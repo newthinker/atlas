@@ -1,0 +1,52 @@
+# ATLAS Configuration Example
+# Copy this file to config.yaml and fill in your settings
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+log:
+  level: "info"  # debug, info, warn, error
+  format: "json" # json, console
+
+# Collectors for market data
+collectors:
+  yahoo:
+    enabled: true
+    rate_limit: 5  # requests per second
+  eastmoney:
+    enabled: true
+    rate_limit: 10
+
+# Trading strategies
+strategies:
+  ma_crossover:
+    enabled: true
+    fast_period: 50
+    slow_period: 200
+
+# Signal routing
+router:
+  min_confidence: 0.5
+  cooldown_duration: "1h"
+  enabled_actions:
+    - buy
+    - sell
+    - strong_buy
+    - strong_sell
+
+# Notification channels
+notifiers:
+  telegram:
+    enabled: true
+    bot_token: "YOUR_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+
+# Watchlist of symbols to monitor
+watchlist:
+  - "AAPL"
+  - "GOOG"
+  - "MSFT"
+
+# Analysis interval
+interval: "5m"
