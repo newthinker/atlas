@@ -1,0 +1,30 @@
+# Worktrees
+.worktrees/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Env files
+.env
+.env.local
+*.local.yaml
+
+# Build
+/bin/
+/dist/
+
+# OS
+.DS_Store
+Thumbs.db
