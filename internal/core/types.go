@@ -68,6 +68,7 @@ type Signal struct {
 	Symbol      string
 	Action      Action
 	Confidence  float64
+	Price       float64 // Price at signal generation
 	Reason      string
 	Strategy    string
 	Metadata    map[string]any
