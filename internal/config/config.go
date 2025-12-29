@@ -17,6 +17,8 @@ type Config struct {
 	Router     RouterConfig               `mapstructure:"router"`
 	Watchlist  []WatchlistItem            `mapstructure:"watchlist"`
 	LLM        LLMConfig                  `mapstructure:"llm"`
+	Broker     BrokerConfig               `mapstructure:"broker"`
+	Meta       MetaConfig                 `mapstructure:"meta"`
 }
 
 type ServerConfig struct {
@@ -109,6 +111,41 @@ type OpenAIConfig struct {
 type OllamaConfig struct {
 	Endpoint string `mapstructure:"endpoint"`
 	Model    string `mapstructure:"model"`
+}
+
+// BrokerConfig holds broker integration settings.
+type BrokerConfig struct {
+	Enabled  bool       `mapstructure:"enabled"`
+	Provider string     `mapstructure:"provider"`
+	Futu     FutuConfig `mapstructure:"futu"`
+}
+
+// FutuConfig holds Futu broker settings.
+type FutuConfig struct {
+	Host          string `mapstructure:"host"`
+	Port          int    `mapstructure:"port"`
+	Env           string `mapstructure:"env"` // "simulate" or "real"
+	TradePassword string `mapstructure:"trade_password"`
+	RSAKeyPath    string `mapstructure:"rsa_key_path"`
+}
+
+// MetaConfig holds LLM meta-strategy settings.
+type MetaConfig struct {
+	Arbitrator  ArbitratorConfig  `mapstructure:"arbitrator"`
+	Synthesizer SynthesizerConfig `mapstructure:"synthesizer"`
+}
+
+// ArbitratorConfig holds signal arbitrator settings.
+type ArbitratorConfig struct {
+	Enabled      bool `mapstructure:"enabled"`
+	ContextDays  int  `mapstructure:"context_days"`
+}
+
+// SynthesizerConfig holds strategy synthesizer settings.
+type SynthesizerConfig struct {
+	Enabled   bool   `mapstructure:"enabled"`
+	Schedule  string `mapstructure:"schedule"`
+	MinTrades int    `mapstructure:"min_trades"`
 }
 
 // Load reads configuration from file
