@@ -45,3 +45,22 @@ func TestAction_Constants(t *testing.T) {
 		}
 	}
 }
+
+func TestFundamental_IsValid(t *testing.T) {
+	tests := []struct {
+		name string
+		f    Fundamental
+		want bool
+	}{
+		{"valid", Fundamental{Symbol: "600519", Date: time.Now()}, true},
+		{"empty symbol", Fundamental{Date: time.Now()}, false},
+		{"zero date", Fundamental{Symbol: "600519"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.IsValid(); got != tt.want {
+				t.Errorf("IsValid() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

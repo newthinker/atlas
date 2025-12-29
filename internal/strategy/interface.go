@@ -27,6 +27,7 @@ type AnalysisContext struct {
 	Market       core.Market
 	OHLCV        []core.OHLCV
 	LatestQuote  *core.Quote
+	Fundamental  *core.Fundamental
 	Fundamentals map[string]float64
 	Indicators   map[string][]float64
 	Now          time.Time

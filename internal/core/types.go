@@ -52,6 +52,29 @@ type OHLCV struct {
 	Time     time.Time
 }
 
+// Fundamental represents fundamental data for a stock
+type Fundamental struct {
+	Symbol        string
+	Market        Market
+	Date          time.Time // Report date
+	PE            float64   // Price to Earnings ratio
+	PB            float64   // Price to Book ratio
+	PS            float64   // Price to Sales ratio
+	ROE           float64   // Return on Equity (percentage)
+	ROA           float64   // Return on Assets (percentage)
+	DividendYield float64   // Dividend yield (percentage)
+	MarketCap     float64   // Market capitalization
+	Revenue       float64   // Total revenue
+	NetIncome     float64   // Net income
+	EPS           float64   // Earnings per share
+	Source        string    // Data source
+}
+
+// IsValid checks if fundamental data has required fields
+func (f Fundamental) IsValid() bool {
+	return f.Symbol != "" && !f.Date.IsZero()
+}
+
 // Action represents a trading signal action
 type Action string
 
