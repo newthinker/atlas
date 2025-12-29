@@ -1,0 +1,47 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "release"
+
+storage:
+  hot:
+    dsn: "postgres://localhost:5432/atlas"
+    retention_days: 90
+  cold:
+    type: localfs
+    path: "/mnt/nas/atlas/archive"
+
+collectors:
+  yahoo:
+    enabled: true
+    markets: ["US", "HK"]
+    interval: "5m"
+  eastmoney:
+    enabled: true
+    markets: ["CN_A"]
+    interval: "30s"
+
+strategies:
+  ma_crossover:
+    enabled: true
+    params:
+      fast_period: 50
+      slow_period: 200
+
+notifiers:
+  telegram:
+    enabled: true
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+
+router:
+  cooldown_hours: 4
+  min_confidence: 0.6
+
+watchlist:
+  - symbol: "600519.SH"
+    name: "贵州茅台"
+    strategies: ["ma_crossover"]
+  - symbol: "AAPL"
+    name: "Apple Inc"
+    strategies: ["ma_crossover"]

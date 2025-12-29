@@ -24,6 +24,11 @@
 # Build
 /bin/
 /dist/
+atlas
+
+# Config files with secrets
+config.yaml
+config.yml
 
 # OS
 .DS_Store
