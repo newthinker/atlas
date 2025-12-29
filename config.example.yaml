@@ -86,6 +86,19 @@ storage:
       secret_key: "${AWS_SECRET_ACCESS_KEY}"
       prefix: "archive/"
 
+# LLM configuration (Phase 4)
+llm:
+  provider: claude
+  claude:
+    api_key: "${ANTHROPIC_API_KEY}"
+    model: "claude-sonnet-4-20250514"
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-4o"
+  ollama:
+    endpoint: "http://localhost:11434"
+    model: "qwen2.5:32b"
+
 # Watchlist of symbols to monitor
 watchlist:
   - symbol: "600519.SH"
