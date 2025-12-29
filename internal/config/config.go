@@ -35,8 +35,18 @@ type HotStorageConfig struct {
 }
 
 type ColdStorageConfig struct {
-	Type string `mapstructure:"type"` // "localfs" or "s3"
-	Path string `mapstructure:"path"` // For localfs
+	Type string   `mapstructure:"type"` // "localfs" or "s3"
+	Path string   `mapstructure:"path"` // For localfs
+	S3   S3Config `mapstructure:"s3"`   // For S3
+}
+
+type S3Config struct {
+	Bucket    string `mapstructure:"bucket"`
+	Endpoint  string `mapstructure:"endpoint"`
+	Region    string `mapstructure:"region"`
+	AccessKey string `mapstructure:"access_key"`
+	SecretKey string `mapstructure:"secret_key"`
+	Prefix    string `mapstructure:"prefix"`
 }
 
 type CollectorConfig struct {

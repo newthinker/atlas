@@ -73,6 +73,19 @@ notifiers:
     headers:
       Authorization: "Bearer YOUR_TOKEN"
 
+# Storage configuration
+storage:
+  cold:
+    type: localfs  # or "s3"
+    path: "/mnt/nas/atlas/archive"
+    s3:
+      bucket: "atlas-archive"
+      endpoint: "https://s3.amazonaws.com"
+      region: "us-east-1"
+      access_key: "${AWS_ACCESS_KEY_ID}"
+      secret_key: "${AWS_SECRET_ACCESS_KEY}"
+      prefix: "archive/"
+
 # Watchlist of symbols to monitor
 watchlist:
   - symbol: "600519.SH"

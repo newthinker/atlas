@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/newthinker/atlas/internal/api"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/logger"
 	"github.com/spf13/cobra"
@@ -46,11 +49,33 @@ func runServe(cmd *cobra.Command, args []string) error {
 		zap.Int("port", cfg.Server.Port),
 	)
 
+	// Create API server
+	server, err := api.NewServer(api.Config{
+		Host:         cfg.Server.Host,
+		Port:         cfg.Server.Port,
+		TemplatesDir: "internal/api/templates",
+	}, log)
+	if err != nil {
+		return fmt.Errorf("creating server: %w", err)
+	}
+
+	// Start server in goroutine
+	go func() {
+		if err := server.Start(); err != nil {
+			log.Error("server error", zap.Error(err))
+		}
+	}()
+
 	// Wait for shutdown signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Info("shutting down ATLAS server")
-	return nil
+
+	// Graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	return server.Shutdown(ctx)
 }

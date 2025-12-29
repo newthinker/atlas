@@ -1,0 +1,35 @@
+{{define "content"}}
+<div class="space-y-6">
+    <h1 class="text-3xl font-bold text-gray-900">Dashboard</h1>
+
+    <!-- Stats Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="text-sm text-gray-500">Total Signals Today</div>
+            <div class="text-2xl font-bold text-indigo-600">{{.SignalsToday}}</div>
+        </div>
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="text-sm text-gray-500">Buy Signals</div>
+            <div class="text-2xl font-bold text-green-600">{{.BuySignals}}</div>
+        </div>
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="text-sm text-gray-500">Sell Signals</div>
+            <div class="text-2xl font-bold text-red-600">{{.SellSignals}}</div>
+        </div>
+        <div class="bg-white rounded-lg shadow p-6">
+            <div class="text-sm text-gray-500">Watchlist Items</div>
+            <div class="text-2xl font-bold text-gray-600">{{.WatchlistCount}}</div>
+        </div>
+    </div>
+
+    <!-- Recent Signals -->
+    <div class="bg-white rounded-lg shadow">
+        <div class="px-6 py-4 border-b">
+            <h2 class="text-lg font-semibold">Recent Signals</h2>
+        </div>
+        <div id="signals-list" hx-get="/api/signals/recent" hx-trigger="load, every 30s" hx-swap="innerHTML">
+            <div class="p-6 text-gray-500">Loading signals...</div>
+        </div>
+    </div>
+</div>
+{{end}}
