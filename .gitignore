@@ -24,7 +24,7 @@
 # Build
 /bin/
 /dist/
-atlas
+/atlas
 
 # Config files with secrets
 config.yaml
