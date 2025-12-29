@@ -13,40 +13,74 @@ log:
 collectors:
   yahoo:
     enabled: true
-    rate_limit: 5  # requests per second
+    markets: ["US", "HK"]
+    interval: "5m"
   eastmoney:
     enabled: true
-    rate_limit: 10
+    markets: ["CN_A"]
+    interval: "30s"
+  # Lixinger API for CN fundamental data (Phase 2)
+  lixinger:
+    enabled: false
+    api_key: "${LIXINGER_API_KEY}"
+    markets: ["CN_A"]
+    interval: "24h"
 
 # Trading strategies
 strategies:
+  # Technical strategies
   ma_crossover:
     enabled: true
-    fast_period: 50
-    slow_period: 200
+    params:
+      fast_period: 50
+      slow_period: 200
+  # Fundamental strategies (Phase 2)
+  pe_band:
+    enabled: true
+    params:
+      low_threshold: 15.0
+      high_threshold: 30.0
+  dividend_yield:
+    enabled: true
+    params:
+      min_yield: 3.0
 
 # Signal routing
 router:
   min_confidence: 0.5
-  cooldown_duration: "1h"
-  enabled_actions:
-    - buy
-    - sell
-    - strong_buy
-    - strong_sell
+  cooldown_hours: 4
 
 # Notification channels
 notifiers:
   telegram:
     enabled: true
-    bot_token: "YOUR_BOT_TOKEN"
-    chat_id: "YOUR_CHAT_ID"
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+  # Email notifier (Phase 2)
+  email:
+    enabled: false
+    host: "smtp.example.com"
+    port: 587
+    username: ""
+    password: ""
+    from: "atlas@example.com"
+    to:
+      - "user@example.com"
+  # Webhook notifier (Phase 2)
+  webhook:
+    enabled: false
+    url: "https://example.com/webhook"
+    headers:
+      Authorization: "Bearer YOUR_TOKEN"
 
 # Watchlist of symbols to monitor
 watchlist:
-  - "AAPL"
-  - "GOOG"
-  - "MSFT"
-
-# Analysis interval
-interval: "5m"
+  - symbol: "600519.SH"
+    name: "Kweichow Moutai"
+    strategies: ["ma_crossover", "pe_band", "dividend_yield"]
+  - symbol: "AAPL"
+    name: "Apple Inc"
+    strategies: ["ma_crossover"]
+  - symbol: "GOOG"
+    name: "Alphabet Inc"
+    strategies: ["ma_crossover"]

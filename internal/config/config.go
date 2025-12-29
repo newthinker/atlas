@@ -52,10 +52,19 @@ type StrategyConfig struct {
 }
 
 type NotifierConfig struct {
-	Enabled  bool   `mapstructure:"enabled"`
-	BotToken string `mapstructure:"bot_token"`
-	ChatID   string `mapstructure:"chat_id"`
-	URL      string `mapstructure:"url"`
+	Enabled  bool              `mapstructure:"enabled"`
+	BotToken string            `mapstructure:"bot_token"`
+	ChatID   string            `mapstructure:"chat_id"`
+	URL      string            `mapstructure:"url"`
+	// Email notifier fields
+	Host     string            `mapstructure:"host"`
+	Port     int               `mapstructure:"port"`
+	Username string            `mapstructure:"username"`
+	Password string            `mapstructure:"password"`
+	From     string            `mapstructure:"from"`
+	To       []string          `mapstructure:"to"`
+	// Webhook notifier fields
+	Headers  map[string]string `mapstructure:"headers"`
 }
 
 type RouterConfig struct {
