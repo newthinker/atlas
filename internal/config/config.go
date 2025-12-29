@@ -16,6 +16,7 @@ type Config struct {
 	Notifiers  map[string]NotifierConfig  `mapstructure:"notifiers"`
 	Router     RouterConfig               `mapstructure:"router"`
 	Watchlist  []WatchlistItem            `mapstructure:"watchlist"`
+	LLM        LLMConfig                  `mapstructure:"llm"`
 }
 
 type ServerConfig struct {
@@ -86,6 +87,28 @@ type WatchlistItem struct {
 	Symbol     string   `mapstructure:"symbol"`
 	Name       string   `mapstructure:"name"`
 	Strategies []string `mapstructure:"strategies"`
+}
+
+type LLMConfig struct {
+	Provider string       `mapstructure:"provider"`
+	Claude   ClaudeConfig `mapstructure:"claude"`
+	OpenAI   OpenAIConfig `mapstructure:"openai"`
+	Ollama   OllamaConfig `mapstructure:"ollama"`
+}
+
+type ClaudeConfig struct {
+	APIKey string `mapstructure:"api_key"`
+	Model  string `mapstructure:"model"`
+}
+
+type OpenAIConfig struct {
+	APIKey string `mapstructure:"api_key"`
+	Model  string `mapstructure:"model"`
+}
+
+type OllamaConfig struct {
+	Endpoint string `mapstructure:"endpoint"`
+	Model    string `mapstructure:"model"`
 }
 
 // Load reads configuration from file
