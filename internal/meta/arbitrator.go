@@ -10,6 +10,7 @@ import (
 	atlasctx "github.com/newthinker/atlas/internal/context"
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/llm"
+	"go.uber.org/zap"
 )
 
 // Arbitrator uses LLM to resolve conflicting trading signals.
@@ -18,6 +19,7 @@ type Arbitrator struct {
 	marketContext atlasctx.MarketContextProvider
 	trackRecord   atlasctx.TrackRecordProvider
 	newsProvider  atlasctx.NewsProvider
+	logger        *zap.Logger
 	contextDays   int
 }
 
@@ -32,16 +34,21 @@ func NewArbitrator(
 	marketCtx atlasctx.MarketContextProvider,
 	trackRecord atlasctx.TrackRecordProvider,
 	newsProvider atlasctx.NewsProvider,
+	logger *zap.Logger,
 	cfg ArbitratorConfig,
 ) *Arbitrator {
 	if cfg.ContextDays <= 0 {
 		cfg.ContextDays = 7
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	return &Arbitrator{
 		llm:           llmProvider,
 		marketContext: marketCtx,
 		trackRecord:   trackRecord,
 		newsProvider:  newsProvider,
+		logger:        logger,
 		contextDays:   cfg.ContextDays,
 	}
 }
@@ -77,10 +84,29 @@ func (a *Arbitrator) Arbitrate(ctx context.Context, req ArbitrationRequest) (*Ar
 		}, nil
 	}
 
-	// Gather context
-	marketCtx, _ := a.marketContext.GetContext(ctx, req.Market)
-	news, _ := a.newsProvider.GetNews(ctx, req.Symbol, a.contextDays)
-	allStats, _ := a.trackRecord.GetAllStats(ctx)
+	// Gather context with graceful degradation
+	marketCtx, err := a.marketContext.GetContext(ctx, req.Market)
+	if err != nil {
+		a.logger.Warn("failed to get market context, using defaults",
+			zap.String("market", string(req.Market)),
+			zap.Error(err))
+		marketCtx = &atlasctx.MarketContext{Regime: "unknown", Volatility: 0}
+	}
+
+	news, err := a.newsProvider.GetNews(ctx, req.Symbol, a.contextDays)
+	if err != nil {
+		a.logger.Warn("failed to get news, proceeding without",
+			zap.String("symbol", req.Symbol),
+			zap.Error(err))
+		news = []atlasctx.NewsItem{}
+	}
+
+	allStats, err := a.trackRecord.GetAllStats(ctx)
+	if err != nil {
+		a.logger.Warn("failed to get track records, proceeding without",
+			zap.Error(err))
+		allStats = make(map[string]*atlasctx.StrategyStats)
+	}
 
 	// Build prompt
 	prompt := a.buildPrompt(req, marketCtx, news, allStats)

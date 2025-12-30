@@ -88,6 +88,7 @@ const (
 
 // Signal represents a trading signal from a strategy
 type Signal struct {
+	ID          string `json:"id"`
 	Symbol      string
 	Action      Action
 	Confidence  float64

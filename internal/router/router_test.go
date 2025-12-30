@@ -1,11 +1,13 @@
 package router
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/notifier"
+	"github.com/newthinker/atlas/internal/storage/signal"
 )
 
 type mockNotifier struct {
@@ -258,5 +260,25 @@ func TestRouter_DefaultConfig(t *testing.T) {
 
 	if len(cfg.EnabledActions) != 4 {
 		t.Errorf("default should have 4 enabled actions, got %d", len(cfg.EnabledActions))
+	}
+}
+
+func TestRouter_PersistsSignals(t *testing.T) {
+	store := signal.NewMemoryStore(100)
+	r := New(Config{MinConfidence: 0.5, CooldownDuration: time.Hour}, nil, nil)
+	r.SetSignalStore(store)
+
+	sig := core.Signal{
+		Symbol:      "AAPL",
+		Action:      core.ActionBuy,
+		Confidence:  0.8,
+		GeneratedAt: time.Now(),
+	}
+
+	r.Route(sig)
+
+	signals, _ := store.List(context.Background(), signal.ListFilter{})
+	if len(signals) != 1 {
+		t.Errorf("expected 1 persisted signal, got %d", len(signals))
 	}
 }

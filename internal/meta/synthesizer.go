@@ -12,12 +12,14 @@ import (
 	atlasctx "github.com/newthinker/atlas/internal/context"
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/llm"
+	"go.uber.org/zap"
 )
 
 // Synthesizer uses LLM to analyze trading history and suggest improvements.
 type Synthesizer struct {
 	llm         llm.Provider
 	trackRecord atlasctx.TrackRecordProvider
+	logger      *zap.Logger
 }
 
 // SynthesizerConfig holds synthesizer configuration.
@@ -26,10 +28,14 @@ type SynthesizerConfig struct {
 }
 
 // NewSynthesizer creates a new strategy synthesizer.
-func NewSynthesizer(llmProvider llm.Provider, trackRecord atlasctx.TrackRecordProvider, cfg SynthesizerConfig) *Synthesizer {
+func NewSynthesizer(llmProvider llm.Provider, trackRecord atlasctx.TrackRecordProvider, logger *zap.Logger, cfg SynthesizerConfig) *Synthesizer {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Synthesizer{
 		llm:         llmProvider,
 		trackRecord: trackRecord,
+		logger:      logger,
 	}
 }
 
@@ -95,8 +101,13 @@ func (s *Synthesizer) Synthesize(ctx context.Context, req SynthesisRequest) (*Sy
 		return nil, fmt.Errorf("no trades or signals to analyze")
 	}
 
-	// Get strategy stats
-	allStats, _ := s.trackRecord.GetAllStats(ctx)
+	// Get strategy stats with graceful degradation
+	allStats, err := s.trackRecord.GetAllStats(ctx)
+	if err != nil {
+		s.logger.Warn("failed to get track records, proceeding without",
+			zap.Error(err))
+		allStats = make(map[string]*atlasctx.StrategyStats)
+	}
 
 	// Build prompt
 	prompt := s.buildPrompt(req, allStats)

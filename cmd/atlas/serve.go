@@ -44,6 +44,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Warn("no config file specified, using defaults")
 	}
 
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
 	log.Info("starting ATLAS server",
 		zap.String("host", cfg.Server.Host),
 		zap.Int("port", cfg.Server.Port),

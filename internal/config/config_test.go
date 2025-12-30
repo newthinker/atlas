@@ -51,3 +51,58 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("expected default min_confidence 0.6, got %f", cfg.Router.MinConfidence)
 	}
 }
+
+func TestConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			cfg: Config{
+				Server: ServerConfig{Host: "0.0.0.0", Port: 8080},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid port - zero",
+			cfg: Config{
+				Server: ServerConfig{Host: "0.0.0.0", Port: 0},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid port - too high",
+			cfg: Config{
+				Server: ServerConfig{Host: "0.0.0.0", Port: 70000},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid router confidence",
+			cfg: Config{
+				Server: ServerConfig{Host: "0.0.0.0", Port: 8080},
+				Router: RouterConfig{MinConfidence: 1.5},
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative cooldown",
+			cfg: Config{
+				Server: ServerConfig{Host: "0.0.0.0", Port: 8080},
+				Router: RouterConfig{CooldownHours: -1},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
