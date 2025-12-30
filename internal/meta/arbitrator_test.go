@@ -17,6 +17,7 @@ func TestArbitrator_AllSignalsAgree(t *testing.T) {
 		&mockMarketCtx{},
 		atlasctx.NewInMemoryTrackRecord(),
 		atlasctx.NewStaticNewsProvider(nil),
+		nil, // logger
 		ArbitratorConfig{},
 	)
 
@@ -49,6 +50,7 @@ func TestArbitrator_NoSignals(t *testing.T) {
 		&mockMarketCtx{},
 		atlasctx.NewInMemoryTrackRecord(),
 		atlasctx.NewStaticNewsProvider(nil),
+		nil, // logger
 		ArbitratorConfig{},
 	)
 

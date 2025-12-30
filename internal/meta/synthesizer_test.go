@@ -16,6 +16,7 @@ func TestSynthesizer_Synthesize(t *testing.T) {
 	synth := NewSynthesizer(
 		&mockSynthLLM{},
 		atlasctx.NewInMemoryTrackRecord(),
+		nil, // logger
 		SynthesizerConfig{},
 	)
 
@@ -46,6 +47,7 @@ func TestSynthesizer_NoData(t *testing.T) {
 	synth := NewSynthesizer(
 		&mockSynthLLM{},
 		atlasctx.NewInMemoryTrackRecord(),
+		nil, // logger
 		SynthesizerConfig{},
 	)
 
