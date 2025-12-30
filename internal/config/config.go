@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/newthinker/atlas/internal/core"
 	"github.com/spf13/viper"
 )
 
@@ -199,4 +200,46 @@ func Defaults() *Config {
 			MinConfidence: 0.6,
 		},
 	}
+}
+
+// Validate checks the configuration for errors.
+func (c *Config) Validate() error {
+	// Server validation
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		return core.WrapError(core.ErrConfigInvalid,
+			fmt.Errorf("port must be between 1 and 65535, got %d", c.Server.Port))
+	}
+
+	// Router validation
+	if c.Router.MinConfidence < 0 || c.Router.MinConfidence > 1 {
+		return core.WrapError(core.ErrConfigInvalid,
+			fmt.Errorf("min_confidence must be between 0 and 1, got %f", c.Router.MinConfidence))
+	}
+	if c.Router.CooldownHours < 0 {
+		return core.WrapError(core.ErrConfigInvalid,
+			fmt.Errorf("cooldown_hours cannot be negative, got %d", c.Router.CooldownHours))
+	}
+
+	// LLM validation - if provider set, check config exists
+	if c.LLM.Provider != "" {
+		switch c.LLM.Provider {
+		case "claude":
+			if c.LLM.Claude.APIKey == "" {
+				return core.WrapError(core.ErrConfigMissing,
+					fmt.Errorf("claude api_key required when provider is claude"))
+			}
+		case "openai":
+			if c.LLM.OpenAI.APIKey == "" {
+				return core.WrapError(core.ErrConfigMissing,
+					fmt.Errorf("openai api_key required when provider is openai"))
+			}
+		case "ollama":
+			if c.LLM.Ollama.Endpoint == "" {
+				return core.WrapError(core.ErrConfigMissing,
+					fmt.Errorf("ollama endpoint required when provider is ollama"))
+			}
+		}
+	}
+
+	return nil
 }
