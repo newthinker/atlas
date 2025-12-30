@@ -245,3 +245,38 @@ func (a *App) GetStats() map[string]any {
 		"router":      a.router.GetStats(),
 	}
 }
+
+// GetWatchlist returns the current watchlist.
+func (a *App) GetWatchlist() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	result := make([]string, len(a.watchlist))
+	copy(result, a.watchlist)
+	return result
+}
+
+// AddToWatchlist adds a symbol to the watchlist.
+func (a *App) AddToWatchlist(symbol string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Check if already exists
+	for _, s := range a.watchlist {
+		if s == symbol {
+			return
+		}
+	}
+	a.watchlist = append(a.watchlist, symbol)
+}
+
+// RemoveFromWatchlist removes a symbol from the watchlist.
+func (a *App) RemoveFromWatchlist(symbol string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, s := range a.watchlist {
+		if s == symbol {
+			a.watchlist = append(a.watchlist[:i], a.watchlist[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
