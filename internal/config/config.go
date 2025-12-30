@@ -23,9 +23,12 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host string `mapstructure:"host"`
-	Port int    `mapstructure:"port"`
-	Mode string `mapstructure:"mode"`
+	Host        string `mapstructure:"host"`
+	Port        int    `mapstructure:"port"`
+	Mode        string `mapstructure:"mode"`
+	APIKey      string `mapstructure:"api_key"`
+	JobTTLHours int    `mapstructure:"job_ttl_hours"`
+	MaxJobs     int    `mapstructure:"max_jobs"`
 }
 
 type StorageConfig struct {
@@ -183,9 +186,11 @@ func Load(path string) (*Config, error) {
 func Defaults() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host: "0.0.0.0",
-			Port: 8080,
-			Mode: "release",
+			Host:        "0.0.0.0",
+			Port:        8080,
+			Mode:        "release",
+			JobTTLHours: 1,
+			MaxJobs:     100,
 		},
 		Storage: StorageConfig{
 			Hot: HotStorageConfig{
