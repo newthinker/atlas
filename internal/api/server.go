@@ -5,9 +5,17 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/newthinker/atlas/internal/api/handler/api"
 	"github.com/newthinker/atlas/internal/api/handler/web"
+	"github.com/newthinker/atlas/internal/api/job"
+	"github.com/newthinker/atlas/internal/api/middleware"
+	"github.com/newthinker/atlas/internal/app"
+	"github.com/newthinker/atlas/internal/backtest"
+	"github.com/newthinker/atlas/internal/storage/signal"
+	"github.com/newthinker/atlas/internal/strategy"
 	"go.uber.org/zap"
 )
 
@@ -23,10 +31,21 @@ type Config struct {
 	Host         string
 	Port         int
 	TemplatesDir string
+	APIKey       string
+	JobTTLHours  int
+	MaxJobs      int
+}
+
+// Dependencies holds all server dependencies
+type Dependencies struct {
+	App         *app.App
+	SignalStore signal.Store
+	Backtester  *backtest.Backtester
+	Strategies  *strategy.Engine
 }
 
 // NewServer creates a new HTTP server
-func NewServer(cfg Config, logger *zap.Logger) (*Server, error) {
+func NewServer(cfg Config, deps Dependencies, logger *zap.Logger) (*Server, error) {
 	mux := http.NewServeMux()
 
 	s := &Server{
@@ -42,7 +61,7 @@ func NewServer(cfg Config, logger *zap.Logger) (*Server, error) {
 	}
 
 	// Set up routes
-	if err := s.setupRoutes(cfg.TemplatesDir); err != nil {
+	if err := s.setupRoutes(cfg, deps); err != nil {
 		return nil, fmt.Errorf("setting up routes: %w", err)
 	}
 
@@ -50,23 +69,85 @@ func NewServer(cfg Config, logger *zap.Logger) (*Server, error) {
 }
 
 // setupRoutes configures all HTTP routes
-func (s *Server) setupRoutes(templatesDir string) error {
-	// Web UI routes
-	webHandler, err := web.NewHandler(templatesDir)
-	if err != nil {
-		return fmt.Errorf("creating web handler: %w", err)
+func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
+	// Create job store
+	ttl := time.Duration(cfg.JobTTLHours) * time.Hour
+	if ttl == 0 {
+		ttl = time.Hour
 	}
+	maxJobs := cfg.MaxJobs
+	if maxJobs == 0 {
+		maxJobs = 100
+	}
+	jobStore := job.NewStore(maxJobs, ttl)
 
-	s.mux.HandleFunc("/", webHandler.Dashboard)
-	s.mux.HandleFunc("/signals", webHandler.Signals)
-	s.mux.HandleFunc("/watchlist", webHandler.Watchlist)
-	s.mux.HandleFunc("/backtest", webHandler.Backtest)
+	// Create API handlers
+	signalsHandler := api.NewSignalsHandler(deps.SignalStore)
+	watchlistHandler := api.NewWatchlistHandler(deps.App)
+	backtestHandler := api.NewBacktestHandler(jobStore, deps.Backtester, deps.Strategies)
+	analysisHandler := api.NewAnalysisHandler(deps.App)
 
-	// API routes (placeholder for future)
-	s.mux.HandleFunc("/api/signals/recent", s.handleRecentSignals)
-	s.mux.HandleFunc("/api/backtest", s.handleBacktest)
-	s.mux.HandleFunc("/api/watchlist", s.handleWatchlist)
+	// Auth middleware for API routes
+	authMiddleware := middleware.APIKeyAuth(cfg.APIKey)
+
+	// API v1 routes (with auth)
+	s.mux.Handle("/api/v1/signals", authMiddleware(http.HandlerFunc(signalsHandler.List)))
+	s.mux.Handle("/api/v1/signals/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/signals/")
+		signalsHandler.GetByID(w, r, id)
+	})))
+	s.mux.Handle("/api/v1/watchlist", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			watchlistHandler.List(w, r)
+		case http.MethodPost:
+			watchlistHandler.Add(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	s.mux.Handle("/api/v1/watchlist/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		symbol := strings.TrimPrefix(r.URL.Path, "/api/v1/watchlist/")
+		if r.Method == http.MethodDelete {
+			watchlistHandler.Remove(w, r, symbol)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	s.mux.Handle("/api/v1/backtest", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			backtestHandler.Create(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	s.mux.Handle("/api/v1/backtest/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jobID := strings.TrimPrefix(r.URL.Path, "/api/v1/backtest/")
+		backtestHandler.GetStatus(w, r, jobID)
+	})))
+	s.mux.Handle("/api/v1/analysis/run", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			analysisHandler.Trigger(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+
+	// Health endpoint (no auth)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
+
+	// Web UI routes (no auth - same origin)
+	if cfg.TemplatesDir != "" {
+		webHandler, err := web.NewHandler(cfg.TemplatesDir)
+		if err != nil {
+			return fmt.Errorf("creating web handler: %w", err)
+		}
+
+		s.mux.HandleFunc("/", webHandler.Dashboard)
+		s.mux.HandleFunc("/signals", webHandler.Signals)
+		s.mux.HandleFunc("/watchlist", webHandler.Watchlist)
+		s.mux.HandleFunc("/backtest", webHandler.Backtest)
+	}
 
 	return nil
 }
@@ -86,27 +167,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-// API handlers (placeholders)
+// Health handler
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
-}
-
-func (s *Server) handleRecentSignals(w http.ResponseWriter, r *http.Request) {
-	// TODO: Return actual signals
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(`<div class="p-6 text-gray-500">No recent signals</div>`))
-}
-
-func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
-	// TODO: Run actual backtest
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(`<div class="p-6 text-gray-500">Backtest feature coming soon</div>`))
-}
-
-func (s *Server) handleWatchlist(w http.ResponseWriter, r *http.Request) {
-	// TODO: Handle watchlist CRUD
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 }
