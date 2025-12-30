@@ -4,12 +4,13 @@
 server:
   host: "0.0.0.0"
   port: 8080
+  mode: "release"  # release, debug
 
 log:
   level: "info"  # debug, info, warn, error
   format: "json" # json, console
 
-# Collectors for market data
+# Data collectors for market data
 collectors:
   yahoo:
     enabled: true
@@ -19,7 +20,7 @@ collectors:
     enabled: true
     markets: ["CN_A"]
     interval: "30s"
-  # Lixinger API for CN fundamental data (Phase 2)
+  # Lixinger API for CN fundamental data
   lixinger:
     enabled: false
     api_key: "${LIXINGER_API_KEY}"
@@ -34,20 +35,23 @@ strategies:
     params:
       fast_period: 50
       slow_period: 200
-  # Fundamental strategies (Phase 2)
+      ma_type: "sma"  # sma, ema
+  # Fundamental strategies
   pe_band:
-    enabled: true
+    enabled: false
     params:
-      low_threshold: 15.0
-      high_threshold: 30.0
+      lookback_years: 5
+      threshold_percentile: 20
   dividend_yield:
-    enabled: true
+    enabled: false
     params:
       min_yield: 3.0
+      min_payout_years: 5
+      max_payout_ratio: 80
 
 # Signal routing
 router:
-  min_confidence: 0.5
+  min_confidence: 0.6
   cooldown_hours: 4
 
 # Notification channels
@@ -56,39 +60,42 @@ notifiers:
     enabled: true
     bot_token: "${TELEGRAM_BOT_TOKEN}"
     chat_id: "${TELEGRAM_CHAT_ID}"
-  # Email notifier (Phase 2)
   email:
     enabled: false
-    host: "smtp.example.com"
+    host: "smtp.gmail.com"
     port: 587
-    username: ""
-    password: ""
-    from: "atlas@example.com"
+    username: "${EMAIL_USERNAME}"
+    password: "${EMAIL_PASSWORD}"
+    from: "ATLAS <atlas@example.com>"
     to:
       - "user@example.com"
-  # Webhook notifier (Phase 2)
   webhook:
     enabled: false
-    url: "https://example.com/webhook"
+    url: "https://example.com/atlas-webhook"
     headers:
-      Authorization: "Bearer YOUR_TOKEN"
+      Authorization: "Bearer ${WEBHOOK_TOKEN}"
 
 # Storage configuration
 storage:
+  # Hot storage (recent data, fast access)
+  hot:
+    dsn: ""  # Empty for in-memory, or PostgreSQL DSN: "postgres://user:pass@localhost:5432/atlas"
+    retention_days: 90
+  # Cold storage (archived data)
   cold:
-    type: localfs  # or "s3"
-    path: "/mnt/nas/atlas/archive"
+    type: "localfs"  # localfs, s3
+    path: "./data/archive"
     s3:
       bucket: "atlas-archive"
       endpoint: "https://s3.amazonaws.com"
       region: "us-east-1"
       access_key: "${AWS_ACCESS_KEY_ID}"
       secret_key: "${AWS_SECRET_ACCESS_KEY}"
-      prefix: "archive/"
+      prefix: "atlas/"
 
-# LLM configuration (Phase 4)
+# LLM configuration
 llm:
-  provider: claude
+  provider: "claude"  # claude, openai, ollama
   claude:
     api_key: "${ANTHROPIC_API_KEY}"
     model: "claude-sonnet-4-20250514"
@@ -99,14 +106,38 @@ llm:
     endpoint: "http://localhost:11434"
     model: "qwen2.5:32b"
 
+# LLM meta-strategies
+meta:
+  arbitrator:
+    enabled: true
+    context_days: 7  # Days of news/context for arbitration
+  synthesizer:
+    enabled: false
+    schedule: "0 0 * * 0"  # Cron: weekly on Sunday midnight
+    min_trades: 50          # Minimum trades required for analysis
+
+# Broker integration
+broker:
+  enabled: false
+  provider: "mock"  # mock, futu
+  futu:
+    host: "127.0.0.1"
+    port: 11111
+    env: "simulate"  # simulate, real
+    trade_password: "${FUTU_TRADE_PWD}"
+    rsa_key_path: ""
+
 # Watchlist of symbols to monitor
 watchlist:
-  - symbol: "600519.SH"
-    name: "Kweichow Moutai"
-    strategies: ["ma_crossover", "pe_band", "dividend_yield"]
   - symbol: "AAPL"
     name: "Apple Inc"
     strategies: ["ma_crossover"]
-  - symbol: "GOOG"
-    name: "Alphabet Inc"
+  - symbol: "MSFT"
+    name: "Microsoft Corp"
+    strategies: ["ma_crossover"]
+  - symbol: "600519.SH"
+    name: "Kweichow Moutai"
+    strategies: ["ma_crossover", "pe_band", "dividend_yield"]
+  - symbol: "0700.HK"
+    name: "Tencent Holdings"
     strategies: ["ma_crossover"]
