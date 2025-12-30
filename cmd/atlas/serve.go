@@ -9,8 +9,14 @@ import (
 	"time"
 
 	"github.com/newthinker/atlas/internal/api"
+	"github.com/newthinker/atlas/internal/app"
+	"github.com/newthinker/atlas/internal/backtest"
+	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/logger"
+	signalstore "github.com/newthinker/atlas/internal/storage/signal"
+	"github.com/newthinker/atlas/internal/strategy"
+	"github.com/newthinker/atlas/internal/strategy/ma_crossover"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -54,12 +60,78 @@ func runServe(cmd *cobra.Command, args []string) error {
 		zap.Int("port", cfg.Server.Port),
 	)
 
-	// Create API server
-	server, err := api.NewServer(api.Config{
+	// Create signal store
+	sigStore := signalstore.NewMemoryStore(1000)
+
+	// Create App
+	application := app.New(cfg, log)
+
+	// Register collectors if configured
+	if collectorCfg, ok := cfg.Collectors["yahoo"]; ok && collectorCfg.Enabled {
+		yahooCollector := yahoo.New()
+		application.RegisterCollector(yahooCollector)
+	}
+
+	// Create strategy engine and register strategies
+	strategies := strategy.NewEngine()
+	if strategyCfg, ok := cfg.Strategies["ma_crossover"]; ok && strategyCfg.Enabled {
+		// Get params with defaults
+		fastPeriod := 50
+		slowPeriod := 200
+		if fast, ok := strategyCfg.Params["fast_period"].(int); ok {
+			fastPeriod = fast
+		}
+		if slow, ok := strategyCfg.Params["slow_period"].(int); ok {
+			slowPeriod = slow
+		}
+		maStrategy := ma_crossover.New(fastPeriod, slowPeriod)
+		if err := maStrategy.Init(strategy.Config{Params: strategyCfg.Params}); err != nil {
+			log.Warn("failed to init ma_crossover strategy", zap.Error(err))
+		} else {
+			strategies.Register(maStrategy)
+			application.RegisterStrategy(maStrategy)
+		}
+	}
+
+	// Set watchlist from config
+	if len(cfg.Watchlist) > 0 {
+		symbols := make([]string, len(cfg.Watchlist))
+		for i, item := range cfg.Watchlist {
+			symbols[i] = item.Symbol
+		}
+		application.SetWatchlist(symbols)
+	}
+
+	// Create backtester with first available collector
+	var backtester *backtest.Backtester
+	collectors := application.GetCollectors()
+	if len(collectors) > 0 {
+		backtester = backtest.New(collectors[0])
+	} else {
+		// Create a default yahoo collector for backtesting
+		backtester = backtest.New(yahoo.New())
+	}
+
+	// Create server dependencies
+	deps := api.Dependencies{
+		App:         application,
+		SignalStore: sigStore,
+		Backtester:  backtester,
+		Strategies:  strategies,
+	}
+
+	// Create server config
+	serverCfg := api.Config{
 		Host:         cfg.Server.Host,
 		Port:         cfg.Server.Port,
 		TemplatesDir: "internal/api/templates",
-	}, log)
+		APIKey:       cfg.Server.APIKey,
+		JobTTLHours:  cfg.Server.JobTTLHours,
+		MaxJobs:      cfg.Server.MaxJobs,
+	}
+
+	// Create API server
+	server, err := api.NewServer(serverCfg, deps, log)
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)
 	}
