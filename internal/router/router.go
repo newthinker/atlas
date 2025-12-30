@@ -1,11 +1,13 @@
 package router
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/notifier"
+	"github.com/newthinker/atlas/internal/storage/signal"
 	"go.uber.org/zap"
 )
 
@@ -27,11 +29,17 @@ func DefaultConfig() Config {
 
 // Router routes signals to notifiers with filtering
 type Router struct {
-	cfg       Config
-	registry  *notifier.Registry
-	logger    *zap.Logger
-	cooldowns map[string]time.Time // symbol -> last signal time
-	mu        sync.RWMutex
+	cfg         Config
+	registry    *notifier.Registry
+	logger      *zap.Logger
+	cooldowns   map[string]time.Time // symbol -> last signal time
+	signalStore signal.Store
+	mu          sync.RWMutex
+}
+
+// SetSignalStore sets the signal persistence store
+func (r *Router) SetSignalStore(store signal.Store) {
+	r.signalStore = store
 }
 
 // New creates a new signal router
@@ -59,12 +67,22 @@ func (r *Router) Route(signal core.Signal) error {
 		return nil
 	}
 
+	// Persist signal if store is configured
+	if r.signalStore != nil {
+		if err := r.signalStore.Save(context.Background(), signal); err != nil {
+			r.logger.Error("failed to persist signal", zap.Error(err))
+		}
+	}
+
 	// Update cooldown
 	r.mu.Lock()
 	r.cooldowns[signal.Symbol] = time.Now()
 	r.mu.Unlock()
 
-	// Send to all notifiers
+	// Send to all notifiers (nil registry is allowed)
+	if r.registry == nil {
+		return nil
+	}
 	errors := r.registry.NotifyAll(signal)
 
 	if len(errors) > 0 {
