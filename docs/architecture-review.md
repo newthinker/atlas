@@ -378,79 +378,115 @@ func New(cfg *config.Config) *App {
 
 ---
 
-## 8. 待改进项
+## 8. 安全性与性能分析
 
-### 8.1 高优先级 (P0)
+### 8.1 安全性评估
 
-| 问题 | 位置 | 建议 |
-|------|------|------|
-| 错误静默忽略 | `meta/arbitrator.go` | 添加日志记录或优雅降级 |
-| 信号无持久化 | `router/router.go` | 添加信号存储层到 hot storage |
-| 配置验证不完整 | `config/config.go` | 添加 `Validate()` 方法 |
+| 领域 | 当前状态 | 风险等级 | 建议 |
+|------|----------|----------|------|
+| API 认证 | 无认证机制 | 高 | 添加 JWT/API Key 认证 |
+| 敏感数据 | 环境变量存储 | 低 | 已采用最佳实践 ✓ |
+| 输入验证 | 部分实现 | 中 | 添加统一验证层 |
+| SQL 注入 | N/A (无 SQL) | - | 不适用 |
+| 日志脱敏 | 未实现 | 中 | API Key 等敏感信息需脱敏 |
+| HTTPS | 依赖反向代理 | 低 | 文档已说明 Nginx/Caddy 配置 ✓ |
 
-**错误处理问题示例**:
-```go
-// 当前代码 - 静默忽略错误
-marketCtx, _ := a.marketContext.GetContext(ctx, req.Market)
-news, _ := a.newsProvider.GetNews(ctx, req.Symbol, a.contextDays)
+### 8.2 性能特征
 
-// 建议改进
-marketCtx, err := a.marketContext.GetContext(ctx, req.Market)
-if err != nil {
-    a.logger.Warn("failed to get market context", zap.Error(err))
-    marketCtx = &MarketContext{} // 使用默认值
-}
-```
+| 组件 | 并发模型 | 瓶颈分析 |
+|------|----------|----------|
+| 数据采集 | 串行 (按标的) | 大 watchlist 时延迟累积 |
+| 策略分析 | 并行 (per strategy) | CPU 密集，受核心数限制 |
+| 通知发送 | 并行 (per notifier) | 外部 API 延迟 |
+| LLM 调用 | 同步阻塞 | API 延迟 2-10 秒 |
 
-### 8.2 中优先级 (P1)
+### 8.3 性能优化建议
 
-| 问题 | 建议 |
-|------|------|
-| API 层不完整 | 完善 `/api/signals`, `/api/backtest` 等端点 |
-| 缺少测试 | `api/handler/web` 添加 HTTP handler 单元测试 |
-| 错误类型不统一 | 定义 `core/errors.go` 统一错误类型 |
-
-**建议添加统一错误类型**:
-```go
-// internal/core/errors.go
-type Error struct {
-    Code    string
-    Message string
-    Cause   error
-}
-
-var (
-    ErrSymbolNotFound   = &Error{Code: "SYMBOL_NOT_FOUND"}
-    ErrStrategyFailed   = &Error{Code: "STRATEGY_FAILED"}
-    ErrBrokerDisconnect = &Error{Code: "BROKER_DISCONNECT"}
-)
-```
-
-### 8.3 低优先级 (P2)
-
-| 问题 | 建议 |
-|------|------|
-| 缺少 Metrics | 添加 Prometheus metrics 暴露 |
-| 缺少 Tracing | 添加 OpenTelemetry 追踪 |
-| 缺少 Rate Limiting | API 层添加限流中间件 |
-| 新闻提供商未实现 | 集成新闻 API (Alpha Vantage, NewsAPI 等) |
-| Futu 券商未实现 | 实现真实券商集成 |
-
-### 8.4 API 层状态
-
-| 路由 | 状态 |
-|------|------|
-| `/api/health` | 已实现 |
-| `/api/signals/recent` | 占位符 |
-| `/api/backtest` | 占位符 |
-| `/api/watchlist` | 占位符 |
-| Web UI handlers | 模板引用但未完全实现 |
+| 优化项 | 说明 | 优先级 |
+|--------|------|--------|
+| 数据采集并行化 | 使用 worker pool 并行获取多个标的 | P1 |
+| LLM 调用异步化 | 仲裁结果不阻塞信号路由 | P2 |
+| 添加缓存层 | 对 OHLCV 历史数据添加 TTL 缓存 | P2 |
+| 连接池复用 | HTTP client 连接池优化 | P3 |
 
 ---
 
-## 9. 测试覆盖
+## 9. 开发扩展指南
 
-### 9.1 测试文件分布 (38 个)
+### 9.1 添加新策略
+
+**步骤:**
+
+1. 创建策略目录: `internal/strategy/<name>/`
+2. 实现 `Strategy` 接口:
+
+```go
+// internal/strategy/rsi/strategy.go
+package rsi
+
+type Strategy struct {
+    period     int
+    overbought float64
+    oversold   float64
+}
+
+func (s *Strategy) Name() string { return "rsi" }
+
+func (s *Strategy) RequiredData() strategy.DataRequirements {
+    return strategy.DataRequirements{
+        PriceHistory: s.period + 1,
+    }
+}
+
+func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
+    // 实现 RSI 计算和信号生成
+}
+```
+
+3. 注册到引擎: `internal/strategy/engine.go`
+4. 添加配置: `config.example.yaml`
+5. 添加测试: `internal/strategy/rsi/strategy_test.go`
+
+### 9.2 添加新采集器
+
+**步骤:**
+
+1. 创建采集器目录: `internal/collector/<name>/`
+2. 实现 `Collector` 接口
+3. 注册到 Registry: `internal/collector/registry.go`
+4. 添加配置项
+
+**关键方法:**
+
+| 方法 | 说明 |
+|------|------|
+| `FetchQuote()` | 实时报价 |
+| `FetchHistory()` | 历史 K 线 |
+| `SupportedMarkets()` | 支持的市场列表 |
+
+### 9.3 添加新通知器
+
+**步骤:**
+
+1. 创建目录: `internal/notifier/<name>/`
+2. 实现 `Notifier` 接口
+3. 注册到 Registry
+4. 实现消息格式化 (参考 telegram 的 Markdown 格式)
+
+### 9.4 添加新 LLM 提供商
+
+**步骤:**
+
+1. 创建目录: `internal/llm/<provider>/`
+2. 实现 `llm.Provider` 接口
+3. 在 `internal/llm/factory/factory.go` 添加 case
+4. 添加配置结构到 `config.go`
+
+---
+
+## 10. 测试覆盖
+
+### 10.1 测试文件分布 (38 个)
 
 | 包 | 测试文件 |
 |------|----------|
@@ -469,7 +505,7 @@ var (
 | `indicator` | `sma_test.go` |
 | `storage/archive/*` | localfs, s3 |
 
-### 9.2 测试模式
+### 10.2 测试模式
 
 - Mock 实现用于测试 (broker/mock)
 - 基于接口的测试 (所有主要组件)
@@ -478,9 +514,72 @@ var (
 
 ---
 
-## 10. 总体评估
+## 11. 改进路线图
 
-### 10.1 评分
+### 11.1 里程碑规划
+
+| 里程碑 | 目标 | 包含任务 |
+|--------|------|----------|
+| M1: 生产就绪 | 系统可靠性达到生产标准 | 信号持久化, 错误处理标准化, 配置验证 |
+| M2: API 完善 | Web Dashboard 可用 | API 端点实现, HTTP 测试, 前端集成 |
+| M3: 可观测性 | 运维监控能力 | Metrics, Tracing, 告警集成 |
+| M4: 实盘交易 | 券商集成上线 | Futu 实现, 风控模块, 订单管理 |
+
+### 11.2 任务依赖关系
+
+```text
+                    ┌─────────────────┐
+                    │ 统一错误类型    │
+                    │ (core/errors)   │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+     ┌────────────┐  ┌────────────┐  ┌────────────┐
+     │ 错误处理   │  │ 配置验证   │  │ API 错误   │
+     │ 标准化     │  │            │  │ 响应格式   │
+     └────────────┘  └────────────┘  └─────┬──────┘
+                                           │
+                                           ▼
+                                    ┌────────────┐
+                                    │ API 端点   │
+                                    │ 实现       │
+                                    └─────┬──────┘
+                                          │
+              ┌───────────────────────────┼───────────────────────────┐
+              ▼                           ▼                           ▼
+     ┌────────────┐              ┌────────────┐              ┌────────────┐
+     │ 信号持久化 │              │ Metrics    │              │ Futu 券商  │
+     │            │              │ 暴露       │              │ 集成       │
+     └────────────┘              └────────────┘              └────────────┘
+```
+
+### 11.3 M1 详细任务清单
+
+| 任务 | 依赖 | 产出 |
+|------|------|------|
+| 定义统一错误类型 | 无 | `core/errors.go` |
+| 错误处理标准化 | 统一错误类型 | 更新 meta/, collector/, notifier/ |
+| 信号持久化层 | 无 | `storage/signal/` 包 |
+| Router 集成持久化 | 信号持久化层 | Router 写入信号到存储 |
+| 配置验证方法 | 统一错误类型 | `config.Validate()` |
+| 启动时配置校验 | 配置验证方法 | `serve.go` 调用验证 |
+
+### 11.4 API 层当前状态
+
+| 路由 | 状态 | 所属里程碑 |
+|------|------|------------|
+| `/api/health` | 已实现 | - |
+| `/api/signals/recent` | 占位符 | M2 |
+| `/api/backtest` | 占位符 | M2 |
+| `/api/watchlist` | 占位符 | M2 |
+| Web UI handlers | 模板引用 | M2 |
+
+---
+
+## 12. 总体评估
+
+### 12.1 评分
 
 | 维度 | 评分 | 说明 |
 |------|------|------|
@@ -492,7 +591,7 @@ var (
 | 运维友好性 | 60% | 缺少 metrics/tracing |
 | 文档完整性 | 80% | README, 部署, 用户手册, API 文档 |
 
-### 10.2 可视化评分
+### 12.2 可视化评分
 
 ```
 架构设计:     ████████████████████  95%
@@ -506,7 +605,7 @@ var (
 综合评分:     B+ (Very Good) - 4.2/5
 ```
 
-### 10.3 建议优先级
+### 12.3 建议优先级
 
 | 优先级 | 任务 | 原因 |
 |--------|------|------|
@@ -539,4 +638,76 @@ ATLAS 项目采用了优秀的架构设计，Clean Architecture 和 Plugin Patte
 
 ---
 
+## 附录 A: 架构决策记录 (ADR)
+
+### ADR-001: 选择 Clean Architecture
+
+**状态:** 已采纳
+
+**背景:**
+需要一个支持多数据源、多策略、多通知渠道的可扩展架构。
+
+**决策:**
+采用 Clean Architecture，core 层定义领域模型，外层实现具体适配。
+
+**理由:**
+
+- 领域模型独立于框架和外部服务
+- 便于测试 (可 mock 外层依赖)
+- 支持替换任意外层实现
+
+**后果:**
+
+- 需要定义清晰的接口边界
+- 代码量略增 (接口 + 实现分离)
+
+---
+
+### ADR-002: LLM Provider 抽象设计
+
+**状态:** 已采纳
+
+**背景:**
+需要支持多个 LLM 提供商 (Claude, OpenAI, Ollama)，且可能随时切换。
+
+**决策:**
+定义 `llm.Provider` 接口，通过 Factory 模式根据配置创建实例。
+
+**理由:**
+
+- 提供商 API 差异大，需要统一抽象
+- 配置驱动，无需改代码即可切换
+- 支持本地模型 (Ollama) 降低成本
+
+**后果:**
+
+- 接口设计需兼顾各提供商能力
+- 部分高级功能 (如 Claude 的 tool use) 暂未暴露
+
+---
+
+### ADR-003: 信号路由与过滤机制
+
+**状态:** 已采纳
+
+**背景:**
+策略可能产生大量信号，需要过滤和去重。
+
+**决策:**
+Router 组件负责: Confidence 过滤 + Cooldown 去重 + 分发到所有 Notifier。
+
+**理由:**
+
+- 集中管理过滤逻辑
+- Cooldown 防止同一标的短时间重复通知
+- 解耦策略和通知
+
+**后果:**
+
+- 信号可能被过滤掉 (需要合理配置阈值)
+- 当前未持久化被过滤的信号 (待改进，见 M1 路线图)
+
+---
+
 *报告生成时间: 2024-12-30*
+*报告更新时间: 2024-12-30 (新增安全性分析、开发指南、路线图、ADR)*
