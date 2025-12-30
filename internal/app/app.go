@@ -280,3 +280,8 @@ func (a *App) RemoveFromWatchlist(symbol string) bool {
 	}
 	return false
 }
+
+// GetCollectors returns all registered collectors.
+func (a *App) GetCollectors() []collector.Collector {
+	return a.collectors.GetAll()
+}
