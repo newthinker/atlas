@@ -157,3 +157,68 @@ func TestRegistry_ImplementsGatherer(t *testing.T) {
 	reg := NewRegistry()
 	var _ prometheus.Gatherer = reg
 }
+
+func TestRegistry_BusinessMetrics(t *testing.T) {
+	reg := NewRegistry()
+
+	reg.RecordSignal("ma_crossover", "buy")
+	reg.RecordAnalysisCycle(0.5)
+	reg.RecordBacktest("complete", 2.5)
+	reg.SetWatchlistSize(10)
+
+	mfs, _ := reg.Gather()
+
+	expected := []string{
+		"atlas_signals_generated_total",
+		"atlas_analysis_cycles_total",
+		"atlas_analysis_duration_seconds",
+		"atlas_backtests_total",
+		"atlas_backtest_duration_seconds",
+		"atlas_watchlist_symbols",
+	}
+
+	found := make(map[string]bool)
+	for _, mf := range mfs {
+		found[mf.GetName()] = true
+	}
+
+	for _, name := range expected {
+		if !found[name] {
+			t.Errorf("expected metric %s not found", name)
+		}
+	}
+}
+
+func TestRegistry_SignalRouted(t *testing.T) {
+	reg := NewRegistry()
+
+	reg.RecordSignalRouted("telegram", "success")
+
+	mfs, _ := reg.Gather()
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() == "atlas_signals_routed_total" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected atlas_signals_routed_total metric")
+	}
+}
+
+func TestRegistry_JobsActive(t *testing.T) {
+	reg := NewRegistry()
+
+	reg.SetJobsActive("backtest", 3)
+
+	mfs, _ := reg.Gather()
+	for _, mf := range mfs {
+		if mf.GetName() == "atlas_jobs_active" {
+			for _, m := range mf.GetMetric() {
+				if m.GetGauge().GetValue() != 3 {
+					t.Errorf("expected jobs active to be 3, got %v", m.GetGauge().GetValue())
+				}
+			}
+		}
+	}
+}
