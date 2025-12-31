@@ -14,6 +14,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/logger"
+	"github.com/newthinker/atlas/internal/metrics"
 	signalstore "github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/newthinker/atlas/internal/strategy/ma_crossover"
@@ -112,12 +113,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 		backtester = backtest.New(yahoo.New())
 	}
 
+	// Create metrics registry if enabled
+	var metricsReg *metrics.Registry
+	if cfg.Metrics.Enabled {
+		metricsReg = metrics.NewRegistry()
+		log.Info("metrics enabled", zap.String("path", cfg.Metrics.Path))
+	}
+
 	// Create server dependencies
 	deps := api.Dependencies{
 		App:         application,
 		SignalStore: sigStore,
 		Backtester:  backtester,
 		Strategies:  strategies,
+		Metrics:     metricsReg,
 	}
 
 	// Create server config

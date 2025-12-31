@@ -144,3 +144,24 @@ watchlist:
   - symbol: "0700.HK"
     name: "Tencent Holdings"
     strategies: ["ma_crossover"]
+
+# Metrics configuration (Prometheus)
+metrics:
+  enabled: true
+  path: "/metrics"
+
+# Alerting configuration
+alerts:
+  enabled: true
+  check_interval: 60s
+  rules:
+    - name: high_error_rate
+      expr: "error_rate > 0.05"
+      for: 5m
+      severity: warning
+      message: "API error rate above 5%"
+    - name: api_down
+      expr: "up == 0"
+      for: 1m
+      severity: critical
+      message: "ATLAS API is not responding"

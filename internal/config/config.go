@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/spf13/viper"
@@ -20,6 +21,8 @@ type Config struct {
 	LLM        LLMConfig                  `mapstructure:"llm"`
 	Broker     BrokerConfig               `mapstructure:"broker"`
 	Meta       MetaConfig                 `mapstructure:"meta"`
+	Metrics    MetricsConfig              `mapstructure:"metrics"`
+	Alerts     AlertsConfig               `mapstructure:"alerts"`
 }
 
 type ServerConfig struct {
@@ -152,6 +155,28 @@ type SynthesizerConfig struct {
 	MinTrades int    `mapstructure:"min_trades"`
 }
 
+// MetricsConfig holds metrics configuration.
+type MetricsConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Path    string `mapstructure:"path"`
+}
+
+// AlertsConfig holds alerts configuration.
+type AlertsConfig struct {
+	Enabled       bool          `mapstructure:"enabled"`
+	CheckInterval time.Duration `mapstructure:"check_interval"`
+	Rules         []AlertRule   `mapstructure:"rules"`
+}
+
+// AlertRule defines a single alert rule.
+type AlertRule struct {
+	Name     string        `mapstructure:"name"`
+	Expr     string        `mapstructure:"expr"`
+	For      time.Duration `mapstructure:"for"`
+	Severity string        `mapstructure:"severity"`
+	Message  string        `mapstructure:"message"`
+}
+
 // Load reads configuration from file
 func Load(path string) (*Config, error) {
 	v := viper.New()
@@ -203,6 +228,14 @@ func Defaults() *Config {
 		Router: RouterConfig{
 			CooldownHours: 4,
 			MinConfidence: 0.6,
+		},
+		Metrics: MetricsConfig{
+			Enabled: true,
+			Path:    "/metrics",
+		},
+		Alerts: AlertsConfig{
+			Enabled:       false,
+			CheckInterval: 60 * time.Second,
 		},
 	}
 }
