@@ -14,8 +14,10 @@ import (
 	"github.com/newthinker/atlas/internal/api/middleware"
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/backtest"
+	"github.com/newthinker/atlas/internal/metrics"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
@@ -42,6 +44,7 @@ type Dependencies struct {
 	SignalStore signal.Store
 	Backtester  *backtest.Backtester
 	Strategies  *strategy.Engine
+	Metrics     *metrics.Registry
 }
 
 // NewServer creates a new HTTP server
@@ -90,13 +93,37 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 	// Auth middleware for API routes
 	authMiddleware := middleware.APIKeyAuth(cfg.APIKey)
 
-	// API v1 routes (with auth)
-	s.mux.Handle("/api/v1/signals", authMiddleware(http.HandlerFunc(signalsHandler.List)))
-	s.mux.Handle("/api/v1/signals/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Metrics and logging middleware
+	var metricsMiddleware func(http.Handler) http.Handler
+	var loggingMiddleware func(http.Handler) http.Handler
+
+	if deps.Metrics != nil {
+		metricsMiddleware = metrics.HTTPMiddleware(deps.Metrics)
+		loggingMiddleware = metrics.LoggingMiddleware(s.logger)
+
+		// Add metrics endpoint
+		s.mux.Handle("/metrics", promhttp.HandlerFor(deps.Metrics, promhttp.HandlerOpts{}))
+	}
+
+	// Helper to wrap handlers with all middleware (logging -> metrics -> auth)
+	wrapHandler := func(handler http.Handler) http.Handler {
+		h := authMiddleware(handler)
+		if metricsMiddleware != nil {
+			h = metricsMiddleware(h)
+		}
+		if loggingMiddleware != nil {
+			h = loggingMiddleware(h)
+		}
+		return h
+	}
+
+	// API v1 routes (with auth, metrics, logging)
+	s.mux.Handle("/api/v1/signals", wrapHandler(http.HandlerFunc(signalsHandler.List)))
+	s.mux.Handle("/api/v1/signals/", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/signals/")
 		signalsHandler.GetByID(w, r, id)
 	})))
-	s.mux.Handle("/api/v1/watchlist", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.Handle("/api/v1/watchlist", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			watchlistHandler.List(w, r)
@@ -106,7 +133,7 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
-	s.mux.Handle("/api/v1/watchlist/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.Handle("/api/v1/watchlist/", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		symbol := strings.TrimPrefix(r.URL.Path, "/api/v1/watchlist/")
 		if r.Method == http.MethodDelete {
 			watchlistHandler.Remove(w, r, symbol)
@@ -114,18 +141,18 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
-	s.mux.Handle("/api/v1/backtest", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.Handle("/api/v1/backtest", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			backtestHandler.Create(w, r)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
-	s.mux.Handle("/api/v1/backtest/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.Handle("/api/v1/backtest/", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		jobID := strings.TrimPrefix(r.URL.Path, "/api/v1/backtest/")
 		backtestHandler.GetStatus(w, r, jobID)
 	})))
-	s.mux.Handle("/api/v1/analysis/run", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.Handle("/api/v1/analysis/run", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			analysisHandler.Trigger(w, r)
 		} else {
