@@ -122,9 +122,26 @@ type OllamaConfig struct {
 
 // BrokerConfig holds broker integration settings.
 type BrokerConfig struct {
-	Enabled  bool       `mapstructure:"enabled"`
-	Provider string     `mapstructure:"provider"`
-	Futu     FutuConfig `mapstructure:"futu"`
+	Enabled   bool                  `mapstructure:"enabled"`
+	Provider  string                `mapstructure:"provider"`
+	Mode      string                `mapstructure:"mode"` // paper, live
+	Execution ExecutionConfigOpts   `mapstructure:"execution"`
+	Risk      RiskConfigOpts        `mapstructure:"risk"`
+	Futu      FutuConfig            `mapstructure:"futu"`
+}
+
+// ExecutionConfigOpts holds execution settings for the broker.
+type ExecutionConfigOpts struct {
+	Mode           string  `mapstructure:"mode"`             // auto, confirm, batch
+	BatchTime      string  `mapstructure:"batch_time"`       // HH:MM for batch execution
+	DefaultSizePct float64 `mapstructure:"default_size_pct"` // Position size as % of portfolio
+}
+
+// RiskConfigOpts holds risk control settings.
+type RiskConfigOpts struct {
+	MaxPositionPct   float64 `mapstructure:"max_position_pct"`
+	MaxDailyLossPct  float64 `mapstructure:"max_daily_loss_pct"`
+	MaxOpenPositions int     `mapstructure:"max_open_positions"`
 }
 
 // FutuConfig holds Futu broker settings.
@@ -237,6 +254,20 @@ func Defaults() *Config {
 			Enabled:       false,
 			CheckInterval: 60 * time.Second,
 		},
+		Broker: BrokerConfig{
+			Enabled:  false,
+			Provider: "futu",
+			Mode:     "paper",
+			Execution: ExecutionConfigOpts{
+				Mode:           "confirm",
+				DefaultSizePct: 2.0,
+			},
+			Risk: RiskConfigOpts{
+				MaxPositionPct:   10.0,
+				MaxDailyLossPct:  5.0,
+				MaxOpenPositions: 20,
+			},
+		},
 	}
 }
 
@@ -276,6 +307,21 @@ func (c *Config) Validate() error {
 				return core.WrapError(core.ErrConfigMissing,
 					fmt.Errorf("ollama endpoint required when provider is ollama"))
 			}
+		}
+	}
+
+	// Broker validation
+	if c.Broker.Enabled {
+		if c.Broker.Mode == "live" && c.Broker.Futu.Env != "real" {
+			return core.WrapError(core.ErrConfigInvalid,
+				fmt.Errorf("live mode requires futu env=real, got %s", c.Broker.Futu.Env))
+		}
+		switch c.Broker.Execution.Mode {
+		case "auto", "confirm", "batch", "":
+			// Valid
+		default:
+			return core.WrapError(core.ErrConfigInvalid,
+				fmt.Errorf("invalid execution mode: %s", c.Broker.Execution.Mode))
 		}
 	}
 
