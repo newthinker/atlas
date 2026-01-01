@@ -228,6 +228,8 @@ type Balance struct {
 	MarginAvailable float64 `json:"margin_available"`
 	// DayTradingBuyingPower is the buying power for day trading (US only).
 	DayTradingBuyingPower float64 `json:"day_trading_buying_power,omitempty"`
+	// DailyPL is the realized profit/loss for the current trading day.
+	DailyPL float64 `json:"daily_pl"`
 	// UpdatedAt is when the balance was last updated.
 	UpdatedAt time.Time `json:"updated_at"`
 }
