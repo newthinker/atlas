@@ -14,6 +14,7 @@ import (
 	"github.com/newthinker/atlas/internal/api/middleware"
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/backtest"
+	"github.com/newthinker/atlas/internal/broker"
 	"github.com/newthinker/atlas/internal/metrics"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
@@ -40,11 +41,12 @@ type Config struct {
 
 // Dependencies holds all server dependencies
 type Dependencies struct {
-	App         *app.App
-	SignalStore signal.Store
-	Backtester  *backtest.Backtester
-	Strategies  *strategy.Engine
-	Metrics     *metrics.Registry
+	App              *app.App
+	SignalStore      signal.Store
+	Backtester       *backtest.Backtester
+	Strategies       *strategy.Engine
+	Metrics          *metrics.Registry
+	ExecutionManager *broker.ExecutionManager
 }
 
 // NewServer creates a new HTTP server

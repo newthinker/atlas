@@ -11,6 +11,7 @@ import (
 	"github.com/newthinker/atlas/internal/api"
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/backtest"
+	"github.com/newthinker/atlas/internal/broker"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/logger"
@@ -120,13 +121,36 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Info("metrics enabled", zap.String("path", cfg.Metrics.Path))
 	}
 
+	// Create execution manager if broker is enabled
+	var execManager *broker.ExecutionManager
+	if cfg.Broker.Enabled {
+		// TODO: Create actual broker instance when FUTU integration is ready
+		// For now, log that broker is enabled but not yet implemented
+		log.Warn("broker enabled but not yet fully implemented",
+			zap.String("provider", cfg.Broker.Provider),
+			zap.String("mode", cfg.Broker.Mode),
+			zap.String("execution_mode", cfg.Broker.Execution.Mode),
+		)
+		// Once a proper Broker implementation exists:
+		// brokerInstance := futu.New(cfg.Broker.Futu)
+		// if err := brokerInstance.Connect(context.Background()); err != nil {
+		//     return fmt.Errorf("connecting to broker: %w", err)
+		// }
+		// defer brokerInstance.Disconnect()
+		//
+		// riskChecker := broker.NewRiskChecker(broker.RiskConfig{...}, brokerInstance)
+		// posTracker := broker.NewPositionTracker(brokerInstance)
+		// execManager = broker.NewExecutionManager(broker.ExecutionConfig{...}, brokerInstance, riskChecker, posTracker)
+	}
+
 	// Create server dependencies
 	deps := api.Dependencies{
-		App:         application,
-		SignalStore: sigStore,
-		Backtester:  backtester,
-		Strategies:  strategies,
-		Metrics:     metricsReg,
+		App:              application,
+		SignalStore:      sigStore,
+		Backtester:       backtester,
+		Strategies:       strategies,
+		Metrics:          metricsReg,
+		ExecutionManager: execManager,
 	}
 
 	// Create server config

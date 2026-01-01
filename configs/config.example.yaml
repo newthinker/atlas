@@ -122,7 +122,16 @@ meta:
 # Broker integration
 broker:
   enabled: false
-  provider: "mock"  # mock, futu
+  provider: "futu"  # futu
+  mode: "paper"     # paper, live
+  execution:
+    mode: "confirm"       # auto, confirm, batch
+    batch_time: "09:00"   # For batch mode (HH:MM)
+    default_size_pct: 2   # 2% of portfolio per position
+  risk:
+    max_position_pct: 10      # Max 10% in single position
+    max_daily_loss_pct: 5     # Stop trading if down 5% today
+    max_open_positions: 20    # Max concurrent positions
   futu:
     host: "127.0.0.1"
     port: 11111

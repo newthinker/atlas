@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-func TestOrderSide_Values(t *testing.T) {
+func TestLegacyOrderSide_Values(t *testing.T) {
 	tests := []struct {
-		side OrderSide
+		side LegacyOrderSide
 		want string
 	}{
-		{OrderSideBuy, "buy"},
-		{OrderSideSell, "sell"},
+		{LegacyOrderSideBuy, "buy"},
+		{LegacyOrderSideSell, "sell"},
 	}
 
 	for _, tt := range tests {
@@ -21,14 +21,14 @@ func TestOrderSide_Values(t *testing.T) {
 	}
 }
 
-func TestOrderType_Values(t *testing.T) {
+func TestLegacyOrderType_Values(t *testing.T) {
 	tests := []struct {
-		typ  OrderType
+		typ  LegacyOrderType
 		want string
 	}{
-		{OrderTypeMarket, "market"},
-		{OrderTypeLimit, "limit"},
-		{OrderTypeStop, "stop"},
+		{LegacyOrderTypeMarket, "market"},
+		{LegacyOrderTypeLimit, "limit"},
+		{LegacyOrderTypeStop, "stop"},
 	}
 
 	for _, tt := range tests {
@@ -38,16 +38,16 @@ func TestOrderType_Values(t *testing.T) {
 	}
 }
 
-func TestOrderStatus_Values(t *testing.T) {
+func TestLegacyOrderStatus_Values(t *testing.T) {
 	tests := []struct {
-		status OrderStatus
+		status LegacyOrderStatus
 		want   string
 	}{
-		{OrderStatusPending, "pending"},
-		{OrderStatusOpen, "open"},
-		{OrderStatusFilled, "filled"},
-		{OrderStatusCancelled, "cancelled"},
-		{OrderStatusRejected, "rejected"},
+		{LegacyOrderStatusPending, "pending"},
+		{LegacyOrderStatusOpen, "open"},
+		{LegacyOrderStatusFilled, "filled"},
+		{LegacyOrderStatusCancelled, "cancelled"},
+		{LegacyOrderStatusRejected, "rejected"},
 	}
 
 	for _, tt := range tests {

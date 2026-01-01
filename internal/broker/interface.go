@@ -1,4 +1,6 @@
 // internal/broker/interface.go
+// This file contains legacy types for backward compatibility.
+// New code should use types from types.go.
 package broker
 
 import (
@@ -8,8 +10,9 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 )
 
-// Broker defines the interface for broker integrations.
-type Broker interface {
+// LegacyBroker defines the legacy interface for broker integrations.
+// Deprecated: Use Broker interface from types.go instead.
+type LegacyBroker interface {
 	// Metadata
 	Name() string
 	SupportedMarkets() []core.Market
@@ -20,19 +23,20 @@ type Broker interface {
 	IsConnected() bool
 
 	// Read operations (Phase 4 scope)
-	GetPositions(ctx context.Context) ([]Position, error)
-	GetOrders(ctx context.Context, filter OrderFilter) ([]Order, error)
+	GetPositions(ctx context.Context) ([]LegacyPosition, error)
+	GetOrders(ctx context.Context, filter OrderFilter) ([]LegacyOrder, error)
 	GetAccountInfo(ctx context.Context) (*AccountInfo, error)
 	GetTradeHistory(ctx context.Context, start, end time.Time) ([]Trade, error)
 
 	// Write operations (defined but not implemented in Phase 4)
-	PlaceOrder(ctx context.Context, order OrderRequest) (*Order, error)
+	PlaceOrder(ctx context.Context, order LegacyOrderRequest) (*LegacyOrder, error)
 	CancelOrder(ctx context.Context, orderID string) error
-	ModifyOrder(ctx context.Context, orderID string, changes OrderChanges) (*Order, error)
+	ModifyOrder(ctx context.Context, orderID string, changes OrderChanges) (*LegacyOrder, error)
 }
 
-// Position represents a portfolio position.
-type Position struct {
+// LegacyPosition represents a portfolio position (legacy format).
+// Deprecated: Use Position from types.go instead.
+type LegacyPosition struct {
 	Symbol       string      `json:"symbol"`
 	Market       core.Market `json:"market"`
 	Quantity     int64       `json:"quantity"`
@@ -51,64 +55,69 @@ type AccountInfo struct {
 	DayTradesLeft int     `json:"day_trades_left"`
 }
 
-// OrderSide represents buy or sell.
-type OrderSide string
+// LegacyOrderSide represents buy or sell (legacy format).
+// Deprecated: Use OrderSide from types.go instead.
+type LegacyOrderSide string
 
 const (
-	OrderSideBuy  OrderSide = "buy"
-	OrderSideSell OrderSide = "sell"
+	LegacyOrderSideBuy  LegacyOrderSide = "buy"
+	LegacyOrderSideSell LegacyOrderSide = "sell"
 )
 
-// OrderType represents the order type.
-type OrderType string
+// LegacyOrderType represents the order type (legacy format).
+// Deprecated: Use OrderType from types.go instead.
+type LegacyOrderType string
 
 const (
-	OrderTypeMarket OrderType = "market"
-	OrderTypeLimit  OrderType = "limit"
-	OrderTypeStop   OrderType = "stop"
+	LegacyOrderTypeMarket LegacyOrderType = "market"
+	LegacyOrderTypeLimit  LegacyOrderType = "limit"
+	LegacyOrderTypeStop   LegacyOrderType = "stop"
 )
 
-// OrderStatus represents the order status.
-type OrderStatus string
+// LegacyOrderStatus represents the order status (legacy format).
+// Deprecated: Use OrderStatus from types.go instead.
+type LegacyOrderStatus string
 
 const (
-	OrderStatusPending   OrderStatus = "pending"
-	OrderStatusOpen      OrderStatus = "open"
-	OrderStatusFilled    OrderStatus = "filled"
-	OrderStatusCancelled OrderStatus = "cancelled"
-	OrderStatusRejected  OrderStatus = "rejected"
+	LegacyOrderStatusPending   LegacyOrderStatus = "pending"
+	LegacyOrderStatusOpen      LegacyOrderStatus = "open"
+	LegacyOrderStatusFilled    LegacyOrderStatus = "filled"
+	LegacyOrderStatusCancelled LegacyOrderStatus = "cancelled"
+	LegacyOrderStatusRejected  LegacyOrderStatus = "rejected"
 )
 
-// Order represents an order.
-type Order struct {
-	OrderID      string      `json:"order_id"`
-	Symbol       string      `json:"symbol"`
-	Market       core.Market `json:"market"`
-	Side         OrderSide   `json:"side"`
-	Type         OrderType   `json:"type"`
-	Quantity     int64       `json:"quantity"`
-	Price        float64     `json:"price,omitempty"`
-	Status       OrderStatus `json:"status"`
-	FilledQty    int64       `json:"filled_qty"`
-	AvgFillPrice float64     `json:"avg_fill_price"`
-	CreatedAt    time.Time   `json:"created_at"`
-	UpdatedAt    time.Time   `json:"updated_at"`
+// LegacyOrder represents an order (legacy format).
+// Deprecated: Use Order from types.go instead.
+type LegacyOrder struct {
+	OrderID      string            `json:"order_id"`
+	Symbol       string            `json:"symbol"`
+	Market       core.Market       `json:"market"`
+	Side         LegacyOrderSide   `json:"side"`
+	Type         LegacyOrderType   `json:"type"`
+	Quantity     int64             `json:"quantity"`
+	Price        float64           `json:"price,omitempty"`
+	Status       LegacyOrderStatus `json:"status"`
+	FilledQty    int64             `json:"filled_qty"`
+	AvgFillPrice float64           `json:"avg_fill_price"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 // OrderFilter filters orders for queries.
 type OrderFilter struct {
 	Symbol string
-	Status OrderStatus
-	Side   OrderSide
+	Status LegacyOrderStatus
+	Side   LegacyOrderSide
 	Since  time.Time
 }
 
-// OrderRequest represents a new order request.
-type OrderRequest struct {
+// LegacyOrderRequest represents a new order request (legacy format).
+// Deprecated: Use OrderRequest from types.go instead.
+type LegacyOrderRequest struct {
 	Symbol   string
 	Market   core.Market
-	Side     OrderSide
-	Type     OrderType
+	Side     LegacyOrderSide
+	Type     LegacyOrderType
 	Quantity int64
 	Price    float64 // For limit orders
 }
@@ -121,13 +130,13 @@ type OrderChanges struct {
 
 // Trade represents a completed trade.
 type Trade struct {
-	TradeID   string      `json:"trade_id"`
-	OrderID   string      `json:"order_id"`
-	Symbol    string      `json:"symbol"`
-	Market    core.Market `json:"market"`
-	Side      OrderSide   `json:"side"`
-	Quantity  int64       `json:"quantity"`
-	Price     float64     `json:"price"`
-	Fee       float64     `json:"fee"`
-	Timestamp time.Time   `json:"timestamp"`
+	TradeID   string          `json:"trade_id"`
+	OrderID   string          `json:"order_id"`
+	Symbol    string          `json:"symbol"`
+	Market    core.Market     `json:"market"`
+	Side      LegacyOrderSide `json:"side"`
+	Quantity  int64           `json:"quantity"`
+	Price     float64         `json:"price"`
+	Fee       float64         `json:"fee"`
+	Timestamp time.Time       `json:"timestamp"`
 }

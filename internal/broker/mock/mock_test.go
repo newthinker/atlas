@@ -11,7 +11,7 @@ import (
 )
 
 func TestMockBroker_ImplementsInterface(t *testing.T) {
-	var _ broker.Broker = (*MockBroker)(nil)
+	var _ broker.LegacyBroker = (*MockBroker)(nil)
 }
 
 func TestMockBroker_Connection(t *testing.T) {
@@ -80,11 +80,11 @@ func TestMockBroker_PlaceOrder(t *testing.T) {
 	ctx := context.Background()
 
 	m.Connect(ctx)
-	order, err := m.PlaceOrder(ctx, broker.OrderRequest{
+	order, err := m.PlaceOrder(ctx, broker.LegacyOrderRequest{
 		Symbol:   "GOOG",
 		Market:   core.MarketUS,
-		Side:     broker.OrderSideBuy,
-		Type:     broker.OrderTypeLimit,
+		Side:     broker.LegacyOrderSideBuy,
+		Type:     broker.LegacyOrderTypeLimit,
 		Quantity: 10,
 		Price:    100.00,
 	})
@@ -96,7 +96,7 @@ func TestMockBroker_PlaceOrder(t *testing.T) {
 	if order.Symbol != "GOOG" {
 		t.Errorf("expected GOOG, got %s", order.Symbol)
 	}
-	if order.Status != broker.OrderStatusOpen {
+	if order.Status != broker.LegacyOrderStatusOpen {
 		t.Errorf("expected open status, got %s", order.Status)
 	}
 }
@@ -106,10 +106,10 @@ func TestMockBroker_CancelOrder(t *testing.T) {
 	ctx := context.Background()
 
 	m.Connect(ctx)
-	order, _ := m.PlaceOrder(ctx, broker.OrderRequest{
+	order, _ := m.PlaceOrder(ctx, broker.LegacyOrderRequest{
 		Symbol:   "GOOG",
 		Market:   core.MarketUS,
-		Side:     broker.OrderSideBuy,
+		Side:     broker.LegacyOrderSideBuy,
 		Quantity: 10,
 	})
 
@@ -119,7 +119,7 @@ func TestMockBroker_CancelOrder(t *testing.T) {
 	}
 
 	orders, _ := m.GetOrders(ctx, broker.OrderFilter{})
-	if orders[0].Status != broker.OrderStatusCancelled {
+	if orders[0].Status != broker.LegacyOrderStatusCancelled {
 		t.Errorf("expected cancelled status, got %s", orders[0].Status)
 	}
 }
@@ -134,7 +134,7 @@ func TestMockBroker_GetTradeHistory(t *testing.T) {
 	m.AddTrade(broker.Trade{
 		TradeID:   "T1",
 		Symbol:    "AAPL",
-		Side:      broker.OrderSideBuy,
+		Side:      broker.LegacyOrderSideBuy,
 		Quantity:  100,
 		Price:     150.00,
 		Timestamp: time.Now().Add(-24 * time.Hour),
@@ -157,8 +157,8 @@ func TestMockBroker_OrderFilter(t *testing.T) {
 	m.Connect(ctx)
 
 	// Place multiple orders
-	m.PlaceOrder(ctx, broker.OrderRequest{Symbol: "AAPL", Side: broker.OrderSideBuy, Quantity: 10})
-	m.PlaceOrder(ctx, broker.OrderRequest{Symbol: "GOOG", Side: broker.OrderSideSell, Quantity: 5})
+	m.PlaceOrder(ctx, broker.LegacyOrderRequest{Symbol: "AAPL", Side: broker.LegacyOrderSideBuy, Quantity: 10})
+	m.PlaceOrder(ctx, broker.LegacyOrderRequest{Symbol: "GOOG", Side: broker.LegacyOrderSideSell, Quantity: 5})
 
 	// Filter by symbol
 	orders, _ := m.GetOrders(ctx, broker.OrderFilter{Symbol: "AAPL"})
@@ -167,7 +167,7 @@ func TestMockBroker_OrderFilter(t *testing.T) {
 	}
 
 	// Filter by side
-	orders, _ = m.GetOrders(ctx, broker.OrderFilter{Side: broker.OrderSideSell})
+	orders, _ = m.GetOrders(ctx, broker.OrderFilter{Side: broker.LegacyOrderSideSell})
 	if len(orders) != 1 {
 		t.Errorf("expected 1 sell order, got %d", len(orders))
 	}

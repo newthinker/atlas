@@ -68,7 +68,7 @@ func init() {
 	brokerHistoryCmd.Flags().StringVar(&historyTo, "to", "", "End date (YYYY-MM-DD)")
 }
 
-func getBroker(cfg *config.Config) (broker.Broker, error) {
+func getBroker(cfg *config.Config) (broker.LegacyBroker, error) {
 	if cfg == nil || !cfg.Broker.Enabled {
 		// Use mock broker for demo/testing
 		return mock.New(), nil

@@ -11,12 +11,12 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 )
 
-// MockBroker implements the Broker interface for testing.
+// MockBroker implements the LegacyBroker interface for testing.
 type MockBroker struct {
 	mu         sync.RWMutex
 	connected  bool
-	positions  []broker.Position
-	orders     []broker.Order
+	positions  []broker.LegacyPosition
+	orders     []broker.LegacyOrder
 	trades     []broker.Trade
 	account    broker.AccountInfo
 	orderID    int
@@ -26,7 +26,7 @@ type MockBroker struct {
 // New creates a new mock broker with sample data.
 func New() *MockBroker {
 	return &MockBroker{
-		positions: []broker.Position{
+		positions: []broker.LegacyPosition{
 			{
 				Symbol:       "AAPL",
 				Market:       core.MarketUS,
@@ -90,7 +90,7 @@ func (m *MockBroker) IsConnected() bool {
 }
 
 // GetPositions returns mock positions.
-func (m *MockBroker) GetPositions(ctx context.Context) ([]broker.Position, error) {
+func (m *MockBroker) GetPositions(ctx context.Context) ([]broker.LegacyPosition, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.connected {
@@ -100,14 +100,14 @@ func (m *MockBroker) GetPositions(ctx context.Context) ([]broker.Position, error
 }
 
 // GetOrders returns mock orders filtered by criteria.
-func (m *MockBroker) GetOrders(ctx context.Context, filter broker.OrderFilter) ([]broker.Order, error) {
+func (m *MockBroker) GetOrders(ctx context.Context, filter broker.OrderFilter) ([]broker.LegacyOrder, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.connected {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	var result []broker.Order
+	var result []broker.LegacyOrder
 	for _, o := range m.orders {
 		if filter.Symbol != "" && o.Symbol != filter.Symbol {
 			continue
@@ -155,7 +155,7 @@ func (m *MockBroker) GetTradeHistory(ctx context.Context, start, end time.Time) 
 }
 
 // PlaceOrder simulates placing an order.
-func (m *MockBroker) PlaceOrder(ctx context.Context, req broker.OrderRequest) (*broker.Order, error) {
+func (m *MockBroker) PlaceOrder(ctx context.Context, req broker.LegacyOrderRequest) (*broker.LegacyOrder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.connected {
@@ -163,7 +163,7 @@ func (m *MockBroker) PlaceOrder(ctx context.Context, req broker.OrderRequest) (*
 	}
 
 	m.orderID++
-	order := broker.Order{
+	order := broker.LegacyOrder{
 		OrderID:   fmt.Sprintf("ORD%d", m.orderID),
 		Symbol:    req.Symbol,
 		Market:    req.Market,
@@ -171,7 +171,7 @@ func (m *MockBroker) PlaceOrder(ctx context.Context, req broker.OrderRequest) (*
 		Type:      req.Type,
 		Quantity:  req.Quantity,
 		Price:     req.Price,
-		Status:    broker.OrderStatusOpen,
+		Status:    broker.LegacyOrderStatusOpen,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -190,10 +190,10 @@ func (m *MockBroker) CancelOrder(ctx context.Context, orderID string) error {
 
 	for i, o := range m.orders {
 		if o.OrderID == orderID {
-			if o.Status != broker.OrderStatusOpen && o.Status != broker.OrderStatusPending {
+			if o.Status != broker.LegacyOrderStatusOpen && o.Status != broker.LegacyOrderStatusPending {
 				return fmt.Errorf("order cannot be cancelled: %s", o.Status)
 			}
-			m.orders[i].Status = broker.OrderStatusCancelled
+			m.orders[i].Status = broker.LegacyOrderStatusCancelled
 			m.orders[i].UpdatedAt = time.Now()
 			return nil
 		}
@@ -202,7 +202,7 @@ func (m *MockBroker) CancelOrder(ctx context.Context, orderID string) error {
 }
 
 // ModifyOrder simulates modifying an order.
-func (m *MockBroker) ModifyOrder(ctx context.Context, orderID string, changes broker.OrderChanges) (*broker.Order, error) {
+func (m *MockBroker) ModifyOrder(ctx context.Context, orderID string, changes broker.OrderChanges) (*broker.LegacyOrder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.connected {
@@ -211,7 +211,7 @@ func (m *MockBroker) ModifyOrder(ctx context.Context, orderID string, changes br
 
 	for i, o := range m.orders {
 		if o.OrderID == orderID {
-			if o.Status != broker.OrderStatusOpen && o.Status != broker.OrderStatusPending {
+			if o.Status != broker.LegacyOrderStatusOpen && o.Status != broker.LegacyOrderStatusPending {
 				return nil, fmt.Errorf("order cannot be modified: %s", o.Status)
 			}
 			if changes.Price != nil {
@@ -228,7 +228,7 @@ func (m *MockBroker) ModifyOrder(ctx context.Context, orderID string, changes br
 }
 
 // AddPosition adds a position for testing.
-func (m *MockBroker) AddPosition(pos broker.Position) {
+func (m *MockBroker) AddPosition(pos broker.LegacyPosition) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.positions = append(m.positions, pos)
