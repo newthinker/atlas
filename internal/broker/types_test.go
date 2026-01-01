@@ -32,9 +32,9 @@ func TestOrderSideConstants(t *testing.T) {
 // TestOrderTypeConstants verifies OrderType constant values.
 func TestOrderTypeConstants(t *testing.T) {
 	tests := []struct {
-		name     string
-		typ      OrderType
-		want     string
+		name string
+		typ  OrderType
+		want string
 	}{
 		{"MARKET", OrderTypeMarket, "MARKET"},
 		{"LIMIT", OrderTypeLimit, "LIMIT"},
@@ -546,23 +546,23 @@ func TestBrokerInterfaceCompleteness(t *testing.T) {
 // mockBrokerForTest is a minimal mock that demonstrates the interface is complete.
 type mockBrokerForTest struct{}
 
-func (m *mockBrokerForTest) Name() string                                        { return "" }
-func (m *mockBrokerForTest) SupportedMarkets() []core.Market                     { return nil }
-func (m *mockBrokerForTest) Connect(_ context.Context) error                     { return nil }
-func (m *mockBrokerForTest) Disconnect() error                                   { return nil }
-func (m *mockBrokerForTest) IsConnected() bool                                   { return false }
+func (m *mockBrokerForTest) Name() string                    { return "" }
+func (m *mockBrokerForTest) SupportedMarkets() []core.Market { return nil }
+func (m *mockBrokerForTest) Connect(_ context.Context) error { return nil }
+func (m *mockBrokerForTest) Disconnect() error               { return nil }
+func (m *mockBrokerForTest) IsConnected() bool               { return false }
 func (m *mockBrokerForTest) PlaceOrder(_ context.Context, _ OrderRequest) (*Order, error) {
 	return nil, nil
 }
-func (m *mockBrokerForTest) CancelOrder(_ context.Context, _ string) error       { return nil }
+func (m *mockBrokerForTest) CancelOrder(_ context.Context, _ string) error { return nil }
 func (m *mockBrokerForTest) GetOrder(_ context.Context, _ string) (*Order, error) {
 	return nil, nil
 }
-func (m *mockBrokerForTest) GetOpenOrders(_ context.Context) ([]Order, error)    { return nil, nil }
-func (m *mockBrokerForTest) GetPositions(_ context.Context) ([]Position, error)  { return nil, nil }
+func (m *mockBrokerForTest) GetOpenOrders(_ context.Context) ([]Order, error)   { return nil, nil }
+func (m *mockBrokerForTest) GetPositions(_ context.Context) ([]Position, error) { return nil, nil }
 func (m *mockBrokerForTest) GetPosition(_ context.Context, _ string) (*Position, error) {
 	return nil, nil
 }
-func (m *mockBrokerForTest) GetBalance(_ context.Context) (*Balance, error)      { return nil, nil }
-func (m *mockBrokerForTest) Subscribe(_ OrderUpdateHandler) error                { return nil }
-func (m *mockBrokerForTest) Unsubscribe() error                                  { return nil }
+func (m *mockBrokerForTest) GetBalance(_ context.Context) (*Balance, error) { return nil, nil }
+func (m *mockBrokerForTest) Subscribe(_ OrderUpdateHandler) error           { return nil }
+func (m *mockBrokerForTest) Unsubscribe() error                             { return nil }
