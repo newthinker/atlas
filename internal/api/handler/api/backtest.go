@@ -14,6 +14,8 @@ import (
 	"github.com/newthinker/atlas/internal/strategy"
 )
 
+const backtestTimeout = 5 * time.Minute
+
 // BacktestRequest is the request body for starting a backtest.
 type BacktestRequest struct {
 	Symbol   string         `json:"symbol"`
@@ -106,7 +108,8 @@ func (h *BacktestHandler) runBacktest(
 	})
 
 	// Run backtest
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), backtestTimeout)
+	defer cancel()
 	result, err := h.backtester.Run(ctx, strat, symbol, start, end)
 
 	if err != nil {
