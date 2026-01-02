@@ -2,7 +2,10 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -528,4 +531,201 @@ func TestDefaultExecutionConfig(t *testing.T) {
 	assert.Equal(t, ExecutionAuto, config.Mode)
 	assert.Equal(t, "09:30", config.BatchTime)
 	assert.Equal(t, 5.0, config.DefaultSizePct)
+}
+
+func TestExecutionManager_PendingOrder_HasQueuedState(t *testing.T) {
+	broker := newMockBrokerForExecution()
+	risk := NewRiskChecker(DefaultRiskConfig(), broker)
+	tracker := NewPositionTracker(broker)
+
+	config := ExecutionConfig{
+		Mode:           ExecutionConfirm,
+		DefaultSizePct: 5.0,
+	}
+	em := NewExecutionManager(config, broker, risk, tracker)
+
+	signal := &core.Signal{
+		Symbol:      "AAPL",
+		Action:      core.ActionBuy,
+		Confidence:  0.8,
+		GeneratedAt: time.Now(),
+	}
+
+	_, err := em.Execute(context.Background(), signal, 150.0)
+	require.NoError(t, err)
+
+	pending := em.GetPendingOrders()
+	require.Len(t, pending, 1)
+	assert.Equal(t, PendingStateQueued, pending[0].State)
+}
+
+// slowMockBroker is a mock broker that delays PlaceOrder to test race conditions.
+type slowMockBroker struct {
+	*mockBrokerForExecution
+	delay     time.Duration
+	callCount atomic.Int32
+}
+
+func newSlowMockBroker(delay time.Duration) *slowMockBroker {
+	return &slowMockBroker{
+		mockBrokerForExecution: newMockBrokerForExecution(),
+		delay:                  delay,
+	}
+}
+
+func (m *slowMockBroker) PlaceOrder(ctx context.Context, req OrderRequest) (*Order, error) {
+	m.callCount.Add(1)
+	time.Sleep(m.delay)
+	return m.mockBrokerForExecution.PlaceOrder(ctx, req)
+}
+
+func TestExecutionManager_Confirm_ConcurrentCallsOnlyOneSucceeds(t *testing.T) {
+	// Use a slow broker to ensure both goroutines try to confirm at the same time
+	broker := newSlowMockBroker(50 * time.Millisecond)
+	risk := NewRiskChecker(DefaultRiskConfig(), broker)
+	tracker := NewPositionTracker(broker)
+
+	config := ExecutionConfig{
+		Mode:           ExecutionConfirm,
+		DefaultSizePct: 5.0,
+	}
+	em := NewExecutionManager(config, broker, risk, tracker)
+
+	signal := &core.Signal{
+		Symbol:      "AAPL",
+		Action:      core.ActionBuy,
+		Confidence:  0.8,
+		GeneratedAt: time.Now(),
+	}
+
+	// Queue the order
+	result, err := em.Execute(context.Background(), signal, 150.0)
+	require.NoError(t, err)
+	pendingID := result.PendingID
+
+	// Try to confirm from multiple goroutines simultaneously
+	var wg sync.WaitGroup
+	successCount := atomic.Int32{}
+	alreadyProcessingCount := atomic.Int32{}
+
+	numGoroutines := 10
+	wg.Add(numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := em.Confirm(context.Background(), pendingID)
+			if err == nil {
+				successCount.Add(1)
+			} else if err.Error() == fmt.Sprintf("order already being processed: %s", pendingID) {
+				alreadyProcessingCount.Add(1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Only one confirm should succeed
+	assert.Equal(t, int32(1), successCount.Load(), "expected exactly one successful confirm")
+
+	// All others should get "already being processed" error
+	assert.Equal(t, int32(numGoroutines-1), alreadyProcessingCount.Load(),
+		"expected all other confirms to get 'already being processed' error")
+
+	// PlaceOrder should only be called once
+	assert.Equal(t, int32(1), broker.callCount.Load(), "PlaceOrder should only be called once")
+
+	// Pending order should be removed
+	pending := em.GetPendingOrders()
+	assert.Len(t, pending, 0)
+}
+
+func TestExecutionManager_Confirm_RestoresStateOnFailure(t *testing.T) {
+	broker := newMockBrokerForExecution()
+	broker.placeErr = errors.New("broker unavailable")
+
+	risk := NewRiskChecker(DefaultRiskConfig(), broker)
+	tracker := NewPositionTracker(broker)
+
+	config := ExecutionConfig{
+		Mode:           ExecutionConfirm,
+		DefaultSizePct: 5.0,
+	}
+	em := NewExecutionManager(config, broker, risk, tracker)
+
+	signal := &core.Signal{
+		Symbol:      "AAPL",
+		Action:      core.ActionBuy,
+		Confidence:  0.8,
+		GeneratedAt: time.Now(),
+	}
+
+	// Queue the order
+	result, err := em.Execute(context.Background(), signal, 150.0)
+	require.NoError(t, err)
+	pendingID := result.PendingID
+
+	// Confirm should fail
+	_, err = em.Confirm(context.Background(), pendingID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "broker unavailable")
+
+	// Pending order should still exist with queued state
+	pending := em.GetPendingOrders()
+	require.Len(t, pending, 1)
+	assert.Equal(t, PendingStateQueued, pending[0].State)
+	assert.Equal(t, pendingID, pending[0].ID)
+
+	// Now fix the broker and try again
+	broker.placeErr = nil
+	confirmResult, err := em.Confirm(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.True(t, confirmResult.Success)
+	assert.NotNil(t, confirmResult.Order)
+
+	// Pending order should now be removed
+	pending = em.GetPendingOrders()
+	assert.Len(t, pending, 0)
+}
+
+func TestExecutionManager_Confirm_AlreadyProcessingError(t *testing.T) {
+	broker := newSlowMockBroker(100 * time.Millisecond)
+	risk := NewRiskChecker(DefaultRiskConfig(), broker)
+	tracker := NewPositionTracker(broker)
+
+	config := ExecutionConfig{
+		Mode:           ExecutionConfirm,
+		DefaultSizePct: 5.0,
+	}
+	em := NewExecutionManager(config, broker, risk, tracker)
+
+	signal := &core.Signal{
+		Symbol:      "AAPL",
+		Action:      core.ActionBuy,
+		Confidence:  0.8,
+		GeneratedAt: time.Now(),
+	}
+
+	// Queue the order
+	result, err := em.Execute(context.Background(), signal, 150.0)
+	require.NoError(t, err)
+	pendingID := result.PendingID
+
+	// Start first confirmation in background
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = em.Confirm(context.Background(), pendingID)
+	}()
+
+	// Wait a bit for the first goroutine to start processing
+	time.Sleep(10 * time.Millisecond)
+
+	// Second confirm should get "already being processed" error
+	_, err = em.Confirm(context.Background(), pendingID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "order already being processed")
+
+	wg.Wait()
 }
