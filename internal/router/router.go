@@ -191,6 +191,45 @@ func (r *Router) ClearAllCooldowns() {
 	r.mu.Unlock()
 }
 
+// CleanupExpiredCooldowns removes cooldown entries older than 2x the cooldown duration.
+func (r *Router) CleanupExpiredCooldowns() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	expiry := r.cfg.CooldownDuration * 2
+	removed := 0
+
+	for symbol, lastTime := range r.cooldowns {
+		if now.Sub(lastTime) > expiry {
+			delete(r.cooldowns, symbol)
+			removed++
+		}
+	}
+
+	return removed
+}
+
+// StartCleanupRoutine starts a background goroutine that periodically cleans up expired cooldowns.
+func (r *Router) StartCleanupRoutine(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				removed := r.CleanupExpiredCooldowns()
+				if removed > 0 {
+					r.logger.Debug("cleaned up expired cooldowns", zap.Int("removed", removed))
+				}
+			}
+		}
+	}()
+}
+
 // GetStats returns router statistics
 func (r *Router) GetStats() map[string]any {
 	r.mu.RLock()
