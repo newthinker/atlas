@@ -23,6 +23,10 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	defaultSignalStoreCapacity = 1000
+)
+
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the ATLAS server",
@@ -63,7 +67,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	)
 
 	// Create signal store
-	sigStore := signalstore.NewMemoryStore(1000)
+	sigStore := signalstore.NewMemoryStore(defaultSignalStoreCapacity)
 
 	// Create App
 	application := app.New(cfg, log)
