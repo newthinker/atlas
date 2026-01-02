@@ -327,3 +327,25 @@ func (c *Config) Validate() error {
 
 	return nil
 }
+
+// WarnHardcodedSecrets logs warnings for secrets that appear to be hardcoded
+// instead of using environment variable syntax (${ENV_VAR}).
+func (c *Config) WarnHardcodedSecrets(logger func(string)) {
+	secretFields := []struct {
+		name  string
+		value string
+	}{
+		{"server.api_key", c.Server.APIKey},
+		{"storage.cold.s3.access_key", c.Storage.Cold.S3.AccessKey},
+		{"storage.cold.s3.secret_key", c.Storage.Cold.S3.SecretKey},
+		{"broker.futu.trade_password", c.Broker.Futu.TradePassword},
+		{"llm.claude.api_key", c.LLM.Claude.APIKey},
+		{"llm.openai.api_key", c.LLM.OpenAI.APIKey},
+	}
+
+	for _, f := range secretFields {
+		if f.value != "" && !strings.HasPrefix(f.value, "${") {
+			logger(fmt.Sprintf("WARNING: %s appears to be hardcoded (use ${ENV_VAR} syntax)", f.name))
+		}
+	}
+}
