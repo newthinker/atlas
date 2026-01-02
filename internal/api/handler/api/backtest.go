@@ -86,12 +86,16 @@ func (h *BacktestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Create job
 	j := h.jobStore.Create("backtest")
 
+	// Copy values before starting goroutine to avoid race
+	jobID := j.ID
+	status := j.Status
+
 	// Run backtest in background
-	go h.runBacktest(j.ID, strat, req.Symbol, start, end)
+	go h.runBacktest(jobID, strat, req.Symbol, start, end)
 
 	response.JSON(w, http.StatusAccepted, map[string]any{
-		"job_id": j.ID,
-		"status": j.Status,
+		"job_id": jobID,
+		"status": status,
 	})
 }
 

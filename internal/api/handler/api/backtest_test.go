@@ -74,6 +74,19 @@ func TestBacktestHandler_Create(t *testing.T) {
 	if data["status"] != "pending" {
 		t.Errorf("expected pending status, got %s", data["status"])
 	}
+
+	// Wait for background job to complete to avoid race condition
+	jobID := data["job_id"].(string)
+	for i := 0; i < 100; i++ {
+		j, err := jobStore.Get(jobID)
+		if err != nil {
+			t.Fatalf("failed to get job: %v", err)
+		}
+		if j.Status == job.StatusComplete || j.Status == job.StatusFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestBacktestHandler_Create_MissingFields(t *testing.T) {
