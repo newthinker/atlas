@@ -1,0 +1,59 @@
+{{define "content"}}
+<div class="space-y-6">
+    <div class="flex justify-between items-center">
+        <h1 class="text-3xl font-bold text-gray-900">Signals</h1>
+        <div class="flex space-x-2">
+            <select id="filter-action" class="border rounded px-3 py-2"
+                    hx-get="/signals" hx-target="#signals-table" hx-include="[name='filter']">
+                <option value="">All Actions</option>
+                <option value="buy">Buy</option>
+                <option value="sell">Sell</option>
+            </select>
+            <select id="filter-strategy" class="border rounded px-3 py-2"
+                    hx-get="/signals" hx-target="#signals-table" hx-include="[name='filter']">
+                <option value="">All Strategies</option>
+                <option value="ma_crossover">MA Crossover</option>
+                <option value="pe_band">PE Band</option>
+                <option value="dividend_yield">Dividend Yield</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strategy</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Confidence</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
+                </tr>
+            </thead>
+            <tbody id="signals-table" class="bg-white divide-y divide-gray-200">
+                {{range .Signals}}
+                <tr>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{.Time}}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{.Symbol}}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        {{if eq .Action "buy"}}
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">BUY</span>
+                        {{else}}
+                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">SELL</span>
+                        {{end}}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{.Strategy}}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{.Confidence}}%</td>
+                    <td class="px-6 py-4 text-sm text-gray-500">{{.Reason}}</td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="6" class="px-6 py-4 text-center text-gray-500">No signals found</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}

@@ -1,0 +1,69 @@
+{{define "content"}}
+<div class="space-y-6">
+    <div class="flex justify-between items-center">
+        <h1 class="text-3xl font-bold text-gray-900">Watchlist</h1>
+        <button onclick="document.getElementById('add-modal').classList.remove('hidden')"
+                class="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700">
+            Add Symbol
+        </button>
+    </div>
+
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strategies</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="watchlist-table" class="bg-white divide-y divide-gray-200">
+                {{range .Items}}
+                <tr>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{.Symbol}}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{.Name}}</td>
+                    <td class="px-6 py-4 text-sm text-gray-500">
+                        {{range .Strategies}}
+                        <span class="inline-block bg-gray-100 rounded px-2 py-1 text-xs mr-1">{{.}}</span>
+                        {{end}}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm">
+                        <button hx-delete="/api/watchlist/{{.Symbol}}" hx-target="closest tr" hx-swap="outerHTML"
+                                class="text-red-600 hover:text-red-800">Remove</button>
+                    </td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="4" class="px-6 py-4 text-center text-gray-500">No items in watchlist</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Add Modal -->
+<div id="add-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg p-6 w-96">
+        <h3 class="text-lg font-semibold mb-4">Add to Watchlist</h3>
+        <form hx-post="/api/watchlist" hx-target="#watchlist-table" hx-swap="beforeend">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Symbol</label>
+                    <input type="text" name="symbol" required class="mt-1 block w-full border rounded px-3 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Name</label>
+                    <input type="text" name="name" class="mt-1 block w-full border rounded px-3 py-2">
+                </div>
+                <div class="flex justify-end space-x-2">
+                    <button type="button" onclick="document.getElementById('add-modal').classList.add('hidden')"
+                            class="px-4 py-2 border rounded">Cancel</button>
+                    <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded">Add</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+{{end}}

@@ -1,0 +1,89 @@
+{{define "content"}}
+<div class="space-y-6">
+    <h1 class="text-3xl font-bold text-gray-900">Backtest</h1>
+
+    <div class="bg-white rounded-lg shadow p-6">
+        <form hx-post="/api/backtest" hx-target="#results" hx-swap="innerHTML">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Strategy</label>
+                    <select name="strategy" required class="mt-1 block w-full border rounded px-3 py-2">
+                        <option value="ma_crossover">MA Crossover</option>
+                        <option value="pe_band">PE Band</option>
+                        <option value="dividend_yield">Dividend Yield</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Symbol</label>
+                    <input type="text" name="symbol" required placeholder="AAPL"
+                           class="mt-1 block w-full border rounded px-3 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">From</label>
+                    <input type="date" name="from" required class="mt-1 block w-full border rounded px-3 py-2">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">To</label>
+                    <input type="date" name="to" required class="mt-1 block w-full border rounded px-3 py-2">
+                </div>
+            </div>
+            <div class="mt-4">
+                <button type="submit" class="bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700">
+                    Run Backtest
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <div id="results">
+        {{if .Result}}
+        <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold mb-4">Results: {{.Result.Strategy}} on {{.Result.Symbol}}</h2>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-gray-50 p-4 rounded">
+                    <div class="text-sm text-gray-500">Total Trades</div>
+                    <div class="text-2xl font-bold">{{.Result.Stats.TotalTrades}}</div>
+                </div>
+                <div class="bg-gray-50 p-4 rounded">
+                    <div class="text-sm text-gray-500">Win Rate</div>
+                    <div class="text-2xl font-bold text-green-600">{{printf "%.1f" .Result.Stats.WinRate}}%</div>
+                </div>
+                <div class="bg-gray-50 p-4 rounded">
+                    <div class="text-sm text-gray-500">Total Return</div>
+                    <div class="text-2xl font-bold {{if gt .Result.Stats.TotalReturn 0.0}}text-green-600{{else}}text-red-600{{end}}">
+                        {{printf "%.1f" .Result.Stats.TotalReturn}}%
+                    </div>
+                </div>
+                <div class="bg-gray-50 p-4 rounded">
+                    <div class="text-sm text-gray-500">Max Drawdown</div>
+                    <div class="text-2xl font-bold text-red-600">{{printf "%.1f" .Result.Stats.MaxDrawdown}}%</div>
+                </div>
+            </div>
+
+            <h3 class="font-semibold mb-2">Trades</h3>
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500">Entry</th>
+                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500">Exit</th>
+                        <th class="px-4 py-2 text-left text-xs font-medium text-gray-500">Return</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Result.Trades}}
+                    <tr>
+                        <td class="px-4 py-2 text-sm">{{printf "%.2f" .EntryPrice}}</td>
+                        <td class="px-4 py-2 text-sm">{{if .IsClosed}}{{printf "%.2f" .ExitPrice}}{{else}}-{{end}}</td>
+                        <td class="px-4 py-2 text-sm {{if gt .Return 0.0}}text-green-600{{else}}text-red-600{{end}}">
+                            {{printf "%.2f" .Return}}%
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}
