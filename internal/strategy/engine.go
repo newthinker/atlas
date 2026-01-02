@@ -5,18 +5,27 @@ import (
 	"sync"
 
 	"github.com/newthinker/atlas/internal/core"
+	"go.uber.org/zap"
 )
 
 // Engine manages and runs strategies
 type Engine struct {
 	mu         sync.RWMutex
 	strategies map[string]Strategy
+	logger     *zap.Logger
 }
 
 // NewEngine creates a new strategy engine
-func NewEngine() *Engine {
+func NewEngine(logger ...*zap.Logger) *Engine {
+	var l *zap.Logger
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	} else {
+		l = zap.NewNop()
+	}
 	return &Engine{
 		strategies: make(map[string]Strategy),
+		logger:     l,
 	}
 }
 
@@ -67,7 +76,10 @@ func (e *Engine) Analyze(ctx context.Context, analysisCtx AnalysisContext) ([]co
 
 		signals, err := s.Analyze(analysisCtx)
 		if err != nil {
-			// Log error but continue with other strategies
+			e.logger.Warn("strategy analysis failed",
+				zap.String("strategy", s.Name()),
+				zap.Error(err),
+			)
 			continue
 		}
 
@@ -100,6 +112,10 @@ func (e *Engine) AnalyzeWithStrategies(ctx context.Context, analysisCtx Analysis
 
 		signals, err := s.Analyze(analysisCtx)
 		if err != nil {
+			e.logger.Warn("strategy analysis failed",
+				zap.String("strategy", s.Name()),
+				zap.Error(err),
+			)
 			continue
 		}
 
