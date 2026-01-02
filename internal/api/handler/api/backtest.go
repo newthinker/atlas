@@ -14,6 +14,8 @@ import (
 	"github.com/newthinker/atlas/internal/strategy"
 )
 
+const backtestTimeout = 5 * time.Minute
+
 // BacktestRequest is the request body for starting a backtest.
 type BacktestRequest struct {
 	Symbol   string         `json:"symbol"`
@@ -84,12 +86,16 @@ func (h *BacktestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Create job
 	j := h.jobStore.Create("backtest")
 
+	// Copy values before starting goroutine to avoid race
+	jobID := j.ID
+	status := j.Status
+
 	// Run backtest in background
-	go h.runBacktest(j.ID, strat, req.Symbol, start, end)
+	go h.runBacktest(jobID, strat, req.Symbol, start, end)
 
 	response.JSON(w, http.StatusAccepted, map[string]any{
-		"job_id": j.ID,
-		"status": j.Status,
+		"job_id": jobID,
+		"status": status,
 	})
 }
 
@@ -106,7 +112,8 @@ func (h *BacktestHandler) runBacktest(
 	})
 
 	// Run backtest
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), backtestTimeout)
+	defer cancel()
 	result, err := h.backtester.Run(ctx, strat, symbol, start, end)
 
 	if err != nil {

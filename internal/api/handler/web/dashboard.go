@@ -2,11 +2,10 @@
 package web
 
 import (
-	"html/template"
 	"net/http"
-	"path/filepath"
 )
 
+// DashboardData holds data for the dashboard template
 type DashboardData struct {
 	Title          string
 	SignalsToday   int
@@ -15,18 +14,7 @@ type DashboardData struct {
 	WatchlistCount int
 }
 
-type Handler struct {
-	templates *template.Template
-}
-
-func NewHandler(templatesDir string) (*Handler, error) {
-	tmpl, err := template.ParseGlob(filepath.Join(templatesDir, "*.html"))
-	if err != nil {
-		return nil, err
-	}
-	return &Handler{templates: tmpl}, nil
-}
-
+// Dashboard renders the dashboard page
 func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	data := DashboardData{
 		Title:          "Dashboard",

@@ -282,3 +282,29 @@ func TestRouter_PersistsSignals(t *testing.T) {
 		t.Errorf("expected 1 persisted signal, got %d", len(signals))
 	}
 }
+
+func TestRouter_CleanupExpiredCooldowns(t *testing.T) {
+	cfg := Config{
+		CooldownDuration: 100 * time.Millisecond,
+		MinConfidence:    0.5,
+	}
+	r := New(cfg, nil, nil)
+
+	// Add some cooldowns
+	r.mu.Lock()
+	r.cooldowns["AAPL"] = time.Now().Add(-300 * time.Millisecond) // expired
+	r.cooldowns["MSFT"] = time.Now().Add(-300 * time.Millisecond) // expired
+	r.cooldowns["GOOG"] = time.Now()                               // not expired
+	r.mu.Unlock()
+
+	removed := r.CleanupExpiredCooldowns()
+	if removed != 2 {
+		t.Errorf("expected 2 removed, got %d", removed)
+	}
+
+	r.mu.RLock()
+	if len(r.cooldowns) != 1 {
+		t.Errorf("expected 1 cooldown remaining, got %d", len(r.cooldowns))
+	}
+	r.mu.RUnlock()
+}

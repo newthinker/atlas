@@ -24,8 +24,9 @@ type App struct {
 	notifiers  *notifier.Registry
 	router     *router.Router
 
-	watchlist []string
-	interval  time.Duration
+	watchlist    []string
+	watchlistSet map[string]struct{}
+	interval     time.Duration
 
 	mu      sync.RWMutex
 	running bool
@@ -50,14 +51,15 @@ func New(cfg *config.Config, logger *zap.Logger) *App {
 	r := router.New(routerCfg, notifiers, logger)
 
 	return &App{
-		cfg:        cfg,
-		logger:     logger,
-		collectors: collectors,
-		strategies: strategies,
-		notifiers:  notifiers,
-		router:     r,
-		watchlist:  []string{},
-		interval:   5 * time.Minute,
+		cfg:          cfg,
+		logger:       logger,
+		collectors:   collectors,
+		strategies:   strategies,
+		notifiers:    notifiers,
+		router:       r,
+		watchlist:    []string{},
+		watchlistSet: make(map[string]struct{}),
+		interval:     5 * time.Minute,
 	}
 }
 
@@ -81,6 +83,10 @@ func (a *App) SetWatchlist(symbols []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.watchlist = symbols
+	a.watchlistSet = make(map[string]struct{}, len(symbols))
+	for _, s := range symbols {
+		a.watchlistSet[s] = struct{}{}
+	}
 }
 
 // SetInterval sets the analysis interval
@@ -259,12 +265,10 @@ func (a *App) GetWatchlist() []string {
 func (a *App) AddToWatchlist(symbol string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	// Check if already exists
-	for _, s := range a.watchlist {
-		if s == symbol {
-			return
-		}
+	if _, exists := a.watchlistSet[symbol]; exists {
+		return
 	}
+	a.watchlistSet[symbol] = struct{}{}
 	a.watchlist = append(a.watchlist, symbol)
 }
 
@@ -272,13 +276,17 @@ func (a *App) AddToWatchlist(symbol string) {
 func (a *App) RemoveFromWatchlist(symbol string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if _, exists := a.watchlistSet[symbol]; !exists {
+		return false
+	}
+	delete(a.watchlistSet, symbol)
 	for i, s := range a.watchlist {
 		if s == symbol {
 			a.watchlist = append(a.watchlist[:i], a.watchlist[i+1:]...)
-			return true
+			break
 		}
 	}
-	return false
+	return true
 }
 
 // GetCollectors returns all registered collectors.

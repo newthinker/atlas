@@ -31,6 +31,16 @@ const (
 	ExecutionBatch ExecutionMode = "batch"
 )
 
+// PendingState represents the state of a pending order.
+type PendingState string
+
+const (
+	// PendingStateQueued indicates order is waiting for confirmation.
+	PendingStateQueued PendingState = "queued"
+	// PendingStateProcessing indicates order is being executed.
+	PendingStateProcessing PendingState = "processing"
+)
+
 // ExecutionConfig holds configuration for the execution manager.
 type ExecutionConfig struct {
 	// Mode determines how orders are processed.
@@ -62,6 +72,8 @@ type PendingOrder struct {
 	Signal *core.Signal
 	// CreatedAt is when the pending order was created.
 	CreatedAt time.Time
+	// State is the current state of the pending order.
+	State PendingState
 }
 
 // ExecuteResult represents the outcome of an execution attempt.
@@ -205,6 +217,7 @@ func (em *ExecutionManager) queueForConfirmation(request OrderRequest, signal *c
 		Price:     price,
 		Signal:    signal,
 		CreatedAt: time.Now(),
+		State:     PendingStateQueued,
 	}
 	em.pending[pendingID] = pending
 
@@ -223,19 +236,30 @@ func (em *ExecutionManager) Confirm(ctx context.Context, pendingID string) (*Exe
 		em.mu.Unlock()
 		return nil, ErrPendingOrderNotFound
 	}
-	// Remove from pending before executing
-	delete(em.pending, pendingID)
+	if pending.State == PendingStateProcessing {
+		em.mu.Unlock()
+		return nil, fmt.Errorf("order already being processed: %s", pendingID)
+	}
+	// Mark as processing instead of deleting
+	pending.State = PendingStateProcessing
+	em.pending[pendingID] = pending
 	em.mu.Unlock()
 
 	// Place the order
 	order, err := em.broker.PlaceOrder(ctx, pending.Request)
 	if err != nil {
-		// Re-add to pending on failure
+		// Restore to queued state on failure
 		em.mu.Lock()
+		pending.State = PendingStateQueued
 		em.pending[pendingID] = pending
 		em.mu.Unlock()
 		return nil, fmt.Errorf("execution: failed to place order: %w", err)
 	}
+
+	// Remove from pending on success
+	em.mu.Lock()
+	delete(em.pending, pendingID)
+	em.mu.Unlock()
 
 	// Update position tracker if order is filled
 	if order.IsFilled() {
