@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func (m *mockBrokerForExecution) PlaceOrder(ctx context.Context, req OrderReques
 	m.orderSeq++
 	now := time.Now()
 	order := &Order{
-		OrderID:          string(rune('0' + m.orderSeq)),
+		OrderID:          fmt.Sprintf("order-%d", m.orderSeq),
 		Symbol:           req.Symbol,
 		Market:           req.Market,
 		Side:             req.Side,
