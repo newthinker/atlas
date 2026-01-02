@@ -1,7 +1,9 @@
 package yahoo
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/core"
@@ -64,5 +66,58 @@ func TestYahoo_DetectMarket(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("detectMarket(%s) = %s, want %s", tc.symbol, got, tc.expected)
 		}
+	}
+}
+
+func TestValidateSymbol(t *testing.T) {
+	tests := []struct {
+		name    string
+		symbol  string
+		wantErr bool
+	}{
+		{"valid US symbol", "AAPL", false},
+		{"valid HK symbol", "0700.HK", false},
+		{"valid CN symbol", "600519.SH", false},
+		{"valid SZ symbol", "000001.SZ", false},
+		{"valid lowercase", "aapl", false},
+		{"empty symbol", "", true},
+		{"too long", "VERYLONGSYMBOLNAME12345", true},
+		{"invalid chars", "AAP!L", true},
+		{"path injection", "../etc/passwd", true},
+		{"url injection", "AAPL?foo=bar", true},
+		{"space injection", "AAPL bar", true},
+		{"newline injection", "AAPL\nbar", true},
+		{"slash injection", "AAPL/bar", true},
+		{"ampersand injection", "AAPL&bar=baz", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSymbol(tt.symbol)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSymbol(%q) error = %v, wantErr %v", tt.symbol, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestFetchQuote_ValidatesSymbol(t *testing.T) {
+	y := New()
+	_, err := y.FetchQuote("../etc/passwd")
+	if err == nil {
+		t.Error("FetchQuote should reject invalid symbol")
+	}
+	if !strings.Contains(err.Error(), "invalid symbol format") {
+		t.Errorf("expected 'invalid symbol format' error, got: %v", err)
+	}
+}
+
+func TestFetchHistory_ValidatesSymbol(t *testing.T) {
+	y := New()
+	_, err := y.FetchHistory("AAPL?foo=bar", time.Now().Add(-24*time.Hour), time.Now(), "1d")
+	if err == nil {
+		t.Error("FetchHistory should reject invalid symbol")
+	}
+	if !strings.Contains(err.Error(), "invalid symbol format") {
+		t.Errorf("expected 'invalid symbol format' error, got: %v", err)
 	}
 }

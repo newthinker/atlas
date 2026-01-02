@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,23 @@ import (
 const (
 	baseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
 )
+
+// validSymbol matches stock symbols like AAPL, MSFT, 600519.SH, 0700.HK
+var validSymbol = regexp.MustCompile(`^[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?$`)
+
+// validateSymbol checks if a symbol has valid format
+func validateSymbol(symbol string) error {
+	if symbol == "" {
+		return fmt.Errorf("symbol cannot be empty")
+	}
+	if len(symbol) > 20 {
+		return fmt.Errorf("symbol too long: %s", symbol)
+	}
+	if !validSymbol.MatchString(symbol) {
+		return fmt.Errorf("invalid symbol format: %s", symbol)
+	}
+	return nil
+}
 
 // Yahoo implements the Yahoo Finance collector
 type Yahoo struct {
@@ -63,6 +81,9 @@ func (y *Yahoo) toYahooSymbol(symbol string) string {
 
 // FetchQuote fetches real-time quote
 func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
+	if err := validateSymbol(symbol); err != nil {
+		return nil, err
+	}
 	yahooSymbol := y.toYahooSymbol(symbol)
 	url := fmt.Sprintf("%s/%s?interval=1d&range=1d", baseURL, yahooSymbol)
 
@@ -104,6 +125,9 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 
 // FetchHistory fetches historical OHLCV data
 func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
+	if err := validateSymbol(symbol); err != nil {
+		return nil, err
+	}
 	yahooSymbol := y.toYahooSymbol(symbol)
 	yahooInterval := y.toYahooInterval(interval)
 
