@@ -34,7 +34,7 @@ go mod download
 go build -o bin/atlas ./cmd/atlas
 
 # Create configuration
-cp configs/config.example.yaml config.yaml
+cp config.example.yaml config.yaml
 
 # Run
 ./bin/atlas serve -c config.yaml --debug
