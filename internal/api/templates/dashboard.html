@@ -27,7 +27,7 @@
         <div class="px-6 py-4 border-b">
             <h2 class="text-lg font-semibold">Recent Signals</h2>
         </div>
-        <div id="signals-list" hx-get="/api/signals/recent" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        <div id="signals-list" hx-get="/api/v1/signals" hx-trigger="load, every 30s" hx-swap="innerHTML">
             <div class="p-6 text-gray-500">Loading signals...</div>
         </div>
     </div>
