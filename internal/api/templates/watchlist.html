@@ -29,7 +29,7 @@
                         {{end}}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm">
-                        <button hx-delete="/api/watchlist/{{.Symbol}}" hx-target="closest tr" hx-swap="outerHTML"
+                        <button hx-delete="/api/v1/watchlist/{{.Symbol}}" hx-target="closest tr" hx-swap="outerHTML"
                                 class="text-red-600 hover:text-red-800">Remove</button>
                     </td>
                 </tr>
@@ -47,7 +47,7 @@
 <div id="add-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center">
     <div class="bg-white rounded-lg p-6 w-96">
         <h3 class="text-lg font-semibold mb-4">Add to Watchlist</h3>
-        <form hx-post="/api/watchlist" hx-target="#watchlist-table" hx-swap="beforeend">
+        <form hx-post="/api/v1/watchlist" hx-target="#watchlist-table" hx-swap="beforeend">
             <div class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Symbol</label>
