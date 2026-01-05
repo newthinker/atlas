@@ -26,7 +26,7 @@ func NewHandler(templatesDir string) (*Handler, error) {
 	pageTemplates := make(map[string]*template.Template)
 
 	// List of page templates (excluding layout.html)
-	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html"}
+	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html"}
 
 	for _, page := range pages {
 		var tmpl *template.Template
@@ -64,7 +64,7 @@ func NewHandler(templatesDir string) (*Handler, error) {
 // This is useful for testing or custom template sources.
 func NewHandlerWithFS(fsys fs.FS) (*Handler, error) {
 	pageTemplates := make(map[string]*template.Template)
-	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html"}
+	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html"}
 
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(fsys, "layout.html", page)

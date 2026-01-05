@@ -176,6 +176,7 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		s.mux.HandleFunc("/signals", webHandler.Signals)
 		s.mux.HandleFunc("/watchlist", webHandler.Watchlist)
 		s.mux.HandleFunc("/backtest", webHandler.Backtest)
+		s.mux.HandleFunc("/settings", webHandler.Settings)
 	}
 
 	return nil
