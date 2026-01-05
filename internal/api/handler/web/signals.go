@@ -26,5 +26,5 @@ func (h *Handler) Signals(w http.ResponseWriter, r *http.Request) {
 		Signals: []SignalView{}, // Empty for now
 	}
 
-	h.templates.ExecuteTemplate(w, "layout.html", data)
+	h.render(w, "signals.html", data)
 }

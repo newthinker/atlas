@@ -24,5 +24,5 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		WatchlistCount: 0,
 	}
 
-	h.templates.ExecuteTemplate(w, "layout.html", data)
+	h.render(w, "dashboard.html", data)
 }

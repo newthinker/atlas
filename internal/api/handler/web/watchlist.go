@@ -23,5 +23,5 @@ func (h *Handler) Watchlist(w http.ResponseWriter, r *http.Request) {
 		Items: []WatchlistItem{},
 	}
 
-	h.templates.ExecuteTemplate(w, "layout.html", data)
+	h.render(w, "watchlist.html", data)
 }

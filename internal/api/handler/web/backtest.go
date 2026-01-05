@@ -18,5 +18,5 @@ func (h *Handler) Backtest(w http.ResponseWriter, r *http.Request) {
 		Result: nil,
 	}
 
-	h.templates.ExecuteTemplate(w, "layout.html", data)
+	h.render(w, "backtest.html", data)
 }
