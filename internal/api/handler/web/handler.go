@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
-	"os"
+	"net/http"
 	"path/filepath"
 )
 
@@ -15,46 +15,80 @@ var templateFS embed.FS
 
 // Handler provides web UI handlers with template rendering
 type Handler struct {
-	templates *template.Template
+	// pageTemplates holds separate template instances for each page
+	// Each instance contains layout.html + the specific page template
+	pageTemplates map[string]*template.Template
 }
 
 // NewHandler creates a new web handler with templates loaded from the given directory.
 // If templatesDir is empty, it falls back to embedded templates.
 func NewHandler(templatesDir string) (*Handler, error) {
-	var tmpl *template.Template
-	var err error
+	pageTemplates := make(map[string]*template.Template)
 
-	if templatesDir != "" {
-		// Use filesystem templates from the provided directory
-		tmpl, err = template.ParseGlob(filepath.Join(templatesDir, "*.html"))
-		if err != nil {
-			return nil, fmt.Errorf("parsing templates from directory: %w", err)
-		}
-	} else {
-		// Use embedded templates as fallback
-		subFS, err := fs.Sub(templateFS, "templates")
-		if err != nil {
-			return nil, fmt.Errorf("accessing embedded templates: %w", err)
+	// List of page templates (excluding layout.html)
+	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html"}
+
+	for _, page := range pages {
+		var tmpl *template.Template
+		var err error
+
+		if templatesDir != "" {
+			// Parse layout first, then the page template
+			layoutPath := filepath.Join(templatesDir, "layout.html")
+			pagePath := filepath.Join(templatesDir, page)
+			tmpl, err = template.ParseFiles(layoutPath, pagePath)
+			if err != nil {
+				return nil, fmt.Errorf("parsing template %s: %w", page, err)
+			}
+		} else {
+			// Use embedded templates
+			subFS, err := fs.Sub(templateFS, "templates")
+			if err != nil {
+				return nil, fmt.Errorf("accessing embedded templates: %w", err)
+			}
+
+			// Parse layout first, then the page template
+			tmpl, err = template.ParseFS(subFS, "layout.html", page)
+			if err != nil {
+				return nil, fmt.Errorf("parsing embedded template %s: %w", page, err)
+			}
 		}
 
-		tmpl, err = template.ParseFS(subFS, "*.html")
-		if err != nil {
-			return nil, fmt.Errorf("parsing embedded templates: %w", err)
-		}
+		pageTemplates[page] = tmpl
 	}
 
-	return &Handler{templates: tmpl}, nil
+	return &Handler{pageTemplates: pageTemplates}, nil
 }
 
 // NewHandlerWithFS creates a new web handler using a custom filesystem.
 // This is useful for testing or custom template sources.
 func NewHandlerWithFS(fsys fs.FS) (*Handler, error) {
-	tmpl, err := template.ParseFS(fsys, "*.html")
-	if err != nil {
-		return nil, fmt.Errorf("parsing templates from fs: %w", err)
+	pageTemplates := make(map[string]*template.Template)
+	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html"}
+
+	for _, page := range pages {
+		tmpl, err := template.ParseFS(fsys, "layout.html", page)
+		if err != nil {
+			return nil, fmt.Errorf("parsing template %s from fs: %w", page, err)
+		}
+		pageTemplates[page] = tmpl
 	}
 
-	return &Handler{templates: tmpl}, nil
+	return &Handler{pageTemplates: pageTemplates}, nil
+}
+
+// render executes the specified page template with the given data
+func (h *Handler) render(w http.ResponseWriter, page string, data any) {
+	tmpl, ok := h.pageTemplates[page]
+	if !ok {
+		http.Error(w, "template not found: "+page, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.ExecuteTemplate(w, "layout.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // TemplateFS returns the embedded template filesystem for external use.
@@ -66,6 +100,3 @@ func TemplateFS() fs.FS {
 	}
 	return subFS
 }
-
-// Ensure os import is used (for potential future directory checks)
-var _ = os.DirFS
