@@ -3,14 +3,14 @@
     <div class="flex justify-between items-center">
         <h1 class="text-3xl font-bold text-gray-900">Signals</h1>
         <div class="flex space-x-2">
-            <select id="filter-action" class="border rounded px-3 py-2"
-                    hx-get="/signals" hx-target="#signals-table" hx-include="[name='filter']">
+            <select id="filter-action" name="action" class="border rounded px-3 py-2"
+                    hx-get="/signals" hx-target="#signals-table" hx-include="#filter-action, #filter-strategy">
                 <option value="">All Actions</option>
                 <option value="buy">Buy</option>
                 <option value="sell">Sell</option>
             </select>
-            <select id="filter-strategy" class="border rounded px-3 py-2"
-                    hx-get="/signals" hx-target="#signals-table" hx-include="[name='filter']">
+            <select id="filter-strategy" name="strategy" class="border rounded px-3 py-2"
+                    hx-get="/signals" hx-target="#signals-table" hx-include="#filter-action, #filter-strategy">
                 <option value="">All Strategies</option>
                 <option value="ma_crossover">MA Crossover</option>
                 <option value="pe_band">PE Band</option>
