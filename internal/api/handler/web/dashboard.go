@@ -12,6 +12,7 @@ type DashboardData struct {
 	BuySignals     int
 	SellSignals    int
 	WatchlistCount int
+	RecentSignals  []SignalView
 }
 
 // Dashboard renders the dashboard page
@@ -22,6 +23,7 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		BuySignals:     0,
 		SellSignals:    0,
 		WatchlistCount: 0,
+		RecentSignals:  []SignalView{}, // Empty for now, will be populated when signal store is wired
 	}
 
 	h.render(w, "dashboard.html", data)
