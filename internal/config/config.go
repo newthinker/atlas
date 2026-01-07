@@ -95,6 +95,8 @@ type RouterConfig struct {
 type WatchlistItem struct {
 	Symbol     string   `mapstructure:"symbol"`
 	Name       string   `mapstructure:"name"`
+	Market     string   `mapstructure:"market"` // "A股", "H股", "美股", "数字货币"
+	Type       string   `mapstructure:"type"`   // "股票", "基金", "债券", "ETF", "期权", "期货", "加密货币"
 	Strategies []string `mapstructure:"strategies"`
 }
 

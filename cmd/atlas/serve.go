@@ -99,13 +99,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Set watchlist from config
-	if len(cfg.Watchlist) > 0 {
-		symbols := make([]string, len(cfg.Watchlist))
-		for i, item := range cfg.Watchlist {
-			symbols[i] = item.Symbol
-		}
-		application.SetWatchlist(symbols)
+	// Set watchlist from config with full details (name, market, type, strategies)
+	for _, item := range cfg.Watchlist {
+		application.AddToWatchlistWithDetails(item.Symbol, item.Name, item.Market, item.Type, item.Strategies)
 	}
 
 	// Create backtester with first available collector

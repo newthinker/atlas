@@ -8,6 +8,31 @@
         </button>
     </div>
 
+    <!-- Filters -->
+    <div class="flex items-center space-x-4 bg-white rounded-lg shadow px-4 py-3">
+        <span class="text-sm font-medium text-gray-700">筛选:</span>
+        <div class="flex items-center space-x-2">
+            <label class="text-sm text-gray-600">市场</label>
+            <select id="filter-market" onchange="applyFilters()" class="border rounded px-2 py-1 text-sm">
+                <option value="">全部</option>
+                {{range .Markets}}
+                <option value="{{.}}">{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+        <div class="flex items-center space-x-2">
+            <label class="text-sm text-gray-600">类型</label>
+            <select id="filter-type" onchange="applyFilters()" class="border rounded px-2 py-1 text-sm">
+                <option value="">全部</option>
+                {{range .Types}}
+                <option value="{{.}}">{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+        <button onclick="clearFilters()" class="text-sm text-indigo-600 hover:text-indigo-800">清除筛选</button>
+        <span id="filter-count" class="text-sm text-gray-500 ml-auto"></span>
+    </div>
+
     <div class="bg-white rounded-lg shadow overflow-hidden">
         <table class="min-w-full divide-y divide-gray-200">
             <thead class="bg-gray-50">
@@ -20,9 +45,11 @@
             </thead>
             <tbody id="watchlist-table" class="bg-white divide-y divide-gray-200">
                 {{range .Items}}
-                <tr>
+                <tr data-market="{{.Market}}" data-type="{{.Type}}">
                     <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{.Symbol}}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{.Name}}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {{.Name}}{{if or .Market .Type}} <span class="text-gray-400">({{.Market}} · {{.Type}})</span>{{end}}
+                    </td>
                     <td class="px-6 py-4 text-sm text-gray-500">
                         {{range .Strategies}}
                         <span class="inline-block bg-gray-100 rounded px-2 py-1 text-xs mr-1">{{.}}</span>
@@ -44,21 +71,63 @@
 </div>
 
 <!-- Add Modal -->
-<div id="add-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center">
-    <div class="bg-white rounded-lg p-6 w-96">
+<div id="add-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg p-6 w-96 max-h-[90vh] overflow-y-auto">
         <h3 class="text-lg font-semibold mb-4">Add to Watchlist</h3>
-        <form hx-post="/api/v1/watchlist" hx-target="#watchlist-table" hx-swap="beforeend">
+        <form id="add-form" hx-post="/api/v1/watchlist" hx-target="#watchlist-table" hx-swap="beforeend">
             <div class="space-y-4">
-                <div>
+                <!-- Symbol with autocomplete -->
+                <div class="relative">
                     <label class="block text-sm font-medium text-gray-700">Symbol</label>
-                    <input type="text" name="symbol" required class="mt-1 block w-full border rounded px-3 py-2">
+                    <input type="text" name="symbol" id="symbol-input" required autocomplete="off"
+                           placeholder="e.g. 600036 or AAPL"
+                           class="mt-1 block w-full border rounded px-3 py-2">
+                    <div id="symbol-dropdown" class="hidden absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                    </div>
                 </div>
+
+                <!-- Name -->
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Name</label>
-                    <input type="text" name="name" class="mt-1 block w-full border rounded px-3 py-2">
+                    <input type="text" name="name" id="name-input" placeholder="e.g. China Merchants Bank"
+                           class="mt-1 block w-full border rounded px-3 py-2">
                 </div>
+
+                <!-- Market dropdown -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Market</label>
+                    <select name="market" id="market-select" class="mt-1 block w-full border rounded px-3 py-2">
+                        {{range .Markets}}
+                        <option value="{{.}}">{{.}}</option>
+                        {{end}}
+                    </select>
+                </div>
+
+                <!-- Type dropdown -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Type</label>
+                    <select name="type" id="type-select" class="mt-1 block w-full border rounded px-3 py-2">
+                        {{range .Types}}
+                        <option value="{{.}}">{{.}}</option>
+                        {{end}}
+                    </select>
+                </div>
+
+                <!-- Strategies -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Strategies</label>
+                    <div class="space-y-2">
+                        {{range .Strategies}}
+                        <label class="flex items-center">
+                            <input type="checkbox" name="strategies" value="{{.}}" class="rounded border-gray-300 text-indigo-600 mr-2">
+                            <span class="text-sm text-gray-700">{{.}}</span>
+                        </label>
+                        {{end}}
+                    </div>
+                </div>
+
                 <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="document.getElementById('add-modal').classList.add('hidden')"
+                    <button type="button" onclick="closeAddModal()"
                             class="px-4 py-2 border rounded">Cancel</button>
                     <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded">Add</button>
                 </div>
@@ -66,4 +135,156 @@
         </form>
     </div>
 </div>
+
+<script>
+    // Symbol autocomplete
+    const symbolInput = document.getElementById('symbol-input');
+    const symbolDropdown = document.getElementById('symbol-dropdown');
+    const nameInput = document.getElementById('name-input');
+    const marketSelect = document.getElementById('market-select');
+    const typeSelect = document.getElementById('type-select');
+
+    let debounceTimer;
+
+    symbolInput.addEventListener('input', function() {
+        const query = this.value.trim();
+
+        clearTimeout(debounceTimer);
+
+        if (query.length < 2) {
+            symbolDropdown.classList.add('hidden');
+            return;
+        }
+
+        debounceTimer = setTimeout(async () => {
+            try {
+                const response = await fetch(`/api/v1/symbols/search?q=${encodeURIComponent(query)}`);
+                const data = await response.json();
+
+                // Handle wrapped response: {"data":{"results":[...]}}
+                const results = data.data?.results || data.results || [];
+                if (results.length > 0) {
+                    symbolDropdown.innerHTML = results.map(item => `
+                        <div class="px-4 py-2 hover:bg-gray-100 cursor-pointer"
+                             onclick="selectSymbol('${item.symbol}', '${item.name.replace(/'/g, "\\'")}', '${item.market}', '${item.type}')">
+                            <div class="font-medium">${item.symbol}</div>
+                            <div class="text-sm text-gray-500">${item.name} (${item.market} · ${item.type})</div>
+                        </div>
+                    `).join('');
+                    symbolDropdown.classList.remove('hidden');
+                } else {
+                    symbolDropdown.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error('Search error:', error);
+                symbolDropdown.classList.add('hidden');
+            }
+        }, 300);
+    });
+
+    function selectSymbol(symbol, name, market, type) {
+        symbolInput.value = symbol;
+        nameInput.value = name;
+
+        // Set market dropdown
+        for (let option of marketSelect.options) {
+            if (option.value === market) {
+                option.selected = true;
+                break;
+            }
+        }
+
+        // Set type dropdown
+        for (let option of typeSelect.options) {
+            if (option.value === type) {
+                option.selected = true;
+                break;
+            }
+        }
+
+        symbolDropdown.classList.add('hidden');
+    }
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!symbolInput.contains(e.target) && !symbolDropdown.contains(e.target)) {
+            symbolDropdown.classList.add('hidden');
+        }
+    });
+
+    // Close modal function
+    function closeAddModal() {
+        document.getElementById('add-modal').classList.add('hidden');
+        document.getElementById('add-form').reset();
+        symbolDropdown.classList.add('hidden');
+    }
+
+    // Close modal on HX-Trigger: closeModal
+    document.body.addEventListener('closeModal', function() {
+        closeAddModal();
+        // Remove "No items" row if it exists
+        var emptyRow = document.querySelector('#watchlist-table tr td[colspan]');
+        if (emptyRow) {
+            emptyRow.closest('tr').remove();
+        }
+        // Update filter count after adding new item
+        updateFilterCount();
+    });
+
+    // Filter functions
+    function applyFilters() {
+        const marketFilter = document.getElementById('filter-market').value;
+        const typeFilter = document.getElementById('filter-type').value;
+        const rows = document.querySelectorAll('#watchlist-table tr[data-market]');
+
+        let visibleCount = 0;
+        let totalCount = rows.length;
+
+        rows.forEach(row => {
+            const rowMarket = row.getAttribute('data-market');
+            const rowType = row.getAttribute('data-type');
+
+            const marketMatch = !marketFilter || rowMarket === marketFilter;
+            const typeMatch = !typeFilter || rowType === typeFilter;
+
+            if (marketMatch && typeMatch) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        updateFilterCount(visibleCount, totalCount);
+    }
+
+    function clearFilters() {
+        document.getElementById('filter-market').value = '';
+        document.getElementById('filter-type').value = '';
+        applyFilters();
+    }
+
+    function updateFilterCount(visible, total) {
+        const countEl = document.getElementById('filter-count');
+        if (visible !== undefined && total !== undefined) {
+            if (visible === total) {
+                countEl.textContent = `共 ${total} 项`;
+            } else {
+                countEl.textContent = `显示 ${visible} / ${total} 项`;
+            }
+        } else {
+            const rows = document.querySelectorAll('#watchlist-table tr[data-market]');
+            countEl.textContent = `共 ${rows.length} 项`;
+        }
+    }
+
+    // Initialize filter count on page load
+    updateFilterCount();
+
+    // Update filter count after HTMX requests (add/remove items)
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        // Re-apply filters to handle newly added/removed items and update count
+        applyFilters();
+    });
+</script>
 {{end}}
