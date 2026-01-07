@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,34 @@ import (
 	"go.uber.org/zap"
 )
 
+// Market constants
+const (
+	MarketAShare = "A股"
+	MarketHShare = "H股"
+	MarketUS     = "美股"
+	MarketCrypto = "数字货币"
+)
+
+// Type constants
+const (
+	TypeStock  = "股票"
+	TypeFund   = "基金"
+	TypeBond   = "债券"
+	TypeETF    = "ETF"
+	TypeOption = "期权"
+	TypeFuture = "期货"
+	TypeCrypto = "加密货币"
+)
+
+// WatchlistItem represents an item in the watchlist with associated metadata
+type WatchlistItem struct {
+	Symbol     string
+	Name       string
+	Market     string // "A股", "H股", "美股", "数字货币"
+	Type       string // "股票", "基金", "债券", "ETF", "期权", "期货", "加密货币"
+	Strategies []string
+}
+
 // App is the main application orchestrator
 type App struct {
 	cfg        *config.Config
@@ -24,9 +53,9 @@ type App struct {
 	notifiers  *notifier.Registry
 	router     *router.Router
 
-	watchlist    []string
-	watchlistSet map[string]struct{}
-	interval     time.Duration
+	watchlistItems []WatchlistItem
+	watchlistSet   map[string]struct{}
+	interval       time.Duration
 
 	mu      sync.RWMutex
 	running bool
@@ -51,15 +80,15 @@ func New(cfg *config.Config, logger *zap.Logger) *App {
 	r := router.New(routerCfg, notifiers, logger)
 
 	return &App{
-		cfg:          cfg,
-		logger:       logger,
-		collectors:   collectors,
-		strategies:   strategies,
-		notifiers:    notifiers,
-		router:       r,
-		watchlist:    []string{},
-		watchlistSet: make(map[string]struct{}),
-		interval:     5 * time.Minute,
+		cfg:            cfg,
+		logger:         logger,
+		collectors:     collectors,
+		strategies:     strategies,
+		notifiers:      notifiers,
+		router:         r,
+		watchlistItems: []WatchlistItem{},
+		watchlistSet:   make(map[string]struct{}),
+		interval:       5 * time.Minute,
 	}
 }
 
@@ -82,9 +111,10 @@ func (a *App) RegisterNotifier(n notifier.Notifier) error {
 func (a *App) SetWatchlist(symbols []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.watchlist = symbols
+	a.watchlistItems = make([]WatchlistItem, len(symbols))
 	a.watchlistSet = make(map[string]struct{}, len(symbols))
-	for _, s := range symbols {
+	for i, s := range symbols {
+		a.watchlistItems[i] = WatchlistItem{Symbol: s, Name: s}
 		a.watchlistSet[s] = struct{}{}
 	}
 }
@@ -110,7 +140,7 @@ func (a *App) Start(ctx context.Context) error {
 	a.mu.Unlock()
 
 	a.logger.Info("ATLAS starting",
-		zap.Strings("watchlist", a.watchlist),
+		zap.Int("watchlist_count", len(a.watchlistItems)),
 		zap.Duration("interval", a.interval),
 	)
 
@@ -147,23 +177,23 @@ func (a *App) Stop() {
 // runAnalysisCycle fetches data and runs strategies for all symbols
 func (a *App) runAnalysisCycle(ctx context.Context) {
 	a.mu.RLock()
-	symbols := make([]string, len(a.watchlist))
-	copy(symbols, a.watchlist)
+	items := make([]WatchlistItem, len(a.watchlistItems))
+	copy(items, a.watchlistItems)
 	a.mu.RUnlock()
 
-	if len(symbols) == 0 {
+	if len(items) == 0 {
 		a.logger.Debug("no symbols in watchlist")
 		return
 	}
 
-	a.logger.Debug("starting analysis cycle", zap.Int("symbols", len(symbols)))
+	a.logger.Debug("starting analysis cycle", zap.Int("symbols", len(items)))
 
-	for _, symbol := range symbols {
+	for _, item := range items {
 		if ctx.Err() != nil {
 			return
 		}
 
-		a.analyzeSymbol(ctx, symbol)
+		a.analyzeSymbol(ctx, item.Symbol)
 	}
 }
 
@@ -244,7 +274,7 @@ func (a *App) GetStats() map[string]any {
 
 	return map[string]any{
 		"running":     a.running,
-		"watchlist":   len(a.watchlist),
+		"watchlist":   len(a.watchlistItems),
 		"collectors":  len(a.collectors.GetAll()),
 		"strategies":  len(a.strategies.GetAll()),
 		"notifiers":   len(a.notifiers.GetAll()),
@@ -252,24 +282,82 @@ func (a *App) GetStats() map[string]any {
 	}
 }
 
-// GetWatchlist returns the current watchlist.
+// GetWatchlist returns the current watchlist symbols.
 func (a *App) GetWatchlist() []string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	result := make([]string, len(a.watchlist))
-	copy(result, a.watchlist)
+	result := make([]string, len(a.watchlistItems))
+	for i, item := range a.watchlistItems {
+		result[i] = item.Symbol
+	}
+	return result
+}
+
+// GetWatchlistItems returns the full watchlist items with metadata.
+func (a *App) GetWatchlistItems() []WatchlistItem {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	result := make([]WatchlistItem, len(a.watchlistItems))
+	copy(result, a.watchlistItems)
 	return result
 }
 
 // AddToWatchlist adds a symbol to the watchlist.
 func (a *App) AddToWatchlist(symbol string) {
+	a.AddToWatchlistWithDetails(symbol, symbol, "", "", nil)
+}
+
+// AddToWatchlistWithDetails adds a symbol to the watchlist with name and strategies.
+func (a *App) AddToWatchlistWithDetails(symbol, name, market, assetType string, strategies []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, exists := a.watchlistSet[symbol]; exists {
 		return
 	}
 	a.watchlistSet[symbol] = struct{}{}
-	a.watchlist = append(a.watchlist, symbol)
+	if name == "" {
+		name = symbol
+	}
+	// Auto-detect market and type if not provided
+	if market == "" {
+		market = DetectMarket(symbol)
+	}
+	if assetType == "" {
+		assetType = DetectType(symbol)
+	}
+	a.watchlistItems = append(a.watchlistItems, WatchlistItem{
+		Symbol:     symbol,
+		Name:       name,
+		Market:     market,
+		Type:       assetType,
+		Strategies: strategies,
+	})
+}
+
+// DetectMarket auto-detects the market based on symbol pattern
+func DetectMarket(symbol string) string {
+	upperSymbol := strings.ToUpper(symbol)
+	switch {
+	case strings.HasSuffix(upperSymbol, ".SH") || strings.HasSuffix(upperSymbol, ".SZ"):
+		return MarketAShare
+	case strings.HasSuffix(upperSymbol, ".HK"):
+		return MarketHShare
+	case strings.Contains(upperSymbol, "-USD") || strings.Contains(upperSymbol, "-USDT") ||
+		strings.HasPrefix(upperSymbol, "BTC") || strings.HasPrefix(upperSymbol, "ETH"):
+		return MarketCrypto
+	default:
+		return MarketUS
+	}
+}
+
+// DetectType auto-detects the asset type based on symbol pattern
+func DetectType(symbol string) string {
+	upperSymbol := strings.ToUpper(symbol)
+	if strings.Contains(upperSymbol, "-USD") || strings.Contains(upperSymbol, "-USDT") ||
+		strings.HasPrefix(upperSymbol, "BTC") || strings.HasPrefix(upperSymbol, "ETH") {
+		return TypeCrypto
+	}
+	return TypeStock
 }
 
 // RemoveFromWatchlist removes a symbol from the watchlist.
@@ -280,9 +368,9 @@ func (a *App) RemoveFromWatchlist(symbol string) bool {
 		return false
 	}
 	delete(a.watchlistSet, symbol)
-	for i, s := range a.watchlist {
-		if s == symbol {
-			a.watchlist = append(a.watchlist[:i], a.watchlist[i+1:]...)
+	for i, item := range a.watchlistItems {
+		if item.Symbol == symbol {
+			a.watchlistItems = append(a.watchlistItems[:i], a.watchlistItems[i+1:]...)
 			break
 		}
 	}

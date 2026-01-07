@@ -56,6 +56,18 @@ func (e *Engine) GetAll() []Strategy {
 	return result
 }
 
+// GetStrategyNames returns the names of all registered strategies
+func (e *Engine) GetStrategyNames() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	names := make([]string, 0, len(e.strategies))
+	for name := range e.strategies {
+		names = append(names, name)
+	}
+	return names
+}
+
 // Analyze runs all strategies on the given context
 func (e *Engine) Analyze(ctx context.Context, analysisCtx AnalysisContext) ([]core.Signal, error) {
 	e.mu.RLock()

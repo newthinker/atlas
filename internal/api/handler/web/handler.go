@@ -13,11 +13,33 @@ import (
 //go:embed templates/*
 var templateFS embed.FS
 
+// WatchlistItemData represents a watchlist item with metadata
+type WatchlistItemData struct {
+	Symbol     string
+	Name       string
+	Market     string
+	Type       string
+	Strategies []string
+}
+
+// WatchlistProvider provides watchlist data
+type WatchlistProvider interface {
+	GetWatchlist() []string
+	GetWatchlistItems() []WatchlistItemData
+}
+
+// StrategyProvider provides strategy information
+type StrategyProvider interface {
+	GetStrategyNames() []string
+}
+
 // Handler provides web UI handlers with template rendering
 type Handler struct {
 	// pageTemplates holds separate template instances for each page
 	// Each instance contains layout.html + the specific page template
-	pageTemplates map[string]*template.Template
+	pageTemplates     map[string]*template.Template
+	watchlistProvider WatchlistProvider
+	strategyProvider  StrategyProvider
 }
 
 // NewHandler creates a new web handler with templates loaded from the given directory.
@@ -89,6 +111,16 @@ func (h *Handler) render(w http.ResponseWriter, page string, data any) {
 	if err := tmpl.ExecuteTemplate(w, "layout.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// SetWatchlistProvider sets the watchlist data provider
+func (h *Handler) SetWatchlistProvider(p WatchlistProvider) {
+	h.watchlistProvider = p
+}
+
+// SetStrategyProvider sets the strategy data provider
+func (h *Handler) SetStrategyProvider(p StrategyProvider) {
+	h.strategyProvider = p
 }
 
 // TemplateFS returns the embedded template filesystem for external use.

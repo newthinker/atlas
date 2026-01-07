@@ -49,6 +49,30 @@ type Dependencies struct {
 	ExecutionManager *broker.ExecutionManager
 }
 
+// watchlistAdapter adapts app.App to the web handler's WatchlistProvider interface
+type watchlistAdapter struct {
+	app *app.App
+}
+
+func (a *watchlistAdapter) GetWatchlist() []string {
+	return a.app.GetWatchlist()
+}
+
+func (a *watchlistAdapter) GetWatchlistItems() []web.WatchlistItemData {
+	appItems := a.app.GetWatchlistItems()
+	result := make([]web.WatchlistItemData, len(appItems))
+	for i, item := range appItems {
+		result[i] = web.WatchlistItemData{
+			Symbol:     item.Symbol,
+			Name:       item.Name,
+			Market:     item.Market,
+			Type:       item.Type,
+			Strategies: item.Strategies,
+		}
+	}
+	return result
+}
+
 // NewServer creates a new HTTP server
 func NewServer(cfg Config, deps Dependencies, logger *zap.Logger) (*Server, error) {
 	mux := http.NewServeMux()
@@ -91,6 +115,7 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 	watchlistHandler := api.NewWatchlistHandler(deps.App)
 	backtestHandler := api.NewBacktestHandler(jobStore, deps.Backtester, deps.Strategies)
 	analysisHandler := api.NewAnalysisHandler(deps.App)
+	symbolsHandler := api.NewSymbolsHandler()
 
 	// Auth middleware for API routes
 	authMiddleware := middleware.APIKeyAuth(cfg.APIKey)
@@ -143,6 +168,7 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
+	s.mux.Handle("/api/v1/symbols/search", wrapHandler(http.HandlerFunc(symbolsHandler.Search)))
 	s.mux.Handle("/api/v1/backtest", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			backtestHandler.Create(w, r)
@@ -170,6 +196,14 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		webHandler, err := web.NewHandler(cfg.TemplatesDir)
 		if err != nil {
 			return fmt.Errorf("creating web handler: %w", err)
+		}
+
+		// Wire up data providers
+		if deps.App != nil {
+			webHandler.SetWatchlistProvider(&watchlistAdapter{app: deps.App})
+		}
+		if deps.Strategies != nil {
+			webHandler.SetStrategyProvider(deps.Strategies)
 		}
 
 		s.mux.HandleFunc("/", webHandler.Dashboard)
