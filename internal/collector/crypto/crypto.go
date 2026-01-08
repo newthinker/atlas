@@ -20,12 +20,13 @@ type CryptoCollector struct {
 }
 
 // New creates a new CryptoCollector with default providers
+// Provider order: OKX first (accessible in China), then CoinGecko, then Binance
 func New() *CryptoCollector {
 	return &CryptoCollector{
 		providers: []Provider{
-			binance.New(),
-			coingecko.New(""),
 			okx.New(),
+			coingecko.New(""),
+			binance.New(),
 		},
 		defaultQuote: "USDT",
 	}

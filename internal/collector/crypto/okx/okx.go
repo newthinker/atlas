@@ -107,7 +107,7 @@ func (o *OKX) FetchQuote(symbol string) (*core.Quote, error) {
 	open, _ := strconv.ParseFloat(data.Open24h, 64)
 	high, _ := strconv.ParseFloat(data.High24h, 64)
 	low, _ := strconv.ParseFloat(data.Low24h, 64)
-	volume, _ := strconv.ParseFloat(data.Vol24h, 64)
+	volume, _ := strconv.ParseFloat(data.VolCcy24h, 64) // Use quote currency volume (USDT)
 	bidPrice, _ := strconv.ParseFloat(data.BidPx, 64)
 	askPrice, _ := strconv.ParseFloat(data.AskPx, 64)
 	ts, _ := strconv.ParseInt(data.Ts, 10, 64)
@@ -225,15 +225,16 @@ type okxTickerResponse struct {
 }
 
 type okxTicker struct {
-	InstId  string `json:"instId"`
-	Last    string `json:"last"`
-	Open24h string `json:"open24h"`
-	High24h string `json:"high24h"`
-	Low24h  string `json:"low24h"`
-	Vol24h  string `json:"vol24h"`
-	BidPx   string `json:"bidPx"`
-	AskPx   string `json:"askPx"`
-	Ts      string `json:"ts"`
+	InstId    string `json:"instId"`
+	Last      string `json:"last"`
+	Open24h   string `json:"open24h"`
+	High24h   string `json:"high24h"`
+	Low24h    string `json:"low24h"`
+	Vol24h    string `json:"vol24h"`    // Volume in base currency (e.g., BTC)
+	VolCcy24h string `json:"volCcy24h"` // Volume in quote currency (e.g., USDT)
+	BidPx     string `json:"bidPx"`
+	AskPx     string `json:"askPx"`
+	Ts        string `json:"ts"`
 }
 
 type okxCandleResponse struct {
