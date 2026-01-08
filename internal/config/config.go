@@ -60,10 +60,11 @@ type S3Config struct {
 }
 
 type CollectorConfig struct {
-	Enabled  bool     `mapstructure:"enabled"`
-	Markets  []string `mapstructure:"markets"`
-	Interval string   `mapstructure:"interval"`
-	APIKey   string   `mapstructure:"api_key"`
+	Enabled  bool           `mapstructure:"enabled"`
+	Markets  []string       `mapstructure:"markets"`
+	Interval string         `mapstructure:"interval"`
+	APIKey   string         `mapstructure:"api_key"`
+	Extra    map[string]any `mapstructure:",remain"` // Flexible options for specific collectors
 }
 
 type StrategyConfig struct {

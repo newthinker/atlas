@@ -12,6 +12,10 @@ import (
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/backtest"
 	"github.com/newthinker/atlas/internal/broker"
+	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/crypto"
+	"github.com/newthinker/atlas/internal/collector/eastmoney"
+	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/logger"
@@ -76,6 +80,38 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if collectorCfg, ok := cfg.Collectors["yahoo"]; ok && collectorCfg.Enabled {
 		yahooCollector := yahoo.New()
 		application.RegisterCollector(yahooCollector)
+	}
+
+	// Create Lixinger collector if configured (used as fallback for Eastmoney)
+	var lixingerCollector *lixinger.Lixinger
+	if collectorCfg, ok := cfg.Collectors["lixinger"]; ok && collectorCfg.Enabled && collectorCfg.APIKey != "" {
+		lixingerCollector = lixinger.New(collectorCfg.APIKey)
+		log.Info("lixinger collector initialized as fallback for eastmoney")
+	}
+
+	// Register Eastmoney collector for A-shares
+	if collectorCfg, ok := cfg.Collectors["eastmoney"]; ok && collectorCfg.Enabled {
+		eastmoneyCollector := eastmoney.New()
+		// Set Lixinger as fallback if available
+		if lixingerCollector != nil {
+			eastmoneyCollector.SetLixingerFallback(lixingerCollector)
+			log.Info("lixinger fallback configured for eastmoney collector")
+		}
+		application.RegisterCollector(eastmoneyCollector)
+	}
+
+	// Register Crypto collector for digital assets
+	if collectorCfg, ok := cfg.Collectors["crypto"]; ok && collectorCfg.Enabled {
+		cryptoCollector := crypto.New()
+		// Configure from config if available
+		if collectorCfg.Extra != nil {
+			cryptoCollector.Init(collector.Config{
+				Enabled: true,
+				Extra:   collectorCfg.Extra,
+			})
+		}
+		application.RegisterCollector(cryptoCollector)
+		log.Info("crypto collector registered")
 	}
 
 	// Create strategy engine and register strategies
