@@ -104,14 +104,16 @@ func (h *WatchlistHandler) Add(w http.ResponseWriter, r *http.Request) {
 		}
 
 		fmt.Fprintf(w, `<tr data-market="%s" data-type="%s">
-			<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">%s</td>
+			<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+				<a href="/symbols/%s" class="text-indigo-600 hover:text-indigo-800 hover:underline">%s</a>
+			</td>
 			<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">%s</td>
 			<td class="px-6 py-4 text-sm text-gray-500">%s</td>
 			<td class="px-6 py-4 whitespace-nowrap text-sm">
 				<button hx-delete="/api/v1/watchlist/%s" hx-target="closest tr" hx-swap="outerHTML"
 						class="text-red-600 hover:text-red-800">Remove</button>
 			</td>
-		</tr>`, market, assetType, req.Symbol, nameDisplay, strategiesHTML, req.Symbol)
+		</tr>`, market, assetType, req.Symbol, req.Symbol, nameDisplay, strategiesHTML, req.Symbol)
 		return
 	}
 

@@ -15,6 +15,7 @@ import (
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/backtest"
 	"github.com/newthinker/atlas/internal/broker"
+	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/metrics"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
@@ -117,6 +118,17 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 	analysisHandler := api.NewAnalysisHandler(deps.App)
 	symbolsHandler := api.NewSymbolsHandler()
 
+	// Create symbol detail handler with collectors
+	var symbolDetailHandler *api.SymbolDetailHandler
+	if deps.App != nil {
+		collectors := deps.App.GetCollectors()
+		collectorMap := make(map[string]collector.Collector)
+		for _, c := range collectors {
+			collectorMap[c.Name()] = c
+		}
+		symbolDetailHandler = api.NewSymbolDetailHandler(collectorMap)
+	}
+
 	// Auth middleware for API routes
 	authMiddleware := middleware.APIKeyAuth(cfg.APIKey)
 
@@ -169,6 +181,32 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		}
 	})))
 	s.mux.Handle("/api/v1/symbols/search", wrapHandler(http.HandlerFunc(symbolsHandler.Search)))
+
+	// Symbol detail API routes
+	if symbolDetailHandler != nil {
+		s.mux.Handle("/api/v1/symbols/", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.TrimPrefix(r.URL.Path, "/api/v1/symbols/")
+			parts := strings.Split(path, "/")
+			if len(parts) < 2 {
+				http.Error(w, "Invalid path", http.StatusBadRequest)
+				return
+			}
+			symbol := parts[0]
+			action := parts[1]
+
+			switch action {
+			case "quote":
+				symbolDetailHandler.GetQuote(w, r, symbol)
+			case "history":
+				symbolDetailHandler.GetHistory(w, r, symbol)
+			case "indicators":
+				symbolDetailHandler.GetIndicators(w, r, symbol)
+			default:
+				http.Error(w, "Not found", http.StatusNotFound)
+			}
+		})))
+	}
+
 	s.mux.Handle("/api/v1/backtest", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			backtestHandler.Create(w, r)
@@ -211,6 +249,16 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		s.mux.HandleFunc("/watchlist", webHandler.Watchlist)
 		s.mux.HandleFunc("/backtest", webHandler.Backtest)
 		s.mux.HandleFunc("/settings", webHandler.Settings)
+
+		// Symbol detail page
+		s.mux.HandleFunc("/symbols/", func(w http.ResponseWriter, r *http.Request) {
+			symbol := strings.TrimPrefix(r.URL.Path, "/symbols/")
+			if symbol == "" {
+				http.Redirect(w, r, "/watchlist", http.StatusFound)
+				return
+			}
+			webHandler.SymbolDetail(w, r, symbol)
+		})
 	}
 
 	return nil

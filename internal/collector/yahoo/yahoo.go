@@ -87,7 +87,16 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 	yahooSymbol := y.toYahooSymbol(symbol)
 	url := fmt.Sprintf("%s/%s?interval=1d&range=1d", baseURL, yahooSymbol)
 
-	resp, err := y.client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	// Add browser-like headers to avoid rate limiting
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := y.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching quote: %w", err)
 	}
@@ -113,13 +122,22 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 	r := result.Chart.Result[0]
 	meta := r.Meta
 
+	// Calculate change from previous close
+	change := meta.RegularMarketPrice - meta.ChartPreviousClose
+
 	return &core.Quote{
-		Symbol: symbol,
-		Market: y.detectMarket(symbol),
-		Price:  meta.RegularMarketPrice,
-		Volume: int64(meta.RegularMarketVolume),
-		Time:   time.Unix(int64(meta.RegularMarketTime), 0),
-		Source: "yahoo",
+		Symbol:        symbol,
+		Market:        y.detectMarket(symbol),
+		Price:         meta.RegularMarketPrice,
+		Open:          meta.RegularMarketOpen,
+		High:          meta.RegularMarketDayHigh,
+		Low:           meta.RegularMarketDayLow,
+		PrevClose:     meta.ChartPreviousClose,
+		Change:        change,
+		ChangePercent: meta.RegularMarketChangePercent,
+		Volume:        int64(meta.RegularMarketVolume),
+		Time:          time.Unix(int64(meta.RegularMarketTime), 0),
+		Source:        "yahoo",
 	}, nil
 }
 
@@ -134,7 +152,16 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 	url := fmt.Sprintf("%s/%s?interval=%s&period1=%d&period2=%d",
 		baseURL, yahooSymbol, yahooInterval, start.Unix(), end.Unix())
 
-	resp, err := y.client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	// Add browser-like headers to avoid rate limiting
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := y.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching history: %w", err)
 	}
@@ -224,10 +251,15 @@ type chartResult struct {
 }
 
 type chartMeta struct {
-	Symbol              string  `json:"symbol"`
-	RegularMarketPrice  float64 `json:"regularMarketPrice"`
-	RegularMarketVolume int     `json:"regularMarketVolume"`
-	RegularMarketTime   int     `json:"regularMarketTime"`
+	Symbol                     string  `json:"symbol"`
+	RegularMarketPrice         float64 `json:"regularMarketPrice"`
+	RegularMarketVolume        int     `json:"regularMarketVolume"`
+	RegularMarketTime          int     `json:"regularMarketTime"`
+	RegularMarketOpen          float64 `json:"regularMarketOpen"`
+	RegularMarketDayHigh       float64 `json:"regularMarketDayHigh"`
+	RegularMarketDayLow        float64 `json:"regularMarketDayLow"`
+	ChartPreviousClose         float64 `json:"chartPreviousClose"`
+	RegularMarketChangePercent float64 `json:"regularMarketChangePercent"`
 }
 
 type indicators struct {

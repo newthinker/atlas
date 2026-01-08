@@ -1,0 +1,795 @@
+{{define "content"}}
+<div class="space-y-4">
+    <!-- Header with back button and symbol info -->
+    <div class="flex items-center space-x-4">
+        <a href="/watchlist" class="text-indigo-600 hover:text-indigo-800">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+            </svg>
+        </a>
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">{{.Symbol}}</h1>
+            <p class="text-sm text-gray-500">{{.Name}}{{if or .Market .Type}} ({{.Market}} · {{.Type}}){{end}}</p>
+        </div>
+        <button onclick="refreshData()" class="ml-auto bg-indigo-600 text-white px-3 py-1 rounded hover:bg-indigo-700 text-sm">
+            Refresh
+        </button>
+    </div>
+
+    <!-- Quote Card -->
+    <div class="bg-white rounded-lg shadow p-4">
+        <div id="quote-loading" class="text-center text-gray-500">Loading quote...</div>
+        <div id="quote-data" class="hidden">
+            <div class="flex items-baseline space-x-4">
+                <span id="quote-price-label" class="text-sm text-gray-500 mr-1"></span>
+                <span id="quote-price" class="text-3xl font-bold"></span>
+                <span id="quote-change" class="text-lg"></span>
+            </div>
+            <!-- Stock/ETF view: Open, High, Low, Volume -->
+            <div id="quote-stock-details" class="grid grid-cols-4 gap-4 mt-4 text-sm">
+                <div>
+                    <span class="text-gray-500">Open</span>
+                    <span id="quote-open" class="block font-medium"></span>
+                </div>
+                <div>
+                    <span class="text-gray-500">High</span>
+                    <span id="quote-high" class="block font-medium"></span>
+                </div>
+                <div>
+                    <span class="text-gray-500">Low</span>
+                    <span id="quote-low" class="block font-medium"></span>
+                </div>
+                <div>
+                    <span class="text-gray-500">Volume</span>
+                    <span id="quote-volume" class="block font-medium"></span>
+                </div>
+            </div>
+            <!-- Fund view: Fund-specific details -->
+            <div id="quote-fund-details" class="hidden mt-4 text-sm">
+                <div class="grid grid-cols-3 gap-4">
+                    <div>
+                        <span class="text-gray-500">最新净值</span>
+                        <span id="quote-latest-nav" class="block font-medium"></span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">成立以来年化</span>
+                        <span id="quote-annualized-return" class="block font-medium"></span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">最大回撤</span>
+                        <span id="quote-max-drawdown" class="block font-medium"></span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">基金规模</span>
+                        <span id="quote-fund-size" class="block font-medium"></span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">成立时长</span>
+                        <span id="quote-fund-age" class="block font-medium"></span>
+                    </div>
+                    <div>
+                        <span class="text-gray-500">基金经理</span>
+                        <span id="quote-fund-manager" class="block font-medium"></span>
+                    </div>
+                </div>
+                <div class="mt-2 text-xs text-gray-400">
+                    <span id="quote-fund-company"></span>
+                    <span class="mx-2">·</span>
+                    <span id="quote-fund-type"></span>
+                </div>
+            </div>
+        </div>
+        <div id="quote-error" class="hidden text-center text-red-500"></div>
+    </div>
+
+    <!-- Controls -->
+    <div class="bg-white rounded-lg shadow p-4">
+        <div class="flex flex-wrap items-center gap-4">
+            <!-- Time Range -->
+            <div class="flex items-center space-x-2">
+                <span class="text-sm font-medium text-gray-700">Range:</span>
+                <div class="flex space-x-1">
+                    <button onclick="setRange('1M')" data-range="1M" class="range-btn px-3 py-1 text-sm rounded border">1M</button>
+                    <button onclick="setRange('3M')" data-range="3M" class="range-btn px-3 py-1 text-sm rounded border bg-indigo-600 text-white">3M</button>
+                    <button onclick="setRange('6M')" data-range="6M" class="range-btn px-3 py-1 text-sm rounded border">6M</button>
+                    <button onclick="setRange('1Y')" data-range="1Y" class="range-btn px-3 py-1 text-sm rounded border">1Y</button>
+                </div>
+            </div>
+
+            <!-- Strategy Toggles -->
+            <div class="flex items-center space-x-4 ml-auto">
+                <span class="text-sm font-medium text-gray-700">Indicators:</span>
+                <label class="flex items-center space-x-1 cursor-pointer">
+                    <input type="checkbox" id="toggle-ma" class="rounded text-indigo-600" checked>
+                    <span class="text-sm">MA Crossover</span>
+                </label>
+                <label class="flex items-center space-x-1 cursor-pointer">
+                    <input type="checkbox" id="toggle-pe" class="rounded text-indigo-600">
+                    <span class="text-sm">PE Band</span>
+                </label>
+                <label class="flex items-center space-x-1 cursor-pointer">
+                    <input type="checkbox" id="toggle-div" class="rounded text-indigo-600">
+                    <span class="text-sm">Dividend Yield</span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="bg-white rounded-lg shadow p-4">
+        <div id="chart-container" style="height: 500px; position: relative;">
+            <div id="chart-loading" class="absolute inset-0 flex items-center justify-center text-gray-500">
+                Loading chart...
+            </div>
+            <div id="chart" style="height: 100%;"></div>
+            <!-- Floating Tooltip - Stock/ETF view -->
+            <div id="chart-tooltip-stock" class="absolute pointer-events-none bg-gray-900 text-white text-xs rounded-lg shadow-lg p-3 z-50" style="min-width: 160px; display: none;">
+                <div id="tooltip-date" class="font-semibold mb-2 pb-1 border-b border-gray-700"></div>
+                <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                    <span class="text-gray-400">Open</span>
+                    <span id="tooltip-open" class="text-right"></span>
+                    <span class="text-gray-400">High</span>
+                    <span id="tooltip-high" class="text-right text-green-400"></span>
+                    <span class="text-gray-400">Low</span>
+                    <span id="tooltip-low" class="text-right text-red-400"></span>
+                    <span class="text-gray-400">Close</span>
+                    <span id="tooltip-close" class="text-right font-semibold"></span>
+                    <span class="text-gray-400">Volume</span>
+                    <span id="tooltip-volume" class="text-right"></span>
+                    <span class="text-gray-400">Change</span>
+                    <span id="tooltip-change" class="text-right"></span>
+                </div>
+            </div>
+            <!-- Floating Tooltip - Fund view -->
+            <div id="chart-tooltip-fund" class="absolute pointer-events-none bg-gray-900 text-white text-xs rounded-lg shadow-lg p-3 z-50" style="min-width: 140px; display: none;">
+                <div id="tooltip-fund-date" class="font-semibold mb-2 pb-1 border-b border-gray-700"></div>
+                <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                    <span class="text-gray-400">净值 NAV</span>
+                    <span id="tooltip-fund-nav" class="text-right font-semibold"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Signals Table -->
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+        <div class="px-4 py-3 border-b">
+            <h3 class="text-lg font-medium text-gray-900">Recent Signals</h3>
+        </div>
+        <div id="signals-loading" class="p-4 text-center text-gray-500">Loading signals...</div>
+        <table id="signals-table" class="hidden min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Signal</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                </tr>
+            </thead>
+            <tbody id="signals-body" class="bg-white divide-y divide-gray-200">
+            </tbody>
+        </table>
+        <div id="signals-empty" class="hidden p-4 text-center text-gray-500">No signals in selected period</div>
+    </div>
+</div>
+
+<!-- Lightweight Charts -->
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+
+<script>
+    const symbol = '{{.Symbol}}';
+    let currentRange = '3M';
+    let chart = null;
+    let mainSeries = null; // Could be candlestick or line series depending on asset type
+    let fastMASeries = null;
+    let slowMASeries = null;
+    let peBandUpperSeries = null;
+    let peBandLowerSeries = null;
+    let divYieldSeries = null;
+    let markers = [];
+    let ohlcvData = {}; // Store OHLCV data keyed by date for tooltip lookup
+    let isFundSymbol = false; // Whether current symbol is an open-end fund
+
+    // Detect if symbol is an ETF (traded on exchange with OHLCV)
+    function isETF(sym) {
+        const code = sym.split('.')[0];
+        if (code.length !== 6) return false;
+        // Shenzhen ETFs: 159xxx
+        if (code.startsWith('159')) return true;
+        // Shanghai ETFs: 510xxx, 511xxx, 512xxx, 513xxx, 515xxx, 516xxx, 518xxx
+        const prefix = code.substring(0, 3);
+        return ['510', '511', '512', '513', '515', '516', '518'].includes(prefix);
+    }
+
+    // Detect if symbol is an open-end fund (only has NAV data, no OHLCV)
+    function isFund(sym) {
+        const code = sym.split('.')[0];
+        if (code.length !== 6) return false;
+        // ETFs are NOT open-end funds
+        if (isETF(sym)) return false;
+        // Open-end fund codes typically start with 0, 1, 2, 3, 5
+        const first = code[0];
+        return ['0', '1', '2', '3', '5'].includes(first);
+    }
+
+    // Smart price formatting - use more decimals for low-priced assets (funds)
+    function formatPrice(price) {
+        if (price === 0 || price === null || price === undefined) return '--';
+        // Use 4 decimals for prices under 10 (typical for funds)
+        if (price < 10) {
+            return price.toFixed(4);
+        }
+        return price.toFixed(2);
+    }
+
+    // Smart change formatting
+    function formatChange(change, price) {
+        if (price === 0 || price === null || price === undefined) return '--';
+        if (price < 10) {
+            return (change >= 0 ? '+' : '') + change.toFixed(4);
+        }
+        return (change >= 0 ? '+' : '') + change.toFixed(2);
+    }
+
+    // Initialize chart
+    function initChart() {
+        // Detect if this is a fund
+        isFundSymbol = isFund(symbol);
+
+        const container = document.getElementById('chart');
+        chart = LightweightCharts.createChart(container, {
+            layout: {
+                background: { type: 'solid', color: 'white' },
+                textColor: '#333',
+            },
+            grid: {
+                vertLines: { color: '#f0f0f0' },
+                horzLines: { color: '#f0f0f0' },
+            },
+            crosshair: {
+                mode: LightweightCharts.CrosshairMode.Normal,
+            },
+            rightPriceScale: {
+                borderColor: '#ddd',
+            },
+            timeScale: {
+                borderColor: '#ddd',
+                timeVisible: true,
+            },
+        });
+
+        // For funds, use line chart (NAV only); for stocks/ETFs, use candlestick
+        if (isFundSymbol) {
+            mainSeries = chart.addLineSeries({
+                color: '#2196F3',
+                lineWidth: 2,
+                title: 'NAV',
+                crosshairMarkerVisible: true,
+                crosshairMarkerRadius: 4,
+            });
+        } else {
+            mainSeries = chart.addCandlestickSeries({
+                upColor: '#26a69a',
+                downColor: '#ef5350',
+                borderVisible: false,
+                wickUpColor: '#26a69a',
+                wickDownColor: '#ef5350',
+            });
+        }
+
+        // Fast MA (10-day) - Blue
+        fastMASeries = chart.addLineSeries({
+            color: '#2196F3',
+            lineWidth: 1,
+            title: 'MA10',
+        });
+
+        // Slow MA (20-day) - Orange
+        slowMASeries = chart.addLineSeries({
+            color: '#FF9800',
+            lineWidth: 1,
+            title: 'MA20',
+        });
+
+        // PE Band Upper - Dashed red
+        peBandUpperSeries = chart.addLineSeries({
+            color: '#f44336',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            title: 'PE Upper',
+        });
+
+        // PE Band Lower - Dashed green
+        peBandLowerSeries = chart.addLineSeries({
+            color: '#4caf50',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            title: 'PE Lower',
+        });
+
+        // Dividend Yield line - Purple
+        divYieldSeries = chart.addLineSeries({
+            color: '#9c27b0',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            title: 'Div Yield 3%',
+        });
+
+        // Initial visibility
+        updateIndicatorVisibility();
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            chart.applyOptions({ width: container.clientWidth });
+        });
+
+        // Setup tooltip on crosshair move
+        const tooltipStock = document.getElementById('chart-tooltip-stock');
+        const tooltipFund = document.getElementById('chart-tooltip-fund');
+        const chartContainer = document.getElementById('chart-container');
+
+        chart.subscribeCrosshairMove((param) => {
+            // Hide both tooltips if mouse leaves chart or no time
+            if (
+                param.point === undefined ||
+                !param.time ||
+                param.point.x < 0 ||
+                param.point.y < 0
+            ) {
+                tooltipStock.style.display = 'none';
+                tooltipFund.style.display = 'none';
+                return;
+            }
+
+            // Format date string from param.time
+            let dateStr = '';
+            if (typeof param.time === 'string') {
+                dateStr = param.time;
+            } else if (typeof param.time === 'object' && param.time.year) {
+                // Business day format: { year, month, day }
+                const t = param.time;
+                dateStr = `${t.year}-${String(t.month).padStart(2, '0')}-${String(t.day).padStart(2, '0')}`;
+            } else if (typeof param.time === 'number') {
+                // Unix timestamp
+                const d = new Date(param.time * 1000);
+                dateStr = d.toISOString().split('T')[0];
+            }
+
+            // Get data from stored ohlcvData
+            const data = ohlcvData[dateStr];
+            if (!data) {
+                tooltipStock.style.display = 'none';
+                tooltipFund.style.display = 'none';
+                return;
+            }
+
+            // Use different tooltip for funds vs stocks
+            const tooltip = isFundSymbol ? tooltipFund : tooltipStock;
+            const otherTooltip = isFundSymbol ? tooltipStock : tooltipFund;
+            otherTooltip.style.display = 'none';
+
+            if (isFundSymbol) {
+                // Fund tooltip: just show NAV
+                document.getElementById('tooltip-fund-date').textContent = dateStr;
+                document.getElementById('tooltip-fund-nav').textContent = formatPrice(data.close);
+            } else {
+                // Stock tooltip: show OHLCV
+                document.getElementById('tooltip-date').textContent = dateStr;
+                document.getElementById('tooltip-open').textContent = formatPrice(data.open);
+                document.getElementById('tooltip-high').textContent = formatPrice(data.high);
+                document.getElementById('tooltip-low').textContent = formatPrice(data.low);
+                document.getElementById('tooltip-close').textContent = formatPrice(data.close);
+                document.getElementById('tooltip-volume').textContent = formatVolume(data.volume);
+
+                // Calculate and display change
+                const change = data.close - data.open;
+                const changePercent = data.open > 0 ? ((change / data.open) * 100) : 0;
+                const changeEl = document.getElementById('tooltip-change');
+                changeEl.textContent = `${change >= 0 ? '+' : ''}${changePercent.toFixed(2)}%`;
+                changeEl.className = `text-right ${change >= 0 ? 'text-green-400' : 'text-red-400'}`;
+
+                // Also update close color based on change
+                const closeEl = document.getElementById('tooltip-close');
+                closeEl.className = `text-right font-semibold ${change >= 0 ? 'text-green-400' : 'text-red-400'}`;
+            }
+
+            // Position tooltip
+            const tooltipWidth = isFundSymbol ? 150 : 170;
+            const tooltipHeight = isFundSymbol ? 80 : 180;
+
+            let left = param.point.x + 20;
+            let top = param.point.y - 20;
+
+            // Prevent overflow right
+            if (left + tooltipWidth > chartContainer.clientWidth) {
+                left = param.point.x - tooltipWidth - 20;
+            }
+
+            // Prevent overflow bottom
+            if (top + tooltipHeight > chartContainer.clientHeight) {
+                top = chartContainer.clientHeight - tooltipHeight - 10;
+            }
+
+            // Prevent overflow top
+            if (top < 10) {
+                top = 10;
+            }
+
+            tooltip.style.left = left + 'px';
+            tooltip.style.top = top + 'px';
+            tooltip.style.display = 'block';
+        });
+    }
+
+    // Fetch quote data
+    async function fetchQuote() {
+        try {
+            const response = await fetch(`/api/v1/symbols/${symbol}/quote`);
+            const data = await response.json();
+
+            document.getElementById('quote-loading').classList.add('hidden');
+
+            if (data.error) {
+                document.getElementById('quote-error').textContent = `Error: ${data.error.message || 'Failed to load quote'}`;
+                document.getElementById('quote-error').classList.remove('hidden');
+                return;
+            }
+
+            // Handle wrapped response: {"data":{"quote":{...}}}
+            const quote = data.data?.quote || data.quote;
+            if (quote) {
+                const q = quote;
+                // API returns capitalized field names (Price, Volume, etc.)
+                const price = q.Price || q.price || 0;
+
+                // Show appropriate label and layout based on asset type
+                const isFundAsset = isFund(symbol);
+                document.getElementById('quote-price-label').textContent = isFundAsset ? '估算净值:' : '';
+                document.getElementById('quote-price').textContent = formatPrice(price);
+
+                const changeEl = document.getElementById('quote-change');
+                const change = q.Change || q.change || 0;
+                const changePercent = q.ChangePercent || q.change_percent || 0;
+                const changeStr = formatChange(change, price);
+                changeEl.textContent = `${changeStr} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`;
+                changeEl.className = change >= 0 ? 'text-lg text-green-600' : 'text-lg text-red-600';
+
+                // Show different detail sections for funds vs stocks
+                if (isFundAsset) {
+                    // Show fund view with detailed fund info
+                    document.getElementById('quote-stock-details').classList.add('hidden');
+                    document.getElementById('quote-fund-details').classList.remove('hidden');
+
+                    // Fund info from API
+                    const fundInfo = q.FundInfo || q.fund_info;
+                    if (fundInfo) {
+                        // Latest NAV
+                        const latestNav = fundInfo.LatestNAV || fundInfo.latest_nav;
+                        document.getElementById('quote-latest-nav').textContent = latestNav ? formatPrice(latestNav) : '--';
+
+                        // Annualized return
+                        const annualizedReturn = fundInfo.AnnualizedReturn || fundInfo.annualized_return;
+                        const annualizedEl = document.getElementById('quote-annualized-return');
+                        if (annualizedReturn !== undefined && annualizedReturn !== null) {
+                            annualizedEl.textContent = `${annualizedReturn >= 0 ? '+' : ''}${annualizedReturn.toFixed(2)}%`;
+                            annualizedEl.className = `block font-medium ${annualizedReturn >= 0 ? 'text-green-600' : 'text-red-600'}`;
+                        } else {
+                            annualizedEl.textContent = '--';
+                        }
+
+                        // Max drawdown (stored as negative percentage)
+                        const maxDrawdown = fundInfo.MaxDrawdown || fundInfo.max_drawdown;
+                        const drawdownEl = document.getElementById('quote-max-drawdown');
+                        if (maxDrawdown !== undefined && maxDrawdown !== null && maxDrawdown !== 0) {
+                            drawdownEl.textContent = `${maxDrawdown.toFixed(2)}%`;
+                            drawdownEl.className = 'block font-medium text-red-600';
+                        } else {
+                            drawdownEl.textContent = '--';
+                        }
+
+                        // Fund size
+                        const fundSize = fundInfo.FundSize || fundInfo.fund_size;
+                        document.getElementById('quote-fund-size').textContent = fundSize ? `${fundSize.toFixed(2)}亿` : '--';
+
+                        // Fund age (calculate from inception date)
+                        const inceptionDate = fundInfo.InceptionDate || fundInfo.inception_date;
+                        if (inceptionDate) {
+                            const inception = new Date(inceptionDate);
+                            const now = new Date();
+                            const years = (now - inception) / (365.25 * 24 * 60 * 60 * 1000);
+                            if (years >= 1) {
+                                document.getElementById('quote-fund-age').textContent = `${years.toFixed(1)}年`;
+                            } else {
+                                const months = Math.floor(years * 12);
+                                document.getElementById('quote-fund-age').textContent = `${months}个月`;
+                            }
+                        } else {
+                            document.getElementById('quote-fund-age').textContent = '--';
+                        }
+
+                        // Fund manager
+                        const manager = fundInfo.Manager || fundInfo.manager;
+                        document.getElementById('quote-fund-manager').textContent = manager || '--';
+
+                        // Fund company and type
+                        const company = fundInfo.ManagementCompany || fundInfo.management_company;
+                        document.getElementById('quote-fund-company').textContent = company || '';
+                        const fundType = fundInfo.FundType || fundInfo.fund_type;
+                        document.getElementById('quote-fund-type').textContent = fundType || '';
+                    } else {
+                        // No fund info available, show placeholders
+                        document.getElementById('quote-latest-nav').textContent = formatPrice(price);
+                        document.getElementById('quote-annualized-return').textContent = '--';
+                        document.getElementById('quote-max-drawdown').textContent = '--';
+                        document.getElementById('quote-fund-size').textContent = '--';
+                        document.getElementById('quote-fund-age').textContent = '--';
+                        document.getElementById('quote-fund-manager').textContent = '--';
+                        document.getElementById('quote-fund-company').textContent = '';
+                        document.getElementById('quote-fund-type').textContent = '';
+                    }
+                } else {
+                    // Show stock view: Open, High, Low, Volume
+                    document.getElementById('quote-stock-details').classList.remove('hidden');
+                    document.getElementById('quote-fund-details').classList.add('hidden');
+
+                    const open = q.Open || q.open;
+                    const high = q.High || q.high;
+                    const low = q.Low || q.low;
+                    document.getElementById('quote-open').textContent = open ? formatPrice(open) : '--';
+                    document.getElementById('quote-high').textContent = high ? formatPrice(high) : '--';
+                    document.getElementById('quote-low').textContent = low ? formatPrice(low) : '--';
+                    document.getElementById('quote-volume').textContent = formatVolume(q.Volume || q.volume);
+                }
+
+                document.getElementById('quote-data').classList.remove('hidden');
+            } else {
+                document.getElementById('quote-error').textContent = 'No quote data available';
+                document.getElementById('quote-error').classList.remove('hidden');
+            }
+        } catch (error) {
+            console.error('Quote fetch error:', error);
+            document.getElementById('quote-loading').classList.add('hidden');
+            document.getElementById('quote-error').textContent = 'Failed to load quote: ' + error.message;
+            document.getElementById('quote-error').classList.remove('hidden');
+        }
+    }
+
+    // Fetch history data
+    async function fetchHistory() {
+        try {
+            const response = await fetch(`/api/v1/symbols/${symbol}/history?range=${currentRange}&interval=1d`);
+            const data = await response.json();
+
+            document.getElementById('chart-loading').classList.add('hidden');
+
+            if (data.error) {
+                document.getElementById('chart-loading').classList.remove('hidden');
+                document.getElementById('chart-loading').textContent = `Error: ${data.error.message || 'Failed to load chart data'}`;
+                return;
+            }
+
+            // Handle wrapped response: {"data":{"data":[...]}}
+            const historyData = data.data?.data || data.data || [];
+            if (historyData && historyData.length > 0) {
+                // Clear previous data
+                ohlcvData = {};
+
+                const candleData = historyData.map(bar => {
+                    const time = (bar.Time || bar.time).split('T')[0];
+                    const open = bar.Open || bar.open;
+                    const high = bar.High || bar.high;
+                    const low = bar.Low || bar.low;
+                    const close = bar.Close || bar.close;
+                    const volume = bar.Volume || bar.volume || 0;
+
+                    // Store for tooltip lookup
+                    ohlcvData[time] = { open, high, low, close, volume };
+
+                    return { time, open, high, low, close };
+                });
+
+                // For funds, use line chart data; for stocks, use candlestick data
+                if (isFundSymbol) {
+                    const lineData = candleData.map(d => ({
+                        time: d.time,
+                        value: d.close // Use close (NAV) for line chart
+                    }));
+                    mainSeries.setData(lineData);
+                } else {
+                    mainSeries.setData(candleData);
+                }
+                chart.timeScale().fitContent();
+            } else {
+                document.getElementById('chart-loading').classList.remove('hidden');
+                document.getElementById('chart-loading').textContent = 'No history data available';
+            }
+        } catch (error) {
+            console.error('History fetch error:', error);
+            document.getElementById('chart-loading').classList.remove('hidden');
+            document.getElementById('chart-loading').textContent = 'Failed to load chart data: ' + error.message;
+        }
+    }
+
+    // Fetch indicators
+    async function fetchIndicators() {
+        const strategies = [];
+        if (document.getElementById('toggle-ma').checked) strategies.push('ma_crossover');
+        if (document.getElementById('toggle-pe').checked) strategies.push('pe_band');
+        if (document.getElementById('toggle-div').checked) strategies.push('dividend_yield');
+
+        if (strategies.length === 0) {
+            clearIndicators();
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/v1/symbols/${symbol}/indicators?strategies=${strategies.join(',')}&range=${currentRange}`);
+            const data = await response.json();
+
+            if (data.error) {
+                console.error('Indicators API error:', data.error);
+                updateSignalsTable([]);
+                return;
+            }
+
+            // Handle wrapped response: {"data":{"indicators":{...}}}
+            const indicators = data.data?.indicators || data.indicators;
+            if (indicators) {
+                // MA Crossover
+                if (indicators.ma_crossover) {
+                    const ma = indicators.ma_crossover;
+
+                    if (ma.fast_ma) {
+                        fastMASeries.setData(ma.fast_ma.map(d => ({ time: d.time, value: d.value })));
+                    }
+                    if (ma.slow_ma) {
+                        slowMASeries.setData(ma.slow_ma.map(d => ({ time: d.time, value: d.value })));
+                    }
+
+                    // Set markers for signals
+                    if (ma.signals && ma.signals.length > 0) {
+                        markers = ma.signals.map(s => ({
+                            time: s.time,
+                            position: s.action === 'buy' ? 'belowBar' : 'aboveBar',
+                            color: s.action === 'buy' ? '#26a69a' : '#ef5350',
+                            shape: s.action === 'buy' ? 'arrowUp' : 'arrowDown',
+                            text: s.action.toUpperCase(),
+                        }));
+                        mainSeries.setMarkers(markers);
+
+                        // Update signals table
+                        updateSignalsTable(ma.signals);
+                    } else {
+                        mainSeries.setMarkers([]);
+                        updateSignalsTable([]);
+                    }
+                }
+
+                // PE Band
+                if (indicators.pe_band) {
+                    const pe = indicators.pe_band;
+                    // Create horizontal lines using a simple approach
+                    // For now, we'll just hide these since PE bands need special handling
+                }
+
+                // Dividend Yield
+                if (indicators.dividend_yield) {
+                    // Similar to PE band, needs special handling for horizontal lines
+                }
+            }
+        } catch (error) {
+            console.error('Indicators fetch error:', error);
+        }
+    }
+
+    function clearIndicators() {
+        fastMASeries.setData([]);
+        slowMASeries.setData([]);
+        peBandUpperSeries.setData([]);
+        peBandLowerSeries.setData([]);
+        divYieldSeries.setData([]);
+        mainSeries.setMarkers([]);
+    }
+
+    function updateIndicatorVisibility() {
+        const showMA = document.getElementById('toggle-ma').checked;
+        const showPE = document.getElementById('toggle-pe').checked;
+        const showDiv = document.getElementById('toggle-div').checked;
+
+        fastMASeries.applyOptions({ visible: showMA });
+        slowMASeries.applyOptions({ visible: showMA });
+        peBandUpperSeries.applyOptions({ visible: showPE });
+        peBandLowerSeries.applyOptions({ visible: showPE });
+        divYieldSeries.applyOptions({ visible: showDiv });
+    }
+
+    function updateSignalsTable(signals) {
+        const loading = document.getElementById('signals-loading');
+        const table = document.getElementById('signals-table');
+        const empty = document.getElementById('signals-empty');
+        const body = document.getElementById('signals-body');
+
+        loading.classList.add('hidden');
+
+        if (signals.length === 0) {
+            table.classList.add('hidden');
+            empty.classList.remove('hidden');
+            return;
+        }
+
+        empty.classList.add('hidden');
+        table.classList.remove('hidden');
+
+        body.innerHTML = signals.map(s => `
+            <tr>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${s.time}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm">
+                    <span class="px-2 py-1 rounded text-xs font-medium ${s.action === 'buy' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                        ${s.action.toUpperCase()}
+                    </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${s.price?.toFixed(2) || '--'}</td>
+            </tr>
+        `).join('');
+    }
+
+    function setRange(range) {
+        currentRange = range;
+
+        // Update button styles
+        document.querySelectorAll('.range-btn').forEach(btn => {
+            if (btn.dataset.range === range) {
+                btn.classList.add('bg-indigo-600', 'text-white');
+                btn.classList.remove('bg-white');
+            } else {
+                btn.classList.remove('bg-indigo-600', 'text-white');
+                btn.classList.add('bg-white');
+            }
+        });
+
+        // Reload data
+        fetchHistory();
+        fetchIndicators();
+    }
+
+    function formatVolume(vol) {
+        if (!vol) return '--';
+        if (vol >= 1000000000) return (vol / 1000000000).toFixed(2) + 'B';
+        if (vol >= 1000000) return (vol / 1000000).toFixed(2) + 'M';
+        if (vol >= 1000) return (vol / 1000).toFixed(2) + 'K';
+        return vol.toString();
+    }
+
+    function refreshData() {
+        document.getElementById('quote-loading').classList.remove('hidden');
+        document.getElementById('quote-data').classList.add('hidden');
+        document.getElementById('chart-loading').classList.remove('hidden');
+        document.getElementById('chart-loading').textContent = 'Loading chart...';
+
+        fetchQuote();
+        fetchHistory();
+        fetchIndicators();
+    }
+
+    // Event listeners for indicator toggles
+    document.getElementById('toggle-ma').addEventListener('change', () => {
+        updateIndicatorVisibility();
+        fetchIndicators();
+    });
+    document.getElementById('toggle-pe').addEventListener('change', () => {
+        updateIndicatorVisibility();
+        fetchIndicators();
+    });
+    document.getElementById('toggle-div').addEventListener('change', () => {
+        updateIndicatorVisibility();
+        fetchIndicators();
+    });
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+        initChart();
+        fetchQuote();
+        fetchHistory();
+        fetchIndicators();
+    });
+</script>
+{{end}}
