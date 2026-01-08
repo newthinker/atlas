@@ -187,6 +187,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		Strategies:       strategies,
 		Metrics:          metricsReg,
 		ExecutionManager: execManager,
+		Config:           cfg,
 	}
 
 	// Create server config

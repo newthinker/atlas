@@ -33,6 +33,25 @@ type StrategyProvider interface {
 	GetStrategyNames() []string
 }
 
+// ConfigProvider provides configuration data for the settings page
+type ConfigProvider interface {
+	GetNotifiers() map[string]NotifierInfo
+	GetRouterConfig() RouterInfo
+}
+
+// NotifierInfo holds notifier display info
+type NotifierInfo struct {
+	Enabled bool
+	Type    string // telegram, email, webhook
+	Details string // Additional details for display
+}
+
+// RouterInfo holds router configuration
+type RouterInfo struct {
+	MinConfidence float64
+	CooldownHours int
+}
+
 // Handler provides web UI handlers with template rendering
 type Handler struct {
 	// pageTemplates holds separate template instances for each page
@@ -40,6 +59,7 @@ type Handler struct {
 	pageTemplates     map[string]*template.Template
 	watchlistProvider WatchlistProvider
 	strategyProvider  StrategyProvider
+	configProvider    ConfigProvider
 }
 
 // NewHandler creates a new web handler with templates loaded from the given directory.
@@ -121,6 +141,11 @@ func (h *Handler) SetWatchlistProvider(p WatchlistProvider) {
 // SetStrategyProvider sets the strategy data provider
 func (h *Handler) SetStrategyProvider(p StrategyProvider) {
 	h.strategyProvider = p
+}
+
+// SetConfigProvider sets the configuration data provider
+func (h *Handler) SetConfigProvider(p ConfigProvider) {
+	h.configProvider = p
 }
 
 // TemplateFS returns the embedded template filesystem for external use.

@@ -16,6 +16,7 @@ import (
 	"github.com/newthinker/atlas/internal/backtest"
 	"github.com/newthinker/atlas/internal/broker"
 	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/metrics"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
@@ -48,6 +49,7 @@ type Dependencies struct {
 	Strategies       *strategy.Engine
 	Metrics          *metrics.Registry
 	ExecutionManager *broker.ExecutionManager
+	Config           *config.Config
 }
 
 // watchlistAdapter adapts app.App to the web handler's WatchlistProvider interface
@@ -72,6 +74,54 @@ func (a *watchlistAdapter) GetWatchlistItems() []web.WatchlistItemData {
 		}
 	}
 	return result
+}
+
+// configAdapter adapts config.Config to the web handler's ConfigProvider interface
+type configAdapter struct {
+	cfg *config.Config
+}
+
+func (a *configAdapter) GetNotifiers() map[string]web.NotifierInfo {
+	result := make(map[string]web.NotifierInfo)
+	if a.cfg == nil {
+		return result
+	}
+	for name, notifier := range a.cfg.Notifiers {
+		var details string
+		switch name {
+		case "telegram":
+			if notifier.ChatID != "" {
+				details = fmt.Sprintf("Chat ID: %s", notifier.ChatID)
+			}
+		case "email":
+			if notifier.Host != "" {
+				details = fmt.Sprintf("SMTP: %s:%d", notifier.Host, notifier.Port)
+				if len(notifier.To) > 0 {
+					details += fmt.Sprintf(", To: %s", strings.Join(notifier.To, ", "))
+				}
+			}
+		case "webhook":
+			if notifier.URL != "" {
+				details = fmt.Sprintf("URL: %s", notifier.URL)
+			}
+		}
+		result[name] = web.NotifierInfo{
+			Enabled: notifier.Enabled,
+			Type:    name,
+			Details: details,
+		}
+	}
+	return result
+}
+
+func (a *configAdapter) GetRouterConfig() web.RouterInfo {
+	if a.cfg == nil {
+		return web.RouterInfo{MinConfidence: 0.6, CooldownHours: 4}
+	}
+	return web.RouterInfo{
+		MinConfidence: a.cfg.Router.MinConfidence,
+		CooldownHours: a.cfg.Router.CooldownHours,
+	}
 }
 
 // NewServer creates a new HTTP server
@@ -242,6 +292,9 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		}
 		if deps.Strategies != nil {
 			webHandler.SetStrategyProvider(deps.Strategies)
+		}
+		if deps.Config != nil {
+			webHandler.SetConfigProvider(&configAdapter{cfg: deps.Config})
 		}
 
 		s.mux.HandleFunc("/", webHandler.Dashboard)
