@@ -6,10 +6,11 @@ import "time"
 type Market string
 
 const (
-	MarketUS  Market = "US"
-	MarketHK  Market = "HK"
-	MarketCNA Market = "CN_A"
-	MarketEU  Market = "EU"
+	MarketUS     Market = "US"
+	MarketHK     Market = "HK"
+	MarketCNA    Market = "CN_A"
+	MarketEU     Market = "EU"
+	MarketCrypto Market = "CRYPTO"
 )
 
 // AssetType represents the type of financial asset
@@ -25,14 +26,36 @@ const (
 
 // Quote represents a real-time price quote
 type Quote struct {
-	Symbol string
-	Market Market
-	Price  float64
-	Volume int64
-	Bid    float64
-	Ask    float64
-	Time   time.Time
-	Source string
+	Symbol        string
+	Market        Market
+	Price         float64
+	Open          float64
+	High          float64
+	Low           float64
+	PrevClose     float64
+	Change        float64
+	ChangePercent float64
+	Volume        int64
+	Bid           float64
+	Ask           float64
+	Time          time.Time
+	Source        string
+	FundInfo      *FundInfo `json:",omitempty"` // Fund-specific info (only for funds)
+}
+
+// FundInfo represents fund-specific information (for open-end funds)
+type FundInfo struct {
+	Name              string    // 基金名称
+	Manager           string    // 基金经理
+	ManagementCompany string    // 基金公司
+	InceptionDate     time.Time // 成立日期
+	FundSize          float64   // 基金规模(亿元)
+	FundSizeDate      string    // 规模日期
+	AnnualizedReturn  float64   // 成立以来年化收益率(%)
+	MaxDrawdown       float64   // 最大回撤(%)
+	LatestNAV         float64   // 最新净值
+	NAVDate           string    // 净值日期
+	FundType          string    // 基金类型
 }
 
 // IsValid checks if the quote has required fields
