@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/core"
 )
+
+// Common quote currencies for symbol parsing
+var quoteCurrencies = []string{"USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"}
 
 const (
 	baseURL = "https://www.okx.com"
@@ -42,10 +45,30 @@ func (o *OKX) Name() string {
 	return "okx"
 }
 
+// parseSymbol extracts base and quote from a normalized symbol
+// "BTCUSDT" -> ("BTC", "USDT")
+func parseSymbol(symbol string) (base, quote string) {
+	s := strings.ToUpper(symbol)
+
+	// Try to find known quote currency
+	for _, q := range quoteCurrencies {
+		if strings.HasSuffix(s, q) && len(s) > len(q) {
+			return strings.TrimSuffix(s, q), q
+		}
+	}
+
+	// Fallback: assume last 4 chars are quote
+	if len(s) > 4 {
+		return s[:len(s)-4], s[len(s)-4:]
+	}
+
+	return s, ""
+}
+
 // toInstID converts normalized symbol to OKX instrument ID
 // BTCUSDT -> BTC-USDT
 func (o *OKX) toInstID(symbol string) string {
-	base, quote := crypto.ParseSymbol(symbol)
+	base, quote := parseSymbol(symbol)
 	return base + "-" + quote
 }
 

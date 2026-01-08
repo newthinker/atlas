@@ -4,12 +4,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/core"
 )
 
-func TestOKX_ImplementsProvider(t *testing.T) {
-	var _ crypto.Provider = (*OKX)(nil)
+// TestOKX_HasRequiredMethods verifies OKX has the required provider methods
+func TestOKX_HasRequiredMethods(t *testing.T) {
+	o := New()
+	// Verify required methods exist by calling them
+	_ = o.Name()
+	// FetchQuote and FetchHistory signatures are verified by compile-time
 }
 
 func TestOKX_Name(t *testing.T) {

@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/core"
 )
+
+// Common quote currencies for symbol parsing
+var quoteCurrencies = []string{"USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"}
 
 const (
 	baseURL = "https://api.coingecko.com/api/v3"
@@ -75,9 +77,29 @@ func (c *CoinGecko) Name() string {
 	return "coingecko"
 }
 
+// parseSymbol extracts base and quote from a normalized symbol
+// "BTCUSDT" -> ("BTC", "USDT")
+func parseSymbol(symbol string) (base, quote string) {
+	s := strings.ToUpper(symbol)
+
+	// Try to find known quote currency
+	for _, q := range quoteCurrencies {
+		if strings.HasSuffix(s, q) && len(s) > len(q) {
+			return strings.TrimSuffix(s, q), q
+		}
+	}
+
+	// Fallback: assume last 4 chars are quote
+	if len(s) > 4 {
+		return s[:len(s)-4], s[len(s)-4:]
+	}
+
+	return s, ""
+}
+
 // symbolToID converts trading pair to CoinGecko coin ID
 func (c *CoinGecko) symbolToID(symbol string) string {
-	base, _ := crypto.ParseSymbol(symbol)
+	base, _ := parseSymbol(symbol)
 	if id, ok := symbolToIDMap[base]; ok {
 		return id
 	}
@@ -86,7 +108,7 @@ func (c *CoinGecko) symbolToID(symbol string) string {
 
 // symbolToVsCurrency extracts the quote currency for CoinGecko API
 func (c *CoinGecko) symbolToVsCurrency(symbol string) string {
-	_, quote := crypto.ParseSymbol(symbol)
+	_, quote := parseSymbol(symbol)
 	switch quote {
 	case "USDT", "USDC", "BUSD", "USD":
 		return "usd"
