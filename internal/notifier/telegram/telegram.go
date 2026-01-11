@@ -75,6 +75,15 @@ func (t *Telegram) SendBatch(signals []core.Signal) error {
 	return t.sendMessage(sb.String())
 }
 
+// escapeMarkdown escapes special characters for Telegram Markdown
+// Only escapes characters that are not part of our intentional formatting
+func escapeMarkdown(text string) string {
+	// Replace underscores that are not part of our *bold* markers
+	// We use * for bold, so underscores in content should be escaped
+	result := strings.ReplaceAll(text, "_", "\\_")
+	return result
+}
+
 func (t *Telegram) formatSignal(signal core.Signal) string {
 	var sb strings.Builder
 
@@ -108,6 +117,9 @@ func (t *Telegram) formatSignal(signal core.Signal) string {
 
 func (t *Telegram) sendMessage(text string) error {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
+
+	// Escape special characters for Markdown
+	text = escapeMarkdown(text)
 
 	payload := map[string]any{
 		"chat_id":    t.chatID,
