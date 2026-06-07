@@ -13,8 +13,9 @@ import (
 )
 
 type mockCollector struct {
-	name    string
-	history []core.OHLCV
+	name       string
+	history    []core.OHLCV
+	fetchCount *int // optional: incremented on each FetchHistory call
 }
 
 func (m *mockCollector) Name() string                        { return m.name }
@@ -26,6 +27,9 @@ func (m *mockCollector) FetchQuote(symbol string) (*core.Quote, error) {
 	return &core.Quote{Symbol: symbol, Price: 100}, nil
 }
 func (m *mockCollector) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
+	if m.fetchCount != nil {
+		*m.fetchCount++
+	}
 	return m.history, nil
 }
 
@@ -148,6 +152,63 @@ func TestApp_RunOnce(t *testing.T) {
 	// Signal should have been routed to notifier
 	if len(mockNoti.received) != 1 {
 		t.Errorf("expected 1 signal, got %d", len(mockNoti.received))
+	}
+}
+
+func TestApp_PerSymbolStrategies(t *testing.T) {
+	cfg := &config.Config{}
+	app := New(cfg, nil)
+
+	history := make([]core.OHLCV, 10)
+	for i := range history {
+		history[i] = core.OHLCV{Symbol: "TEST", Close: float64(100 + i), Time: time.Now()}
+	}
+
+	app.RegisterCollector(&mockCollector{name: "mock", history: history})
+	app.RegisterStrategy(&mockStrategy{name: "s1", signals: []core.Signal{{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8}}})
+	app.RegisterStrategy(&mockStrategy{name: "s2", signals: []core.Signal{{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8}}})
+
+	noti := &mockNotifier{name: "mock"}
+	app.RegisterNotifier(noti)
+
+	// Only s1 is selected for this symbol.
+	app.AddToWatchlistWithDetails("TEST", "Test", "", "", []string{"s1"})
+
+	app.RunOnce(context.Background())
+
+	if len(noti.received) != 1 {
+		t.Fatalf("expected 1 signal (only s1), got %d", len(noti.received))
+	}
+	if noti.received[0].Strategy != "s1" {
+		t.Errorf("expected signal from s1, got %q", noti.received[0].Strategy)
+	}
+}
+
+func TestApp_PreferredCollectorTriedFirst(t *testing.T) {
+	cfg := &config.Config{}
+	app := New(cfg, nil)
+
+	history := make([]core.OHLCV, 10)
+	for i := range history {
+		history[i] = core.OHLCV{Symbol: "600519.SH", Close: float64(100 + i), Time: time.Now()}
+	}
+
+	var emCount, yhCount int
+	// eastmoney has data; yahoo would be the fallback and should not be called.
+	app.RegisterCollector(&mockCollector{name: "eastmoney", history: history, fetchCount: &emCount})
+	app.RegisterCollector(&mockCollector{name: "yahoo", history: nil, fetchCount: &yhCount})
+	app.RegisterStrategy(&mockStrategy{name: "s1", signals: []core.Signal{{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.8}}})
+	app.RegisterNotifier(&mockNotifier{name: "mock"})
+
+	app.AddToWatchlistWithDetails("600519.SH", "Moutai", "", "", nil)
+
+	app.RunOnce(context.Background())
+
+	if emCount != 1 {
+		t.Errorf("expected eastmoney to be fetched once, got %d", emCount)
+	}
+	if yhCount != 0 {
+		t.Errorf("expected yahoo not to be fetched, got %d", yhCount)
 	}
 }
 

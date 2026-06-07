@@ -8,6 +8,9 @@ import (
 	"io/fs"
 	"net/http"
 	"path/filepath"
+
+	"github.com/newthinker/atlas/internal/core"
+	"github.com/newthinker/atlas/internal/storage/signal"
 )
 
 //go:embed templates/*
@@ -60,6 +63,7 @@ type Handler struct {
 	watchlistProvider WatchlistProvider
 	strategyProvider  StrategyProvider
 	configProvider    ConfigProvider
+	signalStore       signal.Store
 }
 
 // NewHandler creates a new web handler with templates loaded from the given directory.
@@ -146,6 +150,38 @@ func (h *Handler) SetStrategyProvider(p StrategyProvider) {
 // SetConfigProvider sets the configuration data provider
 func (h *Handler) SetConfigProvider(p ConfigProvider) {
 	h.configProvider = p
+}
+
+// SetSignalStore sets the signal persistence store used by the dashboard and
+// signals pages.
+func (h *Handler) SetSignalStore(s signal.Store) {
+	h.signalStore = s
+}
+
+// toSignalView converts a domain signal into its display representation.
+func toSignalView(s core.Signal) SignalView {
+	return SignalView{
+		Time:       s.GeneratedAt.Format("2006-01-02 15:04"),
+		Symbol:     s.Symbol,
+		Action:     string(s.Action),
+		Strategy:   s.Strategy,
+		Confidence: int(s.Confidence * 100),
+		Reason:     s.Reason,
+	}
+}
+
+// recentSignalViews converts signals to views, newest first, capped at limit.
+// The store returns signals oldest-first, so we iterate in reverse. A limit <= 0
+// returns all signals.
+func recentSignalViews(signals []core.Signal, limit int) []SignalView {
+	views := make([]SignalView, 0, len(signals))
+	for i := len(signals) - 1; i >= 0; i-- {
+		if limit > 0 && len(views) >= limit {
+			break
+		}
+		views = append(views, toSignalView(signals[i]))
+	}
+	return views
 }
 
 // TemplateFS returns the embedded template filesystem for external use.

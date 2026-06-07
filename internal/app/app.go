@@ -10,8 +10,10 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
+	"github.com/newthinker/atlas/internal/meta"
 	"github.com/newthinker/atlas/internal/notifier"
 	"github.com/newthinker/atlas/internal/router"
+	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"go.uber.org/zap"
 )
@@ -52,6 +54,7 @@ type App struct {
 	strategies *strategy.Engine
 	notifiers  *notifier.Registry
 	router     *router.Router
+	arbitrator *meta.Arbitrator
 
 	watchlistItems []WatchlistItem
 	watchlistSet   map[string]struct{}
@@ -105,6 +108,21 @@ func (a *App) RegisterStrategy(s strategy.Strategy) {
 // RegisterNotifier adds a notifier to the app
 func (a *App) RegisterNotifier(n notifier.Notifier) error {
 	return a.notifiers.Register(n)
+}
+
+// SetSignalStore wires a signal store into the router so generated signals are
+// persisted for the API and web UI.
+func (a *App) SetSignalStore(store signal.Store) {
+	a.router.SetSignalStore(store)
+}
+
+// SetArbitrator enables LLM-based arbitration of conflicting signals. When set,
+// symbols producing multiple signals are resolved into a single decision before
+// routing.
+func (a *App) SetArbitrator(arb *meta.Arbitrator) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.arbitrator = arb
 }
 
 // SetWatchlist sets the symbols to monitor
@@ -193,20 +211,22 @@ func (a *App) runAnalysisCycle(ctx context.Context) {
 			return
 		}
 
-		a.analyzeSymbol(ctx, item.Symbol)
+		a.analyzeSymbol(ctx, item)
 	}
 }
 
-// analyzeSymbol fetches data and runs analysis for a single symbol
-func (a *App) analyzeSymbol(ctx context.Context, symbol string) {
-	// Get collector for this symbol (simplified: just use first available)
-	collectors := a.collectors.GetAll()
+// analyzeSymbol fetches data and runs analysis for a single watchlist item.
+func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
+	symbol := item.Symbol
+
+	collectors := a.orderedCollectors(symbol)
 	if len(collectors) == 0 {
 		a.logger.Warn("no collectors available", zap.String("symbol", symbol))
 		return
 	}
 
-	// Fetch historical data (last 250 trading days for 200-day MA)
+	// Fetch historical data (last 250 trading days for 200-day MA), preferring
+	// the collector that matches the symbol's market and falling back to others.
 	end := time.Now()
 	start := end.AddDate(0, 0, -365)
 
@@ -235,7 +255,14 @@ func (a *App) analyzeSymbol(ctx context.Context, symbol string) {
 		Now:    time.Now(),
 	}
 
-	signals, err := a.strategies.Analyze(ctx, analysisCtx)
+	// Honour per-symbol strategy selection when configured; otherwise run all.
+	var signals []core.Signal
+	var err error
+	if len(item.Strategies) > 0 {
+		signals, err = a.strategies.AnalyzeWithStrategies(ctx, analysisCtx, item.Strategies)
+	} else {
+		signals, err = a.strategies.Analyze(ctx, analysisCtx)
+	}
 	if err != nil {
 		a.logger.Error("analysis failed",
 			zap.String("symbol", symbol),
@@ -244,9 +271,16 @@ func (a *App) analyzeSymbol(ctx context.Context, symbol string) {
 		return
 	}
 
+	if len(signals) == 0 {
+		return
+	}
+
+	// Resolve conflicting signals via the LLM arbitrator when enabled.
+	signals = a.arbitrate(ctx, symbol, signals)
+
 	// Route signals
-	for _, signal := range signals {
-		if err := a.router.Route(signal); err != nil {
+	for _, sig := range signals {
+		if err := a.router.Route(sig); err != nil {
 			a.logger.Error("failed to route signal",
 				zap.String("symbol", symbol),
 				zap.Error(err),
@@ -254,12 +288,64 @@ func (a *App) analyzeSymbol(ctx context.Context, symbol string) {
 		}
 	}
 
-	if len(signals) > 0 {
-		a.logger.Info("signals generated",
-			zap.String("symbol", symbol),
-			zap.Int("count", len(signals)),
-		)
+	a.logger.Info("signals generated",
+		zap.String("symbol", symbol),
+		zap.Int("count", len(signals)),
+	)
+}
+
+// orderedCollectors returns collectors with the best match for the symbol first,
+// so analysis fetches from the right data source while preserving fallbacks.
+func (a *App) orderedCollectors(symbol string) []collector.Collector {
+	all := a.collectors.GetAll()
+	preferred := collector.SelectForSymbol(a.collectors, symbol)
+	if preferred == nil {
+		return all
 	}
+
+	ordered := make([]collector.Collector, 0, len(all))
+	ordered = append(ordered, preferred)
+	for _, c := range all {
+		if c != preferred {
+			ordered = append(ordered, c)
+		}
+	}
+	return ordered
+}
+
+// arbitrate resolves multiple signals for a symbol into a single decision using
+// the LLM arbitrator. It returns the original signals unchanged when no
+// arbitrator is configured, there is nothing to resolve, or arbitration fails.
+func (a *App) arbitrate(ctx context.Context, symbol string, signals []core.Signal) []core.Signal {
+	a.mu.RLock()
+	arb := a.arbitrator
+	a.mu.RUnlock()
+
+	if arb == nil || len(signals) < 2 {
+		return signals
+	}
+
+	result, err := arb.Arbitrate(ctx, meta.ArbitrationRequest{
+		Symbol:             symbol,
+		Market:             collector.MarketForSymbol(symbol),
+		ConflictingSignals: signals,
+	})
+	if err != nil {
+		a.logger.Warn("arbitration failed, routing original signals",
+			zap.String("symbol", symbol),
+			zap.Error(err),
+		)
+		return signals
+	}
+
+	return []core.Signal{{
+		Symbol:      symbol,
+		Action:      result.Decision,
+		Confidence:  result.Confidence,
+		Reason:      result.Reasoning,
+		Strategy:    "meta_arbitrator",
+		GeneratedAt: time.Now(),
+	}}
 }
 
 // RunOnce performs a single analysis cycle (useful for testing)
@@ -273,12 +359,12 @@ func (a *App) GetStats() map[string]any {
 	defer a.mu.RUnlock()
 
 	return map[string]any{
-		"running":     a.running,
-		"watchlist":   len(a.watchlistItems),
-		"collectors":  len(a.collectors.GetAll()),
-		"strategies":  len(a.strategies.GetAll()),
-		"notifiers":   len(a.notifiers.GetAll()),
-		"router":      a.router.GetStats(),
+		"running":    a.running,
+		"watchlist":  len(a.watchlistItems),
+		"collectors": len(a.collectors.GetAll()),
+		"strategies": len(a.strategies.GetAll()),
+		"notifiers":  len(a.notifiers.GetAll()),
+		"router":     a.router.GetStats(),
 	}
 }
 
