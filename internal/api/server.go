@@ -171,12 +171,11 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 	// Create symbol detail handler with collectors
 	var symbolDetailHandler *api.SymbolDetailHandler
 	if deps.App != nil {
-		collectors := deps.App.GetCollectors()
-		collectorMap := make(map[string]collector.Collector)
-		for _, c := range collectors {
-			collectorMap[c.Name()] = c
+		reg := collector.NewRegistry()
+		for _, c := range deps.App.GetCollectors() {
+			reg.Register(c)
 		}
-		symbolDetailHandler = api.NewSymbolDetailHandler(collectorMap)
+		symbolDetailHandler = api.NewSymbolDetailHandler(reg)
 	}
 
 	// Auth middleware for API routes
@@ -295,6 +294,9 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		}
 		if deps.Config != nil {
 			webHandler.SetConfigProvider(&configAdapter{cfg: deps.Config})
+		}
+		if deps.SignalStore != nil {
+			webHandler.SetSignalStore(deps.SignalStore)
 		}
 
 		s.mux.HandleFunc("/", webHandler.Dashboard)

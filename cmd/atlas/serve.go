@@ -18,7 +18,11 @@ import (
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
+	atlasctx "github.com/newthinker/atlas/internal/context"
+	"github.com/newthinker/atlas/internal/core"
+	"github.com/newthinker/atlas/internal/llm/factory"
 	"github.com/newthinker/atlas/internal/logger"
+	"github.com/newthinker/atlas/internal/meta"
 	"github.com/newthinker/atlas/internal/metrics"
 	signalstore "github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
@@ -75,6 +79,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Create App
 	application := app.New(cfg, log)
+
+	// Persist generated signals so the API and web UI can display them.
+	application.SetSignalStore(sigStore)
 
 	// Register collectors if configured
 	if collectorCfg, ok := cfg.Collectors["yahoo"]; ok && collectorCfg.Enabled {
@@ -138,6 +145,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Set watchlist from config with full details (name, market, type, strategies)
 	for _, item := range cfg.Watchlist {
 		application.AddToWatchlistWithDetails(item.Symbol, item.Name, item.Market, item.Type, item.Strategies)
+	}
+
+	// Wire the LLM signal arbitrator when enabled.
+	if cfg.Meta.Arbitrator.Enabled && cfg.LLM.Provider != "" {
+		if arb, err := buildArbitrator(cfg, application.GetCollectors(), log); err != nil {
+			log.Warn("failed to enable signal arbitrator", zap.Error(err))
+		} else {
+			application.SetArbitrator(arb)
+			log.Info("LLM signal arbitrator enabled",
+				zap.String("provider", cfg.LLM.Provider),
+				zap.Int("context_days", cfg.Meta.Arbitrator.ContextDays),
+			)
+		}
 	}
 
 	// Create backtester with first available collector
@@ -225,4 +245,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	return server.Shutdown(ctx)
+}
+
+// buildArbitrator constructs an LLM-backed signal arbitrator from the configured
+// LLM provider and the available collectors (used for market context).
+func buildArbitrator(cfg *config.Config, collectors []collector.Collector, log *zap.Logger) (*meta.Arbitrator, error) {
+	llmProvider, err := factory.New(cfg.LLM)
+	if err != nil {
+		return nil, fmt.Errorf("creating llm provider: %w", err)
+	}
+
+	// Map collectors by the markets they support for market-context lookups.
+	marketCollectors := make(map[core.Market]collector.Collector)
+	for _, c := range collectors {
+		for _, m := range c.SupportedMarkets() {
+			if _, ok := marketCollectors[m]; !ok {
+				marketCollectors[m] = c
+			}
+		}
+	}
+
+	marketCtx := atlasctx.NewMarketContextService(marketCollectors)
+	trackRecord := atlasctx.NewInMemoryTrackRecord()
+	news := atlasctx.NewStaticNewsProvider(nil)
+
+	return meta.NewArbitrator(llmProvider, marketCtx, trackRecord, news, log, meta.ArbitratorConfig{
+		ContextDays: cfg.Meta.Arbitrator.ContextDays,
+	}), nil
 }

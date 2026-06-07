@@ -14,11 +14,11 @@ import (
 
 // SymbolDetailHandler handles symbol detail API requests
 type SymbolDetailHandler struct {
-	collectors map[string]collector.Collector
+	collectors *collector.Registry
 }
 
 // NewSymbolDetailHandler creates a new symbol detail handler
-func NewSymbolDetailHandler(collectors map[string]collector.Collector) *SymbolDetailHandler {
+func NewSymbolDetailHandler(collectors *collector.Registry) *SymbolDetailHandler {
 	return &SymbolDetailHandler{
 		collectors: collectors,
 	}
@@ -55,21 +55,7 @@ func (h *SymbolDetailHandler) GetHistory(w http.ResponseWriter, r *http.Request,
 		interval = "1d"
 	}
 
-	// Calculate date range
-	end := time.Now()
-	var start time.Time
-	switch rangeParam {
-	case "1M":
-		start = end.AddDate(0, -1, 0)
-	case "3M":
-		start = end.AddDate(0, -3, 0)
-	case "6M":
-		start = end.AddDate(0, -6, 0)
-	case "1Y":
-		start = end.AddDate(-1, 0, 0)
-	default:
-		start = end.AddDate(0, -3, 0)
-	}
+	start, end := dateRange(rangeParam)
 
 	col := h.selectCollector(symbol)
 	if col == nil {
@@ -106,20 +92,7 @@ func (h *SymbolDetailHandler) GetIndicators(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Fetch historical data for calculations
-	end := time.Now()
-	var start time.Time
-	switch rangeParam {
-	case "1M":
-		start = end.AddDate(0, -1, 0)
-	case "3M":
-		start = end.AddDate(0, -3, 0)
-	case "6M":
-		start = end.AddDate(0, -6, 0)
-	case "1Y":
-		start = end.AddDate(-1, 0, 0)
-	default:
-		start = end.AddDate(0, -3, 0)
-	}
+	start, end := dateRange(rangeParam)
 
 	col := h.selectCollector(symbol)
 	if col == nil {
@@ -154,45 +127,27 @@ func (h *SymbolDetailHandler) GetIndicators(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// selectCollector chooses the appropriate collector based on symbol
+// selectCollector chooses the appropriate collector based on symbol.
+// It delegates to collector.SelectForSymbol so the routing rules stay in one place.
 func (h *SymbolDetailHandler) selectCollector(symbol string) collector.Collector {
-	upperSymbol := strings.ToUpper(symbol)
+	return collector.SelectForSymbol(h.collectors, symbol)
+}
 
-	// A-share symbols use Eastmoney
-	if strings.HasSuffix(upperSymbol, ".SH") || strings.HasSuffix(upperSymbol, ".SZ") {
-		if col, ok := h.collectors["eastmoney"]; ok {
-			return col
-		}
+// dateRange converts a range parameter (e.g. "1M", "1Y") into a start/end window
+// ending at the current time. Unknown values default to the last 3 months.
+func dateRange(rangeParam string) (start, end time.Time) {
+	end = time.Now()
+	switch rangeParam {
+	case "1M":
+		start = end.AddDate(0, -1, 0)
+	case "6M":
+		start = end.AddDate(0, -6, 0)
+	case "1Y":
+		start = end.AddDate(-1, 0, 0)
+	default: // "3M" and any unrecognised value
+		start = end.AddDate(0, -3, 0)
 	}
-
-	// Crypto symbols use crypto collector
-	// Common crypto symbols: BTC, ETH, SOL, or pairs like BTCUSDT, ETH-USD
-	cryptoSymbols := []string{"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "DOT", "AVAX", "MATIC", "LINK", "UNI", "ATOM", "LTC"}
-	for _, cs := range cryptoSymbols {
-		if strings.HasPrefix(upperSymbol, cs) || upperSymbol == cs {
-			if col, ok := h.collectors["crypto"]; ok {
-				return col
-			}
-		}
-	}
-	// Also check for -USD suffix (like ETH-USD)
-	if strings.HasSuffix(upperSymbol, "-USD") || strings.HasSuffix(upperSymbol, "USDT") {
-		if col, ok := h.collectors["crypto"]; ok {
-			return col
-		}
-	}
-
-	// Default to Yahoo for US/HK stocks
-	if col, ok := h.collectors["yahoo"]; ok {
-		return col
-	}
-
-	// Return any available collector
-	for _, col := range h.collectors {
-		return col
-	}
-
-	return nil
+	return start, end
 }
 
 // MAIndicatorData holds MA crossover indicator data
@@ -203,8 +158,8 @@ type MAIndicatorData struct {
 
 // MASignal represents a MA crossover signal
 type MASignal struct {
-	Time   string `json:"time"`
-	Action string `json:"action"`
+	Time   string  `json:"time"`
+	Action string  `json:"action"`
 	Price  float64 `json:"price"`
 }
 
@@ -329,8 +284,8 @@ func (h *SymbolDetailHandler) calculateDividendYield(history []core.OHLCV) map[s
 
 	// Target yield thresholds (example: 3% and 5%)
 	return map[string]any{
-		"current_price":    currentPrice,
-		"yield_3_percent":  currentPrice * 0.97, // Price where yield would be ~3%
-		"yield_5_percent":  currentPrice * 0.95, // Price where yield would be ~5%
+		"current_price":   currentPrice,
+		"yield_3_percent": currentPrice * 0.97, // Price where yield would be ~3%
+		"yield_5_percent": currentPrice * 0.95, // Price where yield would be ~5%
 	}
 }
