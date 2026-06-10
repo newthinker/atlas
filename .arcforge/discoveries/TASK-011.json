@@ -1,0 +1,42 @@
+{
+  "task_id": "TASK-011",
+  "key_findings": [
+    "原 baseURL 为包级 const，FetchQuote/FetchHistory 直接引用，无法在不打真实网络的情况下测试。改为 Yahoo 实例字段 baseURL + NewWithBaseURL(url) 注入构造即可用 httptest.Server 测试，New() 仍指向 defaultBaseURL，默认行为不变。",
+    "FetchQuote/FetchHistory 对任意 path 发请求（{baseURL}/{symbol}?...），httptest handler 可对所有 path 返回同一响应体，无需精确匹配路由。",
+    "FetchHistory 对缺失数据（quotes.Open[i]==nil）已 continue 跳过；timestamp 为空数组时循环零次返回空切片，不 panic。result 为空数组时按既有逻辑返回 'no data' 错误。"
+  ],
+  "decisions": [
+    {
+      "decision": "包级 const baseURL 改名 defaultBaseURL，新增 Yahoo.baseURL 字段与 NewWithBaseURL 构造；New() 委托 NewWithBaseURL(defaultBaseURL)",
+      "rationale": "最小侵入实现测试注入（ADR-6/NewWithBaseURL 模式），保证现有 8 个测试不修改即通过（functional[0]）。"
+    },
+    {
+      "decision": "新增 httptest 辅助 newTestServer(t, status, body) 返回 (*httptest.Server, *Yahoo)，t.Cleanup 自动关闭",
+      "rationale": "复用于全部新测试，消除每个用例重复的 server 搭建/拆除样板。"
+    },
+    {
+      "decision": "boundary 用两个子测试：result 空数组 → 期望 error；timestamp 空数组 → 期望空切片无错",
+      "rationale": "两种 '空' 在既有代码里语义不同（前者 no-data 错误、后者正常空结果），分别断言确保 boundary[0] 的 '不 panic' 与正确返回。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/yahoo_test.go"
+  ],
+  "interfaces_exposed": {
+    "NewWithBaseURL": "func(baseURL string) *Yahoo — 测试注入构造；生产用 New()（指向 defaultBaseURL）",
+    "Yahoo.baseURL": "string 实例字段（原包级 const baseURL 改为 defaultBaseURL）"
+  },
+  "verification": {
+    "tests": [
+      "现有 8 测试不修改通过 (functional[0])",
+      "TestFetchQuote_ParsesResponse (functional[1])",
+      "TestFetchHistory_ParsesResponse (functional[2])",
+      "TestFetchHistory_EmptyResult/{empty_result_array,empty_timestamps} (boundary[0])",
+      "TestFetch_NonOKStatus (error_handling[0])",
+      "TestFetch_MalformedJSON (error_handling[1])"
+    ],
+    "command": "go test ./internal/collector/yahoo/ -race -cover",
+    "result": "ok, coverage 82.0% (>= 80% dev_minimum gate)"
+  }
+}

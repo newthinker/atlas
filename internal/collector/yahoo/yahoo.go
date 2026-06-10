@@ -13,9 +13,9 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 )
 
-const (
-	baseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
-)
+// defaultBaseURL is the production Yahoo Finance chart endpoint. It is the
+// default for New; tests inject an httptest server URL via NewWithBaseURL.
+const defaultBaseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 // validSymbol matches stock symbols like AAPL, MSFT, 600519.SH, 0700.HK
 var validSymbol = regexp.MustCompile(`^[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?$`)
@@ -36,16 +36,24 @@ func validateSymbol(symbol string) error {
 
 // Yahoo implements the Yahoo Finance collector
 type Yahoo struct {
-	client *http.Client
-	config collector.Config
+	client  *http.Client
+	config  collector.Config
+	baseURL string
 }
 
-// New creates a new Yahoo collector
+// New creates a new Yahoo collector pointing at the production endpoint.
 func New() *Yahoo {
+	return NewWithBaseURL(defaultBaseURL)
+}
+
+// NewWithBaseURL creates a Yahoo collector with a custom chart endpoint.
+// It is intended for tests that point the collector at an httptest server.
+func NewWithBaseURL(baseURL string) *Yahoo {
 	return &Yahoo{
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		baseURL: baseURL,
 	}
 }
 
@@ -85,7 +93,7 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 		return nil, err
 	}
 	yahooSymbol := y.toYahooSymbol(symbol)
-	url := fmt.Sprintf("%s/%s?interval=1d&range=1d", baseURL, yahooSymbol)
+	url := fmt.Sprintf("%s/%s?interval=1d&range=1d", y.baseURL, yahooSymbol)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -150,7 +158,7 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 	yahooInterval := y.toYahooInterval(interval)
 
 	url := fmt.Sprintf("%s/%s?interval=%s&period1=%d&period2=%d",
-		baseURL, yahooSymbol, yahooInterval, start.Unix(), end.Unix())
+		y.baseURL, yahooSymbol, yahooInterval, start.Unix(), end.Unix())
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
