@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "core.OHLCV 是扁平值类型（无指针/slice 字段），因此对其 slice 做浅元素 copy 即等价于深拷贝；命中返回副本只需 make+copy，无需逐字段克隆。",
+    "缓存 key 由 symbol|start|end|interval 拼接，start/end 先 Truncate(time.Minute).UTC() 再 RFC3339 格式化，使同一分钟内的亚分钟差异共享同一缓存槽（boundary 要求）。",
+    "淘汰最旧用单调递增 seq（每次 store 前 c.seq++）标记插入顺序；evictOldest 线性扫描取最小 seq。每个已存条目 seq 必非零，故 oldestSeq==0 同时兼任『尚未见到条目』哨兵与『map 为空无需淘汰』守卫。",
+    "参考 internal/context/news.go 的 CachedNewsProvider 模式：嵌入接口透传其余方法，仅装饰目标方法，单 mu sync.Mutex 保护 map。"
+  ],
+  "decisions": [
+    {
+      "decision": "CachedCollector 嵌入 Collector 接口，仅重写 FetchHistory；Name/SupportedMarkets/Init/Start/Stop/FetchQuote 由嵌入字段自动透传。FetchQuote 故意不缓存（实时性）。",
+      "rationale": "done_criteria functional[3] 要求其余方法透传；嵌入接口是 Go 惯用的零样板透传方式，且 FetchQuote 报价需实时不应入缓存。"
+    },
+    {
+      "decision": "FetchHistory 命中路径与回填路径都返回 cloneOHLCV 副本；底层返回 error 时直接 return 不写缓存。",
+      "rationale": "functional[2] 要求命中返回副本以防调用方 mutate 污染共享底层数组；error_handling[0] 要求错误结果不入缓存，下次仍穿透。"
+    },
+    {
+      "decision": "容量上限 maxCacheEntries=256；store 时若为新 key 且已达上限则先 evictOldest（按最小 seq 淘汰）。读临界区命中即释放锁再 clone，回填单独再次加锁。",
+      "rationale": "boundary[0] 要求超 256 淘汰最旧且总数不超上限；缩短持锁区间，clone 在锁外执行降低并发争用，配合单 mu 保证 -race 通过（non_functional[0]）。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/cache.go",
+    "internal/collector/cache_test.go"
+  ],
+  "interfaces_exposed": [
+    "type CachedCollector struct { Collector; ... }",
+    "func NewCached(c Collector, ttl time.Duration) *CachedCollector",
+    "func (c *CachedCollector) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error)"
+  ],
+  "verification": {
+    "command": "go test ./internal/collector/ -run TestCachedCollector -race -count=1",
+    "result": "ok github.com/newthinker/atlas/internal/collector",
+    "build": "go build ./... OK; go vet ./internal/collector/ OK; gofmt -l (cache.go,cache_test.go) clean",
+    "done_criteria_coverage": {
+      "functional[0]": "TestCachedCollector_HitWithinTTL",
+      "functional[1]": "TestCachedCollector_DistinctKeys",
+      "functional[2]": "TestCachedCollector_ReturnsCopy",
+      "functional[3]": "TestCachedCollector_PassThrough",
+      "boundary[0]": "TestCachedCollector_TTLExpiry + TestCachedCollector_CapacityEviction + TestCachedCollector_KeyTruncatedToMinute",
+      "error_handling[0]": "TestCachedCollector_ErrorNotCached",
+      "non_functional[0]": "TestCachedCollector_ConcurrentRace (-race)"
+    }
+  }
+}
