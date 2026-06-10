@@ -11,7 +11,6 @@ import (
 	"github.com/newthinker/atlas/internal/api"
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/backtest"
-	"github.com/newthinker/atlas/internal/broker"
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/collector/eastmoney"
@@ -177,26 +176,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Info("metrics enabled", zap.String("path", cfg.Metrics.Path))
 	}
 
-	// Create execution manager if broker is enabled
-	var execManager *broker.ExecutionManager
-	if cfg.Broker.Enabled {
-		// TODO: Create actual broker instance when FUTU integration is ready
-		// For now, log that broker is enabled but not yet implemented
-		log.Warn("broker enabled but not yet fully implemented",
-			zap.String("provider", cfg.Broker.Provider),
-			zap.String("mode", cfg.Broker.Mode),
-			zap.String("execution_mode", cfg.Broker.Execution.Mode),
-		)
-		// Once a proper Broker implementation exists:
-		// brokerInstance := futu.New(cfg.Broker.Futu)
-		// if err := brokerInstance.Connect(context.Background()); err != nil {
-		//     return fmt.Errorf("connecting to broker: %w", err)
-		// }
-		// defer brokerInstance.Disconnect()
-		//
-		// riskChecker := broker.NewRiskChecker(broker.RiskConfig{...}, brokerInstance)
-		// posTracker := broker.NewPositionTracker(brokerInstance)
-		// execManager = broker.NewExecutionManager(broker.ExecutionConfig{...}, brokerInstance, riskChecker, posTracker)
+	// Wire the paper-mode execution chain when the broker is enabled. In paper
+	// mode this builds PaperBroker → RiskChecker → PositionTracker →
+	// ExecutionManager, injects a signal adapter into the app, and exposes the
+	// manager through the API dependencies. When disabled or configured for a
+	// non-paper mode, execManager is nil and the process starts normally.
+	execManager, err := wireExecution(context.Background(), cfg, application, log)
+	if err != nil {
+		return fmt.Errorf("wiring execution: %w", err)
 	}
 
 	// Create server dependencies

@@ -156,12 +156,15 @@ func (em *ExecutionManager) Execute(ctx context.Context, signal *core.Signal, pr
 		}, nil
 	}
 
-	// Build order request
+	// Build order request. Price is carried on the request so that brokers
+	// pricing fills from the request (e.g. the paper broker) can settle the
+	// order; Validate ignores Price for market orders.
 	request := OrderRequest{
 		Symbol:   signal.Symbol,
 		Side:     side,
 		Type:     OrderTypeMarket,
 		Quantity: quantity,
+		Price:    price,
 	}
 
 	// Run risk check
