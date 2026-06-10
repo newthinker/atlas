@@ -1,0 +1,55 @@
+{
+  "task_id": "TASK-005",
+  "title": "分析循环 worker pool 并行化 + 仲裁超时",
+  "key_findings": [
+    "strategy.Engine.Analyze (engine.go:100) 会原地写 signals[i].Strategy = s.Name()。Engine 自身对并发 Analyze 是安全的（仅 RLock 读 strategies map），但前提是各 Strategy 返回独立的 signals slice。原 mockStrategy 返回共享底层数组，导致并行分析下 -race 报写冲突——这是测试桩的问题，非生产 bug；真实策略每次计算新 slice。",
+    "router.Router 并发安全（cooldown 有自带 mutex），notifier 注册表 NotifyAll 并发可用；并行路由会让多个 goroutine 并发调用 notifier.Send，自定义测试 notifier 桩必须自带锁。",
+    "仲裁超时若仅靠 context.WithTimeout 包装，要求 arbitrator 内部 LLM 调用尊重 ctx 取消（生产 llm.Provider 的 HTTP Chat 尊重 ctx）。meta.Arbitrator.Arbitrate 把 ctx 透传给 a.llm.Chat，因此 app 层包 WithTimeout 即可在慢 LLM 时及时降级。",
+    "router 对同一 symbol 有 cooldown：同标的的第二个原始信号会被 passesFilters 过滤。故仲裁超时降级测试不能断言『2 个原始信号都被路由』，应断言『路由到的是原始信号而非 meta_arbitrator 决策』。",
+    "errgroup.WithContext 派生的 gctx 会随父 ctx 取消而取消；派发循环每次 g.Go 前检查 gctx.Err() 即可实现『ctx 取消后不再派发新标的并尽快返回』。"
+  ],
+  "decisions": [
+    {
+      "decision": "runAnalysisCycle 在 cfg.Analysis.Workers<=1 时走原串行路径，>1 时用 errgroup + SetLimit(workers) 信号量并行。",
+      "rationale": "ADR-3：行为向后兼容、一键回退；errgroup 是项目可接受的轻量依赖。workers<=1 含 workers=0（零值 config），保证现有测试不改即过。"
+    },
+    {
+      "decision": "新增 analyzeSymbolSafe 包一层 recover，串行与并行路径都经它调用 analyzeSymbol。",
+      "rationale": "error_handling[0] 要求单标的 panic 不影响其他标的、不退进程。统一封装使 panic 隔离与 workers 配置无关，串行路径也获益。"
+    },
+    {
+      "decision": "App.arbitrator 字段由 *meta.Arbitrator 改为本地最小接口 signalArbitrator；SetArbitrator 签名不变并加 typed-nil 守卫，新增 unexported setArbitratorClient 供测试注入慢桩。",
+      "rationale": "符合 ADR-2/ADR-4 消费方定义接口的惯例，使仲裁超时可在不构造完整 meta.Arbitrator(+4 个 provider 桩)的情况下被测试覆盖。typed-nil 守卫避免 nil *meta.Arbitrator 变成非 nil 接口导致误判 arb!=nil。"
+    },
+    {
+      "decision": "arbitrate 内 context.WithTimeout(ctx, cfg.Meta.Arbitrator.Timeout)，timeout<=0 或 cfg 为 nil 时回退 15s 默认；超时/出错统一记 warning 并返回原信号。",
+      "rationale": "ADR-4：仲裁是增强路径，超时复用既有『出错回退原信号』语义，放 app 层保持 meta 包无配置依赖。"
+    }
+  ],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go",
+    "go.mod",
+    "go.sum"
+  ],
+  "interfaces_exposed": {
+    "signalArbitrator (unexported, internal/app)": "interface { Arbitrate(ctx context.Context, req meta.ArbitrationRequest) (*meta.ArbitrationResult, error) } — *meta.Arbitrator 满足之",
+    "App.SetArbitrator(arb *meta.Arbitrator)": "签名不变；nil 安全（typed-nil 守卫禁用仲裁）",
+    "config 消费": "cfg.Analysis.Workers (int, <=1 串行, 默认4 by config loader); cfg.Meta.Arbitrator.Timeout (time.Duration, <=0 回退 15s)",
+    "behavior": "runAnalysisCycle: workers>1 并行执行 analyzeSymbol(errgroup SetLimit); 单标的 panic 经 analyzeSymbolSafe recover 隔离; arbitrate 受 timeout 约束并降级"
+  },
+  "verification": {
+    "tests": "go test -race ./internal/app/ => ok",
+    "coverage": "94.5% (>= dev_minimum 80%)",
+    "vet_build": "go vet ./internal/app/ 干净; go build ./... 干净; go mod tidy 已将 golang.org/x/sync v0.16.0 提升为 direct require",
+    "dod_mapping": {
+      "functional[0]": "TestApp_ParallelWorkers_ProcessesAllConcurrently (8 标的全处理 + maxActive>=2)",
+      "functional[1]": "TestApp_SerialWhenWorkersLE1 (maxActive==1) + 现有 app 测试不改即过",
+      "functional[2]": "TestApp_ArbitrateTimeout_ReturnsOriginal (慢桩 5s 尊重 ctx, 50ms 超时, 路由原始信号非 meta_arbitrator, <2s 返回)",
+      "boundary[0]": "TestApp_Parallel_EmptyWatchlist (空表不 panic) + TestApp_Parallel_CtxCancelled (预取消 ctx 快速返回且不派发全部)",
+      "error_handling[0]": "TestApp_Parallel_PanicIsolated (BOOM 标的 panic, OK1/OK2 仍产出 2 信号, 进程不退)",
+      "error_handling[1]": "含于 ArbitrateTimeout (超时记 warning 原信号继续路由)",
+      "non_functional[0]": "go test -race 全包通过"
+    }
+  }
+}

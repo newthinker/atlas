@@ -16,6 +16,7 @@ import (
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // Market constants
@@ -54,7 +55,7 @@ type App struct {
 	strategies *strategy.Engine
 	notifiers  *notifier.Registry
 	router     *router.Router
-	arbitrator *meta.Arbitrator
+	arbitrator signalArbitrator
 	executor   SignalExecutor
 
 	watchlistItems []WatchlistItem
@@ -117,10 +118,29 @@ func (a *App) SetSignalStore(store signal.Store) {
 	a.router.SetSignalStore(store)
 }
 
+// signalArbitrator resolves conflicting signals into a single decision. It is
+// satisfied by *meta.Arbitrator and defined here so the analysis loop can bound
+// arbitration latency (see ADR-4) and tests can inject a stub.
+type signalArbitrator interface {
+	Arbitrate(ctx context.Context, req meta.ArbitrationRequest) (*meta.ArbitrationResult, error)
+}
+
 // SetArbitrator enables LLM-based arbitration of conflicting signals. When set,
 // symbols producing multiple signals are resolved into a single decision before
 // routing.
 func (a *App) SetArbitrator(arb *meta.Arbitrator) {
+	// Guard against the typed-nil interface pitfall: a nil *meta.Arbitrator must
+	// disable arbitration, not become a non-nil interface value.
+	if arb == nil {
+		a.setArbitratorClient(nil)
+		return
+	}
+	a.setArbitratorClient(arb)
+}
+
+// setArbitratorClient stores the arbitrator behind its interface; used by
+// SetArbitrator and by tests injecting a stub.
+func (a *App) setArbitratorClient(arb signalArbitrator) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.arbitrator = arb
@@ -221,15 +241,59 @@ func (a *App) runAnalysisCycle(ctx context.Context) {
 		return
 	}
 
-	a.logger.Debug("starting analysis cycle", zap.Int("symbols", len(items)))
-
-	for _, item := range items {
-		if ctx.Err() != nil {
-			return
-		}
-
-		a.analyzeSymbol(ctx, item)
+	workers := 0
+	if a.cfg != nil {
+		workers = a.cfg.Analysis.Workers
 	}
+
+	a.logger.Debug("starting analysis cycle",
+		zap.Int("symbols", len(items)),
+		zap.Int("workers", workers),
+	)
+
+	// workers <= 1 keeps the original serial path for full backward compatibility.
+	if workers <= 1 {
+		for _, item := range items {
+			if ctx.Err() != nil {
+				return
+			}
+			a.analyzeSymbolSafe(ctx, item)
+		}
+		return
+	}
+
+	// Parallel path: bounded concurrency via errgroup.SetLimit. Each symbol is
+	// processed independently; per-symbol failures are isolated in
+	// analyzeSymbolSafe so they never cancel siblings or crash the process.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+	for _, item := range items {
+		if gctx.Err() != nil {
+			break // stop dispatching new symbols once cancelled
+		}
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return nil
+			}
+			a.analyzeSymbolSafe(gctx, item)
+			return nil
+		})
+	}
+	_ = g.Wait()
+}
+
+// analyzeSymbolSafe runs analyzeSymbol with panic recovery so a single symbol's
+// failure cannot crash the process or abort other symbols in the cycle.
+func (a *App) analyzeSymbolSafe(ctx context.Context, item WatchlistItem) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.logger.Error("analyzeSymbol panicked, skipping symbol",
+				zap.String("symbol", item.Symbol),
+				zap.Any("panic", r),
+			)
+		}
+	}()
+	a.analyzeSymbol(ctx, item)
 }
 
 // analyzeSymbol fetches data and runs analysis for a single watchlist item.
@@ -359,7 +423,17 @@ func (a *App) arbitrate(ctx context.Context, symbol string, signals []core.Signa
 		return signals
 	}
 
-	result, err := arb.Arbitrate(ctx, meta.ArbitrationRequest{
+	// Bound a single arbitration call so a slow LLM cannot stall the cycle.
+	// On timeout the call returns ctx.Err() and we degrade to the original
+	// signals, matching the existing "on error, route originals" semantics.
+	timeout := 15 * time.Second
+	if a.cfg != nil && a.cfg.Meta.Arbitrator.Timeout > 0 {
+		timeout = a.cfg.Meta.Arbitrator.Timeout
+	}
+	arbCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	result, err := arb.Arbitrate(arbCtx, meta.ArbitrationRequest{
 		Symbol:             symbol,
 		Market:             collector.MarketForSymbol(symbol),
 		ConflictingSignals: signals,

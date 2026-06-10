@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
+	"github.com/newthinker/atlas/internal/meta"
 	"github.com/newthinker/atlas/internal/notifier"
 	"github.com/newthinker/atlas/internal/strategy"
 )
@@ -20,11 +22,11 @@ type mockCollector struct {
 	fetchCount *int // optional: incremented on each FetchHistory call
 }
 
-func (m *mockCollector) Name() string                        { return m.name }
-func (m *mockCollector) SupportedMarkets() []core.Market     { return []core.Market{core.MarketUS} }
-func (m *mockCollector) Init(cfg collector.Config) error     { return nil }
-func (m *mockCollector) Start(ctx context.Context) error     { return nil }
-func (m *mockCollector) Stop() error                         { return nil }
+func (m *mockCollector) Name() string                    { return m.name }
+func (m *mockCollector) SupportedMarkets() []core.Market { return []core.Market{core.MarketUS} }
+func (m *mockCollector) Init(cfg collector.Config) error { return nil }
+func (m *mockCollector) Start(ctx context.Context) error { return nil }
+func (m *mockCollector) Stop() error                     { return nil }
 func (m *mockCollector) FetchQuote(symbol string) (*core.Quote, error) {
 	return &core.Quote{Symbol: symbol, Price: 100}, nil
 }
@@ -47,23 +49,43 @@ func (m *mockStrategy) RequiredData() strategy.DataRequirements {
 }
 func (m *mockStrategy) Init(cfg strategy.Config) error { return nil }
 func (m *mockStrategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
-	return m.signals, nil
+	// Return a fresh copy: the engine stamps Strategy onto each element, so a
+	// real strategy hands back freshly computed signals. Sharing one backing
+	// array across concurrent analyses would be a mock artifact, not a bug.
+	out := make([]core.Signal, len(m.signals))
+	copy(out, m.signals)
+	return out, nil
 }
 
 type mockNotifier struct {
-	name     string
-	received []core.Signal
+	name string
+	mu   sync.Mutex
+	recv []core.Signal
 }
 
-func (m *mockNotifier) Name() string { return m.name }
+func (m *mockNotifier) Name() string                   { return m.name }
 func (m *mockNotifier) Init(cfg notifier.Config) error { return nil }
 func (m *mockNotifier) Send(signal core.Signal) error {
-	m.received = append(m.received, signal)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recv = append(m.recv, signal)
 	return nil
 }
 func (m *mockNotifier) SendBatch(signals []core.Signal) error {
-	m.received = append(m.received, signals...)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recv = append(m.recv, signals...)
 	return nil
+}
+
+// received returns a copy of the signals delivered so far, safe for concurrent
+// routing (the parallel analysis path calls Send from multiple goroutines).
+func (m *mockNotifier) received() []core.Signal {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]core.Signal, len(m.recv))
+	copy(out, m.recv)
+	return out
 }
 
 func TestApp_New(t *testing.T) {
@@ -152,8 +174,8 @@ func TestApp_RunOnce(t *testing.T) {
 	app.RunOnce(ctx)
 
 	// Signal should have been routed to notifier
-	if len(mockNoti.received) != 1 {
-		t.Errorf("expected 1 signal, got %d", len(mockNoti.received))
+	if got := mockNoti.received(); len(got) != 1 {
+		t.Errorf("expected 1 signal, got %d", len(got))
 	}
 }
 
@@ -178,11 +200,12 @@ func TestApp_PerSymbolStrategies(t *testing.T) {
 
 	app.RunOnce(context.Background())
 
-	if len(noti.received) != 1 {
-		t.Fatalf("expected 1 signal (only s1), got %d", len(noti.received))
+	got := noti.received()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 signal (only s1), got %d", len(got))
 	}
-	if noti.received[0].Strategy != "s1" {
-		t.Errorf("expected signal from s1, got %q", noti.received[0].Strategy)
+	if got[0].Strategy != "s1" {
+		t.Errorf("expected signal from s1, got %q", got[0].Strategy)
 	}
 }
 
@@ -354,8 +377,8 @@ func TestApp_Executor_NilByDefault(t *testing.T) {
 
 	app.RunOnce(context.Background())
 
-	if len(mockNoti.received) != 1 {
-		t.Errorf("expected 1 routed signal, got %d", len(mockNoti.received))
+	if got := mockNoti.received(); len(got) != 1 {
+		t.Errorf("expected 1 routed signal, got %d", len(got))
 	}
 }
 
@@ -496,4 +519,215 @@ func TestApp_SettersAndAccessors(t *testing.T) {
 
 	// Stop before Start must be a no-op (cancel is nil).
 	app.Stop()
+}
+
+// --- TASK-005: worker pool 并行化 + 仲裁超时测试 ---
+// Context Checkpoint: done_criteria → test mapping
+// functional[0]     "workers>1 全标的处理且确实并行"   → TestApp_ParallelWorkers_ProcessesAllConcurrently
+// functional[1]     "workers<=1 走串行路径"            → TestApp_SerialWhenWorkersLE1 + 现有测试
+// functional[2]     "arbitrate WithTimeout 超时返回原信号" → TestApp_ArbitrateTimeout_ReturnsOriginal
+// boundary[0]       "空 watchlist 不 panic; ctx 取消尽快返回" → TestApp_Parallel_EmptyWatchlist / TestApp_Parallel_CtxCancelled
+// error_handling[0] "单标的 panic 不影响其他标的、不退进程"  → TestApp_Parallel_PanicIsolated
+// error_handling[1] "仲裁超时记 warning 原信号继续路由"      → TestApp_ArbitrateTimeout_ReturnsOriginal
+
+// concurrencyCollector tracks how many FetchHistory calls run in parallel.
+type concurrencyCollector struct {
+	delay     time.Duration
+	active    int32
+	maxActive int32
+	calls     int32
+}
+
+func (c *concurrencyCollector) Name() string                    { return "concurrency" }
+func (c *concurrencyCollector) SupportedMarkets() []core.Market { return []core.Market{core.MarketUS} }
+func (c *concurrencyCollector) Init(cfg collector.Config) error { return nil }
+func (c *concurrencyCollector) Start(ctx context.Context) error { return nil }
+func (c *concurrencyCollector) Stop() error                     { return nil }
+func (c *concurrencyCollector) FetchQuote(symbol string) (*core.Quote, error) {
+	return &core.Quote{Symbol: symbol, Price: 100}, nil
+}
+func (c *concurrencyCollector) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
+	atomic.AddInt32(&c.calls, 1)
+	cur := atomic.AddInt32(&c.active, 1)
+	for {
+		max := atomic.LoadInt32(&c.maxActive)
+		if cur <= max || atomic.CompareAndSwapInt32(&c.maxActive, max, cur) {
+			break
+		}
+	}
+	time.Sleep(c.delay)
+	atomic.AddInt32(&c.active, -1)
+	return executorTestHistory(), nil
+}
+
+func symbolsN(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("SYM%d", i)
+	}
+	return out
+}
+
+func newParallelApp(workers int, coll collector.Collector) *App {
+	cfg := &config.Config{}
+	cfg.Analysis.Workers = workers
+	app := New(cfg, nil)
+	app.RegisterCollector(coll)
+	app.RegisterStrategy(&mockStrategy{name: "s", signals: []core.Signal{
+		{Symbol: "X", Action: core.ActionBuy, Confidence: 0.8},
+	}})
+	return app
+}
+
+func TestApp_ParallelWorkers_ProcessesAllConcurrently(t *testing.T) {
+	coll := &concurrencyCollector{delay: 40 * time.Millisecond}
+	app := newParallelApp(4, coll)
+	app.SetWatchlist(symbolsN(8))
+
+	app.RunOnce(context.Background())
+
+	if got := atomic.LoadInt32(&coll.calls); got != 8 {
+		t.Errorf("expected all 8 symbols processed, got %d", got)
+	}
+	if got := atomic.LoadInt32(&coll.maxActive); got < 2 {
+		t.Errorf("expected concurrent execution (maxActive>=2), got %d", got)
+	}
+}
+
+func TestApp_SerialWhenWorkersLE1(t *testing.T) {
+	coll := &concurrencyCollector{delay: 10 * time.Millisecond}
+	app := newParallelApp(1, coll)
+	app.SetWatchlist(symbolsN(5))
+
+	app.RunOnce(context.Background())
+
+	if got := atomic.LoadInt32(&coll.calls); got != 5 {
+		t.Errorf("expected 5 symbols processed, got %d", got)
+	}
+	if got := atomic.LoadInt32(&coll.maxActive); got != 1 {
+		t.Errorf("serial path must never run concurrently, maxActive=%d", got)
+	}
+}
+
+func TestApp_Parallel_EmptyWatchlist(t *testing.T) {
+	coll := &concurrencyCollector{delay: time.Millisecond}
+	app := newParallelApp(4, coll)
+	// no watchlist
+	app.RunOnce(context.Background()) // must not panic
+	if got := atomic.LoadInt32(&coll.calls); got != 0 {
+		t.Errorf("expected 0 calls for empty watchlist, got %d", got)
+	}
+}
+
+func TestApp_Parallel_CtxCancelled(t *testing.T) {
+	coll := &concurrencyCollector{delay: 50 * time.Millisecond}
+	app := newParallelApp(4, coll)
+	app.SetWatchlist(symbolsN(20))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+
+	start := time.Now()
+	app.RunOnce(ctx)
+	elapsed := time.Since(start)
+
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("cancelled cycle should return promptly, took %v", elapsed)
+	}
+	if got := atomic.LoadInt32(&coll.calls); got == 20 {
+		t.Errorf("cancelled cycle should not dispatch all symbols, got %d", got)
+	}
+}
+
+// panicStrategy panics for one symbol to verify worker-level isolation.
+type panicStrategy struct{ panicSymbol string }
+
+func (p *panicStrategy) Name() string        { return "panic" }
+func (p *panicStrategy) Description() string { return "panic" }
+func (p *panicStrategy) RequiredData() strategy.DataRequirements {
+	return strategy.DataRequirements{PriceHistory: 10}
+}
+func (p *panicStrategy) Init(cfg strategy.Config) error { return nil }
+func (p *panicStrategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
+	if ctx.Symbol == p.panicSymbol {
+		panic("boom in " + ctx.Symbol)
+	}
+	return []core.Signal{{Symbol: ctx.Symbol, Action: core.ActionBuy, Confidence: 0.8}}, nil
+}
+
+func TestApp_Parallel_PanicIsolated(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Analysis.Workers = 4
+	app := New(cfg, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	app.RegisterStrategy(&panicStrategy{panicSymbol: "BOOM"})
+	noti := &mockNotifier{name: "mock"}
+	app.RegisterNotifier(noti)
+	app.SetWatchlist([]string{"BOOM", "OK1", "OK2"})
+
+	app.RunOnce(context.Background()) // must not crash the process
+
+	got := noti.received()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 signals from non-panicking symbols, got %d", len(got))
+	}
+	for _, s := range got {
+		if s.Symbol == "BOOM" {
+			t.Errorf("did not expect a signal from panicking symbol")
+		}
+	}
+}
+
+// slowArbitrator blocks until its context is cancelled, simulating a slow LLM.
+type slowArbitrator struct{ called int32 }
+
+func (s *slowArbitrator) Arbitrate(ctx context.Context, req meta.ArbitrationRequest) (*meta.ArbitrationResult, error) {
+	atomic.AddInt32(&s.called, 1)
+	select {
+	case <-time.After(5 * time.Second):
+		return &meta.ArbitrationResult{Decision: core.ActionSell, Confidence: 0.99}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestApp_ArbitrateTimeout_ReturnsOriginal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Meta.Arbitrator.Timeout = 50 * time.Millisecond
+	app := New(cfg, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	// Two conflicting signals trigger arbitration (len >= 2).
+	app.RegisterStrategy(&mockStrategy{name: "s", signals: []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8, Strategy: "a"},
+		{Symbol: "TEST", Action: core.ActionSell, Confidence: 0.7, Strategy: "b"},
+	}})
+	noti := &mockNotifier{name: "mock"}
+	app.RegisterNotifier(noti)
+	app.SetWatchlist([]string{"TEST"})
+
+	arb := &slowArbitrator{}
+	app.setArbitratorClient(arb)
+
+	start := time.Now()
+	app.RunOnce(context.Background())
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("arbitration must time out quickly, took %v", elapsed)
+	}
+	if atomic.LoadInt32(&arb.called) != 1 {
+		t.Errorf("expected arbitrator to be invoked once, got %d", arb.called)
+	}
+	// On timeout we degrade to the original signals. The router's per-symbol
+	// cooldown lets only the first through, but the key assertion is that it is
+	// an ORIGINAL signal, never the arbitrated "meta_arbitrator" decision.
+	got := noti.received()
+	if len(got) == 0 {
+		t.Fatal("expected at least one original signal routed on timeout, got 0")
+	}
+	for _, s := range got {
+		if s.Strategy == "meta_arbitrator" {
+			t.Errorf("timed-out arbitration must not produce an arbitrated signal: %+v", s)
+		}
+	}
 }
