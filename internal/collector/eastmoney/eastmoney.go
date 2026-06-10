@@ -187,6 +187,10 @@ func (e *Eastmoney) fetchStockQuote(symbol string) (*core.Quote, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("eastmoney: unexpected HTTP status %d", resp.StatusCode)
+	}
+
 	var result quoteResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
@@ -246,6 +250,10 @@ func (e *Eastmoney) fetchFundQuoteFromEastmoney(symbol string) (*core.Quote, err
 		return nil, fmt.Errorf("fetching fund quote: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("eastmoney: unexpected HTTP status %d", resp.StatusCode)
+	}
 
 	// Response is JSONP: jsonpgz({...});
 	body := make([]byte, 4096)
@@ -337,6 +345,10 @@ func (e *Eastmoney) fetchFundHistoryFromEastmoney(symbol string, start, end time
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("eastmoney: unexpected HTTP status %d", resp.StatusCode)
+	}
+
 	var result fundHistoryResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
@@ -416,6 +428,10 @@ func (e *Eastmoney) fetchStockHistory(symbol string, start, end time.Time, inter
 		return nil, fmt.Errorf("fetching history: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("eastmoney: unexpected HTTP status %d", resp.StatusCode)
+	}
 
 	var result historyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

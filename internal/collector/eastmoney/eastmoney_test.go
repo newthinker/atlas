@@ -172,21 +172,45 @@ func TestFetchHistory_EmptyKlines(t *testing.T) {
 	}
 }
 
-// error[0]
+// error[0]: status code itself must drive the error. Body is VALID JSON that
+// would parse successfully on 200, so a passing test proves a real StatusCode
+// guard (not a decode-failure path shared with the malformed-JSON test).
 func TestFetchQuote_HTTPError(t *testing.T) {
-	e, _ := newStockServer(t, http.StatusInternalServerError, "internal error")
+	validBody := `{"data":{"f43":1500,"f46":1480,"f51":1520,"f52":1470,"f60":1485,"f47":1,"f169":15,"f170":1.0}}`
+	e, _ := newStockServer(t, http.StatusInternalServerError, validBody)
 	if _, err := e.FetchQuote("600519.SH"); err == nil {
-		t.Fatal("expected error for HTTP 500")
+		t.Fatal("expected error for HTTP 500 even with valid JSON body")
 	}
 }
 
-// error[0]
+// error[0]: same as above for the history endpoint.
 func TestFetchHistory_HTTPError(t *testing.T) {
-	e, _ := newStockServer(t, http.StatusInternalServerError, "internal error")
+	validBody := `{"data":{"code":"600519","name":"X","klines":["2024-01-02,10.0,11.0,12.0,9.0,1000"]}}`
+	e, _ := newStockServer(t, http.StatusInternalServerError, validBody)
 	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
 	if _, err := e.FetchHistory("600519.SH", start, end, "1d"); err == nil {
-		t.Fatal("expected error for HTTP 500")
+		t.Fatal("expected error for HTTP 500 even with valid JSON body")
+	}
+}
+
+// error[0]: fund quote endpoint must also honor the status code (valid JSONP body).
+func TestFetchQuote_Fund_HTTPError(t *testing.T) {
+	validJSONP := `jsonpgz({"fundcode":"110011","dwjz":"1.50","gsz":"1.60","gszzl":"6.67"});`
+	e, _ := newStockServer(t, http.StatusInternalServerError, validJSONP)
+	if _, err := e.FetchQuote("110011.OF"); err == nil {
+		t.Fatal("expected error for fund quote HTTP 500 even with valid JSONP body")
+	}
+}
+
+// error[0]: fund history endpoint must also honor the status code (valid JSON body).
+func TestFetchHistory_Fund_HTTPError(t *testing.T) {
+	validBody := `{"Data":{"LSJZList":[{"FSRQ":"2024-01-02","DWJZ":"1.50"}]}}`
+	e, _ := newStockServer(t, http.StatusInternalServerError, validBody)
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
+	if _, err := e.FetchHistory("110011.OF", start, end, "1d"); err == nil {
+		t.Fatal("expected error for fund history HTTP 500 even with valid JSON body")
 	}
 }
 

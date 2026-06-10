@@ -3,7 +3,7 @@
   "key_findings": [
     "原 4 个 baseURL 是包级 const（quoteURL/historyURL/fundURL/fundHistoryURL）。重命名为 default* 并改为 Eastmoney 结构体实例字段 quoteURL/historyURL/fundURL/fundHistoryURL，New() 用默认值填充，业务逻辑（含 SetLixingerFallback fallback）完全未动。",
     "新增 NewWithBaseURLs(quote, history, fund, fundHistory string) 注入构造（仿 binance NewWithBaseURL）；空串参数回退到对应 default*，便于只覆写部分 URL。",
-    "无需新增显式 StatusCode 检查即可满足 error_handling[0]：HTTP 非 200 时若 body 非 JSON 走 json decode error，若 body 为 {data:null} 走 'no data' error，两种都返回 error，不改业务逻辑。畸形 JSON / data 为 null 同样走既有错误路径，无 panic。",
+    "error_handling[0] 必须由状态码本身驱动：每个 HTTP fetch 方法在 Do/Get 后、Decode 前加 `if resp.StatusCode != http.StatusOK { return error }` 守卫（4 处：fetchStockQuote/fetchStockHistory/fetchFundQuoteFromEastmoney/fetchFundHistoryFromEastmoney）。最初误判为可借 decode 失败碰巧覆盖（fantasy assertion），经 test-agent-1 退回(ISSUE-1)后改正。",
     "stock kline 字符串格式为 date,open,close,high,low,volume（正则按位取 matches[2..6]）；stock 价格 divisor=100（ETF=1000）；fund 历史 API 返回最新在前，代码反转为时间正序。"
   ],
   "decisions": [
@@ -16,8 +16,8 @@
       "rationale": "测试常只需把 quote+history+fund 指向同一 httptest 服务器；空串回退降低调用方负担且不破坏默认。"
     },
     {
-      "decision": "不为 fetchStock*/fetchFund* 增加显式 resp.StatusCode 检查。",
-      "rationale": "任务硬约束『不改任何业务逻辑』；既有 decode/no-data 错误路径已能让所有 DoD 错误场景返回 error 不 panic，经 httptest 验证。"
+      "decision": "为全部 4 个 HTTP fetch 方法增加显式 resp.StatusCode != http.StatusOK 守卫，并把 *_HTTPError 测试改为『合法 JSON/JSONP body + 非 200』断言 error（与畸形 JSON 用例区分代码路径），新增 fund 路径 HTTP 错误测试。",
+      "rationale": "done_criteria 是验收唯一依据，error_handling[0] 要求状态码本身驱动错误，优先于『不改业务逻辑』的笼统约束。守卫为小幅健壮性增强，不动解析逻辑。修正自 test-agent-1 退回(ISSUE-1: HTTP collector 缺 StatusCode 检查)。"
     },
     {
       "decision": "用 httptest.Server 同时作为 quote/history/fund/fundHistory 的注入 URL，handler 按测试设定返回 status+body。",
@@ -34,17 +34,17 @@
   ],
   "verification": {
     "command": "go test -race -cover -count=1 ./internal/collector/eastmoney/",
-    "result": "ok ... coverage: 84.3% of statements (≥80% 门禁通过)",
+    "result": "ok ... coverage: 86.5% of statements (≥80% 门禁通过)",
     "build": "gofmt -l 无输出; go vet OK; go build ./... OK",
     "done_criteria_coverage": {
       "functional[0]": "现有 5 个 TestEastmoney_* 未修改即通过 + TestNewWithBaseURLs_DefaultsUnchanged",
       "functional[1]": "TestFetchQuote_Stock (divisor=100 价格断言)",
       "functional[2]": "TestFetchHistory_Stock (2 条 OHLCV 字段断言)",
       "boundary[0]": "TestFetchHistory_EmptyKlines + TestFetchQuote_NullData",
-      "error_handling[0]": "TestFetchQuote_HTTPError + TestFetchHistory_HTTPError (HTTP 500)",
-      "error_handling[1]": "TestFetchQuote_MalformedJSON",
+      "error_handling[0]": "TestFetchQuote_HTTPError + TestFetchHistory_HTTPError + TestFetchQuote_Fund_HTTPError + TestFetchHistory_Fund_HTTPError (HTTP 500 + 合法 JSON/JSONP body, 由 StatusCode 守卫驱动 error, 与畸形 JSON 路径区分)",
+      "error_handling[1]": "TestFetchQuote_MalformedJSON ({not json, 200 状态)",
       "error_handling[2]": "TestFetchQuote_NullData (200 + data null)",
-      "non_functional[0]": "覆盖率 84.3% + TestFetchQuote_Fund/TestFetchHistory_Fund/TestPureHelpers"
+      "non_functional[0]": "覆盖率 86.5% + TestFetchQuote_Fund/TestFetchHistory_Fund/TestPureHelpers"
     }
   },
   "notes": "本任务最初被一个失控的 code-simplifier 子代理误置 blocked_clarification（详见 wisdom/learnings-dev-agent-1.md），已纠正为 in_progress 并由 dev-agent-1 正常完成。"
