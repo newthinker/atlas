@@ -1,0 +1,51 @@
+{
+  "task_id": "TASK-009",
+  "key_findings": [
+    "原 4 个 baseURL 是包级 const（quoteURL/historyURL/fundURL/fundHistoryURL）。重命名为 default* 并改为 Eastmoney 结构体实例字段 quoteURL/historyURL/fundURL/fundHistoryURL，New() 用默认值填充，业务逻辑（含 SetLixingerFallback fallback）完全未动。",
+    "新增 NewWithBaseURLs(quote, history, fund, fundHistory string) 注入构造（仿 binance NewWithBaseURL）；空串参数回退到对应 default*，便于只覆写部分 URL。",
+    "无需新增显式 StatusCode 检查即可满足 error_handling[0]：HTTP 非 200 时若 body 非 JSON 走 json decode error，若 body 为 {data:null} 走 'no data' error，两种都返回 error，不改业务逻辑。畸形 JSON / data 为 null 同样走既有错误路径，无 panic。",
+    "stock kline 字符串格式为 date,open,close,high,low,volume（正则按位取 matches[2..6]）；stock 价格 divisor=100（ETF=1000）；fund 历史 API 返回最新在前，代码反转为时间正序。"
+  ],
+  "decisions": [
+    {
+      "decision": "const 改名为 default* 并保留为实例字段默认值，而非直接删除。",
+      "rationale": "保持生产默认行为不变（functional[0]：现有 5 个测试不改即通过），同时让测试可注入 httptest.Server。"
+    },
+    {
+      "decision": "NewWithBaseURLs 对空串参数回退默认，而非强制四个全填。",
+      "rationale": "测试常只需把 quote+history+fund 指向同一 httptest 服务器；空串回退降低调用方负担且不破坏默认。"
+    },
+    {
+      "decision": "不为 fetchStock*/fetchFund* 增加显式 resp.StatusCode 检查。",
+      "rationale": "任务硬约束『不改任何业务逻辑』；既有 decode/no-data 错误路径已能让所有 DoD 错误场景返回 error 不 panic，经 httptest 验证。"
+    },
+    {
+      "decision": "用 httptest.Server 同时作为 quote/history/fund/fundHistory 的注入 URL，handler 按测试设定返回 status+body。",
+      "rationale": "单服务器覆盖股票与基金路径，测试简洁；同一 handler 复用降低重复。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/eastmoney/eastmoney.go",
+    "internal/collector/eastmoney/eastmoney_test.go"
+  ],
+  "interfaces_exposed": [
+    "func NewWithBaseURLs(quote, history, fund, fundHistory string) *Eastmoney // 测试注入构造，空串回退默认",
+    "const defaultQuoteURL/defaultHistoryURL/defaultFundURL/defaultFundHistoryURL"
+  ],
+  "verification": {
+    "command": "go test -race -cover -count=1 ./internal/collector/eastmoney/",
+    "result": "ok ... coverage: 84.3% of statements (≥80% 门禁通过)",
+    "build": "gofmt -l 无输出; go vet OK; go build ./... OK",
+    "done_criteria_coverage": {
+      "functional[0]": "现有 5 个 TestEastmoney_* 未修改即通过 + TestNewWithBaseURLs_DefaultsUnchanged",
+      "functional[1]": "TestFetchQuote_Stock (divisor=100 价格断言)",
+      "functional[2]": "TestFetchHistory_Stock (2 条 OHLCV 字段断言)",
+      "boundary[0]": "TestFetchHistory_EmptyKlines + TestFetchQuote_NullData",
+      "error_handling[0]": "TestFetchQuote_HTTPError + TestFetchHistory_HTTPError (HTTP 500)",
+      "error_handling[1]": "TestFetchQuote_MalformedJSON",
+      "error_handling[2]": "TestFetchQuote_NullData (200 + data null)",
+      "non_functional[0]": "覆盖率 84.3% + TestFetchQuote_Fund/TestFetchHistory_Fund/TestPureHelpers"
+    }
+  },
+  "notes": "本任务最初被一个失控的 code-simplifier 子代理误置 blocked_clarification（详见 wisdom/learnings-dev-agent-1.md），已纠正为 in_progress 并由 dev-agent-1 正常完成。"
+}

@@ -1,7 +1,22 @@
 package eastmoney
 
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "默认构造行为不变, 现有 5 测试不改即过"        → 现有 TestEastmoney_* (未修改) + TestNewWithBaseURLs_DefaultsUnchanged
+// functional[1] "httptest 下 FetchQuote 解析股票行情为 Quote" → TestFetchQuote_Stock
+// functional[2] "httptest 下 FetchHistory 解析 K 线为 OHLCV" → TestFetchHistory_Stock
+// boundary[0]   "空数据/空列表返回空结果或明确错误不 panic"   → TestFetchHistory_EmptyKlines / TestFetchQuote_NullData
+// error[0]      "HTTP 非 200 返回 error"                     → TestFetchQuote_HTTPError / TestFetchHistory_HTTPError
+// error[1]      "畸形 JSON 返回 error"                       → TestFetchQuote_MalformedJSON
+// error[2]      "200 但业务错误(data null) 返回 error 不 panic" → TestFetchQuote_NullData
+// non_func[0]   "包覆盖率 ≥ 80%"                             → 全部 + TestLifecycleNoop / TestFetchQuote_Fund / TestFetchHistory_Fund
+
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/core"
@@ -64,5 +79,221 @@ func TestEastmoney_ToKlineType(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("toKlineType(%s) = %s, want %s", tc.interval, got, tc.expected)
 		}
+	}
+}
+
+// --- httptest-based tests (TASK-009) ---
+
+// functional[0]: injection constructor keeps production defaults when given empty args.
+func TestNewWithBaseURLs_DefaultsUnchanged(t *testing.T) {
+	e := NewWithBaseURLs("", "", "", "")
+	if e.quoteURL != defaultQuoteURL || e.historyURL != defaultHistoryURL ||
+		e.fundURL != defaultFundURL || e.fundHistoryURL != defaultFundHistoryURL {
+		t.Error("empty args should preserve default base URLs")
+	}
+	custom := NewWithBaseURLs("a", "b", "c", "d")
+	if custom.quoteURL != "a" || custom.historyURL != "b" || custom.fundURL != "c" || custom.fundHistoryURL != "d" {
+		t.Error("non-empty args should override base URLs")
+	}
+}
+
+// newStockBroker spins up an httptest server returning body for any request and
+// wires it as the quote+history base URL of a fresh collector.
+func newStockServer(t *testing.T, status int, body string) (*Eastmoney, *httptest.Server) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return NewWithBaseURLs(srv.URL, srv.URL, srv.URL, srv.URL), srv
+}
+
+// functional[1]
+func TestFetchQuote_Stock(t *testing.T) {
+	body := `{"data":{"f43":1500,"f44":1499,"f45":1501,"f46":1480,"f47":12345,"f48":0,"f51":1520,"f52":1470,"f57":"600519","f58":"X","f60":1485,"f169":15,"f170":1.01}}`
+	e, _ := newStockServer(t, http.StatusOK, body)
+
+	q, err := e.FetchQuote("600519.SH")
+	if err != nil {
+		t.Fatalf("FetchQuote: %v", err)
+	}
+	if q.Symbol != "600519.SH" || q.Market != core.MarketCNA {
+		t.Errorf("symbol/market = %s/%s", q.Symbol, q.Market)
+	}
+	// stock divisor is 100
+	if q.Price != 15.0 || q.Open != 14.8 || q.High != 15.2 || q.Low != 14.7 || q.PrevClose != 14.85 {
+		t.Errorf("unexpected prices: %+v", q)
+	}
+	if q.Volume != 12345 || q.Source != "eastmoney" {
+		t.Errorf("volume/source = %d/%s", q.Volume, q.Source)
+	}
+}
+
+// functional[2]
+func TestFetchHistory_Stock(t *testing.T) {
+	body := `{"data":{"code":"600519","name":"X","klines":["2024-01-02,10.0,11.0,12.0,9.0,1000","2024-01-03,11.0,12.5,13.0,10.5,2000"]}}`
+	e, _ := newStockServer(t, http.StatusOK, body)
+
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
+	bars, err := e.FetchHistory("600519.SH", start, end, "1d")
+	if err != nil {
+		t.Fatalf("FetchHistory: %v", err)
+	}
+	if len(bars) != 2 {
+		t.Fatalf("bars = %d, want 2", len(bars))
+	}
+	// kline format: date,open,close,high,low,volume
+	b0 := bars[0]
+	if b0.Open != 10.0 || b0.Close != 11.0 || b0.High != 12.0 || b0.Low != 9.0 || b0.Volume != 1000 {
+		t.Errorf("bar0 unexpected: %+v", b0)
+	}
+	if b0.Symbol != "600519.SH" || b0.Interval != "1d" {
+		t.Errorf("bar0 symbol/interval = %s/%s", b0.Symbol, b0.Interval)
+	}
+}
+
+// boundary[0] + error[2]: HTTP 200 with null data returns error, no panic.
+func TestFetchQuote_NullData(t *testing.T) {
+	e, _ := newStockServer(t, http.StatusOK, `{"data":null}`)
+	if _, err := e.FetchQuote("600519.SH"); err == nil {
+		t.Fatal("expected error for null data")
+	}
+}
+
+// boundary[0]: empty klines list returns error, no panic.
+func TestFetchHistory_EmptyKlines(t *testing.T) {
+	e, _ := newStockServer(t, http.StatusOK, `{"data":{"code":"600519","name":"X","klines":[]}}`)
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
+	if _, err := e.FetchHistory("600519.SH", start, end, "1d"); err == nil {
+		t.Fatal("expected error for empty klines")
+	}
+}
+
+// error[0]
+func TestFetchQuote_HTTPError(t *testing.T) {
+	e, _ := newStockServer(t, http.StatusInternalServerError, "internal error")
+	if _, err := e.FetchQuote("600519.SH"); err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+}
+
+// error[0]
+func TestFetchHistory_HTTPError(t *testing.T) {
+	e, _ := newStockServer(t, http.StatusInternalServerError, "internal error")
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
+	if _, err := e.FetchHistory("600519.SH", start, end, "1d"); err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+}
+
+// error[1]
+func TestFetchQuote_MalformedJSON(t *testing.T) {
+	e, _ := newStockServer(t, http.StatusOK, `{not json`)
+	if _, err := e.FetchQuote("600519.SH"); err == nil {
+		t.Fatal("expected error for malformed JSON")
+	}
+}
+
+// non_func[0]: fund quote path (JSONP) via injected fund base URL.
+func TestFetchQuote_Fund(t *testing.T) {
+	body := `jsonpgz({"fundcode":"110011","name":"F","jzrq":"2024-01-01","dwjz":"1.5000","gsz":"1.6000","gszzl":"6.67","gztime":"2024-01-02 15:00"});`
+	e, _ := newStockServer(t, http.StatusOK, body)
+
+	q, err := e.FetchQuote("110011.OF")
+	if err != nil {
+		t.Fatalf("FetchQuote fund: %v", err)
+	}
+	if q.Source != "eastmoney-fund" {
+		t.Errorf("source = %s, want eastmoney-fund", q.Source)
+	}
+	if q.Price != 1.6 || q.PrevClose != 1.5 {
+		t.Errorf("fund price/prevclose = %v/%v", q.Price, q.PrevClose)
+	}
+}
+
+// non_func[0]: fund history path via injected fund-history base URL.
+func TestFetchHistory_Fund(t *testing.T) {
+	body := `{"Data":{"LSJZList":[{"FSRQ":"2024-01-03","DWJZ":"1.60","LJJZ":"2.0","JZZZL":"1.0"},{"FSRQ":"2024-01-02","DWJZ":"1.50","LJJZ":"1.9","JZZZL":"0.5"}]}}`
+	e, _ := newStockServer(t, http.StatusOK, body)
+
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)
+	bars, err := e.FetchHistory("110011.OF", start, end, "1d")
+	if err != nil {
+		t.Fatalf("FetchHistory fund: %v", err)
+	}
+	if len(bars) != 2 {
+		t.Fatalf("bars = %d, want 2", len(bars))
+	}
+	// reversed to chronological order: oldest first
+	if bars[0].Time.After(bars[1].Time) {
+		t.Error("fund history not in chronological order")
+	}
+	if bars[0].Close != 1.50 {
+		t.Errorf("bars[0].Close = %v, want 1.50", bars[0].Close)
+	}
+}
+
+// non_func[0]: lifecycle no-ops and config setters do not panic.
+func TestLifecycleNoop(t *testing.T) {
+	e := New()
+	if err := e.Init(collector.Config{}); err != nil {
+		t.Errorf("Init: %v", err)
+	}
+	if err := e.Start(context.TODO()); err != nil {
+		t.Errorf("Start: %v", err)
+	}
+	if err := e.Stop(); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+	e.SetLixingerFallback(nil)
+}
+
+// non_func[0]: exhaustively cover pure classification/parse helpers.
+func TestPureHelpers(t *testing.T) {
+	e := New()
+
+	etfCases := map[string]bool{
+		"159915.SZ": true, "510300.SH": true, "511990.SH": true,
+		"512000.SH": true, "513050.SH": true, "515000.SH": true,
+		"516000.SH": true, "518880.SH": true,
+		"600519.SH": false, "12345": false, // wrong length
+	}
+	for sym, want := range etfCases {
+		if got := e.isETF(sym); got != want {
+			t.Errorf("isETF(%s) = %v, want %v", sym, got, want)
+		}
+	}
+
+	fundCases := map[string]bool{
+		"110011.OF": true, "000001.OF": true, "200001.OF": true,
+		"300001.OF": true, "500001.OF": true,
+		"159915.SZ": false, // ETF is not an open-end fund
+		"600519.SH": false, // starts with 6
+		"12345":     false, // wrong length
+	}
+	for sym, want := range fundCases {
+		if got := e.isFund(sym); got != want {
+			t.Errorf("isFund(%s) = %v, want %v", sym, got, want)
+		}
+	}
+
+	klineCases := map[string]string{
+		"1m": "1", "5m": "5", "15m": "15", "30m": "30",
+		"1h": "60", "1d": "101", "weird": "101",
+	}
+	for in, want := range klineCases {
+		if got := e.toKlineType(in); got != want {
+			t.Errorf("toKlineType(%s) = %s, want %s", in, got, want)
+		}
+	}
+
+	// parseSymbol: no-dot input falls back to (symbol, "1").
+	if code, mk := e.parseSymbol("600519"); code != "600519" || mk != "1" {
+		t.Errorf("parseSymbol(no dot) = (%s,%s)", code, mk)
 	}
 }

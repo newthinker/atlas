@@ -17,10 +17,10 @@ import (
 )
 
 const (
-	quoteURL       = "https://push2.eastmoney.com/api/qt/stock/get"
-	historyURL     = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-	fundURL        = "https://fundgz.1234567.com.cn/js"
-	fundHistoryURL = "https://api.fund.eastmoney.com/f10/lsjz"
+	defaultQuoteURL       = "https://push2.eastmoney.com/api/qt/stock/get"
+	defaultHistoryURL     = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+	defaultFundURL        = "https://fundgz.1234567.com.cn/js"
+	defaultFundHistoryURL = "https://api.fund.eastmoney.com/f10/lsjz"
 )
 
 // Eastmoney implements the Eastmoney collector for A-shares
@@ -28,6 +28,12 @@ type Eastmoney struct {
 	client           *http.Client
 	config           collector.Config
 	lixingerFallback *lixinger.Lixinger // Fallback collector for when Eastmoney fails
+
+	// Base URLs are instance fields so tests can inject httptest servers.
+	quoteURL       string
+	historyURL     string
+	fundURL        string
+	fundHistoryURL string
 }
 
 // New creates a new Eastmoney collector
@@ -36,7 +42,30 @@ func New() *Eastmoney {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		quoteURL:       defaultQuoteURL,
+		historyURL:     defaultHistoryURL,
+		fundURL:        defaultFundURL,
+		fundHistoryURL: defaultFundHistoryURL,
 	}
+}
+
+// NewWithBaseURLs creates an Eastmoney collector with custom base URLs (for testing).
+// Empty arguments fall back to the corresponding production default.
+func NewWithBaseURLs(quote, history, fund, fundHistory string) *Eastmoney {
+	e := New()
+	if quote != "" {
+		e.quoteURL = quote
+	}
+	if history != "" {
+		e.historyURL = history
+	}
+	if fund != "" {
+		e.fundURL = fund
+	}
+	if fundHistory != "" {
+		e.fundHistoryURL = fundHistory
+	}
+	return e
 }
 
 func (e *Eastmoney) Name() string {
@@ -150,7 +179,7 @@ func (e *Eastmoney) fetchStockQuote(symbol string) (*core.Quote, error) {
 	// f43=price, f44=bid, f45=ask, f46=open, f47=volume, f48=amount
 	// f51=high, f52=low, f60=prev_close, f169=change, f170=change_percent
 	url := fmt.Sprintf("%s?secid=%s&fields=f43,f44,f45,f46,f47,f48,f51,f52,f57,f58,f60,f169,f170",
-		quoteURL, secid)
+		e.quoteURL, secid)
 
 	resp, err := e.client.Get(url)
 	if err != nil {
@@ -210,7 +239,7 @@ func (e *Eastmoney) fetchFundQuote(symbol string) (*core.Quote, error) {
 // fetchFundQuoteFromEastmoney fetches fund NAV data from Eastmoney API
 func (e *Eastmoney) fetchFundQuoteFromEastmoney(symbol string) (*core.Quote, error) {
 	code, _ := e.parseSymbol(symbol)
-	url := fmt.Sprintf("%s/%s.js", fundURL, code)
+	url := fmt.Sprintf("%s/%s.js", e.fundURL, code)
 
 	resp, err := e.client.Get(url)
 	if err != nil {
@@ -293,7 +322,7 @@ func (e *Eastmoney) fetchFundHistoryFromEastmoney(symbol string, start, end time
 		days = 365
 	}
 
-	url := fmt.Sprintf("%s?fundCode=%s&pageIndex=1&pageSize=%d", fundHistoryURL, code, days)
+	url := fmt.Sprintf("%s?fundCode=%s&pageIndex=1&pageSize=%d", e.fundHistoryURL, code, days)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -378,7 +407,7 @@ func (e *Eastmoney) fetchStockHistory(symbol string, start, end time.Time, inter
 	klt := e.toKlineType(interval)
 
 	url := fmt.Sprintf("%s?secid=%s&klt=%s&fqt=1&beg=%s&end=%s&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56",
-		historyURL, secid, klt,
+		e.historyURL, secid, klt,
 		start.Format("20060102"),
 		end.Format("20060102"))
 
@@ -500,4 +529,3 @@ type fundHistoryResponse struct {
 		} `json:"LSJZList"`
 	} `json:"Data"`
 }
-
