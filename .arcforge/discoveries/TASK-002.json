@@ -1,0 +1,41 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "analyzeSymbol(app.go) 是单标的分析的统一入口；信号在 arbitrate 之后、router.Route 处被路由，执行接线点放在同一循环内每个信号路由后最自然。",
+    "App 已有 SetArbitrator 的加锁快照模式（mu.RLock 读字段到局部变量）；executor 字段复用同一并发模式，避免在 SubmitSignal 期间长时间持锁。"
+  ],
+  "decisions": [
+    {
+      "decision": "SignalExecutor 接口定义在 internal/app（消费侧），仅含 SubmitSignal(ctx, core.Signal) error。",
+      "rationale": "遵循 ADR-2，app 编排层不依赖 broker 基础设施层；接口归属消费方，broker 侧实现该接口即可。"
+    },
+    {
+      "decision": "在 analyzeSymbol 路由循环内，先 router.Route 再（executor != nil 时）executor.SubmitSignal；SubmitSignal 出错只记日志不 return。",
+      "rationale": "done_criteria error_handling 要求单次提交失败不得中断同标的后续信号及后续标的；continue 语义通过不 return 实现。"
+    },
+    {
+      "decision": "进入路由循环前用 mu.RLock 快照 executor 到局部变量。",
+      "rationale": "使 SetExecutor 可与分析循环并发执行且 go test -race 无竞争（non_functional 验证项）。"
+    }
+  ],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "interfaces_exposed": [
+    "type SignalExecutor interface { SubmitSignal(ctx context.Context, sig core.Signal) error }",
+    "func (a *App) SetExecutor(e SignalExecutor)"
+  ],
+  "verification": {
+    "command": "go test -race ./internal/app/",
+    "result": "ok github.com/newthinker/atlas/internal/app",
+    "build": "go build ./... OK; go vet ./internal/app/ OK",
+    "done_criteria_coverage": {
+      "functional[0]": "TestApp_Executor_SubmitsRoutedSignals",
+      "functional[1]": "TestApp_Executor_NilByDefault + 现有 app 包测试不修改通过",
+      "boundary[0]": "TestApp_Executor_NoSignalsNoSubmit",
+      "error_handling[0]": "TestApp_Executor_ErrorDoesNotStop",
+      "non_functional[0]": "TestApp_Executor_ConcurrentSetAndRun (-race)"
+    }
+  }
+}

@@ -55,6 +55,7 @@ type App struct {
 	notifiers  *notifier.Registry
 	router     *router.Router
 	arbitrator *meta.Arbitrator
+	executor   SignalExecutor
 
 	watchlistItems []WatchlistItem
 	watchlistSet   map[string]struct{}
@@ -123,6 +124,22 @@ func (a *App) SetArbitrator(arb *meta.Arbitrator) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.arbitrator = arb
+}
+
+// SignalExecutor submits a routed signal for execution (e.g. order placement).
+// It is defined here, on the consuming side, so the app orchestration layer does
+// not depend on the broker infrastructure layer (see ADR-2).
+type SignalExecutor interface {
+	SubmitSignal(ctx context.Context, sig core.Signal) error
+}
+
+// SetExecutor wires a SignalExecutor so that, after routing, every generated
+// signal in an analysis cycle is submitted for execution. When unset, the
+// analysis cycle behaves exactly as before.
+func (a *App) SetExecutor(e SignalExecutor) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.executor = e
 }
 
 // SetWatchlist sets the symbols to monitor
@@ -278,13 +295,30 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	// Resolve conflicting signals via the LLM arbitrator when enabled.
 	signals = a.arbitrate(ctx, symbol, signals)
 
-	// Route signals
+	// Snapshot the executor under the lock so SetExecutor can run concurrently.
+	a.mu.RLock()
+	executor := a.executor
+	a.mu.RUnlock()
+
+	// Route signals, then submit each for execution when an executor is wired.
 	for _, sig := range signals {
 		if err := a.router.Route(sig); err != nil {
 			a.logger.Error("failed to route signal",
 				zap.String("symbol", symbol),
 				zap.Error(err),
 			)
+		}
+
+		if executor != nil {
+			if err := executor.SubmitSignal(ctx, sig); err != nil {
+				// Record and continue: one failed submission must not block
+				// subsequent signals or subsequent symbols.
+				a.logger.Error("failed to submit signal for execution",
+					zap.String("symbol", symbol),
+					zap.String("action", string(sig.Action)),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,4 +279,221 @@ func TestApp_EmptyWatchlistNoError(t *testing.T) {
 	// Should not panic with empty watchlist
 	ctx := context.Background()
 	app.RunOnce(ctx)
+}
+
+// --- TASK-002: SignalExecutor 接线点测试 ---
+// Context Checkpoint: done_criteria → test mapping
+// functional[0]     "设 executor 后每个被路由信号触发一次 SubmitSignal" → TestApp_Executor_SubmitsRoutedSignals
+// functional[1]     "未调 SetExecutor 时行为不变"                       → 现有 app 测试全过 + TestApp_Executor_NilByDefault
+// boundary[0]       "本周期无信号时不调 SubmitSignal"                   → TestApp_Executor_NoSignalsNoSubmit
+// error_handling[0] "SubmitSignal 返错记日志不中断后续"                 → TestApp_Executor_ErrorDoesNotStop
+// non_functional[0] "SetExecutor 与分析循环并发 -race 无竞争"           → TestApp_Executor_ConcurrentSetAndRun
+
+type mockExecutor struct {
+	mu       sync.Mutex
+	received []core.Signal
+	err      error
+}
+
+func (m *mockExecutor) SubmitSignal(ctx context.Context, sig core.Signal) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.received = append(m.received, sig)
+	return m.err
+}
+
+func (m *mockExecutor) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.received)
+}
+
+func executorTestHistory() []core.OHLCV {
+	history := make([]core.OHLCV, 10)
+	for i := 0; i < 10; i++ {
+		history[i] = core.OHLCV{
+			Symbol: "TEST",
+			Close:  float64(100 + i),
+			Time:   time.Now().Add(time.Duration(-10+i) * 24 * time.Hour),
+		}
+	}
+	return history
+}
+
+func TestApp_Executor_SubmitsRoutedSignals(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	app.RegisterStrategy(&mockStrategy{name: "mock", signals: []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8},
+	}})
+	app.SetWatchlist([]string{"TEST"})
+
+	exec := &mockExecutor{}
+	app.SetExecutor(exec)
+
+	app.RunOnce(context.Background())
+
+	if got := exec.count(); got != 1 {
+		t.Fatalf("expected 1 SubmitSignal call, got %d", got)
+	}
+	if exec.received[0].Symbol != "TEST" || exec.received[0].Action != core.ActionBuy {
+		t.Errorf("unexpected submitted signal: %+v", exec.received[0])
+	}
+}
+
+func TestApp_Executor_NilByDefault(t *testing.T) {
+	// Without SetExecutor the cycle must behave exactly as before (no panic).
+	app := New(&config.Config{}, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	app.RegisterStrategy(&mockStrategy{name: "mock", signals: []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8},
+	}})
+	mockNoti := &mockNotifier{name: "mock"}
+	app.RegisterNotifier(mockNoti)
+	app.SetWatchlist([]string{"TEST"})
+
+	app.RunOnce(context.Background())
+
+	if len(mockNoti.received) != 1 {
+		t.Errorf("expected 1 routed signal, got %d", len(mockNoti.received))
+	}
+}
+
+func TestApp_Executor_NoSignalsNoSubmit(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	app.RegisterStrategy(&mockStrategy{name: "mock", signals: nil}) // no signals
+	app.SetWatchlist([]string{"TEST"})
+
+	exec := &mockExecutor{}
+	app.SetExecutor(exec)
+
+	app.RunOnce(context.Background())
+
+	if got := exec.count(); got != 0 {
+		t.Fatalf("expected 0 SubmitSignal calls when no signals, got %d", got)
+	}
+}
+
+var errSubmitBoom = fmt.Errorf("submit boom")
+
+func TestApp_Executor_ErrorDoesNotStop(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	// Two signals on one symbol; both should be submitted even if executor errors.
+	app.RegisterStrategy(&mockStrategy{name: "mock", signals: []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8},
+		{Symbol: "TEST", Action: core.ActionStrongBuy, Confidence: 0.9},
+	}})
+	app.SetWatchlist([]string{"TEST", "TEST2"})
+
+	exec := &mockExecutor{err: errSubmitBoom}
+	app.SetExecutor(exec)
+
+	app.RunOnce(context.Background())
+
+	// 2 signals per symbol × 2 symbols = 4 submissions despite errors.
+	if got := exec.count(); got != 4 {
+		t.Fatalf("expected 4 SubmitSignal calls despite errors, got %d", got)
+	}
+}
+
+func TestApp_Executor_ConcurrentSetAndRun(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	app.RegisterStrategy(&mockStrategy{name: "mock", signals: []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8},
+	}})
+	app.SetWatchlist([]string{"TEST"})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			app.SetExecutor(&mockExecutor{})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			app.RunOnce(context.Background())
+		}
+	}()
+	wg.Wait()
+}
+
+func TestApp_WatchlistManagement(t *testing.T) {
+	app := New(&config.Config{}, nil)
+
+	app.AddToWatchlist("AAPL")
+	app.AddToWatchlist("AAPL") // duplicate ignored
+	app.AddToWatchlistWithDetails("BTC-USD", "Bitcoin", "", "", []string{"ma"})
+
+	if got := app.GetWatchlist(); len(got) != 2 {
+		t.Fatalf("expected 2 symbols, got %d (%v)", len(got), got)
+	}
+
+	items := app.GetWatchlistItems()
+	var btc *WatchlistItem
+	for i := range items {
+		if items[i].Symbol == "BTC-USD" {
+			btc = &items[i]
+		}
+	}
+	if btc == nil {
+		t.Fatal("BTC-USD not found in watchlist items")
+	}
+	if btc.Market != MarketCrypto || btc.Type != TypeCrypto {
+		t.Errorf("expected auto-detected crypto market/type, got %q/%q", btc.Market, btc.Type)
+	}
+
+	if !app.RemoveFromWatchlist("AAPL") {
+		t.Error("expected RemoveFromWatchlist to return true for existing symbol")
+	}
+	if app.RemoveFromWatchlist("MISSING") {
+		t.Error("expected RemoveFromWatchlist to return false for missing symbol")
+	}
+	if len(app.GetWatchlist()) != 1 {
+		t.Errorf("expected 1 symbol after removal, got %d", len(app.GetWatchlist()))
+	}
+}
+
+func TestApp_DetectMarketAndType(t *testing.T) {
+	cases := []struct {
+		symbol     string
+		wantMarket string
+		wantType   string
+	}{
+		{"600000.SH", MarketAShare, TypeStock},
+		{"000001.SZ", MarketAShare, TypeStock},
+		{"00700.HK", MarketHShare, TypeStock},
+		{"BTC-USD", MarketCrypto, TypeCrypto},
+		{"ETH-USDT", MarketCrypto, TypeCrypto},
+		{"AAPL", MarketUS, TypeStock},
+	}
+	for _, c := range cases {
+		if got := DetectMarket(c.symbol); got != c.wantMarket {
+			t.Errorf("DetectMarket(%q)=%q, want %q", c.symbol, got, c.wantMarket)
+		}
+		if got := DetectType(c.symbol); got != c.wantType {
+			t.Errorf("DetectType(%q)=%q, want %q", c.symbol, got, c.wantType)
+		}
+	}
+}
+
+func TestApp_SettersAndAccessors(t *testing.T) {
+	app := New(&config.Config{}, nil)
+
+	// These setters must not panic with nil/zero values.
+	app.SetSignalStore(nil)
+	app.SetArbitrator(nil)
+	app.RegisterCollector(&mockCollector{name: "c1"})
+
+	if got := app.GetCollectors(); len(got) != 1 {
+		t.Errorf("expected 1 collector, got %d", len(got))
+	}
+
+	// Stop before Start must be a no-op (cancel is nil).
+	app.Stop()
 }
