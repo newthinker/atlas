@@ -228,6 +228,9 @@ func Load(path string) (*Config, error) {
 	// (Explicitly-set zero values are preserved and handled post-unmarshal.)
 	v.SetDefault("analysis.workers", 4)
 	v.SetDefault("collector.cache.enabled", true)
+	// W3: keep Load default in sync with Validate/Execute so an enabled broker
+	// missing execution.mode is treated as "confirm" rather than silently no-op.
+	v.SetDefault("broker.execution.mode", "confirm")
 
 	// Support environment variable overrides
 	v.AutomaticEnv()

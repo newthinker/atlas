@@ -307,3 +307,45 @@ func TestConfig_WarnHardcodedSecrets(t *testing.T) {
 		t.Errorf("expected no warnings for empty config, got %v", none)
 	}
 }
+
+// TASK-004 fix W3: broker enabled but execution.mode omitted must default to
+// "confirm" at Load time so Validate passes AND runtime Execute accepts it
+// (avoids silent no-op orders). DoD: yaml 缺省 execution.mode → Load 后为 confirm 且 Validate 通过.
+func TestLoad_ExecutionMode_DefaultsToConfirm(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+server:
+  port: 8080
+broker:
+  enabled: true
+  mode: paper
+  futu:
+    env: simulate
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Broker.Execution.Mode != "confirm" {
+		t.Errorf("execution.mode = %q, want default %q", cfg.Broker.Execution.Mode, "confirm")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with defaulted execution.mode returned error: %v", err)
+	}
+}
+
+// Explicit execution.mode must be preserved (default only fills the gap).
+func TestLoad_ExecutionMode_ExplicitPreserved(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+broker:
+  enabled: true
+  execution:
+    mode: batch
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Broker.Execution.Mode != "batch" {
+		t.Errorf("execution.mode = %q, want explicit %q", cfg.Broker.Execution.Mode, "batch")
+	}
+}

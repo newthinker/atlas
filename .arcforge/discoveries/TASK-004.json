@@ -21,6 +21,10 @@
     {
       "decision": "同步在 Defaults() 中补 Analysis/Meta.Arbitrator.Timeout/Collector 默认值",
       "rationale": "保持 Defaults() 与 Load() 默认一致，下游若用 Defaults() 也能拿到正确默认。"
+    },
+    {
+      "decision": "[review_fix W3] Load 增加 v.SetDefault('broker.execution.mode', 'confirm')",
+      "rationale": "原先 Validate 接受空串但运行期 Execute 拒绝空 mode，broker 启用却漏配 execution.mode 时静默不下单。Load 补默认 confirm 与 Validate/Execute 对齐，消除该 fail-safe 缺陷；显式配置仍优先保留。"
     }
   ],
   "files_modified": [
