@@ -400,24 +400,65 @@ func TestApp_Executor_NoSignalsNoSubmit(t *testing.T) {
 
 var errSubmitBoom = fmt.Errorf("submit boom")
 
+// perSymbolStrategy emits exactly one routable signal for whichever symbol is
+// being analyzed, so distinct symbols produce distinct (non-cooldown-colliding)
+// routed signals.
+type perSymbolStrategy struct{}
+
+func (perSymbolStrategy) Name() string        { return "per-symbol" }
+func (perSymbolStrategy) Description() string { return "per-symbol" }
+func (perSymbolStrategy) RequiredData() strategy.DataRequirements {
+	return strategy.DataRequirements{PriceHistory: 10}
+}
+func (perSymbolStrategy) Init(cfg strategy.Config) error { return nil }
+func (perSymbolStrategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
+	return []core.Signal{{Symbol: ctx.Symbol, Action: core.ActionBuy, Confidence: 0.8}}, nil
+}
+
 func TestApp_Executor_ErrorDoesNotStop(t *testing.T) {
 	app := New(&config.Config{}, nil)
 	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
-	// Two signals on one symbol; both should be submitted even if executor errors.
-	app.RegisterStrategy(&mockStrategy{name: "mock", signals: []core.Signal{
-		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8},
-		{Symbol: "TEST", Action: core.ActionStrongBuy, Confidence: 0.9},
-	}})
-	app.SetWatchlist([]string{"TEST", "TEST2"})
+	// Distinct symbols each route their own signal; an erroring executor must
+	// not stop subsequent symbols from being submitted.
+	app.RegisterStrategy(perSymbolStrategy{})
+	app.SetWatchlist([]string{"AAA", "BBB", "CCC"})
 
 	exec := &mockExecutor{err: errSubmitBoom}
 	app.SetExecutor(exec)
 
 	app.RunOnce(context.Background())
 
-	// 2 signals per symbol × 2 symbols = 4 submissions despite errors.
-	if got := exec.count(); got != 4 {
-		t.Fatalf("expected 4 SubmitSignal calls despite errors, got %d", got)
+	if got := exec.count(); got != 3 {
+		t.Fatalf("expected 3 SubmitSignal calls despite errors, got %d", got)
+	}
+}
+
+// W2 regression: a signal suppressed by the router (cooldown) must NOT be
+// submitted for execution, otherwise a deduplicated signal still places an order.
+func TestApp_Executor_CooldownSuppressedNotSubmitted(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
+	// Two signals on the SAME symbol: the first routes (and sets cooldown), the
+	// second is suppressed by cooldown and must not reach the executor.
+	app.RegisterStrategy(&mockStrategy{name: "mock", signals: []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8},
+		{Symbol: "TEST", Action: core.ActionStrongBuy, Confidence: 0.9},
+	}})
+	noti := &mockNotifier{name: "mock"}
+	app.RegisterNotifier(noti)
+	app.SetWatchlist([]string{"TEST"})
+
+	exec := &mockExecutor{}
+	app.SetExecutor(exec)
+
+	app.RunOnce(context.Background())
+
+	if got := exec.count(); got != 1 {
+		t.Fatalf("cooldown-suppressed signal must not be submitted: want 1 SubmitSignal, got %d", got)
+	}
+	// Sanity: routing itself also suppressed the second signal.
+	if got := len(noti.received()); got != 1 {
+		t.Fatalf("expected 1 routed signal, got %d", got)
 	}
 }
 

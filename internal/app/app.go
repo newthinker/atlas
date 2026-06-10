@@ -366,14 +366,18 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 
 	// Route signals, then submit each for execution when an executor is wired.
 	for _, sig := range signals {
-		if err := a.router.Route(sig); err != nil {
+		routed, err := a.router.Route(sig)
+		if err != nil {
 			a.logger.Error("failed to route signal",
 				zap.String("symbol", symbol),
 				zap.Error(err),
 			)
 		}
 
-		if executor != nil {
+		// Only submit signals that were actually routed. A signal suppressed by
+		// the router (cooldown/confidence/action filters) must not be submitted
+		// for execution, otherwise a deduplicated signal still places an order.
+		if routed && executor != nil {
 			if err := executor.SubmitSignal(ctx, sig); err != nil {
 				// Record and continue: one failed submission must not block
 				// subsequent signals or subsequent symbols.

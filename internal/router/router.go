@@ -55,8 +55,11 @@ func New(cfg Config, registry *notifier.Registry, logger *zap.Logger) *Router {
 	}
 }
 
-// Route processes a signal through filters and sends to notifiers
-func (r *Router) Route(signal core.Signal) error {
+// Route processes a signal through filters and sends to notifiers. It reports
+// whether the signal was actually routed (true) or suppressed by a filter such
+// as the per-symbol cooldown (false), so callers can avoid acting on a
+// suppressed signal (e.g. submitting it for execution).
+func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 	// Apply filters
 	if !r.passesFilters(signal) {
 		r.logger.Debug("signal filtered out",
@@ -64,7 +67,7 @@ func (r *Router) Route(signal core.Signal) error {
 			zap.String("action", string(signal.Action)),
 			zap.Float64("confidence", signal.Confidence),
 		)
-		return nil
+		return false, nil
 	}
 
 	// Persist signal if store is configured
@@ -81,7 +84,7 @@ func (r *Router) Route(signal core.Signal) error {
 
 	// Send to all notifiers (nil registry is allowed)
 	if r.registry == nil {
-		return nil
+		return true, nil
 	}
 	errors := r.registry.NotifyAll(signal)
 
@@ -102,7 +105,7 @@ func (r *Router) Route(signal core.Signal) error {
 		zap.Int("errors", len(errors)),
 	)
 
-	return nil
+	return true, nil
 }
 
 // RouteBatch processes multiple signals

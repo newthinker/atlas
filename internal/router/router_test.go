@@ -16,7 +16,7 @@ type mockNotifier struct {
 	batchCalled bool
 }
 
-func (m *mockNotifier) Name() string           { return m.name }
+func (m *mockNotifier) Name() string                   { return m.name }
 func (m *mockNotifier) Init(cfg notifier.Config) error { return nil }
 func (m *mockNotifier) Send(signal core.Signal) error {
 	m.received = append(m.received, signal)
@@ -47,9 +47,12 @@ func TestRouter_Route_PassesFilters(t *testing.T) {
 		Confidence: 0.8,
 	}
 
-	err := r.Route(signal)
+	routed, err := r.Route(signal)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !routed {
+		t.Fatal("expected signal to be routed")
 	}
 
 	if len(mock.received) != 1 {
@@ -195,6 +198,42 @@ func TestRouter_ClearCooldown(t *testing.T) {
 	}
 }
 
+func TestRouter_RouteReportsCooldownSuppression(t *testing.T) {
+	registry := notifier.NewRegistry()
+	registry.Register(&mockNotifier{name: "mock"})
+
+	r := New(Config{
+		MinConfidence:    0.5,
+		CooldownDuration: 1 * time.Hour,
+		EnabledActions:   []core.Action{core.ActionBuy},
+	}, registry, nil)
+
+	signal := core.Signal{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.8}
+
+	if routed, _ := r.Route(signal); !routed {
+		t.Fatal("first signal should be routed")
+	}
+	if routed, _ := r.Route(signal); routed {
+		t.Fatal("cooldown-suppressed signal must report routed=false")
+	}
+}
+
+func TestRouter_RouteReportsConfidenceSuppression(t *testing.T) {
+	registry := notifier.NewRegistry()
+	registry.Register(&mockNotifier{name: "mock"})
+
+	r := New(Config{
+		MinConfidence:    0.5,
+		CooldownDuration: 1 * time.Hour,
+		EnabledActions:   []core.Action{core.ActionBuy},
+	}, registry, nil)
+
+	low := core.Signal{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.1}
+	if routed, _ := r.Route(low); routed {
+		t.Fatal("below-threshold signal must report routed=false")
+	}
+}
+
 func TestRouter_RouteBatch(t *testing.T) {
 	registry := notifier.NewRegistry()
 	mock := &mockNotifier{name: "mock"}
@@ -294,7 +333,7 @@ func TestRouter_CleanupExpiredCooldowns(t *testing.T) {
 	r.mu.Lock()
 	r.cooldowns["AAPL"] = time.Now().Add(-300 * time.Millisecond) // expired
 	r.cooldowns["MSFT"] = time.Now().Add(-300 * time.Millisecond) // expired
-	r.cooldowns["GOOG"] = time.Now()                               // not expired
+	r.cooldowns["GOOG"] = time.Now()                              // not expired
 	r.mu.Unlock()
 
 	removed := r.CleanupExpiredCooldowns()

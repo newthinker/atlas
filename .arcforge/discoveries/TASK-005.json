@@ -36,12 +36,18 @@
     "signalArbitrator (unexported, internal/app)": "interface { Arbitrate(ctx context.Context, req meta.ArbitrationRequest) (*meta.ArbitrationResult, error) } — *meta.Arbitrator 满足之",
     "App.SetArbitrator(arb *meta.Arbitrator)": "签名不变；nil 安全（typed-nil 守卫禁用仲裁）",
     "config 消费": "cfg.Analysis.Workers (int, <=1 串行, 默认4 by config loader); cfg.Meta.Arbitrator.Timeout (time.Duration, <=0 回退 15s)",
-    "behavior": "runAnalysisCycle: workers>1 并行执行 analyzeSymbol(errgroup SetLimit); 单标的 panic 经 analyzeSymbolSafe recover 隔离; arbitrate 受 timeout 约束并降级"
+    "behavior": "runAnalysisCycle: workers>1 并行执行 analyzeSymbol(errgroup SetLimit); 单标的 panic 经 analyzeSymbolSafe recover 隔离; arbitrate 受 timeout 约束并降级",
+    "router.Route (W2 返工, BREAKING)": "签名由 Route(core.Signal) error 改为 Route(core.Signal) (routed bool, err error); filter(cooldown/confidence/action) 命中返回 (false,nil), 成功路由返回 (true,nil)。调用方仅 app.go 与 router 自身测试。app 据 routed 决定是否 SubmitSignal——cooldown 抑制的信号不下单。"
+  },
+  "rework_W2": {
+    "issue": "QA W2[中]: analyzeSymbol 中 router.Route 与 executor.SubmitSignal 两步独立, cooldown 抑制的信号仍会下单(去重信号重复下单)。",
+    "fix": "Route 返回 routed 标志(等价机制); app 仅在 routed 时 SubmitSignal。补 app 层 TestApp_Executor_CooldownSuppressedNotSubmitted + router 层 TestRouter_RouteReportsCooldown/ConfidenceSuppression。原 TestApp_Executor_ErrorDoesNotStop 因旧断言依赖 bug(同标的 2 信号都下单)而改用 distinct symbol(count==3)。",
+    "scope_change": "锁内将 packages 由 [./internal/app] 扩为 [./internal/app, ./internal/router](无其他在途任务占用 router)。"
   },
   "verification": {
-    "tests": "go test -race ./internal/app/ => ok",
-    "coverage": "94.5% (>= dev_minimum 80%)",
-    "vet_build": "go vet ./internal/app/ 干净; go build ./... 干净; go mod tidy 已将 golang.org/x/sync v0.16.0 提升为 direct require",
+    "tests": "go test -race ./internal/app/ ./internal/router/ => ok",
+    "coverage": "组合门禁(coverpkg=app,router) 89.7% (>= dev_minimum 80%); app 单包 94.5%",
+    "vet_build": "go vet 干净; gofmt 干净; go build ./... 干净; golang.org/x/sync v0.16.0 为 direct require",
     "dod_mapping": {
       "functional[0]": "TestApp_ParallelWorkers_ProcessesAllConcurrently (8 标的全处理 + maxActive>=2)",
       "functional[1]": "TestApp_SerialWhenWorkersLE1 (maxActive==1) + 现有 app 测试不改即过",
@@ -49,6 +55,7 @@
       "boundary[0]": "TestApp_Parallel_EmptyWatchlist (空表不 panic) + TestApp_Parallel_CtxCancelled (预取消 ctx 快速返回且不派发全部)",
       "error_handling[0]": "TestApp_Parallel_PanicIsolated (BOOM 标的 panic, OK1/OK2 仍产出 2 信号, 进程不退)",
       "error_handling[1]": "含于 ArbitrateTimeout (超时记 warning 原信号继续路由)",
+      "W2_regression": "TestApp_Executor_CooldownSuppressedNotSubmitted (cooldown 抑制信号 SubmitSignal 不触发) + TestRouter_RouteReportsCooldownSuppression",
       "non_functional[0]": "go test -race 全包通过"
     }
   }
