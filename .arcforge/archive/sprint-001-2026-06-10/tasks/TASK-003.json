@@ -1,0 +1,62 @@
+{
+  "id": "TASK-003",
+  "title": "serve.go 接线 paper 模式 M4 执行链",
+  "description": "cmd/atlas：cfg.Broker.Enabled 且 Mode==\"paper\" 时构造 PaperBroker→RiskChecker→PositionTracker→ExecutionManager（替换 serve.go:180-200 注释块），新增信号适配器（core.Signal→broker.OrderRequest，实现 app.SignalExecutor）注入 app.SetExecutor，execManager 赋给 api.Dependencies.ExecutionManager（server.go:51 字段已存在）。必须含端到端集成测试证明链路真实可用（这是 M4 需求「验证链路」的唯一落点）。参考 design-spec.md D1.3、ADR-2。",
+  "module": "cmd-atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/executor.go",
+    "cmd/atlas/executor_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Broker.Enabled=true 且 Mode=paper 时：ExecutionManager 被构造并同时注入 app.SetExecutor 与 api.Dependencies.ExecutionManager",
+      "适配器将 BUY/SELL 信号转为对应方向 OrderRequest，数量按 ExecutionConfig.DefaultSizePct 与账户余额计算，提交 ExecutionManager",
+      "端到端集成测试：paper 模式构造链下注入 BUY 信号，断言 PaperBroker 余额减少且 GetPosition 持仓增加；RiskChecker 拒绝场景（如超出 MaxPositionPct 限额）下余额与持仓均不变",
+      "Provider=futu 且非 paper 模式时保持现有 warning 行为，进程正常启动"
+    ],
+    "boundary": [
+      "Broker.Enabled=false 时不构造任何 broker 组件，Dependencies.ExecutionManager 为 nil",
+      "非 BUY/SELL 的信号 Action（如 HOLD/WATCH）适配器跳过不生成订单",
+      "账户余额为 0 或按 DefaultSizePct 计算的下单数量为 0 时跳过下单（不生成 0 数量订单，不返回错误）"
+    ],
+    "error_handling": [
+      "ExecutionManager 提交返回错误（如风险拒绝）时适配器记日志并返回 nil，错误不向分析循环传播，serve 主流程不退出"
+    ],
+    "non_functional": []
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./cmd/atlas",
+    "./internal/broker",
+    "./internal/strategy/ma_crossover"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "DoD 全部满足（8/8 criteria 测试通过，e2e 证明 BUY 改余额/持仓、风险拒绝不变；executor.go 函数覆盖 newSignalExecutor/SubmitSignal/isExecutableAction=100%、buildExecution=92.3%、wireExecution=85.7%），代码已提交 cf27ec8。但 TaskCompleted hook 的 80%『整包』覆盖门禁对 ./cmd/atlas 不可行：package main 含大量既有未测 CLI 样板（main.go/runServe/backtest.go/broker.go 均 0%，皆非 TASK-003 scope）。./cmd/atlas 单包=19.3%，并入我必须修改的 ./internal/broker 后合并=50.8%，均 <80%。同问题波及 TASK-007/008（同为 ./cmd/atlas）。请裁决：(a) 比照 design-spec 第109行先例，由 Test Agent 按 DoD + executor.go 改动文件覆盖验收，hook 对 cmd/atlas 降级/豁免；或 (b) 在 config/task 为 cmd/atlas 设定可行覆盖基线；或 (c) 要求 TASK-003 追加 CLI 集成测试（工作量大且与 TASK-007/008 文件重叠）。另：为修复 ExecutionManager.Execute 未给市价单带 Price 的集成缺陷（导致 paper BUY 永被拒），已锁内防护性把 ./internal/broker 加入本任务 packages（无在途任务占用）。",
+      "asked_at": "2026-06-10T10:13:45Z",
+      "answer": "裁决选 (b) 机制化：hook 已支持任务级 coverage_minimum 字段（覆盖全局 dev_minimum）。本任务已设 coverage_minimum=45（你报告的合并覆盖 50.8% 可过），TASK-007/008 预设 35。验收质量由 DoD 端到端测试 + Test Agent 矩阵保证，不靠整包数字。你对 internal/broker 的防护性 packages 写入和 Price 缺陷修复做法正确，予以确认。请重新认领（epoch 已 +1）走 dev_done 流程。"
+    }
+  ],
+  "verifier": "test-agent-1",
+  "coverage_minimum": 45,
+  "dev_done_at": "2026-06-10T11:02:35Z",
+  "verified_at": "2026-06-10T19:30:00+0800",
+  "fix_items": [
+    "W1[high] 生产链路惰性：ma_crossover strategy.go:86,102 生成 Signal 不设 Price → executor.go:58 以 0 提交被拒被吞，真实 serve 永不下单。修复：策略层用 bar.Close 填充 Signal.Price；executor_test 增加『Price 未填→不下单且记 warning』显式断言，删除/替换硬编码 Price:100 的 fantasy 用例至少一处为真实策略信号路径"
+  ]
+}

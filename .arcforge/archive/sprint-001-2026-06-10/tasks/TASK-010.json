@@ -1,0 +1,45 @@
+{
+  "id": "TASK-010",
+  "title": "lixinger 采集器可测性重构 + httptest 测试",
+  "description": "internal/collector/lixinger：baseURL 常量改为实例字段并提供测试注入构造（NewWithBaseURL 模式），不改业务逻辑。用 httptest.Server 补 FetchQuote/FetchHistory/FetchFundamental（及基金变体）测试。参考 design-spec.md D4、ADR-6。",
+  "module": "collector-lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/lixinger.go",
+    "internal/collector/lixinger/lixinger_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "增加 baseURL 注入构造后默认行为不变，现有 5 个测试不修改即通过",
+      "httptest 下 FetchQuote 与 FetchHistory 正确解析响应（字段断言）",
+      "httptest 下 FetchFundamental/FetchFundamentalHistory 正确解析基本面数据"
+    ],
+    "boundary": [
+      "API 返回空 data 数组时返回空结果或明确错误，不 panic"
+    ],
+    "error_handling": [
+      "HTTP 非 200 状态码返回 error",
+      "畸形 JSON 响应返回 error",
+      "HTTP 200 但响应体携带业务错误码（code 非成功）时返回 error，不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%（TaskCompleted hook dev_minimum 门禁）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

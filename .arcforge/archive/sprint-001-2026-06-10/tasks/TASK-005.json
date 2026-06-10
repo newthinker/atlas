@@ -1,0 +1,55 @@
+{
+  "id": "TASK-005",
+  "title": "分析循环 worker pool 并行化 + 仲裁超时",
+  "description": "internal/app：runAnalysisCycle（app.go:196）按 cfg.Analysis.Workers 并行执行 analyzeSymbol（errgroup+SetLimit 或等价信号量），workers<=1 保留现有串行路径；arbitrate（app.go:319）增加 context.WithTimeout（取 cfg.Meta.Arbitrator.Timeout），超时降级返回原信号。下游组件线程安全已确认（见 requirements-analysis.md R2）。参考 design-spec.md D2.2/D2.3、ADR-3/ADR-4。",
+  "module": "app",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "workers>1 时一个分析周期内全部 watchlist 标的都被处理，且确实并行执行（如慢 mock collector 下周期耗时 < 串行总和，或并发度计数断言）",
+      "workers<=1 时走串行路径，现有 app 包测试不修改即通过",
+      "arbitrate 的 LLM 调用被 WithTimeout 包装，慢 mock LLM 超过 timeout 时返回原信号列表"
+    ],
+    "boundary": [
+      "watchlist 为空时周期正常完成不 panic；ctx 取消后不再派发新标的并尽快返回"
+    ],
+    "error_handling": [
+      "单个标的 analyzeSymbol 出错（采集失败等）或 panic 均不影响其他标的完成处理、不导致进程退出（worker 内 recover 或等价机制）",
+      "仲裁超时/出错时记 warning 日志且原信号继续路由"
+    ],
+    "non_functional": [
+      {
+        "desc": "internal/app 全包 go test -race 通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/app",
+    "./internal/router"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "fix_items": [
+    "W2[中] app.go:369-377 router.Route 与 executor.SubmitSignal 两步独立：Route 因 cooldown 抑制时仍执行下单。修复：仅当 Route 实际路由成功（未被 cooldown/抑制）才调用 SubmitSignal（Route 需返回可判定结果或等价机制），并补测试：cooldown 抑制的信号不触发 SubmitSignal"
+  ],
+  "verified_at": "2026-06-10T19:20:00+0800"
+}

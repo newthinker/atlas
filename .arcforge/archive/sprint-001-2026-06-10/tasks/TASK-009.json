@@ -1,0 +1,45 @@
+{
+  "id": "TASK-009",
+  "title": "eastmoney 采集器可测性重构 + httptest 测试",
+  "description": "internal/collector/eastmoney：把 4 个硬编码 baseURL 常量改为实例字段并提供测试注入构造（参考 crypto/binance/binance.go:36 NewWithBaseURL 模式），不改任何业务逻辑（含 SetLixingerFallback 行为）。用 httptest.Server 补 FetchQuote/FetchHistory（股票与基金路径）测试。参考 design-spec.md D4、ADR-6。",
+  "module": "collector-eastmoney",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/eastmoney/eastmoney.go",
+    "internal/collector/eastmoney/eastmoney_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "增加 baseURL 注入构造后默认构造行为不变，现有 5 个测试不修改即通过",
+      "httptest 下 FetchQuote 正确解析股票行情响应为 core.Quote",
+      "httptest 下 FetchHistory 正确解析 K 线响应为 []core.OHLCV（字段与条数断言）"
+    ],
+    "boundary": [
+      "API 返回空数据/空列表时返回空结果或明确错误，不 panic"
+    ],
+    "error_handling": [
+      "HTTP 非 200 状态码返回 error",
+      "畸形 JSON 响应返回 error",
+      "HTTP 200 但响应体为业务错误（如 data 为 null/rc 非成功码）时返回 error，不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%（TaskCompleted hook dev_minimum 门禁）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/collector/eastmoney"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

@@ -1,0 +1,46 @@
+{
+  "coverage": {
+    "dev_scope": "changed-package",
+    "dev_minimum": 80,
+    "final_minimum": 80,
+    "tool": "auto",
+    "report_dir": ".arcforge/coverage",
+    "test_timeout": "120s"
+  },
+  "autonomy": "dod-gate",
+  "max_rework": 3,
+  "scheduling": "dag",
+  "team": {
+    "max_dev_agents": 4,
+    "max_test_agents": 2,
+    "max_qa_agents": 1
+  },
+  "tdd": {
+    "strict": true,
+    "require_failing_test_first": true,
+    "require_all_tests_pass": true
+  },
+  "code_review": {
+    "enabled": true,
+    "max_iterations": 3,
+    "severity_threshold": "warning",
+    "adversarial": {
+      "perspective_review": true,
+      "cross_model": "auto"
+    }
+  },
+  "language": "go",
+  "test_command": "go test ./... -v -coverprofile=coverage.out",
+  "coverage_command": "go tool cover -func=coverage.out",
+  "capabilities": {
+    "ecc": false,
+    "superpowers": true,
+    "codex_cli": false,
+    "gemini_cli": false,
+    "detected_at": "2026-06-10T09:23:41Z"
+  },
+  "arcforge": {
+    "repo": "https://github.com/newthinker/ArcForge.git",
+    "auto_update_check": true
+  }
+}

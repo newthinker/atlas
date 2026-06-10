@@ -1,0 +1,43 @@
+{
+  "assigned_to": "dev-agent-3",
+  "assignment_epoch": 2,
+  "complexity": "simple",
+  "context_from": [],
+  "dependencies": [],
+  "description": "internal/config 新增三组配置：AnalysisConfig{Workers int}（默认 4）；ArbitratorConfig 增加 Timeout time.Duration（默认 15s）；CollectorConfig 下 CacheConfig{Enabled bool, TTL time.Duration}（默认 true/5m）。含 yaml mapstructure 标签与默认值注册。参考 design-spec.md D2.1。",
+  "dev_done_at": "2026-06-10T17:51:35+0800",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "done_criteria": {
+    "boundary": [
+      "workers 配置为 0 或负数时 Load 不报错（语义为串行，由 app 层处理 <=1 分支）",
+      "timeout/ttl 配置为 0 时取各自默认值"
+    ],
+    "error_handling": [
+      "timeout/ttl 为非法 duration 字符串（如 \"abc\"）时 Load 返回错误"
+    ],
+    "functional": [
+      "yaml 设置 analysis.workers / meta.arbitrator.timeout / collector.cache.{enabled,ttl} 后 Load 返回对应值",
+      "yaml 完全缺省这三组配置时取默认值：Workers=4、Timeout=15s、Cache.Enabled=true、Cache.TTL=5m"
+    ],
+    "non_functional": []
+  },
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go"
+  ],
+  "id": "TASK-004",
+  "module": "config",
+  "packages": [
+    "./internal/config"
+  ],
+  "questions": [],
+  "rework_count": 1,
+  "status": "accepted",
+  "title": "新增 analysis/arbitrator-timeout/collector-cache 配置",
+  "verifier": "test-agent-2",
+  "wave": 1,
+  "verified_at": "2026-06-10T19:10:00+0800",
+  "fix_items": [
+    "W3[中] config.go:372 Validate 接受 execution.mode 空串但 execution.go:185 运行期拒绝 → broker 启用但漏配 mode 时静默不下单。修复：Load 为 execution.mode 补默认 confirm（与现有默认值注册一致），并补测试：yaml 缺省 execution.mode 时 Load 后值为 confirm 且 Validate 通过"
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": "TASK-006",
+  "title": "实现 CachedCollector OHLCV TTL 缓存装饰器",
+  "description": "internal/collector 新增 cache.go：CachedCollector 嵌入 Collector 接口透传其余方法，仅缓存 FetchHistory（key = symbol|start|end|interval，时间截断到分钟）。NewCached(c, ttl)。命中返回副本；容量上限 256 淘汰最旧；并发安全。参考 design-spec.md D3、ADR-5 与 internal/context/news.go:61 的 CachedNewsProvider 模式。",
+  "module": "collector",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/cache.go",
+    "internal/collector/cache_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TTL 内相同 (symbol,start,end,interval) 第二次 FetchHistory 命中缓存，底层 collector 调用计数为 1",
+      "不同 symbol/interval/时间范围互不命中，各自穿透底层",
+      "命中返回的是副本：调用方修改返回 slice 的元素不影响后续命中结果",
+      "Name/SupportedMarkets 等其余 Collector 方法透传底层实现"
+    ],
+    "boundary": [
+      "TTL 过期后重新穿透底层并刷新缓存；条目数超过 256 时淘汰最旧条目（总数不超上限）"
+    ],
+    "error_handling": [
+      "底层返回 error 时结果不入缓存，下一次调用仍穿透底层"
+    ],
+    "non_functional": [
+      {
+        "desc": "并发 FetchHistory（相同与不同 key 混合）go test -race 通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/collector"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "dev_done_at": "2026-06-10T09:49:44Z"
+}

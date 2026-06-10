@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "broker.ExecutionManager.Execute(ctx, *core.Signal, price) 已封装全部执行语义：action→side 映射、按 DefaultSizePct×TotalValue÷price 计算 quantity、风险检查、下单、更新 PositionTracker。因此 cmd/atlas 适配器是薄桥接（signal→Execute），无需自行构造 OrderRequest。",
+    "集成缺陷（被 e2e 测试捕获，正是 M4『验证链路』目的）：ExecutionManager.Execute 原先构造市价 OrderRequest 时未带 Price，而 paper.PaperBroker.PlaceOrder 要求 request.Price>0 并以该价成交（见 TASK-001 discovery）。导致 BUY 永远被 ErrInvalidPrice 拒绝、余额/持仓不变。修复：Execute 把入参 price 写入 request.Price（market 单 Validate 忽略 Price，对 mock/limit 路径无副作用，broker 四个子包测试全绿）。",
+    "paper.PaperBroker 必须先 Connect(ctx) 才能 GetBalance/PlaceOrder（否则 ErrNotConnected）；buildExecution 在构造后立即 Connect。",
+    "风险拒绝(RiskChecker.Check 返回 Allowed=false)在 Execute 中表现为 ExecuteResult{Success:false}, nil error（非 error）；真正的 error 仅来自 nil signal/price<=0/GetBalance 失败/PlaceOrder 失败。适配器对两者都记日志并返回 nil，确保不打断分析循环。",
+    "config.BrokerConfig: Enabled/Provider/Mode(paper|live)/Execution{Mode,BatchTime,DefaultSizePct}/Risk{MaxPositionPct,MaxDailyLossPct,MaxOpenPositions}/Futu。",
+    "QA W1 修复(rework=1,epoch=3)：ma_crossover 生成 Signal 不设 Price → 真实 serve 下 executor 收到 Price=0 → ExecutionManager 拒(\"price must be positive\") → SubmitSignal 吞掉 → 生产链路永不下单。原 e2e 用硬编码 Price:100 的 fantasy 信号掩盖。修复：strategy.go 两个 crossover Signal 用最近收盘价 lastClose 填 Price；ma_crossover_test 断言 golden cross 信号 Price==lastClose；executor_test 把 e2e BUY 改为真实 ma_crossover 生成信号驱动（goldenCrossSignal 辅助），并新增 TestSignalExecutor_UnpricedSignalNotTraded 显式断言 Price=0→不下单/无持仓（W1 失败模式守卫）。packages 扩 ./internal/strategy/ma_crossover。"
+  ],
+  "decisions": [
+    {
+      "decision": "适配器 signalExecutor 依赖包内最小接口 orderExecutor{Execute(...)} 而非具体 *broker.ExecutionManager；wireExecution 依赖 executorSetter{SetExecutor(app.SignalExecutor)}（*app.App 满足）。",
+      "rationale": "便于用 stub 单测错误/跳过路径，并用 fake setter 断言 SetExecutor 注入，同时 e2e 用真实链验证。遵循 ADR-2：适配器在 cmd/atlas 装配层，避免 broker↔app 循环依赖。"
+    },
+    {
+      "decision": "非 BUY/SELL（HOLD 等）在适配器内 isExecutableAction 早跳过，不调用 Execute。",
+      "rationale": "DoD boundary[1] 明确『适配器跳过』；早跳过避免对 HOLD 信号无谓拉取余额，且语义可单测（stub.called==0）。"
+    },
+    {
+      "decision": "buildExecution 在 broker disabled 或 mode!=paper 时返回 (nil,nil) 并对非 paper 记 warning；wireExecution 仅在 execManager!=nil 时调用 SetExecutor。",
+      "rationale": "DoD boundary[0]（disabled→deps.ExecutionManager 为 nil，不注入）与 functional[3]（futu 非 paper 保持 warning，进程正常启动）。"
+    },
+    {
+      "decision": "防护性扩展 TASK-003.packages 增加 ./internal/broker（锁内、epoch 校验），因修复 execution.go 的 price 传递。",
+      "rationale": "无在途任务占用 ./internal/broker（TASK-001 仅占 ./internal/broker/paper 且已 verified）；改动是单行必要修复，符合『验证链路真实可用』目标。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/executor.go",
+    "cmd/atlas/executor_test.go",
+    "cmd/atlas/serve.go",
+    "internal/broker/execution.go",
+    "internal/strategy/ma_crossover/strategy.go",
+    "internal/strategy/ma_crossover/strategy_test.go"
+  ],
+  "interfaces_exposed": [
+    "func newSignalExecutor(exec orderExecutor, log *zap.Logger) *signalExecutor  // 实现 app.SignalExecutor",
+    "type orderExecutor interface { Execute(ctx context.Context, signal *core.Signal, price float64) (*broker.ExecuteResult, error) }  // *broker.ExecutionManager 满足",
+    "type executorSetter interface { SetExecutor(app.SignalExecutor) }  // *app.App 满足",
+    "func buildExecution(ctx context.Context, cfg *config.Config, log *zap.Logger) (*broker.ExecutionManager, error)  // disabled/非paper 返回(nil,nil)",
+    "func wireExecution(ctx context.Context, cfg *config.Config, setter executorSetter, log *zap.Logger) (*broker.ExecutionManager, error)  // 构造链+注入SetExecutor+返回execManager 供 api.Dependencies",
+    "serve.go runServe 内：execManager 由 wireExecution(context.Background(), cfg, application, log) 得到并赋给 api.Dependencies.ExecutionManager（TASK-007/008 在此基础上接线缓存/回测）"
+  ],
+  "verification": {
+    "command": "go test ./cmd/atlas/ -race -count=1 ; go test ./internal/broker/... -count=1",
+    "result": "ok cmd/atlas (-race); ok internal/broker, /mock, /mocks, /paper (回归全绿)",
+    "build": "go build ./cmd/atlas/ OK; go vet ./cmd/atlas/ ./internal/broker/ 无输出",
+    "coverage_note": "executor.go 函数覆盖：newSignalExecutor/SubmitSignal/isExecutableAction 100%，buildExecution 92.3%，wireExecution 85.7%。但 ./cmd/atlas 整包覆盖率仅 ~19%（合并 ./internal/broker 后 50.8%），远低于 hook 的 80% 门禁——因 package main 大量既有未测 CLI 样板（main.go/runServe/backtest.go/broker.go，均非本任务 scope）。已就此向 Leader 提 blocked_clarification。",
+    "done_criteria_coverage": {
+      "functional[0]": "TestWireExecution_PaperMode_InjectsBoth + TestBuildExecution_PaperMode_Constructs",
+      "functional[1]": "TestSignalExecutor_EndToEnd_BuyChangesBalanceAndPosition",
+      "functional[2]": "TestSignalExecutor_EndToEnd_BuyChangesBalanceAndPosition + TestSignalExecutor_EndToEnd_RiskRejectionNoChange",
+      "functional[3]": "TestBuildExecution_FutuNonPaper_NilNoError",
+      "boundary[0]": "TestBuildExecution_Disabled_Nil + TestWireExecution_Disabled_NoInject",
+      "boundary[1]": "TestSignalExecutor_HoldSignalSkipped",
+      "boundary[2]": "TestSignalExecutor_ZeroQuantitySkipped + TestSignalExecutor_ZeroQuantitySkipped_Unit",
+      "error_handling[0]": "TestSignalExecutor_ExecuteErrorReturnsNil"
+    }
+  }
+}

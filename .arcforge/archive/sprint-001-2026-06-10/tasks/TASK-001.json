@@ -1,0 +1,46 @@
+{
+  "id": "TASK-001",
+  "title": "实现 PaperBroker（内存模拟券商）",
+  "description": "在 internal/broker/paper 新建 PaperBroker，实现 broker.Broker 新接口（types.go:251，14 方法）。市价单立即全额成交，维护 cash/positions/orders 内存状态，支持 OrderUpdateHandler 回调。构造函数 New(initialCash float64)。参考 .arcforge/docs/01-design/design-spec.md D1.1。",
+  "module": "broker-paper",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/broker/paper/paper.go",
+    "internal/broker/paper/paper_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "var _ broker.Broker = (*PaperBroker)(nil) 编译期断言通过，New(initialCash) 返回未连接实例，Connect 后 IsConnected()==true",
+      "买单 PlaceOrder 立即成交：返回订单状态为已成交，GetBalance 现金减少 qty*成交价，GetPosition(symbol) 数量增加 qty（成交价 = OrderRequest 携带的价格字段，paper 模式市价单以请求价格立即成交，见 design-spec D1.1；请求未带价格时返回错误）",
+      "卖单成交后现金增加 qty*price、持仓减少 qty；持仓清零后 GetPosition 反映无持仓",
+      "Subscribe 注册 handler 后，PlaceOrder 成交触发 handler 回调且回调参数包含成交订单"
+    ],
+    "boundary": [
+      "卖出数量超过当前持仓时 PlaceOrder 返回错误，cash/positions 状态不变",
+      "买入所需金额超过可用现金时 PlaceOrder 返回错误，状态不变"
+    ],
+    "error_handling": [
+      "未 Connect 时 PlaceOrder 返回错误；CancelOrder/GetOrder 传入不存在的订单 ID 返回错误"
+    ],
+    "non_functional": [
+      {
+        "desc": "并发 PlaceOrder + GetPositions/GetBalance 在 go test -race 下无竞争",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/broker/paper"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "verified_at": "2026-06-10T18:00:00+0800"
+}

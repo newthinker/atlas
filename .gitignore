@@ -37,3 +37,12 @@ Thumbs.db
 # Logs
 logs/
 *.log
+# ===== Arcforge =====
+# CLM checkpoints（临时工作状态，不需要版本控制）
+.arcforge/checkpoints/
+# 覆盖率中间产物
+coverage.out
+.arcforge/coverage/
+# 归档后的瞬态数据同样不入版本控制（mv 进 archive 会脱离上面两条模式）
+.arcforge/archive/*/checkpoints/
+.arcforge/archive/*/coverage/

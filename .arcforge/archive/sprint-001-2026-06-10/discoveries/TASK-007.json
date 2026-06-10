@@ -1,0 +1,44 @@
+{
+  "task_id": "TASK-007",
+  "key_findings": [
+    "缓存接线点抽成单个包内函数 maybeCache(c, enabled, ttl)，被 yahoo/eastmoney/crypto 三处 RegisterCollector 调用复用；enabled/ttl 来自 cfg.Collector.Cache，在注册段前各取一次局部变量，避免在每个 if 分支重复读配置。",
+    "CachedCollector 仅嵌入 collector.Collector 接口（见 TASK-006），不透传扩展接口方法。lixinger 实现 collector.FundamentalCollector，若被包装则 *CachedCollector 上的 FundamentalCollector 类型断言失败，破坏 eastmoney 的 fundamental fallback 消费路径——故 maybeCache 对实现 FundamentalCollector 的 collector 一律原样返回不包装。",
+    "Name() 与 SupportedMarkets() 经嵌入字段透传，故包装不改变 collector.SelectForSymbol 的按名/按市场路由结果（non_functional 透传保证）。",
+    "broker_test.go 的 mustBroker 原返回 interface{} 再断言；getBroker 本就返回 broker.LegacyBroker，直接以该接口类型返回更直接且保持 *mock.MockBroker 断言语义不变（REFACTOR 顺带清理，不影响 broker handler 覆盖）。",
+    "QA 注意：broker_test.go 不属于 TASK-007 done_criteria，而是为满足 ./cmd/atlas 包级覆盖门禁（min=35）补的『特征化测试』——cmd/atlas 充满既有未测 CLI 样板，仅靠 maybeCache 的 4 条 DoD 测试只能到 ~20.6%。broker.go 的 7 个 CLI handler（getBroker/withBrokerConnection/runBroker{Status,Positions,Orders,Account,History}）此前 0% 且无在途任务占用（TASK-008 仅占 backtest.go），用 mock broker 覆盖后整包升至 45.9%。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增包内函数 maybeCache(c collector.Collector, enabled bool, ttl time.Duration) collector.Collector：enabled=false 原样返回；c 实现 collector.FundamentalCollector 时原样返回；否则 collector.NewCached(c, ttl) 包装。",
+      "rationale": "functional[0]/[1] 要求按 enabled 决定是否包装；boundary[0] 要求扩展接口 collector 不被包装破坏断言路径。集中到一处守卫式实现避免三个注册分支各自重复判断、降低漏判风险。"
+    },
+    {
+      "decision": "在三个 collector 注册分支（yahoo/eastmoney/crypto）统一用 application.RegisterCollector(maybeCache(c, cacheEnabled, cacheTTL)) 包装；缓存开启时打一条 ttl 日志。",
+      "rationale": "三处共享同一接线策略，复用 maybeCache 保证行为一致；日志提供运行期可观测性。eastmoney 的 lixinger fallback 注入在包装前完成，不受影响。"
+    },
+    {
+      "decision": "用守卫子句（guard clauses）而非嵌套三元/条件表达，避免嵌套三元，保持显式可读。",
+      "rationale": "符合项目代码简化规范：清晰优先于紧凑，多分支用顺序 if 返回而非嵌套表达式。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/serve_test.go",
+    "cmd/atlas/broker_test.go"
+  ],
+  "interfaces_exposed": [
+    "func maybeCache(c collector.Collector, enabled bool, ttl time.Duration) collector.Collector"
+  ],
+  "verification": {
+    "command": "go test ./cmd/atlas/ -race -count=1",
+    "result": "ok github.com/newthinker/atlas/cmd/atlas",
+    "build": "go build ./... OK; go vet ./cmd/atlas/ OK; gofmt -l (serve.go,serve_test.go,broker_test.go) clean",
+    "coverage": "go test ./cmd/atlas/ -cover => 45.4% (>= coverage_minimum 35)",
+    "done_criteria_coverage": {
+      "functional[0]": "TestMaybeCache_EnabledWrapsPlain",
+      "functional[1]": "TestMaybeCache_DisabledNoWrap",
+      "boundary[0]": "TestMaybeCache_FundamentalNotWrapped",
+      "non_functional[0]": "TestMaybeCache_SelectorRoutingUnchanged"
+    }
+  }
+}

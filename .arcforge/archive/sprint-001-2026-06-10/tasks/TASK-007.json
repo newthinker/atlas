@@ -1,0 +1,50 @@
+{
+  "id": "TASK-007",
+  "title": "serve.go 接线 OHLCV 缓存装饰器",
+  "description": "cmd/atlas：cfg.Collector.Cache.Enabled 时，在 collector 注册处用 collector.NewCached(c, cfg.Collector.Cache.TTL) 包装注册的采集器。注意：实现扩展接口（如 lixinger 的 FundamentalCollector）的采集器不可被包装破坏类型断言路径——对这类 collector 不包装或确保断言路径不受影响（写测试覆盖）。参考 design-spec.md D3 接线部分。",
+  "module": "cmd-atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/serve_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "cache.enabled=true 时注册到 registry 的普通 collector 被 CachedCollector 包装（TTL 来自配置）",
+      "cache.enabled=false 时所有 collector 原样注册不包装"
+    ],
+    "boundary": [
+      "实现 FundamentalCollector 等扩展接口的 collector（如 lixinger）：包装策略不破坏现有类型断言消费路径（不包装该类，或测试证明断言仍成立）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "包装后 selector.SelectForSymbol 的市场匹配行为不变（Name/SupportedMarkets 透传保证）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-004",
+    "TASK-006"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003",
+    "TASK-004",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "coverage_minimum": 35,
+  "verified_at": "2026-06-10T18:45:00+0800"
+}

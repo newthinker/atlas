@@ -1,0 +1,46 @@
+{
+  "assigned_to": "dev-agent-3",
+  "assignment_epoch": 1,
+  "complexity": "simple",
+  "context_from": [],
+  "dependencies": [],
+  "description": "internal/collector/yahoo：baseURL 常量改为实例字段并提供测试注入构造（NewWithBaseURL 模式），不改业务逻辑。用 httptest.Server 补 FetchQuote/FetchHistory 测试（现有测试仅覆盖符号校验）。参考 design-spec.md D4、ADR-6。",
+  "dev_done_at": "2026-06-10T17:54:07+0800",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "done_criteria": {
+    "boundary": [
+      "chart 响应 result 为空或 timestamp 数组为空时返回空结果或明确错误，不 panic"
+    ],
+    "error_handling": [
+      "HTTP 非 200 状态码返回 error",
+      "畸形 JSON 响应返回 error"
+    ],
+    "functional": [
+      "增加 baseURL 注入构造后默认行为不变，现有 8 个测试不修改即通过",
+      "httptest 下 FetchQuote 正确解析 chart 响应为 core.Quote",
+      "httptest 下 FetchHistory 正确解析为 []core.OHLCV（时间戳/OHLC 字段断言）"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%（TaskCompleted hook dev_minimum 门禁）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "estimated_files": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/yahoo_test.go"
+  ],
+  "id": "TASK-011",
+  "module": "collector-yahoo",
+  "packages": [
+    "./internal/collector/yahoo"
+  ],
+  "questions": [],
+  "rework_count": 0,
+  "status": "accepted",
+  "title": "yahoo 采集器可测性重构 + httptest 测试",
+  "verifier": "test-agent-2",
+  "wave": 1,
+  "verified_at": "2026-06-10T18:15:00+0800"
+}

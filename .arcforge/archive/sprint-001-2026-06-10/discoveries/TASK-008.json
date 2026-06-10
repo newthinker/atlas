@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-008",
+  "key_findings": [
+    "回测引擎 backtest.New(provider).Run(ctx, strat, symbol, start, end) 内部以 '1d' 拉取 OHLCV；空数据时返回 errors.New('no historical data available')（非 sentinel）。为区分『拉取失败(error_handling[0] 非0退出)』与『空数据(boundary[1] 友好提示退0)』，CLI 先用 provider.FetchHistory 预取一次：err→错误退出，空→友好提示返回 nil，非空→用 staticOHLCVProvider 把已取数据喂给 Run，避免对真实采集器二次拉取。",
+    "collector.Collector 接口含 FetchHistory，天然满足 backtest.OHLCVProvider，可直接用 collector.SelectForSymbol(reg, symbol) 选出的采集器作为 provider（接口到接口赋值）。",
+    "非0退出码经由 cobra RunE 返回非 nil error 实现（main 据此退出非0）；策略不存在时先向 out 打印可用策略列表（strategy.Engine.GetStrategyNames）再返回 error。",
+    "可测性靠依赖注入：executeBacktest(deps backtestDeps{provider,strategies,out}, ...)，测试注入 stubProvider(返回固定数据/错误/空)与注册了 mock 策略的 strategy.Engine、bytes.Buffer 作 out，全部离线确定性（non_functional[0]），无真实 API。runBacktest 仅负责装配真实 provider(yahoo/eastmoney/crypto + SelectForSymbol)与 ma_crossover 引擎。"
+  ],
+  "decisions": [
+    {
+      "decision": "抽出 executeBacktest(deps, strategyName, symbol, fromStr, toStr) error 承载全部核心逻辑，runBacktest 只做真实依赖装配并委派。",
+      "rationale": "package main 的 cobra handler 直依赖全局 flag + os.Stdout + 真实采集器，无法离线测试。注入 backtestDeps 后所有 DoD 分支均可用 stub 断言，满足 non_functional『不打真实 API、可重复』。"
+    },
+    {
+      "decision": "校验顺序：解析日期→to<from→策略存在性→拉取(失败/空)→Run→打表。",
+      "rationale": "让每条 DoD 在最早可判定点短路：b0(日期)与 f1(未知策略)在拉取前返回，避免无谓 IO；error_handling[0] 与 b1 在预取处分流。"
+    },
+    {
+      "decision": "新增 staticOHLCVProvider 把预取数据复用给 Run，而非让 Run 再拉一次。",
+      "rationale": "避免对真实 HTTP 采集器二次请求；同时让空/错误判定与引擎执行共用同一份数据，行为一致。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/backtest.go",
+    "cmd/atlas/backtest_test.go"
+  ],
+  "interfaces_exposed": [
+    "func executeBacktest(deps backtestDeps, strategyName, symbol, fromStr, toStr string) error",
+    "type backtestDeps struct { provider backtest.OHLCVProvider; strategies *strategy.Engine; out io.Writer }",
+    "func runBacktest(cmd *cobra.Command, args []string) error  // cobra RunE，装配真实 provider+engine 后委派 executeBacktest"
+  ],
+  "verification": {
+    "command": "go test ./cmd/atlas/ -race -count=1",
+    "result": "ok github.com/newthinker/atlas/cmd/atlas",
+    "build": "go build ./cmd/atlas/ OK; go vet ./cmd/atlas/ 无输出",
+    "coverage": "task-completed.sh gate exit=0：./cmd/atlas 53.3% (>= coverage_minimum 35)",
+    "done_criteria_coverage": {
+      "functional[0]": "TestExecuteBacktest_RunsEngineAndOutputs (断言 provider 被调用 + 输出含 Signals/Trades/Win Rate/Total Return)",
+      "functional[1]": "TestExecuteBacktest_UnknownStrategy (返回 error + 输出列出可用策略 + provider 未被调用)",
+      "boundary[0]": "TestExecuteBacktest_FromAfterTo (+ TestExecuteBacktest_InvalidDate)",
+      "boundary[1]": "TestExecuteBacktest_EmptyData (返回 nil + 友好提示, 不 panic)",
+      "error_handling[0]": "TestExecuteBacktest_FetchError",
+      "non_functional[0]": "全部测试用 stubProvider + bytes.Buffer，离线确定性"
+    }
+  }
+}

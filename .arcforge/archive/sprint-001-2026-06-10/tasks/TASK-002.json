@@ -1,0 +1,42 @@
+{
+  "id": "TASK-002",
+  "title": "App 增加 SignalExecutor 执行接线点",
+  "description": "internal/app 定义 SignalExecutor 接口（SubmitSignal(ctx, core.Signal) error）与 App.SetExecutor 方法（加锁模式同 SetArbitrator，app.go:122）。analyzeSymbol 在路由阶段（app.go:282-289）之后对每个已路由信号调用 executor.SubmitSignal。参考 design-spec.md D1.2、ADR-2。",
+  "module": "app",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "定义 SignalExecutor 接口与 SetExecutor 方法；设置 executor 后，分析周期内每个被路由的信号都触发一次 SubmitSignal（mock executor 计数断言）",
+      "未调用 SetExecutor 时行为与现状完全一致，现有 app 包全部测试不修改即通过"
+    ],
+    "boundary": [
+      "本周期无信号产生时不调用 SubmitSignal"
+    ],
+    "error_handling": [
+      "SubmitSignal 返回错误时记录日志，不中断同标的后续信号及后续标的的处理"
+    ],
+    "non_functional": [
+      {
+        "desc": "SetExecutor 与分析循环并发调用在 go test -race 下无竞争",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

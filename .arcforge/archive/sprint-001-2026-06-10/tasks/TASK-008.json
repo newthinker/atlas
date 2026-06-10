@@ -1,0 +1,49 @@
+{
+  "id": "TASK-008",
+  "title": "backtest CLI 接入回测引擎",
+  "description": "cmd/atlas/backtest.go:62 TODO 处接线：按 symbol 构造/选择 collector 作为 OHLCVProvider，按名字从 strategy registry 取策略，调用 backtest.New(provider).Run(ctx, strat, symbol, from, to)，将 Result（Signals/Trades/Stats）表格化输出 stdout。引擎用法参考 internal/backtest/backtester_test.go:63-114。参考 design-spec.md D5。",
+  "module": "cmd-atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/backtest.go",
+    "cmd/atlas/backtest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "atlas backtest <strategy> --symbol X --from D1 --to D2 实际调用回测引擎并输出信号数、交易数与 Stats 统计",
+      "策略名不存在时输出可用策略列表并以非 0 退出码结束"
+    ],
+    "boundary": [
+      "--from 晚于 --to 时返回参数错误（非 0 退出码）",
+      "数据源返回空 OHLCV 时输出友好提示，不 panic"
+    ],
+    "error_handling": [
+      "collector 拉取历史数据失败时输出错误信息并以非 0 退出码结束"
+    ],
+    "non_functional": [
+      {
+        "desc": "CLI 测试不依赖真实外部 API：通过可注入的 OHLCVProvider/httptest collector 完成全部断言，离线可重复运行",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "coverage_minimum": 35,
+  "dev_done_at": "2026-06-10T10:43:20Z"
+}
