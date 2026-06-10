@@ -1,0 +1,50 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "broker.OrderRequest.Validate() (types.go:103) 只对 OrderTypeLimit 校验 Price>0；market 单不校验，故 PaperBroker.PlaceOrder 必须自带 request.Price<=0 检查以满足『请求未带价格返回错误』(design-spec D1.1)。",
+    "broker.Order 的 FilledAt 是 *time.Time，需要一个可取地址的局部变量；buildFilledOrder 用 filledAt:=now 提供地址，这是标准 Go 习惯写法。",
+    "paper 模式所有订单立即终态成交，故 GetOpenOrders 恒为空、CancelOrder 对存量订单恒返回 ErrOrderNotCancellable；CancelOrder 末尾 return nil 仅为接口契约完整性（实际不可达，是唯一未覆盖行）。"
+  ],
+  "decisions": [
+    {
+      "decision": "PlaceOrder 在 Validate() 之后再单独检查 request.Price<=0 返回 ErrInvalidPrice。",
+      "rationale": "Validate 不覆盖 market 单价格；paper 市价单以请求价格成交，无价格则无法定价，必须显式拒绝。"
+    },
+    {
+      "decision": "读操作用 RLock、写操作用 Lock，未抽取统一的 connected 守卫 helper。",
+      "rationale": "各方法锁模式不同且已在各自锁内检查；抽 helper 需引入『调用方须持锁』隐式前提，对并发敏感代码弊大于利。"
+    },
+    {
+      "decision": "applyFill 在 pos.Quantity==0 时 delete 持仓并提前返回；CostBasis!=0 时才算 UnrealizedPLPercent。",
+      "rationale": "清零持仓即视为无持仓（done_criteria functional[2]）；避免除零。"
+    },
+    {
+      "decision": "Subscribe 仅在 PlaceOrder 成交后回调 handler；Unsubscribe 置 nil 后不再回调。",
+      "rationale": "满足 functional[3] 回调含成交订单，且解订后不触发。"
+    }
+  ],
+  "files_modified": [
+    "internal/broker/paper/paper.go",
+    "internal/broker/paper/paper_test.go"
+  ],
+  "interfaces_exposed": [
+    "func New(initialCash float64) *PaperBroker",
+    "type PaperBroker struct{} // 实现 broker.Broker 全部 14 方法",
+    "var _ broker.Broker = (*PaperBroker)(nil)"
+  ],
+  "verification": {
+    "command": "go test -race -cover -count=1 ./internal/broker/paper/",
+    "result": "ok github.com/newthinker/atlas/internal/broker/paper coverage: 97.6% of statements",
+    "build": "gofmt -l 无输出; go vet ./internal/broker/paper/ OK",
+    "done_criteria_coverage": {
+      "functional[0]": "TestInterfaceAssertion(编译期断言 var _) + TestConnectLifecycle",
+      "functional[1]": "TestBuyOrderFills + TestBuyOrderRequiresPrice",
+      "functional[2]": "TestSellOrderFills + TestSellClearsPosition",
+      "functional[3]": "TestSubscribeHandlerCalled",
+      "boundary[0]": "TestSellExceedsPosition",
+      "boundary[1]": "TestBuyExceedsCash",
+      "error_handling[0]": "TestPlaceOrderNotConnected + TestCancelGetNotFound",
+      "non_functional[0]": "TestConcurrentAccess (-race)"
+    }
+  }
+}
