@@ -82,10 +82,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Persist generated signals so the API and web UI can display them.
 	application.SetSignalStore(sigStore)
 
+	// OHLCV cache settings applied when registering collectors below.
+	cacheEnabled := cfg.Collector.Cache.Enabled
+	cacheTTL := cfg.Collector.Cache.TTL
+	if cacheEnabled {
+		log.Info("OHLCV collector cache enabled", zap.Duration("ttl", cacheTTL))
+	}
+
 	// Register collectors if configured
 	if collectorCfg, ok := cfg.Collectors["yahoo"]; ok && collectorCfg.Enabled {
 		yahooCollector := yahoo.New()
-		application.RegisterCollector(yahooCollector)
+		application.RegisterCollector(maybeCache(yahooCollector, cacheEnabled, cacheTTL))
 	}
 
 	// Create Lixinger collector if configured (used as fallback for Eastmoney)
@@ -103,7 +110,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			eastmoneyCollector.SetLixingerFallback(lixingerCollector)
 			log.Info("lixinger fallback configured for eastmoney collector")
 		}
-		application.RegisterCollector(eastmoneyCollector)
+		application.RegisterCollector(maybeCache(eastmoneyCollector, cacheEnabled, cacheTTL))
 	}
 
 	// Register Crypto collector for digital assets
@@ -116,7 +123,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 				Extra:   collectorCfg.Extra,
 			})
 		}
-		application.RegisterCollector(cryptoCollector)
+		application.RegisterCollector(maybeCache(cryptoCollector, cacheEnabled, cacheTTL))
 		log.Info("crypto collector registered")
 	}
 
@@ -259,4 +266,21 @@ func buildArbitrator(cfg *config.Config, collectors []collector.Collector, log *
 	return meta.NewArbitrator(llmProvider, marketCtx, trackRecord, news, log, meta.ArbitratorConfig{
 		ContextDays: cfg.Meta.Arbitrator.ContextDays,
 	}), nil
+}
+
+// maybeCache wraps c in an OHLCV TTL CachedCollector when caching is enabled.
+//
+// Collectors exposing an extension interface consumed via type assertion (e.g.
+// collector.FundamentalCollector, implemented by lixinger) are returned
+// unwrapped: CachedCollector embeds only collector.Collector and would hide
+// those methods, breaking the assertion path. Name and SupportedMarkets pass
+// through the wrapper, so collector routing/selection is unaffected.
+func maybeCache(c collector.Collector, enabled bool, ttl time.Duration) collector.Collector {
+	if !enabled {
+		return c
+	}
+	if _, ok := c.(collector.FundamentalCollector); ok {
+		return c
+	}
+	return collector.NewCached(c, ttl)
 }
