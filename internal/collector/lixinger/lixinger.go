@@ -106,6 +106,10 @@ func (l *Lixinger) FetchQuote(symbol string) (*core.Quote, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lixinger: unexpected HTTP status %d", resp.StatusCode)
+	}
+
 	var result struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -186,6 +190,10 @@ func (l *Lixinger) FetchHistory(symbol string, start, end time.Time, interval st
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lixinger: unexpected HTTP status %d", resp.StatusCode)
+	}
+
 	var result struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -258,6 +266,10 @@ func (l *Lixinger) FetchFundQuote(symbol string) (*core.Quote, error) {
 		return nil, fmt.Errorf("lixinger: fetch fund failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lixinger: unexpected HTTP status %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Code    int    `json:"code"`
@@ -337,6 +349,10 @@ func (l *Lixinger) fetchFundInfo(code string) *core.FundInfo {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
 	var result struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -413,6 +429,10 @@ func (l *Lixinger) FetchFundHistory(symbol string, start, end time.Time) ([]core
 		return nil, fmt.Errorf("lixinger: fetch fund history failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lixinger: unexpected HTTP status %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Code    int    `json:"code"`
@@ -529,6 +549,10 @@ func (l *Lixinger) postJSON(url string, payload any) (*lixingerResponse, error) 
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lixinger: unexpected HTTP status %d", resp.StatusCode)
+	}
 
 	var result lixingerResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

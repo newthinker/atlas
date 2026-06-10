@@ -132,19 +132,25 @@ func TestLixinger_EmptyData_Fundamental(t *testing.T) {
 }
 
 func TestLixinger_HTTPError_Quote(t *testing.T) {
-	// Non-200 with a non-JSON body: decode fails downstream → error, no panic.
-	l, closeFn := newTestServer(t, http.StatusInternalServerError, "upstream down")
+	// Non-200 status carrying a perfectly valid success body. The error must come
+	// from the status-code guard, not from JSON decoding — otherwise a 503 from a
+	// caching proxy or rate-limit gateway would be mistaken for a real quote.
+	body := `{"code":0,"data":[{"stockCode":"600519","close":1800.5}]}`
+	l, closeFn := newTestServer(t, http.StatusServiceUnavailable, body)
 	defer closeFn()
 	if _, err := l.FetchQuote("600519.SH"); err == nil {
-		t.Error("expected error on HTTP 500")
+		t.Error("expected error on HTTP 503 despite valid JSON body")
 	}
 }
 
 func TestLixinger_HTTPError_Fundamental(t *testing.T) {
-	l, closeFn := newTestServer(t, http.StatusBadGateway, "bad gateway")
+	// Same contract for fundamentals: a non-200 status with a valid body must
+	// still surface an error driven by the status code.
+	body := `{"code":0,"data":[{"stockCode":"600519","pe_ttm":30.5}]}`
+	l, closeFn := newTestServer(t, http.StatusBadGateway, body)
 	defer closeFn()
 	if _, err := l.FetchFundamental("600519"); err == nil {
-		t.Error("expected error on HTTP 502")
+		t.Error("expected error on HTTP 502 despite valid JSON body")
 	}
 }
 

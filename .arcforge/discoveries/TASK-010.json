@@ -2,7 +2,7 @@
   "task_id": "TASK-010",
   "key_findings": [
     "lixinger 所有 HTTP 端点此前用包级 const baseURL 拼 URL（6 处）；改为实例字段 l.baseURL 后即可用 httptest.Server 注入，业务逻辑零改动。",
-    "各 Fetch 方法在非 200 HTTP 状态下仍会继续 json.Decode body：因此 error_handling『非 200 返 error』通过『非 200 + 非 JSON body → decode 失败』路径达成，未改动状态码处理逻辑。",
+    "返工修复(epoch2): 原实现在非 200 状态下仍直接 json.Decode，'非 200 返 error' 仅靠'非 JSON body→decode 失败'侥幸通过(与 MalformedJSON 同路径), HTTP 503+合法 success body 会被误当成功——这是 verifier 抓到的 fantasy assertion。修复: 在全部 6 处 client.Do 后、Decode 前加 if resp.StatusCode != http.StatusOK 守卫(5 处返 error, fetchFundInfo 返 nil)。HTTPError 测试改用'合法 JSON+非200'断言, 与 MalformedJSON 路径彻底区分。",
     "FetchHistory/FetchFundHistory 对空 data 返回空 slice 且不报错；FetchQuote/FetchFundQuote/FetchFundamental 对空 data 返回明确 error——两类边界行为均符合 boundary done_criteria（『空结果或明确错误』）。"
   ],
   "decisions": [
@@ -15,8 +15,8 @@
       "rationale": "保证『现有 5 测试不修改即过』可被客观验证（原文件零 diff）。"
     },
     {
-      "decision": "非 200 错误路径用『非 JSON body』触发 decode 失败来断言 error。",
-      "rationale": "不引入新的状态码检查逻辑（任务要求不改业务逻辑），同时真实覆盖错误返回。"
+      "decision": "返工(epoch2): 在 6 处 client.Do 后加最小状态码守卫 resp.StatusCode != http.StatusOK 返 error/nil; HTTPError 测试改用合法 JSON+非200 状态断言。",
+      "rationale": "verifier 判定原『非 JSON body 触发 decode 失败』为 fantasy assertion——未真正验证状态码驱动错误, 且 HTTP 503+合法 body 存在未覆盖的误判场景。DoD error_handling[0] 明确要求『状态码非 200 返 error』, DoD 为验收唯一依据优先于『不改业务逻辑』的笼统约束。守卫为局部健壮性增强, 不改解析逻辑。负向对照: 移除 Quote 守卫后 TestLixinger_HTTPError_Quote 如期失败, 证明断言非空洞。"
     }
   ],
   "files_modified": [
@@ -29,17 +29,18 @@
   "verification": {
     "command": "go test -race ./internal/collector/lixinger/",
     "result": "ok",
-    "isolated_gate": "go test ./internal/collector/lixinger -coverpkg=./internal/collector/lixinger => coverage 83.2% (>= 80%)",
-    "build": "go build ./... OK; go vet OK",
+    "isolated_gate": "go test -race -cover ./internal/collector/lixinger => coverage 81.7% (>= 80%)",
+    "build": "go build ./... OK; go vet OK; gofmt 干净",
+    "rework_fix": "epoch2 修复 error_handling[0] fantasy assertion: 6 处状态码守卫 + 2 个 HTTPError 测试改用合法JSON+非200。负向对照已验证(移除守卫则测试失败)。",
     "done_criteria_coverage": {
       "functional[0]": "原 lixinger_test.go 5 测试不改即过 + TestLixinger_NewDefaultsBaseURL",
       "functional[1]": "TestLixinger_FetchQuote_OK / TestLixinger_FetchHistory_OK",
       "functional[2]": "TestLixinger_FetchFundamental_OK / TestLixinger_FetchFundamentalHistory_OK",
       "boundary[0]": "TestLixinger_EmptyData_Quote/History/Fundamental",
-      "error_handling[0]": "TestLixinger_HTTPError_Quote/Fundamental",
-      "error_handling[1]": "TestLixinger_MalformedJSON_Quote/History",
+      "error_handling[0]": "TestLixinger_HTTPError_Quote/Fundamental (合法JSON+非200状态码驱动 error; 状态码守卫覆盖全部 6 个 Do 站点)",
+      "error_handling[1]": "TestLixinger_MalformedJSON_Quote/History (200+畸形JSON, 与 HTTPError 路径区分)",
       "error_handling[2]": "TestLixinger_BusinessError_Quote/Fundamental",
-      "non_functional[0]": "覆盖率 83.2% >= dev_minimum 80%"
+      "non_functional[0]": "覆盖率 81.7% >= dev_minimum 80%"
     },
     "gate_note": "task-completed.sh 因共享工作区里 TASK-002(已 verified 但未提交)的 ./internal/app 改动被判 scope 漂移——该 drift 不属于 TASK-010。门禁 scope 排除仅覆盖 in_progress/dev_done/verifying，不含 verified，存在窗口。未改 TASK-010.packages 以避免掩盖真实 scope。TASK-010 自身 scope 隔离校验已通过。"
   }
