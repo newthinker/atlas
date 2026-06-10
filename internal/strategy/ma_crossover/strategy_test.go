@@ -72,6 +72,13 @@ func TestMACrossover_GoldenCross(t *testing.T) {
 	if signals[0].Action != core.ActionBuy {
 		t.Errorf("expected Buy action for golden cross, got %s", signals[0].Action)
 	}
+
+	// Regression (QA W1): the signal must carry an execution price (latest close),
+	// otherwise downstream order execution receives Price=0 and never trades.
+	lastClose := prices[len(prices)-1]
+	if signals[0].Price != lastClose {
+		t.Errorf("signal Price = %v, want latest close %v (unpriced signal => no order downstream)", signals[0].Price, lastClose)
+	}
 }
 
 func TestMACrossover_NotEnoughData(t *testing.T) {

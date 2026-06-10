@@ -79,6 +79,10 @@ func (m *MACrossover) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, erro
 	currSlow := slowMA[len(slowMA)-1]
 	prevSlow := slowMA[len(slowMA)-2]
 
+	// Price the signal at the latest close so downstream execution can size and
+	// place an order; without it the executor receives Price=0 and never trades.
+	lastClose := prices[len(prices)-1]
+
 	var signals []core.Signal
 
 	// Golden Cross: fast crosses above slow
@@ -86,6 +90,7 @@ func (m *MACrossover) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, erro
 		signals = append(signals, core.Signal{
 			Symbol:      ctx.Symbol,
 			Action:      core.ActionBuy,
+			Price:       lastClose,
 			Confidence:  m.calculateConfidence(currFast, currSlow),
 			Reason:      fmt.Sprintf("Golden Cross: MA%d (%.2f) crossed above MA%d (%.2f)", m.fastPeriod, currFast, m.slowPeriod, currSlow),
 			GeneratedAt: time.Now(),
@@ -102,6 +107,7 @@ func (m *MACrossover) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, erro
 		signals = append(signals, core.Signal{
 			Symbol:      ctx.Symbol,
 			Action:      core.ActionSell,
+			Price:       lastClose,
 			Confidence:  m.calculateConfidence(currFast, currSlow),
 			Reason:      fmt.Sprintf("Death Cross: MA%d (%.2f) crossed below MA%d (%.2f)", m.fastPeriod, currFast, m.slowPeriod, currSlow),
 			GeneratedAt: time.Now(),
