@@ -13,19 +13,31 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 )
 
-const baseURL = "https://open.lixinger.com/api"
+const defaultBaseURL = "https://open.lixinger.com/api"
 
 // Lixinger implements FundamentalCollector for Lixinger API
 type Lixinger struct {
-	apiKey string
-	client *http.Client
+	apiKey  string
+	baseURL string
+	client  *http.Client
 }
 
 // New creates a new Lixinger collector
 func New(apiKey string) *Lixinger {
+	return NewWithBaseURL(apiKey, defaultBaseURL)
+}
+
+// NewWithBaseURL creates a Lixinger collector pointed at a custom API base URL.
+// It exists so tests can inject an httptest.Server endpoint; production code
+// uses New, which defaults to the real Lixinger API.
+func NewWithBaseURL(apiKey, baseURL string) *Lixinger {
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
 	return &Lixinger{
-		apiKey: apiKey,
-		client: &http.Client{Timeout: 30 * time.Second},
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		client:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -70,7 +82,7 @@ func (l *Lixinger) FetchQuote(symbol string) (*core.Quote, error) {
 	}
 
 	code := l.toLixingerSymbol(symbol)
-	url := fmt.Sprintf("%s/cn/stock/real-time", baseURL)
+	url := fmt.Sprintf("%s/cn/stock/real-time", l.baseURL)
 
 	payload := map[string]any{
 		"token":      l.apiKey,
@@ -147,7 +159,7 @@ func (l *Lixinger) FetchHistory(symbol string, start, end time.Time, interval st
 	}
 
 	code := l.toLixingerSymbol(symbol)
-	url := fmt.Sprintf("%s/cn/stock/hq", baseURL)
+	url := fmt.Sprintf("%s/cn/stock/hq", l.baseURL)
 
 	payload := map[string]any{
 		"token":      l.apiKey,
@@ -223,7 +235,7 @@ func (l *Lixinger) FetchFundQuote(symbol string) (*core.Quote, error) {
 	}
 
 	code := l.toLixingerSymbol(symbol)
-	url := fmt.Sprintf("%s/cn/fund/nav", baseURL)
+	url := fmt.Sprintf("%s/cn/fund/nav", l.baseURL)
 
 	payload := map[string]any{
 		"token":     l.apiKey,
@@ -297,7 +309,7 @@ func (l *Lixinger) FetchFundInfoPublic(code string) *core.FundInfo {
 
 // fetchFundInfo fetches detailed fund information from Lixinger
 func (l *Lixinger) fetchFundInfo(code string) *core.FundInfo {
-	url := fmt.Sprintf("%s/cn/fund/fundamental", baseURL)
+	url := fmt.Sprintf("%s/cn/fund/fundamental", l.baseURL)
 
 	payload := map[string]any{
 		"token":     l.apiKey,
@@ -376,7 +388,7 @@ func (l *Lixinger) FetchFundHistory(symbol string, start, end time.Time) ([]core
 	}
 
 	code := l.toLixingerSymbol(symbol)
-	url := fmt.Sprintf("%s/cn/fund/nav/history", baseURL)
+	url := fmt.Sprintf("%s/cn/fund/nav/history", l.baseURL)
 
 	payload := map[string]any{
 		"token":     l.apiKey,
@@ -443,7 +455,7 @@ func (l *Lixinger) FetchFundHistory(symbol string, start, end time.Time) ([]core
 
 // FetchFundamental fetches latest fundamental data for a stock
 func (l *Lixinger) FetchFundamental(symbol string) (*core.Fundamental, error) {
-	url := fmt.Sprintf("%s/cn/company/fundamental/non_financial", baseURL)
+	url := fmt.Sprintf("%s/cn/company/fundamental/non_financial", l.baseURL)
 
 	payload := map[string]any{
 		"token":      l.apiKey,
