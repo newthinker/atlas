@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoad_FromFile(t *testing.T) {
@@ -104,5 +107,203 @@ func TestConfig_Validate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// Context Checkpoint: done_criteria → test mapping (TASK-004)
+// functional[0]    "yaml 设置三组配置后 Load 返回对应值"      → TestLoad_NewConfig_FromYAML
+// functional[1]    "缺省时取默认 4/15s/true/5m"             → TestLoad_NewConfig_Defaults
+// boundary[0]      "workers=0/负数 Load 不报错"             → TestLoad_Workers_ZeroOrNegative
+// boundary[1]      "timeout/ttl=0 取各自默认值"             → TestLoad_TimeoutTTL_ZeroUsesDefault
+// error_handling[0] "非法 duration 字符串返回错误"           → TestLoad_InvalidDuration
+
+func writeTempConfig(t *testing.T, content string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
+
+// functional[0]
+func TestLoad_NewConfig_FromYAML(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+analysis:
+  workers: 8
+meta:
+  arbitrator:
+    timeout: 30s
+collector:
+  cache:
+    enabled: false
+    ttl: 2m
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Analysis.Workers != 8 {
+		t.Errorf("Workers = %d, want 8", cfg.Analysis.Workers)
+	}
+	if cfg.Meta.Arbitrator.Timeout != 30*time.Second {
+		t.Errorf("Timeout = %v, want 30s", cfg.Meta.Arbitrator.Timeout)
+	}
+	if cfg.Collector.Cache.Enabled {
+		t.Errorf("Cache.Enabled = true, want false")
+	}
+	if cfg.Collector.Cache.TTL != 2*time.Minute {
+		t.Errorf("Cache.TTL = %v, want 2m", cfg.Collector.Cache.TTL)
+	}
+}
+
+// functional[1]
+func TestLoad_NewConfig_Defaults(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+server:
+  port: 8080
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Analysis.Workers != 4 {
+		t.Errorf("default Workers = %d, want 4", cfg.Analysis.Workers)
+	}
+	if cfg.Meta.Arbitrator.Timeout != 15*time.Second {
+		t.Errorf("default Timeout = %v, want 15s", cfg.Meta.Arbitrator.Timeout)
+	}
+	if !cfg.Collector.Cache.Enabled {
+		t.Errorf("default Cache.Enabled = false, want true")
+	}
+	if cfg.Collector.Cache.TTL != 5*time.Minute {
+		t.Errorf("default Cache.TTL = %v, want 5m", cfg.Collector.Cache.TTL)
+	}
+}
+
+// boundary[0]
+func TestLoad_Workers_ZeroOrNegative(t *testing.T) {
+	for _, w := range []int{0, -1} {
+		cfgPath := writeTempConfig(t, fmt.Sprintf("analysis:\n  workers: %d\n", w))
+		cfg, err := Load(cfgPath)
+		if err != nil {
+			t.Fatalf("workers=%d: Load returned error: %v", w, err)
+		}
+		if cfg.Analysis.Workers != w {
+			t.Errorf("workers=%d: got %d", w, cfg.Analysis.Workers)
+		}
+	}
+}
+
+// boundary[1]
+func TestLoad_TimeoutTTL_ZeroUsesDefault(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+meta:
+  arbitrator:
+    timeout: 0
+collector:
+  cache:
+    ttl: 0
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Meta.Arbitrator.Timeout != 15*time.Second {
+		t.Errorf("Timeout(0) = %v, want default 15s", cfg.Meta.Arbitrator.Timeout)
+	}
+	if cfg.Collector.Cache.TTL != 5*time.Minute {
+		t.Errorf("Cache.TTL(0) = %v, want default 5m", cfg.Collector.Cache.TTL)
+	}
+}
+
+// error_handling[0]
+func TestLoad_InvalidDuration(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+meta:
+  arbitrator:
+    timeout: "abc"
+`)
+	if _, err := Load(cfgPath); err == nil {
+		t.Errorf("expected error for invalid duration, got nil")
+	}
+}
+
+// validConfig returns a baseline config that passes Validate.
+func validConfig() Config {
+	return Config{
+		Server: ServerConfig{Port: 8080},
+		Router: RouterConfig{MinConfidence: 0.6, CooldownHours: 4},
+	}
+}
+
+func TestConfig_Validate_Branches(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"port too low", func(c *Config) { c.Server.Port = 0 }, true},
+		{"port too high", func(c *Config) { c.Server.Port = 70000 }, true},
+		{"min_confidence high", func(c *Config) { c.Router.MinConfidence = 1.5 }, true},
+		{"cooldown negative", func(c *Config) { c.Router.CooldownHours = -1 }, true},
+		{"claude ok", func(c *Config) { c.LLM.Provider = "claude"; c.LLM.Claude.APIKey = "k" }, false},
+		{"claude missing key", func(c *Config) { c.LLM.Provider = "claude" }, true},
+		{"openai missing key", func(c *Config) { c.LLM.Provider = "openai" }, true},
+		{"openai ok", func(c *Config) { c.LLM.Provider = "openai"; c.LLM.OpenAI.APIKey = "k" }, false},
+		{"ollama missing endpoint", func(c *Config) { c.LLM.Provider = "ollama" }, true},
+		{"ollama ok", func(c *Config) { c.LLM.Provider = "ollama"; c.LLM.Ollama.Endpoint = "http://x" }, false},
+		{"broker live needs real env", func(c *Config) {
+			c.Broker.Enabled = true
+			c.Broker.Mode = "live"
+			c.Broker.Futu.Env = "simulate"
+		}, true},
+		{"broker invalid exec mode", func(c *Config) {
+			c.Broker.Enabled = true
+			c.Broker.Execution.Mode = "bogus"
+		}, true},
+		{"broker ok", func(c *Config) {
+			c.Broker.Enabled = true
+			c.Broker.Mode = "paper"
+			c.Broker.Execution.Mode = "confirm"
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validConfig()
+			tt.mutate(&c)
+			if err := c.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() err=%v, wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestConfig_WarnHardcodedSecrets(t *testing.T) {
+	c := Config{}
+	c.Server.APIKey = "plain-secret"
+	c.LLM.Claude.APIKey = "${CLAUDE_KEY}" // env syntax → no warning
+	c.LLM.OpenAI.APIKey = "openai-plain"
+
+	var msgs []string
+	c.WarnHardcodedSecrets(func(s string) { msgs = append(msgs, s) })
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 warnings, got %d: %v", len(msgs), msgs)
+	}
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "server.api_key") || !strings.Contains(joined, "llm.openai.api_key") {
+		t.Errorf("missing expected fields in warnings: %v", msgs)
+	}
+	if strings.Contains(joined, "llm.claude.api_key") {
+		t.Errorf("env-syntax secret should not warn: %v", msgs)
+	}
+
+	// No secrets → no warnings.
+	var none []string
+	(&Config{}).WarnHardcodedSecrets(func(s string) { none = append(none, s) })
+	if len(none) != 0 {
+		t.Errorf("expected no warnings for empty config, got %v", none)
 	}
 }

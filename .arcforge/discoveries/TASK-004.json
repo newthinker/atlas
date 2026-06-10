@@ -1,0 +1,65 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "design-spec D2.1 的 yaml 顶层键 `collector`（单数）与既有 `collectors`（map[string]CollectorConfig）是两个不同的配置树，新配置 collector.cache 必须挂在新增的顶层字段上，不能复用 per-collector 的 CollectorConfig。",
+    "viper v1.20.1 默认 DecoderConfig 已含 StringToTimeDurationHookFunc，故 time.Duration 字段可直接解析 '15s'/'5m'，非法字符串如 'abc' 会在 Unmarshal 阶段返回错误。",
+    "viper.SetDefault 仅在 key 缺省时生效；用户显式设 0 会覆盖默认。因此 Workers 用 SetDefault(4) 满足缺省默认且保留显式 0/负数；Timeout/TTL 的 '0 取默认' 语义改为 unmarshal 后 <=0 回退默认。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增顶层 Config.Collector CollectorGlobalConfig{Cache CacheConfig}，mapstructure 'collector'",
+      "rationale": "yaml 路径为 collector.cache.{enabled,ttl}（DoD functional 明确），与现有 collectors map 区分，避免污染 per-collector 配置语义。"
+    },
+    {
+      "decision": "Workers 默认用 viper.SetDefault('analysis.workers', 4)；Cache.Enabled 用 SetDefault('collector.cache.enabled', true)",
+      "rationale": "缺省→默认且显式零值（workers=0 串行、enabled=false 关闭）被保留，满足 boundary[0]。"
+    },
+    {
+      "decision": "Timeout/TTL 在 Unmarshal 后做 <=0 → 默认（15s/5m）的后处理",
+      "rationale": "DoD boundary[1] 要求 timeout/ttl=0 取默认，与 Workers 的零值保留语义相反，故单独后处理。"
+    },
+    {
+      "decision": "同步在 Defaults() 中补 Analysis/Meta.Arbitrator.Timeout/Collector 默认值",
+      "rationale": "保持 Defaults() 与 Load() 默认一致，下游若用 Defaults() 也能拿到正确默认。"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/config_test.go"
+  ],
+  "interfaces_exposed": {
+    "AnalysisConfig": {
+      "mapstructure": "analysis",
+      "fields": { "Workers": "int (mapstructure:workers, 默认 4, <=1 串行)" }
+    },
+    "ArbitratorConfig.Timeout": "time.Duration (mapstructure:timeout, 默认 15s, 位于 Config.Meta.Arbitrator)",
+    "CollectorGlobalConfig": {
+      "field_on_config": "Config.Collector (mapstructure:collector)",
+      "fields": { "Cache": "CacheConfig (mapstructure:cache)" }
+    },
+    "CacheConfig": {
+      "mapstructure": "cache (于 Config.Collector.Cache)",
+      "fields": {
+        "Enabled": "bool (mapstructure:enabled, 默认 true)",
+        "TTL": "time.Duration (mapstructure:ttl, 默认 5m)"
+      }
+    },
+    "access_paths": {
+      "workers": "cfg.Analysis.Workers",
+      "arbitrator_timeout": "cfg.Meta.Arbitrator.Timeout",
+      "cache_enabled": "cfg.Collector.Cache.Enabled",
+      "cache_ttl": "cfg.Collector.Cache.TTL"
+    }
+  },
+  "verification": {
+    "tests": [
+      "TestLoad_NewConfig_FromYAML (functional[0])",
+      "TestLoad_NewConfig_Defaults (functional[1])",
+      "TestLoad_Workers_ZeroOrNegative (boundary[0])",
+      "TestLoad_TimeoutTTL_ZeroUsesDefault (boundary[1])",
+      "TestLoad_InvalidDuration (error_handling[0])"
+    ],
+    "command": "go test ./internal/config/ -race -cover",
+    "result": "ok, coverage 93.5%"
+  }
+}

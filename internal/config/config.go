@@ -11,8 +11,8 @@ import (
 )
 
 type Config struct {
-	Server     ServerConfig              `mapstructure:"server"`
-	Storage    StorageConfig             `mapstructure:"storage"`
+	Server     ServerConfig               `mapstructure:"server"`
+	Storage    StorageConfig              `mapstructure:"storage"`
 	Collectors map[string]CollectorConfig `mapstructure:"collectors"`
 	Strategies map[string]StrategyConfig  `mapstructure:"strategies"`
 	Notifiers  map[string]NotifierConfig  `mapstructure:"notifiers"`
@@ -23,6 +23,26 @@ type Config struct {
 	Meta       MetaConfig                 `mapstructure:"meta"`
 	Metrics    MetricsConfig              `mapstructure:"metrics"`
 	Alerts     AlertsConfig               `mapstructure:"alerts"`
+	Analysis   AnalysisConfig             `mapstructure:"analysis"`
+	Collector  CollectorGlobalConfig      `mapstructure:"collector"`
+}
+
+// AnalysisConfig holds analysis pipeline settings.
+type AnalysisConfig struct {
+	// Workers is the number of parallel analysis workers; <=1 means serial.
+	Workers int `mapstructure:"workers"`
+}
+
+// CollectorGlobalConfig holds collector-wide settings (distinct from the
+// per-collector Collectors map). Top-level yaml key: "collector".
+type CollectorGlobalConfig struct {
+	Cache CacheConfig `mapstructure:"cache"`
+}
+
+// CacheConfig holds OHLCV collector cache settings.
+type CacheConfig struct {
+	Enabled bool          `mapstructure:"enabled"`
+	TTL     time.Duration `mapstructure:"ttl"`
 }
 
 type ServerConfig struct {
@@ -73,19 +93,19 @@ type StrategyConfig struct {
 }
 
 type NotifierConfig struct {
-	Enabled  bool              `mapstructure:"enabled"`
-	BotToken string            `mapstructure:"bot_token"`
-	ChatID   string            `mapstructure:"chat_id"`
-	URL      string            `mapstructure:"url"`
+	Enabled  bool   `mapstructure:"enabled"`
+	BotToken string `mapstructure:"bot_token"`
+	ChatID   string `mapstructure:"chat_id"`
+	URL      string `mapstructure:"url"`
 	// Email notifier fields
-	Host     string            `mapstructure:"host"`
-	Port     int               `mapstructure:"port"`
-	Username string            `mapstructure:"username"`
-	Password string            `mapstructure:"password"`
-	From     string            `mapstructure:"from"`
-	To       []string          `mapstructure:"to"`
+	Host     string   `mapstructure:"host"`
+	Port     int      `mapstructure:"port"`
+	Username string   `mapstructure:"username"`
+	Password string   `mapstructure:"password"`
+	From     string   `mapstructure:"from"`
+	To       []string `mapstructure:"to"`
 	// Webhook notifier fields
-	Headers  map[string]string `mapstructure:"headers"`
+	Headers map[string]string `mapstructure:"headers"`
 }
 
 type RouterConfig struct {
@@ -125,12 +145,12 @@ type OllamaConfig struct {
 
 // BrokerConfig holds broker integration settings.
 type BrokerConfig struct {
-	Enabled   bool                  `mapstructure:"enabled"`
-	Provider  string                `mapstructure:"provider"`
-	Mode      string                `mapstructure:"mode"` // paper, live
-	Execution ExecutionConfigOpts   `mapstructure:"execution"`
-	Risk      RiskConfigOpts        `mapstructure:"risk"`
-	Futu      FutuConfig            `mapstructure:"futu"`
+	Enabled   bool                `mapstructure:"enabled"`
+	Provider  string              `mapstructure:"provider"`
+	Mode      string              `mapstructure:"mode"` // paper, live
+	Execution ExecutionConfigOpts `mapstructure:"execution"`
+	Risk      RiskConfigOpts      `mapstructure:"risk"`
+	Futu      FutuConfig          `mapstructure:"futu"`
 }
 
 // ExecutionConfigOpts holds execution settings for the broker.
@@ -164,8 +184,10 @@ type MetaConfig struct {
 
 // ArbitratorConfig holds signal arbitrator settings.
 type ArbitratorConfig struct {
-	Enabled      bool `mapstructure:"enabled"`
-	ContextDays  int  `mapstructure:"context_days"`
+	Enabled     bool `mapstructure:"enabled"`
+	ContextDays int  `mapstructure:"context_days"`
+	// Timeout bounds a single LLM arbitration call; default 15s.
+	Timeout time.Duration `mapstructure:"timeout"`
 }
 
 // SynthesizerConfig holds strategy synthesizer settings.
@@ -202,6 +224,11 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 
+	// Defaults applied only when the key is absent from the config file.
+	// (Explicitly-set zero values are preserved and handled post-unmarshal.)
+	v.SetDefault("analysis.workers", 4)
+	v.SetDefault("collector.cache.enabled", true)
+
 	// Support environment variable overrides
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -222,6 +249,14 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshaling config: %w", err)
+	}
+
+	// Duration fields fall back to defaults when unset or explicitly zero.
+	if cfg.Meta.Arbitrator.Timeout <= 0 {
+		cfg.Meta.Arbitrator.Timeout = 15 * time.Second
+	}
+	if cfg.Collector.Cache.TTL <= 0 {
+		cfg.Collector.Cache.TTL = 5 * time.Minute
 	}
 
 	return &cfg, nil
@@ -248,6 +283,20 @@ func Defaults() *Config {
 		Router: RouterConfig{
 			CooldownHours: 4,
 			MinConfidence: 0.6,
+		},
+		Analysis: AnalysisConfig{
+			Workers: 4,
+		},
+		Meta: MetaConfig{
+			Arbitrator: ArbitratorConfig{
+				Timeout: 15 * time.Second,
+			},
+		},
+		Collector: CollectorGlobalConfig{
+			Cache: CacheConfig{
+				Enabled: true,
+				TTL:     5 * time.Minute,
+			},
 		},
 		Metrics: MetricsConfig{
 			Enabled: true,
