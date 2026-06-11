@@ -131,7 +131,7 @@ Expected: FAIL（`^GSPC`、`GC=F` 被现有正则拒绝）
 var validSymbol = regexp.MustCompile(`^(\^[A-Za-z0-9]{1,10}|[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?|[A-Za-z]{1,6}=F)$`)
 ```
 
-FetchQuote/FetchHistory 的 URL 构造处将 `yahooSymbol` 替换为 `url.PathEscape(yahooSymbol)`（两处，import `net/url`）。
+FetchQuote/FetchHistory 的 URL 构造处将 `yahooSymbol` 替换为 `url.PathEscape(yahooSymbol)`（两处，import `net/url`）。**注意**：这两个函数现有局部变量名为 `url`，会遮蔽 `net/url` 包——同步将局部变量改名为 `reqURL`，避免作用域陷阱。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -262,8 +262,9 @@ git commit -m "feat(yahoo): add FetchEPSHistory via fundamentals-timeseries endp
 
 **Files:**
 - Create: `internal/collector/indexes.go`（共享表，eastmoney 与 selector 共用，避免 import 环）
+- Create: `internal/collector/indexes_test.go`（IsAShareIndex 表驱动小用例：`000300.SH`→true、`000001.SH`→true、`000001.SZ`→false、`600519.SH`→false）
 - Modify: `internal/collector/eastmoney/eastmoney.go`（parseSymbol :99-115）
-- Test: `internal/collector/eastmoney/eastmoney_test.go`、`internal/collector/registry_test.go`（或新建 indexes_test.go）
+- Test: `internal/collector/eastmoney/eastmoney_test.go`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -371,10 +372,7 @@ func TestMarketForSymbol_IndexAndCommodity(t *testing.T) {
 }
 
 func TestSelectForSymbol_IndexAndCommodityRouteToYahoo(t *testing.T) {
-	reg := NewRegistry()
-	reg.Register(fakeCollector{name: "yahoo"})
-	reg.Register(fakeCollector{name: "eastmoney"})
-	reg.Register(fakeCollector{name: "crypto"})
+	reg := newRegistryWith("yahoo", "eastmoney", "crypto") // 复用 selector_test.go 既有 helper
 	for _, sym := range []string{"^GSPC", "^HSI", "GC=F"} {
 		if c := SelectForSymbol(reg, sym); c == nil || c.Name() != "yahoo" {
 			t.Errorf("SelectForSymbol(%q) -> %v, want yahoo", sym, c)
@@ -386,7 +384,7 @@ func TestSelectForSymbol_IndexAndCommodityRouteToYahoo(t *testing.T) {
 }
 ```
 
-（`fakeCollector` 若 selector_test.go 已有同类 stub 则复用，否则补一个实现 Collector 接口的最小 stub。）
+（注意：selector_test.go 既有 `fakeCollector` 的方法是**指针接收者**，值字面量不实现 Collector 接口；务必复用既有 `newRegistryWith` helper，自建时必须用 `&fakeCollector{...}`。）
 
 - [ ] **Step 2: 运行确认失败**
 
@@ -410,6 +408,13 @@ var indexMarkets = map[string]core.Market{
 
 func isIndexSymbol(upper string) bool     { return strings.HasPrefix(upper, "^") }
 func isCommoditySymbol(upper string) bool { return strings.HasSuffix(upper, "=F") }
+
+// KnownIndexMarket reports whether a ^-prefixed symbol is in the phase-1
+// index list and its market. The app assembly layer warns on unknown ones.
+func KnownIndexMarket(symbol string) (core.Market, bool) {
+	m, ok := indexMarkets[strings.ToUpper(symbol)]
+	return m, ok
+}
 ```
 
 `SelectForSymbol` 的 switch 中、A 股分支之后 crypto 分支之前插入：
@@ -496,7 +501,7 @@ Expected: FAIL（TypeIndex 常量与 assetTypeOf 未定义）
 
 - [ ] **Step 3: 实现**
 
-Type 常量块追加 `TypeIndex = "指数"`。DetectType 重写：
+Type 常量块追加 `TypeIndex = "指数"`。同步在 `DetectMarket`（app.go:537-549）的 switch 中、`.HK` 分支之后加一条 `case upperSymbol == "^HSI": return MarketHShare`，避免 UI 市场标签（美股/H股）与 `collector.MarketForSymbol` 的 HK 归属不一致（既有测试 `TestApp_DetectMarketAndType` 补一行用例）。DetectType 重写：
 
 ```go
 func DetectType(symbol string) string {
@@ -586,7 +591,10 @@ func TestFetchValuationPercentile(t *testing.T) {
 		if !strings.Contains(string(body), "pe_ttm.y5.cvpos") {
 			t.Errorf("missing metric in body: %s", body)
 		}
-		w.Write([]byte(`{"code":1,"data":[{"date":"2026-06-10","stockCode":"600519",
+		// 成功码约定：与既有 lixinger.go 一致（code 0 = 成功，非 0 = 失败）。
+		// ⚠️ 实现首日核对项：用真实 API 验证成功码/metrics 键名两个约定，
+		//    若真实 API 与既有代码不符，统一修正全包并更新所有 fixture。
+		w.Write([]byte(`{"code":0,"data":[{"date":"2026-06-10","stockCode":"600519",
 			"pe_ttm":{"y5":{"cvpos":0.2345}}}]}`))
 	}))
 	defer srv.Close()
@@ -603,7 +611,7 @@ func TestFetchValuationPercentile(t *testing.T) {
 
 func TestFetchValuationPercentile_Unavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"code":0,"message":"no permission"}`)) // 权限不足
+		w.Write([]byte(`{"code":403,"message":"no permission"}`)) // 权限不足（非 0 = 失败）
 	}))
 	defer srv.Close()
 	lx := NewWithBaseURL("test-key", srv.URL)
@@ -684,13 +692,14 @@ func (l *Lixinger) FetchValuationPercentile(symbol string, lookbackYears int) (f
 	}
 	metric := fmt.Sprintf("pe_ttm.%s.cvpos", gran)
 	// POST {baseURL}/{endpoint}，body: {token, date:"latest", stockCodes:[code], metricsList:[metric]}
+	//   ⚠️ 请求体键名（metricsList vs metrics）属实现首日核对项，与成功码一起对照真实 API 固化
 	// 解析 data[0] 按 metric 路径逐层下钻（map[string]any），cvpos ∈ [0,1] → ×100 返回
-	// code != 1 / data 为空 / 字段缺失 → 返回 (-1, error)（含权限不足场景）
+	// code != 0 / data 为空 / 字段缺失 → 返回 (-1, error)（含权限不足场景）
 	...
 }
 ```
 
-（POST/JSON 解析按 lixinger.go 现有 `doRequest` 模式实现。）
+（POST 复用 lixinger.go 现有 `postJSON` helper 发请求；但既有 `lixingerResponse` 是平铺固定字段结构，承载不了 `pe_ttm.y5.cvpos` 嵌套——本方法的响应体需自行用 `map[string]any` 解析，不要复用该结构体。）
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -860,7 +869,9 @@ func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64,
 	// 1. eps 升序排序；统计 EPS>0 的点数 < MinEPSPoints → ErrInsufficientEPS
 	// 2. 当前 EPS = 最后一个点；<=0 → ErrNonPositiveEPS
 	// 3. 遍历 closes：二分/线性找 Date <= bar.Time 的最近 eps 点；无 → 跳过；EPS<=0 → 剔除
-	// 4. 当前 PE = 最后 close / 当前 EPS；return PercentileRank(peSeries, currentPE)
+	// 4. 剔除后 PE 序列为空 → 同样返回 ErrInsufficientEPS（数据缺失语义统一进兜底链，
+	//    绝不能让 PercentileRank 的 -1 带着 nil error 冒充"重建成功"）
+	// 5. 当前 PE = 最后 close / 当前 EPS；return PercentileRank(peSeries, currentPE)
 	...
 }
 ```
@@ -987,9 +998,17 @@ func (s *Strategy) RequiredData() strategy.DataRequirements {
 }
 
 func (s *Strategy) Init(cfg strategy.Config) error {
-	// 读取 lookback_years/low/high/extreme_low/extreme_high（int 与 float64 双形态兼容，
-	// 参照 ma_crossover.Init 的参数读取写法）；校验 extreme_low < low < high < extreme_high，
-	// 违反返回 error
+	// 注意：YAML 经 viper 解析后数值可能是 int 也可能是 float64，
+	// ma_crossover.Init 只处理 .(int) 单形态，不能照抄。用本地 helper：
+	//   func numParam(p map[string]any, key string, def float64) float64 {
+	//       switch v := p[key].(type) {
+	//       case int: return float64(v)
+	//       case float64: return v
+	//       }
+	//       return def
+	//   }
+	// 读取 lookback_years/low/high/extreme_low/extreme_high 后校验
+	// extreme_low < low < high < extreme_high，违反返回 error
 	...
 }
 
@@ -1284,11 +1303,27 @@ func (a *App) historyWindowDays(item WatchlistItem) int {
 	if maxBars <= 250 {
 		return 365
 	}
-	return maxBars*7/5 + 30 // 交易日→自然日（×1.4）+ 节假日缓冲
+	// 交易日→自然日：真实折算系数 365/252 ≈ 1.448（×7/5 只折周末、漏节假日，
+	// 对 5×252=1260 bars 会算出 1794 < 1825，不满足 5 年覆盖）
+	return maxBars*365/252 + 30
 }
 ```
 
 `warnOnce`：App 增加 `warned sync.Map`，`LoadOrStore` 去重后 `logger.Warn`。
+
+`effectiveStrategies` 内同步实现**表外指数 warning**（设计 §2.3，Chunk 1 Task 5 仅导出 `KnownIndexMarket` 查询，告警职责在此）：
+
+```go
+	if strings.HasPrefix(item.Symbol, "^") {
+		if _, known := collector.KnownIndexMarket(item.Symbol); !known {
+			a.warnOnce("unknown-index:"+item.Symbol,
+				"index symbol outside phase-1 list, market defaults to US",
+				zap.String("symbol", item.Symbol))
+		}
+	}
+```
+
+补充说明（行为边界，非遗漏）：未绑定 strategies 的 watchlist 项走 `Analyze`（全策略）路径，历史窗口回退 365 天（约 250 bars < 252 门槛），price_percentile 自然不出信号，AssetTypes 过滤也不介入——设计 §3.3 只约束"绑定"，此为既有行为，保持现状。
 
 `analyzeSymbol` 改动两处：
 1. `start := end.AddDate(0, 0, -a.historyWindowDays(item))`
@@ -1361,6 +1396,45 @@ func TestBuildPEPercentile_Paths(t *testing.T) {
 }
 ```
 
+测试 helper 定义（写在 app_test.go，日期对齐是 load-bearing 约束）：
+
+```go
+// stubVal/stubEPS 带调用计数，亏损用例断言 stubVal.calls == 0
+type stubVal struct {
+	pct   float64
+	err   error
+	calls int
+}
+func (s *stubVal) FetchValuationPercentile(string, int) (float64, error) {
+	s.calls++
+	return s.pct, s.err
+}
+
+type stubEPS struct {
+	pts []core.EPSPoint
+	err error
+}
+func (s *stubEPS) FetchEPSHistory(string, time.Time, time.Time) ([]core.EPSPoint, error) {
+	return s.pts, s.err
+}
+
+// 基准日期：EPS 点必须早于全部收盘 bar，否则阶梯对齐找不到点，
+// PE 序列为空 → ErrInsufficientEPS，"主路径重建"用例会以费解方式失败。
+var epsBase = time.Now().AddDate(-3, 0, 0)
+
+// validEPS8: 8 个正 EPS 季度点（满足 MinEPSPoints），起点 epsBase
+func validEPS8() []core.EPSPoint { /* quarterly from epsBase, EPS=4..5 */ }
+
+// lossEPS: 8 个正点 + 最末 1 个负点（当前 EPS ≤ 0 → ErrNonPositiveEPS）
+func lossEPS() []core.EPSPoint { /* same + final EPS=-1 */ }
+
+// sampleCloses(n): n 根日线，起点 epsBase.AddDate(0,1,0)（晚于首个 EPS 点）
+func sampleCloses(n int) []core.OHLCV { /* close=100+i%50 */ }
+
+// TypeOfCase: case → app 中文类型标签（^ 前缀 → TypeIndex，其余 → TypeStock）
+func TypeOfCase(c testCase) string { ... }
+```
+
 - [ ] **Step 2: 运行确认失败**
 
 Run: `go test ./internal/app/ -run TestBuildPEPercentile -v` → FAIL
@@ -1405,33 +1479,44 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 		return f
 
 	default:
-		// 美/港个股：Yahoo EPS 重建主路径
-		if a.epsSrc != nil {
-			end := time.Now()
-			eps, err := a.epsSrc.FetchEPSHistory(symbol, end.AddDate(-lookback, 0, -90), end)
-			if err == nil {
-				pct, rerr := valuation.ReconstructPEPercentile(ohlcv, eps)
-				switch {
-				case rerr == nil:
-					f.PEPercentile, f.Source = pct, "reconstructed"
-					return f
-				case errors.Is(rerr, valuation.ErrNonPositiveEPS):
-					return f // 真实亏损：直接不可用，不兜底（设计 §3.2/§5）
-				}
-				// ErrInsufficientEPS → 落入兜底
-				err = rerr
-			}
-			// 数据缺失类失败 → 理杏仁兜底
+		// 美/港个股：Yahoo EPS 重建主路径。
+		// epsSrc 未配置（yahoo 未启用）也算"主路径不可用·数据缺失"，
+		// 直接进理杏仁兜底（设计 §5 口径），fallback_reason="yahoo_not_configured"
+		if a.epsSrc == nil {
 			if a.valuationSrc != nil {
 				if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, lookback); ferr == nil {
-					f.PEPercentile = pct
-					f.Source = "lixinger_cvpos:" + fallbackReason(err)
+					f.PEPercentile, f.Source = pct, "lixinger_cvpos:yahoo_not_configured"
 					return f
 				}
 			}
-			a.warnOnce("pepct:"+symbol, "pe percentile unavailable (primary and fallback failed)",
-				zap.String("symbol", symbol), zap.Error(err))
+			a.warnOnce("pepct:"+symbol, "pe percentile unavailable: no eps source and no fallback",
+				zap.String("symbol", symbol))
+			return f
 		}
+		end := time.Now()
+		eps, err := a.epsSrc.FetchEPSHistory(symbol, end.AddDate(-lookback, 0, -90), end)
+		if err == nil {
+			pct, rerr := valuation.ReconstructPEPercentile(ohlcv, eps)
+			switch {
+			case rerr == nil:
+				f.PEPercentile, f.Source = pct, "reconstructed"
+				return f
+			case errors.Is(rerr, valuation.ErrNonPositiveEPS):
+				return f // 真实亏损：直接不可用，不兜底（设计 §3.2/§5）
+			}
+			// ErrInsufficientEPS → 落入兜底
+			err = rerr
+		}
+		// 数据缺失类失败 → 理杏仁兜底
+		if a.valuationSrc != nil {
+			if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, lookback); ferr == nil {
+				f.PEPercentile = pct
+				f.Source = "lixinger_cvpos:" + fallbackReason(err)
+				return f
+			}
+		}
+		a.warnOnce("pepct:"+symbol, "pe percentile unavailable (primary and fallback failed)",
+			zap.String("symbol", symbol), zap.Error(err))
 		return f
 	}
 }
@@ -1459,7 +1544,21 @@ git commit -m "feat(app): PE percentile orchestration with lixinger fallback cha
 
 - [ ] **Step 1: serve.go 注册两个新策略**
 
-参照 ma_crossover 注册块写法：读取 `strategies.price_percentile` / `strategies.pe_percentile` 配置（enabled + params），`Init` 后 `strategies.Register(...)`；注入估值数据源：`app.SetValuationSources(lixingerCollector, yahooCollector)`（lixinger 未启用时传 nil）。
+参照 ma_crossover 注册块写法：读取 `strategies.price_percentile` / `strategies.pe_percentile` 配置（enabled + params），`Init` 后 `strategies.Register(...)`。
+
+注入估值数据源时必须规避 **typed-nil 接口陷阱**：serve.go 现状 `lixingerCollector` 是 `*lixinger.Lixinger`（:99，可能保持 nil 指针），直接传参会让接口非 nil 但内部指针为 nil，`buildFundamental` 的 nil 防护失效。同时 `yahooCollector` 声明在 :94 的 if 块内，作用域不可达，需把声明提升到函数级。正确写法：
+
+```go
+	var vs app.ValuationSource
+	if lixingerCollector != nil {
+		vs = lixingerCollector
+	}
+	var es app.EPSSource
+	if yahooCollector != nil {
+		es = yahooCollector
+	}
+	atlasApp.SetValuationSources(vs, es)
+```
 
 - [ ] **Step 2: backtest.go 注册 price_percentile（冒烟）**
 
@@ -1497,7 +1596,12 @@ watchlist 示例追加（design §7）：
 ```bash
 go build ./...
 go test ./... 2>&1 | tail -20        # 全部 PASS
-go run ./cmd/atlas backtest --help   # 确认 CLI 无回归（按现有 backtest 用法跑一条 price_percentile 冒烟）
+# 回测冒烟：区间必须 > 252 个交易日（minSampleBars 门槛），否则 0 信号也"通过"，无判定力
+go run ./cmd/atlas backtest --strategy price_percentile --symbol AAPL \
+  --from 2021-01-01 --to 2026-06-01
+# 预期：运行无错退出；窗口滚过 252 bars 后允许产生信号；0 trades 可接受但需人工
+# 确认日志中出现过 percentile 计算（非因数据不足直接全程跳过）。
+# （flag 名以 backtest.go 实际定义为准，执行时核对 --help）
 ```
 
 - [ ] **Step 5: 提交**
