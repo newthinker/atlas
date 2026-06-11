@@ -1,7 +1,7 @@
 # 指数/大宗商品采集 与 历史百分位监控策略 — 设计文档
 
 > 日期：2026-06-11
-> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认）；rev3 — 美/港指数估值分位移入一期边界（Yahoo 财报端点不覆盖指数符号），PE 重建逻辑落点定为 `internal/valuation` 纯函数包；rev4 — 按用户补充需求引入理杏仁多市场兜底（hk/us company 与 index 接口），美/港指数估值分位恢复一期范围（理杏仁为唯一路径），并补充部分季度亏损的 PE 序列剔除规则
+> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认）；rev3 — 美/港指数估值分位移入一期边界（Yahoo 财报端点不覆盖指数符号），PE 重建逻辑落点定为 `internal/valuation` 纯函数包；rev4 — 按用户补充需求引入理杏仁多市场兜底（hk/us company 与 index 接口），美/港指数估值分位恢复一期范围（理杏仁为唯一路径），并补充部分季度亏损的 PE 序列剔除规则；rev5 — 修复 rev4 审查发现的三处一致性缺陷（悬空引用、理杏仁不可用影响面、EPS 不足兜底口径），补指数映射表与 fallback_reason 元数据
 > 前置分析：`docs/reviews/2026-06-11-asset-coverage-and-percentile-analysis.md`
 
 ## 1. 需求与范围
@@ -64,14 +64,23 @@
 - 新增方法 `FetchValuationPercentile(symbol string, lookbackYears int) (float64, error)`，按符号市场分派端点：
   - A 股股票走现有 `cn/company/fundamental/non_financial` 接口（与 lixinger.go 现状一致），请求 `pe_ttm.y{N}.cvpos`（lookback 映射 y3/y5/y10）；金融股该端点不适用，返回不可用（一期边界，见 §1.3）
   - A 股指数走 `cn/index/fundamental` 接口同字段
-  - **港/美股票与指数（兜底/补缺，用户补充需求）**：分派到 `hk/company`、`us/company`、`hk/index`、`us/index` 对应 fundamental 接口同字段；符号需做理杏仁代码映射（如 `0700.HK` → `00700`，`^GSPC` → 对应指数代码，实现时按官方文档核对）
+  - **港/美股票与指数（兜底/补缺，用户补充需求）**：分派到 `hk/company`、`us/company`、`hk/index`、`us/index` 对应 fundamental 接口同字段；个股符号做理杏仁代码映射（如 `0700.HK` → `00700`）；一期 4 个指数的映射表如下（理杏仁代码列在实现首日经对应 basic-info / samples 接口核对后固化）：
+
+    | watchlist 符号 | 指数 | 理杏仁接口 | 理杏仁代码（待核对固化） |
+    |---|---|---|---|
+    | `^GSPC` | 标普 500 | `us/index` | SPX（候选） |
+    | `^IXIC` | 纳斯达克综合 | `us/index` | COMP（候选） |
+    | `^DJI` | 道琼斯工业 | `us/index` | DJI（候选） |
+    | `^HSI` | 恒生指数 | `hk/index` | HSI（候选） |
+
   - 注：港美股数据的可用性取决于理杏仁账号开通的 API 权限；权限不足时返回不可用，按 §5 降级
+  - 注：理杏仁 hk/us company 接口是否如 cn 一样区分非金融/银行/券商/保险端点未核实——美/港金融股的主路径（Yahoo EPS 重建）不受影响，仅兜底路径可能受限，实现时核实并按实际情况收窄兜底范围
 - `core.Fundamental` 新增字段 `PEPercentile float64`（0–100；-1 表示不可用）
 - **兜底角色**：理杏仁在本设计中承担两类角色——① 美/港指数估值分位的**唯一路径**（Yahoo 财报端点不覆盖指数）；② 美/港个股估值分位在 Yahoo EPS 重建失败时的**兜底路径**（cvpos 精确值，`method` 标注 `lixinger_cvpos`）
 
 ### 2.5 Yahoo 历史 EPS 采集（美/港个股估值分位的数据基础）
 
-- **仅适用于个股**（含 `.HK`）；指数符号（`^` 前缀）无财报数据，不在本接口能力范围（见 §1.3 边界）
+- **仅适用于个股**（含 `.HK`）；指数符号（`^` 前缀）无财报数据，不在本接口能力范围——美/港指数的估值分位由理杏仁 hk/us index 接口提供（§2.4、§3.2）
 - yahoo 采集器新增方法 `FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error)`：
   - 端点：`query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}`，请求 `type=trailingDilutedEPS`（TTM 摊薄 EPS，按季度时间戳返回），`period1/period2` 覆盖 lookback 窗口
   - 该端点对 `.HK` 符号同样有效（Yahoo 覆盖港股基本面）
@@ -116,7 +125,8 @@
   - 重建逻辑实现为独立纯函数包 `internal/valuation`（`ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64, error)`），由 app 层 Context 组装阶段调用，策略只消费 `Fundamental.PEPercentile`
   - 注：早期方案「价格 ÷ 当前（常数）EPS」已被 spec 审查否决——常数缩放不改变分位，结果与价格分位逐点等价，无信息增量
 - 信号规则与阈值结构同 price_percentile（默认 low=20 / high=80，极值 10/90）
-- 当前 EPS ≤ 0（亏损）、EPS 历史点不足（< 8 个季度）或分位不可用时不出信号
+- 美/港个股主路径不可用（当前 EPS ≤ 0、有效 EPS 季度点 < 8、端点失败）时走理杏仁兜底（§2.4）；兜底亦不可用（无 key / 无权限）才不出信号——与 §5 错误处理表口径一致
+- 兜底产出的信号在 `Signal.Metadata` 额外记录降级原因（如 `fallback_reason: "yahoo_eps_insufficient"`），便于区分主路径与兜底信号的数据质量
 - 现有 `pe_band` 保留不动；配置示例中删除从未生效的 `lookback_years`/`threshold_percentile` 误导参数
 
 ### 3.3 类型体系修补
@@ -155,7 +165,7 @@ Signal（含 percentile 元数据）→ router（min_confidence、冷却）→ T
 | 故障场景 | 行为 |
 |---|---|
 | 价格历史不足（< 1 年） | price_percentile 不出信号，debug 日志说明样本量 |
-| 理杏仁不可用 / 无 API key | A 股 pe_percentile **不出信号**（eastmoney 无 EPS 能力，不存在可用的近似路径）；warning 日志按标的去重（每标的仅首次告警，避免每轮 ticker 重复刷日志） |
+| 理杏仁不可用 / 无 API key | 三类影响：① A 股 pe_percentile **不出信号**（eastmoney 无 EPS 能力，不存在可用的近似路径）；② 美/港**指数** pe_percentile **不出信号**（理杏仁是唯一路径）；③ 美/港**个股**失去兜底，仅剩 Yahoo EPS 重建主路径。warning 日志按标的去重（每标的仅首次告警，避免每轮 ticker 重复刷日志） |
 | Yahoo EPS 端点失败 / EPS 季度点 < 8 | 美/港个股 pe_percentile 先兜底理杏仁 hk/us cvpos；兜底也不可用（无 key / 无权限）才不出信号，不影响 price_percentile |
 | 理杏仁港美股权限不足 | 对应标的估值分位返回不可用，按上行降级；warning 按标的去重 |
 | 当前 EPS ≤ 0 或缺失 | pe_percentile 跳过该标的，不影响 price_percentile |
