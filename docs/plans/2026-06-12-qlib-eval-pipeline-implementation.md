@@ -327,7 +327,10 @@ git commit -m "feat(cli): wire export-signals command and Makefile target"
 
 **Files:**
 - Create: `scripts/qlib_eval/README.md`、`scripts/qlib_eval/requirements.txt`、`scripts/qlib_eval/qlib_eval/__init__.py`、`scripts/qlib_eval/qlib_eval/symbols.py`
+- Create: `scripts/qlib_eval/conftest.py`（**pytest 找包机制，必须显式声明**：`import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).parent))`——否则裸 `pytest` 会 ModuleNotFoundError，`python -m pytest` 能跑只是因为 cwd 注入 sys.path 的副作用）
 - Test: `scripts/qlib_eval/tests/test_symbols.py`
+
+**硬约束（写进 README 与 code review 检查项）**：`import qlib` 禁止出现在任何模块顶层，只允许在 `QlibPriceSource` 方法体内惰性导入——这是 pytest 零 qlib 依赖的机制保证。Task 6 加守门测试：`import qlib_eval.prices; assert "qlib" not in sys.modules`。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -401,12 +404,18 @@ def test_align_entry_next_open():
     e = align_entry(PRICES, pd.Timestamp("2024-01-02"), max_defer=5)
     assert e.date == pd.Timestamp("2024-01-03") and e.price == 10.2
 
-def test_align_entry_defers_over_holiday():
-    # 信号日 1/6（周六）→ 顺延到 1/15? 不：下一交易日是 1/15 之前无数据，
-    # 1/5 信号 → 次日 1/15 间隔超 5 个交易日? 数据中 1/5 后下一行就是 1/15，
-    # 顺延仅 1 个数据行 → 允许；用 max_defer 控制按交易日行数计
+def test_align_entry_boundary_defer_kept():
+    # 边界保留用例：信号 1/5 → 下一 bar 1/15，恰好 10 个日历日 == max_defer*2，
+    # 规则是「> max_defer*2 才丢弃」→ 10 不丢，入场 1/15。
+    # ⚠️ 此用例钉死边界比较符必须是 >（写成 >= 此测试即翻车）
     e = align_entry(PRICES, pd.Timestamp("2024-01-05"), max_defer=5)
     assert e.date == pd.Timestamp("2024-01-15")
+
+def test_align_entry_drops_when_defer_exceeds_limit():
+    # 丢弃用例（与上一例配对夹住边界）：信号 1/2 → 若价格序列中 1/2 之后
+    # 下一 bar 直接是 1/15（13 个日历日 > 10）→ None
+    gappy = frame(["2024-01-02", "2024-01-15"], [10.0, 11.0], [10.1, 11.1])
+    assert align_entry(gappy, pd.Timestamp("2024-01-02"), max_defer=5) is None
 
 def test_align_entry_drops_when_no_data():
     assert align_entry(PRICES, pd.Timestamp("2024-01-15"), max_defer=5) is None  # 其后无 bar
@@ -427,22 +436,23 @@ class Entry:
     index: int     # positional index into the price frame
 
 class PriceSource(Protocol):
-    def history(self, symbol: str) -> pd.DataFrame: ...
-    """index=交易日 DatetimeIndex，columns 含 open/close；symbol 为 atlas 形式（600519.SH）"""
-    def benchmark(self) -> pd.DataFrame: ...
-    """SH000300 的 close 序列"""
+    def history(self, symbol: str) -> pd.DataFrame:
+        """index=交易日 DatetimeIndex，columns 含 open/close；symbol 为 atlas 形式（600519.SH）"""
+        ...
+
+    def benchmark(self) -> pd.DataFrame:
+        """SH000300 的 close 序列"""
+        ...
 
 def align_entry(prices: pd.DataFrame, signal_date: pd.Timestamp, max_defer: int) -> Entry | None:
     """Entry at the first trading day strictly after signal_date (next-day open,
-    no look-ahead). Returns None when no bar follows; defer is bounded by
-    max_defer positional rows (drop & count by caller)."""
+    no look-ahead). Returns None when no bar follows, or when the gap between
+    signal_date and the entry bar exceeds max_defer*2 CALENDAR days (the
+    calendar-day approximation of 'defer beyond max_defer trading days';
+    strictly greater-than — ==boundary is kept). Drop & count by caller."""
     pos = prices.index.searchsorted(signal_date, side="right")
     if pos >= len(prices.index):
         return None
-    # 顺延语义：searchsorted 已落在下一交易日；max_defer 限制的是信号日与入场日
-    # 之间的「日历跨度对应的缺数据行」，此处直接判定 pos 行有效即可——
-    # 停牌缺行体现为 next bar 距信号日远；用交易日行数无法表达，按
-    # (entry.date - signal_date).days > max_defer*2 视为顺延过久 → None
     entry_date = prices.index[pos]
     if (entry_date - signal_date).days > max_defer * 2:
         return None
@@ -484,12 +494,20 @@ def test_sell_avoidance_return(): ...
 # horizon 越界 → NA 并计数
 def test_horizon_exceeds_data_returns_none(): ...
 
-# 聚合：按 strategy×action 的 mean/median/win_rate/n；
-# buy 胜率口径 = 超额 > 0 占比；sell 胜率 = 规避收益 > 0 占比
+# 基准缺 entry 日期 → searchsorted 最近前值对齐（事件研究最易写错的对齐逻辑）：
+# bench 索引为 [1/2, 1/4, 1/8]、close=[3000, 3030, 3060]；entry_date=1/3（bench 缺）
+# → 基准起点取 1/2 的 3000；标的 exit 行日期=1/8 → 基准终点 3060 → 基准收益 +2%
+def test_benchmark_aligns_to_last_available_before_entry(): ...
+
+# 聚合：按 strategy×action 的 mean/median/win_rate/n。合成 4 条 buy outcome
+# （超额 +5%/+1%/-2%/-4%）→ n=4, mean_excess=0.0%, win_rate=50%（buy 胜率=超额>0 占比）；
+# 2 条 sell outcome（规避收益 +3%/-1%）→ win_rate=50%（sell 胜率=规避收益>0 占比）
 def test_aggregate_by_strategy_action(): ...
 
-# 置信度分桶：>=0.6 / >=0.8 两桶重复聚合
-def test_confidence_buckets(): ...
+# 置信度分桶是【累积阈值】而非互斥区间：conf=0.85 的样本必须同时计入
+# ≥0.0、≥0.6、≥0.8 三桶；conf=0.65 计入 ≥0.0 与 ≥0.6 两桶。
+# 合成 3 条（conf 0.5/0.65/0.85）→ 三桶 n 分别为 3/2/1
+def test_confidence_buckets_are_cumulative(): ...
 ```
 
 - [ ] **Step 2: 确认失败 → Step 3: 实现**
@@ -508,8 +526,11 @@ class SignalOutcome:
 def evaluate_signal(sig, prices, bench, max_defer=5) -> SignalOutcome | None:
     # align_entry → None 则调用方计入 dropped
     # h 日收益 = close[entry.index+h] / entry.price - 1（越界 → None）
-    # 基准收益 = bench_close[entry_date+h 对齐位置] / bench_close[entry_date] - 1
-    #   （基准按日期对齐到自身索引；bench 缺该日期时取 searchsorted 最近前值）
+    # 基准对齐口径（钉死，个股停牌时两种理解结果不同）：
+    #   起点 = bench 中 ≤ entry_date 的最近前值（searchsorted side="right" - 1）
+    #   终点 = 先取【标的】第 entry.index+h 行的日期（exit_date），
+    #          再取 bench 中 ≤ exit_date 的最近前值
+    #   bench_ret = bench_close[终点] / bench_close[起点] - 1
     # buy/strong_buy: excess = ret - bench_ret
     # sell/strong_sell: excess = -(ret - bench_ret)  # 规避收益：信号后跑输基准记为正
     ...
@@ -557,7 +578,7 @@ python evaluate.py --signals signals.csv \
 
   - 启动即检测 qlib 数据目录，缺失则打印 get_data 命令并 exit(1)（设计 §5）
   - 非 A 股符号 → 跳过收集进「数据缺口」节
-  - 报告写 `reports/signal-eval-YYYYMMDD.md`；`reports/` 加入根 .gitignore
+  - 报告写 `reports/signal-eval-YYYYMMDD.md`；根 .gitignore 加入 `reports/`、`signals.csv` 与 `scripts/qlib_eval/.venv/`（该 venv 目录已实际存在于工作区，不忽略的话 Task 9 的 `git add -A` 会把它整个提交进仓库）
 
 - [ ] **Step 4: 确认通过 → Step 5: 提交**
 
