@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,19 +26,36 @@ type fakeStrategy struct {
 	name         string
 	assetTypes   []core.AssetType
 	priceHistory int
+	fundamentals bool
 	signals      []core.Signal
+
+	mu             sync.Mutex
+	gotFundamental *core.Fundamental // captured from the last Analyze call
 }
 
-func (f *fakeStrategy) Name() string        { return f.name }
+func (f *fakeStrategy) Name() string       { return f.name }
 func (f *fakeStrategy) Description() string { return "fake" }
 func (f *fakeStrategy) RequiredData() strategy.DataRequirements {
-	return strategy.DataRequirements{AssetTypes: f.assetTypes, PriceHistory: f.priceHistory}
+	return strategy.DataRequirements{
+		AssetTypes:   f.assetTypes,
+		PriceHistory: f.priceHistory,
+		Fundamentals: f.fundamentals,
+	}
 }
 func (f *fakeStrategy) Init(cfg strategy.Config) error { return nil }
 func (f *fakeStrategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
+	f.mu.Lock()
+	f.gotFundamental = ctx.Fundamental
+	f.mu.Unlock()
 	out := make([]core.Signal, len(f.signals))
 	copy(out, f.signals)
 	return out, nil
+}
+
+func (f *fakeStrategy) capturedFundamental() *core.Fundamental {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gotFundamental
 }
 
 type mockCollector struct {
@@ -920,5 +939,195 @@ func TestAnalyzeSymbol_AllFilteredReturnsEarly(t *testing.T) {
 	app.analyzeSymbol(context.Background(), item)
 	if n := len(notif.received()); n != 0 {
 		t.Errorf("expected no signals when all bound strategies filtered, got %d", n)
+	}
+}
+
+// --- TASK-011: PE percentile orchestration (buildFundamental fallback chain) ---
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "六路径表" + functional[1] "亏损 stubVal.calls==0" → TestBuildPEPercentile_Paths
+// functional[2] "epsSrc 未配置→yahoo_not_configured"        → TestBuildFundamental_EPSNotConfigured
+// boundary[0]   "商品/加密/基金→nil; 双 nil→-1+warnOnce 不 panic" → TestBuildFundamental_NilSourcesAndUnsupported
+// error_handling[0] "理杏仁 fetch 失败→warnOnce+(-1)"        → TestBuildFundamental_LixingerFetchError
+
+// stubVal/stubEPS are call-counting valuation/eps source stubs. The loss case
+// asserts stubVal.calls == 0 (the no-fallback invariant).
+type stubVal struct {
+	pct   float64
+	err   error
+	calls int
+}
+
+func (s *stubVal) FetchValuationPercentile(string, int) (float64, error) {
+	s.calls++
+	return s.pct, s.err
+}
+
+type stubEPS struct {
+	pts []core.EPSPoint
+	err error
+}
+
+func (s *stubEPS) FetchEPSHistory(string, time.Time, time.Time) ([]core.EPSPoint, error) {
+	return s.pts, s.err
+}
+
+// epsBase is the anchor for fixture dates. EPS points MUST predate every close
+// bar, otherwise the step alignment finds no point, the PE series is empty and
+// ReconstructPEPercentile returns ErrInsufficientEPS — making the "primary
+// reconstruction" case fail in a baffling way (plan Task 13 load-bearing note).
+var epsBase = time.Now().AddDate(-3, 0, 0)
+
+// validEPS8 returns 8 positive quarterly EPS(TTM) points from epsBase, enough
+// for MinEPSPoints with a positive current EPS.
+func validEPS8() []core.EPSPoint {
+	pts := make([]core.EPSPoint, 8)
+	for i := range pts {
+		pts[i] = core.EPSPoint{Date: epsBase.AddDate(0, 3*i, 0), EPS: 4 + 0.1*float64(i)}
+	}
+	return pts
+}
+
+// lossEPS returns 8 positive quarterly points plus a final negative one, so the
+// current EPS(TTM) is non-positive → ErrNonPositiveEPS (real loss, no fallback).
+func lossEPS() []core.EPSPoint {
+	return append(validEPS8(), core.EPSPoint{Date: epsBase.AddDate(0, 24, 0), EPS: -1})
+}
+
+// sampleCloses returns n daily bars starting one month after epsBase (later than
+// the first EPS point so every bar aligns to a point).
+func sampleCloses(n int) []core.OHLCV {
+	start := epsBase.AddDate(0, 1, 0)
+	out := make([]core.OHLCV, n)
+	for i := range out {
+		out[i] = core.OHLCV{Close: 100 + float64(i%50), Time: start.AddDate(0, 0, i)}
+	}
+	return out
+}
+
+func TestBuildPEPercentile_Paths(t *testing.T) {
+	cases := []struct {
+		name       string
+		symbol     string
+		appType    string
+		eps        []core.EPSPoint
+		epsErr     error
+		valPct     float64
+		valErr     error
+		wantPct    bool   // expect PEPercentile >= 0
+		wantSource string // Source prefix
+		wantNoVal  bool   // valuation source must NOT be consulted
+	}{
+		{"A股走理杏仁", "600519.SH", TypeStock, nil, nil, 23.4, nil, true, "lixinger_cvpos", false},
+		{"美股主路径重建", "AAPL", TypeStock, validEPS8(), nil, 0, errors.New("unused"), true, "reconstructed", true},
+		{"美股EPS不足→兜底成功", "AAPL", TypeStock, nil, nil, 41.2, nil, true, "lixinger_cvpos:", false},
+		{"美股EPS不足→兜底也失败", "AAPL", TypeStock, nil, nil, -1, errors.New("no permission"), false, "", false},
+		{"美股真实亏损→直接跳过不兜底", "LOSS", TypeStock, lossEPS(), nil, 99, nil, false, "", true},
+		{"美/港指数走理杏仁", "^GSPC", TypeIndex, nil, nil, 88.0, nil, true, "lixinger_cvpos", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := New(&config.Config{}, zap.NewNop())
+			sv := &stubVal{pct: c.valPct, err: c.valErr}
+			a.SetValuationSources(sv, &stubEPS{pts: c.eps, err: c.epsErr})
+
+			f := a.buildFundamental(c.symbol, c.appType, sampleCloses(700))
+
+			gotAvail := f != nil && f.PEPercentile >= 0
+			if gotAvail != c.wantPct {
+				t.Fatalf("availability mismatch: got %v, want %v (f=%+v)", gotAvail, c.wantPct, f)
+			}
+			if c.wantPct && !strings.HasPrefix(f.Source, c.wantSource) {
+				t.Errorf("Source = %q, want prefix %q", f.Source, c.wantSource)
+			}
+			if c.wantNoVal && sv.calls != 0 {
+				t.Errorf("valuation source must not be consulted, but calls = %d", sv.calls)
+			}
+		})
+	}
+}
+
+func TestBuildFundamental_EPSNotConfigured(t *testing.T) {
+	// US stock with no EPS source but a working valuation source: fall straight
+	// to lixinger with the yahoo_not_configured reason.
+	a := New(&config.Config{}, zap.NewNop())
+	a.SetValuationSources(&stubVal{pct: 55.0}, nil)
+	f := a.buildFundamental("AAPL", TypeStock, sampleCloses(300))
+	if f == nil || f.PEPercentile < 0 {
+		t.Fatalf("expected available fundamental, got %+v", f)
+	}
+	if f.Source != "lixinger_cvpos:yahoo_not_configured" {
+		t.Errorf("Source = %q, want lixinger_cvpos:yahoo_not_configured", f.Source)
+	}
+}
+
+func TestBuildFundamental_NilSourcesAndUnsupported(t *testing.T) {
+	a := New(&config.Config{}, zap.NewNop()) // no sources configured
+
+	// Unsupported asset classes return nil regardless of sources.
+	for _, tc := range []struct{ symbol, appType string }{
+		{"GC=F", TypeFuture}, {"BTC-USDT", TypeCrypto}, {"510300.SH", TypeFund},
+	} {
+		if f := a.buildFundamental(tc.symbol, tc.appType, sampleCloses(10)); f != nil {
+			t.Errorf("buildFundamental(%q,%q) = %+v, want nil", tc.symbol, tc.appType, f)
+		}
+	}
+
+	// CN stock with both sources nil: unavailable fundamental, no panic.
+	f := a.buildFundamental("600519.SH", TypeStock, sampleCloses(10))
+	if f == nil || f.PEPercentile != -1 {
+		t.Fatalf("expected PEPercentile=-1 fundamental, got %+v", f)
+	}
+	// US stock with both sources nil: unavailable, no panic.
+	f = a.buildFundamental("AAPL", TypeStock, sampleCloses(10))
+	if f == nil || f.PEPercentile != -1 {
+		t.Fatalf("expected PEPercentile=-1 fundamental, got %+v", f)
+	}
+}
+
+func TestBuildFundamental_LixingerFetchError(t *testing.T) {
+	obsCore, logs := observer.New(zap.WarnLevel)
+	a := New(&config.Config{}, zap.New(obsCore))
+	a.SetValuationSources(&stubVal{pct: -1, err: errors.New("rate limited")}, nil)
+	f := a.buildFundamental("600519.SH", TypeStock, sampleCloses(10))
+	if f == nil || f.PEPercentile != -1 {
+		t.Fatalf("expected PEPercentile=-1 on fetch error, got %+v", f)
+	}
+	if logs.Len() == 0 {
+		t.Errorf("expected a warnOnce log on lixinger fetch failure")
+	}
+}
+
+func TestAnalyzeSymbol_AssemblesFundamentalWhenNeeded(t *testing.T) {
+	a := New(&config.Config{}, zap.NewNop())
+	a.SetValuationSources(&stubVal{pct: 23.4}, nil)
+	a.RegisterCollector(&mockCollector{name: "eastmoney", history: sampleCloses(300)})
+	strat := &fakeStrategy{name: "val", fundamentals: true, priceHistory: 10}
+	a.RegisterStrategy(strat)
+
+	item := WatchlistItem{Symbol: "600519.SH", Type: TypeStock, Strategies: []string{"val"}}
+	a.analyzeSymbol(context.Background(), item)
+
+	got := strat.capturedFundamental()
+	if got == nil {
+		t.Fatal("expected strategy to receive an assembled Fundamental, got nil")
+	}
+	if got.Source != "lixinger_cvpos" || got.PEPercentile != 23.4 {
+		t.Errorf("Fundamental = %+v, want lixinger_cvpos / 23.4", got)
+	}
+}
+
+func TestAnalyzeSymbol_SkipsFundamentalWhenNotNeeded(t *testing.T) {
+	a := New(&config.Config{}, zap.NewNop())
+	a.SetValuationSources(&stubVal{pct: 50}, nil)
+	a.RegisterCollector(&mockCollector{name: "eastmoney", history: sampleCloses(300)})
+	strat := &fakeStrategy{name: "plain", priceHistory: 10} // fundamentals=false
+	a.RegisterStrategy(strat)
+
+	item := WatchlistItem{Symbol: "600519.SH", Type: TypeStock, Strategies: []string{"plain"}}
+	a.analyzeSymbol(context.Background(), item)
+
+	if got := strat.capturedFundamental(); got != nil {
+		t.Errorf("expected no Fundamental for non-fundamental strategy, got %+v", got)
 	}
 }

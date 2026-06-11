@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/newthinker/atlas/internal/router"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
+	"github.com/newthinker/atlas/internal/valuation"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -59,6 +61,9 @@ type App struct {
 	router     *router.Router
 	arbitrator signalArbitrator
 	executor   SignalExecutor
+
+	valuationSrc ValuationSource
+	epsSrc       EPSSource
 
 	watchlistItems []WatchlistItem
 	watchlistSet   map[string]struct{}
@@ -129,6 +134,27 @@ func (a *App) SetSignalStore(store signal.Store) {
 // arbitration latency (see ADR-4) and tests can inject a stub.
 type signalArbitrator interface {
 	Arbitrate(ctx context.Context, req meta.ArbitrationRequest) (*meta.ArbitrationResult, error)
+}
+
+// ValuationSource provides a PE-TTM cvpos percentile (0-100) for a symbol. It is
+// satisfied by *lixinger.Lixinger; declared as a narrow interface so the app
+// layer does not depend on the concrete collector package.
+type ValuationSource interface {
+	FetchValuationPercentile(symbol string, lookbackYears int) (float64, error)
+}
+
+// EPSSource provides a trailing diluted EPS history for a symbol. It is
+// satisfied by *yahoo.Yahoo.
+type EPSSource interface {
+	FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error)
+}
+
+// SetValuationSources injects the valuation (lixinger) and EPS (yahoo) data
+// sources used to assemble PE-percentile fundamentals. Either may be nil, in
+// which case the corresponding path is treated as unavailable.
+func (a *App) SetValuationSources(vs ValuationSource, es EPSSource) {
+	a.valuationSrc = vs
+	a.epsSrc = es
 }
 
 // SetArbitrator enables LLM-based arbitration of conflicting signals. When set,
@@ -350,8 +376,13 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	// Run analysis
 	analysisCtx := strategy.AnalysisContext{
 		Symbol: symbol,
+		Market: collector.MarketForSymbol(symbol),
 		OHLCV:  ohlcv,
 		Now:    time.Now(),
+	}
+	// Assemble the PE-percentile fundamental only when a bound strategy needs it.
+	if a.needsFundamentals(effective) {
+		analysisCtx.Fundamental = a.buildFundamental(symbol, item.Type, ohlcv)
 	}
 
 	// Honour per-symbol strategy selection when configured; otherwise run all.
@@ -669,6 +700,104 @@ func (a *App) historyWindowDays(item WatchlistItem) int {
 	// 交易日→自然日：真实折算系数 365/252 ≈ 1.448（×7/5 只折周末、漏节假日，
 	// 对 5×252=1260 bars 会算出 1794 < 1825，不满足 5 年覆盖）。
 	return maxBars*365/252 + 30
+}
+
+// valuationLookbackYears is the phase-1 fixed PE-percentile lookback window,
+// matching the strategy default; later phases may push it down to a parameter.
+const valuationLookbackYears = 5
+
+// buildFundamental assembles Fundamental.PEPercentile for one watchlist item
+// when any bound strategy needs fundamentals. Returns nil when the item's asset
+// class has no valuation path (commodity/crypto/fund). Path table (design §3.2):
+//
+//	CN stock/index -> lixinger cvpos (lixinger IS the source, no fallback chain)
+//	US/HK index    -> lixinger cvpos (sole path)
+//	US/HK stock    -> yahoo EPS reconstruction; on missing-data errors fall back
+//	                  to lixinger; on ErrNonPositiveEPS skip entirely (a real
+//	                  loss — a fallback percentile would mislead).
+func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core.Fundamental {
+	at := assetTypeOf(appType)
+	if at != core.AssetStock && at != core.AssetIndex {
+		return nil
+	}
+	market := collector.MarketForSymbol(symbol)
+	f := &core.Fundamental{Symbol: symbol, Market: market, Date: time.Now(), PEPercentile: -1}
+
+	switch {
+	case market == core.MarketCNA, at == core.AssetIndex:
+		// A 股（股票+指数）与美/港指数：理杏仁唯一路径。
+		if a.valuationSrc == nil {
+			a.warnOnce("lixinger:"+symbol, "valuation percentile unavailable: lixinger not configured",
+				zap.String("symbol", symbol))
+			return f
+		}
+		pct, err := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears)
+		if err != nil {
+			a.warnOnce("lixinger:"+symbol, "valuation percentile fetch failed",
+				zap.String("symbol", symbol), zap.Error(err))
+			return f
+		}
+		f.PEPercentile, f.Source = pct, "lixinger_cvpos"
+		return f
+
+	default:
+		// 美/港个股：Yahoo EPS 重建主路径。epsSrc 未配置（yahoo 未启用）也算
+		// "主路径不可用·数据缺失"，直接进理杏仁兜底（设计 §5）。
+		if a.epsSrc == nil {
+			if a.valuationSrc != nil {
+				if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears); ferr == nil {
+					f.PEPercentile, f.Source = pct, "lixinger_cvpos:yahoo_not_configured"
+					return f
+				}
+			}
+			a.warnOnce("pepct:"+symbol, "pe percentile unavailable: no eps source and no fallback",
+				zap.String("symbol", symbol))
+			return f
+		}
+		end := time.Now()
+		eps, err := a.epsSrc.FetchEPSHistory(symbol, end.AddDate(-valuationLookbackYears, 0, -90), end)
+		if err == nil {
+			pct, rerr := valuation.ReconstructPEPercentile(ohlcv, eps)
+			switch {
+			case rerr == nil:
+				f.PEPercentile, f.Source = pct, "reconstructed"
+				return f
+			case errors.Is(rerr, valuation.ErrNonPositiveEPS):
+				return f // 真实亏损：不可用，绝不兜底（设计 §3.2/§5）
+			}
+			err = rerr // ErrInsufficientEPS（或其它数据缺失）→ 落入兜底
+		}
+		if a.valuationSrc != nil {
+			if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears); ferr == nil {
+				f.PEPercentile = pct
+				f.Source = "lixinger_cvpos:" + fallbackReason(err)
+				return f
+			}
+		}
+		a.warnOnce("pepct:"+symbol, "pe percentile unavailable (primary and fallback failed)",
+			zap.String("symbol", symbol), zap.Error(err))
+		return f
+	}
+}
+
+// fallbackReason classifies why the yahoo reconstruction path yielded to the
+// lixinger fallback, encoded into Fundamental.Source for observability.
+func fallbackReason(err error) string {
+	if errors.Is(err, valuation.ErrInsufficientEPS) {
+		return "yahoo_eps_insufficient"
+	}
+	return "yahoo_eps_error"
+}
+
+// needsFundamentals reports whether any of the named (registered) strategies
+// declares a fundamental-data requirement.
+func (a *App) needsFundamentals(names []string) bool {
+	for _, n := range names {
+		if s, ok := a.strategies.Get(n); ok && s.RequiredData().Fundamentals {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveFromWatchlist removes a symbol from the watchlist.
