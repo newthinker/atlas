@@ -1,7 +1,7 @@
 # 指数/大宗商品采集 与 历史百分位监控策略 — 设计文档
 
 > 日期：2026-06-11
-> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认）；rev3 — 美/港指数估值分位移入一期边界（Yahoo 财报端点不覆盖指数符号），PE 重建逻辑落点定为 `internal/valuation` 纯函数包；rev4 — 按用户补充需求引入理杏仁多市场兜底（hk/us company 与 index 接口），美/港指数估值分位恢复一期范围（理杏仁为唯一路径），并补充部分季度亏损的 PE 序列剔除规则；rev5 — 修复 rev4 审查发现的三处一致性缺陷（悬空引用、理杏仁不可用影响面、EPS 不足兜底口径），补指数映射表与 fallback_reason 元数据
+> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认）；rev3 — 美/港指数估值分位移入一期边界（Yahoo 财报端点不覆盖指数符号），PE 重建逻辑落点定为 `internal/valuation` 纯函数包；rev4 — 按用户补充需求引入理杏仁多市场兜底（hk/us company 与 index 接口），美/港指数估值分位恢复一期范围（理杏仁为唯一路径），并补充部分季度亏损的 PE 序列剔除规则；rev5 — 修复 rev4 审查发现的三处一致性缺陷（悬空引用、理杏仁不可用影响面、EPS 不足兜底口径），补指数映射表与 fallback_reason 元数据；rev6（终版） — 按第五轮审查对齐 EPS≤0 口径：真实亏损直接跳过不兜底，仅数据缺失触发兜底
 > 前置分析：`docs/reviews/2026-06-11-asset-coverage-and-percentile-analysis.md`
 
 ## 1. 需求与范围
@@ -18,7 +18,7 @@
 | 分位指标 | 价格分位 + 估值分位（PE），一期同时实现 |
 | 指数/商品覆盖 | 国际主要指数（一期清单：^GSPC、^IXIC、^DJI、^HSI）+ A 股指数（000300.SH 等）+ 国际商品期货（GC=F 等） |
 | 估值分位数据源 | A 股（股票/指数）走理杏仁 cvpos 精确值；美/港个股接入 Yahoo fundamentals-timeseries 历史 EPS(TTM) 序列重建真实 PE 历史后求分位（spec 审查否决了「当前 EPS 近似法」——其分位与价格分位逐点等价，无信息增量），**理杏仁 hk/us 接口作为兜底**；美/港指数走理杏仁 hk/index、us/index cvpos（唯一路径） |
-| 理杏仁兜底（用户补充需求） | 理杏仁开放平台覆盖港美股、指数、基金等市场，作为 Yahoo 路径失败时的兜底数据源；覆盖范围以账号开通的 API 权限为准 |
+| 理杏仁兜底（用户补充需求） | 理杏仁开放平台覆盖港美股、指数、基金等市场，作为 Yahoo 路径失败时的兜底数据源（美/港指数除外，见上行：唯一路径）；覆盖范围以账号开通的 API 权限为准 |
 | 输出语义 | 标准买卖信号（buy/sell/strong_buy/strong_sell），完全复用 Signal → router → notifier 链路 |
 | 实现路线 | 方案三：扩展现有采集器 + 双策略 + 类型体系修补（不新建采集器） |
 
@@ -125,7 +125,8 @@
   - 重建逻辑实现为独立纯函数包 `internal/valuation`（`ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64, error)`），由 app 层 Context 组装阶段调用，策略只消费 `Fundamental.PEPercentile`
   - 注：早期方案「价格 ÷ 当前（常数）EPS」已被 spec 审查否决——常数缩放不改变分位，结果与价格分位逐点等价，无信息增量
 - 信号规则与阈值结构同 price_percentile（默认 low=20 / high=80，极值 10/90）
-- 美/港个股主路径不可用（当前 EPS ≤ 0、有效 EPS 季度点 < 8、端点失败）时走理杏仁兜底（§2.4）；兜底亦不可用（无 key / 无权限）才不出信号——与 §5 错误处理表口径一致
+- 美/港个股主路径**数据不可用**（EPS 数据缺失、有效 EPS 季度点 < 8、端点失败）时走理杏仁兜底（§2.4）；兜底亦不可用（无 key / 无权限）才不出信号——与 §5 错误处理表口径一致
+- 当前 EPS(TTM) ≤ 0（真实亏损）**直接跳过、不兜底**：PE 分位在亏损时概念上无意义，理杏仁 cvpos 同样基于负 PE，兜底只会产生误导信号
 - 兜底产出的信号在 `Signal.Metadata` 额外记录降级原因（如 `fallback_reason: "yahoo_eps_insufficient"`），便于区分主路径与兜底信号的数据质量
 - 现有 `pe_band` 保留不动；配置示例中删除从未生效的 `lookback_years`/`threshold_percentile` 误导参数
 
@@ -185,7 +186,9 @@ Signal（含 percentile 元数据）→ router（min_confidence、冷却）→ T
   - 百分位计算边界：空序列、单点、全相同值、当前价为历史最高/最低
   - 四档信号阈值与置信度映射
   - 样本不足 / EPS 为负 / PEPercentile 不可用的跳过路径
-- **装配层**：AssetTypes 过滤的 warning + 跳过行为（app 启动与 watchlist 增改两条路径）
+- **装配层**：
+  - AssetTypes 过滤的 warning + 跳过行为（app 启动与 watchlist 增改两条路径）
+  - 兜底链路编排：主路径失败 → 兜底成功（fallback_reason 断言）/ 双失败无信号 / EPS ≤ 0 直接跳过不触发兜底
 - **回测兼容**：两个新策略仅依赖 Strategy 接口，可被现有 backtest 引擎直接驱动；补一条回测冒烟用例
 
 ## 7. 配置示例
