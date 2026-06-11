@@ -88,6 +88,68 @@ func TestSelectForSymbol_EmptyRegistry(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping
+// functional[1] "MarketForSymbol index/commodity 全用例" → TestMarketForSymbol_IndexAndCommodity
+// functional[2] "SelectForSymbol ^GSPC/^HSI/GC=F→yahoo, 000300.SH→eastmoney" → TestSelectForSymbol_IndexAndCommodityRouteToYahoo
+// functional[3] "KnownIndexMarket 表内(market,true)/表外^(_,false)" → TestKnownIndexMarket
+
+func TestMarketForSymbol_IndexAndCommodity(t *testing.T) {
+	cases := []struct {
+		symbol string
+		want   core.Market
+	}{
+		{"^GSPC", core.MarketUS}, {"^IXIC", core.MarketUS}, {"^DJI", core.MarketUS},
+		{"^HSI", core.MarketHK},
+		{"^N225", core.MarketUS}, // 表外 ^ 符号默认 US（warning 由 app 层负责）
+		{"GC=F", core.MarketUS}, {"CL=F", core.MarketUS},
+		{"000300.SH", core.MarketCNA},
+		{"AAPL", core.MarketUS}, {"BTC-USDT", core.MarketCrypto},
+	}
+	for _, c := range cases {
+		if got := MarketForSymbol(c.symbol); got != c.want {
+			t.Errorf("MarketForSymbol(%q) = %v, want %v", c.symbol, got, c.want)
+		}
+	}
+}
+
+func TestSelectForSymbol_IndexAndCommodityRouteToYahoo(t *testing.T) {
+	reg := newRegistryWith("yahoo", "eastmoney", "crypto")
+	for _, sym := range []string{"^GSPC", "^HSI", "GC=F"} {
+		if c := SelectForSymbol(reg, sym); c == nil || c.Name() != "yahoo" {
+			t.Errorf("SelectForSymbol(%q) -> %v, want yahoo", sym, c)
+		}
+	}
+	if c := SelectForSymbol(reg, "000300.SH"); c == nil || c.Name() != "eastmoney" {
+		t.Errorf("000300.SH should route to eastmoney")
+	}
+}
+
+func TestKnownIndexMarket(t *testing.T) {
+	// 表内符号返回 (market, true)
+	known := []struct {
+		symbol string
+		want   core.Market
+	}{
+		{"^GSPC", core.MarketUS},
+		{"^IXIC", core.MarketUS},
+		{"^DJI", core.MarketUS},
+		{"^HSI", core.MarketHK},
+		{"^gspc", core.MarketUS}, // 大小写不敏感
+	}
+	for _, c := range known {
+		m, ok := KnownIndexMarket(c.symbol)
+		if !ok || m != c.want {
+			t.Errorf("KnownIndexMarket(%q) = (%v,%v), want (%v,true)", c.symbol, m, ok, c.want)
+		}
+	}
+	// 表外 ^ 符号返回 (_, false)
+	for _, sym := range []string{"^N225", "^FTSE"} {
+		if _, ok := KnownIndexMarket(sym); ok {
+			t.Errorf("KnownIndexMarket(%q) should be unknown", sym)
+		}
+	}
+}
+
 func TestMarketForSymbol(t *testing.T) {
 	tests := []struct {
 		symbol string
