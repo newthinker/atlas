@@ -32,6 +32,7 @@ func (d *DividendYield) RequiredData() strategy.DataRequirements {
 	return strategy.DataRequirements{
 		PriceHistory: 0,
 		Fundamentals: true,
+		AssetTypes:   []core.AssetType{core.AssetStock},
 	}
 }
 

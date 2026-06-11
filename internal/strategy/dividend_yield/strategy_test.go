@@ -12,6 +12,15 @@ func TestDividendYield_ImplementsStrategy(t *testing.T) {
 	var _ strategy.Strategy = (*DividendYield)(nil)
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-009)
+// functional[1] "dividend_yield AssetTypes 恰为 [stock]" → TestDividendYield_AssetTypes
+func TestDividendYield_AssetTypes(t *testing.T) {
+	got := New(3.0).RequiredData().AssetTypes
+	if len(got) != 1 || got[0] != core.AssetStock {
+		t.Errorf("AssetTypes = %v, want [%q]", got, core.AssetStock)
+	}
+}
+
 func TestDividendYield_Name(t *testing.T) {
 	d := New(3.0)
 	if d.Name() != "dividend_yield" {

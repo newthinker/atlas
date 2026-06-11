@@ -35,6 +35,10 @@ func (m *MACrossover) RequiredData() strategy.DataRequirements {
 	return strategy.DataRequirements{
 		PriceHistory: m.slowPeriod + 10, // Extra buffer
 		Indicators:   []string{"SMA"},
+		AssetTypes: []core.AssetType{
+			core.AssetStock, core.AssetIndex, core.AssetETF,
+			core.AssetFund, core.AssetCommodity, core.AssetCrypto,
+		},
 	}
 }
 

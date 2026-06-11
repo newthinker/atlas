@@ -25,7 +25,11 @@ func (p *PEBand) Description() string {
 }
 
 func (p *PEBand) RequiredData() strategy.DataRequirements {
-	return strategy.DataRequirements{PriceHistory: 0, Fundamentals: true}
+	return strategy.DataRequirements{
+		PriceHistory: 0,
+		Fundamentals: true,
+		AssetTypes:   []core.AssetType{core.AssetStock},
+	}
 }
 
 func (p *PEBand) Init(cfg strategy.Config) error {

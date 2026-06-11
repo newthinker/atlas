@@ -12,10 +12,51 @@ func TestMACrossover_ImplementsStrategy(t *testing.T) {
 	var _ strategy.Strategy = (*MACrossover)(nil)
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-009)
+// functional[0] "ma_crossover RequiredData().AssetTypes 恰为六类" → TestMACrossover_AssetTypes
+func TestMACrossover_AssetTypes(t *testing.T) {
+	got := New(5, 10).RequiredData().AssetTypes
+	want := []core.AssetType{
+		core.AssetStock, core.AssetIndex, core.AssetETF,
+		core.AssetFund, core.AssetCommodity, core.AssetCrypto,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("AssetTypes = %v, want exactly %v", got, want)
+	}
+	set := make(map[core.AssetType]bool, len(got))
+	for _, a := range got {
+		set[a] = true
+	}
+	for _, w := range want {
+		if !set[w] {
+			t.Errorf("AssetTypes missing %q; got %v", w, got)
+		}
+	}
+}
+
 func TestMACrossover_Name(t *testing.T) {
 	s := New(5, 10)
 	if s.Name() != "ma_crossover" {
 		t.Errorf("expected 'ma_crossover', got '%s'", s.Name())
+	}
+}
+
+func TestMACrossover_Description(t *testing.T) {
+	if got := New(5, 10).Description(); got != "MA Crossover (5/10)" {
+		t.Errorf("Description() = %q, want %q", got, "MA Crossover (5/10)")
+	}
+}
+
+func TestMACrossover_Init(t *testing.T) {
+	s := New(5, 10)
+	if err := s.Init(strategy.Config{Params: map[string]any{
+		"fast_period": 8,
+		"slow_period": 21,
+	}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.fastPeriod != 8 || s.slowPeriod != 21 {
+		t.Errorf("after Init fast/slow = %d/%d, want 8/21", s.fastPeriod, s.slowPeriod)
 	}
 }
 
