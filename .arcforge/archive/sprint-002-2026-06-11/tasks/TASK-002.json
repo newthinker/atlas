@@ -1,0 +1,52 @@
+{
+  "id": "TASK-002",
+  "title": "yahoo 指数/期货符号支持 + FetchEPSHistory",
+  "description": "按 plan Task 2 + Task 3 原文施工：①validateSymbol 正则接受 ^GSPC 类指数与 GC=F 类期货；FetchQuote/FetchHistory URL 用 url.PathEscape（局部变量 url 改名 reqURL 防遮蔽）。②新增 eps.go：FetchEPSHistory 经 fundamentals-timeseries 端点取 trailingDilutedEPS 季度序列（**必须复用与 FetchQuote 相同的 UA/Accept 请求头**——httptest 测不出但真实端点无 UA 会 403，plan T3 注释明示）；Yahoo 结构体加 epsBaseURL；新增 NewWithBaseURLs(chartURL, epsURL)，NewWithBaseURL 两者同设（兼容既有测试）。测试代码以 plan 原文为准。",
+  "module": "collector-yahoo",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/yahoo_test.go",
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/eps_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "plan Task 2 表驱动用例全过：^GSPC/^IXIC/^HSI/GC=F/CL=F/SI=F 接受，空串/^/=F/^GSPC.SH/GC=X=F/注入串拒绝",
+      "FetchQuote(^GSPC) 请求路径将 ^ 百分号编码为 %5E（httptest 断言）",
+      "FetchEPSHistory 正确解析 trailingDilutedEPS（asOfDate+reportedValue.raw），按 Date 升序返回，请求含 type=trailingDilutedEPS",
+      "NewWithBaseURLs 注入双端点；NewWithBaseURL 兼容既有测试零修改通过"
+    ],
+    "boundary": [
+      "timeseries result 为空/字段缺失返回空 slice + nil error；reportedValue.raw <= 0 的点保留（剔除语义归 valuation 层）"
+    ],
+    "error_handling": [
+      "指数符号（^ 前缀）调用 FetchEPSHistory 不发请求直接返回 error"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%，全部测试 httptest 离线",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/collector/yahoo"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "dev_done_at": "2026-06-11T02:50:18Z",
+  "verified_at": "2026-06-11T02:53:39Z"
+}

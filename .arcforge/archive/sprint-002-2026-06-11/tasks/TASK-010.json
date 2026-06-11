@@ -1,0 +1,51 @@
+{
+  "id": "TASK-010",
+  "title": "app 资产类型识别 + AssetTypes 绑定校验 + 动态历史窗口",
+  "description": "按 plan Task 6 + Task 12 原文施工：①TypeIndex 常量、DetectType 重写（^/IsAShareIndex→指数，=F→期货，crypto 规则，默认股票）、assetTypeOf 映射（Bond→空）、DetectMarket 加 ^HSI→MarketHShare。②effectiveStrategies（AssetTypes 过滤 + warnOnce 去重告警 + 表外 ^ 指数 warning）、historyWindowDays（max PriceHistory 交易日→自然日 ×365/252+30，<=250 回退 365）、warnOnce（sync.Map）。analyzeSymbol 接入两处：动态 start 窗口 + effective 策略列表（非空绑定但全被过滤→直接 return）。未绑定 strategies 项保持既有行为（plan 行为边界说明）。",
+  "module": "app",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "DetectType plan 用例全过：^GSPC/^HSI/000300.SH/000001.SH→指数，000001.SZ/600519.SH/AAPL→股票，GC=F→期货，BTC-USDT→加密货币",
+      "assetTypeOf 七映射全过（含 TypeBond→空）；DetectMarket(^HSI)→H股",
+      "effectiveStrategies：stock_only 策略对 GC=F 项被过滤、AssetTypes 空=不限保留；同一 (symbol,strategy) 二次调用仅 1 条 warning",
+      "historyWindowDays：5*252 bars 策略 → ≥1825 天；无策略声明 → 365"
+    ],
+    "boundary": [
+      "item.Strategies 非空但 effective 为空 → analyzeSymbol 直接返回不分析；表外 ^ 符号绑定时 warnOnce 提示默认 US"
+    ],
+    "error_handling": [
+      "未注册策略名保留传递给 engine 既有报错路径（不在过滤层吞掉）"
+    ],
+    "non_functional": [
+      {
+        "desc": "internal/app 全包 -race 通过（warnOnce 并发安全）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "verified_at": "2026-06-11T02:59:29Z"
+}

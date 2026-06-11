@@ -1,0 +1,44 @@
+{
+  "id": "TASK-003",
+  "title": "collector 根包：A 股指数表 + selector 指数/期货路由",
+  "description": "按 plan Task 4（前半）+ Task 5 原文施工：①新建 indexes.go：AShareIndexSecIDs 六指数表 + IsAShareIndex。②selector.go：indexMarkets 表（^GSPC/^IXIC/^DJI→US，^HSI→HK）、isIndexSymbol/isCommoditySymbol、KnownIndexMarket 导出；SelectForSymbol 在 A 股分支后插入 ^/=F→yahoo 路由；MarketForSymbol 表内取值/表外 ^ 默认 US/=F→US。注意既有 fakeCollector 指针接收者陷阱（plan 原文提示）。",
+  "module": "collector",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/indexes.go",
+    "internal/collector/indexes_test.go",
+    "internal/collector/selector.go",
+    "internal/collector/selector_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "IsAShareIndex 表驱动：000300.SH/000001.SH→true，000001.SZ/600519.SH→false",
+      "MarketForSymbol：^GSPC/^IXIC/^DJI→US、^HSI→HK、^N225（表外）→US、GC=F/CL=F→US、000300.SH→CNA、AAPL→US、BTC-USDT→Crypto（plan Task 5 全用例）",
+      "SelectForSymbol：^GSPC/^HSI/GC=F→yahoo，000300.SH→eastmoney",
+      "KnownIndexMarket 对表内返回 (market,true)，表外 ^ 返回 (_,false)"
+    ],
+    "boundary": [
+      "A 股指数（000300.SH，无 ^ 前缀）仍走 .SH/.SZ 的 CNA 分支不受新路由影响（既有测试零回归）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/collector"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

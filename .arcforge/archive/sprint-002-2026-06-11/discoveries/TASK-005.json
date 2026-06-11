@@ -1,0 +1,51 @@
+{
+  "task_id": "TASK-005",
+  "key_findings": [
+    "既有 lixinger.postJSON 把响应 decode 进平铺的 lixingerResponse（pe_ttm 是 float64），承载不了嵌套 pe_ttm.y5.cvpos。按 plan 提示新增 postJSONRaw（返回原始 body，复用同一 POST + StatusCode!=200 守卫），FetchValuationPercentile 自行 json.Unmarshal 进 {code,message,data:[]map[string]any} 并用 digFloat 沿 path 下钻。",
+    "endpointFor 复用 TASK-003 的 collector.IsAShareIndex 判定 A 股指数（cn/index），与 eastmoney/selector 共用单一真相源；港股代码经 5 位补零（0700.HK→00700）。",
+    "ISSUE-1 落实：postJSONRaw 在 Decode 前 resp.StatusCode!=200 即 error；测试 TestFetchValuationPercentile_HTTPError 用『合法 JSON body + HTTP 500』专门触发该守卫，与业务码非0(_BusinessError, HTTP200+code403)、metric 缺失(_MissingMetric) 三条错误路径分离，避免 fantasy-pass。"
+  ],
+  "decisions": [
+    {
+      "decision": "lookbackYears→粒度抽成 lookbackGranularity 纯函数（<=3→y3, <=5→y5, else y10），FetchValuationPercentile 调用。",
+      "rationale": "便于 TestFetchValuationPercentile_Granularity 表驱动断言请求体 metric 字符串，且与请求逻辑解耦。"
+    },
+    {
+      "decision": "cvpos 缺失/类型不符/data 空/业务码非0/HTTP 非200 一律返回 (-1, error)。",
+      "rationale": "DoD error_handling 要求；-1 作为『不可用』哨兵值，由 valuation/app 上层按降级链处理（design §5）。"
+    },
+    {
+      "decision": "code-simplifier 子代理把港股补零 for 循环替换为 fmt.Sprintf(\"%05s\", code)。已实测 Go %05s 对字符串做零填充（0700→00700）且 TestEndpointFor 通过，予以保留。",
+      "rationale": "更简洁且被测试覆盖；已验证非空格填充（[00700]）。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/valuation.go",
+    "internal/collector/lixinger/valuation_test.go"
+  ],
+  "interfaces_exposed": [
+    "func (l *Lixinger) FetchValuationPercentile(symbol string, lookbackYears int) (float64, error)  // 返回 PE-TTM cvpos 百分位 0-100；不可用/错误返回 (-1, error)",
+    "func endpointFor(symbol string) (endpoint, code string)  // 包内私有：相对端点路径 + 理杏仁证券码；空端点=该类不支持",
+    "func (l *Lixinger) postJSONRaw(url string, payload any) ([]byte, error)  // 包内私有：原始 body POST，StatusCode!=200 即 error",
+    "var usHKIndexCodes map[string]struct{endpoint,code string}  // 包内私有：^GSPC→SPX(us/index) / ^IXIC→COMP / ^DJI→DJI / ^HSI→HSI(hk/index)"
+  ],
+  "dod_test_mapping": [
+    "functional[0] endpointFor 七用例 → TestEndpointFor (600519.SH/000300.SH/0700.HK/AAPL/^GSPC/^HSI/GC=F)",
+    "functional[1] 请求体含 pe_ttm.y5.cvpos; cvpos 0.2345→23.45(±0.01) → TestFetchValuationPercentile",
+    "functional[2] lookbackYears→y3/y5/y10 粒度 → TestFetchValuationPercentile_Granularity (1/3/4/5/6/10)",
+    "boundary GC=F 不发请求返回 error → TestEndpointFor(GC=F 空) + TestFetchValuationPercentile_Unsupported",
+    "error 业务码非0 → TestFetchValuationPercentile_BusinessError；data 空 → _EmptyData；metric 缺失 → _MissingMetric；(ISSUE-1) 合法JSON+非200 → _HTTPError",
+    "non_functional 覆盖率≥80% httptest 离线 → 83.6%，全 httptest，-race 通过"
+  ],
+  "caveats": [
+    "plan Step 3 标注『实现首日核对项』：成功码约定(code 0=成功，沿用既有 lixinger.go)、请求体键名(metricsList vs metrics)、理杏仁国际指数码(SPX/COMP/DJI/HSI)、港股5位补零——均按既有代码约定与 plan 候选值实现，无 LIXINGER_API_KEY 未对真实 API 核验。若真实 API 与此不符需统一修正全包+fixture（design §2.4 冻结项）。",
+    "FetchFundamental(既有)仍用 metrics 键名取平铺指标；本任务估值分位用 metricsList 取嵌套 cvpos——两键名差异沿用既有代码现状，未统一，留待首日真实 API 核对裁决。"
+  ],
+  "verification": {
+    "build": "go build ./internal/collector/lixinger/ 通过",
+    "vet": "go vet 通过",
+    "tests": "go test ./internal/collector/lixinger/ -race 全绿（含既有 lixinger_test/httptest_test 零回归）",
+    "coverage": "83.6% (≥80%)",
+    "commit": "cfb4fe8 feat(lixinger): multi-market valuation percentile (cn/hk/us company+index)"
+  }
+}

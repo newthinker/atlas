@@ -1,0 +1,43 @@
+{
+  "task_id": "TASK-010",
+  "key_findings": [
+    "DetectType 重写为 switch：^前缀 || collector.IsAShareIndex(symbol) → TypeIndex；=F 后缀 → TypeFuture；crypto 规则不变；default TypeStock。消费 TASK-003 暴露的 IsAShareIndex。",
+    "DetectMarket 在 .HK 分支后插入 `case upperSymbol==\"^HSI\": return MarketHShare`，使 UI 市场标签与 collector.MarketForSymbol(^HSI→HK) 一致，防美股/H股标签分裂。",
+    "AddToWatchlist 自动识别路径（app.go ~541/544）复用 DetectMarket/DetectType，故 ^GSPC 自动归 指数、^HSI 自动归 H股——行为变更是预期且被 effectiveStrategies 链路消费。",
+    "warnOnce 用 sync.Map.LoadOrStore 去重，键为 binding:<symbol>:<strategy> 与 unknown-index:<symbol>；-race 全过。",
+    "effectiveStrategies 顶部处理表外 ^ 指数 warning（KnownIndexMarket 查询），随后按 AssetTypes 过滤：decl 空=不限保留；未注册策略名透传给 engine 报错路径（不在过滤层吞）。",
+    "analyzeSymbol：Strategies 非空时先算 effective，全被过滤→fetch 前直接 return（省抓取）；start 窗口改用 historyWindowDays(item)；策略选择改用 effective 列表。未绑定项保持 Analyze 全策略 + 365 天既有行为。"
+  ],
+  "decisions": [
+    {
+      "decision": "effectiveStrategies 的表外 ^ 指数 warning 仅在 item 被绑定策略（analyzeSymbol 中 len(item.Strategies)>0 才调用）时触发。",
+      "rationale": "done_criteria boundary 表述为「表外 ^ 符号绑定时 warnOnce」；未绑定项走全策略路径不经过本函数，符合设计 §2.3 告警职责划分。单测直接调用 effectiveStrategies 验证去重。"
+    },
+    {
+      "decision": "用 slices.Contains(decl, at) 替代 plan 骨架的自建 contains 辅助函数。",
+      "rationale": "go.mod 为 go 1.24，标准库 slices 可用；避免在 app 包新增私有 helper，单一真相源。"
+    },
+    {
+      "decision": "historyWindowDays 早返回不需要 effective 列表，按 item.Strategies 全集取 max PriceHistory。",
+      "rationale": "窗口大小应覆盖任何可能运行的策略所需历史；过滤发生在策略执行选择层，与数据抓取窗口正交。<=250 bars 回退 365 天兼容现状。"
+    }
+  ],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "interfaces_exposed": [
+    "const app.TypeIndex = \"指数\"",
+    "func app.DetectType(symbol string) string  // ^/IsAShareIndex→指数, =F→期货, crypto, default 股票",
+    "func app.DetectMarket(symbol string) string  // 新增 ^HSI→H股",
+    "func (a *App) effectiveStrategies(item WatchlistItem) []string  // 包内：AssetTypes 过滤后的有效策略名",
+    "func (a *App) historyWindowDays(item WatchlistItem) int  // 包内：交易日→自然日窗口, 365 floor",
+    "func assetTypeOf(appType string) core.AssetType  // 包内：UI类型→core资产类型, 不支持返回空"
+  ],
+  "verification": {
+    "build": "go build ./... 通过 (exit 0)",
+    "tests": "go test ./internal/app/ -race -cover 通过，覆盖率 95.5% (≥80%)；go test ./... 全量零回归",
+    "dod": "DetectType/assetTypeOf/DetectMarket(^HSI)/effectiveStrategies(过滤+去重)/historyWindowDays/未注册透传/effective空早返回 均有对应测试，全过",
+    "coverage": "internal/app 95.5%"
+  }
+}

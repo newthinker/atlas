@@ -1,0 +1,52 @@
+{
+  "id": "TASK-007",
+  "title": "price_percentile 策略（全资产）",
+  "description": "按 plan Task 9 原文施工：新策略包——默认参数 lookback 5y / 25/75/10/90；minSampleBars=252 门槛；classify 分档（extreme→0.8+线性≤0.95，normal→0.6-0.8 线性）；RequiredData 声明 PriceHistory=lookback*252 + 六类 AssetTypes；Init 用 numParam helper 兼容 int/float64（plan 明示不可照抄 ma_crossover 的 .(int) 单形态），校验 extreme_low<low<high<extreme_high。信号带 Price=当前收盘与 percentile/lookback_years/sample_size Metadata。",
+  "module": "strategy-price-percentile",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/strategy/price_percentile/strategy.go",
+    "internal/strategy/price_percentile/strategy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "300 根 K 线下：历史最低价→strong_buy 且 Confidence∈[0.8,0.95] 且 Metadata 含 percentile；中位→无信号；历史最高→strong_sell（plan 用例）",
+      "RequiredData：lookback_years=3 时 PriceHistory=756；AssetTypes 六类（stock/index/etf/fund/commodity/crypto）",
+      "信号 Price 字段 = 当前收盘价（非 0，sprint-001 W1 教训）"
+    ],
+    "boundary": [
+      "OHLCV < 252 根 → 返回 (nil, nil) 不出信号",
+      "Init 参数 int 与 float64 两种形态均正确解析"
+    ],
+    "error_handling": [
+      "阈值乱序（如 extreme_low >= low）Init 返回 error"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-006"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./internal/strategy/price_percentile"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "dev_done_at": "2026-06-11T03:01:44Z",
+  "verified_at": "2026-06-11T03:07:34Z"
+}

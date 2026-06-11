@@ -1,0 +1,50 @@
+{
+  "id": "TASK-006",
+  "title": "internal/valuation 纯函数包（分位 + PE 重建）",
+  "description": "按 plan Task 8 原文施工：percentile.go——PercentileRank（strictly-less 口径，空序列→-1）；reconstruct.go——ReconstructPEPercentile（EPS 升序、阶梯对齐日线 close、剔除 EPS<=0 交易日、MinEPSPoints=8）+ 哨兵错误 ErrInsufficientEPS（数据缺失可兜底）/ErrNonPositiveEPS（当前亏损不兜底）。plan 注释第 4 点是 load-bearing：剔除后 PE 序列为空必须返回 ErrInsufficientEPS，绝不能让 PercentileRank 的 -1 带 nil error 冒充成功。",
+  "module": "valuation",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/valuation/percentile.go",
+    "internal/valuation/percentile_test.go",
+    "internal/valuation/reconstruct.go",
+    "internal/valuation/reconstruct_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "PercentileRank plan 用例全过：middle=50/lowest=0/highest=100/all-equal=0/single=0/空→-1",
+      "ReconstructPEPercentile 阶梯对齐：EPS 上升+价格恒定 → 当前 PE 分位 < 50",
+      "回归用例：EPS 跳升期重建 PE 分位与价格分位差 ≥ 1（两者不可恒等）"
+    ],
+    "boundary": [
+      "有效（EPS>0）季度点 < 8 → ErrInsufficientEPS；中间单个负 EPS 季度剔除后剩余 ≥8 有效点仍正常计算",
+      "剔除后 PE 序列为空 → ErrInsufficientEPS（不得返回 -1+nil）"
+    ],
+    "error_handling": [
+      "当前 EPS(TTM) ≤ 0 → ErrNonPositiveEPS（errors.Is 可判别）"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%，纯函数无 IO",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/valuation"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "selector.go 既有路由为 switch true 表驱动；在 A 股分支之后、crypto 分支之前插入 isIndexSymbol/isCommoditySymbol 合并 case 路由到 yahoo，对既有 US/HK/crypto 用例零回归。",
+    "fakeCollector 为指针接收者，newRegistryWith 注册 &fakeCollector{name:n}；新增测试沿用同一 helper，未触发指针接收者陷阱。",
+    "MarketForSymbol 的指数分支复用 KnownIndexMarket(symbol) 做表内查找，避免重复 strings.ToUpper 与重复 map 查询逻辑（单一真相源）。"
+  ],
+  "decisions": [
+    {
+      "decision": "KnownIndexMarket 内部用 strings.ToUpper 做大小写不敏感查找。",
+      "rationale": "watchlist 符号大小写不固定（^gspc 需命中 ^GSPC），且导出给下游 app 层判定/告警使用，需稳定。"
+    },
+    {
+      "decision": "表外 ^ 符号在 MarketForSymbol 默认 MarketUS、SelectForSymbol 默认 yahoo，而非报错。",
+      "rationale": "依设计 §2.3，未知指数绑定的 warning 由 app 装配层负责，collector 路由层只做尽力而为的默认归类。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/indexes.go",
+    "internal/collector/indexes_test.go",
+    "internal/collector/selector.go",
+    "internal/collector/selector_test.go"
+  ],
+  "interfaces_exposed": [
+    "func IsAShareIndex(symbol string) bool",
+    "var AShareIndexSecIDs map[string]string",
+    "func KnownIndexMarket(symbol string) (core.Market, bool)"
+  ],
+  "verification": "go build ./... 通过；go test ./internal/collector/ -race -cover 通过，覆盖率 99.0%（≥80%）；go vet ./internal/collector/ 无输出。done_criteria 全部由 TestIsAShareIndex / TestMarketForSymbol_IndexAndCommodity / TestSelectForSymbol_IndexAndCommodityRouteToYahoo / TestKnownIndexMarket 覆盖，既有 TestSelectForSymbol / TestMarketForSymbol 零回归。"
+}

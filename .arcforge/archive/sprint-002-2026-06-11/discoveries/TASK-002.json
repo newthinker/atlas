@@ -1,0 +1,48 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "validateSymbol 正则改为 `^(\\^[A-Za-z0-9]{1,10}|[A-Za-z0-9]{1,10}(\\.[A-Za-z]{1,4})?|[A-Za-z]{1,6}=F)$`，纯语法校验，与 phase-1 coverage list 解耦。",
+    "FetchQuote/FetchHistory 局部变量 url 改名 reqURL 防遮蔽 net/url 包；URL 构造用 url.PathEscape(yahooSymbol)，^GSPC → %5EGSPC。",
+    "抽出 (y *Yahoo) newRequest(reqURL) helper 统一三条路径(quote/history/eps)的 UA/Accept/Accept-Language 头——真实 fundamentals-timeseries 端点无 UA 会 403（httptest 测不出，靠 helper 复用保证）。",
+    "Yahoo 结构体加 epsBaseURL；New 用 NewWithBaseURLs(defaultBaseURL, defaultEPSBaseURL)；NewWithBaseURL(u) 转调 NewWithBaseURLs(u,u) 保持既有测试零修改。",
+    "FetchEPSHistory 解析 timeseries.result[0].trailingDilutedEPS[]，asOfDate 按 2006-01-02 解析，reportedValue.raw 取值，按 Date 升序 sort 返回。"
+  ],
+  "decisions": [
+    {
+      "decision": "指数符号(^ 前缀)在 FetchEPSHistory 入口直接 return error，不发请求。",
+      "rationale": "设计 §2.5 指数无 filings；提前返回避免无谓 HTTP 与端点 404 噪音。错误测试与畸形 JSON/HTTP 错误走不同路径。"
+    },
+    {
+      "decision": "reportedValue.raw <= 0 的点保留，不在 collector 层剔除。",
+      "rationale": "plan T3 明示剔除语义归 valuation 层；collector 仅做忠实解析。TestFetchEPSHistory_KeepsNonPositive 固化此契约。"
+    },
+    {
+      "decision": "timeseries result 为空或字段缺失返回空 slice + nil error（非 error）。",
+      "rationale": "plan T3：由调用方按点数门槛判定可用性，collector 不替调用方决策。asOfDate 不可解析的点 skip 而非报错。"
+    },
+    {
+      "decision": "ISSUE-1：FetchEPSHistory 在 Do 后 Decode 前加 `if resp.StatusCode != http.StatusOK { return error }`。",
+      "rationale": "防 HTTP 503 + 合法 JSON body 被当成功。NonOKStatus 测试用合法 JSON+503 触发守卫，MalformedJSON 测试用 200+非法 body 触发 decode 失败，两条路径分离。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/yahoo_test.go",
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/eps_test.go"
+  ],
+  "interfaces_exposed": [
+    "func NewWithBaseURLs(chartURL, epsURL string) *Yahoo  // 双端点测试构造器",
+    "func NewWithBaseURL(baseURL string) *Yahoo            // 既有，现转调 NewWithBaseURLs(u,u)",
+    "func (y *Yahoo) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error)  // 指数符号返回 error；空结果返回 []core.EPSPoint{},nil；按 Date 升序",
+    "const defaultEPSBaseURL = \"https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries\"",
+    "validateSymbol 现接受 ^GSPC 指数与 GC=F 期货（包内私有）"
+  ],
+  "verification": {
+    "build": "go build ./internal/collector/yahoo/ 通过",
+    "vet": "go vet ./internal/collector/yahoo/ 通过",
+    "tests": "go test ./internal/collector/yahoo/ 全部 PASS（含既有用例零回归 + 新增 8 用例）",
+    "coverage": "包覆盖率 81.7% ≥ 80% 阈值；全部测试 httptest 离线",
+    "issue1_compliance": "FetchEPSHistory HTTP 错误(503+合法JSON)与畸形JSON(200+非法body)分路径断言 error"
+  }
+}

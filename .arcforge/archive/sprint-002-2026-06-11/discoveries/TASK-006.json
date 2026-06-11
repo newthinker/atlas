@@ -1,0 +1,48 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "internal/valuation 是全新纯函数包，无 IO，仅依赖 internal/core 的 OHLCV/EPSPoint。包覆盖率 100.0%。",
+    "PercentileRank 采用 strictly-less 口径：返回序列中严格小于 current 的比例×100；空序列返回 -1（哨兵，区分于合法 0）。all-equal/single 因无严格更小值返回 0。",
+    "ReconstructPEPercentile 用 sort.Search 做阶梯对齐（每个 close 取 Date<=bar.Time 的最近 EPS 点）；EPS 升序排序后处理；O((n+m)log m)。",
+    "load-bearing 不变量已落实并单测覆盖（TestReconstructPEPercentile_EmptyAfterDrop）：剔除 EPS<=0 交易日后 PE 序列为空时返回 ErrInsufficientEPS，绝不让 PercentileRank 的 -1 带 nil error 冒充成功。"
+  ],
+  "decisions": [
+    {
+      "decision": "错误检查顺序：先判 positive<MinEPSPoints(ErrInsufficientEPS)，再判 currentEPS<=0(ErrNonPositiveEPS)，最后判空序列(ErrInsufficientEPS)。",
+      "rationale": "与 plan Task 8 注释步骤一致。数据缺失(可兜底)与真实亏损(不兜底)是下游 TASK-011 兜底链的契约：ErrInsufficientEPS→走理杏仁兜底，ErrNonPositiveEPS→直接跳过不兜底。"
+    },
+    {
+      "decision": "currentEPS 取排序后最后一个 EPS 点(最新季度)，currentPE = 最后一根 close / currentEPS。",
+      "rationale": "TTM EPS 当前值即最新季度点；与 plan「当前 PE = 最后 close / 当前 EPS」一致。"
+    },
+    {
+      "decision": "latestEPSAtOrBefore 用 sort.Search 找首个 Date>t 的下标，取前一个；i==0 表示全部晚于 t → ok=false（该 bar 被跳过）。",
+      "rationale": "阶梯函数对齐的标准二分实现，O(log m)，比线性扫描清晰且高效。"
+    }
+  ],
+  "files_modified": [
+    "internal/valuation/percentile.go",
+    "internal/valuation/percentile_test.go",
+    "internal/valuation/reconstruct.go",
+    "internal/valuation/reconstruct_test.go"
+  ],
+  "interfaces_exposed": [
+    "valuation.PercentileRank(series []float64, current float64) float64  // 严格小于占比×100；空序列→-1",
+    "valuation.ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64, error)  // 阶梯对齐重建 PE 序列后返回当前 PE 的分位",
+    "valuation.ErrInsufficientEPS  // 有效正 EPS 点 < 8 或剔除后 PE 序列为空：数据缺失，调用方可走理杏仁兜底",
+    "valuation.ErrNonPositiveEPS  // 当前 EPS(TTM) <= 0：真实亏损，PE 分位无意义，调用方直接跳过(不兜底)",
+    "valuation.MinEPSPoints = 8  // 重建所需最小有效正 EPS 季度点数"
+  ],
+  "verification": {
+    "build": "go build ./... 通过 (exit 0)",
+    "vet": "go vet ./internal/valuation/ 通过 (exit 0)",
+    "fmt": "gofmt -l internal/valuation/ 无输出 (干净)",
+    "tests": "go test ./internal/valuation/ 全过：TestPercentileRank, TestReconstructPEPercentile_{StepAlignment,NotEqualToPricePercentile,Errors,EmptyAfterDrop}",
+    "coverage": "internal/valuation 覆盖率 100.0% (>= 80% 默认阈值)"
+  },
+  "downstream_notes": [
+    "TASK-007 (price_percentile) 复用 PercentileRank。",
+    "TASK-008 (pe_percentile) 不直接调用本包(输入取 ctx.Fundamental.PEPercentile)。",
+    "TASK-011 (buildFundamental 兜底链) 依赖双哨兵语义：errors.Is(err, ErrNonPositiveEPS)→直接不可用不兜底；errors.Is(err, ErrInsufficientEPS) 或其他 fetch 失败→走理杏仁兜底，Source=\"lixinger_cvpos:yahoo_eps_insufficient\"。"
+  ]
+}

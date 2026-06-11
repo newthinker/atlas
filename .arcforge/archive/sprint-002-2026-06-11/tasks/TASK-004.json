@@ -1,0 +1,45 @@
+{
+  "id": "TASK-004",
+  "title": "eastmoney 指数 secid 解析",
+  "description": "按 plan Task 4（后半）原文施工：parseSymbol 开头查 collector.AShareIndexSecIDs，命中则拆 secid 返回 (code, market)；个股走既有后缀规则不受影响。eastmoney 已 import internal/collector 无新依赖。",
+  "module": "collector-eastmoney",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/eastmoney/eastmoney.go",
+    "internal/collector/eastmoney/eastmoney_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "plan Task 4 表驱动用例全过，断言重点：000001.SH（指数）→ market \"1\" 与 000001.SZ（个股）→ market \"0\" 正确区分；600519.SH 个股不受影响"
+    ],
+    "boundary": [
+      "表外 .SH/.SZ 符号仍走既有后缀规则（既有测试零回归）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/collector/eastmoney"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "verified_at": "2026-06-11T03:05:13Z",
+  "verify_note": "VERIFIED with MEDIUM advisory Finding-1: test mislabels 399001.SZ (深证成指, in-table) as out-of-table; non-DoD case, output coincides, no criterion fails; recommend dev fix inTable flag."
+}

@@ -1,0 +1,47 @@
+{
+  "id": "TASK-005",
+  "title": "lixinger 多市场估值分位（FetchValuationPercentile）",
+  "description": "按 plan Task 7 原文施工：新建 valuation.go——endpointFor 分派（A股指数→cn/index、A股个股→cn/company/non_financial、港股→hk/company（5位补零）、美股→us/company、表内国际指数→us|hk/index、商品/加密→空）；FetchValuationPercentile 取 pe_ttm.{y3|y5|y10}.cvpos，cvpos×100 返回。注意 plan 提示：postJSON 平铺结构承载不了嵌套 metric，需自写发送+解析或抽 postJSONRaw；成功码/metricsList 键名为实现首日核对项（无 LIXINGER_API_KEY 时按既有代码约定实现并在 discovery 注明）。",
+  "module": "collector-lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/valuation.go",
+    "internal/collector/lixinger/valuation_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "endpointFor 表驱动全过（plan Task 7 七用例：600519.SH/000300.SH/0700.HK→00700/AAPL/^GSPC→SPX/^HSI→HSI/GC=F→空）",
+      "FetchValuationPercentile 请求体含 pe_ttm.y5.cvpos（lookback=5），cvpos 0.2345 → 返回 23.45（±0.01）",
+      "lookbackYears 映射粒度：<=3→y3、<=5→y5、否则 y10"
+    ],
+    "boundary": [
+      "商品符号（GC=F）返回 error 不发请求"
+    ],
+    "error_handling": [
+      "业务错误码（code 非 0，如权限不足）返回 (-1, error)；data 为空/metric 字段缺失返回 (-1, error)"
+    ],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%，httptest 离线",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

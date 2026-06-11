@@ -1,0 +1,49 @@
+{
+  "task_id": "TASK-012",
+  "key_findings": [
+    "serve.go 装配收口：注册 price_percentile + pe_percentile（读 cfg.Strategies[*].Enabled/Params，经 registerConfiguredStrategy helper Init→engine.Register+app.RegisterStrategy）；注入估值源 application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSourceOrNil(yahooCollector))。",
+    "typed-nil 陷阱已机制化规避：valuationSourceOrNil(*lixinger.Lixinger)/epsSourceOrNil(*yahoo.Yahoo) 在指针为 nil 时返回 untyped-nil 接口，避免「非 nil 接口包 nil 指针」defeat buildFundamental 的 valuationSrc!=nil 守卫。yahooCollector 声明从 if 块提升到函数级才能注入。",
+    "backtest.go 注册 price_percentile（OHLCV-only 可离线回测）；pe_percentile 故意不注册（依赖在线估值分位，回测引擎无该数据，代码注释说明）。",
+    "config.example.yaml：新增 price_percentile{25/75/10/90}+pe_percentile{20/80/10/90} 两块；删除 pe_band 下从未生效的 lookback_years/threshold_percentile 两行；watchlist 追加 ^GSPC(指数,price+pe)/GC=F(期货,price)/BTC-USDT(加密,price)。",
+    "回测冒烟实跑确认 percentile 计算端到端发生（非数据不足全程跳过）：AAPL 880 signals；^GSPC 836 signals（指数符号端到端，承接 plan 验收对照第 1 条）；^IXIC 873 signals。"
+  ],
+  "decisions": [
+    {
+      "decision": "抽 registerConfiguredStrategy(engine, app, s, cfg, log) helper 统一两策略注册（Init 失败 log.Warn 并跳过）。",
+      "rationale": "与 ma_crossover 现有 wiring 行为一致（Init 失败不致命）；两策略注册逻辑相同，helper 消除重复且便于一致维护。"
+    },
+    {
+      "decision": "typed-nil 防护抽成两个独立具名 helper 而非 inline if，并加 4 个单测直接断言 nil→nil / real→non-nil。",
+      "rationale": "DoD functional[0] 硬断言「nil 指针不得变非 nil 接口」需可测；runServe 整体不易单测，具名 helper 把 load-bearing 不变量隔离为纯函数，单测固化，回归可防。"
+    },
+    {
+      "decision": "config watchlist 三新项用 YAML inline flow（{symbol:..,type:..}），含 type 中文标签（指数/期货/加密货币）。",
+      "rationale": "照 plan Task 14 Step 3 原文；type 用 app 层中文标签与 config.WatchlistItem.Type 注释一致。已用临时 load 测试确认解析正确（type/strategies 字段就位）。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/backtest.go",
+    "cmd/atlas/serve_test.go",
+    "configs/config.example.yaml",
+    "README.md"
+  ],
+  "interfaces_exposed": [
+    "func registerConfiguredStrategy(engine *strategy.Engine, application *app.App, s strategy.Strategy, cfg strategy.Config, log *zap.Logger)  // cmd/atlas 包内",
+    "func valuationSourceOrNil(c *lixinger.Lixinger) app.ValuationSource  // nil 指针→untyped-nil 接口",
+    "func epsSourceOrNil(c *yahoo.Yahoo) app.EPSSource  // nil 指针→untyped-nil 接口"
+  ],
+  "verification": {
+    "build": "go build ./... 通过 (exit 0)",
+    "vet": "go vet ./... 通过 (exit 0，全量是 plan T15 Step 3 承接)",
+    "tests": "go test ./... 全量通过零回归（48 ok 包，无 FAIL/panic）；cmd/atlas typed-nil 4 测试全 PASS",
+    "coverage": "cmd/atlas 覆盖率 51.8% ≥ coverage_minimum 35",
+    "config_parse": "临时 load 测试：price_percentile/pe_percentile enabled=true，pe_band 死参数 lookback_years 已不存在，watchlist 7 项含 ^GSPC/GC=F/BTC-USDT 且 type 字段正确",
+    "backtest_smoke": "AAPL 880 signals + ^GSPC 836 signals + ^IXIC 873 signals（均无错退出，percentile 计算发生）。注：^GSPC 首两轮 Yahoo 返回 EOF（瞬时反爬/限流），重试后成功——URL 转义正确(%5EGSPC)，失败为外部依赖瞬时性非代码缺陷。"
+  },
+  "downstream_notes": [
+    "理杏仁指数代码核对（plan Task 15 Step 1，需 LIXINGER_API_KEY）：本环境无 key，已跳过。usHKIndexCodes（SPX/COMP/DJI/HSI）已固化在 internal/collector/lixinger/valuation.go（他人 scope），如需线上核对请在配 key 环境用 hk/index、us/index basic-info/samples 接口复核。",
+    "price_percentile 现已在 serve 与 backtest 双注册；pe_percentile 仅 serve 注册（回测无在线估值源）。",
+    "config 删除 pe_band 死参数后 pe_band 仅保留 enabled:false（design §3.2 该策略参数从未被读取）。"
+  ]
+}

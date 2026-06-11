@@ -1,0 +1,36 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "core 类型扩展为纯声明、无行为：AssetType 常量块、Fundamental 结构、新增 EPSPoint 均集中在 internal/core/types.go。",
+    "AssetType 与 Fundamental 已被多处消费（collector、strategy、context 等），但仅新增常量/字段不破坏既有调用点，全量测试零回归。",
+    "internal/core 覆盖率维持 80.0%，新增纯类型未引入可执行语句，故不降低覆盖率。"
+  ],
+  "decisions": [
+    {
+      "decision": "AssetCrypto 常量放入既有 AssetType const 块末尾，依赖 gofmt 列对齐（与 AssetCommodity 对齐）。",
+      "rationale": "保持与现有 AssetStock/AssetIndex/... 同块同风格，避免割裂常量定义。"
+    },
+    {
+      "decision": "PEPercentile 使用 3 行前置块注释而非行尾注释。",
+      "rationale": "注释含取值范围(0-100)、负值语义、Source 编码三层信息，过长不适合行尾；其余短字段仍用行尾注释。"
+    },
+    {
+      "decision": "EPSPoint 定义为 {Date time.Time, EPS float64} 并置于 Fundamental 之前。",
+      "rationale": "按 plan Task 1 原文，作为 TTM 摊薄 EPS 序列的单点类型，紧邻其消费方 Fundamental。"
+    }
+  ],
+  "files_modified": [
+    "internal/core/types.go"
+  ],
+  "interfaces_exposed": [
+    "core.AssetCrypto AssetType = \"crypto\"",
+    "core.EPSPoint struct{ Date time.Time; EPS float64 }",
+    "core.Fundamental.PEPercentile float64  // 0-100，负值=不可用，语义随 Source 字段编码"
+  ],
+  "verification": {
+    "build": "go build ./... 通过 (exit 0)",
+    "vet": "go vet ./... 通过 (exit 0)",
+    "tests": "go test ./... 全量通过，零回归",
+    "coverage": "internal/core 覆盖率 80.0% ≥ 78% 阈值"
+  }
+}

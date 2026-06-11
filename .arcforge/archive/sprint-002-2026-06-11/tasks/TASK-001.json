@@ -1,0 +1,40 @@
+{
+  "id": "TASK-001",
+  "title": "core 类型扩展（AssetCrypto/EPSPoint/PEPercentile）",
+  "description": "按 plan Task 1 原文（docs/plans/2026-06-11-index-commodity-percentile-implementation.md）：AssetType 常量块追加 AssetCrypto；Fundamental 增加 PEPercentile float64 字段（含注释：0-100，负值=不可用，Source 编码获取方法）；新增 EPSPoint{Date,EPS}。纯类型无行为，消费方测试覆盖。",
+  "module": "core",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/core/types.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "AssetCrypto 常量、EPSPoint 结构、Fundamental.PEPercentile 字段按 plan Task 1 的代码块原样存在（含注释语义）",
+      "go build ./... 与 go vet ./... 通过，全量既有测试零回归"
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "internal/core 包覆盖率不低于 78%（现状 80.0%，新增纯类型不应引入未覆盖语句）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/core"
+  ],
+  "coverage_minimum": 78,
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "dev_done_at": "2026-06-11T02:39:11Z",
+  "verified_at": "2026-06-11T02:43:41Z"
+}

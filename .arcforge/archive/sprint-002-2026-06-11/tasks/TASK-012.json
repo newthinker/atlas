@@ -1,0 +1,60 @@
+{
+  "id": "TASK-012",
+  "title": "cmd 装配 + 配置示例 + 回测冒烟 + README",
+  "description": "按 plan Task 14 + Task 15（部分）原文施工：①serve.go 注册两个新策略（读 strategies.* 配置）；注入估值源必须按 plan 的 typed-nil 防护写法（var vs app.ValuationSource; if lixingerCollector != nil {...}），yahooCollector 声明提升到函数级。②backtest.go 注册 price_percentile（pe_percentile 不注册，注释说明）。③config.example.yaml：strategies 块追加两策略 + 删除 pe_band 从未生效的 lookback_years/threshold_percentile 两行 + watchlist 示例追加 ^GSPC/GC=F/BTC-USDT。④回测冒烟（区间 >252 交易日）。⑤README 两行追加。⑥理杏仁指数代码核对（无 LIXINGER_API_KEY 则跳过并在 discovery 注明）。",
+  "module": "cmd-atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/backtest.go",
+    "cmd/atlas/serve_test.go",
+    "configs/config.example.yaml",
+    "README.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      "serve 配置启用时两个新策略被注册（Init 带 params）；估值源注入有 typed-nil 防护（nil 指针不得变成非 nil 接口，测试断言）",
+      "backtest 引擎注册 price_percentile；回测冒烟两个符号均无错退出且日志确认 percentile 计算发生（非数据不足全程跳过）：atlas backtest price_percentile --symbol AAPL 与 --symbol \"^GSPC\"（区间 2021-01-01..2026-06-01，>252 交易日）——后者承接 plan 验收对照第 1 条（指数符号端到端）",
+      "config.example.yaml 含两策略参数块与三条新 watchlist 示例，pe_band 死参数两行已删除"
+    ],
+    "boundary": [
+      "lixinger/yahoo 未配置时 serve 正常启动（注入 nil 接口路径不 panic）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "README Multiple Strategies / Multi-Market 两行已更新",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go build ./... && go vet ./... && go test ./... 全量通过（全 Sprint 集成回归；vet 全量是 plan T15 Step 3 承接）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-007",
+    "TASK-008",
+    "TASK-009",
+    "TASK-011"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-007",
+    "TASK-008",
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-012.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "coverage_minimum": 35,
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "dev_done_at": "2026-06-11T03:41:11Z"
+}

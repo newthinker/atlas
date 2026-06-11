@@ -1,0 +1,44 @@
+{
+  "task_id": "TASK-011",
+  "key_findings": [
+    "buildFundamental 是六路径兜底链的单一编排点：at=assetTypeOf(appType)，非 AssetStock/AssetIndex（商品/加密/基金）直接返回 nil；其余先建 PEPercentile=-1 的 Fundamental 再按 market/at 分派。",
+    "兜底链硬约束（QA 重点）：ErrNonPositiveEPS（真实亏损）→ 立即 return，绝不调用 valuationSrc（测试 stubVal.calls==0 验证）；仅 ErrInsufficientEPS / fetch 失败 / epsSrc 未配置才走理杏仁兜底。",
+    "Source 字段编码口径（断言依据，不可改）：A股/指数=‘lixinger_cvpos’；美股主路径=‘reconstructed’；epsSrc 未配置兜底=‘lixinger_cvpos:yahoo_not_configured’；数据缺失兜底=‘lixinger_cvpos:’+fallbackReason(err)（ErrInsufficientEPS→yahoo_eps_insufficient，否则 yahoo_eps_error）。",
+    "窄接口解耦：ValuationSource/EPSSource 定义在 app 包，避免 import lixinger/yahoo 具体包；SetValuationSources(vs,es) 直接赋值，nil 容忍由 buildFundamental 内 nil 检查实现（TASK-012 serve.go 注入真实 *lixinger.Lixinger / *yahoo.Yahoo）。",
+    "analyzeSymbol 接入：analysisCtx.Market 始终设为 collector.MarketForSymbol(symbol)；仅当 needsFundamentals(effective)（任一已注册有效策略 RequiredData().Fundamentals==true）时才 buildFundamental，避免无谓的网络调用。未绑定项 effective 为空→不组装 Fundamental（保持 legacy 行为）。",
+    "测试日期对齐 load-bearing：epsBase=now-3y，validEPS8 从 epsBase 起 8 个季度正点，sampleCloses 从 epsBase+1月起（晚于首 EPS 点）——若 EPS 点晚于 bar 则阶梯对齐 latestEPSAtOrBefore 返回 ok=false，PE 序列空→ErrInsufficientEPS，‘主路径重建’用例会以费解方式失败。",
+    "[review_fix epoch=2/QA W1] arbitrate() 合成的 meta_arbitrator 信号原 Price=0，本 Sprint 双策略示例(^GSPC 同绑两策略)使 冲突→仲裁→Price=0 下单 条件可达(ExecutionManager 拒 price must be positive→不出单, 资金安全 latent)。修复：新增包内 referencePrice(signals)(首个正 Price 否则 0)，合成信号 Price=referencePrice(conflicting)（参考 sprint-001 784ed71 ma_crossover 补价模式）。回归守卫 TestApp_ArbitrateSignalIsPriced 已验证移除 fix 即 FAIL。",
+    "[review_fix epoch=2/QA S1] valuationSrc/epsSrc 由并行 worker 的 buildFundamental 无锁读取，靠 set-once@assembly(Start 前) 保证 -race 无竞态；SetValuationSources 已加注释固化『必须 Start 前注入』不变量。"
+  ],
+  "decisions": [
+    {
+      "decision": "needsFundamentals 只检查 effective 列表（绑定且通过 AssetTypes 过滤的策略），未绑定项不组装 Fundamental。",
+      "rationale": "plan Task 13 明示‘effective 中任一策略 Fundamentals=true 时’组装；未绑定项走全策略 legacy 路径，与 TASK-010 的行为边界一致。"
+    },
+    {
+      "decision": "valuationLookbackYears 提为包级常量 5，FetchValuationPercentile 与 FetchEPSHistory 共用。",
+      "rationale": "plan‘一期固定 5 年，与策略默认一致’；单一常量避免两处 magic number 漂移，后续可下沉为策略参数。"
+    },
+    {
+      "decision": "FetchEPSHistory 取 end.AddDate(-5,0,-90) 到 end 的窗口（多取 90 天）。",
+      "rationale": "照 plan 骨架；多取一季度缓冲确保 TTM 起点 EPS 点落在 close 序列之前，满足阶梯对齐前置点要求。"
+    }
+  ],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "interfaces_exposed": [
+    "type app.ValuationSource interface { FetchValuationPercentile(symbol string, lookbackYears int) (float64, error) }",
+    "type app.EPSSource interface { FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error) }",
+    "func (a *App) SetValuationSources(vs ValuationSource, es EPSSource)  // nil 容忍",
+    "func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core.Fundamental  // 包内：六路径兜底链",
+    "Fundamental.Source 编码: lixinger_cvpos | reconstructed | lixinger_cvpos:yahoo_not_configured | lixinger_cvpos:yahoo_eps_insufficient | lixinger_cvpos:yahoo_eps_error"
+  ],
+  "verification": {
+    "build": "go build ./... 通过 (exit 0)",
+    "tests": "go test ./internal/app/ -race -cover 通过，覆盖率 96.3% (≥80%, review_fix 后)；go test ./... 全量零回归；go vet ./internal/app/ 无输出",
+    "dod": "六路径表(TestBuildPEPercentile_Paths,含亏损 stubVal.calls==0)、epsSrc未配置兜底(TestBuildFundamental_EPSNotConfigured)、商品/加密/基金→nil + 双nil→-1不panic(TestBuildFundamental_NilSourcesAndUnsupported)、理杏仁fetch失败→warnOnce+(-1)(TestBuildFundamental_LixingerFetchError)、analyzeSymbol 条件组装(TestAnalyzeSymbol_AssemblesFundamentalWhenNeeded/SkipsWhenNotNeeded) 全过；[review_fix] 仲裁补价 TestApp_ArbitrateSignalIsPriced(移除fix即FAIL) + TestReferencePrice 全过",
+    "coverage": "internal/app 96.3%"
+  }
+}

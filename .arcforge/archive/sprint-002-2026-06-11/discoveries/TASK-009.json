@@ -1,0 +1,49 @@
+{
+  "task_id": "TASK-009",
+  "key_findings": [
+    "三策略的 RequiredData() 仅是纯声明扩展：为 strategy.DataRequirements 增加 AssetTypes 字段值，无行为变更，对 Analyze/engine 既有逻辑零影响（全 strategy 树测试零回归）。",
+    "strategy.DataRequirements.AssetTypes []core.AssetType 字段在 internal/strategy/interface.go:18 已存在（TASK-001 之前即有），本任务只是给三个既有策略填充该字段。",
+    "engine（internal/strategy）的过滤消费逻辑不在本任务，AssetTypes 填充后 internal/strategy 包测试缓存通过，未触发任何隐式行为。"
+  ],
+  "decisions": [
+    {
+      "decision": "ma_crossover 的 AssetTypes 用多行字面量列出六类（stock/index/etf/fund/commodity/crypto）；pe_band 与 dividend_yield 用单行 []core.AssetType{core.AssetStock}。",
+      "rationale": "按 plan Task 11 原文与 design §3.3：趋势类 ma_crossover 适用全资产，估值/股息类仅适用个股。"
+    },
+    {
+      "decision": "断言测试用集合(map)比较而非顺序比较 ma_crossover 的六类。",
+      "rationale": "AssetTypes 语义是集合，不应耦合声明顺序，避免未来重排序时测试脆断。"
+    },
+    {
+      "decision": "保留 code-simplifier 子代理顺带新增的 4 个特征化测试（TestMACrossover_Description/Init、TestPEBand_Description/Init）。",
+      "rationale": "纯测试新增、不改动任何既有测试与生产代码（DoD boundary『既有测试零修改』保持）；覆盖既有未测的 Description()/Init()，把三包合并门禁从恰好 80.0% 提升到 93.3%，消除边界脆性。这些是覆盖率特征化测试，非 DoD 验收测试——供 Test/QA 区分。"
+    }
+  ],
+  "files_modified": [
+    "internal/strategy/ma_crossover/strategy.go",
+    "internal/strategy/ma_crossover/strategy_test.go",
+    "internal/strategy/pe_band/strategy.go",
+    "internal/strategy/pe_band/strategy_test.go",
+    "internal/strategy/dividend_yield/strategy.go",
+    "internal/strategy/dividend_yield/strategy_test.go"
+  ],
+  "interfaces_exposed": [
+    "ma_crossover.(*MACrossover).RequiredData().AssetTypes = [stock index etf fund commodity crypto]",
+    "pe_band.(*PEBand).RequiredData().AssetTypes = [stock]",
+    "dividend_yield.(*DividendYield).RequiredData().AssetTypes = [stock]"
+  ],
+  "dod_test_mapping": [
+    "functional[0] ma_crossover 六类全资产 → TestMACrossover_AssetTypes (集合断言)",
+    "functional[1] pe_band/dividend_yield [stock] → TestPEBand_AssetTypes / TestDividendYield_AssetTypes",
+    "boundary 三包既有测试零修改通过 → 全 strategy 树 go test 全绿",
+    "non_functional 三包覆盖≥80%(合并门禁) → 合并 -coverpkg total=93.3%；单包 ma 94.9% / pe 93.3% / dividend 90.5%"
+  ],
+  "verification": {
+    "build": "go build ./internal/strategy/... 通过",
+    "vet": "go vet 三包通过",
+    "tests": "go test ./internal/strategy/... 全绿，零回归",
+    "coverage_per_pkg": "ma_crossover 94.9% / pe_band 93.3% / dividend_yield 90.5%（均≥80%）",
+    "coverage_merged_gate": "三包 -coverpkg 合并 total = 93.3%（hook 门禁机制，≥ dev_minimum 80%）",
+    "commit": "986a29e feat(strategy): declare AssetTypes on existing strategies"
+  }
+}

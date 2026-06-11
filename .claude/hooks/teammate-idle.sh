@@ -30,8 +30,10 @@ case "$ME" in
     MINE=$(query_tasks 'select(.assigned_to == $me and (.status | IN("assigned","in_progress","review_fix"))) | .id' --arg me "$ME") ;;
   test-*)
     MINE=$(query_tasks 'select((.verifier // "") == $me and .status == "verifying") | .id' --arg me "$ME")
-    # dev_done 待领验证的任务对 Test Agent 也算相关
-    PENDING_VERIFY=$(query_tasks 'select(.status == "dev_done") | .id')
+    # dev_done 仅当 verifier 指派给自己才相关。verifier 为空 = Leader 尚未派验，
+    # 该窗口属 Leader 职责，不唤醒任何 test 实例——否则 test agent 醒来发现
+    # verifier 非自己又 idle，hook 再唤醒，空转循环（2026-06-11 实测两轮）。
+    PENDING_VERIFY=$(query_tasks 'select(.status == "dev_done" and (.verifier // "") == $me) | .id' --arg me "$ME")
     MINE=$(printf '%s\n%s' "$MINE" "$PENDING_VERIFY") ;;
   qa-*)
     # QA 仅在「终审就绪」时保活:全部任务 verified/accepted/skipped 且至少一个 verified。

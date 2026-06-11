@@ -1,0 +1,42 @@
+{
+  "task_id": "TASK-008",
+  "key_findings": [
+    "Strategy 结构同 price_percentile 但不抽公共基类（plan Task 10 明示）：字段 lookbackYears/low/high/extremeLow/extremeHigh，默认 5年/20/80/10/90。",
+    "RequiredData 声明 PriceHistory=lookbackYears*252（load-bearing 注释保留：不声明则单绑定时窗口仅 ~1 年，PE 重建出错位分位）+ Fundamentals=true + AssetTypes 恰为 [AssetStock, AssetIndex]（顺序固定）。",
+    "Analyze 输入取 ctx.Fundamental.PEPercentile（0-100）；Fundamental 为 nil 或 PEPercentile<0 → 返回 (nil,nil)。",
+    "Source 用 strings.Cut(\":\") 解析为 method/fallbackReason；无冒号时 fallbackReason 为空，不写入 Metadata。Metadata 含 pe_percentile/method/lookback_years(+可选 fallback_reason)。",
+    "Price 取 ctx.OHLCV 最后一根 Close，OHLCV 为空则 0。",
+    "classify 用 switch（非嵌套三元）分档：<extremeLow→strong_buy(0.8+linear,capped0.95)；<low→buy(0.6-0.8)；>extremeHigh→strong_sell；>high→sell；其余空。",
+    "numParam 同时容忍 int 与 float64（viper YAML 解码两种皆可），不能复用 ma_crossover 的 int-only cast。"
+  ],
+  "decisions": [
+    {
+      "decision": "REFACTOR 阶段评审 strategy.go 后未对源码做改动（无需简化）。",
+      "rationale": "classify 已用 switch 无嵌套三元；Init 保留阈值序与 lookback>0 两个独立校验以各自给出具体错误信息；load-bearing 注释（PriceHistory 声明理由、不抽基类理由、numParam 不可复用理由）记录非显然决策，删除会丢失意图而非噪声。"
+    },
+    {
+      "decision": "Init 保留 extreme_low<low<high<extreme_high 链式校验与 lookback_years>0 校验为两条独立分支。",
+      "rationale": "两条产生不同的、可定位的 error 文案；合并会降低诊断性。done_criteria 不要求合并。"
+    }
+  ],
+  "files_modified": [
+    "internal/strategy/pe_percentile/strategy.go",
+    "internal/strategy/pe_percentile/strategy_test.go"
+  ],
+  "interfaces_exposed": [
+    "type pe_percentile.Strategy struct",
+    "func pe_percentile.New() *Strategy",
+    "func (s *Strategy) Name() string  // \"pe_percentile\"",
+    "func (s *Strategy) Description() string",
+    "func (s *Strategy) RequiredData() strategy.DataRequirements  // PriceHistory=lookback*252, Fundamentals=true, AssetTypes=[stock,index]",
+    "func (s *Strategy) Init(cfg strategy.Config) error  // 校验 extreme_low<low<high<extreme_high 且 lookback>0",
+    "func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error)"
+  ],
+  "verification": {
+    "build": "go build ./... 通过 (exit 0)",
+    "vet": "go vet ./internal/strategy/pe_percentile/ 通过 (exit 0)",
+    "tests": "go test ./internal/strategy/pe_percentile/ -cover -count=1 通过，覆盖率 89.5% (≥80%)",
+    "dod": "分档用例 5/15/50/85/95、Source 双段解析+无冒号、RequiredData 三项、Fundamental nil / PEPercentile<0 边界 均有测试覆盖且全过",
+    "coverage": "internal/strategy/pe_percentile 89.5%"
+  }
+}

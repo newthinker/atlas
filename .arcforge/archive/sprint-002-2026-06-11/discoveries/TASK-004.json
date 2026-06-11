@@ -1,0 +1,38 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "TASK-004 仅是 plan Task 4 的『eastmoney 后半』：共享表 internal/collector/indexes.go 已由 TASK-003 创建（AShareIndexSecIDs/IsAShareIndex），本任务只在 eastmoney.parseSymbol 开头接入该表查找。eastmoney 已 import internal/collector，无新依赖。",
+    "重要诚实说明：plan Step 2 已预判『本用例可能直接通过』——AShareIndexSecIDs 现有 6 个条目的 secid 市场前缀(1.=沪 / 0.=深)与 .SH→1 / .SZ→0 后缀规则对所有条目完全巧合一致，故 parseSymbol 接表前后对当前数据 (code,market) 输出等价，测试 RED 阶段未自然失败（GREEN-on-arrival）。",
+    "实现价值（非死代码）：把索引 secid 解析改为以权威表为单一真相源，与后缀启发式解耦——未来若新增某指数其 Eastmoney secid 市场前缀与 .SH/.SZ 后缀不一致，parseSymbol 自动走表而不会被后缀误判。表查找分支已被 TestParseSymbol_AShareIndexes 的表内用例覆盖（含 secid==表值 的权威性断言）。"
+  ],
+  "decisions": [
+    {
+      "decision": "parseSymbol 在 strings.Split 后缀逻辑之前先查 collector.AShareIndexSecIDs，命中则 SplitN(secid,\".\",2) 返回 (parts[1]=code, parts[0]=market)。",
+      "rationale": "表是索引 secid 的权威来源；个股不命中表自然回落既有后缀规则，零回归。"
+    },
+    {
+      "decision": "测试对表内符号额外断言 market+\".\"+code == AShareIndexSecIDs[symbol] 且 IsAShareIndex(symbol)==true。",
+      "rationale": "把『索引经表解析』这一意图固化为回归守卫——若未来后缀规则与表发生分歧，该断言会当场抓出 parseSymbol 是否真的走了表路径。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/eastmoney/eastmoney.go",
+    "internal/collector/eastmoney/eastmoney_test.go"
+  ],
+  "interfaces_exposed": [
+    "(*Eastmoney).parseSymbol(symbol string) (code, market string)  // 行为契约不变；索引经 AShareIndexSecIDs 表解析，个股走 .SH→1/.SZ→0 后缀"
+  ],
+  "dod_test_mapping": [
+    "functional[0] 000001.SH(指数)→1 / 000001.SZ(个股)→0 区分；600519.SH 不受影响 → TestParseSymbol_AShareIndexes（表内/表外混合用例）",
+    "boundary 表外 .SH/.SZ 仍走既有后缀规则 → 同测试 000001.SZ/399001.SZ/600519.SH 用例 + 既有 TestEastmoney_ParseSymbol 零回归",
+    "non_functional 包覆盖率 ≥ 80% → 86.7%"
+  ],
+  "verification": {
+    "build": "go build ./internal/collector/eastmoney/ 通过",
+    "vet": "go vet 通过",
+    "tests": "go test ./internal/collector/eastmoney/ -race 全绿，既有测试零回归",
+    "coverage": "86.7% (≥80%)",
+    "commit": "ae8353e feat(eastmoney): resolve A-share index secid via shared table",
+    "note_for_qa": "RED 未自然失败属预期（plan Step 2 已声明，索引 secid 与后缀巧合一致）；实现仍按 DoD 接入权威表，非 no-op 装饰——它把真相源从后缀启发式迁到表，并被覆盖。"
+  }
+}

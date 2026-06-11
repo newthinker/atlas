@@ -1,0 +1,57 @@
+{
+  "id": "TASK-011",
+  "title": "app 估值分位编排（buildFundamental 兜底链）",
+  "description": "按 plan Task 13 原文施工：ValuationSource/EPSSource 窄接口 + SetValuationSources(vs, es)（nil 容忍）+ buildFundamental 路径表——CN 股票/指数与 US/HK 指数走理杏仁唯一路径；US/HK 个股 Yahoo EPS 重建主路径，ErrNonPositiveEPS 直接跳过不兜底，ErrInsufficientEPS/fetch 失败/epsSrc 未配置 → 理杏仁兜底（Source=lixinger_cvpos:<reason>）；商品/加密/基金返回 nil。analyzeSymbol 接入：effective 中任一策略 Fundamentals=true 时组装 Fundamental 与 Market。测试 helper 的日期对齐是 load-bearing（EPS 点必须早于全部 bar，plan 原文）。",
+  "module": "app",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "plan Task 13 六路径表驱动全过：A股走理杏仁(lixinger_cvpos)、美股主路径(reconstructed)、EPS不足→兜底成功(lixinger_cvpos:前缀)、兜底也失败→不可用、真实亏损→跳过、美/港指数走理杏仁",
+      "亏损用例断言 stubVal.calls == 0（不兜底是硬约束）",
+      "epsSrc 未配置时美股直接走兜底，Source=lixinger_cvpos:yahoo_not_configured"
+    ],
+    "boundary": [
+      "商品/加密/基金类型返回 nil Fundamental；valuationSrc 与 epsSrc 均为 nil 时返回 PEPercentile=-1 的 Fundamental 并 warnOnce 不 panic"
+    ],
+    "error_handling": [
+      "理杏仁路径 fetch 失败 → warnOnce + PEPercentile=-1（策略层自然无信号）"
+    ],
+    "non_functional": [
+      {
+        "desc": "internal/app 全包 -race 通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-010",
+    "TASK-006",
+    "TASK-002",
+    "TASK-005"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-010",
+    "TASK-006",
+    "TASK-002",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "verified_at": "2026-06-11T04:09:51Z",
+  "fix_items": [
+    "QA W1：app.go:504-511 仲裁合成的 meta_arbitrator 信号 Price=0——CARRYOVER I3 因本 Sprint 双策略示例升级为条件可达（冲突→仲裁→Price=0 下单，资金安全）。修复：合成信号补价（取冲突信号的参考价或末根收盘，参考 sprint-001 commit 784ed71 模式），并补测试断言仲裁合成信号 Price>0。顺带采纳 QA S1：valuationSrc/epsSrc 注入点加注释固化『必须 Start 前注入』不变量（或纳入 a.mu）"
+  ]
+}

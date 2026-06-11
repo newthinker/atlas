@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-007",
+  "key_findings": [
+    "price_percentile 是全资产价格分位策略，复用 valuation.PercentileRank(closes, cur)（TASK-006 接口，严格小于占比×100，空序列→-1）。",
+    "刻意不与 pe_percentile 共享基类：两策略阈值语义独立可分化；mirror 其 numParam/classify/min 模式保持平行结构（plan Task 10）。",
+    "Init 用本地 numParam helper 兼容 int/float64（viper YAML 解析数值形态不定），不照抄 ma_crossover 的 .(int) 单形态——boundary[1] 双形态测试固化。",
+    "minSampleBars=252 门槛：OHLCV<252 直接返回 (nil,nil) 不出信号，防新上市资产误报。",
+    "信号 Price=closes[len-1]（当前收盘，非 0）——sprint-001 W1 执行惰性教训，TestAnalyze_SignalBands 显式断言 Price==50。"
+  ],
+  "decisions": [
+    {
+      "decision": "classify 分档：extreme→0.8+0.15*linear(capped 0.95)，normal→0.6+0.2*linear；空 action 表示无信号。",
+      "rationale": "与 plan Task 9 代码块及 pe_percentile 完全一致，设计 §3.1 分档语义；中位区间返回 (\"\",0) → Analyze 不出信号。"
+    },
+    {
+      "decision": "Init 校验 extreme_low<low<high<extreme_high，违反返回 error；并校验 lookback_years>0。",
+      "rationale": "阈值乱序会使分档区间退化/反转；error_handling[0] 三组乱序用例覆盖。lookback_years<=0 会使 PriceHistory 非正。"
+    },
+    {
+      "decision": "RequiredData.AssetTypes 含六类（stock/index/etf/fund/commodity/crypto），PriceHistory=lookbackYears*252。",
+      "rationale": "价格分位对所有资产类别适用（含 TASK-001 新增 AssetCrypto）；functional[1] 断言 lookback_years=3→756 + 六类。"
+    }
+  ],
+  "files_modified": [
+    "internal/strategy/price_percentile/strategy.go",
+    "internal/strategy/price_percentile/strategy_test.go"
+  ],
+  "interfaces_exposed": [
+    "func New() *Strategy  // 默认 lookback 5y / low25 high75 extremeLow10 extremeHigh90",
+    "func (s *Strategy) Name() string  // \"price_percentile\"",
+    "func (s *Strategy) Description() string",
+    "func (s *Strategy) RequiredData() strategy.DataRequirements  // PriceHistory=lookbackYears*252, AssetTypes 六类, 无 Fundamentals",
+    "func (s *Strategy) Init(cfg strategy.Config) error  // numParam int/float64 兼容; 校验阈值序与 lookback>0",
+    "func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error)  // <252 根→(nil,nil); 信号 Price=当前收盘, Metadata{percentile,lookback_years,sample_size}"
+  ],
+  "verification": {
+    "build": "go build ./internal/strategy/price_percentile/ 通过",
+    "vet": "go vet ./internal/strategy/price_percentile/ 通过",
+    "tests": "go test ./internal/strategy/price_percentile/ 全 PASS：TestAnalyze_SignalBands / _InsufficientHistory / TestRequiredData / TestInit_ParamTypes / TestInit_ThresholdDisorder",
+    "coverage": "包覆盖率 88.6% ≥ 80% 阈值"
+  },
+  "downstream_notes": [
+    "策略尚未在 engine/serve 注册（plan Task 9 仅建包；注册/wiring 归后续接线任务）。",
+    "复用 valuation.PercentileRank；与 pe_percentile 平行但独立，勿合并基类。"
+  ]
+}

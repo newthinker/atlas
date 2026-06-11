@@ -1,0 +1,49 @@
+{
+  "id": "TASK-009",
+  "title": "既有三策略补 AssetTypes 声明",
+  "description": "按 plan Task 11 原文施工：ma_crossover RequiredData 增加六类全资产 AssetTypes；pe_band 与 dividend_yield 各增加 [AssetStock]。每包补一个断言用例。",
+  "module": "strategy-existing",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/strategy/ma_crossover/strategy.go",
+    "internal/strategy/ma_crossover/strategy_test.go",
+    "internal/strategy/pe_band/strategy.go",
+    "internal/strategy/dividend_yield/strategy.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "ma_crossover RequiredData().AssetTypes 恰为六类（stock/index/etf/fund/commodity/crypto），有测试断言",
+      "pe_band 与 dividend_yield 的 AssetTypes 恰为 [stock]，各有测试断言"
+    ],
+    "boundary": [
+      "三包既有测试零修改通过"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "三包各自覆盖率 ≥ 80%（task scope 合并门禁）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/strategy/ma_crossover",
+    "./internal/strategy/pe_band",
+    "./internal/strategy/dividend_yield"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "verified_at": "2026-06-11T02:57:07Z"
+}

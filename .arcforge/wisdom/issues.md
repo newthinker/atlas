@@ -2,7 +2,8 @@
 
 ## CARRYOVER（sprint-001 遗留，下一 Sprint 候选）
 
-- **I3 [latent]** `app.go` arbitrate 合成的 `meta_arbitrator` 信号未设 Price——多策略 + arbitration 启用后将复现 W1 同类执行惰性（fail-safe 不出错单）。当前 serve 仅注册 ma_crossover 不可达。修复方向：仲裁结果信号补价（参考 784ed71 模式）。来源：sprint-001 qa-verdict-final.md。
+- ~~**I3 [latent]** 仲裁合成信号未设 Price~~ ✅ **已于 sprint-002 修复**（cc0182a：referencePrice 取冲突信号首个正价 + 反例锁定测试）——sprint-002 双策略示例使其条件可达，QA 对抗轮拦截后裁决即修。
+- **理杏仁口径核对**（sprint-002 遗留）：cvpos 边界口径（≤ vs <）、usHKIndexCodes 四候选代码（SPX/COMP/DJI/HSI）、metricsList 键名——需 LIXINGER_API_KEY，代码已注明首日核对项。
 - **I1** confirm/batch 模式仅入队但日志 "signal executed" 语义误导；paper 模式无自动 confirm，pending 单需消费方。
 - **I2** PaperBroker.CancelOrder 非终态分支不可达死代码。
 - **I4 [trivial]** router.Route 恒返回 nil err，app.go 对应 err 分支为死代码。
@@ -23,10 +24,11 @@
 - **裁决**: hook 支持任务级 `coverage_minimum`（Leader 裁决写入 task JSON），TASK-003=45 / TASK-007=35 / TASK-008=35；验收质量由 DoD 端到端测试兜底。
 - **附带发现**: dev-agent-4 修复了 ExecutionManager.Execute 市价单不带 Price 导致 paper BUY 永被拒的真实集成缺陷（internal/broker，已防护性纳入 003 packages）——QA 阶段重点回看。
 
-## ISSUE-4: TeammateIdle hook QA 保活条件导致空转（已修复）
+## ISSUE-4: TeammateIdle hook 保活条件过宽导致空转（qa-* 与 test-* 两例，均已修复）
 
-- **现象**: review_fix 阶段 qa-agent-1 被无限唤醒（8 次/40s）——hook 对 qa-* 的保活条件是「存在 verified 任务」，但 verified 任务在等 review_fix 回流，QA 无事可做。
-- **修复**: qa-* 保活改为「终审就绪」语义：无任何在途任务（pending/assigned/in_progress/dev_done/verifying/rejected/blocked/review_fix）且存在 verified 时才 exit 2。
+- **qa-* 例（sprint-001）**: review_fix 阶段 qa-agent-1 被无限唤醒（8 次/40s）——保活条件「存在 verified 任务」，但 verified 在等修复回流。修复：改「终审就绪」语义（无在途任务且存在 verified 才 exit 2）。
+- **test-* 例（sprint-002，两轮）**: ①test-agent-1 被**已派给他人**的 dev_done 唤醒（3 次/50s），修复为过滤 verifier；②修复后仍被 **verifier 为空**（Leader 派验前窗口）的 dev_done 唤醒（6+ 次/分钟）——test agent 工作循环只认 verifier==自己，醒来无事 idle，hook 再唤醒成环。最终修复：PENDING_VERIFY 仅匹配 `verifier == 自己`，verifier 空窗口属 Leader 职责不唤醒任何 test 实例。
+- **模式教训**: 保活条件必须按「该实例可执行的动作」过滤，而非按任务状态泛匹配——建议回流上游模板时全角色复查此原则。
 
 ## ISSUE-2: 流程类（已修复，供复盘）
 

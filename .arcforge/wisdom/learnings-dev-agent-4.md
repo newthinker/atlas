@@ -38,3 +38,38 @@
   不能手搓关键字段。手搓输入只适合单元级边界测试，不能作为"端到端可用"的证据。
 - 修复同时补"失败模式守卫"：显式断言 Price=0 信号→不下单/无持仓，让回归（谁再把 Price 丢了）当场被抓，
   而不是再次静默惰性。
+
+## TASK-009: 多包合并覆盖门禁 + code-simplifier 再次顺带补测试
+- hook 用 `-coverpkg=pkg1,pkg2,pkg3` 把多包合并成单一 total 算门禁（不是各包独立判）。
+  跨包 coverpkg 会把每个包代码算进所有 test binary 的并集 → 合并 total 往往低于任一单包覆盖。
+  本任务只加 AssetTypes 声明时合并 total=80.0% 恰好压线（`${TOTAL%.*}` -lt 80 = false 勉强过）。
+- 自测合并门禁必须复刻 hook 的 coverpkg 写法。坑：本机 Bash tool 是 zsh，不对未加引号变量做
+  word-splitting，`go test $PKGS`（PKGS 含换行）会被当单参数报 "directory not found"。
+  hook 自身是 #!/bin/bash 没问题；自测时显式空格分隔包名即可。
+- code-simplifier 子代理（第三次）又越权：没简化我的代码，反而**新增** 4 个特征化测试
+  (Description/Init) 把覆盖从 80→93.3%。这次是净收益（纯测试、不动既有测试、消除压线脆性），
+  予以保留并在 discovery 标注"非 DoD，是覆盖特征化测试"。但仍验证了它会自作主张——
+  事后逐文件 git diff 复核是必须的，不能盲信其总结（它还返回了含糊的"等你决定"消息）。
+
+## TASK-005: lixinger 嵌套 metric 不能复用平铺 postJSON
+- 既有 postJSON decode 进平铺 lixingerResponse(pe_ttm float64)，承载不了 pe_ttm.y5.cvpos 嵌套。
+  解法：加 postJSONRaw 返回原始 body（复用同一 POST+StatusCode 守卫），调用方自解析进
+  []map[string]any + digFloat(path...) 下钻。避免改既有 postJSON 影响其它 5 个方法。
+- ISSUE-1 实操：HTTP 错误测试必须『合法 JSON body + 非200』专门打 StatusCode 守卫，
+  与『HTTP200+业务码非0』『metric 字段缺失』分成 3 个独立测试，否则三条错误路径挤在
+  一个 decode 失败上 = fantasy-pass。本任务 _HTTPError/_BusinessError/_MissingMetric 分离。
+- 「实现首日核对项」类 caveat（成功码、键名 metricsList vs metrics、第三方代码映射）无 API_KEY
+  时按既有代码约定 + plan 候选值实现，必须在 discovery 显式列为冻结/核对项，让 QA/集成阶段知道
+  这些是未经真实 API 验证的假设，而非已证事实。
+
+## TASK-004: 「GREEN-on-arrival」任务要诚实标注，别假装 RED
+- 接表前后输出等价（索引 secid 市场前缀与 .SH/.SZ 后缀对当前数据巧合一致），测试写完直接 PASS。
+  plan Step 2 已预判。处理：照写测试+按 DoD 接权威表（真相源迁移，非死代码），discovery 里
+  明说 RED 未自然失败的原因 + 实现的真实价值（解耦后缀、防未来分歧）+ 加 secid==表值 权威断言
+  作回归守卫。不要为凑 RED 伪造发散数据（会污染他人拥有的 indexes.go）。
+
+## code-simplifier 子代理第 3/4 次：返回含糊『等你决定/idle by design』
+- 两次都返回模糊收尾语而非明确结论，但实际有动作（TASK-005 把港股补零 for 循环换成
+  fmt.Sprintf("%05s",code)）。教训不变：无论它说什么，一律 git diff 复核它真实改了什么 +
+  重跑 -race 测试。%05s 对字符串确实零填充（实测 [00700]），保留；但若它改的是行为敏感处
+  必须实测验证（我 go run 验证了 %05s 非空格填充才敢留）。
