@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -17,8 +18,11 @@ import (
 // default for New; tests inject an httptest server URL via NewWithBaseURL.
 const defaultBaseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
 
-// validSymbol matches stock symbols like AAPL, MSFT, 600519.SH, 0700.HK
-var validSymbol = regexp.MustCompile(`^[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?$`)
+// validSymbol matches stock symbols (AAPL, 600519.SH, 0700.HK),
+// index symbols (^GSPC) and futures symbols (GC=F).
+// Validation is purely syntactic and intentionally decoupled from the
+// phase-1 coverage list (see design §2.1).
+var validSymbol = regexp.MustCompile(`^(\^[A-Za-z0-9]{1,10}|[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?|[A-Za-z]{1,6}=F)$`)
 
 // validateSymbol checks if a symbol has valid format
 func validateSymbol(symbol string) error {
@@ -36,25 +40,48 @@ func validateSymbol(symbol string) error {
 
 // Yahoo implements the Yahoo Finance collector
 type Yahoo struct {
-	client  *http.Client
-	config  collector.Config
-	baseURL string
+	client     *http.Client
+	config     collector.Config
+	baseURL    string
+	epsBaseURL string
 }
 
-// New creates a new Yahoo collector pointing at the production endpoint.
+// New creates a new Yahoo collector pointing at the production endpoints.
 func New() *Yahoo {
-	return NewWithBaseURL(defaultBaseURL)
+	return NewWithBaseURLs(defaultBaseURL, defaultEPSBaseURL)
 }
 
-// NewWithBaseURL creates a Yahoo collector with a custom chart endpoint.
-// It is intended for tests that point the collector at an httptest server.
+// NewWithBaseURL creates a Yahoo collector with a custom chart endpoint, using
+// the same URL for both chart and EPS endpoints. It keeps existing tests that
+// only wire a single httptest server working unchanged.
 func NewWithBaseURL(baseURL string) *Yahoo {
+	return NewWithBaseURLs(baseURL, baseURL)
+}
+
+// NewWithBaseURLs creates a Yahoo collector with independent chart and EPS
+// endpoints. It is intended for tests that point each at an httptest server.
+func NewWithBaseURLs(chartURL, epsURL string) *Yahoo {
 	return &Yahoo{
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		baseURL: baseURL,
+		baseURL:    chartURL,
+		epsBaseURL: epsURL,
 	}
+}
+
+// newRequest builds a GET request carrying browser-like headers. Yahoo's
+// unofficial endpoints return 403 without a User-Agent, so every code path
+// (quote, history, EPS) must share these headers.
+func (y *Yahoo) newRequest(reqURL string) (*http.Request, error) {
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	return req, nil
 }
 
 func (y *Yahoo) Name() string {
@@ -93,16 +120,12 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 		return nil, err
 	}
 	yahooSymbol := y.toYahooSymbol(symbol)
-	url := fmt.Sprintf("%s/%s?interval=1d&range=1d", y.baseURL, yahooSymbol)
+	reqURL := fmt.Sprintf("%s/%s?interval=1d&range=1d", y.baseURL, url.PathEscape(yahooSymbol))
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := y.newRequest(reqURL)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, err
 	}
-	// Add browser-like headers to avoid rate limiting
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := y.client.Do(req)
 	if err != nil {
@@ -157,17 +180,13 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 	yahooSymbol := y.toYahooSymbol(symbol)
 	yahooInterval := y.toYahooInterval(interval)
 
-	url := fmt.Sprintf("%s/%s?interval=%s&period1=%d&period2=%d",
-		y.baseURL, yahooSymbol, yahooInterval, start.Unix(), end.Unix())
+	reqURL := fmt.Sprintf("%s/%s?interval=%s&period1=%d&period2=%d",
+		y.baseURL, url.PathEscape(yahooSymbol), yahooInterval, start.Unix(), end.Unix())
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := y.newRequest(reqURL)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, err
 	}
-	// Add browser-like headers to avoid rate limiting
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := y.client.Do(req)
 	if err != nil {

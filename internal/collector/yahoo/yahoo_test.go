@@ -114,6 +114,45 @@ func TestValidateSymbol(t *testing.T) {
 	}
 }
 
+// functional[0]: validateSymbol accepts index(^) and futures(=F) forms,
+// rejects empty / bare prefixes / mixed / injection.
+func TestValidateSymbol_IndexAndFutures(t *testing.T) {
+	cases := []struct {
+		symbol string
+		wantOK bool
+	}{
+		{"AAPL", true}, {"600519.SH", true}, {"0700.HK", true},
+		{"^GSPC", true}, {"^IXIC", true}, {"^HSI", true},
+		{"GC=F", true}, {"CL=F", true}, {"SI=F", true},
+		{"", false}, {"^", false}, {"=F", false},
+		{"^GSPC.SH", false}, {"GC=X=F", false}, {"AAPL; DROP", false},
+	}
+	for _, c := range cases {
+		err := validateSymbol(c.symbol)
+		if (err == nil) != c.wantOK {
+			t.Errorf("validateSymbol(%q) ok=%v, want %v", c.symbol, err == nil, c.wantOK)
+		}
+	}
+}
+
+// functional[1]: ^ must be percent-encoded as %5E in the request path.
+func TestFetchQuote_EscapesIndexSymbol(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.Write([]byte(`{"chart":{"result":[{"meta":{"symbol":"^GSPC","regularMarketPrice":5000,"chartPreviousClose":4990,"regularMarketTime":1700000000},"timestamp":[1700000000],"indicators":{"quote":[{"open":[4995],"high":[5010],"low":[4980],"close":[5000],"volume":[1000]}]}}],"error":null}}`))
+	}))
+	defer srv.Close()
+
+	y := NewWithBaseURL(srv.URL)
+	if _, err := y.FetchQuote("^GSPC"); err != nil {
+		t.Fatalf("FetchQuote(^GSPC) error: %v", err)
+	}
+	if !strings.Contains(gotPath, "%5EGSPC") {
+		t.Errorf("request path %q does not percent-encode ^ as %%5E", gotPath)
+	}
+}
+
 func TestFetchQuote_ValidatesSymbol(t *testing.T) {
 	y := New()
 	_, err := y.FetchQuote("../etc/passwd")
