@@ -95,8 +95,15 @@ func (e *Eastmoney) Stop() error {
 }
 
 // parseSymbol converts 600519.SH to (600519, 1) for Eastmoney API
-// Shanghai = 1, Shenzhen = 0
+// Shanghai = 1, Shenzhen = 0. Known A-share indexes resolve via the shared
+// AShareIndexSecIDs table (the authoritative secid source) so index handling
+// is decoupled from the .SH/.SZ suffix heuristic; equities keep the suffix rule.
 func (e *Eastmoney) parseSymbol(symbol string) (code, market string) {
+	if secid, ok := collector.AShareIndexSecIDs[symbol]; ok {
+		parts := strings.SplitN(secid, ".", 2)
+		return parts[1], parts[0]
+	}
+
 	parts := strings.Split(symbol, ".")
 	if len(parts) != 2 {
 		return symbol, "1"

@@ -62,6 +62,44 @@ func TestEastmoney_ParseSymbol(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-004)
+// functional[0] "000001.SH(指数)→1 与 000001.SZ(个股)→0 区分；600519.SH 不受影响"
+//   → TestParseSymbol_AShareIndexes
+// boundary "表外 .SH/.SZ 仍走既有后缀规则" → 表外用例 (000001.SZ / 600519.SH / 399001.SZ)
+func TestParseSymbol_AShareIndexes(t *testing.T) {
+	e := New()
+	cases := []struct {
+		symbol, wantCode, wantMarket string
+		inTable                      bool // 是否经 AShareIndexSecIDs 权威表命中
+	}{
+		{"000300.SH", "000300", "1", true},  // 沪深300（表内指数）
+		{"000905.SH", "000905", "1", true},  // 中证500（表内指数）
+		{"000001.SH", "000001", "1", true},  // 上证指数（表内指数）
+		{"399006.SZ", "399006", "0", true},  // 创业板指（表内指数，SZ→0）
+		{"000001.SZ", "000001", "0", false}, // 平安银行（表外个股，走后缀规则）
+		{"399001.SZ", "399001", "0", false}, // 深证成指（表外，走后缀规则）
+		{"600519.SH", "600519", "1", false}, // 个股不受影响
+	}
+	for _, c := range cases {
+		code, market := e.parseSymbol(c.symbol)
+		if code != c.wantCode || market != c.wantMarket {
+			t.Errorf("parseSymbol(%q) = (%s,%s), want (%s,%s)",
+				c.symbol, code, market, c.wantCode, c.wantMarket)
+		}
+		// 权威性断言：表内符号的 (market,code) 必须等于 AShareIndexSecIDs 的 secid 分解，
+		// 证明索引经表（单一真相源）解析而非偶合后缀规则。
+		if c.inTable {
+			wantSecID := collector.AShareIndexSecIDs[c.symbol]
+			if got := market + "." + code; got != wantSecID {
+				t.Errorf("parseSymbol(%q) secid = %q, want table value %q", c.symbol, got, wantSecID)
+			}
+			if !collector.IsAShareIndex(c.symbol) {
+				t.Errorf("%q should be a known A-share index", c.symbol)
+			}
+		}
+	}
+}
+
 func TestEastmoney_ToKlineType(t *testing.T) {
 	tests := []struct {
 		interval string
