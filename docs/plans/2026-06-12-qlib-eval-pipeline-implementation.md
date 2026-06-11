@@ -419,6 +419,12 @@ def test_align_entry_drops_when_defer_exceeds_limit():
 
 def test_align_entry_drops_when_no_data():
     assert align_entry(PRICES, pd.Timestamp("2024-01-15"), max_defer=5) is None  # 其后无 bar
+
+def test_no_qlib_at_module_level():
+    # 守门测试（Task 5 硬约束的机制保证）：评估模块顶层不得 import qlib
+    import sys
+    import qlib_eval.prices  # noqa: F401
+    assert "qlib" not in sys.modules
 ```
 
 - [ ] **Step 2: 确认失败 → Step 3: 实现**
@@ -527,7 +533,9 @@ def evaluate_signal(sig, prices, bench, max_defer=5) -> SignalOutcome | None:
     # align_entry → None 则调用方计入 dropped
     # h 日收益 = close[entry.index+h] / entry.price - 1（越界 → None）
     # 基准对齐口径（钉死，个股停牌时两种理解结果不同）：
-    #   起点 = bench 中 ≤ entry_date 的最近前值（searchsorted side="right" - 1）
+    #   起点 = bench 中 ≤ entry_date 的最近前值（searchsorted side="right" - 1；
+    #          结果为 -1 即 entry 早于 bench 首行 → 显式返回 None 计入数据缺口，
+    #          防止 Python 负索引静默取最后一行）
     #   终点 = 先取【标的】第 entry.index+h 行的日期（exit_date），
     #          再取 bench 中 ≤ exit_date 的最近前值
     #   bench_ret = bench_close[终点] / bench_close[起点] - 1
