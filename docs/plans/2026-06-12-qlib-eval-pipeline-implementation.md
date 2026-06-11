@@ -23,8 +23,8 @@
 
 **Files:**
 - Modify: `internal/backtest/backtester.go`（Run :69-81、Result 构造 :89-97）
-- Modify: `internal/backtest/result.go`（Result 结构，若字段定义在别处则以实际为准）
-- Test: `internal/backtest/backtester_test.go`
+- Modify: `internal/backtest/types.go:10-18`（Result 结构定义处，增加 `SkippedBars int`）
+- Test: `internal/backtest/backtester_test.go`（包内已有 `mockProvider`（:14-24，含 data/err 字段）直接复用：`New(&mockProvider{data: bars})`，不要新建 staticProvider）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -121,10 +121,12 @@ git commit -m "feat(backtest): stamp GeneratedAt with bar time and count skipped
 
 ```go
 func TestAnalyze_GeneratedAtUsesCtxNow(t *testing.T) {
-	// 构造一段产生金叉信号的序列（复用既有测试的造数方式），
-	// ctx.Now 设为历史时间，断言信号 GeneratedAt == ctx.Now 而非墙钟
+	// 注意：现有测试无可复用 helper，参照 TestMACrossover_GoldenCross 的内联
+	// 造数方式构造金叉场景：New(2, 4) + close 序列 100,95,90,85,80,120
 	past := time.Date(2023, 6, 1, 0, 0, 0, 0, time.UTC)
-	ctx := buildCrossoverContext(past) // 复用/仿照既有测试 helper 构造金叉场景
+	s := New(2, 4)
+	ctx := strategy.AnalysisContext{Symbol: "T", Now: past,
+		OHLCV: barsFromCloses(100, 95, 90, 85, 80, 120)} // 6 行小 helper，时间任意递增
 	sigs, err := s.Analyze(ctx)
 	if err != nil || len(sigs) == 0 {
 		t.Fatalf("expected signal, got %v err=%v", sigs, err)
@@ -200,7 +202,7 @@ func TestExportSignals_RejectsFundamentalStrategies(t *testing.T) {
 }
 ```
 
-（helper：`makeBars` 生成连续工作日 bar；`engineWith` 注册 stub 后返回 Engine；golden 中 2024-01-06/07 是周末，makeBars 按工作日生成。）
+（helper：`makeBars` 生成连续工作日 bar；`engineWith` 注册 stub 后返回 Engine；golden 中 2024-01-06/07 是周末，makeBars 按工作日生成。`flatStub.RequiredData()` 返回 `{PriceHistory: 1}`——warm-up 起点因此只前移约 31 天，不影响 golden 的 from 过滤断言。`executeExport` 三个 writer 的分工在 doc comment 写明：`w`=CSV 数据、`deps.out`=CLI 信息、`deps.errOut`=跳过摘要。）
 
 - [ ] **Step 2: 运行确认失败**
 
@@ -279,8 +281,14 @@ var exportCmd = &cobra.Command{
 // flags: --strategies (comma list, required), --symbols (comma list, required),
 //        --from/--to (required), --out (default "signals.csv", "-" = stdout)
 // runExportSignals: 组 registry（照抄 backtest.go:70-73），逐 symbol SelectForSymbol，
-//                   engine 注册 ma_crossover.New(50,200) + price_percentile.New()（同 backtest.go:81-85），
 //                   打开输出文件后调 executeExport
+//
+// ⚠️ engine 必须注册【全部】策略（ma_crossover、price_percentile、pe_band、
+// dividend_yield、pe_percentile，各用默认构造器）——与 backtest.go 只注册离线
+// 策略不同。否则 `--strategies pe_band` 会落进 "unknown strategy" 分支，
+// executeExport 的 Fundamentals 动态拒绝在 CLI 路径上永远不可达，设计 §2.1/§5
+// 的「显式报错拒绝」与验收项落空。注册 ≠ 运行：基本面策略注册后会在白名单
+// 校验处被拒绝，绝不会进入重放。
 ```
 
 - [ ] **Step 2: Makefile target**
