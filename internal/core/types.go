@@ -22,6 +22,7 @@ const (
 	AssetETF       AssetType = "etf"
 	AssetFund      AssetType = "fund"
 	AssetCommodity AssetType = "commodity"
+	AssetCrypto    AssetType = "crypto"
 )
 
 // Quote represents a real-time price quote
@@ -75,6 +76,12 @@ type OHLCV struct {
 	Time     time.Time
 }
 
+// EPSPoint is one point of a trailing-twelve-month diluted EPS series.
+type EPSPoint struct {
+	Date time.Time
+	EPS  float64
+}
+
 // Fundamental represents fundamental data for a stock
 type Fundamental struct {
 	Symbol        string
@@ -90,7 +97,11 @@ type Fundamental struct {
 	Revenue       float64   // Total revenue
 	NetIncome     float64   // Net income
 	EPS           float64   // Earnings per share
-	Source        string    // Data source
+	// PEPercentile is the position of current PE in its historical series,
+	// 0-100. Negative means unavailable. Source encodes how it was obtained:
+	// "lixinger_cvpos", "reconstructed", or "method:fallback_reason".
+	PEPercentile float64
+	Source       string // Data source
 }
 
 // IsValid checks if fundamental data has required fields
