@@ -699,7 +699,7 @@ func (l *Lixinger) FetchValuationPercentile(symbol string, lookbackYears int) (f
 }
 ```
 
-（POST 复用 lixinger.go 现有 `postJSON` helper 发请求；但既有 `lixingerResponse` 是平铺固定字段结构，承载不了 `pe_ttm.y5.cvpos` 嵌套——本方法的响应体需自行用 `map[string]any` 解析，不要复用该结构体。）
+（注意 `postJSON` 内部已把响应 decode 进平铺的 `lixingerResponse` 并消费了 body，无法"只借它发请求"——而该结构承载不了 `pe_ttm.y5.cvpos` 嵌套。参照 `postJSON` 的 POST 三段式**自写**发送+解析，响应 decode 进 `map[string]any` 后按 metric 路径下钻；或抽一个返回原始 body 的 `postJSONRaw` 变体供两处共用。）
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1156,6 +1156,10 @@ Expected: FAIL
 ```go
 func (s *Strategy) RequiredData() strategy.DataRequirements {
 	return strategy.DataRequirements{
+		// PriceHistory 必须声明：buildFundamental 的 PE 重建复用 analyzeSymbol
+		// 取回的 ohlcv，窗口由绑定策略的 max PriceHistory 决定——不声明则
+		// 单独绑定本策略时只拿到 1 年数据，重建出"1 年 PE 分位"与 5 年文案错位
+		PriceHistory: s.lookbackYears * 252,
 		Fundamentals: true,
 		AssetTypes:   []core.AssetType{core.AssetStock, core.AssetIndex},
 	}
@@ -1382,7 +1386,8 @@ func TestBuildPEPercentile_Paths(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a := New(...)
-			a.SetValuationSources(stubVal{pct: c.valPct, err: c.valErr}, stubEPS{pts: c.eps, err: c.epsErr})
+			sv := &stubVal{pct: c.valPct, err: c.valErr} // 指针：亏损用例后续断言 sv.calls == 0
+			a.SetValuationSources(sv, &stubEPS{pts: c.eps, err: c.epsErr})
 			f := a.buildFundamental(c.symbol, TypeOfCase(c), sampleCloses(700))
 			if c.wantPct != (f != nil && f.PEPercentile >= 0) {
 				t.Fatalf("availability mismatch: %+v", f)
@@ -1557,7 +1562,7 @@ git commit -m "feat(app): PE percentile orchestration with lixinger fallback cha
 	if yahooCollector != nil {
 		es = yahooCollector
 	}
-	atlasApp.SetValuationSources(vs, es)
+	application.SetValuationSources(vs, es) // serve.go 中 App 实例变量名为 application
 ```
 
 - [ ] **Step 2: backtest.go 注册 price_percentile（冒烟）**
@@ -1597,8 +1602,8 @@ watchlist 示例追加（design §7）：
 go build ./...
 go test ./... 2>&1 | tail -20        # 全部 PASS
 # 回测冒烟：区间必须 > 252 个交易日（minSampleBars 门槛），否则 0 信号也"通过"，无判定力
-go run ./cmd/atlas backtest --strategy price_percentile --symbol AAPL \
-  --from 2021-01-01 --to 2026-06-01
+go run ./cmd/atlas backtest price_percentile --symbol AAPL \
+  --from 2021-01-01 --to 2026-06-01   # 策略名是位置参数（backtest.go: Use: "backtest [strategy]"）
 # 预期：运行无错退出；窗口滚过 252 bars 后允许产生信号；0 trades 可接受但需人工
 # 确认日志中出现过 percentile 计算（非因数据不足直接全程跳过）。
 # （flag 名以 backtest.go 实际定义为准，执行时核对 --help）
