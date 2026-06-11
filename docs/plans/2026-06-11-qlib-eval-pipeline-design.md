@@ -1,7 +1,7 @@
 # Qlib 回测验证管线（atlas × qlib 整合一期）— 设计文档
 
 > 日期：2026-06-11
-> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查修正：get_data 命令改为本版本的 qlib.cli.data 入口、CSV date 钉死取自重放 bar 时间（修复 ma_crossover 的 GeneratedAt 墙钟问题并列入范围）、基本面依赖策略显式拒绝
+> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查修正：get_data 命令改为本版本的 qlib.cli.data 入口、CSV date 钉死取自重放 bar 时间（修复 ma_crossover 的 GeneratedAt 墙钟问题并列入范围）、基本面依赖策略显式拒绝；rev3（终版，审查通过）— 引擎统一盖戳 GeneratedAt = bar 时间（一行改动，机制性根治）、白名单改为按 RequiredData().Fundamentals 动态判定
 > 上游分析：`docs/reviews/2026-06-11-qlib-integration-analysis.md`
 > 定位：qlib 整合演进路径的第一步（零侵入回测验证）；ML sidecar 与数据仓库/PIT 为后续独立子项目
 
@@ -38,9 +38,11 @@ atlas export-signals --strategies ma_crossover,price_percentile \
   --out signals.csv
 ```
 
-- 复用 `internal/backtest` 引擎的逐日滚动重放并**直接读取 `Result.Signals`**——已核实 `backtester.go` 的 `Run()` 按 bar 滚动调用 `strat.Analyze` 且原始信号在仓位模拟之前就收集于 `Result.Signals`，无需改引擎即可截获；引擎会把 `sig.Price` 覆写为当日收盘价、`sig.Strategy` 覆写为策略名，与 CSV 契约一致
+- 复用 `internal/backtest` 引擎的逐日滚动重放并**直接读取 `Result.Signals`**——已核实 `backtester.go` 的 `Run()` 按 bar 滚动调用 `strat.Analyze` 且原始信号在仓位模拟之前就收集于 `Result.Signals`；引擎会把 `sig.Price` 覆写为当日收盘价、`sig.Strategy` 覆写为策略名
+- **引擎做一行改动**：`Run()` 在覆写 `sig.Price`/`sig.Strategy` 的同一位置统一覆写 `sig.GeneratedAt = ohlcv[i].Time`，从机制上保证 `GeneratedAt` 对任意策略都等于 bar 时间，导出端可放心读取（否则「读 Result.Signals」与「date 取 bar 时间」两条只能靠每个策略自觉用 ctx.Now 维系）
+- **策略白名单按 `RequiredData().Fundamentals == false` 动态判定**（不硬编码策略名列表，新增 OHLCV-only 策略自动纳入）
 - 历史数据经现有 collector 路径获取（A 股 → eastmoney `FetchHistory`，指数符号由 `AShareIndexSecIDs` 表支持），与 serve 模式同源
-- **策略白名单**：仅接受可离线回测的策略（数据需求不含 Fundamentals，即 ma_crossover、price_percentile）；`--strategies` 传入 pe_band/dividend_yield/pe_percentile 等依赖基本面的策略时**显式报错拒绝**（backtest 的 AnalysisContext 不填基本面，静默输出 0 信号会被误读为「策略从不触发」）
+- **策略白名单**：仅接受可离线回测的策略（`RequiredData().Fundamentals == false`，当前即 ma_crossover、price_percentile）；`--strategies` 传入基本面依赖策略时**显式报错拒绝**并列出可用清单（backtest 的 AnalysisContext 不填基本面，静默输出 0 信号会被误读为「策略从不触发」）
 - 引擎对单 bar `Analyze` 错误静默跳过（`backtester.go:71-73`）；导出端对跳过的 bar 计数并在结束时输出 stderr 摘要，与 §3.2 的丢弃样本计数口径对齐
 
 ### 2.2 导出口径：router 过滤前的原始信号
