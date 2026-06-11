@@ -815,6 +815,46 @@ func TestApp_ArbitrateTimeout_ReturnsOriginal(t *testing.T) {
 	}
 }
 
+// okArbitrator resolves immediately to a fixed decision (no price of its own).
+type okArbitrator struct{ decision core.Action }
+
+func (o *okArbitrator) Arbitrate(ctx context.Context, req meta.ArbitrationRequest) (*meta.ArbitrationResult, error) {
+	return &meta.ArbitrationResult{Decision: o.decision, Confidence: 0.9, Reasoning: "test"}, nil
+}
+
+// TestApp_ArbitrateSignalIsPriced guards QA W1 / CARRYOVER I3: the synthesized
+// meta_arbitrator decision must carry a reference price (from the conflicting
+// inputs) so a real executor does not reject it as an unpriced (Price=0) order.
+func TestApp_ArbitrateSignalIsPriced(t *testing.T) {
+	app := New(&config.Config{}, zap.NewNop())
+	app.setArbitratorClient(&okArbitrator{decision: core.ActionSell})
+
+	conflicting := []core.Signal{
+		{Symbol: "TEST", Action: core.ActionBuy, Confidence: 0.8, Price: 123.45, Strategy: "a"},
+		{Symbol: "TEST", Action: core.ActionSell, Confidence: 0.7, Price: 123.45, Strategy: "b"},
+	}
+	out := app.arbitrate(context.Background(), "TEST", conflicting)
+
+	if len(out) != 1 || out[0].Strategy != "meta_arbitrator" {
+		t.Fatalf("expected one arbitrated signal, got %+v", out)
+	}
+	if out[0].Price <= 0 {
+		t.Errorf("arbitrated signal must carry a positive reference price, got %v", out[0].Price)
+	}
+	if out[0].Price != 123.45 {
+		t.Errorf("arbitrated price = %v, want reference 123.45 from conflicting signals", out[0].Price)
+	}
+}
+
+func TestReferencePrice(t *testing.T) {
+	if got := referencePrice([]core.Signal{{Price: 0}, {Price: 50}, {Price: 99}}); got != 50 {
+		t.Errorf("referencePrice = %v, want first positive 50", got)
+	}
+	if got := referencePrice([]core.Signal{{Price: 0}, {Price: 0}}); got != 0 {
+		t.Errorf("referencePrice with no priced signal = %v, want 0", got)
+	}
+}
+
 // --- TASK-010: asset-type detection, binding validation, dynamic window ---
 //
 // Context Checkpoint: done_criteria → test mapping

@@ -152,6 +152,11 @@ type EPSSource interface {
 // SetValuationSources injects the valuation (lixinger) and EPS (yahoo) data
 // sources used to assemble PE-percentile fundamentals. Either may be nil, in
 // which case the corresponding path is treated as unavailable.
+//
+// Invariant (QA S1): this MUST be called during assembly, before Start. The
+// fields are read lock-free by buildFundamental on the parallel analysis
+// workers; set-once-before-Start is what keeps that race-free (mirrors the
+// executor wiring contract). Do not call it once the analysis loop is running.
 func (a *App) SetValuationSources(vs ValuationSource, es EPSSource) {
 	a.valuationSrc = vs
 	a.epsSrc = es
@@ -501,14 +506,32 @@ func (a *App) arbitrate(ctx context.Context, symbol string, signals []core.Signa
 		return signals
 	}
 
+	// Carry a reference price onto the synthesized decision. Without it the
+	// downstream executor receives Price=0, which ExecutionManager rejects
+	// ("price must be positive") so the arbitrated decision would never trade
+	// (QA W1 / CARRYOVER I3; mirrors the 784ed71 ma_crossover fix).
 	return []core.Signal{{
 		Symbol:      symbol,
 		Action:      result.Decision,
 		Confidence:  result.Confidence,
+		Price:       referencePrice(signals),
 		Reason:      result.Reasoning,
 		Strategy:    "meta_arbitrator",
 		GeneratedAt: time.Now(),
 	}}
+}
+
+// referencePrice returns the price to stamp on a synthesized arbitration signal:
+// the first positive price among the conflicting inputs (all priced at the same
+// cycle's latest close). Returns 0 only when no input carries a price, in which
+// case the executor's positive-price guard still suppresses an unpriced order.
+func referencePrice(signals []core.Signal) float64 {
+	for _, s := range signals {
+		if s.Price > 0 {
+			return s.Price
+		}
+	}
+	return 0
 }
 
 // RunOnce performs a single analysis cycle (useful for testing)
