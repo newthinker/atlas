@@ -1,7 +1,7 @@
 # Qlib 回测验证管线（atlas × qlib 整合一期）— 设计文档
 
 > 日期：2026-06-11
-> 状态：设计已确认（用户逐节批准）
+> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查修正：get_data 命令改为本版本的 qlib.cli.data 入口、CSV date 钉死取自重放 bar 时间（修复 ma_crossover 的 GeneratedAt 墙钟问题并列入范围）、基本面依赖策略显式拒绝
 > 上游分析：`docs/reviews/2026-06-11-qlib-integration-analysis.md`
 > 定位：qlib 整合演进路径的第一步（零侵入回测验证）；ML sidecar 与数据仓库/PIT 为后续独立子项目
 
@@ -38,9 +38,10 @@ atlas export-signals --strategies ma_crossover,price_percentile \
   --out signals.csv
 ```
 
-- 复用 `internal/backtest` 引擎的逐日滚动重放机制驱动策略（与回测同一代码路径，保证验证的是真实实现），不做仓位模拟，只收集每个交易日各策略 `Analyze` 产出的原始 Signal
-- 历史数据经现有 collector 路径获取（A 股 → eastmoney `FetchHistory`），与 serve 模式同源
-- 若现有 backtest 引擎无法直接截获信号流，则在导出命令中复用其滚动窗口逻辑直接驱动 `strategy.Analyze`（二者等价，实现时择低成本者）
+- 复用 `internal/backtest` 引擎的逐日滚动重放并**直接读取 `Result.Signals`**——已核实 `backtester.go` 的 `Run()` 按 bar 滚动调用 `strat.Analyze` 且原始信号在仓位模拟之前就收集于 `Result.Signals`，无需改引擎即可截获；引擎会把 `sig.Price` 覆写为当日收盘价、`sig.Strategy` 覆写为策略名，与 CSV 契约一致
+- 历史数据经现有 collector 路径获取（A 股 → eastmoney `FetchHistory`，指数符号由 `AShareIndexSecIDs` 表支持），与 serve 模式同源
+- **策略白名单**：仅接受可离线回测的策略（数据需求不含 Fundamentals，即 ma_crossover、price_percentile）；`--strategies` 传入 pe_band/dividend_yield/pe_percentile 等依赖基本面的策略时**显式报错拒绝**（backtest 的 AnalysisContext 不填基本面，静默输出 0 信号会被误读为「策略从不触发」）
+- 引擎对单 bar `Analyze` 错误静默跳过（`backtester.go:71-73`）；导出端对跳过的 bar 计数并在结束时输出 stderr 摘要，与 §3.2 的丢弃样本计数口径对齐
 
 ### 2.2 导出口径：router 过滤前的原始信号
 
@@ -53,7 +54,8 @@ symbol,date,strategy,action,confidence,price,metadata
 600519.SH,2024-03-15,ma_crossover,buy,0.72,1688.00,"{""fast_ma"":1690.2}"
 ```
 
-- `date`：信号产生的交易日（YYYY-MM-DD）；`metadata`：JSON 字符串（percentile 值等）
+- `date`：信号产生的交易日（YYYY-MM-DD）。**必须取自重放 bar 的时间（`ohlcv[i].Time`），严禁信任 `Signal.GeneratedAt`**——已核实 ma_crossover 设置的是 `time.Now()` 墙钟时间，信任它会把全部历史信号标成导出当日，事件研究静默失效。顺带修复 `ma_crossover/strategy.go:100,117` 的 `GeneratedAt: time.Now()` → `ctx.Now`（与 price_percentile 口径一致），列入实现范围
+- `metadata`：JSON 字符串（percentile 值等）。Go 侧用 `encoding/csv` 写、Python 侧用 `csv`/`pandas` 默认 quoting 读，不手写拼接引号
 - schema 由 Go 单测（golden file）钉死，字段变更必须显式改契约
 
 ## 3. Python 评估端（`scripts/qlib_eval/`）
@@ -68,8 +70,10 @@ scripts/qlib_eval/
 └── tests/test_eval.py # 合成数据驱动的核心计算单测
 ```
 
-数据初始化（一次性）：
-`python -m qlib.run.get_data qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn`
+数据初始化（一次性，命令已对照本地 qlib 副本 README:231 核实——`qlib.run.get_data` 是旧版形式，本版本入口是 `qlib.cli.data`）：
+`python -m qlib.cli.data qlib_data --target_dir ~/.qlib/qlib_data/cn_data --region cn`
+
+注：社区数据包托管在 GitHub releases（SunsetWolf/qlib_dataset），国内网络可能需要代理；README 局限说明中注明。
 
 ### 3.2 事件研究计算口径
 
@@ -109,6 +113,8 @@ eastmoney FetchHistory ──► atlas export-signals ──► signals.csv
 | 信号日期晚于数据包截止日 | 按 horizon 可计算部分输出，不足的标 N/A 并计数 |
 | CSV 格式不符 | 显式报错指出行号与字段，不静默跳过 |
 | 导出端历史数据拉取失败 | 与现有 backtest 相同的错误传播，单标的失败不中断其他标的导出 |
+| `--strategies` 含依赖基本面的策略 | 启动时显式报错拒绝并列出可用白名单（防止静默 0 信号被误读，见 §2.1） |
+| 重放中单 bar Analyze 失败 | 引擎静默跳过；导出端计数并输出 stderr 摘要 |
 
 ## 6. 测试
 
