@@ -26,6 +26,8 @@ import (
 	signalstore "github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/newthinker/atlas/internal/strategy/ma_crossover"
+	"github.com/newthinker/atlas/internal/strategy/pe_percentile"
+	"github.com/newthinker/atlas/internal/strategy/price_percentile"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -89,9 +91,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Info("OHLCV collector cache enabled", zap.Duration("ttl", cacheTTL))
 	}
 
-	// Register collectors if configured
+	// Register collectors if configured. yahooCollector is declared at function
+	// scope so it can later be injected as the app's EPS source for PE-percentile
+	// reconstruction (it stays nil when yahoo is not configured).
+	var yahooCollector *yahoo.Yahoo
 	if collectorCfg, ok := cfg.Collectors["yahoo"]; ok && collectorCfg.Enabled {
-		yahooCollector := yahoo.New()
+		yahooCollector = yahoo.New()
 		application.RegisterCollector(maybeCache(yahooCollector, cacheEnabled, cacheTTL))
 	}
 
@@ -127,6 +132,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Info("crypto collector registered")
 	}
 
+	// Inject valuation/EPS sources used to assemble PE-percentile fundamentals.
+	// Pass through the typed-nil guards so an unconfigured collector stays an
+	// untyped-nil interface (see valuationSourceOrNil).
+	application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSourceOrNil(yahooCollector))
+
 	// Create strategy engine and register strategies
 	strategies := strategy.NewEngine()
 	if strategyCfg, ok := cfg.Strategies["ma_crossover"]; ok && strategyCfg.Enabled {
@@ -146,6 +156,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 			strategies.Register(maStrategy)
 			application.RegisterStrategy(maStrategy)
 		}
+	}
+
+	// Percentile strategies: position of price / PE within their own multi-year
+	// history. Both read enabled + params from config like ma_crossover above.
+	if strategyCfg, ok := cfg.Strategies["price_percentile"]; ok && strategyCfg.Enabled {
+		registerConfiguredStrategy(strategies, application, price_percentile.New(), strategy.Config{Params: strategyCfg.Params}, log)
+	}
+	if strategyCfg, ok := cfg.Strategies["pe_percentile"]; ok && strategyCfg.Enabled {
+		registerConfiguredStrategy(strategies, application, pe_percentile.New(), strategy.Config{Params: strategyCfg.Params}, log)
 	}
 
 	// Set watchlist from config with full details (name, market, type, strategies)
@@ -266,6 +285,37 @@ func buildArbitrator(cfg *config.Config, collectors []collector.Collector, log *
 	return meta.NewArbitrator(llmProvider, marketCtx, trackRecord, news, log, meta.ArbitratorConfig{
 		ContextDays: cfg.Meta.Arbitrator.ContextDays,
 	}), nil
+}
+
+// registerConfiguredStrategy initialises s with cfg and, on success, registers
+// it with both the signal engine and the app. Init failures are logged and the
+// strategy is skipped, matching the ma_crossover wiring.
+func registerConfiguredStrategy(engine *strategy.Engine, application *app.App, s strategy.Strategy, cfg strategy.Config, log *zap.Logger) {
+	if err := s.Init(cfg); err != nil {
+		log.Warn("failed to init strategy", zap.String("strategy", s.Name()), zap.Error(err))
+		return
+	}
+	engine.Register(s)
+	application.RegisterStrategy(s)
+}
+
+// valuationSourceOrNil returns a non-nil app.ValuationSource only when c is a
+// live collector. Returning c directly when it is a nil *lixinger.Lixinger
+// would yield a non-nil interface wrapping a nil pointer (the typed-nil trap),
+// defeating buildFundamental's `valuationSrc != nil` guard and panicking on use.
+func valuationSourceOrNil(c *lixinger.Lixinger) app.ValuationSource {
+	if c == nil {
+		return nil
+	}
+	return c
+}
+
+// epsSourceOrNil mirrors valuationSourceOrNil for the yahoo EPS source.
+func epsSourceOrNil(c *yahoo.Yahoo) app.EPSSource {
+	if c == nil {
+		return nil
+	}
+	return c
 }
 
 // maybeCache wraps c in an OHLCV TTL CachedCollector when caching is enabled.

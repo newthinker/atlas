@@ -6,8 +6,8 @@ A global asset monitoring system with automated trading signal generation. ATLAS
 
 ## Features
 
-- **Multi-Market Coverage** - US, Hong Kong, China A-shares markets
-- **Multiple Strategies** - MA Crossover, PE Band, Dividend Yield, RSI (extensible)
+- **Multi-Market Coverage** - US, Hong Kong, China A-shares markets, plus indexes & commodities
+- **Multiple Strategies** - MA Crossover, PE Band, Dividend Yield, Price/PE Percentile, RSI (extensible)
 - **LLM Meta-Strategies** - AI-powered signal arbitration and strategy synthesis
 - **Broker Integration** - Portfolio positions, orders, trade history (Futu planned)
 - **Backtesting** - Test strategies against historical data

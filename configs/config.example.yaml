@@ -42,9 +42,13 @@ strategies:
   # Fundamental strategies
   pe_band:
     enabled: false
-    params:
-      lookback_years: 5
-      threshold_percentile: 20
+  # Historical-percentile strategies (price / PE position in own multi-year range)
+  price_percentile:
+    enabled: true
+    params: {lookback_years: 5, low: 25, high: 75, extreme_low: 10, extreme_high: 90}
+  pe_percentile:
+    enabled: true
+    params: {lookback_years: 5, low: 20, high: 80, extreme_low: 10, extreme_high: 90}
   dividend_yield:
     enabled: false
     params:
@@ -153,6 +157,10 @@ watchlist:
   - symbol: "0700.HK"
     name: "Tencent Holdings"
     strategies: ["ma_crossover"]
+  # Index / commodity / crypto examples for the percentile strategies
+  - {symbol: "^GSPC",    name: "标普500",   type: "指数",     strategies: [price_percentile, pe_percentile]}
+  - {symbol: "GC=F",     name: "COMEX黄金", type: "期货",     strategies: [price_percentile]}
+  - {symbol: "BTC-USDT", name: "比特币",    type: "加密货币", strategies: [price_percentile]}
 
 # Metrics configuration (Prometheus)
 metrics:

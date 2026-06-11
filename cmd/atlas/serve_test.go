@@ -11,9 +11,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/core"
 )
+
+// TASK-012 done_criteria → test mapping
+// functional[0]/boundary[0] "估值源注入 typed-nil 防护：nil 指针不得变非 nil 接口"
+//   → TestValuationSourceOrNil_NilStaysNil / TestEPSSourceOrNil_NilStaysNil
+//   + TestValuationSourceOrNil_RealNonNil / TestEPSSourceOrNil_RealNonNil
+
+// functional[0] + boundary[0]: a nil *lixinger.Lixinger must NOT become a
+// non-nil app.ValuationSource, or buildFundamental's `valuationSrc != nil`
+// guard would be defeated (typed-nil interface trap) and panic at call time.
+func TestValuationSourceOrNil_NilStaysNil(t *testing.T) {
+	var nilCollector *lixinger.Lixinger
+	got := valuationSourceOrNil(nilCollector)
+	if got != nil {
+		t.Errorf("valuationSourceOrNil(nil *Lixinger) = %v (typed-nil leak), want untyped nil interface", got)
+	}
+}
+
+func TestEPSSourceOrNil_NilStaysNil(t *testing.T) {
+	var nilCollector *yahoo.Yahoo
+	got := epsSourceOrNil(nilCollector)
+	if got != nil {
+		t.Errorf("epsSourceOrNil(nil *Yahoo) = %v (typed-nil leak), want untyped nil interface", got)
+	}
+}
+
+// functional[0]: a real collector must be injected as a non-nil interface.
+func TestValuationSourceOrNil_RealNonNil(t *testing.T) {
+	var _ app.ValuationSource = lixinger.New("dummy-key") // compile-time impl check
+	if got := valuationSourceOrNil(lixinger.New("dummy-key")); got == nil {
+		t.Error("valuationSourceOrNil(real *Lixinger) = nil, want non-nil source")
+	}
+}
+
+func TestEPSSourceOrNil_RealNonNil(t *testing.T) {
+	var _ app.EPSSource = yahoo.New() // compile-time impl check
+	if got := epsSourceOrNil(yahoo.New()); got == nil {
+		t.Error("epsSourceOrNil(real *Yahoo) = nil, want non-nil source")
+	}
+}
 
 // plainCollector implements only collector.Collector.
 type plainCollector struct {

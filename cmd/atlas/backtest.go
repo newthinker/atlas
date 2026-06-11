@@ -16,6 +16,7 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/newthinker/atlas/internal/strategy/ma_crossover"
+	"github.com/newthinker/atlas/internal/strategy/price_percentile"
 	"github.com/spf13/cobra"
 )
 
@@ -78,6 +79,10 @@ func runBacktest(cmd *cobra.Command, args []string) error {
 
 	engine := strategy.NewEngine()
 	engine.Register(ma_crossover.New(50, 200))
+	// price_percentile works on OHLCV alone, so it backtests offline. pe_percentile
+	// is intentionally not registered: it reads a precomputed PE percentile from an
+	// online valuation source the backtest engine does not provide.
+	engine.Register(price_percentile.New())
 
 	deps := backtestDeps{provider: provider, strategies: engine, out: os.Stdout}
 	return executeBacktest(deps, args[0], backtestSymbol, backtestFrom, backtestTo)
