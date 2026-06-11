@@ -14,7 +14,30 @@ import (
 	"github.com/newthinker/atlas/internal/meta"
 	"github.com/newthinker/atlas/internal/notifier"
 	"github.com/newthinker/atlas/internal/strategy"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
+
+// fakeStrategy is a configurable strategy stub for asset-type binding and
+// history-window tests (mockStrategy has fixed RequiredData).
+type fakeStrategy struct {
+	name         string
+	assetTypes   []core.AssetType
+	priceHistory int
+	signals      []core.Signal
+}
+
+func (f *fakeStrategy) Name() string        { return f.name }
+func (f *fakeStrategy) Description() string { return "fake" }
+func (f *fakeStrategy) RequiredData() strategy.DataRequirements {
+	return strategy.DataRequirements{AssetTypes: f.assetTypes, PriceHistory: f.priceHistory}
+}
+func (f *fakeStrategy) Init(cfg strategy.Config) error { return nil }
+func (f *fakeStrategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
+	out := make([]core.Signal, len(f.signals))
+	copy(out, f.signals)
+	return out, nil
+}
 
 type mockCollector struct {
 	name       string
@@ -770,5 +793,132 @@ func TestApp_ArbitrateTimeout_ReturnsOriginal(t *testing.T) {
 		if s.Strategy == "meta_arbitrator" {
 			t.Errorf("timed-out arbitration must not produce an arbitrated signal: %+v", s)
 		}
+	}
+}
+
+// --- TASK-010: asset-type detection, binding validation, dynamic window ---
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "DetectType index/commodity 全用例" → TestDetectType_IndexAndCommodity
+// functional[1] "assetTypeOf 七映射 + DetectMarket(^HSI)→H股" → TestAssetTypeOf, TestDetectMarket_HSI
+// functional[2] "effectiveStrategies 过滤+空不限+二次仅1 warning" → TestEffectiveStrategies_FiltersByAssetType
+// functional[3] "historyWindowDays 5*252→≥1825, 无策略→365" → TestHistoryWindowDays
+// boundary[0]   "Strategies非空但effective空→直接返回; 表外^绑定 warnOnce" →
+//               TestAnalyzeSymbol_AllFilteredReturnsEarly, TestEffectiveStrategies_UnknownIndexWarnsOnce
+// error_handling[0] "未注册策略名透传" → TestEffectiveStrategies_UnregisteredPassThrough
+
+func TestDetectType_IndexAndCommodity(t *testing.T) {
+	cases := []struct{ symbol, want string }{
+		{"^GSPC", TypeIndex}, {"^HSI", TypeIndex},
+		{"000300.SH", TypeIndex}, {"000001.SH", TypeIndex},
+		{"000001.SZ", TypeStock}, {"600519.SH", TypeStock},
+		{"GC=F", TypeFuture},
+		{"BTC-USDT", TypeCrypto}, {"AAPL", TypeStock},
+	}
+	for _, c := range cases {
+		if got := DetectType(c.symbol); got != c.want {
+			t.Errorf("DetectType(%q) = %q, want %q", c.symbol, got, c.want)
+		}
+	}
+}
+
+func TestAssetTypeOf(t *testing.T) {
+	cases := []struct {
+		appType string
+		want    core.AssetType
+	}{
+		{TypeStock, core.AssetStock}, {TypeIndex, core.AssetIndex},
+		{TypeETF, core.AssetETF}, {TypeFund, core.AssetFund},
+		{TypeFuture, core.AssetCommodity}, {TypeCrypto, core.AssetCrypto},
+		{TypeBond, ""}, // 一期不支持 → 空值，装配层按"全跳过+warning"处理
+	}
+	for _, c := range cases {
+		if got := assetTypeOf(c.appType); got != c.want {
+			t.Errorf("assetTypeOf(%q) = %q, want %q", c.appType, got, c.want)
+		}
+	}
+}
+
+func TestDetectMarket_HSI(t *testing.T) {
+	// ^HSI must report H股 so the UI market label stays consistent with the
+	// collector.MarketForSymbol HK routing (plan Task 6).
+	if got := DetectMarket("^HSI"); got != MarketHShare {
+		t.Errorf("DetectMarket(^HSI) = %q, want %q", got, MarketHShare)
+	}
+}
+
+func TestEffectiveStrategies_FiltersByAssetType(t *testing.T) {
+	obsCore, logs := observer.New(zap.WarnLevel)
+	app := New(&config.Config{}, zap.New(obsCore))
+	app.RegisterStrategy(&fakeStrategy{name: "stock_only", assetTypes: []core.AssetType{core.AssetStock}})
+	app.RegisterStrategy(&fakeStrategy{name: "all_assets"}) // AssetTypes 空 = 不限
+
+	item := WatchlistItem{Symbol: "GC=F", Type: TypeFuture, Strategies: []string{"stock_only", "all_assets"}}
+	got := app.effectiveStrategies(item)
+	if len(got) != 1 || got[0] != "all_assets" {
+		t.Fatalf("effectiveStrategies = %v, want [all_assets]", got)
+	}
+
+	// 二次调用不重复告警（warnOnce 去重）
+	_ = app.effectiveStrategies(item)
+	if n := logs.FilterMessage("strategy skipped: asset type not supported").Len(); n != 1 {
+		t.Errorf("skip warning count = %d, want 1 (deduped)", n)
+	}
+}
+
+func TestEffectiveStrategies_UnregisteredPassThrough(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	item := WatchlistItem{Symbol: "AAPL", Type: TypeStock, Strategies: []string{"ghost"}}
+	got := app.effectiveStrategies(item)
+	if len(got) != 1 || got[0] != "ghost" {
+		t.Errorf("effectiveStrategies = %v, want [ghost] (unregistered passed to engine error path)", got)
+	}
+}
+
+func TestEffectiveStrategies_UnknownIndexWarnsOnce(t *testing.T) {
+	obsCore, logs := observer.New(zap.WarnLevel)
+	app := New(&config.Config{}, zap.New(obsCore))
+	item := WatchlistItem{Symbol: "^N225", Type: TypeIndex, Strategies: []string{"ghost"}}
+	app.effectiveStrategies(item)
+	app.effectiveStrategies(item)
+	if n := logs.FilterMessage("index symbol outside phase-1 list, market defaults to US").Len(); n != 1 {
+		t.Errorf("unknown-index warning count = %d, want 1", n)
+	}
+}
+
+func TestHistoryWindowDays(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	app.RegisterStrategy(&fakeStrategy{name: "pp", priceHistory: 5 * 252})
+	item := WatchlistItem{Symbol: "AAPL", Type: TypeStock, Strategies: []string{"pp"}}
+	if d := app.historyWindowDays(item); d < 1825 { // 5y 交易日 → ≥5y 自然日
+		t.Errorf("historyWindowDays = %d, want >= 1825", d)
+	}
+	// 无策略声明时回退 365（现状兼容）
+	if d := app.historyWindowDays(WatchlistItem{Symbol: "X"}); d != 365 {
+		t.Errorf("default window = %d, want 365", d)
+	}
+}
+
+func TestAnalyzeSymbol_AllFilteredReturnsEarly(t *testing.T) {
+	app := New(&config.Config{}, nil)
+	notif := &mockNotifier{name: "n"}
+	if err := app.RegisterNotifier(notif); err != nil {
+		t.Fatalf("RegisterNotifier: %v", err)
+	}
+	app.RegisterCollector(&mockCollector{
+		name:    "yahoo",
+		history: []core.OHLCV{{Close: 100}, {Close: 101}},
+	})
+	// Bound only to a stock-only strategy that WOULD emit a buy signal; binding
+	// it to a futures symbol must filter it out and skip analysis entirely.
+	app.RegisterStrategy(&fakeStrategy{
+		name:       "stock_only",
+		assetTypes: []core.AssetType{core.AssetStock},
+		signals:    []core.Signal{{Symbol: "GC=F", Action: core.ActionBuy, Confidence: 0.9}},
+	})
+	item := WatchlistItem{Symbol: "GC=F", Type: TypeFuture, Strategies: []string{"stock_only"}}
+	app.analyzeSymbol(context.Background(), item)
+	if n := len(notif.received()); n != 0 {
+		t.Errorf("expected no signals when all bound strategies filtered, got %d", n)
 	}
 }

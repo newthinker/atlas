@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ const (
 	TypeOption = "期权"
 	TypeFuture = "期货"
 	TypeCrypto = "加密货币"
+	TypeIndex  = "指数"
 )
 
 // WatchlistItem represents an item in the watchlist with associated metadata
@@ -65,6 +67,10 @@ type App struct {
 	mu      sync.RWMutex
 	running bool
 	cancel  context.CancelFunc
+
+	// warned dedupes per-key warnings (e.g. asset-type binding mismatches and
+	// out-of-list index symbols) so the parallel analysis loop logs each once.
+	warned sync.Map
 }
 
 // New creates a new App instance
@@ -300,16 +306,28 @@ func (a *App) analyzeSymbolSafe(ctx context.Context, item WatchlistItem) {
 func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	symbol := item.Symbol
 
+	// Resolve which bound strategies actually apply to this asset type. A
+	// non-empty binding that filters down to nothing means the item is
+	// intentionally excluded from analysis (design §3.3), so skip the fetch.
+	var effective []string
+	if len(item.Strategies) > 0 {
+		effective = a.effectiveStrategies(item)
+		if len(effective) == 0 {
+			return
+		}
+	}
+
 	collectors := a.orderedCollectors(symbol)
 	if len(collectors) == 0 {
 		a.logger.Warn("no collectors available", zap.String("symbol", symbol))
 		return
 	}
 
-	// Fetch historical data (last 250 trading days for 200-day MA), preferring
-	// the collector that matches the symbol's market and falling back to others.
+	// Fetch enough history for the most demanding bound strategy (trading days
+	// converted to calendar days), preferring the collector that matches the
+	// symbol's market and falling back to others.
 	end := time.Now()
-	start := end.AddDate(0, 0, -365)
+	start := end.AddDate(0, 0, -a.historyWindowDays(item))
 
 	var ohlcv []core.OHLCV
 	var fetchErr error
@@ -337,10 +355,12 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	}
 
 	// Honour per-symbol strategy selection when configured; otherwise run all.
+	// effective is the asset-type-filtered binding (non-empty here, since an
+	// all-filtered binding returned early above).
 	var signals []core.Signal
 	var err error
-	if len(item.Strategies) > 0 {
-		signals, err = a.strategies.AnalyzeWithStrategies(ctx, analysisCtx, item.Strategies)
+	if len(effective) > 0 {
+		signals, err = a.strategies.AnalyzeWithStrategies(ctx, analysisCtx, effective)
 	} else {
 		signals, err = a.strategies.Analyze(ctx, analysisCtx)
 	}
@@ -540,6 +560,10 @@ func DetectMarket(symbol string) string {
 		return MarketAShare
 	case strings.HasSuffix(upperSymbol, ".HK"):
 		return MarketHShare
+	case upperSymbol == "^HSI":
+		// Hang Seng index: report H股 so the UI market label matches the HK
+		// routing in collector.MarketForSymbol (avoids 美股/H股 inconsistency).
+		return MarketHShare
 	case strings.Contains(upperSymbol, "-USD") || strings.Contains(upperSymbol, "-USDT") ||
 		strings.HasPrefix(upperSymbol, "BTC") || strings.HasPrefix(upperSymbol, "ETH"):
 		return MarketCrypto
@@ -551,11 +575,100 @@ func DetectMarket(symbol string) string {
 // DetectType auto-detects the asset type based on symbol pattern
 func DetectType(symbol string) string {
 	upperSymbol := strings.ToUpper(symbol)
-	if strings.Contains(upperSymbol, "-USD") || strings.Contains(upperSymbol, "-USDT") ||
-		strings.HasPrefix(upperSymbol, "BTC") || strings.HasPrefix(upperSymbol, "ETH") {
+	switch {
+	case strings.HasPrefix(upperSymbol, "^"), collector.IsAShareIndex(symbol):
+		return TypeIndex
+	case strings.HasSuffix(upperSymbol, "=F"):
+		return TypeFuture
+	case strings.Contains(upperSymbol, "-USD") || strings.Contains(upperSymbol, "-USDT") ||
+		strings.HasPrefix(upperSymbol, "BTC") || strings.HasPrefix(upperSymbol, "ETH"):
 		return TypeCrypto
+	default:
+		return TypeStock
 	}
-	return TypeStock
+}
+
+// assetTypeOf maps the Chinese UI type label to the core asset type used by
+// strategy AssetTypes declarations. Empty means unsupported in phase 1.
+func assetTypeOf(appType string) core.AssetType {
+	switch appType {
+	case TypeStock:
+		return core.AssetStock
+	case TypeIndex:
+		return core.AssetIndex
+	case TypeETF:
+		return core.AssetETF
+	case TypeFund:
+		return core.AssetFund
+	case TypeFuture:
+		return core.AssetCommodity
+	case TypeCrypto:
+		return core.AssetCrypto
+	default:
+		return ""
+	}
+}
+
+// warnOnce logs a warning the first time it sees a given key, deduping repeats
+// across the concurrent analysis loop.
+func (a *App) warnOnce(key, msg string, fields ...zap.Field) {
+	if _, loaded := a.warned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	a.logger.Warn(msg, fields...)
+}
+
+// effectiveStrategies returns the item's bound strategies minus those whose
+// AssetTypes declaration excludes the item's asset type. Mismatches are logged
+// once per (symbol,strategy) pair (design §3.3). Unregistered names are passed
+// through so the engine surfaces its own error.
+func (a *App) effectiveStrategies(item WatchlistItem) []string {
+	if strings.HasPrefix(item.Symbol, "^") {
+		if _, known := collector.KnownIndexMarket(item.Symbol); !known {
+			a.warnOnce("unknown-index:"+item.Symbol,
+				"index symbol outside phase-1 list, market defaults to US",
+				zap.String("symbol", item.Symbol))
+		}
+	}
+
+	at := assetTypeOf(item.Type)
+	out := make([]string, 0, len(item.Strategies))
+	for _, name := range item.Strategies {
+		s, ok := a.strategies.Get(name)
+		if !ok {
+			out = append(out, name) // 未注册的留给 engine 报错路径
+			continue
+		}
+		decl := s.RequiredData().AssetTypes
+		if len(decl) == 0 || (at != "" && slices.Contains(decl, at)) {
+			out = append(out, name)
+			continue
+		}
+		a.warnOnce("binding:"+item.Symbol+":"+name,
+			"strategy skipped: asset type not supported",
+			zap.String("symbol", item.Symbol), zap.String("strategy", name),
+			zap.String("asset_type", item.Type))
+	}
+	return out
+}
+
+// historyWindowDays converts the max PriceHistory (trading days) demanded by the
+// item's strategies into calendar days, with the legacy 365-day floor.
+func (a *App) historyWindowDays(item WatchlistItem) int {
+	maxBars := 0
+	for _, name := range item.Strategies {
+		if s, ok := a.strategies.Get(name); ok {
+			if ph := s.RequiredData().PriceHistory; ph > maxBars {
+				maxBars = ph
+			}
+		}
+	}
+	if maxBars <= 250 {
+		return 365
+	}
+	// 交易日→自然日：真实折算系数 365/252 ≈ 1.448（×7/5 只折周末、漏节假日，
+	// 对 5×252=1260 bars 会算出 1794 < 1825，不满足 5 年覆盖）。
+	return maxBars*365/252 + 30
 }
 
 // RemoveFromWatchlist removes a symbol from the watchlist.
