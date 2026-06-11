@@ -1,7 +1,7 @@
 # 指数/大宗商品采集 与 历史百分位监控策略 — 设计文档
 
 > 日期：2026-06-11
-> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认），并落实其余审查建议
+> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认）；rev3 — 美/港指数估值分位移入一期边界（Yahoo 财报端点不覆盖指数符号），PE 重建逻辑落点定为 `internal/valuation` 纯函数包，并落实其余审查建议
 > 前置分析：`docs/reviews/2026-06-11-asset-coverage-and-percentile-analysis.md`
 
 ## 1. 需求与范围
@@ -25,6 +25,7 @@
 
 - 国内期货（上期所/大商所/郑商所）数据源接入 — 留二期
 - 美/港市场以外的国际指数（^N225、^GDAXI 等）— 留二期，避免市场归属语义（交易时段/市场过滤）含混
+- **美/港指数（^GSPC、^HSI 等）的估值分位** — Yahoo fundamentals-timeseries 是公司财报端点，对指数符号不返回 EPS（指数无财报），一期美/港指数仅绑定 price_percentile；A 股指数估值分位不受影响（理杏仁指数接口直接提供 cvpos）
 - A 股金融股（银行/券商/保险）的 PE 分位 — 理杏仁对金融股使用独立端点（bank/security/insurance），一期沿用 non_financial 端点，金融股 pe_percentile 不出信号，留二期
 - PB / 股息率分位
 - 估值分位的本地基本面快照库（每日持久化积累）
@@ -38,6 +39,7 @@
 - 符号校验正则从 `^[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?$` 扩展为同时接受：
   - 指数前缀：`^` + 字母数字（`^GSPC`、`^IXIC`、`^DJI`、`^HSI`、`^N225`）
   - 期货后缀：字母 + `=F`（`GC=F`、`CL=F`、`SI=F`、`HG=F`）
+  - 注：符号校验只做格式合法性判断，与一期覆盖清单（§1.3）解耦——`^N225` 格式合法但不在一期清单，由 §2.3 的「表外 `^` 符号 warning」兜底
 - 构造请求 URL 时对 `^` 做 percent-encoding（`%5E`），统一在请求构造处处理
 - `SupportedMarkets` 不变（US/HK），指数/商品归入对应市场
 - 现有 chart 端点（`query1.finance.yahoo.com/v8/finance/chart`）原生支持这些符号，无需更换接口
@@ -63,8 +65,9 @@
   - 指数走 `cn/index/fundamental` 接口同字段
 - `core.Fundamental` 新增字段 `PEPercentile float64`（0–100；-1 表示不可用）
 
-### 2.6 Yahoo 历史 EPS 采集（美/港股估值分位的数据基础）
+### 2.5 Yahoo 历史 EPS 采集（美/港个股估值分位的数据基础）
 
+- **仅适用于个股**（含 `.HK`）；指数符号（`^` 前缀）无财报数据，不在本接口能力范围（见 §1.3 边界）
 - yahoo 采集器新增方法 `FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error)`：
   - 端点：`query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}`，请求 `type=trailingDilutedEPS`（TTM 摊薄 EPS，按季度时间戳返回），`period1/period2` 覆盖 lookback 窗口
   - 该端点对 `.HK` 符号同样有效（Yahoo 覆盖港股基本面）
@@ -72,7 +75,7 @@
 - 数据质量门槛：lookback 窗口内有效（EPS > 0）季度点 < 8 个时视为数据不足，估值分位不可用
 - 风险注记：该端点为非官方接口，存在反爬/格式变更风险；实现需带 UA 头与现有 yahoo 采集器一致的限流/重试，失败时按 §5 降级
 
-### 2.5 资产类型自动识别（`internal/app.DetectType`）
+### 2.6 资产类型自动识别（`internal/app.DetectType`）
 
 - `^` 前缀 / 指数代码表命中 → `index`
 - `=F` 后缀 → `commodity`
@@ -82,7 +85,7 @@
 
 ### 3.1 `price_percentile` 策略（新增 `internal/strategy/price_percentile/`）
 
-- 适用资产：全部（stock/index/etf/commodity/crypto）
+- 适用资产：全部（stock/index/etf/fund/commodity/crypto；fund 以 NAV 历史作为价格序列）
 - 数据需求：`PriceHistory = lookback_years × 252` 个交易日的日线收盘价，复用现有 `FetchHistory` + TTL 缓存，**不引入新存储**
 - 计算：当前价格在历史收盘价序列中的百分位 `P = rank(price) / N × 100`
 - 信号规则（参数可配，括号为默认值）：
@@ -100,10 +103,11 @@
 
 ### 3.2 `pe_percentile` 策略（新增 `internal/strategy/pe_percentile/`）
 
-- 适用资产：仅 stock + index（通过 `AssetTypes` 声明）
+- 适用资产：stock + index（通过 `AssetTypes` 声明）；其中美/港指数因无 EPS 数据源一期不出信号（§1.3），实际可用范围 = 全部股票 + A 股指数
 - 分位获取两条路径，策略本身不感知差异（由 AnalysisContext 提供 `PEPercentile`）：
   - **A 股**（非金融股票/指数）：理杏仁 cvpos 精确值，`Metadata` 标注 `method: "lixinger_cvpos"`
-  - **美/港股**：真实 PE 序列重建 — 取 §2.6 的历史 EPS(TTM) 季度序列，对 lookback 窗口内每个日线收盘价 `PE_t = price_t / EPS_TTM(t)`（EPS 取该日之前最近一个季度点，阶梯函数对齐），对当前 PE 在该序列中求分位；`Metadata` 标注 `method: "reconstructed"`
+  - **美/港个股**：真实 PE 序列重建 — 取 §2.5 的历史 EPS(TTM) 季度序列，对 lookback 窗口内每个日线收盘价 `PE_t = price_t / EPS_TTM(t)`（EPS 取该日之前最近一个季度点，阶梯函数对齐），对当前 PE 在该序列中求分位；`Metadata` 标注 `method: "reconstructed"`
+  - 重建逻辑实现为独立纯函数包 `internal/valuation`（`ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64, error)`），由 app 层 Context 组装阶段调用，策略只消费 `Fundamental.PEPercentile`
   - 注：早期方案「价格 ÷ 当前（常数）EPS」已被 spec 审查否决——常数缩放不改变分位，结果与价格分位逐点等价，无信息增量
 - 信号规则与阈值结构同 price_percentile（默认 low=20 / high=80，极值 10/90）
 - 当前 EPS ≤ 0（亏损）、EPS 历史点不足（< 8 个季度）或分位不可用时不出信号
@@ -135,15 +139,15 @@ price_percentile / pe_percentile 各自 Analyze
 Signal（含 percentile 元数据）→ router（min_confidence、冷却）→ Telegram / Email / Webhook
 ```
 
-- 商品（GC=F）走 yahoo，只绑定 price_percentile
-- 美/港股 pe_percentile：Context 组装阶段额外调用 `yahoo.FetchEPSHistory`（§2.6），用 EPS(TTM) 季度序列 + 日线收盘价重建真实 PE 序列后计算分位
+- 商品（GC=F）与美/港指数（^GSPC 等）走 yahoo，只绑定 price_percentile
+- 美/港个股 pe_percentile：Context 组装阶段额外调用 `yahoo.FetchEPSHistory`（§2.5），经 `internal/valuation.ReconstructPEPercentile` 重建真实 PE 序列后计算分位
 
 ## 5. 错误处理
 
 | 故障场景 | 行为 |
 |---|---|
 | 价格历史不足（< 1 年） | price_percentile 不出信号，debug 日志说明样本量 |
-| 理杏仁不可用 / 无 API key | A 股 pe_percentile **不出信号**（eastmoney 无 EPS 能力，不存在可用的近似路径），warning 日志提示原因 |
+| 理杏仁不可用 / 无 API key | A 股 pe_percentile **不出信号**（eastmoney 无 EPS 能力，不存在可用的近似路径）；warning 日志按标的去重（每标的仅首次告警，避免每轮 ticker 重复刷日志） |
 | Yahoo EPS 端点失败 / EPS 季度点 < 8 | 美/港股 pe_percentile 不出信号，不影响 price_percentile |
 | 当前 EPS ≤ 0 或缺失 | pe_percentile 跳过该标的，不影响 price_percentile |
 | Yahoo 对 `^`/`=F` 符号返回异常 | 与现有股票路径相同的错误传播；单标的失败不影响其他标的（沿用 `analyzeSymbolSafe` 隔离） |
@@ -156,11 +160,12 @@ Signal（含 percentile 元数据）→ router（min_confidence、冷却）→ T
   - yahoo `FetchEPSHistory` 走 httptest 模拟：正常季度序列、空数据、字段缺失、EPS 为负
   - eastmoney 指数 secid 映射测试（含 `000001.SH` 与 `000001.SZ` 歧义用例）
   - lixinger cvpos 走 httptest 模拟（沿用 `lixinger_httptest_test.go` 模式）
+- **valuation 包（`internal/valuation`）**：
+  - PE 序列重建：EPS 阶梯函数对齐正确性（季度边界前后取值）；重建分位与价格分位**不等价**的回归用例（EPS 变动期）；EPS 点不足 / 全负的错误返回
 - **策略层**：
   - 百分位计算边界：空序列、单点、全相同值、当前价为历史最高/最低
-  - PE 序列重建：EPS 阶梯函数对齐正确性（季度边界前后取值）；重建分位与价格分位**不等价**的回归用例（EPS 变动期）
   - 四档信号阈值与置信度映射
-  - 样本不足 / EPS 为负的跳过路径
+  - 样本不足 / EPS 为负 / PEPercentile 不可用的跳过路径
 - **装配层**：AssetTypes 过滤的 warning + 跳过行为（app 启动与 watchlist 增改两条路径）
 - **回测兼容**：两个新策略仅依赖 Strategy 接口，可被现有 backtest 引擎直接驱动；补一条回测冒烟用例
 
@@ -176,8 +181,9 @@ strategies:
     params: {lookback_years: 5, low: 20, high: 80, extreme_low: 10, extreme_high: 90}
 
 watchlist:
-  - {symbol: "^GSPC",     name: "标普500",   type: index,     strategies: [price_percentile, pe_percentile]}
+  - {symbol: "^GSPC",     name: "标普500",   type: index,     strategies: [price_percentile]}          # 美/港指数无 EPS 源，估值分位见 §1.3
   - {symbol: "000300.SH", name: "沪深300",   type: index,     strategies: [price_percentile, pe_percentile]}
+  - {symbol: "AAPL",      name: "苹果",      type: stock,     strategies: [price_percentile, pe_percentile]}  # 美股个股走 PE 序列重建
   - {symbol: "GC=F",      name: "COMEX黄金", type: commodity, strategies: [price_percentile]}
   - {symbol: "BTC-USDT",  name: "比特币",    type: crypto,    strategies: [price_percentile]}
 ```
