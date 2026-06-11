@@ -1,7 +1,7 @@
 # 指数/大宗商品采集 与 历史百分位监控策略 — 设计文档
 
 > 日期：2026-06-11
-> 状态：设计已确认（用户逐节批准）
+> 状态：设计已确认（用户逐节批准）；rev2 — 按 spec 审查结论将美/港股估值分位从「当前 EPS 近似」改为「Yahoo 历史 EPS(TTM) 重建真实 PE 序列」（用户确认），并落实其余审查建议
 > 前置分析：`docs/reviews/2026-06-11-asset-coverage-and-percentile-analysis.md`
 
 ## 1. 需求与范围
@@ -16,14 +16,16 @@
 | 决定点 | 结论 |
 |---|---|
 | 分位指标 | 价格分位 + 估值分位（PE），一期同时实现 |
-| 指数/商品覆盖 | 国际主要指数（^GSPC 等）+ A 股指数（000300.SH 等）+ 国际商品期货（GC=F 等） |
-| 估值分位数据源 | A 股（股票/指数）走理杏仁 cvpos 精确值；美/港股用「价格历史 ÷ 当前 EPS(TTM)」近似 |
+| 指数/商品覆盖 | 国际主要指数（一期清单：^GSPC、^IXIC、^DJI、^HSI）+ A 股指数（000300.SH 等）+ 国际商品期货（GC=F 等） |
+| 估值分位数据源 | A 股（股票/指数）走理杏仁 cvpos 精确值；美/港股接入 Yahoo fundamentals-timeseries 历史 EPS(TTM) 序列，重建真实 PE 历史后求分位（spec 审查否决了「当前 EPS 近似法」——其分位与价格分位逐点等价，无信息增量） |
 | 输出语义 | 标准买卖信号（buy/sell/strong_buy/strong_sell），完全复用 Signal → router → notifier 链路 |
 | 实现路线 | 方案三：扩展现有采集器 + 双策略 + 类型体系修补（不新建采集器） |
 
 ### 1.3 明确不做（一期边界）
 
 - 国内期货（上期所/大商所/郑商所）数据源接入 — 留二期
+- 美/港市场以外的国际指数（^N225、^GDAXI 等）— 留二期，避免市场归属语义（交易时段/市场过滤）含混
+- A 股金融股（银行/券商/保险）的 PE 分位 — 理杏仁对金融股使用独立端点（bank/security/insurance），一期沿用 non_financial 端点，金融股 pe_percentile 不出信号，留二期
 - PB / 股息率分位
 - 估值分位的本地基本面快照库（每日持久化积累）
 - `pe_band` 的分位化改造（保留其绝对阈值语义）
@@ -52,14 +54,23 @@
 ### 2.3 路由层（`internal/collector/selector.go`）
 
 - `SelectForSymbol` 增加分支：`^` 前缀或 `=F` 后缀 → yahoo；指数代码表命中的 `.SH/.SZ` → eastmoney
-- `MarketForSymbol` 同步更新
+- `MarketForSymbol`：为 `^` 前缀符号维护显式市场映射表（`^GSPC`/`^IXIC`/`^DJI` → US，`^HSI` → HK）；表外的 `^` 符号默认 US 并输出 warning（与一期指数清单边界一致）；`=F` 后缀 → US
 
 ### 2.4 lixinger 采集器（估值分位数据）
 
 - 新增方法 `FetchValuationPercentile(symbol string, lookbackYears int) (float64, error)`：
-  - 股票走 `cn/company/fundamental` 接口，请求 `pe_ttm.y{N}.cvpos`（lookback 映射 y3/y5/y10）
+  - 股票走现有 `cn/company/fundamental/non_financial` 接口（与 lixinger.go 现状一致），请求 `pe_ttm.y{N}.cvpos`（lookback 映射 y3/y5/y10）；金融股该端点不适用，返回不可用（一期边界，见 §1.3）
   - 指数走 `cn/index/fundamental` 接口同字段
 - `core.Fundamental` 新增字段 `PEPercentile float64`（0–100；-1 表示不可用）
+
+### 2.6 Yahoo 历史 EPS 采集（美/港股估值分位的数据基础）
+
+- yahoo 采集器新增方法 `FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error)`：
+  - 端点：`query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}`，请求 `type=trailingDilutedEPS`（TTM 摊薄 EPS，按季度时间戳返回），`period1/period2` 覆盖 lookback 窗口
+  - 该端点对 `.HK` 符号同样有效（Yahoo 覆盖港股基本面）
+- 新增类型 `core.EPSPoint{Date time.Time; EPS float64}`
+- 数据质量门槛：lookback 窗口内有效（EPS > 0）季度点 < 8 个时视为数据不足，估值分位不可用
+- 风险注记：该端点为非官方接口，存在反爬/格式变更风险；实现需带 UA 头与现有 yahoo 采集器一致的限流/重试，失败时按 §5 降级
 
 ### 2.5 资产类型自动识别（`internal/app.DetectType`）
 
@@ -91,17 +102,18 @@
 
 - 适用资产：仅 stock + index（通过 `AssetTypes` 声明）
 - 分位获取两条路径，策略本身不感知差异（由 AnalysisContext 提供 `PEPercentile`）：
-  - **A 股**（股票/指数）：理杏仁 cvpos 精确值
-  - **美/港股**：近似计算 — 价格历史 ÷ 当前 EPS(TTM) 重建 PE 序列后求分位；`Metadata` 标注 `method: "approximated"`，通知文案注明近似
+  - **A 股**（非金融股票/指数）：理杏仁 cvpos 精确值，`Metadata` 标注 `method: "lixinger_cvpos"`
+  - **美/港股**：真实 PE 序列重建 — 取 §2.6 的历史 EPS(TTM) 季度序列，对 lookback 窗口内每个日线收盘价 `PE_t = price_t / EPS_TTM(t)`（EPS 取该日之前最近一个季度点，阶梯函数对齐），对当前 PE 在该序列中求分位；`Metadata` 标注 `method: "reconstructed"`
+  - 注：早期方案「价格 ÷ 当前（常数）EPS」已被 spec 审查否决——常数缩放不改变分位，结果与价格分位逐点等价，无信息增量
 - 信号规则与阈值结构同 price_percentile（默认 low=20 / high=80，极值 10/90）
-- EPS ≤ 0（亏损）或分位不可用时不出信号
+- 当前 EPS ≤ 0（亏损）、EPS 历史点不足（< 8 个季度）或分位不可用时不出信号
 - 现有 `pe_band` 保留不动；配置示例中删除从未生效的 `lookback_years`/`threshold_percentile` 误导参数
 
 ### 3.3 类型体系修补
 
 - `core.AssetType` 增加 `AssetCrypto AssetType = "crypto"`
-- 策略引擎（`internal/strategy/engine.go`）启用 `AssetTypes` 过滤：watchlist 项的资产类型不在策略声明范围内时，**启动时输出 warning 日志并跳过该绑定**（不静默、不崩溃）
-- 既有策略补填 `AssetTypes`：ma_crossover 全资产；pe_band / dividend_yield 仅 stock
+- 启用 `AssetTypes` 过滤，**校验落点在 app 装配层**（engine 不感知 watchlist）：App 启动及 watchlist 增改时，将每个绑定与策略 `RequiredData().AssetTypes` 交叉校验，不匹配则输出 warning 日志并跳过该绑定（不静默、不崩溃）；engine 仅提供 `RequiredData` 查询，不改其分析职责
+- 既有策略补填 `AssetTypes`：ma_crossover 全资产（含 fund/etf）；pe_band / dividend_yield 仅 stock
 
 ## 4. 数据流
 
@@ -124,29 +136,32 @@ Signal（含 percentile 元数据）→ router（min_confidence、冷却）→ T
 ```
 
 - 商品（GC=F）走 yahoo，只绑定 price_percentile
-- 美股 pe_percentile 在 Context 组装阶段以价格序列 ÷ 当前 EPS 近似重建 PE 序列
+- 美/港股 pe_percentile：Context 组装阶段额外调用 `yahoo.FetchEPSHistory`（§2.6），用 EPS(TTM) 季度序列 + 日线收盘价重建真实 PE 序列后计算分位
 
 ## 5. 错误处理
 
 | 故障场景 | 行为 |
 |---|---|
-| 历史数据不足（< 1 年） | 不出信号，debug 日志说明样本量 |
-| 理杏仁不可用 / 无 API key | pe_percentile 对 A 股降级为近似计算路径，`method` 标注降级 |
-| EPS ≤ 0 或缺失 | pe_percentile 跳过该标的，不影响 price_percentile |
+| 价格历史不足（< 1 年） | price_percentile 不出信号，debug 日志说明样本量 |
+| 理杏仁不可用 / 无 API key | A 股 pe_percentile **不出信号**（eastmoney 无 EPS 能力，不存在可用的近似路径），warning 日志提示原因 |
+| Yahoo EPS 端点失败 / EPS 季度点 < 8 | 美/港股 pe_percentile 不出信号，不影响 price_percentile |
+| 当前 EPS ≤ 0 或缺失 | pe_percentile 跳过该标的，不影响 price_percentile |
 | Yahoo 对 `^`/`=F` 符号返回异常 | 与现有股票路径相同的错误传播；单标的失败不影响其他标的（沿用 `analyzeSymbolSafe` 隔离） |
-| 策略绑定到不支持的资产类型 | 启动时 warning + 跳过该绑定 |
+| 策略绑定到不支持的资产类型 | 启动/增改 watchlist 时 warning + 跳过该绑定（app 装配层校验） |
 
 ## 6. 测试策略
 
 - **采集层**：
   - yahoo 符号校验表驱动测试（`^GSPC` / `GC=F` / 非法符号）；URL percent-encoding 断言
+  - yahoo `FetchEPSHistory` 走 httptest 模拟：正常季度序列、空数据、字段缺失、EPS 为负
   - eastmoney 指数 secid 映射测试（含 `000001.SH` 与 `000001.SZ` 歧义用例）
   - lixinger cvpos 走 httptest 模拟（沿用 `lixinger_httptest_test.go` 模式）
 - **策略层**：
   - 百分位计算边界：空序列、单点、全相同值、当前价为历史最高/最低
+  - PE 序列重建：EPS 阶梯函数对齐正确性（季度边界前后取值）；重建分位与价格分位**不等价**的回归用例（EPS 变动期）
   - 四档信号阈值与置信度映射
   - 样本不足 / EPS 为负的跳过路径
-- **引擎层**：AssetTypes 过滤的 warning + 跳过行为
+- **装配层**：AssetTypes 过滤的 warning + 跳过行为（app 启动与 watchlist 增改两条路径）
 - **回测兼容**：两个新策略仅依赖 Strategy 接口，可被现有 backtest 引擎直接驱动；补一条回测冒烟用例
 
 ## 7. 配置示例
