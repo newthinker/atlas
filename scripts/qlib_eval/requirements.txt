@@ -1,0 +1,12 @@
+# qlib_eval 评估层依赖
+#
+# 测试期依赖（pytest 运行所需，零 qlib 依赖）：
+pandas>=1.5
+pytest>=7.0
+
+# 运行时依赖（仅真实评估运行需要，测试不依赖）：
+#   pyqlib —— 价格数据源，QlibPriceSource 内惰性导入。两种安装方式任选其一：
+#     1) pip install pyqlib
+#     2) pip install -e /Users/zuowei/workspace/python/qlib   # 本地副本（开发推荐）
+#
+# 注意：import qlib 禁止出现在任何模块顶层，pytest 全程不安装 qlib。
