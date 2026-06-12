@@ -62,24 +62,26 @@ router:
   cooldown_hours: 4      # 0 = 禁用冷却；仅约束不带分位元数据的策略信号
   percentile_step: 5     # 全局默认步长；策略 params.percentile_step 优先（0 = 禁用）
 
-# Notification channels
+# Notification channels.
+# 仅 enabled: true 的通知器才会接线；必填字段缺失时启动 warn 并跳过该通知器
+# （不阻断服务）。若所有 enabled 的通知器都注册失败，启动额外 warn 告警信号不会外发。
 notifiers:
   telegram:
     enabled: true
-    bot_token: "${TELEGRAM_BOT_TOKEN}"
-    chat_id: "${TELEGRAM_CHAT_ID}"
+    bot_token: "${TELEGRAM_BOT_TOKEN}"   # 必填
+    chat_id: "${TELEGRAM_CHAT_ID}"       # 必填（telegram 必填: bot_token + chat_id，缺失则 warn 并跳过）
   email:
     enabled: false
-    host: "smtp.gmail.com"
+    host: "smtp.gmail.com"               # 必填
     port: 587
     username: "${EMAIL_USERNAME}"
     password: "${EMAIL_PASSWORD}"
-    from: "ATLAS <atlas@example.com>"
+    from: "ATLAS <atlas@example.com>"     # 必填
     to:
-      - "user@example.com"
+      - "user@example.com"               # 必填（至少 1 个收件人；email 必填: host + from + to，缺失则 warn 并跳过）
   webhook:
     enabled: false
-    url: "https://example.com/atlas-webhook"
+    url: "https://example.com/atlas-webhook"  # 必填（webhook 必填: url，缺失则 warn 并跳过）
     headers:
       Authorization: "Bearer ${WEBHOOK_TOKEN}"
 
