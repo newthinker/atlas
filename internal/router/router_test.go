@@ -322,6 +322,166 @@ func TestRouter_PersistsSignals(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// TASK-001 percentile step gate tests
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] 买入序列 49→47→44→46→49      → TestRoute_PercentileStep_BuySide
+// functional[1] 卖出侧对称 81→83→86          → TestRoute_PercentileStep_SellSideSymmetric
+// functional[2] key 独立 buy/sell/strategy/strong → TestRoute_PercentileStep_KeysIndependent
+// functional[3] 策略级步长三态                → TestRoute_PercentileStep_PerStrategyOverride
+// functional[4] 静态过滤前置不写门控          → TestRoute_PercentileStep_StaticFilterBeforeGate
+// boundary[0]   step=0 走冷却                 → TestRoute_StepDisabled_UsesCooldown
+// boundary[1]   坏元数据回退冷却不 panic      → TestRoute_PercentileStep_BadMetadataFallsBackToCooldown
+// ---------------------------------------------------------------------------
+
+func pctSignal(symbol, strat string, action core.Action, pct float64) core.Signal {
+	return core.Signal{
+		Symbol: symbol, Action: action, Confidence: 0.9, Strategy: strat,
+		Metadata: map[string]any{"percentile": pct},
+	}
+}
+
+func newStepRouter(step float64) *Router {
+	cfg := DefaultConfig()
+	cfg.PercentileStep = step
+	cfg.CooldownDuration = 1 * time.Hour // 显式非零：验证分位路径确实绕过冷却
+	return New(cfg, nil, nil)            // New 内部对 nil logger 兜底
+}
+
+func TestRoute_PercentileStep_BuySide(t *testing.T) {
+	r := newStepRouter(5)
+	cases := []struct {
+		pct  float64
+		want bool
+	}{
+		{49, true},  // 首次：放行并记录 49
+		{47, false}, // |47-49|=2 < 5：抑制
+		{44, true},  // |44-49|=5 ≥ 5：放行，记录 44
+		{46, false}, // |46-44|=2 < 5：抑制
+		{49, true},  // 恢复重算：|49-44|=5 ≥ 5：放行（防死锁规则）
+	}
+	for i, c := range cases {
+		routed, err := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, c.pct))
+		if err != nil || routed != c.want {
+			t.Fatalf("step %d (pct=%v): routed=%v err=%v, want %v", i, c.pct, routed, err, c.want)
+		}
+	}
+}
+
+func TestRoute_PercentileStep_SellSideSymmetric(t *testing.T) {
+	r := newStepRouter(5)
+	for i, c := range []struct {
+		pct  float64
+		want bool
+	}{{81, true}, {83, false}, {86, true}} {
+		routed, _ := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionSell, c.pct))
+		if routed != c.want {
+			t.Fatalf("sell step %d (pct=%v): routed=%v, want %v", i, c.pct, routed, c.want)
+		}
+	}
+}
+
+func TestRoute_PercentileStep_KeysIndependent(t *testing.T) {
+	r := newStepRouter(5)
+	// buy 侧已记录 49
+	r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49))
+	// sell 侧独立：首个 sell 信号放行（不受 buy 侧记录影响）
+	if routed, _ := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionSell, 81)); !routed {
+		t.Error("sell side must be independent of buy side")
+	}
+	// 不同策略独立：pe_percentile 首个信号放行（注意元数据键不同）
+	sig := pctSignal("600519.SH", "pe_percentile", core.ActionBuy, 50)
+	sig.Metadata = map[string]any{"pe_percentile": 50.0}
+	if routed, _ := r.Route(sig); !routed {
+		t.Error("different strategy must have independent gate key")
+	}
+	// strong_buy 与 buy 同侧共享 key：strong_buy 47 应被 buy 侧的 49 记录抑制
+	if routed, _ := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionStrongBuy, 47)); routed {
+		t.Error("strong_buy shares the buy-side key, |47-49|<5 must suppress")
+	}
+}
+
+func TestRoute_PercentileStep_BadMetadataFallsBackToCooldown(t *testing.T) {
+	r := newStepRouter(5)
+	sig := pctSignal("600519.SH", "price_percentile", core.ActionBuy, 0)
+	sig.Metadata = map[string]any{"percentile": "not-a-float"}
+	if routed, _ := r.Route(sig); !routed {
+		t.Fatal("first signal via cooldown path should route")
+	}
+	// 第二条同标的（仍坏元数据）→ 冷却抑制（1h 内）
+	if routed, _ := r.Route(sig); routed {
+		t.Error("second signal within cooldown must be suppressed (fell back to cooldown path)")
+	}
+}
+
+func TestRoute_PercentileStep_PerStrategyOverride(t *testing.T) {
+	r := newStepRouter(5) // 全局默认 5
+	// 信号自带 percentile_step: 3（策略级配置经元数据传递）→ 按 3 门控
+	mk := func(pct float64) core.Signal {
+		sig := pctSignal("600519.SH", "pe_percentile", core.ActionBuy, pct)
+		sig.Metadata = map[string]any{"pe_percentile": pct, "percentile_step": 3.0}
+		return sig
+	}
+	for i, c := range []struct {
+		pct  float64
+		want bool
+	}{{49, true}, {47, false}, {46, true}} { // |46-49|=3 ≥ 3 放行（全局 5 则会抑制）
+		if routed, _ := r.Route(mk(c.pct)); routed != c.want {
+			t.Fatalf("override step %d (pct=%v): routed=%v, want %v", i, c.pct, routed, c.want)
+		}
+	}
+	// 全局 step=0 + 信号自带 step=3 → 仍按 3 门控（按策略启用场景，设计 rev4 §4）
+	r0 := newStepRouter(0)
+	if routed, _ := r0.Route(mk(49)); !routed {
+		t.Error("strategy-level step must enable the gate even when global step is 0")
+	}
+	if routed, _ := r0.Route(mk(48)); routed { // |48-49|=1 < 3：被步进抑制而非进入冷却路径
+		t.Error("gate must be active with strategy-level step despite global 0")
+	}
+
+	// step 元数据类型异常（string）→ 回退全局 5
+	bad := pctSignal("0700.HK", "price_percentile", core.ActionBuy, 49)
+	bad.Metadata["percentile_step"] = "3"
+	if routed, _ := r.Route(bad); !routed {
+		t.Fatal("first should route")
+	}
+	bad2 := pctSignal("0700.HK", "price_percentile", core.ActionBuy, 45) // |45-49|=4 < 5
+	bad2.Metadata["percentile_step"] = "3"
+	if routed, _ := r.Route(bad2); routed {
+		t.Error("invalid step metadata must fall back to global step 5")
+	}
+}
+
+// TestRoute_PercentileStep_StaticFilterBeforeGate verifies that the static
+// confidence/action filters run BEFORE the step gate: a sub-threshold
+// percentile signal is dropped (routed=false) without recording any gate
+// state, so a later qualifying signal at the same percentile routes as "first".
+func TestRoute_PercentileStep_StaticFilterBeforeGate(t *testing.T) {
+	r := newStepRouter(5)
+	low := pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49)
+	low.Confidence = 0.1 // 低于 DefaultConfig.MinConfidence 0.5
+	if routed, _ := r.Route(low); routed {
+		t.Fatal("low-confidence percentile signal must be filtered by static filters")
+	}
+	// 同分位的合格信号按「首次」放行：证明上面的信号未写入步进门控状态
+	if routed, _ := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49)); !routed {
+		t.Error("statically-filtered signal must not record gate state; first valid signal should route")
+	}
+}
+
+func TestRoute_StepDisabled_UsesCooldown(t *testing.T) {
+	r := newStepRouter(0) // step=0 禁用：带分位元数据也走冷却
+	sig := pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49)
+	if routed, _ := r.Route(sig); !routed {
+		t.Fatal("first should route")
+	}
+	sig2 := pctSignal("600519.SH", "price_percentile", core.ActionBuy, 30) // 深跌也被冷却抑制
+	if routed, _ := r.Route(sig2); routed {
+		t.Error("step disabled: cooldown must suppress regardless of percentile delta")
+	}
+}
+
 func TestRouter_CleanupExpiredCooldowns(t *testing.T) {
 	cfg := Config{
 		CooldownDuration: 100 * time.Millisecond,

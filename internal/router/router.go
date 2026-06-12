@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 
@@ -16,6 +17,12 @@ type Config struct {
 	MinConfidence    float64       `mapstructure:"min_confidence"`
 	CooldownDuration time.Duration `mapstructure:"cooldown_duration"`
 	EnabledActions   []core.Action `mapstructure:"enabled_actions"`
+	// PercentileStep is the global fallback step for percentile re-alert gating
+	// (|current percentile - last notified| >= step routes again). 0 = disabled,
+	// in which case percentile signals fall back to the cooldown path. A
+	// per-signal Metadata["percentile_step"] (strategy-level config) overrides
+	// this value when present and > 0.
+	PercentileStep float64 `mapstructure:"percentile_step"`
 }
 
 // DefaultConfig returns default router configuration
@@ -33,6 +40,7 @@ type Router struct {
 	registry    *notifier.Registry
 	logger      *zap.Logger
 	cooldowns   map[string]time.Time // symbol -> last signal time
+	pctGates    map[string]float64   // symbol|strategy|side -> last notified percentile
 	signalStore signal.Store
 	mu          sync.RWMutex
 }
@@ -52,6 +60,7 @@ func New(cfg Config, registry *notifier.Registry, logger *zap.Logger) *Router {
 		registry:  registry,
 		logger:    logger,
 		cooldowns: make(map[string]time.Time),
+		pctGates:  make(map[string]float64),
 	}
 }
 
@@ -60,8 +69,9 @@ func New(cfg Config, registry *notifier.Registry, logger *zap.Logger) *Router {
 // as the per-symbol cooldown (false), so callers can avoid acting on a
 // suppressed signal (e.g. submitting it for execution).
 func (r *Router) Route(signal core.Signal) (routed bool, err error) {
-	// Apply filters
-	if !r.passesFilters(signal) {
+	// Static filters (confidence + action) are a common precondition for both
+	// the percentile-step gate and the cooldown path.
+	if !r.passesStaticFilters(signal) {
 		r.logger.Debug("signal filtered out",
 			zap.String("symbol", signal.Symbol),
 			zap.String("action", string(signal.Action)),
@@ -70,17 +80,32 @@ func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 		return false, nil
 	}
 
+	// Dispatch: percentile signals (percentile metadata present AND an effective
+	// step > 0) go through the step gate, which fully replaces the cooldown —
+	// it neither reads nor stamps the per-symbol cooldown. All other signals
+	// take the original cooldown path unchanged.
+	if pct, ok := r.percentileOf(signal); ok && r.effectiveStep(signal) > 0 {
+		if !r.passPercentileGate(signal, pct, r.effectiveStep(signal)) {
+			return false, nil
+		}
+	} else {
+		if !r.passesCooldown(signal) {
+			return false, nil
+		}
+		// Stamp the cooldown only on the cooldown path; the percentile branch
+		// must never touch it (otherwise it would suppress other strategies'
+		// signals for the same symbol).
+		r.mu.Lock()
+		r.cooldowns[signal.Symbol] = time.Now()
+		r.mu.Unlock()
+	}
+
 	// Persist signal if store is configured
 	if r.signalStore != nil {
 		if err := r.signalStore.Save(context.Background(), signal); err != nil {
 			r.logger.Error("failed to persist signal", zap.Error(err))
 		}
 	}
-
-	// Update cooldown
-	r.mu.Lock()
-	r.cooldowns[signal.Symbol] = time.Now()
-	r.mu.Unlock()
 
 	// Send to all notifiers (nil registry is allowed)
 	if r.registry == nil {
@@ -147,8 +172,16 @@ func (r *Router) RouteBatch(signals []core.Signal) error {
 	return nil
 }
 
-// passesFilters checks if a signal passes all configured filters
+// passesFilters checks if a signal passes the static filters and the cooldown.
+// Retained for RouteBatch (Task 2 splits the batch dispatch); Route() now uses
+// passesStaticFilters + the percentile/cooldown dispatch directly.
 func (r *Router) passesFilters(signal core.Signal) bool {
+	return r.passesStaticFilters(signal) && r.passesCooldown(signal)
+}
+
+// passesStaticFilters checks the confidence threshold and action whitelist —
+// the common precondition that applies regardless of percentile/cooldown path.
+func (r *Router) passesStaticFilters(signal core.Signal) bool {
 	// Check confidence threshold
 	if signal.Confidence < r.cfg.MinConfidence {
 		return false
@@ -168,7 +201,13 @@ func (r *Router) passesFilters(signal core.Signal) bool {
 		}
 	}
 
-	// Check cooldown
+	return true
+}
+
+// passesCooldown reports whether the per-symbol cooldown allows this signal.
+// CooldownDuration == 0 makes time.Since(last) < 0 always false → always passes
+// (cooldown disabled).
+func (r *Router) passesCooldown(signal core.Signal) bool {
 	r.mu.RLock()
 	lastSignal, exists := r.cooldowns[signal.Symbol]
 	r.mu.RUnlock()
@@ -177,6 +216,67 @@ func (r *Router) passesFilters(signal core.Signal) bool {
 		return false
 	}
 
+	return true
+}
+
+// percentileOf extracts the historical percentile from signal metadata, trying
+// the price then PE keys in order. Asserting float64 is safe: signals travel
+// in-memory only (strategy → app → router); signalStore is write-only. Revisit
+// if a replay-from-store path is ever added. A present-but-wrong-typed value is
+// logged at debug and treated as absent (signal then takes the cooldown path).
+func (r *Router) percentileOf(sig core.Signal) (float64, bool) {
+	for _, key := range []string{"percentile", "pe_percentile"} {
+		v, ok := sig.Metadata[key]
+		if !ok {
+			continue
+		}
+		if f, ok := v.(float64); ok {
+			return f, true
+		}
+		r.logger.Debug("percentile metadata is not float64; falling back to cooldown path",
+			zap.String("symbol", sig.Symbol),
+			zap.String("strategy", sig.Strategy),
+			zap.String("key", key),
+			zap.Any("value", v),
+		)
+	}
+	return 0, false
+}
+
+// effectiveStep returns the gate step for a signal: the strategy-carried
+// Metadata["percentile_step"] wins when present and positive; otherwise the
+// global router config value. <= 0 means the gate is disabled for this signal.
+func (r *Router) effectiveStep(sig core.Signal) float64 {
+	if v, ok := sig.Metadata["percentile_step"]; ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			return f
+		}
+	}
+	return r.cfg.PercentileStep
+}
+
+// sideOf maps an action onto the gate side: buy/strong_buy share the buy side,
+// sell/strong_sell share the sell side.
+func sideOf(action core.Action) string {
+	if action == core.ActionBuy || action == core.ActionStrongBuy {
+		return "buy"
+	}
+	return "sell"
+}
+
+// passPercentileGate reports whether the signal clears the step gate and records
+// its percentile when it does. Check and update happen in one critical section
+// (no check-then-act race). First sighting of a key always passes.
+func (r *Router) passPercentileGate(sig core.Signal, pct, step float64) bool {
+	key := sig.Symbol + "|" + sig.Strategy + "|" + sideOf(sig.Action)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	last, exists := r.pctGates[key]
+	if exists && math.Abs(pct-last) < step {
+		return false
+	}
+	r.pctGates[key] = pct
 	return true
 }
 
