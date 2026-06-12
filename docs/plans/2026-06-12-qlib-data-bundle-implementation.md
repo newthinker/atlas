@@ -116,6 +116,9 @@ func TestExportOHLCV_BenchmarkFailureIsFatal(t *testing.T) {
 
 func TestExportOHLCV_EmptySymbolsAndWatchlistIsError(t *testing.T) {
 	// C1-1 防线：watchlist 为空且未显式 --symbols → 报错（绝不退化为只导基准）
+	// 归层澄清：该语义属 CLI 层符号集解析——defaultOHLCVSymbols 落地为可返回
+	// error 的 resolver（如 resolveOHLCVSymbols(flag, watchlist) ([]string, error)），
+	// 本测试针对 resolver；与 Task 2 的 BenchmarkMissing CLI 测试同层
 }
 
 func TestDefaultOHLCVSymbols(t *testing.T) {
