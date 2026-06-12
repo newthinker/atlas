@@ -49,7 +49,9 @@ func SelectForSymbol(reg *Registry, symbol string) Collector {
 	upper := strings.ToUpper(symbol)
 
 	switch {
-	case isAShareSymbol(upper):
+	case isAShareSymbol(upper), IsAShareIndex(symbol):
+		// 表成员判定覆盖 .CSI 后缀的中证跨市场指数（如 930713.CSI），
+		// 它们不带 .SH/.SZ 后缀但同样由 eastmoney 提供行情
 		if c, ok := reg.Get("eastmoney"); ok {
 			return c
 		}
@@ -79,7 +81,7 @@ func SelectForSymbol(reg *Registry, symbol string) Collector {
 func MarketForSymbol(symbol string) core.Market {
 	upper := strings.ToUpper(symbol)
 	switch {
-	case isAShareSymbol(upper):
+	case isAShareSymbol(upper), IsAShareIndex(symbol):
 		return core.MarketCNA
 	case isIndexSymbol(upper):
 		if m, ok := KnownIndexMarket(symbol); ok {

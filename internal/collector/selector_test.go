@@ -168,3 +168,17 @@ func TestMarketForSymbol(t *testing.T) {
 		}
 	}
 }
+
+func TestCSIIndexRouting(t *testing.T) {
+	// .CSI 后缀的中证跨市场指数靠 AShareIndexSecIDs 表成员判定路由，
+	// 不依赖 .SH/.SZ 后缀（如 930713.CSI 中证人工智能主题）。
+	reg := newRegistryWith("yahoo", "eastmoney", "crypto")
+	for _, sym := range []string{"930713.CSI", "930604.CSI", "000922.SH"} {
+		if c := SelectForSymbol(reg, sym); c == nil || c.Name() != "eastmoney" {
+			t.Errorf("SelectForSymbol(%q) -> %v, want eastmoney", sym, c)
+		}
+		if m := MarketForSymbol(sym); m != core.MarketCNA {
+			t.Errorf("MarketForSymbol(%q) = %v, want CN_A", sym, m)
+		}
+	}
+}

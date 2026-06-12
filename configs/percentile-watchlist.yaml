@@ -52,14 +52,15 @@ watchlist:
   - {symbol: "399001.SZ", name: "深证成指",   type: "指数", strategies: [price_percentile, pe_percentile]}
   - {symbol: "399006.SZ", name: "创业板指",   type: "指数", strategies: [price_percentile, pe_percentile]}
 
-  # ---------- A 股重点行业指数 ----------
-  - {symbol: "399986.SZ", name: "中证银行",     type: "指数", strategies: [price_percentile]}  # 金融类指数 PE 分位一期不可用
-  - {symbol: "399975.SZ", name: "证券公司",     type: "指数", strategies: [price_percentile]}  # 同上
-  - {symbol: "399997.SZ", name: "中证白酒",     type: "指数", strategies: [price_percentile, pe_percentile]}
-  - {symbol: "000933.SH", name: "中证医药卫生", type: "指数", strategies: [price_percentile, pe_percentile]}
-  - {symbol: "000932.SH", name: "中证主要消费", type: "指数", strategies: [price_percentile, pe_percentile]}
-  - {symbol: "399967.SZ", name: "中证军工",     type: "指数", strategies: [price_percentile, pe_percentile]}
-  - {symbol: "399808.SZ", name: "中证新能源",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  # ---------- A 股重点行业/主题指数 ----------
+  - {symbol: "399986.SZ",  name: "中证银行",       type: "指数", strategies: [price_percentile]}  # 金融类指数 PE 分位一期不可用
+  - {symbol: "399975.SZ",  name: "证券公司",       type: "指数", strategies: [price_percentile]}  # 同上
+  - {symbol: "399997.SZ",  name: "中证白酒",       type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000933.SH",  name: "中证医药卫生",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000932.SH",  name: "中证主要消费",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000922.SH",  name: "中证红利",       type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "930713.CSI", name: "中证人工智能",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "930604.CSI", name: "中国互联网30",   type: "指数", strategies: [price_percentile]}  # 成分为海外上市中概股，理杏仁估值覆盖不确定，先仅价格分位
 
   # ---------- A 股个股 ----------
   - {symbol: "600036.SH", name: "招商银行", type: "股票", strategies: [price_percentile]}  # 金融股 PE 分位一期不可用

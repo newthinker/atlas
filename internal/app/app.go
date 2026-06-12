@@ -610,7 +610,8 @@ func (a *App) AddToWatchlistWithDetails(symbol, name, market, assetType string, 
 func DetectMarket(symbol string) string {
 	upperSymbol := strings.ToUpper(symbol)
 	switch {
-	case strings.HasSuffix(upperSymbol, ".SH") || strings.HasSuffix(upperSymbol, ".SZ"):
+	case strings.HasSuffix(upperSymbol, ".SH") || strings.HasSuffix(upperSymbol, ".SZ"),
+		collector.IsAShareIndex(symbol): // .CSI 后缀的中证跨市场指数
 		return MarketAShare
 	case strings.HasSuffix(upperSymbol, ".HK"):
 		return MarketHShare
