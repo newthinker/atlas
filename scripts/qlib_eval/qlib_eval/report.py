@@ -16,8 +16,10 @@ def read_signals(path: str) -> pd.DataFrame:
     - 每行列数必须为 7，date 解析为 Timestamp、confidence/price 解析为 float，
       metadata **保留原串**（不反序列化）；
     - 缺列 / 坏行 → ValueError，消息含**行号**（含表头的 1-based 物理行号）。
+
+    encoding 用 ``utf-8-sig`` 以容忍 Excel 导出的 UTF-8 BOM（否则首列名被 BOM 污染）。
     """
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         try:
             header = next(reader)
@@ -94,6 +96,11 @@ def render_report(agg: pd.DataFrame, stats: dict, meta: dict) -> str:
         f"- 丢弃（无入场 bar / 顺延过久 / 入场早于基准）: {stats.get('dropped', 0)}",
         f"- 数据缺口（价格/基准缺失）: {stats.get('data_gaps', 0)}",
     ]
+    if stats.get("benchmark_error"):
+        parts.append(
+            f"- ⚠ 基准 {benchmark} 数据缺失，全部超额收益无法计算: "
+            f"{stats['benchmark_error']}"
+        )
     non_ashare = stats.get("non_ashare") or []
     parts.append(f"- 非 A 股符号（Phase 1 跳过，未评估）: {', '.join(non_ashare) or '无'}")
     na_counts = stats.get("na_counts") or {}

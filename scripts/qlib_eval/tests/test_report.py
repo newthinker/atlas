@@ -159,3 +159,66 @@ def test_main_exits_when_qlib_dir_missing(tmp_path, capsys):
 def test_import_evaluate_no_qlib():
     import evaluate  # noqa: F401
     assert "qlib" not in sys.modules
+
+
+# ---- review_fix (QA W1/W2/S7) ----
+
+def test_main_empty_signals_writes_report_exit0(tmp_path):
+    # QA W1：仅表头的空信号文件曾在 signals['date'].min().strftime 触发 NaTType 崩溃。
+    # 修复后：入口短路写「无信号」报告并 exit 0，且不构造 QlibPriceSource（不触 qlib）。
+    header_only = "symbol,date,strategy,action,confidence,price,metadata\n"
+    sig_path = _write(tmp_path, header_only)
+    qlib_dir = tmp_path / "qlib"
+    qlib_dir.mkdir()  # 存在的目录 → 通过 check_qlib_dir
+    out_dir = tmp_path / "out"
+    rc = evaluate.main(
+        ["--signals", sig_path, "--qlib-dir", str(qlib_dir), "--out", str(out_dir)]
+    )
+    assert rc == 0
+    reports = list(out_dir.glob("signal-eval-*.md"))
+    assert len(reports) == 1
+    assert "信号总数: 0" in reports[0].read_text()
+    assert "qlib" not in sys.modules
+
+
+class _BenchFailSource:
+    def history(self, symbol):  # pragma: no cover - 基准先失败，不会走到
+        raise AssertionError("history should not be called when benchmark fails")
+
+    def benchmark(self):
+        raise FileNotFoundError("SH000300 not found in qlib data")
+
+
+def test_collect_outcomes_benchmark_failure_is_graceful():
+    # QA W2：source.benchmark() 抛错不得整跑崩溃——降级为空 outcomes + benchmark_error 提示。
+    signals = pd.DataFrame(
+        [
+            {"symbol": "600519.SH", "date": pd.Timestamp("2024-01-01"),
+             "strategy": "ma", "action": "buy", "confidence": 0.9,
+             "price": 10.0, "metadata": "{}"},
+        ]
+    )
+    outcomes, stats = evaluate.collect_outcomes(signals, _BenchFailSource(), max_defer=5)
+    assert outcomes == []
+    assert "benchmark_error" in stats
+    assert "SH000300" in stats["benchmark_error"]
+
+
+def test_render_report_surfaces_benchmark_error():
+    md = render_report(
+        aggregate([]),
+        {"dropped": 0, "data_gaps": 0, "non_ashare": [], "na_counts": {},
+         "benchmark_error": "SH000300 not found in qlib data"},
+        {"generated_at": "2024-06-12", "n_signals": 3, "benchmark": "SH000300",
+         "qlib_dir": "~"},
+    )
+    assert "基准" in md and "SH000300 not found in qlib data" in md
+
+
+def test_read_signals_tolerates_utf8_bom(tmp_path):
+    # QA S7：Excel 导出的 CSV 带 UTF-8 BOM，read_signals 需用 utf-8-sig 容忍。
+    p = tmp_path / "bom.csv"
+    p.write_bytes(("﻿" + VALID_CSV).encode("utf-8"))
+    df = read_signals(str(p))
+    assert len(df) == 2
+    assert list(df.columns)[0] == "symbol"  # BOM 不得污染首列名

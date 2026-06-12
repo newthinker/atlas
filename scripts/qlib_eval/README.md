@@ -82,6 +82,9 @@ scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q
   `-(ret - bench_ret)`（信号后跑输基准记为正）。
 - **基准对齐**：个股停牌时取 bench 中 ≤ 目标日期的最近前值（若入场日早于基准首行 →
   计入数据缺口，不静默取末行）。
+- **基准收益口径**：基准为**收盘到收盘**（entry 日 close → exit 日 close）；而个股为
+  **开盘到收盘**（entry 日 open → exit 日 close）。两者在入场日存在日内偏置（个股多算了
+  entry 日 open→close 一段，基准未算），属已知近似——超额绝对值不宜过度解读，重在横向对比。
 - **置信度分桶**：`≥0.0 / ≥0.6 / ≥0.8` 累积阈值（非互斥区间）；一条信号计入所有
   `confidence ≥ 阈值` 的桶。
 - **胜率（win_rate）**：超额收益 `> 0` 的样本占比。因 sell 的超额已取规避向，

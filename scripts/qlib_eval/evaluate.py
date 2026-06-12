@@ -45,15 +45,25 @@ def get_data_hint(qlib_dir: str) -> str:
     )
 
 
+def _empty_stats() -> dict:
+    """零样本时的 stats 骨架（空信号短路、基准降级共用，避免两处 drift）。"""
+    return {"dropped": 0, "data_gaps": 0, "non_ashare": [], "na_counts": {}}
+
+
 def collect_outcomes(signals: pd.DataFrame, source, max_defer: int = 5):
     """对每个信号求 outcome。返回 ``(outcomes, stats)``。
 
     - 非 A 股符号（``to_qlib_instrument`` raise ValueError）不中断评估，收集进
       ``stats["non_ashare"]``；
     - ``evaluate_signal`` 返回 None（无入场 / 入场早于基准）计入 ``stats["dropped"]``；
-    - ``stats["data_gaps"]`` 计 source 取价失败的符号数。
+    - ``stats["data_gaps"]`` 计 source 取价失败的符号数；
+    - 基准取数失败（与逐 symbol 降级对称）不整跑崩溃，降级为空 outcomes +
+      ``stats["benchmark_error"]`` 明确提示（无基准则全部超额无法计算）。
     """
-    bench = source.benchmark()
+    try:
+        bench = source.benchmark()
+    except Exception as e:  # noqa: BLE001 — 基准缺失整体降级，不抛栈给用户
+        return [], {**_empty_stats(), "benchmark_error": str(e)}
     outcomes = []
     dropped = 0
     data_gaps = 0
@@ -107,6 +117,23 @@ def _parse_args(argv):
     return p.parse_args(argv)
 
 
+def _meta(args, n_signals: int) -> dict:
+    return {
+        "generated_at": _dt.date.today().isoformat(),
+        "n_signals": n_signals,
+        "benchmark": "SH000300",
+        "qlib_dir": args.qlib_dir,
+    }
+
+
+def _write_report(out_dir: str, report: str) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"signal-eval-{_dt.date.today():%Y%m%d}.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    return out_path
+
+
 def main(argv=None) -> int:
     args = _parse_args(argv)
 
@@ -115,6 +142,15 @@ def main(argv=None) -> int:
         return 1
 
     signals = read_signals(args.signals)
+
+    # 空信号文件（仅表头）：入口短路写「无信号」报告并正常退出——避免对空 date 列
+    # 取 min/max 得到 NaT、再 strftime 触发 NaTType 崩溃（QA W1，实测复现）。
+    if signals.empty:
+        out_path = _write_report(
+            args.out, render_report(aggregate([]), _empty_stats(), _meta(args, 0))
+        )
+        sys.stdout.write(f"无信号可评估，已写入空报告 {out_path}\n")
+        return 0
 
     # 真实运行：此处才惰性构造 qlib 数据源（pytest 不触达）
     from qlib_eval.prices import QlibPriceSource
@@ -125,21 +161,8 @@ def main(argv=None) -> int:
                              start=start, end=end)
 
     outcomes, stats = collect_outcomes(signals, source, max_defer=args.max_defer)
-    agg = aggregate(outcomes)
-
-    today = _dt.date.today()
-    meta = {
-        "generated_at": today.isoformat(),
-        "n_signals": len(signals),
-        "benchmark": "SH000300",
-        "qlib_dir": args.qlib_dir,
-    }
-    report = render_report(agg, stats, meta)
-
-    os.makedirs(args.out, exist_ok=True)
-    out_path = os.path.join(args.out, f"signal-eval-{today:%Y%m%d}.md")
-    with open(out_path, "w") as f:
-        f.write(report)
+    report = render_report(aggregate(outcomes), stats, _meta(args, len(signals)))
+    out_path = _write_report(args.out, report)
     sys.stdout.write(f"报告已写入 {out_path}\n")
     return 0
 
