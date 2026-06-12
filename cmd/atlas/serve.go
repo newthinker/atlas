@@ -23,6 +23,10 @@ import (
 	"github.com/newthinker/atlas/internal/logger"
 	"github.com/newthinker/atlas/internal/meta"
 	"github.com/newthinker/atlas/internal/metrics"
+	"github.com/newthinker/atlas/internal/notifier"
+	"github.com/newthinker/atlas/internal/notifier/email"
+	"github.com/newthinker/atlas/internal/notifier/telegram"
+	"github.com/newthinker/atlas/internal/notifier/webhook"
 	signalstore "github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/newthinker/atlas/internal/strategy/ma_crossover"
@@ -136,6 +140,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Pass through the typed-nil guards so an unconfigured collector stays an
 	// untyped-nil interface (see valuationSourceOrNil).
 	application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSourceOrNil(yahooCollector))
+
+	// Wire configured notifiers (telegram/email/webhook) so routed signals are
+	// actually delivered. Done after collectors are registered and before the
+	// server starts. Misconfigured entries warn and are skipped, never blocking
+	// startup (matches collector/strategy wiring above).
+	registerConfiguredNotifiers(cfg, application, log)
 
 	// Create strategy engine and register strategies
 	strategies := strategy.NewEngine()
@@ -285,6 +295,70 @@ func buildArbitrator(cfg *config.Config, collectors []collector.Collector, log *
 	return meta.NewArbitrator(llmProvider, marketCtx, trackRecord, news, log, meta.ArbitratorConfig{
 		ContextDays: cfg.Meta.Arbitrator.ContextDays,
 	}), nil
+}
+
+// registerConfiguredNotifiers wires the enabled telegram/email/webhook entries
+// in cfg.Notifiers into the app's notifier registry and returns the number
+// successfully registered. Misconfigured entries (missing required fields,
+// unknown type, or a registry rejection such as a duplicate name) are logged at
+// warn level and skipped — they never block startup, matching the
+// collector/strategy wiring. If any notifier was enabled yet none registered, a
+// warn is emitted because routed signals would otherwise be dropped silently.
+func registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *zap.Logger) int {
+	registered := 0
+	enabled := 0
+
+	for key, nc := range cfg.Notifiers {
+		if !nc.Enabled {
+			continue
+		}
+		enabled++
+
+		// requireField logs the standardized "missing required field" warning and
+		// reports false when a required field is empty, letting each case bail out
+		// of the loop iteration uniformly.
+		requireField := func(name string, present bool) bool {
+			if !present {
+				log.Warn("notifier missing required field", zap.String("notifier", key), zap.String("field", name))
+			}
+			return present
+		}
+
+		var n notifier.Notifier
+		switch key {
+		case "telegram":
+			if !requireField("bot_token", nc.BotToken != "") || !requireField("chat_id", nc.ChatID != "") {
+				continue
+			}
+			n = telegram.New(nc.BotToken, nc.ChatID)
+		case "email":
+			if !requireField("host", nc.Host != "") || !requireField("from", nc.From != "") || !requireField("to", len(nc.To) != 0) {
+				continue
+			}
+			n = email.New(nc.Host, nc.Port, nc.Username, nc.Password, nc.From, nc.To)
+		case "webhook":
+			if !requireField("url", nc.URL != "") {
+				continue
+			}
+			n = webhook.New(nc.URL, nc.Headers)
+		default:
+			log.Warn("unknown notifier type", zap.String("notifier", key))
+			continue
+		}
+
+		if err := application.RegisterNotifier(n); err != nil {
+			log.Warn("failed to register notifier", zap.String("notifier", key), zap.Error(err))
+			continue
+		}
+		registered++
+		log.Info("registered notifier", zap.String("notifier", key))
+	}
+
+	log.Info("configured notifiers registered", zap.Int("count", registered))
+	if enabled > 0 && registered == 0 {
+		log.Warn("all configured notifiers failed to register; signals will not be delivered")
+	}
+	return registered
 }
 
 // registerConfiguredStrategy initialises s with cfg and, on success, registers
