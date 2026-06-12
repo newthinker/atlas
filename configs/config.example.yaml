@@ -45,10 +45,10 @@ strategies:
   # Historical-percentile strategies (price / PE position in own multi-year range)
   price_percentile:
     enabled: true
-    params: {lookback_years: 5, low: 25, high: 75, extreme_low: 10, extreme_high: 90}
+    params: {lookback_years: 5, low: 25, high: 75, extreme_low: 10, extreme_high: 90, percentile_step: 5}  # 按策略覆盖全局步长
   pe_percentile:
     enabled: true
-    params: {lookback_years: 5, low: 20, high: 80, extreme_low: 10, extreme_high: 90}
+    params: {lookback_years: 5, low: 20, high: 80, extreme_low: 10, extreme_high: 90, percentile_step: 5}  # 按策略覆盖全局步长
   dividend_yield:
     enabled: false
     params:
@@ -59,7 +59,8 @@ strategies:
 # Signal routing
 router:
   min_confidence: 0.6
-  cooldown_hours: 4
+  cooldown_hours: 4      # 0 = 禁用冷却；仅约束不带分位元数据的策略信号
+  percentile_step: 5     # 全局默认步长；策略 params.percentile_step 优先（0 = 禁用）
 
 # Notification channels
 notifiers:

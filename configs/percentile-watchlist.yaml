@@ -6,8 +6,6 @@
 #
 # 监控规则（已确认）：
 #   - 低于历史 50 分位 → 买入通知；其后每再跌 5 个百分位（45/40/35…）再次提醒
-#     ※ 「每 5 个百分位再次提醒」依赖 router 的 percentile_step 功能（开发中），
-#       功能就位前的过渡行为：低于 50 分位期间按 cooldown_hours 周期重复提醒
 #   - 高于历史 80 分位 → 卖出通知
 #   - 25 分位以下 / 90 分位以上升级为 strong_buy / strong_sell
 #
@@ -27,6 +25,7 @@ strategies:
       high: 80           # 高于 80 分位 → sell
       extreme_low: 25    # 低于 25 分位 → strong_buy
       extreme_high: 90   # 高于 90 分位 → strong_sell
+      percentile_step: 5 # 可按策略独立调整，如 PE 分位改 3
   pe_percentile:
     enabled: true
     params:
@@ -35,11 +34,12 @@ strategies:
       high: 80
       extreme_low: 25
       extreme_high: 90
+      percentile_step: 5 # 可按策略独立调整，如 PE 分位改 3
 
 router:
   min_confidence: 0.6
-  cooldown_hours: 24    # percentile_step 功能就位前的防刷屏过渡值
-  # percentile_step: 5  # ← 功能交付后取消注释：同方向信号需分位再降/升 5 才重新提醒
+  cooldown_hours: 4     # 仅约束不带分位元数据的策略（如 ma_crossover）
+  percentile_step: 5    # 策略未配 percentile_step 时的回退值；同方向信号需分位再降/升 5 才重新提醒
 
 watchlist:
   # ---------- A 股宽基指数 ----------

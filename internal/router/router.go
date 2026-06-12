@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -81,24 +82,8 @@ func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 		return false, nil
 	}
 
-	// Dispatch: percentile signals (percentile metadata present AND an effective
-	// step > 0) go through the step gate, which fully replaces the cooldown —
-	// it neither reads nor stamps the per-symbol cooldown. All other signals
-	// take the original cooldown path unchanged.
-	if pct, ok := r.percentileOf(signal); ok && r.effectiveStep(signal) > 0 {
-		if !r.passPercentileGate(signal, pct, r.effectiveStep(signal)) {
-			return false, nil
-		}
-	} else {
-		if !r.passesCooldown(signal) {
-			return false, nil
-		}
-		// Stamp the cooldown only on the cooldown path; the percentile branch
-		// must never touch it (otherwise it would suppress other strategies'
-		// signals for the same symbol).
-		r.mu.Lock()
-		r.cooldowns[signal.Symbol] = time.Now()
-		r.mu.Unlock()
+	if !r.passesDispatchGate(signal) {
+		return false, nil
 	}
 
 	// Persist signal if store is configured
@@ -142,20 +127,10 @@ func (r *Router) RouteBatch(signals []core.Signal) error {
 		if !r.passesStaticFilters(signal) {
 			continue
 		}
-		// Same dispatch as Route: percentile signals go through the step gate
-		// (no cooldown read/stamp); all others take the cooldown path and stamp
-		// it. Evaluated in order so a later signal sees the earlier one's state.
-		if pct, ok := r.percentileOf(signal); ok && r.effectiveStep(signal) > 0 {
-			if !r.passPercentileGate(signal, pct, r.effectiveStep(signal)) {
-				continue
-			}
-		} else {
-			if !r.passesCooldown(signal) {
-				continue
-			}
-			r.mu.Lock()
-			r.cooldowns[signal.Symbol] = time.Now()
-			r.mu.Unlock()
+		// Same dispatch as Route. Evaluated in order so a later signal sees the
+		// earlier one's gate/cooldown state.
+		if !r.passesDispatchGate(signal) {
+			continue
 		}
 		filtered = append(filtered, signal)
 	}
@@ -198,19 +173,33 @@ func (r *Router) passesStaticFilters(signal core.Signal) bool {
 	}
 
 	// Check action whitelist
-	if len(r.cfg.EnabledActions) > 0 {
-		actionAllowed := false
-		for _, a := range r.cfg.EnabledActions {
-			if signal.Action == a {
-				actionAllowed = true
-				break
-			}
-		}
-		if !actionAllowed {
-			return false
+	if len(r.cfg.EnabledActions) > 0 && !slices.Contains(r.cfg.EnabledActions, signal.Action) {
+		return false
+	}
+
+	return true
+}
+
+// passesDispatchGate applies the percentile-step gate or the per-symbol cooldown
+// and reports whether the signal may proceed. Percentile signals (percentile
+// metadata present AND an effective step > 0) go through the step gate, which
+// fully replaces the cooldown — it neither reads nor stamps the cooldown. All
+// other signals take the cooldown path and, on pass, stamp the cooldown; the
+// percentile branch must never touch it (otherwise it would suppress other
+// strategies' signals for the same symbol).
+func (r *Router) passesDispatchGate(signal core.Signal) bool {
+	if pct, ok := r.percentileOf(signal); ok {
+		if step := r.effectiveStep(signal); step > 0 {
+			return r.passPercentileGate(signal, pct, step)
 		}
 	}
 
+	if !r.passesCooldown(signal) {
+		return false
+	}
+	r.mu.Lock()
+	r.cooldowns[signal.Symbol] = time.Now()
+	r.mu.Unlock()
 	return true
 }
 
