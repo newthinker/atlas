@@ -38,7 +38,7 @@ func newStepRouter(step float64) *Router {
 	cfg := DefaultConfig()
 	cfg.PercentileStep = step
 	cfg.CooldownDuration = 1 * time.Hour // 显式非零：验证分位路径确实绕过冷却
-	return New(cfg, nil, zap.NewNop())
+	return New(cfg, nil, nil) // New 内部对 nil logger 兜底，无需引入 zap import
 }
 
 func TestRoute_PercentileStep_BuySide(t *testing.T) {
@@ -192,10 +192,9 @@ func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 		if !r.passesCooldown(signal) { // 原 passesFilters 第三段
 			return false, nil
 		}
-		defer func() { // 仅冷却路径更新冷却戳（保持原 Route 的更新时机语义即可，直接内联也行）
-			...
-		}()
-		// 实现时直接保留原结构：通过冷却检查后，在原位置更新 r.cooldowns
+		// 把现有的 r.cooldowns 更新（原 router.go:81-83）移入本 else 分支内：
+		// 冷却戳只在冷却路径盖，分位分支绝不碰——否则 Task 2 的
+		// TestRoute_PercentileSignalDoesNotTouchCooldown 必挂
 	}
 	// 后续：signalStore 持久化、通知（原代码不动）
 }
@@ -282,7 +281,7 @@ func TestGetStats_IncludesPercentileGate(t *testing.T) {
 
 - [ ] **Step 2: 运行确认失败 → Step 3: 实现**
 
-- `RouteBatch` 的过滤改为与 Route 相同的分流（static 过滤 → 分位信号走 `passPercentileGate` / 其余走 `passesCooldown` + 更新冷却戳），逐条顺序判定；其余批处理行为（不写 signalStore 等）不动
+- `RouteBatch` 的过滤改为与 Route 相同的分流（static 过滤 → 分位信号走 `passPercentileGate` / 其余走 `passesCooldown` + 更新冷却戳），逐条顺序判定；**并补 nil-registry 守卫**（`Route` 在 :86-88 有守卫而 `RouteBatch` 没有——`filtered` 非空时直接调 `r.registry.NotifyAllBatch` 会对 nil registry panic，本任务测试用 nil registry 构造，没有守卫 GREEN 阶段必炸）；其余批处理行为（不写 signalStore 等）不动
 - `ClearCooldown(symbol)`：加锁后 `delete(r.cooldowns, symbol)` + 遍历 `pctGates` 删除 `strings.HasPrefix(key, symbol+"|")` 的条目（假设 symbol 不含 `|`，注释注明）
 - `ClearAllCooldowns`：同时重建两个 map
 - `GetStats`：增加 `percentile_gates_active`（len(pctGates)）与 `percentile_step`
@@ -301,7 +300,7 @@ git commit -m "feat(router): percentile gate for RouteBatch, clear ops and stats
 ### Task 3: 配置接线（修复 cfg.Router 死配置预存 bug）
 
 **Files:**
-- Modify: `internal/config/config.go`（RouterConfig :111-114、默认值 :286-289、校验 :337-344）
+- Modify: `internal/config/config.go`（RouterConfig :111-114、默认值 :286-289、校验 :337-345；新增 `PercentileStep < 0` 校验沿用 `core.WrapError(core.ErrConfigInvalid, ...)` 风格）
 - Modify: `internal/app/app.go`（New 的 routerCfg 构造 :91-96）
 - Test: `internal/app/app_test.go`
 
@@ -309,7 +308,7 @@ git commit -m "feat(router): percentile gate for RouteBatch, clear ops and stats
 
 ```go
 func TestNew_RouterConfigFromCfg(t *testing.T) {
-	cfg := config.Default() // 以实际默认构造函数为准
+	cfg := config.Defaults() // 实际函数名已核实（config.go:269），返回 *Config
 	cfg.Router.CooldownHours = 24
 	cfg.Router.MinConfidence = 0.7
 	cfg.Router.PercentileStep = 5
@@ -334,7 +333,7 @@ func TestNew_RouterConfigFromCfg(t *testing.T) {
 - [ ] **Step 2: 运行确认失败**
 
 Run: `go test ./internal/app/ -run TestNew_RouterConfig -v`
-Expected: FAIL（cooldown_seconds 恒为 3600 —— 死配置 bug 实证）
+Expected: **编译错误**（`cfg.Router.PercentileStep` 字段尚不存在）。RED 阶段分两步看：先在 config.go 加 `PercentileStep` 字段（仅字段，不接线）使测试可编译，再跑——此时断言失败、`cooldown_seconds` 恒为 3600，即死配置 bug 的实证；随后做 app.New() 接线转 GREEN。
 
 - [ ] **Step 3: 实现**
 
@@ -379,7 +378,7 @@ hardcoded 1h/0.5 that ignored configuration."
 
 - [ ] **Step 1: 配置更新**
 
-percentile-watchlist.yaml：`# percentile_step: 5` → `percentile_step: 5`，并把行尾注释改为「同方向信号需分位变化 ≥5 才重新提醒；时间冷却不约束分位信号」。
+percentile-watchlist.yaml 三处同步更新：① `# percentile_step: 5` 取消注释，行尾注释改为「同方向信号需分位变化 ≥5 才重新提醒；时间冷却不约束分位信号」；② 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；③ `cooldown_hours: 24` 行尾的「过渡值」注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」，数值可保留 24 或回调为 4（建议 4，与默认一致——分位信号已不受其约束）。
 
 config.example.yaml 的 router 节：
 
