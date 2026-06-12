@@ -19,9 +19,10 @@ query_tasks() {
 }
 
 if [ -z "$ME" ]; then
-    # 拿不到实例名 → 退化为保守保活(原行为),但打印警告便于排查
-    OPEN=$(query_tasks 'select(.status | IN("pending","assigned","in_progress","dev_done","verifying","rejected","review_fix","blocked_clarification")) | .id')
-    [ -n "$OPEN" ] && { echo "WARN: teammate 名未知,按全局任务保活。请核实 hook stdin 字段。" >&2; exit 2; }
+    # 拿不到实例名 → 放行 idle。原「按全局任务保活」会把 QA/Leader spawn 的
+    # 临时子代理（无实例名）推去“推进任务”，诱发越权写 tasks/*.json
+    # （2026-06-12 sprint-004 实测：对抗子代理被此提示误导，擅自 verified→accepted）。
+    # 临时子代理的生命周期由 spawn 方负责，不归保活机制管。
     exit 0
 fi
 

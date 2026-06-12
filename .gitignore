@@ -54,3 +54,4 @@ signals.csv
 # Arcforge 瞬态通信与 Python 缓存
 .arcforge/inbox/
 __pycache__/
+qlib_csv/
