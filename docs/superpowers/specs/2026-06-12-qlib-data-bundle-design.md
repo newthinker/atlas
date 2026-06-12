@@ -16,7 +16,7 @@
 make qlib-data
   ├─ ① atlas export-ohlcv（Go，新增 cobra 子命令）
   │     --symbols  默认 = watchlist 内 A 股标的（.SH/.SZ 后缀判定）+ 000300.SH 基准（去重）
-  │     --from/--to/--out-dir（日期由 Makefile 传 SIGNAL_FROM/SIGNAL_TO，见下）
+  │     --from/--to/--out-dir（Makefile 只传 --from=$(SIGNAL_FROM)，--to 默认当天，见下）
   │     每标的一个 CSV（列：symbol,date,open,high,low,close,volume,factor）
   │     文件名 = 小写 qlib instrument（600519.SH → sh600519.csv）
   │     collector 选择复用 SelectForSymbol（eastmoney 指数 secid 路径）
