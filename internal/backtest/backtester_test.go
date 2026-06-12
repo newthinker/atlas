@@ -10,6 +10,11 @@ import (
 	"github.com/newthinker/atlas/internal/strategy"
 )
 
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "引擎统一盖戳 GeneratedAt=bar.Time（覆写策略自报 1999）" → TestRun_StampsGeneratedAtAndCountsSkips
+// functional[1] "Analyze error bar 跳过 + Result.SkippedBars 计数"        → TestRun_StampsGeneratedAtAndCountsSkips
+// boundary[0]   "无 skip 时 SkippedBars=0；既有用例零修改通过"            → TestBacktester_Run（断言 SkippedBars==0）+ 全量回归
+
 // mockProvider implements OHLCVProvider for testing
 type mockProvider struct {
 	data []core.OHLCV
@@ -110,6 +115,11 @@ func TestBacktester_Run(t *testing.T) {
 	// Verify stats were calculated
 	if result.Stats.TotalTrades != len(result.Trades) {
 		t.Errorf("TotalTrades = %v, want %v", result.Stats.TotalTrades, len(result.Trades))
+	}
+
+	// boundary[0]: no analysis errors → no skipped bars
+	if result.SkippedBars != 0 {
+		t.Errorf("SkippedBars = %v, want 0", result.SkippedBars)
 	}
 }
 
@@ -262,6 +272,47 @@ func TestSignalsToTrades_SellWithoutBuy(t *testing.T) {
 	// Sell without open position should result in no trades
 	if len(trades) != 0 {
 		t.Errorf("Expected 0 trades for sell without buy, got %d", len(trades))
+	}
+}
+
+// stampStub produces a fixed signal carrying a deliberately wrong GeneratedAt
+// and fails analysis on the bar whose Close == failOn, exercising both the
+// engine's GeneratedAt stamping (设计 §2.1) and the skip-counting path.
+type stampStub struct{ failOn int }
+
+func (s *stampStub) Name() string        { return "stamp_stub" }
+func (s *stampStub) Description() string { return "" }
+func (s *stampStub) RequiredData() strategy.DataRequirements {
+	return strategy.DataRequirements{PriceHistory: 1}
+}
+func (s *stampStub) Init(strategy.Config) error { return nil }
+func (s *stampStub) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) {
+	if len(ctx.OHLCV) > 0 && ctx.OHLCV[len(ctx.OHLCV)-1].Close == float64(s.failOn) {
+		return nil, errors.New("boom") // trigger engine skip path
+	}
+	return []core.Signal{{Symbol: ctx.Symbol, Action: core.ActionBuy,
+		GeneratedAt: time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)}}, nil // wrong time, must be overwritten
+}
+
+func TestRun_StampsGeneratedAtAndCountsSkips(t *testing.T) {
+	bars := []core.OHLCV{
+		{Symbol: "T", Close: 1, Time: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)},
+		{Symbol: "T", Close: 2, Time: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC)}, // failOn=2 → skip
+		{Symbol: "T", Close: 3, Time: time.Date(2024, 1, 4, 0, 0, 0, 0, time.UTC)},
+	}
+	bt := New(&mockProvider{data: bars})
+	res, err := bt.Run(context.Background(), &stampStub{failOn: 2}, "T", bars[0].Time, bars[2].Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Signals) != 2 {
+		t.Fatalf("signals = %d, want 2", len(res.Signals))
+	}
+	if !res.Signals[0].GeneratedAt.Equal(bars[0].Time) || !res.Signals[1].GeneratedAt.Equal(bars[2].Time) {
+		t.Errorf("GeneratedAt not stamped with bar time: %+v", res.Signals)
+	}
+	if res.SkippedBars != 1 {
+		t.Errorf("SkippedBars = %d, want 1", res.SkippedBars)
 	}
 }
 

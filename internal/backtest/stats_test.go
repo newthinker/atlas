@@ -17,10 +17,10 @@ func TestCalculateStats_Empty(t *testing.T) {
 func TestCalculateStats_WinRate(t *testing.T) {
 	exit := &core.Signal{Symbol: "TEST"}
 	trades := []Trade{
-		{Return: 0.10, ExitSignal: exit}, // win
-		{Return: 0.05, ExitSignal: exit}, // win
+		{Return: 0.10, ExitSignal: exit},  // win
+		{Return: 0.05, ExitSignal: exit},  // win
 		{Return: -0.03, ExitSignal: exit}, // loss
-		{Return: 0.02, ExitSignal: exit}, // win
+		{Return: 0.02, ExitSignal: exit},  // win
 	}
 
 	stats := CalculateStats(trades)
@@ -65,8 +65,8 @@ func TestCalculateMaxDrawdown(t *testing.T) {
 func TestCalculateStats_IgnoresOpenTrades(t *testing.T) {
 	exit := &core.Signal{Symbol: "TEST"}
 	trades := []Trade{
-		{Return: 0.10, ExitSignal: exit},  // closed
-		{Return: 0.05, ExitSignal: nil},   // open - should be ignored
+		{Return: 0.10, ExitSignal: exit}, // closed
+		{Return: 0.05, ExitSignal: nil},  // open - should be ignored
 	}
 
 	stats := CalculateStats(trades)

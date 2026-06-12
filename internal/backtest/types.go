@@ -15,6 +15,9 @@ type Result struct {
 	Signals   []core.Signal
 	Trades    []Trade
 	Stats     Stats
+	// SkippedBars counts bars whose strategy analysis returned an error and
+	// were skipped during the backtest run.
+	SkippedBars int
 }
 
 // Trade represents a simulated trade from entry to exit

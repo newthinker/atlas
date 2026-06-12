@@ -46,6 +46,7 @@ func (b *Backtester) Run(ctx context.Context, strat strategy.Strategy, symbol st
 	}
 
 	var allSignals []core.Signal
+	skipped := 0
 
 	// Run strategy on each bar with rolling window
 	for i := 0; i < len(ohlcv); i++ {
@@ -69,6 +70,7 @@ func (b *Backtester) Run(ctx context.Context, strat strategy.Strategy, symbol st
 		// Run strategy analysis
 		signals, err := strat.Analyze(analysisCtx)
 		if err != nil {
+			skipped++
 			continue // Skip bars with analysis errors
 		}
 
@@ -76,6 +78,7 @@ func (b *Backtester) Run(ctx context.Context, strat strategy.Strategy, symbol st
 		for _, sig := range signals {
 			sig.Price = ohlcv[i].Close
 			sig.Strategy = strat.Name()
+			sig.GeneratedAt = ohlcv[i].Time // bar time, never wall clock
 			allSignals = append(allSignals, sig)
 		}
 	}
@@ -87,13 +90,14 @@ func (b *Backtester) Run(ctx context.Context, strat strategy.Strategy, symbol st
 	stats := CalculateStats(trades)
 
 	return &Result{
-		Strategy:  strat.Name(),
-		Symbol:    symbol,
-		StartDate: start,
-		EndDate:   end,
-		Signals:   allSignals,
-		Trades:    trades,
-		Stats:     stats,
+		Strategy:    strat.Name(),
+		Symbol:      symbol,
+		StartDate:   start,
+		EndDate:     end,
+		Signals:     allSignals,
+		Trades:      trades,
+		Stats:       stats,
+		SkippedBars: skipped,
 	}, nil
 }
 
