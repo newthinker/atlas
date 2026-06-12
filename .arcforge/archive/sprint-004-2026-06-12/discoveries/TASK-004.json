@@ -1,0 +1,42 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "[review_fix FP-1] build_data 新增 verify_csv_dir_symbols(csv_dir, expected_instruments)：dump 前用外部预期符号集独立校验磁盘文件集合，残留旧符号 .csv → ValueError(含符号名+清理提示)。main 增 --expected-symbols(atlas 形式，经 qlib_eval.symbols.to_qlib_instrument 转 instrument)，不传则跳过(向后兼容)；Makefile qlib-data 传 --expected-symbols $(SIGNAL_SYMBOLS)。根因：原 main 从 csv 文件名反推 expected，旧 CSV 静默混入 verify_bundle 也通过。",
+    "[review_fix DC-1] README 复权口径补「前复权跨日漂移」披露：前复权以最新一期为基准回溯，每日全量重建后遇新除权事件历史前复权值整体平移，跨日报告同日绝对数值可能不同；横向(同包内)对比不受影响，需可复现绝对值则固定数据包快照。",
+    "Makefile QLIB_DIR 由社区包 cn_data 切到自建包：QLIB_DIR ?= $(QLIB_DATA_DIR)（= $(HOME)/.qlib/qlib_data/atlas_cn），signal-eval 默认即读自建包，单一真相源。覆盖 QLIB_DIR=~/.qlib/qlib_data/cn_data 可回退社区包。",
+    "evaluate.py 的 DEFAULT_QLIB_DIR 故意保持 cn_data 不改——绕过 Makefile 直调 evaluate.py 必须自带 --qlib-dir 指向 atlas_cn，否则读到截止 2020-09 的社区包；make 路径总是显式 --qlib-dir $(QLIB_DIR) 不受默认值影响。README 已注明。",
+    "test_makefile.py 既有 helper(_var_defs/_expand)足以校验 QLIB_DIR 展开值：新增 test_qlib_dir_default_is_atlas_cn 断言 expanded.endswith('atlas_cn')，机制锁死默认值防回归（无 cn_data 锚定断言需改）。",
+    "e2e 全链路实证可用（硬 DoD 全过）：make qlib-data 真实网络采集 600519.SH+000300.SH → dump_bin → build_data.verify_bundle 通过；instruments=2，区间 2021-01-04~2026-06-12。"
+  ],
+  "decisions": [
+    {
+      "decision": "QLIB_DIR ?= $(QLIB_DATA_DIR) 而非硬编码第二份 atlas_cn 路径。",
+      "rationale": "qlib-data 产出目录(QLIB_DATA_DIR)与 signal-eval 读取目录(QLIB_DIR)单一真相源，避免两处路径漂移；?= 保留用户覆盖回退社区包的能力。"
+    },
+    {
+      "decision": "不修改 evaluate.py DEFAULT_QLIB_DIR（保持 cn_data），改由 README 文档化直调注意。",
+      "rationale": "plan T4 钉死：make 路径总显式传 --qlib-dir，改默认值无收益且会掩盖直调场景的真实依赖；文档化比静默改默认更安全。"
+    },
+    {
+      "decision": "README 五要素集中在新增「自建数据包（atlas → qlib，默认路径）」一节，并与既有「评估口径」交叉引用复权口径。",
+      "rationale": "non_functional[0] verify_by review；fqt=1 前复权/factor=1 与评估端 open/close 口径一致，集中一处避免口径分散。"
+    }
+  ],
+  "files_modified": [
+    "Makefile",
+    "scripts/qlib_eval/README.md",
+    "scripts/qlib_eval/tests/test_makefile.py"
+  ],
+  "interfaces_exposed": [
+    "Make 变量 QLIB_DIR ?= $(QLIB_DATA_DIR)（默认 atlas_cn）；make signal-eval 默认评估自建包，make signal-eval QLIB_DIR=... 可覆盖",
+    "test_makefile.py::test_qlib_dir_default_is_atlas_cn —— QLIB_DIR 默认值守门测试",
+    "README「自建数据包」章节 —— 建包用法/复权口径(含前复权跨日漂移披露)/社区包对比(含切换)/crontab/evaluate 直调注意",
+    "build_data.verify_csv_dir_symbols(csv_dir, expected_instruments) -> None；磁盘有非预期符号 .csv → ValueError(含符号名+清理提示)",
+    "build_data.main 新增 --expected-symbols（逗号分隔 atlas 符号，可选）：提供则 dump 前防呆校验，不传向后兼容"
+  ],
+  "verification": {
+    "command": "make qlib-data; D.features 首尾对照; make signal-eval; go build/vet/test ./...; pytest scripts/qlib_eval/tests/",
+    "result": "make qlib-data 产出 atlas_cn(instruments=2, calendar 2021-01-04~2026-06-12, verify_bundle 通过); D.features(['SH600519']) 首尾 2021-01-04 open1785.77/close1782.79、2026-06-12 open1271.18/close1288.91 与 sh600519.csv 逐值全等; make signal-eval 默认 2021-2026 报告 reports/signal-eval-20260612.md 含 ma_crossover(6 行)+price_percentile(39 行) 非空结果表(1457 信号); go build/vet/test ./... 全 ok; pytest 44 passed。",
+    "notes": "首轮 commit 36d476d；review_fix 轮 commit 14cb5e5(FP-1 防呆 + DC-1 披露)，pytest 48 passed(+4)、make qlib-data 实跑 FP-1 happy path 无误报。GitNexus 索引 stale(非阻塞)。e2e 真实运行为硬 DoD——本 Sprint 存在理由(社区包默认区间产不出结果)已实证消除。"
+  }
+}

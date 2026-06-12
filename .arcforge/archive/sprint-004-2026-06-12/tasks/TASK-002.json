@@ -1,0 +1,51 @@
+{
+  "id": "TASK-002",
+  "title": "cobra 接线 + Makefile qlib-data + test_makefile 泛化",
+  "description": "按 plan rev4 Task 2 原文施工：cobra export-ohlcv 命令（flags：--symbols 默认空=resolver、--from required、--to 默认空=当天、--out-dir 默认 qlib_csv；config 加载参照 serve.go:55-66——export_signals 无 config 加载不可作参照）；CLI 层基准校验（清单不含 000300.SH → 报错）；Makefile qlib-data target（**必须 --symbols $(SIGNAL_SYMBOLS)，只传 --from 不传 --to**，plan C1-1 BLOCKER 说明段）；test_makefile.py 把 _signal_eval_block 泛化为 _target_block(name)（既有测试零行为变化）+ qlib-data 四断言。TDD：UsageListsAllFlags 与 BenchmarkMissing 测试先行。",
+  "module": "cmd-atlas-wiring",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go",
+    "Makefile",
+    "scripts/qlib_eval/tests/test_makefile.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestExportOHLCVCommand_UsageListsAllFlags（仿 export_signals 同类测试）：--symbols/--from/--to/--out-dir 齐全",
+      "CLI 层 TestRunExportOHLCV_BenchmarkMissingIsFatal：--symbols 清单不含 000300.SH → 报错含 benchmark",
+      "test_makefile：_target_block 泛化后既有测试零修改通过 + qlib-data 断言（--symbols $(SIGNAL_SYMBOLS) 在 / --from $(SIGNAL_FROM) 在 / --to 不在 / $(QLIB_PY) build_data.py 在）"
+    ],
+    "boundary": [
+      "go build 后 ./bin/atlas export-ohlcv --help 列出全部 flags（冒烟）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "双语言门禁：go test ./cmd/atlas（35 基线）+ hook 同款 pytest 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./cmd/atlas",
+    "./scripts/qlib_eval"
+  ],
+  "coverage_minimum": 35,
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

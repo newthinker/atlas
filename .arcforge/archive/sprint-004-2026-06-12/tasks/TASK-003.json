@@ -1,0 +1,43 @@
+{
+  "id": "TASK-003",
+  "title": "build_data.py（dump_bin 编排 + 产物校验）",
+  "description": "按 plan rev4 Task 3 原文施工：run_dump_bin（**--data_path 非 csv_path——本地副本 DumpDataBase.__init__(data_path,...)，照网上旧教程写 csv_path 是 plan 评审 C2-1 BLOCKER**；--exclude_fields symbol,date 钉死；returncode!=0 透传 raise）、date_span_from_csvs（verify 区间从 CSV 数据行 min/max 推导，argparse 零日期参数）、verify_bundle（instruments/all.txt tab 三字段大写格式 + calendar 覆盖，只读校验绝不重写）、空 CSV 进 dump 前拒绝、main 收尾打印 signal-eval 指引。integration marker 留二期（由 TASK-004 e2e 承接）。",
+  "module": "qlib-eval",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/build_data.py",
+    "scripts/qlib_eval/tests/test_build_data.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "mock subprocess 命令构造断言：dump_bin.py + dump_all + **--data_path** + --qlib_dir + --exclude_fields symbol,date（紧邻值断言）",
+      "date_span_from_csvs：从多 CSV 数据行推导 (min,max) 日期",
+      "verify_bundle：tab 三字段大写 fixture 下通过；缺 instrument / calendar 区间不足 → ValueError 含缺失项；**只读**（校验前后产物文件零修改）"
+    ],
+    "boundary": [
+      "csv 目录含空文件/仅 header 文件 → 进 dump 前 raise"
+    ],
+    "error_handling": [
+      "dump_bin returncode!=0 → raise（含 stderr 摘要），不静默"
+    ],
+    "non_functional": [
+      {
+        "desc": "hook 同款命令全绿（从仓库根，零 qlib import——subprocess mock）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

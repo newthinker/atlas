@@ -1,0 +1,44 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "export-ohlcv cobra 命令接线完成：flags --symbols(默认空=resolver 从 watchlist 推导)、--from(required)、--to(默认空=当天)、--out-dir(默认 qlib_csv)；注册到 rootCmd，--help 列全四 flag。",
+    "config 加载走 serve.go 同款 cfgFile + config.Load 模式（loadConfigOrDefaults）：有 -c/--config 则 config.Load，否则 config.Defaults()。export_signals 无 config 加载，不可作参照（plan C1-5）。config.Defaults() 无 watchlist 字段——故未带 --config 时 watchlist 为空。",
+    "CLI 层基准校验 requireBenchmark：解析后的符号集不含 000300.SH → 立即报错（消息含 benchmark），先于建 registry / 任何网络。这是 TASK-001「核心纯执行、清单含基准校验留 CLI 层」分层语义的承接。",
+    "Makefile qlib-data target：必须显式 --symbols $(SIGNAL_SYMBOLS)、只传 --from $(SIGNAL_FROM) 不传 --to（C1-1 BLOCKER：recipe 不带 --config → CLI 拿不到 watchlist → 默认集退化为只剩基准，静默缺 600519.SH）。共用 SIGNAL_SYMBOLS 天然保证「评估符号 ⊆ 数据包」。新增变量 QLIB_CSV_DIR?=qlib_csv、QLIB_DATA_DIR?=$(HOME)/.qlib/qlib_data/atlas_cn。",
+    "build_data.py(TASK-003) CLI 实参为 --csv-dir / --target-dir（非 dump_bin 内部的 --data_path），Makefile recipe 第二行据此调用 $(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_DIR) --target-dir $(QLIB_DATA_DIR)。",
+    "test_makefile.py 把硬编码 _signal_eval_block() 泛化为 _target_block(name)（re.escape(name) 锚定目标行 + 后续 Tab recipe 行）；4 个既有 signal-eval 测试改用 _target_block(\"signal-eval\") 零行为变化，新增 test_qlib_data_target_flags 四断言。"
+  ],
+  "decisions": [
+    {
+      "decision": "requireBenchmark 作为独立纯函数置于 runExportOHLCV 内、resolveOHLCVSymbols 之后、建 registry 之前。",
+      "rationale": "使 TestRunExportOHLCV_BenchmarkMissingIsFatal 能直调 runExportOHLCV 而零网络：缺基准时在任何 collector/解析前 return，测试确定性。"
+    },
+    {
+      "decision": "Makefile qlib-data 只传 --from 不传 --to。",
+      "rationale": "spec 钉死数据包覆盖至当天（export-ohlcv 的 To 空 → time.Now()）；test_qlib_data_target_flags 用 `\"--to\" not in block` 机制锁死防回归。"
+    },
+    {
+      "decision": "registry 组装(yahoo/eastmoney/crypto)与 registryProvider 适配直接复用 export_signals.go 的同包定义，不重复定义。",
+      "rationale": "registryProvider 已在 export_signals.go(package main) 定义；CLI 路径逐 symbol SelectForSymbol 行为一致，避免重复。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go",
+    "Makefile",
+    "scripts/qlib_eval/tests/test_makefile.py"
+  ],
+  "interfaces_exposed": [
+    "cobra 命令 export-ohlcv（rootCmd 子命令）：flags --symbols/--from(required)/--to/--out-dir(默认 qlib_csv)",
+    "runExportOHLCV(cmd *cobra.Command, args []string) error：loadConfigOrDefaults → resolveOHLCVSymbols → requireBenchmark → registryProvider → executeExportOHLCV(sleep=300ms)",
+    "requireBenchmark(symbols []string) error：不含 benchmarkSymbol(000300.SH) → error 含 benchmark（CLI 层校验）",
+    "loadConfigOrDefaults() (*config.Config, error)：cfgFile 非空 config.Load 否则 config.Defaults()",
+    "Make target qlib-data：./bin/atlas export-ohlcv --symbols $(SIGNAL_SYMBOLS) --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_DIR) → $(QLIB_PY) build_data.py --csv-dir --target-dir。新变量 QLIB_CSV_DIR/QLIB_DATA_DIR",
+    "test_makefile.py: _target_block(name) 泛化 helper（取代 _signal_eval_block），供后续 target 复用"
+  ],
+  "verification": {
+    "command": "go test ./cmd/atlas/ -race -count=1 -cover; ./bin/atlas export-ohlcv --help; pytest test_makefile.py; make -n qlib-data",
+    "result": "go ok cover 59.8%(>=35)/-race 全绿；--help 列全 --symbols/--from/--to/--out-dir；pytest 5 passed(4 既有零变化+1 新)；make -n 确认 recipe 含 --symbols 600519.SH,000300.SH、无 --to、build_data.py --csv-dir/--target-dir。gofmt/vet 干净。",
+    "notes": "code-simplifier 把 requireBenchmark 显式 for 改为 slices.Contains(+slices 导入)，等价、双语言全绿；本次严格约束子代理未越界改状态机/discovery/commit。"
+  }
+}

@@ -42,3 +42,16 @@ TASK-009 首版我为遵守任务的"不改业务逻辑"约束，没加 resp.Sta
 - **包内重名 helper 冲突**：cmd/atlas 测试已有 engineWith(names...string)（注册 mock），新增按真实 Strategy 实例注册时要换名 engineWithStrategies，否则 DuplicateDecl。开工先 grep 既有 test helper。
 - **CLI 全策略注册 vs 离线运行**：export 引擎注册全 5 策略（含基本面），靠白名单在重放前拒绝——「注册≠运行」。少注册会让基本面策略名落入 unknown 分支，使显式拒绝路径不可达。用含负向断言的回归测试锁定。
 - **环境**：本机 pyenv python3 坏（libintl.8 缺失），任务文件读写一律用 jq，勿用 python3。
+
+## TASK-001 (sprint-004, 2026-06-12) export-ohlcv 核心
+- golden CSV 互锁：测试 helper 的生成规律与 want 串必须同生共死；为抓「列错位」缺陷，helper 必须给 O/H/L/C/V 互异值（全零的既有 makeBars 抓不出 open/high 互换）。
+- 失败语义分档要走**不同代码分支**：基准失败循环内即时 return（fatal），非基准 append failures 续跑。统一一个 `if err return` 会让「任何失败皆 fatal」的错误实现穿过验收——boundary 测试就是专门钉这个的。
+- resolver 空集判定要在「+基准去重」**之前**：否则空 watchlist 会退化成 {benchmark} 而非报错（C1-1）。
+- 流程坑复现：code-simplifier 子代理仍会越界自行走 discovery+dev_done+(漏)commit。每次调用后必须自查 task 状态/epoch/discovery/commit，别信子代理的完成自述。
+
+## TASK-002 (sprint-004, 2026-06-12) cobra 接线 + Makefile qlib-data
+- CLI 层校验设计成独立纯函数(requireBenchmark)并置于「resolver 之后、建 registry 之前」，就能让 RunE 测试零网络直调——缺基准时早于任何 collector return。可测性靠摆放顺序换来。
+- 双 package 任务要双语言自验：go test + 同款 venv pytest 都要绿；Makefile recipe 用 `make -n` 干跑确认变量展开 + 关键 flag 在/不在(--to not in)，比肉眼读 Makefile 可靠。
+- test_makefile 把硬编码 _signal_eval_block 泛化为 _target_block(name)+re.escape，4 既有测试改调零行为变化——「泛化既有 helper 而非复制」是加 target 守门测试的正解。
+- 子代理约束有效复盘：这次在 prompt 里硬性列「严禁碰 .arcforge/git/状态机 + 必须贴双语言测试结果」，code-simplifier 就只做了 slices.Contains 等价精简、没越界。约束要写死、可验证。
+- 提交只 add 本任务文件（cmd/atlas Makefile test_makefile.py），勿带 session 起点就 dirty 的 AGENTS.md/CLAUDE.md。

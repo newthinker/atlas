@@ -1,0 +1,44 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "qlib instrument 形如 SH600519（前缀大写交易所 + 去后缀代码），由 toQlibInstrument 从 600519.SH/.SZ 推导；CSV 文件名为 instrument 的 strings.ToLower（sh600519.csv）——大小写在两层分别钉死，下游 TASK-002 据此命名/校验。",
+    "CSV 是八列 qlib dump_bin 约定：symbol,date,open,high,low,close,volume,factor；factor 恒为字面量 \"1\"（源已前复权 fqt=1，评估器不乘 $factor），价格 %.2f、volume 整数。",
+    "失败语义分两档：基准 000300.SH 拉取失败或空 bars → 立即 fatal（错误消息含 benchmark）；其余 A 股失败/空/非 A 股 → 计入 failures 摘要、继续导出其余符号、已写 CSV 保留、整体返回非 0 error。",
+    "resolveOHLCVSymbols：显式 --symbols 原样透传（基准存在性校验留 TASK-002 CLI 层）；否则从 watchlist 过滤 .SH/.SZ + 追加基准、保序去重；过滤后空集 → error（绝不退化为只导基准，plan C1-1）。",
+    "测试需 O/H/L/C/V 互异的 bars 才能抓列错位——既有 makeBars 只填 Close/Time 不可用；本任务新建 makeOHLCVBars（跳周末、逐 bar 递增）与 fakeOHLCVProvider（per-symbol data/errs map）。golden want 串与 makeOHLCVBars 生成规律互锁。"
+  ],
+  "decisions": [
+    {
+      "decision": "toQlibInstrument 返回大写 instrument，文件名层单独 strings.ToLower，而非在一处兼顾两种大小写。",
+      "rationale": "instrument 大写是 qlib instruments/all.txt 与 D.features 的契约（镜像 symbols.py）；文件名小写是 dump_bin 输入约定。两者关注点不同，分层各自钉死，契约测试含 sh000300.csv 派生断言。"
+    },
+    {
+      "decision": "sleep 经 ohlcvDeps 注入（CLI 路径传 300ms 礼貌延迟，测试传空函数），provider/errOut 同样注入。",
+      "rationale": "核心层可离线确定性运行：测试零等待、用 fakeOHLCVProvider 表达 per-symbol 成功/失败、errOut 捕获摘要做断言。"
+    },
+    {
+      "decision": "基准失败在循环内即时 return，非基准失败 append 到 failures 续跑；循环后有 failures 才打印摘要并返回 error。",
+      "rationale": "boundary[1] 明确要求防「任何失败皆 fatal」的错误实现穿过验收——基准与非基准必须走不同分支。"
+    },
+    {
+      "decision": "makeOHLCVBars 用单一 bar 索引 i=len(bars) 派生全部列（Open=100+i …… Volume=1000+i），跳过周末。",
+      "rationale": "单一索引保证八列在 golden CSV 中同步推进、便于抓列错位；与 golden want 串逐字节互锁，注释标注不得单边改动。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "interfaces_exposed": [
+    "toQlibInstrument(symbol string) (string, error)：600519.SH->SH600519 / 399001.SZ->SZ399001；非 A 股 -> error",
+    "executeExportOHLCV(deps ohlcvDeps, p exportOHLCVParams) error：逐 A 股写 {out}/{lower instrument}.csv；非基准失败降级+非 0 退出，基准失败 fatal",
+    "resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem) ([]string, error)：显式 flag 透传 / 否则 watchlist .SH/.SZ + 基准保序去重；空集 -> error",
+    "type ohlcvDeps{provider backtest.OHLCVProvider; errOut io.Writer; sleep func()}、type exportOHLCVParams{Symbols []string; From,To,OutDir string}",
+    "测试 helper：makeOHLCVBars(start string, n int) []core.OHLCV（O/H/L/C/V 互异，与 golden 互锁）、fakeOHLCVProvider{data,errs map}、const benchmarkSymbol=\"000300.SH\""
+  ],
+  "verification": {
+    "command": "go test ./cmd/atlas/ -race -coverprofile",
+    "result": "ok，coverage 60.0% of statements（>= 35 基线），race 全绿",
+    "notes": "code-simplifier 已在 makeOHLCVBars 去除未用的外层循环计数器并将 bar 索引 len(bars) 提取为单一 i，消除一次迭代内的双读；生成值逐字节不变，golden CSV want 串与对外签名零变更。"
+  }
+}

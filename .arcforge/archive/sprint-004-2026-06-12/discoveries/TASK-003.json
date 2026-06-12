@@ -1,0 +1,42 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "本地 qlib dump_bin.py 的 DumpDataBase.__init__ 签名是 data_path（非旧教程的 csv_path）——命令行参数钉死 --data_path（plan 评审 C2-1 BLOCKER）。",
+    "dump_bin 的 instruments/all.txt 真实格式为 tab 分隔三字段（instrument 大写 + begin + end）；calendars/day.txt 每行一个日期。verify_bundle 据此只读校验。",
+    "--exclude_fields symbol,date 必须保留：symbol/date 是字符串列，不排除则 dump 内部 astype(float32) 必崩。",
+    "零 qlib import：唯一外部调用是 subprocess 跑官方 dump_bin.py，单测全部 mock subprocess.run，可从仓库根全绿。"
+  ],
+  "decisions": [
+    {
+      "decision": "run_dump_bin 进 dump 前先校验 csv_dir 非空且无空 CSV（每个 CSV >= header + 1 数据行），否则 raise ValueError。",
+      "rationale": "防空 instrument 污染产物（boundary[0]）；在 subprocess 之前拒绝，run.assert_not_called 可断言。"
+    },
+    {
+      "decision": "run_dump_bin 用 sys.executable 作解释器，不写死 python3。",
+      "rationale": "系统 python3 已损坏；hook/Makefile 均经 scripts/qlib_eval/.venv/bin/python，sys.executable 即该 venv。"
+    },
+    {
+      "decision": "verify_bundle 严格只读，绝不写 instruments/calendar（由 dump_bin 自动生成）。",
+      "rationale": "functional[2] 要求校验前后产物零修改；test_verify_bundle_is_read_only 用目录 sha256 指纹断言。"
+    },
+    {
+      "decision": "date_span_from_csvs 从全部 CSV 数据行的 date 列推导全局 (min,max)，argparse 不暴露日期参数。",
+      "rationale": "verify 区间由数据本身决定，避免人为传错区间。"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/build_data.py",
+    "scripts/qlib_eval/tests/test_build_data.py"
+  ],
+  "interfaces_exposed": [
+    "run_dump_bin(csv_dir, target_dir, scripts_dir=DEFAULT_QLIB_SCRIPTS) -> CompletedProcess; 非 0 返回码 -> RuntimeError（含 stderr 摘要）；空/仅 header CSV -> ValueError",
+    "date_span_from_csvs(csv_dir) -> (min_date, max_date) 字符串；无数据行 -> ValueError",
+    "verify_bundle(target_dir, expected_instruments, start, end) -> None；缺 instrument / calendar 不覆盖 -> ValueError；只读",
+    "main(argv=None) -> int"
+  ],
+  "verification": {
+    "command": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q",
+    "result": "42 passed（其中 test_build_data.py 10 passed）",
+    "notes": "code-simplifier 已抽出 _csv_lines 共享 helper 消除 CSV 读行重复，对外签名与 dump_bin 命令参数零变更。"
+  }
+}

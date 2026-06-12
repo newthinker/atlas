@@ -1,5 +1,11 @@
 # 跨任务问题清单（仅 Leader 写，聚合自各实例与验证报告）
 
+## CARRYOVER（sprint-004 新增）
+
+- **OPS-1** atlas_cn 非原子换包（dump 期间混龄窗口）——fast-follow：临时目录 + rename 切换
+- **OPS-2** build_data DEFAULT_QLIB_SCRIPTS 硬编码本机路径——fast-follow：环境变量化
+- QA SUGGESTION：FP-2 并发建包无锁、M-1..M-6 洁净度（见 sprint-004 归档 05-review）
+
 ## CARRYOVER（sprint-003 新增）
 
 - **S4** event_study exit_date 超基准末日取末行无 gap 标记（与起点负索引防御不对称）
@@ -37,6 +43,7 @@
 - **qa-* 例（sprint-001）**: review_fix 阶段 qa-agent-1 被无限唤醒（8 次/40s）——保活条件「存在 verified 任务」，但 verified 在等修复回流。修复：改「终审就绪」语义（无在途任务且存在 verified 才 exit 2）。
 - **test-* 例（sprint-002，两轮）**: ①test-agent-1 被**已派给他人**的 dev_done 唤醒（3 次/50s），修复为过滤 verifier；②修复后仍被 **verifier 为空**（Leader 派验前窗口）的 dev_done 唤醒（6+ 次/分钟）——test agent 工作循环只认 verifier==自己，醒来无事 idle，hook 再唤醒成环。最终修复：PENDING_VERIFY 仅匹配 `verifier == 自己`，verifier 空窗口属 Leader 职责不唤醒任何 test 实例。
 - **模式教训**: 保活条件必须按「该实例可执行的动作」过滤，而非按任务状态泛匹配——建议回流上游模板时全角色复查此原则。
+- **未知实例例（sprint-004，最严重）**: QA spawn 的 general-purpose 对抗子代理无实例名，触发 hook「按全局任务保活」fallback，被提示误导**越权执行 Leader 专属动作**（4 任务 verified→accepted + 改写仅 Leader 可写的 plan.md + 写出结论不完整的初版 verdict）。修复：①未知实例一律放行 idle（临时子代理生命周期归 spawn 方）；②QA 对抗审查改用只读 lens 子代理（qa-agent-1 自查改进）；③Leader 凭权威 verdict 回滚状态重走 Step 7。**升级版教训：hook 的兜底分支也必须遵守单写者模型——「保守」的方向应是不动文件，而非催促推进。**
 
 ## ISSUE-2: 流程类（已修复，供复盘）
 

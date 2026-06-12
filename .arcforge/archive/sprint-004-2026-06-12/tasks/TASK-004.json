@@ -1,0 +1,53 @@
+{
+  "id": "TASK-004",
+  "title": "QLIB_DIR 切换 + README + e2e 验收（必跑）",
+  "description": "按 plan rev4 Task 4 原文施工：Makefile QLIB_DIR 默认切 ~/.qlib/qlib_data/atlas_cn（test_makefile 锚定旧值的断言同步）；README 增建包章节（用法/复权口径 fqt=1 前复权 factor=1 与评估口径交叉引用/crontab 示例/社区包对比/evaluate.py 直调需自带 --qlib-dir）；**e2e 必跑**（ADR-S4-3，数据包与采集链路已在 sprint-003 验收实证可用）：make qlib-data → D.features 抽查 SH600519 首尾两天数值与源 CSV 逐值一致 → make signal-eval 默认 2021-2026 区间报告含非空策略结果表。",
+  "module": "qlib-eval",
+  "complexity": "medium",
+  "estimated_files": [
+    "Makefile",
+    "scripts/qlib_eval/README.md",
+    "scripts/qlib_eval/tests/test_makefile.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Makefile QLIB_DIR 默认 = atlas_cn（test_makefile 断言更新）",
+      "e2e：make qlib-data 成功产出 atlas_cn（instruments/calendar 校验通过）",
+      "e2e：D.features(['SH600519']) 首尾两天 open/close 与 qlib_csv/sh600519.csv 对应行逐值一致（spec 首日核对项）",
+      "e2e：make signal-eval（默认 2021-2026）报告含 ma_crossover 与 price_percentile 非空结果表——本需求存在理由"
+    ],
+    "boundary": [
+      "全量回归：go build/vet/test ./... + hook 同款 pytest 全绿"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "README 含五要素：建包用法/复权口径/crontab 示例/evaluate 直调注意/社区包 vs 自建包对比（含 QLIB_DIR 切换方法）",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./scripts/qlib_eval"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "fix_items": [
+    "QA FP-1: qlib_csv 残留旧符号 CSV 会被 dump 进新包——build_data 在 dump 前校验 csv_dir 文件集合与预期一致（如发现非本次导出符号的 .csv → raise 并提示清理；或 main 增加 --expected-symbols 比对），补测试",
+    "QA DC-1: README 评估口径补披露前复权跨日漂移——每日全量重建后历史前复权值会随新除权事件整体平移，跨日报告的同日数值可能不同（评估口径一节一段话）"
+  ]
+}

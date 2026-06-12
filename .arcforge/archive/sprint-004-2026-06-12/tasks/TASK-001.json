@@ -1,0 +1,46 @@
+{
+  "id": "TASK-001",
+  "title": "export-ohlcv 核心（qlib CSV 约定 + 符号契约 + 失败语义）",
+  "description": "按 plan rev4 Task 1 原文施工（docs/plans/2026-06-12-qlib-data-bundle-implementation.md）：toQlibInstrument（镜像 symbols.py，返回大写，文件名层 .lower()）、executeExportOHLCV（CSV 七列 factor=1、文件名小写 instrument、逐符号降级摘要、基准拉取失败 fatal、300ms sleep 注入）、resolveOHLCVSymbols resolver（watchlist .SH/.SZ + 基准去重，空集报错）。新建 helper makeOHLCVBars（O/H/L/C/V 互异）与 fakeOHLCVProvider（map data/errs）——**既有 makeBars 只填 Close/Time 不可用于 golden**（plan 评审 C1-2）。golden 与 helper 规律互锁不得单边改动。",
+  "module": "cmd-atlas",
+  "complexity": "complex",
+  "estimated_files": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "toQlibInstrument 契约测试与 symbols.py 同样本同结果：000300.SH→SH000300（含文件名派生断言 sh000300.csv）、600519.SH→SH600519、399001.SZ→SZ399001；五类非 A 股（AAPL/^GSPC/GC=F/BTC-USDT/0700.HK）拒绝",
+      "golden CSV 逐字节：header symbol,date,open,high,low,close,volume,factor + 三行互异 OHLCV 值 + factor 恒 1 + 文件名 sh600519.csv（plan 给定 want 串）",
+      "resolveOHLCVSymbols：watchlist {600519.SH,BTC-USDT,^GSPC,000300.SH} → {600519.SH,000300.SH}（.SH/.SZ 过滤+基准去重）"
+    ],
+    "boundary": [
+      "非 A 股符号在清单中 → 不落盘、errOut 摘要、返回 error，已成功 CSV 保留",
+      "非基准 A 股拉取失败（fakeOHLCVProvider.errs 注入如 600000.SH）→ 不中断、其余符号继续导出、摘要含该符号、整体非 0 退出、已成功 CSV 保留——防「任何失败皆 fatal」的错误实现穿过验收",
+      "watchlist 为空且未显式 --symbols → resolver 返回 error（绝不退化为只导基准）"
+    ],
+    "error_handling": [
+      "基准 000300.SH 拉取失败（或返回空 bars）→ 立即返回 error 且消息含 benchmark（核心层语义；清单含基准校验归 TASK-002 CLI 层）"
+    ],
+    "non_functional": [
+      {
+        "desc": "sleep 经 deps 注入（测试零等待）；go test ./cmd/atlas -race 通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "coverage_minimum": 35,
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

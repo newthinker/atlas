@@ -63,3 +63,12 @@
 - 修复取「冲突信号参考价」而非重新取末根收盘：合成点(arbitrate)手上只有 signals 没有 OHLCV，且冲突信号本就携带同一 cycle 的末根收盘价，referencePrice(首个正价) 最省且语义正确。
 - 回归守卫务必自证 RED：用 perl 临时把 fix 改回 Price=0 跑测试确认 FAIL 再还原——否则「碰巧通过」的 fantasy-pass 测试无法证明它真的守住了 bug（呼应 ISSUE-1 精神）。
 - QA S1(无锁读 set-once 字段)用注释固化不变量即可，不必上锁：与既有 executor 字段同模式，set-once@assembly(Start前) 是 -race 干净的根因。
+
+## sprint-004 TASK-003/004 (qlib 自建数据包：build_data.py + Makefile/README + e2e)
+- **dump_bin 参数名以本地副本签名为唯一真相**：`DumpDataBase.__init__(data_path, qlib_dir, ..., exclude_fields="")` 经 `fire` 暴露为 `--data_path/--qlib_dir/--exclude_fields`。网上旧教程的 `csv_path` 会让 mock 测试固化错误命令、实跑才崩（评审 C2-1 BLOCKER）。教训：薄封装外部 CLI 时，参数名先 `grep` 本地脚本的 `__init__`/argparse，别照网文。
+- **instruments/all.txt 真实格式**：tab 三字段 `SYMBOL\tbegin\tend`（symbol.upper()，`%Y-%m-%d`）；calendars/day.txt 每行一日期。verify_bundle 据此**只读**校验——fixture 必须按真实格式造，且用目录 sha256 指纹断言「校验前后零修改」。
+- **e2e 硬 DoD 真能揪出价值**：make qlib-data→D.features 首尾逐值对照 CSV→make signal-eval 默认区间非空结果表，三关全过才证明「本需求存在理由（社区包截止 2020-09 默认区间产不出结果）」被消除。D.features 首尾两天 open/close 与源 CSV 完全相等是最干脆的端到端正确性证据。
+- **FP-1 防呆的根因类型**：`main` 从「磁盘文件名」反推 expected，导致残留旧符号 CSV 静默混入、verify_bundle 也通过——自校验（拿磁盘当真相）永远抓不到磁盘本身的污染。修复=引入**外部意图符号集**(--expected-symbols，经 to_qlib_instrument 转换)独立比对。凡「从产物反推预期」的校验都要警惕这类自证陷阱。
+- **前复权跨日漂移**是评估口径的固有特性必须文档披露：每日全量重建遇新除权事件，历史前复权值整体平移→跨日报告同日绝对数值不同；横向(同包内)对比不受影响。
+- **code-simplifier 越权问题用「禁令式 prompt」根治**：TASK-003 首轮没写死禁令→它又擅自写 discovery+翻 dev_done+漏 commit（与 sprint-002 同款）；TASK-004 及 review_fix 轮在 prompt 写死「禁碰 .arcforge/、禁 git、禁改状态机、限 N 文件」后它正确 declined。结论固化：调子代理务必把 scope 边界 + 禁止动作写死，并事后独立核验 git/状态。
+- **本会话 SendMessage 工具不可用**：dev-agent 角色下只能经 `.arcforge/inbox/{ts}-dev-agent-2-to-leader.md` 通知 Leader。靠「文件系统是唯一真相源」——status 落盘 dev_done，Leader 轮询即见，通知丢失不影响推进。

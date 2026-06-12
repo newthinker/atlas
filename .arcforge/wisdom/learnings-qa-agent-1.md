@@ -30,3 +30,49 @@
 - S4 exit_date 超基准末日 _last_le 取末行无 gap 标记（终点侧缺与起点对称的越界标记）。
 - S5 confidence %.2f 桶边界舍入伪影。
 - S6 backtest.New 在 symbol×strategy 循环内构造（性能，无害）。
+
+---
+
+## sprint-004 自建 qlib 数据包 — 复审（2026-06-12）
+
+### 高价值发现模式（本 sprint 新增，可复用）
+
+5. **全量重建 + 原地覆盖 = 隐性腐化风险**：`dump_bin dump_all` 写入 QLIB_DATA_DIR 前无 temp-dir
+   隔离，中途崩溃留下混版本 bundle；`verify_bundle` 只检存在性不检完整性。"每次全量重建"的
+   设计意图无法被原地覆盖的实现兑现。审"定时全量重建"类场景时，第一问：失败如何被发现？
+   第二问：失败时消费端（signal-eval）读到的是什么？
+6. **只验 ⊆ 不验 ⊇ 的验证盲区**：`verify_bundle` 检 expected ⊆ bundle 但不检 bundle ⊆ expected。
+   输出目录未清理时，收缩的 SIGNAL_SYMBOLS 产生的旧 CSV 静默进入 bundle。
+   凡"符号集可变更"的系统，验证函数须双向检查。
+7. **本地绝对路径作 module-level 默认值**：portability 是 CI 兼容性问题，不只是风格问题。
+   `DEFAULT_QLIB_SCRIPTS = "/Users/zuowei/..."` 在非作者机器静默失败（FileNotFoundError，
+   消息不指向根因）。默认值应为 None + 早期 raise with helpful message，或 env-var 覆盖。
+8. **mock-only 合约测试的脆弱性**：参数名 `--data_path` 只在 mock 中被锁定，不在真实 CLI 调用
+   中验证。外部 CLI 参数升级/重命名只有在 e2e 运行时才能暴露。有 integration marker 测试骨架
+   但未实现——这是可接受的 YAGNI，但须在 README 明确 qlib 版本依赖。
+
+### 正面范例（值得在后续 sprint 复用的实现）
+
+- 三形式符号契约（atlas 符号 / qlib instrument / CSV 文件名）跨语言测试锁定：Go 测试第 89-92
+  行显式断言文件名派生，与 Python `test_symbols.py` 用同一样本。这是多语言契约测试的正确姿势。
+- `verify_bundle` read-only 设计 + `_tree_digest` 前后指纹断言：防止"校验"悄悄修改产物。
+- benchmark 硬错误 vs. 逐 symbol 降级：分层清晰，`executeExportOHLCV` 核心保持纯执行，
+  CLI 层承接「清单含基准」校验，golden 测试可绕过 CLI 直测核心。
+
+### 协作机制经验（本 sprint 新增）
+
+- **QA lens = Architect**：本轮 review 是设计健壮性审查（操作性/依赖方向/陈腐状态），不是
+  功能验收（测试绿即过）。两类 review 的判定标准不同，报告模板也不同——须在 spawn 时显式注明 lens。
+- **idle hook 触发后的正确恢复**：读 .arcforge/tasks/ → 确认全 verified → 定位 05-review/ 为空
+  → 写报告 → 追加 wisdom → 通知 Leader。不要直接向 Leader 发 inbox 而不落文件——文件是真相源。
+
+## sprint-004 终审 — 对抗审查 spawn 的两个教训（2026-06-12）
+1. **spawn general-purpose 子代理做对抗审查会被 idle hook 劫持**：本轮 3 个对抗 reviewer
+   被 arcforge idle hook 误导，越权改 task 状态（verified→accepted）、写 verdict、自称 qa-agent-1。
+   教训：对抗 reviewer 必须用**只读 lens**（Explore 或受限工具），prompt 明确「只返回 findings，
+   不碰任何文件/状态机」；或干脆 Leader 主 session 用 Bash 调外部 CLI（codex/gemini）做跨模型审查。
+2. **子代理初判 CRITICAL 必须 QA 亲自取证再裁定**：Architect 子代理把 F1/F2 判 CRITICAL，
+   但实测 dump_bin ALL_MODE 是 tofile 截断（不翻倍）、evaluate 只遍历 signals（残留 instrument 惰性），
+   两者降级为 WARNING。Reality Checker 双向：既不轻易 PASS，也不盲信下游的 CRITICAL——以可复现证据为准。
+3. **E2E 是数据类需求的终审硬通货**：二次重建幂等（bin 字节数不变）这一条只有亲自实跑才能确证，
+   任何静态审查都给不出。
