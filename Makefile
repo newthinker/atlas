@@ -9,12 +9,15 @@ SIGNAL_TO      ?= 2026-06-01
 
 # Python 评估链：系统 python3 已损坏，统一走预置 venv（3.11 + pandas + pytest）
 QLIB_PY        ?= scripts/qlib_eval/.venv/bin/python
-QLIB_DIR       ?= ~/.qlib/qlib_data/cn_data
 SIGNAL_OUT     ?= reports/
 
 # qlib 自建数据包：导出的 per-instrument CSV 目录 + dump_bin 产出的 qlib 数据目录
 QLIB_CSV_DIR   ?= qlib_csv
 QLIB_DATA_DIR  ?= $(HOME)/.qlib/qlib_data/atlas_cn
+
+# signal-eval 默认读自建包 atlas_cn（单一真相源）：社区包 cn_data 截止 2020-09，
+# 默认 2021-2026 区间产不出结果——本需求的存在理由。覆盖 QLIB_DIR 可回退社区包。
+QLIB_DIR       ?= $(QLIB_DATA_DIR)
 
 build:
 	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/atlas

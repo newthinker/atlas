@@ -97,3 +97,12 @@ def test_qlib_data_target_flags():
     assert "--from $(SIGNAL_FROM)" in block
     assert "--to" not in block  # spec: 不传 --to
     assert "$(QLIB_PY) scripts/qlib_eval/build_data.py" in block
+
+
+def test_qlib_dir_default_is_atlas_cn():
+    # TASK-004 functional[0]：signal-eval 默认 QLIB_DIR 必须指向自建包 atlas_cn
+    # （而非社区包 cn_data，社区包截止 2020-09 → 默认 2021-2026 区间产不出结果）。
+    defs = _var_defs(_makefile_text())
+    assert "QLIB_DIR" in defs, "Makefile 缺少 QLIB_DIR 变量"
+    expanded = _expand(defs["QLIB_DIR"], defs)
+    assert expanded.endswith("atlas_cn"), f"QLIB_DIR 默认须指向 atlas_cn，实得 {expanded!r}"

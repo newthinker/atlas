@@ -36,6 +36,65 @@ python -m qlib.cli.data qlib_data \
 - 数据包有**数据截止日局限**（非实时，最新若干交易日可能缺失）。
 - 缺数据目录时 `evaluate.py` 会打印上述下载命令并 `exit(1)`。
 
+## 自建数据包（atlas → qlib，默认路径）
+
+社区包截止 ~2020-09，`make signal-eval` 默认评估区间 2021–2026 在社区包上**产不出结果**。
+atlas 用自有采集器构建 qlib 数据包 `~/.qlib/qlib_data/atlas_cn`，与信号生成**同源**
+（同一套 collector / 同一 `FetchHistory`），覆盖至当天——这正是本评估链存在的理由。
+
+### 用法
+
+```bash
+# 从仓库根：导出 per-instrument OHLCV CSV → 官方 dump_bin 编译为 qlib 数据目录
+make qlib-data
+# 产出 qlib_csv/*.csv 与 ~/.qlib/qlib_data/atlas_cn/{instruments,calendars,features}
+# build_data.py 会只读校验 instruments/calendar 覆盖区间，不通过则非 0 退出
+
+make signal-eval    # 默认 QLIB_DIR 已指向 atlas_cn，直接产出非空报告
+```
+
+`qlib-data` 显式传 `--symbols $(SIGNAL_SYMBOLS)`（与 signal-eval 共用），天然保证
+「评估符号 ⊆ 数据包」；只传 `--from`、覆盖至当天。
+
+### 复权口径
+
+- 价格 = eastmoney **`fqt=1` 前复权**，与信号侧 `FetchHistory` 天然同源（同一次取数）。
+- CSV `factor` 列**恒为 `1`**：价格在源头已前复权，评估端**从不**再乘 `$factor`。
+- 与上文「评估口径」一节交叉引用：事件研究的 open/close 即前复权价，超额收益口径不变。
+
+### 社区包 vs 自建包
+
+| 维度 | 社区包 `cn_data` | 自建包 `atlas_cn` |
+|------|------------------|-------------------|
+| 数据截止 | ~2020-09（非实时） | 当天（每次 `make qlib-data` 重建） |
+| 数据源 | 第三方托管 | atlas 自有采集器（与信号同源） |
+| 覆盖符号 | 全市场 | `SIGNAL_SYMBOLS`（评估所需子集） |
+| 默认 2021–2026 区间 | **产不出结果** | 非空结果 |
+
+**QLIB_DIR 切换方法**：`signal-eval` 默认 `QLIB_DIR = $(QLIB_DATA_DIR)`（即 atlas_cn）。
+回退社区包：`make signal-eval QLIB_DIR=~/.qlib/qlib_data/cn_data`。
+
+### 定时重建（crontab 示例）
+
+atlas 不内置调度，用系统 cron 在每个交易日收盘后重建：
+
+```cron
+# 每个交易日 16:30 重建 qlib 数据包（日志追加到 /tmp/qlib-data.log）
+30 16 * * 1-5 cd /path/to/atlas && make qlib-data >> /tmp/qlib-data.log 2>&1
+```
+
+### 直接调用 evaluate.py 的注意
+
+`evaluate.py` 内置 `DEFAULT_QLIB_DIR` 仍指向社区包 `cn_data`（未改动）。**绕过 Makefile
+直接运行时必须自带 `--qlib-dir`** 指向 atlas_cn，否则会读到截止 2020-09 的社区包：
+
+```bash
+scripts/qlib_eval/.venv/bin/python scripts/qlib_eval/evaluate.py \
+  --signals signals.csv --qlib-dir ~/.qlib/qlib_data/atlas_cn --out reports/
+```
+
+`make signal-eval` 路径总是显式传 `--qlib-dir $(QLIB_DIR)`，不受该默认值影响。
+
 ## 运行
 
 一键端到端（推荐，从仓库根执行）：
