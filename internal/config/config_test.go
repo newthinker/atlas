@@ -1,13 +1,71 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/newthinker/atlas/internal/core"
 )
+
+// Context Checkpoint: done_criteria → test mapping (TASK-005)
+// functional[0]    "router.percentile_step 经 mapstructure 从配置解析生效" → TestLoad_RouterPercentileStep_FromYAML
+// boundary[0]      "未配置时字段为零值 0(Defaults 返回 0)"             → TestDefaults_RouterPercentileStep_Zero
+// error_handling[0] "PercentileStep<0 校验返回错误,链含 ErrConfigInvalid" → TestConfig_Validate_PercentileStepNegative
+
+// functional[0]: percentile_step parses from yaml via mapstructure tag.
+func TestLoad_RouterPercentileStep_FromYAML(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+router:
+  percentile_step: 5
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Router.PercentileStep != 5 {
+		t.Errorf("Router.PercentileStep = %v, want 5", cfg.Router.PercentileStep)
+	}
+}
+
+// boundary[0]: unset percentile_step is zero (disabled, back-compat); Defaults omits it.
+func TestDefaults_RouterPercentileStep_Zero(t *testing.T) {
+	if got := Defaults().Router.PercentileStep; got != 0 {
+		t.Errorf("Defaults Router.PercentileStep = %v, want 0", got)
+	}
+	cfgPath := writeTempConfig(t, "server:\n  port: 8080\n")
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Router.PercentileStep != 0 {
+		t.Errorf("unconfigured Router.PercentileStep = %v, want 0", cfg.Router.PercentileStep)
+	}
+}
+
+// error_handling[0]: negative percentile_step rejected, error chain holds ErrConfigInvalid.
+func TestConfig_Validate_PercentileStepNegative(t *testing.T) {
+	c := validConfig()
+	c.Router.PercentileStep = -1
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative percentile_step, got nil")
+	}
+	if !errors.Is(err, core.ErrConfigInvalid) {
+		t.Errorf("error chain must contain core.ErrConfigInvalid, got %v", err)
+	}
+	// zero and positive must pass.
+	for _, v := range []float64{0, 5} {
+		c.Router.PercentileStep = v
+		if err := c.Validate(); err != nil {
+			t.Errorf("percentile_step=%v: unexpected error %v", v, err)
+		}
+	}
+}
 
 func TestLoad_FromFile(t *testing.T) {
 	content := []byte(`

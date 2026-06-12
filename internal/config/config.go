@@ -111,6 +111,10 @@ type NotifierConfig struct {
 type RouterConfig struct {
 	CooldownHours int     `mapstructure:"cooldown_hours"`
 	MinConfidence float64 `mapstructure:"min_confidence"`
+	// PercentileStep is the global re-alert step for percentile signals.
+	// 0 (the zero value / unconfigured) disables the gate; per-strategy
+	// params.percentile_step overrides it. Negative is rejected by Validate.
+	PercentileStep float64 `mapstructure:"percentile_step"`
 }
 
 type WatchlistItem struct {
@@ -342,6 +346,10 @@ func (c *Config) Validate() error {
 	if c.Router.CooldownHours < 0 {
 		return core.WrapError(core.ErrConfigInvalid,
 			fmt.Errorf("cooldown_hours cannot be negative, got %d", c.Router.CooldownHours))
+	}
+	if c.Router.PercentileStep < 0 {
+		return core.WrapError(core.ErrConfigInvalid,
+			fmt.Errorf("percentile_step cannot be negative, got %f", c.Router.PercentileStep))
 	}
 
 	// LLM validation - if provider set, check config exists
