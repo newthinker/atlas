@@ -482,6 +482,73 @@ func TestRoute_StepDisabled_UsesCooldown(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// TASK-002 cooldown interaction, RouteBatch and state management
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] 分位信号不更新冷却戳        → TestRoute_PercentileSignalDoesNotTouchCooldown
+// functional[1] RouteBatch 复用步进门控      → TestRouteBatch_UsesPercentileGate
+// functional[2] ClearCooldown 前缀清步进 key → TestClearCooldowns_AlsoClearPercentileGates (前半)
+// functional[3] ClearAllCooldowns 全清       → TestClearCooldowns_AlsoClearPercentileGates (后半)
+// functional[4] GetStats 暴露门控状态        → TestGetStats_IncludesPercentileGate
+// boundary[0]   RouteBatch nil-registry 守卫 → TestRouteBatch_UsesPercentileGate (nil registry 构造)
+// ---------------------------------------------------------------------------
+
+func TestRoute_PercentileSignalDoesNotTouchCooldown(t *testing.T) {
+	r := newStepRouter(5)
+	// 分位信号通知后……
+	r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49))
+	// ……同标的无元数据信号（如 ma_crossover）不应被冷却压制（冷却戳未被分位路径更新）
+	plain := core.Signal{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.9, Strategy: "ma_crossover"}
+	if routed, _ := r.Route(plain); !routed {
+		t.Error("percentile signal must not stamp the per-symbol cooldown")
+	}
+}
+
+func TestClearCooldowns_AlsoClearPercentileGates(t *testing.T) {
+	r := newStepRouter(5)
+	r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49))
+	r.Route(pctSignal("0700.HK", "price_percentile", core.ActionBuy, 40))
+
+	r.ClearCooldown("600519.SH") // 按 symbol| 前缀清除步进 key
+	if routed, _ := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 48)); !routed {
+		t.Error("after ClearCooldown the first percentile signal must route again")
+	}
+	if routed, _ := r.Route(pctSignal("0700.HK", "price_percentile", core.ActionBuy, 39)); routed {
+		t.Error("other symbols' gates must survive ClearCooldown(600519.SH)")
+	}
+
+	r.ClearAllCooldowns()
+	if routed, _ := r.Route(pctSignal("0700.HK", "price_percentile", core.ActionBuy, 38)); !routed {
+		t.Error("after ClearAllCooldowns all gates must reset")
+	}
+}
+
+func TestRouteBatch_UsesPercentileGate(t *testing.T) {
+	r := newStepRouter(5)
+	// 批内同 key 两条：第一条放行并更新状态，第二条按更新后状态判定（与连续 Route 等价）
+	err := r.RouteBatch([]core.Signal{
+		pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49),
+		pctSignal("600519.SH", "price_percentile", core.ActionBuy, 47), // |47-49|<5 → 不入批
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 间接断言：再 Route 44 应放行（状态为 49 而非 47）
+	if routed, _ := r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 44)); !routed {
+		t.Error("batch must have recorded 49 (not 47); |44-49|=5 should route")
+	}
+}
+
+func TestGetStats_IncludesPercentileGate(t *testing.T) {
+	r := newStepRouter(5)
+	r.Route(pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49))
+	stats := r.GetStats()
+	if stats["percentile_gates_active"] != 1 || stats["percentile_step"] != 5.0 {
+		t.Errorf("stats = %+v", stats)
+	}
+}
+
 func TestRouter_CleanupExpiredCooldowns(t *testing.T) {
 	cfg := Config{
 		CooldownDuration: 100 * time.Millisecond,

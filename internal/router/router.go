@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,17 +139,33 @@ func (r *Router) RouteBatch(signals []core.Signal) error {
 	var filtered []core.Signal
 
 	for _, signal := range signals {
-		if r.passesFilters(signal) {
-			filtered = append(filtered, signal)
-
-			// Update cooldown
+		if !r.passesStaticFilters(signal) {
+			continue
+		}
+		// Same dispatch as Route: percentile signals go through the step gate
+		// (no cooldown read/stamp); all others take the cooldown path and stamp
+		// it. Evaluated in order so a later signal sees the earlier one's state.
+		if pct, ok := r.percentileOf(signal); ok && r.effectiveStep(signal) > 0 {
+			if !r.passPercentileGate(signal, pct, r.effectiveStep(signal)) {
+				continue
+			}
+		} else {
+			if !r.passesCooldown(signal) {
+				continue
+			}
 			r.mu.Lock()
 			r.cooldowns[signal.Symbol] = time.Now()
 			r.mu.Unlock()
 		}
+		filtered = append(filtered, signal)
 	}
 
 	if len(filtered) == 0 {
+		return nil
+	}
+
+	// nil registry is allowed (parity with Route): nothing to notify.
+	if r.registry == nil {
 		return nil
 	}
 
@@ -170,13 +187,6 @@ func (r *Router) RouteBatch(signals []core.Signal) error {
 	)
 
 	return nil
-}
-
-// passesFilters checks if a signal passes the static filters and the cooldown.
-// Retained for RouteBatch (Task 2 splits the batch dispatch); Route() now uses
-// passesStaticFilters + the percentile/cooldown dispatch directly.
-func (r *Router) passesFilters(signal core.Signal) bool {
-	return r.passesStaticFilters(signal) && r.passesCooldown(signal)
 }
 
 // passesStaticFilters checks the confidence threshold and action whitelist —
@@ -280,17 +290,29 @@ func (r *Router) passPercentileGate(sig core.Signal, pct, step float64) bool {
 	return true
 }
 
-// ClearCooldown removes cooldown for a specific symbol
+// ClearCooldown removes cooldown for a specific symbol, and also clears that
+// symbol's percentile gate state. Gate keys are "symbol|strategy|side"; we
+// assume symbol contains no '|' (true for all current watchlist symbol forms),
+// so the "symbol|" prefix uniquely identifies the symbol's gate entries.
 func (r *Router) ClearCooldown(symbol string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	delete(r.cooldowns, symbol)
-	r.mu.Unlock()
+
+	prefix := symbol + "|"
+	for key := range r.pctGates {
+		if strings.HasPrefix(key, prefix) {
+			delete(r.pctGates, key)
+		}
+	}
 }
 
-// ClearAllCooldowns removes all cooldowns
+// ClearAllCooldowns removes all cooldowns and all percentile gate state.
 func (r *Router) ClearAllCooldowns() {
 	r.mu.Lock()
 	r.cooldowns = make(map[string]time.Time)
+	r.pctGates = make(map[string]float64)
 	r.mu.Unlock()
 }
 
@@ -339,9 +361,11 @@ func (r *Router) GetStats() map[string]any {
 	defer r.mu.RUnlock()
 
 	return map[string]any{
-		"cooldowns_active": len(r.cooldowns),
-		"min_confidence":   r.cfg.MinConfidence,
-		"cooldown_seconds": r.cfg.CooldownDuration.Seconds(),
-		"enabled_actions":  r.cfg.EnabledActions,
+		"cooldowns_active":        len(r.cooldowns),
+		"min_confidence":          r.cfg.MinConfidence,
+		"cooldown_seconds":        r.cfg.CooldownDuration.Seconds(),
+		"enabled_actions":         r.cfg.EnabledActions,
+		"percentile_gates_active": len(r.pctGates),
+		"percentile_step":         r.cfg.PercentileStep, // global fallback only
 	}
 }
