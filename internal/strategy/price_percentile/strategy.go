@@ -17,10 +17,11 @@ import (
 // Strategy emits buy/sell signals from where the current close sits within its
 // own multi-year price distribution.
 type Strategy struct {
-	lookbackYears int
-	low, high     float64
-	extremeLow    float64
-	extremeHigh   float64
+	lookbackYears  int
+	low, high      float64
+	extremeLow     float64
+	extremeHigh    float64
+	percentileStep float64 // 0 = unconfigured; router falls back to its global step
 }
 
 func New() *Strategy {
@@ -46,6 +47,7 @@ func (s *Strategy) Init(cfg strategy.Config) error {
 	s.high = numParam(cfg.Params, "high", s.high)
 	s.extremeLow = numParam(cfg.Params, "extreme_low", s.extremeLow)
 	s.extremeHigh = numParam(cfg.Params, "extreme_high", s.extremeHigh)
+	s.percentileStep = numParam(cfg.Params, "percentile_step", 0) // ≤0 = unconfigured
 	if !(s.extremeLow < s.low && s.low < s.high && s.high < s.extremeHigh) {
 		return fmt.Errorf("price_percentile: thresholds must satisfy extreme_low < low < high < extreme_high, got %.1f/%.1f/%.1f/%.1f",
 			s.extremeLow, s.low, s.high, s.extremeHigh)
@@ -73,6 +75,12 @@ func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) 
 	if action == "" {
 		return nil, nil
 	}
+	md := map[string]any{
+		"percentile": p, "lookback_years": s.lookbackYears, "sample_size": len(closes),
+	}
+	if s.percentileStep > 0 {
+		md["percentile_step"] = s.percentileStep // strategy-level step; router prefers it over global
+	}
 	return []core.Signal{{
 		Symbol:      ctx.Symbol,
 		Action:      action,
@@ -81,9 +89,7 @@ func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) 
 		Reason:      fmt.Sprintf("price at %.1f%% of %d-year range", p, s.lookbackYears),
 		Strategy:    s.Name(),
 		GeneratedAt: ctx.Now,
-		Metadata: map[string]any{
-			"percentile": p, "lookback_years": s.lookbackYears, "sample_size": len(closes),
-		},
+		Metadata:    md,
 	}}, nil
 }
 

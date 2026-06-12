@@ -102,6 +102,73 @@ func TestInit_ParamTypes(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-003)
+// functional[0] "Init(percentile_step:3 int) → 信号 Metadata[percentile_step]==3.0" → TestInit_PercentileStepParam
+// boundary[0]   "未配置 percentile_step → 信号 Metadata 不含该键"                    → TestAnalyze_NoStepParam_NoStepMetadata
+// boundary[1]   "percentile_step ≤ 0 → 视为未配置,不写元数据"                        → TestInit_PercentileStepNonPositive
+
+// analyzeWithExtremeLowPercentile drives one extreme-low (strong_buy) signal,
+// reusing the SignalBands construction (300 bars, last close at historical low).
+func analyzeWithExtremeLowPercentile(t *testing.T, s *Strategy) []core.Signal {
+	t.Helper()
+	closes := make([]float64, 300)
+	for i := range closes {
+		closes[i] = 100 + float64(i%50)
+	}
+	closes[299] = 50 // historical low → extreme-low percentile → strong_buy
+	sigs, err := s.Analyze(ctxWithCloses(closes))
+	if err != nil {
+		t.Fatalf("Analyze error: %v", err)
+	}
+	return sigs
+}
+
+// functional[0]: int-form percentile_step param propagates to signal metadata.
+// (float64 form is covered by the existing numParam dual-form tests.)
+func TestInit_PercentileStepParam(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"percentile_step": 3}}); err != nil {
+		t.Fatal(err)
+	}
+	sigs := analyzeWithExtremeLowPercentile(t, s)
+	if len(sigs) == 0 {
+		t.Fatal("expected a signal")
+	}
+	if sigs[0].Metadata["percentile_step"] != 3.0 {
+		t.Errorf("metadata percentile_step = %v, want 3.0", sigs[0].Metadata["percentile_step"])
+	}
+}
+
+// boundary[0]: guard test — absent when not configured (router falls back to global).
+func TestAnalyze_NoStepParam_NoStepMetadata(t *testing.T) {
+	s := New()
+	_ = s.Init(strategy.Config{})
+	sigs := analyzeWithExtremeLowPercentile(t, s)
+	if len(sigs) == 0 {
+		t.Fatal("expected a signal")
+	}
+	if _, ok := sigs[0].Metadata["percentile_step"]; ok {
+		t.Error("percentile_step must be absent when not configured (router falls back to global)")
+	}
+}
+
+// boundary[1]: percentile_step ≤ 0 is treated as unconfigured (no metadata written).
+func TestInit_PercentileStepNonPositive(t *testing.T) {
+	for _, v := range []any{0, -1, 0.0, -2.5} {
+		s := New()
+		if err := s.Init(strategy.Config{Params: map[string]any{"percentile_step": v}}); err != nil {
+			t.Fatalf("step=%v: Init error %v", v, err)
+		}
+		sigs := analyzeWithExtremeLowPercentile(t, s)
+		if len(sigs) == 0 {
+			t.Fatalf("step=%v: expected a signal", v)
+		}
+		if _, ok := sigs[0].Metadata["percentile_step"]; ok {
+			t.Errorf("step=%v: percentile_step ≤ 0 must not write metadata", v)
+		}
+	}
+}
+
 // error_handling[0]: thresholds out of order must fail Init.
 func TestInit_ThresholdDisorder(t *testing.T) {
 	cases := []map[string]any{
