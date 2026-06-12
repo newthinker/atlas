@@ -337,6 +337,10 @@ func TestPureHelpers(t *testing.T) {
 		"159915.SZ": false, // ETF is not an open-end fund
 		"600519.SH": false, // starts with 6
 		"12345":     false, // wrong length
+		// A-share indexes share leading digits with fund codes but are
+		// not funds — they must take the index secid path, not fund NAV
+		// (regression: FetchHistory("000300.SH") failed as "no history for fund")
+		"000300.SH": false, "000001.SH": false, "399001.SZ": false,
 	}
 	for sym, want := range fundCases {
 		if got := e.isFund(sym); got != want {

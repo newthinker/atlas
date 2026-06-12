@@ -145,6 +145,11 @@ func (e *Eastmoney) isETF(symbol string) bool {
 // isFund checks if the symbol is an open-end fund (开放式基金/场外基金)
 // These funds only have daily NAV data, no intraday OHLCV
 func (e *Eastmoney) isFund(symbol string) bool {
+	// A-share indexes (000300.SH 沪深300 etc.) share leading digits with
+	// open-end fund codes but must take the index secid path.
+	if collector.IsAShareIndex(symbol) {
+		return false
+	}
 	code, _ := e.parseSymbol(symbol)
 	if len(code) != 6 {
 		return false
