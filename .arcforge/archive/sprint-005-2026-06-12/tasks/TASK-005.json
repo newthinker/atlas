@@ -1,0 +1,41 @@
+{
+  "id": "TASK-005",
+  "title": "config 增加 router.percentile_step 字段与校验",
+  "description": "internal/config/config.go：RouterConfig（:111-114）增加 PercentileStep float64 `mapstructure:\"percentile_step\"`；校验块（:337-345）追加 PercentileStep < 0 拒绝，沿用 core.WrapError(core.ErrConfigInvalid, ...) 风格；默认值块（:286-289）不加该字段（零值 0 = 禁用，向后兼容）。在 internal/config 包内写 TDD 测试：字段可从 yaml/map 解析、负值校验拒绝、未配置时为 0。",
+  "module": "config",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "RouterConfig.PercentileStep 经 mapstructure 标签 percentile_step 从配置解析生效（包内测试断言解析结果）"
+    ],
+    "boundary": [
+      "未配置 percentile_step 时字段为零值 0（默认值块不含该字段，Defaults() 返回 0）"
+    ],
+    "error_handling": [
+      "PercentileStep < 0 时校验返回错误，错误链含 core.ErrConfigInvalid（与既有校验风格一致）"
+    ],
+    "non_functional": [
+      {
+        "desc": "既有 config 用例零回归（go test ./internal/config/ 全 PASS）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/config"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

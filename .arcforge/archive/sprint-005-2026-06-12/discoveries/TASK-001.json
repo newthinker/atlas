@@ -1,0 +1,37 @@
+{
+  "task": "TASK-001",
+  "title": "router 步进门控核心",
+  "key_findings": [
+    "现有 router 仅有按标的时间冷却（cooldowns map[string]time.Time），无分位语义。",
+    "Route() 签名 (routed bool, err error) 未变；唯一外部调用方 internal/app/app.go:425 (a.router.Route(sig)) 无行为依赖变更。",
+    "app.New() (app.go:91-96) 仍硬编码 router.Config（无 PercentileStep，零值=禁用）——配置接线属 Task 4，本任务不动，零值向后兼容。",
+    "passesFilters 被保留为 passesStaticFilters && passesCooldown 的薄包装，RouteBatch 仍调用它（RouteBatch 改造属 Task 2），故无回归。"
+  ],
+  "decisions": [
+    {"decision": "percentileOf 实现为 *Router 方法而非自由函数", "rationale": "done_criteria non_functional 要求类型不符元数据时输出 debug 日志，需 r.logger；自由函数无法访问 logger。"},
+    {"decision": "冷却戳更新移入 Route() 的 else(冷却)分支内", "rationale": "设计 §1/§4：分位信号完全替代冷却，不得更新冷却戳，否则压制同标的其它策略（Task 2 的 NotTouchCooldown 测试依赖此）。"},
+    {"decision": "passPercentileGate 用单 r.mu.Lock() 临界区完成 check+update", "rationale": "设计 §4：避免 check-then-act 竞态，不照搬冷却的 RLock+Lock 两段式。"},
+    {"decision": "effectiveStep 优先 Metadata[percentile_step](float64且>0)否则全局 cfg.PercentileStep", "rationale": "rev4 策略级步长：信号自带覆盖全局；类型异常(string)回退全局；全局0+信号3 仍启用门控。"},
+    {"decision": "新增 StaticFilterBeforeGate 测试", "rationale": "done_criteria functional[4] / reviewer 反审补充：低置信分位信号被静态过滤拦截且不写门控状态，随后合格信号按首次放行。"}
+  ],
+  "files_modified": [
+    "internal/router/router.go",
+    "internal/router/router_test.go"
+  ],
+  "interfaces_exposed": {
+    "Config.PercentileStep": "float64 `mapstructure:\"percentile_step\"` — 全局回退步长，0=禁用。供 TASK-004 config 接线使用。",
+    "Router.pctGates": "map[string]float64 私有字段，key=symbol|strategy|side。供 TASK-002 ClearCooldown/ClearAllCooldowns/GetStats 使用。",
+    "(*Router).percentileOf(sig) (float64,bool)": "私有方法，依序取 Metadata[percentile]/[pe_percentile]，类型不符输 debug 日志。",
+    "(*Router).effectiveStep(sig) float64": "私有方法，策略级步长优先回退全局。",
+    "sideOf(action core.Action) string": "包级私有函数，buy/strong_buy→buy，其余→sell。",
+    "(*Router).passPercentileGate(sig, pct, step) bool": "私有方法，单临界区 check+update。供 TASK-002 RouteBatch 复用以防旁路。",
+    "(*Router).passesStaticFilters(sig) bool / (*Router).passesCooldown(sig) bool": "passesFilters 拆分出的两个私有方法；passesFilters 保留为二者 && 包装。供 TASK-002 RouteBatch 分流复用。"
+  },
+  "verification": {
+    "tests": "go test ./internal/router/ -v：20 个用例全 PASS（既有 12 + 新增 8，零回归）。",
+    "new_tests": ["TestRoute_PercentileStep_BuySide","TestRoute_PercentileStep_SellSideSymmetric","TestRoute_PercentileStep_KeysIndependent","TestRoute_PercentileStep_BadMetadataFallsBackToCooldown","TestRoute_PercentileStep_PerStrategyOverride","TestRoute_PercentileStep_StaticFilterBeforeGate","TestRoute_StepDisabled_UsesCooldown"],
+    "coverage": "go tool cover -func=/tmp/cov-001.out → total 83.8% (≥80)。新增 6 个函数均 100%；未覆盖的 ClearAllCooldowns/StartCleanupRoutine 为既有未测函数(非本任务范围, ClearAllCooldowns 属 Task 2)。",
+    "build": "go build ./... 通过；go vet ./internal/router/ 无输出。",
+    "commit": "055d062"
+  }
+}

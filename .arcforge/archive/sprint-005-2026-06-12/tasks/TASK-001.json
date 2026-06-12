@@ -1,0 +1,72 @@
+{
+  "id": "TASK-001",
+  "title": "router 步进门控核心（Route 分流 + 策略级步长）",
+  "description": "在 internal/router 实现百分位步进门控：Config 增加 PercentileStep；Router 增加 pctGates 状态（与 cooldowns 共用 r.mu）；percentileOf/effectiveStep/sideOf/passPercentileGate 四个函数；passesFilters 拆为 passesStaticFilters + passesCooldown；Route() 分流（分位信号走步进门控、不查不更新冷却戳，冷却戳更新移入冷却分支）。测试与实现骨架以 docs/plans/2026-06-12-percentile-step-implementation.md Task 1 为准（严格 TDD：先抄入 Step 1 全部测试确认 FAIL，再做 Step 3 最小实现）。",
+  "module": "router",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/router/router.go",
+    "internal/router/router_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "买入侧步进序列 49→放行 47→抑制 44→放行 46→抑制 49→放行（恢复重算，|49-44|=5≥5），与计划 TestRoute_PercentileStep_BuySide 一致",
+      "卖出侧对称：81→放行 83→抑制 86→放行（TestRoute_PercentileStep_SellSideSymmetric）",
+      "门控 key 独立性：buy/sell 侧独立、不同 strategy 独立、strong_buy 与 buy 共享同侧 key（TestRoute_PercentileStep_KeysIndependent）",
+      "策略级步长三态（同一测试 TestRoute_PercentileStep_PerStrategyOverride）：Metadata percentile_step=3.0 覆盖全局 5；全局 step=0 + 信号 step=3 仍启用门控；step 元数据类型异常（string \"3\"）→ 回退全局步长 5 门控",
+      "静态过滤前置于步进分支：低于 min_confidence 的分位信号 routed=false 且不写入步进门控状态——随后同分位的合格信号按「首次」放行（新增测试，reviewer 反审补充，设计 §4 通用前置）"
+    ],
+    "boundary": [
+      "全局 step=0 且信号无 step 元数据 → 分位信号走冷却路径（TestRoute_StepDisabled_UsesCooldown），既有 router 用例零回归（go test ./internal/router/ 全 PASS）",
+      "分位元数据类型非 float64（string）→ 回退冷却路径不 panic（TestRoute_PercentileStep_BadMetadataFallsBackToCooldown）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "步进判定与状态写入在同一 r.mu.Lock() 临界区内完成（passPercentileGate 单临界区，无 check-then-act 竞态）；冷却戳更新只发生在冷却分支内；percentileOf 遇类型不符元数据时输出 debug 日志说明（设计 §5）",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/router"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "id": "QA-C1",
+      "severity": "CRITICAL",
+      "title": "pctGates memory leak: no cleanup routine",
+      "description": "pctGates map accumulates without cleanup. CleanupExpiredCooldowns() must also clean pctGates. StartCleanupRoutine() must be called from app.New() or app.Start().",
+      "location": "internal/router/router.go:308-325",
+      "assignee": "dev-agent-1",
+      "required_action": "Add cleanup logic + call routine from app"
+    },
+    {
+      "id": "QA-C2",
+      "severity": "CRITICAL",
+      "title": "sideOf() has silent default case",
+      "description": "sideOf() defaults all non-buy actions to sell. Must use switch with panic default to catch unknown action types.",
+      "location": "internal/router/router.go:257-264",
+      "assignee": "dev-agent-1",
+      "required_action": "Change to switch/case with panic; add test TestSideOf_UnknownActionPanics"
+    },
+    {
+      "id": "QA-C3",
+      "severity": "CRITICAL",
+      "title": "passesDispatchGate lacks decision tree documentation",
+      "description": "Function logic is correct but decision tree (percentile path vs cooldown path) is undocumented. Must add detailed comments explaining mutual exclusivity.",
+      "location": "internal/router/router.go:183-204",
+      "assignee": "dev-agent-1",
+      "required_action": "Add decision tree comments; add tests TestPassesDispatchGate_PercentilePathDoesNotTouchCooldown"
+    }
+  ],
+  "verifier": "test-agent-1"
+}

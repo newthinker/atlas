@@ -1,0 +1,27 @@
+{
+  "task": "TASK-004",
+  "key_findings": [
+    "pe_percentile 分位元数据键是 pe_percentile（非 percentile）；步长元数据键统一为 percentile_step（router 跨策略共用此键提取有效步长）。",
+    "本包已有 numParam 双形态 helper（int/float64），直接复用读取 percentile_step，无需新增解析逻辑。",
+    "外部调用方仅 cmd/atlas（export_signals.go/serve.go）经 New()+Config{Params} 注入，新增私有字段 + 可选 param 完全向后兼容，无签名变更。",
+    "造数 helper peCtx(5, \"lixinger_cvpos\") 触发一条 strong_buy 信号（5<extremeLow 10），用于端到端断言 Metadata。"
+  ],
+  "decisions": [
+    {"decision": "percentileStep 用 numParam(..., 0) 读取，>0 才写 Metadata[\"percentile_step\"]", "rationale": "与设计 rev4 §2 一致：≤0=未配置，router 回退全局默认；缺键而非写 0 让 router 的回退分支自然生效。"},
+    {"decision": "保持 pe_percentile 与 price_percentile 独立实现，不抽公共基类", "rationale": "任务/包注释明确两策略阈值语义可能分化，~30 行重复换取清晰边界（plan Task 10）。"},
+    {"decision": "新增 TestInit_PercentileStepNonPositive_NoMetadata 覆盖 int0/负/float0 三态", "rationale": "boundary[1] ≤0 视为未配置，需多形态零值都不写元数据。"}
+  ],
+  "files_modified": [
+    "internal/strategy/pe_percentile/strategy.go",
+    "internal/strategy/pe_percentile/strategy_test.go"
+  ],
+  "interfaces_exposed": [
+    "Signal.Metadata[\"percentile_step\"] float64：仅当策略 params.percentile_step>0 时存在；router effectiveStep 优先采用，缺失则回退 router.percentile_step。"
+  ],
+  "verification": {
+    "tests": "go test ./internal/strategy/pe_percentile/ -v → 8/8 PASS（既有 5 + 新增 3）",
+    "coverage": "92.7% (≥80% dev_minimum)",
+    "vet_build": "go vet 通过；go build ./... 成功（cmd/atlas 调用方零回归）",
+    "commit": "10984ba"
+  }
+}

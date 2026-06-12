@@ -1,0 +1,40 @@
+{
+  "id": "TASK-003",
+  "title": "price_percentile 策略级步长参数",
+  "description": "internal/strategy/price_percentile：结构体加 percentileStep float64；Init 用既有 numParam 双形态 helper 读取 params.percentile_step（≤0 视为未配置）；Analyze 构造 Metadata 时仅在 >0 时写入 md[\"percentile_step\"]。保持与 pe_percentile 独立实现，不抽公共基类。测试骨架以计划文档 Task 3 为准（需自建 analyzeWithExtremeLowPercentile 造数 helper，按本包既有测试造数方式触发一条 buy 信号）。注意 RED 阶段守卫测试 TestAnalyze_NoStepParam_NoStepMetadata 本就 PASS，只有一半红是预期。",
+  "module": "strategy/price_percentile",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/strategy/price_percentile/strategy.go",
+    "internal/strategy/price_percentile/strategy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Init(Params{percentile_step: 3})（int 形态）后触发的信号 Metadata[\"percentile_step\"] == 3.0（TestInit_PercentileStepParam；float64 形态由既有 numParam 用例覆盖）"
+    ],
+    "boundary": [
+      "未配置 percentile_step → 信号 Metadata 不含 percentile_step 键（TestAnalyze_NoStepParam_NoStepMetadata）",
+      "percentile_step ≤ 0 → 视为未配置，不写元数据"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "既有 price_percentile 用例零回归（go test ./internal/strategy/price_percentile/ 全 PASS）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/strategy/price_percentile"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

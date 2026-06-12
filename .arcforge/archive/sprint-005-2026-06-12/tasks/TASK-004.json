@@ -1,0 +1,40 @@
+{
+  "id": "TASK-004",
+  "title": "pe_percentile 策略级步长参数",
+  "description": "internal/strategy/pe_percentile：与 TASK-003 同构——结构体加 percentileStep float64；Init 用既有 numParam 双形态 helper 读取 params.percentile_step（≤0 视为未配置）；Analyze 仅在 >0 时写 md[\"percentile_step\"]。保持独立实现。造数 helper 用本包既有 peCtx(5, ...) 方式触发一条 buy 信号。注意本策略分位元数据键是 pe_percentile（非 percentile）。RED 阶段守卫测试本就 PASS，只有一半红是预期。",
+  "module": "strategy/pe_percentile",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/strategy/pe_percentile/strategy.go",
+    "internal/strategy/pe_percentile/strategy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Init(Params{percentile_step: 3})（int 形态）后触发的信号 Metadata[\"percentile_step\"] == 3.0（TestInit_PercentileStepParam；float64 形态由既有 numParam 用例覆盖）"
+    ],
+    "boundary": [
+      "未配置 percentile_step → 信号 Metadata 不含 percentile_step 键（TestAnalyze_NoStepParam_NoStepMetadata）",
+      "percentile_step ≤ 0 → 视为未配置，不写元数据"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "既有 pe_percentile 用例零回归（go test ./internal/strategy/pe_percentile/ 全 PASS）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/strategy/pe_percentile"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

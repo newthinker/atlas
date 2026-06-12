@@ -1,0 +1,61 @@
+{
+  "id": "TASK-007",
+  "title": "配置文件交付与收尾（code-simplifier + 全量回归）",
+  "description": "按计划文档 Task 5 执行：① configs/percentile-watchlist.yaml 四处更新（全局 percentile_step: 5 取消注释并注明回退语义；两个分位策略 params 各加 percentile_step: 5 并注明可按策略调整；删除头部第 9-10 行过渡行为段落；cooldown_hours 定为 4，注释改为仅约束不带分位元数据的策略）；② configs/config.example.yaml router 节补 min_confidence/cooldown_hours/percentile_step 及注释，strategies 节两个分位策略补 percentile_step 示例行；③ 运行 code-simplifier sub-agent（Task tool，subagent_type \"code-simplifier:code-simplifier\"，列出全部改动文件）；④ go vet ./... && go test ./... && npx gitnexus analyze；⑤ 最终提交。",
+  "module": "configs",
+  "complexity": "simple",
+  "estimated_files": [
+    "configs/percentile-watchlist.yaml",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "percentile-watchlist.yaml 四处更新与计划 Task 5 Step 1 逐条一致（全局 step 取消注释/两策略 params 加 step/过渡段落删除/cooldown_hours=4 改注释）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "config.example.yaml router 节与 strategies 节按计划模板补全参数及注释",
+        "verify_by": "review"
+      },
+      "更新后的 percentile-watchlist.yaml 可被 config 包成功加载且 Router.PercentileStep==5（以加载测试或临时验证程序实证）"
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "code-simplifier 已对全部改动文件运行，建议已评估（采纳或注明不采纳理由），结果包含在最终提交中",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go vet ./... 与 go test ./... 全量通过，npx gitnexus analyze 重新索引完成",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./configs"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

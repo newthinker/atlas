@@ -1,0 +1,78 @@
+{
+  "id": "TASK-001",
+  "title": "serve.go 通知器接线（registerConfiguredNotifiers）",
+  "description": "cmd/atlas/serve.go 新增私有函数 registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *zap.Logger) int 并在 runServe 的 collector 注册后调用。按 key 分派：telegram(必填 bot_token+chat_id)/email(必填 host+from+len(to)>0)/webhook(必填 url)，用各包 New 构造器直建后 application.RegisterNotifier；enabled=false 跳过；必填缺失/未知 key/Register 返回 err → warn+跳过不阻断启动。每注册一条 info，结束 info 总数；存在 enabled=true 配置但注册数 0 → warn 静默失效告警。设计细节与测试表以 docs/plans/2026-06-12-notifier-wiring-implementation.md 为准（严格 TDD，测试清单 §测试 共 7 条直接转化）。",
+  "module": "cmd/atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/serve_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "telegram enabled 且 bot_token+chat_id 齐 → 注册 1（返回值与 app.GetStats()[\"notifiers\"] 双断言）",
+      "email enabled 且 host+from+to 齐 → 注册 1（reviewer 反审补充：三类成功路径必须各有正向用例）",
+      "webhook enabled 有 url → 注册 1（headers 为 nil 也正常注册）；telegram+webhook 同时 enabled 字段齐 → 注册 2；每成功注册输出含 notifier 名的 info 日志",
+      {
+        "desc": "runServe 在 collector 注册之后、Start 之前实际调用装配函数，启动日志含注册总数 info（代码位置检查）",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      "enabled=false（三类）、cfg.Notifiers 为 nil/空 map → 0 且不 panic",
+      "必填字段逐字段缺失表驱动：telegram 缺 bot_token/缺 chat_id、email 缺 host/缺 from/缺 to、webhook 缺 url → 各 0 且 warn 指明缺失字段；未知 notifier key enabled → 0（warn unknown type）"
+    ],
+    "error_handling": [
+      "RegisterNotifier 返回 err（重名：先手动注册同名再调装配函数）→ warn+跳过不阻断；存在 enabled=true 配置但最终注册数 0 → 静默失效 warn（zaptest observer 断言）"
+    ],
+    "non_functional": [
+      {
+        "desc": "单测不发起网络调用（仅构造与注册，不调 Send）；既有 cmd/atlas 用例零回归；变更包覆盖率 ≥80%（来源：团队规范 coverage.dev_minimum，非需求文档）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "qa_review": ".arcforge/discoveries/TASK-001-qa.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "CRIT-1",
+      "title": "Short-circuit OR logic masks field validation failures",
+      "location": "cmd/atlas/serve.go:330, 335, 340",
+      "severity": "CRITICAL",
+      "description": "Validation uses || operator: when first field missing, second field check is skipped. Both bot_token AND chat_id missing → only bot_token reported. Violates DoD: 'warn 指明缺失字段'",
+      "fix": "Change || to && or use separate if blocks to ensure all required fields checked and reported",
+      "verification": "All field defects must be reported simultaneously; update test coverage to verify"
+    },
+    {
+      "id": "CRIT-2",
+      "title": "Whitespace-only values bypass validation",
+      "location": "cmd/atlas/serve.go:330, 335, 340",
+      "severity": "CRITICAL",
+      "description": "BotToken: \"   \" passes != \"\" check but is invalid; fails at runtime when signals sent",
+      "fix": "Add strings.TrimSpace() validation; reject empty-after-trimming values",
+      "test": "Add TestRegisterConfiguredNotifiers_WhitespaceOnlyFields to verify rejection"
+    },
+    {
+      "id": "CRIT-3",
+      "title": "Partial notifier failure silently drops notifications",
+      "location": "cmd/atlas/serve.go:358",
+      "severity": "CRITICAL",
+      "description": "Silent-failure warn triggers only on enabled>0 && registered==0. Partial failures (enabled=2, registered=1) drop notifications silently",
+      "fix": "Change condition to: enabled>0 && registered<enabled",
+      "test": "Add TestRegisterConfiguredNotifiers_PartialSuccess covering 1 OK + 1 failed scenario"
+    }
+  ],
+  "verifier": "test-agent-1"
+}

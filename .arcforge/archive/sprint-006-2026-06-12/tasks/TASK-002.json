@@ -1,0 +1,61 @@
+{
+  "id": "TASK-002",
+  "title": "配置示例注释与收尾（code-simplifier + 全量回归）",
+  "description": "① configs/config.example.yaml notifiers 节补行尾必填字段注释（telegram: 必填 bot_token+chat_id；email: 必填 host+from+to；webhook: 必填 url；均注明「缺失时启动 warn 并跳过该通知器」）；② Task tool 运行 code-simplifier（subagent_type \"code-simplifier:code-simplifier\"，列出 cmd/atlas/serve.go、serve_test.go），建议逐条评估，采纳纳入提交、不采纳在 discovery 注明理由，禁止其写 .arcforge/；③ go vet ./... && go test ./... && npx gitnexus analyze；④ GIT 锁内最终提交（明确列出文件，不含 .arcforge/）。",
+  "module": "configs",
+  "complexity": "simple",
+  "estimated_files": [
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "config.example.yaml notifiers 三个通知器各有必填字段与降级语义行尾注释，与 TASK-001 实现的校验规则一致",
+        "verify_by": "review"
+      },
+      {
+        "desc": "端到端验收（直击事故根因）：webhook 指向本地临时 HTTP server + 精简 watchlist 启动 serve，触发一轮分析，断言 routed 日志 \"notifiers\":1 且本地 server 收到信号 payload（不外发真实通知；由 Test Agent 在验证阶段实际执行）",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "code-simplifier 已运行且建议处置有记录（采纳/不采纳理由在 discovery）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go vet ./... 与 go test ./... 全量通过，npx gitnexus analyze 完成",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "qa_review": ".arcforge/discoveries/TASK-002-qa.json",
+  "packages": [
+    "./configs"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "DEP-1",
+      "title": "Dependent on TASK-001 fixes",
+      "severity": "BLOCKING",
+      "description": "TASK-002 depends on TASK-001. The 3 critical issues in TASK-001 must be fixed before TASK-002 E2E testing can meaningfully validate notifier wiring.",
+      "note": "TASK-002 itself (config documentation + code-simplifier) is well-executed. Fix TASK-001 first, then re-verify TASK-002 E2E path."
+    }
+  ],
+  "verifier": "test-agent-1"
+}

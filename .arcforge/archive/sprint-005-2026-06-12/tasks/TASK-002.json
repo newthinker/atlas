@@ -1,0 +1,57 @@
+{
+  "id": "TASK-002",
+  "title": "router 冷却交互、RouteBatch 与状态管理",
+  "description": "在 TASK-001 基础上完成 internal/router 剩余改造：RouteBatch 改为与 Route 相同分流（static 过滤 → 分位走 passPercentileGate / 其余 passesCooldown+更新冷却戳，批内逐条顺序判定）并补 nil-registry 守卫；ClearCooldown(symbol) 按 symbol+\"|\" 前缀清步进 key；ClearAllCooldowns 重建两 map；GetStats 增加 percentile_gates_active 与 percentile_step。测试骨架以计划文档 Task 2 为准（严格 TDD）。",
+  "module": "router",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/router/router.go",
+    "internal/router/router_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "分位信号通知后，同标的无元数据信号不被冷却压制（TestRoute_PercentileSignalDoesNotTouchCooldown）",
+      "RouteBatch 使用同一步进门控：批内同 key 第一条放行并更新状态，第二条按更新后状态判定，与连续 Route 等价（TestRouteBatch_UsesPercentileGate）",
+      "ClearCooldown(symbol) 同时清除该标的的全部步进 key（前缀匹配），其它标的的门控状态保留（TestClearCooldowns_AlsoClearPercentileGates 前半）",
+      "ClearAllCooldowns 后所有门控状态清零，首个分位信号重新放行（同测试后半）",
+      "GetStats 返回 percentile_gates_active（len(pctGates)）与 percentile_step（全局回退值）（TestGetStats_IncludesPercentileGate）"
+    ],
+    "boundary": [
+      "RouteBatch 在 nil registry 下 filtered 非空时不 panic（nil-registry 守卫，与 Route :86-88 对齐）；既有 router 用例零回归"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "ClearCooldown 前缀删除处注释注明假设 symbol 不含 '|'；RouteBatch 其余既有不对等行为（不写 signalStore 等）维持现状未动",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/router"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "id": "QA-C1-relate",
+      "severity": "CRITICAL",
+      "title": "Related to QA-C1: pctGates cleanup (TASK-001)",
+      "description": "TASK-001 will address pctGates cleanup. Ensure coordinated fixes to CleanupExpiredCooldowns() and startup.",
+      "location": "internal/router/router.go",
+      "assignee": "dev-agent-1",
+      "required_action": "Coordinate with TASK-001 fixes"
+    }
+  ],
+  "verifier": "test-agent-1"
+}

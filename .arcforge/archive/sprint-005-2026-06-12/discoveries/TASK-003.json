@@ -1,0 +1,28 @@
+{
+  "task": "TASK-003",
+  "key_findings": [
+    "price_percentile 已有 numParam 双形态 helper(int/float64),直接复用读取 percentile_step,无需新增解析逻辑",
+    "Analyze 原先内联构造 Metadata map;改为先建 md 再条件写入 percentile_step,行为对其余键零影响",
+    "守卫测试 TestAnalyze_NoStepParam_NoStepMetadata 在 RED 阶段即 PASS 属预期(未实现时元数据本就不写)"
+  ],
+  "decisions": [
+    {"decision": "percentile_step ≤ 0 视为未配置,不写入 Metadata", "rationale": "与 router effectiveStep 语义一致:缺该键时 router 回退全局步长;0 表示该策略不覆盖全局"},
+    {"decision": "不抽 price_percentile 与 pe_percentile 公共基类", "rationale": "两策略阈值语义可能分化,既有代码刻意独立(见包头注释 plan Task 10),TASK-003 维持现状"},
+    {"decision": "用 numParam(cfg.Params, \"percentile_step\", 0) 默认 0", "rationale": "复用既有双形态容错,int/float64 YAML 均可解析;0 默认天然表达未配置"}
+  ],
+  "files_modified": [
+    "internal/strategy/price_percentile/strategy.go",
+    "internal/strategy/price_percentile/strategy_test.go"
+  ],
+  "interfaces_exposed": [
+    "Strategy 结构体新增私有字段 percentileStep float64(未配置或≤0 时为 0)",
+    "信号 Metadata 在 percentileStep>0 时新增键 \"percentile_step\"(float64);未配置时不含该键",
+    "策略参数键 params.percentile_step(int 或 float64)经 Init 生效"
+  ],
+  "verification": {
+    "test_command": "go test ./internal/strategy/price_percentile/ -v",
+    "result": "PASS (8 tests incl. TestInit_PercentileStepParam / TestAnalyze_NoStepParam_NoStepMetadata / TestInit_PercentileStepNonPositive)",
+    "coverage": "89.7% (≥80% gate)",
+    "commit": "fa9ee68"
+  }
+}

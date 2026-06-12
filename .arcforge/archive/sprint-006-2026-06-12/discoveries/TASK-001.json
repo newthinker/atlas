@@ -1,0 +1,35 @@
+{
+  "task_id": "TASK-001",
+  "title": "serve.go notifier wiring (registerConfiguredNotifiers)",
+  "key_findings": [
+    "Pre-existing bug confirmed: cmd/atlas/serve.go never wired cfg.Notifiers into app.RegisterNotifier; the notifiers config section was dead config and every routed signal logged notifiers=0, silently persisted but never delivered.",
+    "Constructor signatures (verified): telegram.New(botToken, chatID string); email.New(host string, port int, username, password, from string, to []string); webhook.New(url string, headers map[string]string).",
+    "app.RegisterNotifier(n notifier.Notifier) error returns a duplicate-name error (registry.Register: 'notifier %s already registered'). app.GetStats()[notifiers] is an int = len(registry.GetAll()).",
+    "Notifier Name(): telegram/email/webhook equal their config map keys, so the info log uses the key as the notifier name.",
+    "config.NotifierConfig has all fields (Enabled/BotToken/ChatID/URL/Host/Port/Username/Password/From/To/Headers); cfg.Notifiers is map[string]NotifierConfig."
+  ],
+  "decisions": [
+    {"decision": "Package-private registerConfiguredNotifiers returning the registered count", "rationale": "Testable inside cmd/atlas (serve_test.go precedent); runServe needs only a one-line call."},
+    {"decision": "Use constructors (telegram/email/webhook .New) directly, not Notifier.Init", "rationale": "All existing call sites use New directly; Init is a legacy interface remnant left untouched (plan design-decision 6)."},
+    {"decision": "Missing required field / unknown key / RegisterNotifier error all warn+skip, never block startup", "rationale": "Matches serve.go strategy-init-failure (:295) and collector wiring; an unavailable notifier must not block the core service."},
+    {"decision": "When enabled>0 yet registered==0, emit an extra warn 'all configured notifiers failed to register; signals will not be delivered'", "rationale": "Directly targets the silent-failure incident; operationally visible."},
+    {"decision": "Log message texts and field names are a fixed contract: 'registered notifier'(notifier), 'unknown notifier type'(notifier), 'notifier missing required field'(notifier,field), 'configured notifiers registered'(count), silent-failure warn snippet 'signals will not be delivered'", "rationale": "Unit tests assert these via zaptest/observer; TASK-002 E2E and downstream must not change them casually."},
+    {"decision": "config.example.yaml comment additions (listed in plan deliverables) NOT done in this task", "rationale": "This task scope is limited to ./cmd/atlas (serve.go + serve_test.go); leave to Leader or a follow-up task."}
+  ],
+  "files_modified": [
+    "cmd/atlas/serve.go (new registerConfiguredNotifiers + runServe call + 4 notifier subpackage imports)",
+    "cmd/atlas/serve_test.go (new TestRegisterConfiguredNotifiers_* : 11 test functions incl. table-driven subcases)"
+  ],
+  "interfaces_exposed": [
+    {"symbol": "registerConfiguredNotifiers", "signature": "func registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *zap.Logger) int", "visibility": "package-private (cmd/atlas)", "note": "Returns count of successful registrations; for TASK-002 E2E reuse/reference. Call site: inside runServe, after collector registration and before api server Start."}
+  ],
+  "verification": {
+    "tests": "go test ./cmd/atlas/ -run TestRegisterConfiguredNotifiers -v: all PASS (incl. nil/empty, 6 missing-field table cases, unknown key, duplicate, silent-failure warn).",
+    "full_package": "go test ./cmd/atlas/: ok, zero regression.",
+    "coverage": "Changed function registerConfiguredNotifiers 100.0%; package ./cmd/atlas total 60.1% (baseline) -> 62.8% (this change).",
+    "coverage_note": "package main contains large amounts of un-unit-testable startup logic (runServe/wireExecution etc); 80% on the whole package is infeasible. Per spawn instruction the criterion is 'new function 100% + package coverage not lowered' (satisfied: +2.7pt). If the TaskCompleted hook hard gate (dev_minimum=80) blocks verification, recommend Leader set a task-level coverage_minimum for TASK-001 (the hook docs name this as the ruling path for package main).",
+    "no_network": "Unit tests only build New + RegisterNotifier, never call Send/SendBatch; no network calls.",
+    "gofmt_vet": "gofmt -l empty; go vet ./cmd/atlas/ passes.",
+    "commit": "d9f530a fix(serve): register configured notifiers (telegram/email/webhook)"
+  }
+}

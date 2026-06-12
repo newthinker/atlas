@@ -1,0 +1,40 @@
+{
+  "task_id": "TASK-005",
+  "key_findings": [
+    "RouterConfig 已有 CooldownHours/MinConfidence 的校验范式：core.WrapError(core.ErrConfigInvalid, fmt.Errorf(...))，新字段校验沿用同一形态并紧随 CooldownHours 之后，保持 Router 校验聚合。",
+    "Load() 通过 viper Unmarshal 经 mapstructure 标签解析；percentile_step 无需 SetDefault，缺省即 Go 零值 0（= 禁用），与 Defaults() 不含该字段一致，向后兼容。",
+    "float 校验沿用既有 %f 动词（与 min_confidence 一致）。"
+  ],
+  "decisions": [
+    {
+      "decision": "Defaults() 不为 PercentileStep 赋值",
+      "rationale": "零值 0 即表示禁用步进门控，显式默认会破坏 done_criteria 的 boundary 语义；与 viper 不设 SetDefault 保持一致。"
+    },
+    {
+      "decision": "校验仅拒绝负值（< 0），不设上界",
+      "rationale": "done_criteria 仅要求负值拒绝；步长为百分位点差，正值上界由策略语义决定，不在 config 层强加。"
+    },
+    {
+      "decision": "code-simplifier 复核后未改动代码",
+      "rationale": "新增字段、校验块、三个测试已符合既有约定（error-wrap 风格、%f 动词、helper 复用、DoD 映射注释），无可在不损可读性前提下简化之处。"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/config_test.go"
+  ],
+  "interfaces_exposed": [
+    "RouterConfig.PercentileStep float64 (mapstructure:\"percentile_step\")：0=禁用全局步进门控；负值经 Config.Validate() 返回 core.ErrConfigInvalid；策略级 params.percentile_step 覆盖之。"
+  ],
+  "verification": {
+    "command": "go test ./internal/config/ -count=1",
+    "result": "ok github.com/newthinker/atlas/internal/config",
+    "new_tests": [
+      "TestLoad_RouterPercentileStep_FromYAML (functional[0])",
+      "TestDefaults_RouterPercentileStep_Zero (boundary[0])",
+      "TestConfig_Validate_PercentileStepNegative (error_handling[0])"
+    ],
+    "commit": "55668d2",
+    "coverage": "93.9% (≥80% gate)"
+  }
+}

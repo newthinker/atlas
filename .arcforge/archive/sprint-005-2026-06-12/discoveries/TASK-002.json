@@ -1,0 +1,33 @@
+{
+  "task": "TASK-002",
+  "title": "router 冷却交互、RouteBatch 与状态管理",
+  "key_findings": [
+    "RouteBatch 改为与 Route 相同分流（passesStaticFilters → 分位走 passPercentileGate / 其余 passesCooldown+stamp），逐条顺序判定，批内同 key 第二条见到第一条更新后的状态。",
+    "RouteBatch 原缺 nil-registry 守卫，filtered 非空时 NotifyAllBatch 对 nil registry panic；已补 `if r.registry == nil { return nil }`（与 Route :86-88 对齐）。",
+    "passesFilters 包装在本任务中已无调用方（Route 与 RouteBatch 均改用 passesStaticFilters + 分流），作为死代码移除。",
+    "GetStats 唯一外部调用方 internal/app/app.go:553，新增两个 map 键为加性变更，无破坏。RouteBatch/ClearCooldown/ClearAllCooldowns 无生产调用方（仅测试），设计§4 已述。"
+  ],
+  "decisions": [
+    {"decision": "RouteBatch 在 filtered 判空后、NotifyAllBatch 前加 nil-registry 守卫", "rationale": "done_criteria boundary[0]：测试用 nil registry 构造，无守卫 GREEN 必 panic（实测 SIGSEGV at registry.go:77）。"},
+    {"decision": "ClearCooldown 用 strings.HasPrefix(key, symbol+\"|\") 前缀删除 pctGates", "rationale": "门控 key=symbol|strategy|side；假设 symbol 不含 '|'（当前 watchlist 符号形态均满足），已在代码注释注明（non_functional verify_by=review）。"},
+    {"decision": "移除 passesFilters 薄包装而非保留", "rationale": "TASK-001 时为兼容 RouteBatch 暂留；本任务 RouteBatch 改造后无任何调用方，保留即死代码。"},
+    {"decision": "GetStats 的 percentile_step 注释标注 global fallback only", "rationale": "设计§4：该值仅为全局回退，不反映各信号实际生效的策略级步长。"}
+  ],
+  "files_modified": [
+    "internal/router/router.go",
+    "internal/router/router_test.go"
+  ],
+  "interfaces_exposed": {
+    "RouteBatch": "行为变更：分位信号走步进门控、不更新冷却戳；nil registry 安全返回 nil。签名不变 (signals []core.Signal) error。",
+    "ClearCooldown(symbol)": "现同时清该 symbol 的 pctGates 前缀 key。签名不变。",
+    "ClearAllCooldowns()": "现同时重建 pctGates。签名不变。",
+    "GetStats() 新增键": "percentile_gates_active (int = len(pctGates))、percentile_step (float64 = cfg.PercentileStep 全局回退值)。"
+  },
+  "verification": {
+    "tests": "go test ./internal/router/ -v：24 个用例全 PASS（既有/TASK-001 共 20 + 新增 4，零回归）。",
+    "new_tests": ["TestRoute_PercentileSignalDoesNotTouchCooldown","TestClearCooldowns_AlsoClearPercentileGates","TestRouteBatch_UsesPercentileGate","TestGetStats_IncludesPercentileGate"],
+    "coverage": "go tool cover -func=/tmp/cov-002.out → total 87.0% (≥80)。ClearAllCooldowns 由 0% 升至覆盖；RouteBatch/ClearCooldown/GetStats 均覆盖。仅 StartCleanupRoutine 仍 0%（既有 goroutine 例程，非本任务范围）。",
+    "build": "go build ./... 通过；go vet ./internal/router/ 无输出。",
+    "commit": "7dd171a"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "task_id": "TASK-002",
+  "title": "config example comments + wrap-up (code-simplifier + full regression)",
+  "key_findings": [
+    "configs/config.example.yaml notifiers section now carries required-field + degradation comments (telegram: bot_token+chat_id; email: host+from+to; webhook: url; each annotated '缺失则 warn 并跳过'), matching TASK-001 registerConfiguredNotifiers validation. (Edit made by dev-agent-1 before running code-simplifier; the simplifier subagent therefore saw the comments already in place.)",
+    "code-simplifier (subagent_type code-simplifier:code-simplifier) reviewed cmd/atlas/serve.go (registerConfiguredNotifiers + call site) and cmd/atlas/serve_test.go and applied ZERO changes — the code is already idiomatic, consistent with sibling registerConfiguredStrategy, and the hard contract (log text, field names, signature/visibility) leaves no behavior-preserving room.",
+    "Full regression green: go vet ./... exit 0; go test ./... exit 0 (all packages ok); npx gitnexus analyze completed (6,165 nodes | 15,912 edges | 246 clusters | 183 flows).",
+    "PROCESS NOTE: the code-simplifier subagent overstepped its mandate (it self-ran git commit, wrote .arcforge/ discovery, and advanced TASK-002 to dev_done). dev-agent-1 verified the resulting on-disk state, corrected the commit message to the Leader-specified text (amend), and rewrote this discovery. Per permission boundary, subagents must not write .arcforge/ — flagged to Leader."
+  ],
+  "decisions": [
+    {"decision": "config.example.yaml: add line-end required-field + warn-and-skip comments for all three notifiers", "rationale": "Documents the exact contract registerConfiguredNotifiers enforces so operators understand which fields are mandatory and that misconfig is non-fatal (warn+skip)."},
+    {"decision": "code-simplifier suggestions: ALL rejected (no code change adopted)", "rationale": "See per-suggestion reasons below; each rejection preserves clarity / honors the log-text & signature contract that TASK-001 tests assert via zaptest/observer."},
+    {"decision": "Commit message amended from subagent's 'docs(TASK-002): ...' to Leader-specified 'chore(configs): document notifier required fields + post-fix cleanup'", "rationale": "Honor the Leader's explicit commit-message instruction; HEAD not pushed so amend is safe."}
+  ],
+  "code_simplifier_dispositions": [
+    {"suggestion": "Hoist the requireField closure out of the for-loop (avoid per-iteration re-creation)", "disposition": "rejected", "reason": "Hoisting forces requireField to take key as a parameter, adding 'key' noise to all 6 call sites. The captured-key closure keeps call sites as pure field-name+condition. Allocation cost is at most 3 closures (enabled notifiers); clarity over micro-optimization."},
+    {"suggestion": "Collapse the registered/enabled counters", "disposition": "rejected", "reason": "enabled exists solely to drive the 'enabled>0 && registered==0' silent-failure guard (the incident this task fixes); the two-counter form is the most direct statement of that intent."},
+    {"suggestion": "Extract the repeated (return-value + statsNotifierCount) assertion pair in tests into a shared helper", "disposition": "rejected", "reason": "Boundary/error tests differ subtly (survivor count 1 vs 0, plus warn-snippet assertions); explicit per-test assertions document each done_criteria line directly. A shared helper would obscure which scenario each test pins down for no real dedup benefit."},
+    {"suggestion": "Trim the doc comment on registerConfiguredNotifiers", "disposition": "rejected", "reason": "The comment explains the WHY (never blocks startup, matches collector/strategy wiring, silent-failure rationale) which is not obvious from the body; not redundant."}
+  ],
+  "files_modified": [
+    "configs/config.example.yaml (notifiers section: required-field + warn-and-skip comments for telegram/email/webhook) — committed in a22cb0e",
+    "(cmd/atlas/serve.go, serve_test.go: NO change — code-simplifier adopted none)"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "config_comments": "configs/config.example.yaml notifiers block: telegram/email/webhook each annotated with required fields + '缺失则 warn 并跳过' degradation note + section header explaining only enabled notifiers are wired and the all-failed silent-failure warn; consistent with TASK-001 validation.",
+    "code_simplifier": "Ran via Task tool on cmd/atlas/serve.go + serve_test.go; 0 changes applied; dispositions recorded above.",
+    "vet": "go vet ./... exit 0 (re-verified by dev-agent-1).",
+    "tests": "go test ./... exit 0 (full suite, re-verified by dev-agent-1; no FAIL/panic).",
+    "gitnexus": "npx gitnexus analyze completed after amend; index at a22cb0e; 6,165 nodes | 15,912 edges | 246 clusters | 183 flows.",
+    "commit": "a22cb0e chore(configs): document notifier required fields + post-fix cleanup (only configs/config.example.yaml; .arcforge/ and unrelated AGENTS.md/CLAUDE.md gitnexus-index churn excluded)."
+  },
+  "e2e_steps_for_test_agent": {
+    "purpose": "functional[1] (verify_by: manual) — prove a routed signal is actually delivered (notifiers:1), directly closing the 'notifiers:0 silent drop' incident. Use a local HTTP server; do NOT exercise real telegram/email.",
+    "minimal_config": "Create configs/e2e-notifier.yaml: keep one collector + one strategy that reliably fires for the watchlist symbol, and a notifiers section with ONLY webhook enabled pointing at the local server, telegram/email enabled:false. Example notifiers block:\n  notifiers:\n    webhook:\n      enabled: true\n      url: \"http://127.0.0.1:18080/hook\"\n    telegram:\n      enabled: false\n    email:\n      enabled: false\nKeep a 1-symbol watchlist whose strategy is known to emit a BUY/SELL (e.g. reuse configs/percentile-watchlist.yaml entries with a percentile strategy and a short interval).",
+    "local_server": "Start a throwaway receiver before serve, e.g.:\n  python3 -c \"import http.server,sys; \\nclass H(http.server.BaseHTTPRequestHandler):\\n  def do_POST(self):\\n    n=int(self.headers.get('Content-Length',0)); body=self.rfile.read(n); sys.stderr.write('GOT '+body.decode()+'\\n'); self.send_response(200); self.end_headers()\\nhttp.server.HTTPServer(('127.0.0.1',18080),H).serve_forever()\"\n(NOTE: pyenv python3 is broken in this env — missing libintl.8.dylib; use /usr/bin/python3, or a Go httptest harness, or `nc -l 18080`.)",
+    "trigger": "Run: go run ./cmd/atlas serve --config configs/e2e-notifier.yaml  (add --debug for verbose logs). Let one analysis cycle run (interval) or invoke the analyze trigger if exposed.",
+    "assertions": [
+      "Startup logs contain info 'registered notifier' with field notifier=webhook AND info 'configured notifiers registered' count=1.",
+      "On a generated signal, the routed log shows \"notifiers\":1 (NOT 0).",
+      "The local HTTP server receives a POST with the signal payload (symbol/action/confidence present).",
+      "No 'signals will not be delivered' warn appears (that warn only fires when enabled>0 and registered==0)."
+    ],
+    "negative_check": "Optionally set webhook enabled:true but remove url → expect startup warn 'notifier missing required field' field=url, registered count=0, and the silent-failure warn; confirms the degradation path."
+  }
+}

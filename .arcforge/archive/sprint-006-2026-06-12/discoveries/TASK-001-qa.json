@@ -1,0 +1,88 @@
+{
+  "task_id": "TASK-001",
+  "reviewer": "qa-agent-1",
+  "review_type": "adversarial-code-review",
+  "verdict": "CONDITIONAL PASS - requires fixes before acceptance",
+  "date": "2026-06-12",
+  "critical_issues": [
+    {
+      "id": "CRIT-1",
+      "title": "Short-circuit OR logic masks field validation failures",
+      "location": "cmd/atlas/serve.go:330, 335, 340",
+      "severity": "CRITICAL",
+      "description": "Validation uses || (OR) short-circuit: when first field missing, second field check is skipped. If both bot_token AND chat_id are missing, only bot_token is reported as missing. Violates done_criteria 'warn 指明缺失字段' which requires all missing fields to be named.",
+      "example": "nc.BotToken=\"\" && nc.ChatID=\"\" → only warns 'bot_token missing', hides 'chat_id missing'",
+      "impact": "Users see incomplete error messages and must iterate multiple times to discover all missing fields",
+      "fix": "Change || to && or use separate if blocks to ensure all required fields are checked and reported",
+      "dod_violation": "Boundary[1]: 'warn 指明缺失字段'"
+    },
+    {
+      "id": "CRIT-2",
+      "title": "Whitespace-only values bypass validation",
+      "location": "cmd/atlas/serve.go:330, 335, 340",
+      "severity": "CRITICAL",
+      "description": "Validation checks != \"\" which rejects empty strings but accepts whitespace-only: BotToken: \"   \" or \"\\t\\n\" passes validation. These invalid values are passed to constructors and cause silent failures at runtime when signals are sent.",
+      "example": "BotToken: \"   \" → passes validation, fails at runtime",
+      "impact": "Configuration appears valid; operator discovers problem only when signals fail to deliver",
+      "fix": "Add strings.TrimSpace() in validation; reject trimmed-empty-string",
+      "test_gap": "No TestRegisterConfiguredNotifiers_WhitespaceOnlyFields"
+    },
+    {
+      "id": "CRIT-3",
+      "title": "Partial notifier failure (1 success, 1 failed) silently drops notifications",
+      "location": "cmd/atlas/serve.go:358",
+      "severity": "CRITICAL",
+      "description": "Silent-failure warn triggers only when enabled>0 AND registered==0. When enabled=2 but registered=1 (one notifier succeeds, one fails), no warning is emitted. Signals routed to the failed notifier are silently dropped.",
+      "example": "telegram: OK, email: missing-To field → enabled=2, registered=1 → no warning → email notifications silently lost",
+      "impact": "Operator believes all enabled notifiers are working; some notifications silently fail",
+      "fix": "Change condition to: enabled>0 AND registered<enabled",
+      "test_gap": "No TestRegisterConfiguredNotifiers_PartialSuccess"
+    }
+  ],
+  "warnings": [
+    {
+      "id": "WARN-1",
+      "title": "Map iteration order non-determinism",
+      "location": "cmd/atlas/serve.go:311",
+      "severity": "WARNING",
+      "description": "Go maps iterate in random order. Multiple notifiers produce non-deterministic log output order",
+      "impact": "Complicates troubleshooting; test assertions on log order are fragile",
+      "mitigation": "Sort keys before iteration for deterministic order (optional)"
+    },
+    {
+      "id": "WARN-2",
+      "title": "Config key case sensitivity inconsistency",
+      "location": "cmd/atlas/serve.go:328-347",
+      "severity": "WARNING",
+      "description": "Config keys are case-sensitive but notifier Name() returns lowercase. Key \"Telegram\" doesn't match case \"telegram\" in switch, resulting in confusing 'unknown notifier type' error",
+      "impact": "User confusion about valid key formats",
+      "mitigation": "Document that keys must be lowercase, or normalize with strings.ToLower()"
+    }
+  ],
+  "test_coverage_gaps": [
+    "TestRegisterConfiguredNotifiers_WhitespaceOnlyFields - validates whitespace-only rejection",
+    "TestRegisterConfiguredNotifiers_PartialSuccess - one notifier OK, one failed, verify partial-failure warn",
+    "TestRegisterConfiguredNotifiers_CaseSensitivity - uppercase config key handling"
+  ],
+  "done_criteria_violations": [
+    {
+      "criterion": "Boundary[1]: 必填字段逐字段缺失表驱动...warn 指明缺失字段",
+      "status": "PARTIALLY VIOLATED",
+      "reason": "Short-circuit OR logic only reports first missing field, not all"
+    }
+  ],
+  "recommendations": {
+    "option_a": "Apply fixes (~15 LOC + 3 test functions), re-verify, then accept. Preferred to close logic gaps before production deployment.",
+    "option_b": "Accept as-is; add 3 critical + 2 warning to fast-follow backlog. Higher operational risk."
+  },
+  "effort_estimate": {
+    "code_changes": "~15 lines",
+    "test_additions": "3 new test functions (~20 lines)",
+    "verification_time": "1-2 hours"
+  },
+  "confidence": "HIGH - All issues have exact line numbers and reproducible scenarios",
+  "authority_documents": [
+    ".arcforge/docs/05-review/qa-review-notifier-wiring.md",
+    ".arcforge/docs/05-review/qa-verdict.md"
+  ]
+}

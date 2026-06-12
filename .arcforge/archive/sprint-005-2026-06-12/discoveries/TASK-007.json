@@ -1,0 +1,29 @@
+{
+  "task_id": "TASK-007",
+  "title": "配置文件交付与收尾（code-simplifier + 全量回归）",
+  "key_findings": [
+    "percentile-watchlist.yaml 四处更新已完成：全局 percentile_step:5 取消注释（回退语义注释）；price_percentile/pe_percentile params 各加 percentile_step:5（可按策略调整注释）；头部过渡行为两行（依赖开发中功能/cooldown 周期重复提醒）删除；cooldown_hours 24→4，注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」。",
+    "config.example.yaml：router 节补 cooldown_hours 注释 + percentile_step:5 行；price_percentile/pe_percentile 内联 params 各加 percentile_step:5（按策略覆盖全局步长注释）。",
+    "加载实证：临时 internal/config 测试 Load(percentile-watchlist.yaml) 成功，Router.PercentileStep==5、CooldownHours==4、MinConfidence==0.6；config.example.yaml 亦加载成功。临时测试已删除，未进提交。",
+    "code-simplifier 仅改动 internal/router/router.go（其余文件评估后未改）：① 抽取 Route/RouteBatch 共用的 passesDispatchGate 私有方法消除分流重复；② passesStaticFilters 的 EnabledActions 线性查找改 slices.Contains（import slices）。均为行为保持型重构，全量测试验证等价。"
+  ],
+  "decisions": [
+    {"decision": "采纳 code-simplifier 的两项 router.go 重构", "rationale": "passesDispatchGate 消除 Route/RouteBatch 间复制的分流逻辑（DRY，单点维护语义）；slices.Contains 为标准库 modernize。go test ./internal/router/ ./internal/app/ ./internal/config/ ./internal/strategy/... -count=1 全绿且 router 覆盖率 86.8% 证明行为等价。"},
+    {"decision": "code-simplifier 未改 config/app/strategy/test 文件", "rationale": "子代理评估后认为这些文件已符合既有约定无可在不损可读性下简化（与 TASK-005 discovery 中 simplifier 结论一致）。"},
+    {"decision": "最终提交仅含 configs/* 与 internal/router/router.go，显式列文件不用 git add -A", "rationale": "避免误提交 .arcforge/（协作状态）与会话开始即存在的 AGENTS.md/CLAUDE.md 无关改动（及 gitnexus analyze 对 CLAUDE.md gitnexus 块的自动更新），保持提交聚焦。"}
+  ],
+  "files_modified": [
+    "configs/percentile-watchlist.yaml",
+    "configs/config.example.yaml",
+    "internal/router/router.go"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "load_check": "Load(configs/percentile-watchlist.yaml) → PercentileStep=5/CooldownHours=4/MinConfidence=0.6；Load(configs/config.example.yaml) 成功（临时测试已删除）。",
+    "go_vet": "go vet ./... 无输出（通过）。",
+    "go_test": "go test ./... 全量 PASS（含 router/app/config/strategy 全部包）；-count=1 重跑 router/app/config/price_percentile/pe_percentile 全 ok。",
+    "router_coverage": "86.8% (≥80)。",
+    "gitnexus": "npx gitnexus analyze 成功重索引（6129 nodes/15792 edges/183 flows，11.0s）；提交后 HEAD 前移产生 hash 级 stale 提示属正常（索引内容已含本次工作树改动）。",
+    "commit": "fa60303"
+  }
+}

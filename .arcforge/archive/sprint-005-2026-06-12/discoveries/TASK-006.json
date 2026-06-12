@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-006",
+  "title": "app.New() 配置接线（修复 cfg.Router 死配置预存 bug）",
+  "key_findings": [
+    "app.New() (app.go:91-96) 原硬编码 router.Config{MinConfidence:0.5, CooldownDuration:1h}，完全忽略 cfg.Router——RED 阶段实证 cooldown_seconds 恒 3600、min_confidence 恒 0.5、percentile_step 恒 0。",
+    "接线后存量行为变更（BREAKING-ish）：未显式配置的部署 cooldown 1h→4h、min_confidence 0.5→0.6（config.Defaults() 的 CooldownHours:4/MinConfidence:0.6 开始真正生效）。",
+    "回归连带：既有 TestApp_Executor_CooldownSuppressedNotSubmitted 用 New(&config.Config{}) 隐式依赖硬编码 1h 冷却；接线后空 config 的 CooldownHours=0 即禁用冷却，第二条信号不再被压制。已修正该测试为显式 cfg.Router.CooldownHours=1，保留其原意（冷却抑制不提交执行）。",
+    "router.go passesCooldown 已含 CooldownDuration==0 注释（time.Since(last)<0 恒 false 天然满足禁用，TASK-001 时即写入），本任务无需改 router.go（范围限 internal/app）。"
+  ],
+  "decisions": [
+    {"decision": "CooldownDuration = time.Duration(cfg.Router.CooldownHours) * time.Hour，0 不特判", "rationale": "router.passesCooldown 对 0 天然恒放行；与 percentile_step:0=禁用 风格对齐。"},
+    {"decision": "EnabledActions 维持硬编码四 action 不从 config 读", "rationale": "config 无对应字段，设计明确 YAGNI；done_criteria functional[3] 要求保持硬编码。"},
+    {"decision": "修正 TestApp_Executor_CooldownSuppressedNotSubmitted 而非保留", "rationale": "该测试隐式依赖被修复的死配置 bug；接线后须显式开冷却才能表达其断言意图。属 bug 修复的预期连带，非新增回归。"}
+  ],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "interfaces_exposed": [
+    "app.New(cfg, logger) 行为变更：router 配置改由 cfg.Router 映射（CooldownHours/MinConfidence/PercentileStep），签名不变。未显式配置时冷却 4h、置信 0.6（原 1h/0.5）。"
+  ],
+  "verification": {
+    "command": "go test ./internal/app/ && go test ./...",
+    "result": "internal/app PASS（含 TestNew_RouterConfigFromCfg / TestNew_CooldownDisabledWhenZeroHours 新增 2 + 既有全绿，零回归）；go test ./... 全绿；go build ./... 通过。",
+    "new_tests": ["TestNew_RouterConfigFromCfg (functional[0-3])","TestNew_CooldownDisabledWhenZeroHours (boundary[0])"],
+    "fixed_tests": ["TestApp_Executor_CooldownSuppressedNotSubmitted (显式开冷却以保留原意)"],
+    "coverage": "internal/app total 96.3% (≥80)。",
+    "commit": "eb9c12b"
+  }
+}

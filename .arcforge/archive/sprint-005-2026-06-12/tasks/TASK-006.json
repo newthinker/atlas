@@ -1,0 +1,53 @@
+{
+  "id": "TASK-006",
+  "title": "app.New() 配置接线（修复 cfg.Router 死配置预存 bug）",
+  "description": "internal/app/app.go New() 的 routerCfg 构造（:91-96）从硬编码（1h/0.5）改为 cfg.Router 映射：MinConfidence、CooldownDuration = CooldownHours * time.Hour（0 = 禁用冷却，恒放行，在 router.go passesCooldown 处注释注明 time.Since(last)<0 恒 false 天然满足、无需特判）、PercentileStep；EnabledActions 维持现有硬编码（YAGNI）。TDD 见计划文档 Task 4：TestNew_RouterConfigFromCfg 写入 app_test.go（同包可访问私有字段），RED 阶段先是断言失败（cooldown_seconds 恒 3600 即死配置 bug 实证——config 字段已由 TASK-005 就位，无编译错误阶段），接线后转 GREEN。提交信息必须注明存量行为变更：未显式配置的部署冷却 1h→4h、置信阈值 0.5→0.6。",
+  "module": "app",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "cfg.Router.CooldownHours=24 构造后 router.GetStats()[\"cooldown_seconds\"] == 86400.0（死配置 bug 修复实证）",
+      "cfg.Router.MinConfidence=0.7 接线生效（stats[\"min_confidence\"] == 0.7）",
+      "cfg.Router.PercentileStep=5 接线生效（stats[\"percentile_step\"] == 5.0）",
+      "EnabledActions 仍为硬编码四种 action（buy/sell/strong_buy/strong_sell），不从 config 读取"
+    ],
+    "boundary": [
+      "cooldown_hours: 0 → 冷却禁用恒放行（同标的连续两条无元数据信号均 route）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "提交信息注明存量行为变更（cooldown 1h→4h、min_confidence 0.5→0.6，BREAKING-ish 段落，参照计划 Task 4 Step 5 模板）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "既有 app 用例零回归（go test ./internal/app/ 全 PASS）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-005"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}
