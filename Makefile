@@ -40,7 +40,8 @@ signal-eval: export-signals
 qlib-data: build
 	./bin/atlas export-ohlcv --symbols $(SIGNAL_SYMBOLS) \
 	  --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_DIR)
-	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_DIR) --target-dir $(QLIB_DATA_DIR)
+	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_DIR) \
+	  --target-dir $(QLIB_DATA_DIR) --expected-symbols $(SIGNAL_SYMBOLS)
 
 run: build
 	./$(BUILD_DIR)/$(BINARY)

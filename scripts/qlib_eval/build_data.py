@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from qlib_eval.symbols import to_qlib_instrument  # 纯字符串映射，零 qlib 依赖
+
 DEFAULT_QLIB_SCRIPTS = "/Users/zuowei/workspace/python/qlib/scripts"
 DEFAULT_TARGET = "~/.qlib/qlib_data/atlas_cn"
 
@@ -24,6 +26,25 @@ HEADER_FIELD = "date"  # CSV 日期列名（export-ohlcv header: symbol,date,ope
 def _data_csvs(csv_dir):
     """csv_dir 下所有 *.csv，按文件名排序。"""
     return sorted(Path(csv_dir).glob("*.csv"))
+
+
+def verify_csv_dir_symbols(csv_dir, expected_instruments):
+    """dump 前校验 csv_dir 的文件集合与预期符号一致（FP-1）。
+
+    防呆场景：用户改了 SIGNAL_SYMBOLS 后，qlib_csv 里上一轮导出的旧符号 CSV 仍残留，
+    会被 dump_bin 一并打进新包——而 main 原本从文件名反推 expected，旧 CSV 静默混入、
+    verify_bundle 也照样通过。这里用「外部预期符号集」独立比对磁盘文件集合，发现
+    非预期 .csv 即 raise 并提示清理。
+
+    expected_instruments: 大写 qlib instrument 集合（如 {"SH600519"}）。
+    """
+    actual = {p.stem.upper() for p in _data_csvs(csv_dir)}
+    extra = sorted(actual - set(expected_instruments))
+    if extra:
+        raise ValueError(
+            f"{csv_dir} 含非预期符号的残留 CSV {extra}（不在本次导出符号集内）；"
+            f"请先清理（rm {csv_dir}/* 后重跑 make qlib-data）再构建数据包。"
+        )
 
 
 def _csv_lines(path):
@@ -141,6 +162,12 @@ def main(argv=None):
     parser.add_argument("--csv-dir", required=True)
     parser.add_argument("--target-dir", default=DEFAULT_TARGET)
     parser.add_argument("--qlib-scripts", default=DEFAULT_QLIB_SCRIPTS)
+    parser.add_argument(
+        "--expected-symbols",
+        default="",
+        help="逗号分隔的 atlas 符号清单（如 600519.SH,000300.SH）；提供时在 dump 前"
+        "校验 csv-dir 文件集合无残留旧符号 CSV（FP-1 防呆）。",
+    )
     args = parser.parse_args(argv)
 
     csv_dir = Path(args.csv_dir).expanduser()
@@ -148,6 +175,16 @@ def main(argv=None):
 
     expected = {p.stem.upper() for p in _data_csvs(csv_dir)}
     start, end = date_span_from_csvs(csv_dir)
+
+    # FP-1：提供 --expected-symbols 时，用外部预期符号集独立校验磁盘文件集合，
+    # 早于 dump 拦截残留旧符号 CSV（不提供则跳过，向后兼容）。
+    if args.expected_symbols.strip():
+        wanted = {
+            to_qlib_instrument(s.strip())
+            for s in args.expected_symbols.split(",")
+            if s.strip()
+        }
+        verify_csv_dir_symbols(csv_dir, wanted)
 
     run_dump_bin(csv_dir, target_dir, scripts_dir=args.qlib_scripts)
     verify_bundle(target_dir, expected_instruments=expected, start=start, end=end)

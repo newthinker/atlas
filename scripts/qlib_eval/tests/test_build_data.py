@@ -13,6 +13,11 @@ boundary[0]   "csv 目录含空文件/仅 header 文件 -> 进 dump 前 raise"
 error_handling[0] "dump_bin returncode!=0 -> raise(含 stderr 摘要)"
               -> test_dump_bin_failure_propagates
 
+TASK-004 review_fix FP-1 "dump 前校验 csv_dir 文件集合与预期符号一致，旧 CSV 残留 -> raise"
+              -> test_verify_csv_dir_symbols_passes_exact / test_verify_csv_dir_symbols_rejects_extra
+                 / test_main_expected_symbols_mismatch_aborts_before_dump
+                 / test_main_expected_symbols_match_proceeds
+
 零 qlib 依赖：build_data 仅在 run_dump_bin 内 subprocess.run 官方 dump_bin.py，
 测试全部 mock subprocess（hook 同款命令从仓库根运行，conftest 注入 sys.path）。
 """
@@ -214,3 +219,74 @@ def test_verify_bundle_is_read_only(tmp_path):
         target, expected_instruments={"SH600519"}, start="2021-01-04", end="2021-03-10"
     )
     assert _tree_digest(target) == before  # 校验前后产物文件零修改
+
+
+# --------------------------------------------------------------------------
+# review_fix FP-1 — dump 前校验 csv_dir 文件集合与预期符号一致
+# --------------------------------------------------------------------------
+def test_verify_csv_dir_symbols_passes_exact(tmp_path):
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    _write_csv(csv_dir / "sh600519.csv", [("2024-01-02", "1")])
+    _write_csv(csv_dir / "sh000300.csv", [("2024-01-02", "1")])
+    # 预期集合与磁盘文件集合一致 → 不抛
+    build_data.verify_csv_dir_symbols(csv_dir, {"SH600519", "SH000300"})
+
+
+def test_verify_csv_dir_symbols_rejects_extra(tmp_path):
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    _write_csv(csv_dir / "sh600519.csv", [("2024-01-02", "1")])
+    _write_csv(csv_dir / "sh000001.csv", [("2024-01-02", "1")])  # 旧符号残留
+    with pytest.raises(ValueError) as ei:
+        build_data.verify_csv_dir_symbols(csv_dir, {"SH600519"})
+    msg = str(ei.value)
+    assert "SH000001" in msg  # 指明多余符号
+    assert "清理" in msg or "clean" in msg.lower()  # 提示清理
+
+
+def test_main_expected_symbols_mismatch_aborts_before_dump(tmp_path):
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    _write_csv(csv_dir / "sh600519.csv", [("2024-01-02", "1")])
+    _write_csv(csv_dir / "sh000001.csv", [("2024-01-02", "1")])  # 残留
+    with mock.patch("build_data.subprocess.run") as run:
+        with pytest.raises(ValueError):
+            build_data.main(
+                [
+                    "--csv-dir",
+                    str(csv_dir),
+                    "--target-dir",
+                    str(tmp_path / "bundle"),
+                    "--expected-symbols",
+                    "600519.SH",  # atlas 形式；仅期望 SH600519
+                ]
+            )
+        run.assert_not_called()  # 在 dump 前就中止
+
+
+def test_main_expected_symbols_match_proceeds(tmp_path):
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    _write_csv(csv_dir / "sh600519.csv", [("2021-01-04", "1")])
+    target = tmp_path / "bundle"
+    # 预期与磁盘一致 → 越过校验进入 dump（subprocess mock 成功），再 mock verify_bundle
+    with mock.patch("build_data.subprocess.run") as run, mock.patch(
+        "build_data.verify_bundle"
+    ) as vb:
+        run.return_value = mock.Mock(returncode=0, stderr="")
+        rc = build_data.main(
+            [
+                "--csv-dir",
+                str(csv_dir),
+                "--target-dir",
+                str(target),
+                "--qlib-scripts",
+                str(tmp_path),
+                "--expected-symbols",
+                "600519.SH",
+            ]
+        )
+        assert rc == 0
+        run.assert_called_once()  # 通过校验，确实进 dump
+        vb.assert_called_once()
