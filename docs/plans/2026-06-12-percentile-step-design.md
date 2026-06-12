@@ -53,30 +53,30 @@
 
 - `passesFilters` 重构拆分：confidence/action 过滤保留为通用前置；冷却检查拆为独立 `passesCooldown`
 - `Route()` 分流：
-  - 信号带分位元数据 且 `PercentileStep > 0` → 步进判定；通过则通知并更新步进状态，**不查、不更新**冷却戳
+  - 信号带分位元数据 且 **有效步长 > 0**（按 §2 取值顺序：信号自带 → 全局回退）→ 步进判定；通过则通知并更新步进状态，**不查、不更新**冷却戳。注意「策略配了 step 而全局为 0」是 rev4 合法的按策略启用场景，必须走步进路径
   - 否则 → 原有路径（冷却检查 → 通知 → 更新冷却戳），行为零变化
 - `RouteBatch` 复用同一判定与状态更新函数，防旁路。注（spec 审查核实）：RouteBatch 当前**无生产调用方**（仅测试引用），分位信号实际只走 `Route()` 单发路径——改造按最小成本做：批内逐条顺序判定（同 key 第一条放行并更新状态后，第二条按更新后的状态判定，与连续调用 Route 等价）；RouteBatch 与 Route 现存的其它不对等（不写 signalStore、先更新冷却后通知）维持现状，不在本设计范围
 - **判定与状态更新的原子性**：步进判定与状态写入在同一 `r.mu.Lock()` 临界区内完成（不照搬现有冷却的 RLock 读 + Lock 写两段式；app 侧 Route 虽为单 goroutine 串行调用，仍以单临界区写法为准）
-- `GetStats` 增加 `percentile_gates_active`（状态条目数）与 `percentile_step` 回显
+- `GetStats` 增加 `percentile_gates_active`（状态条目数）与 `percentile_step` 回显（rev4 注：该值仅为**全局回退值**，不反映各信号实际生效的策略级步长）
 - `ClearAllCooldowns` 同步清空步进状态（手动重置 = 全部重置）；`ClearCooldown(symbol)` 按 `symbol+"|"` 前缀遍历删除该标的的全部步进 key（隐含假设：symbol 不含 `|`，当前所有 watchlist 符号形态均满足）
 
 ## 5. 边界与错误处理
 
 | 场景 | 行为 |
 |---|---|
-| step = 0 / 未配置 | 所有信号走原冷却路径，与现状完全一致 |
+| **全局与策略级 step 均**未配置/≤0 | 所有信号走原冷却路径，与现状完全一致 |
 | 分位元数据存在但类型非 float64 | 视为无元数据 → 冷却路径，debug 日志说明 |
 | 同标的绑定两个分位策略 | 各自独立 key 互不干扰（price 49 分位的通知不影响 pe 52 分位的判定） |
 | strong_buy 之后的 buy（同侧） | 共享 buy 侧 key，按分位距离判定 |
 | 状态规模 | watchlist 量级（几十标的 × ≤2 策略 × 2 方向），无需清理例程；重启清零 |
 
-## 6. 测试（第 1-8 条 `internal/router/router_test.go`；第 9 条 `internal/app/app_test.go`，表驱动、无外部依赖）
+## 6. 测试（第 1-8 条 `internal/router/router_test.go`；第 9 条 `internal/app/app_test.go`；第 10 条跨 router_test.go（优先级/回退/互不干扰）与各策略包（Init→Metadata 端到端）。表驱动、无外部依赖）
 
 1. 买入侧步进序列：49 放行 → 47 抑制 → 44 放行 → 46 抑制
 2. 恢复重算：last=44 时 49 放行（|49−44|≥5）并更新记录为 49
 3. 卖出侧对称：81 放行 → 83 抑制 → 86 放行
 4. buy/sell 侧独立；双分位策略（不同 strategy）key 独立
-5. 无分位元数据 / step=0 → 冷却行为回归（既有用例不回归）
+5. 无分位元数据 / 两级 step 均未配置 → 冷却行为回归（既有用例不回归）
 6. 分位信号不更新冷却戳：分位通知后，同标的无元数据信号仍按自身冷却判定放行
 7. `ClearAllCooldowns` / `ClearCooldown(symbol)` 后首个分位信号重新放行
 8. 元数据类型异常（如 string）→ 走冷却路径不 panic
