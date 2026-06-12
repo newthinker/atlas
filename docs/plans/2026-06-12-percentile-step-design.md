@@ -1,0 +1,75 @@
+# Router percentile_step（百分位步进提醒）— 设计文档
+
+> 日期：2026-06-12
+> 状态：设计已确认（用户批准）
+> 需求来源：百分位监控规则——低于 50 分位开始买入提醒，**此后每再跌 5 个历史百分位（45/40/35…）再次提醒**；高于 80 分位卖出提醒，对称地每涨 5 个百分位再提醒。现有 router 仅有按标的时间冷却，无法表达「按分位步进」语义。
+> 关联配置：`configs/percentile-watchlist.yaml`（已预留 `percentile_step: 5` 注释行）
+
+## 1. 已确认的设计决定
+
+| 决定点 | 结论 |
+|---|---|
+| 步进语义 | 历史百分位点（非价格百分比）；对称规则 `|当前分位 − 上次通知分位| ≥ step` 即放行 |
+| 状态持久化 | 内存态，重启清零（重启后首个越线信号重新提醒一次，视为状态确认；与 cooldown 同语义） |
+| 与时间冷却交互 | **完全替代**：分位信号不受 cooldown 约束、也不更新按标的冷却戳（不压制同标的其它策略） |
+| 逻辑落点 | Router 内置门控（方案一）；策略保持无状态，通知去重职责与 cooldown 同居 router |
+| 范围边界 | 不做状态持久化、不做最小冷却叠加、不做按策略独立 step（全局一个值） |
+
+## 2. 配置与状态
+
+- **配置**：`router.percentile_step`（float64，默认 0 = 禁用，向后完全兼容）
+  - `internal/config/config.go` 的 `RouterConfig` 增加 `PercentileStep float64 \`mapstructure:"percentile_step"\``
+  - `internal/router/router.go` 的 `Config` 增加 `PercentileStep float64`；serve.go 装配处透传
+- **状态**：`map[string]float64`，key = `symbol|strategy|side`
+  - side ∈ {buy, sell}：`buy`/`strong_buy` 归 buy 侧，`sell`/`strong_sell` 归 sell 侧（同侧不同 action 共享 key，按分位距离判定与档位无关）
+  - 与 `cooldowns` 共用现有 `r.mu` 锁
+- **分位提取**：依序尝试 `Signal.Metadata["percentile"]`（price_percentile）、`Metadata["pe_percentile"]`（pe_percentile），取第一个存在且断言为 float64 成功的值；均不存在/类型不符 → 该信号不适用步进门控
+
+## 3. 判定规则（对称式，防死锁）
+
+```
+首次（无记录）                  → 放行，记录当前分位
+|当前分位 − 上次通知分位| ≥ step → 放行，更新记录
+否则                            → 抑制（Route 返回 routed=false）
+```
+
+单条规则覆盖三种场景：
+
+1. 买入侧继续下跌：50 通知 → 47 抑制 → 44 通知（|44−49|≥5）
+2. 卖出侧继续上涨：81 通知 → 83 抑制 → 86 通知
+3. **行情恢复后的新一轮（防死锁）**：上次跌至 35 分位通知后反弹到 60（区间内无信号），再跌回 49：|49−35|=14 ≥ 5 → 放行并以 49 重新起算。无需单独的「重置」分支。
+
+## 4. Route 分流
+
+- `passesFilters` 重构拆分：confidence/action 过滤保留为通用前置；冷却检查拆为独立 `passesCooldown`
+- `Route()` 分流：
+  - 信号带分位元数据 且 `PercentileStep > 0` → 步进判定；通过则通知并更新步进状态，**不查、不更新**冷却戳
+  - 否则 → 原有路径（冷却检查 → 通知 → 更新冷却戳），行为零变化
+- `RouteBatch` 复用同一判定与状态更新函数，防旁路
+- `GetStats` 增加 `percentile_gates_active`（状态条目数）与 `percentile_step` 回显
+- `ClearAllCooldowns` 同步清空步进状态（手动重置 = 全部重置）；`ClearCooldown(symbol)` 同步清除该标的的全部步进 key
+
+## 5. 边界与错误处理
+
+| 场景 | 行为 |
+|---|---|
+| step = 0 / 未配置 | 所有信号走原冷却路径，与现状完全一致 |
+| 分位元数据存在但类型非 float64 | 视为无元数据 → 冷却路径，debug 日志说明 |
+| 同标的绑定两个分位策略 | 各自独立 key 互不干扰（price 49 分位的通知不影响 pe 52 分位的判定） |
+| strong_buy 之后的 buy（同侧） | 共享 buy 侧 key，按分位距离判定 |
+| 状态规模 | watchlist 量级（几十标的 × ≤2 策略 × 2 方向），无需清理例程；重启清零 |
+
+## 6. 测试（`internal/router/router_test.go`，表驱动、无外部依赖）
+
+1. 买入侧步进序列：49 放行 → 47 抑制 → 44 放行 → 46 抑制
+2. 恢复重算：last=44 时 49 放行（|49−44|≥5）并更新记录为 49
+3. 卖出侧对称：81 放行 → 83 抑制 → 86 放行
+4. buy/sell 侧独立；双分位策略（不同 strategy）key 独立
+5. 无分位元数据 / step=0 → 冷却行为回归（既有用例不回归）
+6. 分位信号不更新冷却戳：分位通知后，同标的无元数据信号仍按自身冷却判定放行
+7. `ClearAllCooldowns` / `ClearCooldown(symbol)` 后首个分位信号重新放行
+8. 元数据类型异常（如 string）→ 走冷却路径不 panic
+
+## 7. 交付后的配置变更
+
+`configs/percentile-watchlist.yaml` 取消 `percentile_step: 5` 注释；`cooldown_hours: 24` 保留（仅约束无分位元数据的策略，如 ma_crossover）。`configs/config.example.yaml` 的 router 节补充该参数及注释。
