@@ -27,9 +27,9 @@ make qlib-data
         校验 instruments/all.txt 与 calendars/day.txt（dump_bin 自动生成，build_data 只核对不重写）
 ```
 
-**符号三形式约定**（贯穿全文，勿混用）：atlas 符号 = `000300.SH`（CLI 入参/采集器/错误消息）；CSV 文件名 = 小写 instrument `sh000300.csv`；qlib 库内 instrument = `SH000300`（instruments/all.txt 中的形式）。Go 侧文件名映射的**权威定义是 `scripts/qlib_eval/qlib_eval/symbols.py` 的 `to_qlib_instrument`**（小写化），双侧各加同样本契约测试（`000300.SH → sh000300`）。
+**符号三形式约定**（贯穿全文，勿混用）：atlas 符号 = `000300.SH`（CLI 入参/采集器/错误消息）；qlib instrument = `SH000300`（**`scripts/qlib_eval/qlib_eval/symbols.py` 的 `to_qlib_instrument` 返回值，大写，现存测试已锁定**）；CSV 文件名 = instrument 再小写 `sh000300.csv`（即 `to_qlib_instrument(symbol).lower() + ".csv"`，dump_bin 对文件名大小写宽容但统一小写）。双侧契约测试用同一样本：`000300.SH → SH000300`（Go 侧断言含文件名层 `sh000300.csv` 派生）。
 
-**日期区间**：Makefile 的 `qlib-data` 与 `export-signals` 共用 `SIGNAL_FROM`/`SIGNAL_TO` 变量，且数据包结束日取 `max(SIGNAL_TO, today)` 语义（实现为 qlib-data 默认 `--to` 用当天）——保证 horizon 60 日窗口有数据，杜绝「数据区间 < 信号区间」重蹈本需求要解决的问题。
+**日期区间**：Makefile 的 `qlib-data` **只传 `--from $(SIGNAL_FROM)`，不传 `--to`**；export-ohlcv 的 `--to` 默认值为当天——由此天然实现「数据包结束日 ≥ max(SIGNAL_TO, today)」（保证 horizon 60 日窗口有数据），杜绝「数据区间 < 信号区间」重蹈本需求要解决的问题。
 
 **非 A 股符号语义**：export-ohlcv 镜像 `to_qlib_instrument` 规则——非 `.SH/.SZ` 符号直接拒绝并计入失败摘要（不落盘、不静默跳过），与 Python 评估侧 Phase-1 A 股 only 边界一致。
 
@@ -42,7 +42,7 @@ make qlib-data
 | 组件 | 职责 | 依赖 |
 |------|------|------|
 | cmd/atlas/export_ohlcv.go | 拉取+CSV 落地，结构同 export_signals（exportDeps 注入 + golden 测试） | collector registry / SelectForSymbol |
-| scripts/qlib_eval/build_data.py | dump_bin 编排 + instruments/calendar 收尾 | 本地 qlib 副本（仅运行时） |
+| scripts/qlib_eval/build_data.py | dump_bin 编排 + instruments/calendar 校验（dump_bin 自动生成，只核对不重写） | 本地 qlib 副本（仅运行时） |
 | Makefile qlib-data | ①→② 串联；signal-eval 的 QLIB_DIR 默认切换 | — |
 | README 建包章节 | 一次性准备、crontab 示例、复权口径说明 | — |
 
@@ -72,7 +72,7 @@ make qlib-data
   - 文件名契约测试（与 symbols.py 同样本）；--help 冒烟
 - Python（pytest 默认零 qlib 依赖，hook 同款命令）：
   - build_data 的 dump_bin **命令构造**用 mock subprocess 断言（参数/路径/顺序）
-  - instruments/calendar 生成逻辑用合成 CSV 目录单测
+  - instruments/calendar 校验逻辑用合成 CSV 目录单测
   - 真实 dump_bin 调用走 pytest marker（integration，本地 qlib 副本存在时运行）
 - **e2e 验收（需求存在理由）**：`make qlib-data && make signal-eval`（默认 2021-2026 区间）产出含非空策略结果表的报告——社区包做不到的事。
 
