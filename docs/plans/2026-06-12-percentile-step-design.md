@@ -19,11 +19,13 @@
 
 - **配置**：`router.percentile_step`（float64，默认 0 = 禁用，向后完全兼容）
   - `internal/config/config.go` 的 `RouterConfig` 增加 `PercentileStep float64 \`mapstructure:"percentile_step"\``
-  - `internal/router/router.go` 的 `Config` 增加 `PercentileStep float64`；serve.go 装配处透传
+  - `internal/router/router.go` 的 `Config` 增加 `PercentileStep float64`
+  - **装配点（spec 审查纠正）**：router.Config 由 `internal/app/app.go` 的 `app.New()` 构造，当前为**硬编码**（MinConfidence 0.5、CooldownDuration 1h）——`cfg.Router` 的 `cooldown_hours`/`min_confidence` 是从未生效的死配置（预存 bug）。本功能必须把 `app.New()` 改为从 `cfg.Router` 映射构造（CooldownHours→Duration、MinConfidence、PercentileStep），**顺带修复该预存 bug**（否则 §7 的「cooldown_hours: 24 约束 ma_crossover」同样落空，实际恒为 1h）。修复属于本设计范围，需有配置生效的回归测试。
 - **状态**：`map[string]float64`，key = `symbol|strategy|side`
   - side ∈ {buy, sell}：`buy`/`strong_buy` 归 buy 侧，`sell`/`strong_sell` 归 sell 侧（同侧不同 action 共享 key，按分位距离判定与档位无关）
   - 与 `cooldowns` 共用现有 `r.mu` 锁
 - **分位提取**：依序尝试 `Signal.Metadata["percentile"]`（price_percentile）、`Metadata["pe_percentile"]`（pe_percentile），取第一个存在且断言为 float64 成功的值；均不存在/类型不符 → 该信号不适用步进门控
+  - `.(float64)` 断言安全的依据：信号从 strategy → app → router 全程内存传递，signalStore 只写不回读再路由，不存在 JSON 反序列化边界；若未来引入「从存储重放信号」路径需重新评估此假设
 
 ## 3. 判定规则（对称式，防死锁）
 
@@ -35,7 +37,7 @@
 
 单条规则覆盖三种场景：
 
-1. 买入侧继续下跌：50 通知 → 47 抑制 → 44 通知（|44−49|≥5）
+1. 买入侧继续下跌：50 通知 → 47 抑制（|47−50|<5）→ 44 通知（|44−50|=6≥5）
 2. 卖出侧继续上涨：81 通知 → 83 抑制 → 86 通知
 3. **行情恢复后的新一轮（防死锁）**：上次跌至 35 分位通知后反弹到 60（区间内无信号），再跌回 49：|49−35|=14 ≥ 5 → 放行并以 49 重新起算。无需单独的「重置」分支。
 
@@ -45,9 +47,10 @@
 - `Route()` 分流：
   - 信号带分位元数据 且 `PercentileStep > 0` → 步进判定；通过则通知并更新步进状态，**不查、不更新**冷却戳
   - 否则 → 原有路径（冷却检查 → 通知 → 更新冷却戳），行为零变化
-- `RouteBatch` 复用同一判定与状态更新函数，防旁路
+- `RouteBatch` 复用同一判定与状态更新函数，防旁路。注（spec 审查核实）：RouteBatch 当前**无生产调用方**（仅测试引用），分位信号实际只走 `Route()` 单发路径——改造按最小成本做：批内逐条顺序判定（同 key 第一条放行并更新状态后，第二条按更新后的状态判定，与连续调用 Route 等价）；RouteBatch 与 Route 现存的其它不对等（不写 signalStore、先更新冷却后通知）维持现状，不在本设计范围
+- **判定与状态更新的原子性**：步进判定与状态写入在同一 `r.mu.Lock()` 临界区内完成（不照搬现有冷却的 RLock 读 + Lock 写两段式；app 侧 Route 虽为单 goroutine 串行调用，仍以单临界区写法为准）
 - `GetStats` 增加 `percentile_gates_active`（状态条目数）与 `percentile_step` 回显
-- `ClearAllCooldowns` 同步清空步进状态（手动重置 = 全部重置）；`ClearCooldown(symbol)` 同步清除该标的的全部步进 key
+- `ClearAllCooldowns` 同步清空步进状态（手动重置 = 全部重置）；`ClearCooldown(symbol)` 按 `symbol+"|"` 前缀遍历删除该标的的全部步进 key（隐含假设：symbol 不含 `|`，当前所有 watchlist 符号形态均满足）
 
 ## 5. 边界与错误处理
 
@@ -69,6 +72,7 @@
 6. 分位信号不更新冷却戳：分位通知后，同标的无元数据信号仍按自身冷却判定放行
 7. `ClearAllCooldowns` / `ClearCooldown(symbol)` 后首个分位信号重新放行
 8. 元数据类型异常（如 string）→ 走冷却路径不 panic
+9. **配置接线回归（修复预存死配置 bug）**：`app.New()` 用含自定义 `cooldown_hours`/`min_confidence`/`percentile_step` 的 cfg 构造后，router 实际行为反映配置值（而非硬编码 1h/0.5）
 
 ## 7. 交付后的配置变更
 
