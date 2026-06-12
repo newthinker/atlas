@@ -107,6 +107,35 @@ func TestRoute_PercentileStep_BadMetadataFallsBackToCooldown(t *testing.T) {
 	}
 }
 
+func TestRoute_PercentileStep_PerStrategyOverride(t *testing.T) {
+	r := newStepRouter(5) // 全局默认 5
+	// 信号自带 percentile_step: 3（策略级配置经元数据传递）→ 按 3 门控
+	mk := func(pct float64) core.Signal {
+		sig := pctSignal("600519.SH", "pe_percentile", core.ActionBuy, pct)
+		sig.Metadata = map[string]any{"pe_percentile": pct, "percentile_step": 3.0}
+		return sig
+	}
+	for i, c := range []struct {
+		pct  float64
+		want bool
+	}{{49, true}, {47, false}, {46, true}} { // |46-49|=3 ≥ 3 放行（全局 5 则会抑制）
+		if routed, _ := r.Route(mk(c.pct)); routed != c.want {
+			t.Fatalf("override step %d (pct=%v): routed=%v, want %v", i, c.pct, routed, c.want)
+		}
+	}
+	// step 元数据类型异常（string）→ 回退全局 5
+	bad := pctSignal("0700.HK", "price_percentile", core.ActionBuy, 49)
+	bad.Metadata["percentile_step"] = "3"
+	if routed, _ := r.Route(bad); !routed {
+		t.Fatal("first should route")
+	}
+	bad2 := pctSignal("0700.HK", "price_percentile", core.ActionBuy, 45) // |45-49|=4 < 5
+	bad2.Metadata["percentile_step"] = "3"
+	if routed, _ := r.Route(bad2); routed {
+		t.Error("invalid step metadata must fall back to global step 5")
+	}
+}
+
 func TestRoute_StepDisabled_UsesCooldown(t *testing.T) {
 	r := newStepRouter(0) // step=0 禁用：带分位元数据也走冷却
 	sig := pctSignal("600519.SH", "price_percentile", core.ActionBuy, 49)
@@ -152,6 +181,18 @@ func percentileOf(sig core.Signal) (float64, bool) {
 	return 0, false
 }
 
+// effectiveStep returns the gate step for a signal: the strategy-carried
+// Metadata["percentile_step"] wins when present and positive; otherwise the
+// global router config value. <= 0 means the gate is disabled for this signal.
+func (r *Router) effectiveStep(sig core.Signal) float64 {
+	if v, ok := sig.Metadata["percentile_step"]; ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			return f
+		}
+	}
+	return r.cfg.PercentileStep
+}
+
 func sideOf(action core.Action) string {
 	if action == core.ActionBuy || action == core.ActionStrongBuy {
 		return "buy"
@@ -162,12 +203,12 @@ func sideOf(action core.Action) string {
 // passPercentileGate reports whether the signal clears the step gate and
 // records its percentile when it does. Check and update happen in one
 // critical section (no check-then-act race).
-func (r *Router) passPercentileGate(sig core.Signal, pct float64) bool {
+func (r *Router) passPercentileGate(sig core.Signal, pct, step float64) bool {
 	key := sig.Symbol + "|" + sig.Strategy + "|" + sideOf(sig.Action)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	last, exists := r.pctGates[key]
-	if exists && math.Abs(pct-last) < r.cfg.PercentileStep {
+	if exists && math.Abs(pct-last) < step {
 		return false
 	}
 	r.pctGates[key] = pct
@@ -183,9 +224,10 @@ func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 		... // 原 debug 日志 + return false, nil
 	}
 
-	if pct, ok := percentileOf(signal); ok && r.cfg.PercentileStep > 0 {
+	if pct, ok := percentileOf(signal); ok && r.effectiveStep(signal) > 0 {
 		// 分位信号：步进门控完全替代冷却（不查、不更新冷却戳，设计 §1/§4）
-		if !r.passPercentileGate(signal, pct) {
+		// 步长优先用信号自带（策略级配置），回退全局默认（设计 rev4）
+		if !r.passPercentileGate(signal, pct, r.effectiveStep(signal)) {
 			return false, nil
 		}
 	} else {
@@ -297,7 +339,63 @@ git add internal/router/
 git commit -m "feat(router): percentile gate for RouteBatch, clear ops and stats"
 ```
 
-### Task 3: 配置接线（修复 cfg.Router 死配置预存 bug）
+### Task 3: 策略级步长参数（设计 rev4）
+
+**Files:**
+- Modify: `internal/strategy/price_percentile/strategy.go`（Init 参数读取、Analyze 的 Metadata 构造）
+- Modify: `internal/strategy/pe_percentile/strategy.go`（同上）
+- Test: 各自 strategy_test.go
+
+- [ ] **Step 1: 写失败测试（两个策略包各一）**
+
+```go
+// price_percentile/strategy_test.go
+func TestInit_PercentileStepParam(t *testing.T) {
+	s := New()
+	// int 与 float64 双形态均可读（YAML 经 viper 可能给任一形态）
+	if err := s.Init(strategy.Config{Params: map[string]any{"percentile_step": 3}}); err != nil {
+		t.Fatal(err)
+	}
+	sigs := analyzeWithExtremeLowPercentile(t, s) // 复用既有造数 helper 触发一条信号
+	if len(sigs) == 0 {
+		t.Fatal("expected a signal")
+	}
+	if sigs[0].Metadata["percentile_step"] != 3.0 {
+		t.Errorf("metadata percentile_step = %v, want 3.0", sigs[0].Metadata["percentile_step"])
+	}
+}
+
+func TestAnalyze_NoStepParam_NoStepMetadata(t *testing.T) {
+	s := New()
+	_ = s.Init(strategy.Config{})
+	sigs := analyzeWithExtremeLowPercentile(t, s)
+	if _, ok := sigs[0].Metadata["percentile_step"]; ok {
+		t.Error("percentile_step must be absent when not configured (router falls back to global)")
+	}
+}
+```
+
+（`analyzeWithExtremeLowPercentile`：按各自包既有测试的造数方式触发一条 buy 信号的小 helper；pe_percentile 包用 `peCtx(5, ...)` 即可。）
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `go test ./internal/strategy/price_percentile/ ./internal/strategy/pe_percentile/ -run 'PercentileStep|NoStepParam' -v`
+Expected: FAIL（Metadata 无 percentile_step 键）
+
+- [ ] **Step 3: 实现**
+
+两个策略各自：结构体加 `percentileStep float64` 字段；`Init` 用既有 `numParam` 双形态 helper 读取 `percentile_step`（≤0 视为未配置）；`Analyze` 构造 Metadata 时 `if s.percentileStep > 0 { md["percentile_step"] = s.percentileStep }`。**保持两包独立实现，不抽公共基类**（与既有结构一致）。
+
+- [ ] **Step 4: 运行确认通过 + 提交**
+
+Run: `go test ./internal/strategy/... -v` → PASS
+
+```bash
+git add internal/strategy/price_percentile/ internal/strategy/pe_percentile/
+git commit -m "feat(strategy): per-strategy percentile_step carried via signal metadata"
+```
+
+### Task 4: 配置接线（修复 cfg.Router 死配置预存 bug）
 
 **Files:**
 - Modify: `internal/config/config.go`（RouterConfig :111-114、默认值 :286-289、校验 :337-345；新增 `PercentileStep < 0` 校验沿用 `core.WrapError(core.ErrConfigInvalid, ...)` 风格）
@@ -370,7 +468,7 @@ documented defaults (cooldown 4h, min_confidence 0.6) instead of the
 hardcoded 1h/0.5 that ignored configuration."
 ```
 
-### Task 4: 配置文件与收尾
+### Task 5: 配置文件与收尾
 
 **Files:**
 - Modify: `configs/percentile-watchlist.yaml`（取消 percentile_step 注释）
@@ -378,7 +476,7 @@ hardcoded 1h/0.5 that ignored configuration."
 
 - [ ] **Step 1: 配置更新**
 
-percentile-watchlist.yaml 三处同步更新：① `# percentile_step: 5` 取消注释，行尾注释改为「同方向信号需分位变化 ≥5 才重新提醒；时间冷却不约束分位信号」；② 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；③ `cooldown_hours` 定为 **4**，行尾注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」。注：此处**有意偏离设计 §7 的「24 保留」**——24h 是 percentile_step 就位前防刷屏的过渡值，功能就位后分位信号已不受冷却约束，无理由让 ma_crossover 类信号忍受 24h 冷却，回归默认 4h。
+percentile-watchlist.yaml 四处同步更新：① `# percentile_step: 5` 取消注释（全局默认，行尾注释「策略未配 percentile_step 时的回退值」）；② 两个分位策略的 params 各加 `percentile_step: 5`（行尾注释「可按策略独立调整，如 PE 分位改 3」）；③ 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；④ `cooldown_hours` 定为 **4**，行尾注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」。注：④ **有意偏离设计 §7 的「24 保留」**——24h 是 percentile_step 就位前防刷屏的过渡值，功能就位后分位信号已不受冷却约束，回归默认 4h。
 
 config.example.yaml 的 router 节：
 
@@ -386,8 +484,10 @@ config.example.yaml 的 router 节：
 router:
   min_confidence: 0.6
   cooldown_hours: 4      # 0 = 禁用冷却；仅约束不带分位元数据的策略信号
-  percentile_step: 5     # 0 = 禁用；分位策略信号按 |Δ分位|≥step 重新提醒（替代时间冷却）
+  percentile_step: 5     # 全局默认步长；策略 params.percentile_step 优先（0 = 禁用）
 ```
+
+strategies 节的两个分位策略 params 同步补 `percentile_step` 示例行（注释「按策略覆盖全局步长」）。
 
 - [ ] **Step 2: 运行 code-simplifier**（全局规范）
 
@@ -418,3 +518,4 @@ Implements docs/plans/2026-06-12-percentile-step-design.md (rev3)"
 - [ ] step=0 / 坏元数据 → 冷却路径回归，原有用例零回归
 - [ ] 死配置 bug 修复有实证测试（两段式 RED：先编译错误，加字段后断言失败 cooldown_seconds=3600 即 bug 实证）
 - [ ] ClearCooldown/ClearAllCooldowns 同步清理步进状态
+- [ ] 策略级步长（rev4）：信号自带 step 覆盖全局、类型异常回退全局、未配置不写元数据三态均有测试；两策略可配不同步长

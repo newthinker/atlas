@@ -1,7 +1,7 @@
 # Router percentile_step（百分位步进提醒）— 设计文档
 
 > 日期：2026-06-12
-> 状态：设计已确认（用户批准）
+> 状态：设计已确认（用户批准）；rev4 — 按用户需求将步长下沉为策略级可配（params.percentile_step 经 Metadata 传递，全局值降为回退默认），方案 A 经用户确认
 > 需求来源：百分位监控规则——低于 50 分位开始买入提醒，**此后每再跌 5 个历史百分位（45/40/35…）再次提醒**；高于 80 分位卖出提醒，对称地每涨 5 个百分位再提醒。现有 router 仅有按标的时间冷却，无法表达「按分位步进」语义。
 > 关联配置：`configs/percentile-watchlist.yaml`（已预留 `percentile_step: 5` 注释行）
 
@@ -13,7 +13,8 @@
 | 状态持久化 | 内存态，重启清零（重启后首个越线信号重新提醒一次，视为状态确认；与 cooldown 同语义） |
 | 与时间冷却交互 | **完全替代**：分位信号不受 cooldown 约束、也不更新按标的冷却戳（不压制同标的其它策略） |
 | 逻辑落点 | Router 内置门控（方案一）；策略保持无状态，通知去重职责与 cooldown 同居 router |
-| 范围边界 | 不做状态持久化、不做最小冷却叠加、不做按策略独立 step（全局一个值） |
+| **步长粒度（rev4 变更，用户确认）** | **策略级可配**：`strategies.{name}.params.percentile_step` 经 `Signal.Metadata["percentile_step"]` 传递，router 门控优先用信号自带步长，缺失/无效时回退全局 `router.percentile_step`。watchlist 资产经绑定的策略获得不同步长（如价格分位 5、PE 分位 3） |
+| 范围边界 | 不做状态持久化、不做最小冷却叠加、不做按标的独立 step（粒度到策略为止） |
 
 ## 2. 配置与状态
 
@@ -29,6 +30,10 @@
   - 与 `cooldowns` 共用现有 `r.mu` 锁
 - **分位提取**：依序尝试 `Signal.Metadata["percentile"]`（price_percentile）、`Metadata["pe_percentile"]`（pe_percentile），取第一个存在且断言为 float64 成功的值；均不存在/类型不符 → 该信号不适用步进门控
   - `.(float64)` 断言安全的依据：信号从 strategy → app → router 全程内存传递，signalStore 只写不回读再路由，不存在 JSON 反序列化边界；若未来引入「从存储重放信号」路径需重新评估此假设
+- **策略级步长（rev4）**：
+  - `price_percentile` / `pe_percentile` 的 params 增加可选 `percentile_step`（双形态 int/float64 读取，≤0 视为未配置）；策略持有该值并在 `Analyze` 产出信号时写入 `Metadata["percentile_step"]`（float64，仅在 >0 时写入）
+  - router 的**有效步长**取值顺序：`Metadata["percentile_step"]`（存在且 float64 且 >0）→ 全局 `router.percentile_step` → 两者皆无效则该信号走冷却路径
+  - 门控启用条件相应改为：信号带分位元数据 **且 有效步长 > 0**
 
 ## 3. 判定规则（对称式，防死锁）
 
@@ -76,7 +81,8 @@
 7. `ClearAllCooldowns` / `ClearCooldown(symbol)` 后首个分位信号重新放行
 8. 元数据类型异常（如 string）→ 走冷却路径不 panic
 9. **配置接线回归（修复预存死配置 bug）**：`app.New()` 用含自定义 `cooldown_hours`/`min_confidence`/`percentile_step` 的 cfg 构造后，router 实际行为反映配置值（而非硬编码 1h/0.5）
+10. **策略级步长（rev4）**：信号自带 `percentile_step: 3` 时按 3 门控（覆盖全局 5）；信号无 step 元数据时回退全局值；两策略不同步长互不干扰；策略 Init 读取 params 并在信号中携带的端到端用例（策略包内测试）
 
 ## 7. 交付后的配置变更
 
-`configs/percentile-watchlist.yaml` 取消 `percentile_step: 5` 注释；`cooldown_hours: 24` 保留（仅约束无分位元数据的策略，如 ma_crossover）。`configs/config.example.yaml` 的 router 节补充该参数及注释。
+`configs/percentile-watchlist.yaml`：两个分位策略的 params 增加 `percentile_step: 5`（可独立调整，如 PE 分位改 3）；router 节 `percentile_step: 5` 取消注释（作为未配置策略的全局默认）；`cooldown_hours` 仅约束无分位元数据的策略（如 ma_crossover）。`configs/config.example.yaml` 的 strategies 与 router 节同步补充参数及注释。
