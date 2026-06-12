@@ -1,0 +1,80 @@
+# ============================================================================
+# A 股指数 / A 股个股 / 港股个股 — 历史百分位监控配置（就绪可合并）
+#
+# 使用方式：把下面的 strategies 与 watchlist 两个块合并进 configs/config.yaml
+# （strategies 覆盖同名项；watchlist 整体替换或追加）。
+#
+# 监控规则（已确认）：
+#   - 低于历史 50 分位 → 买入通知；其后每再跌 5 个百分位（45/40/35…）再次提醒
+#     ※ 「每 5 个百分位再次提醒」依赖 router 的 percentile_step 功能（开发中），
+#       功能就位前的过渡行为：低于 50 分位期间按 cooldown_hours 周期重复提醒
+#   - 高于历史 80 分位 → 卖出通知
+#   - 25 分位以下 / 90 分位以上升级为 strong_buy / strong_sell
+#
+# 数据路径说明：
+#   - A 股指数/个股行情走 eastmoney；PE 分位走理杏仁（需配置 LIXINGER_API_KEY）
+#   - A 股金融股（招商银行/邮储银行/中国平安）与银行/证券指数的 PE 分位
+#     受理杏仁 non_financial 端点限制暂不可用（一期边界），仅价格分位生效
+#   - 港股行情走 Yahoo；PE 分位走 Yahoo 历史 EPS 重建（理杏仁兜底）
+# ============================================================================
+
+strategies:
+  price_percentile:
+    enabled: true
+    params:
+      lookback_years: 5
+      low: 50            # 低于 50 分位 → buy
+      high: 80           # 高于 80 分位 → sell
+      extreme_low: 25    # 低于 25 分位 → strong_buy
+      extreme_high: 90   # 高于 90 分位 → strong_sell
+  pe_percentile:
+    enabled: true
+    params:
+      lookback_years: 5
+      low: 50
+      high: 80
+      extreme_low: 25
+      extreme_high: 90
+
+router:
+  min_confidence: 0.6
+  cooldown_hours: 24    # percentile_step 功能就位前的防刷屏过渡值
+  # percentile_step: 5  # ← 功能交付后取消注释：同方向信号需分位再降/升 5 才重新提醒
+
+watchlist:
+  # ---------- A 股宽基指数 ----------
+  - {symbol: "000001.SH", name: "上证指数",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000016.SH", name: "上证50",     type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000300.SH", name: "沪深300",    type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000905.SH", name: "中证500",    type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000852.SH", name: "中证1000",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000688.SH", name: "科创50",     type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "399001.SZ", name: "深证成指",   type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "399006.SZ", name: "创业板指",   type: "指数", strategies: [price_percentile, pe_percentile]}
+
+  # ---------- A 股重点行业指数 ----------
+  - {symbol: "399986.SZ", name: "中证银行",     type: "指数", strategies: [price_percentile]}  # 金融类指数 PE 分位一期不可用
+  - {symbol: "399975.SZ", name: "证券公司",     type: "指数", strategies: [price_percentile]}  # 同上
+  - {symbol: "399997.SZ", name: "中证白酒",     type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000933.SH", name: "中证医药卫生", type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000932.SH", name: "中证主要消费", type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "399967.SZ", name: "中证军工",     type: "指数", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "399808.SZ", name: "中证新能源",   type: "指数", strategies: [price_percentile, pe_percentile]}
+
+  # ---------- A 股个股 ----------
+  - {symbol: "600036.SH", name: "招商银行", type: "股票", strategies: [price_percentile]}  # 金融股 PE 分位一期不可用
+  - {symbol: "601658.SH", name: "邮储银行", type: "股票", strategies: [price_percentile]}  # 同上
+  - {symbol: "601318.SH", name: "中国平安", type: "股票", strategies: [price_percentile]}  # 同上
+  - {symbol: "600276.SH", name: "恒瑞医药", type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "600519.SH", name: "贵州茅台", type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000858.SZ", name: "五粮液",   type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "000423.SZ", name: "东阿阿胶", type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "600900.SH", name: "长江电力", type: "股票", strategies: [price_percentile, pe_percentile]}
+
+  # ---------- 港股个股 ----------
+  # 港股 PE 分位走 Yahoo 历史 EPS 重建（理杏仁兜底），金融股不受 A 股端点限制
+  - {symbol: "3288.HK", name: "海天味业",     type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "0700.HK", name: "腾讯控股",     type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "9988.HK", name: "阿里巴巴-W",   type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "0883.HK", name: "中国海洋石油", type: "股票", strategies: [price_percentile, pe_percentile]}
+  - {symbol: "6886.HK", name: "华泰证券",     type: "股票", strategies: [price_percentile, pe_percentile]}
