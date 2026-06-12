@@ -15,17 +15,23 @@
 ```
 make qlib-data
   ├─ ① atlas export-ohlcv（Go，新增 cobra 子命令）
-  │     --symbols  默认 = watchlist 内 A 股标的 + SH000300 基准；可传任意清单
-  │     --from/--to/--out-dir
-  │     每标的一个 CSV（dump_bin 标准列：symbol,date,open,high,low,close,volume,factor）
-  │     文件名用 qlib 小写 instrument 形式（600519.SH → sh600519.csv）
+  │     --symbols  默认 = watchlist 内 A 股标的（.SH/.SZ 后缀判定）+ 000300.SH 基准（去重）
+  │     --from/--to/--out-dir（日期由 Makefile 传 SIGNAL_FROM/SIGNAL_TO，见下）
+  │     每标的一个 CSV（列：symbol,date,open,high,low,close,volume,factor）
+  │     文件名 = 小写 qlib instrument（600519.SH → sh600519.csv）
   │     collector 选择复用 SelectForSymbol（eastmoney 指数 secid 路径）
   └─ ② build_data.py（scripts/qlib_eval/ 新增，薄封装）
         --csv-dir / --qlib-scripts（默认 /Users/zuowei/workspace/python/qlib/scripts）
         --target-dir（默认 ~/.qlib/qlib_data/atlas_cn）
-        subprocess 调官方 dump_bin.py（DumpDataAll 全量模式）
-        生成 instruments/all.txt；校验 calendars/day.txt 覆盖请求区间
+        subprocess 调官方 dump_bin.py（DumpDataAll 全量模式，--exclude_fields symbol,date）
+        校验 instruments/all.txt 与 calendars/day.txt（dump_bin 自动生成，build_data 只核对不重写）
 ```
+
+**符号三形式约定**（贯穿全文，勿混用）：atlas 符号 = `000300.SH`（CLI 入参/采集器/错误消息）；CSV 文件名 = 小写 instrument `sh000300.csv`；qlib 库内 instrument = `SH000300`（instruments/all.txt 中的形式）。Go 侧文件名映射的**权威定义是 `scripts/qlib_eval/qlib_eval/symbols.py` 的 `to_qlib_instrument`**（小写化），双侧各加同样本契约测试（`000300.SH → sh000300`）。
+
+**日期区间**：Makefile 的 `qlib-data` 与 `export-signals` 共用 `SIGNAL_FROM`/`SIGNAL_TO` 变量，且数据包结束日取 `max(SIGNAL_TO, today)` 语义（实现为 qlib-data 默认 `--to` 用当天）——保证 horizon 60 日窗口有数据，杜绝「数据区间 < 信号区间」重蹈本需求要解决的问题。
+
+**非 A 股符号语义**：export-ohlcv 镜像 `to_qlib_instrument` 规则——非 `.SH/.SZ` 符号直接拒绝并计入失败摘要（不落盘、不静默跳过），与 Python 评估侧 Phase-1 A 股 only 边界一致。
 
 - 目标目录 `atlas_cn` 独立于社区 `cn_data`，两包并存可对比。
 - `signal-eval` 已有 `--qlib-dir`/`QLIB_DIR` 参数，零改动适配；Makefile 将 `QLIB_DIR` 默认值切到 `atlas_cn`。
@@ -43,21 +49,27 @@ make qlib-data
 ## 错误处理
 
 - 逐符号降级：单标的拉取失败 → stderr 警告 + 跳过，结尾输出失败摘要；失败数 > 0 时整体非 0 退出（已成功的 CSV 保留，可重跑）。
-- **基准 SH000300 失败 = 硬错误**（无基准则评估无意义，不降级）。
+- **基准 000300.SH 失败 = 硬错误**（无基准则评估无意义，不降级）。
+- 限流：当前默认集仅 2 个 instrument（watchlist 现实只有 600519.SH 一只 A 股 + 基准），无需限流；逐符号加固定 300ms 间隔作为礼貌延迟，为「几十标的」规模预留（一行实现，不做更复杂的限流器）。
 - 空 CSV 不写盘（防 dump_bin 吞入产生空 instrument）。
 - dump_bin 子进程失败：透传 stderr，非 0 退出。
 
-## 实现首日核对项（钉死，防口径事故）
+## 已钉死的口径结论（评审核实，不再是开放核对项）
 
-1. **复权口径**：核对 eastmoney kline 接口当前 fqt 参数取值（不复权/前复权/后复权），必须与信号生成侧（分析循环/backtest 用的同一 FetchHistory）一致；据此决定 factor 列写法——qlib 惯例 factor=复权因子，若导出价已复权则 factor=1 并在 README 注明。两侧口径写进 README「评估口径」。
-2. **dump_bin 输入约定**：CSV 列名、日期格式、--date_field_name/--symbol_field_name 等参数以官方脚本实际解析逻辑为准（实现时读 dump_bin.py 源码核对，不凭记忆）。
+1. **复权口径已确认**：eastmoney kline 为 **fqt=1 前复权**（eastmoney.go:433），信号生成侧用同一 FetchHistory，两侧天然同源；evaluate 侧只读 $open/$close 不乘 $factor（prices.py），故 **CSV factor 列恒写 1**，README「评估口径」注明「价格为前复权，factor=1」。
+2. **dump_bin 参数已确认**：不传字段过滤时 dump_bin 对全部列做 astype(float32)，字符串列必崩——build_data 必须传 **`--exclude_fields symbol,date`**（date 经 --date_field_name 处理、symbol 从文件名取），该参数列入 mock subprocess 命令构造断言的预期值。其余约定（--date_field_name 默认 date、文件名即 instrument）已读源码核实（dump_bin.py:269,328-337）。
+
+## 实现首日核对项
+
+- 实跑 dump_bin 一次后用 qlib `D.features(["SH600519"],...)` 抽查首尾两天数值与源 CSV 一致（端到端数值 sanity，防字段错位类低级事故）。
 
 ## 测试策略
 
 - Go（cmd/atlas，沿用 coverage_minimum=35 先例）：
-  - golden CSV 逐字节（列名/小写文件名/日期格式/factor 列）
-  - 单符号失败 → 降级摘要 + 非 0 退出；基准失败 → 硬错误
-  - 默认符号集 = watchlist A 股 + 基准（含去重）；--help 冒烟
+  - golden CSV 逐字节（列名/小写文件名/日期格式/factor=1 列）
+  - 单符号失败 → 降级摘要 + 非 0 退出；基准失败 → 硬错误；**非 A 股符号拒绝进摘要**
+  - 默认符号集 = watchlist A 股（.SH/.SZ 判定，config 经既有 --config 旗标 + config.Load 加载）+ 000300.SH 基准去重——注意现实：当前 config 仅 1 只 A 股，默认集 = {600519.SH, 000300.SH}，与 SIGNAL_SYMBOLS 恰好重合
+  - 文件名契约测试（与 symbols.py 同样本）；--help 冒烟
 - Python（pytest 默认零 qlib 依赖，hook 同款命令）：
   - build_data 的 dump_bin **命令构造**用 mock subprocess 断言（参数/路径/顺序）
   - instruments/calendar 生成逻辑用合成 CSV 目录单测
