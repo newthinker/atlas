@@ -38,17 +38,38 @@ python -m qlib.cli.data qlib_data \
 
 ## 运行
 
+一键端到端（推荐，从仓库根执行）：
+
+```bash
+make signal-eval   # export-signals 导出 signals.csv → evaluate.py 评估 → reports/
+```
+
+`signal-eval` 依赖 `export-signals`，并用预置 venv 的 Python 调 `evaluate.py`
+（**系统 python3 已损坏，务必走 venv，勿用裸 python**）。可覆盖变量：
+`QLIB_DIR`（数据目录）、`SIGNAL_OUT`（报告输出目录）、`SIGNAL_SYMBOLS/FROM/TO`。
+
+分步执行：
+
 ```bash
 # 1) Go 侧导出信号
 make export-signals            # 产出 signals.csv
 
-# 2) Python 侧评估
-cd scripts/qlib_eval
-python evaluate.py --signals ../../signals.csv \
-  [--qlib-dir ~/.qlib/qlib_data/cn_data] [--out ../../reports/]
+# 2) Python 侧评估（用 venv python，不要用系统 python3）
+scripts/qlib_eval/.venv/bin/python scripts/qlib_eval/evaluate.py \
+  --signals signals.csv [--qlib-dir ~/.qlib/qlib_data/cn_data] [--out reports/]
 ```
 
-报告写入 `reports/signal-eval-YYYYMMDD.md`。
+报告写入 `reports/signal-eval-YYYYMMDD.md`。qlib 数据目录缺失时 `evaluate.py`
+打印下载指引并以非 0 退出（不 panic、不静默）。
+
+## 测试
+
+```bash
+# 从仓库根执行（与 TaskCompleted hook 同款命令）
+scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q
+```
+
+测试**全程不依赖 qlib 安装与数据包**。
 
 ## 评估口径
 
@@ -59,7 +80,16 @@ python evaluate.py --signals ../../signals.csv \
 - **horizon**：5 / 20 / 60 个交易日。
 - **超额收益**：相对基准 `SH000300`（沪深 300）；buy 为 `ret - bench_ret`，sell 为规避口径
   `-(ret - bench_ret)`（信号后跑输基准记为正）。
-- **基准对齐**：个股停牌时取 bench 中 ≤ 目标日期的最近前值。
+- **基准对齐**：个股停牌时取 bench 中 ≤ 目标日期的最近前值（若入场日早于基准首行 →
+  计入数据缺口，不静默取末行）。
+- **置信度分桶**：`≥0.0 / ≥0.6 / ≥0.8` 累积阈值（非互斥区间）；一条信号计入所有
+  `confidence ≥ 阈值` 的桶。
+- **胜率（win_rate）**：超额收益 `> 0` 的样本占比。因 sell 的超额已取规避向，
+  buy 与 sell 胜率口径统一为「超额 > 0」（buy=跑赢基准，sell=成功规避下跌）。
+- **数据缺口分类**：`dropped`（无入场 bar / 顺延过久 / 入场早于基准）、`data_gaps`
+  （价格/基准取数失败）、非 A 股符号（Phase 1 跳过）在报告「数据缺口」节分行展示。
+- **数据局限**：qlib 数据包非实时，有**数据截止日局限**（最新若干交易日可能缺失），
+  落在数据截止日附近的 horizon 会越界计 NA；样本期取足够长（如 2021–2026）以保证样本数。
 
 ## 硬约束
 
