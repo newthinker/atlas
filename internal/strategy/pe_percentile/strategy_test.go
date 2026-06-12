@@ -13,6 +13,11 @@ import (
 // functional[1] "Source method:fallback_reason 解析进 Metadata"          → TestAnalyze_MethodMetadata
 // functional[2] "RequiredData Fundamentals=true/AssetTypes=[stock,index]/PriceHistory=lookback*252" → TestRequiredData_AssetTypes
 // boundary[0]   "Fundamental nil 或 PEPercentile<0 → (nil,nil)"          → TestAnalyze_Unavailable
+//
+// TASK-004 done_criteria → test mapping (percentile_step):
+// functional[0] "Init(percentile_step:3 int) → Metadata[percentile_step]==3.0" → TestInit_PercentileStepParam
+// boundary[0]   "未配置 → Metadata 不含 percentile_step 键"                    → TestAnalyze_NoStepParam_NoStepMetadata
+// boundary[1]   "percentile_step ≤ 0 → 视为未配置，不写元数据"                  → TestInit_PercentileStepNonPositive_NoMetadata
 
 func peCtx(pePct float64, source string) strategy.AnalysisContext {
 	return strategy.AnalysisContext{
@@ -102,5 +107,54 @@ func TestInit_InvalidThresholds(t *testing.T) {
 	err := s.Init(strategy.Config{Params: map[string]any{"low": 90, "high": 20}})
 	if err == nil {
 		t.Errorf("expected error for low >= high")
+	}
+}
+
+// TestInit_PercentileStepParam: functional[0] — int 形态参数被 numParam 双形态
+// helper 读取，>0 时写入信号 Metadata（float64）。float64 形态由既有 numParam
+// 用例覆盖。peCtx(5,...) 触发一条 strong_buy 信号。
+func TestInit_PercentileStepParam(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"percentile_step": 3}}); err != nil {
+		t.Fatal(err)
+	}
+	sigs, _ := s.Analyze(peCtx(5, "lixinger_cvpos"))
+	if len(sigs) == 0 {
+		t.Fatal("expected a signal")
+	}
+	if sigs[0].Metadata["percentile_step"] != 3.0 {
+		t.Errorf("metadata percentile_step = %v, want 3.0", sigs[0].Metadata["percentile_step"])
+	}
+}
+
+// TestAnalyze_NoStepParam_NoStepMetadata: boundary[0] — 未配置时 Metadata 不含
+// percentile_step 键（router 回退全局默认）。RED 阶段守卫测试，本就 PASS。
+func TestAnalyze_NoStepParam_NoStepMetadata(t *testing.T) {
+	s := New()
+	_ = s.Init(strategy.Config{})
+	sigs, _ := s.Analyze(peCtx(5, "lixinger_cvpos"))
+	if len(sigs) == 0 {
+		t.Fatal("expected a signal")
+	}
+	if _, ok := sigs[0].Metadata["percentile_step"]; ok {
+		t.Error("percentile_step must be absent when not configured (router falls back to global)")
+	}
+}
+
+// TestInit_PercentileStepNonPositive_NoMetadata: boundary[1] — ≤0 视为未配置，
+// 不写元数据（int 0 / 负 / float64 0 三态）。
+func TestInit_PercentileStepNonPositive_NoMetadata(t *testing.T) {
+	for _, step := range []any{0, -1, 0.0} {
+		s := New()
+		if err := s.Init(strategy.Config{Params: map[string]any{"percentile_step": step}}); err != nil {
+			t.Fatalf("step=%v: %v", step, err)
+		}
+		sigs, _ := s.Analyze(peCtx(5, "lixinger_cvpos"))
+		if len(sigs) == 0 {
+			t.Fatalf("step=%v: expected a signal", step)
+		}
+		if _, ok := sigs[0].Metadata["percentile_step"]; ok {
+			t.Errorf("step=%v: percentile_step <= 0 must be treated as unconfigured", step)
+		}
 	}
 }

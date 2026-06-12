@@ -21,6 +21,10 @@ type Strategy struct {
 	low, high     float64
 	extremeLow    float64
 	extremeHigh   float64
+	// percentileStep is the per-strategy re-alert step carried to the router via
+	// Signal.Metadata["percentile_step"]. <= 0 means unconfigured: the router
+	// falls back to its global router.percentile_step (design rev4 §2).
+	percentileStep float64
 }
 
 func New() *Strategy {
@@ -49,6 +53,7 @@ func (s *Strategy) Init(cfg strategy.Config) error {
 	s.high = numParam(cfg.Params, "high", s.high)
 	s.extremeLow = numParam(cfg.Params, "extreme_low", s.extremeLow)
 	s.extremeHigh = numParam(cfg.Params, "extreme_high", s.extremeHigh)
+	s.percentileStep = numParam(cfg.Params, "percentile_step", 0)
 	if !(s.extremeLow < s.low && s.low < s.high && s.high < s.extremeHigh) {
 		return fmt.Errorf("pe_percentile: thresholds must satisfy extreme_low < low < high < extreme_high, got %.1f/%.1f/%.1f/%.1f",
 			s.extremeLow, s.low, s.high, s.extremeHigh)
@@ -75,6 +80,11 @@ func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) 
 	md := map[string]any{"pe_percentile": p, "method": method, "lookback_years": s.lookbackYears}
 	if fallbackReason != "" {
 		md["fallback_reason"] = fallbackReason
+	}
+	// Only carry a positive step; absence signals the router to use its global
+	// fallback (design rev4 §2).
+	if s.percentileStep > 0 {
+		md["percentile_step"] = s.percentileStep
 	}
 
 	price := 0.0
