@@ -21,6 +21,9 @@
   - `internal/config/config.go` 的 `RouterConfig` 增加 `PercentileStep float64 \`mapstructure:"percentile_step"\``
   - `internal/router/router.go` 的 `Config` 增加 `PercentileStep float64`
   - **装配点（spec 审查纠正）**：router.Config 由 `internal/app/app.go` 的 `app.New()` 构造，当前为**硬编码**（MinConfidence 0.5、CooldownDuration 1h）——`cfg.Router` 的 `cooldown_hours`/`min_confidence` 是从未生效的死配置（预存 bug）。本功能必须把 `app.New()` 改为从 `cfg.Router` 映射构造（CooldownHours→Duration、MinConfidence、PercentileStep），**顺带修复该预存 bug**（否则 §7 的「cooldown_hours: 24 约束 ma_crossover」同样落空，实际恒为 1h）。修复属于本设计范围，需有配置生效的回归测试。
+  - **存量行为变更注记（发布说明用）**：config 默认值为 `cooldown_hours: 4`、`min_confidence: 0.6`，而硬编码生效值是 1h / 0.5——修复接线后，未显式配置的部署冷却 1h→4h、置信阈值 0.5→0.6，此为修复本意的可见变更
+  - `cooldown_hours: 0` 约定为禁用冷却（恒放行），与 `percentile_step: 0 = 禁用` 风格对齐
+  - `EnabledActions` 维持 `app.New()` 现有硬编码，config 无对应字段，不在本设计范围（YAGNI）
 - **状态**：`map[string]float64`，key = `symbol|strategy|side`
   - side ∈ {buy, sell}：`buy`/`strong_buy` 归 buy 侧，`sell`/`strong_sell` 归 sell 侧（同侧不同 action 共享 key，按分位距离判定与档位无关）
   - 与 `cooldowns` 共用现有 `r.mu` 锁
@@ -62,7 +65,7 @@
 | strong_buy 之后的 buy（同侧） | 共享 buy 侧 key，按分位距离判定 |
 | 状态规模 | watchlist 量级（几十标的 × ≤2 策略 × 2 方向），无需清理例程；重启清零 |
 
-## 6. 测试（`internal/router/router_test.go`，表驱动、无外部依赖）
+## 6. 测试（第 1-8 条 `internal/router/router_test.go`；第 9 条 `internal/app/app_test.go`，表驱动、无外部依赖）
 
 1. 买入侧步进序列：49 放行 → 47 抑制 → 44 放行 → 46 抑制
 2. 恢复重算：last=44 时 49 放行（|49−44|≥5）并更新记录为 49
