@@ -110,6 +110,10 @@ func TestExportOHLCV_BenchmarkFailureIsFatal(t *testing.T) {
 	// → executeExportOHLCV 立即返回 error 且消息含 "benchmark"
 }
 
+// 分层语义：清单「含基准」校验在 CLI 层（runExportOHLCV，符号集语义所在层，
+// 与默认集构造同层）；executeExportOHLCV 核心保持纯执行——golden 测试可直调
+// 核心、symbols 不带基准，零冲突。CLI 层校验的测试归 Task 2。
+
 func TestExportOHLCV_EmptySymbolsAndWatchlistIsError(t *testing.T) {
 	// C1-1 防线：watchlist 为空且未显式 --symbols → 报错（绝不退化为只导基准）
 }
@@ -120,7 +124,7 @@ func TestDefaultOHLCVSymbols(t *testing.T) {
 }
 ```
 
-golden 数值按 makeBars 实际生成规律对齐（执行时以现有 helper 为准）；`sleep` 注入避免测试等待 300ms。
+golden 与上文 makeOHLCVBars 的生成规律**互锁，不得单边改动**（既有 makeBars 只填 Close/Time，不可用于 golden）；`sleep` 注入避免测试等待 300ms。
 
 - [ ] **Step 2: 运行确认失败**
 
@@ -220,8 +224,10 @@ var exportOHLCVCmd = &cobra.Command{
 //     （逐 symbol SelectForSymbol）
 
 // TDD 顺序（先测后实现）：先写 TestExportOHLCVCommand_UsageListsAllFlags
-//（仿照 export_signals 的同名测试）与 test_makefile 断言（Step 3），确认 RED，
-// 再实现 cobra 命令与 Makefile target。
+//（仿照 export_signals 的同名测试）、TestRunExportOHLCV_BenchmarkMissingIsFatal
+//（CLI 层校验：--symbols 清单不含 000300.SH → 报错含 "benchmark"，Task 1 分层
+// 语义的承接）与 test_makefile 断言（Step 3），确认 RED，再实现 cobra 命令与
+// Makefile target。
 ```
 
 - [ ] **Step 2: Makefile target（注意：只传 --from，不传 --to——spec 钉死）**
@@ -237,7 +243,7 @@ qlib-data: build
 	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_DIR) --target-dir $(QLIB_DATA_DIR)
 ```
 
-**必须显式传 `--symbols $(SIGNAL_SYMBOLS)`**（评审 C1-1 BLOCKER）：recipe 不带 --config 时 CLI 拿不到 watchlist（config.Defaults() 无该字段），默认集会退化为只剩基准，数据包静默缺 600519.SH——`make signal-eval` 的信号又被全丢，复刻本需求要消灭的事故。共用 SIGNAL_SYMBOLS 还天然保证「评估符号 ⊆ 数据包」。基准 000300.SH 若不在 SIGNAL_SYMBOLS 中由 CLI 自动追加（默认集逻辑同样适用于显式清单）。
+**必须显式传 `--symbols $(SIGNAL_SYMBOLS)`**（评审 C1-1 BLOCKER）：recipe 不带 --config 时 CLI 拿不到 watchlist（config.Defaults() 无该字段），默认集会退化为只剩基准，数据包静默缺 600519.SH——`make signal-eval` 的信号又被全丢，复刻本需求要消灭的事故。共用 SIGNAL_SYMBOLS 还天然保证「评估符号 ⊆ 数据包」。SIGNAL_SYMBOLS 默认值已含基准 000300.SH；若用户覆盖变量时漏掉基准，由 export-ohlcv 既有的「基准失败/缺失 = 硬错误」语义兜底报错（不做显式清单自动追加——spec 未定义该行为，YAGNI）。
 
 （build_data.py 在 Task 3 实现；本 task 先落 target，test_makefile 锚定文本。`QLIB_DIR` 默认值切换放 Task 4 与 e2e 一起验。）
 
