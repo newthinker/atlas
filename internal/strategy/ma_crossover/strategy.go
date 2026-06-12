@@ -2,7 +2,6 @@ package ma_crossover
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/indicator"
@@ -97,7 +96,7 @@ func (m *MACrossover) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, erro
 			Price:       lastClose,
 			Confidence:  m.calculateConfidence(currFast, currSlow),
 			Reason:      fmt.Sprintf("Golden Cross: MA%d (%.2f) crossed above MA%d (%.2f)", m.fastPeriod, currFast, m.slowPeriod, currSlow),
-			GeneratedAt: time.Now(),
+			GeneratedAt: ctx.Now,
 			Metadata: map[string]any{
 				"fast_ma": currFast,
 				"slow_ma": currSlow,
@@ -114,7 +113,7 @@ func (m *MACrossover) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, erro
 			Price:       lastClose,
 			Confidence:  m.calculateConfidence(currFast, currSlow),
 			Reason:      fmt.Sprintf("Death Cross: MA%d (%.2f) crossed below MA%d (%.2f)", m.fastPeriod, currFast, m.slowPeriod, currSlow),
-			GeneratedAt: time.Now(),
+			GeneratedAt: ctx.Now,
 			Metadata: map[string]any{
 				"fast_ma": currFast,
 				"slow_ma": currSlow,

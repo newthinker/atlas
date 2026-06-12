@@ -12,6 +12,54 @@ func TestMACrossover_ImplementsStrategy(t *testing.T) {
 	var _ strategy.Strategy = (*MACrossover)(nil)
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-002, plan Task 2)
+// functional[0] "ctx.Now 设为历史时间时 GeneratedAt==ctx.Now(非墙钟)" → TestAnalyze_GeneratedAtUsesCtxNow
+// functional[1] "金叉/死叉两处信号生成点均已修复"                       → TestAnalyze_GeneratedAtUsesCtxNow (golden) + TestAnalyze_DeathCrossGeneratedAtUsesCtxNow (death)
+// boundary[0]   "既有测试零修改通过"                                   → 既有 TestMACrossover_* 不变
+
+// barsFromCloses builds OHLCV bars from a sequence of closing prices with a
+// fixed arbitrary increasing timestamp per bar (time value is irrelevant here).
+func barsFromCloses(closes ...float64) []core.OHLCV {
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	bars := make([]core.OHLCV, len(closes))
+	for i, c := range closes {
+		bars[i] = core.OHLCV{
+			Symbol: "T",
+			Close:  c,
+			Time:   base.Add(time.Duration(i) * 24 * time.Hour),
+		}
+	}
+	return bars
+}
+
+func TestAnalyze_GeneratedAtUsesCtxNow(t *testing.T) {
+	past := time.Date(2023, 6, 1, 0, 0, 0, 0, time.UTC)
+	s := New(2, 4)
+	ctx := strategy.AnalysisContext{Symbol: "T", Now: past,
+		OHLCV: barsFromCloses(100, 95, 90, 85, 80, 120)} // golden cross
+	sigs, err := s.Analyze(ctx)
+	if err != nil || len(sigs) == 0 {
+		t.Fatalf("expected signal, got %v err=%v", sigs, err)
+	}
+	if !sigs[0].GeneratedAt.Equal(past) {
+		t.Errorf("GeneratedAt = %v, want ctx.Now (%v)", sigs[0].GeneratedAt, past)
+	}
+}
+
+func TestAnalyze_DeathCrossGeneratedAtUsesCtxNow(t *testing.T) {
+	past := time.Date(2023, 6, 1, 0, 0, 0, 0, time.UTC)
+	s := New(2, 4)
+	ctx := strategy.AnalysisContext{Symbol: "T", Now: past,
+		OHLCV: barsFromCloses(80, 85, 90, 95, 100, 60)} // death cross
+	sigs, err := s.Analyze(ctx)
+	if err != nil || len(sigs) == 0 {
+		t.Fatalf("expected signal, got %v err=%v", sigs, err)
+	}
+	if !sigs[0].GeneratedAt.Equal(past) {
+		t.Errorf("GeneratedAt = %v, want ctx.Now (%v)", sigs[0].GeneratedAt, past)
+	}
+}
+
 // Context Checkpoint: done_criteria → test mapping (TASK-009)
 // functional[0] "ma_crossover RequiredData().AssetTypes 恰为六类" → TestMACrossover_AssetTypes
 func TestMACrossover_AssetTypes(t *testing.T) {
