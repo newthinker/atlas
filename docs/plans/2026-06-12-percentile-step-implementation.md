@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为 router 实现百分位步进提醒门控（`|当前分位−上次通知分位| ≥ step` 才重新放行），并顺带修复 `cfg.Router` 死配置预存 bug。
+**Goal:** 为 router 实现百分位步进提醒门控（`|当前分位−上次通知分位| ≥ step` 才重新放行），步长**策略级可配**（经 Signal.Metadata 传递、全局值为回退默认），并顺带修复 `cfg.Router` 死配置预存 bug。
 
-**Architecture:** Router 内置门控：confidence/action 过滤为通用前置，分位信号（带 percentile 元数据且 step>0）走步进判定（单临界区、不查不更新冷却戳），其余信号走原冷却路径零变化。配置经 `config.RouterConfig.PercentileStep` → `app.New()`（从硬编码改为 cfg 映射）→ `router.Config` 接线。
+**Architecture:** Router 内置门控：confidence/action 过滤为通用前置，分位信号（带 percentile 元数据且有效步长>0）走步进判定（单临界区、不查不更新冷却戳），其余信号走原冷却路径零变化。步长来源：`strategies.{name}.params.percentile_step` → 策略写入 Metadata → router `effectiveStep` 优先采用，回退全局 `router.percentile_step`（经 `app.New()` 从硬编码改为 cfg 映射接线）。
 
 **Tech Stack:** Go 1.21、标准库 testing（表驱动，沿用 router_test.go 现有风格）。
 
-**设计依据（必读）：** `docs/plans/2026-06-12-percentile-step-design.md`（rev3 终版）
+**设计依据（必读）：** `docs/plans/2026-06-12-percentile-step-design.md`（rev4，含策略级步长）
 
 **执行纪律：** 严格 TDD；全部 Task 完成后、最终提交前运行 code-simplifier sub-agent（全局规范）。
 
@@ -123,6 +123,15 @@ func TestRoute_PercentileStep_PerStrategyOverride(t *testing.T) {
 			t.Fatalf("override step %d (pct=%v): routed=%v, want %v", i, c.pct, routed, c.want)
 		}
 	}
+	// 全局 step=0 + 信号自带 step=3 → 仍按 3 门控（按策略启用场景，设计 rev4 §4）
+	r0 := newStepRouter(0)
+	if routed, _ := r0.Route(mk(49)); !routed {
+		t.Error("strategy-level step must enable the gate even when global step is 0")
+	}
+	if routed, _ := r0.Route(mk(48)); routed { // |48-49|=1 < 3：被步进抑制而非进入冷却路径
+		t.Error("gate must be active with strategy-level step despite global 0")
+	}
+
 	// step 元数据类型异常（string）→ 回退全局 5
 	bad := pctSignal("0700.HK", "price_percentile", core.ActionBuy, 49)
 	bad.Metadata["percentile_step"] = "3"
@@ -352,7 +361,7 @@ git commit -m "feat(router): percentile gate for RouteBatch, clear ops and stats
 // price_percentile/strategy_test.go
 func TestInit_PercentileStepParam(t *testing.T) {
 	s := New()
-	// int 与 float64 双形态均可读（YAML 经 viper 可能给任一形态）
+	// 此处测 int 形态；float64 形态由既有 numParam 用例覆盖（双形态 helper 已有测试）
 	if err := s.Init(strategy.Config{Params: map[string]any{"percentile_step": 3}}); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +389,7 @@ func TestAnalyze_NoStepParam_NoStepMetadata(t *testing.T) {
 - [ ] **Step 2: 运行确认失败**
 
 Run: `go test ./internal/strategy/price_percentile/ ./internal/strategy/pe_percentile/ -run 'PercentileStep|NoStepParam' -v`
-Expected: FAIL（Metadata 无 percentile_step 键）
+Expected: `TestInit_PercentileStepParam` FAIL（Metadata 无 percentile_step 键）；`TestAnalyze_NoStepParam_NoStepMetadata` 是守卫测试，RED 阶段本就 PASS——只有一半红是预期现象
 
 - [ ] **Step 3: 实现**
 
@@ -476,7 +485,7 @@ hardcoded 1h/0.5 that ignored configuration."
 
 - [ ] **Step 1: 配置更新**
 
-percentile-watchlist.yaml 四处同步更新：① `# percentile_step: 5` 取消注释（全局默认，行尾注释「策略未配 percentile_step 时的回退值」）；② 两个分位策略的 params 各加 `percentile_step: 5`（行尾注释「可按策略独立调整，如 PE 分位改 3」）；③ 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；④ `cooldown_hours` 定为 **4**，行尾注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」。注：④ **有意偏离设计 §7 的「24 保留」**——24h 是 percentile_step 就位前防刷屏的过渡值，功能就位后分位信号已不受冷却约束，回归默认 4h。
+percentile-watchlist.yaml 四处同步更新：① `# percentile_step: 5` 取消注释（全局默认，行尾注释「策略未配 percentile_step 时的回退值」）；② 两个分位策略的 params 各加 `percentile_step: 5`（行尾注释「可按策略独立调整，如 PE 分位改 3」）；③ 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；④ `cooldown_hours` 定为 **4**，行尾注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」——24h 是 percentile_step 就位前防刷屏的过渡值，功能就位后回归默认 4h（与设计 rev4 §7 一致）。
 
 config.example.yaml 的 router 节：
 
@@ -491,7 +500,7 @@ strategies 节的两个分位策略 params 同步补 `percentile_step` 示例行
 
 - [ ] **Step 2: 运行 code-simplifier**（全局规范）
 
-Task tool: `subagent_type: "code-simplifier:code-simplifier"`，prompt 列出 router.go、router_test.go、config.go、app.go 改动。
+Task tool: `subagent_type: "code-simplifier:code-simplifier"`，prompt 列出全部改动文件：router.go、router_test.go、config.go、app.go、app_test.go、price_percentile/strategy.go(+test)、pe_percentile/strategy.go(+test)。
 
 - [ ] **Step 3: 全量回归 + gitnexus**
 
@@ -505,7 +514,7 @@ go vet ./... && go test ./... && npx gitnexus analyze
 git add -A
 git commit -m "feat: percentile step re-alert config rollout
 
-Implements docs/plans/2026-06-12-percentile-step-design.md (rev3)"
+Implements docs/plans/2026-06-12-percentile-step-design.md (rev4)"
 ```
 
 ---
