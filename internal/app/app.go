@@ -89,9 +89,11 @@ func New(cfg *config.Config, logger *zap.Logger) *App {
 	notifiers := notifier.NewRegistry()
 
 	routerCfg := router.Config{
-		MinConfidence:    0.5,
-		CooldownDuration: 1 * time.Hour,
-		EnabledActions:   []core.Action{core.ActionBuy, core.ActionSell, core.ActionStrongBuy, core.ActionStrongSell},
+		MinConfidence:    cfg.Router.MinConfidence,
+		CooldownDuration: time.Duration(cfg.Router.CooldownHours) * time.Hour, // 0 = cooldown disabled (router.passesCooldown: time.Since(last) < 0 is never true)
+		PercentileStep:   cfg.Router.PercentileStep,
+		// EnabledActions stays hardcoded: config has no corresponding field (YAGNI).
+		EnabledActions: []core.Action{core.ActionBuy, core.ActionSell, core.ActionStrongBuy, core.ActionStrongSell},
 	}
 	r := router.New(routerCfg, notifiers, logger)
 

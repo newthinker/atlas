@@ -144,6 +144,58 @@ func TestApp_New(t *testing.T) {
 	}
 }
 
+// TestNew_RouterConfigFromCfg proves the cfg.Router fields are actually wired
+// into the router (the pre-existing dead-config bug: app.New hardcoded 1h/0.5
+// and ignored cfg.Router entirely).
+//
+// Context Checkpoint: done_criteria → test mapping (TASK-006)
+// functional[0] cooldown_hours=24 → 86400s      → this test (cooldown_seconds)
+// functional[1] min_confidence=0.7 wired          → this test (min_confidence)
+// functional[2] percentile_step=5 wired           → this test (percentile_step)
+// functional[3] EnabledActions hardcoded 4        → this test (enabled_actions)
+// boundary[0]   cooldown_hours=0 disables cooldown → TestNew_CooldownDisabledWhenZeroHours
+func TestNew_RouterConfigFromCfg(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Router.CooldownHours = 24
+	cfg.Router.MinConfidence = 0.7
+	cfg.Router.PercentileStep = 5
+
+	a := New(cfg, nil)
+	stats := a.router.GetStats()
+
+	if stats["cooldown_seconds"] != float64(24*3600) {
+		t.Errorf("cooldown not wired: %v", stats["cooldown_seconds"])
+	}
+	if stats["min_confidence"] != 0.7 {
+		t.Errorf("min_confidence not wired: %v", stats["min_confidence"])
+	}
+	if stats["percentile_step"] != 5.0 {
+		t.Errorf("percentile_step not wired: %v", stats["percentile_step"])
+	}
+	actions, _ := stats["enabled_actions"].([]core.Action)
+	if len(actions) != 4 {
+		t.Errorf("enabled_actions must stay hardcoded (4 actions), got %v", stats["enabled_actions"])
+	}
+}
+
+// TestNew_CooldownDisabledWhenZeroHours verifies cooldown_hours: 0 disables the
+// cooldown (CooldownDuration 0 → time.Since(last) < 0 always false → always
+// passes), so two consecutive non-percentile signals for the same symbol route.
+func TestNew_CooldownDisabledWhenZeroHours(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Router.CooldownHours = 0
+	cfg.Router.MinConfidence = 0.5
+	a := New(cfg, nil)
+
+	sig := core.Signal{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.9, Strategy: "ma_crossover"}
+	if routed, _ := a.router.Route(sig); !routed {
+		t.Fatal("first signal should route")
+	}
+	if routed, _ := a.router.Route(sig); !routed {
+		t.Error("cooldown_hours=0 disables cooldown: second signal must also route")
+	}
+}
+
 func TestApp_RegisterComponents(t *testing.T) {
 	cfg := &config.Config{}
 	app := New(cfg, nil)
@@ -478,7 +530,11 @@ func TestApp_Executor_ErrorDoesNotStop(t *testing.T) {
 // W2 regression: a signal suppressed by the router (cooldown) must NOT be
 // submitted for execution, otherwise a deduplicated signal still places an order.
 func TestApp_Executor_CooldownSuppressedNotSubmitted(t *testing.T) {
-	app := New(&config.Config{}, nil)
+	// Cooldown must be explicitly enabled now that app.New wires cfg.Router
+	// (the old hardcoded 1h is gone; an empty config means cooldown disabled).
+	cfg := &config.Config{}
+	cfg.Router.CooldownHours = 1
+	app := New(cfg, nil)
 	app.RegisterCollector(&mockCollector{name: "mock", history: executorTestHistory()})
 	// Two signals on the SAME symbol: the first routes (and sets cooldown), the
 	// second is suppressed by cooldown and must not reach the executor.
