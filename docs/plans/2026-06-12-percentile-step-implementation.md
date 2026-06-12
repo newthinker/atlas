@@ -328,7 +328,7 @@ func TestNew_RouterConfigFromCfg(t *testing.T) {
 }
 ```
 
-（app_test.go 与 app.go 同包，可访问私有字段；`config.Default()` 名称以 config.go 实际默认构造函数为准，执行时核对。）
+（app_test.go 与 app.go 同包，可访问私有字段。）
 
 - [ ] **Step 2: 运行确认失败**
 
@@ -378,7 +378,7 @@ hardcoded 1h/0.5 that ignored configuration."
 
 - [ ] **Step 1: 配置更新**
 
-percentile-watchlist.yaml 三处同步更新：① `# percentile_step: 5` 取消注释，行尾注释改为「同方向信号需分位变化 ≥5 才重新提醒；时间冷却不约束分位信号」；② 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；③ `cooldown_hours: 24` 行尾的「过渡值」注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」，数值可保留 24 或回调为 4（建议 4，与默认一致——分位信号已不受其约束）。
+percentile-watchlist.yaml 三处同步更新：① `# percentile_step: 5` 取消注释，行尾注释改为「同方向信号需分位变化 ≥5 才重新提醒；时间冷却不约束分位信号」；② 文件头部第 9-10 行「功能就位前的过渡行为」段落删除（功能已就位）；③ `cooldown_hours` 定为 **4**，行尾注释改为「仅约束不带分位元数据的策略（如 ma_crossover）」。注：此处**有意偏离设计 §7 的「24 保留」**——24h 是 percentile_step 就位前防刷屏的过渡值，功能就位后分位信号已不受冷却约束，无理由让 ma_crossover 类信号忍受 24h 冷却，回归默认 4h。
 
 config.example.yaml 的 router 节：
 
@@ -416,5 +416,5 @@ Implements docs/plans/2026-06-12-percentile-step-design.md (rev3)"
 - [ ] 卖出侧对称；buy/sell 与双策略 key 独立；strong 档共享同侧 key
 - [ ] 分位信号不更新冷却戳（同标的 ma_crossover 不受压制）
 - [ ] step=0 / 坏元数据 → 冷却路径回归，原有用例零回归
-- [ ] 死配置 bug 修复有实证测试（Step 2 先 FAIL 即为 bug 存在的证明）
+- [ ] 死配置 bug 修复有实证测试（两段式 RED：先编译错误，加字段后断言失败 cooldown_seconds=3600 即 bug 实证）
 - [ ] ClearCooldown/ClearAllCooldowns 同步清理步进状态
