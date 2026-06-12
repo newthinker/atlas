@@ -1,0 +1,40 @@
+{
+  "task": "TASK-007",
+  "agent": "dev-agent-3",
+  "key_findings": [
+    "report.py：read_signals 用 csv.reader（非 DictReader）逐行校验列数=7，date→Timestamp、confidence/price→float，metadata 原串保留；坏行 raise ValueError(f'signals CSV line {lineno}: ...') 含物理行号（含表头 1-based）。render_report(agg,stats,meta)->str 输出含「评估口径」「数据缺口」节 + 每策略 markdown 表小节。",
+    "evaluate.py：argparse 入口 --signals/--qlib-dir/--out/--max-defer。main 先 check_qlib_dir，缺失→get_data_hint 写 stderr 并 return 1（提前返回，绝不触 qlib）。QlibPriceSource 仅在 main 真实运行分支内 import（顶层零 qlib）。collect_outcomes 编排：groupby symbol，非A股(to_qlib_instrument ValueError)→non_ashare 跳过不中断，取价异常→data_gaps，evaluate_signal None→dropped。",
+    "测试 import evaluate 不触发 qlib（守门 test_import_evaluate_no_qlib + test_main_exits_when_qlib_dir_missing 内 assert 'qlib' not in sys.modules）。conftest 的 sys.path 注入使 evaluate.py（脚本，非包内）可被 tests import。",
+    "全套 24 passed（symbols 2 + prices 6 + event_study 8 + report 8）。pandas 3.0.3 下 csv 解析与 Timestamp 行为符合预期。",
+    "review_fix(epoch=2, QA W1/W2/S3/S7)：W1 空信号文件(仅表头)曾在 signals['date'].min().strftime 触发 NaTType 崩溃→main 加 signals.empty 入口短路写无信号报告 exit 0（不构造 QlibPriceSource，不触 qlib）。W2 collect_outcomes 包裹 source.benchmark() try/except，基准缺失降级返回 ([], stats+benchmark_error)，render_report 在数据缺口节输出该提示行。S7 read_signals encoding=utf-8-sig 容忍 Excel BOM。S3 README 注明基准收盘到收盘 vs 个股开盘到收盘的入场日内偏置。修复后全套 32 passed。"
+  ],
+  "decisions": [
+    {
+      "decision": "read_signals 用 csv.reader 而非 DictReader 做严格校验。",
+      "rationale": "csv.reader 直接给每行 list，len != 7 即可精确判缺列/多列并报物理行号；DictReader 的 None/restkey 语义对空尾列与缺列易混淆。metadata 保留原串（解析后的 JSON 文本如 {\"k\":1}），不反序列化——report 只透传。"
+    },
+    {
+      "decision": "qlib 检测/下载指引/编排拆为 check_qlib_dir/get_data_hint/collect_outcomes 三个可单测纯函数，main 仅做装配。",
+      "rationale": "DoD 要求 qlib 检测路径有测试且 pytest 不依赖 qlib；纯函数 + main 提前返回让缺目录路径在不构造 QlibPriceSource 的前提下可测。collect_outcomes 用 _FakeSource 注入即可测非A股跳过（boundary[0]）。"
+    },
+    {
+      "decision": "dropped 与 data_gaps 区分：evaluate_signal None（无入场/入场早于基准）计 dropped；source.history 取价异常计 data_gaps；非A股单列 non_ashare。",
+      "rationale": "承接 TASK-006 discovery 的衔接提示——evaluate_signal 的 None 归 dropped，符号级缺失（非A股/取价失败）单独入数据缺口节，render_report 三者分行展示。"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/qlib_eval/report.py",
+    "scripts/qlib_eval/evaluate.py",
+    "scripts/qlib_eval/tests/test_report.py"
+  ],
+  "interfaces_exposed": [
+    "qlib_eval.report.SIGNAL_COLUMNS = [symbol,date,strategy,action,confidence,price,metadata]",
+    "qlib_eval.report.read_signals(path: str) -> pd.DataFrame  # 严格七列；坏行 ValueError 含 line N；encoding=utf-8-sig 容忍 Excel BOM",
+    "qlib_eval.report.render_report(agg: pd.DataFrame, stats: dict, meta: dict) -> str  # stats: dropped/data_gaps/non_ashare/na_counts/[benchmark_error]；meta: generated_at/n_signals/benchmark/qlib_dir",
+    "evaluate.check_qlib_dir(qlib_dir: str) -> bool",
+    "evaluate.get_data_hint(qlib_dir: str) -> str",
+    "evaluate.collect_outcomes(signals: pd.DataFrame, source, max_defer: int = 5) -> (list[SignalOutcome], dict)  # 基准取数失败→([], stats with benchmark_error)",
+    "evaluate.main(argv=None) -> int  # qlib-dir 缺失→stderr 指引+return 1；空信号→写无信号报告 return 0；否则评估并写 reports/signal-eval-YYYYMMDD.md"
+  ],
+  "verification": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q 从仓库根：原 24 passed（commit 592bfbf）；review_fix 后 32 passed, exit 0（新增 4 例：空信号短路/基准降级/render benchmark_error/utf-8-sig BOM）。顶层无 qlib import。review_fix commit 35c18c9。code-simplifier 抽出 _empty_stats() DRY 两零样本路径，复测 32 passed。"
+}

@@ -1,0 +1,35 @@
+{
+  "task": "TASK-005",
+  "agent": "dev-agent-3",
+  "key_findings": [
+    "prices.py 提供 Entry dataclass、PriceSource Protocol（history/benchmark）、align_entry 纯函数、QlibPriceSource（lazy import）。",
+    "align_entry 用 prices.index.searchsorted(signal_date, side='right') 定位严格次日首个交易日；pos 越界 → None；(entry_date - signal_date).days > max_defer*2 → None。",
+    "守门测试 test_no_qlib_at_module_level 通过：import qlib_eval.prices 后 'qlib' 不在 sys.modules——QlibPriceSource 全部 qlib import 在方法体内惰性触发。",
+    "pandas 3.0.3 下 prices.iloc[pos]['open'] 与 index.searchsorted 行为与预期一致，无需为 pandas 3.x 调整写法。"
+  ],
+  "decisions": [
+    {
+      "decision": "边界比较符严格 > max_defer*2（== 保留入场），日历日近似 max_defer*2。",
+      "rationale": "plan T6 钉死；DoD 双侧用例（1/5→1/15 恰 10 日历日保留 vs 1/2→1/15 13 日历日丢弃）夹住边界，写 >= 即翻车。"
+    },
+    {
+      "decision": "QlibPriceSource 所有 qlib 相关 import（qlib、qlib.data.D）放方法体内，构造函数只存参数、_ensure_init 惰性 qlib.init。",
+      "rationale": "pytest 零 qlib 依赖的机制保证；守门测试锁死顶层无 qlib import。_normalize 处理 qlib 的 (instrument, datetime) MultiIndex + $open/$close 列 → datetime 单层 index + open/close 列。"
+    },
+    {
+      "decision": "Entry.index 为 positional index（int(pos)），下游 horizon 计算用 entry.index+h 定位 exit 行。",
+      "rationale": "DoD boundary[0]；Task 7 event_study 的 h 日收益 close[entry.index+h]/entry.price-1 直接复用，避免重复 searchsorted。"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/qlib_eval/prices.py",
+    "scripts/qlib_eval/tests/test_prices.py"
+  ],
+  "interfaces_exposed": [
+    "qlib_eval.prices.Entry(date: pd.Timestamp, price: float, index: int)  # dataclass",
+    "qlib_eval.prices.align_entry(prices: pd.DataFrame, signal_date: pd.Timestamp, max_defer: int) -> Entry | None  # 严格次日开盘入场，越界/顺延过久→None",
+    "qlib_eval.prices.PriceSource  # Protocol: history(symbol: str) -> pd.DataFrame; benchmark() -> pd.DataFrame（index=DatetimeIndex, cols=open/close）",
+    "qlib_eval.prices.QlibPriceSource(provider_uri: str, start: str, end: str)  # lazy-import qlib，实现 PriceSource，仅真实运行用"
+  ],
+  "verification": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q 从仓库根：8 passed, exit 0（含 test_prices 6 例 + test_symbols 2 例）。守门测试确认顶层无 qlib import。commit 7de4730。"
+}

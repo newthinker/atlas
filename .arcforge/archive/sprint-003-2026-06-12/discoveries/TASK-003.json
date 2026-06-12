@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-003",
+  "title": "export-signals CLI（白名单+warm-up+golden CSV+cobra+Makefile）(plan Task 3+4)",
+  "key_findings": [
+    "TASK-001 的引擎盖戳是 golden CSV 可复现的前提：executeExport 依赖 Result.Signals[].GeneratedAt == bar.Time 做 warm-up 过滤（GeneratedAt >= from），并依赖 Result.SkippedBars 输出跳过摘要。",
+    "cmd/atlas 已有 staticOHLCVProvider(backtest.go) 与 parseBacktestDate/dateLayout，直接复用；测试侧已有 engineWith(names...string)（注册 mockBtStrategy），故新增 engineWithStrategies(strats...Strategy) 以注入真实/stub 策略实例，避免重名冲突。",
+    "warm-up 起点用裸公式 from.AddDate(0,0,-(maxBars*365/252+30))，与 app.historyWindowDays 同口径（不套 365 floor）；maxBars=1 → 31 天，正好让 golden 的 2024-01-02 bar 落在 from(01-03) 之前被过滤。",
+    "encoding/csv.Writer 默认 \\n 行尾 + 自动对含引号字段加引号并双写内部引号：metadata map[string]any{\"k\":1} → json {\"k\":1} → CSV \"{\"\"k\"\":1}\"，无需手写转义。",
+    "CLI 多 symbol 各需不同 collector：registryProvider 适配器在每次 FetchHistory 内按 symbol 调 collector.SelectForSymbol，对外仍是单一 backtest.OHLCVProvider，测试注入 staticOHLCVProvider 即可离线确定性。"
+  ],
+  "decisions": [
+    {
+      "decision": "newExportEngine() 注册全部 5 策略（ma_crossover/price_percentile/pe_band/dividend_yield/pe_percentile），基本面策略用默认构造器 pe_band.New(15,30)/dividend_yield.New(3.0)。",
+      "rationale": "plan T4 加粗警告：少注册会让 --strategies pe_band 落入 unknown strategy 分支，Fundamentals 动态拒绝在 CLI 路径永不可达，设计 §2.1/§5 的显式拒绝与验收落空。注册≠运行——白名单在重放前拒绝基本面策略，构造器阈值从不被执行，故取任意合理默认值。TestExportSignals_PEBandViaCLIEngineRejected 是该回归的硬断言。"
+    },
+    {
+      "decision": "白名单先对全部 p.Strategies 校验完（unknown / requires fundamentals）再开始拉数据；错误消息用 offlineNames() 动态列出可离线策略（排序稳定）。",
+      "rationale": "fail-fast 且不硬编码策略名；offlineNames 过滤 Fundamentals==true 后排序，保证错误信息确定可测。"
+    },
+    {
+      "decision": "executeExport 三 writer 分工：w=CSV 数据、deps.out=CLI 信息、deps.errOut=SkippedBars>0 的一行摘要。",
+      "rationale": "与 plan T3 注释一致；摘要写 errOut 不污染 CSV（stdout 模式下 \"-\" 输出 CSV，摘要走 stderr）。"
+    },
+    {
+      "decision": "metadata 列：sig.Metadata==nil → 空串；非 nil → json.Marshal。",
+      "rationale": "DoD boundary：nil metadata 该列空串；JSON 编码交给 csv.Writer 处理引号转义。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/export_signals.go",
+    "cmd/atlas/export_signals_test.go",
+    "Makefile"
+  ],
+  "interfaces_exposed": [
+    "cmd/atlas (package main) executeExport(deps exportDeps, w io.Writer, p exportParams) error — 核心导出，可离线测试注入",
+    "exportParams{Strategies []string; Symbols []string; From, To string}",
+    "exportDeps{provider backtest.OHLCVProvider; strategies *strategy.Engine; out io.Writer; errOut io.Writer}",
+    "newExportEngine() *strategy.Engine — 注册全部 5 策略",
+    "registryProvider{reg *collector.Registry} 实现 backtest.OHLCVProvider，按 symbol SelectForSymbol",
+    "exportCmd (cobra) export-signals：--strategies/--symbols/--from/--to 必填，--out 默认 signals.csv，\"-\"=stdout",
+    "CSV 七列契约：symbol,date,strategy,action,confidence,price,metadata（confidence/price=%.2f，date=YYYY-MM-DD）",
+    "Makefile target: export-signals（依赖 build；SIGNAL_SYMBOLS/SIGNAL_FROM/SIGNAL_TO 可覆盖）"
+  ],
+  "verification": {
+    "tests": [
+      "TestExportSignals_GoldenCSV",
+      "TestExportSignals_RejectsFundamentalStrategies",
+      "TestExportSignals_UnknownStrategy",
+      "TestNewExportEngine_RegistersAllFive",
+      "TestExportSignals_PEBandViaCLIEngineRejected",
+      "TestExportSignals_SkippedBarsSummary",
+      "TestExportSignals_NilMetadataEmptyColumn",
+      "TestExportSignals_DateErrors (bad_from/bad_to/from_after_to)",
+      "TestExportCommand_UsageListsAllFlags"
+    ],
+    "command": "go test github.com/newthinker/atlas/cmd/atlas/ -count=1 -cover",
+    "coverage": "56.5% (coverage_minimum=35)",
+    "smoke": "go build -o bin/atlas ./cmd/atlas && ./bin/atlas export-signals --help 列出全部 flags",
+    "existing_tests_unchanged": true
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "TASK-004",
+  "title": "Python 脚手架 + 符号映射",
+  "description": "按 plan Task 5 原文：scripts/qlib_eval 包结构（README/requirements.txt/qlib_eval/__init__.py/symbols.py + tests/）。to_qlib_instrument：600519.SH→SH600519、399001.SZ→SZ399001，非 A 股（AAPL/^GSPC/GC=F/BTC-USDT/0700.HK）raise ValueError。requirements.txt 注明 pyqlib 仅运行时依赖；README 含数据包下载命令与口径说明骨架。**环境注意：统一用 scripts/qlib_eval/.venv/bin/python 跑 pytest（默认 python3 损坏，venv 已由 Leader 预置）**。",
+  "module": "qlib-eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/README.md",
+    "scripts/qlib_eval/requirements.txt",
+    "scripts/qlib_eval/conftest.py",
+    "scripts/qlib_eval/qlib_eval/__init__.py",
+    "scripts/qlib_eval/qlib_eval/symbols.py",
+    "scripts/qlib_eval/tests/test_symbols.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "to_qlib_instrument 三正例（SH/SZ 前缀换位）通过",
+      "五类非 A 股符号均 raise ValueError（plan T5 测试）"
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "必须创建 scripts/qlib_eval/conftest.py（plan T5 明示，sys.path 声明）；hook 同款命令从仓库根执行全绿：scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/（cd 进目录跑绿不算数——hook 从根目录调用）；不 import qlib",
+        "verify_by": "test"
+      },
+      {
+        "desc": "README 含数据包下载命令与 pyqlib 安装两方式说明",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

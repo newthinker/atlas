@@ -1,0 +1,46 @@
+{
+  "id": "TASK-008",
+  "title": "端到端串联 + Makefile + README 收尾",
+  "description": "按 plan Task 9 原文：Makefile signal-eval target（export-signals → evaluate.py，python 用 scripts/qlib_eval/.venv/bin/python）；README 补口径说明（max_defer*2 近似、胜率口径、数据截止局限）；端到端验证 go test ./... + pytest 全绿；qlib 数据包就位时 make signal-eval 产出报告（数据缺失则验证指引路径输出，ADR-S3-4 口径）。plan T9 的 code-simplifier/gitnexus/最终集成提交由既有流程承接（Dev commit 前简化、QA 跑 gitnexus）。",
+  "module": "qlib-eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "Makefile",
+    "scripts/qlib_eval/README.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      "make signal-eval target 存在且命令链正确（export-signals 依赖 + venv python 调 evaluate.py）",
+      "端到端：go build ./... && go vet ./... && go test ./... 与 qlib_eval pytest 全部通过（全 Sprint 集成回归，vet 承接 plan T9 Step 4）"
+    ],
+    "boundary": [
+      "qlib 数据缺失环境下 make signal-eval 走到 evaluate.py 的指引输出并非 0 退出（不 panic 不静默）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "README 口径说明完整（入场/顺延/超额/规避/胜率/数据局限）",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-007"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-003",
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

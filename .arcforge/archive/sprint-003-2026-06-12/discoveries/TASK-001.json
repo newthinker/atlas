@@ -1,0 +1,39 @@
+{
+  "task_id": "TASK-001",
+  "title": "backtest 引擎盖戳 GeneratedAt + SkippedBars 计数 (plan Task 1)",
+  "key_findings": [
+    "Backtester.Run 的每根 bar 信号收集循环 (backtester.go) 是统一覆写 GeneratedAt 的唯一收口点；strategy.AnalysisContext 已带 bar 时间，无需新增接口。",
+    "原实现已逐 bar 跳过 Analyze 返回 error 的 bar (continue)，但未对外暴露跳过数量；新增 Result.SkippedBars 计数即可，无行为变更。"
+  ],
+  "decisions": [
+    {
+      "decision": "在信号收集处统一执行 sig.GeneratedAt = ohlcv[i].Time（bar 时间），机制性覆写策略自报值。",
+      "rationale": "信号时间必须由 bar 逻辑时钟决定，绝不用墙钟，CSV 导出/回放按 GeneratedAt 过滤窗口才可复现 (设计 §2.1)。"
+    },
+    {
+      "decision": "Result 新增 SkippedBars int 字段，Run 内 skipped 计数器在 Analyze 出错的 continue 分支自增，构造 Result 时回填。",
+      "rationale": "暴露被跳过 bar 数供上层诊断数据质量，无 skip 时为 0，对既有调用方零影响。"
+    },
+    {
+      "decision": "保留既有自定义 max 函数（Go 1.21+ 已内置）不动。",
+      "rationale": "超出 TASK-001 范围且 TestMax 依赖它，属可后续清理的既有技术债，不在本任务改。"
+    }
+  ],
+  "files_modified": [
+    "internal/backtest/backtester.go",
+    "internal/backtest/types.go",
+    "internal/backtest/backtester_test.go"
+  ],
+  "interfaces_exposed": [
+    "backtest.Result.SkippedBars int — Analyze 出错被跳过的 bar 数；无 skip 时为 0"
+  ],
+  "verification": {
+    "tests": [
+      "TestRun_StampsGeneratedAtAndCountsSkips",
+      "TestBacktester_Run (新增 SkippedBars==0 断言)"
+    ],
+    "command": "go test ./internal/backtest/ -cover",
+    "coverage": "98.0%",
+    "existing_tests_unchanged": true
+  }
+}

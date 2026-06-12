@@ -1,0 +1,40 @@
+{
+  "id": "TASK-002",
+  "title": "ma_crossover GeneratedAt 墙钟修复",
+  "description": "按 plan Task 2 原文：strategy.go:100,117 两处 GeneratedAt: time.Now() 改为 ctx.Now。测试以历史 ctx.Now 构造金叉场景断言 GeneratedAt==ctx.Now 而非墙钟。",
+  "module": "strategy-ma-crossover",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/strategy/ma_crossover/strategy.go",
+    "internal/strategy/ma_crossover/strategy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "ctx.Now 设为历史时间时，金叉信号 GeneratedAt 等于 ctx.Now（不再是墙钟）",
+      "两处信号生成点（金叉/死叉）均已修复"
+    ],
+    "boundary": [
+      "既有测试零修改通过"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/strategy/ma_crossover"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

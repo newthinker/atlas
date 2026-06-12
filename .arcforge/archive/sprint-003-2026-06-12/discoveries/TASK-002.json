@@ -1,0 +1,32 @@
+{
+  "task_id": "TASK-002",
+  "title": "ma_crossover GeneratedAt 墙钟修复 (plan Task 2)",
+  "key_findings": [
+    "strategy.AnalysisContext 已带 Now time.Time 字段 (interface.go:33)，无需新增接口。",
+    "Analyze 内两处 core.Signal.GeneratedAt 原为 time.Now() 墙钟，导致历史回放/导出时间戳不可复现。"
+  ],
+  "decisions": [
+    {
+      "decision": "两处 GeneratedAt: time.Now() 改为 ctx.Now，并删除不再使用的 time import。",
+      "rationale": "信号时间必须由分析上下文的逻辑时钟决定，回放/CSV 导出按 GeneratedAt 过滤窗口才能可复现 (plan Task 3 warm-up 依赖此)。"
+    },
+    {
+      "decision": "新增包内小 helper barsFromCloses(...float64) 构造 OHLCV，时间戳用固定递增基准。",
+      "rationale": "现有测试内联造数无可复用 helper；bar 时间值与本断言无关，固定基准避免引入墙钟不确定性。"
+    }
+  ],
+  "files_modified": [
+    "internal/strategy/ma_crossover/strategy.go",
+    "internal/strategy/ma_crossover/strategy_test.go"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "tests": [
+      "TestAnalyze_GeneratedAtUsesCtxNow",
+      "TestAnalyze_DeathCrossGeneratedAtUsesCtxNow"
+    ],
+    "command": "go test ./internal/strategy/ma_crossover/ -race -cover",
+    "coverage": "94.9%",
+    "existing_tests_unchanged": true
+  }
+}

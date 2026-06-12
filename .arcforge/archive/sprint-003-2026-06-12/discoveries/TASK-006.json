@@ -1,0 +1,37 @@
+{
+  "task": "TASK-006",
+  "agent": "dev-agent-3",
+  "key_findings": [
+    "event_study.py 提供 Signal/SignalOutcome dataclass、evaluate_signal、aggregate、常量 HORIZONS=(5,20,60)/CONF_BUCKETS=(0.0,0.6,0.8)。纯 pandas，无 qlib。",
+    "基准最近前值对齐封装为内部 helper _last_le(index, when)=searchsorted(side='right')-1；调用方对 <0 显式 return None / excess[h]=None，机制性防止 Python 负索引 iloc[-1] 静默取末行。",
+    "horizon 收益用 positional：exit_idx=entry.index+h（复用 TASK-005 的 Entry.index），越界→returns[h]/excess[h]=None；aggregate 跳过 None，不污染 n/mean/median。",
+    "8 个事件研究单测全部手工可验算（+10%/+2%→+8%、sell 规避 +12%、三桶 3/2/1、bench 缺 entry 日取前值），全绿 16 passed。"
+  ],
+  "decisions": [
+    {
+      "decision": "evaluate_signal 返回 None 表示「无可用结果」，两种来源：align_entry 无入场 bar；entry 早于 bench 首行（start_pos<0）。调用方（Task 8）负责区分 dropped vs 数据缺口的计数。",
+      "rationale": "DoD boundary[1] 钉死「显式 None 计入数据缺口」；保持 evaluate_signal 单一职责（产出 outcome 或 None），分类计数留给上层循环。"
+    },
+    {
+      "decision": "sell/strong_sell 的 excess 取规避口径 -(ret-bench_ret)，buy/strong_buy 为 ret-bench_ret；win_rate 统一 = excess>0 占比。",
+      "rationale": "DoD functional[1]/[2]；因 sell 已对 excess 取向，buy/sell 胜率口径统一为 excess>0，无需在 aggregate 再分支。"
+    },
+    {
+      "decision": "CONF_BUCKETS 累积阈值：outcome 计入所有 confidence>=bucket 的桶；mean/median 用 statistics 模块对 list 计算，末尾 pd.DataFrame(rows, columns=...) 构造。",
+      "rationale": "DoD functional[3] conf 0.5/0.65/0.85→n=3/2/1；用纯 Python list+statistics 避免 pandas groupby 在 None/空组上的边界坑，结果稳定可验算。"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/qlib_eval/event_study.py",
+    "scripts/qlib_eval/tests/test_event_study.py"
+  ],
+  "interfaces_exposed": [
+    "qlib_eval.event_study.HORIZONS = (5, 20, 60)",
+    "qlib_eval.event_study.CONF_BUCKETS = (0.0, 0.6, 0.8)  # 累积阈值",
+    "qlib_eval.event_study.Signal(symbol: str, date: pd.Timestamp, strategy: str, action: str, confidence: float)  # dataclass，evaluate_signal 入参",
+    "qlib_eval.event_study.SignalOutcome(symbol, date, strategy, action, confidence, returns: dict[int, float|None], excess: dict[int, float|None])  # dataclass",
+    "qlib_eval.event_study.evaluate_signal(sig: Signal, prices: pd.DataFrame, bench: pd.DataFrame, max_defer: int = 5) -> SignalOutcome | None",
+    "qlib_eval.event_study.aggregate(outcomes: list[SignalOutcome]) -> pd.DataFrame  # 列: strategy,action,conf_bucket,horizon,n,mean_ret,median_ret,mean_excess,win_rate"
+  ],
+  "verification": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q 从仓库根：16 passed, exit 0（symbols 2 + prices 6 + event_study 8）。无 qlib 依赖。commit d92994d。code-simplifier 审过无改动。"
+}

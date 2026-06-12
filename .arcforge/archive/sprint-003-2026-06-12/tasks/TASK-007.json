@@ -1,0 +1,53 @@
+{
+  "id": "TASK-007",
+  "title": "CSV 读取 + markdown 报告 + evaluate.py CLI",
+  "description": "按 plan Task 8 原文：report.py——read_signals（csv.DictReader 严格七列 schema，date 解析/confidence float/metadata 原串；缺列坏行 ValueError 含行号）、render_report（含「评估口径」「数据缺口」节与每策略小节）。evaluate.py argparse 入口：--signals/--qlib-dir/--out；启动检测 qlib 数据目录缺失→打印 get_data 命令 exit(1)（设计 §5）；非 A 股符号跳过收集进数据缺口节；报告写 reports/signal-eval-YYYYMMDD.md。",
+  "module": "qlib-eval",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/report.py",
+    "scripts/qlib_eval/evaluate.py",
+    "scripts/qlib_eval/tests/test_report.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "read_signals 合法 CSV → DataFrame（date 为 Timestamp、confidence 为 float、metadata 保留原串）",
+      "render_report 输出含「评估口径」「数据缺口」节与每策略小节的 markdown（plan T8 测试）"
+    ],
+    "boundary": [
+      "非 A 股符号不中断评估，收集进数据缺口节"
+    ],
+    "error_handling": [
+      "缺列/坏行 ValueError 且消息含行号；qlib 数据目录缺失时打印下载命令并 exit(1)"
+    ],
+    "non_functional": [
+      {
+        "desc": "pytest 全绿不依赖 qlib；evaluate.py 的 qlib 检测路径有测试（mock/不存在目录）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./scripts/qlib_eval"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "fix_items": [
+    "QA W1: evaluate.py:122-123 空信号文件（仅 header）真实运行 NaTType strftime 崩溃（实测复现）——入口短路：信号为空写无信号报告并 exit 0，补测试",
+    "QA W2: evaluate.py:56 source.benchmark() 无 try/except，基准缺失整跑崩溃——包裹并给基准缺失明确提示，补测试",
+    "顺手 S3: README 口径注明基准为收盘到收盘（个股 open→close vs 基准 close→close 的入场日内偏置）",
+    "顺手 S7: report.py:20 read_signals encoding 改 utf-8-sig（Excel BOM 容忍）"
+  ]
+}

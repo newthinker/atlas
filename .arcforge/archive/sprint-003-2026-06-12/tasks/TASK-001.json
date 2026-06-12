@@ -1,0 +1,41 @@
+{
+  "id": "TASK-001",
+  "title": "backtest 引擎盖戳 GeneratedAt + SkippedBars 计数",
+  "description": "按 plan Task 1 原文（docs/plans/2026-06-12-qlib-eval-pipeline-implementation.md）：Run() 信号覆写处统一 sig.GeneratedAt = ohlcv[i].Time（bar 时间，机制性覆写策略自报值，设计 §2.1）；Analyze 出错的 bar 计入 Result.SkippedBars 新字段。测试用故意写错 GeneratedAt 的 stampStub 断言覆写。",
+  "module": "backtest",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/backtest/backtester.go",
+    "internal/backtest/types.go",
+    "internal/backtest/backtester_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "stampStub 故意返回 1999 年 GeneratedAt，引擎导出信号的 GeneratedAt 均等于各自 bar 的 Time（plan T1 测试）",
+      "Analyze 返回 error 的 bar 被跳过且 Result.SkippedBars 准确计数（3 bar 场景 failOn 中间 bar → Signals=2, SkippedBars=1）"
+    ],
+    "boundary": [
+      "无 skip 场景 SkippedBars=0；既有 backtest 测试零修改通过"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "包覆盖率 ≥ 80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/backtest"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

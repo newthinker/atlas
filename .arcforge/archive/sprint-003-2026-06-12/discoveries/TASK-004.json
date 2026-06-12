@@ -1,0 +1,31 @@
+{
+  "task": "TASK-004",
+  "agent": "dev-agent-3",
+  "key_findings": [
+    "scripts/qlib_eval 包脚手架完成：README.md / requirements.txt / conftest.py / qlib_eval/__init__.py / qlib_eval/symbols.py / tests/test_symbols.py 全部就位。",
+    "conftest.py 通过 sys.path.insert 注入 scripts/qlib_eval 目录，保证 hook 同款命令（从仓库根 scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/）能解析 import qlib_eval。",
+    "无 qlib 顶层 import（grep 唯一命中在 __init__.py 文档字符串内，是约束说明文本而非 import 语句）。"
+  ],
+  "decisions": [
+    {
+      "decision": "to_qlib_instrument 用两条 early-return 守卫子句（.SH/.SZ）+ 末尾 raise ValueError 实现。",
+      "rationale": "Phase 1 A 股 only（设计 §1.1）；扁平守卫子句无嵌套，签名与 ValueError 行为被两条 done_criteria 锁死，保持不变。"
+    },
+    {
+      "decision": "代码简化（code-simplifier）通过：四个 Python 文件已处于最简，无改动。",
+      "rationale": "symbols.py 无嵌套/冗余/三元；__init__.py 仅 docstring；conftest.py 的 sys.path 注入为必需单行；test_symbols.py 已用数据驱动循环覆盖五类拒绝符号。任何改动都会破坏锁定约束或降低清晰度。"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/README.md",
+    "scripts/qlib_eval/requirements.txt",
+    "scripts/qlib_eval/conftest.py",
+    "scripts/qlib_eval/qlib_eval/__init__.py",
+    "scripts/qlib_eval/qlib_eval/symbols.py",
+    "scripts/qlib_eval/tests/test_symbols.py"
+  ],
+  "interfaces_exposed": [
+    "qlib_eval.symbols.to_qlib_instrument(symbol: str) -> str  # A 股 SH/SZ 前缀换位；非 A 股 raise ValueError"
+  ],
+  "verification": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/ -q 从仓库根执行：2 passed, exit 0。无 qlib 顶层 import。六个必需文件全部存在。"
+}
