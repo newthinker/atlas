@@ -43,13 +43,13 @@ def _expand(s: str, defs: dict) -> str:
     return s
 
 
-def _signal_eval_block() -> str:
-    """提取 signal-eval 目标行 + 其后所有以 Tab 开头的 recipe 行。"""
+def _target_block(name: str) -> str:
+    """提取指定 Make 目标行 + 其后所有以 Tab 开头的 recipe 行。"""
     lines = _makefile_text().splitlines()
     block = []
     capturing = False
     for line in lines:
-        if re.match(r"^signal-eval\s*:", line):
+        if re.match(rf"^{re.escape(name)}\s*:", line):
             capturing = True
             block.append(line)
             continue
@@ -62,23 +62,23 @@ def _signal_eval_block() -> str:
 
 
 def test_signal_eval_target_exists():
-    block = _signal_eval_block()
+    block = _target_block("signal-eval")
     assert re.search(r"^signal-eval\s*:", block, re.MULTILINE), "缺少 signal-eval 目标"
 
 
 def test_signal_eval_depends_on_export_signals():
-    block = _signal_eval_block()
+    block = _target_block("signal-eval")
     target_line = block.splitlines()[0]
     assert "export-signals" in target_line, "signal-eval 必须依赖 export-signals"
 
 
 def test_signal_eval_invokes_evaluate_py():
-    block = _signal_eval_block()
+    block = _target_block("signal-eval")
     assert "evaluate.py" in block, "signal-eval recipe 必须调用 evaluate.py"
 
 
 def test_signal_eval_uses_venv_python_not_bare_python():
-    block = _signal_eval_block()
+    block = _target_block("signal-eval")
     recipe = "\n".join(block.splitlines()[1:])  # 仅 recipe 行
     expanded = _expand(recipe, _var_defs(_makefile_text()))  # 展开 $(QLIB_PY) 等变量
     assert VENV_PYTHON in expanded, f"recipe 展开后必须用 {VENV_PYTHON}"
@@ -87,3 +87,13 @@ def test_signal_eval_uses_venv_python_not_bare_python():
     assert not re.search(r"\bpython[0-9.]*\b", stripped), (
         "signal-eval recipe 不得出现裸 python 调用，必须经 venv python"
     )
+
+
+def test_qlib_data_target_flags():
+    # C1-1 BLOCKER 防线：qlib-data recipe 不带 --config 时 CLI 拿不到 watchlist，
+    # 必须显式 --symbols $(SIGNAL_SYMBOLS) 才不会退化为只导基准；spec 钉死不传 --to。
+    block = _target_block("qlib-data")
+    assert "--symbols $(SIGNAL_SYMBOLS)" in block  # C1-1 防线
+    assert "--from $(SIGNAL_FROM)" in block
+    assert "--to" not in block  # spec: 不传 --to
+    assert "$(QLIB_PY) scripts/qlib_eval/build_data.py" in block

@@ -222,3 +222,34 @@ func TestResolveOHLCVSymbols_EmptyWatchlistIsError(t *testing.T) {
 		t.Fatal("watchlist without any A-share must be an error")
 	}
 }
+
+// --- TASK-002 CLI wiring ---
+// functional[0] "export-ohlcv usage 列出 --symbols/--from/--to/--out-dir" → TestExportOHLCVCommand_UsageListsAllFlags
+// functional[1] "CLI 层基准校验: --symbols 不含 000300.SH → 报错含 benchmark" → TestRunExportOHLCV_BenchmarkMissingIsFatal
+
+func TestExportOHLCVCommand_UsageListsAllFlags(t *testing.T) {
+	usage := exportOHLCVCmd.UsageString()
+	for _, flag := range []string{"--symbols", "--from", "--to", "--out-dir"} {
+		if !strings.Contains(usage, flag) {
+			t.Errorf("export-ohlcv usage missing flag %s:\n%s", flag, usage)
+		}
+	}
+}
+
+func TestRunExportOHLCV_BenchmarkMissingIsFatal(t *testing.T) {
+	// CLI 层校验（承接 TASK-001 分层语义）：显式 --symbols 不含基准 000300.SH →
+	// 立即报错含 benchmark，且早于任何网络/解析（resolver 透传 flag → requireBenchmark 拦截）。
+	saved := exportOHLCVSymbols
+	t.Cleanup(func() { exportOHLCVSymbols = saved })
+
+	exportOHLCVSymbols = []string{"600519.SH"} // 缺基准
+	cfgFile = ""                               // → config.Defaults()，watchlist 空但 flag 非空走透传
+
+	err := runExportOHLCV(exportOHLCVCmd, nil)
+	if err == nil {
+		t.Fatal("symbol set without benchmark must be fatal at the CLI layer")
+	}
+	if !strings.Contains(err.Error(), "benchmark") {
+		t.Errorf("error must mention benchmark, got: %v", err)
+	}
+}

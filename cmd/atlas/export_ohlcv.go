@@ -6,12 +6,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/newthinker/atlas/internal/backtest"
+	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/crypto"
+	"github.com/newthinker/atlas/internal/collector/eastmoney"
+	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
+	"github.com/spf13/cobra"
 )
 
 // benchmarkSymbol is the CSI 300 index (SH000300 in qlib form). Strategy
@@ -168,4 +174,92 @@ func resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem) ([]str
 		}
 	}
 	return result, nil
+}
+
+// --- CLI wiring ---
+
+var (
+	exportOHLCVSymbols []string
+	exportOHLCVFrom    string
+	exportOHLCVTo      string
+	exportOHLCVOutDir  string
+)
+
+var exportOHLCVCmd = &cobra.Command{
+	Use:   "export-ohlcv",
+	Short: "Export per-instrument OHLCV CSVs in qlib dump_bin convention",
+	Long: "Export one qlib-convention OHLCV CSV per A-share instrument for the " +
+		"offline qlib data bundle. With no --symbols the set defaults to the " +
+		"config watchlist's A-shares plus the benchmark; the benchmark must always " +
+		"be present for the evaluation to be meaningful.",
+	RunE: runExportOHLCV,
+}
+
+func init() {
+	exportOHLCVCmd.Flags().StringSliceVar(&exportOHLCVSymbols, "symbols", nil,
+		"Comma-separated symbols (default: watchlist A-shares + benchmark)")
+	exportOHLCVCmd.Flags().StringVar(&exportOHLCVFrom, "from", "", "Start date YYYY-MM-DD (required)")
+	exportOHLCVCmd.Flags().StringVar(&exportOHLCVTo, "to", "", "End date YYYY-MM-DD (default: today)")
+	exportOHLCVCmd.Flags().StringVar(&exportOHLCVOutDir, "out-dir", "qlib_csv", "Output directory for per-instrument CSVs")
+
+	exportOHLCVCmd.MarkFlagRequired("from")
+
+	rootCmd.AddCommand(exportOHLCVCmd)
+}
+
+// requireBenchmark enforces, at the CLI layer, that the resolved symbol set
+// includes the benchmark — without it strategy evaluation is meaningless. This
+// continues the layering decision from the export-ohlcv core (TASK-001): the
+// core stays pure, the "list must contain the benchmark" check lives here.
+func requireBenchmark(symbols []string) error {
+	if slices.Contains(symbols, benchmarkSymbol) {
+		return nil
+	}
+	return fmt.Errorf("symbol set must include benchmark %s for evaluation to be meaningful", benchmarkSymbol)
+}
+
+// loadConfigOrDefaults mirrors serve.go's cfgFile + config.Load pattern: an
+// explicit --config is loaded, otherwise the built-in defaults are used.
+// (export-signals carries no config loading, so it cannot serve as a reference —
+// plan C1-5.)
+func loadConfigOrDefaults() (*config.Config, error) {
+	if cfgFile != "" {
+		cfg, err := config.Load(cfgFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading config: %w", err)
+		}
+		return cfg, nil
+	}
+	return config.Defaults(), nil
+}
+
+func runExportOHLCV(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfigOrDefaults()
+	if err != nil {
+		return err
+	}
+	symbols, err := resolveOHLCVSymbols(exportOHLCVSymbols, cfg.Watchlist)
+	if err != nil {
+		return err
+	}
+	if err := requireBenchmark(symbols); err != nil {
+		return err
+	}
+
+	reg := collector.NewRegistry()
+	reg.Register(yahoo.New())
+	reg.Register(eastmoney.New())
+	reg.Register(crypto.New())
+
+	deps := ohlcvDeps{
+		provider: registryProvider{reg: reg},
+		errOut:   os.Stderr,
+		sleep:    func() { time.Sleep(300 * time.Millisecond) },
+	}
+	return executeExportOHLCV(deps, exportOHLCVParams{
+		Symbols: symbols,
+		From:    exportOHLCVFrom,
+		To:      exportOHLCVTo,
+		OutDir:  exportOHLCVOutDir,
+	})
 }

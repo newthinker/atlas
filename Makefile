@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval
+.PHONY: build run test clean export-signals signal-eval qlib-data
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -12,6 +12,10 @@ QLIB_PY        ?= scripts/qlib_eval/.venv/bin/python
 QLIB_DIR       ?= ~/.qlib/qlib_data/cn_data
 SIGNAL_OUT     ?= reports/
 
+# qlib 自建数据包：导出的 per-instrument CSV 目录 + dump_bin 产出的 qlib 数据目录
+QLIB_CSV_DIR   ?= qlib_csv
+QLIB_DATA_DIR  ?= $(HOME)/.qlib/qlib_data/atlas_cn
+
 build:
 	go build -o $(BUILD_DIR)/$(BINARY) ./cmd/atlas
 
@@ -24,6 +28,16 @@ export-signals: build
 signal-eval: export-signals
 	$(QLIB_PY) scripts/qlib_eval/evaluate.py --signals signals.csv \
 	  --qlib-dir $(QLIB_DIR) --out $(SIGNAL_OUT)
+
+# 自建 qlib 数据包：导出 per-instrument OHLCV CSV → dump_bin 编译为 qlib 数据目录。
+# 必须显式 --symbols $(SIGNAL_SYMBOLS)（C1-1 BLOCKER）：recipe 不带 --config，CLI
+# 拿不到 watchlist（config.Defaults() 无该字段），默认集会退化为只剩基准、静默缺
+# 600519.SH。共用 SIGNAL_SYMBOLS 还天然保证「评估符号 ⊆ 数据包」。spec 钉死只传
+# --from 不传 --to（数据包覆盖至当天）。
+qlib-data: build
+	./bin/atlas export-ohlcv --symbols $(SIGNAL_SYMBOLS) \
+	  --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_DIR)
+	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_DIR) --target-dir $(QLIB_DATA_DIR)
 
 run: build
 	./$(BUILD_DIR)/$(BINARY)
