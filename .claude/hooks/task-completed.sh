@@ -73,8 +73,30 @@ fi
 # 过滤不存在的目录(被删除文件的 dirname 可能已不存在)
 PKGS=$(echo "$PKGS" | while read -r p; do [ -n "$p" ] && [ -d "$p" ] && echo "$p"; done)
 
+# ---- 2e. 跨语言分流:无 .go 文件的 scope 不进 Go 门禁(sprint-003 起支持 Python 任务)。
+#          scope 含 scripts/qlib_eval 时改跑 pytest(venv 由 Leader 预置);
+#          测试失败同样阻断,覆盖率门禁由 Test Agent 按 DoD 核对。----
+GO_PKGS=$(echo "$PKGS" | while read -r p; do
+    [ -n "$p" ] && ls "$p"/*.go >/dev/null 2>&1 && echo "$p"; done)
+PY_SCOPE=$(echo "$PKGS" | grep -c "scripts/qlib_eval" || true)
+if [ "$PY_SCOPE" -gt 0 ]; then
+    PYBIN="scripts/qlib_eval/.venv/bin/python"
+    if [ -x "$PYBIN" ] && [ -d scripts/qlib_eval/tests ]; then
+        PYOUT=$("$PYBIN" -m pytest scripts/qlib_eval/tests/ -q 2>&1)
+        if [ $? -ne 0 ]; then
+            echo "BLOCKED: pytest failed in scripts/qlib_eval. Fix before marking complete:" >&2
+            echo "$PYOUT" | tail -20 >&2
+            exit 2
+        fi
+        echo "pytest passed for scripts/qlib_eval."
+    else
+        echo "WARN: qlib_eval venv 或 tests 目录缺失,跳过 pytest 门禁。" >&2
+    fi
+fi
+PKGS="$GO_PKGS"
+
 if [ -z "$PKGS" ]; then
-    echo "No packages in scope for ${TASK_ID:-unknown task}. Proceeding."
+    echo "No Go packages in scope for ${TASK_ID:-unknown task}. Proceeding."
     exit 0
 fi
 

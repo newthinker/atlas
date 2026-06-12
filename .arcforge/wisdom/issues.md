@@ -1,5 +1,13 @@
 # 跨任务问题清单（仅 Leader 写，聚合自各实例与验证报告）
 
+## CARRYOVER（sprint-003 新增）
+
+- **S4** event_study exit_date 超基准末日取末行无 gap 标记（与起点负索引防御不对称）
+- **S5** export confidence %.2f 舍入影响置信桶边界（0.799→0.80）备查
+- **S6** export_signals.go backtest.New 循环内构造（微优化）
+- **真实数据包端到端**：qlib cn_data 就位后人工跑一次 make signal-eval 验证完整报告
+- **环境债**：系统默认 python3（pyenv 3.10.12）dyld 损坏，全仓 Python 工作必须用 scripts/qlib_eval/.venv（或修复 pyenv）
+
 ## CARRYOVER（sprint-001 遗留，下一 Sprint 候选）
 
 - ~~**I3 [latent]** 仲裁合成信号未设 Price~~ ✅ **已于 sprint-002 修复**（cc0182a：referencePrice 取冲突信号首个正价 + 反例锁定测试）——sprint-002 双策略示例使其条件可达，QA 对抗轮拦截后裁决即修。

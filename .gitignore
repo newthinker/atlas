@@ -46,3 +46,11 @@ coverage.out
 # 归档后的瞬态数据同样不入版本控制（mv 进 archive 会脱离上面两条模式）
 .arcforge/archive/*/checkpoints/
 .arcforge/archive/*/coverage/
+
+# qlib_eval Python 评估环境
+scripts/qlib_eval/.venv/
+reports/
+signals.csv
+# Arcforge 瞬态通信与 Python 缓存
+.arcforge/inbox/
+__pycache__/

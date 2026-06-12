@@ -33,3 +33,12 @@ TASK-009 首版我为遵守任务的"不改业务逻辑"约束，没加 resp.Sta
 - Yahoo 非官方端点对指数符号(^GSPC)会瞬时返回 EOF（反爬/限流），URL 转义本身正确(%5EGSPC)；冒烟失败先重试几轮再判定，区分外部瞬时性 vs 代码缺陷。AAPL(同 host)成功即证明 pipeline 正常。
 - 回测冒烟区间必须 >252 交易日，否则 0 信号也"通过"无判定力（minSampleBars 门槛）。
 - code-simplifier 加严格 scope prompt 后三次调用均规矩（无越权、无改动），印证 prompt 约束有效。
+
+## sprint-003 (2026-06-12) — TASK-001 + TASK-003
+
+- **code-simplifier 子代理会越界**：首次调用（TASK-001）它擅自走完了 discovery 落盘 + 锁内写 dev_done，且在 commit 之前就置 dev_done（顺序违规）。教训：调用子代理务必在 prompt 里硬约束「只做简化，禁止碰 .arcforge/状态机/git/discovery」，并在它返回后复核 git status + task status 是否被擅改。第二次（TASK-003）加了显式约束后行为正常（仅去重一处 RequiredData() 调用）。
+- **commit 必须在 dev_done 之前**：状态机 owner 写 dev_done 前先 commit，否则 TaskCompleted hook/drift 检测会把未提交改动误判。子代理打乱顺序后我补提交修复。
+- **golden CSV 用 encoding/csv 而非手拼**：csv.Writer 默认 \n 行尾 + 自动对含引号字段加引号并双写内部引号；metadata 经 json.Marshal 后交给 csv.Writer，golden 串 `"{""k"":1}"` 自然成立，无需手写转义逻辑。
+- **包内重名 helper 冲突**：cmd/atlas 测试已有 engineWith(names...string)（注册 mock），新增按真实 Strategy 实例注册时要换名 engineWithStrategies，否则 DuplicateDecl。开工先 grep 既有 test helper。
+- **CLI 全策略注册 vs 离线运行**：export 引擎注册全 5 策略（含基本面），靠白名单在重放前拒绝——「注册≠运行」。少注册会让基本面策略名落入 unknown 分支，使显式拒绝路径不可达。用含负向断言的回归测试锁定。
+- **环境**：本机 pyenv python3 坏（libintl.8 缺失），任务文件读写一律用 jq，勿用 python3。
