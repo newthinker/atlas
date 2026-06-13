@@ -335,6 +335,23 @@ func (a *App) analyzeSymbolSafe(ctx context.Context, item WatchlistItem) {
 	a.analyzeSymbol(ctx, item)
 }
 
+// enrichSignalMetadata stamps the watchlist display name onto outgoing signals
+// (Metadata["name"]) so notifiers can render human-friendly titles. Existing
+// keys are never overwritten; an empty name leaves signals untouched.
+func enrichSignalMetadata(signals []core.Signal, item WatchlistItem) {
+	if item.Name == "" {
+		return
+	}
+	for i := range signals {
+		if signals[i].Metadata == nil {
+			signals[i].Metadata = make(map[string]any, 1)
+		}
+		if _, exists := signals[i].Metadata["name"]; !exists {
+			signals[i].Metadata["name"] = item.Name
+		}
+	}
+}
+
 // analyzeSymbol fetches data and runs analysis for a single watchlist item.
 func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	symbol := item.Symbol
@@ -416,6 +433,10 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 
 	// Resolve conflicting signals via the LLM arbitrator when enabled.
 	signals = a.arbitrate(ctx, symbol, signals)
+
+	// Stamp watchlist display info so notifiers can render human-friendly
+	// titles without knowing the watchlist.
+	enrichSignalMetadata(signals, item)
 
 	// Snapshot the executor under the lock so SetExecutor can run concurrently.
 	a.mu.RLock()

@@ -186,3 +186,42 @@ func TestTelegram_SendBatch_Formatting(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatSignal_TitleIncludesNameFromMetadata(t *testing.T) {
+	tg := New("token", "chat")
+	sig := core.Signal{
+		Symbol: "0883.HK", Action: core.ActionStrongSell, Confidence: 0.857,
+		Metadata: map[string]any{"name": "中国海洋石油", "percentile": 93.8},
+	}
+	got := tg.formatSignal(sig)
+	if !strings.Contains(got, "*00883.HK 中国海洋石油*") {
+		t.Errorf("title must contain padded symbol + name, got:\n%s", got)
+	}
+}
+
+func TestFormatSignal_NoNameMetadata_KeepsBareTitle(t *testing.T) {
+	tg := New("token", "chat")
+	got := tg.formatSignal(core.Signal{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.8})
+	if !strings.Contains(got, "*600519.SH* - buy") {
+		t.Errorf("title without name must stay bare (no trailing space inside bold), got:\n%s", got)
+	}
+}
+
+func TestDisplaySymbol_HKPaddedToFiveDigits(t *testing.T) {
+	cases := map[string]string{
+		"0883.HK":   "00883.HK",
+		"6886.HK":   "06886.HK",
+		"9988.HK":   "09988.HK",
+		"3288.HK":   "03288.HK",
+		"00700.HK":  "00700.HK", // already five digits
+		"600519.SH": "600519.SH",
+		"AAPL":      "AAPL",
+		"BTC.HK":    "BTC.HK", // non-numeric code untouched
+		".HK":       ".HK",
+	}
+	for in, want := range cases {
+		if got := displaySymbol(in); got != want {
+			t.Errorf("displaySymbol(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -1,0 +1,51 @@
+{
+  "id": "TASK-007",
+  "title": "清理临时探测目录 + 全量构建/测试/vet 验证",
+  "description": "删除 _probe/ 临时探测目录。运行 go build ./... && go vet ./internal/collector/lixinger/ && go test ./...，确认 lixinger 包测试全绿、构建与 vet 无告警（其余包仅限与本次无关的既有失败）。依据计划 Task 7。",
+  "module": "internal/collector/lixinger",
+  "complexity": "simple",
+  "estimated_files": [
+    "_probe/main.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "_probe/ 已删除",
+      "go build ./... 通过",
+      "go test ./internal/collector/lixinger/ 全 PASS（client/valuation/stock/fundamental/fund/history）"
+    ],
+    "boundary": [
+      "go vet ./internal/collector/lixinger/ 无告警"
+    ],
+    "error_handling": [
+      "全量 go test ./... 仅存在与本次无关的既有失败（须明列）"
+    ],
+    "non_functional": [
+      {
+        "desc": "lixinger 包整体覆盖率 ≥80%（final_minimum）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "leader",
+  "verifier": "leader",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 0,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

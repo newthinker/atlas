@@ -1,11 +1,8 @@
 package lixinger
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 
 	"github.com/newthinker/atlas/internal/collector"
@@ -15,7 +12,7 @@ import (
 // Candidate values — verify against the basic-info/samples API on first
 // implementation day and freeze (design §2.4).
 var usHKIndexCodes = map[string]struct{ endpoint, code string }{
-	"^GSPC": {"us/index/fundamental", "SPX"},
+	"^GSPC": {"us/index/fundamental", ".INX"}, // live: SPX 返回空 data；.INX 才有数据
 	"^IXIC": {"us/index/fundamental", "COMP"},
 	"^DJI":  {"us/index/fundamental", "DJI"},
 	"^HSI":  {"hk/index/fundamental", "HSI"},
@@ -38,13 +35,14 @@ func endpointFor(symbol string) (endpoint, code string) {
 		}
 		return "", ""
 	case strings.HasSuffix(symbol, ".HK"):
-		// 0700.HK → 00700（理杏仁港股 5 位代码）
+		// 0700.HK → 00700（理杏仁港股 5 位代码）。live: hk/company/fundamental 404，
+		// 正确端点为 hk/company/fundamental/non_financial。
 		c := fmt.Sprintf("%05s", strings.TrimSuffix(symbol, ".HK"))
-		return "hk/company/fundamental", c
+		return "hk/company/fundamental/non_financial", c
 	case strings.HasSuffix(symbol, "=F"), strings.Contains(symbol, "-USD"):
 		return "", ""
-	default: // 美股个股
-		return "us/company/fundamental", symbol
+	default: // 美股个股：理杏仁开放 API 无个股基本面端点(404) → 降级，无端点
+		return "", ""
 	}
 }
 
@@ -62,96 +60,46 @@ func lookbackGranularity(lookbackYears int) string {
 }
 
 // FetchValuationPercentile returns the PE-TTM historical percentile (0-100) for
-// a stock or index, using Lixinger's cvpos metric. lookbackYears maps to the
-// closest supported granularity (y3/y5/y10). It returns (-1, error) for any
-// unsupported symbol, transport/HTTP failure, business error code, or missing
-// metric — callers degrade to "percentile unavailable" (design §5).
+// a stock or index via Lixinger's cvpos metric. Index endpoints require the
+// market-cap-weighted (.mcw) variant. The metric string doubles as the flat
+// response key (e.g. "pe_ttm.y5.cvpos"). Returns (-1, error) for unsupported
+// symbols or any failure — callers degrade to "percentile unavailable".
 func (l *Lixinger) FetchValuationPercentile(symbol string, lookbackYears int) (float64, error) {
 	endpoint, code := endpointFor(symbol)
 	if endpoint == "" {
 		return -1, fmt.Errorf("lixinger: valuation percentile unsupported for %s", symbol)
 	}
 	gran := lookbackGranularity(lookbackYears)
-	metric := fmt.Sprintf("pe_ttm.%s.cvpos", gran)
 
-	url := fmt.Sprintf("%s/%s", l.baseURL, endpoint)
+	metric := fmt.Sprintf("pe_ttm.%s.cvpos", gran)
+	if strings.Contains(endpoint, "/index/") {
+		metric = fmt.Sprintf("pe_ttm.%s.mcw.cvpos", gran) // 指数为市值加权
+	}
+
 	payload := map[string]any{
 		"token":       l.apiKey,
 		"date":        "latest",
 		"stockCodes":  []string{code},
 		"metricsList": []string{metric},
 	}
-
-	raw, err := l.postJSONRaw(url, payload)
+	raw, err := l.request(endpoint, payload)
 	if err != nil {
 		return -1, err
 	}
 
 	var result struct {
-		Code    int              `json:"code"`
-		Message string           `json:"message"`
-		Data    []map[string]any `json:"data"`
+		Data []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return -1, fmt.Errorf("lixinger: decode valuation response: %w", err)
-	}
-	if result.Code != 0 {
-		return -1, fmt.Errorf("lixinger: API error %d: %s", result.Code, result.Message)
 	}
 	if len(result.Data) == 0 {
 		return -1, fmt.Errorf("lixinger: no valuation data for %s", symbol)
 	}
 
-	cvpos, ok := digFloat(result.Data[0], "pe_ttm", gran, "cvpos")
+	v, ok := result.Data[0][metric].(float64) // 扁平 dotted key
 	if !ok {
 		return -1, fmt.Errorf("lixinger: metric %s missing for %s", metric, symbol)
 	}
-	return cvpos * 100, nil
-}
-
-// digFloat walks a nested map[string]any along path and returns the terminal
-// value as a float64, reporting false if any segment is absent or mistyped.
-func digFloat(m map[string]any, path ...string) (float64, bool) {
-	cur := any(m)
-	for _, key := range path {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return 0, false
-		}
-		cur, ok = obj[key]
-		if !ok {
-			return 0, false
-		}
-	}
-	f, ok := cur.(float64)
-	return f, ok
-}
-
-// postJSONRaw posts payload as JSON and returns the raw response body. Unlike
-// postJSON it does not decode into the flat lixingerResponse, so callers can
-// parse nested metric trees (e.g. pe_ttm.y5.cvpos). The HTTP status guard
-// mirrors postJSON: a non-200 response is an error regardless of body content.
-func (l *Lixinger) postJSONRaw(url string, payload any) ([]byte, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := l.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("lixinger: unexpected HTTP status %d", resp.StatusCode)
-	}
-
-	return io.ReadAll(resp.Body)
+	return v * 100, nil
 }

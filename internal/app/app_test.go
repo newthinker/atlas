@@ -1227,3 +1227,28 @@ func TestAnalyzeSymbol_SkipsFundamentalWhenNotNeeded(t *testing.T) {
 		t.Errorf("expected no Fundamental for non-fundamental strategy, got %+v", got)
 	}
 }
+
+func TestEnrichSignalMetadata(t *testing.T) {
+	sigs := []core.Signal{
+		{Symbol: "0883.HK"},
+		{Symbol: "0883.HK", Metadata: map[string]any{"percentile": 93.8}},
+		{Symbol: "0883.HK", Metadata: map[string]any{"name": "已有名"}},
+	}
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "0883.HK", Name: "中国海洋石油"})
+
+	if sigs[0].Metadata["name"] != "中国海洋石油" {
+		t.Errorf("nil metadata must be initialized and stamped, got %v", sigs[0].Metadata)
+	}
+	if sigs[1].Metadata["name"] != "中国海洋石油" || sigs[1].Metadata["percentile"] != 93.8 {
+		t.Errorf("existing metadata must be stamped without clobbering keys, got %v", sigs[1].Metadata)
+	}
+	if sigs[2].Metadata["name"] != "已有名" {
+		t.Errorf("pre-existing name must not be overwritten, got %v", sigs[2].Metadata)
+	}
+
+	plain := []core.Signal{{Symbol: "X"}}
+	enrichSignalMetadata(plain, WatchlistItem{Symbol: "X"})
+	if plain[0].Metadata != nil {
+		t.Errorf("empty watchlist name must not allocate metadata, got %v", plain[0].Metadata)
+	}
+}

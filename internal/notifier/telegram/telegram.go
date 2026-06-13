@@ -84,18 +84,39 @@ func escapeMarkdown(text string) string {
 	return result
 }
 
+// displaySymbol renders a symbol for humans. HKEX codes are officially five
+// digits, so shorter all-digit .HK prefixes are left-padded with zeros for
+// display only — data-layer symbols stay exactly as configured.
+func displaySymbol(symbol string) string {
+	code, found := strings.CutSuffix(symbol, ".HK")
+	if !found || code == "" || len(code) >= 5 {
+		return symbol
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return symbol
+		}
+	}
+	return strings.Repeat("0", 5-len(code)) + code + ".HK"
+}
+
 func (t *Telegram) formatSignal(signal core.Signal) string {
 	var sb strings.Builder
 
 	// Action emoji
 	actionEmoji := "📈"
-	if signal.Action == core.ActionSell {
+	switch signal.Action {
+	case core.ActionSell:
 		actionEmoji = "📉"
-	} else if signal.Action == core.ActionHold {
+	case core.ActionHold:
 		actionEmoji = "⏸️"
 	}
 
-	sb.WriteString(fmt.Sprintf("%s *%s* - %s\n", actionEmoji, signal.Symbol, signal.Action))
+	title := displaySymbol(signal.Symbol)
+	if name, ok := signal.Metadata["name"].(string); ok && name != "" {
+		title += " " + name
+	}
+	sb.WriteString(fmt.Sprintf("%s *%s* - %s\n", actionEmoji, title, signal.Action))
 	sb.WriteString(fmt.Sprintf("📊 Confidence: %.1f%%\n", signal.Confidence*100))
 
 	if signal.Strategy != "" {

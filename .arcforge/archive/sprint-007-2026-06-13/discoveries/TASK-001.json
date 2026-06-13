@@ -1,0 +1,59 @@
+{
+  "task_id": "TASK-001",
+  "title": "传输层 client.go（统一 code:1 信封 + 退避重试 + WithRetry 选项）",
+  "instance": "dev-agent-1",
+  "key_findings": [
+    "Lixinger 成功语义为 code==1（与旧实现的 code==0 完全相反）；任何非 1（尤其 0）均为业务错误，error 对象可能携带 message / messages[].message / name 三种形式之一。",
+    "传输层与业务方法解耦：request() 只负责 HTTP + 信封校验 + 退避，返回原始 body，由各业务方法自行解析 data 数组（含估值的扁平 dotted key 场景）。",
+    "重试与 HTTP 状态解耦：429/5xx 视为可重试（retry 开启时），4xx 立即返回不重试，传输层错误（连接失败/读 body 失败）也可重试。",
+    "构造器双轨：New 面向生产默认 retry=true 且 retryDelays==defaultRetryDelays[1,2,4,8,16]s；NewWithBaseURL 默认 retry=false，使 httptest 测试不会真正 sleep 退避。",
+    "包内旧 lixinger.go 的 7 个业务方法（FetchQuote/FetchHistory/FetchFundQuote/... 及 postJSON/lixingerResponse）暂未改动，仍编译，将由 Task 2-5 替换；本任务仅新增传输层与构造器。"
+  ],
+  "decisions": [
+    {
+      "decision": "New(apiKey, opts...) 采用函数式选项 + WithRetry(bool)",
+      "rationale": "保持向后兼容（serve.go 旧 New(apiKey) 调用仍编译），同时让配置可通过 WithRetry 注入 retry 开关（Task 6 接线）。"
+    },
+    {
+      "decision": "request 内 maxAttempts = retry ? len(retryDelays)+1 : 1，退避用 retryDelays[attempt] 且仅在非末次尝试时 sleep",
+      "rationale": "确保『连续 N 次失败后第 N+1 次成功』语义；retryDelays 可被测试置零数组以零延迟验证尝试次数，避免单测真正等待。"
+    },
+    {
+      "decision": "parseEnvelope 错误透出优先级 message > messages[0].message > name > 兜底(code+message)",
+      "rationale": "覆盖 DoD 要求的三种 error 形态，并对无 error 对象的非 1 code 给出可诊断的兜底信息。"
+    },
+    {
+      "decision": "doOnce 返回 (raw, status, err) 三元组，由 request 统一判定可重试/不可重试/成功",
+      "rationale": "把『一次 HTTP 往返』与『重试策略』分离，便于读测与未来复用；4xx 与 5xx 的分流在单一处集中。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/client.go (新建)",
+    "internal/collector/lixinger/client_test.go (新建)",
+    "internal/collector/lixinger/lixinger.go (struct 增 retry/retryDelays 字段;构造器改为 New(apiKey,opts...) + WithRetry + NewWithBaseURL/newWithBaseURL;defaultRetryDelays 变量;旧业务方法未动)"
+  ],
+  "interfaces_exposed": {
+    "request": "func (l *Lixinger) request(endpoint string, payload any) ([]byte, error) — POST baseURL/endpoint 的 JSON,校验 code:1 信封后返回原始 body;开 retry 时对 429/5xx 退避,4xx 不重试。下游业务方法统一经此调用。",
+    "doOnce": "func (l *Lixinger) doOnce(url string, body []byte) (raw []byte, status int, err error) — 单次 HTTP 往返(包级私有,仅 request 使用)。",
+    "parseEnvelope": "func parseEnvelope(raw []byte) ([]byte, error) — 包级函数,校验 envelope.code==1 返回原始 body,否则返回透出 error 信息的错误。",
+    "envelope": "type envelope struct{ Code int `json:\"code\"`; Message string `json:\"message\"`; Error *struct{ Name string; Message string; Messages []struct{ Message string } } `json:\"error\"` } — 公共响应信封。",
+    "New": "func New(apiKey string, opts ...Option) *Lixinger — 生产构造器,默认 retry=true、retryDelays=defaultRetryDelays。",
+    "WithRetry": "func WithRetry(enabled bool) Option — 开/关退避重试。",
+    "NewWithBaseURL": "func NewWithBaseURL(apiKey, baseURL string) *Lixinger — 测试用,默认 retry=false。",
+    "Option": "type Option func(*Lixinger) — 函数式选项类型。",
+    "userAgent": "const userAgent — Chrome UA,request 随每次请求发送(连同 Content-Type: application/json)。",
+    "defaultRetryDelays": "var defaultRetryDelays = []time.Duration{1,2,4,8,16}*time.Second — 生产退避调度。"
+  },
+  "verification": {
+    "commands": [
+      "go test ./internal/collector/lixinger/ -run 'TestRequest|TestNew_Defaults' -v  => 11 用例全 PASS (6 计划用例 + TestNew_Defaults + TestRequest_SendsHeaders + 3 个补充 parseEnvelope 分支测试)",
+      "go build ./internal/collector/lixinger/  => exit 0",
+      "go build ./...  => exit 0 (serve.go 旧 New(apiKey) 调用经 variadic 仍编译)",
+      "go vet ./internal/collector/lixinger/  => exit 0,无告警",
+      "go test ./internal/collector/lixinger/ -run 'TestRequest|TestNew_Defaults' -coverprofile  => 新代码(client.go + 4 个新构造器)语句覆盖率 51/58 = 87.9% (>= 80% 门槛)"
+    ],
+    "coverage_note": "包级 total 仅 ~16.8%,因 lixinger.go 仍含 Task 2-5 待删除的 7 个旧业务方法(0% 覆盖);本任务新代码覆盖率 87.9%。未覆盖的 7 条语句为不可达错误路径(http.NewRequest 失败 / io.ReadAll 失败)与 newWithBaseURL 空 baseURL 默认分支。",
+    "baseline_red_expected": "TestFetchHistory_RequestShapeAndParse / TestFetchHistory_EmptyData 仍 FAIL —— 这是针对旧 cn/stock/hq FetchHistory 的预期 baseline RED,由 Task 3 修复,不属本任务范围。"
+  },
+  "deviations_from_plan": "无。严格按计划 Task 1 Step 1/4 代码实现;额外补充 3 个 parseEnvelope 分支测试(error.name-only / 非1code无error对象 / 非法JSON)以把新代码覆盖率从 ~75% 提升至 87.9%,均不改变实现代码,仅强化 DoD『透出 error.name』的验证。"
+}

@@ -8,13 +8,25 @@ import (
 	"testing"
 )
 
-// Context Checkpoint: done_criteria → test mapping (TASK-005, plan Task 7)
-// functional[0] endpointFor 七用例分派                       → TestEndpointFor
-// functional[1] 请求体含 pe_ttm.y5.cvpos; cvpos 0.2345→23.45 → TestFetchValuationPercentile
-// functional[2] lookbackYears 映射 y3/y5/y10 粒度            → TestFetchValuationPercentile_Granularity
-// boundary      GC=F 商品不发请求返回 error                  → TestEndpointFor(GC=F) + TestFetchValuationPercentile_Unsupported
-// error[0]      业务码非0 / data 空 / metric 缺失 → (-1,error)→ _BusinessError / _EmptyData / _MissingMetric
-// error(ISSUE-1)合法 JSON + 非200 → error（与畸形/业务码分路径）→ TestFetchValuationPercentile_HTTPError
+// Context Checkpoint: done_criteria → test mapping (TASK-002, plan Task 2)
+// functional[0] 个股 cn/company/fundamental/non_financial; pe_ttm.y5.cvpos(无mcw); 0.0298→2.98 → TestFetchValuationPercentile_Stock
+// functional[1] 指数 cn/index/fundamental; pe_ttm.y5.mcw.cvpos; 0.9479→94.79; HK/US 指数含/index/同走.mcw → TestFetchValuationPercentile_IndexUsesMcw
+// functional[2] lookbackYears 映射 y3/y5/y10 且请求体含对应 metric                              → TestFetchValuationPercentile_Granularity
+// functional[3] endpointFor 七用例分派不变                                                       → TestEndpointFor
+// boundary[0]   GC=F 商品 → endpointFor 空，不发请求直接 error                                  → TestFetchValuationPercentile_Unsupported
+// boundary[1]   data 为空 / 缺指标 key → (-1,error)                                              → _EmptyData / _MissingMetric
+// error[0]      业务错误 code!=1 → (-1,error); 合法 JSON 但 HTTP 500 → error(单次)              → _BusinessError / _HTTPError
+
+// valServer spins an httptest server returning a fixed status + body, replacing
+// the deleted newTestServer helper.
+func valServer(t *testing.T, status int, body string) (*Lixinger, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	return NewWithBaseURL("test-key", srv.URL), srv.Close
+}
 
 func TestEndpointFor(t *testing.T) {
 	cases := []struct {
@@ -24,9 +36,9 @@ func TestEndpointFor(t *testing.T) {
 	}{
 		{"600519.SH", "cn/company/fundamental/non_financial", "600519"},
 		{"000300.SH", "cn/index/fundamental", "000300"},
-		{"0700.HK", "hk/company/fundamental", "00700"},
-		{"AAPL", "us/company/fundamental", "AAPL"},
-		{"^GSPC", "us/index/fundamental", "SPX"},
+		{"0700.HK", "hk/company/fundamental/non_financial", "00700"},
+		{"AAPL", "", ""}, // 美股个股：理杏仁开放 API 无端点 → 降级
+		{"^GSPC", "us/index/fundamental", ".INX"},
 		{"^HSI", "hk/index/fundamental", "HSI"},
 		{"GC=F", "", ""},
 	}
@@ -39,24 +51,49 @@ func TestEndpointFor(t *testing.T) {
 	}
 }
 
-func TestFetchValuationPercentile(t *testing.T) {
+func TestFetchValuationPercentile_Stock(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), "pe_ttm.y5.cvpos") {
-			t.Errorf("missing metric in body: %s", body)
+		if !strings.HasSuffix(r.URL.Path, "/cn/company/fundamental/non_financial") {
+			t.Errorf("wrong endpoint: %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"code":0,"data":[{"date":"2026-06-10","stockCode":"600519",
-			"pe_ttm":{"y5":{"cvpos":0.2345}}}]}`))
+		raw, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(raw), `"pe_ttm.y5.cvpos"`) {
+			t.Errorf("stock metric must be pe_ttm.y5.cvpos (no mcw), got: %s", raw)
+		}
+		_, _ = w.Write([]byte(`{"code":1,"message":"success","data":[{"date":"2026-06-12T00:00:00+08:00","stockCode":"600519","pe_ttm.y5.cvpos":0.0298}]}`))
 	}))
 	defer srv.Close()
 
 	lx := NewWithBaseURL("test-key", srv.URL)
-	got, err := lx.FetchValuationPercentile("600519.SH", 5)
+	pct, err := lx.FetchValuationPercentile("600519.SH", 5)
 	if err != nil {
-		t.Fatalf("FetchValuationPercentile: %v", err)
+		t.Fatalf("failed: %v", err)
 	}
-	if got < 23.44 || got > 23.46 { // cvpos 0-1 → 0-100
-		t.Errorf("percentile = %v, want 23.45", got)
+	if pct < 2.97 || pct > 2.99 {
+		t.Errorf("pct = %v, want ~2.98 (0.0298*100)", pct)
+	}
+}
+
+func TestFetchValuationPercentile_IndexUsesMcw(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/cn/index/fundamental") {
+			t.Errorf("wrong endpoint: %s", r.URL.Path)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(raw), `"pe_ttm.y5.mcw.cvpos"`) {
+			t.Errorf("index metric must include .mcw, got: %s", raw)
+		}
+		_, _ = w.Write([]byte(`{"code":1,"message":"success","data":[{"date":"2026-06-12T00:00:00+08:00","stockCode":"000300","pe_ttm.y5.mcw.cvpos":0.9479}]}`))
+	}))
+	defer srv.Close()
+
+	lx := NewWithBaseURL("test-key", srv.URL)
+	pct, err := lx.FetchValuationPercentile("000300.SH", 5)
+	if err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if pct < 94.78 || pct > 94.80 {
+		t.Errorf("pct = %v, want ~94.79", pct)
 	}
 }
 
@@ -74,7 +111,7 @@ func TestFetchValuationPercentile_Granularity(t *testing.T) {
 			if !strings.Contains(string(body), wantMetric) {
 				t.Errorf("lookback %d: body missing %q: %s", c.lookback, wantMetric, body)
 			}
-			_, _ = w.Write([]byte(`{"code":0,"data":[{"pe_ttm":{"` + c.wantGran + `":{"cvpos":0.5}}}]}`))
+			_, _ = w.Write([]byte(`{"code":1,"data":[{"` + wantMetric + `":0.5}]}`))
 		}))
 		lx := NewWithBaseURL("test-key", srv.URL)
 		if _, err := lx.FetchValuationPercentile("600519.SH", c.lookback); err != nil {
@@ -93,18 +130,17 @@ func TestFetchValuationPercentile_Unsupported(t *testing.T) {
 }
 
 func TestFetchValuationPercentile_BusinessError(t *testing.T) {
-	lx, closeFn := newTestServer(t, http.StatusOK, `{"code":403,"message":"no permission"}`)
+	lx, closeFn := valServer(t, http.StatusOK, `{"code":0,"error":{"message":"no permission"}}`)
 	defer closeFn()
-	if _, err := lx.FetchValuationPercentile("AAPL", 5); err == nil {
-		t.Error("expected error on business code 403")
+	if _, err := lx.FetchValuationPercentile("600519.SH", 5); err == nil {
+		t.Error("expected error on business error (code != 1)")
 	}
 }
 
 func TestFetchValuationPercentile_HTTPError(t *testing.T) {
-	// 合法 JSON body 但 HTTP 500 —— 必须因 StatusCode 守卫报错，
-	// 与畸形 JSON / 业务码非0 分路径（wisdom ISSUE-1）。
-	lx, closeFn := newTestServer(t, http.StatusInternalServerError,
-		`{"code":0,"data":[{"pe_ttm":{"y5":{"cvpos":0.5}}}]}`)
+	// 合法 JSON body 但 HTTP 500 —— 必须因 StatusCode 守卫报错（retry off → 单次即返回）。
+	lx, closeFn := valServer(t, http.StatusInternalServerError,
+		`{"code":1,"data":[{"pe_ttm.y5.cvpos":0.5}]}`)
 	defer closeFn()
 	if _, err := lx.FetchValuationPercentile("600519.SH", 5); err == nil {
 		t.Error("expected error on HTTP 500 despite valid JSON body")
@@ -112,7 +148,7 @@ func TestFetchValuationPercentile_HTTPError(t *testing.T) {
 }
 
 func TestFetchValuationPercentile_EmptyData(t *testing.T) {
-	lx, closeFn := newTestServer(t, http.StatusOK, `{"code":0,"data":[]}`)
+	lx, closeFn := valServer(t, http.StatusOK, `{"code":1,"data":[]}`)
 	defer closeFn()
 	if _, err := lx.FetchValuationPercentile("600519.SH", 5); err == nil {
 		t.Error("expected error on empty data")
@@ -120,9 +156,9 @@ func TestFetchValuationPercentile_EmptyData(t *testing.T) {
 }
 
 func TestFetchValuationPercentile_MissingMetric(t *testing.T) {
-	lx, closeFn := newTestServer(t, http.StatusOK, `{"code":0,"data":[{"stockCode":"600519"}]}`)
+	lx, closeFn := valServer(t, http.StatusOK, `{"code":1,"data":[{"stockCode":"600519"}]}`)
 	defer closeFn()
 	if _, err := lx.FetchValuationPercentile("600519.SH", 5); err == nil {
-		t.Error("expected error when pe_ttm.cvpos missing")
+		t.Error("expected error when metric key missing")
 	}
 }

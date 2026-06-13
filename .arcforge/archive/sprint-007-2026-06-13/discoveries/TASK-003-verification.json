@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-003",
+  "instance": "test-agent-1",
+  "role": "test-agent",
+  "verdict": "NEEDS_WORK",
+  "summary": "实现正确、所有现有测试转绿、stock.go 三函数覆盖率均 >=80%、旧 cn/stock/* 端点已移除、依赖方(eastmoney/atlas)编译通过。唯一缺陷：error_handling[0]『apiKey 为空 -> error (fetchCandlestick 守卫)』被 DoD 列为可测条目，但无任何测试覆盖该守卫分支，覆盖率 profile 明确显示守卫块执行计数为 0。",
+  "commands_run": [
+    "go test ./internal/collector/lixinger/ -run 'TestFetchQuote|TestFetchHistory' -count=1 -v  => 5/5 PASS",
+    "go tool cover -func (stock.go) => fetchCandlestick 80.0%, FetchHistory 90.0%, FetchQuote 93.8%",
+    "go build ./internal/collector/lixinger/ ./internal/collector/eastmoney/ ./cmd/atlas/ => BUILD_OK",
+    "go vet ./internal/collector/lixinger/ => VET_OK",
+    "grep -rn 'cn/stock/real-time|cn/stock/hq' internal/collector/lixinger/ => 无匹配 (EXIT=1)",
+    "go test -run 'TestRequest|TestFetchValuationPercentile|TestEndpointFor' -count=1 => 19/19 PASS (回归绿)"
+  ],
+  "criteria_matrix": [
+    {"id": "functional[0]", "desc": "FetchQuote 派生 Price/PrevClose/Change/Source", "test": "TestFetchQuote_DerivesFromCandlestick", "verdict": "PASS", "evidence": "Price=1275.88(latest close), PrevClose=1256, Change~19.88, Source=lixinger-delayed; 源码 stock.go:85-104 与断言一致"},
+    {"id": "functional[1]", "desc": "FetchHistory 命中 cn/company/candlestick、单数 stockCode、含 type、RFC3339+OHLCV", "test": "TestFetchHistory_RequestShapeAndParse", "verdict": "PASS", "evidence": "断言 endpoint 后缀、stockCode 单数且不含 stockCodes、含 type；OHLCV 全字段+RFC3339 时区均校验; 源码用 time.RFC3339, type:fc_rights, 单数 stockCode"},
+    {"id": "functional[2]", "desc": "非200 error、空 data 不报错", "test": "TestFetchHistory_HTTPErrorIsError / TestFetchHistory_EmptyData", "verdict": "PASS", "evidence": "两例均 PASS"},
+    {"id": "boundary[0]", "desc": "FetchQuote 空 candlestick -> error", "test": "TestFetchQuote_EmptyDataIsError", "verdict": "PASS", "evidence": "空 data[] 时返回 err; 源码 stock.go:82-84"},
+    {"id": "boundary[1]", "desc": "单数 stockCode 不含复数 stockCodes", "test": "TestFetchHistory_RequestShapeAndParse", "verdict": "PASS", "evidence": "断言 body 含 \"stockCode\":\"600519\" 且 NOT contains stockCodes; 源码 stock.go:29 用单数"},
+    {"id": "error_handling[0]", "desc": "apiKey 为空 -> error (fetchCandlestick 守卫)", "test": "无对应测试", "verdict": "未覆盖", "evidence": "守卫存在于 stock.go:24-26 且正确, 但无测试调用 NewWithBaseURL(\"\", ...) 并断言 error; coverage profile 行 stock.go:24.20,26.3 执行计数=0, 即该分支从未被执行。DoD 将其列为 error_handling 条目(verify_by: test 等价), 须有对应测试断言。"},
+    {"id": "non_functional[0]", "desc": "旧 cn/stock/* 已移除、编译通过无未用 import、stock.go 覆盖率>=80%", "test": "verify_by: test", "verdict": "PASS", "evidence": "grep cn/stock/real-time|cn/stock/hq 无匹配; lixinger.go 旧 FetchQuote/FetchHistory 已删(仅余 Fund* 方法); go vet 无告警; stock.go 三函数 80/90/93.8% 均>=80%。注: lixinger.go:345 的 stockCodes 属 FetchFundamental(基金端点), 非本任务 stock 路径, 在 Task4/5 范围。"}
+  ],
+  "defects": [
+    {"severity": "minor", "criterion": "error_handling[0]", "desc": "apiKey 空守卫无测试覆盖", "fix_suggestion": "在 stock_test.go 增加一例: lx := NewWithBaseURL(\"\", srv.URL); _, err := lx.FetchQuote(...) (或 FetchHistory); 断言 err != nil 且 err 含 'api_key is required'。这同时把 fetchCandlestick 覆盖率从 80% 拉满, 并把 DoD error_handling[0] 从代码存在升级为有断言的真实验证。"}
+  ],
+  "package_total_coverage_note": "package total 25.2%(本次仅跑 stock 子集) / dev 报告全量 48.4%, 受旧 fund/fundamental 方法暂无测试拖累, 属 Task4/5 范围, 非本任务回归。按变更文件 stock.go 判定, 三函数均达标。",
+  "regression": "TestRequest* / TestFetchValuationPercentile* / TestEndpointFor 全绿, history_test.go baseline RED 已转绿, 无破坏既有测试。",
+  "recommended_status": "rejected"
+}

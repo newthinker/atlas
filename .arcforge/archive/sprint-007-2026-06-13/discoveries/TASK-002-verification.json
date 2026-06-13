@@ -1,0 +1,31 @@
+{
+  "task_id": "TASK-002",
+  "verifier": "test-agent-1",
+  "verdict": "PASS",
+  "verified_at": "2026-06-13",
+  "criteria_matrix": [
+    {"dim":"functional[0]","criterion":"个股 600519.SH→cn/company/fundamental/non_financial，请求体含 pe_ttm.y5.cvpos(无mcw)，0.0298→2.98","test":"TestFetchValuationPercentile_Stock","verdict":"PASS","evidence":"PASS；测试断言 URL 后缀=/cn/company/fundamental/non_financial、body 含 \"pe_ttm.y5.cvpos\"、pct∈[2.97,2.99]"},
+    {"dim":"functional[1]","criterion":"指数 000300.SH→cn/index/fundamental，请求体含 pe_ttm.y5.mcw.cvpos，0.9479→94.79；含 /index/ 走 .mcw","test":"TestFetchValuationPercentile_IndexUsesMcw + 源码 strings.Contains(endpoint,\"/index/\")","verdict":"PASS","evidence":"PASS；断言 body 含 \".mcw.cvpos\"、pct∈[94.78,94.80]。源码 valuation.go:74-75 按 endpoint 含 /index/ 切换 .mcw；endpointFor 把 CN/HK/US 指数统一映射含 /index/ → ^GSPC/^HSI 同走 .mcw（逻辑覆盖，无独立用例直跑指数 fetch，但 endpointFor 用例锁定其端点含 /index/）"},
+    {"dim":"functional[2]","criterion":"lookbackYears 映射 y3/y5/y10 且请求体含对应 metric","test":"TestFetchValuationPercentile_Granularity","verdict":"PASS","evidence":"PASS；表驱动 6 例 1→y3,3→y3,4→y5,5→y5,6→y10,10→y10，断言 body 含对应 wantMetric"},
+    {"dim":"functional[3]","criterion":"endpointFor 七用例分派不变","test":"TestEndpointFor","verdict":"PASS","evidence":"PASS；7 用例(600519.SH/000300.SH/0700.HK→00700/AAPL/^GSPC→SPX/^HSI→HSI/GC=F→空)断言端点+code"},
+    {"dim":"boundary[0]","criterion":"GC=F→endpointFor 空，不发请求直接 error","test":"TestFetchValuationPercentile_Unsupported","verdict":"PASS","evidence":"PASS；baseURL=http://127.0.0.1:0(无效)仍返回 error，证明 endpointFor==\"\" 短路未触网"},
+    {"dim":"boundary[1]","criterion":"空 data / 缺 key →(-1,error)","test":"TestFetchValuationPercentile_EmptyData / _MissingMetric","verdict":"PASS","evidence":"PASS；len(Data)==0 与 Data[0][metric] 断言失败两路径各返回 error"},
+    {"dim":"error_handling[0]","criterion":"code!=1 业务错误→error；HTTP500+合法body→error(retry off 单次)","test":"TestFetchValuationPercentile_BusinessError / _HTTPError","verdict":"PASS","evidence":"PASS；BusinessError 用 code:0 → parseEnvelope 报错；HTTPError 用 500+合法JSON，NewWithBaseURL retry=false(lixinger.go:63)→maxAttempts=1→client.go:50-51 setlastErr→return error，单次无 masking"},
+    {"dim":"non_functional[0]","criterion":"lixinger_httptest_test.go 已删；postJSONRaw/digFloat 已移除；变更文件覆盖率≥80%","test":"test","verdict":"PASS","evidence":"PASS；ls 文件不存在(exit1)；grep postJSONRaw|digFloat 无命中(exit1)；go build/vet exit0；valuation.go 覆盖率 FetchValuationPercentile 95.0% / endpointFor 90.0% / lookbackGranularity 100% 均≥80%"}
+  ],
+  "commands_run": [
+    "go test -run 'TestEndpointFor|TestFetchValuationPercentile' -v => 9/9 PASS",
+    "go test -coverprofile + cover -func => valuation.go 90-100%",
+    "go build ./internal/collector/lixinger/ => exit0; go vet => exit0",
+    "ls lixinger_httptest_test.go => No such file (exit1)",
+    "grep postJSONRaw|digFloat valuation.go => 无命中(exit1)",
+    "go test -run TestRequest => 10/10 PASS (Task1 client 无回归)"
+  ],
+  "defects": [],
+  "observations": [
+    "包级 total 覆盖率 24% 属预期(lixinger.go 含 Task3-5 待删旧业务方法 0% 覆盖)，按变更文件 valuation.go 判定达标。",
+    "FetchValuationPercentile 95% 未覆盖语句为 json.Unmarshal(raw) 失败分支——request/parseEnvelope 已保证 code==1 合法信封 JSON，该分支事实不可达，不构成缺陷。",
+    "functional[1] HK/US 指数 .mcw 为逻辑覆盖：无独立用例直接 fetch ^GSPC/^HSI，但 endpointFor 用例锁定其端点含 /index/ + 源码 strings.Contains 分派统一，链路可推定成立。建议(非阻塞)后续补一例 ^GSPC fetch 直证 mcw 请求体。",
+    "baseline RED(TestFetchHistory_*)为 Task3 范围，本任务不涉及，不扣分。"
+  ]
+}

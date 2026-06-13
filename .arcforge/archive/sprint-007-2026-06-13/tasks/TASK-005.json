@@ -1,0 +1,76 @@
+{
+  "id": "TASK-005",
+  "title": "fund.go — 基金净值 + profile/manager/drawdown 多接口聚合",
+  "description": "新建 internal/collector/lixinger/fund.go：fetchNetValues(cn/fund/net-value,单数 stockCode,字段 netValue)。FetchFundHistory 把 NAV 写入 OHLC 四值、RFC3339。FetchFundQuote 取最新净值 + fetchFundInfo。fetchFundInfo 聚合 profile(c_name/f_c_name/inception_date/op_mode) + manager(无 departureDate 的现任) + drawdown(granularity y1,取最小 value) + net-value(最新)；子接口失败留空不致命，profile 失败返回 nil。FetchFundInfoPublic 暴露 fetchFundInfo。删除 lixinger.go 旧 FetchFundQuote/FetchFundInfoPublic/fetchFundInfo/FetchFundHistory(cn/fund/nav*)，清理 import。依据计划 Task 5。",
+  "module": "internal/collector/lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/fund.go",
+    "internal/collector/lixinger/fund_test.go",
+    "internal/collector/lixinger/lixinger.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchFundHistory 命中 cn/fund/net-value，netValue 写入 OHLC 四值，RFC3339（TestFetchFundHistory_NetValue）",
+      "FetchFundInfoPublic 聚合：Name=c_name、ManagementCompany=f_c_name、Manager=现任(无 departureDate)、MaxDrawdown=最小 value、LatestNAV=最新、InceptionDate 解析（TestFetchFundInfoPublic_Aggregates）",
+      "FetchFundQuote Price=最新 netValue 且附带 FundInfo（TestFetchFundQuote_LatestNav）"
+    ],
+    "boundary": [
+      "子接口部分失败(profile ok, 其余 500) → 仍返回非 nil 且 profile 字段填充（TestFetchFundInfoPublic_PartialFailureDegrades）",
+      "空净值 → FetchFundQuote error"
+    ],
+    "error_handling": [
+      "apiKey 为空 → error；profile 调用失败 → fetchFundInfo 返回 nil"
+    ],
+    "non_functional": [
+      {
+        "desc": "旧 cn/fund/nav* 端点代码已移除；package 全量测试全绿；变更包覆盖率 ≥80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "status_note": "review_fix → in_progress",
+  "fix_items": [
+    {
+      "id": "QA-C4",
+      "title": "FundInfo.Name 误填托管行(c_name)",
+      "location": "fund.go fetchFundInfo profile 解析",
+      "severity": "CRITICAL",
+      "description": "cn/fund/profile 的 c_name=托管行(实测「中国银行股份有限公司」)，非基金名；基金简称在 e_t_short_name(「白酒基金LOF」)。当前 Name=c_name 会展示成托管银行。",
+      "fix": "Name 改取 e_t_short_name；解析结构体加 ETShortName json:\"e_t_short_name\"。"
+    },
+    {
+      "id": "QA-C5",
+      "title": "fetchFundInfo 无 apiKey 守卫",
+      "location": "fund.go fetchFundInfo",
+      "severity": "CRITICAL",
+      "description": "FetchFundInfoPublic→fetchFundInfo 无 apiKey 空守卫，空 token 会发网络请求。",
+      "fix": "fetchFundInfo 开头 if l.apiKey==\"\" { return nil }。"
+    },
+    {
+      "id": "QA-MOCK",
+      "title": "fund_test mock 用臆造响应形状",
+      "location": "fund_test.go fundMux",
+      "severity": "WARNING",
+      "description": "原 mock 把 c_name 当基金名(臆造)，掩盖了 C4。须改用真实形状：c_name=托管行、e_t_short_name=基金名。",
+      "fix": "fundMux profile 响应改为真实形状(c_name 托管行 + e_t_short_name 基金名)，并断言 Name==e_t_short_name。"
+    }
+  ]
+}

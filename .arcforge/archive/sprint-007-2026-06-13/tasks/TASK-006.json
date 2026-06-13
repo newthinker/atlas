@@ -1,0 +1,51 @@
+{
+  "id": "TASK-006",
+  "title": "serve.go 接 retry 配置开关 + 配置文件说明",
+  "description": "修改 cmd/atlas/serve.go 的 lixinger 构造块：读 collectorCfg.Extra[\"retry\"] (bool, 缺省 true)，用 lixinger.New(apiKey, lixinger.WithRetry(retry)) 构造。configs/config.yaml 与 config.example.yaml 的 lixinger 块加 retry: true 注释行。依据计划 Task 6。",
+  "module": "cmd/atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "configs/config.yaml",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "serve.go 从 Extra[\"retry\"] 读取开关(缺省 true)并传入 lixinger.New(..., WithRetry(retry))（代码位置检查）",
+        "verify_by": "review"
+      },
+      "config.yaml / config.example.yaml 的 lixinger 块含 retry 配置项与说明注释"
+    ],
+    "boundary": [
+      "Extra 中无 retry 键 → 默认 true（类型断言失败保持默认）"
+    ],
+    "error_handling": [
+      "retry 值非 bool → 保持默认 true（断言失败不 panic）"
+    ],
+    "non_functional": [
+      {
+        "desc": "go build ./... 通过；既有 cmd/atlas 用例零回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "leader (review-based DoD)",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

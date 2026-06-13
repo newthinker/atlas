@@ -1,0 +1,67 @@
+{
+  "task_id": "TASK-002",
+  "title": "valuation.go 改用 request()、扁平 key、指数 .mcw（并删除遗留反转语义测试文件）",
+  "instance": "dev-agent-1",
+  "key_findings": [
+    "估值分位指标 metric 字符串即响应的扁平 dotted key（如 \"pe_ttm.y5.cvpos\"），从 data[0][metric].(float64) 直接取值 ×100 返回 0-100 百分位；不再有嵌套 pe_ttm→y5→cvpos 结构。",
+    "指数 endpoint（CN cn/index/fundamental、US us/index/fundamental、HK hk/index/fundamental）一律包含 /index/，凡含 /index/ 即用市值加权变体 metric pe_ttm.{gran}.mcw.cvpos；个股用 pe_ttm.{gran}.cvpos（无 mcw）。判定靠 strings.Contains(endpoint, \"/index/\")，对 CN/HK/US 指数统一生效。",
+    "FetchValuationPercentile 完全改走 Task1 的传输层 l.request(endpoint, payload)：信封 code==1 校验、HTTP 状态守卫、退避重试均由 request 统一处理；valuation.go 不再自持 HTTP 代码。HTTP 500 + 合法 JSON body 仍报错（request 的状态守卫），retry 默认关闭故单次返回。",
+    "删除 lixinger_httptest_test.go（旧文件编码 code:0=成功 的反转语义 + 已废弃端点 + 定义包内唯一的 newTestServer），它原是 lixinger 包 newTestServer 的唯一定义；valuation_test.go 重写为自包含 valServer helper，删除后 valuation 测试编译自洽。删除使旧 quote/history/fundamental/fund 方法暂失测试覆盖（Task3-5 重写补测）。",
+    "valuation.go 移除 postJSONRaw 与 digFloat 两个旧函数；import 由 bytes+encoding/json+fmt+io+net/http+strings+collector 收敛为 encoding/json+fmt+strings+collector。"
+  ],
+  "decisions": [
+    {
+      "decision": "metric 字符串复用为响应扁平 key，data[0][metric].(float64) 取值",
+      "rationale": "理杏仁实测以扁平 dotted key 返回分位值；让请求 metricsList 项与解析 key 共用同一字符串消除两处不一致风险，缺 key 即 (-1,error)。"
+    },
+    {
+      "decision": "指数分派条件用 strings.Contains(endpoint, \"/index/\") 而非按 symbol 前缀",
+      "rationale": "endpointFor 已把 CN/HK/US 指数统一映射到含 /index/ 的 endpoint；据 endpoint 判定使 .mcw 分派对三市场指数一致，符合 reviewer 反审补充（^GSPC/^HSI 同走 .mcw）。"
+    },
+    {
+      "decision": "(-1, error) 作为所有失败路径返回（unsupported / request 失败 / 空 data / 缺 key / 解码失败）",
+      "rationale": "保留设计 §5 的降级契约：调用方据负值/error 降级为『percentile unavailable』，不抛 panic。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/lixinger_httptest_test.go (删除：旧反转语义 + newTestServer 定义)",
+    "internal/collector/lixinger/valuation_test.go (整体重写：自包含 valServer，code:1 信封，扁平 key，新增 _Stock/_IndexUsesMcw 用例)",
+    "internal/collector/lixinger/valuation.go (重写 FetchValuationPercentile 走 request()+扁平 key+指数 .mcw；删 postJSONRaw/digFloat；收敛 import；endpointFor/lookbackGranularity/usHKIndexCodes 保留不变)"
+  ],
+  "interfaces_exposed": {
+    "FetchValuationPercentile": "func (l *Lixinger) FetchValuationPercentile(symbol string, lookbackYears int) (float64, error) — 经 endpointFor 选端点+code；lookbackGranularity 映射 y3(<=3)/y5(<=5)/y10(>5)；个股 metric=pe_ttm.{gran}.cvpos，端点含 /index/ 则 pe_ttm.{gran}.mcw.cvpos；POST payload {token,date:latest,stockCodes:[code],metricsList:[metric]} 经 l.request 发出；从 data[0][metric].(float64)×100 返回 0-100；任何不支持/失败/空data/缺key 返回 (-1,error)。",
+    "endpointFor": "func endpointFor(symbol string) (endpoint, code string) — 未改动；CN指数 cn/index/fundamental、CN个股 cn/company/fundamental/non_financial、HK个股 hk/company/fundamental(5位码)、US个股 us/company/fundamental、^GSPC→us/index/fundamental(SPX)、^HSI→hk/index/fundamental(HSI)、商品/crypto/未知指数→(\"\",\"\")。",
+    "lookbackGranularity": "func lookbackGranularity(lookbackYears int) string — 未改动；<=3→y3，<=5→y5，>5→y10。"
+  },
+  "verification": {
+    "commands": [
+      "go test ./internal/collector/lixinger/ -run 'TestEndpointFor|TestFetchValuationPercentile' -v => 9 用例全 PASS (EndpointFor + Stock/IndexUsesMcw/Granularity/Unsupported/BusinessError/HTTPError/EmptyData/MissingMetric)",
+      "go build ./internal/collector/lixinger/ => exit 0",
+      "go vet ./internal/collector/lixinger/ => exit 0 无告警",
+      "go test ./internal/collector/lixinger/ -run 'TestRequest' => ok (Task1 client 测试无回归)",
+      "go tool cover -func: valuation.go FetchValuationPercentile 95.0% / endpointFor 90.0% / lookbackGranularity 100% (均 >= 80% 门槛)"
+    ],
+    "coverage_note": "变更文件 valuation.go 三个函数语句覆盖率 90-100%，>= 80% dev 门槛。包级 total 24% 因 lixinger.go 仍含 Task3-5 待删除的旧业务方法(0% 覆盖)。FetchValuationPercentile 未覆盖语句为 json.Unmarshal 失败的不可达分支(request 已保证合法信封 JSON)。",
+    "baseline_red_expected": "TestFetchHistory_RequestShapeAndParse / TestFetchHistory_EmptyData 仍 FAIL —— 针对旧 cn/stock/hq FetchHistory 的预期 baseline RED，由 Task 3 修复，不属本任务范围。"
+  },
+  "deviations_from_plan": "无。严格按计划 Task 2 Step 1/2/4 实现。注意：本仓库写入辅助脚本为 with-task-lock.sh（spawn 指令所示），不存在 arcforge-write.sh；discovery 经 with-task-lock.sh 在锁内原子写(临时文件+mv)。未改 TASK-002.json status、未 git commit（遵 spawn 指令）。",
+  "rework_history": [
+    {
+      "round": "QA-reject-r2",
+      "date": "2026-06-13",
+      "fix_items": [
+        "QA-C1",
+        "QA-C2",
+        "QA-W-INX"
+      ],
+      "real_api_contract": [
+        "hk/company/fundamental → 404；正确端点 hk/company/fundamental/non_financial (00700 live 200)。endpointFor .HK 分支已改用之。",
+        "us/company/fundamental → 404；理杏仁开放 API 无美股个股基本面端点。endpointFor default(美股个股)分支改为返回 (\"\",\"\")，调用方降级为 percentile unavailable。",
+        "美股指数 ^GSPC 映射 SPX live 返回空 data；.INX 才有数据。usHKIndexCodes[\"^GSPC\"].code 由 SPX 改为 .INX。",
+        "^DJI(DJI)/^IXIC(COMP) 暂未 live 核实，保持原值，待后续验证。"
+      ],
+      "test_changes": "valuation_test.go TestEndpointFor 期望更新为 {0700.HK→hk/company/fundamental/non_financial,00700}、{AAPL→\"\",\"\"}、{^GSPC→us/index/fundamental,.INX}；先 RED 后 GREEN。BusinessError 用例 symbol 由 AAPL 改 600519.SH(AAPL 现无端点会提前 error，无法触达业务错误分支)。",
+      "lesson": "测试 mock/期望必须反映 live API 实测形状，不能臆测端点路径与代码映射。"
+    }
+  ]
+}

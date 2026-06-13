@@ -1,0 +1,76 @@
+{
+  "id": "TASK-002",
+  "title": "valuation.go 改用 request()、扁平 key、指数 .mcw（并删除遗留反转语义测试文件）",
+  "description": "删除 lixinger_httptest_test.go（编码 code:0=成功 的反转语义 + 已废弃端点 + 定义 newTestServer）。整体重写 valuation_test.go 为自包含（不依赖 newTestServer，code:1 + 扁平 key）。重写 valuation.go 的 FetchValuationPercentile：改用 client.request()，个股 metric=pe_ttm.yN.cvpos、指数(endpoint 含 /index/)=pe_ttm.yN.mcw.cvpos，按扁平 dotted key 从 data[0] 取 float64；删除 postJSONRaw、digFloat，import 改为 encoding/json+fmt+strings+collector。保留 endpointFor/lookbackGranularity/usHKIndexCodes。依据计划 Task 2。",
+  "module": "internal/collector/lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/valuation.go",
+    "internal/collector/lixinger/valuation_test.go",
+    "internal/collector/lixinger/lixinger_httptest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "个股 600519.SH 命中 cn/company/fundamental/non_financial，请求体含 pe_ttm.y5.cvpos（无 mcw），0.0298→2.98（TestFetchValuationPercentile_Stock）",
+      "指数 000300.SH 命中 cn/index/fundamental，请求体含 pe_ttm.y5.mcw.cvpos，0.9479→94.79（TestFetchValuationPercentile_IndexUsesMcw）；reviewer 反审补充：HK/US 指数(^GSPC→us/index、^HSI→hk/index)凡 endpoint 含 /index/ 同样走 .mcw 分派",
+      "lookbackYears 映射 y3/y5/y10 且请求体含对应 metric（TestFetchValuationPercentile_Granularity）",
+      "endpointFor 七用例分派不变（TestEndpointFor）"
+    ],
+    "boundary": [
+      "商品符号 GC=F → endpointFor 空，不发请求直接 error（TestFetchValuationPercentile_Unsupported）",
+      "data 为空 / 缺指标 key → (-1,error)（_EmptyData / _MissingMetric）"
+    ],
+    "error_handling": [
+      "业务错误 code!=1 → (-1,error)（_BusinessError）；合法 JSON 但 HTTP 500 → error（_HTTPError，retry off 单次）"
+    ],
+    "non_functional": [
+      {
+        "desc": "lixinger_httptest_test.go 已删除（不再编译）；postJSONRaw/digFloat 已移除；变更包覆盖率 ≥80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "qa-agent-1 (r2 PASS)",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "QA-C1",
+      "title": "endpointFor 港股个股端点缺 /non_financial",
+      "location": "valuation.go endpointFor (.HK 分支)",
+      "severity": "CRITICAL",
+      "description": "hk/company/fundamental 实测 404；正确端点为 hk/company/fundamental/non_financial（00700 实测 200）。",
+      "fix": "把 .HK 分支端点改为 hk/company/fundamental/non_financial；更新 TestEndpointFor 期望。"
+    },
+    {
+      "id": "QA-C2",
+      "title": "endpointFor 美股个股端点不存在",
+      "location": "valuation.go endpointFor (default 分支)",
+      "severity": "CRITICAL",
+      "description": "us/company/fundamental 实测 404，理杏仁开放 API 无美股个股基本面端点。",
+      "fix": "default(美股个股)分支返回空端点(\"\",\"\")，调用方降级'分位不可用'；更新 TestEndpointFor(AAPL 期望空)。"
+    },
+    {
+      "id": "QA-W-INX",
+      "title": "美股指数 ^GSPC 代码 SPX 返回空数据",
+      "location": "valuation.go usHKIndexCodes",
+      "severity": "WARNING",
+      "description": "SPX 实测返回 data:[]（无数据）；.INX 实测返回有效 cvpos。^DJI(DJI)/^IXIC(COMP) 同样返回空，正确码未定，安全降级为不可用，本轮仅修已确认的 ^GSPC。",
+      "fix": "^GSPC 映射 SPX→.INX；更新 TestEndpointFor(^GSPC 期望 .INX)。^DJI/^IXIC 记入 final-report 待后续核实。"
+    }
+  ]
+}

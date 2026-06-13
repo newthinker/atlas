@@ -1,0 +1,51 @@
+{
+  "id": "TASK-003",
+  "title": "stock.go — FetchHistory + FetchQuote 走 cn/company/candlestick",
+  "description": "新建 internal/collector/lixinger/stock.go：candlestickBar 结构 + fetchCandlestick(单数 stockCode + type:fc_rights + startDate/endDate)。FetchHistory 解析 RFC3339 日期、volume 取整，空数据不报错。FetchQuote 拉最近约10天取最新一条近似(close→Price,open/high/low 齐,上一条 close 算 Change/ChangePercent)，Source=lixinger-delayed。删除 lixinger.go 旧 FetchQuote(cn/stock/real-time)与旧 FetchHistory(cn/stock/hq)，清理未用 import。让既有 history_test.go 转绿。依据计划 Task 3。",
+  "module": "internal/collector/lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/stock.go",
+    "internal/collector/lixinger/stock_test.go",
+    "internal/collector/lixinger/lixinger.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchQuote 从 candlestick 派生：Price=最新 close、PrevClose=上一条 close、Change 一致、Source=lixinger-delayed（TestFetchQuote_DerivesFromCandlestick）",
+      "FetchHistory 命中 cn/company/candlestick、单数 stockCode、含 type，RFC3339 日期与 OHLCV 正确解析（既有 history_test.go: TestFetchHistory_RequestShapeAndParse 转绿）",
+      "FetchHistory 非200 返回错误、空 data 不报错（既有 history_test.go: _HTTPErrorIsError / _EmptyData）"
+    ],
+    "boundary": [
+      "FetchQuote 空 candlestick → error（TestFetchQuote_EmptyDataIsError）",
+      "请求体使用单数 stockCode，不含复数 stockCodes（既有 history_test 已断言）"
+    ],
+    "error_handling": [
+      "apiKey 为空 → error（fetchCandlestick 守卫）"
+    ],
+    "non_functional": [
+      {
+        "desc": "旧 cn/stock/* 端点代码已移除；package 编译通过、无未用 import；变更包覆盖率 ≥80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "reject_reason": "error_handling[0] apiKey 空守卫无测试覆盖（coverage 该分支执行 0 次），需补 NewWithBaseURL(\"\", srv.URL) 用例断言 FetchQuote/FetchHistory 返回含 'api_key is required' 的错误。",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": []
+}

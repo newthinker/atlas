@@ -1,0 +1,81 @@
+{
+  "artifact": "qa-review-r2",
+  "subject": "lixinger collector — Code Review 第2轮 (iteration 2)：复审上一轮 5 CRITICAL + 采纳 WARNING 的修复",
+  "reviewer": "qa-agent-1",
+  "date": "2026-06-13",
+  "iteration": 2,
+  "prior_report": ".arcforge/discoveries/qa-review.json",
+  "gates": {
+    "go_test_v": "PASS — 19/19 tests PASS, ok lixinger 3.308s (-count=1 -v)",
+    "go_test_cover": "PASS — coverage 90.9% of statements",
+    "go_build": "PASS — go build ./... 全仓通过",
+    "go_vet": "PASS — go vet ./internal/collector/lixinger/ 无告警"
+  },
+  "critical_closure": [
+    {
+      "id": "C-us-endpoint",
+      "leader_ruling": "真",
+      "status": "CLOSED",
+      "evidence": "valuation.go:44-45 default 分支(美股个股) return \"\",\"\"；FetchValuationPercentile endpoint==\"\" 时返回 unsupported error 由调用方降级。测试 valuation_test.go:40 {AAPL,\"\",\"\"} 与 TestEndpointFor 固化降级契约。"
+    },
+    {
+      "id": "C-hk-endpoint",
+      "leader_ruling": "真",
+      "status": "CLOSED",
+      "evidence": "valuation.go:40-41 .HK 分支 return \"hk/company/fundamental/non_financial\", %05s 补零(0700.HK→00700)。测试 valuation_test.go:39 {0700.HK, hk/company/fundamental/non_financial, 00700}。与 Leader live 实测 00700 200 一致。"
+    },
+    {
+      "id": "C-fund-manager",
+      "leader_ruling": "误判 — 实现正确，不应改动",
+      "status": "CONFIRMED_UNCHANGED",
+      "evidence": "fund.go:140-159 仍解析 data[].managers[].{name,departureDate} 嵌套结构，loop 取首个 DepartureDate==\"\"(在任) break。mock fund_test.go:35 含 王平(有 departureDate)+侯昊(无)，TestFetchFundInfoPublic_Aggregates 断言 Manager==侯昊。误判项逻辑未被破坏，与 Leader nested data[].managers[]+departureDate 的 live 形状一致。"
+    },
+    {
+      "id": "C-fund-profile-name",
+      "leader_ruling": "真",
+      "status": "CLOSED",
+      "evidence": "fund.go:120,128 Name = d.ETShortName(e_t_short_name)，c_name 不再被映射为 Name(struct 中已无 CName 字段)。mock fund_test.go:32 c_name=中国银行股份有限公司 / e_t_short_name=白酒基金LOF，断言(:74) info.Name==白酒基金LOF。"
+    },
+    {
+      "id": "C-apikey-guard",
+      "leader_ruling": "真",
+      "status": "CLOSED",
+      "evidence": "fund.go:109-111 fetchFundInfo 顶部 if l.apiKey==\"\" { return nil }，不变量收敛进方法内。测试 TestFetchFundInfoPublic_EmptyAPIKeyIsNil 用非法 baseURL 证明无触网。"
+    }
+  ],
+  "warning_closure": [
+    {
+      "id": "W-4xx-message-discarded",
+      "status": "CLOSED",
+      "evidence": "client.go:52-57 4xx 分支先 parseEnvelope(raw) 透出 error.message，失败回退裸状态码；4xx 不重试。测试 TestRequest_4xxSurfacesErrorMessage(retry=true 仍 1 次调用, 断言 message 含 metricsList)+TestRequest_No4xxRetry。"
+    },
+    {
+      "id": "W-index-codes (^GSPC)",
+      "status": "CLOSED",
+      "evidence": "valuation.go:15 ^GSPC→.INX(注释记 live SPX 空/.INX 有数据)。测试 valuation_test.go:41 {^GSPC, us/index/fundamental, .INX}。^DJI/^IXIC 仍为 candidate(DJI/COMP)，Leader 已记入待办——非 blocker。"
+    }
+  ],
+  "regression_check": {
+    "result": "无新引入的 CRITICAL/WARNING 级回归",
+    "details": [
+      "endpointFor case 顺序正确：IsAShareIndex → .SH/.SZ → ^前缀(index map/降级) → .HK → 商品/crypto → default 美股降级。^ 分支在 .HK/默认之前，无误吞。",
+      "FetchValuationPercentile endpoint==\"\" 早返回 unsupported error，与商品/crypto/美股个股统一降级路径，调用方无 nil deref。",
+      "fund.go profile 失败 return nil(:136)，其余 sub-fetch best-effort，nil FundInfo 经 omitempty 指针下游安全(沿用上轮 I-nil-fundinfo-safe 结论，未变)。",
+      "client.go 重试边界未改：maxAttempts/sleep 越界守卫沿用上轮 I-retry-correct 结论。4xx 新分支不进入 sleep 路径(直接 return)，不影响重试计数。",
+      "go vet clean、全仓 build 通过，无签名/接口破坏外溢。"
+    ]
+  },
+  "residual_open_items_non_blocking": [
+    {"id": "W-unit-inconsistency", "severity": "WARNING-未处理", "note": "fund.go:180 MaxDrawdown 仍存原始分数(-0.3369)，core.types 字段注释为(%)。上轮 WARNING，本轮裁决未列入修复项；如 Leader 视为 deferred 可接受，否则应另开。复审仅记录，不因其单独阻断(非本轮 5 CRITICAL/采纳 WARNING 范围)。"},
+    {"id": "W-cvpos-scale", "severity": "INFO", "note": "valuation.go:104 v*100 量纲假设(0.0298→2.98)由测试 valuation_test.go 固化，未见 Leader live 反证；保持。"},
+    {"id": "^DJI/^IXIC codes", "severity": "INFO", "note": "candidate 代码未 freeze，Leader 已记待办，安全降级。"},
+    {"id": "I-stray-files", "severity": "INFO", "note": "工作树仍有 _probe/ 与 internal/collector/lixinger/history_test.go(untracked)；提交前清理 _probe/。history_test.go 是正常新测试文件。"}
+  ],
+  "round2_adversarial": {
+    "lenses": ["Skeptic(回归/边界)", "Contract(端点/字段, 以 Leader live 裁决为权威)"],
+    "cross_model": "codex/gemini 不可用 → 纯 Claude 双视角；契约以 Leader 实测裁决为准(优于静态 api-docs)。",
+    "consensus": "两视角对 5 CRITICAL 闭合 + 无新 high-severity 回归达成一致；唯一遗留 W-unit-inconsistency 为上轮已知、本轮未派修复，不构成新分歧。"
+  },
+  "verdict": "PASS",
+  "verdict_rationale": "Leader live 裁决的 4 个真 CRITICAL(C-us/C-hk/C-fund-profile-name/C-apikey-guard)均已在源码落实且被对应测试固化；C-fund-manager 误判项实现确认未被破坏(仍取 departureDate==\"\" 现任)；采纳的 WARNING(4xx 透出 message、^GSPC→.INX)均已修并测试。无 high-severity 新回归，build/vet/test(90.9%)全绿。遗留 W-unit-inconsistency 属上轮已知、本轮未列入修复范围的 WARNING，建议 Leader 决定 deferred 或另开单——不阻断本轮 PASS。"
+}
