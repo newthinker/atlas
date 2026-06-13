@@ -1,0 +1,49 @@
+{
+  "id": "TASK-004",
+  "title": "集成 — 港股 signal-eval 产出非空事件研究",
+  "description": "端到端验证：export-signals 港股集（price_percentile,ma_crossover）→ signals_hk.csv → evaluate.py --qlib-dir atlas_hk --benchmark ^HSI → reports/signal-eval-*.md。校验报告非空（基准 ^HSI、丢弃数远小于信号总数、有 mean_ret/win_rate 表），对照修复前 8129/8129 全丢弃。A股默认基准零回归由单测覆盖。依据计划 Task 4。无源码改动。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [],
+  "done_criteria": {
+    "functional": [
+      "export-signals 港股集生成信号数 > 0（退出 0）",
+      "evaluate.py --benchmark ^HSI 对 atlas_hk 产出报告，基准显示 ^HSI（非 SH000300）",
+      "报告丢弃数 << 信号总数（基准存在不再全丢弃），含 price_percentile/ma_crossover 的 mean_ret/win_rate 表"
+    ],
+    "boundary": [
+      "默认 benchmark=000300.SH 路径行为不变（A股零回归，单测覆盖）"
+    ],
+    "error_handling": [
+      "基准 ^HSI 经 to_qlib_instrument→HSI 在 atlas_hk 存在，取数成功（非 benchmark_error）"
+    ],
+    "non_functional": [
+      {
+        "desc": "pytest scripts/qlib_eval/ 全绿；临时 signals_hk.csv 清理（gitignore）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "leader",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 0,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (e2e: 基准^HSI, 丢弃3 vs 修复前8129全丢, 超额收益非nan, 56 passed)"
+}

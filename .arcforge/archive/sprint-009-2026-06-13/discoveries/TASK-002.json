@@ -1,0 +1,33 @@
+{
+  "task_id": "TASK-002",
+  "title": "evaluate.py 暴露 --benchmark",
+  "owner": "dev-agent-1",
+  "key_findings": [
+    "_parse_args 新增 --benchmark（默认 000300.SH，atlas 形式），_meta 由硬编码 SH000300 改用 args.benchmark，main 构造 QlibPriceSource 透传 benchmark=args.benchmark。",
+    "沿用 TASK-001 暴露的 QlibPriceSource(provider_uri, start, end, benchmark=000300.SH) 签名透传，无需再改 prices.py。",
+    "消费侧 collect_outcomes / benchmark_error 降级逻辑未触碰：基准取数失败仍走既有 try/except 降级（test_collect_outcomes_benchmark_failure_is_graceful 仍绿）。",
+    "test_report.py 顶部既有 import evaluate（经 conftest 注入 sys.path），新测试直接调 evaluate._parse_args / evaluate._meta，不触发 qlib。",
+    "QA review_fix(iter1) F2：report.py render_report 的 meta.get('benchmark', 兜底) 原默认是 qlib 形式 'SH000300'，与 evaluate._meta 默认 '000300.SH' 不一致——meta 缺 benchmark 时报告会渲染出 SH000300 误导。改兜底为 '000300.SH' 对齐 atlas 形式。",
+    "QA review_fix(iter1) F3：test_meta_reflects_benchmark_arg 仅断言 _meta dict，无 render 层端到端验证。新增 test_render_report_text_reflects_benchmark（参数化 000300.SH / ^HSI）断言渲染 markdown 含 '基准: {benchmark}' 与 '相对基准 {benchmark}'，证明 render 真随 meta benchmark 变文案。"
+  ],
+  "decisions": [
+    {"decision": "--benchmark 默认值用 atlas 形式 000300.SH（非 qlib 形式 SH000300），与 _meta、QlibPriceSource 构造参数同形式。", "rationale": "atlas 形式贯穿 CLI->构造层，转 qlib instrument 延迟到 benchmark() 内（TASK-001 决策），A股缺省零回归。"},
+    {"decision": "_meta benchmark 改 args.benchmark 而非保留 SH000300 常量。", "rationale": "报告须如实反映实际基准（港股 ^HSI），硬编码会误导。DoD functional[1] 直接断言。"},
+    {"decision": "render_report meta.get 兜底默认由 'SH000300' 改 '000300.SH'（F2）。", "rationale": "正常路径 meta 必带 benchmark，兜底仅在异常缺字段时触发；保留 qlib 形式默认会与全链路 atlas 形式不一致并误导报告读者。"},
+    {"decision": "F3 用 parametrize(['000300.SH','^HSI']) 端到端断言渲染文案，复用 aggregate([]) + 内联 _empty_stats() 构造最小 meta。", "rationale": "原 test 只验 dict，无法捕捉 render 忽略 meta benchmark 的回归；端到端断言渲染输出才真正守护 DoD functional[1]。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/evaluate.py", "scripts/qlib_eval/tests/test_report.py", "scripts/qlib_eval/qlib_eval/report.py"],
+  "interfaces_exposed": [
+    {"symbol": "evaluate._parse_args", "signature": "_parse_args(argv) -> Namespace(..., benchmark: str = \"000300.SH\")", "note": "新增 --benchmark 选项；缺省 000300.SH。下游 Makefile（TASK-003）经 --benchmark $(SIGNAL_BENCHMARK) 传入。"},
+    {"symbol": "evaluate._meta", "signature": "_meta(args, n_signals) -> dict", "note": "返回 dict 的 benchmark 字段现取 args.benchmark（不再硬编码 SH000300）。"},
+    {"symbol": "qlib_eval.report.render_report", "signature": "render_report(agg, stats, meta) -> str", "note": "meta.get('benchmark') 兜底默认现为 '000300.SH'（F2）；渲染 '基准:' 与 '相对基准' 文案均引用此值。"}
+  ],
+  "verification": {
+    "red": "test_parse_args_benchmark_default_and_override + test_meta_reflects_benchmark_arg 初始 FAIL（unrecognized arguments: --benchmark）。",
+    "test_report": "16 passed（含 F3 新增 parametrized 2 用例）",
+    "full_suite": "scripts/qlib_eval/ 58 passed，无回归",
+    "no_regression": "benchmark_error 降级 / import evaluate 不触 qlib / 空信号短路 等既有用例全绿",
+    "source_confirm": "evaluate.py L117 --benchmark default 000300.SH；L126 _meta benchmark=args.benchmark；L163 QlibPriceSource(..., benchmark=args.benchmark)；report.py L78 兜底默认 000300.SH",
+    "review_fix_iter1": "F2(report.py 兜底默认 SH000300->000300.SH) + F3(test_report.py 新增 render 层端到端基准文案断言) 已落地，test_report.py 16 passed / 全量 58 passed。"
+  }
+}

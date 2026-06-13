@@ -75,7 +75,7 @@ def render_report(agg: pd.DataFrame, stats: dict, meta: dict) -> str:
     stats：``{"dropped", "data_gaps", "non_ashare": [...], "na_counts": {h: n}}``。
     meta：``{"generated_at", "n_signals", "benchmark", "qlib_dir"}``。
     """
-    benchmark = meta.get("benchmark", "SH000300")
+    benchmark = meta.get("benchmark", "000300.SH")
     parts = [
         "# 信号事件研究报告",
         "",

@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval qlib-data qlib-data-hk
+.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -6,6 +6,7 @@ BUILD_DIR=bin
 SIGNAL_SYMBOLS ?= 600519.SH,000300.SH
 SIGNAL_FROM    ?= 2021-01-01
 SIGNAL_TO      ?= 2026-06-01
+SIGNAL_BENCHMARK ?= 000300.SH
 
 # Python 评估链：系统 python3 已损坏，统一走预置 venv（3.11 + pandas + pytest）
 QLIB_PY        ?= scripts/qlib_eval/.venv/bin/python
@@ -35,7 +36,15 @@ export-signals: build
 # qlib 数据目录缺失时 evaluate.py 打印 get_data 下载指引并以非 0 退出（不 panic）。
 signal-eval: export-signals
 	$(QLIB_PY) scripts/qlib_eval/evaluate.py --signals signals.csv \
-	  --qlib-dir $(QLIB_DIR) --out $(SIGNAL_OUT)
+	  --qlib-dir $(QLIB_DIR) --benchmark $(SIGNAL_BENCHMARK) --out $(SIGNAL_OUT)
+
+# 港股事件研究：港股集信号 → 对 atlas_hk 评估，基准恒生指数 ^HSI。
+# 港股行情走 yahoo；离线仅 price_percentile/ma_crossover 可回放。
+signal-eval-hk: build
+	./bin/atlas export-signals --config configs/config.yaml --symbols $(SIGNAL_SYMBOLS_HK) \
+	  --strategies price_percentile,ma_crossover --from $(SIGNAL_FROM) --to $(SIGNAL_TO) --out signals_hk.csv
+	$(QLIB_PY) scripts/qlib_eval/evaluate.py --signals signals_hk.csv \
+	  --qlib-dir $(QLIB_DATA_HK_DIR) --benchmark ^HSI --out $(SIGNAL_OUT)
 
 # 自建 qlib 数据包：导出 per-instrument OHLCV CSV → dump_bin 编译为 qlib 数据目录。
 # 必须显式 --symbols $(SIGNAL_SYMBOLS)（C1-1 BLOCKER）：recipe 不带 --config，CLI

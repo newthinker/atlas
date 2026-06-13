@@ -114,6 +114,8 @@ def _parse_args(argv):
     p.add_argument("--qlib-dir", default=DEFAULT_QLIB_DIR, help="qlib 数据目录")
     p.add_argument("--out", default=DEFAULT_OUT, help="报告输出目录")
     p.add_argument("--max-defer", type=int, default=5, help="入场顺延上限（交易日近似）")
+    p.add_argument("--benchmark", default="000300.SH",
+                   help="基准 symbol（atlas 形式：A股 000300.SH / 港股 ^HSI）")
     return p.parse_args(argv)
 
 
@@ -121,7 +123,7 @@ def _meta(args, n_signals: int) -> dict:
     return {
         "generated_at": _dt.date.today().isoformat(),
         "n_signals": n_signals,
-        "benchmark": "SH000300",
+        "benchmark": args.benchmark,
         "qlib_dir": args.qlib_dir,
     }
 
@@ -158,7 +160,7 @@ def main(argv=None) -> int:
     start = signals["date"].min().strftime("%Y-%m-%d")
     end = signals["date"].max().strftime("%Y-%m-%d")
     source = QlibPriceSource(provider_uri=os.path.expanduser(args.qlib_dir),
-                             start=start, end=end)
+                             start=start, end=end, benchmark=args.benchmark)
 
     outcomes, stats = collect_outcomes(signals, source, max_defer=args.max_defer)
     report = render_report(aggregate(outcomes), stats, _meta(args, len(signals)))
