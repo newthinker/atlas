@@ -1,7 +1,7 @@
 package main
 
 // Context Checkpoint: done_criteria → test mapping (TASK-001)
-// functional[0]   "toQlibInstrument 契约: 000300.SH→SH000300(+sh000300.csv 派生)/600519.SH/399001.SZ; 五类非A股拒绝" → TestToQlibInstrument_Contract
+// functional[0]   "toQlibInstrument 契约: 000300.SH→SH000300(+sh000300.csv 派生)/600519.SH/399001.SZ/930713.CSI; HK: 0700.HK→HK00700/2800.HK→HK02800/^HSI→HSI/^HSCE→HSCEI; AAPL/^GSPC/GC=F/BTC-USDT/0700.HK.X/^HSTECH 拒绝" → TestToQlibInstrument_Contract
 // functional[1]   "golden CSV 逐字节: 8列 header + 三行互异 OHLCV + factor 恒1 + sh600519.csv"                    → TestExportOHLCV_GoldenCSV
 // functional[2]   "resolveOHLCVSymbols: watchlist .SH/.SZ 过滤 + 基准去重 → {600519.SH,000300.SH}"             → TestResolveOHLCVSymbols_Default
 // boundary[0]     "非 A 股符号在清单 → 不落盘 + errOut 摘要 + 返回 error, 已成功 CSV 保留"                       → TestExportOHLCV_NonAShareRejectedIntoSummary
@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,10 @@ func TestToQlibInstrument_Contract(t *testing.T) {
 		{"600519.SH", "SH600519"},
 		{"399001.SZ", "SZ399001"},
 		{"930713.CSI", "CSI930713"}, // 中证跨市场指数（.CSI）
+		{"0700.HK", "HK00700"},      // 港股股票：HK + 5 位补零
+		{"2800.HK", "HK02800"},      // 港股 ETF
+		{"^HSI", "HSI"},             // 恒生指数
+		{"^HSCE", "HSCEI"},          // 国企指数（HSCEI）
 	}
 	for _, c := range cases {
 		got, err := toQlibInstrument(c.in)
@@ -82,7 +87,7 @@ func TestToQlibInstrument_Contract(t *testing.T) {
 			t.Errorf("toQlibInstrument(%q) = (%q,%v), want %q", c.in, got, err, c.want)
 		}
 	}
-	for _, bad := range []string{"AAPL", "^GSPC", "GC=F", "BTC-USDT", "0700.HK"} {
+	for _, bad := range []string{"AAPL", "^GSPC", "GC=F", "BTC-USDT", "0700.HK.X", "^HSTECH"} {
 		if _, err := toQlibInstrument(bad); err == nil {
 			t.Errorf("toQlibInstrument(%q) should reject non-A-share", bad)
 		}
@@ -203,7 +208,7 @@ func TestResolveOHLCVSymbols_Default(t *testing.T) {
 		{Symbol: "^GSPC"},
 		{Symbol: "000300.SH"},
 	}
-	got, err := resolveOHLCVSymbols(nil, watchlist)
+	got, err := resolveOHLCVSymbols(nil, watchlist, "cn")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -215,11 +220,11 @@ func TestResolveOHLCVSymbols_Default(t *testing.T) {
 
 func TestResolveOHLCVSymbols_EmptyWatchlistIsError(t *testing.T) {
 	// C1-1 防线：watchlist 为空且未显式 --symbols → 报错（绝不退化为只导基准）
-	if _, err := resolveOHLCVSymbols(nil, nil); err == nil {
+	if _, err := resolveOHLCVSymbols(nil, nil, "cn"); err == nil {
 		t.Fatal("empty watchlist with no --symbols must be an error, not degrade to benchmark-only")
 	}
 	// 仅含非 A 股的 watchlist 同样视为空集（过滤后无 A 股）
-	if _, err := resolveOHLCVSymbols(nil, []config.WatchlistItem{{Symbol: "AAPL"}, {Symbol: "BTC-USDT"}}); err == nil {
+	if _, err := resolveOHLCVSymbols(nil, []config.WatchlistItem{{Symbol: "AAPL"}, {Symbol: "BTC-USDT"}}, "cn"); err == nil {
 		t.Fatal("watchlist without any A-share must be an error")
 	}
 }
@@ -230,7 +235,7 @@ func TestResolveOHLCVSymbols_EmptyWatchlistIsError(t *testing.T) {
 
 func TestExportOHLCVCommand_UsageListsAllFlags(t *testing.T) {
 	usage := exportOHLCVCmd.UsageString()
-	for _, flag := range []string{"--symbols", "--from", "--to", "--out-dir"} {
+	for _, flag := range []string{"--symbols", "--from", "--to", "--out-dir", "--market"} {
 		if !strings.Contains(usage, flag) {
 			t.Errorf("export-ohlcv usage missing flag %s:\n%s", flag, usage)
 		}
@@ -252,5 +257,130 @@ func TestRunExportOHLCV_BenchmarkMissingIsFatal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "benchmark") {
 		t.Errorf("error must mention benchmark, got: %v", err)
+	}
+}
+
+// --- TASK-003 market 参数化 ---
+// functional[0] "benchmarkForMarket: cn→000300.SH、hk→^HSI"                                  → TestBenchmarkForMarket
+// functional[1] "resolveOHLCVSymbols(nil,wl,\"hk\") 选 .HK+^HSI/^HSCE、排除 A 股、含基准、去重" → TestResolveOHLCVSymbols_HKMarket
+// error_handling[1] "hk 基准 ^HSI 取数失败 → executeExportOHLCV 返回 error 且消息含 benchmark"  → TestExportOHLCV_HKBenchmarkFailureIsFatal
+
+func TestResolveOHLCVSymbols_HKMarket(t *testing.T) {
+	wl := []config.WatchlistItem{
+		{Symbol: "0700.HK"}, {Symbol: "2800.HK"}, {Symbol: "^HSI"},
+		{Symbol: "^HSCE"}, {Symbol: "600519.SH"}, // A股应被 hk market 排除
+	}
+	got, err := resolveOHLCVSymbols(nil, wl, "hk")
+	if err != nil {
+		t.Fatalf("hk resolve: %v", err)
+	}
+	want := map[string]bool{"0700.HK": true, "2800.HK": true, "^HSI": true, "^HSCE": true}
+	for _, s := range got {
+		if s == "600519.SH" {
+			t.Error("A-share must be excluded from hk market set")
+		}
+		delete(want, s)
+	}
+	if len(want) != 0 {
+		t.Errorf("hk set missing symbols: %v (got %v)", want, got)
+	}
+	// 基准 ^HSI 必须在内
+	if !slices.Contains(got, "^HSI") {
+		t.Errorf("hk set must include benchmark ^HSI, got %v", got)
+	}
+}
+
+func TestBenchmarkForMarket(t *testing.T) {
+	if benchmarkForMarket("cn") != "000300.SH" {
+		t.Errorf("cn benchmark = %q, want 000300.SH", benchmarkForMarket("cn"))
+	}
+	if benchmarkForMarket("hk") != "^HSI" {
+		t.Errorf("hk benchmark = %q, want ^HSI", benchmarkForMarket("hk"))
+	}
+}
+
+// TestExportOHLCV_HKBenchmarkFailureIsFatal is the reviewer-mandated direct
+// assertion (DoD error_handling[1]): with the HK benchmark ^HSI injected via
+// p.Benchmark, a failed ^HSI fetch must make executeExportOHLCV fatal. This
+// proves the market benchmark reaches the core's fatal branch — the core used
+// to hardcode benchmarkSymbol (000300.SH), which would have silently degraded
+// ^HSI to a non-fatal per-symbol failure.
+func TestExportOHLCV_HKBenchmarkFailureIsFatal(t *testing.T) {
+	dir := t.TempDir()
+	deps := ohlcvDeps{
+		provider: fakeOHLCVProvider{
+			errs: map[string]error{"^HSI": errors.New("boom")},
+		},
+		errOut: io.Discard,
+		sleep:  func() {},
+	}
+	err := executeExportOHLCV(deps, exportOHLCVParams{
+		Symbols:   []string{"^HSI"},
+		From:      "2024-01-01",
+		To:        "2024-01-10",
+		OutDir:    dir,
+		Benchmark: "^HSI",
+	})
+	if err == nil {
+		t.Fatal("hk benchmark ^HSI fetch failure must be fatal")
+	}
+	if !strings.Contains(err.Error(), "benchmark") {
+		t.Errorf("fatal error message must mention benchmark, got: %v", err)
+	}
+}
+
+// TestRequireBenchmark_Market covers both the present (nil) and missing (error
+// mentioning the market benchmark) branches for cn and hk — requireBenchmark now
+// resolves the benchmark per market via benchmarkForMarket.
+func TestRequireBenchmark_Market(t *testing.T) {
+	cases := []struct {
+		name    string
+		symbols []string
+		market  string
+		wantErr bool
+		wantStr string
+	}{
+		{"cn present", []string{"600519.SH", "000300.SH"}, "cn", false, ""},
+		{"cn missing", []string{"600519.SH"}, "cn", true, "000300.SH"},
+		{"hk present", []string{"0700.HK", "^HSI"}, "hk", false, ""},
+		{"hk missing", []string{"0700.HK"}, "hk", true, "^HSI"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := requireBenchmark(c.symbols, c.market)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("requireBenchmark(%v,%q) err=%v, wantErr=%v", c.symbols, c.market, err, c.wantErr)
+			}
+			if c.wantErr && !strings.Contains(err.Error(), c.wantStr) {
+				t.Errorf("error must mention benchmark %q, got: %v", c.wantStr, err)
+			}
+		})
+	}
+}
+
+// QA fix F3: --market 只接受 {cn,hk}；非法取值不得静默按 cn 跑，必须在
+// runExportOHLCV 入口报错（消息含 unknown market），且早于任何 resolver/网络。
+func TestRunExportOHLCV_RejectsUnknownMarket(t *testing.T) {
+	savedSymbols := exportOHLCVSymbols
+	savedMarket := exportOHLCVMarket
+	savedCfg := cfgFile
+	t.Cleanup(func() {
+		exportOHLCVSymbols = savedSymbols
+		exportOHLCVMarket = savedMarket
+		cfgFile = savedCfg
+	})
+
+	exportOHLCVSymbols = []string{"0700.HK", "^HSI"} // 合法集合，证明拦截不是别的分支
+	cfgFile = ""
+
+	for _, m := range []string{"us", "HK", "cn ", "", "crypto"} {
+		exportOHLCVMarket = m
+		err := runExportOHLCV(exportOHLCVCmd, nil)
+		if err == nil {
+			t.Fatalf("--market %q must be rejected, got nil error", m)
+		}
+		if !strings.Contains(err.Error(), "unknown market") {
+			t.Errorf("--market %q error must mention unknown market, got: %v", m, err)
+		}
 	}
 }

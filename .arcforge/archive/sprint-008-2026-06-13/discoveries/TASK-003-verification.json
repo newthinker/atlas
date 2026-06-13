@@ -1,0 +1,32 @@
+{
+  "task_id": "TASK-003",
+  "title": "export-ohlcv market 参数化（基准 + 选择 + --market）验证",
+  "verifier": "test-agent-1",
+  "verdict": "VERIFIED",
+  "evidence": {
+    "tests": "go test ./cmd/atlas/ -count=1 全 PASS（含 TestBenchmarkForMarket / TestResolveOHLCVSymbols_HKMarket / TestExportOHLCV_HKBenchmarkFailureIsFatal / TestRequireBenchmark_Market[cn_present|cn_missing|hk_present|hk_missing] / 既有 TestExportOHLCV_BenchmarkFailureIsFatal / TestResolveOHLCVSymbols_Default 全绿，零回归）",
+    "build": "go build ./... → BUILD_OK；go vet ./cmd/atlas/ → VET_OK",
+    "coverage_changed_funcs": "benchmarkForMarket=100%, inMarket=100%, resolveOHLCVSymbols=100%, requireBenchmark=100%, executeExportOHLCV=85.7%（均 ≥80%）",
+    "coverage_pkg_total": "62.2%（基线 ~60.8%，净正）；< 80% 全局门禁由既有未测 CLI 入口(main/runServe/runExportSignals/broker 子命令/newCollectorRegistry)稀释——属任务范围外，按 Leader 裁决以变更函数判定，不据此判 NEEDS WORK"
+  },
+  "done_criteria_matrix": [
+    {"dim":"functional[0]","criterion":"benchmarkForMarket cn→000300.SH / hk→^HSI","test":"TestBenchmarkForMarket","verdict":"PASS"},
+    {"dim":"functional[1]","criterion":"resolveOHLCVSymbols(nil,wl,hk) 选 .HK+^HSI/^HSCE、排除A股、含基准^HSI、去重","test":"TestResolveOHLCVSymbols_HKMarket","verdict":"PASS"},
+    {"dim":"functional[2]","criterion":"--market 默认 cn；cn 路径不回归","test":"源码 init() 默认 \"cn\"(line 239-240) + TestResolveOHLCVSymbols_Default/BenchmarkFailureIsFatal/GoldenCSV 全绿","verdict":"PASS"},
+    {"dim":"boundary[0a]","criterion":"hk market 但 watchlist 无港股 → error","test":"代码路径(resolveOHLCVSymbols len(picks)==0, market 参数化报错)100% 覆盖；直接断言由 cn 版 TestResolveOHLCVSymbols_EmptyWatchlistIsError 覆盖同一参数化路径，无 hk-专属断言用例","verdict":"PASS(minor: 无 hk-专属空集断言, 见缺陷1)"},
+    {"dim":"boundary[0b]","criterion":"缺基准 → requireBenchmark 报错含基准符号","test":"TestRequireBenchmark_Market/hk_missing(断言含 ^HSI) + /cn_missing(断言含 000300.SH)","verdict":"PASS"},
+    {"dim":"boundary[1]","criterion":"executeExportOHLCV 用 p.Benchmark；hk→^HSI 致命, cn 空回退 000300.SH","test":"源码 line 99-102 benchmark:=p.Benchmark 空回退 benchmarkSymbol + line 129 symbol==benchmark 判定; TestExportOHLCV_HKBenchmarkFailureIsFatal(注入 Benchmark:^HSI) + TestExportOHLCV_BenchmarkFailureIsFatal(空 Benchmark 回退 cn)","verdict":"PASS"},
+    {"dim":"error_handling[0]","criterion":"基准取数失败/空 bars → 立即 error 含 benchmark（cn _BenchmarkFailureIsFatal 不回归）","test":"TestExportOHLCV_BenchmarkFailureIsFatal PASS（断言 err 含 benchmark）","verdict":"PASS"},
+    {"dim":"error_handling[1] REVIEWER补强","criterion":"直接断言 hk 基准 ^HSI 取数失败 → executeExportOHLCV 返回 error 且消息含 benchmark","test":"TestExportOHLCV_HKBenchmarkFailureIsFatal: errs={^HSI:boom} + Symbols=[^HSI] + Benchmark=\"^HSI\" → 断言 err!=nil 且 err 含 \"benchmark\"。核对源码:fatal 判定走 p.Benchmark(非硬编码 benchmarkSymbol)，^HSI==benchmark 命中 line 129-131 fatal 分支。非空洞。","verdict":"PASS"},
+    {"dim":"non_functional[0]","criterion":"go build 通过 + cmd/atlas 全绿 + 变更包覆盖率≥80%","test":"build/vet/test 全绿；变更函数全部≥85.7%；包总62.2%受既有未测CLI入口稀释(范围外)","verdict":"PASS(coverage 按变更函数判定, Leader 裁决)"}
+  ],
+  "defects": [
+    {"severity":"minor","desc":"boundary[0] 第一子句『hk market 但 watchlist 无港股 → error』无 hk-专属断言用例（仅 cn 版 TestResolveOHLCVSymbols_EmptyWatchlistIsError 覆盖同一 market 参数化错误路径）。该代码路径已 100% 覆盖且 inMarket(hk) 已被 HKMarket 用例验证，故功能正确性有保障，仅断言粒度略缺。建议(非阻断)补一行 resolveOHLCVSymbols(nil, []{600519.SH}, \"hk\") 应 error 的断言。"},
+    {"severity":"info","desc":"包总覆盖率 62.2% < 80% 全局门禁，由既有未测 CLI 入口稀释(非本任务引入)，不影响 VERIFIED。"}
+  ],
+  "verification": {
+    "tests":"PASS (count=1, 全量 cmd/atlas)",
+    "build":"go build ./... + go vet ./cmd/atlas/ 通过",
+    "coverage":"变更函数 ≥85.7%；包总 62.2%"
+  }
+}

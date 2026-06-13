@@ -1,0 +1,54 @@
+{
+  "id": "TASK-007",
+  "title": "集成 — 建 atlas_hk 包并分析（端到端验证）",
+  "description": "export-ohlcv --market hk --from 2021-01-01 → qlib_csv_hk（11 CSV）→ build_data.py → atlas_hk → analyze_watchlist.py → reports/watchlist-hk-analysis.md。并验证 atlas_cn(默认 market=cn)零回归(仍 24 标的)。依据计划 Task 7。无源码改动，纯集成验证。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [],
+  "done_criteria": {
+    "functional": [
+      "export-ohlcv --market hk 导出 11 个 CSV（5 股票+4 ETF+2 指数），退出 0，hsi.csv close 为恒生点位(~2万)；reviewer 反审补充：hsi.csv 非空即实跑确认 ^HSI 经 SelectForSymbol→yahoo 路由成立",
+      "build_data.py 建 atlas_hk：instruments 11，HK 独立日历",
+      "analyze_watchlist --qlib-dir atlas_hk 产报告，含 HSI/HSCEI 相关性"
+    ],
+    "boundary": [
+      "默认 market=cn 仍导出 24 个 A股 CSV（含 .CSI），atlas_cn 零回归"
+    ],
+    "error_handling": [
+      "基准 ^HSI 取数失败则硬错误（口径同 000300.SH）"
+    ],
+    "non_functional": [
+      {
+        "desc": "全量 go test ./... 与 pytest 无新增失败；go build ./... 通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "leader",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 0,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (e2e: 11 CSV + atlas_hk独立日历 + 报告 + cn零回归 + 全量绿)"
+}

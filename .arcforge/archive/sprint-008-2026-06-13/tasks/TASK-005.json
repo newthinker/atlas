@@ -1,0 +1,49 @@
+{
+  "id": "TASK-005",
+  "title": "Makefile 新增 qlib-data-hk target",
+  "description": "Makefile 加 QLIB_CSV_HK_DIR(qlib_csv_hk)/QLIB_DATA_HK_DIR(~/.qlib/qlib_data/atlas_hk) 变量；.PHONY 加 qlib-data-hk；新增 target：export-ohlcv --config configs/config.yaml --market hk --from $(SIGNAL_FROM) --out-dir qlib_csv_hk，再 build_data.py --csv-dir qlib_csv_hk --target-dir atlas_hk。依据计划 Task 5。",
+  "module": "build",
+  "complexity": "simple",
+  "estimated_files": [
+    "Makefile"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "make -n qlib-data-hk 打印 export-ohlcv --market hk + build_data.py --target-dir atlas_hk 两条命令，无 missing separator 语法错",
+        "verify_by": "test"
+      },
+      "target 用 --config configs/config.yaml（提供 watchlist 与 lixinger key）+ --market hk + ^HSI 基准路径"
+    ],
+    "boundary": [
+      "QLIB_DATA_HK_DIR 独立于 atlas_cn（QLIB_DATA_DIR），两包并存不互相覆盖"
+    ],
+    "error_handling": [
+      "沿用 export-ohlcv 退出码（基准失败非0退出）"
+    ],
+    "non_functional": [
+      {
+        "desc": "既有 qlib-data / signal-eval target 不受影响",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "build"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (make -n)"
+}

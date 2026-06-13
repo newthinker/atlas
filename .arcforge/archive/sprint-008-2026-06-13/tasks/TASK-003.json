@@ -1,0 +1,67 @@
+{
+  "id": "TASK-003",
+  "title": "export-ohlcv market 参数化（基准 + 选择 + --market）",
+  "description": "cmd/atlas/export_ohlcv.go 增 benchmarkForMarket(cn=000300.SH/hk=^HSI)、inMarket(symbol,market)；resolveOHLCVSymbols/requireBenchmark 加 market 参数（用 inMarket/benchmarkForMarket）；exportOHLCVParams 加 Benchmark 字段，executeExportOHLCV 用 p.Benchmark(空回退 benchmarkSymbol)；CLI 加 --market cn|hk(默认 cn)，runExportOHLCV 传 market 并设 Benchmark。更新既有 resolve 测试为三参，新增 HK 选择/基准用例。依据计划 Task 3。与 TASK-001 同改 export_ohlcv.go，故依赖其完成。",
+  "module": "cmd/atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "benchmarkForMarket: cn→000300.SH、hk→^HSI（TestBenchmarkForMarket）",
+      "resolveOHLCVSymbols(nil,wl,\"hk\") 选出 .HK + ^HSI/^HSCE、排除 A股、含基准 ^HSI、去重（TestResolveOHLCVSymbols_HKMarket）",
+      "--market 默认 cn；cn 路径选择/基准/导出与现状一致（既有用例不回归）"
+    ],
+    "boundary": [
+      "hk market 但 watchlist 无港股 → error；缺基准 → requireBenchmark 报错含基准符号",
+      "executeExportOHLCV 用 p.Benchmark：hk 时 ^HSI 为致命基准，cn 时 000300.SH（空 Benchmark 回退 cn）"
+    ],
+    "error_handling": [
+      "基准取数失败/空 bars → 立即 error 且消息含 benchmark（既有 _BenchmarkFailureIsFatal 不回归）",
+      "reviewer 反审补充：须有**直接断言 hk 基准 ^HSI 取数失败 → executeExportOHLCV 返回 error** 的新用例（验证 market 基准已注入 core 的 fatal 分支，而非仅测 benchmarkForMarket 返回值——execute 内部原硬编码 benchmarkSymbol，易漏）"
+    ],
+    "non_functional": [
+      {
+        "desc": "go build ./... 通过；cmd/atlas 全量测试全绿（新 HK 用例 + 既有 cn 用例）；变更包覆盖率 ≥80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "F1",
+      "severity": "WARNING",
+      "location": "internal/collector/selector.go indexMarkets",
+      "title": "^HSCE 未注册到 indexMarkets",
+      "description": "本 sprint 给 watchlist 加了 ^HSCE，但 indexMarkets 只有 ^HSI:MarketHK，MarketForSymbol(^HSCE)→US，app 分析层误标国企指数为美股。",
+      "fix": "indexMarkets 加 \"^HSCE\": core.MarketHK；加测试断言 MarketForSymbol(^HSCE)==MarketHK。"
+    },
+    {
+      "id": "F3",
+      "severity": "WARNING",
+      "location": "cmd/atlas/export_ohlcv.go runExportOHLCV",
+      "title": "--market 不校验取值",
+      "description": "--market 接受任意串，!=hk 静默按 cn 处理，--market us/拼写错会建错包。",
+      "fix": "runExportOHLCV 校验 market ∈ {cn,hk}，否则返回 error；加测试。"
+    }
+  ],
+  "verifier": "test-agent-1 (changed-func cov ≥80%)"
+}

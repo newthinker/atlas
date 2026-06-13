@@ -1,0 +1,46 @@
+{
+  "id": "TASK-002",
+  "title": "to_qlib_instrument 支持 HK（Python，与 Go 对称）",
+  "description": "scripts/qlib_eval/qlib_eval/symbols.py 的 to_qlib_instrument 增 HK：.HK→\"HK\"+zfill(5)、^HSI→\"HSI\"、^HSCE→\"HSCEI\"；其余 raise ValueError。更新 test_symbols.py：加 HK 正例样本，reject 列表移除 0700.HK、加 ^HSTECH。与 Go 侧 TASK-001 命名严格对称。依据计划 Task 2。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/symbols.py",
+    "scripts/qlib_eval/tests/test_symbols.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "0700.HK→HK00700、2800.HK→HK02800（zfill(5)）（test_to_qlib_instrument）",
+      "^HSI→HSI、^HSCE→HSCEI（同上）",
+      "既有 SH/SZ/CSI 映射不回归"
+    ],
+    "boundary": [
+      "^HSTECH 与 AAPL/^GSPC/GC=F/BTC-USDT 仍 raise ValueError（test_to_qlib_instrument_rejects_non_ashare）"
+    ],
+    "error_handling": [
+      "非支持符号 raise ValueError"
+    ],
+    "non_functional": [
+      {
+        "desc": "pytest test_symbols.py 全绿；与 Go TASK-001 命名口径逐字一致",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (pytest+symmetry)"
+}

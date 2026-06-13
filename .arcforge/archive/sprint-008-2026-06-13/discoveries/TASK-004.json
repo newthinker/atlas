@@ -1,0 +1,32 @@
+{
+  "task_id": "TASK-004",
+  "instance": "dev-agent-1",
+  "key_findings": [
+    "configs/config.yaml 的 watchlist 港股个股块(5 行)之后追加 4 支港股基金(type 基金)与 2 支港股指数(type 指数)，全部 strategies: [price_percentile]。",
+    "export-ohlcv --market hk 选出 5 既有港股 + 4 ETF + 2 指数 = 11 个标的，全部成功导出 11 个 CSV，退出码 0。",
+    "yahoo 行情可达；^HSI 既作基准也作 watchlist 条目，未导致重复或缺失。",
+    "^HSTECH 未纳入 watchlist（plan 既定：yahoo 无数据，由 3033.HK 恒生科技ETF 代理）。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增条目全部仅用 price_percentile（不含 pe_percentile）。",
+      "rationale": "ETF/指数无单一 PE，pe_percentile 不适用；与 plan Task 4 Step 1 给定的 yaml 完全一致。"
+    },
+    {
+      "decision": "严格按 plan 文本逐字追加，包括两段中文注释（港股基金 / 港股指数）。",
+      "rationale": "保持与既有 watchlist 注释风格一致，且不改动任何既有条目，满足 non_functional『既有 watchlist 条目不变』。"
+    }
+  ],
+  "files_modified": [
+    "configs/config.yaml"
+  ],
+  "interfaces_exposed": [
+    "watchlist 新增 symbol: 2800.HK/2828.HK/3033.HK/3181.HK (type 基金), ^HSI/^HSCE (type 指数)"
+  ],
+  "verification": {
+    "build": "go build -o bin/atlas ./cmd/atlas => BUILD_OK",
+    "export": "./bin/atlas export-ohlcv --config configs/config.yaml --market hk --from 2026-06-01 --to 2026-06-10 --out-dir /tmp/hktest => exit 0, 11 CSVs",
+    "csv_files": ["hk00700.csv","hk00883.csv","hk02800.csv","hk02828.csv","hk03033.csv","hk03181.csv","hk03288.csv","hk06886.csv","hk09988.csv","hscei.csv","hsi.csv"],
+    "hstech_excluded": "^HSTECH 不在 watchlist 中（grep 确认无该 symbol）"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "task_id": "TASK-005",
+  "title": "Makefile 新增 qlib-data-hk target",
+  "key_findings": [
+    "Makefile 既有 qlib-data target 用 --symbols $(SIGNAL_SYMBOLS) 显式传符号(无 --config);qlib-data-hk 改走 --config configs/config.yaml 由 watchlist+market hk 决定符号集。",
+    "QLIB_PY(scripts/qlib_eval/.venv/bin/python) 与 SIGNAL_FROM(2021-01-01) 变量复用既有定义,无需新增。",
+    "make -n 对新旧两 target 均无 missing separator,recipe 行确为 Tab 缩进。"
+  ],
+  "decisions": [
+    {"decision": "QLIB_CSV_HK_DIR/QLIB_DATA_HK_DIR 紧跟 QLIB_DATA_DIR 之后定义", "rationale": "就近聚合 qlib 数据包路径变量,atlas_hk 独立于 atlas_cn 两包并存不互相覆盖(boundary DoD)。"},
+    {"decision": "qlib-data-hk 依赖 build,且 export-ohlcv 带 --config 而非 --symbols", "rationale": "港股集动态来自 watchlist+--market hk,且 --config 同时提供 lixinger key;基准 ^HSI 由 TASK-003 的 benchmarkForMarket(hk) 注入。"}
+  ],
+  "files_modified": ["Makefile"],
+  "interfaces_exposed": [
+    "make target: qlib-data-hk (build -> export-ohlcv --config configs/config.yaml --market hk --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_HK_DIR) -> build_data.py --csv-dir $(QLIB_CSV_HK_DIR) --target-dir $(QLIB_DATA_HK_DIR))",
+    "make vars: QLIB_CSV_HK_DIR?=qlib_csv_hk, QLIB_DATA_HK_DIR?=$(HOME)/.qlib/qlib_data/atlas_hk"
+  ],
+  "verification": {
+    "make -n qlib-data-hk": "PASS - 打印 export-ohlcv --market hk + build_data.py --target-dir .../atlas_hk,无语法错",
+    "make -n qlib-data": "PASS - 既有 target 不受影响(仍 --symbols/--expected-symbols/atlas_cn)",
+    "grep atlas_hk|qlib-data-hk|QLIB_CSV_HK Makefile": "PASS - .PHONY 行 + 2 变量 + target 全部命中"
+  }
+}

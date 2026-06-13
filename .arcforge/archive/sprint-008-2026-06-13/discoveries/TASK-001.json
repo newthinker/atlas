@@ -1,0 +1,36 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "toQlibInstrument 原仅支持 .SH/.SZ/.CSE A股映射, 现新增 .HK/^HSI/^HSCE 三类 HK 分支",
+    "Go fmt.Sprintf(\"%05s\", s) 对 \"0700\"->\"00700\"、\"2800\"->\"02800\" 确为零填充(已运行验证)",
+    "^HSTECH 不在支持列表(yahoo 无数据), 被显式拒绝, 由 3033.HK 代理(见计划)",
+    "error 消息从 'not an A-share symbol' 改为 'not a supported A-share/HK symbol'"
+  ],
+  "decisions": [
+    {
+      "decision": ".HK 使用 'HK' + fmt.Sprintf(\"%05s\", TrimSuffix(.HK)) 命名",
+      "rationale": "港股代码位数不定(0700/2800), qlib instrument 需定长前缀+5位补零保证唯一且可排序; Python 端 zfill(5) 对称"
+    },
+    {
+      "decision": "^HSCE 映射为 HSCEI(而非 HSCE)",
+      "rationale": "国企指数业界 qlib 习惯命名为 HSCEI; Python symbols.py 镜像同值(计划 Task 2)"
+    },
+    {
+      "decision": "REFACTOR 阶段不做额外抽象",
+      "rationale": "switch 分支已最小且与 symbols.py 一一对应, 抽象反而破坏对称契约可读性"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "interfaces_exposed": {
+    "toQlibInstrument(symbol string) (string, error)": "HK 命名规则供 TASK-002 Python to_qlib_instrument 对称参考: .HK->'HK'+zfill(5); ^HSI->'HSI'; ^HSCE->'HSCEI'; 其余(含 ^HSTECH/AAPL/^GSPC/GC=F/BTC-USDT/0700.HK.X) raise/error"
+  },
+  "verification": {
+    "red": "go test -run TestToQlibInstrument_Contract: 4 HK 用例 FAIL(预期)",
+    "green": "同命令 PASS",
+    "build": "go build ./cmd/atlas/ OK",
+    "no_regression": "go test ./cmd/atlas/ -count=1 全 PASS(既有 .SH/.SZ/.CSI + golden CSV + resolve 用例不受影响)"
+  }
+}
