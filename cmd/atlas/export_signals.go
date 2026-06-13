@@ -13,9 +13,6 @@ import (
 
 	"github.com/newthinker/atlas/internal/backtest"
 	"github.com/newthinker/atlas/internal/collector"
-	"github.com/newthinker/atlas/internal/collector/crypto"
-	"github.com/newthinker/atlas/internal/collector/eastmoney"
-	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/newthinker/atlas/internal/strategy/dividend_yield"
@@ -109,10 +106,11 @@ func (r registryProvider) FetchHistory(symbol string, start, end time.Time, inte
 }
 
 func runExportSignals(cmd *cobra.Command, args []string) error {
-	reg := collector.NewRegistry()
-	reg.Register(yahoo.New())
-	reg.Register(eastmoney.New())
-	reg.Register(crypto.New())
+	cfg, err := loadConfigOrDefaults()
+	if err != nil {
+		return err
+	}
+	reg := newCollectorRegistry(cfg)
 
 	out := os.Stdout
 	var w io.Writer = out

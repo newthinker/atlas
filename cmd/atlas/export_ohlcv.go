@@ -14,6 +14,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/collector/eastmoney"
+	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
@@ -233,6 +234,29 @@ func loadConfigOrDefaults() (*config.Config, error) {
 	return config.Defaults(), nil
 }
 
+// newCollectorRegistry builds the CLI collector registry: yahoo, eastmoney and
+// crypto. When the config carries an enabled Lixinger key, Lixinger is wired as
+// eastmoney's A-share fallback (mirrors serve.go) so that history degrades to
+// the Lixinger candlestick API when the eastmoney kline endpoint is unreachable
+// (index → cn/index/candlestick, stock → company). Without --config the API key
+// is absent and the fallback stays off.
+func newCollectorRegistry(cfg *config.Config) *collector.Registry {
+	reg := collector.NewRegistry()
+	reg.Register(yahoo.New())
+
+	em := eastmoney.New()
+	if lc, ok := cfg.Collectors["lixinger"]; ok && lc.Enabled && lc.APIKey != "" {
+		retry := true
+		if v, ok := lc.Extra["retry"].(bool); ok {
+			retry = v
+		}
+		em.SetLixingerFallback(lixinger.New(lc.APIKey, lixinger.WithRetry(retry)))
+	}
+	reg.Register(em)
+	reg.Register(crypto.New())
+	return reg
+}
+
 func runExportOHLCV(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfigOrDefaults()
 	if err != nil {
@@ -246,10 +270,7 @@ func runExportOHLCV(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	reg := collector.NewRegistry()
-	reg.Register(yahoo.New())
-	reg.Register(eastmoney.New())
-	reg.Register(crypto.New())
+	reg := newCollectorRegistry(cfg)
 
 	deps := ohlcvDeps{
 		provider: registryProvider{reg: reg},
