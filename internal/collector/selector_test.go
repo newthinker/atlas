@@ -100,6 +100,7 @@ func TestMarketForSymbol_IndexAndCommodity(t *testing.T) {
 	}{
 		{"^GSPC", core.MarketUS}, {"^IXIC", core.MarketUS}, {"^DJI", core.MarketUS},
 		{"^HSI", core.MarketHK},
+		{"^HSCE", core.MarketHK}, // QA fix F1: 恒生中国企业指数须标 HK，不得默认 US
 		{"^N225", core.MarketUS}, // 表外 ^ 符号默认 US（warning 由 app 层负责）
 		{"GC=F", core.MarketUS}, {"CL=F", core.MarketUS},
 		{"000300.SH", core.MarketCNA},

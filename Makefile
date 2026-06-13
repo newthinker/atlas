@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval qlib-data
+.PHONY: build run test clean export-signals signal-eval qlib-data qlib-data-hk
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -14,6 +14,8 @@ SIGNAL_OUT     ?= reports/
 # qlib 自建数据包：导出的 per-instrument CSV 目录 + dump_bin 产出的 qlib 数据目录
 QLIB_CSV_DIR   ?= qlib_csv
 QLIB_DATA_DIR  ?= $(HOME)/.qlib/qlib_data/atlas_cn
+QLIB_CSV_HK_DIR  ?= qlib_csv_hk
+QLIB_DATA_HK_DIR ?= $(HOME)/.qlib/qlib_data/atlas_hk
 
 # signal-eval 默认读自建包 atlas_cn（单一真相源）：社区包 cn_data 截止 2020-09，
 # 默认 2021-2026 区间产不出结果——本需求的存在理由。覆盖 QLIB_DIR 可回退社区包。
@@ -42,6 +44,14 @@ qlib-data: build
 	  --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_DIR)
 	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_DIR) \
 	  --target-dir $(QLIB_DATA_DIR) --expected-symbols $(SIGNAL_SYMBOLS)
+
+# 港股自建 qlib 数据包：watchlist 港股集（.HK + ^HSI/^HSCE）→ atlas_hk（独立日历）。
+# 需 --config 提供 watchlist；港股行情走 yahoo，基准 ^HSI。
+qlib-data-hk: build
+	./bin/atlas export-ohlcv --config configs/config.yaml --market hk \
+	  --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_HK_DIR)
+	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_HK_DIR) \
+	  --target-dir $(QLIB_DATA_HK_DIR)
 
 run: build
 	./$(BUILD_DIR)/$(BINARY)

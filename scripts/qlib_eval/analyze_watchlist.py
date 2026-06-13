@@ -14,10 +14,19 @@ import os
 
 import numpy as np
 import pandas as pd
-import qlib
-from qlib.data import D
 
 TRADING_DAYS = 244  # A-share approximate annualization base
+
+
+def is_index(c: str) -> bool:
+    """指数 instrument 判定：A股 SH/SZ 的 000/399 段、中证 CSI 前缀、港股 HSI/HSCEI。
+
+    港股证券 instrument 形如 HK00001/HK00700，其 c[2:5] 恰为 "000"，旧逻辑会把
+    它们误判为指数。港股指数命名为 HSI/HSCEI(不带 HK 前缀)，故 HK 前缀的一律是证券。
+    """
+    if c.startswith("HK"):
+        return False
+    return c[2:5] in ("000", "399") or c.startswith("CSI") or c in ("HSI", "HSCEI")
 
 
 def perf_row(close: pd.Series) -> dict:
@@ -53,6 +62,9 @@ def main() -> int:
         print(f"qlib bundle not found: {qlib_dir} — run `make qlib-data` first")
         return 1
 
+    import qlib
+    from qlib.data import D
+
     qlib.init(provider_uri=qlib_dir, region="cn")
     codes = D.list_instruments(D.instruments(market="all"), as_list=True)
     codes = sorted(codes)
@@ -68,8 +80,7 @@ def main() -> int:
             rows[c] = r
     perf = pd.DataFrame(rows).T
 
-    # 指数（SH/SZ 以 000/399 开头的指数代码）日收益相关性
-    idx_codes = [c for c in codes if c[2:5] in ("000", "399")]
+    idx_codes = [c for c in codes if is_index(c)]
     corr = closes[idx_codes].pct_change().corr() if len(idx_codes) >= 2 else pd.DataFrame()
 
     start, end = closes.index.min().date(), closes.index.max().date()

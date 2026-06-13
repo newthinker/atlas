@@ -20,6 +20,7 @@ var indexMarkets = map[string]core.Market{
 	"^IXIC": core.MarketUS,
 	"^DJI":  core.MarketUS,
 	"^HSI":  core.MarketHK,
+	"^HSCE": core.MarketHK,
 }
 
 func isIndexSymbol(upper string) bool     { return strings.HasPrefix(upper, "^") }

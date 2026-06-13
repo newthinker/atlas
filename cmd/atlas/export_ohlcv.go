@@ -25,6 +25,28 @@ import (
 // evaluation is meaningless without it, so a failed benchmark fetch is fatal.
 const benchmarkSymbol = "000300.SH"
 
+// benchmarkForMarket returns the qlib-bundle benchmark per market: A-share uses
+// CSI 300 (000300.SH), HK uses the Hang Seng Index (^HSI). The benchmark must
+// fetch successfully or the export is fatal —评估无基准无意义。
+func benchmarkForMarket(market string) string {
+	if market == "hk" {
+		return "^HSI"
+	}
+	return benchmarkSymbol
+}
+
+// inMarket reports whether a watchlist symbol belongs to a market's qlib bundle.
+// HK = .HK securities (stocks/ETF/REIT) + the two supported HK indexes; CN =
+// .SH/.SZ equities and .SH/.SZ/.CSI indexes.
+func inMarket(symbol, market string) bool {
+	if market == "hk" {
+		return strings.HasSuffix(symbol, ".HK") || symbol == "^HSI" || symbol == "^HSCE"
+	}
+	return strings.HasSuffix(symbol, ".SH") ||
+		strings.HasSuffix(symbol, ".SZ") ||
+		strings.HasSuffix(symbol, ".CSI")
+}
+
 // ohlcvCSVHeader is the eight-column qlib dump_bin contract: factor is always 1
 // because prices are already 前复权 (fqt=1) at the source and the evaluator
 // never multiplies $factor (spec §已钉死口径).
@@ -32,9 +54,9 @@ var ohlcvCSVHeader = []string{"symbol", "date", "open", "high", "low", "close", 
 
 // toQlibInstrument mirrors scripts/qlib_eval/qlib_eval/symbols.py
 // to_qlib_instrument — keep the two in sync (the contract test shares samples).
-// 600519.SH -> SH600519, 399001.SZ -> SZ399001, 930713.CSI -> CSI930713
-// (中证跨市场指数). Every non-A-share symbol is rejected (Phase 1 is A-share
-// only, design §1.1).
+// A-share: 600519.SH->SH600519, 399001.SZ->SZ399001, 930713.CSI->CSI930713.
+// HK: 0700.HK->HK00700 (HK + 5位补零), 2800.HK->HK02800; index ^HSI->HSI,
+// ^HSCE->HSCEI. Every other symbol is rejected.
 func toQlibInstrument(symbol string) (string, error) {
 	switch {
 	case strings.HasSuffix(symbol, ".SH"):
@@ -43,14 +65,21 @@ func toQlibInstrument(symbol string) (string, error) {
 		return "SZ" + strings.TrimSuffix(symbol, ".SZ"), nil
 	case strings.HasSuffix(symbol, ".CSI"):
 		return "CSI" + strings.TrimSuffix(symbol, ".CSI"), nil
+	case strings.HasSuffix(symbol, ".HK"):
+		return "HK" + fmt.Sprintf("%05s", strings.TrimSuffix(symbol, ".HK")), nil
+	case symbol == "^HSI":
+		return "HSI", nil
+	case symbol == "^HSCE":
+		return "HSCEI", nil
 	}
-	return "", fmt.Errorf("not an A-share symbol: %s", symbol)
+	return "", fmt.Errorf("not a supported A-share/HK symbol: %s", symbol)
 }
 
 type exportOHLCVParams struct {
-	Symbols  []string
-	From, To string
-	OutDir   string
+	Symbols   []string
+	From, To  string
+	OutDir    string
+	Benchmark string // 该 market 的基准；空则回退 benchmarkSymbol（cn）
 }
 
 // ohlcvDeps holds the injectable dependencies so the core can run offline and
@@ -67,6 +96,10 @@ type ohlcvDeps struct {
 // and a non-zero exit, but already-written CSVs are kept and the remaining
 // symbols keep exporting. A failed or empty benchmark is fatal.
 func executeExportOHLCV(deps ohlcvDeps, p exportOHLCVParams) error {
+	benchmark := p.Benchmark
+	if benchmark == "" {
+		benchmark = benchmarkSymbol
+	}
 	from, err := parseBacktestDate("from", p.From)
 	if err != nil {
 		return err
@@ -93,7 +126,7 @@ func executeExportOHLCV(deps ohlcvDeps, p exportOHLCVParams) error {
 			err = fmt.Errorf("no data")
 		}
 		if err != nil {
-			if symbol == benchmarkSymbol {
+			if symbol == benchmark {
 				return fmt.Errorf("benchmark %s: %w", symbol, err)
 			}
 			failures = append(failures, fmt.Sprintf("%s: %v", symbol, err))
@@ -149,30 +182,26 @@ func writeOHLCVCSV(dir, instrument string, bars []core.OHLCV) error {
 	return cw.Error()
 }
 
-// resolveOHLCVSymbols picks the symbol set to export. An explicit --symbols flag
-// wins as-is (the CLI layer validates benchmark presence). Otherwise the set is
-// derived from the watchlist's A-share (.SH/.SZ) symbols plus the benchmark,
-// order-preserved and de-duplicated. An empty derived set (no flag and no
-// A-share in the watchlist) is an error — it must never degrade to exporting the
-// benchmark alone (plan C1-1).
-func resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem) ([]string, error) {
+// resolveOHLCVSymbols picks the symbol set to export for a market. An explicit
+// --symbols flag wins as-is. Otherwise the set is the watchlist symbols of that
+// market plus the market benchmark, order-preserved and de-duplicated. An empty
+// derived set is an error — never silently degrade to benchmark-only (plan C1-1).
+func resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem, market string) ([]string, error) {
 	if len(flag) > 0 {
 		return flag, nil
 	}
-	var shares []string
+	var picks []string
 	for _, item := range watchlist {
-		if strings.HasSuffix(item.Symbol, ".SH") || strings.HasSuffix(item.Symbol, ".SZ") ||
-			strings.HasSuffix(item.Symbol, ".CSI") {
-			shares = append(shares, item.Symbol)
+		if inMarket(item.Symbol, market) {
+			picks = append(picks, item.Symbol)
 		}
 	}
-	if len(shares) == 0 {
-		return nil, fmt.Errorf("no A-share symbols in watchlist and no --symbols provided")
+	if len(picks) == 0 {
+		return nil, fmt.Errorf("no %s-market symbols in watchlist and no --symbols provided", market)
 	}
-
-	result := make([]string, 0, len(shares)+1)
+	result := make([]string, 0, len(picks)+1)
 	seen := make(map[string]bool)
-	for _, s := range append(shares, benchmarkSymbol) {
+	for _, s := range append(picks, benchmarkForMarket(market)) {
 		if !seen[s] {
 			seen[s] = true
 			result = append(result, s)
@@ -188,6 +217,7 @@ var (
 	exportOHLCVFrom    string
 	exportOHLCVTo      string
 	exportOHLCVOutDir  string
+	exportOHLCVMarket  string
 )
 
 var exportOHLCVCmd = &cobra.Command{
@@ -206,6 +236,8 @@ func init() {
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVFrom, "from", "", "Start date YYYY-MM-DD (required)")
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVTo, "to", "", "End date YYYY-MM-DD (default: today)")
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVOutDir, "out-dir", "qlib_csv", "Output directory for per-instrument CSVs")
+	exportOHLCVCmd.Flags().StringVar(&exportOHLCVMarket, "market", "cn",
+		"Market bundle: cn (A-share) or hk (Hong Kong)")
 
 	exportOHLCVCmd.MarkFlagRequired("from")
 
@@ -216,11 +248,12 @@ func init() {
 // includes the benchmark — without it strategy evaluation is meaningless. This
 // continues the layering decision from the export-ohlcv core (TASK-001): the
 // core stays pure, the "list must contain the benchmark" check lives here.
-func requireBenchmark(symbols []string) error {
-	if slices.Contains(symbols, benchmarkSymbol) {
+func requireBenchmark(symbols []string, market string) error {
+	bench := benchmarkForMarket(market)
+	if slices.Contains(symbols, bench) {
 		return nil
 	}
-	return fmt.Errorf("symbol set must include benchmark %s for evaluation to be meaningful", benchmarkSymbol)
+	return fmt.Errorf("symbol set must include benchmark %s for evaluation to be meaningful", bench)
 }
 
 // loadConfigOrDefaults mirrors serve.go's cfgFile + config.Load pattern: an
@@ -266,11 +299,14 @@ func runExportOHLCV(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	symbols, err := resolveOHLCVSymbols(exportOHLCVSymbols, cfg.Watchlist)
+	if exportOHLCVMarket != "cn" && exportOHLCVMarket != "hk" {
+		return fmt.Errorf("unknown market %q (want cn or hk)", exportOHLCVMarket)
+	}
+	symbols, err := resolveOHLCVSymbols(exportOHLCVSymbols, cfg.Watchlist, exportOHLCVMarket)
 	if err != nil {
 		return err
 	}
-	if err := requireBenchmark(symbols); err != nil {
+	if err := requireBenchmark(symbols, exportOHLCVMarket); err != nil {
 		return err
 	}
 
@@ -282,9 +318,10 @@ func runExportOHLCV(cmd *cobra.Command, args []string) error {
 		sleep:    func() { time.Sleep(300 * time.Millisecond) },
 	}
 	return executeExportOHLCV(deps, exportOHLCVParams{
-		Symbols: symbols,
-		From:    exportOHLCVFrom,
-		To:      exportOHLCVTo,
-		OutDir:  exportOHLCVOutDir,
+		Symbols:   symbols,
+		From:      exportOHLCVFrom,
+		To:        exportOHLCVTo,
+		OutDir:    exportOHLCVOutDir,
+		Benchmark: benchmarkForMarket(exportOHLCVMarket),
 	})
 }
