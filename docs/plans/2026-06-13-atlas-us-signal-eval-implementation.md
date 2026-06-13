@@ -97,7 +97,15 @@ git commit -m "feat(export-ohlcv): map US tickers/indices to qlib instruments"
 - Modify: `cmd/atlas/export_ohlcv.go`（`benchmarkForMarket` :31-36、`inMarket` :41-48、`runExportOHLCV` market 校验 :302-303、`--market` flag help :239-240）
 - Test: `cmd/atlas/export_ohlcv_test.go`
 
-- [ ] **Step 1: 写失败测试**
+- [ ] **Step 1: 写失败测试 + 既有 reject 测试迁移**
+
+**⚠ 既有测试迁移（计划审查发现，必做）**：`TestRunExportOHLCV_RejectsUnknownMarket`（`export_ohlcv_test.go:376`）当前把 `"us"` 列在必须 reject 的市场列表里——US 校验放开后该用例会失败。把该行的 `"us"` **移除**（保留 `"HK"` 大写、`"cn "` 带空格、`""`、`"crypto"` 仍 reject）：
+
+```go
+	for _, m := range []string{"HK", "cn ", "", "crypto"} { // 移除 "us"：US 已成合法市场
+```
+
+新增 US 行为测试：
 
 ```go
 func TestBenchmarkForMarket_US(t *testing.T) {
@@ -128,8 +136,8 @@ func TestInMarket_US(t *testing.T) {
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `go test ./cmd/atlas/ -run 'TestBenchmarkForMarket_US|TestInMarket_US' -v`
-Expected: FAIL（us 分支未实现，benchmarkForMarket(us) 回退 cn 基准）
+Run: `go test ./cmd/atlas/ -run 'TestBenchmarkForMarket_US|TestInMarket_US|TestRunExportOHLCV_RejectsUnknownMarket' -v`
+Expected: FAIL（us 分支未实现：benchmarkForMarket(us) 回退 cn 基准；且 RejectsUnknownMarket 因移除 "us" 后、实现未放开前——若先跑会要求 us 仍被拒，故须实现与测试改动同提交）
 
 - [ ] **Step 3: 实现**
 
@@ -174,6 +182,8 @@ func inMarket(symbol, market string) bool {
 ```
 
 `--market` flag help（:240）改为 `"Market bundle: cn (A-share), hk (Hong Kong) or us (US)"`。
+
+文案收尾（计划审查 advisory，无测试覆盖但保持一致）：`exportOHLCVCmd` 的 `Long`（:226-229）与 `--symbols` flag help（:235）当前写死 "A-share"，改为泛指（如 "per instrument" / "watchlist symbols for the market"），不再特指 A 股。
 
 - [ ] **Step 4: 运行确认通过 + 全包回归**
 
@@ -469,7 +479,7 @@ Implements docs/plans/2026-06-13-atlas-us-signal-eval-design.md"
 
 - [ ] `toQlibInstrument`/`to_qlib_instrument` 两侧对 `AAPL→AAPL`、`^GSPC→GSPC` 输出一致；`AAPL123`/`AAPL.B` 两侧均 reject（锚定契约）
 - [ ] 既有契约测试中 `AAPL`/`^GSPC` 已从 reject 迁为 accept，无 CI 红
-- [ ] `benchmarkForMarket("us")=^GSPC`、`inMarket` 美股分支、`--market us` 校验通过；cn/hk 不回归
+- [ ] `benchmarkForMarket("us")=^GSPC`、`inMarket` 美股分支、`--market us` 校验通过；cn/hk 不回归；`TestRunExportOHLCV_RejectsUnknownMarket` 已移除 `"us"`（不再误判合法市场）
 - [ ] `QlibPriceSource` region 默认 cn（CN/HK 零变化）、可传 us
 - [ ] `make signal-eval-us` 对真实 atlas_us 包产出非空报告（region=us 验收，异常则回退 cn）
 - [ ] Go + Python 全量测试通过；pytest 仍全程 qlib-free
