@@ -1,0 +1,76 @@
+{
+  "task_id": "TASK-005",
+  "title": "fund.go — 基金净值 + profile/manager/drawdown 多接口聚合",
+  "key_findings": [
+    "lixinger.go 删旧 4 个 fund 方法后，仅 import context/fmt/net/http/strings/time + collector + core 仍被 struct/构造器/Init 使用；bytes 与 encoding/json 已不再需要，已删除。所有 HTTP 现统一经 client.go 的 request()（信封 code==1）。",
+    "net-value 端点为 cn/fund/net-value，参数单数 stockCode（非 fundCodes），字段 netValue，日期 RFC3339（如 2026-06-10T00:00:00+08:00），数据按时间倒序（newest-first），rows[0] 即最新。",
+    "FetchFundQuote 改为基于 net-value 最新两点推导：Price=rows[0].netValue；若有 rows[1] 则 PrevClose/Change/ChangePercent 由相邻两点计算（旧实现直接读 API 的 navChange/navPct 字段，新端点不提供，故本地计算）。",
+    "fetchFundInfo 聚合 4 个子接口，profile 为核心：profile 调用失败立即返回 nil；manager/drawdown/net-value 任一失败仅留空对应字段、不致命。",
+    "现任经理判定 = managers 数组中第一个无 departureDate 的条目（顺序取首个在任）。最大回撤 = drawdown.data 中最小 value（用 math.Inf(1) 哨兵 + IsInf 守卫避免空数组误置 0）。"
+  ],
+  "decisions": [
+    {
+      "decision": "FetchFundQuote 的涨跌幅由 net-value 相邻两点本地计算",
+      "rationale": "新端点 cn/fund/net-value 只返回 netValue+date，不像旧 cn/fund/nav 提供 navChange/navPct；用 rows[0] 与 rows[1] 计算等价信息，prev==0 时跳过百分比避免除零。"
+    },
+    {
+      "decision": "fetchFundInfo profile 失败返回 nil，其余子接口失败留空",
+      "rationale": "DoD error_handling 明确要求；profile 提供名称/公司等核心标识，缺失则整个 FundInfo 无意义；manager/drawdown/nav 为增强信息，缺失可降级。"
+    },
+    {
+      "decision": "InceptionDate 与 net-value 日期均用 time.RFC3339 解析",
+      "rationale": "实测接口返回带时区的 RFC3339（+08:00），旧实现用 2006-01-02 会解析失败导致字段空。"
+    },
+    {
+      "decision": "FundType 复用 profile 的 op_mode（运作方式）",
+      "rationale": "新 profile 端点无独立基金类型字段，op_mode（如 契约型开放式）是最贴近的语义，按计划填入 FundType。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/fund.go (new)",
+    "internal/collector/lixinger/fund_test.go (new, 8 tests + fundMux())",
+    "internal/collector/lixinger/lixinger.go (removed old FetchFundQuote/FetchFundInfoPublic/fetchFundInfo/FetchFundHistory + cleaned bytes & encoding/json imports)"
+  ],
+  "interfaces_exposed": [
+    "func (l *Lixinger) FetchFundHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) — NAV 写入 OHLC 四值，apiKey 空 → error",
+    "func (l *Lixinger) FetchFundQuote(symbol string) (*core.Quote, error) — Price=最新 netValue，附 fetchFundInfo；空净值/apiKey 空 → error",
+    "func (l *Lixinger) FetchFundInfoPublic(code string) *core.FundInfo — 聚合 profile/manager/drawdown/最新NAV；profile 失败 → nil",
+    "签名与 eastmoney.go(248/302/325) 调用完全一致，无需改动调用方"
+  ],
+  "verification": {
+    "build": "go build ./internal/collector/... ./cmd/... OK (eastmoney + cmd 仍编译)",
+    "tests": "8/8 fund 测试 PASS；全包 go test -count=1 全绿",
+    "coverage": "package 90.8%；fund.go: fetchNetValues 87.5% / FetchFundHistory 83.3% / FetchFundQuote 94.1% / FetchFundInfoPublic 100% / fetchFundInfo 100%",
+    "vet": "go vet 无告警",
+    "dod_coverage": "functional[0..2] + boundary[0..1] + error_handling(apiKey 空 + profile→nil) 逐条有断言执行；旧 cn/fund/nav*/fundamental 端点已 grep 确认移除"
+  },
+  "rework_history": [
+    {
+      "round": "QA-reject-r2",
+      "date": "2026-06-13",
+      "fix_items": [
+        "QA-C4",
+        "QA-C5",
+        "QA-MOCK"
+      ],
+      "real_api_contract": [
+        "cn/fund/profile 字段语义实测：c_name=托管行(如 中国银行股份有限公司)，e_t_short_name=基金简称(如 白酒基金LOF)，f_c_name=管理公司(招商基金)。基金名应取 e_t_short_name，原实现误用 c_name(托管行)。",
+        "cn/fund/manager nested data[].managers[](含 departureDate) — 原实现正确，未改动。"
+      ],
+      "impl_changes": [
+        "fetchFundInfo profile 解析结构体字段 c_name→e_t_short_name；info.Name = d.ETShortName(不再用 c_name)。",
+        "fetchFundInfo 开头加 apiKey 空守卫：l.apiKey==\"\" → return nil(不触网)。"
+      ],
+      "test_changes": "fund_test.go fundMux profile 响应改真实形状(c_name=托管行 + e_t_short_name=白酒基金LOF + f_c_name)；_Aggregates 断言 Name==白酒基金LOF；_PartialFailureDegrades profile 补 e_t_short_name=X；新增 TestFetchFundInfoPublic_EmptyAPIKeyIsNil(空 key→nil 不触网)。先 RED 后 GREEN。",
+      "lesson": "测试 mock 必须反映真实 API 响应形状——c_name 看似基金名实为托管行，靠 live 取证才发现契约 bug。"
+    }
+  ],
+  "unit_normalization": {
+    "date": "2026-06-13",
+    "trigger": "QA WARNING W-unit-inconsistency (Leader 核实为真实正确性 bug)",
+    "finding": "理杏仁 cn/fund/drawdown value 是原始比率(实测 -0.3369=-33.69%)，但 core.FundInfo.MaxDrawdown 注释为 最大回撤(%)。存 -0.3369 与百分数语义不符，差 100x。",
+    "fix": "fetchFundInfo drawdown: info.MaxDrawdown = min -> min * 100，归一为百分数。无其他消费方依赖原始比率，x100 安全。",
+    "tdd": "先改 fund_test.go TestFetchFundInfoPublic_Aggregates 断言 -0.3369->-33.69(容差 math.Abs<1e-6) RED -> 改实现 -> GREEN。",
+    "verification": "go test -run TestFetchFundInfoPublic 全 PASS；整包 -count=1 全绿；go build ./... OK"
+  }
+}

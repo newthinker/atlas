@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-004",
+  "instance": "test-agent-1",
+  "verdict": "PASS",
+  "verified_at": "2026-06-13",
+  "coverage_matrix": [
+    {"criterion": "functional[0] 命中 cn/company/fundamental/non_financial，metricsList 且不含 roe_ttm/market_value", "test": "TestFetchFundamental_RequestShapeAndParse", "result": "PASS", "evidence": "测试断言 r.URL.Path 后缀==/cn/company/fundamental/non_financial；body 含 metricsList；body 不含 roe_ttm/market_value（真断言，非空洞）。源码 metricsList=[pe_ttm,pb,ps_ttm,dyr,mc]。grep roe/market_value/dividend_yield 在 fundamental.go 命中 0。"},
+    {"criterion": "functional[1] PE/PB/PS 正确、DividendYield=dyr、MarketCap=mc、Source=lixinger", "test": "TestFetchFundamental_RequestShapeAndParse", "result": "PASS", "evidence": "断言 PE=19.5248/PB=5.9617/PS=9.212/DividendYield=0.0403(dyr)/MarketCap=1614992921147.91(mc)/Source=lixinger，全部具体数值断言。"},
+    {"criterion": "functional[2] ROE 保持 0", "test": "TestFetchFundamental_RequestShapeAndParse", "result": "PASS", "evidence": "断言 f.ROE!=0 报错；core/types.go:93 ROE 字段真实存在；fundamental.go 构造体未赋 ROE，保持零值。"},
+    {"criterion": "boundary[0] 空 data → error", "test": "TestFetchFundamental_EmptyDataIsError", "result": "PASS", "evidence": "data:[] 时断言 err!=nil；源码 len(Data)==0 显式返回 error，coverage 行 40.27,42.3 = 1（执行）。"},
+    {"criterion": "error_handling[0] apiKey 为空 → error", "test": "TestFetchFundamental_EmptyAPIKeyIsError", "result": "PASS", "evidence": "TASK-003 教训已吸取：coverage profile 显示守卫块 fundamental.go:15.20,17.3 计数=1（实际执行≥1，非仅形式存在）；断言 err 含 'api_key is required'；baseURL 无效证明 fail-fast 不触网。"},
+    {"criterion": "non_functional 旧符号已移除/不改 core 类型/编译通过/变更文件覆盖率≥80%", "test": "grep + go build + go tool cover", "result": "PASS", "evidence": "grep postJSON/lixingerResponse/lixingerMetric 全包命中 0；git diff/status internal/core 无变更；go build ./internal/collector/... ./cmd/... OK；go vet 无告警；fundamental.go 覆盖率 FetchFundamental 84.6% + FetchFundamentalHistory 100.0%，均≥80%。"}
+  ],
+  "additional_tests": [
+    {"test": "TestFetchFundamentalHistory_SingleElement", "result": "PASS", "note": "断言单元素切片契约 len==1 且 rows[0].PE/Source 正确。"},
+    {"test": "TestFetchFundamentalHistory_PropagatesError", "result": "PASS", "note": "错误透传断言。"}
+  ],
+  "commands_run": [
+    "go test ./internal/collector/lixinger/ -run TestFetchFundamental -count=1 -v → 5/5 PASS",
+    "go test -run TestFetchFundamental -coverprofile -count=1 + go tool cover -func → fundamental.go 84.6%/100.0%",
+    "go build ./internal/collector/... ./cmd/... → BUILD_OK；go vet → VET_OK",
+    "grep postJSON|lixingerResponse|lixingerMetric → 0 hits (exit 1)",
+    "grep roe|market_value|dividend_yield in fundamental.go → 0 hits (exit 1)",
+    "git diff/status internal/core → 无变更",
+    "go test ./internal/collector/lixinger/ -count=1 → ok (全包回归绿)"
+  ],
+  "uncovered_blocks_note": "fundamental.go 两个未覆盖块均为 request() 错误(25.16-27.3) 与 json.Unmarshal 错误(37.53-39.3)，对合法 HTTP 测试 server 天然不可达，与 dev 声明一致，不影响 DoD 判定。",
+  "defects": [],
+  "assertion_quality": "RequestShapeAndParse 的 metricsList/不含 roe_ttm/market_value 为真断言（strings.Contains 检查请求体），非空洞通过；ROE=0 断言针对真实字段；apiKey 守卫经 coverage 证实实际执行。无空洞断言、无掩盖性 mock。"
+}

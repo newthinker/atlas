@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-006",
+  "title": "serve.go 接 retry 配置开关 + 配置文件说明",
+  "key_findings": [
+    "lixinger 构造块在 cmd/atlas/serve.go:107-117（runServe 内）。改后读 collectorCfg.Extra[\"retry\"] (bool, 缺省 true) 并传 lixinger.New(APIKey, lixinger.WithRetry(retry))。",
+    "collector.Config.Extra 为 map[string]any（mapstructure:\",remain\"），nil-map 读取在 Go 中安全返回零值，类型断言 .(bool) 失败时 ok==false 保持默认 true，不 panic——天然覆盖 boundary(无 retry 键) 与 error_handling(值非 bool) 两条 DoD。",
+    "lixinger.New(apiKey string, opts ...Option) 与 WithRetry(enabled bool) Option 由 TASK-001 暴露（lixinger.go:34/38），签名与计划 Step 1 一致，直接接线无需改 collector 包。"
+  ],
+  "decisions": [
+    {"decision": "用 `if v, ok := collectorCfg.Extra[\"retry\"].(bool); ok { retry = v }` 模式读取开关", "rationale": "单次类型断言同时处理『键不存在(nil-map/缺键返回 nil interface)』与『值非 bool』两种降级路径，断言失败即保持 retry=true 默认，零 panic，满足 DoD boundary+error_handling；这是 Go 读 map[string]any 配置的惯用法。"},
+    {"decision": "config.yaml / config.example.yaml 的 retry 行带中文注释说明退避语义（429/5xx，1/2/4/8/16s 最多5次，设 false 关闭）", "rationale": "DoD functional[1] 要求『含 retry 配置项与说明注释』；注释让运维明确开关作用与退避策略，无需翻代码。example 的 api_key 保持 ${LIXINGER_API_KEY} 占位不动。"},
+    {"decision": "未为 serve.go 装配代码新增单测", "rationale": "DoD functional[0] 标 verify_by: review（代码位置检查）；cmd/atlas 现有测试为 wireExecution 等装配，runServe 无可注入的轻量 hook 点，强加测试会引入脆弱的全 runServe 集成桩，收益低于风险。降级路径已由类型断言机制保证。"}
+  ],
+  "files_modified": [
+    "cmd/atlas/serve.go (lixinger 构造块: 读 Extra[\"retry\"] 缺省 true + WithRetry 接线)",
+    "configs/config.yaml (lixinger 块加 retry: true + 注释)",
+    "configs/config.example.yaml (lixinger 块加 retry: true + 注释，api_key 保持占位)"
+  ],
+  "interfaces_exposed": [
+    "配置约定: collectors.lixinger.retry (bool, 缺省 true) 控制 lixinger client 429/5xx 退避重试开关；缺省或非 bool 均回落 true。"
+  ],
+  "verification": {
+    "build": "go build ./... 全仓编译通过 (BUILD_OK)",
+    "tests": "go test ./cmd/atlas/ -count=1 → ok 0.557s，既有用例零回归",
+    "vet": "go vet ./cmd/atlas/ 无告警",
+    "wiring_grep": "grep 确认 serve.go:112 Extra[\"retry\"].(bool) + serve.go:115 lixinger.New(..., lixinger.WithRetry(retry))",
+    "config_grep": "grep 确认 config.yaml:32 与 config.example.yaml:32 均有 retry: true + 注释",
+    "dod_coverage": "functional[0] 接线(review 位置检查通过) + functional[1] 配置项+注释(两文件确认) + boundary(无 retry 键→默认 true，类型断言机制) + error_handling(非 bool→默认 true，不 panic) + non_functional(build 全过 + cmd/atlas 零回归)"
+  }
+}

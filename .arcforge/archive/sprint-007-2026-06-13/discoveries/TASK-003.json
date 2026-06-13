@@ -1,0 +1,37 @@
+{
+  "task_id": "TASK-003",
+  "instance": "dev-agent-1",
+  "key_findings": [
+    "cn/company/candlestick 返回 newest-first，bars[0] 为最新交易日，bars[1] 为上一交易日；FetchQuote 据此派生 PrevClose/Change。",
+    "candlestick payload 必须用单数 stockCode（复数 stockCodes 在真实 API 上 404）、type:\"fc_rights\"（前复权，与 eastmoney 一致）、startDate/endDate 为 yyyy-MM-dd。",
+    "响应日期为 RFC3339（如 2026-06-10T00:00:00+08:00），用 time.Parse(time.RFC3339,...)；volume 为浮点经 int64() 取整。",
+    "FetchHistory 空 data 返回空切片不报错；非200/code!=1 经 client.request() 信封校验已天然报错。",
+    "Lixinger 无实时行情 API，FetchQuote 是最近~10天 candlestick 的最新一条近似，Source=\"lixinger-delayed\" 以与真实实时数据区分。",
+    "返工(rework_count=1)补测：apiKey 空守卫(stock.go:24-26)原 coverage 执行 0 次，新增 TestStock_EmptyAPIKeyIsError 用 NewWithBaseURL(\"\",...) 同时断言 FetchQuote/FetchHistory 返回含 'api_key is required' 的错误，守卫分支执行计数升至 1，未改实现代码。"
+  ],
+  "decisions": [
+    {"decision": "fetchCandlestick 作为 FetchHistory/FetchQuote 共享私有方法，含 apiKey 空守卫", "rationale": "两方法同端点同参数，集中守卫与解码避免重复；error_handling[0] apiKey 守卫一处覆盖。"},
+    {"decision": "FetchQuote 取 end=now, start=now-10d 窗口", "rationale": "容纳周末/停牌，保证至少拿到最近一条；窗口仅影响请求参数不影响断言。"},
+    {"decision": "len(bars)>1 时才填 PrevClose/Change/ChangePercent，prev!=0 才算百分比", "rationale": "单条数据无法算涨跌，避免除零。"},
+    {"decision": "未清理 lixinger.go 的 bytes/net/http/encoding/json/time import", "rationale": "残留的旧 fund/fundamental 方法（Task4/5 范围）仍使用这些 import，现在删会破坏编译；按计划留待 Task4/5 清理。"},
+    {"decision": "返工只新增测试用例，不触实现", "rationale": "Test Agent 仅指出 error_handling[0] 断言缺失，守卫逻辑本身正确；空 key + 不可达 baseURL(http://127.0.0.1:0) 在守卫处 fail-fast，不触网，测试稳定快速。"}
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/stock.go (新建)",
+    "internal/collector/lixinger/stock_test.go (新建；返工新增 TestStock_EmptyAPIKeyIsError + import time)",
+    "internal/collector/lixinger/lixinger.go (删除旧 FetchQuote(cn/stock/real-time) 与旧 FetchHistory(cn/stock/hq))"
+  ],
+  "interfaces_exposed": [
+    "func (l *Lixinger) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) — 走 cn/company/candlestick",
+    "func (l *Lixinger) FetchQuote(symbol string) (*core.Quote, error) — candlestick 最新一条近似，Source=lixinger-delayed",
+    "func (l *Lixinger) fetchCandlestick(symbol string, start, end time.Time) ([]candlestickBar, error) — 私有共享",
+    "type candlestickBar struct{Date string; Open/High/Low/Close/Volume float64}"
+  ],
+  "verification": {
+    "build": "go build ./internal/collector/lixinger/ — OK",
+    "tests": "go test -run 'TestStock_EmptyAPIKey|TestFetchQuote|TestFetchHistory' — 6/6 PASS (含 history_test.go 3 例 + FetchQuote 2 例 + 返工 EmptyAPIKey 1 例)",
+    "regression": "TestRequest|TestFetchValuationPercentile|TestEndpointFor — PASS；go vet 无告警",
+    "coverage_stock_go": "fetchCandlestick 90.0%（返工后，apiKey 守卫分支 stock.go:24-26 执行计数 0→1），FetchHistory 90.0%，FetchQuote 100.0%（均 >=80%）",
+    "note_package_total": "package total 受旧 fund/fundamental 方法暂无测试拖累（Task2 删除遗留测试所致），属 Task4/5 范围，非本任务回归。"
+  }
+}

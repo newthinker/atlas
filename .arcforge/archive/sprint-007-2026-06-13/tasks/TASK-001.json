@@ -1,0 +1,47 @@
+{
+  "id": "TASK-001",
+  "title": "传输层 client.go（统一 code:1 信封 + 退避重试 + WithRetry 选项）",
+  "description": "新建 internal/collector/lixinger/client.go：统一 request(endpoint, payload)([]byte,error) helper，设置 Content-Type + User-Agent(Chrome UA) 请求头；信封语义 code==1 为成功，否则透出 error.message/messages[0].message/name；非200 中 429/5xx 在 retry 开启时按 SKILL.md 调度退避(1/2/4/8/16s,最多5次)，4xx 不重试；retry 关闭时单次。改造 lixinger.go：struct 增 retry/retryDelays 字段，构造器改为 New(apiKey, opts...) + WithRetry(bool) + 保留 NewWithBaseURL(retry 默认关)。设计与测试以计划 Task 1 为准（严格 TDD）。",
+  "module": "internal/collector/lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/client.go",
+    "internal/collector/lixinger/client_test.go",
+    "internal/collector/lixinger/lixinger.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "request() 对 code:1 响应返回原始 body 且无错误（TestRequest_Code1IsSuccess）",
+      "code:0 + error.message 响应返回错误且透出 message（TestRequest_Code0IsError）",
+      "400 + ValidationError.messages[].message 返回错误（TestRequest_ValidationErrorMessageSurfaced）",
+      "New(apiKey) 默认 retry=true 且 retryDelays==[1,2,4,8,16]s、WithRetry(false) 可关闭、NewWithBaseURL 默认关闭；request 发出的请求带 User-Agent 头（构造器行为 + 请求头检查，reviewer 反审补充：须防退避被静默置空）"
+    ],
+    "boundary": [
+      "429 连续两次后第三次成功 → request() 成功且恰好 3 次尝试（TestRequest_RetriesOn429ThenSucceeds，retryDelays 置零）",
+      "retry 关闭时遇 5xx 只请求 1 次并返回错误（TestRequest_RetryDisabledDoesNotRetry）"
+    ],
+    "error_handling": [
+      "4xx（如 400）不触发重试，恰好 1 次请求（TestRequest_No4xxRetry，retryDelays 置零）"
+    ],
+    "non_functional": [
+      {
+        "desc": "单测不发起真实网络（httptest）；变更包覆盖率 ≥80%（团队规范 coverage.dev_minimum）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

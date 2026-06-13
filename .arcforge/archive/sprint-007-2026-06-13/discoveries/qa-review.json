@@ -1,0 +1,187 @@
+{
+  "artifact": "qa-review",
+  "subject": "lixinger collector 修复重写 — 两轮 Code Review（常规 + 跨视角对抗）",
+  "reviewer": "qa-agent-1",
+  "date": "2026-06-13",
+  "scope": [
+    "internal/collector/lixinger/client.go",
+    "internal/collector/lixinger/stock.go",
+    "internal/collector/lixinger/fundamental.go",
+    "internal/collector/lixinger/fund.go",
+    "internal/collector/lixinger/valuation.go",
+    "internal/collector/lixinger/lixinger.go",
+    "internal/collector/lixinger/*_test.go",
+    "cmd/atlas/serve.go"
+  ],
+  "gates": {
+    "go_build": "PASS (go build ./... 全仓通过)",
+    "go_vet": "PASS (go vet ./internal/collector/lixinger/ 无告警)",
+    "go_test": "PASS 表面 (ok, coverage 90.8%) — 但多条测试以伪造响应体 mock 真实 API，绿灯掩盖了真实契约错误（见 C-fund/C-us/C-hk）"
+  },
+  "round1_conventional": {
+    "code_quality": "结构清晰、单写者拆分到位、错误信息有前缀；toLixingerSymbol 有一处不可达 return（INFO）。",
+    "architecture": "client.go 统一信封语义一处定义、域拆分合理；valuation 与非 valuation 走两套 symbol 转换路径（INFO）。",
+    "security": "见 C-apikey；token 仅置于 body 不入 URL/日志，无泄漏；http.Client 复用并发安全。",
+    "performance": "FetchFundQuote 对同一 net-value 窗口发两次请求（fetchFundInfo 内重复 fetchNetValues）—INFO 级低效。"
+  },
+  "findings": [
+    {
+      "id": "C-us-endpoint",
+      "severity": "CRITICAL",
+      "lens": "contract",
+      "location": "internal/collector/lixinger/valuation.go:43-44 (default 分支)",
+      "description": "美股个股走 us/company/fundamental，但官方 skill api-docs 中不存在任何 us_company_* 端点（已核实：~/Downloads/lixinger-open-skill/api-docs/ 仅有 us_index_*）。理杏仁开放版不提供美股个股基本面，所有 AAPL 等会 404/业务错误。测试用例 {AAPL, us/company/fundamental} 固化了不存在的端点。",
+      "suggestion": "美股个股一期应 return (\"\",\"\")（不支持，调用方降级），与 commodity/crypto 一致。"
+    },
+    {
+      "id": "C-hk-endpoint",
+      "severity": "CRITICAL",
+      "lens": "contract",
+      "location": "internal/collector/lixinger/valuation.go:37-39",
+      "description": "港股个股走 hk/company/fundamental（裸路径），但官方仅有 hk/company/fundamental/non_financial（及 _bank/_insurance/_reit/...），无裸路径，会 404。测试用例 {0700.HK, hk/company/fundamental} 同样固化错误路径。已核实 api-docs 文件列表。",
+      "suggestion": "改为 hk/company/fundamental/non_financial（与 CN 个股一致），金融股按不可用降级。"
+    },
+    {
+      "id": "C-fund-manager",
+      "severity": "CRITICAL",
+      "lens": "contract",
+      "location": "internal/collector/lixinger/fund.go:137-156",
+      "description": "cn/fund/manager 响应被假设为 data[].managers[].{name,departureDate} 嵌套数组靠『无 departureDate=现任』筛选。官方 cn_fund_manager.json 实测：responseParams 为扁平 {name,birthYear,resume,stockCode,gender}，无 managers 数组、无 departureDate；且其 stockCodes 入参是『基金经理代码』(如 8801388323) 而非基金代码，用基金代码 161725 查询语义错误。结果：json.Unmarshal 全部解析为零值，info.Manager 永远为空字符串。fund_test.go 用自造 managers[]+departureDate mock，绿灯是假的。",
+      "suggestion": "重新设计『按基金查现任经理』路径（确认正确端点，如基金信息API的经理字段）；按真实扁平结构解析；补一组以官方 responseParams 为蓝本的解析测试。"
+    },
+    {
+      "id": "C-fund-profile-name",
+      "severity": "CRITICAL",
+      "lens": "contract",
+      "location": "internal/collector/lixinger/fund.go:118,125",
+      "description": "info.Name = d.CName（c_name）。官方 cn_fund_profile.json 实测：c_name=『基金托管人』(custodian 托管银行)，非基金名称。代码把托管行写进了 FundInfo.Name。真正基金名称在 cn/fund 端点 (name/shortName) 或 profile 的 e_t_short_name(场内简称)。注：f_c_name→ManagementCompany、inception_date→InceptionDate、op_mode→FundType 三项映射正确。spec 第112行源头即写错（c_name 当名称），代码忠实实现了错的 spec。",
+      "suggestion": "Name 改用 e_t_short_name，或改走 cn/fund 端点取 name/shortName；c_name 不应作为名称。同步修正 spec L112。"
+    },
+    {
+      "id": "C-apikey-guard",
+      "severity": "CRITICAL",
+      "lens": "security",
+      "location": "internal/collector/lixinger/fund.go:108-109 (fetchFundInfo / FetchFundInfoPublic)",
+      "description": "FetchFundInfoPublic→fetchFundInfo 无 apiKey 守卫，空 token 时直接触网请求 cn/fund/profile。其余所有对外方法均有 l.apiKey=='' 守卫。当前生产经 eastmoney.go:301 的 HasAPIKey() 门控暂时安全，但该不变量寄生在调用方，一个新调用方即破。违反『每个对外方法触网前校验 apiKey』不变量。",
+      "suggestion": "在 fetchFundInfo 顶部加 if l.apiKey==\"\" { return nil }，将不变量收敛到方法内。"
+    },
+    {
+      "id": "W-index-codes",
+      "severity": "WARNING",
+      "lens": "contract",
+      "location": "internal/collector/lixinger/valuation.go:14-18 (usHKIndexCodes)",
+      "description": "^GSPC→SPX / ^IXIC→COMP / ^DJI→DJI 未经真实 API 验证（spec §2.4 自标 candidate 待 freeze）。官方 us_index_* 的 requestExample 中标普 500 真实代码为 .INX（带点前缀），证伪了 SPX。^HSI→HSI 正确。叠加 C-us-endpoint，美股指数估值分位目前实际全部不可用。",
+      "suggestion": "用真实 token 实测 freeze 美股指数代码（至少标普改为 .INX）；冻结前 4 个里仅 ^HSI 可信。"
+    },
+    {
+      "id": "W-unit-inconsistency",
+      "severity": "WARNING",
+      "lens": "skeptic",
+      "location": "fundamental.go:51 (DividendYield) / fund.go:177 (MaxDrawdown) / valuation.go:103 (cvpos)",
+      "description": "同一包内分数→百分数量纲不一致：valuation cvpos 做了 v*100，但 dyr(0.0403) 与 drawdown(-0.3369) 按原始分数存入。core.types MaxDrawdown 字段注释为『最大回撤(%)』，期望百分数；存 -0.3369 会被下游当 -0.34% 渲染，实际应为 -33.69%（差 100 倍）。测试固化了原始值，反而锁死了不一致。",
+      "suggestion": "统一量纲：DividendYield/MaxDrawdown 按字段注释存百分数(×100)，或改注释为 fraction；让测试与字段注释一致。"
+    },
+    {
+      "id": "W-4xx-message-discarded",
+      "severity": "WARNING",
+      "lens": "security",
+      "location": "internal/collector/lixinger/client.go:52-53",
+      "description": "4xx 等不可重试状态仅返回 'unexpected HTTP status N' 并丢弃 body。理杏仁把真实诊断（token 无效、未知 stockCode、非法 metric、会员过期）放在 4xx body 的 error.message，parseEnvelope 仅在 HTTP200 才被调用，导致金融股/指数边界几乎无法从日志诊断。",
+      "suggestion": "4xx 分支尝试 parseEnvelope(raw)/轻量 unmarshal，将 API 错误信息并入：'lixinger: HTTP %d: %s'（限制 body 长度防日志膨胀）。"
+    },
+    {
+      "id": "W-prevclose-zero-untested",
+      "severity": "WARNING",
+      "lens": "skeptic",
+      "location": "stock.go:97-104 / fund.go:89-96",
+      "description": "prev!=0 除零守卫存在且正确，但无任何测试覆盖 bars[1].Close==0 / rows[1].NetValue==0 路径，守卫属『侥幸存活』。",
+      "suggestion": "补 2-bar fixture（prev=0）断言不 panic 且 ChangePercent==0。"
+    },
+    {
+      "id": "W-silent-dataloss",
+      "severity": "WARNING",
+      "lens": "skeptic",
+      "location": "stock.go:55-57 / fund.go:49-51",
+      "description": "FetchHistory/FetchFundHistory 在 time.Parse(RFC3339) 失败时静默 continue 丢行；若 API 改日期格式则全部行被丢弃返回 ([],nil)，与『无交易日』不可区分，无日志无错误。code:1 但 data 缺失/类型错亦走同一静默空成功路径（W-envelope）。",
+      "suggestion": "至少记录/计数被丢弃行，或当有行但全部解析失败时返回错误；补 code:1+缺 data / 异常日期格式 的测试。"
+    },
+    {
+      "id": "W-date-latest-unverified",
+      "severity": "WARNING",
+      "lens": "contract",
+      "location": "fundamental.go:20 / valuation.go:80 (date:\"latest\")",
+      "description": "cn_company_fundamental_non_financial 文档 date 类型为 YYYY-MM-DD，requestExample 用具体日期，未出现 'latest'（'latest' 仅在 us_index_constituents 等端点示例出现）。fundamental 端点是否接受 latest 未经实测。",
+      "suggestion": "实测确认 fundamental 端点接受 'latest'，否则改传当天日期。"
+    },
+    {
+      "id": "W-cvpos-scale-unverified",
+      "severity": "WARNING",
+      "lens": "contract",
+      "location": "internal/collector/lixinger/valuation.go:103 (v*100)",
+      "description": "cvpos 返回值是分数(0.0298)还是百分数(2.98) 未被官方文档示例证实，label 名为『分位点%』存在歧义。若 API 已返百分数则 *100 会得 298。属未验证关键假设。",
+      "suggestion": "实测一次 pe_ttm.y3.cvpos 确认量纲后 freeze。"
+    },
+    {
+      "id": "I-manager-multi",
+      "severity": "INFO",
+      "lens": "skeptic",
+      "location": "fund.go:149-154",
+      "description": "（在 C-fund-manager 修复前提下）现任经理选取只取首个、多经理共管只留其一、全部离任则 Manager 留空且无 fallback，均无测试固化契约。"
+    },
+    {
+      "id": "I-toLixingerSymbol-deadcode",
+      "severity": "INFO",
+      "lens": "skeptic",
+      "location": "lixinger.go:92-97",
+      "description": "strings.Split 永不返回空切片，if len(parts)>0 恒真，尾部 return symbol 不可达；与 endpointFor 的 %05s HK padding 是两套不一致的 symbol 转换路径。"
+    },
+    {
+      "id": "I-retry-correct",
+      "severity": "INFO",
+      "lens": "skeptic+security",
+      "location": "internal/collector/lixinger/client.go:46-63",
+      "description": "重试循环经多角度核实正确：maxAttempts=len(delays)+1，sleep 仅在 attempt<maxAttempts-1 触发无越界；全 429→6 次尝试返回非 nil retryable 错误；传输错误每次置 lastErr，无 nil-return-nil-error；retry=false 单次。原 brief 怀疑的 off-by-one / nil 返回均不成立。"
+    },
+    {
+      "id": "I-nil-fundinfo-safe",
+      "severity": "INFO",
+      "lens": "security",
+      "location": "fund.go:87,133",
+      "description": "fetchFundInfo 失败返回 nil，全仓 grep 无下游解引用 q.FundInfo.<field>，Quote.FundInfo 为 omitempty 指针，nil 安全。"
+    },
+    {
+      "id": "I-perf-double-fetch",
+      "severity": "INFO",
+      "lens": "skeptic",
+      "location": "fund.go:73 vs fund.go:183",
+      "description": "FetchFundQuote 先 fetchNetValues 取最新，再经 fetchFundInfo 对同窗口二次 fetchNetValues，重复一次网络往返。"
+    },
+    {
+      "id": "I-stray-swapfile",
+      "severity": "INFO",
+      "lens": "skeptic",
+      "location": "internal/collector/lixinger/.lixinger.go.swp + _probe/",
+      "description": "工作树残留 Vim swap 文件与 _probe/ 目录，提交前应清理，勿入库。"
+    }
+  ],
+  "round2_adversarial": {
+    "lenses": ["Skeptic(正确性/边界)", "Security&Boundary(安全/守卫/并发)", "Contract(真实 API 契约, 以官方 skill api-docs 为准)"],
+    "cross_model": "codex/gemini CLI 不可用 → 纯 Claude 三视角；契约视角逐端点比对官方 ~/Downloads/lixinger-open-skill/api-docs/*.json",
+    "high_severity_consensus": "三视角对 CRITICAL 无分歧：契约视角发现 4 个端点/字段级 CRITICAL（C-us/C-hk/C-fund-manager/C-fund-profile-name）均经 QA 本体直接核对官方 api-docs 证实；安全视角 1 个 CRITICAL（apikey 守卫）独立成立。无 reviewer 间冲突。"
+  },
+  "verdict": "REJECT",
+  "verdict_rationale": "存在 5 个 CRITICAL，其中 4 个是端点/字段级真实 API 契约错误（美股个股端点不存在、港股端点缺 /non_financial、基金经理响应结构完全不匹配且查询语义错、基金名称取成了托管行），已逐条经官方 skill api-docs 直接证实；测试因使用伪造响应体而全绿，属『测试固化错误契约』，不能作为通过依据。reviewer 间对 high-severity 共识一致 → REJECT（非 CONTESTED）。",
+  "severity_threshold": "warning",
+  "fix_items": [
+    "C-us-endpoint: 美股个股 endpointFor 返回 (\"\",\"\") 降级；删/改测试用例 {AAPL,...}",
+    "C-hk-endpoint: hk/company/fundamental → hk/company/fundamental/non_financial；改测试用例 {0700.HK,...}",
+    "C-fund-manager: 重设按基金查现任经理路径，按官方扁平 responseParams 解析，重写 mock 为真实结构",
+    "C-fund-profile-name: FundInfo.Name 改用 e_t_short_name 或 cn/fund 端点 name/shortName；修正 spec L112",
+    "C-apikey-guard: fetchFundInfo 顶部加 apiKey 空守卫",
+    "W-index-codes: 实测 freeze 美股指数代码(标普→.INX)",
+    "W-unit-inconsistency: 统一 DividendYield/MaxDrawdown 与字段注释量纲",
+    "W-4xx-message-discarded: 4xx 分支透出 API error.message",
+    "W-prevclose-zero-untested / W-silent-dataloss: 补除零与解析失败/缺 data 测试",
+    "W-date-latest-unverified / W-cvpos-scale-unverified: 实测确认 date:latest 受理与 cvpos 量纲"
+  ]
+}

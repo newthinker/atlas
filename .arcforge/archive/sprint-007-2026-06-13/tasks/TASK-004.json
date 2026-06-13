@@ -1,0 +1,49 @@
+{
+  "id": "TASK-004",
+  "title": "fundamental.go — FetchFundamental 走 non_financial（metricsList + dyr/mc）",
+  "description": "新建 internal/collector/lixinger/fundamental.go：FetchFundamental 用 metricsList:[pe_ttm,pb,ps_ttm,dyr,mc]，解析扁平字段映射到 core.Fundamental(PE/PB/PS/DividendYield=dyr/MarketCap=mc)，ROE 不提供保持 0；空 data 报错。FetchFundamentalHistory 返回单元素切片。删除 lixinger.go 旧 FetchFundamental/FetchFundamentalHistory/postJSON/lixingerResponse/lixingerMetric，清理未用 import。依据计划 Task 4。",
+  "module": "internal/collector/lixinger",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/lixinger/fundamental.go",
+    "internal/collector/lixinger/fundamental_test.go",
+    "internal/collector/lixinger/lixinger.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "命中 cn/company/fundamental/non_financial，请求体含 metricsList 且不含 roe_ttm/market_value（TestFetchFundamental_RequestShapeAndParse）",
+      "PE/PB/PS 正确、DividendYield=dyr、MarketCap=mc、Source=lixinger（同上）",
+      "ROE 保持 0（non_financial 不提供）"
+    ],
+    "boundary": [
+      "空 data → error（TestFetchFundamental_EmptyDataIsError）"
+    ],
+    "error_handling": [
+      "apiKey 为空 → error"
+    ],
+    "non_functional": [
+      {
+        "desc": "旧 postJSON/lixingerResponse/lixingerMetric 已移除；不改 core.Fundamental 类型；package 编译通过；变更包覆盖率 ≥80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

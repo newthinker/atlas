@@ -1,0 +1,33 @@
+{
+  "task_id": "TASK-005",
+  "verifier": "test-agent-1",
+  "verdict": "PASS",
+  "verified_at": "2026-06-13",
+  "evidence": {
+    "tests": "go test -run TestFetchFund -count=1 -v: 8/8 fund tests PASS (plus 5 fundamental tests PASS); full package go test -count=1: ok, coverage 90.8%",
+    "coverage_fund_go": "fetchNetValues 87.5% / FetchFundHistory 83.3% / FetchFundQuote 94.1% / FetchFundInfoPublic 100% / fetchFundInfo 100% (all > 80%)",
+    "build": "go build ./internal/collector/... ./cmd/... OK",
+    "vet": "go vet ./internal/collector/lixinger/ clean",
+    "old_endpoints_removed": "grep 'cn/fund/nav|cn/fund/fundamental' in package = EXIT 1 (no match); lixinger.go retains only a comment pointer, no fund methods or endpoint strings"
+  },
+  "coverage_matrix": [
+    {"criterion": "functional[0] FetchFundHistory net-value→OHLC 四值/RFC3339", "test": "TestFetchFundHistory_NetValue", "verdict": "PASS", "note": "asserts Open=High=Low=Close=0.5454 and Time not zero; 2 rows parsed"},
+    {"criterion": "functional[1] 聚合 Name/Company/Manager/MaxDrawdown/LatestNAV/InceptionDate", "test": "TestFetchFundInfoPublic_Aggregates", "verdict": "PASS", "note": "non-vacuous: Manager==侯昊 discriminates against first-entry 王平 (has departureDate); MaxDrawdown==-0.3369 discriminates against -0.3368 (max) and against take-first"},
+    {"criterion": "functional[2] FetchFundQuote Price=latest netValue + FundInfo attached", "test": "TestFetchFundQuote_LatestNav", "verdict": "PASS", "note": "Price==0.5454 and FundInfo.Name non-empty"},
+    {"criterion": "boundary[0] partial failure (profile ok, rest 500) → non-nil + profile filled", "test": "TestFetchFundInfoPublic_PartialFailureDegrades", "verdict": "PASS", "note": "NewWithBaseURL retry=false so 500 fails immediately; asserts info!=nil && Name==X"},
+    {"criterion": "boundary[1] empty net-value → FetchFundQuote error", "test": "TestFetchFundQuote_EmptyNavIsError", "verdict": "PASS"},
+    {"criterion": "error_handling apiKey empty → error", "test": "TestFetchFundQuote_EmptyAPIKeyIsError + TestFetchFundHistory_EmptyAPIKeyIsError", "verdict": "PASS", "note": "asserts error mentions 'api_key is required'; invalid baseURL proves no network call"},
+    {"criterion": "error_handling profile failure → fetchFundInfo nil", "test": "TestFetchFundInfoPublic_ProfileFailureIsNil", "verdict": "PASS", "note": "all endpoints 500 → asserts info==nil"},
+    {"criterion": "non_functional old cn/fund/nav* removed + full tests green + coverage >=80%", "test": "grep + go test + cover", "verdict": "PASS"}
+  ],
+  "critical_aggregation_checks": {
+    "current_manager_selection": "PASS non-vacuous — code picks first managers[] entry with DepartureDate=='' ; test data orders 王平(departed) before 侯昊(active), so a naive take-first would fail the assertion",
+    "min_drawdown": "PASS non-vacuous — code takes min value with math.Inf sentinel + IsInf guard; test data -0.3368 then -0.3369 deliberately close, so take-first/take-max bugs would surface",
+    "profile_fail_nil_vs_subfetch_empty": "PASS — two distinct tests separate the two paths; profile fail returns nil (early return), sub-fetch fail leaves field empty (best-effort)"
+  },
+  "defects": [],
+  "minor_observations": [
+    "fetchNetValues 87.5% and FetchFundHistory 83.3%: uncovered lines are the json.Unmarshal-error and time.Parse-continue branches (defensive paths), not done_criteria-relevant. Above 80% threshold, acceptable.",
+    "Drawdown test data are static-min; no test for empty-drawdown→MaxDrawdown stays 0 (IsInf guard). Not in done_criteria; fetchFundInfo at 100% line coverage already exercises the populated branch. Optional hardening, not blocking."
+  ]
+}
