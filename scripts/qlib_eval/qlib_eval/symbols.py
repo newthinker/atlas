@@ -15,4 +15,6 @@ def to_qlib_instrument(symbol: str) -> str:
         return "SH" + symbol[:-3]
     if symbol.endswith(".SZ"):
         return "SZ" + symbol[:-3]
+    if symbol.endswith(".CSI"):  # 中证跨市场指数 930713.CSI -> CSI930713
+        return "CSI" + symbol[:-4]
     raise ValueError(f"not an A-share symbol: {symbol!r}")

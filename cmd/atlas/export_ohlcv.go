@@ -32,14 +32,17 @@ var ohlcvCSVHeader = []string{"symbol", "date", "open", "high", "low", "close", 
 
 // toQlibInstrument mirrors scripts/qlib_eval/qlib_eval/symbols.py
 // to_qlib_instrument — keep the two in sync (the contract test shares samples).
-// 600519.SH -> SH600519, 399001.SZ -> SZ399001; every non-A-share symbol is
-// rejected (Phase 1 is A-share only, design §1.1).
+// 600519.SH -> SH600519, 399001.SZ -> SZ399001, 930713.CSI -> CSI930713
+// (中证跨市场指数). Every non-A-share symbol is rejected (Phase 1 is A-share
+// only, design §1.1).
 func toQlibInstrument(symbol string) (string, error) {
 	switch {
 	case strings.HasSuffix(symbol, ".SH"):
 		return "SH" + strings.TrimSuffix(symbol, ".SH"), nil
 	case strings.HasSuffix(symbol, ".SZ"):
 		return "SZ" + strings.TrimSuffix(symbol, ".SZ"), nil
+	case strings.HasSuffix(symbol, ".CSI"):
+		return "CSI" + strings.TrimSuffix(symbol, ".CSI"), nil
 	}
 	return "", fmt.Errorf("not an A-share symbol: %s", symbol)
 }
@@ -158,7 +161,8 @@ func resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem) ([]str
 	}
 	var shares []string
 	for _, item := range watchlist {
-		if strings.HasSuffix(item.Symbol, ".SH") || strings.HasSuffix(item.Symbol, ".SZ") {
+		if strings.HasSuffix(item.Symbol, ".SH") || strings.HasSuffix(item.Symbol, ".SZ") ||
+			strings.HasSuffix(item.Symbol, ".CSI") {
 			shares = append(shares, item.Symbol)
 		}
 	}

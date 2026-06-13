@@ -12,6 +12,7 @@ def test_to_qlib_instrument():
     assert to_qlib_instrument("600519.SH") == "SH600519"
     assert to_qlib_instrument("000300.SH") == "SH000300"
     assert to_qlib_instrument("399001.SZ") == "SZ399001"
+    assert to_qlib_instrument("930713.CSI") == "CSI930713"  # 中证跨市场指数
 
 
 def test_to_qlib_instrument_rejects_non_ashare():
