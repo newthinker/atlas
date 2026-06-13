@@ -5,6 +5,12 @@ functional[1] 丢弃 "1/2→1/15 13 日历日 > 10 → None"                -> t
 functional[2] "最后一根 bar 之后的信号 → None"                     -> test_align_entry_drops_when_no_data
 boundary[0]   "Entry 携带 positional index"                        -> test_align_entry_carries_positional_index
 non_functional[0] "顶层不得 import qlib（lazy import 守门）"        -> test_no_qlib_at_module_level
+
+TASK-001 done_criteria -> test mapping:
+functional[0] "默认 _benchmark==000300.SH，转 SH000300"             -> test_qlib_price_source_benchmark_param
+functional[1] "benchmark='^HSI' 时 _benchmark==^HSI，转 HSI"        -> test_qlib_price_source_benchmark_param
+functional[2] "benchmark() 实际请求 instrument == 转换值（防硬编码）" -> test_benchmark_requests_converted_instrument
+boundary[0]   "构造不触发 qlib（惰性 import 保持）"                  -> test_qlib_price_source_benchmark_param + test_no_qlib_at_module_level
 """
 
 import pandas as pd
@@ -64,3 +70,58 @@ def test_no_qlib_at_module_level():
     import qlib_eval.prices  # noqa: F401
 
     assert "qlib" not in sys.modules
+
+
+def test_qlib_price_source_benchmark_param():
+    """QlibPriceSource 存储基准(atlas 形式)且默认为 A股 CSI300；构造不触发 qlib。"""
+    from qlib_eval.prices import QlibPriceSource
+    from qlib_eval.symbols import to_qlib_instrument
+
+    s_default = QlibPriceSource(provider_uri="x", start="2021-01-01", end="2021-12-31")
+    assert s_default._benchmark == "000300.SH"
+    assert to_qlib_instrument(s_default._benchmark) == "SH000300"
+
+    s_hk = QlibPriceSource(
+        provider_uri="x", start="2021-01-01", end="2021-12-31", benchmark="^HSI"
+    )
+    assert s_hk._benchmark == "^HSI"
+    assert to_qlib_instrument(s_hk._benchmark) == "HSI"
+
+
+def test_benchmark_requests_converted_instrument(monkeypatch):
+    # functional[2] reviewer 最高风险点：benchmark() 必须用 to_qlib_instrument(self._benchmark)
+    # 而非残留硬编码 ["SH000300"]。注入 fake qlib(sys.modules) 捕获 D.features 实际入参。
+    import sys
+    import types
+
+    import pandas as pd
+    from qlib_eval.prices import QlibPriceSource
+
+    captured = {}
+    fake_qlib = types.ModuleType("qlib")
+    fake_qlib.init = lambda **kw: None
+    fake_data = types.ModuleType("qlib.data")
+
+    class _D:
+        @staticmethod
+        def features(instruments, fields, start_time=None, end_time=None):
+            captured["instruments"] = list(instruments)
+            idx = pd.MultiIndex.from_product(
+                [list(instruments), [pd.Timestamp("2021-01-04")]],
+                names=["instrument", "datetime"],
+            )
+            return pd.DataFrame({"$open": [1.0], "$close": [1.0]}, index=idx)
+
+    fake_data.D = _D
+    monkeypatch.setitem(sys.modules, "qlib", fake_qlib)
+    monkeypatch.setitem(sys.modules, "qlib.data", fake_data)
+
+    QlibPriceSource(
+        provider_uri="x", start="2021-01-01", end="2021-12-31", benchmark="^HSI"
+    ).benchmark()
+    assert captured["instruments"] == ["HSI"]
+
+    QlibPriceSource(
+        provider_uri="x", start="2021-01-01", end="2021-12-31"
+    ).benchmark()
+    assert captured["instruments"] == ["SH000300"]

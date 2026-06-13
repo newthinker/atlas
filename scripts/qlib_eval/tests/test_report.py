@@ -222,3 +222,46 @@ def test_read_signals_tolerates_utf8_bom(tmp_path):
     df = read_signals(str(p))
     assert len(df) == 2
     assert list(df.columns)[0] == "symbol"  # BOM 不得污染首列名
+
+
+# ---- TASK-002: --benchmark 参数化 ----
+# done_criteria -> test mapping
+# functional[0] "_parse_args 默认 000300.SH / --benchmark ^HSI 时 ^HSI"
+#               -> test_parse_args_benchmark_default_and_override
+# functional[1] "_meta 的 benchmark 反映 args.benchmark"
+#               -> test_meta_reflects_benchmark_arg
+# boundary[0]   "缺省即 000300.SH（A股零回归）"
+#               -> test_parse_args_benchmark_default_and_override（默认分支）
+
+
+def test_parse_args_benchmark_default_and_override():
+    a = evaluate._parse_args(["--signals", "s.csv"])
+    assert a.benchmark == "000300.SH"
+    b = evaluate._parse_args(["--signals", "s.csv", "--benchmark", "^HSI"])
+    assert b.benchmark == "^HSI"
+
+
+def test_meta_reflects_benchmark_arg():
+    args = evaluate._parse_args(["--signals", "s.csv", "--benchmark", "^HSI"])
+    meta = evaluate._meta(args, 5)
+    assert meta["benchmark"] == "^HSI"
+
+
+# ---- TASK-002 review_fix (QA F3/F2): render 层端到端验基准文案 ----
+# functional "render_report 渲染输出文案随 meta benchmark 变（不止 dict 断言）"
+#            -> test_render_report_text_reflects_benchmark
+
+
+def _empty_stats() -> dict:
+    return {"dropped": 0, "data_gaps": 0, "non_ashare": [], "na_counts": {}}
+
+
+@pytest.mark.parametrize("benchmark", ["000300.SH", "^HSI"])
+def test_render_report_text_reflects_benchmark(benchmark):
+    # F3：meta 始终带 benchmark，render 应直接用 meta 值而非 fallback 默认。
+    meta = {"generated_at": "2024-06-12", "n_signals": 3,
+            "benchmark": benchmark, "qlib_dir": "~"}
+    md = render_report(aggregate([]), _empty_stats(), meta)
+    assert f"基准: {benchmark}" in md
+    # 超额收益口径行也应引用同一基准
+    assert f"相对基准 {benchmark}" in md

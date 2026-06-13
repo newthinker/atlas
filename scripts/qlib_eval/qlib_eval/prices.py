@@ -26,7 +26,7 @@ class PriceSource(Protocol):
         ...
 
     def benchmark(self) -> pd.DataFrame:
-        """SH000300 的 close 序列。"""
+        """基准 instrument 的 open/close 序列（A股 SH000300 / 港股 HSI 等）。"""
         ...
 
 
@@ -59,10 +59,11 @@ def align_entry(
 class QlibPriceSource:
     """真实运行用的价格数据源；惰性 import qlib，pytest 全程不触达。"""
 
-    def __init__(self, provider_uri: str, start: str, end: str):
+    def __init__(self, provider_uri: str, start: str, end: str, benchmark: str = "000300.SH"):
         self._provider_uri = provider_uri
         self._start = start
         self._end = end
+        self._benchmark = benchmark  # atlas 形式（000300.SH / ^HSI），benchmark() 内转 qlib instrument
         self._initialized = False
 
     def _ensure_init(self) -> None:
@@ -91,8 +92,10 @@ class QlibPriceSource:
         self._ensure_init()
         from qlib.data import D  # 惰性 import
 
+        from .symbols import to_qlib_instrument
+
         df = D.features(
-            ["SH000300"],
+            [to_qlib_instrument(self._benchmark)],
             ["$open", "$close"],
             start_time=self._start,
             end_time=self._end,
