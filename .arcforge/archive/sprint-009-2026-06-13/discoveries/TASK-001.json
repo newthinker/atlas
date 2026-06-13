@@ -1,0 +1,25 @@
+{
+  "task_id": "TASK-001",
+  "title": "QlibPriceSource 基准参数化（prices.py）",
+  "owner": "dev-agent-1",
+  "key_findings": [
+    "QlibPriceSource.benchmark() 原写死 ['SH000300']，现改为按构造参数经 to_qlib_instrument 解析。",
+    "to_qlib_instrument 已支持 000300.SH->SH000300、^HSI->HSI（symbols.py，无需改动）。",
+    "qlib 惰性 import 守门 test_no_qlib_at_module_level 仍绿：monkeypatch 注入 fake qlib 仅测试内作用域，restore 后 sys.modules 干净。"
+  ],
+  "decisions": [
+    {"decision": "benchmark 默认 '000300.SH'（atlas 形式），存 self._benchmark；benchmark() 内才转 qlib instrument。", "rationale": "atlas 形式贯穿构造层，转换延迟到取数，A股零回归。"},
+    {"decision": "新增 test_benchmark_requests_converted_instrument：注入 fake qlib(sys.modules) 捕获 D.features 实际入参并断言。", "rationale": "reviewer 最高风险点——仅测字段存储无法证明 benchmark() 未残留硬编码；断言 ^HSI->['HSI']、默认->['SH000300']。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/prices.py", "scripts/qlib_eval/tests/test_prices.py"],
+  "interfaces_exposed": [
+    {"symbol": "QlibPriceSource.__init__", "signature": "QlibPriceSource(provider_uri: str, start: str, end: str, benchmark: str = '000300.SH')", "note": "新增 benchmark 关键字参数（atlas 形式：A股 000300.SH / 港股 ^HSI），存 self._benchmark。TASK-002 按此签名透传 benchmark=args.benchmark。"},
+    {"symbol": "QlibPriceSource.benchmark", "signature": "benchmark() -> pd.DataFrame", "note": "向 D.features 请求 to_qlib_instrument(self._benchmark) 的 $open/$close，经 _normalize 返回 datetime index + open/close。"}
+  ],
+  "verification": {
+    "test_prices": "8 passed（2 新增 + 6 既有）",
+    "full_suite": "scripts/qlib_eval/ 54 passed",
+    "no_qlib_gate": "test_no_qlib_at_module_level PASS",
+    "d_features_assertion": "test_benchmark_requests_converted_instrument PASS：^HSI->['HSI']、默认->['SH000300']"
+  }
+}

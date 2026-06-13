@@ -1,0 +1,44 @@
+{
+  "id": "TASK-001",
+  "title": "QlibPriceSource 基准参数化（prices.py）",
+  "description": "scripts/qlib_eval/qlib_eval/prices.py：QlibPriceSource.__init__ 加 benchmark='000300.SH' 参数并存 _benchmark；benchmark() 用 to_qlib_instrument(self._benchmark) 替代硬编码 ['SH000300']；PriceSource Protocol 的 benchmark docstring 泛化。加 test_prices.py 测试：默认 _benchmark==000300.SH 且转 SH000300、benchmark='^HSI' 时 _benchmark==^HSI 且转 HSI（构造不触发 qlib）。依据计划 Task 1。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/prices.py",
+    "scripts/qlib_eval/tests/test_prices.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "QlibPriceSource 默认 _benchmark=='000300.SH'，to_qlib_instrument 转 'SH000300'（test_qlib_price_source_benchmark_param）",
+      "benchmark='^HSI' 时 _benchmark=='^HSI'，to_qlib_instrument 转 'HSI'（同上）",
+      "benchmark() 实际向 D.features 请求的 instrument == to_qlib_instrument(self._benchmark)：注入 fake qlib(sys.modules) 断言 ^HSI→请求 [\"HSI\"]、默认→请求 [\"SH000300\"]（reviewer 最高风险点：防 benchmark() 残留硬编码 [\"SH000300\"]，仅测字段存储不够）"
+    ],
+    "boundary": [
+      "构造 QlibPriceSource 不触发 qlib（惰性 import 保持；no-qlib-at-module-level 测试不回归）"
+    ],
+    "error_handling": [
+      "默认参数缺省即 000300.SH（A股零回归）"
+    ],
+    "non_functional": [
+      {
+        "desc": "pytest test_prices.py 全绿（含既有 align_entry / no-qlib 用例）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (D.features 入参断言+全量绿)"
+}

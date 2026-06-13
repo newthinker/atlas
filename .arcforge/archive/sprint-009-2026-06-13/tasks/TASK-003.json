@@ -1,0 +1,52 @@
+{
+  "id": "TASK-003",
+  "title": "Makefile signal-eval --benchmark + signal-eval-hk target",
+  "description": "Makefile：加 SIGNAL_BENCHMARK ?= 000300.SH；.PHONY 加 signal-eval-hk；signal-eval 的 evaluate 行追加 --benchmark $(SIGNAL_BENCHMARK)；新增 signal-eval-hk target（export-signals --config --symbols $(SIGNAL_SYMBOLS_HK) --strategies price_percentile,ma_crossover → evaluate.py --qlib-dir $(QLIB_DATA_HK_DIR) --benchmark ^HSI）。依据计划 Task 3。依赖 TASK-002 的 --benchmark。",
+  "module": "build",
+  "complexity": "simple",
+  "estimated_files": [
+    "Makefile"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "make -n signal-eval-hk 打印 export-signals(--symbols 港股集 --strategies price_percentile,ma_crossover) + evaluate.py(--qlib-dir atlas_hk --benchmark ^HSI)，无 missing separator",
+        "verify_by": "test"
+      },
+      {
+        "desc": "make -n signal-eval 的 evaluate 行含 --benchmark 000300.SH",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "SIGNAL_BENCHMARK 默认 000300.SH；signal-eval-hk 用独立 QLIB_DATA_HK_DIR 与 ^HSI"
+    ],
+    "error_handling": [
+      "沿用 evaluate 退出码"
+    ],
+    "non_functional": [
+      {
+        "desc": "既有 signal-eval / qlib-data / qlib-data-hk target 不受破坏；test_makefile.py(若有 signal-eval 断言)不回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "build"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (make -n)"
+}

@@ -1,0 +1,37 @@
+{
+  "task_id": "TASK-003",
+  "title": "Makefile signal-eval --benchmark + signal-eval-hk target",
+  "key_findings": [
+    "Makefile 已有 SIGNAL_SYMBOLS_HK 与 QLIB_DATA_HK_DIR 变量（港股 watchlist + atlas_hk 数据目录），signal-eval-hk 直接复用，无需新增数据变量。",
+    "既有 test_makefile.py(6 用例) 仅断言 signal-eval 结构与 QLIB_DIR=atlas_cn；不断言 --benchmark，故追加 --benchmark 不破坏既有断言。",
+    "test_signal_eval_uses_venv_python_not_bare_python 会展开 recipe 变量后禁止裸 python token——signal-eval recipe 仍只经 $(QLIB_PY)，新增 --benchmark $(SIGNAL_BENCHMARK) 不引入裸 python。"
+  ],
+  "decisions": [
+    {
+      "decision": "SIGNAL_BENCHMARK 默认值设为 000300.SH（atlas 形式），signal-eval 经 $(SIGNAL_BENCHMARK) 透传。",
+      "rationale": "与 TASK-002 的 evaluate.py --benchmark 默认 000300.SH 对齐，A股路径零回归；变量化允许覆盖。"
+    },
+    {
+      "decision": "signal-eval-hk 的 ^HSI 与 atlas_hk 直接硬编码/复用变量，未引入新可覆盖变量。",
+      "rationale": "港股事件研究基准固定恒生指数；QLIB_DATA_HK_DIR 已是既有变量，无需再抽象，遵循 Realistic Scope（只动 Makefile）。"
+    },
+    {
+      "decision": "signal-eval-hk 依赖 build（而非 export-signals），自身 recipe 内调 export-signals --config --symbols $(SIGNAL_SYMBOLS_HK)。",
+      "rationale": "通用 export-signals target 用 A股 SIGNAL_SYMBOLS，不适配港股；港股需 --config 提供 watchlist 且独立标的集，故 hk target 内联独立 export-signals 调用。"
+    }
+  ],
+  "files_modified": [
+    "Makefile"
+  ],
+  "interfaces_exposed": [
+    "make signal-eval-hk: 端到端港股事件研究 target（export-signals 港股集 → evaluate.py --qlib-dir atlas_hk --benchmark ^HSI）",
+    "make SIGNAL_BENCHMARK=<sym> signal-eval: 可覆盖 A股评估基准，默认 000300.SH"
+  ],
+  "verification": {
+    "make_n_signal_eval": "evaluate 行含 --benchmark 000300.SH，无 missing separator",
+    "make_n_signal_eval_hk": "export-signals(--config --symbols 港股集 --strategies price_percentile,ma_crossover) + evaluate.py(--qlib-dir .../atlas_hk --benchmark ^HSI)，无 missing separator",
+    "make_n_qlib_data": "未受影响，正常",
+    "make_n_qlib_data_hk": "未受影响，正常",
+    "test_makefile_py": "scripts/qlib_eval/tests/test_makefile.py 6 passed（无回归）"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "task": "signal-eval 基准参数化（支持港股）",
+  "reviewer": "qa-agent-1",
+  "reviewed_at": "2026-06-13",
+  "rounds": {
+    "round1_standard": "代码质量/架构/安全/性能/测试质量",
+    "round2_adversarial": "纯 Claude 三视角（codex/gemini 不可用）：Skeptic-正确性 / 回归安全 / 真实契约"
+  },
+  "checks_run": {
+    "pytest": "scripts/qlib_eval/ -q -> 56 passed",
+    "go_build": "go build ./... -> exit 0",
+    "make_dry_run": "signal-eval 含 --benchmark 000300.SH; signal-eval-hk 含 atlas_hk + --benchmark ^HSI"
+  },
+  "severity_threshold": "warning",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "INFO",
+      "location": "prices.py:91-103",
+      "desc": "benchmark() 真用 to_qlib_instrument(self._benchmark)，无残留硬编码 SH000300。test_benchmark_requests_converted_instrument 用 fake qlib 注入真断言 D.features 实收 instrument == ['HSI']/['SH000300']，非空洞。核心目标达成。",
+      "fix": "无需修复。"
+    },
+    {
+      "id": "F2",
+      "severity": "WARNING",
+      "location": "evaluate.py:126 + report.py:78,84,90",
+      "desc": "_meta benchmark 默认值由旧硬编码 'SH000300'(qlib形式) 变为 '000300.SH'(atlas形式)，报告文案 '基准: SH000300' -> '基准: 000300.SH'。数值/功能零回归，但报告文本变化。下游若按 SH000300 文本匹配会断裂。report.py:78 fallback default 仍是 'SH000300'，与新口径不一致（误导，但正常路径 meta 必带 benchmark 故不触发）。",
+      "fix": "(a) 在 spec/验收口径明确『基准展示统一为 atlas 形式』为预期变更（spec 已隐含提及，宜钉死）；(b) 统一 report.py:78 fallback 为 '000300.SH'。"
+    },
+    {
+      "id": "F3",
+      "severity": "WARNING",
+      "location": "test_report.py:92-96,207-215,244-247",
+      "desc": "render 层无 ^HSI 端到端覆盖：所有 render_report 测试 meta 仍传 SH000300；新增 test_meta_reflects_benchmark_arg 只断言 _meta() 字典 key，未经 render。默认 000300.SH 经 _meta->render 的端到端文案也无断言。即测试套件无法守门 A股默认报告基准文本（F2 的盲区），也无法守门 ^HSI 真渲染到报告。",
+      "fix": "补一条 render_report(_meta(_parse_args(['--signals','s.csv']),n),...) 断言输出含 '基准: 000300.SH'；再补一条 meta={'benchmark':'^HSI'} 断言输出含 '^HSI'。"
+    },
+    {
+      "id": "F4",
+      "severity": "INFO",
+      "location": "prices.py:74 (qlib.init region='cn')",
+      "desc": "QlibPriceSource._ensure_init 硬编码 region='cn'，signal-eval-hk 用同一类指向 atlas_hk 跑港股。region 影响 qlib 交易日历/复权口径。本 event-study 仅取原始 $open/$close（不触发停板/复权），实践中可跑通；且此为 PR 引入前的既有模式（analyze_watchlist.py:68 同样 region='cn'），非本次改动新增。属未闭合的隐含假设，非阻塞。",
+      "fix": "建议在 _ensure_init 加注释固化『event-study 仅取原始 OHLC，故 region 口径不影响结果』；或后续将 region 与 benchmark 一并参数化（不在本轮范围）。"
+    },
+    {
+      "id": "F5",
+      "severity": "INFO",
+      "location": "test_report.py:184 (benchmark_error 降级测试)",
+      "desc": "不支持基准符号(如 ^GSPC) -> to_qlib_instrument raise ValueError -> collect_outcomes except Exception 捕获降级 benchmark_error 的链路成立（ValueError 是 Exception 子类）。但现有降级测试用 FileNotFoundError 触发，缺『不支持符号 ValueError』这条新参数化边界的显式断言。",
+      "fix": "补一条用不支持符号(^GSPC)构造 QlibPriceSource().benchmark() 经 collect_outcomes 验证 benchmark_error 的用例。"
+    },
+    {
+      "id": "F6",
+      "severity": "WARNING",
+      "location": "Makefile:44 vs Makefile:32",
+      "desc": "signal-eval-hk 的 export-signals 带 --config configs/config.yaml，而 A股 export-signals(Makefile:32) 不带 --config。不对称：HK 路径受 config watchlist/collector 路由影响，config 缺失或字段不全时 HK target 可能在 export 阶段 fail（A股路径不会）。Go 侧 benchmarkForMarket('hk')='^HSI' 与 toQlibInstrument('^HSI')='HSI' 已与 Python 对称（契约成立）。--config 取舍取决于港股 yahoo collector 是否必需 config。",
+      "fix": "确认 HK target 带 --config 为有意（港股行情需 collector 配置）；若是，在 recipe 注释说明该依赖；若否，去掉以与 A股路径对齐。"
+    },
+    {
+      "id": "F7",
+      "severity": "INFO",
+      "location": "symbols.py:8-10 + cmd/atlas/export_ohlcv.go:58-71 + 各自 tests",
+      "desc": "symbols.py 注释声称与 Go toQlibInstrument『逐字对称，契约测试共享样本』，但实为两份独立人工同步的样本表（无共享 fixture）。Go TestToQlibInstrument_Contract 覆盖 8 正+6 拒样本；Python 端仅断言 2 条(000300.SH/^HSI)。两侧可独立漂移而 CI 不报错。本次改动两侧映射均正确，非即时断裂。",
+      "fix": "建议（非本轮）抽共享样本 fixture，Go/Python 各读同一文件机制化锁死对称。"
+    },
+    {
+      "id": "F8",
+      "severity": "INFO",
+      "location": "test_prices.py:87",
+      "desc": "fake D.features(instruments, fields, start_time=None, end_time=None) 签名偏紧，真实 qlib D.features 还有 freq/disk_cache 等参数。对本 PR 断言目标(instrument 转换值)不假过，但给人『签名已校验』错觉。",
+      "fix": "fake 用 def features(instruments, *args, **kwargs) 宽松化并加注释。"
+    }
+  ],
+  "verdict": "PASS",
+  "verdict_rationale": "无 CRITICAL；无 reviewer 共识一致的 high-severity 阻塞项。核心目标（benchmark() 用 to_qlib_instrument 无残留硬编码、转换值真传 D.features 经测试钉死、_meta/main 透传、^HSI→HSI 契约与 Go 侧对称、benchmark_error 优雅降级、A股默认数值零回归）全部成立，56 测试通过 + go build 0 + make -n 正确。WARNING 三项（F2 报告文案变更宜在验收口径钉死、F3 render 层测试盲区、F6 Makefile --config 不对称）均为质量/守门改进项，不构成功能阻塞，建议作为非阻塞 follow-up 修复或在验收口径声明。"
+}

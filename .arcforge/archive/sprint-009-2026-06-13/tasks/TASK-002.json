@@ -1,0 +1,65 @@
+{
+  "id": "TASK-002",
+  "title": "evaluate.py 暴露 --benchmark",
+  "description": "scripts/qlib_eval/evaluate.py：_parse_args 加 --benchmark（默认 000300.SH，atlas 形式）；_meta 的 benchmark 改用 args.benchmark；main 构造 QlibPriceSource 透传 benchmark=args.benchmark。加 test_report.py 测试：--benchmark 解析(默认/覆盖)、_meta 反映传入基准。依据计划 Task 2。依赖 TASK-001 的构造器 benchmark 参数。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/evaluate.py",
+    "scripts/qlib_eval/tests/test_report.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "_parse_args 默认 benchmark=='000300.SH'，--benchmark ^HSI 时为 '^HSI'（test_parse_args_benchmark_default_and_override）",
+      "_meta 的 benchmark 反映 args.benchmark（test_meta_reflects_benchmark_arg）",
+      "main 构造 QlibPriceSource 传 benchmark=args.benchmark（源码确认）"
+    ],
+    "boundary": [
+      "缺省 --benchmark 即 000300.SH（A股 signal-eval 零回归）"
+    ],
+    "error_handling": [
+      "基准取数失败仍走既有 benchmark_error 优雅降级（消费侧 collect_outcomes 不改）"
+    ],
+    "non_functional": [
+      {
+        "desc": "pytest scripts/qlib_eval/ 全量全绿（含 benchmark_error 降级 / import evaluate 不触 qlib）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "F2",
+      "severity": "WARNING",
+      "location": "scripts/qlib_eval/qlib_eval/report.py:78",
+      "title": "benchmark fallback 仍 SH000300，与 atlas-form 显示不一致",
+      "description": "_meta 现传 atlas 形式(000300.SH)，但 report.py 的 meta.get(\"benchmark\",\"SH000300\") 兜底仍 qlib 形式。meta 缺键时不一致。",
+      "fix": "report.py 兜底默认改为 000300.SH（与 evaluate _meta 默认一致）。"
+    },
+    {
+      "id": "F3",
+      "severity": "WARNING",
+      "location": "scripts/qlib_eval/tests/test_report.py",
+      "title": "render 层无基准端到端断言",
+      "description": "test_meta_reflects_benchmark_arg 仅断言 dict，未验 render_report 输出文案随基准变（F2 盲区）。",
+      "fix": "加 render_report 断言：meta benchmark=000300.SH 渲染含「基准: 000300.SH」、=^HSI 渲染含「基准: ^HSI」。"
+    }
+  ],
+  "verifier": "leader (--benchmark+_meta+透传+56 passed)"
+}
