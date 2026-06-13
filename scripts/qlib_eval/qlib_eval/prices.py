@@ -59,11 +59,12 @@ def align_entry(
 class QlibPriceSource:
     """真实运行用的价格数据源；惰性 import qlib，pytest 全程不触达。"""
 
-    def __init__(self, provider_uri: str, start: str, end: str, benchmark: str = "000300.SH"):
+    def __init__(self, provider_uri: str, start: str, end: str, benchmark: str = "000300.SH", region: str = "cn"):
         self._provider_uri = provider_uri
         self._start = start
         self._end = end
         self._benchmark = benchmark  # atlas 形式（000300.SH / ^HSI），benchmark() 内转 qlib instrument
+        self._region = region  # qlib region：cn（A股/港股）/ us（美股）
         self._initialized = False
 
     def _ensure_init(self) -> None:
@@ -71,7 +72,7 @@ class QlibPriceSource:
             return
         import qlib  # 惰性 import：仅真实运行时触发
 
-        qlib.init(provider_uri=self._provider_uri, region="cn")
+        qlib.init(provider_uri=self._provider_uri, region=self._region)
         self._initialized = True
 
     def history(self, symbol: str) -> pd.DataFrame:

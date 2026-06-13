@@ -133,15 +133,15 @@ def test_non_ashare_collected_into_data_gaps():
         [
             {"symbol": "600519.SH", "date": pd.Timestamp("2024-01-01"),
              "strategy": "ma", "action": "buy", "confidence": 0.9, "price": 10.0, "metadata": "{}"},
-            {"symbol": "AAPL", "date": pd.Timestamp("2024-01-01"),
+            {"symbol": "GC=F", "date": pd.Timestamp("2024-01-01"),
              "strategy": "ma", "action": "buy", "confidence": 0.9, "price": 1.0, "metadata": "{}"},
         ]
     )
     source = _FakeSource({"600519.SH": prices}, bench)
     outcomes, stats = evaluate.collect_outcomes(signals, source, max_defer=5)
-    # 非 A 股不中断：600519 仍产出 outcome，AAPL 收进数据缺口
+    # 非 A 股不中断：600519 仍产出 outcome，GC=F（不可映射）收进数据缺口
     assert len(outcomes) == 1
-    assert "AAPL" in stats["non_ashare"]
+    assert "GC=F" in stats["non_ashare"]
 
 
 def test_main_exits_when_qlib_dir_missing(tmp_path, capsys):

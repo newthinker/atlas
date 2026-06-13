@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk
+.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -20,6 +20,10 @@ QLIB_DATA_HK_DIR ?= $(HOME)/.qlib/qlib_data/atlas_hk
 # 港股 watchlist 标的（atlas 形式）：用于 build_data 的 stale-CSV 防呆 --expected-symbols。
 # 须与 configs/config.yaml watchlist 的港股集（.HK + ^HSI/^HSCE）保持一致。
 SIGNAL_SYMBOLS_HK ?= 3288.HK,0700.HK,9988.HK,0883.HK,6886.HK,2800.HK,2828.HK,3033.HK,3181.HK,^HSI,^HSCE
+QLIB_CSV_US_DIR  ?= qlib_csv_us
+QLIB_DATA_US_DIR ?= $(HOME)/.qlib/qlib_data/atlas_us
+# 美股 watchlist 标的（atlas 形式）：须与 configs/config.yaml 的美股集（裸 ticker + ^GSPC）一致。
+SIGNAL_SYMBOLS_US ?= AAPL,MSFT,NVDA,GOOGL,AMZN,META,JNJ,JPM,^GSPC
 
 # signal-eval 默认读自建包 atlas_cn（单一真相源）：社区包 cn_data 截止 2020-09，
 # 默认 2021-2026 区间产不出结果——本需求的存在理由。覆盖 QLIB_DIR 可回退社区包。
@@ -64,6 +68,20 @@ qlib-data-hk: build
 	  --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_HK_DIR)
 	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_HK_DIR) \
 	  --target-dir $(QLIB_DATA_HK_DIR) --expected-symbols $(SIGNAL_SYMBOLS_HK)
+
+# 美股自建 qlib 数据包：watchlist 美股集（裸 ticker + ^GSPC）→ atlas_us（独立日历）。
+qlib-data-us: build
+	./bin/atlas export-ohlcv --config configs/config.yaml --market us \
+	  --from $(SIGNAL_FROM) --out-dir $(QLIB_CSV_US_DIR)
+	$(QLIB_PY) scripts/qlib_eval/build_data.py --csv-dir $(QLIB_CSV_US_DIR) \
+	  --target-dir $(QLIB_DATA_US_DIR) --expected-symbols $(SIGNAL_SYMBOLS_US)
+
+# 美股事件研究：美股集信号 → 对 atlas_us 评估，基准 ^GSPC，region us。
+signal-eval-us: build
+	./bin/atlas export-signals --config configs/config.yaml --symbols $(SIGNAL_SYMBOLS_US) \
+	  --strategies price_percentile,ma_crossover --from $(SIGNAL_FROM) --to $(SIGNAL_TO) --out signals_us.csv
+	$(QLIB_PY) scripts/qlib_eval/evaluate.py --signals signals_us.csv \
+	  --qlib-dir $(QLIB_DATA_US_DIR) --benchmark ^GSPC --region us --out $(SIGNAL_OUT)
 
 run: build
 	./$(BUILD_DIR)/$(BINARY)

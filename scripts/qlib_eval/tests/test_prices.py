@@ -125,3 +125,16 @@ def test_benchmark_requests_converted_instrument(monkeypatch):
         provider_uri="x", start="2021-01-01", end="2021-12-31"
     ).benchmark()
     assert captured["instruments"] == ["SH000300"]
+
+
+def test_qlib_price_source_stores_region():
+    from qlib_eval.prices import QlibPriceSource
+    src = QlibPriceSource(provider_uri="/tmp/x", start="2021-01-01", end="2021-12-31",
+                          benchmark="^GSPC", region="us")
+    assert src._region == "us"
+
+
+def test_qlib_price_source_region_defaults_cn():
+    from qlib_eval.prices import QlibPriceSource
+    src = QlibPriceSource(provider_uri="/tmp/x", start="2021-01-01", end="2021-12-31")
+    assert src._region == "cn"

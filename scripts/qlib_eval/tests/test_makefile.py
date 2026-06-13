@@ -106,3 +106,32 @@ def test_qlib_dir_default_is_atlas_cn():
     assert "QLIB_DIR" in defs, "Makefile 缺少 QLIB_DIR 变量"
     expanded = _expand(defs["QLIB_DIR"], defs)
     assert expanded.endswith("atlas_cn"), f"QLIB_DIR 默认须指向 atlas_cn，实得 {expanded!r}"
+
+
+# --- TASK-005: 美股 target 守门测试（镜像 hk） ---
+
+def test_signal_eval_us_target_exists_and_correct():
+    block = _target_block("signal-eval-us")
+    assert block, "signal-eval-us target 缺失"
+    defs = _var_defs(_makefile_text())
+    expanded = _expand(block, defs)
+    assert "export-signals" in block
+    assert "--benchmark ^GSPC" in expanded
+    assert "--region us" in expanded
+    assert "atlas_us" in expanded
+    assert VENV_PYTHON in expanded
+    assert "evaluate.py" in block
+
+
+def test_qlib_data_us_target_exists():
+    block = _target_block("qlib-data-us")
+    assert block, "qlib-data-us target 缺失"
+    expanded = _expand(block, _var_defs(_makefile_text()))
+    assert "--market us" in expanded
+    assert "atlas_us" in expanded
+    assert "build_data.py" in block
+
+
+def test_us_targets_in_phony():
+    first_line = _makefile_text().splitlines()[0]
+    assert "signal-eval-us" in first_line and "qlib-data-us" in first_line
