@@ -1,0 +1,75 @@
+{
+  "task": "hk-qlib-bundle (atlas_hk) two-round code review",
+  "reviewer": "qa-agent-1",
+  "date": "2026-06-13",
+  "rounds": {
+    "round1_standard": "code quality / correctness / contract symmetry / build+tests",
+    "round2_adversarial": "Claude tri-lens: Skeptic + Architect (codex/gemini unavailable)"
+  },
+  "gates": {
+    "go_build": "PASS",
+    "go_vet_cmd_atlas": "PASS",
+    "go_test_cmd_atlas": "PASS",
+    "go_test_collector_app": "PASS",
+    "pytest_qlib_eval": "PASS (48 passed)",
+    "go_python_naming_symmetry": "PASS (%05s == zfill(5) across 0700/2800/9988/13/00001 incl edge cases)"
+  },
+  "severity_threshold": "warning",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "WARNING",
+      "location": "internal/collector/selector.go:18-23 (indexMarkets map)",
+      "description": "^HSCE is NOT in indexMarkets, so MarketForSymbol(^HSCE) returns MarketUS (not MarketHK) and KnownIndexMarket(^HSCE)=not-known. Spec lines 85-88 explicitly mandate verifying AND adding ^HSI/^HSCE->HK classification. ^HSI was added, ^HSCE was missed. IMPACT IS BOUNDED: the export-ohlcv/qlib deliverable is UNAFFECTED (SelectForSymbol routes all ^-prefixed to yahoo regardless). The defect surfaces only in the in-app watchlist analysis: app.go:705 emits a misleading 'market defaults to US' warn for ^HSCE, and core.Fundamental.Market would be wrong IF fundamentals were built. ^HSCE is type=指数 with only price_percentile (no fundamentals), so no functional break today. Architect lens rated this CRITICAL; QA reconciled to WARNING on actual scope impact. Both lenses agree the defect EXISTS.",
+      "fix": "Add `\"^HSCE\": core.MarketHK,` to indexMarkets (selector.go:22) and a TestSelectForSymbol/MarketForSymbol case asserting ^HSCE->MarketHK. One-line fix, satisfies spec MUST-verify item."
+    },
+    {
+      "id": "F2",
+      "severity": "WARNING",
+      "location": "scripts/qlib_eval/analyze_watchlist.py:71-74 (is_index)",
+      "description": "is_index checks c[2:5] in (000,399) for ALL instruments including HK (HKxxxxx). A low-numbered HK stock collides: 0001.HK->HK00001->c[2:5]=000 and 0013.HK->HK00013->c[2:5]=000 would be WRONGLY classified as index and pulled into the index correlation matrix. 0001.HK (长江和记) / 0013.HK (长实) are real HK blue chips. All 9 CURRENT watchlist HK codes are safe (verified), so this is latent, not triggered today — but bites on the next sub-100 HK code added.",
+      "fix": "Exclude HK instruments before the numeric segment check, e.g. `if c.startswith('HK'): return False` (HK indexes are explicitly HSI/HSCEI, not HKxxxxx)."
+    },
+    {
+      "id": "F3",
+      "severity": "WARNING",
+      "location": "cmd/atlas/export_ohlcv.go:239 (flag), runExportOHLCV ~298",
+      "description": "--market accepts any string; benchmarkForMarket/inMarket treat anything != 'hk' as cn. `--market us` or a typo `--market hkk` silently exports A-share data with the cn benchmark instead of erroring. Footgun for a CLI that drives data-bundle builds.",
+      "fix": "Validate in runExportOHLCV before resolve: reject market not in {cn,hk} with a clear error."
+    },
+    {
+      "id": "F4",
+      "severity": "INFO",
+      "location": "Makefile:50-54 (qlib-data-hk)",
+      "description": "qlib-data-hk invokes build_data.py WITHOUT --expected-symbols, while the cn target passes it. Loses the residual/stale-CSV validation guard for the HK bundle. Non-functional (build still succeeds).",
+      "fix": "Pass --expected-symbols for the HK set, or document why it is intentionally omitted."
+    },
+    {
+      "id": "F5",
+      "severity": "INFO",
+      "location": "cmd/atlas/export_ohlcv.go:31-47 (benchmarkForMarket/inMarket)",
+      "description": "Market selection is magic-string `== \"hk\"` with implicit cn fallback in two functions. Adding a 3rd market is an O(n) shotgun edit. Acceptable design debt for a 2-market system; flag for future.",
+      "fix": "Optional: a small marketConfig registry {id,benchmark,inMarket} keyed by market id; also enables F3 validation centrally."
+    },
+    {
+      "id": "F6",
+      "severity": "INFO",
+      "location": "Makefile:16-18; scripts/qlib_eval/analyze_watchlist.py --qlib-dir default",
+      "description": "QLIB_CSV_DIR (cn) lacks the _cn suffix that QLIB_CSV_HK_DIR has; analyze_watchlist default --qlib-dir is hardcoded to atlas_cn. HK runs must pass --qlib-dir explicitly. Usability nit, isolation itself is correct (separate target-dirs atlas_cn vs atlas_hk verified).",
+      "fix": "Optional: symmetric naming + error message mentioning both make targets."
+    }
+  ],
+  "verified_correct": [
+    "Go/Python toQlibInstrument byte-symmetric for .HK/^HSI/^HSCE and rejection set (^HSTECH, 0700.HK.X, AAPL, ^GSPC, GC=F, BTC-USDT)",
+    "executeExportOHLCV uses p.Benchmark (no hardcoded 000300.SH); HK ^HSI fetch failure is fatal (TestExportOHLCV_HKBenchmarkFailureIsFatal)",
+    "resolveOHLCVSymbols(hk) selects .HK + ^HSI/^HSCE, excludes A-share, includes benchmark, de-dups order-preserved",
+    "requireBenchmark resolves per-market benchmark (TestRequireBenchmark_Market cn/hk x present/missing)",
+    "cn default zero-regression: TestResolveOHLCVSymbols_Default unchanged behavior",
+    "Market isolation: qlib-data->atlas_cn / qlib-data-hk->atlas_hk, separate csv+target dirs, no sharing",
+    "CSV filename derivation lowercase: HK00700->hk00700.csv, HSI->hsi.csv, HSCEI->hscei.csv matches spec contract table",
+    "watchlist: 4 ETF (2800/2828/3033/3181.HK) + 2 index (^HSI/^HSCE) added, all type-appropriate with ONLY price_percentile; ^HSTECH correctly excluded; 5 existing HK stocks unchanged"
+  ],
+  "verdict": "CONTESTED",
+  "verdict_rationale": "No CRITICAL with reviewer consensus; the export/qlib deliverable passes all gates. But three WARNING-level defects exist (F1 spec-mandated routing miss, F2 latent is_index HK collision, F3 unvalidated --market), and the two adversarial lenses disagreed on F1 severity (Architect=CRITICAL fix-before-merge, QA=WARNING bounded-impact). Above severity_threshold=warning, so not a clean PASS; needs Leader judgment on fix-before-accept vs accept-with-followup.",
+  "recommended_fix_items": ["F1", "F2", "F3"]
+}

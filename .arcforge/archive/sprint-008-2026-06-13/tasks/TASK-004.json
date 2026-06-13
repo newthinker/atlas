@@ -1,0 +1,49 @@
+{
+  "id": "TASK-004",
+  "title": "config.yaml watchlist 加港股 ETF + 指数",
+  "description": "configs/config.yaml 的 watchlist 港股个股块后追加：基金 2800.HK 盈富/2828.HK 国企/3033.HK 恒生科技ETF/3181.HK AI（type 基金，price_percentile）；指数 ^HSI 恒生/^HSCE 国企（type 指数，price_percentile）。验证 config 可加载且 export-ohlcv --market hk 能选出这些标的。依据计划 Task 4。",
+  "module": "configs",
+  "complexity": "simple",
+  "estimated_files": [
+    "configs/config.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "watchlist 含 2800/2828/3033/3181.HK（type 基金）与 ^HSI/^HSCE（type 指数），均 price_percentile",
+      {
+        "desc": "export-ohlcv --config configs/config.yaml --market hk 选出这 6 个新标的 + 5 既有港股 = 11（含基准 ^HSI），导出 11 个 CSV",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "config.Load 解析 watchlist 不报错；新增条目 Symbol/Name/Type/Strategies 字段齐全"
+    ],
+    "error_handling": [
+      "^HSTECH 不出现在 watchlist（yahoo 无数据）"
+    ],
+    "non_functional": [
+      {
+        "desc": "yaml 语法有效；既有 watchlist 条目不变",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "configs"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (config+11csv)"
+}

@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "analyze_watchlist.py 原指数识别 c[2:5] in (000,399) 仅覆盖 A股 SH/SZ 指数段；港股 instrument (HSI/HSCEI) 与中证指数 (CSI 前缀) 不被纳入相关性矩阵。",
+    "qlib instrument 命名契约(Task 1/2): A股 SH000300/SZ399001、中证 CSI930713、港股指数 HSI/HSCEI、港股个股 HK00700。is_index 据此区分指数与个股。",
+    "QA CONTESTED 返工(iter1) F2: 修正 is_index 对低位港股的误判 -- HK00001 的 c[2:5] 恰为 '000',旧逻辑会把它误判为指数(原 discovery 仅验证了 HK00700->c[2:5]='007' 不命中,遗漏 HK0000x/HK00x 段)。is_index 提升为模块级并在函数体开头加 'if c.startswith(\"HK\"): return False'(港股证券一律非指数;HK 指数命名 HSI/HSCEI 不带 HK 前缀)。同时把 import qlib/from qlib.data import D 改为 main() 内惰性导入,使新增 tests/test_analyze_watchlist.py 顶层 import analyze_watchlist 不污染 sys.modules(满足既有 'no qlib at module level' 守门测试,全 52 py 测试无序列污染)。"
+  ],
+  "decisions": [
+    {
+      "decision": "用 is_index(c) 局部函数泛化指数识别：c[2:5] in (000,399) or c.startswith(CSI) or c in (HSI,HSCEI)",
+      "rationale": "保留原 000/399 条件确保 atlas_cn 不回归；新增 CSI 前缀与 HSI/HSCEI 精确匹配纳入中证与港股指数。HK 个股以 HK 前缀+数字命名 (HK00700)，c[2:5]=007 不命中、不以 CSI 开头、不等于 HSI/HSCEI，故正确排除。"
+    },
+    {
+      "decision": "is_index 提升为模块级函数 + 开头 HK 前缀守门 return False;import qlib 惰性化进 main()",
+      "rationale": "(1) HK 前缀守门修复 HK00001 等低位港股 c[2:5]='000' 的误判,这是 QA F2 根因;模块级便于 pytest 直测。(2) 惰性 import 对齐项目既有 evaluate/prices 的 'no qlib at module level' 约定,使测试可顶层 import analyze_watchlist 而不把 qlib 注入 sys.modules,消除测试序列污染。"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/analyze_watchlist.py"
+  ],
+  "interfaces_exposed": [
+    "is_index(c: str) -> bool（main() 内局部函数，识别 A股 000/399 + CSI 前缀 + HSI/HSCEI）"
+  ],
+  "verification": {
+    "syntax": "scripts/qlib_eval/.venv/bin/python -c ast.parse(...) -> ok",
+    "logic_selftest": "is_index: SH000300=T, CSI930713=T, HSI=T, HSCEI=T, SZ399001=T, HK00700=F, SH600519=F (全部符合预期)",
+    "no_regression": "000/399 条件保留为 is_index 首个析取项，atlas_cn 报告行为不变；改动仅影响 idx_codes 成员，corr.empty 守卫沿用，个股表现表不受影响",
+    "rework_iter1": "新增 tests/test_analyze_watchlist.py(RED->GREEN): is_index('HK00001')=F, is_index('HK00700')=F, is_index('HSI')=T, is_index('HSCEI')=T, is_index('SH000300')=T, is_index('CSI930713')=T, is_index('SZ399001')=T, is_index('SH600519')=F。ast.parse ok;scripts/qlib_eval pytest 52 passed(48 既有+4 新),无序列污染;guard: import analyze_watchlist 后 'qlib' not in sys.modules。"
+  }
+}

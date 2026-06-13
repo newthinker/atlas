@@ -1,0 +1,46 @@
+{
+  "task": "hk-qlib-bundle (atlas_hk) code review iteration 2",
+  "reviewer": "qa-agent-1",
+  "date": "2026-06-13",
+  "iteration": 2,
+  "scope": "re-verify the 3 WARNING fixes (F1/F2/F3) Leader adopted after round-1 CONTESTED verdict",
+  "gates": {
+    "go_build": "PASS (BUILD_OK)",
+    "go_vet_cmd_atlas_collector": "PASS (VET_OK)",
+    "go_test_cmd_atlas": "PASS (ok 0.954s)",
+    "go_test_collector": "PASS (ok 0.538s)",
+    "pytest_qlib_eval": "PASS (52 passed in 0.26s, was 48 -> +4 new is_index tests)"
+  },
+  "warning_closure": [
+    {
+      "id": "F1",
+      "status": "CLOSED",
+      "fix_present": "selector.go:23 adds `\"^HSCE\": core.MarketHK,` to indexMarkets",
+      "test_evidence": "selector_test.go:103 TestMarketForSymbol_IndexAndCommodity asserts MarketForSymbol(\"^HSCE\")==core.MarketHK; PASS. KnownIndexMarket/SelectForSymbol tests all green.",
+      "no_new_problem": "Map entry is consumed ONLY by KnownIndexMarket -> MarketForSymbol index branch. SelectForSymbol routes all ^-prefixed to yahoo regardless (selector.go:59), so collector routing is unchanged. TestMarketForSymbol_IndexAndCommodity confirms table-absent ^N225 still -> MarketUS, so the addition does not over-broaden HK classification. Verified empirically."
+    },
+    {
+      "id": "F2",
+      "status": "CLOSED",
+      "fix_present": "analyze_watchlist.py:27-28 `if c.startswith(\"HK\"): return False` guards before the c[2:5] numeric check; qlib import made lazy inside main() (lines 65-68).",
+      "test_evidence": "tests/test_analyze_watchlist.py: HK00001/HK00700->False, HSI/HSCEI->True, SH000300/CSI930713->True, SH600519->False, SZ399001->True; all 4 tests PASS. Existing guard test_prices.py::test_no_qlib_at_module_level still PASS.",
+      "no_new_problem": "Empirically confirmed `qlib not in sys.modules` after `import analyze_watchlist` (lazy import effective). is_index/perf_row are pure; the HK guard precedes the numeric segment check; HK indexes (HSI/HSCEI) carry no HK prefix so still classify True. analyze() runtime behavior unchanged. The module-level `import analyze_watchlist` in the test only resolves BECAUSE qlib is lazy — doubles as a lazy-import regression guard."
+    },
+    {
+      "id": "F3",
+      "status": "CLOSED",
+      "fix_present": "export_ohlcv.go:302-304 runExportOHLCV rejects market not in {cn,hk} with `unknown market %q (want cn or hk)`, before resolveOHLCVSymbols/registry/network.",
+      "test_evidence": "export_ohlcv_test.go:363 TestRunExportOHLCV_RejectsUnknownMarket rejects {us, HK, 'cn ', '', crypto} with a legit symbol set (proves the block is the market check, not another branch) and asserts error contains 'unknown market'; PASS.",
+      "no_new_problem": "Strict equality `!= \"cn\" && != \"hk\"`; legitimate cn/hk pass through (TestRequireBenchmark_Market cn/hk, TestResolveOHLCVSymbols_Default cn, TestResolveOHLCVSymbols_HKMarket all PASS). Case-sensitive/whitespace-strict rejection is correct given the lowercase `cn` flag default. No false rejection of legal markets."
+    }
+  ],
+  "round1_verified_still_intact": [
+    "cn zero-regression: TestResolveOHLCVSymbols_Default PASS, TestExportOHLCV_GoldenCSV PASS",
+    "benchmark fatal both markets: TestExportOHLCV_BenchmarkFailureIsFatal + TestExportOHLCV_HKBenchmarkFailureIsFatal + TestRunExportOHLCV_BenchmarkMissingIsFatal PASS",
+    "naming symmetry / toQlibInstrument unchanged: cmd/atlas suite PASS",
+    "market isolation + per-market benchmark resolution: TestBenchmarkForMarket, TestRequireBenchmark_Market PASS"
+  ],
+  "new_problems": [],
+  "verdict": "PASS",
+  "verdict_rationale": "All three round-1 WARNINGs (F1 spec-mandated ^HSCE routing, F2 latent is_index HK collision + lazy-qlib hygiene, F3 unvalidated --market) are closed with present source fixes AND passing assertions that target the exact defect. No high-severity finding remains. No new problems introduced: F1 does not alter collector routing nor over-broaden classification, F2 lazy import leaves qlib out of sys.modules and does not change analyze logic, F3 strict validation does not reject legitimate cn/hk. All round-1 verified-correct items remain green. Build/vet/tests all PASS (Go cmd+collector, pytest 52 passed)."
+}

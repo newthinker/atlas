@@ -1,0 +1,54 @@
+{
+  "id": "TASK-006",
+  "title": "analyze_watchlist.py 识别 HK/CSI 指数进相关性",
+  "description": "scripts/qlib_eval/analyze_watchlist.py 的指数识别从 `c[2:5] in (000,399)` 泛化为 is_index(c)=c[2:5] in (000,399) or c.startswith(CSI) or c in (HSI,HSCEI)，让港股指数 HSI/HSCEI 进相关性矩阵。依据计划 Task 6。独立改动。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/analyze_watchlist.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "is_index 识别 A股(000/399)、中证(CSI 前缀)、港股(HSI/HSCEI) 三类指数",
+      {
+        "desc": "脚本 ast.parse 通过（语法有效），其余逻辑不变",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "无指数 instrument 时相关性矩阵为空但不报错（沿用 corr.empty 守卫）"
+    ],
+    "error_handling": [
+      "非阻塞：识别仅影响相关性矩阵的成员，不影响个股表现表"
+    ],
+    "non_functional": [
+      {
+        "desc": "atlas_cn 报告行为不回归（000/399 仍识别）",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "F2",
+      "severity": "WARNING",
+      "location": "scripts/qlib_eval/analyze_watchlist.py is_index",
+      "title": "is_index 对低位港股代码误判",
+      "description": "is_index 用 c[2:5] in (000,399) 对所有 instrument，HK00001(0001.HK 长和)→c[2:5]=000 被误判为指数。当前 9 个港股代码安全，属潜在 bug。",
+      "fix": "is_index 开头加 if c.startswith(\"HK\"): return False；可加注释说明港股证券非指数。"
+    }
+  ],
+  "verifier": "leader (syntax+logic)"
+}

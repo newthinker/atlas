@@ -1,0 +1,35 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "Python to_qlib_instrument 原仅支持 .SH/.SZ/.CSI A股, 新增 .HK/^HSI/^HSCE 三类 HK 分支, 与 Go TASK-001 逐字对称",
+    "Python str.zfill(5) 对 '0700'->'00700'、'2800'->'02800' 与 Go fmt.Sprintf('%05s',...) 同值(已实测对照)",
+    "^HSTECH 显式拒绝(yahoo 无数据, 由 3033.HK 代理); reject 列表从 0700.HK 改为 ^HSTECH",
+    "error 文案从 'not an A-share symbol' 改为 'not a supported A-share/HK symbol' 与 Go 对齐"
+  ],
+  "decisions": [
+    {
+      "decision": ".HK 用 'HK' + symbol[:-3].zfill(5) 命名",
+      "rationale": "港股代码位数不定(0700/2800), 定长前缀+5位补零保证唯一可排序; Go fmt.Sprintf('%05s',...) 对称"
+    },
+    {
+      "decision": "^HSCE 映射为 HSCEI(而非 HSCE)",
+      "rationale": "国企指数 qlib 业界习惯命名 HSCEI; 镜像 Go TASK-001 同值"
+    },
+    {
+      "decision": "保持 if-chain 不抽象(无 REFACTOR)",
+      "rationale": "分支已最小且与 Go switch 一一对应, 抽象会破坏对称契约可读性(沿用 TASK-001 决策)"
+    }
+  ],
+  "files_modified": [
+    "scripts/qlib_eval/qlib_eval/symbols.py",
+    "scripts/qlib_eval/tests/test_symbols.py"
+  ],
+  "interfaces_exposed": {
+    "to_qlib_instrument(symbol: str) -> str": "与 Go toQlibInstrument 逐字对称: .HK->'HK'+zfill(5); ^HSI->'HSI'; ^HSCE->'HSCEI'; 其余(含 ^HSTECH/AAPL/^GSPC/GC=F/BTC-USDT/0700.HK.X) raise ValueError"
+  },
+  "verification": {
+    "red": "pytest test_symbols.py: HK 断言报 ValueError(预期 1 failed)",
+    "green": "pytest test_symbols.py -q: 2 passed",
+    "symmetry": "对 7 正例 + 6 反例与 Go TASK-001 样本逐字比对, 全部一致"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "id": "TASK-001",
+  "title": "toQlibInstrument 支持 .HK / ^HSI / ^HSCE（Go）",
+  "description": "cmd/atlas/export_ohlcv.go 的 toQlibInstrument 增 HK 命名：.HK→\"HK\"+5位补零(fmt %05s)、^HSI→\"HSI\"、^HSCE→\"HSCEI\"；其余(含 ^HSTECH/AAPL)仍 error。更新 TestToQlibInstrument_Contract：加 0700.HK→HK00700/2800.HK→HK02800/^HSI→HSI/^HSCE→HSCEI 正例，bad 列表移除 0700.HK(现合法)、加 ^HSTECH。依据计划 Task 1。",
+  "module": "cmd/atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "0700.HK→HK00700、2800.HK→HK02800（HK + %05s 5位补零）（TestToQlibInstrument_Contract）",
+      "^HSI→HSI、^HSCE→HSCEI（同上）",
+      "既有 .SH/.SZ/.CSI 映射不回归（SH600519/SZ399001/CSI930713）"
+    ],
+    "boundary": [
+      "^HSTECH 与其它非支持符号(AAPL/^GSPC/GC=F/BTC-USDT)仍返回 error"
+    ],
+    "error_handling": [
+      "非 A股非 HK 符号返回非 nil error"
+    ],
+    "non_functional": [
+      {
+        "desc": "go build ./cmd/atlas/ 通过；契约测试与 symbols.py 共享样本口径一致",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader (contract test)"
+}

@@ -1,0 +1,54 @@
+{
+  "task_id": "TASK-003",
+  "title": "export-ohlcv market 参数化（基准 + 选择 + --market）",
+  "key_findings": [
+    "TASK-001 已先行把 toQlibInstrument 的 .HK/^HSI/^HSCE 分支与 TestToQlibInstrument_Contract 的 HK 契约样本落地，TASK-003 仅做 market 选择/基准参数化，未触碰 toQlibInstrument。",
+    "executeExportOHLCV 原硬编码 benchmarkSymbol(000300.SH) 作 fatal 基准；改为 p.Benchmark(空回退 000300.SH)，使 hk 的 ^HSI 能进入 fatal 分支——这是 reviewer 补强项的根因。",
+    "cmd/atlas 包总覆盖率为既有 60.8% 基线（main/runServe/runExportSignals/broker 子命令/newCollectorRegistry 等 CLI 入口长期无测试），本任务后升至 61.9%（净正、零回归），但 < 80% 全局门禁。",
+    "QA CONTESTED 返工(iter1) F3: runExportOHLCV 入口加 --market 白名单校验 (!=cn && !=hk -> error '''unknown market %q (want cn or hk)'''),修复 --market 任意串静默按 cn 的 WARNING;新增 TestRunExportOHLCV_RejectsUnknownMarket(us/HK/'''cn '''/''/crypto 全断言含 unknown market,RED->GREEN)。"
+  ],
+  "decisions": [
+    {
+      "decision": "benchmarkForMarket: hk→^HSI, 其余(含 cn)→000300.SH",
+      "rationale": "默认 cn 语义；非 hk 一律回退 A 股基准，避免未知 market 串拿到空基准。"
+    },
+    {
+      "decision": "inMarket: hk = .HK || ^HSI || ^HSCE；cn = .SH || .SZ || .CSI",
+      "rationale": "与设计/plan Task3 一致；^HSTECH 不在 hk 集（无 yahoo 数据，由 3033.HK 代理）。"
+    },
+    {
+      "decision": "exportOHLCVParams 加 Benchmark 字段，executeExportOHLCV 内空则回退 benchmarkSymbol",
+      "rationale": "core 保持纯函数、可注入；空回退保证既有 cn 调用与 TestExportOHLCV_BenchmarkFailureIsFatal 零回归。"
+    },
+    {
+      "decision": "新增 TestExportOHLCV_HKBenchmarkFailureIsFatal 直接断言（注入 errs:{^HSI}, Benchmark:^HSI → err 含 benchmark）",
+      "rationale": "DoD error_handling[1] reviewer 补强：仅测 benchmarkForMarket 返回值无法证明基准已注入 core 的 fatal 分支。"
+    },
+    {
+      "decision": "测试内 sliceContains 替换为 slices.Contains（code-simplifier 建议）",
+      "rationale": "production 代码 requireBenchmark 已用 slices.Contains，去掉冗余手写 helper；测试语义不变。"
+    },
+    {
+      "decision": "--market 校验置于 runExportOHLCV 的 loadConfigOrDefaults 之后、resolveOHLCVSymbols 之前",
+      "rationale": "resolver/benchmark 依赖 market 取值;在 CLI 入口尽早拦非法值,避免下游用未知 market 静默回退 cn 语义(QA F3)。core executeExportOHLCV 保持纯,白名单属 CLI 层职责。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "interfaces_exposed": [
+    "CLI flag --market cn|hk (默认 cn)，注册于 exportOHLCVCmd.init()，变量 exportOHLCVMarket",
+    "func benchmarkForMarket(market string) string  // cn→000300.SH, hk→^HSI",
+    "func inMarket(symbol, market string) bool",
+    "func resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem, market string) ([]string, error)  // 三参",
+    "func requireBenchmark(symbols []string, market string) error  // 二参",
+    "exportOHLCVParams.Benchmark string  // 该 market 基准，空回退 benchmarkSymbol(cn)"
+  ],
+  "verification": {
+    "tests": "go test ./cmd/atlas/ -count=1 全 PASS（新增 TestResolveOHLCVSymbols_HKMarket/TestBenchmarkForMarket/TestExportOHLCV_HKBenchmarkFailureIsFatal/TestRequireBenchmark_Market + 既有 cn 用例改三参零回归）",
+    "build": "go build ./... 通过；go vet ./cmd/atlas/ 通过",
+    "coverage": "变更函数 benchmarkForMarket/inMarket/resolveOHLCVSymbols/requireBenchmark=100%, executeExportOHLCV=85.7%; 包总 61.9%(基线 60.8%)，因既有 CLI 入口未测 < 80% 门禁——需 Leader 裁决任务级 coverage_minimum 或 changed-lines 范围。",
+    "rework_iter1": "go test ./cmd/atlas/ ./internal/collector/ -count=1 全 PASS;go build ./... + go vet 通过。TestRunExportOHLCV_RejectsUnknownMarket 覆盖 unknown-market error 分支。"
+  }
+}
