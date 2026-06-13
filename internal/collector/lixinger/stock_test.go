@@ -9,6 +9,7 @@ package lixinger
 // error_handling[0] apiKey 为空 → error (fetchCandlestick 守卫)    → 经 fetchCandlestick；history/quote 共用
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,5 +77,39 @@ func TestStock_EmptyAPIKeyIsError(t *testing.T) {
 	}
 	if _, err := lx.FetchHistory("600519.SH", time.Now().AddDate(0, 0, -5), time.Now(), "1d"); err == nil || !strings.Contains(err.Error(), "api_key is required") {
 		t.Errorf("FetchHistory with empty key: want api_key error, got %v", err)
+	}
+}
+
+// A-share indexes must route to cn/index/candlestick (type:normal), NOT
+// cn/company/candlestick — otherwise an index code is mis-served as a company
+// of the same numeric code (e.g. 000001.SH 上证指数 → 平安银行 000001).
+func TestFetchHistory_IndexUsesIndexEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/cn/index/candlestick") {
+			t.Errorf("index must hit cn/index/candlestick, got: %s", r.URL.Path)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		body := string(raw)
+		if !strings.Contains(body, `"type":"normal"`) {
+			t.Errorf("index candlestick requires type:normal, got: %s", body)
+		}
+		if !strings.Contains(body, `"stockCode":"000300"`) {
+			t.Errorf("must use singular stockCode 000300, got: %s", body)
+		}
+		_, _ = w.Write([]byte(`{"code":1,"message":"success","data":[` +
+			`{"date":"2026-06-10T00:00:00+08:00","open":4753.12,"high":4786.52,"low":4718.99,"close":4748.59,"volume":25929710900000000}` +
+			`]}`))
+	}))
+	defer srv.Close()
+
+	lx := NewWithBaseURL("k", srv.URL)
+	rows, err := lx.FetchHistory("000300.SH",
+		time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC), "1d")
+	if err != nil {
+		t.Fatalf("index FetchHistory failed: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Close != 4748.59 {
+		t.Errorf("index bars mismatch: %+v", rows)
 	}
 }

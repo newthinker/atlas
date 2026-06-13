@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/core"
 )
 
@@ -19,19 +20,27 @@ type candlestickBar struct {
 	Volume float64 `json:"volume"`
 }
 
-// fetchCandlestick is the shared call behind FetchHistory and FetchQuote.
+// fetchCandlestick is the shared call behind FetchHistory and FetchQuote. It
+// routes A-share indexes to cn/index/candlestick (type "normal") and equities
+// to cn/company/candlestick (type "fc_rights", forward-adjusted). Using the
+// company endpoint for an index code mis-serves a same-numbered company (e.g.
+// 000001.SH 上证指数 would return 平安银行 000001), so the split is required.
 func (l *Lixinger) fetchCandlestick(symbol string, start, end time.Time) ([]candlestickBar, error) {
 	if err := l.requireKey(); err != nil {
 		return nil, err
 	}
+	endpoint, adjustType := "cn/company/candlestick", "fc_rights"
+	if collector.IsAShareIndex(symbol) {
+		endpoint, adjustType = "cn/index/candlestick", "normal"
+	}
 	payload := map[string]any{
 		"token":     l.apiKey,
 		"stockCode": l.toLixingerSymbol(symbol), // 单数，复数会 404
-		"type":      "fc_rights",                // 标准前复权，与 eastmoney 一致
+		"type":      adjustType,
 		"startDate": start.Format("2006-01-02"),
 		"endDate":   end.Format("2006-01-02"),
 	}
-	raw, err := l.request("cn/company/candlestick", payload)
+	raw, err := l.request(endpoint, payload)
 	if err != nil {
 		return nil, err
 	}

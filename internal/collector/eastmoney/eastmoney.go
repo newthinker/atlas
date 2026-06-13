@@ -150,6 +150,13 @@ func (e *Eastmoney) isFund(symbol string) bool {
 	if collector.IsAShareIndex(symbol) {
 		return false
 	}
+	// Exchange-listed securities carry a .SH/.SZ suffix — stocks, ETFs and
+	// indexes, never OTC open-end funds (those use .OF). Without this guard,
+	// Shenzhen main-board equities like 000858.SZ 五粮液 / 000423.SZ 东阿阿胶
+	// were misclassified as funds and lost their OHLCV.
+	if strings.HasSuffix(symbol, ".SH") || strings.HasSuffix(symbol, ".SZ") {
+		return false
+	}
 	code, _ := e.parseSymbol(symbol)
 	if len(code) != 6 {
 		return false

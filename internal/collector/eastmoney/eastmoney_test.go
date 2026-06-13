@@ -341,6 +341,11 @@ func TestPureHelpers(t *testing.T) {
 		// not funds — they must take the index secid path, not fund NAV
 		// (regression: FetchHistory("000300.SH") failed as "no history for fund")
 		"000300.SH": false, "000001.SH": false, "399001.SZ": false,
+		// Shenzhen main-board equities (000xxx.SZ) share the leading '0' with
+		// open-end fund codes but carry an exchange suffix → exchange-listed
+		// stocks, never open-end funds (regression: 五粮液/东阿阿胶 routed to
+		// fund NAV path and lost OHLCV).
+		"000858.SZ": false, "000423.SZ": false, "000001.SZ": false,
 	}
 	for sym, want := range fundCases {
 		if got := e.isFund(sym); got != want {
