@@ -14,6 +14,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/collector/eastmoney"
+	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
@@ -31,14 +32,17 @@ var ohlcvCSVHeader = []string{"symbol", "date", "open", "high", "low", "close", 
 
 // toQlibInstrument mirrors scripts/qlib_eval/qlib_eval/symbols.py
 // to_qlib_instrument — keep the two in sync (the contract test shares samples).
-// 600519.SH -> SH600519, 399001.SZ -> SZ399001; every non-A-share symbol is
-// rejected (Phase 1 is A-share only, design §1.1).
+// 600519.SH -> SH600519, 399001.SZ -> SZ399001, 930713.CSI -> CSI930713
+// (中证跨市场指数). Every non-A-share symbol is rejected (Phase 1 is A-share
+// only, design §1.1).
 func toQlibInstrument(symbol string) (string, error) {
 	switch {
 	case strings.HasSuffix(symbol, ".SH"):
 		return "SH" + strings.TrimSuffix(symbol, ".SH"), nil
 	case strings.HasSuffix(symbol, ".SZ"):
 		return "SZ" + strings.TrimSuffix(symbol, ".SZ"), nil
+	case strings.HasSuffix(symbol, ".CSI"):
+		return "CSI" + strings.TrimSuffix(symbol, ".CSI"), nil
 	}
 	return "", fmt.Errorf("not an A-share symbol: %s", symbol)
 }
@@ -157,7 +161,8 @@ func resolveOHLCVSymbols(flag []string, watchlist []config.WatchlistItem) ([]str
 	}
 	var shares []string
 	for _, item := range watchlist {
-		if strings.HasSuffix(item.Symbol, ".SH") || strings.HasSuffix(item.Symbol, ".SZ") {
+		if strings.HasSuffix(item.Symbol, ".SH") || strings.HasSuffix(item.Symbol, ".SZ") ||
+			strings.HasSuffix(item.Symbol, ".CSI") {
 			shares = append(shares, item.Symbol)
 		}
 	}
@@ -233,6 +238,29 @@ func loadConfigOrDefaults() (*config.Config, error) {
 	return config.Defaults(), nil
 }
 
+// newCollectorRegistry builds the CLI collector registry: yahoo, eastmoney and
+// crypto. When the config carries an enabled Lixinger key, Lixinger is wired as
+// eastmoney's A-share fallback (mirrors serve.go) so that history degrades to
+// the Lixinger candlestick API when the eastmoney kline endpoint is unreachable
+// (index → cn/index/candlestick, stock → company). Without --config the API key
+// is absent and the fallback stays off.
+func newCollectorRegistry(cfg *config.Config) *collector.Registry {
+	reg := collector.NewRegistry()
+	reg.Register(yahoo.New())
+
+	em := eastmoney.New()
+	if lc, ok := cfg.Collectors["lixinger"]; ok && lc.Enabled && lc.APIKey != "" {
+		retry := true
+		if v, ok := lc.Extra["retry"].(bool); ok {
+			retry = v
+		}
+		em.SetLixingerFallback(lixinger.New(lc.APIKey, lixinger.WithRetry(retry)))
+	}
+	reg.Register(em)
+	reg.Register(crypto.New())
+	return reg
+}
+
 func runExportOHLCV(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfigOrDefaults()
 	if err != nil {
@@ -246,10 +274,7 @@ func runExportOHLCV(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	reg := collector.NewRegistry()
-	reg.Register(yahoo.New())
-	reg.Register(eastmoney.New())
-	reg.Register(crypto.New())
+	reg := newCollectorRegistry(cfg)
 
 	deps := ohlcvDeps{
 		provider: registryProvider{reg: reg},

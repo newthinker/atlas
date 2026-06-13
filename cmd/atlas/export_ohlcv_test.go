@@ -74,6 +74,7 @@ func TestToQlibInstrument_Contract(t *testing.T) {
 		{"000300.SH", "SH000300"}, // 与 symbols.py tests 同样本
 		{"600519.SH", "SH600519"},
 		{"399001.SZ", "SZ399001"},
+		{"930713.CSI", "CSI930713"}, // 中证跨市场指数（.CSI）
 	}
 	for _, c := range cases {
 		got, err := toQlibInstrument(c.in)
