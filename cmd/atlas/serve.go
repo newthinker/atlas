@@ -104,10 +104,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		application.RegisterCollector(maybeCache(yahooCollector, cacheEnabled, cacheTTL))
 	}
 
-	// Create Lixinger collector if configured (used as fallback for Eastmoney)
+	// Create Lixinger collector if configured (used as fallback for Eastmoney).
+	// retry 开关默认开启（遵循 SKILL.md 退避策略），可在配置中关闭。
 	var lixingerCollector *lixinger.Lixinger
 	if collectorCfg, ok := cfg.Collectors["lixinger"]; ok && collectorCfg.Enabled && collectorCfg.APIKey != "" {
-		lixingerCollector = lixinger.New(collectorCfg.APIKey)
+		retry := true
+		if v, ok := collectorCfg.Extra["retry"].(bool); ok {
+			retry = v
+		}
+		lixingerCollector = lixinger.New(collectorCfg.APIKey, lixinger.WithRetry(retry))
 		log.Info("lixinger collector initialized as fallback for eastmoney")
 	}
 

@@ -29,6 +29,7 @@ collectors:
     api_key: "${LIXINGER_API_KEY}"
     markets: ["CN_A"]
     interval: "24h"
+    retry: true   # 429/5xx 退避重试（1/2/4/8/16s，最多5次）；设 false 关闭
 
 # Trading strategies
 strategies:

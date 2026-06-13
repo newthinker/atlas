@@ -101,6 +101,10 @@ request(endpoint string, payload any) ([]byte, error)
 | `FetchValuationPercentile`（个股） | `cn/company/fundamental/non_financial` | 仅经统一信封修复即生效 |
 | `FetchValuationPercentile`（指数） | `cn/index/fundamental` | 指标 `pe_ttm.y{N}.mcw.cvpos`；`digFloat` 路径加 `mcw` 层 |
 
+> QA 实测修正（2026-06-13）`endpointFor` 端点（原为 spec §2.4 未冻结候选值）：
+> - 港股个股：`hk/company/fundamental` 实测 404 → 正确端点 **`hk/company/fundamental/non_financial`**（00700 实测 200，返回 `pe_ttm.y5.cvpos`）。
+> - 美股个股：`us/company/fundamental` 实测 404，理杏仁开放 API **无美股个股基本面端点** → `endpointFor` 应对美股个股返回空端点（调用方降级「分位不可用」），与商品/加密一致。美股仅 `us/index/*` 可用。
+
 > ROE 保留字段置零，不改 `core.Fundamental` 类型，避免影响其他 collector。
 
 ### 4. 基金 `fund.go`（多接口聚合）
@@ -109,7 +113,9 @@ request(endpoint string, payload any) ([]byte, error)
 |---|---|---|
 | `FetchFundHistory` | `cn/fund/net-value` | 单数 `stockCode`；字段 `netValue`；RFC3339 |
 | `FetchFundQuote` | `cn/fund/net-value` + `fetchFundInfo` | 取最近一条净值当最新价 |
-| `fetchFundInfo` | 聚合 4 接口 | `profile`(c_name/f_c_name/inception_date/op_mode) + `manager`(现任) + `drawdown`(最大回撤) + `net-value`(最新净值)；AnnualizedReturn 与 FundSize 无直接字段，本轮留空（不自算）；**任一子接口失败不致命，缺哪个留空哪个** |
+| `fetchFundInfo` | 聚合 4 接口 | `profile`(**Name=`e_t_short_name` 基金简称；`c_name` 是托管行不可当基金名**；ManagementCompany=`f_c_name`；inception_date；op_mode) + `manager`(现任，`data[].managers[]` 取无 `departureDate` 者) + `drawdown`(最大回撤) + `net-value`(最新净值)；AnnualizedReturn 与 FundSize 无直接字段，本轮留空（不自算）；**任一子接口失败不致命，缺哪个留空哪个**；**须有 apiKey 守卫** |
+
+> QA 实测修正（2026-06-13）：`cn/fund/profile` 的 `c_name`=托管行（如「中国银行股份有限公司」），`e_t_short_name`=基金简称（如「白酒基金LOF」）。原 spec 误将 `c_name` 当基金名。`cn/fund/manager` 实测返回 nested `data[].managers[]`（含 `departureDate`），实现正确。
 
 ## 数据流
 
