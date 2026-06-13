@@ -8,14 +8,14 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 )
 
-// usHKIndexCodes maps phase-1 international index symbols to Lixinger codes.
-// Candidate values — verify against the basic-info/samples API on first
-// implementation day and freeze (design §2.4).
+// usHKIndexCodes maps supported international index symbols to Lixinger codes.
+// Frozen against the live us/index & hk/index listing APIs (2026-06-13): the
+// Lixinger open API US-index universe contains only the S&P 500 (.INX) — Dow
+// Jones (^DJI) and Nasdaq Composite (^IXIC) are NOT covered, so they are
+// intentionally absent and degrade to "percentile unavailable".
 var usHKIndexCodes = map[string]struct{ endpoint, code string }{
-	"^GSPC": {"us/index/fundamental", ".INX"}, // live: SPX 返回空 data；.INX 才有数据
-	"^IXIC": {"us/index/fundamental", "COMP"},
-	"^DJI":  {"us/index/fundamental", "DJI"},
-	"^HSI":  {"hk/index/fundamental", "HSI"},
+	"^GSPC": {"us/index/fundamental", ".INX"}, // 标普500；live 验证（SPX 返回空，.INX 有数据）
+	"^HSI":  {"hk/index/fundamental", "HSI"},  // 恒生指数；live 验证
 }
 
 // endpointFor returns the Lixinger fundamental endpoint (relative path) and the

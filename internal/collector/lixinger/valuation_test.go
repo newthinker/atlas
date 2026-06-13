@@ -40,6 +40,8 @@ func TestEndpointFor(t *testing.T) {
 		{"AAPL", "", ""}, // 美股个股：理杏仁开放 API 无端点 → 降级
 		{"^GSPC", "us/index/fundamental", ".INX"},
 		{"^HSI", "hk/index/fundamental", "HSI"},
+		{"^DJI", "", ""},  // 道指：理杏仁开放 API 不覆盖 → 降级
+		{"^IXIC", "", ""}, // 纳指综合：理杏仁开放 API 不覆盖 → 降级
 		{"GC=F", "", ""},
 	}
 	for _, c := range cases {
