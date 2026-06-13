@@ -1,0 +1,64 @@
+{
+  "id": "TASK-006",
+  "title": "config 美股 watchlist + 端到端验收收尾",
+  "description": "configs/config.yaml：HK 指数块之后追加 8 个股（AAPL/MSFT/NVDA/GOOGL/AMZN/META/JNJ/JPM，type 股票，strategies [price_percentile, pe_percentile]）+ ^GSPC（type 指数，strategies [price_percentile]），须与 SIGNAL_SYMBOLS_US 一致。收尾验收：go build + go test ./cmd/atlas/ + .venv pytest 全量；export-signals 对 AAPL,^GSPC 产出非空 CSV（smoke）；运行 code-simplifier sub-agent 简化全部改动文件；端到端 make qlib-data-us && make signal-eval-us 产出非空 markdown 报告（region=us 验收，异常则 --region us 回退 cn 并记录）。依据计划 Task 6。",
+  "module": "configs",
+  "complexity": "medium",
+  "estimated_files": [
+    "configs/config.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "config.yaml 含 8 个美股个股（AAPL/MSFT/NVDA/GOOGL/AMZN/META/JNJ/JPM）+ ^GSPC 指数，字段与计划一致",
+      "export-signals --symbols AAPL,^GSPC --strategies price_percentile,ma_crossover 产出非空 CSV（header + AAPL/^GSPC 信号行）",
+      "config 美股集与 Makefile SIGNAL_SYMBOLS_US 一致（裸 ticker + ^GSPC）"
+    ],
+    "boundary": [
+      "go build -o bin/atlas ./cmd/atlas 通过；CN/HK watchlist 块不变"
+    ],
+    "error_handling": [
+      {
+        "desc": "端到端必先记录 region=us 真实运行结果（成功 or 具体报错）；仅在贴出 us 失败证据后方可 --region us 回退 cn，回退决定写入提交信息（设计 §4.1；防 region 参数化沦为未验证死代码）",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./cmd/atlas/ 与 .venv pytest scripts/qlib_eval/tests/ 全量全绿；pytest 仍 qlib-free",
+        "verify_by": "test"
+      },
+      {
+        "desc": "code-simplifier 已对全部改动文件运行且简化结果已纳入提交",
+        "verify_by": "review"
+      },
+      {
+        "desc": "make qlib-data-us && make signal-eval-us 产出非空 markdown 报告（5/20/60 日相对 ^GSPC 超额）",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-002",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "configs"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

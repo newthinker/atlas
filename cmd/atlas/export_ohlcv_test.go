@@ -80,6 +80,12 @@ func TestToQlibInstrument_Contract(t *testing.T) {
 		{"2800.HK", "HK02800"},      // 港股 ETF
 		{"^HSI", "HSI"},             // 恒生指数
 		{"^HSCE", "HSCEI"},          // 国企指数（HSCEI）
+		{"AAPL", "AAPL"},
+		{"MSFT", "MSFT"},
+		{"GOOGL", "GOOGL"},
+		{"^GSPC", "GSPC"},
+		{"^IXIC", "IXIC"},
+		{"^DJI", "DJI"},
 	}
 	for _, c := range cases {
 		got, err := toQlibInstrument(c.in)
@@ -87,7 +93,7 @@ func TestToQlibInstrument_Contract(t *testing.T) {
 			t.Errorf("toQlibInstrument(%q) = (%q,%v), want %q", c.in, got, err, c.want)
 		}
 	}
-	for _, bad := range []string{"AAPL", "^GSPC", "GC=F", "BTC-USDT", "0700.HK.X", "^HSTECH"} {
+	for _, bad := range []string{"GC=F", "BTC-USDT", "0700.HK.X", "^HSTECH", "AAPL123", "AAPL.B", "aapl", "ABCDEF", "TOOLONG"} {
 		if _, err := toQlibInstrument(bad); err == nil {
 			t.Errorf("toQlibInstrument(%q) should reject non-A-share", bad)
 		}
@@ -373,7 +379,7 @@ func TestRunExportOHLCV_RejectsUnknownMarket(t *testing.T) {
 	exportOHLCVSymbols = []string{"0700.HK", "^HSI"} // 合法集合，证明拦截不是别的分支
 	cfgFile = ""
 
-	for _, m := range []string{"us", "HK", "cn ", "", "crypto"} {
+	for _, m := range []string{"HK", "cn ", "", "crypto"} { // 移除 "us"：US 已成合法市场
 		exportOHLCVMarket = m
 		err := runExportOHLCV(exportOHLCVCmd, nil)
 		if err == nil {
@@ -382,5 +388,33 @@ func TestRunExportOHLCV_RejectsUnknownMarket(t *testing.T) {
 		if !strings.Contains(err.Error(), "unknown market") {
 			t.Errorf("--market %q error must mention unknown market, got: %v", m, err)
 		}
+	}
+}
+
+// --- TASK-002 US market 分支 ---
+// functional[0] "benchmarkForMarket(us)→^GSPC，cn 不回归"                          → TestBenchmarkForMarket_US
+// functional[1] "inMarket: 美股裸 ticker + 三大指数判 true，A股/港股/期货/带后缀拒绝" → TestInMarket_US
+
+func TestBenchmarkForMarket_US(t *testing.T) {
+	if got := benchmarkForMarket("us"); got != "^GSPC" {
+		t.Errorf("benchmarkForMarket(us) = %q, want ^GSPC", got)
+	}
+	if got := benchmarkForMarket("cn"); got != "000300.SH" {
+		t.Errorf("cn regressed: %q", got)
+	}
+}
+
+func TestInMarket_US(t *testing.T) {
+	in := map[string]bool{
+		"AAPL": true, "MSFT": true, "GOOGL": true, "^GSPC": true, "^IXIC": true, "^DJI": true,
+		"600519.SH": false, "0700.HK": false, "^HSI": false, "GC=F": false, "AAPL.B": false,
+	}
+	for sym, want := range in {
+		if got := inMarket(sym, "us"); got != want {
+			t.Errorf("inMarket(%q, us) = %v, want %v", sym, got, want)
+		}
+	}
+	if !inMarket("600519.SH", "cn") || !inMarket("0700.HK", "hk") {
+		t.Error("cn/hk inMarket regressed")
 	}
 }

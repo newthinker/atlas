@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -26,21 +27,29 @@ import (
 const benchmarkSymbol = "000300.SH"
 
 // benchmarkForMarket returns the qlib-bundle benchmark per market: A-share uses
-// CSI 300 (000300.SH), HK uses the Hang Seng Index (^HSI). The benchmark must
-// fetch successfully or the export is fatal —评估无基准无意义。
+// CSI 300 (000300.SH), HK uses the Hang Seng Index (^HSI), US uses the S&P 500
+// (^GSPC). The benchmark must fetch successfully or the export is fatal —评估无
+// 基准无意义。
 func benchmarkForMarket(market string) string {
-	if market == "hk" {
+	switch market {
+	case "hk":
 		return "^HSI"
+	case "us":
+		return "^GSPC"
 	}
 	return benchmarkSymbol
 }
 
 // inMarket reports whether a watchlist symbol belongs to a market's qlib bundle.
-// HK = .HK securities (stocks/ETF/REIT) + the two supported HK indexes; CN =
-// .SH/.SZ equities and .SH/.SZ/.CSI indexes.
+// HK = .HK securities (stocks/ETF/REIT) + the two supported HK indexes; US =
+// bare tickers (usTickerRe) + the three supported US indexes; CN = .SH/.SZ
+// equities and .SH/.SZ/.CSI indexes.
 func inMarket(symbol, market string) bool {
-	if market == "hk" {
+	switch market {
+	case "hk":
 		return strings.HasSuffix(symbol, ".HK") || symbol == "^HSI" || symbol == "^HSCE"
+	case "us":
+		return symbol == "^GSPC" || symbol == "^IXIC" || symbol == "^DJI" || usTickerRe.MatchString(symbol)
 	}
 	return strings.HasSuffix(symbol, ".SH") ||
 		strings.HasSuffix(symbol, ".SZ") ||
@@ -52,11 +61,18 @@ func inMarket(symbol, market string) bool {
 // never multiplies $factor (spec §已钉死口径).
 var ohlcvCSVHeader = []string{"symbol", "date", "open", "high", "low", "close", "volume", "factor"}
 
+// usTickerRe matches a bare US ticker: 1-5 uppercase letters. Anchored full-match
+// so AAPL123 / AAPL.B are rejected. Mirrored in symbols.py (re.fullmatch).
+var usTickerRe = regexp.MustCompile("^[A-Z]{1,5}$")
+
 // toQlibInstrument mirrors scripts/qlib_eval/qlib_eval/symbols.py
 // to_qlib_instrument — keep the two in sync (the contract test shares samples).
 // A-share: 600519.SH->SH600519, 399001.SZ->SZ399001, 930713.CSI->CSI930713.
 // HK: 0700.HK->HK00700 (HK + 5位补零), 2800.HK->HK02800; index ^HSI->HSI,
-// ^HSCE->HSCEI. Every other symbol is rejected.
+// ^HSCE->HSCEI.
+// US: bare ticker (1-5 uppercase letters) is identity (AAPL->AAPL); the three
+// supported US indexes drop the ^ prefix (^GSPC->GSPC, ^IXIC->IXIC, ^DJI->DJI).
+// Every other symbol is rejected.
 func toQlibInstrument(symbol string) (string, error) {
 	switch {
 	case strings.HasSuffix(symbol, ".SH"):
@@ -71,8 +87,12 @@ func toQlibInstrument(symbol string) (string, error) {
 		return "HSI", nil
 	case symbol == "^HSCE":
 		return "HSCEI", nil
+	case symbol == "^GSPC", symbol == "^IXIC", symbol == "^DJI":
+		return strings.TrimPrefix(symbol, "^"), nil // 美股指数剥离 ^
+	case usTickerRe.MatchString(symbol):
+		return symbol, nil // 美股裸 ticker 恒等
 	}
-	return "", fmt.Errorf("not a supported A-share/HK symbol: %s", symbol)
+	return "", fmt.Errorf("not a supported A-share/HK/US symbol: %s", symbol)
 }
 
 type exportOHLCVParams struct {
@@ -223,21 +243,21 @@ var (
 var exportOHLCVCmd = &cobra.Command{
 	Use:   "export-ohlcv",
 	Short: "Export per-instrument OHLCV CSVs in qlib dump_bin convention",
-	Long: "Export one qlib-convention OHLCV CSV per A-share instrument for the " +
-		"offline qlib data bundle. With no --symbols the set defaults to the " +
-		"config watchlist's A-shares plus the benchmark; the benchmark must always " +
-		"be present for the evaluation to be meaningful.",
+	Long: "Export one qlib-convention OHLCV CSV per instrument for the offline " +
+		"qlib data bundle. With no --symbols the set defaults to the config " +
+		"watchlist's symbols for the selected --market plus the benchmark; the " +
+		"benchmark must always be present for the evaluation to be meaningful.",
 	RunE: runExportOHLCV,
 }
 
 func init() {
 	exportOHLCVCmd.Flags().StringSliceVar(&exportOHLCVSymbols, "symbols", nil,
-		"Comma-separated symbols (default: watchlist A-shares + benchmark)")
+		"Comma-separated symbols (default: the market's watchlist symbols + benchmark)")
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVFrom, "from", "", "Start date YYYY-MM-DD (required)")
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVTo, "to", "", "End date YYYY-MM-DD (default: today)")
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVOutDir, "out-dir", "qlib_csv", "Output directory for per-instrument CSVs")
 	exportOHLCVCmd.Flags().StringVar(&exportOHLCVMarket, "market", "cn",
-		"Market bundle: cn (A-share) or hk (Hong Kong)")
+		"Market bundle: cn (A-share), hk (Hong Kong) or us (US)")
 
 	exportOHLCVCmd.MarkFlagRequired("from")
 
@@ -299,8 +319,8 @@ func runExportOHLCV(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if exportOHLCVMarket != "cn" && exportOHLCVMarket != "hk" {
-		return fmt.Errorf("unknown market %q (want cn or hk)", exportOHLCVMarket)
+	if exportOHLCVMarket != "cn" && exportOHLCVMarket != "hk" && exportOHLCVMarket != "us" {
+		return fmt.Errorf("unknown market %q (want cn, hk or us)", exportOHLCVMarket)
 	}
 	symbols, err := resolveOHLCVSymbols(exportOHLCVSymbols, cfg.Watchlist, exportOHLCVMarket)
 	if err != nil {

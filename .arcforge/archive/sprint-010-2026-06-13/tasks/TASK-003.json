@@ -1,0 +1,51 @@
+{
+  "id": "TASK-003",
+  "title": "symbols.py 美股对称镜像",
+  "description": "scripts/qlib_eval/qlib_eval/symbols.py：顶部加 import re；to_qlib_instrument 的 ^HSCE 分支之后、raise ValueError 之前插入 US 分支：symbol in (^GSPC,^IXIC,^DJI)→return symbol[1:]；re.fullmatch(r'[A-Z]{1,5}', symbol)→return symbol（全串锚定，与 Go ^[A-Z]{1,5}$ 等价）；raise ValueError 文案与 docstring 改含 US。测试 test_symbols.py：test_to_qlib_instrument accept 追加 AAPL/GOOGL/^GSPC/^IXIC/^DJI；reject 循环移除 'AAPL'/'^GSPC' 补锚定负向（GC=F/BTC-USDT/^HSTECH/AAPL123/AAPL.B/aapl/TOOLONG）。依据计划 Task 3。venv：scripts/qlib_eval/.venv/bin/python -m pytest。先 RED 后 GREEN，并跑 Go 契约测试确认两侧对称。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/symbols.py",
+    "scripts/qlib_eval/tests/test_symbols.py",
+    "scripts/qlib_eval/tests/test_report.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "to_qlib_instrument('AAPL')=='AAPL'、('GOOGL')=='GOOGL'（裸 ticker 恒等）",
+      "to_qlib_instrument('^GSPC')=='GSPC'、('^IXIC')=='IXIC'、('^DJI')=='DJI'（指数剥离 ^）",
+      "用 re.fullmatch 全串锚定，与 Go usTickerRe 输出对称（同样本同结果）"
+    ],
+    "boundary": [
+      "GC=F/BTC-USDT/^HSTECH/AAPL123/AAPL.B/aapl/ABCDEF(6字符)/TOOLONG 均 raise ValueError（re.fullmatch 锚定，off-by-one 守门）",
+      "既有 CN/HK accept 与 reject 样本不回归"
+    ],
+    "error_handling": [
+      "raise ValueError 文案与 docstring 含 US 说明"
+    ],
+    "non_functional": [
+      {
+        "desc": ".venv pytest test_symbols.py 全绿 且 go test TestToQlibInstrument_Contract 全绿（跨语言契约对称）；pytest 全程 qlib-free",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

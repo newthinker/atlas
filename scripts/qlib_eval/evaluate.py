@@ -116,6 +116,7 @@ def _parse_args(argv):
     p.add_argument("--max-defer", type=int, default=5, help="入场顺延上限（交易日近似）")
     p.add_argument("--benchmark", default="000300.SH",
                    help="基准 symbol（atlas 形式：A股 000300.SH / 港股 ^HSI）")
+    p.add_argument("--region", default="cn", help="qlib region：cn（A股/港股）/ us（美股）")
     return p.parse_args(argv)
 
 
@@ -160,7 +161,8 @@ def main(argv=None) -> int:
     start = signals["date"].min().strftime("%Y-%m-%d")
     end = signals["date"].max().strftime("%Y-%m-%d")
     source = QlibPriceSource(provider_uri=os.path.expanduser(args.qlib_dir),
-                             start=start, end=end, benchmark=args.benchmark)
+                             start=start, end=end, benchmark=args.benchmark,
+                             region=args.region)
 
     outcomes, stats = collect_outcomes(signals, source, max_defer=args.max_defer)
     report = render_report(aggregate(outcomes), stats, _meta(args, len(signals)))
