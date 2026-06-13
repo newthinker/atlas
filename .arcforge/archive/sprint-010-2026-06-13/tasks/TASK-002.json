@@ -1,0 +1,49 @@
+{
+  "id": "TASK-002",
+  "title": "benchmarkForMarket / inMarket / market 校验的美股分支",
+  "description": "cmd/atlas/export_ohlcv.go：benchmarkForMarket 加 case \"us\"→\"^GSPC\"（保持 hk→^HSI、default→benchmarkSymbol）；inMarket 加 case \"us\"→ symbol∈{^GSPC,^IXIC,^DJI}||usTickerRe.MatchString(symbol)（复用 TASK-001 的 usTickerRe）；runExportOHLCV 的 --market 校验放开 us（!=cn&&!=hk&&!=us → error 'unknown market %q (want cn, hk or us)'）；--market flag help 改 'Market bundle: cn (A-share), hk (Hong Kong) or us (US)'；exportOHLCVCmd.Long 与 --symbols help 去掉写死 'A-share' 改泛指。测试：TestRunExportOHLCV_RejectsUnknownMarket 移除 'us'（保留 HK/cn /\"\"/crypto）；新增 TestBenchmarkForMarket_US、TestInMarket_US（含 cn/hk 不回归断言）。依据计划 Task 2。先改测试确认 FAIL 再实现，测试与实现同提交。",
+  "module": "cmd/atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "benchmarkForMarket(\"us\")==\"^GSPC\"（TestBenchmarkForMarket_US）",
+      "inMarket 对 AAPL/MSFT/GOOGL/^GSPC/^IXIC/^DJI 在 us 下为 true；对 600519.SH/0700.HK/^HSI/GC=F/AAPL.B 为 false（TestInMarket_US）",
+      "--market us 通过校验；未知市场仍 reject，error 文案 'want cn, hk or us'"
+    ],
+    "boundary": [
+      "benchmarkForMarket(\"cn\")==\"000300.SH\"、inMarket(600519.SH,cn)/inMarket(0700.HK,hk) 不回归",
+      "TestRunExportOHLCV_RejectsUnknownMarket 已移除 'us'，仍 reject HK(大写)/'cn '(带空格)/''/crypto"
+    ],
+    "error_handling": [
+      "--market flag help 与 unknown-market error 文案均含 us"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./cmd/atlas/ -v 全包全绿（cn/hk 用例零回归）；先 RED 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

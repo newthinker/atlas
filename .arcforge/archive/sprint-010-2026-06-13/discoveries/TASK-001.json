@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-001",
+  "owner": "dev-agent-1",
+  "key_findings": [
+    "usTickerRe = regexp.MustCompile(\"^[A-Z]{1,5}$\") 已作为包级 var 引入 cmd/atlas/export_ohlcv.go，置于 toQlibInstrument 上方，是 TASK-002 inMarket 须复用的单一真相源（勿重定义）。",
+    "US 指数分支顺序：^GSPC/^IXIC/^DJI 显式 case 在 usTickerRe 之前（^ 不在 [A-Z] 内本不冲突，显式优先保意图清晰）。",
+    "观察（非阻塞）：TestExportOHLCV_NonAShareRejectedIntoSummary 仍用 AAPL 作样本；AAPL 现为合法 US ticker，但该测试跑 CN 市场导出逻辑、AAPL 无注入数据，故仍降级进 failure summary（经 empty-bars 而非符号拒绝），断言仍成立。TASK-002/003 可酌情换样本，本 sprint 不强制。"
+  ],
+  "decisions": [
+    {"decision": "import regexp 插入 path/filepath 之后 slices 之前", "rationale": "Go stdlib 字母序"},
+    {"decision": "error 文案改 'not a supported A-share/HK/US symbol'", "rationale": "计划要求含 US"}
+  ],
+  "files_modified": ["cmd/atlas/export_ohlcv.go", "cmd/atlas/export_ohlcv_test.go"],
+  "interfaces_exposed": [
+    "usTickerRe（包级 var，^[A-Z]{1,5}$，给 TASK-002 复用）",
+    "toQlibInstrument US 行为：裸 ticker 恒等；^GSPC/^IXIC/^DJI 剥 ^；其余 reject"
+  ],
+  "verification": "RED：6 个 US accept 用例 FAIL（报 not a supported A-share/HK）；GREEN：go test ./cmd/atlas/ -v 全包 PASS（ok 0.298s，CN/HK golden/resolver/benchmark/market 用例不回归）；go vet ./cmd/atlas/ exit 0"
+}

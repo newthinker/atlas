@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-006",
+  "owner": "dev-agent-1 + Leader（收口）",
+  "key_findings": [
+    "config.yaml 美股 watchlist 已加：8 个股（AAPL/MSFT/NVDA/GOOGL/AMZN/META/JNJ/JPM）+ ^GSPC，与 SIGNAL_SYMBOLS_US 逐字一致，缩进/风格对齐既有 HK 条目。",
+    "smoke：export-signals AAPL,^GSPC 产 1308 行 CSV（AAPL 721 + ^GSPC 587，两策略齐全）。",
+    "code-simplifier：评估全部改动文件，结论『无需简化』（忠实镜像 HK，强改会破坏跨语言对称），复跑 go test/pytest/vet 全绿。",
+    "★ 端到端 region=us 真实跑通（非回退）：make qlib-data-us 建 atlas_us 包 9 instruments（^GSPC→GSPC 经 build_data 映射，实证 reviewer #5 风险化解，区间 2021-01-04~2026-06-12）；make signal-eval-us 以 qlib region=us 初始化成功，产出非空报告 reports/signal-eval-20260613.md（70 行，10155 信号，基准 ^GSPC，5/20/60 日相对超额齐全，数据缺口 0，非 A 股符号『无』）。",
+    "region=us 未触发任何 qlib 报错/读空，无需 design §4.1 的 cn 回退——region 参数化在真实美股包上验证有效，非死代码。"
+  ],
+  "decisions": [
+    {"decision": "保留 --region us（不回退 cn）", "rationale": "真实 atlas_us 包 region=us 跑通，报告非空，正面证据满足强化 DoD"}
+  ],
+  "files_modified": ["configs/config.yaml"],
+  "interfaces_exposed": ["完整美股 signal-eval 管线：make qlib-data-us / make signal-eval-us"],
+  "verification": "go build ok；go test ./cmd/atlas/ ok 3.325s；.venv pytest 63 passed；go vet ./... 净；smoke CSV 1308 行；端到端 region=us 报告非空（10155 信号 / ^GSPC / 5·20·60 超额）"
+}

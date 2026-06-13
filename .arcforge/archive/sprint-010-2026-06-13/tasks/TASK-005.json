@@ -1,0 +1,51 @@
+{
+  "id": "TASK-005",
+  "title": "Makefile 美股 target + 守门测试",
+  "description": "Makefile：.PHONY 首行末尾追加 'signal-eval-us qlib-data-us'；变量块（HK 变量后）加 QLIB_CSV_US_DIR?=qlib_csv_us、QLIB_DATA_US_DIR?=$(HOME)/.qlib/qlib_data/atlas_us、SIGNAL_SYMBOLS_US?=AAPL,MSFT,NVDA,GOOGL,AMZN,META,JNJ,JPM,^GSPC；新增 qlib-data-us（export-ohlcv --market us → build_data.py --target-dir atlas_us --expected-symbols $(SIGNAL_SYMBOLS_US)）与 signal-eval-us（export-signals --symbols $(SIGNAL_SYMBOLS_US) → evaluate.py --benchmark ^GSPC --region us）两 target，走 $(QLIB_PY)/VENV_PYTHON。测试 test_makefile.py 追加（沿用 _target_block/_var_defs/_expand/VENV_PYTHON）：test_signal_eval_us_target_exists_and_correct、test_qlib_data_us_target_exists、test_us_targets_in_phony。依据计划 Task 5。venv pytest。先 RED 后 GREEN。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "Makefile",
+    "scripts/qlib_eval/tests/test_makefile.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "signal-eval-us target 存在且展开含 '--benchmark ^GSPC'、'--region us'、'atlas_us'、VENV_PYTHON、evaluate.py（test_signal_eval_us_target_exists_and_correct）",
+      "qlib-data-us target 存在且展开含 '--market us'、'atlas_us'、build_data.py（test_qlib_data_us_target_exists）",
+      ".PHONY 首行同时含 signal-eval-us 与 qlib-data-us（test_us_targets_in_phony）"
+    ],
+    "boundary": [
+      "新增变量用 ?= 可被环境覆盖；SIGNAL_SYMBOLS_US 与 config US watchlist 一致（裸 ticker + ^GSPC）",
+      "既有 hk/cn target 与 test_makefile.py 既有用例不回归"
+    ],
+    "error_handling": [
+      "两 target 走 venv python（$(QLIB_PY)/VENV_PYTHON），非裸 python（损坏的系统 python3）"
+    ],
+    "non_functional": [
+      {
+        "desc": ".venv pytest test_makefile.py 全绿；先 RED 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

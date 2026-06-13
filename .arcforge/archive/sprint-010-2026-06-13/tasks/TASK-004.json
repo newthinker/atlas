@@ -1,0 +1,46 @@
+{
+  "id": "TASK-004",
+  "title": "prices.py region 参数化 + evaluate.py --region",
+  "description": "scripts/qlib_eval/qlib_eval/prices.py：QlibPriceSource.__init__ 签名末位加 region='cn'，存 self._region；_ensure_init 的 qlib.init 用 region=self._region。scripts/qlib_eval/evaluate.py：_parse_args 加 --region（default='cn', help 'qlib region：cn（A股/港股）/ us（美股）'）；main 构造 QlibPriceSource 透传 region=args.region。测试 test_prices.py：test_qlib_price_source_stores_region（region='us'→_region=='us'）、test_qlib_price_source_region_defaults_cn（不传→_region=='cn'）；构造不调 _ensure_init 不 import qlib。依据计划 Task 4。venv pytest。先 RED 后 GREEN。",
+  "module": "scripts/qlib_eval",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/prices.py",
+    "scripts/qlib_eval/evaluate.py",
+    "scripts/qlib_eval/tests/test_prices.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "QlibPriceSource(...,region='us') 后 _region=='us'（test_qlib_price_source_stores_region）",
+      "_ensure_init 调用 qlib.init(provider_uri=..., region=self._region)（非硬编码 cn）",
+      "evaluate.py 有 --region 参数（default cn），main 透传到 QlibPriceSource(region=args.region)"
+    ],
+    "boundary": [
+      "不传 region 时 _region=='cn'（向后兼容，test_qlib_price_source_region_defaults_cn）",
+      "构造 QlibPriceSource 不触发 qlib import（no-qlib-at-module-level 不回归）"
+    ],
+    "error_handling": [
+      "region 缺省即 cn，CN/HK 既有调用零行为变化"
+    ],
+    "non_functional": [
+      {
+        "desc": ".venv pytest scripts/qlib_eval/tests/ 全绿（既有用例不回归）；全程 qlib-free",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "scripts/qlib_eval"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

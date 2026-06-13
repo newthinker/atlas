@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-004",
+  "owner": "dev-agent-2",
+  "key_findings": [
+    "_ensure_init 现有写法为 qlib.init(provider_uri=self._provider_uri, region=\"cn\")，与计划假设一致；仅把硬编码 region=\"cn\" 改为 region=self._region，其余实参不动 → 默认 cn 时行为与改前完全等价，CN/HK 零回归。",
+    "QlibPriceSource(region=...) 默认 cn，存 self._region；evaluate.py 新增 --region（default cn）main 透传。",
+    "pytest 全程 qlib-free 保持：新测试仅断言字段不调 _ensure_init；守门 test_no_qlib_at_module_level / test_import_evaluate_no_qlib 同 run 通过。"
+  ],
+  "decisions": [
+    {"decision": "region: str = \"cn\" 带类型注解、注释逐字段", "rationale": "与现有 benchmark 形参风格一致"},
+    {"decision": "self._region 插在 self._benchmark 之后 self._initialized 之前", "rationale": "现有字段顺序"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/prices.py", "scripts/qlib_eval/evaluate.py", "scripts/qlib_eval/tests/test_prices.py"],
+  "interfaces_exposed": [
+    "QlibPriceSource(provider_uri, start, end, benchmark='000300.SH', region='cn')",
+    "evaluate.py --region（default cn，透传 QlibPriceSource）"
+  ],
+  "verification": "RED：region 两测试 FAIL（TypeError unexpected kwarg region / AttributeError _region）；GREEN：.venv pytest scripts/qlib_eval/tests/ → 60 passed in 0.40s（含 2 新 region 测试 + no-qlib 守门）"
+}

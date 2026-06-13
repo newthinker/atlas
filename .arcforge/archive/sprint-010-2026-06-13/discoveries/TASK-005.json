@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-005",
+  "owner": "dev-agent-2",
+  "key_findings": [
+    "两 US target 镜像 hk：共享变量沿用现有 QLIB_PY/SIGNAL_FROM/SIGNAL_TO/SIGNAL_OUT；新增 QLIB_CSV_US_DIR/QLIB_DATA_US_DIR(→atlas_us)/SIGNAL_SYMBOLS_US。",
+    "qlib-data-us：export-ohlcv --market us → build_data.py --expected-symbols $(SIGNAL_SYMBOLS_US)（含 ^GSPC，build_data 内经 to_qlib_instrument 映射为 GSPC，与 TASK-003 一致）。",
+    "signal-eval-us：export-signals --symbols $(SIGNAL_SYMBOLS_US) → evaluate.py --benchmark ^GSPC --region us。Python 全走 $(QLIB_PY)=venv。",
+    "make -n 干跑确认变量展开正确（--market us / atlas_us / --benchmark ^GSPC --region us / venv 路径）。"
+  ],
+  "decisions": [
+    {"decision": "复用现有 SIGNAL_FROM/TO/OUT 而非新建", "rationale": "与 hk target 对称，避免变量漂移"}
+  ],
+  "files_modified": ["Makefile", "scripts/qlib_eval/tests/test_makefile.py"],
+  "interfaces_exposed": [
+    "make qlib-data-us、make signal-eval-us（供 TASK-006 端到端）",
+    "SIGNAL_SYMBOLS_US=AAPL,MSFT,NVDA,GOOGL,AMZN,META,JNJ,JPM,^GSPC（须与 config 一致）"
+  ],
+  "verification": "RED：pytest -k us 3 failed；GREEN：pytest test_makefile.py -v → 9 passed（3 新 US + 6 cn/hk 不回归）；make -n 双 target 展开正确"
+}

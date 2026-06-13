@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-003",
+  "owner": "dev-agent-2",
+  "key_findings": [
+    "Python re.fullmatch(r'[A-Z]{1,5}', symbol) 与 Go usTickerRe ^[A-Z]{1,5}$ 等价（fullmatch 隐含首尾锚定）；off-by-one 安全（ABCDEF=6 拒、TOOLONG=7 拒）、大小写敏感（aapl 拒）。",
+    "指数剥离用显式白名单 symbol in (^GSPC,^IXIC,^DJI)（与 Go 同三标的），非泛化剥 ^，避免误收 ^HSTECH。",
+    "跨语言契约对称已实证：Go TestToQlibInstrument_Contract 与 Python test_symbols.py 对相同 US 样本逐字一致。",
+    "连带影响（Leader 授权 scope 扩张同 package）：test_report.py::test_non_ashare_collected_into_data_gaps 原用 AAPL 当不被支持符号 fixture；AAPL 合法后失效。fixture 符号 AAPL→GC=F（:136/:142/:144），测试意图（不可映射→non_ashare/data_gaps 桶、不中断管线）原样保留。"
+  ],
+  "decisions": [
+    {"decision": "re.fullmatch 而非 re.match", "rationale": "隐含全串锚定，与 Go ^...$ 等价，防部分匹配误接"},
+    {"decision": "test_report.py fixture AAPL→GC=F", "rationale": "GC=F 真正不可映射；保留测试意图；Leader 授权同 package 防护性扩张"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/symbols.py", "scripts/qlib_eval/tests/test_symbols.py", "scripts/qlib_eval/tests/test_report.py"],
+  "interfaces_exposed": [
+    "to_qlib_instrument US 对称契约：AAPL→AAPL、^GSPC→GSPC，越界/小写/带后缀 raise ValueError，与 Go toQlibInstrument 逐字一致"
+  ],
+  "verification": "RED：AAPL accept FAIL；GREEN：.venv pytest scripts/qlib_eval/tests/ → 60 passed（含 test_report fixture 修复后消除 1 failed）；Go TestToQlibInstrument_Contract PASS；qlib-free 守门通过"
+}

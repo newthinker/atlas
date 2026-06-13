@@ -1,0 +1,45 @@
+{
+  "id": "TASK-001",
+  "title": "toQlibInstrument 美股分支 + 契约测试 reject→accept 迁移",
+  "description": "cmd/atlas/export_ohlcv.go：import 块加 regexp（字母序，path/filepath 之后 slices 之前）；toQlibInstrument 上方加包级 var usTickerRe = regexp.MustCompile(\"^[A-Z]{1,5}$\")（全串锚定，注释引用 symbols.py 的 re.fullmatch）；^HSCE case 之后加两分支：symbol∈{^GSPC,^IXIC,^DJI}→strings.TrimPrefix(symbol,\"^\")，usTickerRe.MatchString(symbol)→恒等返回；error 文案改 'not a supported A-share/HK/US symbol'；doc 注释补 US 规则。测试 TestToQlibInstrument_Contract：accept cases 追加 6 条 US（AAPL/MSFT/GOOGL/^GSPC/^IXIC/^DJI），reject 列表移除 'AAPL'/'^GSPC' 并补锚定负向样本（GC=F/BTC-USDT/0700.HK.X/^HSTECH/AAPL123/AAPL.B/aapl/TOOLONG）。依据计划 Task 1。严格 TDD：先改测试确认 FAIL 再实现。",
+  "module": "cmd/atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/export_ohlcv.go",
+    "cmd/atlas/export_ohlcv_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "toQlibInstrument(\"AAPL\")==\"AAPL\"、(\"GOOGL\")==\"GOOGL\"、(\"MSFT\")==\"MSFT\"（裸 ticker 恒等，TestToQlibInstrument_Contract accept）",
+      "toQlibInstrument(\"^GSPC\")==\"GSPC\"、(\"^IXIC\")==\"IXIC\"、(\"^DJI\")==\"DJI\"（指数剥离 ^）",
+      "包级 var usTickerRe 为 regexp.MustCompile(\"^[A-Z]{1,5}$\")，供 Task 2 inMarket 复用（单一真相源）"
+    ],
+    "boundary": [
+      "AAPL123 / AAPL.B / aapl / ABCDEF（6字符,off-by-one）/ TOOLONG（7字符）/ ^HSTECH 均被 reject（全串锚定生效，reject 用例报错则不通过）",
+      "CN/HK 既有 accept 样本（如 600519.SH→SH600519、0700.HK→HK0700、^HSI→HSI）不回归"
+    ],
+    "error_handling": [
+      "未匹配任何市场时返回 error，文案含 'A-share/HK/US'（不再只提 A-share/HK）"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./cmd/atlas/ -run TestToQlibInstrument_Contract -v 全绿；先经历 RED（reject 含 AAPL/^GSPC 时 FAIL）再 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

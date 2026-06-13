@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-002",
+  "owner": "dev-agent-1",
+  "key_findings": [
+    "benchmarkForMarket 与 inMarket 由 if market==\"hk\" 单分支重构为 switch market，新增 case \"us\"，default 保持 cn——比 if 链清晰且 cn/hk 不回归。",
+    "inMarket US 分支复用包级 usTickerRe（TASK-001 引入），与 toQlibInstrument 同源；AAPL.B/GC=F 等带后缀/符号被 anchored full-match 拒绝。",
+    "TestRunExportOHLCV_RejectsUnknownMarket 迁移：移除 'us'，保留 HK(大写)/'cn '(空格)/''/'crypto' 仍 reject。",
+    "文案收尾：exportOHLCVCmd.Long、--symbols help、benchmarkForMarket/inMarket doc 由特指 A-share 改泛指。",
+    "观察（非阻塞）：runExportOHLCV 的 us 端到端 resolver 路径无专门集成测试，但底层 resolveOHLCVSymbols/requireBenchmark 经 benchmarkForMarket/inMarket 参数化、已被单测覆盖；DoD 未要求额外集成测试，本 sprint 不补。"
+  ],
+  "decisions": [
+    {"decision": "if→switch 重构 benchmarkForMarket/inMarket", "rationale": "三市场分支清晰、零回归"},
+    {"decision": "复用 usTickerRe 不重定义", "rationale": "单一真相源，与 toQlibInstrument 语义一致"}
+  ],
+  "files_modified": ["cmd/atlas/export_ohlcv.go", "cmd/atlas/export_ohlcv_test.go"],
+  "interfaces_exposed": [
+    "benchmarkForMarket(\"us\")==\"^GSPC\"",
+    "inMarket(sym,\"us\")：^GSPC/^IXIC/^DJI 或 usTickerRe",
+    "--market us 合法；unknown-market error 'want cn, hk or us'；flag help 含 us"
+  ],
+  "verification": "RED：TestBenchmarkForMarket_US/TestInMarket_US FAIL；GREEN：go test ./cmd/atlas/ -v 全绿（ok 0.289s，含新测试 + cn/hk 不回归）；go vet exit 0"
+}
