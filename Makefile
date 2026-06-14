@@ -22,8 +22,8 @@ QLIB_DATA_HK_DIR ?= $(HOME)/.qlib/qlib_data/atlas_hk
 SIGNAL_SYMBOLS_HK ?= 3288.HK,0700.HK,9988.HK,0883.HK,6886.HK,2800.HK,2828.HK,3033.HK,3181.HK,^HSI,^HSCE
 QLIB_CSV_US_DIR  ?= qlib_csv_us
 QLIB_DATA_US_DIR ?= $(HOME)/.qlib/qlib_data/atlas_us
-# 美股 watchlist 标的（atlas 形式）：须与 configs/config.yaml 的美股集（裸 ticker + ^GSPC）一致。
-SIGNAL_SYMBOLS_US ?= AAPL,MSFT,NVDA,GOOGL,AMZN,META,JNJ,JPM,^GSPC
+# 美股 watchlist 标的（atlas 形式）：须与 configs/config.yaml 的美股集（个股 + ETF 裸 ticker + ^GSPC/^IXIC/^DJI 指数）一致。
+SIGNAL_SYMBOLS_US ?= AAPL,MSFT,NVDA,GOOGL,AMZN,META,JNJ,JPM,SPY,QQQ,VOO,VTI,^GSPC,^IXIC,^DJI
 
 # signal-eval 默认读自建包 atlas_cn（单一真相源）：社区包 cn_data 截止 2020-09，
 # 默认 2021-2026 区间产不出结果——本需求的存在理由。覆盖 QLIB_DIR 可回退社区包。
