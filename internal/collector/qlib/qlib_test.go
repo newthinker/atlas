@@ -183,3 +183,53 @@ func TestFetchHistoryNonDailyDelegates(t *testing.T) {
 		t.Fatalf("non-daily should delegate fully, got %+v", got)
 	}
 }
+
+func TestSupportedMarkets(t *testing.T) {
+	got := New(newTestDB(t)).SupportedMarkets()
+	want := map[core.Market]bool{core.MarketUS: false, core.MarketCNA: false, core.MarketHK: false}
+	for _, m := range got {
+		if _, ok := want[m]; ok {
+			want[m] = true
+		}
+	}
+	for m, seen := range want {
+		if !seen {
+			t.Errorf("SupportedMarkets missing %v: got %+v", m, got)
+		}
+	}
+}
+
+func TestLifecycleNoOps(t *testing.T) {
+	c := New(newTestDB(t))
+	if err := c.Init(collector.Config{}); err != nil {
+		t.Errorf("Init should return nil, got %v", err)
+	}
+	if err := c.Start(context.Background()); err != nil {
+		t.Errorf("Start should return nil, got %v", err)
+	}
+	if err := c.Stop(); err != nil {
+		t.Errorf("Stop should return nil, got %v", err)
+	}
+}
+
+func TestWithMaxStalenessOption(t *testing.T) {
+	db := newTestDB(t)
+	seedOHLCV(t, db)
+	c := New(db, WithMaxStaleness(1*time.Hour),
+		WithClock(func() time.Time { return d("2024-01-05") }))
+	got, err := c.FetchHistory("AAPL", d("2024-01-02"), d("2024-01-04"), "1d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 bars, got %d", len(got))
+	}
+}
+
+func TestFetchQuoteNoExternalErrors(t *testing.T) {
+	c := New(newTestDB(t))
+	got, err := c.FetchQuote("AAPL")
+	if err == nil {
+		t.Fatalf("expected error with no external, got quote %+v", got)
+	}
+}
