@@ -14,6 +14,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,13 @@ func TestFetchHistoryReadsWarehouseRange(t *testing.T) {
 	}
 	if got[0].Interval != "1d" || got[0].Symbol != "AAPL" {
 		t.Errorf("bad metadata: %+v", got[0])
+	}
+	// F2: date parsed via 2006-01-02; volume scanned as int64.
+	if !got[0].Time.Equal(d("2024-01-02")) {
+		t.Errorf("bad time parse: got %v want %v", got[0].Time, d("2024-01-02"))
+	}
+	if got[0].Volume != int64(100) {
+		t.Errorf("bad volume: got %d want 100", got[0].Volume)
 	}
 }
 
@@ -233,3 +241,33 @@ func TestFetchQuoteNoExternalErrors(t *testing.T) {
 		t.Fatalf("expected error with no external, got quote %+v", got)
 	}
 }
+
+// T6 error_handling: daily request for a symbol absent from warehouse errors.
+func TestFetchHistoryUnknownSymbolErrors(t *testing.T) {
+	db := newTestDB(t) // no warehouse_meta rows seeded
+	got, err := c(db).FetchHistory("ZZZZ", d("2024-01-02"), d("2024-01-04"), "1d")
+	if err == nil {
+		t.Fatalf("expected error for unknown symbol, got bars %+v", got)
+	}
+	if !strings.Contains(err.Error(), "not in warehouse") {
+		t.Errorf("error should mention 'not in warehouse', got %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty bars on error, got %d", len(got))
+	}
+}
+
+// T8 error_handling: non-daily request without external source errors.
+func TestFetchHistoryNonDailyNoExternalErrors(t *testing.T) {
+	db := newTestDB(t)
+	seedOHLCV(t, db)
+	got, err := c(db).FetchHistory("AAPL", d("2024-01-02"), d("2024-01-04"), "5m")
+	if err == nil {
+		t.Fatalf("expected error for intraday without external, got bars %+v", got)
+	}
+	if !strings.Contains(err.Error(), "only stores daily bars") {
+		t.Errorf("error should mention 'only stores daily bars', got %v", err)
+	}
+}
+
+func c(db *sql.DB) *Collector { return New(db) }
