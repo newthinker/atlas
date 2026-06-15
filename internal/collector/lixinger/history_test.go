@@ -47,16 +47,27 @@ func TestFetchHistory_RequestShapeAndParse(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
+	// FetchHistory must return CHRONOLOGICAL (oldest-first) order, matching the
+	// eastmoney FetchHistory contract that the backtest replay assumes. The API
+	// returns newest-first; the fixture is [06-10, 06-09], so after reversal
+	// rows[0] is the OLDER 06-09 bar and rows[1] the newer 06-10 bar.
 	r0 := rows[0]
 	if r0.Symbol != "600519.SH" || r0.Interval != "1d" {
 		t.Errorf("symbol/interval = %q/%q, want 600519.SH/1d", r0.Symbol, r0.Interval)
 	}
-	if r0.Open != 1252.08 || r0.High != 1282 || r0.Low != 1250.21 || r0.Close != 1275.88 || r0.Volume != 3924400 {
-		t.Errorf("OHLCV mismatch: %+v", r0)
+	if !rows[0].Time.Before(rows[1].Time) {
+		t.Errorf("rows must be chronological (oldest-first): rows[0]=%v rows[1]=%v", rows[0].Time, rows[1].Time)
 	}
-	wantTime := time.Date(2026, 6, 10, 0, 0, 0, 0, time.FixedZone("", 8*3600))
-	if !r0.Time.Equal(wantTime) {
-		t.Errorf("RFC3339 date not parsed: got %v, want %v", r0.Time, wantTime)
+	if r0.Open != 1262.99 || r0.High != 1263 || r0.Low != 1252.55 || r0.Close != 1256 || r0.Volume != 2786000 {
+		t.Errorf("oldest-first row[0] OHLCV mismatch (want 06-09 bar): %+v", r0)
+	}
+	wantOldest := time.Date(2026, 6, 9, 0, 0, 0, 0, time.FixedZone("", 8*3600))
+	if !r0.Time.Equal(wantOldest) {
+		t.Errorf("rows[0] must be oldest 06-09: got %v, want %v", r0.Time, wantOldest)
+	}
+	wantNewest := time.Date(2026, 6, 10, 0, 0, 0, 0, time.FixedZone("", 8*3600))
+	if !rows[1].Time.Equal(wantNewest) {
+		t.Errorf("rows[1] must be newest 06-10: got %v, want %v", rows[1].Time, wantNewest)
 	}
 }
 

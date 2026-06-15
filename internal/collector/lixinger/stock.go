@@ -76,6 +76,13 @@ func (l *Lixinger) FetchHistory(symbol string, start, end time.Time, interval st
 			Time:     t,
 		})
 	}
+	// Lixinger returns newest-first; reverse to chronological (oldest-first) to
+	// match the eastmoney FetchHistory contract the backtest replay assumes.
+	// Without this the replay eats the most recent ~maxBars as warm-up and drops
+	// the latest year of signals.
+	for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
+		data[i], data[j] = data[j], data[i]
+	}
 	return data, nil
 }
 

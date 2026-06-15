@@ -61,6 +61,11 @@ func (l *Lixinger) FetchFundHistory(symbol string, start, end time.Time) ([]core
 			Time:     t,
 		})
 	}
+	// Lixinger returns newest-first; reverse to chronological (oldest-first) to
+	// match the eastmoney FetchHistory contract the backtest replay assumes.
+	for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
+		data[i], data[j] = data[j], data[i]
+	}
 	return data, nil
 }
 
