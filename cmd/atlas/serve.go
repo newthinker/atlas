@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/signal"
@@ -34,6 +35,7 @@ import (
 	"github.com/newthinker/atlas/internal/strategy/price_percentile"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -140,6 +142,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		application.RegisterCollector(maybeCache(cryptoCollector, cacheEnabled, cacheTTL))
 		log.Info("crypto collector registered")
 	}
+
+	// Wire qlib warehouse collector after all external collectors are registered
+	// so that SelectExternalForSymbol can resolve to them at runtime.
+	wireQlibWarehouse(cfg.Qlib, application.CollectorRegistry(), func(p string) (*sql.DB, error) {
+		return sql.Open("sqlite", "file:"+p+"?mode=ro")
+	}, log)
 
 	// Inject valuation/EPS sources used to assemble PE-percentile fundamentals.
 	// Pass through the typed-nil guards so an unconfigured collector stays an
