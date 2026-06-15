@@ -57,13 +57,12 @@ func (h *SymbolDetailHandler) GetHistory(w http.ResponseWriter, r *http.Request,
 
 	start, end := dateRange(rangeParam)
 
-	col := h.selectCollector(symbol)
-	if col == nil {
+	if h.selectCollector(symbol) == nil {
 		response.Error(w, http.StatusServiceUnavailable, &core.Error{Code: "COLLECTOR_UNAVAILABLE", Message: "no collector available for this symbol"})
 		return
 	}
 
-	history, err := col.FetchHistory(symbol, start, end, interval)
+	history, err := h.fetchHistoryWithFallback(symbol, start, end, interval)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, core.WrapError(core.ErrCollectorFailed, err))
 		return
@@ -94,13 +93,12 @@ func (h *SymbolDetailHandler) GetIndicators(w http.ResponseWriter, r *http.Reque
 	// Fetch historical data for calculations
 	start, end := dateRange(rangeParam)
 
-	col := h.selectCollector(symbol)
-	if col == nil {
+	if h.selectCollector(symbol) == nil {
 		response.Error(w, http.StatusServiceUnavailable, &core.Error{Code: "COLLECTOR_UNAVAILABLE", Message: "no collector available for this symbol"})
 		return
 	}
 
-	history, err := col.FetchHistory(symbol, start, end, "1d")
+	history, err := h.fetchHistoryWithFallback(symbol, start, end, "1d")
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, core.WrapError(core.ErrCollectorFailed, err))
 		return
@@ -131,6 +129,29 @@ func (h *SymbolDetailHandler) GetIndicators(w http.ResponseWriter, r *http.Reque
 // It delegates to collector.SelectForSymbol so the routing rules stay in one place.
 func (h *SymbolDetailHandler) selectCollector(symbol string) collector.Collector {
 	return collector.SelectForSymbol(h.collectors, symbol)
+}
+
+// fetchHistoryWithFallback fetches history from the symbol's primary collector,
+// degrading to an external source when the qlib warehouse collector errors.
+//
+// Mirrors the app-layer fallthrough: if the selected collector is the qlib
+// warehouse (Name()=="qlib") and its FetchHistory fails, retry once against the
+// external (non-qlib) collector. SelectExternalForSymbol guarantees it never
+// returns qlib, so this cannot recurse back into the warehouse. For any other
+// collector, or when no external source exists, the original result/error is
+// returned unchanged.
+func (h *SymbolDetailHandler) fetchHistoryWithFallback(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
+	col := h.selectCollector(symbol)
+	if col == nil {
+		return nil, core.ErrCollectorFailed
+	}
+	history, err := col.FetchHistory(symbol, start, end, interval)
+	if err != nil && col.Name() == "qlib" {
+		if ext := collector.SelectExternalForSymbol(h.collectors, symbol); ext != nil {
+			return ext.FetchHistory(symbol, start, end, interval)
+		}
+	}
+	return history, err
 }
 
 // dateRange converts a range parameter (e.g. "1M", "1Y") into a start/end window
