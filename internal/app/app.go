@@ -115,6 +115,10 @@ func (a *App) RegisterCollector(c collector.Collector) {
 	a.collectors.Register(c)
 }
 
+// CollectorRegistry exposes the collector registry for wiring delegating
+// collectors (e.g. the qlib warehouse needs it for external tail-fill).
+func (a *App) CollectorRegistry() *collector.Registry { return a.collectors }
+
 // RegisterStrategy adds a strategy to the app
 func (a *App) RegisterStrategy(s strategy.Strategy) {
 	a.strategies.Register(s)

@@ -1228,6 +1228,48 @@ func TestAnalyzeSymbol_SkipsFundamentalWhenNotNeeded(t *testing.T) {
 	}
 }
 
+// --- Task 10 Step 3: CollectorRegistry exposure ---
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "CollectorRegistry() returns non-nil registry"
+//               → TestCollectorRegistry_NonNil
+// functional[1] "RegisterCollector wired to same registry as CollectorRegistry"
+//               → TestCollectorRegistry_SameRegistryAsRegisterCollector
+
+// TestCollectorRegistry_NonNil asserts CollectorRegistry() returns a non-nil
+// *collector.Registry on a freshly constructed App.
+func TestCollectorRegistry_NonNil(t *testing.T) {
+	a := New(&config.Config{}, nil)
+	if a.CollectorRegistry() == nil {
+		t.Fatal("CollectorRegistry() must return a non-nil *collector.Registry")
+	}
+}
+
+// TestCollectorRegistry_SameRegistryAsRegisterCollector asserts that the registry
+// exposed by CollectorRegistry() is the same instance used by RegisterCollector,
+// i.e. collectors registered via RegisterCollector are visible through the registry.
+func TestCollectorRegistry_SameRegistryAsRegisterCollector(t *testing.T) {
+	a := New(&config.Config{}, nil)
+	mc := &mockCollector{name: "test-registry-collector"}
+	a.RegisterCollector(mc)
+
+	reg := a.CollectorRegistry()
+	if reg == nil {
+		t.Fatal("CollectorRegistry() must not be nil")
+	}
+	all := reg.GetAll()
+	found := false
+	for _, c := range all {
+		if c.Name() == "test-registry-collector" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("collector registered via RegisterCollector not visible through CollectorRegistry(); registry has %d collector(s)", len(all))
+	}
+}
+
 func TestEnrichSignalMetadata(t *testing.T) {
 	sigs := []core.Signal{
 		{Symbol: "0883.HK"},
