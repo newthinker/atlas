@@ -63,18 +63,18 @@ func (c *Collector) Init(cfg collector.Config) error      { return nil }
 func (c *Collector) Start(_ context.Context) error        { return nil }
 func (c *Collector) Stop() error                          { return nil }
 
-// Covers reports whether the warehouse has data for symbol.
+// Covers reports whether the warehouse has usable data for symbol. It uses the
+// same predicate as lastDate (row exists AND last_date is parseable) so the
+// selector never routes a symbol with a corrupt last_date to this collector.
 func (c *Collector) Covers(symbol string) bool {
-	var n int
-	err := c.db.QueryRow(
-		"SELECT COUNT(*) FROM warehouse_meta WHERE symbol=?", strings.ToUpper(symbol),
-	).Scan(&n)
-	return err == nil && n > 0
+	_, ok := c.lastDate(strings.ToUpper(symbol))
+	return ok
 }
 
 const dateFmt = "2006-01-02"
 
-// lastDate returns the warehouse coverage end for symbol; ok=false if absent.
+// lastDate returns the warehouse coverage end for symbol; ok=false if the meta
+// row is absent or its last_date is unparseable (logged, never silent).
 func (c *Collector) lastDate(symbol string) (time.Time, bool) {
 	var s string
 	err := c.db.QueryRow(
@@ -84,7 +84,11 @@ func (c *Collector) lastDate(symbol string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	t, perr := time.Parse(dateFmt, s)
-	return t, perr == nil
+	if perr != nil {
+		log.Printf("qlib: corrupt last_date %q for %s, treating as uncovered: %v", s, symbol, perr)
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // readRange reads warehouse ohlcv bars in [start,end] inclusive.
@@ -100,15 +104,16 @@ func (c *Collector) readRange(symbol string, start, end time.Time) ([]core.OHLCV
 	var out []core.OHLCV
 	for rows.Next() {
 		var ds string
-		var o, h, l, cl float64
-		var vol int64
+		var o, h, l, cl sql.NullFloat64
+		var vol sql.NullInt64
 		if err := rows.Scan(&ds, &o, &h, &l, &cl, &vol); err != nil {
 			return nil, err
 		}
 		ts, _ := time.Parse(dateFmt, ds)
 		out = append(out, core.OHLCV{
 			Symbol: symbol, Interval: "1d",
-			Open: o, High: h, Low: l, Close: cl, Volume: vol, Time: ts,
+			Open: o.Float64, High: h.Float64, Low: l.Float64,
+			Close: cl.Float64, Volume: vol.Int64, Time: ts,
 		})
 	}
 	return out, rows.Err()

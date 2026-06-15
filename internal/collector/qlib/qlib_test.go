@@ -271,3 +271,36 @@ func TestFetchHistoryNonDailyNoExternalErrors(t *testing.T) {
 }
 
 func c(db *sql.DB) *Collector { return New(db) }
+
+// #1: nullable numeric columns (NULL in DB) must not crash FetchHistory.
+// ingest writes NULL for empty CSV cells; readRange must scan null-safe (NULL->0).
+func TestFetchHistoryHandlesNullColumns(t *testing.T) {
+	db := newTestDB(t)
+	_, _ = db.Exec("INSERT INTO warehouse_meta VALUES('NULLCO','US','yahoo','2024-01-02','x')")
+	// open/high/low/close/volume all NULL; only date present.
+	_, err := db.Exec("INSERT INTO ohlcv(symbol,date) VALUES('NULLCO','2024-01-02')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c(db).FetchHistory("NULLCO", d("2024-01-02"), d("2024-01-02"), "1d")
+	if err != nil {
+		t.Fatalf("NULL columns must not error, got %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 bar, got %d", len(got))
+	}
+	b := got[0]
+	if b.Open != 0 || b.High != 0 || b.Low != 0 || b.Close != 0 || b.Volume != int64(0) {
+		t.Errorf("NULL numeric columns should map to 0, got %+v", b)
+	}
+}
+
+// #3: Covers must reject rows whose last_date is unparseable, matching the
+// lastDate parse-failure path so selector never routes to a broken symbol.
+func TestCoversRejectsCorruptLastDate(t *testing.T) {
+	db := newTestDB(t)
+	_, _ = db.Exec("INSERT INTO warehouse_meta VALUES('BADDT','US','yahoo','not-a-date','x')")
+	if c(db).Covers("BADDT") {
+		t.Error("Covers must be false when last_date is unparseable (consistent with lastDate)")
+	}
+}
