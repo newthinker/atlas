@@ -55,8 +55,16 @@ func TestFetchFundHistory_NetValue(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
-	if rows[0].Close != 0.5454 || rows[0].Open != 0.5454 || rows[0].High != 0.5454 || rows[0].Low != 0.5454 {
-		t.Errorf("NAV row OHLC must equal netValue, got %+v", rows[0])
+	// Chronological (oldest-first) contract: fixture is [06-10 0.5454, 06-09 0.5395]
+	// newest-first; after reversal rows[0] is the OLDER 06-09 (0.5395) bar.
+	if !rows[0].Time.Before(rows[1].Time) {
+		t.Errorf("rows must be chronological (oldest-first): rows[0]=%v rows[1]=%v", rows[0].Time, rows[1].Time)
+	}
+	if rows[0].Close != 0.5395 || rows[0].Open != 0.5395 || rows[0].High != 0.5395 || rows[0].Low != 0.5395 {
+		t.Errorf("oldest-first NAV row[0] OHLC must equal netValue 0.5395, got %+v", rows[0])
+	}
+	if rows[1].Close != 0.5454 {
+		t.Errorf("newest row[1] NAV must be 0.5454, got %v", rows[1].Close)
 	}
 	if rows[0].Time.IsZero() {
 		t.Error("RFC3339 date must parse into Time")
