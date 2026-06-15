@@ -183,3 +183,59 @@ func TestCSIIndexRouting(t *testing.T) {
 		}
 	}
 }
+
+// Context Checkpoint: done_criteria → test mapping (Task 9)
+// functional[0] "SelectForSymbol 优先返回 qlib 当 qlib.Covers(symbol)==true" → TestSelectForSymbolPrefersQlibWhenCovered
+// functional[1] "SelectExternalForSymbol 永不返回 qlib"                       → TestSelectExternalForSymbolNeverReturnsQlib
+// boundary[0]   "仅注册 qlib 时 SelectExternalForSymbol 返回 nil"              → TestSelectExternalForSymbolOnlyQlibReturnsNil
+
+// coveringCollector is a test stub implementing Collector + warehouseCoverer.
+// It embeds *fakeCollector to satisfy the full Collector interface; Name() and
+// Covers() are overridden to simulate the qlib warehouse collector.
+type coveringCollector struct {
+	*fakeCollector
+	covers map[string]bool
+}
+
+func (c coveringCollector) Name() string        { return "qlib" }
+func (c coveringCollector) Covers(s string) bool { return c.covers[s] }
+
+func TestSelectForSymbolPrefersQlibWhenCovered(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(coveringCollector{
+		fakeCollector: &fakeCollector{name: "qlib"},
+		covers:        map[string]bool{"AAPL": true},
+	})
+	// AAPL covered by qlib -> must return qlib
+	got := SelectForSymbol(reg, "AAPL")
+	if got == nil || got.Name() != "qlib" {
+		t.Fatalf("covered symbol should route to qlib, got %v", got)
+	}
+}
+
+func TestSelectExternalForSymbolNeverReturnsQlib(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(coveringCollector{
+		fakeCollector: &fakeCollector{name: "qlib"},
+		covers:        map[string]bool{"AAPL": true},
+	})
+	got := SelectExternalForSymbol(reg, "AAPL")
+	if got != nil && got.Name() == "qlib" {
+		t.Fatal("SelectExternalForSymbol must never return qlib")
+	}
+}
+
+// TestSelectExternalForSymbolOnlyQlibReturnsNil verifies the anti-recursion
+// guard: when only qlib is registered, SelectExternalForSymbol must return nil
+// (not qlib itself, which would cause infinite delegation loops).
+func TestSelectExternalForSymbolOnlyQlibReturnsNil(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(coveringCollector{
+		fakeCollector: &fakeCollector{name: "qlib"},
+		covers:        map[string]bool{"AAPL": true},
+	})
+	got := SelectExternalForSymbol(reg, "AAPL")
+	if got != nil {
+		t.Fatalf("only qlib registered: SelectExternalForSymbol must return nil, got %v", got.Name())
+	}
+}

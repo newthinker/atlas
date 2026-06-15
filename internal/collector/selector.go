@@ -33,16 +33,36 @@ func KnownIndexMarket(symbol string) (core.Market, bool) {
 	return m, ok
 }
 
+// warehouseCoverer is implemented by the qlib warehouse collector.
+// Using an interface here avoids a direct import of the qlib package.
+type warehouseCoverer interface{ Covers(symbol string) bool }
+
 // SelectForSymbol picks the most appropriate registered collector for a symbol.
 //
-// Routing rules:
-//   - A-share symbols (.SH/.SZ) -> "eastmoney"
-//   - crypto symbols (BTC*, *-USD, *USDT, ...) -> "crypto"
-//   - everything else (US/HK stocks) -> "yahoo"
+// Routing rules (in priority order):
+//  1. qlib warehouse collector covers the symbol → return qlib
+//  2. A-share symbols (.SH/.SZ) -> "eastmoney"
+//  3. crypto symbols (BTC*, *-USD, *USDT, ...) -> "crypto"
+//  4. everything else (US/HK stocks) -> "yahoo"
 //
 // If the preferred collector is not registered it falls back to any available
 // collector, returning nil only when the registry is empty.
 func SelectForSymbol(reg *Registry, symbol string) Collector {
+	if reg == nil {
+		return nil
+	}
+	if c, ok := reg.Get("qlib"); ok {
+		if cov, ok2 := c.(warehouseCoverer); ok2 && cov.Covers(symbol) {
+			return c
+		}
+	}
+	return SelectExternalForSymbol(reg, symbol)
+}
+
+// SelectExternalForSymbol routes to an external (non-qlib) collector.
+// It applies the same market-based routing as the original SelectForSymbol but
+// explicitly skips the qlib collector to prevent tail-fill delegation loops.
+func SelectExternalForSymbol(reg *Registry, symbol string) Collector {
 	if reg == nil {
 		return nil
 	}
@@ -71,9 +91,13 @@ func SelectForSymbol(reg *Registry, symbol string) Collector {
 		return c
 	}
 
-	// Fallback: return any available collector.
-	if all := reg.GetAll(); len(all) > 0 {
-		return all[0]
+	// Fallback: return any available external collector, skipping qlib to
+	// prevent infinite delegation when qlib is the only registered collector.
+	for _, c := range reg.GetAll() {
+		if c.Name() == "qlib" {
+			continue
+		}
+		return c
 	}
 	return nil
 }
