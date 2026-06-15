@@ -28,4 +28,16 @@ def test_main_errors_on_missing_csv_dir(tmp_path):
         "--csv-dir", str(tmp_path / "nope"), "--market", "US",
         "--source", "yahoo", "--db", str(tmp_path / "w.db"),
     ])
-    assert rc != 0
+    assert rc == 1
+
+
+def test_main_errors_on_empty_csv_dir(tmp_path):
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    # 存在但只含表头、无数据行的 .csv → parse 出 0 行 → return 2
+    (csv_dir / "aapl.csv").write_text("symbol,date,open,high,low,close,volume,factor\n")
+    rc = build_warehouse.main([
+        "--csv-dir", str(csv_dir), "--market", "US",
+        "--source", "yahoo", "--db", str(tmp_path / "w.db"),
+    ])
+    assert rc == 2

@@ -32,6 +32,21 @@ def test_parse_csv_without_factor_defaults_adj_close_to_close(tmp_path):
     assert rows[0].adj_close == 1.5
 
 
+def test_parse_csv_empty_numeric_fields_yield_none(tmp_path):
+    _write(tmp_path, "aapl.csv", """
+        symbol,date,open,high,low,close,volume,factor
+        aapl,2024-01-02,,,,1.5,,
+    """)
+    rows = ingest.parse_dir(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.open is None
+    assert r.high is None
+    assert r.low is None
+    assert r.volume is None
+    assert r.close == 1.5
+
+
 def test_parse_dir_skips_non_csv(tmp_path):
     (tmp_path / "README.md").write_text("not csv")
     assert ingest.parse_dir(tmp_path) == []
