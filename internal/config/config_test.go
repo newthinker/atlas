@@ -338,6 +338,31 @@ func TestConfig_Validate_Branches(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (Task 10 Step 1)
+// functional[0] "QlibConfig 三字段经 mapstructure 正确解析" → TestLoad_QlibConfig_FromYAML
+
+func TestLoad_QlibConfig_FromYAML(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+qlib:
+  enabled: true
+  db_path: /data/qlib_warehouse.db
+  max_staleness_days: 14
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Qlib.Enabled {
+		t.Errorf("Qlib.Enabled = false, want true")
+	}
+	if cfg.Qlib.DBPath != "/data/qlib_warehouse.db" {
+		t.Errorf("Qlib.DBPath = %q, want /data/qlib_warehouse.db", cfg.Qlib.DBPath)
+	}
+	if cfg.Qlib.MaxStalenessDays != 14 {
+		t.Errorf("Qlib.MaxStalenessDays = %d, want 14", cfg.Qlib.MaxStalenessDays)
+	}
+}
+
 func TestConfig_WarnHardcodedSecrets(t *testing.T) {
 	c := Config{}
 	c.Server.APIKey = "plain-secret"

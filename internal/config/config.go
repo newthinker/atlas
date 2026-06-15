@@ -25,6 +25,14 @@ type Config struct {
 	Alerts     AlertsConfig               `mapstructure:"alerts"`
 	Analysis   AnalysisConfig             `mapstructure:"analysis"`
 	Collector  CollectorGlobalConfig      `mapstructure:"collector"`
+	Qlib       QlibConfig                 `mapstructure:"qlib"`
+}
+
+// QlibConfig configures the local qlib SQLite data warehouse collector.
+type QlibConfig struct {
+	Enabled          bool   `mapstructure:"enabled"`
+	DBPath           string `mapstructure:"db_path"`
+	MaxStalenessDays int    `mapstructure:"max_staleness_days"`
 }
 
 // AnalysisConfig holds analysis pipeline settings.
