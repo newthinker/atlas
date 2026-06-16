@@ -35,13 +35,17 @@ func (s *Strategy) Name() string        { return "pe_percentile" }
 func (s *Strategy) Description() string { return "PE position in its own multi-year history" }
 
 func (s *Strategy) RequiredData() strategy.DataRequirements {
+	ph := s.lookbackYears * 252
+	if s.lookbackYears == 0 {
+		ph = strategy.SinceInceptionBars
+	}
 	return strategy.DataRequirements{
 		// PriceHistory must be declared: the assembly layer's PE reconstruction
 		// reuses the OHLCV fetched for this item, and the window is the max
 		// PriceHistory across the item's bound strategies. Omitting it would
 		// leave a solo binding with only ~1 year of data, reconstructing a
 		// "1-year PE percentile" that contradicts the N-year reason text.
-		PriceHistory: s.lookbackYears * 252,
+		PriceHistory: ph,
 		Fundamentals: true,
 		AssetTypes:   []core.AssetType{core.AssetStock, core.AssetIndex},
 	}
@@ -58,8 +62,8 @@ func (s *Strategy) Init(cfg strategy.Config) error {
 		return fmt.Errorf("pe_percentile: thresholds must satisfy extreme_low < low < high < extreme_high, got %.1f/%.1f/%.1f/%.1f",
 			s.extremeLow, s.low, s.high, s.extremeHigh)
 	}
-	if s.lookbackYears <= 0 {
-		return fmt.Errorf("pe_percentile: lookback_years must be positive, got %d", s.lookbackYears)
+	if s.lookbackYears < 0 {
+		return fmt.Errorf("pe_percentile: lookback_years must be non-negative, got %d", s.lookbackYears)
 	}
 	return nil
 }
@@ -93,9 +97,18 @@ func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) 
 	}
 	return []core.Signal{{
 		Symbol: ctx.Symbol, Action: action, Confidence: conf, Price: price,
-		Reason:   fmt.Sprintf("PE at %.1f%% of its %d-year history (%s)", p, s.lookbackYears, method),
+		Reason:   s.reasonText(p, method),
 		Strategy: s.Name(), GeneratedAt: ctx.Now, Metadata: md,
 	}}, nil
+}
+
+// reasonText builds the signal Reason string. When lookbackYears==0 (since
+// inception) it reports "full history"; otherwise it names the year span.
+func (s *Strategy) reasonText(p float64, method string) string {
+	if s.lookbackYears == 0 {
+		return fmt.Sprintf("PE at %.1f%% of full history (%s)", p, method)
+	}
+	return fmt.Sprintf("PE at %.1f%% of its %d-year history (%s)", p, s.lookbackYears, method)
 }
 
 // classify maps a PE percentile to (action, confidence); "" means no signal.
