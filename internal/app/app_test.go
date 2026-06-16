@@ -1301,6 +1301,7 @@ func TestEnrichSignalMetadata(t *testing.T) {
 // Context Checkpoint: done_criteria → test mapping
 // functional[0] "New 后 valuationLookback 默认 5"                          → TestValuationLookback_DefaultIs5
 // functional[1] "SetValuationLookback(0) → lixingerLookback()==10"         → TestLixingerLookback_InceptionMapsToY10
+// functional[F1] "EPS 窗口 inception(0) start≈100年floor、非0为 N年+90天"  → TestEpsFetchStart
 // boundary[0]   "SetValuationLookback(7) → lixingerLookback()==7; 0→10"   → TestLixingerLookback_PassesThrough
 // non_functional "EPS 多取（inception floor）不改 PE 分位结果"              → TestReconstructPercentileUnaffectedByEPSOverfetch
 
@@ -1344,6 +1345,41 @@ func TestLixingerLookback_PassesThrough(t *testing.T) {
 		a.SetValuationLookback(c.set)
 		if got := a.lixingerLookback(); got != c.want {
 			t.Errorf("SetValuationLookback(%d): lixingerLookback() = %d, want %d", c.set, got, c.want)
+		}
+	}
+}
+
+// TestEpsFetchStart directly asserts the EPS-history fetch window (done_criteria
+// F1). Two branches:
+//   - inception (lookback 0): start floors to ~100 years before end, far earlier
+//     than the fixed 5-year window (asserted via the <-50y bound).
+//   - fixed N-year: start is exactly end.AddDate(-N, 0, -90) (N years plus one
+//     extra quarter so the EPS series fully covers the price window).
+//
+// Pairs with TestReconstructPercentileUnaffectedByEPSOverfetch: that proves the
+// deep floor is harmless to the percentile; this proves the floor is actually
+// applied (i.e. inception really does over-fetch).
+func TestEpsFetchStart(t *testing.T) {
+	end := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Inception: must reach far past the fixed 5-year window. A <-50y bound is a
+	// loose-but-decisive assertion that the deep ~100y floor is in effect (and
+	// would catch any regression to a shallow window).
+	aInception := New(&config.Config{}, nil)
+	aInception.SetValuationLookback(0)
+	got := aInception.epsFetchStart(end)
+	if !got.Before(end.AddDate(-50, 0, 0)) {
+		t.Errorf("inception epsFetchStart = %v, want earlier than %v (deep ~100y floor)",
+			got, end.AddDate(-50, 0, 0))
+	}
+
+	// Fixed N-year branches: exact start = end - N years - 90 days.
+	for _, n := range []int{5, 3} {
+		a := New(&config.Config{}, nil)
+		a.SetValuationLookback(n)
+		want := end.AddDate(-n, 0, -90)
+		if got := a.epsFetchStart(end); !got.Equal(want) {
+			t.Errorf("epsFetchStart with lookback=%d = %v, want %v (N years + 90 days)", n, got, want)
 		}
 	}
 }
