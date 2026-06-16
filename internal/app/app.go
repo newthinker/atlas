@@ -190,6 +190,9 @@ func (a *App) lixingerLookback() int {
 // upstream tolerance we clamp here. The cost is losing pre-1970 history for the
 // handful of instruments that predate it (e.g. ^GSPC's 1957-1970 span) — an
 // accepted trade-off, and indices use lixinger for PE anyway.
+// Strategy-side inception window: strategy.SinceInceptionBars (~100 years) in
+// internal/strategy/interface.go; this floor is the app-layer complement that
+// prevents the resulting date from going negative on Unix.
 var epochFloor = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // clampToEpochFloor returns t, or epochFloor when t is earlier, so no fetch ever

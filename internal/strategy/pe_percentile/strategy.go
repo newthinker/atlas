@@ -97,16 +97,19 @@ func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) 
 	}
 	return []core.Signal{{
 		Symbol: ctx.Symbol, Action: action, Confidence: conf, Price: price,
-		Reason:   s.reasonText(p, method),
+		Reason:   s.reasonText(p, method, len(ctx.OHLCV)),
 		Strategy: s.Name(), GeneratedAt: ctx.Now, Metadata: md,
 	}}, nil
 }
 
 // reasonText builds the signal Reason string. When lookbackYears==0 (since
-// inception) it reports "full history"; otherwise it names the year span.
-func (s *Strategy) reasonText(p float64, method string) string {
+// inception) it reports "full history" with the OHLCV bar count so operators
+// can distinguish a true full-history run from a data-truncated one (aligns
+// with price_percentile's "(N bars)" convention). Otherwise it names the year
+// span; bar count is omitted for the fixed-window case.
+func (s *Strategy) reasonText(p float64, method string, bars int) string {
 	if s.lookbackYears == 0 {
-		return fmt.Sprintf("PE at %.1f%% of full history (%s)", p, method)
+		return fmt.Sprintf("PE at %.1f%% of full history (%s, %d bars)", p, method, bars)
 	}
 	return fmt.Sprintf("PE at %.1f%% of its %d-year history (%s)", p, s.lookbackYears, method)
 }

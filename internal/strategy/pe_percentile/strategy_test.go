@@ -26,6 +26,9 @@ import (
 // boundary[0]   "Init(lookback_years:-1) 报错"                                        → TestInit_RejectsNegativeLookback
 // functional[2] "lookback_years=0 + Fundamental 有效 → Reason 含 'full history'"      → TestAnalyze_FullHistoryReasonText
 // boundary[1]   "lookback_years=0 + Fundamental nil → 无信号"                         → TestAnalyze_InceptionNoFundamentalNoSignal
+//
+// I3 QA polish — inception reason bar count:
+// functional[3] "lookback_years=0 → inception Reason 末尾含 bar 数 '(N bars)'"        → TestAnalyze_InceptionReasonContainsBarCount
 
 func peCtx(pePct float64, source string) strategy.AnalysisContext {
 	return strategy.AnalysisContext{
@@ -237,5 +240,50 @@ func TestAnalyze_InceptionNoFundamentalNoSignal(t *testing.T) {
 	}
 	if len(sigs) != 0 {
 		t.Errorf("expected no signal when Fundamental is nil, got %+v", sigs)
+	}
+}
+
+// TestAnalyze_InceptionReasonContainsBarCount: I3 — lookback_years=0 (inception)
+// Signal.Reason should contain the OHLCV bar count as "(N bars)", aligning with
+// price_percentile's convention and helping operators distinguish true full-history
+// from data-truncated runs. Non-inception reason text must remain unchanged.
+func TestAnalyze_InceptionReasonContainsBarCount(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	ohlcv := make([]core.OHLCV, 7)
+	ctx := strategy.AnalysisContext{
+		Symbol: "TEST", Now: time.Now(),
+		OHLCV:       ohlcv,
+		Fundamental: &core.Fundamental{Symbol: "TEST", PEPercentile: 5, Source: "lixinger_cvpos"},
+	}
+	sigs, err := s.Analyze(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(sigs))
+	}
+	// Inception reason must end with "(method, N bars)" — bar count = len(ctx.OHLCV).
+	if !strings.Contains(sigs[0].Reason, "7 bars") {
+		t.Errorf("inception Reason = %q, want it to contain '7 bars'", sigs[0].Reason)
+	}
+
+	// Non-inception reason must NOT contain "bars" (format unchanged).
+	s2 := New()
+	if err := s2.Init(strategy.Config{Params: map[string]any{"lookback_years": 5}}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	sigs2, err := s2.Analyze(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs2) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(sigs2))
+	}
+	if strings.Contains(sigs2[0].Reason, "bars") {
+		t.Errorf("non-inception Reason = %q, must not contain 'bars'", sigs2[0].Reason)
 	}
 }
