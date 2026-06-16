@@ -32,8 +32,12 @@ func (s *Strategy) Name() string        { return "price_percentile" }
 func (s *Strategy) Description() string { return "Price position in its own multi-year history" }
 
 func (s *Strategy) RequiredData() strategy.DataRequirements {
+	ph := s.lookbackYears * 252
+	if s.lookbackYears == 0 {
+		ph = strategy.SinceInceptionBars
+	}
 	return strategy.DataRequirements{
-		PriceHistory: s.lookbackYears * 252,
+		PriceHistory: ph,
 		AssetTypes: []core.AssetType{
 			core.AssetStock, core.AssetIndex, core.AssetETF,
 			core.AssetFund, core.AssetCommodity, core.AssetCrypto,
@@ -52,8 +56,8 @@ func (s *Strategy) Init(cfg strategy.Config) error {
 		return fmt.Errorf("price_percentile: thresholds must satisfy extreme_low < low < high < extreme_high, got %.1f/%.1f/%.1f/%.1f",
 			s.extremeLow, s.low, s.high, s.extremeHigh)
 	}
-	if s.lookbackYears <= 0 {
-		return fmt.Errorf("price_percentile: lookback_years must be positive, got %d", s.lookbackYears)
+	if s.lookbackYears < 0 {
+		return fmt.Errorf("price_percentile: lookback_years must be non-negative, got %d", s.lookbackYears)
 	}
 	return nil
 }
@@ -86,7 +90,7 @@ func (s *Strategy) Analyze(ctx strategy.AnalysisContext) ([]core.Signal, error) 
 		Action:      action,
 		Confidence:  conf,
 		Price:       cur,
-		Reason:      fmt.Sprintf("price at %.1f%% of %d-year range", p, s.lookbackYears),
+		Reason:      s.reasonText(p, len(closes)),
 		Strategy:    s.Name(),
 		GeneratedAt: ctx.Now,
 		Metadata:    md,
@@ -107,6 +111,15 @@ func (s *Strategy) classify(p float64) (core.Action, float64) {
 		return core.ActionSell, 0.6 + 0.2*(p-s.high)/(s.extremeHigh-s.high)
 	}
 	return "", 0
+}
+
+// reasonText builds the signal Reason string. When lookbackYears==0 (since
+// inception) it reports the actual bar count; otherwise it names the year range.
+func (s *Strategy) reasonText(p float64, bars int) string {
+	if s.lookbackYears == 0 {
+		return fmt.Sprintf("price at %.1f%% of full history (%d bars)", p, bars)
+	}
+	return fmt.Sprintf("price at %.1f%% of %d-year range", p, s.lookbackYears)
 }
 
 // numParam reads a numeric param tolerating both int and float64, since viper

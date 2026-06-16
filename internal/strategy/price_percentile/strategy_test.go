@@ -1,6 +1,7 @@
 package price_percentile
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +167,96 @@ func TestInit_PercentileStepNonPositive(t *testing.T) {
 		if _, ok := sigs[0].Metadata["percentile_step"]; ok {
 			t.Errorf("step=%v: percentile_step ≤ 0 must not write metadata", v)
 		}
+	}
+}
+
+// Context Checkpoint: done_criteria → test mapping (Task 2 — since inception)
+// functional[0] "lookback_years=0 → RequiredData().PriceHistory==SinceInceptionBars"          → TestRequiredData_SinceInception
+// functional[1] "Init with lookback_years=0 does not error"                                   → TestInit_AcceptsZeroLookback
+// error_handling[0] "Init with lookback_years=-1 returns error"                               → TestInit_RejectsNegativeLookback
+// functional[2] "lookback_years=0 + signal → Reason contains 'full history'"                  → TestAnalyze_FullHistoryReasonText
+// boundary[0]   "lookback_years=0 but ctx.OHLCV < 252 bars → nil (minSampleBars still guards)" → TestAnalyze_InceptionRespectsMinSample
+
+// TestRequiredData_SinceInception verifies lookback_years==0 returns SinceInceptionBars.
+func TestRequiredData_SinceInception(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init(lookback_years=0) unexpected error: %v", err)
+	}
+	rd := s.RequiredData()
+	if rd.PriceHistory != strategy.SinceInceptionBars {
+		t.Errorf("PriceHistory = %d, want SinceInceptionBars (%d)", rd.PriceHistory, strategy.SinceInceptionBars)
+	}
+}
+
+// TestInit_AcceptsZeroLookback verifies Init does not reject lookback_years==0.
+func TestInit_AcceptsZeroLookback(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Errorf("Init(lookback_years=0) should not error, got: %v", err)
+	}
+}
+
+// TestInit_RejectsNegativeLookback verifies Init rejects lookback_years < 0.
+func TestInit_RejectsNegativeLookback(t *testing.T) {
+	for _, neg := range []any{-1, -1.0, -5} {
+		s := New()
+		if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": neg}}); err == nil {
+			t.Errorf("Init(lookback_years=%v) should return error", neg)
+		}
+	}
+}
+
+// TestAnalyze_FullHistoryReasonText verifies Reason text contains "full history"
+// when lookback_years==0 and a signal is generated.
+func TestAnalyze_FullHistoryReasonText(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	// 300 bars with extreme-low current close → strong_buy signal
+	closes := make([]float64, 300)
+	for i := range closes {
+		closes[i] = 100 + float64(i%50)
+	}
+	closes[299] = 50 // historical low → extreme-low percentile
+	sigs, err := s.Analyze(ctxWithCloses(closes))
+	if err != nil {
+		t.Fatalf("Analyze error: %v", err)
+	}
+	if len(sigs) == 0 {
+		t.Fatal("expected at least one signal")
+	}
+	reason := sigs[0].Reason
+	if !strings.Contains(reason, "full history") {
+		t.Errorf("Reason = %q, want it to contain 'full history'", reason)
+	}
+	// metadata lookback_years should be 0 (inception marker preserved for downstream)
+	if v, ok := sigs[0].Metadata["lookback_years"]; !ok || v != 0 {
+		t.Errorf("metadata lookback_years = %v, want 0", v)
+	}
+}
+
+// TestAnalyze_InceptionRespectsMinSample (B3 강화):
+// lookback_years==0 but fewer than 252 bars → no signal (minSampleBars guard remains active).
+func TestAnalyze_InceptionRespectsMinSample(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	// 100 bars — below minSampleBars=252; all prices at extreme low so the classify
+	// logic would signal if it were reached. We assert it is NOT reached.
+	closes := make([]float64, 100)
+	for i := range closes {
+		closes[i] = 1.0 // all same → current is at 0th percentile
+	}
+	closes[99] = 0.5 // extreme low
+	sigs, err := s.Analyze(ctxWithCloses(closes))
+	if err != nil {
+		t.Fatalf("Analyze error: %v", err)
+	}
+	if len(sigs) != 0 {
+		t.Errorf("inception with <252 bars must return nil (no signal), got %+v", sigs)
 	}
 }
 
