@@ -1,0 +1,118 @@
+# Per-Market Fundamentals Adapter Contract
+
+This document describes how each market produces the normalized fundamentals CSV
+consumed by `fundamentals.parse_dir()` and written atomically into
+`fundamentals_pit` alongside OHLCV data.
+
+## Normalized CSV Contract
+
+All fundamentals CSV files must use the following fixed header:
+
+```
+symbol,report_period,observe_date,eps_ttm,pe,pb,ps,roe,dividend_yield
+```
+
+Column rules:
+- `symbol`: ticker, uppercase (e.g. `AAPL`, `600519`)
+- `report_period`: quarter-end date in `YYYY-MM-DD` (e.g. 2024-Q1 → `2024-03-31`)
+- `observe_date`: the date the value became **publicly known** (filing/disclosure
+  date), `YYYY-MM-DD`; must be >= `report_period`; this is the PIT anchor that
+  eliminates look-ahead bias
+- `eps_ttm`: trailing-twelve-months diluted EPS; **mandatory** — rows with an
+  empty `eps_ttm` are skipped by `parse_file` and never enter the warehouse
+- `pe`, `pb`, `ps`, `roe`, `dividend_yield`: optional; empty string is accepted
+  and stored as NULL
+
+One CSV file per symbol, named `<symbol>.csv` (lowercase filename is fine;
+`parse_file` uppercases the `symbol` column value).
+
+---
+
+## A-Share (recommended — qlib native PIT)
+
+**Source:** qlib `dump_pit` / financial data export with report period and first
+disclosure date.
+
+- `observe_date` = first public disclosure date (披露日) from the qlib PIT dataset
+- `eps_ttm` = rolling four-quarter diluted EPS (稀释 EPS TTM)
+- This is the most accurate PIT source because qlib records the actual filing
+  date, not the report period end.
+
+Command skeleton (adjust paths to your qlib data directory):
+
+```bash
+# Example: export A-share PIT fundamentals from qlib
+QLIB_DATA_DIR=~/.qlib/qlib_data/atlas_cn
+python - <<'EOF'
+import qlib
+from qlib.data import D
+qlib.init(provider_uri=QLIB_DATA_DIR)
+# Use qlib's PIT financial API to export eps_ttm per symbol
+# Output: fundamentals_csv_cn/<symbol>.csv following the contract above
+EOF
+```
+
+Output directory: `fundamentals_csv_cn/` (one CSV per symbol).
+
+---
+
+## US Equities (Yahoo — best-effort approximate PIT)
+
+**Source:** Yahoo Finance `trailingDilutedEPS` / quarterly earnings history.
+
+**Limitation:** Yahoo only provides `asOfDate` (the report-period end date), not
+the actual SEC filing date. The true 10-Q/10-K filing typically lags the quarter
+end by 30–60 days.
+
+**Approximation:** `observe_date = asOfDate + 45 days` (empirical median lag for
+US quarterly filings). This is materially better than using `report_period` itself
+(which is the period end, guaranteed to precede the filing), but is not exact PIT.
+
+Mark the approximation in the CSV by adding a comment or `source` column if your
+adapter supports it. The warehouse schema does not store `source` per row, so the
+distinction lives only in the adapter documentation.
+
+Adapter skeleton:
+
+```python
+# scripts/adapters/fetch_us_fundamentals.py  (not yet implemented)
+# Uses yfinance / yahoo_fin to pull trailingDilutedEPS history per symbol,
+# computes observe_date = asOfDate + timedelta(days=45), writes contract CSV.
+```
+
+Output directory: `fundamentals_csv_us/` (one CSV per symbol).
+
+Makefile variable: `FUNDAMENTALS_US_DIR ?= fundamentals_csv_us`
+
+---
+
+## HK Equities (lixinger — best-effort)
+
+**Source:** lixinger fundamentals API (already integrated in atlas via
+`internal/collector/lixinger`).
+
+- `observe_date` = the data point date returned by the lixinger API
+- `eps_ttm` = EPS TTM from lixinger response
+- `pe`, `pb`, etc. populated from the corresponding lixinger fields where
+  available
+
+Adapter skeleton:
+
+```python
+# scripts/adapters/fetch_hk_fundamentals.py  (not yet implemented)
+# Calls atlas lixinger collector (or lixinger HTTP API directly) per symbol,
+# maps response fields to contract columns, writes fundamentals_csv_hk/<symbol>.csv
+```
+
+Output directory: `fundamentals_csv_hk/` (one CSV per symbol).
+
+---
+
+## Fallback Behavior (missing fundamentals)
+
+If a symbol has no CSV in the fundamentals directory (or the directory is not
+passed to `--fundamentals-dir`), the warehouse simply contains no
+`fundamentals_pit` rows for that symbol. The Go `qlibpit.Source` detects this via
+`hasFundamentals()` and automatically delegates to the configured fallback EPS
+source (Yahoo), with zero change to valuation output. No action needed on the
+Python side.

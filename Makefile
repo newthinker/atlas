@@ -94,7 +94,11 @@ clean:
 
 # 历史行情仓库：从 per-instrument CSV 目录构建本地 SQLite 仓库（仅 stdlib）。
 WAREHOUSE_DB ?= data/qlib_warehouse.db
+# 可选：基本面 CSV 目录（归一化契约，见 scripts/qlib_warehouse/ADAPTERS.md）。
+# 目录存在时透传 --fundamentals-dir；目录不存在时守卫自动省略该参数，dump 仍正常。
+FUNDAMENTALS_US_DIR ?= fundamentals_csv_us
 warehouse-dump:
 	@mkdir -p $(dir $(WAREHOUSE_DB))
 	$(QLIB_PY) -m scripts.qlib_warehouse.build_warehouse \
-	  --csv-dir $(QLIB_CSV_US_DIR) --market US --source yahoo --db $(WAREHOUSE_DB)
+	  --csv-dir $(QLIB_CSV_US_DIR) --market US --source yahoo --db $(WAREHOUSE_DB) \
+	  $(if $(wildcard $(FUNDAMENTALS_US_DIR)),--fundamentals-dir $(FUNDAMENTALS_US_DIR),)
