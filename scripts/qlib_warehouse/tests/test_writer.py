@@ -1,6 +1,7 @@
 import sqlite3
 from scripts.qlib_warehouse import writer
 from scripts.qlib_warehouse.ingest import OhlcvRow
+from scripts.qlib_warehouse.fundamentals import FundRow
 
 
 def _rows():
@@ -35,3 +36,28 @@ def test_write_overwrites_existing(tmp_path):
     writer.write(str(db), _rows()[:1], "US", "yahoo", "2024-01-05T00:00:00Z")
     conn = sqlite3.connect(str(db))
     assert conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0] == 1
+
+
+def _funds():
+    return [
+        FundRow("AAPL", "2023-12-31", "2024-03-01", 3.0, None, None, None, None, None),
+        FundRow("AAPL", "2024-03-31", "2024-05-15", 4.0, None, None, None, None, None),
+        # 修订：同一 report_period 更晚 observe_date
+        FundRow("AAPL", "2024-03-31", "2024-08-01", 4.2, None, None, None, None, None),
+    ]
+
+
+def test_write_persists_fundamentals_keeping_revisions(tmp_path):
+    db = tmp_path / "w.db"
+    writer.write(str(db), _rows(), "US", "yahoo", "2024-09-01T00:00:00Z",
+                 fundamentals=_funds())
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM fundamentals_pit").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0] == 2  # ohlcv 不受影响
+
+
+def test_write_without_fundamentals_is_backward_compatible(tmp_path):
+    db = tmp_path / "w.db"
+    writer.write(str(db), _rows(), "US", "yahoo", "2024-09-01T00:00:00Z")
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM fundamentals_pit").fetchone()[0] == 0
