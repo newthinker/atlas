@@ -60,12 +60,15 @@ strategies:
       max_payout_ratio: 80
 
 # Valuation lookback configuration
-# lookback_years 控制 PE/价格分位的历史窗口；0 表示自上市/起始日全历史。
+# lookback_years 控制 PE/价格分位的历史窗口；默认 5（与 strategies 默认一致，零回归）。
+# 设为 0 = 自上市/起始日全历史（inception）。
+# 启用全史回看需**同时**把 strategies.price_percentile.params.lookback_years、
+# strategies.pe_percentile.params.lookback_years 与 valuation.lookback_years 都设为 0；
+# 只设其一会导致价格窗口与 PE/EPS 窗口不一致。
 # 注意：A 股个股 + 所有指数走理杏仁(lixinger)，其 PE 分位上限 10 年(y10)，
-# inception(0) 对这些标的等价"最多 10 年"，非真全史。
-# 美/港个股走 yahoo EPS 重建，可真到上市日。
+# inception(0) 对这些标的等价"最多 10 年"，非真全史；美/港个股走 yahoo EPS 重建，可真到上市日。
 valuation:
-  lookback_years: 0   # PE 分位 lookback；0=自上市起（细节见上方注释）。
+  lookback_years: 5   # PE 分位 lookback；默认 5（细节见上方注释，0=自上市起）。
 
 # Signal routing
 router:
