@@ -184,17 +184,36 @@ func (a *App) lixingerLookback() int {
 	return a.valuationLookback
 }
 
-// epsFetchStart returns the start date for the trailing EPS history fetch.
-// Fixed-window mode reaches back valuationLookback years plus one extra quarter
-// (90 days) so the EPS series fully covers the price window. Since-inception
-// mode (0) floors to ~100 years ago; data sources clip to the actual listing
-// date. Over-fetching earlier EPS points never shifts the percentile, since the
-// PE window is determined by the price bars, not the EPS slice length.
+// epochFloor is the earliest fetch start any data path will request: the Unix
+// epoch (1970-01-01). Reaching back before it produces a negative Unix timestamp
+// in the Yahoo chart URL's period1 (QA W3); rather than rely on undeclared
+// upstream tolerance we clamp here. The cost is losing pre-1970 history for the
+// handful of instruments that predate it (e.g. ^GSPC's 1957-1970 span) — an
+// accepted trade-off, and indices use lixinger for PE anyway.
+var epochFloor = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// clampToEpochFloor returns t, or epochFloor when t is earlier, so no fetch ever
+// requests a negative Unix start.
+func clampToEpochFloor(t time.Time) time.Time {
+	if t.Before(epochFloor) {
+		return epochFloor
+	}
+	return t
+}
+
+// epsFetchStart returns the lookback-derived start date for the trailing EPS
+// history fetch. Fixed-window mode reaches back valuationLookback years plus one
+// extra quarter (90 days) so the EPS series fully covers the price window.
+// Since-inception mode (0) reaches back to the 1970 epoch floor; data sources
+// clip to the actual listing date. Over-fetching earlier EPS points never shifts
+// the percentile, since the PE window is determined by the price bars, not the
+// EPS slice length. The caller widens this further to cover the supplied ohlcv
+// span (see buildFundamental, QA W2).
 func (a *App) epsFetchStart(end time.Time) time.Time {
 	if a.valuationLookback == 0 {
-		return end.AddDate(-100, 0, 0)
+		return epochFloor
 	}
-	return end.AddDate(-a.valuationLookback, 0, -90)
+	return clampToEpochFloor(end.AddDate(-a.valuationLookback, 0, -90))
 }
 
 // SetArbitrator enables LLM-based arbitration of conflicting signals. When set,
@@ -410,7 +429,10 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	// converted to calendar days), preferring the collector that matches the
 	// symbol's market and falling back to others.
 	end := time.Now()
-	start := end.AddDate(0, 0, -a.historyWindowDays(item))
+	// Clamp to the 1970 epoch floor: full-history strategies (lookback_years: 0)
+	// demand a window reaching back ~100 years, whose negative Unix start breaks
+	// the Yahoo chart URL (QA W3). Data sources clip to the actual listing date.
+	start := clampToEpochFloor(end.AddDate(0, 0, -a.historyWindowDays(item)))
 
 	var ohlcv []core.OHLCV
 	var fetchErr error
@@ -831,7 +853,19 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 			return f
 		}
 		end := time.Now()
-		eps, err := a.epsSrc.FetchEPSHistory(symbol, a.epsFetchStart(end), end)
+		// EPS must cover the whole ohlcv window, not just the lookback window:
+		// when the price strategy runs full-history but valuation.lookback_years
+		// stays short, closes earlier than the first EPS point would be silently
+		// dropped while the Reason still claims full history (QA W2). Take the
+		// earlier of the lookback start and the earliest bar (minus a quarter for
+		// step alignment), then clamp to the 1970 floor.
+		epsStart := a.epsFetchStart(end)
+		if len(ohlcv) > 0 {
+			if barStart := clampToEpochFloor(ohlcv[0].Time.AddDate(0, 0, -90)); barStart.Before(epsStart) {
+				epsStart = barStart
+			}
+		}
+		eps, err := a.epsSrc.FetchEPSHistory(symbol, epsStart, end)
 		if err == nil {
 			pct, rerr := valuation.ReconstructPEPercentile(ohlcv, eps)
 			switch {
