@@ -1,0 +1,50 @@
+{
+  "id": "TASK-004",
+  "title": "build CLI + Makefile warehouse-dump target (Python)",
+  "description": "按计划 Task 4。实现 scripts/qlib_warehouse/build_warehouse.py：main(argv) argparse --csv-dir/--market/--source/--db/--dumped-at；csv-dir 不存在 return 1，无行 return 2，否则 dumped_at 缺省取 datetime.now(utc).isoformat()，调 writer.write，打印 'wrote N rows'，return 0。以 python -m scripts.qlib_warehouse.build_warehouse 运行。Makefile：.PHONY 行追加 warehouse-dump，文件末尾追加 target（WAREHOUSE_DB ?= data/qlib_warehouse.db；mkdir -p 后调 $(QLIB_PY) -m ... --csv-dir $(QLIB_CSV_US_DIR) --market US --source yahoo --db $(WAREHOUSE_DB)）。串行依赖 TASK-003。严格 TDD：先写 tests/test_build_warehouse.py 确认 RED 再实现。",
+  "module": "qlib-warehouse-cli",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/build_warehouse.py",
+    "scripts/qlib_warehouse/tests/test_build_warehouse.py",
+    "Makefile"
+  ],
+  "done_criteria": {
+    "functional": [
+      "main([...--db]) 从 csv-dir 构建库，warehouse_meta last_date 正确，返回 0 (test_main_builds_warehouse_from_csv_dir)",
+      "make warehouse-dump 生成 data/qlib_warehouse.db 并打印 'wrote N rows'（N>0）"
+    ],
+    "boundary": [
+      "缺 csv-dir 时 main 返回非 0 (test_main_errors_on_missing_csv_dir)",
+      "解析到 0 行时返回非 0"
+    ],
+    "error_handling": [
+      "csv-dir 不存在 return 1，无行 return 2（错误写 stderr）"
+    ],
+    "non_functional": [
+      {
+        "desc": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_warehouse/tests/test_build_warehouse.py -v 为 2 passed；RED→GREEN；make warehouse-dump 实跑成功",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

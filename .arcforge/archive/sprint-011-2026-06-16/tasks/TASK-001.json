@@ -1,0 +1,43 @@
+{
+  "id": "TASK-001",
+  "title": "SQLite schema 模块 (Python)",
+  "description": "按计划 Task 1。创建空 scripts/qlib_warehouse/__init__.py 与 tests/__init__.py；实现 scripts/qlib_warehouse/schema.py：DDL 常量建 ohlcv(PK symbol,date)/fundamentals_pit(PK symbol,report_period,observe_date)/warehouse_meta(PK symbol) 三表，apply(conn) 执行 executescript+commit。严格 TDD：先写 tests/test_schema.py 确认 RED(ModuleNotFoundError) 再实现 GREEN。验证用 scripts/qlib_eval/.venv/bin/python -m pytest。",
+  "module": "qlib-warehouse-schema",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/__init__.py",
+    "scripts/qlib_warehouse/schema.py",
+    "scripts/qlib_warehouse/tests/__init__.py",
+    "scripts/qlib_warehouse/tests/test_schema.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "schema.apply(conn) 后 sqlite_master 含 ohlcv/fundamentals_pit/warehouse_meta 三表 (test_apply_creates_all_tables)",
+      "ohlcv 主键为 (symbol,date)：同 (symbol,date) 重复 INSERT 抛 sqlite3.IntegrityError (test_ohlcv_primary_key_is_symbol_date)"
+    ],
+    "boundary": [
+      "apply 幂等：对同一 conn 重复调用不报错 (DDL 用 IF NOT EXISTS)"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_warehouse/tests/test_schema.py -v 为 2 passed；先经历 RED(ModuleNotFoundError) 再 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

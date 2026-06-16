@@ -1,0 +1,45 @@
+{
+  "id": "TASK-007",
+  "title": "各市场基本面适配器 ADAPTERS.md + Makefile 透传 (best-effort)",
+  "description": "按 phase-2 计划 Task 7（best-effort，不写单测）。新建 scripts/qlib_warehouse/ADAPTERS.md：归一化契约表头(symbol,report_period,observe_date,eps_ttm,pe,pb,ps,roe,dividend_yield)；A股(qlib dump_pit 原生，observe_date 取披露日)、美股(Yahoo trailingDilutedEPS 仅报告期末 asOfDate，近似 observe_date=asOfDate+45天，CSV source 注明近似)、港股(lixinger，observe_date 取数据点日期)；缺基本面符号不产 CSV→Go 自动回落 yahoo。修改 Makefile：warehouse-dump target 增 FUNDAMENTALS_US_DIR ?= fundamentals_csv_us，用 $(if $(wildcard $(FUNDAMENTALS_US_DIR)),--fundamentals-dir $(FUNDAMENTALS_US_DIR),) 守卫（目录不存在不传，dump 仍只写 OHLCV）。串行依赖 TASK-003（Makefile 透传依赖 --fundamentals-dir 已实现）。验证 make warehouse-dump 在无 fundamentals 目录时仍打印 wrote N rows 不报错。",
+  "module": "warehouse-adapters-doc",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/ADAPTERS.md",
+    "Makefile"
+  ],
+  "done_criteria": {
+    "functional": [
+      "ADAPTERS.md 含归一化契约表头 + A股/美股/港股三市场 observe_date 产出方式 + 缺基本面回落说明",
+      "Makefile warehouse-dump 用 $(wildcard) 守卫可选透传 --fundamentals-dir"
+    ],
+    "boundary": [
+      "无 fundamentals_csv_us/ 目录时 make warehouse-dump 仍成功（只写 OHLCV，不传 --fundamentals-dir，零破坏）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "make warehouse-dump 实跑（无 fundamentals 目录）打印 'wrote N rows'（N>0）不报错；本任务不含单元测试（适配器属集成，best-effort）",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

@@ -1,0 +1,49 @@
+{
+  "id": "TASK-006",
+  "title": "serve.go 装配 qlibpit 包装 yahoo EPS 源 (Go)",
+  "description": "按 phase-2 计划 Task 6，并适配第一期现实。第一期 T12 把开库封装进 wireQlibWarehouse(cfg,reg,openFn,log) bool，db 句柄不外露——本任务须重构 wireQlibWarehouse 暴露已开 *sql.DB（推荐改签名返回 (*sql.DB,bool)，nil=未启用/打开失败；或拆 open/register），serve.go 拿到 db 后：var epsSrc app.EPSSource = epsSourceOrNil(yahooCollector)；db!=nil 时 epsSrc = qlibpit.New(db, epsSrc) 并 log.Info；application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSrc)（替换 serve.go:155 原行）。import 增 internal/collector/qlibpit。约束：①qlib collector 注册仍在外部源注册之后 ②SetValuationSources 仍在 application.Start 之前(QA S1 不变量) ③第一期 wireQlibWarehouse 四降级分支单测(qlib_wiring_test.go)零回归(签名变更需同步更新测试)。开工先 grep -n 'SetValuationSources|wireQlibWarehouse|epsSourceOrNil' cmd/atlas/serve.go 确认现状。Go 命令加 GOTOOLCHAIN=local。",
+  "module": "serve-qlibpit-wiring",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/qlib_wiring.go",
+    "cmd/atlas/qlib_wiring_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "wireQlibWarehouse 暴露已开 *sql.DB；db!=nil 时 SetValuationSources 注入 qlibpit.New(db, epsSourceOrNil(yahoo)) 作 EPS 源、yahoo 兜底",
+      "db==nil（qlib 未启用/打开失败）时 EPS 源维持纯 yahoo（epsSourceOrNil），行为与第一期一致"
+    ],
+    "boundary": [
+      "qlib collector 注册仍在所有外部 collector 注册之后；SetValuationSources 仍在 application.Start 之前（QA S1 不变量）",
+      "第一期 wireQlibWarehouse 四降级分支单测随签名变更同步更新且全绿（零回归）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过；go test ./cmd/... 全绿（serve_test.go epsSourceOrNil + wiring 四分支零回归）；go test ./internal/... 零回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

@@ -1,0 +1,46 @@
+{
+  "id": "TASK-002",
+  "title": "CSV 摄取与归一化 (Python)",
+  "description": "按计划 Task 2。实现 scripts/qlib_warehouse/ingest.py：OhlcvRow namedtuple(symbol date open high low close volume adj_close)；parse_file 用 csv.DictReader 解析，adj_close=close*factor（缺 factor 列时 =close），symbol strip+upper，volume int(float())，空字段→None；parse_dir 对目录内 sorted *.csv 逐个 parse_file 拼接。串行依赖 TASK-001（同 package scope 互斥）。严格 TDD：先写 tests/test_ingest.py 确认 RED 再实现。",
+  "module": "qlib-warehouse-ingest",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/ingest.py",
+    "scripts/qlib_warehouse/tests/test_ingest.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "有 factor 列时 adj_close==close*factor 且 symbol 转大写、volume 为 int (test_parse_csv_computes_adj_close_and_uppercases)",
+      "无 factor 列时 adj_close==close (test_parse_csv_without_factor_defaults_adj_close_to_close)"
+    ],
+    "boundary": [
+      "parse_dir 跳过非 .csv 文件，仅 README.md 时返回 [] (test_parse_dir_skips_non_csv)",
+      "空字符串/缺失数值字段归一化为 None"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_warehouse/tests/test_ingest.py -v 为 3 passed；RED→GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

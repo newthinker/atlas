@@ -1,0 +1,48 @@
+{
+  "id": "TASK-003",
+  "title": "原子 SQLite 写入器 (Python)",
+  "description": "按计划 Task 3。实现 scripts/qlib_warehouse/writer.py：write(db_path, rows, market, source, dumped_at) 写入临时库 <db_path>.tmp（schema.apply + executemany 插 ohlcv + 按每 symbol 最大 date 写 warehouse_meta）再 os.replace(tmp, db_path) 原子覆盖；写前清理残留 tmp。dumped_at 由调用方传入不在库内取系统时间。串行依赖 TASK-002（依赖 schema+ingest，同 package scope 互斥）。严格 TDD：先写 tests/test_writer.py 确认 RED 再实现。",
+  "module": "qlib-warehouse-writer",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/writer.py",
+    "scripts/qlib_warehouse/tests/test_writer.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "write 后 ohlcv 行数==输入行数，warehouse_meta(market,source,last_date) 中 last_date 为该 symbol 最大 date (test_write_persists_ohlcv_and_meta)",
+      "last_date 计算正确：多行同 symbol 取最大 date"
+    ],
+    "boundary": [
+      "原子写：write 完成后无 <db_path>.tmp 残留 (test_write_is_atomic_no_tmp_left)",
+      "重复 write 覆盖而非累积：第二次写 1 行后 COUNT==1 (test_write_overwrites_existing)",
+      "原子性以 os.replace(rename) 实现而非原地改写目标库（code review 可证：写全程只动 .tmp，最后一步 os.replace 覆盖）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_warehouse/tests/test_writer.py -v 为 3 passed；RED→GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

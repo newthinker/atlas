@@ -1,0 +1,39 @@
+{
+  "id": "TASK-011",
+  "title": "App.CollectorRegistry() 导出方法 (Go)",
+  "description": "按计划 Task 10 Step 3。在 internal/app/app.go 紧邻 RegisterCollector 处新增导出方法 func (a *App) CollectorRegistry() *collector.Registry { return a.collectors }（字段名 a.collectors 已确认，app.go:58/103）。供 serve.go 装配 qlib 补尾时取 registry。本任务独立无依赖（仅改 app 包）。补一条测试断言 New 后的 App.CollectorRegistry() 非 nil 且与 RegisterCollector 操作同一 registry；保证 go build + 既有测试零回归。",
+  "module": "app-collector-registry",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "App.CollectorRegistry() 返回 *collector.Registry，即内部 a.collectors（非 nil）",
+      "通过 CollectorRegistry() 可见 RegisterCollector 注册的 collector（同一 registry）"
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go build ./internal/app 通过；go test ./internal/app/ 零回归（新增测试 RED→GREEN）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

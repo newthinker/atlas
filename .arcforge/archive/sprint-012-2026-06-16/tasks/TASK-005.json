@@ -1,0 +1,44 @@
+{
+  "id": "TASK-005",
+  "title": "qlibpit 仓库缺基本面时委托兜底 (Go)",
+  "description": "按 phase-2 计划 Task 5。兜底逻辑已在 Task 4 的 New(db,fallback)+FetchEPSHistory 实现（hasFundamentals 为假时委托 fallback，fallback nil 返回空切片）；本任务补测试钉死契约。修改 internal/collector/qlibpit/qlibpit_test.go 追加 fakeEPS（记录 called symbol）+ 三测试。若 Task4 实现未含兜底分支则在本任务补全实现。Go 命令加 GOTOOLCHAIN=local。严格 TDD：先追加测试确认 RED（若兜底已实现则部分直接 GREEN，需确保三契约都被钉死）。串行依赖 TASK-004（同 package）。",
+  "module": "qlibpit-fallback",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/qlibpit/qlibpit_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "缺符号基本面时委托 fallback，返回其数据且 fallback 被以该 symbol 调用 (TestFallbackUsedWhenNoWarehouseFundamentals: MSFT→9.9, called=='MSFT')"
+    ],
+    "boundary": [
+      "缺基本面且 fallback 为 nil 时返回空切片无错 (TestNoFundamentalsNoFallbackReturnsEmpty)",
+      "仓库有该符号基本面时优先仓库、fallback 不被调用 (TestWarehouseFundamentalsPreemptFallback: 返 4.0, called=='')"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/collector/qlibpit/ -v 全部 PASS（含 Task4 用例）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/collector/qlibpit"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

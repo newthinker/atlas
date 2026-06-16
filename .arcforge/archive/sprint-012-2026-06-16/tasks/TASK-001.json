@@ -1,0 +1,43 @@
+{
+  "id": "TASK-001",
+  "title": "基本面 CSV 摄取 fundamentals.py (Python)",
+  "description": "按 phase-2 计划 Task 1 + 人类确认门决策②（拒绝空 eps_ttm）。新建 scripts/qlib_warehouse/fundamentals.py：FundRow namedtuple(symbol report_period observe_date eps_ttm pe pb ps roe dividend_yield)；parse_file 用 csv.DictReader，数值列空字符串→None（_f 辅助），symbol strip+upper，report_period/observe_date strip；parse_dir 对 sorted *.csv 逐个 parse_file 拼接。**收紧**：必填列 eps_ttm 为空（或缺列）的行视为脏数据，parse_file 跳过该行（不入主源），保证数据质量。严格 TDD：先写 tests/test_fundamentals.py 确认 RED(ModuleNotFoundError) 再实现。venv: scripts/qlib_eval/.venv/bin/python，PYTHONPATH=. 跑 pytest。",
+  "module": "warehouse-fundamentals-ingest",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/fundamentals.py",
+    "scripts/qlib_warehouse/tests/test_fundamentals.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "parse_dir 读必填+可选列：symbol 大写、report_period/observe_date 原样、eps_ttm/roe 解析为 float、空列(pe/pb)→None (test_parse_dir_reads_required_and_optional)",
+      "FundRow 含全部 9 字段"
+    ],
+    "boundary": [
+      "parse_dir 跳过非 .csv 文件，仅 notes.txt 时返回 [] (test_parse_dir_skips_non_csv)",
+      "可选数值列空字符串归一化为 None（pe/pb/ps/roe/dividend_yield）",
+      "必填列 eps_ttm 为空/缺失的行被跳过（不入主源），同文件其余合法行仍返回（test_parse_dir_skips_empty_eps_ttm）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "PYTHONPATH=. scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_warehouse/tests/test_fundamentals.py -v 为 2 passed；先 RED(ModuleNotFoundError) 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

@@ -1,0 +1,44 @@
+{
+  "id": "TASK-009",
+  "title": "selector 优先 qlib + SelectExternalForSymbol (Go)",
+  "description": "按计划 Task 9。重构 internal/collector/selector.go：把现有 SelectForSymbol 的整段路由逻辑（upper:=... 到 GetAll fallback）原样移入新函数 SelectExternalForSymbol(reg,symbol)，并在其 GetAll 兜底分支加 if c.Name()=='qlib' { continue } 跳过 qlib（防补尾递归）；SelectForSymbol 改为先取 reg.Get('qlib') 断言 warehouseCoverer 接口 Covers(symbol) 命中则返回 qlib，否则 return SelectExternalForSymbol。定义 type warehouseCoverer interface{ Covers(symbol string) bool } 避免 import qlib 包。本任务独立无依赖（仅改 collector 包）。严格 TDD：先追加 coveringCollector + TestSelectForSymbolPrefersQlibWhenCovered/TestSelectExternalForSymbolNeverReturnsQlib 确认 RED 再实现。必须保既有 selector 路由测试零回归。",
+  "module": "collector-selector",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/selector.go",
+    "internal/collector/selector_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "SelectForSymbol 当 qlib.Covers(symbol)==true 时返回 qlib collector (TestSelectForSymbolPrefersQlibWhenCovered)",
+      "未命中或无 qlib 时回落 SelectExternalForSymbol 原路由逻辑"
+    ],
+    "boundary": [
+      "SelectExternalForSymbol 永不返回 qlib，含 GetAll 兜底分支跳过 qlib (TestSelectExternalForSymbolNeverReturnsQlib)",
+      "仅注册 qlib、无任何外部 collector 时 SelectExternalForSymbol 返回 nil（直击 GetAll 兜底递归路径，非走 switch 主路由的专测）"
+    ],
+    "error_handling": [
+      "reg==nil 时两函数均返回 nil"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/ -v 全绿，既有路由/MarketForSymbol 测试零回归；新增两测试 RED→GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/collector"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

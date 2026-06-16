@@ -1,0 +1,39 @@
+{
+  "id": "TASK-010",
+  "title": "QlibConfig 配置结构 (Go)",
+  "description": "按计划 Task 10 Step 1。在 internal/config/config.go 的 Config 结构追加字段 Qlib QlibConfig `mapstructure:\"qlib\"`；新增类型 QlibConfig{Enabled bool `mapstructure:\"enabled\"`; DBPath string `mapstructure:\"db_path\"`; MaxStalenessDays int `mapstructure:\"max_staleness_days\"`}。本任务独立无依赖（仅改 config 包）。若 config 包有结构体加载/默认值测试，补一条 QlibConfig 字段可被 mapstructure 解析的测试；否则保证 go build + 既有测试零回归。",
+  "module": "config-qlib",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Config 结构含 Qlib QlibConfig 字段（mapstructure tag 'qlib'）",
+      "QlibConfig 含 Enabled(bool)/DBPath(string)/MaxStalenessDays(int) 且 mapstructure tag 为 enabled/db_path/max_staleness_days"
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go build ./internal/config 通过；go test ./internal/config/ 零回归（如新增解析测试则 RED→GREEN）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "packages": [
+    "./internal/config"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

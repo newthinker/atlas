@@ -1,0 +1,45 @@
+{
+  "id": "TASK-004",
+  "title": "qlibpit EPS 源 PIT 点对时间查询 (Go)",
+  "description": "按 phase-2 计划 Task 4。新建 internal/collector/qlibpit/qlibpit.go：EPSSource 接口(FetchEPSHistory(symbol,start,end)([]core.EPSPoint,error)) 镜像 app.EPSSource 避免 import app；Source{db,fallback}；New(db,fallback)；hasFundamentals(symbol) 查 COUNT；FetchEPSHistory：symbol 大写，查 fundamentals_pit WHERE symbol=? AND observe_date<=end AND eps_ttm IS NOT NULL ORDER BY observe_date，映射 EPSPoint{Date:parse(observe_date), EPS:eps_ttm}，end 截断防前视。本任务先不接兜底分支(占位 fallback)。Go 命令加 GOTOOLCHAIN=local。严格 TDD：先写 qlibpit_test.go(newTestDB 建 fundamentals_pit 内存表 + TestFetchEPSHistoryExcludesFutureObserveDate/KeepsRevisionsOrdered) 确认 RED(undefined New) 再实现。",
+  "module": "qlibpit-eps-source",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/qlibpit/qlibpit.go",
+    "internal/collector/qlibpit/qlibpit_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchEPSHistory 升序按 observe_date 返回 EPSPoint，EPS/Date 映射正确 (TestFetchEPSHistoryKeepsRevisionsOrdered: 2 行 4.0/4.2)",
+      "修订（同 report_period 不同 observe_date）按 observe_date 升序全保留"
+    ],
+    "boundary": [
+      "防前视：observe_date>end 的行不返回（end=2024-04-01 时未来 2024-05-15 行不可见，只返 1 行）(TestFetchEPSHistoryExcludesFutureObserveDate)",
+      "等值边界：observe_date==end 的行必须包含（钉死 <= 而非 <，防 off-by-one；专测 observe_date 恰等 end 时返回该行）",
+      "eps_ttm IS NULL 的行被排除"
+    ],
+    "error_handling": [
+      "symbol 大小写不敏感（'aapl' 命中 'AAPL'）"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/collector/qlibpit/ -v PASS；先 RED(undefined New) 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/collector/qlibpit"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

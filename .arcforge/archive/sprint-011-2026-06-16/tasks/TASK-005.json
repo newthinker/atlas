@@ -1,0 +1,43 @@
+{
+  "id": "TASK-005",
+  "title": "SQLite 驱动 + qlib collector 骨架与 Covers (Go)",
+  "description": "按计划 Task 5。go get modernc.org/sqlite@latest && go mod tidy。创建 internal/collector/qlib/qlib.go：Collector{db,maxStaleness(默认7*24h),now(默认time.Now),external}；New(db,opts...)+Option(WithMaxStaleness/WithClock/WithExternal)；实现 collector.Collector 接口 Name()=='qlib'/SupportedMarkets()={US,CNA,HK}/Init/Start(ctx context.Context) error/Stop 均 no-op（Start 签名以 internal/collector/interface.go 真实定义为准）；Covers(symbol) 查 warehouse_meta COUNT 大写匹配。严格 TDD：先写 qlib_test.go(newTestDB 建内存库) 确认 RED(undefined New) 再实现。",
+  "module": "qlib-collector-skeleton",
+  "complexity": "simple",
+  "estimated_files": [
+    "go.mod",
+    "go.sum",
+    "internal/collector/qlib/qlib.go",
+    "internal/collector/qlib/qlib_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "New(db) 构造成功，Name()=='qlib' (TestNameIsQlib)，SupportedMarkets 含 MarketUS/MarketCNA/MarketHK",
+      "Covers 大小写不敏感命中 warehouse_meta：Covers('aapl')==true、Covers('MSFT')==false (TestCoversReportsWarehouseMembership)"
+    ],
+    "boundary": [
+      "Init/Start(ctx)/Stop 为 no-op 不报错；Start 签名与 collector.Collector 接口一致（编译通过即证）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go.mod 出现 modernc.org/sqlite；go test ./internal/collector/qlib/ -run 'TestCovers|TestName' -v PASS；先 RED(undefined New) 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/collector/qlib"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

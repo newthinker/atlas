@@ -1,0 +1,48 @@
+{
+  "id": "TASK-003",
+  "title": "build CLI 增加 --fundamentals-dir (Python)",
+  "description": "按 phase-2 计划 Task 3。修改 scripts/qlib_warehouse/build_warehouse.py：argparse 增 --fundamentals-dir(default=None)；解析 OHLCV 后、writer.write 前：若 args.fundamentals_dir 则 from . import fundamentals（local import），fdir 不存在 return 3，否则 funds=fundamentals.parse_dir(fdir)；writer.write(..., fundamentals=funds)（替换原无 fundamentals= 的调用）。串行依赖 TASK-002。严格 TDD：先追加 test_build_warehouse.py 用例（test_main_ingests_fundamentals_when_dir_given：给 csv-dir+fundamentals-dir，断言 rc==0 且 fundamentals_pit 中 AAPL eps_ttm==3.0）确认 RED(unrecognized arguments) 再实现。",
+  "module": "warehouse-cli-fundamentals",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/build_warehouse.py",
+    "scripts/qlib_warehouse/tests/test_build_warehouse.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "main(--csv-dir ... --fundamentals-dir ...) rc==0 且 fundamentals_pit 中 symbol='AAPL' 的 eps_ttm==3.0 (test_main_ingests_fundamentals_when_dir_given)",
+      "不传 --fundamentals-dir 时 funds=None，行为与第一期一致（既有用例零回归）"
+    ],
+    "boundary": [
+      "--fundamentals-dir 指向不存在目录时 return 3（错误写 stderr）"
+    ],
+    "error_handling": [
+      "fundamentals-dir 不存在 → return 3"
+    ],
+    "non_functional": [
+      {
+        "desc": "PYTHONPATH=. ...pytest scripts/qlib_warehouse/ -v 全部 passed（含第一期所有用例）；先 RED(unrecognized arguments --fundamentals-dir) 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

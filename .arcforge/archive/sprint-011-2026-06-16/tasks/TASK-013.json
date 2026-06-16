@@ -1,0 +1,52 @@
+{
+  "id": "TASK-013",
+  "title": "symbol_detail API 对 qlib 错误降级回落外部源 (Go, QA #2)",
+  "description": "QA review #2：internal/api/handler/api/symbol_detail.go 的 GetHistory(:66)/GetIndicators(:103) 经 selectCollector→SelectForSymbol 拿单个 collector，当其为 qlib 且 FetchHistory 报错时直接 HTTP 500，无降级（不像 app.go 那样 fallthrough）。修复：当选中 collector 为 qlib(Name()=='qlib') 且 FetchHistory 返回错误时，回落到 collector.SelectExternalForSymbol(h.collectors,symbol) 再取一次；外部也失败或 nil 才返回错误。建议抽一个 handler 方法 fetchHistoryWithFallback(symbol,start,end,interval) 供两处复用，避免重复。严格 TDD：先写 handler 测试（构造一个 Covers 命中但 FetchHistory 报错的 fake qlib + 一个可用 external，断言降级返回 external 数据而非 500）确认 RED 再实现。Go 命令加 GOTOOLCHAIN=local。",
+  "module": "api-symbol-detail-fallback",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/api/handler/api/symbol_detail.go",
+    "internal/api/handler/api/symbol_detail_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "选中 collector 为 qlib 且其 FetchHistory 报错时，GetHistory/GetIndicators 回落 SelectExternalForSymbol 并返回外部数据（非 500）",
+      "正常情况（qlib 成功）仍直接返回仓库数据，行为不变"
+    ],
+    "boundary": [
+      "qlib 报错且外部源也不可用(nil 或亦报错)时返回错误（保持原错误语义）",
+      "选中 collector 非 qlib 时不触发 fallback（行为零变化，既有路径零回归）"
+    ],
+    "error_handling": [
+      "fallback 逻辑只在 col.Name()=='qlib' 时启用，绝不递归回 qlib（SelectExternalForSymbol 已保证）"
+    ],
+    "non_functional": [
+      {
+        "desc": "go build ./... 通过；go test ./internal/api/... 全绿（新增 fallback 测试 RED→GREEN）；go test ./internal/... 零回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-008",
+    "TASK-009",
+    "TASK-012"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-008",
+    "TASK-009",
+    "TASK-012"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-013.json",
+  "packages": [
+    "./internal/api/handler/api"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

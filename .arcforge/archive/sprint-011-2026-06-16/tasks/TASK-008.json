@@ -1,0 +1,45 @@
+{
+  "id": "TASK-008",
+  "title": "FetchQuote 与非日频委托外部源 (Go)",
+  "description": "按计划 Task 8。实现 FetchQuote(symbol)：external!=nil 时委托 external(symbol).FetchQuote，否则 error('no realtime source')。在 FetchHistory 顶部（symbol 大写之后）加：interval 非 ''/'1d' 时若 external!=nil 整体委托 external.FetchHistory(symbol,start,end,interval)，否则 error('warehouse only stores daily bars')。串行依赖 TASK-007。严格 TDD：先追加 fakeExtQuote + TestFetchQuoteDelegates/TestFetchHistoryNonDailyDelegates 确认 RED 再实现。",
+  "module": "qlib-collector-delegate",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/qlib/qlib.go",
+    "internal/collector/qlib/qlib_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchQuote 委托 external，返回 Price==9.9 (TestFetchQuoteDelegates)",
+      "interval 非日频('5m') 时整体委托 external，返回 got[0].Interval=='5m' (TestFetchHistoryNonDailyDelegates)"
+    ],
+    "boundary": [],
+    "error_handling": [
+      "无 external 时 FetchQuote 返回 error；非日频无 external 时返回 error('only stores daily bars')"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/qlib/ -v 全部 PASS；先 RED 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./internal/collector/qlib"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

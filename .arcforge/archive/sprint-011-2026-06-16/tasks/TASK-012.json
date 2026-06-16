@@ -1,0 +1,58 @@
+{
+  "id": "TASK-012",
+  "title": "serve.go 装配 qlib collector + 装配单测 (Go)",
+  "description": "按计划 Task 10 Step 2/3/4/5，并按人类确认门决策②补自动化装配测试。将 qlib 装配抽成可测纯函数（建议 cmd/atlas/qlib_wiring.go，package main）：func wireQlibWarehouse(cfg config.QlibConfig, reg *collector.Registry, openFn func(dbPath string)(*sql.DB,error), log *zap.Logger) bool —— cfg.Enabled==false 或 DBPath=='' 直接 return false；openFn 失败→log.Warn 返回 false；db.Ping 失败→log.Warn、db.Close、返回 false；成功→stale=MaxStalenessDays*24h(0→7*24h)，reg.Register(qlib.New(db,WithMaxStaleness(stale),WithExternal(func(s)collector.Collector{return collector.SelectExternalForSymbol(reg,s)})))，log.Info，返回 true。serve.go 在所有外部 collector 注册后调用 wireQlibWarehouse(cfg.Qlib, application.CollectorRegistry(), func(p){return sql.Open(\"sqlite\",\"file:\"+p+\"?mode=ro\")}, log)。import 增补 database/sql、_ modernc.org/sqlite、internal/collector/qlib。新增 cmd/atlas/qlib_wiring_test.go 注入 fake openFn 覆盖四分支。依赖 T4/T8/T9/T10/T11，开工前读各上游 discovery。严格 TDD：先写 wiring 测试确认 RED 再实现。",
+  "module": "serve-qlib-wiring",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/qlib_wiring.go",
+    "cmd/atlas/qlib_wiring_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "wireQlibWarehouse(enabled=true, openFn 返回可读库) 注册 qlib collector 返回 true，且 reg.Get('qlib') 命中、WithExternal 委托 SelectExternalForSymbol（单测，注入 fake openFn）",
+      "MaxStalenessDays==0 时 staleness 回退默认 7 天（成功分支断言，可经注册成功 + qlib 包测试间接保证）"
+    ],
+    "boundary": [
+      "cfg.Qlib.Enabled==false（或 DBPath=='') → 不调用 openFn、不注册、reg 无 qlib、返回 false（零回归单测）",
+      "openFn 返回 err → log.Warn、不注册、返回 false、不 panic（单测注入失败 opener）",
+      "db.Ping 失败 → log.Warn、调用 db.Close、不注册、返回 false（单测注入坏 DSN 库）"
+    ],
+    "error_handling": [
+      "WithExternal 委托 collector.SelectExternalForSymbol(reg,s)，绝不递归回 qlib 自身"
+    ],
+    "non_functional": [
+      {
+        "desc": "serve.go 调用 wireQlibWarehouse 装配；go build ./... 通过；go test ./cmd/... 全绿（四分支单测 RED→GREEN）；go test ./internal/... 零回归；make warehouse-dump 冒烟生成 data/qlib_warehouse.db",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-008",
+    "TASK-009",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-004",
+    "TASK-008",
+    "TASK-009",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-012.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

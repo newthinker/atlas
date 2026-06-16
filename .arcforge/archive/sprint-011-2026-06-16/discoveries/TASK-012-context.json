@@ -1,0 +1,27 @@
+{
+  "note": "T12 装配所需上游接口汇总（Leader 从 dev 报告聚合）",
+  "upstream_interfaces": {
+    "TASK-004": "make warehouse-dump 已实跑生成 data/qlib_warehouse.db（20505 ohlcv 行 / 15 symbol）。build_warehouse.main(argv)->int。",
+    "TASK-008_qlib": {
+      "New": "func New(db *sql.DB, opts ...Option) *Collector",
+      "Options": ["WithMaxStaleness(time.Duration)", "WithClock(func() time.Time)", "WithExternal(ExternalSelector)"],
+      "ExternalSelector": "type ExternalSelector func(symbol string) collector.Collector",
+      "behavior": "Name()=='qlib'; 日线走仓库+补尾; 非日线/quote 委托 external; 无仓库数据返回 error"
+    },
+    "TASK-009_selector": {
+      "SelectExternalForSymbol": "func SelectExternalForSymbol(reg *collector.Registry, symbol string) collector.Collector — 永不返回 qlib(GetAll 兜底跳过)",
+      "usage": "WithExternal(func(s string) collector.Collector { return collector.SelectExternalForSymbol(appReg, s) })"
+    },
+    "TASK-010_config": "config.Config.Qlib QlibConfig{Enabled bool; DBPath string; MaxStalenessDays int}",
+    "TASK-011_app": "func (a *App) CollectorRegistry() *collector.Registry — 返回 live registry 供 SelectExternalForSymbol 运行时查找"
+  },
+  "core_types": {
+    "OHLCV": "core.OHLCV{Symbol string; Interval string; Open/High/Low/Close float64; Volume int64; Time time.Time}",
+    "MarketCNA_value": "CN_A",
+    "Collector.Start": "Start(ctx context.Context) error"
+  },
+  "env": {
+    "sqlite_driver": "modernc.org/sqlite v1.38.2（go1.24 兼容，Leader 预置；go get 用 GOTOOLCHAIN=local）",
+    "go_open_ro": "sql.Open(\"sqlite\", \"file:\"+DBPath+\"?mode=ro\")"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "TASK-006",
+  "title": "FetchHistory 仓库主源读取 (Go)",
+  "description": "按计划 Task 6。在 internal/collector/qlib/qlib.go 追加：const dateFmt='2006-01-02'；lastDate(symbol) 查 warehouse_meta.last_date；readRange(symbol,start,end) 查 ohlcv WHERE date>=? AND date<=? ORDER BY date 映射为 []core.OHLCV(Symbol 大写,Interval='1d',Time 由 date 解析,Volume int64)；FetchHistory(symbol,start,end,interval)：symbol 大写，lastDate 缺失则 error，whEnd=min(end,last)，return readRange。本任务不做补尾。串行依赖 TASK-005。严格 TDD：先追加测试 seedOHLCV/TestFetchHistory* 确认 RED 再实现。",
+  "module": "qlib-collector-fetchhistory",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/qlib/qlib.go",
+    "internal/collector/qlib/qlib_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchHistory 读 [start,end] 仓库段，3 行序列 Close 1.0/1.1/1.2 正确，got[0].Interval=='1d' 且 Symbol=='AAPL' (TestFetchHistoryReadsWarehouseRange)",
+      "Time 字段由 date 按 2006-01-02 解析，Volume 为 int64"
+    ],
+    "boundary": [
+      "end 超过 last_date 且无 external 时只返回 ≤last_date 段（capped at last_date，3 行）(TestFetchHistoryCapsAtLastDate)"
+    ],
+    "error_handling": [
+      "symbol 不在 warehouse_meta 时返回 error('not in warehouse')"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/qlib/ -run TestFetchHistory -v PASS；先 RED(FetchHistory 未定义) 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/collector/qlib"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 2,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

@@ -1,0 +1,46 @@
+{
+  "id": "TASK-002",
+  "title": "writer 同次原子写 fundamentals_pit (Python)",
+  "description": "按 phase-2 计划 Task 2。修改 scripts/qlib_warehouse/writer.py：write 签名加 fundamentals=None（向后兼容，第一期不传仍可用）；funds=list(fundamentals or [])，在 warehouse_meta 写入后、commit 前，若 funds 则 executemany INSERT INTO fundamentals_pit(9列)；同一临时库 + os.replace 原子写。修订（同 report_period 不同 observe_date）原样保留不去重。串行依赖 TASK-001（同 package + 用 FundRow）。严格 TDD：先追加 test_writer.py 用例（test_write_persists_fundamentals_keeping_revisions 断言 3 行 fundamentals + ohlcv 2 行不受影响；test_write_without_fundamentals_is_backward_compatible 断言 fundamentals_pit 0 行）确认 RED 再实现。复用第一期 _rows() 辅助。",
+  "module": "warehouse-writer-fundamentals",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/qlib_warehouse/writer.py",
+    "scripts/qlib_warehouse/tests/test_writer.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      "write(..., fundamentals=_funds()) 后 fundamentals_pit 含 3 行（含同 report_period 修订全保留），ohlcv 仍 2 行不受影响 (test_write_persists_fundamentals_keeping_revisions)",
+      "9 列 fundamentals 字段正确落库"
+    ],
+    "boundary": [
+      "write 不传 fundamentals 时 fundamentals_pit 为 0 行，向后兼容（第一期既有 3 用例零回归）(test_write_without_fundamentals_is_backward_compatible)",
+      "修订（同 report_period 不同 observe_date）原样保留，不去重"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "PYTHONPATH=. ...pytest scripts/qlib_warehouse/tests/test_writer.py -v 为 5 passed（第一期 3+本期 2）；先 RED(unexpected keyword 'fundamentals') 后 GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}
