@@ -251,6 +251,11 @@ func Load(path string) (*Config, error) {
 	// W3: keep Load default in sync with Validate/Execute so an enabled broker
 	// missing execution.mode is treated as "confirm" rather than silently no-op.
 	v.SetDefault("broker.execution.mode", "confirm")
+	// C1: legacy configs without a valuation block must keep the historical
+	// 5-year PE-percentile lookback. SetDefault fires only when the key is
+	// absent, so an explicit `valuation.lookback_years: 0` (since inception) is
+	// preserved. Without this, serve.go would silently flip to inception mode.
+	v.SetDefault("valuation.lookback_years", 5)
 
 	// Support environment variable overrides
 	v.AutomaticEnv()

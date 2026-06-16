@@ -443,6 +443,29 @@ func TestDefaults_ValuationLookbackIs5(t *testing.T) {
 	}
 }
 
+// boundary[1] (QA C1 fix): a legacy config file with NO valuation block must
+// Load() with LookbackYears==5, not 0. Defaults() applies to constructed configs
+// but Load() builds via viper.Unmarshal, so it needs its own SetDefault. Without
+// it, serve.go SetValuationLookback(0) silently flips every pre-existing
+// deployment into since-inception mode (zero-regression break).
+func TestLoad_NoValuationBlockDefaultsTo5(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+server:
+  host: "127.0.0.1"
+  port: 8080
+storage:
+  cold:
+    type: localfs
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Valuation.LookbackYears != 5 {
+		t.Errorf("Load (no valuation block) Valuation.LookbackYears = %d, want 5", cfg.Valuation.LookbackYears)
+	}
+}
+
 // Explicit execution.mode must be preserved (default only fills the gap).
 func TestLoad_ExecutionMode_ExplicitPreserved(t *testing.T) {
 	cfgPath := writeTempConfig(t, `
