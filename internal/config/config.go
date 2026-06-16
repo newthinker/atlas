@@ -26,6 +26,14 @@ type Config struct {
 	Analysis   AnalysisConfig             `mapstructure:"analysis"`
 	Collector  CollectorGlobalConfig      `mapstructure:"collector"`
 	Qlib       QlibConfig                 `mapstructure:"qlib"`
+	Valuation  ValuationConfig            `mapstructure:"valuation"`
+}
+
+// ValuationConfig configures the app-side PE-percentile lookback used for EPS
+// reconstruction and lixinger cvpos. LookbackYears: 0 means "since inception"
+// (EPS reconstruction uses full history; lixinger is capped at its y10 bucket).
+type ValuationConfig struct {
+	LookbackYears int `mapstructure:"lookback_years"`
 }
 
 // QlibConfig configures the local qlib SQLite data warehouse collector.
@@ -334,6 +342,9 @@ func Defaults() *Config {
 				MaxDailyLossPct:  5.0,
 				MaxOpenPositions: 20,
 			},
+		},
+		Valuation: ValuationConfig{
+			LookbackYears: 5,
 		},
 	}
 }

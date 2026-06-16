@@ -416,6 +416,33 @@ broker:
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (Task 4, phase3)
+// functional[0] "YAML valuation.lookback_years:0 解析为 0" → TestLoad_ValuationConfig
+// boundary[0]   "Defaults() ValuationConfig.LookbackYears == 5" → TestDefaults_ValuationLookbackIs5
+
+// functional[0]: valuation.lookback_years: 0 in YAML parses to LookbackYears==0 (since inception).
+func TestLoad_ValuationConfig(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+valuation:
+  lookback_years: 0
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Valuation.LookbackYears != 0 {
+		t.Errorf("Valuation.LookbackYears = %d, want 0", cfg.Valuation.LookbackYears)
+	}
+}
+
+// boundary[0]: Defaults() sets ValuationConfig.LookbackYears to 5 (preserve existing behaviour).
+func TestDefaults_ValuationLookbackIs5(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Valuation.LookbackYears != 5 {
+		t.Errorf("Defaults Valuation.LookbackYears = %d, want 5", cfg.Valuation.LookbackYears)
+	}
+}
+
 // Explicit execution.mode must be preserved (default only fills the gap).
 func TestLoad_ExecutionMode_ExplicitPreserved(t *testing.T) {
 	cfgPath := writeTempConfig(t, `
