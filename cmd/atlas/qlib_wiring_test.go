@@ -1,13 +1,13 @@
 package main
 
-// Context Checkpoint: done_criteria → test mapping (TASK-010 wiring)
-// functional[0]  "Enabled=true, DB valid → register qlib collector, return true"
+// Context Checkpoint: done_criteria → test mapping (TASK-010 wiring, TASK-016 PIT EPS)
+// functional[0]  "Enabled=true, DB valid → register qlib collector, return (db,true), db non-nil"
 //                → TestWireQlib_SuccessRegisters
-// boundary[0]    "Enabled=false → return false, openFn not called, no qlib in reg"
+// boundary[0]    "Enabled=false → return (nil,false), openFn not called, no qlib in reg"
 //                → TestWireQlib_DisabledSkips
-// error_handling[0] "openFn returns error → return false, no panic, no qlib in reg"
+// error_handling[0] "openFn returns error → return (nil,false), no panic, no qlib in reg"
 //                → TestWireQlib_OpenFailSkips
-// error_handling[1] "Ping fails → return false, no qlib in reg"
+// error_handling[1] "Ping fails → return (nil,false), no qlib in reg"
 //                → TestWireQlib_PingFailSkips
 
 import (
@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// boundary[0]: cfg.Enabled=false → return false, openFn never called, reg has no qlib.
+// boundary[0]: cfg.Enabled=false → return (nil,false), openFn never called, reg has no qlib.
 func TestWireQlib_DisabledSkips(t *testing.T) {
 	cfg := config.QlibConfig{Enabled: false, DBPath: "/some/path.db"}
 	reg := collector.NewRegistry()
@@ -31,10 +31,13 @@ func TestWireQlib_DisabledSkips(t *testing.T) {
 		return nil, nil
 	}
 
-	got := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
+	db, ok := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
 
-	if got {
+	if ok {
 		t.Fatal("expected false when Enabled=false")
+	}
+	if db != nil {
+		t.Fatal("expected nil db when Enabled=false")
 	}
 	if openCalled {
 		t.Fatal("openFn must not be called when Enabled=false")
@@ -44,7 +47,7 @@ func TestWireQlib_DisabledSkips(t *testing.T) {
 	}
 }
 
-// error_handling[0]: openFn returns error → return false, no panic, qlib not in reg.
+// error_handling[0]: openFn returns error → return (nil,false), no panic, qlib not in reg.
 func TestWireQlib_OpenFailSkips(t *testing.T) {
 	cfg := config.QlibConfig{Enabled: true, DBPath: "/any/path.db"}
 	reg := collector.NewRegistry()
@@ -52,17 +55,20 @@ func TestWireQlib_OpenFailSkips(t *testing.T) {
 		return nil, errors.New("boom")
 	}
 
-	got := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
+	db, ok := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
 
-	if got {
+	if ok {
 		t.Fatal("expected false when openFn errors")
+	}
+	if db != nil {
+		t.Fatal("expected nil db when openFn errors")
 	}
 	if _, ok := reg.Get("qlib"); ok {
 		t.Fatal("qlib must not be registered when openFn errors")
 	}
 }
 
-// error_handling[1]: openFn returns a DB whose Ping fails → return false, no qlib.
+// error_handling[1]: openFn returns a DB whose Ping fails → return (nil,false), no qlib.
 // Uses file:/nonexistent-dir/x.db?mode=ro which Open succeeds but Ping fails.
 func TestWireQlib_PingFailSkips(t *testing.T) {
 	cfg := config.QlibConfig{Enabled: true, DBPath: "/nonexistent-dir/x.db"}
@@ -72,19 +78,24 @@ func TestWireQlib_PingFailSkips(t *testing.T) {
 		return sql.Open("sqlite", "file:/nonexistent-dir/x.db?mode=ro")
 	}
 
-	got := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
+	db, ok := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
 
-	if got {
+	if ok {
 		t.Fatal("expected false when Ping fails")
+	}
+	if db != nil {
+		t.Fatal("expected nil db when Ping fails")
 	}
 	if _, ok := reg.Get("qlib"); ok {
 		t.Fatal("qlib must not be registered when Ping fails")
 	}
 }
 
-// functional[0]: openFn returns a healthy in-memory DB with schema → return true,
-// reg.Get("qlib") returns the collector, Name()=="qlib".
+// functional[0]: openFn returns a healthy in-memory DB with schema → return (db,true),
+// db is non-nil, reg.Get("qlib") returns the collector, Name()=="qlib".
 // Also exercises MaxStalenessDays=0 path (defaults to 7*24h, must not panic).
+// The returned db and the db inside the registered collector are the same handle
+// (no double-open): both use the single *sql.DB returned by openFn.
 func TestWireQlib_SuccessRegisters(t *testing.T) {
 	cfg := config.QlibConfig{Enabled: true, DBPath: ":memory:", MaxStalenessDays: 0}
 	reg := collector.NewRegistry()
@@ -117,10 +128,13 @@ func TestWireQlib_SuccessRegisters(t *testing.T) {
 		return db, nil
 	}
 
-	got := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
+	db, ok := wireQlibWarehouse(cfg, reg, openFn, zap.NewNop())
 
-	if !got {
+	if !ok {
 		t.Fatal("expected true on successful wiring")
+	}
+	if db == nil {
+		t.Fatal("expected non-nil db on successful wiring")
 	}
 	c, ok := reg.Get("qlib")
 	if !ok {
