@@ -116,3 +116,12 @@ passed to `--fundamentals-dir`), the warehouse simply contains no
 `hasFundamentals()` and automatically delegates to the configured fallback EPS
 source (Yahoo), with zero change to valuation output. No action needed on the
 Python side.
+
+## Consumed columns
+
+The current Go consumer (`qlibpit.Source`) reads **only `eps_ttm`** (for PE
+percentile reconstruction). The other normalized columns — `pe`, `pb`, `ps`,
+`roe`, `dividend_yield` — are persisted to `fundamentals_pit` for forward
+compatibility but are **not consumed** this phase. Adapters should still
+populate them when cheaply available, but a CSV with only the required columns
+plus `eps_ttm` is fully functional today.

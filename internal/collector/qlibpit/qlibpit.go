@@ -8,6 +8,7 @@ package qlibpit
 
 import (
 	"database/sql"
+	"log"
 	"strings"
 	"time"
 
@@ -36,14 +37,22 @@ func New(db *sql.DB, fallback EPSSource) *Source {
 
 func (s *Source) hasFundamentals(symbol string) bool {
 	var n int
-	err := s.db.QueryRow(
+	if err := s.db.QueryRow(
 		"SELECT COUNT(*) FROM fundamentals_pit WHERE symbol=?", symbol,
-	).Scan(&n)
-	return err == nil && n > 0
+	).Scan(&n); err != nil {
+		// Warehouse unreadable/corrupt: treat as absent so the caller degrades
+		// to the fallback source, but surface it so ops can spot a bad DB.
+		log.Printf("qlibpit: fundamentals lookup failed for %s, treating as absent: %v", symbol, err)
+		return false
+	}
+	return n > 0
 }
 
 // FetchEPSHistory returns the PIT EPS(TTM) series for symbol, ascending by
-// observe_date, including only points knowable on or before end.
+// observe_date, including only points knowable on or before end. start is
+// intentionally ignored: the percentile window is bounded downstream by
+// ReconstructPEPercentile over the OHLCV closes, so the full PIT EPS history
+// up to end is returned and step-aligned there.
 func (s *Source) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error) {
 	symbol = strings.ToUpper(symbol)
 	if !s.hasFundamentals(symbol) {
@@ -70,6 +79,9 @@ func (s *Source) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EP
 		}
 		date, err := time.Parse(dateFmt, od)
 		if err != nil {
+			// Malformed observe_date (contract violation): drop the row rather
+			// than risk mis-ordering, but log so the bad CSV can be traced.
+			log.Printf("qlibpit: skipping %s row with unparseable observe_date %q: %v", symbol, od, err)
 			continue
 		}
 		out = append(out, core.EPSPoint{Date: date, EPS: eps})

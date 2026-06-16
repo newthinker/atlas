@@ -22,6 +22,8 @@ def test_main_builds_warehouse_from_csv_dir(tmp_path):
     assert conn.execute(
         "SELECT last_date FROM warehouse_meta WHERE symbol='AAPL'"
     ).fetchone()[0] == "2024-01-02"
+    # Backward compatibility: without --fundamentals-dir, no PIT rows are written.
+    assert conn.execute("SELECT COUNT(*) FROM fundamentals_pit").fetchone()[0] == 0
 
 
 def test_main_errors_on_missing_csv_dir(tmp_path):
