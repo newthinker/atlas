@@ -26,6 +26,14 @@ type Config struct {
 	Analysis   AnalysisConfig             `mapstructure:"analysis"`
 	Collector  CollectorGlobalConfig      `mapstructure:"collector"`
 	Qlib       QlibConfig                 `mapstructure:"qlib"`
+	Valuation  ValuationConfig            `mapstructure:"valuation"`
+}
+
+// ValuationConfig configures the app-side PE-percentile lookback used for EPS
+// reconstruction and lixinger cvpos. LookbackYears: 0 means "since inception"
+// (EPS reconstruction uses full history; lixinger is capped at its y10 bucket).
+type ValuationConfig struct {
+	LookbackYears int `mapstructure:"lookback_years"`
 }
 
 // QlibConfig configures the local qlib SQLite data warehouse collector.
@@ -243,6 +251,11 @@ func Load(path string) (*Config, error) {
 	// W3: keep Load default in sync with Validate/Execute so an enabled broker
 	// missing execution.mode is treated as "confirm" rather than silently no-op.
 	v.SetDefault("broker.execution.mode", "confirm")
+	// C1: legacy configs without a valuation block must keep the historical
+	// 5-year PE-percentile lookback. SetDefault fires only when the key is
+	// absent, so an explicit `valuation.lookback_years: 0` (since inception) is
+	// preserved. Without this, serve.go would silently flip to inception mode.
+	v.SetDefault("valuation.lookback_years", 5)
 
 	// Support environment variable overrides
 	v.AutomaticEnv()
@@ -334,6 +347,9 @@ func Defaults() *Config {
 				MaxDailyLossPct:  5.0,
 				MaxOpenPositions: 20,
 			},
+		},
+		Valuation: ValuationConfig{
+			LookbackYears: 5,
 		},
 	}
 }

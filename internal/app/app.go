@@ -62,8 +62,9 @@ type App struct {
 	arbitrator signalArbitrator
 	executor   SignalExecutor
 
-	valuationSrc ValuationSource
-	epsSrc       EPSSource
+	valuationSrc      ValuationSource
+	epsSrc            EPSSource
+	valuationLookback int // PE-percentile lookback in years; 0 = since inception
 
 	watchlistItems []WatchlistItem
 	watchlistSet   map[string]struct{}
@@ -98,15 +99,16 @@ func New(cfg *config.Config, logger *zap.Logger) *App {
 	r := router.New(routerCfg, notifiers, logger)
 
 	return &App{
-		cfg:            cfg,
-		logger:         logger,
-		collectors:     collectors,
-		strategies:     strategies,
-		notifiers:      notifiers,
-		router:         r,
-		watchlistItems: []WatchlistItem{},
-		watchlistSet:   make(map[string]struct{}),
-		interval:       5 * time.Minute,
+		cfg:               cfg,
+		logger:            logger,
+		collectors:        collectors,
+		strategies:        strategies,
+		notifiers:         notifiers,
+		router:            r,
+		watchlistItems:    []WatchlistItem{},
+		watchlistSet:      make(map[string]struct{}),
+		interval:          5 * time.Minute,
+		valuationLookback: 5,
 	}
 }
 
@@ -166,6 +168,55 @@ type EPSSource interface {
 func (a *App) SetValuationSources(vs ValuationSource, es EPSSource) {
 	a.valuationSrc = vs
 	a.epsSrc = es
+}
+
+// SetValuationLookback sets the PE-percentile lookback in years (0 = since inception).
+// Must be called before Start (same set-once-before-Start contract as SetValuationSources).
+func (a *App) SetValuationLookback(years int) { a.valuationLookback = years }
+
+// lixingerLookback maps the configured lookback to a value lixinger can serve.
+// lixinger cvpos only has y3/y5/y10 buckets; 0 (since inception) maps to its
+// deepest bucket y10 (a documented limitation for CN stocks and all indices).
+func (a *App) lixingerLookback() int {
+	if a.valuationLookback == 0 {
+		return 10
+	}
+	return a.valuationLookback
+}
+
+// epochFloor is the earliest fetch start any data path will request: the Unix
+// epoch (1970-01-01). Reaching back before it produces a negative Unix timestamp
+// in the Yahoo chart URL's period1 (QA W3); rather than rely on undeclared
+// upstream tolerance we clamp here. The cost is losing pre-1970 history for the
+// handful of instruments that predate it (e.g. ^GSPC's 1957-1970 span) — an
+// accepted trade-off, and indices use lixinger for PE anyway.
+// Strategy-side inception window: strategy.SinceInceptionBars (~100 years) in
+// internal/strategy/interface.go; this floor is the app-layer complement that
+// prevents the resulting date from going negative on Unix.
+var epochFloor = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// clampToEpochFloor returns t, or epochFloor when t is earlier, so no fetch ever
+// requests a negative Unix start.
+func clampToEpochFloor(t time.Time) time.Time {
+	if t.Before(epochFloor) {
+		return epochFloor
+	}
+	return t
+}
+
+// epsFetchStart returns the lookback-derived start date for the trailing EPS
+// history fetch. Fixed-window mode reaches back valuationLookback years plus one
+// extra quarter (90 days) so the EPS series fully covers the price window.
+// Since-inception mode (0) reaches back to the 1970 epoch floor; data sources
+// clip to the actual listing date. Over-fetching earlier EPS points never shifts
+// the percentile, since the PE window is determined by the price bars, not the
+// EPS slice length. The caller widens this further to cover the supplied ohlcv
+// span (see buildFundamental, QA W2).
+func (a *App) epsFetchStart(end time.Time) time.Time {
+	if a.valuationLookback == 0 {
+		return epochFloor
+	}
+	return clampToEpochFloor(end.AddDate(-a.valuationLookback, 0, -90))
 }
 
 // SetArbitrator enables LLM-based arbitration of conflicting signals. When set,
@@ -381,7 +432,10 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 	// converted to calendar days), preferring the collector that matches the
 	// symbol's market and falling back to others.
 	end := time.Now()
-	start := end.AddDate(0, 0, -a.historyWindowDays(item))
+	// Clamp to the 1970 epoch floor: full-history strategies (lookback_years: 0)
+	// demand a window reaching back ~100 years, whose negative Unix start breaks
+	// the Yahoo chart URL (QA W3). Data sources clip to the actual listing date.
+	start := clampToEpochFloor(end.AddDate(0, 0, -a.historyWindowDays(item)))
 
 	var ohlcv []core.OHLCV
 	var fetchErr error
@@ -753,10 +807,6 @@ func (a *App) historyWindowDays(item WatchlistItem) int {
 	return maxBars*365/252 + 30
 }
 
-// valuationLookbackYears is the phase-1 fixed PE-percentile lookback window,
-// matching the strategy default; later phases may push it down to a parameter.
-const valuationLookbackYears = 5
-
 // buildFundamental assembles Fundamental.PEPercentile for one watchlist item
 // when any bound strategy needs fundamentals. Returns nil when the item's asset
 // class has no valuation path (commodity/crypto/fund). Path table (design §3.2):
@@ -782,7 +832,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 				zap.String("symbol", symbol))
 			return f
 		}
-		pct, err := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears)
+		pct, err := a.valuationSrc.FetchValuationPercentile(symbol, a.lixingerLookback())
 		if err != nil {
 			a.warnOnce("lixinger:"+symbol, "valuation percentile fetch failed",
 				zap.String("symbol", symbol), zap.Error(err))
@@ -796,7 +846,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 		// "主路径不可用·数据缺失"，直接进理杏仁兜底（设计 §5）。
 		if a.epsSrc == nil {
 			if a.valuationSrc != nil {
-				if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears); ferr == nil {
+				if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, a.lixingerLookback()); ferr == nil {
 					f.PEPercentile, f.Source = pct, "lixinger_cvpos:yahoo_not_configured"
 					return f
 				}
@@ -806,7 +856,19 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 			return f
 		}
 		end := time.Now()
-		eps, err := a.epsSrc.FetchEPSHistory(symbol, end.AddDate(-valuationLookbackYears, 0, -90), end)
+		// EPS must cover the whole ohlcv window, not just the lookback window:
+		// when the price strategy runs full-history but valuation.lookback_years
+		// stays short, closes earlier than the first EPS point would be silently
+		// dropped while the Reason still claims full history (QA W2). Take the
+		// earlier of the lookback start and the earliest bar (minus a quarter for
+		// step alignment), then clamp to the 1970 floor.
+		epsStart := a.epsFetchStart(end)
+		if len(ohlcv) > 0 {
+			if barStart := clampToEpochFloor(ohlcv[0].Time.AddDate(0, 0, -90)); barStart.Before(epsStart) {
+				epsStart = barStart
+			}
+		}
+		eps, err := a.epsSrc.FetchEPSHistory(symbol, epsStart, end)
 		if err == nil {
 			pct, rerr := valuation.ReconstructPEPercentile(ohlcv, eps)
 			switch {
@@ -819,7 +881,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 			err = rerr // ErrInsufficientEPS（或其它数据缺失）→ 落入兜底
 		}
 		if a.valuationSrc != nil {
-			if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears); ferr == nil {
+			if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, a.lixingerLookback()); ferr == nil {
 				f.PEPercentile = pct
 				f.Source = "lixinger_cvpos:" + fallbackReason(err)
 				return f

@@ -162,6 +162,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Info("qlib PIT EPS source enabled (yahoo fallback)")
 	}
 	application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSrc)
+	application.SetValuationLookback(cfg.Valuation.LookbackYears)
 
 	// Wire configured notifiers (telegram/email/webhook) so routed signals are
 	// actually delivered. Done after collectors are registered and before the

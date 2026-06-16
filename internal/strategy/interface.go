@@ -6,6 +6,15 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 )
 
+// SinceInceptionBars is the PriceHistory value a percentile strategy declares
+// when configured with lookback_years: 0 ("since inception"). It is a large
+// trading-day count (~100 years) so historyWindowDays computes a window that
+// reaches back past any real listing date; FetchHistory then returns only the
+// bars that actually exist, giving each symbol its own full-history window.
+// Note: the app-side fetch start is additionally clamped to 1970-01-01 (epochFloor)
+// so no Yahoo URL receives a negative Unix timestamp — see internal/app/app.go.
+const SinceInceptionBars = 100 * 252
+
 // Config holds strategy configuration
 type Config struct {
 	Enabled bool

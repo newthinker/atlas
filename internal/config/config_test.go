@@ -416,6 +416,56 @@ broker:
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (Task 4, phase3)
+// functional[0] "YAML valuation.lookback_years:0 解析为 0" → TestLoad_ValuationConfig
+// boundary[0]   "Defaults() ValuationConfig.LookbackYears == 5" → TestDefaults_ValuationLookbackIs5
+
+// functional[0]: valuation.lookback_years: 0 in YAML parses to LookbackYears==0 (since inception).
+func TestLoad_ValuationConfig(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+valuation:
+  lookback_years: 0
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Valuation.LookbackYears != 0 {
+		t.Errorf("Valuation.LookbackYears = %d, want 0", cfg.Valuation.LookbackYears)
+	}
+}
+
+// boundary[0]: Defaults() sets ValuationConfig.LookbackYears to 5 (preserve existing behaviour).
+func TestDefaults_ValuationLookbackIs5(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Valuation.LookbackYears != 5 {
+		t.Errorf("Defaults Valuation.LookbackYears = %d, want 5", cfg.Valuation.LookbackYears)
+	}
+}
+
+// boundary[1] (QA C1 fix): a legacy config file with NO valuation block must
+// Load() with LookbackYears==5, not 0. Defaults() applies to constructed configs
+// but Load() builds via viper.Unmarshal, so it needs its own SetDefault. Without
+// it, serve.go SetValuationLookback(0) silently flips every pre-existing
+// deployment into since-inception mode (zero-regression break).
+func TestLoad_NoValuationBlockDefaultsTo5(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+server:
+  host: "127.0.0.1"
+  port: 8080
+storage:
+  cold:
+    type: localfs
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Valuation.LookbackYears != 5 {
+		t.Errorf("Load (no valuation block) Valuation.LookbackYears = %d, want 5", cfg.Valuation.LookbackYears)
+	}
+}
+
 // Explicit execution.mode must be preserved (default only fills the gap).
 func TestLoad_ExecutionMode_ExplicitPreserved(t *testing.T) {
 	cfgPath := writeTempConfig(t, `

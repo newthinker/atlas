@@ -215,10 +215,21 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 	timestamps := r.Timestamp
 	quotes := r.Indicators.Quote[0]
 
-	data := make([]core.OHLCV, 0, len(timestamps))
-	for i, ts := range timestamps {
-		if quotes.Open[i] == nil {
-			continue // Skip missing data
+	// n guards against jagged slices: use the shortest length across all fields.
+	n := len(timestamps)
+	for _, length := range []int{len(quotes.Open), len(quotes.High), len(quotes.Low), len(quotes.Close), len(quotes.Volume)} {
+		if length < n {
+			n = length
+		}
+	}
+
+	data := make([]core.OHLCV, 0, n)
+	for i := 0; i < n; i++ {
+		ts := timestamps[i]
+		// Skip bars with any missing field (Yahoo returns partial old bars).
+		if quotes.Open[i] == nil || quotes.High[i] == nil || quotes.Low[i] == nil ||
+			quotes.Close[i] == nil || quotes.Volume[i] == nil {
+			continue
 		}
 		data = append(data, core.OHLCV{
 			Symbol:   symbol,

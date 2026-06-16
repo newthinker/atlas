@@ -16,6 +16,7 @@ import (
 	"github.com/newthinker/atlas/internal/meta"
 	"github.com/newthinker/atlas/internal/notifier"
 	"github.com/newthinker/atlas/internal/strategy"
+	"github.com/newthinker/atlas/internal/valuation"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -33,7 +34,7 @@ type fakeStrategy struct {
 	gotFundamental *core.Fundamental // captured from the last Analyze call
 }
 
-func (f *fakeStrategy) Name() string       { return f.name }
+func (f *fakeStrategy) Name() string        { return f.name }
 func (f *fakeStrategy) Description() string { return "fake" }
 func (f *fakeStrategy) RequiredData() strategy.DataRequirements {
 	return strategy.DataRequirements{
@@ -1292,5 +1293,203 @@ func TestEnrichSignalMetadata(t *testing.T) {
 	enrichSignalMetadata(plain, WatchlistItem{Symbol: "X"})
 	if plain[0].Metadata != nil {
 		t.Errorf("empty watchlist name must not allocate metadata, got %v", plain[0].Metadata)
+	}
+}
+
+// --- TASK-005: configurable valuation lookback with since-inception mode ---
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "New 后 valuationLookback 默认 5"                          → TestValuationLookback_DefaultIs5
+// functional[1] "SetValuationLookback(0) → lixingerLookback()==10"         → TestLixingerLookback_InceptionMapsToY10
+// functional[F1] "EPS 窗口 inception(0) start≈100年floor、非0为 N年+90天"  → TestEpsFetchStart
+// boundary[0]   "SetValuationLookback(7) → lixingerLookback()==7; 0→10"   → TestLixingerLookback_PassesThrough
+// non_functional "EPS 多取（inception floor）不改 PE 分位结果"              → TestReconstructPercentileUnaffectedByEPSOverfetch
+
+// TestValuationLookback_DefaultIs5 asserts that a newly constructed App has
+// valuationLookback == 5, preserving the phase-1 fixed-window behaviour when the
+// caller does not explicitly configure an inception mode.
+func TestValuationLookback_DefaultIs5(t *testing.T) {
+	a := New(&config.Config{}, nil)
+	if a.valuationLookback != 5 {
+		t.Errorf("valuationLookback default = %d, want 5", a.valuationLookback)
+	}
+}
+
+// TestLixingerLookback_InceptionMapsToY10 asserts that when valuationLookback is
+// set to 0 (since inception), lixingerLookback() returns 10 — the deepest bucket
+// the lixinger cvpos API supports (y10). This is a documented limitation for CN
+// stocks and all indices.
+func TestLixingerLookback_InceptionMapsToY10(t *testing.T) {
+	a := New(&config.Config{}, nil)
+	a.SetValuationLookback(0)
+	if got := a.lixingerLookback(); got != 10 {
+		t.Errorf("lixingerLookback() with valuationLookback=0 = %d, want 10", got)
+	}
+}
+
+// TestLixingerLookback_PassesThrough verifies that non-zero lookback values pass
+// through lixingerLookback() unchanged, and that 0 always maps to 10.
+func TestLixingerLookback_PassesThrough(t *testing.T) {
+	cases := []struct {
+		set  int
+		want int
+	}{
+		{set: 7, want: 7},
+		{set: 5, want: 5},
+		{set: 3, want: 3},
+		{set: 10, want: 10},
+		{set: 0, want: 10}, // since inception → deepest lixinger bucket
+	}
+	for _, c := range cases {
+		a := New(&config.Config{}, nil)
+		a.SetValuationLookback(c.set)
+		if got := a.lixingerLookback(); got != c.want {
+			t.Errorf("SetValuationLookback(%d): lixingerLookback() = %d, want %d", c.set, got, c.want)
+		}
+	}
+}
+
+// TestEpsFetchStart directly asserts the EPS-history fetch window (done_criteria
+// F1 + QA W3). Two branches:
+//   - inception (lookback 0): start is clamped to the 1970-01-01 floor (Unix 0),
+//     not the raw ~1926 AddDate(-100y) which would yield a negative Unix epoch in
+//     the Yahoo URL (QA W3).
+//   - fixed N-year: start is exactly end.AddDate(-N, 0, -90) (N years plus one
+//     extra quarter so the EPS series fully covers the price window), and never
+//     earlier than the 1970 floor.
+//
+// Pairs with TestReconstructPercentileUnaffectedByEPSOverfetch: that proves the
+// deep floor is harmless to the percentile; this proves the floor is applied and
+// clamped (i.e. inception over-fetches but stops at 1970).
+func TestEpsFetchStart(t *testing.T) {
+	end := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	floor := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Inception (QA W3): clamped to exactly the 1970-01-01 floor, not 1926.
+	aInception := New(&config.Config{}, nil)
+	aInception.SetValuationLookback(0)
+	got := aInception.epsFetchStart(end)
+	if !got.Equal(floor) {
+		t.Errorf("inception epsFetchStart = %v, want 1970-01-01 floor (got Unix %d)", got, got.Unix())
+	}
+	// Defensive: the floored start must yield a non-negative Unix epoch (the root
+	// cause of W3 was a negative period1 in the Yahoo URL).
+	if got.Unix() < 0 {
+		t.Errorf("inception epsFetchStart Unix = %d, want >= 0 (no negative period1)", got.Unix())
+	}
+
+	// Fixed N-year branches: exact start = end - N years - 90 days (well after 1970).
+	for _, n := range []int{5, 3} {
+		a := New(&config.Config{}, nil)
+		a.SetValuationLookback(n)
+		want := end.AddDate(-n, 0, -90)
+		if got := a.epsFetchStart(end); !got.Equal(want) {
+			t.Errorf("epsFetchStart with lookback=%d = %v, want %v (N years + 90 days)", n, got, want)
+		}
+	}
+}
+
+// TestReconstructPercentileUnaffectedByEPSOverfetch is the N2 load-bearing test.
+// It proves that EPS overfetch (adding earlier EPS points beyond the ohlcv window,
+// as happens in inception mode where epsStart is floored to 100 years ago) does
+// NOT change the PE percentile result. The PE percentile window is determined by
+// the ohlcv slice, not the EPS slice length.
+//
+// Construction:
+//   - ohlcv: 300 daily bars starting at a fixed anchor date
+//   - epsA:  8 positive quarterly EPS points starting just before ohlcv[0]
+//     (minimal: covers only the ohlcv window)
+//   - epsB:  epsA prepended with 4 extra earlier EPS points (simulating the
+//     "inception floor" fetching more history than needed)
+//
+// Both calls to ReconstructPEPercentile must return the same percentile, proving
+// the PE series is determined by ohlcv alignment, not EPS slice length.
+func TestReconstructPercentileUnaffectedByEPSOverfetch(t *testing.T) {
+	anchor := time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Build ohlcv: 300 bars starting at anchor
+	ohlcv := make([]core.OHLCV, 300)
+	for i := range ohlcv {
+		ohlcv[i] = core.OHLCV{
+			Close: 100 + float64(i%50),
+			Time:  anchor.AddDate(0, 0, i),
+		}
+	}
+
+	// epsA: 8 positive quarterly EPS points starting 30 days before ohlcv[0]
+	// so that every ohlcv bar has a valid step-aligned EPS.
+	epsAStart := anchor.AddDate(0, 0, -30)
+	epsA := make([]core.EPSPoint, 8)
+	for i := range epsA {
+		epsA[i] = core.EPSPoint{Date: epsAStart.AddDate(0, 3*i, 0), EPS: 4.0 + 0.1*float64(i)}
+	}
+
+	// epsB: epsA prepended with 4 extra earlier points (overfetch simulation).
+	// These extra points predate ohlcv entirely, so they do not add any new
+	// aligned close→EPS pairs — the PE series remains identical.
+	extraStart := anchor.AddDate(-2, 0, 0)
+	extra := make([]core.EPSPoint, 4)
+	for i := range extra {
+		extra[i] = core.EPSPoint{Date: extraStart.AddDate(0, 3*i, 0), EPS: 3.0 + 0.1*float64(i)}
+	}
+	epsB := append(extra, epsA...)
+
+	pctA, errA := valuation.ReconstructPEPercentile(ohlcv, epsA)
+	pctB, errB := valuation.ReconstructPEPercentile(ohlcv, epsB)
+
+	if errA != nil {
+		t.Fatalf("ReconstructPEPercentile(ohlcv, epsA) error = %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("ReconstructPEPercentile(ohlcv, epsB) error = %v", errB)
+	}
+	if pctA != pctB {
+		t.Errorf("percentile changed with EPS overfetch: epsA→%.4f, epsB→%.4f; "+
+			"PE percentile window must be determined by ohlcv, not EPS slice length", pctA, pctB)
+	}
+}
+
+// recordingEPS captures the start date passed to FetchEPSHistory so the W2 test
+// can assert the EPS fetch window actually covers the supplied ohlcv span.
+type recordingEPS struct {
+	gotStart time.Time
+	pts      []core.EPSPoint
+}
+
+func (s *recordingEPS) FetchEPSHistory(_ string, start, _ time.Time) ([]core.EPSPoint, error) {
+	s.gotStart = start
+	return s.pts, nil
+}
+
+// TestBuildFundamental_EPSStartCoversOhlcvWindow is the QA W2 regression test.
+// When the price strategy runs in full-history mode but valuation.lookback_years
+// stays at a short N (here 5), the ohlcv window can start far earlier than the
+// lookback-derived EPS start. If the EPS fetch only reached back N years, every
+// close earlier than the first EPS point would be silently dropped by
+// ReconstructPEPercentile while the Reason still claims full history. The fix
+// requires the EPS fetch start to be no later than the earliest ohlcv bar (minus
+// a quarter for step alignment), so EPS covers the whole price window.
+func TestBuildFundamental_EPSStartCoversOhlcvWindow(t *testing.T) {
+	a := New(&config.Config{}, nil)
+	a.SetValuationLookback(5) // short EPS lookback, but ohlcv spans much longer
+
+	rec := &recordingEPS{pts: validEPS8()}
+	a.SetValuationSources(&stubVal{pct: 50}, rec)
+
+	// ohlcv earliest bar at year 2000 — far older than the 5-year EPS lookback.
+	ohlcvStart := time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC)
+	bars := make([]core.OHLCV, 300)
+	for i := range bars {
+		bars[i] = core.OHLCV{Close: 100 + float64(i%50), Time: ohlcvStart.AddDate(0, 0, i)}
+	}
+
+	a.buildFundamental("AAPL", TypeStock, bars)
+
+	if rec.gotStart.IsZero() {
+		t.Fatal("FetchEPSHistory was not called; cannot verify EPS window")
+	}
+	if rec.gotStart.After(bars[0].Time) {
+		t.Errorf("EPS fetch start = %v, want <= earliest ohlcv bar %v (must cover full price window)",
+			rec.gotStart, bars[0].Time)
 	}
 }

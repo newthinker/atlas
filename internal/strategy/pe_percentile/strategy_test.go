@@ -1,6 +1,7 @@
 package pe_percentile
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,16 @@ import (
 // functional[0] "Init(percentile_step:3 int) → Metadata[percentile_step]==3.0" → TestInit_PercentileStepParam
 // boundary[0]   "未配置 → Metadata 不含 percentile_step 键"                    → TestAnalyze_NoStepParam_NoStepMetadata
 // boundary[1]   "percentile_step ≤ 0 → 视为未配置，不写元数据"                  → TestInit_PercentileStepNonPositive_NoMetadata
+//
+// Task 3 since-inception done_criteria → test mapping:
+// functional[0] "lookback_years=0 → RequiredData().PriceHistory==SinceInceptionBars" → TestRequiredData_SinceInception
+// functional[1] "Init(lookback_years:0) 不报错"                                       → TestInit_AcceptsZeroLookback
+// boundary[0]   "Init(lookback_years:-1) 报错"                                        → TestInit_RejectsNegativeLookback
+// functional[2] "lookback_years=0 + Fundamental 有效 → Reason 含 'full history'"      → TestAnalyze_FullHistoryReasonText
+// boundary[1]   "lookback_years=0 + Fundamental nil → 无信号"                         → TestAnalyze_InceptionNoFundamentalNoSignal
+//
+// I3 QA polish — inception reason bar count:
+// functional[3] "lookback_years=0 → inception Reason 末尾含 bar 数 '(N bars)'"        → TestAnalyze_InceptionReasonContainsBarCount
 
 func peCtx(pePct float64, source string) strategy.AnalysisContext {
 	return strategy.AnalysisContext{
@@ -156,5 +167,123 @@ func TestInit_PercentileStepNonPositive_NoMetadata(t *testing.T) {
 		if _, ok := sigs[0].Metadata["percentile_step"]; ok {
 			t.Errorf("step=%v: percentile_step <= 0 must be treated as unconfigured", step)
 		}
+	}
+}
+
+// Task 3: since-inception tests
+
+// TestRequiredData_SinceInception: functional[0] — lookback_years=0 时
+// RequiredData().PriceHistory 应等于 strategy.SinceInceptionBars。
+func TestRequiredData_SinceInception(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init with lookback_years=0 failed: %v", err)
+	}
+	rd := s.RequiredData()
+	if rd.PriceHistory != strategy.SinceInceptionBars {
+		t.Errorf("PriceHistory = %d, want SinceInceptionBars (%d)", rd.PriceHistory, strategy.SinceInceptionBars)
+	}
+}
+
+// TestInit_AcceptsZeroLookback: functional[1] — lookback_years=0 合法，Init 不报错。
+func TestInit_AcceptsZeroLookback(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Errorf("Init(lookback_years=0) should not error, got: %v", err)
+	}
+}
+
+// TestInit_RejectsNegativeLookback: boundary[0] — lookback_years=-1 非法，Init 报错。
+func TestInit_RejectsNegativeLookback(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": -1}}); err == nil {
+		t.Error("Init(lookback_years=-1) should return an error")
+	}
+}
+
+// TestAnalyze_FullHistoryReasonText: functional[2] — lookback_years=0 + Fundamental
+// 有效时，Signal.Reason 应含 "full history"，且 metadata lookback_years==0。
+func TestAnalyze_FullHistoryReasonText(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	sigs, err := s.Analyze(peCtx(5, "lixinger_cvpos"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(sigs))
+	}
+	if !strings.Contains(sigs[0].Reason, "full history") {
+		t.Errorf("Reason = %q, want it to contain 'full history'", sigs[0].Reason)
+	}
+	if sigs[0].Metadata["lookback_years"] != 0 {
+		t.Errorf("metadata lookback_years = %v, want 0", sigs[0].Metadata["lookback_years"])
+	}
+}
+
+// TestAnalyze_InceptionNoFundamentalNoSignal: boundary[1] — lookback_years=0 +
+// Fundamental nil（数据不足/未算出分位）→ 无信号。
+// pe_percentile 的 Analyze 顶部已有 Fundamental nil 守卫，本测试确认 inception
+// 模式下该守卫仍然生效（与 price_percentile minSampleBars 门槛不同，pe_percentile
+// 不直接检查 OHLCV 长度，依赖 Fundamental 是否可用来判断数据充足性）。
+func TestAnalyze_InceptionNoFundamentalNoSignal(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	ctx := strategy.AnalysisContext{Symbol: "TEST", Now: time.Now(), Fundamental: nil}
+	sigs, err := s.Analyze(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs) != 0 {
+		t.Errorf("expected no signal when Fundamental is nil, got %+v", sigs)
+	}
+}
+
+// TestAnalyze_InceptionReasonContainsBarCount: I3 — lookback_years=0 (inception)
+// Signal.Reason should contain the OHLCV bar count as "(N bars)", aligning with
+// price_percentile's convention and helping operators distinguish true full-history
+// from data-truncated runs. Non-inception reason text must remain unchanged.
+func TestAnalyze_InceptionReasonContainsBarCount(t *testing.T) {
+	s := New()
+	if err := s.Init(strategy.Config{Params: map[string]any{"lookback_years": 0}}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	ohlcv := make([]core.OHLCV, 7)
+	ctx := strategy.AnalysisContext{
+		Symbol: "TEST", Now: time.Now(),
+		OHLCV:       ohlcv,
+		Fundamental: &core.Fundamental{Symbol: "TEST", PEPercentile: 5, Source: "lixinger_cvpos"},
+	}
+	sigs, err := s.Analyze(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(sigs))
+	}
+	// Inception reason must end with "(method, N bars)" — bar count = len(ctx.OHLCV).
+	if !strings.Contains(sigs[0].Reason, "7 bars") {
+		t.Errorf("inception Reason = %q, want it to contain '7 bars'", sigs[0].Reason)
+	}
+
+	// Non-inception reason must NOT contain "bars" (format unchanged).
+	s2 := New()
+	if err := s2.Init(strategy.Config{Params: map[string]any{"lookback_years": 5}}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	sigs2, err := s2.Analyze(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs2) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(sigs2))
+	}
+	if strings.Contains(sigs2[0].Reason, "bars") {
+		t.Errorf("non-inception Reason = %q, must not contain 'bars'", sigs2[0].Reason)
 	}
 }
