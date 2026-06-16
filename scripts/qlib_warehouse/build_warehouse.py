@@ -15,6 +15,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--source", required=True)
     ap.add_argument("--db", required=True)
     ap.add_argument("--dumped-at", default=None)
+    ap.add_argument("--fundamentals-dir", default=None)
     args = ap.parse_args(argv)
 
     csv_dir = Path(args.csv_dir)
@@ -27,9 +28,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"no rows parsed from {csv_dir}", file=sys.stderr)
         return 2
 
+    from . import fundamentals  # local import to keep ingest path lazy
+    funds = None
+    if args.fundamentals_dir:
+        fdir = Path(args.fundamentals_dir)
+        if not fdir.is_dir():
+            print(f"fundamentals-dir not found: {fdir}", file=sys.stderr)
+            return 3
+        funds = fundamentals.parse_dir(fdir)
+
     dumped_at = args.dumped_at or datetime.now(timezone.utc).isoformat()
     writer.write(args.db, rows, market=args.market, source=args.source,
-                 dumped_at=dumped_at)
+                 dumped_at=dumped_at, fundamentals=funds)
     print(f"wrote {len(rows)} rows to {args.db}")
     return 0
 

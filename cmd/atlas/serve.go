@@ -16,6 +16,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/collector/eastmoney"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/qlibpit"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	atlasctx "github.com/newthinker/atlas/internal/context"
@@ -145,14 +146,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Wire qlib warehouse collector after all external collectors are registered
 	// so that SelectExternalForSymbol can resolve to them at runtime.
-	wireQlibWarehouse(cfg.Qlib, application.CollectorRegistry(), func(p string) (*sql.DB, error) {
+	// The returned db handle is shared with qlibpit below (single open, no double-open).
+	qlibWarehouseDB, _ := wireQlibWarehouse(cfg.Qlib, application.CollectorRegistry(), func(p string) (*sql.DB, error) {
 		return sql.Open("sqlite", "file:"+p+"?mode=ro")
 	}, log)
 
 	// Inject valuation/EPS sources used to assemble PE-percentile fundamentals.
 	// Pass through the typed-nil guards so an unconfigured collector stays an
 	// untyped-nil interface (see valuationSourceOrNil).
-	application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSourceOrNil(yahooCollector))
+	// When the qlib warehouse is available, wrap the yahoo EPS source with the
+	// PIT-correct qlibpit source (yahoo becomes the fallback, no recursive wrapping).
+	var epsSrc app.EPSSource = epsSourceOrNil(yahooCollector)
+	if qlibWarehouseDB != nil {
+		epsSrc = qlibpit.New(qlibWarehouseDB, epsSrc)
+		log.Info("qlib PIT EPS source enabled (yahoo fallback)")
+	}
+	application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSrc)
 
 	// Wire configured notifiers (telegram/email/webhook) so routed signals are
 	// actually delivered. Done after collectors are registered and before the
