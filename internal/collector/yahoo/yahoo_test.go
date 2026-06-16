@@ -331,3 +331,61 @@ func TestFetch_MalformedJSON(t *testing.T) {
 		t.Error("FetchHistory: expected error for malformed JSON, got nil")
 	}
 }
+
+// Context Checkpoint: done_criteria -> test mapping
+// error_handling[nil-fields] "bar with any nil OHLCV field must be skipped, not panic" -> TestFetchHistory_SkipsBarsWithNilFields
+// boundary[nil-fields]       "legal bar adjacent to nil bar is returned intact"         -> TestFetchHistory_SkipsBarsWithNilFields
+
+// TestFetchHistory_SkipsBarsWithNilFields verifies that FetchHistory does not
+// panic when Yahoo returns a bar whose Open is non-nil but Close (or another
+// field) is null, and that such bars are silently skipped while adjacent valid
+// bars are returned correctly.
+//
+// The response has three timestamps:
+//   ts[0]: all fields valid     -> bar must appear in output
+//   ts[1]: close == null        -> bar must be skipped (was causing panic before fix)
+//   ts[2]: volume == null       -> bar must be skipped
+func TestFetchHistory_SkipsBarsWithNilFields(t *testing.T) {
+	// JSON: open is non-nil for all three entries, but close[1] and volume[2] are null.
+	body := `{
+  "chart": {
+    "result": [{
+      "meta": {"symbol": "AAPL"},
+      "timestamp": [1700000000, 1700086400, 1700172800],
+      "indicators": {
+        "quote": [{
+          "open":   [100.0, 102.0, 104.0],
+          "high":   [105.0, 107.0, 109.0],
+          "low":    [99.0,  101.0, 103.0],
+          "close":  [104.0, null,  108.0],
+          "volume": [1000,  2000,  null]
+        }]
+      }
+    }],
+    "error": null
+  }
+}`
+	_, y := newTestServer(t, http.StatusOK, body)
+
+	// A nil-field deref would panic here, which the test runner reports as a failure.
+	bars, err := y.FetchHistory("AAPL", time.Unix(1700000000, 0), time.Unix(1700172800, 0), "1d")
+	if err != nil {
+		t.Fatalf("FetchHistory returned unexpected error: %v", err)
+	}
+
+	// Only ts[0] has all fields non-nil; ts[1] and ts[2] must be skipped.
+	if len(bars) != 1 {
+		t.Fatalf("len(bars) = %d, want 1 (only the fully-populated bar)", len(bars))
+	}
+	bar := bars[0]
+	if !bar.Time.Equal(time.Unix(1700000000, 0)) {
+		t.Errorf("bars[0].Time = %v, want %v", bar.Time, time.Unix(1700000000, 0))
+	}
+	if bar.Open != 100.0 || bar.High != 105.0 || bar.Low != 99.0 || bar.Close != 104.0 {
+		t.Errorf("bars[0] OHLC = %v/%v/%v/%v, want 100/105/99/104",
+			bar.Open, bar.High, bar.Low, bar.Close)
+	}
+	if bar.Volume != 1000 {
+		t.Errorf("bars[0].Volume = %d, want 1000", bar.Volume)
+	}
+}
