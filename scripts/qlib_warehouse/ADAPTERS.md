@@ -125,3 +125,44 @@ percentile reconstruction). The other normalized columns — `pe`, `pb`, `ps`,
 compatibility but are **not consumed** this phase. Adapters should still
 populate them when cheaply available, but a CSV with only the required columns
 plus `eps_ttm` is fully functional today.
+
+---
+
+## Lookback modes
+
+The `lookback_years` parameter (in `config.yaml` under `valuation.lookback_years`
+or per-strategy `params.lookback_years`) controls the historical window used for
+price and PE percentile calculations.
+
+| Value | Meaning |
+|-------|---------|
+| `> 0` | Rolling N-year window (e.g. `5` = trailing 5 years) |
+| `0`   | Since inception — use all available history from the earliest data point |
+
+### Per-path capability table
+
+| Data path | Price percentile | PE percentile | Effective history |
+|-----------|-----------------|---------------|-------------------|
+| Price (all markets via qlib_csv) | Full market history | N/A | True since-IPO if `export-ohlcv --from 1970-01-01` used (see below) |
+| US/HK individual equities — PE via Yahoo EPS rebuild | N/A | Full history | True since-IPO; Yahoo provides complete quarterly EPS history |
+| A-share individual stocks + all indices — PE via lixinger | N/A | Capped at 10 years | lixinger API maximum lookback is `y10` (10 years); `lookback_years: 0` is equivalent to "at most 10 years" for these symbols, not true full history |
+
+### Data prerequisite for full-history price percentile
+
+By default, `qlib_csv_us/` is populated by `make qlib-data-us` which uses
+`SIGNAL_FROM` (default `2021-01-01`), giving only ~5 years of price history.
+
+To enable true since-inception price percentile for US equities, regenerate the
+CSV directory with the full-history start date before running `make warehouse-dump`:
+
+```bash
+# Step 1: rebuild qlib_csv_us with full history
+./bin/atlas export-ohlcv --from $(WAREHOUSE_FROM) --market us --out-dir qlib_csv_us
+# WAREHOUSE_FROM defaults to 1970-01-01 (set in Makefile)
+
+# Step 2: build the warehouse
+make warehouse-dump
+```
+
+`SIGNAL_FROM` is intentionally left unchanged so that `make signal-eval-us` and
+related targets continue to operate on their existing date range.

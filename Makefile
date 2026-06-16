@@ -6,6 +6,10 @@ BUILD_DIR=bin
 SIGNAL_SYMBOLS ?= 600519.SH,000300.SH
 SIGNAL_FROM    ?= 2021-01-01
 SIGNAL_TO      ?= 2026-06-01
+# 全史 dump 起点：warehouse-dump 前若需重建全史 qlib_csv，先运行：
+#   ./bin/atlas export-ohlcv --from $(WAREHOUSE_FROM) --market us --out-dir $(QLIB_CSV_US_DIR)
+# 再执行 make warehouse-dump。SIGNAL_FROM 保持不变，避免影响既有 signal-eval 数据包。
+WAREHOUSE_FROM ?= 1970-01-01
 SIGNAL_BENCHMARK ?= 000300.SH
 
 # Python 评估链：系统 python3 已损坏，统一走预置 venv（3.11 + pandas + pytest）
