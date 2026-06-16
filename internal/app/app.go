@@ -62,8 +62,9 @@ type App struct {
 	arbitrator signalArbitrator
 	executor   SignalExecutor
 
-	valuationSrc ValuationSource
-	epsSrc       EPSSource
+	valuationSrc      ValuationSource
+	epsSrc            EPSSource
+	valuationLookback int // PE-percentile lookback in years; 0 = since inception
 
 	watchlistItems []WatchlistItem
 	watchlistSet   map[string]struct{}
@@ -98,15 +99,16 @@ func New(cfg *config.Config, logger *zap.Logger) *App {
 	r := router.New(routerCfg, notifiers, logger)
 
 	return &App{
-		cfg:            cfg,
-		logger:         logger,
-		collectors:     collectors,
-		strategies:     strategies,
-		notifiers:      notifiers,
-		router:         r,
-		watchlistItems: []WatchlistItem{},
-		watchlistSet:   make(map[string]struct{}),
-		interval:       5 * time.Minute,
+		cfg:               cfg,
+		logger:            logger,
+		collectors:        collectors,
+		strategies:        strategies,
+		notifiers:         notifiers,
+		router:            r,
+		watchlistItems:    []WatchlistItem{},
+		watchlistSet:      make(map[string]struct{}),
+		interval:          5 * time.Minute,
+		valuationLookback: 5,
 	}
 }
 
@@ -166,6 +168,33 @@ type EPSSource interface {
 func (a *App) SetValuationSources(vs ValuationSource, es EPSSource) {
 	a.valuationSrc = vs
 	a.epsSrc = es
+}
+
+// SetValuationLookback sets the PE-percentile lookback in years (0 = since inception).
+// Must be called before Start (same set-once-before-Start contract as SetValuationSources).
+func (a *App) SetValuationLookback(years int) { a.valuationLookback = years }
+
+// lixingerLookback maps the configured lookback to a value lixinger can serve.
+// lixinger cvpos only has y3/y5/y10 buckets; 0 (since inception) maps to its
+// deepest bucket y10 (a documented limitation for CN stocks and all indices).
+func (a *App) lixingerLookback() int {
+	if a.valuationLookback == 0 {
+		return 10
+	}
+	return a.valuationLookback
+}
+
+// epsFetchStart returns the start date for the trailing EPS history fetch.
+// Fixed-window mode reaches back valuationLookback years plus one extra quarter
+// (90 days) so the EPS series fully covers the price window. Since-inception
+// mode (0) floors to ~100 years ago; data sources clip to the actual listing
+// date. Over-fetching earlier EPS points never shifts the percentile, since the
+// PE window is determined by the price bars, not the EPS slice length.
+func (a *App) epsFetchStart(end time.Time) time.Time {
+	if a.valuationLookback == 0 {
+		return end.AddDate(-100, 0, 0)
+	}
+	return end.AddDate(-a.valuationLookback, 0, -90)
 }
 
 // SetArbitrator enables LLM-based arbitration of conflicting signals. When set,
@@ -753,10 +782,6 @@ func (a *App) historyWindowDays(item WatchlistItem) int {
 	return maxBars*365/252 + 30
 }
 
-// valuationLookbackYears is the phase-1 fixed PE-percentile lookback window,
-// matching the strategy default; later phases may push it down to a parameter.
-const valuationLookbackYears = 5
-
 // buildFundamental assembles Fundamental.PEPercentile for one watchlist item
 // when any bound strategy needs fundamentals. Returns nil when the item's asset
 // class has no valuation path (commodity/crypto/fund). Path table (design §3.2):
@@ -782,7 +807,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 				zap.String("symbol", symbol))
 			return f
 		}
-		pct, err := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears)
+		pct, err := a.valuationSrc.FetchValuationPercentile(symbol, a.lixingerLookback())
 		if err != nil {
 			a.warnOnce("lixinger:"+symbol, "valuation percentile fetch failed",
 				zap.String("symbol", symbol), zap.Error(err))
@@ -796,7 +821,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 		// "主路径不可用·数据缺失"，直接进理杏仁兜底（设计 §5）。
 		if a.epsSrc == nil {
 			if a.valuationSrc != nil {
-				if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears); ferr == nil {
+				if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, a.lixingerLookback()); ferr == nil {
 					f.PEPercentile, f.Source = pct, "lixinger_cvpos:yahoo_not_configured"
 					return f
 				}
@@ -806,7 +831,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 			return f
 		}
 		end := time.Now()
-		eps, err := a.epsSrc.FetchEPSHistory(symbol, end.AddDate(-valuationLookbackYears, 0, -90), end)
+		eps, err := a.epsSrc.FetchEPSHistory(symbol, a.epsFetchStart(end), end)
 		if err == nil {
 			pct, rerr := valuation.ReconstructPEPercentile(ohlcv, eps)
 			switch {
@@ -819,7 +844,7 @@ func (a *App) buildFundamental(symbol, appType string, ohlcv []core.OHLCV) *core
 			err = rerr // ErrInsufficientEPS（或其它数据缺失）→ 落入兜底
 		}
 		if a.valuationSrc != nil {
-			if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, valuationLookbackYears); ferr == nil {
+			if pct, ferr := a.valuationSrc.FetchValuationPercentile(symbol, a.lixingerLookback()); ferr == nil {
 				f.PEPercentile = pct
 				f.Source = "lixinger_cvpos:" + fallbackReason(err)
 				return f
