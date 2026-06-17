@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -95,21 +96,102 @@ func (t *Telegram) Send(signal core.Signal) error {
 }
 
 func (t *Telegram) SendBatch(signals []core.Signal) error {
-	if len(signals) == 0 {
+	msg := formatBatch(signals)
+	if msg == "" {
 		return nil
 	}
+	return t.sendMessage(msg)
+}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📊 *%d Trading Signals*\n\n", len(signals)))
+// batchGroup is one action section of the digest table.
+type batchGroup struct {
+	title   string
+	actions []core.Action
+}
 
-	for i, signal := range signals {
-		sb.WriteString(t.formatSignal(signal))
-		if i < len(signals)-1 {
-			sb.WriteString("\n---\n\n")
+// digestGroups defines section order: buy, sell, then hold.
+var digestGroups = []batchGroup{
+	{"📈 买入", []core.Action{core.ActionStrongBuy, core.ActionBuy}},
+	{"📉 卖出", []core.Action{core.ActionStrongSell, core.ActionSell}},
+	{"⏸ 持有", []core.Action{core.ActionHold}},
+}
+
+// formatBatch renders signals as a Telegram message: a title line plus one
+// monospace, display-width-aligned table per non-empty action group, rows
+// sorted by confidence descending. Returns "" for an empty batch.
+func formatBatch(signals []core.Signal) string {
+	if len(signals) == 0 {
+		return ""
+	}
+	var latest time.Time
+	for _, s := range signals {
+		if s.GeneratedAt.After(latest) {
+			latest = s.GeneratedAt
 		}
 	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📊 Atlas 信号汇总 · %s · %d 条\n",
+		latest.Format("2006-01-02 15:04"), len(signals)))
 
-	return t.sendMessage(sb.String())
+	for _, g := range digestGroups {
+		rows := make([]core.Signal, 0)
+		for _, s := range signals {
+			for _, a := range g.actions {
+				if s.Action == a {
+					rows = append(rows, s)
+					break
+				}
+			}
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Confidence > rows[j].Confidence })
+		sb.WriteString("\n")
+		sb.WriteString(g.title)
+		sb.WriteString("\n")
+		sb.WriteString(renderTable(rows))
+	}
+	return sb.String()
+}
+
+// renderTable builds a fenced, column-aligned table for one group's rows.
+func renderTable(rows []core.Signal) string {
+	header := []string{"SYMBOL", "NAME", "CONF", "PRICE"}
+	cells := [][]string{header}
+	for _, s := range rows {
+		name, _ := s.Metadata["name"].(string)
+		price := ""
+		if s.Price > 0 {
+			price = fmt.Sprintf("%.2f", s.Price)
+		}
+		cells = append(cells, []string{
+			s.Symbol, name, fmt.Sprintf("%.1f%%", s.Confidence*100), price,
+		})
+	}
+	widths := make([]int, len(header))
+	for _, row := range cells {
+		for i, c := range row {
+			if w := displayWidth(c); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("```\n")
+	for _, row := range cells {
+		for i, c := range row {
+			if i == len(row)-1 {
+				sb.WriteString(c) // last column: no trailing pad
+			} else {
+				sb.WriteString(padRight(c, widths[i]))
+				sb.WriteString("  ")
+			}
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("```\n")
+	return sb.String()
 }
 
 // escapeMarkdown escapes special characters for Telegram Markdown

@@ -241,6 +241,58 @@ func TestFormatSignal_NoNameMetadata_KeepsBareTitle(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-002)
+// functional[0] "TestFormatBatch_GroupsAndAligns 全过" → TestFormatBatch_GroupsAndAligns
+// functional[1] "TestFormatBatch_EmptyAndHold 全过"    → TestFormatBatch_EmptyAndHold
+// functional[2] "SendBatch 经 formatBatch 渲染"        → TestFormatBatch_EmptyAndHold (nil)
+// boundary[0]   "formatBatch(nil)==\"\""               → TestFormatBatch_EmptyAndHold
+// boundary[1]   "末列无尾随补空格"                      → TestFormatBatch_GroupsAndAligns (code block)
+// error_handling[0] "Metadata 无 name 时 NAME 为空，不 panic" → TestFormatBatch_GroupsAndAligns
+
+func TestFormatBatch_GroupsAndAligns(t *testing.T) {
+	sigs := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionStrongSell, Confidence: 0.934, Price: 299.24},
+		{Symbol: "600519.SH", Action: core.ActionStrongBuy, Confidence: 0.947, Price: 1240.92,
+			Metadata: map[string]any{"name": "贵州茅台"}},
+		{Symbol: "0700.HK", Action: core.ActionBuy, Confidence: 0.85, Price: 463.6,
+			Metadata: map[string]any{"name": "腾讯控股"}},
+	}
+	out := formatBatch(sigs)
+
+	// header with count
+	if !strings.Contains(out, "3 条") {
+		t.Errorf("missing count header:\n%s", out)
+	}
+	// group titles present, buy section before sell section
+	bi := strings.Index(out, "📈 买入")
+	si := strings.Index(out, "📉 卖出")
+	if bi < 0 || si < 0 || bi > si {
+		t.Errorf("group order wrong (buy=%d sell=%d):\n%s", bi, si, out)
+	}
+	// code blocks present
+	if strings.Count(out, "```") < 4 { // 2 groups * 2 fences
+		t.Errorf("expected fenced tables:\n%s", out)
+	}
+	// buy group sorted by confidence desc: 茅台(0.947) before 腾讯(0.85)
+	if strings.Index(out, "600519.SH") > strings.Index(out, "0700.HK") {
+		t.Errorf("buy rows not sorted by confidence:\n%s", out)
+	}
+	// CJK name column aligned: the CONF token follows name padded by display width
+	if !strings.Contains(out, "贵州茅台") || !strings.Contains(out, "94.7%") {
+		t.Errorf("missing row content:\n%s", out)
+	}
+}
+
+func TestFormatBatch_EmptyAndHold(t *testing.T) {
+	if formatBatch(nil) != "" {
+		t.Error("empty batch must yield empty string")
+	}
+	out := formatBatch([]core.Signal{{Symbol: "X", Action: core.ActionHold, Confidence: 0.7}})
+	if !strings.Contains(out, "⏸ 持有") {
+		t.Errorf("hold group missing:\n%s", out)
+	}
+}
+
 func TestDisplaySymbol_HKPaddedToFiveDigits(t *testing.T) {
 	cases := map[string]string{
 		"0883.HK":   "00883.HK",
