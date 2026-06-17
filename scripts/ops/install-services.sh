@@ -4,6 +4,7 @@
 #   - com.newthinker.atlas.serve         常驻服务
 #   - com.newthinker.atlas.refresh-us    每天 08:00 刷新美股 + 重建仓库
 #   - com.newthinker.atlas.refresh-cnhk  每天 20:00 刷新 A 股/港股 + 重建仓库
+#   - com.newthinker.atlas.analysis      每 30 分钟触发一轮分析（产信号 → 通知）
 #
 # plist 真相源在 deploy/launchd/（路径指向 runtime 目录）。幂等：已加载会先 bootout 再 bootstrap。
 # 无需 sudo（用户级 LaunchAgent）。运维手册：docs/ops/qlib-warehouse-runbook.md
@@ -19,7 +20,7 @@ launchctl bootout "gui/$UID_NUM/com.newthinker.atlas.warehouse-dump" 2>/dev/null
 rm -f "$LA/com.newthinker.atlas.warehouse-dump.plist"
 
 mkdir -p "$LA"
-for L in com.newthinker.atlas.serve com.newthinker.atlas.refresh-us com.newthinker.atlas.refresh-cnhk; do
+for L in com.newthinker.atlas.serve com.newthinker.atlas.refresh-us com.newthinker.atlas.refresh-cnhk com.newthinker.atlas.analysis; do
   src="$DEV_ROOT/deploy/launchd/$L.plist"
   [ -f "$src" ] || { echo "[install] 缺少 plist: $src" >&2; exit 1; }
   plutil -lint "$src" >/dev/null
