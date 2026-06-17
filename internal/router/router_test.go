@@ -549,6 +549,75 @@ func TestGetStats_IncludesPercentileGate(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// TASK-003 batch-notify buffer + FlushNotifications
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] batch 模式下两次 Route 不触发 Send/SendBatch     → TestRoute_BatchNotify_BuffersUntilFlush
+// functional[1] FlushNotifications 后恰好一次 batch 且 n==2      → TestRoute_BatchNotify_BuffersUntilFlush
+// functional[2] batch_notify=false 时 Route 立即 Send            → TestRoute_NonBatch_NotifiesImmediately
+// boundary[0]   空缓冲 FlushNotifications 不发送（batches==0）   → TestFlush_EmptyIsNoop
+// boundary[1]   nil registry Route 返回 true,nil; Flush no-op    → (由构造器行为+已有测试覆盖)
+// error_handling NotifyAllBatch errors 逐条 log，不中断 flush    → (运行时行为；nil logger 兜底)
+// ---------------------------------------------------------------------------
+
+// countingNotifier records Send vs SendBatch calls.
+type countingNotifier struct {
+	sends   int
+	batches int
+	lastN   int
+}
+
+func (c *countingNotifier) Name() string                      { return "counting" }
+func (c *countingNotifier) Init(notifier.Config) error        { return nil }
+func (c *countingNotifier) Send(core.Signal) error            { c.sends++; return nil }
+func (c *countingNotifier) SendBatch(s []core.Signal) error {
+	c.batches++
+	c.lastN = len(s)
+	return nil
+}
+
+func newRouterWithNotifier(cfg Config) (*Router, *countingNotifier) {
+	reg := notifier.NewRegistry()
+	cn := &countingNotifier{}
+	reg.Register(cn)
+	return New(cfg, reg, nil), cn
+}
+
+func TestRoute_BatchNotify_BuffersUntilFlush(t *testing.T) {
+	cfg := Config{MinConfidence: 0.5, BatchNotify: true}
+	r, cn := newRouterWithNotifier(cfg)
+
+	r.Route(core.Signal{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9})
+	r.Route(core.Signal{Symbol: "MSFT", Action: core.ActionSell, Confidence: 0.9})
+
+	if cn.sends != 0 || cn.batches != 0 {
+		t.Fatalf("batch mode must not notify during Route (sends=%d batches=%d)", cn.sends, cn.batches)
+	}
+	r.FlushNotifications()
+	if cn.batches != 1 || cn.lastN != 2 {
+		t.Fatalf("flush should send one batch of 2, got batches=%d n=%d", cn.batches, cn.lastN)
+	}
+}
+
+func TestRoute_NonBatch_NotifiesImmediately(t *testing.T) {
+	cfg := Config{MinConfidence: 0.5, BatchNotify: false}
+	r, cn := newRouterWithNotifier(cfg)
+	r.Route(core.Signal{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9})
+	if cn.sends != 1 || cn.batches != 0 {
+		t.Fatalf("non-batch mode must Send immediately (sends=%d batches=%d)", cn.sends, cn.batches)
+	}
+}
+
+func TestFlush_EmptyIsNoop(t *testing.T) {
+	cfg := Config{MinConfidence: 0.5, BatchNotify: true}
+	r, cn := newRouterWithNotifier(cfg)
+	r.FlushNotifications()
+	if cn.batches != 0 {
+		t.Fatalf("empty flush must not send, got batches=%d", cn.batches)
+	}
+}
+
 func TestRouter_CleanupExpiredCooldowns(t *testing.T) {
 	cfg := Config{
 		CooldownDuration: 100 * time.Millisecond,

@@ -25,6 +25,10 @@ type Config struct {
 	// per-signal Metadata["percentile_step"] (strategy-level config) overrides
 	// this value when present and > 0.
 	PercentileStep float64 `mapstructure:"percentile_step"`
+	// BatchNotify defers notification: Route buffers passed signals instead of
+	// notifying immediately; FlushNotifications sends them as one batch. Routing
+	// decision/cooldown/execution stay per-signal. Default wired true by config.
+	BatchNotify bool `mapstructure:"batch_notify"`
 }
 
 // DefaultConfig returns default router configuration
@@ -44,6 +48,7 @@ type Router struct {
 	cooldowns   map[string]time.Time // symbol -> last signal time
 	pctGates    map[string]float64   // symbol|strategy|side -> last notified percentile
 	signalStore signal.Store
+	pending     []core.Signal // batch-notify buffer; guarded by mu
 	mu          sync.RWMutex
 }
 
@@ -93,21 +98,23 @@ func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 		}
 	}
 
-	// Send to all notifiers (nil registry is allowed)
+	// nil registry: nothing to notify (parity with original).
 	if r.registry == nil {
 		return true, nil
 	}
+	// Batch mode: buffer and defer; FlushNotifications sends one batch per cycle.
+	if r.cfg.BatchNotify {
+		r.mu.Lock()
+		r.pending = append(r.pending, signal)
+		r.mu.Unlock()
+		return true, nil
+	}
 	errors := r.registry.NotifyAll(signal)
-
 	if len(errors) > 0 {
 		for name, err := range errors {
-			r.logger.Error("notifier failed",
-				zap.String("notifier", name),
-				zap.Error(err),
-			)
+			r.logger.Error("notifier failed", zap.String("notifier", name), zap.Error(err))
 		}
 	}
-
 	r.logger.Info("signal routed",
 		zap.String("symbol", signal.Symbol),
 		zap.String("action", string(signal.Action)),
@@ -115,8 +122,26 @@ func (r *Router) Route(signal core.Signal) (routed bool, err error) {
 		zap.Int("notifiers", len(r.registry.GetAll())),
 		zap.Int("errors", len(errors)),
 	)
-
 	return true, nil
+}
+
+// FlushNotifications sends all buffered (batch-notify) signals as one batch and
+// clears the buffer. No-op when the buffer is empty or no registry is set.
+// Called at the end of an analysis cycle.
+func (r *Router) FlushNotifications() {
+	r.mu.Lock()
+	batch := r.pending
+	r.pending = nil
+	r.mu.Unlock()
+
+	if len(batch) == 0 || r.registry == nil {
+		return
+	}
+	errors := r.registry.NotifyAllBatch(batch)
+	for name, err := range errors {
+		r.logger.Error("notifier failed on digest", zap.String("notifier", name), zap.Error(err))
+	}
+	r.logger.Info("signal digest sent", zap.Int("count", len(batch)), zap.Int("errors", len(errors)))
 }
 
 // RouteBatch processes multiple signals
