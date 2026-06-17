@@ -1493,3 +1493,90 @@ func TestBuildFundamental_EPSStartCoversOhlcvWindow(t *testing.T) {
 			rec.gotStart, bars[0].Time)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TASK-004 app wiring: BatchNotify + serial-path flush regression
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "app routerCfg 映射 BatchNotify: cfg.Router.BatchNotify" → TestNew_RouterBatchNotifyWired
+// boundary[0]   "workers<=1 串行路径退出后 FlushNotifications 被调用"    → TestRunAnalysisCycle_SerialPath_FlushCalled
+// ---------------------------------------------------------------------------
+
+// flushCountingNotifier counts SendBatch calls to verify FlushNotifications was called.
+type flushCountingNotifier struct {
+	mu      sync.Mutex
+	batches int
+}
+
+func (f *flushCountingNotifier) Name() string                      { return "flush-counter" }
+func (f *flushCountingNotifier) Init(notifier.Config) error        { return nil }
+func (f *flushCountingNotifier) Send(core.Signal) error            { return nil }
+func (f *flushCountingNotifier) SendBatch(sigs []core.Signal) error {
+	f.mu.Lock()
+	f.batches++
+	f.mu.Unlock()
+	return nil
+}
+func (f *flushCountingNotifier) getBatches() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.batches
+}
+
+// functional[0]: cfg.Router.BatchNotify is mapped into the router config.
+func TestNew_RouterBatchNotifyWired(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Router.BatchNotify = true
+	a := New(cfg, nil)
+
+	// Route a qualifying signal and confirm it was buffered (sends==0, no notifier triggered).
+	// We verify via FlushNotifications: if BatchNotify is wired, Flush triggers SendBatch.
+	fcn := &flushCountingNotifier{}
+	if err := a.notifiers.Register(fcn); err != nil {
+		t.Fatalf("register notifier: %v", err)
+	}
+	sig := core.Signal{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9}
+	if routed, err := a.router.Route(sig); err != nil || !routed {
+		t.Fatalf("Route failed: routed=%v err=%v", routed, err)
+	}
+	// Before flush: no batch sent.
+	if got := fcn.getBatches(); got != 0 {
+		t.Fatalf("expected 0 batches before flush, got %d (BatchNotify not wired?)", got)
+	}
+	a.router.FlushNotifications()
+	if got := fcn.getBatches(); got != 1 {
+		t.Fatalf("expected 1 batch after flush, got %d", got)
+	}
+}
+
+// boundary[0]: serial path (workers<=1) must call FlushNotifications on exit.
+// Uses a mockCollector+mockStrategy that yield one signal, with batch_notify=true.
+// After RunOnce the notifier must have received exactly one SendBatch call.
+func TestRunAnalysisCycle_SerialPath_FlushCalled(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Router.MinConfidence = 0.5
+	cfg.Router.CooldownHours = 0 // disable cooldown so signal routes
+	cfg.Router.BatchNotify = true
+	cfg.Analysis.Workers = 1 // force serial path
+
+	a := New(cfg, nil)
+
+	fcn := &flushCountingNotifier{}
+	if err := a.notifiers.Register(fcn); err != nil {
+		t.Fatalf("register notifier: %v", err)
+	}
+
+	sig := core.Signal{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9}
+	a.RegisterCollector(&mockCollector{
+		name:    "mc",
+		history: []core.OHLCV{{Close: 100, Time: time.Now()}},
+	})
+	a.RegisterStrategy(&mockStrategy{name: "ms", signals: []core.Signal{sig}})
+	a.AddToWatchlist("AAPL")
+
+	a.RunOnce(context.Background())
+
+	if got := fcn.getBatches(); got != 1 {
+		t.Errorf("serial path: expected 1 batch after RunOnce (flush must be called), got %d", got)
+	}
+}

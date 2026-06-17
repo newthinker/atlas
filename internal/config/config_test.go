@@ -482,3 +482,38 @@ broker:
 		t.Errorf("execution.mode = %q, want explicit %q", cfg.Broker.Execution.Mode, "batch")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TASK-003 config wiring: router.batch_notify
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "Load 默认 router.batch_notify=true（未配置时）" → TestLoad_BatchNotify_DefaultTrue
+// boundary[0]   "显式 batch_notify:false 可覆盖默认"            → TestLoad_BatchNotify_CanOverrideFalse
+// ---------------------------------------------------------------------------
+
+// functional[0]: batch_notify defaults to true when absent from config file.
+func TestLoad_BatchNotify_DefaultTrue(t *testing.T) {
+	cfgPath := writeTempConfig(t, "server:\n  port: 8080\n")
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Router.BatchNotify {
+		t.Errorf("Router.BatchNotify = false, want true (default)")
+	}
+}
+
+// boundary[0]: explicit batch_notify: false must override the default.
+func TestLoad_BatchNotify_CanOverrideFalse(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+router:
+  batch_notify: false
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Router.BatchNotify {
+		t.Errorf("Router.BatchNotify = true, want false (explicit override)")
+	}
+}

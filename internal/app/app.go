@@ -93,6 +93,7 @@ func New(cfg *config.Config, logger *zap.Logger) *App {
 		MinConfidence:    cfg.Router.MinConfidence,
 		CooldownDuration: time.Duration(cfg.Router.CooldownHours) * time.Hour, // 0 = cooldown disabled (router.passesCooldown: time.Since(last) < 0 is never true)
 		PercentileStep:   cfg.Router.PercentileStep,
+		BatchNotify:      cfg.Router.BatchNotify,
 		// EnabledActions stays hardcoded: config has no corresponding field (YAGNI).
 		EnabledActions: []core.Action{core.ActionBuy, core.ActionSell, core.ActionStrongBuy, core.ActionStrongSell},
 	}
@@ -334,6 +335,11 @@ func (a *App) runAnalysisCycle(ctx context.Context) {
 		a.logger.Debug("no symbols in watchlist")
 		return
 	}
+
+	// Flush buffered batch-notify signals on every exit path (serial, parallel,
+	// ctx cancelled). Placed after the empty-watchlist guard so an empty cycle
+	// never triggers a spurious SendBatch.
+	defer a.router.FlushNotifications()
 
 	workers := 0
 	if a.cfg != nil {

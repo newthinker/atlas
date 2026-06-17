@@ -139,6 +139,9 @@ type RouterConfig struct {
 	// 0 (the zero value / unconfigured) disables the gate; per-strategy
 	// params.percentile_step overrides it. Negative is rejected by Validate.
 	PercentileStep float64 `mapstructure:"percentile_step"`
+	// BatchNotify aggregates a cycle's signals into one digest notification
+	// instead of per-signal messages. Default true (see Load SetDefault).
+	BatchNotify bool `mapstructure:"batch_notify"`
 }
 
 type WatchlistItem struct {
@@ -267,6 +270,9 @@ func Load(path string) (*Config, error) {
 	// absent, so an explicit `valuation.lookback_years: 0` (since inception) is
 	// preserved. Without this, serve.go would silently flip to inception mode.
 	v.SetDefault("valuation.lookback_years", 5)
+	// Aggregate a cycle's signals into one digest notification by default;
+	// explicit `router.batch_notify: false` switches back to per-signal sends.
+	v.SetDefault("router.batch_notify", true)
 
 	// Support environment variable overrides
 	v.AutomaticEnv()
