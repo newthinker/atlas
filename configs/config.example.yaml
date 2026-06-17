@@ -70,6 +70,15 @@ strategies:
 valuation:
   lookback_years: 5   # PE 分位 lookback；默认 5（细节见上方注释，0=自上市起）。
 
+# 本地 qlib 数据仓库（方向③）：以本地 SQLite 历史库为权威主源，外部 API 仅补
+# 「仓库最后一天→今日」的新鲜尾巴；缺库/损坏/enabled:false 时自动回落纯外部 API
+# （零行为变化）。库由 `make warehouse-dump` 生成，运维见 docs/ops/qlib-warehouse-runbook.md。
+# 整段缺省即等同 enabled:false。
+qlib:
+  enabled: false                    # true 才挂仓库；false/缺省 → 纯外部 API
+  db_path: "data/qlib_warehouse.db" # 与 Makefile WAREHOUSE_DB 一致
+  max_staleness_days: 7             # last_date 超过该天数仅记 warning，仍服务（默认 7）
+
 # Signal routing
 router:
   min_confidence: 0.6
