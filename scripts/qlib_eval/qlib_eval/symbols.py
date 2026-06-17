@@ -39,3 +39,43 @@ def to_qlib_instrument(symbol: str) -> str:
     if re.fullmatch(r"[A-Z]{1,5}", symbol):  # 美股裸 ticker 恒等（全串锚定，等价 Go ^[A-Z]{1,5}$）
         return symbol
     raise ValueError(f"not a supported A-share/HK/US symbol: {symbol!r}")
+
+
+# 逆映射：qlib instrument -> atlas symbol。
+# 正向映射会丢失市场上下文（GSPC 既可能是 ^GSPC 也可能是叫 GSPC 的股票；
+# 以 SH 开头的美股 ticker 会撞 A 股前缀），因此逆映射**必须带市场**才能消歧。
+# market 取仓库的市场标签：US / CN_A（或 CN）/ HK。
+_US_INDEX_FROM_QLIB = {"GSPC": "^GSPC", "IXIC": "^IXIC", "DJI": "^DJI"}
+_HK_INDEX_FROM_QLIB = {"HSI": "^HSI", "HSCEI": "^HSCE"}
+
+
+def from_qlib_instrument(instrument: str, market: str) -> str:
+    """SH600519 ->(CN_A) 600519.SH、HK00700 ->(HK) 0700.HK、GSPC ->(US) ^GSPC。
+
+    是 ``to_qlib_instrument`` 在给定 market 下的逆：对每个市场的合法符号满足
+    ``from_qlib_instrument(to_qlib_instrument(s), market) == s``。market 提供上下文，
+    使 US 组的 ``SHW`` 保持恒等（不误判为 A 股），US 组的 ``GSPC`` 还原为 ``^GSPC``。
+    无法在该市场下解释的符号 raise ValueError（调用方可据此保留原值兜底）。
+    """
+    m = (market or "").upper()
+    if m == "US":
+        if instrument in _US_INDEX_FROM_QLIB:
+            return _US_INDEX_FROM_QLIB[instrument]
+        if re.fullmatch(r"[A-Z]{1,5}", instrument):
+            return instrument
+        raise ValueError(f"not a US instrument: {instrument!r}")
+    if m in ("CN_A", "CN"):
+        if instrument.startswith("SH"):
+            return instrument[2:] + ".SH"
+        if instrument.startswith("SZ"):
+            return instrument[2:] + ".SZ"
+        if instrument.startswith("CSI"):
+            return instrument[3:] + ".CSI"
+        raise ValueError(f"not a CN_A instrument: {instrument!r}")
+    if m == "HK":
+        if instrument in _HK_INDEX_FROM_QLIB:
+            return _HK_INDEX_FROM_QLIB[instrument]
+        if instrument.startswith("HK") and instrument[2:].isdigit():
+            return f"{int(instrument[2:]):04d}.HK"  # 还原为 4 位补零的 Yahoo 港股代码
+        raise ValueError(f"not an HK instrument: {instrument!r}")
+    raise ValueError(f"unknown market: {market!r}")

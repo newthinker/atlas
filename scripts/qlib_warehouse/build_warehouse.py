@@ -25,7 +25,7 @@ def _build_groups(add_specs):
         if not d.is_dir():
             print(f"skip {market}: csv-dir not found: {d}", file=sys.stderr)
             continue
-        rows = ingest.parse_dir(d)
+        rows = ingest.parse_dir(d, market)
         if not rows:
             print(f"skip {market}: no rows in {d}", file=sys.stderr)
             continue
@@ -69,7 +69,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not csv_dir.is_dir():
         print(f"csv-dir not found: {csv_dir}", file=sys.stderr)
         return 1
-    rows = ingest.parse_dir(csv_dir)
+    rows = ingest.parse_dir(csv_dir, args.market)
     if not rows:
         print(f"no rows parsed from {csv_dir}", file=sys.stderr)
         return 2
