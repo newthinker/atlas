@@ -353,7 +353,7 @@ func registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *
 			if !requireField("bot_token", nc.BotToken != "") || !requireField("chat_id", nc.ChatID != "") {
 				continue
 			}
-			n = telegram.New(nc.BotToken, nc.ChatID)
+			n = telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy))
 		case "email":
 			if !requireField("host", nc.Host != "") || !requireField("from", nc.From != "") || !requireField("to", len(nc.To) != 0) {
 				continue

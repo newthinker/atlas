@@ -95,6 +95,9 @@ notifiers:
     enabled: true
     bot_token: "${TELEGRAM_BOT_TOKEN}"   # 必填
     chat_id: "${TELEGRAM_CHAT_ID}"       # 必填（telegram 必填: bot_token + chat_id，缺失则 warn 并跳过）
+    proxy: ""                            # 可选：api.telegram.org 不可直达时走代理，
+                                         # 如 "http://127.0.0.1:7890" 或 "socks5://127.0.0.1:1080"；
+                                         # 仅作用于 telegram 投递，行情采集器保持直连。空=直连
   email:
     enabled: false
     host: "smtp.gmail.com"               # 必填

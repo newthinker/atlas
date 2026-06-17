@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/notifier"
 )
+
+// httpTimeout bounds each Telegram Bot API call (direct or proxied).
+const httpTimeout = 30 * time.Second
 
 // Telegram implements the Notifier interface for Telegram Bot API
 type Telegram struct {
@@ -19,15 +23,45 @@ type Telegram struct {
 	client   *http.Client
 }
 
+// Option configures a Telegram notifier.
+type Option func(*Telegram)
+
+// WithProxy routes Telegram API calls through an HTTP/HTTPS/SOCKS5 proxy
+// (e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"). Needed where
+// api.telegram.org is not directly reachable. Empty or unparseable → direct.
+// Scoped to this notifier only, so market collectors keep their direct path.
+func WithProxy(proxyURL string) Option {
+	return func(t *Telegram) { t.applyProxy(proxyURL) }
+}
+
+// applyProxy sets a proxied transport on the client when proxyURL is valid.
+// The nil-client guard covers Init being called on a bare &Telegram{} (no New),
+// as the notifier registry and tests do.
+func (t *Telegram) applyProxy(proxyURL string) {
+	if proxyURL == "" {
+		return
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return
+	}
+	if t.client == nil {
+		t.client = &http.Client{Timeout: httpTimeout}
+	}
+	t.client.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+}
+
 // New creates a new Telegram notifier
-func New(botToken, chatID string) *Telegram {
-	return &Telegram{
+func New(botToken, chatID string, opts ...Option) *Telegram {
+	t := &Telegram{
 		botToken: botToken,
 		chatID:   chatID,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client:   &http.Client{Timeout: httpTimeout},
 	}
+	for _, o := range opts {
+		o(t)
+	}
+	return t
 }
 
 func (t *Telegram) Name() string {
@@ -40,6 +74,9 @@ func (t *Telegram) Init(cfg notifier.Config) error {
 	}
 	if chatID, ok := cfg.Params["chat_id"].(string); ok {
 		t.chatID = chatID
+	}
+	if proxy, ok := cfg.Params["proxy"].(string); ok {
+		t.applyProxy(proxy)
 	}
 
 	if t.botToken == "" {

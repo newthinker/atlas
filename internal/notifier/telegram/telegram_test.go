@@ -23,6 +23,40 @@ func TestTelegram_Name(t *testing.T) {
 	}
 }
 
+func TestTelegram_WithProxy(t *testing.T) {
+	tg := New("token", "chatid", WithProxy("http://127.0.0.1:7890"))
+	tr, ok := tg.client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatalf("expected *http.Transport with Proxy set, got %T", tg.client.Transport)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://api.telegram.org/", nil)
+	u, err := tr.Proxy(req)
+	if err != nil || u == nil || u.String() != "http://127.0.0.1:7890" {
+		t.Errorf("proxy resolved to %v (err %v), want http://127.0.0.1:7890", u, err)
+	}
+}
+
+func TestTelegram_WithProxy_emptyStaysDirect(t *testing.T) {
+	tg := New("token", "chatid", WithProxy(""))
+	if tg.client.Transport != nil {
+		t.Error("empty proxy should leave the default transport (direct/env)")
+	}
+}
+
+func TestTelegram_Init_ReadsProxy(t *testing.T) {
+	tg := &Telegram{}
+	err := tg.Init(notifier.Config{Params: map[string]any{
+		"bot_token": "x", "chat_id": "y", "proxy": "socks5://127.0.0.1:1080",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tr, ok := tg.client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatalf("Init should apply proxy transport, got %T", tg.client.Transport)
+	}
+}
+
 func TestTelegram_Init(t *testing.T) {
 	tg := &Telegram{}
 

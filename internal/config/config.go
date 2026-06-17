@@ -118,6 +118,9 @@ type NotifierConfig struct {
 	BotToken string `mapstructure:"bot_token"`
 	ChatID   string `mapstructure:"chat_id"`
 	URL      string `mapstructure:"url"`
+	// Proxy routes this notifier's outbound calls through an HTTP/SOCKS5 proxy
+	// (e.g. telegram where api.telegram.org is blocked). Empty = direct.
+	Proxy string `mapstructure:"proxy"`
 	// Email notifier fields
 	Host     string   `mapstructure:"host"`
 	Port     int      `mapstructure:"port"`
