@@ -1,0 +1,21 @@
+{
+  "task": "TASK-002",
+  "key_findings": [
+    "enrichSignalMetadata 增参 fundamental *core.Fundamental（app.go:405），去掉 name=='' 提前返回改内部条件；fundamental!=nil && PEPercentile>=0 时盖 pe_percentile_display=PEPercentile（不覆盖既有）",
+    "调用点 app.go:514 传 analysisCtx.Fundamental",
+    "enrichSignalMetadata 覆盖率 100%；6 包零回归 + -race 无竞争",
+    "B4(0.0 合法盖键)/B6(name 空+PE 有,_,ok 断言)/N1(router 带不带键 Route 一致) 用例均 PASS"
+  ],
+  "decisions": [],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go",
+    "internal/router/router_test.go"
+  ],
+  "interfaces_exposed": [
+    "enrichSignalMetadata(signals, item, fundamental *core.Fundamental)",
+    "生产 Metadata[\"pe_percentile_display\"](float64)=Fundamental.PEPercentile，与 TASK-001 消费端契约一致"
+  ],
+  "verification": "RED: too many arguments in call to enrichSignalMetadata; GREEN: 6 新用例(含 B4/B6) + N1 router 对照 PASS；go build ok；app/notifier/router -race 全绿；enrichSignalMetadata 100%",
+  "commit": "cebea8a"
+}

@@ -1,0 +1,47 @@
+{
+  "id": "TASK-003",
+  "title": "router 延迟通知缓冲 + FlushNotifications",
+  "description": "按 plan Task 3 原文施工：internal/router/router.go 的 Config 增加 BatchNotify bool（mapstructure:\"batch_notify\"）；Router 结构体增加 pending []core.Signal（复用现有 mu）；Route 中「Send to all notifiers」段改为——nil registry 直接 return true,nil；batch 模式下加锁 append pending 后 return true,nil（不通知）；否则走原 NotifyAll + 日志路径。在 RouteBatch 之前新增 FlushNotifications()：加锁取出并清空 pending，空批/无 registry 为 no-op，否则 NotifyAllBatch 并 log。路由决策/冷却/执行语义保持逐信号不变。测试以 plan Task 3 原文为准。",
+  "module": "router-batch-buffer",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/router/router.go",
+    "internal/router/router_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestRoute_BatchNotify_BuffersUntilFlush：batch 模式下两次 Route 不触发任何 Send/SendBatch；FlushNotifications 后恰好一次 batch 且 n==2",
+      "TestRoute_NonBatch_NotifiesImmediately：batch_notify=false 时 Route 立即 Send（sends==1, batches==0）",
+      "路由决策/冷却/执行/信号存储语义保持逐信号不变（既有路由/冷却/门测试全过）"
+    ],
+    "boundary": [
+      "TestFlush_EmptyIsNoop：空缓冲 FlushNotifications 不发送（batches==0）",
+      "nil registry 时 Route 返回 true,nil；FlushNotifications 为 no-op"
+    ],
+    "error_handling": [
+      "NotifyAllBatch 返回的 errors 逐条 log，不中断 flush；nil logger 由 New 兜底为 NewNop"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/router/ -count=1 全绿（新测试 + 既有零回归），包覆盖率 ≥ 80%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-1",
+  "dev_done_at": "2026-06-17",
+  "verified_at": "2026-06-17",
+  "verified_note": "全部 DoD PASS；cov 87.6%；-race 无数据竞争",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/router"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": []
+}

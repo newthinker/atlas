@@ -1,0 +1,33 @@
+{
+  "task": "TASK-004",
+  "key_findings": [
+    "RouterConfig.BatchNotify bool 字段加 mapstructure:\"batch_notify\"；v.SetDefault(\"router.batch_notify\", true) 放在 Load 的 SetDefault 区块末尾，与 valuation.lookback_years 等保持一致风格",
+    "app.New 的 routerCfg 增加 BatchNotify: cfg.Router.BatchNotify，与既有 PercentileStep 映射模式一致",
+    "【关键修正落地】defer a.router.FlushNotifications() 放在 runAnalysisCycle 的 len(items)==0 提前返回之后、workers 计算之前，覆盖串行（workers<=1）、并行（errgroup）、ctx 取消三条退出路径",
+    "串行路径回归测试 TestRunAnalysisCycle_SerialPath_FlushCalled：workers=1 + batch_notify=true，RunOnce 后 flushCountingNotifier.batches==1，直接验证 defer flush 在串行出口生效",
+    "go build ./... 通过；8 个包（router/config/notifier/*/app/cmd）全绿，零回归"
+  ],
+  "decisions": [
+    {
+      "decision": "用 defer 而非在 g.Wait() 后直接调用 FlushNotifications",
+      "rationale": "runAnalysisCycle 有 workers<=1 串行分支在 g.Wait() 之前 return（app.go:349-357），plan 原文只在 g.Wait() 后加 flush 会导致串行配置下 batch 信号永不发送且跨轮泄漏；defer 统一覆盖所有出口，与 Leader 修正要求一致"
+    },
+    {
+      "decision": "flushCountingNotifier 定义在 app_test.go 而非复用 mockNotifier",
+      "rationale": "mockNotifier 的 SendBatch 不计独立 batches 计数，无法精确断言 flush 恰好触发一次 SendBatch；两者语义不重叠，共存不引入重复"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "internal/app/app.go",
+    "internal/app/app_test.go",
+    "configs/config.example.yaml"
+  ],
+  "interfaces_exposed": [
+    "RouterConfig.BatchNotify bool (mapstructure:\"batch_notify\") — 配置层字段，Load 默认 true，显式 false 可覆盖",
+    "app.New 中 routerCfg.BatchNotify 已映射，下游无需额外接线"
+  ],
+  "verification": "RED: config build failed (RouterConfig has no field BatchNotify); GREEN: TestLoad_BatchNotify_DefaultTrue/CanOverrideFalse PASS, TestNew_RouterBatchNotifyWired PASS, TestRunAnalysisCycle_SerialPath_FlushCalled PASS; go build ./... ok; 8包全绿; commit 39fb228",
+  "commit": "39fb228"
+}

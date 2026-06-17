@@ -1,0 +1,18 @@
+{
+  "task": "TASK-001",
+  "key_findings": [
+    "renderTable 表头加 PE% 末列，行内读 Metadata[\"pe_percentile_display\"].(float64) → %.1f%%，缺失/类型不符留空",
+    "renderTable 覆盖率 100%，telegram 整包 90.5%，28 测试零回归",
+    "F5 端到端 formatBatch 用例 + B4(0.0 显示 0.0%) + wrong-type + nil-metadata 用例均 PASS"
+  ],
+  "decisions": [],
+  "files_modified": [
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "interfaces_exposed": [
+    "renderTable 消费 Metadata[\"pe_percentile_display\"](float64,0-100)，键契约与 TASK-002 生产端一致"
+  ],
+  "verification": "RED: missing PE% header; GREEN: TestRenderTable_PEPercentileColumn + TestFormatBatch_PEPercentileEndToEnd(F5) + ZeroValue(B4) PASS；整包 28 tests ok，cov 90.5%",
+  "commit": "7889c8b"
+}

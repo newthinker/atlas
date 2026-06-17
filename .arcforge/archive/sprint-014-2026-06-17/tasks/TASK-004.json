@@ -1,0 +1,56 @@
+{
+  "id": "TASK-004",
+  "title": "配置默认 + app 接线 + cycle 末 flush",
+  "description": "按 plan Task 4 施工，含独立评审修正：internal/config/config.go 的 RouterConfig 增加 BatchNotify bool（mapstructure:\"batch_notify\"，紧接 PercentileStep 之后）+ 在 Load 的 SetDefault 区块追加 v.SetDefault(\"router.batch_notify\", true)；internal/app/app.go 的 routerCfg 增加 BatchNotify: cfg.Router.BatchNotify。【关键修正】runAnalysisCycle 存在 workers<=1 串行分支会在 g.Wait() 之前 return（app.go:349-357），计划原文仅在 g.Wait() 后加 flush 会导致串行配置下信号永不发送且跨轮泄漏；因此须用 defer a.router.FlushNotifications()，放在 len(items)==0 提前返回（app.go:333-336）之后、workers 计算之前，使串行/并行/ctx 取消所有出口都 flush。configs/config.example.yaml 的 router 段增加 batch_notify: true 文档化。依赖 TASK-002（SendBatch）与 TASK-003（FlushNotifications/BatchNotify 字段）已就绪。",
+  "module": "config-app-wiring",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/app/app.go",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "RouterConfig.BatchNotify 字段存在（mapstructure:\"batch_notify\"）；Load 默认 router.batch_notify=true（未配置时加载后为 true）",
+      "app routerCfg 映射 BatchNotify: cfg.Router.BatchNotify",
+      "runAnalysisCycle 用 defer a.router.FlushNotifications() 保证串行(workers<=1)与并行(workers>1)两条路径都在退出时 flush",
+      "configs/config.example.yaml router 段含 batch_notify: true 注释说明"
+    ],
+    "boundary": [
+      "配置文件显式设 batch_notify:false 时加载结果为 false（默认可被覆盖）",
+      "回归：workers=1 串行配置下，batch 模式一轮分析后信号被发出（flush 被调用，不缓冲泄漏到下一轮）—— 须有针对串行路径 flush 的测试或显式核验"
+    ],
+    "error_handling": [
+      "config 校验不因新字段报错；app 接线不改变 g.Wait 既有错误处理"
+    ],
+    "non_functional": [
+      {
+        "desc": "go build ./... 通过；go test ./internal/router/ ./internal/config/ ./internal/notifier/... ./internal/app/ ./cmd/... -count=1 全绿（零回归）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "leader",
+  "dev_done_at": "2026-06-17",
+  "verified_at": "2026-06-17",
+  "verified_note": "提交 39fb228 含全部字段+defer flush；go build+8 包全绿；串行 flush 回归 TestRunAnalysisCycle_SerialPath_FlushCalled PASS",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/config",
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": []
+}

@@ -1,0 +1,30 @@
+{
+  "task": "TASK-003",
+  "key_findings": [
+    "Config.BatchNotify bool 字段通过 mapstructure:\"batch_notify\" 与配置系统对接，默认值由 TASK-004 的 SetDefault 负责",
+    "pending []core.Signal 复用现有 mu（sync.RWMutex），Flush 时升级为写锁取出并清空，避免引入新锁",
+    "Route 通知段改写后：nil registry 提前返回（parity with original）→ batch 模式加锁 append pending → 否则原 NotifyAll 路径；路由决策/冷却/执行语义完全不变",
+    "FlushNotifications 置于 RouteBatch 之前，空批/nil registry 均为 no-op；NotifyAllBatch errors 逐条 log 不中断 flush",
+    "整包 27 个测试零回归，覆盖率 87.6%"
+  ],
+  "decisions": [
+    {
+      "decision": "countingNotifier 独立定义（不复用 mockNotifier）",
+      "rationale": "现有 mockNotifier 只记录 received 列表，无独立 sends/batches 计数字段，无法满足 DoD 的精确断言（sends==1/batches==0）；两者语义不重叠，共存不引入重复"
+    },
+    {
+      "decision": "FlushNotifications 中 mu.Lock/Unlock 取出 batch 后立即释放，再调用 NotifyAllBatch",
+      "rationale": "避免持锁期间调用外部 notifier（潜在阻塞/死锁）；batch 已是局部拷贝，释放锁后操作安全"
+    }
+  ],
+  "files_modified": [
+    "internal/router/router.go",
+    "internal/router/router_test.go"
+  ],
+  "interfaces_exposed": [
+    "Config.BatchNotify bool (mapstructure:\"batch_notify\") — 供 TASK-004 在 RouterConfig 增加同名字段并映射",
+    "(*Router).FlushNotifications() — 供 TASK-004 在 runAnalysisCycle 退出时调用（建议用 defer）"
+  ],
+  "verification": "RED: build failed (unknown field BatchNotify / FlushNotifications undefined); GREEN: 27 tests PASS, coverage 87.6%; commit 3f0bb11",
+  "commit": "3f0bb11"
+}

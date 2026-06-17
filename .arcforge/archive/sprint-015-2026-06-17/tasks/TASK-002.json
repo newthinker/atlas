@@ -1,0 +1,50 @@
+{
+  "id": "TASK-002",
+  "title": "enrichSignalMetadata 盖 pe_percentile_display",
+  "description": "按 plan Task 2 原文施工：internal/app/app.go 的 enrichSignalMetadata 增参 fundamental *core.Fundamental；去掉原 item.Name==\"\" 提前返回（改为内部条件，因可能无 name 但有 PE）；当 fundamental!=nil && fundamental.PEPercentile>=0 时给每条信号盖 Metadata[\"pe_percentile_display\"]=PEPercentile（不覆盖既有键，与 name 同风格）；调用点(app.go:503)改为 enrichSignalMetadata(signals, item, analysisCtx.Fundamental)。更新 app_test.go 两处既有调用(约 1280/1293)补第三参 nil + 新增 PE 盖键用例。严格 TDD。生产端键名必须与 TASK-001 消费端一致：pe_percentile_display(float64,0-100)。",
+  "module": "app-enrich-pe",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "enrichSignalMetadata 增参后：fundamental 有 PE(PEPercentile=12.3) → 每条信号带 pe_percentile_display=12.3",
+      "name 逻辑零回归（item.Name 非空仍盖 name，不覆盖既有）",
+      "调用点传 analysisCtx.Fundamental"
+    ],
+    "boundary": [
+      "PEPercentile<0(哨兵-1) → 不盖 pe_percentile_display",
+      "fundamental=nil(如 ETF) → 不盖 pe_percentile_display，但 name 仍盖",
+      "【B4 必测】PEPercentile==0.0(历史最低,合法值) → 必须盖键(值0.0)，不可被 >=0 误当不可用吞掉",
+      "【B6 必测】name=='' 且 PE 有值 → 仍盖 PE 键、不盖 name；断言用 _,ok:=Metadata[\"name\"];!ok（非 ==\"\"，后者对缺键也成立测不出）",
+      "既有 pe_percentile_display 键不被覆盖"
+    ],
+    "error_handling": [
+      "signals[i].Metadata 为 nil 时初始化后再写，不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "变更函数 enrichSignalMetadata 覆盖率 ≥ 80%；go build ./... 通过；app/telegram/router 包测试零回归。【N1 必测】router 对照回归：同一信号带/不带 pe_percentile_display，Route 决策完全一致（证明门控不读新键，非仅 grep）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2-2",
+  "verifier": "leader",
+  "dev_done_at": "2026-06-17",
+  "verified_at": "2026-06-17",
+  "verified_note": "enrichSignalMetadata 100%；B4/B6/N1 PASS；6 包+router -race 全绿 @cebea8a",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": []
+}

@@ -1,0 +1,58 @@
+{
+  "id": "TASK-002",
+  "title": "按动作分组的表格批量格式（formatBatch + SendBatch）",
+  "description": "按 plan Task 2 原文施工：在 internal/notifier/telegram/telegram.go 新增 formatBatch（标题行=时间+条数；每个非空动作组一张等宽 fenced 表格；列 SYMBOL/NAME/CONF/PRICE；末列不补尾空格）、renderTable、digestGroups（买入=strong_buy+buy / 卖出=strong_sell+sell / 持有=hold，组顺序固定，组内 Confidence 降序稳定排序）；import 增加 sort（time 已在）。把现有 SendBatch 整体替换为调用 formatBatch（空串返回 nil）。复用 TASK-001 的 displayWidth/padRight。测试以 plan Task 2 原文为准。",
+  "module": "notifier-telegram-batch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestFormatBatch_GroupsAndAligns 全过：标题含 \"3 条\"；买入段在卖出段之前；至少 4 个 ``` 围栏（2 组×2）；买入组按置信度降序（600519.SH 在 0700.HK 之前）；含 贵州茅台 与 94.7%",
+      "TestFormatBatch_EmptyAndHold 全过：仅 hold 信号出现 \"⏸ 持有\" 分组",
+      "SendBatch 经 formatBatch 渲染；非空时调 sendMessage 发送一条消息"
+    ],
+    "boundary": [
+      "formatBatch(nil)==\"\"；SendBatch 空批返回 nil 且不发送",
+      "renderTable 末列（PRICE）无尾随补空格；Price<=0 时 PRICE 列为空字符串",
+      "含特殊字符（如 symbol/name 内 _、反引号）时 formatBatch 输出不破坏 ``` 代码块结构（sendMessage 会对全文 escapeMarkdown 并以 parse_mode=Markdown 发送，须确认围栏存活）—— 实测数据罕见，作边界核验项"
+    ],
+    "error_handling": [
+      "Metadata 无 name 或类型断言失败时 NAME 列为空字符串，不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/notifier/telegram/ -count=1 全绿（含既有 Send/Init/proxy 测试零回归）；变更/新增函数 formatBatch/renderTable/SendBatch 覆盖率 ≥ 80%。注：整包 ≥80% 不可达且范围外——Send/sendMessage/escapeMarkdown 为既有未测 HTTP 代码（同 TASK-001 修正）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1+leader",
+  "dev_done_at": "2026-06-17",
+  "verified_at": "2026-06-17",
+  "verified_note": "review_fix 复验(leader,-race)：W1 sendRaw 拆分(Send 仍转义/SendBatch 跳过)、W2 零值省时间、I1 slices.Contains、I3 hold 图标统一；UnderscoreNotEscaped/ZeroTimestamp/HoldIconConsistent/Send/FormatSignal 全 PASS；整包 90.3% 零回归 @611d8e4",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/notifier/telegram"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    "W1: digest（formatBatch 输出）经 sendMessage 时，含 _ 的 symbol/name 在代码块内会被 escapeMarkdown 转成 \\_ 字面反斜杠。修复使 digest 路径下 _ 在 ``` 代码块内字面渲染（不出现反斜杠），且不改变既有逐条 Send/formatSignal 行为（formatSignal 仍依赖 _ 转义）。建议给 batch 路径单独的发送/转义策略（如 sendMessage 增 escape 开关或新增 raw 变体）。加测试：symbol/name 含 _ 时发送 payload 含字面名（无 \\_）。",
+    "W2: formatBatch 标题时间取 max(GeneratedAt)，零值时显示 0001-01-01。修复：latest.IsZero() 时省略时间段（标题仅『📊 Atlas 信号汇总 · N 条』）或回退当前时间；务必可单测（推荐省略时间段，避免 time.Now() 不可测）。加零值用例。",
+    "I1（捎带清理）: formatBatch 内层 action 匹配改用 slices.Contains(g.actions, s.Action)。",
+    "I3（捎带清理）: 统一 hold 图标——digest 与 formatSignal 用同一个（⏸️ 或 ⏸ 二选一保持一致）。"
+  ]
+}

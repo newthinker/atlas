@@ -1,0 +1,34 @@
+{
+  "task": "TASK-002",
+  "key_findings": [
+    "formatBatch 按 digestGroups 固定顺序(买/卖/持)分组，组内 Confidence 降序 SliceStable；空输入返回空串",
+    "renderTable 以 displayWidth/padRight(复用 TASK-001)做等宽对齐，末列不补尾空格",
+    "SendBatch 重写为调 formatBatch，空串 return nil；走 sendRaw 路径跳过 escapeMarkdown",
+    "review_fix(W1): 新增 sendRaw（不转义），SendBatch 走此路径；sendMessage 保持 escapeMarkdown 供 Send 用",
+    "review_fix(W2): latest.IsZero() 时标题省略时间段，避免显示 0001-01-01",
+    "review_fix(I1): 内层 action 匹配改用 slices.Contains",
+    "review_fix(I3): digestGroups hold 图标统一为 ⏸️，与 formatSignal 一致",
+    "整包覆盖率 review_fix 后提升至 90.3%（SendBatch 100% / formatBatch 91.7% / renderTable 100% / sendRaw 64.3%——HTTP error 分支范围外）"
+  ],
+  "decisions": [
+    {
+      "decision": "新增 sendRaw 而非给 sendMessage 加 bool 参数",
+      "rationale": "两条路径语义明确分离：sendMessage=需转义的 Markdown 文本，sendRaw=已是合法格式无需转义的内容；参数开关易被误用"
+    },
+    {
+      "decision": "hold 图标统一为 ⏸️（带 variation selector）",
+      "rationale": "与 formatSignal 既有实现一致；variation selector 确保在各平台渲染为 emoji 而非文本符号"
+    }
+  ],
+  "files_modified": [
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "interfaces_exposed": [
+    "formatBatch([]core.Signal) string — 供 SendBatch 调用；空批返回 \"\"",
+    "(*Telegram).SendBatch 重写——TASK-004 经 router.FlushNotifications→NotifyAllBatch 触达",
+    "sendRaw(string) error — package-private，digest 路径专用，不转义 Markdown"
+  ],
+  "verification": "初版 RED: undefined formatBatch; GREEN: 整包 20 tests 零回归，83.6%。review_fix RED: W1/W2 FAIL; GREEN: 整包 23 tests 零回归，90.3%",
+  "commits": ["6629618", "611d8e4"]
+}

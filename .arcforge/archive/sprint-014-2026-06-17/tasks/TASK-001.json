@@ -1,0 +1,47 @@
+{
+  "id": "TASK-001",
+  "title": "显示宽度工具（CJK 对齐）",
+  "description": "按 plan Task 1 原文施工：新建 internal/notifier/telegram/width.go，实现 displayWidth（CJK 宽字符记 2）、padRight（按显示宽度右补空格）、isWide（覆盖 atlas 涉及的东亚宽字符区段，无第三方依赖）。测试代码以 plan Task 1 原文为准（TestDisplayWidth / TestPadRight）。严格 TDD：先写失败测试，确认 undefined 失败，再实现。",
+  "module": "notifier-telegram-width",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/notifier/telegram/width.go",
+    "internal/notifier/telegram/width_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "displayWidth 表驱动全过：\"\"=0, AAPL=4, 贵州茅台=8, 茅台A=5, 0700.HK=7",
+      "padRight ASCII：padRight(\"AAPL\",6)==\"AAPL  \"（补 2 空格）",
+      "padRight CJK：padRight(\"茅台\",6)==\"茅台  \"（茅台显示宽 4，补 2 空格）"
+    ],
+    "boundary": [
+      "padRight 溢出：padRight(\"AAPL\",3)==\"AAPL\"（已 >= 目标宽度，原样返回）",
+      "displayWidth(\"\")==0"
+    ],
+    "error_handling": [
+      "纯函数无错误路径；非 ASCII 非宽字符记 1（不 panic）"
+    ],
+    "non_functional": [
+      {
+        "desc": "变更文件 width.go 覆盖率 ≥ 80%（实测 100%）+ telegram 包测试零回归（覆盖率不下降）。注：整包 ≥80% 不可达且范围外——包内 Send/sendMessage/escapeMarkdown 为既有未测 HTTP 代码，非本任务范围（Leader 首验修正）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "dev_done_at": "2026-06-17",
+  "verified_at": "2026-06-17",
+  "verified_note": "width.go 100% 覆盖、整包零回归(18 tests)；整包 70.3% 系既有未测 HTTP 代码所致，DoD 已修正为变更文件基准",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/notifier/telegram"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": []
+}

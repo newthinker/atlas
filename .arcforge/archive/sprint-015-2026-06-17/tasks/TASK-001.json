@@ -1,0 +1,50 @@
+{
+  "id": "TASK-001",
+  "title": "renderTable 增加 PE% 列",
+  "description": "按 plan Task 1 原文施工：internal/notifier/telegram/telegram.go 的 renderTable 表头由 [SYMBOL,NAME,CONF,PRICE] 改为 [SYMBOL,NAME,CONF,PRICE,PE%]；行内末列取 s.Metadata[\"pe_percentile_display\"].(float64)，存在则 fmt.Sprintf(\"%.1f%%\", v)，否则空串；列宽自适应与 CJK 对齐、末列不补尾空格逻辑不变。测试以 plan Task 1 原文为准（TestRenderTable_PEPercentileColumn）。严格 TDD。消费端键名必须与 TASK-002 生产端一致：pe_percentile_display(float64,0-100)。",
+  "module": "telegram-pe-column",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "renderTable 表头含 PE% 且为末列",
+      "信号带 pe_percentile_display=12.3 → 输出含 12.3%",
+      "PE% 列对齐（含 CJK 行），列宽自适应不破",
+      "【F5 必测】端到端 formatBatch 层（经分组+置信度排序）PE% 列仍正确出现，而非仅 renderTable 单组",
+      "【B4】信号 pe_percentile_display==0.0 → 显示 0.0%（不被当作无值）"
+    ],
+    "boundary": [
+      "信号无 pe_percentile_display → 该格空串，``` 围栏成对、表格结构完整",
+      "末列(PE%)无尾随补空格",
+      "pe_percentile_display 类型非 float64 → 留空，不 panic"
+    ],
+    "error_handling": [
+      "Metadata 为 nil 或缺键时类型断言双返回值安全，不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "变更函数 renderTable 覆盖率 ≥ 80% + telegram 包测试零回归（既有 TestFormatBatch_* Contains 断言不受加列影响）。整包 ≥80% 范围外(既有未测 HTTP 代码)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1-2",
+  "verifier": "leader",
+  "dev_done_at": "2026-06-17",
+  "verified_at": "2026-06-17",
+  "verified_note": "renderTable 100%、整包 90.5%；F5/B4/wrong-type/nil-metadata PASS；-race 全绿 @7889c8b",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/notifier/telegram"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": []
+}
