@@ -618,6 +618,48 @@ func TestFlush_EmptyIsNoop(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// TASK-002 N1: pe_percentile_display is a display-only key; router decisions
+// (routed bool, notifier calls, buffer state) must be identical whether the
+// key is present or absent on the signal.
+// ---------------------------------------------------------------------------
+
+func TestRoute_PEPercentileDisplay_DoesNotAffectRouting(t *testing.T) {
+	makeSig := func(withPE bool) core.Signal {
+		s := core.Signal{
+			Symbol:     "600519.SH",
+			Action:     core.ActionBuy,
+			Confidence: 0.9,
+			Strategy:   "price_percentile",
+			Metadata:   map[string]any{"percentile": 45.0},
+		}
+		if withPE {
+			s.Metadata["pe_percentile_display"] = 12.3
+		}
+		return s
+	}
+
+	cfg := Config{MinConfidence: 0.5, PercentileStep: 5}
+
+	// Router A: signal WITHOUT pe_percentile_display
+	rA, cnA := newRouterWithNotifier(cfg)
+	routedA, errA := rA.Route(makeSig(false))
+
+	// Router B: signal WITH pe_percentile_display (same percentile, same action)
+	rB, cnB := newRouterWithNotifier(cfg)
+	routedB, errB := rB.Route(makeSig(true))
+
+	if routedA != routedB {
+		t.Errorf("routed mismatch: without_pe=%v with_pe=%v", routedA, routedB)
+	}
+	if errA != errB {
+		t.Errorf("error mismatch: without_pe=%v with_pe=%v", errA, errB)
+	}
+	if cnA.sends != cnB.sends {
+		t.Errorf("Send calls mismatch: without_pe=%d with_pe=%d", cnA.sends, cnB.sends)
+	}
+}
+
 func TestRouter_CleanupExpiredCooldowns(t *testing.T) {
 	cfg := Config{
 		CooldownDuration: 100 * time.Millisecond,

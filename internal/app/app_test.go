@@ -1277,7 +1277,7 @@ func TestEnrichSignalMetadata(t *testing.T) {
 		{Symbol: "0883.HK", Metadata: map[string]any{"percentile": 93.8}},
 		{Symbol: "0883.HK", Metadata: map[string]any{"name": "已有名"}},
 	}
-	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "0883.HK", Name: "中国海洋石油"})
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "0883.HK", Name: "中国海洋石油"}, nil)
 
 	if sigs[0].Metadata["name"] != "中国海洋石油" {
 		t.Errorf("nil metadata must be initialized and stamped, got %v", sigs[0].Metadata)
@@ -1290,9 +1290,93 @@ func TestEnrichSignalMetadata(t *testing.T) {
 	}
 
 	plain := []core.Signal{{Symbol: "X"}}
-	enrichSignalMetadata(plain, WatchlistItem{Symbol: "X"})
+	enrichSignalMetadata(plain, WatchlistItem{Symbol: "X"}, nil)
 	if plain[0].Metadata != nil {
 		t.Errorf("empty watchlist name must not allocate metadata, got %v", plain[0].Metadata)
+	}
+}
+
+// Context Checkpoint: done_criteria → test mapping (TASK-002)
+// functional[0] "fundamental 有 PE(12.3) → 每条信号带 pe_percentile_display=12.3" → TestEnrichSignalMetadata_StampsPEPercentile
+// functional[1] "name 逻辑零回归(item.Name 非空仍盖 name，不覆盖既有)"              → TestEnrichSignalMetadata_StampsPEPercentile
+// boundary[0]   "PEPercentile<0(哨兵-1) → 不盖 pe_percentile_display"              → TestEnrichSignalMetadata_NoPEWhenUnavailable
+// boundary[1]   "fundamental=nil → 不盖 pe_percentile_display，但 name 仍盖"       → TestEnrichSignalMetadata_NoPEWhenUnavailable
+// boundary[2]   "【B4】PEPercentile==0.0(合法) → 必须盖键(值0.0)"                  → TestEnrichSignalMetadata_PEZeroIsValid
+// boundary[3]   "【B6】name='' 且 PE 有值 → 盖 PE 键、不盖 name（断言用 _,ok）"   → TestEnrichSignalMetadata_NoNameButHasPE
+// boundary[4]   "既有 pe_percentile_display 键不被覆盖"                             → TestEnrichSignalMetadata_NoPEOverwrite
+// error_handling "signals[i].Metadata 为 nil 时初始化后再写，不 panic"              → TestEnrichSignalMetadata_StampsPEPercentile (nil Metadata slot 0)
+
+func TestEnrichSignalMetadata_StampsPEPercentile(t *testing.T) {
+	sigs := []core.Signal{{Symbol: "600519.SH"}, {Symbol: "600519.SH"}}
+	f := &core.Fundamental{Symbol: "600519.SH", PEPercentile: 12.3}
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "600519.SH", Name: "贵州茅台"}, f)
+	for _, s := range sigs {
+		if got, _ := s.Metadata["pe_percentile_display"].(float64); got != 12.3 {
+			t.Errorf("pe_percentile_display = %v, want 12.3", s.Metadata["pe_percentile_display"])
+		}
+		if s.Metadata["name"] != "贵州茅台" {
+			t.Errorf("name not stamped: %v", s.Metadata["name"])
+		}
+	}
+}
+
+func TestEnrichSignalMetadata_NoPEWhenUnavailable(t *testing.T) {
+	// PEPercentile = -1（不可用哨兵）→ 不盖键
+	sigs := []core.Signal{{Symbol: "X"}}
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "X", Name: "n"},
+		&core.Fundamental{Symbol: "X", PEPercentile: -1})
+	if _, ok := sigs[0].Metadata["pe_percentile_display"]; ok {
+		t.Error("must not stamp pe_percentile_display when PEPercentile < 0")
+	}
+	// fundamental = nil（如 ETF）→ 不盖键，且 name 仍盖
+	sigs2 := []core.Signal{{Symbol: "Y"}}
+	enrichSignalMetadata(sigs2, WatchlistItem{Symbol: "Y", Name: "etf"}, nil)
+	if _, ok := sigs2[0].Metadata["pe_percentile_display"]; ok {
+		t.Error("nil fundamental must not stamp pe_percentile_display")
+	}
+	if sigs2[0].Metadata["name"] != "etf" {
+		t.Error("name must still be stamped when fundamental is nil")
+	}
+}
+
+// TestEnrichSignalMetadata_PEZeroIsValid validates boundary case B4:
+// PEPercentile==0.0 is a legitimate historical low and must be stamped.
+func TestEnrichSignalMetadata_PEZeroIsValid(t *testing.T) {
+	sigs := []core.Signal{{Symbol: "Z"}}
+	f := &core.Fundamental{Symbol: "Z", PEPercentile: 0.0}
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "Z", Name: "zero-pe"}, f)
+	v, ok := sigs[0].Metadata["pe_percentile_display"]
+	if !ok {
+		t.Fatal("PEPercentile==0.0 must stamp pe_percentile_display (0.0 is valid, not a sentinel)")
+	}
+	if got, _ := v.(float64); got != 0.0 {
+		t.Errorf("pe_percentile_display = %v, want 0.0", v)
+	}
+}
+
+// TestEnrichSignalMetadata_NoNameButHasPE validates boundary case B6:
+// name=="" but PE has a value → PE key stamped, name key absent (not just empty).
+func TestEnrichSignalMetadata_NoNameButHasPE(t *testing.T) {
+	sigs := []core.Signal{{Symbol: "W"}}
+	f := &core.Fundamental{Symbol: "W", PEPercentile: 55.0}
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "W", Name: ""}, f)
+	if _, ok := sigs[0].Metadata["pe_percentile_display"]; !ok {
+		t.Error("PE must be stamped even when item.Name is empty")
+	}
+	// Use presence check, not == "" — missing key also evaluates to "" as string.
+	if _, ok := sigs[0].Metadata["name"]; ok {
+		t.Error("name key must be absent (not just empty) when item.Name is empty")
+	}
+}
+
+// TestEnrichSignalMetadata_NoPEOverwrite validates that a pre-existing
+// pe_percentile_display key is never overwritten.
+func TestEnrichSignalMetadata_NoPEOverwrite(t *testing.T) {
+	sigs := []core.Signal{{Symbol: "Q", Metadata: map[string]any{"pe_percentile_display": 99.9}}}
+	f := &core.Fundamental{Symbol: "Q", PEPercentile: 20.0}
+	enrichSignalMetadata(sigs, WatchlistItem{Symbol: "Q", Name: "q"}, f)
+	if got, _ := sigs[0].Metadata["pe_percentile_display"].(float64); got != 99.9 {
+		t.Errorf("pre-existing pe_percentile_display must not be overwritten, got %v", got)
 	}
 }
 

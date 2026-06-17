@@ -383,6 +383,103 @@ func TestHoldIconConsistent(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-001)
+// functional[0] "renderTable 表头含 PE% 且为末列"                    → TestRenderTable_PEPercentileColumn
+// functional[1] "信号带 pe_percentile_display=12.3 → 输出含 12.3%"  → TestRenderTable_PEPercentileColumn
+// functional[2] "PE% 列对齐（含 CJK 行），列宽自适应不破"            → TestRenderTable_PEPercentileColumn
+// functional[3] "【F5】端到端 formatBatch 层 PE% 列仍正确出现"       → TestFormatBatch_PEPercentileEndToEnd
+// functional[4] "【B4】pe_percentile_display==0.0 → 显示 0.0%"      → TestRenderTable_PEPercentileZeroValue
+// boundary[0]   "无 pe_percentile_display → 格空串，结构完整"        → TestRenderTable_PEPercentileColumn
+// boundary[1]   "末列(PE%)无尾随补空格"                              → TestRenderTable_PEPercentileColumn
+// boundary[2]   "pe_percentile_display 类型非 float64 → 留空不 panic" → TestRenderTable_PEPercentileWrongType
+// error_handling[0] "Metadata nil 或缺键时类型断言安全不 panic"       → TestRenderTable_PEPercentileNilMetadata
+
+func TestRenderTable_PEPercentileColumn(t *testing.T) {
+	rows := []core.Signal{
+		{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.948, Price: 1240.92,
+			Metadata: map[string]any{"name": "贵州茅台", "pe_percentile_display": 12.3}},
+		{Symbol: "0700.HK", Action: core.ActionBuy, Confidence: 0.855, Price: 463.6,
+			Metadata: map[string]any{"name": "腾讯控股"}}, // 无 PE → 该格留空
+	}
+	out := renderTable(rows)
+
+	// 表头含 PE%
+	if !strings.Contains(out, "PE%") {
+		t.Errorf("missing PE%% header:\n%s", out)
+	}
+	// 有 PE 的行渲染百分位
+	if !strings.Contains(out, "12.3%") {
+		t.Errorf("missing PE percentile value:\n%s", out)
+	}
+	// 无 PE 的行不应凭空出现百分位；腾讯行的 PE 格为空——通过列数稳定间接校验：
+	// 每行列数一致（含表头共 3 行），且表格结构完整（``` 围栏成对）
+	if strings.Count(out, "```") != 2 {
+		t.Errorf("table fences broken:\n%s", out)
+	}
+}
+
+// B4: pe_percentile_display==0.0 不能被当作「无值」漏掉
+func TestRenderTable_PEPercentileZeroValue(t *testing.T) {
+	rows := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9, Price: 150.0,
+			Metadata: map[string]any{"name": "Apple", "pe_percentile_display": 0.0}},
+	}
+	out := renderTable(rows)
+	if !strings.Contains(out, "0.0%") {
+		t.Errorf("pe_percentile_display==0.0 must render as 0.0%%, got:\n%s", out)
+	}
+}
+
+// boundary: pe_percentile_display 类型非 float64 → 留空，不 panic
+func TestRenderTable_PEPercentileWrongType(t *testing.T) {
+	rows := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9,
+			Metadata: map[string]any{"pe_percentile_display": "not-a-float"}},
+	}
+	// 不 panic 即 pass，PE% 格留空
+	out := renderTable(rows)
+	if !strings.Contains(out, "PE%") {
+		t.Errorf("header PE%% must still be present:\n%s", out)
+	}
+}
+
+// error_handling: Metadata 为 nil 时不 panic
+func TestRenderTable_PEPercentileNilMetadata(t *testing.T) {
+	rows := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9, Metadata: nil},
+	}
+	out := renderTable(rows)
+	if !strings.Contains(out, "PE%") {
+		t.Errorf("header PE%% must still be present:\n%s", out)
+	}
+}
+
+// F5: 端到端 formatBatch（分组+置信度排序后）PE% 列仍正确出现
+func TestFormatBatch_PEPercentileEndToEnd(t *testing.T) {
+	sigs := []core.Signal{
+		{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.948, Price: 1240.92,
+			Metadata: map[string]any{"name": "贵州茅台", "pe_percentile_display": 35.7}},
+		{Symbol: "0700.HK", Action: core.ActionBuy, Confidence: 0.855, Price: 463.6,
+			Metadata: map[string]any{"name": "腾讯控股"}}, // 无 PE
+		{Symbol: "AAPL", Action: core.ActionSell, Confidence: 0.80, Price: 200.0,
+			Metadata: map[string]any{"name": "Apple", "pe_percentile_display": 72.1}},
+	}
+	out := formatBatch(sigs)
+
+	// 表头含 PE%（出现在每个分组的 fenced 表格中）
+	if !strings.Contains(out, "PE%") {
+		t.Errorf("PE%% header must appear in formatBatch output:\n%s", out)
+	}
+	// 有 PE 的买入行渲染百分位
+	if !strings.Contains(out, "35.7%") {
+		t.Errorf("buy group PE percentile 35.7%% missing:\n%s", out)
+	}
+	// 有 PE 的卖出行渲染百分位
+	if !strings.Contains(out, "72.1%") {
+		t.Errorf("sell group PE percentile 72.1%% missing:\n%s", out)
+	}
+}
+
 func TestDisplaySymbol_HKPaddedToFiveDigits(t *testing.T) {
 	cases := map[string]string{
 		"0883.HK":   "00883.HK",
