@@ -79,3 +79,52 @@ def test_main_errors_on_missing_fundamentals_dir(tmp_path):
         "--market", "US", "--source", "yahoo", "--db", str(tmp_path / "w.db"),
     ])
     assert rc == 3
+
+
+def _mkcsv(d, name, sym, date, close):
+    d.mkdir(exist_ok=True)
+    (d / name).write_text(
+        "symbol,date,open,high,low,close,volume,factor\n"
+        f"{sym},{date},1,2,0.5,{close},100,1\n"
+    )
+
+
+def test_main_multi_market_add_coexist(tmp_path):
+    us = tmp_path / "us"; hk = tmp_path / "hk"
+    _mkcsv(us, "aapl.csv", "aapl", "2024-01-02", 1.5)
+    _mkcsv(hk, "tx.csv", "0700.HK", "2024-01-02", 9.9)
+    db = tmp_path / "w.db"
+    rc = build_warehouse.main([
+        "--db", str(db), "--dumped-at", "2024-01-03T00:00:00Z",
+        "--add", "US", "yahoo", str(us),
+        "--add", "HK", "yahoo", str(hk),
+    ])
+    assert rc == 0
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0] == 2
+    markets = {r[0] for r in conn.execute("SELECT DISTINCT market FROM warehouse_meta")}
+    assert markets == {"US", "HK"}
+
+
+def test_main_multi_market_skips_missing_dirs(tmp_path):
+    us = tmp_path / "us"
+    _mkcsv(us, "aapl.csv", "aapl", "2024-01-02", 1.5)
+    db = tmp_path / "w.db"
+    rc = build_warehouse.main([
+        "--db", str(db), "--dumped-at", "2024-01-03T00:00:00Z",
+        "--add", "US", "yahoo", str(us),
+        "--add", "HK", "yahoo", str(tmp_path / "missing_hk"),  # 缺目录 → 跳过，不报错
+    ])
+    assert rc == 0
+    conn = sqlite3.connect(str(db))
+    assert {r[0] for r in conn.execute("SELECT DISTINCT market FROM warehouse_meta")} == {"US"}
+
+
+def test_main_multi_market_all_empty_errors(tmp_path):
+    db = tmp_path / "w.db"
+    rc = build_warehouse.main([
+        "--db", str(db),
+        "--add", "US", "yahoo", str(tmp_path / "nope1"),
+        "--add", "HK", "yahoo", str(tmp_path / "nope2"),
+    ])
+    assert rc == 2

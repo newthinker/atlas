@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.refresh-us</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/scripts/ops/refresh-market.sh</string>
+    <string>us</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <!-- 调 make qlib-data-us（含 export-ohlcv；-o build 跳过 go build），需 make/go 在 PATH。 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 每天 08:00 本地时间（+0800）。美股 16:00 ET 收盘 = 次日约 04:00–05:00 +0800，
+       08:00 在收盘且数据可用之后。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/refresh-us.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/refresh-us.err.log</string>
+</dict>
+</plist>

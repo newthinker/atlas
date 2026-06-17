@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.refresh-cnhk</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/scripts/ops/refresh-market.sh</string>
+    <string>cnhk</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <!-- 调 make qlib-data + qlib-data-hk（含 export-ohlcv；-o build 跳过 go build），需 make/go 在 PATH。 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 每天 20:00 本地时间（+0800）。A 股 15:00 / 港股 16:00 收盘后。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>20</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/refresh-cnhk.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/refresh-cnhk.err.log</string>
+</dict>
+</plist>

@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump
+.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -109,3 +109,12 @@ warehouse-dump:
 	$(QLIB_PY) -m scripts.qlib_warehouse.build_warehouse \
 	  --csv-dir $(QLIB_CSV_US_DIR) --market US --source yahoo --db $(WAREHOUSE_DB) \
 	  $(if $(wildcard $(FUNDAMENTALS_US_DIR)),--fundamentals-dir $(FUNDAMENTALS_US_DIR),)
+
+# 多市场仓库：从 US/CN/HK 三个 CSV 目录全量重建单一 SQLite 仓库（原子写）。
+# 缺/空的目录自动跳过（不报错），因此分时段刷新各市场后调用本目标都能得到完整仓库。
+warehouse-dump-all:
+	@mkdir -p $(dir $(WAREHOUSE_DB))
+	$(QLIB_PY) -m scripts.qlib_warehouse.build_warehouse --db $(WAREHOUSE_DB) \
+	  --add US yahoo $(QLIB_CSV_US_DIR) \
+	  --add CN_A eastmoney $(QLIB_CSV_DIR) \
+	  --add HK yahoo $(QLIB_CSV_HK_DIR)

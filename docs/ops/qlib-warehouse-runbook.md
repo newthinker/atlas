@@ -57,9 +57,9 @@ runtime 可用 `ATLAS_RUNTIME` 环境变量覆盖）：
 | 脚本 | 作用 |
 |---|---|
 | `deploy.sh` | 代码目录 `make build` → 把运行时产物 rsync 到 runtime。剥离 `*.go` 但**保留 `internal/api/templates/` 等运行时资产**；`--delete` 同步代码/脚本，但排除并保护 runtime 本地数据（`data/ logs/ qlib_csv*/ fundamentals_csv*/ signals*.csv reports/`）；收紧 `config.yaml` 为 600 |
-| `install-services.sh` | 安装并加载两个 LaunchAgent（serve + 每夜 dump）。幂等；已处理 bootout→bootstrap 竞态（EIO 重试） |
-| `services.sh <cmd>` | 日常管理：`status / restart / stop / start / dump-now / logs / dump-logs / uninstall` |
-| `nightly-warehouse.sh` | 每夜数据仓库重建（由 launchd 调度，见 §5；用 `make -o build` 免编译复用部署的二进制） |
+| `install-services.sh` | 安装并加载 3 个 LaunchAgent（serve + refresh-us + refresh-cnhk）。幂等；清理旧的单一 warehouse-dump；已处理 bootout→bootstrap 竞态（EIO 重试） |
+| `services.sh <cmd>` | 日常管理：`status / restart / stop / start / refresh-us / refresh-cnhk / logs / refresh-logs <us\|cnhk> / uninstall` |
+| `refresh-market.sh <us\|cnhk>` | 刷新指定市场组 OHLCV（`-o build` 免编译复用部署二进制）→ `warehouse-dump-all` 全量重建含全部市场的仓库。由 launchd 分时段调度（见 §5） |
 
 ### 首次部署
 
@@ -75,9 +75,11 @@ bash scripts/ops/deploy.sh
 # 3. 安装并加载系统服务（用户级 LaunchAgent，无需 sudo）
 bash scripts/ops/install-services.sh
 
-# 4. 首次需要数据：触发一次每夜重建（导出 OHLCV → 建 SQLite 仓库），跟随日志等 "ok: N ohlcv rows ..."
-bash scripts/ops/services.sh dump-now
-bash scripts/ops/services.sh dump-logs
+# 4. 首次需要数据：手动各触发一次刷新+重建（不等定时点），跟随日志等 "ok: N ohlcv rows ..."
+bash scripts/ops/services.sh refresh-us       # 美股
+bash scripts/ops/services.sh refresh-logs us
+bash scripts/ops/services.sh refresh-cnhk     # A 股 + 港股
+bash scripts/ops/services.sh refresh-logs cnhk
 
 # 5. 校验服务（期望 health=200）
 bash scripts/ops/services.sh status
@@ -128,39 +130,39 @@ qlib:
 
 > 若库文件缺失/损坏，atlas 打印 warning 跳过注册、继续以纯外部 API 运行——**不会启动失败**。
 
-## 5. 日常工作流（每日盘后）
+## 5. 日常工作流（两个分时段定时任务）
 
-atlas serve **常驻不重启**；备料由 cron 每晚跑一次，原子 rename 覆盖库文件，atlas 下个
-监控周期自然只读到新库（SQLite 只读重连，无需重启 atlas）。
+atlas serve **常驻不重启**；备料由两个 LaunchAgent 按本地时间（**+0800**，launchd 用系统时区）
+分时段触发，原子 rename 覆盖库文件，atlas 下个监控周期自然只读到新库（SQLite 只读重连，
+无需重启 atlas）。
 
-**严格顺序**：先 `qlib-data-us`（产出/刷新 CSV），再 `warehouse-dump`（CSV→SQLite）。
-落盘脚本 **`scripts/ops/nightly-warehouse.sh`** 已实现这条流水线（仓库根目录自脚本位置推导，
-免硬编码绝对路径），各步骤：
+| LaunchAgent | 时刻（本地 +0800） | 动作 | 为何这个点 |
+|---|---|---|---|
+| `com.newthinker.atlas.refresh-us` | **每天 08:00** | `refresh-market.sh us` | 美股 16:00 ET 收盘 ≈ 次日 04:00–05:00 +0800，08:00 在收盘且数据可用后 |
+| `com.newthinker.atlas.refresh-cnhk` | **每天 20:00** | `refresh-market.sh cnhk` | A 股 15:00 / 港股 16:00 收盘后 |
 
-1. `make qlib-data-us` — 刷新美股 OHLCV CSV（+ `.bin` 数据包）
-2. （可选）刷新 PIT 基本面 CSV → `fundamentals_csv_us/`（脚本内注释处接入适配器，缺则自动跳过）
-3. `make warehouse-dump` — 重建 SQLite 仓库（原子写）
-4. 健康校验 — 库非空且 `last_date` 可解析，否则非零退出
-5. 校验通过 → `cp` 一份 `.bak`（回滚永远指向「上一份验证通过」的库，见 §9）
+每个任务的流水线（`refresh-market.sh`，仓库根目录自脚本位置推导，免硬编码）：
 
-手动跑一次：
+1. 刷新该市场组 OHLCV CSV：US → `make -o build qlib-data-us`；CNHK → `make -o build qlib-data` + `qlib-data-hk`
+2. `make warehouse-dump-all` — 从 **US/CN/HK 三个 CSV 目录全量重建**单一仓库（缺目录自动跳过、原子写）
+3. 健康校验 — 库非空且 `last_date` 可解析，否则非零退出
+4. 校验通过 → `cp` 一份 `.bak`（回滚永远指向「上一份验证通过」的库，见 §9）
+
+> **关键设计**：重建总是吃全部市场的 CSV，所以两个任务谁先谁后都不会互相覆盖——
+> 早 8 点刷美股后重建（含昨晚的 A/港 CSV），晚 8 点刷 A/港后重建（含早上的美股 CSV），
+> 仓库始终包含三市场最新可得数据。
+
+手动各跑一次（不等定时点）：
 
 ```bash
-bash scripts/ops/nightly-warehouse.sh
-# 末行期望：ok: N ohlcv rows, M fundamentals, last_date=YYYY-MM-DD (age Nd)
+bash scripts/ops/services.sh refresh-us      # 或直接 bash scripts/ops/refresh-market.sh us
+bash scripts/ops/services.sh refresh-cnhk
+# 末行期望：ok: N ohlcv rows, M markets, K fundamentals, last_date=YYYY-MM-DD (age Nd)
 ```
 
-> 可用环境变量覆盖默认：`QLIB_PY`、`WAREHOUSE_DB`（与 Makefile 同名变量对齐）。
-> 脚本是该流程的唯一真相源；本节只描述步骤，不再内联 shell，避免两处漂移。
-
-cron（美股收盘 16:00 ET 之后，取 23:30 ET；按服务器时区调整）：
-
-```cron
-# m h dom mon dow  command
-30 23 * * 1-5  /bin/bash /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/scripts/ops/nightly-warehouse.sh >> /var/log/atlas/warehouse.log 2>&1
-```
-
-> 仅工作日（`1-5`）。脚本失败（`set -e` + 校验非零退出）会在日志留痕，但
+> 调度由 `deploy/launchd/com.newthinker.atlas.refresh-*.plist` 的 `StartCalendarInterval` 定义
+> （每天 `Hour`/`Minute`，无 `Weekday` = 每天触发）。改时刻：编辑 plist → `deploy.sh` → `install-services.sh` 重载。
+> 任务失败（`set -e` + 校验非零退出）会在 `logs/refresh-*.err.log` 留痕，但
 > **不影响正在运行的 atlas**——它继续用上一份库 + 外部 API 补尾。
 
 ## 6. 离线策略评估（方向①，按需，非每日）
@@ -189,20 +191,20 @@ make signal-eval-us
 
 | 症状 | 排查 | 处置 |
 |---|---|---|
-| 启动无 `qlib warehouse collector registered` | `enabled` 是否 true、`db_path` 是否存在可读 | 修配置或先 `make warehouse-dump` |
-| `wrote 0 rows` | `qlib_csv_us/` 是否为空/陈旧 | 先 `make qlib-data-us` 刷新 CSV |
-| 健康校验 `WAREHOUSE EMPTY` | dump 上游 export-ohlcv 是否失败 | 查 `warehouse.log`，确认外部行情可达 |
-| PE 分位仍走 yahoo（非 PIT） | `fundamentals_pit` 是否有该符号 | 产出 `fundamentals_csv_us/` 后重跑 dump |
-| atlas 读到半成品库 | 不应发生（原子 rename）；若见 `.tmp` 残留 | 删 `data/qlib_warehouse.db.tmp`，重跑 dump |
+| 启动无 `qlib warehouse collector registered` | `enabled` 是否 true、`db_path` 是否存在可读 | 修配置或先 `services.sh refresh-us` 生成库 |
+| 健康校验 `WAREHOUSE EMPTY` | 刷新上游 export-ohlcv 是否失败 | 查 `logs/refresh-*.err.log`，确认外部行情可达 |
+| 某市场数据没更新 | 对应任务是否触发/失败 | `services.sh refresh-logs us`（或 `cnhk`）看日志，必要时手动 `services.sh refresh-us` |
+| PE 分位仍走 yahoo（非 PIT） | `fundamentals_pit` 是否有该符号 | 产出 `fundamentals_csv_us/` 后重跑刷新（best-effort，见 ADAPTERS.md） |
+| atlas 读到半成品库 | 不应发生（原子 rename）；若见 `.tmp` 残留 | 删 `data/qlib_warehouse.db.tmp`，重跑刷新 |
 | 数据回归/异常 | —— | 见第 9 节回滚 |
 
 日志过滤：
 
 ```bash
-# atlas 侧 qlib 相关日志
-journalctl -u atlas | grep -iE 'qlib|warehouse|tail-fill|stale'
-# 仓库 dump 侧
-tail -f /var/log/atlas/warehouse.log
+RT=/Users/zuowei/workspace/runtime/atlas
+grep -iE 'qlib|warehouse|tail-fill|stale' "$RT/logs/atlas.err.log"   # atlas serve 侧
+tail -f "$RT/logs/refresh-us.out.log"                                # 美股刷新
+tail -f "$RT/logs/refresh-cnhk.out.log"                              # A 股/港股刷新
 ```
 
 ## 9. 回滚 / 应急关停
@@ -219,8 +221,8 @@ cp data/qlib_warehouse.db.bak data/qlib_warehouse.db   # 见下方备份建议
 # atlas 无需重启，下个周期只读重连即可读到
 ```
 
-> 备份建议：在 `warehouse-dump` 成功且健康校验通过后，再 `cp` 一份 `.bak`，使回滚永远
-> 指向「上一份验证通过」的库。可加进 nightly 脚本第 [4] 步之后。
+> 备份是自动的：`refresh-market.sh` 在健康校验通过后已 `cp` 一份 `.bak`（§5 第 4 步），
+> 故 `data/qlib_warehouse.db.bak` 始终指向「上一份验证通过」的库。
 
 ## 10. 边界与已知约束
 
