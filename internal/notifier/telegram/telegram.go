@@ -164,7 +164,7 @@ func formatBatch(signals []core.Signal) string {
 
 // renderTable builds a fenced, column-aligned table for one group's rows.
 func renderTable(rows []core.Signal) string {
-	header := []string{"SYMBOL", "NAME", "CONF", "PRICE"}
+	header := []string{"SYMBOL", "NAME", "CONF", "PRICE", "PE%"}
 	cells := [][]string{header}
 	for _, s := range rows {
 		name, _ := s.Metadata["name"].(string)
@@ -172,8 +172,14 @@ func renderTable(rows []core.Signal) string {
 		if s.Price > 0 {
 			price = fmt.Sprintf("%.2f", s.Price)
 		}
+		// pe_percentile_display is a display-only key (0-100) stamped by the app
+		// layer from Fundamental.PEPercentile; absent for symbols without PE.
+		pePct := ""
+		if v, ok := s.Metadata["pe_percentile_display"].(float64); ok {
+			pePct = fmt.Sprintf("%.1f%%", v)
+		}
 		cells = append(cells, []string{
-			s.Symbol, name, fmt.Sprintf("%.1f%%", s.Confidence*100), price,
+			s.Symbol, name, fmt.Sprintf("%.1f%%", s.Confidence*100), price, pePct,
 		})
 	}
 	widths := make([]int, len(header))
