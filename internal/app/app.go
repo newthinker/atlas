@@ -396,19 +396,30 @@ func (a *App) analyzeSymbolSafe(ctx context.Context, item WatchlistItem) {
 	a.analyzeSymbol(ctx, item)
 }
 
-// enrichSignalMetadata stamps the watchlist display name onto outgoing signals
-// (Metadata["name"]) so notifiers can render human-friendly titles. Existing
-// keys are never overwritten; an empty name leaves signals untouched.
-func enrichSignalMetadata(signals []core.Signal, item WatchlistItem) {
-	if item.Name == "" {
+// enrichSignalMetadata stamps watchlist display info onto outgoing signals so
+// notifiers can render human-friendly rows. Existing keys are never overwritten.
+//   - Metadata["name"]: watchlist display name (skipped when item.Name is empty).
+//   - Metadata["pe_percentile_display"]: the symbol's PE historical percentile
+//     (0-100) from Fundamental, for the digest PE% column. Display-only — the
+//     router never reads it; stamped only when a valid PE percentile exists.
+func enrichSignalMetadata(signals []core.Signal, item WatchlistItem, fundamental *core.Fundamental) {
+	hasPE := fundamental != nil && fundamental.PEPercentile >= 0
+	if item.Name == "" && !hasPE {
 		return
 	}
 	for i := range signals {
 		if signals[i].Metadata == nil {
-			signals[i].Metadata = make(map[string]any, 1)
+			signals[i].Metadata = make(map[string]any, 2)
 		}
-		if _, exists := signals[i].Metadata["name"]; !exists {
-			signals[i].Metadata["name"] = item.Name
+		if item.Name != "" {
+			if _, exists := signals[i].Metadata["name"]; !exists {
+				signals[i].Metadata["name"] = item.Name
+			}
+		}
+		if hasPE {
+			if _, exists := signals[i].Metadata["pe_percentile_display"]; !exists {
+				signals[i].Metadata["pe_percentile_display"] = fundamental.PEPercentile
+			}
 		}
 	}
 }
@@ -500,7 +511,7 @@ func (a *App) analyzeSymbol(ctx context.Context, item WatchlistItem) {
 
 	// Stamp watchlist display info so notifiers can render human-friendly
 	// titles without knowing the watchlist.
-	enrichSignalMetadata(signals, item)
+	enrichSignalMetadata(signals, item, analysisCtx.Fundamental)
 
 	// Snapshot the executor under the lock so SetExecutor can run concurrently.
 	a.mu.RLock()
