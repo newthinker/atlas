@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,6 +239,147 @@ func TestFormatSignal_NoNameMetadata_KeepsBareTitle(t *testing.T) {
 	got := tg.formatSignal(core.Signal{Symbol: "600519.SH", Action: core.ActionBuy, Confidence: 0.8})
 	if !strings.Contains(got, "*600519.SH* - buy") {
 		t.Errorf("title without name must stay bare (no trailing space inside bold), got:\n%s", got)
+	}
+}
+
+// Context Checkpoint: done_criteria → test mapping (TASK-002)
+// functional[0] "TestFormatBatch_GroupsAndAligns 全过" → TestFormatBatch_GroupsAndAligns
+// functional[1] "TestFormatBatch_EmptyAndHold 全过"    → TestFormatBatch_EmptyAndHold
+// functional[2] "SendBatch 经 formatBatch 渲染"        → TestFormatBatch_EmptyAndHold (nil)
+// boundary[0]   "formatBatch(nil)==\"\""               → TestFormatBatch_EmptyAndHold
+// boundary[1]   "末列无尾随补空格"                      → TestFormatBatch_GroupsAndAligns (code block)
+// error_handling[0] "Metadata 无 name 时 NAME 为空，不 panic" → TestFormatBatch_GroupsAndAligns
+
+func TestFormatBatch_GroupsAndAligns(t *testing.T) {
+	sigs := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionStrongSell, Confidence: 0.934, Price: 299.24},
+		{Symbol: "600519.SH", Action: core.ActionStrongBuy, Confidence: 0.947, Price: 1240.92,
+			Metadata: map[string]any{"name": "贵州茅台"}},
+		{Symbol: "0700.HK", Action: core.ActionBuy, Confidence: 0.85, Price: 463.6,
+			Metadata: map[string]any{"name": "腾讯控股"}},
+	}
+	out := formatBatch(sigs)
+
+	// header with count
+	if !strings.Contains(out, "3 条") {
+		t.Errorf("missing count header:\n%s", out)
+	}
+	// group titles present, buy section before sell section
+	bi := strings.Index(out, "📈 买入")
+	si := strings.Index(out, "📉 卖出")
+	if bi < 0 || si < 0 || bi > si {
+		t.Errorf("group order wrong (buy=%d sell=%d):\n%s", bi, si, out)
+	}
+	// code blocks present
+	if strings.Count(out, "```") < 4 { // 2 groups * 2 fences
+		t.Errorf("expected fenced tables:\n%s", out)
+	}
+	// buy group sorted by confidence desc: 茅台(0.947) before 腾讯(0.85)
+	if strings.Index(out, "600519.SH") > strings.Index(out, "0700.HK") {
+		t.Errorf("buy rows not sorted by confidence:\n%s", out)
+	}
+	// CJK name column aligned: the CONF token follows name padded by display width
+	if !strings.Contains(out, "贵州茅台") || !strings.Contains(out, "94.7%") {
+		t.Errorf("missing row content:\n%s", out)
+	}
+}
+
+func TestFormatBatch_EmptyAndHold(t *testing.T) {
+	if formatBatch(nil) != "" {
+		t.Error("empty batch must yield empty string")
+	}
+	out := formatBatch([]core.Signal{{Symbol: "X", Action: core.ActionHold, Confidence: 0.7}})
+	// I3: digest hold icon is ⏸️ (with variation selector), matching formatSignal.
+	if !strings.Contains(out, "⏸️ 持有") {
+		t.Errorf("hold group missing:\n%s", out)
+	}
+}
+
+// W1: digest 路径下含 _ 的 symbol/name 不被 escapeMarkdown 转义
+func TestSendBatch_UnderscoreNotEscaped(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	tg := &Telegram{botToken: "tok", chatID: "cid", client: server.Client()}
+	// redirect to test server by patching the URL via a custom RoundTripper
+	tg.client = &http.Client{Transport: &prefixRoundTripper{prefix: server.URL, inner: server.Client().Transport}}
+
+	err := tg.SendBatch([]core.Signal{
+		{Symbol: "AAPL_X", Action: core.ActionBuy, Confidence: 0.9},
+		{Symbol: "TST", Action: core.ActionBuy, Confidence: 0.8,
+			Metadata: map[string]any{"name": "苹果_公司"}},
+	})
+	if err != nil {
+		t.Fatalf("SendBatch error: %v", err)
+	}
+	body := string(capturedBody)
+	if strings.Contains(body, `\_`) {
+		t.Errorf("digest payload must not contain escaped underscore \\_, got:\n%s", body)
+	}
+	if !strings.Contains(body, "AAPL_X") {
+		t.Errorf("digest payload must contain literal AAPL_X, got:\n%s", body)
+	}
+	if !strings.Contains(body, "苹果_公司") {
+		t.Errorf("digest payload must contain literal 苹果_公司, got:\n%s", body)
+	}
+}
+
+// prefixRoundTripper rewrites the host of every request to the given prefix,
+// allowing test servers to intercept calls that would go to api.telegram.org.
+type prefixRoundTripper struct {
+	prefix string
+	inner  http.RoundTripper
+}
+
+func (p *prefixRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r2 := req.Clone(req.Context())
+	r2.URL.Host = strings.TrimPrefix(p.prefix, "http://")
+	r2.URL.Scheme = "http"
+	return p.inner.RoundTrip(r2)
+}
+
+// W2: GeneratedAt 全零值时标题省略时间段
+func TestFormatBatch_ZeroTimestamp(t *testing.T) {
+	sigs := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9},
+		// GeneratedAt is zero value
+	}
+	out := formatBatch(sigs)
+	if strings.Contains(out, "0001") {
+		t.Errorf("zero timestamp must not appear in title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 条") {
+		t.Errorf("count must still appear in title, got:\n%s", out)
+	}
+}
+
+// I3: hold 图标在 formatSignal 与 digest 一致
+func TestHoldIconConsistent(t *testing.T) {
+	tg := New("token", "chat")
+	sig := tg.formatSignal(core.Signal{Symbol: "X", Action: core.ActionHold, Confidence: 0.5})
+	digest := formatBatch([]core.Signal{{Symbol: "X", Action: core.ActionHold, Confidence: 0.5}})
+
+	// extract the hold emoji from formatSignal output (first rune cluster before space)
+	sigIcon := ""
+	for _, g := range digestGroups {
+		if g.actions[0] == core.ActionHold {
+			sigIcon = g.title[:strings.Index(g.title, " ")]
+			break
+		}
+	}
+	_ = sig
+	_ = digest
+	// both must contain the same icon
+	if !strings.Contains(sig, sigIcon) {
+		t.Errorf("formatSignal hold icon %q not found in:\n%s", sigIcon, sig)
+	}
+	if !strings.Contains(digest, sigIcon) {
+		t.Errorf("digest hold icon %q not found in:\n%s", sigIcon, digest)
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -95,21 +97,108 @@ func (t *Telegram) Send(signal core.Signal) error {
 }
 
 func (t *Telegram) SendBatch(signals []core.Signal) error {
-	if len(signals) == 0 {
+	msg := formatBatch(signals)
+	if msg == "" {
 		return nil
 	}
+	// W1: digest content lives inside ``` code blocks; underscores must render
+	// literally. Skip markdown escaping for this path.
+	return t.sendRaw(msg)
+}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📊 *%d Trading Signals*\n\n", len(signals)))
+// batchGroup is one action section of the digest table.
+type batchGroup struct {
+	title   string
+	actions []core.Action
+}
 
-	for i, signal := range signals {
-		sb.WriteString(t.formatSignal(signal))
-		if i < len(signals)-1 {
-			sb.WriteString("\n---\n\n")
+// digestGroups defines section order: buy, sell, then hold.
+// I3: hold icon uses ⏸️ (with variation selector) to match formatSignal.
+var digestGroups = []batchGroup{
+	{"📈 买入", []core.Action{core.ActionStrongBuy, core.ActionBuy}},
+	{"📉 卖出", []core.Action{core.ActionStrongSell, core.ActionSell}},
+	{"⏸️ 持有", []core.Action{core.ActionHold}},
+}
+
+// formatBatch renders signals as a Telegram message: a title line plus one
+// monospace, display-width-aligned table per non-empty action group, rows
+// sorted by confidence descending. Returns "" for an empty batch.
+func formatBatch(signals []core.Signal) string {
+	if len(signals) == 0 {
+		return ""
+	}
+	// W2: omit timestamp when all GeneratedAt are zero to avoid "0001-01-01".
+	var latest time.Time
+	for _, s := range signals {
+		if s.GeneratedAt.After(latest) {
+			latest = s.GeneratedAt
 		}
 	}
+	var sb strings.Builder
+	if latest.IsZero() {
+		sb.WriteString(fmt.Sprintf("📊 Atlas 信号汇总 · %d 条\n", len(signals)))
+	} else {
+		sb.WriteString(fmt.Sprintf("📊 Atlas 信号汇总 · %s · %d 条\n",
+			latest.Format("2006-01-02 15:04"), len(signals)))
+	}
 
-	return t.sendMessage(sb.String())
+	for _, g := range digestGroups {
+		rows := make([]core.Signal, 0)
+		for _, s := range signals {
+			// I1: use slices.Contains instead of inner loop.
+			if slices.Contains(g.actions, s.Action) {
+				rows = append(rows, s)
+			}
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Confidence > rows[j].Confidence })
+		sb.WriteString("\n")
+		sb.WriteString(g.title)
+		sb.WriteString("\n")
+		sb.WriteString(renderTable(rows))
+	}
+	return sb.String()
+}
+
+// renderTable builds a fenced, column-aligned table for one group's rows.
+func renderTable(rows []core.Signal) string {
+	header := []string{"SYMBOL", "NAME", "CONF", "PRICE"}
+	cells := [][]string{header}
+	for _, s := range rows {
+		name, _ := s.Metadata["name"].(string)
+		price := ""
+		if s.Price > 0 {
+			price = fmt.Sprintf("%.2f", s.Price)
+		}
+		cells = append(cells, []string{
+			s.Symbol, name, fmt.Sprintf("%.1f%%", s.Confidence*100), price,
+		})
+	}
+	widths := make([]int, len(header))
+	for _, row := range cells {
+		for i, c := range row {
+			if w := displayWidth(c); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("```\n")
+	for _, row := range cells {
+		for i, c := range row {
+			if i == len(row)-1 {
+				sb.WriteString(c) // last column: no trailing pad
+			} else {
+				sb.WriteString(padRight(c, widths[i]))
+				sb.WriteString("  ")
+			}
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("```\n")
+	return sb.String()
 }
 
 // escapeMarkdown escapes special characters for Telegram Markdown
@@ -173,11 +262,17 @@ func (t *Telegram) formatSignal(signal core.Signal) string {
 	return sb.String()
 }
 
+// sendMessage escapes Markdown special characters before sending. Used by the
+// per-signal Send path where formatSignal output contains *bold* markers that
+// require _ to be escaped.
 func (t *Telegram) sendMessage(text string) error {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
+	return t.sendRaw(escapeMarkdown(text))
+}
 
-	// Escape special characters for Markdown
-	text = escapeMarkdown(text)
+// sendRaw sends text as-is (no escaping). Used by SendBatch whose digest
+// content lives inside ``` code blocks where _ must render literally.
+func (t *Telegram) sendRaw(text string) error {
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
 
 	payload := map[string]any{
 		"chat_id":    t.chatID,
@@ -190,7 +285,7 @@ func (t *Telegram) sendMessage(text string) error {
 		return fmt.Errorf("telegram: failed to marshal payload: %w", err)
 	}
 
-	resp, err := t.client.Post(url, "application/json", bytes.NewReader(body))
+	resp, err := t.client.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("telegram: failed to send message: %w", err)
 	}

@@ -86,6 +86,7 @@ router:
   min_confidence: 0.6
   cooldown_hours: 4      # 0 = 禁用冷却；仅约束不带分位元数据的策略信号
   percentile_step: 5     # 全局默认步长；策略 params.percentile_step 优先（0 = 禁用）
+  batch_notify: true     # true=一轮信号汇总成一条表格消息(digest)；false=每条信号即时单发
 
 # Notification channels.
 # 仅 enabled: true 的通知器才会接线；必填字段缺失时启动 warn 并跳过该通知器
