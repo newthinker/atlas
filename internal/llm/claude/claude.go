@@ -4,6 +4,8 @@ package claude
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -16,15 +18,47 @@ type Provider struct {
 	model  string
 }
 
+// Option configures a Claude provider.
+type Option func(*config)
+
+type config struct{ proxy string }
+
+// WithProxy routes Anthropic API calls through an HTTP/HTTPS/SOCKS5 proxy
+// (e.g. "http://127.0.0.1:7890"), needed where api.anthropic.com is blocked.
+// Empty or unparseable → direct.
+func WithProxy(proxyURL string) Option {
+	return func(c *config) { c.proxy = proxyURL }
+}
+
+// proxiedClient builds an *http.Client routed through proxyURL, or nil for direct.
+func proxiedClient(proxyURL string) *http.Client {
+	if proxyURL == "" {
+		return nil
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil
+	}
+	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(u)}}
+}
+
 // New creates a new Claude provider.
-func New(apiKey, model string) (*Provider, error) {
+func New(apiKey, model string, opts ...Option) (*Provider, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("API key required")
 	}
 	if model == "" {
 		model = "claude-sonnet-4-20250514"
 	}
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+	reqOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if hc := proxiedClient(cfg.proxy); hc != nil {
+		reqOpts = append(reqOpts, option.WithHTTPClient(hc))
+	}
+	client := anthropic.NewClient(reqOpts...)
 	return &Provider{client: client, model: model}, nil
 }
 

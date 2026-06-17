@@ -159,6 +159,9 @@ type LLMConfig struct {
 type ClaudeConfig struct {
 	APIKey string `mapstructure:"api_key"`
 	Model  string `mapstructure:"model"`
+	// Proxy routes Anthropic API calls through an HTTP/SOCKS5 proxy where
+	// api.anthropic.com is blocked. Empty = direct.
+	Proxy string `mapstructure:"proxy"`
 }
 
 type OpenAIConfig struct {

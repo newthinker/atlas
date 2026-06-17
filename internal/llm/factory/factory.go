@@ -15,7 +15,7 @@ import (
 func New(cfg config.LLMConfig) (llm.Provider, error) {
 	switch cfg.Provider {
 	case "claude":
-		return claude.New(cfg.Claude.APIKey, cfg.Claude.Model)
+		return claude.New(cfg.Claude.APIKey, cfg.Claude.Model, claude.WithProxy(cfg.Claude.Proxy))
 	case "openai":
 		return openai.New(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
 	case "ollama":

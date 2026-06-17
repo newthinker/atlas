@@ -137,6 +137,8 @@ llm:
   claude:
     api_key: "${ANTHROPIC_API_KEY}"
     model: "claude-sonnet-4-20250514"
+    proxy: ""   # 可选：api.anthropic.com 不可直达时走代理（仲裁器用），
+                # 如 "http://127.0.0.1:7890"；空=直连。不可达时仲裁降级为直接路由原始信号
   openai:
     api_key: "${OPENAI_API_KEY}"
     model: "gpt-4o"
