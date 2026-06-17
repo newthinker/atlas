@@ -4,7 +4,9 @@
 
 ## 目标
 
-在 Telegram 信号汇总表格（digest）中，为**每条信号行**增加一列 `PE_PCT`，显示该标的「当前市盈率在其历史市盈率中的百分位」（0–100%）。
+在 Telegram 信号汇总表格（digest）中，为**每条信号行**增加一列 `PE%`，显示该标的「当前市盈率在其历史市盈率中的百分位」（0–100%）。
+
+> 表头文案为 `PE%`（用户指定）。语义是「PE 历史百分位」，非市盈率数值。
 
 ## 范围
 
@@ -41,9 +43,9 @@ analyzeSymbol:
 - 调用点（行 503）传入 `analysisCtx.Fundamental`。
 
 **2. `internal/notifier/telegram/telegram.go`**
-- `renderTable` 表头由 `["SYMBOL","NAME","CONF","PRICE"]` 改为 `["SYMBOL","NAME","CONF","PRICE","PE_PCT"]`。
+- `renderTable` 表头由 `["SYMBOL","NAME","CONF","PRICE"]` 改为 `["SYMBOL","NAME","CONF","PRICE","PE%"]`。
 - 新列取 `s.Metadata["pe_percentile_display"].(float64)`；存在则 `fmt.Sprintf("%.1f%%", v)`，否则空字符串。
-- 列顺序：**末列**（PE_PCT 成为最后一列，沿用「末列不补尾空格」规则）。
+- 列顺序：**末列**（`PE%` 成为最后一列，沿用「末列不补尾空格」规则）。
 - 既有列宽自适应与 CJK 对齐逻辑不变（width.go displayWidth/padRight 复用）。
 
 ### 展示键约定
@@ -61,7 +63,7 @@ analyzeSymbol:
 - `enrichSignalMetadata`：fundamental 有 PE（PEPercentile=62.3）→ 每条 signal 带 `pe_percentile_display=62.3`；PEPercentile=-1 → 不带键；fundamental=nil → 不带键；name 逻辑零回归。
 
 **telegram 包**
-- `renderTable`/`formatBatch`：信号带 `pe_percentile_display` → 输出含 `PE_PCT` 表头与对应 `xx.x%`，列对齐（含 CJK 行）；缺该键 → 该格为空、表格结构不破；末列无尾随补空格。
+- `renderTable`/`formatBatch`：信号带 `pe_percentile_display` → 输出含 `PE%` 表头与对应 `xx.x%`，列对齐（含 CJK 行）；缺该键 → 该格为空、表格结构不破；末列无尾随补空格。
 - 既有 `TestFormatBatch_*` / digest 测试零回归（仅表头/列数变化需同步更新断言）。
 
 **router 包**
