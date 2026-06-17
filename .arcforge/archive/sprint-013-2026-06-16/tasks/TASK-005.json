@@ -1,0 +1,43 @@
+{
+  "id": "TASK-005",
+  "title": "app PE 分位 lookback 可配 + inception 逻辑 (Go)",
+  "description": "按 phase-3 计划 Task 5。internal/app/app.go：删除 const valuationLookbackYears(:758)，改为 App 结构字段 valuationLookback int（New 默认 5）+ 导出 SetValuationLookback(years int)。buildFundamental 三处消费点改造：(1) EPS 重建窗口(:809) epsStart=end.AddDate(-a.valuationLookback,0,-90)，valuationLookback==0 时 epsStart=end.AddDate(-100,0,0)(inception floor)；(2) 新增方法 lixingerLookback() int：valuationLookback==0 返回 10(lixinger y10 上限) 否则透传；(3) 三处 FetchValuationPercentile(symbol, valuationLookbackYears)(:785/799/822) 改为 a.lixingerLookback()。字段+setter 取 int 不 import config，故本任务独立无依赖。Go 命令 GOTOOLCHAIN=local。严格 TDD：先 RED 再实现，既有默认 5 年用例零回归。",
+  "module": "app-valuation-lookback",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "App 有 valuationLookback 字段，New 后默认==5 (TestValuationLookback_DefaultIs5)；SetValuationLookback 可改",
+      "EPS 重建窗口 inception(0) 时 start 远早于 5 年前(floor≈100年)，非 0 时为 N 年+90天（TestEpsFetchStart 直接断言两分支）"
+    ],
+    "boundary": [
+      "lixingerLookback(): valuationLookback==0 → 10 (TestLixingerLookback_InceptionMapsToY10)；封顶 y10 实际发生在 lixinger 内部桶(>5→y10)",
+      "lixingerLookback(): 非 0 原样透传 (TestLixingerLookback_PassesThrough)",
+      "钉死 PE 窗口由 ohlcv 决定：固定 ohlcv 下 valuation.ReconstructPEPercentile 对『含早期 floor 的长 EPS』与『仅覆盖 ohlcv 窗口的紧凑 EPS』返回相同分位（TestReconstructPercentileUnaffectedByEPSOverfetch）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/app/ -v 全绿；删 const 后默认 5 行为零回归；RED→GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/app"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 2,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-2"
+}

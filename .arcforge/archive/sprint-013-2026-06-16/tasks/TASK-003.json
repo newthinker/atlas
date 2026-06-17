@@ -1,0 +1,48 @@
+{
+  "id": "TASK-003",
+  "title": "pe_percentile 支持 lookback_years:0 = since inception (Go)",
+  "description": "按 phase-3 计划 Task 3，与 Task 2 对称。改 internal/strategy/pe_percentile/strategy.go 三处：Init(:61) 校验放宽为 <0；RequiredData(:44) lookbackYears==0 时 PriceHistory=strategy.SinceInceptionBars；Analyze(:96) Reason 文案 lookbackYears==0 时 'PE at %.1f%% of full history (%s)' 否则保持 '%d-year history'，metadata lookback_years 写 0。PE 分位实际窗口由 app 侧决定（Task 5），本任务只让策略声明全史 PriceHistory 并接受 0。依赖 TASK-001。Go 命令 GOTOOLCHAIN=local。严格 TDD：先 RED 再实现，既有用例零回归。",
+  "module": "pe-percentile-inception",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/strategy/pe_percentile/strategy.go",
+    "internal/strategy/pe_percentile/strategy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "lookback_years=0 时 RequiredData().PriceHistory==strategy.SinceInceptionBars (TestRequiredData_SinceInception)",
+      "Analyze 在 lookback_years=0 时 Reason 含 'full history'（TestAnalyze_FullHistoryReasonText）"
+    ],
+    "boundary": [
+      "Init 接受 lookback_years=0 (TestInit_AcceptsZeroLookback)",
+      "Init 拒绝 lookback_years<0 (TestInit_RejectsNegativeLookback)",
+      "lookback_years>0 时 PriceHistory 仍为 N*252（零回归）",
+      "inception 模式(lookback=0)下样本 <252 bars 仍不出信号（minSampleBars 兜底，TestAnalyze_InceptionRespectsMinSample）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/strategy/pe_percentile/ -v 全绿零回归；RED→GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/strategy/pe_percentile"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

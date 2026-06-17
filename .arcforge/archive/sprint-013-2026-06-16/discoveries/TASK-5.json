@@ -1,0 +1,45 @@
+{
+  "task_id": "TASK-5",
+  "title": "app PE 分位 lookback 可配 + inception 逻辑",
+  "completed_at": "2026-06-16",
+  "key_findings": [
+    "const valuationLookbackYears=5 已删除，替换为 App.valuationLookback int 字段（New() 默认 5，行为与原始一致）",
+    "lixinger cvpos 只有 y3/y5/y10 三档，0（since inception）必须映射到 y10（最深档），这是外部 API 限制，本期不绕过",
+    "EPS 多取（inception floor 取 100 年前）不改 PE 分位结果：percentile 窗口由 ohlcv 决定，EPS 仅用于步进对齐，TestReconstructPercentileUnaffectedByEPSOverfetch 钉死此不变量",
+    "code-simplifier 将 EPS 窗口计算提取为 epsFetchStart(end time.Time) time.Time 命名方法，与 lixingerLookback() 并排，意图更清晰"
+  ],
+  "decisions": [
+    {
+      "decision": "lixingerLookback() 独立于 valuationLookback，0 映射 10，非 0 透传",
+      "rationale": "lixinger API 无全历史档，inception 语义在此路径只能近似为最长可用窗口 y10；独立方法使映射规则集中且可测"
+    },
+    {
+      "decision": "epsFetchStart 取 -100 年而非哨兵常量",
+      "rationale": "100 年足以覆盖任何实际上市日；yahoo/qlibpit FetchEPSHistory 按 start 参数过滤，超出上市日的请求会返回实际存在的数据，无副作用"
+    },
+    {
+      "decision": "提取 epsFetchStart helper（code-simplifier 建议，采纳）",
+      "rationale": "将固定窗口与 inception 两种逻辑封装在一处，buildFundamental default 分支调用点变为单行，注释说明过取无害的原因"
+    }
+  ],
+  "files_modified": [
+    "internal/app/app.go",
+    "internal/app/app_test.go"
+  ],
+  "interfaces_exposed": {
+    "SetValuationLookback": "func (a *App) SetValuationLookback(years int) — sets PE-percentile lookback in years; 0 = since inception. Must be called before Start.",
+    "lixingerLookback": "func (a *App) lixingerLookback() int — internal; maps 0→10, else passthrough. Used by Task 6 serve.go wiring.",
+    "epsFetchStart": "func (a *App) epsFetchStart(end time.Time) time.Time — internal; returns EPS fetch start date based on valuationLookback."
+  },
+  "verification": {
+    "test_command": "GOTOOLCHAIN=local go test ./internal/app/ -v",
+    "result": "PASS — all tests including 4 new Task 5 tests; zero regression on existing buildFundamental path tests",
+    "commit": "8a1961c feat(app): configurable valuation lookback with since-inception mode",
+    "new_tests": [
+      "TestValuationLookback_DefaultIs5",
+      "TestLixingerLookback_InceptionMapsToY10",
+      "TestLixingerLookback_PassesThrough",
+      "TestReconstructPercentileUnaffectedByEPSOverfetch"
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "TASK-007",
+  "title": "全史 dump + config 示例 + 文档 (Makefile/docs, best-effort)",
+  "description": "按 phase-3 计划 Task 7（无 Go 单测，数据/文档）。(1) Makefile 新增 `WAREHOUSE_FROM ?= 1970-01-01`（全史 dump 起点，不改默认 SIGNAL_FROM 避免影响 signal-eval），并在文档说明用 `export-ohlcv --from $(WAREHOUSE_FROM)` 重生成 qlib_csv 再 warehouse-dump。(2) configs/config.example.yaml：price_percentile/pe_percentile params 加注释示例 `lookback_years: 0  # 0=自上市/起始日全历史`；新增 `valuation: { lookback_years: 0 }` 块并注明 A 股个股+指数走 lixinger PE 分位上限 10 年。(3) scripts/qlib_warehouse/ADAPTERS.md 补「Lookback modes」节说明各路径 inception 能力与 lixinger y10 上限。依赖 TASK-006。手工验证：export-ohlcv --from 1970 的 AAPL CSV 首行远早于 2021、make warehouse-dump 成功、serve 配 lookback_years:0 启动正常且 /history 全史 bar 数远超 5 年。",
+  "module": "warehouse-fullhistory-docs",
+  "complexity": "simple",
+  "estimated_files": [
+    "Makefile",
+    "configs/config.example.yaml",
+    "scripts/qlib_warehouse/ADAPTERS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Makefile 含 WAREHOUSE_FROM ?= 1970-01-01；config.example.yaml 含 lookback_years:0 示例 + valuation 块 + lixinger 10Y 上限注释",
+      "ADAPTERS.md 含 Lookback modes 节说明各路径 inception 能力与 lixinger y10 上限"
+    ],
+    "boundary": [
+      "不改默认 SIGNAL_FROM（既有 signal-eval 数据包零影响）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "手工：export-ohlcv --from 1970 --market us 的 AAPL CSV 首行日期远早于 2021；make warehouse-dump 成功；serve 配 lookback_years:0 启动日志正常、/history 返回 bar 数远超 5 年(>1260)",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "scripts/qlib_warehouse"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "leader-manual"
+}

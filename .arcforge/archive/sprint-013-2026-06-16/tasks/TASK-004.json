@@ -1,0 +1,41 @@
+{
+  "id": "TASK-004",
+  "title": "ValuationConfig 配置结构 (Go)",
+  "description": "按 phase-3 计划 Task 4。internal/config/config.go 的 Config(:13-29) 新增字段 `Valuation ValuationConfig `mapstructure:\"valuation\"``；新增类型 `ValuationConfig struct { LookbackYears int `mapstructure:\"lookback_years\"` }`（0=since inception）。config.Defaults() 里 Valuation.LookbackYears=5（保持未配置时现状默认）。本任务独立无依赖。Go 命令 GOTOOLCHAIN=local。严格 TDD：先写 config_test 用例 RED 再实现。",
+  "module": "config-valuation",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Config 含 Valuation ValuationConfig 字段；ValuationConfig 有 LookbackYears int (mapstructure 'lookback_years')",
+      "YAML valuation.lookback_years:0 解析为 0 (TestLoad_ValuationConfig)"
+    ],
+    "boundary": [
+      "config.Defaults() 的 Valuation.LookbackYears==5 (TestDefaults_ValuationLookbackIs5)"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/config/ -v 全绿零回归；RED→GREEN",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/config"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

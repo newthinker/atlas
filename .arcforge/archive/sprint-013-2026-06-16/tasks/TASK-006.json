@@ -1,0 +1,50 @@
+{
+  "id": "TASK-006",
+  "title": "serve.go 装配 valuation lookback (Go)",
+  "description": "按 phase-3 计划 Task 6。cmd/atlas/serve.go：在构造 App、注册策略、SetValuationSources 附近加 `application.SetValuationLookback(cfg.Valuation.LookbackYears)`，确认在 application.Start 之前（QA S1 不变量）。需 TASK-004(cfg.Valuation)、TASK-005(SetValuationLookback)；TASK-002/003 让策略接受 0（集成点整体验证）。Go 命令 GOTOOLCHAIN=local。验证 go build ./... + 全量测试零回归。",
+  "module": "serve-valuation-wiring",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/serve.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "serve.go 调用 application.SetValuationLookback(cfg.Valuation.LookbackYears)，在 application.Start 之前",
+      "cfg.Valuation.LookbackYears 默认 5 时行为与现状一致（零回归）"
+    ],
+    "boundary": [
+      "配 valuation.lookback_years:0 时装配为 inception（经 App 字段，serve 不 panic）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过；go test ./internal/... ./cmd/... 全绿零回归（serve_test.go 既有用例）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}

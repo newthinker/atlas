@@ -1,0 +1,39 @@
+{
+  "id": "TASK-001",
+  "title": "strategy 包 SinceInceptionBars 哨兵常量 (Go)",
+  "description": "按 phase-3 计划 Task 1。在 internal/strategy/interface.go 新增导出常量 `const SinceInceptionBars = 100 * 252`（约100年交易日），供 price/pe 策略在 lookback_years==0 时作为 RequiredData().PriceHistory 返回值——使 historyWindowDays 折算出覆盖至 ~1926 的窗口，FetchHistory 按各标的上市日裁剪。附文档注释说明用途。Go 命令 GOTOOLCHAIN=local。严格 TDD：先写 interface_test.go(若无则建) TestSinceInceptionBarsIsLarge 断言 >= 100*252，RED(undefined) 再实现。",
+  "module": "strategy-inception-const",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/strategy/interface.go",
+    "internal/strategy/interface_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "internal/strategy 包导出 const SinceInceptionBars 且值 >= 100*252（TestSinceInceptionBarsIsLarge）",
+      "常量有文档注释说明其作为 lookback_years:0 时 PriceHistory 哨兵的用途"
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/strategy/ -v PASS；先 RED(undefined SinceInceptionBars) 后 GREEN；既有 strategy 包测试零回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/strategy"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "verifier": "test-agent-1"
+}
