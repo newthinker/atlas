@@ -103,35 +103,24 @@ atlas serve **常驻不重启**；备料由 cron 每晚跑一次，原子 rename
 监控周期自然只读到新库（SQLite 只读重连，无需重启 atlas）。
 
 **严格顺序**：先 `qlib-data-us`（产出/刷新 CSV），再 `warehouse-dump`（CSV→SQLite）。
+落盘脚本 **`scripts/ops/nightly-warehouse.sh`** 已实现这条流水线（仓库根目录自脚本位置推导，
+免硬编码绝对路径），各步骤：
+
+1. `make qlib-data-us` — 刷新美股 OHLCV CSV（+ `.bin` 数据包）
+2. （可选）刷新 PIT 基本面 CSV → `fundamentals_csv_us/`（脚本内注释处接入适配器，缺则自动跳过）
+3. `make warehouse-dump` — 重建 SQLite 仓库（原子写）
+4. 健康校验 — 库非空且 `last_date` 可解析，否则非零退出
+5. 校验通过 → `cp` 一份 `.bak`（回滚永远指向「上一份验证通过」的库，见 §9）
+
+手动跑一次：
 
 ```bash
-#!/usr/bin/env bash
-# scripts/ops/nightly-warehouse.sh —— 建议落盘为可被 cron 调用的脚本
-set -euo pipefail
-cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas
-
-# [1] 刷新美股 OHLCV CSV（+ .bin 数据包）
-make qlib-data-us
-
-# [2] （可选）刷新 PIT 基本面 CSV —— 见 ADAPTERS.md，缺则自动跳过
-#     <在此调用你的基本面适配器，产出 fundamentals_csv_us/>
-
-# [3] 重建 SQLite 仓库（原子）
-make warehouse-dump
-
-# [4] 健康校验：库非空且 last_date 不早于 N 天
-scripts/qlib_eval/.venv/bin/python - <<'PY'
-import sqlite3, sys, datetime
-c = sqlite3.connect("data/qlib_warehouse.db")
-n = c.execute("SELECT COUNT(*) FROM ohlcv").fetchone()[0]
-last = c.execute("SELECT MAX(last_date) FROM warehouse_meta").fetchone()[0]
-if n == 0 or last is None:
-    print("WAREHOUSE EMPTY", file=sys.stderr); sys.exit(1)
-age = (datetime.date.today() - datetime.date.fromisoformat(last)).days
-print(f"ok: {n} rows, last_date={last} (age {age}d)")
-sys.exit(0)
-PY
+bash scripts/ops/nightly-warehouse.sh
+# 末行期望：ok: N ohlcv rows, M fundamentals, last_date=YYYY-MM-DD (age Nd)
 ```
+
+> 可用环境变量覆盖默认：`QLIB_PY`、`WAREHOUSE_DB`（与 Makefile 同名变量对齐）。
+> 脚本是该流程的唯一真相源；本节只描述步骤，不再内联 shell，避免两处漂移。
 
 cron（美股收盘 16:00 ET 之后，取 23:30 ET；按服务器时区调整）：
 
