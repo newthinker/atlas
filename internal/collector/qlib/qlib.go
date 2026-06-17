@@ -21,12 +21,20 @@ import (
 // realtime for a symbol (must never return the qlib collector itself).
 type ExternalSelector func(symbol string) collector.Collector
 
+// DefaultConnMaxLifetime bounds how long a pooled SQLite connection lives.
+// The warehouse is atomically swapped (os.replace) by the nightly dump; an
+// open read-only connection keeps the old inode, so without recycling atlas
+// would serve stale data until restart. Recycling lets a fresh connection
+// pick up the rebuilt file within this window — no restart needed.
+const DefaultConnMaxLifetime = 10 * time.Minute
+
 // Collector reads historical OHLCV from the local SQLite warehouse.
 type Collector struct {
-	db           *sql.DB
-	maxStaleness time.Duration
-	now          func() time.Time
-	external     ExternalSelector
+	db              *sql.DB
+	maxStaleness    time.Duration
+	connMaxLifetime time.Duration
+	now             func() time.Time
+	external        ExternalSelector
 }
 
 // Option configures a Collector.
@@ -41,12 +49,24 @@ func WithClock(f func() time.Time) Option { return func(c *Collector) { c.now = 
 // WithExternal sets the tail-fill / realtime delegate selector.
 func WithExternal(s ExternalSelector) Option { return func(c *Collector) { c.external = s } }
 
+// WithConnMaxLifetime sets how long pooled connections live before recycling
+// (so a rebuilt warehouse is picked up without restarting atlas).
+func WithConnMaxLifetime(d time.Duration) Option { return func(c *Collector) { c.connMaxLifetime = d } }
+
 // New builds a warehouse collector over an already-open read-only DB.
 func New(db *sql.DB, opts ...Option) *Collector {
-	c := &Collector{db: db, maxStaleness: 7 * 24 * time.Hour, now: time.Now}
+	c := &Collector{
+		db:              db,
+		maxStaleness:    7 * 24 * time.Hour,
+		connMaxLifetime: DefaultConnMaxLifetime,
+		now:             time.Now,
+	}
 	for _, o := range opts {
 		o(c)
 	}
+	// Recycle connections so an atomically-swapped warehouse becomes visible
+	// without restarting the process. Shared *sql.DB → also covers qlibpit.
+	db.SetConnMaxLifetime(c.connMaxLifetime)
 	return c
 }
 
@@ -59,9 +79,9 @@ func (c *Collector) SupportedMarkets() []core.Market {
 }
 
 // Init/Start/Stop are no-ops; the collector is constructed via New.
-func (c *Collector) Init(cfg collector.Config) error      { return nil }
-func (c *Collector) Start(_ context.Context) error        { return nil }
-func (c *Collector) Stop() error                          { return nil }
+func (c *Collector) Init(cfg collector.Config) error { return nil }
+func (c *Collector) Start(_ context.Context) error   { return nil }
+func (c *Collector) Stop() error                     { return nil }
 
 // Covers reports whether the warehouse has usable data for symbol. It uses the
 // same predicate as lastDate (row exists AND last_date is parseable) so the

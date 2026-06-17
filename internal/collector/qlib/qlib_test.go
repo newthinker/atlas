@@ -14,6 +14,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,56 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/core"
 )
+
+// writeWarehouseFile creates a minimal file-backed warehouse containing one
+// symbol, used to test that connections recycle after an os.Rename swap.
+func writeWarehouseFile(t *testing.T, path, symbol string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(
+		`CREATE TABLE warehouse_meta(symbol TEXT PRIMARY KEY,market TEXT,source TEXT,last_date TEXT,dumped_at TEXT);
+		 INSERT INTO warehouse_meta VALUES(?,'US','yahoo','2024-01-02','x');`, symbol); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnRecyclesAfterWarehouseReplaced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wh.db")
+	writeWarehouseFile(t, path, "AAA")
+
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := New(db, WithConnMaxLifetime(50*time.Millisecond))
+
+	if !c.Covers("AAA") {
+		t.Fatal("want AAA covered before replace")
+	}
+
+	// Atomically replace the warehouse with one containing a different symbol.
+	tmp := path + ".new"
+	writeWarehouseFile(t, tmp, "BBB")
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+
+	// After the conn lifetime elapses, the pooled connection (still bound to the
+	// old inode) must be retired and a fresh one opened against the new file.
+	time.Sleep(150 * time.Millisecond)
+	if c.Covers("AAA") {
+		t.Error("after recycle, stale AAA should no longer be visible")
+	}
+	if !c.Covers("BBB") {
+		t.Error("after recycle, new BBB should be visible without restart")
+	}
+}
 
 // newTestDB builds an in-memory warehouse with the given ohlcv rows + meta.
 func newTestDB(t *testing.T) *sql.DB {

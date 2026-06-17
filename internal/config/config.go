@@ -37,10 +37,15 @@ type ValuationConfig struct {
 }
 
 // QlibConfig configures the local qlib SQLite data warehouse collector.
+//
+// ConnMaxLifetime recycles pooled read-only connections so a rebuilt warehouse
+// (atomic os.replace) is picked up without restarting atlas. <=0 uses the
+// collector default (10m). Accepts durations like "30s", "5m".
 type QlibConfig struct {
-	Enabled          bool   `mapstructure:"enabled"`
-	DBPath           string `mapstructure:"db_path"`
-	MaxStalenessDays int    `mapstructure:"max_staleness_days"`
+	Enabled          bool          `mapstructure:"enabled"`
+	DBPath           string        `mapstructure:"db_path"`
+	MaxStalenessDays int           `mapstructure:"max_staleness_days"`
+	ConnMaxLifetime  time.Duration `mapstructure:"conn_max_lifetime"`
 }
 
 // AnalysisConfig holds analysis pipeline settings.

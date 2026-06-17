@@ -46,8 +46,16 @@ func wireQlibWarehouse(cfg config.QlibConfig, reg *collector.Registry, openFn fu
 		stale = 7 * 24 * time.Hour
 	}
 
+	// Recycle pooled connections so a rebuilt warehouse is picked up without
+	// restarting atlas; <=0 falls back to the collector default.
+	connLifetime := cfg.ConnMaxLifetime
+	if connLifetime <= 0 {
+		connLifetime = qlib.DefaultConnMaxLifetime
+	}
+
 	reg.Register(qlib.New(db,
 		qlib.WithMaxStaleness(stale),
+		qlib.WithConnMaxLifetime(connLifetime),
 		qlib.WithExternal(func(s string) collector.Collector {
 			return collector.SelectExternalForSymbol(reg, s)
 		}),
@@ -56,6 +64,7 @@ func wireQlibWarehouse(cfg config.QlibConfig, reg *collector.Registry, openFn fu
 	log.Info("qlib warehouse collector registered",
 		zap.String("db_path", cfg.DBPath),
 		zap.Duration("max_staleness", stale),
+		zap.Duration("conn_max_lifetime", connLifetime),
 	)
 	return db, true
 }

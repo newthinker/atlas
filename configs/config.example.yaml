@@ -78,6 +78,8 @@ qlib:
   enabled: false                    # true 才挂仓库；false/缺省 → 纯外部 API
   db_path: "data/qlib_warehouse.db" # 与 Makefile WAREHOUSE_DB 一致
   max_staleness_days: 7             # last_date 超过该天数仅记 warning，仍服务（默认 7）
+  conn_max_lifetime: 10m            # 只读连接回收周期：每日重建（os.replace）后无需重启
+                                    # atlas 即可读到新库，最多滞后该时长（<=0 用默认 10m）
 
 # Signal routing
 router:
