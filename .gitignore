@@ -56,3 +56,11 @@ signals.csv
 __pycache__/
 qlib_csv/
 qlib_csv_hk/
+qlib_csv_us/
+# 数据产物：本地 SQLite 仓库、PIT 基本面 CSV、信号导出（均可由管线重建，不入库）
+data/
+*.db
+fundamentals_csv/
+fundamentals_csv_us/
+signals_us.csv
+signals_hk.csv
