@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.warehouse-dump</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/scripts/ops/nightly-warehouse.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <!-- nightly 调 `make qlib-data-us`（含 export-ohlcv，-o build 跳过 go build），需 make/go 在 PATH。 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 每周一至周五 23:30 触发（美股收盘后；按需调时区/时刻）。 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+
+  <!-- 定时任务：登录时不立即跑，只按日历触发。 -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/warehouse.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/warehouse.err.log</string>
+</dict>
+</plist>

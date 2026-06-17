@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.serve</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/bin/atlas</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 常驻：开机/登录即起，崩溃自动拉起，最短重启间隔 10s 防抖。 -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/atlas.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/atlas.err.log</string>
+</dict>
+</plist>
