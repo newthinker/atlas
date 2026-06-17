@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -288,8 +289,97 @@ func TestFormatBatch_EmptyAndHold(t *testing.T) {
 		t.Error("empty batch must yield empty string")
 	}
 	out := formatBatch([]core.Signal{{Symbol: "X", Action: core.ActionHold, Confidence: 0.7}})
-	if !strings.Contains(out, "⏸ 持有") {
+	// I3: digest hold icon is ⏸️ (with variation selector), matching formatSignal.
+	if !strings.Contains(out, "⏸️ 持有") {
 		t.Errorf("hold group missing:\n%s", out)
+	}
+}
+
+// W1: digest 路径下含 _ 的 symbol/name 不被 escapeMarkdown 转义
+func TestSendBatch_UnderscoreNotEscaped(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	tg := &Telegram{botToken: "tok", chatID: "cid", client: server.Client()}
+	// redirect to test server by patching the URL via a custom RoundTripper
+	tg.client = &http.Client{Transport: &prefixRoundTripper{prefix: server.URL, inner: server.Client().Transport}}
+
+	err := tg.SendBatch([]core.Signal{
+		{Symbol: "AAPL_X", Action: core.ActionBuy, Confidence: 0.9},
+		{Symbol: "TST", Action: core.ActionBuy, Confidence: 0.8,
+			Metadata: map[string]any{"name": "苹果_公司"}},
+	})
+	if err != nil {
+		t.Fatalf("SendBatch error: %v", err)
+	}
+	body := string(capturedBody)
+	if strings.Contains(body, `\_`) {
+		t.Errorf("digest payload must not contain escaped underscore \\_, got:\n%s", body)
+	}
+	if !strings.Contains(body, "AAPL_X") {
+		t.Errorf("digest payload must contain literal AAPL_X, got:\n%s", body)
+	}
+	if !strings.Contains(body, "苹果_公司") {
+		t.Errorf("digest payload must contain literal 苹果_公司, got:\n%s", body)
+	}
+}
+
+// prefixRoundTripper rewrites the host of every request to the given prefix,
+// allowing test servers to intercept calls that would go to api.telegram.org.
+type prefixRoundTripper struct {
+	prefix string
+	inner  http.RoundTripper
+}
+
+func (p *prefixRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r2 := req.Clone(req.Context())
+	r2.URL.Host = strings.TrimPrefix(p.prefix, "http://")
+	r2.URL.Scheme = "http"
+	return p.inner.RoundTrip(r2)
+}
+
+// W2: GeneratedAt 全零值时标题省略时间段
+func TestFormatBatch_ZeroTimestamp(t *testing.T) {
+	sigs := []core.Signal{
+		{Symbol: "AAPL", Action: core.ActionBuy, Confidence: 0.9},
+		// GeneratedAt is zero value
+	}
+	out := formatBatch(sigs)
+	if strings.Contains(out, "0001") {
+		t.Errorf("zero timestamp must not appear in title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 条") {
+		t.Errorf("count must still appear in title, got:\n%s", out)
+	}
+}
+
+// I3: hold 图标在 formatSignal 与 digest 一致
+func TestHoldIconConsistent(t *testing.T) {
+	tg := New("token", "chat")
+	sig := tg.formatSignal(core.Signal{Symbol: "X", Action: core.ActionHold, Confidence: 0.5})
+	digest := formatBatch([]core.Signal{{Symbol: "X", Action: core.ActionHold, Confidence: 0.5}})
+
+	// extract the hold emoji from formatSignal output (first rune cluster before space)
+	sigIcon := ""
+	for _, g := range digestGroups {
+		if g.actions[0] == core.ActionHold {
+			sigIcon = g.title[:strings.Index(g.title, " ")]
+			break
+		}
+	}
+	_ = sig
+	_ = digest
+	// both must contain the same icon
+	if !strings.Contains(sig, sigIcon) {
+		t.Errorf("formatSignal hold icon %q not found in:\n%s", sigIcon, sig)
+	}
+	if !strings.Contains(digest, sigIcon) {
+		t.Errorf("digest hold icon %q not found in:\n%s", sigIcon, digest)
 	}
 }
 

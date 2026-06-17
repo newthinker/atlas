@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -100,7 +101,9 @@ func (t *Telegram) SendBatch(signals []core.Signal) error {
 	if msg == "" {
 		return nil
 	}
-	return t.sendMessage(msg)
+	// W1: digest content lives inside ``` code blocks; underscores must render
+	// literally. Skip markdown escaping for this path.
+	return t.sendRaw(msg)
 }
 
 // batchGroup is one action section of the digest table.
@@ -110,10 +113,11 @@ type batchGroup struct {
 }
 
 // digestGroups defines section order: buy, sell, then hold.
+// I3: hold icon uses ⏸️ (with variation selector) to match formatSignal.
 var digestGroups = []batchGroup{
 	{"📈 买入", []core.Action{core.ActionStrongBuy, core.ActionBuy}},
 	{"📉 卖出", []core.Action{core.ActionStrongSell, core.ActionSell}},
-	{"⏸ 持有", []core.Action{core.ActionHold}},
+	{"⏸️ 持有", []core.Action{core.ActionHold}},
 }
 
 // formatBatch renders signals as a Telegram message: a title line plus one
@@ -123,6 +127,7 @@ func formatBatch(signals []core.Signal) string {
 	if len(signals) == 0 {
 		return ""
 	}
+	// W2: omit timestamp when all GeneratedAt are zero to avoid "0001-01-01".
 	var latest time.Time
 	for _, s := range signals {
 		if s.GeneratedAt.After(latest) {
@@ -130,17 +135,19 @@ func formatBatch(signals []core.Signal) string {
 		}
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📊 Atlas 信号汇总 · %s · %d 条\n",
-		latest.Format("2006-01-02 15:04"), len(signals)))
+	if latest.IsZero() {
+		sb.WriteString(fmt.Sprintf("📊 Atlas 信号汇总 · %d 条\n", len(signals)))
+	} else {
+		sb.WriteString(fmt.Sprintf("📊 Atlas 信号汇总 · %s · %d 条\n",
+			latest.Format("2006-01-02 15:04"), len(signals)))
+	}
 
 	for _, g := range digestGroups {
 		rows := make([]core.Signal, 0)
 		for _, s := range signals {
-			for _, a := range g.actions {
-				if s.Action == a {
-					rows = append(rows, s)
-					break
-				}
+			// I1: use slices.Contains instead of inner loop.
+			if slices.Contains(g.actions, s.Action) {
+				rows = append(rows, s)
 			}
 		}
 		if len(rows) == 0 {
@@ -255,11 +262,17 @@ func (t *Telegram) formatSignal(signal core.Signal) string {
 	return sb.String()
 }
 
+// sendMessage escapes Markdown special characters before sending. Used by the
+// per-signal Send path where formatSignal output contains *bold* markers that
+// require _ to be escaped.
 func (t *Telegram) sendMessage(text string) error {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
+	return t.sendRaw(escapeMarkdown(text))
+}
 
-	// Escape special characters for Markdown
-	text = escapeMarkdown(text)
+// sendRaw sends text as-is (no escaping). Used by SendBatch whose digest
+// content lives inside ``` code blocks where _ must render literally.
+func (t *Telegram) sendRaw(text string) error {
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
 
 	payload := map[string]any{
 		"chat_id":    t.chatID,
@@ -272,7 +285,7 @@ func (t *Telegram) sendMessage(text string) error {
 		return fmt.Errorf("telegram: failed to marshal payload: %w", err)
 	}
 
-	resp, err := t.client.Post(url, "application/json", bytes.NewReader(body))
+	resp, err := t.client.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("telegram: failed to send message: %w", err)
 	}
