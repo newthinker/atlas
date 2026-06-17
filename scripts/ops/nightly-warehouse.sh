@@ -25,8 +25,11 @@ log() { echo "[$(ts)] $*"; }
 log "nightly-warehouse start (repo=${REPO_ROOT})"
 
 # [1] 刷新美股 OHLCV CSV（+ qlib .bin 数据包）。
-log "step 1: make qlib-data-us"
-make qlib-data-us
+#     runtime 部署目录不含 Go 源码：用 `-o build` 让 make 视 build 前置为「已最新」，
+#     跳过 go build，直接复用已部署的 ./bin/atlas。开发树里手动 `make qlib-data-us`
+#     仍会照常重建（开发树有源码，build 正常执行）。
+log "step 1: make -o build qlib-data-us (skip rebuild, reuse deployed binary)"
+make -o build qlib-data-us
 
 # [2] （可选）刷新 PIT 基本面 CSV → fundamentals_csv_us/。
 #     接入适配器后取消注释；缺该目录时 warehouse-dump 自动跳过基本面（零破坏）。
