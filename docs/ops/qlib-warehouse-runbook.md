@@ -176,6 +176,19 @@ make signal-eval-us
 
 失败仅意味着少了一份离线报告，**对线上 atlas 零影响**。
 
+## 时序 IC 评估（方向②前置）
+
+`make baseline-scores` 对 atlas_cn 算反转 baseline → `make signal-ic SCORES=baseline_scores.csv`
+产出 `reports/signal-ic-YYYYMMDD.md`（逐标的时序 IC / ICIR / t-stat）。
+
+方向② sidecar 上线后，让其输出同格式 `scores.csv`，`make signal-ic SCORES=scores.csv`
+即给出该 ML 模型的预测力 = 验收抓手。
+
+⚠ 读数告诫：
+- t-stat 用重叠前向收益，**偏乐观**；以并列的 t_stat_nonoverlap 为审慎旁证。
+- watchlist 仅十来个标的，跨标的 ICIR/广度是小样本，作参考非硬门槛。
+- oracle baseline（make baseline-scores 后手工构造）应得 IC≈1，可随时自检管线未坏。
+
 ## 7. atlas 运行期行为（理解降级）
 
 | 场景 | FetchHistory（OHLCV） | FetchEPSHistory（PE 分位） |

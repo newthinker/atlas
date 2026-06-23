@@ -1,0 +1,25 @@
+{
+  "task": "TASK-002",
+  "owner": "dev-agent-1",
+  "commit": "a9efe85",
+  "key_findings": [
+    "T1 删了顶层 import math，本任务用 math.sqrt → 已加回顶层 import math（守门测试仍绿，无 qlib）。",
+    "常数序列 Spearman/Pearson corr 为 NaN（scipy ConstantInputWarning）→ DoD6 真实触发路径，实现用 pd.notna(ic) 守护返回 None 不抛。warning 为预期非失败。",
+    "非重叠采样口径 = merged.sort_values('date').iloc[::h]（每 h 行一点），n_no=子集长度。h=3/n=10 → idx 0,3,6,9（n_no=4）手工验算钉死。",
+    "venv 无 pytest-cov/coverage → 覆盖率数字无法机器产出（降级）；改按分支论证全分支被测。"
+  ],
+  "decisions": [
+    {"decision": "照搬 plan Task2 实现", "rationale": "唯一权威依据，签名/返回结构与下游 Task3/6 约定一致。"},
+    {"decision": "code-simplifier 采纳：抽局部 helper t_stat_of(sample) 消重叠/非重叠重复逻辑", "rationale": "行为等价（len>=2 门 + pd.notna 保持），可读性升；代价 merged.corr 算两次开销可忽略。"},
+    {"decision": "测试文件不简化", "rationale": "含 DoD↔测试映射注释与手工验算，规格文档价值。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/ic.py", "scripts/qlib_eval/tests/test_ic.py"],
+  "interfaces_exposed": [
+    "instrument_ic(scores, fwd, symbol, h, method='spearman', min_periods=60) -> dict|None  # {ic,n_periods,t_stat,t_stat_nonoverlap}",
+    "有效配对<min_periods→None整体；ic NaN→ic/t_stat=None(n_periods仍给)；非重叠样本<2→t_stat_nonoverlap=None"
+  ],
+  "verification": {
+    "task_tests": "pytest test_ic.py -v → 17 passed, 1 warning（9 T1 + 8 新增；warning=DoD6 常数序列预期）",
+    "regression": "pytest tests/ -q → 85 passed, 1 warning"
+  }
+}

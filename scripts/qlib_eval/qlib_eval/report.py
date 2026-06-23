@@ -119,3 +119,112 @@ def render_report(agg: pd.DataFrame, stats: dict, meta: dict) -> str:
             parts.append("")
 
     return "\n".join(parts).rstrip() + "\n"
+
+
+SCORE_COLUMNS = ["date", "symbol", "score"]
+
+
+def read_scores(path: str) -> pd.DataFrame:
+    """读取分数面板 CSV（长格式 date,symbol,score），严格校验 schema。
+
+    - 表头必须恰为 SCORE_COLUMNS；
+    - date→Timestamp、score→float，坏行 ValueError 带 1-based 物理行号；
+    - utf-8-sig 容忍 BOM（与 read_signals 一致）。
+
+    已知约束：重复 (date,symbol) 不去重、不报错，全部保留（按设计计划）。
+    """
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration as e:
+            raise ValueError("scores CSV is empty") from e
+        if header != SCORE_COLUMNS:
+            raise ValueError(
+                f"scores CSV header mismatch: expected {SCORE_COLUMNS}, got {header}"
+            )
+        rows = []
+        for lineno, raw in enumerate(reader, start=2):
+            if not raw:
+                continue
+            if len(raw) != len(SCORE_COLUMNS):
+                raise ValueError(
+                    f"scores CSV line {lineno}: expected {len(SCORE_COLUMNS)} "
+                    f"columns, got {len(raw)}"
+                )
+            rec = dict(zip(SCORE_COLUMNS, raw))
+            try:
+                rec["date"] = pd.Timestamp(rec["date"])
+                rec["score"] = float(rec["score"])
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"scores CSV line {lineno}: {e}") from e
+            rows.append(rec)
+    return pd.DataFrame(rows, columns=SCORE_COLUMNS)
+
+
+def _ic_instrument_table(by: pd.DataFrame) -> str:
+    cols = ["symbol", "ic", "n_periods", "t_stat", "t_stat_nonoverlap"]
+    lines = ["| " + " | ".join(cols) + " |",
+             "|" + "|".join(["---"] * len(cols)) + "|"]
+    def cell(value, spec: str) -> str:
+        """NaN/None → 占位符 '-'，否则按 spec 格式化（列经 pandas 转 float64，None 变 nan）。"""
+        return "-" if pd.isna(value) else format(value, spec)
+
+    for _, r in by.iterrows():
+        lines.append(
+            "| {sym} | {ic} | {n} | {t} | {tno} |".format(
+                sym=r["symbol"], ic=cell(r["ic"], ".4f"), n=int(r["n_periods"]),
+                t=cell(r["t_stat"], ".3f"), tno=cell(r["t_stat_nonoverlap"], ".3f"),
+            )
+        )
+    return "\n".join(lines)
+
+
+def render_ic_report(per_horizon: dict, meta: dict) -> str:
+    """渲染时序 IC 报告 markdown。
+
+    per_horizon: {h: {"by_instrument": df, "summary": dict}}。
+    meta: {generated_at, n_scores, method, qlib_dir}。
+    """
+    parts = [
+        "# 信号时序 IC 评估报告",
+        "",
+        f"- 生成时间: {meta.get('generated_at', '')}",
+        f"- 分数样本数: {meta.get('n_scores', '')}",
+        f"- 相关方法: {meta.get('method', 'spearman')}（Rank IC=spearman / IC=pearson）",
+        f"- qlib 数据目录: {meta.get('qlib_dir', '')}",
+        "",
+        "## 评估口径",
+        "- 时序 IC（逐标的）: 单标的 score_t 与其前向收益的时间序列相关。",
+        "- 入场: 信号次日开盘（next-open，规避前视）；horizon 后收盘出场。",
+        "- horizon: 5 / 20 / 60 个交易日。",
+        "- ⚠ t-stat 用重叠前向收益，**偏乐观**；t_stat_nonoverlap 为非重叠采样旁证。",
+        "",
+    ]
+    if not per_horizon:
+        parts.append("## 结果\n（无可评估分数）")
+        return "\n".join(parts).rstrip() + "\n"
+
+    def fmt(value, spec: str) -> str:
+        """None → 占位符 '-'，否则按 spec 格式化。"""
+        return "-" if value is None else format(value, spec)
+
+    for h in sorted(per_horizon):
+        s = per_horizon[h]["summary"]
+        parts.append(f"## horizon {h}")
+        if s["n_instruments"] < 2:
+            parts.append(
+                f"- ⚠ 标的不足（n={s['n_instruments']}），跨标的一致性(ICIR)不可计算。"
+            )
+        icir = fmt(s["icir"], ".3f")
+        mean_ic = fmt(s["mean_ic"], ".4f")
+        med_ic = fmt(s["median_ic"], ".4f")
+        breadth = fmt(s["positive_breadth"], ".2%")
+        parts.append(
+            f"- mean IC: {mean_ic} | median IC: {med_ic} | **ICIR**: {icir} | "
+            f"正 IC 广度: {breadth} | 标的数: {s['n_instruments']}"
+        )
+        parts.append("")
+        parts.append(_ic_instrument_table(per_horizon[h]["by_instrument"]))
+        parts.append("")
+    return "\n".join(parts).rstrip() + "\n"

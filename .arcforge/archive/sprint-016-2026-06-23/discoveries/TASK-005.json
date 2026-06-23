@@ -1,0 +1,24 @@
+{
+  "task": "TASK-005",
+  "owner": "dev-agent-2",
+  "commit": "d43354a",
+  "key_findings": [
+    "baseline.py 顶层零 qlib：reversal_scores/oracle_scores 纯 pandas；load_prices 函数体内惰性 import QlibPriceSource（其内部再惰性 import qlib），import 链全程不触发 qlib。",
+    "强化守门在全量套件语境下也通过：依次 import baseline/ic/report 后 qlib 不在 sys.modules，证明无间接 import 链泄漏。",
+    "并行期回归曾见 1 失败（dev-agent-1 在途 RED 的 test_watchlist_summary_zero_std_icir_none），T3 提交后已消除（Leader 复核 97 passed）。"
+  ],
+  "decisions": [
+    {"decision": "DoD3 用 monkeypatch 注入 fake source（history 对 BAD symbol 抛异常）", "rationale": "既验证吞异常不中断、又验证未触发真实 qlib import，规避 pytest 无 qlib 环境。"},
+    {"decision": "code-simplifier 采纳：oracle_scores 去掉 rename 后冗余 [[date,symbol,score]] 列重选(no-op)", "rationale": "rename 前已切片；其余保持（reversal 显式行累积更易读，.copy() 防 SettingWithCopy）。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/baseline.py", "scripts/qlib_eval/tests/test_baseline.py"],
+  "interfaces_exposed": [
+    "reversal_scores(prices, lookback=5) -> DataFrame[date,symbol,score]  # score=-(close_t/close_{t-lookback}-1)",
+    "oracle_scores(fwd, horizon) -> DataFrame[date,symbol,score]  # score=ret@horizon",
+    "load_prices(qlib_dir, symbols, start, end, region='cn') -> dict[str,DataFrame]  # 惰性 import QlibPriceSource，单 symbol 失败不中断"
+  ],
+  "verification": {
+    "task_tests": "pytest test_baseline.py -v → 4 passed",
+    "regression": "并行期 96 passed/1 在途 RED；T3 落地后 Leader 复核 97 passed"
+  }
+}

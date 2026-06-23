@@ -1,0 +1,25 @@
+{
+  "task": "TASK-006",
+  "owner": "dev-agent-1",
+  "commit": "99ad940",
+  "key_findings": [
+    "conftest.py 已把 scripts/qlib_eval 注入 sys.path，测试中 from ic_evaluate/evaluate/qlib_eval.ic import 均可解析。",
+    "evaluate.check_qlib_dir = os.path.isdir(expanduser(...))，传不存在 --qlib-dir 即 False 且不触发 qlib → DoD4(exit1) 可真实测试无需 monkeypatch。",
+    "ic_evaluate.py 仅在 main() 内惰性 from qlib_eval.prices import QlibPriceSource；隔离运行守门测试确认 qlib not in sys.modules。"
+  ],
+  "decisions": [
+    {"decision": "补 4 个测试覆盖 DoD2/3/4/5（plan 仅给 collect_ic 一测）", "rationale": "DoD 逐条须有对应测试。"},
+    {"decision": "缺目录测试用真实 bogus 路径而非 monkeypatch", "rationale": "check_qlib_dir 纯 os.path.isdir，真实路径更贴近行为且不触 qlib。"},
+    {"decision": "空面板测试用 monkeypatch check_qlib_dir→True + 仅表头 CSV", "rationale": "空分支在目录检查之后，scores.empty → 写空报告 return 0 不触 QlibPriceSource。"},
+    {"decision": "code-simplifier 无需修改", "rationale": "两文件已简洁；相邻测试字面量重复按测试自包含原则保留。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/ic_evaluate.py", "scripts/qlib_eval/tests/test_ic_report.py"],
+  "interfaces_exposed": [
+    "collect_ic(scores, source, horizons=HORIZONS, method='spearman', min_periods=60) -> (per_horizon, stats)  # per_horizon[h]={by_instrument:df,summary:dict}; stats={n_symbols,data_gaps}; source 仅需 history(symbol)->df",
+    "main(argv=None) -> int  # 缺目录 stderr get_data_hint 且 return 1；空面板写空报告 return 0；正常路径惰性 QlibPriceSource 取价后 return 0"
+  ],
+  "verification": {
+    "task_tests": "pytest test_ic_report.py -v → 16 passed（11 T4 + 5 新增）",
+    "regression": "pytest tests/ → 113 passed, 1 warning"
+  }
+}

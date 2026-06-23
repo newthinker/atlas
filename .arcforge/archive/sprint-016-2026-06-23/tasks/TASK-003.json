@@ -1,0 +1,60 @@
+{
+  "id": "TASK-003",
+  "title": "ic.py — 汇总（ic_summary_by_instrument + watchlist_summary）",
+  "description": "在 ic.py 追加 ic_summary_by_instrument(scores, fwd, h, method, min_periods) → DataFrame[symbol,ic,n_periods,t_stat,t_stat_nonoverlap]（剔除样本不足标的，按 symbol 排序）；watchlist_summary(per_inst) → dict{mean_ic,median_ic,icir,positive_breadth,n_instruments}，icir=mean/std(ddof=1)，n_instruments<2 → icir=None，n=0 → 全 None。TDD：先写失败测试再实现。",
+  "module": "qlib_eval/ic",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/ic.py",
+    "scripts/qlib_eval/tests/test_ic.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "ic_summary_by_instrument 每标的一行，列恰为 [symbol,ic,n_periods,t_stat,t_stat_nonoverlap]，按 symbol 排序（test_summary_by_instrument_drops_thin）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "watchlist_summary 聚合 mean_ic/median_ic/positive_breadth/n_instruments，数值正确（test_watchlist_summary_aggregates：mean=0,median=0.10,breadth=2/3,n=3）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "样本不足（n_periods<min_periods）标的被剔除（BBB 仅 2<3 不出现在输出）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "n_instruments<2 → icir=None；ics 为空 → 全字段 None、n_instruments=0",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "icir = ics.mean()/ics.std(ddof=1)；std=0 或 NaN 时 icir=None 不抛",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "a3e5269",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "scripts/qlib_eval/qlib_eval/ic.py",
+    "scripts/qlib_eval/tests/test_ic.py"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

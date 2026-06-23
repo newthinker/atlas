@@ -1,0 +1,69 @@
+{
+  "id": "TASK-002",
+  "title": "ic.py — instrument_ic（单标的时序 IC + t-stat）",
+  "description": "在 ic.py 追加 instrument_ic(scores, fwd, symbol, h, method='spearman', min_periods=60)。按 date 内连接该 symbol 的 (date,score) 与 (date,ret@horizon=h)，dropna 后：n=有效配对数（<min_periods → None）；ic=两序列相关；t_stat=ic*sqrt(n)；t_stat_nonoverlap=非重叠采样（按 date 排序每 h 行取一点）的 ic*sqrt(n_no)，非重叠样本<2 → None。返回 dict{ic,n_periods,t_stat,t_stat_nonoverlap}。TDD：先写失败测试再实现。",
+  "module": "qlib_eval/ic",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/ic.py",
+    "scripts/qlib_eval/tests/test_ic.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "分数与前向收益完全同序 → Spearman IC=1.0，n_periods=5，t_stat=sqrt(5)（test_instrument_ic_perfect_positive）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "符号正确性（强化 gap2）：完全反相关序列 → IC≈-1.0；常数/随机序列 → IC≈0，钉死符号不漂移",
+        "verify_by": "test"
+      },
+      {
+        "desc": "非重叠 t-stat 区分（强化 gap3，重叠虚高校正）：用足够长重叠样本，断言 t_stat_nonoverlap 取每 h 行采样、n_no 步长正确，且与重叠 t_stat 数值不同",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "有效配对数 < min_periods → 返回 None（test_instrument_ic_below_min_periods_returns_none）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "非重叠样本 < 2 → t_stat_nonoverlap 为 None",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "ic 计算为 NaN 时 ic/t_stat 字段返回 None 而非抛异常",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "method 'pearson'(IC) 与 'spearman'(Rank IC) 两条路径都被实测：在非线性单调序列上二者结果不同",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "a9efe85",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "scripts/qlib_eval/qlib_eval/ic.py",
+    "scripts/qlib_eval/tests/test_ic.py"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

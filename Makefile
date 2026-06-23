@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all
+.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all signal-ic baseline-scores
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -48,6 +48,23 @@ export-signals: build
 signal-eval: export-signals
 	$(QLIB_PY) scripts/qlib_eval/evaluate.py --signals signals.csv \
 	  --qlib-dir $(QLIB_DIR) --benchmark $(SIGNAL_BENCHMARK) --out $(SIGNAL_OUT)
+
+# 时序 IC 评估：消费分数面板 CSV（date,symbol,score）→ 逐标的时序 IC 报告。
+# 分数面板来源：baseline-scores（验证）或方向② sidecar（生产）。
+SCORES ?= scores.csv
+signal-ic:
+	$(QLIB_PY) scripts/qlib_eval/ic_evaluate.py --scores $(SCORES) \
+	  --qlib-dir $(QLIB_DATA_DIR) --out $(SIGNAL_OUT)
+
+# 生成 reversal baseline 分数面板（自验证 harness 用，无需 ML）。
+# 直接对 atlas_cn bundle 算 -过去5日收益 当 score，写 baseline_scores.csv。
+baseline-scores:
+	$(QLIB_PY) -c "import os, sys; sys.path.insert(0,'scripts/qlib_eval'); \
+	from qlib_eval.baseline import load_prices, reversal_scores; \
+	syms='$(SIGNAL_SYMBOLS)'.split(','); \
+	pr=load_prices(os.path.expanduser('$(QLIB_DATA_DIR)'), syms, '$(SIGNAL_FROM)', '$(SIGNAL_TO)'); \
+	reversal_scores(pr).to_csv('baseline_scores.csv', index=False)"
+	@echo 'baseline_scores.csv 生成完成；运行: make signal-ic SCORES=baseline_scores.csv'
 
 # 港股事件研究：港股集信号 → 对 atlas_hk 评估，基准恒生指数 ^HSI。
 # 港股行情走 yahoo；离线仅 price_percentile/ma_crossover 可回放。

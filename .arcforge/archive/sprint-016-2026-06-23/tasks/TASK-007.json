@@ -1,0 +1,67 @@
+{
+  "id": "TASK-007",
+  "title": "Makefile target + runbook 文档",
+  "description": "改 Makefile：.PHONY 追加 signal-ic baseline-scores；signal-eval target 之后插入 signal-ic（消费分数面板 CSV 调 ic_evaluate.py）与 baseline-scores（对 atlas_cn 算 reversal baseline 写 baseline_scores.csv）。改 docs/ops/qlib-warehouse-runbook.md：方向①评估章节后追加『时序 IC 评估（方向②前置）』章节 + 重叠收益 t-stat 读数告诫。验证 make -n dry-run 与 grep 章节落地。",
+  "module": "build/docs",
+  "complexity": "simple",
+  "estimated_files": [
+    "Makefile",
+    "docs/ops/qlib-warehouse-runbook.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "make -n signal-ic SCORES=baseline_scores.csv 打印含 ic_evaluate.py --scores baseline_scores.csv 的命令，无语法错误",
+        "verify_by": "test"
+      },
+      {
+        "desc": "baseline-scores target 调 load_prices+reversal_scores 写出 baseline_scores.csv（make -n 语法正确）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "runbook 含 '时序 IC 评估' 章节（grep -c '时序 IC 评估' == 1）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": ".PHONY 行追加 signal-ic baseline-scores；不破坏既有 signal-eval 等 target",
+        "verify_by": "review"
+      },
+      {
+        "desc": "runbook 写入重叠收益 t-stat 偏乐观 / oracle 自检 / 小样本告诫",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "cffde70",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "Makefile",
+    "docs/ops/qlib-warehouse-runbook.md",
+    "scripts/qlib_eval/tests/test_makefile.py"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "W3",
+      "title": "test_makefile.py 加 signal-ic/baseline-scores 覆盖",
+      "severity": "WARNING",
+      "description": "新 target signal-ic/baseline-scores 无 Makefile 测试覆盖。在既有 test_makefile.py 加测试：两 target 在 .PHONY 中、signal-ic recipe 调 ic_evaluate.py 且用 QLIB_PY(venv python) 而非裸 python、baseline-scores recipe 调 load_prices+reversal_scores 写 baseline_scores.csv。沿用既有 test_makefile.py 的 helper 风格。"
+    }
+  ]
+}
