@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all signal-ic baseline-scores
+.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all signal-ic signal-ic-hk signal-ic-us baseline-scores
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -55,6 +55,16 @@ SCORES ?= scores.csv
 signal-ic:
 	$(QLIB_PY) scripts/qlib_eval/ic_evaluate.py --scores $(SCORES) \
 	  --qlib-dir $(QLIB_DATA_DIR) --out $(SIGNAL_OUT)
+
+# 港股时序 IC 评估：分数面板 → 对 atlas_hk 评估（港股走 cn region/日历）。
+signal-ic-hk:
+	$(QLIB_PY) scripts/qlib_eval/ic_evaluate.py --scores $(SCORES) \
+	  --qlib-dir $(QLIB_DATA_HK_DIR) --region cn --out $(SIGNAL_OUT)
+
+# 美股时序 IC 评估：分数面板 → 对 atlas_us 评估（region us，独立日历）。
+signal-ic-us:
+	$(QLIB_PY) scripts/qlib_eval/ic_evaluate.py --scores $(SCORES) \
+	  --qlib-dir $(QLIB_DATA_US_DIR) --region us --out $(SIGNAL_OUT)
 
 # 生成 reversal baseline 分数面板（自验证 harness 用，无需 ML）。
 # 直接对 atlas_cn bundle 算 -过去5日收益 当 score，写 baseline_scores.csv。
