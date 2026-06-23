@@ -165,3 +165,39 @@ def test_baseline_scores_recipe_content():
     assert "load_prices" in expanded
     assert "reversal_scores" in expanded
     assert "baseline_scores.csv" in expanded
+
+
+# --- 港股/美股时序 IC 评估 target 守门测试 ---
+
+def test_ic_market_targets_in_phony():
+    first_line = _makefile_text().splitlines()[0]
+    assert "signal-ic-hk" in first_line and "signal-ic-us" in first_line
+
+
+def test_signal_ic_hk_targets_atlas_hk_via_venv_python():
+    block = _target_block("signal-ic-hk")
+    assert block, "signal-ic-hk target 缺失"
+    recipe = "\n".join(block.splitlines()[1:])
+    expanded = _expand(recipe, _var_defs(_makefile_text()))
+    assert "ic_evaluate.py" in expanded, "signal-ic-hk recipe 必须调用 ic_evaluate.py"
+    assert "atlas_hk" in expanded, "signal-ic-hk 必须指向 atlas_hk bundle"
+    assert VENV_PYTHON in expanded
+    stripped = expanded.replace(VENV_PYTHON, "")
+    assert not re.search(r"\bpython[0-9.]*\b", stripped), (
+        "signal-ic-hk recipe 不得出现裸 python 调用"
+    )
+
+
+def test_signal_ic_us_targets_atlas_us_region_us():
+    block = _target_block("signal-ic-us")
+    assert block, "signal-ic-us target 缺失"
+    recipe = "\n".join(block.splitlines()[1:])
+    expanded = _expand(recipe, _var_defs(_makefile_text()))
+    assert "ic_evaluate.py" in expanded, "signal-ic-us recipe 必须调用 ic_evaluate.py"
+    assert "atlas_us" in expanded, "signal-ic-us 必须指向 atlas_us bundle"
+    assert "--region us" in expanded, "美股必须传 --region us（独立日历）"
+    assert VENV_PYTHON in expanded
+    stripped = expanded.replace(VENV_PYTHON, "")
+    assert not re.search(r"\bpython[0-9.]*\b", stripped), (
+        "signal-ic-us recipe 不得出现裸 python 调用"
+    )

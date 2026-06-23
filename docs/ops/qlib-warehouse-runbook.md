@@ -184,6 +184,9 @@ make signal-eval-us
 方向② sidecar 上线后，让其输出同格式 `scores.csv`，`make signal-ic SCORES=scores.csv`
 即给出该 ML 模型的预测力 = 验收抓手。
 
+港股/美股用对应 target（各自指向 atlas_hk / atlas_us bundle，美股自动带 `--region us`）：
+`make signal-ic-hk SCORES=<hk_scores.csv>`、`make signal-ic-us SCORES=<us_scores.csv>`。
+
 ⚠ 读数告诫：
 - t-stat 用重叠前向收益，**偏乐观**；以并列的 t_stat_nonoverlap 为审慎旁证。
 - watchlist 仅十来个标的，跨标的 ICIR/广度是小样本，作参考非硬门槛。
