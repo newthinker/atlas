@@ -1,0 +1,33 @@
+{
+  "phase": "qa",
+  "reviewer": "qa-agent",
+  "scope": "bc81c39..HEAD（7 commits：2ae38c7 a9efe85 a3e5269 d43354a 013c588 99ad940 242d05c）",
+  "rounds": ["常规审查", "跨视角对抗（Skeptic+Architect+Minimalist，纯 Claude，codex/gemini 不可用降级）"],
+  "verdict": "PASS",
+  "tests": "全量 113 passed, 1 warning（预期 ConstantInputWarning）",
+  "critical": [],
+  "refuted_overclaims": [
+    "Skeptic 报 report.py:172 .format(None) CRITICAL 崩溃 → 经实证驳回：ic/t_stat 列 float+None 被 pandas 强转 float64，None→nan，format(nan)='nan' 不抛。无崩溃，仅 nan 观感问题。"
+  ],
+  "warnings": [
+    {"id": "W1", "file": "report.py:172", "issue": "_ic_instrument_table 对 ic/t_stat 无 None/NaN 守护，常数分数标的渲染成 'nan' 而非 '-'（仅 t_stat_nonoverlap 在 :175 有守护）", "fix": "仿 :175 给 ic/t_stat 加守护", "severity": "WARNING", "blocking": false},
+    {"id": "W2", "file": "ic.py:60-62", "issue": "重复 (date,symbol) merge 笛卡尔膨胀 n_periods 与 IC，无可见信号。仅影响未来方向② sidecar 生产路径（buggy 上游 scores.csv）；baseline 生产者 reversal_scores 不会产生重复", "fix": "可选：instrument_ic 内 drop_duplicates(subset=['date']) 或 read_scores 重复计数告警。QA 建议推迟到 sidecar 集成", "severity": "WARNING", "blocking": false},
+    {"id": "W3", "file": "test_makefile.py", "issue": "新 target signal-ic/baseline-scores 无 Makefile 测试覆盖，未来改 recipe 会静默失效", "fix": "加 target 存在性 + venv-python + CSV 列测试", "severity": "WARNING", "blocking": false}
+  ],
+  "info": [
+    "ic.py:50/prices.py:40 calendar-day max_defer*2 是 trading-day defer 的近似，可能跨假期多保留停牌>5日的标的；已文档化，Phase1 可接受。",
+    "report.py:199 overlap t-stat 告诫为定性；可选注明 effective dof≈n/h。"
+  ],
+  "passed_checks": [
+    "时序 IC 逐标的（非横截面）正确",
+    "next-open 无前视（三候选值互异钉死）",
+    "t_stat=ic*sqrt(n) 符号保留；overlap vs nonoverlap 数值有别",
+    "T3 math.isclose 近零 std 修正正确且优于 plan 原码",
+    "顶层零 qlib（ic/baseline/report/ic_evaluate 全守门），惰性链无泄漏",
+    "契约一致：per_horizon 结构、scores.csv 长格式、symbol 全程 atlas 形",
+    "零回归（report.py 纯追加，43 既有测试绿）",
+    "重复键不去重为有意决策（文档+测试 test_read_scores_duplicate_pairs_kept）",
+    "Minimalist：无过度工程/死代码"
+  ],
+  "recommendation": "accept-and-fast-follow 或 一轮 cheap review_fix 折入 W1+W3，W2 推迟到 sidecar 集成"
+}

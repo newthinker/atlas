@@ -1,0 +1,80 @@
+{
+  "id": "TASK-004",
+  "title": "report.py — read_scores + render_ic_report",
+  "description": "在 report.py 增量追加 SCORE_COLUMNS=[date,symbol,score]、read_scores(path)（严格校验表头、date→Timestamp/score→float、坏行带 1-based 物理行号 ValueError、utf-8-sig 容忍 BOM）、render_ic_report(per_horizon, meta)（markdown，含口径说明/重叠告诫/逐 horizon 的 ICIR+mean/median+广度+逐标的明细表）。新建 test_ic_report.py。不破坏既有 render_report/read_signals。TDD：先写失败测试再实现。",
+  "module": "qlib_eval/report",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/report.py",
+    "scripts/qlib_eval/tests/test_ic_report.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "render_ic_report 输出含 'ICIR'、't-stat'、逐标的明细（'AAA'）、'horizon 5' 标题（test_render_ic_report_contains_metrics）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "report 含重叠收益 t-stat 告诫（含 '重叠' 字样）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "n_instruments<2 → 输出含 '标的不足'，ICIR 标注不可计算（test_render_ic_report_thin_watchlist）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "per_horizon 为空 dict → 输出 '无可评估分数' 不抛",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "scores CSV 表头不符 → ValueError(match 'header mismatch')（test_read_scores_bad_header）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "坏行（强化 gap4）：列数不符 / date|score 解析失败 → ValueError 带 1-based 物理行号（行号断言）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "空文件（强化 gap4）：仅 BOM 或完全空 → ValueError('scores CSV is empty')",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "read_scores 用 utf-8-sig 容忍 BOM，与既有 read_signals 一致；不破坏 render_report/read_signals 既有测试。注：重复 (date,symbol) 不去重/不报错，文档标注为已知约束（sidecar 保证唯一）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "cffde70",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "scripts/qlib_eval/qlib_eval/report.py",
+    "scripts/qlib_eval/tests/test_ic_report.py"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    {
+      "id": "W1",
+      "title": "render_ic_report 给 ic/t_stat 加 NaN 守护",
+      "severity": "WARNING",
+      "description": "_ic_instrument_table 仅 t_stat_nonoverlap 有 None/NaN 守护（report.py:175）；ic 与 t_stat 列在常数分数标的时为 None→pandas 转 nan，渲染成 'nan' 而非 '-'。仿 :175 给 ic/t_stat 加守护，并补一个测试断言 None ic 渲染为 '-'。"
+    }
+  ]
+}

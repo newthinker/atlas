@@ -1,0 +1,26 @@
+{
+  "task": "TASK-001",
+  "owner": "dev-agent-1",
+  "commit": "2ae38c7",
+  "key_findings": [
+    "align_entry(prices, signal_date, max_defer) -> Entry|None；max_defer 无默认值。Entry(date, price=入场日开盘价, index=positional)。",
+    "max_defer 语义：入场对齐到 signal_date 严格次日的首个存在 bar（searchsorted side=right）。None 的两种情形：(1) 之后无 bar；(2) (entry_date-signal_date).days > max_defer*2（严格大于才丢，==max_defer*2 保留）。缺 bar=停牌自动延迟，只要日历间隔<=max_defer*2。",
+    "前视判别测试：open!=close 且拉大差距的帧，next-open 正确值与错用 close_t/close_{t+1} 三者互不相等，1 正向+2 not-isclose 断言钉死。",
+    "停牌测试：删除次日 bar 模拟停牌，8 日历日(<=10)延迟入场产行；15 日历日(>10) None 不产行。"
+  ],
+  "decisions": [
+    {"decision": "删除计划 Task1 顶层 import math", "rationale": "forward_returns 不用 math（Task2 才用），避免未用导入 + surgical scope。"},
+    {"decision": "测试拆成 9 个具名测试", "rationale": "每条 DoD 独立可点名覆盖，含强化 gap1/gap2。"},
+    {"decision": "code-simplifier：采纳 for t in df.index 去掉未用 i；其余建议拒绝", "rationale": "纯可读性行为不变；保留独立强化测试不抽 fixture 以免侵蚀覆盖。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/ic.py", "scripts/qlib_eval/tests/test_ic.py"],
+  "interfaces_exposed": [
+    "HORIZONS = (5, 20, 60)",
+    "forward_returns(prices: dict[str,pd.DataFrame], horizons=HORIZONS, max_defer: int = 5) -> pd.DataFrame  # 列 [date,symbol,horizon,ret], ret=close[entry.index+h]/entry.price-1",
+    "顶层依赖仅 pandas + .prices.align_entry，无 qlib"
+  ],
+  "verification": {
+    "task_tests": "pytest test_ic.py -v → 9 passed",
+    "regression": "pytest tests/ -q → 77 passed（既有不受影响）"
+  }
+}

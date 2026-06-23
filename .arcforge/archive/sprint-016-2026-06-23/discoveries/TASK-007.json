@@ -1,0 +1,22 @@
+{
+  "task": "TASK-007",
+  "owner": "dev-agent-1",
+  "commit": "242d05c",
+  "key_findings": [
+    "既有 Makefile 变量名全部与计划一致：QLIB_PY/QLIB_DATA_DIR/SIGNAL_SYMBOLS/SIGNAL_FROM/SIGNAL_TO/SIGNAL_OUT，直接采用计划片段无需替换。",
+    ".PHONY 在第 1 行；signal-eval target 在 L48-50，新 target 插入其后。",
+    "runbook 方向①评估章节=第6节，新章节插入其后第7节之前。",
+    "grep 计数 ==1 机理：节标题用『时序 IC 评估』，告诫 bullet 用『时序 IC』(无评估)→恰单次匹配。"
+  ],
+  "decisions": [
+    {"decision": "照搬计划片段不改变量名；SCORES ?= scores.csv 紧贴 signal-ic", "rationale": "与既有变量定义于消费者上方的局部约定一致。"},
+    {"decision": "code-simplifier 两处保持原样(no diff)", "rationale": "构建脚本/运维手册可读性与显式性优先；baseline-scores 内联 python -c 拆解会降清晰度且抽文件越界。"}
+  ],
+  "files_modified": ["Makefile", "docs/ops/qlib-warehouse-runbook.md"],
+  "verification": {
+    "make_signal_ic": "make -n signal-ic SCORES=baseline_scores.csv → 打印 ic_evaluate.py --scores baseline_scores.csv --qlib-dir ... --out reports/，无语法错误",
+    "make_baseline_scores": "make -n baseline-scores → 语法正确（load_prices + reversal_scores.to_csv）",
+    "grep_runbook": "grep -c '时序 IC 评估' → 1",
+    "regression": "pytest tests/ -q → 113 passed, 1 warning（test_makefile.py 未破坏）"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "id": "TASK-005",
+  "title": "baseline.py — oracle + 反转因子（自验证）",
+  "description": "新建 scripts/qlib_eval/qlib_eval/baseline.py：reversal_scores(prices, lookback=5)（score=-(close_t/close_{t-lookback}-1)，纯）、oracle_scores(fwd, horizon)（score=ret@horizon，无噪声 → IC=1，纯）、load_prices(qlib_dir, symbols, start, end, region='cn')（函数体内惰性 import QlibPriceSource，单 symbol 取价失败不中断）。顶层不得 import qlib，含守门测试。新建 test_baseline.py。TDD：先写失败测试再实现。与 TASK-003 并行（不同文件）。",
+  "module": "qlib_eval/baseline",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/baseline.py",
+    "scripts/qlib_eval/tests/test_baseline.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "reversal_scores：close 翻倍序列 lookback=1 → 第 2 点 score=-(2/1-1)=-1.0（test_reversal_scores_formula）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "oracle_scores 端到端：score=该 horizon 前向收益本身 → instrument_ic 得 IC≈1.0（test_oracle_scores_give_ic_one）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "load_prices 函数体内惰性 import QlibPriceSource；单 symbol 取价异常被吞、不中断整体",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "守门（强化 gap6）：依次 import qlib_eval.baseline / qlib_eval.ic / qlib_eval.report 后 'qlib' 均不在 sys.modules（覆盖所有新/改模块顶层，防间接 import 链）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "baseline.py 顶层不得出现 import qlib",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-2",
+  "commit": "d43354a",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "scripts/qlib_eval/qlib_eval/baseline.py",
+    "scripts/qlib_eval/tests/test_baseline.py"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

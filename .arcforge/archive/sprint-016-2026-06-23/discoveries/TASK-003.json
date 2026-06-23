@@ -1,0 +1,23 @@
+{
+  "task": "TASK-003",
+  "owner": "dev-agent-1",
+  "commit": "a3e5269",
+  "key_findings": [
+    "在 ic.py / test_ic.py 末尾纯追加 2 函数 + 8 测试，未触碰 T1/T2，回归全绿。",
+    "发现并修复 plan 原始代码真实 bug：ICIR 守卫 std not in (None,0) 用 == 成员判断，无法捕获 std(ddof=1) 对常数序列 [0.2,0.2,0.2] 的浮点残差(~3.4e-17)，导致 icir 爆成 ~5.9e15 而非 None。test_watchlist_summary_zero_std_icir_none 在 GREEN 阶段抓出。"
+  ],
+  "decisions": [
+    {"decision": "改用 math.isclose(std, 0.0, abs_tol=1e-12) 判近零（替换 plan 的 std not in (None,0)）", "rationale": "DoD non_functional[5] 要求 std=0/NaN→icir=None 不抛；浮点残差零必须按零处理。属对 plan 字面代码的正确性修正，语义与设计意图一致。注：人类选『不改实现』指的是不增删功能，此为满足既定 DoD 的 bug 修正，不属 scope 蔓延。"},
+    {"decision": "追加第 8 测试 test_watchlist_summary_nan_ic_dropped（超 plan 2 测试）", "rationale": "覆盖 dropna + NaN→单点 std 不抛路径。"},
+    {"decision": "code-simplifier：无需改动（两函数已最小清晰，守卫为 load-bearing）；仅补 matrix 注释第 8 测试名", "rationale": "isclose 近零检查不可弱化。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/ic.py", "scripts/qlib_eval/tests/test_ic.py"],
+  "interfaces_exposed": [
+    "ic_summary_by_instrument(scores, fwd, h, method='spearman', min_periods=60) -> DataFrame[symbol,ic,n_periods,t_stat,t_stat_nonoverlap]（剔除样本不足，按 symbol 排序）",
+    "watchlist_summary(per_inst) -> dict{mean_ic,median_ic,icir,positive_breadth,n_instruments}；n==0→全None+n=0；n<2 或 std≈0/NaN→icir=None"
+  ],
+  "verification": {
+    "task_tests": "pytest test_ic.py -q → 25 passed, 1 warning",
+    "regression": "pytest tests/ -q → 97 passed, 1 warning（合并 T5 后复核）"
+  }
+}

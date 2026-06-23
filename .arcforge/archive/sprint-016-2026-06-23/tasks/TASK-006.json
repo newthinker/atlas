@@ -1,0 +1,68 @@
+{
+  "id": "TASK-006",
+  "title": "ic_evaluate.py — CLI 入口 + collect_ic",
+  "description": "新建 scripts/qlib_eval/ic_evaluate.py：collect_ic(scores, source, horizons, method, min_periods) → (per_horizon, stats)（取价→forward_returns→逐 horizon ic_summary_by_instrument+watchlist_summary，单 symbol 取价失败计入 data_gaps）；main(argv) → int（缺 qlib 目录打印 get_data_hint 后 exit(1)；空面板写空报告 exit(0)；正常读 scores→QlibPriceSource 惰性取价→写 reports/signal-ic-YYYYMMDD.md）。复用 evaluate.check_qlib_dir/get_data_hint，不改 evaluate.py。test_ic_report.py 追加集成测试（注入 _FakeSource）。顶层不 import qlib。TDD：先写失败测试再实现。",
+  "module": "qlib_eval/ic_evaluate",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/ic_evaluate.py",
+    "scripts/qlib_eval/tests/test_ic_report.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "collect_ic + 注入 _FakeSource：oracle 分数（=2日前向收益）→ per_horizon[2].summary.mean_ic=1.0，stats.n_symbols=1（test_collect_ic_oracle_end_to_end）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "collect_ic（强化 gap6）：注入 source.history 对某 symbol 抛异常 → 计入 stats.data_gaps，不中断其余标的",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "main 空面板（强化 gap5）：monkeypatch check_qlib_dir→True + 空 scores CSV → 写空报告并 return 0",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "main 缺目录（强化 gap5）：check_qlib_dir 为 False（传 bogus --qlib-dir）→ stderr 打印 get_data_hint 并 return 1",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "ic_evaluate.py 顶层不 import qlib（QlibPriceSource 在 main 内惰性 import）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "全量 pytest（scripts/qlib_eval/tests/）通过，既有 test_event_study/test_prices/test_report 等不受影响",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "99ad940",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "scripts/qlib_eval/ic_evaluate.py",
+    "scripts/qlib_eval/tests/test_ic_report.py"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

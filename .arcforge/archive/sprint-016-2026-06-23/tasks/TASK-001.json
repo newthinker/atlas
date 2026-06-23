@@ -1,0 +1,68 @@
+{
+  "id": "TASK-001",
+  "title": "ic.py — forward_returns（next-open 前向收益）",
+  "description": "新建 scripts/qlib_eval/qlib_eval/ic.py，实现 forward_returns 与模块常量 HORIZONS=(5,20,60)。next-open 对齐：对每个 score 日 t，align_entry 取次日开盘入场，horizon h 出场行=入场行+h（positional），ret=close[exit]/open[entry]-1，长格式列 [date,symbol,horizon,ret]。纯 pandas，顶层不得 import qlib。TDD：先写失败测试 test_forward_returns_next_open，再实现。测试命令 scripts/qlib_eval/.venv/bin/python -m pytest scripts/qlib_eval/tests/test_ic.py -v。",
+  "module": "qlib_eval/ic",
+  "complexity": "medium",
+  "estimated_files": [
+    "scripts/qlib_eval/qlib_eval/ic.py",
+    "scripts/qlib_eval/tests/test_ic.py"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "forward_returns 产出 next-open 前向收益：入场 index1 开盘 10.0 / index6 close 12.0 → ret=+0.2；返回长格式列恰为 [date,symbol,horizon,ret]",
+        "verify_by": "test"
+      },
+      {
+        "desc": "HORIZONS == (5,20,60) 模块常量",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "horizon 越界（entry_idx+h >= n_bars）不产行（index3 起 horizon5 越界 → 该 (t,h) 无行）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "align_entry 返回 None（无次日 bar）时该 score 日不产任何行",
+        "verify_by": "test"
+      },
+      {
+        "desc": "前视判别（强化 gap1）：用 open≠close 的合成帧，断言 ret 由 open_{t+1} 入场算出，错用 close_t 入场会得不同值 → 钉死无前视偏差",
+        "verify_by": "test"
+      },
+      {
+        "desc": "停牌/缺 bar（强化 gap2）：score 日次日停牌时 align_entry 在 max_defer 内延迟入场；max_defer 耗尽 → 该日不产行",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "ic.py 顶层不得 import qlib（纯 pandas，仅从 .prices import align_entry）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "不改动 event_study.py / prices.py；既有 pytest（test_prices/test_event_study 等）全绿不受影响",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "2ae38c7",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "scripts/qlib_eval/qlib_eval/ic.py",
+    "scripts/qlib_eval/tests/test_ic.py"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

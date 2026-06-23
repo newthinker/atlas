@@ -1,0 +1,26 @@
+{
+  "task": "TASK-004",
+  "owner": "dev-agent-1",
+  "commit": "013c588",
+  "key_findings": [
+    "report.py 在 scripts/qlib_eval/qlib_eval/report.py，末尾增量追加，既有 read_signals/render_report/_strategy_table/SIGNAL_COLUMNS 未改。",
+    "read_scores 与既有 read_signals 共用同一 CSV 读取范式（utf-8-sig、csv.reader、1-based 物理行号、header 严格相等），风格一致。",
+    "计划 render_ic_report 自带空 per_horizon 短路与 n_instruments<2 标的不足提示，边界原生覆盖。"
+  ],
+  "decisions": [
+    {"decision": "严格按计划实现，不引入去重", "rationale": "DoD8 明确重复 (date,symbol) 不去重/不报错为已知约束；以 test_read_scores_duplicate_pairs_kept 锁定该行为 + docstring 注明。"},
+    {"decision": "行号断言用 pytest.raises(match='3')", "rationale": "DoD6 要求行号出现在异常信息，正则匹配比断言固定整句更稳健。"},
+    {"decision": "code-simplifier 采纳：抽局部 fmt(value,spec) helper 消 4 处重复格式化；拒绝抽取 read_scores/read_signals 共享 reader", "rationale": "共享 reader 会改既有 read_signals 违反任务边界。"}
+  ],
+  "files_modified": ["scripts/qlib_eval/qlib_eval/report.py", "scripts/qlib_eval/tests/test_ic_report.py"],
+  "interfaces_exposed": [
+    "SCORE_COLUMNS = ['date','symbol','score']",
+    "read_scores(path) -> pd.DataFrame  # 表头须恰为 SCORE_COLUMNS（否则 'scores CSV header mismatch'）；坏行/列数→ValueError 带 1-based 行号；空文件→'scores CSV is empty'；utf-8-sig 容忍 BOM；重复键全保留",
+    "render_ic_report(per_horizon, meta) -> str  # per_horizon[h]={by_instrument:df,summary:dict}；空→'无可评估分数'；n_instruments<2→'标的不足' 且 ICIR 渲染 '-'",
+    "_ic_instrument_table(by) -> str（私有）"
+  ],
+  "verification": {
+    "task_tests": "pytest test_ic_report.py -v → 11 passed",
+    "regression": "pytest tests/ -q → 108 passed, 1 warning"
+  }
+}
