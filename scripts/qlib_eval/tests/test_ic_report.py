@@ -138,6 +138,22 @@ def test_render_ic_report_empty():
     assert "无可评估分数" in md
 
 
+def test_render_ic_report_instrument_table_guards_nan():
+    # 某标的 ic=None（常数分数序列）+ t_stat=None：pandas 把列转 float64 → None 变 nan，
+    # 表格行应渲染占位符 '-' 而非字面 'nan'。
+    by = pd.DataFrame({"symbol": ["AAA", "CONST"], "ic": [0.10, None],
+                       "n_periods": [100, 50], "t_stat": [1.0, None],
+                       "t_stat_nonoverlap": [0.5, None]})
+    summary = {"mean_ic": 0.1, "median_ic": 0.1, "icir": 1.0,
+               "positive_breadth": 1.0, "n_instruments": 2}
+    md = render_ic_report({5: {"by_instrument": by, "summary": summary}},
+                          {"generated_at": "x", "n_scores": 150,
+                           "method": "spearman", "qlib_dir": "x"})
+    const_row = next(ln for ln in md.splitlines() if ln.startswith("| CONST "))
+    assert "nan" not in const_row
+    assert "| - |" in const_row
+
+
 # ===========================================================================
 # ic_evaluate (Task 6) 集成测试
 # Context Checkpoint: done_criteria -> test mapping

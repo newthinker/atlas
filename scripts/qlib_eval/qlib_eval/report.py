@@ -166,13 +166,15 @@ def _ic_instrument_table(by: pd.DataFrame) -> str:
     cols = ["symbol", "ic", "n_periods", "t_stat", "t_stat_nonoverlap"]
     lines = ["| " + " | ".join(cols) + " |",
              "|" + "|".join(["---"] * len(cols)) + "|"]
+    def cell(value, spec: str) -> str:
+        """NaN/None → 占位符 '-'，否则按 spec 格式化（列经 pandas 转 float64，None 变 nan）。"""
+        return "-" if pd.isna(value) else format(value, spec)
+
     for _, r in by.iterrows():
-        tno = r["t_stat_nonoverlap"]
         lines.append(
-            "| {sym} | {ic:.4f} | {n} | {t:.3f} | {tno} |".format(
-                sym=r["symbol"], ic=r["ic"], n=int(r["n_periods"]),
-                t=r["t_stat"],
-                tno="-" if pd.isna(tno) else "{:.3f}".format(tno),
+            "| {sym} | {ic} | {n} | {t} | {tno} |".format(
+                sym=r["symbol"], ic=cell(r["ic"], ".4f"), n=int(r["n_periods"]),
+                t=cell(r["t_stat"], ".3f"), tno=cell(r["t_stat_nonoverlap"], ".3f"),
             )
         )
     return "\n".join(lines)

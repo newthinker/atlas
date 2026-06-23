@@ -135,3 +135,33 @@ def test_qlib_data_us_target_exists():
 def test_us_targets_in_phony():
     first_line = _makefile_text().splitlines()[0]
     assert "signal-eval-us" in first_line and "qlib-data-us" in first_line
+
+
+# --- TASK-007: 时序 IC 评估 target 守门测试 ---
+
+def test_ic_targets_in_phony():
+    first_line = _makefile_text().splitlines()[0]
+    assert "signal-ic" in first_line and "baseline-scores" in first_line
+
+
+def test_signal_ic_uses_venv_python_and_ic_evaluate():
+    block = _target_block("signal-ic")
+    assert block, "signal-ic target 缺失"
+    recipe = "\n".join(block.splitlines()[1:])  # 仅 recipe 行
+    expanded = _expand(recipe, _var_defs(_makefile_text()))
+    assert "ic_evaluate.py" in expanded, "signal-ic recipe 必须调用 ic_evaluate.py"
+    assert VENV_PYTHON in expanded, f"signal-ic recipe 展开后必须用 {VENV_PYTHON}"
+    # 去掉 venv 路径后不得再出现任何裸 python token（系统 python3 已损坏）
+    stripped = expanded.replace(VENV_PYTHON, "")
+    assert not re.search(r"\bpython[0-9.]*\b", stripped), (
+        "signal-ic recipe 不得出现裸 python 调用，必须经 venv python"
+    )
+
+
+def test_baseline_scores_recipe_content():
+    block = _target_block("baseline-scores")
+    assert block, "baseline-scores target 缺失"
+    expanded = _expand(block, _var_defs(_makefile_text()))
+    assert "load_prices" in expanded
+    assert "reversal_scores" in expanded
+    assert "baseline_scores.csv" in expanded
