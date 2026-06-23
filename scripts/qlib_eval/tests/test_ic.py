@@ -291,3 +291,142 @@ def test_instrument_ic_pearson_vs_spearman_differ():
     assert math.isclose(sp["ic"], 1.0, rel_tol=1e-9)   # 秩相关对单调不敏感
     assert pe["ic"] < 1.0                                # 线性相关被非线性削弱
     assert not math.isclose(sp["ic"], pe["ic"], rel_tol=1e-9)
+
+
+# ===========================================================================
+# TASK-003: ic_summary_by_instrument + watchlist_summary — done_criteria -> test
+#   functional[1]  "每标的一行, 列恰 [symbol,ic,n_periods,t_stat,t_stat_nonoverlap],
+#                   按 symbol 排序"
+#                  -> test_summary_by_instrument_columns_and_sorted
+#   functional[2]  "watchlist_summary 聚合 mean=0,median=0.10,breadth=2/3,n=3 数值正确"
+#                  -> test_watchlist_summary_aggregates
+#   boundary[3]    "样本不足标的被剔除(BBB 仅 2<3 不出现)"
+#                  -> test_summary_by_instrument_drops_thin
+#   boundary[4]    "n_instruments<2 → icir=None; ics 为空 → 全字段 None, n_instruments=0"
+#                  -> test_watchlist_summary_single_instrument_icir_none
+#                   + test_watchlist_summary_empty_all_none
+#   non_functional[5] "icir=mean/std(ddof=1); std=0 或 NaN → icir=None 不抛"
+#                  -> test_watchlist_summary_icir_formula
+#                   + test_watchlist_summary_zero_std_icir_none
+#                   + test_watchlist_summary_nan_ic_dropped
+# ===========================================================================
+
+from qlib_eval.ic import ic_summary_by_instrument, watchlist_summary  # noqa: E402
+
+
+def test_summary_by_instrument_columns_and_sorted():
+    # functional[1]: 每标的一行, 列恰为指定 5 列且按 symbol 排序。
+    # 故意以非排序顺序 concat (CCC 先于 AAA), 验证输出按 symbol 升序。
+    ds = _seq_dates(5)
+    scores = pd.concat([
+        _scores(ds, [1, 2, 3, 4, 5], "CCC"),
+        _scores(ds, [1, 2, 3, 4, 5], "AAA"),
+    ])
+    fwd = pd.concat([
+        _fwd(ds, [0.5, 0.4, 0.3, 0.2, 0.1], "CCC"),
+        _fwd(ds, [0.1, 0.2, 0.3, 0.4, 0.5], "AAA"),
+    ])
+    out = ic_summary_by_instrument(scores, fwd, h=5, min_periods=3)
+    assert list(out.columns) == [
+        "symbol", "ic", "n_periods", "t_stat", "t_stat_nonoverlap"
+    ]
+    assert list(out["symbol"]) == ["AAA", "CCC"]   # 按 symbol 排序
+    assert len(out) == 2                            # 每标的恰一行
+
+
+def test_summary_by_instrument_drops_thin():
+    # boundary[3]: BBB 仅 2 < 3 个有效配对 → 被剔除, 只剩 AAA。
+    ds = _seq_dates(5)
+    scores = pd.concat([
+        _scores(ds, [1, 2, 3, 4, 5], "AAA"),
+        _scores(ds[:2], [1, 2], "BBB"),
+    ])
+    fwd = pd.concat([
+        _fwd(ds, [0.1, 0.2, 0.3, 0.4, 0.5], "AAA"),
+        _fwd(ds[:2], [0.1, 0.2], "BBB"),
+    ])
+    out = ic_summary_by_instrument(scores, fwd, h=5, min_periods=3)
+    assert list(out["symbol"]) == ["AAA"]
+
+
+def test_watchlist_summary_aggregates():
+    # functional[2]: mean=0, median=0.10, breadth=2/3, n=3 数值正确。
+    per_inst = pd.DataFrame({
+        "symbol": ["AAA", "BBB", "CCC"], "ic": [0.10, 0.20, -0.30],
+        "n_periods": [100, 100, 100], "t_stat": [1.0, 2.0, -3.0],
+        "t_stat_nonoverlap": [0.5, 1.0, -1.5],
+    })
+    s = watchlist_summary(per_inst)
+    assert math.isclose(s["mean_ic"], 0.0, abs_tol=1e-9)
+    assert math.isclose(s["median_ic"], 0.10, rel_tol=1e-9)
+    assert s["n_instruments"] == 3
+    assert math.isclose(s["positive_breadth"], 2 / 3, rel_tol=1e-9)
+    # icir = mean / std(ddof=1) = 0 / 0.2645751311... = 0.0
+    assert math.isclose(s["icir"], 0.0, abs_tol=1e-9)
+
+
+def test_watchlist_summary_icir_formula():
+    # non_functional[5]: icir = ics.mean() / ics.std(ddof=1)（精确手工验算）。
+    per_inst = pd.DataFrame({
+        "symbol": ["AAA", "BBB", "CCC"], "ic": [0.10, 0.20, 0.30],
+        "n_periods": [100, 100, 100], "t_stat": [1.0, 2.0, 3.0],
+        "t_stat_nonoverlap": [0.5, 1.0, 1.5],
+    })
+    s = watchlist_summary(per_inst)
+    ics = pd.Series([0.10, 0.20, 0.30])
+    assert math.isclose(s["icir"], ics.mean() / ics.std(ddof=1), rel_tol=1e-9)
+    assert math.isclose(s["positive_breadth"], 1.0, rel_tol=1e-9)   # 全正
+
+
+def test_watchlist_summary_single_instrument_icir_none():
+    # boundary[4]: n_instruments < 2 → icir=None（std(ddof=1) 单点无定义）。
+    per_inst = pd.DataFrame({
+        "symbol": ["AAA"], "ic": [0.15], "n_periods": [100],
+        "t_stat": [1.5], "t_stat_nonoverlap": [0.7],
+    })
+    s = watchlist_summary(per_inst)
+    assert s["n_instruments"] == 1
+    assert s["icir"] is None
+    assert math.isclose(s["mean_ic"], 0.15, rel_tol=1e-9)
+    assert math.isclose(s["median_ic"], 0.15, rel_tol=1e-9)
+    assert math.isclose(s["positive_breadth"], 1.0, rel_tol=1e-9)
+
+
+def test_watchlist_summary_empty_all_none():
+    # boundary[4]: ics 为空 → 全字段 None, n_instruments=0。
+    per_inst = pd.DataFrame({
+        "symbol": [], "ic": [], "n_periods": [],
+        "t_stat": [], "t_stat_nonoverlap": [],
+    })
+    s = watchlist_summary(per_inst)
+    assert s == {
+        "mean_ic": None, "median_ic": None, "icir": None,
+        "positive_breadth": None, "n_instruments": 0,
+    }
+
+
+def test_watchlist_summary_zero_std_icir_none():
+    # non_functional[5]: 所有 ic 相同 → std(ddof=1)=0 → icir=None, 不抛 ZeroDivision。
+    per_inst = pd.DataFrame({
+        "symbol": ["AAA", "BBB", "CCC"], "ic": [0.20, 0.20, 0.20],
+        "n_periods": [100, 100, 100], "t_stat": [2.0, 2.0, 2.0],
+        "t_stat_nonoverlap": [1.0, 1.0, 1.0],
+    })
+    s = watchlist_summary(per_inst)
+    assert s["icir"] is None
+    assert math.isclose(s["mean_ic"], 0.20, rel_tol=1e-9)
+    assert s["n_instruments"] == 3
+
+
+def test_watchlist_summary_nan_ic_dropped():
+    # non_functional[5] / boundary[4]: 含 NaN 的 ic 行被 dropna 后剩 1 个有效 → icir=None。
+    # 也验证 std 为 NaN 路径(若只剩单点)不抛异常。
+    per_inst = pd.DataFrame({
+        "symbol": ["AAA", "BBB"], "ic": [0.15, float("nan")],
+        "n_periods": [100, 100], "t_stat": [1.5, None],
+        "t_stat_nonoverlap": [0.7, None],
+    })
+    s = watchlist_summary(per_inst)
+    assert s["n_instruments"] == 1              # NaN ic 被剔除
+    assert s["icir"] is None
+    assert math.isclose(s["mean_ic"], 0.15, rel_tol=1e-9)

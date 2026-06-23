@@ -78,3 +78,46 @@ def instrument_ic(
         "t_stat": t_stat_of(merged),
         "t_stat_nonoverlap": t_stat_of(nonov) if len(nonov) >= 2 else None,
     }
+
+
+def ic_summary_by_instrument(
+    scores: pd.DataFrame, fwd: pd.DataFrame, h: int,
+    method: str = "spearman", min_periods: int = 60,
+) -> pd.DataFrame:
+    """每标的一行的时序 IC 汇总；样本不足的标的被剔除，按 symbol 排序。
+
+    列恰为 ["symbol","ic","n_periods","t_stat","t_stat_nonoverlap"]。
+    """
+    cols = ["symbol", "ic", "n_periods", "t_stat", "t_stat_nonoverlap"]
+    rows = []
+    for symbol in sorted(scores["symbol"].unique()):
+        res = instrument_ic(scores, fwd, symbol, h, method, min_periods)
+        if res is None:
+            continue
+        rows.append({"symbol": symbol, **res})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def watchlist_summary(per_inst: pd.DataFrame) -> dict:
+    """跨标的聚合：mean/median IC、ICIR（标的间 mean/std）、正 IC 广度。
+
+    - 仅统计 ic 非 NaN 的标的；空 → 全字段 None、n_instruments=0。
+    - icir = ics.mean() / ics.std(ddof=1)；n<2 或 std 为 0/NaN → icir=None（不抛）。
+    """
+    ics = per_inst["ic"].dropna()
+    n = int(len(ics))
+    if n == 0:
+        return {"mean_ic": None, "median_ic": None, "icir": None,
+                "positive_breadth": None, "n_instruments": 0}
+    std = ics.std(ddof=1) if n >= 2 else None
+    # std 为 None(n<2) / NaN / 0(含浮点残差近零) → ICIR 不可计算，返回 None 不抛。
+    icir = (float(ics.mean() / std)
+            if std is not None and pd.notna(std) and not math.isclose(std, 0.0, abs_tol=1e-12)
+            else None)
+    return {
+        "mean_ic": float(ics.mean()),
+        "median_ic": float(ics.median()),
+        "icir": icir,
+        "positive_breadth": float((ics > 0).sum() / n),
+        "n_instruments": n,
+    }
