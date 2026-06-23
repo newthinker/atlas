@@ -136,3 +136,113 @@ def test_render_ic_report_empty():
     md = render_ic_report({}, {"generated_at": "x", "n_scores": 0,
                           "method": "spearman", "qlib_dir": "x"})
     assert "无可评估分数" in md
+
+
+# ===========================================================================
+# ic_evaluate (Task 6) 集成测试
+# Context Checkpoint: done_criteria -> test mapping
+# functional[1]      "collect_ic oracle 端到端: per_horizon[2].summary.mean_ic=1.0,
+#                     stats.n_symbols=1" -> test_collect_ic_oracle_end_to_end
+# functional[2]gap6  "collect_ic: source.history 抛异常 → 计入 stats.data_gaps,
+#                     不中断其余标的"     -> test_collect_ic_history_error_counts_gap
+# boundary[3]gap5    "main 空面板: check_qlib_dir→True + 空 scores → 空报告 return 0"
+#                     -> test_main_empty_panel_writes_empty_report_returns_zero
+# error[4]gap5       "main 缺目录: check_qlib_dir→False → stderr=get_data_hint, return 1"
+#                     -> test_main_missing_qlib_dir_prints_hint_returns_one
+# non_func[5]        "ic_evaluate.py 顶层不 import qlib"
+#                     -> test_ic_evaluate_no_qlib_at_module_level
+# ===========================================================================
+import math
+import sys
+
+from ic_evaluate import collect_ic
+
+
+class _FakeSource:
+    """注入用价格源：history(symbol)->df。"""
+
+    def __init__(self, frames, fail=()):
+        self._frames = frames
+        self._fail = set(fail)
+
+    def history(self, symbol):
+        if symbol in self._fail:
+            raise RuntimeError(f"no data for {symbol}")
+        return self._frames[symbol]
+
+
+def _pf(dates, opens, closes):
+    idx = pd.DatetimeIndex(pd.to_datetime(dates))
+    return pd.DataFrame({"open": opens, "close": closes}, index=idx)
+
+
+# --- functional[1]: collect_ic oracle 端到端 --------------------------------
+def test_collect_ic_oracle_end_to_end():
+    # oracle 分数（=2日前向收益）经 collect_ic → horizon 2 的 mean IC = 1.0
+    ds = ["2024-01-0%d" % d for d in range(1, 10)]
+    closes = [10, 11, 12, 13, 14, 15, 16, 17, 18]
+    frames = {"AAA": _pf(ds, closes, closes)}
+    from qlib_eval.baseline import oracle_scores
+    from qlib_eval.ic import forward_returns
+    fwd = forward_returns(frames, horizons=(2,))
+    scores = oracle_scores(fwd, horizon=2)
+    per_horizon, stats = collect_ic(scores, _FakeSource(frames),
+                                    horizons=(2,), min_periods=3)
+    assert math.isclose(per_horizon[2]["summary"]["mean_ic"], 1.0, rel_tol=1e-9)
+    assert stats["n_symbols"] == 1
+
+
+# --- functional[2] gap6: history 抛异常 → 计入 data_gaps, 不中断其余 --------
+def test_collect_ic_history_error_counts_gap():
+    ds = ["2024-01-0%d" % d for d in range(1, 10)]
+    closes = [10, 11, 12, 13, 14, 15, 16, 17, 18]
+    frames = {"AAA": _pf(ds, closes, closes)}
+    # scores 含 AAA(可取价) 与 BAD(history 抛异常)
+    scores = pd.DataFrame({
+        "date": pd.to_datetime(ds + ds),
+        "symbol": ["AAA"] * len(ds) + ["BAD"] * len(ds),
+        "score": list(range(len(ds))) + list(range(len(ds))),
+    })
+    source = _FakeSource(frames, fail=("BAD",))
+    per_horizon, stats = collect_ic(scores, source, horizons=(2,), min_periods=3)
+    # BAD 取价失败计入 data_gaps，但 AAA 仍被正常评估
+    assert stats["data_gaps"] == 1
+    assert stats["n_symbols"] == 1
+    assert per_horizon[2]["summary"]["n_instruments"] == 1
+
+
+# --- boundary[3] gap5: main 空面板 → 空报告 return 0 ------------------------
+def test_main_empty_panel_writes_empty_report_returns_zero(tmp_path, monkeypatch):
+    import ic_evaluate
+    # check_qlib_dir 替为 True（不触发 qlib），scores 仅表头无数据行
+    monkeypatch.setattr(ic_evaluate, "check_qlib_dir", lambda d: True)
+    scores_csv = tmp_path / "empty.csv"
+    scores_csv.write_text("date,symbol,score\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    rc = ic_evaluate.main(["--scores", str(scores_csv),
+                           "--qlib-dir", str(tmp_path / "anydir"),
+                           "--out", str(out_dir)])
+    assert rc == 0
+    written = list(out_dir.glob("*.md"))
+    assert len(written) == 1
+    assert "无可评估分数" in written[0].read_text(encoding="utf-8")
+
+
+# --- error[4] gap5: main 缺目录 → stderr=hint, return 1 --------------------
+def test_main_missing_qlib_dir_prints_hint_returns_one(tmp_path, capsys):
+    import ic_evaluate
+    bogus = tmp_path / "does-not-exist"  # check_qlib_dir 真实返回 False（os.path.isdir）
+    scores_csv = tmp_path / "s.csv"
+    scores_csv.write_text("date,symbol,score\n2024-01-01,AAA,0.1\n", encoding="utf-8")
+    rc = ic_evaluate.main(["--scores", str(scores_csv),
+                           "--qlib-dir", str(bogus),
+                           "--out", str(tmp_path / "out")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "qlib 数据目录不存在" in err  # get_data_hint 的内容
+
+
+# --- non_functional[5]: 顶层不 import qlib ----------------------------------
+def test_ic_evaluate_no_qlib_at_module_level():
+    import ic_evaluate  # noqa: F401
+    assert "qlib" not in sys.modules
