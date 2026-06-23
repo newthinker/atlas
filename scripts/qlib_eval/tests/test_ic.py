@@ -128,3 +128,166 @@ def test_no_qlib_at_module_level():
     import qlib_eval.ic  # noqa: F401
 
     assert "qlib" not in sys.modules
+
+
+# ===========================================================================
+# TASK-002: instrument_ic — done_criteria -> test mapping
+#   functional[1]  "完全同序 → Spearman IC=1.0, n_periods=5, t_stat=sqrt(5)"
+#                  -> test_instrument_ic_perfect_positive
+#   functional[2]  "[强化 符号正确性] 反相关→IC≈-1; 随机→IC≈0; 常数→不漂移"
+#                  -> test_instrument_ic_perfect_negative
+#                   + test_instrument_ic_uncorrelated_near_zero
+#   functional[3]  "[强化 gap3 重叠虚高校正] nonoverlap 每 h 行采样, n_no 步长正确,
+#                   且与重叠 t_stat 数值不同"
+#                  -> test_instrument_ic_nonoverlap_sampling_and_differs
+#   boundary[4]    "有效配对 < min_periods → None"
+#                  -> test_instrument_ic_below_min_periods_returns_none
+#   boundary[5]    "非重叠样本 < 2 → t_stat_nonoverlap=None"
+#                  -> test_instrument_ic_nonoverlap_lt2_returns_none
+#   error[6]       "ic 为 NaN 时 ic/t_stat 字段返回 None 而非抛异常"
+#                  -> test_instrument_ic_nan_returns_none_not_raise
+#   non_functional[7] "pearson 与 spearman 两路径都实测, 非线性单调序列上结果不同"
+#                  -> test_instrument_ic_pearson_vs_spearman_differ
+# ===========================================================================
+
+from qlib_eval.ic import instrument_ic  # noqa: E402
+
+
+def _scores(dates, vals, symbol="AAA"):
+    return pd.DataFrame(
+        {"date": pd.to_datetime(dates), "symbol": symbol, "score": vals}
+    )
+
+
+def _fwd(dates, rets, symbol="AAA", h=5):
+    return pd.DataFrame(
+        {"date": pd.to_datetime(dates), "symbol": symbol, "horizon": h, "ret": rets}
+    )
+
+
+def _seq_dates(n):
+    """n 个连续 Timestamp（用 2024 起，跨月避免日历对齐分歧）。"""
+    return list(pd.date_range("2024-01-01", periods=n, freq="D").strftime("%Y-%m-%d"))
+
+
+def test_instrument_ic_perfect_positive():
+    # functional[1]: 分数与前向收益完全同序 → Spearman IC=1.0；t_stat=1.0*sqrt(5)
+    ds = _seq_dates(5)
+    res = instrument_ic(
+        _scores(ds, [1, 2, 3, 4, 5]),
+        _fwd(ds, [0.1, 0.2, 0.3, 0.4, 0.5]),
+        "AAA", h=5, min_periods=3,
+    )
+    assert res is not None
+    assert math.isclose(res["ic"], 1.0, rel_tol=1e-9)
+    assert res["n_periods"] == 5
+    assert math.isclose(res["t_stat"], math.sqrt(5), rel_tol=1e-9)
+
+
+def test_instrument_ic_perfect_negative():
+    # functional[2] 符号正确性: 完全反相关 → Spearman IC = -1.0; t_stat 同号(负)
+    ds = _seq_dates(5)
+    res = instrument_ic(
+        _scores(ds, [1, 2, 3, 4, 5]),
+        _fwd(ds, [0.5, 0.4, 0.3, 0.2, 0.1]),
+        "AAA", h=5, min_periods=3,
+    )
+    assert res is not None
+    assert math.isclose(res["ic"], -1.0, rel_tol=1e-9)
+    assert math.isclose(res["t_stat"], -math.sqrt(5), rel_tol=1e-9)
+
+
+def test_instrument_ic_uncorrelated_near_zero():
+    # functional[2] 符号正确性: score 与 ret 排名无单调关系 → Spearman IC = 0（不漂移成假信号）。
+    # score 秩 = [1,2,3,4,5]; ret=[0.2,0.5,0.3,0.1,0.4] → ret 秩 = [2,5,3,1,4]。
+    # d = [-1,-3,0,3,1]; sum d^2 = 20; rho = 1 - 6*20/(5*24) = 1 - 1.0 = 0.0（精确 0）。
+    ds = _seq_dates(5)
+    res = instrument_ic(
+        _scores(ds, [1, 2, 3, 4, 5]),
+        _fwd(ds, [0.2, 0.5, 0.3, 0.1, 0.4]),
+        "AAA", h=5, min_periods=3,
+    )
+    assert res is not None
+    assert abs(res["ic"]) < 1e-9
+    assert abs(res["t_stat"]) < 1e-9
+
+
+def test_instrument_ic_nonoverlap_sampling_and_differs():
+    # functional[3] gap3: 足够长重叠样本。h=3, n=10 → nonoverlap iloc[::3] = idx 0,3,6,9 → n_no=4。
+    # 设计 score 与 ret 让重叠 IC 与非重叠 IC 数值不同（证明非重叠旁证真的取了子集）。
+    ds = _seq_dates(10)
+    scores = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    # 整体大致正相关，但被采样点 (idx 0,3,6,9) 的秩关系与整体不同。
+    rets = [0.10, 0.50, 0.20, 0.40, 0.90, 0.30, 0.70, 0.60, 1.00, 0.80]
+    res = instrument_ic(
+        _scores(ds, scores), _fwd(ds, rets, h=3), "AAA", h=3, min_periods=3,
+    )
+    assert res is not None
+    assert res["n_periods"] == 10
+    # 手工验算非重叠子集（按 date 排序后 iloc[::3]）：
+    sub_scores = [scores[i] for i in (0, 3, 6, 9)]   # [1,4,7,10]
+    sub_rets = [rets[i] for i in (0, 3, 6, 9)]        # [0.10,0.40,0.70,0.80]
+    expected_n_no = len(sub_scores)                   # 4
+    expected_ic_no = pd.Series(sub_scores).corr(
+        pd.Series(sub_rets), method="spearman"
+    )
+    expected_t_no = expected_ic_no * math.sqrt(expected_n_no)
+    assert math.isclose(res["t_stat_nonoverlap"], expected_t_no, rel_tol=1e-9)
+    # 非重叠旁证与重叠 t_stat 数值不同（证明真的非重叠，步长 h 生效）。
+    assert not math.isclose(
+        res["t_stat_nonoverlap"], res["t_stat"], rel_tol=1e-9
+    )
+
+
+def test_instrument_ic_below_min_periods_returns_none():
+    # boundary[4]: 有效配对 2 < min_periods 60 → None
+    ds = _seq_dates(2)
+    assert instrument_ic(
+        _scores(ds, [1, 2]), _fwd(ds, [0.1, 0.2]),
+        "AAA", h=5, min_periods=60,
+    ) is None
+
+
+def test_instrument_ic_nonoverlap_lt2_returns_none():
+    # boundary[5]: 非重叠样本 < 2 → t_stat_nonoverlap=None。
+    # n=5, h=20 → iloc[::20] 只取 idx 0 → n_no=1 < 2 → t_stat_nonoverlap=None。
+    ds = _seq_dates(5)
+    res = instrument_ic(
+        _scores(ds, [1, 2, 3, 4, 5]),
+        _fwd(ds, [0.1, 0.2, 0.3, 0.4, 0.5], h=20),
+        "AAA", h=20, min_periods=3,
+    )
+    assert res is not None
+    assert res["t_stat_nonoverlap"] is None
+    # 重叠口径仍有正常数值，不受非重叠不足影响。
+    assert math.isclose(res["ic"], 1.0, rel_tol=1e-9)
+
+
+def test_instrument_ic_nan_returns_none_not_raise():
+    # error[6]: score 恒定 → corr 为 NaN → ic/t_stat 返回 None 而非抛异常。
+    ds = _seq_dates(5)
+    res = instrument_ic(
+        _scores(ds, [3, 3, 3, 3, 3]),          # 常数 score → 相关无定义 (NaN)
+        _fwd(ds, [0.1, 0.2, 0.3, 0.4, 0.5]),
+        "AAA", h=5, min_periods=3,
+    )
+    assert res is not None
+    assert res["ic"] is None
+    assert res["t_stat"] is None
+    assert res["n_periods"] == 5
+
+
+def test_instrument_ic_pearson_vs_spearman_differ():
+    # non_functional[7]: 非线性单调序列上 pearson 与 spearman 两路径都跑通且结果不同。
+    # 完全单调（同序）→ Spearman=1.0 恒定；pearson 受非线性曲率影响 < 1.0。
+    ds = _seq_dates(5)
+    scores = [1, 2, 3, 4, 5]
+    rets = [0.01, 0.02, 0.04, 0.08, 0.16]   # 指数增长：单调但非线性
+    sp = instrument_ic(_scores(ds, scores), _fwd(ds, rets),
+                       "AAA", h=5, method="spearman", min_periods=3)
+    pe = instrument_ic(_scores(ds, scores), _fwd(ds, rets),
+                       "AAA", h=5, method="pearson", min_periods=3)
+    assert sp is not None and pe is not None
+    assert math.isclose(sp["ic"], 1.0, rel_tol=1e-9)   # 秩相关对单调不敏感
+    assert pe["ic"] < 1.0                                # 线性相关被非线性削弱
+    assert not math.isclose(sp["ic"], pe["ic"], rel_tol=1e-9)
