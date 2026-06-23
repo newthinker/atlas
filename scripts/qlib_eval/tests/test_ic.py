@@ -10,6 +10,9 @@ boundary[6]   "[gap2 停牌/max_defer] 次日停牌在 max_defer 内延迟入场
               -> test_forward_returns_defers_entry_when_next_bar_suspended
                  + test_forward_returns_drops_when_defer_exhausted
 non_functional[7] "ic.py 顶层不得 import qlib（纯 pandas 守门）"   -> test_no_qlib_at_module_level
+boundary[8]   "[真实数据健壮性] 入场 bar open==0(指数占位)/NaN(停牌) → 跳过, 不除零不泄漏 NaN"
+              -> test_forward_returns_skips_zero_open_entry
+                 + test_forward_returns_skips_nan_open_entry
 """
 
 import math
@@ -119,6 +122,36 @@ def test_forward_returns_drops_when_defer_exhausted():
     df = price_frame(dates, opens=[10.0, 30.0, 99.0], closes=[10.0, 31.0, 36.0])
     fwd = forward_returns({"AAA": df}, horizons=(1,), max_defer=5)
     assert fwd[fwd["date"] == pd.Timestamp("2024-01-05")].empty
+
+
+def test_forward_returns_skips_zero_open_entry():
+    # boundary[8] [真实数据健壮性] 入场 bar open==0（atlas_cn 部分指数开盘价存为 0 占位，
+    # 如 930604.CSI）→ ret=close/open 会除零。forward_returns 必须跳过该 (t,h) 不崩溃，
+    # 且不影响入场价正常的其他 score 日。
+    # 4 连续日：D1 open=0（score 日 D0 的入场无效）；D2 open=10 有效（score 日 D1 入场）。
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
+    df = price_frame(dates, opens=[5.0, 0.0, 10.0, 9.0],
+                     closes=[5.0, 8.0, 10.0, 12.0])
+    fwd = forward_returns({"AAA": df}, horizons=(1,))  # 不得抛 ZeroDivisionError
+    # score 日 D0 入场=D1 open=0 → 无效，不产行。
+    assert fwd[fwd["date"] == pd.Timestamp("2024-01-01")].empty
+    # score 日 D1 入场=D2 open=10、出场=D3 close=12 → ret=12/10-1=0.2 正常产出。
+    row = fwd[(fwd["date"] == pd.Timestamp("2024-01-02")) & (fwd["horizon"] == 1)]
+    assert len(row) == 1
+    assert math.isclose(row.iloc[0]["ret"], 0.2, rel_tol=1e-9)
+    # 整列不得含 NaN/inf（除零或缺价泄漏的标志）。
+    assert fwd["ret"].notna().all()
+
+
+def test_forward_returns_skips_nan_open_entry():
+    # boundary[8] 入场 bar open==NaN（停牌占位，atlas_cn 每标的约 101 行）→ 同样跳过，
+    # 不让 NaN ret 泄漏进前向收益面板。
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
+    df = price_frame(dates, opens=[5.0, float("nan"), 10.0, 9.0],
+                     closes=[5.0, 8.0, 10.0, 12.0])
+    fwd = forward_returns({"AAA": df}, horizons=(1,))
+    assert fwd[fwd["date"] == pd.Timestamp("2024-01-01")].empty
+    assert fwd["ret"].notna().all()
 
 
 def test_no_qlib_at_module_level():

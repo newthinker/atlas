@@ -22,7 +22,8 @@ def forward_returns(
 
     对每个 score 日 t（=价格 frame 的交易日）：入场=align_entry(df, t) 的次日开盘；
     horizon h 的出场行 = 入场行 + h（positional）。ret = close[出场]/open[入场] - 1。
-    无次日 bar（align_entry None）或出场越界 → 该 (t,h) 不产行。
+    无次日 bar（align_entry None）、入场价无效（open 为 0 或 NaN——atlas_cn 部分指数开盘价
+    存为 0 占位、停牌存为 NaN）或出场越界 → 该 (t,h) 不产行。
 
     返回长格式列 ["date","symbol","horizon","ret"]。
     """
@@ -33,6 +34,8 @@ def forward_returns(
             entry = align_entry(df, t, max_defer)
             if entry is None:
                 continue
+            if not entry.price or pd.isna(entry.price):
+                continue  # 入场价为 0/NaN（指数 open=0 占位 / 停牌）→ 规避除零与 NaN 泄漏
             for h in horizons:
                 exit_idx = entry.index + h
                 if exit_idx >= n_bars:
