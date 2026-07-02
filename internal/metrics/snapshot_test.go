@@ -12,7 +12,7 @@ import (
 // functional[0]    "gauge 取当前值 / counter 取累计值"                    → TestSnapshot_GaugeAndCounter
 // functional[1]    "多 label 序列聚合求和为单键（3+5→8）"                → TestSnapshot_MultiLabelSum
 // functional[2]    "histogram 展开 _count/_sum"                          → TestSnapshot_Histogram
-// functional[3]    "3 位数字 status → _<h>xx 求和；非数字不产额外键"     → TestSnapshot_StatusClassKeys
+// functional[3]    "3 位数字或 [1-5]xx 字符串 status → _<N>xx 求和；其他值不产额外键" → TestSnapshot_StatusClassKeys / TestSnapshot_RecordRequestProduces5xx
 // boundary[0]      "空 registry → 空 map，非 nil，不 panic"             → TestSnapshot_EmptyRegistry
 // error_handling[0] "Gather 出错不 panic，处理已收集部分"                → TestSnapshot_GatherError_NoPanic
 
@@ -83,26 +83,47 @@ func TestSnapshot_StatusClassKeys(t *testing.T) {
 		prometheus.CounterOpts{Name: "test_requests_total"},
 		[]string{"status"},
 	)
-	cv.WithLabelValues("500").Add(2)
-	cv.WithLabelValues("502").Add(3)
-	cv.WithLabelValues("200").Add(4)
-	cv.WithLabelValues("ok").Add(9) // non-numeric → no extra key
+	cv.WithLabelValues("500").Add(2)  // 3-digit numeric → _5xx
+	cv.WithLabelValues("502").Add(3)  // 3-digit numeric → _5xx
+	cv.WithLabelValues("5xx").Add(1)  // class string (RecordRequest form) → _5xx
+	cv.WithLabelValues("200").Add(4)  // → _2xx
+	cv.WithLabelValues("ok").Add(9)   // other value → no extra key
 
 	snap := snapshotRegistry(t, cv).Snapshot()
 
 	// base name still aggregates every series.
-	if snap["test_requests_total"] != 18 {
-		t.Errorf("base = %v, want 18 (2+3+4+9)", snap["test_requests_total"])
+	if snap["test_requests_total"] != 19 {
+		t.Errorf("base = %v, want 19 (2+3+1+4+9)", snap["test_requests_total"])
 	}
-	if snap["test_requests_total_5xx"] != 5 {
-		t.Errorf("_5xx = %v, want 5 (500:2 + 502:3)", snap["test_requests_total_5xx"])
+	// numeric 500/502 and the "5xx" class string all fold into _5xx (AD-13a).
+	if snap["test_requests_total_5xx"] != 6 {
+		t.Errorf("_5xx = %v, want 6 (500:2 + 502:3 + 5xx:1)", snap["test_requests_total_5xx"])
 	}
 	if snap["test_requests_total_2xx"] != 4 {
 		t.Errorf("_2xx = %v, want 4", snap["test_requests_total_2xx"])
 	}
-	// non-numeric status must not spawn a class key.
+	// values that are neither 3-digit nor [1-5]xx must not spawn a class key.
 	if _, ok := snap["test_requests_total_okxx"]; ok {
-		t.Error("non-numeric status must not produce a class key")
+		t.Error("non-status value must not produce a class key")
+	}
+}
+
+// TestSnapshot_RecordRequestProduces5xx locks in the TASK-203 prerequisite: the
+// real recording path (RecordRequest → statusToString stores "5xx") must surface
+// an http_requests_total_5xx key through Snapshot (AD-13a). Note the metric is
+// named http_requests_total (no atlas_ prefix — see metrics.go).
+func TestSnapshot_RecordRequestProduces5xx(t *testing.T) {
+	reg := NewRegistry()
+	reg.RecordRequest("GET", "/x", 503, 0.01)
+	reg.RecordRequest("GET", "/x", 200, 0.01)
+
+	snap := reg.Snapshot()
+
+	if snap["http_requests_total_5xx"] != 1 {
+		t.Errorf("http_requests_total_5xx = %v, want 1", snap["http_requests_total_5xx"])
+	}
+	if snap["http_requests_total_2xx"] != 1 {
+		t.Errorf("http_requests_total_2xx = %v, want 1", snap["http_requests_total_2xx"])
 	}
 }
 
