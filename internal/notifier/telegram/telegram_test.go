@@ -329,6 +329,47 @@ func TestSendBatch_UnderscoreNotEscaped(t *testing.T) {
 	}
 }
 
+// TASK-202: SendText delivers pre-formatted alert text verbatim through the
+// raw (unescaped) send path, so underscores in "[SEVERITY] name: message" stay
+// literal.
+func TestTelegram_SendText(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	tg := &Telegram{botToken: "tok", chatID: "cid"}
+	tg.client = &http.Client{Transport: &prefixRoundTripper{prefix: server.URL, inner: server.Client().Transport}}
+
+	const msg = "[CRITICAL] cpu_high: cpu usage > 90%"
+	if err := tg.SendText(msg); err != nil {
+		t.Fatalf("SendText error: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("payload not JSON: %v (%s)", err, capturedBody)
+	}
+	if payload["chat_id"] != "cid" {
+		t.Errorf("chat_id = %v, want cid", payload["chat_id"])
+	}
+	if payload["text"] != msg {
+		t.Errorf("text = %q, want verbatim %q (raw, unescaped)", payload["text"], msg)
+	}
+	if strings.Contains(string(capturedBody), `\_`) {
+		t.Errorf("SendText must not escape underscores, got:\n%s", capturedBody)
+	}
+}
+
+// TestTelegram_ImplementsSendText pins the public optional-interface method the
+// alert adapter's direct path relies on.
+func TestTelegram_ImplementsSendText(t *testing.T) {
+	var _ interface{ SendText(string) error } = (*Telegram)(nil)
+}
+
 // prefixRoundTripper rewrites the host of every request to the given prefix,
 // allowing test servers to intercept calls that would go to api.telegram.org.
 type prefixRoundTripper struct {

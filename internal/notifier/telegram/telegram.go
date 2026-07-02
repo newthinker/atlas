@@ -96,6 +96,13 @@ func (t *Telegram) Send(signal core.Signal) error {
 	return t.sendMessage(message)
 }
 
+// SendText sends a pre-formatted plain-text message as-is (no Markdown
+// escaping), reusing the raw send path. Used by the alert adapter to deliver
+// alert text like "[SEVERITY] name: message" directly.
+func (t *Telegram) SendText(text string) error {
+	return t.sendRaw(text)
+}
+
 func (t *Telegram) SendBatch(signals []core.Signal) error {
 	msg := formatBatch(signals)
 	if msg == "" {
