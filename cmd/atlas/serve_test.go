@@ -69,8 +69,8 @@ func TestRegisterConfiguredNotifiers_TelegramSuccess(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 1 {
-		t.Errorf("return = %d, want 1", got)
+	if len(got) != 1 {
+		t.Errorf("return count = %d, want 1", len(got))
 	}
 	if n := statsNotifierCount(t, application); n != 1 {
 		t.Errorf("GetStats notifiers = %d, want 1", n)
@@ -91,8 +91,8 @@ func TestRegisterConfiguredNotifiers_EmailSuccess(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 1 {
-		t.Errorf("return = %d, want 1", got)
+	if len(got) != 1 {
+		t.Errorf("return count = %d, want 1", len(got))
 	}
 	if n := statsNotifierCount(t, application); n != 1 {
 		t.Errorf("GetStats notifiers = %d, want 1", n)
@@ -108,8 +108,8 @@ func TestRegisterConfiguredNotifiers_WebhookSuccess(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 1 {
-		t.Errorf("return = %d, want 1", got)
+	if len(got) != 1 {
+		t.Errorf("return count = %d, want 1", len(got))
 	}
 	if n := statsNotifierCount(t, application); n != 1 {
 		t.Errorf("GetStats notifiers = %d, want 1", n)
@@ -127,8 +127,8 @@ func TestRegisterConfiguredNotifiers_TelegramAndWebhook(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 2 {
-		t.Errorf("return = %d, want 2", got)
+	if len(got) != 2 {
+		t.Errorf("return count = %d, want 2", len(got))
 	}
 	if n := statsNotifierCount(t, application); n != 2 {
 		t.Errorf("GetStats notifiers = %d, want 2", n)
@@ -156,8 +156,8 @@ func TestRegisterConfiguredNotifiers_DisabledSkipped(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 0 {
-		t.Errorf("return = %d, want 0", got)
+	if len(got) != 0 {
+		t.Errorf("return count = %d, want 0", len(got))
 	}
 	if n := statsNotifierCount(t, application); n != 0 {
 		t.Errorf("GetStats notifiers = %d, want 0", n)
@@ -183,8 +183,8 @@ func TestRegisterConfiguredNotifiers_NilOrEmpty(t *testing.T) {
 
 			got := registerConfiguredNotifiers(cfg, application, log)
 
-			if got != 0 {
-				t.Errorf("return = %d, want 0", got)
+			if len(got) != 0 {
+				t.Errorf("return count = %d, want 0", len(got))
 			}
 			if n := statsNotifierCount(t, application); n != 0 {
 				t.Errorf("GetStats notifiers = %d, want 0", n)
@@ -217,8 +217,8 @@ func TestRegisterConfiguredNotifiers_MissingRequiredFields(t *testing.T) {
 
 			got := registerConfiguredNotifiers(cfg, application, log)
 
-			if got != 0 {
-				t.Errorf("return = %d, want 0", got)
+			if len(got) != 0 {
+				t.Errorf("return count = %d, want 0", len(got))
 			}
 			if n := statsNotifierCount(t, application); n != 0 {
 				t.Errorf("GetStats notifiers = %d, want 0", n)
@@ -240,8 +240,8 @@ func TestRegisterConfiguredNotifiers_UnknownType(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 0 {
-		t.Errorf("return = %d, want 0", got)
+	if len(got) != 0 {
+		t.Errorf("return count = %d, want 0", len(got))
 	}
 	if logs.FilterMessage("unknown notifier type").
 		FilterField(zap.String("notifier", "slack")).Len() != 1 {
@@ -263,8 +263,8 @@ func TestRegisterConfiguredNotifiers_DuplicateRegister(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 0 {
-		t.Errorf("return = %d, want 0 (duplicate skipped)", got)
+	if len(got) != 0 {
+		t.Errorf("return count = %d, want 0 (duplicate skipped)", len(got))
 	}
 	// The pre-registered notifier must still be the only one present.
 	if n := statsNotifierCount(t, application); n != 1 {
@@ -286,8 +286,8 @@ func TestRegisterConfiguredNotifiers_SilentFailureWarn(t *testing.T) {
 
 	got := registerConfiguredNotifiers(cfg, application, log)
 
-	if got != 0 {
-		t.Errorf("return = %d, want 0", got)
+	if len(got) != 0 {
+		t.Errorf("return count = %d, want 0", len(got))
 	}
 	if logs.FilterMessageSnippet("signals will not be delivered").
 		FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
