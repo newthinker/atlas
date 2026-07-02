@@ -312,10 +312,9 @@ func TestConfig_Validate_Branches(t *testing.T) {
 		{"openai ok", func(c *Config) { c.LLM.Provider = "openai"; c.LLM.OpenAI.APIKey = "k" }, false},
 		{"ollama missing endpoint", func(c *Config) { c.LLM.Provider = "ollama" }, true},
 		{"ollama ok", func(c *Config) { c.LLM.Provider = "ollama"; c.LLM.Ollama.Endpoint = "http://x" }, false},
-		{"broker live needs real env", func(c *Config) {
+		{"broker live not supported (paper-only)", func(c *Config) {
 			c.Broker.Enabled = true
 			c.Broker.Mode = "live"
-			c.Broker.Futu.Env = "simulate"
 		}, true},
 		{"broker invalid exec mode", func(c *Config) {
 			c.Broker.Enabled = true
@@ -335,6 +334,23 @@ func TestConfig_Validate_Branches(t *testing.T) {
 				t.Errorf("Validate() err=%v, wantErr=%v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestConfig_Validate_LiveNotSupported asserts an enabled broker in live mode is
+// rejected as paper-only (AD-15, FutuBroker withdrawn 2026-07-02). Covers
+// error_handling[1].
+func TestConfig_Validate_LiveNotSupported(t *testing.T) {
+	c := validConfig()
+	c.Broker.Enabled = true
+	c.Broker.Mode = "live"
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("expected error for live mode")
+	}
+	if !strings.Contains(err.Error(), "live trading not supported (paper-only)") {
+		t.Fatalf("error = %q, want it to contain %q", err.Error(), "live trading not supported (paper-only)")
 	}
 }
 
@@ -401,8 +417,6 @@ server:
 broker:
   enabled: true
   mode: paper
-  futu:
-    env: simulate
 `)
 	cfg, err := Load(cfgPath)
 	if err != nil {
@@ -413,6 +427,32 @@ broker:
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() with defaulted execution.mode returned error: %v", err)
+	}
+}
+
+// TestLoad_LegacyFutuSection_Ignored asserts an old config carrying a futu:
+// block still loads without error after FutuConfig was removed — viper silently
+// ignores the now-unmapped keys. Covers boundary[0].
+func TestLoad_LegacyFutuSection_Ignored(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+server:
+  port: 8080
+broker:
+  enabled: true
+  mode: paper
+  provider: mock
+  futu:
+    host: "127.0.0.1"
+    port: 11111
+    env: simulate
+    trade_password: "secret"
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load with legacy futu section failed: %v", err)
+	}
+	if cfg.Broker.Provider != "mock" {
+		t.Errorf("Broker.Provider = %q, want mock", cfg.Broker.Provider)
 	}
 }
 

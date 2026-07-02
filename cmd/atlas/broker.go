@@ -105,9 +105,6 @@ func getBroker(cfg *config.Config) (broker.LegacyBroker, error) {
 	switch cfg.Broker.Provider {
 	case "mock":
 		return mock.New(), nil
-	case "futu":
-		// TODO: Implement Futu broker when OpenD SDK is integrated
-		return nil, fmt.Errorf("futu broker not yet implemented, use mock for now")
 	default:
 		return nil, fmt.Errorf("unknown broker provider: %s", cfg.Broker.Provider)
 	}

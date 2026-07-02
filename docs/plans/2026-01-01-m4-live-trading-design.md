@@ -1,5 +1,11 @@
 # M4: Live Trading Design
 
+> ⚠️ **WITHDRAWN (2026-07-02):** FutuBroker will **not** be implemented — Futu is
+> unavailable to mainland China users. The live-trading path described below is
+> withdrawn; ATLAS execution is **paper-only** (see AD-15). `broker.mode: live`
+> is rejected at config validation. This document is retained for historical
+> context only and does not reflect the shipped design.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Enable ATLAS to execute trades through FUTU broker based on strategy signals, with paper trading first and risk controls.
