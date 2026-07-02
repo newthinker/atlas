@@ -1,5 +1,21 @@
 # ATLAS Architecture Design
 
+> **⚠ 部分设计已被实践 superseded（2026-07 校订）**
+>
+> 本文档是 2025-12-28 的初始蓝图，local-first phase 落地后若干技术选型已被更轻量的实现取代。
+> 阅读下文的具体组件时请以下表的现实替代为准：
+>
+> | 原设计 | 现实替代 | 依据 |
+> |---|---|---|
+> | **TimescaleDB**（热数据时序库） | 无外部时序库：信号走内存 store，历史 OHLCV 走本地单文件 SQLite（`modernc.org/sqlite`） | `internal/storage/signal/memory.go`、`data/qlib_warehouse.db` |
+> | **gin**（Web 框架） | 标准库 `net/http`（`http.ServeMux`），无第三方路由框架 | `internal/api/server.go` |
+> | **WebSocket**（实时信号推送） | 未实现推送：Web UI 为 `html/template` 服务端整页渲染 | `internal/api/templates/*.html` |
+> | **Parquet**（冷数据归档格式） | 冷数据不落 Parquet：OHLCV 仓库即单一 SQLite 文件 | `data/qlib_warehouse.db` |
+> | **CircuitBreaker**（数据源熔断） | 无熔断器组件：collector 失败走 selector fallback 链 + router cooldown 降级 | `internal/collector/selector.go` |
+> | **sina**（新浪行情 collector） | 未接入新浪源：A 股/指数走 eastmoney，美股走 yahoo，基本面走 lixinger | `internal/collector/{eastmoney,yahoo,lixinger}/` |
+>
+> 下文保留原始设计文字不动，仅作历史记录。
+
 ## Overview
 
 ATLAS (Asset Tracking & Leadership Analysis System) is a global asset monitoring system with automated trading signal generation. This document describes the system architecture.
