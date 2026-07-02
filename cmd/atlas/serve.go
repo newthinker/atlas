@@ -82,8 +82,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		zap.Int("port", cfg.Server.Port),
 	)
 
-	// Create signal store
-	sigStore := signalstore.NewMemoryStore(defaultSignalStoreCapacity)
+	// Create signal store per config (sqlite by default, persistent). A sqlite
+	// open failure exits rather than silently degrading to memory.
+	sigStore, closeSignalStore, err := buildSignalStore(cfg, log)
+	if err != nil {
+		return fmt.Errorf("creating signal store: %w", err)
+	}
+	defer closeSignalStore()
 
 	// Create App
 	application := app.New(cfg, log)
@@ -301,6 +306,33 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	return server.Shutdown(ctx)
+}
+
+// buildSignalStore constructs the signal store from config. backend=sqlite
+// (the default) opens a persistent SQLiteStore at the configured path and
+// returns a cleanup that closes it; backend=memory returns an in-memory store
+// with a no-op cleanup. A sqlite open failure is returned as an error so serve
+// exits rather than silently falling back to memory — dropping signals the
+// operator explicitly asked to persist would be worse than failing fast.
+func buildSignalStore(cfg *config.Config, log *zap.Logger) (signalstore.Store, func(), error) {
+	switch cfg.Storage.Signals.Backend {
+	case "memory":
+		log.Info("signal store: in-memory (non-persistent)")
+		return signalstore.NewMemoryStore(defaultSignalStoreCapacity), func() {}, nil
+	case "sqlite", "":
+		path := cfg.Storage.Signals.Path
+		if path == "" {
+			path = "data/signals.db"
+		}
+		store, err := signalstore.NewSQLiteStore(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening sqlite signal store at %s: %w", path, err)
+		}
+		log.Info("signal store: sqlite (persistent)", zap.String("path", path))
+		return store, func() { _ = store.Close() }, nil
+	default:
+		return nil, nil, fmt.Errorf("invalid storage.signals.backend: %s (want memory or sqlite)", cfg.Storage.Signals.Backend)
+	}
 }
 
 // buildArbitrator constructs an LLM-backed signal arbitrator from the configured

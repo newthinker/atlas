@@ -557,3 +557,86 @@ router:
 		t.Errorf("Router.BatchNotify = true, want false (explicit override)")
 	}
 }
+
+// Context Checkpoint: done_criteria → test mapping (TASK-302)
+// functional[0] "storage.signals.backend/path 解析；缺省 sqlite + data/signals.db" → TestLoad_SignalStorage_FromYAML / TestLoad_SignalStorage_DefaultsToSqlite / TestDefaults_SignalStorage
+// boundary[0]   "老配置无 storage 节 → 缺省 sqlite + data/signals.db 不报错"      → TestLoad_SignalStorage_DefaultsToSqlite
+// error_handling[1] "backend 非法值校验报错，错误信息含非法值"                   → TestConfig_Validate_SignalBackendInvalid
+
+// functional[0]: explicit storage.signals values parse from yaml.
+func TestLoad_SignalStorage_FromYAML(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+storage:
+  signals:
+    backend: memory
+    path: /tmp/custom-signals.db
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Storage.Signals.Backend != "memory" {
+		t.Errorf("Backend = %q, want memory", cfg.Storage.Signals.Backend)
+	}
+	if cfg.Storage.Signals.Path != "/tmp/custom-signals.db" {
+		t.Errorf("Path = %q, want /tmp/custom-signals.db", cfg.Storage.Signals.Path)
+	}
+}
+
+// boundary[0]: a legacy config with no storage block loads with the sqlite
+// defaults and does not error.
+func TestLoad_SignalStorage_DefaultsToSqlite(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+server:
+  port: 8080
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Storage.Signals.Backend != "sqlite" {
+		t.Errorf("default Backend = %q, want sqlite", cfg.Storage.Signals.Backend)
+	}
+	if cfg.Storage.Signals.Path != "data/signals.db" {
+		t.Errorf("default Path = %q, want data/signals.db", cfg.Storage.Signals.Path)
+	}
+}
+
+// functional[0]: Defaults() carries the sqlite signal-store defaults.
+func TestDefaults_SignalStorage(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Storage.Signals.Backend != "sqlite" {
+		t.Errorf("Defaults Backend = %q, want sqlite", cfg.Storage.Signals.Backend)
+	}
+	if cfg.Storage.Signals.Path != "data/signals.db" {
+		t.Errorf("Defaults Path = %q, want data/signals.db", cfg.Storage.Signals.Path)
+	}
+}
+
+// error_handling[1]: an invalid backend is rejected and the error names the
+// offending value.
+func TestConfig_Validate_SignalBackendInvalid(t *testing.T) {
+	cfg := Defaults()
+	cfg.Storage.Signals.Backend = "postgres"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid backend, got nil")
+	}
+	if !errors.Is(err, core.ErrConfigInvalid) {
+		t.Errorf("error chain must include ErrConfigInvalid, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "postgres") {
+		t.Errorf("error must name the invalid value 'postgres', got %v", err)
+	}
+}
+
+// functional[0]: memory and sqlite backends both pass validation.
+func TestConfig_Validate_SignalBackendValid(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		cfg := Defaults()
+		cfg.Storage.Signals.Backend = backend
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("backend %q must be valid, got %v", backend, err)
+		}
+	}
+}

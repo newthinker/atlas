@@ -131,6 +131,13 @@ storage:
       access_key: "${AWS_ACCESS_KEY_ID}"
       secret_key: "${AWS_SECRET_ACCESS_KEY}"
       prefix: "atlas/"
+  # Generated-signal store (feeds the API and web UI).
+  # ⚠️ 行为变化：默认从「内存」改为「sqlite」——信号默认持久化落盘到
+  # data/signals.db，重启后不再丢失。如需旧的非持久化行为，显式设 backend: memory。
+  # sqlite 打开失败时服务启动即退出（不静默降级内存，避免悄悄丢数据）。
+  signals:
+    backend: "sqlite"        # sqlite（默认，持久化）| memory（进程内，重启即丢）
+    path: "data/signals.db"  # sqlite 数据库路径（backend=sqlite 时生效；父目录自动创建）
 
 # LLM configuration
 llm:

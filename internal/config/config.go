@@ -76,8 +76,17 @@ type ServerConfig struct {
 }
 
 type StorageConfig struct {
-	Hot  HotStorageConfig  `mapstructure:"hot"`
-	Cold ColdStorageConfig `mapstructure:"cold"`
+	Hot     HotStorageConfig    `mapstructure:"hot"`
+	Cold    ColdStorageConfig   `mapstructure:"cold"`
+	Signals SignalStorageConfig `mapstructure:"signals"`
+}
+
+// SignalStorageConfig selects where generated signals are persisted. Backend
+// defaults to "sqlite" (persistent, data/signals.db) — a deliberate change from
+// the former in-memory-only behaviour, applied in Load/Defaults.
+type SignalStorageConfig struct {
+	Backend string `mapstructure:"backend"` // "memory" | "sqlite" (default sqlite)
+	Path    string `mapstructure:"path"`    // sqlite db path (default data/signals.db)
 }
 
 type HotStorageConfig struct {
@@ -294,6 +303,16 @@ func Load(path string) (*Config, error) {
 		cfg.Collector.Cache.TTL = 5 * time.Minute
 	}
 
+	// Signal store defaults to persistent sqlite so legacy configs without a
+	// storage.signals block load cleanly and persist by default (behaviour
+	// change from the former in-memory-only store).
+	if cfg.Storage.Signals.Backend == "" {
+		cfg.Storage.Signals.Backend = "sqlite"
+	}
+	if cfg.Storage.Signals.Path == "" {
+		cfg.Storage.Signals.Path = "data/signals.db"
+	}
+
 	return &cfg, nil
 }
 
@@ -313,6 +332,10 @@ func Defaults() *Config {
 			},
 			Cold: ColdStorageConfig{
 				Type: "localfs",
+			},
+			Signals: SignalStorageConfig{
+				Backend: "sqlite",
+				Path:    "data/signals.db",
 			},
 		},
 		Router: RouterConfig{
@@ -381,6 +404,16 @@ func (c *Config) Validate() error {
 	if c.Router.PercentileStep < 0 {
 		return core.WrapError(core.ErrConfigInvalid,
 			fmt.Errorf("percentile_step cannot be negative, got %f", c.Router.PercentileStep))
+	}
+
+	// Signal storage validation. Empty is allowed (Load normalizes it to the
+	// sqlite default); any other non-{memory,sqlite} value is a config error.
+	switch c.Storage.Signals.Backend {
+	case "", "memory", "sqlite":
+		// Valid
+	default:
+		return core.WrapError(core.ErrConfigInvalid,
+			fmt.Errorf("invalid storage.signals.backend: %s (want memory or sqlite)", c.Storage.Signals.Backend))
 	}
 
 	// LLM validation - if provider set, check config exists
