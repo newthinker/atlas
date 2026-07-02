@@ -1,4 +1,4 @@
-.PHONY: build run test clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all signal-ic signal-ic-hk signal-ic-us baseline-scores
+.PHONY: build run test test-integration clean export-signals signal-eval signal-eval-hk qlib-data qlib-data-hk signal-eval-us qlib-data-us warehouse-dump warehouse-dump-all signal-ic signal-ic-hk signal-ic-us baseline-scores
 
 BINARY=atlas
 BUILD_DIR=bin
@@ -122,6 +122,9 @@ run: build
 
 test:
 	go test -v ./...
+
+test-integration:
+	go test -tags integration ./internal/collector/crypto/...
 
 clean:
 	rm -rf $(BUILD_DIR)
