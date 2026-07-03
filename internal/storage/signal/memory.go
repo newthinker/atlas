@@ -4,6 +4,7 @@ package signal
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -69,6 +70,15 @@ func (m *MemoryStore) List(ctx context.Context, filter ListFilter) ([]core.Signa
 			result = append(result, sig)
 		}
 	}
+
+	// Stable order: generated_at ASC, id ASC (AD-14) — matches the sqlite
+	// store's ORDER BY so both implementations return the same sequence.
+	sort.SliceStable(result, func(i, j int) bool {
+		if !result[i].GeneratedAt.Equal(result[j].GeneratedAt) {
+			return result[i].GeneratedAt.Before(result[j].GeneratedAt)
+		}
+		return result[i].ID < result[j].ID
+	})
 
 	// Apply offset and limit
 	if filter.Offset > 0 && filter.Offset < len(result) {
