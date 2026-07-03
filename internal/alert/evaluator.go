@@ -47,6 +47,18 @@ func NewEvaluator(notifiers []Notifier) *Evaluator {
 	}
 }
 
+// SetLogger injects a logger for notify-failure reporting. A nil logger is
+// ignored so the default no-op logger is kept. NewEvaluator callers that do not
+// call SetLogger keep the previous silent behaviour.
+func (e *Evaluator) SetLogger(logger *zap.Logger) {
+	if logger == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.logger = logger
+}
+
 // SetMetrics updates the current metrics.
 func (e *Evaluator) SetMetrics(metrics map[string]float64) {
 	e.mu.Lock()

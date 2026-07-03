@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/newthinker/atlas/internal/alert"
 	"github.com/newthinker/atlas/internal/config"
+	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/metrics"
 	"github.com/newthinker/atlas/internal/notifier"
 	"github.com/newthinker/atlas/internal/notifier/telegram"
@@ -59,6 +61,16 @@ func (f *fakeAlertNotifier) count() int {
 	defer f.mu.Unlock()
 	return len(f.msgs)
 }
+
+// failingNotifier is a notifier.Notifier whose Send always errors, so the alert
+// adapter's Notify returns an error and the evaluator logs a warn — used to
+// prove the injected production logger is wired through maybeStartAlertRunner.
+type failingNotifier struct{ name string }
+
+func (f *failingNotifier) Name() string                  { return f.name }
+func (f *failingNotifier) Init(notifier.Config) error    { return nil }
+func (f *failingNotifier) Send(core.Signal) error        { return errors.New("send boom") }
+func (f *failingNotifier) SendBatch([]core.Signal) error { return nil }
 
 // fakeSignalCounter implements the signalCounter seam used by the alert loop.
 type fakeSignalCounter struct {
@@ -378,6 +390,34 @@ func TestMaybeStartAlertRunner_WrapsNotifiersAndRegistrySnapshot(t *testing.T) {
 	}
 	if n, err := r.count(time.Now()); err != nil || n != 3 {
 		t.Errorf("count seam = (%d, %v), want (3, nil)", n, err)
+	}
+}
+
+// non_functional[1]: maybeStartAlertRunner must inject the production logger
+// into the evaluator so a Notify failure surfaces as a Warn in real logs.
+func TestMaybeStartAlertRunner_InjectsLoggerForNotifyFailures(t *testing.T) {
+	obs, logs := observer.New(zapcore.WarnLevel)
+	cfg := &config.Config{Alerts: config.AlertsConfig{
+		Enabled:       true,
+		CheckInterval: time.Hour, // large so the ticker never fires; we drive evaluateOnce
+		Rules:         []config.AlertRule{{Name: "sig", Expr: "signals_24h > 5", Severity: "info", Message: "busy"}},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	r := maybeStartAlertRunner(ctx, cfg,
+		[]notifier.Notifier{&failingNotifier{name: "boom"}}, nil, &fakeSignalCounter{n: 7}, zap.New(obs))
+	if r == nil {
+		t.Fatal("expected a runner")
+	}
+	cancel() // stop the background goroutine; drive the cycle deterministically
+	r.evaluateOnce()
+
+	warns := logs.FilterMessageSnippet("notify failed")
+	if warns.Len() == 0 {
+		t.Fatalf("injected logger must surface the notify-failure warn in production, got: %v", logs.All())
+	}
+	if f := warns.All()[0].ContextMap(); f["rule"] != "sig" {
+		t.Errorf("warn must name the firing rule, got fields %v", f)
 	}
 }
 

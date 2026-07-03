@@ -154,10 +154,14 @@ func maybeStartAlertRunner(
 		interval = defaultAlertInterval
 	}
 
+	// Inject the production logger so Notify failures surface as warnings.
+	evaluator := alert.NewEvaluator(adapters)
+	evaluator.SetLogger(log)
+
 	r := &alertRunner{
 		interval:  interval,
 		rules:     mapRules(cfg.Alerts.Rules),
-		evaluator: alert.NewEvaluator(adapters),
+		evaluator: evaluator,
 		snapshot: func() map[string]float64 {
 			if reg == nil {
 				return map[string]float64{}

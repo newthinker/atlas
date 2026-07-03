@@ -212,6 +212,27 @@ func TestEvaluator_NotifyFailure_LogsWarnAndRetriesNextRound(t *testing.T) {
 	}
 }
 
+// non_functional[1]: SetLogger provides a logger injection path; a nil logger
+// is ignored (keeps the default no-op) so it never panics.
+func TestEvaluator_SetLogger_InjectsAndNilSafe(t *testing.T) {
+	failing := &errNotifier{name: "boom", err: errors.New("send failed")}
+	eval := NewEvaluator([]Notifier{failing})
+	obs, logs := observer.New(zapcore.WarnLevel)
+	eval.SetLogger(zap.New(obs))
+
+	rule := Rule{Name: "down", Expr: "up == 0", For: 0, Severity: "critical", Message: "down"}
+	eval.SetMetrics(map[string]float64{"up": 0})
+	eval.Evaluate(rule)
+
+	if logs.FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
+		t.Errorf("injected logger must capture the notify-failure warn, got %d", logs.Len())
+	}
+
+	// A nil logger must be ignored (no panic, keeps prior logger).
+	eval.SetLogger(nil)
+	eval.Evaluate(rule) // must not panic
+}
+
 // W2 functional[0]+[2]: when at least one notifier succeeds, the rule enters
 // cooldown (no re-dispatch next round), while the failing one is only logged
 // and does not interrupt the successful delivery.
