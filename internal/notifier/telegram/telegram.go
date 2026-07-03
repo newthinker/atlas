@@ -96,6 +96,16 @@ func (t *Telegram) Send(signal core.Signal) error {
 	return t.sendMessage(message)
 }
 
+// SendText sends a pre-formatted message as plain text with no parse_mode, so
+// Telegram does not attempt Markdown parsing. Alert text ("[SEVERITY] name:
+// message", rules.go) carries arbitrary operator-supplied characters; unpaired
+// Markdown metacharacters (_ * [ `) would otherwise make the API reject the
+// message with HTTP 400 and the alert would be silently lost. Plain text
+// delivers it verbatim. Used by the alert adapter's direct path.
+func (t *Telegram) SendText(text string) error {
+	return t.sendPayload(text, "")
+}
+
 func (t *Telegram) SendBatch(signals []core.Signal) error {
 	msg := formatBatch(signals)
 	if msg == "" {
@@ -275,15 +285,25 @@ func (t *Telegram) sendMessage(text string) error {
 	return t.sendRaw(escapeMarkdown(text))
 }
 
-// sendRaw sends text as-is (no escaping). Used by SendBatch whose digest
-// content lives inside ``` code blocks where _ must render literally.
+// sendRaw sends text as-is (no escaping) with Markdown parse_mode. Used by
+// SendBatch whose digest content lives inside ``` code blocks where _ must
+// render literally.
 func (t *Telegram) sendRaw(text string) error {
+	return t.sendPayload(text, "Markdown")
+}
+
+// sendPayload posts text to the Telegram sendMessage API. A non-empty parseMode
+// is forwarded as-is (e.g. "Markdown"); an empty parseMode omits the field so
+// the message is delivered as plain text (no metacharacter interpretation).
+func (t *Telegram) sendPayload(text, parseMode string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
 
 	payload := map[string]any{
-		"chat_id":    t.chatID,
-		"text":       text,
-		"parse_mode": "Markdown",
+		"chat_id": t.chatID,
+		"text":    text,
+	}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 
 	body, err := json.Marshal(payload)

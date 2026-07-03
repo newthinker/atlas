@@ -1,8 +1,13 @@
 package alert
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type mockNotifier struct {
@@ -13,6 +18,20 @@ func (m *mockNotifier) Name() string { return "mock" }
 func (m *mockNotifier) Notify(msg string) error {
 	m.sent = append(m.sent, msg)
 	return nil
+}
+
+// errNotifier always fails and counts how many times it was called, so tests
+// can assert on retry behaviour and warn logging.
+type errNotifier struct {
+	name  string
+	calls int
+	err   error
+}
+
+func (m *errNotifier) Name() string { return m.name }
+func (m *errNotifier) Notify(string) error {
+	m.calls++
+	return m.err
 }
 
 func TestEvaluator_EvaluateRule(t *testing.T) {
@@ -159,6 +178,88 @@ func TestRule_FormatMessage(t *testing.T) {
 
 	if msg != "[WARNING] high_error_rate: API error rate above 5%" {
 		t.Errorf("unexpected message: %s", msg)
+	}
+}
+
+// W2 functional[0]+[1]: a failing notifier is logged (with rule + notifier
+// name) and must NOT enter cooldown, so the next evaluation retries.
+func TestEvaluator_NotifyFailure_LogsWarnAndRetriesNextRound(t *testing.T) {
+	failing := &errNotifier{name: "boom", err: errors.New("send failed")}
+	eval := NewEvaluator([]Notifier{failing})
+	obs, logs := observer.New(zapcore.WarnLevel)
+	eval.logger = zap.New(obs)
+
+	rule := Rule{Name: "down", Expr: "up == 0", For: 0, Severity: "critical", Message: "Service is down"}
+	eval.SetMetrics(map[string]float64{"up": 0})
+
+	eval.Evaluate(rule)
+	if failing.calls != 1 {
+		t.Fatalf("expected 1 notify attempt, got %d", failing.calls)
+	}
+	warns := logs.FilterLevelExact(zapcore.WarnLevel)
+	if warns.Len() != 1 {
+		t.Fatalf("expected 1 warn on notify failure, got %d", warns.Len())
+	}
+	fields := warns.All()[0].ContextMap()
+	if fields["rule"] != "down" || fields["notifier"] != "boom" {
+		t.Errorf("warn must name rule and notifier, got fields %v", fields)
+	}
+
+	// Total failure must not have entered cooldown → next round retries.
+	eval.Evaluate(rule)
+	if failing.calls != 2 {
+		t.Errorf("failure must not enter cooldown; expected retry (2 attempts), got %d", failing.calls)
+	}
+}
+
+// non_functional[1]: SetLogger provides a logger injection path; a nil logger
+// is ignored (keeps the default no-op) so it never panics.
+func TestEvaluator_SetLogger_InjectsAndNilSafe(t *testing.T) {
+	failing := &errNotifier{name: "boom", err: errors.New("send failed")}
+	eval := NewEvaluator([]Notifier{failing})
+	obs, logs := observer.New(zapcore.WarnLevel)
+	eval.SetLogger(zap.New(obs))
+
+	rule := Rule{Name: "down", Expr: "up == 0", For: 0, Severity: "critical", Message: "down"}
+	eval.SetMetrics(map[string]float64{"up": 0})
+	eval.Evaluate(rule)
+
+	if logs.FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
+		t.Errorf("injected logger must capture the notify-failure warn, got %d", logs.Len())
+	}
+
+	// A nil logger must be ignored (no panic, keeps prior logger).
+	eval.SetLogger(nil)
+	eval.Evaluate(rule) // must not panic
+}
+
+// W2 functional[0]+[2]: when at least one notifier succeeds, the rule enters
+// cooldown (no re-dispatch next round), while the failing one is only logged
+// and does not interrupt the successful delivery.
+func TestEvaluator_PartialFailure_EntersCooldownAndWarns(t *testing.T) {
+	failing := &errNotifier{name: "boom", err: errors.New("x")}
+	ok := &mockNotifier{}
+	// failing first proves a failure does not abort the remaining notifiers.
+	eval := NewEvaluator([]Notifier{failing, ok})
+	obs, logs := observer.New(zapcore.WarnLevel)
+	eval.logger = zap.New(obs)
+	eval.SetCooldown(5 * time.Minute)
+
+	rule := Rule{Name: "down", Expr: "up == 0", For: 0, Severity: "critical", Message: "Service is down"}
+	eval.SetMetrics(map[string]float64{"up": 0})
+
+	eval.Evaluate(rule)
+	if failing.calls != 1 || len(ok.sent) != 1 {
+		t.Fatalf("both notifiers must be attempted: failing.calls=%d ok.sent=%d", failing.calls, len(ok.sent))
+	}
+	if logs.FilterLevelExact(zapcore.WarnLevel).Len() != 1 {
+		t.Errorf("expected 1 warn for the failing notifier, got %d", logs.FilterLevelExact(zapcore.WarnLevel).Len())
+	}
+
+	// One success → cooldown entered → no re-dispatch on the next evaluation.
+	eval.Evaluate(rule)
+	if failing.calls != 1 || len(ok.sent) != 1 {
+		t.Errorf("partial success must enter cooldown; got failing.calls=%d ok.sent=%d", failing.calls, len(ok.sent))
 	}
 }
 

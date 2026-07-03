@@ -195,18 +195,22 @@ metrics:
   enabled: true
   path: "/metrics"
 
-# Alerting configuration
+# Alerting configuration.
+# The evaluation loop (started only when enabled) snapshots metrics every
+# check_interval, derives a couple of alert-friendly metrics, and evaluates the
+# rules below. Rule expr must reference a metric the snapshot produces:
+#   http_error_rate  — interval 5xx-over-total request error rate (0..1), derived
+#                       from the delta of http_requests_total_5xx / http_requests_total
+#                       between two snapshots (first snapshot has no baseline).
+#   signals_24h      — number of signals stored in the last 24h.
+# Plus any raw key from /metrics (e.g. atlas_signals_generated_total). Note HTTP
+# metric names have no atlas_ prefix; business metrics do.
 alerts:
   enabled: true
   check_interval: 60s
   rules:
     - name: high_error_rate
-      expr: "error_rate > 0.05"
+      expr: "http_error_rate > 0.1"
       for: 5m
       severity: warning
-      message: "API error rate above 5%"
-    - name: api_down
-      expr: "up == 0"
-      for: 1m
-      severity: critical
-      message: "ATLAS API is not responding"
+      message: "API 5xx error rate above 10% over the last interval"

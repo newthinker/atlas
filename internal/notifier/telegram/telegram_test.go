@@ -329,6 +329,56 @@ func TestSendBatch_UnderscoreNotEscaped(t *testing.T) {
 	}
 }
 
+// TASK-202 (W1 fix): SendText delivers alert text verbatim as plain text —
+// no parse_mode field — so unpaired Markdown metacharacters (_ [ ] `) in
+// operator-supplied "[SEVERITY] name: message" are not parsed and cannot
+// trigger a Telegram HTTP 400 that would silently drop the alert.
+func TestTelegram_SendText(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	tg := &Telegram{botToken: "tok", chatID: "cid"}
+	tg.client = &http.Client{Transport: &prefixRoundTripper{prefix: server.URL, inner: server.Client().Transport}}
+
+	// Unpaired _, unbalanced [ ], and a lone backtick: a Markdown-parsed send
+	// would 400 on this; plain text must carry it through untouched.
+	const msg = "[CRITICAL] disk_low on node_a: free < 5% [urgent] use `df`"
+	if err := tg.SendText(msg); err != nil {
+		t.Fatalf("SendText error: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("payload not JSON: %v (%s)", err, capturedBody)
+	}
+	if payload["chat_id"] != "cid" {
+		t.Errorf("chat_id = %v, want cid", payload["chat_id"])
+	}
+	if payload["text"] != msg {
+		t.Errorf("text = %q, want verbatim %q", payload["text"], msg)
+	}
+	// The core of the W1 fix: no parse_mode, so Telegram treats the text as
+	// plain and never tries to parse the metacharacters.
+	if _, ok := payload["parse_mode"]; ok {
+		t.Errorf("SendText payload must not carry parse_mode, got %v", payload["parse_mode"])
+	}
+	// Verbatim: metacharacters are neither escaped nor stripped.
+	if strings.Contains(string(capturedBody), `\_`) {
+		t.Errorf("SendText must not escape underscores, got:\n%s", capturedBody)
+	}
+}
+
+// TestTelegram_ImplementsSendText pins the public optional-interface method the
+// alert adapter's direct path relies on.
+func TestTelegram_ImplementsSendText(t *testing.T) {
+	var _ interface{ SendText(string) error } = (*Telegram)(nil)
+}
+
 // prefixRoundTripper rewrites the host of every request to the given prefix,
 // allowing test servers to intercept calls that would go to api.telegram.org.
 type prefixRoundTripper struct {

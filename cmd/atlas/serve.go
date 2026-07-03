@@ -167,8 +167,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Wire configured notifiers (telegram/email/webhook) so routed signals are
 	// actually delivered. Done after collectors are registered and before the
 	// server starts. Misconfigured entries warn and are skipped, never blocking
-	// startup (matches collector/strategy wiring above).
-	registerConfiguredNotifiers(cfg, application, log)
+	// startup (matches collector/strategy wiring above). The returned notifiers
+	// are reused as alert sinks when the alert loop is enabled below.
+	notifiers := registerConfiguredNotifiers(cfg, application, log)
 
 	// Create strategy engine and register strategies
 	strategies := strategy.NewEngine()
@@ -234,6 +235,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		metricsReg = metrics.NewRegistry()
 		log.Info("metrics enabled", zap.String("path", cfg.Metrics.Path))
 	}
+
+	// Start the alert evaluation loop when enabled. It periodically snapshots
+	// metrics, derives http_error_rate / signals_24h, and evaluates the
+	// configured rules, delivering to the same notifiers via alert adapters.
+	// The loop stops when appCtx is cancelled during shutdown. When alerts are
+	// disabled this is a no-op (no goroutine, no evaluator).
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+	maybeStartAlertRunner(appCtx, cfg, notifiers, metricsReg, sigStore, log)
 
 	// Wire the paper-mode execution chain when the broker is enabled. In paper
 	// mode this builds PaperBroker → RiskChecker → PositionTracker →
@@ -321,14 +331,15 @@ func buildArbitrator(cfg *config.Config, collectors []collector.Collector, log *
 }
 
 // registerConfiguredNotifiers wires the enabled telegram/email/webhook entries
-// in cfg.Notifiers into the app's notifier registry and returns the number
-// successfully registered. Misconfigured entries (missing required fields,
+// in cfg.Notifiers into the app's notifier registry and returns the notifiers
+// successfully registered (so the alert loop can wrap the same instances as
+// alert sinks). Misconfigured entries (missing required fields,
 // unknown type, or a registry rejection such as a duplicate name) are logged at
 // warn level and skipped — they never block startup, matching the
 // collector/strategy wiring. If any notifier was enabled yet none registered, a
 // warn is emitted because routed signals would otherwise be dropped silently.
-func registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *zap.Logger) int {
-	registered := 0
+func registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *zap.Logger) []notifier.Notifier {
+	registered := make([]notifier.Notifier, 0)
 	enabled := 0
 
 	for key, nc := range cfg.Notifiers {
@@ -373,12 +384,12 @@ func registerConfiguredNotifiers(cfg *config.Config, application *app.App, log *
 			log.Warn("failed to register notifier", zap.String("notifier", key), zap.Error(err))
 			continue
 		}
-		registered++
+		registered = append(registered, n)
 		log.Info("registered notifier", zap.String("notifier", key))
 	}
 
-	log.Info("configured notifiers registered", zap.Int("count", registered))
-	if enabled > 0 && registered == 0 {
+	log.Info("configured notifiers registered", zap.Int("count", len(registered)))
+	if enabled > 0 && len(registered) == 0 {
 		log.Warn("all configured notifiers failed to register; signals will not be delivered")
 	}
 	return registered
