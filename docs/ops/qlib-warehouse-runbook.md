@@ -57,9 +57,10 @@ runtime 可用 `ATLAS_RUNTIME` 环境变量覆盖）：
 | 脚本 | 作用 |
 |---|---|
 | `deploy.sh` | 代码目录 `make build` → 把运行时产物 rsync 到 runtime。剥离 `*.go` 但**保留 `internal/api/templates/` 等运行时资产**；`--delete` 同步代码/脚本，但排除并保护 runtime 本地数据（`data/ logs/ qlib_csv*/ fundamentals_csv*/ signals*.csv reports/`）；收紧 `config.yaml` 为 600 |
-| `install-services.sh` | 安装并加载 3 个 LaunchAgent（serve + refresh-us + refresh-cnhk）。幂等；清理旧的单一 warehouse-dump；已处理 bootout→bootstrap 竞态（EIO 重试） |
-| `services.sh <cmd>` | 日常管理：`status / restart / stop / start / refresh-us / refresh-cnhk / logs / refresh-logs <us\|cnhk> / uninstall` |
+| `install-services.sh` | 安装并加载 4 个 LaunchAgent（serve + refresh-us + refresh-cnhk + analysis）。幂等；清理旧的单一 warehouse-dump；已处理 bootout→bootstrap 竞态（EIO 重试） |
+| `services.sh <cmd>` | 日常管理：`status / restart / stop / start / refresh-us / refresh-cnhk / analysis-now / logs / refresh-logs <us\|cnhk> / analysis-logs / uninstall` |
 | `refresh-market.sh <us\|cnhk>` | 刷新指定市场组 OHLCV（`-o build` 免编译复用部署二进制）→ `warehouse-dump-all` 全量重建含全部市场的仓库。由 launchd 分时段调度（见 §5） |
+| `trigger-analysis.sh` | 触发一轮分析：从 `configs/config.yaml` 读端口/api_key，`POST /api/v1/analysis/run` 让 atlas 产信号 → router → 通知器。由 analysis LaunchAgent 每 30 分钟调用（见 §5.1） |
 
 ### 首次部署
 
@@ -164,6 +165,32 @@ bash scripts/ops/services.sh refresh-cnhk
 > （每天 `Hour`/`Minute`，无 `Weekday` = 每天触发）。改时刻：编辑 plist → `deploy.sh` → `install-services.sh` 重载。
 > 任务失败（`set -e` + 校验非零退出）会在 `logs/refresh-*.err.log` 留痕，但
 > **不影响正在运行的 atlas**——它继续用上一份库 + 外部 API 补尾。
+
+### 5.1 定时分析触发（第三个定时 LaunchAgent）
+
+刷新任务只备料（重建仓库），**不产信号**；`atlas serve` 自身也不跑分析循环（`App.Start`
+未接线），分析需外部按周期触发。这由第三个 LaunchAgent 完成：
+
+| LaunchAgent | 频率 | 动作 | 机制 |
+|---|---|---|---|
+| `com.newthinker.atlas.analysis` | **每 30 分钟**（`StartInterval` 1800s） | `trigger-analysis.sh` | `POST /api/v1/analysis/run` → atlas 产信号 → router → Telegram 通知 |
+
+与 refresh 任务的三点关键差异：
+
+- **依赖 serve 在跑**：走 HTTP API 而非文件重建，`atlas serve` 未运行则触发失败
+  （`trigger-analysis.sh` 打 `WARN: trigger failed` 并非零退出，见 `logs/analysis.err.log`）。
+- **间隔调度而非日历时刻**：用 `StartInterval`（秒）非 `StartCalendarInterval`；改频率编辑
+  plist 的 `StartInterval` → `deploy.sh` → `install-services.sh` 重载。
+- **不会刷屏**：30min 较密，但 router 的 `cooldown_hours`（默认 4h）防止同一信号重复推送；
+  `RunAtLoad=false` 使装服务时不立即触发一轮通知。
+
+手动立即触发一轮 / 跟随触发日志（不等 30min）：
+
+```bash
+bash scripts/ops/services.sh analysis-now    # launchctl kickstart，立即跑一轮分析
+bash scripts/ops/services.sh analysis-logs   # tail -f logs/analysis.out.log
+# analysis.out.log 每行形如：[<ts>] analysis trigger -> http=200
+```
 
 ## 6. 离线策略评估（方向①，按需，非每日）
 

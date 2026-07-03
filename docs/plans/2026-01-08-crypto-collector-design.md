@@ -59,6 +59,10 @@ type Provider interface {
 }
 ```
 
+> **未实现，实施时裁剪**：实际 `internal/collector/crypto/provider.go` 的 `Provider`
+> 接口只有 `Name/FetchQuote/FetchHistory` 三个方法，**没有 `SupportsSymbol`**——
+> fallback 靠遍历所有 provider 试错，不预筛支持的 symbol。若无明确需求勿补此方法。
+
 ### 3. Symbol Normalizer
 
 `internal/collector/crypto/symbol.go`:
@@ -148,4 +152,13 @@ var (
 )
 ```
 
+> **未实现，实施时裁剪**：crypto 包**未定义**上述 sentinel 错误。现状 provider
+> 直接返回原始 `error`，collector 用 `fmt.Errorf("all providers failed: %w", lastErr)`
+> 包裹最后一个错误（`internal/collector/crypto/crypto.go`）。core 包虽有通用
+> `core.ErrSymbolNotFound`，但它是 `*core.Error` 而非此处的 `errors.New`，二者不通用。
+
 Only retryable errors trigger fallback; permanent errors return immediately.
+
+> **未实现，实施时裁剪**：实际 `FetchQuote`/`FetchHistory` **无差别遍历所有 provider**，
+> 任何错误都继续 fallback 到下一个源，不区分「可重试 vs 永久」——没有错误分类逻辑。
+> 若无监控数据佐证需要短路永久错误，勿引入此复杂度。

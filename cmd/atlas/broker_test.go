@@ -43,7 +43,12 @@ func TestGetBroker(t *testing.T) {
 			c.Broker.Provider = "mock"
 			return c
 		}(), false},
-		{"futu provider not implemented", func() *config.Config {
+		{"default provider falls back to mock", func() *config.Config {
+			c := config.Defaults() // Provider defaults to "mock"
+			c.Broker.Enabled = true
+			return c
+		}(), false},
+		{"futu provider is unknown (FutuBroker withdrawn)", func() *config.Config {
 			c := config.Defaults()
 			c.Broker.Enabled = true
 			c.Broker.Provider = "futu"
@@ -72,6 +77,23 @@ func TestGetBroker(t *testing.T) {
 				t.Fatal("expected a broker instance")
 			}
 		})
+	}
+}
+
+// TestGetBroker_UnknownProviderNamesProvider verifies the error surfaces the
+// actual provider name (futu falls through to default after FutuBroker was
+// withdrawn — 2026-07-02, paper-only). Covers functional[0] + error_handling[0].
+func TestGetBroker_UnknownProviderNamesProvider(t *testing.T) {
+	c := config.Defaults()
+	c.Broker.Enabled = true
+	c.Broker.Provider = "futu"
+
+	_, err := getBroker(c)
+	if err == nil {
+		t.Fatal("expected error for futu provider")
+	}
+	if got := err.Error(); got != "unknown broker provider: futu" {
+		t.Fatalf("error = %q, want %q", got, "unknown broker provider: futu")
 	}
 }
 

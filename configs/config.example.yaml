@@ -160,8 +160,8 @@ meta:
 # Broker integration
 broker:
   enabled: false
-  provider: "futu"  # futu
-  mode: "paper"     # paper, live
+  provider: "mock"  # mock (paper-only; live trading not supported)
+  mode: "paper"     # paper only
   execution:
     mode: "confirm"       # auto, confirm, batch
     batch_time: "09:00"   # For batch mode (HH:MM)
@@ -170,12 +170,6 @@ broker:
     max_position_pct: 10      # Max 10% in single position
     max_daily_loss_pct: 5     # Stop trading if down 5% today
     max_open_positions: 20    # Max concurrent positions
-  futu:
-    host: "127.0.0.1"
-    port: 11111
-    env: "simulate"  # simulate, real
-    trade_password: "${FUTU_TRADE_PWD}"
-    rsa_key_path: ""
 
 # Watchlist of symbols to monitor
 watchlist:

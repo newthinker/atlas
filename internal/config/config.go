@@ -184,7 +184,6 @@ type BrokerConfig struct {
 	Mode      string              `mapstructure:"mode"` // paper, live
 	Execution ExecutionConfigOpts `mapstructure:"execution"`
 	Risk      RiskConfigOpts      `mapstructure:"risk"`
-	Futu      FutuConfig          `mapstructure:"futu"`
 }
 
 // ExecutionConfigOpts holds execution settings for the broker.
@@ -199,15 +198,6 @@ type RiskConfigOpts struct {
 	MaxPositionPct   float64 `mapstructure:"max_position_pct"`
 	MaxDailyLossPct  float64 `mapstructure:"max_daily_loss_pct"`
 	MaxOpenPositions int     `mapstructure:"max_open_positions"`
-}
-
-// FutuConfig holds Futu broker settings.
-type FutuConfig struct {
-	Host          string `mapstructure:"host"`
-	Port          int    `mapstructure:"port"`
-	Env           string `mapstructure:"env"` // "simulate" or "real"
-	TradePassword string `mapstructure:"trade_password"`
-	RSAKeyPath    string `mapstructure:"rsa_key_path"`
 }
 
 // MetaConfig holds LLM meta-strategy settings.
@@ -353,7 +343,7 @@ func Defaults() *Config {
 		},
 		Broker: BrokerConfig{
 			Enabled:  false,
-			Provider: "futu",
+			Provider: "mock",
 			Mode:     "paper",
 			Execution: ExecutionConfigOpts{
 				Mode:           "confirm",
@@ -416,9 +406,11 @@ func (c *Config) Validate() error {
 
 	// Broker validation
 	if c.Broker.Enabled {
-		if c.Broker.Mode == "live" && c.Broker.Futu.Env != "real" {
+		// Live trading was withdrawn (FutuBroker not implemented, 2026-07-02
+		// decision / AD-15). Only paper trading is supported.
+		if c.Broker.Mode == "live" {
 			return core.WrapError(core.ErrConfigInvalid,
-				fmt.Errorf("live mode requires futu env=real, got %s", c.Broker.Futu.Env))
+				fmt.Errorf("live trading not supported (paper-only)"))
 		}
 		switch c.Broker.Execution.Mode {
 		case "auto", "confirm", "batch", "":
@@ -442,7 +434,6 @@ func (c *Config) WarnHardcodedSecrets(logger func(string)) {
 		{"server.api_key", c.Server.APIKey},
 		{"storage.cold.s3.access_key", c.Storage.Cold.S3.AccessKey},
 		{"storage.cold.s3.secret_key", c.Storage.Cold.S3.SecretKey},
-		{"broker.futu.trade_password", c.Broker.Futu.TradePassword},
 		{"llm.claude.api_key", c.LLM.Claude.APIKey},
 		{"llm.openai.api_key", c.LLM.OpenAI.APIKey},
 	}

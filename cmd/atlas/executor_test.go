@@ -4,7 +4,7 @@ package main
 // functional[0]   "paper 模式 ExecutionManager 注入 app.SetExecutor 与 deps"  → TestWireExecution_PaperMode_InjectsBoth
 // functional[1]   "BUY/SELL 信号按 DefaultSizePct 与余额下单提交"             → TestSignalExecutor_EndToEnd_BuyChangesBalanceAndPosition
 // functional[2]   "e2e BUY 改余额/持仓；风险拒绝场景余额/持仓不变"             → TestSignalExecutor_EndToEnd_BuyChangesBalanceAndPosition / TestSignalExecutor_EndToEnd_RiskRejectionNoChange
-// functional[3]   "Provider=futu 非 paper 保持 warning，进程正常启动"          → TestBuildExecution_FutuNonPaper_NilNoError
+// functional[3]   "非 paper 模式保持 warning，进程正常启动"                    → TestBuildExecution_NonPaper_NilNoError
 // boundary[0]     "Enabled=false 不构造组件，deps.ExecutionManager 为 nil"      → TestBuildExecution_Disabled_Nil / TestWireExecution_Disabled_NoInject
 // boundary[1]     "非 BUY/SELL（HOLD/WATCH）跳过不生成订单"                    → TestSignalExecutor_HoldSignalSkipped
 // boundary[2]     "余额 0 或下单数量为 0 时跳过下单，不报错"                    → TestSignalExecutor_ZeroQuantitySkipped
@@ -102,12 +102,10 @@ func TestBuildExecution_Disabled_Nil(t *testing.T) {
 }
 
 // functional[3]
-func TestBuildExecution_FutuNonPaper_NilNoError(t *testing.T) {
+func TestBuildExecution_NonPaper_NilNoError(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Broker.Enabled = true
-	cfg.Broker.Provider = "futu"
 	cfg.Broker.Mode = "live"
-	cfg.Broker.Futu.Env = "real"
 
 	em, err := buildExecution(context.Background(), cfg, zap.NewNop())
 	if err != nil {
