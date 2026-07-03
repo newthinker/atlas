@@ -236,7 +236,8 @@ func (e *Eastmoney) fetchStockQuote(symbol string) (*core.Quote, error) {
 		Low:           d.F52 / divisor,
 		PrevClose:     d.F60 / divisor,
 		Change:        d.F169 / divisor,
-		ChangePercent: d.F170,
+		// f170 is percent×100 (fixed scale, independent of the price divisor).
+		ChangePercent: d.F170 / 100,
 		Volume:        int64(d.F47),
 		Bid:           d.F44 / divisor,
 		Ask:           d.F45 / divisor,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/notifier"
+	"github.com/newthinker/atlas/internal/text"
 )
 
 // httpTimeout bounds each Telegram Bot API call (direct or proxied).
@@ -195,7 +196,7 @@ func renderTable(rows []core.Signal) string {
 	widths := make([]int, len(header))
 	for _, row := range cells {
 		for i, c := range row {
-			if w := displayWidth(c); w > widths[i] {
+			if w := text.DisplayWidth(c); w > widths[i] {
 				widths[i] = w
 			}
 		}
@@ -207,7 +208,7 @@ func renderTable(rows []core.Signal) string {
 			if i == len(row)-1 {
 				sb.WriteString(c) // last column: no trailing pad
 			} else {
-				sb.WriteString(padRight(c, widths[i]))
+				sb.WriteString(text.PadRight(c, widths[i]))
 				sb.WriteString("  ")
 			}
 		}

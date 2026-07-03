@@ -64,7 +64,8 @@ type App struct {
 
 	valuationSrc      ValuationSource
 	epsSrc            EPSSource
-	valuationLookback int // PE-percentile lookback in years; 0 = since inception
+	fundamentalSrc    FundamentalSource // 估值三项(PE/PB/股息率)来源,可为 nil
+	valuationLookback int               // PE-percentile lookback in years; 0 = since inception
 
 	watchlistItems []WatchlistItem
 	watchlistSet   map[string]struct{}
