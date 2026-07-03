@@ -3,6 +3,8 @@ package alert
 import (
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // Notifier interface for sending alerts.
@@ -25,6 +27,10 @@ type Evaluator struct {
 	// For testing: allow time advancement
 	now func() time.Time
 
+	// logger records notify failures; defaults to a no-op so callers that do
+	// not wire a logger keep the previous silent behaviour on the success path.
+	logger *zap.Logger
+
 	mu sync.RWMutex
 }
 
@@ -37,6 +43,7 @@ func NewEvaluator(notifiers []Notifier) *Evaluator {
 		pending:   make(map[string]time.Time),
 		lastFired: make(map[string]time.Time),
 		now:       time.Now,
+		logger:    zap.NewNop(),
 	}
 }
 
@@ -90,14 +97,29 @@ func (e *Evaluator) Evaluate(rule Rule) {
 		return // In cooldown
 	}
 
-	// Fire alert
+	// Fire alert. A notifier that returns an error is logged and skipped
+	// without aborting the others.
 	msg := rule.FormatMessage(e.metrics)
+	anySucceeded := false
 	for _, n := range e.notifiers {
-		n.Notify(msg)
+		if err := n.Notify(msg); err != nil {
+			e.logger.Warn("alert notify failed",
+				zap.String("rule", rule.Name),
+				zap.String("notifier", n.Name()),
+				zap.Error(err),
+			)
+			continue
+		}
+		anySucceeded = true
 	}
 
-	e.lastFired[rule.Name] = now
-	delete(e.pending, rule.Name)
+	// Only enter cooldown once at least one notifier delivered. On total
+	// failure, leave lastFired and pending untouched so the next evaluation
+	// retries immediately instead of silently swallowing the alert.
+	if anySucceeded {
+		e.lastFired[rule.Name] = now
+		delete(e.pending, rule.Name)
+	}
 }
 
 // EvaluateAll evaluates all rules.
