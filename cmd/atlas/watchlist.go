@@ -138,10 +138,14 @@ func resolveSymbolFilter(deps watchlistDeps, requested []string) ([]string, erro
 	return valid, nil
 }
 
-// allFailed reports whether every symbol yielded no metric at all.
+// allFailed reports whether every symbol yielded no metric at all. Any non-nil
+// metric counts as output — including PB/dividend yield alone, and a negative PE
+// (a real loss surfaced by the W2 fix) — so a symbol with only fundamentals but
+// no quote/history is not mistaken for a total failure.
 func allFailed(ms []app.SymbolMetrics) bool {
 	for _, m := range ms {
-		if m.Price != 0 || m.PricePercentile != nil || m.PEPercentile != nil || m.PE != nil {
+		if m.Price != 0 || m.PricePercentile != nil || m.PEPercentile != nil ||
+			m.PE != nil || m.PB != nil || m.DividendYield != nil {
 			return false
 		}
 	}

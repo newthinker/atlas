@@ -6,6 +6,7 @@ package main
 // functional[2] --symbols 未知警告跳过/全未知报错
 //               → TestExecuteWatchlist_UnknownSymbolWarns / _AllUnknownSymbolsErrors
 // error_handling[0] 全失败打gaps返error → TestExecuteWatchlist_AllFailedErrors
+// W4 "仅 PB/DYR 非 nil 不触发 allFailed" → TestExecuteWatchlist_FundamentalOnlyNotAllFailed
 // boundary[0]   空watchlist提示exit0 → TestExecuteWatchlist_EmptyWatchlist
 
 import (
@@ -126,6 +127,23 @@ func TestExecuteWatchlist_AllFailedErrors(t *testing.T) {
 	_, _, err := runExecute(t, watchlistParams{}, ms)
 	if err == nil {
 		t.Fatal("expected error when every symbol failed")
+	}
+}
+
+// TestExecuteWatchlist_FundamentalOnlyNotAllFailed (W4): quote/history 失败但
+// fundamental 返回 PB/股息率(无 price、无 PE/百分位)时不算"全失败",数据照展示。
+func TestExecuteWatchlist_FundamentalOnlyNotAllFailed(t *testing.T) {
+	ms := []app.SymbolMetrics{
+		{Symbol: "600519.SH", Name: "贵州茅台", Market: "A股",
+			PB: f64(5.96), DividendYield: f64(4.03),
+			Gaps: []string{"quote unavailable", "history unavailable"}},
+	}
+	out, _, err := runExecute(t, watchlistParams{}, ms)
+	if err != nil {
+		t.Fatalf("PB/DYR alone must not be treated as total failure: %v", err)
+	}
+	if !strings.Contains(out, "5.96") || !strings.Contains(out, "4.03") {
+		t.Errorf("fundamental-only metrics should still render, got:\n%s", out)
 	}
 }
 
