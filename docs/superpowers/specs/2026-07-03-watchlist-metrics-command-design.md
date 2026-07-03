@@ -77,8 +77,13 @@ func (a *App) SnapshotMetrics(ctx context.Context, symbols []string) []SymbolMet
 
 1. **行情**:`orderedCollectors(symbol)` 依序试 `FetchQuote`
    (与分析循环同一路由链:qlib 仓库优先、外部兜底);
-2. **估值 + PE 百分位**:调用现成 `buildFundamental`
+2. **PE 百分位**:调用现成 `buildFundamental`
    (内含 A 股 lixinger cvpos、美/港 Yahoo EPS 重建、兜底链与 fallback_reason,零重复实现);
+   **估值三项(PE/PB/股息率)**:计划期核实 `buildFundamental` 只组装 PE 百分位、
+   不含估值三项,且全仓仅 lixinger 实现 `FetchFundamental`(生产路径未接线)。
+   修正:App 新增窄接口 `FundamentalSource`(`FetchFundamental(symbol)`),
+   装配时注入 lixinger——A 股估值三项由此而来;**美/港/加密标的估值三项首版
+   为不可用(`—` + 缺口说明)**,待未来 yahoo 侧实现 FetchFundamental 再补;
 3. **价格百分位**:拉 `cfg.Valuation.LookbackYears` 窗口的日线收盘序列
    (`lookback_years:0` = 全历史,语义与策略一致),
    `valuation.PercentileRank(closes, 最新价)`;
