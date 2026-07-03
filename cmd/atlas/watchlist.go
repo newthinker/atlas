@@ -26,7 +26,10 @@ var watchlistCmd = &cobra.Command{
 	Short: "Show quote/valuation/percentile metrics for all watchlist symbols",
 	Long: `Fetches the latest price, change %, PE/PB/dividend yield and PE/price
 percentiles for every watchlist symbol, offline (no running serve needed).
-Assembly reuses the analysis loop's exact valuation pipeline.`,
+Assembly mirrors the analysis loop's valuation pipeline; percentile windows
+use the global valuation.lookback_years config (the live analysis loop instead
+picks each strategy's own lookback, so values may differ under non-default
+configs).`,
 	RunE: runWatchlist,
 }
 
