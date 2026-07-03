@@ -168,6 +168,37 @@ func TestFetchQuote_Stock(t *testing.T) {
 	}
 }
 
+// W1 fix: eastmoney f170 is percent×100, so ChangePercent must be divided by a
+// fixed 100 scale — independent of the price divisor (1000 for ETFs). Covers the
+// stock path, the ETF path (divisor=1000 must not touch ChangePercent), and the
+// zero/negative boundaries.
+func TestFetchQuote_ChangePercentScale(t *testing.T) {
+	cases := []struct {
+		name   string
+		symbol string
+		f170   string
+		want   float64
+	}{
+		{"stock positive", "600519.SH", "204", 2.04},
+		{"etf positive keeps 100 scale", "510300.SH", "204", 2.04},
+		{"zero", "600519.SH", "0", 0},
+		{"negative", "600519.SH", "-153", -1.53},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"data":{"f43":1500,"f46":1480,"f51":1520,"f52":1470,"f60":1485,"f47":1,"f169":15,"f170":%s}}`, tc.f170)
+			e, _ := newStockServer(t, http.StatusOK, body)
+			q, err := e.FetchQuote(tc.symbol)
+			if err != nil {
+				t.Fatalf("FetchQuote: %v", err)
+			}
+			if q.ChangePercent != tc.want {
+				t.Errorf("ChangePercent = %v, want %v", q.ChangePercent, tc.want)
+			}
+		})
+	}
+}
+
 // functional[2]
 func TestFetchHistory_Stock(t *testing.T) {
 	body := `{"data":{"code":"600519","name":"X","klines":["2024-01-02,10.0,11.0,12.0,9.0,1000","2024-01-03,11.0,12.5,13.0,10.5,2000"]}}`
