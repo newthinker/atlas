@@ -48,6 +48,10 @@ type SymbolMetrics struct {
 // SnapshotMetrics assembles a read-only metrics snapshot for watchlist items.
 // symbols nil means the full watchlist; otherwise it filters to that subset
 // (watchlist order preserved). Read-only: no signals, no notifications.
+//
+// The PE and price percentiles are computed over a single history window whose
+// length is the global valuation.lookback_years config (see snapshotHistoryStart),
+// not the per-strategy lookback the live analysis loop uses.
 func (a *App) SnapshotMetrics(ctx context.Context, symbols []string) []SymbolMetrics {
 	items := a.snapshotItems(symbols)
 	results := make([]SymbolMetrics, len(items))
@@ -146,11 +150,14 @@ func (a *App) snapshotSymbol(_ context.Context, item WatchlistItem) SymbolMetric
 			m.Gaps = append(m.Gaps, "pe percentile unavailable")
 		}
 		// 估值三项:仅在有 FundamentalSource 时可得(当前 = A 股 lixinger)。
+		// 取值成功时如实呈现——dyr=0(不分红)与 pe_ttm<0(亏损)都是 lixinger 的
+		// 已知事实,不能掩盖成 nil("数据不可用"),否则与真正缺失混淆。仅 fetch
+		// 出错时才置 nil 并记 gap。
 		if a.fundamentalSrc != nil {
 			if fd, err := a.fundamentalSrc.FetchFundamental(item.Symbol); err == nil && fd != nil {
-				m.PE = positivePtr(fd.PE)
-				m.PB = positivePtr(fd.PB)
-				m.DividendYield = positivePtr(fd.DividendYield)
+				m.PE = &fd.PE
+				m.PB = &fd.PB
+				m.DividendYield = &fd.DividendYield
 			} else {
 				m.Gaps = append(m.Gaps, fmt.Sprintf("fundamental unavailable: %v", err))
 			}
@@ -181,18 +188,14 @@ func (a *App) snapshotSymbol(_ context.Context, item WatchlistItem) SymbolMetric
 	return m
 }
 
-// snapshotHistoryStart mirrors the strategy-side lookback semantics:
-// valuationLookback 0 = since inception (epoch-floor clamped by caller).
+// snapshotHistoryStart returns the history-window start for both the PE and
+// price percentiles. The window baseline is the global valuation.lookback_years
+// config (App.valuationLookback): >0 = that many years back; 0 = since inception
+// (AddDate(-100y), epoch-floor clamped by the caller). This is a single global
+// window, unlike the analysis loop where each strategy picks its own lookback.
 func (a *App) snapshotHistoryStart(end time.Time) time.Time {
 	if a.valuationLookback <= 0 {
 		return end.AddDate(-100, 0, 0)
 	}
 	return end.AddDate(-a.valuationLookback, 0, 0)
-}
-
-func positivePtr(v float64) *float64 {
-	if v > 0 {
-		return &v
-	}
-	return nil
 }

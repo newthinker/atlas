@@ -2,6 +2,7 @@ package app
 
 // Context Checkpoint: done_criteria → test mapping
 // functional[0] "全路径 A 股" → TestSnapshotMetrics_FullPathAShare
+// W2 "合法 0/负值如实呈现" → TestSnapshotMetrics_LegitimateZeroNegative
 // functional[1] "无估值降级 / crypto 不记估值 gap"
 //               → TestSnapshotMetrics_MissingValuationDegrades / _CryptoNoValuationGap
 // functional[2] "symbols 过滤保序 / ≥3 标的并发保序(B4)"
@@ -121,6 +122,35 @@ func TestSnapshotMetrics_FullPathAShare(t *testing.T) {
 	}
 	if len(m.Gaps) != 0 {
 		t.Errorf("unexpected gaps: %v", m.Gaps)
+	}
+}
+
+// TestSnapshotMetrics_LegitimateZeroNegative (W2): lixinger 的已知事实——dyr=0
+// (不分红)与 pe_ttm<0(亏损)——必须如实呈现为非 nil 值,不能被掩盖成 nil
+// ("数据不可用"),也不记 gap。
+func TestSnapshotMetrics_LegitimateZeroNegative(t *testing.T) {
+	fake := &snapFake{
+		quote:   map[string]*core.Quote{"600519.SH": {Price: 1400}},
+		history: map[string][]core.OHLCV{"600519.SH": bars(100, 110, 120)},
+	}
+	a := newSnapshotApp(t, fake, WatchlistItem{Symbol: "600519.SH", Name: "亏损不分红", Market: "A股", Type: "股票"})
+	a.SetValuationSources(snapValuation{pct: 50}, nil)
+	a.SetFundamentalSource(snapFundamental{f: &core.Fundamental{PE: -8.2, PB: 1.5, DividendYield: 0}})
+
+	m := a.SnapshotMetrics(context.Background(), nil)[0]
+	if m.PE == nil || *m.PE != -8.2 {
+		t.Errorf("negative PE must surface as-is, got %v", m.PE)
+	}
+	if m.DividendYield == nil || *m.DividendYield != 0 {
+		t.Errorf("zero dividend yield must surface as 0 (not nil), got %v", m.DividendYield)
+	}
+	if m.PB == nil || *m.PB != 1.5 {
+		t.Errorf("PB = %v", m.PB)
+	}
+	for _, g := range m.Gaps {
+		if strings.Contains(g, "fundamental") {
+			t.Errorf("legitimate 0/negative must not record a fundamental gap, got %q", g)
+		}
 	}
 }
 
