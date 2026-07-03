@@ -1,11 +1,11 @@
-package telegram
+package text
 
 import "strings"
 
-// displayWidth returns the number of fixed-width cells s occupies in a Telegram
-// monospace code block, counting East-Asian wide runes (CJK) as 2 and others as
-// 1. Padding by rune count would misalign rows containing Chinese names.
-func displayWidth(s string) int {
+// DisplayWidth returns the number of fixed-width cells s occupies in a monospace
+// table, counting East-Asian wide runes (CJK) as 2 and others as 1. Padding by
+// rune count would misalign rows containing Chinese names.
+func DisplayWidth(s string) int {
 	w := 0
 	for _, r := range s {
 		if isWide(r) {
@@ -17,10 +17,10 @@ func displayWidth(s string) int {
 	return w
 }
 
-// padRight right-pads s with spaces to the given display width (no-op if s is
+// PadRight right-pads s with spaces to the given display width (no-op if s is
 // already at least that wide).
-func padRight(s string, width int) string {
-	if n := width - displayWidth(s); n > 0 {
+func PadRight(s string, width int) string {
+	if n := width - DisplayWidth(s); n > 0 {
 		return s + strings.Repeat(" ", n)
 	}
 	return s
