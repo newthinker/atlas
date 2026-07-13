@@ -75,10 +75,8 @@ func resolveFREDKey(envName string) string {
 	if err != nil {
 		return ""
 	}
-	if fc, ok := cfg.Collectors["fred"]; ok {
-		return fc.APIKey
-	}
-	return ""
+	// missing "fred" key yields a zero CollectorConfig, i.e. empty APIKey
+	return cfg.Collectors["fred"].APIKey
 }
 
 func runCrisisBackfill(cmd *cobra.Command, args []string) error {
