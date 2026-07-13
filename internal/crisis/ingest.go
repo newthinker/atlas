@@ -101,6 +101,12 @@ func (ig *Ingestor) ingestFredSeries(ctx context.Context, seriesID, indicator st
 			Source: "fred", FetchedAt: stamp,
 		})
 	}
+	return ig.upsert(ctx, rows)
+}
+
+// upsert stores rows and returns the row count, the shared tail of every
+// ingest helper.
+func (ig *Ingestor) upsert(ctx context.Context, rows []Observation) (int, error) {
 	if err := ig.store.UpsertObservations(ctx, rows); err != nil {
 		return 0, err
 	}
@@ -122,7 +128,7 @@ func (ig *Ingestor) ingestSpread(ctx context.Context, from, to, stamp string) (i
 	for _, o := range effr {
 		effrByDate[o.Date] = o.Value
 	}
-	rows := []Observation{}
+	rows := make([]Observation, 0, len(sofr))
 	for _, o := range sofr {
 		e, ok := effrByDate[o.Date]
 		if !ok {
@@ -133,10 +139,7 @@ func (ig *Ingestor) ingestSpread(ctx context.Context, from, to, stamp string) (i
 			Source: "derived", FetchedAt: stamp,
 		})
 	}
-	if err := ig.store.UpsertObservations(ctx, rows); err != nil {
-		return 0, err
-	}
-	return len(rows), nil
+	return ig.upsert(ctx, rows)
 }
 
 func (ig *Ingestor) ingestYahoo(ctx context.Context, indicator, symbol, from, to, stamp string) (int, error) {
@@ -160,8 +163,5 @@ func (ig *Ingestor) ingestYahoo(ctx context.Context, indicator, symbol, from, to
 			Source: "yahoo", FetchedAt: stamp,
 		})
 	}
-	if err := ig.store.UpsertObservations(ctx, rows); err != nil {
-		return 0, err
-	}
-	return len(rows), nil
+	return ig.upsert(ctx, rows)
 }
