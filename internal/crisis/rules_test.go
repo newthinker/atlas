@@ -4,7 +4,7 @@ package crisis
 // functional[0] vix/move 区间+vix 单周涨幅; sofr_effr 持续性 red/amber → TestEvaluateIndicatorStatusPaths
 // functional[1] hy_oas 双向黄灯 + 月动量 → TestEvaluateIndicatorStatusPaths / TestEvaluateIndicatorBaseline
 // functional[2] t10y2y 倒挂/复陡 STEEPENING; nfci; usdjpy wow 双阈值+52周 CROWDED → TestEvaluateIndicatorStatusPaths
-// functional[3] 分位轨 Pct5y≥red/amber maxStatus 合成 → TestEvaluateIndicatorStatusPaths (ramp)
+// functional[3] 分位轨升红(Pct5y≥red) → StatusPaths (ramp)；升黄(Pct5y∈[amber,red)) → TestPercentileTrackAmberUpgrade
 // functional[4] 基线锚点 AMBER 计数=2 → TestEvaluateIndicatorBaseline
 // boundary[0]   Window 空→NO_DATA; staleFor→STALE 直接返回; <60 跳过分位轨但 WindowActualObs 标注 → TestEvaluateIndicatorStatusPaths
 // boundary[1]   Pct5y/WindowActualObs 对 track=false 也恒填充 → TestEvaluateIndicatorBaseline (t10y2y/usdjpy WindowActualObs=80)
@@ -235,4 +235,32 @@ func TestEvaluateIndicatorAbsoluteBands(t *testing.T) {
 			assert.Equal(t, tt.wantTag, res.Tag)
 		})
 	}
+}
+
+// TestPercentileTrackAmberUpgrade 覆盖 functional[3] 的 AMBER 半边（rules.go
+// `case res.Pct5y >= cfg.Percentile.Amber`）：VIX 绝对轨全绿，但当前值处 80 观测
+// 的 [0.90,0.97) 分位 → 分位轨升黄。判别性：amber 分支坏则退回 GREEN 使用例失败。
+func TestPercentileTrackAmberUpgrade(t *testing.T) {
+	cfg := testConfig()
+	const d = "2026-07-10"
+
+	// 80 观测：73 个低值(10) + 6 个中值(24.5) + 当前值(24)。严格小于 24 的恰 73 个
+	// → 分位 73/80 = 0.9125 ∈ [0.90,0.97)。全部 <25 → 绝对轨绿；末 6 观测 WowPct<0
+	// → 不触发周涨。
+	vals := make([]Observation, 80)
+	for i := range vals {
+		v := 10.0
+		switch {
+		case i == 79:
+			v = 24.0
+		case i >= 73:
+			v = 24.5
+		}
+		vals[i] = Observation{Date: addDays(d, i-79), Value: v}
+	}
+	res, err := EvaluateIndicator(cfg, IndVIX, d, memSeries{IndVIX: vals})
+	require.NoError(t, err)
+	assert.Equal(t, StatusAmber, res.RawStatus)
+	assert.InDelta(t, 0.9125, res.Pct5y, 1e-9)
+	assert.Equal(t, 80, res.WindowActualObs)
 }
