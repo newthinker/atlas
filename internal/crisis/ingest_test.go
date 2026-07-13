@@ -116,3 +116,28 @@ func TestIngestYahooClose(t *testing.T) {
 	require.NotNil(t, mv)
 	assert.InDelta(t, 69.6, mv.Value, 1e-9)
 }
+
+// TestIngestAllSurfacesFREDFailure 覆盖 error_handling[0] 第二子句：FRED 抓取
+// 失败时 IngestAll 立即返回非 nil error（缺失序列 → fakeFRED.FetchSeries 报错）。
+func TestIngestAllSurfacesFREDFailure(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		drop string // 从全序列 map 中删除的 FRED id
+	}{
+		{"direct series failure", "VIXCLS"}, // fredDirect 首个 → ingestFredSeries 失败
+		{"spread leg failure", "SOFR"},      // ingestSpread 的 SOFR 腿失败
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newTestStore(t)
+			ff := allFredSeries()
+			delete(ff, tt.drop)
+			ig := NewIngestor(ff, fakeYahoo{}, st)
+			_, err := ig.IngestAll(ctx, "2026-07-01", "2026-07-02")
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.drop)
+		})
+	}
+}
