@@ -185,14 +185,15 @@ func importCSVFrom(ctx context.Context, st *crisis.Store, r io.Reader, indicator
 	return len(obs), nil
 }
 
-// crisisEvalDeps 注入依赖使 daily 流程可单测(模式同 watchlistDeps)。
+// crisisEvalDeps 注入依赖使 daily/nfci 流程可单测(模式同 watchlistDeps)。
 type crisisEvalDeps struct {
-	cfg    *crisis.Config
-	store  *crisis.Store
-	ingest func(ctx context.Context, from, to string) (*crisis.IngestReport, error)
-	now    func() time.Time
-	out    io.Writer
-	errOut io.Writer
+	cfg        *crisis.Config
+	store      *crisis.Store
+	ingest     func(ctx context.Context, from, to string) (*crisis.IngestReport, error)
+	ingestNFCI func(ctx context.Context, from, to string) (int, error)
+	now        func() time.Time
+	out        io.Writer
+	errOut     io.Writer
 }
 
 // requiredDaily 是齐备性校验的必要集:FRED 日频序列(设计 §4.3——T+1 未齐则
@@ -220,17 +221,27 @@ func runCrisisEval(cmd *cobra.Command, args []string) error {
 		}
 		return executeCrisisEvalDaily(cmd.Context(), deps, evalDate)
 	case "nfci":
-		now := time.Now().UTC()
-		n, err := ig.IngestNFCI(cmd.Context(),
-			now.AddDate(0, 0, -30).Format("2006-01-02"), now.Format("2006-01-02"))
-		if err != nil {
-			return err
+		deps := crisisEvalDeps{
+			cfg: ccfg, store: st, ingestNFCI: ig.IngestNFCI,
+			now: time.Now, out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(),
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "nfci refreshed: %d rows\n", n)
-		return nil
+		return executeCrisisEvalNFCI(cmd.Context(), deps)
 	default:
 		return fmt.Errorf("unknown --mode %q", evalMode)
 	}
+}
+
+// executeCrisisEvalNFCI 仅刷新周频 NFCI(now−30d..today),不做评估——NFCI 更新后
+// 参与后续 daily 评估(设计 §3.2 条 4)。
+func executeCrisisEvalNFCI(ctx context.Context, d crisisEvalDeps) error {
+	now := d.now().UTC()
+	n, err := d.ingestNFCI(ctx,
+		now.AddDate(0, 0, -30).Format("2006-01-02"), now.Format("2006-01-02"))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(d.out, "nfci refreshed: %d rows\n", n)
+	return nil
 }
 
 func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride string) error {

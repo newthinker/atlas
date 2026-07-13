@@ -242,7 +242,7 @@ func TestResolveFREDKey(t *testing.T) {
 // functional[0] "目标日=--date 或 PrevTradingDay(now);评估落库打印摘要" → TestExecuteCrisisEvalDaily / TestExecuteCrisisEvalDailyDateOverride
 // functional[1] "幂等 HasSystemEvalForDate → already evaluated exit 0"    → TestExecuteCrisisEvalDaily(第二次唤起)
 // functional[2] "数据齐备门:四序列缺任一 → not ready exit 0"             → TestExecuteCrisisEvalDailyDataNotReady
-// functional[3] "nfci 模式仅 IngestNFCI 不评估;status 打印状态/持续/指标"  → TestRunCrisisEvalNFCI(错误路径) / TestExecuteCrisisStatus
+// functional[3] "nfci 模式仅 IngestNFCI 不评估;status 打印状态/持续/指标"  → TestExecuteCrisisEvalNFCI / TestExecuteCrisisStatus
 // boundary[0]   "move/usdjpy 缺 target 不阻断(STALE/NO_DATA 正常评估)"    → TestExecuteCrisisEvalDailyMoveMissing
 // boundary[1]   "库空 status 打印 no evaluations yet 正常返回"            → TestExecuteCrisisStatus
 // error_handling[0] "ingest 失败返回非零错误(区别 not ready 空跑)"        → TestExecuteCrisisEvalDailyIngestError
@@ -400,6 +400,43 @@ func TestExecuteCrisisEvalDailyIngestError(t *testing.T) {
 	err := executeCrisisEvalDaily(ctx, deps, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "boom")
+}
+
+func TestExecuteCrisisEvalNFCI(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+
+	var calls int
+	var gotFrom, gotTo string
+	var buf strings.Builder
+	deps := crisisEvalDeps{
+		cfg: crisisTestConfig(), store: st,
+		ingestNFCI: func(_ context.Context, from, to string) (int, error) {
+			calls++
+			gotFrom, gotTo = from, to
+			return 3, nil
+		},
+		now: sat711, out: &buf, errOut: io.Discard,
+	}
+	require.NoError(t, executeCrisisEvalNFCI(ctx, deps))
+
+	assert.Equal(t, 1, calls) // 仅刷新一次
+	assert.Equal(t, "2026-06-11", gotFrom)
+	assert.Equal(t, "2026-07-11", gotTo) // now−30d..today 窗口
+	assert.Contains(t, buf.String(), "nfci refreshed: 3 rows")
+
+	// 不评估:不产生任何系统评估行(设计 §3.2 条 4,NFCI 参与后续 daily)
+	sys, err := st.LatestSystemEval(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, sys)
+
+	// 采集失败透传非零错误
+	deps.ingestNFCI = func(context.Context, string, string) (int, error) {
+		return 0, errors.New("nfci boom")
+	}
+	err = executeCrisisEvalNFCI(ctx, deps)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nfci boom")
 }
 
 func TestExecuteCrisisStatus(t *testing.T) {
