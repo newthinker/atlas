@@ -429,10 +429,7 @@ func TestRunCrisisEvalStatusConfigError(t *testing.T) {
 	snapshotCrisisFlags(t)
 	crisisCfgPath = filepath.Join(t.TempDir(), "nope.yaml")
 
-	c := &cobra.Command{}
-	c.SetContext(context.Background())
-	c.SetOut(io.Discard)
-	c.SetErr(io.Discard)
+	c := newDiscardCmd()
 	require.Error(t, runCrisisStatus(c, nil))
 	require.Error(t, runCrisisEval(c, nil))
 }
