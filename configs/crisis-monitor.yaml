@@ -1,0 +1,65 @@
+storage:
+  path: data/crisis.db
+
+fred:
+  api_key_env: FRED_API_KEY
+
+freshness:                     # 设计 §3.2 条 2：超过预期发布时点 48h → STALE
+  daily_max_lag_days: 4        # T+1 + 48h + 周末缓冲
+  weekly_max_lag_days: 12      # NFCI 周频
+
+percentile:                    # 设计 §3.1 双轨中的分位轨（全指标通用参数）
+  window_years: 5
+  amber: 0.90
+  red: 0.97
+
+indicators:
+  vix:
+    series: VIXCLS
+    amber: 25
+    red: 30
+    weekly_spike_pct: 0.50     # 单周涨幅 > 50% → AMBER
+    percentile_track: true
+  move:
+    series: ^MOVE
+    amber: 100
+    red: 120
+    percentile_track: true
+  sofr_effr:
+    amber_bp: 10
+    amber_persist_days: 3      # +10~25bp 持续 ≥3 交易日
+    red_bp: 25
+    red_persist_days: 5        # >+25bp 持续 ≥5 交易日
+    percentile_track: true
+    suppress_quarter_end: true # 设计 §3.2 条 1
+  hy_oas:
+    series: BAMLH0A0HYM2
+    amber_low_bp: 350          # <350 自满（COMPLACENCY）
+    amber_high_bp: 500         # 500–600 压力（STRESS）
+    red_bp: 600
+    momentum_bp: 100           # 月走阔 >100bp → AMBER(STRESS)
+    momentum_window_obs: 21
+    percentile_track: true
+  t10y2y:
+    series: T10Y2Y
+    amber_bp: 25               # >25 绿；0~25 黄；<0 红
+    steepening_bp: 50          # 倒挂后复陡 >50bp → STEEPENING 标记
+    steepening_lookback_obs: 250
+    percentile_track: false    # 方向反转（低位才危险），分位轨不适用
+  nfci:
+    series: NFCI
+    green_below: -0.3
+    red_above: 0
+    percentile_track: true
+  usdjpy:
+    amber_wow_pct: -0.02       # 周环比 ≤ −2%（日元急升值 = USDJPY 下跌）
+    red_wow_pct: -0.03
+    crowded_52w_pct: 0.98      # 52 周分位 ≥0.98（USDJPY 极端高位 = 日元空头拥挤）→ CROWDED
+    percentile_track: false
+
+state_machine:
+  watch_amber_count: 3         # NORMAL→WATCH 的 AMBER 计数阈（AMBER 及以上）
+  crisis_exit_days: 10
+  watch_exit_days: 20
+  brewing_exit_days: 10
+  demote_hysteresis_days: 3    # 设计 §3.2 条 3：降级需连续 3 观测日
