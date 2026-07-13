@@ -5,7 +5,7 @@ package crisis
 // functional[1] staleFor daily/nfci weekly 四用例 → TestStaleFor
 // functional[2] ApplyHysteresis 升级立即/降级需连续 days 个 raw ≤ 目标 → TestApplyHysteresis
 // boundary[0]   季中/窗口外/周末/bad-date 为假；历史不足 days-1 不降级 → TestInQuarterEndWindow / TestApplyHysteresis
-// boundary[1]   detail 缺 raw 回退 status 列（rawFromDetail）→ 经 TestApplyHysteresis 的非色彩历史用例间接覆盖
+// boundary[1]   detail 缺 raw 回退 status 列（rawFromDetail）→ TestApplyHysteresis 的 mixed 用例（prev[1].Detail="" 走 return e.Status 分支）
 
 import (
 	"testing"
@@ -59,4 +59,8 @@ func TestApplyHysteresis(t *testing.T) {
 	// 历史中夹非色彩状态（STALE）→ 无法确认连续低档，维持
 	stale := []Evaluation{evalWithRaw(StatusAmber, StatusGreen), evalWithRaw(StatusStale, StatusStale)}
 	assert.Equal(t, StatusAmber, ApplyHysteresis(StatusGreen, stale, 3))
+	// detail 缺 raw → rawFromDetail 回退 Status 列：prev[1] Detail="" 回退到 GREEN，
+	// 连续低档成立放行降级（回退坏则返回 AMBER 使用例失败，判别性充分）
+	mixed := []Evaluation{evalWithRaw(StatusAmber, StatusGreen), {Status: StatusGreen, Detail: ""}}
+	assert.Equal(t, StatusGreen, ApplyHysteresis(StatusGreen, mixed, 3))
 }
