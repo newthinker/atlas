@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -40,9 +41,11 @@ func snapshotCrisisFlags(t *testing.T) {
 	t.Helper()
 	pCfg, pFrom, pTo := crisisCfgPath, backfillFrom, backfillTo
 	pCSV, pInd, pScale, pFile := backfillCSV, backfillIndicator, backfillScale, cfgFile
+	pRFrom, pRTo, pRJSON := replayFrom, replayTo, replayJSON
 	t.Cleanup(func() {
 		crisisCfgPath, backfillFrom, backfillTo = pCfg, pFrom, pTo
 		backfillCSV, backfillIndicator, backfillScale, cfgFile = pCSV, pInd, pScale, pFile
+		replayFrom, replayTo, replayJSON = pRFrom, pRTo, pRJSON
 	})
 }
 
@@ -563,4 +566,106 @@ func TestStateStreakDaysBreak(t *testing.T) {
 	n, err := stateStreakDays(ctx, st, crisis.StateNormal)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n) // 7/10 NORMAL 计入,遇 7/09 WATCH 中断
+}
+
+// ---- TASK-013: crisis replay ----
+// done_criteria → test mapping
+// functional[0] "EvalDates 逐日 EvalDay + MemHistory 累积,不写 crisis_evaluations" → TestExecuteCrisisReplayTransitions(含 LatestSystemEval 仍 nil 的不写库判别断言)
+// functional[1] "输出状态转移时间线 + final state + 各态进入次数;--json 机器可读"    → TestExecuteCrisisReplayTransitions / TestExecuteCrisisReplayJSON
+// functional[2] "80 日全绿 + 末 3 日 NFCI 转正 → 一次 NORMAL→WATCH 且 final WATCH"  → TestExecuteCrisisReplayTransitions
+// boundary[0]   "区间内无 vix 观测 → 返回含 run backfill first 的错误"               → TestExecuteCrisisReplayNoData
+
+// seedReplayWatch 铺 80 日全绿 + 末 3 日 NFCI 转正(领先层红),用于触发一次 NORMAL→WATCH。
+func seedReplayWatch(t *testing.T, st *crisis.Store) {
+	t.Helper()
+	ctx := context.Background()
+	seedObservations(t, st, "2026-07-10", 80)
+	var red []crisis.Observation
+	for _, d := range []string{"2026-07-08", "2026-07-09", "2026-07-10"} {
+		red = append(red, crisis.Observation{Date: d, Indicator: crisis.IndNFCI, Value: 0.2,
+			Source: "test", FetchedAt: "2026-07-11T00:00:00.000000000Z"})
+	}
+	require.NoError(t, st.UpsertObservations(ctx, red))
+}
+
+func TestExecuteCrisisReplayTransitions(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	seedReplayWatch(t, st)
+
+	var buf bytes.Buffer
+	require.NoError(t, executeCrisisReplay(ctx, crisisTestConfig(), st, "2026-06-25", "2026-07-10", false, &buf))
+	out := buf.String()
+	assert.Contains(t, out, "NORMAL → WATCH")
+	assert.Contains(t, out, "final state: WATCH")
+	assert.Contains(t, out, "entered WATCH")
+
+	// 回放零落库:真相源不被回测污染
+	sys, err := st.LatestSystemEval(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, sys)
+}
+
+// --json:每条转移一行 JSON,可解析且含 date/from/to/amber_count。
+func TestExecuteCrisisReplayJSON(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	seedReplayWatch(t, st)
+
+	var buf bytes.Buffer
+	require.NoError(t, executeCrisisReplay(ctx, crisisTestConfig(), st, "2026-06-25", "2026-07-10", true, &buf))
+
+	var parsed int
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if !strings.HasPrefix(line, "{") {
+			continue // final-state 汇总行非 JSON
+		}
+		var m map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &m))
+		assert.Equal(t, "WATCH", m["to"])
+		assert.Contains(t, m, "date")
+		assert.Contains(t, m, "amber_count")
+		parsed++
+	}
+	assert.Equal(t, 1, parsed) // 恰一次 NORMAL→WATCH 转移
+}
+
+func TestExecuteCrisisReplayNoData(t *testing.T) {
+	st := newCrisisTestStore(t)
+	var buf bytes.Buffer
+	err := executeCrisisReplay(context.Background(), crisisTestConfig(), st, "2008-01-01", "2008-12-31", false, &buf)
+	require.ErrorContains(t, err, "run backfill first")
+}
+
+// runCrisisReplay wrapper:必填校验 / 配置错误 / 经 seeded db 委托成功。
+func TestRunCrisisReplay(t *testing.T) {
+	t.Run("missing flags", func(t *testing.T) {
+		snapshotCrisisFlags(t)
+		replayFrom, replayTo = "", ""
+		require.Error(t, runCrisisReplay(newDiscardCmd(), nil))
+	})
+
+	t.Run("config error", func(t *testing.T) {
+		snapshotCrisisFlags(t)
+		crisisCfgPath = filepath.Join(t.TempDir(), "nope.yaml")
+		replayFrom, replayTo = "2026-06-25", "2026-07-10"
+		require.Error(t, runCrisisReplay(newDiscardCmd(), nil))
+	})
+
+	t.Run("delegates over seeded db", func(t *testing.T) {
+		snapshotCrisisFlags(t)
+		cfgPath, dbPath := writeTempCrisisConfigDB(t)
+		st, err := crisis.NewStore(dbPath)
+		require.NoError(t, err)
+		seedReplayWatch(t, st)
+		require.NoError(t, st.Close())
+
+		crisisCfgPath = cfgPath
+		replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
+		var buf bytes.Buffer
+		c := newDiscardCmd()
+		c.SetOut(&buf)
+		require.NoError(t, runCrisisReplay(c, nil))
+		assert.Contains(t, buf.String(), "final state")
+	})
 }
