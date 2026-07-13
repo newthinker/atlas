@@ -19,10 +19,11 @@ import (
 const defaultBaseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 // validSymbol matches stock symbols (AAPL, 600519.SH, 0700.HK),
-// index symbols (^GSPC) and futures symbols (GC=F).
+// index symbols (^GSPC), futures symbols (GC=F) and Yahoo currency
+// symbols (JPY=X).
 // Validation is purely syntactic and intentionally decoupled from the
 // phase-1 coverage list (see design §2.1).
-var validSymbol = regexp.MustCompile(`^(\^[A-Za-z0-9]{1,10}|[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?|[A-Za-z]{1,6}=F)$`)
+var validSymbol = regexp.MustCompile(`^(\^[A-Za-z0-9]{1,10}|[A-Za-z0-9]{1,10}(\.[A-Za-z]{1,4})?|[A-Za-z]{1,6}=[FX])$`)
 
 // validateSymbol checks if a symbol has valid format
 func validateSymbol(symbol string) error {

@@ -135,6 +135,27 @@ func TestValidateSymbol_IndexAndFutures(t *testing.T) {
 	}
 }
 
+// Context Checkpoint: done_criteria -> test mapping
+// functional[0] "validateSymbol(JPY=X) 通过（货币后缀 =X 放行）"        -> case "JPY=X" (wantOK true)
+// boundary[0]   "GC=F/^MOVE/普通符号继续通过；JPY=Z 等未知后缀仍拒绝" -> cases GC=F, ^MOVE, JPY=Z
+func TestValidateSymbolCurrencyPairs(t *testing.T) {
+	cases := []struct {
+		symbol string
+		wantOK bool
+	}{
+		{"JPY=X", true},  // Yahoo currency symbol (design §2.1 USD/JPY)
+		{"GC=F", true},   // futures suffix unaffected
+		{"^MOVE", true},  // index suffix unaffected
+		{"JPY=Z", false}, // unknown suffix still rejected
+	}
+	for _, c := range cases {
+		err := validateSymbol(c.symbol)
+		if (err == nil) != c.wantOK {
+			t.Errorf("validateSymbol(%q) ok=%v, want %v", c.symbol, err == nil, c.wantOK)
+		}
+	}
+}
+
 // functional[1]: ^ must be percent-encoded as %5E in the request path.
 func TestFetchQuote_EscapesIndexSymbol(t *testing.T) {
 	var gotPath string
