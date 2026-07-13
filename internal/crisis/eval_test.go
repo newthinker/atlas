@@ -140,3 +140,17 @@ func TestEvalDayHistoryError(t *testing.T) {
 	require.ErrorIs(t, err, assertErr)
 	assert.Nil(t, res)
 }
+
+// TestEvalDayResumesPreviousState 覆盖 prevState 从历史系统行恢复的半边（eval.go:49-50，
+// 冷启动半之外）：非空历史 → PrevState 取历史系统行 SystemState 而非 NORMAL。replay
+// 的逐日状态 carry 依赖此分支——坏掉则每日从 NORMAL 重启、多日转移链断裂。
+func TestEvalDayResumesPreviousState(t *testing.T) {
+	const d = "2026-07-10"
+	hist := histWithSystem(1, SysDetail{AnyTrigger: false, Prev: StateWatch}) // 一条 WATCH 系统行
+
+	res, err := EvalDay(testConfig(), d, baselineSeries(d), hist, evalAt)
+	require.NoError(t, err)
+	assert.Equal(t, StateWatch, res.PrevState) // 从历史恢复（非冷启动 NORMAL）
+	assert.Equal(t, StateWatch, res.State)     // 历史仅 1 条 < 19 → 不退出，维持 WATCH
+	assert.False(t, res.Transitioned())
+}
