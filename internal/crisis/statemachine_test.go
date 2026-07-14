@@ -240,3 +240,32 @@ func TestExitStreakRequiresInStateHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateBrewing, next, "异态历史行不得计入 BREWING 退出冷却")
 }
+
+func clearStreakEval(date string, anyTrigger bool) Evaluation {
+	d, _ := json.Marshal(SysDetail{Date: date, AnyTrigger: anyTrigger, Prev: StateWatch})
+	return Evaluation{TS: date, Indicator: "", SystemState: StateWatch, Detail: string(d)}
+}
+
+// ClearStreakDays：any_trigger=false 的连续历史日数（周报退出进度，设计 §6.6）。
+func TestClearStreakDays(t *testing.T) {
+	h := NewMemHistory()
+	h.Append([]Evaluation{clearStreakEval("2026-07-06", true)})
+	h.Append([]Evaluation{clearStreakEval("2026-07-07", false)})
+	h.Append([]Evaluation{clearStreakEval("2026-07-08", false)})
+	n, err := ClearStreakDays(h, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n) // 最新两行 false，第三行 true 中断
+
+	// 空历史 → 0
+	n, err = ClearStreakDays(NewMemHistory(), 20)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	// 坏 detail 行 → 中断计数而非上抛（同 systemDetailStreak 的保守约定）
+	h2 := NewMemHistory()
+	h2.Append([]Evaluation{{TS: "2026-07-07", Detail: "not-json"}})
+	h2.Append([]Evaluation{clearStreakEval("2026-07-08", false)})
+	n, err = ClearStreakDays(h2, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+}
