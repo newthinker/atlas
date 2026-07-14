@@ -126,8 +126,8 @@ atlas/
 ├── configs/
 │   └── crisis-monitor.yaml    # 全部阈值与调度配置
 ├── deploy/launchd/            # 新增 3 个 plist（crisis-daily / crisis-nfci / crisis-intraday-jpy）
-└── cmd/
-    └── crisis.go              # CLI: atlas crisis status / backfill / eval（平铺，沿用现有 cmd 惯例）
+└── cmd/atlas/
+    └── crisis.go              # CLI: atlas crisis status / backfill / eval（子命令平铺在 cmd/atlas/ 内，沿用现有惯例）
 ```
 
 规则引擎必须**配置驱动**——阈值写进 YAML 而非代码，未来调参不发版：

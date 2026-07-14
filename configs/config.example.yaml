@@ -30,6 +30,10 @@ collectors:
     markets: ["CN_A"]
     interval: "24h"
     retry: true   # 429/5xx 退避重试（1/2/4/8/16s，最多5次）；设 false 关闭
+  # FRED API for macro crisis monitor (Cassandra); env FRED_API_KEY overrides
+  fred:
+    enabled: false
+    api_key: "${FRED_API_KEY}"
 
 # Trading strategies
 strategies:
