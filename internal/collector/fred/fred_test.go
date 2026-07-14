@@ -146,3 +146,15 @@ func TestFetchSeriesTransportErrorSanitized(t *testing.T) {
 	assert.NotContains(t, err.Error(), secret)               // key 值不泄漏
 	assert.Contains(t, err.Error(), "after retries")         // 仍走重试耗尽 = retryable 语义不变
 }
+
+func TestFetchSeriesBadBaseURLSanitized(t *testing.T) {
+	// url.Parse fails on the control character; the resulting *url.Error would
+	// embed the full URL (api_key included) — assert it is stripped too.
+	c := NewWithBaseURL("super-secret-fred-key", "http://a\x7f.com")
+	c.backoff = time.Millisecond
+	_, err := c.FetchSeries(context.Background(), "VIXCLS", "", "")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "api_key")
+	assert.NotContains(t, err.Error(), "super-secret-fred-key")
+	assert.Contains(t, err.Error(), "building request")
+}

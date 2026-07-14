@@ -80,21 +80,25 @@ func (c *Client) FetchSeries(ctx context.Context, seriesID, start, end string) (
 	return nil, fmt.Errorf("fred %s after retries: %w", seriesID, lastErr)
 }
 
+// stripURLError drops the *url.Error wrapper whose Error() embeds the full
+// request URL — its query carries the api_key, which must never reach launchd
+// stderr logs. Only the inner cause survives (design: key 不入日志).
+func stripURLError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
+}
+
 func (c *Client) fetchOnce(ctx context.Context, reqURL string) ([]Observation, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("building request: %w", stripURLError(err))
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		// url.Error.Error() embeds the full request URL, whose query carries
-		// the api_key; strip it so transport failures logged to launchd stderr
-		// never leak the key. Keep only the inner cause; still retryable.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			err = urlErr.Err
-		}
-		return nil, true, fmt.Errorf("transport: %w", err)
+		return nil, true, fmt.Errorf("transport: %w", stripURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
