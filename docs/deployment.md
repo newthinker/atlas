@@ -232,10 +232,56 @@ sudo journalctl -u atlas -f
 
 ---
 
+## macOS launchd Deployment（本机生产实况）
+
+生产实例以用户级 LaunchAgent 运行在 runtime 目录（默认 `/Users/zuowei/workspace/runtime/atlas`，二进制与配置由代码目录投递，数据本地持有）。
+
+### 部署流程
+
+```bash
+# 1. 构建并同步运行时产物（幂等；data/ logs/ 等本地数据受 --delete 保护）
+bash scripts/ops/deploy.sh            # ATLAS_RUNTIME=<path> 可覆盖目标
+
+# 2. 安装/重载全部 LaunchAgent（幂等：bootout → bootstrap）
+bash scripts/ops/install-services.sh
+
+# 3. 仅更新二进制后重启常驻服务
+launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
+```
+
+### 服务清单（plist 真相源 `deploy/launchd/`）
+
+| 服务 | 调度 | 职责 |
+|---|---|---|
+| serve | 常驻 | Web/API |
+| refresh-us / refresh-cnhk | 每日 08:00 / 20:00 | 行情刷新 + 仓库重建 |
+| analysis | 每 30 分钟 | 信号分析 → 通知 |
+| crisis-daily | 22:45 / 23:45 / 次日 07:30 | 危机监控每日评估（多时点覆盖 ET 发布，幂等空跑） |
+| crisis-nfci | 周三 21:00 / 22:00 | 刷新周频 NFCI（不评估） |
+| crisis-intraday-jpy | 每 30 分钟 | 盘中 JPY 检查（非 BREWING/CRISIS 态空跑近零） |
+
+### 危机监控（Cassandra）部署要点
+
+- **首次部署前置**：runtime `data/crisis.db` 需含历史回填——在代码目录跑
+  `bin/atlas crisis backfill -c configs/config.yaml --from 2006-01-01` 后把
+  `data/crisis.db` 拷贝到 runtime `data/`（deploy.sh 不同步 data/）；HY OAS 2006 起
+  历史需人工 CSV 快照补齐（FRED 只保留近三年）：
+  `bin/atlas crisis backfill --csv <快照.csv> --indicator hy_oas --scale 100`。
+- **FRED key**：runtime `configs/config.yaml` 的 `collectors.fred.api_key`
+  （随 deploy.sh 同步并 chmod 600），env `FRED_API_KEY` 可覆盖；密钥不入 plist 不入日志。
+- **验证**：`launchctl kickstart gui/$(id -u)/com.newthinker.atlas.crisis-daily`
+  后查 `logs/crisis-daily.log`——当日已评估应打印 already evaluated（幂等空跑）；
+  `bin/atlas crisis status` 查看当前系统状态与各指标读数。
+- 状态语义与阈值调参见 `docs/plans/atlas-macro-crisis-monitor-design.md`（阈值全部在
+  `configs/crisis-monitor.yaml`，调参不需发版，重跑 `atlas crisis replay` 验证）。
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
+| `FRED_API_KEY` | FRED API key（危机监控；覆盖主配置 collectors.fred.api_key） | If crisis monitor enabled |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for notifications | If Telegram enabled |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID for notifications | If Telegram enabled |
 | `ANTHROPIC_API_KEY` | Claude API key for LLM features | If LLM enabled |
