@@ -149,3 +149,67 @@ func allGreen(rs []IndicatorResult) bool {
 	}
 	return true
 }
+
+// notifyFooter 页脚（通知设计 §4.2）：只挂结构化家族；速报是事实陈述不带页脚。
+// 措辞集中为常量，禁词与"非交易信号"由单测全家族兜底（通知设计 §7）。
+const notifyFooter = "\n—\n风险状态提示（概率语言），非交易信号；指标基于有限历史样本，可能失效；操作决策不在本模块范围。"
+
+const crisisSentence = "情绪层双红：危机进行中。此阶段执行预案而非预测。"
+
+// semanticSentences 语义句查表（通知设计 §4.1），键 = "FROM→TO"（状态机可达的
+// 全部转移）。含天数处用 %d 占位，semanticSentence 注入 state_machine 配置值。
+var semanticSentences = map[string]string{
+	"NORMAL→WATCH":   "领先层或多指标共振异常。观察期：提高警觉，尚无行动含义。",
+	"WATCH→BREWING":  "信用与流动性双红共振。历史样本中，此组合出现后 3–12 个月内系统性风险显著抬升（样本量小，存在失效可能）。",
+	"NORMAL→CRISIS":  crisisSentence,
+	"WATCH→CRISIS":   crisisSentence,
+	"BREWING→CRISIS": crisisSentence,
+	"CRISIS→WATCH":   "情绪层连续 %d 个交易日回落至绿。危机状态解除，转入观察期。",
+	"BREWING→WATCH":  "信用/流动性共振解除并稳定 %d 个交易日。回到观察期。",
+	"WATCH→NORMAL":   "全部触发条件解除并稳定 %d 个交易日。回到常态。",
+}
+
+// semanticSentence 查表并注入 %d（避免 YAML 调参后文案失真，通知设计 §4.1）。
+// 未知转移返回空串（渲染时省略语义句段）。
+func semanticSentence(cfg *Config, from, to SystemState) string {
+	s, ok := semanticSentences[string(from)+"→"+string(to)]
+	if !ok {
+		return ""
+	}
+	sm := cfg.StateMachine
+	switch {
+	case from == StateCrisis && to == StateWatch:
+		return fmt.Sprintf(s, sm.CrisisExitDays)
+	case from == StateBrewing && to == StateWatch:
+		return fmt.Sprintf(s, sm.BrewingExitDays)
+	case from == StateWatch && to == StateNormal:
+		return fmt.Sprintf(s, sm.WatchExitDays)
+	}
+	return s
+}
+
+// renderTransition 消息 1/2：状态升级/降级（通知设计 §5.1/§5.2）。
+func renderTransition(cfg *Config, nc NotifyContext) string {
+	res := nc.Res
+	var first, title, tail string
+	if stateRank(res.State) > stateRank(res.PrevState) {
+		prefix := "[P1] ⚠️"
+		if res.State == StateBrewing || res.State == StateCrisis {
+			prefix = "[P0] 🚨"
+		}
+		first = fmt.Sprintf("%s 状态升级 %s → %s · %s", prefix, res.PrevState, res.State, monthDay(res.Date))
+		title = "触发共振："
+		tail = fmt.Sprintf("%s 已持续 %d 个评估日 → %s · 下一评估：下一交易日",
+			res.PrevState, nc.StateDays, res.State)
+	} else {
+		first = fmt.Sprintf("[P1] ✅ 状态解除 %s → %s · %s", res.PrevState, res.State, monthDay(res.Date))
+		title = "仍异常："
+		tail = fmt.Sprintf("%s 共持续 %d 个评估日 · 下一评估：下一交易日", res.PrevState, nc.StateDays)
+	}
+	parts := []string{first}
+	if s := semanticSentence(cfg, res.PrevState, res.State); s != "" {
+		parts = append(parts, s)
+	}
+	parts = append(parts, bodyZones(cfg, res, title), tail)
+	return strings.Join(parts, "\n\n") + notifyFooter
+}
