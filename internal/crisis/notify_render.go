@@ -213,3 +213,64 @@ func renderTransition(cfg *Config, nc NotifyContext) string {
 	parts = append(parts, bodyZones(cfg, res, title), tail)
 	return strings.Join(parts, "\n\n") + notifyFooter
 }
+
+func colorWord(s Status) string {
+	switch s {
+	case StatusGreen:
+		return "绿"
+	case StatusAmber:
+		return "黄"
+	case StatusRed:
+		return "红"
+	}
+	return "白" // STALE / NO_DATA / SUPPRESSED_SEASONAL
+}
+
+// diffLine "较昨日"差异行（通知设计 §6.5）：状态迁移优先（usdjpy 转黄（原绿）），
+// 读数变化仅列当日异常区指标（hy_oas +6bp）；完全无变化 → 无变化。
+// 读数无变化用浮点直等判断（d != 0）——PrevDay.Value 与当日 Value 同出一个 store 的
+// float 读写、无精度损失，故"完全相等=无变化"成立，刻意不引入 epsilon（补充决策）。
+func diffLine(nc NotifyContext) string {
+	abnormal, _ := splitZones(nc.Res)
+	inAbnormal := map[string]bool{}
+	for _, r := range abnormal {
+		inAbnormal[r.Indicator] = true
+	}
+	var parts []string
+	for _, ind := range AllIndicators {
+		prev, ok := nc.PrevDay[ind]
+		if !ok {
+			continue
+		}
+		cur := nc.Res.Results[ind]
+		if prev.Status != cur.Status {
+			parts = append(parts, fmt.Sprintf("%s 转%s（原%s）", ind, colorWord(cur.Status), colorWord(prev.Status)))
+			continue
+		}
+		if d := cur.Value - prev.Value; inAbnormal[ind] && d != 0 {
+			parts = append(parts, ind+" "+formatDelta(ind, d))
+		}
+	}
+	if len(parts) == 0 {
+		return "较昨日：无变化"
+	}
+	return "较昨日：" + strings.Join(parts, " · ")
+}
+
+// renderDaily 消息 3：BREWING/CRISIS 无变更日报（通知设计 §5.3）。
+func renderDaily(cfg *Config, nc NotifyContext) string {
+	res := nc.Res
+	first := fmt.Sprintf("[P1] 📍 %s 日报 第 %d 日 · %s", res.State, nc.StateDays, monthDay(res.Date))
+	tail := diffLine(nc) + "\n盘中 JPY 监测运行中（每 30 分钟）· 下一评估：下一交易日"
+	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
+}
+
+// renderWeekly 消息 5：WATCH 周报（通知设计 §5.5，退出进度见 §6.6）。
+func renderWeekly(cfg *Config, nc NotifyContext) string {
+	res := nc.Res
+	first := fmt.Sprintf("[P1] 📅 Cassandra 周报 · %s 当周 · %s 已持续 %d 个评估日",
+		monthDay(res.Date), res.State, nc.StateDays)
+	tail := fmt.Sprintf("退出进度：触发条件已连续解除 %d 日（回 NORMAL 需连续 %d 日）\n下次周报：下周一 · 状态变更即时通知",
+		nc.ClearStreak, cfg.StateMachine.WatchExitDays)
+	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
+}

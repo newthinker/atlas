@@ -210,3 +210,82 @@ func TestRenderTransitionDowngrade(t *testing.T) {
 	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateWatch, StateNormal), StateDays: 40})
 	assert.Contains(t, msg, "稳定 20 个交易日。回到常态")
 }
+
+// colorWord 四分支（绿/黄/红 + 非色彩统一"白"）。
+func TestColorWord(t *testing.T) {
+	assert.Equal(t, "绿", colorWord(StatusGreen))
+	assert.Equal(t, "黄", colorWord(StatusAmber))
+	assert.Equal(t, "红", colorWord(StatusRed))
+	assert.Equal(t, "白", colorWord(StatusStale))
+	assert.Equal(t, "白", colorWord(StatusNoData))
+	assert.Equal(t, "白", colorWord(StatusSuppressed))
+}
+
+// diffLine 多级判据（通知设计 §6.5）——每级单独锁：
+// 1) 状态迁移优先于读数变化（既变色又变值 → 只出迁移句，互斥）
+// 2) 读数变化仅列当日异常区指标（非异常区变值 → 不出现）
+// 3) 顺序按 AllIndicators；4) 缺 PrevDay 行不参与；5) ⚪ 迁移 → "转白"
+func TestDiffLineLevels(t *testing.T) {
+	res := dayResult(StateBrewing, StateBrewing) // 全绿 Value=1
+	set := func(ind string, r IndicatorResult) { res.Results[ind] = r }
+	set(IndHYOAS, IndicatorResult{Indicator: IndHYOAS, Status: StatusRed, Value: 618})   // 异常，且变色+变值
+	set(IndSOFREFFR, IndicatorResult{Indicator: IndSOFREFFR, Status: StatusRed, Value: 30}) // 异常，但缺 PrevDay
+	set(IndMOVE, IndicatorResult{Indicator: IndMOVE, Status: StatusStale, Value: 1})       // ⚪ 迁移
+
+	nc := NotifyContext{Res: res, PrevDay: map[string]Evaluation{
+		IndHYOAS: {Indicator: IndHYOAS, Status: StatusAmber, Value: 500}, // 变色(黄→红)+变值(+118)
+		IndVIX:   {Indicator: IndVIX, Status: StatusGreen, Value: 5},     // 非异常，仅变值(-4) → 不出现
+		IndMOVE:  {Indicator: IndMOVE, Status: StatusGreen, Value: 1},    // 绿→STALE → 转白
+	}}
+	line := diffLine(nc)
+	// 顺序按 AllIndicators：move(idx1) 先于 hy_oas(idx3)；迁移句互斥（hy_oas 无 +118bp）
+	assert.Equal(t, "较昨日：move 转白（原绿） · hy_oas 转红（原黄）", line)
+	assert.NotContains(t, line, "+118bp") // 迁移优先：读数变化被抑制（互斥）
+	assert.NotContains(t, line, "vix")    // 非异常区变值不出现
+	assert.NotContains(t, line, "sofr")   // 缺 PrevDay 不参与
+}
+
+// 日报（§5.3）：首行第 N 日、异常指标区、较昨日差异行、盘中提示尾注。
+func TestRenderDaily(t *testing.T) {
+	cfg := testConfig()
+	res := dayResult(StateBrewing, StateBrewing)
+	res.Date = "2026-07-18"
+	set := func(ind string, r IndicatorResult) { res.Results[ind] = r }
+	set(IndHYOAS, IndicatorResult{Indicator: IndHYOAS, Status: StatusRed, Value: 618, Pct5y: 0.98, Tag: TagStress})
+	set(IndUSDJPY, IndicatorResult{Indicator: IndUSDJPY, Status: StatusAmber, Value: 158.9, Wow: -0.021, WowOK: true})
+
+	nc := NotifyContext{Res: res, StateDays: 5, PrevDay: map[string]Evaluation{
+		IndHYOAS:  {Indicator: IndHYOAS, Status: StatusRed, Value: 612},
+		IndUSDJPY: {Indicator: IndUSDJPY, Status: StatusGreen, Value: 160.1},
+		IndVIX:    {Indicator: IndVIX, Status: StatusGreen, Value: 1}, // 读数不变且非异常 → 不出现
+	}}
+	msg := renderDaily(cfg, nc)
+	assert.True(t, strings.HasPrefix(msg, "[P1] 📍 BREWING 日报 第 5 日 · 07-18\n\n异常指标：\n🔴 信用 hy_oas 618bp"))
+	// 状态迁移优先 + 读数变化仅列异常区指标（§6.5）；顺序按 AllIndicators
+	assert.Contains(t, msg, "较昨日：hy_oas +6bp · usdjpy 转黄（原绿）")
+	assert.NotContains(t, msg, "usdjpy -1.2") // usdjpy 既变色又变值 → 只出迁移句（互斥）
+	assert.Contains(t, msg, "盘中 JPY 监测运行中（每 30 分钟）· 下一评估：下一交易日")
+	assert.True(t, strings.HasSuffix(msg, notifyFooter))
+
+	// 完全无变化 → "较昨日：无变化"（boundary[0]）
+	res2 := dayResult(StateCrisis, StateCrisis)
+	nc2 := NotifyContext{Res: res2, StateDays: 2, PrevDay: map[string]Evaluation{
+		IndVIX: {Indicator: IndVIX, Status: StatusGreen, Value: 1},
+	}}
+	msg = renderDaily(cfg, nc2)
+	assert.True(t, strings.HasPrefix(msg, "[P1] 📍 CRISIS 日报 第 2 日"))
+	assert.Contains(t, msg, "较昨日：无变化")
+}
+
+// 周报（§5.5）：首行当周、退出进度（§6.6）、下次周报尾注。
+func TestRenderWeekly(t *testing.T) {
+	cfg := testConfig()
+	res := dayResult(StateWatch, StateWatch)
+	res.Date = "2026-07-20"
+	msg := renderWeekly(cfg, NotifyContext{Res: res, StateDays: 18, ClearStreak: 8})
+	assert.True(t, strings.HasPrefix(msg, "[P1] 📅 Cassandra 周报 · 07-20 当周 · WATCH 已持续 18 个评估日"))
+	assert.Contains(t, msg, "7 指标全绿：")
+	assert.Contains(t, msg, "退出进度：触发条件已连续解除 8 日（回 NORMAL 需连续 20 日）")
+	assert.Contains(t, msg, "下次周报：下周一 · 状态变更即时通知")
+	assert.True(t, strings.HasSuffix(msg, notifyFooter))
+}
