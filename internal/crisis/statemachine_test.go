@@ -268,4 +268,17 @@ func TestClearStreakDays(t *testing.T) {
 	n, err = ClearStreakDays(h2, 20)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+
+	// RecentSystem 返回错误 → 原样上抛（error_handling[1]）
+	_, err = ClearStreakDays(errHistory{err: assertErr}, 20)
+	assert.ErrorIs(t, err, assertErr)
+
+	// max 封顶回看深度：3 行全 false，max=2 只数 2（boundary[1]）
+	h3 := NewMemHistory()
+	h3.Append([]Evaluation{clearStreakEval("2026-07-06", false)})
+	h3.Append([]Evaluation{clearStreakEval("2026-07-07", false)})
+	h3.Append([]Evaluation{clearStreakEval("2026-07-08", false)})
+	n, err = ClearStreakDays(h3, 2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
 }
