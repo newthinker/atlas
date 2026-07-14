@@ -175,4 +175,11 @@ func TestBuildEvaluationsCarriesPersistAndWow(t *testing.T) {
 	assert.Contains(t, byInd[IndSOFREFFR].Detail, `"persist_days":9`)
 	assert.Contains(t, byInd[IndUSDJPY].Detail, `"wow":-0.031`)
 	assert.Contains(t, byInd[IndUSDJPY].Detail, `"wow_ok":true`)
+
+	// 纯零值全绿行经 omitempty 省略三键（hy_oas 不填 Wow/WowOK/PersistDays）。
+	// 冒号形式锁死各键独立："wow": 不误匹配 "wow_ok":。
+	green := byInd[IndHYOAS].Detail
+	assert.NotContains(t, green, `"persist_days":`)
+	assert.NotContains(t, green, `"wow":`)
+	assert.NotContains(t, green, `"wow_ok":`)
 }
