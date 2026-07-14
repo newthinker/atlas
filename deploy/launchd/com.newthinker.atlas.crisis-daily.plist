@@ -25,6 +25,12 @@
   <dict>
     <key>PATH</key>
     <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Yahoo 从本网络直连恒 403，需经本地代理（与主配置 telegram/claude 的
+         proxy 一致，代理常驻已是系统级依赖）；FRED 经代理亦验证可用。 -->
+    <key>http_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>https_proxy</key>
+    <string>http://127.0.0.1:7897</string>
   </dict>
 
   <!-- 多时点唤起（本地 +0800）覆盖 ET 上午发布 ± 夏令时漂移（设计 §4.3）：

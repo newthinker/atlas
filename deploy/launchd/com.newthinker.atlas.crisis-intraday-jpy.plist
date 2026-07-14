@@ -25,6 +25,11 @@
   <dict>
     <key>PATH</key>
     <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Yahoo FetchQuote 从本网络直连恒 403，需经本地代理（同 crisis-daily）。 -->
+    <key>http_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>https_proxy</key>
+    <string>http://127.0.0.1:7897</string>
   </dict>
 
   <!-- 每 30 分钟一次（设计 §4.3）：非 BREWING/CRISIS 态启动即空跑退出（不取行情），
