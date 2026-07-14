@@ -70,6 +70,20 @@ func TestSplitZonesOrdering(t *testing.T) {
 		restInds = append(restInds, r.Indicator)
 	}
 	assert.Equal(t, []string{IndT10Y2Y, IndNFCI, IndUSDJPY, IndMOVE}, restInds)
+
+	// 第三级：同严重度同冰山层 → AllIndicators 序（vix 先于 move，锁 SliceStable 稳定性）
+	res2 := dayResult(StateWatch, StateWatch)
+	for _, ind := range []string{IndVIX, IndMOVE} {
+		r := res2.Results[ind]
+		r.Status = StatusAmber
+		res2.Results[ind] = r
+	}
+	ab2, _ := splitZones(res2)
+	assert.Equal(t, []string{IndVIX, IndMOVE}, []string{ab2[0].Indicator, ab2[1].Indicator})
+
+	// indicatorIndex 兜底：未知指标排在 AllIndicators 之后
+	assert.Equal(t, 0, indicatorIndex(IndVIX))
+	assert.Equal(t, len(AllIndicators), indicatorIndex("unknown"))
 }
 
 // 区块标题（设计 §4 + 补充决策 5）。

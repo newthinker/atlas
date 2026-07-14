@@ -92,13 +92,30 @@ func splitZones(res *DayResult) (abnormal, rest []IndicatorResult) {
 			noncolor = append(noncolor, r)
 		}
 	}
-	sort.SliceStable(abnormal, func(i, j int) bool {
-		if severity(abnormal[i].Status) != severity(abnormal[j].Status) {
-			return severity(abnormal[i].Status) > severity(abnormal[j].Status)
+	sort.Slice(abnormal, func(i, j int) bool {
+		a, b := abnormal[i], abnormal[j]
+		if severity(a.Status) != severity(b.Status) {
+			return severity(a.Status) > severity(b.Status) // 一级：严重度降序
 		}
-		return icebergRank(abnormal[i].Indicator) < icebergRank(abnormal[j].Indicator)
+		if icebergRank(a.Indicator) != icebergRank(b.Indicator) {
+			return icebergRank(a.Indicator) < icebergRank(b.Indicator) // 二级：冰山层序
+		}
+		return indicatorIndex(a.Indicator) < indicatorIndex(b.Indicator) // 三级：AllIndicators 序（显式，不靠排序稳定性）
 	})
 	return abnormal, append(rest, noncolor...)
+}
+
+// indicatorIndex is the position of ind in AllIndicators — the third-level
+// abnormal-zone tiebreak (通知设计 §6.2). Made explicit so the ordering is a
+// total comparator rather than an artifact of sort stability (which n≤7 slices
+// can't distinguish stable-vs-unstable and so can't lock via mutation).
+func indicatorIndex(ind string) int {
+	for i, x := range AllIndicators {
+		if x == ind {
+			return i
+		}
+	}
+	return len(AllIndicators)
 }
 
 // bodyZones 渲染异常区 + 其余区（通知设计 §4 骨架第三段）。
