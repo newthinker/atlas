@@ -669,3 +669,113 @@ func TestRunCrisisReplay(t *testing.T) {
 		assert.Contains(t, buf.String(), "final state")
 	})
 }
+
+// stubSender 捕获发送文本并可注入失败，用于 eval 通知接线测试。
+type stubSender struct {
+	err  error
+	sent []string
+}
+
+func (s *stubSender) SendText(text string) error {
+	s.sent = append(s.sent, text)
+	return s.err
+}
+
+func TestSummaryDue(t *testing.T) {
+	assert.True(t, summaryDue("2026-07-01", crisis.StateNormal))   // 周三 = 当月首交易日 → 月报
+	assert.False(t, summaryDue("2026-07-02", crisis.StateNormal))
+	assert.True(t, summaryDue("2026-08-03", crisis.StateNormal))   // 8/1 周六 → 首交易日 = 8/3 周一
+	assert.True(t, summaryDue("2026-07-13", crisis.StateWatch))    // 周一 → 周报
+	assert.False(t, summaryDue("2026-07-14", crisis.StateWatch))
+	assert.False(t, summaryDue("2026-07-13", crisis.StateBrewing)) // BREWING 走日报，不走摘要
+	assert.False(t, summaryDue("bad-date", crisis.StateNormal))    // 坏日期不发
+	assert.False(t, summaryDue("2026-07-04", crisis.StateNormal))  // 周六 → 非交易日，非首交易日
+}
+
+// buildCrisisSender 在无 telegram 配置时返回 nil（eval 退化为打印）。
+func TestBuildCrisisSenderNoConfig(t *testing.T) {
+	assert.Nil(t, buildCrisisSender())
+}
+
+// 状态变更日经 Sender 发送通知（functional[2]）。
+func TestExecuteCrisisEvalDailySendsNotification(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	const target = "2026-07-10"
+	vals := map[string]float64{
+		crisis.IndVIX: 15, crisis.IndMOVE: 70, crisis.IndSOFREFFR: -10, crisis.IndHYOAS: 400,
+		crisis.IndT10Y2Y: 35, crisis.IndNFCI: 0.1, crisis.IndUSDJPY: 150, // nfci>0 领先红 → NORMAL→WATCH
+	}
+	seedIndicators(t, st, target, 80, vals)
+
+	sender := &stubSender{}
+	var calls int
+	deps := crisisEvalDeps{
+		cfg: crisisTestConfig(), store: st, ingest: noopIngest(&calls),
+		now: sat711, out: io.Discard, errOut: io.Discard, sender: sender,
+	}
+	require.NoError(t, executeCrisisEvalDaily(ctx, deps, ""))
+	require.Len(t, sender.sent, 1)
+	assert.True(t, strings.HasPrefix(sender.sent[0], "[P1]"))
+	assert.Contains(t, sender.sent[0], "NORMAL → WATCH")
+}
+
+// 发送失败仅记 stderr 不失败退出（error_handling[0]）。
+func TestExecuteCrisisEvalDailyNotifyFailureDoesNotAbort(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	const target = "2026-07-10"
+	vals := map[string]float64{
+		crisis.IndVIX: 15, crisis.IndMOVE: 70, crisis.IndSOFREFFR: -10, crisis.IndHYOAS: 400,
+		crisis.IndT10Y2Y: 35, crisis.IndNFCI: 0.1, crisis.IndUSDJPY: 150,
+	}
+	seedIndicators(t, st, target, 80, vals)
+
+	var errBuf bytes.Buffer
+	var calls int
+	deps := crisisEvalDeps{
+		cfg: crisisTestConfig(), store: st, ingest: noopIngest(&calls),
+		now: sat711, out: io.Discard, errOut: &errBuf,
+		sender: &stubSender{err: errors.New("telegram down")},
+	}
+	require.NoError(t, executeCrisisEvalDaily(ctx, deps, "")) // 不失败退出
+	assert.Contains(t, errBuf.String(), "notify failed")
+	// 评估已落库（文件真相源，通知丢失可自愈）
+	sys, err := st.LatestSystemEval(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, sys)
+	assert.Equal(t, crisis.StateWatch, sys.SystemState)
+}
+
+// sender 未配置（nil）时通知打印到 out，便于本地试运行。
+func TestExecuteCrisisEvalDailyNilSenderPrints(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	const target = "2026-07-10"
+	vals := map[string]float64{
+		crisis.IndVIX: 15, crisis.IndMOVE: 70, crisis.IndSOFREFFR: -10, crisis.IndHYOAS: 400,
+		crisis.IndT10Y2Y: 35, crisis.IndNFCI: 0.1, crisis.IndUSDJPY: 150,
+	}
+	seedIndicators(t, st, target, 80, vals)
+
+	var out bytes.Buffer
+	var calls int
+	deps := crisisEvalDeps{
+		cfg: crisisTestConfig(), store: st, ingest: noopIngest(&calls),
+		now: sat711, out: &out, errOut: io.Discard, // sender 缺省 nil
+	}
+	require.NoError(t, executeCrisisEvalDaily(ctx, deps, ""))
+	assert.Contains(t, out.String(), "[P1]")
+}
+
+func TestStaleIndicators(t *testing.T) {
+	res := &crisis.DayResult{Results: map[string]crisis.IndicatorResult{}}
+	for _, ind := range crisis.AllIndicators {
+		res.Results[ind] = crisis.IndicatorResult{Indicator: ind, Status: crisis.StatusGreen}
+	}
+	mv := res.Results[crisis.IndMOVE]
+	mv.Status = crisis.StatusStale
+	res.Results[crisis.IndMOVE] = mv
+
+	assert.Equal(t, []string{crisis.IndMOVE}, staleIndicators(res))
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector/fred"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/crisis"
+	"github.com/newthinker/atlas/internal/notifier/telegram"
 )
 
 var (
@@ -211,6 +212,7 @@ type crisisEvalDeps struct {
 	now        func() time.Time
 	out        io.Writer
 	errOut     io.Writer
+	sender     crisis.Sender
 }
 
 // requiredDaily 是齐备性校验的必要集:FRED 日频序列(设计 §4.3——T+1 未齐则
@@ -235,6 +237,7 @@ func runCrisisEval(cmd *cobra.Command, args []string) error {
 		deps := crisisEvalDeps{
 			cfg: ccfg, store: st, ingest: ig.IngestAll,
 			now: time.Now, out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(),
+			sender: buildCrisisSender(),
 		}
 		return executeCrisisEvalDaily(cmd.Context(), deps, evalDate)
 	case "nfci":
@@ -307,7 +310,73 @@ func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride 
 		return err
 	}
 	printDayResult(d.out, res)
+
+	days, err := stateStreakDays(ctx, d.store, res.State)
+	if err != nil {
+		return err
+	}
+	for _, msg := range crisis.Messages(res, days, summaryDue(target, res.State), staleIndicators(res)) {
+		if d.sender == nil {
+			fmt.Fprintln(d.out, msg) // 未配置 telegram：打印便于本地试运行
+			continue
+		}
+		if err := d.sender.SendText(msg); err != nil {
+			// 通知失败不失败退出：评估已落库，状态可由 status 自愈获取（文件真相源）
+			fmt.Fprintf(d.errOut, "warning: notify failed: %v\n", err)
+		}
+	}
 	return nil
+}
+
+// buildCrisisSender 复用主配置 notifiers.telegram 凭据（serve.go:330 同款构造，
+// notifier 零改动）。未配置或缺凭据 → nil（eval 退化为打印）。
+func buildCrisisSender() crisis.Sender {
+	cfg, err := loadConfigOrDefaults()
+	if err != nil {
+		return nil
+	}
+	nc, ok := cfg.Notifiers["telegram"]
+	if !ok || !nc.Enabled || nc.BotToken == "" || nc.ChatID == "" {
+		return nil
+	}
+	return telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy))
+}
+
+// summaryDue：NORMAL → 当月首个交易日发月报（设计 §4.3：不加第 4 个 plist，
+// 在 daily eval 内判断）；WATCH → 周一发周报。
+func summaryDue(date string, state crisis.SystemState) bool {
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return false
+	}
+	switch state {
+	case crisis.StateNormal:
+		return isFirstTradingDayOfMonth(t)
+	case crisis.StateWatch:
+		return t.Weekday() == time.Monday
+	}
+	return false
+}
+
+func isFirstTradingDayOfMonth(t time.Time) bool {
+	if t.Weekday() == time.Saturday || t.Weekday() == time.Sunday {
+		return false
+	}
+	first := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for first.Weekday() == time.Saturday || first.Weekday() == time.Sunday {
+		first = first.AddDate(0, 0, 1)
+	}
+	return t.Equal(first)
+}
+
+func staleIndicators(res *crisis.DayResult) []string {
+	var out []string
+	for _, ind := range crisis.AllIndicators {
+		if res.Results[ind].Status == crisis.StatusStale {
+			out = append(out, ind)
+		}
+	}
+	return out
 }
 
 func mustAddDays(date string, n int) string {
