@@ -75,8 +75,11 @@ func staleFor(cfg *Config, indicator, evalDate, latestObsDate string) bool {
 // indDetail is the JSON persisted in indicator evaluation rows; Raw feeds the
 // hysteresis on later days.
 type indDetail struct {
-	Raw             Status `json:"raw"`
-	WindowActualObs int    `json:"window_actual_obs"`
+	Raw             Status  `json:"raw"`
+	WindowActualObs int     `json:"window_actual_obs"`
+	PersistDays     int     `json:"persist_days,omitempty"`
+	Wow             float64 `json:"wow,omitempty"`
+	WowOK           bool    `json:"wow_ok,omitempty"`
 }
 
 func rawFromDetail(e Evaluation) Status {

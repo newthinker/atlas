@@ -80,6 +80,9 @@ type IndicatorResult struct {
 	Value           float64
 	Pct5y           float64
 	WindowActualObs int
+	PersistDays     int     // sofr_effr：满足当前档位阈值的连续观测数（通知文案用）
+	Wow             float64 // usdjpy/vix：周环比；WowOK=false 时无效
+	WowOK           bool
 }
 
 // SeriesReader is the rules engine's read-only view of observations; the
