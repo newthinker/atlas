@@ -6,6 +6,7 @@ package fred
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -86,7 +87,14 @@ func (c *Client) fetchOnce(ctx context.Context, reqURL string) ([]Observation, b
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, true, err
+		// url.Error.Error() embeds the full request URL, whose query carries
+		// the api_key; strip it so transport failures logged to launchd stderr
+		// never leak the key. Keep only the inner cause; still retryable.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, true, fmt.Errorf("transport: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

@@ -129,3 +129,20 @@ func TestFetchSeriesInvalidValue(t *testing.T) {
 	_, err := c.FetchSeries(context.Background(), "SOFR", "", "")
 	require.Error(t, err)
 }
+
+// SEC-1: 传输层错误(*url.Error 的 Error() 含带 api_key 的完整 URL)必须脱敏,
+// 不得把 key 泄漏到 launchd 错误日志;且仍按可重试语义走重试耗尽路径。
+func TestFetchSeriesTransportErrorSanitized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	unreachable := srv.URL
+	srv.Close() // 关闭后该地址连接被拒 → 传输层错误
+
+	const secret = "super-secret-fred-key"
+	c := NewWithBaseURL(secret, unreachable)
+	c.backoff = time.Millisecond
+	_, err := c.FetchSeries(context.Background(), "VIXCLS", "2026-07-01", "2026-07-03")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "api_key")            // query 键名不泄漏
+	assert.NotContains(t, err.Error(), secret)               // key 值不泄漏
+	assert.Contains(t, err.Error(), "after retries")         // 仍走重试耗尽 = retryable 语义不变
+}
