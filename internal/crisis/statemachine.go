@@ -70,7 +70,7 @@ func NextState(cfg *Config, prev SystemState, res map[string]IndicatorResult, hi
 		if brewingPair {
 			return StateBrewing, det, nil
 		}
-		ok, err := systemDetailStreak(hist, sm.BrewingExitDays, func(d SysDetail) bool { return !d.BrewingPair })
+		ok, err := systemDetailStreak(hist, sm.BrewingExitDays, StateBrewing, func(d SysDetail) bool { return !d.BrewingPair })
 		if err != nil || !ok {
 			return StateBrewing, det, err
 		}
@@ -83,7 +83,7 @@ func NextState(cfg *Config, prev SystemState, res map[string]IndicatorResult, hi
 		if det.AnyTrigger {
 			return StateWatch, det, nil
 		}
-		ok, err := systemDetailStreak(hist, sm.WatchExitDays, func(d SysDetail) bool { return !d.AnyTrigger })
+		ok, err := systemDetailStreak(hist, sm.WatchExitDays, StateWatch, func(d SysDetail) bool { return !d.AnyTrigger })
 		if err != nil || !ok {
 			return StateWatch, det, err
 		}
@@ -120,10 +120,13 @@ func sentimentGreenStreak(res map[string]IndicatorResult, hist EvalHistory, days
 	return true, nil
 }
 
-// systemDetailStreak: 此前 days-1 个系统评估行的 detail 均满足 pred（今日条件
-// 由调用方先判）。detail JSON 不可解析时按保守处理——该行视为不满足退出条件
-// （不退出）而非上抛错误，以免一条坏历史行使整日评估失败（DoD error_handling）。
-func systemDetailStreak(hist EvalHistory, days int, pred func(SysDetail) bool) (bool, error) {
+// systemDetailStreak: 此前 days-1 个系统评估行均处于 state 态且 detail 满足
+// pred（今日条件由调用方先判）。异态历史行意味着进入 state 尚不足 days-1 日，
+// 冷却期必须在态内重新累积——否则危机康复尾段的免触发日会把 WATCH/BREWING 的
+// 观察期压缩掉（QA 裁决：设计 §3.3 的"持续 N 交易日"限定态内计数）。detail JSON
+// 不可解析时按保守处理——该行视为不满足退出条件（不退出）而非上抛错误，
+// 以免一条坏历史行使整日评估失败（DoD error_handling）。
+func systemDetailStreak(hist EvalHistory, days int, state SystemState, pred func(SysDetail) bool) (bool, error) {
 	prev, err := hist.RecentSystem(days - 1)
 	if err != nil {
 		return false, err
@@ -132,6 +135,9 @@ func systemDetailStreak(hist EvalHistory, days int, pred func(SysDetail) bool) (
 		return false, nil
 	}
 	for _, e := range prev {
+		if e.SystemState != state {
+			return false, nil
+		}
 		var d SysDetail
 		if err := json.Unmarshal([]byte(e.Detail), &d); err != nil {
 			return false, nil

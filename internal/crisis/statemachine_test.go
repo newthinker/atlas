@@ -134,9 +134,9 @@ func TestNextStateExits(t *testing.T) {
 	goodDet, _ := json.Marshal(SysDetail{AnyTrigger: false, Prev: StateWatch})
 	trigDet, _ := json.Marshal(SysDetail{AnyTrigger: true, Prev: StateWatch})
 	for i := 0; i < 18; i++ {
-		mixed.Append([]Evaluation{{Indicator: "", Detail: string(goodDet)}})
+		mixed.Append([]Evaluation{{Indicator: "", SystemState: StateWatch, Detail: string(goodDet)}})
 	}
-	mixed.Append([]Evaluation{{Indicator: "", Detail: string(trigDet)}})
+	mixed.Append([]Evaluation{{Indicator: "", SystemState: StateWatch, Detail: string(trigDet)}})
 	next, _, err = NextState(cfg, StateWatch, greens, mixed)
 	require.NoError(t, err)
 	assert.Equal(t, StateWatch, next)
@@ -153,9 +153,9 @@ func TestNextStateMalformedDetailConservative(t *testing.T) {
 
 	h := NewMemHistory()
 	for i := 0; i < 18; i++ {
-		h.Append([]Evaluation{{Indicator: "", Detail: string(good)}})
+		h.Append([]Evaluation{{Indicator: "", SystemState: StateWatch, Detail: string(good)}})
 	}
-	h.Append([]Evaluation{{Indicator: "", Detail: "{not valid json"}})
+	h.Append([]Evaluation{{Indicator: "", SystemState: StateWatch, Detail: "{not valid json"}})
 
 	next, _, err := NextState(cfg, StateWatch, greens, h)
 	require.NoError(t, err)
@@ -199,4 +199,44 @@ func TestMemHistoryOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ind, 1)
 	assert.Equal(t, "2026-07-02", ind[0].TS)
+}
+
+// QA CONTESTED 裁决回归：退出冷却必须在态内累积——危机康复尾段的免触发
+// CRISIS 行不得计入 WATCH→NORMAL 的 20 日观察期（BREWING 同理）。
+func TestExitStreakRequiresInStateHistory(t *testing.T) {
+	cfg := testConfig()
+	quiet := colorResults(nil) // 全绿：今日无任何触发
+
+	// 19 条 any_trigger=false 历史行，但其中仅 1 条是 WATCH 态，其余是
+	// CRISIS 康复尾段——修复前会被误计满而 T+1 直降 NORMAL。
+	mixed := NewMemHistory()
+	b, _ := json.Marshal(SysDetail{AnyTrigger: false, Prev: StateCrisis})
+	for i := 0; i < 18; i++ {
+		mixed.Append([]Evaluation{{Indicator: "", SystemState: StateCrisis, Detail: string(b)}})
+	}
+	bw, _ := json.Marshal(SysDetail{AnyTrigger: false, Prev: StateWatch})
+	mixed.Append([]Evaluation{{Indicator: "", SystemState: StateWatch, Detail: string(bw)}})
+
+	next, _, err := NextState(cfg, StateWatch, quiet, mixed)
+	require.NoError(t, err)
+	assert.Equal(t, StateWatch, next, "异态历史行不得计入 WATCH 退出冷却")
+
+	// 对照半：同样 19 条全为 WATCH 态 → 正常放行 NORMAL。
+	next, _, err = NextState(cfg, StateWatch, quiet, histWithSystem(19, SysDetail{AnyTrigger: false, Prev: StateWatch}))
+	require.NoError(t, err)
+	assert.Equal(t, StateNormal, next)
+
+	// BREWING 同理：9 条 pair=false 但混入 WATCH 态行 → 维持 BREWING。
+	mixedB := NewMemHistory()
+	bb, _ := json.Marshal(SysDetail{BrewingPair: false, Prev: StateWatch})
+	for i := 0; i < 9; i++ {
+		st := StateBrewing
+		if i == 4 {
+			st = StateWatch
+		}
+		mixedB.Append([]Evaluation{{Indicator: "", SystemState: st, Detail: string(bb)}})
+	}
+	next, _, err = NextState(cfg, StateBrewing, quiet, mixedB)
+	require.NoError(t, err)
+	assert.Equal(t, StateBrewing, next, "异态历史行不得计入 BREWING 退出冷却")
 }
