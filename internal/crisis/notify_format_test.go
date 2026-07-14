@@ -71,6 +71,12 @@ func TestTrendArrow(t *testing.T) {
 	assert.Equal(t, "↗", trendArrow(IndT10Y2Y, 9))
 	assert.Equal(t, "→", trendArrow(IndNFCI, -0.009)) // < 0.01
 	assert.Equal(t, "↘", trendArrow(IndNFCI, -0.02))
+
+	// 恰好 |Δ|==eps 归属方向（设计"< eps 才横盘"→ 恰好相等即箭头，非 →）
+	// 锁 >= / <= 边界，防 >=→> 变异静默通过
+	assert.Equal(t, "↗", trendArrow(IndVIX, 0.1))
+	assert.Equal(t, "↘", trendArrow(IndVIX, -0.1))
+	assert.Equal(t, "↗", trendArrow(IndT10Y2Y, 1))
 }
 
 // 设计 §6.4 + 补充决策 2：21 观测 → 7 桶；全平全 ▄；不足 7 逐点；空窗口空串。
