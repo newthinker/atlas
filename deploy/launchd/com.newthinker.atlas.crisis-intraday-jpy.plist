@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.crisis-intraday-jpy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/bin/atlas</string>
+    <string>crisis</string>
+    <string>eval</string>
+    <string>--mode</string>
+    <string>intraday</string>
+    <string>--config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
+    <string>--crisis-config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/crisis-monitor.yaml</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 每 30 分钟一次（设计 §4.3）：非 BREWING/CRISIS 态启动即空跑退出（不取行情），
+       成本近零；BREWING/CRISIS 态才拉 JPY=X 实时价做盘中 carry-trade 急平仓监控。 -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/crisis-intraday-jpy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/crisis-intraday-jpy.err.log</string>
+</dict>
+</plist>

@@ -219,6 +219,17 @@ func (s *Store) HasSystemEvalForDate(ctx context.Context, date string) (bool, er
 	return n > 0, nil
 }
 
+// HasIndicatorEvalForDate dedupes per-day one-shot alerts (intraday JPY).
+func (s *Store) HasIndicatorEvalForDate(ctx context.Context, indicator, date string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM crisis_evaluations WHERE indicator = ? AND ts = ?`, indicator, date).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("checking eval for %s/%s: %w", indicator, date, err)
+	}
+	return n > 0, nil
+}
+
 // Reader / History bind a context so the pure engine interfaces stay
 // context-free (replay and tests use in-memory implementations instead).
 func (s *Store) Reader(ctx context.Context) SeriesReader { return storeReader{ctx, s} }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/newthinker/atlas/internal/collector/fred"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
+	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/crisis"
 	"github.com/newthinker/atlas/internal/notifier/telegram"
 )
@@ -78,7 +79,7 @@ func init() {
 	crisisBackfillCmd.Flags().StringVar(&backfillIndicator, "indicator", "", "indicator for --csv import (e.g. hy_oas)")
 	crisisBackfillCmd.Flags().Float64Var(&backfillScale, "scale", 1, "value multiplier for --csv (percent→bp: 100)")
 	crisisEvalCmd.Flags().StringVar(&evalDate, "date", "", "override evaluation date YYYY-MM-DD (default: previous trading day)")
-	crisisEvalCmd.Flags().StringVar(&evalMode, "mode", "daily", "daily | nfci")
+	crisisEvalCmd.Flags().StringVar(&evalMode, "mode", "daily", "daily | nfci | intraday")
 	crisisReplayCmd.Flags().StringVar(&replayFrom, "from", "", "start date YYYY-MM-DD (required)")
 	crisisReplayCmd.Flags().StringVar(&replayTo, "to", "", "end date YYYY-MM-DD (required)")
 	crisisReplayCmd.Flags().BoolVar(&replayJSON, "json", false, "emit transitions as JSON lines")
@@ -246,6 +247,12 @@ func runCrisisEval(cmd *cobra.Command, args []string) error {
 			now: time.Now, out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(),
 		}
 		return executeCrisisEvalNFCI(cmd.Context(), deps)
+	case "intraday":
+		deps := crisisEvalDeps{
+			cfg: ccfg, store: st, now: time.Now,
+			out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(), sender: buildCrisisSender(),
+		}
+		return executeCrisisIntraday(cmd.Context(), deps, yahoo.New().FetchQuote)
 	default:
 		return fmt.Errorf("unknown --mode %q", evalMode)
 	}
@@ -377,6 +384,66 @@ func staleIndicators(res *crisis.DayResult) []string {
 		}
 	}
 	return out
+}
+
+// intradayIndicator 是盘中告警的去重行标识（不属于 7 个正式指标）。
+const intradayIndicator = "usdjpy_intraday"
+
+// executeCrisisIntraday（设计 §4.3 intraday_jpy 行）：先读库中系统状态，非
+// BREWING/CRISIS 立即退出；否则用 JPY=X 实时价对库中 5 观测前收盘算周环比，
+// 触红即发 [P0]（捕捉 carry trade 急平仓），以评估行做每日一次去重。
+func executeCrisisIntraday(ctx context.Context, d crisisEvalDeps, quote func(string) (*core.Quote, error)) error {
+	sys, err := d.store.LatestSystemEval(ctx)
+	if err != nil {
+		return err
+	}
+	if sys == nil || (sys.SystemState != crisis.StateBrewing && sys.SystemState != crisis.StateCrisis) {
+		return nil
+	}
+
+	today := d.now().UTC().Format("2006-01-02")
+	sent, err := d.store.HasIndicatorEvalForDate(ctx, intradayIndicator, today)
+	if err != nil {
+		return err
+	}
+	if sent {
+		return nil
+	}
+
+	q, err := quote("JPY=X")
+	if err != nil {
+		return err
+	}
+	win, err := d.store.SeriesWindow(ctx, crisis.IndUSDJPY, today, 5)
+	if err != nil {
+		return err
+	}
+	if len(win) < 5 || win[0].Value == 0 {
+		return nil // 历史不足，无法算周环比
+	}
+	wow := q.Price/win[0].Value - 1
+	if wow > d.cfg.Indicators.USDJPY.RedWowPct {
+		return nil
+	}
+
+	// 先落去重行再发送（文件真相源先行，通知丢失不重复告警）
+	if err := d.store.AppendEvaluations(ctx, []crisis.Evaluation{{
+		TS: today, EvalAt: crisis.NowStamp(d.now()), Indicator: intradayIndicator,
+		Status: crisis.StatusRed, Value: q.Price,
+		Detail: fmt.Sprintf(`{"wow":%.4f}`, wow),
+	}}); err != nil {
+		return err
+	}
+	msg := fmt.Sprintf("[P0] 盘中告警：USD/JPY 周环比 %.1f%%（现价 %.2f），疑似 carry trade 急平仓（%s，系统状态 %s）",
+		wow*100, q.Price, today, sys.SystemState)
+	if d.sender == nil {
+		fmt.Fprintln(d.out, msg)
+		return nil
+	}
+	if err := d.sender.SendText(msg); err != nil {
+		fmt.Fprintf(d.errOut, "warning: notify failed: %v\n", err)
+	}
+	return nil
 }
 
 func mustAddDays(date string, n int) string {

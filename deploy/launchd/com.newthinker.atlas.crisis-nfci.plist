@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.crisis-nfci</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/bin/atlas</string>
+    <string>crisis</string>
+    <string>eval</string>
+    <string>--mode</string>
+    <string>nfci</string>
+    <string>--config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
+    <string>--crisis-config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/crisis-monitor.yaml</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- NFCI 周三 ET 8:30 发布后，本地 +0800 晚间两时点覆盖夏令时漂移（设计 §3.2 条 4）。 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/crisis-nfci.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/crisis-nfci.err.log</string>
+</dict>
+</plist>

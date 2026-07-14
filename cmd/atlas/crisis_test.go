@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/crisis"
 )
 
@@ -778,4 +779,151 @@ func TestStaleIndicators(t *testing.T) {
 	res.Results[crisis.IndMOVE] = mv
 
 	assert.Equal(t, []string{crisis.IndMOVE}, staleIndicators(res))
+}
+
+// seedBrewing 预置一条 BREWING 系统行，使 intraday 进入告警评估路径。
+func seedBrewing(t *testing.T, st *crisis.Store, date string) {
+	t.Helper()
+	require.NoError(t, st.AppendEvaluations(context.Background(), []crisis.Evaluation{{
+		TS: date, EvalAt: "2026-07-10T00:00:00.000000000Z", Indicator: "",
+		SystemState: crisis.StateBrewing, Detail: "{}",
+	}}))
+}
+
+func intradayDeps(st *crisis.Store) crisisEvalDeps {
+	return crisisEvalDeps{
+		cfg: crisisTestConfig(), store: st,
+		now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+		out:    io.Discard, errOut: io.Discard,
+	}
+}
+
+func TestExecuteCrisisIntraday(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	deps := intradayDeps(st)
+	var quoteCalls int
+	quote := func(string) (*core.Quote, error) {
+		quoteCalls++
+		return &core.Quote{Price: 145}, nil
+	}
+
+	// 非 BREWING/CRISIS → 空跑退出，连行情都不取（设计 §4.3：空跑成本近零）
+	require.NoError(t, executeCrisisIntraday(ctx, deps, quote))
+	assert.Equal(t, 0, quoteCalls)
+
+	// BREWING 态 + 5 观测前收盘 150、现价 145 → wow=−3.3% ≤ −3% → 告警一次
+	seedIndicators(t, st, "2026-07-09", 10, map[string]float64{crisis.IndUSDJPY: 150})
+	seedBrewing(t, st, "2026-07-09")
+	require.NoError(t, executeCrisisIntraday(ctx, deps, quote))
+	assert.Equal(t, 1, quoteCalls)
+	sent, err := st.HasIndicatorEvalForDate(ctx, "usdjpy_intraday", "2026-07-10")
+	require.NoError(t, err)
+	assert.True(t, sent)
+
+	// 同日第二次唤起 → 每日一次去重，不再取行情
+	require.NoError(t, executeCrisisIntraday(ctx, deps, quote))
+	assert.Equal(t, 1, quoteCalls)
+}
+
+// error_handling：FetchQuote 失败 → 返回非 nil error 且不写去重行（下次可重试）。
+func TestExecuteCrisisIntradayQuoteError(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	deps := intradayDeps(st)
+	seedIndicators(t, st, "2026-07-09", 10, map[string]float64{crisis.IndUSDJPY: 150})
+	seedBrewing(t, st, "2026-07-09")
+
+	quote := func(string) (*core.Quote, error) { return nil, errors.New("yahoo down") }
+	require.Error(t, executeCrisisIntraday(ctx, deps, quote))
+
+	sent, err := st.HasIndicatorEvalForDate(ctx, "usdjpy_intraday", "2026-07-10")
+	require.NoError(t, err)
+	assert.False(t, sent) // 未写去重行 → 下次触发可重试
+}
+
+// boundary：不足 5 观测 或 5 观测前收盘为 0 → 静默跳过不告警、不写去重行。
+func TestExecuteCrisisIntradaySilentSkips(t *testing.T) {
+	quote := func(string) (*core.Quote, error) { return &core.Quote{Price: 145}, nil }
+
+	t.Run("insufficient history", func(t *testing.T) {
+		st := newCrisisTestStore(t)
+		ctx := context.Background()
+		seedIndicators(t, st, "2026-07-09", 3, map[string]float64{crisis.IndUSDJPY: 150}) // 仅 3 观测
+		seedBrewing(t, st, "2026-07-09")
+		require.NoError(t, executeCrisisIntraday(ctx, intradayDeps(st), quote))
+		sent, err := st.HasIndicatorEvalForDate(ctx, "usdjpy_intraday", "2026-07-10")
+		require.NoError(t, err)
+		assert.False(t, sent)
+	})
+
+	t.Run("zero base close", func(t *testing.T) {
+		st := newCrisisTestStore(t)
+		ctx := context.Background()
+		// 5 观测但最早一条(=win[0]，5 观测前收盘)为 0
+		require.NoError(t, st.UpsertObservations(ctx, []crisis.Observation{
+			{Date: "2026-07-06", Indicator: crisis.IndUSDJPY, Value: 0, Source: "test", FetchedAt: "x"},
+			{Date: "2026-07-07", Indicator: crisis.IndUSDJPY, Value: 150, Source: "test", FetchedAt: "x"},
+			{Date: "2026-07-08", Indicator: crisis.IndUSDJPY, Value: 150, Source: "test", FetchedAt: "x"},
+			{Date: "2026-07-09", Indicator: crisis.IndUSDJPY, Value: 150, Source: "test", FetchedAt: "x"},
+			{Date: "2026-07-10", Indicator: crisis.IndUSDJPY, Value: 150, Source: "test", FetchedAt: "x"},
+		}))
+		seedBrewing(t, st, "2026-07-09")
+		require.NoError(t, executeCrisisIntraday(ctx, intradayDeps(st), quote))
+		sent, err := st.HasIndicatorEvalForDate(ctx, "usdjpy_intraday", "2026-07-10")
+		require.NoError(t, err)
+		assert.False(t, sent)
+	})
+}
+
+// wow 未触红（现价高于基期）→ 不告警、不写去重行。
+func TestExecuteCrisisIntradayNoTrigger(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	seedIndicators(t, st, "2026-07-09", 10, map[string]float64{crisis.IndUSDJPY: 150})
+	seedBrewing(t, st, "2026-07-09")
+
+	quote := func(string) (*core.Quote, error) { return &core.Quote{Price: 149}, nil } // wow≈−0.7% > −3%
+	require.NoError(t, executeCrisisIntraday(ctx, intradayDeps(st), quote))
+	sent, err := st.HasIndicatorEvalForDate(ctx, "usdjpy_intraday", "2026-07-10")
+	require.NoError(t, err)
+	assert.False(t, sent)
+}
+
+// 配置了 Sender 时触发告警经 SendText 发送（成功路径）。
+func TestExecuteCrisisIntradaySendsViaSender(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	seedIndicators(t, st, "2026-07-09", 10, map[string]float64{crisis.IndUSDJPY: 150})
+	seedBrewing(t, st, "2026-07-09")
+
+	sender := &stubSender{}
+	deps := intradayDeps(st)
+	deps.sender = sender
+	quote := func(string) (*core.Quote, error) { return &core.Quote{Price: 145}, nil } // wow=−3.3%
+
+	require.NoError(t, executeCrisisIntraday(ctx, deps, quote))
+	require.Len(t, sender.sent, 1)
+	assert.True(t, strings.HasPrefix(sender.sent[0], "[P0]"))
+	assert.Contains(t, sender.sent[0], "carry trade")
+}
+
+// Sender 发送失败仅记 stderr 不失败退出，且去重行已落库（不重复告警）。
+func TestExecuteCrisisIntradaySendFailureDoesNotAbort(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	seedIndicators(t, st, "2026-07-09", 10, map[string]float64{crisis.IndUSDJPY: 150})
+	seedBrewing(t, st, "2026-07-09")
+
+	var errBuf bytes.Buffer
+	deps := intradayDeps(st)
+	deps.sender = &stubSender{err: errors.New("telegram down")}
+	deps.errOut = &errBuf
+	quote := func(string) (*core.Quote, error) { return &core.Quote{Price: 145}, nil }
+
+	require.NoError(t, executeCrisisIntraday(ctx, deps, quote))
+	assert.Contains(t, errBuf.String(), "notify failed")
+	sent, err := st.HasIndicatorEvalForDate(ctx, "usdjpy_intraday", "2026-07-10")
+	require.NoError(t, err)
+	assert.True(t, sent) // 去重行先落库，避免下次重复告警
 }

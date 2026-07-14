@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.crisis-daily</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/bin/atlas</string>
+    <string>crisis</string>
+    <string>eval</string>
+    <string>--mode</string>
+    <string>daily</string>
+    <string>--config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
+    <string>--crisis-config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/crisis-monitor.yaml</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 多时点唤起（本地 +0800）覆盖 ET 上午发布 ± 夏令时漂移（设计 §4.3）：
+       当晚 22:45 / 23:45，次日 07:30 兜底；周末与数据未齐由幂等+齐备性校验空跑。 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/crisis-daily.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/crisis-daily.err.log</string>
+</dict>
+</plist>

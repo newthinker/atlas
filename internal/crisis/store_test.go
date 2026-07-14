@@ -118,6 +118,14 @@ func TestStoreEvaluations(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, has)
 
+	// HasIndicatorEvalForDate：按 (indicator, ts) 判在（intraday 每日去重用）
+	hasVix, err := s.HasIndicatorEvalForDate(ctx, IndVIX, "2026-07-02")
+	require.NoError(t, err)
+	assert.True(t, hasVix)
+	hasVix, err = s.HasIndicatorEvalForDate(ctx, IndVIX, "2026-07-05")
+	require.NoError(t, err)
+	assert.False(t, hasVix)
+
 	// Reader / History 适配器冒烟
 	w, err := s.Reader(ctx).Window(IndVIX, "2026-07-03", 1)
 	require.NoError(t, err)
