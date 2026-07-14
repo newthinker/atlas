@@ -4591,3 +4591,9 @@ Grafana 面板、strategy 层联动、notifier 优先级路由公共化、假日
 - 2007~2009：2007-01-03 WATCH ≪ vix 首红；2009-12-01 CRISIS 退出后 WATCH 恰满 20 交易日（12-29）降 NORMAL（态内计数 7d84524 实证）✓
 - 2015~2019：BREWING 0 次（≤1）✓
 限定条件：hy_oas 仅回填到 2023-07-14（FRED 三年截断），2008 段与 2015-19 段的 BREWING 语义待人工导入 2006 起 HY OAS CSV 快照后复跑确认（`bin/atlas crisis backfill --csv <快照> --indicator hy_oas --scale 100`）。
+
+### 附注补充（2026-07-14 下午）：HY OAS 历史快照已导入，全量复验通过
+
+- **数据源**：GitHub 公开镜像 `Duzzuti/fear-and-greed`（FRED BAMLH0A0HYM2 存档 2000-01-03~2024-12-19）。可信度验证：与 FRED 官方现存段 378 个重叠日**零不一致**（浮点精确相等），2008-12-15 峰值 21.82% 与史实吻合。裁剪 ≤2023-07-13 段（6,142 行）经 `crisis backfill --csv --scale 100` 导入，source=manual_backfill，与官方段无缝衔接（07-13 397bp → 07-14 390bp）。快照留存 `data/hyoas-2000-2023-snapshot.csv`（dev 与 runtime；ICE 授权限制，**不入公开仓库**）。
+- **全量复跑四段回测**：仍全部达标。2008 段带真实 HY 后 2009-12 退出更保守（HY 高位使 WATCH 持续至段末，符合语义）；2015-19 段 BREWING 仍 0 次，新增 WATCH 进入对应 2015-16 能源高收益债危机等真实压力期。阈值仍未调整。
+- **launchd Yahoo 403 已修**：本网络直连被边缘封锁，crisis-daily/crisis-intraday-jpy plist 增加本地代理 env（e3f1496）。
