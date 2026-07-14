@@ -1,0 +1,45 @@
+{
+  "id": "TASK-005",
+  "title": "派生指标计算 derive.go",
+  "description": "实施方案 Task 5（行 1518–1654）：SpreadBp/WowPct/MomChange/Percentile 四个纯函数，Percentile 复用 valuation.PercentileRank（internal/valuation/percentile.go:7，0–100 返回、空序列 -1，需除以 100 归一）。依赖 TASK-004 仅为 internal/crisis 同包串行化（功能上只需 TASK-001）。",
+  "module": "internal/crisis",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/crisis/derive.go",
+    "internal/crisis/derive_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "SpreadBp(sofr,effr) = (sofr−effr)×100（方案用例：4.55/4.30→25，4.30/4.40→−10）",
+      "WowPct 在 ≥6 观测时返回 close_t/close_{t-5}−1 与 ok=true",
+      "MomChange 返回 window[last]−window[last−n]；Percentile 返回 0–1 分位与实际观测数"
+    ],
+    "boundary": [
+      "WowPct 不足 6 观测或基期（t-5 收盘）为 0 返回 ok=false；MomChange 窗口不足 n+1 或 n≤0 返回 ok=false；Percentile 空窗返回 (-1, 0)"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿（含 obsSeq 复用 fixture）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

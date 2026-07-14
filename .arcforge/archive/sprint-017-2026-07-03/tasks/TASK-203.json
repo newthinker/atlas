@@ -1,0 +1,79 @@
+{
+  "id": "TASK-203",
+  "title": "serve 装配 alert 评估循环 + 派生指标 + 示例规则",
+  "description": "cmd/atlas/serve.go：cfg.Alerts.Enabled 时，把已注册 notifiers 包上适配器（TASK-202 产物，位置见其 discovery）构造 alert.Evaluator，起 goroutine 按 check_interval 循环：metrics.Registry.Snapshot()（TASK-201 产物）→ 补派生指标 → SetMetrics → EvaluateAll(rules)；随 app ctx 优雅退出。派生指标（runner 内计算，首批 2 个）：http_error_rate = 保留上次快照，用 http_requests_total_5xx 与基名 http_requests_total 两键（TASK-201 AD-13 状态类聚合键）的增量算区间错误率（累计比率无意义，必须 delta；负增量按计数器重启 clamp 到 0）；signals_24h = SignalStore.Count(from=now-24h)，Count 出错时该指标跳过不中断评估循环。每轮 SetMetrics 传新 map，不共享可变 map。config.AlertRule.For 已是 time.Duration（viper 默认 hook 解 \"5m\"），映射测试须含字符串 duration 解码用例。config.AlertRule 与 alert.Rule 字段一一对应直接映射。configs/config.example.yaml 补可用示例规则（http_error_rate > 0.1 + for: 5m）。裁剪：不做 up 指标、不专门造 analysis_failures_1h。测试用 observer.ObservedLogs 验证装配行为（沿用 notifier 接线 PR 的测试风格）。【键名更正（TASK-201 discovery）】HTTP 指标 prometheus Name 无 atlas_ 前缀：取数键为 http_requests_total_5xx 与 http_requests_total；业务指标才带 atlas_ 前缀。规则示例中的指标名以 Snapshot 实际产出为准。",
+  "module": "alert-wiring/serve-assembly",
+  "complexity": "medium",
+  "pr": 2,
+  "estimated_files": [
+    "cmd/atlas/serve.go",
+    "cmd/atlas/alert_runner.go",
+    "cmd/atlas/alert_runner_test.go",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "cfg.Alerts.Enabled=true 时评估循环按 check_interval 周期执行 Snapshot → 补派生指标 → SetMetrics → EvaluateAll，规则触发时通知送达适配器",
+        "verify_by": "test"
+      },
+      {
+        "desc": "http_error_rate 用相邻两次快照 _5xx 键与基名键的增量计算区间错误率（首次快照无基线时不产出或为 0，不得用累计比率；负增量 clamp 到 0）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "signals_24h 来自 SignalStore.Count(from=now-24h)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "config.AlertRule 各字段正确映射到 alert.Rule（含 for/冷却相关字段）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "Alerts.Enabled=false 时零行为变化：不起 goroutine、不构造 Evaluator",
+        "verify_by": "test"
+      },
+      {
+        "desc": "总请求增量为 0 时 http_error_rate 不除零（产出 0 或跳过）",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "app ctx 取消后评估 goroutine 在有限时间内返回、无泄漏（必须有停止断言，不能只测启动；单条规则 Notify 失败不中断循环）",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "config.example.yaml 含可用示例规则（http_error_rate > 0.1 + for: 5m）及注释；internal/alert 评估器本体零改动",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-201",
+    "TASK-202"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-201",
+    "TASK-202"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "verifier": "test-agent-1",
+  "commit": "6f2317250f11433149f997d2c484e3758430ec89",
+  "discovery": ".arcforge/discoveries/TASK-203.json",
+  "packages": [
+    "cmd/atlas",
+    "configs/config.example.yaml"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "coverage_minimum": 35
+}

@@ -1,0 +1,25 @@
+{
+  "task": "TASK-008",
+  "key_findings": [
+    "InQuarterEndWindow：quarterStart/quarterEnd 由月份定位季度锚点，lastTradingDayOnOrBefore/firstTradingDayOnOrAfter 落到交易日，向内 PrevTradingDay×3 与 nextTradingDay×2 覆盖两侧窗口；周末/bad-date 先短路 false。锚点 2026-03-27/03-30/03-31/04-01/04-02、2026-12-31 为真",
+    "staleFor：daysBetween(latestObsDate, evalDate) > maxLag；仅 nfci 用 WeeklyMaxLagDays(12)，其余 DailyMaxLagDays(4)。等效覆盖 MOVE 连续拉取失败降级（不单独计次）",
+    "ApplyHysteresis 非对称防抖：升级（severity(raw)≥severity(prevEff)）或无历史/raw 非色彩 → 直接 raw；降级需 today+prev[0..days-2] 的 rawFromDetail 全 isColor 且 severity≤raw，否则返回 prevEff（prev[0].Status 昨日生效状态）；历史<days-1 不降级（冷启动安全）",
+    "rawFromDetail：反序列化 indDetail{Raw,WindowActualObs}，raw 空回退 e.Status；**json tag raw/window_actual_obs 是 Task9 写 detail、Task11 读的序列化契约**",
+    "覆盖率 87.8%"
+  ],
+  "decisions": [
+    {"decision": "InQuarterEndWindow 逐交易日回退/前进而非固定偏移", "rationale": "周内日近似下季末交易日数不固定（月末落周末），逐日遍历天然正确"},
+    {"decision": "prevEff 取 prev[0].Status（生效状态）而非 raw", "rationale": "维持时回退到昨日实际生效档；raw 仅用于判断连续低档"},
+    {"decision": "非色彩状态（STALE/NO_DATA/SUPPRESSED）阻断降级", "rationale": "severity=-1 无法确认连续低档，维持 prevEff，符合设计 §3.2 条 5 共用退出机制"}
+  ],
+  "files_modified": ["internal/crisis/suppress.go", "internal/crisis/suppress_test.go"],
+  "interfaces_exposed": [
+    "InQuarterEndWindow(date string) bool",
+    "staleFor(cfg *Config, indicator, evalDate, latestObsDate string) bool",
+    "ApplyHysteresis(raw Status, prev []Evaluation, days int) Status（prev 新→旧）",
+    "rawFromDetail(e Evaluation) Status; type indDetail struct{ Raw Status `json:\"raw\"`; WindowActualObs int `json:\"window_actual_obs\"` }"
+  ],
+  "rework": "首验 REJECTED：rawFromDetail 回退分支覆盖=0（「间接覆盖」注释被 profile 证伪）。返工 bc85498 补 mixed 判别性用例（prev[1] Detail=\"\" 回退 Status 列放行降级），rawFromDetail 100%，复验 VERIFIED",
+  "verification": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；coverage 88.1% (>=80%)；commits d59eb24 + bc85498 仅含声明的 2 文件；simplifier 无改动",
+  "note": "discovery 由 dev-agent-1 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）"
+}

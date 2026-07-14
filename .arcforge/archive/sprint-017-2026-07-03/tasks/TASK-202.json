@@ -1,0 +1,64 @@
+{
+  "id": "TASK-202",
+  "title": "notifier 适配器（alert.Notifier ← notifier.Notifier）+ telegram SendText",
+  "description": "实现 alert 侧 Notifier 接口到 notifier.Notifier 的适配器：若底层 notifier 实现可选接口 interface{ SendText(string) error } → 直发告警文本（格式 [SEVERITY] name: message）；否则回退包装为系统信号 core.Signal{Symbol:\"SYSTEM\", Strategy:\"alert\", Reason:告警文本} 走 Send。telegram 加公开 SendText 方法（内部走已有 sendRaw，约 3 行）；email/webhook 走回退路径，零改动。架构约束（AD-12）：internal/alert 不得 import internal/notifier——适配器放 internal/notifier 侧（建议）或 cmd/atlas，位置决策记入 discovery 供 TASK-203 读取。先读 internal/alert/evaluator.go 确认 alert 侧 Notifier 接口的实际签名。TDD：先写失败单测。",
+  "module": "alert-wiring/notifier-adapter",
+  "complexity": "medium",
+  "pr": 2,
+  "estimated_files": [
+    "internal/notifier/alert_adapter.go",
+    "internal/notifier/alert_adapter_test.go",
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "底层 notifier 实现 SendText 时，适配器直发文本，格式 [SEVERITY] name: message",
+        "verify_by": "test"
+      },
+      {
+        "desc": "底层不实现 SendText 时，回退包装 core.Signal{Symbol:\"SYSTEM\", Strategy:\"alert\", Reason:告警文本} 走 Send",
+        "verify_by": "test"
+      },
+      {
+        "desc": "telegram notifier 公开 SendText(string) error，内部复用已有 sendRaw 发送路径",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "底层 Send/SendText 返回错误时适配器如实向上传递，不吞错",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "internal/alert 包零改动且不被 internal/notifier 之外的新依赖方向污染（alert 不 import notifier）；email/webhook 实现零改动",
+        "verify_by": "review"
+      },
+      {
+        "desc": "适配器双路径（直发/回退）单测齐备；go test ./internal/notifier/... 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 2,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-1",
+  "commit": "0f3c3669572a3de1ceed74486cfd62a64b700a68",
+  "discovery": ".arcforge/discoveries/TASK-202.json",
+  "packages": [
+    "internal/notifier"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    "W1: telegram 告警路径 parse_mode=Markdown 会让含奇数下划线/方括号/反引号的告警文本被 Telegram 400 拒收（telegram.go:293 sendRaw 固定 parse_mode）。修复：SendText 告警路径改纯文本发送（payload 不带 parse_mode），SendBatch/sendMessage 现行为不变；测试断言 SendText 的 payload 无 parse_mode 字段 + 含下划线/方括号/反引号的文本可发送。更新 SendText 注释与 discovery。"
+  ]
+}

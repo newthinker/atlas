@@ -1,0 +1,53 @@
+{
+  "id": "TASK-014",
+  "title": "通知模板与 telegram 接入 notify.go",
+  "description": "实施方案 Task 14（行 4049–4335）：Sender 接口 + Messages 文案生成（[P0]/[P1]/[P2] 前缀、月报/周报、页脚边界声明），cmd 端 eval 流程末尾接 telegram（serve.go:330 同款构造零改动复用）。跨 internal/crisis + cmd/atlas 双 package（AD-3 裁决，队尾串行无互斥风险）。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/notify.go",
+    "internal/crisis/notify_test.go",
+    "cmd/atlas/crisis.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "状态变更 → [P1]；进入 BREWING/CRISIS → [P0]；BREWING/CRISIS 无变更日 → [P1] 日报；summaryDue 月报（NORMAL∧当月首交易日，附 7 指标读数+分位）/ 周报（WATCH∧周一）",
+      "STALE 指标 → [P2] 运维告警；模板含当前状态/触发指标及读数/5 年分位/持续天数/下一评估提示，页脚固定边界声明",
+      "eval daily 流程末尾经 Sender 发送（telegram.New(BotToken, ChatID, WithProxy) 复用）"
+    ],
+    "boundary": [
+      "全部生成文案不含\"必然/一定/即将\"（单测逐条断言，Global Constraints）",
+      "NORMAL 无变更且非 summaryDue → 不发消息（零消息日）"
+    ],
+    "error_handling": [
+      "发送失败仅记 stderr 不失败退出（评估已落库，通知可自愈）"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-011",
+    "TASK-013"
+  ],
+  "wave": 11,
+  "context_from": [
+    "TASK-011",
+    "TASK-012",
+    "TASK-013"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-014.json",
+  "packages": [
+    "./internal/crisis",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

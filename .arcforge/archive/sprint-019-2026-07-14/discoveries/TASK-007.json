@@ -1,0 +1,23 @@
+{
+  "task": "TASK-007",
+  "key_findings": [
+    "crisis 命令照 watchlist.go 平铺惯例：var 命令对象 + init() 注册 PersistentFlags 与 AddCommand(rootCmd)；父命令 --crisis-config persistent flag 默认 configs/crisis-monitor.yaml",
+    "上游契约全部与实际源码一致：crisis.LoadConfig/NewStore(ccfg.Storage.Path)/Store.Observation(ctx,indicator,date)/UpsertObservations、NowStamp(t)、NewIngestor/IngestAll/IngestReport{Counts,YahooErrs}、fred.New、yahoo.New()",
+    "FRED key 解析 resolveFREDKey：env（ccfg.FRED.APIKeyEnv，默认 FRED_API_KEY）优先，回退 cmd 主配置 collectors.fred.api_key（经 loadConfigOrDefaults）；密钥不写入任何入库文件",
+    "importCSVFrom：date,value 两列可带表头（首行 date parse 失败即视为表头跳过），value×scale，source=manual_backfill；非首行坏日期/坏值/列数不足均报错",
+    "cmd/atlas 全包覆盖率基线 69.2%（<80%），经 AD-6 裁决 cmd 任务门禁按本任务新增文件判定：crisis.go 80.3%（61/76 语句）PASS"
+  ],
+  "decisions": [
+    {"decision": "runCrisisBackfill 的 FRED/Yahoo 网络 happy 路径不写单测", "rationale": "属 non_functional[1] manual 项（真实网络），离线不可测；仅覆盖 CSV 路径与全部错误前置分支"},
+    {"decision": "测试用真实 configs/crisis-monitor.yaml 复制 + 单处替换 storage.path→临时库", "rationale": "crisis.LoadConfig 有完整 validate，手写最小 yaml 易与 struct 脱节；复制真实配置只改存储路径，既过校验又离线"},
+    {"decision": "采纳 simplifier：resolveFREDKey 用 cfg.Collectors[\"fred\"].APIKey 零值访问替代 if-ok 分支", "rationale": "map 缺键返回零值 CollectorConfig（APIKey 空），等价且更简；覆盖率 80.8%→80.3% 仍达标"}
+  ],
+  "files_modified": ["cmd/atlas/crisis.go", "cmd/atlas/crisis_test.go"],
+  "interfaces_exposed": [
+    "atlas crisis 父命令 + backfill 子命令；--crisis-config persistent flag（默认 configs/crisis-monitor.yaml）",
+    "私有助手（Task 12/13 复用）：openCrisisStore() (*crisis.Config,*crisis.Store,error)、resolveFREDKey(envName string) string、importCSV(ctx,st,path,indicator,scale) (int,error)、importCSVFrom(ctx,st,io.Reader,indicator,scale) (int,error)",
+    "backfill flags: --from/--to/--csv/--indicator/--scale"
+  ],
+  "verification": "GOTOOLCHAIN=local go build -o bin/atlas ./cmd/atlas 通过；go test ./cmd/atlas/ 全绿（新增 6 测试函数 11 子用例）；crisis.go 语句覆盖率 80.3%（AD-6 PASS）；go vet 干净；commits f104ba1 + 38bd622 仅含声明的 2 文件",
+  "note": "discovery 由 dev-agent-2 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）。38bd622 由 Leader 复核 diff 后提交（dev 报告中'子代理自行 commit'为误判）。manual 验收（真实 FRED backfill/CSV 导入/sqlite 抽查/基线核对）列终验收清单"
+}

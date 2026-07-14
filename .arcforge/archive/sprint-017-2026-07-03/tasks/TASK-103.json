@@ -1,0 +1,54 @@
+{
+  "id": "TASK-103",
+  "title": "文档治理（runbook 补记 + superseded 注记 + 未实现标注）",
+  "description": "纯文档任务，不改任何代码。1) docs/ops/qlib-warehouse-runbook.md 补记第 4 个 LaunchAgent：analysis 服务（com.newthinker.atlas.analysis.plist）、trigger-analysis.sh、services.sh analysis-now / analysis-logs 子命令（写前先在仓库中核实这些脚本/plist 的实际路径与用法）。2) docs/plans/2025-12-28-atlas-architecture-design.md 头部加\"部分设计已被实践 superseded\"注记，点名 TimescaleDB / gin / WebSocket / Parquet / CircuitBreaker / sina 六项及现实替代（net/http、内存+sqlite 存储、整页渲染等）。3) docs/plans/2026-01-08-crypto-collector-design.md 对 SupportsSymbol / sentinel 错误 / \"仅可重试才 fallback\" 三处加\"未实现，实施时裁剪\"标注——不补实现，尊重既成 YAGNI 判断。",
+  "module": "cleanup/docs",
+  "complexity": "simple",
+  "pr": 1,
+  "estimated_files": [
+    "docs/ops/qlib-warehouse-runbook.md",
+    "docs/plans/2025-12-28-atlas-architecture-design.md",
+    "docs/plans/2026-01-08-crypto-collector-design.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "runbook 含 analysis LaunchAgent 完整条目：plist 名、触发脚本、services.sh analysis-now / analysis-logs 子命令，且与仓库内实际脚本内容核实一致",
+        "verify_by": "review"
+      },
+      {
+        "desc": "架构设计文档头部有 superseded 注记，逐一点名 TimescaleDB/gin/WebSocket/Parquet/CircuitBreaker/sina 六项及各自现实替代",
+        "verify_by": "review"
+      },
+      {
+        "desc": "crypto 设计文档在 SupportsSymbol、sentinel 错误、仅可重试才 fallback 三处均有\"未实现，实施时裁剪\"标注",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "git diff 只含 3 个 md 文件，无任何代码/配置改动；不补任何被标注为未实现的功能",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "verifier": "test-agent-1",
+  "commit": "0722664c0318d41e44bd96f484735c4f24ef30f6",
+  "discovery": ".arcforge/discoveries/TASK-103.json",
+  "packages": [
+    "docs/ops/qlib-warehouse-runbook.md",
+    "docs/plans/2025-12-28-atlas-architecture-design.md",
+    "docs/plans/2026-01-08-crypto-collector-design.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

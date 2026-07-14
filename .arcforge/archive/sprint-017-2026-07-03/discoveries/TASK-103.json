@@ -1,0 +1,45 @@
+{
+  "task_id": "TASK-103",
+  "key_findings": [
+    "analysis 服务已在仓库落地：deploy/launchd/com.newthinker.atlas.analysis.plist（StartInterval 1800s 每 30min，RunAtLoad=false 装载不立即触发），调用 scripts/ops/trigger-analysis.sh。",
+    "trigger-analysis.sh 从 configs/config.yaml 读 server.port 与 server.api_key，POST http://127.0.0.1:<port>/api/v1/analysis/run；atlas serve 未运行则打 WARN 并非零退出。设计上 atlas serve 自身不跑分析循环（App.Start 未接线），分析靠此脚本外部周期触发。",
+    "services.sh 已有 analysis-now（launchctl kickstart 立即跑一轮）与 analysis-logs（tail -f logs/analysis.out.log）子命令；install-services.sh 实际安装 4 个 LaunchAgent（serve/refresh-us/refresh-cnhk/analysis），runbook 原文只记 3 个已过时。",
+    "架构设计六项现实替代已在代码核实：gin→net/http（internal/api/server.go 用 http.ServeMux，无 gin 依赖）；TimescaleDB→无 postgres 依赖，信号走 internal/storage/signal/memory.go 内存 store + 历史走本地 SQLite modernc.org/sqlite（data/qlib_warehouse.db）；WebSocket→无 websocket 依赖，Web UI 为 html/template 服务端整页渲染（internal/api/templates/*.html）；Parquet→无 parquet 依赖，冷数据即单一 SQLite；CircuitBreaker→无熔断器组件，collector 走 selector fallback + router cooldown；sina→未接入新浪源，A股/指数走 eastmoney、美股走 yahoo、基本面走 lixinger。",
+    "crypto 设计三处均确认未实现：Provider 接口（internal/collector/crypto/provider.go）只有 Name/FetchQuote/FetchHistory 无 SupportsSymbol；crypto 包未定义 ErrSymbolNotFound/ErrRateLimited/ErrProviderDown（core 包有同名但为 *core.Error 非 errors.New，不通用）；FetchQuote/FetchHistory 无差别遍历所有 provider，任何错误都继续 fallback，无「可重试 vs 永久」分类。"
+  ],
+  "decisions": [
+    {
+      "decision": "runbook 中 §3 表格与 §5 一并订正而非仅追加 analysis 条目",
+      "rationale": "install-services.sh 说明栏原记「3 个 LaunchAgent」、services.sh 命令列表缺 analysis-now/analysis-logs、§5 标题「两个分时段定时任务」均与现状不符。done_criteria 要求「与仓库实际脚本核实一致」，故订正过时记载以保持一致，改动限于 analysis 相关字句。"
+    },
+    {
+      "decision": "analysis 单独成 §5.1 小节而非塞进 §5 refresh 表格",
+      "rationale": "analysis 机制与两个 refresh 任务本质不同：用 StartInterval 间隔调度而非 StartCalendarInterval 日历时刻；走 HTTP API 依赖 serve 在跑而非文件重建。合表会混淆列语义（时刻 vs 频率），独立小节并列出三点差异更清晰。"
+    },
+    {
+      "decision": "架构文档用头部注记表逐项点名，正文原文不动",
+      "rationale": "done_criteria 明确要求头部加 superseded 注记并逐一点名六项及现实替代。保留原始设计文字作历史记录，仅在头部集中标注被取代项，符合「不改实现、尊重历史文档」的治理意图。"
+    },
+    {
+      "decision": "crypto 三处只加标注不补实现",
+      "rationale": "done_criteria non_functional 明确「不补任何被标注为未实现的功能」，尊重既成 YAGNI 判断。标注说明现状实现与设计的差异，供后续实施者裁剪。"
+    }
+  ],
+  "files_modified": [
+    "docs/ops/qlib-warehouse-runbook.md",
+    "docs/plans/2025-12-28-atlas-architecture-design.md",
+    "docs/plans/2026-01-08-crypto-collector-design.md"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "commit": "0722664c0318d41e44bd96f484735c4f24ef30f6",
+    "git_diff_scope": "本次提交仅含 3 个目标 md 文件（3 files changed, 58 insertions(+), 2 deletions(-)），无任何代码/配置改动；同分支其他 dev 的未提交改动未被纳入本提交。",
+    "no_code_symbols": "纯文档改动，无代码符号受影响（gitnexus MCP 工具在本 dev agent 工具集中不可用，已由 git diff 确认全部为 .md 文件降级验证）。",
+    "criteria_check": [
+      "functional[0] runbook analysis 条目：§3 表 + §5.1 已补 plist 名/trigger-analysis.sh/analysis-now/analysis-logs，与脚本核实一致 ✅",
+      "functional[1] 架构 superseded 注记：头部表逐一点名六项及现实替代 ✅",
+      "functional[2] crypto 三处「未实现，实施时裁剪」标注齐全 ✅",
+      "non_functional[0] 本提交仅 3 个 md，无代码/配置改动，未补任何未实现功能 ✅"
+    ]
+  }
+}

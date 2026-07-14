@@ -1,0 +1,51 @@
+{
+  "id": "TASK-011",
+  "title": "单日评估编排 eval.go",
+  "description": "实施方案 Task 11（行 3320–3529）：EvalDay 编排 7 指标评估 → 季末抑制（仅 sofr_effr 且 raw≥AMBER 且季末窗 → SUPPRESSED_SEASONAL）→ ApplyHysteresis → NextState → 组装 8 行 Evaluation。测试 fixture 复用 rules_test.go 的 baselineSeries/testConfig/seriesEnding。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/eval.go",
+    "internal/crisis/eval_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "EvalDay 返回 DayResult：Results 含 7 指标、PrevState/State/Detail、Evaluations 恰 8 行（7 指标行 + 1 系统行）可直接落库",
+      "指标行 detail 存 {\"raw\":..,\"window_actual_obs\":..}；系统行 detail 存 SysDetail JSON、Indicator=\"\"",
+      "空历史冷启动 prev=NORMAL；Transitioned() 反映状态变更；基线 fixture 维持 NORMAL 且 AmberCount=2",
+      "sofr_effr raw≥AMBER 且季末窗 → SUPPRESSED_SEASONAL；色彩状态经 ApplyHysteresis（降级滞回 demote_hysteresis_days）"
+    ],
+    "boundary": [
+      "非色彩状态（NO_DATA/STALE/SUPPRESSED_SEASONAL）不过滞回直通输出"
+    ],
+    "error_handling": [
+      "任一指标评估出错时 EvalDay 返回错误（不落半套结果；注入失败 SeriesReader 的最小用例）"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-010"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-008",
+    "TASK-009",
+    "TASK-010"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "reject_reason": "EvalDay prevState 从历史系统行恢复分支（eval.go:49-50）覆盖=0：全部用例空历史只测冷启动半。该分支是 replay 逐日状态链根基。修复：预置系统行 SystemState=WATCH 断言 res.PrevState==WATCH。"
+}

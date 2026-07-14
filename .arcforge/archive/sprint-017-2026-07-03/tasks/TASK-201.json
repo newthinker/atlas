@@ -1,0 +1,69 @@
+{
+  "id": "TASK-201",
+  "title": "metrics Registry.Snapshot()（通用 prometheus 桥接）",
+  "description": "internal/metrics 新增 snapshot.go：给 Registry 加 Snapshot() map[string]float64 方法。遍历 prometheus Gather() 结果：gauge/counter 取值（同名多 label 序列聚合求和），histogram 展开为 <name>_count / <name>_sum 两键。【AD-13 裁决】对带 status label 且值为 3 位数字的序列，额外产出 <name>_2xx/_4xx/_5xx 状态类聚合键（按百位归类、跨其余 label 求和）——这是 TASK-203 http_error_rate 的取数来源；非数字 status 值（ok/error 等）不产额外键。prometheus 依赖封闭在 metrics 包内——alert 包继续只见 map[string]float64，与 Evaluator.SetMetrics 既有边界一致。效果：告警规则表达式可引用任意已注册指标（如 atlas_signals_generated_total > 100）。TDD：先写失败单测再实现。",
+  "module": "alert-wiring/snapshot",
+  "complexity": "medium",
+  "pr": 2,
+  "estimated_files": [
+    "internal/metrics/snapshot.go",
+    "internal/metrics/snapshot_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "Registry.Snapshot() 返回 map[string]float64：gauge 取当前值，counter 取累计值",
+        "verify_by": "test"
+      },
+      {
+        "desc": "同名指标多 label 序列聚合求和为单键（如两个 label 组合的 counter 值 3 和 5 → 该键为 8）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "histogram 展开为 <name>_count 与 <name>_sum 两键，值与观测一致",
+        "verify_by": "test"
+      },
+      {
+        "desc": "带 status label 的序列额外产出 <name>_2xx/_4xx/_5xx 状态类键：status 值为 3 位数字（如 500,502）或 [1-5]xx 类字符串（如 \"5xx\"，现有 RecordRequest 的实际存法）均归入对应类键并求和；status=ok 等其他值不产额外键（AD-13/AD-13a）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "空 registry（无任何注册指标）Snapshot 返回空 map，不 panic 不返回 nil",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "Gather() 出错时 Snapshot 有确定行为（返回空 map 或已收集部分并记录日志），不 panic——具体策略由 Dev 定并记入 discovery",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "Snapshot 公开签名不暴露任何 prometheus 类型；internal/alert 包零改动",
+        "verify_by": "review"
+      },
+      {
+        "desc": "单测覆盖 gauge/counter/histogram/多 label 四场景（注入假 registry）；go test ./internal/metrics/... 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 2,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "dc8c291bcc66ab45c4b87fa8f6018c8bba36b8f8",
+  "discovery": ".arcforge/discoveries/TASK-201.json",
+  "packages": [
+    "internal/metrics"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

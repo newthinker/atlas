@@ -1,0 +1,61 @@
+{
+  "id": "TASK-003",
+  "title": "提取 buildCollectors（serve 装配段迁出为共享函数）",
+  "description": "把 cmd/atlas/serve.go:99-170 采集器装配段（cache 设置、yahoo/lixinger/eastmoney/crypto 注册、wireQlibWarehouse、估值/EPS 源注入、SetValuationLookback）**原样迁入**新文件 cmd/atlas/collectors.go 的 buildCollectors(cfg, application, log) (cleanup func(), err error)——代码逐字迁移不改行为（三个段内变量 yahooCollector/lixingerCollector/qlibWarehouseDB 段后无引用，已核实）。追加两处新内容：① lixingerCollector 非 nil 时 application.SetFundamentalSource(lixingerCollector)（typed-nil 防护同 valuationSourceOrNil 模式，TASK-002 产物）；② cleanup 闭包关闭 qlibWarehouseDB（nil-safe）。serve.go 原段替换为一次调用 + defer cleanupCollectors()，移除因迁移不再使用的 import（yahoo 仍被 backtester 段使用需保留）。err 当前恒 nil（签名按 spec 预留）。测试代码在计划 Task 3 Step 1 逐字给出（EmptyConfig/Defaults 两用例；若 Defaults 未启用采集器按计划注记手工启用 yahoo）。注意：编辑 serve.go 前先 gitnexus_impact runServe。开工前读 .arcforge/discoveries/TASK-002.json 确认 SetFundamentalSource 签名。权威步骤：计划 Task 3。",
+  "module": "watchlist-cmd/build-collectors",
+  "complexity": "medium",
+  "pr": 1,
+  "estimated_files": [
+    "cmd/atlas/collectors.go",
+    "cmd/atlas/collectors_test.go",
+    "cmd/atlas/serve.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "buildCollectors 空配置成功返回且 cleanup nil-safe（TestBuildCollectors_EmptyConfig）；默认/启用 yahoo 配置注册到采集器，且断言注册的 collector 名称集合符合迁移前预期（可机检零变化锚点，AD-8/B10）（TestBuildCollectors_Defaults）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "lixinger 配置启用时 FundamentalSource 被注入；未配置时不注入（typed-nil 不逃逸为非 nil 接口）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "装配段代码逐字迁移（diff 对照：除函数包装/两处新增外与原 serve.go:99-170 零差异）；serve 行为零变化",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go build ./... 干净（serve.go 无未使用 import）；go test ./cmd/atlas/ 全绿（既有 serve/executor/export/alert_runner/signalstore 测试零回归）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "cleanup 确实关闭 qlib 仓库句柄（qlib 启用场景下可实证或代码 review 确认）",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "203cf8ab1496bf8c51d59fdce7b2612f0141ee7c",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

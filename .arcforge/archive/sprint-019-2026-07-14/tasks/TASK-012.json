@@ -1,0 +1,53 @@
+{
+  "id": "TASK-012",
+  "title": "crisis eval / status 子命令",
+  "description": "实施方案 Task 12（行 3530–3888）：eval（daily/nfci 模式）与 status 子命令；executeCrisisEvalDaily 用 deps 注入（沿用 watchlistDeps 模式）。daily 五步：目标日=--date 或 PrevTradingDay(now) → 幂等跳过 → IngestAll(target−45d,today) → 数据齐备门 → EvalDay+AppendEvaluations+摘要。",
+  "module": "cmd/atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "daily：目标评估日 = --date 或 PrevTradingDay(now)；评估落库后打印摘要",
+      "幂等：HasSystemEvalForDate 为真 → 打印 already evaluated 并 exit 0（多时点唤起空跑）",
+      "数据齐备门：vix/hy_oas/t10y2y/sofr_effr 四序列 target 日缺任一观测 → 打印 not ready 并 exit 0 等下次唤起",
+      "nfci 模式仅 IngestNFCI(now−30d,today) 不评估；status 打印最新系统状态、同态持续天数、当日各指标 status/value/5y 分位"
+    ],
+    "boundary": [
+      "move/usdjpy 缺 target 日观测不阻断评估（走 STALE/NO_DATA 正常评估）",
+      "库中无任何评估行时 status 打印 no evaluations yet 并正常返回"
+    ],
+    "error_handling": [
+      "FRED 采集失败返回非零错误（区别于 not ready 的正常空跑；注入失败 ingest 的最小用例）"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./cmd/atlas/ 全绿（deps 注入，无真实网络）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007",
+    "TASK-011"
+  ],
+  "wave": 9,
+  "context_from": [
+    "TASK-006",
+    "TASK-007",
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-012.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "reject_reason": "functional[3] nfci 半边零覆盖（runCrisisEval case nfci 全分支 count=0）且 crisis_test.go:245 注释引用不存在的 TestRunCrisisEvalNFCI（虚假覆盖声明）。裁决修复方案 a：抽 executeCrisisEvalNFCI 复用 deps 注入 + 判别用例 + 修正假注释。"
+}

@@ -1,0 +1,54 @@
+{
+  "id": "TASK-006",
+  "title": "采集编排 ingest.go",
+  "description": "实施方案 Task 6（行 1655–1973）：Ingestor 编排 FRED（vix/hy_oas/t10y2y 换算 + SOFR/EFFR 按日 join 派生 sofr_effr）与 Yahoo（^MOVE→move、JPY=X→usdjpy），单位遵循方案「存储单位约定」表。契约：NewIngestor/IngestAll/IngestNFCI/IngestReport。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/ingest.go",
+    "internal/crisis/ingest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "IngestAll 采集 FRED 三日频序列并按单位表换算入库（vix 原值、hy_oas/t10y2y 百分数×100 为 bp），source=fred",
+      "SOFR/EFFR 按日期 join 后 (SOFR−EFFR)×100 入库为 sofr_effr，source=derived",
+      "Yahoo ^MOVE→move、JPY=X→usdjpy 取日收盘，日期取 o.Time.UTC().Format(\"2006-01-02\")；IngestNFCI 单独采集周频 NFCI",
+      "IngestReport.Counts 按指标统计入库条数"
+    ],
+    "boundary": [
+      "SOFR/EFFR 任一腿缺该日则跳过该日（不派生）"
+    ],
+    "error_handling": [
+      "Yahoo 失败不阻断（错误收进 IngestReport.YahooErrs，MOVE 缺数由 STALE 兜底）；FRED 失败返回 error"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿（fakeFRED/fakeYahoo 注入，无真实网络）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "reject_reason": "error_handling[0] 第二子句「FRED 失败返回 error」无测试断言：ingest.go 四个 FRED 错误返回分支覆盖计数=0（IngestAll return nil,err / ingestFredSeries fetching err / ingestSpread SOFR/EFFR err）。修复：新增 fakeFRED 缺 VIXCLS 用例断言 IngestAll 返回非 nil error。"
+}

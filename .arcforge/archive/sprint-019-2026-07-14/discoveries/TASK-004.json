@@ -1,0 +1,22 @@
+{
+  "task": "TASK-004",
+  "key_findings": [
+    "viper v1.21.0 已在依赖；LoadConfig 用 viper.New().SetConfigFile(path).ReadInConfig()+Unmarshal(mapstructure) → validate()，读/解析/校验三段各自包装错误",
+    "config 采用 typed struct per-indicator（偏差 2），7 指标结构形态不同（persistence/两侧 amber/momentum/steepening），非泛化阈值 DSL",
+    "所有阈值数字仅存于 configs/crisis-monitor.yaml；后续任务从 cfg.Indicators.* / cfg.StateMachine.* / cfg.Percentile.* / cfg.Freshness.* 取值，代码零阈值字面量",
+    "冒烟测试直接加载仓库正式 yaml（相对路径 ../../configs/crisis-monitor.yaml），yaml 增删字段会立刻在测试中暴露，防 struct/yaml 脱节"
+  ],
+  "decisions": [
+    {"decision": "补 TestConfigValidateBranches 表驱动覆盖 validate 8 分支", "rationale": "加 config.go 后全包覆盖率降至 79%，validate 各校验分支未覆盖；表驱动逐条注入非法值补齐至 82.7%，同时属 boundary 验收"},
+    {"decision": "validate() 顺序返回首个违规", "rationale": "照抄方案参考实现；错误文案被测试按子串断言，保持不变"},
+    {"decision": "先提交 bad1f55 再 spawn code-simplifier（协议 v2）", "rationale": "主产物先入库；本次子代理判定无需简化（git diff 空），无二次提交"}
+  ],
+  "files_modified": ["configs/crisis-monitor.yaml", "internal/crisis/config.go", "internal/crisis/config_test.go"],
+  "interfaces_exposed": [
+    "config: LoadConfig(path string) (*Config, error)",
+    "Config{Storage.Path, FRED.APIKeyEnv, Freshness{DailyMaxLagDays,WeeklyMaxLagDays}, Percentile{WindowYears,Amber,Red}, Indicators{VIX,MOVE,SOFREFFR,HYOAS,T10Y2Y,NFCI,USDJPY}, StateMachine{WatchAmberCount,CrisisExitDays,WatchExitDays,BrewingExitDays,DemoteHysteresisDays}}",
+    "VIXCfg{Series,Amber,Red,WeeklySpikePct,PercentileTrack}; MOVECfg{Series,Amber,Red,PercentileTrack}; SOFREFFRCfg{AmberBp,AmberPersistDays,RedBp,RedPersistDays,PercentileTrack,SuppressQuarterEnd}; HYOASCfg{Series,AmberLowBp,AmberHighBp,RedBp,MomentumBp,MomentumWindowObs,PercentileTrack}; T10Y2YCfg{Series,AmberBp,SteepeningBp,SteepeningLookbackObs,PercentileTrack}; NFCICfg{Series,GreenBelow,RedAbove,PercentileTrack}; USDJPYCfg{AmberWowPct,RedWowPct,Crowded52wPct,PercentileTrack}"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；coverage 82.7% (>=80%)；commit bad1f55 含声明的 3 文件；阈值数字仅在 YAML；typed struct（偏差 2）",
+  "note": "discovery 由 dev-agent-1 报告提供、Leader 落盘（降级：dev 不写 .arcforge）；Leader 已独立复核测试/覆盖率/提交范围"
+}

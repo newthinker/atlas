@@ -1,0 +1,44 @@
+{
+  "task_id": "TASK-001",
+  "title": "提取 internal/text 共享 CJK 宽度包",
+  "owner": "dev-agent-1",
+  "commit": "2e824a5338b9f477ceff489f1864c353a6c1ef6d",
+  "key_findings": [
+    "displayWidth/padRight 在整个仓库仅被 telegram.go:198/210 两处调用（包内私有），迁移影响面 LOW，无外部引用。",
+    "isWide 的 East-Asian 区间表逐字保留（10 个区间，从 Hangul Jamo 到 CJK Ext B+），零改动。",
+    "git 自动识别 width.go 为 rename（telegram → internal/text，相似度 70%），确认函数体逐字迁移。",
+    "internal/text 覆盖率 100%；telegram 包既有表格测试全绿（89.9% 覆盖），防回归通过。"
+  ],
+  "decisions": [
+    {
+      "decision": "导出 DisplayWidth/PadRight，isWide 保持不导出",
+      "rationale": "计划 Task 1 与 DoD boundary[0] 明确要求；isWide 是内部实现细节，下游只需宽度计算与右填充两个能力。"
+    },
+    {
+      "decision": "注释措辞从 'Telegram monospace code block' 泛化为 'monospace table'",
+      "rationale": "共享包不应绑定 Telegram 语境；Task 4 的终端表格渲染也复用该包。"
+    },
+    {
+      "decision": "telegram.go 仅改动 import + 两处调用，删除旧 width.go/width_test.go",
+      "rationale": "外科式改动，避免触碰无关代码；旧文件删除后包内无 displayWidth/padRight 残留（grep 已验证）。"
+    }
+  ],
+  "files_modified": [
+    "internal/text/width.go (新建，迁移自 telegram/width.go)",
+    "internal/text/width_test.go (新建)",
+    "internal/notifier/telegram/telegram.go (import + :199/:211 两处调用)",
+    "internal/notifier/telegram/width.go (删除)",
+    "internal/notifier/telegram/width_test.go (删除)"
+  ],
+  "interfaces_exposed": [
+    "func DisplayWidth(s string) int — 返回 s 在等宽表格中占的固定宽度单元数，CJK 宽字符计 2、其余计 1",
+    "func PadRight(s string, width int) string — 右填充空格至指定显示宽度，s 已 >= 目标宽度时原样返回（不截断）"
+  ],
+  "verification": {
+    "build": "go build ./... 干净",
+    "unit_tests": "go test ./internal/text/ ./internal/notifier/telegram/ 全绿",
+    "full_suite": "go test ./... 离线全绿，无回归",
+    "coverage": "internal/text 100.0%；internal/notifier/telegram 89.9%",
+    "done_criteria": "functional[0/1]、boundary[0]、non_functional[0] 逐条通过"
+  }
+}

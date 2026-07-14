@@ -1,0 +1,55 @@
+{
+  "task_id": "TASK-203",
+  "key_findings": [
+    "alert 装配落在 cmd/atlas：新增 alert_runner.go（alertRunner + 派生指标 + mapRules + maybeStartAlertRunner），serve.go 在 metricsReg 创建后、execution/deps 之前起循环。internal/alert 本体零改动（git diff internal/alert/ 为空）。",
+    "复用已注册 notifiers：registerConfiguredNotifiers 返回值由 int 改为 []notifier.Notifier，serve 捕获后经 notifier.NewAlertAdapter(n) 包成 []alert.Notifier 传 alert.NewEvaluator（telegram 走 SendText 直发、email/webhook 走 SYSTEM/alert 信号回退，均由 TASK-202 适配器处理）。同步更新 serve_test.go 8 处 got!=N → len(got)!=N。",
+    "http_error_rate 派生：取相邻两次 Snapshot 的 http_requests_total_5xx 与基名 http_requests_total（TASK-201 键，无 atlas_ 前缀）增量。首轮无基线返回 produced=false（不产出该键，规则不会因累计比率误触发）；负增量按计数器重启 clamp 到 0；总请求增量<=0 时返回 rate 0 避免除零。状态 derivedMetrics 挂在 runner 上跨轮持有 prev。",
+    "signals_24h = store.Count(ctx, signalstore.ListFilter{From: now-24h})。Count 出错时 log.Warn 并跳过该指标键（不写入 map），评估循环继续；出错不 return、不 panic。",
+    "每轮 evaluateOnce 用 snapshot() 新返回的 map（metrics.Snapshot 每次新建；reg==nil 时返回新空 map），派生键写入该新 map 后 SetMetrics，不共享可变 map。",
+    "优雅退出：serve 建 appCtx（context.WithCancel(Background)）+ defer appCancel()，maybeStartAlertRunner 内 go r.run(appCtx)；run 用 ticker，select ctx.Done()→log+return。停止断言测试 TestAlertRunner_Run_StopsOnCtxCancel：大 interval 下 cancel 后 2s 内 run 返回，否则判 goroutine 泄漏。-race 通过。",
+    "config.AlertRule → alert.Rule 字段一一映射（Name/Expr/For/Severity/Message）。For 已是 time.Duration：viper v.Unmarshal 默认启用 StringToTimeDurationHookFunc，config.Load 加载 for:\"5m\" 即解成 5*time.Minute。TestMapRules_DurationStringDecode 用真实临时 yaml 经 config.Load 验证 For==5m 且 mapRules 保真。"
+  ],
+  "decisions": [
+    {
+      "decision": "runner 用注入的 seam（snapshot func() map、count func(since time.Time)、now func() time.Time）而非直接调 reg/store，便于确定性单测。",
+      "rationale": "http_error_rate 依赖跨轮增量、signals_24h 依赖 now-24h 时点，注入后可脚本化快照序列与计数返回，精确验证首轮/正常/负增量/零增量/出错跳过，无需真实 goroutine 时序。生产装配在 maybeStartAlertRunner 内绑定真实 reg.Snapshot 与 store.Count。"
+    },
+    {
+      "decision": "http_error_rate 首轮返回 produced=false（不产出键），而非产出 0。",
+      "rationale": "DoD functional[1] 允许「不产出或为 0」。不产出更干净：规则对不存在的指标不触发（alert.Rule.Evaluate 对缺键返回 false），避免装载首轮即误报；累计比率无意义已被增量语义排除。"
+    },
+    {
+      "decision": "registerConfiguredNotifiers 返回 []notifier.Notifier 复用实例，而非在 alert 侧重新构造 notifier。",
+      "rationale": "TASK-202 wiring_hint 指定包已构造实例；重构造会重复 telegram/email/webhook 的字段校验逻辑且可能与 app 注册的实例语义分叉。notifier 无状态、并发安全，router 与 alert 共享同一实例安全。"
+    },
+    {
+      "decision": "metricsReg==nil（cfg.Metrics.Enabled=false）时 snapshot 返回空 map，http_error_rate 自然不产出，signals_24h 仍可用。",
+      "rationale": "alert 与 metrics 开关解耦：即便未开 metrics，signals_24h 类基于 store 的规则仍可评估，且不 panic。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/alert_runner.go (new)",
+    "cmd/atlas/alert_runner_test.go (new)",
+    "cmd/atlas/serve.go (registerConfiguredNotifiers 返回 slice + appCtx/maybeStartAlertRunner 装配)",
+    "cmd/atlas/serve_test.go (8 处 got!=N → len(got)!=N 适配返回类型)",
+    "configs/config.example.yaml (示例规则 http_error_rate>0.1 for:5m + 可用指标键注释；裁剪 up/error_rate)"
+  ],
+  "interfaces_exposed": [
+    "cmd/atlas: maybeStartAlertRunner(ctx, cfg, []notifier.Notifier, *metrics.Registry, signalCounter, *zap.Logger) *alertRunner — disabled 返 nil",
+    "cmd/atlas: mapRules([]config.AlertRule) []alert.Rule",
+    "cmd/atlas: registerConfiguredNotifiers 现返回 []notifier.Notifier（调用方 serve 已适配；GetStats/日志断言不受影响）",
+    "cmd/atlas: signalCounter 接口 { Count(ctx, signalstore.ListFilter)(int,error) }（*signalstore.MemoryStore 满足）"
+  ],
+  "verification": {
+    "commit": "6f2317250f11433149f997d2c484e3758430ec89",
+    "tests": "go test ./cmd/atlas/ 全绿；-race 亦通过（ld LC_DYSYMTAB warning 为 macOS 工具链噪声，无关）",
+    "build": "go build ./... 通过",
+    "vet": "go vet ./cmd/atlas/ 通过",
+    "coverage": "新增 alert_runner.go 逐函数：httpErrorRate/mapRules/evaluateOnce/run 100%、maybeStartAlertRunner 93.3%；registerConfiguredNotifiers 100%。cmd/atlas 整包 65.1%。",
+    "alert_untouched": "git diff internal/alert/ 为空（non_functional[0] 满足）",
+    "scope": "仅 cmd/atlas + configs/config.example.yaml，与声明 packages 一致；共享分支其他 dev 改动未纳入本提交",
+    "code_simplifier": "已按全局规范经 Task 调用 code-simplifier:code-simplifier；其未做任何 Edit/Write（无需简化）",
+    "gitnexus_note": "gitnexus MCP 工具在 dev-agent 工具集不可用，改动范围用 git status 逐文件核对",
+    "coverage_gate_note": "TaskCompleted hook 对声明 package 整包跑覆盖率、默认 dev_minimum=80。cmd/atlas 为 package main 含大量任务外存量样板，整包 65.1%<80。先例 cmd/atlas 任务（archive TASK-007/012）由 Leader 裁决写 coverage_minimum=35。需 Leader 为 TASK-203 设 coverage_minimum（建议 35，与先例一致；本任务实测 65.1% 有充足余量），否则验证阶段门禁会误阻。"
+  }
+}

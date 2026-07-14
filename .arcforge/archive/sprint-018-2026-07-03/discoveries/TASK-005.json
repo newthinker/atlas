@@ -1,0 +1,29 @@
+{
+  "task_id": "TASK-005",
+  "title": "eastmoney ChangePercent 单位修复（QA W1）",
+  "owner": "dev-agent-1",
+  "commit": "ddc543ccf09cae466a3eb442ab3ca1021c9f9029",
+  "key_findings": [
+    "eastmoney push2 的 f170 为百分比×100（+2.04% 返回 204），fetchStockQuote 原样赋给 ChangePercent 导致放大 100 倍。",
+    "百分比缩放恒为固定 100，与价格字段的 divisor 无关：divisor 仅对 ETF=1000/股票=100，用于 f43/f44/f45/f46/f51/f52/f60/f169 价格类字段；ChangePercent 必须用字面量 /100。",
+    "既有 TestFetchQuote_Stock（fixture f170=1.01）未断言 ChangePercent，故修复不破坏它——无需改动既有测试。",
+    "基金路径 fetchFundQuoteFromEastmoney:301 的 changePercent 来自 strconv.ParseFloat(fund.Gszzl)，Gszzl（估算涨跌率）是直接百分比字符串（如 \"2.04\"），非放大值，语义与修正后一致，无需改动。"
+  ],
+  "decisions": [
+    {
+      "decision": "fetchStockQuote 中 ChangePercent: d.F170 → d.F170 / 100（固定字面量 100），加一行注释说明 f170 为 percent×100 且独立于价格 divisor。",
+      "rationale": "东财 f170 精度约定恒为百分比×2 位小数缩放；用 divisor 会在 ETF（1000）上得到错误结果，故刻意与价格 divisor 区分。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/eastmoney/eastmoney.go（仅 ChangePercent 一处换算 + 一行注释）",
+    "internal/collector/eastmoney/eastmoney_test.go（新增表驱动 TestFetchQuote_ChangePercentScale）"
+  ],
+  "interfaces_exposed": {},
+  "verification": {
+    "unit_tests": "go test ./internal/collector/eastmoney/ 全绿；新增 TestFetchQuote_ChangePercentScale 四子用例 PASS（stock 204→2.04、ETF 510300.SH 204→2.04 不受 divisor=1000 影响、zero 0→0、negative -153→-1.53）",
+    "regression": "eastmoney 既有 20 个测试零回归；go build ./... 干净；go test ./... 离线全绿",
+    "coverage": "internal/collector/eastmoney 87.0%",
+    "dod_coverage": "functional[0]（股票+ETF）/boundary[0]（0/负值）有通过测试；functional[1]（基金路径语义一致）review 确认无需改；non_functional[0]（仅一处换算+零回归）实证"
+  }
+}

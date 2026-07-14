@@ -1,0 +1,51 @@
+{
+  "id": "TASK-004",
+  "title": "配置文件 crisis-monitor.yaml 与 typed 加载",
+  "description": "实施方案 Task 4（行 1201–1517）：configs/crisis-monitor.yaml（设计 §3.1/§3.3 全部阈值原样落地，方案给出完整 YAML）+ internal/crisis/config.go 的 LoadConfig（viper，typed struct，偏差 2）。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "configs/crisis-monitor.yaml",
+    "internal/crisis/config.go",
+    "internal/crisis/config_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "LoadConfig(path) 返回 typed *Config，字段覆盖 Storage/FRED/Freshness/Percentile/7 指标配置/StateMachine，数值与 YAML 一致",
+      "configs/crisis-monitor.yaml 按方案完整内容原样落地（含 freshness/percentile/7 指标阈值/状态机参数）"
+    ],
+    "boundary": [
+      "文件不存在返回错误；关键字段缺失（按方案 config_test 的校验用例）报错"
+    ],
+    "error_handling": [
+      "非法 YAML 返回包装错误"
+    ],
+    "non_functional": [
+      {
+        "desc": "阈值数字只存在于 YAML，crisis 包代码零阈值字面量（Global Constraints）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

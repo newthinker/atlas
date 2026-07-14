@@ -1,0 +1,51 @@
+{
+  "id": "TASK-009",
+  "title": "单指标规则引擎 rules.go",
+  "description": "实施方案 Task 9（行 2474–2958）：EvaluateIndicator 统一流水线（NO_DATA/STALE 短路 → 指标专属绝对阈值轨 → 分位轨 maxStatus 合成）。7 指标规则按设计 §3.1 表逐行。测试内建 memSeries/seriesEnding/baselineSeries/testConfig 四个 fixture 供 Task 10/11 复用。",
+  "module": "internal/crisis",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/crisis/rules.go",
+    "internal/crisis/rules_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "vix/move 区间规则 + vix 单周涨幅 weekly_spike_pct 至少黄；sofr_effr 持续性（red_persist_days 全>red_bp 红、amber_persist_days 全>amber_bp 黄）",
+      "hy_oas 双向黄灯：>red_bp 红、<amber_low_bp 黄+COMPLACENCY、[amber_high_bp,red_bp] 黄+STRESS、月动量>momentum_bp 至少黄（无 tag 补 STRESS）",
+      "t10y2y：<0 红、[0,amber_bp] 黄；倒挂后复陡>steepening_bp 附加 STEEPENING 不改色。nfci/usdjpy 按 §3.1（usdjpy wow 双阈值 + 52 周分位 CROWDED）",
+      "分位轨：percentile_track 且 5 年窗 ≥60 观测时 Pct5y≥red 升红 / ≥amber 升黄，两轨 maxStatus 合成",
+      "基线锚点：附录基线 fixture 断言 vix/move/sofr_effr/t10y2y/nfci 绿、hy_oas AMBER+COMPLACENCY、usdjpy AMBER+CROWDED（AMBER 计数=2）"
+    ],
+    "boundary": [
+      "Window 空 → NO_DATA、staleFor → STALE 直接返回（退出共振）；观测<60 跳过分位轨但 WindowActualObs 如实标注",
+      "Pct5y/WindowActualObs 对 percentile_track=false 指标也恒填充"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；代码零阈值字面量（全部经 cfg）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-008"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-004",
+    "TASK-005",
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "reject_reason": "functional[3]「分位轨 ≥amber 升黄」半边无断言：rules.go:44-45 AMBER 升级分支覆盖=0（唯一分位轨用例 ramp 的 0.9875 直接触发 RED）。修复：构造绝对轨绿、Pct5y 落 [0.90,0.97) 的用例断言 AMBER。"
+}

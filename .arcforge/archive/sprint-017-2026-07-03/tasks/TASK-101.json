@@ -1,0 +1,74 @@
+{
+  "id": "TASK-101",
+  "title": "FutuBroker 遗留清理（代码 + 配置 + 文档撤回标注）",
+  "description": "Futu 已禁止大陆用户使用，FutuBroker 决定不实现（2026-07-02 决策），实盘链路定格 paper-only。删除 cmd/atlas/broker.go getBroker 中 case \"futu\" 分支及 TODO 注释（现 broker.go:108 附近），futu 落入 default 报 unknown broker provider: futu。删除 internal/config/config.go 的 FutuConfig 结构体与 BrokerConfig.Futu 字段，并把 Broker.Provider 缺省值从 \"futu\" 改为 \"mock\"（config.go:356）。configs/config.example.yaml 删 futu 段。docs/plans/2026-01-01-m4-live-trading-design.md 头部加撤回标注。【AD-15 裁决，reviewer 发现的编译阻断点】config.go 另有两处 Futu 引用必须一并收敛：:419-421 live 校验 c.Broker.Futu.Env 改为 Broker.Mode==\"live\" 时直接报错 live trading not supported (paper-only)；:445 WarnHardcodedSecrets 删除 broker.futu.trade_password 条目。注意：编辑任何符号前先 gitnexus_impact 评估影响面。",
+  "module": "cleanup/futu",
+  "complexity": "simple",
+  "pr": 1,
+  "estimated_files": [
+    "cmd/atlas/broker.go",
+    "internal/config/config.go",
+    "configs/config.example.yaml",
+    "docs/plans/2026-01-01-m4-live-trading-design.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "getBroker 收到 provider=futu 时返回错误 unknown broker provider: futu（走 default 分支，case \"futu\" 已删除）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "FutuConfig 结构体与 BrokerConfig.Futu 字段已删除（含 config.go:419/445 两处引用与 WarnHardcodedSecrets 的 futu 条目），全仓 grep 无残留引用，go build ./... 通过",
+        "verify_by": "review"
+      },
+      {
+        "desc": "Broker.Provider 缺省值为 \"mock\"：broker.enabled=true 且未显式配置 provider 时 getBroker 成功返回 mock broker，不报错",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "加载含 futu: 段的老配置 yaml 不报错（viper 静默忽略多余段）",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "unknown provider 错误信息包含实际传入的 provider 名，便于排障",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Broker.Mode=live 时配置校验报错 live trading not supported (paper-only)，不再引用 Futu.Env（AD-15）",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "configs/config.example.yaml 无任何 futu 相关段落；docs/plans/2026-01-01-m4-live-trading-design.md 头部有撤回标注（点明 FutuBroker 不实现、paper-only、2026-07-02 决策）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go test ./... 全绿，除本任务 estimated_files 外无其他文件改动",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "18f16fb7e2c2882069016ac62c7896b7ac49b106",
+  "discovery": ".arcforge/discoveries/TASK-101.json",
+  "packages": [
+    "cmd/atlas/broker.go",
+    "internal/config/config.go",
+    "configs/config.example.yaml",
+    "docs/plans/2026-01-01-m4-live-trading-design.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

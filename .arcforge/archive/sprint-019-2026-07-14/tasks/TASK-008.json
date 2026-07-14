@@ -1,0 +1,48 @@
+{
+  "id": "TASK-008",
+  "title": "抑制、防抖与新鲜度 suppress.go",
+  "description": "实施方案 Task 8（行 2263–2473）：InQuarterEndWindow（季末最后 3 交易日 ∪ 下季前 2 交易日，周内日近似）/ staleFor（daysBetween>maxLag，nfci 用 weekly）/ ApplyHysteresis（升级立即、降级需连续 days 个 raw ≤ 目标档）。依赖 TASK-006 含 internal/crisis 同包串行化（功能上需 TASK-001/004）。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/suppress.go",
+    "internal/crisis/suppress_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "InQuarterEndWindow 对已核实日历锚点为真：2026-03-27/03-30/03-31/04-01/04-02、2026-12-31",
+      "staleFor：daily 指标 lag>daily_max_lag_days、nfci lag>weekly_max_lag_days 判 STALE（方案四个用例）",
+      "ApplyHysteresis：升级立即生效；降级要求今日 raw + 此前 days-1 个评估日 raw 全部 severity ≤ 目标档，否则维持昨日生效状态"
+    ],
+    "boundary": [
+      "季中/窗口外一交易日/周末/bad-date 为假；历史行数不足 days-1 不降级（冷启动安全）",
+      "指标行 detail JSON 缺 raw 字段时回退用 status 列"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "reject_reason": "boundary[1]「detail 缺 raw 回退 status 列」无判别性断言：rawFromDetail 的 return e.Status 回退分支覆盖=0（所有 fixture 均带非空 raw，'间接覆盖'注释不成立）。修复：加一个历史行 Detail 为空的用例断言回退生效。"
+}

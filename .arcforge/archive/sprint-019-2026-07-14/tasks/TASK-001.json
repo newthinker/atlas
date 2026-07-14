@@ -1,0 +1,47 @@
+{
+  "id": "TASK-001",
+  "title": "crisis 包基础类型、日期工具与 sqlite Store",
+  "description": "实施方案 Task 1（行 203–909）：internal/crisis 的 types.go/dates.go/store.go，含两张表 schema（crisis_evaluations 带 ts 数据日列，偏差 1）与 SeriesReader/EvalHistory 适配器。惯例照抄 internal/storage/signal/sqlite.go。接口签名以方案「核心接口契约」为准。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/types.go",
+    "internal/crisis/dates.go",
+    "internal/crisis/store.go",
+    "internal/crisis/store_test.go",
+    "internal/crisis/dates_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "PrevTradingDay 周内日近似：周一/周日输入返回上周五，周三返回周二；NowStamp 输出固定宽度 UTC RFC3339（与 signal timeLayout 一致）；addYears/addDays/daysBetween 按方案测试用例工作",
+      "NewStore 以 WAL+busy_timeout 打开 sqlite 并建 macro_observations/crisis_evaluations 两表与索引；UpsertObservations 单事务写入；SeriesWindow 返回 ts<=end 最近 n 条升序，SeriesSince 返回闭区间升序",
+      "AppendEvaluations / RecentSystemEvals（新→旧，indicator='' 为系统行）/ RecentIndicatorEvals / LatestSystemEval / HasSystemEvalForDate / EvalDates（vix 观测日）按契约工作；Reader/History 适配器满足 SeriesReader/EvalHistory 接口"
+    ],
+    "boundary": [
+      "同 (ts,indicator) 重复 upsert 为覆盖而非报错（幂等基础）",
+      "Observation/LatestObservation/LatestSystemEval 无数据时返回 (nil, nil)"
+    ],
+    "error_handling": [
+      "NewStore 对不可创建的 db 路径返回包装错误（最小错误路径用例；Ping/schema 失败分支的连接关闭由 QA review 核对，不作断言）"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；导出签名与方案「核心接口契约」types/dates/store 部分完全一致",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

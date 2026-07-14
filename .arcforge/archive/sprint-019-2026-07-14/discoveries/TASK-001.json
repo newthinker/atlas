@@ -1,0 +1,24 @@
+{
+  "task": "TASK-001",
+  "key_findings": [
+    "sqlite 惯例成功照抄 internal/storage/signal/sqlite.go：file: DSN + journal_mode(WAL) + busy_timeout(5000)、MkdirAll、Ping、schema Exec；modernc.org/sqlite v1.38.2 已在 go.mod，无需新增依赖",
+    "crisis_evaluations 含 ts 数据日列（偏差 1），indicator='' 表示系统级行；索引 (indicator, ts) 两张表各一",
+    "覆盖率 81.1%（≥80 门禁通过）；测试 6 文件含额外的 types_test.go（severity/maxStatus/isColor 直测）"
+  ],
+  "decisions": [
+    {"decision": "code-simplifier 提取未导出 scanMaybeObservation helper，Observation/LatestObservation 委托之", "rationale": "去除重复的 ErrNoRows→nil,nil 样板；不改任何导出签名"},
+    {"decision": "SeriesWindow 用 DESC LIMIT 取窗后反转", "rationale": "方案参考实现原样采用，避免子查询"},
+    {"decision": "crisis_evaluations 各列 NOT NULL DEFAULT ''/0", "rationale": "系统行/指标行统一 9 列插入，默认值避免 NULL 扫描歧义（免 sql.NullString）"},
+    {"decision": "Reader(ctx)/History(ctx) 返回绑定 ctx 的 storeReader/storeHistory 适配器", "rationale": "纯引擎接口 SeriesReader/EvalHistory 保持无 ctx，回放与测试可用内存实现替换"},
+    {"decision": "error_handling 用例以普通文件作父目录触发 MkdirAll 失败（TestNewStoreBadPath）", "rationale": "方案原无错误路径用例，此为最小可靠触发方式，断言 err 非空且 store==nil"}
+  ],
+  "files_modified": ["internal/crisis/types.go", "internal/crisis/dates.go", "internal/crisis/store.go", "internal/crisis/types_test.go", "internal/crisis/dates_test.go", "internal/crisis/store_test.go"],
+  "interfaces_exposed": [
+    "Status/Tag/SystemState/Observation/Evaluation/IndicatorResult 类型与 Ind* 常量、AllIndicators",
+    "SeriesReader{Window,WindowSince} / EvalHistory{RecentSystem,RecentIndicator}",
+    "NewStore/Close/UpsertObservations/Observation/LatestObservation/SeriesWindow/SeriesSince/AppendEvaluations/RecentSystemEvals/RecentIndicatorEvals/LatestSystemEval/HasSystemEvalForDate/EvalDates/Reader/History",
+    "dates: PrevTradingDay/NowStamp/addYears/addDays/daysBetween + dateLayout/timeLayout"
+  ],
+  "verification": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis/ 全绿，coverage 81.1%；commit 452c06d",
+  "note": "本 discovery 由 Leader 依据 dev-agent-1 及其 code-simplifier 报告 + 亲自复核（测试/覆盖率/diff）代写（降级：dev 不写 .arcforge）"
+}

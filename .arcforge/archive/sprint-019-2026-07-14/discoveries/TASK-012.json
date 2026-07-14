@@ -1,0 +1,25 @@
+{
+  "task": "TASK-012",
+  "key_findings": [
+    "eval daily 用 crisisEvalDeps 注入（cfg/store/ingest func/now func/out/errOut），executeCrisisEvalDaily(ctx,deps,dateOverride) 全离线可测；runCrisisEval 仅负责构造真实 fred.New/yahoo.New Ingestor 并把 ig.IngestAll 作为 deps.ingest 传入——Task14/15 扩展 deps 时沿用此边界",
+    "五步：目标日（--date 或 PrevTradingDay(now.UTC)）→ HasSystemEvalForDate 幂等短路 → ingest(target-45d, now) → requiredDaily=[vix,hy_oas,t10y2y,sofr_effr] 逐个 Observation(target) 非空齐备门 → EvalDay(store.Reader/History)+AppendEvaluations+printDayResult",
+    "status 持续天数 stateStreakDays=RecentSystemEvals(500) 前缀同态连续段计数（ts DESC，遇异态 break）；库空打印 no evaluations yet",
+    "离线覆盖真实网络入口的技巧：预置同一 sqlite 的 target 评估行 → daily 分支在 HasSystemEvalForDate 处幂等短路，不触发 IngestAll，零网络覆盖 Ingestor 构造与 daily case",
+    "覆盖率按 AD-6：crisis.go 80.4%（135/168）；全包 71.6% 记录；未覆盖块=nfci/backfill 真实网络（manual）+ 防御透传"
+  ],
+  "decisions": [
+    {"decision": "nfci 模式与 backfill IngestAll happy 路径不写离线单测", "rationale": "真实 FRED/Yahoo 网络调用，属 manual 验收"},
+    {"decision": "seedObservations 重构为 seedIndicators（可传指标子集）的薄封装", "rationale": "boundary 用例需只 seed 四必备序列，复用同一 fixture 避免脱节"},
+    {"decision": "补 printDayResult 状态迁移分支与 stateStreakDays 中断分支直测", "rationale": "稳态 NORMAL 下不可自然触发的判别性另一半；把 crisis.go 抬过 80% 门禁"},
+    {"decision": "采纳 simplifier 的 newDiscardCmd 测试助手复用（adaa3c5，Leader 复核补交）", "rationale": "去除 4 处内联 cobra.Command 重复；等价、覆盖率不降"}
+  ],
+  "files_modified": ["cmd/atlas/crisis.go", "cmd/atlas/crisis_test.go"],
+  "interfaces_exposed": [
+    "atlas crisis eval [--date YYYY-MM-DD] [--mode daily|nfci] / atlas crisis status",
+    "crisisEvalDeps{cfg,store,ingest,now,out,errOut}（Task14/15 扩展点）",
+    "executeCrisisEvalDaily(ctx, crisisEvalDeps, dateOverride) error、executeCrisisStatus(ctx,*Store,io.Writer) error、stateStreakDays、printDayResult、mustAddDays、requiredDaily"
+  ],
+  "rework": "首验 REJECTED：nfci 模式零覆盖 + 假测试注释（引用不存在的 TestRunCrisisEvalNFCI）。dev-agent-2 遇用量限额，Leader 按方案 a 代工 04ccad1：crisisEvalDeps 增 ingestNFCI seam、抽 executeCrisisEvalNFCI（100% 直测）、TestExecuteCrisisEvalNFCI（窗口/不评估/错误透传判别断言）、假注释修正。复验 VERIFIED",
+  "verification": "GOTOOLCHAIN=local go build -o bin/atlas ./cmd/atlas 通过；go test ./cmd/atlas/ 全绿（deps 注入零网络）；crisis.go 82.9%（141/170，AD-6 PASS）；commits 3f4e64f + adaa3c5 + 04ccad1 仅含声明的 2 文件",
+  "note": "discovery 由 dev-agent-2 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）。adaa3c5 由 Leader 复核后提交（dev 报告中'子代理自行补交'为误判）"
+}

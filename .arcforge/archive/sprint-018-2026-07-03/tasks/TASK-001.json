@@ -1,0 +1,56 @@
+{
+  "id": "TASK-001",
+  "title": "提取 internal/text 共享 CJK 宽度包",
+  "description": "把 internal/notifier/telegram/width.go 的 CJK 显示宽度函数迁移为共享包 internal/text：displayWidth→DisplayWidth、padRight→PadRight（isWide 保持不导出），函数体逐字保留（East-Asian 区间表不动），注释中 Telegram 措辞泛化为 monospace table。telegram.go:198/:210 改用 text.DisplayWidth/text.PadRight 并加 import；删除 telegram 包内旧 width.go 与 width_test.go。测试代码在实施计划 Task 1 Step 1 中逐字给出（TDD：先落测试 RED 再迁移）。权威步骤：docs/superpowers/plans/2026-07-03-watchlist-metrics-command.md Task 1。",
+  "module": "watchlist-cmd/text",
+  "complexity": "simple",
+  "pr": 1,
+  "estimated_files": [
+    "internal/text/width.go",
+    "internal/text/width_test.go",
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/width.go (删除)",
+    "internal/notifier/telegram/width_test.go (删除)"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "text.DisplayWidth/text.PadRight 按计划 Step 1 的测试用例全 PASS（含 CJK 混排、溢出不截断）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "telegram.go 改用 text.DisplayWidth/text.PadRight，旧 width.go/width_test.go 已删除，telegram 包内无 displayWidth/padRight 残留",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "width.go 函数体逐字迁移（East-Asian 区间表与 isWide 逻辑零改动），仅包名/导出名/注释措辞三处变化",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go build ./... 干净；go test ./internal/text/ ./internal/notifier/telegram/ 全绿（telegram 既有表格测试防回归）；go test ./... 离线全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "2e824a5338b9f477ceff489f1864c353a6c1ef6d",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "internal/text",
+    "internal/notifier/telegram"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

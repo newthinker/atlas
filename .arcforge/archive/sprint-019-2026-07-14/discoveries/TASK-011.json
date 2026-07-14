@@ -1,0 +1,24 @@
+{
+  "task": "TASK-011",
+  "key_findings": [
+    "EvalDay 编排：AllIndicators 顺序逐个 EvaluateIndicator（出错立即 return nil,err）→ sofr_effr 且 SuppressQuarterEnd 且 raw≥AMBER 且 InQuarterEndWindow → SUPPRESSED_SEASONAL；否则 isColor(raw) → ApplyHysteresis(prev=hist.RecentIndicator(ind,demote-1), demote)；非色彩直通",
+    "prevState 取 hist.RecentSystem(1)，空历史或空态=NORMAL 冷启动（设计 §4.3）；NextState 后 det.Date=date 回填",
+    "buildEvaluations 组装 8 行：7 指标行 detail=indDetail{Raw,WindowActualObs} JSON（与 Task8 tag 严格一致）+ 1 系统行 Indicator=\"\"、detail=SysDetail JSON；全部 TS=date、EvalAt=NowStamp(evalAt)，可直接 AppendEvaluations 落库",
+    "错误语义分层贯穿：sr/hist 的 IO 错误上抛（EvalDay 不落半套）；历史数据坏行在 statemachine 内保守吞错（Task10 决策）——两级策略一致",
+    "覆盖率 90.5%；剩余未覆盖经 html 逐块核查全部为不可独立触发的防御透传（errHistory 在滞回阶段即短路 / json.Marshal 对纯值结构恒成功）"
+  ],
+  "decisions": [
+    {"decision": "补季末抑制「不抑制」半与滞回「放行」半、errReader/errHistory 两类错误用例", "rationale": "方案参考测试仅给触发半；两半判别性要求（前三轮拒验教训）"},
+    {"decision": "剩余 err 透传块不强补", "rationale": "不可独立触发（已 html 逐块论证），非功能缺口"},
+    {"decision": "fixture 全部复用 rules_test/statemachine_test（baselineSeries/testConfig/seriesEnding/errHistory/assertErr）", "rationale": "同包已定义，复用避免脱节"}
+  ],
+  "files_modified": ["internal/crisis/eval.go", "internal/crisis/eval_test.go"],
+  "interfaces_exposed": [
+    "type DayResult struct{ Date string; Results map[string]IndicatorResult; PrevState, State SystemState; Detail SysDetail; Evaluations []Evaluation }",
+    "(r *DayResult) Transitioned() bool",
+    "EvalDay(cfg *Config, date string, sr SeriesReader, hist EvalHistory, evalAt time.Time) (*DayResult, error)"
+  ],
+  "rework": "首验 REJECTED：prevState resume-from-history 分支（eval.go:49-50）零命中（全部用例空历史）——replay 逐日状态链根基。返工 1253f3d 补 TestEvalDayResumesPreviousState（预置 WATCH 系统行判别用例），复验 VERIFIED",
+  "verification": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；coverage 90.7%；go vet 干净；commits 50aa92a + 1253f3d 仅含声明的 2 文件；8 行落库/detail tag/冷启动与 resume 两半/季末两半/滞回两半/非色彩直通/sr·hist 错误透传均按设计 §3.2/§3.3",
+  "note": "discovery 由 dev-agent-1 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）。internal/crisis 纯函数引擎层至此全部收尾"
+}

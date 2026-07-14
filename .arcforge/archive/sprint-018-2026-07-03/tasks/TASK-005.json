@@ -1,0 +1,52 @@
+{
+  "id": "TASK-005",
+  "title": "eastmoney ChangePercent 单位修复（QA W1）",
+  "description": "QA 终审定级 WARNING 的既有缺陷（Leader 冒烟发现，本轮修复裁决）：internal/collector/eastmoney/eastmoney.go:239 FetchQuote 的 ChangePercent: d.F170 未除缩放因子——东财 push2 的 f170 为百分比×100（与 f43 价格同为 2 位小数缩放，f152 精度约定），导致 A 股涨跌幅显示放大 100 倍（+2.04% 显示 +204.0%），watchlist 命令与 web UI symbol_detail 均受影响。修复：ChangePercent 除以 100（注意：百分比缩放恒为 100，不随 ETF 的 divisor=1000 变化——与价格字段的 divisor 区分开）。同时核查同文件基金路径（:318 changePercent 本地计算）语义是否一致（自算路径预期无此问题，确认即可）。TDD：先写失败测试（fixture f170=204 → ChangePercent==2.04），跑既有 eastmoney 测试零回归。",
+  "module": "watchlist-cmd/eastmoney-chgpct-fix",
+  "complexity": "simple",
+  "pr": 1,
+  "estimated_files": [
+    "internal/collector/eastmoney/eastmoney.go",
+    "internal/collector/eastmoney/eastmoney_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "FetchQuote 解析 fixture f170=204 时 ChangePercent==2.04（股票路径）；ETF 路径 ChangePercent 同样除 100（不受 divisor=1000 影响）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "基金路径（自算 changePercent）语义核查一致，无需改动或已同步修正",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "f170=0 与负值（下跌）除 100 后语义正确",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "仅改 ChangePercent 一处换算（Price/Change 等其余字段零改动）；go test ./internal/collector/eastmoney/... 全绿零回归；go test ./... 离线全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 4,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "ddc543ccf09cae466a3eb442ab3ca1021c9f9029",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "internal/collector/eastmoney"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

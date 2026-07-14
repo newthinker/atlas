@@ -1,0 +1,56 @@
+{
+  "task_id": "TASK-202",
+  "key_findings": [
+    "alert.Notifier 接口(internal/alert/evaluator.go:9)为 { Name() string; Notify(msg string) error }；Evaluator.Evaluate 对每个 notifier 调用 n.Notify(msg)（evaluator.go:96）。",
+    "传入 Notify 的 msg 已由 rule.FormatMessage 格式化为 \"[SEVERITY] name: message\"（internal/alert/rules.go:63，fmt.Sprintf(\"[%s] %s: %s\", ToUpper(Severity), Name, Message)）。因此适配器无需再拼格式，直发即保持契约。",
+    "notifier.Notifier 接口(interface.go:14)为 Name/Init/Send(core.Signal)/SendBatch；telegram 私有发送体已重构为 sendPayload(text,parseMode)，sendRaw=sendPayload(_,\"Markdown\")、SendText=sendPayload(_,\"\")（纯文本）。",
+    "email、webhook 均未实现 SendText，因此走回退路径（包装 SYSTEM/alert 信号）；telegram 走直发路径。",
+    "W1 修复（返工 epoch=2, commit 0f3c366）：原 SendText 复用 sendRaw 固定 parse_mode=Markdown，告警文本([SEVERITY] name: message，name/message 为运营者 config 自由填)含奇数 _/[ ]/` 时被 Telegram 400 静默丢告警。改为纯文本发送(payload 省略 parse_mode 字段)；SendBatch(sendRaw)/per-signal Send(sendMessage) 仍 Markdown，行为字节不变(map JSON key 有序输出一致)。"
+  ],
+  "decisions": [
+    {
+      "decision": "适配器放 internal/notifier/alert_adapter.go（类型 AlertAdapter，构造 NewAlertAdapter(inner notifier.Notifier)）。",
+      "rationale": "AD-12 要求 internal/alert 不得 import internal/notifier；把适配器放 notifier 侧使依赖单向。TASK-203 在 serve 装配处 import notifier 构造 AlertAdapter 后作为 alert.Notifier 传入 alert.NewEvaluator。"
+    },
+    {
+      "decision": "AlertAdapter 结构化满足 alert.Notifier（实现 Name()string + Notify(msg string)error），且不 import internal/alert。",
+      "rationale": "Go 结构化类型允许无需 import 即满足接口，避免 notifier→alert 的反向依赖，保持两包解耦。测试用本地 alertNotifier 接口 + var _ 断言形状。"
+    },
+    {
+      "decision": "选路用可选接口 textSender interface{ SendText(string) error } 做类型断言：实现则 SendText(msg) 直发；否则 Send(core.Signal{Symbol:\"SYSTEM\", Strategy:\"alert\", Reason:msg})。两路径错误均 return 原样，不吞错。",
+      "rationale": "满足 functional[0/1] 与 boundary[0]；msg 已是最终格式，直发不改写。"
+    },
+    {
+      "decision": "telegram 新增公开 SendText(text string) error { return t.sendRaw(text) }。",
+      "rationale": "sendRaw 不转义，告警文本（可能含下划线如 cpu_high）逐字送达；复用既有发送/超时/代理路径。"
+    }
+  ],
+  "files_modified": [
+    "internal/notifier/alert_adapter.go (new: AlertAdapter, NewAlertAdapter, textSender)",
+    "internal/notifier/alert_adapter_test.go (new: 5 adapter 测试 + 形状断言)",
+    "internal/notifier/telegram/telegram.go (new method: SendText)",
+    "internal/notifier/telegram/telegram_test.go (new: TestTelegram_SendText, TestTelegram_ImplementsSendText)"
+  ],
+  "interfaces_exposed": [
+    "notifier.AlertAdapter — 实现 alert.Notifier 形状(Name/Notify)，构造 notifier.NewAlertAdapter(inner notifier.Notifier) *AlertAdapter",
+    "notifier.textSender（未导出，可选接口 { SendText(string) error }）",
+    "telegram.(*Telegram).SendText(string) error — 纯文本发送(无 parse_mode)，使 telegram 走适配器直发路径",
+    "telegram.(*Telegram).sendPayload(text,parseMode string) error（未导出）— parseMode==\"\" 省略 parse_mode 走纯文本；供 sendRaw(Markdown) 与 SendText(纯文本) 共用"
+  ],
+  "wiring_hint_for_TASK_203": "在 serve 装配处：为每个已构造的 notifier.Notifier 包一层 notifier.NewAlertAdapter(n)，收集为 []alert.Notifier 传入 alert.NewEvaluator(...)。telegram 会走 SendText 直发，email/webhook 走 SYSTEM/alert 信号回退。alert 包无需任何改动。",
+  "verification": {
+    "adapter_tests": "go test ./internal/notifier/ -run AlertAdapter -v → 5 用例全过（直发/回退/两路径错误传递/Name 委派）",
+    "telegram_tests": "go test ./internal/notifier/telegram/ -run 'SendText|ImplementsSendText' -v → 2 用例全过；TestTelegram_SendText 断言 payload 无 parse_mode 字段 + 含 _ [ ] ` 元字符文本逐字送达（W1）；TestSendBatch_UnderscoreNotEscaped/TestTelegram_Send 仍过（Markdown 路径不变）",
+    "full_pkg": "go test ./internal/notifier/... → notifier/email/telegram/webhook 全 ok；go test ./... exit 0",
+    "vet": "go vet ./internal/notifier/... → rc=0",
+    "gofmt": "gofmt -l → 无输出",
+    "ad12": "grep internal/notifier internal/alert/ → 空（alert 未 import notifier）；alert_adapter.go 未 import internal/alert；email/webhook 零改动"
+  },
+  "w1_fix": {
+    "issue": "SendText 复用 sendRaw 固定 parse_mode=Markdown → 告警文本含奇数 _/[ ]/` 被 Telegram 400 静默丢告警",
+    "fix": "抽出 sendPayload(text,parseMode)；parseMode=\"\" 省略 parse_mode 走纯文本。SendText→纯文本；sendRaw(SendBatch)/sendMessage(per-signal Send) 仍 Markdown 字节不变",
+    "commit": "0f3c3669572a3de1ceed74486cfd62a64b700a68"
+  },
+  "commit": "0f3c3669572a3de1ceed74486cfd62a64b700a68",
+  "commit_v1": "813bf4f301d56e922a3b4d677e5587d1e887cb12"
+}

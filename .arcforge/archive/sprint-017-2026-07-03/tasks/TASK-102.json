@@ -1,0 +1,65 @@
+{
+  "id": "TASK-102",
+  "title": "网络型集成测试隔离（//go:build integration）",
+  "description": "internal/collector/crypto/{okx,coingecko,binance} 三包中打真实外部 API 的 Test*_Integration 测试，各自拆到同包新文件 *_integration_test.go，文件头加 //go:build integration 约束；使用 httptest 的单测留在原文件不动。Makefile 新增 test-integration target：go test -tags integration ./internal/collector/crypto/...。目标：go test ./... 不联网、确定性全绿；make test-integration 保留活 API 探测能力。",
+  "module": "cleanup/test-isolation",
+  "complexity": "simple",
+  "pr": 1,
+  "estimated_files": [
+    "internal/collector/crypto/okx/*_integration_test.go",
+    "internal/collector/crypto/coingecko/*_integration_test.go",
+    "internal/collector/crypto/binance/*_integration_test.go",
+    "Makefile"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "okx/coingecko/binance 三包中所有打真实 API 的 Test*_Integration 测试均已移入各自 *_integration_test.go，文件头为 //go:build integration",
+        "verify_by": "review"
+      },
+      {
+        "desc": "Makefile 存在 test-integration target，命令为 go test -tags integration ./internal/collector/crypto/...",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "不带 tag 的 go test ./internal/collector/crypto/... -v 输出中不出现任何 Integration 用例（不联网即可全绿）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "httptest 类单测全部留在原文件，行为与数量不变",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go vet ./... 与 go vet -tags integration ./internal/collector/crypto/... 均通过（两种 tag 组合都编译）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "go test ./... 全绿；被移动的测试代码逻辑零修改（纯搬家 + build tag）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-1",
+  "commit": "adf5737619755bc4eb6f7552e31c90bdcd254e8f",
+  "discovery": ".arcforge/discoveries/TASK-102.json",
+  "packages": [
+    "internal/collector/crypto/okx",
+    "internal/collector/crypto/coingecko",
+    "internal/collector/crypto/binance",
+    "Makefile"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

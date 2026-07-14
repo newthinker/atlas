@@ -1,0 +1,21 @@
+{
+  "task": "TASK-005",
+  "key_findings": [
+    "SpreadBp/WowPct/MomChange/Percentile 四个纯函数落地 internal/crisis/derive.go（46 行），Percentile 复用 valuation.PercentileRank（0–100 → /100 归一，空序列 -1 → 返回 (-1,0)）",
+    "含 DoD 反审补充的两条守卫：WowPct 基期（t-5 收盘）为 0 → ok=false；MomChange n≤0 → ok=false",
+    "derive_test.go 含 obsSeq fixture（从 2026-01-01 起逐日序列生成，后续 rules/eval 测试复用）；覆盖率 84.4%",
+    "code-simplifier 审查判定无可等价简化（四函数已是最小实现）"
+  ],
+  "decisions": [
+    {"decision": "协议 v2：TDD 全绿先提交 78ba314，simplifier 无改动无二次提交", "rationale": "主产物先入库"}
+  ],
+  "files_modified": ["internal/crisis/derive.go", "internal/crisis/derive_test.go"],
+  "interfaces_exposed": [
+    "SpreadBp(sofr, effr float64) float64",
+    "WowPct(window []Observation) (float64, bool)",
+    "MomChange(window []Observation, n int) (float64, bool)",
+    "Percentile(window []Observation, current float64) (float64, int)"
+  ],
+  "verification": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis/ 全绿（TestSpreadBp/TestWowPct/TestMomChange/TestPercentile 直证），coverage 84.4%；commit 78ba314 仅含声明的 2 文件",
+  "note": "dev-agent-1 因 API 连接中断未交正式报告；discovery 由 Leader 依据自身复核（测试运行/覆盖率/commit 范围/simplifier 报告）代写"
+}

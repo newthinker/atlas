@@ -1,0 +1,55 @@
+{
+  "task_id": "TASK-302",
+  "key_findings": [
+    "config 新增 storage.signals 节：StorageConfig.Signals SignalStorageConfig{Backend,Path}（mapstructure signals/backend/path）。缺省 backend=sqlite、path=data/signals.db。",
+    "缺省在两处兜底：config.Load 末尾 post-unmarshal 归一化（Backend \"\"→sqlite、Path \"\"→data/signals.db），config.Defaults() 直接构造 Signals 默认值。老配置无 storage 节 → 走 sqlite 缺省，Load 不报错。",
+    "backend 校验双重：config.Validate() switch backend∈{\"\",memory,sqlite} 否则 core.WrapError(ErrConfigInvalid, ...含非法值)；serve.buildSignalStore default 分支同样返 error 含非法值。",
+    "serve 装配：buildSignalStore(cfg,log)(signalstore.Store, func(), error) 取代原固定 signalstore.NewMemoryStore。sqlite/\"\" → NewSQLiteStore(path)，失败返 error（serve return 退出，不降级内存）、成功返 cleanup=Close；memory → NewMemoryStore(defaultSignalStoreCapacity) + no-op cleanup。runServe 用 defer closeSignalStore() 在退出时释放 sqlite 句柄。",
+    "TASK-301 契约沿用：NewSQLiteStore(path) 会 MkdirAll 父目录、WAL、失败不 panic；测试用『父目录是普通文件』强制 MkdirAll 失败以验证 open failure 路径。"
+  ],
+  "decisions": [
+    {
+      "decision": "缺省 backend=sqlite（持久化落盘 data/signals.db），是相对原内存-only 的有意行为变化。",
+      "rationale": "任务显式要求；用户默认获得重启不丢信号。config.example.yaml 与提交信息均显著标注 BEHAVIOR CHANGE，PR 描述需再次说明。"
+    },
+    {
+      "decision": "sqlite 打开失败 serve 启动即返回 error 退出，不降级内存。",
+      "rationale": "用户显式配置持久化时静默降级=悄悄丢数据，失败快退更安全（任务硬约束）。"
+    },
+    {
+      "decision": "buildSignalStore 返回 cleanup func()（sqlite=Close，memory=no-op），serve 用 defer 调用。",
+      "rationale": "SQLiteStore 持 WAL 句柄须在进程退出时 Close；用返回的 cleanup 闭包封装 concrete 类型的 Close，避免在 signalstore.Store 接口上暴露 Close。"
+    },
+    {
+      "decision": "backend 校验放 config.Validate() 与 buildSignalStore 两处。",
+      "rationale": "Validate 供 config 层单测且 serve 启动前统一校验；buildSignalStore default 分支作装配侧防御（即使绕过 Validate 也不静默）。DoD error_handling[1] 允许『校验或装配阶段』报错。"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go (SignalStorageConfig 类型；StorageConfig.Signals；Load 归一化；Defaults Signals；Validate backend 校验)",
+    "internal/config/config_test.go (新增 6 测试：FromYAML/DefaultsToSqlite/Defaults/ValidateInvalid/ValidateValid)",
+    "cmd/atlas/serve.go (buildSignalStore 函数；替换 sigStore 装配为 buildSignalStore + defer closeSignalStore)",
+    "cmd/atlas/signalstore_wiring_test.go (new：Memory/Sqlite/SqliteOpenFailure/InvalidBackend 4 测试)",
+    "configs/config.example.yaml (storage.signals 节 + ⚠️ 行为变化注释)"
+  ],
+  "interfaces_exposed": [
+    "config.SignalStorageConfig{ Backend string `signals.backend`; Path string `signals.path` }，经 Config.Storage.Signals 访问",
+    "config 缺省: backend=sqlite, path=data/signals.db（Load 归一化 + Defaults）",
+    "config.Validate() 对非 memory/sqlite backend 返回 ErrConfigInvalid（错误含非法值）",
+    "cmd/atlas buildSignalStore(cfg *config.Config, log *zap.Logger) (signalstore.Store, func(), error) —— 内部函数，装配用"
+  ],
+  "explicitly_not_done": [
+    "未做 retention 清理（信号保留/淘汰）",
+    "未做内存→sqlite 数据迁移（切换 backend 不搬运历史信号）"
+  ],
+  "verification": {
+    "build": "go build ./... 通过",
+    "vet": "go vet ./internal/config/ ./cmd/atlas/ → rc=0",
+    "config_tests": "go test ./internal/config/ -run 'SignalStorage|SignalBackend' → 5 用例全过；包覆盖率 94.7%",
+    "serve_tests": "go test ./cmd/atlas/ -run BuildSignalStore → 4 用例全过（memory 类型/sqlite 往返+建文件/open failure 返 error 不降级/非法 backend 含值）；包覆盖率 65.0%（>cov_min=35）",
+    "full_suite": "go test ./... → exit 0 全绿",
+    "example_yaml": "临时用例 Load(configs/config.example.yaml) 解析 storage.signals=sqlite/data/signals.db 通过（Validate 因未设 ANTHROPIC_API_KEY 报 LLM 缺失，与本任务无关）"
+  },
+  "pr_note": "缺省信号存储从内存改为 sqlite（data/signals.db），重启后信号持久化——PR 描述须显著说明此行为变化；opt-out 为 storage.signals.backend: memory。",
+  "commit": "f030a29674cad83d7ea5cab06b6248b846a425cb"
+}

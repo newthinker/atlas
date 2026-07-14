@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-003",
+  "title": "提取 buildCollectors（serve 装配段迁出为共享函数）",
+  "owner": "dev-agent-1",
+  "commit": "203cf8ab1496bf8c51d59fdce7b2612f0141ee7c",
+  "key_findings": [
+    "serve.go:99-170 装配段的三个段内变量 yahooCollector/lixingerCollector/qlibWarehouseDB 全部只在该段内使用，段后无引用（grep 实证），迁移安全；backtester 用 yahoo.New() 新建，不依赖 yahooCollector。",
+    "*lixinger.Lixinger 已实现 FetchFundamental(symbol string) (*core.Fundamental, error)（fundamental.go:14），满足 app.FundamentalSource（注入前已核对）。",
+    "config.Defaults() 的 Collectors map 为 nil（不预启用任何采集器），故 Defaults 测试手工启用 yahoo/eastmoney/crypto。",
+    "CachedCollector 内嵌 Collector，Name()/SupportedMarkets() 透传，缓存包装不影响名称集合断言。cache 默认启用（Collector.Cache.Enabled=true）。",
+    "maybeCache/valuationSourceOrNil/epsSourceOrNil 保留在 serve.go（同 package main），collectors.go 直接调用，最小 diff。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增 fundamentalSourceOrNil(c *lixinger.Lixinger) app.FundamentalSource helper，buildCollectors 中 application.SetFundamentalSource(fundamentalSourceOrNil(lixingerCollector)) 无条件调用。",
+      "rationale": "fundamentalSrc 是 app 包内不导出字段，cmd/atlas 无法直接观测其是否被注入；抽出 helper 使 DoD functional[1]（typed-nil 不逃逸为非 nil 接口）可单测，且逐字镜像既有 valuationSourceOrNil/epsSourceOrNil 模式。与计划的 `if lixingerCollector != nil { SetFundamentalSource(...) }` 内联形式行为等价（nil 收集器→nil 接口，snapshot.go `fundamentalSrc != nil` 守卫不变）。"
+    },
+    {
+      "decision": "serve.go 移除 database/sql、crypto、eastmoney、qlibpit 四个 import；保留 lixinger、yahoo。",
+      "rationale": "四者仅在被迁移段使用；lixinger 被 valuationSourceOrNil（留在 serve.go）引用，yahoo 被 backtester 段与 epsSourceOrNil 引用，故保留。go build 干净证明无残留。"
+    },
+    {
+      "decision": "cleanup 闭包保持 nil-safe（if qlibWarehouseDB != nil { Close() }），err 恒 nil（spec 预留返回值）。",
+      "rationale": "调用方可无条件 defer；qlib 未启用时 qlibWarehouseDB=nil，cleanup 不 panic（TestBuildCollectors_EmptyConfig 实证）。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/collectors.go（新建：buildCollectors + fundamentalSourceOrNil）",
+    "cmd/atlas/collectors_test.go（新建：3 测试）",
+    "cmd/atlas/serve.go（99-170 段替换为 buildCollectors 调用 + defer cleanup；删 4 个 import）"
+  ],
+  "interfaces_exposed": {
+    "buildCollectors": "func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) (cleanup func(), err error) — 装配全部已配置采集器 + valuation/EPS/fundamental 源；cleanup 关闭 qlib 仓库句柄（nil-safe，可无条件 defer）；err 当前恒 nil（spec 预留）。TASK-004 的 runWatchlist 直接调用：cleanup, err := buildCollectors(cfg, application, log); defer cleanup()。",
+    "fundamentalSourceOrNil": "func fundamentalSourceOrNil(c *lixinger.Lixinger) app.FundamentalSource — typed-nil 防护辅助（内部用）。"
+  },
+  "downstream_notes": {
+    "TASK-004": "runWatchlist 用法：application := app.New(cfg, log); cleanup, err := buildCollectors(cfg, application, log); if err != nil { return err }; defer cleanup(); 再 AddToWatchlistWithDetails 填 watchlist、调 SnapshotMetrics。buildCollectors 只装配采集器与估值源，不填 watchlist（watchlist 由调用方从 cfg.Watchlist 循环 Add）。"
+  },
+  "verification": {
+    "build": "go build ./... 干净（serve.go 无未使用 import）",
+    "unit_tests": "go test ./cmd/atlas/ 全绿；TestBuildCollectors_EmptyConfig/Defaults + TestFundamentalSourceOrNil 三用例 PASS",
+    "regression": "既有 serve/executor/export/alert_runner/signalstore 测试零回归；go test ./... 离线全绿",
+    "boundary_verbatim": "diff 原 serve.go:99-170 vs collectors.go 装配段 = 零差异（仅一处新增段前分隔空行）",
+    "dod_coverage": "functional[0/1]、non_functional[0] 有通过测试；boundary[0]（逐字迁移 diff）、non_functional[1]（cleanup 关句柄）为 review 项已实证"
+  }
+}

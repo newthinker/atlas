@@ -1,0 +1,58 @@
+{
+  "id": "TASK-015",
+  "title": "盘中 JPY 模式 + 3 个 launchd plist + 部署清单（第三阶段收口）",
+  "description": "实施方案 Task 15（行 4336–4583）：eval --mode intraday（非 BREWING/CRISIS 空跑退出；否则 FetchQuote(JPY=X) 与 5 观测前收盘比 wow，≤red_wow_pct → [P0]，usdjpy_intraday 评估行每日一次去重）；store 增 HasIndicatorEvalForDate；3 个 plist 照 refresh-us.plist 模板。跨 cmd/atlas + internal/crisis 双 package（AD-3）。",
+  "module": "cmd/atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go",
+    "internal/crisis/store.go",
+    "deploy/launchd/com.newthinker.atlas.crisis-daily.plist",
+    "deploy/launchd/com.newthinker.atlas.crisis-nfci.plist",
+    "deploy/launchd/com.newthinker.atlas.crisis-intraday-jpy.plist"
+  ],
+  "done_criteria": {
+    "functional": [
+      "intraday：LatestSystemEval 非 BREWING/CRISIS → exit 0 且不调 FetchQuote（空跑近零）；BREWING/CRISIS 态实时价与库中 5 观测前收盘比 wow ≤ red_wow_pct → [P0] 告警一次",
+      "usdjpy_intraday 评估行实现每日一次去重（HasIndicatorEvalForDate 新增于 store）",
+      "3 个 plist：daily 多时点 22:45/23:45/07:30、nfci 周三 21:00/22:00、intraday StartInterval 1800；WorkingDirectory/日志/PATH 照 refresh-us.plist 模板"
+    ],
+    "boundary": [
+      "同日第二次触发 intraday 告警条件仍成立 → 不重复告警（去重行生效）",
+      "库中 usdjpy 不足 5 观测或 5 观测前收盘为 0 → 静默跳过不告警"
+    ],
+    "error_handling": [
+      "FetchQuote 失败记录错误退出非零，不写去重行（下次触发可重试）"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./... && go build -o bin/atlas ./cmd/atlas 全绿",
+        "verify_by": "test"
+      },
+      {
+        "desc": "部署与试运行清单（同步 runtime、launchctl bootstrap/kickstart 验证幂等空跑、两周试运行）人工执行",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-014"
+  ],
+  "wave": 12,
+  "context_from": [
+    "TASK-012",
+    "TASK-014"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-015.json",
+  "packages": [
+    "./cmd/atlas",
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

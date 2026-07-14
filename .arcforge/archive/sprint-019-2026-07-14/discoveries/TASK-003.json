@@ -1,0 +1,17 @@
+{
+  "task": "TASK-003",
+  "key_findings": [
+    "gitnexus impact({target:\"validateSymbol\", direction:\"upstream\"})（Leader 代跑，MUST 规则）：直接调用方 3 个，全在 yahoo 包内——Yahoo.FetchQuote / Yahoo.FetchHistory / Yahoo.FetchEPSHistory；0 个执行流受影响；风险 LOW。改动只放宽匹配（=F → =[FX]），既有符号集合不变",
+    "yahoo_test.go 既有断言风格为原生 t.Errorf（非 testify），新测试按现有风格写表驱动用例",
+    "gofmt 报 yahoo_test.go 363-370 行既有注释未格式化——不在本次改动范围，未触碰（surgical 原则）"
+  ],
+  "decisions": [
+    {"decision": "只改 validSymbol 正则一行 + 注释 + 追加 TestValidateSymbolCurrencyPairs", "rationale": "方案 Task 3 明确唯一改动点；JPY=X/GC=F/^MOVE 通过、JPY=Z 拒绝"}
+  ],
+  "files_modified": ["internal/collector/yahoo/yahoo.go", "internal/collector/yahoo/yahoo_test.go"],
+  "interfaces_exposed": [
+    "yahoo.FetchHistory(\"JPY=X\", ...) / FetchQuote(\"JPY=X\") 现可用（Task 6/15 消费）"
+  ],
+  "verification": "GOTOOLCHAIN=local go test -count=1 ./internal/collector/yahoo/ 全包回归全绿；commit 76e9f59",
+  "note": "本 discovery 由 Leader 依据 dev-agent-3 及其 code-simplifier 报告 + 亲自复核（diff/回归）代写（降级：dev 不写 .arcforge）"
+}

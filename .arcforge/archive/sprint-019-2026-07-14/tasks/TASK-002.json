@@ -1,0 +1,45 @@
+{
+  "id": "TASK-002",
+  "title": "FRED 采集器 internal/collector/fred",
+  "description": "实施方案 Task 2（行 910–1138）：FRED API 客户端，GET {base}/series/observations，key/重试退避/缺失值过滤。契约：fred.New / NewWithBaseURL / (*Client).FetchSeries。",
+  "module": "internal/collector/fred",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/fred/fred.go",
+    "internal/collector/fred/fred_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchSeries 请求 /series/observations 携带 series_id/api_key/file_type=json/observation_start/observation_end，解析 date+value 为 []Observation",
+      "New 使用默认 baseURL；NewWithBaseURL 支持 httptest 注入"
+    ],
+    "boundary": [
+      "value 为 \".\" 的观测被过滤（FRED 缺失值约定）",
+      "start/end 为空串时不携带对应 query 参数"
+    ],
+    "error_handling": [
+      "5xx/网络错误指数退避重试至多 3 次（backoff 字段可注入，测试 1ms），耗尽后返回包装错误",
+      "4xx 不重试立即返回错误；value 不可解析返回错误"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/collector/fred/ 全绿（3 个方案测试）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/collector/fred"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "reject_reason": "QA SEC-1：fred.go 传输错误分支透传 *url.Error（Error() 含完整 URL 与 api_key query），经重试包装冒泡至 stderr → launchd 错误日志落盘。修复：Do 失败分支脱敏（只带 seriesID/内层 err，丢弃原始 URL），并加断言 api_key 不出现在错误串的用例。"
+}

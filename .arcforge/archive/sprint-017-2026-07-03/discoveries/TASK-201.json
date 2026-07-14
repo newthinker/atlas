@@ -1,0 +1,49 @@
+{
+  "task": "TASK-201",
+  "key_findings": [
+    "Snapshot 键命名规则（TASK-203 取数依据，含 AD-13a 修订）：gauge/counter → 键=指标基名，跨所有 label 组合求和为单值；histogram → <name>_count 与 <name>_sum 两键（值为观测计数与观测和）；status 类键 → 对带 status label 且值匹配正则 ^([1-5]xx|[1-9][0-9]{2})$ 的 counter/gauge 序列（即 3 位数字码如 500，或 [1-5]xx 类字符串如 \"5xx\"），按首位字符额外产 <name>_<N>xx（500/502/\"5xx\" 均→ <name>_5xx，跨其余 label 求和）。基名聚合与状态类键并存（AD-13 双层 + AD-13a 扩展识别）。",
+    "✅ TASK-203 取数前提已打通（AD-13a）：现有 metrics.RecordRequest 经 statusToString 把状态码存为 \"2xx\"~\"5xx\" 类字符串（metrics.go:137-141、185-198），RecordRequest 行为不动；Snapshot 识别正则已扩展为同时吃 3 位数字与 [1-5]xx 字符串，故真实录制路径下 http 状态类键能真实产出。测试 TestSnapshot_RecordRequestProduces5xx 用 NewRegistry()+RecordRequest(503/200) 断言键真实生成。",
+    "⚠️ 真实键名更正（TASK-203 必读）：HTTP 请求计数指标的 prometheus Name 是 \"http_requests_total\"（metrics.go:41，无 atlas_ 前缀），故 Snapshot 产出的键是 http_requests_total_5xx / http_requests_total_2xx，而非任务文本/AD 里写的 atlas_http_requests_total_5xx。TASK-203 计算 http_error_rate 时须用 http_requests_total_5xx 与 http_requests_total（基名总数）两键的增量。业务指标才带 atlas_ 前缀（如 atlas_signals_generated_total）。",
+    "其他非状态 status 值（ok/error 等，既非 3 位数字也非 [1-5]xx）不产额外键（YAGNI）；6xx+/0xx 等超范围值也不匹配 [1-5]xx，纯 3 位数字仍按首位归类（如 600→_6xx，实践中不会出现）。",
+    "prometheus 依赖完全封闭在 metrics 包：公开方法 Snapshot() map[string]float64 无任何 prometheus 类型；内部 helper snapshot(g prometheus.Gatherer) 未导出，仅用于把 Gather 抽象出来以便测试注入。internal/alert 包零改动，与 Evaluator.SetMetrics(map[string]float64) 既有边界一致。"
+  ],
+  "decisions": [
+    {
+      "decision": "status 类键识别正则由 ^[1-9][0-9]{2}$ 扩展为 ^([1-5]xx|[1-9][0-9]{2})$（AD-13a），归类逻辑仍用 value[:1]+\"xx\"，对数字码与类字符串两种形式天然一致。",
+      "rationale": "现有 RecordRequest 存的是 \"5xx\" 类字符串而非 3 位数字，原正则下 http_requests_total_5xx 永不产出，http_error_rate 无从取数。Leader 裁决 AD-13a：不动 RecordRequest（避免指标基数与既有观测语义变化），改由 Snapshot 侧同时识别两种形式。value[:1] 对 \"5xx\" 取 '5'、对 \"500\" 取 '5'，都归 _5xx，无需分支。"
+    },
+    {
+      "decision": "Gather 出错策略：忽略 error、处理 Gather 返回的部分 MetricFamily 切片，永不 panic；空 registry / 完全失败时返回非 nil 空 map。",
+      "rationale": "prometheus.Registry.Gather() 出错时仍返回已成功收集的家族（MultiError 语义），『处理部分数据』既满足 DoD『返回空 map 或已收集部分』，又无需给 Snapshot 注入 logger 依赖，保持签名纯净。TestSnapshot_GatherError_NoPanic 用假 Gatherer 注入 部分家族+error 验证。"
+    },
+    {
+      "decision": "内部逻辑走未导出 helper snapshot(prometheus.Gatherer)，公开 Snapshot() 仅转发 r。status 类键仅对 counter/gauge 标量序列计算，histogram 不参与。",
+      "rationale": "让 error 路径可通过注入假 Gatherer 测试，同时公开签名不暴露 prometheus 类型（non_functional[0]）。histogram 无标量『值』语义，status 归类对其无意义。"
+    },
+    {
+      "decision": "client_model（dto）从 indirect 提升为 direct 依赖（首版 bfc46fb 已提交，本次 go mod tidy 确认无额外变化）。",
+      "rationale": "snapshot.go 直接 import dto 类型解析 Gather 结果，直接依赖应在 go.mod 如实标注。"
+    }
+  ],
+  "files_modified": [
+    "internal/metrics/snapshot.go",
+    "internal/metrics/snapshot_test.go",
+    "go.mod"
+  ],
+  "interfaces_exposed": [
+    "func (r *Registry) Snapshot() map[string]float64 — 摊平快照，无 prometheus 类型泄漏",
+    "键规则：<base>（gauge/counter 聚合和）、<base>_count/<base>_sum（histogram）、<base>_<N>xx（status 为 3 位数字或 [1-5]xx 字符串，按首位归类）",
+    "HTTP 键真实名：http_requests_total、http_requests_total_5xx、http_requests_total_2xx（无 atlas_ 前缀）",
+    "空/出错 → 非 nil 空 map；永不 panic"
+  ],
+  "verification": {
+    "build": "go build ./... 通过",
+    "vet": "go vet ./internal/metrics/ 通过",
+    "tests": "go test ./internal/metrics/ 全绿；go test ./... 全绿(exit 0)",
+    "coverage_scenarios": "gauge/counter、多label求和、histogram、status类键(3位数字+\"5xx\"字符串+非状态值排除)、真实RecordRequest路径产出_5xx/_2xx、空registry、Gather出错不panic",
+    "scope": "仅 internal/metrics 的 snapshot.go/snapshot_test.go（本次 AD-13a 增量）+ go.mod（首版已提升 client_model 为 direct）；internal/alert 零改动",
+    "commit": "dc8c291bcc66ab45c4b87fa8f6018c8bba36b8f8",
+    "commit_history": "首版 bfc46fb（Snapshot 骨架）→ dc8c291（AD-13a 扩展 [1-5]xx 识别）",
+    "gitnexus_note": "gitnexus MCP 工具在 dev-agent 工具集不可用，改动范围用 git status 逐文件核对"
+  }
+}

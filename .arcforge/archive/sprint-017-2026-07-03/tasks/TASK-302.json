@@ -1,0 +1,69 @@
+{
+  "id": "TASK-302",
+  "title": "storage.signals 配置节 + serve 按配置装配信号存储",
+  "description": "internal/config/config.go 新增 storage.signals 配置节：backend: memory|sqlite（默认 sqlite）、path（默认 data/signals.db）。cmd/atlas/serve.go 按配置选择构造信号存储，替换现固定 signalstore.NewMemoryStore（serve.go:86 附近）。sqlite 打开失败快速失败（启动即退，不降级内存）——用户显式要求持久化时静默降级等于悄悄丢数据。configs/config.example.yaml 补注释说明两种 backend 与默认值，并显著说明行为变化（缺省从内存变 sqlite）。读 TASK-301 discovery 获取构造函数签名。注意：缺省 backend=sqlite 是有意的行为变化，需在 PR 描述中说明。",
+  "module": "signal-persistence/config-assembly",
+  "complexity": "simple",
+  "pr": 3,
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "cmd/atlas/serve.go",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "config 支持 storage.signals.backend（memory|sqlite）与 storage.signals.path；缺省值分别为 sqlite 与 data/signals.db",
+        "verify_by": "test"
+      },
+      {
+        "desc": "backend=sqlite 时 serve 构造 SQLiteStore（用配置 path）；backend=memory 时构造 MemoryStore，行为与改动前一致",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "老配置文件无 storage 节时按缺省走 sqlite + data/signals.db，加载不报错",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "sqlite 打开失败时 serve 启动即返回错误退出，不降级为内存存储",
+        "verify_by": "test"
+      },
+      {
+        "desc": "backend 为非法值（非 memory/sqlite）时配置校验或装配阶段报错，错误信息含非法值",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "config.example.yaml 注释说明两种 backend、默认值与行为变化（原为内存）；go test ./... 全绿",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-301"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-301"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-1",
+  "commit": "f030a29674cad83d7ea5cab06b6248b846a425cb",
+  "discovery": ".arcforge/discoveries/TASK-302.json",
+  "packages": [
+    "internal/config",
+    "cmd/atlas/serve.go",
+    "configs/config.example.yaml"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

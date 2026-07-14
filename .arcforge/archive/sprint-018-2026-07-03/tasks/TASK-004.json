@@ -1,0 +1,81 @@
+{
+  "id": "TASK-004",
+  "title": "atlas watchlist 命令与渲染（表格/JSON/退出码）",
+  "description": "新增 cmd/atlas/watchlist.go：cobra 命令 atlas watchlist [--json] [--symbols A,B]。runWatchlist：loadConfigOrDefaults → newStderrLogger（stdout 只出数据，日志 WarnLevel 走 stderr）→ app.New + buildCollectors（TASK-003）+ defer cleanup → 按 cfg.Watchlist AddToWatchlistWithDetails 并收集 known → executeWatchlist。executeWatchlist（依赖注入 watchlistDeps 可测）：resolveSymbolFilter（未知标的 stderr warn 跳过、全未知报错、无 filter=nil）→ snapshot → 空 watchlist stderr 提示且返回 nil → allFailed 全失败打 gaps 后返回 error（非零退出）→ --json 时 json.Encoder 输出数组（nil 字段序列化为 null）否则 renderTable（text.DisplayWidth/PadRight 对齐，TASK-001；缺失指标显示 —；末列不补尾空格）+ renderGaps（'! SYMBOL: gaps' 摘要）。实现与测试代码在计划 Task 4 中逐字给出（7 个测试用例）。开工前读 TASK-001/002/003 的 discovery 确认接口。手工冒烟（Step 5，可选联网）交给验证阶段按需执行。权威步骤：计划 Task 4。",
+  "module": "watchlist-cmd/command",
+  "complexity": "medium",
+  "pr": 1,
+  "estimated_files": [
+    "cmd/atlas/watchlist.go",
+    "cmd/atlas/watchlist_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "表格渲染 CJK 对齐（NAME 列起点显示宽度一致）、缺失指标显示 —、表后有缺口摘要（TestExecuteWatchlist_TableAligned）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "--json 输出合法 JSON 数组、缺失指标为 null、可 roundtrip（TestExecuteWatchlist_JSON）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "--symbols：未知标的 stderr 警告后跳过（UnknownSymbolWarns）；全部未知返回 error（AllUnknownSymbolsErrors）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "空 watchlist：stderr 提示、返回 nil 不报错（EmptyWatchlist）",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "全标的失败：打印 gaps 后返回 error → 命令非零退出（AllFailedErrors）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "config 语义（AD-8/C2 裁决）：--config 指向不可解析文件时 loadConfigOrDefaults 返回错误→非零退出；无 --config 走默认配置继续（与既有 export 命令一致）",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "stdout 仅含表格/JSON（logger 与警告全走 stderr）；命令注册进 rootCmd（atlas help 可见）；零新增第三方依赖",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go build ./... && go test ./... 离线全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-1",
+  "commit": "df769a4",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "cmd/atlas/watchlist.go",
+    "cmd/atlas/watchlist_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    "W3b（AD-8a 重开修正后的处置）: watchlist.go 命令 Long 文案 \"reuses the analysis loop's exact valuation pipeline\" 过度承诺——PE/价格百分位窗口基准是 valuation.lookback_years 全局配置，而分析循环按各策略 lookback（pe_percentile 默认 5y、price_percentile 默认 3y）定窗，非默认配置下美/港个股数值可能不同。修复：软化措辞（如 \"assembly mirrors the analysis loop's valuation pipeline; percentile windows use valuation.lookback_years\"），不改代码行为；--help 输出同步更新。",
+    "W4: allFailed（watchlist.go:139）判据漏检 PB/DividendYield——quote/history 全失败但 fundamental 返回 PB/股息率（或 W2 修复后的非正 PE）时误判\"全失败\"exit 1，吞掉本可展示的数据。修复：allFailed 判据补 m.PB != nil || m.DividendYield != nil（与 W2 语义对齐：任何非 nil 指标都算\"有产出\"）；补测试（仅 PB/DYR 非 nil 的 metrics 不触发 allFailed）。"
+  ]
+}

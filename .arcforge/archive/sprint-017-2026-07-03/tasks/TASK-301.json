@@ -1,0 +1,70 @@
+{
+  "id": "TASK-301",
+  "title": "sqlite SignalStore 实现 + memory/sqlite 契约测试",
+  "description": "internal/storage/signal/sqlite.go 新增 NewSQLiteStore(path string)：复用 modernc.org/sqlite（锁定 v1.38.2 不升版，GOTOOLCHAIN=local 约束）；打开时设 journal_mode=WAL + busy_timeout；对 path 父目录 MkdirAll（默认 data/ 不存在时首启可用），失败返回 error；单写多读由 database/sql 连接池覆盖。单表 schema（CREATE TABLE IF NOT EXISTS signals，不引入迁移框架）：id TEXT PRIMARY KEY, symbol/action TEXT NOT NULL, confidence/price REAL, reason/strategy/metadata TEXT（metadata 存 JSON）, generated_at TEXT NOT NULL（RFC3339）；两索引 idx_signals_symbol_time(symbol,generated_at) 与 idx_signals_time(generated_at)。ID 生成沿用内存实现的 sig_<unixnano>_<counter> 方案。【AD-14 裁决】排序语义定为 generated_at ASC, id ASC：memory.List 补显式稳定排序（ID 单调，与现插入序兼容），sqlite 用 ORDER BY；limit=0 = 不限制（memory.go:80 语义，不得直译 LIMIT 0）；offset 越界返回空；from/to 沿用 memory 严格开区间（Before/After 不含端点）；GetByID 未命中返回 core.ErrSymbolNotFound（与 memory 同一 sentinel）。同时新增 store_contract_test.go：同一套表驱动用例依次跑 memory 与 sqlite 双实现；sqlite 用 t.TempDir() 建库。先读 interface.go 与 memory.go 钉死既有语义。TDD：契约测试先行。",
+  "module": "signal-persistence/sqlite-store",
+  "complexity": "medium",
+  "pr": 3,
+  "estimated_files": [
+    "internal/storage/signal/sqlite.go",
+    "internal/storage/signal/store_contract_test.go",
+    "internal/storage/signal/memory.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "NewSQLiteStore 建库建表（IF NOT EXISTS，含两索引，父目录自动 MkdirAll），Save 赋 sig_<unixnano>_<counter> 格式 ID，GetByID 取回等值信号；未命中返回 core.ErrSymbolNotFound（errors.Is 可判，与 memory 一致）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "List/Count 支持 ListFilter 全字段（symbol/strategy/action/from/to/limit/offset）；排序为 generated_at ASC, id ASC（AD-14），memory.List 同步补显式稳定排序，两实现结果序一致",
+        "verify_by": "test"
+      },
+      {
+        "desc": "契约测试同套表驱动用例跑 memory 与 sqlite 双实现全部通过：Save 赋 ID、GetByID、各 filter 组合、排序、分页、Count、metadata JSON 往返（含 nil/空 map，行为对齐 memory）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "空库 List 返回空集、Count 返回 0；关闭后重开同一 path 数据仍在（持久化生效）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "limit=0 = 不限制（不得译成 LIMIT 0）；offset 越界返回空；from/to 为闭区间（含端点，与 memory.matches 的 >=From && <=To 语义一致；AD-14a 更正，原\"开区间\"为笔误）——契约测试逐条钉死",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "path 不可用（父目录不可建、路径为损坏文件等）时 NewSQLiteStore 返回 error 而非 panic，供装配侧快速失败",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "go.mod 中 modernc.org/sqlite 保持 v1.38.2 不变；连接打开时设置 journal_mode=WAL 与 busy_timeout",
+        "verify_by": "review"
+      },
+      {
+        "desc": "interface.go 零改动；memory.go 仅补显式排序不改其他行为；go test -race ./internal/storage/signal/... 全绿（含并发 Save/List 无 data race）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 4,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "verifier": "test-agent-1",
+  "commit": "1f39943588c6a11567234e1361504d1372a8c469",
+  "discovery": ".arcforge/discoveries/TASK-301.json",
+  "packages": [
+    "internal/storage/signal"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": []
+}

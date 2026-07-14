@@ -1,0 +1,65 @@
+{
+  "id": "TASK-204",
+  "title": "alert Evaluator Notify 失败处理（QA W2 修复）",
+  "description": "QA 两轮审查发现（W2，pre-existing 缺陷因本轮接线首次上线）：internal/alert/evaluator.go:95-100 对 Notifier.Notify 的返回错误静默吞掉，且无论成败都写 lastFired 进入冷却期——与 W1 叠加时告警彻底静默丢失。修复：Notify 返回 error 时记 Warn 日志（含 rule name 与 notifier name），且**不写 lastFired**（失败不进冷却，下轮评估仍可重发）；多 notifier 时任一成功即视为已送达进入冷却（部分失败逐个记 Warn），全部失败才不写 lastFired。不改 Evaluator 其他语义（for/冷却/表达式求值均不动）。TDD：先写失败测试（假 notifier 返回 error）。QA 报告见 .arcforge/docs/05-review/qa-review.md W2 节。",
+  "module": "alert-wiring/evaluator-notify-fix",
+  "complexity": "simple",
+  "pr": 2,
+  "estimated_files": [
+    "internal/alert/evaluator.go",
+    "internal/alert/evaluator_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "Notify 返回 error 时记 Warn 日志（含 rule 名与失败 notifier 名），不 panic 不中断其余 notifier/规则",
+        "verify_by": "test"
+      },
+      {
+        "desc": "全部 notifier 失败时不写 lastFired（不进冷却），下一轮评估同规则可再次触发通知",
+        "verify_by": "test"
+      },
+      {
+        "desc": "任一 notifier 成功即写 lastFired 进入冷却（部分失败仅记 Warn）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "全部成功路径行为与修复前完全一致（既有 evaluator 测试零回归）",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "不改 for/冷却/表达式求值语义；改动限 evaluator.go 的 notify 分发段 + 测试；go test -race ./internal/alert/... 全绿",
+        "verify_by": "test"
+      },
+      {
+        "desc": "生产可见性：Evaluator 提供 logger 注入途径（导出 setter 或构造选项，NewEvaluator 既有调用不破坏），serve 装配路径（maybeStartAlertRunner）注入真实 zap logger——Notify 失败的 Warn 在生产日志可见（装配测试用 observer 断言）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 6,
+  "context_from": [
+    "TASK-202",
+    "TASK-203"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "verifier": "test-agent-1",
+  "commit": "da1715bbf0ed6ffc460f9fa943157fe3b36114dc",
+  "discovery": ".arcforge/discoveries/TASK-204.json",
+  "packages": [
+    "internal/alert",
+    "cmd/atlas"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "fix_items": [],
+  "coverage_minimum": 35
+}

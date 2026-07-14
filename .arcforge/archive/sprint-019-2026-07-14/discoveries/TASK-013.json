@@ -1,0 +1,23 @@
+{
+  "task": "TASK-013",
+  "key_findings": [
+    "replay 用内存历史与真相源隔离：crisis.NewMemHistory() 实现 EvalHistory，EvalDay(cfg,d,store.Reader(ctx),mem,time.Now()) 逐日推进，mem.Append(res.Evaluations) 累积——全程不触 AppendEvaluations，crisis_evaluations 审计表只属 live eval",
+    "回测日历=Store.EvalDates(from,to)：vix 观测日 ASC；空集即真相源未回填 → 返回含 'run backfill first' 的错误，明确失败不静默",
+    "状态转移经 res.Transitioned() 判定，entered map[SystemState]int 计各态进入次数；--json 每条转移 json.Marshal{date,from,to,amber_count} 一行；文本态 'Prev → State (amber=n)' 箭头格式",
+    "离线覆盖 runCrisisReplay 委托路径：writeTempCrisisConfigDB 造临时 crisis 配置指向 seeded sqlite → replay 纯读库零网络，wrapper 全分支可测",
+    "crisis.go 覆盖 84.9%（174/205，AD-6 PASS，较接手基线 82.9% 反升）"
+  ],
+  "decisions": [
+    {"decision": "复用 TASK-012 的 writeTempCrisisConfigDB / seedObservations / newDiscardCmd fixture", "rationale": "同包已定义避免脱节；seedReplayWatch 叠末 3 日 NFCI 转正构造转移"},
+    {"decision": "补 --json 可解析断言与 runCrisisReplay wrapper 三分支", "rationale": "两半纪律：方案仅给文本转移与 no-data 两测"},
+    {"decision": "simplifier 无改动，单 commit 交付", "rationale": "replay 实现直用方案参考，无重复可提取"}
+  ],
+  "files_modified": ["cmd/atlas/crisis.go", "cmd/atlas/crisis_test.go"],
+  "interfaces_exposed": [
+    "atlas crisis replay --from YYYY-MM-DD --to YYYY-MM-DD [--json]",
+    "executeCrisisReplay(ctx, *crisis.Config, *crisis.Store, from, to string, jsonOut bool, out io.Writer) error（纯读库，可复用于阈值调参）",
+    "runCrisisReplay cobra wrapper（--from/--to 必填）"
+  ],
+  "verification": "GOTOOLCHAIN=local go build 通过；go test ./cmd/atlas/ 全绿（新增 4 测试函数）；crisis.go 84.9%（AD-6 PASS）；go vet 干净；commit 263282f 仅含声明的 2 文件",
+  "note": "discovery 由 dev-agent-2 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）。manual 项（三段历史验收）列终验收清单。dev 提醒其 simplifier 子代理本轮输出跑偏（误纠缠 .arcforge 状态而非专注复审）——与既往 slot 身份混淆同源，已记入运行事故模式"
+}

@@ -1,0 +1,62 @@
+{
+  "task_id": "TASK-004",
+  "title": "atlas watchlist 命令与渲染",
+  "commit": "df769a4",
+  "key_findings": [
+    "loadConfigOrDefaults()(*config.Config,error) 位于 cmd/atlas/export_ohlcv.go:283，既有行为满足 AD-8/C2：--config 指向不可解析文件返回 error(命令非零退出)，无 --config 走默认配置继续——review 项无需改动。",
+    "rootCmd 位于 cmd/atlas/main.go:14；watchlistCmd 经 init() 的 rootCmd.AddCommand 注册，atlas --help 可见 watchlist。",
+    "config.WatchlistItem{Symbol,Name,Market,Type,Strategies}；runWatchlist 从 cfg.Watchlist 循环 AddToWatchlistWithDetails 填 watchlist(buildCollectors 不填，与 TASK-003 discovery 一致)。",
+    "SymbolMetrics 指针字段(PE/PB/DividendYield/PEPercentile/PricePercentile) nil → 表格渲染 naCell '—'、JSON 序列化 null(json tag 齐全，encoding/json 天然输出 null)。"
+  ],
+  "decisions": [
+    {
+      "decision": "executeWatchlist 经 watchlistDeps 依赖注入(snapshot 函数 + known 列表 + out/errOut writer)，与渲染/过滤逻辑一起离线单测，不触网。",
+      "rationale": "镜像 exportDeps 模式；7 个 DoD 用例全部在 executeWatchlist/resolveSymbolFilter/renderTable 层覆盖，无需真实 collector。"
+    },
+    {
+      "decision": "stdout 只出表格/JSON；warning(未知 symbol、空 watchlist、gaps-on-all-failed)与 logger(newStderrLogger, WarnLevel)全走 stderr。",
+      "rationale": "DoD non_functional：管道下游可安全消费 stdout 的 JSON/表格；诊断信息不污染。"
+    },
+    {
+      "decision": "退出语义：空 watchlist → stderr 提示 + 返回 nil(exit 0)；全失败 → stderr 打 gaps + 返回 error(非零退出)；--symbols 全未知 → 返回 error；部分未知 → stderr 警告后跳过继续。",
+      "rationale": "DoD boundary/error_handling 逐条；空表非错误(正常空态)，全失败是错误(无数据可用)。"
+    },
+    {
+      "decision": "表格 CJK 对齐复用 text.DisplayWidth/PadRight(TASK-001)，末列不补尾空格。",
+      "rationale": "对齐 telegram renderTable 约定；避免行尾多余空格。"
+    },
+    {
+      "decision": "code-simplifier 两处安全简化：JSON 分支去掉中间变量直接 return Encode(ms)；renderTable 内层 width 变量 w→cw 避免 shadow io.Writer 参数。",
+      "rationale": "纯清晰度，零行为变化；测试全绿验证。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/watchlist.go(新建)",
+    "cmd/atlas/watchlist_test.go(新建，7 个测试函数)"
+  ],
+  "interfaces_exposed": {
+    "watchlistCmd": "cobra 命令 'atlas watchlist [--json] [--symbols A,B]'，已注册进 rootCmd",
+    "executeWatchlist": "func executeWatchlist(ctx context.Context, deps watchlistDeps, params watchlistParams) error — 命令核心，依赖注入可离线单测",
+    "watchlistDeps": "struct{ snapshot func(ctx,symbols)[]app.SymbolMetrics; known []string; out,errOut io.Writer }",
+    "watchlistParams": "struct{ jsonOut bool; symbols []string(nil=全表) }"
+  },
+  "verification": {
+    "tests": "go test ./cmd/atlas/ 全绿(7 个 TestExecuteWatchlist_* 用例)；go build ./... && go test ./... 离线全绿",
+    "dod_coverage": "functional[0-2]/boundary[0]/error_handling[0] 均有对应通过测试；error_handling[1](config C2 语义)与 non_functional[0](stdout纯净+rootCmd注册+零新依赖)为 review 项：loadConfigOrDefaults 既有行为满足，watchlistCmd 已注册(atlas --help 验证)，仅用 cobra/zap/encoding/json 无新增第三方依赖",
+    "smoke": "计划 Step 5 手工冒烟(需网络)未做，按 Leader 指示留验证/交付阶段"
+  },
+  "rework_history": [
+    {
+      "round": 1,
+      "fix": "W3b",
+      "commit": "8ef8835",
+      "change": "软化 watchlistCmd.Long 文案，注明百分位窗口基准为全局 valuation.lookback_years（区别于分析循环 per-strategy lookback）。纯文案不改行为。"
+    },
+    {
+      "round": 1,
+      "fix": "W4",
+      "commit": "df769a4",
+      "change": "allFailed 判据补 m.PB != nil || m.DividendYield != nil：quote/history 全失败但 fundamental 返回 PB/股息率（或 W2 后负 PE）时不再误判\"全失败\"exit 1。补测试 TestExecuteWatchlist_FundamentalOnlyNotAllFailed。语义=任何非 nil 指标算有产出，与 W2 对齐。"
+    }
+  ]
+}

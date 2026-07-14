@@ -1,0 +1,54 @@
+{
+  "task_id": "TASK-102",
+  "key_findings": [
+    "三包各有恰好 2 个 Test*_Integration（共 6 个）打真实外部 API：okx {FetchQuote,FetchHistory}、coingecko {FetchQuote,FetchHistory}、binance {FetchQuote,FetchHistory}。",
+    "原文件中没有 httptest 类单测；留在原文件的是纯逻辑单测（toInstID/toInterval/symbolToID/symbolToVsCurrency/Name/HasRequiredMethods），仅依赖 testing。",
+    "Integration 测试是唯一使用 time 与 internal/core 的测试；搬走后原文件的 time、core import 变为未使用，必须一并删除以过 vet。",
+    "被搬测试内部靠 testing.Short() 跳过，但无 tag 时仍会被编译进测试二进制且在非 -short 运行时联网。改用 //go:build integration 后无 tag 时根本不编译，实现确定性离线。"
+  ],
+  "decisions": [
+    {
+      "decision": "每包新建 <pkg>_integration_test.go，首行 //go:build integration + 空行，package 与原包一致，import testing/time/core。",
+      "rationale": "同包同名前缀便于关联；build tag + 空行是 Go 约定语法（空行区分 build constraint 与 package doc）。"
+    },
+    {
+      "decision": "被搬测试代码逐字保留（含 testing.Short() 跳过与注释），仅从原文件删除 + 删除随之失效的 time/core import。",
+      "rationale": "任务是纯搬家，零逻辑修改；删除未使用 import 是搬家的必然副产物而非逻辑改动。"
+    },
+    {
+      "decision": "Makefile 同时把 test-integration 加入 .PHONY 并新增 target。",
+      "rationale": "target 名与真实文件无关，必须声明 PHONY 才能稳定执行。"
+    },
+    {
+      "decision": "提交仅 stage 本 scope 7 个文件，不含同分支其他并行 dev 的在途改动（cmd/atlas、internal/config、docs）。",
+      "rationale": "单写者/scope 互斥，避免误提交他人未完成工作。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/crypto/okx/okx_integration_test.go (new)",
+    "internal/collector/crypto/okx/okx_test.go (瘦身:删2个Integration+删time/core import)",
+    "internal/collector/crypto/coingecko/coingecko_integration_test.go (new)",
+    "internal/collector/crypto/coingecko/coingecko_test.go (瘦身:删2个Integration+删time/core import)",
+    "internal/collector/crypto/binance/binance_integration_test.go (new)",
+    "internal/collector/crypto/binance/binance_test.go (瘦身:删2个Integration+删time/core import)",
+    "Makefile (.PHONY + test-integration target)"
+  ],
+  "interfaces_exposed": [
+    "make test-integration = go test -tags integration ./internal/collector/crypto/...",
+    "build tag 'integration' 门控三包网络测试"
+  ],
+  "moved_tests": {
+    "okx": ["TestOKX_FetchQuote_Integration", "TestOKX_FetchHistory_Integration"],
+    "coingecko": ["TestCoinGecko_FetchQuote_Integration", "TestCoinGecko_FetchHistory_Integration"],
+    "binance": ["TestBinance_FetchQuote_Integration", "TestBinance_FetchHistory_Integration"]
+  },
+  "verification": {
+    "no_tag_no_integration": "go test ./internal/collector/crypto/... -v | grep -i integration → 空；三包 ok 全绿",
+    "vet_plain": "go vet ./... → rc=0",
+    "vet_integration": "go vet -tags integration ./internal/collector/crypto/... → rc=0",
+    "list_integration": "go test -tags integration -list → 6 个 Integration 用例可见",
+    "make_test_integration": "make test-integration → 编译启动并运行 6 用例（本次外部 API 可达，全绿）",
+    "full_suite_note": "go test ./... 中 cmd/atlas 与 internal/config 的失败来自同分支另外两个并行 dev 的未提交在途改动（config_test.go/broker_test.go/executor_test.go 均为 Modified），不属于 TASK-102 scope；本任务改动的三 crypto 包 + Makefile 全绿。"
+  },
+  "commit": "adf5737619755bc4eb6f7552e31c90bdcd254e8f"
+}

@@ -1,0 +1,24 @@
+{
+  "task": "TASK-014",
+  "key_findings": [
+    "Messages 纯函数按 §3.3 表：Transitioned→进入 BREWING/CRISIS 为[P0] 否则[P1]；非变更 BREWING/CRISIS→[P1]日报；summaryDue→月度(NORMAL)/周度(WATCH)摘要；staleInds→逐个[P2]。P0/P1/日报/摘要均带 footer 边界声明；[P2] 无 footer。indicatorLines 渲染状态/读数/5y分位(Pct5y>=0 才显示)/tag+下一评估提示",
+    "summaryDue 由 cmd 计算（非 notify）：NORMAL→isFirstTradingDayOfMonth（月初落周末顺延首个工作日）；WATCH→周一；BREWING/CRISIS/坏日期→false。设计 §4.3 不加第 4 个 plist，摘要判断内嵌 daily eval",
+    "cmd 接线：crisisEvalDeps 加 sender crisis.Sender；executeCrisisEvalDaily 落库+打印后 stateStreakDays→Messages→逐条发送；sender==nil 打印到 out（本地试运行），发送失败仅 stderr 告警不返回 error（评估已落库，文件真相源自愈）",
+    "buildCrisisSender 复用主配置 cfg.Notifiers[\"telegram\"]（Enabled/BotToken/ChatID 齐备才构造），telegram.New 与 serve.go:330 同款零改动；缺配置→nil",
+    "覆盖率：internal/crisis 91.1%（notify.go Messages/indicatorLines 100%）、cmd crisis.go 85.8%（205/239，AD-6）"
+  ],
+  "decisions": [
+    {"decision": "补 indicatorLines 两分支、周末 summaryDue、buildCrisisSender nil、nil-sender 打印、staleIndicators 独立用例", "rationale": "两半纪律：方案参考测试只覆盖主路径"},
+    {"decision": "发送失败 fmt.Fprintf(errOut) 不返回 error", "rationale": "DoD + 设计 §4.4：评估已落库，通知丢失可由 status 自愈，不应使 launchd 任务非零退出"},
+    {"decision": "footer 用概率语言、禁确定性字样", "rationale": "Global Constraints；单测逐条 NotContains 必然/一定/即将，P0/P1 必含「非交易信号」"}
+  ],
+  "files_modified": ["internal/crisis/notify.go", "internal/crisis/notify_test.go", "cmd/atlas/crisis.go", "cmd/atlas/crisis_test.go"],
+  "interfaces_exposed": [
+    "type Sender interface{ SendText(text string) error }",
+    "Messages(res *DayResult, stateDays int, summaryDue bool, staleInds []string) []string",
+    "const footer（固定边界声明）",
+    "cmd 私有：summaryDue(date, state) bool、isFirstTradingDayOfMonth(t) bool、staleIndicators(res) []string、buildCrisisSender() crisis.Sender；crisisEvalDeps.sender 字段"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿；go vet 干净；internal/crisis 91.1%、crisis.go 85.8%（AD-6）；commit 08b407e 仅含声明 4 文件；telegram 零改动复用",
+  "note": "discovery 由 dev-agent-1 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）。dev 经 API 中断后 SendMessage 续接完成交付"
+}

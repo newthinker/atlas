@@ -1,0 +1,59 @@
+{
+  "task_id": "TASK-204",
+  "key_findings": [
+    "QA W2 修复落在 internal/alert/evaluator.go 的 Evaluate() 触发段（原 95-100 行）。缺陷：for range notifiers 调 n.Notify(msg) 丢弃返回 error，随后无条件 e.lastFired[rule.Name]=now 进 5min 冷却——发送失败静默丢失且冷却内不重试；与 W1（telegram Markdown 静默丢弃）叠加时告警彻底丢失。",
+    "修复：Notify 返回 error 时 e.logger.Warn（字段 rule=规则名、notifier=n.Name()、error）并 continue（不中断其余 notifier）；用 anySucceeded 标志，仅当至少一个 notifier 成功才写 e.lastFired + delete(e.pending)。全部失败时 lastFired 与 pending 均不动。",
+    "失败时保留 pending 是刻意的：For>0 规则若已满足 For 时长后首次 fire 失败，下一轮 rule 仍 true、pending 仍在、now-pendingSince>=For → 立即重发（不重启 For 等待）。若删 pending 会让 For>0 规则重新等一个 For 周期才重试，延迟恢复。For=0 规则不受 pending 影响，天然每轮重试。",
+    "Evaluator 无 logger 依赖。为不改 NewEvaluator([]Notifier) 签名（cmd/atlas 的 alert.NewEvaluator(adapters) 依赖，TASK-203 刚接线），新增未导出字段 logger *zap.Logger，NewEvaluator 初始化 zap.NewNop()。",
+    "【epoch=2 增量 - 生产可见性】Leader 采纳原补充里的缺口，新增 non_functional[1]：Evaluator 增加导出方法 SetLogger(*zap.Logger)（nil 忽略保留 nop；加锁写 e.logger，与 Evaluate 持锁读 e.logger 同步避免 race）；cmd/atlas maybeStartAlertRunner 装配时 evaluator.SetLogger(log) 注入真实 zap logger，使 Notify 失败 Warn（含 rule/notifier 名）在生产日志可见。装配测试 TestMaybeStartAlertRunner_InjectsLoggerForNotifyFailures 用 failingNotifier（Send 返 error）+ 触发规则 + observer 断言 Warn 落入注入 logger 且字段 rule 正确；evaluator 侧 TestEvaluator_SetLogger_InjectsAndNilSafe 验证注入生效与 nil 安全。packages 扩为 internal/alert + cmd/atlas。"
+  ],
+  "decisions": [
+    {
+      "decision": "logger 用未导出字段 + nop 默认，而非改 NewEvaluator 签名或加公开 SetLogger。",
+      "rationale": "NewEvaluator 签名改动会波及 cmd/atlas（超出本任务 scope『改动限 internal/alert』）。公开 SetLogger 在生产无调用者属 YAGNI。同包白盒测试可直接设未导出字段观察 Warn，最小且够用。"
+    },
+    {
+      "decision": "全部失败时同时保留 lastFired 与 pending（不仅 lastFired）。",
+      "rationale": "DoD 只点名不写 lastFired，但若删 pending，For>0 规则会重启 For 等待，延迟重试。保留 pending 使『下一轮可再次触发』对 For>0 与 For=0 规则都成立，贴合修复意图（失败即下轮重发）。"
+    },
+    {
+      "decision": "failing notifier 在测试中放数组首位。",
+      "rationale": "证明单个 notifier 失败不中断其后 notifier（functional[0] 不中断其余 notifier），failing-then-ok 顺序下 ok 仍被调用。"
+    },
+    {
+      "decision": "【epoch=2】用导出 SetLogger(*zap.Logger) 而非改 NewEvaluator 签名或构造选项，nil 忽略且加锁写。",
+      "rationale": "SetLogger 不破坏 NewEvaluator 既有签名/调用（cmd/atlas 依赖）；nil 忽略使误传不清空日志；加锁写与 Evaluate 持锁读 e.logger 同步，-race 干净。此增量把生产可见性从 nop 提升为 serve 注入的真实 logger，闭合上一轮遗留的观测缺口。"
+    }
+  ],
+  "files_modified": [
+    "internal/alert/evaluator.go (Evaluator 加 logger 字段+nop 默认；Evaluate notify 段改为 Warn+anySucceeded 门控冷却；epoch=2 增加导出 SetLogger)",
+    "internal/alert/evaluator_test.go (errNotifier；NotifyFailure/PartialFailure；epoch=2 加 SetLogger_InjectsAndNilSafe)",
+    "cmd/atlas/alert_runner.go (epoch=2: maybeStartAlertRunner 注入 evaluator.SetLogger(log))",
+    "cmd/atlas/alert_runner_test.go (epoch=2: failingNotifier + TestMaybeStartAlertRunner_InjectsLoggerForNotifyFailures)"
+  ],
+  "interfaces_exposed": [
+    "NewEvaluator([]Notifier) *Evaluator 签名不变（logger 默认 nop）",
+    "新增 (*Evaluator).SetLogger(*zap.Logger)：nil 忽略、加锁写；serve maybeStartAlertRunner 已注入真实 logger",
+    "Evaluator 行为变更：Notify 全失败不进冷却（下轮重试）；任一成功进冷却；失败记 Warn（rule+notifier 名），生产日志可见。成功路径不变。"
+  ],
+  "verification": {
+    "commit_epoch1": "3f06800ff8cb856636fa77ac9d52998b987dac34 (W2 本体)",
+    "commit": "da1715bbf0ed6ffc460f9fa943157fe3b36114dc (epoch=2 生产 logger 注入增量)",
+    "tests": "go test -race ./internal/alert/... ./cmd/atlas/... 全绿（alert 11 用例 / cmd/atlas alert 相关全过；既有零回归）",
+    "vet": "go vet ./internal/alert/ ./cmd/atlas/ 通过",
+    "build": "go build ./... 通过",
+    "coverage": "internal/alert 91.7%；新增 SetLogger 及 maybeStartAlertRunner 注入均被测试覆盖",
+    "scope": "internal/alert + cmd/atlas 共 4 文件，与声明 packages 一致；同分支 dev-agent-2 的 telegram(W1) 改动未纳入本提交",
+    "criteria_check": [
+      "functional[0] Notify error 记 Warn(rule+notifier 名)不中断 → NotifyFailure/PartialFailure ✅",
+      "functional[1] 全失败不写 lastFired 下轮重试 → NotifyFailure calls==2 ✅",
+      "functional[2] 任一成功进冷却 → PartialFailure 无 re-dispatch ✅",
+      "boundary[0] 全成功零回归 → 既有用例全过 ✅",
+      "non_functional[0] 不改 for/冷却/表达式求值；-race 全绿 ✅",
+      "non_functional[1] 生产可见性：SetLogger 注入途径 + maybeStartAlertRunner 注入真实 logger + observer 断言 → SetLogger_InjectsAndNilSafe / InjectsLoggerForNotifyFailures ✅"
+    ],
+    "code_simplifier": "两轮均经 Task 调用 code-simplifier:code-simplifier，均无改动（Complete. No action）",
+    "coverage_gate_note": "packages 现含 cmd/atlas（package main），TaskCompleted hook 整包默认 dev_minimum=80；cmd/atlas 整包约 65%（大量任务外存量样板），需 Leader 为 TASK-204 设 coverage_minimum（先例 cmd/atlas 任务=35）。已在通知中提请。",
+    "gitnexus_note": "gitnexus MCP 工具在 dev-agent 工具集不可用，改动范围用 git status 逐文件核对"
+  }
+}

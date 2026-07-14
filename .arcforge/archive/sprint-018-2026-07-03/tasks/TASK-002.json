@@ -1,0 +1,71 @@
+{
+  "id": "TASK-002",
+  "title": "App.SnapshotMetrics 只读指标组装 + FundamentalSource 注入",
+  "description": "internal/app 新增 snapshot.go：FundamentalSource 窄接口 + SetFundamentalSource（App 结构体加 fundamentalSrc 字段，valuationSrc/epsSrc 旁）；SymbolMetrics 结构（指针字段 nil=不可用，Gaps 记原因，json tag 按计划逐字）；SnapshotMetrics(ctx, symbols)（symbols nil=全 watchlist、否则过滤且保持 watchlist 顺序；errgroup 并发上限取 cfg.Analysis.Workers ≥1；per-symbol panic 隔离进 Gaps，镜像 analyzeSymbolSafe）。组装链：行情/历史按 orderedCollectors 依序试；历史窗口 valuationLookback（0=全历史 AddDate(-100)）+ clampToEpochFloor；PE 百分位走 buildFundamental（返回 nil=资产类型无估值路径，预期缺席不记 gap；PEPercentile=-1 记 gap）；估值三项仅在 fundamentalSrc 非 nil 时取（positivePtr 过滤非正值），nil 时记 gap 'fundamental source not configured for market'；价格百分位=现价（缺行情退最后收盘）在窗口收盘序列的 valuation.PercentileRank。实现与测试代码在实施计划 Task 2 中逐字给出（6 个测试用例；snapFake.Init 参数类型以 collector 包实际签名为准）。TDD 先 RED。权威步骤：计划 Task 2。",
+  "module": "watchlist-cmd/snapshot",
+  "complexity": "medium",
+  "pr": 1,
+  "estimated_files": [
+    "internal/app/snapshot.go",
+    "internal/app/snapshot_test.go",
+    "internal/app/app.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "全路径 A 股用例：行情/估值三项/PE 百分位/价格百分位全部就位且值精确（TestSnapshotMetrics_FullPathAShare）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "无估值源时估值字段全 nil、价格百分位仍可算、Gaps 有记录（MissingValuationDegrades）；crypto 不记估值 gap（CryptoNoValuationGap）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "symbols 过滤只返回指定子集且保持 watchlist 顺序（SymbolsFilter）；另有 ≥3 标的用例逐位断言 ms[i].Symbol==watchlist 顺序（并发下保序，AD-8/B4）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "单标的 panic 被隔离（记 gap），其余标的不受影响（PanicIsolated）；全采集器失败时指标为空但 Gaps 有因（AllCollectorsFail）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "SnapshotMetrics 只读：不产信号、不发通知、不写任何 store（review 实现确认无副作用调用）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "价格百分位极值边界（PercentileRank 严格小于语义，AD-8/B5）：current 大于全部收盘→100；current==最小收盘→0；current 落序列内部有一个中间值用例",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "接口签名与计划 Interfaces 块逐字一致（FundamentalSource/SetFundamentalSource/SymbolMetrics/SnapshotMetrics——T3/T4 依赖）；App 结构体仅加 fundamentalSrc 一个字段",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go test ./internal/app/ 全绿（既有分析循环测试零回归）；go test -race ./internal/app/ -run TestSnapshotMetrics 无 data race；并发等价用例：Workers=1 与 Workers=4 结果切片逐元素相等（AD-8/B3）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "verifier": "test-agent-1",
+  "commit": "b6f59a4",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "internal/app"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "fix_items": [
+    "W2: positivePtr 把合法 0/负值掩盖为 nil——lixinger 有数据时 dyr=0（不分红）与 pe_ttm<0（亏损）是已知事实，渲染成\"—\"与\"数据不可用\"混淆且不记 gap。修复：FetchFundamental 成功时直接取 &fd.PE/&fd.PB/&fd.DividendYield（不经 positivePtr），仅 fetch 出错时置 nil+记 gap；删除或收窄 positivePtr；补测试（dyr=0 → DividendYield 非 nil 值 0；pe<0 → PE 非 nil 负值）。同时在 SnapshotMetrics/snapshotHistoryStart docstring 注明价格/PE 百分位窗口基准是 valuation.lookback_years（配合 W3b）。"
+  ]
+}

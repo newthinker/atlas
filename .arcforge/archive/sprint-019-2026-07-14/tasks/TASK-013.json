@@ -1,0 +1,50 @@
+{
+  "id": "TASK-013",
+  "title": "crisis replay 回测（第二阶段收口）",
+  "description": "实施方案 Task 13（行 3889–4046）：replay --from --to [--json]，EvalDates（vix 观测日）逐日 EvalDay + MemHistory 累积，不写库；输出状态转移时间线与各态进入次数。三段历史验收（2020/2024/2008 提前预警 + 2015–19 误报 ≤1）需真实回填数据，人工执行。",
+  "module": "cmd/atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "executeCrisisReplay 按 EvalDates 逐日评估并经 MemHistory 累积状态，不写 crisis_evaluations",
+      "输出含状态转移时间线（如 NORMAL → WATCH）、final state 与各态进入次数汇总；--json 输出机器可读格式",
+      "单测：80 日全绿 + 末 3 日 NFCI 转正 fixture → 出现一次 NORMAL → WATCH 且 final state: WATCH"
+    ],
+    "boundary": [
+      "区间内无 vix 观测 → 返回含 run backfill first 的错误（真相源未回填时明确失败，不静默；方案 TestExecuteCrisisReplayNoData）"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./cmd/atlas/ 全绿",
+        "verify_by": "test"
+      },
+      {
+        "desc": "三段历史验收（设计 §6 分段降级标准）用真实 backfill 数据人工执行；不达标只调 YAML 阈值重跑并把最终参数记入实施方案附注",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-012"
+  ],
+  "wave": 10,
+  "context_from": [
+    "TASK-011",
+    "TASK-012"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-013.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

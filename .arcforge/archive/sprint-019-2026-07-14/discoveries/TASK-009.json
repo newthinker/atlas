@@ -1,0 +1,25 @@
+{
+  "task": "TASK-009",
+  "key_findings": [
+    "EvaluateIndicator 统一流水线：Window(,,1) 空→NO_DATA；staleFor→STALE（直接返回退出共振）；WindowSince(5yr) 填 Pct5y/WindowActualObs；evalAbsolute 指标专属绝对轨；percentileTrack 且 WindowActualObs≥60（minPercentileObs）时 Pct5y≥red/amber 经 maxStatus 升级。RawStatus 承载防抖前原始档",
+    "7 指标绝对轨形态：vix/move 区间+vix WowPct 周涨；sofr_effr 持续性 allAbove(red_persist_days) 红 / lastN(amber_persist_days) 黄；hy_oas 双向黄灯（<low COMPLACENCY / [high,red] STRESS）+ MomChange 补 STRESS；t10y2y <0 红/[0,amber] 黄 + 复陡 STEEPENING（不改色）；nfci 区间；usdjpy WowPct 双阈 + 52 周 Percentile≥crowded 加 CROWDED",
+    "Pct5y/WindowActualObs 对 track=false 指标恒填充（供通知展示）；短窗如实标注但不用于升级（偏差 3）",
+    "测试 fixture memSeries/seriesEnding/baselineSeries/testConfig 为交付物，Task 10/11 直接复用；testConfig 数值与 YAML 一致但不读文件",
+    "覆盖率 88.9%；dev 提交前逐分支自查（吸取 006/008 教训），补 TestEvaluateIndicatorAbsoluteBands 表驱动 9 用例后关键函数 90%+；剩余未覆盖全部为 SeriesReader 错误透传分支（memSeries 永不报错，非 DoD 功能分支）"
+  ],
+  "decisions": [
+    {"decision": "补 TestEvaluateIndicatorAbsoluteBands 表驱动 9 用例覆盖各指标红/黄绝对区间", "rationale": "方案参考测试只覆盖部分分支而 done_criteria functional 明确要求；补齐后关键函数覆盖率 90%+"},
+    {"decision": "剩余 SeriesReader err 分支不强补", "rationale": "memSeries 永不报错，纯内存测试无法触发；属防御性错误透传，强造 error-reader 无验收价值"},
+    {"decision": "minPercentileObs=60 定为包级常量而非 cfg", "rationale": "偏差 3 的统计有效性门槛（非市场阈值），全指标统一，不需运行时调参"},
+    {"decision": "simplifier 判定不改", "rationale": "抽取重复 switch 或折叠派发会掩埋逐指标设计语义"}
+  ],
+  "files_modified": ["internal/crisis/rules.go", "internal/crisis/rules_test.go"],
+  "interfaces_exposed": [
+    "EvaluateIndicator(cfg *Config, indicator, date string, sr SeriesReader) (IndicatorResult, error)",
+    "const minPercentileObs = 60",
+    "test fixtures（Task10/11 复用）：memSeries（实现 SeriesReader）、seriesEnding(end,n,base,last)、baselineSeries(end)、testConfig()"
+  ],
+  "rework": "首验 REJECTED：分位轨 AMBER 升级半边（rules.go:44-45）覆盖=0。返工 0a301e6 补 TestPercentileTrackAmberUpgrade（80 观测 73/80=0.9125 分位判别性用例），复验 VERIFIED",
+  "verification": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；coverage 89.1%；commits d8da972 + 0a301e6 仅含声明的 2 文件；零阈值字面量；基线锚点 AMBER=2 按设计 §3.1",
+  "note": "discovery 由 dev-agent-1 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）"
+}

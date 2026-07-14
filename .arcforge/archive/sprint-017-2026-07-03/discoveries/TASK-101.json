@@ -1,0 +1,47 @@
+{
+  "task": "TASK-101",
+  "key_findings": [
+    "BrokerConfig.Futu 字段仅被 3 处引用：config.go 自身(Validate:419、WarnHardcodedSecrets:445)、config_test.go、executor_test.go。删除结构体会使后两个测试文件编译失败，作为编译孤儿一并收敛（属本次改动的必要连带）。",
+    "cmd/atlas/executor.go 只读 cfg.Broker.Provider(string) 与 cfg.Broker.Mode，从不引用 Futu 结构体，故 buildExecution 源码无需改动；非 paper 模式已由 Mode!=\"paper\" 分支处理，与 provider 无关。",
+    "internal/broker/types.go:252 的注释里把 futu 作为 broker 名示例列举（'alpaca, ibkr, futu'），非 FutuConfig 代码引用，且不在 estimated_files 范围内，未改动。",
+    "config.Load() 走 viper，未对 broker.provider 设 SetDefault；缺省 provider 依赖 config.Defaults() 返回的 \"mock\"。老配置带 futu: 段时 viper 静默忽略未映射键，加载不报错。"
+  ],
+  "decisions": [
+    {
+      "decision": "getBroker 删除 case \"futu\" 后不新增专门分支，让 futu 自然落入 default 返回 'unknown broker provider: futu'。",
+      "rationale": "FutuBroker 已撤回，futu 与任何其它未知 provider 无区别，统一走 default 分支既满足 DoD 又避免残留特判逻辑。"
+    },
+    {
+      "decision": "Validate 中 Mode==\"live\" 直接报错 'live trading not supported (paper-only)'，不再读取任何 Futu 字段。",
+      "rationale": "AD-15 裁决实盘链路定格 paper-only；原 'live 需 futu env=real' 校验依赖已删除的字段，改为无条件拒绝 live 更贴合撤回决策。"
+    },
+    {
+      "decision": "boundary[0] 新增独立测试 TestLoad_LegacyFutuSection_Ignored，而非依赖既有 TestLoad_ExecutionMode_DefaultsToConfirm 里偶带的 futu: 段。",
+      "rationale": "让老配置向后兼容这一行为有明确、专属的测试守护，避免未来他人清理无关 yaml 时静默丢失覆盖。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/broker.go",
+    "internal/config/config.go",
+    "configs/config.example.yaml",
+    "docs/plans/2026-01-01-m4-live-trading-design.md",
+    "cmd/atlas/broker_test.go",
+    "internal/config/config_test.go",
+    "cmd/atlas/executor_test.go"
+  ],
+  "interfaces_exposed": [
+    "getBroker(cfg) 现只识别 provider=\"mock\"，其余(含 futu)返回 'unknown broker provider: <name>'",
+    "config.BrokerConfig 不再有 Futu 字段；FutuConfig 类型已删除",
+    "Config.Validate(): broker.enabled && mode==\"live\" 返回 ErrConfigInvalid 包裹 'live trading not supported (paper-only)'",
+    "config.Defaults().Broker.Provider == \"mock\""
+  ],
+  "verification": {
+    "build": "go build ./... 通过",
+    "vet": "go vet ./... 通过",
+    "tests": "go test ./... 全绿(exit 0)；受影响包 cmd/atlas、internal/config 均 ok",
+    "grep_residual": "全仓 grep FutuConfig/Broker.Futu/broker.futu：无代码引用残留（仅 config_test.go 一条解释性注释提及 FutuConfig 已删除）",
+    "scope": "git 提交 18f16fb 恰为 estimated_files 4 个 + 编译孤儿收敛测试 3 个，共 7 文件；同分支其他 dev 的改动未纳入",
+    "commit": "18f16fb7e2c2882069016ac62c7896b7ac49b106",
+    "gitnexus_note": "CLAUDE.md 要求的 gitnexus_impact/detect_changes MCP 工具在 dev-agent 工具集中不可用，改动范围改用 git status 逐文件核对"
+  }
+}

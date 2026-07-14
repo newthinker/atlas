@@ -1,0 +1,25 @@
+{
+  "task": "TASK-010",
+  "key_findings": [
+    "NextState 优先级：情绪双红（vix RED∧move RED，coloredStatus 计）任意态→CRISIS 提前返回；随后按 prev 态 switch。det.AnyTrigger=leadingRed||amberCount≥watch_amber_count||brewingPair||sentimentDoubleRed 写入系统行 detail 供后续退出重建",
+    "退出连续日全部从 EvalHistory 历史行重建（进程无计数器，设计 §4.3）：CRISIS 看指标行 vix/move GREEN（sentimentGreenStreak，今日+RecentIndicator days-1）；WATCH/BREWING 看系统行 detail.any_trigger/brewing_pair（systemDetailStreak，RecentSystem days-1）。历史<days-1 一律不退出（冷启动安全）",
+    "非色彩状态（STALE/NO_DATA/SUPPRESSED）经 coloredStatus 返回 \"\" 退出共振计数与双红/领先判定；amberOrWorseCount 按 severity≥AMBER 计数（RED 计入，语义补充 1）",
+    "malformed detail 保守语义 vs IO error 透传的分工：systemDetailStreak 中 json.Unmarshal 失败→(false,nil) 保守不退出（DoD error_handling）；hist.RecentSystem/RecentIndicator 的 error→透传给调用方。MemHistory 用 prepend 保持新→旧",
+    "覆盖率：全包 90.8%，statemachine.go/memhistory.go 全函数 100%（dev 提交前逐块自查，含 errHistory fixture 覆盖 IO 透传三态）"
+  ],
+  "decisions": [
+    {"decision": "systemDetailStreak unmarshal 失败改为 return (false,nil) 而非方案参考实现的 return err（有据偏离）", "rationale": "DoD error_handling 明确要求「保守处理（不满足退出条件）」；一条坏历史行不应使整日评估失败。接口级 IO 错误仍透传，二者区分"},
+    {"decision": "补 errHistory fixture 覆盖 hist.Recent* 错误透传（CRISIS/WATCH/BREWING 三态）", "rationale": "MemHistory 永不报错，err 透传分支不可测；恒报错 fixture 消除无证据覆盖风险"},
+    {"decision": "每条退出转移的触发/不触发两半均补判别性用例（今日仍触发/历史夹 true/今日非双绿等「维持半」）", "rationale": "前三轮拒验教训，NextState 达 100%"},
+    {"decision": "simplifier 判定不改：不合并两个 streak 函数", "rationale": "错误策略不同（吞 unmarshal / 透传 IO），合并会模糊边界"}
+  ],
+  "files_modified": ["internal/crisis/statemachine.go", "internal/crisis/memhistory.go", "internal/crisis/statemachine_test.go"],
+  "interfaces_exposed": [
+    "NextState(cfg *Config, prev SystemState, res map[string]IndicatorResult, hist EvalHistory) (SystemState, SysDetail, error)",
+    "type SysDetail struct{ Date string `json:\"date\"`; AnyTrigger bool `json:\"any_trigger\"`; BrewingPair bool `json:\"brewing_pair\"`; AmberCount int `json:\"amber_count\"`; Prev SystemState `json:\"prev\"` }",
+    "MemHistory（实现 EvalHistory，新→旧）：NewMemHistory / Append / RecentSystem / RecentIndicator",
+    "test fixtures（Task11 复用）：colorResults(map[string]Status)、histWithSystem(days, SysDetail)"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；coverage 90.8%（两文件全函数 100%）；go vet 干净；commit 5a0fa1c 仅含声明的 3 文件；SysDetail json tag 与契约一致",
+  "note": "discovery 由 dev-agent-1 报告提供、Leader 落盘并独立复核（降级：dev 不写 .arcforge）"
+}

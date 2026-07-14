@@ -1,0 +1,43 @@
+{
+  "id": "TASK-003",
+  "title": "yahoo collector 支持货币符号 JPY=X",
+  "description": "实施方案 Task 3（行 1139–1200）：仅改 internal/collector/yahoo/yahoo.go 的 validSymbol 正则，期货后缀 =F 放宽为 =[FX]。这是全 Sprint 唯一触碰既有 symbol 的改动——修改前必须跑 gitnexus impact（项目 MUST 规则），HIGH/CRITICAL 需先停下上报。",
+  "module": "internal/collector/yahoo",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/yahoo_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "validateSymbol(\"JPY=X\") 通过（货币后缀 =X 放行）"
+    ],
+    "boundary": [
+      "GC=F（期货）、^MOVE（指数）、普通/交易所后缀符号继续通过；JPY=Z 等未知后缀仍拒绝"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "改动前运行 gitnexus impact({target:\"validateSymbol\", direction:\"upstream\"}) 并把影响面（直接调用方、风险级别）记入 discovery；改动只放宽匹配、既有符号集合不变",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/collector/yahoo/ 全包回归全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-3",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/collector/yahoo"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

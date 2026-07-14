@@ -1,0 +1,22 @@
+{
+  "task": "TASK-015",
+  "key_findings": [
+    "intraday 模式：executeCrisisIntraday 启动读 LatestSystemEval，非 BREWING/CRISIS → exit 0 不调 FetchQuote（空跑近零）；否则实时价与库中 5 观测前收盘比 wow，≤ red_wow_pct → [P0] 告警",
+    "usdjpy_intraday 评估行每日一次去重；store 新增 HasIndicatorEvalForDate（镜像 HasSystemEvalForDate）",
+    "3 个 launchd plist 照 refresh-us.plist 模板：daily 三时点 22:45/23:45/07:30、nfci 周三 21:00/22:00、intraday StartInterval 1800",
+    "覆盖率：internal/crisis 91.0%、cmd crisis.go 85.3%（232/272，AD-6）；全仓 53 包全绿",
+    "simplifier 判定无需改动（intraday 流程镜像 daily/nfci 惯例，共享 helper 抽取属禁止的新抽象）"
+  ],
+  "decisions": [
+    {"decision": "协议 v2：主提交 9850acc（7 文件），simplifier 无改动", "rationale": "标准流程；store_test.go 为 HasIndicatorEvalForDate 配套直测"}
+  ],
+  "files_modified": ["cmd/atlas/crisis.go", "cmd/atlas/crisis_test.go", "internal/crisis/store.go", "internal/crisis/store_test.go", "deploy/launchd/com.newthinker.atlas.crisis-daily.plist", "deploy/launchd/com.newthinker.atlas.crisis-nfci.plist", "deploy/launchd/com.newthinker.atlas.crisis-intraday-jpy.plist"],
+  "interfaces_exposed": [
+    "CLI: atlas crisis eval --mode intraday",
+    "(*Store).HasIndicatorEvalForDate(ctx, indicator, date string) (bool, error)",
+    "const intradayIndicator = \"usdjpy_intraday\"（去重行标识）",
+    "deploy/launchd/com.newthinker.atlas.crisis-{daily,nfci,intraday-jpy}.plist"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./... 53 包全绿；go build -o bin/atlas ./cmd/atlas 通过；internal/crisis 91.0%、cmd crisis.go 85.3%；commit 9850acc",
+  "note": "Leader 依据自身复核 + simplifier 报告代写；dev-agent-1 正式报告到达后补充。manual 项（部署与两周试运行）列终验收清单"
+}
