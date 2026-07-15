@@ -1,0 +1,48 @@
+{
+  "id": "TASK-002",
+  "title": "ClearStreakDays 导出助手",
+  "description": "statemachine.go 末尾追加 ClearStreakDays(hist EvalHistory, max int) (int, error)：统计最新起 any_trigger=false 的连续历史系统行数（周报退出进度分子，当日行由调用方补）。实施步骤见 impl 文档 Task 2。",
+  "module": "internal/crisis",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/crisis/statemachine.go",
+    "internal/crisis/statemachine_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "最新两行 any_trigger=false、第三行 true 时返回 2（true 中断计数）"
+    ],
+    "boundary": [
+      "空历史返回 0",
+      "回看深度受 max 参数限制（RecentSystem(max)）"
+    ],
+    "error_handling": [
+      "detail 非法 JSON 的行保守中断计数而非上抛（同 systemDetailStreak 约定）",
+      "RecentSystem 返回错误时原样上抛"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿（含既有测试回归）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/crisis",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-2",
+  "fix_items": [
+    "CRITICAL: ClearStreakDays 不校验 SystemState，跨状态污染周报退出进度分子（与 systemDetailStreak 口径不一致，违反既有 QA 裁决「态内计数」）。修复：签名改为 ClearStreakDays(hist EvalHistory, state SystemState, max int)，循环内 e.SystemState != state 即 break；cmd/atlas buildNotifyContext 调用点传 crisis.StateWatch；测试加 mixed-state fixture（参照 TestExitStreakRequiresInStateHistory：CRISIS(AnyTrigger:false)×N + WATCH(AnyTrigger:false)×1 → 返回 1）"
+  ]
+}

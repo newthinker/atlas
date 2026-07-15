@@ -1,0 +1,51 @@
+{
+  "id": "TASK-006",
+  "title": "notify_render.go（三）— 日报（较昨日）与周报（退出进度）",
+  "description": "notify_render.go 追加 colorWord/diffLine/renderDaily（消息 3）/renderWeekly（消息 5）。实施步骤见 impl 文档 Task 6。消费 TASK-005 的 notifyFooter。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "renderDaily 首行 \"[P1] 📍 {STATE} 日报 第 {StateDays} 日 · MM-DD\"，正文\"异常指标：\"分区，尾注含 diffLine + \"盘中 JPY 监测运行中（每 30 分钟）· 下一评估：下一交易日\"",
+      "diffLine：状态迁移优先渲染 \"{ind} 转{色}（原{色}）\"；读数变化仅列当日异常区指标（如 \"hy_oas +6bp\"）；顺序按 AllIndicators",
+      "renderWeekly 首行 \"[P1] 📅 Cassandra 周报 · MM-DD 当周 · {STATE} 已持续 N 个评估日\"；退出进度行 \"触发条件已连续解除 {ClearStreak} 日（回 NORMAL 需连续 {watch_exit_days} 日）\"；尾注 \"下次周报：下周一 · 状态变更即时通知\""
+    ],
+    "boundary": [
+      "完全无变化 → \"较昨日：无变化\"",
+      "PrevDay 缺行的指标不参与 diffLine"
+    ],
+    "non_functional": [
+      {
+        "desc": "renderDaily/renderWeekly 均以 notifyFooter 结尾",
+        "verify_by": "test"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-6"
+}

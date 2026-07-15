@@ -1,0 +1,49 @@
+{
+  "task_id": "TASK-008",
+  "key_findings": [
+    "buildNotifyContext 直接采用 impl 文档 Task 8 参考实现（与 crisis 包真实签名逐一核对无出入，未发现如 T4 那样的参考实现 bug）：SeriesWindow 返回升序（DESC LIMIT 后反转），故 Delta=win[len-1]-win[0]=末-首正确；RecentIndicatorEvals 返回 ts DESC（新→旧），evals[0] 即最近一评估日；LatestObservation 返回 (*Observation,error) 且 ErrNoRows→(nil,nil)，无观测时 StaleLastObs 缺省；DayResult.Detail 为 crisis.SysDetail（含 AnyTrigger bool）。",
+    "时序约束（DoD non_functional review 判据）已在函数头注释声明：buildNotifyContext 必须在 AppendEvaluations 之前调用——PrevDay/StateDays/ClearStreak 取的都是'截至昨日'的库内历史，当日增量（今日行、今日 any_trigger）在函数内补。本任务只加函数、executeCrisisEvalDaily 一行未动（Task 9 才接线）。",
+    "StateDays 双语义（补充决策 6）：变更日 = stateStreakDays(PrevState)（前状态历史连续行数）；非变更日 = stateStreakDays(State)+1（当前状态历史连续行数 + 当日）。复用既有 cmd 层 stateStreakDays（crisis.go:507，查 RecentSystemEvals）。",
+    "ClearStreak（补充决策 8）= crisis.ClearStreakDays(store.History, WatchExitDays) + 1，仅在 WATCH ∧ SummaryDue ∧ !res.Detail.AnyTrigger 三条件同真时组装；历史值由 T2 的 ClearStreakDays 提供（只数历史 any_trigger=false 连续行），当日 +1 由本层补（T2 discovery 已约定当日行组装时尚未落库）。",
+    "错误路径可测性受具体类型 crisisEvalDeps.store *crisis.Store 限制：函数内 5 处 store 查询走同一 sqlite 连接，调用顺序上 PrevDay 循环的 RecentIndicatorEvals（查 crisis_evaluations）最先跑。可独立触发的错误返回 = RecentIndicatorEvals（关整库）、LatestObservation、SeriesWindow（旁路连接 DROP macro_observations 表、保留 crisis_evaluations）。旁路删表用第二个 sql.Open 连接同一 db 文件，WAL 下 DDL 提交后 store 连接下次查询即见'no such table'——已实测生效。"
+  ],
+  "decisions": [
+    {
+      "decision": "buildNotifyContext 内 store 调用顺序固定为 PrevDay 循环(RecentIndicatorEvals) → stateStreakDays(RecentSystemEvals) → NewStale 循环(LatestObservation) → ClearStreakDays(History/RecentSystem) → Trends 循环(SeriesWindow)，与 impl 参考实现一致，未重排。",
+      "rationale": "该顺序是错误路径可测性的依据；同时 PrevDay 必须先于 NewStale 去重（去重判据 prev.Status==STALE 依赖 PrevDay map 已填）。重排会破坏去重语义与 error 用例设计。"
+    },
+    {
+      "decision": "3 个错误返回块（crisis.go 358/364/390：stateStreakDays 变更/非变更分支的 err 返回 + ClearStreakDays 的 err 返回）不做独立覆盖，接受记录在案缺口（方案 A，Leader 裁决）。",
+      "rationale": "三者都查 crisis_evaluations 表，而 PrevDay 循环首个 RecentIndicatorEvals 也查同一表且在前——具体类型 *crisis.Store 下无法构造'首查成功、后查失败'的静态表状态（同表先查必先败），故结构性不可达。error_handling[0] 的'原样上抛'模式已在 3 个可独立触发处（RecentIndicatorEvals/LatestObservation/SeriesWindow）证明，impl 全用无包装的 `return nc, err`。完全独立覆盖需把 crisisEvalDeps.store 抽成接口注入 fake，属波及 Task 9（executeCrisisEvalDaily/Intraday 均用 d.store 多方法）的生产改动，收益仅 3 个 err 转发块，不成比例。与 TASK-004 记录 SliceStable 不可锁性同类先例。Leader 派验时会告知 test-agent-1 按 A 口径核对、不判 FAIL。"
+    },
+    {
+      "decision": "测试助手 newNotifyTestDeps 委派给 newNotifyDepsAt(t, dbPath) 以暴露 db 路径供错误用例旁路删表；新增导入 database/sql 与 blank modernc.org/sqlite。",
+      "rationale": "impl 的 newNotifyTestDeps 用 t.TempDir() 不暴露路径，而 LatestObservation/SeriesWindow 错误路径需从第二连接 DROP macro_observations，必须拿到 db 文件路径。委派保持 impl 测试调用 `newNotifyTestDeps(t)` 不变且 DRY。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/crisis.go (+buildNotifyContext，纯插入于 executeCrisisEvalDaily 之后，既有函数零改动)",
+    "cmd/atlas/crisis_test.go (+导入 database/sql 与 _ modernc.org/sqlite、助手 newNotifyDepsAt/notifyDayResult/dropMacroObs、5 个测试)"
+  ],
+  "interfaces_exposed": [
+    "func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayResult) (crisis.NotifyContext, error)  // 包私有（package main）；Task 9 executeCrisisEvalDaily 接线消费，须在 AppendEvaluations 之前调用"
+  ],
+  "verification": {
+    "dod_test_mapping": {
+      "functional[0] PrevDay 取昨日行而非当日": "TestBuildNotifyContext（assert nc.PrevDay[vix].Status==GREEN，今日 res 中 vix 为 STALE）",
+      "functional[1] StateDays 变更=前状态streak / 非变更=streak+1": "TestBuildNotifyContext（非变更 WATCH，1 历史行+今日=2）+ TestBuildNotifyContextTransitionAndTrends（WATCH→BREWING 变更，前状态 2 历史行=2）",
+      "functional[2] NewStale 去重 + StaleLastObs 缺省/命中": "TestBuildNotifyContext（move 昨日已 STALE→去重、vix 新进→[vix]、vix 无观测→StaleLastObs 缺省）+ TestBuildNotifyContextStaleLastObs（vix 有观测→StaleLastObs[vix]=最后观测日 2026-07-14）",
+      "functional[3] ClearStreak WATCH∧SummaryDue∧!AnyTrigger=base+1": "TestBuildNotifyContext（三条件真=2）+ TestBuildNotifyContextClearStreakConditions（逐条独立否定：非WATCH(NORMAL月报日)/非SummaryDue(周二)/AnyTrigger=true 各令 ClearStreak=0）",
+      "functional[4] Trends 仅 SummaryDue∧NORMAL 升序 Delta=末-首、无观测不进 map": "TestBuildNotifyContextTransitionAndTrends（08-03 NORMAL 月首交易日，vix 窗口 Len=21 升序、Delta=末-首、move 无观测不进 map；WATCH 分支 nc.Trends==nil）",
+      "error_handling[0] store 查询错误原样上抛": "TestBuildNotifyContextStoreErrors 3 子测试：RecentIndicatorEvals（关库）/ LatestObservation（删 macro_observations 表 + 触发 NewStale）/ SeriesWindow（删表 + NORMAL 月报日）。History/stateStreakDays 两查询结构性不可达（见 decisions 方案 A），不独立触发",
+      "non_functional[0] 不改 executeCrisisEvalDaily + 全仓 build 通过 + 旧 Messages 输出不变": "GOTOOLCHAIN=local go build ./... 通过；全 cmd/atlas 套件绿（既有测试零改动零回归）；executeCrisisEvalDaily 一行未动",
+      "non_functional[1] 时序约束在函数注释声明（review）": "crisis.go buildNotifyContext 头注释：'必须在 AppendEvaluations 之前调用'"
+    },
+    "impact": "buildNotifyContext 为新增包私有函数，当前无生产调用方（Task 9 才接线），仅测试调用；门禁 impact/detect_changes 由 Leader 代跑（本会话 gitnexus MCP 版本与索引不匹配）",
+    "detect_changes": "Leader 代跑通过：risk_level=low、affected_processes=[]（空）。crisis.go 为单一 +83 行纯插入 hunk（buildNotifyContext 插于 executeCrisisEvalDaily 之后，既有函数零改动）；工具输出中 summaryDue/executeCrisisIntraday/staleIndicators/buildCrisisSender/isFirstTradingDayOfMonth/intradayIndicator 六个既有符号标 'touched' 是插入位移对旧索引（建于 d43d029）行区间的映射伪影，非真实修改；buildNotifyContext 属新符号不在旧索引、不按名列出，判定以 affected_processes 空 + git diff 范围为准（同 TASK-002/003/004 先例）",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./cmd/atlas/ 全绿；5 个新测试覆盖全部 8 条 DoD（见 dod_test_mapping）；既有 cmd/atlas 测试零改动零回归",
+    "coverage": "./cmd/atlas 整包 74.7%（基线 73.9%，本任务 +0.8pp）≥ coverage_minimum 35（Leader 裁决写入，归档 8 处 cmd/atlas 先例一致——package main 含大量任务外 0% glue backtest/export/serve/watchlist/main，整包 80% 不可行）；buildNotifyContext 函数级 93.2%（3 个 count=0 块 crisis.go:358/364/390 为结构性不可达 err 转发，方案 A）",
+    "commit": "28a7cca feat(crisis): assemble NotifyContext ahead of notification switch（仅 cmd/atlas/crisis.go + crisis_test.go，纯新增 311 行，一次通过零返工）"
+  }
+}

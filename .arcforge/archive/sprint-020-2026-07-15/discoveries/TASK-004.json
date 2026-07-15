@@ -1,0 +1,48 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "impl 文档 Task 4 参考实现有两处与其自身测试/DoD 冲突的 bug，已按测试/DoD 修正（下游 T5–T7 复用这些渲染器需知悉修正后的真实行为）：",
+    "BUG1 indicatorLine NO_DATA 分隔符：参考实现恒 head+\" · \"+note，NO_DATA 行（无读数）会得到 \"⚪ 领先 nfci · 无数据(NO_DATA)\"；DoD boundary[0]「NO_DATA 行无读数」+ 测试要求纯空格 \"⚪ 领先 nfci 无数据(NO_DATA)\"。修正：NO_DATA 分支直接 head+\" \"+note，STALE/季末抑制仍 head+\" 读数 · 说明\"。",
+    "BUG2 bodyZones 全绿判定：参考实现 len(rest)==len(AllIndicators) 判全绿，但 splitZones 把 noncolor(⚪) append 进 rest——无异常时 rest 恒=7，会把「含 STALE 无异常」误判为「7 指标全绿」，违反补充决策 5。修正：新增 allGreen(rest) 逐个查 StatusGreen，含任一 ⚪ 即用「其余指标：」。对应 boundary[1]。",
+    "indicatorLine 的两个片段触发是含等号判别（severity(status)>=severity(Amber) 显持续/周跌、Wow<=amber_wow_pct 触周跌），已补恰好落界用例（sofr 恰好 AMBER、usdjpy Wow 恰好==-0.02）并变异自检（>=改>、<=改< 均 FAIL）。",
+    "Trend/NotifyContext 为导出类型，字段与 design-spec.md 契约逐字一致（Res/StateDays/SummaryDue/NewStale/StaleLastObs/PrevDay/ClearStreak/Trends），T8 跨包消费。",
+    "返工关键发现（epoch=2）：test-agent 建议的纯测试修复（assert [vix,move] 同层对）实测无法捕获 SliceStable→Slice 变异——Go sort.Slice 对 n≤12 用稳定的 insertion sort，abnormal 区最多 7 个指标，Slice 与 SliceStable 行为恒等、黑盒不可区分。根因：第三级『AllIndicators 序』原本只靠 SliceStable 稳定性 + 输入按 AllIndicators 构建 隐式达成，无可变异的显式判据。故第三级判据的可锁性无法用 test-only 达成。"
+  ],
+  "decisions": [
+    {
+      "decision": "BUG1 修正：indicatorLine 对 NO_DATA 行改用纯空格接说明（head+\" \"+note），不再走恒定的 head+\" · \"+note",
+      "rationale": "impl 参考实现恒用 \" · \"，NO_DATA 无读数时产出悬空的 \"⚪ 领先 nfci · 无数据(NO_DATA)\"；DoD boundary[0]「NO_DATA 行无读数」+ impl 自带测试期望纯空格 \"⚪ 领先 nfci 无数据(NO_DATA)\"。STALE（有读数）仍用 \"读数 · 说明\"，与 NO_DATA 区分。测试/DoD 是 source of truth，参考实现与其自身测试冲突时以测试为准。Leader 已独立核对认可。"
+    },
+    {
+      "decision": "BUG2 修正：bodyZones 用新助手 allGreen(rest) 判「7 指标全绿」，替代 len(rest)==len(AllIndicators)",
+      "rationale": "splitZones 把 noncolor(⚪) append 进 rest，无异常时 len(rest) 恒=7，len 判定会把「含 STALE/NO_DATA 无异常」误标成「7 指标全绿」，直接违反补充决策 5（存在 ⚪ 时须用「其余指标：」）。impl 文档第三个测试用例本身就会拒绝参考实现。allGreen 逐行校验 StatusGreen 才是正确门；抽成命名助手比魔法条件可读，纯函数无副作用。Leader 已独立核对认可。"
+    },
+    {
+      "decision": "返工修正（epoch=2，生产改动）：splitZones 第三级排序改为显式 indicatorIndex 全序比较 + 改用 sort.Slice，替代原 SliceStable 依赖稳定性隐式达成 AllIndicators 序",
+      "rationale": "test-agent 建议的纯测试修复无法锁第三级（sort.Slice 对 n≤7 恒稳定，SliceStable→Slice 变异黑盒不可区分——已实测证明）。把第三级做成显式比较后：行为完全不变（所有用例输出一致），但第三级成为真实可锁代码路径——变异自检第三级 <改> 现 FAIL、二级 icebergRank <改> 也 FAIL。比较器现为全序，SliceStable→Slice 变异变得无害（两者结果都正确），真正锁点转移到第三级 <。新增包内私有 indicatorIndex(ind)=AllIndicators 下标（补兜底断言达 100% 覆盖）。已向 Leader 报告此超出 test-only 的生产改动、请其核跑 detect_changes；改动可逆。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go (新建，返工加 indicatorIndex + 第三级显式比较)",
+    "internal/crisis/notify_render_test.go (新建，返工加同层对 + indicatorIndex 兜底断言)"
+  ],
+  "interfaces_exposed": [
+    "type Trend struct { Window []Observation; Delta float64 }  // 导出",
+    "type NotifyContext struct { Res *DayResult; StateDays int; SummaryDue bool; NewStale []string; StaleLastObs map[string]string; PrevDay map[string]Evaluation; ClearStreak int; Trends map[string]Trend }  // 导出，T8 消费",
+    "func monthDay(date string) string / func stateRank(s SystemState) int  // 包内私有",
+    "func indicatorLine(cfg *Config, r IndicatorResult) string  // T5–7 消费",
+    "func splitZones(res *DayResult) (abnormal, rest []IndicatorResult)  // T5–7 消费",
+    "func bodyZones(cfg *Config, res *DayResult, abnormalTitle string) string  // T5–7 消费",
+    "func allGreen(rs []IndicatorResult) bool  // 包内私有",
+    "func indicatorIndex(ind string) int  // 包内私有（返工加）；AllIndicators 下标，splitZones 第三级全序判据"
+  ],
+  "verification": {
+    "impact": "纯新增文件无既有调用方；门禁 detect_changes 由 Leader 代跑",
+    "detect_changes": "首轮（0beae94）+ 返工（ce52fa4）Leader 均代跑通过：risk low、affected_processes 为空。splitZones/bodyZones/indicatorIndex 是本任务新符号（不在旧索引），无既有执行流受影响；git 核对变更仅 notify_render.go + notify_render_test.go 两文件；Leader 亲跑全包测试绿。ce52fa4 的生产改动结论已被此重跑覆盖确认。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；5 测试覆盖 8 条 DoD；返工加 TestSplitZonesOrdering 同层对 [vix,move] 锁第三级 + indicatorIndex 兜底断言",
+    "mutation_check": "两含等号边界 severity>=改>、Wow<=改< 均使 TestIndicatorLineBoundaryTriggers FAIL；返工后第三级 indicatorIndex <改> 使 TestSplitZonesOrdering FAIL、二级 icebergRank <改> 也 FAIL——三级判据现各自可变异锁（首轮 SliceStable→Slice 变异因 Go 小 n sort 恒稳定而无法锁，故第三级显式化）",
+    "coverage": "notify_render.go 函数级覆盖 100%（coverprofile 逐块核对无 count=0）；包总覆盖 93.1%",
+    "commit": "0beae94 feat(crisis): add NotifyContext, indicator line and zone rendering；ce52fa4 fix(crisis): make abnormal third-level ordering an explicit total comparator（返工 epoch=2，rework 1）"
+  }
+}

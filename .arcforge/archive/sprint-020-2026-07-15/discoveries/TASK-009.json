@@ -1,0 +1,35 @@
+{
+  "task_id": "TASK-009",
+  "key_findings": [
+    "终局切换是全 Sprint 唯一跨两包提交（AD-1）：internal/crisis/notify.go 重写为新签名 Messages(cfg,nc)+FormatIntradayAlert，cmd/atlas/crisis.go 两处接线切换。执行中变量名/函数名/删除项/既有断言全部与 impl Task 9 假设一致，未触发澄清红线。",
+    "装配矩阵 Messages：switch 四分支（状态变更>BREWING·CRISIS 日报>NORMAL 月报(SummaryDue)>WATCH 周报(SummaryDue)）结构化家族至多一条 + NewStale 每指标追加一条 [P2]；分支优先级即 switch 顺序（变更 > 日报 > 摘要）。",
+    "时序语义（functional[2]）：executeCrisisEvalDaily 中 buildNotifyContext 必须在 AppendEvaluations 之前——PrevDay/StateDays/ClearStreak 取截至昨日历史。原 impl 测试均为变更日（StateDays 取 PrevState 计数，对落库顺序不敏感），时序变异静默通过；自查发现后补 TestExecuteCrisisEvalDailyContextBeforeAppend（非变更 BREWING 日报，StateDays 对顺序敏感）锁死。",
+    "cmd 既有断言（crisis_test.go NORMAL→WATCH 的 [P1]+文本、intraday 的 [P0]+carry trade）与新模板兼容，一字未改（符合 Leader 预期与红线：只改措辞不放宽强度，此处无需改）。"
+  ],
+  "decisions": [
+    {
+      "decision": "自查补 cmd 时序锁测试，用非变更 BREWING 日报的 StateDays(第 2 日 vs 第 3 日) 区分 buildNotifyContext 与 AppendEvaluations 的先后",
+      "rationale": "functional[2] 是明示 DoD，但 impl 自带 cmd 测试都是变更日（变更消息 StateDays=stateStreakDays(PrevState)，今日行是新态、不计入旧态，故对顺序不敏感）→ 顺序颠倒变异静默通过。非变更日报 StateDays=stateStreakDays(当前态)+1，今日行若先落库会被算进当前态历史 → 第 N 日多一天。前置 1 条 BREWING 系统行 + brewingPair 观测构造非变更 BREWING 日报锁死；变异（buildNotifyContext 挪到 append 后）已验证 FAIL。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify.go (整体重写；删旧 footer/旧四参 Messages/indicatorLines)",
+    "internal/crisis/notify_test.go (整体重写；保留 dayResult)",
+    "cmd/atlas/crisis.go (executeCrisisEvalDaily 接 buildNotifyContext+新 Messages；executeCrisisIntraday 用 FormatIntradayAlert；删 staleIndicators)",
+    "cmd/atlas/crisis_test.go (删 TestStaleIndicators；加 TestExecuteCrisisEvalDailyContextBeforeAppend 时序锁)"
+  ],
+  "interfaces_exposed": [
+    "func Messages(cfg *Config, nc NotifyContext) []string  // 通知设计 §8 最终公开接口，消息 1–6 装配",
+    "func FormatIntradayAlert(price, base, wow float64, state SystemState, at time.Time) string  // 消息 7 盘中速报",
+    "删除：旧 Messages(res *DayResult, stateDays int, summaryDue bool, staleInds []string)、const footer、func indicatorLines、cmd func staleIndicators"
+  ],
+  "verification": {
+    "impact": "Leader 前置代跑批复全 LOW（与 impl Step 1 预期一致）：Messages 唯一调用方 executeCrisisEvalDaily；executeCrisisEvalDaily/executeCrisisIntraday 唯一调用方 runCrisisEval。无 HIGH/CRITICAL。",
+    "detect_changes": "Leader 代跑通过：risk medium（与切换性质相称、可接受）。变更面严丝合缝：internal/crisis 侧 Messages/footer/Sender 重写 + 4 新测试；cmd 侧 executeCrisisEvalDaily 接线 + stateStreakDays 调用点变动 + 2 既有测试适配；受影响执行流仅 1 条（ExecuteCrisisEvalDaily→IsWeekend），与 impact 前置（上游收敛 runCrisisEval）一致、无意外扩散。Leader 另亲跑两包 build+test 全绿、grep 无 indicatorLines/staleIndicators 生产残留。（提交时机：Leader 放行与我先提交交叉，Leader 判定动作与放行一致、无实质违规。）",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿；覆盖 8 条 DoD：functional[0] 装配矩阵四分支+优先级+NewStale、functional[1] FormatIntradayAlert、functional[2] 时序(buildNotifyContext 在 append 前)+nil sender 打印+发送失败 warning 不中断、functional[3] 删除清单无残留(grep)、boundary[0] NORMAL 非到期零消息、non_functional[0] 禁词全7家族+页脚归属+4096、non_functional[1] 两包全绿、non_functional[2] impact+detect_changes+code-simplifier",
+    "mutation_check": "Messages 去 ||StateCrisis→TestMessagesDispatch FAIL；去 NewStale 循环→FAIL；时序 buildNotifyContext 挪到 append 后→TestExecuteCrisisEvalDailyContextBeforeAppend FAIL；均还原后 PASS",
+    "coverage": "internal/crisis 93.8%（Messages/FormatIntradayAlert 函数级 100%）；cmd/atlas 74.4%（coverage_minimum=35，远超）",
+    "commit": "058765f feat(crisis): switch notifications to structured template families（AD-1 唯一跨两包提交，4 文件 +147/-142；amend 并入 code-simplifier 指出的 gofmt 修正——crisis.go 删 staleIndicators 的双空行残留 + notify_test.go 新代码字段对齐）。注：cmd/atlas/crisis_test.go 尚有既有 gofmt 漂移（TestSummaryDue/intradayDeps/SeriesWindow 等非本次改动函数），按 surgical 原则未裹入本 feature 提交，已报告 Leader 另行处理。"
+  }
+}

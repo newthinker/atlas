@@ -1,0 +1,38 @@
+{
+  "task_id": "TASK-005",
+  "key_findings": [
+    "semanticSentences 是包级 map[\"FROM→TO\"]string，8 个可达转移；3 个降级转移（CRISIS→WATCH/BREWING→WATCH/WATCH→NORMAL）句中含 %d，由 semanticSentence 按 from/to 注入对应 state_machine 天数（CrisisExitDays/BrewingExitDays/WatchExitDays），避免 YAML 调参后文案硬编码失真。",
+    "renderTransition 依 stateRank(State)>stateRank(PrevState) 分升级/降级两支：升级 [P0]🚨(进 BREWING/CRISIS) 或 [P1]⚠️(进 WATCH)、'触发共振：'分区；降级 [P1]✅、'仍异常：'分区。两支均以 notifyFooter 结尾（含'非交易信号'页脚，设计 §4.2/§7）。",
+    "notifyFooter/semanticSentences/crisisSentence 为 T6/T7/T9 下游消费的包级常量，命名与 impl 文档逐字一致。",
+    "未知/不可达转移（如 NORMAL→NORMAL、CRISIS→NORMAL）semanticSentence 返回空串，renderTransition 省略语义句段（boundary[0]）。"
+  ],
+  "decisions": [
+    {
+      "decision": "8 个转移键用表驱动 TestSemanticSentenceAllTransitions 逐键区分断言，而非只测部分键",
+      "rationale": "多键表是上轮泛化纪律的直接场景——只测 3 个键剩 5 个键可随便改字而测试不挂。表驱动逐键锁 wording，任一键改字即 FAIL。"
+    },
+    {
+      "decision": "3 个 %d 注入转移用 TestSemanticSentenceConfigInjection 设三个互异值(7/12/25)做调参跟随断言",
+      "rationale": "functional[1] 要求'注入'而非硬编码天数；三个互异值同时锁'跟随配置'与'字段不串用'（若 Brewing 误用 CrisisExitDays，7≠12 立即 FAIL——已变异验证）。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go (追加 notifyFooter/crisisSentence/semanticSentences/semanticSentence/renderTransition)",
+    "internal/crisis/notify_render_test.go (追加 4 测试 + 更新 1 处 T4 陈旧注释文字，不动断言)"
+  ],
+  "interfaces_exposed": [
+    "const notifyFooter string  // 包级，结构化家族页脚（含'非交易信号'），T6/T7/T9 消费",
+    "var semanticSentences map[string]string  // 包级语义句表，键 FROM→TO",
+    "func semanticSentence(cfg *Config, from, to SystemState) string  // 查表+注入 %d，未知转移空串",
+    "func renderTransition(cfg *Config, nc NotifyContext) string  // 消息 1/2 状态升级/降级渲染"
+  ],
+  "verification": {
+    "impact": "纯追加常量/函数无既有调用方（T6/T7/T9 才消费）；门禁 detect_changes 由 Leader 代跑",
+    "detect_changes": "Leader 代跑通过：risk low，affected_processes 为空，代码变更仅 notify_render 两文件（+155/-1，含 T4 注释更新）无越界；cmd/ 无本任务改动（dev-agent-2 尚未落文件，无交叉污染）。Leader 亲跑 build + T5 两组测试全绿（IDE undefined 诊断为 LSP 时序、已排除）。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；4 测试覆盖 7 条 DoD：functional[0] 8 转移键表 + functional[1] 3 个 %d 调参跟随 + functional[2/3] 升级/降级渲染逐段 + boundary[0] 未知转移空串 + non_functional[0] renderTransition 以 notifyFooter 结尾",
+    "mutation_check": "P0 条件去 StateCrisis → TestRenderTransitionUpgrade FAIL；Brewing 注入误用 CrisisExitDays → TestSemanticSentenceConfigInjection FAIL（7≠12）；均还原后 PASS",
+    "coverage": "semanticSentence/renderTransition 函数级覆盖 100%（coverprofile 无 count=0）；包总覆盖 93.4%",
+    "commit": "e9e1222 feat(crisis): render state transition messages with semantic sentences（body 注明顺手更新 T4 陈旧注释，断言不动）"
+  }
+}

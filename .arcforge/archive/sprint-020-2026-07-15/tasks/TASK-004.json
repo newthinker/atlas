@@ -1,0 +1,50 @@
+{
+  "id": "TASK-004",
+  "title": "notify_render.go（一）— NotifyContext、指标行与分区",
+  "description": "新建 internal/crisis/notify_render.go：导出类型 Trend/NotifyContext + 包内 monthDay/stateRank/indicatorLine/splitZones/bodyZones。实施步骤见 impl 文档 Task 4。消费 TASK-001 的 PersistDays/Wow/WowOK 与 TASK-003 的全部格式化原语。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Trend{Window,Delta}/NotifyContext{Res,StateDays,SummaryDue,NewStale,StaleLastObs,PrevDay,ClearStreak,Trends} 导出且与设计 §8+补充决策 1 一致",
+      "indicatorLine 按设计 §5 示例逐字符渲染：hy_oas 红行、sofr 持续片段（AMBER 及以上且 PersistDays>0）、usdjpy 周跌片段（WowOK && Wow<=cfg amber_wow_pct）、tag 片段",
+      "splitZones：异常区(🔴🟡)严重度降序→同级冰山层序→AllIndicators 序；其余区 🟢 按 AllIndicators 序、⚪ 殿后",
+      "bodyZones：全绿→\"7 指标全绿：\"；有异常→abnormalTitle + 空行 + \"其余指标：\"；monthDay(\"2026-07-14\")=\"07-14\"；stateRank 严格递增 NORMAL<WATCH<BREWING<CRISIS"
+    ],
+    "boundary": [
+      "Pct5y<0 省略分位片段；NO_DATA 行无读数；STALE 行带读数+说明",
+      "CROWDED-only（wow 未触发阈值）不带周跌片段（补充决策 7）；含 ⚪ 且无异常时标题用\"其余指标：\"而非全绿（补充决策 5）",
+      "monthDay 对非 YYYY-MM-DD 长度输入原样返回（防御 fallback）"
+    ],
+    "non_functional": [
+      {
+        "desc": "渲染函数均为纯函数；GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-4"
+}

@@ -1,0 +1,38 @@
+{
+  "task_id": "TASK-007",
+  "key_findings": [
+    "renderMonthly 是月报特例：单一趋势区按 AllIndicators 序、不做异常/正常分区（不出现 '异常指标：'/'其余指标：'）；空/缺趋势窗口的指标省略该行。",
+    "trendLine 复用 T3 sparkline/trendArrow/formatDelta + T4 格式化原语；可选片段顺序 5y分位 → tag → 非色彩说明（⚪ 指标进趋势区走 nonColorNote 分支）。",
+    "renderOpsAlert 是 P2 速报家族：两行、无 notifyFooter 页脚（速报为单事实陈述，设计 §2）。通道名 move/usdjpy→Yahoo、其余→FRED；nfci 特例用 weekly_max_lag_days（其余用 daily_max_lag_days）。StaleLastObs 缺失该指标 → '无历史观测' 降级文案。",
+    "nextMonthlyDue 用 time.Parse(dateLayout) → 下月 Month()；不可解析降级 '下月首个交易日'（boundary[1] 后半，impl 测试未覆盖此路径，本任务自补含跨年 12月→1月）。"
+  ],
+  "decisions": [
+    {
+      "decision": "3 个 config 注入值全部异值锁（watch_amber_count/daily_max_lag_days/weekly_max_lag_days）",
+      "rationale": "沿用 T6 泛化纪律：输出里每个来自 cfg 的数字都要有'改了 cfg 后断言跟随'的用例，否则默认值恰好相等时硬编码变异静默通过。三值各设异值（5/3/10）并变异验证（硬编码→FAIL）。"
+    },
+    {
+      "decision": "通道映射验非示例指标 usdjpy→Yahoo、vix→FRED，nfci weekly 特例单独锁",
+      "rationale": "impl 测试只验 move→Yahoo/nfci→FRED；补 usdjpy→Yahoo（Yahoo 分支的另一指标）、vix→FRED（FRED 默认分支）确保映射非偶然。nfci 的 weekly 特例分支用异值锁（去分支→用 daily 阈值→FAIL）。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go (import 加 time；追加 trendLine/nextMonthlyDue/renderMonthly/renderOpsAlert)",
+    "internal/crisis/notify_render_test.go (追加 testTrends + TestNextMonthlyDue/TestRenderMonthly/TestRenderOpsAlert/TestOpsAlertLagInjection)"
+  ],
+  "interfaces_exposed": [
+    "func trendLine(r IndicatorResult, tr Trend) string  // 包内私有，月报趋势行",
+    "func nextMonthlyDue(date string) string  // 包内私有，下月到期文案（含降级）",
+    "func renderMonthly(cfg *Config, nc NotifyContext) string  // 消息 4，T9 装配",
+    "func renderOpsAlert(cfg *Config, nc NotifyContext, ind string) string  // 消息 6，T9 装配"
+  ],
+  "verification": {
+    "impact": "纯追加函数无既有调用方（T9 才装配）；门禁 detect_changes 由 Leader 代跑",
+    "detect_changes": "Leader 代跑通过：risk low，affected_processes 为空，代码变更仅 notify_render 两文件（+176 纯追加）无越界。Leader 亲跑 T7 相关测试全绿；三个 cfg 异值锁/通道非示例用例/三降级路径/两处负向断言/⚪ 趋势行分支清单全对上。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过（T8 已 verified 全仓可编译）",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；4 测试覆盖 8 条 DoD：functional[0] 月报首行/趋势区/不分区、functional[1] 趋势行格式、functional[2] AMBER 尾注(watch_amber_count 注入)、functional[3] 速报两行/滞后/通道(nfci weekly)、boundary[0]「缺失或为空」两分支各一用例（缺失=delete Trends、为空=Trend{Window:nil}）、boundary[1] StaleLastObs 缺失+日期不可解析降级、non_functional[0] 月报有页脚/速报无页脚",
+    "mutation_check": "5 变异均 FAIL：watch_amber_count 硬编码 3→FAIL；nfci weekly 特例去除→FAIL；通道去 IndUSDJPY→FAIL；nextMonthlyDue 去 err 降级→FAIL；返工后去 len(Window)==0 守卫→TestRenderMonthly FAIL（为空分支，首轮拒因：只测了缺失分支、注释误标为空窗口）；均还原后 PASS",
+    "coverage": "trendLine/nextMonthlyDue/renderMonthly/renderOpsAlert 函数级覆盖 100%（coverprofile 无 count=0；补 ⚪ 趋势行覆盖 trendLine nonColorNote 分支）；包总 93.8%",
+    "commit": "9cf9e34 feat(crisis): render monthly trend summary and ops stale alerts；e71159e test(crisis): cover empty trend window omission in monthly report（返工 epoch=2，rework 1，补「为空」分支 + 改正误标注释）"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "IndicatorResult 追加 PersistDays/Wow/WowOK 三字段即满足下游通知渲染（Task 4）与审计需求，无需改动判定管线 EvaluateIndicator/EvalDay 的控制流。",
+    "evalSOFREFFR 的判定窗口从 RedPersistDays 放宽到 persistLookbackObs=30 后，用 lastN(win, RedPersistDays/AmberPersistDays) 还原原判定窗口，判定语义严格等价；既有 rules/eval/suppress 测试零回归验证了这一点。",
+    "detail JSON 三个新键均用 omitempty：全绿/零值指标行自动省略 persist_days/wow/wow_ok，满足 functional[2] 负向断言（绿行实测 detail={\"raw\":\"GREEN\",\"window_actual_obs\":0}，三键均不在）。",
+    "gitnexus impact(upstream) 四符号均 LOW 风险：三 eval 函数收敛于包内 evalAbsolute→EvaluateIndicator；buildEvaluations 经 EvalDay 到 cmd/atlas，但本次仅新增输出字段无行为变更。",
+    "下游注意（test-agent-1 观察）：Wow 用 omitempty 后，WowOK=true 且 Wow 恰=0 的行会省略 \"wow\":0 只留 \"wow_ok\"——当前无回读方无影响，后续任务若从 detail JSON 回读 wow 需以 wow_ok 判定有效性而非 wow 键存在与否。"
+  ],
+  "decisions": [
+    {
+      "decision": "PersistDays 统计窗口固定 persistLookbackObs=30（常量，非 YAML 阈值）",
+      "rationale": "补充决策 3：设计示例\"持续 9 个交易日\"超过 red_persist_days=5，说明计数是显示口径而非规则阈值；30 观测（约 6 周）足够覆盖任何值得播报的持续期。"
+    },
+    {
+      "decision": "consecutiveAbove 严格大于阈值（<=threshold 即中断），从窗口尾部倒数",
+      "rationale": "与 allAbove 的判定语义一致（allAbove 用 <= 判否），保证 RED/AMBER 触发时 PersistDays 计数与判定同源。"
+    },
+    {
+      "decision": "vix 与 usdjpy 均在有 wow 时无条件填充 Wow/WowOK（不止触发档位）",
+      "rationale": "functional[1] 要求基线全平的 vix 也报 WowOK=true/Wow≈0；渲染层（Task 4）自行按阈值决定是否显示周跌片段（补充决策 7）。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/types.go",
+    "internal/crisis/suppress.go",
+    "internal/crisis/eval.go",
+    "internal/crisis/rules.go",
+    "internal/crisis/rules_test.go",
+    "internal/crisis/eval_test.go"
+  ],
+  "interfaces_exposed": [
+    "IndicatorResult.PersistDays int    // sofr_effr：满足当前档位阈值的连续观测数",
+    "IndicatorResult.Wow float64        // usdjpy/vix：周环比；WowOK=false 时无效",
+    "IndicatorResult.WowOK bool",
+    "评估行 detail JSON 新增键：persist_days,omitempty / wow,omitempty / wow_ok,omitempty",
+    "const persistLookbackObs = 30      // 包内私有，PersistDays 显示回看上限",
+    "func consecutiveAbove(obs []Observation, threshold float64) int  // 包内私有"
+  ],
+  "verification": {
+    "impact": "gitnexus impact upstream: evalVIX/evalSOFREFFR/evalUSDJPY/buildEvaluations 均 LOW，无 HIGH/CRITICAL",
+    "detect_changes": "首轮：变更 9 符号全部落在 internal/crisis（eval/rules/suppress），risk medium 无 HIGH/CRITICAL。返工轮（epoch=2）：gitnexus CLI 因索引被重建为 DB v42、构建仅支持 v40 报版本不匹配无法运行；改动为纯测试单文件（eval_test.go +7 行），diff 已确认 scope 仍限 internal/crisis，无生产代码变更。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；TestIndicatorResultPersistAndWow / TestBuildEvaluationsCarriesPersistAndWow 通过；返工补 functional[2] 负向断言（绿行 detail 印证三键省略）",
+    "coverage": "internal/crisis 91.2% of statements",
+    "commit": "d43d029 feat(crisis): expose persist days and wow on indicator results；0e9ee0a test(crisis): assert omitempty drops persist/wow keys on green rows"
+  }
+}

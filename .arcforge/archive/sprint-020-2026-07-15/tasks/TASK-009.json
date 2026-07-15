@@ -1,0 +1,64 @@
+{
+  "id": "TASK-009",
+  "title": "切换 — notify.go 重写、cmd 接线与全家族测试",
+  "description": "notify.go 整体重写为 Sender + Messages(cfg,nc) + FormatIntradayAlert；executeCrisisEvalDaily 接线（buildNotifyContext 在 AppendEvaluations 之前）；executeCrisisIntraday 切换文案；删除旧 footer/Messages/indicatorLines 与 cmd 的 staleIndicators；notify_test.go 整体重写。实施步骤见 impl 文档 Task 9。前置：对 Messages/executeCrisisEvalDaily/executeCrisisIntraday 跑 gitnexus_impact(upstream)。注意：本任务为唯一签名切换点，例外允许跨 internal/crisis + cmd/atlas 两包一次提交（AD-1）。",
+  "module": "internal/crisis + cmd/atlas",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/crisis/notify.go",
+    "internal/crisis/notify_test.go",
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Messages 装配矩阵：状态变更 > BREWING/CRISIS 日报 > NORMAL 月报（SummaryDue）> WATCH 周报（SummaryDue），结构化家族至多一条；NewStale 每指标追加一条 [P2] 速报",
+      "FormatIntradayAlert 按 §5.7：\"[P0] 🚨 USD/JPY 盘中急跌 -3.4% · MM-DD HH:MM\" + 现价/基准/系统状态/去重说明，无页脚",
+      "executeCrisisEvalDaily：buildNotifyContext 在 AppendEvaluations 之前调用；sender 为 nil 时打印到 out；发送失败仅 errOut warning 不中断",
+      "旧 footer 常量、旧 Messages(res,days,due,stale)、indicatorLines、cmd 的 staleIndicators 已删除且无残留调用方"
+    ],
+    "boundary": [
+      "NORMAL 非到期 → Messages 返回空（零消息）"
+    ],
+    "non_functional": [
+      {
+        "desc": "7 类消息全家族：禁词（必然/一定/即将）零出现；\"非交易信号\"页脚仅结构化家族；单条长度 ≤4096",
+        "verify_by": "test"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿（cmd 既有断言只改措辞不放宽强度）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "gitnexus_impact 已对 Messages/executeCrisisEvalDaily/executeCrisisIntraday 执行且无未处置 HIGH/CRITICAL；提交前已跑 gitnexus_detect_changes 核对影响面并运行 code-simplifier",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005",
+    "TASK-006",
+    "TASK-007",
+    "TASK-008"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-005",
+    "TASK-006",
+    "TASK-007",
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/crisis",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-9",
+  "coverage_minimum": 35
+}
