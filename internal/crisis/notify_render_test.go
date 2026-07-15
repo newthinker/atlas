@@ -346,9 +346,13 @@ func TestRenderMonthly(t *testing.T) {
 	assert.Contains(t, renderMonthly(cfg, nc), "触发 WATCH 需 ≥5）")
 	cfg.StateMachine.WatchAmberCount = 3 // 复原
 
-	// 空窗口 → 省略该行（boundary[0]）
+	// boundary[0]「趋势窗口缺失或为空」是两分支，各一用例：
+	// (1) 缺失（!ok）：Trends 无该键
 	delete(nc.Trends, IndMOVE)
 	assert.NotContains(t, renderMonthly(cfg, nc), "move")
+	// (2) 为空（len(Window)==0）：键在但窗口空
+	nc.Trends[IndT10Y2Y] = Trend{Window: nil}
+	assert.NotContains(t, renderMonthly(cfg, nc), "t10y2y")
 
 	// 月报日期不可解析 → 尾注降级 "下月首个交易日"（boundary[1] 后半）
 	res.Date = "bad-date"
