@@ -313,16 +313,18 @@ func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride 
 	if err != nil {
 		return err
 	}
+	// NotifyContext 必须在 AppendEvaluations 之前组装：PrevDay/StateDays/
+	// ClearStreak 取的是"截至昨日"的历史（通知设计 §8）
+	nc, err := buildNotifyContext(ctx, d, res)
+	if err != nil {
+		return err
+	}
 	if err := d.store.AppendEvaluations(ctx, res.Evaluations); err != nil {
 		return err
 	}
 	printDayResult(d.out, res)
 
-	days, err := stateStreakDays(ctx, d.store, res.State)
-	if err != nil {
-		return err
-	}
-	for _, msg := range crisis.Messages(res, days, summaryDue(target, res.State), staleIndicators(res)) {
+	for _, msg := range crisis.Messages(d.cfg, nc) {
 		if d.sender == nil {
 			fmt.Fprintln(d.out, msg) // 未配置 telegram：打印便于本地试运行
 			continue
@@ -453,16 +455,6 @@ func isFirstTradingDayOfMonth(t time.Time) bool {
 	return t.Equal(first)
 }
 
-func staleIndicators(res *crisis.DayResult) []string {
-	var out []string
-	for _, ind := range crisis.AllIndicators {
-		if res.Results[ind].Status == crisis.StatusStale {
-			out = append(out, ind)
-		}
-	}
-	return out
-}
-
 // intradayIndicator 是盘中告警的去重行标识（不属于 7 个正式指标）。
 const intradayIndicator = "usdjpy_intraday"
 
@@ -511,8 +503,7 @@ func executeCrisisIntraday(ctx context.Context, d crisisEvalDeps, quote func(str
 	}}); err != nil {
 		return err
 	}
-	msg := fmt.Sprintf("[P0] 盘中告警：USD/JPY 周环比 %.1f%%（现价 %.2f），疑似 carry trade 急平仓（%s，系统状态 %s）",
-		wow*100, q.Price, today, sys.SystemState)
+	msg := crisis.FormatIntradayAlert(q.Price, win[0].Value, wow, sys.SystemState, d.now())
 	if d.sender == nil {
 		fmt.Fprintln(d.out, msg)
 		return nil

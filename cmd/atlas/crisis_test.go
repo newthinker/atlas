@@ -724,6 +724,32 @@ func TestExecuteCrisisEvalDailySendsNotification(t *testing.T) {
 	assert.Contains(t, sender.sent[0], "NORMAL → WATCH")
 }
 
+// buildNotifyContext 必须在 AppendEvaluations 之前（通知设计 §8，functional[2]）：
+// 非变更日报的 StateDays = stateStreakDays(当前态)+1；若当日行先落库，会把今日
+// 算进历史 → "第 N 日" 多一天。前置 1 条 BREWING 历史行 + 今日 brewingPair 留在
+// BREWING（无变更）→ 期望"第 2 日"；顺序颠倒则为"第 3 日"。
+func TestExecuteCrisisEvalDailyContextBeforeAppend(t *testing.T) {
+	st := newCrisisTestStore(t)
+	ctx := context.Background()
+	const target = "2026-07-10"
+	// hy_oas RED(>600) + sofr_effr 持续 RED(>25) → brewingPair
+	vals := map[string]float64{
+		crisis.IndVIX: 15, crisis.IndMOVE: 70, crisis.IndSOFREFFR: 30, crisis.IndHYOAS: 650,
+		crisis.IndT10Y2Y: 35, crisis.IndNFCI: -0.5, crisis.IndUSDJPY: 150,
+	}
+	seedIndicators(t, st, target, 80, vals)
+	seedBrewing(t, st, "2026-07-09") // 前置 BREWING 系统行 → prevState=BREWING、无变更
+
+	sender := &stubSender{}
+	deps := crisisEvalDeps{
+		cfg: crisisTestConfig(), store: st, ingest: noopIngest(new(int)),
+		now: sat711, out: io.Discard, errOut: io.Discard, sender: sender,
+	}
+	require.NoError(t, executeCrisisEvalDaily(ctx, deps, target))
+	require.Len(t, sender.sent, 1)
+	assert.Contains(t, sender.sent[0], "BREWING 日报 第 2 日")
+}
+
 // 发送失败仅记 stderr 不失败退出（error_handling[0]）。
 func TestExecuteCrisisEvalDailyNotifyFailureDoesNotAbort(t *testing.T) {
 	st := newCrisisTestStore(t)
@@ -770,18 +796,6 @@ func TestExecuteCrisisEvalDailyNilSenderPrints(t *testing.T) {
 	}
 	require.NoError(t, executeCrisisEvalDaily(ctx, deps, ""))
 	assert.Contains(t, out.String(), "[P1]")
-}
-
-func TestStaleIndicators(t *testing.T) {
-	res := &crisis.DayResult{Results: map[string]crisis.IndicatorResult{}}
-	for _, ind := range crisis.AllIndicators {
-		res.Results[ind] = crisis.IndicatorResult{Indicator: ind, Status: crisis.StatusGreen}
-	}
-	mv := res.Results[crisis.IndMOVE]
-	mv.Status = crisis.StatusStale
-	res.Results[crisis.IndMOVE] = mv
-
-	assert.Equal(t, []string{crisis.IndMOVE}, staleIndicators(res))
 }
 
 // seedBrewing 预置一条 BREWING 系统行，使 intraday 进入告警评估路径。
