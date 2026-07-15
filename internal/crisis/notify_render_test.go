@@ -293,3 +293,104 @@ func TestRenderWeekly(t *testing.T) {
 	cfg.StateMachine.WatchExitDays = 25
 	assert.Contains(t, renderWeekly(cfg, NotifyContext{Res: res, StateDays: 18, ClearStreak: 8}), "回 NORMAL 需连续 25 日")
 }
+
+// testTrends 为 dayResult 的 7 指标各造一段 21 观测趋势窗口。
+func testTrends(end string) map[string]Trend {
+	out := map[string]Trend{}
+	for _, ind := range AllIndicators {
+		win := seriesEnding(end, 21, 10, 12)
+		out[ind] = Trend{Window: win, Delta: win[len(win)-1].Value - win[0].Value}
+	}
+	return out
+}
+
+// nextMonthlyDue：正常解析 → "{下月} 月首个交易日"；不可解析 → 降级 "下月首个交易日"。
+func TestNextMonthlyDue(t *testing.T) {
+	assert.Equal(t, "9 月首个交易日", nextMonthlyDue("2026-08-03"))
+	assert.Equal(t, "1 月首个交易日", nextMonthlyDue("2026-12-15")) // 跨年：12 月 +1 → 1 月
+	assert.Equal(t, "下月首个交易日", nextMonthlyDue("bad-date"))   // boundary[1]：不可解析降级
+	assert.Equal(t, "下月首个交易日", nextMonthlyDue(""))
+}
+
+// 月报（§5.4）：单一趋势区（无异常/正常分区）、sparkline+月变化并列、
+// AMBER 计数尾注、下次月报。
+func TestRenderMonthly(t *testing.T) {
+	cfg := testConfig()
+	res := dayResult(StateNormal, StateNormal)
+	res.Date = "2026-08-03"
+	res.Detail = SysDetail{AmberCount: 2}
+	r := res.Results[IndHYOAS]
+	r.Status, r.Tag, r.Value, r.Pct5y = StatusAmber, TagComplacency, 267, 0.03
+	res.Results[IndHYOAS] = r
+	// ⚪ 指标进趋势区 → 趋势行带非色彩说明（trendLine 的 nonColorNote 分支）
+	mv := res.Results[IndMOVE]
+	mv.Status, mv.Value = StatusStale, 88.1
+	res.Results[IndMOVE] = mv
+
+	nc := NotifyContext{Res: res, StateDays: 63, SummaryDue: true, Trends: testTrends(res.Date)}
+	msg := renderMonthly(cfg, nc)
+	assert.Contains(t, msg, "⚪ 情绪 move 88.1 ")        // ⚪ 趋势行
+	assert.Contains(t, msg, "· 数据断更(STALE)")         // nonColorNote 分支
+	assert.True(t, strings.HasPrefix(msg, "[P1] 📅 Cassandra 月报 · 2026-08 · NORMAL 已持续 63 个评估日\n\n近 21 个交易日趋势（走势 · 月变化 · 5y分位）：\n"))
+	assert.Contains(t, msg, "🟢 情绪 vix 1.0 ")
+	assert.Contains(t, msg, "↗+2.0 · 50%")
+	assert.Contains(t, msg, "🟡 信用 hy_oas 267bp ")
+	assert.Contains(t, msg, "↗+2bp · 3% · 自满(COMPLACENCY)")
+	assert.NotContains(t, msg, "异常指标：") // 月报特例：不分区（设计 §4）
+	assert.NotContains(t, msg, "其余指标：")
+	assert.Contains(t, msg, "AMBER 计数 2（触发 WATCH 需 ≥3）· 下次月报：9 月首个交易日")
+	assert.True(t, strings.HasSuffix(msg, notifyFooter))
+
+	// watch_amber_count 注入锁（testConfig=3，异值断言防硬编码）
+	cfg.StateMachine.WatchAmberCount = 5
+	assert.Contains(t, renderMonthly(cfg, nc), "触发 WATCH 需 ≥5）")
+	cfg.StateMachine.WatchAmberCount = 3 // 复原
+
+	// 空窗口 → 省略该行（boundary[0]）
+	delete(nc.Trends, IndMOVE)
+	assert.NotContains(t, renderMonthly(cfg, nc), "move")
+
+	// 月报日期不可解析 → 尾注降级 "下月首个交易日"（boundary[1] 后半）
+	res.Date = "bad-date"
+	assert.Contains(t, renderMonthly(cfg, NotifyContext{Res: res, StateDays: 1, Trends: testTrends("2026-08-03")}), "下次月报：下月首个交易日")
+}
+
+// P2 运维速报（§5.6）：两行、无页脚、滞后与通道名。
+func TestRenderOpsAlert(t *testing.T) {
+	cfg := testConfig()
+	res := dayResult(StateNormal, StateNormal)
+	res.Date = "2026-07-14"
+	nc := NotifyContext{Res: res, NewStale: []string{IndMOVE},
+		StaleLastObs: map[string]string{IndMOVE: "2026-07-09"}}
+
+	msg := renderOpsAlert(cfg, nc, IndMOVE)
+	assert.Equal(t, "[P2] 🔧 move 数据源断更 · 07-14\n最后观测 07-09（滞后 5 日 > 阈值 4 日），已标记 STALE 退出共振计数；恢复后自动回归。持续超一周需检查 Yahoo 通道。", msg)
+	assert.NotContains(t, msg, "非交易信号") // 速报无页脚（设计 §2）
+
+	// nfci 用周频阈值 + FRED 通道（特例分支）
+	nc.StaleLastObs[IndNFCI] = "2026-06-30"
+	msg = renderOpsAlert(cfg, nc, IndNFCI)
+	assert.Contains(t, msg, "滞后 14 日 > 阈值 12 日")
+	assert.Contains(t, msg, "FRED 通道")
+
+	// 通道映射非示例指标：usdjpy→Yahoo、vix→FRED（补充决策 1）
+	nc.StaleLastObs[IndUSDJPY] = "2026-07-08"
+	assert.Contains(t, renderOpsAlert(cfg, nc, IndUSDJPY), "Yahoo 通道")
+	// 最后观测日缺失 → 降级文案（vix 不在 StaleLastObs），且 vix→FRED
+	msg = renderOpsAlert(cfg, nc, IndVIX)
+	assert.Contains(t, msg, "无历史观测")
+	assert.Contains(t, msg, "FRED 通道")
+}
+
+// P2 阈值注入锁：daily/weekly max_lag_days 均须异值断言（testConfig 4/12）。
+func TestOpsAlertLagInjection(t *testing.T) {
+	cfg := testConfig()
+	cfg.Freshness.DailyMaxLagDays = 3
+	cfg.Freshness.WeeklyMaxLagDays = 10
+	res := dayResult(StateNormal, StateNormal)
+	res.Date = "2026-07-14"
+	nc := NotifyContext{Res: res, StaleLastObs: map[string]string{
+		IndMOVE: "2026-07-09", IndNFCI: "2026-06-30"}}
+	assert.Contains(t, renderOpsAlert(cfg, nc, IndMOVE), "阈值 3 日")  // daily 注入
+	assert.Contains(t, renderOpsAlert(cfg, nc, IndNFCI), "阈值 10 日") // weekly 注入
+}

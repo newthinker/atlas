@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Trend is one indicator's monthly-summary window (通知设计 §8).
@@ -273,4 +274,78 @@ func renderWeekly(cfg *Config, nc NotifyContext) string {
 	tail := fmt.Sprintf("退出进度：触发条件已连续解除 %d 日（回 NORMAL 需连续 %d 日）\n下次周报：下周一 · 状态变更即时通知",
 		nc.ClearStreak, cfg.StateMachine.WatchExitDays)
 	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
+}
+
+// trendLine 月报趋势行（通知设计 §5.4/§6.4）：
+// 🟡 信用 hy_oas 267bp ▃▂▂▁▁▁▁ ↘-18bp · 3% · 自满(COMPLACENCY)
+func trendLine(r IndicatorResult, tr Trend) string {
+	head := fmt.Sprintf("%s %s %s %s %s %s%s",
+		statusEmoji(r.Status), layerName(r.Indicator), r.Indicator,
+		formatReading(r.Indicator, r.Value), sparkline(tr.Window),
+		trendArrow(r.Indicator, tr.Delta), formatDelta(r.Indicator, tr.Delta))
+	var parts []string
+	if showPct5y(r.Indicator) && r.Pct5y >= 0 {
+		parts = append(parts, formatPct5y(r.Pct5y))
+	}
+	if t := tagText(r.Tag); t != "" {
+		parts = append(parts, t)
+	}
+	if note := nonColorNote(r.Status); note != "" {
+		parts = append(parts, note)
+	}
+	if len(parts) == 0 {
+		return head
+	}
+	return head + " · " + strings.Join(parts, " · ")
+}
+
+func nextMonthlyDue(date string) string {
+	t, err := time.Parse(dateLayout, date)
+	if err != nil {
+		return "下月首个交易日"
+	}
+	return fmt.Sprintf("%d 月首个交易日", int(t.AddDate(0, 1, 0).Month()))
+}
+
+// renderMonthly 消息 4：NORMAL 月报（通知设计 §5.4）。月报特例：不做异常/
+// 正常分区，单一趋势区按 AllIndicators 顺序；空趋势窗口省略该行。
+func renderMonthly(cfg *Config, nc NotifyContext) string {
+	res := nc.Res
+	month := res.Date
+	if len(month) >= 7 {
+		month = month[:7]
+	}
+	first := fmt.Sprintf("[P1] 📅 Cassandra 月报 · %s · %s 已持续 %d 个评估日",
+		month, res.State, nc.StateDays)
+	lines := []string{"近 21 个交易日趋势（走势 · 月变化 · 5y分位）："}
+	for _, ind := range AllIndicators {
+		tr, ok := nc.Trends[ind]
+		if !ok || len(tr.Window) == 0 {
+			continue
+		}
+		lines = append(lines, trendLine(res.Results[ind], tr))
+	}
+	tail := fmt.Sprintf("AMBER 计数 %d（触发 WATCH 需 ≥%d）· 下次月报：%s",
+		res.Detail.AmberCount, cfg.StateMachine.WatchAmberCount, nextMonthlyDue(res.Date))
+	return strings.Join([]string{first, strings.Join(lines, "\n"), tail}, "\n\n") + notifyFooter
+}
+
+// renderOpsAlert 消息 6：P2 运维速报（通知设计 §5.6）。速报家族：单事实陈述、
+// 无页脚。去重（仅新进入 STALE 当日发）由 cmd 组装 NewStale 时完成。
+func renderOpsAlert(cfg *Config, nc NotifyContext, ind string) string {
+	first := fmt.Sprintf("[P2] 🔧 %s 数据源断更 · %s", ind, monthDay(nc.Res.Date))
+	channel := "FRED"
+	if ind == IndMOVE || ind == IndUSDJPY {
+		channel = "Yahoo"
+	}
+	lastObs, ok := nc.StaleLastObs[ind]
+	if !ok || lastObs == "" {
+		return first + fmt.Sprintf("\n无历史观测，已标记 STALE 退出共振计数；恢复后自动回归。持续超一周需检查 %s 通道。", channel)
+	}
+	maxLag := cfg.Freshness.DailyMaxLagDays
+	if ind == IndNFCI {
+		maxLag = cfg.Freshness.WeeklyMaxLagDays
+	}
+	return first + fmt.Sprintf("\n最后观测 %s（滞后 %d 日 > 阈值 %d 日），已标记 STALE 退出共振计数；恢复后自动回归。持续超一周需检查 %s 通道。",
+		monthDay(lastObs), daysBetween(lastObs, nc.Res.Date), maxLag, channel)
 }
