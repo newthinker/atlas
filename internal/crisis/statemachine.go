@@ -150,18 +150,24 @@ func systemDetailStreak(hist EvalHistory, days int, state SystemState, pred func
 }
 
 // ClearStreakDays counts consecutive historical system rows (newest first,
-// looking back at most max rows) whose detail carries any_trigger=false —
-// the weekly report's exit-progress numerator (通知设计 §6.6). Today's row is
-// not yet persisted when the caller assembles the NotifyContext, so the
-// caller adds the current day itself. Unparseable detail breaks the streak
-// conservatively instead of erroring (same convention as systemDetailStreak).
-func ClearStreakDays(hist EvalHistory, max int) (int, error) {
+// looking back at most max rows) that are IN state and whose detail carries
+// any_trigger=false — the weekly report's exit-progress numerator (通知设计
+// §6.6). Counting is in-state on purpose (same 裁决 as systemDetailStreak: the
+// cooldown must re-accumulate within the state), else a CRISIS recovery tail of
+// trigger-free days would pollute the WATCH exit progress. A row of a different
+// state breaks the streak, as does unparseable detail — both conservative stops.
+// Today's row is not yet persisted when the caller assembles the NotifyContext,
+// so the caller adds the current day itself.
+func ClearStreakDays(hist EvalHistory, state SystemState, max int) (int, error) {
 	prev, err := hist.RecentSystem(max)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
 	for _, e := range prev {
+		if e.SystemState != state {
+			break
+		}
 		var d SysDetail
 		if err := json.Unmarshal([]byte(e.Detail), &d); err != nil || d.AnyTrigger {
 			break

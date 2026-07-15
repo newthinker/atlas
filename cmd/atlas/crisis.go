@@ -390,7 +390,7 @@ func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayRe
 
 	// 周报退出进度：历史 any_trigger=false 连续日数 + 今日（补充决策 8）
 	if res.State == crisis.StateWatch && nc.SummaryDue && !res.Detail.AnyTrigger {
-		base, err := crisis.ClearStreakDays(d.store.History(ctx), d.cfg.StateMachine.WatchExitDays)
+		base, err := crisis.ClearStreakDays(d.store.History(ctx), crisis.StateWatch, d.cfg.StateMachine.WatchExitDays)
 		if err != nil {
 			return nc, err
 		}
