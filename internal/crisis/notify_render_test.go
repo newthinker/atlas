@@ -130,11 +130,11 @@ func TestSemanticSentenceAllTransitions(t *testing.T) {
 		want     string
 	}{
 		{StateNormal, StateWatch, "领先层或多指标共振异常。观察期：提高警觉，尚无行动含义。"},
-		{StateWatch, StateBrewing, "信用与流动性双红共振。历史样本中，此组合出现后 3–12 个月内系统性风险显著抬升（样本量小，存在失效可能）。"},
+		{StateWatch, StateBrewing, "信用与流动性双红共振。历史样本中此组合后系统性风险抬升比例显著（样本量小，可能失效）；此为状态描述而非预测，不构成操作依据。"},
 		{StateNormal, StateCrisis, "情绪层双红：危机进行中。此阶段执行预案而非预测。"},
 		{StateWatch, StateCrisis, "情绪层双红：危机进行中。此阶段执行预案而非预测。"},
 		{StateBrewing, StateCrisis, "情绪层双红：危机进行中。此阶段执行预案而非预测。"},
-		{StateCrisis, StateWatch, "情绪层连续 10 个交易日回落至绿。危机状态解除，转入观察期。"},
+		{StateCrisis, StateWatch, "情绪层连续 10 个交易日回落至绿。危机状态退出，转入观察期；信用/流动性等其余层面可能仍异常，见下。"},
 		{StateBrewing, StateWatch, "信用/流动性共振解除并稳定 10 个交易日。回到观察期。"},
 		{StateWatch, StateNormal, "全部触发条件解除并稳定 20 个交易日。回到常态。"},
 	}
@@ -169,6 +169,8 @@ func TestRenderTransitionUpgrade(t *testing.T) {
 	msg := renderTransition(cfg, NotifyContext{Res: res, StateDays: 12})
 	assert.True(t, strings.HasPrefix(msg, "[P0] 🚨 状态升级 WATCH → BREWING · 07-14\n\n"))
 	assert.Contains(t, msg, "信用与流动性双红共振")
+	assert.Contains(t, msg, "此为状态描述而非预测，不构成操作依据") // R2（v1.1）
+	assert.NotContains(t, msg, "3–12 个月")         // R2：删除具体时窗预测
 	assert.Contains(t, msg, "触发共振：\n🔴 信用 hy_oas 612bp · 5y分位 98% · 压力(STRESS)\n🔴 流动性 sofr_effr +28bp · 持续 5 个交易日")
 	assert.Contains(t, msg, "\n\n其余指标：\n")
 	assert.Contains(t, msg, "WATCH 已持续 12 个评估日 → BREWING · 下一评估：下一交易日")
@@ -195,7 +197,8 @@ func TestRenderTransitionDowngrade(t *testing.T) {
 	res.Results[IndHYOAS] = r
 
 	msg := renderTransition(cfg, NotifyContext{Res: res, StateDays: 34})
-	assert.True(t, strings.HasPrefix(msg, "[P1] ✅ 状态解除 BREWING → WATCH · 09-02"))
+	// hy_oas=AMBER → 异常区非空 → 🔽 状态回落（R2，v1.1）
+	assert.True(t, strings.HasPrefix(msg, "[P1] 🔽 状态回落 BREWING → WATCH · 09-02"))
 	assert.Contains(t, msg, "稳定 10 个交易日") // brewing_exit_days=10
 	assert.Contains(t, msg, "仍异常：\n🟡 信用 hy_oas")
 	assert.Contains(t, msg, "BREWING 共持续 34 个评估日 · 下一评估：下一交易日")
@@ -204,11 +207,134 @@ func TestRenderTransitionDowngrade(t *testing.T) {
 	cfg.StateMachine.BrewingExitDays = 12 // YAML 调参 → 文案跟随
 	assert.Contains(t, renderTransition(cfg, NotifyContext{Res: res, StateDays: 34}), "稳定 12 个交易日")
 
-	// CRISIS→WATCH 与 WATCH→NORMAL 分别注入 crisis_exit_days / watch_exit_days
+	// CRISIS→WATCH（全绿 → 异常区空 → ✅ 状态解除）；R3：措辞改「危机状态退出」
 	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateCrisis, StateWatch), StateDays: 20})
+	assert.True(t, strings.HasPrefix(msg, "[P1] ✅ 状态解除 CRISIS → WATCH"))
 	assert.Contains(t, msg, "情绪层连续 10 个交易日回落至绿")
+	assert.Contains(t, msg, "危机状态退出，转入观察期")
+	assert.NotContains(t, msg, "危机状态解除")
+	// WATCH→NORMAL 注入 watch_exit_days
 	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateWatch, StateNormal), StateDays: 40})
 	assert.Contains(t, msg, "稳定 20 个交易日。回到常态")
+}
+
+// R2（设计 v1.1）：✅ 仅限异常区为空的降级；非空用 🔽 状态回落。恰好落界：
+// 恰有一个 🟡 即切换。
+func TestRenderTransitionConditionalGlyph(t *testing.T) {
+	cfg := testConfig()
+
+	// 全绿降级 → ✅ 状态解除
+	msg := renderTransition(cfg, NotifyContext{Res: dayResult(StateWatch, StateNormal), StateDays: 40})
+	assert.True(t, strings.HasPrefix(msg, "[P1] ✅ 状态解除 WATCH → NORMAL"))
+	assert.NotContains(t, msg, "状态回落")
+
+	// 恰好一个 AMBER → 🔽 状态回落（落界）
+	res := dayResult(StateWatch, StateNormal)
+	r := res.Results[IndHYOAS]
+	r.Status = StatusAmber
+	res.Results[IndHYOAS] = r
+	msg = renderTransition(cfg, NotifyContext{Res: res, StateDays: 40})
+	assert.True(t, strings.HasPrefix(msg, "[P1] 🔽 状态回落 WATCH → NORMAL"))
+	assert.NotContains(t, msg, "状态解除")
+
+	// 含 ⚪ 但无 🔴🟡（异常区仍为空）→ ✅（⚪ 不算异常区）
+	res2 := dayResult(StateBrewing, StateWatch)
+	r2 := res2.Results[IndMOVE]
+	r2.Status = StatusStale
+	res2.Results[IndMOVE] = r2
+	msg = renderTransition(cfg, NotifyContext{Res: res2, StateDays: 34})
+	assert.True(t, strings.HasPrefix(msg, "[P1] ✅ 状态解除 BREWING → WATCH"))
+
+	// 升级路径不受影响
+	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateWatch, StateBrewing), StateDays: 12})
+	assert.True(t, strings.HasPrefix(msg, "[P0] 🚨 状态升级 WATCH → BREWING"))
+}
+
+// R1a（设计 v1.1）：降级当日 NewStale 且断更前为 RED/AMBER → 尾注前插警示行。
+// 三条件独立否定 + 多指标 AllIndicators 序 + 断更前恰为 AMBER 落界。
+func TestRenderTransitionStaleWarning(t *testing.T) {
+	cfg := testConfig()
+	downgrade := func(newStale []string, prevDay map[string]Evaluation) string {
+		return renderTransition(cfg, NotifyContext{
+			Res: dayResult(StateBrewing, StateWatch), StateDays: 34,
+			NewStale: newStale, PrevDay: prevDay,
+		})
+	}
+
+	// 断更前 RED → 警示行出现，且在尾注之前
+	msg := downgrade([]string{IndHYOAS},
+		map[string]Evaluation{IndHYOAS: {Indicator: IndHYOAS, Status: StatusRed}})
+	assert.Contains(t, msg, "⚠ 注意：本次变更当日 hy_oas 数据断更（断更前为红），触发条件可能被动解除而非真实缓解，请人工核实。")
+	assert.Less(t, strings.Index(msg, "⚠ 注意"), strings.Index(msg, "共持续"))
+
+	// 断更前恰为 AMBER（落界）→ 出现
+	msg = downgrade([]string{IndHYOAS},
+		map[string]Evaluation{IndHYOAS: {Indicator: IndHYOAS, Status: StatusAmber}})
+	assert.Contains(t, msg, "（断更前为黄）")
+
+	// 否定 1：NewStale 为空 → 无警示
+	msg = downgrade(nil, map[string]Evaluation{IndHYOAS: {Indicator: IndHYOAS, Status: StatusRed}})
+	assert.NotContains(t, msg, "⚠ 注意")
+
+	// 否定 2：断更前为绿 → 无警示
+	msg = downgrade([]string{IndHYOAS},
+		map[string]Evaluation{IndHYOAS: {Indicator: IndHYOAS, Status: StatusGreen}})
+	assert.NotContains(t, msg, "⚠ 注意")
+
+	// 否定 3：升级路径 → 无警示（即使 NewStale+RED）
+	msg = renderTransition(cfg, NotifyContext{
+		Res: dayResult(StateWatch, StateBrewing), StateDays: 12,
+		NewStale: []string{IndHYOAS},
+		PrevDay:  map[string]Evaluation{IndHYOAS: {Indicator: IndHYOAS, Status: StatusRed}},
+	})
+	assert.NotContains(t, msg, "⚠ 注意")
+
+	// 多指标：AllIndicators 序（vix 先于 hy_oas），颜色同序对应
+	msg = downgrade([]string{IndHYOAS, IndVIX}, map[string]Evaluation{
+		IndHYOAS: {Indicator: IndHYOAS, Status: StatusAmber},
+		IndVIX:   {Indicator: IndVIX, Status: StatusRed},
+	})
+	assert.Contains(t, msg, "vix、hy_oas 数据断更（断更前为红、黄）")
+}
+
+// N1（反审补充）：最坏组合降级消息长度 ≤4096。7 指标全 NewStale 且断更前全 RED
+// → 警示行 7 名 + 7 行 ⚪ 正文 + 语义句 + 页脚，是长度上界（全 STALE 时异常区空、
+// 走 ✅，但警示行/正文最长）；附一个异常区非空(🔽) + 多 NewStale 变体亦 ≤4096。
+func TestRenderTransitionStaleWarningWithinLimit(t *testing.T) {
+	cfg := testConfig()
+	redPrev := map[string]Evaluation{}
+	for _, ind := range AllIndicators {
+		redPrev[ind] = Evaluation{Indicator: ind, Status: StatusRed}
+	}
+	// (a) 7 全 NewStale：最长警示行 + 全 ⚪ 正文
+	res := dayResult(StateBrewing, StateWatch)
+	for _, ind := range AllIndicators {
+		r := res.Results[ind]
+		r.Status = StatusStale
+		res.Results[ind] = r
+	}
+	msg := renderTransition(cfg, NotifyContext{Res: res, StateDays: 34, NewStale: AllIndicators, PrevDay: redPrev})
+	assert.Contains(t, msg, "⚠ 注意")
+	assert.LessOrEqual(t, len(msg), 4096)
+
+	// (b) 异常区非空(🔽)：1 指标今日 RED + 其余 6 NewStale（断更前 RED）
+	res2 := dayResult(StateBrewing, StateWatch)
+	rr := res2.Results[IndSOFREFFR]
+	rr.Status, rr.Value = StatusRed, 30
+	res2.Results[IndSOFREFFR] = rr
+	var six []string
+	for _, ind := range AllIndicators {
+		if ind == IndSOFREFFR {
+			continue
+		}
+		r := res2.Results[ind]
+		r.Status = StatusStale
+		res2.Results[ind] = r
+		six = append(six, ind)
+	}
+	msg = renderTransition(cfg, NotifyContext{Res: res2, StateDays: 34, NewStale: six, PrevDay: redPrev})
+	assert.True(t, strings.HasPrefix(msg, "[P1] 🔽 状态回落"))
+	assert.LessOrEqual(t, len(msg), 4096)
 }
 
 // colorWord 四分支（绿/黄/红 + 非色彩统一"白"）。
@@ -228,9 +354,9 @@ func TestColorWord(t *testing.T) {
 func TestDiffLineLevels(t *testing.T) {
 	res := dayResult(StateBrewing, StateBrewing) // 全绿 Value=1
 	set := func(ind string, r IndicatorResult) { res.Results[ind] = r }
-	set(IndHYOAS, IndicatorResult{Indicator: IndHYOAS, Status: StatusRed, Value: 618})   // 异常，且变色+变值
+	set(IndHYOAS, IndicatorResult{Indicator: IndHYOAS, Status: StatusRed, Value: 618})      // 异常，且变色+变值
 	set(IndSOFREFFR, IndicatorResult{Indicator: IndSOFREFFR, Status: StatusRed, Value: 30}) // 异常，但缺 PrevDay
-	set(IndMOVE, IndicatorResult{Indicator: IndMOVE, Status: StatusStale, Value: 1})       // ⚪ 迁移
+	set(IndMOVE, IndicatorResult{Indicator: IndMOVE, Status: StatusStale, Value: 1})        // ⚪ 迁移
 
 	nc := NotifyContext{Res: res, PrevDay: map[string]Evaluation{
 		IndHYOAS: {Indicator: IndHYOAS, Status: StatusAmber, Value: 500}, // 变色(黄→红)+变值(+118)
@@ -308,7 +434,7 @@ func testTrends(end string) map[string]Trend {
 func TestNextMonthlyDue(t *testing.T) {
 	assert.Equal(t, "9 月首个交易日", nextMonthlyDue("2026-08-03"))
 	assert.Equal(t, "1 月首个交易日", nextMonthlyDue("2026-12-15")) // 跨年：12 月 +1 → 1 月
-	assert.Equal(t, "下月首个交易日", nextMonthlyDue("bad-date"))   // boundary[1]：不可解析降级
+	assert.Equal(t, "下月首个交易日", nextMonthlyDue("bad-date"))    // boundary[1]：不可解析降级
 	assert.Equal(t, "下月首个交易日", nextMonthlyDue(""))
 }
 
@@ -329,8 +455,8 @@ func TestRenderMonthly(t *testing.T) {
 
 	nc := NotifyContext{Res: res, StateDays: 63, SummaryDue: true, Trends: testTrends(res.Date)}
 	msg := renderMonthly(cfg, nc)
-	assert.Contains(t, msg, "⚪ 情绪 move 88.1 ")        // ⚪ 趋势行
-	assert.Contains(t, msg, "· 数据断更(STALE)")         // nonColorNote 分支
+	assert.Contains(t, msg, "⚪ 情绪 move 88.1 ") // ⚪ 趋势行
+	assert.Contains(t, msg, "· 数据断更(STALE)")   // nonColorNote 分支
 	assert.True(t, strings.HasPrefix(msg, "[P1] 📅 Cassandra 月报 · 2026-08 · NORMAL 已持续 63 个评估日\n\n近 21 个交易日趋势（走势 · 月变化 · 5y分位）：\n"))
 	assert.Contains(t, msg, "🟢 情绪 vix 1.0 ")
 	assert.Contains(t, msg, "↗+2.0 · 50%")
