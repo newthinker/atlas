@@ -369,6 +369,22 @@ func TestDiffLineLevels(t *testing.T) {
 	assert.NotContains(t, line, "+118bp") // 迁移优先：读数变化被抑制（互斥）
 	assert.NotContains(t, line, "vix")    // 非异常区变值不出现
 	assert.NotContains(t, line, "sofr")   // 缺 PrevDay 不参与
+
+	// R4（v1.1）：双非色彩迁移用具体说明，不再"转白（原白）"；混合迁移(绿→STALE)仍"转白（原绿）"
+	ncMix := NotifyContext{Res: dayResult(StateBrewing, StateBrewing), PrevDay: map[string]Evaluation{
+		IndSOFREFFR: {Indicator: IndSOFREFFR, Status: StatusStale, Value: 28},
+		IndNFCI:     {Indicator: IndNFCI, Status: StatusNoData},
+	}}
+	rs := ncMix.Res.Results[IndSOFREFFR]
+	rs.Status = StatusSuppressed
+	ncMix.Res.Results[IndSOFREFFR] = rs
+	rn := ncMix.Res.Results[IndNFCI]
+	rn.Status = StatusStale
+	ncMix.Res.Results[IndNFCI] = rn
+	mixLine := diffLine(ncMix)
+	assert.Contains(t, mixLine, "sofr_effr 转季末抑制（原数据断更(STALE)）")
+	assert.Contains(t, mixLine, "nfci 转数据断更(STALE)（原无数据(NO_DATA)）")
+	assert.NotContains(t, mixLine, "转白（原白）")
 }
 
 // 日报（§5.3）：首行第 N 日、异常指标区、较昨日差异行、盘中提示尾注。
@@ -494,8 +510,10 @@ func TestRenderOpsAlert(t *testing.T) {
 		StaleLastObs: map[string]string{IndMOVE: "2026-07-09"}}
 
 	msg := renderOpsAlert(cfg, nc, IndMOVE)
-	assert.Equal(t, "[P2] 🔧 move 数据源断更 · 07-14\n最后观测 07-09（滞后 5 日 > 阈值 4 日），已标记 STALE 退出共振计数；恢复后自动回归。持续超一周需检查 Yahoo 通道。", msg)
-	assert.NotContains(t, msg, "非交易信号") // 速报无页脚（设计 §2）
+	// R6（v1.1）：术语外化——不再"退出共振计数/恢复后自动回归"
+	assert.Equal(t, "[P2] 🔧 move 数据源断更 · 07-14\n最后观测 07-09（滞后 5 日 > 阈值 4 日），已标记 STALE、不再计入触发判定；数据恢复后自动重新计入。持续超一周需检查 Yahoo 通道。", msg)
+	assert.NotContains(t, msg, "非交易信号")  // 速报无页脚（设计 §2）
+	assert.NotContains(t, msg, "退出共振计数") // R6：旧术语已移除
 
 	// nfci 用周频阈值 + FRED 通道（特例分支）
 	nc.StaleLastObs[IndNFCI] = "2026-06-30"
@@ -506,10 +524,26 @@ func TestRenderOpsAlert(t *testing.T) {
 	// 通道映射非示例指标：usdjpy→Yahoo、vix→FRED（补充决策 1）
 	nc.StaleLastObs[IndUSDJPY] = "2026-07-08"
 	assert.Contains(t, renderOpsAlert(cfg, nc, IndUSDJPY), "Yahoo 通道")
-	// 最后观测日缺失 → 降级文案（vix 不在 StaleLastObs），且 vix→FRED
+	// 最后观测日缺失 → 降级文案（vix 不在 StaleLastObs），且 vix→FRED + R6 新措辞
 	msg = renderOpsAlert(cfg, nc, IndVIX)
-	assert.Contains(t, msg, "无历史观测")
+	assert.Contains(t, msg, "无历史观测，已标记 STALE、不再计入触发判定；数据恢复后自动重新计入")
 	assert.Contains(t, msg, "FRED 通道")
+	assert.NotContains(t, msg, "退出共振计数")
+
+	// R1b：断更前为 RED → 追加警示行；恰为 AMBER（落界）→ 同样追加；绿/缺失 → 不追加
+	ncPrev := NotifyContext{Res: res, NewStale: []string{IndMOVE},
+		StaleLastObs: map[string]string{IndMOVE: "2026-07-09"},
+		PrevDay:      map[string]Evaluation{IndMOVE: {Indicator: IndMOVE, Status: StatusRed}}}
+	assert.Contains(t, renderOpsAlert(cfg, ncPrev, IndMOVE), "⚠ 断更前为红且计入触发判定，今日若出现状态解除可能为被动解除，请人工核实。")
+
+	ncPrev.PrevDay[IndMOVE] = Evaluation{Indicator: IndMOVE, Status: StatusAmber}
+	assert.Contains(t, renderOpsAlert(cfg, ncPrev, IndMOVE), "⚠ 断更前为黄")
+
+	ncPrev.PrevDay[IndMOVE] = Evaluation{Indicator: IndMOVE, Status: StatusGreen}
+	assert.NotContains(t, renderOpsAlert(cfg, ncPrev, IndMOVE), "⚠ 断更前")
+
+	delete(ncPrev.PrevDay, IndMOVE) // PrevDay 缺行 → 不追加
+	assert.NotContains(t, renderOpsAlert(cfg, ncPrev, IndMOVE), "⚠ 断更前")
 }
 
 // P2 阈值注入锁：daily/weekly max_lag_days 均须异值断言（testConfig 4/12）。

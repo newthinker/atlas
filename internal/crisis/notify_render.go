@@ -253,7 +253,13 @@ func diffLine(nc NotifyContext) string {
 		}
 		cur := nc.Res.Results[ind]
 		if prev.Status != cur.Status {
-			parts = append(parts, fmt.Sprintf("%s 转%s（原%s）", ind, colorWord(cur.Status), colorWord(prev.Status)))
+			if !isColor(prev.Status) && !isColor(cur.Status) { // R4：双非色彩用具体说明
+				parts = append(parts, fmt.Sprintf("%s 转%s（原%s）", ind,
+					nonColorNote(cur.Status), nonColorNote(prev.Status)))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s 转%s（原%s）", ind,
+					colorWord(cur.Status), colorWord(prev.Status)))
+			}
 			continue
 		}
 		if d := cur.Value - prev.Value; inAbnormal[ind] && d != 0 {
@@ -346,16 +352,22 @@ func renderOpsAlert(cfg *Config, nc NotifyContext, ind string) string {
 	if ind == IndMOVE || ind == IndUSDJPY {
 		channel = "Yahoo"
 	}
-	lastObs, ok := nc.StaleLastObs[ind]
-	if !ok || lastObs == "" {
-		return first + fmt.Sprintf("\n无历史观测，已标记 STALE 退出共振计数；恢复后自动回归。持续超一周需检查 %s 通道。", channel)
+	var body string
+	if lastObs, ok := nc.StaleLastObs[ind]; ok && lastObs != "" {
+		maxLag := cfg.Freshness.DailyMaxLagDays
+		if ind == IndNFCI {
+			maxLag = cfg.Freshness.WeeklyMaxLagDays
+		}
+		body = fmt.Sprintf("最后观测 %s（滞后 %d 日 > 阈值 %d 日），已标记 STALE、不再计入触发判定；数据恢复后自动重新计入。持续超一周需检查 %s 通道。",
+			monthDay(lastObs), daysBetween(lastObs, nc.Res.Date), maxLag, channel)
+	} else {
+		body = fmt.Sprintf("无历史观测，已标记 STALE、不再计入触发判定；数据恢复后自动重新计入。持续超一周需检查 %s 通道。", channel)
 	}
-	maxLag := cfg.Freshness.DailyMaxLagDays
-	if ind == IndNFCI {
-		maxLag = cfg.Freshness.WeeklyMaxLagDays
+	msg := first + "\n" + body
+	if prev, ok := nc.PrevDay[ind]; ok && severity(prev.Status) >= severity(StatusAmber) { // R1b：断更前 RED/AMBER 追加被动解除警示
+		msg += fmt.Sprintf("\n⚠ 断更前为%s且计入触发判定，今日若出现状态解除可能为被动解除，请人工核实。", colorWord(prev.Status))
 	}
-	return first + fmt.Sprintf("\n最后观测 %s（滞后 %d 日 > 阈值 %d 日），已标记 STALE 退出共振计数；恢复后自动回归。持续超一周需检查 %s 通道。",
-		monthDay(lastObs), daysBetween(lastObs, nc.Res.Date), maxLag, channel)
+	return msg
 }
 
 // staleDowngradeWarning R1a（设计 v1.1）：状态降级当日有指标新进入 STALE 且
