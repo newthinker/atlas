@@ -36,10 +36,11 @@ func Messages(cfg *Config, nc NotifyContext) []string {
 	return msgs
 }
 
-// FormatIntradayAlert 消息 7：盘中 JPY 速报（通知设计 §5.7）。at 为本地时区
-// 时刻；速报家族无页脚，每日一次去重由 executeCrisisIntraday 的评估行保证。
+// FormatIntradayAlert 消息 7：盘中 JPY 速报（通知设计 §5.7，v1.1 R5：去因果
+// 归因，报事实 + 内联限定语；该限定语非页脚常量，速报家族无页脚规则不变）。
+// at 为本地时区时刻；每日一次去重由 executeCrisisIntraday 的评估行保证。
 func FormatIntradayAlert(price, base, wow float64, state SystemState, at time.Time) string {
 	return fmt.Sprintf(
-		"[P0] 🚨 USD/JPY 盘中急跌 %.1f%% · %s\n现价 %.1f（5 观测日前 %.1f）· 系统状态 %s · 疑似 carry trade 快速平仓。今日此告警不再重复。",
+		"[P0] 🚨 USD/JPY 盘中急跌 %.1f%% · %s\n现价 %.1f（5 观测日前 %.1f）· 系统状态 %s · 成因未核实，非交易信号。今日此告警不再重复。",
 		wow*100, at.Format("01-02 15:04"), price, base, state)
 }

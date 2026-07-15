@@ -686,10 +686,10 @@ func (s *stubSender) SendText(text string) error {
 }
 
 func TestSummaryDue(t *testing.T) {
-	assert.True(t, summaryDue("2026-07-01", crisis.StateNormal))   // 周三 = 当月首交易日 → 月报
+	assert.True(t, summaryDue("2026-07-01", crisis.StateNormal)) // 周三 = 当月首交易日 → 月报
 	assert.False(t, summaryDue("2026-07-02", crisis.StateNormal))
-	assert.True(t, summaryDue("2026-08-03", crisis.StateNormal))   // 8/1 周六 → 首交易日 = 8/3 周一
-	assert.True(t, summaryDue("2026-07-13", crisis.StateWatch))    // 周一 → 周报
+	assert.True(t, summaryDue("2026-08-03", crisis.StateNormal)) // 8/1 周六 → 首交易日 = 8/3 周一
+	assert.True(t, summaryDue("2026-07-13", crisis.StateWatch))  // 周一 → 周报
 	assert.False(t, summaryDue("2026-07-14", crisis.StateWatch))
 	assert.False(t, summaryDue("2026-07-13", crisis.StateBrewing)) // BREWING 走日报，不走摘要
 	assert.False(t, summaryDue("bad-date", crisis.StateNormal))    // 坏日期不发
@@ -810,8 +810,8 @@ func seedBrewing(t *testing.T, st *crisis.Store, date string) {
 func intradayDeps(st *crisis.Store) crisisEvalDeps {
 	return crisisEvalDeps{
 		cfg: crisisTestConfig(), store: st,
-		now:    func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
-		out:    io.Discard, errOut: io.Discard,
+		now: func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) },
+		out: io.Discard, errOut: io.Discard,
 	}
 }
 
@@ -922,7 +922,7 @@ func TestExecuteCrisisIntradaySendsViaSender(t *testing.T) {
 	require.NoError(t, executeCrisisIntraday(ctx, deps, quote))
 	require.Len(t, sender.sent, 1)
 	assert.True(t, strings.HasPrefix(sender.sent[0], "[P0]"))
-	assert.Contains(t, sender.sent[0], "carry trade")
+	assert.Contains(t, sender.sent[0], "成因未核实") // v1.1 R5：盘中去归因（原 carry trade）
 }
 
 // Sender 发送失败仅记 stderr 不失败退出，且去重行已落库（不重复告警）。
@@ -1169,7 +1169,7 @@ func TestBuildNotifyContextStoreErrors(t *testing.T) {
 	t.Run("SeriesWindow", func(t *testing.T) {
 		dbPath := filepath.Join(t.TempDir(), "crisis.db")
 		d := newNotifyDepsAt(t, dbPath)
-		dropMacroObs(t, dbPath) // 无 STALE 指标 → 直达 Trends 组装的 SeriesWindow 失败
+		dropMacroObs(t, dbPath)                                                      // 无 STALE 指标 → 直达 Trends 组装的 SeriesWindow 失败
 		res := notifyDayResult("2026-08-03", crisis.StateNormal, crisis.StateNormal) // NORMAL 月报日
 		_, err := buildNotifyContext(ctx, d, res)
 		require.Error(t, err)
