@@ -1,0 +1,41 @@
+{
+  "id": "TASK-005",
+  "title": "telegram SendDocument（multipart 上传）",
+  "description": "internal/notifier/telegram 追加 (t *Telegram) SendDocument(path, caption string) error：multipart/form-data 上传 Bot API sendDocument，caption >1024 rune 按 rune 截断，文件名取 basename，错误语义同 sendPayload，复用 t.client。Sender 接口（internal/crisis/notify.go:12）不动。测试用 httptest + RoundTripper 重定向（不改产线 URL）。权威规格：impl 计划 Task 5。",
+  "module": "notifier-telegram",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "multipart 字段齐全：请求路径 /bot<token>/sendDocument、chat_id、caption 原文、document 文件名 = path 的 basename、文件内容逐字节一致（TestTelegram_SendDocument）"
+    ],
+    "boundary": [
+      "caption 恰 1024 rune 不截断；1025 rune 截为前 1024（按 rune 截断，多字节字符不截半）（TestTelegram_SendDocumentCaptionTruncation）"
+    ],
+    "error_handling": [
+      "文件不存在 → 返回 error；API 非 200 → 错误含 \"telegram: API error (status 400)\"（语义同 sendPayload）（TestTelegram_SendDocumentErrors）"
+    ],
+    "non_functional": [
+      {
+        "desc": "Sender 接口不动（仍仅 SendText）；复用既有 t.client（含 proxy transport）；产线 URL 不改，测试侧 rewriteTransport 重定向",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/notifier/telegram"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

@@ -1,0 +1,58 @@
+{
+  "id": "TASK-006",
+  "title": "report 子命令装配（参数/量控/发送/落盘）",
+  "description": "新增 cmd/atlas/crisis_report.go：atlas crisis report --from --to --form daily|monthly [--send]。参数校验、启动前量控（EvalDates 日历、--send >31 拦截）、回放前缀 cmd 层拼接、逐条发送（间隔 3s 注入 sleep、单条失败继续）、HTML 落盘 reports/ 并经 documentSender 类型断言发送（降级附路径）。依赖注入模式沿用 crisisEvalDeps。另在 crisis_test.go 的 snapshotCrisisFlags 补 report 标志位。权威规格：impl 计划 Task 6。",
+  "module": "cmd-report",
+  "complexity": "complex",
+  "estimated_files": [
+    "cmd/atlas/crisis_report.go",
+    "cmd/atlas/crisis_report_test.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "stdout 模式：逐条报告含回放前缀 \"【历史回放 2026-07-10 · 非实时告警】\" 与 \"日报 第\"、总结 \"【回放总结 <from> ~ <to>】\"、HTML 落盘 <htmlDir>/crisis-replay-<from>-<to>.html（内容以 <!DOCTYPE html> 开头）并打印路径；无量控（TestExecuteCrisisReportStdout）",
+      "monthly 报告日 = 全库日历中每月首交易日且落在窗口内者（3 个月 → 3 条），前缀用月份 \"【历史回放 2026-05 · 非实时告警】\"，正文为 Cassandra 月报（TestExecuteCrisisReportMonthly）",
+      "--send 通过量控时：31 条报告 + 1 条总结全部经 SendText 发送（注入 sleep 不真等 3s）；HTML 经 SendDocument 发送且 caption = 总结首行、路径含 crisis-replay-（TestExecuteCrisisReportSendQuota 后半）"
+    ],
+    "boundary": [
+      "量控在任何发送前拦截：32 条时错误字面值恰为 \"daily 回放共 32 条报告，超过 --send 上限 31。请缩短周期，或用 --form monthly，或去掉 --send 输出到 stdout。\" 且 sender.sent 为空；31 条恰通过（TestExecuteCrisisReportSendQuota 前半）",
+      "sender 不支持 SendDocument → 降级：总结尾附 \"详细报告（本机）：\" + 文件名（TestExecuteCrisisReportNoDocSenderDegrades）"
+    ],
+    "error_handling": [
+      "参数校验逐项：--from/--to 必填、bad date（YYYY-MM-DD）、from is after to、--form 枚举、--from 早于库内最早观测日时报 \"实际可用起点\" 并给出该日期（TestExecuteCrisisReportValidation）",
+      "--send 且 sender=nil → 报错含 \"notifiers.telegram\"；单条发送失败记 stderr \"warning: notify failed\" 且继续、整体不失败退出（TestExecuteCrisisReportSendNeedsSender / SendFailureContinues）"
+    ],
+    "non_functional": [
+      {
+        "desc": "snapshotCrisisFlags 补充 reportFrom/reportTo/reportForm/reportSend 保存恢复；--send 模式 stdout 打印不关闭（在 send=true 用例断言 out.String() 含报告与总结，reviewer 补强）；不带 --send 无任何网络调用",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

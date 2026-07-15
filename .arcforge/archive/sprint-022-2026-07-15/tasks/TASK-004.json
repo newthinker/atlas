@@ -1,0 +1,61 @@
+{
+  "id": "TASK-004",
+  "title": "RenderReplayHTML 详细报告（SVG 点阵/折线/报表）",
+  "description": "新增 internal/crisis/replay_html.go：RenderReplayHTML(cfg,days,sr) 渲染自包含单文件 HTML（五段：阈值摘要表/状态时间线点阵 SVG/7 指标折线 SVG 含阈值线与 STALE 打点/月度汇总表/状态转移明细表），html/template + 手工 SVG，无外链、prefers-color-scheme 亮暗兼容，始终全量日粒度。复用 mkReplayDay（TASK-002）与 hasFreshReading（TASK-003）。权威规格：impl 计划 Task 4。",
+  "module": "crisis-replay",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/crisis/replay_html.go",
+    "internal/crisis/replay_html_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "点阵色块数 = 交易日数（class=\"day\" 计数=3）；期间标题 \"2026-06-30 ~ 2026-07-02\"；转移明细含 \"NORMAL → WATCH\" 且 \"→\" 仅 1 次；月度表含 <td>2026-06</td> 与 <td>2026-07</td>；WATCH 色块 #eab308（TestRenderReplayHTMLGoldenFragments）",
+      "折线 polyline 条数 = 有观测指标数（fixture 中 2）；点数 = 该指标观测数（vix 3 点、hy_oas 2 点，缺观测日不补点，逗号计数口径）（TestRenderReplayHTMLPolylinePoints）"
+    ],
+    "boundary": [
+      "sofr_effr 全期无数据 → 省略该幅并注记 \"该指标自 2018-04 起才有数据\"；STALE/缺数日 x 轴 <circle> 打点且 title 含 \"2026-07-01 STALE\"（TestRenderReplayHTMLNotesAndMarkers）"
+    ],
+    "error_handling": [
+      "days 为空 → 报错 \"no replay days to render\"；SeriesReader 错误上抛"
+    ],
+    "non_functional": [
+      {
+        "desc": "自包含：不含 http:// 与 https://；含 prefers-color-scheme 与 overflow-x；禁词为零；页脚含 \"历史回放，非实时告警\"（TestRenderReplayHTMLSelfContained）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "阈值摘要与折线阈值线读 cfg（断言含 amber=25 证明来自 testConfig）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "usdjpy 周环比规则无水平阈值线（thresholdLines 对 usdjpy 返回 nil；fixture 中 usdjpy 无观测→整幅省略，该分支无法用现有 fixture 断言，改为审查核对）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "浏览器目检亮暗两态渲染正常（临时落盘 scratchpad，勿提交临时代码）",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

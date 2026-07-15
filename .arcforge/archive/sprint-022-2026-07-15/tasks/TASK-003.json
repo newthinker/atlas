@@ -1,0 +1,53 @@
+{
+  "id": "TASK-003",
+  "title": "RenderReplaySummary 标准总结（回放专用尾注）",
+  "description": "新增 internal/crisis/replay_summary.go：RenderReplaySummary(cfg,days) 渲染回放窗口标准总结（期初态/转移/各态停留/指标极值/AMBER 峰值/STALE 统计），回放专用尾注 replayFooter 不复用 notifyFooter；定义 hasFreshReading（TASK-004 复用）。复用 TASK-002 测试 helper mkReplayDay。权威规格：impl 计划 Task 3。",
+  "module": "crisis-replay",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/replay_summary.go",
+    "internal/crisis/replay_summary_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "期初态/转移列表/各态停留/AMBER 峰值：输出含 \"【回放总结 <from> ~ <to>】\"、\"状态：NORMAL 起步 · 期间转移 1 次\"、\"2026-07-07 NORMAL → WATCH\"、各态停留严重度降序仅列出现过的态（\"WATCH 2 日 · NORMAL 1 日\"）、\"AMBER 峰值：3/7（2026-07-07）\"（TestRenderReplaySummaryTransitions）",
+      "极值方向逐指标与红灯方向一致：vix 取最大、t10y2y 取最小，并补 usdjpy 取最小方向断言（reviewer 补强）；STALE 日读数不计入极值（move 999 被跳过取 120.0）；STALE 统计仅列非零指标（TestRenderReplaySummaryExtremesAndStale）"
+    ],
+    "boundary": [
+      "无转移 → \"期间转移 0 次\" 且 \"转移：无\"；全零 STALE 省略整行；AMBER 全零 → \"AMBER 峰值：0/7\"（TestRenderReplaySummaryNoTransition）",
+      "窗口首日即为转移日 → 期初态取 PrevState（如首日 NORMAL→WATCH 时输出 \"NORMAL 起步\"；补用例，reviewer 补强）"
+    ],
+    "error_handling": [
+      "days 为空返回空串，不 panic（调用方保证非空）"
+    ],
+    "non_functional": [
+      {
+        "desc": "千日量级 + 10 次转移输出 ≤4096 rune；不含禁词（必然/一定/即将）；\"指标极值\" 段恰出现 1 次（TestRenderReplaySummaryUnder4096）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "尾注为回放专用 replayFooter（含 \"历史回放，非实时告警；阈值为当前配置，非事后调参。\"），不含 notifyFooter 的 \"操作决策不在本模块范围\"",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2"
+}

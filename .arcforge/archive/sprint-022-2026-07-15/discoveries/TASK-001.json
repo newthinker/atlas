@@ -1,0 +1,30 @@
+{
+  "task": "TASK-001",
+  "owner": "dev-agent-1",
+  "commit": "1156257 + 283ed97（rework：补 EvalDay 失败/WindowSince error 两分支测试，ReplayRange 覆盖 100%，第 2 轮复验 VERIFIED）",
+  "key_findings": [
+    "全期窗口下暖机语义与旧冷启动结果一致（暖机段全绿→保持 NORMAL），黄金测试与手工黄金 diff（2006-01-01..2009-12-31，1007 eval days，4×WATCH/2×CRISIS 转移）逐字节一致",
+    "storeReader.WindowSince(IndVIX, \"\", to) 空 from 语义：SeriesSince 用 ts >= \"\" 恒真（store.go:134），返回 ≤to 全部观测——这是「从库内最早观测日暖机」的实现支点",
+    "GitNexus 索引 stale @56ec9e3；本 Sprint 内不重建索引（memory：中途 reindex 会使长跑 agent 的 MCP 版本不匹配），detect_changes 以 affected_processes 空 + git diff 范围为准"
+  ],
+  "decisions": [
+    {"decision": "交易日历用 sr.WindowSince(IndVIX, \"\", to) 而非 Store.EvalDates", "rationale": "ReplayRange 只依赖 SeriesReader 接口（纯函数、可被 memSeries fixture 驱动），不耦合 Store；口径仍为 vix 观测日（与 EvalDates 同）"},
+    {"decision": "StateDays 在引擎暖机遍历中连续计数（Transitioned→1 否则++），暖机期计入", "rationale": "窗口切片后首日 StateDays 须反映暖机累积（07-08=2），不能从窗口起点重置"}
+  ],
+  "files_modified": [
+    "internal/crisis/replay.go",
+    "internal/crisis/replay_test.go",
+    "cmd/atlas/crisis.go"
+  ],
+  "interfaces_exposed": [
+    "type ReplayDay struct { Date string; Res *DayResult; StateDays int }",
+    "func ReplayRange(cfg *Config, sr SeriesReader, from, to string) ([]ReplayDay, error)"
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全 PASS；既有黄金 TestExecuteCrisisReplayTransitions/JSON/NoData 未修改且 PASS",
+    "coverage": "ReplayRange 90.0%、executeCrisisReplay 94.7%（均 ≥80%）；两包 total 82.9%",
+    "manual_golden": "data/crisis.db 存在，before/after 全期窗口 diff IDENTICAL；文件在 session scratchpad replay-golden-{before,after}.txt",
+    "zero_write": "无 AppendEvaluations 调用；TestExecuteCrisisReplayTransitions 的 LatestSystemEval==nil 断言守住"
+  },
+  "notes": "code-simplifier 与 detect_changes 由 Leader 代跑（协议 v2）；detect_changes(compare master) 已跑：仅 executeCrisisReplay touched、affected_processes 空、low"
+}

@@ -1,0 +1,27 @@
+{
+  "task": "TASK-005",
+  "owner": "dev-agent-2",
+  "commit": "d2591fe357e8d98aa0da7644b937625dcc828e7f",
+  "key_findings": [
+    "产线 URL 写死 api.telegram.org 不改，测试用 rewriteTransport（替换 tg.client.Transport）重写 host 指向 httptest，与既有 proxy transport 模式一致",
+    "caption 为空串时不写 caption 字段，避免发送空 caption"
+  ],
+  "decisions": [
+    {"decision": "caption 截断用 []rune 切片而非 byte", "rationale": "中文回放总结含多字节字符，byte 截断会截半产生乱码；rune 截断保证 1024 字符边界完整"},
+    {"decision": "错误分层：文件层（open/read document）与 API 层（API error status）分开", "rationale": "便于 cmd 层区分本地 IO 失败与远端拒绝"}
+  ],
+  "files_modified": [
+    "internal/notifier/telegram/telegram.go",
+    "internal/notifier/telegram/telegram_test.go"
+  ],
+  "interfaces_exposed": [
+    "func (t *Telegram) SendDocument(path, caption string) error",
+    "const documentCaptionMax = 1024"
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test ./internal/notifier/telegram/ -v 全 PASS（既有 25+ 无回归 + 新增 3 个）；go vet 无告警",
+    "coverage": "SendDocument 80.0%（达标），package total 88.1%；未覆盖为 CreateFormFile/io.Copy 错误分支（实践不可触发）",
+    "dod_mapping": "functional→TestTelegram_SendDocument；boundary→TestTelegram_SendDocumentCaptionTruncation（1024 不截/1025 截两半齐全）；error_handling→TestTelegram_SendDocumentErrors（文件缺失+API 400 两半齐全）；nf(review)→Sender 接口未动、复用 t.client、零新依赖"
+  },
+  "notes": "code-simplifier 与 detect_changes 由 Leader 代跑（协议 v2）"
+}

@@ -1,0 +1,53 @@
+{
+  "id": "TASK-001",
+  "title": "ReplayRange 回放引擎 + 既有 replay 子命令重构（黄金对照）",
+  "description": "新增 internal/crisis/replay.go：ReplayDay{Date,Res,StateDays} 与 ReplayRange(cfg,sr,from,to)——从库内最早 vix 观测日暖机逐日 EvalDay 推进（MemHistory、零写入），只返回 [from,to] 窗口切片；重构 cmd/atlas/crisis.go 的 executeCrisisReplay 调用引擎，全期窗口输出逐字节不变。权威规格：docs/plans/2026-07-15-crisis-replay-report-impl.md Task 1（含参考实现与测试代码）。",
+  "module": "crisis-replay",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/crisis/replay.go",
+    "internal/crisis/replay_test.go",
+    "cmd/atlas/crisis.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "ReplayRange 暖机逐日推进并只返回 [from,to] 窗口：12 日 fixture（末 4 日情绪双红）中首日 StateNormal/StateDays=1，转移日 2026-07-07 Transitioned 且 State=CRISIS/StateDays=1，次日 StateDays=2，转移前一日 NORMAL StateDays=8（TestReplayRangeWarmupAndStateDays）",
+      "executeCrisisReplay 重构为调用 crisis.ReplayRange，输出格式逐字节不变：既有 TestExecuteCrisisReplayTransitions/JSON/NoData 全 PASS（回归黄金，不得修改这些测试）"
+    ],
+    "boundary": [
+      "窗口切片不影响暖机计数：from=2026-07-08 时返回 3 日，首日 State=CRISIS、PrevState=CRISIS（暖机结果而非冷启动）、StateDays=2（TestReplayRangeWindowSlice）",
+      "窗口内无交易日 → 空切片且 err=nil；from > to → 返回 error（TestReplayRangeEmptyAndBadRange）"
+    ],
+    "error_handling": [
+      "EvalDay 逐日失败以 \"evaluating <date>: %w\" 包装上抛；cmd 层结果为空时报 \"no observations between <from> and <to> — run backfill first\""
+    ],
+    "non_functional": [
+      {
+        "desc": "回放零写入：评估历史只进 NewMemHistory()，观测只经 SeriesReader 读取，不写 crisis_evaluations 审计表",
+        "verify_by": "review"
+      },
+      {
+        "desc": "有真实库 data/crisis.db 时录制手工黄金（2006-01-01..2009-12-31）并 diff 逐字节一致；无库则跳过并在 discovery 注明",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/crisis",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "reject_reason": [
+    "error_handling: EvalDay 失败的 evaluating <date>: %w 包装分支无测试覆盖（replay.go:32.17,34.4 命中=0），触发半缺失；需用会令 EvalDay 失败的 fixture 驱动 ReplayRange 并 ErrorContains(err, \"evaluating\")",
+    "非阻断附带项: replay.go:23 sr.WindowSince error 分支未覆盖，可一并补"
+  ]
+}

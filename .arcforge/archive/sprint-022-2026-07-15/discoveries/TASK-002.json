@@ -1,0 +1,27 @@
+{
+  "task": "TASK-002",
+  "owner": "dev-agent-2",
+  "commit": "f72e7f3223a67a9d8f6c853b14f41c3cb46c72f5",
+  "key_findings": [
+    "monthly Trends 装配与 buildNotifyContext（cmd/atlas/crisis.go:401-413）同式：空窗口 continue 省略趋势行，Delta=末值−首值",
+    "PrevDay 空 map（而非 nil）是「较昨日：无变化」的实现支点：窗口首日只初始化空 map、不遍历 prev"
+  ],
+  "decisions": [
+    {"decision": "完全采用计划 Step 3 参考实现，无偏离", "rationale": "计划为权威规格且字段逐一核实一致；TDD 全绿即最小正确实现"},
+    {"decision": "mkReplayDay helper 签名照计划原样", "rationale": "TASK-003/004 同包复用，不能改"}
+  ],
+  "files_modified": [
+    "internal/crisis/replay_report.go",
+    "internal/crisis/replay_report_test.go"
+  ],
+  "interfaces_exposed": [
+    "func ReplayReport(cfg *Config, form string, day ReplayDay, prev *ReplayDay, sr SeriesReader) (string, error)",
+    "测试 helper: func mkReplayDay(date string, prev, state SystemState, stateDays, amber int, statuses map[string]Status, vals map[string]float64) ReplayDay（TASK-003/004 同包复用）"
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis/ 全 PASS（5 新测试 + 既有渲染测试无回归）；go vet 无告警",
+    "coverage": "ReplayReport 94.1%、package total 94.2%；未覆盖为 monthly sr.Window error return 路径（memSeries 不产错；包内已有 failReader stub 可覆盖，如后续被要求）",
+    "dod_mapping": "functional→TestReplayReportDaily/Monthly；boundary→FirstDay/IgnoresGate；error_handling→UnknownForm；nf(review)→纯函数+NotifyContext 口径"
+  },
+  "notes": "code-simplifier 与 detect_changes 由 Leader 代跑（协议 v2）"
+}
