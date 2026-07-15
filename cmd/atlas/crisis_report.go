@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -103,12 +104,7 @@ func executeCrisisReport(ctx context.Context, d crisisReportDeps, from, to, form
 		return fmt.Errorf("--from %s 早于库内最早观测日，实际可用起点：%s", from, cal[0])
 	}
 	isReport := reportDates(cal, from, to, form)
-	nReports := 0
-	for _, ok := range isReport {
-		if ok {
-			nReports++
-		}
-	}
+	nReports := len(isReport) // reportDates 只登记报告日（全为 true），故条数即 len
 	if send && nReports > reportSendLimit {
 		return fmt.Errorf("%s 回放共 %d 条报告，超过 --send 上限 %d。请缩短周期，或用 --form monthly，或去掉 --send 输出到 stdout。",
 			form, nReports, reportSendLimit)
@@ -213,10 +209,6 @@ func replayPrefix(form, date string) string {
 
 // firstLine 取总结首行作 sendDocument caption。
 func firstLine(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			return s[:i]
-		}
-	}
-	return s
+	first, _, _ := strings.Cut(s, "\n")
+	return first
 }
