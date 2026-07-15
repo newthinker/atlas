@@ -175,21 +175,11 @@ func lineChartSVG(cfg *Config, ind string, days []ReplayDay, obs []Observation) 
 	}
 	lo, hi := obs[0].Value, obs[0].Value
 	for _, o := range obs {
-		if o.Value < lo {
-			lo = o.Value
-		}
-		if o.Value > hi {
-			hi = o.Value
-		}
+		lo, hi = min(lo, o.Value), max(hi, o.Value)
 	}
 	lines := thresholdLines(cfg, ind)
 	for _, t := range lines {
-		if t.v < lo {
-			lo = t.v
-		}
-		if t.v > hi {
-			hi = t.v
-		}
+		lo, hi = min(lo, t.v), max(hi, t.v)
 	}
 	if hi == lo {
 		hi = lo + 1
@@ -268,12 +258,7 @@ func monthRows(days []ReplayDay) []monthRow {
 			if !a.seen {
 				a.lo, a.hi, a.seen = r.Value, r.Value, true
 			} else {
-				if r.Value < a.lo {
-					a.lo = r.Value
-				}
-				if r.Value > a.hi {
-					a.hi = r.Value
-				}
+				a.lo, a.hi = min(a.lo, r.Value), max(a.hi, r.Value)
 			}
 			a.end = r.Value
 		}
