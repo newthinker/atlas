@@ -89,7 +89,7 @@ WORKDIR /app
 COPY --from=builder /app/atlas .
 COPY --from=builder /app/internal/api/templates ./internal/api/templates
 
-EXPOSE 8080
+EXPOSE 8090
 
 ENTRYPOINT ["./atlas"]
 CMD ["serve", "-c", "/config/config.yaml"]
@@ -106,7 +106,7 @@ services:
   atlas:
     build: .
     ports:
-      - "8080:8080"
+      - "8090:8090"
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - atlas-data:/data
@@ -378,7 +378,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/atlas.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:8090;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -404,7 +404,7 @@ Create `Caddyfile`:
 
 ```
 atlas.example.com {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:8090
 }
 ```
 
@@ -415,7 +415,7 @@ atlas.example.com {
 ATLAS exposes a health endpoint:
 
 ```bash
-curl http://localhost:8080/api/health
+curl http://localhost:8090/api/health
 # {"status":"ok"}
 ```
 
@@ -425,7 +425,7 @@ For Docker health checks:
 services:
   atlas:
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8090/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -485,8 +485,8 @@ pg_dump -U atlas atlas > atlas-db-$(date +%Y%m%d).sql
 
 **Port already in use:**
 ```bash
-# Find process using port 8080
-lsof -i :8080
+# Find process using port 8090
+lsof -i :8090
 # Kill it or change port in config
 ```
 
