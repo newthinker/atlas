@@ -288,4 +288,8 @@ func TestRenderWeekly(t *testing.T) {
 	assert.Contains(t, msg, "退出进度：触发条件已连续解除 8 日（回 NORMAL 需连续 20 日）")
 	assert.Contains(t, msg, "下次周报：下周一 · 状态变更即时通知")
 	assert.True(t, strings.HasSuffix(msg, notifyFooter))
+
+	// WatchExitDays 注入锁（testConfig 恰为 20，须异值断言防硬编码；同 T5 注入锁法）
+	cfg.StateMachine.WatchExitDays = 25
+	assert.Contains(t, renderWeekly(cfg, NotifyContext{Res: res, StateDays: 18, ClearStreak: 8}), "回 NORMAL 需连续 25 日")
 }
