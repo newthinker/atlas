@@ -1,0 +1,29 @@
+{
+  "task": "TASK-004",
+  "owner": "dev-agent-1",
+  "commit": "61dad9e",
+  "key_findings": [
+    "fixture 仅 vix/hy_oas 两指标导致 stateColor/thresholdLines 初测覆盖 60%/50%，用两个定向单测（TestStateColorPalette 四态 / TestThresholdLines 七指标）拉满 100%，避免污染 golden fixture 计数断言",
+    "SVG 经 template.HTML 注入的安全前提成立：内容全部来自受控数据（日期/状态枚举/formatReading 数字），无用户输入",
+    "nf(review)「usdjpy 无水平阈值线」升级为 assert.Nil(thresholdLines(cfg, IndUSDJPY)) 机器断言，强于人工审查"
+  ],
+  "decisions": [
+    {"decision": "helper 用独立单测覆盖而非扩 fixture", "rationale": "扩 htmlFixture 会牵动点阵/月度/polyline 计数断言，独立断言 helper 契约更聚焦判别"},
+    {"decision": "usdjpy→nil 落成断言", "rationale": "分支无法经 fixture 端到端触发（usdjpy 无观测整幅省略），helper 层直接断言机器可判"}
+  ],
+  "files_modified": [
+    "internal/crisis/replay_html.go",
+    "internal/crisis/replay_html_test.go"
+  ],
+  "interfaces_exposed": [
+    "func RenderReplayHTML(cfg *Config, days []ReplayDay, sr SeriesReader) (string, error)",
+    "包内私有 helper：stateColor/thresholdRows/thresholdLines/timelineSVG/lineChartSVG/monthRows/transitionRows/replayTmpl"
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis/ 全 PASS（9 用例：计划 6 + error 两半 2 + helper 定向 2）；go vet 无告警",
+    "coverage": "RenderReplayHTML 94.7%、lineChartSVG 88.9%、monthRows 93.0%、transitionRows 88.2%、其余 helper 100%；package total 94.3%",
+    "manual_preview": "92 日跨 3 月、3 次转移、含 STALE 样例落盘 scratchpad/replay-report-preview.html（21249 bytes，无外链）；亮暗目检留待 QA/验收阶段",
+    "dod_mapping": "functional→GoldenFragments/PolylinePoints；boundary→NotesAndMarkers；error_handling 两半→Empty/ReaderError（复用 failReader）；nf test→SelfContained+ThresholdLines；nf review→升级为 ThresholdLines assert.Nil；nf manual→preview 落盘"
+  },
+  "notes": "code-simplifier 与 detect_changes 由 Leader 代跑（协议 v2）；临时生成代码 zz_preview_test.go 已删除未提交"
+}

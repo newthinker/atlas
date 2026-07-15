@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -324,5 +328,59 @@ func (t *Telegram) sendPayload(text, parseMode string) error {
 		return fmt.Errorf("telegram: API error (status %d): %v", resp.StatusCode, result)
 	}
 
+	return nil
+}
+
+// documentCaptionMax is the Bot API sendDocument caption limit (in characters).
+const documentCaptionMax = 1024
+
+// SendDocument uploads a local file to the Bot API sendDocument endpoint via
+// multipart/form-data. The filename seen by the chat is the path's basename;
+// captions beyond the API limit are truncated by rune so multi-byte text never
+// splits. Error semantics follow sendPayload (non-200 → telegram: API error).
+func (t *Telegram) SendDocument(path, caption string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("telegram: open document: %w", err)
+	}
+	defer f.Close()
+
+	if r := []rune(caption); len(r) > documentCaptionMax {
+		caption = string(r[:documentCaptionMax])
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("chat_id", t.chatID); err != nil {
+		return fmt.Errorf("telegram: build multipart: %w", err)
+	}
+	if caption != "" {
+		if err := w.WriteField("caption", caption); err != nil {
+			return fmt.Errorf("telegram: build multipart: %w", err)
+		}
+	}
+	fw, err := w.CreateFormFile("document", filepath.Base(path))
+	if err != nil {
+		return fmt.Errorf("telegram: build multipart: %w", err)
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return fmt.Errorf("telegram: read document: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("telegram: build multipart: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", t.botToken)
+	resp, err := t.client.Post(apiURL, w.FormDataContentType(), &buf)
+	if err != nil {
+		return fmt.Errorf("telegram: failed to send document: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var result map[string]any
+		json.NewDecoder(resp.Body).Decode(&result)
+		return fmt.Errorf("telegram: API error (status %d): %v", resp.StatusCode, result)
+	}
 	return nil
 }

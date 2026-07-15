@@ -1,0 +1,47 @@
+{
+  "id": "TASK-002",
+  "title": "ReplayReport 装配（daily/monthly + PrevDay 链）",
+  "description": "新增 internal/crisis/replay_report.go：ReplayReport(cfg,form,day,prev,sr) 导出装配入口，组装 NotifyContext 后调私有 renderDaily/renderMonthly；忽略消息矩阵门控；daily 走 PrevDay 链、monthly 用 sr.Window(ind,day.Date,21) 装 Trends。测试文件定义 mkReplayDay helper（TASK-003/004 同包复用）。权威规格：impl 计划 Task 2。",
+  "module": "crisis-replay",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/replay_report.go",
+    "internal/crisis/replay_report_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "daily 首行含回放态与 StateDays（如 \"CRISIS 日报 第 2 日\"）；PrevDay 链使差异行真实可用（\"vix 转红（原绿）\"）；保留消息家族既有页脚（\"非交易信号\"）（TestReplayReportDaily）",
+      "monthly 从 sr.Window(ind, day.Date, 21) 装 Trends：输出含 \"Cassandra 月报 · 2026-07\" 与 \"近 21 个交易日趋势\"，仅有观测的指标有趋势行、空窗口指标省略（TestReplayReportMonthly）"
+    ],
+    "boundary": [
+      "窗口首日 prev=nil → PrevDay 空 map → 差异行输出 \"较昨日：无变化\"（TestReplayReportDailyFirstDay）",
+      "状态门控忽略：NORMAL 日也渲染 daily（\"NORMAL 日报 第 5 日\"）（TestReplayReportDailyIgnoresGate）"
+    ],
+    "error_handling": [
+      "未知 form 返回 error 且错误信息含该 form 值（如 \"weekly\"）（TestReplayReportUnknownForm）"
+    ],
+    "non_functional": [
+      {
+        "desc": "渲染纯函数无 IO；NotifyContext 口径：SummaryDue=false、NewStale/StaleLastObs 空、daily 不装 Trends、PrevDay 只填 Indicator/Status/Value",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1"
+}

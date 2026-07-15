@@ -46,10 +46,12 @@ func snapshotCrisisFlags(t *testing.T) {
 	pCfg, pFrom, pTo := crisisCfgPath, backfillFrom, backfillTo
 	pCSV, pInd, pScale, pFile := backfillCSV, backfillIndicator, backfillScale, cfgFile
 	pRFrom, pRTo, pRJSON := replayFrom, replayTo, replayJSON
+	pRepFrom, pRepTo, pRepForm, pRepSend := reportFrom, reportTo, reportForm, reportSend
 	t.Cleanup(func() {
 		crisisCfgPath, backfillFrom, backfillTo = pCfg, pFrom, pTo
 		backfillCSV, backfillIndicator, backfillScale, cfgFile = pCSV, pInd, pScale, pFile
 		replayFrom, replayTo, replayJSON = pRFrom, pRTo, pRJSON
+		reportFrom, reportTo, reportForm, reportSend = pRepFrom, pRepTo, pRepForm, pRepSend
 	})
 }
 

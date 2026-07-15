@@ -600,41 +600,35 @@ func runCrisisReplay(cmd *cobra.Command, args []string) error {
 }
 
 // executeCrisisReplay 逐日重放:观测来自 sqlite,评估历史只进 MemHistory,
-// 不写 crisis_evaluations(审计表只属于 live eval)。
+// 不写 crisis_evaluations(审计表只属于 live eval)。v1.1 起统一暖机语义:
+// 引擎从库内最早观测日推进,窗口期初态为暖机结果。
 func executeCrisisReplay(ctx context.Context, cfg *crisis.Config, st *crisis.Store, from, to string, jsonOut bool, out io.Writer) error {
-	dates, err := st.EvalDates(ctx, from, to)
+	days, err := crisis.ReplayRange(cfg, st.Reader(ctx), from, to)
 	if err != nil {
 		return err
 	}
-	if len(dates) == 0 {
+	if len(days) == 0 {
 		return fmt.Errorf("no observations between %s and %s — run backfill first", from, to)
 	}
 
-	mem := crisis.NewMemHistory()
-	reader := st.Reader(ctx)
 	entered := map[crisis.SystemState]int{}
-	cur := crisis.StateNormal
-	for _, d := range dates {
-		res, err := crisis.EvalDay(cfg, d, reader, mem, time.Now())
-		if err != nil {
-			return fmt.Errorf("evaluating %s: %w", d, err)
+	for _, day := range days {
+		res := day.Res
+		if !res.Transitioned() {
+			continue
 		}
-		mem.Append(res.Evaluations)
-		if res.Transitioned() {
-			entered[res.State]++
-			if jsonOut {
-				b, _ := json.Marshal(map[string]any{
-					"date": d, "from": res.PrevState, "to": res.State, "amber_count": res.Detail.AmberCount,
-				})
-				fmt.Fprintln(out, string(b))
-			} else {
-				fmt.Fprintf(out, "%s  %s → %s (amber=%d)\n", d, res.PrevState, res.State, res.Detail.AmberCount)
-			}
+		entered[res.State]++
+		if jsonOut {
+			b, _ := json.Marshal(map[string]any{
+				"date": day.Date, "from": res.PrevState, "to": res.State, "amber_count": res.Detail.AmberCount,
+			})
+			fmt.Fprintln(out, string(b))
+		} else {
+			fmt.Fprintf(out, "%s  %s → %s (amber=%d)\n", day.Date, res.PrevState, res.State, res.Detail.AmberCount)
 		}
-		cur = res.State
 	}
 
-	fmt.Fprintf(out, "\nfinal state: %s over %d eval days\n", cur, len(dates))
+	fmt.Fprintf(out, "\nfinal state: %s over %d eval days\n", days[len(days)-1].Res.State, len(days))
 	for _, s := range []crisis.SystemState{crisis.StateWatch, crisis.StateBrewing, crisis.StateCrisis} {
 		fmt.Fprintf(out, "entered %-8s %d times\n", s, entered[s])
 	}

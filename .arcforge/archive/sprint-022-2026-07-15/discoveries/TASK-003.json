@@ -1,0 +1,30 @@
+{
+  "task": "TASK-003",
+  "owner": "dev-agent-1",
+  "commit": "5c6ca07",
+  "key_findings": [
+    "mkReplayDay 默认 7 指标 GREEN/Value=10：极值测试须显式给 usdjpy 赋值（150/145/155）才能做出落界可判别的 min 方向断言",
+    "formatReading 方向格式：vix/move/usdjpy %.1f、t10y2y %+.0fbp，断言字面量直接对齐",
+    "notifyFooter（notify_render.go:157）含「操作决策不在本模块范围」，与 replayFooter 无重叠，NotContains 稳固区分两套尾注"
+  ],
+  "decisions": [
+    {"decision": "完全采用计划参考实现，无偏离", "rationale": "契约逐一核实一致，TDD 全绿即最小正确实现"},
+    {"decision": "usdjpy min 断言并入 ExtremesAndStale 用例", "rationale": "与 vix/t10y2y 方向断言同主题，三指标一处对照；min(145@07-09) 与 max(155@07-10) 分离保证判别力"}
+  ],
+  "files_modified": [
+    "internal/crisis/replay_summary.go",
+    "internal/crisis/replay_summary_test.go"
+  ],
+  "interfaces_exposed": [
+    "func RenderReplaySummary(cfg *Config, days []ReplayDay) string",
+    "func worstIsMin(ind string) bool（TASK-004 复用）",
+    "func hasFreshReading(s Status) bool（TASK-004 复用）",
+    "const replayFooter"
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis/ 全 PASS（6 用例）；go vet 无告警",
+    "coverage": "RenderReplaySummary/worstIsMin/hasFreshReading 均 100.0%；package total 94.5%",
+    "dod_mapping": "functional→Transitions/ExtremesAndStale（含 usdjpy 补强）；boundary→NoTransition/FirstDayTransition（补强用例）；error_handling→Empty（nil+空 slice 显式覆盖）；nf→Under4096+尾注双向断言"
+  },
+  "notes": "code-simplifier 与 detect_changes 由 Leader 代跑（协议 v2）"
+}

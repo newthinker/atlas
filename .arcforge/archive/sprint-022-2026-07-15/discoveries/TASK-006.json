@@ -1,0 +1,31 @@
+{
+  "task": "TASK-006",
+  "owner": "dev-agent-2",
+  "commit": "c5f2d8669ae7955aa9745dd8bd9bf9dcb5b1dba1",
+  "key_findings": [
+    "量控严格前置：EvalDates(ctx,\"\",to) 全库日历 → reportDates 计数 → >31 在 ReplayRange 之前 return，sender.sent 空断言守住「任何发送前拦截」",
+    "monthly 月首判定基于全库日历（不受窗口截断），reportDates 用 prevMonth 追踪跨月边界",
+    "降级路径：documentSender 类型断言失败则总结尾附本机路径，与 TASK-005 约定吻合",
+    "wiring 测试用 t.Chdir(t.TempDir()) 隔离 reports/ 相对路径落盘，防止测试污染仓库"
+  ],
+  "decisions": [
+    {"decision": "计划 7 用例之外补 TestFirstLine 与 TestRunCrisisReport（RunE wiring 三子测试）", "rationale": "firstLine 初测 75%<80% 门禁、runCrisisReport 0% 而既有 runCrisisReplay 惯例是 wiring 全覆盖；补齐消除 reality-checker 缺口"},
+    {"decision": "采用计划参考实现原样", "rationale": "权威规格，上游签名逐一核实一致"}
+  ],
+  "files_modified": [
+    "cmd/atlas/crisis_report.go",
+    "cmd/atlas/crisis_report_test.go",
+    "cmd/atlas/crisis_test.go（仅 snapshotCrisisFlags 补 report 4 标志）"
+  ],
+  "interfaces_exposed": [
+    "CLI: atlas crisis report --from --to --form daily|monthly [--send]；HTML 落盘 reports/crisis-replay-<from>-<to>.html",
+    "func executeCrisisReport(ctx, d crisisReportDeps, from, to, form string, send bool) error",
+    "type crisisReportDeps / type documentSender / const reportSendLimit = 31"
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test -count=1 三包全 PASS（9 report 用例 + 既有无回归）；go vet 无告警",
+    "coverage": "runCrisisReport 100%、executeCrisisReport 87.5%、reportDates/replayPrefix/firstLine 100%；未覆盖 12.5% 为 IO error return 与防御守卫",
+    "dod_mapping": "functional→Stdout/Monthly/SendQuota 后半；boundary→SendQuota 前半（字面值逐字）/NoDocSenderDegrades；error_handling→Validation/SendNeedsSender/SendFailureContinues；nf→snapshotCrisisFlags+stdout 不关闭（补强断言）+无 send 零网络"
+  },
+  "notes": "code-simplifier 与 detect_changes 由 Leader 代跑（协议 v2）"
+}
