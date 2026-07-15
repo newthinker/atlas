@@ -134,7 +134,7 @@ func TestSemanticSentenceAllTransitions(t *testing.T) {
 		{StateNormal, StateCrisis, "情绪层双红：危机进行中。此阶段执行预案而非预测。"},
 		{StateWatch, StateCrisis, "情绪层双红：危机进行中。此阶段执行预案而非预测。"},
 		{StateBrewing, StateCrisis, "情绪层双红：危机进行中。此阶段执行预案而非预测。"},
-		{StateCrisis, StateWatch, "情绪层连续 10 个交易日回落至绿。危机状态退出，转入观察期；信用/流动性等其余层面可能仍异常，见下。"},
+		{StateCrisis, StateWatch, "情绪层连续 10 个交易日回落至绿。危机状态退出，转入观察期。"},
 		{StateBrewing, StateWatch, "信用/流动性共振解除并稳定 10 个交易日。回到观察期。"},
 		{StateWatch, StateNormal, "全部触发条件解除并稳定 20 个交易日。回到常态。"},
 	}
@@ -207,12 +207,15 @@ func TestRenderTransitionDowngrade(t *testing.T) {
 	cfg.StateMachine.BrewingExitDays = 12 // YAML 调参 → 文案跟随
 	assert.Contains(t, renderTransition(cfg, NotifyContext{Res: res, StateDays: 34}), "稳定 12 个交易日")
 
-	// CRISIS→WATCH（全绿 → 异常区空 → ✅ 状态解除）；R3：措辞改「危机状态退出」
+	// CRISIS→WATCH（全绿 → 异常区空 → ✅ 状态解除）；R3：措辞改「危机状态退出」；
+	// R7（设计 v1.2）：全绿降级不带任何「仍异常」从句（旧固定从句已移除）
 	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateCrisis, StateWatch), StateDays: 20})
 	assert.True(t, strings.HasPrefix(msg, "[P1] ✅ 状态解除 CRISIS → WATCH"))
 	assert.Contains(t, msg, "情绪层连续 10 个交易日回落至绿")
-	assert.Contains(t, msg, "危机状态退出，转入观察期")
+	assert.Contains(t, msg, "危机状态退出，转入观察期。")
 	assert.NotContains(t, msg, "危机状态解除")
+	assert.NotContains(t, msg, "仍有异常")
+	assert.NotContains(t, msg, "可能仍异常")
 	// WATCH→NORMAL 注入 watch_exit_days
 	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateWatch, StateNormal), StateDays: 40})
 	assert.Contains(t, msg, "稳定 20 个交易日。回到常态")
@@ -248,6 +251,27 @@ func TestRenderTransitionConditionalGlyph(t *testing.T) {
 	// 升级路径不受影响
 	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateWatch, StateBrewing), StateDays: 12})
 	assert.True(t, strings.HasPrefix(msg, "[P0] 🚨 状态升级 WATCH → BREWING"))
+
+	// R7（设计 v1.2）：从句与 🔽 共用判定——含异常降级带「其余层面仍有异常，见下。」
+	res3 := dayResult(StateCrisis, StateWatch)
+	r3 := res3.Results[IndHYOAS]
+	r3.Status = StatusAmber
+	res3.Results[IndHYOAS] = r3
+	msg = renderTransition(cfg, NotifyContext{Res: res3, StateDays: 20})
+	assert.True(t, strings.HasPrefix(msg, "[P1] 🔽 状态回落 CRISIS → WATCH"))
+	assert.Contains(t, msg, "转入观察期。其余层面仍有异常，见下。")
+
+	// BREWING→WATCH 含异常同样获得从句（机制化，非仅 CRISIS→WATCH）
+	res4 := dayResult(StateBrewing, StateWatch)
+	r4 := res4.Results[IndHYOAS]
+	r4.Status = StatusAmber
+	res4.Results[IndHYOAS] = r4
+	msg = renderTransition(cfg, NotifyContext{Res: res4, StateDays: 34})
+	assert.Contains(t, msg, "回到观察期。其余层面仍有异常，见下。")
+
+	// 全绿 BREWING→WATCH 不带从句
+	msg = renderTransition(cfg, NotifyContext{Res: dayResult(StateBrewing, StateWatch), StateDays: 34})
+	assert.NotContains(t, msg, "仍有异常")
 }
 
 // R1a（设计 v1.1）：降级当日 NewStale 且断更前为 RED/AMBER → 尾注前插警示行。

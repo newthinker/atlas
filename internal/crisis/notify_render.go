@@ -166,7 +166,7 @@ var semanticSentences = map[string]string{
 	"NORMAL→CRISIS":  crisisSentence,
 	"WATCH→CRISIS":   crisisSentence,
 	"BREWING→CRISIS": crisisSentence,
-	"CRISIS→WATCH":   "情绪层连续 %d 个交易日回落至绿。危机状态退出，转入观察期；信用/流动性等其余层面可能仍异常，见下。",
+	"CRISIS→WATCH":   "情绪层连续 %d 个交易日回落至绿。危机状态退出，转入观察期。",
 	"BREWING→WATCH":  "信用/流动性共振解除并稳定 %d 个交易日。回到观察期。",
 	"WATCH→NORMAL":   "全部触发条件解除并稳定 %d 个交易日。回到常态。",
 }
@@ -193,7 +193,7 @@ func semanticSentence(cfg *Config, from, to SystemState) string {
 // renderTransition 消息 1/2：状态升级/降级（通知设计 §5.1/§5.2）。
 func renderTransition(cfg *Config, nc NotifyContext) string {
 	res := nc.Res
-	var first, title, tail string
+	var first, title, tail, residualClause string
 	if stateRank(res.State) > stateRank(res.PrevState) {
 		prefix := "[P1] ⚠️"
 		if res.State == StateBrewing || res.State == StateCrisis {
@@ -207,6 +207,7 @@ func renderTransition(cfg *Config, nc NotifyContext) string {
 		glyphAndVerb := "✅ 状态解除" // R2：仅异常区为空时用 ✅（设计 v1.1 原则 2）
 		if abnormal, _ := splitZones(res); len(abnormal) > 0 {
 			glyphAndVerb = "🔽 状态回落"
+			residualClause = "其余层面仍有异常，见下。" // R7（v1.2）：与 🔽 共用同一判定
 		}
 		first = fmt.Sprintf("[P1] %s %s → %s · %s", glyphAndVerb, res.PrevState, res.State, monthDay(res.Date))
 		title = "仍异常："
@@ -216,7 +217,8 @@ func renderTransition(cfg *Config, nc NotifyContext) string {
 		}
 	}
 	parts := []string{first}
-	if s := semanticSentence(cfg, res.PrevState, res.State); s != "" {
+	// 语义句与残余从句拼接后统一判空：不可达转移无语义句时从句独立成段。
+	if s := semanticSentence(cfg, res.PrevState, res.State) + residualClause; s != "" {
 		parts = append(parts, s)
 	}
 	parts = append(parts, bodyZones(cfg, res, title), tail)
