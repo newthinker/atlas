@@ -335,6 +335,83 @@ func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride 
 	return nil
 }
 
+// buildNotifyContext 组装通知渲染输入（通知设计 §8）。必须在 AppendEvaluations
+// 之前调用：PrevDay/StateDays/ClearStreak 都取"截至昨日"的库内历史，当日增量
+// （今日行、今日 any_trigger）在此函数内补足。
+func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayResult) (crisis.NotifyContext, error) {
+	nc := crisis.NotifyContext{Res: res, SummaryDue: summaryDue(res.Date, res.State)}
+
+	nc.PrevDay = map[string]crisis.Evaluation{}
+	for _, ind := range crisis.AllIndicators {
+		evals, err := d.store.RecentIndicatorEvals(ctx, ind, 1)
+		if err != nil {
+			return nc, err
+		}
+		if len(evals) > 0 {
+			nc.PrevDay[ind] = evals[0]
+		}
+	}
+
+	// 变更消息展示"前状态已持续 N 日"；无变更消息含当日（补充决策 6）
+	if res.Transitioned() {
+		days, err := stateStreakDays(ctx, d.store, res.PrevState)
+		if err != nil {
+			return nc, err
+		}
+		nc.StateDays = days
+	} else {
+		days, err := stateStreakDays(ctx, d.store, res.State)
+		if err != nil {
+			return nc, err
+		}
+		nc.StateDays = days + 1
+	}
+
+	// P2 去重：仅"昨日非 STALE、今日 STALE"的指标发一次（通知设计 §2）
+	nc.StaleLastObs = map[string]string{}
+	for _, ind := range crisis.AllIndicators {
+		if res.Results[ind].Status != crisis.StatusStale {
+			continue
+		}
+		if prev, ok := nc.PrevDay[ind]; ok && prev.Status == crisis.StatusStale {
+			continue
+		}
+		nc.NewStale = append(nc.NewStale, ind)
+		o, err := d.store.LatestObservation(ctx, ind)
+		if err != nil {
+			return nc, err
+		}
+		if o != nil {
+			nc.StaleLastObs[ind] = o.Date
+		}
+	}
+
+	// 周报退出进度：历史 any_trigger=false 连续日数 + 今日（补充决策 8）
+	if res.State == crisis.StateWatch && nc.SummaryDue && !res.Detail.AnyTrigger {
+		base, err := crisis.ClearStreakDays(d.store.History(ctx), d.cfg.StateMachine.WatchExitDays)
+		if err != nil {
+			return nc, err
+		}
+		nc.ClearStreak = base + 1
+	}
+
+	// 月报趋势：仅 SummaryDue ∧ NORMAL 时组装（通知设计 §8）
+	if nc.SummaryDue && res.State == crisis.StateNormal {
+		nc.Trends = map[string]crisis.Trend{}
+		for _, ind := range crisis.AllIndicators {
+			win, err := d.store.SeriesWindow(ctx, ind, res.Date, 21)
+			if err != nil {
+				return nc, err
+			}
+			if len(win) == 0 {
+				continue
+			}
+			nc.Trends[ind] = crisis.Trend{Window: win, Delta: win[len(win)-1].Value - win[0].Value}
+		}
+	}
+	return nc, nil
+}
+
 // buildCrisisSender 复用主配置 notifiers.telegram 凭据（serve.go:330 同款构造，
 // notifier 零改动）。未配置或缺凭据 → nil（eval 退化为打印）。
 func buildCrisisSender() crisis.Sender {
