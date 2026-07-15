@@ -5,6 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -546,5 +549,122 @@ func TestDisplaySymbol_HKPaddedToFiveDigits(t *testing.T) {
 		if got := displaySymbol(in); got != want {
 			t.Errorf("displaySymbol(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Context Checkpoint: done_criteria → test mapping (TASK-005 SendDocument)
+// functional[0]     multipart 字段齐全/basename/逐字节一致 → TestTelegram_SendDocument
+// boundary[0]       caption 1024 不截 / 1025 按 rune 截为 1024 → TestTelegram_SendDocumentCaptionTruncation
+// error_handling[0] 文件不存在报错 / API 非 200 → telegram: API error (status 400) → TestTelegram_SendDocumentErrors
+
+// rewriteTransport 把所有请求重定向到 httptest server（产线 URL 写死
+// api.telegram.org，测试侧重写 host 而不改产线代码）。
+type rewriteTransport struct{ base *url.URL }
+
+func (rt rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Scheme, req.URL.Host = rt.base.Scheme, rt.base.Host
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func newDocServer(t *testing.T, status int) (*Telegram, *struct {
+	path, chatID, caption, filename string
+	body                            []byte
+}) {
+	t.Helper()
+	got := &struct {
+		path, chatID, caption, filename string
+		body                            []byte
+	}{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.path = r.URL.Path
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			t.Errorf("parse multipart: %v", err)
+		}
+		got.chatID = r.FormValue("chat_id")
+		got.caption = r.FormValue("caption")
+		f, hdr, err := r.FormFile("document")
+		if err != nil {
+			t.Errorf("form file: %v", err)
+		} else {
+			got.filename = hdr.Filename
+			got.body, _ = io.ReadAll(f)
+			f.Close()
+		}
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]any{"ok": status == http.StatusOK})
+	}))
+	t.Cleanup(server.Close)
+	u, _ := url.Parse(server.URL)
+	tg := New("test-token", "test-chat")
+	tg.client = &http.Client{Transport: rewriteTransport{base: u}}
+	return tg, got
+}
+
+// functional: multipart 字段齐全，文件名取 basename，路径含 sendDocument。
+func TestTelegram_SendDocument(t *testing.T) {
+	tg, got := newDocServer(t, http.StatusOK)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "crisis-replay-2008-01-01-2009-12-31.html")
+	if err := os.WriteFile(file, []byte("<!DOCTYPE html><p>x</p>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tg.SendDocument(file, "【回放总结 2008-01-01 ~ 2009-12-31】"); err != nil {
+		t.Fatalf("SendDocument: %v", err)
+	}
+	if got.path != "/bottest-token/sendDocument" {
+		t.Errorf("path = %q", got.path)
+	}
+	if got.chatID != "test-chat" {
+		t.Errorf("chat_id = %q", got.chatID)
+	}
+	if got.caption != "【回放总结 2008-01-01 ~ 2009-12-31】" {
+		t.Errorf("caption = %q", got.caption)
+	}
+	if got.filename != "crisis-replay-2008-01-01-2009-12-31.html" {
+		t.Errorf("filename = %q (want basename)", got.filename)
+	}
+	if string(got.body) != "<!DOCTYPE html><p>x</p>" {
+		t.Errorf("body mismatch")
+	}
+}
+
+// boundary: caption 恰 1024 rune 不截断；1025 截为 1024（按 rune，防多字节截半）。
+func TestTelegram_SendDocumentCaptionTruncation(t *testing.T) {
+	tg, got := newDocServer(t, http.StatusOK)
+	file := filepath.Join(t.TempDir(), "r.html")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exact := strings.Repeat("危", 1024)
+	if err := tg.SendDocument(file, exact); err != nil {
+		t.Fatal(err)
+	}
+	if got.caption != exact {
+		t.Errorf("1024 rune caption 不应截断")
+	}
+
+	if err := tg.SendDocument(file, exact+"溢"); err != nil {
+		t.Fatal(err)
+	}
+	if got.caption != exact {
+		t.Errorf("1025 rune caption 应截为 1024，got len %d", len([]rune(got.caption)))
+	}
+}
+
+// error_handling: 文件不存在 → 报错；API 非 200 → telegram: API error。
+func TestTelegram_SendDocumentErrors(t *testing.T) {
+	tg, _ := newDocServer(t, http.StatusBadRequest)
+	if err := tg.SendDocument("/no/such/file.html", "c"); err == nil {
+		t.Error("missing file should error")
+	}
+	file := filepath.Join(t.TempDir(), "r.html")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := tg.SendDocument(file, "c")
+	if err == nil || !strings.Contains(err.Error(), "telegram: API error (status 400)") {
+		t.Errorf("want API error, got %v", err)
 	}
 }
