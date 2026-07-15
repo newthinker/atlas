@@ -1,0 +1,47 @@
+{
+  "id": "TASK-003",
+  "title": "notify_format.go — 格式化原语与 sparkline",
+  "description": "新建 internal/crisis/notify_format.go：layerName/icebergRank/statusEmoji/nonColorNote/tagText/formatReading/formatDelta/deltaEpsilon/trendArrow/showPct5y/formatPct5y/sparkline/bucketMeans，全部包内私有纯函数。实施步骤见 impl 文档 Task 3。",
+  "module": "internal/crisis",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/crisis/notify_format.go",
+    "internal/crisis/notify_format_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "层名映射（vix/move→情绪、sofr_effr→流动性、hy_oas→信用、t10y2y/nfci→领先、usdjpy→旁证）、冰山层序（信用<流动性<情绪<领先<旁证）、statusEmoji（🔴🟡🟢⚪）、nonColorNote（STALE/NO_DATA/季末抑制/空）、tagText（中文(英文)四类）符合设计 §6.1–6.3",
+      "formatReading/formatDelta 每指标格式符合 §6.3：vix/move/usdjpy 一位小数、hy_oas 0 位+bp、sofr/t10y2y 带正负号+bp、nfci 两位小数带符号；formatPct5y(0.98)=\"98%\"",
+      "trendArrow：|Δ| < 该指标显示精度一个单位（vix 类 0.1、nfci 0.01、bp 类 1）→ \"→\"，否则 ↗/↘",
+      "sparkline：21 观测分 7 连续桶取均值后 min-max 八阶归一，单调升序首桶 ▁ 末桶 █"
+    ],
+    "boundary": [
+      "sparkline 全平序列→全 ▄；观测 ≤7 逐点渲染；空窗口→空串",
+      "showPct5y(sofr_effr)=false、showPct5y(usdjpy)=false、showPct5y(vix)=true（补充决策 4）"
+    ],
+    "non_functional": [
+      {
+        "desc": "全部为无状态纯函数（无 IO、无包级可变状态）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-3"
+}

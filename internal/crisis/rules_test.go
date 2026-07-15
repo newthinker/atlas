@@ -264,3 +264,45 @@ func TestPercentileTrackAmberUpgrade(t *testing.T) {
 	assert.InDelta(t, 0.9125, res.Pct5y, 1e-9)
 	assert.Equal(t, 80, res.WindowActualObs)
 }
+
+// TestIndicatorResultPersistAndWow 覆盖通知模板需要的持续性/周环比字段
+// （通知设计 §8：规则层计算时顺手填充）。
+func TestIndicatorResultPersistAndWow(t *testing.T) {
+	cfg := testConfig()
+	const d = "2026-07-10"
+
+	// sofr_effr：末尾连续 9 个观测 > red_bp(25) → RED 且 PersistDays=9
+	// （9 > red_persist_days=5：计数不受规则窗口限制，补充决策 3）
+	sr := baselineSeries(d)
+	sr[IndSOFREFFR] = append(
+		seriesEnding(addDays(d, -9), 40, -10, -10),
+		seriesEnding(d, 9, 30, 30)...)
+	res, err := EvaluateIndicator(cfg, IndSOFREFFR, d, sr)
+	require.NoError(t, err)
+	assert.Equal(t, StatusRed, res.RawStatus)
+	assert.Equal(t, 9, res.PersistDays)
+
+	// amber 档：末尾 3 个观测在 (10, 25] → AMBER 且 PersistDays=3
+	sr[IndSOFREFFR] = append(
+		seriesEnding(addDays(d, -3), 40, -10, -10),
+		seriesEnding(d, 3, 15, 15)...)
+	res, err = EvaluateIndicator(cfg, IndSOFREFFR, d, sr)
+	require.NoError(t, err)
+	assert.Equal(t, StatusAmber, res.RawStatus)
+	assert.Equal(t, 3, res.PersistDays)
+
+	// usdjpy：周环比恰为 red_wow_pct(-3%) → RED，Wow/WowOK 填充
+	sr = baselineSeries(d)
+	sr[IndUSDJPY] = seriesEnding(d, 80, 160, 155.2) // 155.2/160−1 = −3.0%
+	res, err = EvaluateIndicator(cfg, IndUSDJPY, d, sr)
+	require.NoError(t, err)
+	assert.Equal(t, StatusRed, res.RawStatus)
+	assert.True(t, res.WowOK)
+	assert.InDelta(t, -0.03, res.Wow, 0.0001)
+
+	// vix：wow 同样填充（基线全平 → wow=0 但 ok=true）
+	res, err = EvaluateIndicator(cfg, IndVIX, d, baselineSeries(d))
+	require.NoError(t, err)
+	assert.True(t, res.WowOK)
+	assert.InDelta(t, 0, res.Wow, 0.0001)
+}

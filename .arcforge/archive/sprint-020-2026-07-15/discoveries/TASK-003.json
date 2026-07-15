@@ -1,0 +1,42 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "notify_format.go 全部为包内私有无状态纯函数（无 IO、无包级可变状态；仅一个包级只读 var sparkGlyphs 字形表），满足 non_functional review 条目。",
+    "sparkline 采用补充决策 2 口径：>7 观测分 7 连续桶取均值后 min-max 八阶归一；=7/<7 逐点（bucketMeans 的 len<=buckets 分支直接透传值）；全平序列 hi==lo 返回全 ▄；空窗口空串。idx 用 *8 后 clamp>7，保证最大值落末阶 █。",
+    "trendArrow 的横盘阈值 deltaEpsilon 按指标显示精度分档（vix/move/usdjpy 0.1、nfci 0.01、bp 类 1），与 formatReading/formatDelta 的精度一致。",
+    "showPct5y 写死排除 sofr_effr/usdjpy（补充决策 4）；layerName/icebergRank 固定映射七指标到五冰山层，icebergRank 用于 T4 异常区同级排序。"
+  ],
+  "decisions": [
+    {
+      "decision": "补 sparkline 单调降序子例覆盖 min-max 的 v<lo 分支",
+      "rationale": "升序/全平序列下 lo 永不下降，v<lo 分支 coverprofile=0；降序序列（首桶最高 █、末桶最低 ▁）exercise 该分支，验证向下归一正确——避免 TASK-002 式的未覆盖分支被 test-agent 拒。"
+    },
+    {
+      "decision": "补 tagText(\"\")=\"\" 与 layerName(\"unknown\")=\"unknown\" 兜底断言",
+      "rationale": "tagText(\"\") 是真实下游路径（indicatorLine 常传空 Tag），与 nonColorNote 的空默认对称；layerName 兜底虽属防御性，加断言锁契约并消除覆盖盲区。补后 notify_format.go 函数级覆盖 100%。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_format.go (新建)",
+    "internal/crisis/notify_format_test.go (新建)"
+  ],
+  "interfaces_exposed": [
+    "以下均为包内私有纯函数，供 T4–T7 渲染器消费：",
+    "func layerName(ind string) string / func icebergRank(ind string) int",
+    "func statusEmoji(s Status) string / func nonColorNote(s Status) string / func tagText(t Tag) string",
+    "func formatReading(ind string, v float64) string / func formatDelta(ind string, d float64) string",
+    "func deltaEpsilon(ind string) float64 / func trendArrow(ind string, delta float64) string",
+    "func showPct5y(ind string) bool / func formatPct5y(p float64) string",
+    "func sparkline(window []Observation) string / func bucketMeans(window []Observation, buckets int) []float64",
+    "var sparkGlyphs = []rune(\"▁▂▃▄▅▆▇█\")  // 包级只读"
+  ],
+  "verification": {
+    "impact": "纯新增私有函数无既有调用方（T4 才消费），无 impact 前置要求；门禁 detect_changes 由 Leader 代跑",
+    "detect_changes": "Leader 代跑通过：risk_level=low，affected_processes 为空，与纯新增私有函数无既有调用方预期一致。git 交叉核对：仅两个新建未跟踪文件（notify_format.go/notify_format_test.go），无既有文件改动、无越界。新符号不在旧索引（建于 d43d029）属正常表现（同 T2）。非阻塞备注：IDE 4 条 modernize 提示（:159 min 内建、:176+测试 range over int）——impl 文档参考实现即此写法、仓库既有代码同风格、code-simplifier 建议保持，故不改（贴合上游契约与既有风格优先，同 T2 max 处置）。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；4 测试覆盖 8 条 DoD：functional[0] 层名/层序/emoji/nonColorNote/tagText、functional[1] formatReading/formatDelta/formatPct5y、functional[2] trendArrow（含恰好 |Δ|==eps 落界方向断言，返工补）、functional[3] sparkline 升/降序、boundary[0] 全平/≤7/空、boundary[1] showPct5y",
+    "coverage": "notify_format.go 函数级覆盖 100%（coverprofile 逐块核对无 count=0）；包总覆盖 92.5%",
+    "mutation_check": "trendArrow 边界断言经变异验证：临时 >= 改 > 后 TestTrendArrow FAIL、还原后 PASS，确认恰好 |Δ|==eps 的方向被真实锁住（返工前变异静默通过 → 7/8 REJECTED 的根因）",
+    "commit": "c73778f feat(crisis): add notification formatting primitives and sparkline；83bf0d4 test(crisis): pin trend arrow direction at exact epsilon boundary（返工 epoch=2，rework 1，补 functional[2] 落界断言）"
+  }
+}

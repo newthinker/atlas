@@ -1,0 +1,52 @@
+{
+  "id": "TASK-001",
+  "title": "IndicatorResult 新字段与规则层填充",
+  "description": "types.go 的 IndicatorResult 追加 PersistDays/Wow/WowOK；evalVIX/evalSOFREFFR/evalUSDJPY 填充；suppress.go indDetail 与 eval.go buildEvaluations 将新字段序列化进评估行 detail JSON。evalSOFREFFR 窗口放宽到 persistLookbackObs=30 后用 lastN 还原原判定窗口（判定语义等价）。实施步骤见 impl 文档 Task 1（含完整测试与实现代码）。前置：对 evalVIX/evalSOFREFFR/evalUSDJPY/buildEvaluations 跑 gitnexus_impact(upstream) 并报告风险。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/types.go",
+    "internal/crisis/rules.go",
+    "internal/crisis/suppress.go",
+    "internal/crisis/eval.go",
+    "internal/crisis/rules_test.go",
+    "internal/crisis/eval_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "sofr_effr 末尾连续 9 观测 > red_bp(25) 时 RawStatus=RED 且 PersistDays=9（计数不受 red_persist_days=5 限制）；末尾 3 观测在 (10,25] 时 RawStatus=AMBER 且 PersistDays=3",
+      "usdjpy 周环比恰为 red_wow_pct(-3%) 时 RawStatus=RED、WowOK=true、Wow≈-0.03；vix 基线全平时 WowOK=true、Wow≈0",
+      "评估行 detail JSON 携带 persist_days/wow/wow_ok（如 sofr RED 行含 \"persist_days\":9，usdjpy RED 行含 \"wow\":-0.031 与 \"wow_ok\":true）；全绿/零值指标行经 omitempty 省略这三个键（负向断言）"
+    ],
+    "boundary": [
+      "evalSOFREFFR 判定窗口经 lastN 还原后与改造前语义等价：既有 rules/suppress/eval 全部测试无回归"
+    ],
+    "error_handling": [
+      "sr.Window 返回错误时原样上抛，无新增吞错路径"
+    ],
+    "non_functional": [
+      {
+        "desc": "gitnexus_impact 已对 evalVIX/evalSOFREFFR/evalUSDJPY/buildEvaluations 执行且无未处置 HIGH/CRITICAL；提交前已跑 gitnexus_detect_changes 核对影响面并运行 code-simplifier",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-1"
+}

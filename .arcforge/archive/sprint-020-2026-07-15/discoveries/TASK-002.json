@@ -1,0 +1,42 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "ClearStreakDays 复用既有 EvalHistory.RecentSystem(max)（MemHistory 与 storeHistory 均实现，返回新→旧顺序），从最新行起顺序累计 any_trigger=false，遇 true 或 detail 不可解析即中断。",
+    "与 systemDetailStreak 的保守约定一致：坏 detail 行不上抛错误而是中断计数；仅 RecentSystem 自身返回错误时原样上抛。",
+    "本助手只统计历史行；当日 any_trigger 由 cmd 层（T8）用 res.Detail.AnyTrigger 补上（当日行组装 NotifyContext 时尚未落库，补充决策 8）。max 参数直接透传 RecentSystem 实现回看深度限制。",
+    "形参名 max 遮蔽 Go 内建 max（函数体未用内建，无功能影响）——但该签名是 design-spec/impl 文档定义的跨任务契约（ClearStreakDays(hist EvalHistory, max int)），T8 按此消费；code-simplifier 亦建议不改（改名动签名超出范围），故保留。",
+    "detect_changes 对纯新增导出函数的正常表现：ClearStreakDays 是新符号、尚不在索引（索引建于 d43d029），故不会按名列入 changed_symbols——判定以 affected_processes 为空 + git diff 范围为准。",
+    "QA CRITICAL（review_fix, epoch=3）根因：首版 ClearStreakDays 只看 AnyTrigger 不校验 e.SystemState，与同文件 systemDetailStreak（显式态内计数、注释记有既有 QA 裁决『冷却期必须在态内重新累积』）口径不一致。后果：CRISIS 康复尾段 AnyTrigger=false 的日子会污染 WATCH 周报退出进度分子——mixed fixture(CRISIS×18+WATCH×1 全 false) 得 19、状态机口径应为 1，renderWeekly 渲染『已连续解除 20 日（需 20 日）』虚高文案。此缺陷是『复用现有约定时只抄了一半』——ClearStreakDays 抄了 systemDetailStreak 的坏detail保守中断，却漏了它的态内计数。"
+  ],
+  "decisions": [
+    {
+      "decision": "遇 unparseable detail 用 break 中断而非 continue 或 error",
+      "rationale": "与同文件 systemDetailStreak 一致（DoD error_handling）：一条坏历史行不应使整日评估失败，也不应跨过它继续计数（连续性语义要求中断）。"
+    },
+    {
+      "decision": "RecentSystem 的 error 原样上抛（return 0, err）",
+      "rationale": "存储层读失败是真错误，与 detail 解析失败区分处理；DoD error_handling 明确要求。"
+    },
+    {
+      "decision": "review_fix（epoch=3）：签名加 state 参数 ClearStreakDays(hist EvalHistory, state SystemState, max int)，循环内 e.SystemState != state 即 break（态内计数）；cmd buildNotifyContext 调用点传 crisis.StateWatch",
+      "rationale": "QA CRITICAL 修复（Leader 批复签名变更豁免红线）。态内计数与 systemDetailStreak 同口径（既有 QA 裁决：冷却期必须在态内重新累积），异态历史行不得污染当前态退出进度。state != state 与坏 detail 同为保守中断。跨两包一次提交保证可编译（AD-1 同理）。mixed 用例 + 变异自检（去 state 校验→FAIL）锁死。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/statemachine.go（首版 + review_fix 加 state 参数与态内 break）",
+    "internal/crisis/statemachine_test.go（首版 + review_fix 适配新签名 + mixed-state 子例）",
+    "cmd/atlas/crisis.go（review_fix：buildNotifyContext 调用点传 crisis.StateWatch）"
+  ],
+  "interfaces_exposed": [
+    "func ClearStreakDays(hist EvalHistory, state SystemState, max int) (int, error)  // 导出；T8 cmd 消费，周报退出进度分子（设计 §6.6）。review_fix 后加 state 参数（态内计数），旧两参签名已废。"
+  ],
+  "verification": {
+    "impact": "本任务为新增导出函数，无既有调用方（下游 T8 才消费）；门禁 impact 由 Leader 代跑（gitnexus CLI 本地版本不匹配无法运行）",
+    "detect_changes": "首版(f0c85cf)Leader 代跑 low/affected 空。review_fix(2955906)Leader 代跑通过：risk low、affected_processes 为空，变更恰 3 文件（statemachine.go +18/-6、statemachine_test.go +28/-7、crisis.go 调用点 +1/-1），无越界；ClearStreakDays 新符号以 diff 范围判定（惯例）。Leader 亲跑两包 build + ClearStreakDays/BuildNotifyContext 相关测试全绿。code-simplifier 确认修复正确、gofmt 干净。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过（两包）",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿；TestClearStreakDays 覆盖 6 条 DoD + review_fix 新增 mixed-state 子例（CRISIS×18+WATCH×1 喂 StateWatch → 1，修复前 19）；既有子例适配新签名传 StateWatch",
+    "coverage": "internal/crisis ~91%；ClearStreakDays 函数级覆盖 100%（含 state != state break 分支，由 mixed 用例 exercise）",
+    "mutation_check": "review_fix：去掉 e.SystemState != state 校验 → TestClearStreakDays FAIL（mixed 用例得 19≠1）；还原后 PASS。首版变异（去 state break 前）：错误分支/max 封顶已在 epoch=2 锁。",
+    "commit": "f0c85cf feat(crisis): add ClearStreakDays helper；00c1baf test(crisis): cover error propagation and max cap（epoch=2）；2955906 fix(crisis): scope ClearStreakDays to in-state rows（review_fix epoch=3，rework 2，QA CRITICAL 态内计数，跨两包 gofmt 干净）"
+  }
+}

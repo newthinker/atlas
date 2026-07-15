@@ -1,0 +1,50 @@
+{
+  "id": "TASK-005",
+  "title": "notify_render.go（二）— 语义句表与状态变更渲染",
+  "description": "notify_render.go 追加 notifyFooter/crisisSentence/semanticSentences 常量、semanticSentence(cfg,from,to)、renderTransition(cfg,nc)（消息 1/2）。实施步骤见 impl 文档 Task 5。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "semanticSentences 覆盖 8 个可达转移（NORMAL→WATCH、WATCH→BREWING、*→CRISIS×3、CRISIS→WATCH、BREWING→WATCH、WATCH→NORMAL），措辞与设计 §4.1 一致",
+      "semanticSentence 对 CRISIS→WATCH/BREWING→WATCH/WATCH→NORMAL 分别注入 crisis_exit_days/brewing_exit_days/watch_exit_days；YAML 调参后文案跟随（BrewingExitDays=12 → \"稳定 12 个交易日\"）",
+      "升级渲染：进 BREWING/CRISIS 前缀 [P0] 🚨、进 WATCH 前缀 [P1] ⚠️；首行 \"状态升级 FROM → TO · MM-DD\"；正文\"触发共振：\"分区；尾注 \"FROM 已持续 N 个评估日 → TO · 下一评估：下一交易日\"",
+      "降级渲染：[P1] ✅ 状态解除、\"仍异常：\"分区、尾注 \"FROM 共持续 N 个评估日\""
+    ],
+    "boundary": [
+      "未知转移 semanticSentence 返回空串且渲染省略语义句段"
+    ],
+    "non_functional": [
+      {
+        "desc": "renderTransition 输出以 notifyFooter 结尾（含\"非交易信号\"）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-5"
+}

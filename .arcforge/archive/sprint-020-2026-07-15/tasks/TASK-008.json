@@ -1,0 +1,54 @@
+{
+  "id": "TASK-008",
+  "title": "cmd 层 buildNotifyContext（旧 Messages 暂不切换）",
+  "description": "cmd/atlas/crisis.go 追加 buildNotifyContext(ctx, d, res)（executeCrisisEvalDaily 本任务不动）。组装 PrevDay/StateDays/NewStale/StaleLastObs/ClearStreak/Trends。实施步骤见 impl 文档 Task 8。消费 TASK-002 的 ClearStreakDays 与 TASK-004 的 NotifyContext/Trend。可与 TASK-005/006/007 并行（不同 package）。",
+  "module": "cmd/atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "PrevDay 为每指标最近 1 条评估行（昨日行而非当日）",
+      "StateDays：变更日 = 前状态历史连续行数；非变更日 = 当前状态历史连续行数 + 1（补充决策 6）",
+      "NewStale 仅含\"昨日非 STALE、今日 STALE\"的指标（持续 STALE 去重）；StaleLastObs 用 LatestObservation 组装，无观测则缺省",
+      "ClearStreak：仅 WATCH ∧ SummaryDue ∧ 今日 any_trigger=false 时 = ClearStreakDays 历史值 + 1（补充决策 8）",
+      "Trends 仅 SummaryDue ∧ NORMAL 时组装：SeriesWindow 21 观测升序、Delta=末-首，无观测指标不进 map"
+    ],
+    "error_handling": [
+      "store 查询（RecentIndicatorEvals/LatestObservation/SeriesWindow/History）错误原样上抛"
+    ],
+    "non_functional": [
+      {
+        "desc": "本任务不改 executeCrisisEvalDaily；GOTOOLCHAIN=local go build ./... 通过且旧 Messages 通知输出不变",
+        "verify_by": "test"
+      },
+      {
+        "desc": "buildNotifyContext 调用时序约束（须在 AppendEvaluations 之前）已在函数注释中声明",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-14-crisis-notification-templates-impl.md#task-8",
+  "coverage_minimum": 35
+}

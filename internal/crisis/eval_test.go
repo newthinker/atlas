@@ -154,3 +154,32 @@ func TestEvalDayResumesPreviousState(t *testing.T) {
 	assert.Equal(t, StateWatch, res.State)     // 历史仅 1 条 < 19 → 不退出，维持 WATCH
 	assert.False(t, res.Transitioned())
 }
+
+// 评估行 detail JSON 同步携带新字段（审计与"较昨日"对比，通知设计 §8）。
+func TestBuildEvaluationsCarriesPersistAndWow(t *testing.T) {
+	r := &DayResult{Date: "2026-07-10", Results: map[string]IndicatorResult{}}
+	for _, ind := range AllIndicators {
+		r.Results[ind] = IndicatorResult{Indicator: ind, Status: StatusGreen, RawStatus: StatusGreen}
+	}
+	r.Results[IndSOFREFFR] = IndicatorResult{Indicator: IndSOFREFFR,
+		Status: StatusRed, RawStatus: StatusRed, PersistDays: 9}
+	r.Results[IndUSDJPY] = IndicatorResult{Indicator: IndUSDJPY,
+		Status: StatusRed, RawStatus: StatusRed, Wow: -0.031, WowOK: true}
+
+	evals, err := buildEvaluations(r, time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	byInd := map[string]Evaluation{}
+	for _, e := range evals {
+		byInd[e.Indicator] = e
+	}
+	assert.Contains(t, byInd[IndSOFREFFR].Detail, `"persist_days":9`)
+	assert.Contains(t, byInd[IndUSDJPY].Detail, `"wow":-0.031`)
+	assert.Contains(t, byInd[IndUSDJPY].Detail, `"wow_ok":true`)
+
+	// 纯零值全绿行经 omitempty 省略三键（hy_oas 不填 Wow/WowOK/PersistDays）。
+	// 冒号形式锁死各键独立："wow": 不误匹配 "wow_ok":。
+	green := byInd[IndHYOAS].Detail
+	assert.NotContains(t, green, `"persist_days":`)
+	assert.NotContains(t, green, `"wow":`)
+	assert.NotContains(t, green, `"wow_ok":`)
+}

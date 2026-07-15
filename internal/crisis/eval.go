@@ -68,7 +68,8 @@ func buildEvaluations(r *DayResult, evalAt time.Time) ([]Evaluation, error) {
 	out := make([]Evaluation, 0, len(AllIndicators)+1)
 	for _, ind := range AllIndicators {
 		ir := r.Results[ind]
-		d, err := json.Marshal(indDetail{Raw: ir.RawStatus, WindowActualObs: ir.WindowActualObs})
+		d, err := json.Marshal(indDetail{Raw: ir.RawStatus, WindowActualObs: ir.WindowActualObs,
+			PersistDays: ir.PersistDays, Wow: ir.Wow, WowOK: ir.WowOK})
 		if err != nil {
 			return nil, err
 		}

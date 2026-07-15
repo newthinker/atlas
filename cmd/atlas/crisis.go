@@ -313,16 +313,18 @@ func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride 
 	if err != nil {
 		return err
 	}
+	// NotifyContext 必须在 AppendEvaluations 之前组装：PrevDay/StateDays/
+	// ClearStreak 取的是"截至昨日"的历史（通知设计 §8）
+	nc, err := buildNotifyContext(ctx, d, res)
+	if err != nil {
+		return err
+	}
 	if err := d.store.AppendEvaluations(ctx, res.Evaluations); err != nil {
 		return err
 	}
 	printDayResult(d.out, res)
 
-	days, err := stateStreakDays(ctx, d.store, res.State)
-	if err != nil {
-		return err
-	}
-	for _, msg := range crisis.Messages(res, days, summaryDue(target, res.State), staleIndicators(res)) {
+	for _, msg := range crisis.Messages(d.cfg, nc) {
 		if d.sender == nil {
 			fmt.Fprintln(d.out, msg) // 未配置 telegram：打印便于本地试运行
 			continue
@@ -333,6 +335,83 @@ func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride 
 		}
 	}
 	return nil
+}
+
+// buildNotifyContext 组装通知渲染输入（通知设计 §8）。必须在 AppendEvaluations
+// 之前调用：PrevDay/StateDays/ClearStreak 都取"截至昨日"的库内历史，当日增量
+// （今日行、今日 any_trigger）在此函数内补足。
+func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayResult) (crisis.NotifyContext, error) {
+	nc := crisis.NotifyContext{Res: res, SummaryDue: summaryDue(res.Date, res.State)}
+
+	nc.PrevDay = map[string]crisis.Evaluation{}
+	for _, ind := range crisis.AllIndicators {
+		evals, err := d.store.RecentIndicatorEvals(ctx, ind, 1)
+		if err != nil {
+			return nc, err
+		}
+		if len(evals) > 0 {
+			nc.PrevDay[ind] = evals[0]
+		}
+	}
+
+	// 变更消息展示"前状态已持续 N 日"；无变更消息含当日（补充决策 6）
+	if res.Transitioned() {
+		days, err := stateStreakDays(ctx, d.store, res.PrevState)
+		if err != nil {
+			return nc, err
+		}
+		nc.StateDays = days
+	} else {
+		days, err := stateStreakDays(ctx, d.store, res.State)
+		if err != nil {
+			return nc, err
+		}
+		nc.StateDays = days + 1
+	}
+
+	// P2 去重：仅"昨日非 STALE、今日 STALE"的指标发一次（通知设计 §2）
+	nc.StaleLastObs = map[string]string{}
+	for _, ind := range crisis.AllIndicators {
+		if res.Results[ind].Status != crisis.StatusStale {
+			continue
+		}
+		if prev, ok := nc.PrevDay[ind]; ok && prev.Status == crisis.StatusStale {
+			continue
+		}
+		nc.NewStale = append(nc.NewStale, ind)
+		o, err := d.store.LatestObservation(ctx, ind)
+		if err != nil {
+			return nc, err
+		}
+		if o != nil {
+			nc.StaleLastObs[ind] = o.Date
+		}
+	}
+
+	// 周报退出进度：历史 any_trigger=false 连续日数 + 今日（补充决策 8）
+	if res.State == crisis.StateWatch && nc.SummaryDue && !res.Detail.AnyTrigger {
+		base, err := crisis.ClearStreakDays(d.store.History(ctx), crisis.StateWatch, d.cfg.StateMachine.WatchExitDays)
+		if err != nil {
+			return nc, err
+		}
+		nc.ClearStreak = base + 1
+	}
+
+	// 月报趋势：仅 SummaryDue ∧ NORMAL 时组装（通知设计 §8）
+	if nc.SummaryDue && res.State == crisis.StateNormal {
+		nc.Trends = map[string]crisis.Trend{}
+		for _, ind := range crisis.AllIndicators {
+			win, err := d.store.SeriesWindow(ctx, ind, res.Date, 21)
+			if err != nil {
+				return nc, err
+			}
+			if len(win) == 0 {
+				continue
+			}
+			nc.Trends[ind] = crisis.Trend{Window: win, Delta: win[len(win)-1].Value - win[0].Value}
+		}
+	}
+	return nc, nil
 }
 
 // buildCrisisSender 复用主配置 notifiers.telegram 凭据（serve.go:330 同款构造，
@@ -374,16 +453,6 @@ func isFirstTradingDayOfMonth(t time.Time) bool {
 		first = first.AddDate(0, 0, 1)
 	}
 	return t.Equal(first)
-}
-
-func staleIndicators(res *crisis.DayResult) []string {
-	var out []string
-	for _, ind := range crisis.AllIndicators {
-		if res.Results[ind].Status == crisis.StatusStale {
-			out = append(out, ind)
-		}
-	}
-	return out
 }
 
 // intradayIndicator 是盘中告警的去重行标识（不属于 7 个正式指标）。
@@ -434,8 +503,7 @@ func executeCrisisIntraday(ctx context.Context, d crisisEvalDeps, quote func(str
 	}}); err != nil {
 		return err
 	}
-	msg := fmt.Sprintf("[P0] 盘中告警：USD/JPY 周环比 %.1f%%（现价 %.2f），疑似 carry trade 急平仓（%s，系统状态 %s）",
-		wow*100, q.Price, today, sys.SystemState)
+	msg := crisis.FormatIntradayAlert(q.Price, win[0].Value, wow, sys.SystemState, d.now())
 	if d.sender == nil {
 		fmt.Fprintln(d.out, msg)
 		return nil

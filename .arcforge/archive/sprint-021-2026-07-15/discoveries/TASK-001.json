@@ -1,0 +1,37 @@
+{
+  "task_id": "TASK-001",
+  "sprint": "sprint-021 (crisis notify v1.1)",
+  "key_findings": [
+    "R2/R3 纯文案修订：WATCH→BREWING 去掉「3–12 个月」具体时窗、加「此为状态描述而非预测，不构成操作依据」；CRISIS→WATCH「危机状态解除」改「危机状态退出，转入观察期；信用/流动性等其余层面可能仍异常，见下」。语义句表两键字面值更新，Task 3 全家族测试沿用。",
+    "R2 条件符号：renderTransition 降级分支按 splitZones(res) 的异常区是否为空选 ✅ 状态解除 / 🔽 状态回落。⚪(STALE/NO_DATA/季末) 走 noncolor 不计入异常区，故含 ⚪ 无 🔴🟡 仍用 ✅。升级路径前缀不变。",
+    "R1a 警示行 staleDowngradeWarning：降级当日 NewStale ∧ PrevDay(昨日)为 RED/AMBER → 尾注行前插「⚠ 注意：本次变更当日 {inds} 数据断更（断更前为{colors}），触发条件可能被动解除而非真实缓解，请人工核实。」。指标按 AllIndicators 序、颜色同序对应；升级路径 renderTransition 走 if 分支不调本函数（天然否定）。",
+    "零接口变更：staleDowngradeWarning 是包内私有、仅 renderTransition 消费；复用既有 splitZones/colorWord/severity/NewStale/PrevDay，import 仅加 slices（slices.Contains 判 NewStale 成员）。"
+  ],
+  "decisions": [
+    {
+      "decision": "N1（反审补充）最坏组合 ≤4096 用两个变体断言",
+      "rationale": "DoD 原文『7 指标全 NewStale 且断更前全 RED + 异常区非空』字面自相矛盾（全 NewStale=全 STALE 今日→异常区必空）。故拆两变体覆盖：(a) 7 全 NewStale 全 RED 断更（警示行 7 名 + 7 ⚪ 正文，长度上界，走 ✅）；(b) 1 今日 RED（异常区非空 🔽）+ 6 NewStale RED 断更（字面满足异常区非空）。两者均断言 ≤4096，共同覆盖『最坏组合无病态膨胀』的 N1 实质意图。"
+    },
+    {
+      "decision": "警示行插入尾注行之前（tail = w + \"\\n\" + tail），非正文分区内",
+      "rationale": "照 impl 文档 R1a：警示是对整次降级的溯源提示，紧邻尾注的『共持续 N 日』摘要更醒目；测试 assert.Less(index(⚠), index(共持续)) 锁位置。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go（import+slices；semanticSentences 两键；renderTransition else 条件符号+警示行插入；新增 staleDowngradeWarning）",
+    "internal/crisis/notify_render_test.go（两键期望+Upgrade/Downgrade 断言更新；新增 ConditionalGlyph/StaleWarning/StaleWarningWithinLimit；顺带 gofmt -w 清理本文件 sprint-020 两处既有注释对齐——全为本 dev 自有代码）"
+  ],
+  "interfaces_exposed": [
+    "func staleDowngradeWarning(nc NotifyContext) string  // 包内私有，仅 renderTransition 消费；R1a 断更溯源警示",
+    "语义句表两键字面值更新（WATCH→BREWING / CRISIS→WATCH），Task 3 全家族测试沿用"
+  ],
+  "verification": {
+    "impact": "Leader 代跑（新索引 v42，epistemic=exact）两目标均 LOW：renderTransition 上游唯一 Messages→executeCrisisEvalDaily→runCrisisEval；semanticSentence 上游唯一 renderTransition→Messages→executeCrisisEvalDaily。同链收敛，无 HIGH/CRITICAL，批复开工，与 impl Step 1 预期一致。",
+    "detect_changes": "Leader 代跑通过：risk medium（渲染枢纽文案修订，相称可接受）。新索引精确符号级：生产变更恰 renderTransition + semanticSentences 两符号，受影响执行流 4 条全为 Messages 内部渲染链（AllGreen/StateRank/MonthDay/SemanticSentence），与 impact 前置一致、无扩散；其余 touched 为同文件测试函数与插入位移。git 核对仅 notify_render 两文件（+170/-12），Leader 亲跑 T1 相关测试全绿。code-simplifier 确认无改动、gofmt 干净。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿；覆盖 8 条 DoD（R2/R3 文案两键+逐字、条件符号✅/🔽含落界、警示行三否定+多指标序+落界+位置、N1 两变体≤4096、非功能变异三项+coverprofile+禁词零引入+两包绿）",
+    "mutation_check": "三项均 FAIL：len(abnormal)>0→>=0（ConditionalGlyph FAIL）、severity <→<=（StaleWarning 落界 FAIL）、删警示行插入块（StaleWarning 主用例 FAIL）；还原后 PASS",
+    "coverage": "staleDowngradeWarning / renderTransition 函数级 100%（coverprofile 无 count=0）",
+    "commit": "783b39a feat(crisis): add downgrade provenance warning and conditional glyph (design v1.1 R1a/R2/R3)（2 文件 +170/-12；gofmt 自查干净）"
+  }
+}

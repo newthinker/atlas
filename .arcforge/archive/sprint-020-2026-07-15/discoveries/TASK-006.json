@@ -1,0 +1,37 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "diffLine 是多级判据：(1) 状态迁移优先于读数变化——同一指标既变色又变值时只出迁移句 '{ind} 转{色}（原{色}）'（migration 分支 continue，与读数句互斥）；(2) 读数变化仅列当日异常区指标（inAbnormal 守卫）；(3) 顺序按 AllIndicators；(4) 缺 PrevDay 行不参与（!ok continue）；(5) ⚪ 迁移经 colorWord 白分支渲染 '转白（原绿）'（P2 场景昨日绿今日 STALE）。",
+    "colorWord 把 GREEN/AMBER/RED 映射 绿/黄/红，其余（STALE/NO_DATA/SUPPRESSED_SEASONAL）统一 '白'。",
+    "renderDaily/renderWeekly 均复用 T4 bodyZones + T5 notifyFooter，首行/尾注格式照设计 §5.3/§5.5；周报退出进度注入 cfg.StateMachine.WatchExitDays。"
+  ],
+  "decisions": [
+    {
+      "decision": "diffLine 读数无变化用浮点直等 d != 0，刻意不引入 epsilon（Leader 确认的语义假设）",
+      "rationale": "PrevDay.Value 与当日 IndicatorResult.Value 同出一个 sqlite store 的 float 读写、无精度损失，'完全相等=无变化' 成立。引入 epsilon 反而会把'读数真有微小变化但小于 eps'误判为无变化。照 impl 设计保持直等；代码注释已就地说明该假设，供后续维护者知悉（若将来 PrevDay 来源改为跨精度计算需重审）。"
+    },
+    {
+      "decision": "TestDiffLineLevels 单个用例同时锁 5 级判据 + 两个变异自检",
+      "rationale": "多级判据每级须独立可区分：hy_oas 既变色又变值锁'迁移优先/互斥'（变异删 continue→FAIL）；vix 非异常仅变值锁'仅异常区'（变异去 inAbnormal 守卫→FAIL）；move 绿→STALE 锁 colorWord 白 + ⚪ 迁移；sofr 异常但缺 PrevDay 锁 boundary[1]；完整串断言锁 AllIndicators 序。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go (追加 colorWord/diffLine/renderDaily/renderWeekly)",
+    "internal/crisis/notify_render_test.go (追加 TestColorWord/TestDiffLineLevels/TestRenderDaily/TestRenderWeekly)"
+  ],
+  "interfaces_exposed": [
+    "func colorWord(s Status) string  // 包内私有，Status→色字（含'白'兜底）",
+    "func diffLine(nc NotifyContext) string  // 包内私有，'较昨日'差异行",
+    "func renderDaily(cfg *Config, nc NotifyContext) string  // 消息 3，T9 装配",
+    "func renderWeekly(cfg *Config, nc NotifyContext) string  // 消息 5，T9 装配"
+  ],
+  "verification": {
+    "impact": "纯追加函数无既有调用方（T9 才装配）；门禁 detect_changes 由 Leader 代跑",
+    "detect_changes": "Leader 代跑通过：risk low，affected_processes 为空，变更仅 notify_render 两文件（+140 纯追加）。输出中出现的 cmd/atlas 符号是 dev-agent-2 的 T8 未提交插入造成的行号位移伪影（T8 侧已核实纯新增），与本任务无关。Leader 亲跑 T6 四组测试全绿。",
+    "build": "GOTOOLCHAIN=local go build ./internal/... 通过；go build ./... 亦通过（T8 cmd 未破坏全仓编译）",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；4 测试覆盖 7 条 DoD：functional[0] renderDaily 首行/异常区/尾注、functional[1] diffLine 迁移优先+仅异常区+AllIndicators 序、functional[2] renderWeekly 首行/退出进度/尾注（返工加 WatchExitDays=25 异值注入锁）、boundary[0] 无变化、boundary[1] 缺 PrevDay 跳过、non_functional[0] 均以 notifyFooter 结尾",
+    "mutation_check": "迁移优先：删 migration 分支 continue → TestDiffLineLevels FAIL；仅异常区：去 inAbnormal 守卫 → FAIL；返工后 renderWeekly 的 WatchExitDays 硬编码 20 → TestRenderWeekly FAIL（首轮拒因：testConfig.WatchExitDays 恰为 20 与硬编码不可区分，未异值锁）；均还原后 PASS",
+    "coverage": "colorWord/diffLine/renderDaily/renderWeekly 函数级覆盖 100%（coverprofile 无 count=0）",
+    "commit": "569933e feat(crisis): render daily digest and weekly summary messages；caab292 test(crisis): pin weekly exit target to config value（返工 epoch=2，rework 1）"
+  }
+}

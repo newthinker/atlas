@@ -240,3 +240,59 @@ func TestExitStreakRequiresInStateHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateBrewing, next, "异态历史行不得计入 BREWING 退出冷却")
 }
+
+func clearStreakEval(date string, anyTrigger bool) Evaluation {
+	d, _ := json.Marshal(SysDetail{Date: date, AnyTrigger: anyTrigger, Prev: StateWatch})
+	return Evaluation{TS: date, Indicator: "", SystemState: StateWatch, Detail: string(d)}
+}
+
+// ClearStreakDays：state 态内、any_trigger=false 的连续历史日数（周报退出进度，
+// 设计 §6.6）。clearStreakEval 造的都是 WATCH 态行，故既有子例传 StateWatch。
+func TestClearStreakDays(t *testing.T) {
+	h := NewMemHistory()
+	h.Append([]Evaluation{clearStreakEval("2026-07-06", true)})
+	h.Append([]Evaluation{clearStreakEval("2026-07-07", false)})
+	h.Append([]Evaluation{clearStreakEval("2026-07-08", false)})
+	n, err := ClearStreakDays(h, StateWatch, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n) // 最新两行 false，第三行 true 中断
+
+	// 空历史 → 0
+	n, err = ClearStreakDays(NewMemHistory(), StateWatch, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	// 坏 detail 行 → 中断计数而非上抛（同 systemDetailStreak 的保守约定）
+	h2 := NewMemHistory()
+	h2.Append([]Evaluation{{TS: "2026-07-07", Indicator: "", SystemState: StateWatch, Detail: "not-json"}})
+	h2.Append([]Evaluation{clearStreakEval("2026-07-08", false)})
+	n, err = ClearStreakDays(h2, StateWatch, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	// RecentSystem 返回错误 → 原样上抛（error_handling[1]）
+	_, err = ClearStreakDays(errHistory{err: assertErr}, StateWatch, 20)
+	assert.ErrorIs(t, err, assertErr)
+
+	// max 封顶回看深度：3 行全 false，max=2 只数 2（boundary[1]）
+	h3 := NewMemHistory()
+	h3.Append([]Evaluation{clearStreakEval("2026-07-06", false)})
+	h3.Append([]Evaluation{clearStreakEval("2026-07-07", false)})
+	h3.Append([]Evaluation{clearStreakEval("2026-07-08", false)})
+	n, err = ClearStreakDays(h3, StateWatch, 2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	// 态内计数（QA CRITICAL 修复）：CRISIS 康复尾段 18 行 false + 今日进 WATCH 的 1 行
+	// false，喂 StateWatch 只应数 WATCH 那 1 行——异态历史行不得污染 WATCH 退出进度。
+	// （RecentSystem 新→旧：WATCH 在最前，遇 CRISIS 态即 break）
+	mixed := NewMemHistory()
+	cb, _ := json.Marshal(SysDetail{AnyTrigger: false, Prev: StateCrisis})
+	for i := 0; i < 18; i++ {
+		mixed.Append([]Evaluation{{Indicator: "", SystemState: StateCrisis, Detail: string(cb)}})
+	}
+	mixed.Append([]Evaluation{clearStreakEval("2026-07-09", false)}) // WATCH 态，最新
+	n, err = ClearStreakDays(mixed, StateWatch, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n) // 修复前会数满 19
+}

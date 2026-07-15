@@ -2,70 +2,45 @@ package crisis
 
 import (
 	"fmt"
-	"strings"
+	"time"
 )
 
 // Sender is the outbound channel; telegram.Telegram's SendText satisfies it.
 // Single channel, no priority routing — urgency rides in the [P0]/[P1]/[P2]
-// text prefix (design §4.4).
+// text prefix. All messages are plain text (no parse_mode): emoji and
+// sparkline glyphs are ordinary characters (通知设计 §7).
 type Sender interface {
 	SendText(text string) error
 }
 
-// footer is the fixed boundary disclaimer (design §5). Wording stays
-// probabilistic everywhere — deterministic claims are banned by test.
-const footer = "\n—\n本通知为风险状态提示（概率语言），非交易信号；指标组合基于有限历史危机样本，存在失效可能；资产操作决策（降杠杆、网格暂停等）不在本模块范围。"
-
-// Messages renders the day's outbound notifications per the design §3.3
-// state/notification table: transition alerts ([P0] on entering
-// BREWING/CRISIS, else [P1]), daily digests while in BREWING/CRISIS, periodic
-// summaries (monthly in NORMAL, weekly in WATCH — summaryDue computed by the
-// caller), plus [P2] ops alerts for stale indicators.
-func Messages(res *DayResult, stateDays int, summaryDue bool, staleInds []string) []string {
+// Messages renders the day's outbound notifications per 通知设计 §2 的消息类型
+// 矩阵：结构化家族（状态变更 / BREWING·CRISIS 日报 / NORMAL 月报 / WATCH 周报）
+// 至多一条，加每个新进入 STALE 的指标一条 [P2] 速报。SummaryDue、NewStale 等
+// 输入由 cmd 层在落库前组装（buildNotifyContext）。
+func Messages(cfg *Config, nc NotifyContext) []string {
 	var msgs []string
-
+	res := nc.Res
 	switch {
 	case res.Transitioned():
-		prefix := "[P1]"
-		if res.State == StateBrewing || res.State == StateCrisis {
-			prefix = "[P0]"
-		}
-		msgs = append(msgs, fmt.Sprintf("%s 危机监控状态变更：%s → %s（%s）\n%s%s",
-			prefix, res.PrevState, res.State, res.Date, indicatorLines(res), footer))
+		msgs = append(msgs, renderTransition(cfg, nc))
 	case res.State == StateBrewing || res.State == StateCrisis:
-		msgs = append(msgs, fmt.Sprintf("[P1] 危机监控日报（%s 第 %d 个评估日，%s）\n%s%s",
-			res.State, stateDays, res.Date, indicatorLines(res), footer))
-	case summaryDue:
-		kind := "月度摘要"
-		if res.State == StateWatch {
-			kind = "周度摘要"
-		}
-		msgs = append(msgs, fmt.Sprintf("[P1] 危机监控%s（%s，%s 已持续 %d 个评估日）\n%s%s",
-			kind, res.Date, res.State, stateDays, indicatorLines(res), footer))
+		msgs = append(msgs, renderDaily(cfg, nc))
+	case nc.SummaryDue && res.State == StateNormal:
+		msgs = append(msgs, renderMonthly(cfg, nc))
+	case nc.SummaryDue && res.State == StateWatch:
+		msgs = append(msgs, renderWeekly(cfg, nc))
 	}
-
-	for _, ind := range staleInds {
-		msgs = append(msgs, fmt.Sprintf(
-			"[P2] 运维告警：%s 数据超过新鲜度窗口，标记 STALE，已退出共振计数（%s）", ind, res.Date))
+	for _, ind := range nc.NewStale {
+		msgs = append(msgs, renderOpsAlert(cfg, nc, ind))
 	}
 	return msgs
 }
 
-// indicatorLines renders one line per indicator: status, reading, 5y
-// percentile and tag（设计 §4.4 模板要素），加下一评估提示。
-func indicatorLines(res *DayResult) string {
-	var b strings.Builder
-	for _, ind := range AllIndicators {
-		r := res.Results[ind]
-		fmt.Fprintf(&b, "%-10s %-20s %10.2f", ind, r.Status, r.Value)
-		if r.Pct5y >= 0 {
-			fmt.Fprintf(&b, "  5y分位 %2.0f%%", r.Pct5y*100)
-		}
-		if r.Tag != "" {
-			fmt.Fprintf(&b, "  [%s]", r.Tag)
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("下一评估：下一交易日（launchd 多时点唤起）")
-	return b.String()
+// FormatIntradayAlert 消息 7：盘中 JPY 速报（通知设计 §5.7，v1.1 R5：去因果
+// 归因，报事实 + 内联限定语；该限定语非页脚常量，速报家族无页脚规则不变）。
+// at 为本地时区时刻；每日一次去重由 executeCrisisIntraday 的评估行保证。
+func FormatIntradayAlert(price, base, wow float64, state SystemState, at time.Time) string {
+	return fmt.Sprintf(
+		"[P0] 🚨 USD/JPY 盘中急跌 %.1f%% · %s\n现价 %.1f（5 观测日前 %.1f）· 系统状态 %s · 成因未核实，非交易信号。今日此告警不再重复。",
+		wow*100, at.Format("01-02 15:04"), price, base, state)
 }

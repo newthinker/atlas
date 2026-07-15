@@ -1,0 +1,50 @@
+{
+  "id": "TASK-001",
+  "title": "语义句修订、降级条件符号与断更警示行（R1a/R2/R3）",
+  "description": "notify_render.go：semanticSentences 两键改文案（WATCH→BREWING 去预测感、CRISIS→WATCH 危机退出措辞）；renderTransition 降级分支改条件符号（✅ 仅异常区空/🔽 状态回落）并在尾注前插 staleDowngradeWarning 警示行；新增包内私有 staleDowngradeWarning(nc)（NewStale ∧ PrevDay 前状态≥AMBER，AllIndicators 序）。实施步骤与完整代码见 impl 文档 Task 1。前置：对 renderTransition/semanticSentence 跑 gitnexus_impact(upstream)。",
+  "module": "internal/crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "WATCH→BREWING 语义句含「此为状态描述而非预测，不构成操作依据」且不含「3–12 个月」；CRISIS→WATCH 含「危机状态退出，转入观察期；信用/流动性等其余层面可能仍异常，见下」且不含「危机状态解除」（逐字对设计 v1.1 R2/R3）",
+      "降级条件符号：异常区为空 → 「[P1] ✅ 状态解除」；异常区非空 → 「[P1] 🔽 状态回落」；⚪ 不计入异常区（含 ⚪ 无 🔴🟡 仍用 ✅）；升级路径前缀不变",
+      "警示行：降级 ∧ NewStale 非空 ∧ 断更前（PrevDay）为 RED/AMBER → 尾注行前出现「⚠ 注意：本次变更当日 {inds} 数据断更（断更前为{colors}），触发条件可能被动解除而非真实缓解，请人工核实。」；多指标按 AllIndicators 序、颜色同序对应"
+    ],
+    "boundary": [
+      "条件符号恰好落界：恰有一个 AMBER → 🔽；断更前恰为 AMBER → 警示行出现",
+      "警示行三条件独立否定：NewStale 空 / 断更前为绿 / 升级路径（即使 NewStale+RED）均不出现"
+    ],
+    "non_functional": [
+      {
+        "desc": "变异自检三项 FAIL：len(abnormal)>0→>=0、severity <→<=、删警示行插入块；staleDowngradeWarning 全分支 coverprofile 非零；新文案禁词零引入；最坏组合降级消息（7 指标全 NewStale 且断更前全 RED + 异常区非空）长度 ≤4096（N1）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "gitnexus_impact 已跑且无未处置 HIGH/CRITICAL；提交前 detect_changes + code-simplifier",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿（含既有回归）",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-15-crisis-notify-v1.1-impl.md#task-1"
+}

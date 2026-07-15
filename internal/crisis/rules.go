@@ -102,8 +102,11 @@ func evalVIX(cfg *Config, date string, sr SeriesReader, res *IndicatorResult) er
 	if err != nil {
 		return err
 	}
-	if wow, ok := WowPct(win); ok && wow > c.WeeklySpikePct {
-		res.RawStatus = maxStatus(res.RawStatus, StatusAmber)
+	if wow, ok := WowPct(win); ok {
+		res.Wow, res.WowOK = wow, true
+		if wow > c.WeeklySpikePct {
+			res.RawStatus = maxStatus(res.RawStatus, StatusAmber)
+		}
 	}
 	return nil
 }
@@ -118,23 +121,43 @@ func evalMOVE(cfg *Config, res *IndicatorResult) {
 	}
 }
 
+// persistLookbackObs caps the "持续 N 个交易日" count in notifications. It is
+// a display bound, not a rule threshold (thresholds live in YAML); ~6 weeks
+// covers any persistence worth reporting.
+const persistLookbackObs = 30
+
 // evalSOFREFFR: persistence conditions are the core noise filter (design
 // §3.1 note 3) — red needs red_persist_days consecutive observations above
-// red_bp, amber likewise over its own window.
+// red_bp, amber likewise over its own window. The wider lookback only feeds
+// PersistDays for notifications; the rule windows are unchanged via lastN.
 func evalSOFREFFR(cfg *Config, date string, sr SeriesReader, res *IndicatorResult) error {
 	c := cfg.Indicators.SOFREFFR
-	win, err := sr.Window(IndSOFREFFR, date, c.RedPersistDays)
+	win, err := sr.Window(IndSOFREFFR, date, persistLookbackObs)
 	if err != nil {
 		return err
 	}
-	if len(win) >= c.RedPersistDays && allAbove(win, c.RedBp) {
+	if len(win) >= c.RedPersistDays && allAbove(lastN(win, c.RedPersistDays), c.RedBp) {
 		res.RawStatus = StatusRed
+		res.PersistDays = consecutiveAbove(win, c.RedBp)
 		return nil
 	}
 	if len(win) >= c.AmberPersistDays && allAbove(lastN(win, c.AmberPersistDays), c.AmberBp) {
 		res.RawStatus = StatusAmber
+		res.PersistDays = consecutiveAbove(win, c.AmberBp)
 	}
 	return nil
+}
+
+// consecutiveAbove counts trailing observations strictly above threshold.
+func consecutiveAbove(obs []Observation, threshold float64) int {
+	n := 0
+	for i := len(obs) - 1; i >= 0; i-- {
+		if obs[i].Value <= threshold {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // evalHYOAS: two-sided amber (design §3.1 note 1) — too tight is complacency,
@@ -209,6 +232,7 @@ func evalUSDJPY(cfg *Config, date string, sr SeriesReader, res *IndicatorResult)
 		return err
 	}
 	if wow, ok := WowPct(win); ok {
+		res.Wow, res.WowOK = wow, true
 		switch {
 		case wow <= c.RedWowPct:
 			res.RawStatus = StatusRed
