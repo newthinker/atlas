@@ -1,0 +1,36 @@
+{
+  "task_id": "TASK-002",
+  "sprint": "sprint-021 (crisis notify v1.1)",
+  "key_findings": [
+    "R4 diffLine 双非色彩迁移：迁移分支加 !isColor(prev)&&!isColor(cur) 判断——双非色彩(STALE↔NO_DATA↔SUPPRESSED 之间)用 nonColorNote 具体说明（如 sofr_effr 转季末抑制（原数据断更(STALE)））；否则(含混合迁移绿↔非色彩)仍 colorWord（转白（原绿）保持不动）。避免 v1.0 的『转白（原白）』信息丢失。",
+    "R6 renderOpsAlert 术语外化：两分支(有/无历史观测)措辞统一改『已标记 STALE、不再计入触发判定；数据恢复后自动重新计入』，移除内部实现术语『退出共振计数/恢复后自动回归』——面向运维读者用业务语言。整函数重构为 body 变量 + 末尾 R1b 追加，避免两分支各拼一遍。",
+    "R1b renderOpsAlert 条件警示行：断更前(PrevDay) severity>=AMBER → 末行追加『⚠ 断更前为{色}且计入触发判定，今日若出现状态解除可能为被动解除，请人工核实。』。与 T1 的 staleDowngradeWarning(状态变更消息里)互补——T1 在降级消息、T2 在 P2 速报，两处都提示被动解除风险。",
+    "零接口变更：无新符号，复用 isColor/nonColorNote/colorWord/severity/PrevDay；仅 diffLine 迁移分支 + renderOpsAlert 整函数改写。"
+  ],
+  "decisions": [
+    {
+      "decision": "R4 判断用 !isColor(prev) && !isColor(cur)（双非色彩才走 nonColorNote）",
+      "rationale": "混合迁移（绿→STALE 等）一端是色彩，colorWord 已能表达（转白（原绿）），无需 nonColorNote；只有两端都非色彩时 colorWord 会得『转白（原白）』丢失区分，才需 nonColorNote。变异 &&→|| 会让混合迁移也走 nonColorNote → 破坏既有『转白（原绿）』断言，已验证 FAIL。"
+    },
+    {
+      "decision": "暂不采纳 code-simplifier 的可选 DRY nit（diffLine R4 用 label 函数变量消格式串）",
+      "rationale": "该建议干净、行为等价、code-simplifier 背书，但发现时 T2 已 dev_done 且 test-agent 正验证 a7e41f9——amend 改 hash 会扰乱在途验证，得不偿失。code-simplifier 亦明确『不改也完全可接受』。已回退未提交的重构、保持工作区与 a7e41f9 一致；nit 记录在案，可下轮维护单独 style 提交采纳。教训：采纳可选 nit 前先确认任务未在验证中。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go（diffLine 迁移分支加双非色彩；renderOpsAlert 整函数重构 R6 措辞+R1b 警示）",
+    "internal/crisis/notify_render_test.go（TestDiffLineLevels 加 R4 子例；TestRenderOpsAlert 换 R6 措辞+加 R1b 四子例；gofmt -w 本 dev 自有文件）"
+  ],
+  "interfaces_exposed": [
+    "无新符号；修订后 P2 文案字面值（Task 3 全家族测试沿用）：『已标记 STALE、不再计入触发判定；数据恢复后自动重新计入』+ R1b 警示行"
+  ],
+  "verification": {
+    "impact": "Leader 代跑（epistemic=exact）两目标均 LOW：diffLine 上游经 renderDaily 收敛 Messages；renderOpsAlert 上游 Messages→executeCrisisEvalDaily→runCrisisEval。无 HIGH/CRITICAL，与预期一致。",
+    "detect_changes": "Leader 代跑通过 risk medium 相称：生产符号检出 diffLine（renderDaily 为行位移伪影），受影响流 2 条均日报渲染链（Messages→ColorWord/FormatDelta）；工具未按名列 renderOpsAlert 是 hunk 映射已知不完美（sprint-020 记录过同款），Leader 以 git diff 交叉核对——变更仅 notify_render 两文件（+59/-13）、无越界。Leader 亲跑 diffLine/OpsAlert/Daily 测试全绿。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ 全绿；覆盖 7 条 DoD：R4 双非色彩+混合不动+无转白原白、R6 两分支措辞外化+旧术语负向、R1b 三否定+AMBER 落界、变异两项、gofmt/禁词/两包绿",
+    "mutation_check": "两项均 FAIL：R4 &&→||（双非色彩用例 FAIL，混合迁移被误改）、R1b >=→>（AMBER 落界用例 FAIL）；还原后 PASS",
+    "coverage": "diffLine / renderOpsAlert 函数级 100%（coverprofile 无 count=0）",
+    "commit": "a7e41f9 feat(crisis): non-color diff wording and ops alert provenance (design v1.1 R1b/R4/R6)（2 文件 +59/-13；gofmt 自查干净）"
+  }
+}

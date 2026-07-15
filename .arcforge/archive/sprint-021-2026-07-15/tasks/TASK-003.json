@@ -1,0 +1,59 @@
+{
+  "id": "TASK-003",
+  "title": "盘中速报去归因与页脚断言重构（R5 + 测试连锁）",
+  "description": "notify.go：FormatIntradayAlert 格式串去「疑似 carry trade 快速平仓」、加「成因未核实，非交易信号」内联限定语；notify_test.go：TestFormatIntradayAlert 断言更新 + TestMessagesForbiddenWordsAllFamilies 页脚归属改 HasSuffix(notifyFooter)（子串判定因限定语失效）；cmd/atlas/crisis_test.go：「carry trade」断言改「成因未核实」（仅字符串、不放宽强度）。实施步骤见 impl 文档 Task 3。跨两包=生产变更与 cmd 测试断言适配须原子提交（AD-2；cmd 侧仅测试文件）。coverage_minimum=35 依据归档先例（sprint-001 Leader 裁决 + 8 处同值：cmd package main 含任务外 glue，任务级字段覆盖全局 dev_minimum；N2 出处注明）。前置：对 FormatIntradayAlert 跑 gitnexus_impact。",
+  "module": "internal/crisis + cmd/atlas(test-only)",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/crisis/notify.go",
+    "internal/crisis/notify_test.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "盘中速报含「成因未核实，非交易信号」、不含「carry trade」；首行/现价/系统状态/去重说明格式不变（逐字对设计 v1.1 R5）",
+      "全家族页脚归属改按 HasSuffix(notifyFooter) 判定：5 条结构化消息为真、P2 与盘中速报为假；断言家族计数 5+2",
+      "cmd/atlas 盘中断言完成措辞适配且既有断言强度不放宽",
+      "原则 3 集成断言：Messages(降级 ∧ NewStale ∧ 断更前 RED) 同时产出带 ⚠ 警示的转移消息与带 ⚠ 警示的 P2 速报（N3）"
+    ],
+    "boundary": [
+      "盘中速报不以 notifyFooter 结尾（HasSuffix 为假的显式断言）"
+    ],
+    "non_functional": [
+      {
+        "desc": "变异自检 FAIL：盘中速报误挂 notifyFooter → TestFormatIntradayAlert 与全家族测试均 FAIL；grep 终检 carry trade/退出共振计数/危机状态解除/3–12 个月 全仓零命中",
+        "verify_by": "test"
+      },
+      {
+        "desc": "gitnexus_impact（FormatIntradayAlert）已跑无 HIGH/CRITICAL；提交前 detect_changes + code-simplifier；生产变更与 cmd 断言适配在同一提交（git show 核查，AD-2/N4）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ ./cmd/atlas/ 两包全绿；禁词全家族回归 + 4096 上限保持",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/crisis",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "coverage_minimum": 35,
+  "impl_ref": "docs/plans/2026-07-15-crisis-notify-v1.1-impl.md#task-3"
+}

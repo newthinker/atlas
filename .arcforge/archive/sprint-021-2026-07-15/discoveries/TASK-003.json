@@ -1,0 +1,34 @@
+{
+  "task_id": "TASK-003",
+  "sprint": "sprint-021 (crisis notify v1.1) — 收官任务",
+  "key_findings": [
+    "R5 盘中速报去归因：FormatIntradayAlert 的『疑似 carry trade 快速平仓』改『成因未核实，非交易信号』——报事实 + 内联限定语，不做未核实的因果归因。该限定语含『非交易信号』字样但非页脚常量 notifyFooter，速报家族无页脚规则不变。",
+    "页脚归属断言连锁重构：因盘中速报现含『非交易信号』内联限定语，旧的子串判定（Contains『非交易信号』）失效——改按 HasSuffix(notifyFooter) 完整常量判定，并加家族计数 5(结构化)+2(P2+盘中)。这是 R5 引发的测试连锁。",
+    "N3 集成断言（反审补充）：TestMessagesStaleDowngradeIntegration 在装配层(Messages)联合验证 T1 的 staleDowngradeWarning(转移消息⚠) 与 T2 的 R1b(P2⚠)——降级∧NewStale∧断更前RED 时两个警示同时出现，转移消息带页脚、P2 不带。",
+    "AD-2 原子性(N4)：cmd/atlas/crisis_test.go 的 carry trade 断言与生产 FormatIntradayAlert 改动在同一提交（否则中间提交点 cmd 测试会红）。"
+  ],
+  "decisions": [
+    {
+      "decision": "grep 终检『四旧词全仓零命中』理解为『旧消息文案不出现在输出』，非字面全零",
+      "rationale": "DoD 同时要求(a)测试有 NotContains 旧词断言(functional『不含 carry trade/3–12 个月』等) 与 (b)grep 零命中——字面自相矛盾（NotContains 断言必须引用旧词字面值）。唯一自洽解释=生产消息串无旧文案(已确认 notify.go/notify_render.go 零命中)。grep 剩余命中=测试 absence 断言(合法验证) + 两处生产域注释(rules.go:226/crisis.go:463 用 carry trade 作金融机制术语，非消息文案)。两处域注释处置由 Leader 裁决（见 verification.grep_ruling）。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/notify.go（FormatIntradayAlert 去归因）",
+    "internal/crisis/notify_test.go（TestFormatIntradayAlert 断言 + 页脚归属重构 HasSuffix+计数 + N3 集成断言）",
+    "cmd/atlas/crisis_test.go（盘中断言 carry trade→成因未核实，AD-2 同提交）"
+  ],
+  "interfaces_exposed": [
+    "无新符号；FormatIntradayAlert 格式串修订（cmd 测试断言依赖『成因未核实』片段）"
+  ],
+  "verification": {
+    "impact": "Leader 代跑（epistemic=exact）LOW：FormatIntradayAlert 上游唯一直接调用方 executeCrisisIntraday→runCrisisEval，无 HIGH/CRITICAL，与预期一致。",
+    "detect_changes": "Leader 代跑通过：risk low，affected_processes 为空。符号级输出严丝合缝：生产仅 FormatIntradayAlert，其余为两包测试函数（含 cmd 断言适配），恰 3 文件（+45/-15）。Leader 亲跑盘中/全家族/N3 集成测试全绿。code-simplifier 确认无改动、gofmt 干净，并肯定页脚归属改用『盘中急跌』内容子串区分安全（日报尾注『盘中 JPY 监测运行中』无碰撞）。",
+    "grep_ruling": "Leader 裁决（记于 02-plan/requirement-dod-matrix.md『DoD 解释性裁决 2026-07-15』，方案 A）：grep『四旧词全仓零命中』按意图=生产消息字面值零命中；测试 NotContains 守卫（须字面引用旧词以断言缺席）+ 工程域注释（rules.go:226/crisis.go:463 解释金融机制的 carry trade 术语）豁免；R5 对象是用户可见文案、非注释术语。故 T3 scope 保持 3 文件，rules.go/crisis.go 不动。生产消息字面值零旧文案已确认（notify.go/notify_render.go）。",
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "test": "GOTOOLCHAIN=local go test ./internal/crisis/ ./cmd/atlas/ 全绿；覆盖 8 条 DoD：R5 去归因逐字、页脚归属 HasSuffix+5/2 计数、cmd 断言适配、N3 集成、boundary 盘中不挂页脚、变异+grep+两包绿+4096/禁词回归",
+    "mutation_check": "盘中误挂 notifyFooter（返回值 + notifyFooter）→ TestFormatIntradayAlert + TestMessagesForbiddenWordsAllFamilies 均 FAIL；还原后 PASS",
+    "coverage": "FormatIntradayAlert 函数级 100%（coverprofile）",
+    "commit": "da72f04 feat(crisis): factual intraday alert wording and footer-constant assertions (design v1.1 R5)（AD-2 原子三文件跨两包 +45/-15；git show 可核 N4；gofmt 自查干净）"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "id": "TASK-002",
+  "title": "diffLine 双非色彩迁移与 P2 速报修订（R1b/R4/R6）",
+  "description": "notify_render.go：diffLine 迁移分支——两侧均非色彩时用 nonColorNote 具体文案（混合迁移维持 colorWord）；renderOpsAlert——R6 术语外化（「已标记 STALE、不再计入触发判定；数据恢复后自动重新计入」）+ R1b 断更前 RED/AMBER 追加被动解除警示行。实施步骤与完整代码见 impl 文档 Task 2。与 TASK-001 同文件追加写，串行。",
+  "module": "internal/crisis",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "双非色彩迁移用具体说明：STALE→季末抑制 → 「sofr_effr 转季末抑制（原数据断更(STALE)）」、NO_DATA→STALE → 「nfci 转数据断更(STALE)（原无数据(NO_DATA)）」；输出不含「转白（原白）」；混合迁移（绿→STALE）维持「转白（原绿）」既有断言",
+      "P2 术语外化：两个分支（有/无历史观测）的文案均为「已标记 STALE、不再计入触发判定；数据恢复后自动重新计入」，不再出现「退出共振计数」「恢复后自动回归」",
+      "R1b 条件行：断更前（PrevDay）为 RED/AMBER → P2 末行追加「⚠ 断更前为{色}且计入触发判定，今日若出现状态解除可能为被动解除，请人工核实。」"
+    ],
+    "boundary": [
+      "R1b 落界与否定：断更前恰为 AMBER → 出现；断更前为绿 → 不出现；PrevDay 缺行 → 不出现"
+    ],
+    "non_functional": [
+      {
+        "desc": "变异自检两项 FAIL：R4 分支 && → ||、R1b >= → >；新文案禁词零引入",
+        "verify_by": "test"
+      },
+      {
+        "desc": "gitnexus_impact（diffLine/renderOpsAlert）已跑无 HIGH/CRITICAL；提交前 detect_changes + code-simplifier",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过且 go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "impl_ref": "docs/plans/2026-07-15-crisis-notify-v1.1-impl.md#task-2"
+}
