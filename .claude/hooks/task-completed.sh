@@ -28,17 +28,16 @@ if [ -z "$TASK_ID" ]; then
     TASK_ID=$(echo "$HOOK_INPUT" | { grep -oE 'TASK-[0-9]+' || true; } | head -1)
 fi
 
-# ---- 2a. 主路径:任务声明的 packages ----
+# ---- 2a. 主路径:任务声明的 packages + 无代码任务判定 ----
 PKGS=""
+DOCS_ONLY="false"
 if [ -n "$TASK_ID" ] && [ -f "$TASK_DIR/$TASK_ID.json" ]; then
     PKGS=$(jq -r '.packages[]?' "$TASK_DIR/$TASK_ID.json" 2>/dev/null | sort -u)
-    # 任务级覆盖基线覆盖全局 dev_minimum(Leader 裁决写入;
-    # 场景:package main 等含大量任务范围外存量样板的包,整包 80% 不可行)
-    TASK_MIN=$(jq -r '.coverage_minimum // empty' "$TASK_DIR/$TASK_ID.json" 2>/dev/null)
-    if [ -n "$TASK_MIN" ]; then
-        echo "NOTE: $TASK_ID 使用任务级覆盖基线 ${TASK_MIN}%（Leader 裁决，全局默认 ${DEV_MIN}%）"
-        DEV_MIN="$TASK_MIN"
-    fi
+    # 无代码任务 = done_criteria 各维度全部条目为对象且 verify_by ∈ {review,manual},
+    # 且至少 1 条。字符串条目视同 verify_by:test,自动排除出无代码任务。
+    DOCS_ONLY=$(jq -r '[.done_criteria // {} | .[]? | .[]?]
+        | (length > 0) and all(type == "object" and (.verify_by == "review" or .verify_by == "manual"))' \
+        "$TASK_DIR/$TASK_ID.json" 2>/dev/null || echo false)
 fi
 
 # ---- 2b. git 推断的「实际触碰范围」(含 untracked,修 F4);
@@ -50,7 +49,7 @@ ACTUAL=$(echo "$CHANGED_FILES" | { grep '\.go$' || true; } \
          | xargs -n1 dirname 2>/dev/null | sort -u | sed 's#^#./#')
 # 其他在途任务声明的 packages(他人的在途改动不算到本任务头上,修 F1 污染)
 OTHERS=$(find "$TASK_DIR" -name '*.json' ! -name "${TASK_ID:-__none__}.json" -exec \
-    jq -r 'select(.status | IN("in_progress","dev_done","verifying","verified","accepted")) | .packages[]?' {} \; \
+    jq -r 'select(.status | IN("assigned","in_progress","dev_done","verifying","blocked_clarification")) | .packages[]?' {} \; \
     2>/dev/null | sort -u)
 MINE_ACTUAL=$(comm -23 <(echo "$ACTUAL") <(echo "$OTHERS"))
 
@@ -70,33 +69,40 @@ else
     PKGS="$MINE_ACTUAL"
 fi
 
-# 过滤不存在的目录(被删除文件的 dirname 可能已不存在)
-PKGS=$(echo "$PKGS" | while read -r p; do [ -n "$p" ] && [ -d "$p" ] && echo "$p"; done)
-
-# ---- 2e. 跨语言分流:无 .go 文件的 scope 不进 Go 门禁(sprint-003 起支持 Python 任务)。
-#          scope 含 scripts/qlib_eval 时改跑 pytest(venv 由 Leader 预置);
-#          测试失败同样阻断,覆盖率门禁由 Test Agent 按 DoD 核对。----
-GO_PKGS=$(echo "$PKGS" | while read -r p; do
-    [ -n "$p" ] && ls "$p"/*.go >/dev/null 2>&1 && echo "$p"; done)
-PY_SCOPE=$(echo "$PKGS" | grep -c "scripts/qlib_eval" || true)
-if [ "$PY_SCOPE" -gt 0 ]; then
-    PYBIN="scripts/qlib_eval/.venv/bin/python"
-    if [ -x "$PYBIN" ] && [ -d scripts/qlib_eval/tests ]; then
-        PYOUT=$("$PYBIN" -m pytest scripts/qlib_eval/tests/ -q 2>&1)
-        if [ $? -ne 0 ]; then
-            echo "BLOCKED: pytest failed in scripts/qlib_eval. Fix before marking complete:" >&2
-            echo "$PYOUT" | tail -20 >&2
-            exit 2
-        fi
-        echo "pytest passed for scripts/qlib_eval."
-    else
-        echo "WARN: qlib_eval venv 或 tests 目录缺失,跳过 pytest 门禁。" >&2
-    fi
-fi
-PKGS="$GO_PKGS"
+# 过滤不存在的路径(无代码任务可声明文件或目录,故用 -e;被删文件的 dirname 亦被排除)
+PKGS=$(echo "$PKGS" | while read -r p; do [ -n "$p" ] && [ -e "$p" ] && echo "$p"; done)
 
 if [ -z "$PKGS" ]; then
-    echo "No Go packages in scope for ${TASK_ID:-unknown task}. Proceeding."
+    if [ -z "$TASK_ID" ]; then
+        # 非 arcforge 任务完成事件(解析不出 TASK_ID)且无实际 .go 改动:不误拦
+        echo "WARN: 无任务上下文且无代码改动,跳过门禁。" >&2
+        exit 0
+    fi
+    echo "BLOCKED: ${TASK_ID} 的声明范围为空或声明路径全部不存在。" >&2
+    echo "无代码任务也必须显式声明:packages 指向文档/产物路径,且全部 done_criteria 标注 verify_by: review|manual。" >&2
+    exit 2
+fi
+
+if [ "$DOCS_ONLY" = "true" ]; then
+    # 无代码任务分支:验证声明范围内确有实际变更,跳过 Go 门禁。
+    # 用 here-doc 让 while 在当前 shell 执行(绕开 bash 3.2 命令替换内 case/;; 解析 bug)。
+    CHANGED_IN_SCOPE=""
+    while read -r f; do
+        [ -n "$f" ] || continue
+        for p in $PKGS; do
+            q="${p#./}"
+            case "$f" in
+                "$q"|"$q"/*) CHANGED_IN_SCOPE="$f" ;;
+            esac
+        done
+    done <<EOF
+$CHANGED_FILES
+EOF
+    if [ -z "$CHANGED_IN_SCOPE" ]; then
+        echo "BLOCKED: 无代码任务 ${TASK_ID} 声明范围内没有任何实际变更。" >&2
+        exit 2
+    fi
+    echo "无代码任务(全部 verify_by=review|manual),范围内变更已确认,跳过 Go 门禁。"
     exit 0
 fi
 

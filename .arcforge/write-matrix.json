@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tokens": {},
+  "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
+  "rules": [
+    {"path": "tasks/TASK-*.json",         "writers": "owner-table"},
+    {"path": "docs/01-design/*",          "writers": ["leader"]},
+    {"path": "docs/02-plan/*",            "writers": ["leader"]},
+    {"path": "docs/03-progress/plan.md",  "writers": ["leader"]},
+    {"path": "docs/04-test/*",            "writers": ["test-*"]},
+    {"path": "docs/05-review/*",          "writers": ["qa-*"]},
+    {"path": "docs/06-acceptance/*",      "writers": ["leader"]},
+    {"path": "docs/07-deploy/*",          "writers": ["ops-*"]},
+    {"path": "discoveries/TASK-*.json",   "writers": "task-owner"},
+    {"path": "wisdom/learnings-{me}.md",  "writers": "self"},
+    {"path": "wisdom/decisions-{me}.md",  "writers": "self"},
+    {"path": "wisdom/_digest.md",         "writers": ["leader"]},
+    {"path": "checkpoints/{me}*",         "writers": "self"}
+  ],
+  "owner_table": {
+    "pending":               ["leader"],
+    "assigned":              ["leader"],
+    "in_progress":           ["dev-*"],
+    "dev_done":              ["dev-*"],
+    "verifying":             ["test-*"],
+    "verified":              ["test-*"],
+    "rejected":              ["test-*"],
+    "review_fix":            ["leader"],
+    "accepted":              ["leader"],
+    "skipped":               ["leader"],
+    "blocked_clarification": ["leader", "dev-*"],
+    "blocked_human":         ["leader"]
+  },
+  "transitions": {
+    "pending->assigned":                    ["leader"],
+    "assigned->in_progress":                ["dev-*"],
+    "in_progress->dev_done":                ["dev-*"],
+    "in_progress->blocked_clarification":   ["dev-*"],
+    "blocked_clarification->in_progress":   ["dev-*"],
+    "blocked_clarification->blocked_human": ["leader"],
+    "blocked_human->assigned":              ["leader"],
+    "blocked_human->skipped":               ["leader"],
+    "dev_done->verifying":                  ["leader"],
+    "verifying->verified":                  ["test-*"],
+    "verifying->rejected":                  ["test-*"],
+    "rejected->assigned":                   ["leader"],
+    "assigned->assigned":                   ["leader"],
+    "in_progress->assigned":                ["leader"],
+    "rejected->blocked_human":              ["leader"],
+    "verified->review_fix":                 ["leader"],
+    "review_fix->in_progress":              ["dev-*"],
+    "verified->accepted":                   ["leader"],
+    "pending->skipped":                     ["leader"],
+    "assigned->skipped":                    ["leader"]
+  },
+  "bindings": {
+    "dev-*":  "assigned_to",
+    "test-*": "verifier"
+  }
+}

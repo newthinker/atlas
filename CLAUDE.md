@@ -1,25 +1,24 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **atlas** (6802 symbols, 17975 relationships, 270 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **atlas** (9530 symbols, 24190 relationships, 294 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "master"})`.
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
+- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
 
 ## Resources
 
@@ -71,6 +70,12 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
    单模型规划；codex/gemini CLI 不可用 → 对抗审查退回纯 Claude 跨视角；
    superpowers 不可用 → 跳过对应增强并在 final-report 注明。
 
+5. **终端回显不可信，判定只锚定文件内容。** 任何落盘操作（状态迁移、写
+   discovery/report）后必须用 `jq`/`ls` 直读目标文件核实生效；PASS/FAIL、任务完成
+   等判定只依据文件内容，**禁止以单次终端回显作为依据**（跨 Sprint 两例：Sprint A
+   验证者「读取污染」把不存在的 done_criteria 当真、Sprint B agent 伪造输出流谎报
+   transition 成功——jq 直读才发现根本未落盘）。
+
 ---
 
 ## 角色：Project Leader
@@ -78,7 +83,6 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 你（主 session）就是 Project Leader。收到 `/arcforge` 命令或读取到需求文档时，执行以下流程：
 
 ### 1. 需求分析阶段
-
 - 读取并理解需求文档（默认 `requirements.md`）。
 - 若 `everything-claude-code (ECC)` 可用，调用其 `/multi-plan` 做多模型协作规划生成初始计划；
   **不可用时**直接用 superpowers 的 `brainstorming` skill 精炼设计（优雅降级）。
@@ -86,7 +90,6 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 - 产出保存到 `.arcforge/docs/01-design/`。
 
 ### 2. 任务拆分 & 完成标准定义（Realistic Scope）
-
 - 在初始计划基础上细化为可独立开发的任务。
 - **Realistic Scope 约束**（用 agent 可自评的标度，而非人类时间）：
   每个任务 ≤ 1 个 package、`done_criteria` 总条数 ≤ 8、预计改动文件 ≤ 5。超出则继续拆分。
@@ -100,7 +103,6 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 - 写入 `.arcforge/tasks/TASK-xxx.json`。
 
 ### 3. DoD 验证 & 人类确认门（质量源头，杠杆最高）
-
 - 生成需求↔DoD 双向追溯矩阵，写入 `02-plan/requirement-dod-matrix.md`，
   机器检查暴露「孤儿需求」（无 DoD 覆盖）和「凭空 DoD」（不对应任何需求）。
 - spawn 一个独立 reviewer agent，**只读需求文档（不看 DoD 生成过程）**，独立判断验收标准
@@ -112,19 +114,16 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
   - `full-auto`：不暂停，靠追溯矩阵 + reviewer 自动兜底
 
 ### 4. 团队组建
-
 - 根据任务总量、依赖图、`wave` 决定 Dev Agent 数量（不超过 `team.max_dev_agents`）。
 - 为每个 Dev Agent 分配一组可并行的任务（同一 wave、package 不重叠）。
 - 用 Agent Teams 创建团队并 spawn teammates（dev × N、test × 1-2）。
 
 ### 5. 进度跟踪（文件级真相源）
-
 - **以 `tasks/*.json` 的 status 字段为准**轮询跟踪，inbox 仅作通知/催办。
 - 扫描到 `dev_done` → 指派 Test Agent 验证；扫描到 `rejected`/`review_fix` → 重派对应 Dev。
 - 状态变更先落盘（原子写）再发通知；`plan.md` 仅由 Leader 写。
 
 ### 6. 质量门禁
-
 - 全体任务 `verified` 后，spawn QA Agent 做 Code Review（两轮：常规 + 跨视角对抗）。
 - 根据 Review 结果决定是否需要修复迭代（最多 `code_review.max_iterations` 轮）。
 
@@ -152,39 +151,87 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 **正常流转：** `pending → assigned → in_progress → dev_done → verifying → verified → accepted`
 
 **返工与澄清环：**
-
 - 验证不过：`verifying → rejected → assigned → ...`
 - QA 退回：`verified → review_fix → in_progress → ...`
 - 澄清环：`in_progress → blocked_clarification → assigned → ...`（Leader 周期扫描答复）
+- **Leader 调度边（均 leader 专属，置于 `rejected → assigned` 之后）**：
+  `assigned → assigned`（`assigned` 超时**重派**，`assignment_epoch += 1`）、
+  `in_progress → assigned`（**收回**卡住任务重新分配，`assignment_epoch += 1`）、
+  `rejected → blocked_human`（**熔断**，不改 epoch）。
 - **返工上限**：每次从 `rejected`/`review_fix` 重派回 Dev 时 `rework_count += 1`；
-  超过 `max_rework`（config，默认 3）不再重派，转 `blocked_human` 并在 plan.md 头部
-  高亮，附历史 reject_reason 汇总——反复返工 3 次以上大概率是 done_criteria 本身
-  不可实现或自相矛盾，继续机器循环只会烧 token。
+  达到 `max_rework`（config，默认 3）触顶后不再重派，由 **Leader 执行 `rejected → blocked_human`**
+  熔断并在 plan.md 头部高亮，附历史 reject_reason 汇总——反复返工 3 次以上大概率是
+  done_criteria 本身不可实现或自相矛盾，继续机器循环只会烧 token。
 
 同一 task 任意时刻只有一个 owner，配合原子写即可避免竞争。
 
 ## 认领协议（超时重派防双写）
 
-「owner 移交顺序发生」在一个场景下不成立：Leader 因 assigned 超时重派，而原 Dev
-恰好迟到认领。用 epoch + 锁临界区机制性消除：
+所有 `.arcforge/` 状态写入必须经 `arcforge-write.sh`(声明身份 × 权限矩阵 × 迁移校验,
+锁临界区与 epoch 自增在脚本内完成);`with-task-lock.sh` 退为脚本内部实现,不再直接调用。
+直接 Write/Edit/重定向写 `.arcforge/` 会被 PreToolUse hook 拒绝。
 
-- **所有对 task JSON 的「读-校验-写」必须在任务锁临界区内完成**：
+「owner 移交顺序发生」在一个场景下不成立：Leader 因 assigned 超时重派，而原 Dev
+恰好迟到认领。用 epoch + 锁临界区机制性消除（以下校验均由 `arcforge-write.sh` 在锁内自动完成）：
+
+- **认领/迁移**经唯一写入通道：
 
   ```bash
-  bash .claude/hooks/with-task-lock.sh TASK-001 <读 → 校验 → 写临时文件 → mv 覆盖>
+  bash .claude/hooks/arcforge-write.sh --as {你的实例名} task TASK-001 transition in_progress
   ```
 
-  （辅助脚本优先 flock；无 flock 的环境如 macOS 自动退化为 mkdir 自旋锁。）
+  脚本在任务锁临界区内完成「读 → 校验迁移边/owner/绑定 → 原子写 → 维护 last_transition」。
+  （锁优先 flock；无 flock 的环境如 macOS 自动退化为 mkdir 自旋锁。）
 
-- **Leader 每次（重）派**：临界区内 `assignment_epoch += 1`，同时写 `assigned_to`
-  与 `status=assigned`。
-- **Dev 认领**：临界区内读取 → 校验 `(status==assigned && assigned_to==自己)` →
-  写 `status=in_progress`，原样带回读到的 epoch。
-- **Dev 后续每次写该 task 文件**：临界区内重读，epoch 与自己持有的不一致 = 已被
-  重派，**立即放弃（不写）**，回到任务扫描循环。
+- **Leader 每次（重）派**：`task TASK-xxx transition assigned --field assigned_to=...`，
+  脚本在临界区内 `assignment_epoch += 1`，同时写 `assigned_to` 与 `status=assigned`。
+- **Dev 认领**：脚本临界区内校验 `(status==assigned && assigned_to==自己)`，
+  不满足即拒绝（说明已被重派，放弃认领）；满足则写 `status=in_progress`。
+  **认领后记下该任务当前 `assignment_epoch`**。
+- **Dev 后续每次 transition/update 该 task 必须携带 `--expect-epoch <认领时记下的值>`**：
+  脚本在锁临界区内重读 `assignment_epoch`，与携带值不一致 → DENY（exit 2）并提示回到
+  任务扫描循环（任务已被重派，过期 owner 的迟到写入根本落不了盘）；携带值非非负整数
+  → fail（exit 1）不落盘。这把 F5「Dev 每次写该任务须携带自己持有的 epoch」从口头
+  自觉升级为锁内机制化断言（重读-校验-写原子，竞态窗口为零）。
 - Leader 收到 `dev_done` 时校验 epoch：不一致则忽略（过期 owner 的迟到产物）。
 
-裸的「写前重读」只是缩小竞态窗口；读-校验-写必须原子，才不依赖 agent 自觉。
+裸的「写前重读」只是缩小竞态窗口；读-校验-写必须原子，故全部收口到 `arcforge-write.sh`，
+不依赖 agent 自觉。
+
+## 记录员代理模式（Leader 主导型任务）
+
+A6 死锁教训：Leader **不在**执行类迁移边（`assigned→in_progress→dev_done` 等）的合法写者
+集合内——权限矩阵刻意不把 leader 加入执行迁移，以保持权限最小化、不打开越权面。因此
+**任何「由 Leader 主导」的任务都不能由 Leader 亲自走执行状态机**，否则会在 `assigned→in_progress`
+处因「leader 无权执行」被 DENY 而死锁。
+
+正确做法：把 Leader 主导型任务拆成 **Leader 编排 + `dev-*` 记录员执行**两层——
+
+- **Leader 只做协调**：拆分、派发（`transition assigned --field assigned_to=<记录员>`）、
+  答疑、聚合、转 `accepted`；不碰执行迁移。
+- **指定一个 `dev-*` 记录员实例**承接该任务的执行状态机，**状态机 owner 恒为该记录员**
+  （`assigned_to` 始终是记录员；认领、`in_progress`、`dev_done` 全由记录员经写通道完成）。
+- 记录员可 spawn 子代理做读/分析（子代理一律禁写 `.arcforge/`），结论带回由记录员落盘。
+
+这样 Leader 权限边界不变，执行迁移始终有合法 `dev-*` owner，A6 死锁不再发生。
+
+## 运行时资产只读
+
+`.claude/hooks/`、`.claude/scripts/`、`.claude/settings.json` 与 `.claude/settings.local.json`
+对**全体 agent（含 Leader）只读**，由 write-guard 机制拦截（不依赖 write-matrix，对全体 agent 生效）。
+但 write-guard 的 Bash 侧是「常见写动词启发式」，**非完备拦截**（python/perl/heredoc/变量拼接
+可逃逸）；深度防御靠单写者矩阵 + validator 审计 + 每实例 token（Sprint E：`tokens` 已登记的
+实例，写通道在子命令分发前统一验 `ARCFORGE_TOKEN` 的 sha256，冒名写被机制性 DENY；未登记
+实例保持声明式旧行为，`--as` 仅挡「顺手直改」）。
+理由：hook 无法可靠区分调用者身份，任何例外都会成为注入诱导的口子（sprint-001
+实测 QA 越权直改运行时 hook）。合法变更路径：改 project-template/ → TDD →
+人类确认 → 会话外同步。
+
+## 无代码任务声明
+
+dev_done/task-completed 门禁默认拒绝空 scope。纯文档/产物类任务必须：packages 显式指向
+文档路径，且全部 done_criteria 使用对象形态并标注 `verify_by: review|manual`
+（字符串条目视同 verify_by: test，会触发 Go 门禁）。
 
 ## 任务图与 wave 并行调度
 
@@ -202,8 +249,10 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 `validator/` 提供任务图校验器。Leader 在拆分后、每次 wave 放行前运行：
 
 ```bash
-go run ./validator/cmd/arcforge-validate .arcforge/tasks
+bash .claude/scripts/validator-run.sh validate .arcforge/tasks
 ```
+
+（exit 127 = validator 未分发，回退手工统计。）
 
 校验规则：DAG 无环、wave 序、完成必有产物、失败必有原因、skip 传播、单 owner 不变量、
 context_from 闭合、epoch 不变量、在途任务 scope 非空且互斥、blocked_clarification 必有

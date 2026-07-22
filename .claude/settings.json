@@ -65,6 +65,28 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "bash .claude/hooks/write-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "bash .claude/hooks/write-guard.sh"
+          }
+        ]
+      }
+    ],
     "TaskCompleted": [
       {
         "hooks": [
