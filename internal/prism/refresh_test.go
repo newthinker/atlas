@@ -2,6 +2,7 @@ package prism
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 // boundary[0]       "latest+1 >= now → 零请求直接成功返回(不调用 Fetch)"       → TestRefreshUpToDateZeroRequest
 // boundary[1]       "单标的失败不中断其余标的(部分失败语义)"                   → TestRefreshPartialFailure
 // error_handling[0] "未知 source 或 latest 解析失败 → 记入 Failed 并继续"       → TestRefreshUnknownSource / TestRefreshBadLatestDate
+// [TASK-006] engine  "美股引擎路径重算 PE 序列 + 滚动分位并整段落库"           → TestRefreshEnginePath
 
 type fakeStore struct {
 	latest  map[string]string // symbol -> latest date
@@ -149,4 +151,47 @@ func TestRefreshBadLatestDate(t *testing.T) {
 	assert.Contains(t, rep.Failed[0], "000300.SH")
 	_, called := lix.calls["000300.SH"]
 	assert.False(t, called, "latest 解析失败应在拉取前中止该标的")
+}
+
+type fakeUS2 struct {
+	closes []core.OHLCV
+	eps    []core.EPSPoint
+}
+
+func (f fakeUS2) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
+	return f.closes, nil
+}
+func (f fakeUS2) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error) {
+	return f.eps, nil
+}
+
+func TestRefreshEnginePath(t *testing.T) {
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	eps := make([]core.EPSPoint, 8)
+	for i := range eps {
+		eps[i] = core.EPSPoint{Date: now.AddDate(0, -3*(8-i), 0), EPS: 2.0}
+	}
+	closes := []core.OHLCV{
+		{Time: now.AddDate(0, 0, -2), Close: 100},
+		{Time: now.AddDate(0, 0, -1), Close: 110},
+	}
+	cfg := config.PrismConfig{Instruments: []config.PrismInstrument{
+		{Symbol: "NVDA", Name: "NVIDIA", Type: "stock", Market: "US", Group: "美股公司", Source: "engine"},
+	}}
+	cfg.ApplyDefaults()
+
+	store := newFakeStore()
+	rep := Refresh(cfg, store, &fakeLix{}, fakeUS2{closes: closes, eps: eps}, now)
+	assert.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed)
+	rows := store.upserts["NVDA"]
+	require.Len(t, rows, 2)
+	assert.InDelta(t, 50.0, rows[0].PETTM, 1e-9) // 100/2
+	assert.InDelta(t, 55.0, rows[1].PETTM, 1e-9) // 110/2
+	// 序列只有 2 点,不足 rollingMinPoints → 滚动分位为 NaN(落 NULL)
+	assert.True(t, math.IsNaN(rows[0].Pctl5Y))
+	// M1 口径:yahoo 路径无 PB/PS,10Y 分位无意义,恒 NaN
+	assert.True(t, math.IsNaN(rows[0].PB))
+	assert.True(t, math.IsNaN(rows[0].PSTTM))
+	assert.True(t, math.IsNaN(rows[0].Pctl10Y))
 }

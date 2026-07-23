@@ -4,12 +4,14 @@ package prism
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
+	"github.com/newthinker/atlas/internal/valuation"
 )
 
 // Store is the subset of *prismstore.Store used by Refresh.
@@ -101,8 +103,39 @@ func refreshLixinger(cfg config.PrismConfig, store Store, lix LixingerClient, in
 	return store.UpsertValuations(id, rows)
 }
 
-// refreshEngine is filled in by the US-engine task (TASK-006); keeping the stub
-// here lets the lixinger path land independently.
+// rollingMinPoints: 滚动分位窗口内最少样本数(约 1 年交易日)。
+const rollingMinPoints = 252
+
+// refreshEngine 每日全量重算美股公司近 us_lookback_years 年 PE 序列并整段 upsert
+// (幂等,无增量状态)。yahoo 路径 M1 口径:无 PB/PSTTM,仅 5Y 滚动分位。
 func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config.PrismInstrument, now time.Time) error {
-	return fmt.Errorf("engine source not implemented yet")
+	id, err := upsertMeta(store, inst)
+	if err != nil {
+		return err
+	}
+	start := now.AddDate(-cfg.USLookbackYears, 0, 0)
+	// EPS 需要比价格多回看 1 年,保证首个交易日有可对齐的 EPS 点
+	eps, err := us.FetchEPSHistory(inst.Symbol, start.AddDate(-1, 0, 0), now)
+	if err != nil {
+		return fmt.Errorf("eps history: %w", err)
+	}
+	closes, err := us.FetchHistory(inst.Symbol, start, now, "1d")
+	if err != nil {
+		return fmt.Errorf("price history: %w", err)
+	}
+	dates, pe, err := valuation.ReconstructPESeries(closes, eps)
+	if err != nil {
+		return fmt.Errorf("reconstruct: %w", err)
+	}
+	p5 := valuation.RollingPercentile(dates, pe, 5, rollingMinPoints)
+
+	rows := make([]prismstore.ValuationRow, len(dates))
+	for i := range dates {
+		rows[i] = prismstore.ValuationRow{
+			D: dates[i].Format("2006-01-02"), PETTM: pe[i],
+			PB: math.NaN(), PSTTM: math.NaN(), // yahoo 路径 M1 无 PB/PS(设计 §9 M1 口径标注)
+			Pctl5Y: p5[i], Pctl10Y: math.NaN(), // 仅 5Y 数据,10Y 分位无意义
+		}
+	}
+	return store.UpsertValuations(id, rows)
 }
