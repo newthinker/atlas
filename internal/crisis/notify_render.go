@@ -18,7 +18,7 @@ type Trend struct {
 type NotifyContext struct {
 	Res          *DayResult
 	StateDays    int                   // 变更消息=前状态持续日数；否则=当前状态含当日（补充决策 6）
-	SummaryDue   bool                  // 月报/周报到期（cmd 计算）
+	Summary      SummaryKind           // 摘要到期类型（cmd 计算，撞日归月报）
 	NewStale     []string              // 今日新进入 STALE 的指标（P2 去重后）
 	StaleLastObs map[string]string     // NewStale 指标的最后观测日（补充决策 1）
 	PrevDay      map[string]Evaluation // 前一评估日指标行（较昨日 & NewStale 依据）
@@ -282,13 +282,17 @@ func renderDaily(cfg *Config, nc NotifyContext) string {
 	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
 }
 
-// renderWeekly 消息 5：WATCH 周报（通知设计 §5.5，退出进度见 §6.6）。
+// renderWeekly 消息 5：WATCH/NORMAL 周报（通知设计 §5.5，退出进度见 §6.6）。
+// 退出进度行仅 WATCH 态渲染——NORMAL 态无退出概念（NORMAL 周报设计 §3.3）。
 func renderWeekly(cfg *Config, nc NotifyContext) string {
 	res := nc.Res
 	first := fmt.Sprintf("[P1] 📅 Cassandra 周报 · %s 当周 · %s 已持续 %d 个评估日",
 		monthDay(res.Date), res.State, nc.StateDays)
-	tail := fmt.Sprintf("退出进度：触发条件已连续解除 %d 日（回 NORMAL 需连续 %d 日）\n下次周报：下周一 · 状态变更即时通知",
-		nc.ClearStreak, cfg.StateMachine.WatchExitDays)
+	tail := "下次周报：下周一 · 状态变更即时通知"
+	if res.State == StateWatch {
+		tail = fmt.Sprintf("退出进度：触发条件已连续解除 %d 日（回 NORMAL 需连续 %d 日）\n",
+			nc.ClearStreak, cfg.StateMachine.WatchExitDays) + tail
+	}
 	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
 }
 

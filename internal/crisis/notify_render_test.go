@@ -460,6 +460,19 @@ func TestRenderWeekly(t *testing.T) {
 	assert.Contains(t, renderWeekly(cfg, NotifyContext{Res: res, StateDays: 18, ClearStreak: 8}), "回 NORMAL 需连续 25 日")
 }
 
+// NORMAL 周报：复用骨架但无退出进度行（NORMAL 态无退出概念，设计 §3.3）。
+func TestRenderWeeklyNormal(t *testing.T) {
+	cfg := testConfig()
+	res := dayResult(StateNormal, StateNormal)
+	res.Date = "2026-07-13"
+	msg := renderWeekly(cfg, NotifyContext{Res: res, StateDays: 30})
+	assert.True(t, strings.HasPrefix(msg, "[P1] 📅 Cassandra 周报 · 07-13 当周 · NORMAL 已持续 30 个评估日"))
+	assert.Contains(t, msg, "7 指标全绿：")
+	assert.NotContains(t, msg, "退出进度")
+	assert.Contains(t, msg, "下次周报：下周一 · 状态变更即时通知")
+	assert.True(t, strings.HasSuffix(msg, notifyFooter))
+}
+
 // testTrends 为 dayResult 的 7 指标各造一段 21 观测趋势窗口。
 func testTrends(end string) map[string]Trend {
 	out := map[string]Trend{}
@@ -493,7 +506,7 @@ func TestRenderMonthly(t *testing.T) {
 	mv.Status, mv.Value = StatusStale, 88.1
 	res.Results[IndMOVE] = mv
 
-	nc := NotifyContext{Res: res, StateDays: 63, SummaryDue: true, Trends: testTrends(res.Date)}
+	nc := NotifyContext{Res: res, StateDays: 63, Summary: SummaryMonthly, Trends: testTrends(res.Date)}
 	msg := renderMonthly(cfg, nc)
 	assert.Contains(t, msg, "⚪ 情绪 move 88.1 ") // ⚪ 趋势行
 	assert.Contains(t, msg, "· 数据断更(STALE)")   // nonColorNote 分支

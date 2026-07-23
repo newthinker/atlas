@@ -35,8 +35,8 @@ func TestMessagesDispatch(t *testing.T) {
 	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateBrewing, StateWatch), StateDays: 34})
 	require.Len(t, msgs, 1)
 	assert.True(t, strings.HasPrefix(msgs[0], "[P1] ✅ 状态解除"))
-	// 否定路径：变更日即使 SummaryDue 也出状态变更、不出周报（变更 > 摘要）
-	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateNormal, StateWatch), StateDays: 1, SummaryDue: true, ClearStreak: 8})
+	// 否定路径：变更日即使 Summary 到期也出状态变更、不出周报（变更 > 摘要）
+	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateNormal, StateWatch), StateDays: 1, Summary: SummaryWeekly, ClearStreak: 8})
 	require.Len(t, msgs, 1)
 	assert.Contains(t, msgs[0], "状态升级 NORMAL → WATCH")
 	assert.NotContains(t, msgs[0], "周报")
@@ -51,10 +51,15 @@ func TestMessagesDispatch(t *testing.T) {
 
 	// —— 分支 3/4：NORMAL+到期 → 月报；WATCH+到期 → 周报 ——
 	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateNormal, StateNormal), StateDays: 63,
-		SummaryDue: true, Trends: testTrends("2026-07-10")})
+		Summary: SummaryMonthly, Trends: testTrends("2026-07-10")})
 	require.Len(t, msgs, 1)
 	assert.Contains(t, msgs[0], "Cassandra 月报")
-	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateWatch, StateWatch), StateDays: 18, SummaryDue: true, ClearStreak: 8})
+	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateWatch, StateWatch), StateDays: 18, Summary: SummaryWeekly, ClearStreak: 8})
+	require.Len(t, msgs, 1)
+	assert.Contains(t, msgs[0], "Cassandra 周报")
+
+	// —— 分支 4'：NORMAL+周报到期 → 周报（NORMAL 周报设计 2026-07-23）——
+	msgs = Messages(cfg, NotifyContext{Res: dayResult(StateNormal, StateNormal), StateDays: 30, Summary: SummaryWeekly})
 	require.Len(t, msgs, 1)
 	assert.Contains(t, msgs[0], "Cassandra 周报")
 
@@ -107,9 +112,9 @@ func TestMessagesForbiddenWordsAllFamilies(t *testing.T) {
 	all = append(all, Messages(cfg, NotifyContext{Res: dayResult(StateBrewing, StateWatch), StateDays: 34})...) // 2 降级
 	all = append(all, Messages(cfg, staleCtx(dayResult(StateCrisis, StateCrisis)))...)                          // 3 日报 + 6 P2
 	all = append(all, Messages(cfg, NotifyContext{Res: dayResult(StateNormal, StateNormal), StateDays: 63,
-		SummaryDue: true, Trends: testTrends("2026-07-10")})...) // 4 月报
+		Summary: SummaryMonthly, Trends: testTrends("2026-07-10")})...) // 4 月报
 	all = append(all, Messages(cfg, NotifyContext{Res: dayResult(StateWatch, StateWatch), StateDays: 18,
-		SummaryDue: true, ClearStreak: 8})...) // 5 周报
+		Summary: SummaryWeekly, ClearStreak: 8})...) // 5 周报
 	all = append(all, FormatIntradayAlert(152.1, 157.5, -0.034, StateBrewing,
 		time.Date(2026, 7, 18, 14, 30, 0, 0, time.UTC))) // 7 盘中
 	require.Len(t, all, 7)

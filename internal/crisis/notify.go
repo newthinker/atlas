@@ -13,9 +13,19 @@ type Sender interface {
 	SendText(text string) error
 }
 
+// SummaryKind 是摘要类消息的到期类型，cmd 层按评估日与状态判定（撞日归月报，
+// NORMAL 周报设计 2026-07-23）。零值 SummaryNone = 不到期。
+type SummaryKind int
+
+const (
+	SummaryNone SummaryKind = iota
+	SummaryWeekly
+	SummaryMonthly
+)
+
 // Messages renders the day's outbound notifications per 通知设计 §2 的消息类型
-// 矩阵：结构化家族（状态变更 / BREWING·CRISIS 日报 / NORMAL 月报 / WATCH 周报）
-// 至多一条，加每个新进入 STALE 的指标一条 [P2] 速报。SummaryDue、NewStale 等
+// 矩阵：结构化家族（状态变更 / BREWING·CRISIS 日报 / NORMAL 月报·周报 / WATCH 周报）
+// 至多一条，加每个新进入 STALE 的指标一条 [P2] 速报。Summary、NewStale 等
 // 输入由 cmd 层在落库前组装（buildNotifyContext）。
 func Messages(cfg *Config, nc NotifyContext) []string {
 	var msgs []string
@@ -25,9 +35,9 @@ func Messages(cfg *Config, nc NotifyContext) []string {
 		msgs = append(msgs, renderTransition(cfg, nc))
 	case res.State == StateBrewing || res.State == StateCrisis:
 		msgs = append(msgs, renderDaily(cfg, nc))
-	case nc.SummaryDue && res.State == StateNormal:
+	case nc.Summary == SummaryMonthly && res.State == StateNormal:
 		msgs = append(msgs, renderMonthly(cfg, nc))
-	case nc.SummaryDue && res.State == StateWatch:
+	case nc.Summary == SummaryWeekly && (res.State == StateNormal || res.State == StateWatch):
 		msgs = append(msgs, renderWeekly(cfg, nc))
 	}
 	for _, ind := range nc.NewStale {

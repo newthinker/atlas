@@ -687,15 +687,23 @@ func (s *stubSender) SendText(text string) error {
 	return s.err
 }
 
-func TestSummaryDue(t *testing.T) {
-	assert.True(t, summaryDue("2026-07-01", crisis.StateNormal)) // 周三 = 当月首交易日 → 月报
-	assert.False(t, summaryDue("2026-07-02", crisis.StateNormal))
-	assert.True(t, summaryDue("2026-08-03", crisis.StateNormal)) // 8/1 周六 → 首交易日 = 8/3 周一
-	assert.True(t, summaryDue("2026-07-13", crisis.StateWatch))  // 周一 → 周报
-	assert.False(t, summaryDue("2026-07-14", crisis.StateWatch))
-	assert.False(t, summaryDue("2026-07-13", crisis.StateBrewing)) // BREWING 走日报，不走摘要
-	assert.False(t, summaryDue("bad-date", crisis.StateNormal))    // 坏日期不发
-	assert.False(t, summaryDue("2026-07-04", crisis.StateNormal))  // 周六 → 非交易日，非首交易日
+// Context Checkpoint: done_criteria → test mapping (TASK-003 summaryKind)
+// functional[0] NORMAL 首交易日→Monthly / NORMAL 周一→Weekly / WATCH 周一→Weekly / BREWING→None → TestSummaryKind
+// functional[1] 撞日归月报（2026-06-01、2026-08-03）→Monthly                              → TestSummaryKind
+// functional[2] NORMAL∧Weekly 组装：Summary=Weekly ∧ Trends nil ∧ ClearStreak 0          → TestBuildNotifyContextNormalWeekly
+// boundary[0]   坏日期/周六非交易日/NORMAL 周二/WATCH 非周一 → None                        → TestSummaryKind
+func TestSummaryKind(t *testing.T) {
+	assert.Equal(t, crisis.SummaryMonthly, summaryKind("2026-07-01", crisis.StateNormal)) // 周三 = 当月首交易日 → 月报
+	assert.Equal(t, crisis.SummaryNone, summaryKind("2026-07-02", crisis.StateNormal))
+	assert.Equal(t, crisis.SummaryMonthly, summaryKind("2026-08-03", crisis.StateNormal)) // 8/1 周六 → 首交易日 = 8/3 周一，撞日归月报
+	assert.Equal(t, crisis.SummaryMonthly, summaryKind("2026-06-01", crisis.StateNormal)) // 6/1 周一 ∧ 首交易日 → 撞日只发月报
+	assert.Equal(t, crisis.SummaryWeekly, summaryKind("2026-07-13", crisis.StateNormal))  // NORMAL 普通周一 → 周报（本需求核心）
+	assert.Equal(t, crisis.SummaryNone, summaryKind("2026-07-14", crisis.StateNormal))    // NORMAL 周二 → 静默
+	assert.Equal(t, crisis.SummaryWeekly, summaryKind("2026-07-13", crisis.StateWatch))   // WATCH 周一 → 周报（回归）
+	assert.Equal(t, crisis.SummaryNone, summaryKind("2026-07-14", crisis.StateWatch))
+	assert.Equal(t, crisis.SummaryNone, summaryKind("2026-07-13", crisis.StateBrewing)) // BREWING 走日报，不走摘要
+	assert.Equal(t, crisis.SummaryNone, summaryKind("bad-date", crisis.StateNormal))    // 坏日期不发
+	assert.Equal(t, crisis.SummaryNone, summaryKind("2026-07-04", crisis.StateNormal))  // 周六 → 非交易日
 }
 
 // buildCrisisSender 在无 telegram 配置时返回 nil（eval 退化为打印）。
@@ -953,9 +961,9 @@ func TestExecuteCrisisIntradaySendFailureDoesNotAbort(t *testing.T) {
 //                                                   → TestBuildNotifyContext(=2) / TestBuildNotifyContextTransitionAndTrends(=2)
 // functional[2] NewStale 去重 + StaleLastObs 缺省/命中
 //                                                   → TestBuildNotifyContext(nil obs) / TestBuildNotifyContextStaleLastObs(命中)
-// functional[3] ClearStreak WATCH∧SummaryDue∧!AnyTrigger 三条件
+// functional[3] ClearStreak WATCH∧SummaryWeekly∧!AnyTrigger 三条件
 //                                                   → TestBuildNotifyContext(=2) + TestBuildNotifyContextClearStreakConditions(逐条否定=0)
-// functional[4] Trends 仅 SummaryDue∧NORMAL 升序 Delta=末-首、无观测不进 map
+// functional[4] Trends 仅 SummaryMonthly∧NORMAL 升序 Delta=末-首、无观测不进 map
 //                                                   → TestBuildNotifyContextTransitionAndTrends
 // error_handling[0] RecentIndicatorEvals/LatestObservation/SeriesWindow 错误原样上抛
 //                                                   → TestBuildNotifyContextStoreErrors（stateStreakDays/History 二查询被
@@ -1031,7 +1039,7 @@ func TestBuildNotifyContext(t *testing.T) {
 	assert.Equal(t, crisis.StatusGreen, nc.PrevDay[crisis.IndVIX].Status) // 昨日行而非当日
 	assert.Equal(t, []string{crisis.IndVIX}, nc.NewStale)                 // move 昨日已 STALE → 不重复（要点 5）
 	assert.Equal(t, 2, nc.StateDays)                                      // 昨日 1 行 WATCH + 今日
-	assert.True(t, nc.SummaryDue)                                         // 周一 + WATCH
+	assert.Equal(t, crisis.SummaryWeekly, nc.Summary)                    // 周一 + WATCH
 	assert.Equal(t, 2, nc.ClearStreak)                                    // 昨日 any_trigger=false + 今日
 	assert.Nil(t, nc.Trends)                                              // 非 NORMAL 月报 → 不组装
 
@@ -1099,7 +1107,7 @@ func TestBuildNotifyContextStaleLastObs(t *testing.T) {
 	assert.Equal(t, "2026-07-14", nc.StaleLastObs[crisis.IndVIX]) // 最后观测日（LatestObservation ts DESC）
 }
 
-// ClearStreak 三条件（WATCH ∧ SummaryDue ∧ !AnyTrigger）逐条独立否定 → 计数留 0。
+// ClearStreak 三条件（WATCH ∧ SummaryWeekly ∧ !AnyTrigger）逐条独立否定 → 计数留 0。
 func TestBuildNotifyContextClearStreakConditions(t *testing.T) {
 	ctx := context.Background()
 	seedClearHistory := func(d crisisEvalDeps) {
@@ -1109,24 +1117,24 @@ func TestBuildNotifyContextClearStreakConditions(t *testing.T) {
 		}))
 	}
 
-	// 否定 WATCH：NORMAL 月报日（SummaryDue 真）∧ !AnyTrigger，但非 WATCH → 块跳过
+	// 否定 WATCH：NORMAL 月报日（Summary 为 SummaryMonthly）∧ !AnyTrigger，但非 WATCH → 块跳过
 	dNotWatch := newNotifyTestDeps(t)
 	seedClearHistory(dNotWatch)
 	resN := notifyDayResult("2026-08-03", crisis.StateNormal, crisis.StateNormal)
 	resN.Detail = crisis.SysDetail{AnyTrigger: false}
 	ncN, err := buildNotifyContext(ctx, dNotWatch, resN)
 	require.NoError(t, err)
-	assert.True(t, ncN.SummaryDue)
+	assert.Equal(t, crisis.SummaryMonthly, ncN.Summary)
 	assert.Equal(t, 0, ncN.ClearStreak)
 
-	// 否定 SummaryDue：WATCH ∧ 周二（非周一）∧ !AnyTrigger → 块跳过
+	// 否定 SummaryWeekly：WATCH ∧ 周二（非周一）∧ !AnyTrigger → 块跳过
 	dNotDue := newNotifyTestDeps(t)
 	seedClearHistory(dNotDue)
 	resD := notifyDayResult("2026-07-21", crisis.StateWatch, crisis.StateWatch) // 周二
 	resD.Detail = crisis.SysDetail{AnyTrigger: false}
 	ncD, err := buildNotifyContext(ctx, dNotDue, resD)
 	require.NoError(t, err)
-	assert.False(t, ncD.SummaryDue)
+	assert.Equal(t, crisis.SummaryNone, ncD.Summary)
 	assert.Equal(t, 0, ncD.ClearStreak)
 
 	// 否定 !AnyTrigger：WATCH ∧ 周一 ∧ AnyTrigger=true → 块跳过
@@ -1136,8 +1144,20 @@ func TestBuildNotifyContextClearStreakConditions(t *testing.T) {
 	resT.Detail = crisis.SysDetail{AnyTrigger: true}
 	ncT, err := buildNotifyContext(ctx, dTrig, resT)
 	require.NoError(t, err)
-	assert.True(t, ncT.SummaryDue)
+	assert.Equal(t, crisis.SummaryWeekly, ncT.Summary)
 	assert.Equal(t, 0, ncT.ClearStreak)
+}
+
+// NORMAL 周一：Summary=weekly，但不组装 Trends（仅月报）也不计 ClearStreak（仅 WATCH）。
+func TestBuildNotifyContextNormalWeekly(t *testing.T) {
+	d := newNotifyTestDeps(t)
+	res := notifyDayResult("2026-07-13", crisis.StateNormal, crisis.StateNormal) // 周一，非月初
+	res.Detail = crisis.SysDetail{AnyTrigger: false}
+	nc, err := buildNotifyContext(context.Background(), d, res)
+	require.NoError(t, err)
+	assert.Equal(t, crisis.SummaryWeekly, nc.Summary)
+	assert.Nil(t, nc.Trends)
+	assert.Equal(t, 0, nc.ClearStreak)
 }
 
 // store 查询错误原样上抛：关库触发 RecentIndicatorEvals；删 macro_observations

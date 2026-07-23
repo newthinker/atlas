@@ -25,6 +25,17 @@ done
 # jq 缺失会让终态校验静默放空(find -exec jq 2>/dev/null 输出为空),必须前置检查
 command -v jq >/dev/null 2>&1 || { echo "ERROR: 本脚本依赖 jq(终态校验),请先安装。" >&2; exit 1; }
 
+# ---- 0. 前置校验:模板↔运行时漂移禁止归档(backlog-sprint-c #1,--force 不豁免) ----
+# 漂移归档会固化「运行时跑的不是入库版本」的不一致快照。同目录 check-runtime-sync.sh
+# 缺失(如脚本被单独分发)则跳过本门禁,不阻断归档。
+SYNC_CHECK="$(dirname "$0")/check-runtime-sync.sh"
+if [ -f "$SYNC_CHECK" ]; then
+    bash "$SYNC_CHECK" || {
+        echo "ABORT: 模板↔运行时存在漂移,先完成人类同步再归档(--force 不豁免)。" >&2
+        exit 1
+    }
+fi
+
 # ---- 1. 前置校验:tasks 缺失或无任务文件 = 无可归档内容(防误调/重复调用) ----
 TASK_COUNT=$(find "$TASK_DIR" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
 if [ "$TASK_COUNT" -eq 0 ]; then
