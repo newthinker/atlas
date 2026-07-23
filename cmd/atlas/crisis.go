@@ -341,7 +341,7 @@ func executeCrisisEvalDaily(ctx context.Context, d crisisEvalDeps, dateOverride 
 // 之前调用：PrevDay/StateDays/ClearStreak 都取"截至昨日"的库内历史，当日增量
 // （今日行、今日 any_trigger）在此函数内补足。
 func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayResult) (crisis.NotifyContext, error) {
-	nc := crisis.NotifyContext{Res: res, SummaryDue: summaryDue(res.Date, res.State)}
+	nc := crisis.NotifyContext{Res: res, Summary: summaryKind(res.Date, res.State)}
 
 	nc.PrevDay = map[string]crisis.Evaluation{}
 	for _, ind := range crisis.AllIndicators {
@@ -389,7 +389,7 @@ func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayRe
 	}
 
 	// 周报退出进度：历史 any_trigger=false 连续日数 + 今日（补充决策 8）
-	if res.State == crisis.StateWatch && nc.SummaryDue && !res.Detail.AnyTrigger {
+	if res.State == crisis.StateWatch && nc.Summary == crisis.SummaryWeekly && !res.Detail.AnyTrigger {
 		base, err := crisis.ClearStreakDays(d.store.History(ctx), crisis.StateWatch, d.cfg.StateMachine.WatchExitDays)
 		if err != nil {
 			return nc, err
@@ -397,8 +397,8 @@ func buildNotifyContext(ctx context.Context, d crisisEvalDeps, res *crisis.DayRe
 		nc.ClearStreak = base + 1
 	}
 
-	// 月报趋势：仅 SummaryDue ∧ NORMAL 时组装（通知设计 §8）
-	if nc.SummaryDue && res.State == crisis.StateNormal {
+	// 月报趋势：仅 SummaryMonthly ∧ NORMAL 时组装（通知设计 §8）
+	if nc.Summary == crisis.SummaryMonthly && res.State == crisis.StateNormal {
 		nc.Trends = map[string]crisis.Trend{}
 		for _, ind := range crisis.AllIndicators {
 			win, err := d.store.SeriesWindow(ctx, ind, res.Date, 21)
@@ -428,20 +428,28 @@ func buildCrisisSender() crisis.Sender {
 	return telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy))
 }
 
-// summaryDue：NORMAL → 当月首个交易日发月报（设计 §4.3：不加第 4 个 plist，
-// 在 daily eval 内判断）；WATCH → 周一发周报。
-func summaryDue(date string, state crisis.SystemState) bool {
+// summaryKind：NORMAL → 当月首个交易日发月报（设计 §4.3：不加第 4 个 plist，
+// 在 daily eval 内判断），其余周一发周报（撞日归月报，NORMAL 周报设计 §3.1）；
+// WATCH → 周一发周报；BREWING/CRISIS → 无摘要（日报已覆盖）。
+func summaryKind(date string, state crisis.SystemState) crisis.SummaryKind {
 	t, err := time.Parse("2006-01-02", date)
 	if err != nil {
-		return false
+		return crisis.SummaryNone
 	}
 	switch state {
 	case crisis.StateNormal:
-		return isFirstTradingDayOfMonth(t)
+		if isFirstTradingDayOfMonth(t) {
+			return crisis.SummaryMonthly
+		}
+		if t.Weekday() == time.Monday {
+			return crisis.SummaryWeekly
+		}
 	case crisis.StateWatch:
-		return t.Weekday() == time.Monday
+		if t.Weekday() == time.Monday {
+			return crisis.SummaryWeekly
+		}
 	}
-	return false
+	return crisis.SummaryNone
 }
 
 func isFirstTradingDayOfMonth(t time.Time) bool {
