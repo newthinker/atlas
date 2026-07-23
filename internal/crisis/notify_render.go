@@ -18,7 +18,7 @@ type Trend struct {
 type NotifyContext struct {
 	Res          *DayResult
 	StateDays    int                   // 变更消息=前状态持续日数；否则=当前状态含当日（补充决策 6）
-	SummaryDue   bool                  // 月报/周报到期（cmd 计算）
+	Summary      SummaryKind           // 摘要到期类型（cmd 计算，撞日归月报）
 	NewStale     []string              // 今日新进入 STALE 的指标（P2 去重后）
 	StaleLastObs map[string]string     // NewStale 指标的最后观测日（补充决策 1）
 	PrevDay      map[string]Evaluation // 前一评估日指标行（较昨日 & NewStale 依据）

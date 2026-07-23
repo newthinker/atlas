@@ -493,7 +493,7 @@ func TestRenderMonthly(t *testing.T) {
 	mv.Status, mv.Value = StatusStale, 88.1
 	res.Results[IndMOVE] = mv
 
-	nc := NotifyContext{Res: res, StateDays: 63, SummaryDue: true, Trends: testTrends(res.Date)}
+	nc := NotifyContext{Res: res, StateDays: 63, Summary: SummaryMonthly, Trends: testTrends(res.Date)}
 	msg := renderMonthly(cfg, nc)
 	assert.Contains(t, msg, "⚪ 情绪 move 88.1 ") // ⚪ 趋势行
 	assert.Contains(t, msg, "· 数据断更(STALE)")   // nonColorNote 分支
