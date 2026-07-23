@@ -49,14 +49,7 @@ func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64,
 
 	// 4. Step-align each close with the latest EPS at or before its time; drop
 	//    days whose aligned EPS <= 0 (loss quarters).
-	peSeries := make([]float64, 0, len(closes))
-	for _, bar := range closes {
-		e, ok := latestEPSAtOrBefore(pts, bar.Time)
-		if !ok || e <= 0 {
-			continue
-		}
-		peSeries = append(peSeries, bar.Close/e)
-	}
+	_, peSeries := alignPE(closes, pts)
 	// load-bearing: an empty PE series is a data-availability failure, not a
 	// success — never let PercentileRank's -1 ride out with a nil error.
 	if len(peSeries) == 0 || len(closes) == 0 {
@@ -76,4 +69,22 @@ func latestEPSAtOrBefore(pts []core.EPSPoint, t time.Time) (eps float64, ok bool
 		return 0, false
 	}
 	return pts[i-1].EPS, true
+}
+
+// alignPE step-aligns each close with the latest EPS point at or before it,
+// skipping days whose aligned EPS <= 0 or whose close <= 0. pts must be sorted
+// ascending by date. Returned dates/pe are ascending and equal length.
+func alignPE(closes []core.OHLCV, pts []core.EPSPoint) (dates []time.Time, pe []float64) {
+	sorted := make([]core.OHLCV, len(closes))
+	copy(sorted, closes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	for _, c := range sorted {
+		e, ok := latestEPSAtOrBefore(pts, c.Time)
+		if !ok || e <= 0 || c.Close <= 0 {
+			continue
+		}
+		dates = append(dates, c.Time)
+		pe = append(pe, c.Close/e)
+	}
+	return dates, pe
 }
