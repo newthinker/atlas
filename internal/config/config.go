@@ -27,6 +27,7 @@ type Config struct {
 	Collector  CollectorGlobalConfig      `mapstructure:"collector"`
 	Qlib       QlibConfig                 `mapstructure:"qlib"`
 	Valuation  ValuationConfig            `mapstructure:"valuation"`
+	Prism      PrismConfig                `mapstructure:"prism"`
 }
 
 // ValuationConfig configures the app-side PE-percentile lookback used for EPS
@@ -455,6 +456,46 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// PrismConfig configures the Prism valuation board module (M1).
+type PrismConfig struct {
+	Enabled         bool              `mapstructure:"enabled"`
+	DBPath          string            `mapstructure:"db_path"`
+	LookbackYears   int               `mapstructure:"lookback_years"`    // 理杏仁首次回填年数
+	USLookbackYears int               `mapstructure:"us_lookback_years"` // 美股 yahoo 重建年数
+	LowPct          float64           `mapstructure:"low_pct"`           // 低估阈值(百分位)
+	HighPct         float64           `mapstructure:"high_pct"`          // 高估阈值(百分位)
+	Instruments     []PrismInstrument `mapstructure:"instruments"`
+}
+
+// PrismInstrument is one entry of the Prism instrument pool.
+type PrismInstrument struct {
+	Symbol string `mapstructure:"symbol"`
+	Name   string `mapstructure:"name"`
+	Type   string `mapstructure:"type"`   // "stock" | "index"
+	Market string `mapstructure:"market"` // "US" | "HK" | "CN_A"
+	Group  string `mapstructure:"group"`  // 展示分组,如 "A股指数"
+	Source string `mapstructure:"source"` // "lixinger" | "engine"
+}
+
+// ApplyDefaults fills zero-valued fields with M1 defaults.
+func (c *PrismConfig) ApplyDefaults() {
+	if c.DBPath == "" {
+		c.DBPath = "data/prism.db"
+	}
+	if c.LookbackYears == 0 {
+		c.LookbackYears = 10
+	}
+	if c.USLookbackYears == 0 {
+		c.USLookbackYears = 5
+	}
+	if c.LowPct == 0 {
+		c.LowPct = 15
+	}
+	if c.HighPct == 0 {
+		c.HighPct = 85
+	}
 }
 
 // WarnHardcodedSecrets logs warnings for secrets that appear to be hardcoded
