@@ -325,6 +325,17 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 			}
 			webHandler.SymbolDetail(w, r, symbol)
 		})
+
+		// Prism valuation pages (only when the store is wired)
+		if deps.PrismStore != nil {
+			webHandler.SetPrismProvider(deps.PrismStore, deps.PrismLow, deps.PrismHigh)
+			s.mux.HandleFunc("/prism/board", webHandler.PrismBoard)
+			s.mux.HandleFunc("/prism/detail/", func(w http.ResponseWriter, r *http.Request) {
+				symbol := strings.TrimPrefix(r.URL.Path, "/prism/detail/")
+				webHandler.PrismDetail(w, r, symbol)
+			})
+			s.mux.HandleFunc("/static/", webHandler.Static)
+		}
 	}
 
 	return nil
