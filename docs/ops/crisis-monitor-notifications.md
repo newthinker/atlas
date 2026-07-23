@@ -44,8 +44,8 @@
   持续 STALE 不重复发。
 - **盘中速报触发**：JPY=X 实时价对 5 观测日前收盘的周环比跌破 `red_wow_pct`（−3%）；
   以评估行 `usdjpy_intraday` 做每日一次去重，**先落库去重行再发送**——通知丢失也不会重复告警。
-- **月报/周报不加第 4 个 plist**：`summaryDue` 在 daily eval 内判断
-  「NORMAL ∧ 当月首个交易日」或「WATCH ∧ 周一」。
+- **月报/周报不加第 4 个 plist**：`summaryKind` 在 daily eval 内判断——NORMAL
+  当月首个交易日发月报、其余周一发周报（撞日只发月报）；WATCH 周一发周报。
 
 ## 3. 通知机制
 
