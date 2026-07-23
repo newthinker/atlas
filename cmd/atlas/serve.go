@@ -25,6 +25,7 @@ import (
 	"github.com/newthinker/atlas/internal/notifier/email"
 	"github.com/newthinker/atlas/internal/notifier/telegram"
 	"github.com/newthinker/atlas/internal/notifier/webhook"
+	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 	signalstore "github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/newthinker/atlas/internal/strategy/ma_crossover"
@@ -191,6 +192,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("wiring execution: %w", err)
 	}
 
+	// Open the Prism store when enabled; nil keeps its API routes unregistered.
+	// Closed on shutdown via defer (serve blocks until the signal handler returns).
+	var prismStore *prismstore.Store
+	prismCfg := cfg.Prism
+	prismCfg.ApplyDefaults()
+	if prismCfg.Enabled {
+		prismStore, err = prismstore.Open(prismCfg.DBPath)
+		if err != nil {
+			return fmt.Errorf("opening prism store: %w", err)
+		}
+		defer prismStore.Close()
+	}
+
 	// Create server dependencies
 	deps := api.Dependencies{
 		App:              application,
@@ -200,6 +214,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 		Metrics:          metricsReg,
 		ExecutionManager: execManager,
 		Config:           cfg,
+		PrismStore:       prismStore,
+		PrismLow:         prismCfg.LowPct,
+		PrismHigh:        prismCfg.HighPct,
 	}
 
 	// Create server config

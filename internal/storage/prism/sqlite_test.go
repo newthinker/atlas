@@ -1,6 +1,7 @@
 package prism
 
 import (
+	"errors"
 	"math"
 	"path/filepath"
 	"testing"
@@ -137,4 +138,13 @@ func TestOpenCreatesNestedParentDirs(t *testing.T) {
 	defer s.Close()
 	_, err = s.UpsertInstrument(Instrument{Symbol: "NVDA", Type: "stock", Market: "US", Name: "NVIDIA", Group: "美股公司", Source: "engine"})
 	require.NoError(t, err)
+}
+
+func TestSeriesUnknownSymbolReturnsErrNotFound(t *testing.T) {
+	// error_handling: 未知 symbol 返回包装的 ErrNotFound(errors.Is 可判)
+	s := openTemp(t)
+	_, err := s.Series("NOPE", "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNotFound), "未知 symbol 应返回可判定的 ErrNotFound")
+	assert.Contains(t, err.Error(), "NOPE")
 }

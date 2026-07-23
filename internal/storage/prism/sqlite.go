@@ -4,6 +4,7 @@ package prism
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,9 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// ErrNotFound is returned by Series when the symbol has no instrument row.
+var ErrNotFound = errors.New("prism: symbol not found")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS instrument (
@@ -186,8 +190,11 @@ func (s *Store) Series(symbol, from string) (*SeriesData, error) {
 	sd := &SeriesData{Symbol: symbol}
 	err := s.db.QueryRow(`SELECT name, source FROM instrument WHERE symbol=?`,
 		symbol).Scan(&sd.Name, &sd.Source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, symbol)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("prism: unknown symbol %s: %w", symbol, err)
+		return nil, fmt.Errorf("prism: query symbol %s: %w", symbol, err)
 	}
 	rows, err := s.db.Query(`
 		SELECT v.d, v.pe_ttm, v.pctl_5y, v.pctl_10y
