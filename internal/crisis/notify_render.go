@@ -282,13 +282,17 @@ func renderDaily(cfg *Config, nc NotifyContext) string {
 	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
 }
 
-// renderWeekly 消息 5：WATCH 周报（通知设计 §5.5，退出进度见 §6.6）。
+// renderWeekly 消息 5：WATCH/NORMAL 周报（通知设计 §5.5，退出进度见 §6.6）。
+// 退出进度行仅 WATCH 态渲染——NORMAL 态无退出概念（NORMAL 周报设计 §3.3）。
 func renderWeekly(cfg *Config, nc NotifyContext) string {
 	res := nc.Res
 	first := fmt.Sprintf("[P1] 📅 Cassandra 周报 · %s 当周 · %s 已持续 %d 个评估日",
 		monthDay(res.Date), res.State, nc.StateDays)
-	tail := fmt.Sprintf("退出进度：触发条件已连续解除 %d 日（回 NORMAL 需连续 %d 日）\n下次周报：下周一 · 状态变更即时通知",
-		nc.ClearStreak, cfg.StateMachine.WatchExitDays)
+	tail := "下次周报：下周一 · 状态变更即时通知"
+	if res.State == StateWatch {
+		tail = fmt.Sprintf("退出进度：触发条件已连续解除 %d 日（回 NORMAL 需连续 %d 日）\n",
+			nc.ClearStreak, cfg.StateMachine.WatchExitDays) + tail
+	}
 	return strings.Join([]string{first, bodyZones(cfg, res, "异常指标："), tail}, "\n\n") + notifyFooter
 }
 
