@@ -307,10 +307,14 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 Prism 的 A/H 公司(茅台/腾讯)与 A 股指数兜底数据源经本地 aktools HTTP 侧车拉取
 AKShare。侧车是独立 Python 进程（与 Go 主程序解耦，与 qlib_eval 的 venv 完全隔离）。
 
-- **建 venv**：`bash scripts/akshare/setup.sh`（幂等，重复执行安全）——在
-  `scripts/akshare/.venv` 建独立虚拟环境、按 `requirements.txt` 安装 akshare + aktools，
-  并 `pip freeze > requirements.lock` 留档。默认解释器 `python3.11`，可传参覆盖
-  （`bash scripts/akshare/setup.sh python3.12`）。
+- **投递**：`scripts/akshare/`(setup.sh + requirements.txt + requirements.lock)随
+  `deploy.sh` rsync 投递到 runtime 目录（`/Users/zuowei/workspace/runtime/atlas`），
+  **setup.sh 须在 runtime 侧执行**——venv 落在 `runtime/scripts/akshare/.venv`,与 plist
+  `ProgramArguments` 的绝对路径一致(`.venv/` 本身不入 git,仅 lock 追踪)。
+- **建 venv**：runtime 侧执行 `bash scripts/akshare/setup.sh`（幂等，重复执行安全）——在
+  `scripts/akshare/.venv` 建独立虚拟环境。**有 `requirements.lock` 时按 lock 复现安装**
+  （锁定版本、不覆写 lock）；无 lock(首次)时按 `requirements.txt` 安装并 `pip freeze`
+  生成 lock。默认解释器 `python3.11`，可传参覆盖（`bash scripts/akshare/setup.sh python3.12`）。
 - **装载常驻**：`launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.aktools.plist`
   （plist 真相源 `deploy/launchd/com.newthinker.atlas.aktools.plist`，`KeepAlive` 保活、
   `RunAtLoad` 开机自启）。侧车仅绑 `127.0.0.1:8180`，不对外暴露。
@@ -321,15 +325,20 @@ AKShare。侧车是独立 Python 进程（与 Go 主程序解耦，与 qlib_eval
 - **验证**：`curl 127.0.0.1:8180` 侧车可达（返回 aktools 首页）；主程序侧
   `bin/atlas prism refresh -c configs/config.yaml` 后 `/prism/board` 目检茅台/腾讯上墙。
 - **日志路径**：`logs/aktools.out.log` / `logs/aktools.err.log`。
-- **升级流程**：重跑 `bash scripts/akshare/setup.sh`（拉最新 akshare/aktools），对比
-  `requirements.lock` 前后差异确认变更、验证 refresh 正常后提交更新的 lock 文件；异常可据
-  lock 回滚版本。
+- **升级流程**：显式跑 `bash scripts/akshare/setup.sh --upgrade`(忽略 lock、按
+  `requirements.txt` 重装到最新并刷新 lock)——**须用 `--upgrade`**，否则默认路径按 lock
+  复现安装、不会拉新版本，也不会顺手覆写 lock(升级对比的基准保持稳定)。对比
+  `requirements.lock` 前后差异确认变更、验证 refresh 正常后提交更新的 lock 文件;异常可据
+  旧 lock 回滚版本。
 - **⚠ live 校验点**：AKShare 接口名/字段键（`stock_a_indicator_lg`/`stock_hk_valuation_baidu`/
   `stock_index_pe_lg` 及 `trade_date`/`pe_ttm`/`日期`/`滚动市盈率` 等）与 aktools CLI 旗标名
   （`--host`/`--port`）随上游变动是常态，首跑若不符以实际响应修正代码常量/plist 并同步测试。
 - **口径说明**：AKShare 无官方分位，兜底期指数 5Y/10Y 分位为读回本地序列后用
   `valuation.RollingPercentile` 本地计算，与理杏仁官方 cvpos 有方法论差异（数值方向一致、
-  绝对值允许差异）；指数兜底仅有 PE（PB/PS 为空），HK 公司仅有 PE/PB（无 PS）。
+  绝对值允许差异）。**注意**:降级发生当日,该指数历史序列可能是**混源**的——早先由理杏仁
+  写入(其 PE 为 mcw 加权口径)、当日由 akshare 补(乐咕滚动市盈率,亦加权但口径不完全一致),
+  故兜底日的分位是该混源序列上的排位,跨源衔接处存在轻微不连续,主源恢复后次日续拉即回归
+  单一口径。指数兜底仅有 PE（PB/PS 为空），HK 公司仅有 PE/PB（无 PS）。
 
 ---
 
