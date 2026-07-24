@@ -514,3 +514,58 @@ func TestRefreshAkshareSeriesReadbackFailure(t *testing.T) {
 	assert.Contains(t, rep.Failed[0], "read back series", "读回失败须带前缀")
 	assert.Empty(t, store.upserts["600519.SH"], "读回失败不得写库")
 }
+
+// Context Checkpoint (TASK-005): done_criteria → test mapping
+//   functional[0/1] 主源败+兜底成→Degraded+Refreshed+兜底行落库, 格式串双断言 → TestRefreshFallbackDegraded
+//   error_handling  双源皆败→Failed 单条含两原因, Degraded 空                → TestRefreshFallbackBothFail
+//   boundary        主源成→不触碰 akshare(indexCalls 空, 零多余请求)         → TestRefreshFallbackNotTriggered
+
+// fbInst 是配置了 lixinger 主源 + akshare 兜底的指数标的。
+func fbInst() config.PrismInstrument {
+	return config.PrismInstrument{Symbol: "000300.SH", Name: "沪深300", Type: "index",
+		Market: "CN_A", Group: "A股指数", Source: "lixinger", FallbackSource: "akshare"}
+}
+
+func TestRefreshFallbackDegraded(t *testing.T) {
+	store := newFakeStore()
+	lix := &fakeLix{fail: map[string]error{"000300.SH": errors.New("quota exhausted")}}
+	ak := &fakeAkshare{indexPts: []akshare.ValuationPoint{
+		{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), PETTM: 14.6, PB: math.NaN(), PSTTM: math.NaN()},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, now)
+	assert.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed, "兜底成功计入 Refreshed")
+	require.Len(t, rep.Degraded, 1)
+	assert.Contains(t, rep.Degraded[0], "000300.SH")
+	assert.Contains(t, rep.Degraded[0], "lixinger failed", "格式串前段")
+	assert.Contains(t, rep.Degraded[0], "quota exhausted", "含主源失败原因")
+	assert.Contains(t, rep.Degraded[0], "akshare fallback ok", "格式串后段")
+	require.Len(t, store.upserts["000300.SH"], 1, "兜底行已写入")
+}
+
+func TestRefreshFallbackBothFail(t *testing.T) {
+	store := newFakeStore()
+	lix := &fakeLix{fail: map[string]error{"000300.SH": errors.New("lix down")}}
+	ak := &fakeAkshare{fail: map[string]error{"000300.SH": errors.New("aktools down")}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	assert.Empty(t, rep.Degraded)
+	require.Len(t, rep.Failed, 1, "双败合并为单条")
+	assert.Contains(t, rep.Failed[0], "lix down")
+	assert.Contains(t, rep.Failed[0], "aktools down")
+}
+
+func TestRefreshFallbackNotTriggered(t *testing.T) {
+	store, lix, ak := newFakeStore(), &fakeLix{}, &fakeAkshare{}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, now)
+	assert.Empty(t, rep.Failed)
+	assert.Empty(t, rep.Degraded)
+	assert.Empty(t, ak.indexCalls, "主源成功不得触碰兜底源(零多余请求)")
+	assert.Empty(t, ak.stockCalls)
+}

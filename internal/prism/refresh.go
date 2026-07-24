@@ -45,6 +45,7 @@ type USClient interface {
 type Report struct {
 	Refreshed int
 	Failed    []string // "SYMBOL: error" 摘要
+	Degraded  []string // 主源失败但兜底成功的标的(可观测降级,进告警提示不算失败)
 }
 
 // Refresh updates every configured instrument: lixinger-sourced instruments
@@ -56,6 +57,15 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 		switch inst.Source {
 		case "lixinger":
 			err = refreshLixinger(cfg, store, lix, inst, now)
+			if err != nil && inst.FallbackSource == "akshare" {
+				if fbErr := refreshAkshare(cfg, store, ak, inst, now); fbErr == nil {
+					rep.Degraded = append(rep.Degraded,
+						fmt.Sprintf("%s: lixinger failed (%v), akshare fallback ok", inst.Symbol, err))
+					err = nil
+				} else {
+					err = fmt.Errorf("lixinger: %v; akshare fallback: %v", err, fbErr)
+				}
+			}
 		case "engine":
 			err = refreshEngine(cfg, store, us, inst, now)
 		case "akshare":
