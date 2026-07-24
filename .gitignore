@@ -49,6 +49,8 @@ coverage.out
 
 # qlib_eval Python 评估环境
 scripts/qlib_eval/.venv/
+# akshare / aktools 侧车 venv(requirements.lock 仍纳入 git 追踪)
+scripts/akshare/.venv/
 reports/
 signals.csv
 # Arcforge 瞬态通信与 Python 缓存

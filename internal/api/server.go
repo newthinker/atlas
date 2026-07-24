@@ -18,6 +18,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/metrics"
+	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -50,6 +51,9 @@ type Dependencies struct {
 	Metrics          *metrics.Registry
 	ExecutionManager *broker.ExecutionManager
 	Config           *config.Config
+	PrismStore       *prismstore.Store // nil = prism 未启用,不注册路由
+	PrismLow         float64
+	PrismHigh        float64
 }
 
 // watchlistAdapter adapts app.App to the web handler's WatchlistProvider interface
@@ -205,6 +209,13 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		return h
 	}
 
+	// Prism valuation board API (only when a store is injected)
+	if deps.PrismStore != nil {
+		prismHandler := api.NewPrismHandler(deps.PrismStore, deps.PrismLow, deps.PrismHigh)
+		s.mux.Handle("/api/prism/board", wrapHandler(http.HandlerFunc(prismHandler.Board)))
+		s.mux.Handle("/api/prism/series", wrapHandler(http.HandlerFunc(prismHandler.Series)))
+	}
+
 	// API v1 routes (with auth, metrics, logging)
 	s.mux.Handle("/api/v1/signals", wrapHandler(http.HandlerFunc(signalsHandler.List)))
 	s.mux.Handle("/api/v1/signals/", wrapHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +325,17 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 			}
 			webHandler.SymbolDetail(w, r, symbol)
 		})
+
+		// Prism valuation pages (only when the store is wired)
+		if deps.PrismStore != nil {
+			webHandler.SetPrismProvider(deps.PrismStore, deps.PrismLow, deps.PrismHigh)
+			s.mux.HandleFunc("/prism/board", webHandler.PrismBoard)
+			s.mux.HandleFunc("/prism/detail/", func(w http.ResponseWriter, r *http.Request) {
+				symbol := strings.TrimPrefix(r.URL.Path, "/prism/detail/")
+				webHandler.PrismDetail(w, r, symbol)
+			})
+			s.mux.HandleFunc("/static/", webHandler.Static)
+		}
 	}
 
 	return nil

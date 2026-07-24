@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.aktools</string>
+
+  <!-- 隔离 venv 解释器;实参以实现时 aktools CLI 为准(⚠ live 校验: --host/--port 旗标名) -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/scripts/akshare/.venv/bin/python</string>
+    <string>-m</string>
+    <string>aktools</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8180</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/aktools.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/aktools.err.log</string>
+</dict>
+</plist>

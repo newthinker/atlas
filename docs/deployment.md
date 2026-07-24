@@ -259,6 +259,8 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 | crisis-daily | 22:45 / 23:45 / 次日 07:30 | 危机监控每日评估（多时点覆盖 ET 发布，幂等空跑） |
 | crisis-nfci | 周三 21:00 / 22:00 | 刷新周频 NFCI（不评估） |
 | crisis-intraday-jpy | 每 30 分钟 | 盘中 JPY 检查（非 BREWING/CRISIS 态空跑近零） |
+| prism-daily | 每日 08:30 | Prism 估值刷新（理杏仁增量 + 美股 yahoo 重算，在 refresh-us 08:00 之后） |
+| aktools | 常驻 | AKShare HTTP 侧车（127.0.0.1:8180，Prism A/H 公司与指数兜底数据源） |
 
 ### 危机监控（Cassandra）部署要点
 
@@ -274,6 +276,69 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
   `bin/atlas crisis status` 查看当前系统状态与各指标读数。
 - 状态语义与阈值调参见 `docs/plans/atlas-macro-crisis-monitor-design.md`（阈值全部在
   `configs/crisis-monitor.yaml`，调参不需发版，重跑 `atlas crisis replay` 验证）。
+- 通知频率与机制（各状态收到什么消息、多久一条、排障速查）见
+  `docs/ops/crisis-monitor-notifications.md`。
+
+### Prism 估值面板部署要点
+
+- **装载**：plist 随 `install-services.sh` 一并 bootstrap（幂等）；或单独
+  `launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.prism-daily.plist`。
+  调度每日 08:30，刻意排在 refresh-us（08:00）之后——美股 engine 标的重算依赖当日行情已落库。
+- **配置要点**：runtime `configs/config.yaml` 的 `prism.enabled: true` 决定是否启用（同时
+  Web 侧 `/prism/board` 路由才注册、estimate 阈值 `low_pct`/`high_pct` 生效）；理杏仁标的
+  复用现有 `collectors.lixinger.api_key`（无需为 prism 单列密钥，env `LIXINGER_API_KEY` 可覆盖），
+  密钥不入 plist 不入日志。`db_path`（默认 `data/prism.db`）随 runtime 本地持有，deploy.sh 不同步 data/。
+- **日志路径**：`logs/prism-daily.out.log` / `logs/prism-daily.err.log`。
+- **手动触发/首跑**：在 runtime 目录（`/Users/zuowei/workspace/runtime/atlas`）执行
+  `bin/atlas prism refresh -c configs/config.yaml`——首次全量回填（理杏仁近 10Y、美股近 5Y），
+  之后每日只拉增量（理杏仁请求区间为 latest+1 起，控制理杏豆成本）。**须在 runtime 目录内运行**：
+  `db_path`（默认 `data/prism.db`）是相对路径，按进程 cwd 解析，在代码目录跑会把库写错地方、
+  与 launchd 任务读写的库不是同一个。
+- **验证**：`launchctl kickstart gui/$(id -u)/com.newthinker.atlas.prism-daily` 后查
+  `logs/prism-daily.out.log`；浏览器打开 `/prism/board` 目检卡片，`/prism/detail/<symbol>` 目检
+  PE 与滚动分位曲线。设计与 M1 验收标准见 `docs/prism/atlas_prism_design.md`。
+- **已知限制**：启用 `ATLAS_API_KEY`（API 鉴权）时，`/prism/detail` 的图表会 401 空白——
+  页面 JS 用浏览器 `fetch` 调 `/api/prism/series` 不带 `X-API-Key` 头。这与既有 `/symbols/`
+  详情页同源继承缺陷，后续与既有页统一修复（如同源会话票据或页面注入 key）；`/prism/board`
+  为服务端渲染不受影响。
+
+### AKShare 侧车（aktools）部署要点
+
+Prism 的 A/H 公司(茅台/腾讯)与 A 股指数兜底数据源经本地 aktools HTTP 侧车拉取
+AKShare。侧车是独立 Python 进程（与 Go 主程序解耦，与 qlib_eval 的 venv 完全隔离）。
+
+- **投递**：`scripts/akshare/`(setup.sh + requirements.txt + requirements.lock)随
+  `deploy.sh` rsync 投递到 runtime 目录（`/Users/zuowei/workspace/runtime/atlas`），
+  **setup.sh 须在 runtime 侧执行**——venv 落在 `runtime/scripts/akshare/.venv`,与 plist
+  `ProgramArguments` 的绝对路径一致(`.venv/` 本身不入 git,仅 lock 追踪)。
+- **建 venv**：runtime 侧执行 `bash scripts/akshare/setup.sh`（幂等，重复执行安全）——在
+  `scripts/akshare/.venv` 建独立虚拟环境。**有 `requirements.lock` 时按 lock 复现安装**
+  （锁定版本、不覆写 lock）；无 lock(首次)时按 `requirements.txt` 安装并 `pip freeze`
+  生成 lock。默认解释器 `python3.11`，可传参覆盖（`bash scripts/akshare/setup.sh python3.12`）。
+- **装载常驻**：`launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.aktools.plist`
+  （plist 真相源 `deploy/launchd/com.newthinker.atlas.aktools.plist`，`KeepAlive` 保活、
+  `RunAtLoad` 开机自启）。侧车仅绑 `127.0.0.1:8180`，不对外暴露。
+- **配置要点**：runtime `configs/config.yaml` 的 `prism.akshare_base_url`
+  （默认 `http://127.0.0.1:8180`）须与 plist 的 `--host/--port` 一致；池内 source=akshare
+  的标的（茅台/腾讯）走侧车，source=lixinger 且带 `fallback_source: akshare` 的指数
+  （沪深300/中证500）在主源失败时自动降级到侧车。
+- **验证**：`curl 127.0.0.1:8180` 侧车可达（返回 aktools 首页）；主程序侧
+  `bin/atlas prism refresh -c configs/config.yaml` 后 `/prism/board` 目检茅台/腾讯上墙。
+- **日志路径**：`logs/aktools.out.log` / `logs/aktools.err.log`。
+- **升级流程**：显式跑 `bash scripts/akshare/setup.sh --upgrade`(忽略 lock、按
+  `requirements.txt` 重装到最新并刷新 lock)——**须用 `--upgrade`**，否则默认路径按 lock
+  复现安装、不会拉新版本，也不会顺手覆写 lock(升级对比的基准保持稳定)。对比
+  `requirements.lock` 前后差异确认变更、验证 refresh 正常后提交更新的 lock 文件;异常可据
+  旧 lock 回滚版本。
+- **⚠ live 校验点**：AKShare 接口名/字段键（`stock_a_indicator_lg`/`stock_hk_valuation_baidu`/
+  `stock_index_pe_lg` 及 `trade_date`/`pe_ttm`/`日期`/`滚动市盈率` 等）与 aktools CLI 旗标名
+  （`--host`/`--port`）随上游变动是常态，首跑若不符以实际响应修正代码常量/plist 并同步测试。
+- **口径说明**：AKShare 无官方分位，兜底期指数 5Y/10Y 分位为读回本地序列后用
+  `valuation.RollingPercentile` 本地计算，与理杏仁官方 cvpos 有方法论差异（数值方向一致、
+  绝对值允许差异）。**注意**:降级发生当日,该指数历史序列可能是**混源**的——早先由理杏仁
+  写入(其 PE 为 mcw 加权口径)、当日由 akshare 补(乐咕滚动市盈率,亦加权但口径不完全一致),
+  故兜底日的分位是该混源序列上的排位,跨源衔接处存在轻微不连续,主源恢复后次日续拉即回归
+  单一口径。指数兜底仅有 PE（PB/PS 为空），HK 公司仅有 PE/PB（无 PS）。
 
 ---
 

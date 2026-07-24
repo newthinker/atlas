@@ -24,20 +24,10 @@ const MinEPSPoints = 8
 // drops days whose aligned EPS <= 0, and returns the percentile of the current
 // PE within that series.
 func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64, error) {
-	// 1. Sort a copy of the EPS points ascending by date.
-	pts := make([]core.EPSPoint, len(eps))
-	copy(pts, eps)
-	sort.Slice(pts, func(i, j int) bool { return pts[i].Date.Before(pts[j].Date) })
-
-	// 2. Need at least MinEPSPoints positive quarterly points to be meaningful.
-	positive := 0
-	for _, p := range pts {
-		if p.EPS > 0 {
-			positive++
-		}
-	}
-	if positive < MinEPSPoints {
-		return -1, ErrInsufficientEPS
+	// 1-2. Sort the EPS points and require enough positive quarterly points.
+	pts, err := sortedEPSWithGate(eps)
+	if err != nil {
+		return -1, err
 	}
 
 	// 3. Current EPS(TTM) is the latest point; non-positive means a real loss,
@@ -49,14 +39,7 @@ func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64,
 
 	// 4. Step-align each close with the latest EPS at or before its time; drop
 	//    days whose aligned EPS <= 0 (loss quarters).
-	peSeries := make([]float64, 0, len(closes))
-	for _, bar := range closes {
-		e, ok := latestEPSAtOrBefore(pts, bar.Time)
-		if !ok || e <= 0 {
-			continue
-		}
-		peSeries = append(peSeries, bar.Close/e)
-	}
+	_, peSeries := alignPE(closes, pts)
 	// load-bearing: an empty PE series is a data-availability failure, not a
 	// success — never let PercentileRank's -1 ride out with a nil error.
 	if len(peSeries) == 0 || len(closes) == 0 {
@@ -65,6 +48,25 @@ func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64,
 
 	currentPE := closes[len(closes)-1].Close / currentEPS
 	return PercentileRank(peSeries, currentPE), nil
+}
+
+// sortedEPSWithGate returns a copy of eps sorted ascending by date, erroring
+// with ErrInsufficientEPS when fewer than MinEPSPoints have EPS > 0.
+func sortedEPSWithGate(eps []core.EPSPoint) ([]core.EPSPoint, error) {
+	pts := make([]core.EPSPoint, len(eps))
+	copy(pts, eps)
+	sort.Slice(pts, func(i, j int) bool { return pts[i].Date.Before(pts[j].Date) })
+
+	positive := 0
+	for _, p := range pts {
+		if p.EPS > 0 {
+			positive++
+		}
+	}
+	if positive < MinEPSPoints {
+		return nil, ErrInsufficientEPS
+	}
+	return pts, nil
 }
 
 // latestEPSAtOrBefore returns the EPS of the latest point whose date is at or
@@ -76,4 +78,22 @@ func latestEPSAtOrBefore(pts []core.EPSPoint, t time.Time) (eps float64, ok bool
 		return 0, false
 	}
 	return pts[i-1].EPS, true
+}
+
+// alignPE step-aligns each close with the latest EPS point at or before it,
+// skipping days whose aligned EPS <= 0 or whose close <= 0. pts must be sorted
+// ascending by date. Returned dates/pe are ascending and equal length.
+func alignPE(closes []core.OHLCV, pts []core.EPSPoint) (dates []time.Time, pe []float64) {
+	sorted := make([]core.OHLCV, len(closes))
+	copy(sorted, closes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	for _, c := range sorted {
+		e, ok := latestEPSAtOrBefore(pts, c.Time)
+		if !ok || e <= 0 || c.Close <= 0 {
+			continue
+		}
+		dates = append(dates, c.Time)
+		pe = append(pe, c.Close/e)
+	}
+	return dates, pe
 }

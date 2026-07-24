@@ -1,0 +1,65 @@
+{{define "content"}}
+<div class="space-y-4">
+  <div class="flex items-center justify-between">
+    <h2 class="text-xl font-semibold">{{.Name}} <span class="text-sm text-gray-500">{{.Symbol}} · {{.Source}}</span></h2>
+    <div id="window-btns" class="flex gap-1">
+      <button data-w="1y" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">1Y</button>
+      <button data-w="3y" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">3Y</button>
+      <button data-w="5y" class="px-2 py-1 text-sm rounded bg-blue-600 text-white">5Y</button>
+      <button data-w="max" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">MAX</button>
+    </div>
+  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="rounded-lg border bg-white dark:bg-gray-800 p-2"><div id="pe-chart" style="height:360px"></div></div>
+    <div class="rounded-lg border bg-white dark:bg-gray-800 p-2"><div id="pctl-chart" style="height:360px"></div></div>
+  </div>
+</div>
+<script src="/static/echarts.min.js"></script>
+<script>
+(function () {
+  var symbol = {{.Symbol}};
+  var peChart = echarts.init(document.getElementById('pe-chart'));
+  var pctlChart = echarts.init(document.getElementById('pctl-chart'));
+
+  function load(win) {
+    fetch('/api/prism/series?symbol=' + encodeURIComponent(symbol) + '&window=' + win)
+      .then(function (r) { return r.json(); })
+      .then(function (resp) {
+        var d = resp.data || {};
+        peChart.setOption({
+          title: { text: 'PE(TTM)', left: 'center', textStyle: { fontSize: 13 } },
+          tooltip: { trigger: 'axis' },
+          xAxis: { type: 'category', data: d.dates },
+          yAxis: { type: 'value', scale: true },
+          series: [{ type: 'line', data: d.pe_ttm, showSymbol: false }],
+          grid: { left: 48, right: 16, bottom: 32 }
+        });
+        pctlChart.setOption({
+          title: { text: '滚动百分位', left: 'center', textStyle: { fontSize: 13 } },
+          tooltip: { trigger: 'axis' },
+          xAxis: { type: 'category', data: d.dates },
+          yAxis: { type: 'value', min: 0, max: 100 },
+          series: [
+            { name: '5Y 分位', type: 'line', data: d.pctl_5y, showSymbol: false },
+            { name: '10Y 分位', type: 'line', data: d.pctl_10y, showSymbol: false }
+          ],
+          legend: { bottom: 0 },
+          grid: { left: 40, right: 16, bottom: 48 }
+        });
+      });
+  }
+
+  document.querySelectorAll('#window-btns button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#window-btns button').forEach(function (b) {
+        b.className = 'px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700';
+      });
+      btn.className = 'px-2 py-1 text-sm rounded bg-blue-600 text-white';
+      load(btn.dataset.w);
+    });
+  });
+  window.addEventListener('resize', function () { peChart.resize(); pctlChart.resize(); });
+  load('5y');
+})();
+</script>
+{{end}}
