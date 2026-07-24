@@ -156,6 +156,23 @@ func TestFetchCompanyFactsQ4GuardRejectsCrossYear(t *testing.T) {
 	}
 }
 
+// [TASK-008 review_fix] 同比例多次拆股:一个年度 period_end 跨两次 2:1 拆股产生两个 ratio-2
+// 相邻跳变(filed 2021-02-20 与 2024-02-20,相隔 >1 年)。必须识别为两个独立事件(按生效日聚簇,
+// 而非按 ratio 合并),pre-both 季度累计 ÷4(而非只 ÷2);DilutedShares 反向 ×4。
+func TestFetchCompanyFactsRepeatedSameRatioSplit(t *testing.T) {
+	srv, _ := factsFileServer(t, "testdata/companyfacts_double_split.json", "/api/xbrl/companyfacts/CIK0001045810.json")
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	facts, err := c.FetchCompanyFacts("1045810")
+	require.NoError(t, err)
+	require.Len(t, facts, 1)
+	q1 := facts[0]
+	assert.Equal(t, time.Date(2019, 4, 27, 0, 0, 0, 0, time.UTC), q1.PeriodEnd)
+	assert.InDelta(t, 2.0, q1.EPSDiluted, 1e-9, "两次 2:1 累计 ÷4(8.0÷4=2.0),而非只 ÷2=4.0")
+	assert.InDelta(t, 4000.0, q1.DilutedShares, 1e-9, "股本反向 ×4(1000×4)")
+	assert.InDelta(t, 5000.0, q1.NetIncome, 1e-9, "绝对值不受拆股影响")
+}
+
 func TestFetchCompanyFactsIFRS(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"cik": 1, "facts": {"ifrs-full": {}}}`))

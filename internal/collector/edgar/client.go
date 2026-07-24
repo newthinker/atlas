@@ -115,6 +115,10 @@ type splitEvent struct {
 const (
 	splitRatioTolerance = 0.05
 	splitMinVotes       = 2
+	// splitClusterGap:同一比例的生效日观测相隔超过此值即视为**不同次**拆股。单次拆股的
+	// 观测(各 period_end 的首个拆股后重述 + 股本重述)通常落在 ~1 年内;公司先后两次同比例
+	// 拆股一般相隔数年。
+	splitClusterGap = 365 * 24 * time.Hour
 )
 
 // splitRatios 是真实股票拆股的常见比例白名单。只在 2024 被重述、跳过 2021 中间重述的老
@@ -160,23 +164,38 @@ func ratioVotes(byEnd map[string][]rawFact) map[float64]int {
 	return votes
 }
 
-// refineEffDates 对每个已验证真实比例 R,从条目里「比例 ≈ R」的相邻 filed 对取最早的新基准
-// filed 作为生效日。inverse=false 用于每股值(拆股后变小,older/newer≈R);inverse=true 用于
-// 股本数(拆股后变大,newer/older≈R)。股本是数十亿大整数,季度粒度也无舍入噪声,能把生效日
-// 收得比每股值(小额季度舍入使 ratio 失真、只能靠年报)更紧,避免误伤拆股后原生季度。
-func refineEffDates(byEnd map[string][]rawFact, valid map[float64]bool, inverse bool, effByRatio map[float64]time.Time) {
+// collectEffObs 把已验证真实比例 R 的「新基准 filed」观测收集进 obsByRatio[R]。inverse=false
+// 用于每股值(拆股后变小,older/newer≈R);inverse=true 用于股本数(拆股后变大,newer/older≈R)。
+func collectEffObs(byEnd map[string][]rawFact, valid map[float64]bool, inverse bool, obsByRatio map[float64][]time.Time) {
 	eachRestatementRatio(byEnd, inverse, func(R float64, newer rawFact) {
 		if !valid[R] {
 			return
 		}
-		eff, err := time.Parse("2006-01-02", newer.Filed)
-		if err != nil {
-			return
-		}
-		if cur, ok := effByRatio[R]; !ok || eff.Before(cur) {
-			effByRatio[R] = eff
+		if eff, err := time.Parse("2006-01-02", newer.Filed); err == nil {
+			obsByRatio[R] = append(obsByRatio[R], eff)
 		}
 	})
+}
+
+// clusterEvents 把每个比例 R 的生效日观测按时间聚簇为独立事件——同一次拆股会被多个 period_end
+// 在相近时间观测到(合成一个事件,生效日取簇内最早);相隔 >splitClusterGap 的观测属**不同次**
+// 拆股(如公司先后两次 2:1),各成一个事件。这样同比例多次拆股不会被按 ratio 合并丢失
+// (QA WARNING-1)。
+func clusterEvents(obsByRatio map[float64][]time.Time) []splitEvent {
+	var events []splitEvent
+	for R, dates := range obsByRatio {
+		sort.Slice(dates, func(i, j int) bool { return dates[i].Before(dates[j]) })
+		start, prev := dates[0], dates[0]
+		for _, d := range dates[1:] {
+			if d.Sub(prev) > splitClusterGap {
+				events = append(events, splitEvent{start, R})
+				start = d
+			}
+			prev = d
+		}
+		events = append(events, splitEvent{start, R})
+	}
+	return events
 }
 
 // detectSplits 从每股科目(EPSDiluted)与股本数(DilutedShares)的跨 filed 重述推断拆股时间线,
@@ -184,17 +203,16 @@ func refineEffDates(byEnd map[string][]rawFact, valid map[float64]bool, inverse 
 //  1. 比例只从 EPS **年度(FY)条目**投票检测——年度每股值量级大、无低值四舍五入噪声,只会给出
 //     真实拆股比(如 4、10);季度低值(如 0.06→0.02=3×)的舍入噪声不会污染。需 >=splitMinVotes
 //     个不同财年年度确认,进一步排除偶发。
-//  2. 生效日从 EPS 与**股本数**里「比例 ∈ 已验证真实比例」的最早新基准 filed 定位——股本是大整数
-//     无舍入噪声,季度重述能给出紧边界(拆股实际生效附近),避免用年报 filed(偏晚)误伤拆股后
-//     原生季度。
+//  2. 生效日从**年度 EPS 与股本数**里「比例 ∈ 已验证真实比例」的新基准 filed 观测聚簇定位——
+//     两者量级大、无低值舍入噪声(季度低值 EPS 的舍入会造出偶发同比例假观测,故 eff 不扫季度
+//     EPS);股本季度粒度亦干净,能把生效日收得紧(拆股实际生效附近),避免用年报 filed(偏晚)
+//     误伤拆股后原生季度。同比例多次拆股按生效日聚簇为多个事件(见 clusterEvents)。
 //
 // 早期只在后期被一次性重述(跳过中间拆股)的期间,其相邻比是组合比(如 40),不在白名单、也不是
 // 已验证真实比例,被忽略;但时间线由各原子拆股(4、10)自身确立,按 filed 累积应用仍正确归一。
 func detectSplits(eps, shares []rawFact) []splitEvent {
 	annualByEnd := map[string][]rawFact{}
-	epsByEnd := map[string][]rawFact{}
 	for _, f := range eps {
-		epsByEnd[f.End] = append(epsByEnd[f.End], f)
 		if isAnnual(f) {
 			annualByEnd[f.End] = append(annualByEnd[f.End], f)
 		}
@@ -212,15 +230,10 @@ func detectSplits(eps, shares []rawFact) []splitEvent {
 	for _, f := range shares {
 		sharesByEnd[f.End] = append(sharesByEnd[f.End], f)
 	}
-	effByRatio := map[float64]time.Time{}
-	refineEffDates(epsByEnd, valid, false, effByRatio)
-	refineEffDates(sharesByEnd, valid, true, effByRatio)
-
-	var events []splitEvent
-	for R, eff := range effByRatio {
-		events = append(events, splitEvent{eff, R})
-	}
-	return events
+	obsByRatio := map[float64][]time.Time{}
+	collectEffObs(annualByEnd, valid, false, obsByRatio)
+	collectEffObs(sharesByEnd, valid, true, obsByRatio)
+	return clusterEvents(obsByRatio)
 }
 
 // splitFactor 返回 filed 这条记录到「最新基准」需累乘的拆股比例(生效日晚于 filed 的拆股
