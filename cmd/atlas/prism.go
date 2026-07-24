@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	akshare "github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/prism"
@@ -81,10 +82,11 @@ func runPrismRefresh(cmd *cobra.Command, args []string) error {
 
 	lix := lixinger.New(cfg.Collectors["lixinger"].APIKey, lixinger.WithRetry(true))
 	yh := yahoo.New()
+	ak := akshare.New(pcfg.AkshareBaseURL)
 
 	deps := prismRefreshDeps{
 		refresh: func() prism.Report {
-			return prism.Refresh(pcfg, store, lix, yh, time.Now())
+			return prism.Refresh(pcfg, store, lix, yh, ak, time.Now())
 		},
 		sender: buildCrisisSender(),
 		out:    cmd.OutOrStdout(),

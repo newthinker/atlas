@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	akshare "github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
@@ -29,14 +30,16 @@ import (
 // [TASK-006] engine boundary[1] "engine 单标的失败不中断其余标的"           → TestRefreshEnginePartialFailure
 
 type fakeStore struct {
-	latest  map[string]string // symbol -> latest date
-	upserts map[string][]prismstore.ValuationRow
-	ids     map[int64]string
-	nextID  int64
+	latest    map[string]string // symbol -> latest date
+	upserts   map[string][]prismstore.ValuationRow
+	ids       map[int64]string
+	nextID    int64
+	series    map[string]*prismstore.SeriesData // symbol → 预置历史(Series 返回)
+	seriesErr map[string]error                  // symbol → 注入 Series 读回错误
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{latest: map[string]string{}, upserts: map[string][]prismstore.ValuationRow{}, ids: map[int64]string{}}
+	return &fakeStore{latest: map[string]string{}, upserts: map[string][]prismstore.ValuationRow{}, ids: map[int64]string{}, series: map[string]*prismstore.SeriesData{}}
 }
 func (f *fakeStore) UpsertInstrument(inst prismstore.Instrument) (int64, error) {
 	f.nextID++
@@ -47,6 +50,15 @@ func (f *fakeStore) LatestDate(id int64) (string, error) { return f.latest[f.ids
 func (f *fakeStore) UpsertValuations(id int64, rows []prismstore.ValuationRow) error {
 	f.upserts[f.ids[id]] = append(f.upserts[f.ids[id]], rows...)
 	return nil
+}
+func (f *fakeStore) Series(symbol, from string) (*prismstore.SeriesData, error) {
+	if err := f.seriesErr[symbol]; err != nil {
+		return nil, err
+	}
+	if sd, ok := f.series[symbol]; ok {
+		return sd, nil
+	}
+	return &prismstore.SeriesData{Symbol: symbol}, nil
 }
 
 type fakeLix struct {
@@ -74,6 +86,35 @@ func (fakeUS) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPo
 	return nil, errors.New("not used in this test")
 }
 
+type fakeAkshare struct {
+	stockCalls map[string][2]time.Time // symbol → [start,end](参数捕获)
+	indexCalls map[string][2]time.Time
+	stockPts   []akshare.ValuationPoint
+	indexPts   []akshare.ValuationPoint
+	fail       map[string]error
+}
+
+func (f *fakeAkshare) FetchStockValuationSeries(symbol, market string, start, end time.Time) ([]akshare.ValuationPoint, error) {
+	if f.stockCalls == nil {
+		f.stockCalls = map[string][2]time.Time{}
+	}
+	f.stockCalls[symbol] = [2]time.Time{start, end}
+	if err := f.fail[symbol]; err != nil {
+		return nil, err
+	}
+	return f.stockPts, nil
+}
+func (f *fakeAkshare) FetchIndexValuationSeries(symbol string, start, end time.Time) ([]akshare.ValuationPoint, error) {
+	if f.indexCalls == nil {
+		f.indexCalls = map[string][2]time.Time{}
+	}
+	f.indexCalls[symbol] = [2]time.Time{start, end}
+	if err := f.fail[symbol]; err != nil {
+		return nil, err
+	}
+	return f.indexPts, nil
+}
+
 func lixCfg() config.PrismConfig {
 	c := config.PrismConfig{Instruments: []config.PrismInstrument{
 		{Symbol: "000300.SH", Name: "沪深300", Type: "index", Market: "CN_A", Group: "A股指数", Source: "lixinger"},
@@ -85,7 +126,7 @@ func lixCfg() config.PrismConfig {
 func TestRefreshLixingerBackfill(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 
@@ -100,7 +141,7 @@ func TestRefreshLixingerIncremental(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-20" // 预置 latest → id 映射在 UpsertInstrument 时建立
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
 	win := lix.calls["000300.SH"]
 	assert.Equal(t, time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC), win[0], "增量从 latest+1 天开始")
 	assert.Equal(t, now, win[1])
@@ -110,7 +151,7 @@ func TestRefreshUpToDateZeroRequest(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-22" // latest+1 == now → 已是最新
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed, "零请求仍算成功")
 	_, called := lix.calls["000300.SH"]
@@ -124,7 +165,7 @@ func TestRefreshPartialFailure(t *testing.T) {
 		Symbol: "^GSPC", Name: "标普500", Type: "index", Market: "US", Group: "美股指数", Source: "lixinger"})
 	store := newFakeStore()
 	lix := &fakeLix{fail: map[string]error{"000300.SH": errors.New("boom")}}
-	rep := Refresh(cfg, store, lix, fakeUS{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
+	rep := Refresh(cfg, store, lix, fakeUS{}, &fakeAkshare{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 1, rep.Refreshed, "^GSPC 仍应成功")
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "000300.SH")
@@ -138,7 +179,7 @@ func TestRefreshUnknownSource(t *testing.T) {
 	}}
 	cfg.ApplyDefaults()
 	store, lix := newFakeStore(), &fakeLix{}
-	rep := Refresh(cfg, store, lix, fakeUS{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
+	rep := Refresh(cfg, store, lix, fakeUS{}, &fakeAkshare{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 1, rep.Refreshed, "已知 source 标的不受未知 source 影响")
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "XYZ")
@@ -149,7 +190,7 @@ func TestRefreshBadLatestDate(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "not-a-date"
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "000300.SH")
@@ -209,7 +250,7 @@ func TestRefreshEnginePath(t *testing.T) {
 
 	store := newFakeStore()
 	us := &fakeUS2{closes: closes, eps: eps}
-	rep := Refresh(cfg, store, &fakeLix{}, us, now)
+	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 	rows := store.upserts["NVDA"]
@@ -264,7 +305,7 @@ func TestRefreshEngineFailurePrefixes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.PrismConfig{Instruments: []config.PrismInstrument{engineInst("NVDA")}}
 			cfg.ApplyDefaults()
-			rep := Refresh(cfg, newFakeStore(), &fakeLix{}, tc.us, now)
+			rep := Refresh(cfg, newFakeStore(), &fakeLix{}, tc.us, &fakeAkshare{}, now)
 			assert.Equal(t, 0, rep.Refreshed)
 			require.Len(t, rep.Failed, 1)
 			assert.Contains(t, rep.Failed[0], "NVDA")
@@ -286,7 +327,7 @@ func TestRefreshEnginePartialFailure(t *testing.T) {
 	cfg.ApplyDefaults()
 	store := newFakeStore()
 
-	rep := Refresh(cfg, store, &fakeLix{}, us, now)
+	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, now)
 	assert.Equal(t, 1, rep.Refreshed, "OK 标的仍应成功")
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "BAD")
@@ -303,7 +344,7 @@ func TestRefreshLixingerTimezoneSafeUpToDate(t *testing.T) {
 	now := time.Date(2026, 7, 23, 20, 0, 0, 0, west)
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-23" // 本地当日已有数据
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed, "已是最新仍算成功")
 	_, called := lix.calls["000300.SH"]
@@ -317,7 +358,7 @@ func TestRefreshLixingerTimezoneSafeIncremental(t *testing.T) {
 	now := time.Date(2026, 7, 23, 20, 0, 0, 0, west) // 本地 07-23
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-20"
-	Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
 	win, called := lix.calls["000300.SH"]
 	require.True(t, called, "有增量应发请求")
 	assert.Equal(t, "2026-07-21", win[0].Format("2006-01-02"), "增量从 latest+1 天开始")
@@ -341,10 +382,135 @@ func TestRefreshEngineNonPositiveCurrentEPS(t *testing.T) {
 	cfg.ApplyDefaults()
 	store := newFakeStore()
 
-	rep := Refresh(cfg, store, &fakeLix{}, us, now)
+	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "LOSS")
 	assert.Contains(t, rep.Failed[0], "non-positive", "错误语义应对齐 ErrNonPositiveEPS")
 	assert.Empty(t, store.upserts["LOSS"], "当前亏损标的不得入库")
+}
+
+// Context Checkpoint: TASK-004 done_criteria → test mapping
+// functional[0]     "公司标的增量 latest+1 起拉取,新点 PE/PB/PS 落库"          → TestRefreshAkshareStockIncremental
+// functional[1]     "300 天历史 PE=10 + 新点 PE=20 → pctl_5y=pctl_10y=100;只写新点" → TestRefreshAkshareLocalPercentile
+// functional[2]     "index 走 FetchIndexValuationSeries、stock 走 FetchStockValuationSeries" → TestRefreshAkshareIndexDispatch
+// boundary[0]       "空拉取→零写入仍计成功"                                      → TestRefreshAkshareEmptyFetch
+// error_handling[0] "akshare 直连失败→Failed 含 symbol 与原因且 Refreshed=0"     → TestRefreshAkshareFetchFailure
+// error_handling[0] "store.Series 读回失败→同样进 Failed"                        → TestRefreshAkshareSeriesReadbackFailure
+
+func akCfg(inst config.PrismInstrument) config.PrismConfig {
+	c := config.PrismConfig{Instruments: []config.PrismInstrument{inst}}
+	c.ApplyDefaults()
+	return c
+}
+
+func TestRefreshAkshareStockIncremental(t *testing.T) {
+	store, ak := newFakeStore(), &fakeAkshare{stockPts: []akshare.ValuationPoint{
+		{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), PETTM: 22.7, PB: 8.2, PSTTM: math.NaN()},
+	}}
+	store.latest["600519.SH"] = "2026-07-22"
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	inst := config.PrismInstrument{Symbol: "600519.SH", Name: "贵州茅台", Type: "stock", Market: "CN_A", Group: "A股公司", Source: "akshare"}
+
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	assert.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed)
+	win := ak.stockCalls["600519.SH"]
+	assert.Equal(t, "2026-07-23", win[0].Format("2006-01-02"), "增量从 latest+1")
+	assert.Equal(t, now, win[1], "end=now")
+	require.Len(t, store.upserts["600519.SH"], 1)
+	assert.Equal(t, 22.7, store.upserts["600519.SH"][0].PETTM)
+	assert.Equal(t, 8.2, store.upserts["600519.SH"][0].PB)
+	assert.Equal(t, "2026-07-23", store.upserts["600519.SH"][0].D)
+}
+
+func TestRefreshAkshareLocalPercentile(t *testing.T) {
+	// 预置 300 天历史(PE 全为 10),新点 PE=20 → 新点在窗口内为最大值,pctl_5y=100;
+	// 样本 300>=252 满足 minPoints。
+	hist := &prismstore.SeriesData{Symbol: "600519.SH"}
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 300; i++ {
+		hist.Dates = append(hist.Dates, base.AddDate(0, 0, i).Format("2006-01-02"))
+		hist.PETTM = append(hist.PETTM, 10.0)
+	}
+	store := newFakeStore()
+	store.series["600519.SH"] = hist
+	store.latest["600519.SH"] = hist.Dates[len(hist.Dates)-1]
+
+	newDay := base.AddDate(0, 0, 300)
+	ak := &fakeAkshare{stockPts: []akshare.ValuationPoint{{Date: newDay, PETTM: 20.0, PB: math.NaN(), PSTTM: math.NaN()}}}
+	now := newDay.AddDate(0, 0, 1)
+	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
+
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	require.Empty(t, rep.Failed)
+	rows := store.upserts["600519.SH"]
+	require.Len(t, rows, 1, "只写新点,历史行不回写")
+	assert.InDelta(t, 100.0, rows[0].Pctl5Y, 1e-9, "新点为窗口最大值→100 分位")
+	assert.InDelta(t, 100.0, rows[0].Pctl10Y, 1e-9)
+}
+
+func TestRefreshAkshareIndexDispatch(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{indexPts: []akshare.ValuationPoint{
+		{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), PETTM: 14.6, PB: math.NaN(), PSTTM: math.NaN()},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	inst := config.PrismInstrument{Symbol: "000300.SH", Type: "index", Market: "CN_A", Source: "akshare"}
+
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	assert.Empty(t, rep.Failed)
+	_, usedIndex := ak.indexCalls["000300.SH"]
+	assert.True(t, usedIndex, "index 类型必须走 FetchIndexValuationSeries")
+	assert.Empty(t, ak.stockCalls)
+}
+
+func TestRefreshAkshareEmptyFetch(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{} // 返回空切片
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
+
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	assert.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed)
+	assert.Empty(t, store.upserts["600519.SH"], "空拉取零写入")
+}
+
+// error_handling[0] ①:akshare 直连失败(fakeAkshare.fail 注入)→ Report.Failed
+// 含 symbol 与原因且 Refreshed=0;并断言失败前确已发起拉取(参数捕获)。
+func TestRefreshAkshareFetchFailure(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{fail: map[string]error{"600519.SH": errors.New("aktools down")}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
+
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "600519.SH")
+	assert.Contains(t, rep.Failed[0], "aktools down")
+	_, called := ak.stockCalls["600519.SH"]
+	assert.True(t, called, "失败前必须已发起 stock 拉取")
+	assert.Empty(t, store.upserts["600519.SH"], "拉取失败不得写库")
+}
+
+// error_handling[0] ②:store.Series 读回失败(seriesErr 注入)→ 同样进 Failed。
+// 需 fetch 返回非空点触发读回路径。
+func TestRefreshAkshareSeriesReadbackFailure(t *testing.T) {
+	store := newFakeStore()
+	store.seriesErr = map[string]error{"600519.SH": errors.New("db locked")}
+	ak := &fakeAkshare{stockPts: []akshare.ValuationPoint{
+		{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), PETTM: 22.7, PB: 8.2, PSTTM: math.NaN()},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
+
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "600519.SH")
+	assert.Contains(t, rep.Failed[0], "db locked")
+	assert.Contains(t, rep.Failed[0], "read back series", "读回失败须带前缀")
+	assert.Empty(t, store.upserts["600519.SH"], "读回失败不得写库")
 }

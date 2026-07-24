@@ -5,8 +5,10 @@ package prism
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
+	akshare "github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
@@ -19,11 +21,18 @@ type Store interface {
 	UpsertInstrument(inst prismstore.Instrument) (int64, error)
 	LatestDate(instrumentID int64) (string, error)
 	UpsertValuations(instrumentID int64, rows []prismstore.ValuationRow) error
+	Series(symbol, from string) (*prismstore.SeriesData, error)
 }
 
 // LixingerClient is the subset of *lixinger.Lixinger used by Refresh.
 type LixingerClient interface {
 	FetchValuationSeries(symbol string, start, end time.Time) ([]lixinger.ValuationPoint, error)
+}
+
+// AkshareClient is the subset of *akshare.Client used by Refresh.
+type AkshareClient interface {
+	FetchStockValuationSeries(symbol, market string, start, end time.Time) ([]akshare.ValuationPoint, error)
+	FetchIndexValuationSeries(symbol string, start, end time.Time) ([]akshare.ValuationPoint, error)
 }
 
 // USClient is the subset of *yahoo.Yahoo used by the US engine path (Task 6).
@@ -40,7 +49,7 @@ type Report struct {
 
 // Refresh updates every configured instrument: lixinger-sourced instruments
 // fetch incrementally (理杏豆计费), engine-sourced US stocks rebuild via yahoo.
-func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, now time.Time) Report {
+func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, now time.Time) Report {
 	var rep Report
 	for _, inst := range cfg.Instruments {
 		var err error
@@ -49,6 +58,8 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 			err = refreshLixinger(cfg, store, lix, inst, now)
 		case "engine":
 			err = refreshEngine(cfg, store, us, inst, now)
+		case "akshare":
+			err = refreshAkshare(cfg, store, ak, inst, now)
 		default:
 			err = fmt.Errorf("unknown source %q", inst.Source)
 		}
@@ -68,28 +79,40 @@ func upsertMeta(store Store, inst config.PrismInstrument) (int64, error) {
 	})
 }
 
+// incrementalStart 计算增量拉取起点并处理「已是最新」的日历日零请求守卫,供
+// lixinger/akshare 两路复用。返回 (start, skip, err);skip=true 表示已是最新、
+// 应零请求直接成功。首次(latest="")从 now-lookbackYears 回填。
+//
+// 日历日语义比较(ISO 日期串按字典序即时间序,与宿主时区无关):增量起点已达今天
+// 或更新 → 零请求。避免西经宿主机把 latest 的 UTC 午夜与本地 now 做绝对时刻比较,
+// 产生 startDate>endDate 的倒挂请求。
+func incrementalStart(store Store, id int64, lookbackYears int, now time.Time) (time.Time, bool, error) {
+	latest, err := store.LatestDate(id)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	start := now.AddDate(-lookbackYears, 0, 0)
+	if latest != "" {
+		d, perr := time.Parse("2006-01-02", latest)
+		if perr != nil {
+			return time.Time{}, false, fmt.Errorf("bad latest date %q: %w", latest, perr)
+		}
+		start = d.AddDate(0, 0, 1) // 增量:从 latest 的次日开始
+		if start.Format("2006-01-02") >= now.Format("2006-01-02") {
+			return time.Time{}, true, nil
+		}
+	}
+	return start, false, nil
+}
+
 func refreshLixinger(cfg config.PrismConfig, store Store, lix LixingerClient, inst config.PrismInstrument, now time.Time) error {
 	id, err := upsertMeta(store, inst)
 	if err != nil {
 		return err
 	}
-	latest, err := store.LatestDate(id)
-	if err != nil {
+	start, skip, err := incrementalStart(store, id, cfg.LookbackYears, now)
+	if err != nil || skip {
 		return err
-	}
-	start := now.AddDate(-cfg.LookbackYears, 0, 0)
-	if latest != "" {
-		d, perr := time.Parse("2006-01-02", latest)
-		if perr != nil {
-			return fmt.Errorf("bad latest date %q: %w", latest, perr)
-		}
-		start = d.AddDate(0, 0, 1) // 增量:从 latest 的次日开始
-		// 日历日语义比较(ISO 日期串按字典序即时间序,与宿主时区无关):增量起点已达
-		// 今天或更新 → 零请求(理杏豆)。避免西经宿主机把 latest 的 UTC 午夜与本地
-		// now 做绝对时刻比较,产生 startDate>endDate 的倒挂请求。
-		if start.Format("2006-01-02") >= now.Format("2006-01-02") {
-			return nil
-		}
 	}
 	pts, err := lix.FetchValuationSeries(inst.Symbol, start, now)
 	if err != nil {
@@ -160,5 +183,82 @@ func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config
 			Pctl5Y: p5[i], Pctl10Y: math.NaN(), // 仅 5Y 数据,10Y 分位无意义
 		}
 	}
+	return store.UpsertValuations(id, rows)
+}
+
+// refreshAkshare 每日增量拉取 akshare(经 aktools)公司/指数估值,并在本地计算滚动
+// 分位——akshare 无官方分位,故读回 store 已存全历史与新拉取点合并后整段算 5Y/10Y
+// 分位,但只为新拉取的日期写行(历史行不回写)。
+func refreshAkshare(cfg config.PrismConfig, store Store, ak AkshareClient, inst config.PrismInstrument, now time.Time) error {
+	id, err := upsertMeta(store, inst)
+	if err != nil {
+		return err
+	}
+	start, skip, err := incrementalStart(store, id, cfg.LookbackYears, now)
+	if err != nil || skip {
+		return err
+	}
+	var pts []akshare.ValuationPoint
+	if inst.Type == "index" {
+		pts, err = ak.FetchIndexValuationSeries(inst.Symbol, start, now)
+	} else {
+		pts, err = ak.FetchStockValuationSeries(inst.Symbol, inst.Market, start, now)
+	}
+	if err != nil {
+		return err
+	}
+	if len(pts) == 0 {
+		return nil // 无新数据,零写入
+	}
+
+	// 本地分位:历史(剔除 NaN PE)+ 新点合并(同日新值覆盖),升序后整段算 5Y/10Y 分位。
+	hist, err := store.Series(inst.Symbol, "")
+	if err != nil {
+		return fmt.Errorf("read back series: %w", err)
+	}
+	peByDay := make(map[string]float64, len(hist.Dates)+len(pts))
+	for i, ds := range hist.Dates {
+		if !math.IsNaN(hist.PETTM[i]) {
+			peByDay[ds] = hist.PETTM[i]
+		}
+	}
+	newDays := make(map[string]akshare.ValuationPoint, len(pts))
+	for _, p := range pts {
+		ds := p.Date.Format("2006-01-02")
+		newDays[ds] = p
+		if !math.IsNaN(p.PETTM) {
+			peByDay[ds] = p.PETTM
+		}
+	}
+	days := make([]string, 0, len(peByDay))
+	for ds := range peByDay {
+		days = append(days, ds)
+	}
+	sort.Strings(days)
+	dates := make([]time.Time, len(days))
+	pe := make([]float64, len(days))
+	idx := make(map[string]int, len(days))
+	for i, ds := range days {
+		d, perr := time.Parse("2006-01-02", ds)
+		if perr != nil {
+			return fmt.Errorf("bad stored date %q: %w", ds, perr)
+		}
+		dates[i], pe[i], idx[ds] = d, peByDay[ds], i
+	}
+	p5 := valuation.RollingPercentile(dates, pe, 5, rollingMinPoints)
+	p10 := valuation.RollingPercentile(dates, pe, 10, rollingMinPoints)
+
+	rows := make([]prismstore.ValuationRow, 0, len(newDays))
+	for ds, p := range newDays {
+		row := prismstore.ValuationRow{
+			D: ds, PETTM: p.PETTM, PB: p.PB, PSTTM: p.PSTTM,
+			Pctl5Y: math.NaN(), Pctl10Y: math.NaN(),
+		}
+		if i, ok := idx[ds]; ok { // PE 为 NaN 的新点不在分位序列中,保持 NaN
+			row.Pctl5Y, row.Pctl10Y = p5[i], p10[i]
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].D < rows[j].D })
 	return store.UpsertValuations(id, rows)
 }
