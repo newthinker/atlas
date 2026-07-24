@@ -68,10 +68,15 @@ cmd/atlas/prism.go                 构造 akshare client 注入(base_url 取配�
 
 ## §4 部署运维
 
-- venv(`scripts/qlib_eval/.venv`,Python 3.11)安装 `akshare + aktools`;若隔离顾虑
-  实现时可另建 `scripts/akshare/.venv`(实现者按依赖冲突实测定,优先复用)。
-- 新增 launchd 常驻服务 `com.newthinker.atlas.aktools`: KeepAlive,仅绑
-  `127.0.0.1:8180`,日志 `logs/aktools.{out,err}.log`;deployment.md 追加装载/验证段。
+- **独立 venv 隔离部署**: 新建 `scripts/akshare/.venv`(Python 3.11+)专供
+  `akshare + aktools`,与 qlib_eval 的 venv 完全隔离(两者依赖树庞大且各自随上游
+  更新,共享必然互相牵连)。提供 `scripts/akshare/setup.sh`(幂等建 venv + pip 安装
+  + 版本冻结 requirements.txt)供部署与升级复用;aktools 启动命令统一指向该 venv
+  的解释器。
+- 新增 launchd 常驻服务 `com.newthinker.atlas.aktools`: ProgramArguments 用隔离
+  venv 解释器(`…/scripts/akshare/.venv/bin/python -m aktools --host 127.0.0.1 --port 8180`,
+  实参以实现时 aktools CLI 为准),KeepAlive,仅绑 `127.0.0.1:8180`,日志
+  `logs/aktools.{out,err}.log`;deployment.md 追加装载/验证段。
 - aktools 不可用 → akshare 路径报错: 公司标的进 Failed、指数标的主源若正常则无影响
   (兜底未触发);均不中断其他标的(沿用部分失败语义)。
 - prism-daily plist 无需改动。
