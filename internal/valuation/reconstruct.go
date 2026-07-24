@@ -50,12 +50,20 @@ func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64,
 	return PercentileRank(peSeries, currentPE), nil
 }
 
+// effectiveDate is the date an EPS point becomes publicly known.
+func effectiveDate(p core.EPSPoint) time.Time {
+	if !p.FilingDate.IsZero() {
+		return p.FilingDate
+	}
+	return p.Date
+}
+
 // sortedEPSWithGate returns a copy of eps sorted ascending by date, erroring
 // with ErrInsufficientEPS when fewer than MinEPSPoints have EPS > 0.
 func sortedEPSWithGate(eps []core.EPSPoint) ([]core.EPSPoint, error) {
 	pts := make([]core.EPSPoint, len(eps))
 	copy(pts, eps)
-	sort.Slice(pts, func(i, j int) bool { return pts[i].Date.Before(pts[j].Date) })
+	sort.Slice(pts, func(i, j int) bool { return effectiveDate(pts[i]).Before(effectiveDate(pts[j])) })
 
 	positive := 0
 	for _, p := range pts {
@@ -73,7 +81,7 @@ func sortedEPSWithGate(eps []core.EPSPoint) ([]core.EPSPoint, error) {
 // before t. pts must be sorted ascending by date. ok is false when every point
 // is strictly after t.
 func latestEPSAtOrBefore(pts []core.EPSPoint, t time.Time) (eps float64, ok bool) {
-	i := sort.Search(len(pts), func(i int) bool { return pts[i].Date.After(t) })
+	i := sort.Search(len(pts), func(i int) bool { return effectiveDate(pts[i]).After(t) })
 	if i == 0 {
 		return 0, false
 	}

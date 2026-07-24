@@ -46,6 +46,23 @@ func TestReconstructPESeriesStepAlignment(t *testing.T) {
 	assert.InDelta(t, 25.0, pe[1], 1e-9)
 }
 
+// Context Checkpoint: filing date 生效阶梯右移(防前视) → TestReconstructPESeriesFilingDateEffective
+func TestReconstructPESeriesFilingDateEffective(t *testing.T) {
+	eps := makeEPS(8, day(2024, 1, 1), 2.0)
+	// 最后一季: 报告期 2025-10-01,EPS 翻倍,但 filing date 晚 45 天
+	eps[7].EPS = 4.0
+	eps[7].FilingDate = eps[7].Date.AddDate(0, 0, 45)
+	closes := []core.OHLCV{
+		{Time: eps[7].Date.AddDate(0, 0, 10), Close: 100}, // 报告期后、filing 前 → 仍用旧 EPS=2
+		{Time: eps[7].Date.AddDate(0, 0, 50), Close: 100}, // filing 后 → 新 EPS=4
+	}
+	_, pe, err := ReconstructPESeries(closes, eps)
+	require.NoError(t, err)
+	require.Len(t, pe, 2)
+	assert.InDelta(t, 50.0, pe[0], 1e-9, "filing 之前不得看到新财报(防前视)")
+	assert.InDelta(t, 25.0, pe[1], 1e-9)
+}
+
 func TestReconstructPESeriesInsufficient(t *testing.T) {
 	_, _, err := ReconstructPESeries(
 		[]core.OHLCV{{Time: day(2026, 1, 1), Close: 10}},

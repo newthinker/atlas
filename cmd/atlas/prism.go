@@ -9,8 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	akshare "github.com/newthinker/atlas/internal/collector/akshare"
+	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
+	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/prism"
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 )
@@ -34,6 +36,18 @@ func init() {
 // textSender matches the telegram client returned by buildCrisisSender (crisis.Sender).
 type textSender interface {
 	SendText(msg string) error
+}
+
+// hasEdgarInstrument reports whether any instrument uses the EDGAR source,
+// which requires a configured User-Agent (SEC rejects requests without a
+// contact email).
+func hasEdgarInstrument(instruments []config.PrismInstrument) bool {
+	for _, inst := range instruments {
+		if inst.Source == "edgar" {
+			return true
+		}
+	}
+	return false
 }
 
 type prismRefreshDeps struct {
@@ -88,13 +102,18 @@ func runPrismRefresh(cmd *cobra.Command, args []string) error {
 	}
 	defer store.Close()
 
+	if pcfg.EdgarUserAgent == "" && hasEdgarInstrument(pcfg.Instruments) {
+		return fmt.Errorf("prism.edgar_user_agent required for source==edgar instruments (SEC requires a contact email in the User-Agent)")
+	}
+
 	lix := lixinger.New(cfg.Collectors["lixinger"].APIKey, lixinger.WithRetry(true))
 	yh := yahoo.New()
 	ak := akshare.New(pcfg.AkshareBaseURL)
+	ed := edgar.New(pcfg.EdgarUserAgent)
 
 	deps := prismRefreshDeps{
 		refresh: func() prism.Report {
-			return prism.Refresh(pcfg, store, lix, yh, ak, time.Now())
+			return prism.Refresh(pcfg, store, lix, yh, ak, ed, time.Now())
 		},
 		sender: buildCrisisSender(),
 		out:    cmd.OutOrStdout(),

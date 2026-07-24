@@ -2,6 +2,7 @@ package prism
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	akshare "github.com/newthinker/atlas/internal/collector/akshare"
+	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
@@ -30,16 +32,21 @@ import (
 // [TASK-006] engine boundary[1] "engine 单标的失败不中断其余标的"           → TestRefreshEnginePartialFailure
 
 type fakeStore struct {
-	latest    map[string]string // symbol -> latest date
-	upserts   map[string][]prismstore.ValuationRow
-	ids       map[int64]string
-	nextID    int64
-	series    map[string]*prismstore.SeriesData // symbol → 预置历史(Series 返回)
-	seriesErr map[string]error                  // symbol → 注入 Series 读回错误
+	latest       map[string]string // symbol -> latest date
+	upserts      map[string][]prismstore.ValuationRow
+	fundamentals map[string][]prismstore.FundamentalRow // symbol → 落库季度事实
+	ids          map[int64]string
+	nextID       int64
+	series       map[string]*prismstore.SeriesData // symbol → 预置历史(Series 返回)
+	seriesErr    map[string]error                  // symbol → 注入 Series 读回错误
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{latest: map[string]string{}, upserts: map[string][]prismstore.ValuationRow{}, ids: map[int64]string{}, series: map[string]*prismstore.SeriesData{}}
+	return &fakeStore{latest: map[string]string{}, upserts: map[string][]prismstore.ValuationRow{}, fundamentals: map[string][]prismstore.FundamentalRow{}, ids: map[int64]string{}, series: map[string]*prismstore.SeriesData{}}
+}
+func (f *fakeStore) UpsertFundamentals(id int64, rows []prismstore.FundamentalRow) error {
+	f.fundamentals[f.ids[id]] = append(f.fundamentals[f.ids[id]], rows...)
+	return nil
 }
 func (f *fakeStore) UpsertInstrument(inst prismstore.Instrument) (int64, error) {
 	f.nextID++
@@ -126,7 +133,7 @@ func lixCfg() config.PrismConfig {
 func TestRefreshLixingerBackfill(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 
@@ -141,7 +148,7 @@ func TestRefreshLixingerIncremental(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-20" // 预置 latest → id 映射在 UpsertInstrument 时建立
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
+	Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, now)
 	win := lix.calls["000300.SH"]
 	assert.Equal(t, time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC), win[0], "增量从 latest+1 天开始")
 	assert.Equal(t, now, win[1])
@@ -151,7 +158,7 @@ func TestRefreshUpToDateZeroRequest(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-22" // latest+1 == now → 已是最新
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed, "零请求仍算成功")
 	_, called := lix.calls["000300.SH"]
@@ -165,7 +172,7 @@ func TestRefreshPartialFailure(t *testing.T) {
 		Symbol: "^GSPC", Name: "标普500", Type: "index", Market: "US", Group: "美股指数", Source: "lixinger"})
 	store := newFakeStore()
 	lix := &fakeLix{fail: map[string]error{"000300.SH": errors.New("boom")}}
-	rep := Refresh(cfg, store, lix, fakeUS{}, &fakeAkshare{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
+	rep := Refresh(cfg, store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 1, rep.Refreshed, "^GSPC 仍应成功")
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "000300.SH")
@@ -179,7 +186,7 @@ func TestRefreshUnknownSource(t *testing.T) {
 	}}
 	cfg.ApplyDefaults()
 	store, lix := newFakeStore(), &fakeLix{}
-	rep := Refresh(cfg, store, lix, fakeUS{}, &fakeAkshare{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
+	rep := Refresh(cfg, store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 1, rep.Refreshed, "已知 source 标的不受未知 source 影响")
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "XYZ")
@@ -190,7 +197,7 @@ func TestRefreshBadLatestDate(t *testing.T) {
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "not-a-date"
 	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "000300.SH")
@@ -250,7 +257,7 @@ func TestRefreshEnginePath(t *testing.T) {
 
 	store := newFakeStore()
 	us := &fakeUS2{closes: closes, eps: eps}
-	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, now)
+	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 	rows := store.upserts["NVDA"]
@@ -305,7 +312,7 @@ func TestRefreshEngineFailurePrefixes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.PrismConfig{Instruments: []config.PrismInstrument{engineInst("NVDA")}}
 			cfg.ApplyDefaults()
-			rep := Refresh(cfg, newFakeStore(), &fakeLix{}, tc.us, &fakeAkshare{}, now)
+			rep := Refresh(cfg, newFakeStore(), &fakeLix{}, tc.us, &fakeAkshare{}, fakeEdgar{}, now)
 			assert.Equal(t, 0, rep.Refreshed)
 			require.Len(t, rep.Failed, 1)
 			assert.Contains(t, rep.Failed[0], "NVDA")
@@ -327,7 +334,7 @@ func TestRefreshEnginePartialFailure(t *testing.T) {
 	cfg.ApplyDefaults()
 	store := newFakeStore()
 
-	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, now)
+	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Equal(t, 1, rep.Refreshed, "OK 标的仍应成功")
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "BAD")
@@ -344,7 +351,7 @@ func TestRefreshLixingerTimezoneSafeUpToDate(t *testing.T) {
 	now := time.Date(2026, 7, 23, 20, 0, 0, 0, west)
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-23" // 本地当日已有数据
-	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed, "已是最新仍算成功")
 	_, called := lix.calls["000300.SH"]
@@ -358,7 +365,7 @@ func TestRefreshLixingerTimezoneSafeIncremental(t *testing.T) {
 	now := time.Date(2026, 7, 23, 20, 0, 0, 0, west) // 本地 07-23
 	store, lix := newFakeStore(), &fakeLix{}
 	store.latest["000300.SH"] = "2026-07-20"
-	Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, now)
+	Refresh(lixCfg(), store, lix, fakeUS{}, &fakeAkshare{}, fakeEdgar{}, now)
 	win, called := lix.calls["000300.SH"]
 	require.True(t, called, "有增量应发请求")
 	assert.Equal(t, "2026-07-21", win[0].Format("2006-01-02"), "增量从 latest+1 天开始")
@@ -382,7 +389,7 @@ func TestRefreshEngineNonPositiveCurrentEPS(t *testing.T) {
 	cfg.ApplyDefaults()
 	store := newFakeStore()
 
-	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, now)
+	rep := Refresh(cfg, store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "LOSS")
@@ -412,7 +419,7 @@ func TestRefreshAkshareStockIncremental(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	inst := config.PrismInstrument{Symbol: "600519.SH", Name: "贵州茅台", Type: "stock", Market: "CN_A", Group: "A股公司", Source: "akshare"}
 
-	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 	win := ak.stockCalls["600519.SH"]
@@ -442,7 +449,7 @@ func TestRefreshAkshareLocalPercentile(t *testing.T) {
 	now := newDay.AddDate(0, 0, 1)
 	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
 
-	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, now)
 	require.Empty(t, rep.Failed)
 	rows := store.upserts["600519.SH"]
 	require.Len(t, rows, 1, "只写新点,历史行不回写")
@@ -458,7 +465,7 @@ func TestRefreshAkshareIndexDispatch(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	inst := config.PrismInstrument{Symbol: "000300.SH", Type: "index", Market: "CN_A", Source: "akshare"}
 
-	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	_, usedIndex := ak.indexCalls["000300.SH"]
 	assert.True(t, usedIndex, "index 类型必须走 FetchIndexValuationSeries")
@@ -471,7 +478,7 @@ func TestRefreshAkshareEmptyFetch(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
 
-	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 	assert.Empty(t, store.upserts["600519.SH"], "空拉取零写入")
@@ -485,7 +492,7 @@ func TestRefreshAkshareFetchFailure(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
 
-	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "600519.SH")
@@ -506,7 +513,7 @@ func TestRefreshAkshareSeriesReadbackFailure(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	inst := config.PrismInstrument{Symbol: "600519.SH", Type: "stock", Market: "CN_A", Source: "akshare"}
 
-	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(inst), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "600519.SH")
@@ -534,7 +541,7 @@ func TestRefreshFallbackDegraded(t *testing.T) {
 	}}
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 
-	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed, "兜底成功计入 Refreshed")
 	require.Len(t, rep.Degraded, 1)
@@ -551,7 +558,7 @@ func TestRefreshFallbackBothFail(t *testing.T) {
 	ak := &fakeAkshare{fail: map[string]error{"000300.SH": errors.New("aktools down")}}
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 
-	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	assert.Empty(t, rep.Degraded)
 	require.Len(t, rep.Failed, 1, "双败合并为单条")
@@ -563,9 +570,184 @@ func TestRefreshFallbackNotTriggered(t *testing.T) {
 	store, lix, ak := newFakeStore(), &fakeLix{}, &fakeAkshare{}
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 
-	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, now)
+	rep := Refresh(akCfg(fbInst()), store, lix, fakeUS{}, ak, fakeEdgar{}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Empty(t, rep.Degraded)
 	assert.Empty(t, ak.indexCalls, "主源成功不得触碰兜底源(零多余请求)")
 	assert.Empty(t, ak.stockCalls)
+}
+
+// Context Checkpoint (TASK-004): done_criteria → test mapping
+//   functional[0]     edgar 主源:facts 落 fundamental_q + filing 生效 PE + PB/PS → TestRefreshEdgarPath
+//   functional[1]     EPS_TTM 4 季滑窗产点;挖一季 NaN → 少一个 TTM 点(加强项)   → TestRefreshEdgarTTMGap
+//   boundary[0]       inst.CIK 为空 → 提示配置 cik 的错误                        → TestRefreshEdgarMissingCIK
+//   error_handling[0] edgar 失败 + FallbackSource==engine → engine 出数 + Degraded → TestRefreshEdgarFallback
+//   error_handling[1] edgar 失败 + FallbackSource 空/非 engine → Failed、Degraded 空 → TestRefreshEdgarNoFallback
+
+type fakeEdgar struct {
+	facts []edgar.QuarterlyFact
+	err   error
+}
+
+func (f fakeEdgar) FetchCompanyFacts(cik string) ([]edgar.QuarterlyFact, error) {
+	return f.facts, f.err
+}
+
+func edgarQuarters(now time.Time) []edgar.QuarterlyFact {
+	// 12 个季度,EPS=1.0/季 → TTM=4.0;equity=80、shares=10 → BVPS=8;revenue=20/季 → RPS_TTM=8
+	out := make([]edgar.QuarterlyFact, 12)
+	for i := range out {
+		end := now.AddDate(0, -3*(12-i), 0)
+		out[i] = edgar.QuarterlyFact{
+			FiscalPeriod: fmt.Sprintf("FY%dQ%d", i/4, i%4+1), PeriodEnd: end,
+			FilingDate: end.AddDate(0, 0, 40),
+			EPSDiluted: 1.0, Revenue: 20, NetIncome: 15, Equity: 80, DilutedShares: 10,
+		}
+	}
+	return out
+}
+
+func edgarCfg() config.PrismConfig {
+	c := config.PrismConfig{Instruments: []config.PrismInstrument{
+		{Symbol: "NVDA", Name: "NVIDIA", Type: "stock", Market: "US", Group: "美股公司",
+			Source: "edgar", CIK: "1045810", FallbackSource: "engine"},
+	}}
+	c.ApplyDefaults()
+	return c
+}
+
+// QA WARNING-2:ttmPoints 4 季滑窗须校验季度连续性——整季缺失(非 NaN,fundamental_q
+// 根本没有该季行)时窗口会跨缺口求和,TTM 失真。删除 12 季中间一季 → 跨缺口窗口不产点。
+// 实测(edgarQuarters 3 月间距):正常窗口跨度 273~275 天,单季缺口窗口 365 天。
+func TestTTMPointsQuarterGap(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	full := edgarQuarters(now)
+	valFn := func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted }
+	require.Len(t, ttmPoints(full, valFn), 9, "12 季无缺口 → 9 个 TTM 点")
+
+	// 整条删除中间一季(orig index 6),而非置 NaN
+	gapped := make([]edgar.QuarterlyFact, 0, 11)
+	gapped = append(gapped, full[:6]...)
+	gapped = append(gapped, full[7:]...)
+	// 11 季 → 8 个候选窗口,其中 3 个跨 6 月缺口(365 天)须被守卫剔除 → 5 个点
+	pts := ttmPoints(gapped, valFn)
+	assert.Len(t, pts, 5, "跨缺口窗口(365 天)不产点,仅保留连续 4 季窗口")
+	// 产出的每个点其窗口跨度都应是正常的 ~9 个月,不含跨缺口的年跨度
+	for _, p := range pts {
+		assert.NotEqual(t, full[6].PeriodEnd, p.Date, "缺失季不应作为任何 TTM 点日期")
+	}
+}
+
+func TestRefreshEdgarPath(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	facts := edgarQuarters(now)
+	lastFiled := facts[11].FilingDate
+	closes := []core.OHLCV{
+		{Time: lastFiled.AddDate(0, 0, -2), Close: 40}, // 最后一季 filing 前
+		{Time: lastFiled.AddDate(0, 0, 2), Close: 40},  // filing 后(TTM 相同=4.0)
+	}
+	store := newFakeStore()
+	rep := Refresh(edgarCfg(), store, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{}, fakeEdgar{facts: facts}, now)
+	require.Empty(t, rep.Failed)
+	assert.Empty(t, rep.Degraded)
+	assert.Len(t, store.fundamentals["NVDA"], 12, "季度事实落 fundamental_q")
+
+	rows := store.upserts["NVDA"]
+	require.Len(t, rows, 2)
+	assert.InDelta(t, 10.0, rows[0].PETTM, 1e-9) // 40/4
+	assert.InDelta(t, 5.0, rows[0].PB, 1e-9)     // 40/8
+	assert.InDelta(t, 5.0, rows[0].PSTTM, 1e-9)  // 40/8
+}
+
+// functional[1] 加强项:挖去一季 EPS=NaN,该季所在的 4 个 TTM 窗口不产点。
+func TestRefreshEdgarTTMGap(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	full := edgarQuarters(now)
+	facts := edgarQuarters(now)
+	facts[6].EPSDiluted = math.NaN() // 挖去第 7 季 EPS
+
+	closes := []core.OHLCV{{Time: full[11].FilingDate.AddDate(0, 0, 2), Close: 40}}
+	storeFull, storeGap := newFakeStore(), newFakeStore()
+	Refresh(edgarCfg(), storeFull, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{}, fakeEdgar{facts: full}, now)
+	Refresh(edgarCfg(), storeGap, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{}, fakeEdgar{facts: facts}, now)
+	// 缺口季落在 i=6..9 共 4 个 TTM 窗口 → 少 4 个 EPS 点。仍有足量点则 PE 列存在;
+	// 断言 fundamental_q 仍全量落库(缺口不影响事实落库),PE 阶梯少一档跳变。
+	assert.Len(t, storeGap.fundamentals["NVDA"], 12, "缺口季仍作为事实落库")
+	// 直接验证 ttmPoints 缺口语义(纯函数,无副作用)
+	assert.Len(t, ttmPoints(full, func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted }), 9)
+	assert.Len(t, ttmPoints(facts, func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted }), 5,
+		"挖一季 → 该季所在 4 个 TTM 窗口不产点,9-4=5")
+}
+
+func TestRefreshEdgarMissingCIK(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	cfg := config.PrismConfig{Instruments: []config.PrismInstrument{
+		{Symbol: "NVDA", Name: "NVIDIA", Type: "stock", Market: "US", Group: "美股公司", Source: "edgar"},
+	}}
+	cfg.ApplyDefaults()
+	store := newFakeStore()
+	rep := Refresh(cfg, store, &fakeLix{}, &fakeUS2{}, &fakeAkshare{}, fakeEdgar{facts: edgarQuarters(now)}, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "NVDA")
+	assert.Contains(t, rep.Failed[0], "cik", "错误须提示配置 cik")
+}
+
+// boundary[1](edgar 路径):Equity 全缺失 → BVPS 无点、RPS 仍在 → PB 整列 NaN,
+// 而 PE 列不受影响(仍为 10)。锁定「PB/PS 缺科目降级不污染 PE」。
+func TestRefreshEdgarMissingEquityNaNPB(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	facts := edgarQuarters(now)
+	for i := range facts {
+		facts[i].Equity = math.NaN() // 挖掉净资产 → BVPS 不可算
+	}
+	lastFiled := facts[11].FilingDate
+	closes := []core.OHLCV{
+		{Time: lastFiled.AddDate(0, 0, -2), Close: 40},
+		{Time: lastFiled.AddDate(0, 0, 2), Close: 40},
+	}
+	store := newFakeStore()
+	rep := Refresh(edgarCfg(), store, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{}, fakeEdgar{facts: facts}, now)
+	require.Empty(t, rep.Failed)
+	rows := store.upserts["NVDA"]
+	require.Len(t, rows, 2)
+	assert.InDelta(t, 10.0, rows[0].PETTM, 1e-9, "PE 列不受 PB 缺科目影响")
+	assert.True(t, math.IsNaN(rows[0].PB), "Equity 缺失 → PB 整列 NaN")
+	assert.True(t, math.IsNaN(rows[1].PB))
+}
+
+func TestRefreshEdgarFallback(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	// engine fallback 需要 yahoo EPS+closes(复用既有 fakeUS2 构造)
+	eps := make([]core.EPSPoint, 8)
+	for i := range eps {
+		eps[i] = core.EPSPoint{Date: now.AddDate(0, -3*(8-i), 0), EPS: 2.0}
+	}
+	closes := []core.OHLCV{{Time: now.AddDate(0, 0, -1), Close: 100}}
+	store := newFakeStore()
+	rep := Refresh(edgarCfg(), store, &fakeLix{}, &fakeUS2{closes: closes, eps: eps},
+		&fakeAkshare{}, fakeEdgar{err: errors.New("edgar down")}, now)
+	require.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed)
+	require.Len(t, rep.Degraded, 1)
+	assert.Contains(t, rep.Degraded[0], "NVDA")
+	assert.InDelta(t, 50.0, store.upserts["NVDA"][0].PETTM, 1e-9, "fallback 走 yahoo 重建")
+}
+
+// error_handling[1](reviewer 增补):edgar 失败且 FallbackSource 为空(或非 engine)
+// → Report.Failed 含该标的、Degraded 为空(不静默吞错,防配错 fallback_source 悄悄不出数)。
+func TestRefreshEdgarNoFallback(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	cfg := config.PrismConfig{Instruments: []config.PrismInstrument{
+		{Symbol: "NVDA", Name: "NVIDIA", Type: "stock", Market: "US", Group: "美股公司",
+			Source: "edgar", CIK: "1045810"}, // 无 FallbackSource
+	}}
+	cfg.ApplyDefaults()
+	store := newFakeStore()
+	rep := Refresh(cfg, store, &fakeLix{}, &fakeUS2{}, &fakeAkshare{}, fakeEdgar{err: errors.New("edgar down")}, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	assert.Empty(t, rep.Degraded, "无兜底不得记 Degraded")
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "NVDA")
+	assert.Contains(t, rep.Failed[0], "edgar down", "失败原因不得静默吞掉")
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	akshare "github.com/newthinker/atlas/internal/collector/akshare"
+	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
@@ -21,7 +22,13 @@ type Store interface {
 	UpsertInstrument(inst prismstore.Instrument) (int64, error)
 	LatestDate(instrumentID int64) (string, error)
 	UpsertValuations(instrumentID int64, rows []prismstore.ValuationRow) error
+	UpsertFundamentals(instrumentID int64, rows []prismstore.FundamentalRow) error
 	Series(symbol, from string) (*prismstore.SeriesData, error)
+}
+
+// EdgarClient is the subset of *edgar.Client used by the EDGAR refresh path.
+type EdgarClient interface {
+	FetchCompanyFacts(cik string) ([]edgar.QuarterlyFact, error)
 }
 
 // LixingerClient is the subset of *lixinger.Lixinger used by Refresh.
@@ -50,7 +57,7 @@ type Report struct {
 
 // Refresh updates every configured instrument: lixinger-sourced instruments
 // fetch incrementally (理杏豆计费), engine-sourced US stocks rebuild via yahoo.
-func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, now time.Time) Report {
+func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient, now time.Time) Report {
 	var rep Report
 	for _, inst := range cfg.Instruments {
 		var err error
@@ -70,6 +77,17 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 			err = refreshEngine(cfg, store, us, inst, now)
 		case "akshare":
 			err = refreshAkshare(cfg, store, ak, inst, now)
+		case "edgar":
+			err = refreshEdgar(cfg, store, ed, us, inst, now)
+			if err != nil && inst.FallbackSource == "engine" {
+				if fbErr := refreshEngine(cfg, store, us, inst, now); fbErr == nil {
+					rep.Degraded = append(rep.Degraded,
+						fmt.Sprintf("%s: edgar failed (%v), engine fallback ok", inst.Symbol, err))
+					err = nil
+				} else {
+					err = fmt.Errorf("edgar: %v; engine fallback: %v", err, fbErr)
+				}
+			}
 		default:
 			err = fmt.Errorf("unknown source %q", inst.Source)
 		}
@@ -271,4 +289,154 @@ func refreshAkshare(cfg config.PrismConfig, store Store, ak AkshareClient, inst 
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].D < rows[j].D })
 	return store.UpsertValuations(id, rows)
+}
+
+// maxTTMWindowDays 是 4 季 TTM 窗口首尾 period_end 的合理跨度上限。连续 4 季约跨
+// 9 个月(实测 273~275 天);整季缺失(fundamental_q 无该季行)时窗口跨缺口求和,
+// 首尾跨度跃升至约 365 天(单季缺口)。取 330 天:高于正常跨度+财季不规则边际,
+// 低于单季缺口跨度,据此剔除跨缺口窗口防 TTM 失真(QA WARNING-2)。
+const maxTTMWindowDays = 330
+
+// ttmPoints 通用 4 季滑窗:val 取单季值,4 季齐、皆非 NaN 且窗口季度连续(首尾
+// period_end 跨度 <= maxTTMWindowDays)才产 TTM 阶梯点(EPSPoint 携带 FilingDate,
+// 防前视经 valuation 生效日逻辑)。
+func ttmPoints(facts []edgar.QuarterlyFact, val func(edgar.QuarterlyFact) float64) []core.EPSPoint {
+	var pts []core.EPSPoint
+	for i := 3; i < len(facts); i++ {
+		span := facts[i].PeriodEnd.Sub(facts[i-3].PeriodEnd).Hours() / 24
+		if span > maxTTMWindowDays {
+			continue // 整季缺失,窗口跨缺口 → 不产点
+		}
+		sum := 0.0
+		ok := true
+		for j := i - 3; j <= i; j++ {
+			v := val(facts[j])
+			if math.IsNaN(v) {
+				ok = false
+				break
+			}
+			sum += v
+		}
+		if ok {
+			pts = append(pts, core.EPSPoint{Date: facts[i].PeriodEnd,
+				FilingDate: facts[i].FilingDate, EPS: sum})
+		}
+	}
+	return pts
+}
+
+// perSharePoints 单季即点(BVPS 等 instant 派生值);缺失或零值不产点。
+func perSharePoints(facts []edgar.QuarterlyFact, val func(edgar.QuarterlyFact) float64) []core.EPSPoint {
+	var pts []core.EPSPoint
+	for _, f := range facts {
+		if v := val(f); !math.IsNaN(v) && v != 0 {
+			pts = append(pts, core.EPSPoint{Date: f.PeriodEnd, FilingDate: f.FilingDate, EPS: v})
+		}
+	}
+	return pts
+}
+
+// sharesAt 返回 period_end 对应季度的 DilutedShares,缺失/未命中返回 NaN。
+func sharesAt(facts []edgar.QuarterlyFact, periodEnd time.Time) float64 {
+	for _, f := range facts {
+		if f.PeriodEnd.Equal(periodEnd) {
+			return f.DilutedShares
+		}
+	}
+	return math.NaN()
+}
+
+// rpsPoints 构造 RPS_TTM(营收 TTM / 当季稀释股本)阶梯,股本缺失的点置 NaN
+// (交由 ReconstructPESeries 的正值门槛过滤,PB/PS 尽力而为)。
+func rpsPoints(facts []edgar.QuarterlyFact) []core.EPSPoint {
+	pts := ttmPoints(facts, func(f edgar.QuarterlyFact) float64 { return f.Revenue })
+	for i := range pts {
+		shares := sharesAt(facts, pts[i].Date)
+		if math.IsNaN(shares) || shares == 0 {
+			pts[i].EPS = math.NaN()
+		} else {
+			pts[i].EPS /= shares
+		}
+	}
+	return pts
+}
+
+// seriesByDate 用 ReconstructPESeries 对齐并转 date→ratio 查找表;失败(科目缺失/
+// 门槛不满足)返回 nil,调用方 lookup 得 NaN(整列 NaN)。
+func seriesByDate(closes []core.OHLCV, pts []core.EPSPoint) map[string]float64 {
+	dates, ratio, err := valuation.ReconstructPESeries(closes, pts)
+	if err != nil {
+		return nil
+	}
+	m := make(map[string]float64, len(dates))
+	for i := range dates {
+		m[dates[i].Format("2006-01-02")] = ratio[i]
+	}
+	return m
+}
+
+// refreshEdgar 全量重拉 EDGAR 季度事实,落 fundamental_q,并以 filing date 生效的
+// EPS_TTM 阶梯重建 PE 序列;PB(Close/BVPS)、PS(Close/RPS_TTM)同构对齐并入行。
+// 价格仍走 yahoo。CIK 空 → 报错提示配置。
+func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, inst config.PrismInstrument, now time.Time) error {
+	if inst.CIK == "" {
+		return fmt.Errorf("edgar source requires cik in config")
+	}
+	id, err := upsertMeta(store, inst)
+	if err != nil {
+		return err
+	}
+	facts, err := ed.FetchCompanyFacts(inst.CIK)
+	if err != nil {
+		return fmt.Errorf("companyfacts: %w", err)
+	}
+	frows := make([]prismstore.FundamentalRow, len(facts))
+	for i, f := range facts {
+		frows[i] = prismstore.FundamentalRow{
+			FiscalPeriod: f.FiscalPeriod, PeriodEnd: f.PeriodEnd.Format("2006-01-02"),
+			FilingDate: f.FilingDate.Format("2006-01-02"),
+			Revenue:    f.Revenue, NetIncome: f.NetIncome, EPSDiluted: f.EPSDiluted,
+			Equity: f.Equity, DilutedShares: f.DilutedShares, Source: "edgar",
+		}
+	}
+	if err := store.UpsertFundamentals(id, frows); err != nil {
+		return err
+	}
+
+	closes, err := us.FetchHistory(inst.Symbol, now.AddDate(-cfg.EdgarLookbackYears, 0, 0), now, "1d")
+	if err != nil {
+		return fmt.Errorf("price history: %w", err)
+	}
+	epsPts := ttmPoints(facts, func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted })
+	dates, pe, err := valuation.ReconstructPESeries(closes, epsPts)
+	if err != nil {
+		return fmt.Errorf("reconstruct: %w", err)
+	}
+	p5 := valuation.RollingPercentile(dates, pe, 5, rollingMinPoints)
+	p10 := valuation.RollingPercentile(dates, pe, 10, rollingMinPoints)
+
+	pbByDate := seriesByDate(closes, perSharePoints(facts, func(f edgar.QuarterlyFact) float64 {
+		if math.IsNaN(f.Equity) || math.IsNaN(f.DilutedShares) || f.DilutedShares == 0 {
+			return math.NaN()
+		}
+		return f.Equity / f.DilutedShares // BVPS
+	}))
+	psByDate := seriesByDate(closes, rpsPoints(facts))
+
+	rows := make([]prismstore.ValuationRow, len(dates))
+	for i := range dates {
+		d := dates[i].Format("2006-01-02")
+		rows[i] = prismstore.ValuationRow{D: d, PETTM: pe[i],
+			PB: lookupRatio(pbByDate, d), PSTTM: lookupRatio(psByDate, d),
+			Pctl5Y: p5[i], Pctl10Y: p10[i]}
+	}
+	return store.UpsertValuations(id, rows)
+}
+
+// lookupRatio 返回 m[d],m 为 nil 或未命中时返回 NaN。
+func lookupRatio(m map[string]float64, d string) float64 {
+	if v, ok := m[d]; ok {
+		return v
+	}
+	return math.NaN()
 }

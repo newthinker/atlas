@@ -1,0 +1,22 @@
+{
+  "cik": 1045810,
+  "entityName": "FALLBACK CORP",
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 0.6, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "Revenues": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 40000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      }
+    }
+  }
+}

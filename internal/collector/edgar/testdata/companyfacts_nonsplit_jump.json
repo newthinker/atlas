@@ -1,0 +1,17 @@
+{
+  "cik": 1045810,
+  "entityName": "NONSPLIT CORP (非整数跳变)",
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2023-01-27", "end": "2023-04-27", "val": 3.0, "fy": 2024, "fp": "Q1", "form": "10-Q", "filed": "2023-05-28"},
+            {"start": "2023-01-27", "end": "2024-01-25", "val": 6.9, "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2024-02-21"},
+            {"start": "2023-01-27", "end": "2024-01-25", "val": 3.0, "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2025-02-26"}
+          ]
+        }
+      }
+    }
+  }
+}

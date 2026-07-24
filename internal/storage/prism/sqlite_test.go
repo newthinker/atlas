@@ -148,3 +148,52 @@ func TestSeriesUnknownSymbolReturnsErrNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrNotFound), "未知 symbol 应返回可判定的 ErrNotFound")
 	assert.Contains(t, err.Error(), "NOPE")
 }
+
+// TASK-002 done_criteria → test mapping:
+//   functional[0]/boundary[1] 幂等 upsert + period_end 升序读回 → TestUpsertFundamentalsRoundtrip
+//   functional[1]             FundamentalRow 字段契约(逐字段相等) → TestUpsertFundamentalsRoundtrip
+//   boundary[0]               Equity NaN 落 NULL 读回 IsNaN        → TestUpsertFundamentalsRoundtrip
+//   error_handling[0]         空 rows 不报错且不产生行             → TestUpsertFundamentalsEmpty
+
+func TestUpsertFundamentalsRoundtrip(t *testing.T) {
+	s := openTemp(t)
+	id, _ := s.UpsertInstrument(Instrument{Symbol: "NVDA", Type: "stock", Market: "US", Name: "NVIDIA", Group: "美股公司", Source: "edgar"})
+	rows := []FundamentalRow{
+		{FiscalPeriod: "2026Q1", PeriodEnd: "2026-04-27", FilingDate: "2026-05-28",
+			Revenue: 44e9, NetIncome: 18e9, EPSDiluted: 0.76, Equity: 80e9, DilutedShares: 24.6e9, Source: "edgar"},
+		{FiscalPeriod: "2025Q4", PeriodEnd: "2026-01-26", FilingDate: "2026-02-26",
+			Revenue: 39e9, NetIncome: 22e9, EPSDiluted: 0.89, Equity: math.NaN(), DilutedShares: 24.7e9, Source: "edgar"},
+	}
+	require.NoError(t, s.UpsertFundamentals(id, rows))
+	require.NoError(t, s.UpsertFundamentals(id, rows)) // 幂等
+
+	got, err := s.QuarterlyFundamentals(id)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	// period_end 升序:2026-01-26 在前,2026-04-27 在后
+	assert.Equal(t, "2025Q4", got[0].FiscalPeriod, "period_end 升序")
+	assert.True(t, math.IsNaN(got[0].Equity), "Equity NaN 落 NULL 读回 IsNaN")
+	assert.Equal(t, "2026-02-26", got[0].FilingDate)
+	// 第二行(2026Q1)字段逐一相等
+	want := rows[0]
+	assert.Equal(t, want.FiscalPeriod, got[1].FiscalPeriod)
+	assert.Equal(t, want.PeriodEnd, got[1].PeriodEnd)
+	assert.Equal(t, want.FilingDate, got[1].FilingDate)
+	assert.Equal(t, want.Revenue, got[1].Revenue)
+	assert.Equal(t, want.NetIncome, got[1].NetIncome)
+	assert.Equal(t, want.EPSDiluted, got[1].EPSDiluted)
+	assert.Equal(t, want.Equity, got[1].Equity)
+	assert.Equal(t, want.DilutedShares, got[1].DilutedShares)
+	assert.Equal(t, want.Source, got[1].Source)
+}
+
+func TestUpsertFundamentalsEmpty(t *testing.T) {
+	// error_handling[0]: 空 rows 切片 Upsert 不报错且不产生行
+	s := openTemp(t)
+	id, _ := s.UpsertInstrument(Instrument{Symbol: "NVDA", Type: "stock", Market: "US", Name: "NVIDIA", Group: "美股公司", Source: "edgar"})
+	require.NoError(t, s.UpsertFundamentals(id, nil))
+	require.NoError(t, s.UpsertFundamentals(id, []FundamentalRow{}))
+	got, err := s.QuarterlyFundamentals(id)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}

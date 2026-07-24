@@ -6,6 +6,7 @@
     {{range .Groups}}
     <a href="/prism/board?group={{.}}" class="px-3 py-1 rounded text-sm {{if eq . $active}}bg-blue-600 text-white{{else}}bg-gray-200 dark:bg-gray-700{{end}}">{{.}}</a>
     {{end}}
+    <a href="/prism/compare" class="ml-auto px-3 py-1 rounded text-sm bg-gray-200 dark:bg-gray-700">对比</a>
   </div>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
     {{range .Cards}}

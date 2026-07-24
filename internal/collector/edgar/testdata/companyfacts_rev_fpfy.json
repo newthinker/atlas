@@ -1,0 +1,30 @@
+{
+  "cik": 1045810,
+  "entityName": "FPFY CORP",
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 0.6, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 99999, "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-02-26"},
+            {"start": "2025-01-27", "end": "2026-01-25", "val": 170000, "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-02-26"}
+          ]
+        }
+      },
+      "Revenues": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 40000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      }
+    }
+  }
+}
