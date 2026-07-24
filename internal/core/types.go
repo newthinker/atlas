@@ -77,9 +77,13 @@ type OHLCV struct {
 }
 
 // EPSPoint is one point of a trailing-twelve-month diluted EPS series.
+// FilingDate, when set, is the public-availability date the value becomes
+// effective (防前视); zero value falls back to Date (yahoo/qlibpit 路径口径:
+// 以报告期日期近似生效日,历史分位存在轻微前视,接受为已知限制).
 type EPSPoint struct {
-	Date time.Time
-	EPS  float64
+	Date       time.Time
+	EPS        float64
+	FilingDate time.Time
 }
 
 // Fundamental represents fundamental data for a stock
