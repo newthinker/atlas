@@ -288,12 +288,18 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
   复用现有 `collectors.lixinger.api_key`（无需为 prism 单列密钥，env `LIXINGER_API_KEY` 可覆盖），
   密钥不入 plist 不入日志。`db_path`（默认 `data/prism.db`）随 runtime 本地持有，deploy.sh 不同步 data/。
 - **日志路径**：`logs/prism-daily.out.log` / `logs/prism-daily.err.log`。
-- **手动触发/首跑**：代码目录或 runtime 目录执行
+- **手动触发/首跑**：在 runtime 目录（`/Users/zuowei/workspace/runtime/atlas`）执行
   `bin/atlas prism refresh -c configs/config.yaml`——首次全量回填（理杏仁近 10Y、美股近 5Y），
-  之后每日只拉增量（理杏仁请求区间为 latest+1 起，控制理杏豆成本）。
+  之后每日只拉增量（理杏仁请求区间为 latest+1 起，控制理杏豆成本）。**须在 runtime 目录内运行**：
+  `db_path`（默认 `data/prism.db`）是相对路径，按进程 cwd 解析，在代码目录跑会把库写错地方、
+  与 launchd 任务读写的库不是同一个。
 - **验证**：`launchctl kickstart gui/$(id -u)/com.newthinker.atlas.prism-daily` 后查
   `logs/prism-daily.out.log`；浏览器打开 `/prism/board` 目检卡片，`/prism/detail/<symbol>` 目检
   PE 与滚动分位曲线。设计与 M1 验收标准见 `docs/prism/atlas_prism_design.md`。
+- **已知限制**：启用 `ATLAS_API_KEY`（API 鉴权）时，`/prism/detail` 的图表会 401 空白——
+  页面 JS 用浏览器 `fetch` 调 `/api/prism/series` 不带 `X-API-Key` 头。这与既有 `/symbols/`
+  详情页同源继承缺陷，后续与既有页统一修复（如同源会话票据或页面注入 key）；`/prism/board`
+  为服务端渲染不受影响。
 
 ---
 

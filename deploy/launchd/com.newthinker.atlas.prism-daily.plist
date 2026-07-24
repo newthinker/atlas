@@ -11,7 +11,7 @@
     <string>prism</string>
     <string>refresh</string>
     <string>-c</string>
-    <string>/Users/zuowei/workspace/runtime/atlas/config.yaml</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
   </array>
 
   <key>WorkingDirectory</key>
