@@ -260,6 +260,7 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 | crisis-nfci | 周三 21:00 / 22:00 | 刷新周频 NFCI（不评估） |
 | crisis-intraday-jpy | 每 30 分钟 | 盘中 JPY 检查（非 BREWING/CRISIS 态空跑近零） |
 | prism-daily | 每日 08:30 | Prism 估值刷新（理杏仁增量 + 美股 yahoo 重算，在 refresh-us 08:00 之后） |
+| aktools | 常驻 | AKShare HTTP 侧车（127.0.0.1:8180，Prism A/H 公司与指数兜底数据源） |
 
 ### 危机监控（Cassandra）部署要点
 
@@ -300,6 +301,35 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
   页面 JS 用浏览器 `fetch` 调 `/api/prism/series` 不带 `X-API-Key` 头。这与既有 `/symbols/`
   详情页同源继承缺陷，后续与既有页统一修复（如同源会话票据或页面注入 key）；`/prism/board`
   为服务端渲染不受影响。
+
+### AKShare 侧车（aktools）部署要点
+
+Prism 的 A/H 公司(茅台/腾讯)与 A 股指数兜底数据源经本地 aktools HTTP 侧车拉取
+AKShare。侧车是独立 Python 进程（与 Go 主程序解耦，与 qlib_eval 的 venv 完全隔离）。
+
+- **建 venv**：`bash scripts/akshare/setup.sh`（幂等，重复执行安全）——在
+  `scripts/akshare/.venv` 建独立虚拟环境、按 `requirements.txt` 安装 akshare + aktools，
+  并 `pip freeze > requirements.lock` 留档。默认解释器 `python3.11`，可传参覆盖
+  （`bash scripts/akshare/setup.sh python3.12`）。
+- **装载常驻**：`launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.aktools.plist`
+  （plist 真相源 `deploy/launchd/com.newthinker.atlas.aktools.plist`，`KeepAlive` 保活、
+  `RunAtLoad` 开机自启）。侧车仅绑 `127.0.0.1:8180`，不对外暴露。
+- **配置要点**：runtime `configs/config.yaml` 的 `prism.akshare_base_url`
+  （默认 `http://127.0.0.1:8180`）须与 plist 的 `--host/--port` 一致；池内 source=akshare
+  的标的（茅台/腾讯）走侧车，source=lixinger 且带 `fallback_source: akshare` 的指数
+  （沪深300/中证500）在主源失败时自动降级到侧车。
+- **验证**：`curl 127.0.0.1:8180` 侧车可达（返回 aktools 首页）；主程序侧
+  `bin/atlas prism refresh -c configs/config.yaml` 后 `/prism/board` 目检茅台/腾讯上墙。
+- **日志路径**：`logs/aktools.out.log` / `logs/aktools.err.log`。
+- **升级流程**：重跑 `bash scripts/akshare/setup.sh`（拉最新 akshare/aktools），对比
+  `requirements.lock` 前后差异确认变更、验证 refresh 正常后提交更新的 lock 文件；异常可据
+  lock 回滚版本。
+- **⚠ live 校验点**：AKShare 接口名/字段键（`stock_a_indicator_lg`/`stock_hk_valuation_baidu`/
+  `stock_index_pe_lg` 及 `trade_date`/`pe_ttm`/`日期`/`滚动市盈率` 等）与 aktools CLI 旗标名
+  （`--host`/`--port`）随上游变动是常态，首跑若不符以实际响应修正代码常量/plist 并同步测试。
+- **口径说明**：AKShare 无官方分位，兜底期指数 5Y/10Y 分位为读回本地序列后用
+  `valuation.RollingPercentile` 本地计算，与理杏仁官方 cvpos 有方法论差异（数值方向一致、
+  绝对值允许差异）；指数兜底仅有 PE（PB/PS 为空），HK 公司仅有 PE/PB（无 PS）。
 
 ---
 

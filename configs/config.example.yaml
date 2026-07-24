@@ -234,13 +234,14 @@ prism:
   us_lookback_years: 5    # 美股 yahoo 重建年数
   low_pct: 15             # 低估阈值(百分位)
   high_pct: 85            # 高估阈值
+  akshare_base_url: "http://127.0.0.1:8180"  # aktools 本地侧车地址(A/H 公司与指数兜底数据源)
   instruments:
-    # ---- A 股指数(理杏仁) ----
-    - {symbol: "000300.SH", name: "沪深300", type: "index", market: "CN_A", group: "A股指数", source: "lixinger"}
-    - {symbol: "000905.SH", name: "中证500", type: "index", market: "CN_A", group: "A股指数", source: "lixinger"}
-    # ---- A/H 公司(理杏仁) ----
-    - {symbol: "600519.SH", name: "贵州茅台", type: "stock", market: "CN_A", group: "A股公司", source: "lixinger"}
-    - {symbol: "0700.HK",   name: "腾讯控股", type: "stock", market: "HK", group: "港股公司", source: "lixinger"}
+    # ---- A 股指数(理杏仁主源,akshare 自动兜底) ----
+    - {symbol: "000300.SH", name: "沪深300", type: "index", market: "CN_A", group: "A股指数", source: "lixinger", fallback_source: "akshare"}
+    - {symbol: "000905.SH", name: "中证500", type: "index", market: "CN_A", group: "A股指数", source: "lixinger", fallback_source: "akshare"}
+    # ---- A/H 公司(akshare 经 aktools) ----
+    - {symbol: "600519.SH", name: "贵州茅台", type: "stock", market: "CN_A", group: "A股公司", source: "akshare"}
+    - {symbol: "0700.HK",   name: "腾讯控股", type: "stock", market: "HK", group: "港股公司", source: "akshare"}
     # ---- 美股指数(理杏仁,live 验证仅标普500) ----
     - {symbol: "^GSPC", name: "标普500", type: "index", market: "US", group: "美股指数", source: "lixinger"}
     # ---- 美股公司(yahoo 重建,近5Y,无 PB/PS) ----
