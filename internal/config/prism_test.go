@@ -28,6 +28,7 @@ func TestPrismConfigApplyDefaults(t *testing.T) {
 	assert.Equal(t, "data/prism.db", c.DBPath)
 	assert.Equal(t, 10, c.LookbackYears)
 	assert.Equal(t, 5, c.USLookbackYears)
+	assert.Equal(t, 10, c.EdgarLookbackYears)
 	assert.Equal(t, 15.0, c.LowPct)
 	assert.Equal(t, 85.0, c.HighPct)
 }
@@ -65,9 +66,10 @@ func TestPrismConfigFieldsAndTags(t *testing.T) {
 }
 
 // Context Checkpoint: akshare 配置默认值与字段 → TestPrismConfigAkshareDefaults
-//   functional[0] "零值 ApplyDefaults 后 AkshareBaseURL=http://127.0.0.1:8180" → TestPrismConfigAkshareDefaults
-//   boundary[0]   "显式 AkshareBaseURL 不被默认值覆盖"                          → TestPrismConfigAkshareDefaults
-//   functional[1] "PrismInstrument.FallbackSource mapstructure=fallback_source" → TestPrismInstrumentFallbackSourceTag
+//
+//	functional[0] "零值 ApplyDefaults 后 AkshareBaseURL=http://127.0.0.1:8180" → TestPrismConfigAkshareDefaults
+//	boundary[0]   "显式 AkshareBaseURL 不被默认值覆盖"                          → TestPrismConfigAkshareDefaults
+//	functional[1] "PrismInstrument.FallbackSource mapstructure=fallback_source" → TestPrismInstrumentFallbackSourceTag
 func TestPrismConfigAkshareDefaults(t *testing.T) {
 	c := PrismConfig{}
 	c.ApplyDefaults()

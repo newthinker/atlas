@@ -671,6 +671,29 @@ func TestRefreshEdgarMissingCIK(t *testing.T) {
 	assert.Contains(t, rep.Failed[0], "cik", "错误须提示配置 cik")
 }
 
+// boundary[1](edgar 路径):Equity 全缺失 → BVPS 无点、RPS 仍在 → PB 整列 NaN,
+// 而 PE 列不受影响(仍为 10)。锁定「PB/PS 缺科目降级不污染 PE」。
+func TestRefreshEdgarMissingEquityNaNPB(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	facts := edgarQuarters(now)
+	for i := range facts {
+		facts[i].Equity = math.NaN() // 挖掉净资产 → BVPS 不可算
+	}
+	lastFiled := facts[11].FilingDate
+	closes := []core.OHLCV{
+		{Time: lastFiled.AddDate(0, 0, -2), Close: 40},
+		{Time: lastFiled.AddDate(0, 0, 2), Close: 40},
+	}
+	store := newFakeStore()
+	rep := Refresh(edgarCfg(), store, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{}, fakeEdgar{facts: facts}, now)
+	require.Empty(t, rep.Failed)
+	rows := store.upserts["NVDA"]
+	require.Len(t, rows, 2)
+	assert.InDelta(t, 10.0, rows[0].PETTM, 1e-9, "PE 列不受 PB 缺科目影响")
+	assert.True(t, math.IsNaN(rows[0].PB), "Equity 缺失 → PB 整列 NaN")
+	assert.True(t, math.IsNaN(rows[1].PB))
+}
+
 func TestRefreshEdgarFallback(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	// engine fallback 需要 yahoo EPS+closes(复用既有 fakeUS2 构造)
