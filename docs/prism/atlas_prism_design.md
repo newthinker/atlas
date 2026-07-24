@@ -370,11 +370,15 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
   4. 参数取包内常量,不进 config(无按环境调参需求,简单优先)。
 - 验收:httptest 单测——首响 429(带/不带 Retry-After)→ 退避后重试成功;连续 429 → 3 次后失败并保留原始错误;节流生效(相邻请求时间差 ≥ 间隔)。生产观察:prism-daily 定时首跑 20 家 `0 failed`(XOM 优雅降级除外)。
 - 明确不做:plist 注入 proxy env 的代理方案——引入「代理进程可用性」这一新故障面,劣于客户端自愈;Stooq 备源仍按 §10 既有条目独立演进。
+- **发布后记(2026-07-25,v1.4.1)**:节流+退避已上线并保留,但「不做代理」的前提被证伪——launchd 直连复测仍 20 failed,区分实验证实根因是 **yahoo 对本机直连出口的持续 IP 级 403 封禁**(非突发限流,客户端自愈无解)。经用户决策改为「代理先行+Stooq 立项」:6 个 yahoo 依赖服务 plist 注入代理 env(含 no_proxy 豁免本机侧车)后 launchd 实测 `25 ok, 0 failed, 5 degraded`(degraded=EDGAR tag 差异类,见 §10)。附带发现并救回 refresh-us 主管线(已静默停更 ~23 天)。
 
 **M3 — 财报桥(2 周)**
 - `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染。
 - 首批 5~10 家模板(MAG7 + TSM/AVGO/LLY 按需)。
 - `/prism/fundamental` 财务趋势页(含股价叠加)+ 堆叠柱状图 + PNG 导出。
+- **Stooq 备源接入(2026-07-25 用户立项)**:新增 `internal/collector/stooq` 作 yahoo 价格失败备源,消除「本机代理可用性」单点;先调研 Stooq 对首批标的的覆盖/复权口径。
+- **EDGAR tag 回退扩展(2026-07-25 立项)**:EPS tag 回退链(EarningsPerShareBasicAndDiluted → NetIncome÷DilutedShares 推算)与股本 tag 扩展,救回 COST/V/CRM/WMT 的 EDGAR 全功能与 AVGO 的 PB;同时给 prism refresh 日志打印 Degraded/Failed 明细(观测缺口)。
+- ETF 成分聚合(D3)+ etfholdings(自 M2 顺延)。
 
 **M4 — 扩展(按需)**
 - 美股扩容至 Top 100;桑基模板逐家增补(上限 30~50 家)。
@@ -391,6 +395,8 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 | 理杏仁 URL/接口改版(历史发生过) | 采集中断 | base path 已配置化(现有 lixinger 客户端);失败走 notifier 告警 |
 | yahoo 非官方 API 变动 | 价格采集中断 | Stooq 备源 + 采集失败告警(复用现有通道) |
 | yahoo 突发限流(429;2026-07-24 v1.4.0 首跑实测) | prism-daily 美股批量刷新整批失败——fallback engine 同依赖 yahoo,双失败不降级;EDGAR 事实层不受影响,仅价格阶段受阻 | M2.1 客户端节流 + 退避(见 §9);扩容(M4)前为硬前置 |
+| **yahoo 直连持续 403(根因修正,2026-07-25)**:本网络直连出口被 yahoo IP 级封禁(间隔 14h 单发仍 403),非突发限流——launchd 无代理 env 致 refresh-us 主管线静默停更 ~23 天(health check 自报 age 23d 无人看)、prism 美股整批失败;crisis plist 早已发现并修复(注释在案)但未推广到其余服务 | 美股行情全链路(refresh-us/prism-daily/serve backtest/crisis yahoo 快照) | 已修复:6 个 yahoo 依赖服务 plist 注入 http(s)_proxy=127.0.0.1:7897 + no_proxy 豁免本机侧车(install-services 重载);M2.1 节流退避保留(防真实突发限流);**Stooq 备源立项 M3(用户决策,消除代理单点)**;教训:环境级修复必须全服务推广并留档,勿只修出问题的那个 |
+| EDGAR EPS/股本 tag 形态差异:COST/V/CRM/WMT 的 EarningsPerShareDiluted 单季条目缺失(70-71/71 NULL,V 连 diluted_shares 全缺),AVGO equity 29/36 缺失 | 4 家走 engine 降级(PE 有/PB-PS 缺)+AVGO PB 整列 NaN——首批 20 家实测 15 家 EDGAR 全功能,5 degraded/1 部分降级 | 按设计优雅降级已兜底(refresh 报告可见 degraded 计数);M3 follow-up:EPS tag 回退链(EarningsPerShareBasicAndDiluted/NetIncome÷shares 推算)与股本 tag 扩展;顺带修 refresh 日志不打印 Degraded 明细的观测缺口 |
 | EDGAR XBRL tag 不一致(公司自定义 tag) | 财务数据缺漏 | 逐家校验 + source 字段标记 + manual 兜底 |
 | 分部口径重述(公司调整业务分类) | 桑基历史断层 | 模板带版本号,重述时新旧模板并存,图上标注断点 |
 | ETF 成分聚合 PE 与市面数字有差异 | 用户困惑 | 口径写入页面 footnote,一致性比"对齐别人"重要 |

@@ -18,6 +18,12 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>http_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>https_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>no_proxy</key>
+    <string>localhost,127.0.0.1</string>
     <key>PATH</key>
     <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

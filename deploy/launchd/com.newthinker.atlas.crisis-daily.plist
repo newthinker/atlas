@@ -23,6 +23,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>no_proxy</key>
+    <string>localhost,127.0.0.1</string>
     <key>PATH</key>
     <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <!-- Yahoo 从本网络直连恒 403，需经本地代理（与主配置 telegram/claude 的
