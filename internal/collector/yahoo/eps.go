@@ -53,7 +53,7 @@ func (y *Yahoo) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPS
 		return nil, err
 	}
 
-	resp, err := y.client.Do(req)
+	resp, err := y.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching eps history: %w", err)
 	}
