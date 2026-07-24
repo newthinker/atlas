@@ -225,3 +225,25 @@ alerts:
       for: 5m
       severity: warning
       message: "API 5xx error rate above 10% over the last interval"
+
+# Prism 估值面板 (docs/prism/atlas_prism_design.md)
+prism:
+  enabled: true
+  db_path: "data/prism.db"
+  lookback_years: 10      # 理杏仁首次回填年数
+  us_lookback_years: 5    # 美股 yahoo 重建年数
+  low_pct: 15             # 低估阈值(百分位)
+  high_pct: 85            # 高估阈值
+  instruments:
+    # ---- A 股指数(理杏仁) ----
+    - {symbol: "000300.SH", name: "沪深300", type: "index", market: "CN_A", group: "A股指数", source: "lixinger"}
+    - {symbol: "000905.SH", name: "中证500", type: "index", market: "CN_A", group: "A股指数", source: "lixinger"}
+    # ---- A/H 公司(理杏仁) ----
+    - {symbol: "600519.SH", name: "贵州茅台", type: "stock", market: "CN_A", group: "A股公司", source: "lixinger"}
+    - {symbol: "0700.HK",   name: "腾讯控股", type: "stock", market: "HK", group: "港股公司", source: "lixinger"}
+    # ---- 美股指数(理杏仁,live 验证仅标普500) ----
+    - {symbol: "^GSPC", name: "标普500", type: "index", market: "US", group: "美股指数", source: "lixinger"}
+    # ---- 美股公司(yahoo 重建,近5Y,无 PB/PS) ----
+    - {symbol: "NVDA", name: "NVIDIA",   type: "stock", market: "US", group: "美股公司", source: "engine"}
+    - {symbol: "MSFT", name: "微软",     type: "stock", market: "US", group: "美股公司", source: "engine"}
+    - {symbol: "AAPL", name: "苹果",     type: "stock", market: "US", group: "美股公司", source: "engine"}

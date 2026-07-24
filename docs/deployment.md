@@ -259,6 +259,7 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 | crisis-daily | 22:45 / 23:45 / 次日 07:30 | 危机监控每日评估（多时点覆盖 ET 发布，幂等空跑） |
 | crisis-nfci | 周三 21:00 / 22:00 | 刷新周频 NFCI（不评估） |
 | crisis-intraday-jpy | 每 30 分钟 | 盘中 JPY 检查（非 BREWING/CRISIS 态空跑近零） |
+| prism-daily | 每日 08:30 | Prism 估值刷新（理杏仁增量 + 美股 yahoo 重算，在 refresh-us 08:00 之后） |
 
 ### 危机监控（Cassandra）部署要点
 
@@ -274,6 +275,25 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
   `bin/atlas crisis status` 查看当前系统状态与各指标读数。
 - 状态语义与阈值调参见 `docs/plans/atlas-macro-crisis-monitor-design.md`（阈值全部在
   `configs/crisis-monitor.yaml`，调参不需发版，重跑 `atlas crisis replay` 验证）。
+- 通知频率与机制（各状态收到什么消息、多久一条、排障速查）见
+  `docs/ops/crisis-monitor-notifications.md`。
+
+### Prism 估值面板部署要点
+
+- **装载**：plist 随 `install-services.sh` 一并 bootstrap（幂等）；或单独
+  `launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.prism-daily.plist`。
+  调度每日 08:30，刻意排在 refresh-us（08:00）之后——美股 engine 标的重算依赖当日行情已落库。
+- **配置要点**：runtime `configs/config.yaml` 的 `prism.enabled: true` 决定是否启用（同时
+  Web 侧 `/prism/board` 路由才注册、estimate 阈值 `low_pct`/`high_pct` 生效）；理杏仁标的
+  复用现有 `collectors.lixinger.api_key`（无需为 prism 单列密钥，env `LIXINGER_API_KEY` 可覆盖），
+  密钥不入 plist 不入日志。`db_path`（默认 `data/prism.db`）随 runtime 本地持有，deploy.sh 不同步 data/。
+- **日志路径**：`logs/prism-daily.out.log` / `logs/prism-daily.err.log`。
+- **手动触发/首跑**：代码目录或 runtime 目录执行
+  `bin/atlas prism refresh -c configs/config.yaml`——首次全量回填（理杏仁近 10Y、美股近 5Y），
+  之后每日只拉增量（理杏仁请求区间为 latest+1 起，控制理杏豆成本）。
+- **验证**：`launchctl kickstart gui/$(id -u)/com.newthinker.atlas.prism-daily` 后查
+  `logs/prism-daily.out.log`；浏览器打开 `/prism/board` 目检卡片，`/prism/detail/<symbol>` 目检
+  PE 与滚动分位曲线。设计与 M1 验收标准见 `docs/prism/atlas_prism_design.md`。
 
 ---
 
