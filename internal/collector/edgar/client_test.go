@@ -22,6 +22,13 @@ import (
 //   error[1]      HTTP 非 200 → 含状态码与 CIK 的错误  → TestFetchCompanyFactsHTTPError
 //   加强项        季度不全的 FY 不产 Q4 (qCount==3)    → TestFetchCompanyFactsPartialFYNoQ4
 
+// [TASK-008] 拆股归一化:
+//   functional[0] 比例跳变检测+每股值归一到最新基准       → TestFetchCompanyFactsSplitNormalization
+//   functional[1] 归一后派生 Q4 EPS 无符号矛盾(NI>0→EPS>0) → TestFetchCompanyFactsSplitNormalization
+//   functional[2] DilutedShares 反向 ×比例                → TestFetchCompanyFactsSplitNormalization
+//   boundary[1]   偏差>5%/非整数比例不误判为拆股           → TestFetchCompanyFactsSplitIgnoresNonIntegerRatio
+//   boundary[0]   无拆股公司零影响                        → 既有 mini/rev_*/q4guard/shares_noq4 测试保持通过
+
 // factsFileServer serves a fixture file, asserting the requested path.
 func factsFileServer(t *testing.T, fixture, wantPath string) (*httptest.Server, *http.Request) {
 	t.Helper()
@@ -170,4 +177,41 @@ func TestFetchCompanyFactsHTTPError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "403")
 	assert.Contains(t, err.Error(), "1045810")
+}
+
+// [TASK-008] 拆股归一化:fixture 模拟 10:1——年度 EPS 被重述(12.0 拆股前→1.2 拆股后),
+// 单季只有拆股前基准(3.0/3.5/4.0)。归一化后:单季每股值 ÷10,派生 Q4 = 归一化 FY−Σ三季 > 0
+// (与 NI>0 一致,无符号矛盾);DilutedShares 反向 ×10 保持 BVPS/RPS 分母基准一致。
+func TestFetchCompanyFactsSplitNormalization(t *testing.T) {
+	srv, _ := factsFileServer(t, "testdata/companyfacts_split.json", "/api/xbrl/companyfacts/CIK0001045810.json")
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	facts, err := c.FetchCompanyFacts("1045810")
+	require.NoError(t, err)
+	require.Len(t, facts, 4, "3 单季 + 推导 Q4")
+
+	q1 := facts[0]
+	assert.Equal(t, time.Date(2023, 4, 27, 0, 0, 0, 0, time.UTC), q1.PeriodEnd)
+	assert.InDelta(t, 0.30, q1.EPSDiluted, 1e-9, "Q1 EPS 归一化到拆股后基准(3.0÷10)")
+	assert.InDelta(t, 25000.0, q1.DilutedShares, 1e-9, "DilutedShares 反向 ×10(2500×10)")
+	assert.InDelta(t, 15000.0, q1.NetIncome, 1e-9, "NetIncome 绝对值不受拆股影响")
+
+	q4 := facts[3]
+	assert.Equal(t, time.Date(2024, 1, 25, 0, 0, 0, 0, time.UTC), q4.PeriodEnd)
+	assert.InDelta(t, 1.2-(0.30+0.35+0.40), q4.EPSDiluted, 1e-9, "派生 Q4 EPS = 归一化 FY−Σ三季 = 0.15")
+	assert.Greater(t, q4.EPSDiluted, 0.0, "NI>0 的年度,派生 Q4 EPS 必须 >0(无符号矛盾)")
+	assert.InDelta(t, 23000.0, q4.NetIncome, 1e-9, "派生 Q4 NI = 74000−51000")
+	assert.Greater(t, q4.NetIncome, 0.0)
+}
+
+// [TASK-008] boundary[1]/error[0]:跨 filed 跳变但比例非近似整数(6.9→3.0=2.3,离最近整数 2 偏差 15%>5%)
+// → 无法确定拆股比,不归一化,单季每股值保持原值(3.0,而非误 ÷2=1.5)。
+func TestFetchCompanyFactsSplitIgnoresNonIntegerRatio(t *testing.T) {
+	srv, _ := factsFileServer(t, "testdata/companyfacts_nonsplit_jump.json", "/api/xbrl/companyfacts/CIK0001045810.json")
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	facts, err := c.FetchCompanyFacts("1045810")
+	require.NoError(t, err)
+	require.Len(t, facts, 1, "只有 Q1 单季,年度非整数跳变不产生归一化副作用")
+	assert.InDelta(t, 3.0, facts[0].EPSDiluted, 1e-9, "非整数比例不误判为拆股 → EPS 保持原值 3.0")
 }

@@ -102,6 +102,165 @@ func isAnnual(f rawFact) bool {
 	return ok && d >= 350 && d <= 380
 }
 
+// splitEvent marks a detected stock split: 从 effFiled 起(首个体现拆股后基准的申报)
+// 每股值缩小为原来的 1/ratio,股本数放大为 ratio 倍。
+type splitEvent struct {
+	effFiled time.Time
+	ratio    float64
+}
+
+// splitRatioTolerance:跨 filed 比例与最近整数的相对偏差在此内才认定为拆股(重述噪声/
+// 四舍五入不误判);splitMinVotes 要求至少这么多个 period_end 都观测到同一比例才认定为
+// 拆股——真实拆股会重述所有历史期,亏损年个别科目的噪声比例只在单个 period_end 出现。
+const (
+	splitRatioTolerance = 0.05
+	splitMinVotes       = 2
+)
+
+// splitRatios 是真实股票拆股的常见比例白名单。只在 2024 被重述、跳过 2021 中间重述的老
+// 期间,其相邻跨 filed 比例会是「组合比」(如 4:1×10:1=40),并非一次独立拆股;若把组合比
+// 也当拆股会与 4、10 叠乘导致早期值被严重过度归一。故只认白名单内的原子比例,时间线仍由
+// 各原子拆股(4、10)自身的投票建立,并按 filed 正确累积应用到全部条目。
+var splitRatios = map[float64]bool{
+	2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true, 10: true, 15: true, 20: true,
+}
+
+// eachRestatementRatio 遍历各 period_end 组内按 filed 升序的相邻条目对,对「值比为近整数
+// (>=2,偏差<=splitRatioTolerance)」的对回调 fn(该比例, 新基准条目)。inverse=true 翻转比例
+// 方向(股本数拆股后变大,用 newer/older),供股本复用同一扫描。
+func eachRestatementRatio(byEnd map[string][]rawFact, inverse bool, fn func(R float64, newer rawFact)) {
+	for _, grp := range byEnd {
+		sort.Slice(grp, func(i, j int) bool { return grp[i].Filed < grp[j].Filed })
+		for i := 1; i < len(grp); i++ {
+			older, newer := grp[i-1], grp[i]
+			if older.Val == 0 || newer.Val == 0 {
+				continue
+			}
+			r := older.Val / newer.Val
+			if inverse {
+				r = newer.Val / older.Val
+			}
+			R := math.Round(r)
+			if R < 2 || math.Abs(r-R)/R > splitRatioTolerance {
+				continue
+			}
+			fn(R, newer)
+		}
+	}
+}
+
+// ratioVotes 统计各 period_end 组内「相邻 filed 值比 ≈ 白名单原子拆股比例」的票数。
+func ratioVotes(byEnd map[string][]rawFact) map[float64]int {
+	votes := map[float64]int{}
+	eachRestatementRatio(byEnd, false, func(R float64, _ rawFact) {
+		if splitRatios[R] {
+			votes[R]++
+		}
+	})
+	return votes
+}
+
+// refineEffDates 对每个已验证真实比例 R,从条目里「比例 ≈ R」的相邻 filed 对取最早的新基准
+// filed 作为生效日。inverse=false 用于每股值(拆股后变小,older/newer≈R);inverse=true 用于
+// 股本数(拆股后变大,newer/older≈R)。股本是数十亿大整数,季度粒度也无舍入噪声,能把生效日
+// 收得比每股值(小额季度舍入使 ratio 失真、只能靠年报)更紧,避免误伤拆股后原生季度。
+func refineEffDates(byEnd map[string][]rawFact, valid map[float64]bool, inverse bool, effByRatio map[float64]time.Time) {
+	eachRestatementRatio(byEnd, inverse, func(R float64, newer rawFact) {
+		if !valid[R] {
+			return
+		}
+		eff, err := time.Parse("2006-01-02", newer.Filed)
+		if err != nil {
+			return
+		}
+		if cur, ok := effByRatio[R]; !ok || eff.Before(cur) {
+			effByRatio[R] = eff
+		}
+	})
+}
+
+// detectSplits 从每股科目(EPSDiluted)与股本数(DilutedShares)的跨 filed 重述推断拆股时间线,
+// 分两步以兼顾「比例干净」与「生效日精确」:
+//  1. 比例只从 EPS **年度(FY)条目**投票检测——年度每股值量级大、无低值四舍五入噪声,只会给出
+//     真实拆股比(如 4、10);季度低值(如 0.06→0.02=3×)的舍入噪声不会污染。需 >=splitMinVotes
+//     个不同财年年度确认,进一步排除偶发。
+//  2. 生效日从 EPS 与**股本数**里「比例 ∈ 已验证真实比例」的最早新基准 filed 定位——股本是大整数
+//     无舍入噪声,季度重述能给出紧边界(拆股实际生效附近),避免用年报 filed(偏晚)误伤拆股后
+//     原生季度。
+//
+// 早期只在后期被一次性重述(跳过中间拆股)的期间,其相邻比是组合比(如 40),不在白名单、也不是
+// 已验证真实比例,被忽略;但时间线由各原子拆股(4、10)自身确立,按 filed 累积应用仍正确归一。
+func detectSplits(eps, shares []rawFact) []splitEvent {
+	annualByEnd := map[string][]rawFact{}
+	epsByEnd := map[string][]rawFact{}
+	for _, f := range eps {
+		epsByEnd[f.End] = append(epsByEnd[f.End], f)
+		if isAnnual(f) {
+			annualByEnd[f.End] = append(annualByEnd[f.End], f)
+		}
+	}
+	valid := map[float64]bool{}
+	for R, v := range ratioVotes(annualByEnd) {
+		if v >= splitMinVotes {
+			valid[R] = true
+		}
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	sharesByEnd := map[string][]rawFact{}
+	for _, f := range shares {
+		sharesByEnd[f.End] = append(sharesByEnd[f.End], f)
+	}
+	effByRatio := map[float64]time.Time{}
+	refineEffDates(epsByEnd, valid, false, effByRatio)
+	refineEffDates(sharesByEnd, valid, true, effByRatio)
+
+	var events []splitEvent
+	for R, eff := range effByRatio {
+		events = append(events, splitEvent{eff, R})
+	}
+	return events
+}
+
+// splitFactor 返回 filed 这条记录到「最新基准」需累乘的拆股比例(生效日晚于 filed 的拆股
+// 全部计入):每股值 ÷factor、股本数 ×factor 即归一到最新基准。filed 不可解析 → 1(不动)。
+func splitFactor(events []splitEvent, filedStr string) float64 {
+	filed, err := time.Parse("2006-01-02", filedStr)
+	if err != nil {
+		return 1
+	}
+	f := 1.0
+	for _, e := range events {
+		if filed.Before(e.effFiled) {
+			f *= e.ratio
+		}
+	}
+	return f
+}
+
+// normalizeSplits 把某科目各条目按拆股时间线归一到最新基准的**副本**(不改原切片)。
+// invert=false 每股值 ÷factor;invert=true 股本数 ×factor。
+func normalizeSplits(facts []rawFact, events []splitEvent, invert bool) []rawFact {
+	if len(events) == 0 {
+		return facts
+	}
+	out := make([]rawFact, len(facts))
+	copy(out, facts)
+	for i := range out {
+		f := splitFactor(events, out[i].Filed)
+		if f == 1 {
+			continue
+		}
+		if invert {
+			out[i].Val *= f
+		} else {
+			out[i].Val /= f
+		}
+	}
+	return out
+}
+
 // FetchCompanyFacts downloads and quarterizes the companyfacts of one CIK.
 // Full refetch every call — EDGAR has no incremental API; upserts are
 // idempotent downstream. Results are sorted by PeriodEnd ascending.
@@ -265,12 +424,19 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 		}
 	}
 
-	durationMetric(unitsOf("EarningsPerShareDiluted"), func(q *QuarterlyFact, v float64) { q.EPSDiluted = v })
+	// 拆股归一化:从每股科目 EPSDiluted 推断拆股时间线,把每股值(÷)与股本数(×)统一到
+	// 最新基准,再喂入季度化。避免年度(拆股后重述)−单季(拆股前基准)得垃圾派生 Q4(TASK-008)。
+	// Revenue/NetIncome/Equity 是绝对值,不随拆股变动,不归一。
+	epsFacts := unitsOf("EarningsPerShareDiluted")
+	sharesFacts := unitsOf("WeightedAverageNumberOfDilutedSharesOutstanding")
+	splits := detectSplits(epsFacts, sharesFacts)
+
+	durationMetric(normalizeSplits(epsFacts, splits, false), func(q *QuarterlyFact, v float64) { q.EPSDiluted = v })
 	durationMetric(firstQuarterlyTag(revenueTags...), func(q *QuarterlyFact, v float64) { q.Revenue = v })
 	durationMetric(unitsOf("NetIncomeLoss"), func(q *QuarterlyFact, v float64) { q.NetIncome = v })
 	// 股本为时点/加权平均量(非流量),Q4=FY−ΣQ 减法无意义(FY≈单季 → 得负值),故只落单季,
-	// Q4 无独立单季申报 → 该季 DilutedShares 留 NaN。
-	sharesSingles, _ := applyDuration(unitsOf("WeightedAverageNumberOfDilutedSharesOutstanding"))
+	// Q4 无独立单季申报 → 该季 DilutedShares 留 NaN。股本随拆股反向放大(×比例)。
+	sharesSingles, _ := applyDuration(normalizeSplits(sharesFacts, splits, true))
 	emitSingles(sharesSingles, func(q *QuarterlyFact, v float64) { q.DilutedShares = v })
 
 	// instant 型(Equity):按 end 匹配同 period_end 的季度。
