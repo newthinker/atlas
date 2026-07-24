@@ -48,6 +48,9 @@ func (c *Client) fetchAStock(symbol string, start, end time.Time) ([]ValuationPo
 			PSTTM: fnum(row, "ps_ttm", "ps"),
 		})
 	}
+	if err := guardSchemaDrift(pts, "stock_a_indicator_lg"); err != nil {
+		return nil, err
+	}
 	return clipSort(pts, start, end), nil
 }
 
@@ -101,6 +104,9 @@ func (c *Client) fetchHKStock(symbol string, start, end time.Time) ([]ValuationP
 			p.PB = b
 		}
 		pts = append(pts, p)
+	}
+	if err := guardSchemaDrift(pts, "stock_hk_valuation_baidu"); err != nil {
+		return nil, err
 	}
 	return clipSort(pts, start, end), nil
 }

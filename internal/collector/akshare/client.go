@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,15 +59,36 @@ func (c *Client) get(api string, params url.Values) ([]map[string]any, error) {
 	return rows, nil
 }
 
-// fnum 取 row 中第一个存在且为数值的键,均缺失返回 NaN。
+// fnum 取 row 中第一个存在且可解析为数值的键,均缺失返回 NaN。
+// 兼容 aktools 偶把数值序列化为 JSON 字符串的情形(string 值经 strconv.ParseFloat)。
 // ⚠ live 校验点: 传入的键名(pe_ttm/ps_ttm/ps 等)须与 aktools 实际响应一致。
 func fnum(row map[string]any, keys ...string) float64 {
 	for _, k := range keys {
-		if v, ok := row[k].(float64); ok {
+		switch v := row[k].(type) {
+		case float64:
 			return v
+		case string:
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return f
+			}
 		}
 	}
 	return math.NaN()
+}
+
+// guardSchemaDrift 侦测上游 schema 漂移: 拉取 >0 行但全部 PETTM 为 NaN,极可能是
+// 字段键变动导致 PE 解析全落空。返回 error 让静默漂移变成 Report.Failed 告警,
+// 而非产出一整段空 PE 的序列被下游当正常数据。
+func guardSchemaDrift(pts []ValuationPoint, api string) error {
+	if len(pts) == 0 {
+		return nil
+	}
+	for _, p := range pts {
+		if !math.IsNaN(p.PETTM) {
+			return nil
+		}
+	}
+	return fmt.Errorf("akshare: %s: fetched %d rows but all PE are NaN (probable schema drift)", api, len(pts))
 }
 
 // fdate 取 row 中第一个存在的日期键,支持 "2006-01-02" 与 ISO8601 前缀。

@@ -39,5 +39,8 @@ func (c *Client) FetchIndexValuationSeries(symbol string, start, end time.Time) 
 			PSTTM: math.NaN(),
 		})
 	}
+	if err := guardSchemaDrift(pts, "stock_index_pe_lg"); err != nil {
+		return nil, err
+	}
 	return clipSort(pts, start, end), nil
 }

@@ -86,6 +86,38 @@ func TestFetchStockUnsupportedMarket(t *testing.T) {
 	assert.ErrorContains(t, err, "unsupported market")
 }
 
+// Context Checkpoint (TASK-002 review_fix):
+//   JSON 字符串数值(aktools 偶把数值序列化为 string)经 strconv 解析 → TestFetchAStockStringNumerics
+//   拉取>0 行但全部 PETTM 为 NaN(schema 漂移)→ error 含 probable schema drift → TestFetchAStockAllNaNGuard
+func TestFetchAStockStringNumerics(t *testing.T) {
+	srv := lgServer(t, "600519", []map[string]any{
+		{"trade_date": "2026-07-22", "pe_ttm": "22.5", "pb": "8.1", "ps_ttm": "10.2"},
+	})
+	defer srv.Close()
+
+	c := New(srv.URL)
+	pts, err := c.FetchStockValuationSeries("600519.SH", "CN_A", day(2026, 7, 1), day(2026, 7, 23))
+	require.NoError(t, err)
+	require.Len(t, pts, 1)
+	assert.Equal(t, 22.5, pts[0].PETTM, "字符串数值须解析为 float")
+	assert.Equal(t, 8.1, pts[0].PB)
+	assert.Equal(t, 10.2, pts[0].PSTTM)
+}
+
+func TestFetchAStockAllNaNGuard(t *testing.T) {
+	// 字段键漂移(pe_ttm→peTTM),解析后全部 PETTM=NaN,守卫应报错而非静默产出空 PE 序列。
+	srv := lgServer(t, "600519", []map[string]any{
+		{"trade_date": "2026-07-22", "peTTM": 22.5, "pb": 8.1},
+		{"trade_date": "2026-07-23", "peTTM": 22.7, "pb": 8.2},
+	})
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.FetchStockValuationSeries("600519.SH", "CN_A", day(2026, 7, 1), day(2026, 7, 23))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "probable schema drift")
+}
+
 // Context Checkpoint (TASK-003):
 //   HK 双指标按日期合并、0700.HK→00700、period=全部、有 PE 缺 PB→PB NaN → TestFetchHKStockMerge
 //   仅有 PB 无 PE 的日不产出行(口径明确,无 PE 无法算分位)               → TestFetchHKStockMerge
