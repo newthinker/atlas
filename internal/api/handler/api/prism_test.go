@@ -77,16 +77,18 @@ func TestPrismBoardStatusAndNulls(t *testing.T) {
 }
 
 func TestPrismStoreErrorReturns500(t *testing.T) {
-	// error_handling: store 层错误 → 500 + {error}
+	// error_handling: store 层错误 → 500,且不回显内部错误细节(response.Error 脱敏)
 	h := NewPrismHandler(&fakePrismStore{err: errors.New("db down")}, 15, 85)
 
 	rec := httptest.NewRecorder()
 	h.Board(rec, httptest.NewRequest(http.MethodGet, "/api/prism/board", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "db down", "500 不得泄露内部错误细节(SQLite 路径/SQL)")
 
 	rec = httptest.NewRecorder()
 	h.Series(rec, httptest.NewRequest(http.MethodGet, "/api/prism/series?symbol=NVDA", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "db down", "500 不得泄露内部错误细节")
 }
 
 func TestPrismSeriesWindowAndErrors(t *testing.T) {

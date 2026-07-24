@@ -57,7 +57,7 @@ func (h *PrismHandler) status(p5, p10 float64) string {
 func (h *PrismHandler) Board(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.store.Board()
 	if err != nil {
-		response.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		response.Error(w, http.StatusInternalServerError, err)
 		return
 	}
 	items := make([]map[string]any, 0, len(rows))
@@ -97,7 +97,7 @@ func (h *PrismHandler) Series(w http.ResponseWriter, r *http.Request) {
 			response.JSON(w, http.StatusNotFound, map[string]any{"error": "unknown symbol"})
 			return
 		}
-		response.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		response.Error(w, http.StatusInternalServerError, err)
 		return
 	}
 	njf := func(vs []float64) []any {
