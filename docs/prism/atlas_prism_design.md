@@ -80,13 +80,13 @@ Atlas 实际无 TimescaleDB 实例(go.mod 仅 `modernc.org/sqlite`,hot storage �
 | 数据 | 主源(Atlas 模块) | 备源 | 频率 | 状态 |
 |------|------|------|------|------|
 | 美股日线收盘价 | yahoo(`collector/yahoo`,已有) | Stooq | 日 | ✅ 复用;复权价用于收益,**未复权价+对应股本**用于市值/PE |
-| A/H 公司估值时序+分位 | 理杏仁(`collector/lixinger`,已有) | eastmoney/yahoo 重建 | 日 | ✅ 复用;现成 pe_ttm/pb 及分位,口径固定为市值加权 |
-| A/H 指数估值+分位 | 理杏仁(已有) | — | 日 | ✅ 复用;官方口径序列,替代成分聚合 |
+| A/H 公司估值时序+分位 | akshare(`collector/akshare`,经本地 aktools 侧车) | 理杏仁/eastmoney | 日 | ✅ M1 落地;茅台/腾讯经 aktools 拉取(source=akshare) |
+| A/H 指数估值+分位 | 理杏仁(`collector/lixinger`,已有) | akshare(aktools)降级 | 日 | ✅ 复用;理杏仁官方口径主源,不可用时降级 akshare(`fallback_source: akshare`) |
 | 美股宽基指数估值+分位 | 理杏仁(已有) | 成分聚合(D3) | 日 | ✅ 复用;覆盖清单以实测为准(M1 首项任务) |
 | A/H 财务报表科目 | 理杏仁(已有) | eastmoney | 季 | ✅ 复用;供财报桥模板填充 |
 | 宏观利率(估值背景) | FRED(`collector/fred`,已有,Cassandra 在用) | — | 日 | ✅ 复用;10Y 收益率用于 ERP 展示 |
-| 美股季报(营收/净利/EPS/股本) | **EDGAR companyfacts(`collector/edgar`,新建)** | yahoo | 季 | ★ M2 新建;EDGAR 免费(10 req/s 礼貌限速) |
-| ETF 持仓权重 | **发行商 CSV(`collector/etfholdings`,新建)** | — | 周 | ★ M2 新建;权重变化慢,每周更新足够 |
+| 美股季报(营收/净利/EPS/股本) | **EDGAR companyfacts(`collector/edgar`)** | yahoo engine 重建 | 季 | ✅ M2 已落地;companyfacts 10Y + 真实 filing date 生效(防前视)+ 拆股归一化;失败降级 yahoo engine |
+| ETF 持仓权重 | 发行商 CSV(`collector/etfholdings`,拟建) | — | 周 | ★ M3(原 M2,经用户决策推迟成分聚合到 M3) |
 | 分部营收(segment) | 公司模板 + EDGAR/理杏仁科目 | 手工录入 | 季 | ★ M3;D4 配置驱动 |
 | 分析师前瞻 EPS | yahoo(已有,补充 info 快照) | — | 快照 | 仅当前值 |
 
@@ -353,12 +353,13 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 - `/prism/board` 卡片页 + `/prism/detail` 时序页上线;prism-daily launchd plist。
 - 验收:茅台/沪深300 的 PE 与分位和理杏仁官网一致;NVDA 5Y PE 曲线形态正确;停掉采集一天,页面显示数据日期而非报错。
 
-**M2 — 美股深度(2~3 周)**
-- `collector/edgar`(companyfacts,实现 FundamentalCollector 接口),首批 20~30 家。
+**M2 — 美股深度(已落地)**
+- `collector/edgar`(companyfacts,实现 FundamentalCollector 接口),首批 20 家 US-GAAP filer。
 - `internal/valuation` filing_date 升级(EPSPoint.FilingDate + 阶梯对齐改造,回归现有 pe_percentile 策略测试)。
-- `collector/etfholdings` + D3 成分聚合引擎 → 行业/主题 ETF 估值。
+- EDGAR 季度化(单季/Q4 按实际期间推导)+ **每股值拆股归一化**(拆股后每股值重述统一到最新基准,防止派生 Q4 符号矛盾与跨拆股日毛刺)。
 - `/prism/compare` 多标的对比页。
-- 验收:NVDA 10Y PE 曲线与图2形态一致,百分位数字可复算;XLK 聚合 PE 的 excluded_weight 正确标注。
+- **范围变更**:`collector/etfholdings` + D3 成分聚合(行业/主题 ETF 估值)经用户决策**推迟到 M3**,不在 M2 交付。
+- 验收:NVDA 10Y PE 曲线与图2形态一致,百分位数字可复算(见本文件同目录计划 `docs/superpowers/plans/2026-07-24-prism-m2.md` Task 7 验收记录)。
 
 **M3 — 财报桥(2 周)**
 - `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染。

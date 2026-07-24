@@ -290,6 +290,11 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
   用它覆盖 runtime 副本）——改配置必须落开发仓再 deploy，仅改 runtime 副本会被下次部署冲掉；理杏仁标的
   复用现有 `collectors.lixinger.api_key`（无需为 prism 单列密钥，env `LIXINGER_API_KEY` 可覆盖），
   密钥不入 plist 不入日志。`db_path`（默认 `data/prism.db`）随 runtime 本地持有，deploy.sh 不同步 data/。
+- **EDGAR 配置（美股公司 source=edgar 必需）**：`prism.edgar_user_agent` 必须设为含**联系邮箱**的
+  User-Agent（如 `atlas-prism/1.0 (you@example.com)`）——SEC 要求所有 companyfacts 请求携带可联系
+  UA，缺失会被 403；存在 `source: edgar` 标的而该项为空时 `prism refresh` 直接报错退出。
+  `prism.edgar_lookback_years`（默认 10）控制美股 PE/PB/PS 重建年数（价格仍走 yahoo）。EDGAR 免费、
+  单公司单请求，礼貌限速 ≤10 req/s，20 家批量安全。
 - **日志路径**：`logs/prism-daily.out.log` / `logs/prism-daily.err.log`。
 - **手动触发/首跑**：在 runtime 目录（`/Users/zuowei/workspace/runtime/atlas`）执行
   `bin/atlas prism refresh -c configs/config.yaml`——首次全量回填（理杏仁近 10Y、美股近 5Y），
