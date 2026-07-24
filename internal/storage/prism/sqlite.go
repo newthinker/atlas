@@ -37,6 +37,19 @@ CREATE TABLE IF NOT EXISTS valuation_daily (
   pctl_10y REAL,
   PRIMARY KEY (instrument_id, d)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS fundamental_q (
+  instrument_id  INTEGER NOT NULL REFERENCES instrument(id),
+  fiscal_period  TEXT NOT NULL,
+  period_end     TEXT NOT NULL,
+  filing_date    TEXT NOT NULL,
+  revenue        REAL,
+  net_income     REAL,
+  eps_diluted    REAL,
+  equity         REAL,
+  diluted_shares REAL,
+  source         TEXT,
+  PRIMARY KEY (instrument_id, period_end)
+) WITHOUT ROWID;
 `
 
 // Store is a SQLite-backed Prism store. Safe for concurrent use via WAL.
@@ -75,6 +88,15 @@ type Instrument struct {
 type ValuationRow struct {
 	D                                 string
 	PETTM, PB, PSTTM, Pctl5Y, Pctl10Y float64
+}
+
+// FundamentalRow is one fiscal quarter of EDGAR facts. NaN fields store as NULL.
+type FundamentalRow struct {
+	FiscalPeriod                                          string // "2026Q1"
+	PeriodEnd                                             string // "YYYY-MM-DD"
+	FilingDate                                            string // "YYYY-MM-DD"
+	Revenue, NetIncome, EPSDiluted, Equity, DilutedShares float64
+	Source                                                string // "edgar"
 }
 
 // BoardRow is the latest valuation row of one instrument, for the board page.
@@ -156,6 +178,59 @@ func (s *Store) UpsertValuations(instrumentID int64, rows []ValuationRow) error 
 		}
 	}
 	return tx.Commit()
+}
+
+// UpsertFundamentals writes rows in one transaction (idempotent per (id,period_end)).
+func (s *Store) UpsertFundamentals(instrumentID int64, rows []FundamentalRow) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO fundamental_q
+		(instrument_id,fiscal_period,period_end,filing_date,revenue,net_income,
+		 eps_diluted,equity,diluted_shares,source) VALUES(?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(instrument_id,period_end) DO UPDATE SET
+		  fiscal_period=excluded.fiscal_period, filing_date=excluded.filing_date,
+		  revenue=excluded.revenue, net_income=excluded.net_income,
+		  eps_diluted=excluded.eps_diluted, equity=excluded.equity,
+		  diluted_shares=excluded.diluted_shares, source=excluded.source`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range rows {
+		if _, err := stmt.Exec(instrumentID, r.FiscalPeriod, r.PeriodEnd, r.FilingDate,
+			toNull(r.Revenue), toNull(r.NetIncome), toNull(r.EPSDiluted),
+			toNull(r.Equity), toNull(r.DilutedShares), r.Source); err != nil {
+			return fmt.Errorf("prism: upsert fundamental %s: %w", r.PeriodEnd, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// QuarterlyFundamentals returns all fundamental rows of the instrument, period_end ascending.
+func (s *Store) QuarterlyFundamentals(instrumentID int64) ([]FundamentalRow, error) {
+	rows, err := s.db.Query(`SELECT fiscal_period,period_end,filing_date,revenue,
+		net_income,eps_diluted,equity,diluted_shares,source
+		FROM fundamental_q WHERE instrument_id=? ORDER BY period_end`, instrumentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FundamentalRow
+	for rows.Next() {
+		var r FundamentalRow
+		var rev, ni, eps, eq, sh sql.NullFloat64
+		if err := rows.Scan(&r.FiscalPeriod, &r.PeriodEnd, &r.FilingDate,
+			&rev, &ni, &eps, &eq, &sh, &r.Source); err != nil {
+			return nil, err
+		}
+		r.Revenue, r.NetIncome, r.EPSDiluted = fromNull(rev), fromNull(ni), fromNull(eps)
+		r.Equity, r.DilutedShares = fromNull(eq), fromNull(sh)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // Board returns each instrument joined with its latest valuation row.
