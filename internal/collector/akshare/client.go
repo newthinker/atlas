@@ -1,7 +1,10 @@
 // Package akshare 经本地 aktools HTTP 侧车调用 AKShare 数据接口
 // (设计: docs/superpowers/specs/2026-07-24-prism-akshare-source-design.md)。
-// ⚠ 接口名与字段键为 live 校验点: AKShare 随上游变动是常态,首次真实运行若不符,
-// 以 aktools 实际响应修正本包常量并同步测试(仿 M1 Task 3 mcw 处理惯例)。
+// ⚠ 接口名与字段键为 live 校验点: AKShare 随上游变动是常态。
+// 已于 2026-07-24 对 akshare 1.18.75 实测校正: 乐咕 stock_a_indicator_lg 已被移除,
+// A 股/港股个股统一改走百度股市通 stock_zh/hk_valuation_baidu(见 stock.go),指数
+// stock_index_pe_lg 仍可用(日频,键名 日期/滚动市盈率 不变)。后续若再不符,以 aktools
+// 实际响应修正本包常量并同步测试(仿 M1 Task 3 mcw 处理惯例)。
 package akshare
 
 import (
