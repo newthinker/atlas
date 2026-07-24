@@ -24,20 +24,10 @@ const MinEPSPoints = 8
 // drops days whose aligned EPS <= 0, and returns the percentile of the current
 // PE within that series.
 func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64, error) {
-	// 1. Sort a copy of the EPS points ascending by date.
-	pts := make([]core.EPSPoint, len(eps))
-	copy(pts, eps)
-	sort.Slice(pts, func(i, j int) bool { return pts[i].Date.Before(pts[j].Date) })
-
-	// 2. Need at least MinEPSPoints positive quarterly points to be meaningful.
-	positive := 0
-	for _, p := range pts {
-		if p.EPS > 0 {
-			positive++
-		}
-	}
-	if positive < MinEPSPoints {
-		return -1, ErrInsufficientEPS
+	// 1-2. Sort the EPS points and require enough positive quarterly points.
+	pts, err := sortedEPSWithGate(eps)
+	if err != nil {
+		return -1, err
 	}
 
 	// 3. Current EPS(TTM) is the latest point; non-positive means a real loss,
@@ -58,6 +48,25 @@ func ReconstructPEPercentile(closes []core.OHLCV, eps []core.EPSPoint) (float64,
 
 	currentPE := closes[len(closes)-1].Close / currentEPS
 	return PercentileRank(peSeries, currentPE), nil
+}
+
+// sortedEPSWithGate returns a copy of eps sorted ascending by date, erroring
+// with ErrInsufficientEPS when fewer than MinEPSPoints have EPS > 0.
+func sortedEPSWithGate(eps []core.EPSPoint) ([]core.EPSPoint, error) {
+	pts := make([]core.EPSPoint, len(eps))
+	copy(pts, eps)
+	sort.Slice(pts, func(i, j int) bool { return pts[i].Date.Before(pts[j].Date) })
+
+	positive := 0
+	for _, p := range pts {
+		if p.EPS > 0 {
+			positive++
+		}
+	}
+	if positive < MinEPSPoints {
+		return nil, ErrInsufficientEPS
+	}
+	return pts, nil
 }
 
 // latestEPSAtOrBefore returns the EPS of the latest point whose date is at or

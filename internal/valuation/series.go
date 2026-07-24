@@ -2,7 +2,6 @@ package valuation
 
 import (
 	"math"
-	"sort"
 	"time"
 
 	"github.com/newthinker/atlas/internal/core"
@@ -12,18 +11,9 @@ import (
 // closes with the EPS(TTM) points (yahoo 路径:EPSPoint.Date 为报告期;M2 接入
 // EDGAR 后升级为 filing date 生效,见设计文档 §5.1).
 func ReconstructPESeries(closes []core.OHLCV, eps []core.EPSPoint) ([]time.Time, []float64, error) {
-	pts := make([]core.EPSPoint, len(eps))
-	copy(pts, eps)
-	sort.Slice(pts, func(i, j int) bool { return pts[i].Date.Before(pts[j].Date) })
-
-	positive := 0
-	for _, p := range pts {
-		if p.EPS > 0 {
-			positive++
-		}
-	}
-	if positive < MinEPSPoints {
-		return nil, nil, ErrInsufficientEPS
+	pts, err := sortedEPSWithGate(eps)
+	if err != nil {
+		return nil, nil, err
 	}
 	dates, pe := alignPE(closes, pts)
 	return dates, pe, nil
