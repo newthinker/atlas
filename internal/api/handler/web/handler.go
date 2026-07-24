@@ -185,7 +185,6 @@ func (h *Handler) SetPrismProvider(p PrismProvider, low, high float64) {
 type prismCard struct {
 	Symbol, Name, Group, Source, AsOf, Status, StatusZH string
 	PETTM, PB, Pctl                                     string // 已格式化,"—" 表缺失
-	PctlVal                                             float64
 }
 
 // fmtVal formats a metric to prec decimals; NaN renders as "—".
@@ -204,7 +203,7 @@ func (h *Handler) PrismBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.prismProvider.Board()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	group := r.URL.Query().Get("group")
@@ -231,7 +230,7 @@ func (h *Handler) PrismBoard(w http.ResponseWriter, r *http.Request) {
 		cards = append(cards, prismCard{
 			Symbol: b.Symbol, Name: b.Name, Group: b.Group, Source: b.Source,
 			AsOf: b.AsOf, Status: status, StatusZH: statusZH,
-			PETTM: fmtVal(b.PETTM, 1), PB: fmtVal(b.PB, 2), Pctl: fmtVal(p, 0), PctlVal: p,
+			PETTM: fmtVal(b.PETTM, 1), PB: fmtVal(b.PB, 2), Pctl: fmtVal(p, 0),
 		})
 	}
 	var groupList []string

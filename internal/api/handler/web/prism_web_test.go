@@ -127,4 +127,25 @@ func TestPrismBoardStoreError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.PrismBoard(rec, httptest.NewRequest(http.MethodGet, "/prism/board", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, "Board() 出错 → 500")
+	assert.NotContains(t, rec.Body.String(), "db down", "500 不回显内部错误细节")
+}
+
+// 回归:serve.go 用磁盘模式 NewHandler("internal/api/templates") 构造,若磁盘目录
+// 缺 prism 模板则启动即崩全站。以真实磁盘路径构造 NewHandler 并渲染 prism 页,
+// 堵住「测试只走 embed」盲区(QA CRITICAL)。
+func TestNewHandlerDiskModeHasPrismTemplates(t *testing.T) {
+	// web 包目录 → internal/api/templates
+	h, err := NewHandler("../../templates")
+	require.NoError(t, err, "磁盘模式必须能解析 prism 模板(serve.go 用的正是磁盘模式)")
+	h.SetPrismProvider(sampleBoard(), 15, 85)
+
+	rec := httptest.NewRecorder()
+	h.PrismBoard(rec, httptest.NewRequest(http.MethodGet, "/prism/board", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "沪深300")
+
+	rec = httptest.NewRecorder()
+	h.PrismDetail(rec, httptest.NewRequest(http.MethodGet, "/prism/detail/NVDA", nil), "NVDA")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `id="pe-chart"`)
 }
