@@ -3,7 +3,8 @@
 # deploy.sh — 从代码目录构建 atlas，并把「运行时产物（不含 Go 源码）」部署到 runtime 目录。
 #
 # 幂等、可重复执行。只覆盖二进制/脚本/配置；**绝不动 runtime 本地数据**
-# （data/ logs/ qlib_csv*/ fundamentals_csv*/ signals*.csv reports/ 均被排除并受 --delete 保护）。
+# （data/ logs/ qlib_csv*/ fundamentals_csv*/ signals*.csv reports/ 以及 runtime 侧
+# 独立安装的 scripts/akshare/.venv/ 均被排除并受 --delete 保护）。
 #
 # 用法：
 #   bash scripts/ops/deploy.sh                 # 部署到默认 runtime
@@ -44,6 +45,7 @@ rsync -a -m --delete \
   --exclude='/scripts/qlib_warehouse/tests/' --exclude='/scripts/qlib_warehouse/.pytest_cache/' \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='.DS_Store' \
   --exclude='/data/' --exclude='/logs/' \
+  --exclude='/scripts/akshare/.venv/' \
   --exclude='/qlib_csv/' --exclude='/qlib_csv_hk/' --exclude='/qlib_csv_us/' \
   --exclude='/fundamentals_csv/' --exclude='/fundamentals_csv_us/' \
   --exclude='/signals*.csv' --exclude='/reports/' \
