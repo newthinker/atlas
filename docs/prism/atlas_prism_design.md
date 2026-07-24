@@ -90,7 +90,7 @@ Atlas 实际无 TimescaleDB 实例(go.mod 仅 `modernc.org/sqlite`,hot storage �
 | 分部营收(segment) | 公司模板 + EDGAR/理杏仁科目 | 手工录入 | 季 | ★ M3;D4 配置驱动 |
 | 分析师前瞻 EPS | yahoo(已有,补充 info 快照) | — | 快照 | 仅当前值 |
 
-**限频与计费纪律**:yahoo 全量约 600 只(去重后),日线增量每天一次,批量 + 间隔 + 复用现有 `collector/cache`,单日约 700 次,安全。理杏仁按理杏豆计量:所有请求先查本地库,只拉增量区间,禁止重复请求历史。
+**限频与计费纪律**:yahoo 全量约 600 只(去重后),日线增量每天一次,批量 + 间隔 + 复用现有 `collector/cache`,单日约 700 次,安全——但**日总量安全 ≠ 突发安全**:2026-07-24 v1.4.0 首跑实测,prism-daily 20 家美股背靠背拉 10Y 行情即触发 yahoo 429,且 engine fallback 同依赖 yahoo 形成双失败(对策见 §9 M2.1 与 §10「yahoo 突发限流」)。理杏仁按理杏豆计量:所有请求先查本地库,只拉增量区间,禁止重复请求历史。
 
 ---
 
@@ -361,6 +361,16 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 - **范围变更**:`collector/etfholdings` + D3 成分聚合(行业/主题 ETF 估值)经用户决策**推迟到 M3**,不在 M2 交付。
 - 验收:NVDA 10Y PE 曲线与图2形态一致,百分位数字可复算(见本文件同目录计划 `docs/superpowers/plans/2026-07-24-prism-m2.md` Task 7 验收记录)。
 
+**M2.1 — yahoo 客户端限流加固(小补丁,生产问题驱动)**
+- 背景:2026-07-24 v1.4.0 首跑,launchd 直连环境下 prism-daily 20 家美股连续拉 10Y 行情触发 yahoo 429;refreshEdgar 卡在价格阶段,fallback engine 同走 yahoo → 20 家双失败不降级(`20 failed / 0 degraded`);手动经代理(不同出口 IP)重跑恢复。M1 时代每日仅 3~4 个 yahoo 请求故从未暴露,美股扩容(M4 Top 100)前必须解决。
+- 设计(改 `internal/collector/yahoo` 客户端层,所有调用方受益,零调用点改动):
+  1. **全局请求节流**:同 host 相邻请求最小间隔约 500ms(串行刷新 20 家仅增约 10s,08:30 调度窗口无感;M4 扩到 100 家约 +50s,仍可接受)。
+  2. **429/5xx 指数退避重试**:1s→2s→4s 最多 3 次,优先尊重 `Retry-After` 响应头;仅对幂等 GET 生效。
+  3. **全局重试预算封顶**(如单次 refresh 累计 ≤20 次重试):极端持续限流下快速失败,不拖长调度窗口;超出预算的标的按既有语义走 fallback/Failed。
+  4. 参数取包内常量,不进 config(无按环境调参需求,简单优先)。
+- 验收:httptest 单测——首响 429(带/不带 Retry-After)→ 退避后重试成功;连续 429 → 3 次后失败并保留原始错误;节流生效(相邻请求时间差 ≥ 间隔)。生产观察:prism-daily 定时首跑 20 家 `0 failed`(XOM 优雅降级除外)。
+- 明确不做:plist 注入 proxy env 的代理方案——引入「代理进程可用性」这一新故障面,劣于客户端自愈;Stooq 备源仍按 §10 既有条目独立演进。
+
 **M3 — 财报桥(2 周)**
 - `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染。
 - 首批 5~10 家模板(MAG7 + TSM/AVGO/LLY 按需)。
@@ -380,6 +390,7 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 | 理杏仁美股指数覆盖不及预期 | M1 宽基指数缺口 | M1 首项任务实测清单;缺口指数回退 M2 的 D3 成分聚合 |
 | 理杏仁 URL/接口改版(历史发生过) | 采集中断 | base path 已配置化(现有 lixinger 客户端);失败走 notifier 告警 |
 | yahoo 非官方 API 变动 | 价格采集中断 | Stooq 备源 + 采集失败告警(复用现有通道) |
+| yahoo 突发限流(429;2026-07-24 v1.4.0 首跑实测) | prism-daily 美股批量刷新整批失败——fallback engine 同依赖 yahoo,双失败不降级;EDGAR 事实层不受影响,仅价格阶段受阻 | M2.1 客户端节流 + 退避(见 §9);扩容(M4)前为硬前置 |
 | EDGAR XBRL tag 不一致(公司自定义 tag) | 财务数据缺漏 | 逐家校验 + source 字段标记 + manual 兜底 |
 | 分部口径重述(公司调整业务分类) | 桑基历史断层 | 模板带版本号,重述时新旧模板并存,图上标注断点 |
 | ETF 成分聚合 PE 与市面数字有差异 | 用户困惑 | 口径写入页面 footnote,一致性比"对齐别人"重要 |
