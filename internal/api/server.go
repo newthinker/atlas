@@ -330,6 +330,7 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		if deps.PrismStore != nil {
 			webHandler.SetPrismProvider(deps.PrismStore, deps.PrismLow, deps.PrismHigh)
 			s.mux.HandleFunc("/prism/board", webHandler.PrismBoard)
+			s.mux.HandleFunc("/prism/compare", webHandler.PrismCompare)
 			s.mux.HandleFunc("/prism/detail/", func(w http.ResponseWriter, r *http.Request) {
 				symbol := strings.TrimPrefix(r.URL.Path, "/prism/detail/")
 				webHandler.PrismDetail(w, r, symbol)

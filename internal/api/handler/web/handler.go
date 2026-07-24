@@ -83,7 +83,7 @@ func NewHandler(templatesDir string) (*Handler, error) {
 	pageTemplates := make(map[string]*template.Template)
 
 	// List of page templates (excluding layout.html)
-	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html", "symbol_detail.html", "prism_board.html", "prism_detail.html"}
+	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html", "symbol_detail.html", "prism_board.html", "prism_detail.html", "prism_compare.html"}
 
 	for _, page := range pages {
 		var tmpl *template.Template
@@ -121,7 +121,7 @@ func NewHandler(templatesDir string) (*Handler, error) {
 // This is useful for testing or custom template sources.
 func NewHandlerWithFS(fsys fs.FS) (*Handler, error) {
 	pageTemplates := make(map[string]*template.Template)
-	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html", "symbol_detail.html", "prism_board.html", "prism_detail.html"}
+	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html", "symbol_detail.html", "prism_board.html", "prism_detail.html", "prism_compare.html"}
 
 	for _, page := range pages {
 		tmpl, err := template.ParseFS(fsys, "layout.html", page)
@@ -258,6 +258,29 @@ func (h *Handler) PrismDetail(w http.ResponseWriter, r *http.Request, symbol str
 	h.render(w, "prism_detail.html", map[string]any{
 		"Title": sd.Name + " 估值时序", "Symbol": sd.Symbol,
 		"Name": sd.Name, "Source": sd.Source,
+	})
+}
+
+// PrismCompare renders the multi-symbol comparison page at /prism/compare.
+// The client concurrently fetches the existing /api/prism/series for each
+// selected symbol (≤8); no new API is introduced.
+func (h *Handler) PrismCompare(w http.ResponseWriter, r *http.Request) {
+	if h.prismProvider == nil {
+		http.Error(w, "prism not enabled", http.StatusNotFound)
+		return
+	}
+	rows, err := h.prismProvider.Board()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	type opt struct{ Symbol, Name, Group string }
+	opts := make([]opt, 0, len(rows))
+	for _, b := range rows {
+		opts = append(opts, opt{b.Symbol, b.Name, b.Group})
+	}
+	h.render(w, "prism_compare.html", map[string]any{
+		"Title": "Prism 多标的对比", "Options": opts,
 	})
 }
 

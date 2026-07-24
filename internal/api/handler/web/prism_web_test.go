@@ -130,6 +130,39 @@ func TestPrismBoardStoreError(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "db down", "500 不回显内部错误细节")
 }
 
+// Context Checkpoint: done_criteria → test mapping (TASK-006 compare)
+//   functional[0]     GET /prism/compare 200 + id="compare-chart" + Board() 候选 + echarts
+//                       → TestPrismComparePage
+//   boundary[0]       prismProvider nil → 404                       → TestPrismCompareNotEnabled
+//   boundary[1]       前端 ≤8 标的(JS MAX)                          → verify_by review(模板断言 render 含 MAX=8)
+//   error_handling[0] Board() 出错 → 500                            → TestPrismCompareStoreError
+func TestPrismComparePage(t *testing.T) {
+	h := newTestPrismHandler(t, sampleBoard())
+	rec := httptest.NewRecorder()
+	h.PrismCompare(rec, httptest.NewRequest(http.MethodGet, "/prism/compare", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, `id="compare-chart"`)
+	assert.Contains(t, body, "沪深300") // 候选列表来自 Board()
+	assert.Contains(t, body, "NVIDIA")
+	assert.Contains(t, body, "/static/echarts.min.js")
+}
+
+func TestPrismCompareNotEnabled(t *testing.T) {
+	h, err := NewHandlerWithFS(TemplateFS()) // 未 SetPrismProvider
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	h.PrismCompare(rec, httptest.NewRequest(http.MethodGet, "/prism/compare", nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "prismProvider nil → 404")
+}
+
+func TestPrismCompareStoreError(t *testing.T) {
+	h := newTestPrismHandler(t, fakeBoard{err: errors.New("db down")})
+	rec := httptest.NewRecorder()
+	h.PrismCompare(rec, httptest.NewRequest(http.MethodGet, "/prism/compare", nil))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "Board() 出错 → 500")
+}
+
 // 回归:serve.go 用磁盘模式 NewHandler("internal/api/templates") 构造,若磁盘目录
 // 缺 prism 模板则启动即崩全站。以真实磁盘路径构造 NewHandler 并渲染 prism 页,
 // 堵住「测试只走 embed」盲区(QA CRITICAL)。
