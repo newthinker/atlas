@@ -85,3 +85,41 @@ func TestFetchStockUnsupportedMarket(t *testing.T) {
 	_, err := c.FetchStockValuationSeries("XXX", "US", day(2026, 1, 1), day(2026, 7, 23))
 	assert.ErrorContains(t, err, "unsupported market")
 }
+
+// Context Checkpoint (TASK-003):
+//   HK 双指标按日期合并、0700.HK→00700、period=全部、有 PE 缺 PB→PB NaN → TestFetchHKStockMerge
+//   仅有 PB 无 PE 的日不产出行(口径明确,无 PE 无法算分位)               → TestFetchHKStockMerge
+func TestFetchHKStockMerge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/public/stock_hk_valuation_baidu", r.URL.Path)
+		assert.Equal(t, "00700", r.URL.Query().Get("symbol"))
+		assert.Equal(t, "全部", r.URL.Query().Get("period"))
+		switch r.URL.Query().Get("indicator") {
+		case "市盈率(TTM)":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"date": "2026-07-22", "value": 22.1},
+				{"date": "2026-07-23", "value": 22.4},
+			})
+		case "市净率":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"date": "2026-07-23", "value": 3.1}, // 07-22 无 PB → NaN
+				{"date": "2026-07-20", "value": 2.9}, // 仅有 PB 无 PE → 不产出行
+			})
+		default:
+			t.Errorf("unexpected indicator %q", r.URL.Query().Get("indicator"))
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	pts, err := c.FetchStockValuationSeries("0700.HK", "HK", day(2026, 7, 1), day(2026, 7, 23))
+	require.NoError(t, err)
+	require.Len(t, pts, 2, "仅有 PB 无 PE 的 07-20 不产出行(以 PE 日期为主键)")
+	assert.Equal(t, "2026-07-22", pts[0].Date.Format("2006-01-02"), "输出升序")
+	assert.Equal(t, 22.1, pts[0].PETTM)
+	assert.True(t, math.IsNaN(pts[0].PB), "该日仅有 PE → PB NaN")
+	assert.Equal(t, 22.4, pts[1].PETTM)
+	assert.Equal(t, 3.1, pts[1].PB)
+	assert.True(t, math.IsNaN(pts[1].PSTTM), "HK 无 PS,恒 NaN")
+	assert.True(t, math.IsNaN(pts[0].PSTTM))
+}

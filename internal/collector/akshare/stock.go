@@ -2,6 +2,7 @@ package akshare
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -50,7 +51,56 @@ func (c *Client) fetchAStock(symbol string, start, end time.Time) ([]ValuationPo
 	return clipSort(pts, start, end), nil
 }
 
-// fetchHKStock 由 Task 3 实现;当前为 stub,保证本 Task 可编译且 US market 用例可过。
+// mapHKSymbol: "0700.HK" → "00700"(百度接口用五位代码)。
+func mapHKSymbol(symbol string) string {
+	code := symbol
+	if i := strings.IndexByte(symbol, '.'); i > 0 {
+		code = symbol[:i]
+	}
+	for len(code) < 5 {
+		code = "0" + code
+	}
+	return code
+}
+
+// fetchHKStock: 百度股市通 stock_hk_valuation_baidu 每次一个指标,两次调用按日期合并。
+// 合并以 PE 日期为主键: 有 PE 缺 PB 的日 PB 记 NaN;仅有 PB 无 PE 的日不产出行
+// (无 PE 无法算分位)。PSTTM 恒 NaN。
+// ⚠ live 校验点: 接口名/indicator 取值(市盈率(TTM)/市净率)/period=全部/date+value 字段键。
 func (c *Client) fetchHKStock(symbol string, start, end time.Time) ([]ValuationPoint, error) {
-	return nil, fmt.Errorf("akshare: hk not implemented yet")
+	code := mapHKSymbol(symbol)
+	fetch := func(indicator string) (map[string]float64, error) {
+		rows, err := c.get("stock_hk_valuation_baidu",
+			url.Values{"symbol": {code}, "indicator": {indicator}, "period": {"全部"}})
+		if err != nil {
+			return nil, err
+		}
+		m := make(map[string]float64, len(rows))
+		for _, row := range rows {
+			d, err := fdate(row, "date")
+			if err != nil {
+				return nil, fmt.Errorf("%w (symbol %s)", err, symbol)
+			}
+			m[d.Format("2006-01-02")] = fnum(row, "value")
+		}
+		return m, nil
+	}
+	pe, err := fetch("市盈率(TTM)")
+	if err != nil {
+		return nil, err
+	}
+	pb, err := fetch("市净率")
+	if err != nil {
+		return nil, err
+	}
+	pts := make([]ValuationPoint, 0, len(pe))
+	for ds, v := range pe {
+		d, _ := time.Parse("2006-01-02", ds)
+		p := ValuationPoint{Date: d, PETTM: v, PB: math.NaN(), PSTTM: math.NaN()}
+		if b, ok := pb[ds]; ok {
+			p.PB = b
+		}
+		pts = append(pts, p)
+	}
+	return clipSort(pts, start, end), nil
 }
