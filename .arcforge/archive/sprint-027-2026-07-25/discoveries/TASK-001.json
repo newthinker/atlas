@@ -1,0 +1,62 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "yahoo 客户端层新增私有 do(req) 包裹节流+429/5xx 退避+实例级重试预算;FetchQuote(现 yahoo.go:~131)与 FetchHistory(现 ~192)已把 y.client.Do(req) 换为 y.do(req)。eps.go 未动(留给 TASK-002)。",
+    "既有 yahoo_test.go/eps_test.go 零修改全 PASS。注意 TestFetch_NonOKStatus 从瞬时变为 ~14.5s:它对 500 状态各做 FetchQuote+FetchHistory 两次调用,而 500 现属可重试,默认 backoffBase=1s 下每次调用退避 1s+2s+4s=7s,两次约 14s。远在 go 默认 10min 超时内,断言不变仍 PASS——按硬约束(既有测试零修改)未触碰该文件。",
+    "gitnexus 索引陈旧(last indexed d4295b2),按任务指示跳过 impact/detect_changes 并记录。改动为纯增量(新字段/方法+两处调用点替换),无重命名。"
+  ],
+  "decisions": [
+    {
+      "decision": "四常量 minRequestInterval=500ms/retryBackoffBase=1s/maxRetryAttempts=3/retryBudgetPerRun=20 为包内常量,不进 config",
+      "rationale": "设计 §9 M2.1:无按环境调参需求,简单优先"
+    },
+    {
+      "decision": "throttle 在持锁状态下 sleep",
+      "rationale": "并发调用方被串行放行,天然形成均匀节奏;既有 Fetch 系列无 ctx,time.Sleep 不接 ctx(YAGNI)"
+    },
+    {
+      "decision": "retryAfterWait 仅解析整数秒形式的 Retry-After,解析失败回退指数退避",
+      "rationale": "yahoo 实际用整数秒;http-date 形式不用"
+    },
+    {
+      "decision": "既有 TestFetch_NonOKStatus 不改(尽管变慢到 14.5s)",
+      "rationale": "boundary DoD 硬约束=既有测试零修改;变慢是 5xx 可重试的正确行为副作用,断言与结果不变"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/throttle_test.go"
+  ],
+  "interfaces_exposed": {
+    "do_signature": "func (y *Yahoo) do(req *http.Request) (*http.Response, error) —— 节流+退避后的响应;重试耗尽或预算用尽时返回最后一个非2xx响应而非 error(错误语义零变更,由调用点既有 unexpected status: %d 路径报错);网络层错误不重试直接返回",
+    "overridable_fields": {
+      "minInterval": "time.Duration —— 同实例相邻请求最小间隔,测试可置 0 关闭节流",
+      "backoffBase": "time.Duration —— 指数退避基数,第 attempt 次等待 = backoffBase<<attempt(即 base*2^attempt)",
+      "maxRetries": "int —— 单请求最多重试次数(attempt>=maxRetries 即停)",
+      "retryBudget": "int —— 实例级重试预算,takeRetryToken 每次消耗 1,<=0 时不再重试"
+    },
+    "constants": {
+      "minRequestInterval": "500 * time.Millisecond",
+      "retryBackoffBase": "time.Second",
+      "maxRetryAttempts": "3",
+      "retryBudgetPerRun": "20"
+    },
+    "helper_methods": {
+      "throttle": "func (y *Yahoo) throttle() —— 持锁 sleep 保证间隔",
+      "takeRetryToken": "func (y *Yahoo) takeRetryToken() bool —— 消耗预算,耗尽返 false",
+      "retryableStatus": "func retryableStatus(code int) bool —— 429 或 >=500 为 true",
+      "retryAfterWait": "func retryAfterWait(resp *http.Response, fallback time.Duration) time.Duration —— Retry-After 整数秒优先,否则 fallback"
+    },
+    "test_helpers": {
+      "newRetryServer": "func newRetryServer(t *testing.T, statuses ...int) (*Yahoo, func() []time.Time) —— 定义在 throttle_test.go;按 statuses 依次响应(超出后 200+throttleChartBody),返回 minInterval=0/backoffBase=1ms 的 Yahoo 与到达时刻快照函数。TASK-002 可直接复用",
+      "fetchOnce": "func fetchOnce(t *testing.T, y *Yahoo) error —— 定义在 throttle_test.go;对固定 AAPL 参数调一次 FetchHistory 返回 err。TASK-002 可直接复用",
+      "throttleChartBody": "const —— FetchHistory 可解析的最小合法 chart 响应体"
+    }
+  },
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test ./internal/collector/yahoo/ -run TestDo -v → 5/5 PASS;-count=1 全量 → 全 PASS(TestFetch_NonOKStatus 14.5s 属预期)",
+    "build_vet": "go build ./... 通过;go vet ./internal/collector/yahoo/ 通过;gofmt -l 无输出",
+    "commit": "cf147dd feat(yahoo): request throttle and 429/5xx backoff with retry budget (M2.1)"
+  },
+  "rework_note": "QA WARNING 修复:retryAfterWait 加 min(60s) cap + maxRetryAfter 可覆盖字段 + TestDoRetryAfterCapped,commit 6288a48;收尾由 dev-agent-14 记录员完成(前实例 API 中断)"
+}

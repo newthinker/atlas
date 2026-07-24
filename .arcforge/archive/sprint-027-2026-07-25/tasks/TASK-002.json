@@ -1,0 +1,60 @@
+{
+  "id": "TASK-002",
+  "title": "FetchEPSHistory 接线 + 重试预算用例 + 跨包回归",
+  "description": "eps.go:56 调用点换 y.do(req)(一行);throttle_test.go 追加 TestDoRetryBudgetExhausted 与 TestFetchEPSHistoryRetries429(eps 响应体以 eps_test.go 既有 fixture 结构为准);跨包全量回归。完整代码见计划 Task 2。",
+  "module": "collector-yahoo",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/throttle_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestFetchEPSHistoryRetries429:eps 路径首响 429 → 重试成功且解析出 1 个 EPS 点(证明 eps 走 do 门)",
+      "TestDoRetryBudgetExhausted:retryBudget=1 时序列 429/200/429 → 第一次调用经重试成功、第二次立即失败,服务端恰收 3 个请求(预算耗尽绝不发第 4 个)"
+    ],
+    "boundary": [
+      "既有 eps_test.go 零修改全 PASS",
+      "TestDoRetryAfterInvalidFallsBack:Retry-After 为非法值(如 garbage)→ 回退指数退避(backoffBase 路径,reviewer 增补)"
+    ],
+    "error_handling": [
+      {
+        "desc": "网络层错误(连接失败)不重试直接返回 err——补测试(server 提前 Close 后 fetch → 1 次尝试即错)或代码审读锚定(reviewer 指出原条目无测试锚定)",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "并发安全(reviewer 必补):GOTOOLCHAIN=local go test -race ./internal/collector/yahoo/ -count=1 全 PASS(mu 保护 lastReq/retryBudget);另 go build ./... 与 collector/prism/valuation/cmd 跨包回归全 PASS",
+        "verify_by": "test"
+      },
+      {
+        "desc": "三调用点(FetchQuote/FetchHistory/FetchEPSHistory)均已换 y.do——grep 全包无残留 y.client.Do(reviewer 增补)",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-13",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/collector/yahoo"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-5",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T23:25:53Z"
+  }
+}

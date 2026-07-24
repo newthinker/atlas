@@ -1,0 +1,29 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "eps.go:56 已把 y.client.Do(req) 换为 y.do(req)——FetchEPSHistory 现同样走节流+429/5xx 退避+重试预算门。至此三个业务调用点(FetchQuote/FetchHistory/FetchEPSHistory)全部接线,全包 grep y.client.Do 只剩 do() 方法本体一处(yahoo.go:120,即包裹器发起真实请求处),满足 reviewer grep 判据。",
+    "throttle_test.go 追加 4 测试:TestDoRetryBudgetExhausted(retryBudget=1,序列 429/200/429,恰 3 请求,预算耗尽绝不发第 4 个)、TestFetchEPSHistoryRetries429(eps 路径首响 429→重试成功解析 1 点,证明 eps 走 do 门)、TestDoRetryAfterInvalidFallsBack(reviewer 增补:Retry-After=garbage→回退指数退避,以两请求间隔≥150ms 锚定 backoffBase 路径而非当作 0)、TestDoNetworkErrorNoRetry(reviewer 增补:server 提前 Close→连接失败,以 retryBudget 未被消耗锚定「仅 1 次尝试、未走重试」)。",
+    "eps 最小响应体以 eps_test.go 既有 fixture 结构为准:{\"timeseries\":{\"result\":[{\"trailingDilutedEPS\":[{\"asOfDate\":\"2023-11-14\",\"reportedValue\":{\"raw\":6.42}}]}]}}——timeseriesResponse 仅解析 result[].trailingDilutedEPS[].asOfDate 与 reportedValue.raw,meta/timestamp 不需要。",
+    "gitnexus 索引陈旧,按任务指示跳过 impact/detect_changes;改动为一行调用点替换+纯新增测试,无重命名。"
+  ],
+  "decisions": [
+    {"decision": "TestDoRetryAfterInvalidFallsBack 用两请求到达间隔≥150ms(backoffBase 设 200ms)锚定回退路径", "rationale": "真锚定 fallback:若非法 Retry-After 被误当 0,重试近乎瞬时 gap<150ms 会失败;仅有回退到 backoffBase<<0=200ms 才满足"},
+    {"decision": "TestDoNetworkErrorNoRetry 用 retryBudget 不变量锚定不重试,而非 arrivals 计数", "rationale": "server 已 Close 无法记录 arrivals;网络层错误在 do 内 client.Do 返回 err 分支即 return,早于 takeRetryToken,故预算不消耗恰好证明未重试"},
+    {"decision": "既有 TestFetch_NonOKStatus 仍不修改", "rationale": "TASK-001 已定:boundary 硬约束既有测试零改;-race 下更慢(整包 27.7s)属预期"}
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/throttle_test.go"
+  ],
+  "interfaces_exposed": {
+    "note": "本任务不新增对外接口,复用 TASK-001 的 do/可覆盖字段/helper。FetchEPSHistory 签名不变:func (y *Yahoo) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error),行为增强为经 do 门(节流+退避+预算),错误语义零变更(unexpected status: %d 仍由调用点报)。"
+  },
+  "verification": {
+    "unit": "GOTOOLCHAIN=local go test ./internal/collector/yahoo/ -count=1 全 PASS;4 个新用例全 PASS;既有 yahoo_test.go/eps_test.go 零修改全 PASS",
+    "race": "GOTOOLCHAIN=local go test -race ./internal/collector/yahoo/ -count=1 → ok 23.8s(mu 全程保护 lastReq/retryBudget,无 data race)",
+    "cross_pkg": "go build ./... 通过;go test ./internal/collector/... ./internal/prism/ ./internal/valuation/ ./cmd/atlas/ -count=1 全 ok",
+    "grep": "grep -rn y.client.Do internal/collector/yahoo/ → 仅 yahoo.go:120(do 本体),满足「业务调用点零残留」",
+    "gofmt": "gofmt -l 无输出",
+    "commit": "fd0dedd feat(yahoo): route eps fetch through throttle gate and cover retry budget (M2.1)"
+  }
+}
