@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
@@ -39,12 +42,30 @@ func validateSymbol(symbol string) error {
 	return nil
 }
 
+// 突发限流参数(设计 §9 M2.1):日总量安全 ≠ 突发安全——2026-07-24 v1.4.0
+// 首跑 20 家背靠背拉 10Y 行情即触发 429,且 engine fallback 同依赖 yahoo。
+// 取包内常量不进 config(无按环境调参需求)。
+const (
+	minRequestInterval = 500 * time.Millisecond // 同实例相邻请求最小间隔
+	retryBackoffBase   = time.Second            // 指数退避基数:1s→2s→4s
+	maxRetryAttempts   = 3                      // 单请求最多重试次数
+	retryBudgetPerRun  = 20                     // 实例级重试预算(极端持续限流下快速失败)
+)
+
 // Yahoo implements the Yahoo Finance collector
 type Yahoo struct {
 	client     *http.Client
 	config     collector.Config
 	baseURL    string
 	epsBaseURL string
+
+	// 节流与退避状态(见 do);字段可在测试中覆盖以缩短用例耗时。
+	mu          sync.Mutex
+	lastReq     time.Time
+	minInterval time.Duration
+	backoffBase time.Duration
+	maxRetries  int
+	retryBudget int
 }
 
 // New creates a new Yahoo collector pointing at the production endpoints.
@@ -66,8 +87,12 @@ func NewWithBaseURLs(chartURL, epsURL string) *Yahoo {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		baseURL:    chartURL,
-		epsBaseURL: epsURL,
+		baseURL:     chartURL,
+		epsBaseURL:  epsURL,
+		minInterval: minRequestInterval,
+		backoffBase: retryBackoffBase,
+		maxRetries:  maxRetryAttempts,
+		retryBudget: retryBudgetPerRun,
 	}
 }
 
@@ -83,6 +108,66 @@ func (y *Yahoo) newRequest(reqURL string) (*http.Request, error) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	return req, nil
+}
+
+// do sends req through the shared throttle/backoff gate. Only idempotent
+// GETs with nil body go through here (newRequest 只构造这种请求),所以同一
+// *http.Request 可安全重发。重试耗尽或预算用尽时返回最后一个响应,交由
+// 调用点既有的 unexpected status 路径报错——错误语义零变更。
+func (y *Yahoo) do(req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		y.throttle()
+		resp, err := y.client.Do(req)
+		if err != nil {
+			return nil, err // 网络层错误不重试,与既有行为一致
+		}
+		if !retryableStatus(resp.StatusCode) || attempt >= y.maxRetries || !y.takeRetryToken() {
+			return resp, nil
+		}
+		wait := retryAfterWait(resp, y.backoffBase<<attempt)
+		_, _ = io.Copy(io.Discard, resp.Body) // 排干并关闭,允许连接复用
+		_ = resp.Body.Close()
+		time.Sleep(wait)
+	}
+}
+
+// throttle 保证同实例相邻请求间隔 ≥ minInterval。刻意在持锁状态下 sleep:
+// 并发调用方会被依次串行放行,天然形成 500ms 一个的均匀节奏。
+func (y *Yahoo) throttle() {
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	if wait := y.minInterval - time.Since(y.lastReq); wait > 0 {
+		time.Sleep(wait)
+	}
+	y.lastReq = time.Now()
+}
+
+// takeRetryToken 消耗一次实例级重试预算;预算耗尽后不再重试(快速失败,
+// 不拖长调度窗口),超预算的标的按既有语义走 fallback/Failed。
+func (y *Yahoo) takeRetryToken() bool {
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	if y.retryBudget <= 0 {
+		return false
+	}
+	y.retryBudget--
+	return true
+}
+
+// retryableStatus: 429 与 5xx 值得重试;4xx 其余(403/404 等)是确定性失败。
+func retryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
+}
+
+// retryAfterWait 优先尊重 Retry-After 响应头(整数秒形式;http-date 形式
+// yahoo 不用,解析失败即回退指数退避)。
+func retryAfterWait(resp *http.Response, fallback time.Duration) time.Duration {
+	if s := resp.Header.Get("Retry-After"); s != "" {
+		if secs, err := strconv.Atoi(s); err == nil && secs >= 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return fallback
 }
 
 func (y *Yahoo) Name() string {
@@ -128,7 +213,7 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 		return nil, err
 	}
 
-	resp, err := y.client.Do(req)
+	resp, err := y.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching quote: %w", err)
 	}
@@ -189,7 +274,7 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 		return nil, err
 	}
 
-	resp, err := y.client.Do(req)
+	resp, err := y.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching history: %w", err)
 	}
