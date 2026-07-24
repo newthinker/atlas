@@ -235,6 +235,8 @@ prism:
   low_pct: 15             # 低估阈值(百分位)
   high_pct: 85            # 高估阈值
   akshare_base_url: "http://127.0.0.1:8180"  # aktools 本地侧车地址(A/H 公司与指数兜底数据源)
+  edgar_user_agent: "atlas-prism/1.0 (you@example.com)"  # SEC 要求 User-Agent 含联系邮箱,否则被 403
+  edgar_lookback_years: 10                    # EDGAR 价格重建年数(价格仍走 yahoo)
   instruments:
     # ---- A 股指数(理杏仁主源,akshare 自动兜底) ----
     - {symbol: "000300.SH", name: "沪深300", type: "index", market: "CN_A", group: "A股指数", source: "lixinger", fallback_source: "akshare"}
@@ -244,7 +246,26 @@ prism:
     - {symbol: "0700.HK",   name: "腾讯控股", type: "stock", market: "HK", group: "港股公司", source: "akshare"}
     # ---- 美股指数(理杏仁,live 验证仅标普500) ----
     - {symbol: "^GSPC", name: "标普500", type: "index", market: "US", group: "美股指数", source: "lixinger"}
-    # ---- 美股公司(yahoo 重建,近5Y,无 PB/PS) ----
-    - {symbol: "NVDA", name: "NVIDIA",   type: "stock", market: "US", group: "美股公司", source: "engine"}
-    - {symbol: "MSFT", name: "微软",     type: "stock", market: "US", group: "美股公司", source: "engine"}
-    - {symbol: "AAPL", name: "苹果",     type: "stock", market: "US", group: "美股公司", source: "engine"}
+    # ---- 美股公司(EDGAR 主源,PE/PB/PS + 真实 filing date;主源失败兜底 yahoo engine)----
+    # CIK 由官方 company_tickers.json 校验(atlas-prism/1.0 UA);仅 US-GAAP filer 入池,
+    # TSM 等 IFRS(20-F)filer 首批不支持,不入池(客户端返回 ErrNotUSGAAP)。
+    - {symbol: "NVDA",  name: "NVIDIA",       type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1045810", fallback_source: "engine"}
+    - {symbol: "AAPL",  name: "苹果",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "320193",  fallback_source: "engine"}
+    - {symbol: "MSFT",  name: "微软",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "789019",  fallback_source: "engine"}
+    - {symbol: "GOOGL", name: "谷歌",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1652044", fallback_source: "engine"}
+    - {symbol: "AMZN",  name: "亚马逊",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1018724", fallback_source: "engine"}
+    - {symbol: "META",  name: "Meta",         type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1326801", fallback_source: "engine"}
+    - {symbol: "TSLA",  name: "特斯拉",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1318605", fallback_source: "engine"}
+    - {symbol: "AVGO",  name: "博通",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1730168", fallback_source: "engine"}
+    - {symbol: "LLY",   name: "礼来",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "59478",   fallback_source: "engine"}
+    - {symbol: "JPM",   name: "摩根大通",      type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "19617",   fallback_source: "engine"}
+    - {symbol: "V",     name: "Visa",         type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1403161", fallback_source: "engine"}
+    - {symbol: "MA",    name: "万事达",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1141391", fallback_source: "engine"}
+    - {symbol: "UNH",   name: "联合健康",      type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "731766",  fallback_source: "engine"}
+    - {symbol: "XOM",   name: "埃克森美孚",    type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "2115436", fallback_source: "engine"}
+    - {symbol: "WMT",   name: "沃尔玛",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "104169",  fallback_source: "engine"}
+    - {symbol: "COST",  name: "好市多",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "909832",  fallback_source: "engine"}
+    - {symbol: "ORCL",  name: "甲骨文",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1341439", fallback_source: "engine"}
+    - {symbol: "NFLX",  name: "奈飞",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1065280", fallback_source: "engine"}
+    - {symbol: "AMD",   name: "AMD",          type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "2488",    fallback_source: "engine"}
+    - {symbol: "CRM",   name: "Salesforce",   type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1108524", fallback_source: "engine"}

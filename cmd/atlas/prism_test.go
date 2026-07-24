@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/prism"
 )
 
@@ -142,4 +143,21 @@ func TestPrismRefreshWarnsOnSendFailureDegraded(t *testing.T) {
 	require.Len(t, sender.sent, 1, "降级路径也应尝试发送")
 	assert.Contains(t, errOut.String(), "warning")
 	assert.Contains(t, errOut.String(), "telegram down")
+}
+
+// [TASK-005] boundary[0] EdgarUserAgent 为空的报错门由 hasEdgarInstrument 判定:
+// 有 source==edgar 标的 → true(runPrismRefresh 据此在 UA 空时报错);否则 false。
+func TestHasEdgarInstrument(t *testing.T) {
+	withEdgar := []config.PrismInstrument{
+		{Symbol: "600519.SH", Source: "akshare"},
+		{Symbol: "NVDA", Source: "edgar", CIK: "1045810"},
+	}
+	assert.True(t, hasEdgarInstrument(withEdgar), "存在 edgar 标的 → true")
+
+	noEdgar := []config.PrismInstrument{
+		{Symbol: "600519.SH", Source: "akshare"},
+		{Symbol: "^GSPC", Source: "lixinger"},
+	}
+	assert.False(t, hasEdgarInstrument(noEdgar), "无 edgar 标的 → false")
+	assert.False(t, hasEdgarInstrument(nil), "空清单 → false")
 }
