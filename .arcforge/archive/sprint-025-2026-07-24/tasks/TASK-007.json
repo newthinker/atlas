@@ -1,0 +1,85 @@
+{
+  "id": "TASK-007",
+  "title": "部署产物(独立 venv + aktools launchd + 配置 + 文档)",
+  "description": "纯产物任务: scripts/akshare/{setup.sh,requirements.txt}、deploy/launchd/com.newthinker.atlas.aktools.plist、config.example.yaml prism 段变更、deployment.md 追加 aktools 段(只追加不重排)。M1.5 五条验收为 manual 留人工。规格以计划 Task 7 为准。",
+  "module": "deploy-docs",
+  "complexity": "simple",
+  "estimated_files": [
+    "scripts/akshare/setup.sh",
+    "scripts/akshare/requirements.txt",
+    "deploy/launchd/com.newthinker.atlas.aktools.plist",
+    "configs/config.example.yaml",
+    "docs/deployment.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "setup.sh 幂等(重复执行安全)、用独立 .venv、装 requirements 并 freeze 到 requirements.lock",
+        "verify_by": "review"
+      },
+      {
+        "desc": "plist: 隔离 venv 解释器启动 aktools、仅绑 127.0.0.1:8180、KeepAlive、日志进 logs/;plutil -lint 通过",
+        "verify_by": "review"
+      },
+      {
+        "desc": "config.example prism 段: akshare_base_url + 茅台/腾讯 source=akshare + 两指数 fallback_source=akshare,其余标的不动",
+        "verify_by": "review"
+      },
+      {
+        "desc": "deployment.md: 服务表加 aktools 行 + 部署要点子节(setup/load/验证/日志/升级/口径说明),只追加不重排",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "M1.5 验收①: setup.sh 成功,launchd 拉起 aktools,curl 127.0.0.1:8180 可达",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1.5 验收②: 茅台/腾讯上墙,detail 曲线连续;live 校验点首跑核验",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1.5 验收③: 指数兜底演练(坏 key→Degraded 告警+当日行写入→恢复)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1.5 验收④⑤: 二跑增量零重复;分位 sanity(0-100,方向与官网一致)",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-001",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-8",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "scripts/akshare",
+    "deploy/launchd",
+    "configs",
+    "docs"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  },
+  "fix_items": [
+    "[Medium] setup.sh 可复现安装: 存在 requirements.lock 时按 lock 安装(pip install -r requirements.lock),否则按 requirements.txt 安装并 freeze 生成 lock;新增显式 --upgrade 旗标(按 requirements.txt 重装并刷新 lock);lock 纳入 git",
+    "[Medium] deployment.md: ①声明 scripts/akshare 随 deploy.sh rsync 投递到 runtime、setup.sh 须在 runtime 侧执行(与 plist 绝对路径一致);②升级流程改为 --upgrade 语义(对比 lock 的基准不再被顺手覆写);③口径说明扩句——兜底日分位为混源(理杏仁 mcw+akshare 加权)序列上的排位。只追加/就地小改不重排"
+  ]
+}

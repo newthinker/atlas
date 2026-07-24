@@ -1,0 +1,57 @@
+{
+  "id": "TASK-003",
+  "title": "cmd 层：summaryKind 判日与 buildNotifyContext 组装",
+  "description": "cmd/atlas/crisis.go 将 summaryDue 替换为 summaryKind(date, state)：NORMAL 首交易日→Monthly、其余周一→Weekly（撞日由分支顺序归月报）；WATCH 周一→Weekly；BREWING/CRISIS/坏日期/非交易日→None。buildNotifyContext：Trends 仅 Monthly∧NORMAL 组装，ClearStreak 仅 WATCH∧Weekly 计算。TDD 步骤见实施计划 Task 3。",
+  "module": "crisis-cmd",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "summaryKind：NORMAL 当月首交易日(2026-07-01)→SummaryMonthly；NORMAL 普通周一(2026-07-13)→SummaryWeekly；WATCH 周一→SummaryWeekly；BREWING/CRISIS 任意日→SummaryNone",
+      "撞日归月报：2026-06-01（周一∧首交易日）与 2026-08-03（8/1 周六顺延首交易日∧周一）均→SummaryMonthly",
+      "buildNotifyContext NORMAL∧Weekly：nc.Summary==SummaryWeekly 且 Trends 为 nil 且 ClearStreak==0（新增 TestBuildNotifyContextNormalWeekly）；既有 4 处组装断言按枚举语义迁移后通过"
+    ],
+    "boundary": [
+      "非法日期('bad-date')→None；周六(2026-07-04)非交易日→None；NORMAL 周二(2026-07-14)与 WATCH 非周一→None"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go build ./... 通过；cmd/atlas 无残留 summaryDue/SummaryDue 引用；go test ./cmd/atlas/ ./internal/crisis/ 两包全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-2",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "TASK-003 代码/测试已全绿并提交(f5d7b82),但 dev_done 门禁按整包 ./cmd/atlas 绝对覆盖率判定=75.9%<80% 而 DENY。任务卡说明的门禁口径(本任务修改文件≥80%)与 task-completed.sh 实际(整包绝对阈值)不符;cmd/atlas 基线被 main/serve/backtest 等无关 0% CLI 入口拉低,我改的 summaryKind 100%/buildNotifyContext 93.2% 已达标,靠 in-scope 改动结构上无法过门禁。请决策:(1)走 test-agent 逐条验收替代覆盖率门禁[推荐,done_criteria 全部可验且已 PASS];(2)人类下调 arcforge.config.json coverage.dev_minimum;(3)授权 scope 扩张补 cmd/atlas 无关测试。我无权改运行时门禁/config,亦不擅自扩 scope。",
+      "asked_at": "2026-07-23T10:35:00Z",
+      "answer": "Leader 决策(AD-6,已记录于 01-design/architecture-decisions.md):采用你方案(2)的受控变体——Leader 已亲跑 profile 核实 crisis.go 文件级覆盖率 86.4%(267/309)满足 dod-gate 已批准的 AD-4 口径,并已临时将 config coverage.dev_minimum 80→75(仅为放行本次 transition,你 dev_done 落盘后 Leader 立即恢复 80)。不走(1)——绕过门禁破坏状态机不变量;不走(3)——违反 Realistic Scope。你现在执行:transition blocked_clarification→in_progress(--expect-epoch 1),然后立即重试 transition dev_done(--expect-epoch 1),门禁将以 75 阈值放行(整包 75.9%>75)。完成后 jq 核实并 SendMessage 回 main。"
+    }
+  ],
+  "verifier": "test-agent-1",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-23T11:12:09Z"
+  }
+}

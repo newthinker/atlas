@@ -1,60 +1,201 @@
 {
   "version": 1,
-  "tokens": {},
+  "tokens": {
+    "dev-agent-1": "ef11b83a1f6384856d83a83978866b2d9d3a5a6a83dff63b5c16fbb43325b91b",
+    "test-agent-1": "a822758e1ca11afd9f65875efd6aa075eb25f5dfb403f8f320e8642f9dda9cfe",
+    "dev-agent-2": "333f19e4cf3ae20674db495d03ff1b03c3345cefafdadf15164b1aed4c70f4b7",
+    "qa-agent-1": "308c4e3675863ac3fee298e54411be89fbc2af6d3e3bd83b8f910ac5e3919732",
+    "dev-agent-3": "53d405910051ff038493945d8b16f5df05812d10de36a07d5c3aee983e149795",
+    "dev-agent-4": "d89840afa52c7b6ab6592a369975f9f18ae4adfd6a6f10556ea35c13f3807983",
+    "dev-agent-5": "85d14e8a21dac275657a7ef16e5f9d0b223f11d1609d62a2164867cf6a0780c9",
+    "test-agent-2": "4813466bb21da0deac6053d589d1012d75c521659005869aa43e3e4cc7834d36",
+    "dev-agent-6": "715c3ce42f7bc893fc725c1a1c862b22ddda680bc4598d6a1982bfe33b843a62",
+    "qa-agent-2": "26ab8c8b86f0168b5535fa786339092ed2b0a3478c6f82af0865c9711100a171",
+    "dev-agent-7": "eacdb065806ae0c0808ad6b8851ffdaaa8bfbb7012e0ba2dc547798edd943902",
+    "dev-agent-8": "7ae742ed09032307a1a4838dea7d43591c6ab792f3e47618f602606c7c3f9401",
+    "test-agent-3": "3d291730131b74a33683555546bae1b0603e56d8548b8c64bfa61a81fb7d73a4",
+    "qa-agent-3": "a6a38194e439acc26d868f343bc883e7f7415d2bb3a42f9bcd09e145d9aa978f",
+    "dev-agent-9": "8524edbbffff1be1fadf2e49119c72bc57bdf056deae323f654b5f76c5e96131",
+    "dev-agent-10": "ed6af525c5f44e5c4cf035fa9aa81659a8a5c11c87cbbe4699e9bc88744588b4",
+    "dev-agent-11": "e85407976f4ce7c416c3445db9d695edd050583c5a7cda53e96bb752a2ba10b6",
+    "dev-agent-12": "1d7f96ec0dd7a33f326bdf2bdae4dcdec4c8814eb2c213e1b5b703d52c5b1b9b",
+    "test-agent-4": "2b4f301ab1dca2bcfbfe420c934ba6bcde573bec82fd683d00403809a398ae49",
+    "qa-agent-4": "5d03efce50a88321f15efb8319fbf1ec1357ba4d05931bd1a7592d2ff0499c86"
+  },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [
-    {"path": "tasks/TASK-*.json",         "writers": "owner-table"},
-    {"path": "docs/01-design/*",          "writers": ["leader"]},
-    {"path": "docs/02-plan/*",            "writers": ["leader"]},
-    {"path": "docs/03-progress/plan.md",  "writers": ["leader"]},
-    {"path": "docs/04-test/*",            "writers": ["test-*"]},
-    {"path": "docs/05-review/*",          "writers": ["qa-*"]},
-    {"path": "docs/06-acceptance/*",      "writers": ["leader"]},
-    {"path": "docs/07-deploy/*",          "writers": ["ops-*"]},
-    {"path": "discoveries/TASK-*.json",   "writers": "task-owner"},
-    {"path": "wisdom/learnings-{me}.md",  "writers": "self"},
-    {"path": "wisdom/decisions-{me}.md",  "writers": "self"},
-    {"path": "wisdom/_digest.md",         "writers": ["leader"]},
-    {"path": "checkpoints/{me}*",         "writers": "self"}
+    {
+      "path": "tasks/TASK-*.json",
+      "writers": "owner-table"
+    },
+    {
+      "path": "docs/01-design/*",
+      "writers": [
+        "leader"
+      ]
+    },
+    {
+      "path": "docs/02-plan/*",
+      "writers": [
+        "leader"
+      ]
+    },
+    {
+      "path": "docs/03-progress/plan.md",
+      "writers": [
+        "leader"
+      ]
+    },
+    {
+      "path": "docs/04-test/*",
+      "writers": [
+        "test-*"
+      ]
+    },
+    {
+      "path": "docs/05-review/*",
+      "writers": [
+        "qa-*"
+      ]
+    },
+    {
+      "path": "docs/06-acceptance/*",
+      "writers": [
+        "leader"
+      ]
+    },
+    {
+      "path": "docs/07-deploy/*",
+      "writers": [
+        "ops-*"
+      ]
+    },
+    {
+      "path": "discoveries/TASK-*.json",
+      "writers": "task-owner"
+    },
+    {
+      "path": "wisdom/learnings-{me}.md",
+      "writers": "self"
+    },
+    {
+      "path": "wisdom/decisions-{me}.md",
+      "writers": "self"
+    },
+    {
+      "path": "wisdom/_digest.md",
+      "writers": [
+        "leader"
+      ]
+    },
+    {
+      "path": "checkpoints/{me}*",
+      "writers": "self"
+    }
   ],
   "owner_table": {
-    "pending":               ["leader"],
-    "assigned":              ["leader"],
-    "in_progress":           ["dev-*"],
-    "dev_done":              ["dev-*"],
-    "verifying":             ["test-*"],
-    "verified":              ["test-*"],
-    "rejected":              ["test-*"],
-    "review_fix":            ["leader"],
-    "accepted":              ["leader"],
-    "skipped":               ["leader"],
-    "blocked_clarification": ["leader", "dev-*"],
-    "blocked_human":         ["leader"]
+    "pending": [
+      "leader"
+    ],
+    "assigned": [
+      "leader"
+    ],
+    "in_progress": [
+      "dev-*"
+    ],
+    "dev_done": [
+      "dev-*"
+    ],
+    "verifying": [
+      "test-*"
+    ],
+    "verified": [
+      "test-*"
+    ],
+    "rejected": [
+      "test-*"
+    ],
+    "review_fix": [
+      "leader"
+    ],
+    "accepted": [
+      "leader"
+    ],
+    "skipped": [
+      "leader"
+    ],
+    "blocked_clarification": [
+      "leader",
+      "dev-*"
+    ],
+    "blocked_human": [
+      "leader"
+    ]
   },
   "transitions": {
-    "pending->assigned":                    ["leader"],
-    "assigned->in_progress":                ["dev-*"],
-    "in_progress->dev_done":                ["dev-*"],
-    "in_progress->blocked_clarification":   ["dev-*"],
-    "blocked_clarification->in_progress":   ["dev-*"],
-    "blocked_clarification->blocked_human": ["leader"],
-    "blocked_human->assigned":              ["leader"],
-    "blocked_human->skipped":               ["leader"],
-    "dev_done->verifying":                  ["leader"],
-    "verifying->verified":                  ["test-*"],
-    "verifying->rejected":                  ["test-*"],
-    "rejected->assigned":                   ["leader"],
-    "assigned->assigned":                   ["leader"],
-    "in_progress->assigned":                ["leader"],
-    "rejected->blocked_human":              ["leader"],
-    "verified->review_fix":                 ["leader"],
-    "review_fix->in_progress":              ["dev-*"],
-    "verified->accepted":                   ["leader"],
-    "pending->skipped":                     ["leader"],
-    "assigned->skipped":                    ["leader"]
+    "pending->assigned": [
+      "leader"
+    ],
+    "assigned->in_progress": [
+      "dev-*"
+    ],
+    "in_progress->dev_done": [
+      "dev-*"
+    ],
+    "in_progress->blocked_clarification": [
+      "dev-*"
+    ],
+    "blocked_clarification->in_progress": [
+      "dev-*"
+    ],
+    "blocked_clarification->blocked_human": [
+      "leader"
+    ],
+    "blocked_human->assigned": [
+      "leader"
+    ],
+    "blocked_human->skipped": [
+      "leader"
+    ],
+    "dev_done->verifying": [
+      "leader"
+    ],
+    "verifying->verified": [
+      "test-*"
+    ],
+    "verifying->rejected": [
+      "test-*"
+    ],
+    "rejected->assigned": [
+      "leader"
+    ],
+    "assigned->assigned": [
+      "leader"
+    ],
+    "in_progress->assigned": [
+      "leader"
+    ],
+    "rejected->blocked_human": [
+      "leader"
+    ],
+    "verified->review_fix": [
+      "leader"
+    ],
+    "review_fix->in_progress": [
+      "dev-*"
+    ],
+    "verified->accepted": [
+      "leader"
+    ],
+    "pending->skipped": [
+      "leader"
+    ],
+    "assigned->skipped": [
+      "leader"
+    ]
   },
   "bindings": {
-    "dev-*":  "assigned_to",
+    "dev-*": "assigned_to",
     "test-*": "verifier"
   }
 }

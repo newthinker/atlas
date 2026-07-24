@@ -1,0 +1,50 @@
+{
+  "id": "TASK-002",
+  "title": "renderWeekly NORMAL 尾段分叉（去退出进度行）",
+  "description": "internal/crisis/notify_render.go 的 renderWeekly 尾段按状态分叉：WATCH 保留退出进度行+下次周报行（逐字节不变）；NORMAL 仅「下次周报：下周一 · 状态变更即时通知」。TDD 步骤见实施计划 Task 2。",
+  "module": "crisis-notify",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "renderWeekly NORMAL：首行前缀 '[P1] 📅 Cassandra 周报 · MM-DD 当周 · NORMAL 已持续 N 个评估日'，含 '7 指标全绿：' 区段与 '下次周报：下周一 · 状态变更即时通知'，以 notifyFooter 结尾（新增 TestRenderWeeklyNormal）",
+      "renderWeekly NORMAL 输出不含 '退出进度' 字样"
+    ],
+    "boundary": [
+      "WATCH 周报输出逐字节不变：既有 TestRenderWeekly 断言原样通过，不得修改其期望值"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/crisis/ 全包全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-23T11:12:09Z"
+  }
+}

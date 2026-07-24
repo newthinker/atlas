@@ -1,0 +1,25 @@
+{
+  "key_findings": [
+    "周一撞美国假日的顺延由上游 data-not-ready 空跑机制覆盖，summaryKind 只看评估日 res.Date，本层不新增日历逻辑",
+    "summaryKind 撞日归月报靠分支顺序：NORMAL 先判 isFirstTradingDayOfMonth(→Monthly) 再判周一(→Weekly)，2026-06-01/2026-08-03 两撞日用例均命中月报分支",
+    "buildNotifyContext 组装门改为枚举等值判定：ClearStreak 仅 WATCH∧Summary==SummaryWeekly，Trends 仅 NORMAL∧Summary==SummaryMonthly；NORMAL 周一 Summary=Weekly 故两者都不触发，nc.Trends 保持 nil、ClearStreak 保持 0",
+    "字段改名连带清理 TASK-008 checkpoint 映射注释里两处过时 SummaryDue 字样，grep -rn 'summaryDue|SummaryDue' cmd/atlas/ 现无残留"
+  ],
+  "decisions": [
+    {"decision": "summaryKind 保留并复用既有 isFirstTradingDayOfMonth，不引入日历表", "rationale": "撞日语义由分支顺序表达即可；假日顺延归上游 data-not-ready 空跑，本层零日历逻辑符合设计 §3.1"},
+    {"decision": "buildNotifyContext 两处组装门用 Summary==SummaryWeekly / ==SummaryMonthly 精确匹配而非非零判断", "rationale": "枚举替换 bool 后须区分 Weekly/Monthly：ClearStreak 只对 Weekly 有意义、Trends 只对 Monthly，非零判断会让 NORMAL 周报误组装月报 Trends"}
+  ],
+  "files_modified": [
+    "cmd/atlas/crisis.go",
+    "cmd/atlas/crisis_test.go"
+  ],
+  "interfaces_exposed": [
+    "func summaryKind(date string, state crisis.SystemState) crisis.SummaryKind（包内私有，替换原 summaryDue bool 返回）"
+  ],
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./cmd/atlas/ ./internal/crisis/ -count=1",
+    "result": "两包均 ok；go build ./... 通过；grep 无 summaryDue/SummaryDue 残留",
+    "coverage": "summaryKind 100.0%、buildNotifyContext 93.2%（cmd/atlas 包整体 75.7%，历史基线低）",
+    "commit": "f5d7b82"
+  }
+}

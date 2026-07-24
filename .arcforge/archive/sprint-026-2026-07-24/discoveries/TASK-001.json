@@ -1,0 +1,18 @@
+{
+  "key_findings": [
+    "EPSPoint 生效日语义收口到单一 helper effectiveDate(p): FilingDate 非零→FilingDate,零→Date。sortedEPSWithGate 排序键与 latestEPSAtOrBefore 的 sort.Search 条件全部改用 effectiveDate,alignPE 经 latestEPSAtOrBefore 自动复用,故仅一处 sort.Search。",
+    "ReconstructPESeries/ReconstructPEPercentile 函数签名未变,下游零改动。",
+    "零值兼容硬验收通过:internal/valuation 既有全部用例一字未改即通过;四包(valuation/prism/app/collector)全回归 PASS,pe_percentile/engine/qlibpit 零漂移。"
+  ],
+  "decisions": [
+    {"what": "生效日判断集中在 effectiveDate 单一 helper,不在各调用点内联", "rationale": "排序键、对齐 sort.Search 三处共用同一语义,收口为单函数避免语义分叉;FilingDate.IsZero() 回退 Date 保证 yahoo/qlibpit 既有构造点(不填 FilingDate)行为逐字节不变。"},
+    {"what": "只替换比较逻辑,不改 EPS<=0 正值门槛与 MinEPSPoints 逻辑", "rationale": "本任务仅升级生效日维度,错误路径(ErrInsufficientEPS/ErrNonPositiveEPS)行为须不变。"}
+  ],
+  "files_modified": [
+    "internal/core/types.go",
+    "internal/valuation/reconstruct.go",
+    "internal/valuation/series_test.go"
+  ],
+  "interfaces_exposed": ["core.EPSPoint{Date,EPS,FilingDate};零值→生效日=Date;valuation.effectiveDate()"],
+  "verification": "go test ./internal/valuation/ ./internal/prism/ ./internal/app/ ./internal/collector/... -count=1 全 PASS;新测试 TestReconstructPESeriesFilingDateEffective PASS(filing 前 PE=50/后 PE=25);覆盖率 valuation 98.5% core 80.0%(门槛 80)。"
+}

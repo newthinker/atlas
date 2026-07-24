@@ -1,0 +1,57 @@
+{
+  "id": "TASK-006",
+  "title": "CLI 接线(akshare client 注入 + Degraded 告警)",
+  "description": "cmd/atlas/prism.go: runPrismRefreshWith 输出与告警扩展(Failed 或 Degraded 非空即发,消息分段);akshare.New(pcfg.AkshareBaseURL) 注入确认。规格以计划 Task 6 为准。",
+  "module": "cmd/atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "out 输出断言含 \"N ok, M failed, K degraded\" 完整计数段(对 out buffer 断言,非仅 sender)",
+      "仅 Degraded 非空也发告警(消息含兜底语义与 symbol),返回 nil(exit 0)"
+    ],
+    "boundary": [
+      "Failed 与 Degraded 均空→不发告警(断言 sender.sent 空);sender=nil 且有 Degraded→退化打印含兜底段(断言实覆盖,不依赖未验证的既有用例)"
+    ],
+    "error_handling": [
+      "SendText 失败仍仅 warn 不失败(核对既有用例断言仍实覆盖新消息路径,不足则补)"
+    ],
+    "non_functional": [
+      {
+        "desc": "go build ./... 通过;cmd/atlas 既有 prism 用例(输出断言受格式影响同步微调)全过",
+        "verify_by": "test"
+      },
+      {
+        "desc": "cmd/atlas 整包口径若触发 AD-6 按处置模板报 Leader 勿自行绕",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-7",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  }
+}

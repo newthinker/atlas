@@ -1,0 +1,59 @@
+{
+  "id": "TASK-007",
+  "title": "atlas prism refresh 子命令与失败告警",
+  "description": "新建 cmd/atlas/prism.go: prism 父命令 + refresh 子命令,deps-struct 模式(runPrismRefreshWith)。配置装载与 telegram sender 必须先读 cmd/atlas/crisis.go 确认既有 helper 实名后复用(loadConfigForCLI/buildCrisisSender 是占位名),禁止自建第二套。实现细节以计划 Task 7 为准。",
+  "module": "cmd/atlas",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "runPrismRefreshWith 输出 \"prism refresh: N ok, M failed\";全部成功时不发告警",
+      "部分失败: sender.SendText 收到含失败标的摘要的告警,函数返回 nil(exit 0 语义)"
+    ],
+    "boundary": [
+      "sender 未配置(nil)→ 告警内容退化为打印到 out,仍返回 nil",
+      "prism.enabled=false → 返回错误(命令 exit 非 0)"
+    ],
+    "error_handling": [
+      "配置装载/prismstore.Open 失败 → 返回 error(exit 非 0);SendText 失败 → 仅向 errOut 打 warning 不失败"
+    ],
+    "non_functional": [
+      {
+        "desc": "配置装载与 sender 构造复用 crisis.go 既有 helper(以实际签名为准),无重复实现",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go build ./... 全仓编译通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-002",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  }
+}

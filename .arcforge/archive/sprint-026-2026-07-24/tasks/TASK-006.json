@@ -1,0 +1,55 @@
+{
+  "id": "TASK-006",
+  "title": "/prism/compare 多标的对比页",
+  "description": "web handler 增 PrismCompare 方法(pages 列表两处追加 prism_compare.html);新建模板(标的多选 ≤8 + 窗口切换 + ECharts PE 叠加 + 横截面表,前端并发 fetch 既有 /api/prism/series,零新 API);server.go 追加 /prism/compare 路由。模板与 JS 按计划 Task 6 提供的完整文件实现。",
+  "module": "web-compare",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/api/handler/web/handler.go",
+    "internal/api/handler/web/templates/prism_compare.html",
+    "internal/api/server.go",
+    "internal/api/handler/web/prism_web_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestPrismComparePage 通过:GET /prism/compare 返回 200,body 含 id=\"compare-chart\"、Board() 候选(沪深300/NVIDIA)与 /static/echarts.min.js 引用",
+      "server.go 注册 /prism/compare 路由到 webHandler.PrismCompare"
+    ],
+    "boundary": [
+      "prismProvider 为 nil → 404 prism not enabled",
+      {
+        "desc": "前端勾选超过 8 个标的时第 9 个被拒(JS MAX 逻辑)",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      "Board() 出错 → 500 并返回错误信息"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/api/... -count=1 全 PASS;atlas serve 打开 /prism/compare 勾选 2~3 标的目检折线与横截面表",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-12",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/api",
+    "./internal/api/handler/web"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  }
+}

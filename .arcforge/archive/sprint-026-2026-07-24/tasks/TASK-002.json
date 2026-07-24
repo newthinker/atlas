@@ -1,0 +1,49 @@
+{
+  "id": "TASK-002",
+  "title": "prism store 增 fundamental_q 表",
+  "description": "internal/storage/prism/sqlite.go schema 追加 fundamental_q 表(PK: instrument_id+period_end, WITHOUT ROWID),新增 FundamentalRow 类型与 UpsertFundamentals/QuarterlyFundamentals 方法(与 UpsertValuations 同款:事务+Prepare+toNull/fromNull)。详见计划 Task 2。",
+  "module": "storage",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/storage/prism/sqlite.go",
+    "internal/storage/prism/sqlite_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestUpsertFundamentalsRoundtrip 通过:UpsertFundamentals 写入后 QuarterlyFundamentals 按 period_end 升序读回,字段逐一相等",
+      "FundamentalRow 字段与计划接口契约一致:FiscalPeriod/PeriodEnd/FilingDate/Revenue/NetIncome/EPSDiluted/Equity/DilutedShares/Source"
+    ],
+    "boundary": [
+      "NaN 字段落库为 NULL,读回为 NaN(Equity NaN 用例)",
+      "同批 rows 重复 Upsert 两次幂等:行数不变,ON CONFLICT 全列覆盖"
+    ],
+    "error_handling": [
+      "空 rows 切片 Upsert 不报错且不产生行"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/storage/prism/ 全 PASS(既有 valuation/instrument 用例回归)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-10",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/storage/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  }
+}

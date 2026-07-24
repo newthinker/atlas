@@ -1,0 +1,63 @@
+{
+  "id": "TASK-007",
+  "title": "文档同步与 M2 验收记录",
+  "description": "纯文档任务:设计文档 §3 数据源矩阵同步现状(A/H→akshare 与降级链、美股公司行标注 M2 已落地 EDGAR)、§9 记录 ETF 聚合移至 M3;deployment.md prism 段追加 edgar_user_agent 配置说明;M2 验收 7 条(防前视/10Y 曲线/可复算/PB-PS/回归/fallback/compare)手动核对并把结果记录进计划文档 Task 7 Step 3 处。只改与现实不符的行,不重写。",
+  "module": "docs",
+  "complexity": "simple",
+  "estimated_files": [
+    "docs/prism/atlas_prism_design.md",
+    "docs/deployment.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "设计文档 §3 数据源矩阵:A/H 公司主源改 akshare(理杏仁指数注明降级链),美股公司行标注 M2 已落地 EDGAR",
+        "verify_by": "review"
+      },
+      {
+        "desc": "设计文档 §9 M2 处记录 ETF 聚合移至 M3",
+        "verify_by": "review"
+      },
+      {
+        "desc": "deployment.md prism 段追加 edgar_user_agent 配置说明(SEC 要求含邮箱)",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "M2 验收 7 条逐条执行并记录结果(防前视 SQL 核对/10Y 曲线形态/pe_ttm 可复算 ±1%/PB 非—/AH+指数回归/fallback Degraded/compare 三标的)",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005",
+    "TASK-006",
+    "TASK-008"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-004",
+    "TASK-005",
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-11",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "docs/prism/atlas_prism_design.md",
+    "docs/deployment.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  }
+}

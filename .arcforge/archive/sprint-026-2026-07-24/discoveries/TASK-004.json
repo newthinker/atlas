@@ -1,0 +1,25 @@
+{
+  "key_findings": [
+    "Refresh 新签名(第 6 参数 ed 插在 now 前): func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient, now time.Time) Report。既有全部调用点须补 ed 参数。",
+    "EdgarClient 接口: FetchCompanyFacts(cik string) ([]edgar.QuarterlyFact, error)——*edgar.Client 天然满足。Store 接口新增 UpsertFundamentals(instrumentID int64, rows []prismstore.FundamentalRow) error。",
+    "edgar 降级与 lixinger→akshare 同构: edgar 失败且 inst.FallbackSource==\"engine\" → refreshEngine 出数并记 Report.Degraded;FallbackSource 空或非 engine → 保持失败进 Report.Failed、Degraded 不记(不静默吞错)。",
+    "PB=Close/BVPS、PS=Close/RPS_TTM 复用 core.EPSPoint + valuation.ReconstructPESeries 对齐;科目缺失/门槛不满足 → seriesByDate 返回 nil → lookupRatio 得 NaN(整列 NaN,不影响 PE 列)。价格走 yahoo。",
+    "ttmPoints: 4 季滑窗(i=3..len-1),窗口内任一 NaN 不产点 + 季度连续性守卫(首尾 period_end 跨度 > maxTTMWindowDays=330 天则不产点,防整季缺失时跨缺口求和 TTM 失真);产出 EPSPoint 携带 facts[i].FilingDate 防前视。"
+  ],
+  "decisions": [
+    {"what": "Store 接口只加 UpsertFundamentals,不加 QuarterlyFundamentals", "rationale": "refreshEdgar 全量重拉不需回读季度事实;最小接口面。"},
+    {"what": "RPS 用独立 rpsPoints + sharesAt 小函数,不用 goto", "rationale": "计划授权 goto 与 lint 冲突改小函数;缺失/零返回 NaN 由正值门槛过滤。"},
+    {"what": "cmd/atlas/prism.go 不改(越界)", "rationale": "cmd 接线是 TASK-005 范围。"},
+    {"what": "rework#1 补两条测试锁定(EdgarLookbackYears=10 断言 + edgar 路径 PB/PS NaN 用例)", "rationale": "test-agent-4 变异测试暴露的断言缺口。"},
+    {"what": "rework#2(QA WARNING-2)ttmPoints 加季度连续性守卫,阈值取 330 天而非 fix_item 建议的 370~400 天", "rationale": "实测(edgarQuarters 3 月间距):正常连续 4 季窗口首尾 period_end 跨度 273~275 天,单季缺失窗口 365 天。fix_item 的 370~400 阈值高于 365,无法剔除单季缺口窗口(会漏判)。330 天高于正常跨度+财季不规则边际、低于单季缺口 365 天,能正确区分。新增 TestTTMPointsQuarterGap:删除中间整季 → 8 候选窗口剔除 3 个跨缺口窗口 → 5 个点。"},
+    {"what": "QA WARNING-3(派生值口径)不修——刻意设计", "rationale": "QA 终审复核结论:PB/PS 派生值采用『最新基准 + 原始 filing date 生效』口径,smoke 已实证可接受;非缺陷,保留现状。"}
+  ],
+  "files_modified": ["internal/config/config.go", "internal/prism/refresh.go", "internal/prism/refresh_test.go", "internal/config/prism_test.go"],
+  "interfaces_exposed": [
+    "prism.EdgarClient interface { FetchCompanyFacts(cik string) ([]edgar.QuarterlyFact, error) }",
+    "func prism.Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient, now time.Time) Report — ed 为第6参插在 now 前,所有既有调用点须补参",
+    "config.PrismInstrument{... CIK string `mapstructure:\"cik\"`}; config.PrismConfig{... EdgarUserAgent, EdgarLookbackYears(默认10) }",
+    "prism.Store 接口新增 UpsertFundamentals(instrumentID int64, rows []prismstore.FundamentalRow) error"
+  ],
+  "verification": "rework#2 后:go test ./internal/prism/ ./internal/config/ -count=1 全 PASS;新增 TestTTMPointsQuarterGap PASS(跨缺口窗口不产点);既有 edgar 6 例 + config 断言全 PASS;gofmt/vet 干净。commit 1335169。已知:cmd/atlas 因 Refresh 新签名暂不可编译,待 TASK-005 接线后 go build ./... 方可通过。"
+}

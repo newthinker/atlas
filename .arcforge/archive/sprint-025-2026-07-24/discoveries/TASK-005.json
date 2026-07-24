@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-005",
+  "title": "指数自动降级链 + Report.Degraded",
+  "by": "dev-agent-8",
+  "at": "2026-07-24",
+  "key_findings": [
+    "Report 加 Degraded []string 字段;lixinger 分支失败且 inst.FallbackSource==\"akshare\" 时当场调 refreshAkshare 兜底。",
+    "TASK-004 已铺好全部基础设施(Refresh 六参、AkshareClient、refreshAkshare、fakeAkshare 带 fail/indexCalls capture、akCfg 助手、errors 已导入),本任务仅新增 6 行 Report 字段 + 10 行降级逻辑 + 3 个用例。",
+    "internal/prism 单包覆盖率 94.2% ≥80;全仓 go build ./... 通过;既有理杏仁/engine/akshare 全部用例无回归。"
+  ],
+  "decisions": [
+    {"decision": "降级仅挂在 case \"lixinger\" 分支内,兜底成功则 err=nil 使外层照常 rep.Refreshed++,并 append Degraded;兜底也败则合成单条 err \"lixinger: <主因>; akshare fallback: <兜因>\" 落入 Failed。", "rationale": "DoD: 兜底成功计入 Refreshed 且 Failed 空;双败 Failed 单条含两原因、Degraded 空。复用外层既有 err!=nil→Failed / err==nil→Refreshed++ 流,不改控制流骨架。"},
+    {"decision": "Degraded 元素格式固定 \"SYMBOL: lixinger failed (<原因>), akshare fallback ok\"。", "rationale": "TASK-006 CLI 告警消费此格式;reviewer P3 口径要求测试分别 assert.Contains \"lixinger failed\" 与 \"akshare fallback ok\" 两段格式串(TestRefreshFallbackDegraded 已双断言)。"},
+    {"decision": "主源成功时短路(err==nil 不进 if),ak 完全不被调用。", "rationale": "boundary: 零多余请求。TestRefreshFallbackNotTriggered 断言 ak.indexCalls/stockCalls 均空。"}
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go (Report 加 Degraded 字段;case lixinger 分支加降级链)",
+    "internal/prism/refresh_test.go (追加 fbInst 助手 + 三态用例 TestRefreshFallbackDegraded/BothFail/NotTriggered)"
+  ],
+  "interfaces_exposed": [
+    "type Report struct { Refreshed int; Failed []string; Degraded []string } —— TASK-006 CLI 消费 Degraded 发降级告警(exit 语义不变)",
+    "Degraded 元素格式: \"SYMBOL: lixinger failed (<原因>), akshare fallback ok\"",
+    "降级触发条件: inst.Source==\"lixinger\" 且 refreshLixinger 失败 且 inst.FallbackSource==\"akshare\""
+  ],
+  "verification": {
+    "tests": ["TestRefreshFallbackDegraded(functional[0/1]: Failed空/Refreshed=1/Degraded含symbol+两段格式串/兜底行落库)", "TestRefreshFallbackBothFail(error_handling: Failed单条含lix down+aktools down, Degraded空)", "TestRefreshFallbackNotTriggered(boundary: 主源成→ak.indexCalls/stockCalls空)", "既有理杏仁/engine/akshare 全部无回归"],
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 -cover && go build ./...",
+    "result": "internal/prism 全 PASS 覆盖率 94.2%;全仓 go build ./... 通过。单包口径达标,预计无 AD-6。"
+  }
+}

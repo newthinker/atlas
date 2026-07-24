@@ -1,0 +1,50 @@
+{
+  "id": "TASK-001",
+  "title": "EPSPoint.FilingDate 与 valuation 生效日升级",
+  "description": "core.EPSPoint 增 FilingDate 字段;reconstruct.go 增 effectiveDate helper 并替换 sortedEPSWithGate/alignPE/latestEPSAtOrBefore 的比较逻辑。零值回退 Date,全部既有构造点行为不变。详见计划 Task 1。",
+  "module": "valuation",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/core/types.go",
+    "internal/valuation/reconstruct.go",
+    "internal/valuation/series_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestReconstructPESeriesFilingDateEffective 通过:最后一季 EPS 翻倍且 FilingDate 晚 45 天时,filing 前的 close 仍用旧 EPS(PE=50),filing 后用新 EPS(PE=25)",
+      "EPSPoint 增加 FilingDate time.Time 字段,ReconstructPESeries 函数签名不变"
+    ],
+    "boundary": [
+      "FilingDate 全零值时排序与对齐结果与旧实现一致:既有 internal/valuation 全部测试用例不修改即通过"
+    ],
+    "error_handling": [
+      "既有错误路径(EPS 点不足 MinEPSPoints 等)行为不变"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/valuation/ ./internal/prism/ ./internal/app/ ./internal/collector/... 全 PASS(pe_percentile/engine/qlibpit 路径零漂移,N3 硬验收)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-9",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/core",
+    "./internal/valuation"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  }
+}

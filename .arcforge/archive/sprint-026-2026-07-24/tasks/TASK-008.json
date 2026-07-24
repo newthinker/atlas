@@ -1,0 +1,60 @@
+{
+  "id": "TASK-008",
+  "title": "EDGAR 每股值拆股归一化(split normalization)",
+  "description": "根治拆股重述污染(AD-9,用户批准入 Sprint):companyfacts 每股科目(EPSDiluted)在拆股后被后续申报重述,但部分单季只存在拆股前基准 → 年度(新基准)−单季(旧基准)产生垃圾派生 Q4。方案(dev-agent-11 已验证思路):检测同一 period_end 的每股值跨 filed 的比例跳变(≈整数比如 10:1/4:1),把全部每股值归一化到最新 filed 基准;DilutedShares 反向同步(×比例)保持 BVPS/RPS 分母一致。诊断素材见 TASK-003/005 discovery。",
+  "module": "collector-edgar",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/testdata/companyfacts_split.json"
+  ],
+  "done_criteria": {
+    "functional": [
+      "拆股检测与归一化:同一 period_end 的 EPSDiluted 跨 filed 出现比例跳变(fixture 模拟 NVDA 10:1:年度重述 1.19 vs 单季旧基准 0.82 类场景)→ 全部每股值统一到最新 filed 基准",
+      "归一化后派生 Q4 无符号矛盾:fixture 中 NetIncome>0 的年度,派生 Q4 EPSDiluted>0 且数值 = 归一化后 FY−ΣQ",
+      "DilutedShares 反向归一化(×拆股比例),BVPS=Equity/shares 与 RPS 分母跨拆股日基准一致"
+    ],
+    "boundary": [
+      "无拆股公司零影响:既有全部 fixture 测试(mini/rev_fallback/q4guard/rev_fpfy/shares_noq4)不改动即通过",
+      "跨 filed 比例偏差 <5%(重述噪声/四舍五入)不误判为拆股,不做归一化"
+    ],
+    "error_handling": [
+      "检测到跳变但比例非近似整数(无法确定拆股比)→ 保持原值不归一化,该情况在返回中可识别(错误或日志约定,实现自定并在 discovery 记录)"
+    ],
+    "non_functional": [
+      {
+        "desc": "NVDA live smoke 复跑:EPS 派生 Q4 全部无符号矛盾(NI 正则 EPS 正),跨 2021(4:1)/2024(10:1) 拆股日的 EPS_TTM/PE 序列无量级跳变毛刺;结果记入 discovery",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-11",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  },
+  "fix_items": [
+    "QA WARNING-1[client.go:215]:effByRatio 以 ratio 为 key,同比例重复拆股(如两次 2:1)会被合并丢失。修复:改以生效日(或事件序列)为 key 支持同比例多次拆股;新 fixture 用例:同比例两次拆股(如 2:1 两次,累计 4x)断言两事件都被检测且归一正确",
+    "回归:既有 11 测试全 PASS;三条已知限制文档同步更新(该条从限制列表移除或改为已修复)"
+  ]
+}

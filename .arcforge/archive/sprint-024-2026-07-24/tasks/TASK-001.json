@@ -1,0 +1,46 @@
+{
+  "id": "TASK-001",
+  "title": "PrismConfig 配置结构与默认值",
+  "description": "internal/config 增加 Prism 字段、PrismConfig/PrismInstrument 类型与 ApplyDefaults()。实现细节以 docs/superpowers/plans/2026-07-23-prism-m1.md Task 1 为准(含测试代码与实现骨架)。",
+  "module": "internal/config",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "PrismConfig 零值 ApplyDefaults 后: DBPath=data/prism.db、LookbackYears=10、USLookbackYears=5、LowPct=15、HighPct=85",
+      "顶层 Config struct 含 Prism PrismConfig 字段(mapstructure:\"prism\");PrismInstrument 含 Symbol/Name/Type/Market/Group/Source 六字段(mapstructure 标签齐全)"
+    ],
+    "boundary": [
+      "已显式赋值字段不被默认值覆盖: DBPath=/tmp/x.db 与 LowPct=20 在 ApplyDefaults 后保持,未赋值的 HighPct 仍补 85"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "internal/config 既有用例全部通过(无回归)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/config"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:26Z"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "task_id": "TASK-005",
+  "key_findings": [
+    "cmd/atlas/prism.go 接线:runPrismRefresh 构造 ed := edgar.New(pcfg.EdgarUserAgent),给 prism.Refresh 补第 6 参 ed(插在 now 前);新增 hasEdgarInstrument 守卫——EdgarUserAgent 为空且存在 source==edgar 标的时返回错误(含 prism.edgar_user_agent + SEC 文案)。import 加 edgar 与 config。全仓 go build ./... 通过(闭合了 prism.go:97 编译窗口)。",
+    "cmd/atlas/prism_test.go 新增 TestHasEdgarInstrument 覆盖两分支;既有用例走 mock refresh 无需补参。go test ./cmd/atlas/ 全 PASS,cover 74.4%。",
+    "configs/config.example.yaml prism 段追加 edgar_user_agent/edgar_lookback_years(10);美股公司区块替换为首批 20 家 US-GAAP filer(source=edgar/fallback_source=engine)。20 个 CIK 用官方 company_tickers.json(atlas-prism/1.0 UA)逐个校验,viper 解析比对全部一致。TSM 等 IFRS(20-F)filer 不入池并注释。",
+    "接线 commit 9f704bc;TASK-003 quarterization 修复 commit 6de11e0。"
+  ],
+  "decisions": [
+    {"decision": "CIK 去前导零存储(如 1045810、320193)", "rationale": "edgar 客户端内部 %010s 左零填充,配置侧存裸数字更简洁,与计划示例一致。"},
+    {"decision": "XOM CIK 用 2115436", "rationale": "官方 company_tickers.json 现值(埃克森美孚新 CIK),非旧值。"},
+    {"decision": "live smoke 用 scratchpad 临时 config/db,未碰 configs/config.yaml", "rationale": "遵守纪律,不污染真相源配置。"}
+  ],
+  "smoke_verification": {
+    "config": "scratchpad 临时 config,仅 NVDA 一个 edgar 标的,UA=atlas-prism/1.0 (zuow11@gmail.com)",
+    "refresh_result": "1 ok / 0 failed / 0 degraded(edgar 主源成功,未走 engine fallback)",
+    "fundamental_q_rows": 71,
+    "quarter_distribution": "Q1=17 Q2=18 Q3=19 Q4=17",
+    "valuation_daily": "2016-07-25 ~ 2026-07-23 约10年;pe_ttm/pb/ps_ttm 2513/2513 填充",
+    "per_column_nonnull": "eps 71/71, revenue 70/71, net_income 71/71, equity 68/71, diluted_shares 54/71(Q4股本按设计NaN)",
+    "meets_criteria": "fundamental_q=71 ≥ 40 达标;revenue 非整列 NULL 达标",
+    "note": "首跑(TASK-003 未修前)曾仅 16 行且全 Q1、revenue 全 NULL,是 live 校验点暴露的 quarterization bug;经 TASK-003 rework(commit 6de11e0)修复后重跑得 71 季。逐科目缺漏见 TASK-003 discovery。"
+  },
+  "residual_limitation": "承 TASK-003 discovery:EPS 派生 Q4 受拆股重述污染(仅每股值);PE/EPS_TTM 跨拆股日不准,Revenue/NI/PB/PS 不受影响。建议独立 follow-up 做拆股归一化。",
+  "files_modified": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go",
+    "configs/config.example.yaml"
+  ],
+  "interfaces_exposed": {
+    "note": "无新公开接口;消费 TASK-003/004 产出。config.PrismConfig.EdgarUserAgent 为空 + 有 edgar 标的 → runPrismRefresh 返回错误。"
+  },
+  "verification": {
+    "build": "go build ./... 通过",
+    "tests": "go test ./cmd/atlas/ -count=1 全 PASS,cover 74.4%",
+    "cik_check": "20/20 与官方 company_tickers.json 一致(viper 解析比对)",
+    "commit": "9f704bc(接线)+ 6de11e0(TASK-003 修复)"
+  }
+}

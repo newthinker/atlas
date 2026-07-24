@@ -1,0 +1,66 @@
+{
+  "id": "TASK-004",
+  "title": "refreshAkshare 路径(增量 + 本地分位 + Refresh 签名变更)",
+  "description": "internal/prism: Store 接口加 Series;新增 AkshareClient 接口与 refreshAkshare(增量守卫复用提取的 incrementalStart;历史读回+新点合并算 5Y/10Y 分位;仅写新点);Refresh 签名加 ak 参数并同步修 cmd/atlas/prism.go 与全部测试调用点。规格以计划 Task 4 为准。",
+  "module": "internal/prism",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go",
+    "cmd/atlas/prism.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "公司标的增量: latest+1 起拉取,新点 PE/PB/PS 落库",
+      "本地分位: 预置 300 天历史(PE=10)+新点 PE=20 → 新点 pctl_5y=pctl_10y=100;只写新点,历史行不回写",
+      "index 类型走 FetchIndexValuationSeries、stock 走 FetchStockValuationSeries(分派断言)"
+    ],
+    "boundary": [
+      "空拉取→零写入仍计成功;日历日零请求守卫与理杏仁路径同语义(incrementalStart 提取后既有理杏仁用例全过)"
+    ],
+    "error_handling": [
+      "source=akshare 直连失败(fakeAkshare.fail 注入)→ Report.Failed 含 symbol 与原因且 Refreshed=0(断言);store.Series 读回失败→同样进 Failed(fakeStore.Series 需支持注入 error,断言实覆盖)"
+    ],
+    "non_functional": [
+      {
+        "desc": "Refresh 六参签名变更后 go build ./... 全仓通过,cmd/atlas 既有测试同步修复无回归",
+        "verify_by": "test"
+      },
+      {
+        "desc": "NaN PE 行剔除出分位输入序列(代码审查);Context Checkpoint 齐全",
+        "verify_by": "review"
+      },
+      {
+        "desc": "变更包 internal/prism 覆盖率 ≥80;cmd/atlas 整包口径若触发 AD-6 按处置模板报 Leader 勿自行绕",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-7",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/prism",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "id": "TASK-001",
+  "title": "配置扩展(FallbackSource + AkshareBaseURL)",
+  "description": "internal/config: PrismInstrument 加 FallbackSource、PrismConfig 加 AkshareBaseURL 与默认值。规格以 docs/superpowers/plans/2026-07-24-prism-akshare-source.md Task 1 为准。",
+  "module": "internal/config",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "PrismConfig 零值 ApplyDefaults 后 AkshareBaseURL=http://127.0.0.1:8180",
+      "PrismInstrument.FallbackSource 字段存在且 mapstructure 标签为 fallback_source(反射断言)"
+    ],
+    "boundary": [
+      "显式 AkshareBaseURL 不被默认值覆盖"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "internal/config 既有用例(含 M1 Prism 用例)全部通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-7",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/config"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  }
+}

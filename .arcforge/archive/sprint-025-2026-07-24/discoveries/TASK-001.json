@@ -1,0 +1,26 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "internal/config 采用 PrismConfig.ApplyDefaults() 就地补默认值模式(仅在字段为零值时填充),显式值天然不被覆盖——新增 AkshareBaseURL 沿用同一 if 空判断惯例。",
+    "mapstructure 标签是 viper 反序列化 yaml 的唯一映射依据;既有 reflectTag 测试助手已提供反射断言标签的范式,本任务的 FallbackSource 标签用同款反射断言。",
+    "PrismConfig 与 PrismInstrument 均无独立构造函数,零值 + ApplyDefaults 即可用,下游 Task 4/5/6 可直接读 cfg.AkshareBaseURL 与 inst.FallbackSource。"
+  ],
+  "decisions": [
+    {"decision": "AkshareBaseURL 默认值硬编码 http://127.0.0.1:8180 写入 ApplyDefaults", "rationale": "与 spec Task 1 及 aktools launchd plist(Task 7)约定端口 8180 一致;放 ApplyDefaults 而非 viper.SetDefault,因 Prism 走 ApplyDefaults 统一补默认,与 DBPath/LookbackYears 等同源。"},
+    {"decision": "FallbackSource 空字符串表示无兜底,不设默认值", "rationale": "只有 A 股指数(000300/000905)需要 akshare 兜底,多数标的无兜底;空=无兜底语义最简,Task 5 降级链据 inst.FallbackSource==\"akshare\" 判定。"}
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/prism_test.go"
+  ],
+  "interfaces_exposed": [
+    "PrismConfig.AkshareBaseURL string (mapstructure:\"akshare_base_url\", 默认 http://127.0.0.1:8180) —— Task 4/6 消费",
+    "PrismInstrument.FallbackSource string (mapstructure:\"fallback_source\", 空=无兜底) —— Task 5 降级链消费",
+    "PrismConfig.ApplyDefaults() 现补齐 AkshareBaseURL 默认值(其余行为不变)"
+  ],
+  "verification": {
+    "tests": ["TestPrismConfigAkshareDefaults (functional[0]+boundary[0])", "TestPrismInstrumentFallbackSourceTag (functional[1])", "既有 internal/config 全部用例 (non_functional[0])"],
+    "command": "GOTOOLCHAIN=local go test ./internal/config/ -count=1 -cover",
+    "result": "ok, coverage 95.7% of statements, 全部 PASS"
+  }
+}

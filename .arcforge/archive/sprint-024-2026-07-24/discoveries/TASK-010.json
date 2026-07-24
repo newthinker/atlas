@@ -1,0 +1,33 @@
+{
+  "task_id": "TASK-010",
+  "by": "dev-agent-6",
+  "type": "docs-only",
+  "key_findings": [
+    "三产物:config.example.yaml prism 段(8 标的)、prism-daily.plist(08:30)、deployment.md Prism 部署要点。无 Go 代码,dev_done 走无代码产物校验分支。",
+    "review_fix MAJOR-1:plist -c 路径缺 configs/ 子目录(计划原文即错误)。既有 serve/crisis 4 plist 全用 /runtime/atlas/configs/config.yaml,prism-daily 原为 /runtime/atlas/config.yaml → config.Load 缺文件报错、每日刷新必失败 DB 永不填充。已对齐为 configs/config.yaml。",
+    "review_fix MAJOR-2:deployment.md 手动 refresh 指引收紧为仅 runtime 目录(db_path 相对路径按 cwd 解析,代码目录跑会写错库);追加已知限制——启用 ATLAS_API_KEY 时 /prism/detail 图表 401 空白(浏览器 fetch 不带 X-API-Key,与 /symbols 详情页同源继承缺陷),/prism/board 服务端渲染不受影响。"
+  ],
+  "decisions": [
+    {"decision": "plist config 路径对齐既有惯例 configs/config.yaml(不采纳计划原文)", "rationale": "计划 Task10 plist 原文路径漏 configs/;既有 4 个 plist 均 configs/config.yaml,config.Load 缺文件即报错。QA 对照既有 plist 捕获,属计划瑕疵。"},
+    {"decision": "手动触发指引限定 runtime 目录并说明 cwd 陷阱", "rationale": "db_path 默认相对 data/prism.db 按进程 cwd 解析;代码目录跑与 launchd 任务读写非同一库,误导性强。"},
+    {"decision": "API-key 限制标为已知限制而非本任务修复", "rationale": "属既有全站 fetch 鉴权同源缺陷(symbol_detail 同款),超出 prism M1 范围;文档标注等既有页统一修复,避免局部改动引入不一致。"}
+  ],
+  "files_modified": [
+    "configs/config.example.yaml (末尾追加 prism 段,8 标的)",
+    "deploy/launchd/com.newthinker.atlas.prism-daily.plist (新建;review_fix:config 路径 configs/config.yaml)",
+    "docs/deployment.md (Prism 部署要点段;review_fix:手动指引收紧 runtime + 已知限制 API-key 401)"
+  ],
+  "interfaces_exposed": {
+    "deploy_contract": "launchctl load com.newthinker.atlas.prism-daily.plist → 每日 08:30 bin/atlas prism refresh -c configs/config.yaml(runtime cwd);prism.enabled 决定 refresh 与 /prism/board 注册;理杏仁复用 collectors.lixinger.api_key;db_path 默认 data/prism.db 相对 cwd。",
+    "known_limitation": "ATLAS_API_KEY 启用时 /prism/detail 图表 401(fetch 不带 X-API-Key,与 symbol_detail 同款),待既有页统一修复;/prism/board SSR 不受影响。",
+    "note": "M1 五条验收 verify_by:manual,人工验收阶段按 docs/prism/atlas_prism_design.md §9 执行。"
+  },
+  "verification": {
+    "config_yaml": "python yaml.safe_load 通过:prism.instruments=8, enabled=true, lookback_years=10",
+    "plist": "plutil -lint OK;config 路径已对齐 configs/config.yaml(与既有 4 plist 一致)",
+    "docs": "deployment.md 仅追加/收紧措辞,既有内容未重排",
+    "gate": "dev_done 无代码任务分支通过(全部 verify_by=review|manual)",
+    "commits": "4b91c3b(主体);45d4020 fix(prism): correct plist config path and document detail API-key limitation(review_fix)",
+    "manual_acceptance": "M1 五条 verify_by:manual,人工验收阶段执行,不在本任务范围"
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "id": "TASK-003",
+  "title": "港股个股(百度双指标合并)+ A 股指数时序",
+  "description": "internal/collector/akshare: 实现 fetchHKStock(stock_hk_valuation_baidu 双指标按日期合并)与 FetchIndexValuationSeries(stock_index_pe_lg 中文键)。规格以计划 Task 3 为准;⚠ live 校验点标注。",
+  "module": "internal/collector/akshare",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/akshare/stock.go",
+    "internal/collector/akshare/index.go",
+    "internal/collector/akshare/stock_test.go",
+    "internal/collector/akshare/index_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "HK: 0700.HK→00700 映射;市盈率(TTM) 与 市净率 两次调用(period=全部)按日期合并;PSTTM 恒 NaN",
+      "指数: 000300.SH→沪深300 中文名映射;解析 日期/滚动市盈率 中文键;PB/PSTTM 恒 NaN",
+      "两路输出均按窗口过滤且升序"
+    ],
+    "boundary": [
+      "HK 合并以 PE 日期为主键: 有 PE 缺 PB 的日→PB NaN(断言);仅有 PB 无 PE 的日不产出行(口径明确,无 PE 无法算分位)"
+    ],
+    "error_handling": [
+      "未登记指数 symbol→error 含 no lg index mapping"
+    ],
+    "non_functional": [
+      {
+        "desc": "T2 既有用例不回归;live 校验点(baidu indicator 取值/lg 中文键)注释标注;Context Checkpoint 齐全",
+        "verify_by": "review"
+      },
+      {
+        "desc": "变更包覆盖率 ≥80",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-8",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/collector/akshare"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  }
+}

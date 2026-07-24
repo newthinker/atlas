@@ -1,0 +1,51 @@
+{
+  "task": "TASK-003",
+  "title": "港股个股(百度双指标合并)+ A 股指数时序",
+  "by": "dev-agent-8",
+  "at": "2026-07-24",
+  "key_findings": [
+    "港股用百度股市通 stock_hk_valuation_baidu,每次只返回一个指标(字段 date/value),须两次调用(市盈率(TTM) 与 市净率)按日期合并;period=全部。",
+    "指数用乐咕 stock_index_pe_lg,symbol 传中文名(沪深300/中证500),字段键为中文 日期/滚动市盈率。",
+    "复用 TASK-002 的 get/fnum/fdate/clipSort helpers;stock.go 追加 import math。",
+    "覆盖率 87.8% ≥ 80;T2 五个用例无回归(全 8 用例 PASS)。"
+  ],
+  "decisions": [
+    {
+      "decision": "HK 合并以 PE 日期为主键: 遍历 pe map 产出行,pb 存在则填、否则 NaN;仅有 PB 无 PE 的日不产出行。",
+      "rationale": "DoD 口径明确——无 PE 无法算分位。TestFetchHKStockMerge 注入 07-20 仅 PB 的行并断言 len==2(不产出),同时断言 07-22 有 PE 缺 PB → PB NaN。"
+    },
+    {
+      "decision": "HK 的 PSTTM 恒 NaN;指数的 PB/PSTTM 恒 NaN。",
+      "rationale": "百度 HK 接口无 PS 指标;lg 指数接口仅取滚动市盈率作兜底。"
+    },
+    {
+      "decision": "mapHKSymbol 去后缀后左补零到 5 位(0700.HK→00700)。",
+      "rationale": "百度接口用五位代码。"
+    },
+    {
+      "decision": "指数 symbol→中文名走白名单 map lgIndexName,未登记 symbol 返回 no lg index mapping 错误。",
+      "rationale": "lg 接口只接受中文名;未登记(如 ^GSPC)显式报错,TestFetchIndexUnknownSymbol 覆盖。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/akshare/stock.go (追加 mapHKSymbol/fetchHKStock 实现替换 stub;import 加 math)",
+    "internal/collector/akshare/index.go (新建: lgIndexName/FetchIndexValuationSeries)",
+    "internal/collector/akshare/stock_test.go (追加 TestFetchHKStockMerge)",
+    "internal/collector/akshare/index_test.go (新建: TestFetchIndexSeries/TestFetchIndexUnknownSymbol)"
+  ],
+  "interfaces_exposed": [
+    "func (c *Client) FetchIndexValuationSeries(symbol string, start, end time.Time) ([]ValuationPoint, error) // A股指数, PB/PS 恒 NaN, 未登记 symbol → 'no lg index mapping'",
+    "fetchHKStock 完成: 经 FetchStockValuationSeries(symbol, market=\"HK\", ...) 暴露, PSTTM 恒 NaN",
+    "var lgIndexName 已登记 000300.SH→沪深300, 000905.SH→中证500(TASK-004 若需其他指数在此追加)"
+  ],
+  "live_check_points": [
+    "baidu: 接口名 stock_hk_valuation_baidu / indicator 取值 市盈率(TTM)、市净率 / period=全部 / 字段键 date,value —— 首跑核验,不符即改常量(stock.go fetchHKStock)+同步测试。",
+    "lg 指数: 接口名 stock_index_pe_lg / symbol 中文名 沪深300 等 / 中文字段键 日期,滚动市盈率 —— 同上 live 校验(index.go)。",
+    "两处均已在函数注释标 ⚠ live 校验点(non_functional verify_by:review)。"
+  ],
+  "verification": {
+    "tests": "全 8 用例 PASS(T2 五 + T3 三: TestFetchHKStockMerge/TestFetchIndexSeries/TestFetchIndexUnknownSymbol), T2 无回归",
+    "coverage": "87.8% (≥80 门禁通过)",
+    "command": "GOTOOLCHAIN=local go test ./internal/collector/akshare/ -count=1 -cover"
+  }
+}

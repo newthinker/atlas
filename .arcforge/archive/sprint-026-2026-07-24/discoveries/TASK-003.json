@@ -1,0 +1,48 @@
+{
+  "task_id": "TASK-003",
+  "rework": "review_fix 修复(rework_count=1):修 3 个 fix_items bug + 追加按实际期间重构 quarterization 以恢复 Q4",
+  "key_findings": [
+    "BUG-1 累计期塌缩已修:先按 duration 过滤(fp∈Q1/Q2/Q3 且 70~100 天=单季;fp=FY 且 350~380 天=年度),再去重。真实 10-Q 每季含单季(≈90天)+累计(6mo/9mo)条目,若先去重累计条目可能胜出后被 duration 丢弃。",
+    "BUG-2/BUG-3 revenue tag 已修:firstQuarterlyTag 选首个含可用单季(fp∈Q1/Q2/Q3)条目的 tag。NVDA 的 RevenueFromContractWithCustomerExcludingAssessedTax 单季只标 fp=FY(10-K 内季度拆分)不可用,须回退到 Revenues。",
+    "根因追加修复:EDGAR 的 fy/fp 是『报告上下文』而非数据实际所属期间——同一 (fy,fp) 可对应不同实际季度(当期+比较期)。故 quarters map 改按实际 period_end 建键(FiscalPeriod 仅作展示标签,可能因财年偏移而 cosmetic 不准,PeriodEnd 才是权威字段);单季/年度均按 period_end 去重取 filed 最新。",
+    "Q4 推导改为按实际期间匹配:对每个年度条目,取 period_end 落在其 (start,end] 内的单季,恰好 3 个才推导 Q4=年度−Σ三季(period_end/filing 用年度条目)。既正确恢复 Q4,又避免跨财年错配得负值。",
+    "股本(WeightedAverageNumberOfDilutedSharesOutstanding)为时点/加权平均量(非流量),不做 Q4=FY−ΣQ 减法(否则 FY≈单季 → 负值);只落单季,Q4 股本留 NaN。",
+    "9 个测试全 PASS,覆盖率 90.8% > dev_minimum 80。"
+  ],
+  "smoke_verification": {
+    "symbol": "NVDA (CIK 1045810)",
+    "fundamental_q_rows": 71,
+    "quarter_distribution": "Q1=17 Q2=18 Q3=19 Q4=17",
+    "valuation_daily": "2016-07-25 ~ 2026-07-23 约10年",
+    "per_column_nonnull": "eps 71/71, revenue 70/71, net_income 71/71, equity 68/71, diluted_shares 54/71(Q4股本按设计留NaN)",
+    "negatives": "neg_shares=0, neg_rev=0, neg_ni=4(全是 2008-2010 NVDA 真实亏损季,营收为正、EPS 同为负,一致)",
+    "gaps": "1 行派生 Q4 revenue 缺失(该财年 Revenues 三季或年度未齐)"
+  },
+  "residual_limitation_stock_split": {
+    "issue": "EPS 派生 Q4 受拆股重述污染(仅每股值,绝对值科目 Revenue/NetIncome/Equity 不受影响)",
+    "root_cause": "companyfacts 里每股值在拆股后被后续 10-K 重述:年度 EPS 去重取 latest filed=拆股后值(如 end 2024-01-28 有 11.93 拆股前 / 1.19 拆股后),但部分单季只存在于拆股前申报(如 end 2023-04-30 只有 0.82,无更晚重述)。年度(拆股后)−单季(拆股前)= 垃圾 Q4 EPS(出现 NI 正而 EPS 负的符号矛盾)。NVDA 有 10:1(2024)、4:1(2021)拆股。",
+    "impact": "派生 Q4 的 EPSDiluted 及跨拆股日的 EPS_TTM/PE 不准;单季 EPS 在同一申报纪元内自洽。Revenue/NI 及 PB/PS 不受影响。",
+    "recommendation": "独立 follow-up 任务做拆股比例归一化(检测同一 period_end 的每股值跨 filed 的比例跳变,统一到最新基准),TASK-003/004 之外。",
+    "verify_by": "review"
+  },
+  "files_modified": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/testdata/companyfacts_mini.json (追加累计双条目)",
+    "internal/collector/edgar/testdata/companyfacts_rev_fpfy.json (新增,BUG-2)",
+    "internal/collector/edgar/testdata/companyfacts_shares_noq4.json (新增)",
+    "internal/collector/edgar/testdata/companyfacts_q4guard.json (新增)"
+  ],
+  "interfaces_exposed": {
+    "note": "公开接口未变(QuarterlyFact 字段/New/NewWithBaseURL/FetchCompanyFacts 签名/ErrNotUSGAAP/NaN=缺失/period_end 升序 均与首版 discovery 一致)。仅内部 quarterization 语义修正。",
+    "behavior_change_for_consumers": "FiscalPeriod 现为展示标签,可能因 EDGAR 财年偏移不精确;下游应以 PeriodEnd 为准(TASK-004 ttmPoints 本就按 PeriodEnd 排序/取值,不受影响)。DilutedShares 在派生 Q4 季为 NaN。"
+  },
+  "verification": {
+    "tests": "go test ./internal/collector/edgar/ -v -cover — 9 PASS",
+    "coverage": "90.8%",
+    "gofmt": "clean",
+    "go_vet": "clean",
+    "commit": "6de11e0",
+    "code_simplifier": "已跑,保持全 PASS"
+  }
+}

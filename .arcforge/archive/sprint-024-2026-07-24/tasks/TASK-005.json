@@ -1,0 +1,62 @@
+{
+  "id": "TASK-005",
+  "title": "刷新编排 — 理杏仁增量路径",
+  "description": "新建 internal/prism/refresh.go: Store/LixingerClient/USClient 窄接口、Report、Refresh 主流程与 refreshLixinger;refreshEngine 留 stub(Task 6 填充)。实现细节以计划 Task 5 为准。",
+  "module": "internal/prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "首次(LatestDate=\"\")从 now-LookbackYears 回填,拉取结果 upsert 落库",
+      "已有数据时从 latest+1 天增量拉取,end=now",
+      "Report.Refreshed 计数成功标的,Failed 收集 \"SYMBOL: error\" 摘要"
+    ],
+    "boundary": [
+      "latest+1 >= now → 零请求直接成功返回(不调用 FetchValuationSeries,理杏豆成本约束)",
+      "单标的失败不中断其余标的(部分失败语义)"
+    ],
+    "error_handling": [
+      "未知 source 或 latest 日期解析失败 → 记入 Failed 并继续"
+    ],
+    "non_functional": [
+      {
+        "desc": "Store/LixingerClient/USClient/Report/Refresh 签名与计划 Task 5 Interfaces 完全一致(Task 6/7 消费)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "测试文件顶部 Context Checkpoint 注释映射验收条目(仿 fred_test.go:15-21)",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-6",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  }
+}

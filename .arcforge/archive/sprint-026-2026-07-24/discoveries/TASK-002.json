@@ -1,0 +1,23 @@
+{
+  "key_findings": [
+    "fundamental_q 表 PK=(instrument_id,period_end) WITHOUT ROWID;period_end 为幂等键,同一 period_end 重复 Upsert 走 ON CONFLICT 全列覆盖。",
+    "FiscalPeriod 不是主键的一部分,仅作为可覆盖列存储(如 Q4 推导后回填时 fiscal_period 会被 excluded 覆盖)。",
+    "NaN 走既有 toNull/fromNull:落库为 NULL,读回为 NaN。source 列非 NaN 语义,直接原样存取(TEXT)。",
+    "覆盖率 81% >= dev_minimum 80;错误路径(tx.Begin/Prepare 失败)未测,属既有 UpsertValuations 同款未覆盖分支。"
+  ],
+  "decisions": [
+    {"decision": "补充 TestUpsertFundamentalsEmpty 覆盖 error_handling[0] 空 rows 边界", "rationale": "计划只给了 roundtrip 用例,done_criteria 明确要求空切片不报错不产行;nil 与 []FundamentalRow{} 均验证。"},
+    {"decision": "QuarterlyFundamentals 空结果返回 nil slice(非空 []) ", "rationale": "与既有 Board/Series 同款 var out 惰性 append 风格;测试用 assert.Empty 兼容 nil。"},
+    {"decision": "source 列可空(TEXT 无 NOT NULL)", "rationale": "对齐计划 schema;直接存 r.Source 字符串,不经 toNull。"}
+  ],
+  "files_modified": [
+    "internal/storage/prism/sqlite.go",
+    "internal/storage/prism/sqlite_test.go"
+  ],
+  "interfaces_exposed": [
+    "type FundamentalRow struct { FiscalPeriod string; PeriodEnd string; FilingDate string; Revenue, NetIncome, EPSDiluted, Equity, DilutedShares float64; Source string } // NaN=缺失,落库 NULL",
+    "func (s *Store) UpsertFundamentals(instrumentID int64, rows []FundamentalRow) error // 单事务幂等 per (instrument_id,period_end);空 rows 不报错不产行",
+    "func (s *Store) QuarterlyFundamentals(instrumentID int64) ([]FundamentalRow, error) // 按 period_end 升序返回该标的全部季度行,空为 nil"
+  ],
+  "verification": "go test ./internal/storage/prism/ -count=1 全 10 用例 PASS(含既有 valuation/instrument 回归);coverage 81.0% (dev_minimum 80);go vet 干净;code-simplifier 已过(gofmt 对齐)。commit 3393887。"
+}

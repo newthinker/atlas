@@ -1,0 +1,36 @@
+{
+  "task_id": "TASK-005",
+  "by": "dev-agent-6",
+  "key_findings": [
+    "新建 internal/prism 包(import 别名 prismstore 消费 storage/prism 避免包名冲突);refreshEngine 本任务仅留 stub 返回 'engine source not implemented yet',TASK-006 填充。",
+    "增量窗口语义:latest==\"\" 从 now.AddDate(-LookbackYears,0,0) 回填;否则 start=latest+1天,若 !start.Before(now) 则零请求 return nil(理杏豆成本约束,boundary[0])。end 恒为 now。",
+    "部分失败语义:Refresh 逐标的 switch source,单标的 err 追加 'SYMBOL: err' 到 Report.Failed 并 continue,不中断;unknown source 与 latest 解析失败均走此路径。",
+    "覆盖率 88.6%(6 用例全 PASS);未覆盖行为 store 错误传播分支(fake 不返错)与 engine stub,DoD 无相关条目。"
+  ],
+  "decisions": [
+    {"decision": "删除计划 stub 里的 math import 占位(_ = math.NaN)", "rationale": "refreshEngine 当前仅 return error 不用 math,保留会触发 unused import 编译错误;计划注释已授权临时删除,TASK-006 实现引擎路径时再加回。"},
+    {"decision": "在计划三个用例外补 TestRefreshUpToDateZeroRequest / TestRefreshUnknownSource / TestRefreshBadLatestDate", "rationale": "DoD boundary[0](零请求)与 error_handling[0](未知 source / latest 解析失败记 Failed 并继续)计划骨架未显式覆盖,须各有对应测试。零请求用 fakeLix.calls 是否含 symbol 断言未发起请求。"}
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go (新建)",
+    "internal/prism/refresh_test.go (新建)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/prism",
+    "Store": "interface{ UpsertInstrument(prismstore.Instrument)(int64,error); LatestDate(instrumentID int64)(string,error); UpsertValuations(instrumentID int64, rows []prismstore.ValuationRow) error }",
+    "LixingerClient": "interface{ FetchValuationSeries(symbol string, start, end time.Time)([]lixinger.ValuationPoint, error) }",
+    "USClient": "interface{ FetchHistory(symbol string, start, end time.Time, interval string)([]core.OHLCV,error); FetchEPSHistory(symbol string, start, end time.Time)([]core.EPSPoint,error) }",
+    "Report": "struct{ Refreshed int; Failed []string }  // Failed 元素形如 \"SYMBOL: error\"",
+    "Refresh": "func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, now time.Time) Report",
+    "internal_helpers": "upsertMeta(store,inst)(int64,error); refreshLixinger(...)error; refreshEngine(...)error [stub, TASK-006 填充]",
+    "note": "签名与计划 Task 5 Interfaces 完全一致,无漂移。TASK-006 消费 USClient/refreshEngine 与 Store.UpsertValuations;TASK-007 消费 Refresh 主入口。yahoo.Yahoo 需满足 USClient(FetchHistory 见 yahoo.go:177,FetchEPSHistory 见 eps.go:40)。"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/prism/ -v -cover",
+    "result": "PASS, 6/6 用例",
+    "coverage": "88.6% (≥80% 门禁达标)",
+    "gofmt_vet": "gofmt -l 无输出;go vet 干净",
+    "commit": "eb13663 feat(prism): refresh orchestration with incremental lixinger path",
+    "detect_changes": "gitnexus 索引 stale(last 86136ed),会话中途重建索引已知坑,detect_changes 由 Leader 代跑,受影响 scope 仅限 internal/prism 新增两文件。"
+  }
+}

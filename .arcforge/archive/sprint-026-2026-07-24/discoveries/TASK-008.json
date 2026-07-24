@@ -1,0 +1,47 @@
+{
+  "task_id": "TASK-008",
+  "key_findings": [
+    "拆股归一化根治 TASK-003/005 暴露的每股值污染:companyfacts 在拆股后用后续申报重述历史每股值,但部分早期期间只存在拆股前基准(无更晚重述)→ 年度(拆股后)−单季(拆股前)派生 Q4 = 垃圾(NI 正而 EPS 负的符号矛盾)、跨拆股日 EPS/PE 量级毛刺。",
+    "两步检测(detectSplits(eps,shares)):(1)拆股比例只从年度 FY EPS 投票——年度每股值量级大、无低值四舍五入噪声,只给真实比(NVDA 得 4、10);季度低值(0.06→0.02=3×)噪声不污染;需 >=2 个不同财年年度确认。(2)生效日从 EPS 与 DilutedShares 精定位——股本是数十亿大整数、季度粒度也无舍入噪声,把生效日收到拆股实际附近(NVDA R=4 eff=2021-08-20、R=10 eff=2024-08-28,即拆股后首个 10-Q),避免用年报 filed(偏晚)误伤拆股后原生季度。",
+    "白名单原子拆股比例 {2,3,4,5,6,7,8,10,15,20}:早期只在后期被一次性重述(跳过中间拆股)的期间相邻比是组合比(4×10=40),不在白名单被忽略;时间线仍由各原子拆股自身的年度投票确立,按 filed 累积应用仍正确归一(否则组合比与 4、10 叠乘把早期值 ÷ratio^N 压成 ~0)。",
+    "归一化:splitFactor(filed)=生效日晚于 filed 的拆股比累乘;EPS ÷factor、DilutedShares ×factor(保持 EPS×shares=NI 与 BVPS/RPS 分母基准一致),在既有 quarterization 前对副本归一,不改原切片。Revenue/NetIncome/Equity 为绝对值不归一。"
+  ],
+  "smoke_verification": {
+    "symbol": "NVDA (CIK 1045810)",
+    "detected_splits": "R=4 eff=2021-08-20(4:1,2021-07 实际)、R=10 eff=2024-08-28(10:1,2024-06 实际)——无 2008-2014 舍入噪声误判",
+    "sign_contradiction": "NI>0 且 EPS<0 = 0 行(修复前为 13 个负 diluted_shares/多个负 Q4 EPS)",
+    "eps_negative_rows": "仅 4 个 2008-2010 真实亏损季(NI 同为负,量级 -0.0055 合理,非 ~0 噪声)",
+    "cross_split_continuity": "跨 2024-06 拆股日 EPS 季度序列平滑(0.25→0.37→…→0.6→0.67→0.78,无 10× 跳),股本全 ~24.6-25B;拆股日无单日 PE 断崖(643→647→666 连续)",
+    "derived_q4": "派生 Q4 EPS 正值合理(如 0.488、0.89)",
+    "latest_pe": "最新 pe_ttm=32(此前 TASK-003 smoke 被污染值 74);TTM 台阶=正确防前视(新财报生效时下调)",
+    "fundamental_q": "71 行,逐科目 eps 71/71、revenue 70/71、ni 71/71、shares 54/71(Q4 股本按设计 NaN)"
+  },
+  "done_criteria_mapping": {
+    "functional[0] 检测+归一到最新基准": "TestFetchCompanyFactsSplitNormalization(10:1 fixture,单季 ÷10)",
+    "functional[1] 派生 Q4 无符号矛盾": "同上(NI>0 → Q4 EPS 0.15>0)+ smoke sign_contradiction=0",
+    "functional[2] DilutedShares ×比例": "同上(2500×10=25000)",
+    "boundary[0] 无拆股零影响": "既有 mini/rev_fallback/rev_fpfy/q4guard/shares_noq4/partial_fy 全部不改通过",
+    "boundary[1]/error[0] 非整数比例不误判": "TestFetchCompanyFactsSplitIgnoresNonIntegerRatio(2.3 偏差 15%>5% → 不归一,EPS 保持 3.0);可识别性=值保持原值可观测,约定见此 discovery",
+    "non_functional manual": "NVDA smoke 见 smoke_verification"
+  },
+  "files_modified": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/testdata/companyfacts_split.json (新增)",
+    "internal/collector/edgar/testdata/companyfacts_nonsplit_jump.json (新增)"
+  ],
+  "interfaces_exposed": {
+    "note": "公开接口未变;QuarterlyFact.EPSDiluted/DilutedShares 现为拆股归一后(最新基准)值。下游 TASK-004 的 EPS_TTM/BVPS/RPS 直接受益,分母基准一致。",
+    "limitations": "(1)FiscalPeriod 仍为展示标签(承 TASK-003,以 PeriodEnd 为准)。(2)拆股检测需公司有年度重述且比例为白名单原子比;纯季度申报或异常比例(非整数)不归一化,保持原值。同比例多次拆股已支持(review_fix 按生效日聚簇)。(3)error#0 的非拆股跳变以『值保持原值』为可识别信号,未加显式返回字段(避免破坏接口)。"
+  },
+  "verification": {
+    "tests": "go test ./internal/collector/edgar/ -v -cover — 11 PASS",
+    "coverage": "91.6%",
+    "gofmt": "clean",
+    "go_vet": "clean",
+    "commit": "a59d2af",
+    "code_simplifier": "已跑(中途 API 中断,已手工采纳其识别的去重:抽出 eachRestatementRatio 供 ratioVotes/refineEffDates 复用),复验 11 PASS 91.6%",
+    "diagnostic_materials": "scratchpad 的 nvda.json(真实 companyfacts)、smoke-config.yaml/smoke-prism.db 可复现"
+  },
+  "rework_note": "review_fix(rework 1/3,QA WARNING-1):detectSplits 事件由「按 ratio 建键(每比例仅一个事件)」改为「按生效日聚簇(clusterEvents,splitClusterGap=365天)」,支持同比例多次拆股(如两次 2:1 累计 4×)。eff 源改为年度 EPS+股本(去季度 EPS 避免低值舍入造假的同比例簇)。新增 TestFetchCompanyFactsRepeatedSameRatioSplit。NVDA 无回归(仍 4@2021-08-20/10@2024-08-28,smoke 71行/符号矛盾0/PE32.0 不变)。12 测试全绿 92.2%。commit fdb5664。"
+}

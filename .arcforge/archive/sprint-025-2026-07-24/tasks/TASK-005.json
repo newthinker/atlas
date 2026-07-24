@@ -1,0 +1,56 @@
+{
+  "id": "TASK-005",
+  "title": "指数自动降级链 + Report.Degraded",
+  "description": "internal/prism: Report 加 Degraded 字段;lixinger 分派失败且 FallbackSource=akshare 时当场兜底,成功记 Degraded 并计入 Refreshed,双败 Failed 含两原因。规格以计划 Task 5 为准。",
+  "module": "internal/prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "主源败+兜底成: Failed 空、Refreshed 计入、Degraded 含 symbol 与主源失败原因、兜底行已落库",
+      "Degraded 元素格式断言实覆盖: assert.Contains 分别断 \"lixinger failed\" 与 \"akshare fallback ok\" 两段格式串"
+    ],
+    "boundary": [
+      "主源成功→不触碰 akshare(零多余请求,capture 断言)"
+    ],
+    "error_handling": [
+      "双源皆败→Failed 单条含两个失败原因,Degraded 空"
+    ],
+    "non_functional": [
+      {
+        "desc": "既有理杏仁/engine/akshare 用例全部无回归",
+        "verify_by": "test"
+      },
+      {
+        "desc": "变更包覆盖率 ≥80",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-8",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  }
+}

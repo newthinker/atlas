@@ -1,0 +1,84 @@
+{
+  "id": "TASK-010",
+  "title": "配置示例、launchd plist、部署文档与 M1 验收",
+  "description": "纯产物/文档任务(无 Go 代码): configs/config.example.yaml 追加 prism 段(8 标的);deploy/launchd/com.newthinker.atlas.prism-daily.plist(每日 08:30);docs/deployment.md 追加 Prism 部署段(该文件有未提交既有改动,只追加不重排);执行 M1 五条人工验收并记录。细节以计划 Task 10 为准。",
+  "module": "docs-deploy",
+  "complexity": "simple",
+  "estimated_files": [
+    "configs/config.example.yaml",
+    "deploy/launchd/com.newthinker.atlas.prism-daily.plist",
+    "docs/deployment.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "config.example.yaml prism 段: enabled/db_path/回填年数/阈值 + 8 个标的(A股指数×2、A/H 公司×2、标普500、美股公司×3),source 标注正确",
+        "verify_by": "review"
+      },
+      {
+        "desc": "plist: Label=com.newthinker.atlas.prism-daily,每日 08:30(在 refresh-us 08:00 之后),日志路径与既有 runtime 约定一致",
+        "verify_by": "review"
+      },
+      {
+        "desc": "deployment.md 追加 Prism 部署段(装载命令/配置要点/日志路径/手动触发),行文仿危机监控段,不重排既有内容",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "M1 验收①: atlas prism refresh 首跑成功,valuation_daily 行数>0",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1 验收②: 茅台/沪深300 PE 与 10Y 分位对齐理杏仁官网同日数字(±0.1)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1 验收③: /prism/detail/NVDA 5Y PE 曲线形态与参考图一致(阶梯+价格波动)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1 验收④: 停跑一天 board 显示「数据至 <昨日>」而非报错",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "M1 验收⑤: 第二次 refresh 日志确认理杏仁只拉增量(区间 latest+1 起)",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007",
+    "TASK-009"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-007",
+    "TASK-008",
+    "TASK-009"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-6",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "packages": [
+    "configs",
+    "deploy/launchd",
+    "docs"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  },
+  "fix_items": [
+    "[MAJOR] prism-daily.plist 配置路径错误: -c 指向 /runtime/atlas/config.yaml,而 serve/crisis 等全部既有 plist 用 /runtime/atlas/configs/config.yaml;config.Load 缺文件即报错,每日刷新任务必失败、DB 永不填充。对齐为 configs/config.yaml",
+    "[MAJOR-处置] deployment.md Prism 段追加已知限制说明: 启用 ATLAS_API_KEY 时 /prism/detail 图表因浏览器 fetch 不带 X-API-Key 而 401 空白(与既有 symbol_detail 同款继承缺陷,后续与既有页统一修复);同时把「代码目录或 runtime 目录」的手动 refresh 指引收紧为仅 runtime 目录(相对 db_path 的 cwd 陷阱)"
+  ]
+}

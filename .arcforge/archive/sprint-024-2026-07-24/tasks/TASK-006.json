@@ -1,0 +1,59 @@
+{
+  "id": "TASK-006",
+  "title": "刷新编排 — 美股 yahoo 引擎路径",
+  "description": "实现 internal/prism/refresh.go 的 refreshEngine: FetchEPSHistory(start-1y)+FetchHistory → ReconstructPESeries → RollingPercentile(5y, minPoints=252) → 整段 upsert。实现细节以计划 Task 6 为准。",
+  "module": "internal/prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "engine source 标的走 yahoo 路径: EPS 比价格多回看 1 年,价格区间 [now-USLookbackYears, now],interval=1d",
+      "重算 PE 正确落库: close=100/EPS=2 → PETTM=50,close=110 → 55"
+    ],
+    "boundary": [
+      "序列样本 < rollingMinPoints(252) → Pctl5Y 为 NaN(落 NULL);PB/PSTTM/Pctl10Y 恒为 NaN(M1 口径)"
+    ],
+    "error_handling": [
+      "eps/price 拉取失败或 ReconstructPESeries 失败 → 包装错误记入 Report.Failed,不中断其余标的"
+    ],
+    "non_functional": [
+      {
+        "desc": "每日全量重算幂等(无增量状态);理杏仁路径既有用例不回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/prism"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  },
+  "reject_reason": "两个 verify_by:test 完成标准缺测试断言(实现代码正确,仅测试覆盖不足)。[functional[0]] fakeUS2.FetchHistory/FetchEPSHistory 丢弃 start/end/interval 参数(return f.closes/f.eps,nil),TestRefreshEnginePath 未断言 EPS 多回看1年(start-1y)、价格区间[now-USLookbackYears,now]、interval=1d 三项中任何一项——只验证了走yahoo路径产出PE。修复:仿同文件 fakeLix.calls 让 fakeUS2 捕获参数并断言 FetchEPSHistory start==now-USLookbackYears-1y、FetchHistory start==now-USLookbackYears/end==now/interval=='1d'。[error_handling[0]] 全包无 engine 失败注入用例:fakeUS2 恒返回 nil error,ReconstructPESeries 失败分支(如EPS<MinEPSPoints)也无测试。三处包装(eps history/price history/reconstruct: %w)代码正确但零测试断言。修复:仿 fakeLix.fail 注入 FetchEPSHistory/FetchHistory 错误各一例、构造 ReconstructPESeries 失败一例,断言各自进 Report.Failed 且带正确前缀、不中断其余标的。已过项:functional[1] PE 50/55落库、boundary[0] Pctl5Y及PB/PSTTM/Pctl10Y 恒NaN、non_functional理杏仁6用例无回归(-count=1全PASS,cover88.5%)。注:team-lead 曾提出这两项可用 review 兜底;因 DoD 标注 verify_by:test 且同包已有 fakeLix 断言范式,按 Reality Checker 口径判 NEEDS WORK,最终是否放宽 DoD 由 Leader 定夺。",
+  "fix_items": [
+    "[MAJOR] refreshLixinger 增量守卫时区混算: latest 经 time.Parse 为 UTC 午夜而 now 为本地时刻,西经宿主机会产生 startDate>endDate 倒挂请求。改为日历日字符串比较,保证请求区间恒 start<=end 且「已是最新」判断与时区无关",
+    "[MAJOR] refreshEngine 缺当前 EPS(TTM)<=0 熔断: 当前 TTM 亏损但历史有>=8 正 EPS 季的标的会静默入库截断到最后盈利日的过期序列。对齐 ReconstructPEPercentile 的 ErrNonPositiveEPS 语义: 最新对齐 EPS<=0 时记入 Report.Failed 不入库,并补测试"
+  ]
+}

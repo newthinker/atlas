@@ -1,0 +1,41 @@
+{
+  "task": "TASK-002",
+  "title": "akshare collector 基座 + A 股个股时序",
+  "by": "dev-agent-8",
+  "at": "2026-07-24",
+  "revision": "review_fix rework=2 (LIVE-FIX akshare 1.18.75)",
+  "key_findings": [
+    "akshare 1.18.75 已移除 stock_a_indicator_lg(aktools 实测 404)。A 股个股改走百度股市通 stock_zh_valuation_baidu,与 HK 的 stock_hk_valuation_baidu 统一为 fetchBaidu(api, code, start, end) 单一路径。",
+    "百度接口 period 粒度实测: 近一年/近三年=日频,近五年≈2日,近十年≈5日,全部=15日降采样。'全部'不可用于日频序列——改按窗口跨度选 period(baiduPeriods)。",
+    "PSTTM 恒 NaN: lg 的 ps 能力随接口移除失效,百度接口无 PS。指数 stock_index_pe_lg 实测完美(5173 行日频,键名 日期/滚动市盈率 一致),index.go 零修改。",
+    "覆盖率 89.5% ≥80;全仓 go build ./... 通过。"
+  ],
+  "decisions": [
+    {"decision": "A股/HK 统一 fetchBaidu(api, code, start, end): 按 period 策略拉每 metric(市盈率(TTM)/市净率),再 PE/PB 按日期合并(PE 日期为主键,仅 PB 无 PE 的日不产出行),复用 fnum/fdate/clipSort/guardSchemaDrift。", "rationale": "lg 移除后两市场数据源同构,消除重复;既有 HK 合并主键口径保留。"},
+    {"decision": "baiduPeriods(start,end): span<=1y→[近一年];<=3y→[近三年];更长→[近十年,近三年] 双拉。用日历日比较 !start.Before(end.AddDate(-N,0,0))。", "rationale": "近三年在近十年之后拉取,同日日频值覆盖近十年降采样稀疏值;首次 10Y 回填走双拉,增量小窗口走近一年。"},
+    {"decision": "guardSchemaDrift 传 api 名(stock_zh/hk_valuation_baidu);PSTTM 显式 NaN 并注释注明 lg ps 能力失效。", "rationale": "字段键(value)漂移可观测;PS 缺失是接口现实非 bug。"},
+    {"decision": "包注释 live 校验点更新为'已于 2026-07-24 对 akshare 1.18.75 实测校正'并记录 lg 移除/百度迁移/指数不变。", "rationale": "留档实测事实,后续再漂移有基准。"}
+  ],
+  "files_modified": [
+    "internal/collector/akshare/stock.go (删 lg fetchAStock;新增 baiduPeriods + fetchBaidu 统一 A/HK;mapAStockSymbol/mapHKSymbol 保留)",
+    "internal/collector/akshare/client.go (包注释 live 校验点更新;fnum/fdate/clipSort/guardSchemaDrift 不变)",
+    "internal/collector/akshare/stock_test.go (删 lgServer 用例;新增 baiduServer + period 策略/字符串数值/guard/HK 合并/缺字段/T00 后缀用例)"
+  ],
+  "interfaces_exposed": [
+    "func (c *Client) FetchStockValuationSeries(symbol, market string, start, end time.Time) ([]ValuationPoint, error) 签名不变;CN_A→stock_zh_valuation_baidu, HK→stock_hk_valuation_baidu",
+    "PSTTM 恒 NaN(百度无 PS);PE/PB 双指标合并(PE 日期为主键)",
+    "period 策略透明于调用方: 首次 10Y 回填自动双拉近十年+近三年,增量走近一年",
+    "包级 helper 不变: get/fnum(float64+string)/fdate(T00 后缀兼容)/clipSort/guardSchemaDrift"
+  ],
+  "live_check_points": [
+    "已对 akshare 1.18.75 实测: stock_zh_valuation_baidu(A股裸六位)/stock_hk_valuation_baidu(HK五位补零), indicator=市盈率(TTM)|市净率, period 粒度如上, date 值带 T00:00:00.000 后缀(fdate[:10] 兼容), 字段键 date/value。",
+    "stock_index_pe_lg 仍可用(日频, 日期/滚动市盈率), index.go 零修改。",
+    "后续再漂移: guardSchemaDrift 会把 PE 全 NaN 转 Failed 告警。"
+  ],
+  "verification": {
+    "tests": "TestFetchAStockBaiduSeries/MissingAndOrder/StringNumerics/AllNaNGuard/FetchBaiduPeriodStrategy(3子)/UnsupportedMarket/HKStockMerge + 指数 + HTTP 全 PASS",
+    "coverage": "89.5% (≥80 门禁通过)",
+    "command": "GOTOOLCHAIN=local go test ./internal/collector/akshare/ -count=1 -cover && go build ./...",
+    "commit": "8c59cd4 fix(prism): migrate stock valuation to baidu endpoints with period strategy (akshare 1.18.75 live correction)"
+  }
+}

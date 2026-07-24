@@ -1,0 +1,57 @@
+{
+  "task_id": "TASK-006",
+  "by": "dev-agent-6",
+  "key_findings": [
+    "refreshEngine 替换 TASK-005 stub:FetchEPSHistory(start-1y..now) + FetchHistory(start..now,\"1d\") → valuation.ReconstructPESeries → valuation.RollingPercentile(pe,5,252) → 整段 upsert;每日全量重算无增量状态(幂等)。",
+    "M1 口径:yahoo 路径 rows 的 PB/PSTTM/Pctl10Y 恒 math.NaN()(落 NULL),仅 PETTM 与 Pctl5Y 有值;rollingMinPoints=252(约1年交易日),窗口样本不足 → 分位 NaN。",
+    "EPS 比价格多回看 1 年(start.AddDate(-1,0,0))保证首个交易日有可对齐 EPS 点;各步错误用 fmt.Errorf 包装(eps history/price history/reconstruct 前缀)返回,由 Refresh 归入 Report.Failed 不中断。",
+    "返工(epoch=2)补齐 verify_by:test 断言:fakeUS2 改捕获参数(epsCalls/priceCalls)+ 可注入失败(failEPS/failPrice);既有理杏仁 6 用例无回归,全包 10 用例 PASS,覆盖率 88.5%→94.2%。"
+  ],
+  "decisions": [
+    {
+      "decision": "fakeUS2 由 value receiver 改 pointer receiver + per-symbol calls/fail map(仿同文件 fakeLix)",
+      "rationale": "functional[0] 需断言拉取窗口参数、error_handling[0] 需注入失败,原丢弃参数的 value fake 无法机制化验证;pointer + map 是同包既有范式。"
+    },
+    {
+      "decision": "engine 失败分支拆两测:TestRefreshEngineFailurePrefixes(单标的表驱动验三前缀)+ TestRefreshEnginePartialFailure(per-symbol failEPS 验不中断)",
+      "rationale": "fakeUS2 对所有 symbol 返回同一份 eps/closes,reconstruct 失败例(削减 EPS)会连累同 fake 的 OK 标的;故前缀验证用单标的、不中断验证用 per-symbol failEPS(仅命中 BAD),两者不互相干扰。"
+    },
+    {
+      "decision": "TestRefreshEnginePath 在计划断言外补 PB/PSTTM/Pctl10Y 恒 NaN + 拉取窗口三参数断言",
+      "rationale": "DoD/设计 §9 M1 口径明确 yahoo 路径无 PB/PS 且 10Y 分位无意义;functional[0] 明确要求验证拉取窗口(价格区间/interval/EPS 多回看)。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go (实现 refreshEngine,加 valuation/math import)",
+    "internal/prism/refresh_test.go (追加 fakeUS2 捕获参数+失败注入、TestRefreshEnginePath 参数断言、TestRefreshEngineFailurePrefixes、TestRefreshEnginePartialFailure)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/prism",
+    "note": "对外签名与 TASK-005 discovery 完全一致,无新增导出符号(refreshEngine 未导出)。USClient(FetchHistory/FetchEPSHistory)现被 engine 路径真实消费;TASK-007 传入的 yahoo.Yahoo 须满足 USClient(FetchHistory yahoo.go:177, FetchEPSHistory eps.go:40)。Refresh 主入口 source=\"engine\" 分支已可用。",
+    "new_internal": "const rollingMinPoints=252; refreshEngine(cfg,store,us,inst,now) error [已实现]"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 -v -cover",
+    "result": "PASS, 10 用例(理杏仁 6 + engine 4:Path/FailurePrefixes[3子例]/PartialFailure,无回归)",
+    "coverage": "94.2% (≥80% 门禁达标,较返工前 88.5% 提升)",
+    "gofmt_vet": "gofmt -l 无输出;go vet 干净",
+    "commits": "edec2e7 feat(prism): US engine path...;adab4cb test(prism): cover engine path params and failure branches(返工 epoch=2)",
+    "rework_note": "epoch=1 首次 REJECT 原因:functional[0] 拉取窗口参数与 error_handling[0] 三处包装前缀零测试断言(实现代码正确)。已补齐,两组断言全绿。",
+    "detect_changes": "gitnexus 索引 stale(last 86136ed),detect_changes 由 Leader 代跑,受影响 scope 仅限 internal/prism 两文件。"
+  },
+  "review_fix_r2": {
+    "by": "dev-agent-4",
+    "epoch": 2,
+    "fixes": [
+      "MAJOR-1 时区安全增量守卫(refreshLixinger):原代码把 latest 经 time.Parse 成 UTC 午夜、与本地 now 做 start.Before(now) 绝对时刻比较,西经宿主机会发 startDate>endDate 倒挂请求。改为:parse latest(保留坏日期错误分支)→ start=latest+1 → 若 start.Format(YYYY-MM-DD) >= now.Format(YYYY-MM-DD) 则零请求。日历日字符串比较(ISO 字典序=时间序)与宿主时区无关,区间恒 start<=end。注意口径是 start(=latest+1)>=nowDate 而非 latest>=nowDate——后者会破坏既有 TestRefreshUpToDateZeroRequest(latest=昨天应零请求)与 TestRefreshBadLatestDate(坏日期须先 parse 报错)。",
+      "MAJOR-2 当前 EPS<=0 熔断(refreshEngine):ReconstructPESeries 只校验正 EPS 点数>=MinEPSPoints,不像 ReconstructPEPercentile 那样 gate 当前 EPS<=0,导致当前 TTM 亏损但历史有>=8 正季的标的静默入库截断到最后盈利日的过期序列。修复:reconstruct 前用 currentEPS(eps)(取日期最晚点,不假设已排序)判断,<=0 则 return valuation.ErrNonPositiveEPS(复用既有哨兵),标的进 Report.Failed 不入库。"
+    ],
+    "new_helper": "currentEPS(eps []core.EPSPoint)(float64,bool) — 返回日期最晚点的 EPS(当前 TTM),空切片 ok=false;语义对齐 valuation.ReconstructPEPercentile 的 currentEPS",
+    "tests_added": [
+      "TestRefreshLixingerTimezoneSafeUpToDate(西经 now,latest=本地当日→零请求不倒挂)",
+      "TestRefreshLixingerTimezoneSafeIncremental(西经 now,增量区间日历日不倒挂)",
+      "TestRefreshEngineNonPositiveCurrentEPS(9点=8正+最新负→Failed 不入库,错误含 non-positive)"
+    ],
+    "verification": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 -cover → ok, 覆盖率 95.0%;既有 12 用例无回归(含 UpToDateZeroRequest/BadLatestDate/Incremental 边界);go vet+gofmt 干净;go build ./... 全仓通过。仅动 refresh.go + refresh_test.go,未改 Store/LixingerClient/USClient 导出契约。commit 6973e44。detect_changes 由 Leader 代跑(gitnexus 索引 stale)。"
+  }
+}

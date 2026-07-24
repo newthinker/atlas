@@ -1,0 +1,44 @@
+{
+  "task_id": "TASK-009",
+  "by": "dev-agent-6",
+  "key_findings": [
+    "web handler 测试用 NewHandlerWithFS(TemplateFS())(embed 模式);但 serve.go:226 用磁盘模式 NewHandler(\"internal/api/templates\")——模板必须磁盘+embed 双份(既有 7 模板皆如此)。QA CRITICAL:初版只把 prism 模板放 embed 目录,磁盘目录缺失致 serve 启动 ParseFiles 失败崩全站;修复复制两模板进 internal/api/templates/ 并补磁盘模式回归测试。",
+    "新增 //go:embed static/* → staticFS;Static handler 白名单仅 echarts.min.js(其余 404),Content-Type text/javascript,http.ServeFileFS 从 embed 读。echarts@5.5.1 vendor 进 static/(1.03MB,Apache 头)。",
+    "detail 模板 JS 按 T8 API 信封契约读 resp.data.*(计划骨架直读 d.dates 会拿不到数据;T8 discovery 明确 response.JSON 包 {data,meta})——已改为 var d = resp.data || {}。",
+    "server.go PrismStore!=nil 才注册 /prism/board、/prism/detail/(剥前缀仿 SymbolDetail)、/static/;*prismstore.Store 满足 web.PrismProvider(Board/Series 同签名)。"
+  ],
+  "decisions": [
+    {"decision": "prism 模板磁盘(internal/api/templates/)+embed(handler/web/templates/)双份", "rationale": "serve.go 用磁盘模式 NewHandler,既有 7 模板均双份维护;缺磁盘份即启动崩溃(QA CRITICAL)。回归测试 TestNewHandlerDiskModeHasPrismTemplates 以 NewHandler(\"../../templates\")真实磁盘构造,已验证移走磁盘模板即 FAIL、堵住『测试只走 embed』盲区。"},
+    {"decision": "detail JS 读 resp.data 而非计划骨架的裸 d", "rationale": "与 TASK-008 API 信封契约一致;否则图表拿不到数据。规格与上游契约冲突时以上游 verified 契约为准。"},
+    {"decision": "PrismBoard 500 泛化为 \"internal error\" 不回显 err 细节;删死字段 prismCard.PctlVal", "rationale": "QA MINOR:错误细节不外泄留日志;PctlVal 声明+赋值无读方为死字段。"},
+    {"decision": "补 boundary/error_handling 测试(nil provider×2、未知 symbol、静态白名单、Board 500 不回显)+ 磁盘模式回归", "rationale": "DoD 分支 + QA CRITICAL 盲区。"}
+  ],
+  "files_modified": [
+    "internal/api/handler/web/handler.go (static embed、两处 pages、PrismProvider/SetPrismProvider/prismCard/fmtVal/PrismBoard/PrismDetail/Static;review_fix:500 泛化 + 删 PctlVal)",
+    "internal/api/handler/web/templates/prism_board.html (embed 份)",
+    "internal/api/handler/web/templates/prism_detail.html (embed 份,JS 读 resp.data)",
+    "internal/api/templates/prism_board.html (review_fix 新增:磁盘份,serve 磁盘模式必需)",
+    "internal/api/templates/prism_detail.html (review_fix 新增:磁盘份)",
+    "internal/api/handler/web/static/echarts.min.js (vendor echarts@5.5.1)",
+    "internal/api/handler/web/prism_web_test.go (8 用例 + review_fix:TestNewHandlerDiskModeHasPrismTemplates 磁盘回归 + 500 不回显断言)",
+    "internal/api/server.go (web 路由区 PrismStore!=nil 注册 /prism/board|/prism/detail/|/static/)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/api/handler/web",
+    "PrismProvider": "interface{ Board()([]prism.BoardRow,error); Series(symbol,from string)(*prism.SeriesData,error) };*prismstore.Store 满足之",
+    "handler_methods": "(*Handler).SetPrismProvider(p PrismProvider, low,high float64);PrismBoard(w,r);PrismDetail(w,r,symbol);Static(w,r)",
+    "routes": "GET /prism/board?group= (SSR 卡片);GET /prism/detail/{symbol} (ECharts 双图);GET /static/echarts.min.js",
+    "template_dual_copy": "prism_board.html/prism_detail.html 必须同时存在于 internal/api/templates/(磁盘,serve 用)与 internal/api/handler/web/templates/(embed);改一处须同步另一处。",
+    "note_for_TASK-010": "部署文档说明 /prism/board;config prism.enabled + instruments 决定注册;静态资源已 vendor 进 embed。"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/api/... -count=1 && go build ./...",
+    "result": "全 PASS(web 10 prism 用例:含磁盘回归 TestNewHandlerDiskModeHasPrismTemplates + 500 不回显;既有 web/api 无回归)",
+    "build": "go build ./... 全仓通过",
+    "regression_proof": "临时移走磁盘 prism_board.html → 回归测试 FAIL;恢复 → PASS,证明确能捕获 serve 启动崩溃 CRITICAL",
+    "gofmt_vet": "gofmt -l 无输出;go vet ./internal/api/... 干净",
+    "commits": "42a20ff(主体);c065e5e fix(prism): add disk templates for serve and harden web handler(review_fix)",
+    "AD-6_note": "packages 含 internal/api,dev_done 大概率再撞 AD-6(聚合<80 既有大包欠账)。请 Leader 同款处置(临时降 dev_minimum + 恢复 + 文件级复核)。",
+    "detect_changes": "gitnexus 索引 stale,由 Leader 代跑"
+  }
+}

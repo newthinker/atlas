@@ -1,0 +1,56 @@
+{
+  "id": "TASK-005",
+  "title": "cmd 接线与 20 家配置清单",
+  "description": "cmd/atlas/prism.go 构造 edgar client 并给 Refresh 补第 6 参数;EdgarUserAgent 为空且存在 source==edgar 标的时报错。configs/config.example.yaml 追加 edgar_user_agent/edgar_lookback_years 与首批 20 家 US-GAAP filer(CIK 用官方 company_tickers.json 校验命令逐个核对,命令见计划 Task 5 Step 2)。手动 smoke:真实 EDGAR 拉 NVDA 核对 fundamental_q ≥40 行与 10Y valuation 覆盖。",
+  "module": "cmd-wiring",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "runPrismRefresh 构造 edgar.New(pcfg.EdgarUserAgent) 并传入 Refresh 第 6 参数;go build ./... 通过",
+      "go test ./cmd/atlas/ -count=1 全 PASS(既有用例补参)"
+    ],
+    "boundary": [
+      "EdgarUserAgent 为空且 instruments 存在 source==edgar → 返回错误提示配置 prism.edgar_user_agent(SEC 要求)"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "config.example.yaml 20 家清单的 CIK 与官方 company_tickers.json 映射一致(校验命令输出比对);TSM 等 IFRS filer 不入池",
+        "verify_by": "review"
+      },
+      {
+        "desc": "手动 smoke:config 只留 NVDA → prism refresh → fundamental_q ≥ 40 行、valuation_daily 覆盖约 10 年;逐科目缺漏在此确认(live 校验点)",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-11",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "id": "TASK-003",
+  "title": "理杏仁估值时序方法 FetchValuationSeries",
+  "description": "internal/collector/lixinger 新增 series.go: ValuationPoint 类型与 (*Lixinger).FetchValuationSeries(symbol, start, end)。复用同包 endpointFor/request/NewWithBaseURL。实现细节以计划 Task 3 为准;注意 ⚠ 指数原始指标名(pe_ttm.mcw)按 cvpos 规则外推未 live 验证,注释须标注 Task 7 首跑校验点。",
+  "module": "internal/collector/lixinger",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/lixinger/series.go",
+    "internal/collector/lixinger/series_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "公司 symbol(600519.SH): 请求打到 /cn/company/fundamental/non_financial,payload 含 startDate/endDate/stockCodes=[600519]/metricsList=[pe_ttm,pb,ps_ttm,pe_ttm.y5.cvpos,pe_ttm.y10.cvpos]",
+      "指数 symbol(000300.SH): 打到 /cn/index/fundamental,metricsList 为 .mcw 五指标(pe_ttm.mcw 等)",
+      "cvpos 原始 0~1 统一 ×100 为百分位;date 同时接受 ISO8601 与 YYYY-MM-DD"
+    ],
+    "boundary": [
+      "响应缺某指标 → 对应字段为 NaN;响应乱序 → 输出按 Date 升序"
+    ],
+    "error_handling": [
+      "endpointFor 不支持的 symbol 返回 error;date 解析失败返回含 symbol 与原始串的包装 error"
+    ],
+    "non_functional": [
+      {
+        "desc": "lixinger 包既有用例(latest/history 等)不回归",
+        "verify_by": "test"
+      },
+      {
+        "desc": "指数指标名外推的 live 校验点已在代码注释与 discovery 中标注",
+        "verify_by": "review"
+      },
+      {
+        "desc": "测试文件顶部 Context Checkpoint 注释映射验收条目(仿 fred_test.go:15-21)",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-5",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/collector/lixinger"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  }
+}

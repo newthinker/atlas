@@ -1,0 +1,38 @@
+{
+  "task": "TASK-004",
+  "title": "valuation 序列函数(ReconstructPESeries + RollingPercentile)",
+  "key_findings": [
+    "reconstruct.go 已有 latestEPSAtOrBefore(pts, t) helper;提取的 alignPE 复用它而非计划的内联 sort.Search——功能等价且不制造死代码",
+    "重构安全网:ReconstructPEPercentile 4 个既有测试全部通过(alignPE 内排序 closes 不影响 PercentileRank 的集合计数;新增 close<=0 跳过在正价格数据下不触发,行为不变)",
+    "全包覆盖率 98.5%,go vet/gofmt 干净,go build ./... 全量无回归",
+    "RollingPercentile 用双指针滑窗(lo 单调右移),窗口 (dates[i]-years, dates[i]) 半开;样本 < minPoints → NaN"
+  ],
+  "decisions": [
+    {"decision": "alignPE 复用 latestEPSAtOrBefore 而非内联 sort.Search", "rationale": "避免 latestEPSAtOrBefore 沦为死代码;二者对同一 pts 语义完全一致(i==0 ↔ idx<0)"},
+    {"decision": "ReconstructPEPercentile 的 step-4 循环整体替换为 _, peSeries := alignPE(closes, pts)", "rationale": "peSeries 多重集不变(排序仅影响顺序,PercentileRank 基于计数);currentPE 仍用原始 closes[len-1],既有测试是安全网"},
+    {"decision": "boundary[1] 测试用 9 个季度点(前 8 正 + 末尾亏损)", "rationale": "需先过 MinEPSPoints=8 门槛才能验证对齐 EPS<=0 交易日被跳过;8 正点满足门槛"}
+  ],
+  "files_modified": [
+    "internal/valuation/reconstruct.go (提取 alignPE,step-4 循环改调用)",
+    "internal/valuation/series.go (新建)",
+    "internal/valuation/series_test.go (新建)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/valuation",
+    "funcs": [
+      "func ReconstructPESeries(closes []core.OHLCV, eps []core.EPSPoint) (dates []time.Time, pe []float64, err error)  // 阶梯对齐日频 PE 序列,升序等长;正 EPS 点<MinEPSPoints 返回 ErrInsufficientEPS;跳过对齐 EPS<=0 或 close<=0 的交易日",
+      "func RollingPercentile(dates []time.Time, values []float64, years, minPoints int) []float64  // 每点在 (dates[i]-years, dates[i]) 窗口内的 0-100 分位;窗口样本<minPoints → NaN;dates 须升序"
+    ],
+    "internal_helper": "alignPE(closes, pts) (dates []time.Time, pe []float64) — 未导出,ReconstructPESeries 与 ReconstructPEPercentile 共用",
+    "note": "Task 6(美股引擎路径)消费 ReconstructPESeries + RollingPercentile 重建美股公司 PE 序列与滚动分位。复用 MinEPSPoints/ErrInsufficientEPS/PercentileRank(既有)。"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/valuation/ -v -cover",
+    "result": "PASS, 9/9 用例(既有 5 + 新 4)",
+    "coverage": "98.5% (≥80% 门禁达标)",
+    "regression": "go build ./... 全量通过;ReconstructPEPercentile 4 既有测试全绿(重构安全网)",
+    "vet": "go vet 通过, gofmt 无差异",
+    "commit": "bb02624 refactor(valuation): extract alignPE; add ReconstructPESeries and RollingPercentile",
+    "detect_changes": "gitnexus 索引 stale(last 86136ed),detect_changes 由 Leader 代跑(会话中途重建索引有版本坑)"
+  }
+}

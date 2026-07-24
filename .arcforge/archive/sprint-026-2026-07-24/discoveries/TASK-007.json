@@ -1,0 +1,30 @@
+{
+  "task_id": "TASK-007",
+  "type": "纯文档任务(文档同步 + M2 验收记录)",
+  "key_findings": [
+    "设计文档 docs/prism/atlas_prism_design.md §3 数据源矩阵同步现状:A/H 公司主源改 akshare(经 aktools 侧车,茅台/腾讯 source=akshare)、A/H 指数标 akshare 降级链(理杏仁主源+fallback_source akshare)、美股季报行改 ✅ M2 已落地(companyfacts 10Y + 真实 filing date 生效 + 拆股归一化,失败降级 yahoo engine)、ETF 持仓权重改 ★ M3(原 M2,经用户决策推迟)。",
+    "§9 M2 节改为『已落地』,列出 EDGAR 采集器/filing_date 升级/季度化+拆股归一化/compare 页,并显式记录『范围变更:etfholdings + D3 成分聚合推迟到 M3』。",
+    "deployment.md prism 段追加 EDGAR 配置说明:prism.edgar_user_agent 必须含联系邮箱(SEC 要求,缺失 403;存在 edgar 标的而为空则 refresh 报错退出)、edgar_lookback_years 默认 10、礼貌限速。",
+    "只改与现实不符的行,未重写文档。"
+  ],
+  "m2_acceptance": {
+    "env": "临时 config(scratchpad,未动 configs/config.yaml),仅 NVDA edgar 标的,真实 EDGAR,smoke db 71 季/2513 日",
+    "1_no_lookahead": "PASS — pe_ttm 在 filing_date 2026-02-25 跳变(47.85→39.91→37.73),period_end 2026-01-25 附近平滑",
+    "2_10y_curve": "PASS — /prism/detail/NVDA 200 渲染;/api/prism/series 2513 点 2016-07-25~2026-07-23(~10Y),pe_ttm+pctl_10y 有值",
+    "3_recomputable": "PASS — 独立 fundamental_q 滚动求和生效 EPS_TTM(3.83/5.03)× pe_ttm = 隐含 Close $183/$190(NVDA 真实价位);filing 日 TTM 台阶与 pe 下跳吻合",
+    "4_pb_ps": "PASS — pb 2513/2513 非空(不再为—),ps 1716/2513(早期营收缺口属预期)",
+    "5_ah_index_regression": "环境不可验证(本地无理杏仁/akshare 凭据,smoke 仅 NVDA)→ 建议部署后核;旁证 filing_date 零值兼容使既有路径零漂移(Task 1 策略测试全 PASS)。未伪造。",
+    "6_fallback": "PASS — 无效 CIK 9999999999 → EDGAR 404 → 降级 engine,报告『1 degraded』+ 完整 Degraded 消息",
+    "7_compare": "PASS(单标的环境)— /prism/compare 200 渲染 compare-chart/symbol-picker/echarts;多标的目检需多标的库,建议部署后复核"
+  },
+  "files_modified": [
+    "docs/prism/atlas_prism_design.md (§3 矩阵 + §9 M2)",
+    "docs/deployment.md (prism 段 EDGAR UA 说明)",
+    "docs/superpowers/plans/2026-07-24-prism-m2.md (Task 7 Step 1/2/3 勾选 + 7 条验收结果)"
+  ],
+  "verification": {
+    "doc_review": "3 处 review 条目(§3/§9/deployment)均已按现实同步",
+    "acceptance": "7 条中 5 PASS + 1 fallback PASS = 6 条本地验证通过;第 5 条(A/H 回归)环境受限如实记录待部署后核,未伪造",
+    "note": "纯文档任务,先 transition dev_done 后 git commit(docs-only 门禁顺序);验收素材 smoke db/config 在 scratchpad 可复现"
+  }
+}

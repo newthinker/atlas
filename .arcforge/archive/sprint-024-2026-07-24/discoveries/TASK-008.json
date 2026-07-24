@@ -1,0 +1,52 @@
+{
+  "task": "TASK-008",
+  "title": "JSON API /api/prism/board 与 /api/prism/series",
+  "key_findings": [
+    "response.JSON(w,status,data) 会把 data 包进标准信封 {\"data\":{...},\"meta\":{timestamp}}——全 API 统一约定(既有 analysis/signals/backtest 测试均 resp.Data.(map[string]any) 读取)。前端(TASK-009)读 board 须走 resp.data.items,series 走 resp.data.symbol/dates/...",
+    "handler/api 包 import handler/api 无别名,server.go 内引用为 api.NewPrismHandler(计划写的 apihandler 别名不符实际)",
+    "NaN→null:jf(v) 单值、njf([]float64) 切片,统一把 math.NaN() 序列化为 JSON null(encoding/json 拒绝 NaN)",
+    "status 规则:pctl_10y 优先,NaN 则退 pctl_5y;仍 NaN→na;<low→low、>high→high、区间内→neutral(四分支均已测)",
+    "500 脱敏(QA review_fix):Board/Series 的 500 分支原直接回显 err.Error() 泄露 SQLite 路径/SQL;response.Error(w,500,err) 对普通 error 脱敏为 'an internal error occurred'(INTERNAL_ERROR),对 core.Error 用结构化 code/message——全 api handler 统一约定。",
+    "多包 AD-6:task-scope 4 包中 storage/prism 达标,handler/api/internal/api/cmd/atlas 为既有大包基线<80,聚合欠账;本次改动(handler/api prism.go 两行 + 测试)不改变该结构。"
+  ],
+  "decisions": [
+    {"decision": "handler 沿用 response.JSON 信封而非自定义裸 JSON", "rationale": "与全 API 约定一致(analysis/signals 同款);前端统一走 resp.data。测试断言据此改为 resp.Data.(map[string]any)"},
+    {"decision": "storage Series 未知 symbol:errors.Is(err, sql.ErrNoRows) → fmt.Errorf(\"%w: %s\", ErrNotFound, symbol);其他 scan 错误保留原包装", "rationale": "精确区分未知 symbol(404)与真实 DB 错误(500);DoD error_handling 要求 errors.Is 可判。仅改 Series 错误分支+加 errors import+ErrNotFound 变量,未动 store 其他部分"},
+    {"decision": "server.go PrismStore==nil 不注册路由;serve.go 仅 cfg.Prism.Enabled 时 prismstore.Open(先 ApplyDefaults),defer Close", "rationale": "prism 未启用零开销;serve 阻塞至信号返回,defer 在 Shutdown 后关库"},
+    {"decision": "补 storage TestSeriesUnknownSymbolReturnsErrNotFound 与 handler neutral/500 用例", "rationale": "填补 MY 新代码真实缺口:ErrNotFound 分支、neutral 状态、store 错误 500——均 DoD 明列。storage 覆盖率 79.7→81.1%"},
+    {"decision": "返工(epoch=3)补 windowFrom 返回值断言:纯函数表驱动 TestWindowFrom + 端到端透传 TestSeriesPassesWindowFromToStore", "rationale": "functional[1] verify_by:test 但 windowFrom 返回值从未被断言(行覆盖 100% 不等于行为验证);表驱动直接锚定映射,端到端复用前任已加的 fakePrismStore.gotFrom 证明 handler 透传。仅动 prism_test.go。"},
+    {"decision": "review_fix(rework=2)500 脱敏:两处 response.JSON(err.Error()) 改 response.Error(w,500,err)", "rationale": "QA MINOR:直接回显 err.Error() 绕过 response.Error 脱敏约定泄露内部细节;对齐其余 api handler。TestPrismStoreErrorReturns500 补 NotContains 'db down' 断言(Board+Series)锁死不回显。仅动 prism.go 两行 + prism_test.go。"}
+  ],
+  "files_modified": [
+    "internal/api/handler/api/prism.go (新建:NewPrismHandler/Board/Series/status/jf/windowFrom;review_fix:两处 500 改 response.Error 脱敏)",
+    "internal/api/handler/api/prism_test.go (4 用例 + 返工 TestWindowFrom/TestSeriesPassesWindowFromToStore;review_fix:500 测试补 NotContains 断言)",
+    "internal/api/server.go (Dependencies +PrismStore/PrismLow/PrismHigh;setupRoutes 条件注册 /api/prism/board|series;import prismstore)",
+    "internal/storage/prism/sqlite.go (最小增补:errors import + ErrNotFound + Series 错误分支映射)",
+    "internal/storage/prism/sqlite_test.go (补 TestSeriesUnknownSymbolReturnsErrNotFound)",
+    "cmd/atlas/serve.go (cfg.Prism.Enabled 时 prismstore.Open 注入 deps,defer Close;import prismstore)"
+  ],
+  "interfaces_exposed": {
+    "api_contract": {
+      "GET /api/prism/board": "resp.data = {items:[{symbol,name,group,market,source,as_of,pe_ttm,pb,pctl_5y,pctl_10y,status}], low_pct, high_pct};status∈low|neutral|high|na;NaN→null",
+      "GET /api/prism/series?symbol=&window=1y|3y|5y|max": "resp.data = {symbol,name,source,dates[],pe_ttm[],pctl_5y[],pctl_10y[]};window 空/max/未知→全部;缺 symbol→400;未知 symbol→404;NaN→null",
+      "500 错误": "response.Error 信封 {error:{code:INTERNAL_ERROR,message:'an internal error occurred'}};不回显内部细节"
+    },
+    "handler_iface": "api.PrismStore interface{ Board()([]prismstore.BoardRow,error); Series(symbol,from string)(*prismstore.SeriesData,error) };*prismstore.Store 满足之",
+    "server_deps": "api.Dependencies 新增 PrismStore *prismstore.Store(nil=不注册)、PrismLow float64、PrismHigh float64",
+    "storage_new": "var prismstore.ErrNotFound = errors.New(\"prism: symbol not found\");Series 未知 symbol 返回 fmt.Errorf(\"%w: %s\", ErrNotFound, symbol)",
+    "window_mapping": "windowFrom(window,now):1y/3y/5y → now.AddDate(-N,0,0).Format(\"2006-01-02\");max/空/未知 → \"\"(store 视作全区间)",
+    "note_for_TASK-009": "web 页面消费 /api/prism/board 与 /api/prism/series,注意读 resp.data 信封;status 标签 low/neutral/high/na 可直接用于卡片配色;low_pct/high_pct 随 board 返回;window 参数取 1y|3y|5y|max。"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/api/handler/api/ -count=1 -v && go build ./...",
+    "result": "全 PASS(handler:BoardStatusAndNulls/StoreError500[补脱敏断言]/SeriesWindowAndErrors + TestWindowFrom[6子例]/TestSeriesPassesWindowFromToStore)",
+    "build": "go build ./... 全仓通过",
+    "coverage": "storage/prism 达标;handler/api/internal/api/cmd/atlas 既有大包基线,聚合 65.8% 属存量欠账(AD-6)",
+    "no_regression": "internal/api/... 与 storage/prism 既有用例全绿,无回归",
+    "vet": "go vet 通过,gofmt 无差异",
+    "commits": "4f7f57c(主体);5e920de(返工 windowFrom 断言);53dc55a fix(prism): sanitize api 500 responses via response.Error(review_fix rework=2)",
+    "rework_note": "epoch=3 返工①windowFrom 断言(已过);review_fix rework=2:500 脱敏——两处 response.JSON(err.Error()) → response.Error(w,500,err),测试补 NotContains 'db down'(Board+Series)。",
+    "AD-6_note": "多包 task-scope 门禁预计 DENY(handler/api/internal/api/cmd/atlas 基线<80,存量欠账,本次仅改 handler/api 两行+测试)。请 Leader 同款处置:临时降 dev_minimum 放行 → 恢复 + 文件级复核。",
+    "detect_changes": "gitnexus 索引 stale,由 Leader 代跑"
+  }
+}

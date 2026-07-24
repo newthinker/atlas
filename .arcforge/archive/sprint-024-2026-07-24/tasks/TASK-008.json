@@ -1,0 +1,70 @@
+{
+  "id": "TASK-008",
+  "title": "JSON API /api/prism/board 与 /api/prism/series",
+  "description": "新建 internal/api/handler/api/prism.go(NewPrismHandler/Board/Series,NaN→null,status 标签);storage/prism 补 ErrNotFound;server.go Dependencies+路由注册;serve.go 按 cfg.Prism.Enabled 注入。实现细节以计划 Task 8 为准。",
+  "module": "internal/api",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/api/handler/api/prism.go",
+    "internal/api/handler/api/prism_test.go",
+    "internal/api/server.go",
+    "internal/storage/prism/sqlite.go",
+    "cmd/atlas/serve.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "GET /api/prism/board → {items, low_pct, high_pct};status 取 pctl_10y、缺则 pctl_5y: <low→low、>high→high、区间内→neutral",
+      "GET /api/prism/series?symbol=&window= → 序列 JSON;window 1y/3y/5y 映射 from 日期,max/空→全部",
+      "NaN 一律序列化为 null(board 与 series 皆是)"
+    ],
+    "boundary": [
+      "缺 symbol 参数 → 400;未知 symbol(ErrNotFound)→ 404;分位全 NaN → status=\"na\""
+    ],
+    "error_handling": [
+      "store 层错误 → 500 + {error};storage/prism Series 未知 symbol 返回包装的 ErrNotFound(errors.Is 可判)"
+    ],
+    "non_functional": [
+      {
+        "desc": "server.go: PrismStore 为 nil 时不注册路由;serve.go 注入前 ApplyDefaults 且关闭逻辑挂 shutdown/defer",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go build ./... 通过;internal/storage/prism 既有用例不回归",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-007"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-6",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./internal/api/handler/api",
+    "./internal/api",
+    "./internal/storage/prism",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  },
+  "reject_reason": "唯一缺口 functional[1] window->from 映射无断言覆盖(其余标准全过)。证据:fakePrismStore.Series(symbol,from) 忽略 from 参数(仅按 symbol 查),grep 确认全文件无 windowFrom 断言、无 from 捕获;windowFrom 虽 100% 行覆盖(被 window=5y 与空window 两路执行)但返回值从未被断言——覆盖!=断言。TestPrismSeriesWindowAndErrors 只验证 window=5y 返回 JSON+null,未验证 DoD 明列的 'window 1y/3y/5y 映射 from 日期、max/空->全部'。与 TASK-006 fakeUS2 丢参数同型,按 Reality Checker「断言不覆盖=不算过」判 NEEDS WORK。修复(小):加表驱动 windowFrom 单测(1y->now-1y,3y->now-3y,5y->now-5y,max/空/未知->\"\") 或让 fakePrismStore 捕获 from 并按 window 断言(如 window=1y -> Series 收到 from==now-1y 格式化值;window=max/空 -> from==\"\")。已过项(本轮亲跑确认):functional[0] board status 四分支+low/high_pct回传+NaN->null(TestPrismBoardStatusAndNulls);functional[2] NaN->null 两端点;boundary 缺symbol->400/未知->404(ErrNotFound)/全NaN->na;error_handling store错误->500+storage ErrNotFound包装(errors.Is);non_func[0](review) server.go nil不注册路由+serve.go ApplyDefaults->Open->defer Close 手术式;non_func[1] go build ./... 通过+既有用例无回归。AD-6 文件级复核:handler/api/prism.go 六函数全100%、storage/prism 81.1%(Series 85% ErrNotFound已覆盖)、新增代码无0%函数。",
+  "fix_items": [
+    "[MINOR] api/prism.go Board/Series 两处 500 分支直接回显 err.Error()(response.JSON 500 map error),绕过 response.Error() 脱敏约定,泄露 SQLite 路径/SQL 细节。改用与其余 api handler 一致的 response.Error()(或等价泛化消息),并在既有 500 测试上补 NotContains 内部细节断言"
+  ]
+}

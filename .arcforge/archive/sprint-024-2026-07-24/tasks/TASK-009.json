@@ -1,0 +1,68 @@
+{
+  "id": "TASK-009",
+  "title": "Web 页面 /prism/board 与 /prism/detail(HTMX + ECharts)",
+  "description": "vendor ECharts 5.5.1 到 web/static;handler.go 加 PrismProvider/SetPrismProvider/PrismBoard/PrismDetail/Static 与 embed static;两个模板;server.go web 路由接线。实现细节以计划 Task 9 为准。",
+  "module": "internal/api/handler/web",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/api/handler/web/handler.go",
+    "internal/api/handler/web/templates/prism_board.html",
+    "internal/api/handler/web/templates/prism_detail.html",
+    "internal/api/handler/web/static/echarts.min.js",
+    "internal/api/server.go",
+    "internal/api/handler/web/prism_web_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "GET /prism/board 服务端渲染卡片: 含标的名与低估/高估中文标签;?group= 筛选只渲染该组卡片",
+      "GET /prism/detail/{symbol} 渲染含 id=\"pe-chart\" 容器与 /static/echarts.min.js 引用的页面",
+      "GET /static/echarts.min.js → 200 且 Content-Type 含 javascript"
+    ],
+    "boundary": [
+      "prismProvider 未设置 → 404;未知 symbol → 404(测试 fake 的 Series 须对未知 symbol 返回 error 使该分支可测);NaN 指标渲染为 \"—\";/static/ 下非 echarts.min.js → 404"
+    ],
+    "error_handling": [
+      "Board() 出错 → 500"
+    ],
+    "non_functional": [
+      {
+        "desc": "ECharts vendor 进 embed,不新增外部 CDN;layout.html 既有 tailwind/htmx CDN 不动",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go test ./internal/api/... 全 PASS 且 go build ./... 通过",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-008"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-002",
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-6",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/api/handler/web",
+    "./internal/api"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  },
+  "fix_items": [
+    "[CRITICAL] serve 磁盘模板路径缺 prism 模板致全站启动失败: 把 prism_board.html/prism_detail.html 复制进 internal/api/templates/(磁盘与 embed 双份是现有惯例);并补一条以真实磁盘 TemplatesDir 构造 NewHandler 的回归测试(web 包内相对路径指向 internal/api/templates,覆盖 serve.go 磁盘模式盲区)",
+    "[MINOR] handler.go PrismBoard/PrismDetail 的 http.Error(w, err.Error(), 500) 改为不回显内部错误细节(泛化消息,细节留日志)",
+    "[MINOR] 删除死字段 prismCard.PctlVal(声明+赋值,无任何读方)"
+  ]
+}

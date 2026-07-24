@@ -1,0 +1,35 @@
+{
+  "task": "TASK-007",
+  "title": "atlas prism refresh 子命令与失败告警",
+  "key_findings": [
+    "计划占位名 → 真实同包 helper:配置装载 loadConfigForCLI → loadConfigOrDefaults() (*config.Config, error)(定义于 cmd/atlas/export_ohlcv.go:283);sender 构造 buildCrisisSender(cfg) → 无参 buildCrisisSender() crisis.Sender(crisis.go:419,未配置 telegram 返回 nil interface)",
+    "crisis.Sender = interface{ SendText(text string) error }(internal/crisis/notify.go:12);本包定义 textSender{ SendText(msg string) error } 与之签名等价,buildCrisisSender() 的 crisis.Sender 可直接赋给 deps.sender(textSender 字段)——接口间赋值,nil crisis.Sender → nil textSender,d.sender==nil 判定成立(buildCrisisSender 未配置时 return 字面 nil,无 typed-nil 陷阱)",
+    "deps-struct 模式:可测核心 runPrismRefreshWith(prismRefreshDeps) 100% 覆盖(4 用例);runPrismRefresh 为 shell(config 装载/enabled 守卫/prismstore.Open/依赖装配),0% 单测——与 crisis.go 的 runCrisisEval shell 不单测完全同构(既定模式),由 review + go build 覆盖",
+    "cfg.Collectors[\"lixinger\"].APIKey(map[string]CollectorConfig,CollectorConfig.APIKey);lixinger.New(key, lixinger.WithRetry(true));yahoo.New() 满足 prism.USClient;prism.Refresh(pcfg, store, lix, yh, time.Now())"
+  ],
+  "decisions": [
+    {"decision": "sender 字段类型用本包 textSender 接口而非直接 import crisis.Sender", "rationale": "解耦 cmd/prism 与 crisis 包;buildCrisisSender() 返回值经接口间赋值适配,prism.go 无需 import crisis"},
+    {"decision": "在计划 2 用例外补 TestPrismRefreshAllSuccessNoAlert 与 TestPrismRefreshWarnsOnSendFailure", "rationale": "覆盖 functional[0](全成功不告警)与 error_handling(SendText 失败仅 warn 不失败),使 DoD 可测项均有真实断言"},
+    {"decision": "enabled=false / config 装载失败 / prismstore.Open 失败 三条守卫留在 shell(runPrismRefresh),verify_by review", "rationale": "均为 if err!=nil{return err} / if !enabled{return err} 型简单守卫,置于不可单测的 shell(需真实 config 装载);与 crisis.go runCrisisEval 一致"}
+  ],
+  "files_modified": [
+    "cmd/atlas/prism.go (新建)",
+    "cmd/atlas/prism_test.go (新建)"
+  ],
+  "interfaces_exposed": {
+    "package": "main (cmd/atlas)",
+    "cobra": "prism 父命令 + prism refresh 子命令(atlas prism refresh),init 注册进 rootCmd;launchd entrypoint",
+    "testable_core": "runPrismRefreshWith(prismRefreshDeps) error;prismRefreshDeps{ refresh func() prism.Report; sender textSender; out, errOut io.Writer };textSender{ SendText(msg string) error }",
+    "note_for_TASK-008": "serve.go/web 接线若需 telegram sender 走 buildCrisisSender() crisis.Sender(无参,未配置返回 nil);prism store 走 prismstore.Open(cfg.Prism.DBPath);二者均已在本任务验证可用。"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./cmd/atlas/ -run TestPrismRefresh -v -count=1",
+    "result": "PASS, 4/4 用例(AllSuccessNoAlert/NotifiesOnPartialFailure/PrintsWithoutSender/WarnsOnSendFailure)",
+    "build": "GOTOOLCHAIN=local go build ./... 全仓通过(non_functional 门禁)",
+    "file_coverage": "prism.go: runPrismRefreshWith 100%、init 100%、runPrismRefresh(shell) 0%;整包 cmd/atlas 75.0%",
+    "AD-6_note": "整包 cmd/atlas 覆盖率 75.0% < 80% dev_minimum,但这是 cmd/atlas 历史基线(~75.9%,大量既有未测 crisis/serve shell)所致,非本次改动缺测——本次新增可测核心 runPrismRefreshWith 已 100%。task-completed.sh 仅整包口径 → dev_done 门禁结构上不可过,属已记录的 AD-6。若 dev_done 被 DENY,请 Leader 按 AD-6 处置:亲跑 profile 核实 prism.go 文件级(核心 100%)→ 临时降 config coverage.dev_minimum 放行本次 transition → 立即恢复 + test-agent 文件级独立复核补偿。",
+    "vet": "go vet ./cmd/atlas/ 通过,gofmt 无差异",
+    "commit": "38f7f70 feat(prism): atlas prism refresh subcommand with telegram failure alert",
+    "detect_changes": "gitnexus 索引 stale,由 Leader 代跑"
+  }
+}

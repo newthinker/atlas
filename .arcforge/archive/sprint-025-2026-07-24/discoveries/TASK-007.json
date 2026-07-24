@@ -1,0 +1,32 @@
+{
+  "task_id": "TASK-007",
+  "title": "部署产物(独立 venv + aktools launchd + 配置 + 文档)",
+  "by": "dev-agent-8",
+  "at": "2026-07-24",
+  "revision": "review_fix rework=1 (QA 2x Medium)",
+  "key_findings": [
+    "纯产物任务;review_fix 修复可复现安装与部署文档硬化。docs-only 流程: 先 dev_done(产物门禁跳过 Go 门禁)后 commit。",
+    "五产物: setup.sh(可复现+--upgrade)、requirements.txt、plist(plutil OK)、config.example.yaml(prism 段)、deployment.md(硬化);额外 .gitignore 忽略 akshare venv(lock 保持追踪)。",
+    "commit 0c99ae5(fix), 3 files +47/-13(setup.sh/.gitignore/deployment.md);原始产物 3cfb2eb 未回退。"
+  ],
+  "decisions": [
+    {"decision": "setup.sh 可复现: 默认路径有 requirements.lock 时 pip install -r requirements.lock(锁定版本不覆写 lock);无 lock 首次按 requirements.txt 装并 freeze。新增 --upgrade 旗标: 忽略 lock 按 requirements.txt 重装最新并刷新 lock。参数解析用 for/case 分离 --upgrade 与解释器位置参数。", "rationale": "QA Medium①: 复现安装的基准(lock)不被顺手覆写,升级需显式意图。bash -n 语法校验通过。"},
+    {"decision": ".gitignore 加 scripts/akshare/.venv/(镜像 qlib_eval 惯例),lock 不被屏蔽保持 git 追踪。", "rationale": "QA 要求 lock 纳入 git;同时防 git add scripts/akshare/ 误提交 .venv。实际 requirements.lock 由部署机首次 setup 生成后提交(无法离线伪造钉版本, 系统 python 环境受限)。"},
+    {"decision": "deployment.md 三处就地小改不重排: ①新增「投递」项声明 scripts/akshare 随 deploy.sh rsync 到 runtime、setup.sh 在 runtime 侧执行(venv 落 runtime/scripts/akshare/.venv 与 plist 绝对路径一致);②升级流程改 --upgrade 语义(强调默认不覆写 lock);③口径说明扩句——降级当日指数序列为混源(理杏仁 mcw 加权 + akshare 乐咕滚动市盈率加权,口径不完全一致),兜底日分位是该混源序列上的排位,衔接处轻微不连续,主源恢复次日回归单一口径。", "rationale": "QA Medium②三项;既有段落零重排。"}
+  ],
+  "files_modified": [
+    "scripts/akshare/setup.sh (lock 优先复现安装 + --upgrade 旗标 + 参数解析)",
+    ".gitignore (加 scripts/akshare/.venv/ 忽略, lock 保持追踪)",
+    "docs/deployment.md (投递声明 + --upgrade 升级语义 + 混源口径扩句, 就地小改不重排)"
+  ],
+  "interfaces_exposed": [
+    "setup.sh 用法: 无参=lock 复现安装(首次无 lock 则按 txt 装+freeze);--upgrade=按 txt 重装最新+刷新 lock;可选位置参数指定解释器",
+    "部署契约不变: aktools 127.0.0.1:8180, prism.akshare_base_url 须与 plist --host/--port 一致; venv 落 runtime/scripts/akshare/.venv",
+    "requirements.lock 由部署机首次 setup 生成并提交(git 追踪, 未被 .gitignore 屏蔽)"
+  ],
+  "verification": {
+    "checks": ["bash -n setup.sh → 语法 OK", "plutil -lint plist → OK(未改动)", "git show --stat 确认仅 3 文件入 fix commit", "config.example.yaml 未再改动(原始 3cfb2eb 已达标)"],
+    "manual_pending": "M1.5 五条验收留人工阶段(含首跑 setup --upgrade 生成并提交真实 lock)",
+    "result": "dev_done 产物门禁通过; commit 0c99ae5"
+  }
+}

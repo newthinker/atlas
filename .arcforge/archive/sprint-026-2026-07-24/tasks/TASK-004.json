@@ -1,0 +1,67 @@
+{
+  "id": "TASK-004",
+  "title": "refreshEdgar 路径(EDGAR 主源 + PB/PS + fallback engine)",
+  "description": "config 增 PrismInstrument.CIK 与 PrismConfig.EdgarUserAgent/EdgarLookbackYears(默认 10);refresh.go 增 EdgarClient 接口、Refresh 第 6 参数、refreshEdgar(facts 落 fundamental_q → EPS_TTM/BVPS/RPS_TTM 阶梯 → PE+分位+PB/PS 并入 valuation_daily)、source==edgar 分派与 fallback engine。Store 接口追加 UpsertFundamentals/QuarterlyFundamentals(fake 同步扩)。详见计划 Task 4。",
+  "module": "prism-refresh",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go",
+    "internal/config/config.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestRefreshEdgarPath 通过:12 季 facts 落 fundamental_q;PE=Close/EPS_TTM(40/4=10)、PB=Close/BVPS(40/8=5)、PS=Close/RPS_TTM(40/8=5);Failed/Degraded 均空",
+      "EPS_TTM 阶梯 4 季齐且皆非 NaN 才产点,EPSPoint 携带 FilingDate(防前视经 TASK-001 生效日逻辑);加强项(不阻塞):挖去一季 EPS=NaN → 对应 TTM 窗口不产点,建议 dev 自评补断言",
+      "EdgarLookbackYears 默认 10(ApplyDefaults),价格仍走 yahoo FetchHistory"
+    ],
+    "boundary": [
+      "inst.CIK 为空 → 返回提示配置 cik 的错误",
+      "Equity/DilutedShares 科目缺失或对齐门槛不满足 → PB/PS 整列 NaN,不影响 PE 列"
+    ],
+    "error_handling": [
+      "TestRefreshEdgarFallback 通过:edgar 失败且 FallbackSource==engine → refreshEngine 出数(yahoo 重建 PE=50),Report.Degraded 含 NVDA,Failed 为空",
+      "edgar 失败且 FallbackSource 为空(或非 engine)→ Report.Failed 含该标的、Degraded 为空(不静默吞错,防配错 fallback_source 悄悄不出数)"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/prism/ -count=1 全 PASS,含既有 lixinger/akshare/engine 用例回归(既有 Refresh 调用点补第 6 参数)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-9",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/prism",
+    "./internal/config"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  },
+  "reject_reason": "2 条 done_criteria 无测试覆盖：(1) functional[2]「EdgarLookbackYears 默认 10」无断言——变异测试将默认改 5 全部测试仍 PASS，TestPrismConfigApplyDefaults(prism_test.go:25) 断言了 LookbackYears/USLookbackYears 却漏 EdgarLookbackYears，补 assert.Equal(t,10,c.EdgarLookbackYears)；(2) boundary[1]「Equity/DilutedShares 缺失→PB/PS 整列 NaN 不影响 PE」edgar 路径无测试(edgarQuarters 恒设 Equity=80/shares=10，line270-271 的 NaN 断言属 engine 路径)，补 edgar 变体用例。其余 6 条含 reviewer 两条防假断言项、覆盖率 93.3%、越界、既有回归零漂移均 PASS。详见 docs/04-test/TASK-004-verification.md",
+  "fix_items": [
+    "QA WARNING-2[refresh.go:296]:ttmPoints 4 季滑窗不校验季度连续性——fundamental_q 有整季缺失时(NVDA 实测 revenue 70/71)窗口跨缺口求和,TTM 失真。修复:窗口内 facts[i].PeriodEnd 与 facts[i-3].PeriodEnd 间距超约 370~400 天(4 季合理跨度)则不产点;补测试:12 季中删除(非 NaN,整条缺失)中间一季 → 跨缺口窗口不产点",
+    "QA WARNING-3 不修(刻意设计,smoke 已实证):派生值最新基准+原始 filing date 口径,在 discovery 注明 QA 复核结论即可",
+    "回归:internal/prism 全测试 PASS,既有断言不改"
+  ]
+}

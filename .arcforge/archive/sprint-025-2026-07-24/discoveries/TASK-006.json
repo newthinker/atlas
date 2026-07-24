@@ -1,0 +1,27 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "runPrismRefreshWith 计数段改为 'N ok, M failed, K degraded';告警触发条件由 len(Failed)>0 改为 len(Failed)>0 || len(Degraded)>0;消息按段拼接(Failed 段⚠+Degraded 段ℹ,strings.Join 换行)。",
+    "既有 4 个 M1 用例的 assert.Contains 断言 'N ok, M failed' 作为新串前缀子串仍通过;已把 AllSuccess 强化为断言完整 '5 ok, 0 failed, 0 degraded'(P4 口径)。",
+    "akshare.New 注入在 TASK-004 已接好(runPrismRefresh 内),本任务未改注入,仅扩展 runPrismRefreshWith。",
+    "cmd/atlas 整包 74.7% < 80 触发 AD-6;改动的 runPrismRefreshWith 100% 覆盖,唯一 0% 为既有 runPrismRefresh CLI shell(不单测惯例)。已报 Leader。"
+  ],
+  "decisions": [
+    {"decision": "消息用 parts []string 分段:Failed 段 '⚠️ Prism 刷新部分失败:'、Degraded 段 'ℹ️ Prism 主源降级(已兜底):',strings.Join(parts, 换行)", "rationale": "DoD: Failed 或 Degraded 任一非空即发;两者同在时一条消息含两段。兜底段文案含'兜底'关键词供测试断言(TestPrismRefreshNotifiesOnDegraded)。"},
+    {"decision": "exit 语义不变:Failed/Degraded 非空均返回 nil(部分失败/降级都不算命令失败)", "rationale": "launchd 入口不因部分失败/降级而非零退出,避免 KeepAlive 反复重启。"},
+    {"decision": "sender=nil 退化打印整条 msg(含兜底段);SendText 失败仅 errOut warn", "rationale": "boundary/error_handling DoD:未配 telegram 退化打印、通知失败不失败——两条路径都新增 Degraded 专项用例显式覆盖(不复用旧 Failed 用例)。"}
+  ],
+  "files_modified": [
+    "cmd/atlas/prism.go (runPrismRefreshWith:计数段加 degraded;告警条件含 Degraded;消息分段拼接)",
+    "cmd/atlas/prism_test.go (import require;强化 AllSuccess 完整计数段;新增 CountLineFull/NotifiesOnDegraded/PrintsDegradedWithoutSender/WarnsOnSendFailureDegraded)"
+  ],
+  "interfaces_exposed": [
+    "CLI 告警语义最终态:runPrismRefreshWith 在 Failed 或 Degraded 任一非空时发告警(exit 0);消费 prism.Report.Degraded(TASK-005 格式 'SYMBOL: lixinger failed (<原因>), akshare fallback ok')",
+    "输出计数段格式:'prism refresh: N ok, M failed, K degraded'"
+  ],
+  "verification": {
+    "tests": ["TestPrismRefreshCountLineFull(functional[0] 完整计数段)", "TestPrismRefreshNotifiesOnDegraded(functional[1] 仅Degraded发告警含兜底+symbol)", "TestPrismRefreshPrintsDegradedWithoutSender(boundary sender=nil退化打印)", "TestPrismRefreshWarnsOnSendFailureDegraded(error_handling 降级路径send失败仅warn)", "AllSuccessNoAlert 强化(boundary 均空不发)", "既有 3 个 Failed 路径用例无回归"],
+    "command": "GOTOOLCHAIN=local go test ./cmd/atlas/ -run TestPrismRefresh -count=1 -v && go build ./...",
+    "result": "全 8 用例 PASS;go build ./... 通过。整包口径 74.7% 走 AD-6 Leader 处置(runPrismRefreshWith 本身 100%)。"
+  }
+}

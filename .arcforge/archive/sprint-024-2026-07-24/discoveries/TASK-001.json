@@ -1,0 +1,22 @@
+{
+  "authorship": "代码+测试由 dev-agent-3 完成;收尾(复核/提交/dev_done)由 dev-agent-4(原 owner dev-agent-5 会话不可恢复,Leader 收回重派,epoch=3)",
+  "key_findings": [
+    "Config struct 位于 internal/config/config.go:13-30,Prism 字段追加在 Valuation 之后",
+    "config 包无 ApplyDefaults 统一入口;PrismConfig.ApplyDefaults() 为自包含零值补默认,由下游(Task5/7 编排)显式调用,不接入 Load()",
+    "既有 config 测试覆盖率 95.5%,新增用例后无回归"
+  ],
+  "decisions": [
+    {"decision": "PrismInstrument mapstructure 标签用 reflect 断言校验", "rationale": "functional[1] 明确要求六字段标签齐全,反射断言比肉眼 review 更可机制化验证"},
+    {"decision": "ApplyDefaults 不接入 Load()", "rationale": "计划 Task1 仅要求结构+默认方法;接入时机由消费方(refresh 编排)决定,避免越界改动 Load 影响既有配置加载"}
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/prism_test.go"
+  ],
+  "interfaces_exposed": [
+    "config.PrismConfig{Enabled bool, DBPath string, LookbackYears int, USLookbackYears int, LowPct float64, HighPct float64, Instruments []PrismInstrument}",
+    "config.PrismInstrument{Symbol, Name, Type, Market, Group, Source string}",
+    "(c *PrismConfig) ApplyDefaults()"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./internal/config/ -cover → ok, coverage 95.5%;3 个新用例全 PASS,既有用例无回归;commit 2f3cb76(收尾 dev-agent-4 复核,diff 符合计划 Task 1 规格)"
+}

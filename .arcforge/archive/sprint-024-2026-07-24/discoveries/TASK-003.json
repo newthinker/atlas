@@ -1,0 +1,28 @@
+{
+  "task_id": "TASK-003",
+  "by": "dev-agent-5",
+  "key_findings": [
+    "复用同包 endpointFor(valuation.go:25) 判定 symbol → 端点/code;request(client.go:33) 走信封校验;NewWithBaseURL(lixinger.go:49) 测试注入 httptest server。",
+    "指数端点(cn/index/fundamental)估值指标带市值加权口径 .mcw,与 valuation.go:74-77 latest 调用同规则;公司端点(cn/company/fundamental/non_financial)用裸指标名。",
+    "cvpos 原始值 0~1,统一 ×100 为百分位;缺失或非数值指标降级为 math.NaN();date 同时接受 RFC3339 与 YYYY-MM-DD;输出按 Date 升序。"
+  ],
+  "decisions": [
+    {"decision": "指数原始估值指标名(pe_ttm.mcw/pb.mcw/ps_ttm.mcw)按 cvpos 命名规则外推,未 live 验证", "rationale": "⚠ Task 7 首次真实运行时若报 metric missing,以真实响应修正 series.go 的 seriesMetrics 常量并同步 series_test.go;已在 seriesMetrics 代码注释标注该校验点。"},
+    {"decision": "TestFetchValuationSeriesCompany 的日期断言改为 Format(\"2006-01-02\")==\"2026-07-22\",不用计划原文的 Truncate(24h)", "rationale": "计划原断言 time.Date(...,Date.Location()) 对比 Date.Truncate(24h) 依赖运行机器时区:本机 +0800 下 Truncate 按 UTC 绝对时间截断产生 07-21 08:00 偏移而必然失败。日历日断言时区无关且保留原意(解析到 7-22)。"},
+    {"decision": "在计划 3 个用例外补 error_handling 两个用例(不支持 symbol、date 解析失败)", "rationale": "done_criteria error_handling[0] 明确要求 endpointFor 不支持返 error、date 解析失败返回含 symbol 与原始串的包装 error,须各有对应测试。"}
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/series.go (新增)",
+    "internal/collector/lixinger/series_test.go (新增)"
+  ],
+  "interfaces_exposed": [
+    "type ValuationPoint struct { Date time.Time; PETTM, PB, PSTTM, Pctl5Y, Pctl10Y float64 } // 缺失=NaN;cvpos 已 ×100",
+    "func (l *Lixinger) FetchValuationSeries(symbol string, start, end time.Time) ([]ValuationPoint, error) // Task 5 消费,输出按 Date 升序"
+  ],
+  "verification": {
+    "tests": "go test ./internal/collector/lixinger/ 全绿(含既有 latest/history 用例无回归)",
+    "coverage": "92.1% (≥80% 门禁)",
+    "gofmt_vet": "gofmt -l 无输出;go vet 干净",
+    "gitnexus_detect_changes": "MCP 索引陈旧(last 86136ed)且会话中途重建有已知坑,未本地运行 detect_changes,请 Leader 代跑校验受影响 scope 仅限 lixinger 包新增两文件。"
+  }
+}

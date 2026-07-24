@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "docs/ops/crisis-monitor-notifications.md §2 频率表 NORMAL 拆两行:周报([P1] 📅 无退出进度行,每周一 1 条) + 月报(含 21 观测日趋势 sparkline,每月首交易日 1 条;与周一撞日只发月报)",
+    "§5 排障速查首行改为'NORMAL/WATCH 态非周一(且 NORMAL 非月初)属正常静默;再查 logs/crisis-daily.out.log 是否 data not ready 或 already evaluated'",
+    "§2 末尾'月报/周报不加第 4 个 plist'行原写 summaryDue「NORMAL ∧ 首交易日 或 WATCH ∧ 周一」,与新增周报行自相矛盾——已改为 summaryKind 语义(NORMAL 首交易日发月报/其余周一发周报撞日归月报;WATCH 周一发周报),与 §2 表格两行一致;grep summaryDue 全文档无残留"
+  ],
+  "decisions": [
+    {"decision": "§2 summaryDue 残留行纳入本任务修复(Leader 核实判定属'手册与新行为对齐'意图,非超范围)", "rationale": "该行与同表新增 NORMAL 周报行自相矛盾,在 TASK-004 声明 scope(同一文档)内;dev_done 状态下 owner 直接补齐无需回退"}
+  ],
+  "files_modified": [
+    "docs/ops/crisis-monitor-notifications.md"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "full_test_cmd": "GOTOOLCHAIN=local go test ./...",
+    "result": "全部 ok,无 FAIL(含 internal/crisis、cmd/atlas 等全部 25+ 包)",
+    "grep_summarydue": "grep -n summaryDue docs/ops/crisis-monitor-notifications.md → 无残留",
+    "code_simplifier": "按协议 v2 由 Leader 代跑,dev-agent-1 未 spawn;此 manual 标准待 Leader 执行",
+    "commits": ["cbfbed9 docs(crisis): update notification runbook for NORMAL weekly report", "d59bc74 docs(crisis): fix stale summaryDue wording in runbook"]
+  }
+}

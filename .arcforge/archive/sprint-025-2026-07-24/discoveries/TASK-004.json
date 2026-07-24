@@ -1,0 +1,33 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "Refresh 签名破坏性变更为 6 参: Refresh(cfg, store, lix, us, ak, now);ak 插在 us 之后。全部既有测试调用点(12 处)与 cmd/atlas/prism.go 已同步,go build ./... 通过。",
+    "提取 incrementalStart(store, id, lookbackYears, now)->(start, skip, err) 供 lixinger/akshare 两路复用;refreshLixinger 改调用它,既有理杏仁 12 用例(含时区安全)无回归——重构安全网全过。",
+    "SeriesData 只有 Dates/PETTM/Pctl5Y/Pctl10Y 无 PB/PSTTM,故本地分位读回仅取 (Date, PETTM);akshare 无官方分位,合并历史+新点整段跑 RollingPercentile(5/10, rollingMinPoints=252),仅写新点。",
+    "组合口径覆盖率 76.3% 触发 AD-6(cmd/atlas 存量 CLI 接线拖低);internal/prism 单包 93.9%,refresh.go 全部新函数 >=91.7%。已按处置模板报 Leader。"
+  ],
+  "decisions": [
+    {"decision": "index 类型走 FetchIndexValuationSeries,其余走 FetchStockValuationSeries(按 inst.Type=='index' 分派)", "rationale": "与 TASK-003 暴露的两方法签名一致;stock 方法内部再按 inst.Market(CN_A/HK)二次分派。"},
+    {"decision": "本地分位:历史剔除 NaN PE 后与新点合并(同日新值覆盖),用 map[string]float64 按日去重,sort.Strings 升序(ISO 日期串字典序=时间序)", "rationale": "RollingPercentile 需升序连续序列;PE 为 NaN 的行不进分位输入序列(该新点 Pctl 保持 NaN),避免污染分位。"},
+    {"decision": "只为 newDays(本次拉取日期)写行,历史行不回写", "rationale": "DoD functional[1] 明确;历史分位不因新点重算而回写,降低写放大。"},
+    {"decision": "store.Series 读回失败包 'read back series: %w' 前缀返回", "rationale": "error_handling DoD 要求读回失败进 Report.Failed 且可辨识来源。"}
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go (Store 接口加 Series;新增 AkshareClient 接口;提取 incrementalStart;Refresh 6 参签名+akshare 分派;新增 refreshAkshare)",
+    "internal/prism/refresh_test.go (fakeStore 加 series/seriesErr+Series 方法;新增 fakeAkshare;akCfg 助手;6 个 akshare 用例含 2 个失败注入;12 处既有调用点加 ak 参数)",
+    "cmd/atlas/prism.go (import akshare;runPrismRefresh 构造 ak := akshare.New(pcfg.AkshareBaseURL) 并传入 Refresh)"
+  ],
+  "interfaces_exposed": [
+    "func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, now time.Time) Report —— TASK-005/006 沿用此签名",
+    "type AkshareClient interface { FetchStockValuationSeries(symbol, market string, start, end time.Time) ([]akshare.ValuationPoint, error); FetchIndexValuationSeries(symbol string, start, end time.Time) ([]akshare.ValuationPoint, error) }",
+    "Store 接口新增 Series(symbol, from string) (*prismstore.SeriesData, error)(*prismstore.Store 已实现)",
+    "func refreshAkshare(cfg, store, ak, inst, now) error —— TASK-005 降级链在 lixinger 分支失败后调用它做兜底",
+    "func incrementalStart(store, id, lookbackYears, now) (start time.Time, skip bool, err error) —— 增量起点+日历日零请求守卫,两路复用",
+    "Report 结构本任务未改(仍 Refreshed/Failed);TASK-005 负责加 Degraded 字段"
+  ],
+  "verification": {
+    "tests": ["TestRefreshAkshareStockIncremental(functional[0])", "TestRefreshAkshareLocalPercentile(functional[1] pctl=100)", "TestRefreshAkshareIndexDispatch(functional[2])", "TestRefreshAkshareEmptyFetch(boundary[0])", "TestRefreshAkshareFetchFailure(error_handling ①)", "TestRefreshAkshareSeriesReadbackFailure(error_handling ②)", "既有 lixinger/engine 全部用例无回归"],
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 -cover && go build ./...",
+    "result": "internal/prism 全 PASS 覆盖率 93.9%;cmd/atlas 全 PASS 无回归;go build ./... 通过。组合口径 76.3% 走 AD-6 Leader 处置。"
+  }
+}

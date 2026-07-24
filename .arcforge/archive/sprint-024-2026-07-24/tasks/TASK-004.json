@@ -1,0 +1,54 @@
+{
+  "id": "TASK-004",
+  "title": "valuation 序列函数(ReconstructPESeries + RollingPercentile)",
+  "description": "internal/valuation: 从 reconstruct.go 提取 alignPE helper(行为不变),新建 series.go 实现 ReconstructPESeries 与 RollingPercentile。复用 MinEPSPoints/ErrInsufficientEPS/PercentileRank。实现细节以计划 Task 4 为准。",
+  "module": "internal/valuation",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/valuation/reconstruct.go",
+    "internal/valuation/series.go",
+    "internal/valuation/series_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "ReconstructPESeries 阶梯对齐: EPS 点生效前 PE=close/旧EPS(100/2=50)、生效后=close/新EPS(100/4=25),输出 dates 升序且与 pe 等长",
+      "RollingPercentile 对每点 i 在 (dates[i]-years, dates[i]) 窗口内计算 0-100 分位"
+    ],
+    "boundary": [
+      "窗口内样本数 < minPoints → 该点为 NaN",
+      "对齐 EPS<=0 或 close<=0 的交易日被跳过(不产生输出点)"
+    ],
+    "error_handling": [
+      "正 EPS 点数 < MinEPSPoints → 返回 ErrInsufficientEPS(errors.Is 可判)"
+    ],
+    "non_functional": [
+      {
+        "desc": "提取 alignPE 后 ReconstructPEPercentile 既有测试全部通过(重构行为不变的安全网)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "测试文件顶部 Context Checkpoint 注释映射验收条目(仿 fred_test.go:15-21)",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/valuation"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "id": "TASK-002",
+  "title": "Prism SQLite store(instrument + valuation_daily)",
+  "description": "新建 internal/storage/prism: Open/Close/UpsertInstrument/LatestDate/UpsertValuations/Board/Series 与类型 Instrument/ValuationRow/BoardRow/SeriesData。签名必须与计划 Task 2 Interfaces 一致(Task 5/6/8/9 消费)。实现细节以计划 Task 2 为准。",
+  "module": "internal/storage/prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/storage/prism/sqlite.go",
+    "internal/storage/prism/sqlite_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "LatestDate: 无数据返回 \"\";写入 2026-07-21/22 两行后返回 2026-07-22",
+      "NaN↔NULL 往返: UpsertValuations 中 NaN 字段落 NULL,Series 读回 math.IsNaN;非 NaN 值往返一致",
+      "Board() 返回每标的最新一行(含 instrument 元数据,AsOf=MAX(d))",
+      "Series(symbol, from) 按 d>=from 过滤;from=\"\" 返回全部,升序"
+    ],
+    "boundary": [
+      "UpsertInstrument 以 (symbol,type) 幂等: 重复 upsert 返回同一 id 且更新元数据",
+      "UpsertValuations 同 (instrument_id,d) 重复写幂等(ON CONFLICT DO UPDATE)"
+    ],
+    "error_handling": [
+      "Open 自动创建多级不存在的父目录(嵌套路径用例,如 TempDir/a/b/prism.db)"
+    ],
+    "non_functional": [
+      {
+        "desc": "审查项: (a) DSN 含 WAL+busy_timeout(5000),modernc.org/sqlite 固定 v1.38.2 不升级(go.mod 不动);(b) schema 初始化失败返回包装错误并关闭 db(难单测,审查该分支);(c) 测试文件顶部 Context Checkpoint 注释映射验收条目",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-4",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/storage/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T02:15:27Z"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "renderWeekly 尾段按 res.State 分叉:NORMAL 仅'下次周报:下周一 · 状态变更即时通知';WATCH 前置'退出进度...'行",
+    "WATCH 分支拼接方式(退出进度行末尾 \\n + 下次周报行)与原单串 fmt.Sprintf 逐字节等价,TestRenderWeekly 原样通过(含 WatchExitDays=25 注入锁)",
+    "NORMAL 周报不依赖 nc.ClearStreak/WatchExitDays,渲染保持纯函数"
+  ],
+  "decisions": [
+    {"decision": "tail 默认为 NORMAL 版(下次周报行),仅 StateWatch 时前置退出进度行", "rationale": "NORMAL 态无退出概念(设计 §3.3);默认 NORMAL 使新增分支最小改动,WATCH 拼接结果与旧输出字节等价保证不变量"}
+  ],
+  "files_modified": [
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "interfaces_exposed": [
+    "renderWeekly(cfg, nc) 对 res.State==StateNormal 输出无退出进度行的周报;WATCH 输出逐字节不变(下游无新导出符号,同包共存)"
+  ],
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/crisis/ -run 'TestRenderWeekly' -count=1 -v; 全包 -cover",
+    "result": "TestRenderWeekly + TestRenderWeeklyNormal 均 PASS;全包 ok coverage 94.6%",
+    "watch_byte_invariant": "TestRenderWeekly(含 WatchExitDays 注入锁)原样通过",
+    "commit": "b717e9b"
+  }
+}

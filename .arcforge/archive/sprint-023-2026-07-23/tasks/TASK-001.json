@@ -1,0 +1,49 @@
+{
+  "id": "TASK-001",
+  "title": "crisis 包：SummaryKind 枚举与 Messages 路由",
+  "description": "internal/crisis 新增三值 SummaryKind 枚举（SummaryNone 零值/SummaryWeekly/SummaryMonthly），NotifyContext.SummaryDue bool 替换为 Summary SummaryKind，Messages 互斥 switch 按枚举路由（Monthly∧NORMAL→月报；Weekly∧(NORMAL|WATCH)→周报）。TDD 步骤见实施计划 Task 1（docs/superpowers/plans/2026-07-23-crisis-normal-weekly-report.md）。",
+  "module": "crisis-notify",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/notify.go",
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_test.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "internal/crisis 导出 type SummaryKind int 与常量 SummaryNone(iota 零值)/SummaryWeekly/SummaryMonthly；NotifyContext 字段 SummaryDue bool 替换为 Summary SummaryKind",
+      "Messages：Summary==SummaryMonthly ∧ State==NORMAL → 恰 1 条月报（含 Cassandra 月报标识）；Summary==SummaryWeekly ∧ State∈{NORMAL,WATCH} → 恰 1 条周报（含 'Cassandra 周报'），新增 NORMAL∧Weekly 分支用例断言 len(msgs)==1"
+    ],
+    "boundary": [
+      "未显式赋值 Summary 的 NotifyContext（零值 SummaryNone）→ NORMAL 非到期零消息（既有 boundary 用例不带 Summary 字段原样通过）",
+      "变更消息优先不变：Transitioned 分支仍居 switch 首位，摘要到期时变更消息让位逻辑回归通过"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "internal/crisis 包内无残留 SummaryDue 引用（grep 校验）；go test ./internal/crisis/ 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-23T11:12:08Z"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "id": "TASK-002",
+  "title": "akshare collector 基座 + A 股个股时序",
+  "description": "新建 internal/collector/akshare: Client/New/get/fnum/fdate/clipSort + FetchStockValuationSeries(CN_A 走乐咕 stock_a_indicator_lg,HK 留 stub)。规格以计划 Task 2 为准;⚠ 接口名/字段键为 live 校验点须注释标注。",
+  "module": "internal/collector/akshare",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/akshare/client.go",
+    "internal/collector/akshare/stock.go",
+    "internal/collector/akshare/client_test.go",
+    "internal/collector/akshare/stock_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "A 股: 请求打到 /api/public/stock_a_indicator_lg 且 symbol=600519(600519.SH 去后缀映射)",
+      "返回按 [start,end] 闭区间过滤(窗口外行剔除)且升序",
+      "字段解析: trade_date/pe_ttm/pb/ps_ttm(ps 兜底键)"
+    ],
+    "boundary": [
+      "缺字段→对应值 NaN;响应乱序→输出升序;仅有 ps 无 ps_ttm 的行经兜底键取到值(断言实覆盖)"
+    ],
+    "error_handling": [
+      "非 200 响应→error 含状态码与 body 片段;不支持的 market→error 含 unsupported market"
+    ],
+    "non_functional": [
+      {
+        "desc": "live 校验点(接口名/字段键)已在包注释与代码处标注;测试文件 Context Checkpoint 注释齐全",
+        "verify_by": "review"
+      },
+      {
+        "desc": "变更包(internal/collector/akshare)覆盖率 ≥80",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-8",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/collector/akshare"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-agent-3",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T07:31:31Z"
+  },
+  "fix_items": [
+    "[LIVE-FIX] akshare 1.18.75 已移除 stock_a_indicator_lg(aktools 实测 404 未找到该接口): A 股个股改走 stock_zh_valuation_baidu,与 HK 统一为百度双指标路径(市盈率(TTM)+市净率,PSTTM 恒 NaN——lg 的 ps 能力随接口移除失效,注释注明)。A 股 symbol 映射为裸六位码(实测 600519 可用)",
+    "[LIVE-FIX] 百度接口(A+HK 共同)period 粒度实测: 近一年/近三年=日频,近五年≈2日,近十年≈5日,全部=15日降采样。period=全部 不可用于日频序列——改为按请求窗口跨度选 period: span<=1y→近一年;<=3y→近三年;更长→近十年+近三年两次拉取按日期合并(近三年日频值覆盖同日稀疏值)。每 metric 按此策略拉取后再双 metric 合并",
+    "[确认项] date 字段带 T00:00:00.000 后缀(fdate 的 [:10] 切片已兼容,补一行测试数据用该格式);指数 stock_index_pe_lg 实测完美(5173 行日频,日期/滚动市盈率键名一致)零修改;同步更新 mock 测试(per-period 响应)与包注释 live 校验点记录"
+  ]
+}

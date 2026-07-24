@@ -1,0 +1,59 @@
+{
+  "id": "TASK-003",
+  "title": "EDGAR companyfacts 客户端",
+  "description": "新建 internal/collector/edgar 包:Client(New/NewWithBaseURL)+QuarterlyFact+FetchCompanyFacts(cik),含季度化解析(单季 70~100 天判定/Q4=FY−ΣQ 推导/修正重报取 filed 最新/Revenue tag 优先级/instant 型 Equity 按 end 对齐)。fixture testdata/companyfacts_mini.json 按计划 Task 3 提供的内容创建。",
+  "module": "collector-edgar",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/testdata/companyfacts_mini.json"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestFetchCompanyFactsRequest 通过:URL 路径 /api/xbrl/companyfacts/CIK0001045810.json(CIK 左零填充 10 位),请求头 User-Agent 含邮箱",
+      "TestFetchCompanyFactsQuarterization 通过:fixture 产出 4 季(3 个 10-Q + 推导 Q4),period_end 升序;Q4 的 EPS/Revenue/NetIncome = FY−(Q1+Q2+Q3),FilingDate=10-K filed,Equity 按 end 对齐(instant)",
+      "修正重报去重:fixture 在 EPS 的 (fy=2026,fp=Q1) 追加一条 filed 更早、val 不同的旧条目,断言最终取 filed 最新那条的值(不能只靠唯一条目数据绕过去重分支)"
+    ],
+    "boundary": [
+      "某季度某科目缺失(如 Q2 shares)→ 该字段为 NaN,不影响其他科目",
+      "Revenue tag 优先级含回退分支:第一优先 tag 有数据即用;另以子测试/fixture 变体覆盖第一优先 tag 缺失 → 回退 Revenues 仍取到 Revenue"
+    ],
+    "error_handling": [
+      "TestFetchCompanyFactsIFRS 通过:facts 无 us-gaap 命名空间 → 返回 ErrNotUSGAAP(errors.Is 可判)",
+      "HTTP 非 200 → 返回含状态码与 CIK 的错误"
+    ],
+    "non_functional": [
+      {
+        "desc": "live 校验点:真实 EDGAR 逐科目缺漏核对推迟到 TASK-005 smoke 执行(本任务仅 fixture 测试)。加强项(不阻塞):Q4 仅在 qCount==3 时推导,季度不全的 FY 不产 Q4——建议 dev 自评补断言",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-11",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-agent-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-24T12:25:13Z"
+  },
+  "fix_items": [
+    "BUG-1 累计期塌缩:真实 10-Q 每季含单季(≈90天)+累计(6mo/9mo)双条目,同(fy,fp)同filed时累计条目先到者胜再被duration过滤丢弃→Q2/Q3全丢。修复:先按duration(fp∈Q1/Q2/Q3且70~100天)过滤,再按(fy,fp)取filed最新去重(顺序对调)",
+    "BUG-2 Revenue tag 选择过弱:firstTag取首个非空tag,但NVDA的RevenueFromContract…单季条目全标fp=FY不可用,选中后不再回退→Revenue整列NULL。修复:改为选首个能产出fp∈Q1/Q2/Q3单季条目的tag",
+    "BUG-3 fp=FY的90天条目(10-K内季度拆分)被fp!=FY守卫排除,与BUG-2交织,修复时一并处理语义",
+    "fixture 防回归:补「同季单季+累计双条目(同filed)」用例与「首选tag仅含fp=FY单季条目→回退次选tag」用例,断言Q2/Q3不丢、Revenue落到可用tag",
+    "回归门槛:修复后既有 6 测试全PASS;dev-agent-11 重跑 NVDA live smoke须 fundamental_q≥40行(实测预期61季)且Revenue非整列NULL,结果记入TASK-005 discovery"
+  ]
+}

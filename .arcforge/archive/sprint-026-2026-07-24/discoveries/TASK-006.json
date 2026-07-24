@@ -1,0 +1,26 @@
+{
+  "key_findings": [
+    "web 包有两套模板目录:embed(internal/api/handler/web/templates/)与磁盘(internal/api/templates/,serve.go 用 NewHandler 磁盘模式)。新页 prism_compare.html 必须两处都放,否则磁盘模式启动即崩;既有回归测试 TestNewHandlerDiskModeHasPrismTemplates 会因 NewHandler 解析全部 pages 而自动守护磁盘缺失。",
+    "compare 页零新 API:前端并发 fetch 既有 /api/prism/series?symbol=&window=,handler 仅用 Board() 渲染候选标的列表。",
+    "PrismCompare 自身语句覆盖率 100%(profile 核实);但门禁对 packages(./internal/api + ./internal/api/handler/web)整包测覆盖率=63.3%,受既有未覆盖代码(server.go handlers、Set* provider setter 等)拖累结构性低于 dev_minimum=80,即 AD-6 已知门禁整包口径坑。"
+  ],
+  "decisions": [
+    {"decision": "500 响应用固定 \"internal error\" 而非 spec 示例的 err.Error()", "rationale": "与既有 PrismBoard 惯例一致,不泄露内部错误细节;既有 TestPrismBoardStoreError 已断言不回显 db 错误。"},
+    {"decision": "board 页顺手加 <a href=\"/prism/compare\">对比</a> 导航(ml-auto 右对齐),embed 与磁盘两份 prism_board.html 同步修改", "rationale": "计划 Task 6 Step3 标注可选入口,顺手补齐可用性。"},
+    {"decision": "boundary[1] ≤8 标的为纯前端 JS(MAX=8)行为,verify_by=review,无 Go 测试可覆盖", "rationale": "服务端 handler 不参与选择数量控制;模板 JS 的 selected().length > MAX 分支属前端逻辑。"}
+  ],
+  "files_modified": [
+    "internal/api/handler/web/handler.go",
+    "internal/api/handler/web/templates/prism_compare.html",
+    "internal/api/templates/prism_compare.html",
+    "internal/api/handler/web/templates/prism_board.html",
+    "internal/api/templates/prism_board.html",
+    "internal/api/server.go",
+    "internal/api/handler/web/prism_web_test.go"
+  ],
+  "interfaces_exposed": [
+    "HTTP GET /prism/compare -> Handler.PrismCompare (nil provider->404, Board() err->500, 否则 200 渲染 prism_compare.html)",
+    "模板名 prism_compare.html(embed 与磁盘两目录),content block 内含 id=\"compare-chart\"、#symbol-picker 复选、#window-btns、#cross-table、/static/echarts.min.js"
+  ],
+  "verification": "go test ./internal/api/... -count=1 全 PASS;新增 TestPrismComparePage(200+compare-chart+沪深300+NVIDIA+echarts)/TestPrismCompareNotEnabled(nil->404)/TestPrismCompareStoreError(Board err->500);PrismCompare 语句覆盖 100%;磁盘模式回归 TestNewHandlerDiskModeHasPrismTemplates PASS。目检(atlas serve 打开页面勾选标的)属 manual 条目留验收。"
+}

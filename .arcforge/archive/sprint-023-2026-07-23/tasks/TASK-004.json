@@ -1,0 +1,60 @@
+{
+  "id": "TASK-004",
+  "title": "运维文档更新与终验（文档任务）",
+  "description": "更新 docs/ops/crisis-monitor-notifications.md（§2 频率表 NORMAL 拆周报/月报两行、§5 排障速查改「非周一静默属正常」），执行全量 go test 终验与 code-simplifier 门禁。内容见实施计划 Task 4。",
+  "module": "crisis-docs",
+  "complexity": "simple",
+  "estimated_files": [
+    "docs/ops/crisis-monitor-notifications.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "§2 频率表 NORMAL 拆两行：周报（[P1] 📅，无退出进度行，每周一 1 条）与月报（含 21 观测日趋势 sparkline，每月首交易日 1 条；与周一撞日只发月报）",
+        "verify_by": "review"
+      },
+      {
+        "desc": "§5 排障速查首行改为「NORMAL/WATCH 态非周一（且 NORMAL 非月初）属正常静默；再查 logs/crisis-daily.out.log 是否 data not ready 或 already evaluated」",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./... 全绿（或既有跳过项不变）",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "code-simplifier 已对 internal/crisis/notify.go、internal/crisis/notify_render.go、cmd/atlas/crisis.go 运行，建议已应用（重跑测试全绿）或记录无需改动",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-1",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "docs/ops/crisis-monitor-notifications.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-1",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-23T11:12:09Z"
+  }
+}

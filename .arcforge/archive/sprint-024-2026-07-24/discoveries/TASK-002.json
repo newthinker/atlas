@@ -1,0 +1,48 @@
+{
+  "task": "TASK-002",
+  "title": "Prism SQLite store (instrument + valuation_daily)",
+  "key_findings": [
+    "modernc.org/sqlite v1.38.2 已在 go.mod,未升级;go.mod 未改动",
+    "覆盖率 80.6%(7 用例全 PASS),未覆盖行集中于 Open schema 初始化失败/sql.Open 失败等错误分支——DoD non_functional 明确标注这些难单测分支用审查覆盖(verify_by: review)",
+    "NaN↔NULL 约定落地:toNull(内存 NaN → SQL NULL)/fromNull(NULL → math.NaN());非 NaN 值往返一致",
+    "valuation_daily 用 WITHOUT ROWID + PRIMARY KEY(instrument_id,d);instrument 用 UNIQUE(symbol,type) 支持幂等 upsert"
+  ],
+  "decisions": [
+    {"decision": "DSN 使用 file:PATH?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", "rationale": "WAL 支持并发读写、busy_timeout 5s 避免锁竞争即时失败;与计划 Task 2 一致"},
+    {"decision": "Open 用 os.MkdirAll 创建多级父目录(dir != \".\" 时)", "rationale": "DoD error_handling[0] 要求嵌套路径 TempDir/a/b/prism.db 自动建目录;已加 TestOpenCreatesNestedParentDirs 覆盖"},
+    {"decision": "schema 列名用 grp(非 group)", "rationale": "group 是 SQLite 保留字;Go 结构体字段仍为 Group,SQL 层映射 grp"},
+    {"decision": "在计划 4 用例外补 3 个 DoD 用例(UpsertInstrument/UpsertValuations 幂等 + Open 嵌套目录)", "rationale": "DoD boundary[0/1] 与 error_handling[0] 需显式覆盖,计划骨架未含"}
+  ],
+  "files_modified": [
+    "internal/storage/prism/sqlite.go (新建)",
+    "internal/storage/prism/sqlite_test.go (新建)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/storage/prism",
+    "types": {
+      "Instrument": "struct{ Symbol, Type, Market, Name, Group, Source string }",
+      "ValuationRow": "struct{ D string; PETTM, PB, PSTTM, Pctl5Y, Pctl10Y float64 }  // NaN=缺失",
+      "BoardRow": "struct{ Instrument; AsOf string; PETTM, PB, Pctl5Y, Pctl10Y float64 }",
+      "SeriesData": "struct{ Symbol, Name, Source string; Dates []string; PETTM, Pctl5Y, Pctl10Y []float64 }",
+      "Store": "struct{ db *sql.DB }"
+    },
+    "funcs": [
+      "func Open(path string) (*Store, error)",
+      "func (s *Store) Close() error",
+      "func (s *Store) UpsertInstrument(inst Instrument) (int64, error)  // 幂等 by (symbol,type),返回 id",
+      "func (s *Store) LatestDate(instrumentID int64) (string, error)  // 无数据返回 \"\"",
+      "func (s *Store) UpsertValuations(instrumentID int64, rows []ValuationRow) error  // 幂等 by (instrument_id,d),单事务",
+      "func (s *Store) Board() ([]BoardRow, error)  // 每标的最新一行,ORDER BY grp,symbol",
+      "func (s *Store) Series(symbol, from string) (*SeriesData, error)  // from=\"\" 全部,升序"
+    ],
+    "note": "Task 5 refresh 编排以 import 别名 prismstore 消费 Instrument/ValuationRow 与 Store 三方法(UpsertInstrument/LatestDate/UpsertValuations);Task 8/9 web/api 消费 Board()/Series()。签名与计划 Task 2 Interfaces 完全一致,无漂移。"
+  },
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/storage/prism/ -v -cover",
+    "result": "PASS, 7/7 用例",
+    "coverage": "80.6% (≥80% 门禁达标)",
+    "vet": "go vet 通过, gofmt 无差异",
+    "commit": "e80de76 feat(prism): SQLite store for instrument and valuation_daily (WAL, NaN<->NULL)",
+    "detect_changes": "gitnexus 索引 stale(last: 86136ed),会话中途重建索引有版本不匹配已知坑,detect_changes 由 Leader 代跑(见项目 memory)"
+  }
+}

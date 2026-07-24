@@ -1,0 +1,31 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "internal/crisis 的 Messages 互斥 switch 保持四分支结构,Transitioned 仍居首位(变更>摘要不变量回归通过)",
+    "枚举替换 SummaryDue bool 后,零值 SummaryNone 天然覆盖'NORMAL 非到期零消息'边界,既有 boundary 用例不带 Summary 字段原样通过",
+    "cmd/atlas 层仍引用 crisis.SummaryDue/summaryDue,需 Task 3 改造后整仓才能编译;本任务范围仅 internal/crisis,包内测试全绿"
+  ],
+  "decisions": [
+    {"decision": "SummaryKind 定义于 notify.go(Sender 之后),常量 SummaryNone=iota 零值", "rationale": "零值即'不到期'安全静默,与实施计划 Task 1 一致,下游 cmd 层可安全默认"},
+    {"decision": "路由用 nc.Summary==SummaryMonthly&&NORMAL / nc.Summary==SummaryWeekly&&(NORMAL||WATCH)", "rationale": "Monthly 仅 NORMAL,Weekly 覆盖 NORMAL+WATCH;NORMAL∧Weekly 新分支即本需求核心"}
+  ],
+  "files_modified": [
+    "internal/crisis/notify.go",
+    "internal/crisis/notify_render.go",
+    "internal/crisis/notify_test.go",
+    "internal/crisis/notify_render_test.go"
+  ],
+  "interfaces_exposed": [
+    "type SummaryKind int (导出)",
+    "const SummaryNone SummaryKind = iota (零值/不到期)",
+    "const SummaryWeekly (周报到期)",
+    "const SummaryMonthly (月报到期)",
+    "NotifyContext.Summary SummaryKind 字段 (替换原 SummaryDue bool);Task 002/003 依赖此三个导出常量与该字段"
+  ],
+  "verification": {
+    "test_cmd": "GOTOOLCHAIN=local go test ./internal/crisis/ -count=1 -cover",
+    "result": "ok, coverage 94.6%",
+    "grep_summarydue": "internal/crisis/ 无残留 SummaryDue",
+    "commit": "8ae94fc"
+  }
+}
