@@ -21,6 +21,9 @@ import (
 //   functional     "retryBudget=1 序列 429/200/429 恰 3 请求" → TestDoRetryBudgetExhausted
 //   boundary       "非法 Retry-After → 回退指数退避"          → TestDoRetryAfterInvalidFallsBack
 //   error_handling "网络层错误不重试(预算不消耗)"           → TestDoNetworkErrorNoRetry
+//
+// TASK-001 review_fix(rework 1):
+//   boundary       "Retry-After 上界 cap,极大值不阻塞调度"    → TestDoRetryAfterCapped
 
 // throttleChartBody 是 FetchHistory 可解析的最小合法 chart 响应。
 const throttleChartBody = `{"chart":{"result":[{"meta":{"symbol":"AAPL","regularMarketPrice":150,"chartPreviousClose":149,"regularMarketTime":1700000000},"timestamp":[1700000000],"indicators":{"quote":[{"open":[149],"high":[151],"low":[148],"close":[150],"volume":[1000]}]}}],"error":null}}`
@@ -132,6 +135,32 @@ func TestDoThrottlesConsecutiveRequests(t *testing.T) {
 	}
 	if gap := ts[1].Sub(ts[0]); gap < 60*time.Millisecond { // 留计时容差
 		t.Errorf("expected >=60ms gap between requests, got %v", gap)
+	}
+}
+
+func TestDoRetryAfterCapped(t *testing.T) {
+	// 服务端 Retry-After: 1(=1s),但实例 maxRetryAfter 覆盖为 100ms——
+	// cap 生效则等待 ~100ms,总耗时 <500ms;若无 cap 会等满 1s。
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n == 0 {
+			n++
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(throttleChartBody))
+	}))
+	t.Cleanup(srv.Close)
+	y := NewWithBaseURL(srv.URL)
+	y.minInterval = 0
+	y.maxRetryAfter = 100 * time.Millisecond
+	start := time.Now()
+	if err := fetchOnce(t, y); err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("Retry-After cap not honored, took %v (waited full 1s?)", elapsed)
 	}
 }
 

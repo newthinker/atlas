@@ -50,6 +50,7 @@ const (
 	retryBackoffBase   = time.Second            // 指数退避基数:1s→2s→4s
 	maxRetryAttempts   = 3                      // 单请求最多重试次数
 	retryBudgetPerRun  = 20                     // 实例级重试预算(极端持续限流下快速失败)
+	maxRetryAfterWait  = 60 * time.Second       // Retry-After 上界:服务端给极大值时不阻塞调度窗口
 )
 
 // Yahoo implements the Yahoo Finance collector
@@ -60,12 +61,13 @@ type Yahoo struct {
 	epsBaseURL string
 
 	// 节流与退避状态(见 do);字段可在测试中覆盖以缩短用例耗时。
-	mu          sync.Mutex
-	lastReq     time.Time
-	minInterval time.Duration
-	backoffBase time.Duration
-	maxRetries  int
-	retryBudget int
+	mu            sync.Mutex
+	lastReq       time.Time
+	minInterval   time.Duration
+	backoffBase   time.Duration
+	maxRetries    int
+	retryBudget   int
+	maxRetryAfter time.Duration
 }
 
 // New creates a new Yahoo collector pointing at the production endpoints.
@@ -87,12 +89,13 @@ func NewWithBaseURLs(chartURL, epsURL string) *Yahoo {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		baseURL:     chartURL,
-		epsBaseURL:  epsURL,
-		minInterval: minRequestInterval,
-		backoffBase: retryBackoffBase,
-		maxRetries:  maxRetryAttempts,
-		retryBudget: retryBudgetPerRun,
+		baseURL:       chartURL,
+		epsBaseURL:    epsURL,
+		minInterval:   minRequestInterval,
+		backoffBase:   retryBackoffBase,
+		maxRetries:    maxRetryAttempts,
+		retryBudget:   retryBudgetPerRun,
+		maxRetryAfter: maxRetryAfterWait,
 	}
 }
 
@@ -124,7 +127,7 @@ func (y *Yahoo) do(req *http.Request) (*http.Response, error) {
 		if !retryableStatus(resp.StatusCode) || attempt >= y.maxRetries || !y.takeRetryToken() {
 			return resp, nil
 		}
-		wait := retryAfterWait(resp, y.backoffBase<<attempt)
+		wait := retryAfterWait(resp, y.backoffBase<<attempt, y.maxRetryAfter)
 		_, _ = io.Copy(io.Discard, resp.Body) // 排干并关闭,允许连接复用
 		_ = resp.Body.Close()
 		time.Sleep(wait)
@@ -160,11 +163,12 @@ func retryableStatus(code int) bool {
 }
 
 // retryAfterWait 优先尊重 Retry-After 响应头(整数秒形式;http-date 形式
-// yahoo 不用,解析失败即回退指数退避)。
-func retryAfterWait(resp *http.Response, fallback time.Duration) time.Duration {
+// yahoo 不用,解析失败即回退指数退避)。头给出的等待封顶 maxWait,避免服务端
+// 返回极大值时单次重试阻塞过久拖长调度窗口。
+func retryAfterWait(resp *http.Response, fallback, maxWait time.Duration) time.Duration {
 	if s := resp.Header.Get("Retry-After"); s != "" {
 		if secs, err := strconv.Atoi(s); err == nil && secs >= 0 {
-			return time.Duration(secs) * time.Second
+			return min(time.Duration(secs)*time.Second, maxWait)
 		}
 	}
 	return fallback
