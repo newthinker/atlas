@@ -117,6 +117,48 @@ func TestPrismSeriesWindowAndErrors(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "未知 symbol → 404")
 }
 
+// TestWindowFromMapping 直接断言 DoD functional[1] 的 window→from 映射:
+// 1y/3y/5y → now-Ny 的日期串;max/空/未知 → ""(全部)。
+func TestWindowFromMapping(t *testing.T) {
+	now := time.Date(2026, 7, 24, 10, 30, 0, 0, time.UTC)
+	cases := []struct {
+		window string
+		want   string
+	}{
+		{"1y", "2025-07-24"},
+		{"3y", "2023-07-24"},
+		{"5y", "2021-07-24"},
+		{"max", ""},
+		{"", ""},
+		{"bogus", ""},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, windowFrom(c.window, now), "window=%q", c.window)
+	}
+}
+
+// TestPrismSeriesPassesWindowFromToStore 验证 handler 确实把 windowFrom 的结果
+// 透传给 store(而非忽略 window 参数)。
+func TestPrismSeriesPassesWindowFromToStore(t *testing.T) {
+	store := &fakePrismStore{series: map[string]*prismstore.SeriesData{
+		"NVDA": {Symbol: "NVDA", Name: "NVIDIA", Source: "engine"},
+	}}
+	h := NewPrismHandler(store, 15, 85)
+
+	// window=1y → store 收到非空 from,且等于 now-1y 的日期串
+	want1y := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
+	rec := httptest.NewRecorder()
+	h.Series(rec, httptest.NewRequest(http.MethodGet, "/api/prism/series?symbol=NVDA&window=1y", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, want1y, store.gotFrom, "window=1y 应透传 now-1y 的 from")
+
+	// window=max → store 收到空 from(全部)
+	rec = httptest.NewRecorder()
+	h.Series(rec, httptest.NewRequest(http.MethodGet, "/api/prism/series?symbol=NVDA&window=max", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "", store.gotFrom, "window=max 应透传空 from(全部)")
+}
+
 // functional[1] window→from 映射:1y/3y/5y 映射为 now 回看对应年数的日期串,
 // "max"/空/未知窗口一律映射为 ""(store 层视作全区间)。
 func TestWindowFrom(t *testing.T) {
