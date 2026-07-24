@@ -460,14 +460,16 @@ func (c *Config) Validate() error {
 
 // PrismConfig configures the Prism valuation board module (M1).
 type PrismConfig struct {
-	Enabled         bool              `mapstructure:"enabled"`
-	DBPath          string            `mapstructure:"db_path"`
-	LookbackYears   int               `mapstructure:"lookback_years"`    // 理杏仁首次回填年数
-	USLookbackYears int               `mapstructure:"us_lookback_years"` // 美股 yahoo 重建年数
-	LowPct          float64           `mapstructure:"low_pct"`           // 低估阈值(百分位)
-	HighPct         float64           `mapstructure:"high_pct"`          // 高估阈值(百分位)
-	AkshareBaseURL  string            `mapstructure:"akshare_base_url"`  // aktools 本地侧车地址
-	Instruments     []PrismInstrument `mapstructure:"instruments"`
+	Enabled            bool              `mapstructure:"enabled"`
+	DBPath             string            `mapstructure:"db_path"`
+	LookbackYears      int               `mapstructure:"lookback_years"`       // 理杏仁首次回填年数
+	USLookbackYears    int               `mapstructure:"us_lookback_years"`    // 美股 yahoo 重建年数
+	LowPct             float64           `mapstructure:"low_pct"`              // 低估阈值(百分位)
+	HighPct            float64           `mapstructure:"high_pct"`             // 高估阈值(百分位)
+	AkshareBaseURL     string            `mapstructure:"akshare_base_url"`     // aktools 本地侧车地址
+	EdgarUserAgent     string            `mapstructure:"edgar_user_agent"`     // SEC 要求 UA 含联系邮箱
+	EdgarLookbackYears int               `mapstructure:"edgar_lookback_years"` // EDGAR 价格重建年数,默认 10
+	Instruments        []PrismInstrument `mapstructure:"instruments"`
 }
 
 // PrismInstrument is one entry of the Prism instrument pool.
@@ -477,7 +479,8 @@ type PrismInstrument struct {
 	Type   string `mapstructure:"type"`   // "stock" | "index"
 	Market string `mapstructure:"market"` // "US" | "HK" | "CN_A"
 	Group  string `mapstructure:"group"`  // 展示分组,如 "A股指数"
-	Source string `mapstructure:"source"` // "lixinger" | "engine"
+	Source string `mapstructure:"source"` // "lixinger" | "engine" | "akshare" | "edgar"
+	CIK    string `mapstructure:"cik"`    // EDGAR CIK(source=="edgar" 必填)
 	// FallbackSource 是主源失败时的兜底源,如 "akshare";空=无兜底。
 	FallbackSource string `mapstructure:"fallback_source"`
 }
@@ -501,6 +504,9 @@ func (c *PrismConfig) ApplyDefaults() {
 	}
 	if c.AkshareBaseURL == "" {
 		c.AkshareBaseURL = "http://127.0.0.1:8180"
+	}
+	if c.EdgarLookbackYears == 0 {
+		c.EdgarLookbackYears = 10
 	}
 }
 
