@@ -293,3 +293,58 @@ func TestRefreshEnginePartialFailure(t *testing.T) {
 	assert.Contains(t, rep.Failed[0], "eps history:")
 	require.Len(t, store.upserts["OK"], 1, "OK 标的应落库")
 }
+
+// [TASK-006 fix MAJOR-1] 时区安全:latest 为宿主本地当日时,即便宿主处于西经
+// 时区(now 的 UTC 日期已跨到次日),也应按日历日判定"已是最新"零请求,绝不
+// 产生 startDate>endDate 的倒挂请求(理杏豆浪费)。
+func TestRefreshLixingerTimezoneSafeUpToDate(t *testing.T) {
+	west := time.FixedZone("PST", -8*3600)
+	// 本地 2026-07-23 20:00(此刻 UTC 已是 2026-07-24 04:00)
+	now := time.Date(2026, 7, 23, 20, 0, 0, 0, west)
+	store, lix := newFakeStore(), &fakeLix{}
+	store.latest["000300.SH"] = "2026-07-23" // 本地当日已有数据
+	rep := Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	assert.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed, "已是最新仍算成功")
+	_, called := lix.calls["000300.SH"]
+	assert.False(t, called, "本地当日已最新应零请求,绝不发倒挂请求")
+	assert.Empty(t, store.upserts["000300.SH"])
+}
+
+// [TASK-006 fix MAJOR-1] 增量请求区间恒 start<=end(日历日),不受宿主时区影响。
+func TestRefreshLixingerTimezoneSafeIncremental(t *testing.T) {
+	west := time.FixedZone("PST", -8*3600)
+	now := time.Date(2026, 7, 23, 20, 0, 0, 0, west) // 本地 07-23
+	store, lix := newFakeStore(), &fakeLix{}
+	store.latest["000300.SH"] = "2026-07-20"
+	Refresh(lixCfg(), store, lix, fakeUS{}, now)
+	win, called := lix.calls["000300.SH"]
+	require.True(t, called, "有增量应发请求")
+	assert.Equal(t, "2026-07-21", win[0].Format("2006-01-02"), "增量从 latest+1 天开始")
+	assert.LessOrEqual(t, win[0].Format("2006-01-02"), win[1].Format("2006-01-02"),
+		"请求区间日历日不得倒挂")
+}
+
+// [TASK-006 fix MAJOR-2] refreshEngine 当前 EPS(TTM)<=0 熔断:历史有 >=8 正 EPS
+// 季但最新一季亏损的标的不入库,记入 Report.Failed(语义对齐 ErrNonPositiveEPS),
+// 避免 board 展示截断到最后盈利日的过期序列。
+func TestRefreshEngineNonPositiveCurrentEPS(t *testing.T) {
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	// 9 个季度点:前 8 正(满足 MinEPSPoints),最新(日期最晚)一季亏损
+	eps := make([]core.EPSPoint, 9)
+	for i := range eps {
+		eps[i] = core.EPSPoint{Date: now.AddDate(0, -3*(9-i), 0), EPS: 2.0}
+	}
+	eps[8].EPS = -1.0
+	us := &fakeUS2{closes: []core.OHLCV{{Time: now.AddDate(0, 0, -1), Close: 100}}, eps: eps}
+	cfg := config.PrismConfig{Instruments: []config.PrismInstrument{engineInst("LOSS")}}
+	cfg.ApplyDefaults()
+	store := newFakeStore()
+
+	rep := Refresh(cfg, store, &fakeLix{}, us, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "LOSS")
+	assert.Contains(t, rep.Failed[0], "non-positive", "错误语义应对齐 ErrNonPositiveEPS")
+	assert.Empty(t, store.upserts["LOSS"], "当前亏损标的不得入库")
+}

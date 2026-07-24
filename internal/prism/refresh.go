@@ -84,8 +84,11 @@ func refreshLixinger(cfg config.PrismConfig, store Store, lix LixingerClient, in
 			return fmt.Errorf("bad latest date %q: %w", latest, perr)
 		}
 		start = d.AddDate(0, 0, 1) // 增量:从 latest 的次日开始
-		if !start.Before(now) {
-			return nil // 已是最新,零请求(理杏豆)
+		// 日历日语义比较(ISO 日期串按字典序即时间序,与宿主时区无关):增量起点已达
+		// 今天或更新 → 零请求(理杏豆)。避免西经宿主机把 latest 的 UTC 午夜与本地
+		// now 做绝对时刻比较,产生 startDate>endDate 的倒挂请求。
+		if start.Format("2006-01-02") >= now.Format("2006-01-02") {
+			return nil
 		}
 	}
 	pts, err := lix.FetchValuationSeries(inst.Symbol, start, now)
@@ -101,6 +104,20 @@ func refreshLixinger(cfg config.PrismConfig, store Store, lix LixingerClient, in
 		})
 	}
 	return store.UpsertValuations(id, rows)
+}
+
+// currentEPS returns the EPS of the latest-dated point (current TTM EPS),
+// mirroring valuation.ReconstructPEPercentile's currentEPS. ok is false for an
+// empty slice. Does not assume eps is sorted.
+func currentEPS(eps []core.EPSPoint) (float64, bool) {
+	var latest core.EPSPoint
+	found := false
+	for _, p := range eps {
+		if !found || p.Date.After(latest.Date) {
+			latest, found = p, true
+		}
+	}
+	return latest.EPS, found
 }
 
 // rollingMinPoints: 滚动分位窗口内最少样本数(约 1 年交易日)。
@@ -122,6 +139,12 @@ func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config
 	closes, err := us.FetchHistory(inst.Symbol, start, now, "1d")
 	if err != nil {
 		return fmt.Errorf("price history: %w", err)
+	}
+	// 熔断:当前 EPS(TTM)<=0(真实亏损)→ 不入库,记入 Report.Failed,语义对齐
+	// valuation.ReconstructPEPercentile 的 ErrNonPositiveEPS。否则历史有 >=8 正 EPS
+	// 季但最新亏损的标的会静默入库截断到最后盈利日的过期序列,误导 board 展示。
+	if e, ok := currentEPS(eps); ok && e <= 0 {
+		return valuation.ErrNonPositiveEPS
 	}
 	dates, pe, err := valuation.ReconstructPESeries(closes, eps)
 	if err != nil {
