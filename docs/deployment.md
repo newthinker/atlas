@@ -284,8 +284,10 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 - **装载**：plist 随 `install-services.sh` 一并 bootstrap（幂等）；或单独
   `launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.prism-daily.plist`。
   调度每日 08:30，刻意排在 refresh-us（08:00）之后——美股 engine 标的重算依赖当日行情已落库。
-- **配置要点**：runtime `configs/config.yaml` 的 `prism.enabled: true` 决定是否启用（同时
-  Web 侧 `/prism/board` 路由才注册、estimate 阈值 `low_pct`/`high_pct` 生效）；理杏仁标的
+- **配置要点**：`configs/config.yaml` 的 `prism.enabled: true` 决定是否启用（同时
+  Web 侧 `/prism/board` 路由才注册、estimate 阈值 `low_pct`/`high_pct` 生效）。
+  **配置真相源在开发仓** `configs/config.yaml`（gitignored 物理存在，deploy.sh rsync 会
+  用它覆盖 runtime 副本）——改配置必须落开发仓再 deploy，仅改 runtime 副本会被下次部署冲掉；理杏仁标的
   复用现有 `collectors.lixinger.api_key`（无需为 prism 单列密钥，env `LIXINGER_API_KEY` 可覆盖），
   密钥不入 plist 不入日志。`db_path`（默认 `data/prism.db`）随 runtime 本地持有，deploy.sh 不同步 data/。
 - **日志路径**：`logs/prism-daily.out.log` / `logs/prism-daily.err.log`。
