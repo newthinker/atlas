@@ -46,11 +46,19 @@ type prismRefreshDeps struct {
 // runPrismRefreshWith is the testable core: run refresh, report, notify.
 func runPrismRefreshWith(d prismRefreshDeps) error {
 	rep := d.refresh()
-	fmt.Fprintf(d.out, "prism refresh: %d ok, %d failed\n", rep.Refreshed, len(rep.Failed))
-	if len(rep.Failed) == 0 {
+	fmt.Fprintf(d.out, "prism refresh: %d ok, %d failed, %d degraded\n",
+		rep.Refreshed, len(rep.Failed), len(rep.Degraded))
+	if len(rep.Failed) == 0 && len(rep.Degraded) == 0 {
 		return nil
 	}
-	msg := "⚠️ Prism 刷新部分失败:\n" + strings.Join(rep.Failed, "\n")
+	var parts []string
+	if len(rep.Failed) > 0 {
+		parts = append(parts, "⚠️ Prism 刷新部分失败:\n"+strings.Join(rep.Failed, "\n"))
+	}
+	if len(rep.Degraded) > 0 {
+		parts = append(parts, "ℹ️ Prism 主源降级(已兜底):\n"+strings.Join(rep.Degraded, "\n"))
+	}
+	msg := strings.Join(parts, "\n")
 	if d.sender == nil {
 		fmt.Fprintln(d.out, msg)
 		return nil
