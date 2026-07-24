@@ -616,6 +616,28 @@ func edgarCfg() config.PrismConfig {
 	return c
 }
 
+// QA WARNING-2:ttmPoints 4 季滑窗须校验季度连续性——整季缺失(非 NaN,fundamental_q
+// 根本没有该季行)时窗口会跨缺口求和,TTM 失真。删除 12 季中间一季 → 跨缺口窗口不产点。
+// 实测(edgarQuarters 3 月间距):正常窗口跨度 273~275 天,单季缺口窗口 365 天。
+func TestTTMPointsQuarterGap(t *testing.T) {
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	full := edgarQuarters(now)
+	valFn := func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted }
+	require.Len(t, ttmPoints(full, valFn), 9, "12 季无缺口 → 9 个 TTM 点")
+
+	// 整条删除中间一季(orig index 6),而非置 NaN
+	gapped := make([]edgar.QuarterlyFact, 0, 11)
+	gapped = append(gapped, full[:6]...)
+	gapped = append(gapped, full[7:]...)
+	// 11 季 → 8 个候选窗口,其中 3 个跨 6 月缺口(365 天)须被守卫剔除 → 5 个点
+	pts := ttmPoints(gapped, valFn)
+	assert.Len(t, pts, 5, "跨缺口窗口(365 天)不产点,仅保留连续 4 季窗口")
+	// 产出的每个点其窗口跨度都应是正常的 ~9 个月,不含跨缺口的年跨度
+	for _, p := range pts {
+		assert.NotEqual(t, full[6].PeriodEnd, p.Date, "缺失季不应作为任何 TTM 点日期")
+	}
+}
+
 func TestRefreshEdgarPath(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	facts := edgarQuarters(now)

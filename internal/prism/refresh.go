@@ -291,11 +291,22 @@ func refreshAkshare(cfg config.PrismConfig, store Store, ak AkshareClient, inst 
 	return store.UpsertValuations(id, rows)
 }
 
-// ttmPoints 通用 4 季滑窗:val 取单季值,4 季齐且皆非 NaN 才产 TTM 阶梯点
-// (EPSPoint 携带 FilingDate,防前视经 valuation 生效日逻辑)。
+// maxTTMWindowDays 是 4 季 TTM 窗口首尾 period_end 的合理跨度上限。连续 4 季约跨
+// 9 个月(实测 273~275 天);整季缺失(fundamental_q 无该季行)时窗口跨缺口求和,
+// 首尾跨度跃升至约 365 天(单季缺口)。取 330 天:高于正常跨度+财季不规则边际,
+// 低于单季缺口跨度,据此剔除跨缺口窗口防 TTM 失真(QA WARNING-2)。
+const maxTTMWindowDays = 330
+
+// ttmPoints 通用 4 季滑窗:val 取单季值,4 季齐、皆非 NaN 且窗口季度连续(首尾
+// period_end 跨度 <= maxTTMWindowDays)才产 TTM 阶梯点(EPSPoint 携带 FilingDate,
+// 防前视经 valuation 生效日逻辑)。
 func ttmPoints(facts []edgar.QuarterlyFact, val func(edgar.QuarterlyFact) float64) []core.EPSPoint {
 	var pts []core.EPSPoint
 	for i := 3; i < len(facts); i++ {
+		span := facts[i].PeriodEnd.Sub(facts[i-3].PeriodEnd).Hours() / 24
+		if span > maxTTMWindowDays {
+			continue // 整季缺失,窗口跨缺口 → 不产点
+		}
 		sum := 0.0
 		ok := true
 		for j := i - 3; j <= i; j++ {
