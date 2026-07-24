@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // reflectTag 返回 v 中名为 field 的字段的 mapstructure 标签。
@@ -61,4 +62,24 @@ func TestPrismConfigFieldsAndTags(t *testing.T) {
 		assert.True(t, ok, "PrismInstrument.%s 应有 mapstructure 标签", field)
 		assert.Equal(t, want, tag, "PrismInstrument.%s", field)
 	}
+}
+
+// Context Checkpoint: akshare 配置默认值与字段 → TestPrismConfigAkshareDefaults
+//   functional[0] "零值 ApplyDefaults 后 AkshareBaseURL=http://127.0.0.1:8180" → TestPrismConfigAkshareDefaults
+//   boundary[0]   "显式 AkshareBaseURL 不被默认值覆盖"                          → TestPrismConfigAkshareDefaults
+//   functional[1] "PrismInstrument.FallbackSource mapstructure=fallback_source" → TestPrismInstrumentFallbackSourceTag
+func TestPrismConfigAkshareDefaults(t *testing.T) {
+	c := PrismConfig{}
+	c.ApplyDefaults()
+	assert.Equal(t, "http://127.0.0.1:8180", c.AkshareBaseURL)
+
+	c2 := PrismConfig{AkshareBaseURL: "http://127.0.0.1:9999"}
+	c2.ApplyDefaults()
+	assert.Equal(t, "http://127.0.0.1:9999", c2.AkshareBaseURL, "显式值不被覆盖")
+}
+
+func TestPrismInstrumentFallbackSourceTag(t *testing.T) {
+	f, ok := reflect.TypeOf(PrismInstrument{}).FieldByName("FallbackSource")
+	require.True(t, ok)
+	assert.Equal(t, "fallback_source", f.Tag.Get("mapstructure"))
 }

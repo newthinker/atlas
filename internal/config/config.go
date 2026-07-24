@@ -466,6 +466,7 @@ type PrismConfig struct {
 	USLookbackYears int               `mapstructure:"us_lookback_years"` // 美股 yahoo 重建年数
 	LowPct          float64           `mapstructure:"low_pct"`           // 低估阈值(百分位)
 	HighPct         float64           `mapstructure:"high_pct"`          // 高估阈值(百分位)
+	AkshareBaseURL  string            `mapstructure:"akshare_base_url"`  // aktools 本地侧车地址
 	Instruments     []PrismInstrument `mapstructure:"instruments"`
 }
 
@@ -477,6 +478,8 @@ type PrismInstrument struct {
 	Market string `mapstructure:"market"` // "US" | "HK" | "CN_A"
 	Group  string `mapstructure:"group"`  // 展示分组,如 "A股指数"
 	Source string `mapstructure:"source"` // "lixinger" | "engine"
+	// FallbackSource 是主源失败时的兜底源,如 "akshare";空=无兜底。
+	FallbackSource string `mapstructure:"fallback_source"`
 }
 
 // ApplyDefaults fills zero-valued fields with M1 defaults.
@@ -495,6 +498,9 @@ func (c *PrismConfig) ApplyDefaults() {
 	}
 	if c.HighPct == 0 {
 		c.HighPct = 85
+	}
+	if c.AkshareBaseURL == "" {
+		c.AkshareBaseURL = "http://127.0.0.1:8180"
 	}
 }
 
