@@ -18,6 +18,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/metrics"
+	"github.com/newthinker/atlas/internal/prism/sankey"
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 	"github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
@@ -54,6 +55,9 @@ type Dependencies struct {
 	PrismStore       *prismstore.Store // nil = prism 未启用,不注册路由
 	PrismLow         float64
 	PrismHigh        float64
+	// PrismSankey 为 nil = 模板未配置或加载失败,不注册财报桥路由。
+	// 注册一个必然报错的端点比不注册更糟: 前端拿到 500 无从判断是配置问题还是故障。
+	PrismSankey *sankey.Service
 }
 
 // watchlistAdapter adapts app.App to the web handler's WatchlistProvider interface
@@ -214,6 +218,13 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		prismHandler := api.NewPrismHandler(deps.PrismStore, deps.PrismLow, deps.PrismHigh)
 		s.mux.Handle("/api/prism/board", wrapHandler(http.HandlerFunc(prismHandler.Board)))
 		s.mux.Handle("/api/prism/series", wrapHandler(http.HandlerFunc(prismHandler.Series)))
+	}
+
+	// Prism earnings bridge API (only when templates loaded successfully)
+	if deps.PrismSankey != nil {
+		sankeyHandler := api.NewSankeyHandler(deps.PrismSankey)
+		s.mux.Handle("/api/prism/sankey", wrapHandler(http.HandlerFunc(sankeyHandler.Sankey)))
+		s.mux.Handle("/api/prism/fundamental", wrapHandler(http.HandlerFunc(sankeyHandler.Fundamental)))
 	}
 
 	// API v1 routes (with auth, metrics, logging)

@@ -27,12 +27,23 @@ func NewPrismHandler(store PrismStore, low, high float64) *PrismHandler {
 	return &PrismHandler{store: store, low: low, high: high}
 }
 
-// jf marshals NaN as null (encoding/json rejects NaN in float64).
+// jf marshals NaN and ±Inf as null: encoding/json rejects both, and a single
+// stray value would fail the whole response rather than one field (AD-14).
+// The engines are expected not to produce Inf; this is the second line.
 func jf(v float64) any {
-	if math.IsNaN(v) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return nil
 	}
 	return v
+}
+
+// jfSlice applies jf element-wise, keeping index alignment with the source slice.
+func jfSlice(vs []float64) []any {
+	out := make([]any, len(vs))
+	for i, v := range vs {
+		out[i] = jf(v)
+	}
+	return out
 }
 
 // status picks pctl_10y when available, else pctl_5y, and maps to a label.
@@ -100,16 +111,9 @@ func (h *PrismHandler) Series(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusInternalServerError, err)
 		return
 	}
-	njf := func(vs []float64) []any {
-		out := make([]any, len(vs))
-		for i, v := range vs {
-			out[i] = jf(v)
-		}
-		return out
-	}
 	response.JSON(w, http.StatusOK, map[string]any{
 		"symbol": sd.Symbol, "name": sd.Name, "source": sd.Source,
-		"dates": sd.Dates, "pe_ttm": njf(sd.PETTM),
-		"pctl_5y": njf(sd.Pctl5Y), "pctl_10y": njf(sd.Pctl10Y),
+		"dates": sd.Dates, "pe_ttm": jfSlice(sd.PETTM),
+		"pctl_5y": jfSlice(sd.Pctl5Y), "pctl_10y": jfSlice(sd.Pctl10Y),
 	})
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/newthinker/atlas/internal/notifier/email"
 	"github.com/newthinker/atlas/internal/notifier/telegram"
 	"github.com/newthinker/atlas/internal/notifier/webhook"
+	"github.com/newthinker/atlas/internal/prism/sankey"
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 	signalstore "github.com/newthinker/atlas/internal/storage/signal"
 	"github.com/newthinker/atlas/internal/strategy"
@@ -38,6 +39,11 @@ import (
 
 const (
 	defaultSignalStoreCapacity = 1000
+
+	// sankeyTemplateDir is where the earnings bridge templates live, relative to
+	// the working directory the service is started from. Templates are read once
+	// at startup, so adding or editing one needs a restart.
+	sankeyTemplateDir = "configs/prism/templates"
 )
 
 var serveCmd = &cobra.Command{
@@ -195,6 +201,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Open the Prism store when enabled; nil keeps its API routes unregistered.
 	// Closed on shutdown via defer (serve blocks until the signal handler returns).
 	var prismStore *prismstore.Store
+	var prismSankey *sankey.Service
 	prismCfg := cfg.Prism
 	prismCfg.ApplyDefaults()
 	if prismCfg.Enabled {
@@ -203,6 +210,23 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("opening prism store: %w", err)
 		}
 		defer prismStore.Close()
+
+		// Templates are read once at startup: changing one needs a restart.
+		// A failure here must not take the whole server down, but it must not
+		// pass unnoticed either (AD-16) — serve keeps running with the earnings
+		// bridge routes unregistered, and the reason is in the log.
+		templates, err := sankey.LoadTemplates(sankeyTemplateDir)
+		switch {
+		case err != nil:
+			log.Error("prism sankey disabled: loading templates failed",
+				zap.String("dir", sankeyTemplateDir), zap.Error(err))
+		case len(templates) == 0:
+			log.Warn("prism sankey disabled: no templates configured",
+				zap.String("dir", sankeyTemplateDir))
+		default:
+			prismSankey = sankey.NewService(prismStore, templates)
+			log.Info("prism sankey enabled", zap.Int("templates", len(templates)))
+		}
 	}
 
 	// Create server dependencies
@@ -217,6 +241,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		PrismStore:       prismStore,
 		PrismLow:         prismCfg.LowPct,
 		PrismHigh:        prismCfg.HighPct,
+		PrismSankey:      prismSankey,
 	}
 
 	// Create server config
