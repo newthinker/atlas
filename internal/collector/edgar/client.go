@@ -63,15 +63,32 @@ type Client struct {
 	client    *http.Client
 	baseURL   string
 	userAgent string
+	// archivesURL 是报告实例文档所在 host,与 baseURL(companyfacts/submissions 的 data host)
+	// **不是同一个** —— 生产分别为 data.sec.gov 与 www.sec.gov。
+	archivesURL string
+	// maxInstanceBytes 是单份实例文档的读取上限(AD-11)。做成字段而非常量,只为让测试能压低
+	// 阈值验证截断行为 —— 造 >64MB 的响应在 CI 上不现实。
+	maxInstanceBytes int64
 }
 
-func New(userAgent string) *Client { return NewWithBaseURL(userAgent, defaultBaseURL) }
+func New(userAgent string) *Client {
+	return NewWithBaseURLs(userAgent, defaultBaseURL, defaultArchivesURL)
+}
 
+// NewWithBaseURL 注入单一 host。archivesURL 一并指向该 host:测试构造的 client 若把 archives
+// 留成真实 www.sec.gov,一旦调用 FetchSegmentRevenue 就会打到线上。
 func NewWithBaseURL(userAgent, baseURL string) *Client {
+	return NewWithBaseURLs(userAgent, baseURL, baseURL)
+}
+
+// NewWithBaseURLs 分别注入 data host 与 archives host。
+func NewWithBaseURLs(userAgent, baseURL, archivesURL string) *Client {
 	return &Client{
-		client:    &http.Client{Timeout: 60 * time.Second},
-		baseURL:   baseURL,
-		userAgent: userAgent,
+		client:           &http.Client{Timeout: 60 * time.Second},
+		baseURL:          baseURL,
+		userAgent:        userAgent,
+		archivesURL:      archivesURL,
+		maxInstanceBytes: defaultMaxInstanceBytes,
 	}
 }
 

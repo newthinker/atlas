@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  精简自真实实例文档 https://www.sec.gov/Archives/edgar/data/789019/000119312526191507/msft-20260331_htm.xml
+  (2026-07-25 实拉, 9,675,172 B, HTTP 200)。**结构严格照真实文档**, 而非 plan 里的示意样例:
+
+  1. 根元素 <xbrl> 用**默认命名空间** http://www.xbrl.org/2003/instance ——
+     context/entity/segment/period/unit 全部无前缀, 只有 xbrldi:explicitMember 带前缀。
+  2. dimension 属性与 member 取值都是 QName 字符串(如 "us-gaap:StatementBusinessSegmentsAxis"),
+     encoding/xml **不会**解析属性值里的前缀, 必须按最后一个 ':' 自行截断取 local name。
+  3. unitRef 的真实取值是 U_USD / U_EUR / U_shares, **不是** plan 示例里的 "usd" ——
+     必须解析 <unit> 定义才能判断单位。真实文档里的 U_UnitedStatesOfAmericaDollarsShare
+     是 <divide> 结构(USD/share, 每股值的单位): 若用「measure 含 USD」的天真判定会把 EPS 当营收。
+
+  真实文档统计(用于说明各干扰 context 并非臆造):
+    context 共 409 个, explicitMember 个数分布 {0:16, 1:276, 2:73, 3:44}
+    -> 交叉维 context 真实存在 117 个;
+    276 个单维 context 里只有 18 个在 StatementBusinessSegmentsAxis 上
+    -> 「单维但轴不匹配」是压倒性多数(DebtInstrumentAxis 73 / ProductOrServiceAxis 48 …);
+    分部轴 context 中有一部分是 instant 型(无 startDate)。
+
+  数值取自真实文档, 可对账:
+    2026-01-01~2026-03-31  Productivity 35.013B / IntelligentCloud 34.681B / MorePersonalComputing 13.192B
+    2025-01-01~2025-03-31  Productivity 29.944B / IntelligentCloud 26.751B / MorePersonalComputing 13.371B
+    2025-07-01~2026-03-31(274d 累计, 必须被期间过滤丢弃) IntelligentCloud 98.485B
+-->
+<xbrl
+  xmlns="http://www.xbrl.org/2003/instance"
+  xmlns:country="http://xbrl.sec.gov/country/2025"
+  xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+  xmlns:msft="http://www.microsoft.com/20260331"
+  xmlns:srt="http://fasb.org/srt/2025"
+  xmlns:us-gaap="http://fasb.org/us-gaap/2025"
+  xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+  xmlns:xlink="http://www.w3.org/1999/xlink">
+  <link:schemaRef xmlns:link="http://www.xbrl.org/2003/linkbase" xlink:href="msft-20260331.xsd" xlink:type="simple"/>
+
+  <!-- ==========================================================================
+       【顺序陷阱】这条 fact 出现在它的 context(C_prior_ic)与全部 <unit> 定义**之前**。
+       AD-11 要求单遍遍历同时收集 contexts 与 pending facts、流**结束后**在内存关联;
+       若实现假设 "context 一定先于 fact 出现"(边读 fact 边查已收 context), 这条会被静默丢弃,
+       去年同季的 IntelligentCloud 就会缺失。
+       ========================================================================== -->
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_prior_ic" unitRef="U_USD" decimals="-6">26751000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- ===== 本季 2026-01-01~2026-03-31 (90d, 保留) ===== -->
+  <context id="C_q3_pbp">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:ProductivityAndBusinessProcessesMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+  <context id="C_q3_ic">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:IntelligentCloudMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+  <context id="C_q3_mpc">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:MorePersonalComputingMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+
+  <!-- ===== 去年同季 2025-01-01~2025-03-31 (90d, 保留) —— AD-2: 一份 10-Q 同时含本季与比较季,
+       「一报告一 SegmentPeriod」的结构会让两者按 member 互相覆盖, 赢家取决于 XML 顺序 ===== -->
+  <context id="C_prior_ic">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:IntelligentCloudMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2025-01-01</startDate><endDate>2025-03-31</endDate></period>
+  </context>
+
+  <!-- ===== 本年累计 2025-07-01~2026-03-31 (274d) —— 期间过滤必须丢弃 ===== -->
+  <context id="C_ytd_ic">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:IntelligentCloudMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2025-07-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+
+  <!-- ===== 干扰项 1: 交叉维(分部轴 × 地域轴), 真实文档有 117 个多维 context ===== -->
+  <context id="C_cross">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:IntelligentCloudMember</xbrldi:explicitMember>
+        <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">country:US</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+
+  <!-- ===== 干扰项 2: 单维但轴不匹配(ProductOrServiceAxis), 真实文档 276 单维里 258 个是这种 ===== -->
+  <context id="C_other_axis">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:ProductOrServiceAxis">msft:ServerProductsAndCloudServicesMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+
+  <!-- ===== 干扰项 3: instant 型 context(无 startDate) —— 必须安全跳过, 不能 panic ===== -->
+  <context id="C_instant_ic">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:IntelligentCloudMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><instant>2026-03-31</instant></period>
+  </context>
+
+  <!-- ===== 干扰项 4: 无 explicitMember 的合并口径 context(真实文档 16 个) ===== -->
+  <context id="C_consolidated">
+    <entity><identifier scheme="http://www.sec.gov/CIK">0000789019</identifier></entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-03-31</endDate></period>
+  </context>
+
+  <!-- ========================= facts ========================= -->
+
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_q3_pbp" unitRef="U_USD" decimals="-6">35013000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_q3_ic" unitRef="U_USD" decimals="-6">34681000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- tag 链优先级: 同 (period, member) 两个 revenue tag 并存, 且**低优先级的 Revenues 排在前面**。
+       「首次出现者胜」的实现会取到 99999, 正确实现必须取 revenueTags 里优先级更高的
+       RevenueFromContractWithCustomerExcludingAssessedTax = 13.192B。 -->
+  <us-gaap:Revenues contextRef="C_q3_mpc" unitRef="U_USD" decimals="-6">99999000000</us-gaap:Revenues>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_q3_mpc" unitRef="U_USD" decimals="-6">13192000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- 274 天累计期的 fact: context 合格但期间不合格, 必须整期丢弃 -->
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_ytd_ic" unitRef="U_USD" decimals="-6">98485000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- context 不合格的 fact: 交叉维 / 轴不匹配 / instant / 无 member -->
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_cross" unitRef="U_USD" decimals="-6">12000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_other_axis" unitRef="U_USD" decimals="-6">21000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_instant_ic" unitRef="U_USD" decimals="-6">77000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_consolidated" unitRef="U_USD" decimals="-6">70066000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- contextRef 指向根本不存在的 context: 关联阶段必须安全丢弃 -->
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_does_not_exist" unitRef="U_USD" decimals="-6">88000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- 非营收 tag(成本/营利)落在合格 context 上: 不得被当作营收计入 -->
+  <us-gaap:CostOfGoodsAndServicesSold contextRef="C_q3_ic" unitRef="U_USD" decimals="-6">15120000000</us-gaap:CostOfGoodsAndServicesSold>
+  <us-gaap:OperatingIncomeLoss contextRef="C_q3_ic" unitRef="U_USD" decimals="-6">13753000000</us-gaap:OperatingIncomeLoss>
+
+  <!-- ===== 单位过滤 =====
+       C_prior_pbp 上挂三条营收 fact, 只有 U_USD 那条算数:
+         U_EUR                              -> 非 USD, 排除
+         U_UnitedStatesOfAmericaDollarsShare -> <divide> USD/share(每股口径), **不是**营收单位, 排除
+         U_USD                              -> 保留 29.944B -->
+  <context id="C_prior_pbp">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:ProductivityAndBusinessProcessesMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2025-01-01</startDate><endDate>2025-03-31</endDate></period>
+  </context>
+  <us-gaap:Revenues contextRef="C_prior_pbp" unitRef="U_EUR" decimals="-6">55555000000</us-gaap:Revenues>
+  <us-gaap:Revenues contextRef="C_prior_pbp" unitRef="U_UnitedStatesOfAmericaDollarsShare" decimals="2">3.24</us-gaap:Revenues>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_prior_pbp" unitRef="U_USD" decimals="-6">29944000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
+  <!-- unitRef 指向未声明的 unit: 无法确认是 USD -> 保守排除 -->
+  <us-gaap:Revenues contextRef="C_prior_pbp" unitRef="U_undeclared" decimals="-6">44444000000</us-gaap:Revenues>
+
+  <!-- ==========================================================================
+       <unit> 定义**放在文档末尾**(在全部引用它们的 fact 之后), 一并检验单位关联同样是
+       「流末在内存关联」而非依赖出现顺序。取值照真实文档。
+       ========================================================================== -->
+  <unit id="U_USD"><measure>iso4217:USD</measure></unit>
+  <unit id="U_EUR"><measure>iso4217:EUR</measure></unit>
+  <unit id="U_shares"><measure>shares</measure></unit>
+  <unit id="U_UnitedStatesOfAmericaDollarsShare">
+    <divide>
+      <unitNumerator><measure>iso4217:USD</measure></unitNumerator>
+      <unitDenominator><measure>shares</measure></unitDenominator>
+    </divide>
+  </unit>
+</xbrl>

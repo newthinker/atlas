@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  期间过滤专用 fixture:每个 context 一个 duration,member 名即其天数,便于逐端点对偶断言。
+  规则(design-spec §1.2):duration = endDate − startDate + 1(含首尾),落在 70~100(单季)
+  或 350~380(FY,含 366 闰年)才保留。两个区间的**四个端点各配一对**内外样本:
+    69/70   100/101   349/350   380/381
+  另含 366d(真实 10-K 里 FY2024 就是 2023-07-01~2024-06-30 = 366 天闰年)。
+-->
+<xbrl
+  xmlns="http://www.xbrl.org/2003/instance"
+  xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+  xmlns:msft="http://www.microsoft.com/20260331"
+  xmlns:us-gaap="http://fasb.org/us-gaap/2025"
+  xmlns:xbrldi="http://xbrl.org/2006/xbrldi">
+
+  <unit id="U_USD"><measure>iso4217:USD</measure></unit>
+
+  <context id="C_069"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D069Member</xbrldi:explicitMember></segment></entity><period><startDate>2026-01-01</startDate><endDate>2026-03-10</endDate></period></context>
+  <context id="C_070"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D070Member</xbrldi:explicitMember></segment></entity><period><startDate>2026-01-01</startDate><endDate>2026-03-11</endDate></period></context>
+  <context id="C_100"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D100Member</xbrldi:explicitMember></segment></entity><period><startDate>2026-01-01</startDate><endDate>2026-04-10</endDate></period></context>
+  <context id="C_101"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D101Member</xbrldi:explicitMember></segment></entity><period><startDate>2026-01-01</startDate><endDate>2026-04-11</endDate></period></context>
+  <context id="C_349"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D349Member</xbrldi:explicitMember></segment></entity><period><startDate>2025-01-01</startDate><endDate>2025-12-15</endDate></period></context>
+  <context id="C_350"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D350Member</xbrldi:explicitMember></segment></entity><period><startDate>2025-01-01</startDate><endDate>2025-12-16</endDate></period></context>
+  <context id="C_366"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D366Member</xbrldi:explicitMember></segment></entity><period><startDate>2023-07-01</startDate><endDate>2024-06-30</endDate></period></context>
+  <context id="C_380"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D380Member</xbrldi:explicitMember></segment></entity><period><startDate>2025-01-01</startDate><endDate>2026-01-15</endDate></period></context>
+  <context id="C_381"><entity><identifier>0000789019</identifier><segment><xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">msft:D381Member</xbrldi:explicitMember></segment></entity><period><startDate>2025-01-01</startDate><endDate>2026-01-16</endDate></period></context>
+
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_069" unitRef="U_USD">69</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_070" unitRef="U_USD">70</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_100" unitRef="U_USD">100</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_101" unitRef="U_USD">101</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_349" unitRef="U_USD">349</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_350" unitRef="U_USD">350</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_366" unitRef="U_USD">366</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_380" unitRef="U_USD">380</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_381" unitRef="U_USD">381</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+</xbrl>

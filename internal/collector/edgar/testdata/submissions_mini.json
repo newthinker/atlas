@@ -1,0 +1,14 @@
+{
+  "cik": "789019",
+  "entityName": "MICROSOFT CORP",
+  "_note": "结构照 https://data.sec.gov/submissions/CIK0000789019.json 精简:filings.recent 是平行数组。真实文件 form 数组长 1000、其中 10-Q/10-K 共 25 份。此处保留 10-Q(reportDate 2026-03-31,晚于 since)、8-K(form 不符)、10-K(reportDate 2019-06-30,早于 since)三条,用于检验双重筛选。accessionNumber 带连字符,推导实例 URL 时须去掉;primaryDocument 的 .htm 换成 _htm.xml。",
+  "filings": {
+    "recent": {
+      "form": ["10-Q", "8-K", "10-K"],
+      "accessionNumber": ["0001193125-26-191507", "0000950170-26-000111", "0000950170-19-000012"],
+      "primaryDocument": ["msft-20260331.htm", "msft-8k.htm", "msft-20190630.htm"],
+      "reportDate": ["2026-03-31", "2026-02-10", "2019-06-30"],
+      "filingDate": ["2026-04-29", "2026-02-11", "2019-08-01"]
+    }
+  }
+}
