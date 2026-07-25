@@ -194,8 +194,15 @@ func gaapWithAnnualEnds(t *testing.T, ends ...string) map[string]tagFacts {
 	return map[string]tagFacts{"Revenues": {Units: map[string][]rawFact{"USD": facts}}}
 }
 
-// functional[0]:阈值三档必须同时存在 —— 只有 15/16 无法区分 `> 15` 与 `>= 15`;
-// 只有 14/16 无法定位阈值落在哪一天。三档一起才把 `end.Day() > 15` 钉死。
+// functional[0]:阈值三档必须同时存在。理由经 day=1..31 穷举各变异体的行为差异确定
+// (先前注释里"只有 15/16 无法区分 > 15 与 >= 15"的说法是错的:day=15 单档就能区分):
+//
+//	去掉 day=14(仅留 15,16) → `!= 15` 这类**非单调**变异存活(它只在 day=15 不回退,
+//	                          其余全回退,故差异全落在 1..14)
+//	去掉 day=15(仅留 14,16) → `>= 15` 存活(差异只在 day=15 这一点)
+//	去掉 day=16(仅留 14,15) → `> 16` 存活(差异只在 day=16 这一点)
+//
+// 另注:对整数天 `>= 15` 与 `> 14` **逐档等价**,是同一种行为而非两个独立变异。
 func TestAnchorYearMonthDayThreshold(t *testing.T) {
 	for _, tc := range []struct {
 		day, wantY, wantM int
@@ -238,7 +245,12 @@ func TestFiscalYearEndMonthPicksMode(t *testing.T) {
 }
 
 // boundary[1]:两个月份票数完全相同时恒取较小者。**必须连跑多次** —— Go 的 map 迭代序
-// 每次 range 都随机,单次调用对「稳定性」零证明力:丢掉平票规则的实现有约一半概率碰巧给对。
+// 每次 range 都随机,单次调用对「稳定性」零证明力。
+//
+// 循环次数不是拍脑袋:把 runs 降到 1 并施加 `n > bestN → n >= bestN` 变异后实测,
+// 该变异只在 **32/40** 次运行里被检出 —— 也就是说单次调用的写法有约 20% 概率放它过去。
+// (注:并非直觉上的 50%;Go 对 2 元素 map 的迭代起点并不均匀。这个数字是测出来的,不是推出来的。)
+// runs=50 把漏检概率压到可忽略,实测该变异 25/25 被杀。
 func TestFiscalYearEndMonthTieBreakIsStable(t *testing.T) {
 	gaap := gaapWithAnnualEnds(t,
 		"2021-03-31", "2022-03-31", // 3 月,2 票
