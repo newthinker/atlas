@@ -620,21 +620,34 @@ func TestRefreshSegmentsIgnoresCorruptFundamentalDate(t *testing.T) {
 func TestRefreshSegmentsDeterministicOrdering(t *testing.T) {
 	// sortedKeys 让 map 遍历产生确定顺序,这是刻意加的 —— 但「刻意」不等于「被守护」:
 	// 去掉排序后行为仍旧正确,只是 Degraded 文案顺序与落库行顺序在每次运行间随机漂移,
-	// 运维无法比对两次运行的输出,测试也没法精确断言。此处用 3 个未映射 member 钉住它
-	// (随机顺序恰好升序的概率仅 1/6)。
-	store := newFakeStore()
-	seedFundamentals(t, store, "MSFT", map[string]string{"2026-03-31": "2026Q3"})
-	seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
-		"789019": {{PeriodStart: q3Start, PeriodEnd: q3End, Form: "10-Q", Values: map[string]float64{
-			"ZuluMember": 1, "AlphaMember": 2, "MikeMember": 3, "ProductivityMember": 29.9e9,
-		}}},
-	}}
+	// 运维无法比对两次运行的输出,测试也没法精确断言。
+	//
+	// **单次调用只是概率性检出,必须重复调用**。原以为「n 个 member → 偶然升序概率
+	// 1/n!」,实测不成立:Go 对单桶小 map(≤8 键)的迭代是**旋转**而非均匀随机排列 ——
+	// 实测 n=5 时只出现 5 种不同顺序(全排列应为 120 种),升序占比随键的哈希落位在
+	// 10%~75% 之间浮动,与 1/n! 毫无关系。因此靠加 member 个数压低误判率是无效的
+	// (3→5 实测只把存活率从 13% 降到 10%)。
+	//
+	// 正确做法是**在用例内重复调用**:每轮都必须升序,存活率 = p^N。取 N=20,
+	// 即便最坏 p≈0.75 也只有 3e-3,实测去排序变异 30 次全红。
+	const rounds = 20
+	want := []string{"AlphaMember", "MikeMember", "RomeoMember", "XrayMember", "ZuluMember"}
+	for round := range rounds {
+		store := newFakeStore()
+		seedFundamentals(t, store, "MSFT", map[string]string{"2026-03-31": "2026Q3"})
+		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
+			"789019": {{PeriodStart: q3Start, PeriodEnd: q3End, Form: "10-Q", Values: map[string]float64{
+				"ZuluMember": 1, "AlphaMember": 2, "MikeMember": 3,
+				"RomeoMember": 4, "XrayMember": 5, "ProductivityMember": 29.9e9,
+			}}},
+		}}
 
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", true)
+		rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", true)
 
-	require.Empty(t, rep.Failed)
-	require.Len(t, rep.Degraded, 3)
-	assert.Contains(t, rep.Degraded[0], "AlphaMember")
-	assert.Contains(t, rep.Degraded[1], "MikeMember")
-	assert.Contains(t, rep.Degraded[2], "ZuluMember")
+		require.Empty(t, rep.Failed)
+		require.Len(t, rep.Degraded, len(want))
+		for i, w := range want {
+			require.Contains(t, rep.Degraded[i], w, "第 %d 轮的第 %d 条 Degraded 须按 member 升序", round, i)
+		}
+	}
 }
