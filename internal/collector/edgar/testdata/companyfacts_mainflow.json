@@ -1,0 +1,92 @@
+{
+  "cik": 1045810,
+  "entityName": "MAIN FLOW CORP",
+  "_note": "三个单季覆盖主干流五科目的全部分支。GrossProfit / SellingGeneralAndAdministrativeExpense 两个 tag 只有 Q3 有条目 —— Q3 直取 tag 值(不被推导覆盖),Q1/Q2 走推导。Cost 只提供链上第二个 tag(CostOfGoodsAndServicesSold),检验 costTags 回退。Q2 的 Cost > Revenue → 毛利为负(不钳零);Q2/Q3 缺 G&A 分列 → SG&A 单侧不求和。",
+  "facts": {
+    "us-gaap": {
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 40000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 42000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"},
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 44000, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "NetIncomeLoss": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 15000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 17000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"},
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 19000, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "CostOfGoodsAndServicesSold": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 24000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 45000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"},
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 26000, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "GrossProfit": {
+        "units": {
+          "USD": [
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 99999, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "SellingAndMarketingExpense": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 5000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 5200, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"}
+          ]
+        }
+      },
+      "GeneralAndAdministrativeExpense": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 3000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "SellingGeneralAndAdministrativeExpense": {
+        "units": {
+          "USD": [
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 12345, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "ResearchAndDevelopmentExpense": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 2000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 2100, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"},
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 2200, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "OperatingIncomeLoss": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 10000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 11000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"},
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 12000, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      },
+      "IncomeTaxExpenseBenefit": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 1500, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 1600, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"},
+            {"start": "2025-07-28", "end": "2025-10-26", "val": 1700, "fy": 2026, "fp": "Q3", "form": "10-Q", "filed": "2025-11-19"}
+          ]
+        }
+      }
+    }
+  }
+}

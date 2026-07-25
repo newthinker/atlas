@@ -1,0 +1,47 @@
+{
+  "cik": 1045810,
+  "entityName": "TAG FALLBACK CORP",
+  "_note": "EarningsPerShareDiluted / WeightedAverageNumberOfDilutedSharesOutstanding / StockholdersEquity 三个首选 tag 全缺,只有各自回退 tag。Q2 连回退 EPS tag 也无条目 → 走 NetIncome/DilutedShares 推算。",
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareBasicAndDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 0.6, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 40000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 42000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"}
+          ]
+        }
+      },
+      "NetIncomeLoss": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 15000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 17000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"}
+          ]
+        }
+      },
+      "WeightedAverageNumberOfSharesOutstandingBasic": {
+        "units": {
+          "shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 24700, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"},
+            {"start": "2025-04-28", "end": "2025-07-27", "val": 25000, "fy": 2026, "fp": "Q2", "form": "10-Q", "filed": "2025-08-27"}
+          ]
+        }
+      },
+      "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": {
+        "units": {
+          "USD": [
+            {"end": "2025-04-27", "val": 80000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "cik": 1045810,
+  "entityName": "TAG PREFERENCE CORP",
+  "_note": "每条 tag 链的首选与回退 tag **同时存在**且值截然不同。回退值全部设为哨兵 99999,一旦回退错误地生效即可被断言捕获。GrossProfit tag 故意缺失,以此检验 costTags 链选中的是 CostOfRevenue(24000)而非 CostOfGoodsAndServicesSold(99999)。",
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 0.6, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "EarningsPerShareBasicAndDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 99999, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "WeightedAverageNumberOfDilutedSharesOutstanding": {
+        "units": {
+          "shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 24700, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "WeightedAverageNumberOfSharesOutstandingBasic": {
+        "units": {
+          "shares": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 99999, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "StockholdersEquity": {
+        "units": {
+          "USD": [
+            {"end": "2025-04-27", "val": 80000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": {
+        "units": {
+          "USD": [
+            {"end": "2025-04-27", "val": 99999, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 40000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "CostOfRevenue": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 24000, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      },
+      "CostOfGoodsAndServicesSold": {
+        "units": {
+          "USD": [
+            {"start": "2025-01-27", "end": "2025-04-27", "val": 99999, "fy": 2026, "fp": "Q1", "form": "10-Q", "filed": "2025-05-28"}
+          ]
+        }
+      }
+    }
+  }
+}
