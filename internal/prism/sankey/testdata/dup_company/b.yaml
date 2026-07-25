@@ -1,0 +1,5 @@
+# company 大小写不同也算重复：返回 map 的 key 统一大写，二者会撞车。
+company: dupco
+cik: "2"
+segments:
+  - {key: second, name_zh: 二, name_en: Second, xbrl_member: SecondMember}

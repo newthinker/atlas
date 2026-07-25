@@ -3,8 +3,11 @@ package sankey
 // Context Checkpoint: done_criteria → test mapping
 // functional[0] 合法模板解析出 company/cik/segment_axis/version 与完整 segments 列表（逐字段断言） → TestLoadTemplatesValid
 // functional[1] 校验分支：key 重复 / xbrl_member 为空 / company 为空 → error                     → TestLoadTemplatesValidation
+// functional[1](a) segments[].key 含大写字符 → 加载期 error                                      → TestLoadTemplatesValidation/upper_case_segment_key
+// functional[1](b) 两个模板文件声明同一 company → 加载期 error（含两个文件名）                    → TestLoadTemplatesDuplicateCompany
 // functional[2] AD-16 三种目录情况区分（不存在 / 无 yaml / 非法 YAML 含文件名）                   → TestLoadTemplatesDirCases
 // functional[3] LoadManualSegments 两层 map / 文件不存在空 map / fiscal_period 键格式校验         → TestLoadManualSegments, TestLoadManualSegmentsBadPeriodKey
+// functional[3](a) YAML 语法错误 / schema 与两层 map 不匹配 → error（含文件名）                    → TestLoadManualSegmentsUnparsableFile
 // functional[4] 仓库真实模板冒烟（configs/prism/templates 全量 + msft 三个 xbrl_member）          → TestLoadTemplatesFromRepoDir
 // boundary[0]   返回 map 的 key 统一为大写 symbol；cik 非空且纯数字                               → TestLoadTemplatesValid, TestLoadTemplatesValidation
 
@@ -136,6 +139,27 @@ segments:
 `,
 			wantErr: "cik",
 		},
+		{
+			// viper 把 LoadManualSegments 的 map key 小写化，大写模板 key 只会静默查出 0 条，
+			// 必须在加载期就报错。
+			name: "upper case segment key",
+			yaml: `
+company: A
+cik: "1"
+segments:
+  - {key: Cloud, name_zh: 云, name_en: Cloud, xbrl_member: CloudMember}
+`,
+			wantErr: "lower case",
+		},
+		{
+			name: "segments is not a list",
+			yaml: `
+company: A
+cik: "1"
+segments: notalist
+`,
+			wantErr: "parsing",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,6 +188,7 @@ func TestLoadTemplatesDirCases(t *testing.T) {
 		got, err := LoadTemplates(dir)
 		require.NoError(t, err)
 		assert.Empty(t, got)
+		assert.NotNil(t, got, "未配置模板是合法状态，应返回可用的空 map")
 	})
 
 	t.Run("invalid yaml", func(t *testing.T) {
@@ -189,6 +214,20 @@ func TestLoadTemplatesDirCases(t *testing.T) {
 		assert.Nil(t, got)
 		assert.Contains(t, err.Error(), "dup_key.yaml")
 	})
+}
+
+// 两个文件声明同一 company 时，后加载者会静默覆盖先加载者，赢家取决于 os.ReadDir 顺序
+// （跨平台不保证稳定）——必须在加载期报错，且错误信息要同时点出两个文件，否则用户还得
+// 自己翻目录找另一半。
+func TestLoadTemplatesDuplicateCompany(t *testing.T) {
+	got, err := LoadTemplates(filepath.Join("testdata", "dup_company"))
+	require.Error(t, err, "同名 company 不得静默覆盖")
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "company")
+	// 大小写不同（DUPCO / dupco）也算撞车：返回 map 的 key 统一大写。
+	assert.Contains(t, err.Error(), "DUPCO")
+	assert.Contains(t, err.Error(), "a.yaml", "错误必须点出两个冲突文件之一")
+	assert.Contains(t, err.Error(), "b.yaml", "错误必须点出两个冲突文件之二")
 }
 
 func TestLoadManualSegments(t *testing.T) {
@@ -236,14 +275,25 @@ func TestLoadManualSegmentsBadPeriodKey(t *testing.T) {
 		})
 	}
 
-	t.Run("invalid yaml", func(t *testing.T) {
-		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "acme.yaml"), []byte("2025Q1:\n  cloud: [1\n"), 0o644))
-		got, err := LoadManualSegments(dir, "ACME")
-		require.Error(t, err)
-		assert.Nil(t, got)
-		assert.Contains(t, err.Error(), "acme.yaml")
-	})
+}
+
+// 文件读不出 period → key → amount 两层 map 时（YAML 语法错误，或语法合法但 schema
+// 不匹配——用户手写这类文件时的常见错误）必须报错并点名文件，不得静默返回空 map。
+func TestLoadManualSegmentsUnparsableFile(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"invalid yaml", "2025Q1:\n  cloud: [1\n"},
+		{"period value is scalar", "2025Q1: 123\n"},
+		{"amount is not a number", "2025Q1:\n  cloud: notanumber\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "acme.yaml"), []byte(tc.body), 0o644))
+			got, err := LoadManualSegments(dir, "ACME")
+			require.Error(t, err)
+			assert.Nil(t, got)
+			assert.Contains(t, err.Error(), "acme.yaml")
+		})
+	}
 }
 
 // 冒烟测试直接加载仓库内的正式模板目录，保证 yaml 与 struct 永不脱节。

@@ -21,8 +21,9 @@ const DefaultSegmentAxis = "StatementBusinessSegmentsAxis"
 
 // Segment maps one reporting segment to its XBRL instance document member.
 type Segment struct {
-	// Key must be lower case: viper lower-cases the segment keys read by
-	// LoadManualSegments, so an upper-case key here would never join.
+	// Key must be lower case (rejected at load time otherwise): viper
+	// lower-cases the segment keys read by LoadManualSegments, so an
+	// upper-case key here would never join.
 	Key    string `mapstructure:"key"`
 	NameZH string `mapstructure:"name_zh"`
 	NameEN string `mapstructure:"name_en"`
@@ -62,15 +63,24 @@ func LoadTemplates(dir string) (map[string]*Template, error) {
 		}
 		return nil, fmt.Errorf("reading sankey template dir %s: %w", dir, err)
 	}
+	srcOf := make(map[string]string)
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
 			continue
 		}
-		tmpl, err := loadTemplate(filepath.Join(dir, e.Name()))
+		path := filepath.Join(dir, e.Name())
+		tmpl, err := loadTemplate(path)
 		if err != nil {
 			return nil, err
 		}
-		out[strings.ToUpper(tmpl.Company)] = tmpl
+		symbol := strings.ToUpper(tmpl.Company)
+		// Without this check the later file silently wins, and which one that is
+		// depends on the (platform-dependent) os.ReadDir order.
+		if prev, ok := srcOf[symbol]; ok {
+			return nil, fmt.Errorf("duplicate company %s declared in both %s and %s", symbol, prev, path)
+		}
+		srcOf[symbol] = path
+		out[symbol] = tmpl
 	}
 	return out, nil
 }
@@ -110,6 +120,8 @@ func (t *Template) validate() error {
 		switch {
 		case s.Key == "":
 			return fmt.Errorf("segments[%d].key is required", i)
+		case s.Key != strings.ToLower(s.Key):
+			return fmt.Errorf("segments[%d].key %q must be lower case, otherwise it never joins against the manual segments", i, s.Key)
 		case s.Member == "":
 			return fmt.Errorf("segments[%d].xbrl_member is required (key=%s)", i, s.Key)
 		case keys[s.Key]:

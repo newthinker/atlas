@@ -1,0 +1,5 @@
+# 与 b.yaml 声明同一个 company —— 必须报错，而不是让 os.ReadDir 顺序决定谁生效。
+company: DUPCO
+cik: "1"
+segments:
+  - {key: first, name_zh: 一, name_en: First, xbrl_member: FirstMember}
