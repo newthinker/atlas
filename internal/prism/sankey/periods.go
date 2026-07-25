@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 )
@@ -29,35 +30,71 @@ type PeriodMetrics struct {
 	GrossMargin, OpMargin, NetMargin                                       float64
 }
 
-// BuildPeriods turns store rows into period columns, ascending by period.
+// PeriodConflict reports data the engine refused to aggregate because the
+// fiscal_period label could not be trusted as a grouping key.
+type PeriodConflict struct {
+	Period string // "2026Q3" or "FY2025"
+	Detail string
+}
+
+// periodEndSlackDays is how far two period_end dates may sit apart and still
+// count as the same quarter. TASK-008 already reverse-looks-up a segment's
+// fiscal_period against fundamental_q with a ±3 day tolerance, so the two
+// sources can legitimately disagree by a few days; different quarters are
+// roughly 90 days apart, leaving plenty of room.
+const periodEndSlackDays = 15
+
+// BuildPeriods turns store rows into period columns, ascending by period,
+// along with any conflicts that made it drop data.
 //
 // granularity "q" converts quarters one to one; "fy" groups them by the fiscal
 // year embedded in the fiscal_period label (so a June-ending issuer's 2026Q1,
 // whose period_end is 2025-09-30, still lands in FY2026) and sums the flow
-// items. A fiscal year with fewer than four quarters is not emitted.
+// items. A fiscal year is emitted only when it holds exactly four quarters.
 //
-// Segment rows are attributed by fiscal_period. Rows whose label is empty
-// (allowed by AD-9 when the period_end reverse lookup failed) cannot be placed
-// in a period and are skipped; the revenue they carry then shows up in the
-// sankey's other_segment residual rather than being charged to a wrong period.
-func BuildPeriods(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow, granularity string) []PeriodMetrics {
-	quarters := buildQuarters(f, segs)
+// Both bounds matter, because the label is not a reliable key: EDGAR's fy/fp
+// pair is the *reporting* context, so a later filing re-disclosing an earlier
+// period carries the later report's label (measured on real MSFT data: 27% of
+// labels cover more than one quarter, one of them four). Fundamentals survive
+// that because period_end is their primary key, but anything grouping by label
+// would silently add unrelated quarters together — a number that still looks
+// like revenue and raises no error. Hence: segment rows are matched to the
+// quarter whose period_end they actually carry, and a fiscal year holding more
+// than four quarters is refused rather than summed.
+//
+// Segment rows whose label is empty (allowed by AD-9 when the period_end
+// reverse lookup failed) cannot be placed in a period and are skipped; the
+// revenue they carry then shows up in the sankey's other_segment residual
+// rather than being charged to a wrong period.
+func BuildPeriods(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow, granularity string) ([]PeriodMetrics, []PeriodConflict) {
+	quarters, conflicts := buildQuarters(f, segs)
 	if granularity != "fy" {
-		return quarters
+		return quarters, conflicts
 	}
-	return aggregateFiscalYears(quarters)
+	fys, fyConflicts := aggregateFiscalYears(quarters)
+	return fys, append(conflicts, fyConflicts...)
 }
 
-func buildQuarters(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow) []PeriodMetrics {
-	byPeriod := make(map[string]map[string]float64)
+// segmentBuckets holds one fiscal_period label's segment revenue, split by the
+// period_end each row was reported for: keying by period_end as well is what
+// keeps two quarters sharing one label from being added together.
+type segmentBuckets map[string]map[string]float64 // period_end → segment_key → revenue
+
+func buildQuarters(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow) ([]PeriodMetrics, []PeriodConflict) {
+	byPeriod := make(map[string]segmentBuckets)
 	for _, s := range segs {
 		if s.FiscalPeriod == "" {
 			continue
 		}
-		if byPeriod[s.FiscalPeriod] == nil {
-			byPeriod[s.FiscalPeriod] = make(map[string]float64)
+		buckets := byPeriod[s.FiscalPeriod]
+		if buckets == nil {
+			buckets = make(segmentBuckets)
+			byPeriod[s.FiscalPeriod] = buckets
 		}
-		byPeriod[s.FiscalPeriod][s.SegmentKey] += s.Revenue
+		if buckets[s.PeriodEnd] == nil {
+			buckets[s.PeriodEnd] = make(map[string]float64)
+		}
+		buckets[s.PeriodEnd][s.SegmentKey] += s.Revenue
 	}
 
 	out := make([]PeriodMetrics, 0, len(f))
@@ -66,7 +103,7 @@ func buildQuarters(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow) 
 			continue
 		}
 		p := PeriodMetrics{
-			Period: r.FiscalPeriod, Segments: byPeriod[r.FiscalPeriod],
+			Period: r.FiscalPeriod, Segments: segmentsAt(byPeriod[r.FiscalPeriod], r.PeriodEnd),
 			Revenue: r.Revenue, GrossProfit: r.GrossProfit, OperatingIncome: r.OperatingIncome,
 			NetIncome: r.NetIncome, RnD: r.RnD, SGnA: r.SGnA, IncomeTax: r.IncomeTax,
 		}
@@ -74,10 +111,99 @@ func buildQuarters(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow) 
 		out = append(out, p)
 	}
 	sortByPeriod(out)
+	return out, labelConflicts(f, byPeriod)
+}
+
+// segmentsAt returns the segment values recorded for the quarter ending at end.
+// Buckets belonging to other quarters that happen to share this label are left
+// out; labelConflicts reports them.
+func segmentsAt(buckets segmentBuckets, end string) map[string]float64 {
+	for bucketEnd, segments := range buckets {
+		if sameQuarter(bucketEnd, end) {
+			return segments
+		}
+	}
+	return nil
+}
+
+// labelConflicts lists every fiscal_period label that covers more than one
+// quarter, counting both fundamental rows and segment rows.
+func labelConflicts(f []prismstore.FundamentalRow, byPeriod map[string]segmentBuckets) []PeriodConflict {
+	ends := make(map[string]map[string]bool) // label → the period_end dates it covers
+	note := func(label, end string) {
+		if label == "" {
+			return
+		}
+		if ends[label] == nil {
+			ends[label] = make(map[string]bool)
+		}
+		ends[label][end] = true
+	}
+	for _, r := range f {
+		note(r.FiscalPeriod, r.PeriodEnd)
+	}
+	for label, buckets := range byPeriod {
+		for end := range buckets {
+			note(label, end)
+		}
+	}
+
+	var out []PeriodConflict
+	for label, es := range ends {
+		distinct := distinctQuarters(es)
+		if len(distinct) < 2 {
+			continue
+		}
+		out = append(out, PeriodConflict{
+			Period: label,
+			Detail: fmt.Sprintf("标签对应 %d 个不同季度 (%s)，只采用与本期 period_end 相符的数据",
+				len(distinct), strings.Join(distinct, ", ")),
+		})
+	}
+	sortConflicts(out)
 	return out
 }
 
-func aggregateFiscalYears(quarters []PeriodMetrics) []PeriodMetrics {
+// distinctQuarters collapses period_end dates that are within the slack of one
+// another and returns the survivors, sorted.
+func distinctQuarters(ends map[string]bool) []string {
+	sorted := make([]string, 0, len(ends))
+	for end := range ends {
+		sorted = append(sorted, end)
+	}
+	sort.Strings(sorted)
+	var out []string
+	for _, e := range sorted {
+		if len(out) > 0 && sameQuarter(out[len(out)-1], e) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// sameQuarter reports whether two period_end dates denote the same quarter.
+// Unparsable dates only match verbatim — guessing would defeat the point.
+func sameQuarter(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ta, err := time.Parse(time.DateOnly, a)
+	if err != nil {
+		return false
+	}
+	tb, err := time.Parse(time.DateOnly, b)
+	if err != nil {
+		return false
+	}
+	gap := ta.Sub(tb)
+	if gap < 0 {
+		gap = -gap
+	}
+	return gap <= periodEndSlackDays*24*time.Hour
+}
+
+func aggregateFiscalYears(quarters []PeriodMetrics) ([]PeriodMetrics, []PeriodConflict) {
 	groups := make(map[string][]PeriodMetrics)
 	for _, q := range quarters {
 		fy := fiscalYearOf(q.Period)
@@ -87,8 +213,19 @@ func aggregateFiscalYears(quarters []PeriodMetrics) []PeriodMetrics {
 		groups[fy] = append(groups[fy], q)
 	}
 
+	var conflicts []PeriodConflict
 	out := make([]PeriodMetrics, 0, len(groups))
 	for fy, qs := range groups {
+		if len(qs) > 4 {
+			// Label collisions can hand us the same fiscal year several times
+			// over. Summing them would report a year at a multiple of its real
+			// size (measured on MSFT: FY2025 productivity at 3.25×), so refuse.
+			conflicts = append(conflicts, PeriodConflict{
+				Period: "FY" + fy,
+				Detail: fmt.Sprintf("收到 %d 个季度（应为 4），标签冲突使该财年无法聚合，已跳过", len(qs)),
+			})
+			continue
+		}
 		if len(qs) < 4 {
 			continue // an incomplete fiscal year is never extrapolated
 		}
@@ -110,7 +247,8 @@ func aggregateFiscalYears(quarters []PeriodMetrics) []PeriodMetrics {
 		out = append(out, agg)
 	}
 	sortByPeriod(out)
-	return out
+	sortConflicts(conflicts)
+	return out, conflicts
 }
 
 func (p *PeriodMetrics) setMargins() {
@@ -121,6 +259,10 @@ func (p *PeriodMetrics) setMargins() {
 
 func sortByPeriod(ps []PeriodMetrics) {
 	sort.Slice(ps, func(i, j int) bool { return ps[i].Period < ps[j].Period })
+}
+
+func sortConflicts(cs []PeriodConflict) {
+	sort.Slice(cs, func(i, j int) bool { return cs[i].Period < cs[j].Period })
 }
 
 // fiscalYearOf returns the fiscal year of "2026Q1" or "FY2026" as "2026".

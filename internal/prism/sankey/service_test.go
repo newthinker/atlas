@@ -455,3 +455,22 @@ func TestAnalyzeMatrixComparesAgainstQuartersOutsideRange(t *testing.T) {
 	assert.Equal(t, "yoy", rev.ChangeKind, "对照期在范围外也应算出同比，而不是退化成 none")
 	assert.InDelta(t, 110.0/88.0-1, rev.Change, 1e-9, "应对比 2025Q2 的 88b")
 }
+
+// 拒绝聚合本身不够——拒绝的理由必须一路传到调用方，否则页面只会「少了一年」而无人知情。
+func TestAnalyzeSurfacesPeriodConflicts(t *testing.T) {
+	store := storeWith(t)
+	// 让 FY2026 收到 6 个季度：2026Q4 这个标签被三份报告重复使用（真实 MSFT 形态）。
+	store.funds[7] = append(store.funds[7],
+		fq("2026Q4", "2024-06-30", 90*b, 54*b, 27*b, 21*b, 7*b, 6*b, 4*b),
+		fq("2026Q4", "2023-06-30", 80*b, 48*b, 24*b, 19*b, 6*b, 5*b, 4*b),
+	)
+
+	got, err := newTestService(t, store).Analyze("ACME", "", "", "fy", "zh")
+	require.NoError(t, err, "上游标签冲突不是本服务的错误，应降级而不是报错")
+	assert.Empty(t, got.Periods, "6 个季度的财年必须被拒绝")
+
+	require.NotEmpty(t, got.Conflicts, "冲突必须透传到 Analysis，否则页面上只是「少了一年」")
+	text := conflictText(got.Conflicts)
+	assert.Contains(t, text, "FY2026", "应点名被拒的财年")
+	assert.Contains(t, text, "2026Q4", "也应点名撞车的季度标签")
+}

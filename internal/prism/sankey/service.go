@@ -27,7 +27,12 @@ type Analysis struct {
 	Periods             []PeriodView
 	Matrix              []MatrixRow
 	Truncated           bool // more periods existed than MaxPeriods allows
-	Template            struct {
+	// Conflicts lists periods the engine refused to aggregate because their
+	// fiscal_period label covers several quarters. Surfacing them is the point:
+	// the alternative is a page that quietly shows a fiscal year at three times
+	// its real size.
+	Conflicts []PeriodConflict
+	Template  struct {
 		Version int
 		Lang    map[string]string // segment_key → display name in the requested lang
 	}
@@ -82,8 +87,10 @@ func (s *Service) Analyze(symbol, from, to, granularity, lang string) (*Analysis
 		return nil, err
 	}
 
-	quarters := BuildPeriods(funds, segs, "q")
-	fys := BuildPeriods(funds, segs, "fy")
+	// The fy pass reports every conflict the q pass does, plus the fiscal years
+	// it had to refuse, so it is the one worth surfacing.
+	quarters, _ := BuildPeriods(funds, segs, "q")
+	fys, conflicts := BuildPeriods(funds, segs, "fy")
 
 	var sel []PeriodMetrics
 	switch granularity {
@@ -96,7 +103,10 @@ func (s *Service) Analyze(symbol, from, to, granularity, lang string) (*Analysis
 	}
 	sel, truncated := truncate(filterRange(sel, from, to))
 
-	out := &Analysis{Symbol: symbol, Granularity: granularity, Truncated: truncated}
+	out := &Analysis{
+		Symbol: symbol, Granularity: granularity,
+		Truncated: truncated, Conflicts: conflicts,
+	}
 	out.Template.Version = tmpl.Version
 	out.Template.Lang = langMap(tmpl, lang)
 	for _, p := range sel {

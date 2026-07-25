@@ -77,7 +77,7 @@ func TestBuildPeriodsQuarterly(t *testing.T) {
 		sr("", "2025-12-31", "cloud", 999*b),
 	}
 
-	got := BuildPeriods(funds, segs, "q")
+	got, _ := BuildPeriods(funds, segs, "q")
 	require.Len(t, got, 2)
 	assert.Equal(t, []string{"2026Q1", "2026Q2"}, periodNames(got), "季度应按期升序")
 
@@ -119,7 +119,7 @@ func TestBuildPeriodsFYAggregation(t *testing.T) {
 		sr("2026Q1", "2025-09-30", "cloud", 84*b),
 	}
 
-	got := BuildPeriods(funds, segs, "fy")
+	got, _ := BuildPeriods(funds, segs, "fy")
 	require.Equal(t, []string{"FY2025"}, periodNames(got),
 		"只有 4 季齐的财年才产出；FY2026 只有 1 季，不得产出")
 
@@ -147,7 +147,7 @@ func TestBuildPeriodsSkipsUnlabeledFundamentalRow(t *testing.T) {
 		fq("2026Q1", "2025-09-30", 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
 	}
 
-	got := BuildPeriods(funds, nil, "q")
+	got, _ := BuildPeriods(funds, nil, "q")
 	require.Equal(t, []string{"2026Q1"}, periodNames(got), "无标签的主表行不得成为一列")
 	for _, p := range got {
 		assert.NotEmpty(t, p.Period, "不得出现无名列")
@@ -173,7 +173,7 @@ func TestBuildPeriodsNonCalendarFiscalYear(t *testing.T) {
 		sr("2026Q4", "2026-06-30", "cloud", 78*b),
 	}
 
-	got := BuildPeriods(funds, segs, "fy")
+	got, _ := BuildPeriods(funds, segs, "fy")
 	require.Equal(t, []string{"FY2026"}, periodNames(got),
 		"FY2026 的四季（2025-09-30 ~ 2026-06-30）应聚合为一个财年；FY2025 只有 2 季不产出")
 	assert.Equal(t, 460*b, got[0].Revenue)
@@ -184,7 +184,7 @@ func TestBuildPeriodsRatioGuards(t *testing.T) {
 		fq("2026Q1", "2025-09-30", 0, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
 		fq("2026Q2", "2025-12-31", math.NaN(), 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
 	}
-	got := BuildPeriods(funds, nil, "q")
+	got, _ := BuildPeriods(funds, nil, "q")
 	require.Len(t, got, 2)
 	for _, p := range got {
 		for name, v := range map[string]float64{
@@ -197,8 +197,119 @@ func TestBuildPeriodsRatioGuards(t *testing.T) {
 }
 
 func TestBuildPeriodsEmptyInput(t *testing.T) {
-	assert.Empty(t, BuildPeriods(nil, nil, "q"))
-	assert.Empty(t, BuildPeriods(nil, nil, "fy"))
+	q, qConflicts := BuildPeriods(nil, nil, "q")
+	assert.Empty(t, q)
+	assert.Empty(t, qConflicts)
+
+	fy, fyConflicts := BuildPeriods(nil, nil, "fy")
+	assert.Empty(t, fy)
+	assert.Empty(t, fyConflicts)
+}
+
+// 真实 EDGAR 数据里 27% 的 fiscal_period 标签对应多个实际季度（实测 MSFT 7/26，
+// 最严重的 2018Q4 横跨 4 个季度）：applyDuration 去重后胜出条目携带的是**较晚那份
+// 报告的上下文标签**。fundamental_q 以 period_end 为 PK，所以数据没丢、只有标签撞车，
+// 但下游一旦把标签当分组键就会把不同季度混在一起。
+//
+// 这两个用例锁的是「上游违约时不静默出错」，治本在 edgar 包（TASK-017）。
+func TestBuildPeriodsRejectsOversizedFiscalYear(t *testing.T) {
+	// FY2025 收到 6 个季度：2025Q4 这个标签被三份不同报告重复使用。
+	funds := []prismstore.FundamentalRow{
+		fq("2025Q1", "2024-09-30", 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
+		fq("2025Q2", "2024-12-31", 110*b, 66*b, 33*b, 26*b, 8*b, 7*b, 5*b),
+		fq("2025Q3", "2025-03-31", 120*b, 70*b, 34*b, 28*b, 9*b, 8*b, 6*b),
+		fq("2025Q4", "2023-06-30", 90*b, 54*b, 27*b, 21*b, 7*b, 6*b, 4*b),
+		fq("2025Q4", "2024-06-30", 120*b, 72*b, 36*b, 28*b, 9*b, 8*b, 6*b),
+		fq("2025Q4", "2025-06-30", 130*b, 78*b, 39*b, 30*b, 9*b, 8*b, 6*b),
+	}
+
+	got, conflicts := BuildPeriods(funds, nil, "fy")
+	assert.NotContains(t, periodNames(got), "FY2025",
+		"6 个季度不是一个财年，宁可不产出也不能相加成一个「完整财年」")
+	assert.Empty(t, got, "本例没有任何合法财年")
+
+	require.NotEmpty(t, conflicts, "拒绝产出必须可观测，不得静默 continue")
+	assert.Contains(t, conflictText(conflicts), "FY2025", "冲突记录应点名被拒的财年")
+}
+
+func TestBuildPeriodsFourQuartersStillProduceFY(t *testing.T) {
+	// 边界：恰好 4 季必须照常产出，别被上界防御误伤。
+	funds := []prismstore.FundamentalRow{
+		fq("2025Q1", "2024-09-30", 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
+		fq("2025Q2", "2024-12-31", 110*b, 66*b, 33*b, 26*b, 8*b, 7*b, 5*b),
+		fq("2025Q3", "2025-03-31", 120*b, 70*b, 34*b, 28*b, 9*b, 8*b, 6*b),
+		fq("2025Q4", "2025-06-30", 130*b, 78*b, 39*b, 30*b, 9*b, 8*b, 6*b),
+	}
+
+	got, conflicts := BuildPeriods(funds, nil, "fy")
+	require.Equal(t, []string{"FY2025"}, periodNames(got))
+	assert.Equal(t, 460*b, got[0].Revenue)
+	assert.Empty(t, conflicts, "标签正常时不得报冲突")
+}
+
+// 真实形态：MSFT 的 2026Q3 标签同时挂着 2025-03-31 与 2026-03-31 两个季度的分部行。
+// 静默 += 会把 intelligent_cloud 报成 61.432B（26.751 + 34.681）。
+func TestBuildPeriodsRejectsCrossQuarterSegmentSum(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("2026Q3", "2026-03-31", 70.066*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
+	}
+	segs := []prismstore.SegmentRow{
+		sr("2026Q3", "2025-03-31", "intelligent_cloud", 26.751*b), // 上一年的同一季
+		sr("2026Q3", "2026-03-31", "intelligent_cloud", 34.681*b), // 本期
+	}
+
+	got, conflicts := BuildPeriods(funds, segs, "q")
+	require.Len(t, got, 1)
+	assert.InDelta(t, 34.681*b, got[0].Segments["intelligent_cloud"], 1,
+		"应只取与本期 period_end 相符的那一行")
+	assert.NotEqual(t, 61.432*b, got[0].Segments["intelligent_cloud"],
+		"跨季相加会产出一个「看着像营收」的错值，无任何报错")
+
+	require.NotEmpty(t, conflicts, "一个标签对应多个期末必须被记录")
+	assert.Contains(t, conflictText(conflicts), "2026Q3")
+	assert.Contains(t, conflictText(conflicts), "2025-03-31", "冲突详情应列出撞车的期末")
+}
+
+func TestBuildPeriodsSegmentLabelSpanningThreeYears(t *testing.T) {
+	// 真实形态：2025Q4 ×3 → [2023-06-30, 2024-06-30, 2025-06-30]
+	funds := []prismstore.FundamentalRow{
+		fq("2025Q4", "2025-06-30", 130*b, 78*b, 39*b, 30*b, 9*b, 8*b, 6*b),
+	}
+	segs := []prismstore.SegmentRow{
+		sr("2025Q4", "2023-06-30", "cloud", 40*b),
+		sr("2025Q4", "2024-06-30", "cloud", 50*b),
+		sr("2025Q4", "2025-06-30", "cloud", 60*b),
+	}
+
+	got, conflicts := BuildPeriods(funds, segs, "q")
+	require.Len(t, got, 1)
+	assert.InDelta(t, 60*b, got[0].Segments["cloud"], 1, "只认本期 period_end 的那一行")
+	assert.NotEqual(t, 150*b, got[0].Segments["cloud"], "三季相加是错值")
+	require.NotEmpty(t, conflicts)
+}
+
+// period_end 相差几天仍是同一季（TASK-008 反查 fiscal_period 时就带 ±3 天容差），
+// 不能把它误判成标签冲突而丢掉真实分部数据。
+func TestBuildPeriodsToleratesNearbyPeriodEnd(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("2026Q1", "2025-09-30", 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
+	}
+	segs := []prismstore.SegmentRow{
+		sr("2026Q1", "2025-09-27", "cloud", 60*b),
+	}
+
+	got, conflicts := BuildPeriods(funds, segs, "q")
+	require.Len(t, got, 1)
+	assert.InDelta(t, 60*b, got[0].Segments["cloud"], 1, "相差 3 天应视为同一季")
+	assert.Empty(t, conflicts, "同一季的微小日期差不是冲突")
+}
+
+func conflictText(cs []PeriodConflict) string {
+	parts := make([]string, 0, len(cs))
+	for _, c := range cs {
+		parts = append(parts, c.Period+": "+c.Detail)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // periodsNamed builds period columns whose only meaningful field is the label —
@@ -643,4 +754,57 @@ func TestBuildSankeyNaNStaysNaN(t *testing.T) {
 		assert.False(t, math.IsInf(n.Value, 0), "node %s 是 Inf", n.Name)
 	}
 	assert.True(t, math.IsNaN(linkValue(t, g, "收入", "毛利")), "缺值应保持 NaN")
+}
+
+// period_end 解析不了时不能猜：既不当作同一季合并，也不能崩。
+func TestBuildPeriodsUnparsablePeriodEnd(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("2026Q3", "2026-03-31", 70*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
+	}
+	segs := []prismstore.SegmentRow{
+		sr("2026Q3", "2026-03-31", "cloud", 34*b),
+		sr("2026Q3", "n/a", "cloud", 26*b), // 上游给了个不是日期的东西
+	}
+
+	got, conflicts := BuildPeriods(funds, segs, "q")
+	require.Len(t, got, 1)
+	assert.InDelta(t, 34*b, got[0].Segments["cloud"], 1, "无法解析的期末不得被并进本期")
+	assert.NotEmpty(t, conflicts, "解析不了就当作不同季度，并记录冲突")
+}
+
+// 某标签的分部行**没有一条**能对上本期 period_end 时，本期就是没有分部数据，
+// 缺口由桑基的 other_segment 残差吸收（而不是错记别的季度的值）。
+func TestBuildPeriodsNoSegmentBucketMatchesQuarter(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("2026Q3", "2026-03-31", 70*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
+	}
+	segs := []prismstore.SegmentRow{
+		sr("2026Q3", "2024-03-31", "cloud", 26*b), // 两年前的同一标签
+	}
+
+	got, conflicts := BuildPeriods(funds, segs, "q")
+	require.Len(t, got, 1)
+	assert.Empty(t, got[0].Segments, "对不上就没有分部数据，不能拿别的季度的值顶上")
+	assert.NotEmpty(t, conflicts)
+}
+
+// 上游标签本身就是垃圾时（长度不足、年份不是数字），各处的解析都必须安全退化，
+// 而不是 panic 或算出个错的对照期。
+func TestBuildPeriodsMalformedLabels(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("abc", "2026-03-31", 70*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
+		fq("20XXQ1", "2026-06-30", 80*b, 50*b, 35*b, 28*b, 8*b, 7*b, 5*b),
+	}
+
+	q, _ := BuildPeriods(funds, nil, "q")
+	assert.Len(t, q, 2, "标签怪归怪，行还是要出，不能凭空吞掉")
+
+	fy, _ := BuildPeriods(funds, nil, "fy")
+	assert.Empty(t, fy, "解析不出财年的标签不得聚合成任何 FY")
+
+	// 矩阵里这类标签算不出去年同期，应退化为 none 而不是乱指一个期。
+	rows := BuildMatrix(q, twoSegTemplate(), "zh", q)
+	rev := rowByKey(t, rows, "revenue")
+	assert.Equal(t, "none", rev.ChangeKind)
+	assert.True(t, math.IsNaN(rev.Change))
 }
