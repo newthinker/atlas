@@ -2,6 +2,7 @@ package prism
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,7 +25,8 @@ import (
 //   functional[1] AD-12 force=true 忽略锚点、传零值 since 全量重拉
 //                                        → TestRefreshSegmentsForceIgnoresAnchor
 //   functional[2] AD-9 主键 period_end;fiscal_period ±3 天反查;反查失败仍落库+Degraded;
-//                 容差内命中 ≥2 条报错
+//                 容差内命中 ≥2 条报错。容差量值由 −4/−3/0/+3/+4 五档钉死 ——
+//                 必须取到「正好 ±3」这一档,否则 3→2 与 <= 改 < 两类退化无人拦
 //                                        → TestRefreshSegmentsFiscalPeriodLookup
 //   functional[3] Q4 = FY − 已存 3 季(逐 segment);凑不齐跳过;负值不落库+Degraded;
 //                 AD-17 FY 期本身不落库
@@ -37,7 +39,11 @@ import (
 //                                        → TestRefreshSegmentsPartialFailure
 //
 // 超出 DoD 的补充用例(理由见各自注释):AD-16(3) 模板串号校验、存储各步失败、
-// manual 文件写坏、只报 10-K 时的未映射 member、fundamental_q 坏日期。
+// manual 文件写坏、只报 10-K 时的未映射 member、fundamental_q 坏日期、
+// Q4 跨轮次重算(自吞噬防护)、财年级季度数守卫、Degraded 与落库行的顺序确定性。
+//
+// 跨轮次纪律:凡「读回自己刚写的数据」的逻辑(此处是 Q4 推导)都必须连跑两轮再断言 ——
+// 这类 bug 首轮结构上就不可能显形,单轮用例再多也看不见。
 // ---------------------------------------------------------------------------
 
 // 财年布局(MSFT 式 6/30 结算),供全部用例复用:
@@ -199,34 +205,40 @@ func TestRefreshSegmentsFiscalPeriodLookup(t *testing.T) {
 			Values: map[string]float64{"ProductivityMember": 29.9e9}}}
 	}
 
-	t.Run("±3 天容差内命中", func(t *testing.T) {
-		store := newFakeStore()
-		// fundamental_q 的 period_end 比分部期晚 2 天(申报口径差),仍应命中
-		seedFundamentals(t, store, "MSFT", map[string]string{"2026-04-02": "2026Q3"})
-		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": period(q3End)}}
-		rep := RefreshSegments(cfg, store, seg, tpl, "", false)
-		require.Empty(t, rep.Failed)
-		row := rowsByKey(t, store, "MSFT")["2026-03-31|productivity"]
-		assert.Equal(t, "2026Q3", row.FiscalPeriod)
-		assert.Equal(t, "2026-03-31", row.PeriodEnd, "AD-9:主键用分部期自身的 period_end,不用 fundamental_q 的")
-		assert.Empty(t, rep.Degraded)
-	})
+	// 容差边界:分部期末固定 2026-03-31,平移 fundamental_q 的 period_end 逐档验。
+	// ±3 必须命中、±4 必须不命中 —— 必须取到「正好等于阈值」这一档,否则容差常量
+	// 改小(3→2)与边界改排他(<= 改 <)两类退化都不会有任何断言变红:只测「明显命中」
+	// (+2)与「明显不命中」(+4)时,两者恰好都落在退化后的行为区间里。
+	for _, tc := range []struct {
+		offsetDays int
+		wantHit    bool
+	}{
+		{-4, false}, {-3, true}, {0, true}, {3, true}, {4, false},
+	} {
+		t.Run(fmt.Sprintf("容差边界offset%+dd", tc.offsetDays), func(t *testing.T) {
+			store := newFakeStore()
+			fundEnd := q3End.AddDate(0, 0, tc.offsetDays).Format("2006-01-02")
+			seedFundamentals(t, store, "MSFT", map[string]string{fundEnd: "2026Q3"})
+			seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": period(q3End)}}
 
-	t.Run("容差外未命中仍落库并记 Degraded", func(t *testing.T) {
-		store := newFakeStore()
-		// 差 4 天 → 超出 ±3 容差
-		seedFundamentals(t, store, "MSFT", map[string]string{"2026-04-04": "2026Q3"})
-		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": period(q3End)}}
-		rep := RefreshSegments(cfg, store, seg, tpl, "", false)
+			rep := RefreshSegments(cfg, store, seg, tpl, "", false)
 
-		require.Empty(t, rep.Failed)
-		row, ok := rowsByKey(t, store, "MSFT")["2026-03-31|productivity"]
-		require.True(t, ok, "AD-9 负向断言:反查失败不得丢数据")
-		assert.Equal(t, 29.9e9, row.Revenue)
-		assert.Equal(t, "", row.FiscalPeriod, "反查失败落空标签")
-		require.Len(t, rep.Degraded, 1)
-		assert.Contains(t, rep.Degraded[0], "2026-03-31")
-	})
+			require.Empty(t, rep.Failed)
+			row, ok := rowsByKey(t, store, "MSFT")["2026-03-31|productivity"]
+			// AD-9 负向断言:反查命中与否都不影响落库,只影响展示标签
+			require.True(t, ok, "反查结果不得影响是否落库")
+			assert.Equal(t, 29.9e9, row.Revenue)
+			assert.Equal(t, "2026-03-31", row.PeriodEnd, "AD-9:主键用分部期自身的 period_end,不用 fundamental_q 的")
+			if tc.wantHit {
+				assert.Equal(t, "2026Q3", row.FiscalPeriod, "偏差 %+dd 在 ±%d 容差内须命中", tc.offsetDays, fiscalPeriodToleranceDays)
+				assert.Empty(t, rep.Degraded)
+			} else {
+				assert.Equal(t, "", row.FiscalPeriod, "偏差 %+dd 超出 ±%d 容差须落空标签", tc.offsetDays, fiscalPeriodToleranceDays)
+				require.Len(t, rep.Degraded, 1)
+				assert.Contains(t, rep.Degraded[0], "2026-03-31")
+			}
+		})
+	}
 
 	t.Run("容差内命中≥2 条报错而非取首个", func(t *testing.T) {
 		store := newFakeStore()
@@ -281,6 +293,64 @@ func TestRefreshSegmentsQ4Derivation(t *testing.T) {
 		assert.Equal(t, 27.0, got["2026-06-30|productivity"].Revenue, "90−63")
 		// FY 期不产生除 Q4 外的额外行:该财年共 3 季 + 1 个 Q4 = 每 segment 4 行
 		assert.Len(t, store.segments["MSFT"], 8, "2 segment × 4 季,FY 期本身不额外落库")
+	})
+
+	t.Run("跨轮次:Q4 已存在时仍可重算并传播重述", func(t *testing.T) {
+		// Q4 自吞噬防护(严格上界 d.Before(FY.PeriodEnd))**只在第二轮显形**:
+		// 首轮 Q4 尚不存在,落在 FY 区间内的季度正好 3 个,闭上界与严格上界行为完全相同。
+		// 第二轮 Q4 已存在且其 period_end 恰等于 FY 期末 —— 闭上界会把 Q4 自身数进来
+		// (len(ends)==4)→ 整个财年被跳过 → Q4 从此永不重算,重述数据永远进不来,
+		// 且值不变、无报错、无 Degraded,是彻底静默的失效。
+		//
+		// 单轮用例结构上看不见这个 bug,故必须连跑两轮;第二轮同时改 FY 值,
+		// 一并钉住「重述可传播」——只断言「第二轮仍是 17」的话,一个「第二轮整个跳过」
+		// 的实现也会通过(值恰好没变)。
+		store := newFakeStore()
+		seedFundamentals(t, store, "MSFT", map[string]string{"2026-06-30": "2026Q4"})
+		seedQuarters(t, store)
+		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
+			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 50, "ProductivityMember": 90}),
+		}}
+
+		require.Empty(t, RefreshSegments(cfg, store, seg, tpl, "", true).Failed)
+		require.Equal(t, 17.0, rowsByKey(t, store, "MSFT")["2026-06-30|intelligent_cloud"].Revenue,
+			"第一轮:50−33=17")
+
+		// 第二轮:年报重述,FY 从 50 改为 60 → Q4 应随之更新为 60−33=27
+		seg.periods["789019"] = fyPeriod(map[string]float64{"IntelligentCloudMember": 60, "ProductivityMember": 90})
+		require.Empty(t, RefreshSegments(cfg, store, seg, tpl, "", true).Failed)
+
+		got := rowsByKey(t, store, "MSFT")
+		assert.Equal(t, 27.0, got["2026-06-30|intelligent_cloud"].Revenue,
+			"第二轮:Q4 须能重算并吸收重述(仍为 17 说明该财年被整个跳过,Q4 已被自己吞掉)")
+		assert.Equal(t, 27.0, got["2026-06-30|productivity"].Revenue, "未重述的 segment 保持 90−63")
+		assert.Len(t, store.segments["MSFT"], 8, "重算不得产生额外行")
+	})
+
+	t.Run("财年内季度数不为 3 时整期跳过", func(t *testing.T) {
+		// 财年级守卫 len(ends)!=3:区间内出现第 4 个季度末(重述/过渡期/口径变更)时,
+		// 逐 segment 守卫挡不住「某 segment 恰好只有 3 个值」的组合 —— 那 3 个值配的是
+		// 4 季跨度,减出来的不是 Q4。此时必须整期跳过。
+		store := newFakeStore()
+		seedFundamentals(t, store, "MSFT", map[string]string{"2026-06-30": "2026Q4"})
+		seedQuarters(t, store)
+		// 区间内插入第 4 个季度末,只给 productivity 供数:
+		// ends 变成 4 个,而 intelligent_cloud 仍恰好是 3 个值 —— 正是逐 segment 守卫
+		// 放行、财年级守卫才拦得住的那个组合。
+		require.NoError(t, store.UpsertSegments(1, []prismstore.SegmentRow{
+			{PeriodEnd: "2026-02-15", SegmentKey: "productivity", Revenue: 5, Source: "edgar_segment"},
+		}))
+		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
+			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 50, "ProductivityMember": 90}),
+		}}
+
+		require.Empty(t, RefreshSegments(cfg, store, seg, tpl, "", true).Failed)
+
+		got := rowsByKey(t, store, "MSFT")
+		_, ok := got["2026-06-30|intelligent_cloud"]
+		assert.False(t, ok, "财年内季度数不为 3 时整期跳过,不得拿 3 个值配 4 季跨度硬推")
+		_, ok = got["2026-06-30|productivity"]
+		assert.False(t, ok, "同期其余 segment 一并跳过")
 	})
 
 	t.Run("某 segment 三季凑不齐则跳过该 segment", func(t *testing.T) {
@@ -545,4 +615,26 @@ func TestRefreshSegmentsIgnoresCorruptFundamentalDate(t *testing.T) {
 	assert.Equal(t, 29.9e9, row.Revenue, "坏日期不得阻断落库")
 	assert.Equal(t, "", row.FiscalPeriod, "反查不到就落空标签")
 	require.Len(t, rep.Degraded, 1)
+}
+
+func TestRefreshSegmentsDeterministicOrdering(t *testing.T) {
+	// sortedKeys 让 map 遍历产生确定顺序,这是刻意加的 —— 但「刻意」不等于「被守护」:
+	// 去掉排序后行为仍旧正确,只是 Degraded 文案顺序与落库行顺序在每次运行间随机漂移,
+	// 运维无法比对两次运行的输出,测试也没法精确断言。此处用 3 个未映射 member 钉住它
+	// (随机顺序恰好升序的概率仅 1/6)。
+	store := newFakeStore()
+	seedFundamentals(t, store, "MSFT", map[string]string{"2026-03-31": "2026Q3"})
+	seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
+		"789019": {{PeriodStart: q3Start, PeriodEnd: q3End, Form: "10-Q", Values: map[string]float64{
+			"ZuluMember": 1, "AlphaMember": 2, "MikeMember": 3, "ProductivityMember": 29.9e9,
+		}}},
+	}}
+
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", true)
+
+	require.Empty(t, rep.Failed)
+	require.Len(t, rep.Degraded, 3)
+	assert.Contains(t, rep.Degraded[0], "AlphaMember")
+	assert.Contains(t, rep.Degraded[1], "MikeMember")
+	assert.Contains(t, rep.Degraded[2], "ZuluMember")
 }
