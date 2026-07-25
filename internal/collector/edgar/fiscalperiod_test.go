@@ -3,6 +3,7 @@ package edgar
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,4 +159,112 @@ func TestFiscalPeriodRejectsAnnualTaggedQuarterlyEntry(t *testing.T) {
 	_, exists := got["2026-06-30"]
 	assert.False(t, exists,
 		"fp=FY 且 90 天的条目必须被两道时长/fp 过滤挡下,不得产出季度(实际得到标签 %q)", got["2026-06-30"])
+}
+
+// ---------------------------------------------------------------------------
+// [TASK-018] 两个推导 helper 的直接锚点。
+//
+// 它们此前**只被上层用例间接执行**:覆盖率把两处算作「已覆盖」,但被改坏时没有任何
+// 断言会红 —— 覆盖率度量的是「执行到」,不是「被约束住」。本组用例补的是后者。
+//   functional[0] anchorYearMonth 三档阈值(14/15/16)   → TestAnchorYearMonthDayThreshold
+//   functional[1] fiscalYearEndMonth 取众数            → TestFiscalYearEndMonthPicksMode
+//   boundary[0]   anchorYearMonth 跨年回绕             → TestAnchorYearMonthYearWraparound
+//   boundary[1]   平票取较小月份且稳定(连跑 ≥20 次)     → TestFiscalYearEndMonthTieBreakIsStable
+//   error[0]      无年度事实 → ok=false 且 month 为零值 → TestFiscalYearEndMonthWithoutAnnualFacts
+// ---------------------------------------------------------------------------
+
+// annualFact 造一条能通过 isAnnual(fp=FY 且 350~380 天)的年度事实,期末为 end。
+func annualFact(t *testing.T, end string) rawFact {
+	t.Helper()
+	e, err := time.Parse(dateLayout, end)
+	require.NoError(t, err)
+	f := rawFact{Start: e.AddDate(-1, 0, 1).Format(dateLayout), End: end, FP: "FY", Filed: end}
+	require.True(t, isAnnual(f), "fixture 前提:%s 必须被 isAnnual 接受", end)
+	return f
+}
+
+// gaapWithAnnualEnds 把各 end 打包成 fiscalYearEndMonth 的入参。它对所有 tag×unit 一视同仁地
+// 投票,与事实挂在哪个 tag/unit 下无关,故全部塞进单个 tag×unit 即可覆盖。
+func gaapWithAnnualEnds(t *testing.T, ends ...string) map[string]tagFacts {
+	t.Helper()
+	facts := make([]rawFact, 0, len(ends))
+	for _, e := range ends {
+		facts = append(facts, annualFact(t, e))
+	}
+	return map[string]tagFacts{"Revenues": {Units: map[string][]rawFact{"USD": facts}}}
+}
+
+// functional[0]:阈值三档必须同时存在 —— 只有 15/16 无法区分 `> 15` 与 `>= 15`;
+// 只有 14/16 无法定位阈值落在哪一天。三档一起才把 `end.Day() > 15` 钉死。
+func TestAnchorYearMonthDayThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		day, wantY, wantM int
+		why               string
+	}{
+		{14, 2025, 5, "day<=15 归上一个月"},
+		{15, 2025, 5, "15 仍算月初漂移(阈值是 > 15,不是 >= 15)"},
+		{16, 2025, 6, "16 起才算本月"},
+	} {
+		y, m := anchorYearMonth(time.Date(2025, time.June, tc.day, 0, 0, 0, 0, time.UTC))
+		assert.Equal(t, tc.wantY, y, "2025-06-%02d 年份:%s", tc.day, tc.why)
+		assert.Equal(t, tc.wantM, m, "2025-06-%02d 月份:%s", tc.day, tc.why)
+	}
+}
+
+// boundary[0]:1 月且 day<=15 时回绕到上一年 12 月。断言年份**确实减 1**、月份为 12
+// (而非 0 或 -1 这种朴素 m-1 的产物)。
+func TestAnchorYearMonthYearWraparound(t *testing.T) {
+	y, m := anchorYearMonth(time.Date(2025, time.January, 5, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 2024, y, "1 月初归上一年")
+	assert.Equal(t, 12, m, "月份回绕为 12,不能是 0 或 -1")
+
+	// 对照:同为 1 月但 day>15 时不回绕。
+	y2, m2 := anchorYearMonth(time.Date(2025, time.January, 25, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 2025, y2)
+	assert.Equal(t, 1, m2)
+}
+
+// functional[1]:少数派月份(1 票,月份值 **3**)与多数派(5 票,月份值 **6**)共存。
+// 少数派月份值刻意**小于**多数派 —— 否则「取首个」或「取较小」的错误实现会与「取众数」
+// 给出同一答案,用例就是空洞的。
+func TestFiscalYearEndMonthPicksMode(t *testing.T) {
+	gaap := gaapWithAnnualEnds(t,
+		"2021-03-31",                                                         // 少数派:3 月,1 票
+		"2020-06-30", "2021-06-30", "2022-06-30", "2023-06-30", "2024-06-30", // 多数派:6 月,5 票
+	)
+	m, ok := fiscalYearEndMonth(gaap)
+	require.True(t, ok)
+	assert.Equal(t, 6, m, "取票数最多的月份,而非最小的(3)或首个遇到的")
+}
+
+// boundary[1]:两个月份票数完全相同时恒取较小者。**必须连跑多次** —— Go 的 map 迭代序
+// 每次 range 都随机,单次调用对「稳定性」零证明力:丢掉平票规则的实现有约一半概率碰巧给对。
+func TestFiscalYearEndMonthTieBreakIsStable(t *testing.T) {
+	gaap := gaapWithAnnualEnds(t,
+		"2021-03-31", "2022-03-31", // 3 月,2 票
+		"2021-09-30", "2022-09-30", // 9 月,2 票
+	)
+	const runs = 50
+	for i := 0; i < runs; i++ {
+		m, ok := fiscalYearEndMonth(gaap)
+		require.True(t, ok)
+		require.Equal(t, 3, m, "第 %d/%d 次调用:平票必须恒取较小月份,不得随 map 迭代序抖动", i+1, runs)
+	}
+}
+
+// error[0]:全部事实都被 isAnnual 过滤掉时返回 ok=false,且 month 为零值 ——
+// 调用方(FetchCompanyFacts)据此走降级分支,绝不能把 0 当成有效月份用。
+func TestFiscalYearEndMonthWithoutAnnualFacts(t *testing.T) {
+	quarterly := rawFact{Start: "2025-01-01", End: "2025-03-31", FP: "Q1", Filed: "2025-04-25"}
+	require.False(t, isAnnual(quarterly), "fixture 前提:该条必须被 isAnnual 拒绝")
+
+	for name, gaap := range map[string]map[string]tagFacts{
+		"只有季度事实":  {"Revenues": {Units: map[string][]rawFact{"USD": {quarterly}}}},
+		"空 units": {"Revenues": {Units: map[string][]rawFact{}}},
+		"空 gaap":  {},
+	} {
+		m, ok := fiscalYearEndMonth(gaap)
+		assert.False(t, ok, "%s:应报告无法推导", name)
+		assert.Zero(t, m, "%s:month 必须是零值,调用方不得当作有效月份", name)
+	}
 }
