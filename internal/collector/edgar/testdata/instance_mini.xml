@@ -136,6 +136,12 @@
 
   <!-- ========================= facts ========================= -->
 
+  <!-- 【干扰前置】交叉维 fact 必须排在合法的 C_q3_ic fact **之前**,且用**同一个 tag**。
+       采纳逻辑对同优先级是「先到先得」:若把它放在后面,即使交叉维护栏失效、这个 12B 被
+       错误收录,也永远轮不上,断言便无论护栏在不在都通过(TASK-005 验证 §6.1 实测:
+       把 `!= 1` 改成 `< 1` 关掉护栏,测试套依然全绿)。前置后护栏一失效即取到 12B 而变红。 -->
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_cross" unitRef="U_USD" decimals="-6">12000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_q3_pbp" unitRef="U_USD" decimals="-6">35013000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_q3_ic" unitRef="U_USD" decimals="-6">34681000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
 
@@ -148,8 +154,8 @@
   <!-- 274 天累计期的 fact: context 合格但期间不合格, 必须整期丢弃 -->
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_ytd_ic" unitRef="U_USD" decimals="-6">98485000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
 
-  <!-- context 不合格的 fact: 交叉维 / 轴不匹配 / instant / 无 member -->
-  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_cross" unitRef="U_USD" decimals="-6">12000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <!-- context 不合格的 fact: 轴不匹配 / instant / 无 member。
+       (交叉维的那条已上移到 C_q3_ic 之前 —— 见上方「干扰前置」注释。) -->
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_other_axis" unitRef="U_USD" decimals="-6">21000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_instant_ic" unitRef="U_USD" decimals="-6">77000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_consolidated" unitRef="U_USD" decimals="-6">70066000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
@@ -162,10 +168,19 @@
   <us-gaap:OperatingIncomeLoss contextRef="C_q3_ic" unitRef="U_USD" decimals="-6">13753000000</us-gaap:OperatingIncomeLoss>
 
   <!-- ===== 单位过滤 =====
-       C_prior_pbp 上挂三条营收 fact, 只有 U_USD 那条算数:
+       C_prior_pbp 上挂四条营收 fact, 只有 U_USD 那条算数:
          U_EUR                              -> 非 USD, 排除
          U_UnitedStatesOfAmericaDollarsShare -> <divide> USD/share(每股口径), **不是**营收单位, 排除
-         U_USD                              -> 保留 29.944B -->
+         U_undeclared                       -> 无对应 <unit> 定义, 无从确认是 USD, 保守排除
+         U_USD                              -> 保留 29.944B
+
+       【干扰前置 + 同 tag】四条**必须用同一个 tag**且三条干扰排在合法那条**之前**。
+       原先干扰项用的是低优先级的 us-gaap:Revenues, 合法项用优先级 0 的
+       RevenueFromContract… —— 合法值靠 tag 优先级就已稳赢, 与单位过滤是否生效无关:
+       TASK-005 验证 §6.2/§6.2.1 实测把单位过滤整个关掉、乃至照 AD-23① 的天真实现
+       (把 <divide> 的孙元素 measure 也纳入判定)做变异, 本用例**依然全绿**,
+       那个 <divide> 陷阱等于摆着好看。改成同 tag 且干扰在前后, 单位判定一旦退化
+       就会取到 3.24(每股值)或 55555B(欧元), 陷阱才真正生效。 -->
   <context id="C_prior_pbp">
     <entity>
       <identifier scheme="http://www.sec.gov/CIK">0000789019</identifier>
@@ -175,12 +190,10 @@
     </entity>
     <period><startDate>2025-01-01</startDate><endDate>2025-03-31</endDate></period>
   </context>
-  <us-gaap:Revenues contextRef="C_prior_pbp" unitRef="U_EUR" decimals="-6">55555000000</us-gaap:Revenues>
-  <us-gaap:Revenues contextRef="C_prior_pbp" unitRef="U_UnitedStatesOfAmericaDollarsShare" decimals="2">3.24</us-gaap:Revenues>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_prior_pbp" unitRef="U_EUR" decimals="-6">55555000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_prior_pbp" unitRef="U_UnitedStatesOfAmericaDollarsShare" decimals="2">3.24</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_prior_pbp" unitRef="U_undeclared" decimals="-6">44444000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
   <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="C_prior_pbp" unitRef="U_USD" decimals="-6">29944000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
-
-  <!-- unitRef 指向未声明的 unit: 无法确认是 USD -> 保守排除 -->
-  <us-gaap:Revenues contextRef="C_prior_pbp" unitRef="U_undeclared" decimals="-6">44444000000</us-gaap:Revenues>
 
   <!-- ==========================================================================
        <unit> 定义**放在文档末尾**(在全部引用它们的 fact 之后), 一并检验单位关联同样是
