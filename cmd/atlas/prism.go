@@ -73,8 +73,9 @@ func runPrismRefreshWith(d prismRefreshDeps) error {
 		parts = append(parts, "ℹ️ Prism 主源降级(已兜底):\n"+strings.Join(rep.Degraded, "\n"))
 	}
 	msg := strings.Join(parts, "\n")
+	// 明细无条件进日志:配置了 telegram 时也要留下 stdout 痕迹,否则通知一挂就没有观测。
+	fmt.Fprintln(d.out, msg)
 	if d.sender == nil {
-		fmt.Fprintln(d.out, msg)
 		return nil
 	}
 	if err := d.sender.SendText(msg); err != nil {
