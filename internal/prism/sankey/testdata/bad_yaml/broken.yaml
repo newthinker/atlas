@@ -1,0 +1,5 @@
+# 故意写坏的 YAML（AD-16：必须报错且错误信息含文件名，不得静默吞成空 map）。
+company: BROKEN
+segments:
+  - {key: cloud, name_zh: 云业务
+    xbrl_member: [unclosed

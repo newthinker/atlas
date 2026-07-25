@@ -1,0 +1,6 @@
+# 手工分部数据样例：fiscal_period → segment_key → 金额（美元）。
+2025Q1:
+  cloud: 29940000000
+  devices: 13020000000.5
+FY2025:
+  cloud: 120000000000

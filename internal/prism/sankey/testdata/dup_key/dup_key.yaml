@@ -1,0 +1,8 @@
+# segments 内 key 重复 —— 必须被 LoadTemplates 拒绝。
+company: DUPE
+cik: "123"
+segment_axis: StatementBusinessSegmentsAxis
+version: 1
+segments:
+  - {key: cloud, name_zh: 云业务, name_en: Cloud, xbrl_member: CloudMember}
+  - {key: cloud, name_zh: 云业务二, name_en: Cloud Two, xbrl_member: CloudTwoMember}

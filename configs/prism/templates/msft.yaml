@@ -1,0 +1,13 @@
+# Prism 财报桥模板：只定义分部与 XBRL member 映射。
+# 主干流（收入→毛利→营利→净利）不在此配置（AD-5）：这些科目固定、全公司同构，
+# 由 periods 引擎从 fundamental_q 自动构建，写进模板只会让每个公司重复一遍同样的结构
+# 并带来模板与引擎脱节的风险。
+# xbrl_member = 实例文档 explicitMember 去命名空间后的 local name（已对 MSFT 真实 XBRL 验证）。
+company: MSFT
+cik: "789019"
+segment_axis: StatementBusinessSegmentsAxis
+version: 1
+segments:
+  - {key: productivity,       name_zh: 生产力与业务流程, name_en: Productivity and Business Processes, xbrl_member: ProductivityAndBusinessProcessesMember}
+  - {key: intelligent_cloud,  name_zh: 智能云,          name_en: Intelligent Cloud,                   xbrl_member: IntelligentCloudMember}
+  - {key: personal_computing, name_zh: 更多个人计算,     name_en: More Personal Computing,             xbrl_member: MorePersonalComputingMember}

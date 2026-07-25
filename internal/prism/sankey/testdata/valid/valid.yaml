@@ -1,0 +1,15 @@
+# 合法模板样例（字段与 configs/prism/templates/*.yaml 同构）。
+company: acme
+cik: "0000123456"
+segment_axis: StatementBusinessSegmentsAxis
+version: 2
+since_fy: 2020
+segments:
+  - key: cloud
+    name_zh: 云业务
+    name_en: Cloud
+    xbrl_member: CloudMember
+  - key: devices
+    name_zh: 硬件设备
+    name_en: Devices
+    xbrl_member: DevicesMember
