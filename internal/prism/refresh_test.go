@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"testing"
 	"time"
 
@@ -43,6 +44,9 @@ type fakeStore struct {
 	priceErr     map[string]error                  // symbol → 注入 UpsertPrices 失败
 	priceCalls   int                               // UpsertPrices 调用次数(负向断言用)
 	segments     map[string][]prismstore.SegmentRow
+	segmentErr   map[string]error // symbol → 注入 UpsertSegments 失败
+	fundErr      map[string]error // symbol → 注入 QuarterlyFundamentals 失败
+	anchorErr    map[string]error // symbol → 注入 LatestSegmentPeriodEnd 失败
 }
 
 func newFakeStore() *fakeStore {
@@ -55,6 +59,9 @@ func newFakeStore() *fakeStore {
 		prices:       map[string][]prismstore.PriceRow{},
 		priceErr:     map[string]error{},
 		segments:     map[string][]prismstore.SegmentRow{},
+		segmentErr:   map[string]error{},
+		fundErr:      map[string]error{},
+		anchorErr:    map[string]error{},
 	}
 }
 
@@ -69,16 +76,51 @@ func (f *fakeStore) UpsertPrices(id int64, rows []prismstore.PriceRow) error {
 	f.prices[sym] = append(f.prices[sym], rows...)
 	return nil
 }
+
+// UpsertSegments 复刻真实 Store 的 upsert 语义:按 (period_end, segment_key) 覆盖
+// 而非追加。RefreshSegments 的 Q4 推导要读回自己刚写的季度行,若 fake 只追加就会
+// 读到重复行、让测试在一个真实 Store 不可能出现的状态上通过。
 func (f *fakeStore) UpsertSegments(id int64, rows []prismstore.SegmentRow) error {
-	f.segments[f.ids[id]] = append(f.segments[f.ids[id]], rows...)
+	sym := f.ids[id]
+	if err := f.segmentErr[sym]; err != nil {
+		return err
+	}
+	cur := f.segments[sym]
+	for _, r := range rows {
+		replaced := false
+		for i := range cur {
+			if cur[i].PeriodEnd == r.PeriodEnd && cur[i].SegmentKey == r.SegmentKey {
+				cur[i] = r
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cur = append(cur, r)
+		}
+	}
+	f.segments[sym] = cur
 	return nil
 }
+
+// SegmentRows 返回 (period_end, segment_key) 升序的副本,与真实 Store 的 ORDER BY 一致。
 func (f *fakeStore) SegmentRows(id int64) ([]prismstore.SegmentRow, error) {
-	return f.segments[f.ids[id]], nil
+	rows := append([]prismstore.SegmentRow(nil), f.segments[f.ids[id]]...)
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].PeriodEnd != rows[j].PeriodEnd {
+			return rows[i].PeriodEnd < rows[j].PeriodEnd
+		}
+		return rows[i].SegmentKey < rows[j].SegmentKey
+	})
+	return rows, nil
 }
 func (f *fakeStore) LatestSegmentPeriodEnd(id int64) (string, error) {
+	sym := f.ids[id]
+	if err := f.anchorErr[sym]; err != nil {
+		return "", err
+	}
 	var latest string
-	for _, r := range f.segments[f.ids[id]] {
+	for _, r := range f.segments[sym] {
 		if r.PeriodEnd > latest {
 			latest = r.PeriodEnd
 		}
@@ -86,7 +128,11 @@ func (f *fakeStore) LatestSegmentPeriodEnd(id int64) (string, error) {
 	return latest, nil
 }
 func (f *fakeStore) QuarterlyFundamentals(id int64) ([]prismstore.FundamentalRow, error) {
-	return f.fundamentals[f.ids[id]], nil
+	sym := f.ids[id]
+	if err := f.fundErr[sym]; err != nil {
+		return nil, err
+	}
+	return f.fundamentals[sym], nil
 }
 func (f *fakeStore) UpsertFundamentals(id int64, rows []prismstore.FundamentalRow) error {
 	f.fundamentals[f.ids[id]] = append(f.fundamentals[f.ids[id]], rows...)
@@ -445,6 +491,44 @@ func TestRefreshEngineNonPositiveCurrentEPS(t *testing.T) {
 	assert.Contains(t, rep.Failed[0], "LOSS")
 	assert.Contains(t, rep.Failed[0], "non-positive", "错误语义应对齐 ErrNonPositiveEPS")
 	assert.Empty(t, store.upserts["LOSS"], "当前亏损标的不得入库")
+}
+
+// [M3 TASK-008 补测:钉住 TASK-006 的落库时点]
+// upsertPrices 位于「取得 closes 之后、EPS 熔断判断之前」,故熔断标的仍写 price_daily。
+// 这是经裁决接受的行为(价格是原始事实、估值是派生计算,失败语义不该传染;亏损股恰恰
+// 最需要基本面页的股价叠加),但此前无任何测试断言它 —— 后人把 upsertPrices 挪到熔断
+// 之后会静默改变行为且无测试变红。本用例钉死四件事,任一被改动即变红。
+func TestRefreshEngineNonPositiveEPSStillStoresPrices(t *testing.T) {
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	eps := make([]core.EPSPoint, 9)
+	for i := range eps {
+		eps[i] = core.EPSPoint{Date: now.AddDate(0, -3*(9-i), 0), EPS: 2.0}
+	}
+	eps[8].EPS = -1.0 // 最新一季亏损 → 熔断
+	closes := []core.OHLCV{
+		{Time: now.AddDate(0, 0, -2), Close: 12.5},
+		{Time: now.AddDate(0, 0, -1), Close: 11.0},
+	}
+	cfg := config.PrismConfig{Instruments: []config.PrismInstrument{engineInst("LOSS")}}
+	cfg.ApplyDefaults()
+	store := newFakeStore()
+
+	rep := Refresh(cfg, store, &fakeLix{}, &fakeUS2{closes: closes, eps: eps}, &fakeAkshare{}, fakeEdgar{}, now)
+
+	// 1) 行情仍落库,且逐点与 closes 一致
+	prices := store.prices["LOSS"]
+	require.Len(t, prices, 2, "熔断不得连带丢弃行情(价格是原始事实)")
+	assert.Equal(t, closes[0].Time.Format("2006-01-02"), prices[0].D)
+	assert.Equal(t, 12.5, prices[0].Close)
+	assert.Equal(t, 11.0, prices[1].Close)
+	// 2) 该标的仍进 Failed
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "LOSS")
+	assert.Contains(t, rep.Failed[0], "non-positive")
+	// 3) 估值不落库
+	assert.Empty(t, store.upserts["LOSS"], "熔断标的的 valuation_daily 仍不得写")
+	// 4) 不计入 Refreshed
+	assert.Equal(t, 0, rep.Refreshed)
 }
 
 // Context Checkpoint: TASK-004 done_criteria → test mapping
