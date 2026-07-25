@@ -337,6 +337,13 @@ func TestFundamentalResponse(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, code)
 		assert.Contains(t, jsonString(t, body), "symbol required")
 	})
+
+	// 存储故障不是「查无此标的」，不能报成 404 让人以为数据不存在。
+	t.Run("store failure is 500", func(t *testing.T) {
+		h := NewSankeyHandler(&fakeSankeyService{fundErr: errors.New("db is down")})
+		code, _ := doGet(t, h, "/api/prism/fundamental?symbol=MSFT", h.Fundamental)
+		assert.Equal(t, http.StatusInternalServerError, code)
+	})
 }
 
 func jsonString(t *testing.T, body map[string]any) string {
