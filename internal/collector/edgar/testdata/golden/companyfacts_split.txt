@@ -1,5 +1,5 @@
 quarters=4
-2025Q1|2023-04-27|2025-05-28|eps=0.3|rev=NaN|ni=15000|eq=NaN|shares=25000
+2024Q1|2023-04-27|2025-05-28|eps=0.3|rev=NaN|ni=15000|eq=NaN|shares=25000
 2024Q2|2023-07-27|2023-08-28|eps=0.35|rev=NaN|ni=17000|eq=NaN|shares=NaN
 2024Q3|2023-10-26|2023-11-19|eps=0.4|rev=NaN|ni=19000|eq=NaN|shares=NaN
-2025Q4|2024-01-25|2025-02-26|eps=0.15|rev=NaN|ni=23000|eq=NaN|shares=NaN
+2024Q4|2024-01-25|2025-02-26|eps=0.15|rev=NaN|ni=23000|eq=NaN|shares=NaN

@@ -1,4 +1,4 @@
 quarters=3
-2026Q1|2022-05-01|2025-05-28|eps=0.6|rev=NaN|ni=NaN|eq=NaN|shares=NaN
-2026Q2|2022-07-31|2025-08-27|eps=0.7|rev=NaN|ni=NaN|eq=NaN|shares=NaN
-2026Q3|2022-10-30|2025-11-19|eps=0.8|rev=NaN|ni=NaN|eq=NaN|shares=NaN
+2023Q1|2022-05-01|2025-05-28|eps=0.6|rev=NaN|ni=NaN|eq=NaN|shares=NaN
+2023Q2|2022-07-31|2025-08-27|eps=0.7|rev=NaN|ni=NaN|eq=NaN|shares=NaN
+2023Q3|2022-10-30|2025-11-19|eps=0.8|rev=NaN|ni=NaN|eq=NaN|shares=NaN

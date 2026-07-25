@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -121,10 +122,78 @@ type rawFact struct {
 	Filed string  `json:"filed"`
 }
 
+// tagFacts is facts[ns][tag]; named so helpers can take it as a parameter.
+type tagFacts struct {
+	Units map[string][]rawFact `json:"units"`
+}
+
 type factsDoc struct {
-	Facts map[string]map[string]struct {
-		Units map[string][]rawFact `json:"units"`
-	} `json:"facts"`
+	Facts map[string]map[string]tagFacts `json:"facts"`
+}
+
+// fiscalYearEndMonth 从年度条目(isAnnual,350~380 天)的 period_end 推断公司的财年结束月份。
+// 取**众数**而非首个:52/53 周财年的结束日会在月内漂移(实测 NVDA 1/25~1/28、AAPL 9/27~9/30),
+// 个别年份甚至可能跨月,众数对这种漂移稳健。ok=false 表示没有任何年度条目,无从推断。
+func fiscalYearEndMonth(gaap map[string]tagFacts) (month int, ok bool) {
+	votes := map[int]int{}
+	for _, t := range gaap {
+		for _, facts := range t.Units {
+			for _, f := range facts {
+				if !isAnnual(f) {
+					continue
+				}
+				if end, err := time.Parse(dateLayout, f.End); err == nil {
+					_, m := anchorYearMonth(end)
+					votes[m]++
+				}
+			}
+		}
+	}
+	best, bestN := 0, 0
+	for m, n := range votes {
+		// 票数相同时取较小月份,避免结果随 map 迭代序抖动。
+		if n > bestN || (n == bestN && m < best) {
+			best, bestN = m, n
+		}
+	}
+	return best, bestN > 0
+}
+
+// fiscalLabel 由 period_end 与财年结束月份推导 "2026Q1" 形式的展示标签。
+//
+// 它是 **period_end 的纯函数** —— 这正是它替代 EDGAR fy/fp 的理由:后者是**报告的上下文
+// 标签**,而 applyDuration 按 period_end 去重取 filed 最新者,于是较早的期间会继承较晚那份
+// 报告的 fy/fp。实测真实 MSFT 因此产生 4 组标签冲突(最严重的 2025Q4 有 3 个不同季度共用),
+// 下游 sankey 又把该标签当聚合分组键,导致财年营收被跨季相加(FY2025 报 377.752B,真值 281.7B)。
+//
+// 财年归属**含端点**:财年结束当天属于**上一**财年的 Q4,而非新财年的 Q1。少一个等号会让所有
+// Q4 整体后移一年,**而标签依然互不重复** —— 只断言唯一性的测试查不出来,故测试锚定具体值。
+func fiscalLabel(end time.Time, fyEndMonth int) string {
+	fy, m := anchorYearMonth(end)
+	if m > fyEndMonth {
+		fy++
+	}
+	// 财年自 fyEndMonth 的次月开始;月差取模后除以 3 即季序(0..3)。
+	offset := ((m-fyEndMonth-1)%12 + 12) % 12
+	return fmt.Sprintf("%dQ%d", fy, offset/3+1)
+}
+
+// anchorYearMonth 返回期间**实际归属**的年月。52/53 周财年的期末会在月界附近漂移,可能落到
+// 次月头几天(实测形态:NVDA 1/25~1/28、AAPL 9/27~9/30,而一个覆盖 2~4 月的季度可能记为
+// 结束于 5/1)。直接取 end.Month() 会把这种期间算到下一个季度去 —— 实测 q4guard fixture 里
+// 2022-05-01(覆盖 2~4 月)与 2022-07-31(覆盖 5~7 月)会因此**共用同一个标签**,
+// 正是本任务要消除的那类冲突。故月初几天一律回归上一个月,期末落在 1 月初时年份同步减一。
+//
+// 阈值取 15:锚定月末的财报日历漂移至多数天,不会到半月;而真正在月中结束的财季极为罕见。
+func anchorYearMonth(end time.Time) (year, month int) {
+	y, m := end.Year(), int(end.Month())
+	if end.Day() > 15 {
+		return y, m
+	}
+	if m == 1 {
+		return y - 1, 12
+	}
+	return y, m - 1
 }
 
 // durationDays returns end-start in days; ok=false when either date is unparseable
@@ -363,6 +432,19 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 		return nil, ErrNotUSGAAP
 	}
 
+	// FiscalPeriod 一律由 period_end 推导(见 fiscalLabel)。降级:没有任何年度条目时推不出
+	// 财年结束月份,回退 EDGAR 原始 fy/fp —— 那是有冲突风险的口径,故必须记录、不得静默。
+	fyEndMonth, hasFYEnd := fiscalYearEndMonth(gaap)
+	if !hasFYEnd {
+		log.Printf("edgar: CIK %s has no annual entries; falling back to EDGAR fy/fp labels, which may collide across quarters", cik)
+	}
+	label := func(end time.Time, rawFY int, rawFP string) string {
+		if !hasFYEnd {
+			return fmt.Sprintf("%d%s", rawFY, rawFP)
+		}
+		return fiscalLabel(end, fyEndMonth)
+	}
+
 	// quarters 以实际 period_end 为 key(而非 fy/fp)——EDGAR 的 fy/fp 是报告上下文,同一
 	// (fy,fp) 可能对应不同实际季度;按 end 建键才能让各科目正确归并到同一真实季度。label 仅
 	// 作 FiscalPeriod 展示标签(取首个写入者的)。
@@ -428,7 +510,7 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 	type qEntry struct {
 		end, filed time.Time
 		val        float64
-		label      string // "%d%s" fy+fp,仅作 FiscalPeriod 展示标签
+		label      string // FiscalPeriod 展示标签,由 period_end 推导(见 fiscalLabel)
 	}
 	type annEntry struct {
 		fy                int
@@ -461,7 +543,7 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 			if e1 != nil || e2 != nil {
 				continue
 			}
-			singles = append(singles, qEntry{end, filed, f.Val, fmt.Sprintf("%d%s", f.FY, f.FP)})
+			singles = append(singles, qEntry{end, filed, f.Val, label(end, f.FY, f.FP)})
 		}
 		for _, f := range annualByEnd {
 			start, e0 := time.Parse("2006-01-02", f.Start)
@@ -498,7 +580,7 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 			}
 			if n == 3 {
 				// Q4 = FY − (Q1+Q2+Q3)。EPS 用同式为近似(股本变动误差通常 <1%)。
-				out = append(out, qEntry{a.end, a.filed, a.val - sum, fmt.Sprintf("%dQ4", a.fy)})
+				out = append(out, qEntry{a.end, a.filed, a.val - sum, label(a.end, a.fy, "Q4")})
 			}
 		}
 		return out
