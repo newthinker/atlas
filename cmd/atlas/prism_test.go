@@ -448,3 +448,16 @@ func TestSegmentReportPassesForceAndManualDir(t *testing.T) {
 	require.Empty(t, rep.Failed)
 	assert.Equal(t, "2026-03-31", segIncr.since.Format("2006-01-02"), "force=false 须用锚点增量")
 }
+
+func TestSankeyDirConstantsArePopulated(t *testing.T) {
+	// manualDir 传空串会**静默禁用** manual 覆盖:segments.go 的 manualRows 对 "" 直接
+	// return,无报错、无 Degraded、无日志 —— 人工兜底数据从此不生效而没有任何一层会喊,
+	// 又一个「合法值但语义错误」。同理 templatesDir 传空会让分部刷新整体静默失效。
+	//
+	// 真正的传参点在 runPrismRefresh(装配壳,无 seam、历来 0% 覆盖),那里的 "" 变异
+	// 无法被行为测试捕获;退而锁住这两个常量的取值,使「先留空回头再填」这类改动变红。
+	assert.Equal(t, "configs/prism/segments", sankeySegmentsDir,
+		"manual 兜底目录不得为空:空值会静默禁用 manual 覆盖")
+	assert.Equal(t, "configs/prism/templates", sankeyTemplatesDir,
+		"模板目录不得为空:空值会让分部刷新整体静默跳过")
+}
