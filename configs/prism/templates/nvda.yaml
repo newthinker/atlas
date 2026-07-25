@@ -19,6 +19,17 @@
 # FY2026（2025-01-27~2026-01-25）实测：
 #   DataCenterMember 193.737B / GamingMember 16.042B / ProfessionalVisualizationMember 3.191B
 #   / AutomotiveMember 2.349B / OEMAndOtherMember 0.619B
+#
+# 【结构变更预警：NVDA 自 FY2027 Q1 起改了披露方式】
+# 2026-04-26 那期（`--full-segments` 全量重拉时实测）在本轴上**只**披露数据中心拆分：
+#   DataCenterMember 75.246B / HyperscaleMember 37.869B
+#   / AICloudsIndustrialEnterpriseMember 37.377B / EdgeComputingMember 6.369B
+# 其中 Hyperscale + AIClouds = 75.246 **恰好等于** DataCenter（前一年同期 2025-04-27 亦然：
+# 21.513 + 17.599 = 39.112），即又一组父子关系；Gaming/ProViz/Automotive/OEM 该期未在本轴披露。
+# 后果：该期只落 data_center 一个分部，Σsegments < Revenue 的差额由桑基 other_segment
+# 残差节点吸收（AD-13），属优雅降级，**不是缺陷**。
+# 若将来要展示 Hyperscale/AIClouds 细分，**必须同时把 DataCenterMember 从本模板移除**，
+# 否则又是一次「只映射互不重叠的一层」被破坏、合计翻倍且不报错。
 company: NVDA
 cik: "1045810"
 segment_axis: ProductOrServiceAxis
