@@ -4,7 +4,7 @@ project: Atlas
 module: Prism
 status: reviewed
 created: 2026-07-23
-updated: 2026-07-23
+updated: 2026-07-25
 tags: [atlas, valuation, visualization, design-doc]
 ---
 
@@ -200,6 +200,18 @@ PE_etf = 1 / Σ( w_i / PE_i )        # 加权调和平均
 
 每个收入分类节点标注:`YoY = (X_q / X_{q-4}) - 1`、`QoQ = (X_q / X_{q-1}) - 1`。季节性强的业务(如消费电子)默认展示 YoY,QoQ 灰显。
 
+### 5.6 财报桥多期分析(M3,2026-07-25 需求确认)
+
+**报告期模型**:两种粒度——季报(Q)与年报(FY)。年报**不新增采集**:流量科目(营收/成本/利润)由财年内 4 季聚合求和;EDGAR 的 FY 原值采集时可得,用作聚合校验。财年归属用 `fundamental_q.fiscal_period` 已存的 EDGAR fy/fp 标签(正确处理财年错位:NVDA 1 月、MSFT 6 月、AAPL 9 月),A/H 标的按自然年。**数据模型零变更**(`segment_revenue`/`fundamental_q` 主键本就含 fiscal_period)。
+
+**范围并行视图(小倍数桑基网格 + 对比矩阵)**:用户指定报告期范围(from~to)与粒度(季/年),范围内每期渲染一张小桑基成网格;**跨图统一比例尺**——金额→流宽映射以范围内最大营收定标,结构变迁可直接目测。网格下方为对比矩阵:行 = 模板节点(分部营收/毛利/营业利润/净利)+ 派生比率(毛利率/营业利润率/净利率),列 = 各期,末列为同比(季度粒度)或区间 CAGR(年度粒度)。同屏期数上限 8,超出翻页。
+
+**智能对比上下文(默认视图)**:不指定范围时,按最新财报类型自动确定对比集:
+- 最新为**季报** → 对比集 = 当前财年内已发布各季(FYTD,如看 FY2026Q3 → Q1/Q2/Q3 并列),每列附去年同期同比;
+- 最新为**年报**(财年第 4 季发布后)→ 对比集 = 库中全部历史年报(上限 10 年)+ YoY 列。
+
+范围选择器是对默认视图的覆盖手段;单期渲染是范围=1 的特例,一套实现。范围跨越分部口径重述时,矩阵在断点列标注「口径变更」,桑基网格按各期所属模板版本渲染(§10 模板版本机制)。
+
 ---
 
 ## 6. 数据模型(SQLite: data/prism.db)
@@ -332,9 +344,11 @@ Atlas dashboard
 │   ├── 指标切换: 营收/净利/毛利率/PE/ROE/营收增速/利润增速
 │   ├── ECharts 折线/柱状切换 + 股价叠加(双轴)
 │   └── 季度/年度/滚动年化 + ECharts dataZoom 双端时间滑块
-├── /prism/sankey/:symbol 财报桥(图7/8)
-│   ├── ECharts sankey(YoY/QoQ 标注) ↔ 分部堆叠柱状图切换
-│   └── PNG 导出(ECharts toolbox.saveAsImage) + 中英文切换
+├── /prism/sankey/:symbol 财报桥(图7/8 + §5.6 多期分析)
+│   ├── 报告期范围选择器(from~to)+ 粒度切换(季/年);默认视图 = 智能对比上下文(§5.6)
+│   ├── 小倍数桑基网格(跨图统一比例尺,≤8 期) ↔ 分部堆叠柱状图切换
+│   ├── 对比矩阵(模板节点+比率 × 各期,末列 YoY/CAGR;重述断点标注)
+│   └── 单期大图模式(YoY/QoQ 节点标注) + PNG 导出 + 中英文切换
 └── /prism/settings       偏好设置(标的池/阈值/自选池)
 
 API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 消费
@@ -372,8 +386,9 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 - 明确不做:plist 注入 proxy env 的代理方案——引入「代理进程可用性」这一新故障面,劣于客户端自愈;Stooq 备源仍按 §10 既有条目独立演进。
 - **发布后记(2026-07-25,v1.4.1)**:节流+退避已上线并保留,但「不做代理」的前提被证伪——launchd 直连复测仍 20 failed,区分实验证实根因是 **yahoo 对本机直连出口的持续 IP 级 403 封禁**(非突发限流,客户端自愈无解)。经用户决策改为「代理先行+Stooq 立项」:6 个 yahoo 依赖服务 plist 注入代理 env(含 no_proxy 豁免本机侧车)后 launchd 实测 `25 ok, 0 failed, 5 degraded`(degraded=EDGAR tag 差异类,见 §10)。附带发现并救回 refresh-us 主管线(已静默停更 ~23 天)。
 
-**M3 — 财报桥(2 周)**
+**M3 — 财报桥(2~3 周)**
 - `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染。
+- **多期分析(§5.6,2026-07-25 需求确认)**:范围并行视图(小倍数桑基网格 + 对比矩阵)、智能对比上下文(季报→FYTD 各季;年报→历史年报 ≤10 年)、年报由季度聚合(数据模型零变更)。
 - 首批 5~10 家模板(MAG7 + TSM/AVGO/LLY 按需)。
 - `/prism/fundamental` 财务趋势页(含股价叠加)+ 堆叠柱状图 + PNG 导出。
 - **Stooq 备源接入(2026-07-25 用户立项)**:新增 `internal/collector/stooq` 作 yahoo 价格失败备源,消除「本机代理可用性」单点;先调研 Stooq 对首批标的的覆盖/复权口径。
