@@ -386,13 +386,16 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 - 明确不做:plist 注入 proxy env 的代理方案——引入「代理进程可用性」这一新故障面,劣于客户端自愈;Stooq 备源仍按 §10 既有条目独立演进。
 - **发布后记(2026-07-25,v1.4.1)**:节流+退避已上线并保留,但「不做代理」的前提被证伪——launchd 直连复测仍 20 failed,区分实验证实根因是 **yahoo 对本机直连出口的持续 IP 级 403 封禁**(非突发限流,客户端自愈无解)。经用户决策改为「代理先行+Stooq 立项」:6 个 yahoo 依赖服务 plist 注入代理 env(含 no_proxy 豁免本机侧车)后 launchd 实测 `25 ok, 0 failed, 5 degraded`(degraded=EDGAR tag 差异类,见 §10)。附带发现并救回 refresh-us 主管线(已静默停更 ~23 天)。
 
-**M3 — 财报桥(2~3 周)**
-- `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染。
+**M3 — 财报桥主线(2~3 周;2026-07-25 拆批决策,计划见 `docs/superpowers/plans/2026-07-25-prism-m3.md`)**
+- **EDGAR tag 回退扩展(前置,2026-07-25 立项)**:EPS tag 回退链(EarningsPerShareBasicAndDiluted → NetIncome÷DilutedShares 推算)与股本/equity tag 扩展,救回 COST/V/CRM/WMT 的 EDGAR 全功能与 AVGO 的 PB;同时给 prism refresh 日志打印 Degraded/Failed 明细(观测缺口)。财报桥依赖 fundamental_q 数据完整性,故置于主线首位。
+- `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染;主干流(收入→毛利→营利→净利)由 companyfacts 扩展科目全自动。
+- **分部营收数据源(2026-07-25 用户决策)**:companyfacts API 不含分部(segment)维度——走 **XBRL filings 自动解析**(submissions API + 报告实例文档),公司自定义 member 名在模板中映射(即 D4「XBRL tag 映射」本义),manual YAML 数据文件兜底;任一公司解析失败转 manual,不阻塞交付。
 - **多期分析(§5.6,2026-07-25 需求确认)**:范围并行视图(小倍数桑基网格 + 对比矩阵)、智能对比上下文(季报→FYTD 各季;年报→历史年报 ≤10 年)、年报由季度聚合(数据模型零变更)。
-- 首批 5~10 家模板(MAG7 + TSM/AVGO/LLY 按需)。
-- `/prism/fundamental` 财务趋势页(含股价叠加)+ 堆叠柱状图 + PNG 导出。
+- 首批 5~10 家模板(MAG7 + AVGO/LLY 按需;**TSM 为 IFRS/20-F,自动解析不适用,纯 manual 或本批跳过**)。
+- `/prism/fundamental` 财务趋势页(含股价叠加,新增 price_daily 落库)+ 堆叠柱状图 + PNG 导出。
+
+**M3.5 — 数据链路基建(与财报桥解耦,主线后另拆计划)**
 - **Stooq 备源接入(2026-07-25 用户立项)**:新增 `internal/collector/stooq` 作 yahoo 价格失败备源,消除「本机代理可用性」单点;先调研 Stooq 对首批标的的覆盖/复权口径。
-- **EDGAR tag 回退扩展(2026-07-25 立项)**:EPS tag 回退链(EarningsPerShareBasicAndDiluted → NetIncome÷DilutedShares 推算)与股本 tag 扩展,救回 COST/V/CRM/WMT 的 EDGAR 全功能与 AVGO 的 PB;同时给 prism refresh 日志打印 Degraded/Failed 明细(观测缺口)。
 - ETF 成分聚合(D3)+ etfholdings(自 M2 顺延)。
 
 **M4 — 扩展(按需)**
