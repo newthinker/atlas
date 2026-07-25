@@ -650,3 +650,35 @@ func TestExecRetryBusy(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, isBusyErr(err))
 }
+
+// TASK-009: Analyze/Fundamental 只拿得到 symbol，而 QuarterlyFundamentals/SegmentRows
+// 要的是 instrument id。此前唯一能取到 id 的是 UpsertInstrument —— 一个会把
+// market/name/grp/source 刷空的写操作，读路径不能用（AD-24）。
+func TestInstrumentID(t *testing.T) {
+	s := openTemp(t)
+	want, err := s.UpsertInstrument(Instrument{
+		Symbol: "MSFT", Type: "stock", Market: "US", Name: "Microsoft",
+		Group: "美股公司", Source: "yahoo",
+	})
+	require.NoError(t, err)
+
+	got, err := s.InstrumentID("MSFT")
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "应返回 UpsertInstrument 建立的那一行 id")
+
+	// 只读：解析之后原有字段一个都不能变。
+	var market, name, grp, source string
+	require.NoError(t, s.db.QueryRow(
+		`SELECT market,name,grp,source FROM instrument WHERE id=?`, want).
+		Scan(&market, &name, &grp, &source))
+	assert.Equal(t, []string{"US", "Microsoft", "美股公司", "yahoo"},
+		[]string{market, name, grp, source}, "解析 symbol 不得改写 instrument 行")
+}
+
+func TestInstrumentIDUnknownSymbol(t *testing.T) {
+	s := openTemp(t)
+	_, err := s.InstrumentID("NOPE")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNotFound), "未知 symbol 应返回可判定的 ErrNotFound")
+	assert.Contains(t, err.Error(), "NOPE", "错误信息应含 symbol")
+}

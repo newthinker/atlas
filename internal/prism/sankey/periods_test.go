@@ -100,10 +100,13 @@ func TestBuildPeriodsQuarterly(t *testing.T) {
 
 // 5 个季度跨 2 财年，后一财年只 1 季 → fy 只产出 1 个完整财年。
 func TestBuildPeriodsFYAggregation(t *testing.T) {
+	// 各季的三个比率**故意不等比**（2025Q3 的 gp/oi 偏离 0.6/0.3）：若各季比率恒定，
+	// 「按求和后的分子分母重算」与「对各季比率取平均」结果完全相同，下面三行比率断言
+	// 就对该属性毫无区分力（实测：仅改 GrossMargin 或仅改 OpMargin 的变异体都能存活）。
 	funds := []prismstore.FundamentalRow{
 		fq("2025Q1", "2024-09-30", 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
 		fq("2025Q2", "2024-12-31", 110*b, 66*b, 33*b, 26*b, 8*b, 7*b, 5*b),
-		fq("2025Q3", "2025-03-31", 120*b, 72*b, 36*b, 28*b, 9*b, 8*b, 6*b),
+		fq("2025Q3", "2025-03-31", 120*b, 70*b, 34*b, 28*b, 9*b, 8*b, 6*b),
 		fq("2025Q4", "2025-06-30", 130*b, 78*b, 39*b, 30*b, 9*b, 8*b, 6*b),
 		fq("2026Q1", "2025-09-30", 140*b, 84*b, 42*b, 32*b, 10*b, 9*b, 7*b),
 	}
@@ -122,18 +125,33 @@ func TestBuildPeriodsFYAggregation(t *testing.T) {
 
 	fy := got[0]
 	assert.Equal(t, 460*b, fy.Revenue, "流量科目应为 4 季之和")
-	assert.Equal(t, 276*b, fy.GrossProfit)
-	assert.Equal(t, 138*b, fy.OperatingIncome)
+	assert.Equal(t, 274*b, fy.GrossProfit)
+	assert.Equal(t, 136*b, fy.OperatingIncome)
 	assert.Equal(t, 108*b, fy.NetIncome)
 	assert.Equal(t, 34*b, fy.RnD)
 	assert.Equal(t, 30*b, fy.SGnA)
 	assert.Equal(t, 22*b, fy.IncomeTax)
 	assert.Equal(t, map[string]float64{"cloud": 276 * b, "devices": 40 * b}, fy.Segments,
 		"Segments 应按 segment_key 求和，且只计入本财年的季")
-	// 比率必须用求和后的值重算，而不是各季比率取平均。
-	assert.InDelta(t, 276.0/460.0, fy.GrossMargin, 1e-9)
-	assert.InDelta(t, 138.0/460.0, fy.OpMargin, 1e-9)
+	// 比率必须用求和后的值重算，而不是各季比率取平均——两者在上面的非等比 fixture 下才会分叉。
+	assert.InDelta(t, 274.0/460.0, fy.GrossMargin, 1e-9)
+	assert.InDelta(t, 136.0/460.0, fy.OpMargin, 1e-9)
 	assert.InDelta(t, 108.0/460.0, fy.NetMargin, 1e-9)
+}
+
+// AD-9 允许 fiscal_period 为空（period_end 反查不到标签时）。主表行的空标签**必须**跳过：
+// 留着会产出一列 Period == "" 的无名列，且因空串排序最小而排在最前，被 TASK-009 原样渲染。
+func TestBuildPeriodsSkipsUnlabeledFundamentalRow(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("", "2025-06-30", 999*b, 999*b, 999*b, 999*b, 0, 0, 0),
+		fq("2026Q1", "2025-09-30", 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b),
+	}
+
+	got := BuildPeriods(funds, nil, "q")
+	require.Equal(t, []string{"2026Q1"}, periodNames(got), "无标签的主表行不得成为一列")
+	for _, p := range got {
+		assert.NotEmpty(t, p.Period, "不得出现无名列")
+	}
 }
 
 // 非日历财年（MSFT 6 月结）：财年归属只看 fiscal_period 标签前 4 位，
@@ -567,6 +585,28 @@ func TestBuildSankeyNegativeFlow(t *testing.T) {
 	assert.Zero(t, linkValue(t, g, "营业利润", "税项及其他"), "负值应以 0 宽表示")
 	require.NotEmpty(t, g.Notes, "负残差必须被显式记录，否则图上凭空少一块而无人知情")
 	assert.Contains(t, strings.Join(g.Notes, "\n"), "税项及其他", "footnote 应点明是哪个节点为负")
+}
+
+// 分部中途新增或裁撤时，模板里有的 key 在某一期没有数据。该分部不画线（画 NaN 线只会
+// 让图上多一条渲染不出来的边），其收入缺口由 other_segment 残差吸收，仍然守恒。
+func TestBuildSankeySegmentMissingThisPeriod(t *testing.T) {
+	p := balancedPeriod()
+	delete(p.Segments, "devices") // 只剩 cloud 40b，缺口 25.585b 归入残差
+
+	g := BuildSankey(p, twoSegTemplate(), "zh")
+	assert.False(t, hasNode(g, "硬件设备"), "本期无数据的分部不应出现在图上，实得 %v", nodeNames(g))
+	assert.False(t, hasLink(g, "硬件设备", "收入"))
+	assert.InDelta(t, 40*b, linkValue(t, g, "云业务", "收入"), 1)
+	assert.InDelta(t, 25.585*b, linkValue(t, g, "其他分部", "收入"), 1,
+		"缺失分部的收入应由 other_segment 吸收，而不是让收入侧凭空少一块")
+
+	var in float64
+	for _, l := range g.Links {
+		if l.Target == "收入" {
+			in += l.Value
+		}
+	}
+	assert.InDelta(t, p.Revenue, in, 1, "收入节点入流仍应等于 Revenue")
 }
 
 func TestBuildSankeyLang(t *testing.T) {

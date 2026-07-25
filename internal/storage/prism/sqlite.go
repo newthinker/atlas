@@ -232,6 +232,24 @@ func (s *Store) UpsertInstrument(inst Instrument) (int64, error) {
 	return id, err
 }
 
+// InstrumentID resolves a symbol to its row id; unknown symbols yield
+// ErrNotFound, as in Series and PriceSeries.
+//
+// Read paths need this: UpsertInstrument is the only other way to obtain an id
+// and its ON CONFLICT clause overwrites market/name/grp/source, so calling it
+// with a bare symbol would silently blank those columns (AD-24).
+func (s *Store) InstrumentID(symbol string) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM instrument WHERE symbol=?`, symbol).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("%w: %s", ErrNotFound, symbol)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("prism: query symbol %s: %w", symbol, err)
+	}
+	return id, nil
+}
+
 // LatestDate returns the max stored date for the instrument, "" when empty.
 // This is the incremental-fetch anchor (理杏豆计费:只拉增量).
 func (s *Store) LatestDate(instrumentID int64) (string, error) {
@@ -433,13 +451,9 @@ func (s *Store) UpsertPrices(instrumentID int64, closes []PriceRow) error {
 // PriceSeries returns the close series of symbol with d >= from (from=""=all),
 // dates ascending. Unknown symbols yield ErrNotFound, as in Series.
 func (s *Store) PriceSeries(symbol, from string) ([]string, []float64, error) {
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM instrument WHERE symbol=?`, symbol).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, fmt.Errorf("%w: %s", ErrNotFound, symbol)
-	}
+	id, err := s.InstrumentID(symbol)
 	if err != nil {
-		return nil, nil, fmt.Errorf("prism: query symbol %s: %w", symbol, err)
+		return nil, nil, err
 	}
 	rows, err := s.db.Query(`SELECT d, close FROM price_daily
 		WHERE instrument_id=? AND (?='' OR d>=?) ORDER BY d`, id, from, from)
