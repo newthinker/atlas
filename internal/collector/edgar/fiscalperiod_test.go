@@ -244,23 +244,49 @@ func TestFiscalYearEndMonthPicksMode(t *testing.T) {
 	assert.Equal(t, 6, m, "取票数最多的月份,而非最小的(3)或首个遇到的")
 }
 
-// boundary[1]:两个月份票数完全相同时恒取较小者。**必须连跑多次** —— Go 的 map 迭代序
-// 每次 range 都随机,单次调用对「稳定性」零证明力。
+// tieBreakRuns 是平票用例每个方向的重复次数。
 //
-// 循环次数不是拍脑袋:把 runs 降到 1 并施加 `n > bestN → n >= bestN` 变异后实测,
-// 该变异只在 **32/40** 次运行里被检出 —— 也就是说单次调用的写法有约 20% 概率放它过去。
-// (注:并非直觉上的 50%;Go 对 2 元素 map 的迭代起点并不均匀。这个数字是测出来的,不是推出来的。)
-// runs=50 把漏检概率压到可忽略,实测该变异 25/25 被杀。
+// 取值经实测反推,不是拍脑袋:施加 `n > bestN → n >= bestN` 变异后,**单次调用**的检出率
+// 取决于两个月份写入 votes map 的先后 —— 50 万次采样实测:
+//
+//	较小月份先写入 → p = 0.87500  (恰为 7/8)
+//	较大月份先写入 → p = 0.12416  (恰为 1/8)
+//
+// 机理:小 map 只有 1 个 bucket,键按**插入顺序**占槽位 0、1;迭代起点是 0~7 的随机偏移,
+// 只有偏移恰为 1 时后插入的键才先被访问。与哈希无关(8 组不同月份对实测同为 7/8)。
+// 注意 p 并非直觉上的 50% —— 「随机」不等于「均匀」,这个数字只能测不能推。
+//
+// 按不利方向 p=0.12416 用 (1−p)^N 反推用例层漏检率:
+//
+//	≤1e-3 → N≥53      ≤1e-6 → N≥105      ≤1e-9 → N≥157      ≤1e-12 → N≥209
+//
+// 取 250(≥209,留余量)。单次调用实测 ~0.7µs,两个方向合计 ~350µs,可忽略。
+const tieBreakRuns = 250
+
+// boundary[1]:两个月份票数完全相同时恒取较小者。
+//
+// **两个书写顺序都必须存在,这是机制而非风格**:用例的可靠性取决于两行的写入先后
+// (见 tieBreakRuns 的实测),只写一个方向时,有人为「按月份排序好看」调换两行,
+// 检出率就从 7/8 掉到 1/8 —— **没有任何信号,测试照样绿**。
+// 同时保留两个方向后,无论谁怎么调换,总有一个方向落在不利档位并被 tieBreakRuns 覆盖,
+// 这个性质不依赖任何人读到本注释。
 func TestFiscalYearEndMonthTieBreakIsStable(t *testing.T) {
-	gaap := gaapWithAnnualEnds(t,
-		"2021-03-31", "2022-03-31", // 3 月,2 票
-		"2021-09-30", "2022-09-30", // 9 月,2 票
-	)
-	const runs = 50
-	for i := 0; i < runs; i++ {
-		m, ok := fiscalYearEndMonth(gaap)
-		require.True(t, ok)
-		require.Equal(t, 3, m, "第 %d/%d 次调用:平票必须恒取较小月份,不得随 map 迭代序抖动", i+1, runs)
+	for _, tc := range []struct {
+		name string
+		ends []string
+	}{
+		{"较小月份先写入", []string{"2021-03-31", "2022-03-31", "2021-09-30", "2022-09-30"}},
+		{"较大月份先写入", []string{"2021-09-30", "2022-09-30", "2021-03-31", "2022-03-31"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gaap := gaapWithAnnualEnds(t, tc.ends...)
+			for i := 0; i < tieBreakRuns; i++ {
+				m, ok := fiscalYearEndMonth(gaap)
+				require.True(t, ok)
+				require.Equal(t, 3, m,
+					"第 %d/%d 次调用:平票必须恒取较小月份,不得随 map 迭代序抖动", i+1, tieBreakRuns)
+			}
+		})
 	}
 }
 
