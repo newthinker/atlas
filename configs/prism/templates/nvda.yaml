@@ -1,0 +1,31 @@
+# Prism 财报桥模板：只定义分部与 XBRL member 映射。主干流（收入→毛利→营利→净利）
+# 不在此配置（AD-5），由 periods 引擎从 fundamental_q 自动构建。
+# xbrl_member = 实例文档 explicitMember 去命名空间后的 local name。
+#
+# 实测来源：10-K FY2026（accession 0001045810-26-000021，nvda-20260125_htm.xml）。
+#
+# 【为什么用 ProductOrServiceAxis 而不是默认的 StatementBusinessSegmentsAxis】
+# 与 AAPL 同一原因：NVDA 的**可报告分部**（Compute & Networking / Graphics）挂在
+# `ConsolidationItemsAxis × StatementBusinessSegmentsAxis` 的**双 member** context 上
+# （实测 6 个），被「恰好一个 explicitMember」规则排除，用默认轴是零产出（已实测确认）。
+# 市场平台维度挂在单 member 的 ProductOrServiceAxis 上，可直接解析。
+#
+# 【必须排除 Compute / Networking】实测三个财年一致：
+#   DataCenterMember = ComputeMember + NetworkingMember（FY2026: 193.737B，分毫不差）
+# 三者同时映射会重复计算（朴素合计 409.675B ≈ 真实营收的 1.90 倍）。
+# 此处按市场平台取互不重叠的五项，Σ = 215.938B = FY2026 合并营收。
+# Compute / Networking 会作为「未映射 member」进 Degraded 文本，属预期行为。
+#
+# FY2026（2025-01-27~2026-01-25）实测：
+#   DataCenterMember 193.737B / GamingMember 16.042B / ProfessionalVisualizationMember 3.191B
+#   / AutomotiveMember 2.349B / OEMAndOtherMember 0.619B
+company: NVDA
+cik: "1045810"
+segment_axis: ProductOrServiceAxis
+version: 1
+segments:
+  - {key: data_center, name_zh: 数据中心,   name_en: Data Center,                xbrl_member: DataCenterMember}
+  - {key: gaming,      name_zh: 游戏,       name_en: Gaming,                     xbrl_member: GamingMember}
+  - {key: pro_viz,     name_zh: 专业可视化, name_en: Professional Visualization, xbrl_member: ProfessionalVisualizationMember}
+  - {key: automotive,  name_zh: 汽车,       name_en: Automotive,                 xbrl_member: AutomotiveMember}
+  - {key: oem_other,   name_zh: OEM 及其他, name_en: OEM & Other,                xbrl_member: OEMAndOtherMember}

@@ -1,0 +1,21 @@
+# Prism 财报桥模板：只定义分部与 XBRL member 映射。主干流（收入→毛利→营利→净利）
+# 不在此配置（AD-5），由 periods 引擎从 fundamental_q 自动构建。
+# xbrl_member = 实例文档 explicitMember 去命名空间后的 local name。
+#
+# 实测来源：10-K FY2025（accession 0001018724-26-000004，amzn-20251231_htm.xml）。
+# 分部营收落在**单 member** 的 StatementBusinessSegmentsAxis context 上，用默认轴即可。
+# FY2025（2025-01-01~2025-12-31）实测：
+#   NorthAmericaSegmentMember 426.305B / InternationalSegmentMember 161.894B
+#   / AmazonWebServicesSegmentMember 128.725B   Σ = 716.924B
+#
+# 注意：AMZN 的实例文档另有 ProductOrServiceAxis（OnlineStores / ThirdPartySellerServices /
+# Advertising / SubscriptionServices / PhysicalStores / OtherServices，以及 Product/Service
+# 两个汇总项）。那是**另一套互不兼容的收入切分**，与三大分部同时映射会重复计算，故不用。
+company: AMZN
+cik: "1018724"
+segment_axis: StatementBusinessSegmentsAxis
+version: 1
+segments:
+  - {key: north_america, name_zh: 北美,       name_en: North America, xbrl_member: NorthAmericaSegmentMember}
+  - {key: international, name_zh: 国际,       name_en: International, xbrl_member: InternationalSegmentMember}
+  - {key: aws,           name_zh: 亚马逊云科技, name_en: AWS,           xbrl_member: AmazonWebServicesSegmentMember}

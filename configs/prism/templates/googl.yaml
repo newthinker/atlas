@@ -1,0 +1,17 @@
+# Prism 财报桥模板：只定义分部与 XBRL member 映射。主干流（收入→毛利→营利→净利）
+# 不在此配置（AD-5），由 periods 引擎从 fundamental_q 自动构建。
+# xbrl_member = 实例文档 explicitMember 去命名空间后的 local name。
+#
+# 实测来源：10-K FY2025（accession 0001652044-26-000018，goog-20251231_htm.xml）。
+# 分部营收落在**单 member** 的 StatementBusinessSegmentsAxis context 上，用默认轴即可。
+# FY2025（2025-01-01~2025-12-31）实测：
+#   GoogleServicesMember 342.721B / GoogleCloudMember 58.705B / AllOtherSegmentsMember 1.537B
+#   Σ = 402.963B（与合并营收的差额由桑基的 other_segment 残差节点吸收，AD-13）
+company: GOOGL
+cik: "1652044"
+segment_axis: StatementBusinessSegmentsAxis
+version: 1
+segments:
+  - {key: google_services, name_zh: 谷歌服务, name_en: Google Services,    xbrl_member: GoogleServicesMember}
+  - {key: google_cloud,    name_zh: 谷歌云,   name_en: Google Cloud,       xbrl_member: GoogleCloudMember}
+  - {key: other_bets,      name_zh: 其他投入, name_en: Other Bets,         xbrl_member: AllOtherSegmentsMember}

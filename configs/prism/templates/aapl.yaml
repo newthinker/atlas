@@ -1,0 +1,33 @@
+# Prism 财报桥模板：只定义分部与 XBRL member 映射。主干流（收入→毛利→营利→净利）
+# 不在此配置（AD-5），由 periods 引擎从 fundamental_q 自动构建。
+# xbrl_member = 实例文档 explicitMember 去命名空间后的 local name。
+#
+# 实测来源：10-K FY2025（accession 0000320193-25-000079，aapl-20250927_htm.xml）。
+#
+# 【为什么用 ProductOrServiceAxis 而不是默认的 StatementBusinessSegmentsAxis】
+# AAPL 的**可报告分部**（Americas / Europe / GreaterChina / Japan / RestOfAsiaPacific）
+# 在实例文档里全部挂在 `ConsolidationItemsAxis × StatementBusinessSegmentsAxis` 的
+# **双 member** context 上（实测 15 个）。解析器按 design-spec §1.2 只收「恰好一个
+# explicitMember」的 context，故用默认轴对 AAPL 是**零产出**（已实测确认）。
+# 产品线维度则挂在单 member 的 ProductOrServiceAxis 上，可直接解析，且更适合收入桑基。
+#
+# 【必须排除汇总项 ProductMember】实测三个财年一致：
+#   ProductMember = iPhone + Mac + iPad + Wearables（FY2025: 307.003B，逐项相加分毫不差）
+# 若把它一并映射会重复计算（朴素合计 723.164B ≈ 真实营收的 1.74 倍）。
+# 此处只映射互不重叠的五项，Σ = 416.161B = FY2025 合并营收。
+# ProductMember 会作为「未映射 member」进 RefreshSegments 的 Degraded 文本，属预期行为。
+#
+# FY2025（2024-09-29~2025-09-27）实测：
+#   IPhoneMember 209.586B / ServiceMember 109.158B / WearablesHomeandAccessoriesMember 35.686B
+#   / MacMember 33.708B / IPadMember 28.023B
+company: AAPL
+cik: "320193"
+segment_axis: ProductOrServiceAxis
+version: 1
+segments:
+  - {key: iphone,    name_zh: iPhone,     name_en: iPhone,                        xbrl_member: IPhoneMember}
+  - {key: mac,       name_zh: Mac,        name_en: Mac,                           xbrl_member: MacMember}
+  - {key: ipad,      name_zh: iPad,       name_en: iPad,                          xbrl_member: IPadMember}
+  # name_en 含逗号,在 flow mapping 里必须加引号,否则逗号会被当成键值对分隔符。
+  - {key: wearables, name_zh: 穿戴与家居配件, name_en: "Wearables, Home and Accessories", xbrl_member: WearablesHomeandAccessoriesMember}
+  - {key: services,  name_zh: 服务,        name_en: Services,                      xbrl_member: ServiceMember}
