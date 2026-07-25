@@ -509,6 +509,31 @@ func TestBuildSankeyBalance(t *testing.T) {
 	for _, l := range g.Links {
 		assert.GreaterOrEqual(t, l.Value, 0.0, "link %s→%s 不得为负", l.Source, l.Target)
 	}
+
+	// 节点 Value 是 ECharts payload 的一部分：只入不出的汇节点取入流、
+	// 只出不入的源节点（各分部、残差）取出流，都不能是 0。
+	for name, want := range map[string]float64{
+		"云业务":   40 * b,
+		"硬件设备":  23 * b,
+		"其他分部":  2.585 * b,
+		"收入":    65.585 * b,
+		"营业费用":  15 * b,
+		"净利润":   24.7 * b,
+		"税项及其他": 5.3 * b,
+	} {
+		assert.InDelta(t, want, nodeValue(t, g, name), 1, "节点 %s 的 Value", name)
+	}
+}
+
+func nodeValue(t *testing.T, g Graph, name string) float64 {
+	t.Helper()
+	for _, n := range g.Nodes {
+		if n.Name == name {
+			return n.Value
+		}
+	}
+	t.Fatalf("node %s not found in %v", name, nodeNames(g))
+	return 0
 }
 
 // 残差小于 Revenue×0.5% 时省略该节点（避免图上出现无意义的毛刺）。
