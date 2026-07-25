@@ -23,8 +23,12 @@ const residualShare = 0.005
 // PeriodMetrics is one column of the analysis: a quarter ("2026Q1") or a
 // fiscal year ("FY2026"). A NaN means "missing", never zero.
 type PeriodMetrics struct {
-	Period   string
-	Segments map[string]float64 // segment_key → revenue
+	Period string
+	// PeriodEnd is the quarter's real end date (the fiscal year's is its last
+	// quarter's). Carrying it is what lets the matrix check that a comparison
+	// period really is a year away, rather than trusting the label alone.
+	PeriodEnd string
+	Segments  map[string]float64 // segment_key → revenue
 
 	Revenue, GrossProfit, OperatingIncome, NetIncome, RnD, SGnA, IncomeTax float64
 	GrossMargin, OpMargin, NetMargin                                       float64
@@ -44,6 +48,15 @@ type PeriodConflict struct {
 // roughly 90 days apart, leaving plenty of room.
 const periodEndSlackDays = 15
 
+// minYearGapDays and maxYearGapDays bound how far apart two quarters may sit
+// and still be each other's year-on-year comparison. Fiscal calendars drift by
+// a few days from year to year (52/53-week years shift by up to a week), so the
+// window is deliberately wider than 365 while staying far short of two years.
+const (
+	minYearGapDays = 340
+	maxYearGapDays = 390
+)
+
 // BuildPeriods turns store rows into period columns, ascending by period,
 // along with any conflicts that made it drop data.
 //
@@ -54,13 +67,13 @@ const periodEndSlackDays = 15
 //
 // Both bounds matter, because the label is not a reliable key: EDGAR's fy/fp
 // pair is the *reporting* context, so a later filing re-disclosing an earlier
-// period carries the later report's label (measured on real MSFT data: 27% of
-// labels cover more than one quarter, one of them four). Fundamentals survive
-// that because period_end is their primary key, but anything grouping by label
-// would silently add unrelated quarters together — a number that still looks
-// like revenue and raises no error. Hence: segment rows are matched to the
-// quarter whose period_end they actually carry, and a fiscal year holding more
-// than four quarters is refused rather than summed.
+// period carries the later report's label (measured on real MSFT data: 4 labels,
+// 12.7%, cover more than one quarter). Fundamentals survive that because
+// period_end is their primary key, but anything grouping by label would
+// silently add unrelated quarters together — a number that still looks like
+// revenue and raises no error. Hence: segment rows are matched to the quarter
+// whose period_end they actually carry, and a fiscal year holding more than
+// four quarters is refused rather than summed.
 //
 // Segment rows whose label is empty (allowed by AD-9 when the period_end
 // reverse lookup failed) cannot be placed in a period and are skipped; the
@@ -103,8 +116,9 @@ func buildQuarters(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow) 
 			continue
 		}
 		p := PeriodMetrics{
-			Period: r.FiscalPeriod, Segments: segmentsAt(byPeriod[r.FiscalPeriod], r.PeriodEnd),
-			Revenue: r.Revenue, GrossProfit: r.GrossProfit, OperatingIncome: r.OperatingIncome,
+			Period: r.FiscalPeriod, PeriodEnd: r.PeriodEnd,
+			Segments: segmentsAt(byPeriod[r.FiscalPeriod], r.PeriodEnd),
+			Revenue:  r.Revenue, GrossProfit: r.GrossProfit, OperatingIncome: r.OperatingIncome,
 			NetIncome: r.NetIncome, RnD: r.RnD, SGnA: r.SGnA, IncomeTax: r.IncomeTax,
 		}
 		p.setMargins()
@@ -240,6 +254,9 @@ func aggregateFiscalYears(quarters []PeriodMetrics) ([]PeriodMetrics, []PeriodCo
 			agg.IncomeTax += q.IncomeTax
 			for k, v := range q.Segments {
 				agg.Segments[k] += v
+			}
+			if q.PeriodEnd > agg.PeriodEnd {
+				agg.PeriodEnd = q.PeriodEnd
 			}
 		}
 		// Margins come from the summed values, not from averaging quarterly ratios.
@@ -409,11 +426,34 @@ func changeOf(values []float64, sel []PeriodMetrics, annual bool,
 		}
 	}
 
-	prev, ok := findPeriod(allQuarters, previousYearLabel(sel[len(sel)-1].Period))
-	if !ok {
+	current := sel[len(sel)-1]
+	prev, ok := findPeriod(allQuarters, previousYearLabel(current.Period))
+	if !ok || !aboutAYearApart(current.PeriodEnd, prev.PeriodEnd) {
 		return math.NaN(), "none"
 	}
 	return growth(last, value(prev)), "yoy"
+}
+
+// aboutAYearApart guards the year-on-year lookup, which finds its comparison
+// period *by label*. When labels collide the match can be two years off, and
+// the result is the worst kind of wrong: a perfectly ordinary-looking growth
+// rate, correctly tagged "yoy", with nothing on the page to suggest the periods
+// are not a year apart. Anything outside the window degrades to no comparison.
+//
+// This stays useful after the labels themselves are fixed upstream: what it
+// guards against is looking something up by an unreliable key, which is a
+// property of the lookup, not of any one bad label.
+func aboutAYearApart(current, prev string) bool {
+	c, err := time.Parse(time.DateOnly, current)
+	if err != nil {
+		return false
+	}
+	p, err := time.Parse(time.DateOnly, prev)
+	if err != nil {
+		return false
+	}
+	days := c.Sub(p).Hours() / 24
+	return days >= minYearGapDays && days <= maxYearGapDays
 }
 
 // growth returns NaN rather than ±Inf when the base is unusable (AD-14).

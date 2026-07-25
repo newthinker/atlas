@@ -20,8 +20,10 @@ package sankey
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
 	"github.com/stretchr/testify/assert"
@@ -124,6 +126,7 @@ func TestBuildPeriodsFYAggregation(t *testing.T) {
 		"只有 4 季齐的财年才产出；FY2026 只有 1 季，不得产出")
 
 	fy := got[0]
+	assert.Equal(t, "2025-06-30", fy.PeriodEnd, "财年的 period_end 是它最后一季的，不是第一季的")
 	assert.Equal(t, 460*b, fy.Revenue, "流量科目应为 4 季之和")
 	assert.Equal(t, 274*b, fy.GrossProfit)
 	assert.Equal(t, 136*b, fy.OperatingIncome)
@@ -206,9 +209,9 @@ func TestBuildPeriodsEmptyInput(t *testing.T) {
 	assert.Empty(t, fyConflicts)
 }
 
-// 真实 EDGAR 数据里 27% 的 fiscal_period 标签对应多个实际季度（实测 MSFT 7/26，
-// 最严重的 2018Q4 横跨 4 个季度）：applyDuration 去重后胜出条目携带的是**较晚那份
-// 报告的上下文标签**。fundamental_q 以 period_end 为 PK，所以数据没丢、只有标签撞车，
+// 真实 EDGAR 数据里 12.7% 的 fiscal_period 标签对应多个实际季度（实测 MSFT 4 组）：
+// applyDuration 去重后胜出条目携带的是**较晚那份报告的上下文标签**。
+// fundamental_q 以 period_end 为 PK，所以数据没丢、只有标签撞车，
 // 但下游一旦把标签当分组键就会把不同季度混在一起。
 //
 // 这两个用例锁的是「上游违约时不静默出错」，治本在 edgar 包（TASK-017）。
@@ -395,10 +398,51 @@ func rowByKey(t *testing.T, rows []MatrixRow, key string) MatrixRow {
 
 func qm(period string, rev, gp, oi, ni float64, segs map[string]float64) PeriodMetrics {
 	return PeriodMetrics{
-		Period: period, Segments: segs,
+		Period: period, PeriodEnd: endOfLabel(period), Segments: segs,
 		Revenue: rev, GrossProfit: gp, OperatingIncome: oi, NetIncome: ni,
 		GrossMargin: gp / rev, OpMargin: oi / rev, NetMargin: ni / rev,
 	}
+}
+
+// daysBefore is the period_end that many days ahead of base, for pinning the
+// day-count constants from both sides.
+func daysBefore(t *testing.T, base string, days int) string {
+	t.Helper()
+	d, err := time.Parse(time.DateOnly, base)
+	require.NoError(t, err)
+	return d.AddDate(0, 0, -days).Format(time.DateOnly)
+}
+
+// endOfLabel gives a label the period_end a June-ending issuer would report
+// (MSFT's calendar, matching the fixtures elsewhere in this file). Real rows
+// always carry one — period_end is part of fundamental_q's primary key — so
+// leaving it blank here would make the year-on-year fixtures unrepresentative.
+func endOfLabel(period string) string {
+	if year, ok := strings.CutPrefix(period, "FY"); ok {
+		return year + "-06-30"
+	}
+	if len(period) != 6 {
+		return ""
+	}
+	year, quarter := period[:4], period[5]
+	fy, err := strconv.Atoi(year)
+	if err != nil {
+		return ""
+	}
+	// The fiscal year opens in July, so its first two quarters end in the
+	// previous calendar year.
+	priorYear := strconv.Itoa(fy - 1)
+	switch quarter {
+	case '1':
+		return priorYear + "-09-30"
+	case '2':
+		return priorYear + "-12-31"
+	case '3':
+		return year + "-03-31"
+	case '4':
+		return year + "-06-30"
+	}
+	return ""
 }
 
 func TestBuildMatrixYoY(t *testing.T) {
@@ -807,4 +851,123 @@ func TestBuildPeriodsMalformedLabels(t *testing.T) {
 	rev := rowByKey(t, rows, "revenue")
 	assert.Equal(t, "none", rev.ChangeKind)
 	assert.True(t, math.IsNaN(rev.Change))
+}
+
+// 【返工项①】上界的验收档位必须跨过 4：只有 5 季能区分 `>4` 与 `>5`。
+// 4/6 两档下把 `>4` 改成 `>5` 两档结论都不变，那个 4 就没有锚点
+// （与 TASK-008 的 ±3 同构：边界值写死了，却没有用例站在边界上）。
+func TestBuildPeriodsFiscalYearQuarterCountBoundaries(t *testing.T) {
+	quarter := func(label, end string) prismstore.FundamentalRow {
+		return fq(label, end, 100*b, 60*b, 30*b, 24*b, 8*b, 7*b, 5*b)
+	}
+	three := []prismstore.FundamentalRow{
+		quarter("2025Q1", "2024-09-30"),
+		quarter("2025Q2", "2024-12-31"),
+		quarter("2025Q3", "2025-03-31"),
+	}
+	four := append(append([]prismstore.FundamentalRow{}, three...), quarter("2025Q4", "2025-06-30"))
+	// 第 5 季只能来自标签重复——一个财年最多 Q1~Q4 四个合法标签。
+	five := append(append([]prismstore.FundamentalRow{}, four...), quarter("2025Q4", "2024-06-30"))
+
+	t.Run("three quarters rejected", func(t *testing.T) {
+		got, conflicts := BuildPeriods(three, nil, "fy")
+		assert.Empty(t, got, "不足 4 季不得外推")
+		assert.Empty(t, conflicts, "数据还没齐是正常状态，不该报冲突")
+	})
+
+	t.Run("four quarters accepted", func(t *testing.T) {
+		got, _ := BuildPeriods(four, nil, "fy")
+		require.Equal(t, []string{"FY2025"}, periodNames(got), "恰好 4 季必须照常产出")
+	})
+
+	t.Run("five quarters rejected", func(t *testing.T) {
+		got, conflicts := BuildPeriods(five, nil, "fy")
+		assert.Empty(t, got, "5 季说明标签撞车，不是一个财年")
+		require.NotEmpty(t, conflicts, "拒绝必须留痕")
+		assert.Contains(t, conflictText(conflicts), "FY2025")
+	})
+}
+
+// 【返工项②】periodEndSlackDays=15 直接决定正确性：过小则真实数据里分部全部对不上、
+// 静默落进残差；过大则相邻季被误判为同一季——正是本任务要防的东西。
+// 14/15/16 三档把它两个方向都锚住。
+func TestBuildPeriodsPeriodEndSlackBoundaries(t *testing.T) {
+	const base = "2026-03-31"
+
+	cases := []struct {
+		name       string
+		days       int
+		wantSame   bool
+		wantAmount float64
+	}{
+		{"14 days is the same quarter", 14, true, 30 * b},
+		{"15 days is still the same quarter", 15, true, 30 * b},
+		{"16 days is a different quarter", 16, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			funds := []prismstore.FundamentalRow{
+				fq("2026Q3", base, 70*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
+			}
+			segs := []prismstore.SegmentRow{sr("2026Q3", daysBefore(t, base, tc.days), "cloud", 30*b)}
+
+			got, conflicts := BuildPeriods(funds, segs, "q")
+			require.Len(t, got, 1)
+			if tc.wantSame {
+				assert.InDelta(t, tc.wantAmount, got[0].Segments["cloud"], 1,
+					"相差 %d 天应视为同一季，分部数据不能丢", tc.days)
+				assert.Empty(t, conflicts, "同一季不该报冲突")
+			} else {
+				assert.Empty(t, got[0].Segments,
+					"相差 %d 天是另一个季度，不得并入本期", tc.days)
+				assert.NotEmpty(t, conflicts, "跨季必须留痕")
+			}
+		})
+	}
+}
+
+// 【返工项③】同比反查按标签命中后，还要校验对照期确实相隔约一年。
+// 否则标签撞车时会拿到相差两年的期，算出一个「完全合理」的增速：
+// 标签对了、期间错了，页面上没有任何异常。
+func TestBuildMatrixYoYRejectsWrongDistanceComparison(t *testing.T) {
+	const base = "2026-03-31"
+	current := PeriodMetrics{Period: "2026Q3", PeriodEnd: base, Revenue: 70 * b}
+
+	cases := []struct {
+		name     string
+		days     int
+		wantKind string
+	}{
+		{"one year apart is a valid comparison", 365, "yoy"},
+		{"340 days is still valid", 340, "yoy"},
+		{"390 days is still valid", 390, "yoy"},
+		{"339 days is too close", 339, "none"},
+		{"391 days is too far", 391, "none"},
+		{"two years apart is the label-collision case", 730, "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := PeriodMetrics{Period: "2025Q3", PeriodEnd: daysBefore(t, base, tc.days), Revenue: 40 * b}
+			rows := BuildMatrix([]PeriodMetrics{current}, twoSegTemplate(), "zh",
+				[]PeriodMetrics{prev, current})
+
+			rev := rowByKey(t, rows, "revenue")
+			assert.Equal(t, tc.wantKind, rev.ChangeKind, "对照期相隔 %d 天", tc.days)
+			if tc.wantKind == "none" {
+				assert.True(t, math.IsNaN(rev.Change),
+					"期间不对就不该给出增速，实得 %v", rev.Change)
+			} else {
+				assert.InDelta(t, 0.75, rev.Change, 1e-9)
+			}
+		})
+	}
+}
+
+// 对照期没有 period_end（上游没填）时无法校验期间，宁可不给同比。
+func TestBuildMatrixYoYWithoutPeriodEnd(t *testing.T) {
+	current := PeriodMetrics{Period: "2026Q3", PeriodEnd: "2026-03-31", Revenue: 70 * b}
+	prev := PeriodMetrics{Period: "2025Q3", Revenue: 40 * b}
+	rows := BuildMatrix([]PeriodMetrics{current}, twoSegTemplate(), "zh",
+		[]PeriodMetrics{prev, current})
+	assert.Equal(t, "none", rowByKey(t, rows, "revenue").ChangeKind)
 }
