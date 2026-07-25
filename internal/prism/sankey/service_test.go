@@ -17,11 +17,22 @@ package sankey
 //               TestROETTM, TestLangMap, TestAnalyzeGranularityAndRange/english_labels
 // boundary[1]   迁移后新 5 列全 NULL 时不报错、节点为 NaN 且无 Inf →
 //               TestAnalyzeWithUnrefreshedColumns
+//
+// ── 返工补入（dev-agent-20，epoch=4）：原写在 description 未落 DoD 的六项补测 ──
+// functional[W7/W8] fundamentalMetrics **全部 9 条**序列表驱动断言（含 eps_diluted/equity）→
+//                   TestFundamentalCoversEveryMetricSeries
+// functional[W2/W4] Analyze 路径断言图上存在分部链路（取数 id + 模板两条链一并钉住）→
+//                   TestAnalyzeDefaultSelection（hasNode "云业务" + linkValue 云业务→收入）
+// functional[W5]    多期下 PeriodView.Metrics 逐期对齐，不得恒取 sel[0] →
+//                   TestAnalyzeGranularityAndRange/explicit_quarterly
+// functional[W10]   lang=en 时矩阵行标签为英文（主干行与分部行各一条）→
+//                   TestAnalyzeGranularityAndRange/english_labels
 
 import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 
@@ -240,6 +251,16 @@ func TestAnalyzeDefaultSelection(t *testing.T) {
 	assert.NotEmpty(t, got.Periods[0].Graph.Links, "PeriodView 应带上该期的 Graph")
 	assert.False(t, got.Truncated, "只有 1 期，不应判为截断")
 
+	// W2/W4：上面那句 NotEmpty(Links) 是**恒真**的——主干链路（收入→成本/毛利…）
+	// 与分部数据无关，恒会画出来。于是「SegmentRows 拿错 id 取不到分部」与
+	// 「BuildSankey 收到 nil 模板」两个变异都能存活，而它们的后果是桑基退化成
+	// 「全部收入都来自 other_segment 残差」——图还在，只是分部全没了。
+	// 断言分部链路本身存在，一句话同时钉住取数与模板两条链。
+	assert.True(t, hasNode(got.Periods[0].Graph, "云业务"),
+		"分部链路必须出现在图上：SegmentRows 取不到数、或模板没传进 BuildSankey，图都只剩主干")
+	assert.Equal(t, 230*b, linkValue(t, got.Periods[0].Graph, "云业务", "收入"),
+		"FY2026 的 cloud 应为 4 季之和 50+55+60+65")
+
 	assert.NotEmpty(t, got.Matrix)
 	assert.Equal(t, 1, got.Template.Version)
 	assert.Equal(t, map[string]string{"cloud": "云业务", "devices": "硬件设备"}, got.Template.Lang)
@@ -281,6 +302,19 @@ func TestAnalyzeGranularityAndRange(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "q", got.Granularity)
 		assert.Equal(t, []string{"2026Q1", "2026Q2", "2026Q3", "2026Q4"}, viewNames(got.Periods))
+
+		// W5：上一句只看标签。标签取自循环变量、Metrics 却可能取自固定下标，
+		// 两者错开时这里依然全绿——单期用例又恰好只有下标 0，于是
+		// 「PeriodView.Metrics 恒取 sel[0]」在多期情形从未被验证过。
+		// 多期下逐期对齐才能把标签和数据绑在一起。
+		wantRev := []float64{100 * b, 110 * b, 120 * b, 130 * b}
+		require.Len(t, got.Periods, len(wantRev))
+		for i, pv := range got.Periods {
+			assert.Equal(t, pv.Period, pv.Metrics.Period,
+				"第 %d 期携带的 Metrics 必须是它自己那一期的", i)
+			assert.Equal(t, wantRev[i], pv.Metrics.Revenue,
+				"第 %d 期(%s)的 Revenue 错位：整页数据会齐刷刷显示成首期的数字", i, pv.Period)
+		}
 	})
 
 	t.Run("range filter is inclusive", func(t *testing.T) {
@@ -303,6 +337,14 @@ func TestAnalyzeGranularityAndRange(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, map[string]string{"cloud": "Cloud", "devices": "Devices"}, got.Template.Lang)
 		assert.True(t, hasNode(got.Periods[0].Graph, "Revenue"), "图上节点名也应随 lang 切换")
+
+		// W10：Template.Lang 与图节点各有自己的取名路径，矩阵是第三条——
+		// lang 没有传给 BuildMatrix 时，前两条照样是英文，只有矩阵行标签留在中文，
+		// 此前无任何断言覆盖。主干行与分部行分别走 pick() 和 displayName()，各钉一条。
+		assert.Equal(t, "Revenue", rowByKey(t, got.Matrix, "revenue").Label,
+			"矩阵主干行标签也必须随 lang 切换")
+		assert.Equal(t, "Cloud", rowByKey(t, got.Matrix, "cloud").Label,
+			"矩阵分部行标签取自模板的 en 名")
 	})
 }
 
@@ -388,6 +430,80 @@ func TestFundamental(t *testing.T) {
 		assert.True(t, math.IsNaN(roe[i]), "不足 4 季不得用部分和冒充 TTM，第 %d 季实得 %v", i, roe[i])
 	}
 	assert.InDelta(t, (24.0+26+28+30)/230.0, roe[3], 1e-9)
+}
+
+// W7/W8：`fundamentalMetrics` 的**每一条**序列都必须被钉住。
+//
+// 退回理由就在这里：TestFundamental 只断言了 revenue（与表外单独设的 roe_ttm），
+// 其余 8 条零断言，于是 `gross_profit → r.OperatingIncome`、`sganda → r.RnD` 这类
+// 串线变异在全套测试下存活——前端毛利曲线会画成营业利润而没有任何信号。
+//
+// **表必须是 9 行不是 7 行**：description 里的「其余 7 条」是低估，漏掉 eps_diluted
+// 与 equity 就是在更小的尺度上复现同一个缺口。
+//
+// fixture 自建而不复用 fq()：fq() 不设 EPSDiluted/Equity，用它这两条会恒为 0，
+// 「读对了字段」和「读到零值」就分不开了。18 个值两两不同，任何一处串线都必然改值。
+func TestFundamentalCoversEveryMetricSeries(t *testing.T) {
+	store := storeWith(t)
+	store.funds[7] = []prismstore.FundamentalRow{
+		{
+			FiscalPeriod: "2026Q1", PeriodEnd: "2025-09-30", Source: "edgar",
+			Revenue: 100 * b, GrossProfit: 61 * b, OperatingIncome: 32 * b, NetIncome: 23 * b,
+			RnD: 14 * b, SGnA: 15 * b, IncomeTax: 6 * b, EPSDiluted: 1.7, Equity: 207 * b,
+		},
+		{
+			FiscalPeriod: "2026Q2", PeriodEnd: "2025-12-31", Source: "edgar",
+			Revenue: 110 * b, GrossProfit: 62 * b, OperatingIncome: 33 * b, NetIncome: 24 * b,
+			RnD: 16 * b, SGnA: 17 * b, IncomeTax: 8 * b, EPSDiluted: 1.9, Equity: 217 * b,
+		},
+	}
+
+	got, err := newTestService(t, store).Fundamental("ACME")
+	require.NoError(t, err)
+
+	// 每个 key 喂的值互不相同 —— 任意两条序列串线都会被下面的精确相等抓住。
+	want := []struct {
+		key    string
+		series []float64
+	}{
+		{"revenue", []float64{100 * b, 110 * b}},
+		{"gross_profit", []float64{61 * b, 62 * b}},
+		{"operating_income", []float64{32 * b, 33 * b}},
+		{"net_income", []float64{23 * b, 24 * b}},
+		{"rnd", []float64{14 * b, 16 * b}},
+		{"sganda", []float64{15 * b, 17 * b}},
+		{"income_tax", []float64{6 * b, 8 * b}},
+		{"eps_diluted", []float64{1.7, 1.9}},
+		{"equity", []float64{207 * b, 217 * b}},
+	}
+	require.Len(t, want, 9, "fundamentalMetrics 是 9 条，表少一行就是漏测一条序列")
+
+	for _, tc := range want {
+		t.Run(tc.key, func(t *testing.T) {
+			series, ok := got.Metrics[tc.key]
+			require.True(t, ok, "Metrics 缺少序列 %q，实有 %v", tc.key, metricKeys(got.Metrics))
+			require.Len(t, series, len(tc.series), "序列应与行数一一对应")
+			for i := range tc.series {
+				assert.Equal(t, tc.series[i], series[i],
+					"%s[%d] 读错字段：前端会照着这条曲线画图，串线不会有任何别的信号", tc.key, i)
+			}
+		})
+	}
+
+	// 键集合也钉住：只断言值不断言集合的话，整条序列被删掉仍可能无人发现。
+	assert.ElementsMatch(t,
+		[]string{"revenue", "gross_profit", "operating_income", "net_income", "rnd",
+			"sganda", "income_tax", "eps_diluted", "equity", "roe_ttm"},
+		metricKeys(got.Metrics), "Metrics 的键集合 = fundamentalMetrics 9 条 + 表外的 roe_ttm")
+}
+
+func metricKeys(m map[string][]float64) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestFundamentalNoData(t *testing.T) {

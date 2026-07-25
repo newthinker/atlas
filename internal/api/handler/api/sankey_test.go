@@ -10,6 +10,8 @@ package api
 //                 无数据 → 404                                                 → TestFundamentalResponse
 //   functional[4] AD-14 Inf 防护：含 Inf 的 Analysis 仍返回 200 而非 500        → TestSankeyInfNeverBreaksJSON
 //   boundary      缺 symbol → 400；granularity 非法 → 400；三种 404 文案互不混淆 → TestSankeyErrorBranches
+//   ── 返工补入（dev-agent-20，epoch=4）──
+//   functional[G2] metricsJSON 必须携带 period_end（此前全仓零断言，变异存活）  → TestSankeyResponseShape
 
 import (
 	"encoding/json"
@@ -125,6 +127,10 @@ func TestSankeyResponseShape(t *testing.T) {
 	require.True(t, ok, "每期应含 metrics")
 	assert.Equal(t, 65.585e9, metrics["revenue"])
 	assert.Equal(t, map[string]any{"cloud": 40e9}, metrics["segments"])
+	// G2：period_end 此前全仓零断言（metricsJSON 丢掉这个字段，三包全量测试无一变红）。
+	// 它是前端把一期对到日历日的唯一依据，fiscal_period 只是标签。
+	assert.Equal(t, "2026-06-30", metrics["period_end"],
+		"metrics 必须携带 period_end：fiscal_period 是标签，日历日只有这一个来源")
 
 	matrix, ok := data["matrix"].([]any)
 	require.True(t, ok)
