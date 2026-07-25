@@ -17,13 +17,20 @@ import (
 	"github.com/newthinker/atlas/internal/valuation"
 )
 
-// Store is the subset of *prismstore.Store used by Refresh.
+// Store is the subset of *prismstore.Store used by Refresh and, from M3, by the
+// segment refresh and the sankey service.
 type Store interface {
 	UpsertInstrument(inst prismstore.Instrument) (int64, error)
 	LatestDate(instrumentID int64) (string, error)
 	UpsertValuations(instrumentID int64, rows []prismstore.ValuationRow) error
 	UpsertFundamentals(instrumentID int64, rows []prismstore.FundamentalRow) error
 	Series(symbol, from string) (*prismstore.SeriesData, error)
+	// M3 新增
+	UpsertPrices(instrumentID int64, closes []prismstore.PriceRow) error
+	UpsertSegments(instrumentID int64, rows []prismstore.SegmentRow) error
+	SegmentRows(instrumentID int64) ([]prismstore.SegmentRow, error)
+	LatestSegmentPeriodEnd(instrumentID int64) (string, error)
+	QuarterlyFundamentals(instrumentID int64) ([]prismstore.FundamentalRow, error)
 }
 
 // EdgarClient is the subset of *edgar.Client used by the EDGAR refresh path.
@@ -55,6 +62,13 @@ type Report struct {
 	Degraded  []string // 主源失败但兜底成功的标的(可观测降级,进告警提示不算失败)
 }
 
+// degrade records one observable degradation; the empty string means "none".
+func (r *Report) degrade(msg string) {
+	if msg != "" {
+		r.Degraded = append(r.Degraded, msg)
+	}
+}
+
 // Refresh updates every configured instrument: lixinger-sourced instruments
 // fetch incrementally (理杏豆计费), engine-sourced US stocks rebuild via yahoo.
 func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient, now time.Time) Report {
@@ -74,13 +88,19 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 				}
 			}
 		case "engine":
-			err = refreshEngine(cfg, store, us, inst, now)
+			var deg string
+			deg, err = refreshEngine(cfg, store, us, inst, now)
+			rep.degrade(deg)
 		case "akshare":
 			err = refreshAkshare(cfg, store, ak, inst, now)
 		case "edgar":
-			err = refreshEdgar(cfg, store, ed, us, inst, now)
+			var deg string
+			deg, err = refreshEdgar(cfg, store, ed, us, inst, now)
+			rep.degrade(deg)
 			if err != nil && inst.FallbackSource == "engine" {
-				if fbErr := refreshEngine(cfg, store, us, inst, now); fbErr == nil {
+				fbDeg, fbErr := refreshEngine(cfg, store, us, inst, now)
+				rep.degrade(fbDeg)
+				if fbErr == nil {
 					rep.Degraded = append(rep.Degraded,
 						fmt.Sprintf("%s: edgar failed (%v), engine fallback ok", inst.Symbol, err))
 					err = nil
@@ -174,32 +194,51 @@ func currentEPS(eps []core.EPSPoint) (float64, bool) {
 // rollingMinPoints: 滚动分位窗口内最少样本数(约 1 年交易日)。
 const rollingMinPoints = 252
 
+// upsertPrices 把已取得的行情落 price_daily,返回一条降级说明("" 表示成功)。
+//
+// 价格对估值链路是**附属产物**(供 M3 桑基/基本面页叠加股价),写失败不应让当日
+// 估值刷新整条判负 —— 故只返回可观测的降级说明交由调用方记入 Report.Degraded,
+// 不作为 error 上抛。
+func upsertPrices(store Store, id int64, symbol string, closes []core.OHLCV) string {
+	rows := make([]prismstore.PriceRow, len(closes))
+	for i, c := range closes {
+		rows[i] = prismstore.PriceRow{D: c.Time.Format("2006-01-02"), Close: c.Close}
+	}
+	if err := store.UpsertPrices(id, rows); err != nil {
+		return fmt.Sprintf("%s: price_daily upsert failed (%v), valuation unaffected", symbol, err)
+	}
+	return ""
+}
+
 // refreshEngine 每日全量重算美股公司近 us_lookback_years 年 PE 序列并整段 upsert
 // (幂等,无增量状态)。yahoo 路径 M1 口径:无 PB/PSTTM,仅 5Y 滚动分位。
-func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config.PrismInstrument, now time.Time) error {
+// 返回的首个值是降级说明("" 表示无降级),见 upsertPrices。
+func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config.PrismInstrument, now time.Time) (string, error) {
 	id, err := upsertMeta(store, inst)
 	if err != nil {
-		return err
+		return "", err
 	}
 	start := now.AddDate(-cfg.USLookbackYears, 0, 0)
 	// EPS 需要比价格多回看 1 年,保证首个交易日有可对齐的 EPS 点
 	eps, err := us.FetchEPSHistory(inst.Symbol, start.AddDate(-1, 0, 0), now)
 	if err != nil {
-		return fmt.Errorf("eps history: %w", err)
+		return "", fmt.Errorf("eps history: %w", err)
 	}
 	closes, err := us.FetchHistory(inst.Symbol, start, now, "1d")
 	if err != nil {
-		return fmt.Errorf("price history: %w", err)
+		return "", fmt.Errorf("price history: %w", err)
 	}
+	// 价格是原始事实,紧随取得即落库:后续估值环节(熔断/重建)失败时行情不应一并丢失。
+	deg := upsertPrices(store, id, inst.Symbol, closes)
 	// 熔断:当前 EPS(TTM)<=0(真实亏损)→ 不入库,记入 Report.Failed,语义对齐
 	// valuation.ReconstructPEPercentile 的 ErrNonPositiveEPS。否则历史有 >=8 正 EPS
 	// 季但最新亏损的标的会静默入库截断到最后盈利日的过期序列,误导 board 展示。
 	if e, ok := currentEPS(eps); ok && e <= 0 {
-		return valuation.ErrNonPositiveEPS
+		return deg, valuation.ErrNonPositiveEPS
 	}
 	dates, pe, err := valuation.ReconstructPESeries(closes, eps)
 	if err != nil {
-		return fmt.Errorf("reconstruct: %w", err)
+		return deg, fmt.Errorf("reconstruct: %w", err)
 	}
 	p5 := valuation.RollingPercentile(dates, pe, 5, rollingMinPoints)
 
@@ -211,7 +250,7 @@ func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config
 			Pctl5Y: p5[i], Pctl10Y: math.NaN(), // 仅 5Y 数据,10Y 分位无意义
 		}
 	}
-	return store.UpsertValuations(id, rows)
+	return deg, store.UpsertValuations(id, rows)
 }
 
 // refreshAkshare 每日增量拉取 akshare(经 aktools)公司/指数估值,并在本地计算滚动
@@ -378,17 +417,18 @@ func seriesByDate(closes []core.OHLCV, pts []core.EPSPoint) map[string]float64 {
 // refreshEdgar 全量重拉 EDGAR 季度事实,落 fundamental_q,并以 filing date 生效的
 // EPS_TTM 阶梯重建 PE 序列;PB(Close/BVPS)、PS(Close/RPS_TTM)同构对齐并入行。
 // 价格仍走 yahoo。CIK 空 → 报错提示配置。
-func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, inst config.PrismInstrument, now time.Time) error {
+// 返回的首个值是降级说明("" 表示无降级),见 upsertPrices。
+func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, inst config.PrismInstrument, now time.Time) (string, error) {
 	if inst.CIK == "" {
-		return fmt.Errorf("edgar source requires cik in config")
+		return "", fmt.Errorf("edgar source requires cik in config")
 	}
 	id, err := upsertMeta(store, inst)
 	if err != nil {
-		return err
+		return "", err
 	}
 	facts, err := ed.FetchCompanyFacts(inst.CIK)
 	if err != nil {
-		return fmt.Errorf("companyfacts: %w", err)
+		return "", fmt.Errorf("companyfacts: %w", err)
 	}
 	frows := make([]prismstore.FundamentalRow, len(facts))
 	for i, f := range facts {
@@ -396,21 +436,25 @@ func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClie
 			FiscalPeriod: f.FiscalPeriod, PeriodEnd: f.PeriodEnd.Format("2006-01-02"),
 			FilingDate: f.FilingDate.Format("2006-01-02"),
 			Revenue:    f.Revenue, NetIncome: f.NetIncome, EPSDiluted: f.EPSDiluted,
-			Equity: f.Equity, DilutedShares: f.DilutedShares, Source: "edgar",
+			Equity: f.Equity, DilutedShares: f.DilutedShares,
+			GrossProfit: f.GrossProfit, RnD: f.RnD, SGnA: f.SGnA,
+			OperatingIncome: f.OperatingIncome, IncomeTax: f.IncomeTax,
+			Source: "edgar",
 		}
 	}
 	if err := store.UpsertFundamentals(id, frows); err != nil {
-		return err
+		return "", err
 	}
 
 	closes, err := us.FetchHistory(inst.Symbol, now.AddDate(-cfg.EdgarLookbackYears, 0, 0), now, "1d")
 	if err != nil {
-		return fmt.Errorf("price history: %w", err)
+		return "", fmt.Errorf("price history: %w", err)
 	}
+	deg := upsertPrices(store, id, inst.Symbol, closes)
 	epsPts := ttmPoints(facts, func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted })
 	dates, pe, err := valuation.ReconstructPESeries(closes, epsPts)
 	if err != nil {
-		return fmt.Errorf("reconstruct: %w", err)
+		return deg, fmt.Errorf("reconstruct: %w", err)
 	}
 	p5 := valuation.RollingPercentile(dates, pe, 5, rollingMinPoints)
 	p10 := valuation.RollingPercentile(dates, pe, 10, rollingMinPoints)
@@ -430,7 +474,7 @@ func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClie
 			PB: lookupRatio(pbByDate, d), PSTTM: lookupRatio(psByDate, d),
 			Pctl5Y: p5[i], Pctl10Y: p10[i]}
 	}
-	return store.UpsertValuations(id, rows)
+	return deg, store.UpsertValuations(id, rows)
 }
 
 // lookupRatio 返回 m[d],m 为 nil 或未命中时返回 NaN。

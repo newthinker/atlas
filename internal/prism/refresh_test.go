@@ -39,10 +39,54 @@ type fakeStore struct {
 	nextID       int64
 	series       map[string]*prismstore.SeriesData // symbol → 预置历史(Series 返回)
 	seriesErr    map[string]error                  // symbol → 注入 Series 读回错误
+	prices       map[string][]prismstore.PriceRow  // symbol → 落库日收盘(M3)
+	priceErr     map[string]error                  // symbol → 注入 UpsertPrices 失败
+	priceCalls   int                               // UpsertPrices 调用次数(负向断言用)
+	segments     map[string][]prismstore.SegmentRow
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{latest: map[string]string{}, upserts: map[string][]prismstore.ValuationRow{}, fundamentals: map[string][]prismstore.FundamentalRow{}, ids: map[int64]string{}, series: map[string]*prismstore.SeriesData{}}
+	return &fakeStore{
+		latest:       map[string]string{},
+		upserts:      map[string][]prismstore.ValuationRow{},
+		fundamentals: map[string][]prismstore.FundamentalRow{},
+		ids:          map[int64]string{},
+		series:       map[string]*prismstore.SeriesData{},
+		prices:       map[string][]prismstore.PriceRow{},
+		priceErr:     map[string]error{},
+		segments:     map[string][]prismstore.SegmentRow{},
+	}
+}
+
+// M3 Store 扩展方法(TASK-002 产出)。refresh 目前只用 UpsertPrices,其余为
+// TASK-007/008/009 的消费面,此处按接口如实实现以保证 fake 与真实 Store 同构。
+func (f *fakeStore) UpsertPrices(id int64, rows []prismstore.PriceRow) error {
+	f.priceCalls++
+	sym := f.ids[id]
+	if err := f.priceErr[sym]; err != nil {
+		return err
+	}
+	f.prices[sym] = append(f.prices[sym], rows...)
+	return nil
+}
+func (f *fakeStore) UpsertSegments(id int64, rows []prismstore.SegmentRow) error {
+	f.segments[f.ids[id]] = append(f.segments[f.ids[id]], rows...)
+	return nil
+}
+func (f *fakeStore) SegmentRows(id int64) ([]prismstore.SegmentRow, error) {
+	return f.segments[f.ids[id]], nil
+}
+func (f *fakeStore) LatestSegmentPeriodEnd(id int64) (string, error) {
+	var latest string
+	for _, r := range f.segments[f.ids[id]] {
+		if r.PeriodEnd > latest {
+			latest = r.PeriodEnd
+		}
+	}
+	return latest, nil
+}
+func (f *fakeStore) QuarterlyFundamentals(id int64) ([]prismstore.FundamentalRow, error) {
+	return f.fundamentals[f.ids[id]], nil
 }
 func (f *fakeStore) UpsertFundamentals(id int64, rows []prismstore.FundamentalRow) error {
 	f.fundamentals[f.ids[id]] = append(f.fundamentals[f.ids[id]], rows...)
@@ -282,6 +326,12 @@ func TestRefreshEnginePath(t *testing.T) {
 
 func engineInst(symbol string) config.PrismInstrument {
 	return config.PrismInstrument{Symbol: symbol, Name: symbol, Type: "stock", Market: "US", Group: "美股公司", Source: "engine"}
+}
+
+func engineCfg() config.PrismConfig {
+	c := config.PrismConfig{Instruments: []config.PrismInstrument{engineInst("NVDA")}}
+	c.ApplyDefaults()
+	return c
 }
 
 func okEPSSeries(now time.Time) []core.EPSPoint {
@@ -750,4 +800,155 @@ func TestRefreshEdgarNoFallback(t *testing.T) {
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "NVDA")
 	assert.Contains(t, rep.Failed[0], "edgar down", "失败原因不得静默吞掉")
+}
+
+// ---------------------------------------------------------------------------
+// M3 TASK-006 done_criteria → test mapping
+//   functional[0] refreshEdgar 落库携带主干流 5 新字段(含 NaN 透传)
+//                                            → TestRefreshEdgarStoresMainFlowFields
+//   functional[1] refreshEdgar 取得 closes 后 UpsertPrices,日期与收盘价一致
+//                                            → TestRefreshEdgarUpsertsPrices
+//   functional[2] refreshEngine 同样 UpsertPrices(两条路径都覆盖)
+//                                            → TestRefreshEngineUpsertsPrices
+//   boundary[0]   UpsertPrices 失败仍完成估值:Refreshed 计数、错误进 Degraded 非 Failed
+//                                            → TestRefreshPriceUpsertFailureDegradesOnly
+//   error[0]      lixinger/akshare 路径不调用 UpsertPrices(A/H 链路零变更负向断言)
+//                                            → TestRefreshCNPathsNeverUpsertPrices
+// ---------------------------------------------------------------------------
+
+// mainFlowQuarters 在 edgarQuarters 基础上填入主干流科目,第 6 季的 SGnA 置 NaN
+// 用于验证 NaN 透传(不被 0 值污染)。
+func mainFlowQuarters(now time.Time) []edgar.QuarterlyFact {
+	facts := edgarQuarters(now)
+	for i := range facts {
+		facts[i].GrossProfit = 12
+		facts[i].RnD = 3
+		facts[i].SGnA = 2
+		facts[i].OperatingIncome = 7
+		facts[i].IncomeTax = 1.5
+	}
+	facts[6].SGnA = math.NaN()
+	return facts
+}
+
+func TestRefreshEdgarStoresMainFlowFields(t *testing.T) {
+	// functional[0]: QuarterlyFact 的 5 个 M3 字段必须原样出现在 FundamentalRow 上
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	facts := mainFlowQuarters(now)
+	closes := []core.OHLCV{{Time: facts[11].FilingDate.AddDate(0, 0, 2), Close: 40}}
+	store := newFakeStore()
+	rep := Refresh(edgarCfg(), store, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{},
+		fakeEdgar{facts: facts}, now)
+	require.Empty(t, rep.Failed)
+
+	rows := store.fundamentals["NVDA"]
+	require.Len(t, rows, 12)
+	for i, r := range rows {
+		assert.Equal(t, 12.0, r.GrossProfit, "第 %d 季 GrossProfit", i)
+		assert.Equal(t, 3.0, r.RnD, "第 %d 季 RnD", i)
+		assert.Equal(t, 7.0, r.OperatingIncome, "第 %d 季 OperatingIncome", i)
+		assert.Equal(t, 1.5, r.IncomeTax, "第 %d 季 IncomeTax", i)
+	}
+	// NaN 透传:缺失科目不得被写成 0
+	assert.True(t, math.IsNaN(rows[6].SGnA), "缺失的 SGnA 须以 NaN 落库,不得变成 0")
+	assert.Equal(t, 2.0, rows[5].SGnA, "其余季 SGnA 不受影响")
+	// 既有字段仍正确(接线不得破坏原映射)
+	assert.Equal(t, 20.0, rows[0].Revenue)
+	assert.Equal(t, "edgar", rows[0].Source)
+}
+
+func TestRefreshEdgarUpsertsPrices(t *testing.T) {
+	// functional[1]: closes 落 price_daily,日期与收盘价逐点一致
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	facts := edgarQuarters(now)
+	lastFiled := facts[11].FilingDate
+	closes := []core.OHLCV{
+		{Time: lastFiled.AddDate(0, 0, -2), Close: 40},
+		{Time: lastFiled.AddDate(0, 0, 2), Close: 44.5},
+	}
+	store := newFakeStore()
+	rep := Refresh(edgarCfg(), store, &fakeLix{}, &fakeUS2{closes: closes}, &fakeAkshare{},
+		fakeEdgar{facts: facts}, now)
+	require.Empty(t, rep.Failed)
+	assert.Empty(t, rep.Degraded, "落价成功不得记 Degraded")
+
+	prices := store.prices["NVDA"]
+	require.Len(t, prices, 2)
+	assert.Equal(t, closes[0].Time.Format("2006-01-02"), prices[0].D)
+	assert.Equal(t, 40.0, prices[0].Close)
+	assert.Equal(t, closes[1].Time.Format("2006-01-02"), prices[1].D)
+	assert.Equal(t, 44.5, prices[1].Close)
+}
+
+func TestRefreshEngineUpsertsPrices(t *testing.T) {
+	// functional[2]: engine 路径同样落 price_daily
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	closes := []core.OHLCV{
+		{Time: now.AddDate(0, 0, -2), Close: 100},
+		{Time: now.AddDate(0, 0, -1), Close: 110},
+	}
+	store := newFakeStore()
+	rep := Refresh(engineCfg(), store, &fakeLix{}, &fakeUS2{closes: closes, eps: okEPSSeries(now)},
+		&fakeAkshare{}, fakeEdgar{}, now)
+	require.Empty(t, rep.Failed)
+	assert.Empty(t, rep.Degraded)
+
+	prices := store.prices["NVDA"]
+	require.Len(t, prices, 2)
+	assert.Equal(t, closes[0].Time.Format("2006-01-02"), prices[0].D)
+	assert.Equal(t, 100.0, prices[0].Close)
+	assert.Equal(t, 110.0, prices[1].Close)
+}
+
+func TestRefreshPriceUpsertFailureDegradesOnly(t *testing.T) {
+	// boundary[0]: 落价失败只降级,估值主流程照常完成(Refreshed 计数、估值行仍落库)
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	facts := edgarQuarters(now)
+	closes := []core.OHLCV{
+		{Time: facts[11].FilingDate.AddDate(0, 0, -2), Close: 40},
+		{Time: facts[11].FilingDate.AddDate(0, 0, 2), Close: 40},
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  config.PrismConfig
+		ed   fakeEdgar
+	}{
+		{"edgar 路径", edgarCfg(), fakeEdgar{facts: facts}},
+		{"engine 路径", engineCfg(), fakeEdgar{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			store.priceErr["NVDA"] = errors.New("disk full")
+			rep := Refresh(tc.cfg, store, &fakeLix{},
+				&fakeUS2{closes: closes, eps: okEPSSeries(now)}, &fakeAkshare{}, tc.ed, now)
+
+			assert.Empty(t, rep.Failed, "落价失败不得让标的进 Failed")
+			assert.Equal(t, 1, rep.Refreshed, "估值主流程仍算刷新成功")
+			require.Len(t, rep.Degraded, 1, "落价失败须可观测")
+			assert.Contains(t, rep.Degraded[0], "NVDA")
+			assert.Contains(t, rep.Degraded[0], "disk full", "降级说明须带原始错误")
+			assert.NotEmpty(t, store.upserts["NVDA"], "估值行仍应落库")
+			assert.Empty(t, store.prices["NVDA"], "失败的落价不得留下半截数据")
+		})
+	}
+}
+
+func TestRefreshCNPathsNeverUpsertPrices(t *testing.T) {
+	// error_handling[0]: A/H 链路零行为变更 —— lixinger 与 akshare 都不得触碰 price_daily
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	cfg := config.PrismConfig{Instruments: []config.PrismInstrument{
+		{Symbol: "000300.SH", Name: "沪深300", Type: "index", Market: "CN_A", Group: "A股指数", Source: "lixinger"},
+		{Symbol: "600519.SH", Name: "贵州茅台", Type: "stock", Market: "CN_A", Group: "A股公司", Source: "akshare"},
+	}}
+	cfg.ApplyDefaults()
+	store := newFakeStore()
+	ak := &fakeAkshare{stockPts: []akshare.ValuationPoint{{Date: now, PETTM: 30, PB: 8, PSTTM: 12}}}
+	rep := Refresh(cfg, store, &fakeLix{}, &fakeUS2{}, ak, fakeEdgar{}, now)
+
+	require.Empty(t, rep.Failed)
+	assert.Equal(t, 2, rep.Refreshed)
+	assert.NotEmpty(t, store.upserts["000300.SH"], "lixinger 估值链路照常落库")
+	assert.NotEmpty(t, store.upserts["600519.SH"], "akshare 估值链路照常落库")
+	assert.Zero(t, store.priceCalls, "A/H 路径不得调用 UpsertPrices")
+	assert.Empty(t, store.prices, "A/H 路径不得写入 price_daily")
 }
