@@ -1,0 +1,2 @@
+quarters=1
+2024Q1|2023-04-27|2023-05-28|eps=3|rev=NaN|ni=NaN|eq=NaN|shares=NaN

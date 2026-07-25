@@ -1,0 +1,5 @@
+quarters=4
+2026Q1|2025-04-27|2025-05-28|eps=0.6|rev=NaN|ni=NaN|eq=NaN|shares=100
+2026Q2|2025-07-27|2025-08-27|eps=0.7|rev=NaN|ni=NaN|eq=NaN|shares=100
+2026Q3|2025-10-26|2025-11-19|eps=0.8|rev=NaN|ni=NaN|eq=NaN|shares=100
+2026Q4|2026-01-25|2026-02-26|eps=0.9|rev=NaN|ni=NaN|eq=NaN|shares=NaN

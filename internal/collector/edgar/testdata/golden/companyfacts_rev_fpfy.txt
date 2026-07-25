@@ -1,0 +1,2 @@
+quarters=1
+2026Q1|2025-04-27|2025-05-28|eps=0.6|rev=40000|ni=NaN|eq=NaN|shares=NaN

@@ -1,0 +1,2 @@
+quarters=1
+2020Q1|2019-04-27|2019-05-28|eps=2|rev=NaN|ni=5000|eq=NaN|shares=4000
