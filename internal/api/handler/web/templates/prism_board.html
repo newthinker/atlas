@@ -10,7 +10,10 @@
   </div>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
     {{range .Cards}}
-    <a href="/prism/detail/{{.Symbol}}" class="block rounded-lg border p-4 hover:shadow-md bg-white dark:bg-gray-800">
+    <!-- 卡片外层由 <a> 改为 <div>：财务趋势入口是卡片内的第二个链接，
+         而 <a> 不能嵌套 <a>。主体仍整块可点，跳估值详情。 -->
+    <div class="rounded-lg border hover:shadow-md bg-white dark:bg-gray-800">
+    <a href="/prism/detail/{{.Symbol}}" class="block p-4 pb-2">
       <div class="flex justify-between items-start">
         <div>
           <div class="font-semibold">{{.Name}}</div>
@@ -31,6 +34,10 @@
       </div>
       <div class="mt-2 text-xs text-gray-400">数据至 {{.AsOf}} · {{.Source}}</div>
     </a>
+    <div class="px-4 pb-3 text-xs">
+      <a href="/prism/fundamental/{{.Symbol}}" class="text-blue-600 hover:underline">财务趋势</a>
+    </div>
+    </div>
     {{end}}
   </div>
 </div>

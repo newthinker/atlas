@@ -220,12 +220,23 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		s.mux.Handle("/api/prism/series", wrapHandler(http.HandlerFunc(prismHandler.Series)))
 	}
 
-	// Prism earnings bridge API (only when templates loaded successfully)
+	// Prism earnings bridge API — registered whether or not the feature is on.
+	//
+	// Leaving these unregistered does not make the requests fail cleanly: /api/
+	// has no catch-all of its own, so ServeMux hands them to the "/" dashboard
+	// handler below and the caller gets 200 + HTML, on which r.json() throws.
+	// Registered, the handler answers a JSON 404 naming the reason (TASK-013).
+	//
+	// The nil check keeps a typed-nil *sankey.Service out of the interface —
+	// assigned directly it would be non-nil inside the handler and panic on
+	// first use.
+	var sankeySvc api.SankeyService
 	if deps.PrismSankey != nil {
-		sankeyHandler := api.NewSankeyHandler(deps.PrismSankey)
-		s.mux.Handle("/api/prism/sankey", wrapHandler(http.HandlerFunc(sankeyHandler.Sankey)))
-		s.mux.Handle("/api/prism/fundamental", wrapHandler(http.HandlerFunc(sankeyHandler.Fundamental)))
+		sankeySvc = deps.PrismSankey
 	}
+	sankeyHandler := api.NewSankeyHandler(sankeySvc)
+	s.mux.Handle("/api/prism/sankey", wrapHandler(http.HandlerFunc(sankeyHandler.Sankey)))
+	s.mux.Handle("/api/prism/fundamental", wrapHandler(http.HandlerFunc(sankeyHandler.Fundamental)))
 
 	// API v1 routes (with auth, metrics, logging)
 	s.mux.Handle("/api/v1/signals", wrapHandler(http.HandlerFunc(signalsHandler.List)))
@@ -363,6 +374,17 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 		s.mux.HandleFunc("/prism/sankey/", func(w http.ResponseWriter, r *http.Request) {
 			symbol := strings.TrimPrefix(r.URL.Path, "/prism/sankey/")
 			webHandler.PrismSankey(w, r, symbol)
+		})
+
+		// Same reasoning as the bridge page above: registered unconditionally so
+		// a disabled feature answers a 404 that says so, instead of the "/"
+		// catch-all quietly serving the dashboard.
+		if deps.PrismSankey != nil {
+			webHandler.SetPrismFundamental(deps.PrismSankey)
+		}
+		s.mux.HandleFunc("/prism/fundamental/", func(w http.ResponseWriter, r *http.Request) {
+			symbol := strings.TrimPrefix(r.URL.Path, "/prism/fundamental/")
+			webHandler.PrismFundamental(w, r, symbol)
 		})
 	}
 

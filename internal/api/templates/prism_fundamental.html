@@ -1,0 +1,273 @@
+<!-- internal/api/handler/web/templates/prism_fundamental.html
+     AD-4: 本文件必须与 internal/api/templates/prism_fundamental.html 逐字节一致
+     (embed 与磁盘两份;serve.go 读的是后者)。TestFundamentalTemplateDirsInSync 守着。 -->
+{{define "content"}}
+<div class="space-y-4">
+  <div class="flex flex-wrap items-center gap-3">
+    <h2 class="text-xl font-semibold">{{.Symbol}} 财务趋势</h2>
+
+    <div id="metric-btns" class="flex flex-wrap gap-1">
+      <button data-m="revenue" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">营收</button>
+      <button data-m="net_income" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">净利</button>
+      <button data-m="gross_margin" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">毛利率</button>
+      <button data-m="op_margin" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">营业利润率</button>
+      <button data-m="roe_ttm" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">ROE(TTM)</button>
+      <button data-m="revenue_yoy" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">营收 YoY</button>
+      <button data-m="net_income_yoy" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">净利 YoY</button>
+    </div>
+
+    <div id="kind-btns" class="flex gap-1">
+      <button data-k="line" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">折线</button>
+      <button data-k="bar" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">柱状</button>
+    </div>
+
+    <div id="gran-btns" class="flex gap-1">
+      <button data-g="q" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">季度</button>
+      <button data-g="fy" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">年度</button>
+    </div>
+
+    <label class="flex items-center gap-1 text-sm">
+      <input id="price-toggle" type="checkbox" class="rounded"> 叠加股价
+    </label>
+  </div>
+
+  <div id="fund-chart" class="w-full rounded-lg border bg-white dark:bg-gray-800 p-2" style="height:440px"></div>
+
+  <p id="fund-zoom-note" class="text-xs text-gray-500">
+    缺失值以断点显示（不画作 0）：ROE(TTM) 在前 3 个季度必然缺失——不足 4 个季度时不以部分和冒充 TTM。
+    年度为 4 个季度聚合；该年任一季度缺失则整年不显示，避免用 3 个季度加出的数字被读成真实下滑。
+    下方 dataZoom 双端滑块可缩放区间。
+  </p>
+</div>
+
+<script src="/static/echarts.min.js"></script>
+<script>
+(function () {
+  // 整份序列由服务端内联（无 XHR）：因此切换指标 / 粒度 / 图形都不发新请求，
+  // 年度聚合与增速也全部在这份数据上现算。
+  var data = {{.PayloadJSON}};
+  var periods = data.periods ? data.periods : [];
+  var metrics = data.metrics ? data.metrics : {};
+  var dates = data.dates ? data.dates : [];
+  var closes = data.closes ? data.closes : [];
+
+  var state = { metric: 'revenue', kind: 'line', gran: 'q', price: false };
+  var chart = echarts.init(document.getElementById('fund-chart'));
+
+  // null 一律表示「缺失」。所有派生计算遇缺失必须产出 null，绝不代入 0：
+  // 代 0 会画出一条与「该期真的是 0」无法区分的曲线。
+  function isNull(v) { return v === null || v === undefined; }
+
+  var RATIO_METRICS = {
+    gross_margin: true, op_margin: true, roe_ttm: true,
+    revenue_yoy: true, net_income_yoy: true
+  };
+  var LABELS = {
+    revenue: '营收', net_income: '净利', gross_margin: '毛利率',
+    op_margin: '营业利润率', roe_ttm: 'ROE(TTM)',
+    revenue_yoy: '营收 YoY', net_income_yoy: '净利 YoY'
+  };
+
+  function series(key) {
+    var s = metrics[key];
+    if (!s) { return []; }
+    return s.slice();
+  }
+
+  // 逐元素相除：分子分母任一缺失、或分母为 0 → null。
+  // 不产生 Infinity / NaN —— 它们在页面上会显示成 "Infinity"/"NaN" 这类噪声。
+  function divide(a, b) {
+    var out = [], i;
+    for (i = 0; i < a.length; i++) {
+      if (isNull(a[i]) || isNull(b[i]) || b[i] === 0) { out.push(null); }
+      else { out.push(a[i] / b[i]); }
+    }
+    return out;
+  }
+
+  // 同比：与 lag 期之前比。基期缺失或为 0 → null。
+  function growth(vals, lag) {
+    var out = [], i, base;
+    for (i = 0; i < vals.length; i++) {
+      base = (i >= lag) ? vals[i - lag] : null;
+      if (isNull(base) || isNull(vals[i]) || base === 0) { out.push(null); }
+      else { out.push((vals[i] - base) / base); }
+    }
+    return out;
+  }
+
+  // 年度聚合 —— **整年作废**策略（缺失季度不跳过）。
+  // 理由：用 3 个季度加出来的「年营收」不是一个偏小的年，而是一个看起来完全
+  // 合理的错数；它会与真 4 季年份并排画出，被读成真实下滑，且没有任何提示。
+  // 跳过缺失季（只加 3 季）是同一个错误的另一种说法。宁可缺一个点——图上断开
+  // 是可见的——也不要一个不可见的错点。
+  function annualSum(vals) {
+    var out = [], i, j, sum, missing;
+    for (i = 0; i + 4 <= vals.length; i += 4) {
+      sum = 0;
+      missing = false;
+      for (j = i; j < i + 4; j++) {
+        if (isNull(vals[j])) { missing = true; } else { sum = sum + vals[j]; }
+      }
+      out.push(missing ? null : sum);
+    }
+    return out;
+  }
+
+  // 比率类指标的年度值取该年最后一个季度：roe_ttm 本身已是滚动 12 个月，
+  // 求和没有意义。缺失照样传播为 null。
+  function annualLast(vals) {
+    var out = [], i;
+    for (i = 0; i + 4 <= vals.length; i += 4) {
+      out.push(isNull(vals[i + 3]) ? null : vals[i + 3]);
+    }
+    return out;
+  }
+
+  function annualLabels() {
+    var out = [], i;
+    for (i = 0; i + 4 <= periods.length; i += 4) { out.push(periods[i + 3]); }
+    return out;
+  }
+
+  function quarterlyValues(metric) {
+    if (metric === 'gross_margin') { return divide(series('gross_profit'), series('revenue')); }
+    if (metric === 'op_margin') { return divide(series('operating_income'), series('revenue')); }
+    if (metric === 'revenue_yoy') { return growth(series('revenue'), 4); }
+    if (metric === 'net_income_yoy') { return growth(series('net_income'), 4); }
+    return series(metric);
+  }
+
+  function annualValues(metric) {
+    if (metric === 'gross_margin') {
+      return divide(annualSum(series('gross_profit')), annualSum(series('revenue')));
+    }
+    if (metric === 'op_margin') {
+      return divide(annualSum(series('operating_income')), annualSum(series('revenue')));
+    }
+    if (metric === 'roe_ttm') { return annualLast(series('roe_ttm')); }
+    if (metric === 'revenue_yoy') { return growth(annualSum(series('revenue')), 1); }
+    if (metric === 'net_income_yoy') { return growth(annualSum(series('net_income')), 1); }
+    return annualSum(series(metric));
+  }
+
+  function currentValues() {
+    return state.gran === 'fy' ? annualValues(state.metric) : quarterlyValues(state.metric);
+  }
+  function currentLabels() {
+    return state.gran === 'fy' ? annualLabels() : periods;
+  }
+
+  function fmt(v) {
+    if (isNull(v)) { return '—'; }
+    if (RATIO_METRICS[state.metric]) { return (v * 100).toFixed(1) + '%'; }
+    return v.toFixed(0);
+  }
+
+  function render() {
+    var values = currentValues();
+    var labels = currentLabels();
+    var name = LABELS[state.metric] ? LABELS[state.metric] : state.metric;
+
+    var xAxis = [{
+      type: 'category', data: labels, axisLabel: { fontSize: 10 }
+    }];
+    var yAxis = [{
+      type: 'value', name: name, scale: true,
+      axisLabel: {
+        fontSize: 10,
+        formatter: function (v) {
+          return RATIO_METRICS[state.metric] ? (v * 100).toFixed(0) + '%' : v;
+        }
+      }
+    }];
+    var seriesOpt = [{
+      name: name, type: state.kind, data: values,
+      // connectNulls 关闭：缺失就是断开，不要用一条直线把两端连起来假装连续。
+      connectNulls: false,
+      smooth: false, itemStyle: { color: '#2563eb' }
+    }];
+
+    if (state.price) {
+      // 双轴：左轴指标、右轴股价。股价按日、指标按报告期，用第二条 x 轴承载。
+      xAxis.push({ type: 'category', data: dates, show: false });
+      yAxis.push({ type: 'value', name: '股价', scale: true, axisLabel: { fontSize: 10 } });
+      seriesOpt.push({
+        name: '股价', type: 'line', data: closes, connectNulls: false,
+        xAxisIndex: 1, yAxisIndex: 1, symbol: 'none',
+        lineStyle: { width: 1, color: '#9ca3af' }, itemStyle: { color: '#9ca3af' }
+      });
+    }
+
+    chart.setOption({
+      tooltip: {
+        trigger: 'axis',
+        formatter: function (params) {
+          var out = '', i, p, text;
+          for (i = 0; i < params.length; i++) {
+            p = params[i];
+            if (i === 0) { out += p.axisValue + '<br/>'; }
+            // 股价不是指标，不套 fmt 的百分比/取整规则；缺失仍显示为 —。
+            if (p.seriesName === '股价') {
+              text = isNull(p.data) ? '—' : p.data;
+            } else {
+              text = fmt(p.data);
+            }
+            out += p.seriesName + '：' + text + '<br/>';
+          }
+          return out;
+        }
+      },
+      legend: { top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 56, right: 56, top: 28, bottom: 56 },
+      xAxis: xAxis,
+      yAxis: yAxis,
+      dataZoom: [
+        { type: 'slider', start: 0, end: 100, height: 18, bottom: 12 },
+        { type: 'inside', start: 0, end: 100 }
+      ],
+      series: seriesOpt
+    }, true);
+  }
+
+  function markActive(group, attr, value) {
+    var nodes = document.querySelectorAll('#' + group + ' button');
+    var i, b, on;
+    for (i = 0; i < nodes.length; i++) {
+      b = nodes[i];
+      on = b.getAttribute(attr) === value;
+      b.className = 'px-2 py-1 text-sm rounded ' +
+        (on ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700');
+    }
+  }
+
+  function bindGroup(group, attr, key) {
+    var nodes = document.querySelectorAll('#' + group + ' button');
+    var i;
+    for (i = 0; i < nodes.length; i++) {
+      nodes[i].addEventListener('click', function () {
+        state[key] = this.getAttribute(attr);
+        markActive(group, attr, state[key]);
+        render();
+      });
+    }
+  }
+
+  bindGroup('metric-btns', 'data-m', 'metric');
+  bindGroup('kind-btns', 'data-k', 'kind');
+  bindGroup('gran-btns', 'data-g', 'gran');
+
+  document.getElementById('price-toggle').addEventListener('change', function () {
+    state.price = this.checked;
+    render();
+  });
+
+  window.addEventListener('resize', function () { chart.resize(); });
+
+  markActive('metric-btns', 'data-m', state.metric);
+  markActive('kind-btns', 'data-k', state.kind);
+  markActive('gran-btns', 'data-g', state.gran);
+  render();
+})();
+</script>
+{{end}}

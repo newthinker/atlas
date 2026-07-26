@@ -30,7 +30,7 @@ var staticFS embed.FS
 var pageNames = []string{
 	"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html",
 	"symbol_detail.html", "prism_board.html", "prism_detail.html", "prism_compare.html",
-	"prism_sankey.html",
+	"prism_sankey.html", "prism_fundamental.html",
 }
 
 // WatchlistItemData represents a watchlist item with metadata
@@ -83,6 +83,7 @@ type Handler struct {
 	signalStore       signal.Store
 	prismProvider     PrismProvider
 	sankeySvc         SankeyAnalyzer
+	fundamentalSvc    FundamentalProvider
 	prismLow          float64
 	prismHigh         float64
 }

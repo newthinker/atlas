@@ -24,8 +24,35 @@ func NewSankeyHandler(svc SankeyService) *SankeyHandler {
 	return &SankeyHandler{svc: svc}
 }
 
+// errPrismNotEnabled is the error code returned when prism is off.
+//
+// Both routes are registered even with no service behind them. Leaving them
+// unregistered does not make the requests fail cleanly: Go's ServeMux hands
+// every unmatched path to the "/" dashboard catch-all — /api/ has no catch-all
+// of its own — so the caller gets 200 and an HTML page, and its
+// r.json() throws on the first character. A JSON 404 instead keeps "feature
+// off" distinguishable from "this symbol has no data" (TASK-013).
+const errPrismNotEnabled = "prism not enabled"
+
+// enabled answers a JSON 404 and reports false when no service is wired.
+// Callers must return immediately when it reports false.
+//
+// The nil test only works because server.go keeps a nil *sankey.Service out of
+// the interface: assigning one directly would leave a typed-nil that is
+// non-nil here and panics on first use.
+func (h *SankeyHandler) enabled(w http.ResponseWriter) bool {
+	if h.svc == nil {
+		response.JSON(w, http.StatusNotFound, map[string]any{"error": errPrismNotEnabled})
+		return false
+	}
+	return true
+}
+
 // Sankey serves GET /api/prism/sankey.
 func (h *SankeyHandler) Sankey(w http.ResponseWriter, r *http.Request) {
+	if !h.enabled(w) {
+		return
+	}
 	q := r.URL.Query()
 	symbol := q.Get("symbol")
 	if symbol == "" {
@@ -60,6 +87,9 @@ func (h *SankeyHandler) Sankey(w http.ResponseWriter, r *http.Request) {
 
 // Fundamental serves GET /api/prism/fundamental.
 func (h *SankeyHandler) Fundamental(w http.ResponseWriter, r *http.Request) {
+	if !h.enabled(w) {
+		return
+	}
 	symbol := r.URL.Query().Get("symbol")
 	if symbol == "" {
 		response.JSON(w, http.StatusBadRequest, map[string]any{"error": "symbol required"})
