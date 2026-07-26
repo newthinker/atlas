@@ -24,6 +24,15 @@ var templateFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
+// pageNames lists the page templates (excluding layout.html) parsed by both
+// constructors. Kept in one place so a new page cannot be wired into the embed
+// path and forgotten on the disk path.
+var pageNames = []string{
+	"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html",
+	"symbol_detail.html", "prism_board.html", "prism_detail.html", "prism_compare.html",
+	"prism_sankey.html",
+}
+
 // WatchlistItemData represents a watchlist item with metadata
 type WatchlistItemData struct {
 	Symbol     string
@@ -73,6 +82,7 @@ type Handler struct {
 	configProvider    ConfigProvider
 	signalStore       signal.Store
 	prismProvider     PrismProvider
+	sankeySvc         SankeyAnalyzer
 	prismLow          float64
 	prismHigh         float64
 }
@@ -82,10 +92,7 @@ type Handler struct {
 func NewHandler(templatesDir string) (*Handler, error) {
 	pageTemplates := make(map[string]*template.Template)
 
-	// List of page templates (excluding layout.html)
-	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html", "symbol_detail.html", "prism_board.html", "prism_detail.html", "prism_compare.html"}
-
-	for _, page := range pages {
+	for _, page := range pageNames {
 		var tmpl *template.Template
 		var err error
 
@@ -121,9 +128,8 @@ func NewHandler(templatesDir string) (*Handler, error) {
 // This is useful for testing or custom template sources.
 func NewHandlerWithFS(fsys fs.FS) (*Handler, error) {
 	pageTemplates := make(map[string]*template.Template)
-	pages := []string{"dashboard.html", "signals.html", "watchlist.html", "backtest.html", "settings.html", "symbol_detail.html", "prism_board.html", "prism_detail.html", "prism_compare.html"}
 
-	for _, page := range pages {
+	for _, page := range pageNames {
 		tmpl, err := template.ParseFS(fsys, "layout.html", page)
 		if err != nil {
 			return nil, fmt.Errorf("parsing template %s from fs: %w", page, err)

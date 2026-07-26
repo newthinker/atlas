@@ -348,6 +348,22 @@ func (s *Server) setupRoutes(cfg Config, deps Dependencies) error {
 			})
 			s.mux.HandleFunc("/static/", webHandler.Static)
 		}
+
+		// The earnings bridge page is registered whether or not the feature is
+		// on, and deliberately outside the block above: an unregistered
+		// /prism/... path falls through to the "/" catch-all and answers 200
+		// with the dashboard, so a bookmark into a disabled feature shows an
+		// unrelated page. Registered, the handler answers a 404 that names the
+		// reason (sankeyNotEnabledMsg). The nil check keeps a typed-nil
+		// *sankey.Service out of the interface — it would pass the handler's
+		// nil test and panic on the first call.
+		if deps.PrismSankey != nil {
+			webHandler.SetPrismSankey(deps.PrismSankey)
+		}
+		s.mux.HandleFunc("/prism/sankey/", func(w http.ResponseWriter, r *http.Request) {
+			symbol := strings.TrimPrefix(r.URL.Path, "/prism/sankey/")
+			webHandler.PrismSankey(w, r, symbol)
+		})
 	}
 
 	return nil

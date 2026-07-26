@@ -1,0 +1,397 @@
+<!-- internal/api/handler/web/templates/prism_sankey.html
+     AD-4: 本文件必须与 internal/api/templates/prism_sankey.html 逐字节一致
+     (embed 与磁盘两份;serve.go 读的是后者)。TestSankeyTemplateDirsInSync 守着。 -->
+{{define "content"}}
+<div class="space-y-4">
+  <div class="flex flex-wrap items-center gap-3">
+    <h2 class="text-xl font-semibold">
+      {{.Symbol}} 财报桥
+      <span class="text-xs font-normal text-gray-500">模板 v{{.TemplateVersion}}</span>
+      {{if gt .TemplateVersion 1}}
+      <span id="tmpl-badge" class="ml-1 px-1 py-0.5 text-xs rounded bg-amber-100 text-amber-800"
+            title="模板版本大于 1：历史期与当前期的分部口径可能已变更，跨版本比较需谨慎">口径变更</span>
+      {{end}}
+    </h2>
+    <div id="gran-btns" class="flex gap-1">
+      <button data-g="q" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">季</button>
+      <button data-g="fy" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">年</button>
+    </div>
+    <div id="lang-btns" class="flex gap-1">
+      <button data-l="zh" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">中</button>
+      <button data-l="en" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">英</button>
+    </div>
+    <div id="view-btns" class="flex gap-1">
+      <button data-v="grid" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">网格</button>
+      <button data-v="single" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">单期大图</button>
+      <button data-v="stack" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700">堆叠柱</button>
+    </div>
+    <div class="flex items-center gap-1 text-sm">
+      <span class="text-gray-500">报告期</span>
+      <select id="range-from" class="px-1 py-1 text-sm rounded border bg-white dark:bg-gray-800">
+        <option value="">不限</option>
+        {{range .Periods}}<option value="{{.}}"{{if eq $.From .}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+      <span class="text-gray-400">至</span>
+      <select id="range-to" class="px-1 py-1 text-sm rounded border bg-white dark:bg-gray-800">
+        <option value="">不限</option>
+        {{range .Periods}}<option value="{{.}}"{{if eq $.To .}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    </div>
+  </div>
+
+  <div id="sankey-error" class="hidden rounded border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2"></div>
+
+  <!-- AD-26: 被引擎拒绝聚合的报告期。这是「某个财年为什么不见了」的唯一解释来源。 -->
+  <div id="sankey-conflicts" class="space-y-1">
+    {{range .Conflicts}}
+    <div class="rounded border border-amber-300 bg-amber-50 text-amber-800 text-sm px-3 py-2">
+      <span class="font-medium">{{.Period}}</span> 已跳过：{{.Detail}}
+    </div>
+    {{end}}
+  </div>
+
+  <div id="sankey-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+
+  <div id="sankey-single" class="hidden rounded-lg border bg-white dark:bg-gray-800 p-2">
+    <div class="flex items-center gap-2 px-1 pb-1 text-sm">
+      <span class="text-gray-500">报告期</span>
+      <select id="single-period" class="px-1 py-1 text-sm rounded border bg-white dark:bg-gray-800"></select>
+      <span class="text-xs text-gray-400">节点标注同比/环比（取自矩阵）</span>
+    </div>
+    <div id="single-chart" style="height:520px"></div>
+  </div>
+
+  <div id="sankey-stack" class="hidden rounded-lg border bg-white dark:bg-gray-800 p-2">
+    <div id="stack-chart" style="height:420px"></div>
+  </div>
+
+  <div class="rounded-lg border bg-white dark:bg-gray-800 p-4 overflow-x-auto">
+    <table class="w-full text-sm" id="sankey-matrix">
+      <thead><tr class="text-left text-gray-500"><th class="py-1">科目</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="text-xs text-gray-500 space-y-1">
+    <div id="sankey-scale-note">
+      统一比例尺：各期图高按「该期营收 ÷ 最大营收」缩放并截断在 50%~100%（ECharts 无跨实例比例尺，
+      故为近似）。跨期图形大小只可作粗略参考，精确比较请看下方矩阵。
+    </div>
+    {{if .Truncated}}<div id="sankey-truncated">报告期数超过上限，仅显示最近的若干期。</div>{{end}}
+    <!-- AD-22: 负残差被画成 0 宽，图上看不出来；这些 footnote 是它唯一的线索。 -->
+    <ul id="sankey-notes" class="list-disc pl-5">
+      {{range .Notes}}<li>{{.Period}}：{{.Text}}</li>{{end}}
+    </ul>
+  </div>
+</div>
+
+<script src="/static/echarts.min.js"></script>
+<script>
+(function () {
+  var symbol = {{.Symbol}};
+  var state = {
+    gran: {{.Granularity}}, lang: {{.Lang}},
+    from: {{.From}}, to: {{.To}}, view: 'grid', single: ''
+  };
+
+  // 三种 404 的文案必须互不相同（TASK-011 契约）。第三种最要紧：路由未注册时
+  // 响应体不是 JSON，resp.data.error 与 resp.error 都是 undefined，若按「无数据」
+  // 显示，用户会去查数据源，而问题在服务端配置。
+  var MSG_NOT_REGISTERED = '接口未注册：Prism 财报桥未启用或模板全部加载失败，请检查服务端配置与日志（不是该标的没有数据）';
+  var MSG_NO_TEMPLATE = '该标的未配置财报桥模板：请在服务端模板目录添加该标的的 YAML 后重启';
+  var MSG_UNKNOWN_SYMBOL = '标的不在库中：请先同步该标的的财报数据';
+
+  var errBox = document.getElementById('sankey-error');
+  var gridBox = document.getElementById('sankey-grid');
+  var singleBox = document.getElementById('sankey-single');
+  var stackBox = document.getElementById('sankey-stack');
+  var notesBox = document.getElementById('sankey-notes');
+  var conflictBox = document.getElementById('sankey-conflicts');
+  var periodSel = document.getElementById('single-period');
+  var gridCharts = [];
+  var singleChart = null, stackChart = null;
+  var latest = null;
+
+  function showError(msg) {
+    errBox.textContent = msg;
+    errBox.classList.remove('hidden');
+  }
+  function clearError() { errBox.classList.add('hidden'); }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  // 任何数值字段都可能是 null（NaN 与 ±Inf 都映射为 null），不可假定为数字。
+  function fmt(v, digits) {
+    if (v === null || v === undefined) { return '—'; }
+    return Number(v).toFixed(digits === undefined ? 2 : digits);
+  }
+  function num(v) { return (v === null || v === undefined) ? 0 : Number(v); }
+  function pct(v) { return (v === null || v === undefined) ? '—' : (Number(v) * 100).toFixed(1) + '%'; }
+
+  function load() {
+    var url = '/api/prism/sankey?symbol=' + encodeURIComponent(symbol) +
+      '&granularity=' + encodeURIComponent(state.gran) +
+      '&lang=' + encodeURIComponent(state.lang) +
+      '&from=' + encodeURIComponent(state.from) +
+      '&to=' + encodeURIComponent(state.to);
+    fetch(url).then(function (r) {
+      return r.text().then(function (t) { return { status: r.status, text: t }; });
+    }).then(function (raw) {
+      var resp = null;
+      try { resp = JSON.parse(raw.text); } catch (e) { resp = null; }
+      if (raw.status !== 200) {
+        if (!resp) { showError(MSG_NOT_REGISTERED); return; }
+        // 400/404 走 response.JSON，错误在 resp.data.error；500 走 response.Error，
+        // 错误在 resp.error.message。两种形状都要认。
+        var code = (resp.data && resp.data.error) ||
+          (resp.error && (resp.error.message || resp.error.code)) || '';
+        if (code === 'no sankey template') { showError(MSG_NO_TEMPLATE); }
+        else if (code === 'unknown symbol') { showError(MSG_UNKNOWN_SYMBOL); }
+        else { showError('加载失败（HTTP ' + raw.status + '）：' + code); }
+        return;
+      }
+      clearError();
+      latest = (resp && resp.data) || {};   // AD-8：响应包了一层 {data, meta}
+      renderAll(latest);
+    }).catch(function (e) { showError('加载失败：' + e); });
+  }
+
+  function renderAll(d) {
+    var periods = d.periods || [];
+    renderNotes(periods);
+    renderConflicts(d.conflicts || []);
+    renderMatrix(periods, d.matrix || []);
+    fillPeriodSelects(periods);
+    renderView(d);
+  }
+
+  function renderNotes(periods) {
+    var html = '';
+    periods.forEach(function (p) {
+      ((p.graph && p.graph.notes) || []).forEach(function (n) {
+        html += '<li>' + esc(p.period) + '：' + esc(n) + '</li>';
+      });
+    });
+    notesBox.innerHTML = html;
+  }
+
+  function renderConflicts(conflicts) {
+    var html = '';
+    conflicts.forEach(function (c) {
+      html += '<div class="rounded border border-amber-300 bg-amber-50 text-amber-800 text-sm px-3 py-2">' +
+        '<span class="font-medium">' + esc(c.period) + '</span> 已跳过：' + esc(c.detail) + '</div>';
+    });
+    conflictBox.innerHTML = html;
+  }
+
+  function renderMatrix(periods, matrix) {
+    var head = '<tr class="text-left text-gray-500"><th class="py-1">科目</th>';
+    periods.forEach(function (p) { head += '<th class="py-1 px-2">' + esc(p.period) + '</th>'; });
+    head += '<th class="py-1 px-2">变化</th></tr>';
+    document.querySelector('#sankey-matrix thead').innerHTML = head;
+
+    var body = '';
+    matrix.forEach(function (row) {
+      var isRatio = /margin/.test(row.key);
+      body += '<tr class="border-t"><td class="py-1">' + esc(row.label) + '</td>';
+      (row.values || []).forEach(function (v) {
+        body += '<td class="py-1 px-2">' + (isRatio ? pct(v) : fmt(v, 0)) + '</td>';
+      });
+      var cls = 'text-gray-400';
+      if (row.change !== null && row.change !== undefined) {
+        cls = Number(row.change) >= 0 ? 'text-green-600' : 'text-red-600';
+      }
+      var kind = row.change_kind && row.change_kind !== 'none' ? ' <span class="text-xs text-gray-400">' + esc(row.change_kind) + '</span>' : '';
+      body += '<td class="py-1 px-2 ' + cls + '">' + pct(row.change) + kind + '</td></tr>';
+    });
+    document.querySelector('#sankey-matrix tbody').innerHTML = body;
+  }
+
+  function fillPeriodSelects(periods) {
+    var opts = '';
+    periods.forEach(function (p) {
+      opts += '<option value="' + esc(p.period) + '">' + esc(p.period) + '</option>';
+    });
+    // 范围两个 select 多一个「不限」；单期大图的 select 只列实际报告期。
+    var rangeOpts = '<option value="">不限</option>' + opts;
+    setSelect('range-from', rangeOpts, state.from);
+    setSelect('range-to', rangeOpts, state.to);
+    periodSel.innerHTML = opts;
+    if (!state.single && periods.length) { state.single = periods[periods.length - 1].period; }
+    periodSel.value = state.single;
+  }
+
+  function setSelect(id, html, value) {
+    var el = document.getElementById(id);
+    el.innerHTML = html;
+    el.value = value || '';
+  }
+
+  function graphOption(p, title) {
+    var g = p.graph || {};
+    return {
+      title: title ? { text: title, left: 'center', textStyle: { fontSize: 13 } } : undefined,
+      tooltip: { trigger: 'item', triggerOn: 'mousemove' },
+      series: [{
+        type: 'sankey', emphasis: { focus: 'adjacency' },
+        data: (g.nodes || []).map(function (n) { return { name: n.name, value: num(n.value) }; }),
+        links: (g.links || []).map(function (l) {
+          return { source: l.source, target: l.target, value: num(l.value) };
+        }),
+        label: { fontSize: 10 }
+      }]
+    };
+  }
+
+  // 统一比例尺：ECharts 无跨实例比例尺，故用容器高度近似——各期高度按营收比例
+  // 缩放并 clamp 在 [0.5, 1]，低于 0.5 的期会小到读不出结构。footnote 已说明。
+  function cellHeight(p, maxRevenue) {
+    var base = 260;
+    var rev = num(p.metrics && p.metrics.revenue);
+    var ratio = maxRevenue > 0 ? rev / maxRevenue : 1;
+    if (!isFinite(ratio) || ratio > 1) { ratio = 1; }
+    if (ratio < 0.5) { ratio = 0.5; }
+    return Math.round(base * ratio);
+  }
+
+  function renderGrid(d) {
+    gridCharts.forEach(function (c) { c.dispose(); });
+    gridCharts = [];
+    gridBox.innerHTML = '';
+    var periods = d.periods || [];
+    var maxRevenue = 0;
+    periods.forEach(function (p) {
+      var rev = num(p.metrics && p.metrics.revenue);
+      if (rev > maxRevenue) { maxRevenue = rev; }
+    });
+    periods.forEach(function (p) {
+      var h = cellHeight(p, maxRevenue);
+      var cell = document.createElement('div');
+      cell.className = 'sankey-cell rounded-lg border bg-white dark:bg-gray-800 p-2';
+      cell.style.height = (h + 24) + 'px'; // 24 = 单元格内边距
+      gridBox.appendChild(cell);
+      var inner = document.createElement('div');
+      inner.style.height = h + 'px';
+      cell.appendChild(inner);
+      var chart = echarts.init(inner);
+      chart.setOption(graphOption(p, p.period));
+      gridCharts.push(chart);
+    });
+  }
+
+  // 单期大图的节点标注取自矩阵的 change（同比或环比，由 change_kind 说明），
+  // 不额外请求。
+  function changeByLabel(matrix) {
+    var out = {};
+    (matrix || []).forEach(function (row) { out[row.label] = row; });
+    return out;
+  }
+
+  function renderSingle(d) {
+    var periods = d.periods || [];
+    var p = null;
+    periods.forEach(function (x) { if (x.period === state.single) { p = x; } });
+    if (!p && periods.length) { p = periods[periods.length - 1]; }
+    if (!p) { return; }
+    if (!singleChart) { singleChart = echarts.init(document.getElementById('single-chart')); }
+    var changes = changeByLabel(d.matrix);
+    var opt = graphOption(p, p.period);
+    opt.toolbox = { feature: { saveAsImage: { title: '导出 PNG', name: symbol + '-' + p.period } } };
+    opt.series[0].label = {
+      fontSize: 11,
+      formatter: function (params) {
+        var row = changes[params.name];
+        if (!row || row.change === null || row.change === undefined) { return params.name; }
+        return params.name + ' (' + row.change_kind + ' ' + (Number(row.change) * 100).toFixed(1) + '%)';
+      }
+    };
+    singleChart.setOption(opt, true);
+  }
+
+  // 堆叠柱用的是同一份数据（分部 × 报告期），不发额外请求。
+  function renderStack(d) {
+    if (!stackChart) { stackChart = echarts.init(document.getElementById('stack-chart')); }
+    var periods = d.periods || [];
+    var lang = (d.template && d.template.lang) || {};
+    var keys = [];
+    periods.forEach(function (p) {
+      var segs = (p.metrics && p.metrics.segments) || {};
+      Object.keys(segs).forEach(function (k) { if (keys.indexOf(k) < 0) { keys.push(k); } });
+    });
+    keys.sort();
+    stackChart.setOption({
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: { bottom: 0 },
+      toolbox: { feature: { saveAsImage: { title: '导出 PNG', name: symbol + '-segments' } } },
+      xAxis: { type: 'category', data: periods.map(function (p) { return p.period; }) },
+      yAxis: { type: 'value' },
+      grid: { left: 64, right: 16, bottom: 56 },
+      series: keys.map(function (k) {
+        return {
+          name: lang[k] || k, type: 'bar', stack: 'segments',
+          data: periods.map(function (p) {
+            var segs = (p.metrics && p.metrics.segments) || {};
+            return num(segs[k]);
+          })
+        };
+      })
+    }, true);
+  }
+
+  function renderView(d) {
+    gridBox.classList.toggle('hidden', state.view !== 'grid');
+    singleBox.classList.toggle('hidden', state.view !== 'single');
+    stackBox.classList.toggle('hidden', state.view !== 'stack');
+    if (state.view === 'grid') { renderGrid(d); }
+    // renderSingle 在 periods 为空时提前返回，singleChart 仍是 null（有模板但该
+    // 范围内无报告期时会走到这里），故 resize 前必须判空，否则切到单期大图直接抛
+    // TypeError、整页 JS 停摆。renderStack 无条件 init，不需要同样的判空。
+    else if (state.view === 'single') { renderSingle(d); if (singleChart) { singleChart.resize(); } }
+    else { renderStack(d); stackChart.resize(); }
+  }
+
+  function markActive(group, attr, value) {
+    document.querySelectorAll('#' + group + ' button').forEach(function (b) {
+      var on = b.getAttribute(attr) === value;
+      b.className = 'px-2 py-1 text-sm rounded ' +
+        (on ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700');
+    });
+  }
+
+  function bindGroup(group, attr, key, reload) {
+    document.querySelectorAll('#' + group + ' button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        state[key] = btn.getAttribute(attr);
+        markActive(group, attr, state[key]);
+        if (reload) { load(); } else if (latest) { renderView(latest); }
+      });
+    });
+  }
+
+  bindGroup('gran-btns', 'data-g', 'gran', true);
+  bindGroup('lang-btns', 'data-l', 'lang', true);
+  bindGroup('view-btns', 'data-v', 'view', false);
+  document.getElementById('range-from').addEventListener('change', function () {
+    state.from = this.value; load();
+  });
+  document.getElementById('range-to').addEventListener('change', function () {
+    state.to = this.value; load();
+  });
+  periodSel.addEventListener('change', function () {
+    state.single = this.value;
+    if (latest) { renderSingle(latest); }
+  });
+  window.addEventListener('resize', function () {
+    gridCharts.forEach(function (c) { c.resize(); });
+    if (singleChart) { singleChart.resize(); }
+    if (stackChart) { stackChart.resize(); }
+  });
+
+  markActive('gran-btns', 'data-g', state.gran);
+  markActive('lang-btns', 'data-l', state.lang);
+  markActive('view-btns', 'data-v', state.view);
+  load();
+})();
+</script>
+{{end}}
