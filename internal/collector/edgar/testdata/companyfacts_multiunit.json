@@ -1,0 +1,37 @@
+{
+  "cik": 909832,
+  "entityName": "COSTCO WHOLESALE CORP /NEW (multi-unit shape)",
+  "_comment": [
+    "[TASK-001] EarningsPerShareDiluted 含两个 unit —— COST/WMT/CRM 的真实形态(live 实测 2026-07-26):",
+    "  COST pure[total=11 usable=3] + USD/shares[total=295 usable=144]",
+    "  WMT  pure[total=3  usable=1] + USD/shares[total=303 usable=155]",
+    "  CRM  pure[total=3  usable=1] + USD/shares[total=312 usable=155]",
+    "pure 是 SEC 早期的无量纲单位,只剩零星陈旧重述;USD/shares 是现行规范单位,承载全部年度数据。",
+    "本 fixture 把 COST(pure 含年度)与 WMT/CRM(pure 含单季)两种真实形态合成到一份里,",
+    "并刻意让 pure 的 filed 晚于 USD/shares 的全部条目 —— 真实 COST 的 pure 正是如此",
+    "(全部 filed=2010-10-18,晚于 2008/2009 期间的原始申报)。这使得任何『合并两个 unit』的实现",
+    "都会在 applyDuration 的 keepLatest(取 filed 最新)去重中让陈旧的 pure 值胜出,产出哨兵值。",
+    "数值取自 COST FY2025 真实期间(DoD 指定口径): FY 18.21 − (4.041+4.019+4.279) = 5.871。"
+  ],
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "pure": [
+            {"start": "2024-09-02", "end": "2024-11-24", "val": 99.9, "fy": 2026, "fp": "Q1", "form": "10-K", "filed": "2026-01-15"},
+            {"start": "2024-09-02", "end": "2025-08-31", "val": 88.8, "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-01-15"},
+            {"start": "2024-11-25", "end": "2025-02-16", "val": 77.7, "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-01-15"}
+          ],
+          "USD/shares": [
+            {"start": "2024-09-02", "end": "2024-11-24", "val": 4.041, "fy": 2025, "fp": "Q1", "form": "10-Q", "filed": "2024-12-19"},
+            {"start": "2024-09-02", "end": "2025-02-16", "val": 8.06, "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-03-13"},
+            {"start": "2024-11-25", "end": "2025-02-16", "val": 4.019, "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-03-13"},
+            {"start": "2024-09-02", "end": "2025-05-11", "val": 12.339, "fy": 2025, "fp": "Q3", "form": "10-Q", "filed": "2025-06-05"},
+            {"start": "2025-02-17", "end": "2025-05-11", "val": 4.279, "fy": 2025, "fp": "Q3", "form": "10-Q", "filed": "2025-06-05"},
+            {"start": "2024-09-02", "end": "2025-08-31", "val": 18.21, "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2025-10-08"}
+          ]
+        }
+      }
+    }
+  }
+}

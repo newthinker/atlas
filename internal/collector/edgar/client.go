@@ -228,6 +228,76 @@ func isAnnual(f rawFact) bool {
 	return ok && d >= 350 && d <= 380
 }
 
+// selectUnit 在一个 tag 的多个 unit 中**确定性地选中一个**(不合并),返回其条目切片。
+//
+// 「一个 tag 只有一个 unit」曾是本文件的隐含假设,实测不成立:COST/WMT/CRM 的
+// EarningsPerShareDiluted 都有 `pure` + `USD/shares` 两个 unit —— `pure` 是 SEC 早期的
+// 无量纲单位,只剩零星陈旧重述(COST 3 条 / WMT 1 条可用),`USD/shares` 才承载全部年度数据
+// (144~155 条可用)。原实现 `for _, facts := range t.Units { return facts }` 取「第一个」,
+// 而 Go 的 map 迭代序随机 ⇒ 有约一半概率取到 pure,年度 EPS 随之丢失,Q4 只能靠 FY−ΣQ 却
+// 无输入 → Q4 EPS 全 NaN → TTM 窗口(必含一个 Q4)全部作废 → PE 序列为空。
+//
+// **选单个而不合并**,三条理由:
+//  1. 保持既有「口径不混用」不变量 —— tag 回退链也是选中单一 tag(见 firstQuarterlyTag)。
+//  2. 合并会污染 detectSplits 的相邻 filed 比例投票(它假设输入是单一科目的完整历史)。
+//  3. 决定性的一条:COST 的 pure 条目 filed=2010-10-18,**晚于**对应期间的原始申报,
+//     合并后会在 applyDuration 的 keepLatest(取 filed 最新)去重中胜出,用陈旧重述值
+//     覆盖正确值 —— 比丢数据更糟,是静默的错数据。
+func selectUnit(units map[string][]rawFact) []rawFact {
+	if len(units) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(units))
+	for name := range units {
+		names = append(names, name)
+	}
+	return units[bestUnitName(units, names)]
+}
+
+// bestUnitName 在 names 给出的候选 unit 中选优,打分依次为:
+// 可用条数(isSingleQuarter 或 isAnnual,即真正会被 applyDuration 采纳的条目)降序 →
+// 总条数降序 → unit 名升序。前者是数据驱动的(比写死 "USD/shares" 之类的名字优先级健壮),
+// 后两级只为消除并列,保证全序。
+//
+// 返回值与 names 的**排列无关** —— 打分是全序(unit 名互不相同,末级必然分出胜负),
+// 对全序取最大值与折叠顺序无关。这一点是确定性的**结构性保证**,而非「靠 map 恰好稳定」:
+// 把候选顺序显式交给调用方,测试才能穷举全部排列断言同一结果(见
+// TestSelectUnitIsPermutationInvariant);若把 map 迭代内联在此处,任何测试都只能概率性地
+// 捕获顺序依赖。
+//
+// 注:可用性判定必须与 applyDuration 的过滤口径保持一致,两处一起改。
+func bestUnitName(units map[string][]rawFact, names []string) string {
+	type candidate struct {
+		name          string
+		usable, total int
+	}
+	cands := make([]candidate, 0, len(names))
+	for _, name := range names {
+		facts := units[name]
+		usable := 0
+		for _, f := range facts {
+			if isSingleQuarter(f) || isAnnual(f) {
+				usable++
+			}
+		}
+		cands = append(cands, candidate{name, usable, len(facts)})
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		a, b := cands[i], cands[j]
+		if a.usable != b.usable {
+			return a.usable > b.usable
+		}
+		if a.total != b.total {
+			return a.total > b.total
+		}
+		return a.name < b.name
+	})
+	return cands[0].name
+}
+
 // splitEvent marks a detected stock split: 从 effFiled 起(首个体现拆股后基准的申报)
 // 每股值缩小为原来的 1/ratio,股本数放大为 ratio 倍。
 type splitEvent struct {
@@ -466,15 +536,13 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 		return q
 	}
 
+	// 多 unit tag 由 selectUnit 确定性地选中一个(不合并),见其文档注释。
 	unitsOf := func(tag string) []rawFact {
 		t, ok := gaap[tag]
 		if !ok {
 			return nil
 		}
-		for _, facts := range t.Units { // 单 unit tag,取第一个 unit
-			return facts
-		}
-		return nil
+		return selectUnit(t.Units)
 	}
 	hasQuarterly := func(facts []rawFact) bool {
 		for _, f := range facts {

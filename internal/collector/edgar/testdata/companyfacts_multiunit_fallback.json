@@ -1,0 +1,35 @@
+{
+  "cik": 1403161,
+  "entityName": "V-shaped preferred-tag-absent + multi-unit fallback tag",
+  "_comment": [
+    "[TASK-001] 首选 EPS tag 存在但**所有 unit 都无可用数据**(units 齐全却全是空数组)→ 该 tag 视为缺失,",
+    "回退链走到 EarningsPerShareBasicAndDiluted;而回退 tag 自身又是多 unit,须同样确定性地选中 USD/shares。",
+    "无任何 shares tag ⇒ DilutedShares 恒 NaN ⇒ EPS 推算规则(NetIncome/DilutedShares)不可能触发,",
+    "任何 ±Inf 都无处产生(AD-14)。",
+    "注:V 的真实形态比这更极端 —— 实测其 us-gaap 里 EarningsPerShareDiluted 与",
+    "EarningsPerShareBasicAndDiluted **两个 tag 都不存在**,回退链无处可退(详见 discovery)。"
+  ],
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "pure": [],
+          "USD/shares": []
+        }
+      },
+      "EarningsPerShareBasicAndDiluted": {
+        "units": {
+          "pure": [
+            {"start": "2024-09-02", "end": "2024-11-24", "val": 99.9, "fy": 2026, "fp": "Q1", "form": "10-K", "filed": "2026-01-15"}
+          ],
+          "USD/shares": [
+            {"start": "2024-09-02", "end": "2024-11-24", "val": 1.0, "fy": 2025, "fp": "Q1", "form": "10-Q", "filed": "2024-12-19"},
+            {"start": "2024-11-25", "end": "2025-02-16", "val": 1.1, "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-03-13"},
+            {"start": "2025-02-17", "end": "2025-05-11", "val": 1.2, "fy": 2025, "fp": "Q3", "form": "10-Q", "filed": "2025-06-05"},
+            {"start": "2024-09-02", "end": "2025-08-31", "val": 5.0, "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2025-10-08"}
+          ]
+        }
+      }
+    }
+  }
+}

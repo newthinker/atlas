@@ -1,0 +1,27 @@
+{
+  "cik": 909832,
+  "entityName": "AVGO-shaped single-unit control",
+  "_comment": [
+    "[TASK-001] 对照组:与 companyfacts_multiunit.json **逐条相同**,只是删掉了 pure 这个 unit",
+    "(AVGO 的真实形态:EarningsPerShareDiluted 只有 USD/shares 一个 unit)。",
+    "两份 fixture 的 FetchCompanyFacts 输出必须逐季逐字段完全一致 —— 这同时钉死两件事:",
+    "  1. 多 unit 时确定性地选中了 USD/shares(否则多 unit 侧会漂移);",
+    "  2. 单 unit 路径没被改坏(否则单 unit 侧会漂移)。"
+  ],
+  "facts": {
+    "us-gaap": {
+      "EarningsPerShareDiluted": {
+        "units": {
+          "USD/shares": [
+            {"start": "2024-09-02", "end": "2024-11-24", "val": 4.041, "fy": 2025, "fp": "Q1", "form": "10-Q", "filed": "2024-12-19"},
+            {"start": "2024-09-02", "end": "2025-02-16", "val": 8.06, "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-03-13"},
+            {"start": "2024-11-25", "end": "2025-02-16", "val": 4.019, "fy": 2025, "fp": "Q2", "form": "10-Q", "filed": "2025-03-13"},
+            {"start": "2024-09-02", "end": "2025-05-11", "val": 12.339, "fy": 2025, "fp": "Q3", "form": "10-Q", "filed": "2025-06-05"},
+            {"start": "2025-02-17", "end": "2025-05-11", "val": 4.279, "fy": 2025, "fp": "Q3", "form": "10-Q", "filed": "2025-06-05"},
+            {"start": "2024-09-02", "end": "2025-08-31", "val": 18.21, "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2025-10-08"}
+          ]
+        }
+      }
+    }
+  }
+}
