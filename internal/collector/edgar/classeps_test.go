@@ -47,6 +47,14 @@ import (
 //	error[0]      实例文档 XML 损坏 → 跳过该份继续              → TestFetchCompanyFactsClassEPSMalformedInstance
 //	error[0]      响应体超限 → 跳过该份,不 OOM                  → TestFetchCompanyFactsClassEPSBodyLimit
 //	error[0]      全部实例文档不可达 → 与当前行为一致(EPS 全 NaN) → TestFetchCompanyFactsClassEPSAllUnavailable
+//
+//	[TASK-003] 收尾:让两条「看着绿其实没判别力」的地方真正有判别力
+//
+//	functional[1] 回看上限用例对**取值**有判别力(期望值不再自引用常量)
+//	              → TestFetchClassEPSRespectsLookbackCap(改写)
+//	functional[2] dominantClass 用 max 而非 sum(真实数据无判别力,构造反例)
+//	boundary[0]   该 fixture 只测算法选择,与 V 的真实分布刻意不同
+//	              → TestDominantClassUsesMaxSharesNotSum(新增)
 
 // vCIK 是 Visa 的真实 CIK。
 const vCIK = "1403161"
@@ -512,10 +520,27 @@ func TestClassRawFactsFPMatchesDownstreamFilter(t *testing.T) {
 	}
 }
 
-// AD-11 回看上限沿用 maxSegmentFilings=12:submissions 给 20 份也只取最近 12 份。
+// 回看上限:submissions 给 40 份,也只取最近 28 份。
+//
+// **期望值 28 在本用例里是写死的字面量,刻意不从 maxClassEPSFilings 算出来。**
+// 初版用 `nFilings = maxClassEPSFilings + 12` 造份数、又用 `maxClassEPSFilings` 断言长度,
+// 两端随常量同步变化 ⇒ 把常量改成任意值它照样绿(实测变异 28→12,本用例 0/5 红),
+// **对取值零判别力**。当时它看上去被杀死了,真正杀它的是 TestClassEPSAndSegmentCapsAreIndependent
+// 里那句字面量断言 —— 判别力必须长在**用例自己**身上,不能靠别处兜底。
+//
+// 28 的正当性来自数据侧实测(2026-07-26 逐份探测 V 的 40 份:序号 0–27 全 200、28 起连续 404),
+// 不来自这个测试。将来可用份数增长、按 maxClassEPSFilings 的注释合理调大常量时,
+// wantCap 需一并更新 —— 强制这次同步正是本用例的作用。
 func TestFetchClassEPSRespectsLookbackCap(t *testing.T) {
-	// 报告份数刻意多于上限,验证「只取最近 N 份」而不是「有多少拉多少」。
-	const nFilings = maxClassEPSFilings + 12
+	const (
+		wantCap  = 28 // 与 maxClassEPSFilings 独立写死,故常量变动必然在此暴露
+		nFilings = 40 // 探测过的份数,刻意多于上限
+	)
+
+	// 请求路径只在这一处成形:登记 fixture 与断言两端共用,改一处漏一处不再可能。
+	archPath := func(i int) string {
+		return fmt.Sprintf("/Archives/edgar/data/%s/000095017025%06d/doc-%02d_htm.xml", vCIK, i, i)
+	}
 
 	var rows [][3]string
 	docs := map[string]string{}
@@ -524,7 +549,7 @@ func TestFetchClassEPSRespectsLookbackCap(t *testing.T) {
 		report := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).
 			AddDate(0, -3*i, 0).Format(dateLayout)
 		rows = append(rows, [3]string{"10-Q", report, report})
-		docs[fmt.Sprintf("doc-%02d_htm.xml", i)] = "testdata/instance_v_fy2025q2_10q.xml"
+		docs[path.Base(archPath(i))] = "testdata/instance_v_fy2025q2_10q.xml"
 	}
 	subsPath := path.Join(t.TempDir(), "subs.json")
 	require.NoError(t, os.WriteFile(subsPath, []byte(submissionsJSON(t, rows)), 0o644))
@@ -533,13 +558,14 @@ func TestFetchClassEPSRespectsLookbackCap(t *testing.T) {
 	_, err := c.FetchCompanyFacts(vCIK)
 	require.NoError(t, err)
 
-	assert.Len(t, archRec.paths(), maxClassEPSFilings,
-		"最多只拉最近 %d 份报告", maxClassEPSFilings)
-	// 取的必须是**最近**的那些:最旧一份(doc-%d)不得被请求。
-	assert.NotContains(t, archRec.paths(),
-		fmt.Sprintf("/Archives/edgar/data/%s/000095017025%06d/doc-%02d_htm.xml",
-			vCIK, nFilings-1, nFilings-1),
-		"超出上限的应当是最旧的那些")
+	// 集合相等而非「只断长度」:多拉、少拉、重复拉、拿错哪一份都在这里暴露。
+	// 只断长度的话,「取最旧那 28 份」这类变异照样绿。
+	want := make([]string, 0, wantCap)
+	for i := 0; i < wantCap; i++ {
+		want = append(want, archPath(i))
+	}
+	assert.ElementsMatch(t, want, archRec.paths(),
+		"必须且只能请求最近 %d 份(序号 0..%d)", wantCap, wantCap-1)
 }
 
 // 类别 EPS 路径与分部营收路径的回看上限**互相独立**。
@@ -550,7 +576,8 @@ func TestClassEPSAndSegmentCapsAreIndependent(t *testing.T) {
 		"两条路径的上限刻意不同;相等会让本测试失去判别力")
 	assert.Equal(t, 12, maxSegmentFilings, "分部营收上限不得被本任务改动")
 	assert.Equal(t, 28, maxClassEPSFilings,
-		"类别 EPS 上限 = 28,来源是 reportDate ≤ 2019-03-31 的实例文档全部 404 这一硬边界")
+		"类别 EPS 上限当前 = 28(2026-07-26 的可用份数快照);"+
+			"若因新增申报按 maxClassEPSFilings 注释合理调大,此处与 TestFetchClassEPSRespectsLookbackCap 一并更新")
 }
 
 // 2019 年前的老式 filing(非 inline XBRL,_htm.xml 推导不成立)一律 404。
@@ -811,4 +838,50 @@ func TestDominantClassIgnoresAlphabeticalOrder(t *testing.T) {
 	// 反向摆放输入顺序,结果不变(与排列无关的性质在此场景下同样成立)。
 	reversed := append(mk("CommonClassZMember", 9e8), mk("CommonClassAMember", 1e6)...)
 	assert.Equal(t, "CommonClassZMember", dominantClass(reversed))
+}
+
+// M-sum 杀手:主类别按该类别申报过的**最大**股本决定,而不是按求和。
+//
+// 为什么必须构造 fixture:**V 的真实数据对 max/sum 这个选择没有判别力** —— Class A 的
+// max=2.085e9、sum=1.245e11,两种算法都遥遥领先其它类别,把 max 换成 sum 照样选中 Class A
+// (实测该变异在本用例存在之前 0/5 红,即完全存活)。TASK-002 的 discovery 把「用 max 不用 sum」
+// 写成了明确决策,却没有任何测试钉住它。要钉住,只能造一个两种算法**给出不同答案**的场景。
+//
+// 场景复刻的正是 max 要防的真实机制:同一条股本事实在 inline XBRL 里会被重复渲染,
+// 且 diluted/basic 两条 tag 都落在 sharesTags 里 —— 于是「条数多」会把求和吹大。
+// 这里 A 类每条只有 Z 类的 1/6,但有 12 条 ⇒ sum 选 A;max 选 Z。
+// 把 max 的正确答案放在字母序**末位**,顺带让「return members[0]」那类变异在这里也红。
+//
+// **该 fixture 不与生产形态冲突**:它测的是**算法选择**,不是 V 的实际数据分布。
+// 真实数据里 max 与 sum 同答案(都选 Class A),正因如此才需要一个刻意构造的反例 ——
+// 用真实形态永远问不出「实现选的是哪一种」。
+func TestDominantClassUsesMaxSharesNotSum(t *testing.T) {
+	const (
+		bigOnce   = 9.0e8 // Z 类:一条大额
+		smallEach = 1.5e8 // A 类:12 条小额,合计 1.8e9
+		nSmall    = 12
+	)
+	// 判别力自检:fixture 数值若被改成 sum 与 max 同答案,本用例会退化成又一条无判别力的
+	// 测试并**静默变绿**。这两行让那种退化立刻失败。
+	require.Greater(t, smallEach*nSmall, bigOnce, "sum 口径下必须是 A 类胜出")
+	require.Greater(t, bigOnce, smallEach, "max 口径下必须是 Z 类胜出")
+
+	facts := []classFact{
+		{tag: "EarningsPerShareDiluted", member: "CommonClassZMember",
+			start: "2024-10-01", end: "2025-09-30", val: 10.20},
+		{tag: "WeightedAverageNumberOfDilutedSharesOutstanding", member: "CommonClassZMember",
+			start: "2024-10-01", end: "2025-09-30", val: bigOnce},
+		{tag: "EarningsPerShareDiluted", member: "CommonClassAMember",
+			start: "2024-10-01", end: "2025-09-30", val: 0.50},
+	}
+	for i := 0; i < nSmall; i++ {
+		// diluted / basic 交替:两条 tag 同属 sharesTags,是求和被吹大的真实来源之一。
+		tag := sharesTags[i%len(sharesTags)]
+		facts = append(facts, classFact{tag: tag, member: "CommonClassAMember",
+			start: "2024-10-01", end: "2025-09-30", val: smallEach})
+	}
+
+	assert.Equal(t, "CommonClassZMember", dominantClass(facts),
+		"按最大股本选 Z;实现若改成求和会选中 A(sum(A)=%.3g > max(Z)=%.3g)",
+		smallEach*nSmall, bigOnce)
 }
