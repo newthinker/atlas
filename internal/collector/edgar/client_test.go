@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,12 +43,21 @@ import (
 //   error[0]      AD-18 golden 回归                              → TestFetchCompanyFactsGolden(golden_test.go)
 
 // factsFileServer serves a fixture file, asserting the requested path.
+//
+// [TASK-002] 不含 EPS 的 fixture(mainflow / eps_no_shares / fy_june / fy_december)会触发
+// 类别维度 EPS 回退路径,于是**同一个 host 上**多出一次 /submissions/ 请求。这里对非
+// companyfacts 路径一律返回 500,使回退路径立即失败 —— 这些用例的观察结果因此与本改动前
+// 完全一致(EPS 仍缺失),同时保留了对 companyfacts 路径本身的断言。
 func factsFileServer(t *testing.T, fixture, wantPath string) (*httptest.Server, *http.Request) {
 	t.Helper()
 	body, err := os.ReadFile(fixture)
 	require.NoError(t, err)
 	var captured http.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/xbrl/companyfacts/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		captured = *r
 		assert.Equal(t, wantPath, r.URL.Path)
 		w.Write(body)

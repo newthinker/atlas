@@ -1,0 +1,852 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xbrl
+  xml:lang="en-US"
+  xmlns="http://www.xbrl.org/2003/instance"
+  xmlns:country="http://xbrl.sec.gov/country/2025"
+  xmlns:dei="http://xbrl.sec.gov/dei/2025"
+  xmlns:ecd="http://xbrl.sec.gov/ecd/2025"
+  xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+  xmlns:link="http://www.xbrl.org/2003/linkbase"
+  xmlns:srt="http://fasb.org/srt/2025"
+  xmlns:us-gaap="http://fasb.org/us-gaap/2025"
+  xmlns:v="http://wwww.visa.com/20250630"
+  xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+  xmlns:xhtml="http://www.w3.org/1999/xhtml"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <unit id="shares">
+        <measure>shares</measure>
+    </unit>
+    <unit id="usd">
+        <measure>iso4217:USD</measure>
+    </unit>
+    <unit id="usdPerShare">
+        <divide>
+            <unitNumerator>
+                <measure>iso4217:USD</measure>
+            </unitNumerator>
+            <unitDenominator>
+                <measure>shares</measure>
+            </unitDenominator>
+        </divide>
+    </unit>
+    <unit id="country">
+        <measure>v:country</measure>
+    </unit>
+    <unit id="number">
+        <measure>pure</measure>
+    </unit>
+    <unit id="eur">
+        <measure>iso4217:EUR</measure>
+    </unit>
+    <unit id="merchant">
+        <measure>v:merchant</measure>
+    </unit>
+    <unit id="lawsuit">
+        <measure>v:lawsuit</measure>
+    </unit>
+    <context id="c-1">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+        </entity>
+        <period>
+            <startDate>2024-10-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-2">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassAMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-10-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-24">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+        </entity>
+        <period>
+            <startDate>2025-04-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-25">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+        </entity>
+        <period>
+            <startDate>2024-04-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-26">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+        </entity>
+        <period>
+            <startDate>2023-10-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-27">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassAMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-04-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-28">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassAMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-04-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-29">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassAMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2023-10-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-30">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB1Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-04-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-31">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB1Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-04-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-32">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB1Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-10-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-33">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB1Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2023-10-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-34">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB2Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-04-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-35">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB2Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-04-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-36">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB2Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-10-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-37">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:CommonClassB2Member</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2023-10-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-38">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassCMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-04-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-39">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassCMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-04-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-40">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassCMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-10-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-41">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">us-gaap:CommonClassCMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2023-10-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-260">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:ParticipatingSecuritiesMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2025-04-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-261">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:ParticipatingSecuritiesMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-10-01</startDate>
+            <endDate>2025-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-262">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:ParticipatingSecuritiesMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2024-04-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <context id="c-263">
+        <entity>
+            <identifier scheme="http://www.sec.gov/CIK">0001403161</identifier>
+            <segment>
+                <xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">v:ParticipatingSecuritiesMember</xbrldi:explicitMember>
+            </segment>
+        </entity>
+        <period>
+            <startDate>2023-10-01</startDate>
+            <endDate>2024-06-30</endDate>
+        </period>
+    </context>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-27"
+      decimals="2"
+      id="f-258"
+      unitRef="usdPerShare">2.69</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-28"
+      decimals="2"
+      id="f-259"
+      unitRef="usdPerShare">2.40</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-2"
+      decimals="2"
+      id="f-260"
+      unitRef="usdPerShare">7.59</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-29"
+      decimals="2"
+      id="f-261"
+      unitRef="usdPerShare">7.08</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-30"
+      decimals="2"
+      id="f-262"
+      unitRef="usdPerShare">4.20</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-31"
+      decimals="2"
+      id="f-263"
+      unitRef="usdPerShare">3.81</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-32"
+      decimals="2"
+      id="f-264"
+      unitRef="usdPerShare">11.87</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-33"
+      decimals="2"
+      id="f-265"
+      unitRef="usdPerShare">11.24</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-34"
+      decimals="2"
+      id="f-266"
+      unitRef="usdPerShare">4.13</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-35"
+      decimals="2"
+      id="f-267"
+      unitRef="usdPerShare">3.81</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-36"
+      decimals="2"
+      id="f-268"
+      unitRef="usdPerShare">11.69</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-37"
+      decimals="2"
+      id="f-269"
+      unitRef="usdPerShare">11.24</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-38"
+      decimals="2"
+      id="f-270"
+      unitRef="usdPerShare">10.77</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-39"
+      decimals="2"
+      id="f-271"
+      unitRef="usdPerShare">9.60</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-40"
+      decimals="2"
+      id="f-272"
+      unitRef="usdPerShare">30.35</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-41"
+      decimals="2"
+      id="f-273"
+      unitRef="usdPerShare">28.31</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-27"
+      decimals="2"
+      id="f-1054"
+      unitRef="usdPerShare">2.69</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-30"
+      decimals="2"
+      id="f-1060"
+      unitRef="usdPerShare">4.20</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-34"
+      decimals="2"
+      id="f-1066"
+      unitRef="usdPerShare">4.13</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-38"
+      decimals="2"
+      id="f-1072"
+      unitRef="usdPerShare">10.77</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-2"
+      decimals="2"
+      id="f-1081"
+      unitRef="usdPerShare">7.59</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-32"
+      decimals="2"
+      id="f-1087"
+      unitRef="usdPerShare">11.87</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-36"
+      decimals="2"
+      id="f-1093"
+      unitRef="usdPerShare">11.69</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-40"
+      decimals="2"
+      id="f-1099"
+      unitRef="usdPerShare">30.35</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-28"
+      decimals="2"
+      id="f-1108"
+      unitRef="usdPerShare">2.40</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-31"
+      decimals="2"
+      id="f-1114"
+      unitRef="usdPerShare">3.81</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-35"
+      decimals="2"
+      id="f-1120"
+      unitRef="usdPerShare">3.81</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-39"
+      decimals="2"
+      id="f-1126"
+      unitRef="usdPerShare">9.60</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-29"
+      decimals="2"
+      id="f-1135"
+      unitRef="usdPerShare">7.08</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-33"
+      decimals="2"
+      id="f-1141"
+      unitRef="usdPerShare">11.24</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-37"
+      decimals="2"
+      id="f-1147"
+      unitRef="usdPerShare">11.24</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareDiluted
+      contextRef="c-41"
+      decimals="2"
+      id="f-1153"
+      unitRef="usdPerShare">28.31</us-gaap:EarningsPerShareDiluted>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-27"
+      decimals="2"
+      id="f-226"
+      unitRef="usdPerShare">2.69</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-28"
+      decimals="2"
+      id="f-227"
+      unitRef="usdPerShare">2.40</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-2"
+      decimals="2"
+      id="f-228"
+      unitRef="usdPerShare">7.60</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-29"
+      decimals="2"
+      id="f-229"
+      unitRef="usdPerShare">7.09</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-30"
+      decimals="2"
+      id="f-230"
+      unitRef="usdPerShare">4.21</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-31"
+      decimals="2"
+      id="f-231"
+      unitRef="usdPerShare">3.82</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-32"
+      decimals="2"
+      id="f-232"
+      unitRef="usdPerShare">11.88</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-33"
+      decimals="2"
+      id="f-233"
+      unitRef="usdPerShare">11.25</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-34"
+      decimals="2"
+      id="f-234"
+      unitRef="usdPerShare">4.13</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-35"
+      decimals="2"
+      id="f-235"
+      unitRef="usdPerShare">3.82</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-36"
+      decimals="2"
+      id="f-236"
+      unitRef="usdPerShare">11.70</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-37"
+      decimals="2"
+      id="f-237"
+      unitRef="usdPerShare">11.25</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-38"
+      decimals="2"
+      id="f-238"
+      unitRef="usdPerShare">10.78</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-39"
+      decimals="2"
+      id="f-239"
+      unitRef="usdPerShare">9.62</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-40"
+      decimals="2"
+      id="f-240"
+      unitRef="usdPerShare">30.39</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-41"
+      decimals="2"
+      id="f-241"
+      unitRef="usdPerShare">28.35</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-27"
+      decimals="2"
+      id="f-1051"
+      unitRef="usdPerShare">2.69</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-30"
+      decimals="2"
+      id="f-1057"
+      unitRef="usdPerShare">4.21</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-34"
+      decimals="2"
+      id="f-1063"
+      unitRef="usdPerShare">4.13</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-38"
+      decimals="2"
+      id="f-1069"
+      unitRef="usdPerShare">10.78</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-2"
+      decimals="2"
+      id="f-1078"
+      unitRef="usdPerShare">7.60</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-32"
+      decimals="2"
+      id="f-1084"
+      unitRef="usdPerShare">11.88</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-36"
+      decimals="2"
+      id="f-1090"
+      unitRef="usdPerShare">11.70</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-40"
+      decimals="2"
+      id="f-1096"
+      unitRef="usdPerShare">30.39</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-28"
+      decimals="2"
+      id="f-1105"
+      unitRef="usdPerShare">2.40</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-31"
+      decimals="2"
+      id="f-1111"
+      unitRef="usdPerShare">3.82</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-35"
+      decimals="2"
+      id="f-1117"
+      unitRef="usdPerShare">3.82</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-39"
+      decimals="2"
+      id="f-1123"
+      unitRef="usdPerShare">9.62</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-29"
+      decimals="2"
+      id="f-1132"
+      unitRef="usdPerShare">7.09</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-33"
+      decimals="2"
+      id="f-1138"
+      unitRef="usdPerShare">11.25</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-37"
+      decimals="2"
+      id="f-1144"
+      unitRef="usdPerShare">11.25</us-gaap:EarningsPerShareBasic>
+    <us-gaap:EarningsPerShareBasic
+      contextRef="c-41"
+      decimals="2"
+      id="f-1150"
+      unitRef="usdPerShare">28.35</us-gaap:EarningsPerShareBasic>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-27" decimals="-6" id="f-274" unitRef="shares">1959000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-28" decimals="-6" id="f-275" unitRef="shares">2029000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-2" decimals="-6" id="f-276" unitRef="shares">1973000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-29" decimals="-6" id="f-277" unitRef="shares">2038000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-30" decimals="-6" id="f-278" unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-31" decimals="-6" id="f-279" unitRef="shares">97000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-32" decimals="-6" id="f-280" unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-33" decimals="-6" id="f-281" unitRef="shares">196000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-34" decimals="-6" id="f-282" unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-35" decimals="-6" id="f-283" unitRef="shares">74000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-36" decimals="-6" id="f-284" unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-37" decimals="-6" id="f-285" unitRef="shares">25000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-38" decimals="-6" id="f-286" unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-39" decimals="-6" id="f-287" unitRef="shares">29000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-40" decimals="-6" id="f-288" unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-41" decimals="-6" id="f-289" unitRef="shares">16000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-27"
+      decimals="-6"
+      id="f-1053"
+      unitRef="shares">1959000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-30"
+      decimals="-6"
+      id="f-1059"
+      unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-34"
+      decimals="-6"
+      id="f-1065"
+      unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-38"
+      decimals="-6"
+      id="f-1071"
+      unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="c-2" decimals="-6" id="f-1080" unitRef="shares">1973000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-32"
+      decimals="-6"
+      id="f-1086"
+      unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-36"
+      decimals="-6"
+      id="f-1092"
+      unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-40"
+      decimals="-6"
+      id="f-1098"
+      unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-28"
+      decimals="-6"
+      id="f-1107"
+      unitRef="shares">2029000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-31"
+      decimals="-6"
+      id="f-1113"
+      unitRef="shares">97000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-35"
+      decimals="-6"
+      id="f-1119"
+      unitRef="shares">74000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-39"
+      decimals="-6"
+      id="f-1125"
+      unitRef="shares">29000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-29"
+      decimals="-6"
+      id="f-1134"
+      unitRef="shares">2038000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-33"
+      decimals="-6"
+      id="f-1140"
+      unitRef="shares">196000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-37"
+      decimals="-6"
+      id="f-1146"
+      unitRef="shares">25000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+      contextRef="c-41"
+      decimals="-6"
+      id="f-1152"
+      unitRef="shares">16000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-27" decimals="-6" id="f-242" unitRef="shares">1709000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-28" decimals="-6" id="f-243" unitRef="shares">1610000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-2" decimals="-6" id="f-244" unitRef="shares">1720000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-29" decimals="-6" id="f-245" unitRef="shares">1591000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-30" decimals="-6" id="f-246" unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-31" decimals="-6" id="f-247" unitRef="shares">97000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-32" decimals="-6" id="f-248" unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-33" decimals="-6" id="f-249" unitRef="shares">196000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-34" decimals="-6" id="f-250" unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-35" decimals="-6" id="f-251" unitRef="shares">74000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-36" decimals="-6" id="f-252" unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-37" decimals="-6" id="f-253" unitRef="shares">25000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-38" decimals="-6" id="f-254" unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-39" decimals="-6" id="f-255" unitRef="shares">29000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-40" decimals="-6" id="f-256" unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-41" decimals="-6" id="f-257" unitRef="shares">16000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-27"
+      decimals="-6"
+      id="f-1050"
+      unitRef="shares">1709000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-30"
+      decimals="-6"
+      id="f-1056"
+      unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-34"
+      decimals="-6"
+      id="f-1062"
+      unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-38"
+      decimals="-6"
+      id="f-1068"
+      unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic contextRef="c-2" decimals="-6" id="f-1077" unitRef="shares">1720000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-32"
+      decimals="-6"
+      id="f-1083"
+      unitRef="shares">5000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-36"
+      decimals="-6"
+      id="f-1089"
+      unitRef="shares">120000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-40"
+      decimals="-6"
+      id="f-1095"
+      unitRef="shares">9000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-28"
+      decimals="-6"
+      id="f-1104"
+      unitRef="shares">1610000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-31"
+      decimals="-6"
+      id="f-1110"
+      unitRef="shares">97000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-35"
+      decimals="-6"
+      id="f-1116"
+      unitRef="shares">74000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-39"
+      decimals="-6"
+      id="f-1122"
+      unitRef="shares">29000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-29"
+      decimals="-6"
+      id="f-1131"
+      unitRef="shares">1591000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-33"
+      decimals="-6"
+      id="f-1137"
+      unitRef="shares">196000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-37"
+      decimals="-6"
+      id="f-1143"
+      unitRef="shares">25000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+      contextRef="c-41"
+      decimals="-6"
+      id="f-1149"
+      unitRef="shares">16000000</us-gaap:WeightedAverageNumberOfSharesOutstandingBasic>
+    <us-gaap:NetIncomeLoss contextRef="c-27" decimals="-6" id="f-1049" unitRef="usd">4605000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-30" decimals="-6" id="f-1055" unitRef="usd">20000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-34" decimals="-6" id="f-1061" unitRef="usd">497000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-38" decimals="-6" id="f-1067" unitRef="usd">97000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-260" decimals="-6" id="f-1073" unitRef="usd">53000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-24" decimals="-6" id="f-1075" unitRef="usd">5272000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-2" decimals="-6" id="f-1076" unitRef="usd">13067000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-32" decimals="-6" id="f-1082" unitRef="usd">57000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-36" decimals="-6" id="f-1088" unitRef="usd">1408000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-40" decimals="-6" id="f-1094" unitRef="usd">280000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-261" decimals="-6" id="f-1100" unitRef="usd">156000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-1" decimals="-6" id="f-1102" unitRef="usd">14968000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-28" decimals="-6" id="f-1103" unitRef="usd">3870000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-31" decimals="-6" id="f-1109" unitRef="usd">372000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-35" decimals="-6" id="f-1115" unitRef="usd">283000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-39" decimals="-6" id="f-1121" unitRef="usd">275000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-262" decimals="-6" id="f-1127" unitRef="usd">72000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-25" decimals="-6" id="f-1129" unitRef="usd">4872000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-29" decimals="-6" id="f-1130" unitRef="usd">11276000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-33" decimals="-6" id="f-1136" unitRef="usd">2209000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-37" decimals="-6" id="f-1142" unitRef="usd">277000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-41" decimals="-6" id="f-1148" unitRef="usd">447000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-263" decimals="-6" id="f-1154" unitRef="usd">216000000</us-gaap:NetIncomeLoss>
+    <us-gaap:NetIncomeLoss contextRef="c-26" decimals="-6" id="f-1156" unitRef="usd">14425000000</us-gaap:NetIncomeLoss>
+</xbrl>

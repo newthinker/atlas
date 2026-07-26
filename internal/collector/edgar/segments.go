@@ -125,7 +125,7 @@ type segmentContext struct {
 // 按 PeriodEnd 升序。axis 为维度轴 local name(模板 segment_axis)。
 // 单份报告失败只跳过该份并记录,不影响其余(见文件头解析规则 7)。
 func (c *Client) FetchSegmentRevenue(cik, axis string, since time.Time) ([]SegmentPeriod, error) {
-	filings, err := c.recentFilings(cik, since)
+	filings, err := c.recentFilings(cik, since, maxSegmentFilings)
 	if err != nil {
 		return nil, err
 	}
@@ -196,8 +196,12 @@ func (c *Client) httpGet(url string) (*http.Response, error) {
 }
 
 // recentFilings 取 filings.recent 中 form 与 reportDate 双重命中的报告,按 reportDate 降序
-// 截取最近 maxSegmentFilings 份。显式排序而非依赖 SEC 的返回顺序。
-func (c *Client) recentFilings(cik string, since time.Time) ([]filing, error) {
+// 截取最近 limit 份。显式排序而非依赖 SEC 的返回顺序。
+//
+// limit 由调用方给出而非写死:分部营收(maxSegmentFilings=12)与类别维度 EPS
+// (maxClassEPSFilings=28)对回看深度的需求不同,两者**必须各自独立**——详见
+// maxClassEPSFilings 的注释。
+func (c *Client) recentFilings(cik string, since time.Time, limit int) ([]filing, error) {
 	url := fmt.Sprintf("%s/submissions/CIK%010s.json", c.baseURL, cik)
 	resp, err := c.httpGet(url)
 	if err != nil {
@@ -234,8 +238,8 @@ func (c *Client) recentFilings(cik string, since time.Time) ([]filing, error) {
 		out = append(out, filing{rec.Form[i], rec.AccessionNumber[i], rec.PrimaryDocument[i], report, filed})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].reportDate.After(out[j].reportDate) })
-	if len(out) > maxSegmentFilings {
-		out = out[:maxSegmentFilings]
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

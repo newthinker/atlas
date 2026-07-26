@@ -675,6 +675,30 @@ func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
 	// 检测的输入仍是单一科目的完整历史,比例投票与生效日聚簇的口径不变(AD-18 golden 回归守护)。
 	epsFacts := firstQuarterlyTag(epsTags...)
 	sharesFacts := firstQuarterlyTag(sharesTags...)
+
+	// companyfacts 只收录**无维度**事实。某些多类别股权结构的公司(实测 V/Visa)按股份
+	// 类别分别披露 EPS,一条无维度 EPS 都没有 ⇒ companyfacts 里整个科目缺席。此时回退到
+	// 报告实例文档按类别取(classeps.go)。**只在完全取不到 EPS 时进入**,因此 EPS 正常的
+	// 公司连一次实例文档请求都不会发出,主路径行为逐字节不变。
+	// 失败一律只记日志:V 目前走 engine fallback 的 degraded 是可接受状态,这条回退路径
+	// 修不成功也不能让整个 refresh 失败。
+	if len(epsFacts) == 0 {
+		classEPS, classShares, err := c.fetchClassDimensionedEPS(cik, classOfStockAxis)
+		switch {
+		case err != nil:
+			log.Printf("edgar: CIK %s class-dimensioned EPS fallback failed: %v", cik, err)
+		case len(classEPS) == 0:
+			log.Printf("edgar: CIK %s has no class-dimensioned EPS either; EPS stays missing", cik)
+		default:
+			epsFacts = classEPS
+			// 同源同口径:类别 EPS 的分母必须是同一类别的股本。回退路径没取到股本时保留
+			// companyfacts 的(总量口径)—— 此时它只参与 detectSplits,不参与 EPS 推算。
+			if len(classShares) != 0 {
+				sharesFacts = classShares
+			}
+		}
+	}
+
 	splits := detectSplits(epsFacts, sharesFacts)
 
 	durationMetric(normalizeSplits(epsFacts, splits, false), func(q *QuarterlyFact, v float64) { q.EPSDiluted = v })
