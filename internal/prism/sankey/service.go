@@ -42,9 +42,16 @@ type Analysis struct {
 type FundamentalView struct {
 	Symbol  string
 	Periods []string // fiscal_period, ascending
-	Metrics map[string][]float64
-	Dates   []string // price_daily
-	Closes  []float64
+	// PeriodEnds is the calendar date each Periods entry closes on, same order
+	// and length. It is carried alongside the labels because the labels cannot
+	// stand in for it: a fiscal "2026Q1" ends in September for a company whose
+	// year is offset, so anything that has to place a report period on a real
+	// timeline — the chart page resampling prices onto report periods — needs
+	// this column rather than a parsed label.
+	PeriodEnds []string
+	Metrics    map[string][]float64
+	Dates      []string // price_daily
+	Closes     []float64
 }
 
 // ServiceStore is the subset of *prismstore.Store the analysis needs.
@@ -147,6 +154,7 @@ func (s *Service) Fundamental(symbol string) (*FundamentalView, error) {
 	}
 	for _, r := range rows {
 		out.Periods = append(out.Periods, r.FiscalPeriod)
+		out.PeriodEnds = append(out.PeriodEnds, r.PeriodEnd)
 	}
 	for _, m := range fundamentalMetrics {
 		series := make([]float64, 0, len(rows))

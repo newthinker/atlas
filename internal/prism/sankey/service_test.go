@@ -432,6 +432,19 @@ func TestFundamental(t *testing.T) {
 	assert.InDelta(t, (24.0+26+28+30)/230.0, roe[3], 1e-9)
 }
 
+// TestFundamentalPeriodEnds —— 财务趋势页把日频股价重采样到报告期末，靠的就是这
+// 一列真实日期（TASK-004）。fiscal_period 标签**不能**当日历季度解析：本 fixture 的
+// 2026Q1 结束于 2025-09-30，COST 一类财年错位的标的更是差一整个季度。
+func TestFundamentalPeriodEnds(t *testing.T) {
+	got, err := newTestService(t, storeWith(t)).Fundamental("ACME")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"}, got.PeriodEnds,
+		"period_end 必须原样带出——它是报告期在日历上的唯一真实位置")
+	require.Len(t, got.PeriodEnds, len(got.Periods),
+		"每个报告期都要有对应的期末日期，否则下游无法按索引配对")
+}
+
 // W7/W8：`fundamentalMetrics` 的**每一条**序列都必须被钉住。
 //
 // 退回理由就在这里：TestFundamental 只断言了 revenue（与表外单独设的 roe_ttm），

@@ -37,6 +37,8 @@
     缺失值以断点显示（不画作 0）：ROE(TTM) 在前 3 个季度必然缺失——不足 4 个季度时不以部分和冒充 TTM。
     年度为 4 个季度聚合；该年任一季度缺失则整年不显示，避免用 3 个季度加出的数字被读成真实下滑。
     下方 dataZoom 双端滑块可缩放区间。
+    叠加股价取<strong>各报告期末（或其前最近一个交易日）的收盘价</strong>，与指标共用同一条时间刻度：
+    同一横向位置就是同一报告期；期内的日间波动不在本图显示（需要日频请看个股详情页）。
   </p>
 </div>
 
@@ -48,8 +50,9 @@
   var data = {{.PayloadJSON}};
   var periods = data.periods ? data.periods : [];
   var metrics = data.metrics ? data.metrics : {};
-  var dates = data.dates ? data.dates : [];
-  var closes = data.closes ? data.closes : [];
+  // 股价已由服务端按报告期末重采样（period_closes[i] ↔ periods[i]），因此与指标
+  // 共用同一条 x 轴。页面不再拿到日频序列：它正是当初逼出第二条 x 轴的东西。
+  var periodCloses = data.period_closes ? data.period_closes : [];
 
   var state = { metric: 'revenue', kind: 'line', gran: 'q', price: false };
   var chart = echarts.init(document.getElementById('fund-chart'));
@@ -158,6 +161,12 @@
     return state.gran === 'fy' ? annualLabels() : periods;
   }
 
+  // 年度下取该年最后一个季度的期末收盘价 —— 与 annualLabels() 取 periods[i+3]
+  // 是同一个下标，股价与指标在年度视图下同样逐点对齐。
+  function currentCloses() {
+    return state.gran === 'fy' ? annualLast(periodCloses) : periodCloses;
+  }
+
   function fmt(v) {
     if (isNull(v)) { return '—'; }
     if (RATIO_METRICS[state.metric]) { return (v * 100).toFixed(1) + '%'; }
@@ -189,12 +198,14 @@
     }];
 
     if (state.price) {
-      // 双轴：左轴指标、右轴股价。股价按日、指标按报告期，用第二条 x 轴承载。
-      xAxis.push({ type: 'category', data: dates, show: false });
+      // 双 y 轴、**单 x 轴**：左轴指标、右轴股价，横轴共用同一组报告期。
+      // 曾经的写法是给股价单开一条 category 轴装日频序列 —— category 轴按索引均匀
+      // 铺开、dataZoom 又按百分比作用于索引，于是 71 个季度与 2513 个交易日只在最
+      // 右端偶然对齐，越往左偏越多（0% 处差 7.5 年），页面上却没有任何提示。
       yAxis.push({ type: 'value', name: '股价', scale: true, axisLabel: { fontSize: 10 } });
       seriesOpt.push({
-        name: '股价', type: 'line', data: closes, connectNulls: false,
-        xAxisIndex: 1, yAxisIndex: 1, symbol: 'none',
+        name: '股价', type: 'line', data: currentCloses(), connectNulls: false,
+        yAxisIndex: 1, symbol: 'none',
         lineStyle: { width: 1, color: '#9ca3af' }, itemStyle: { color: '#9ca3af' }
       });
     }

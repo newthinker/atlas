@@ -62,6 +62,8 @@ func sampleFundamental() *sankey.FundamentalView {
 	return &sankey.FundamentalView{
 		Symbol:  "MSFT",
 		Periods: []string{"2025Q1", "2025Q2", "2025Q3", "2025Q4"},
+		// 报告期在日历上的真实位置——股价按它重采样到与指标同一刻度（TASK-004）。
+		PeriodEnds: []string{"2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31"},
 		Metrics: map[string][]float64{
 			"revenue":          {1000, 1100, 1200, 1300},
 			"gross_profit":     {600, 660, 720, 780},
