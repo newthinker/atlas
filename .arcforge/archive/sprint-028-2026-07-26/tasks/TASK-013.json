@@ -1,0 +1,80 @@
+{
+  "id": "TASK-013",
+  "title": "/prism/fundamental 财务趋势页(股价叠加)",
+  "description": "web/handler.go 加 PrismFundamental(w, r, symbol);新建 prism_fundamental.html;server.go 注册 /prism/fundamental/ 路由;prism_board.html 卡片加入口链接。**同 TASK-012 的 AD-4(模板两处目录 + pages 两处列表)与 AD-8(resp.data 解包)约束**。页面交互见 design-spec.md §5.2。数据来自 TASK-011 已交付的 /api/prism/fundamental。",
+  "module": "api-web",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/api/handler/web/handler.go",
+    "internal/api/handler/web/templates/prism_fundamental.html",
+    "internal/api/templates/prism_fundamental.html",
+    "internal/api/server.go",
+    "internal/api/handler/web/prism_web_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestPrismFundamentalPage: 有数据的 symbol 返回 200,页面含 id=\"fund-chart\" 与 /static/echarts.min.js 引用",
+      "无 fundamental_q 数据的 symbol 返回 404",
+      "页面含指标切换(营收/净利/毛利率/营业利润率/ROE(TTM)/营收 YoY/净利 YoY)、折线柱状切换、季度年度切换与 dataZoom 容器",
+      "prism_board 卡片含指向 /prism/fundamental/ 的入口链接",
+      {
+        "desc": "【null 传播 (a)｜可自动验证部分】上游契约「任何数值字段都可能是 null」，且**不是边缘情况**：`roe_ttm` 按设计前 3 季必然 null（`service_test.go:430` 既有断言锁死「不足 4 季不得用部分和冒充 TTM」）。**双轴叠加**：含 null 的指标序列与股价序列不得使图表报错，**更不得把 null 当 0 画**（会产生一条假的归零曲线）。数据路径可断言，须构造含 null 的真实响应（至少覆盖 `roe_ttm` 前 3 季这个必然场景），**不得只测全非空的理想数据**。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "prism provider 未启用(nil)时返回 404 且不 panic",
+      {
+        "desc": "【null 传播 (b)(c)｜按 AD-7 降级，人类 2026-07-26 决策】JS 端两个纯函数无法在 Go 里诚实验证（`go.mod` 无 JS 引擎；shell out node 会在 CI 缺 node 时退化为假绿或误红，而假绿正是本 sprint 明确记录的反模式）。故 **(b) 4 季聚合 `sum` 遇 null**（必须有明确策略：跳过该季 / 整年作废，二选一并在 discovery 说明理由，**不得产生 NaN 或字符串拼接**）与 **(c) 增速现算分母为 null 或 0**（不得输出 Infinity/NaN 到页面）**转为人工验收项**，写入 M3 验收记录的「待人工验收，未由 agent 验证」清单（AD-7）。**代偿措施（本条的可验证部分）**：加静态守卫钉住模板 JS 中不得出现 `|| 0`、`Number(null)`、`+null` 这类把 null 静默变 0 的写法——该守卫本身可测且必须有对应变异（把守卫去掉或写法改回，须红）。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "模板同步写入两处目录且 diff 无差异;handler.go 两处 pages 列表均加入 prism_fundamental.html;TestNewHandlerDiskModeHasPrismTemplates 通过(AD-4)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "JS 用 resp.data 解包(AD-8);股价叠加为双轴(左轴指标/右轴价格);增速由 JS 从季度序列现算;年度切换为 JS 端 4 季聚合不新增请求;风格对齐既有 prism 模板",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/api/... -count=1 全绿(含 TASK-012 既有测试)",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "【⚠ Leader 更正：初稿写「mux 返回裸 404」是错的，实测为 **200 + dashboard HTML**】`server.go:224` 的 `if deps.PrismSankey != nil` 使 prism 未启用时 `/api/prism/fundamental` **不注册**，而 `server.go:324` 的 `s.mux.HandleFunc(\"/\", webHandler.Dashboard)` 是 catch-all——**Go 的 ServeMux 会把所有未匹配路径交给它**，包括 `/api/` 前缀（`/api/` 没有自己的 catch-all，只有具体路径注册）。实测：`/api/prism/fundamental?symbol=MSFT` 未注册时返回 **200** 和 `<html>dashboard</html>`。后果比 404 严重得多——前端 `fetch(...).then(r => r.json())` 拿到 HTML，`JSON.parse` 抛异常；而「功能未启用」在页面上与「该标的无数据」完全无法区分。**要求**：(a) 把 `/api/prism/fundamental` 改为**无条件注册**、`deps.PrismSankey == nil` 时返回带原因的 JSON 404（沿用 TASK-012 在 web 侧的处置模式，见其 discovery）；(b) 用**负向断言**钉住——未启用时请求该 API 必须得到 404 且响应体是 JSON、不含 dashboard 标志；(c) 注意与 TASK-011 的 `TestSankeyRoutesRegistration`（断言「nil 不注册」）**语义相反**，须同步更新该断言而非当作回归失败。**⚠ 同一缺陷也存在于 `/api/prism/sankey`**（TASK-011 交付，已 verified）——一并修复，两个 API 由同一个 nil 判断控制。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-012"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-012"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-24",
+  "packages": [
+    "./internal/api/handler/web",
+    "./internal/api",
+    "./internal/api/handler/api"
+  ],
+  "assignment_epoch": 4,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-11",
+  "discovery": ".arcforge/discoveries/TASK-013.json",
+  "coverage_floor": 58,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-9"
+}

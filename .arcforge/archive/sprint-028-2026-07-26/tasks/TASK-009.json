@@ -1,0 +1,57 @@
+{
+  "id": "TASK-009",
+  "title": "sankey Service 装配层(Analyze / Fundamental)",
+  "description": "新建 internal/prism/sankey/service.go: ServiceStore 窄接口、NewService、Analysis/PeriodView/FundamentalView 结构与 Analyze/Fundamental 两个方法。签名与 ROE(TTM) 口径见 01-design/design-spec.md §3.3。内存 fake store 沿用 refresh_test.go 惯例。 【顺带补测(test-agent-6 在 TASK-007 验证中发现的 3 个存活变异体,均非 DoD 违反,同包顺带做)】(a) M11 优先: TestBuildPeriodsFYAggregation 的 fixture 里 GrossMargin/OpMargin 各季比率恒定(0.6/0.6/0.6/0.6 与 0.3×4),导致「加权」与「取平均」结果完全相同、这两行断言对「FY 比率须用求和后分子分母重算」这一属性**无区分力**(实测仅改 GrossMargin 或仅改 OpMargin 的变异体均存活,只有 NetMargin 因数值不等比才杀得掉)。修法一行: 把某一季改成非等比(如 2025Q3 的 gp 由 72b 改 70b),三行即都有区分力。(b) M8: 空 FiscalPeriod 的**主表行**跳过未被测试 —— 与分部行不同,主表行的跳过有可观测行为(去掉会产出 Period==\"\" 的无名列排在最前,TASK-009 会渲染出来),AD-9 明说标签可为空即真实场景。(c) M9: 桑基侧「模板分部在本期无数据」未被测试(矩阵侧已有),真实场景是分部中途新增/裁撤,当前行为正确(跳过→落进 other_segment)但无回归保护",
+  "module": "prism-sankey",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/sankey/service.go",
+    "internal/prism/sankey/service_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Analyze 在 from/to 皆为空时走 DefaultSelection,返回的 Granularity 与 DefaultSelection 的返回值一致,Periods 每项含 Period/Graph/Metrics;并且 **AD-22: BuildSankey 产出的 Graph.Notes(负残差/0 宽节点的显式记账)必须原样透传进对应 PeriodView 不得丢弃** —— 丢了前端 footnote 就没有数据源,负残差退回「图上凭空少一块且无人知情」的静默失真",
+      "Analyze 传入 from/to 时按范围过滤;granularity=fy 时 Periods 为财年聚合结果",
+      "AD-15 期数上限: 超过上限时只返回最近 10 期且 Truncated 为 true;≤10 期时 Truncated 为 false(负向断言)。**口径区分(Leader 更正,test-agent-6 指出)**: 生产代码必须 import TASK-007 导出的 sankey.MaxPeriods 常量、不得自己写 10 —— 这是「统一上限」的保证;但**测试断言必须写死期望值 10,不得写 require.Len(sel, MaxPeriods)** —— 否则把常量改成 8 时测试会跟着变、永远为绿,变异体杀不掉。测试的期望值必须独立于被测代码才有锚定作用,两件事别混",
+      "Analyze 对未配置模板的 symbol 返回 ErrNoTemplate 哨兵错误(可被 errors.Is 判定)",
+      "Fundamental 返回季度序列 + ROE(TTM) + price_daily 的 Dates/Closes;无 fundamental_q 数据时返回 prismstore.ErrNotFound"
+    ],
+    "boundary": [
+      "AD-14: ROE(TTM) 在 Equity 为 0 或 NaN 时为 NaN(不产生 Inf,否则 json.Marshal 报错使 API 500);Template.Lang 按 lang 参数返回 zh 或 en 的分部显示名",
+      "fundamental_q 有行但新 5 列全为 NULL(迁移后尚未重刷)时 Analyze 不报错,相关节点为 NaN 交前端渲染为「—」"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 全绿(含 TASK-003/007 既有测试)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-007"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002",
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-17",
+  "packages": [
+    "./internal/prism/sankey",
+    "./internal/storage/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-8",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-6"
+}

@@ -1,0 +1,81 @@
+{
+  "task_id": "TASK-019",
+  "by": "dev-agent-21",
+  "key_findings": [
+    "**结构性论证（本任务的核心交付物，DoD functional[1](a)）**：变异目标是 periods.go:205-208，即 sameQuarter(a,b) 中 `ta, err := time.Parse(time.DateOnly, a); if err != nil { return false }`。该分支被执行的**充要条件**是三条同时成立：(1) segmentsAt(periods.go:135-139) 的 for-range 循环体以某个 bucketEnd 执行（a := bucketEnd）；(2) bucketEnd != end，否则 sameQuarter 在 202 行 `a == b` 处提前 return true；(3) bucketEnd 不可被 time.Parse(time.DateOnly) 解析。新 fixture 令 byPeriod[\"2026Q3\"] 恰有**一个**桶键 \"n/a\"：对一元 map，for-range 必然且仅有一次访问该唯一键——`segmentsAt` 的「命中即 return」在只有一个候选时无从短路，故 (1) **必然**成立且**与遍历顺序无关**；(2) \"n/a\" != \"2026-03-31\"、(3) \"n/a\" 不是 DateOnly 日期，二者都是 fixture 的静态性质。三条合起来 ⇒ 该分支必然执行 ⇒ 变异必然被杀，p = 1（不是「p 很高」）。",
+    "**为什么旧用例只是概率性守护**：TestBuildPeriodsUnparsablePeriodEnd 的 byPeriod[\"2026Q3\"] 有两个桶键（先插入的合法 \"2026-03-31\"、后插入的 \"n/a\"）。若先遍历到合法桶，sameQuarter(\"2026-03-31\",\"2026-03-31\") 在 `a == b` 处 return true，segmentsAt 立即返回，\"n/a\" **根本不进** sameQuarter，条件 (1) 不成立，变异存活。按 AD-27 的插入顺序模型（2 键占槽位 0、1，起点为 0~7 随机偏移，只有偏移恰为 1 时后插入的键才先被访问）预测单次检出 p = 1/8 = 0.125。**实测印证：M1 对旧用例单跑 100 次红 14 次 = 0.14**（p=0.125 时 sd=0.033，落在 0.45 个标准差内）。",
+    "**p 是 fixture 的属性而非代码的属性（AD-27 已立，本任务再次坐实）**：同一份生产代码、同一个变异 M1，仅因 fixture 里桶的个数不同，检出率就从 0.14 变成 1.00。修法不是「加大 N」而是「把候选桶减到 1」——消除随机性本身，而不是压低随机性的后果。",
+    "**结构性前提被机制化锁住，不只是写在注释里**：新用例在调用 BuildPeriods 之前先对 fixture 自检 —— require.Len(ends,1)（只有一个桶）/ require.NotEqual(funds[0].PeriodEnd,end)（桶不等于本期期末）/ require.Error(time.Parse(...))（桶不可解析）。这三条正是论证的 (1)(2)(3)。后人往 segs 里补一行合法桶、或把 \"n/a\" 改成合法日期，会**立刻红**，而不是悄悄退回概率性守护——AD-27 记的「fixture 里两行的列出顺序静默决定测试可靠性」正是这种无信号退化，本用例把它变成有信号。",
+    "**覆盖率非确定性的根因被消除，且直接实测到**：BASE(HEAD=7059066) 连采 8 次 = 97.5% × 6 / 97.8% × 2（复现了 AD-27 记录的 12 次里 10/2 的分布）；改造后连采 8 次 + 简化后再采 6 次，**共 14 次全部 97.8%，零波动**，且**钉在原来那个较高的读数上**——即那 0.3pp 的抖动确实就是这一个分支时执行时不执行造成的。今后 sankey 包的覆盖率读数可作确定值使用。",
+    "**M2（第二个 parse 失败分支，tb）本来就是确定性的，无需改造**：它经由 distinctQuarters(periods.go:188-195) 到达，而那里的 ends 已被 sort.Strings 排序，\"2026-03-31\" < \"n/a\" 恒成立，故 sameQuarter(a=\"2026-03-31\", b=\"n/a\") 每次都在第二次 parse 失败。实测 M2 在旧用例、新用例、全包三档均 20/20。**同一个函数里两个形态完全对称的分支，一个 p=0.125 一个 p=1，差别全在调用点是 map 遍历还是排序后遍历**——这条差异从代码本身看不出来，必须走到调用点。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增独立的顶层用例 TestBuildPeriodsOnlyUnparsableSegmentBucket，而不是把新场景做成既有用例的 t.Run 子测试或改造既有 fixture",
+      "rationale": "DoD boundary 条明令既有 TestBuildPeriodsUnparsablePeriodEnd 保留且仍通过。若把两个场景合进一个表驱动用例，既有用例的代码形态就被改写了，且两者断言的东西不同（旧的断合法桶的值 34b 被正确取到，新的断没有任何分部数据），硬合并会让两条断言互相稀释。两个用例相邻放置，并在旧用例上方补注释点明「它覆盖真实数据形态、分支可达性由下一个用例负责，两者不可互相替代」。"
+    },
+    {
+      "decision": "在测试内对 fixture 做 require 自检（结构性前提三条），而不是只把论证写进注释",
+      "rationale": "本任务要交付的是「p=1」这个性质，而该性质的载体是 fixture 的结构（只有一个桶），不是任何一行断言。注释挡不住后人加一行 sr(...)——AD-27 记录的那个「为排版调换两行顺序，测试从 7e-19 漏检变成 6.8% 漏检、且照样绿」就是先例。自检把「退回概率性守护」这件事从无信号变成立刻红。代价是 6 行测试代码，且不依赖任何被测生产代码。"
+    },
+    {
+      "decision": "不改动 periods.go 一个字符；本任务纯属测试侧改造",
+      "rationale": "sameQuarter 的行为是对的（TASK-007 discovery 已论证「解析失败故意返回 false，猜测会让防御失效」）。问题在于测试只在部分跑动中执行到它。改生产代码（例如让 segmentsAt 遍历完所有桶）会为了可测性改变已验证的语义，是本末倒置。"
+    },
+    {
+      "decision": "变异记录同时报「旧用例单跑」「新用例单跑」「全包」三档，而不是只报全包的满分",
+      "rationale": "test-agent-6 在 TASK-020 复盘里立的规矩：满分的 N/M 不足以说明健壮性，还要问它是在哪个档位上测出来的。只报全包 20/20 会把「是哪个用例在杀」这件事糊掉；分档报出后，改造前(旧用例 14/100)与改造后(新用例 20/20)的**翻转**才是可对照的证据。"
+    },
+    {
+      "decision": "采纳 code-simplifier 的合并建议：把结果断言的 for 循环 + NotContains/Empty 双断言收敛为单条 assert.Empty(got[0].Segments)",
+      "rationale": "上一行 require.Len(t,got,1) 已把 got 锁死为单元素，range 读起来像多期扫描实则只跑一次；且对 map 而言 Empty 严格蕴含 NotContains(\"cloud\")，失败时 Empty 的诊断信息更完整。DoD error_handling 要求「不出现在结果的任何 PeriodMetrics 中」——在 got 恰为 1 元素且已被 require 锁死的前提下，二者等价。**简化后全套变异证据与覆盖率采样已重跑**，结论一字未变（见 verification.post_simplify_recheck）。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/sankey/periods_test.go（唯一改动文件：新增 TestBuildPeriodsOnlyUnparsableSegmentBucket 共 34 行；给既有 TestBuildPeriodsUnparsablePeriodEnd 上方补 3 行注释，其代码逻辑一字未动）"
+  ],
+  "interfaces_exposed": {
+    "production_code": "无。periods.go 未改动，BuildPeriods/sameQuarter/segmentsAt 的签名与行为完全不变，对 TASK-009/012 等下游零影响。",
+    "for_downstream_test_authors": "复用要点——凡是被『命中即 return』的循环包着的防御分支，其可达性取决于 fixture 里有几个候选。要证明该分支被覆盖，把候选减到 1 是结构性做法；加大重跑次数只是降级方案（AD-27）。本用例的 fixture 自检段（require.Len/NotEqual/Error）可直接照搬到同类场景。",
+    "harness": "变异 harness（三重防护，非仓库产物，位于本次会话 scratchpad）：字面替换命中数须恰为 1 / go build ./... 编译守卫 / 还原后 git diff --quiet。两条守卫均已自检证明会真的触发，见 verification.harness_self_test。"
+  },
+  "verification": {
+    "commit_base": "证据全部采于 e415da9（父提交 7059066）；改动仅 internal/prism/sankey/periods_test.go，+45 行，periods.go 未改。dev_done 已先于 commit 落盘。",
+    "red_green": "本任务是测试侧加固，生产代码已正确，故 RED 由变异体承担：施加 M1 后新用例 20/20 全红（RED），还原后 20/20 全绿（GREEN）。",
+    "structural_argument_ad27": "见 key_findings 第 1 条。p=1 是从 fixture 结构推出的，不是从跑动次数推出的；因此 DoD non_functional 里那条 N = ceil(ln(target)/ln(1-p)) 的反推**不适用**（p=1 时 (1-p)^N = 0，N 取任意值漏检率均为 0），也不需要声明 target。",
+    "mutation_log_ad27": [
+      "口径：一律为**用例层面**的『N 次中红了几次』（每次 = 一次独立的 go test -count=1），不是单次函数调用层面。",
+      "M1 = periods.go:207 `return false` → `return true`（sameQuarter 首个 time.Parse 失败分支，a=bucketEnd）",
+      "  · 旧用例单跑 -run '^TestBuildPeriodsUnparsablePeriodEnd$'：30 次红 4 次；加大样本 100 次红 14 次（p≈0.14，与 AD-27 插入顺序模型预测的 1/8=0.125 相容）——**这是改造前的守护强度**",
+      "  · 新用例单跑 -run '^TestBuildPeriodsOnlyUnparsableSegmentBucket$'：**20 次红 20 次**（简化前后各测一轮，两轮均 20/20）",
+      "  · 全包 -run '.'：**20 次红 20 次**（简化前后各测一轮，两轮均 20/20）",
+      "M2 = periods.go:211 `return false` → `return true`（第二个 parse 失败分支，b=end）——非 DoD 要求，附带测量",
+      "  · 旧用例单跑 20/20、新用例单跑 20/20、全包 20/20：该分支经排序后的 distinctQuarters 到达，本来就是确定性的，无需改造",
+      "对照组（未施加任何变异）：全包 10 次红 0 次、新用例单跑 10 次红 0 次，简化后全包再测 10 次红 0 次——证明杀手用例不是恒红。",
+      "存活变异：**无**。未出现任何需要判断『是否语义等价』的存活项（AD-27 第 4 条不适用于本轮）。"
+    ],
+    "harness_self_test": {
+      "note": "AD-27 §4「变异脚本跑完了不等于跑对了」——本轮主动自检了两条守卫，二者都**真的触发了**，不是摆设。",
+      "guard_compile": "注入必然编译失败的变异体 MBAD（`return undefinedIdentOnPurpose`）→ harness 判 COMPILE_FAIL 并 exit 4、**排除计数**，未误记为 SURVIVED；自动还原后 git diff 干净。",
+      "guard_hit_count": "手工预先给 periods.go 施加一份 M1（模拟『还原失败导致变异累积』），再跑 harness M1 → 替换命中数 = 0 ≠ 1 → 判 HARNESS_FAIL exit 3，并自动 git checkout 还原，未产出任何计数。",
+      "guard_restore": "每一轮成功跑动收尾都执行 git checkout -- periods.go 后 git diff --quiet 校验，本轮**全部通过**；末态 git status 中 internal/ 下只有 periods_test.go 一个改动。",
+      "vet_vs_build": "AD-27 与 DoD 措辞为 `go vet`，本轮实际用 `go build ./...` 作编译守卫（对编译问题更直接、实质等价或更强），另在 build 之后附跑 go vet ./internal/prism/sankey/（无输出）。与 test-agent-9 在 TASK-011 记的 §4.5 字面偏差为同一处，非阻断。"
+    },
+    "coverage_ad27_multisample": {
+      "method": "go test ./internal/prism/sankey/ -cover -count=1，逐次独立跑动取读数；BASE 在 scratchpad 的独立 git worktree(HEAD=7059066) 上测，已 worktree remove + prune 清理。",
+      "base_8_samples": "97.5, 97.5, 97.8, 97.5, 97.8, 97.5, 97.5, 97.5 → 6×97.5 / 2×97.8，**非确定**（复现 AD-27 记录的 10/2 分布）",
+      "after_8_samples": "97.8 ×8 → **零波动**",
+      "after_simplify_6_samples": "97.8 ×6 → **零波动**（合计 14 次采样全部 97.8）",
+      "conclusion": "非确定性已消除，且钉在较高读数 97.8%（相对 BASE 的众数 97.5% 为 +0.3pp，无倒退）。残留波动：无。"
+    },
+    "regression": {
+      "full_suite": "go test ./... -count=1 全仓 20 个含测试的包全部 ok，无 FAIL",
+      "build": "go build ./... 干净",
+      "vet": "go vet ./internal/prism/sankey/ 无输出",
+      "gofmt": "gofmt -l internal/prism/sankey/ 为空",
+      "existing_test_preserved": "TestBuildPeriodsUnparsablePeriodEnd 保留、代码逻辑一字未改、单跑与全包跑均 PASS（DoD boundary 条满足）"
+    },
+    "simplifier": "已按全局规范调用 code-simplifier:code-simplifier；其唯一改动为合并结果断言（见 decisions 第 5 条），fixture 自检段与结构性论证注释按硬约束原样保留。**简化后全套变异证据与覆盖率采样已重跑，结论未变。**",
+    "not_mine": "工作区中 .claude/hooks/task-completed.sh 的改动与未跟踪的 .claude/hooks/task-completed.sh.bak 非本任务所为，不会带进本次 commit（.claude/ 运行时资产对我只读）。"
+  }
+}

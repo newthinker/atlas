@@ -1,0 +1,131 @@
+{
+  "task_id": "TASK-012",
+  "by": "dev-agent-22 (RED/GREEN 实现) + dev-agent-23 (变异测试/simplifier/收尾)",
+  "key_findings": [
+    "**既有陷阱(本任务最重要的发现,比 DoD 写的更严重)**: 未注册的 `/prism/...` 路径会落到 `s.mux.HandleFunc(\"/\", webHandler.Dashboard)` 这个 catch-all,返回的**不是裸 404 而是 200 的 dashboard**。用户从书签打开一个被关掉的 prism 页面,看到的是一个正常渲染的仪表盘,根本不知道自己看的不是财报桥——比裸 404 更误导。故 `/prism/sankey/` 路由**无条件注册**(刻意放在 `if deps.PrismStore != nil` 块**之外**),service 为 nil 时由 handler 给解释性 404。**实测探针数据(dev-agent-23 用临时用例实证,非推断,跑完即删)**: prism 全关时 `/prism/board` `/prism/compare` `/prism/detail/MSFT` 三者**全部 200 + 2896 字节的 dashboard HTML**,而 `/prism/sankey/MSFT` 为 **404 + 139 字节**解释性文案。**既有三个页面至今仍有此问题,不在本任务 scope,建议单开任务修**(修法就是本任务这一段:把注册移出 nil 判断,handler 内给解释性 404)。",
+    "**`response.JSON` 包了一层,404 的 error 在 `resp.data.error` 而非 `resp.error`**: 400/404 走 `response.JSON` → 错误落在 `resp.data.error`;500 走 `response.Error` → 落在 `resp.error.message`。页面 JS 三种形态全部处理: 非 JSON 响应体(路由未注册的裸 404,`JSON.parse` 抛异常)→ MSG_NOT_REGISTERED;`resp.data.error`;`resp.error.message||code`。**既有 prism_compare.html 在这一点上有缺陷(AD-8),勿照抄**。",
+    "**typed-nil 陷阱**: `deps.PrismSankey` 是具体类型 `*sankey.Service`,直接赋给接口字段 `SankeyAnalyzer` 会得到「接口非 nil 但内部指针为 nil」的 typed-nil,使 handler 里的 `h.sankeySvc == nil` 判断**失效**并在首次调用时 panic。故 server.go 侧先 `if deps.PrismSankey != nil` 再 `SetPrismSankey`,让接口字段保持真 nil。`TestSankeyPageRouteRegistration/sankey service 为 nil 时页面仍解释原因` 守着这条。",
+    "**G4 的两个环测的不是同一件事(M6 变异体实证)**: 让页面 handler 不收集 Notes(API 仍返回 note)时,`页面环` 20/20 红而 `API 环` 20/20 绿。说明端到端用例必须**两环都断言**才算贯通——只断言 API 环,页面丢弃 Notes 不会被发现;只断言页面环,引擎不产 note 与页面不渲染无法区分。这正是 DoD functional[4] 要消除的「各自绿灯不等于链路贯通」。",
+    "**code-simplifier 发现并已修复的真实缺陷**: `renderView` 里 `renderSingle(d); singleChart.resize();`,而 `renderSingle` 在 `periods` 为空时于 `if (!p) { return; }` 提前返回,此时 `singleChart` 仍是 null → 切到「单期大图」直接抛 TypeError,整页 JS 停摆。触发条件真实可达: 标的有模板但该 from/to 范围内无报告期。已加一行判空并附注释说明原因。**该修复无自动化测试覆盖(Go 测试跑不了 JS),是本任务已知的覆盖缺口**,靠代码注释防回归。`renderStack` 无条件 init,不受影响。",
+    "**scratchpad 目录被同会话并行 agent 共享**: dev-agent-22 的 `ckpt.md` 曾被 dev-agent-21 覆盖。临时文件必须用带实例名的独立文件名(本任务用 `dev23_*` 前缀),勿用 `ckpt.md`/`out.log` 这类通用名。"
+  ],
+  "decisions": [
+    {
+      "decision": "`/prism/sankey/` 路由无条件注册,不放进 `if deps.PrismStore != nil` 块",
+      "rationale": "放进去的话 prism 关闭时该路径落到 `/` catch-all,返回 200 的 dashboard(已实测)。无条件注册 + handler 内 nil 判断 → 稳定给出解释性 404,把「功能未启用」与「该标的无数据」在页面上区分开。代价是多注册一条路由,可忽略。"
+    },
+    {
+      "decision": "页面**服务端**渲染一份 Notes 为 footnote,而不是只靠 JS fetch 后渲染",
+      "rationale": "AD-22 的 Notes 是「图上看不出来但影响解读」的信息(负残差被画成 0 宽)。只靠 JS 渲染的话,JS 未执行/出错时这条信息静默消失,而图仍然画得出来——用户看到一张少了一块且无人告知的图。服务端渲染让这条链在无 JS 时也成立,也让 G4 端到端用例能在 Go 测试里断言(无 JS 引擎)。"
+    },
+    {
+      "decision": "三条 404 文案定义为 handler 侧常量,且测试做**两两交叉**校验(各自含自身关键词 + 不含他者关键词),而非仅断言三者不相等",
+      "rationale": "仅断言「三者不相等」时,把三条文案改成互相包含对方关键词的近义句仍能全绿(M2 变异体正是这个形状),而用户依然分不清三种原因。两两交叉校验把 M2 20/20 杀死。"
+    },
+    {
+      "decision": "非法 `granularity` 按「未指定」传空串给 service,而不是回落到 `q`",
+      "rationale": "回落到 q 会让页面控件显示的粒度与引擎实际用的粒度可能不一致;传空串则由引擎自选,页面显示 `a.Granularity`(引擎实际选的那个),用户看到的粒度永远等于生效的粒度。"
+    },
+    {
+      "decision": "把 handler.go 两处重复的 pages 列表提取为包级 `pageNames`(code-simplifier 提出,已采纳)",
+      "rationale": "`NewHandler`(磁盘)与 `NewHandlerWithFS`(embed)原本各自维护一份逐字相同的列表,新增页面漏改其一 → 单测(走 embed)全绿而 `atlas serve`(走磁盘)启动即失败。这正是 AD-4 那一类漂移,提取到一处使其**结构上不可能**发生,强于再加一条测试。"
+    },
+    {
+      "decision": "变异测试报「N 次中红了几次」并附**结构性确定性论证**,而非只报 20/20",
+      "rationale": "AD-27: 20/20 本身不说明健壮性,要说明它是在哪个档位测出来的。本任务 7 个变异体的判杀路径**不含任何由 map 遍历序决定的分支**——note 是否产生由 `value < 0` 的确定性算术决定,periods/notes 都是 slice(顺序确定),404 用例里唯一的 map(`bodies`)是**全遍历**(检查的断言集合与遍历序无关,只有失败消息的先后会变)。故 p=1 是结构性的,20/20 是确认而非依据,不存在 AD-27 里 `(1−p)^N` 的降级情形。"
+    }
+  ],
+  "files_modified": [
+    "internal/api/handler/web/prism_sankey.go (新增: SankeyAnalyzer 接口、SetPrismSankey、PrismSankey handler、三条 404 文案常量、sankeyNote)",
+    "internal/api/handler/web/prism_sankey_test.go (新增: 9 个用例,含三种 404 交叉校验与 Notes/Conflicts 对偶断言)",
+    "internal/api/handler/web/templates/prism_sankey.html (新增: embed 侧模板)",
+    "internal/api/templates/prism_sankey.html (新增: 磁盘侧模板,与上者逐字节一致 —— AD-4)",
+    "internal/api/handler/web/handler.go (新增 sankeySvc 字段;两处 pages 列表提取为包级 pageNames 并加入 prism_sankey.html)",
+    "internal/api/server.go (setupRoutes 无条件注册 /prism/sankey/,含 typed-nil 判断)",
+    "internal/api/sankey_e2e_test.go (新增: G4 四环端到端用例 + 路由注册用例;sankeyNotesResp 与 newSankeyPageServer 消重)"
+  ],
+  "interfaces_exposed": {
+    "types": [
+      "type SankeyAnalyzer interface { Analyze(symbol, from, to, granularity, lang string) (*sankey.Analysis, error) } —— 页面只需要 Analyze,故比 api 层的 SankeyService 更窄;*sankey.Service 已满足",
+      "func (h *Handler) SetPrismSankey(a SankeyAnalyzer)",
+      "func (h *Handler) PrismSankey(w http.ResponseWriter, r *http.Request, symbol string) —— symbol 由 server.go 侧 TrimPrefix 剥离后传第三形参(照 PrismDetail)"
+    ],
+    "route": "GET /prism/sankey/{symbol}?granularity=q|fy&lang=zh|en&from=&to= —— **无条件注册**;`Dependencies.PrismSankey` 为 nil 时返回带原因的 404 而非裸 404/dashboard",
+    "page_ids": "sankey-grid, sankey-single, sankey-stack, sankey-matrix, sankey-notes, sankey-conflicts, sankey-error, sankey-scale-note, range-from, range-to, single-period, gran-btns(data-g=q|fy), lang-btns(data-l=zh|en), view-btns(data-v=grid|single|stack), tmpl-badge",
+    "contract_for_downstream": "**给 TASK-013(下一个 web 页面)的契约 —— 复用本任务的模式时请照抄这 7 条**:\n(1) **路由必须无条件注册**。放进 `if deps.XXX != nil` 块里,功能关闭时该路径会落到 `/` 的 catch-all 并返回 **200 的 dashboard**(已实测: 2896 字节的仪表盘 HTML)。正确做法: 注册放在块外,`if deps.XXX != nil { webHandler.SetXXX(deps.XXX) }` 放在块内,handler 首行判 nil 给解释性 404。\n(2) **接口字段判 nil 前先防 typed-nil**。`deps.XXX` 是具体指针类型,直接赋给接口字段会让 `== nil` 失效并在首次调用 panic。必须在 server.go 侧先判具体类型非 nil 再 Set。\n(3) **AD-8: JS 用 `resp.data` 解包**;错误码在 `resp.data.error`(400/404,走 response.JSON)或 `resp.error.message`(500,走 response.Error);**响应体可能根本不是 JSON**(裸 404),必须 `JSON.parse` 套 try/catch 并给出「功能未启用」而非「无数据」。prism_compare.html 此处有缺陷,**照 prism_detail.html / prism_sankey.html 写**。\n(4) **AD-4: 模板写两处**(`handler/web/templates/` 与 `internal/api/templates/`)且逐字节一致;页面名加进 handler.go 的**包级 `pageNames`**(本任务已把原来的两份列表合一,现在只需改一处)。建议照抄 `TestSankeyTemplateDirsInSync` + `TestNewHandlerDiskModeRendersSankey` 这对用例。\n(5) **任何数值字段都可能是 null**(NaN 与 ±Inf 都映射为 null),前端渲染为「—」,勿假定为数字。参见模板里的 `fmt`/`pct`/`num` 三个辅助函数,可直接复用。\n(6) **多种 404 必须文案互异**,且测试要做**两两交叉校验**(各含自身关键词 + 不含他者关键词);只断言「互不相等」挡不住互相包含关键词的近义句(M2 变异体已证)。\n(7) **端到端用例要两环都断言**(API 环 + 页面环)。只断言一环时,「页面丢弃数据」或「引擎不产数据」中的一种会漏检(M6 变异体已证: 页面 handler 不收集 Notes 时 API 环 20/20 全绿)。"
+  },
+  "mutation_testing": {
+    "method": "自建 harness(AD-27 第 4 条三重防护): (a) 每个变异体施加**前后**都用 sha256 与 pristine 副本逐文件比对,堵「还原失败 → 变异累积 → 全报 KILLED 的假阳性」(本 sprint 已独立发生三次);(b) 施加后 `go build ./...`,堵「编译失败无 FAIL 行,与变异存活输出形态相同」;(c) 替换命中次数**精确断言**(不符即中止并还原),堵「模式未命中 → 源码没被改 → 全绿被误读」。另加 **NULL 对照**(不施加任何变异跑满 N 轮,必须 0 red,证明 harness 不会凭空报红且基线无 flaky-red)与**收尾 `git diff` 空**的全局闸门。",
+    "runs_per_mutant": 20,
+    "note_on_N": "7 个变异体全部 **20/20 红**。**p=1 是结构性的,不是靠 N 压出来的**: 判杀路径不含任何由 map 遍历序决定的分支(note 产生与否由 `value < 0` 的确定性算术决定;periods/notes 均为 slice;404 用例里唯一的 map 是全遍历,断言集合与遍历序无关)。按 AD-27「先问能不能让它必然发生,再问跑多少次才够」,本任务属前者,`(1−p)^N` 的降级估算不适用。",
+    "mutants": [
+      {
+        "id": "M1",
+        "mutation": "三条 404 文案改成同一句「该标的暂无数据」",
+        "red": "20/20",
+        "killed_by": "TestPrismSankeyThreeDistinct404s(三个子用例全红) + 连带 TestSankeyPageRouteRegistration 两个子用例"
+      },
+      {
+        "id": "M2",
+        "mutation": "三条文案仍互不相同,但每条都含另两条的关键词(只削弱「两两不含他者关键词」这一条断言)",
+        "red": "20/20",
+        "killed_by": "TestPrismSankeyThreeDistinct404s —— 证明交叉校验比「互不相等」强"
+      },
+      {
+        "id": "M3",
+        "mutation": "模板丢弃 Notes 渲染(ul 容器仍在,只是不输出内容)",
+        "red": "20/20",
+        "killed_by": "TestPrismSankeyNotesRenderedAsFootnote + G4 页面环"
+      },
+      {
+        "id": "M4",
+        "mutation": "模板无条件印一句含「按 0 宽绘制」的固定 footnote",
+        "red": "20/20",
+        "killed_by": "Notes 对偶子用例 —— 证明对偶断言有牙,页面不能靠恒印蒙混"
+      },
+      {
+        "id": "M4b",
+        "mutation": "模板无条件印一句含「税项及其他」的固定 footnote",
+        "red": "20/20",
+        "killed_by": "Notes 对偶 + G4「正常数据不产生该 footnote」对偶,双靶命中"
+      },
+      {
+        "id": "M5",
+        "mutation": "**真实引擎(periods.go link())照旧算出 note 文本但不再记录**,Service.Analyze 产出 Notes 恒空 —— G4 最关键的一刀",
+        "red": "20/20",
+        "killed_by": "G4 API 环 + 页面环双双红 —— **端到端链路确实贯通到真实引擎**,不是四环各自绿灯"
+      },
+      {
+        "id": "M6",
+        "mutation": "页面 handler 不再把 API 的 Notes 收集进模板数据(API 仍返回 note)",
+        "red": "20/20",
+        "killed_by": "TestPrismSankeyNotesRenderedAsFootnote + G4 **页面环**;**API 环 20/20 全绿**(预期内的不对称,说明两环测的不是同一件事)"
+      }
+    ],
+    "survivors": "无。7 个变异体全部被杀,不存在需要人工判定「测试有洞 vs 语义等价」的存活体。",
+    "post_simplifier_rerun": "code-simplifier 跑完后**原样重跑 N=20**,7 个变异体结果与跑之前**逐条一致**(全部 20/20,含 M6 的 API 环全绿这一不对称),断言强度未被简化削弱。"
+  },
+  "verification": {
+    "build": "GOTOOLCHAIN=local go build ./... 通过",
+    "tests": "GOTOOLCHAIN=local go test ./... -count=1 **全仓库全绿**(非仅目标包);./internal/api/... 六包 + ./internal/prism/... 两包逐条 ok",
+    "gofmt": "gofmt -l 对本任务 5 个 Go 文件均无输出。注: internal/api/handler/web/prism_web_test.go 有格式问题,但 `git show HEAD:...| gofmt -l` 确认**在 HEAD 即已如此**,是既有问题,本任务未触碰该文件。",
+    "template_sync": "diff 两份 prism_sankey.html 无差异(AD-4);TestSankeyTemplateDirsInSync 与 TestNewHandlerDiskModeRendersSankey 均通过",
+    "done_criteria_mapping": {
+      "functional[0] 200 + sankey-grid + echarts.min.js": "TestPrismSankeyPage ✅",
+      "functional[1] 未配置模板 → 404": "TestPrismSankeyThreeDistinct404s/no_template ✅",
+      "functional[2] 粒度/语言/视图/范围 + 矩阵容器": "TestPrismSankeyPageControls(14 个 id/data 属性) + TestPrismSankeyQueryParamsReachService(参数真透传,含非法 granularity 子用例) ✅",
+      "functional[3] AD-22 Notes 渲染为可见 footnote": "TestPrismSankeyNotesRenderedAsFootnote(含对偶) ✅ 变异 M3/M4/M4b/M6 均 20/20 杀死",
+      "functional[4] G4 四环端到端贯通": "TestSankeyEndToEndEngineNoteReachesPage —— 真 YAML → 真 LoadTemplates → 真 sqlite → 真 FundamentalRow(NetIncome 350 > OperatingIncome 300) → 真 BuildPeriods/Service.Analyze → 真 Server.mux → API JSON + 页面 HTML。**全链无 fake、无手工注入 Notes**。变异 M5(引擎不记录 note)20/20 杀死 —— 这是「链路真的贯通」的实证 ✅",
+      "boundary prism 未启用(nil) → 404 不 panic": "TestPrismSankeyThreeDistinct404s/not_enabled + TestSankeyPageRouteRegistration 两子用例 ✅",
+      "non_functional[0] 双模板目录一致 + 两处 pages 列表": "TestSankeyTemplateDirsInSync + TestNewHandlerDiskModeRendersSankey ✅(pages 列表已提取为单一 pageNames,漂移在结构上不可能)",
+      "non_functional[1] AD-8 resp.data + ES5/IIFE/Tailwind + 统一比例尺 + PNG 导出 (verify_by: review)": "TestPrismSankeyJSUnwrapsDataAndGuardsBare404 为静态文本守卫;人工复核确认: IIFE + 全 var/function 无 ES6、clamp 在 [0.5,1](模板 254 行)及其 footnote 说明(sankey-scale-note)、单期大图与堆叠柱各有 saveAsImage toolbox(299/325 行) ✅",
+      "non_functional[2] go test ./internal/api/... 全绿": "✅ 且已扩到全仓库 go test ./... 全绿",
+      "error_handling 三种 404 文案互异": "TestPrismSankeyThreeDistinct404s 两两交叉校验 ✅ 变异 M1/M2 均 20/20 杀死"
+    }
+  },
+  "known_gaps": [
+    "**页面 JS 无自动化测试**: Go 测试无 JS 引擎,浏览器里 JS 再次 fetch API 并重绘 footnote/图表的那一步无法驱动。G4 用例贯通的是「引擎 → 装配 → API/页面 HTTP 响应」,页面侧断言的是**服务端渲染**的 footnote。模板里 4 处最易回归的点(resp.data 解包、JSON.parse 裸 404 分支、接口未注册文案、resp.data.error)靠 TestPrismSankeyJSUnwrapsDataAndGuardsBare404 的**静态文本守卫**兜底,真正判定归 verify_by: review。",
+    "**上一条的直接后果**: 本任务修复的 `singleChart` 判空(periods 为空时切单期大图抛 TypeError)**没有任何自动化测试覆盖**,只有代码注释防回归。",
+    "**既有 catch-all 问题未修,且范围比本任务最初记录的更大**(不在本任务 scope): (a) **web 侧** —— prism 关闭时 `/prism/board`、`/prism/compare`、`/prism/detail/` 均返回 200 的 dashboard(本任务实测坐实: 2896 字节 dashboard HTML,对照 `/prism/sankey/` 的 404 + 139 字节解释性文案);(b) **API 侧(leader 顺此线索查出,比 web 侧更严重)** —— `/api/` 前缀**同样没有自己的 catch-all**,故 `deps.PrismSankey == nil` 时 `/api/prism/sankey` 与 `/api/prism/fundamental` 也落到 `\"/\"` → **200 + dashboard HTML**;前端 `fetch(...).then(r => r.json())` 会拿到 HTML 而非 JSON,`JSON.parse` 直接抛异常。**本任务只修了 web 侧**(server.go 里的注释也只提 `/prism/...`),API 侧属 TASK-011 已 verified 的代码,leader 已把其修复写进 TASK-013 的 DoD(两个 API 由同一个 nil 判断控制,一并修)。web 侧三个既有页面按建议单开任务。"
+  ]
+}

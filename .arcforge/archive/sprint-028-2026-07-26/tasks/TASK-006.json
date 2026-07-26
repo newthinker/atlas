@@ -1,0 +1,60 @@
+{
+  "id": "TASK-006",
+  "title": "refresh 接线(主干流新字段落库 + closes 落 price_daily)",
+  "description": "internal/prism/refresh.go: Store 接口追加 TASK-002 的 5 个方法(UpsertPrices/UpsertSegments/SegmentRows/LatestSegmentPeriodEnd/QuarterlyFundamentals),refresh_test.go 的 fake 同步实现;refreshEdgar(refresh.go:381) 映射 QuarterlyFact→FundamentalRow 时补 TASK-001 的 5 个新字段;refreshEdgar(closes 在 refresh.go:406)与 refreshEngine(closes 在 refresh.go:190)取得 closes 后各自 UpsertPrices 落 price_daily。**约束: 既有 A/H(akshare/lixinger)与美股估值链路零行为变更**;UpsertPrices 失败不阻断估值主流程。接口定义见 design-spec.md §4.1。",
+  "module": "prism-refresh",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "refreshEdgar 落库的 FundamentalRow 携带 GrossProfit/RnD/SGnA/OperatingIncome/IncomeTax 五个新字段(fake store 断言收到的值与 QuarterlyFact 一致,含 NaN 透传)",
+      "refreshEdgar 取得 closes 后调用 UpsertPrices,fake 断言收到的 PriceRow 日期与收盘价与 closes 一致",
+      "refreshEngine 取得 closes 后同样调用 UpsertPrices(两条路径都覆盖)"
+    ],
+    "boundary": [
+      "UpsertPrices 返回 error 时估值主流程仍完成: Report.Refreshed 仍计数,错误记入 Report.Degraded 而非 Failed"
+    ],
+    "error_handling": [
+      "既有 refreshLixinger/refreshAkshare 路径不调用 UpsertPrices(负向断言,A/H 链路零变更)"
+    ],
+    "non_functional": [
+      {
+        "desc": "Store 接口扩展后 refresh_test.go 的 fake 同步实现全部新方法;既有测试断言零修改",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-16",
+  "packages": [
+    "./internal/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-2",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-7"
+}

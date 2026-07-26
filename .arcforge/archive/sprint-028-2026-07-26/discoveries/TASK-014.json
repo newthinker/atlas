@@ -1,0 +1,51 @@
+{
+  "key_findings": [
+    "【阶段二b 端到端通过】临时 config(仅 5 家)+ 临时 DBPath 跑 `atlas prism refresh --full-segments`:退出码 0、**无 panic**、`5 ok, 0 failed, 46 degraded`。落库 segment_revenue 共 281 行:AAPL 75(15 期×5)、NVDA 71、MSFT/GOOGL/AMZN 各 45(15 期×3)。生产库 data/prism.db 在运行路径下根本不存在,绝无触碰。",
+    "【财年数字逐项精确吻合】按 period_end 窗口聚合(**刻意不依赖 fiscal_period 标签**,原因见下条)得到的财年合计,与阶段二a 用解析器复算的结果完全一致,且每家都恰好 4 个季度:MSFT FY2025 productivity 120.810 / intelligent_cloud 106.265 / personal_computing 54.649 = 281.724B;AAPL FY2025 iphone 209.586 / services 109.158 / wearables 35.686 / mac 33.708 / ipad 28.023 = 416.161B;GOOGL FY2025 google_services 342.721 / google_cloud 58.705 / other_bets 1.537 = 402.963B;AMZN FY2025 north_america 426.305 / international 161.894 / aws 128.725 = 716.924B;NVDA FY2026 data_center 193.737 / gaming 16.042 / pro_viz 3.191 / automotive 2.349 / oem_other 0.619 = 215.938B。AD-17 生效:落库只有季度行,FY 期不落库;Q4 由 FY−Σ3季 推导且正确(MSFT productivity Q4 = 120.810 − 87.698 = 33.112,与落库值一致)。",
+    "【⚠ 发布阻断级问题:fiscal_period 标签冲突打穿财年视图】真实 MSFT 数据上,`fundamental_q` 出现标签撞车:2026Q3×2 → [2025-03-31, 2026-03-31];2026Q2×2 → [2024-12-31, 2025-12-31];2026Q1×2 → [2024-09-30, 2025-09-30];2025Q4×3 → [2023-06-30, 2024-06-30, 2025-06-30]。根因链四层:(1) client.go 的 applyDuration 按 period_end 去重取 filed 最新者,而胜出条目的 fy/fp 是**那份较晚报告的上下文标签**而非该期自身财报期,于是较晚 10-Q 里的去年同季继承了当期标签;Q4 标签取自年度条目的 a.fy,而一份 10-K 携带 3 个财年、全部标着报告自身的 fy,故 2025Q4×3。(2) fundamental_q 原样存下(period_end 是 PK,**数据本身没丢**,只有标签撞车)。(3) sankey.buildQuarters 用 `byPeriod[s.FiscalPeriod][s.SegmentKey] += s.Revenue`,同标签的不同季度分部值被**相加**。(4) aggregateFiscalYears 按标签前 4 位分组,`if len(qs) < 4 { continue }` **只挡不足、不挡超出**,6 个季度全部相加。实测后果:BuildPeriods(\"fy\") 报 MSFT FY2025 营收 377.752B(真值 281.7B,+34%)、FY2025 productivity 392.914B(真值 120.810B,**3.25 倍**);FY2026 报 447.115B = 6 个季度相加,且 FY2026 仅发布 3 个季度却被当作完整财年产出;BuildPeriods(\"q\") 出现重复 Period 且 intelligent_cloud=61.432B = 26.751(2025Q3)+34.681(2026Q3)。各包 fixture 每季标签唯一,故单测抓不到 —— 只在真实 EDGAR 数据上触发。**横跨 TASK-001(client.go 标签生成,已 verified)与 TASK-007(periods 聚合,已 verified),超出 TASK-014 授权范围,我未擅改,已报 Leader 裁决。**",
+    "【M3.5 起点数据:放宽 ConsolidationItemsAxis 后的实测结果】AAPL 与 NVDA 的**可报告分部**在实例文档里全部挂在 `ConsolidationItemsAxis × StatementBusinessSegmentsAxis` 的**双 member** context 上(AAPL 15 个 / NVDA 6 个),被 design-spec §1.2「恰好一个 explicitMember」整体排除 —— 用默认轴对这两家是零产出(真实解析器实测确认)。若放宽为「允许叠加 ConsolidationItemsAxis 这一限定轴」,实测可得:AAPL FY2025(2024-09-29~2025-09-27)AmericasSegmentMember 178.353 / EuropeSegmentMember 111.032 / GreaterChinaSegmentMember 64.377 / RestOfAsiaPacificSegmentMember 33.696 / JapanSegmentMember 28.703 = **416.161B**;NVDA FY2026(2025-01-27~2026-01-25)ComputeAndNetworkingSegmentMember 193.479 / GraphicsSegmentMember 22.459 = **215.938B**。两者都是完整分割(合计等于各自 FY 合并营收)。论证:`ConsolidationItemsAxis=OperatingSegmentsMember` 不是真正的第二个维度,而是「这是经营分部视图」的**限定符**(相对于合并/抵消分录),放宽它不削弱 geography × segment 的交叉维防护。Leader 裁决记入 M3.5,本 sprint 不做。",
+    "【ProductOrServiceAxis 上的汇总项必须排除,否则重复计算】三个财年一致、逐项相加分毫不差:AAPL `ProductMember` = iPhone+Mac+iPad+Wearables(FY2025 307.003B);NVDA `DataCenterMember` = Compute+Networking(FY2026 193.737B)。若一并映射,AAPL 朴素合计 723.164B ≈ 真实营收 1.74 倍、NVDA 409.675B ≈ 1.90 倍,且**数字看起来仍像个营收,不会有任何报错**。两家处置形式相反但逻辑一致:AAPL 排父项取五子项、NVDA 取父项排两子项 —— 统一原则是**只映射互不重叠的一层**。汇总项作为未映射 member 进 Degraded,已在 refresh 输出中逐期确认(AAPL ProductMember 15 期、NVDA Compute/Networking 各 12 期)。",
+    "【NVDA 最新季分部结构已变更】2026-04-26 那期(FY2027 Q1)在 ProductOrServiceAxis 上只披露数据中心拆分:DataCenterMember 75.246B、HyperscaleMember 37.869B、AICloudsIndustrialEnterpriseMember 37.377B、EdgeComputingMember 6.369B —— 其中 Hyperscale + AIClouds = 75.246 **恰好等于** DataCenter(前一年同期 2025-04-27 亦然:21.513+17.599=39.112)。Gaming/ProViz/Automotive/OEM 该期未在此轴披露,故该期只落 1 个分部(data_center)。这不是缺陷:Σsegments < Revenue 的差额由桑基 other_segment 残差节点吸收(AD-13),属优雅降级。但模板维护者需知悉该结构变更,若将来要展示 Hyperscale/AIClouds 细分,须同时把 DataCenterMember 从模板移除以免重复计算。",
+    "【阶段一 fixture 判别力修复已按 10/10 标准自验】按 test-agent-7 附录 A 配方,在隔离 worktree 内对 HEAD 逐个变异体精确计数:变异 A(交叉维 !=1→<1)被 TestFetchSegmentRevenueSingleAxisOnly 杀死 **10/10**;变异 B(<divide> 天真实现)被 TestFetchSegmentRevenueUnitFilter 杀死 **10/10**;变异 C(tag 优先级改先到先得,回归哨兵)被 TestFetchSegmentRevenueTagPriority 杀死 **10/10**。全量 `-count=30` ok,无 flaky。test-agent-7 指出的顺序充要条件已满足(字节偏移:C_cross fact 6840 < C_q3_ic fact 7218;EUR 10577 < divide 10769 < undeclared 10983 < U_USD 11182)。首轮我先在被验 commit ee65b69 上复现了「修复前 A/B 存活、C 被杀」,与其报告逐条吻合,以此确认我搭的变异体与它等价。"
+  ],
+  "decisions": [
+    {
+      "what": "财年合计的核对**刻意按 period_end 窗口聚合**,不用 fiscal_period 标签分组",
+      "rationale": "标签冲突正是本次发现的缺陷。若用标签核对,MSFT 会得到 377.752B 而非 281.724B —— 用一个已知有缺陷的键去验证数据正确性,只会把缺陷验成'正确'。period_end 是真实主键(AD-9),按它的窗口聚合才是独立于缺陷的核对口径。"
+    },
+    {
+      "what": "发现 fiscal_period 缺陷后不自行修复,只取证上报",
+      "rationale": "它横跨 TASK-001(client.go 标签生成)与 TASK-007(periods 聚合),两者均已 verified;修任一处都要改已验收的行为契约,需新任务配 DoD 与测试。与 ConsolidationItemsAxis 那次同一边界。已给出两个方向供裁决:治本是让 FiscalPeriod 由 period_end + 财年结束月推导(成为纯函数,天然唯一);治标兼防御是 aggregateFiscalYears 对 len(qs) > 4 也拒绝/告警(现只挡 < 4)。后者即使治本做了也建议保留 —— 上游违约时不应静默出错。"
+    },
+    {
+      "what": "AAPL 与 NVDA 采用 ProductOrServiceAxis,而非等 ConsolidationItemsAxis 放宽",
+      "rationale": "DoD functional[2] 本就写了该预案(「预期 ProductOrServiceAxis,若实测不同则以实测为准并记录」),是授权路径;数字经端到端复算正确;对收入桑基这个具体用途,产品线/市场平台视角可读性更好。放宽轴规则是有实质影响的 spec 变更,应走完整流程而非搭车。"
+    },
+    {
+      "what": "AMZN 用 StatementBusinessSegmentsAxis 而非 ProductOrServiceAxis",
+      "rationale": "AMZN 两个轴都有数据,但 ProductOrServiceAxis 是另一套互不兼容的收入切分(OnlineStores/ThirdPartySeller/Advertising… 外加 Product/Service 两个汇总项),与三大分部同时映射会重复计算。选可报告分部这一套,并在模板注释里写明为何不混用。"
+    },
+    {
+      "what": "把「为什么必须这样」写进模板文件头注释(排除汇总项的理由、选轴的理由、实测数字)",
+      "rationale": "与 fixture 注释同理:这些看似可以'整理优化'的安排,一旦被后人改动不会有任何测试变红 —— 汇总项加回去只会让数字悄悄变成 1.74 倍。注释里带上实测数字,让后人能自行复核而不必重新联网。"
+    },
+    {
+      "what": "变异自验用精确计数而非 `sort -u` 折叠后的输出",
+      "rationale": "首轮我用 `sort -u` 去重,输出只能证明'至少失败一次',不足以支撑 test-agent-7 要求的「10/10 被杀」。改为 `grep -c '^--- FAIL: <用例名>'` 精确计数后重跑,三个变异体各 10/10。声称的强度必须与证据强度一致。"
+    }
+  ],
+  "files_modified": [
+    "configs/prism/templates/aapl.yaml (新建)",
+    "configs/prism/templates/googl.yaml (新建)",
+    "configs/prism/templates/amzn.yaml (新建)",
+    "configs/prism/templates/nvda.yaml (新建)",
+    "internal/collector/edgar/testdata/instance_mini.xml (阶段一:交叉维 fact 前移;三条干扰 fact 改同 tag 并前置)"
+  ],
+  "interfaces_exposed": [
+    "configs/prism/templates/{msft,aapl,googl,amzn,nvda}.yaml —— 5 份模板,经 sankey.LoadTemplates 加载校验通过;segment key 集合:MSFT{productivity,intelligent_cloud,personal_computing}、AAPL{iphone,mac,ipad,wearables,services}、GOOGL{google_services,google_cloud,other_bets}、AMZN{north_america,international,aws}、NVDA{data_center,gaming,pro_viz,automotive,oem_other}",
+    "segment_axis 取值:MSFT/GOOGL/AMZN = StatementBusinessSegmentsAxis(默认);AAPL/NVDA = ProductOrServiceAxis(覆盖)",
+    "各模板 cik 与 configs/config.example.yaml 中同 symbol 的 cik 逐一吻合(AAPL 320193 / GOOGL 1652044 / AMZN 1018724 / NVDA 1045810 / MSFT 789019)",
+    "manual 兜底目录 configs/prism/segments/ **本批未使用**(无公司需要兜底)"
+  ],
+  "verification": "【统计口径(DoD non_functional 要求)】全自动成功 **5 家**(MSFT/AAPL/GOOGL/AMZN/NVDA),manual 兜底 **0 家**,跳过 **0 家**(TSM 为 IFRS/20-F 不在本批,未纳入配置)。【阶段二b】`GOTOOLCHAIN=local go run ./cmd/atlas prism refresh -c <临时config> --full-segments` 退出码 0,输出 `prism refresh: 5 ok, 0 failed, 46 degraded`,全程无 panic。46 条 degraded 逐条核对均为预期:1 条 MSFT yahoo 价格源 EOF → engine 兜底 ok(真实的单家主源失败,**未阻塞其余 4 家落库**,构成 error_handling DoD 的实证);15 条 AAPL ProductMember 未映射;30 条 NVDA Compute/Networking/Hyperscale/AIClouds/EdgeComputing 未映射 —— 全部是刻意排除的汇总项或新增细分。落库 281 行,按 period_end 窗口聚合的财年合计与阶段二a 复算表逐项精确吻合(见 key_findings[1])。【阶段二a】用真实 sankey.LoadTemplates + 真实 FetchSegmentRevenue 回放本地已下载的真实 10-K(零网络)复算 5 家,数字同上;MSFT 六个基准数(FY26Q3 三个 + FY2025 三个)与 Leader 提供的基准逐项吻合。【阶段一】变异 A/B/C 各 10/10 被对应用例杀死,全量 -count=30 无 flaky,详见 key_findings[6]。【回归】edgar 包全绿 93.1%;AD-18 golden 9 份基线逐字节未变;go build ./... 通过;go test ./internal/prism/... ./internal/collector/edgar/ 全 ok。【安全】全程使用临时 config + 临时 DBPath(scratchpad 下),生产库 data/prism.db 在运行路径下不存在,未做任何写入。网络请求:4 份 submissions + 4 份 10-K(阶段二a,串行带 UA)+ refresh 全量重拉(串行,实现内保证无并发)。"
+}

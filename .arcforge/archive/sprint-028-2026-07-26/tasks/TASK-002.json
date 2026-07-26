@@ -1,0 +1,50 @@
+{
+  "id": "TASK-002",
+  "title": "prism 存储层扩展(fundamental_q 迁移 + segment_revenue + price_daily)",
+  "description": "sqlite.go: fundamental_q 扩 5 列(gross_profit/rnd/sgna/operating_income/income_tax)并新增 migrate() 处理存量库(仓库首次引入 migration 机制,当前无 user_version 也无 ALTER);新增 segment_revenue 与 price_daily 两表及 UpsertSegments/SegmentRows/LatestSegmentPeriodEnd/UpsertPrices/PriceSeries 五个方法。schema/迁移代码/SQL 见 01-design/design-spec.md §2。风险提示:runtime prism.db 已有生产数据,迁移只做 ADD COLUMN,不改既有列。新方法风格与既有 UpsertValuations/UpsertFundamentals 一致(事务 Prepare + ON CONFLICT DO UPDATE + toNull/fromNull)。前置: 对 Open 跑 gitnexus impact(upstream)。",
+  "module": "storage-prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/storage/prism/sqlite.go",
+    "internal/storage/prism/sqlite_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestOpenMigratesFundamentalQ: 用旧 schema(无新列)建库后 Open 成功,pragma_table_info 显示 gross_profit/rnd/sgna/operating_income/income_tax 五列全部存在",
+      "迁移不损坏存量数据: 旧库预置若干行 fundamental_q 与 valuation_daily,Open 后行数与抽样行值完全不变,QuarterlyFundamentals 能读回且新字段为 NaN",
+      "fundamental roundtrip 既有测试扩断言: 新 5 字段 NaN↔NULL 双向往返正确",
+      "TestSegmentRoundtripAndAnchor: 主键为 (instrument_id, period_end, segment_key)(AD-9,不用 fiscal_period 这个不可靠展示标签);UpsertSegments 幂等;source=manual 覆盖同键 edgar_segment 行;SegmentRows 按 period_end+segment_key 升序且 fiscal_period 允许为空;LatestSegmentPeriodEnd 为 SELECT MAX(period_end)(不 JOIN fundamental_q)且随数据推进",
+      "TestPriceSeriesFrom: UpsertPrices 幂等(重复 upsert 后行数不增长、值不变)、PriceSeries 的 from 过滤生效、日期升序返回、close 的 NaN↔NULL 往返"
+    ],
+    "boundary": [
+      "无分部数据时 LatestSegmentPeriodEnd 返回 (\"\", nil);PriceSeries 未知 symbol 返回 ErrNotFound(与既有 Series 一致);from 为空串时返回全部",
+      "AD-10 并发迁移容错(真实拓扑: serve 常驻 + prism-daily 定时并发 Open 同一库): migrate 的 ALTER TABLE 遇 duplicate column 错误时视为已被并发迁移而继续,不使 Open 失败;同一库连续两次 Open 幂等;并发 Open ×N 全部成功(测试可用 goroutine 并发 Open 同一路径);另断言新建库与迁移后旧库的 pragma_table_info 列名与类型完全一致(防 schema 常量与 migrate 列表漂移)"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/storage/prism/ -count=1 全绿;既有 valuation/board/series/instrument 测试零断言修改;并在 discovery 记录回滚安全性论证: ALTER TABLE ADD COLUMN 不破坏旧版二进制的显式列名 SELECT(SQLite 契约)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-16",
+  "packages": [
+    "./internal/storage/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-2",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:24Z"
+  },
+  "verifier": "test-agent-7",
+  "discovery": ".arcforge/discoveries/TASK-002.json"
+}

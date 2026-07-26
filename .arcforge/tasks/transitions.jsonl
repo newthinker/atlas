@@ -1,0 +1,17 @@
+{"task":"TASK-001","from":"pending","to":"assigned","by":"leader","at":"2026-07-26T06:04:00Z"}
+{"task":"TASK-001","from":"assigned","to":"in_progress","by":"dev-agent-26","at":"2026-07-26T06:04:48Z"}
+{"task":"TASK-001","from":"in_progress","to":"assigned","by":"leader","at":"2026-07-26T06:30:00Z"}
+{"task":"TASK-001","from":"assigned","to":"in_progress","by":"dev-agent-27","at":"2026-07-26T07:49:52Z"}
+{"task":"TASK-001","from":"in_progress","to":"dev_done","by":"dev-agent-27","at":"2026-07-26T08:15:03Z"}
+{"task":"TASK-001","from":"dev_done","to":"verifying","by":"leader","at":"2026-07-26T08:20:11Z"}
+{"task":"TASK-001","from":"verifying","to":"verified","by":"test-agent-10","at":"2026-07-26T08:38:35Z"}
+{"task":"TASK-002","from":"pending","to":"assigned","by":"leader","at":"2026-07-26T09:23:59Z"}
+{"task":"TASK-002","from":"assigned","to":"in_progress","by":"dev-agent-28","at":"2026-07-26T09:24:46Z"}
+{"task":"TASK-002","from":"in_progress","to":"dev_done","by":"dev-agent-28","at":"2026-07-26T11:40:38Z"}
+{"task":"TASK-002","from":"dev_done","to":"verifying","by":"leader","at":"2026-07-26T13:11:41Z"}
+{"task":"TASK-002","from":"verifying","to":"verified","by":"test-agent-11","at":"2026-07-26T13:47:20Z"}
+{"task":"TASK-003","from":"pending","to":"assigned","by":"leader","at":"2026-07-26T13:52:38Z"}
+{"task":"TASK-003","from":"assigned","to":"in_progress","by":"dev-agent-29","at":"2026-07-26T13:53:36Z"}
+{"task":"TASK-003","from":"in_progress","to":"dev_done","by":"dev-agent-29","at":"2026-07-26T14:16:06Z"}
+{"task":"TASK-003","from":"dev_done","to":"verifying","by":"leader","at":"2026-07-26T14:19:22Z"}
+{"task":"TASK-003","from":"verifying","to":"verified","by":"test-agent-12","at":"2026-07-26T14:29:55Z"}

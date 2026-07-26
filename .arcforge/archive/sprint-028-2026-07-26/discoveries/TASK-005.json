@@ -1,0 +1,72 @@
+{
+  "key_findings": [
+    "【live 校正 1 · 单位过滤】plan 示例写 unitRef=\"usd\",真实文档是 U_USD / U_EUR / U_shares 等**引用 id**,必须解析 <unit> 定义才能判断单位。真实 MSFT 文档里 U_UnitedStatesOfAmericaDollarsShare 是 <divide><unitNumerator><measure>iso4217:USD</measure></unitNumerator><unitDenominator><measure>shares</measure></unitDenominator></divide> —— 即 USD/share(每股口径)。若按「measure 含 USD 就算营收单位」判定,EPS 会被当成分部营收。实现规则:只有**恰好一个直接子 <measure>** 且其 local name 为 USD 才算合格;<divide> 里的 measure 是孙元素,Go encoding/xml 的直接子元素匹配天然把它排除。unitRef 无对应 unit 定义时保守排除(无从确认是 USD)。",
+    "【live 校正 2 · 交叉维规模】Leader 提示「MSFT 没出现交叉维」仅对**分部轴**成立。全文档统计:409 个 context,explicitMember 个数分布 {0:16, 1:276, 2:73, 3:44} —— 多维 context 共 117 个真实存在;276 个单维 context 里只有 18 个落在 StatementBusinessSegmentsAxis 上,其余是 DebtInstrumentAxis(73)/StatementEquityComponentsAxis(68)/ProductOrServiceAxis(48) 等。因此**「单维但轴不匹配」才是压倒性主要干扰**,而非交叉维。两条排除规则缺一不可。",
+    "【live 校正 3 · 命名空间】真实根元素 <xbrl> 用**默认命名空间** http://www.xbrl.org/2003/instance,故 context/entity/segment/period/unit 全部无前缀,只有 xbrldi:explicitMember 带前缀 —— Go encoding/xml 按 local name 匹配即可(字段 tag 不写 namespace 时忽略 ns)。但 dimension 属性值与 explicitMember 文本是 QName **字符串**(us-gaap:StatementBusinessSegmentsAxis / msft:IntelligentCloudMember),encoding/xml **不解析属性值与文本里的前缀**,必须自行按最后一个 ':' 截断。",
+    "【AD-2 双向证实】用真实文档跑真实解析器:一份 10-Q(9.67MB)产出 2 个季度期(本季 2026-01-01~03-31 + 去年同季 2025-01-01~03-31),两个 274 天累计期被期间过滤丢弃;一份 10-K(10.5MB)产出 3 个 FY 期(365/366/365 天)。「一份报告一条 SegmentPeriod」的结构确实不可实现。",
+    "【对账通过】解析器输出与 Leader 提供的基准逐项吻合:2026-01-01~2026-03-31 Productivity 35.013B / IntelligentCloud 34.681B / MorePersonalComputing 13.192B;另复算 FY2025(2024-07-01~2025-06-30) IntelligentCloud 106.265B。校验方式:把真实 msft_sub.json + msft_instance.xml(9.67MB) + msft_10k.xml(10.5MB) 用既有 newSegmentServers helper 喂给真实 FetchSegmentRevenue,零网络调用。探针文件跑完即删,主工作树零残留(git status 已核实)。",
+    "【降级路径被真实数据走通】live 校验里有 3 份报告的实例文档未在本地登记 → 真实 404 → 各自记录并跳过,其余报告照常产出。这条降级路径不是只在人造 fixture 上成立。",
+    "【submissions 规模】filings.recent 平行数组长 1000,其中 10-Q/10-K 共 25 份 —— 回看上限 12 确有必要(25 × ~10MB = 250MB 的首跑风暴)。accessionNumber 形如 0001193125-26-191507,去连字符后即 URL 路径段。",
+    "【测试有效性】fixture 主动构造了 test-agent-7 预告的变异点:instance_mini.xml 里 C_prior_ic 的营收 fact **排在其 context 之前**(TestFetchSegmentRevenueFactBeforeContext 先断言 fixture 中 fact 偏移 < context 偏移,再断言该值被正确关联 —— 前提断言防止用例日后因 fixture 调整而变空洞);<unit> 定义全部放在引用它们的 fact **之后**;低优先级 tag Revenues 排在高优先级 RevenueFromContract… 之前。这三处都能让「依赖出现顺序」的实现挂掉。"
+  ],
+  "decisions": [
+    {
+      "what": "maxInstanceBytes 做成 Client 字段(默认 defaultMaxInstanceBytes=64MB),而非纯常量",
+      "rationale": "造 >64MB 的 httptest 响应在 CI 上不现实。测试压低阈值验证截断行为,另用 assert.Equal(int64(64<<20), defaultMaxInstanceBytes) 单独锁定生产阈值 —— 两条断言合起来才既覆盖行为又覆盖数值,只做其一都是空洞的。"
+    },
+    {
+      "what": "超限判定放在解析结果**之前**返回错误,即使解析本身成功",
+      "rationale": "io.LimitReader 只截断不报错。若截断恰好落在结构边界上,解析会「成功」但返回残缺数据(部分分部缺失),那比直接报错危险得多 —— 缺失会被下游当成真实的 0 或 NaN。故只要读满上限就一律判为不可信并跳过。"
+    },
+    {
+      "what": "NewWithBaseURL(ua, base) 把 archivesURL **也**指向 base,而非留默认的 www.sec.gov",
+      "rationale": "DoD 要求其语义不变(既有 edgar 测试零改动通过,已验证)。若 archivesURL 保留真实 www.sec.gov,任何用该构造器建的测试 client 一旦调用 FetchSegmentRevenue 就会打到线上 SEC —— 静默的真实网络调用比编译错误难发现得多。"
+    },
+    {
+      "what": "recentFilings 显式按 reportDate 降序排序后再截取 12 份,不依赖 SEC 的返回顺序",
+      "rationale": "「最近 12 份」是语义要求。依赖 SEC 恰好按倒序返回属于隐含假设,一旦 SEC 调整顺序会静默拉到最旧的 12 份。用 SliceStable 保证同日期时保持原始顺序,行为可预测。"
+    },
+    {
+      "what": "filings.recent 平行数组按**最短列**截断",
+      "rationale": "五个数组等长是 SEC 的约定而非保证。任一列短一截时直接索引会 panic —— 采集器 panic 会带崩整个 prism-daily 进程。已加 TestFetchSegmentRevenueRaggedSubmissions 覆盖。"
+    },
+    {
+      "what": "SegmentPeriod 的 Form/FilingDate 取该期各 member 来源报告中**最新**的一份",
+      "rationale": "一期的数据可能来自多份报告(部分 member 被重述)。设计文档只定义了「同 (period,member) 取 FilingDate 更晚者」,没定义期级别的 Form/FilingDate 归属。取最新是唯一自洽的选择:它与 member 级择新规则同向,且让下游(TASK-008 的 ±3 天容差匹配)拿到的是该期最后一次披露时间。"
+    },
+    {
+      "what": "降级信息走 log.Printf(\"edgar: skipping segment instance %s: %v\") 而非新增返回值",
+      "rationale": "FetchSegmentRevenue 的签名由 design-spec 固定(TASK-008 直接消费),不能加 Degraded 返回值。log.Printf 是本仓库 internal/collector/* 的既有降级惯例(qlib/qlibpit/eastmoney 均如此),且可被测试用 log.SetOutput 捕获断言。"
+    },
+    {
+      "what": "期间边界测试单独用 instance_periods.xml,不塞进 instance_mini.xml",
+      "rationale": "instance_mini.xml 承担「真实结构保真」职责(命名空间/单位/干扰 context 都照真实文档),塞进 9 个人造边界期会淹没它的可读性。分开后每个 fixture 只讲一件事。"
+    },
+    {
+      "what": "instance_malformed.xml 与 Ragged submissions 两个测试属主动补充(DoD 只写了 404)",
+      "rationale": "DoD error_handling 原文是「实例文档 404 … 或解析失败 → 跳过」,解析失败分支原本无测试;平行数组越界是我自己引入的防御代码,无测试等于无保证。补上后 segments.go 覆盖率的缺口只剩少数不可达的 err 分支。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/segments.go (新建)",
+    "internal/collector/edgar/segments_test.go (新建)",
+    "internal/collector/edgar/client.go (Client 增 archivesURL/maxInstanceBytes 字段;New/NewWithBaseURL 改为委托 NewWithBaseURLs)",
+    "internal/collector/edgar/testdata/submissions_mini.json (新建)",
+    "internal/collector/edgar/testdata/instance_mini.xml (新建)",
+    "internal/collector/edgar/testdata/instance_periods.xml (新建)",
+    "internal/collector/edgar/testdata/instance_restated.xml (新建)",
+    "internal/collector/edgar/testdata/instance_malformed.xml (新建)"
+  ],
+  "interfaces_exposed": [
+    "type SegmentPeriod struct { PeriodStart, PeriodEnd time.Time; FilingDate time.Time; Form string; Values map[string]float64 } —— Form 取值 \"10-Q\"|\"10-K\";Values 的键是**去命名空间前缀**的 member local name(如 IntelligentCloudMember,不含 msft:);与 design-spec §1.2 定义一致",
+    "func (c *Client) FetchSegmentRevenue(cik, axis string, since time.Time) ([]SegmentPeriod, error) —— cik 可带或不带前导零;axis 为维度轴 local name(不含前缀,如 StatementBusinessSegmentsAxis);since 为**排他**下界(reportDate > since);返回按 **PeriodEnd 升序**(相同则按 PeriodStart 升序);零结果返回空切片 + nil error,不是错误",
+    "func NewWithBaseURLs(userAgent, baseURL, archivesURL string) *Client —— 分别注入 data host 与 archives host",
+    "func NewWithBaseURL(userAgent, baseURL string) *Client —— 语义不变(单 host),archivesURL 一并指向该 host",
+    "func New(userAgent string) *Client —— 生产默认 https://data.sec.gov + https://www.sec.gov",
+    "常量 maxSegmentFilings = 12(回看上限)、defaultMaxInstanceBytes = 64<<20(响应体上限)、defaultArchivesURL = \"https://www.sec.gov\"",
+    "【TASK-008 注意】单份报告失败(404/超限/解析错)**不返回 error**,只写 log 并跳过 —— 调用方从返回值看不出发生过降级。若 RefreshSegments 的 Report.Degraded 需要这些明细,须改签名或加回调,当前实现无此通道。",
+    "【TASK-008 注意】FY 期(350~380 天)与季度期(70~100 天)在返回值里**形态相同**,只能靠 PeriodEnd-PeriodStart 的跨度区分。AD-17 要求 FY 期只用于 Q4 推导、不落库,判别责任在调用方。",
+    "内部辅助(同包可用,非导出):periodKey/segmentContext/filing 结构、localName(qname) 去前缀、keepDuration(periodKey) 期间过滤、attrValue(xml.StartElement, name)"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./internal/collector/edgar/ -count=1 -cover → ok, coverage 93.1%(门槛 80;TASK-001 交付时为 93.9%,本任务新增 segments.go 后微降,未覆盖的是少数不可达 err 分支)。新增 15 个用例全 PASS:RequestFlow / SingleAxisOnly / MultiPeriod / FactBeforeContext / UnitFilter / TagPriority / PeriodFilter / LookbackCap / LaterFilingWins / InstanceNotFound / MalformedInstance / RaggedSubmissions / BodyLimit / SubmissionsError / SegmentClientConstructors。RED 已实测:加最小类型面(SegmentPeriod + 桩函数)使其可编译后,13 个用例中 12 个在断言层 FAIL(SegmentClientConstructors 因构造器改动属结构性实现,先绿),实现后全部转 PASS。AD-18 golden 回归零漂移(git status 显示 testdata/golden/*.txt 9 份基线逐字节未变),证明 Client 结构体改动未影响 FetchCompanyFacts。既有 client_test.go **零改动**通过,证明 NewWithBaseURL 语义未变。live 校验(临时探针,跑完删除,主工作树零残留):真实 msft_sub.json + 9.67MB 实例文档 + 10.5MB 10-K 喂给真实 FetchSegmentRevenue,输出 5 期,2026Q3 三分部 35.013/34.681/13.192 B 与基准逐项吻合、FY2025 IntelligentCloud 106.265B 吻合,均用 require.InDelta 断言;code-simplifier 简化后重跑该 live 断言仍通过。下游回归:GOTOOLCHAIN=local go build ./... 通过;go test ./internal/prism/ ./cmd/atlas/ ./internal/storage/prism/ -count=1 全 ok。gofmt -l 无输出,go vet 通过。gitnexus detect-changes: 3 files/4 symbols, affected processes 0, risk low, 变更范围限于 internal/collector/edgar(列出的既有符号是纯插入导致的行号位移伪影,segments.go 为新文件不在旧索引中)。"
+}

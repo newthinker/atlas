@@ -1,0 +1,55 @@
+{
+  "id": "TASK-004",
+  "title": "refresh Degraded/Failed 明细始终打印到 stdout",
+  "description": "cmd/atlas/prism.go runPrismRefreshWith(prism.go:61): 当前 Failed/Degraded 明细只在 sender 为 nil 时才打到 out(prism.go:76-79),有 sender 时明细只进通知不进日志——这是生产观测缺口。改为把 msg 组装移到 sender 判断之前,fmt.Fprintln(d.out, msg) 无条件执行,sender 存在时再额外发送同一 msg。sender 发送失败仍只 warning 到 errOut 且返回 nil(既有语义不变)。 【门禁预警(Leader 实测)】cmd/atlas 整包覆盖率基线 74.6% < dev_minimum 80,而 task-completed.sh 只支持整包口径 → 本任务 transition dev_done 会被门禁 DENY,这是框架已知缺陷不是你的错。处置: 你必须先用 go test ./cmd/atlas/ -coverprofile 核实**你改动的文件**的文件级覆盖率达标(go tool cover -func 看具体函数),把证据(命令+输出)写进 discovery 与给 Leader 的消息,然后报告 Leader 由其代为放行。**严禁自行修改 arcforge.config.json 或任何 .claude/ 文件**(越权,会被 write-guard 拦截并记为违规)。",
+  "module": "cmd-atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestPrismRefreshAlwaysPrintsDetail: deps 带非 nil sender 且 Report 含 Failed/Degraded 时,out 中同时包含 Failed 明细文本与 Degraded 明细文本",
+      "sender 为 nil 时行为不变: 明细进 out 且返回 nil"
+    ],
+    "boundary": [
+      "Failed 与 Degraded 皆为空时只打印汇总行(N ok, N failed, N degraded),不打印明细段(负向断言)"
+    ],
+    "error_handling": [
+      "sender.SendText 返回错误时仍只向 errOut 输出 warning 且函数返回 nil(既有语义零变更)"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./cmd/atlas/ -count=1 全绿;既有 9 个 TestPrismRefresh* 与 TestHasEdgarInstrument 零修改",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-18",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "TASK-004 5 条 done_criteria 全 PASS 且 commit ef541b7 已在 master 史内,但 transition dev_done 连续 3 次被门禁 DENY: Task-scope coverage 74.6% < dev_minimum 80(scope=./cmd/atlas,74.6% 为改动前既有基线,改动的唯一函数 runPrismRefreshWith 覆盖率 100.0%,缺口全在 runPrismRefresh/runServe/main 等需真实 config+sqlite 的 cobra 外壳)。请择一: (A) 临时下调 dev_minimum 后我重试; (B) 你代为推进; (C) 显式授权我扩范围补 cobra 外壳测试; (D) 其他。",
+      "asked_at": "2026-07-25T09:45:00Z",
+      "answer": "Leader 选 (A):已把 arcforge.config.json 的 coverage.dev_minimum 由 80 临时下调为 74(有时限窗口),整包 74.6% 可过,要求立即 transition dev_done 并回报后立刻恢复为 80。Leader 放行前做了独立复验(不采信汇报):runPrismRefreshWith 100.0%、4 个新测试实跑全 PASS、prism_test.go +75/-0 既有 9 测试零改动、实现净 +2/-1、汇总行与 SendText 失败语义零变更。并明确肯定不堆无关测试、不自改 config、detached worktree 隔离验证三点。答复时间 2026-07-25T09:50Z。"
+    }
+  ],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-1",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:24Z"
+  },
+  "verifier": "test-agent-6",
+  "discovery": ".arcforge/discoveries/TASK-004.json"
+}

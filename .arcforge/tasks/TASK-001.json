@@ -1,0 +1,73 @@
+{
+  "id": "TASK-001",
+  "title": "修复 EDGAR 多 unit tag 只取第一个导致年度数据丢失",
+  "description": "**Leader 已完成完整诊断，因果链闭合、数据齐备。本任务是修复，不是调查。**\n\n## 症状\n\nlive 实测（临时 config + 临时 DB，2026-07-26）：`prism refresh: 5 ok, 0 failed, 4 degraded`。COST/CRM/WMT/V 四家 `edgar failed (reconstruct: valuation: insufficient positive EPS points)`，仅 AVGO 成功。这推翻了上一 sprint TASK-001 的立项理由（该任务的全部目的就是救回这五家）。\n\n## 根因（已实证）\n\n`client.go:474`：\n```go\nfor _, facts := range t.Units {   // 单 unit tag,取第一个 unit\n    return facts\n}\n```\n\n**「单 unit tag」是一个未经验证的假设。** 实测 SEC companyconcept API：\n\n| symbol | units | 各 unit 条数（含年度数） | 结果 |\n|---|---|---|---|\n| COST | **2** | `pure`=11(年3) `USD/shares`=295(年45) | 失败 |\n| WMT | **2** | `pure`=3(年0) `USD/shares`=303(年51) | 失败 |\n| CRM | **2** | `pure`=3(年0) `USD/shares`=312(年57) | 失败 |\n| AVGO | 1 | `USD/shares`=143(年27) | ✅ 成功 |\n\n**三个失败的全是多 unit，唯一成功的是单 unit。** 而 Go 的 map 迭代顺序随机 ⇒ **该缺陷是概率性的**：取到 `USD/shares` 正常，取到 `pure` 则年度数据几乎全丢。\n\n## 完整因果链\n\n1. `:474` 随机取到 `pure` unit（3~11 条老数据，年度 0~3 条）\n2. 年度 EPS 丢失 → `durationMetric` 的 FY−ΣQ 无输入\n3. Q4 的 `DilutedShares` 恒为 NaN（`:627-628` 已注明，设计如此），故 Q4 EPS 只能靠 FY−ΣQ\n4. ⇒ **Q4 EPS 100% 缺失**（实测 COST/CRM/WMT 各缺 17 行，全部集中在 Q4，Q1-Q3 一行不缺）\n5. `refresh.go:353` 的 `ttmPoints` 要求连续 4 季全部非 NaN\n6. **任何连续 4 季窗口必含一个 Q4** ⇒ 全部作废（Leader 复刻实测：69 个窗口全跳过，NaN 分布 `map[Q4:69]`）\n7. `epsPts` 为空 → `ReconstructPESeries` 返回空 → `reconstruct.go:46` → `ErrInsufficientEPS`\n\n## 数据齐备，修复可行\n\nCOST 年度 EPS 存在：`2024-09-02 ~ 2025-08-31  val=18.21  form=10-K`；\nQ1+Q2+Q3 = 4.041+4.019+4.279 = 12.339 ⇒ **Q4 = 18.21 − 12.339 = 5.871**，FY−ΣQ 完全算得出。\n\n## V 是另一类问题，本任务一并处理\n\nV 的 `EarningsPerShareDiluted` companyconcept **返回 404**（该 tag 根本不存在），需要走 `epsTags` 回退链的第二项 `EarningsPerShareBasicAndDiluted`。实测 V 的 71 个季度行 eps_diluted **一个都没有**，说明回退链对它没生效。",
+  "module": "edgar",
+  "complexity": "中等",
+  "estimated_files": 2,
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "多 unit 合并：`client.go:474` 附近的「取第一个 unit 就 return」必须改为**确定性地处理全部 unit**。选择规则由你定并在 discovery 说明理由（合并全部 / 按 unit 名优先级 / 按条数取多），但**必须是确定性的**——不得依赖 map 迭代顺序。测试须构造一个含两个 unit 的 fixture（模拟 COST：`pure` 少量老数据 + `USD/shares` 大量含年度），断言结果与 unit 在 map 中的插入顺序无关。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Q4 EPS 经 FY−ΣQ 产出：构造含年度 EPS + Q1/Q2/Q3 单季 EPS 的 fixture，断言 Q4 的 `EPSDiluted` = 年度 − ΣQ1..Q3（用 COST 实测值：18.21 − 12.339 = 5.871，容差 1e-6）。**当前该值为 NaN**，这是本任务的核心产出。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "【⚠ Leader 更正：原条款以 V 为例，而 V 的实际情况不同】`epsTags` 回退链对「首选 tag 完全不存在」生效：构造 `EarningsPerShareDiluted` 整个 tag 缺席、只有 `EarningsPerShareBasicAndDiluted` 的 fixture，断言 EPS 仍被正确取出。**更正说明**：任务描述原写「V 需要走回退链第二项」，dev-agent-26 实测并经 Leader 独立复核——**V 的 `EarningsPerShareDiluted`、`EarningsPerShareBasicAndDiluted`、`WeightedAverageNumberOfDilutedSharesOutstanding` 三个 tag 全部 HTTP 404**，回退链不是「没生效」而是**无处可退**。**V 非本缺陷所致，本任务不负责修复它**，但本条款仍有效——回退链本身需要测试守护。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "回归：AVGO 形态（单 unit）不得被改坏——构造单 unit fixture，断言行为与修改前逐值一致。修多 unit 时最容易顺手改坏单 unit 路径。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "两个 unit 含**同一期间的冲突值**时的行为必须明确定义并断言（取哪个、为什么），不得静默取任意一个。这是多 unit 合并绕不开的决策点，写进 discovery。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "所有 unit 都无可用数据时，行为与当前一致（该 tag 视为缺失，走回退链下一项），不得 panic、不得产出 ±Inf（AD-14）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "按 AD-27：每条 functional/boundary 至少一个变异从 SURVIVED 翻 KILLED，记「N 次中红了几次」并注明用例层面；施加前 `go build ./...` 确认可编译；harness 须自检还原（本 sprint 该坑独立发生三次）。**多 unit 那条的变异必须能证明确定性**——例如把选择规则改回「取第一个」，在 map 有多 unit 时须红（可能需要多次运行才稳定捕获，按实测 p 定 N）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "edgar 包覆盖率不低于 93.8%（多次采样），全包测试通过含 `-race`；golden 基线若变动须逐条说明原因（本修复会改变 Q4 EPS，golden 变动是预期的）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**live 验证（本任务的最终判据）**：用临时 config + 临时 DBPath（**严禁指向 `data/prism.db`**，该文件当前不存在，勿创建）跑 `prism refresh`，断言 **COST/CRM/WMT 三家从 degraded 变为 ok**。Leader 已验证的基线是 `5 ok, 0 failed, 4 degraded`，故预期结果为 **`5 ok, 0 failed, 1 degraded`（仅剩 V）**。**V 明确排除在本任务范围外**——其三个相关 tag 全部 404，无数据可用，需另开任务调查（可能需 IFRS/20-F 或非 us-gaap 分类）。命令与完整输出附进 discovery。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "verified",
+  "assigned_to": "dev-agent-27",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-10",
+  "last_transition": {
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-agent-10",
+    "at": "2026-07-26T08:38:35Z"
+  }
+}

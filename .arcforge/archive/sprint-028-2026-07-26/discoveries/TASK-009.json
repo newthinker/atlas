@@ -1,0 +1,68 @@
+{
+  "task_id": "TASK-009",
+  "by": "dev-agent-17",
+  "key_findings": [
+    "**AD-24 落地**: design-spec §3.3 说的「由 symbol 解析 instrumentID 的既有途径」**不存在**。Store 的 13 个方法里返回 id 的只有 UpsertInstrument,而它的 ON CONFLICT DO UPDATE 会把 market/name/grp/source 刷成入参值——读路径只有 symbol,调用它等于静默抹掉这四个字段。故新增只读 `InstrumentID(symbol) (int64, error)`(Leader 批准方案 A,packages 已扩到 ./internal/storage/prism)。",
+    "**同比对照期通常落在选择范围之外**: BuildMatrix 的第四个参数必须传**全部季度**而非选中期。传 sel 的变异体在我最初的 fixture 下**存活**(fixture 只有 FY2026 四季、无上年数据,无从区分),补了跨范围用例后才杀掉。这是本任务唯一一个「测试写完仍漏」的接线缺陷,也印证了装配层的缺陷形态确实是接线错误。",
+    "**AD-22 Notes 透传**: `PeriodView.Graph` 用**整体赋值**而非逐字段复制。变异体「逐字段复制 Nodes/Links」被 TestAnalyzePassesThroughGraphNotes 杀死——该用例构造 NetIncome > OperatingIncome 走完整 Analyze 链路,断言输出端 Notes 非空且点名节点。",
+    "**§3.3 结构体注释曾写「期数 > 8 被截断」与同节正文的 10 矛盾**(Leader 已修正为 MaxPeriods)。我实现时依据的是 AD-15 与 DoD 的 10,生产代码只引用 `MaxPeriods` 常量、无字面量;测试期望值写死 10。已用「常量 10→8」变异体验证:TestDefaultSelection 与 TestTruncateToMaxPeriods 双双失败,断言确有锚定作用。",
+    "**AD-14 必须在 sankey 包内守住**: `internal/api/handler/api/prism.go` 的 jf() 目前只映射 NaN、不处理 Inf(扩展它是 TASK-011 的工作,尚未开工),所以本包漏一个 Inf 出去就是 API 500。ROE(TTM) 走 safeDiv;另有两条全扫描断言(矩阵 Change、桑基 link)兜底。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增 prismstore.InstrumentID,并让既有 PriceSeries 复用它",
+      "rationale": "PriceSeries 原本内联了完全相同的 `SELECT id FROM instrument WHERE symbol=?` + ErrNoRows→ErrNotFound 逻辑,复用后消除重复。**已逐行比对确认语义完全一致**(两种错误包装形式与原实现逐字相同),既有 TestPriceSeriesFrom/TestPriceSeriesBoundaries 全绿,storage/prism 覆盖率 81.3%→81.7%。**注意: 这动了 TASK-002 已验收的函数**,虽在本任务已声明的 packages 内,仍显式记录供验证者复核。"
+    },
+    {
+      "decision": "Analyze 先查模板、后取数",
+      "rationale": "未配置模板的 symbol 直接返回 ErrNoTemplate,不触发任何 store 调用(省一次 IO,也让 404 语义先于数据问题)。模板 key 按 TASK-003 契约做 ToUpper 归一,小写入参也能命中;Analysis.Symbol 原样回显调用方传入的写法。"
+    },
+    {
+      "decision": "「配了模板但 store 里没有该标的」透出 prismstore.ErrNotFound,不伪装成 ErrNoTemplate",
+      "rationale": "两者的运维含义不同: 前者是「模板配了但还没刷数据」,后者是「压根没配模板」。混为一谈会让排查方向跑偏。有 TestAnalyzeTemplatedButNotInStore 双向断言(是 ErrNotFound 且**不是** ErrNoTemplate)。"
+    },
+    {
+      "decision": "granularity 显式传 q/fy 时不走 DefaultSelection;为空才走并回填其返回的 granularity",
+      "rationale": "§3.3 的 from/to 为空即走 DefaultSelection。回填是必要的——否则 Analysis.Granularity 会是空串,前端无从知道拿到的是季度还是财年。变异体「不回填」已被杀死。"
+    },
+    {
+      "decision": "Fundamental 的 Metrics 含 9 个主干科目 + roe_ttm",
+      "rationale": "§3.3 只写了 'revenue/net_income/gross_profit/... + roe_ttm'。取 FundamentalRow 里全部有展示价值的数值列(含 eps_diluted/equity),前端按需取用,避免下游再回头加字段。"
+    },
+    {
+      "decision": "ROE(TTM) 不足 4 季返回 NaN,不用部分和冒充",
+      "rationale": "3 个季度的净利之和除以权益会得到一个偏低但「看着合理」的 ROE,属「合法值但语义错误」——比报错更难发现。窗口内任一季缺值同样传播为 NaN(不把缺失当 0)。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/sankey/service.go (新增)",
+    "internal/prism/sankey/service_test.go (新增)",
+    "internal/prism/sankey/periods_test.go (補测三项)",
+    "internal/storage/prism/sqlite.go (新增 InstrumentID;PriceSeries 复用之)",
+    "internal/storage/prism/sqlite_test.go (InstrumentID 两个分支的用例)"
+  ],
+  "interfaces_exposed": {
+    "types": [
+      "type ServiceStore interface { InstrumentID(symbol string) (int64, error); QuarterlyFundamentals(instrumentID int64) ([]prismstore.FundamentalRow, error); SegmentRows(instrumentID int64) ([]prismstore.SegmentRow, error); PriceSeries(symbol, from string) ([]string, []float64, error) } —— *prismstore.Store 已满足,TASK-011 可直接注入",
+      "type Service struct{...};func NewService(store ServiceStore, templates map[string]*Template) *Service",
+      "type PeriodView struct { Period string; Graph Graph; Metrics PeriodMetrics }",
+      "type Analysis struct { Symbol, Granularity string; Periods []PeriodView; Matrix []MatrixRow; Truncated bool; Template struct{ Version int; Lang map[string]string } }",
+      "type FundamentalView struct { Symbol string; Periods []string; Metrics map[string][]float64; Dates []string; Closes []float64 }",
+      "var ErrNoTemplate —— 哨兵错误,errors.Is 可判定",
+      "func (s *Store) InstrumentID(symbol string) (int64, error) —— prismstore 新增,只读;未知 symbol 返回包装的 ErrNotFound"
+    ],
+    "funcs": [
+      "func (s *Service) Analyze(symbol, from, to, granularity, lang string) (*Analysis, error) —— from/to 为**闭区间**期标签,空表示不设该侧边界;granularity \"q\"|\"fy\",空则由 DefaultSelection 决定并回填;lang \"en\" 取英文名,其余取中文;无模板 → ErrNoTemplate;标的不在 store → prismstore.ErrNotFound",
+      "func (s *Service) Fundamental(symbol string) (*FundamentalView, error) —— 无 fundamental_q 行 → prismstore.ErrNotFound;Metrics 含 revenue/gross_profit/operating_income/net_income/rnd/sganda/income_tax/eps_diluted/equity/roe_ttm"
+    ],
+    "contract_for_downstream": "TASK-011: (1) `Analysis.Periods[i].Graph.Notes` 必须透传到 API 响应,它是负残差 footnote 的唯一数据源;(2) 期数上限用 sankey.MaxPeriods,勿写字面量;(3) **jf() 目前只映射 NaN 不拦 Inf**,AD-14 要求的 jf 扩展属 TASK-011 范围;(4) ErrNoTemplate → 404,prismstore.ErrNotFound → 404,其余 → 500。"
+    },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ ./internal/storage/prism/ -count=1 -cover",
+    "result": "sankey 96.1%、storage/prism 81.7%(基线 81.3,未被稀释),两包全绿;go build ./... 通过;gofmt -l 无输出;go vet 通过",
+    "red_confirmed": "分两批确认: 纯计算部分(filterRange/truncate/roeTTM/langMap)与装配部分(ServiceStore/Service/NewService)实现前均为 build FAIL;prismstore.InstrumentID 实现前为 'has no field or method InstrumentID'",
+    "mutation_testing": "装配层 12 个变异体全部杀死(逐字段复制 Graph 丢 Notes / Truncated 恒 false / 不过滤 / 不截断 / BuildMatrix 传 sel / granularity 不回填 / 模板查找不归一 / 空数据不报 ErrNotFound / roe_ttm 不入 Metrics / 不检查模板缺失 等);纯计算 10 个全部杀死(TTM 窗口 4→3、门槛 3→2 与 3→4、裸除法、分母取首季、truncate 边界 <= 改 <、取最早 10 期、filterRange 两侧边界、langMap 恒中文);TASK-007 補测 6 个全部杀死。**其中 1 个(BuildMatrix 传 sel)最初存活,补跨范围用例后杀掉。**",
+    "extra": "code-simplifier 已跑(本轮唯一改动是让 PriceSeries 复用 InstrumentID);上一轮它曾自作主张 git commit,本轮在 prompt 里明令禁止 git 操作,实测已遵守",
+    "commits": ["7c4fb15 feat(prism): sankey Service 装配层(Analyze / Fundamental)"]
+  }
+}

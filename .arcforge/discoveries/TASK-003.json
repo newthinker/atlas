@@ -1,0 +1,62 @@
+{
+  "task_id": "TASK-003",
+  "title": "classeps 收尾:会过期的注释、自引用测试、max/sum 无判别力",
+  "owner": "dev-agent-29",
+  "outcome": "三项全部完成。生产行为零改动(classeps.go 仅注释),两条原本无判别力的地方各自从 SURVIVED 0/5 翻到 KILLED 20/20。",
+  "key_findings": [
+    "**「当时为真、将来为假」是一类独立的注释缺陷,比「未经验证的假设」更隐蔽** —— 原句「40 份里可用的恰好是最近 28 份,把这个数字调大只会多拿一批必然 404 的 URL」在 2026-07-26 是**被逐份 curl 实测验证过的**,正因为它有证据支撑,读者不会质疑它。但它把一个**当日快照**(28 = 那一天的可用总数)写成了**永久结论**(调大无效)。每新增一季申报可用份数 +1,约 3 个月后 28 就从「恰好等于全部可用」变成一道真实截断窗口,调大即有效 —— 该句届时静默失效,且没有任何测试会因此变红。防法是把**结构性事实**(2019-03-31 之前是老式非 inline XBRL,_htm.xml 推导不成立 ⇒ 实例文档必 404;永远成立)与**当日快照**(截至 2026-07-26 恰好 28 份;会变)在文本上分开写,并显式声明快照的失效方向。",
+    "**「变异被杀死」不等于「这个用例有判别力」** —— TASK-002 报的 M12(28→12) KILLED 10/10 字面属实,但那是**整包跑**的结论:真正杀死它的是 TestClassEPSAndSegmentCapsAreIndependent 里的字面量断言 assert.Equal(t, 28, maxClassEPSFilings)。把变异隔离到 -run '^TestFetchClassEPSRespectsLookbackCap$' 单跑,实测 **0/5 红**(完全存活)。该用例用 nFilings = maxClassEPSFilings + 12 造份数、又用 maxClassEPSFilings 断言长度,两端随常量同步变化,对取值零判别力。**可操作的判据:变异测试的 -run 作用域必须收窄到被验证的那一个用例,整包跑只能证明「包里有人杀得掉」,不能证明「这个用例杀得掉」。**",
+    "**真实数据天然无判别力时,变异存活不是测试写漏了,而是该判定在真实形态下不可观测** —— dominantClass 的 max/sum 选择:V 的 Class A max=2.085e9、sum=1.245e11,两种算法都遥遥领先其它类别,同选 Class A,故 M-sum 在任何用 V 真实 fixture 的用例上都必然存活(实测 0/5 红)。TASK-002 的 discovery 把「用 max 不用 sum」写成了带 rationale 的明确决策,却没有任何测试钉住 —— **decision 写进 discovery 不构成守护**。唯一出路是刻意构造一个两种算法给出不同答案的反例。这与 TASK-002 首轮 M1/M3/M4 存活的根因同类(真实数据覆盖不到该判定),是同一个坑的第二次出现。",
+    "本任务两个变异在用例层面 p 结构上都等于 1(M-cap:断言的是集合相等,元素个数确定性地不同;M-sum:dominantClass 遍历的是 sort.Strings 排序后的切片、比较用严格 >,无 map 迭代序参与),故 20/20 是结构性保证而非概率压制。仍按 AD-27 报「N 次中红了几次」。"
+  ],
+  "decisions": [
+    {
+      "decision": "① 注释改写为「结构性上限与当日快照是两件事」两段式,并显式写出快照的失效方向与重估方法",
+      "rationale": "DoD functional[0] 要求改写后在数据增长时仍然正确。做法:(a) 结构性事实段落只讲 2019-03-31 时间线与老式非 inline XBRL,不含任何份数;(b) 当日快照段落标注测量日期 2026-07-26 与「在那一天恰好 28 份」;(c) 显式声明「这个巧合不会持续,将来调大是有效的」,并给出重估判据「按 2019-06-30 至今的季度报告份数重算,不要沿用 28 这个数字」;(d) 给出线性外推的代价(每多一份约 +1.9 MB / +1.6 s,由既有实测 52.3 MB / 45 s / 28 份推出),让后人能自己权衡而不必重跑探测。"
+    },
+    {
+      "decision": "② 期望值改为**写死的字面量** wantCap = 28,刻意不从 maxClassEPSFilings 推导;份数 nFilings = 40 同样写死",
+      "rationale": "自引用的根因是「期望值与被测值同源」。唯一的解法是让期望值有**独立来源** —— 28 的来源是数据侧实测(逐份探测 V 的 40 份:序号 0–27 全 200、28 起连续 404),不是常量本身。副作用是常量将来被合理调大时本用例会红,这是**特性不是缺陷**:它强制那次调整过一遍人眼。注释里写明了这一点,以及 wantCap 需与常量一并更新。"
+    },
+    {
+      "decision": "② 断言从「Len + 逐份 Contains/NotContains」收敛为一条 assert.ElementsMatch(want, archRec.paths())",
+      "rationale": "code-simplifier 提出、经核实采纳。集合相等比「只断长度」严格:多拉、少拉、**重复拉同一份**、拉到不在 doc-00..39 集合里的路径,四类都在这一条里暴露,而原写法后两类只能靠 Len 间接兜住。同时把请求路径的成形收进单个 archPath(i) 闭包,登记 fixture(docs 的键)与断言两端共用 —— 原先是两处独立书写的 fmt.Sprintf,改一处漏一处不会被发现。抓取是串行的(fetchClassDimensionedEPS 单循环无 goroutine),但用 ElementsMatch 不绑定顺序更稳,失败信息也直接列出 extra/missing。"
+    },
+    {
+      "decision": "③ 新增 TestDominantClassUsesMaxSharesNotSum,构造 max 与 sum 给出**不同**主导类别的 fixture,并把 max 的正确答案放在字母序末位",
+      "rationale": "CommonClassZMember 一条 9.0e8;CommonClassAMember 十二条 1.5e8(合计 1.8e9)。max ⇒ Z(9e8 > 1.5e8),sum ⇒ A(1.8e9 > 9e8),两者给出不同答案,故断言 Z 对该选择有判别力。放在字母序末位是顺带的:'return members[0]' 那类变异在这里同样红。十二条小额刻意在 sharesTags 的 diluted/basic 两条 tag 间交替(tag := sharesTags[i%len(sharesTags)]),复刻的正是 max 要防的真实机制 —— 同一事实在 inline XBRL 里重复渲染、且两条 tag 都计入,于是「条数多」把求和吹大。"
+    },
+    {
+      "decision": "③ 在断言前加两行 require.Greater 做 **fixture 判别力自检**",
+      "rationale": "require.Greater(smallEach*nSmall, bigOnce) 与 require.Greater(bigOnce, smallEach) 分别钉住「sum 口径下 A 胜」「max 口径下 Z 胜」。若将来有人调整 fixture 数值(比如把 nSmall 从 12 改小)让 sum 与 max 重新同答案,本用例会**静默退化**成又一条无判别力的测试并照常变绿 —— 这正是本任务在修的病。这两行让那种退化立刻失败而不是无声发生。"
+    },
+    {
+      "decision": "顺带把 TestClassEPSAndSegmentCapsAreIndependent 的断言消息改写(不动断言本身)",
+      "rationale": "该消息原文是「类别 EPS 上限 = 28,来源是 reportDate ≤ 2019-03-31 的实例文档全部 404 这一硬边界」—— 与 ① 要修的是**同一句会过期的断言**的逐字复述。只改注释不改这里,等于把过期的说法留了一份副本。改为标注「当前 = 28(2026-07-26 的可用份数快照)」并指向常量注释。断言本身(assert.Equal(t, 28, maxClassEPSFilings))保留,它作为独立性 tripwire 仍有价值,且 ② 已不再依赖它兜底。"
+    },
+    {
+      "decision": "code-simplifier 的第 3 条建议(把 start/end 日期字面量提成局部常量)不采纳",
+      "rationale": "提出者自评为低优先级。这些日期在该用例里是惰性的(只需合法且一致),内联写出比跳去看常量定义更直读;提取会为单一用例引入无收益的间接层。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/classeps.go(**仅注释**:maxClassEPSFilings 的文档注释;git diff -U0 过滤后非注释改动为空)",
+    "internal/collector/edgar/classeps_test.go(改写 TestFetchClassEPSRespectsLookbackCap;新增 TestDominantClassUsesMaxSharesNotSum;更新文件头 DoD↔测试映射;改写 TestClassEPSAndSegmentCapsAreIndependent 的断言消息)"
+  ],
+  "interfaces_exposed": [
+    "无。本任务不改变任何生产行为,不新增/修改任何导出或非导出的函数、类型、常量取值。maxClassEPSFilings 仍为 28。"
+  ],
+  "verification": {
+    "dod_functional_0_comment": "review 项。classeps.go 的 maxClassEPSFilings 文档注释改写为两段式:「结构性事实(永远成立)」= 2019-03-31 之前老式非 inline XBRL、_htm.xml 推导不成立、实例文档必 404,并明写「真正的上限是这条时间线,不是下面那个数字」;「当日快照(会随时间失效)」= 2026-07-26 探测 40 份、序号 0–27 全 200、28 起连续 404、那一天恰好 28 份 = 全部可用。第三段显式声明「这个巧合不会持续:将来调大是有效的」+ 重估判据(按 2019-06-30 至今的季度报告份数重算,不要沿用 28)+ 线性外推代价(每份 +1.9 MB / +1.6 s)。PASS",
+    "dod_functional_1_selfref": "变异 M-cap12(maxClassEPSFilings 28→12),**隔离到 -run '^TestFetchClassEPSRespectsLookbackCap$' 单跑**:改动前 **0/5 红**(完全存活),改动后 **20/20 红**。另测两个方向:M-cap27(28→27,相邻值)**20/20 红**、M-cap40(28→40,≥nFilings)**20/20 红**。对照组(不施加变异)0/3 红,排除「恒红」假象。PASS",
+    "dod_functional_2_maxsum": "变异 M-sum(dominantClass 的 if f.val > maxShares[m] { = } 改为 +=),隔离到 -run '^TestDominantClassUsesMaxSharesNotSum$' 单跑:改动前该用例不存在、且全部 TestDominantClass* 一起跑也是 **0/5 红**(完全存活);改动后 **20/20 红**。PASS",
+    "dod_boundary_0_fixture": "fixture 与生产形态的关系已在测试注释与本文件 decisions 中说明:它测的是**算法选择**而非 V 的实际数据分布。真实数据里 max 与 sum 同答案(Class A max=2.085e9 / sum=1.245e11,两种算法都远超其它类),所以用真实形态**永远问不出实现选的是哪一种** —— 必须构造反例才有判别力。该 fixture 不进入任何生产路径、不替代任何既有的真实数据用例(TestDominantClassPicksClassA 等仍用逐字节截取的真实 10-K),因此不与生产形态冲突。PASS",
+    "dod_non_functional_0_ad27": "harness = scratchpad/mut29.sh。还原用 **sha256 快照**:施加前 cp 快照 + 记录 shasum,trap EXIT 还原后逐字节比对 sha256,不一致即 FATAL 退出 —— **不用 git diff --quiet**(工作区有未提交改动:状态目录、task-completed.sh、本任务自身的测试改动,git diff 恒为脏 ⇒ 自检恒假;而 git checkout -- 会连本任务改动一起抹掉,TASK-001 实测教训)。9 次施加全部 restore-ok 且 sha256 一致(dcabbae04983c56b681cfd7b5d78aefa9e726aafd81aeb0190f176df4d2e360a)。每个变异施加后先 go vet 确认**可编译**才计数,且比对 sha256 确认变异**确实生效**(未生效即 FATAL)。记法按 AD-27 用「N 次中红了几次」**并注明是用例层面**(-run 收窄到单个用例)。**code-simplifier 改动测试代码后整套变异已重跑**,上表数据即重跑后的结果。两个变异在用例层面 p 结构上 = 1(集合相等断言的元素数确定性不同;dominantClass 遍历 sort.Strings 后的切片、严格 > 比较,无 map 迭代序参与),20/20 是结构性保证而非概率压制。PASS",
+    "dod_non_functional_1_quality": "edgar 包覆盖率 **94.7%**(改动后 5 次采样均 94.7%;改动前基线 4 次采样同样均 94.7%,**无回退**,≥ 门槛 94.7%)。go test -race 通过。全仓 go test ./... **exit=0,58 个包 ok,0 FAIL / 0 panic**。gofmt -l 空、go vet 干净、go build ./... 通过。**生产行为零改动**:git diff -U0 internal/collector/edgar/classeps.go 滤掉 +++/---、// 注释行与空行后**输出为空**,即 22 行改动全部落在注释上。PASS"
+  },
+  "notes_for_downstream": [
+    "**给验证者的复现命令**(harness 在 scratchpad,不入库):变异隔离跑是本任务的关键证据,请务必用 -run '^TestXxx$' 收窄作用域复核 —— 整包跑会被 TestClassEPSAndSegmentCapsAreIndependent 的字面量断言掩盖,那正是本任务要修的假象。",
+    "**maxClassEPSFilings 将来该不该调大**:按注释里的判据,不是看 28,而是数「2019-06-30 至今有多少份季度报告」。若调大,需同步更新两处字面量:classeps_test.go 的 wantCap 与 TestClassEPSAndSegmentCapsAreIndependent 的 assert.Equal(t, 28, ...)。这两处会同时变红,是刻意设计的强制复核点。",
+    "**本任务暴露的一条通用纪律**(建议进 wisdom):变异测试报「KILLED」时必须同时报**作用域**。整包 KILLED 只说明包里有人杀得掉,不说明被审查的那个用例有判别力 —— 后者才是「这条测试值不值得留」的依据。TASK-002 的 M12 10/10 与本任务的 0/5 是同一个变异在两种作用域下的读数。"
+  ]
+}

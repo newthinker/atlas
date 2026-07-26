@@ -1,0 +1,47 @@
+{
+  "id": "TASK-018",
+  "title": "edgar 测试健壮性收尾：财年锚点阈值与众数选择",
+  "description": "本 sprint 在 edgar 包累积的两处「实现有规则、测试无区分力」的缺口。两处都不改产品代码，只补测试。\n\n① client.go:190 `anchorYearMonth` 的 `end.Day() > 15`：处理 52/53 周财年日历漂移的核心阈值，当前测试**一行都没有直接触碰**（grep `anchorYearMonth` 在 _test.go 中零结果）。它今天是对的，但没有任何测试会在它被改动时失败。\n\n② client.go:152-158 `fiscalYearEndMonth` 的众数选择与平票规则：实现明确写了「票数相同时取较小月份，避免结果随 map 迭代序抖动」，但没有测试把「取众数」与「取首个」区分开——两种实现在现有用例下会给出相同结果。\n\n注意本任务的性质：这不是补覆盖率（edgar 已 93.6%），是补**断言的区分力**。覆盖率把这两处算作已覆盖，因为它们确实被上层用例执行到了——这正是覆盖率指标看不见的那类缺口。",
+  "module": "edgar",
+  "complexity": "简单",
+  "estimated_files": 1,
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`anchorYearMonth` 三档边界锚定：以同一年月分别取 day=14 / 15 / 16 调用，各自断言返回的 (year, month) 具体值。三档必须同时存在——只测 15 与 16 无法区分 `> 15` 与 `>= 15`，只测 14 与 16 无法定位阈值落在哪一天。",
+      "`fiscalYearEndMonth` 众数语义锚定：构造少数派月份（1~2 票）与多数派月份（≥4 票）共存的 gaap 输入，断言返回多数派月份。少数派的月份值必须**小于**多数派，这样「取首个/取较小」的错误实现会给出不同答案而被捕获。"
+    ],
+    "boundary": [
+      "`anchorYearMonth` 跨年回绕：1 月且 day ≤ 15 时返回 (上一年, 12)，断言年份确实减 1、月份为 12（而非 0 或 -1）。",
+      "`fiscalYearEndMonth` 平票稳定性：构造两个月份票数完全相同的输入，**连续调用 ≥ 20 次**断言结果恒为较小月份。单次调用无效——Go map 迭代序随机，错误实现有相当概率碰巧给出正确答案。"
+    ],
+    "error_handling": [
+      "`fiscalYearEndMonth` 在无任何年度事实（全部被 `isAnnual` 过滤掉）时返回 ok=false，且 month 为零值；调用方不得把 0 当作有效月份使用。"
+    ],
+    "non_functional": [
+      "变异验证：至少构造并逐一执行 5 个变异体，全部被现有断言杀死。必须包含——`> 15` 改 `>= 15`、`> 15` 改 `> 14`、跨年分支 `y-1` 改 `y`、众数比较 `n > bestN` 改 `n >= bestN`、平票规则 `m < best` 改 `m > best`。在 discovery 中逐个记录变异内容与失败的测试名。",
+      "edgar 包 `go tool cover -func` 总覆盖率不低于当前 93.6%，且全包测试通过（含 -race）。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-017"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-15",
+  "discovery": ".arcforge/discoveries/TASK-018.json",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-6",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  }
+}

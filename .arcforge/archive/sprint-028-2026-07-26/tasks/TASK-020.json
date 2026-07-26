@@ -1,0 +1,44 @@
+{
+  "id": "TASK-020",
+  "title": "edgar：消除 fixture 顺序对平票测试可靠性的静默影响",
+  "description": "dev-agent-15 在 TASK-018 之后用 20 万次采样发现的隐患。\n\n`TestFiscalYearEndMonthTieBreakIsStable` 的可靠性由 fixture 里两行的**列出顺序**静默决定：\n\n| fixture 顺序 | 单次检出 p | N=20 用例层漏检 | N=50 用例层漏检 |\n|---|---|---|---|\n| 较小月份在前（现状） | 0.876 | 7.5e-19 | 4.8e-46 |\n| 较大月份在前 | 0.126 | **6.8%** | 0.12% |\n\n机理：小 map 只有 1 个 bucket，键按插入顺序占据槽位 0、1；迭代起点是 0~7 的随机偏移，只有偏移恰为 1 时后插入的键才先被访问，故 P=7/8。与哈希无关。\n\n**风险形态**：有人为了「按月份排序好看」调换两行，测试就从 7e-19 漏检变成 6.8% 漏检，**没有任何信号，它照样绿**。与「交叉维 fact 前置」「干扰项同 tag」同族——fixture 的不可见属性承载着测试强度。\n\n**实现方式由你判断**：dev-agent-15 原建议加一条注释。但注释靠人遵守；**加一个 fixture 顺序相反的对偶子用例是机制**——无论谁调换顺序，总有一个方向的用例处在 p=0.126 的不利档位，而 runs=50 时它的漏检率是 0.12%，仍能稳定捕获。两种做法可以都做。选哪种、为什么，写进 discovery。",
+  "module": "edgar",
+  "complexity": "简单",
+  "estimated_files": 1,
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "done_criteria": {
+    "functional": [
+      "使 `TestFiscalYearEndMonthTieBreakIsStable` 的可靠性**不再依赖 fixture 中两行的书写顺序**。若采用对偶子用例方案，两个方向都必须存在且各自独立断言「结果恒为较小月份」；若仅采用注释方案，必须说明为何认为注释足够（本任务默认认为不足够，需给出理由）。"
+    ],
+    "boundary": [
+      "对不利顺序（较大月份在前，p≈0.126）的方向，`runs` 必须使该方向的用例层漏检率 ≤ 1e-3；按实测 p 用 `(1−p)^N` 反推并在 discovery 中写出计算过程，不得沿用「20 次/50 次」这类未经本任务重新核算的既有数字。"
+    ],
+    "error_handling": [
+      "不得为降低 flaky 而放宽断言（例如改为「结果是 3 或 9 之一」）——那会消除测试对平票规则的全部约束力，是把守护换成了通过率。"
+    ],
+    "non_functional": [
+      "按 AD-27：变异先 `go vet` 确认可编译再计数；至少验证 `m < best → m > best` 与 `n > bestN → n >= bestN` 两个变异在**两种 fixture 顺序下**都被杀死，记「N 次中红了几次」。",
+      "edgar 包覆盖率不低于 93.8%（多次采样），全包测试通过含 `-race`。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 6,
+  "context_from": [
+    "TASK-018"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-15",
+  "discovery": ".arcforge/discoveries/TASK-020.json",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-6",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  }
+}

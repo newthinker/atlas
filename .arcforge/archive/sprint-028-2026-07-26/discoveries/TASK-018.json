@@ -1,0 +1,40 @@
+{
+  "key_findings": [
+    "【缺口性质:覆盖率看不见的那一类】两处在本任务前的语句覆盖率就已是 100%(被上层用例执行到),但 grep `_test.go` 对 `anchorYearMonth` / `fiscalYearEndMonth` 零结果 —— 没有任何断言约束其行为。补完后覆盖率几乎没动(93.6%→93.8%),变的是判别力。**覆盖率数字不能作为本任务有效性的证据,变异日志才是**(此点由 code-simplifier 主动指出,我认同并记录)。",
+    "【DoD 列的 5 个变异实际只区分 4 种行为】对整数天,`end.Day() >= 15` 与 `end.Day() > 14` **逐档等价**(day=1..31 穷举验证,逐点相同)。二者是同一种行为、由同一档(day=15)杀死,不应记作两个独立变异。故变异日志如实记为「4 种不同行为 + 1 个重复」,加我自补的 3 个,共 **7 种不同行为**。",
+    "【三档阈值的真实理由与我原注释写的不同 —— 原注释是错的】我原写「只有 15/16 无法区分 `> 15` 与 `>= 15`」,穷举证伪:day=15 单档就能区分(正确返回上月、变异返回本月)。穷举各变异与正确实现的行为差集后,三档各自**唯一**封堵的是:去掉 day=14 → `!= 15` 这类**非单调**变异存活(差异全落在 1..14);去掉 day=15 → `>= 15`(≡`> 14`)存活;去掉 day=16 → `> 16` 存活。三档仍缺一不可,但理由不同。另更正一个流传中的说法:`> 13` 可被 day=14 **和** day=15 两档杀死,day=14 并非其唯一杀手 —— day=14 真正独占的是非单调变异。已把穷举结论写进测试注释并提交(d055490)。",
+    "【平票循环次数的必要性:测得值推翻了我的模型】我原注释推测「丢掉平票规则有约一半概率碰巧给对」。实测:把 runs 降到 1 并施加 `n > bestN → n >= bestN`,该变异只在 **32/40** 次运行中被检出 —— 单次调用写法有约 **20%** 概率放它过去,不是 50%(Go 对 2 元素 map 的迭代起点并不均匀)。runs=50 下实测 **25/25** 被杀。**这是本任务里「测量推翻推理」的具体一例**,数字已改为测得值。",
+    "【AD-27 记录形态:E 与 F 的机理不同,但用例层面都是确定的】`m < best → m > best` 在两种迭代序下都返回错值,**调用层面**即确定失败;`n > bestN → n >= bestN` 使「后遍历者获胜」,**调用层面**约 20% 概率漏检 —— 但用例内的 50 次循环把它转成**用例层面确定失败**(25/25)。故「N 次中红了几次」这一指标必须说明测的是哪一层:本任务全部 6 个变异在**用例层面**均为 25/25。",
+    "【跨包负面观测的有效期极短】我在 TASK-017/018 报告里两次写到 `internal/prism/sankey` 无法编译(`periods.go:447 undefined: maxYearGapDays`)。该观测当时属实(dev-agent-17 提交落定前的中间态),但写进报告时状态已消失。经 Leader 提醒后我当场复验:`go build ./internal/prism/sankey` 与 `go build ./...` 均 rc=0。**教训:跨包的负面观测在写进报告前应当场复验,尤其当准备据此改变自己的做法时(我原打算绕开该包做全仓校验)。**"
+  ],
+  "decisions": [
+    {
+      "what": "每个变异体施加后先跑 `go vet` 确认可编译,再统计失败用例",
+      "rationale": "TASK-017 踩过假阴性:`if false {...}` 让变量未使用 → 编译失败 → 输出无任何 `--- FAIL:` 行 → 计数 0,与「变异存活」的输出形态完全相同。度量必须能区分「变异存活」与「根本没跑起来」。"
+    },
+    {
+      "what": "自补 3 个 DoD 未要求的变异(取最小月份 / ok 恒 true / `!= 15`)",
+      "rationale": "DoD 那 5 个全部由 DayThreshold、YearWraparound、TieBreakIsStable 三个用例杀死,**未触及** PicksMode 与 WithoutAnnualFacts —— 不补就无法证明这两个用例非空洞。`!= 15` 则用于坐实 day=14 这一档的独占价值(穷举得出后再实跑确认,不停在推演)。"
+    },
+    {
+      "what": "发现原注释被证伪后,单独提交一次注释更正(d055490),而非留到验收时口头说明",
+      "rationale": "一条**错误的**「为什么」注释比没有注释更有害:它会让后人基于错误理由去改动或删减断言。且本任务的全部产出就是断言的理由,理由错了产出就打折。只改注释、不动断言与数值,回归确认 93.8% 与 -race 不变。"
+    },
+    {
+      "what": "平票用例连跑 50 次而非 DoD 下限的 20 次",
+      "rationale": "实测单次漏检率约 20%,20 次的漏检概率约 0.2^20;50 次成本仍 <1ms 而裕度更大。对随机性驱动的断言,把裕度加到成本可忽略为止是划算的。"
+    },
+    {
+      "what": "众数用例的少数派月份值(3)必须小于多数派(6)",
+      "rationale": "方向反了的话「取众数」与「取最小」两种实现给出同一答案,M6 变异杀不掉,用例即空洞。**构造方向本身就是断言强度的一部分**(Leader 派发时点明,实测确认)。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/fiscalperiod_test.go (a8c8354 追加 2 个 helper + 5 个用例 +109 行;d055490 更正两处被证伪的理由注释。**未改产品代码**)"
+  ],
+  "interfaces_exposed": [
+    "测试内 helper(同包可复用):annualFact(t, end string) rawFact —— 造一条必过 isAnnual 的年度事实(内含 require.True(isAnnual(f)) 的 fixture 前提断言);gaapWithAnnualEnds(t, ends ...string) map[string]tagFacts",
+    "本任务**未改动任何产品代码**,client.go 行为零变更;AD-18 golden 9 份基线逐字节未动"
+  ],
+  "verification": "【变异日志(AD-27:记 N 次中红几次,N=25,用例层面)。每个变异先 `go vet` 确认可编译再计数】DoD 要求的 5 个 —— (1) `end.Day() > 15` → `>= 15`:**25/25**,杀手 TestAnchorYearMonthDayThreshold;(2) `> 15` → `> 14`:**与 (1) 逐档等价,同一种行为**,同样 25/25、同一杀手;(3) `return y - 1, 12` → `return y, 12`:**25/25**,杀手 TestAnchorYearMonthYearWraparound;(4) `n > bestN` → `n >= bestN`:**25/25**(用例层面确定;调用层面约 20% 漏检,靠用例内 50 次循环消除),杀手 TestFiscalYearEndMonthTieBreakIsStable;(5) `m < best` → `m > best`:**25/25**(调用层面即确定),同一杀手。自补的 3 个 —— (6) 选择规则整体替换为「取最小月份」:杀手 TestFiscalYearEndMonthPicksMode;(7) `return best, bestN > 0` → `return best, true`:杀手 TestFiscalYearEndMonthWithoutAnnualFacts(并连带 Golden / RevenueFallback / DegradesWithoutAnnualEntries);(8) `> 15` → `!= 15`(非单调,用于坐实 day=14 档的独占价值):**25/25**,杀手含 TestAnchorYearMonthDayThreshold、TestAnchorYearMonthYearWraparound、TestFetchCompanyFactsGolden、TestFiscalPeriodMonthBoundaryDrift。合计 8 次施加、**7 种不同行为**(其中 2 个等价),全部被杀,无存活。【循环必要性实测】把 TieBreak 用例的 runs 由 50 降到 1 并施加变异 (4):40 次运行中仅 32 次检出 → 单次调用写法约 20% 漏检。【覆盖率】go tool cover -func 总计 **93.8%**(≥93.6% 门槛),anchorYearMonth 与 fiscalYearEndMonth 各 **100%**;三次采样一致(edgar 不存在 sankey 那种非确定覆盖率)。【测试】go test -count=1 全绿;**-race 通过**;gofmt -l 无输出;go vet 通过。【回归】testdata 零改动,golden 9 份逐字节未变;`go build ./...` rc=0(含 internal/prism/sankey —— 早前报告的编译失败已随 TASK-016 落定消失,此处为当场复验结果)。【提交】a8c8354(用例)+ d055490(注释更正),均只动 fiscalperiod_test.go 一个文件,全在声明范围 ./internal/collector/edgar 内,无 scope 漂移。"
+}

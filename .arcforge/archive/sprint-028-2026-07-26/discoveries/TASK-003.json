@@ -1,0 +1,96 @@
+{
+  "task_id": "TASK-003",
+  "by": "dev-agent-17",
+  "revision": "rework-1 (epoch 2)",
+  "key_findings": [
+    "viper 把 YAML **map key** 递归小写化（连列表元素内部的 map key 也不放过），但**任何层级的 value 原样保留**。因此 Template 的 segments 列表（key/name/member 都是 YAML 值）无需归一；LoadManualSegments 的 fiscal_period 与 segment_key 是 map key，必被小写化。已固化进 design-spec §3.1.1。",
+    "viper 对 `[]Segment` 列表 Unmarshal 正常且**保序**：块形式与流形式 `- {key: ..., xbrl_member: ...}` 都能映射到 mapstructure tag。",
+    "由上述两点导出的硬契约：**模板 segments[].key 必须小写**（大写 key 经 viper 后与 manual 数据的小写 key 永远 JOIN 不上，查得 0 条且无任何报错）。rework-1 已把这条从注释约定升级为加载期校验。",
+    "viper 的 Unmarshal 走 mapstructure 且 **WeaklyTypedInput=true**，但 schema 不匹配仍会报错：`segments: notalist`、`2025Q1: 123`、`cloud: notanumber` 三种用户常见手写错误均返回 error（已加回归用例锁定）。",
+    "go.mod / go.sum 零变更：viper v1.21.0 与 testify v1.11.1 均为既有 direct 依赖，yaml 系全部保持 // indirect（AD-1 达成）。"
+  ],
+  "decisions": [
+    {
+      "decision": "fiscal_period 键先 strings.ToUpper 归一再用正则 `^([0-9]{4}Q[1-4]|FY[0-9]{4})$` 校验",
+      "rationale": "viper 小写化导致 `FY2025` 变 `fy2025`，直接用大写正则会把所有合法数据判非法；不校验又会产出永远 JOIN 不上的行。错误信息回显原始键并含文件路径。"
+    },
+    {
+      "decision": "返回 map 的 key 用 strings.ToUpper(tmpl.Company)，而非文件名",
+      "rationale": "文件名与 company 字段可能不一致（AD-16 第 3 点的串号风险）；以 company 为准并大写归一，为 TASK-011 的 CIK 串号校验留唯一依据。"
+    },
+    {
+      "decision": "任一模板文件出错则整个 LoadTemplates 返回 (nil, err)，不返回部分结果",
+      "rationale": "AD-16：部分结果会让「模板被清掉/写坏」表现为个别标的 404 而非显式故障。有 invalid_yaml_among_valid_ones 负向断言锁定 got 为 nil。"
+    },
+    {
+      "decision": "SegmentAxis 为空时回填导出常量 DefaultSegmentAxis",
+      "rationale": "design-spec 注释的默认值；在加载层回填让 TASK-005/006 无需各自判空。"
+    },
+    {
+      "decision": "【rework-1】segments[].key 含大写字符 → 加载期 error",
+      "rationale": "Leader 补漏项 (a)。原先只有 struct 注释约定，test-agent-6 探针实测 `key: Cloud` 被静默接受、以其查 manual 数据得 0 条。属「加载期显式失败 vs 运行期静默空数据」，与 AD-16 同源。实现为 validate() switch 内一条分支，错误文本由 loadTemplate 统一包上文件路径。"
+    },
+    {
+      "decision": "【rework-1】两个模板文件声明同一 company → 加载期 error，错误信息**同时点出两个冲突文件**",
+      "rationale": "Leader 补漏项 (b)。原实现 out[ToUpper(company)] 后写覆盖，赢家取决于 os.ReadDir 顺序（跨平台不稳定，测试也会 flaky）。用 srcOf map 记住每个 symbol 的来源路径，冲突时把两个路径都写进错误——只报后写的那个，用户仍要自己翻目录找另一半。大小写不同的 company（DUPCO / dupco）同样判为冲突，与「返回 map key 统一大写」口径一致。"
+    },
+    {
+      "decision": "【rework-1，非 DoD 强制】补 schema 不匹配的回归用例，并给 dir_without_yaml 补齐 NotNil 对偶断言",
+      "rationale": "test-agent-6 建议 1/2，Leader 判定值得做。原先 bad_yaml 只覆盖 YAML **语法**错误，两处 Unmarshal 的错误分支无回归保护，而 schema 写错是真实会发生的用户错误。建议 3（ReadDir/Stat 的权限类错误）跨平台难测，按 Leader 判断跳过——该分支是正当防御路径，非死代码。"
+    },
+    {
+      "decision": "LoadManualSegments 用 strings.ToLower(symbol) 拼文件名",
+      "rationale": "仓库模板文件名惯例为小写（msft.yaml）；调用方传 MSFT 或 msft 都命中同一文件，有测试覆盖两种大小写。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/sankey/template.go",
+    "internal/prism/sankey/template_test.go",
+    "internal/prism/sankey/testdata/valid/valid.yaml",
+    "internal/prism/sankey/testdata/dup_key/dup_key.yaml",
+    "internal/prism/sankey/testdata/bad_yaml/broken.yaml",
+    "internal/prism/sankey/testdata/dup_company/a.yaml (rework-1 新增)",
+    "internal/prism/sankey/testdata/dup_company/b.yaml (rework-1 新增)",
+    "internal/prism/sankey/testdata/segments/acme.yaml",
+    "configs/prism/templates/msft.yaml"
+  ],
+  "interfaces_exposed": {
+    "const": "DefaultSegmentAxis = \"StatementBusinessSegmentsAxis\"",
+    "Segment": {
+      "go": "type Segment struct { Key string `mapstructure:\"key\"`; NameZH string `mapstructure:\"name_zh\"`; NameEN string `mapstructure:\"name_en\"`; Member string `mapstructure:\"xbrl_member\"` }",
+      "fields": [
+        "Key    string — segment 主键，**必须小写**（加载期强制校验，非仅约定）",
+        "NameZH string — 中文展示名",
+        "NameEN string — 英文展示名",
+        "Member string — XBRL 实例文档 explicitMember 的 local name"
+      ]
+    },
+    "Template": {
+      "go": "type Template struct { Company string `mapstructure:\"company\"`; CIK string `mapstructure:\"cik\"`; SegmentAxis string `mapstructure:\"segment_axis\"`; Segments []Segment `mapstructure:\"segments\"`; Version int `mapstructure:\"version\"`; SinceFY int `mapstructure:\"since_fy\"` }",
+      "fields": [
+        "Company     string — symbol，原样保留 YAML 中的大小写（只有 map key 归一为大写）",
+        "CIK         string — 纯数字串，已校验非空",
+        "SegmentAxis string — 空时由加载层回填 DefaultSegmentAxis，下游可直接用，无需判空",
+        "Segments    []Segment — 保序，顺序即 YAML 顺序（桑基左侧渲染顺序可直接沿用）",
+        "Version     int — 重述断点版本（design §10）",
+        "SinceFY     int — 该版本适用起始财年，0 = 全部"
+      ]
+    },
+    "funcs": [
+      "func LoadTemplates(dir string) (map[string]*Template, error) — key 为大写 symbol；目录不存在/无 yaml → 空非 nil map + nil error；任一文件非法 → (nil, error) 且 error 文本含该文件路径（AD-16）；跨文件 company 冲突 → (nil, error) 且含两个文件路径",
+      "func LoadManualSegments(dir, symbol string) (map[string]map[string]float64, error) — 读 {dir}/{lower(symbol)}.yaml；外层 key 为大写 fiscal_period（2006Q1 / FY2006，非法即报错），内层 key 为小写 segment_key（与模板 key 同口径）；文件或目录不存在 → 空非 nil map + nil error"
+    ],
+    "contract_for_downstream": "TASK-007/008/009 比较 segment key 时一律按小写口径；模板 Segments 顺序可直接作为渲染顺序；LoadTemplates 的 error 禁止丢弃（AD-16）。"
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 -cover",
+    "result": "ok，coverage 97.1%（rework 前 93.5%）；9 个顶层测试 / 36 个 PASS 条目全绿",
+    "red_confirmed": "rework 前两条新校验实测 FAIL：upper_case_segment_key「An error is expected but got nil」、TestLoadTemplatesDuplicateCompany「同名 company 不得静默覆盖」——证明两处静默失败真实存在，非臆测",
+    "extra": "gofmt -l 无输出；go vet ./internal/prism/sankey/ 通过；git diff go.mod go.sum 为空；code-simplifier 二轮复核（首轮判定不改，rework 轮做了错误文本收敛与不可解析用例拆分，测试全绿）",
+    "commits": [
+      "c352c50 feat(prism): sankey template schema, loader and manual segment data",
+      "caf8d9f feat(prism): reject upper-case segment keys and duplicate template companies"
+    ],
+    "scope_note": "packages 已收窄为 [\"./internal/prism/sankey\"]（门禁把 packages 直接喂 go test，非 Go 路径必 setup failed）；configs/prism/templates/msft.yaml 仍属本任务交付，由 TestLoadTemplatesFromRepoDir 逐字段覆盖，其 AD-5 头注释需人工 review。"
+  }
+}

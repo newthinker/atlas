@@ -1,0 +1,77 @@
+{
+  "task_id": "TASK-004",
+  "title": "refresh Degraded/Failed 明细始终打印到 stdout",
+  "by": "dev-agent-18",
+  "key_findings": [
+    "缺口确认:runPrismRefreshWith 原实现把 fmt.Fprintln(d.out, msg) 放在 `if d.sender == nil` 分支内(prism.go:76-79),因此生产环境(telegram 已配置)下 Failed/Degraded 明细只进通知、不进日志。通知链路一旦故障(SendText 报错只写一行 warning 到 errOut),明细就彻底丢失,launchd 日志里只剩一行计数,无法定位是哪个标的失败。",
+    "RED 阶段实测证明缺口真实存在:sender 非 nil 时 out 内容恰为 \"prism refresh: 4 ok, 1 failed, 1 degraded\\n\",不含任何明细文本。",
+    "修复只需把 Fprintln 提到 sender 判断之前(净 +1 行代码 +1 行注释),sender 分支退化为纯 return nil;打印与通知使用同一条 msg,两条链路内容严格一致。",
+    "覆盖率门禁:cmd/atlas 整包基线 74.6% < dev_minimum 80%,门禁脚本只支持整包口径,本任务无法自行满足(见 verification.gate_note)。改动函数 runPrismRefreshWith 文件级/函数级覆盖率为 100.0%。",
+    "【跨 agent 污染,对 Leader 有价值】首次 transition dev_done 的 DENY 并非覆盖率,而是 build failed: internal/storage/prism/sqlite.go:114 undefined: strings —— 另一 agent 在共享工作区的**未提交中间态**(已写 strings.Contains 但尚未补 \"strings\" import)。门禁按整包编译,故任何并发 agent 的半成品都会误伤同包/下游任务的 dev_done。我未修改该文件(非我范围);数分钟后对方补齐 import,重试即越过编译进入覆盖率检查。建议:门禁 DENY 时先区分「本任务问题」与「他人 WIP 污染」,可用 git worktree add --detach HEAD 在隔离副本验证已提交状态。"
+  ],
+  "decisions": [
+    {
+      "decision": "Fprintln 无条件执行,置于 `if d.sender == nil` 判断之前;sender 存在时额外调用 SendText 发送同一条 msg。",
+      "rationale": "打印与通知是两条独立的可观测链路,不应互斥。通知是尽力而为(失败仅 warning),日志是本地确定性留痕,必须无条件产生。复用同一 msg 变量而非各自组装,保证运维在 stdout 与 telegram 看到完全一致的文本。"
+    },
+    {
+      "decision": "汇总行格式 \"prism refresh: %d ok, %d failed, %d degraded\\n\" 与提前返回逻辑(Failed+Degraded 皆空 → 打印汇总行后 return nil)保持零变更。",
+      "rationale": "汇总行可能被人眼或运维脚本(launchd 日志抓取)依赖,属事实上的对外契约;本任务范围仅是补明细,不触碰既有输出契约。新增负向断言 TestPrismRefreshNoDetailSectionWhenClean 用精确等值(assert.Equal 整个 out 字符串)锁死\"干净报告只输出一行\",防止后续任务无意间在干净路径插入噪声。"
+    },
+    {
+      "decision": "SendText 失败仍只向 errOut 输出 warning 且函数返回 nil,语义零变更。",
+      "rationale": "prism refresh 是 launchd 定时入口,通知不可达不等于刷新失败;返回非 nil 会让 launchd 记为任务失败并可能触发重试,放大故障。新增 TestPrismRefreshPrintsDetailEvenWhenSendFails 额外锁定\"通知失败时明细已在 out\"——这正是本次修复最有价值的场景。"
+    },
+    {
+      "decision": "既有 9 个测试(8 个 TestPrismRefresh* + TestHasEdgarInstrument)零修改,新增 4 个测试而非改写既有断言。",
+      "rationale": "既有测试是行为契约的回归网;若为适配新行为去改它们,就失去了\"既有语义未被破坏\"的证据。实测 4 个新测试中 2 个在 RED 阶段失败(真实缺口)、2 个通过(sender=nil 路径与负向断言,本就是防回归定位),既有 9 个全程绿。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/prism.go (+2/-1:Fprintln 上提 + 说明注释)",
+    "cmd/atlas/prism_test.go (+75/-0:4 个新测试 + done_criteria↔测试映射注释,既有测试零改动)"
+  ],
+  "interfaces_exposed": [
+    "runPrismRefreshWith(d prismRefreshDeps) error — 签名不变。行为契约更新:只要 Failed 或 Degraded 非空,明细 msg 必定写入 d.out(与 d.sender 是否为 nil 无关);d.sender 非 nil 时同一 msg 额外发送一次,发送失败仅写 warning 到 d.errOut 并返回 nil。Failed 与 Degraded 皆空时 d.out 恰好只含一行汇总行。",
+    "prismRefreshDeps{refresh, sender, out, errOut} — 结构体与 textSender 接口均未改动,TASK-010/011 可安全在此基础上继续扩展 cmd/atlas。"
+  ],
+  "verification": {
+    "tdd": "RED 阶段实测:TestPrismRefreshAlwaysPrintsDetail 与 TestPrismRefreshPrintsDetailEvenWhenSendFails FAIL(out 不含明细文本),确认测试有效后才改实现;GREEN 后 13 个测试全绿。",
+    "test_cmd": "GOTOOLCHAIN=local go test ./cmd/atlas/ -count=1",
+    "test_result": "ok github.com/newthinker/atlas/cmd/atlas 0.982s — 12 个 TestPrismRefresh* + TestHasEdgarInstrument 全部 PASS",
+    "vet": "GOTOOLCHAIN=local go vet ./cmd/atlas/ — 通过",
+    "coverage_cmd": "GOTOOLCHAIN=local go test ./cmd/atlas/ -coverprofile=/tmp/cov4.out -count=1 && GOTOOLCHAIN=local go tool cover -func=/tmp/cov4.out | grep prism.go",
+    "coverage_evidence": "prism.go:31 init 100.0% / prism.go:44 hasEdgarInstrument 100.0% / prism.go:61 runPrismRefreshWith 100.0% / prism.go:87 runPrismRefresh 0.0%(cobra RunE 外壳,需真实 config+sqlite,不在本任务范围) —— 本任务改动的唯一函数 runPrismRefreshWith 覆盖率 100.0%。",
+    "package_total": "整包 74.6%(go tool cover -func 口径)/ 74.4%(go test -coverprofile 口径,两次运行稳定复现该 0.2pp 差异,系两种统计口径固有差别,非本次改动引入);与 Leader 实测基线 74.6% 一致,本次改动未降低整包覆盖率。",
+    "gate_note": "两次 transition dev_done 实测均 DENY,status 经 jq 直读确认停留 in_progress(未伪造推进)。第一次 DENY = 他人 WIP 导致的 build failed(已消失);第二次 DENY = 预期中的整包覆盖率 74.6% < dev_minimum 80。后者是框架已知缺陷(门禁只支持整包口径),未覆盖部分集中在 runPrismRefresh/runServe/main 等需真实 config+sqlite 的 cobra 外壳函数,与本次改动无关。已按 Leader 指示不堆无关测试,提交文件级证据请求代为放行。",
+    "commit": "ef541b7 feat(prism): refresh Degraded/Failed 明细始终打印到 stdout(仅含 cmd/atlas/prism.go 与 prism_test.go 两个文件)",
+    "head_isolated_verify": "git worktree add --detach <tmp> HEAD 隔离验证已提交状态:go build ./... = BUILD OK;go test ./cmd/atlas/ -count=1 = ok(coverage 74.4%);runPrismRefreshWith 100.0%,total 74.6% —— 证明 ef541b7 自身编译与测试均健康,首次门禁失败纯属他人未提交 WIP 污染。"
+  },
+  "done_criteria_mapping": [
+    {
+      "criterion": "functional[0] sender 非 nil 且含 Failed/Degraded 时 out 同时含两类明细",
+      "test": "TestPrismRefreshAlwaysPrintsDetail",
+      "status": "PASS(RED 阶段实测 FAIL→GREEN)"
+    },
+    {
+      "criterion": "functional[1] sender=nil 时行为不变:明细进 out 且返回 nil",
+      "test": "TestPrismRefreshDetailWithoutSenderUnchanged(+ 既有 TestPrismRefreshPrintsWithoutSender / TestPrismRefreshPrintsDegradedWithoutSender)",
+      "status": "PASS"
+    },
+    {
+      "criterion": "boundary[0] Failed 与 Degraded 皆空时只打印汇总行、不打印明细段(负向断言)",
+      "test": "TestPrismRefreshNoDetailSectionWhenClean(assert.Equal 精确等值整个 out)",
+      "status": "PASS"
+    },
+    {
+      "criterion": "error_handling[0] SendText 报错时仍只向 errOut warning 且返回 nil",
+      "test": "TestPrismRefreshPrintsDetailEvenWhenSendFails(+ 既有 TestPrismRefreshWarnsOnSendFailure / TestPrismRefreshWarnsOnSendFailureDegraded)",
+      "status": "PASS"
+    },
+    {
+      "criterion": "non_functional[0] go test ./cmd/atlas/ -count=1 全绿;既有 9 个测试零修改",
+      "test": "全包测试 ok;git diff 显示 prism_test.go 为 +75/-0(纯新增,既有测试无一行改动)",
+      "status": "PASS"
+    }
+  ]
+}

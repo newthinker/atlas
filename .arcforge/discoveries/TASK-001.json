@@ -1,0 +1,76 @@
+{
+  "task_id": "TASK-001",
+  "title": "修复 EDGAR 多 unit tag 只取第一个导致年度数据丢失",
+  "owner": "dev-agent-27",
+  "predecessor": "dev-agent-26 (完成调研与 fixture,RED 阶段中断;其结论经 leader 独立复核后被本任务直接采用,未重做)",
+  "key_findings": [
+    "根因确认:client.go 的 unitsOf 用 `for _, facts := range t.Units { return facts }` 取「第一个」unit,而 Go 的 map 迭代序随机。「一个 tag 只有一个 unit」是未经验证的假设,实测不成立。",
+    "只有 EarningsPerShareDiluted 是多 unit:WMT pure[3]+USD/shares[303]、COST pure[11]+USD/shares[295]、CRM pure[3]+USD/shares[312];AVGO 单 unit(故唯独它成功)。",
+    "**map 迭代序并非等概率**(本任务新测,纠正了「p=0.5」的直觉估计):对 companyfacts_multiunit.json 的 EarningsPerShareDiluted 做 2 万次「重新反序列化 + 迭代取首个」,pure 排首位 0.8764、USD/shares 排首位 0.1235。Go 只保证迭代起点随机,不保证各 key 等概率排首位。这解释了 live 现象为何是 COST/WMT/CRM 几乎每次都失败,而不是半数失败。",
+    "抽中 pure 的后果因公司而异:COST 的 pure 全部 fp=FY 且 filed=2010-10-18,usable=3、single=0 ⇒ hasQuarterly(pure)=false ⇒ firstQuarterlyTag 落空再抽一次;WMT/CRM 的 pure usable=1 single=1 ⇒ 抽中即被接受,灾难性。",
+    "V 不在本任务范围:实测其 us-gaap 下 EarningsPerShareDiluted / EarningsPerShareBasicAndDiluted / WeightedAverageNumberOfDilutedSharesOutstanding 三个 tag **全部 HTTP 404**。回退链不是「没生效」而是**无处可退**,非本缺陷所致,需另开任务(可能需 IFRS/20-F 或非 us-gaap 分类)。",
+    "**golden 基线未变动**(与派单时的预期不同,详见 decisions):9 个 golden fixture 全是单 unit,本修复对它们逐字节无影响。这反而是 functional[3] 单 unit 回归的额外证据。"
+  ],
+  "decisions": [
+    {
+      "decision": "多 unit 时采用确定性的**单 unit 选择**(选中一个,不合并)",
+      "rationale": "(1) 保持既有「口径不混用」不变量 —— tag 回退链(firstQuarterlyTag)同样是选中单一 tag 而非跨 tag 合并;(2) 合并会污染 detectSplits 的相邻 filed 比例投票,它假设输入是单一科目的完整历史;(3) 决定性的一条:COST 的 pure 条目 filed=2010-10-18 **晚于**对应期间的原始申报,合并后会在 applyDuration 的 keepLatest(取 filed 最新)去重中**胜出**,用陈旧重述值覆盖正确值 —— 比丢数据更糟,是静默的错数据。该竞争实现已作为变异 M5 施加并被 boundary[0] 测试杀死 10/10。"
+    },
+    {
+      "decision": "打分规则:可用条数(isSingleQuarter||isAnnual)降序 → 总条数降序 → unit 名升序",
+      "rationale": "首级是数据驱动的,比写死 \"USD/shares\" 之类的名字优先级健壮(unit 命名随科目而变);后两级只为消除并列、保证全序。对全序取最大值与折叠顺序无关,故结果天然与候选顺序无关。可用性判定刻意与 applyDuration 的过滤口径一致,两处须一起改(已写进代码注释)。"
+    },
+    {
+      "decision": "把决策提为纯函数 bestUnitName(units, names []string),由调用方显式给出候选顺序",
+      "rationale": "**这是 AD-27「结构性保证 > 概率性压制」的落点。** 输出层断言原理上无法必然捕获「取第一个 unit」:正确输出恰好等于「碰巧取到 USD/shares」的输出,单次运行只有 ~0.124 的逃逸率,靠重复运行也只能把漏网概率压到 0.124^R,仍是概率性的。把候选顺序从 map 迭代中剥离、交给调用方后,测试可**穷举全部排列**断言同一结果 ⇒ 变异「return names[0]」在把落选 unit 排首位的那个排列上必然返回错误答案,p(kill)=1,与 map 随机性无关。若把 map 迭代内联进函数内部,该保证就退化为概率性的。"
+    },
+    {
+      "decision": "跨 unit 同期间冲突值:胜出 unit 通吃,落选 unit 整体不参与(boundary[0])",
+      "rationale": "单 unit 选择的自然推论,行为明确且可断言,不存在「静默取任意一个」。fixture 刻意让 pure 的 filed 晚于 USD/shares 全部条目,使任何合并实现都会取到哨兵值 99.9/88.8,测试据此排除。"
+    },
+    {
+      "decision": "harness 还原自检改用「与变异前快照 sha256 逐字节相等」,而非 `git diff --quiet`",
+      "rationale": "client.go 带有本任务**未提交**的改动,`git diff --quiet` 恒为假 —— 直接套用会诱使人改用 `git checkout --` 还原,那会把本任务改动一并抹掉(正是上一 sprint 该坑独立发生三次的形态)。sha256 快照比对在有未提交改动时依然严格,且额外在全部变异结束后重跑全包测试证明还原是行为完整的。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/client.go (新增 selectUnit / bestUnitName;unitsOf 闭包改为调用 selectUnit)",
+    "internal/collector/edgar/multiunit_test.go (新增,7 个测试 + 6 个排列子测试)",
+    "internal/collector/edgar/testdata/companyfacts_multiunit.json (dev-agent-26 建)",
+    "internal/collector/edgar/testdata/companyfacts_multiunit_fallback.json (dev-agent-26 建)",
+    "internal/collector/edgar/testdata/companyfacts_singleunit.json (dev-agent-26 建)"
+  ],
+  "interfaces_exposed": [
+    "selectUnit(units map[string][]rawFact) []rawFact —— 包内;在一个 tag 的多 unit 中确定性选中一个,空 map 返回 nil",
+    "bestUnitName(units map[string][]rawFact, names []string) string —— 包内;返回值与 names 排列无关(结构性可测试点)"
+  ],
+  "verification": {
+    "dod_functional_0": "多 unit 确定性选择 → TestSelectUnitIsPermutationInvariant(6 组场景 × 全排列,结构性 p(kill)=1)+ TestFetchCompanyFactsMultiUnitSelectsDeterministically(32 次重复)。PASS",
+    "dod_functional_1": "Q4 EPS = 18.21 − (4.041+4.019+4.279) = 5.871,容差 1e-6 → TestFetchCompanyFactsMultiUnitDerivesQ4EPS。PASS(修复前该季根本不存在)",
+    "dod_functional_2": "首选 tag 全部 unit 无数据 → 回退链生效,且回退 tag 自身也是多 unit → TestFetchCompanyFactsMultiUnitFallbackChain。PASS。首选 tag **整个缺席**的分支由既有 TestFetchCompanyFactsTagFallback 覆盖",
+    "dod_functional_3": "单 unit(AVGO 形态)回归 → TestFetchCompanyFactsMultiUnitMatchesSingleUnit(多 unit 与删掉 pure 的单 unit 版逐季逐字段一致)+ golden 基线逐字节未变动。PASS",
+    "dod_boundary_0": "跨 unit 同期间冲突 → TestFetchCompanyFactsMultiUnitConflictingPeriods,断言取 4.041/5.871 且哨兵值 99.9/88.8/77.7 不出现在任何季度。PASS",
+    "dod_error_0": "全部 unit 无可用数据 → 视为 tag 缺失走回退链,不 panic;无 shares tag ⇒ DilutedShares 恒 NaN ⇒ EPS 推算不可能触发 ⇒ 无处产生 ±Inf(AD-14),已逐字段断言 !IsInf。PASS",
+    "dod_non_functional_0_mutation": "6 个变异全部可编译、全部 KILLED 10/10:M1 bestUnitName 比较器恒 false(退化为取候选首个)→ TestSelectUnitIsPermutationInvariant;M2 unitsOf 退回原缺陷 for-range-return → TestFetchCompanyFactsMultiUnit*;M3 Q4 推导 FY−ΣQ 改 FY+ΣQ → DerivesQ4EPS;M4 firstQuarterlyTag 去掉回退链 → FallbackChain;M5 selectUnit 改为合并全部 unit → ConflictingPeriods;M6 selectUnit 对单 unit 返回 nil → MatchesSingleUnit。harness 每次还原后 sha256 逐字节比对通过,全部结束后 final sha256 与快照一致且全包测试仍绿。**代码简化(code-simplifier)改动测试文件后,6 个变异已重跑一遍,结论不变**。",
+    "dod_non_functional_1_coverage": "edgar 包覆盖率 94.1%(3 次采样均 94.1%,≥93.8% 门槛);go test -race -count=5 全绿;go build ./... + go vet 干净;gofmt -l 空。golden 基线**未变动** —— 9 个 golden fixture 全是单 unit,本修复对其逐字节无影响(与派单预期不同,见 key_findings)。全仓 go test ./... 全绿。",
+    "dod_non_functional_2_live": "见 live_verification"
+  },
+  "live_verification": {
+    "config": "{scratchpad}/livecheck/fixed.yaml(由 leader 的 probe.yaml 派生,仅改 db_path 指向全新 fixed.db;只含 AVGO/V/WMT/COST/CRM 五家)",
+    "db_path": "{scratchpad}/livecheck/fixed.db(全新建,严禁也未曾指向 data/prism.db —— 该文件确认不存在且未被创建)",
+    "command": "atlas prism refresh -c {scratchpad}/livecheck/fixed.yaml",
+    "result": "prism refresh: 5 ok, 0 failed, 1 degraded\nℹ️ Prism 主源降级(已兜底):\nV: edgar failed (reconstruct: valuation: insufficient positive EPS points), engine fallback ok",
+    "expected": "5 ok, 0 failed, 1 degraded(仅剩 V)—— 与 DoD 预期完全一致,COST/CRM/WMT 三家从 degraded 变为 ok",
+    "counter_check": "为排除「新建 DB 本身导致差异」的混淆,用同一套流程另建 buggy.db,唯一差异是把 unitsOf 退回原缺陷(变异 M2)后重新编译:结果复现 leader 的基线 `5 ok, 0 failed, 4 degraded`,且降级名单正是 V/WMT/COST/CRM 四家。两次 live 运行的唯一变量即本修复,因果归属确凿。",
+    "db_evidence": [
+      "COST 2025Q4(period_end 2025-08-31)eps_diluted = 5.87(存储 2 位小数;DoD 锚定值 5.871)",
+      "Q4 行 EPS 缺失统计:AVGO 8 行 0 缺失、COST 17 行 0 缺失、CRM 17 行 0 缺失、WMT 17 行 0 缺失、V 17 行 17 缺失(V 范围外)。修复前 COST/CRM/WMT 各缺 17 行、全部集中在 Q4",
+      "valuation_daily 的 pe_ttm 覆盖:AVGO 1599/1599、COST 2513/2513、CRM 2182/2182、WMT 2513/2513、V 705/705(V 走 engine 兜底)"
+    ]
+  },
+  "notes_for_downstream": [
+    "本修复只改「多 unit 时选哪个 unit」,不改任何单 unit 行为,故对既有下游无迁移成本。",
+    "若将来发现某 tag 需要跨 unit 合并(例如同一科目在不同 unit 下期间互补),必须先处理 filed 晚于原始申报的陈旧重述条目在 keepLatest 中胜出的问题,否则会引入静默错数据。",
+    "V 的 degraded 需另开任务:三个相关 tag 全部 404,建议先确认其 companyfacts 的实际 namespace 与 form 类型。"
+  ]
+}

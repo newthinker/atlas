@@ -1,0 +1,124 @@
+{
+  "task_id": "TASK-002",
+  "title": "prism 存储层扩展(fundamental_q 迁移 + segment_revenue + price_daily)",
+  "by": "dev-agent-16",
+  "commit": "018446d",
+  "key_findings": [
+    "并发 Open 的真实故障点不是 AD-10 预判的 ALTER TABLE,而是 DSN 里的 journal_mode(WAL) 转换。非 WAL 存量库转 WAL 需独占访问且不走 busy_timeout,8 路并发实测 3/240 次 Open 直接拿到 SQLITE_BUSY(错误位置 'prism: init schema');同一实验中已是 WAL 的库 0/240 失败。AD-10 的 duplicate-column 容错必要但不充分。",
+    "已在 runtime 的 prism.db 由现有代码创建,早已是 WAL 模式,故生产上这条路径只在'首次以并发方式打开一个非 WAL 旧库'时才触发;仍已修复(schema 初始化走 execRetryBusy 有界重试)。",
+    "ALTER TABLE ADD COLUMN 只追加列,故新库与迁移库的列序一致的前提是:const schema 里 5 个新列必须写在 source 之后。若后人把新列插到中间,pragma_table_info 列序会漂移 —— TestMigratedSchemaMatchesFreshSchema 逐 cid 比对列名+类型,会当场抓住。",
+    "回滚安全性(SQLite 契约):ALTER TABLE ADD COLUMN 只在表末尾追加列,既有列的 cid、类型、数据一律不变;旧行的新列读作 NULL。旧版二进制的 SELECT 全部显式列出列名(见 QuarterlyFundamentals/Series/Board 的 SQL),不含 SELECT *,因此迁移后的库仍可被 M2 版二进制正常读写 —— 加列不破坏显式列名 SELECT。反向回滚(降级二进制)无需任何 DDL 动作,多出的 5 列被旧代码忽略。",
+    "migrate 只处理 fundamental_q 的加列;segment_revenue / price_daily 两张新表由 CREATE TABLE IF NOT EXISTS 覆盖,存量库 Open 时自动补建,无需迁移代码。",
+    "AD-9 的 PK 选择在测试中被正向与反向双向锁定:同 (period_end,segment_key) 换 fiscal_period 标签不新增行(幂等);同 fiscal_period 标签但不同 period_end 各自成行(标签碰撞不会静默覆盖)。",
+    "gitnexus impact 不可用:CLI 报 'LadybugDB unavailable for atlas ... Database file version: 42, Current build storage version: 40'。改用 grep 手工评估 Open 的 blast radius(见 verification.impact_analysis)。"
+  ],
+  "decisions": [
+    {
+      "decision": "schema 初始化从 db.Exec(schema) 改为 execRetryBusy(db, schema)(BUSY 有界重试,10 次、20ms 递增退避,累计约 1.1s)",
+      "rationale": "DoD boundary[1] 要求并发 Open ×N 全部成功。实测根因是 WAL 转换不走 busy_timeout,重试是唯一能在不改 DSN 语义的前提下消除该竞态的手段(实验证明调换 pragma 顺序无效)。schema 全部是 CREATE TABLE IF NOT EXISTS,重试幂等安全。重试耗尽后如实返回原始 BUSY,不吞错。"
+    },
+    {
+      "decision": "5 个新列写在 const schema 的 source 之后,而非按业务分组插在 revenue 附近",
+      "rationale": "ALTER TABLE ADD COLUMN 只能追加。写在末尾才能让'新建库'与'迁移后的旧库'列序完全一致,否则两条路径产生形状不同的表,后续任何按序读取都会踩雷。"
+    },
+    {
+      "decision": "错误分类用 isBusyErr / isDuplicateColumnErr 两个独立谓词,并各自用真实 sqlite 错误做测试(不伪造错误字符串)",
+      "rationale": "modernc.org/sqlite 不导出错误码常量,只能匹配错误文本;把匹配收成具名谓词后可被单独断言。测试刻意同时断言反例(其他 DDL 错误不得被误判为 duplicate/busy),防止容错逻辑退化成'吞掉一切错误'。"
+    },
+    {
+      "decision": "LatestSegmentPeriodEnd 用 SELECT MAX(period_end) 且不 JOIN fundamental_q(AD-9)",
+      "rationale": "锚点只依赖 segment_revenue 自身,fundamental_q 缺该季度时锚点不会回退;测试显式断言该 instrument 的 fundamental_q 行数为 0 时仍能返回锚点。"
+    },
+    {
+      "decision": "PriceSeries 未知 symbol 返回 fmt.Errorf(\"%w: %s\", ErrNotFound, symbol),与既有 Series 完全一致",
+      "rationale": "DoD boundary[0] 明确要求与 Series 一致;调用方可用 errors.Is 判定,API 层可映射 404。"
+    },
+    {
+      "decision": "SegmentRow.FiscalPeriod 读侧用 sql.NullString,NULL 与空串统一读回空串",
+      "rationale": "AD-9 把 fiscal_period 降为可空展示列,TASK-008 匹配失败时会落空标签。调用方只需判 == \"\",不必区分 NULL 与 ''。"
+    }
+  ],
+  "files_modified": [
+    "internal/storage/prism/sqlite.go",
+    "internal/storage/prism/sqlite_test.go"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/storage/prism",
+    "types": [
+      {
+        "name": "FundamentalRow(扩字段)",
+        "note": "M3 在既有字段之后新增 5 个 float64;NaN ↔ NULL 双向往返",
+        "fields": [
+          "FiscalPeriod string  // \"2026Q1\"",
+          "PeriodEnd    string  // \"YYYY-MM-DD\"",
+          "FilingDate   string  // \"YYYY-MM-DD\"",
+          "Revenue, NetIncome, EPSDiluted, Equity, DilutedShares float64",
+          "GrossProfit, RnD, SGnA, OperatingIncome, IncomeTax    float64  // M3 新增",
+          "Source string  // \"edgar\""
+        ]
+      },
+      {
+        "name": "SegmentRow",
+        "note": "AD-9:PeriodEnd 是真实主键的一部分,FiscalPeriod 只是展示标签、可为空",
+        "fields": [
+          "PeriodEnd    string   // \"YYYY-MM-DD\",主键之一",
+          "FiscalPeriod string   // \"2026Q1\",展示标签,可为空串",
+          "SegmentKey   string   // 模板 key,主键之一",
+          "Revenue      float64  // NaN ↔ NULL",
+          "Source       string   // \"edgar_segment\" | \"manual\""
+        ]
+      },
+      {
+        "name": "PriceRow",
+        "fields": [
+          "D     string   // \"YYYY-MM-DD\"",
+          "Close float64  // NaN ↔ NULL"
+        ]
+      }
+    ],
+    "methods": [
+      {
+        "signature": "func (s *Store) UpsertSegments(instrumentID int64, rows []SegmentRow) error",
+        "semantics": "单事务写入;按 (instrument_id, period_end, segment_key) 幂等;冲突时更新 fiscal_period/revenue/source(故 source=manual 可覆盖同键 edgar_segment 行)。rows 为 nil/空切片时不报错、不产生行。"
+      },
+      {
+        "signature": "func (s *Store) SegmentRows(instrumentID int64) ([]SegmentRow, error)",
+        "semantics": "返回该 instrument 全部分部行,ORDER BY period_end, segment_key 升序。无数据返回 (nil, nil)。FiscalPeriod 为 NULL 时读回空串。"
+      },
+      {
+        "signature": "func (s *Store) LatestSegmentPeriodEnd(instrumentID int64) (string, error)",
+        "semantics": "SELECT MAX(period_end) FROM segment_revenue WHERE instrument_id=?;无分部数据(含 instrument 不存在)时返回 (\"\", nil) 而非错误。不 JOIN fundamental_q(AD-9)。TASK-008 用作增量锚点。"
+      },
+      {
+        "signature": "func (s *Store) UpsertPrices(instrumentID int64, closes []PriceRow) error",
+        "semantics": "单事务写入;按 (instrument_id, d) 幂等,冲突时更新 close。closes 为 nil/空切片时不报错。"
+      },
+      {
+        "signature": "func (s *Store) PriceSeries(symbol, from string) (dates []string, closes []float64, err error)",
+        "semantics": "按 symbol 查 instrument;未知 symbol 返回包装的 ErrNotFound(errors.Is 可判,错误文本含 symbol)。from==\"\" 返回全部,否则筛 d >= from。日期升序,dates 与 closes 等长一一对应;close 为 NULL 时该位置是 NaN。已知 symbol 但无价格数据返回 (nil, nil, nil)。"
+      }
+    ],
+    "unexported_helpers": [
+      "func migrate(db *sql.DB) error —— Open 内部调用,为存量 fundamental_q 补 m3Columns",
+      "func isBusyErr(err error) bool",
+      "func isDuplicateColumnErr(err error) bool",
+      "func execRetryBusy(db *sql.DB, stmt string) error",
+      "var m3Columns = []string{\"gross_profit\",\"rnd\",\"sgna\",\"operating_income\",\"income_tax\"}"
+    ],
+    "sql_schema_added": [
+      "segment_revenue(instrument_id, period_end, fiscal_period, segment_key, revenue, source) PRIMARY KEY (instrument_id, period_end, segment_key) WITHOUT ROWID",
+      "price_daily(instrument_id, d, close) PRIMARY KEY (instrument_id, d) WITHOUT ROWID",
+      "fundamental_q 追加列 gross_profit / rnd / sgna / operating_income / income_tax,均为 REAL,位于 source 之后"
+    ]
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/storage/prism/ -count=1 -cover",
+    "result": "ok  github.com/newthinker/atlas/internal/storage/prism  1.707s  coverage: 81.3% of statements",
+    "coverage": "81.3%(基线 81.0%,门槛 80%)",
+    "red_evidence": "先写测试并实测失败:加桩后行为级 FAIL 9 个(TestUpsertFundamentalsRoundtrip / TestOpenMigratesFundamentalQ / TestMigratePreservesExistingData / TestOpenIsIdempotent / TestIsDuplicateColumnErr / TestConcurrentOpenAllSucceed / TestSegmentRoundtripAndAnchor / TestPriceSeriesFrom / TestPriceSeriesBoundaries)",
+    "concurrency": "TestConcurrentOpenAllSucceed 以 8 goroutine 同时 Open 同一非 WAL 存量库;修复前 -count=20 中 2 次失败(SQLITE_BUSY at init schema),修复后 -count=40 连续全绿",
+    "adjacent_packages": "GOTOOLCHAIN=local go build ./... 通过;go test ./internal/prism/... ./cmd/... 全绿(internal/prism、internal/prism/sankey、cmd/atlas)",
+    "existing_tests_untouched": "既有 valuation/board/series/instrument 测试零断言修改;唯一改动的既有测试是 TestUpsertFundamentalsRoundtrip —— 按 DoD functional[2] 要求扩充新 5 字段断言(原有断言一条未删、未改)",
+    "impact_analysis": "gitnexus CLI 不可用(LadybugDB 版本 42 vs 构建版本 40),回退 grep 手工评估:prism.Open 的上游调用点仅 2 处 —— cmd/atlas/serve.go:201(Prism 启用时打开,失败则 serve 整体启动失败)与 cmd/atlas/prism.go:99(失败则所有 atlas prism 子命令中止)。两处均 fail-fast,故 Open 中任何新增的可失败步骤(migrate / schema 初始化)风险等级为 HIGH:一次失败即同时打掉常驻服务与定时任务。这正是 AD-10 容错与本次 BUSY 重试修复的动机。包内 Store 方法为纯新增,无既有调用方受影响。"
+  }
+}

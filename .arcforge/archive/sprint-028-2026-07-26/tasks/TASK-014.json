@@ -1,0 +1,77 @@
+{
+  "id": "TASK-014",
+  "title": "首批桑基模板(5~10 家)+ live 校验",
+  "description": "无代码任务(YAML 数据产物)。逐家流程: 用 TASK-005 的解析器对真实 CIK 打印实例文档 member 清单 → 填 configs/prism/templates/{symbol}.yaml → atlas prism refresh → 核对 segment_revenue 落库数字 vs 公司财报。特殊结构: AAPL 产品线在 ProductOrServiceAxis(模板 segment_axis 覆盖);TSLA 汽车/能源;TSM 为 IFRS/20-F 自动解析不适用 → 纯 manual 或本批跳过并记录决定。解析持续失败的公司写 configs/prism/segments/{symbol}.yaml manual 兜底(近 8 季),模板保留。网络已确认可达(data.sec.gov 与 www.sec.gov 经本地 proxy 均 200)。 【安全约束(Leader 追加)】禁止对用户生产库 runtime prism.db 执行刷新: 必须用临时 config(仅含待验证标的)+临时 DBPath(如 /tmp 下)跑 atlas prism refresh,验证完成后不改动用户运行时配置与生产库;网络经本地 proxy 可达(Go http.Transport 默认读 http_proxy 环境变量),无需额外配置。 【AD-12】模板迭代必须用 atlas prism refresh --full-segments(force 全量重拉);纯增量模式下第一次跑完锚点即前进,改模板后再跑将拉不到任何数据。 【顺带修 fixture 健壮性(test-agent-7 在 TASK-005 验证中发现,Leader 采纳;edgar 包后续无其他任务触碰,故并入本任务)】两处断言「通过了,但不是因为它想验证的那条规则」——功能均正确(已另造探针验证),问题在断言不具判别力: ① **交叉维排除的断言顺序依赖**: instance_mini.xml 里合法 fact(34.681B,偏移 7684)排在交叉维 fact(12B,偏移 8842)**之前**且两者同 tag,而采纳逻辑先到先得 → **把交叉维排除整个关掉,断言仍通过、缺陷漏网**;只有把交叉维 fact 前置,变异才会让测试变红。② **单位过滤的断言被 tag 优先级掩蔽**: 三条干扰 fact(EUR / <divide> USD-per-share / 未声明单位)**全部**用 us-gaap:Revenues(优先级 1),而合法 fact 用 RevenueFromContract...(优先级 0)——靠 tag 就已稳赢,**把单位过滤整个关掉 TestFetchSegmentRevenueUnitFilter 依然全绿**。修法合计 **4 行 fixture 改动**: 交叉维 fact 前移;三条干扰 fact 改为与合法 fact 同 tag 并前置。**验收标准不是「改了 fixture」而是「改后那两个变异体(允许交叉维 / 关掉单位过滤)真的会被杀死」**,请重跑确认。**【升级:从「健壮性改进」到「陷阱当前完全无效」】**(test-agent-7 补做实验证实): 照 AD-23① 描述的天真实现做变异(把 <divide> 孙元素 measure 也纳入判定、任一 measure 为 USD 即当 USD),**既有测试套全绿、未变红**。机制: 陷阱构造本身是对的——天真实现确实把 U_UnitedStatesOfAmericaDollarsShare 误判成了 USD;但那条每股值 fact 用的是 us-gaap:Revenues(优先级 1),合法 fact 用 RevenueFromContract...(优先级 0),**误判进来的 3.24 在 tag 优先级上就先出局了,永远浮不到结果里**。所以不是「陷阱造得不够像」,而是**「陷阱被放在了一条永远走不到的分支上」**。→ 根因与交叉维那处**同一**: instance_mini.xml 里所有干扰 fact 都被安排在「先到先得 / 低优先级 tag」这两道**先决淘汰**之后,于是它们想验的规则从未被真正执行到。三个干扰项里**只有轴不匹配那个是真的在防守**(其 member 名 ServerProductsAndCloudServicesMember 不同,不撞键,故 assert.NotContains 有判别力),另两个都因撞同一 member 键被遮蔽。修法即让它们别再被遮蔽。生产实现始终正确(同 tag 探针验过返回 29944,三类干扰都被排除)。**【验收配方位置】** test-agent-7 已在 .arcforge/docs/04-test/TASK-005-verification.md 的**附录 A**(报告 300 行)给出两个变异体的**原样可跑配方**(bash+python,含 worktree 搭建与还原),验收者**直接照跑,不要从散文描述里自行推导变异体**——推出一个不等价的变异会得到假结论。三个配方: 变异 A(交叉维 != 1 → < 1,交付时**存活**,修后须被 TestFetchSegmentRevenueSingleAxisOnly 杀死);变异 B(把 <divide> 孙元素 measure 纳入判定 = AD-23① 的天真实现,交付时**存活**,修后须被 TestFetchSegmentRevenueUnitFilter 杀死);变异 C(tag 优先级改「首次出现者胜」,交付时**已被** TagPriority 抓住——因为修 §6.1 要把 C_cross 的 fact 前移,C 是确认该动作没搞坏 tag 优先级测试的**回归哨兵**)。附录开头写明前置条件: 隔离 worktree、还原一律 git checkout --、每批变异前先验基线全绿。",
+  "module": "configs-prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "configs/prism/templates/aapl.yaml",
+    "configs/prism/templates/googl.yaml",
+    "configs/prism/templates/amzn.yaml",
+    "configs/prism/templates/nvda.yaml",
+    "configs/prism/segments/README.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "除 MSFT 外至少 4 家(AAPL/GOOGL/AMZN/META/NVDA/TSLA 中选)产出 configs/prism/templates/*.yaml,每家的 xbrl_member 映射经真实实例文档打印确认(member 清单记入 discovery)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "MSFT 分部数字与 10-Q 对账一致(基准: FY26Q3 2026-01-01~03-31 Productivity 35.013B / IntelligentCloud 34.681B / MorePersonalComputing 13.192B;FY2025 年报 120.810B / 106.265B / 54.649B)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "AAPL 的 segment_axis 按实测实际轴填写(预期 ProductOrServiceAxis,若实测不同则以实测为准并记录)",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "自动解析持续失败的公司写 configs/prism/segments/{symbol}.yaml manual 兜底数据(近 8 季)且模板保留;TSM(IFRS/20-F)明确记录为跳过并说明理由",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "atlas prism refresh 全程无 panic;单家解析失败只进 Degraded/Failed,不阻塞其余公司落库",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "discovery 中记录: 全自动成功家数 / manual 兜底家数 / 跳过家数,以及各家实测 member 清单原文(作为后续模板维护的事实来源)",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-005",
+    "TASK-010"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-003",
+    "TASK-005",
+    "TASK-010"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-15",
+  "packages": [
+    "configs/prism",
+    "./internal/collector/edgar"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-10",
+  "discovery": ".arcforge/discoveries/TASK-014.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-7"
+}

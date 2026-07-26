@@ -1,0 +1,58 @@
+{
+  "id": "TASK-003",
+  "title": "桑基模板体系(schema/加载/校验 + msft.yaml)",
+  "description": "新建 internal/prism/sankey/template.go: Template/Segment 结构体与 LoadTemplates/LoadManualSegments。**AD-1 决策: 用 viper + mapstructure tag,不引入 gopkg.in/yaml.v3 直接依赖**(仓库不直接 import yaml 包,crisis config internal/crisis/config.go:115 走 viper,本任务同款)。同时产出首个真实模板 configs/prism/templates/msft.yaml——其 3 个 member 名已由 Leader live 验证(见 01-design/requirements-analysis.md §5)。主干流不进模板(AD-5),理由写入模板文件头注释。接口签名见 design-spec.md §3.1。",
+  "module": "prism-sankey",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/prism/sankey/template.go",
+    "internal/prism/sankey/template_test.go",
+    "internal/prism/sankey/testdata/valid.yaml",
+    "internal/prism/sankey/testdata/dup_key.yaml",
+    "configs/prism/templates/msft.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestLoadTemplates: 合法模板解析出 company/cik/segment_axis/version 与完整 segments 列表(key/name_zh/name_en/xbrl_member 逐字段断言)",
+      "校验分支(表驱动,每例断言 err 含出错文件名且返回 nil map): key 重复 / xbrl_member 重复 / xbrl_member 为空或缺失 / key 为空 / company 为空 / cik 为空 / cik 非纯数字;**另加两条加载期显式失败(Leader 补漏,非 dev 过失;design-spec §3.1.1 已同步裁决归属本任务)**: (a) segments[].key 含大写字符 → error(viper 把 manual 数据 map key 小写化,大写 key 只会静默空 JOIN;test-agent-6 探针实测 key=Cloud 被静默接受、查得 0 条); (b) 两个模板文件声明同一 company → error(后加载者静默覆盖,赢家取决于 os.ReadDir 顺序;探针实测 len(map)=1 赢家为 SecondMember)",
+      "AD-16 三种目录情况必须区分(不可一律吞成空 map): 目录不存在 → 空 map + nil error;目录存在但无 yaml → 空 map + nil error;目录含非法 YAML → 返回 error 且错误信息含出错的文件名(负向断言: 不得静默返回空 map,否则表现为 sankey 全站 404 且日志无痕)",
+      "TestLoadManualSegments: 文件存在时解析为 fiscal_period → segment_key → 金额的两层 map;文件不存在时返回空 map + nil error;fiscal_period 键格式被校验(^[0-9]{4}Q[1-4]$ 或 ^FY[0-9]{4}$),非法键报错而非静默产生永远 JOIN 不上的数据",
+      "仓库真实模板冒烟(仿 internal/crisis/config_test.go 的 TestLoadConfigFromRepoFile): 直接加载 configs/prism/templates/ 全量解析通过,msft.yaml 的 3 个 xbrl_member 为 ProductivityAndBusinessProcessesMember/IntelligentCloudMember/MorePersonalComputingMember"
+    ],
+    "boundary": [
+      "返回 map 的 key 统一为大写 symbol;模板的 cik 字段非空且为纯数字串(为 TASK-011 的模板串号校验留出依据)"
+    ],
+    "non_functional": [
+      {
+        "desc": "使用 viper + mapstructure tag(AD-1,与 internal/crisis/config.go 同款),go.mod 的 direct require 段无新增 yaml 依赖;模板文件头注释说明主干流不进模板的理由(AD-5)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-17",
+  "packages": [
+    "./internal/prism/sankey"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-4",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:24Z"
+  },
+  "progress_note": "门禁口径限制：task-completed.sh 把 packages 全部条目直接传给 go test/-coverpkg，非 Go 路径 configs/prism/templates 必然 \"no Go files ... [setup failed]\"（./ 前缀与否均失败），导致 dev_done 被 DENY。故从 packages 移出该数据目录；实际触碰范围仍含 configs/prism/templates/msft.yaml（已随 c352c50 提交），其内容由 ./internal/prism/sankey 的 TestLoadTemplatesFromRepoDir 仓库冒烟测试逐字段覆盖。请 Leader 知悉，验收时勿遗漏该文件的 review 项（AD-5 头注释）。",
+  "verifier": "test-agent-6",
+  "reject_reason": "仅缺 Leader 追加的两条加载期校验，JSON 内 8 条 done_criteria 已逐条实测通过、无需返工。(a) segments[].key 含大写字符未在加载期 error：探针实测模板 key=Cloud 被静默接受，而手工数据经 viper 变 cloud，JOIN 结果为 0（静默空数据）；当前仅 template.go:24-26 注释约定，validate() 无校验。(b) 两个模板文件声明同一 company 未在加载期 error：探针实测 len(map)=1、后加载者静默覆盖，赢家取决于 os.ReadDir 顺序。注意 design-spec §3.1.1「已知限制」明文把 (b) 推给 TASK-011，与追加要求冲突，请 Leader 裁决归属；(a) 单独已足以构成 rejected。修复只需在 Template.validate() 增两条校验 + 对应负向测试。详见 .arcforge/docs/04-test/TASK-003-verification.md",
+  "discovery": ".arcforge/discoveries/TASK-003.json"
+}

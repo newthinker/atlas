@@ -1,0 +1,57 @@
+{
+  "id": "TASK-016",
+  "title": "聚合防御:拒绝标签冲突导致的错误财年与跨季相加",
+  "description": "【发布阻断级缺陷,dev-agent-15 在 TASK-014 阶段二b 用真实数据发现,Leader 独立复核确认】真实 EDGAR companyfacts 中 **27% 的 FiscalPeriod 标签有冲突**(实测 MSFT: 7/26 个标签重复,最严重的 2018Q4 有 **4 个不同季度**共用: 2016-06-30/2016-09-30/2016-12-31/2017-03-31)。根因在 client.go 的 applyDuration 按 period_end 去重取 filed 最新者,而胜出条目的 fy/fp 是**那份较晚报告的上下文标签**,不是该期自身的财报期——较晚 10-Q 里的去年同季会继承当期标签,一份 10-K 携带 3 个财年也全部标着报告自身的 fy。fundamental_q 用 period_end 作 PK 所以**数据本身没丢,只有标签撞车**。但下游 sankey 把标签当聚合分组键用: buildQuarters 的 `byPeriod[s.FiscalPeriod][s.SegmentKey] += s.Revenue` 让**不同季度的分部值被静默相加**;aggregateFiscalYears 的 `if len(qs) < 4 { continue }` **只挡不足、不挡超出**,6 个季度会被当成一个完整财年。实测后果: MSFT FY2025 营收报 377.752B(真值 281.7B,+34%)、FY2025 productivity 报 **392.914B(真值 120.810B,3.25 倍)**;FY2026 只发布 3 个季度却产出了完整财年。**又一例「合法值但语义错误」——数字看着像营收,无任何报错,页面上看不出来。** 本任务只做**防御**(治本由 TASK-017 在 edgar 包做),目标是「上游违约时不静默出错」。为什么既有测试没抓住: 各包 fixture 里每个季度标签都唯一,该问题**只在真实 EDGAR 数据上出现**,需要「较晚的报告重复披露更早的期间」才触发。",
+  "module": "prism-sankey",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/prism/sankey/periods.go",
+    "internal/prism/sankey/periods_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "aggregateFiscalYears 对 len(qs) > 4 的财年**拒绝产出 FY**(与既有 < 4 的处理对称),并使该情况可观测(返回值或调用方可感知的信号,不得静默 continue);测试用 6 个同财年标签的季度构造,断言不产出该 FY;**【返工项①·档位落文】** 验收档位必须是 **3 季拒绝 / 4 季接受 / 5 季拒绝**——只有 5 季能区分 `>4` 与 `>5`(test-agent-6 实测: 现有 4/6 两档下 `>4`→`>5` 变异**存活**)。此前 Leader 仅口头转达未落进 DoD 文本,dev 按字面完成 6 季构造无过失,本条为正式补文",
+      "buildQuarters 遇到**同一 FiscalPeriod 但 period_end 不同**的行时**不得静默 `+=`**;测试构造两行同标签不同 period_end,断言不产生「两季相加」的错值(具体策略由实现者定: 取 period_end 最新者 / 拒绝该标签 / 标记冲突,但必须在 discovery 说明选择理由)",
+      "真实数据回归: 用 MSFT 的真实标签冲突形态(2026Q3 ×2 → [2025-03-31, 2026-03-31]、2025Q4 ×3 → [2023-06-30, 2024-06-30, 2025-06-30])构造 fixture,断言不再出现 61.432B(=26.751+34.681 的跨季相加)这类错值",
+      "**【返工项③·假同比缓解，Leader 裁决(a)】** dev 实测发现: 标签冲突时 findPeriod 按标签反查同比,会拿到 period_end 相差**两年**的对照期,输出 change=0.75/kind=yoy——**标签对了、期间错了**,且 0.75 是完全合理的增速、页面上无任何异常(本 sprint 第 8 次「合法值但语义错误」,也是最难发现的一次)。要求: 同比反查时校验对照期 period_end 与本期相差须在 **340~390 天**内,否则退化为 ChangeKind: none。**即使 TASK-017 治好上游标签这条也要留**——它防的是「按不可靠键反查」这个**行为模式**,不是这一次的 bug"
+    ],
+    "boundary": [
+      "既有正常路径零行为变更: 标签唯一时 BuildPeriods 的输出与改动前逐字段一致(TASK-007 既有 18 个测试零断言修改全绿);**【返工项②·魔数锚点】** periodEndSlackDays=15 目前**两个方向都无锚点**(test-agent-6 实测 15→14 存活、15→30 存活,比 TASK-008 的 ±3 更彻底——那次至少 3→5 被抓住)。该常量直接决定正确性: 过小则真实数据里分部全部对不上、静默落进残差;过大则相邻季被误判为同一季,**正是本任务要防的东西**。须补 **14/15/16 三档**用例锚定",
+      "len(qs) 恰为 4 时仍正常产出 FY(边界值,不能因加了上界防御而误伤正常财年)"
+    ],
+    "non_functional": [
+      {
+        "desc": "变异验证: (a) 去掉 >4 上界防御 → 必须变红; (b) 恢复 buildQuarters 的静默 += → 必须变红。按「被点名的测试在变红列表里且失败信息指向该规则」两步核对",
+        "verify_by": "test"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 全绿,覆盖率不低于 96.1% 基线",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 9,
+  "context_from": [
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-17",
+  "discovery": ".arcforge/discoveries/TASK-016.json",
+  "packages": [
+    "./internal/prism/sankey"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-6",
+  "reject_reason": "仅 functional[0] 未通过：上界值 4 无断言锚点。实跑变异确认——去掉 >4 防御被 TestBuildPeriodsRejectsOversizedFiscalYear 杀死，但 len(qs)>4 改 len(qs)>5 存活，因现有档位只有 4 季(接受)与 6 季(拒绝)，这两档在 >4 与 >5 下表现完全一致，只有 5 季能区分。与 TASK-008 的 ±3 容差完全同构：DoD 明文写死 len(qs)>4 却无用例取在边界上。修法约 6 行：加一个 5 季同财年标签用例，断言不产出该 FY 且 conflicts 含该 FY。注意 DoD 原文只要求「用 6 个季度构造」，dev 按字面完成了，这是 DoD 措辞疏漏不是 dev 失职。其余 6 条 DoD 全部实测通过，一律无需返工：F1 的 61.432/34.681 逐值锚定(K3 变异被杀)、F2 真实形态回归、B0 既有断言零弱化(7 处删除行全是返回值元数适配，其中 2 处改写后断言不减反增)、B1、N0、N1(覆盖率 97.7%，我连测 3 次稳定，与 dev 一致而非 Leader 的 98.0)；可观测性有守护(K7 被杀)、AD-26 Conflicts 透传到 Analysis 有守护、对不上时返回 nil 的语义有守护(K6 被杀)。另强烈建议同轮补 periodEndSlackDays=15 的 14/15/16 三档——该常量两个方向的变异(15→14、15→30)均存活，完全无锚点，比 ±3 那次更彻底(那次至少 3→5 被抓)；它不在 DoD 文本内故不作 REJECTED 依据，但它直接决定正确性(过小则分部全部落进残差、过大则相邻季误判同季)。详见 .arcforge/docs/04-test/TASK-016-verification.md"
+}

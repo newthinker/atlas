@@ -1,0 +1,111 @@
+{
+  "task_id": "TASK-002",
+  "title": "V(Visa) 的 EPS 缺失:companyfacts 只收无维度事实,改走实例文档的类别维度 EPS",
+  "owner": "dev-agent-28",
+  "outcome": "可行性验证通过并完成实现。live: 5 ok, 0 failed, 0 degraded(基线 1 degraded=V)",
+  "key_findings": [
+    "**可行性结论:可行**。V 最近 10-K 实例文档(2.47 MB / 2.0 s)含 23 条 us-gaap:EarningsPerShareDiluted;10-Q 含 90 天单季 EPS。派单里「若不存在则到此为止」的分支未触发。",
+    "**根因比派单假设更具体**:V 的 EPS 与加权稀释股本**每一条都带** us-gaap:StatementClassOfStockAxis 维度(CommonClassA / v:CommonClassB1 / CommonClassB2 / CommonClassC),**不存在无维度的合并 EPS**;而 companyfacts 只收录**无维度**事实 ⇒ 整个科目一条都进不去。Visa 是多类别股权结构、各类别转换比例不同,「合并 EPS」本身没有意义,故它按类别分别披露。",
+    "**对照组(关键的一步)**:同一份文档里 NetIncomeLoss **有**无维度版本(FY2025 = 20,058M)。没有这个对照,「companyfacts 只暴露无维度事实」只是假设;有了它就成为被证明的机制 —— 它同时排除了「V 根本没申报 EPS」这一竞争解释,并解释了为什么净利 227 条而 EPS 0 条。",
+    "交叉校验:20,058M(无维度净利) / 1,966M(Class A 稀释股本) = 10.202 ≈ 10.20(Class A 稀释 EPS)。V 用 as-converted 法,分子是**总**净利。",
+    "陷阱:CommonClassB2Member 的 FY2023 稀释 EPS = **0**,选错类别会得到 0 而非缺失;Basic(8.29/9.74/10.22)与 Diluted(8.28/9.73/10.20)成对出现,混淆会系统性偏高且难察觉。",
+    "**「370 天」的机制解释(排查资产)**:ttmPoints(prism/refresh.go:342)给每个 TTM 点打的是**窗口末季的** FilingDate;effectiveDate(valuation/reconstruct.go:54)= FilingDate;latestEPSAtOrBefore 把早于最早点 FilingDate 的交易日全部丢弃。cap=12 时最早 TTM 点是 2023-12-31 结束的窗口、filed 2025-01-31,**与观测到的序列起点 2025-01-31 完全吻合**。已排除两个更自然的怀疑对象:EPS 期末最早 2022-06-30、price_daily 最早 2016-07-26,**都不是绑定因素**。将来任何「为什么历史这么短」的排查可直接复用这条链路。",
+    "各季 filing_date 普遍晚约一年,源于**次年同期报告的对比期条目 + keepLatest(重述以最新披露为准)**。这是**既有且跨公司**的语义 —— companyfacts 自身也含 filed 晚一年的对比期条目(实测 V 的 2025-01-01~2025-03-31 NetIncomeLoss 有 filed=2025-04-30 与 2026-04-29 两条、值同为 4577000000),不是本路径引入的失真。",
+    "**28 是数据侧硬边界,不是可调参数**:对 V 最近 40 份 10-K/10-Q 逐份探测,reportDate ≤ 2019-03-31 的实例文档**全部 HTTP 404**(第 29 份及以后),往前一份不漏都能取到。2019 年前是老式非 inline XBRL,_htm.xml 推导根本不成立(AD-3 已记载的降级场景)。把这个数字调大只会多拿一批必然 404 的 URL。",
+    "WMT 在两次 live 之间出现过一处末位浮点差(2014-01-31 的派生 Q4:0.453333333333334 vs ...333)。**已证伪为本改动所致**:同一个 atlas-final 二进制三次运行分别产出 ...333 / ...334 / ...334 —— 是 Q4 = FY − ΣQ 的求和顺序取自 singleByEnd **map 迭代序**造成的既有抖动(golden 测试早已为此约定 12 位有效数字)。按 12 位口径,AVGO/COST/CRM/WMT 四家逐值完全一致。"
+  ],
+  "decisions": [
+    {
+      "decision": "只在 companyfacts **完全取不到 EPS** 时才走实例文档路径(len(epsFacts)==0)",
+      "rationale": "把 functional[2] 的回归安全变成**结构性保证**而非概率性观察:COST/CRM/WMT/AVGO 的 EPS 在 companyfacts 里正常存在 ⇒ 分支根本不进入 ⇒ 连一次 HTTP 请求都不发出。即便实例文档路径存在任意 bug 也影响不到它们。测试直接断言 archives host **零请求**(TestFetchCompanyFactsWithEPSNeverTouchesArchives),并配对偶用例证明无 EPS 时确实进入(TestNoEPSFixturesDoEnterFallback)—— 只证前者的话,一个「回退永不触发」的实现照样全绿。"
+    },
+    {
+      "decision": "主类别用 dominantClass 数据驱动选取:候选限定为**有 EPS 披露**的类别,按该类别申报过的**最大**加权稀释股本降序,平手按类别名升序",
+      "rationale": "与 TASK-001 的 bestUnitName 同理,数据驱动比写死 taxonomy 名健壮。用 max 而非 sum:同一事实在 inline XBRL 里重复渲染、股本又有 diluted/basic 两条 tag,求和会按重复次数放大,max 对两者免疫。候选限定为有 EPS 的类别是为排除 ParticipatingSecuritiesMember 这类只有净利分配、不披露 EPS 的「类别」。遍历取自排序后的类别名而非 map 迭代,故结果与输入排列无关。"
+    },
+    {
+      "decision": "合成 rawFact 的期间分类**直接调用下游过滤器本身**(isAnnual / isSingleQuarter)判定,而不是自己再算一遍天数",
+      "rationale": "load-bearing:segments.go 的 keepDuration 算天数**含首尾 +1**,client.go 的 durationDays **不含**,两处差一天。若按 keepDuration 分类,边界期间会被标成单季却被下游拒收,表现为「莫名其妙少一季」且极难定位。让标注与判定共用同一个判据,自洽性由构造保证(TestClassRawFactsFPMatchesDownstreamFilter)。FP 在此只是过滤标志、不承载真实季次 —— 展示标签一律由 period_end 经 fiscalLabel 推导。"
+    },
+    {
+      "decision": "earliestFiledPerValue:同 (period, 值) 的重复披露只保留 filed 最早的一条;值不同则两条都留",
+      "rationale": "companyfacts 每条 entry 自带它自己的 filed,而实例文档路径只能拿到「装着这条事实的那份报告」的 filingDate,对比期会被打上晚一年的**错误**申报日 —— 而整套防前视机制正建立在「Filed 是该值真实公开的日期」之上。按**值**分组而非无脑取最早:值变了才是真重述,那时两条都留、由下游 keepLatest 取最新(TestClassRawFactsKeepsBothOnRestatement),无脑取最早会让重述永远生效不了。**诚实说明:它不改善估值覆盖**(季度级 FilingDate 是全科目取 max,companyfacts 的 NetIncomeLoss 同样带晚一年的对比期条目),实测加与不加均为 ~370 天。保留它的理由是 Filed 语义正确 + 顺带把 V 的 EPS 事实从 54 条去重到 17 条。"
+    },
+    {
+      "decision": "为类别 EPS 路径引入**独立常量** maxClassEPSFilings=28,不动 maxSegmentFilings=12;recentFilings 的上限改为调用方传入的 limit 参数",
+      "rationale": "cap=12 时 V 的估值只有 370 天 / pctl_5y 118 点,**比它替换掉的 engine 兜底(705 天 / 453 点)还短** —— 指标(0 degraded)达成但目标(用户可见历史)倒退;cap=28 是 1377 天 / 1125 点,双轴严格优于兜底。但 maxSegmentFilings 由 FetchSegmentRevenue 共用,抬高它会连带放大分部营收的拉取量,而那条路径的影响在本任务 live 环境里**无法测量**(两次运行 segment_revenue 均 0 行)。**在测不到的地方不动共享状态** —— 这条优先于性能考量。独立性由 TestClassEPSAndSegmentCapsAreIndependent 钉住,变异 M12/M13 各被杀 10/10。"
+    },
+    {
+      "decision": "parseClassFacts **不做 unit 过滤**",
+      "rationale": "与 parseSegmentInstance 的刻意差异。分部营收必须过滤 unit —— V 的实例文档同时声明 usd/eur,营收 tag 在不同货币下重复出现,不过滤会混币种求和。而 EPS/股本的 tag 名在 us-gaap 里已唯一确定量纲(每股金额 / 股数),不存在同 tag 多量纲;真出现外币 EPS 那是 IFRS/20-F 申报人,上游已被 ErrNotUSGAAP 挡掉。实测 V 四份文档里 EPS 一律 unitRef=usdPerShare、股本一律 shares。"
+    },
+    {
+      "decision": "fixture 全部从真实抓取的 SEC 文档**逐字节原样截取**(自建 extract 工具:根元素+全部 unit+被引用的 context+事实元素),不手工编造",
+      "rationale": "AD-27 变异坑第六类的直接防范 —— 编造的 fixture 无法证明真实文档的结构,变异测试对该形态无效。截取后用独立 probe 工具复核:提取件解析出的 Class A 稀释 EPS 与完整 2.47 MB 原件逐值一致。companyfacts_v_no_eps.json 与 submissions_v.json 同样是真实响应的子集(真实 accession/primaryDocument/日期)。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/classeps.go (新增;parseClassFacts / dominantClass / classRawFacts / earliestFiledPerValue / fetchClassInstance / fetchClassDimensionedEPS / maxClassEPSFilings)",
+    "internal/collector/edgar/classeps_test.go (新增;28 个测试)",
+    "internal/collector/edgar/client.go (FetchCompanyFacts 内新增 len(epsFacts)==0 的回退分支)",
+    "internal/collector/edgar/segments.go (recentFilings 增加 limit 参数;FetchSegmentRevenue 传 maxSegmentFilings,行为不变)",
+    "internal/collector/edgar/client_test.go (factsFileServer:非 companyfacts 路径返 500,使 4 个无 EPS 的旧 fixture 行为与改动前一致)",
+    "internal/collector/edgar/testdata/instance_v_fy2025_10k.xml (新增,真实截取)",
+    "internal/collector/edgar/testdata/instance_v_fy2025q1_10q.xml (新增,真实截取)",
+    "internal/collector/edgar/testdata/instance_v_fy2025q2_10q.xml (新增,真实截取)",
+    "internal/collector/edgar/testdata/instance_v_fy2025q3_10q.xml (新增,真实截取)",
+    "internal/collector/edgar/testdata/instance_v_fy2026q2_10q.xml (新增,真实截取;提供跨报告重复期间样本)",
+    "internal/collector/edgar/testdata/companyfacts_v_no_eps.json (新增,真实 companyfacts 子集)",
+    "internal/collector/edgar/testdata/submissions_v.json (新增,真实 submissions 子集)"
+  ],
+  "interfaces_exposed": [
+    "parseClassFacts(r io.Reader, axis string) ([]classFact, error) —— 包内;单遍流式抽出 axis 轴上的带维度 EPS/股本事实,不做 unit/期间过滤",
+    "dominantClass(facts []classFact) string —— 包内;确定性选主类别,结果与输入切片排列无关",
+    "classRawFacts(facts []classFact, member string) (eps, shares []rawFact) —— 包内;合成可直接喂给既有季度化流水线的 rawFact",
+    "earliestFiledPerValue(facts []rawFact) []rawFact —— 包内;同 (period,值) 取最早 filed",
+    "(*Client).fetchClassDimensionedEPS(cik, axis string) (eps, shares []rawFact, err error) —— 包内;顶层取数",
+    "maxClassEPSFilings = 28 —— 包内常量;与 maxSegmentFilings 独立",
+    "(*Client).recentFilings(cik string, since time.Time, limit int) —— **签名变更**:新增 limit 参数(原写死 maxSegmentFilings)"
+  ],
+  "verification": {
+    "dod_functional_0": "可行性验证 → TestVInstanceEPSIsAlwaysClassDimensioned(真实 10-K 里 EPS 存在且每条都带类别 member)+ TestVInstanceNetIncomeHasUndimensionedFact(对照组:NetIncomeLoss 有无维度版本)。PASS。结论:可行,故继续实现而非终止。",
+    "dod_functional_1": "解析与接入 → TestParseClassFactsRealTenK(FY2023/24/25 = 8.28/9.73/10.20 逐值锚定 SEC 原文)、TestParseClassFactsDoesNotMixBasic、TestDominantClassPicksClassA、TestDominantClassIsPermutationInvariant(全排列)、TestFetchCompanyFactsClassEPSFallback(Q1/Q2/Q3 = 2.58/2.32/2.69)、TestFetchCompanyFactsClassEPSDerivesQ4(FY2025 Q4 = 10.20−(2.58+2.32+2.69) = 2.61;FY2024 Q4 = 9.73−(2.39+2.29+2.40) = 2.65)。PASS",
+    "dod_functional_2": "回归 → TestFetchCompanyFactsWithEPSNeverTouchesArchives(6 个含 EPS 的 fixture,archives 零请求 + submissions 零请求)+ TestFetchCompanyFactsUnaffectedByClassEPSPath(archives 可达/不可达两种环境逐季逐字段一致)+ TestNoEPSFixturesDoEnterFallback(对偶)。live 侧:AVGO/COST/CRM/WMT 四家 EPS 在 cap12 与 cap28 两库间按 golden 的 12 位有效数字口径**逐值完全一致**。PASS",
+    "dod_boundary_0": "成本已显式评估(见 cost_assessment)。测试:TestClassRawFactsDropsYTDPeriods(182/183/273/274 天累计期必须丢弃)、TestClassRawFactsFPMatchesDownstreamFilter、TestFetchClassEPSRespectsLookbackCap(40 份只取最近 28)、TestClassEPSAndSegmentCapsAreIndependent、TestFetchClassEPSSkipsPre2019NotFoundTail(连续 404 尾部逐份跳过、可用的照常产出)。PASS。**与 AD-11 双重上限不冲突**:io.LimitReader 64MB 上限保留,份数上限由 12 提到 28 且理由是数据侧硬边界。",
+    "dod_error_0": "TestFetchCompanyFactsClassEPSInstanceNotFound(单份 404 → 该季 NaN 而非错值,其余照常)、SubmissionsError(整条回退放弃,FetchCompanyFacts **不返回错误**,EPS 保持 NaN)、MalformedInstance、BodyLimit(超限跳过而非用残缺数据)、AllUnavailable(与改动前行为一致)。全部不 panic、不让 refresh 失败。PASS",
+    "dod_non_functional_0_mutation": "**13 个变异全部 KILLED,10 次中红 10 次**;对照组 10 次红 0 次;harness 用 **sha256 快照逐字节比对**还原(非 git diff --quiet —— 工作区有未提交改动,git diff 恒为假且会诱使 git checkout -- 抹掉整个任务),每次还原后核实、全部结束后再核实并复跑全包测试。M1 轴匹配 / M2 选类取 min / M3 候选不限 hasEPS / M4 return members[0] / M5 去掉单季复核 / M6 触发条件恒真 / M7 恒假 / M8 取最晚 filed / M9 去掉值分组 / M10 单份失败即整批失败 / M11 去掉超限判定 / M12 cap 改回 12 / M13 改用 maxSegmentFilings。**首轮 M1/M3/M4 存活,逐个查证均非等价变异**而是 V 真实数据覆盖不到该判定(实测三份真实文档里 EPS/股本引用的 12~16 个 context 全部单维且落在类别轴),已补 TestParseClassFactsRespectsAxis / TestDominantClassIgnoresMembersWithoutEPS / TestDominantClassIgnoresAlphabeticalOrder 三条针对性用例。其中 M4「return members[0]」原本**直接穿过**排列不变性用例 —— 因为 V 的正确答案 CommonClassAMember 恰好也是字母序第一,与 TASK-001 同款陷阱。code-simplifier 改动代码后**已整套重跑**,新增常量后**再次整套重跑**。",
+    "dod_non_functional_1_coverage": "edgar 包覆盖率 **94.7%**(3 次采样均 94.7%,≥ 94.1% 水位);go test -count=2 全绿;-race -count=2 通过;go build ./... / go vet / gofmt -l 均干净;全仓 go test ./... 全绿。",
+    "dod_non_functional_2_live": "见 live_verification"
+  },
+  "cost_assessment": {
+    "per_document": "10-K 2.47 MB / 2.0 s;10-Q 1.13~1.46 MB / 1.3~5.6 s;28 份平均 1.87 MB",
+    "total_28_filings": "52.3 MB / 45 s(curl 顺序拉取实测,含 0.15 s 间隔;前 12 份 18.4 MB,增量 16 份 33.9 MB)",
+    "measurement_limitation_1": "**进程内计时不可信,未采用**:cap=28 全流程 13.7 s vs cap=12 的 12.2 s,但测量前刚用 curl 把 28 份全拉过一遍,CDN/代理很可能已预热。冷缓存一律以 45 s 为准。",
+    "measurement_limitation_2": "**maxSegmentFilings 共享常量的副作用无法测量**:两次 live 运行 segment_revenue 均 0 行,该副作用属**代码层面推断**而非实测。正因如此才用独立常量而非抬高共享常量。",
+    "scope": "该成本**只落在 companyfacts 缺 EPS 的公司**上(5 家里只有 V);有 EPS 的公司连一次请求都不发出。",
+    "coverage_tradeoff_resolved": "cap=12: 370 天 / pctl_5y 118 点 / 起 2025-01-31(**劣于** engine 兜底的 705 / 453 / 2023-10-02);cap=28: 1377 天 / pctl_5y 1125 点 / 起 2021-01-29(**双轴严格优于**兜底)。leader 决策采用 cap=28。"
+  },
+  "live_verification": {
+    "config": "{scratchpad}/livecheck/final.yaml(由 leader 的 probe.yaml 派生,仅改 db_path;含 AVGO/V/WMT/COST/CRM 五家)",
+    "db_path": "{scratchpad}/livecheck/final.db(全新建;**严禁也从未指向 data/prism.db** —— 该文件确认不存在且未被创建)",
+    "command": "atlas prism refresh -c {scratchpad}/livecheck/final.yaml",
+    "result": "prism refresh: 5 ok, 0 failed, 0 degraded",
+    "baseline": "5 ok, 0 failed, 1 degraded(仅 V) —— V 已从 degraded 转为 ok",
+    "log": "edgar: CIK 1403161 using class-dimensioned EPS from member CommonClassAMember (33 eps / 33 shares facts from 28 filings)",
+    "db_evidence": [
+      "V 的 fundamental_q 71 行中 31 行有 eps_diluted(改动前 0 行),期末跨度 2018-06-30 ~ 2026-03-31",
+      "逐值复核 SEC 原文:2025Q1=2.58 / 2025Q2=2.32 / 2025Q3=2.69 / 2025Q4=2.61(派生) / 2026Q2=3.14",
+      "V 的 valuation_daily 1377 天、pe_ttm 1377、pctl_5y 1125,起始 2021-01-29",
+      "回归:AVGO 1599/1347、COST 2513/2261、CRM 2182/1930、WMT 2513/2261(days/pctl5)与基线一致;四家 EPS 按 12 位有效数字口径逐值一致"
+    ],
+    "false_alarm_investigated": "首轮比对发现 WMT 2014-01-31 派生 Q4 有末位差(...334 vs ...333)。**已证伪为本改动所致**:同一个 atlas-final 二进制三次运行分别产出 ...333/...334/...334,证明是 Q4 = FY−ΣQ 求和顺序取自 singleByEnd map 迭代序的既有抖动(golden 测试早已为此约定 12 位有效数字)。"
+  },
+  "notes_for_downstream": [
+    "本路径**只在 companyfacts 完全无 EPS 时**触发,对既有公司零影响(连请求都不发)。将来若有别的公司也走这条路,先确认它的 EPS 是否同样挂在 StatementClassOfStockAxis 上 —— 别的轴(如地区、业务线)不会被收录。",
+    "**maxClassEPSFilings=28 是数据侧硬边界,不要随手调大**:reportDate ≤ 2019-03-31 的实例文档一律 404(老式非 inline XBRL)。要往前延伸必须先解决老式 filing 的文档定位方式,不是改常量能做到的。",
+    "**recentFilings 签名已变**(新增 limit 参数)。新增调用方必须显式给出上限,不要再假设它内部写死 12。",
+    "「为什么某标的估值历史很短」的排查链路:ttmPoints 用窗口末季 FilingDate 打戳 → effectiveDate 按它 gating → latestEPSAtOrBefore 丢弃更早交易日。先看最早 TTM 点的 filing_date,再看 EPS 期末跨度,最后才看价格跨度。",
+    "各季 filing_date 普遍晚约一年(对比期条目 + keepLatest)是**既有跨公司语义**,companyfacts 自身也有。若将来要改善,得动 keepLatest 本身 —— 那会影响全部公司与 golden 基线,应单独立项。",
+    "V 的 pb 恒为 NULL(三个库含基线都是 0)—— 既有现象,与本任务无关;其 equity 只有 10 个季度非空。"
+  ]
+}

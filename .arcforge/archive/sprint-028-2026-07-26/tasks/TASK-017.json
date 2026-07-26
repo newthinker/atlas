@@ -1,0 +1,59 @@
+{
+  "id": "TASK-017",
+  "title": "治本:FiscalPeriod 由期间自身推导,不再继承报告上下文标签",
+  "description": "【TASK-016 的治本方案,同一发布阻断级缺陷】现状: client.go 的 FiscalPeriod 取自 EDGAR 的 fy/fp 字段,而那是**报告的上下文标签**——applyDuration 按 period_end 去重取 filed 最新者时,胜出条目携带的是较晚那份报告的 fy/fp。后果是较晚 10-Q 里的去年同季继承当期标签、一份 10-K 携带的 3 个财年全部标着报告自身的 fy。实测真实 MSFT: **27% 的标签冲突(7/26),最严重的 2018Q4 有 4 个不同季度共用**。**目标: 让 FiscalPeriod 成为 period_end 的纯函数,天然唯一,不依赖 EDGAR 上下文字段。** 推导方式(dev-agent-15 提出): 从年度条目(isAnnual 的 duration 350~380 天)推出该公司的**财年结束月份**,再由 period_end 算出所属财年与季序。例: MSFT 财年 6 月结,则 period_end=2025-09-30 → FY2026 Q1。注意 client.go 自身注释早已警告「EDGAR 的 fy/fp 是报告上下文,同一 (fy,fp) 可能对应不同实际季度」,AD-9 也据此把 segment_revenue 的 PK 换成了 period_end——**但没人预料到这个标签会被下游当成聚合分组键用**,这正是本缺陷的教训。⚠ **AD-18 golden 回归是本任务最大风险**: FiscalPeriod 是 goldenDump 覆盖的 8 个字段之一,改动**必然**让 9 份 golden 基线全部变化。**这不是漂移而是预期变更**,必须: (1) 逐份人工核对新标签是否比旧标签更正确(而非仅仅不同); (2) 重新生成基线并在 commit message 说明; (3) **不得**为了让 golden 通过而回退实现。",
+  "module": "collector-edgar",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/testdata/golden/*.txt"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FiscalPeriod 由 period_end 与财年结束月份推导,**是 period_end 的纯函数**;测试断言同一 period_end 无论出现在哪份报告的上下文里都得到相同标签",
+      "标签唯一性 **且语义正确**: 用真实 MSFT 的全部 7 组冲突做 fixture,断言推导后标签**互不重复**。dev-agent-15 已用「period_end + 财年结束月(MSFT=6月)」预验过全部 7 组,**7/7 全解开**,可直接作为期望值对照表(不必再猜正确答案): 2018Q4×4 → [2016Q4,2017Q1,2017Q2,2017Q3];2019Q4×4 → [2017Q4,2018Q1,2018Q2,2018Q3];2020Q4×4 → [2018Q4,2019Q1,2019Q2,2019Q3];2025Q4×3 → [2023Q4,2024Q4,2025Q4];2026Q3×2 → [2025Q3,2026Q3];2026Q2×2 → [2025Q2,2026Q2];2026Q1×2 → [2025Q1,2026Q1]",
+      "非日历财年正确性: MSFT 6 月结 → period_end=2025-09-30 得 2026Q1、2026-06-30 得 2026Q4;NVDA 1 月结同理(用真实标签序列验证);⚠ 现有 fixture 只覆盖一种财年结束月(1 月,建模自 NVDA),等于只测了一个点——12 月(GOOGL/AMZN,最常见)与 6 月(MSFT,全部真实验证的来源)都没覆盖。月份运算在不同结束月下走不同分支,且上面那个等号陷阱在一月财年下症状最不明显(一月底期末与自然年边界几乎重合,错位一格不易察觉)。故必须新增 fixture 至少覆盖 12 月与 6 月两种结束月,6 月那组可直接用上面的 MSFT 对照表作期望值(dev-agent-15 勘察)",
+      "财年结束月份的推导: 从 isAnnual 条目(350~380 天)取得;无年度条目时的**降级行为**必须定义并有断言(建议回退到原 fy/fp 并在该季标记,不得静默产出错标签)"
+    ],
+    "boundary": [
+      "⚠ 财年边界必须**含端点**(dev-agent-15 预判的陷阱): 2016-06-30 与 2016-09-30 只差一个季度却跨财年,推导须用 (month,day) <= (财年结束月,该月末日) 的比较,把**财年末当天算作上一财年的 Q4** 而非新财年 Q1。**差一个等号,所有 Q4 都会被推成下一财年 Q1,而每个标签仍然唯一** —— 只断言「无冲突」的弱断言会全绿放行。**故断言必须锚定具体标签值(如 2016-06-30 → 2016Q4),不能只断言互不相同**。这与本 sprint 反复出现的是同一类: 弱断言挡不住整体错位一格的语义错误",
+      "AD-18 golden 基线**预期变化**: 9 份基线全部重新生成,且必须逐份人工核对「新标签比旧标签更正确」(不是仅仅不同);discovery 中列出每份 fixture 的标签变化对照表与判断依据;另: 既有 tag 回退链/拆股检测/Q4 推导的行为零变更: 除 FiscalPeriod 字段外,golden 的其余 7 个字段逐季逐字段不变;降级路径的 golden 归属: 9 份 golden 里只有 companyfacts_rev_fallback 无年度条目、必走降级,其余 8 份是正常推导产物。逐份人工核对时若不知道这个区别,极易把降级值当成 bug 或反之——请在核对表中点名该份(dev-agent-15 勘察)"
+    ],
+    "non_functional": [
+      {
+        "desc": "golden 交叉校验(dev-agent-15 作为 golden 作者提供): 用 `go test ./internal/collector/edgar/ -run TestFetchCompanyFactsGolden -count=1 -update-golden` 重生成 9 份基线(flag 已存在于 golden_test.go:28),然后 `git diff testdata/golden/` **必须只出现在第一列(FiscalPeriod)**;其余 7 个字段(PeriodEnd/FilingDate/eps 等)应逐字节不变——**若数值列也动了,说明实现顺带改了别的东西,那是真漂移不是预期变更**。每行含 PeriodEnd 可立即判断新标签是否与该期真实财报期相符 || 变异验证: 把 FiscalPeriod 改回取自 fy/fp → 标签唯一性测试必须变红。另需确认 TASK-016 的防御在治本后仍保留(上游违约时不静默出错,两层都要在)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/collector/edgar/ ./internal/prism/ ./internal/prism/sankey/ -count=1 全绿;edgar 覆盖率不低于 93.1% 基线",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-014"
+  ],
+  "wave": 10,
+  "context_from": [
+    "TASK-001",
+    "TASK-016"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-15",
+  "discovery": ".arcforge/discoveries/TASK-017.json",
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-7"
+}

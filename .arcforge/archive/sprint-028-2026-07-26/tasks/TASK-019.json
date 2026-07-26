@@ -1,0 +1,54 @@
+{
+  "id": "TASK-019",
+  "title": "sankey 测试健壮性收尾：把概率性守护改成确定性守护",
+  "description": "test-agent-6 在 TASK-016 复验时实测发现的问题，与 TASK-018 同族，但成因不同——TASK-018 是「实现有规则、测试无区分力」，本任务是「测试有区分力，但只在部分跑动中生效」。\n\n`periods.go` 的 `sameQuarter` 中「`time.Parse` 失败 → `return false`」这一分支，其守护是概率性的：把它变异成 `return true`（匹配一切）后，**25 次跑动只有 6 次变红，存活率 76%**。即「不可解析的期末被并进本期」这个真实错误，大约只有四分之一的跑动能抓住，在 CI 里可以连续多次不被发现。\n\n机制：`segmentsAt` **命中即返回**，而 `TestBuildPeriodsUnparsablePeriodEnd` 的 fixture 含两个桶（合法的 `2026-03-31` 与不可解析的 `n/a`）。合法桶先被遍历到就直接返回，`n/a` 桶根本不会被送进 `sameQuarter`。遍历起点随机（Go map），命中概率即 `(9−n)/8`。\n\n同一机制也是 sankey 包覆盖率非确定的根因（连测 12 次：10 次 97.5%、2 次 97.8%），已立 AD-27。",
+  "module": "sankey",
+  "complexity": "简单",
+  "estimated_files": 1,
+  "packages": [
+    "./internal/prism/sankey"
+  ],
+  "done_criteria": {
+    "functional": [
+      "新增一个**只含不可解析期末桶**的子用例（fixture 中没有任何合法桶可供 `segmentsAt` 短路返回），使 `sameQuarter` 的 `time.Parse` 失败分支**必然**被执行。test-agent-6 给的两条修法中优先此条——它把守护从概率性变成确定性，而非降低失败概率。",
+      {
+        "desc": "变异验证——**要证明的是结构性保证，不是用大 N 压概率**。施加 `sameQuarter` 不可解析分支 `return false → return true` 后：(a) 给出**结构性论证**说明新 fixture 中不存在任何能让 `segmentsAt` 短路返回的合法桶，因而该分支**必然**执行、变异**必然**被杀；(b) 实跑印证，N 次全红（N 取值不重要，因为 p 应为 1；若出现任何一次不红，说明 (a) 的论证不成立，须回头查 fixture 而非加大 N）。**禁止用「连跑 N 次全红」替代 (a)**——那只能证明 p 高，不能证明 p=1，而本任务的全部目的就是把 p 从 0.24 提到 1。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "原有的混合桶场景（合法桶 + 不可解析桶并存）行为不变：既有 `TestBuildPeriodsUnparsablePeriodEnd` 保留且仍通过，不得以「被新用例取代」为由删除——它覆盖的是真实数据形态，新用例覆盖的是分支可达性，两者不可互相替代。"
+    ],
+    "error_handling": [
+      "不可解析期末不得被并入任何期：断言该桶既不出现在结果的任何 `PeriodMetrics` 中，也不导致 panic 或静默丢弃到某个默认期。"
+    ],
+    "non_functional": [
+      "按 AD-27 第 1 条，覆盖率**多次采样**（≥5 次）报告，不得用单次读数与既有值比较——本包覆盖率已实测非确定。预期新用例会消除该非确定性，若采样后仍波动，在 discovery 中说明残留原因。",
+      {
+        "desc": "按 AD-27：每个变异先 `go vet` 确认可编译再计数。**若改造后仍存在概率性成分**（即 (a) 的结构性论证不成立），则不得沿用任何既有 N 值，须实测 p 后按 `N = ceil(ln(target)/ln(1−p))` 反推并声明 target——本条初稿写的「连跑 ≥25 次」已作废：实测 p=0.24 时 N=25 的漏检率是 1.048e-03，**本身就超 1e-3**，与 TASK-018 那个未经核算的 50 是同一个毛病。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-011"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-007",
+    "TASK-016"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-21",
+  "discovery": ".arcforge/discoveries/TASK-019.json",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-9",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  }
+}

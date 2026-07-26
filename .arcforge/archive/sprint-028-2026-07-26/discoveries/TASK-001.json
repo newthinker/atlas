@@ -1,0 +1,64 @@
+{
+  "key_findings": [
+    "tag 链只选中**单一** tag(不做跨 tag 合并),因此 detectSplits(epsFacts, sharesFacts) 的输入仍是同一科目的完整历史,拆股比例投票与生效日聚簇口径未变 —— AD-18 担心的 PE/PB/PS 全序列漂移未发生,9 个既有 fixture 的 golden 输出逐季逐字段零变化(git 层面 testdata/golden/*.txt 逐字节未改动)。",
+    "既有实现存在一处**输出非确定性**(非本任务引入):派生 Q4 = FY − Σ三季 的求和次序取决于 applyDuration 内 map 的迭代序,同一输入的 Q4 值末位有 ~1e-16 相对抖动(实测 0.90000000000000036 与 0.89999999999999991 交替出现)。golden 精度因此取 12 位有效数字(噪声之上、真实漂移量级 2/4/10 倍之下),连跑 5 次稳定。下游若做逐位相等比较需知悉。",
+    "Cost / SG&A 分列这类仅作推导输入的辅助科目**不能**走 durationMetric:后者经 get() 写入 quarters,会凭空造出「只有辅助科目、其余全 NaN」的幽灵季度并进入最终输出。故新增 quarterValues() 走同一 durationEntries 展开但只返回 period_end→值 映射。",
+    "需求原文 plan Task 1 还含 cmd/atlas/prism.go 的 Degraded 明细日志改动,但本任务 packages 限定 ./internal/collector/edgar 且 estimated_files 不含 cmd/atlas —— 未实施,需 Leader 确认是否另有任务承接(否则该项会漏交付)。",
+    "需求原文的测试 helper 名 factsServerFile 确不存在,实际为 factsFileServer(t, fixture, wantPath)(Leader 已提示,此处确认)。",
+    "gitnexus 本地 runner .gitnexus/run.cjs 是 1.6.5,索引库版本 42 > 其存储版本 40,直接调用一律报 LadybugDB unavailable;必须用 npx gitnexus@latest(1.6.9)。未执行 analyze 重建索引,以免打断并行 agent 的 MCP 进程。"
+  ],
+  "decisions": [
+    {
+      "what": "golden 基线(golden_test.go + testdata/golden/*.txt)在**动代码之前**单独提交为 c65f9f8,实现另提交 d1d86ba",
+      "rationale": "AD-18 的价值在于「基线确实来自改动前的实现」。若与实现同提交,该主张无法被审查者独立验证;拆成前后两个提交后,任何人可 checkout c65f9f8 复现基线。"
+    },
+    {
+      "what": "golden 数值精度取 12 位有效数字而非全精度(17 位)",
+      "rationale": "全精度会捕获既有的 map 迭代序浮点噪声(~1e-16),导致 golden 测试本身 flaky(首次生成后第二次运行即 FAIL 实测)。12 位在噪声之上 4 个数量级,而任何真实的拆股归一化漂移是 2/4/10 倍级,不会被掩盖。"
+    },
+    {
+      "what": "golden fixture 用写死清单(goldenFixtures)而非 glob 匹配",
+      "rationale": "本任务新增了 4 个 fixture;若 glob,它们的基线是「改动后」生成的,混入后会稀释 AD-18「改动前后一致」的语义。写死 9 个既有 fixture 使该断言含义精确。新 fixture 由各自的定向用例覆盖。"
+    },
+    {
+      "what": "equity 用新增的 firstTag(首个非空)而非 firstQuarterlyTag",
+      "rationale": "equity 是 instant 型,没有「含可用单季条目」的概念,firstQuarterlyTag 的 hasQuarterly 判定对它恒为 false 会退化成兜底分支,语义误导。同时 firstQuarterlyTag 的兜底循环被重构为直接调用 firstTag,消除重复。"
+    },
+    {
+      "what": "equity 同 period_end 多条时保持「切片顺序最后一个赢」的既有规则,回退链只改『取哪个 tag』",
+      "rationale": "DoD non_functional[0] 明确要求两 tag 都存在时口径不变。改成「取 filed 最新」虽更合理,但属于超出请求范围的行为变更,会让 AD-18 golden 漂移。已登记为可独立评估的改进点,本期不动。"
+    },
+    {
+      "what": "SG&A 分列采用「全部分列都有值才求和」,单侧存在时保持 NaN",
+      "rationale": "DoD boundary[1] 要求。半个和会让 opex 结构被系统性低估且在图上看不出异常(桑基 other_opex 残差会吸收掉),比缺失(前端显示「—」)更危险。"
+    },
+    {
+      "what": "GrossProfit 推导得负值时保留负值不钳零",
+      "rationale": "DoD boundary[1] 要求。成本倒挂是真实经营状态(如商品降价清库存),钳零会把亏损伪装成盈亏平衡。"
+    },
+    {
+      "what": "EPS 推算的分母守卫写为 !math.IsNaN(shares) && shares != 0",
+      "rationale": "两个条件缺一不可:NaN 判断挡不住 0(0 会产出 ±Inf),!=0 判断挡不住 NaN(NaN 相除得 NaN 尚可但语义上不该推算)。±Inf 会让下游 encoding/json.Marshal 直接报错使整个 API 500(AD-14)。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/golden_test.go (新建)",
+    "internal/collector/edgar/testdata/golden/*.txt (新建, 9 份基线)",
+    "internal/collector/edgar/testdata/companyfacts_tag_fallback.json (新建)",
+    "internal/collector/edgar/testdata/companyfacts_tag_preference.json (新建)",
+    "internal/collector/edgar/testdata/companyfacts_mainflow.json (新建)",
+    "internal/collector/edgar/testdata/companyfacts_eps_no_shares.json (新建)"
+  ],
+  "interfaces_exposed": [
+    "QuarterlyFact 扩 5 个字段(NaN=缺失): GrossProfit, RnD, SGnA, OperatingIncome, IncomeTax float64 —— 顺序与 design-spec §1.1 一致",
+    "包级 tag 链变量(TASK-005 segments.go 直接复用,均为 []string,按优先级排列): epsTags, sharesTags, equityTags, grossProfitTags, costTags, rndTags, sgnaTags, opIncomeTags, taxTags",
+    "包级变量 sgnaSplitTags []string —— **注意语义与其它变量不同**: 它不是回退链而是求和项({SellingAndMarketingExpense, GeneralAndAdministrativeExpense}),TASK-005 若按回退链使用会取错口径",
+    "既有 revenueTags 未改动,TASK-005 可直接复用",
+    "FetchCompanyFacts 签名不变: func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error)",
+    "测试 helper factsFileServer(t *testing.T, fixture, wantPath string) (*httptest.Server, *http.Request) 未改动",
+    "golden_test.go 暴露 -update-golden flag 与 goldenFixtures 清单;TASK-005 新增 fixture **不应**加入 goldenFixtures(该清单专指 M3 改造前的 9 份)"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./internal/collector/edgar/ -count=1 -cover → ok, coverage 93.9% of statements(基线 92.2%,dev_minimum 80%)。18 个顶层用例全 PASS,含 TestFetchCompanyFactsGolden 的 9 个子用例全 PASS。新增用例: TagFallback / PreferredTagWins / MainFlow / Q4EPSNotDerived / NoEPSDerivationWithoutShares。RED 已实测: 加字段声明使其可编译后,前 4 个在断言层 FAIL(EPS/Equity 为 NaN、5 个新字段为 0),实现后转 PASS;NoEPSDerivationWithoutShares 是负向守卫,功能不存在时天然为绿。AD-18 golden 双重核实: (1) 测试 PASS; (2) git status/diff 显示 testdata/golden/*.txt 9 份基线逐字节未变(基线提交 c65f9f8 早于实现提交 d1d86ba)。golden 连跑 5 次稳定。下游回归: GOTOOLCHAIN=local go build ./... 通过; go test ./internal/prism/ ./cmd/atlas/ ./internal/storage/prism/ -count=1 全 ok。gofmt -l 无输出, go vet 通过。gitnexus impact(upstream, 用 npx gitnexus@latest): Client.FetchCompanyFacts 直接调用者 0(经 EdgarClient 接口), 接口方法链 refreshEdgar→Refresh→runPrismRefresh 共 3 个受影响符号, risk=LOW; detectSplits upstream 仅 FetchCompanyFacts, risk=LOW; 无 HIGH/CRITICAL。detect-changes: 5 files/24 symbols, affected processes 0, risk low, 变更符号全部落在 internal/collector/edgar/client.go(无 scope 漂移)。"
+}

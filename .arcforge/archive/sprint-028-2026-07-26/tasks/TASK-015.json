@@ -1,0 +1,76 @@
+{
+  "id": "TASK-015",
+  "title": "设计文档同步与 M3 验收记录",
+  "description": "无代码任务(文档)。docs/prism/atlas_prism_design.md 的 D4 补现实注记(companyfacts 无分部维度 → submissions + 实例文档解析路线,2026-07-25 用户决策,member 映射在模板);§7 模板示例同步简化后 schema(flow 段移除,AD-5);§9 标记 M3 落地状态与 M3.5 划分。docs/deployment.md 补 configs/prism/ 目录部署说明(rsync 白名单确认)。同时记录 M3 验收结果——**AD-7: 无法由 agent 客观验证的目检项必须标注「待人工验收」,不得声称通过**。",
+  "module": "docs",
+  "complexity": "simple",
+  "estimated_files": [
+    "docs/prism/atlas_prism_design.md",
+    "docs/deployment.md",
+    "docs/superpowers/plans/2026-07-25-prism-m3.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "atlas_prism_design.md 的 D4 含现实注记: companyfacts 不含分部维度,自动解析走 submissions API + 报告实例文档路线(2026-07-25 用户决策),公司自定义 member 名在模板中映射,manual YAML 兜底",
+        "verify_by": "review"
+      },
+      {
+        "desc": "§7 模板示例同步为简化后 schema(移除 flow 段并说明理由 AD-5);§9 标注 M3 各项落地状态与 M3.5(Stooq 备源 / etfholdings D3 成分聚合)的划分",
+        "verify_by": "review"
+      },
+      {
+        "desc": "docs/deployment.md 含 configs/prism/ 目录的部署说明(含 rsync 白名单确认结论)",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "M3 验收记录写入计划文件: 可自动验证项(HTTP 200/DOM id/数值口径复算/回归全绿)标注实测结果;需人眼确认项(浏览器渲染、PNG 导出、中英切换、双轴目视、prism-daily 生产运行)明确标注「待人工验收,未由 agent 验证」(AD-7)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "【Leader 补｜本 sprint 最大的一类产出，015 是最后一次系统记录的机会】M3 验收记录须含 `06-acceptance/pending-hooks-sync.md` **12 项待同步清单**的摘要与处置状态，逐项标注「已同步 / 待人类会话外处理 / 已放弃」。其中已同步的只有第 8 项（`coverage_floor`，人类今日已改 hook 并经 Leader 双向实跑验证）。**这些是需要改运行时资产才能修的框架缺陷**，不记录就会随 sprint 归档丢失——其中第 11 项（`verifying` 无 verifier 重绑定路径）本 sprint 已真实死锁一次、靠人类带外编辑 task JSON 才解开，第 12 项（description 承载义务而 done_criteria 不含）直接导致 TASK-011 返工。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "【Leader 补】M3 验收记录须含**运维事实**一节：本 sprint 共 **6 次 agent 中途失联**（均为 `API Error: Connection closed mid-response` 或 stall），其中 5 次损失为零、1 次需接手收尾。损失差异**不取决于失联时机而取决于产出是否落盘**——记录各次的失联点与损失，供后续 sprint 判断「落盘纪律」的实际收益。另记 code-simplifier 本 sprint 三次自述与事实不符（谎称 Unchanged / 中断留半成品 / 语无伦次），处置一律为「不采信自述，直接 diff 核对」。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "回归确认并在 discovery 附命令输出: GOTOOLCHAIN=local go test ./... -count=1 全绿,A/H 与美股估值链路(board/detail/compare)行为不变",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-013",
+    "TASK-014"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-013",
+    "TASK-014"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-25",
+  "packages": [
+    "docs/prism",
+    "docs/deployment.md",
+    "docs/superpowers/plans"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-12",
+  "discovery": ".arcforge/discoveries/TASK-015.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-9"
+}

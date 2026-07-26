@@ -1,0 +1,47 @@
+{
+  "key_findings": [
+    "【对 DoD 的更正:真实冲突是 4 组不是 7 组,Leader 已确认】开工时按「不能在没验证过的机制上造 fixture」先核实 DoD 那张对照表的产生机制,发现 2018Q4×4 / 2019Q4×4 / 2020Q4×4 三组是幻影。起疑点是机制反推:单季标签形如 `%d%s`(fp∈Q1/Q2/Q3,不可能是 Q4),Q4 标签只来自年度条目、其 end 应相隔约一年,而那三组的 period_end 横跨 6/9/12/3 月 —— 这个形态产生不出来。三重验证证实:①真实 companyfacts 里全部 5498 条年度条目(fp=FY 且 350~380d)的结束月**都是 6 月**,非 6 月的 0 条;②复刻 applyDuration 得 4 组;③真实 DB fundamental_q 得同样 4 组。溯源:跳过 duration+fp 过滤统计原始 (fy,fp) 会得到 15 组,其中标签实为 `2018FY` 而非 `2018Q4`,period_end 列表与 DoD 逐字吻合 —— 那是 10-Q 里带 fp=FY 的 6mo/9mo 累计期,被 isSingleQuarter(要求 fp∈Q1/Q2/Q3)与 isAnnual(要求 350~380d)双重过滤丢弃,永远进不到输出。Leader 复验后确认其复刻脚本漏了 fp 检查,以我的 4 组为准。真实严重度:4 组 / 32 个标签,影响 71 行中的 9 行(12.7%),非 27%。**缺陷本身与发布阻断级定性不变** —— FY2025 营收 377.752B(真值 281.7B)、productivity 392.914B(真值 120.810B,3.25 倍)均来自真实 DB,不受此更正影响。",
+    "【实现中发现并修掉的第二个陷阱:月界漂移】最初只按 end.Month() 算季序,重生成 golden 时发现 q4guard 的 2022-05-01 与 2022-07-31 **共用 2023Q2** —— 新引入的冲突,正是本任务要消除的那类。根因:52/53 周财报日历的期末会漂到次月头几天,一个覆盖 2~4 月的季度可能记为结束于 5/1,按结束月算会落到下一个季度。修法:anchorYearMonth() 把 day<=15 的期末回归上一个月(期末落在 1 月初时年份同步减一)。阈值 15 的依据:锚定月末的日历漂移至多数天、不会到半月,而真正在月中结束的财季极罕见。实测形态佐证:NVDA 1/25~1/28、AAPL 9/27~9/30。",
+    "【golden 变化远小于预期:9 份只有 2 份变】DoD 预期「改动必然让 9 份基线全部变化」,实际只有 companyfacts_q4guard 与 companyfacts_split 变,其余 7 份逐字节不变 —— 说明那 7 份 fixture 的 EDGAR fy/fp 本来就与推导值一致(它们是干净的单财年样本)。这也解释了为何单测长期抓不到该缺陷:fixture 里根本没有『较晚报告重述较早期间』的形态。另:companyfacts_rev_fallback 是 9 份里唯一无年度条目、必走降级的,其基线不变(降级即回退原 fy/fp,与旧实现同值)。",
+    "【12 月财年 fixture 是回归护栏而非缺陷探测器】TestFiscalPeriodDecemberFY 在实现之前就是绿的 —— 自然年公司的 EDGAR fy/fp 本就与推导值一致。有判别力的是 6 月财年那份(RED 阶段 5/6 失败,只有 December 先绿)。这印证了我勘察时的判断:现有 fixture 清一色 1 月财年等于只测一个点,而 12 月这种最常见形态反而是最不敏感的。两者都要有,但作用不同。",
+    "【方法论事故:一次假阴性,已修正】首轮变异验证用 `if false { return fiscalLabel(...) }`,导致 hasFYEnd 变成未使用变量 → **编译失败** → 输出里没有任何 `--- FAIL:` 行 → 我的计数脚本得 0/10,与「变异存活」的输出形态**完全相同**。改用 `if false && hasFYEnd` 保留引用,并加 `go vet` 构建守卫后得 10/10。教训与本 sprint 的 `sort -u` 事故同族:**度量方式必须能区分「变异存活」与「根本没跑起来」**,否则 0 既可能是好消息也可能是坏消息。"
+  ],
+  "decisions": [
+    {
+      "what": "财年归属用「含端点」比较:财年末当天归上一财年 Q4",
+      "rationale": "DoD boundary[0] 要求,且我预判过:少一个等号会让所有 Q4 整体后移一年,**而标签依然互不重复** —— 只断言唯一性的弱断言会全绿放行。故 TestFiscalPeriodFiscalYearEndIsQ4 对四个样本同时断言「等于正确值」与「不等于错位值」。"
+    },
+    {
+      "what": "财年结束月取年度条目结束月的**众数**,而非首个或最新",
+      "rationale": "52/53 周财年的结束日在月内漂移,个别年份可能跨月。众数对漂移稳健;票数相同时取较小月份,避免结果随 map 迭代序抖动(本包已有过 map 迭代序导致输出非确定的先例,见 TASK-001 discovery)。"
+    },
+    {
+      "what": "无年度条目时回退 EDGAR 原始 fy/fp + log.Printf,而非报错或留空",
+      "rationale": "DoD functional[3] 要求定义降级且不得静默。回退到旧口径不会比改动前更差(行为等价),而 log 让它可观测;报错会让原本能用的公司整体失败,留空会让下游 buildQuarters 直接跳过该季(静默丢数据)。log 是本仓库 internal/collector/* 的既有降级惯例。"
+    },
+    {
+      "what": "加负向锚点 TestFiscalPeriodRejectsAnnualTaggedQuarterlyEntry(Leader 建议,我采纳并做了判别力验证)",
+      "rationale": "「fp=FY 的 90 天条目不得产出季度」此前是**隐含且无测试锚定**的行为,正是需求文档把冲突数算成 7 组的根源。加之前先确认它有判别力:变异「放宽 isSingleQuarter 的 fp 检查」→ 该用例 10/10 变红。不做这步验证的话,通过的负向断言可能是空洞的(本 sprint 已有两例)。"
+    },
+    {
+      "what": "断言一律锚定具体标签值,不用「标签互不重复」这类弱断言",
+      "rationale": "本任务的两个边界(含端点、月界漂移)在错误实现下**唯一性都完全保持** —— 前者是整体错位一格,后者才会真正撞车。唯一性对第一类错误零区分力。故所有用例逐期锚定期望值,唯一性只作补充。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/edgar/client.go (新增 fiscalYearEndMonth/fiscalLabel/anchorYearMonth;tagFacts 提为具名类型;两处标签生成点改为调用 label())",
+    "internal/collector/edgar/fiscalperiod_test.go (新建,8 个用例)",
+    "internal/collector/edgar/testdata/companyfacts_fy_june.json (新建,6 月财年 + 4 组真实冲突形态 + fp=FY 负向锚点)",
+    "internal/collector/edgar/testdata/companyfacts_fy_december.json (新建,12 月财年)",
+    "internal/collector/edgar/testdata/golden/companyfacts_q4guard.txt (基线重生成,3 处标签)",
+    "internal/collector/edgar/testdata/golden/companyfacts_split.txt (基线重生成,2 处标签)"
+  ],
+  "interfaces_exposed": [
+    "QuarterlyFact.FiscalPeriod 语义变更:现为 period_end 的**纯函数**(格式不变,仍是 \"2026Q1\")。同一 period_end 无论出现在哪份报告上下文都得到同一标签,可安全用作聚合分组键 —— 这正是 TASK-016 防御所保护的那个前提现在成立了。",
+    "包内新增(非导出):fiscalYearEndMonth(gaap map[string]tagFacts) (month int, ok bool)、fiscalLabel(end time.Time, fyEndMonth int) string、anchorYearMonth(end time.Time) (year, month int)",
+    "tagFacts 由匿名结构体提为具名类型(facts[ns][tag] 的元素),便于 helper 取参;JSON 标签不变,解析行为不变",
+    "降级信号:无年度条目时 log.Printf(\"edgar: CIK %s has no annual entries; falling back to EDGAR fy/fp labels, which may collide across quarters\"),每次 Fetch 至多一条",
+    "【TASK-016 仍应保留】治本之后 sankey 侧的防御(len(qs)>4 拒绝产出 FY、buildQuarters 不静默 +=)不应移除:上游违约时不静默出错是独立价值,且降级路径下标签仍可能冲突。"
+  ],
+  "verification": "【每份 fixture 的标签变化对照表(DoD boundary[1] 要求)】9 份 golden 中 **7 份逐字节不变**(double_split / mini / nonsplit_jump / partial_fy / rev_fpfy / shares_noq4 / rev_fallback),2 份变化且**只有第一列**:companyfacts_q4guard(1 月财年,年度条目 2025-01-27~2026-01-25):2022-05-01 `2026Q1`→`2023Q1`、2022-07-31 `2026Q2`→`2023Q2`、2022-10-30 `2026Q3`→`2023Q3` —— 判断依据:1 月结公司的 FY2023 = 2022-02~2023-01,这三季分别覆盖 2~4 / 5~7 / 8~10 月,故 Q1/Q2/Q3 正确;旧标签把 2022 年数据标成 FY2026,偏了 3~4 个财年。companyfacts_split(1 月财年):2023-04-27 `2025Q1`→`2024Q1` —— FY2024 = 2023-02~2024-01,4 月末属 Q1;2024-01-25 `2025Q4`→`2024Q4` —— 该 fixture 自身的年度条目 2023-01-27~2024-01-25 就标着 fy=2024,新标签与之一致,旧标签取自另一条重复年度条目携带的 fy=2025。**5 处变化逐一核对均更正确。** companyfacts_rev_fallback 是 9 份里唯一无年度条目、走降级的,基线不变(降级即回退原 fy/fp)。【golden 交叉校验】用 `-update-golden` 重生成后,脚本逐行比对确认 **非第一列变化 = 0**,其余 7 个字段(PeriodEnd/FilingDate/eps/rev/ni/eq/shares)逐字节不变 → 是预期的标签变更,不是数值漂移。【变异验证(隔离 worktree,-count=10,均带 go vet 编译守卫)】把 FiscalPeriod 改回取自 fy/fp:TestFiscalPeriodResolvesRealConflicts / IsPureFunctionOfPeriodEnd / JuneFY / MonthBoundaryDrift / TestFetchCompanyFactsGolden **各 10/10 被杀**;放宽 isSingleQuarter 的 fp 检查:TestFiscalPeriodRejectsAnnualTaggedQuarterlyEntry **10/10 被杀**。【RED 实证】加最小实现前 8 个用例中 5 个在断言层 FAIL,TestFiscalPeriodDecemberFY 先绿(自然年公司新旧标签一致,是回归护栏而非探测器)。【回归】GOTOOLCHAIN=local go test ./internal/collector/edgar/ -count=1 -cover → ok, **93.6%**(基线 93.1%);./internal/prism/ 95.5%、./internal/storage/prism/ 81.7% 均 ok;go build ./... 通过;gofmt -l 无输出;go vet 通过。**注:./internal/prism/sankey/ 当前无法编译(periods.go:447 undefined: maxYearGapDays),经 stash 我的改动后复现依旧,且 sankey 不 import edgar —— 属 dev-agent-17 的 TASK-016 未提交在途工作,与本任务无关。**【detect-changes】10 files/5 symbols,affected processes 0,risk low;变更符号全部落在 internal/collector/edgar/client.go(其中 eachRestatementRatio/ratioVotes/collectEffObs/clusterEvents 是插入 94 行导致的行号位移伪影)。提交 89b1fd5,改动 6 个文件全部在声明范围内,无 scope 漂移。"
+}

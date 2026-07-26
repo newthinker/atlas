@@ -1,0 +1,58 @@
+{
+  "id": "TASK-005",
+  "title": "XBRL filings 分部营收解析器(submissions + 实例文档)",
+  "description": "新建 internal/collector/edgar/segments.go: SegmentPeriod 结构与 (c *Client) FetchSegmentRevenue(cik, axis, since);Client 增 archivesURL 字段与 NewWithBaseURLs 构造器。**完整解析规则见 01-design/design-spec.md §1.2,已由 Leader live 实测校准,与 plan 原文有两处偏离必须遵从**: (1) AD-3 URL 路径为 /Archives/(大写 A),实测可用形如 https://www.sec.gov/Archives/edgar/data/789019/000119312526191507/msft-20260331_htm.xml; (2) AD-2 一份报告可产出多条 SegmentPeriod——实测一份 10-Q 含本季(90d)、去年同季(90d)、本年累计(274d)、去年累计(274d)四组期间,一份 10-K 含 3 个财年 FY(365/366d),故按期间而非按报告聚合。实测单文档 9.7~10.5MB,必须用 encoding/xml Decoder.Token() 流式解析,禁止建全树。",
+  "module": "collector-edgar",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/collector/edgar/segments.go",
+    "internal/collector/edgar/segments_test.go",
+    "internal/collector/edgar/testdata/submissions_mini.json",
+    "internal/collector/edgar/testdata/instance_mini.xml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestFetchSegmentRevenueRequestFlow: submissions 只取 form ∈ {10-Q,10-K} 且 reportDate > since 的报告(早于 since 的 10-K 不拉);实例文档请求路径为 /Archives/edgar/data/{cik整数}/{accession去连字符}/{primaryDocument 的 .htm 换成 _htm.xml}(AD-3 大写 A)",
+      "TestFetchSegmentRevenueSingleAxisOnly: 只收恰好一个 explicitMember 且其 dimension 的 local name == axis 的 context;交叉维度 context(segment 轴 + geography 轴)被排除;单维但轴不匹配的 context 也被排除(fixture 须含该干扰项);member 值去命名空间前缀;Form 字段为 10-Q/10-K",
+      "期间过滤: duration(endDate-startDate+1) 落在 70~100 天或 350~380 天(含 366 闰年)的期保留,274 天累计期被排除",
+      "AD-2 多期产出: fixture 的单份 10-Q 同时含本季与去年同季(均 90d) → 返回 2 条 SegmentPeriod,各自 PeriodStart/PeriodEnd 正确(plan 原设计的「一报告一期」结构会让比较期与本期按 member 互相覆盖且赢家取决于 XML 顺序)",
+      "AD-11 单位过滤: unitRef 非 USD(如 shares/EUR)的 fact 被排除"
+    ],
+    "boundary": [
+      "instant 型 context(无 startDate)被安全跳过不 panic;同 (period, member) 跨两份报告重复出现时取 FilingDate 更晚者(重述以最新披露为准);回看上限生效: 单次调用最多处理最近 12 份符合条件的报告(防 since 为零值时数十份 × ~10MB 的首跑风暴)"
+    ],
+    "error_handling": [
+      "AD-11 降级: 某份报告的实例文档 404(2019 前老式非 inline XBRL 的 _htm.xml 推导不成立)→ 该期跳过并可观测,不中断整家;响应体经 io.LimitReader 限 64MB,超限该期跳过而非 OOM;submissions 非 200 → 返回带 CIK/URL 上下文的 error 且不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "AD-11 单遍解析: HTTP body 不可二次读取,plan 写的「流式两遍」不可实现——须一次 Decoder.Token() 遍历同时收集 contexts 与 pending facts,流末在内存关联(不假设 context 先于 fact 出现);禁止 Unmarshal 建全树(实测文档 9.7MB);两个 host 的请求都必须携带 UA(www.sec.gov 无 UA 同样 403);请求间无并发;NewWithBaseURLs 双 host 注入且既有 NewWithBaseURL 语义不变(现有 edgar 测试零改动通过);design-spec §1.2 解析规则以注释完整保留",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-15",
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-5",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-7"
+}

@@ -1,0 +1,111 @@
+{
+  "task_id": "TASK-010",
+  "title": "cmd 分部刷新接线(RefreshSegments 编排 + Report 合并)",
+  "by": "dev-agent-16",
+  "commit": "0981d90",
+  "context_from_used": [
+    "TASK-004: runPrismRefreshWith 的打印/通知路径与「明细无条件进 stdout」不变量",
+    "TASK-008: RefreshSegments 的 6 参签名(AD-25)与 Report 语义"
+  ],
+  "key_findings": [
+    "**「未映射 member 3→5 个可把偶然升序概率降到 1/120」这个前提不成立** —— Go 对单桶小 map(≤8 键)的迭代是**旋转**而非均匀随机排列。实测(100000 次采样):n=3 时只出现 **3** 种不同顺序(全排列应 6 种)、升序占比 74.95%;n=5 时只出现 **5** 种(全排列应 120 种)、升序占比 50.17%。真实用例里的存活率随键的哈希落位在 10%~75% 间浮动,与 1/n! 毫无关系。按原方案改完实测变异存活率只从 13%(26/30 红)降到 10%(27/30 红),没有达到 <1% 的目标。改为**在用例内循环 20 轮**(每轮都必须升序,存活率 = p^N)后,变异 30/30 全红。",
+    "由此得到的通则:**对非确定性行为,压低误判率要靠「重复观测」而不是「加大单次观测的理论空间」** —— 后者依赖对随机源分布的假设,而 Go map 迭代的实际分布与直觉的「均匀随机排列」相差极远。",
+    "Report.Refreshed 不能相加:估值刷新与分部刷新跑的是**同一批标的**,相加会让汇总行的 \"N ok\" 超过标的总数(3 个标的可以打印出 5 ok),直接误导 launchd 日志与告警。汇总行 ok 的口径固定为「估值刷新成功的标的数」,分部结果经带前缀的 Failed/Degraded 体现。",
+    "两条链路的 Failed/Degraded 条目都以 \"SYMBOL: \" 开头,同一标的两处都失败时无法区分是估值挂了还是分部挂了,故分部条目统一加 \"segments: \" 前缀。",
+    "runPrismRefresh 是纯装配壳(读配置 / 开库 / 构造 4 个 collector client),没有 seam 可注入,历来 0% 覆盖。本任务把可测逻辑全部提到 mergeReports / segmentReport 两个纯函数里,使新增行为 100% 可测而不必为过覆盖率去给壳造 seam。"
+  ],
+  "decisions": [
+    {
+      "decision": "合并逻辑抽成 mergeReports(val, seg) 纯函数,Refreshed 取 val 的值不相加",
+      "rationale": "DoD boundary[1] 明令「汇总行 ok 数不得超过标的总数」。纯函数形态使该口径可被单测直接钉住(变异 A1「Refreshed 相加」立即变红)。"
+    },
+    {
+      "decision": "模板加载与分部刷新抽成 segmentReport(...) ,LoadTemplates 出错时返回带 Degraded 的 Report 而非丢弃",
+      "rationale": "AD-16:plan 原文写的 `templates, _ := LoadTemplates(...)` 是反面写法 —— 模板目录被 rsync --delete 清掉或 YAML 写坏时,表现为 sankey 全站 404 且日志无痕。降级为 Degraded 条目后同时进 stdout 与告警,且该轮不发起任何分部拉取(变异 A4/A5 均被杀)。"
+    },
+    {
+      "decision": "分部条目加 \"segments: \" 前缀",
+      "rationale": "DoD error_handling 要求两类 Failed 同时可见;前缀进一步保证「同一标的两处都失败」时可归因。汇总行格式未变,只影响明细段文本。"
+    },
+    {
+      "decision": "顺序确定性用例改为循环 20 轮,而非按任务描述把 member 从 3 增到 5",
+      "rationale": "原方案的理论前提(1/n!)经实测证伪(见 key_findings),达不到声称的 <1%。循环把存活率压到 p^20,即便最坏 p≈0.75 也只有 3e-3,实测 30/30 全红。member 仍保留 5 个(无害,且让失败信息更易读)。**这是相对任务描述的偏离,已在此显式登记。**"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go",
+    "internal/prism/segments_test.go"
+  ],
+  "interfaces_exposed": {
+    "package": "main (cmd/atlas)",
+    "funcs": [
+      "func mergeReports(val, seg prism.Report) prism.Report —— Failed/Degraded 合并(分部条目加 segmentPrefix),Refreshed 取 val 不相加;不改写入参",
+      "func segmentReport(pcfg config.PrismConfig, store prism.Store, seg prism.SegmentClient, templatesDir, manualDir string, force bool) prism.Report —— 模板出错→Degraded 且不拉取;模板为空/目录不存在→零值 Report;否则调 prism.RefreshSegments",
+      "func prefixAll(msgs []string) []string"
+    ],
+    "consts_vars": [
+      "const segmentPrefix = \"segments: \"",
+      "const sankeyTemplatesDir = \"configs/prism/templates\"",
+      "const sankeySegmentsDir = \"configs/prism/segments\"",
+      "var prismFullSegments bool —— 绑定 --full-segments flag,默认 false"
+    ],
+    "cli": [
+      "atlas prism refresh --full-segments —— 忽略分部增量锚点全量重拉(AD-12,TASK-014 模板迭代依赖)"
+    ]
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./cmd/atlas/ ./internal/prism/ -count=1",
+    "result": "两包均 ok;全仓 go build ./... 与 go test ./internal/... ./cmd/... 全绿",
+    "red_evidence": "先写测试并加桩实测:5 个行为级 FAIL(TestMergeReportsKeepsBothSides / TestPrismRefreshShowsBothFailureSources / TestFullSegmentsFlagRegistered / TestSegmentReportBadTemplateDegradesNotSilently / TestSegmentReportPassesForceAndManualDir),再实现。",
+    "gate_denial_evidence": {
+      "why": "cmd/atlas 整包覆盖率 < dev_minimum 80,transition dev_done 会被门禁 DENY。这是框架只支持整包口径的已知缺陷,非本任务引入。**未自行修改 arcforge.config.json 或任何 .claude/ 文件。**",
+      "package_total_before": "74.6%(TASK-010 开工前,go tool cover -func 口径)",
+      "package_total_after": "74.9%(本任务净提升 +0.3pp)",
+      "command": "GOTOOLCHAIN=local go test ./cmd/atlas/ -count=1 -coverprofile=cov.out && GOTOOLCHAIN=local go tool cover -func=cov.out",
+      "changed_file_breakdown": [
+        "cmd/atlas/prism.go 全文件语句级: 37/57 = 64.9%",
+        "其中 runPrismRefresh(装配壳:读配置/开库/构造 4 个 collector client,无 seam): 0/20 = 0%",
+        "**排除该壳后: 37/37 = 100.0%,壳之外零未覆盖语句**"
+      ],
+      "per_function": [
+        "init                100.0%",
+        "hasEdgarInstrument  100.0%",
+        "mergeReports        100.0%  ← 本任务新增",
+        "prefixAll           100.0%  ← 本任务新增",
+        "segmentReport       100.0%  ← 本任务新增",
+        "runPrismRefreshWith 100.0%",
+        "runPrismRefresh       0.0%  ← 既有装配壳,历来无覆盖"
+      ],
+      "conclusion": "本任务新增的每一条语句都被覆盖;整包不达标完全由既有的 runPrismRefresh 装配壳与同包其它命令文件造成。**未为过门禁堆无关测试。**"
+    },
+    "mutation_testing": {
+      "wiring": [
+        "A1 Refreshed 相加(汇总行 ok 虚高) → TestMergeReportsDoesNotInflateOkCount + TestPrismRefreshShowsBothFailureSources 变红",
+        "A2 丢弃分部 Failed → TestMergeReportsKeepsBothSides + TestPrismRefreshShowsBothFailureSources 变红",
+        "A3 丢弃分部 Degraded → TestMergeReportsKeepsBothSides 变红",
+        "A4 AD-16 丢弃 LoadTemplates error → TestSegmentReportBadTemplateDegradesNotSilently 变红",
+        "A5 模板加载失败仍继续拉分部 → 同上变红",
+        "A6 force 写死 false → TestSegmentReportPassesForceAndManualDir 变红",
+        "A7 --full-segments 默认值改 true → TestFullSegmentsFlagRegistered 变红",
+        "7/7 全部被捕获"
+      ],
+      "ordering_guard": "X16(sortedKeys 去排序):原 3 member 单轮 26/30 红(13% 存活)→ 改 5 member 单轮 27/30 红(10% 存活,未达预期)→ 改循环 20 轮 **30/30 全红**"
+    },
+    "dod_mapping": [
+      "functional[0] 闭包合并两个 Report、双方 Failed 与 Degraded 都在结果里 → TestMergeReportsKeepsBothSides / TestPrismRefreshShowsBothFailureSources",
+      "functional[1] AD-12 --full-segments 透传 force → TestFullSegmentsFlagRegistered + TestSegmentReportPassesForceAndManualDir(force=true→since 零值;false→用锚点)",
+      "functional[2] AD-16 LoadTemplates error 不丢弃、坏 YAML 进 Degraded 含文件名、且不拉取(负向) → TestSegmentReportBadTemplateDegradesNotSilently",
+      "boundary[0] 模板目录不存在/为空 → 跳过且不报错;用 t.TempDir 不依赖真实 configs 目录 → TestSegmentReportSkipsWhenNoTemplates",
+      "boundary[1] 合并后 ok 数不超标的总数 → TestMergeReportsDoesNotInflateOkCount",
+      "error_handling[0] 估值 Failed 与分部 Failed 同时可见 → TestPrismRefreshShowsBothFailureSources",
+      "non_functional 全绿 + TASK-004「有 sender 时明细也进 stdout」不回退(TestPrismRefreshAlwaysPrintsDetail 仍 PASS)+ 汇总行格式未变(TestPrismRefreshNoDetailSectionWhenClean 逐字断言整行)"
+    ],
+    "incidental_fixes": [
+      "cmd/atlas/prism_test.go:64 assert.Len → require.Len(空切片时下一行索引 panic 会中断整个测试二进制、掩盖其后所有结果)",
+      "internal/prism/segments_test.go 顺序确定性用例改循环 20 轮(见 decisions 中的偏离登记)"
+    ],
+    "existing_tests_untouched": "既有 13 个用例断言零修改(唯一改动是 :64 的 assert→require,断言语义不变、只是改为致命);gofmt -l 报的 cmd/atlas/backtest_test.go 与 crisis_test.go 属既有未格式化状态,本次未改动、按 Surgical Changes 未去动它们",
+    "impact_analysis": "gitnexus 仍不可用(索引 stale + LadybugDB 版本 42 vs 40)。手工评估:runPrismRefresh 的 refresh 闭包是唯一被改的生产路径,其上游只有 prismRefreshCmd(launchd 入口);mergeReports/segmentReport/prefixAll 均为新增,无既有调用方。RefreshSegments 至此获得首个生产调用方。风险 MEDIUM(改的是 launchd 每日入口),但行为变化只是「多跑一段分部刷新 + 多几条明细」,估值链路与汇总行格式零变更,且失败被 Report 语义吸收不会让命令退出非零。"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-016",
+  "by": "dev-agent-17",
+  "key_findings": [
+    "**两层防御各司其职,不能互相替代**: (1) buildQuarters 的分部桶按 (label, period_end) 二级键 —— 治「跨季相加」; (2) aggregateFiscalYears 的 len(qs) > 4 上界 —— 治「6 个季度被当成完整财年」。前者不解决后者: 主表行本身就是 6 行不同 period_end 的合法数据,分部桶再怎么分也拦不住财年聚合把它们加起来。",
+    "**`>4` 与 `<4` 的语义不同**: `<4` 是「数据还没齐」(正常,静默跳过即可,下个季度就补上了); `>4` 是「上游数据违约」(不正常,必须留痕)。所以只有 `>4` 分支产出 PeriodConflict。",
+    "**±15 天容差是必需的,不是防御性编程**: TASK-008 反查 fiscal_period 时本身带 ±3 天容差,分部行的 period_end 与主表行可以合法地差几天。若要求精确相等,真实数据里每个季度的分部都会对不上、全部落进 other_segment 残差 —— 那是把一个静默错误换成另一个。不同季度相隔约 90 天,15 天留足了余量。",
+    "**日期解析失败时故意返回 false(视为不同季度)**: 猜测会让防御失效。已有用例 TestBuildPeriodsUnparsablePeriodEnd 锁定。",
+    "**签名改成返回 conflicts 是有意的**: 可以用「保持 BuildPeriods 原签名 + 另加一个带 report 的变体」做到向后兼容,但那等于留下一个丢弃冲突的便捷入口 —— AD-16 的教训正是「可忽略的错误一定会被忽略」(plan 原稿的 `templates, _ :=`)。改签名后调用方被迫面对,全仓只有 2 个生产调用点(都在 service.go),代价可控。"
+  ],
+  "decisions": [
+    {
+      "decision": "分部行归期改为「按 (fiscal_period, period_end) 二级键分桶,主表行只取与自身 period_end 相符(±15 天)的那个桶」",
+      "rationale": "DoD 列的三个候选(取最新 / 拒绝该标签 / 标记冲突)我都没有直接采用,因为它们都在**猜哪一季才是对的**。而主表行自己带着权威的 period_end(AD-9: 它才是真主键),拿它去匹配就不需要猜: 2026Q3 标签下的 2025-03-31 行属于上一年那季,与本期无关,直接不取。既不丢本期数据(取到 34.681B),也不产出错值(不会得到 61.432B)。三个候选里「标记冲突」被同时采纳作为可观测性手段。"
+    },
+    {
+      "decision": "对不上任何桶时 Segments 为 nil,而不是退而求其次取最近的桶",
+      "rationale": "「本期没有分部数据」在桑基里会被 other_segment 残差吸收(可见),而「错记了别的季度的分部值」不可见。TestBuildPeriodsNoSegmentBucketMatchesQuarter 锁定该行为。"
+    },
+    {
+      "decision": "冲突记录同时覆盖主表行与分部行的 period_end",
+      "rationale": "两边都可能撞车,且撞的未必是同一批日期。labelConflicts 取两者并集后按季度折叠,一个标签只报一条,附上它实际覆盖的全部季度。"
+    },
+    {
+      "decision": "Analysis 新增 Conflicts 字段(而非只在包内返回)",
+      "rationale": "拒绝聚合本身只解决了「不产出错值」,没有解决「没人知道少了什么」。页面上「FY2025 不见了」与「FY2025 从来没有过」看起来完全一样。TestAnalyzeSurfacesPeriodConflicts 走完整 Analyze 链路断言透传,并已用「装配层丢弃 Conflicts」变异体验证(见 verification)。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/sankey/periods.go",
+    "internal/prism/sankey/periods_test.go",
+    "internal/prism/sankey/service.go",
+    "internal/prism/sankey/service_test.go"
+  ],
+  "interfaces_exposed": {
+    "breaking_change": "**func BuildPeriods(...) 签名变更**: 原 `[]PeriodMetrics` → 现 `([]PeriodMetrics, []PeriodConflict)`。全仓生产调用点仅 service.go 两处(均已更新);design-spec §3.2 的签名需同步更新(Leader)。",
+    "types": [
+      "type PeriodConflict struct { Period string; Detail string } —— Period 是被拒的期(\"2026Q3\" 或 \"FY2025\"),Detail 是可直接展示给人的中文说明",
+      "Analysis 新增 Conflicts []PeriodConflict"
+    ],
+    "contract_for_downstream": "TASK-011/012: `Analysis.Conflicts` 非空时页面应给出降级提示(与 AD-22 的 Graph.Notes 同理,都是「本该有但被拒绝的东西」的唯一数据源);两者都不该被静默丢弃。TASK-017 治本后本层防御仍应保留 —— 它防的是上游违约,不是某一次具体的 bug。"
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 -cover",
+    "result": "ok,coverage **97.7%**(基线 96.1%,未下降);go build ./... 通过;go vet 通过;gofmt -l 无输出;./internal/... 全量测试通过",
+    "red_confirmed": "实现前为 build FAIL(assignment mismatch: 2 variables but BuildPeriods returns 1 value / undefined: PeriodConflict)",
+    "mutation_testing": "DoD 要求的两个变异体 + 我追加的第三个,均按「被点名的测试在变红列表里 且 失败信息指向该规则」两步核对: (a) 去掉 >4 上界 → TestBuildPeriodsRejectsOversizedFiscalYear 变红,失败信息为「6 个季度不是一个财年,宁可不产出也不能相加成一个「完整财年」」并暴露聚合出的 6.7e+11; (b) 恢复静默 += → TestBuildPeriodsRejectsCrossQuarterSegmentSum 等 5 个变红,失败信息直接给出 61.432B 这个真实错值; (c) 装配层丢弃 Conflicts → TestAnalyzeSurfacesPeriodConflicts 变红,信息为「冲突必须透传到 Analysis」。**(c) 的第一版变异写成了删除结构体字段,导致 `declared and not used` 编译失败 —— 编译错误不是有效变异(它不证明测试有区分力),已改为可编译的 `Conflicts: nil` + `_ = conflicts` 重跑确认。**",
+    "regression": "既有 18 个测试**零断言改动**,仅 7 处调用元数适配(`got := ` → `got, _ := `,以及两处 assert.Empty 拆成两行);git diff 的删除行全部是这 7 行",
+    "extra": "code-simplifier 已跑,它**自报「Unchanged」但实际做了改动**(引入 segmentBuckets 命名类型、把复合键去重换成按标签的集合、抽出 sortConflicts)。改动本身是等价重构且更清晰,故保留,但**我在其之后重跑了全部三个变异体**确认断言强度未变 —— 子代理的自述不可作为验收依据。",
+    "coverage_note": "简化器刚跑完时曾读到 98.0%,之后稳定复现为 97.7%(连续三次)。未能定位该 0.3pp 差异的成因,故以可复现的 97.7% 为准报告,不采信那次孤立读数。",
+    "commits": [
+      "1fd162d fix(prism): 拒绝标签冲突导致的错误财年与跨季相加"
+    ]
+  },
+  "pending_corrections": [
+    "**数字更正(Leader 2026-07-25,dev-agent-15 起疑纠正)**: 「27% 标签冲突 / MSFT 7 of 26 / 2018Q4 横跨 4 季」是**错的** —— Leader 复刻 client.go 时漏了 isSingleQuarter 对 fp ∈ {Q1,Q2,Q3} 的检查,那三组 ×4 是过滤前的原始上下文标签、实际进不了管道。**真实为 4 组 / 12.7%**。当前代码里仍有两处引用旧数字: internal/prism/sankey/periods.go:57 的 BuildPeriods 文档注释、internal/prism/sankey/periods_test.go:209 的用例注释;commit 1fd162d 的信息里也有。**返工轮一并改为 12.7% / 4 组**(commit message 不改写历史)。此刻工作树保持冻结,因为 test-agent-6 正在按 1fd162d 验证,改文件会让它验的与看到的对不上。不影响实现正确性: 防御对任何冲突形态都生效,与冲突比例无关。",
+    "**返工轮待补(Leader 裁决,以 inbox 消息为准,任务描述未改)**: (1) 验收档位补 5 季 —— 3 拒绝 / 4 接受 / **5 拒绝**,只有 5 季能区分 >4 与 >5,当前 4/6 两档对该边界零区分力(与 TASK-008 的 ±3 同构); (2) 同比反查加 340~390 天校验,对照期 period_end 超出该区间则退化为 ChangeKind none —— 治的是「标签对了、期间错了」的假同比(实测 change=0.75 实为跨两年,量级完全正常、页面无异常,本 sprint 第 8 次「合法值但语义错误」); (3) 自验四个变异体: >4→>=4、>4→>5、冲突检测只比标签不比 period_end,加原有两个。"
+  ],
+  "rework_1": {
+    "requirements": "Leader 与 test-agent-6 的三项 DoD 补正(均已落进 task JSON 文本)",
+    "items": [
+      "①档位: 3 拒绝 / 4 接受 / **5 拒绝**。原 4/6 两档对 `>4` vs `>5` 零区分力(test-agent-6 实测该变异存活)。**第 5 季只能来自标签重复**——一个财年最多 Q1~Q4 四个合法标签,这正是首轮「保留重复行而非拒绝该标签」成为上界防御可测前提的原因(两个防御层之间存在可测性依赖)。",
+      "②periodEndSlackDays=15 补 14/15/16 三档。该常量此前**两个方向都无锚点**(15→14 与 15→30 均存活),比 TASK-008 的 ±3 更彻底(那次至少 3→5 被抓住)。",
+      "③同比反查加 340~390 天期间校验。为承载该校验给 PeriodMetrics 新增 PeriodEnd 字段(财年取**最后一季**的 period_end)。"
+    ],
+    "why_340_390": "财年日历逐年漂移(52/53 周财年最多差一周),窗口比 365 宽是有意的,同时远小于两年。解析失败或缺 period_end 一律返回 false(退化为 none),不猜——猜测会让防御失效。",
+    "interface_change": "PeriodMetrics 新增 PeriodEnd string。design-spec §3.2 的结构体定义需同步(Leader)。下游 TASK-011/012 可直接用它显示「期末日期」,不必再从标签反推。",
+    "test_fixture_change": "测试辅助 qm() 补填 period_end(经新增的 endOfLabel 按 MSFT 6 月结日历推导)。**理由**: 生产数据里 period_end 是 fundamental_q 主键的一部分、不可能为空,而 ③ 的校验要求它存在——不补则既有 yoy 用例会因缺值全部退化为 none,fixture 变得不代表真实数据。这改的是 fixture 真实性,不是断言。",
+    "figure_correction": "27% / MSFT 7-of-26 / 2018Q4 横跨 4 季 → **实为 4 组 / 12.7%**(Leader 复核时漏了 isSingleQuarter 对 fp ∈ {Q1,Q2,Q3} 的过滤,那三组 ×4 是过滤前的原始上下文标签)。periods.go:57 与 periods_test.go:210 两处注释已更正;commit 1fd162d 的信息保留原样不改写历史。**该更正本身也是「合法值但语义错误」**: 27% 与 12.7% 都是合理百分比,无任何量级异常提示算错了。",
+    "mutation_testing": "11 个变异体**全部杀死**: >4→>=4、>4→>5、去掉 >4 上界、冲突检测只比标签不比 period_end、恢复静默 +=、slack 15→14、slack 15→30、minYearGap 340→300、maxYearGap 390→800、去掉同比期间校验、FY 的 PeriodEnd 取首季而非末季。**最后一个最初存活**(无人断言财年的 period_end,而它会经 PeriodView.Metrics 暴露给前端,取首季会把年份标早 9 个月),已补断言后杀死。",
+    "verification": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 -cover → ok,**97.8%**(基线 96.1%);gofmt/vet/build 干净;internal/prism、internal/prism/sankey、internal/storage/prism 三包全绿",
+    "process_note": "**本轮未跑 code-simplifier**: 首次调用被用户中断,且中断时它已半途改了 periods_test.go(把两处重复的日期闭包提取为 daysBefore 辅助却未定义该函数,导致 undefined: daysBefore 编译失败)。我**补齐了它未完成的提取**(而非回退,因为两处调用点已改),并在此后重跑了全部 11 个变异体确认断言强度未变。未重新调用简化器是为尊重用户的中断动作;按项目协议 v2,code-simplifier 由 Leader 代跑。",
+    "commit": "a508843 fix(prism): 锚定聚合防御的边界常量,并拦住「标签对了期间错了」的假同比"
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "id": "TASK-011",
+  "title": "/api/prism/sankey 与 /api/prism/fundamental JSON API",
+  "description": "internal/api/handler/api/prism.go 追加两个 handler(沿用既有 response.JSON + jf NaN→null 惯例);internal/api/server.go 的 Dependencies 加 PrismSankey *sankey.Service(nil 则不注册路由)并注册两条 API 路由;cmd/atlas/serve.go 在 prismCfg.Enabled 分支内 LoadTemplates + sankey.NewService 装配注入。路由表与响应结构见 01-design/design-spec.md §5.1。接线模式照 M2 既有 prism 路由。 【门禁预警(Leader 实测)】cmd/atlas 整包覆盖率基线 74.6% < dev_minimum 80,而 task-completed.sh 只支持整包口径 → 本任务 transition dev_done 会被门禁 DENY,这是框架已知缺陷不是你的错。处置: 你必须先用 go test ./cmd/atlas/ -coverprofile 核实**你改动的文件**的文件级覆盖率达标(go tool cover -func 看具体函数),把证据(命令+输出)写进 discovery 与给 Leader 的消息,然后报告 Leader 由其代为放行。**严禁自行修改 arcforge.config.json 或任何 .claude/ 文件**(越权,会被 write-guard 拦截并记为违规)。 【顺带补测(test-agent-6 在 TASK-009 验证中用「接线视角」戳出 6 个存活变异体,均非 DoD 违反;sankey 包后续无其他任务触碰,故并入本任务;packages 已扩含 ./internal/prism/sankey)】按性价比排序: **①W7/W8 最划算**——TestFundamental 只断言了 revenue 与 roe_ttm,fundamentalMetrics 其余 **7 条序列全部无断言**,把 gross_profit 映射到 OperatingIncome、rnd 映射到 SGnA 都不会红(前端毛利曲线会画成营业利润),用**一个表驱动断言覆盖全部 7 条**即可。**②W2/W4 一行杀两个**——Analyze 路径**没有任何断言检查图里存在分部链路**(TestAnalyzeDefaultSelection 只断言 NotEmpty(Graph.Links),主干链路恒在故恒真;english labels 断言的 hasNode(\"Revenue\") 也是主干节点),于是「SegmentRows 传 0 而非 id」与「BuildSankey 传 nil 模板」都存活,后果是桑基退化为「全部收入都是 other_segment 残差」;补一行 assert.True(hasNode(...,\"云业务\")) 同时杀掉两个。**③W5 一行**——4 期用例只断言 viewNames 标签,单期用例才断言 Metrics.Revenue 且下标恰为 0,故「PeriodView.Metrics 恒取 sel[0]」在多期情形从未被验证。**④W10 一行**——lang 未传给 BuildMatrix 时 lang=en 矩阵行标签仍是中文,无断言。(另有 W3 PriceSeries 的 from 存活,但那是 fake 忽略 from 的局限,**非生产缺陷**,不必处理。)",
+  "module": "api-prism",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/api/handler/api/prism.go",
+    "internal/api/handler/api/prism_test.go",
+    "internal/api/server.go",
+    "cmd/atlas/serve.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "GET /api/prism/sankey?symbol=MSFT 无 from/to 时返回 200,响应 data 含 Periods(每项 Period/Graph/Metrics)、Matrix、Granularity、Template;**AD-22 Notes 透传(Leader 补漏)**: 响应必须携带 Graph.Notes —— 透传链是 TASK-007 产生 → TASK-009 装配层 → **本任务 API 响应** → TASK-012 渲染 footnote,**本环断掉则前三环全部白做**,且负残差会退回「图上凭空少一块且无人知情」的静默失真。dev-agent-17 在 TASK-009 discovery 的 contract_for_downstream 里明确要求了这条;AD-26 Conflicts 透传: 响应还须携带 Analysis.Conflicts(BuildPeriods 拒绝聚合的期与原因)——与 Graph.Notes 同为「本该有但被拒绝的东西」的唯一数据源,断链则前端无法给出降级提示",
+      "?granularity=fy、?from=&to=、?lang=en 三个查询参数分别透传到 Service.Analyze 并生效(fake service 断言收到的参数)",
+      "未配置模板的 symbol 返回 404 且响应体含 no sankey template",
+      "GET /api/prism/fundamental?symbol= 返回 200 含 Periods/Metrics/Dates/Closes;无数据时返回 404",
+      "AD-14 Inf 防护(硬故障): jf 扩展为同时把 NaN 与 ±Inf 映射为 null;构造含 Inf 值的 fake Analysis 时 API 仍返回 200 而非 500(encoding/json 对 Inf 直接报错)",
+      {
+        "desc": "【W7/W8｜原写在 description 未落 DoD，本次返工补入】`fundamentalMetrics`（`service.go:161`）的**全部 9 条序列**用一个表驱动断言覆盖：`revenue` / `gross_profit` / `operating_income` / `net_income` / `rnd` / `sganda` / `income_tax` / `eps_diluted` / `equity`。**⚠ 数字更正**：description 与 Leader 初稿都写「7 条」，实为 **9 条**（test-agent-8 核实）——当前仅 `revenue` 被断言（`service_test.go:382`），`roe_ttm` 是表外单独设置（`service.go:147`）不在此表内，故**未被断言的是 8 条**。**建 7 行表会漏掉 `eps_diluted` 与 `equity`，在更小尺度上复现同一缺口。** 实证后果：`gross_profit`→`OperatingIncome`、`sganda`→`RnD` 两个映射变异在全套测试下均存活（前端毛利曲线会画成营业利润，无任何信号）。handler 侧 `TestFundamentalResponse` 用 fake、不经过 `fundamentalMetrics`，**不能替代**。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "【W2/W4｜同上】`Analyze` 路径必须断言图中**存在分部链路**。当前 `TestAnalyzeDefaultSelection` 只断言 `NotEmpty(Graph.Links)`，主干链路恒在故该断言恒真；`english labels` 断言的 `hasNode(\"Revenue\")` 也是主干节点。于是「`SegmentRows` 传 0 而非 id」与「`BuildSankey` 传 nil 模板」两个变异都存活，后果是桑基退化为「全部收入都是 `other_segment` 残差」。补一行 `assert.True(hasNode(...,\"云业务\"))` 同时杀两个。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "【W5｜同上】多期情形下 `PeriodView.Metrics` 的下标必须被断言。当前 4 期用例只断言 `viewNames` 标签，单期用例才断言 `Metrics.Revenue` 且下标恰为 0——「`PeriodView.Metrics` 恒取 `sel[0]`」这个变异在多期情形从未被验证。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "【W10｜同上】`lang` 未传给 `BuildMatrix` 时，`lang=en` 下矩阵行标签仍是中文，当前无断言。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "【G2｜verifier 发现】`period_end` 全仓无任何断言（变异存活）。实现正确但未锚定，一行可补。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**返工验证要求**：上述五条各自对应的变异必须被实际杀死，按 AD-27 记录「N 次中红了几次」并注明为用例层面；变异施加前先 `go vet` 确认可编译。**不得以「测试通过」替代「变异被杀」**——这五条的存在理由恰恰是原有测试通过却无判别力。原有 10 条 DoD 已由 test-agent-8 全部验证 PASS（报告见 `04-test/TASK-011-verification.md`），返工验证聚焦本批新增条目。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "symbol 缺失返回 400;granularity 非法值(如 ?granularity=x)返回 400 而非静默当季度处理;未知 symbol / 无模板 / prism 未启用三种 404 分支的错误文案互不混淆;Dependencies.PrismSankey 为 nil 时两条路由不注册(负向断言)"
+    ],
+    "non_functional": [
+      {
+        "desc": "serve.go 在 prismCfg.Enabled 分支内装配 LoadTemplates(\"configs/prism/templates\") + NewService 注入;AD-16: 模板加载 error 必须记录到日志不得丢弃,加载失败时 serve 仍启动但不注册 sankey 路由(降级可观测);模板在启动时一次性加载,变更需重启这一语义记入 discovery",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/api/... ./cmd/atlas/ -count=1 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-009",
+    "TASK-010"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-009",
+    "TASK-010"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-20",
+  "packages": [
+    "./internal/api/handler/api",
+    "./internal/api",
+    "./cmd/atlas",
+    "./internal/prism/sankey"
+  ],
+  "assignment_epoch": 4,
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "TASK-011 代码已完成并提交(a3864aa + 3e2630c),但 transition dev_done 被门禁 DENY:Task-scope coverage 71.6% < dev_minimum 80%。这正是本任务描述里 Leader 预警的框架缺陷(task-completed.sh 只支持整包口径)。按描述要求的处置,证据已备齐、请求 Leader 代为放行。【证据一】本任务新增/修改的 8 个函数文件级覆盖率全部 100%:NewSankeyHandler/Sankey/Fundamental/analysisJSON/graphJSON/metricsJSON(sankey.go)与 jf/jfSlice(prism.go)。【证据二】非回归:改动前基线 <=71.5%,现 71.6%,略升。【证据三】拉低者均为既有部分:cmd/atlas 的 runServe 0%(仓库本就无任何单测覆盖,它会真正启动服务器)、internal/api 的 setupRoutes 40.7%(既有大函数注册约 40 条路由;我新增的 4 行分支正反两向都有覆盖)。【口径瑕疵如实标注】基线那次测量跑的测试包比门禁多(./internal/api/... 含 web/job/middleware/response),-coverpkg 虽同为四包,但更多测试包只会让数字更高,故真实同口径基线应 <=71.5%;我未拿两个不同口径的数直接对账。【边界】我未修改 arcforge.config.json 或任何 .claude/ 文件(任务描述明令禁止),放行方式请 Leader 决定。【附带答复】你问的 ./internal/prism/sankey 是否要改:**一行未改**(全程 git status 确认),可从 packages 摘掉;注意它是高覆盖率包,摘掉反而会拉低聚合数字。",
+      "asked_at": "2026-07-25T13:40:00Z",
+      "answer": null
+    }
+  ],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-8",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "coverage_floor": 70,
+  "questions[0].answer": "【Leader 答复 / 已呈报人类并取得决策】你的三条证据我全部独立实测复现,结论成立:(1)基线实测 71.1%(worktree @ a8c8354 同口径),TASK-011 后 71.6%,**提升 0.5pp 不是回归**;(2)你新增的 13 个函数(sankey.go 全部 6 个 + prism.go 的 jf/jfSlice 等)实测**全部 100.0%**;(3)拉低者确为既有 runServe 0.0% 与 setupRoutes 38.5%→40.7%(你加的 4 行分支正反两向均覆盖,是它把该函数推高的)。你那条\"摘掉 sankey 反而拉低聚合\"的提醒也被实测证实:只留 handler/api = 52.4%,加 internal/api = 47.9%,**均低于四包合并的 71.6%**——缩小 packages 是反效果,已放弃该方案。【决策】人类已选定\"任务级 coverage_floor\"方案:本任务已写入 coverage_floor=70;但 task-completed.sh 目前不读该字段(DEV_MIN 只取 config 的 coverage.dev_minimum),而 hooks 对全体 agent 只读,**故眼下仍无法 dev_done**,需人类会话外同步 hook。这不是你的问题,你的交付已达标。【状态处置】本任务转 blocked_human(真实阻塞源是运行时资产待同步,不是待 Leader 答复),plan.md 已高亮。hook 同步后我会把它改回 assigned,届时 assignment_epoch 会 +1,**你需要重新认领并以新 epoch 携带后续写入**。【期间请做】(1)把 discovery 落盘(含你给 TASK-012/013 的契约:notes 渲染 footnote、conflicts 降级提示、任何数值字段都可能是 null、granularity 只接受 q/fy、模板变更需重启)——这份证据不落盘就只存在于你的 context 里,本 sprint 已有先例(TASK-018 变异日志);(2)你那两条过程事实我已收下,变异脚本还原自检的教训会进 wisdom。",
+  "coverage_floor:": "70",
+  "verifier": "test-agent-9",
+  "reject_reason": "G1(阻塞): description 明确「并入本任务」的六项 sankey 补测(W2/W4/W5/W7/W8/W10)完全未做,`git log a8c8354..HEAD -- internal/prism/sankey/` 为空。已实证两个真实缺口: `fundamentalMetrics` 中 `gross_profit`->`OperatingIncome`、`sganda`->`RnD` 的映射变异均存活于全套测试(前端毛利曲线会画成营业利润且无任何信号)。handler 侧 `TestFundamentalResponse` 用 fake、不经过 `fundamentalMetrics`,无法替代。返工内容: (a) W7/W8 用一个表驱动断言覆盖 `fundamentalMetrics` **全部 9 条**序列——注意 description 说的「其余 7 条」是低估,该表实为 9 条(revenue/gross_profit/operating_income/net_income/rnd/sganda/income_tax/eps_diluted/equity),`service_test.go:382-385` 现仅断言 revenue(与表外的 roe_ttm),故**零断言的是 8 条**;每条喂互不相同的值并断言 `Metrics[key][i]` 精确相等; (b) W2/W4 在 Analyze 路径加 `assert hasNode(...,\"云业务\")` 一行杀两个(现仅 `NotEmpty(Graph.Links)`,主干链路恒在故恒真); (c) W5 补多期情形下 `PeriodView.Metrics` 的下标断言(现仅单期用例且下标恰为 0); (d) W10 补 `lang=en` 时矩阵行标签为英文的断言。\n\nG2(次要): `period_end` 全仓无任何断言(变异 `metricsJSON` 丢弃 `\"period_end\"` 存活于三包全量)。实现正确但未锚定,fixture 已有 `PeriodEnd: \"2026-06-30\"`,在 `TestSankeyResponseShape` 加一行即可。非 DoD 违反(不在 DoD 文字内,亦不在 TASK-009 contract_for_downstream 四条内),随 G1 一并处理。\n\n说明: 十条 done_criteria **全部 PASS**;dev 声称的 9 个变异经 verifier 独立重跑(隔离 worktree + 自建带三重防护的 harness: `git diff --quiet` 验还原 / `go build` 验编译 / sed 命中检查)**全部 KILLED,且杀手测试与 dev 声称逐一吻合**,dev 第二轮计数属实;AD-14 两层论证经独立复核**接受**。**本次退回仅因 description 载明的补测义务未履行,与已交付部分的质量无关。** 完整证据见 docs/04-test/TASK-011-verification.md。判定对象 HEAD=3912294。"
+}

@@ -1,0 +1,83 @@
+{
+  "task_id": "TASK-007",
+  "by": "dev-agent-17",
+  "key_findings": [
+    "**接口偏离(需 Leader 确认)**: design-spec §3.2 的 `Graph` 只有 Nodes/Links,但同节要求「负残差被显式记录 + footnote 记账」——无处可放。已给 Graph **新增 `Notes []string`**(纯增字段,Node/Link 契约不变,对尚未开工的 TASK-009/012 向后兼容)。若 Leader 不认可,替代方案是把说明塞进节点名,但会污染前端渲染文本。",
+    "**MaxPeriods 导出为常量 = 10**(AD-15)。TASK-009 的 Truncated 判定必须 import 这个常量而不是自己写字面量——AD-15 的成因正是引擎 10 / API 8 三处不一致。",
+    "分部行归期口径: 按 `FiscalPeriod` 关联;**空标签行被跳过**(AD-9 允许为空)。被跳过的收入不会凭空消失,而是落进桑基的 other_segment 残差,可见可查。TASK-008 若希望某行进入图表,必须保证反查到 fiscal_period。",
+    "财年分组只看 fiscal_period 标签前 4 位,与 period_end 落在哪个自然年无关——MSFT 6 月结的 2026Q1 其 period_end 是 2025-09-30,按标签归入 FY2026 才正确。已有专门用例(TestBuildPeriodsNonCalendarFiscalYear)锁定。",
+    "FY 的三个比率必须用**求和后**的分子分母重算,不能对各季比率取平均(加权错误)。变异测试确认该行为被断言锁住。",
+    "**变异测试自查(Leader 提示 test agent 会查空洞断言)**: 构造 20 个变异体,**杀死 19 个**。唯一存活者是等价变异体(见 decisions 末条),非测试缺口。过程中真发现 1 个缺口并已补(Node.Value 无断言)。"
+  ],
+  "decisions": [
+    {
+      "decision": "Graph 增加 Notes []string 承载「负流按 0 宽绘制」的记账",
+      "rationale": "AD-13 要求负残差不画负流但必须显式记录。Nodes/Links 里没有位置可放,而静默画 0 宽会让图上凭空少一块且无人知情——正是 AD-13 想避免的那类静默失真。测试 TestBuildSankeyNegativeFlow 断言 Notes 非空且点明节点名。"
+    },
+    {
+      "decision": "残差判定 |residual| >= |Revenue| * 0.005 才建节点;NaN 一律判 false(省略)",
+      "rationale": "AD-13 的 0.5% 阈值。NaN 参与比较恒为 false,自然退化为「省略该残差」,不会产出 NaN 节点污染图。"
+    },
+    {
+      "decision": "所有除法收口到 safeDiv;分母为 0/NaN/Inf 或分子为 Inf → NaN",
+      "rationale": "AD-14 硬故障:encoding/json 对 ±Inf 直接报错 → 整个 API 500,而 jf() 只映射 NaN。三比率、YoY、CAGR 全部走同一个 helper,不留第二条除法路径。"
+    },
+    {
+      "decision": "CAGR 起点 <= 0 → NaN(不只是 ==0)",
+      "rationale": "变异测试直接发现:起点与终点同为负时两负相除得正比值,会算出「看着合理」的正增长率(-10b → -20b 得 +41%),比 Inf 更危险,因为任何 Inf 防护都拦不住。已补 TestBuildMatrixAnnualChange/CAGR_from_negative_to_negative。"
+    },
+    {
+      "decision": "ChangeKind 语义: **缺对照期 → none;对照期存在但值为 0/NaN → NaN 但保留 yoy/cagr**",
+      "rationale": "DoD 原文只把「缺对照期」映射到 none。保留 kind 能让前端区分「没有可比期」与「有可比期但基数不可用」,二者在 UI 上应有不同措辞。"
+    },
+    {
+      "decision": "矩阵中缺失的分部值填 NaN 而非 0",
+      "rationale": "0 会谎称「该分部本期收入为零」,NaN 由前端渲染为「—」。变异测试确认此行为被锁定。"
+    },
+    {
+      "decision": "Node.Value = max(入流, 出流)",
+      "rationale": "源节点(各分部/残差)只有出流、汇节点(净利润/税项及其他)只有入流,取 max 才能让两类节点都拿到非 0 值。这是变异测试发现的断言缺口:改成只取入流或只取出流原本都能全绿,现已被 TestBuildSankeyBalance 的节点值断言钉死。"
+    },
+    {
+      "decision": "DefaultSelection 年度/季度分支的判定 = 「最新季所属财年 == 最新 FY 的财年」",
+      "rationale": "fys 只含完整财年(BuildPeriods 保证不足 4 季不产出),所以这一个条件就自然覆盖三个边界:皆空 →(nil,\"q\");财年首季 → 该财年只 1 季即返回 1 期;最新财年只有 3 季(Q4 推导失败)→ FY 不在 fys 里 → 走季度分支,不伪造 FY。无需为边界写特判分支。"
+    },
+    {
+      "decision": "存活的等价变异体: 去掉「空 FiscalPeriod 的分部行 continue」不改变可观测行为",
+      "rationale": "空标签行会落进 byPeriod[\"\"] 桶,而该桶永远无人读取(FiscalPeriod 为空的 FundamentalRow 同样被跳过)。属等价变异体而非测试缺口,保留该 continue 是为表达意图。如实记录,不伪装成已覆盖。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/sankey/periods.go (新增)",
+    "internal/prism/sankey/periods_test.go (新增)"
+  ],
+  "interfaces_exposed": {
+    "const": "MaxPeriods = 10 (AD-15,TASK-009 的 Truncated 判定应直接引用)",
+    "types": [
+      "type PeriodMetrics struct { Period string; Segments map[string]float64; Revenue, GrossProfit, OperatingIncome, NetIncome, RnD, SGnA, IncomeTax float64; GrossMargin, OpMargin, NetMargin float64 } —— NaN 表示缺失,绝不用 0 代替",
+      "type MatrixRow struct { Key, Label string; Values []float64; Change float64; ChangeKind string } —— ChangeKind ∈ {yoy,cagr,none};len(Values)==len(sel)",
+      "type Node struct { Name string; Value float64 } —— Name 是 lang 对应的显示名,Value = max(入流,出流)",
+      "type Link struct { Source, Target string; Value float64 } —— Value 恒 >= 0 或 NaN,永不为负",
+      "type Graph struct { Nodes []Node; Links []Link; Notes []string } —— **Notes 为本任务新增字段**(见 key_findings 第 1 条)"
+    ],
+    "funcs": [
+      "func BuildPeriods(f []prismstore.FundamentalRow, segs []prismstore.SegmentRow, granularity string) []PeriodMetrics —— granularity!=\"fy\" 即按季;返回按 Period 升序;fy 分支只产出 4 季齐的财年",
+      "func DefaultSelection(quarters, fys []PeriodMetrics) ([]PeriodMetrics, string) —— 返回 (选中期, \"q\"|\"fy\");输入须按期升序(BuildPeriods 已保证);年度分支截取最近 MaxPeriods 个",
+      "func BuildMatrix(sel []PeriodMetrics, tmpl *Template, lang string, allQuarters []PeriodMetrics) []MatrixRow —— 行序 = 模板 segments(保序) → 7 个主干科目 → 3 个比率;tmpl 为 nil 时只出主干与比率;sel 为空返回 nil",
+      "func BuildSankey(p PeriodMetrics, tmpl *Template, lang string) Graph —— 主干硬编码(AD-5);lang \"en\" 取 NameEN,其余取 NameZH"
+    ],
+    "row_keys": "segment key 原样 + revenue/gross_profit/operating_income/net_income/rnd/sganda/income_tax/gross_margin/op_margin/net_margin",
+    "contract_for_downstream": "TASK-009 直接消费这四个函数:期数上限用 MaxPeriods 常量;Graph.Notes 应透传到前端 footnote;矩阵与桑基里的 NaN 一律交给既有 jf() 映射,切勿在装配层用 0 兜底(会把「缺失」谎报成「为零」)。"
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 -cover",
+    "result": "ok,coverage 95.6%(含 TASK-003 既有测试全绿,无回退);新增 17 个顶层测试",
+    "red_confirmed": "实现前运行为 build FAIL(undefined: PeriodMetrics/MatrixRow/Graph...)",
+    "mutation_testing": "自建 20 个变异体(残差节点不画/阈值失效/不足4季也产出FY/上限10→8/去掉除零防护/缺失分部值返0/负流画负值/去年同期取同年/CAGR起点不防护/FY比率取首季/财年分组失效/季度分支返回全部季/annual判定反转/tax_other用IncomeTax/other_opex漏减SGnA/lang忽略/丢弃Notes/节点Value取入流/取出流/空FiscalPeriod不跳过),**杀死 19 个**;唯一存活者为等价变异体。过程中发现并修补 2 处真实缺口:CAGR 负起点、Node.Value 无断言。",
+    "extra": "gofmt -l 无输出(注意:首次写完 periods.go 时 gofmt 曾报未格式化,已 gofmt -w 修正);go vet 通过;code-simplifier 已跑(移除未使用的 isMargin 字段与冗余的循环变量拷贝,行为不变,变异测试在简化后重跑仍 19/20)",
+    "commits": [
+      "f846b47 feat(prism): 多期分析引擎(期聚合/智能对比集/矩阵/桑基图构建)",
+      "7bf1d5a test(prism): pin sankey node values"
+    ]
+  }
+}

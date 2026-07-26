@@ -1,0 +1,64 @@
+{
+  "id": "TASK-010",
+  "title": "cmd 分部刷新接线(RefreshSegments 编排 + Report 合并)",
+  "description": "cmd/atlas/prism.go runPrismRefresh: 估值 Refresh 之后 LoadTemplates(\"configs/prism/templates\"),非空则串行调用 prism.RefreshSegments,两个 Report 的 Refreshed/Failed/Degraded 在 prismRefreshDeps.refresh 闭包内合并后返回,使 TASK-004 的明细打印与通知走同一条路径。 【门禁预警(Leader 实测)】cmd/atlas 整包覆盖率基线 74.6% < dev_minimum 80,而 task-completed.sh 只支持整包口径 → 本任务 transition dev_done 会被门禁 DENY,这是框架已知缺陷不是你的错。处置: 你必须先用 go test ./cmd/atlas/ -coverprofile 核实**你改动的文件**的文件级覆盖率达标(go tool cover -func 看具体函数),把证据(命令+输出)写进 discovery 与给 Leader 的消息,然后报告 Leader 由其代为放行。**严禁自行修改 arcforge.config.json 或任何 .claude/ 文件**(越权,会被 write-guard 拦截并记为违规)。 【顺带修复(test-agent-6 在 TASK-004 验证中发现的既有脆弱点,非本任务引入)】cmd/atlas/prism_test.go:64-65 用 assert.Len(t, sender.sent, 1) 后紧跟 sender.sent[0] —— assert 非致命,切片为空时下一行 index 越界 panic 会**中断整个测试二进制、掩盖其后所有测试结果**(test-agent-6 做变异测试时真被误导过:全包跑看不到新测试失败,单独跑才发现其实已捕获)。改为 require.Len 即可,一行。该文件属 ./cmd/atlas,在本任务 packages 内,顺带修掉不构成 scope 漂移。 【AD-25 接线签名(Leader 补漏)】RefreshSegments 的最终签名是 **6 参**: RefreshSegments(cfg config.PrismConfig, store Store, seg SegmentClient, templates map[string]*sankey.Template, manualDir string, force bool) Report —— 注意第 5 参是 **manualDir string** 而非早期版本的 now time.Time(AD-25: now 在实现中无任何读取点;而 LoadManualSegments 需要目录,初稿描述了 manual 覆盖步骤却没给获取目录的参数)。生产调用形式: prism.RefreshSegments(pcfg, store, edgarClient, templates, \"configs/prism/segments\", fullSegments)。 【顺带加固(test-agent-6 在 TASK-008 复验中实测,非 DoD,一行)】internal/prism/segments_test.go 的 TestRefreshSegmentsDeterministicOrdering 是**概率性检出而非确定性守护**: 施加「sortedKeys 去排序」变异后连跑 **30 次,变红 26 次、存活 4 次(13%)** —— 因为该用例断言 3 条 Degraded 的顺序,而 Go map 的 3 元素随机迭代恰好产出升序的概率是 **1/6≈17%**,与实测吻合。修法一行: **未映射 member 从 3 个增到 5 个**,偶然升序概率由 1/6 降到 1/120(<1%)。注意 packages 已扩含 ./internal/prism。",
+  "module": "cmd-atlas",
+  "complexity": "simple",
+  "estimated_files": [
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "refresh 闭包在模板非空时调用 RefreshSegments,且两个 Report 的 Failed 与 Degraded 均出现在合并结果中",
+      "AD-12: 新增 --full-segments flag,透传 force=true 使分部刷新忽略锚点全量重拉(TASK-014 模板迭代依赖该入口)",
+      "AD-16: LoadTemplates 的 error 不得丢弃(plan 原文写的 templates, _ := 是反面写法)——模板目录含坏 YAML 时错误进日志与 Degraded(负向断言: 不得静默,否则表现为 sankey 全站 404 且日志无痕)"
+    ],
+    "boundary": [
+      "configs/prism/templates 目录不存在或为空时跳过 RefreshSegments 且不报错,估值刷新的输出与行为不变(测试不得依赖真实 configs 目录存在,因 go test ./cmd/atlas/ 的 cwd 是包目录)",
+      "Report 计数语义: 合并输出的汇总行不得让 ok 数超过标的总数(分部刷新与估值刷新的计数分开表述或明确口径),避免误导 launchd 日志与告警"
+    ],
+    "error_handling": [
+      "估值 Failed 与分部 Failed 同时存在时,输出中两者都可见(不互相覆盖)"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./cmd/atlas/ -count=1 全绿;TASK-004 的「有 sender 时明细也进 stdout」行为不回退(该测试仍 PASS);既有汇总行格式 \"%d ok, %d failed, %d degraded\" 保持不变(可能被人眼或运维脚本依赖)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-008"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004",
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-16",
+  "packages": [
+    "./cmd/atlas",
+    "./internal/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "TASK-010 代码已完成并提交(0981d90),DoD 七条全覆盖、接线变异 7/7 全杀、discovery 已写。但 transition dev_done 被门禁 DENY,需要 Leader 侧动作才能推进——这不是 done_criteria 疑问,而是任务描述里预告的『框架已知缺陷,由 Leader 代为放行』流程。落盘而非只发 inbox,以免通知丢失后本任务在 in_progress 静默卡死(TASK-011 与 TASK-014 依赖它)。【门禁实况,与任务描述预告的口径不同】DENY 报 79.5%,是按声明的两个包**合并**统计(./cmd/atlas + ./internal/prism),而非预告的 cmd/atlas 单包 74.6%。自算合并口径 1300/1638 = 79.37%,**距 80% 仅差 11 条已覆盖语句**;cmd/atlas 单包现为 74.9%(开工前 74.6%,本任务净 +0.3pp)。arcforge.config.json 的 dev_minimum 仍是 80,未被调整。【放行证据】cmd/atlas/prism.go 逐函数:mergeReports/prefixAll/segmentReport(本任务新增)均 100%,runPrismRefreshWith 100%,hasEdgarInstrument 100%,init 100%;唯一 0% 的是既有装配壳 runPrismRefresh(读配置/开库/构造 4 个 collector client,无 seam,历来无覆盖)。**排除该壳后 37/37 = 100%,壳之外零未覆盖语句**。合并口径的未覆盖大头全在无关文件:serve.go 104 条、crisis.go 42、broker.go 34、export_signals.go 28。我未为凑那 11 条去给 runPrismRefresh 造 seam——那等于为过门禁改生产入口结构,与『别为过门禁堆无关测试』同类。**未修改 arcforge.config.json 或任何 .claude/ 资产。**【请求】按 79.5 这个实测值临时放宽 dev_minimum 并在放行后立即恢复,或由 Leader 直接推进状态。【另需裁决的一处偏离】顺序确定性用例未按任务描述『member 3→5』执行:该方案的理论前提(1/n!)实测证伪——Go 单桶小 map 迭代是旋转而非均匀随机排列,10 万次采样显示 n=5 时只出现 5 种顺序(全排列应 120 种)、升序占比 50.17% 而非 0.83%;按原方案改完变异存活率仅从 13% 降到 10%。已改为用例内循环 20 轮,变异 30/30 全红,member 保留 5 个。若要求严格按描述执行请告知,但那样该用例仍有约 10% 漏检。",
+      "asked_at": "2026-07-25T08:05:00Z",
+      "answer": "放行已执行,窗口现已开启。arcforge.config.json 的 coverage.dev_minimum 已由 80 临时下调为 **79**(门禁实测 79.5%)。请**立即** transition in_progress --expect-epoch 1,随后 transition dev_done --expect-epoch 1,完成后马上回报,我会立即恢复 80 并复核窗口期内所有通过项。注意: 边表里 blocked_clarification 只有一条出边 → in_progress(dev-* 专属),**没有 → assigned**,所以我无法把状态改回 assigned;你自己走 in_progress 即可,**epoch 仍是 1**(我没有重派)。【放行依据(Leader 独立复核,不采信汇报)】我按 task-completed.sh 原样复现门禁: total 79.5%;逐函数核实 mergeReports/prefixAll/segmentReport 三个新增函数均 100%、runPrismRefreshWith 100%,唯一 0% 的 runPrismRefresh 是既有装配壳。**你没有为凑那 11 条语句去给入口函数造 seam,这个判断对**——为过门禁改生产入口结构是让指标反向驱动设计,比门禁不过更糟。【偏离裁决: 批准】我独立写探针跑了 10 万次采样,复现了你的结论: n=3 顺序种类 3(应为 6)、升序占比 75.21%;n=5 顺序种类 5(应为 120)、升序占比 50.12%。**Go 单桶小 map 迭代确实是旋转而非均匀随机排列**,所以 test-agent-6 算的 1/6 与我采纳时以为的 1/120 都错了,按原方案改完仍有约 10% 漏检——**是我审批了一个基于错误模型的方案**。你的循环 20 轮方案(存活率 p^N,不依赖对 p 的假设)更稳健,member 保留 5 个也对。"
+    }
+  ],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-6",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-6"
+}

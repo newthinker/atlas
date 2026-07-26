@@ -1,0 +1,152 @@
+{
+  "task_id": "TASK-013",
+  "title": "/prism/fundamental 财务趋势页(股价叠加)",
+  "authors": ["dev-agent-23 (Part A/B/C 实现)", "dev-agent-24 (code-simplifier + 变异复核 + 落盘)"],
+  "key_findings": [
+    {
+      "id": "KF-1",
+      "title": "【生产缺陷】prism 未启用时 /api/prism/* 返回 200 + dashboard HTML,而非 404",
+      "detail": "server.go 原先把两个 prism API 包在 `if deps.PrismSankey != nil` 里。未启用时它们根本不注册,而 `/api/` 前缀**没有自己的 catch-all**,只有具体路径注册;`s.mux.HandleFunc(\"/\", webHandler.Dashboard)` 是全局 catch-all,于是 Go 的 ServeMux 把 /api/prism/fundamental 交给 dashboard,调用方拿到 200 + HTML,前端 `fetch(...).then(r => r.json())` 在第一个字符就抛异常。后果比 404 严重:「功能未启用」与「该标的无数据」在页面上完全无法区分。",
+      "fix": "两个 API 改为**无条件注册**,`deps.PrismSankey == nil` 时由 handler 层 `enabled(w)` 守卫返回 JSON 404 `{\"error\":\"prism not enabled\"}`。同一缺陷同时存在于 TASK-011 已交付的 /api/prism/sankey,已一并修复。"
+    },
+    {
+      "id": "KF-2",
+      "title": "【测试基础设施盲区】「绿但盲」—— 既有测试看到的 404 在生产中根本不存在",
+      "detail": "internal/api/sankey_routes_test.go 的 `newTestServer` 没有设置 `TemplatesDir`,导致模板加载失败、`s.mux.HandleFunc(\"/\", Dashboard)` 这条 catch-all **在测试环境里压根没注册**。于是测试里未匹配路径得到的是 ServeMux 的裸 404 —— 与生产行为(200 + HTML)完全相反。既有断言因此长期是**绿的,但盲的**:它断言的 404 是 fixture 缺陷的产物,不是被测系统的行为。这类缺陷最危险的地方在于它让人以为已有覆盖。",
+      "fix": "(1) `newTestServer` 补 `TemplatesDir: \"templates\"`;(2) 新增**反盲守卫** `requireDashboardCatchAllPresent(t, srv)`,在断言 404 语义之前先证明「dashboard catch-all 确实注册了」—— 若 fixture 再次退化成不加载模板,守卫立刻报警,而不是让下游断言重新变成假绿。变异 A4 专门钉住这一条(去掉 TemplatesDir → 10/10 红)。"
+    },
+    {
+      "id": "KF-3",
+      "title": "typed-nil 陷阱:`var sankeySvc api.SankeyService` 不能省",
+      "detail": "把 `deps.PrismSankey`(*sankey.Service)直接赋给接口变量,即使指针为 nil,接口值也**非 nil**(有类型无值),handler 里 `h.svc == nil` 判为 false,首次调用即 panic。故写成先声明接口变量、仅在 `deps.PrismSankey != nil` 时赋值。code-simplifier 识别出这段「看起来可以合并」并**主动保留**,已在注释中钉住原因。"
+    },
+    {
+      "id": "KF-4",
+      "title": "roe_ttm 前 3 季必然为 null —— 不是边缘情况,是每个标的的固有形状",
+      "detail": "引擎对「不可计算」用 NaN,而 TTM 按设计不得用部分和冒充(service_test.go:430 既有断言锁死)。故任何标的的 roe_ttm 前 3 季必然 NaN。Go 侧 `jsonNum` 把 NaN/±Inf 映射为 **null**(而非 0):json.Marshal 本就拒绝 NaN,更重要的是画成 0 会产生一条与「该季 ROE 真的是 0」无法区分的假归零曲线(AD-14)。"
+    },
+    {
+      "id": "KF-5",
+      "title": "静态守卫的真实强度边界:**止于文本级,不覆盖语义**(dev-agent-24 补测确认)",
+      "detail": "前任预测变异 C7(`isNull` 恒返回 false)会存活,实测却 10/10 变红。追查原因:守卫里那条**正向**断言 `assert.Regexp('=== null|!== null')` 依赖字面文本,而整个模板中 `=== null` **只出现在 isNull 的定义里**(已 grep 核实),改掉定义即触发。这是**文本级的偶然捕获,不是语义验证**。为避免把它误记为「守卫其实管得住语义」,补做变异 C7b:保留 `=== null` 字面、只让表达式恒假(`(v === null || v === undefined) && false`)—— **存活**。结论:守卫只能拦住「把 null 静默变 0 的惯用写法出现在模板里」,拦不住语义被掏空,(b)(c) 的 AD-7 降级结论成立且未被 C7 粉饰。"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-1",
+      "decision": "【DoD boundary[1](b) 明确要求】4 季聚合遇 null 采用「**整年作废**」(annualSum 返回 null),而非「跳过该季」",
+      "implementation": "prism_fundamental.html `annualSum`: `if (isNull(vals[j])) { missing = true; } else { sum = sum + vals[j]; }` → `out.push(missing ? null : sum);`",
+      "rationale": "两个选项都不产生 NaN,但错误的**可见性**天差地别。「跳过缺失季」会把 3 个季度加出来的数当作**真实全年**画在图上 —— 数值看着完全合理(只是偏低约 25%),读图的人无从察觉,是典型的**静默错误**;更糟的是它会伪造出一个假的同比下滑。「整年作废」则在图上留下一个可见缺口(配合 `connectNulls: false`),用户立刻知道「这一年数据不全」,而不是被一个看似正常的错数误导。原则:**宁可显示不出来,也不能显示一个错的**。存量指标(equity/roe_ttm)不适用求和,另走 `annualLast` 取 Q4 时点值。",
+      "alternatives_rejected": ["跳过缺失季直接求和(会静默产出偏低的假全年值,并伪造同比)", "缺失季补 0(等价于跳过,且更明显地污染)"]
+    },
+    {
+      "id": "D-2",
+      "decision": "【(c)】增速现算在分母为 null **或 0** 时输出 null",
+      "implementation": "`if (isNull(base) || isNull(vals[i]) || base === 0) { out.push(null); }`(divide 同理带 `b[i] === 0`)",
+      "rationale": "分母 0 会产出 Infinity、null 参与运算会产出 NaN,任一泄漏到页面都会渲染成 'Infinity'/'NaN' 字样。统一收敛为 null,再由 `fmt()` 显示为 '—'。"
+    },
+    {
+      "id": "D-3",
+      "decision": "整份序列**服务端内联**进页面,页面不发 XHR",
+      "rationale": "(1) 这样才能在渲染任何东西**之前**分辨两种 404;(2) 指标/粒度/折线柱状/股价叠加的一切切换都只是对同一份 payload 的重新计算,不新增请求(DoD non_functional 要求年度切换为 JS 端聚合)。副作用:AD-8(resp.data 解包)在本页**不适用**,因为不存在 fetch。已用 `assert.NotContains(page, \"fetch(\")` 把这个前提钉住 —— 一旦有人后续加了 fetch,该断言变红,提醒他必须同时补 resp.data 解包。"
+    },
+    {
+      "id": "D-4",
+      "decision": "两种 404 使用**措辞明确不同**的文案,并用交叉断言禁止互相包含对方关键词",
+      "rationale": "「Prism 未启用」是运维/配置问题(该查服务端装配与日志),「该标的暂无财报数据」是数据问题(该去同步财报)。合并成一句「无数据」会把人送去查错方向。变异 C6(两条文案改成同一句)10/10 红。"
+    },
+    {
+      "id": "D-5",
+      "decision": "沿用 AD-7:(b)(c) 两个纯 JS 函数**转人工验收**,不做假的自动化",
+      "rationale": "go.mod 无 JS 引擎;shell out 到 node 会在 CI 缺 node 时**退化为假绿**(或误红),而假绿正是本 sprint 明确记录的反模式。与其造一个看着有覆盖的假象,不如如实标注未覆盖并给出代偿措施(静态守卫)+ 明确的人工验收清单。"
+    }
+  ],
+  "files_modified": [
+    "internal/api/server.go — 两个 prism API 无条件注册 + typed-nil 防护;注册 /prism/fundamental/ 页面路由",
+    "internal/api/handler/api/sankey.go — 新增 errPrismNotEnabled 与 enabled(w) 守卫,Sankey/Fundamental 首行调用",
+    "internal/api/sankey_routes_test.go — 修 fixture 盲区(TemplatesDir)+ requireDashboardCatchAllPresent 反盲守卫 + TestPrismAPIsAnswerJSON404WhenDisabled;TestSankeyRoutesRegistration 语义反转",
+    "internal/api/handler/web/prism_fundamental.go — 新增 FundamentalProvider 窄接口 / SetPrismFundamental / PrismFundamental / jsonNum,jsonNums",
+    "internal/api/handler/web/prism_fundamental_test.go — 新增(11 个测试函数,含静态守卫)",
+    "internal/api/handler/web/templates/prism_fundamental.html — 新增(embed 份)",
+    "internal/api/templates/prism_fundamental.html — 新增(磁盘份,与 embed 逐字节一致)",
+    "internal/api/handler/web/templates/prism_board.html — 卡片加财务趋势入口链接",
+    "internal/api/templates/prism_board.html — 同上(AD-4 两份都改)",
+    "internal/api/handler/web/handler.go — pageNames 加 prism_fundamental.html;Handler 加 fundamentalSvc 字段"
+  ],
+  "interfaces_exposed": [
+    {
+      "name": "web.FundamentalProvider",
+      "signature": "interface { Fundamental(symbol string) (*sankey.FundamentalView, error) }",
+      "note": "窄接口,便于在无 store 的情况下测试页面"
+    },
+    {
+      "name": "(*web.Handler).SetPrismFundamental(p FundamentalProvider)",
+      "note": "未装配时页面答 fundNotEnabledMsg 的 404,而不是假装该标的无数据"
+    },
+    {
+      "name": "(*web.Handler).PrismFundamental(w, r, symbol)",
+      "note": "GET /prism/fundamental/{symbol}"
+    },
+    {
+      "name": "GET /api/prism/fundamental?symbol=X 与 GET /api/prism/sankey?symbol=X",
+      "note": "**行为变更**:现在无条件注册。prism 未启用时返回 **JSON 404** `{\"error\":\"prism not enabled\"}`,不再返回 200+dashboard HTML。下游若曾依赖「未启用即不注册」,须按新语义更新(TASK-011 的 TestSankeyRoutesRegistration 已同步反转,**非回归失败**)。"
+    }
+  ],
+  "verification": {
+    "tests": "GOTOOLCHAIN=local go test ./internal/api/... -count=1 六包全绿(含 TASK-012 既有测试);go vet 干净;gofmt -l 对本任务 6 个 .go 文件为空",
+    "coverage": "按门禁口径(-coverpkg=./internal/api/handler/web,./internal/api 聚合)= **64.2%** ≥ coverage_floor 60。注:单包口径 handler/web 70.5%、internal/api 53.7%,分母不同,门禁取聚合值(AD-6 整包口径)。",
+    "mutation_testing": {
+      "protocol": "AD-27:每个变异跑 N=10 轮记「N 次中红了几次」,用例层面统计;施加前后校验 sha256、施加后先 `go build` 确认可编译、跑完自检还原并比对 git diff 为空(本 sprint 该坑已独立发生三次,故三重防护)",
+      "null_control": "各 harness 均先跑 10 轮基线,0 red",
+      "results": [
+        {"id": "A1", "desc": "路由退回「nil 不注册」(缺陷原状)", "result": "10/10 红"},
+        {"id": "A2", "desc": "API handler nil 守卫失效", "result": "10/10 红"},
+        {"id": "A3", "desc": "改用 http.Error 纯文本 404(状态码仍 404)", "result": "10/10 红 —— 证明「只断状态码」不足已被覆盖"},
+        {"id": "A4", "desc": "去掉 fixture 的 TemplatesDir(还原「绿但盲」)", "result": "10/10 红 —— 反盲守卫有效"},
+        {"id": "C1", "desc": "jsonNum 把 NaN/Inf 映射成 0", "result": "10/10 红"},
+        {"id": "C2a", "desc": "模板两份都塞进 `|| 0` 强制转换", "result": "10/10 红 —— **DoD 要求的「静态守卫本身必须有对应变异」**"},
+        {"id": "C2b", "desc": "同 C2a **且删掉守卫断言块**", "result": "全绿(预期存活)—— 成对证明:拦住 C2a 的确实是该守卫,而非其它断言顺带"},
+        {"id": "C3", "desc": "handler 把 symbol 硬编码成 \"MSFT\"(ME12 形态)", "result": "10/10 红(测试用两个不同 symbol,单 symbol 断言挡不住)"},
+        {"id": "C4", "desc": "只从**磁盘那份** board 模板删入口链接(embed 保留)", "result": "10/10 红 —— AD-4 漏改磁盘份可被发现"},
+        {"id": "C5", "desc": "页面 handler nil 守卫失效", "result": "10/10 红"},
+        {"id": "C6", "desc": "两条 404 文案改成同一句", "result": "10/10 红"},
+        {"id": "C7", "desc": "isNull 恒返回 false", "result": "10/10 红 —— **但属文本级偶然捕获**,见 C7b 与 KF-5,不可据此认为语义有守护"},
+        {"id": "C7b", "desc": "isNull 语义掏空但**保留 `=== null` 字面**(dev-agent-24 补做)", "result": "全绿(存活)—— 精确划出守卫强度边界"},
+        {"id": "C8", "desc": "【(b) 真实语义变异】年度聚合由「整年作废」改为「跳过缺失季」", "result": "**全绿(存活)—— AD-7 降级的已知代价,如实记录**"},
+        {"id": "C9", "desc": "【(c) 真实语义变异】增速去掉分母为 0 判断(页面会出 Infinity)", "result": "**全绿(存活)—— 同上**"}
+      ],
+      "harnesses": [
+        "{scratchpad}/dev23_t13_mutate_partA.py (A1-A4)",
+        "{scratchpad}/dev23_t13_mutate_partBC.py (C1-C7)",
+        "{scratchpad}/dev23_t13_mutate_partC_gap.py (C8-C9)",
+        "{scratchpad}/dev24_t13_mutate_c7b.py (C7b,dev-agent-24 新增)"
+      ],
+      "honest_gap_statement": "C8/C9/C7b 三个变异存活,均**位于纯 JS 语义**。这不是疏漏而是 AD-7 降级的**精确代价**:(b)(c) 的正确性目前**没有任何自动化守护**,只有静态守卫挡住「把 null 变 0 的写法」这一层皮。任何人后续改动 annualSum / growth / divide / isNull 的语义,现有测试**不会**报警。"
+    },
+    "code_simplifier": {
+      "status": "已执行(全局规范要求),范围限定本任务 10 个文件",
+      "changes": "仅 1 处:prism_fundamental.html 两份同步 —— tooltip formatter 的嵌套三元展开为 if/else(纯可读性,输出逐字节等价)",
+      "preserved_deliberately": "typed-nil 守卫、isNull/missing/base===0 语义、双 symbol 循环与双模板路径断言均被识别并保留",
+      "independent_verification": "未采信其总结:我自行核实 git status 范围无溢出、prism_web_test.go 未被触碰、两份模板 sha256 各自相等、四种禁用写法计数均为 0、gofmt/vet/build/全量测试全绿,并**重跑全部变异确认断言强度未变**(A1-A4、C1-C7 结果与简化前完全一致)"
+    }
+  },
+  "for_downstream": {
+    "TASK-015": {
+      "note": "本任务进入「待人工验收,未由 agent 验证」清单(AD-7)的条目",
+      "manual_acceptance_items": [
+        "(b) 年度聚合遇 null:打开某标的财务趋势页 → 切「年度」→ 确认**含缺失季的年份显示为缺口而非一个数**(策略=整年作废),且图上不出现 NaN / 'undefined' / 字符串拼接的怪值",
+        "(c) 增速现算:切到「营收 YoY」「净利 YoY」→ 确认首年(无同比基期)与基期为 0 的点显示为 '—',页面任何位置**不出现 Infinity / NaN**",
+        "roe_ttm 前 3 季在图上应是**缺口**(connectNulls:false),不得是一条掉到 0 的线",
+        "双轴叠加:勾选股价后,左轴指标 / 右轴价格量纲互不干扰,tooltip 中股价缺失显示 '—'",
+        "dataZoom 双端滑块拖动后两条序列对齐正确",
+        "prism_board 卡片的「财务趋势」入口可点达 /prism/fundamental/{symbol}(**用 atlas serve 走磁盘模板验证**,而非仅单测的 embed 份)"
+      ],
+      "regression_note": "TASK-011 的 /api/prism/sankey 行为已被本任务改变(未启用时由 200+HTML 变为 JSON 404),TASK-015 若有针对该 API 的验收脚本需同步"
+    }
+  },
+  "notes_for_leader": [
+    "工作区存在**与本任务无关**的脏文件,我一律未碰、未纳入提交:.arcforge/wisdom/learnings-leader.md、.arcforge/write-matrix.json、.claude/hooks/task-completed.sh(+ 同目录 .bak)。其中 .claude/hooks/ 属运行时资产只读区,请确认那两处改动是否为预期。",
+    "internal/api/handler/web/prism_web_test.go 的 gofmt 不合规是 BASE 上的既有问题,按纪律未顺手修,以免混入本次 diff。",
+    "dev-agent-23 的 checkpoint 停在 Part A,但 B/C 实际已完成且留下了可复跑 harness —— 本次全部复跑确认。"
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "id": "TASK-003",
+  "title": "classeps 收尾：会过期的注释、自引用测试、max/sum 无判别力",
+  "description": "TASK-002 已 verified 并合入 master（`a73110e`）。本任务处理 verifier(test-agent-11) 在验证中额外发现的三项——**均不阻塞已交付行为，但都会在将来误导后人**。\n\n**这不是返工**：TASK-002 的 DoD 逐条通过，三项都是超出 DoD 的加测结果。\n\n## ① 一句「当时为真、将来为假」的注释\n\n`classeps.go:54`：\n\n> 40 份里可用的恰好是最近 28 份 —— **把这个数字调大只会多拿一批必然 404 的 URL**\n\n这句在**测量当日（2026-07-26）**成立，但 verifier 指出：**28 是当日的可用总数**，每季新增申报后它会从「恰好等于全部」变成**真实截断窗口**，约 3 个月后调大就能多拿到数据，该句即失效。\n\n这比常见的「未经验证的假设」更隐蔽——**它当时确实被验证过**。\n\n## ② 自引用测试：M12 的「KILLED」不能读作「28 被验证过」\n\n`classeps_test.go:516` 的 `TestFetchClassEPSRespectsLookbackCap`：\n\n```go\nconst nFilings = maxClassEPSFilings + 12   // 期望值由常量算出\n... 断言 Len == maxClassEPSFilings          // 又用常量断言\n```\n\n**常量改成 12 时，期望值同步变化，测试照样绿。** dev 报的「M12(28→12) KILLED 10/10」字面属实，但杀死它的只是另一处字面量断言 `assert.Equal(t, 28, ...)`，**该用例本身对取值零判别力**。\n\n28 的正当性来自数据侧（verifier 逐份 curl 36 份实测：序号 0–27 全 200、序号 28 起连续 404），不是来自这个测试。\n\n## ③ `dominantClass` 的 max/sum 无测试钉住\n\nTASK-002 的 discovery 在 `decisions[]` 里明确主张「用 max 而非 sum」，但**没有测试守护**：变异 `sum` 替代 `max` **0/10 存活**。原因是真实数据天然无判别力——V 的 A 类 max=2.085e9、sum=1.245e11，两种算法都远超其它类。",
+  "module": "edgar",
+  "complexity": "简单",
+  "estimated_files": 2,
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "【①】改写 `classeps.go:54` 那句断言，使其**在数据增长后仍然正确**。要点是把「当日快照」与「结构性事实」分开：结构性事实是「2019-03-31 之前的 filing 因老式非 inline XBRL 而无法定位实例文档」（这条永远成立）；当日快照是「截至 2026-07-26 恰好 28 份可用」（这条会变）。改写后须明确：**将来可用份数增长时，调大常量是有效的**，上限由 2019-03-31 这条时间线而非 28 这个数字决定。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "【②】给 `TestFetchClassEPSRespectsLookbackCap` 补**对取值有判别力**的断言：把常量改成任意其它值时该用例必须红。当前它用 `maxClassEPSFilings + 12` 算期望、又用 `maxClassEPSFilings` 断言，是自引用的。**验证方式：变异 `maxClassEPSFilings = 12`，该用例必须红**（不能只靠别处的字面量断言 `assert.Equal(t, 28, ...)` 兜住）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "【③】给 `dominantClass` 的 max/sum 选择补判别性测试：构造一组 fixture 使 **max 与 sum 给出不同的主导类别**（例如 A 类有 1 条大额、B 类有多条小额但总和更大），断言实现选的是 max 那一个。**验证方式：变异 `max` → `sum`，该用例必须红**（当前该变异 0/10 存活）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "③ 的 fixture 必须与真实数据形态可区分地不同——V 的真实数据里 max 与 sum 给出相同答案（都是 Class A），所以**必须构造反例**才有判别力。在 discovery 中说明该 fixture 为何不与生产形态冲突（它测的是算法选择，不是 V 的实际数据）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "按 AD-27（归档于 `sprint-028-2026-07-26/docs/01-design/`）：②③ 各自的变异必须从 SURVIVED 翻 KILLED，记「N 次中红了几次」注明用例层面；施加前确认可编译；harness 自检还原用 **sha256 快照**（工作区有未提交改动时 `git diff --quiet` 不可用——TASK-001 的实测教训）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "edgar 包覆盖率不低于 94.7%（TASK-002 后的水位，多次采样），全包测试通过含 `-race`，全仓 `go test ./...` 绿。**本任务不得改变任何生产行为**——`classeps.go` 除注释外零改动，`git diff` 须能证明这一点。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002"
+  ],
+  "status": "verified",
+  "assigned_to": "dev-agent-29",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-12",
+  "last_transition": {
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-agent-12",
+    "at": "2026-07-26T14:29:55Z"
+  }
+}

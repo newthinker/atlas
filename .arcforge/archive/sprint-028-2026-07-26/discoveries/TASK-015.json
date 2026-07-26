@@ -1,0 +1,56 @@
+{
+  "task_id": "TASK-015",
+  "title": "设计文档同步与 M3 验收记录",
+  "by": "dev-agent-25",
+  "type": "docs-only (7 条 DoD 全部 verify_by=review)",
+  "judged_head": "ba40d70",
+  "key_findings": [
+    "**§9 的范围项与实际落地位置有一处错位**: §9 把「堆叠柱状图 + PNG 导出」挂在 /prism/fundamental 项下,实际两者都在**桑基页**(sankey-stack + 单期图/堆叠图各一个 saveAsImage toolbox,模板 :299/:325);/prism/fundamental 的 DoD 从未包含 PNG 导出,也确实没做。已在 §9 落地状态表拆成独立行并注明,不按初稿口径含混带过。",
+    "**COST/V/CRM/WMT/AVGO 的 tag 回退实效在 19 份 discovery 中查无任何 live 实测**。§9 立项时明写这五家是受益者,但 TASK-001 只在合成 fixture 上验证,TASK-014 的 live 跑只覆盖 5 家模板公司。这是本 sprint「声称的收益 vs 已验证的收益」缺口最大的一处,已进验收记录 §3.1 第 5 项并写明「完全待人工确认」。",
+    "**manual 兜底路径实现了但零实证**: 首批 5/5 全自动解析成功 → configs/prism/segments/ 目录至今不存在,DoD 的「解析失败转 manual」按字面属**空真满足**。首次真正需要它时应视作未验证代码。",
+    "**deploy.sh 的 rsync 是 exclude 黑名单而非白名单**,configs/ 未被排除 → configs/prism/ 自动同步,新增模板无需改部署脚本。但连带三个事实必须写进部署文档: (1) --delete 使「开发仓删模板 = runtime 删模板」、只在 runtime 手写的模板会被抹掉; (2) -a -m 的 -m 会剪掉空目录,故建了空的 segments/ 目录也不会同步过去(不影响功能); (3) 模板写坏或重复 company 会让**整个桑基服务不启用**而非只坏一家,症状是「桑基全站 404」,故 deploy 后应查启动日志的 templates=N。",
+    "**AD-7 的执行要点是「二分」而非「少写」**: 验收记录严格分成 §2 实测结果与 §3 待人工验收。计划 Task 12 Step 2 的 7 项里没有一项是纯粹的「全自动可验证」——每项都能拆出可实测的部分(数字复算/HTTP/DOM)与必须人眼的部分(渲染/导出/切换),故逐项拆开写,而不是整项标 PASS 或整项标待验。",
+    "**C7 陷阱已按 verifier 的警示原样收录**: 变异 C7(掏空 isNull 连 `=== null` 字面一起删)会 10/10 变红,但不可用作 (b)(c) 有守护的证据——判别证据是 C7b(保留字面、只让表达式恒假)**存活**。验收记录用引用块单独标出该陷阱,防止后人读到「C7 KILLED」就删掉人工验收清单。",
+    "**运维事实的数字口径存在时间差**: TASK-015 的 DoD 文本写「6 次失联(5 零损/1)」,Leader 派发时的口径是「8 次(7 零损/1)」——次数随 sprint 推进增长。wisdom 里有逐次立档的只有 3 例,另有 TASK-013 的 dev-agent-22/23 两任中断可从验证报告 §0 佐证。已在文档中写明口径与出处,并如实标出「第一例在原始记录中标为『全丢』,与『7 次零损失』的分类边界取决于重验成本是否计为损失」——不做平滑。"
+  ],
+  "decisions": [
+    {
+      "decision": "验收记录写进计划文件末尾(docs/superpowers/plans/2026-07-25-prism-m3.md)而非新开文件,并把 Task 12 的 Step 1/2 勾上、Step 2 改为指向该记录",
+      "rationale": "DoD boundary[0] 明确要求「写入计划文件」。计划与验收同文件的好处是:读计划的人一定会读到「这条最后做成了什么样」,而独立验收文件天然会与计划脱节。"
+    },
+    {
+      "decision": "§9 不只标『已落地』,而是给每项标『实测证据 / 缺口』两列",
+      "rationale": "只标 ✅ 会把「有变异守护的 Go 引擎」与「只有人眼能确认的页面渲染」混为一谈,正是 AD-7 要防的事。落地状态表因此把 manual 兜底(已实现无实证)、null 三缺口(无自动化守护)单列成行。"
+    },
+    {
+      "decision": "12 项待同步清单逐项标『已同步 / 待人类会话外处理 / 已放弃』,并对第 8 项额外写明『这只是止血、对症的是增量覆盖率』",
+      "rationale": "第 8 项已同步(人类改了 runtime task-completed.sh,我已直读 :130-135 核实 patch 在位),但 coverage_floor 要人工为每个历史包袱重的包设水位、水位本身无客观依据。只标『已同步』会让后人以为问题解决了,实际只是不再阻塞。"
+    },
+    {
+      "decision": "运维事实一节记录『损失差异不取决于失联时机而取决于产出是否落盘』,并补上该结论的前提条件",
+      "rationale": "原始 wisdom 已指出:若任务被 REJECTED、返工需要原 agent 本人(owner 恒钉死),失联才会真正咬人。所以零损失准确说是『在当前分支上零损失』——落盘保住已完成的工作,保不住未来需要这个 agent 做的工作。漏掉这个前提,结论会被读成『落盘了就万事大吉』。"
+    },
+    {
+      "decision": "先 dev_done 再 commit",
+      "rationale": "docs-only 门禁只扫**未提交**变更(task-completed.sh 的 DOCS_ONLY 分支把 CHANGED_IN_SCOPE 限定在未提交改动)。先 commit 则门禁查不到变更 → DENY,而变更已进 git 历史、退不回未提交态,**无补救路径**。这是待同步清单第 2 项记录的框架缺陷,本任务是本 sprint 唯一会撞上它的任务。"
+    }
+  ],
+  "files_modified": [
+    "docs/prism/atlas_prism_design.md — D4 补现实注记(4 点);§7 换成实际 schema + AD-5 理由 + 两类实测陷阱;§9 加 M3 落地状态表(9 行)",
+    "docs/deployment.md — 新增『财报桥模板目录 configs/prism/(M3 新增)』一节(rsync 白名单确认结论 + 重启要求 + 模板写坏的故障形态 + --full-segments + Degraded 预期项)",
+    "docs/superpowers/plans/2026-07-25-prism-m3.md — Task 12 勾选并指向记录;文件末尾新增『M3 验收记录』六节(交付概览/可自动验证项 5 小节/待人工验收 3 小节/12 项待同步清单/运维事实 2 小节/遗留与后续)"
+  ],
+  "interfaces_exposed": [
+    "docs/superpowers/plans/2026-07-25-prism-m3.md#m3-验收记录 — M3 的唯一验收真相源",
+    "同文件 §3.2 M-1 ~ M-6 — 人工验收清单,交付给人类执行;M-1/M-2/M-3 附『为何无守护』的变异实证",
+    "同文件 §4 — 12 项待同步清单的摘要与处置状态,供 final-report 引用",
+    "docs/prism/atlas_prism_design.md §9 落地状态表 — 后续 M3.5/M4 规划的起点"
+  ],
+  "known_gaps": [
+    "本任务是 docs-only,**没有任何自动化测试能验证文档内容的正确性**——7 条 DoD 全部 verify_by=review,验证方式只能是人读。文档中的每个数字都标了出处(验证报告/discovery/我本人实跑),供 verifier 抽查。",
+    "验收记录中引用的覆盖率数字来自 Leader 汇总,我未逐包复测(DoD 只要求回归全绿)。AD-27 已确认覆盖率读数非确定,单次读数不应作为判定依据。",
+    "wisdom 行数我实测为 2395 行 / 13 个文件,Leader 汇总时点为 2289 行 / 10 个实例——数字随 sprint 持续增长,文档中已注明口径。",
+    "失联 8 次中只有 4 例有逐次记录(3 例在 wisdom 立档 + TASK-013 两任中断可从验证报告佐证),其余未单独立档。已在文档中如实说明,未编造缺失的四例。"
+  ],
+  "verification": "GOTOOLCHAIN=local go test ./... -count=1 → exit 0,**58 个包全部 ok,0 个 FAIL,0 个 no test files**(含 internal/api、internal/api/handler/{api,web,job,middleware,response}、internal/collector/edgar、internal/prism、internal/prism/sankey、internal/storage/prism)。关键包耗时:internal/api 3.016s / handler/api 4.994s / handler/web 1.405s / collector/edgar 6.105s / prism 5.669s / prism/sankey 5.744s / storage/prism 7.061s。工作区除本任务三个 .md 外无未提交代码改动,故该结果即 ba40d70 的结果。A/H 与美股估值链路(board/detail/compare)行为不变的证据形态 = M1/M2 时代既有测试在本 sprint 全程零改动通过;生产链路实际表现属人工验收范围(prism-daily 生产运行未由 agent 验证,已列入验收记录 §3.1 第 7 项)。文档侧核实:git diff --stat 显示本任务只碰 docs/ 下 3 个文件(deployment.md +36 / atlas_prism_design.md +75-? / 计划文件 +291),无 .arcforge/ 或 .claude/ 混入;工作区既有的 learnings-leader.md / write-matrix.json / task-completed.sh(+.bak) 改动为人类与 Leader 所为,未触碰。"
+}

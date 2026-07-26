@@ -1,0 +1,90 @@
+{
+  "task_id": "TASK-006",
+  "title": "refresh 接线(主干流新字段落库 + closes 落 price_daily)",
+  "by": "dev-agent-16",
+  "commit": "34e695a",
+  "context_from_used": [
+    "TASK-001: QuarterlyFact 的 5 个 M3 字段名与顺序(GrossProfit/RnD/SGnA/OperatingIncome/IncomeTax)",
+    "TASK-002: PriceRow{D,Close} 契约与 UpsertPrices 语义(按 (id,d) 幂等,NaN↔NULL)"
+  ],
+  "key_findings": [
+    "Report.Degraded 此前只在 Refresh() 主循环内被写(兜底成功场景),而落价发生在 refreshEdgar/refreshEngine 内部 —— 内层无法触达 rep。因此把这两个函数的签名从 error 改为 (degraded string, error),由主循环经 rep.degrade() 收集。lixinger/akshare 两路签名不变(它们不落价),这本身构成 A/H 零变更的结构性保证。",
+    "价格落库点选在「取得 closes 之后、估值计算之前」,两条路径一致。理由:价格是原始事实,后续估值环节失败(engine 的 ErrNonPositiveEPS 熔断、reconstruct 失败)时行情不应一并丢失。副作用是 EPS<=0 被熔断的标的仍会写 price_daily —— 这是有意为之(价格与估值分表,基本面页仍可叠加股价),且不影响熔断本身的语义(该标的仍进 Report.Failed、valuation_daily 仍不写)。",
+    "core.OHLCV 的日期字段名是 Time(不是 Timestamp),PriceRow.D 由 c.Time.Format(\"2006-01-02\") 得到。",
+    "既有测试中 TestRefreshEdgarPath 与 TestRefreshFallbackNotTriggered 都断言 assert.Empty(rep.Degraded),这构成一道现成的回归网:落价成功路径若误记 Degraded 会立刻被既有测试抓住(实测通过,未改这些断言)。",
+    "refresh_test.go 里既有的 [TASK-006] 标记属于上一期(M1)的任务编号,与本期 M3 TASK-006 无关。本次新增映射注释统一冠以 M3 TASK-006 前缀以免后人误读。"
+  ],
+  "decisions": [
+    {
+      "decision": "refreshEngine/refreshEdgar 签名改为 (degraded string, error),新增 (*Report).degrade(msg) 收集器",
+      "rationale": "DoD boundary[0] 要求落价失败进 Degraded 而非 Failed,而 Degraded 只能由主循环写。返回单个字符串(而非 []string)足够 —— 每条路径最多调用一次 UpsertPrices。既有测试只通过 Refresh() 入口调用,不直接调这两个私有函数,故签名变更不触碰任何既有断言。"
+    },
+    {
+      "decision": "抽 upsertPrices(store, id, symbol, closes) string 辅助函数,两条路径共用",
+      "rationale": "两处映射逻辑与降级文案完全相同;返回 string 而非 error 是刻意的类型级表达 —— 让「这不是失败」在签名上就无法被误当作 error 向上抛。"
+    },
+    {
+      "decision": "Store 接口一次性补齐 5 个方法(而非只加 UpsertPrices)",
+      "rationale": "design-spec §4.1 定义的就是完整扩展面,TASK-007/008/009 直接消费。一次到位可避免后续任务反复改接口并连带改 fake;fakeStore 对未被 refresh 使用的 4 个方法给了真实的最小实现(而非 panic),让下游任务可直接复用该 fake。"
+    },
+    {
+      "decision": "降级文案固定为 \"SYMBOL: price_daily upsert failed (原始错误), valuation unaffected\"",
+      "rationale": "与既有 Degraded 文案风格一致(以 symbol 开头);显式写出 valuation unaffected,让运维看到告警时不必翻代码判断影响面。DoD 要求文案含原始错误,已断言。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/prism",
+    "store_interface": {
+      "name": "prism.Store",
+      "note": "*prismstore.Store 已满足全部 10 个方法(TASK-002 产出),serve.go / prism.go 的装配无需改动",
+      "methods": [
+        "UpsertInstrument(inst prismstore.Instrument) (int64, error)",
+        "LatestDate(instrumentID int64) (string, error)",
+        "UpsertValuations(instrumentID int64, rows []prismstore.ValuationRow) error",
+        "UpsertFundamentals(instrumentID int64, rows []prismstore.FundamentalRow) error",
+        "Series(symbol, from string) (*prismstore.SeriesData, error)",
+        "UpsertPrices(instrumentID int64, closes []prismstore.PriceRow) error",
+        "UpsertSegments(instrumentID int64, rows []prismstore.SegmentRow) error",
+        "SegmentRows(instrumentID int64) ([]prismstore.SegmentRow, error)",
+        "LatestSegmentPeriodEnd(instrumentID int64) (string, error)",
+        "QuarterlyFundamentals(instrumentID int64) ([]prismstore.FundamentalRow, error)"
+      ]
+    },
+    "changed_signatures": [
+      "func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config.PrismInstrument, now time.Time) (string, error)  // 原 error;首值为降级说明,\"\" 表示无降级",
+      "func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, inst config.PrismInstrument, now time.Time) (string, error)  // 原 error",
+      "func refreshLixinger(...) error  // 不变",
+      "func refreshAkshare(...) error   // 不变"
+    ],
+    "new_helpers": [
+      "func (r *Report) degrade(msg string)  // 空串忽略;供主循环收集降级说明",
+      "func upsertPrices(store Store, id int64, symbol string, closes []core.OHLCV) string  // 返回降级说明,\"\" 表示成功"
+    ],
+    "test_fixtures_for_downstream": [
+      "fakeStore 已实现全部 10 个 Store 方法,含 prices/priceErr/priceCalls/segments 字段;TASK-008 可直接复用其 UpsertSegments/SegmentRows/LatestSegmentPeriodEnd(LatestSegmentPeriodEnd 按 PeriodEnd 字符串取最大值,与真实 Store 的 MAX(period_end) 同语义)",
+      "engineCfg() / mainFlowQuarters(now) 两个新测试构造器可复用"
+    ]
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 -cover",
+    "result": "ok  github.com/newthinker/atlas/internal/prism  0.228s  coverage: 94.5% of statements",
+    "coverage": "94.5%(基线 94.1%,门槛 80%)",
+    "red_evidence": "先写测试并实测失败:TestRefreshEdgarStoresMainFlowFields / TestRefreshEdgarUpsertsPrices / TestRefreshEngineUpsertsPrices / TestRefreshPriceUpsertFailureDegradesOnly(含 edgar 与 engine 两个子测试)共 4 个测试函数 FAIL,再实现",
+    "dod_mapping": [
+      "functional[0] 主干流 5 字段落库(含 NaN 透传) → TestRefreshEdgarStoresMainFlowFields",
+      "functional[1] refreshEdgar 落 price_daily,日期与收盘价一致 → TestRefreshEdgarUpsertsPrices",
+      "functional[2] refreshEngine 同样落 price_daily → TestRefreshEngineUpsertsPrices",
+      "boundary[0] 落价失败:Refreshed 计数、进 Degraded 非 Failed、估值行仍落库 → TestRefreshPriceUpsertFailureDegradesOnly(edgar/engine 双子测试)",
+      "error_handling[0] lixinger/akshare 不调用 UpsertPrices → TestRefreshCNPathsNeverUpsertPrices(断言 priceCalls==0 且 prices 为空,同时正向断言两路估值仍落库)",
+      "non_functional[0] fake 同步实现全部新方法、既有测试断言零修改 → git diff 显示测试文件唯一删除行是 newFakeStore 构造器本身,无任何 assert/require 被删改",
+      "non_functional[1] 包测试全绿 → 见 result"
+    ],
+    "existing_tests_untouched": "git diff internal/prism/refresh_test.go 的删除行仅 1 行(newFakeStore 单行构造器,被多行版本替代);全部既有 assert/require 断言原样保留",
+    "repo_wide": "GOTOOLCHAIN=local go build ./... 通过;go vet ./internal/prism/ ./cmd/... 无输出;go test ./internal/... ./cmd/... -count=1 全绿(无 FAIL)",
+    "impact_analysis": "gitnexus 仍不可用(索引 stale 提示 + LadybugDB 版本不匹配)。手工评估:prism.Store 是本包私有窄接口,唯一实现者是 *prismstore.Store(经 cmd/atlas/serve.go 与 cmd/atlas/prism.go 装配),TASK-002 已让它具备全部 5 个新方法,故接口扩展对装配点零改动、编译即验证(go build ./... 通过)。refreshEngine/refreshEdgar 是包私有函数,调用点仅 Refresh() 内 3 处(engine 分支、edgar 分支、edgar 的 engine 兜底),已全部更新。风险等级 LOW。"
+  }
+}

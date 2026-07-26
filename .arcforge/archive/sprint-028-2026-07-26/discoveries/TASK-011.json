@@ -1,0 +1,127 @@
+{
+  "task_id": "TASK-011",
+  "by": "dev-agent-17",
+  "key_findings": [
+    "**`./internal/prism/sankey` 一行未改** —— 全程 `git status` 确认。Leader 可以把它从本任务 packages 摘掉,不会挡住 sankey 收尾加固任务并行。变数(AD-14 要求扩展 jf)最终落在 API 层的 prism.go,未回溯到引擎。",
+    "**两条透传链都按「构造必然产生该内容的输入 + 断言具体值 + 对偶断言」验收**: Notes 用 tax_other 为负的 footnote 文本断言含「税项及其他」,并对偶断言正常数据下 notes 为空;Conflicts 断言 period==FY2025 且 detail 含「收到 5 个季度」,并对偶断言正常数据下为空。两者的丢弃变异体均被杀死。",
+    "**Analysis 不能直接 json.Marshal**: 其中 float64 字段可能是 NaN(引擎用 NaN 表示缺失),encoding/json 直接报错。故 analysisJSON/graphJSON/metricsJSON 逐字段过 jf。这也是为什么 AD-14 的 jf 扩展必须落在这一层——引擎侧再严,装配层只要有一条新路径漏出 Inf,整条响应就 500。",
+    "**jf 扩展顺带消除了一处既有重复**: Series handler 里的 njf 闭包与我新写的 jfSlice 完全同构,code-simplifier 把两者合一并让 Series 复用。改动了 TASK-002 时代的既有 handler(同包、在声明 packages 内),已加变异体「jfSlice 丢弃 jf」验证既有 TestPrismSeriesWindowAndErrors 仍守得住。"
+  ],
+  "decisions": [
+    {
+      "decision": "handler 依赖窄接口 SankeyService 而非 *sankey.Service 具体类型",
+      "rationale": "DoD 要求「fake service 断言收到的参数」——用具体类型就只能造真 Service + 真 store,查询参数透传的断言会被埋进两层实现里。窄接口让 fake 直接捕获五个入参,lang/from/to 不透传的变异体因此可被杀死。"
+    },
+    {
+      "decision": "granularity 非法值返回 400,不静默当季度",
+      "rationale": "design-spec §5.1 明确要求。静默回退会让用户以为自己筛的是别的粒度——响应里没有任何字段能说明「你要的 x 我给了 q」,又一个「合法响应但语义错误」。"
+    },
+    {
+      "decision": "PrismSankey 为 nil 时不注册路由,而非注册后返回 503",
+      "rationale": "注册一个必然报错的端点更糟: 前端拿到 5xx 无从判断是「本实例没配模板」还是「服务故障」。不注册则是明确的 404,与「prism 未启用」语义一致。有负向断言锁定。"
+    },
+    {
+      "decision": "模板加载分三路: error → log.Error 降级;加载到 0 个 → log.Warn 降级;成功 → log.Info 并注册",
+      "rationale": "AD-16 只要求 error 不得丢弃。但「目录存在却一个模板都没有」在 LoadTemplates 的语义里是合法的(返回空 map + nil error),若不单独记一条,运维会看到「sankey 路由没注册」却在日志里找不到任何线索。三路各有各的日志级别,故障与未配置可区分。"
+    },
+    {
+      "decision": "模板启动时一次性加载,变更需重启(DoD 要求记入 discovery)",
+      "rationale": "沿用既有 prism 装配的生命周期(store 也是启动时打开)。热加载需要文件监听 + 并发安全的替换,收益不抵复杂度;运维语义写进了 serve.go 的常量注释与本条。"
+    }
+  ],
+  "files_modified": [
+    "internal/api/handler/api/sankey.go (新增)",
+    "internal/api/handler/api/sankey_test.go (新增)",
+    "internal/api/sankey_routes_test.go (新增)",
+    "internal/api/handler/api/prism.go (jf 扩展 ±Inf;抽出 jfSlice 供 Series 复用)",
+    "internal/api/server.go (Dependencies.PrismSankey + 两条路由)",
+    "cmd/atlas/serve.go (LoadTemplates + NewService 装配与降级)"
+  ],
+  "interfaces_exposed": {
+    "types": [
+      "type SankeyService interface { Analyze(symbol, from, to, granularity, lang string) (*sankey.Analysis, error); Fundamental(symbol string) (*sankey.FundamentalView, error) } —— *sankey.Service 已满足",
+      "func NewSankeyHandler(svc SankeyService) *SankeyHandler",
+      "api.Dependencies 新增 PrismSankey *sankey.Service(nil = 不注册路由)",
+      "cmd/atlas 新增常量 sankeyTemplateDir = \"configs/prism/templates\""
+    ],
+    "response_shape": {
+      "GET /api/prism/sankey": "{data:{symbol, granularity, truncated, periods:[{period, graph:{nodes:[{name,value}], links:[{source,target,value}], notes:[string]}, metrics:{period, period_end, segments:{k:v}, revenue, gross_profit, operating_income, net_income, rnd, sganda, income_tax, gross_margin, op_margin, net_margin}}], matrix:[{key,label,values:[],change,change_kind}], conflicts:[{period,detail}], template:{version,lang}}, meta:{timestamp}}",
+      "GET /api/prism/fundamental": "{data:{symbol, periods:[], metrics:{名称:[]}, dates:[], closes:[]}, meta:{timestamp}}",
+      "note": "**所有数值字段的 NaN 与 ±Inf 均为 null**;前端必须用 resp.data(AD-8)"
+    },
+    "contract_for_downstream": "TASK-012/013 前端契约(本文件在 a3864aa 提交时即已落盘,非事后补记):\n(1) `periods[i].graph.notes` 渲染为 footnote —— 非空即说明该期有被画成 0 宽的负流(AD-22),这是负残差的唯一线索,不渲染等于回到「图上凭空少一块且无人知情」;\n(2) `conflicts` 非空时给降级提示 —— `detail` 是可直接展示的中文(如「收到 5 个季度(应为 4),标签冲突使该财年无法聚合,已跳过」),这是「某个财年为什么不见了」的唯一解释来源(AD-26);\n(3) **任何数值字段都可能是 null** —— NaN(缺失)与 ±Inf 都映射为 null,前端不可假定为数字,应渲染为「—」;\n(4) `granularity` 只接受 q/fy,传别的会拿到 **400**(不是静默按季度处理);`symbol` 缺失同样 400;\n(5) **两种 404 语义不同,文案已刻意区分**: `no sankey template`(该标的没配模板)与 `unknown symbol`(标的不在库里)。另有第三种 404 来自 **路由未注册**(prism 未启用或模板全部加载失败时 `Dependencies.PrismSankey` 为 nil)——此时响应不是 JSON 错误体而是 mux 的裸 404,前端需能区分「功能未启用」与「该标的无数据」;\n(6) 响应包裹层是 `{data:…, meta:…}`,**必须用 `resp.data`**(AD-8);\n(7) **运维语义**: 模板在 serve 启动时一次性加载,新增或修改模板需重启进程才生效;加载失败时 serve 仍启动但不注册这两条路由,原因在日志(AD-16)。"
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/api/... ./cmd/atlas/ -count=1",
+    "result": "7 个包全绿;`-race` 同样全绿;go build ./... 通过;go vet 通过",
+    "coverage": "internal/api/handler/api **连采 5 次稳定 52.5%**(该包无 map 遍历序依赖,不像 sankey 包那样非确定)。该数字是整包口径,含大量本任务未触及的既有 handler。",
+    "red_confirmed": "分两批: handler(undefined: SankeyHandler/NewSankeyHandler)、路由(unknown field PrismSankey in struct literal)",
+    "mutation_testing": "8 个变异体**全部杀死**,且每个都由与该规则同名的用例逮住(两步核对): 丢弃 Graph.Notes→TestSankeyNotesPassThrough、丢弃 Conflicts→TestSankeyConflictsPassThrough、granularity 校验失效→TestSankeyErrorBranches/invalid_granularity、lang 不透传→TestSankeyQueryParamsReachService、from/to 不透传→同上、两种 404 文案混用→TestSankeyErrorBranches、jf 退回只拦 NaN→TestSankeyInfNeverBreaksJSON、nil service 也注册路由→TestSankeyRoutesRegistration。另加 jfSlice 丢弃 jf→既有 TestPrismSeriesWindowAndErrors。",
+    "process_note": "**首轮变异跑作废**: 我的 mut() 辅助里备份文件名与还原路径不一致(存为 sankey_api.go.bak,还原时按 basename 找 sankey.go.bak),cp 静默失败导致**变异累积**,8 次全部报 KILLED 实为假阳性(每次失败都是前面累积的变异所致),且跑完把三个源文件留在了被污染状态。发现后从备份还原、逐行核对六处关键行、重跑测试确认全绿,再用带「还原后 diff 校验」的版本重跑。**教训: 变异测试脚本必须自检还原是否成功,否则得到的是一串无意义的 KILLED。**",
+    "simplifier_note": "code-simplifier 最终回复语无伦次(自称「ninth firing…pending your A/B/C」),我未采信其自述,直接 diff 核对: 实际改动仅一处——把 jfSlice 从 sankey.go 移到 prism.go 并让既有 Series 复用(消除与 njf 闭包的重复)。改动合理故保留,并在其之后重跑全部 8 个变异体确认断言强度未变。",
+    "untouched": "internal/prism/sankey 全程零改动(git status 确认);internal/api/handler/web/prism_web_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go 三个文件 gofmt 不合规,但 HEAD 版本本就如此,非本任务引入,未动。",
+    "commit": "a3864aa feat(prism): /api/prism/sankey 与 /api/prism/fundamental 两个 JSON API"
+  },
+  "gate_evidence": {
+    "situation": "transition dev_done 被门禁 DENY: Task-scope coverage 71.5% < dev_minimum 80%。这是 Leader 在任务描述里已预警的框架缺陷(task-completed.sh 只支持整包口径),不是本次改动引入。",
+    "proof_not_a_regression": "在 HEAD~1(本任务改动之前)用**完全相同的四包口径**测得 task-scope 覆盖率同样是 **71.5%**(命令: git worktree add --detach <tmp> HEAD~1; go test ./internal/api/... ./cmd/atlas/ ./internal/prism/sankey/ -coverpkg=<同四包> -coverprofile; go tool cover -func | tail -1)。**改动前后同口径数字一字不差**,证明 DENY 与本次改动无关。",
+    "file_level_all_100": "本任务新增/修改的 8 个函数文件级覆盖率**全部 100%**(命令: go test ./internal/api/... ./cmd/atlas/ -coverpkg=./internal/api/handler/api,./internal/api,./cmd/atlas -coverprofile=/tmp/t011b.out; go tool cover -func=/tmp/t011b.out): sankey.go NewSankeyHandler/Sankey/Fundamental/analysisJSON/graphJSON/metricsJSON 均 100.0%;prism.go jf/jfSlice 均 100.0%。(Fundamental 初测 86.7%,缺的是「存储故障 → 500」分支,已补用例至 100%。)",
+    "two_pre_existing_low_spots_i_touched": [
+      "internal/api/server.go setupRoutes 40.7% —— 既有大函数(注册约 40 条路由,多数分支无测试)。**我新增的 4 行分支两个方向都有覆盖**(TestSankeyRoutesRegistration 正反两例),拉低整体的是既有部分。",
+      "cmd/atlas/serve.go runServe 0.0% —— 既有函数,仓库中**本就没有任何单测覆盖它**(它会真正启动服务器)。我在其中新增的模板装配代码因此结构性地无法被单测覆盖;AD-16 要求的降级行为已在 DoD 里标为 verify_by: review。"
+    ],
+    "requested_action": "按任务描述的处置要求,报告 Leader 由其代为放行。**我未修改 arcforge.config.json 或任何 .claude/ 文件**(任务描述明令禁止,write-guard 亦会拦截)。",
+    "measurements": {
+      "gate_scope_now": "71.6%(门禁完全同口径: go test ./cmd/atlas ./internal/api ./internal/api/handler/api ./internal/prism/sankey -coverpkg=<同四包>)。门槛 80%。",
+      "baseline_before_my_change": "71.5%(在 a8c8354 即我的改动前的 worktree 上测得)。**注意口径差异**: 该次基线跑的**测试包更多**(./internal/api/... 含 handler/web、job、middleware、response),而 -coverpkg 是同样四个包 —— 测试包更多只会让覆盖统计更高,故真实的「门禁同口径基线」≤ 71.5%。结论: 我的改动没有拉低这个数字(71.5% → 71.6%,略升)。",
+      "honesty_note": "我未能用完全一致的口径重跑基线(第一次尝试因 shell 变量展开导致 -coverpkg 失配、两边都读出 0.0%,已作废)。故此处如实标注两次口径的差异,而不是拿两个数直接对账 —— 本 sprint 已有多次「三方数字对不上」的教训。"
+    }
+  },
+  "ad14_two_layer_evidence": {
+    "why": "test-agent-7 预计会问: API 层的 jf 拦 ±Inf 是第二道防线,那第一道(引擎侧不产出 Inf)的保证在哪?本条在验证开始前写入,免得它只能来问我。",
+    "layer1_engine": "internal/prism/sankey 内**全部除法只有三处**(grep 实测,已排除注释与 import 路径):\n  (1) periods.go:300 `return num / den` —— 位于 safeDiv **内部**,进入前已挡掉 den==0 / den 为 NaN / den 为 ±Inf / num 为 ±Inf 四种情况,故其结果不可能是 Inf。三个比率(GrossMargin/OpMargin/NetMargin)与 growth(同比)全部走它。\n  (2) periods.go:470 `math.Pow(last/first, 1/float64(spans)) - 1` —— 位于 cagr 内,是**唯一一处裸除法**。前置条件已保证 first > 0(否则提前返回 NaN),但极端输入(first 为非规格化小数、last 极大)理论上仍可溢出为 +Inf,故 cagr **末尾另有 `if math.IsInf(r, 0) { return math.NaN() }` 兜底**。两道合起来使该函数不可能返回 Inf。\n  (3) periods.go:455 `c.Sub(p).Hours() / 24` —— 位于 aboutAYearApart,除数是常量 24,被除数是两个已成功 time.Parse 的日期之差(有限),不可能产生 Inf;且其返回值是 bool,不进入任何数值输出。\n  其余数值路径只有加法(财年聚合的 7 个流量科目求和、桑基的残差相减)。有限输入相加只有在接近 1.8e308 时才溢出,真实财务数据(量级 1e9~1e12)不可达;若输入本身含 Inf(存储层异常),加法会传播 Inf —— 这正是 API 层 jf 作为第二道防线的意义。",
+    "layer1_tests": "引擎侧有三处**全扫描**断言(不是抽查单个字段): periods_test.go 的「no Inf anywhere in the matrix」(遍历所有 MatrixRow 的 Change 与全部 Values)、TestBuildSankeyNaNStaysNaN(遍历全部 links 与 nodes)、service_test.go 的 TestAnalyzeWithUnrefreshedColumns(新 5 列全 NULL 时遍历 links 与 matrix)。另有 TestBuildPeriodsRatioGuards / TestBuildMatrixDivisionGuards 对三个比率与同比做 IsNaN + !IsInf 的**成对**断言。",
+    "layer2_api": "本任务的 jf 扩展 + TestSankeyInfNeverBreaksJSON(把 Revenue/GrossMargin/节点值/连线值/分部值/矩阵 Values/Change 全部塞成 ±Inf,断言仍返回 200 且各字段为 null)。变异「jf 退回只拦 NaN」已验证会让该用例变红。",
+    "conclusion": "AD-14 两层都在,且各自有测试守护。第一层保证「不产出」,第二层保证「万一产出也不会让整条响应 500」——后者存在的意义正是防止将来新增计算路径绕过 safeDiv。"
+  },
+  "rework_epoch4_by_dev_agent_20": {
+    "scope": "补齐 description 载明、但当初未落入 done_criteria 的六项 sankey 补测(W2/W4/W5/W7/W8/W10 + verifier 发现的 G2)。返工原因不是前任做错:原有 10 条 DoD 全部 PASS、9 个变异全部 KILLED,是「义务只写在 description 没写进 DoD」导致 dev 按 DoD 交付、test 按 DoD 验收,两边都合规而义务落空。本轮已由 Leader 补进 DoD。",
+    "production_code_untouched": "**生产代码一行未改**(git diff 确认 service.go / sankey.go 全程干净),本次交付纯为测试断言。这些变异体本就没有一个是真 bug —— 实现全部正确,缺的是「钉住它」的断言。",
+    "key_correction": "`fundamentalMetrics` 是 **9 条**不是 description 写的 7 条: revenue/gross_profit/operating_income/net_income/rnd/sganda/income_tax/**eps_diluted**/**equity**。此前只有 revenue 被断言(service_test.go:382),roe_ttm 是表外单独设置(service.go:147)不在此表内,故零断言的是 **8 条**。若照 description 建 7 行表会正好漏掉 eps_diluted 与 equity,在更小尺度上复现同一个缺口。",
+    "fixture_note": "W7/W8 未复用既有 `fq()` 助手: 它只设 7 个数值字段,**不设 EPSDiluted/Equity**,用它这两条会恒为 0,「读对了字段」与「读到零值」就分不开。改为自建 2 行 fixture,18 个值两两互不相同,任意两条序列串线都必然改变数值。",
+    "mutation_log_ad27": {
+      "form": "按 AD-27 记「N 次中红了几次」,**N/M 报的是用例层面**(每次独立 `go test -run <用例> -count=1` 调用,不用 `-count=N` —— 后者只能告诉你「至少红了一次」,数不出 p)。",
+      "n_choice": "AD-27 要求「先测 p 再由 (1-p)^N 定 N」。本批 7 个变异体实测 **p=1.0(20/20 全红)**,故 N=20 已远超需要;这与 AD-27 那个 76% 存活的 `sameQuarter` 案例不同的原因是: 本批断言全部不依赖 Go map 遍历序 —— hasNode/linkValue/rowByKey 遍历的是 slice,序列断言基于有序 rows,G2 是 JSON map 的精确键查找。",
+      "results": [
+        "W2  SegmentRows(id)->SegmentRows(0)                : 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestAnalyzeDefaultSelection)",
+        "W4  BuildSankey(p,tmpl,lang)->BuildSankey(p,nil,lang): 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestAnalyzeDefaultSelection)",
+        "W5  Metrics: p -> Metrics: sel[0]                  : 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestAnalyzeGranularityAndRange/explicit_quarterly)",
+        "W10 BuildMatrix(...,lang,...)->BuildMatrix(...,\"\",...): 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestAnalyzeGranularityAndRange/english_labels)",
+        "W7  gross_profit 读 r.GrossProfit -> r.OperatingIncome: 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestFundamentalCoversEveryMetricSeries/gross_profit)",
+        "W8  sganda 读 r.SGnA -> r.RnD                      : 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestFundamentalCoversEveryMetricSeries/sganda)",
+        "G2  metricsJSON 删 \"period_end\": m.PeriodEnd       : 补测前 SURVIVED,补测后 **20 次中红 20 次** (TestSankeyResponseShape)"
+      ],
+      "before_evidence": "补测前的 SURVIVED 是在**四包全量**(./internal/prism/sankey ./internal/api/handler/api ./internal/api ./cmd/atlas)下测得,不是只跑单包得出的弱结论 —— 7 个变异体在四包全绿下无一变红。",
+      "negative_control": "**对照组**: 未施加任何变异时,这 4 个杀手用例各跑 20 次,**红 0 次**。缺了这一步,「20/20 全红」也可能只是用例本身恒红(写错断言),与判别力无关。",
+      "harness_selfcheck": "AD-27 三重防护,针对本 sprint **独立发生三次**的「备份/还原路径不一致→变异累积→KILLED 全是假阳性」: (1) 施加前 `git diff --quiet` 验工作区干净、施加后验确有 diff、还原后再验干净; (2) **`go build ./...` 显式验编译** —— 编译失败时 go test 输出里同样没有 `--- FAIL:` 行,与「变异存活」形态完全相同,不显式区分就会把编译错误误报成 SURVIVED; (3) perl 精确字面替换并**要求命中数恰为 1**,0 次(锚点写错)或 >1 次(误伤)都判 harness 错误而非静默继续。还原一律用 `git checkout --` 而非文件备份,从根上避免路径不一致。三轮完整 harness 跑动结果一致,收尾自检确认两个源文件零残留。"
+    },
+    "why_each_assertion_has_teeth": {
+      "W2/W4": "原断言 `NotEmpty(Graph.Links)` 是**恒真**的: 主干链路(收入->成本/毛利...)与分部数据无关,恒会画出来;`english labels` 里的 `hasNode(\"Revenue\")` 同样是主干节点。所以取数拿错 id、模板没传进 BuildSankey,图都还在,只是分部全没了(桑基退化为「全部收入都来自 other_segment 残差」)。改断言**分部链路本身存在**(hasNode「云业务」+ linkValue 云业务->收入 == 230b,即 4 季 50+55+60+65 之和),一处同时钉住取数与模板两条链。",
+      "W5": "原断言只看 viewNames 标签,而标签取自循环变量、Metrics 却可能取自固定下标 —— 两者错开时断言依然全绿;单期用例又恰好只有下标 0,于是「恒取 sel[0]」在多期情形从未被验证。补为多期下逐期断言 `pv.Metrics.Period == pv.Period` 且 Revenue 与该期一一对应,把标签和数据绑在一起。",
+      "W10": "Template.Lang、图节点名、矩阵行标签是**三条各自独立的取名路径**。lang 不传给 BuildMatrix 时前两条照样是英文,只有矩阵行留在中文。主干行走 `pick()`、分部行走 `displayName()`,故各钉一条(Revenue / Cloud)。",
+      "W7/W8": "handler 侧 `TestFundamentalResponse` 用 fake、**根本不经过 `fundamentalMetrics`**,无法替代 service 层断言。除逐条值断言外另加键集合 `ElementsMatch`(9 条 + roe_ttm): 只断言值不断言集合的话,整条序列被删掉仍可能无人发现。",
+      "G2": "period_end 是前端把一期对到日历日的唯一依据(fiscal_period 只是标签)。实现本就正确,只是没被锚定。"
+    },
+    "files_modified_rework": [
+      "internal/prism/sankey/service_test.go (+新增 TestFundamentalCoversEveryMetricSeries 与 metricKeys 助手;TestAnalyzeDefaultSelection / TestAnalyzeGranularityAndRange 内补断言;头部映射注释补记返工条目)",
+      "internal/api/handler/api/sankey_test.go (TestSankeyResponseShape 补 period_end 断言;头部映射注释补记 G2)"
+    ],
+    "reuse_note": "package 内已存在 `linkValue(t, g, source, target)` 助手(periods_test.go:591),我起初重复定义导致编译失败,已删除重复版本改为复用。",
+    "verification_rework": {
+      "full_suite": "GOTOOLCHAIN=local go test ./internal/api/... ./cmd/atlas/ ./internal/prism/sankey/ -count=1 → **8 个包全绿**",
+      "gofmt": "两个改动文件均 gofmt 合规(gofmt -l 无输出)",
+      "coverage": "任务四包同口径聚合 **71.6%**,高于本任务 coverage_floor=70。与返工前**持平**(同为 71.6%): 本次纯加测试断言,而这些断言走的是已被覆盖的语句,**只增判别力不增覆盖行**。此处如实标注,不宣称「补测试必然抬高覆盖率」。",
+      "subtests_actually_ran": "`-v` 确认 9 个 metric 子用例逐个 RUN+PASS,而非整表被静默跳过 —— 表驱动测试写错时最容易出现「一条都没跑却全绿」。"
+    }
+  }
+}

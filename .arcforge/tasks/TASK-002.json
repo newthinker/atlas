@@ -1,0 +1,73 @@
+{
+  "id": "TASK-002",
+  "title": "V(Visa) 的 EPS 缺失：companyfacts 无 EPS/股本 tag，评估实例文档路线",
+  "description": "**Leader 已完成诊断，结论是「companyfacts 路径对 V 不可用」。本任务先验证替代路线可行性，再决定实现。**\n\n## 背景\n\nTASK-001 修复多 unit 缺陷后，live 实测 `5 ok, 0 failed, 1 degraded` —— COST/CRM/WMT 三家已救回，**仅剩 V**。V 的失败与多 unit 无关，是另一类问题。\n\n## 诊断（Leader 实测 2026-07-26，拉取完整 companyfacts 3.56 MB）\n\nV 的 `CIK0001403161` companyfacts 含 5 个 namespace（dei / invest / us-gaap / srt / ffd），其中 us-gaap 有 **625 个 tag**。实测结果：\n\n| 项 | 结果 |\n|---|---|\n| 任何 EPS tag | **❌ 完全不存在**。625 个 us-gaap tag 中含 `PerShare` 的仅 7 个，全是无关项（`AntidilutiveSecuritiesExcluded...`、`CommonStockDividendsPerShare...`、`PreferredStockParOrStatedValuePerShare` 等），**无 `EarningsPerShareDiluted` / `EarningsPerShareBasic` / `EarningsPerShareBasicAndDiluted`** |\n| 任何稀释股本 tag | **❌ 完全不存在**。`WeightedAverageNumberOfDilutedSharesOutstanding`、`...SharesOutstandingBasic`、`CommonStockSharesOutstanding` 均无 |\n| `dei:EntityCommonStockSharesOutstanding` | ⚠ 仅 **2 条**（2009-11-13、2010-01-27），且是 **instant** 值（封面页时点股数，非加权平均） |\n| `us-gaap:NetIncomeLoss` | ✅ **227 条**（单季 108、年度 51） |\n\n**⇒ 有净利润但无股本可除，EPS 既取不到也推算不了。这不是回退链失效，是 companyfacts 里根本没有数据。**\n\n（上一 sprint 的任务描述曾写「V 需走回退链第二项」，dev-agent-26 实测三个 tag 全 404 后已更正；本次进一步确认是整个 companyfacts 无此类数据。）\n\n## 待验证的替代路线\n\nVisa 作为大型上市公司，其 10-K/10-Q **必然报告 EPS**。companyfacts 是 SEC 从 XBRL 提取的**聚合视图**，已知会遗漏某些维度——**M3 的分部数据正是因此走了 submissions API + 报告实例文档路线**（见 AD-2/AD-3，归档于 `sprint-028-2026-07-26/docs/01-design/`）。\n\n合理假设：**V 的 EPS 在实例文档里存在，只是没进 companyfacts。** 本任务先验证该假设，再决定是否实现。\n\n## 现有可复用基础设施\n\n`internal/collector/edgar/segments.go` 已实现 submissions API + 实例文档（`_htm.xml`）流式解析，含 AD-11 的单遍解析与双重上限（`io.LimitReader` 64MB + 最近 12 份报告）。EPS 解析可复用同一套取数管道。",
+  "module": "edgar",
+  "complexity": "中等",
+  "estimated_files": 3,
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "**第一步是可行性验证，不是实现**：拉取 V 最近一份 10-K 的实例文档，确认其中是否存在 EPS 相关的 XBRL 事实（`EarningsPerShareDiluted` 或等价物）。**若不存在，本任务到此为止**——在 discovery 中记录证据并结论「V 无法经 EDGAR 路径产出 EPS，应永久走 engine fallback」，转 `dev_done` 交验，**不要为了『做点什么』而实现一个取不到数的解析器**。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "若上一条确认 EPS 存在于实例文档：实现解析并接入 `FetchCompanyFacts` 的取数链，使 V 的 `eps_diluted` 不再全为 NULL。测试须用**真实抓取的 V 实例文档片段**作 fixture（不得手工编造，编造的 fixture 无法证明真实文档的结构）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "回归：本改动**不得影响 COST/CRM/WMT/AVGO 四家**（它们的 EPS 走 companyfacts 路径已正常）。断言这四家的取数路径与本改动前逐值一致——新增回退路径最容易顺手改坏既有主路径。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "实例文档路线的成本必须显式评估并记录：每份文档大小、需拉取份数、总耗时。若为覆盖 5 年 EPS 需拉取超过 12 份报告，与 AD-11 的双重上限冲突，须在 discovery 说明取舍（是提高上限还是接受较短历史）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "实例文档不可达 / 解析失败时，行为与当前一致（该标的 degraded，走 engine fallback），**不得 panic、不得让整个 refresh 失败**。V 目前的 degraded 是可接受状态，修复不成功不能让情况更糟。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "按 AD-27（归档于 `sprint-028-2026-07-26/docs/01-design/architecture-decisions.md`）：每条 functional 至少一个变异从 SURVIVED 翻 KILLED，记「N 次中红了几次」注明用例层面；施加前确认可编译；harness 自检还原（**注意：若工作区有未提交改动，`git diff --quiet` 不可用，改用 sha256 快照比对**——这是 TASK-001 的实测教训）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "edgar 包覆盖率不低于 94.1%（TASK-001 后的水位，多次采样），全包测试通过含 `-race`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**live 验证**：用临时 config + 临时 DBPath（⚠ **严禁指向 `data/prism.db`**，该文件当前不存在，勿创建）跑 `prism refresh`。当前基线是 `5 ok, 0 failed, 1 degraded`（仅 V）。若实现成功则应为 `0 degraded`；若第一条确认不可行，则基线不变即为预期结果。命令与完整输出附进 discovery。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "verified",
+  "assigned_to": "dev-agent-28",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-11",
+  "last_transition": {
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-agent-11",
+    "at": "2026-07-26T13:47:20Z"
+  }
+}

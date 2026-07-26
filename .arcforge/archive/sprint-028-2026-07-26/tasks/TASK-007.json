@@ -1,0 +1,56 @@
+{
+  "id": "TASK-007",
+  "title": "多期分析引擎(期聚合/智能对比集/矩阵/桑基图构建)",
+  "description": "新建 internal/prism/sankey/periods.go: BuildPeriods/DefaultSelection/BuildMatrix/BuildSankey 四个纯函数(无 IO)。完整签名、桑基结构与 tax_other 口径见 01-design/design-spec.md §3.2。桑基主干结构硬编码(AD-5,不进模板);负值节点以 0 宽表示不画负流;NaN 保持 NaN 交前端渲染为「—」。",
+  "module": "prism-sankey",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/prism/sankey/periods.go",
+    "internal/prism/sankey/periods_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestBuildPeriodsFYAggregation: 5 个季度跨 2 财年(后一财年只 1 季) → granularity=fy 只产出 1 个 FY,其流量科目为该财年 4 季之和,Segments 按 segment_key 求和;不足 4 季的财年不产出;用非日历财年的真实标签序列(如 2025Q3,2025Q4,2026Q1)验证分组正确(MSFT 6 月结/NVDA 1 月结)",
+      "TestDefaultSelection 两分支: 最新期为 2026Q3 → 返回该财年内已发布的 [2026Q1,2026Q2,2026Q3] 且 granularity 为 q;最新财年 4 季齐(年报已出) → granularity 为 fy 且构造 11 个财年时截取最近 10 个(AD-15 上限统一为 10)",
+      "TestBuildMatrixYoY: 季度列 Change = 相对去年同期(从 allQuarters 反查)且 ChangeKind=yoy;年度且 ≥3 期 → ChangeKind=cagr;缺对照期 → Change 为 NaN 且 ChangeKind=none",
+      "AD-13 TestBuildSankeyBalance(含残差节点): 图含 other_segment = Revenue-Σsegments 与 other_opex = (GrossProfit-OperatingIncome)-RnD-SGnA 两个残差节点;各节点入流≈出流(±1);tax_other == OperatingIncome-NetIncome —— 没有残差节点时守恒断言只能在人造数据上过,真实 MSFT/NVDA 必然失衡"
+    ],
+    "boundary": [
+      "AD-14 除零防护(硬故障): YoY 的去年同期存在但值为 0 或 NaN 时 Change 返回 NaN 而非 ±Inf;CAGR 起点 ≤0 或跨期数 <2 时返回 NaN;三个比率分母为 0 或 NaN 时为 NaN —— encoding/json 对 Inf 直接报错会让整个 API 500,而 jf() 只映射 NaN",
+      "AD-13 负值场景: NetIncome > OperatingIncome(利息收入大的公司)使 tax_other 为负时不画负流而是标注记账;残差 |差| < Revenue×0.5% 时省略该残差节点",
+      "DefaultSelection 边界: quarters 与 fys 皆空 → (nil, \"q\");最新期为财年首季(该财年只 1 期) → 返回该 1 期;最新财年只有 3 季但年报已发(Q4 推导失败) → 走季度分支不伪造 FY"
+    ],
+    "non_functional": [
+      {
+        "desc": "四个函数均为纯函数无 IO;lang 参数决定节点名取 Segment.NameZH 还是 NameEN;主干流结构硬编码不读模板(AD-5);GOTOOLCHAIN=local go test ./internal/prism/sankey/ -count=1 全绿(含 TASK-003 既有测试)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-17",
+  "packages": [
+    "./internal/prism/sankey"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-7",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-6"
+}

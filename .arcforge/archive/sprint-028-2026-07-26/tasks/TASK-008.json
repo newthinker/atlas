@@ -1,0 +1,63 @@
+{
+  "id": "TASK-008",
+  "title": "分部数据刷新编排(RefreshSegments)",
+  "description": "新建 internal/prism/segments.go: SegmentClient 窄接口与 RefreshSegments(cfg, store, seg, templates, now) Report。五步语义(增量锚点/member 映射/fiscal_period ±3 天反查/Q4 推导/manual 覆盖)见 01-design/design-spec.md §4.2。注意 AD-2: FetchSegmentRevenue 按期间返回,一份报告可能多条,since 用期间的 PeriodEnd 比较。fake 写法沿用 refresh_test.go 惯例。 【顺带补测试锁定(test-agent-7 在 TASK-006 验证中提出,Leader 采纳)】TASK-006 有一个经 Leader 裁决接受的行为选择:价格落库点在「取得 closes 之后、估值计算之前」,故 EPS≤0 被熔断的标的**仍会写 price_daily**(理由:价格是原始事实、估值是派生计算,失败语义不该传染;亏损股恰恰最需要基本面页的股价叠加)。但**当前无任何测试断言它** —— 后人若把 upsertPrices 挪到熔断判断之后(看起来像个合理的「修复」),行为会静默改变而没有任何测试变红。请在 refresh_test.go 补一条测试钉住该行为:构造 EPS≤0 熔断场景,断言四件事 —— price_daily 仍被写入、该标的进 Report.Failed、valuation_daily 不写、不计入 Refreshed。refresh_test.go 属 ./internal/prism,在本任务 packages 内,不构成 scope 漂移。 【已知限制(Leader 裁决,dev-agent-15 在 TASK-005 提出)】FetchSegmentRevenue 对单份报告失败(404/解析失败)只 log.Printf 并跳过,**不通过返回值上报**——其签名由 design-spec 固定,调用方从返回值看不出发生过降级。裁决:本期**接受该限制,不返工 TASK-005**。理由:信息未丢失(stderr 经 launchd 落日志可见),且 Report.Degraded 的主要用途是通知整家级降级而非单期细粒度。**因此本任务的 Report.Degraded 只需包含 RefreshSegments 自身可观察到的降级(未映射 member、fiscal_period 反查失败、Q4 推导负值等),不含解析器内部跳过的期——test agent 不得因此判 reject**。该缺口已登记为后续改进项(可选方案: Client 加 OnDegrade func(string) 可选回调,nil 时退化为 log.Printf,纯增字段不破坏既有签名与测试)。⚠ 该可选方案有个坑(dev-agent-15 前瞻提出,实现者必读): Client 在一次 refresh 里是**跨多个 CIK 复用**的长生命周期对象。若为按标的归因降级而写成「每个 symbol 前重设 c.OnDegrade = 闭包」,那是在改共享状态——当前 FetchSegmentRevenue 内部请求串行、单 goroutine 下能 work,但一旦日后给标的间加并发就会**串号且不报错**,只会把 A 公司的降级记到 B 名下(又一个「合法值但语义错误」)。更稳的形态: 让消息**自带身份**(现有 log.Printf 即如此,文本含完整 URL、URL 含 CIK),或把回调作为 FetchSegmentRevenue 的**参数**而非 Client 字段。",
+  "module": "prism-refresh",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/prism/segments.go",
+    "internal/prism/segments_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestRefreshSegmentsIncrementalAndMapping: 传给 FetchSegmentRevenue 的 since 等于 LatestSegmentPeriodEnd 锚点;模板已映射的 member 以 source=edgar_segment 落库;未映射的 member 记入 Report.Degraded 文本且整体不失败",
+      "AD-12 全量重拉入口: force=true 时忽略锚点传零值 since 全量重拉 —— 纯增量下模板迭代(跑一次看 member 清单 → 改模板 → 再跑)第二次将拉不到任何数据,TASK-014 流程会走不通",
+      "AD-9 落库与标签: 主键为 period_end;fiscal_period 展示标签由 PeriodEnd 在 fundamental_q 的 period_end 中 ±3 天容差反查;匹配不到时仍落库(period_end + 空 fiscal_period)并记 Degraded(负向断言: 不因匹配失败丢数据);容差内命中 ≥2 条时报错而非取首个;**容差边界必须双向钉住(返工项)**: fixture 须含 -3/+3(须命中)与 -4/+4(须不命中)四个取值 —— 仅取 +2/+4 只能钉住上界,常量 3→2 与比较符 <=→< 两个变异体都会存活(test-agent-6 实测),即 DoD 写死的「±3」这个量值没有任何断言锚定它",
+      "TestRefreshSegmentsQ4Derivation: 同财年的 FY 期 Values 减去已存 3 个季度 → Q4 逐 segment 落库;某 segment 三季凑不齐时跳过该 segment;推导得负值(重述/口径变化)时不落库并记 Degraded;AD-17 负向断言: FY 期本身不落库(年度值一律由引擎从 4 季聚合,否则与 fy 聚合重复计算);**Q4 自吞噬防护必须有跨轮次守护(返工项,X3)**: Q4 的 period_end 恰等于 FY 期的 PeriodEnd,若用闭上界会把 Q4 自身数进来 → len(ends)==4 → 整个财年跳过 → **第二轮起 Q4 永不重算、重述数据永远进不来,且值不变、无报错、无 Degraded**。现有 Q4 用例全是单轮的,故把 d.Before(a.PeriodEnd) 改成闭上界后**全部测试仍绿**(test-agent-6 实测)。注意仓库里已有的跨轮次测试 TestRefreshSegmentsManualOverride 的 fixture **没有年度期、走不到 Q4 推导**。修法: Q4 用例连跑两次断言第二轮 Q4 仍为 17;更强的版本是第二轮把 FY 值改成 60、断言 Q4 更新为 27,同时钉住「重述可传播」",
+      "TestRefreshSegmentsManualOverride: LoadManualSegments 的数据最后 upsert 且 source=manual,覆盖同 (period_end, segment_key) 的自动行;并断言下一次 auto 刷新会再次覆盖 manual 行这一语义(该行为须被测试定死,不留歧义)"
+    ],
+    "boundary": [
+      "templates 中无对应模板的标的被跳过;templates 为空 map 时返回零值 Report 且不报错"
+    ],
+    "error_handling": [
+      "单个标的 FetchSegmentRevenue 返回错误时只记入 Report.Failed,其余标的继续处理(断言其余标的仍落库)"
+    ],
+    "non_functional": [
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 全绿(含 TASK-006 既有测试)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-16",
+  "packages": [
+    "./internal/prism"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-6",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "verifier": "test-agent-6",
+  "reject_reason": "仅 functional[2] 未通过：±3 天容差的量值只被上界钉住。独立实跑变异确认——容差常量 3→5 被 TestRefreshSegmentsFiscalPeriodLookup 杀死，但 3→2 与比较符 <=→< 两个变异体均存活，根因是用例取值为 +2/+4/-1/+1，无任何用例取正好 ±3 天。实现（3 天 + 闭区间）是正确的，但 DoD 明文写死的「±3」这个数值没有任何断言锚定它，任何把容差改小或边界改排他的改动都不会有测试变红。修法约 4 行：在 TestRefreshSegmentsFiscalPeriodLookup 增 -3d/+3d 须命中、-4d 须不命中三个子例。其余 7 条 DoD（F0/F1/F3/F4/B0/E0/N0）全部实测通过，AD-17 断言形态正确（断言值 17 而非 FY 全额 50）、CIK 校验零请求成立（变异 X2 被杀）、TASK-006 补测四件事齐全、manual 跨轮次回压已钉死，一律无需返工。另发现 3 个非 DoD 违反的存活变异体建议同轮补掉，其中 X3 优先级高：Q4 上界改闭区间后第二轮起 Q4 永不重算（重述数据永远更新不进来，且无报错无 Degraded），实现正确但无跨轮次测试守护——现有 Q4 用例全是单轮的，而该 bug 只在第二轮显形。详见 .arcforge/docs/04-test/TASK-008-verification.md"
+}

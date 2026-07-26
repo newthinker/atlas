@@ -1,0 +1,87 @@
+{
+  "id": "TASK-012",
+  "title": "/prism/sankey 页面(小倍数网格 + 矩阵 + 视图切换)",
+  "description": "web/handler.go 加 SetPrismSankey 与 PrismSankey(w, r, symbol) 方法(路径参数由 server.go 侧 TrimPrefix 剥离后传第三形参,照 PrismDetail);新建模板 prism_sankey.html;server.go 注册 /prism/sankey/ 路由。**AD-4 关键约束: 模板必须同时写入 internal/api/handler/web/templates/ (embed) 与 internal/api/templates/ (serve.go 磁盘实际读取) 两个目录且内容一致,handler.go 中 NewHandler(:86) 与 NewHandlerWithFS(:124) 两处 pages 列表也必须同步**——漏同步会导致 atlas serve 磁盘模式启动即失败而单测不报错。**AD-8: 页面 JS 必须用 resp.data 解包 response.JSON**(既有 prism_compare.html 此处有缺陷,勿照抄;照 prism_detail.html:27 的正确写法)。交互清单见 01-design/design-spec.md §5.2。",
+  "module": "api-web",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/api/handler/web/handler.go",
+    "internal/api/handler/web/templates/prism_sankey.html",
+    "internal/api/templates/prism_sankey.html",
+    "internal/api/server.go",
+    "internal/api/handler/web/prism_web_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestPrismSankeyPage: 有模板的 symbol 返回 200,页面含 id=\"sankey-grid\" 与 /static/echarts.min.js 引用",
+      "未配置模板的 symbol 返回 404",
+      "页面含粒度切换(季/年)、语言切换(中/英)、视图切换(网格/单期大图/堆叠柱)、报告期范围选择与矩阵 table 容器",
+      "AD-22 footnote 渲染: 页面必须把 API 返回的 Notes 渲染为可见 footnote(负残差、0 宽节点、统一比例尺近似的说明),而不是丢弃 —— 这些是桑基图上「看不出来但影响解读」的信息",
+      {
+        "desc": "【G4 残留收口｜test-agent-8 与 test-agent-9 两轮验证均指出，本任务是唯一还能补的位置】补**一个端到端用例**贯通 `007 产生 → 009 装配 → 011 API → 012 渲染` 四环链。当前每一环只在**自己的边界**被测：`sankey_test.go:151` 的 `TestSankeyNotesPassThrough` 直接把 note 塞进 fake（`a.Periods[0].Graph.Notes = [...]`），**不驱动真实引擎**——因此「引擎真的会在该输入下产生这条 note」从未被任何测试验证过，四环各自绿灯不等于链路贯通。要求：构造**真实的 `FundamentalRow` 数据**（`NetIncome > OperatingIncome` 使 `tax_other` 为负），经真实 `BuildPeriods` → `Service.Analyze` → API handler → 页面渲染，断言最终页面上出现含「税项及其他」的 footnote。**不得在链路任何一环使用 fake 或手工注入 Notes**——那正是本条要消除的缺口。若因架构原因无法在 web 层做完整贯通，在 discovery 中说明卡在哪一环、并给出退而求其次的最长贯通范围。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      "prism provider 未启用(nil)时返回 404 且不 panic"
+    ],
+    "non_functional": [
+      {
+        "desc": "模板同步写入 handler/web/templates/ 与 internal/api/templates/ 两处且 diff 无差异;handler.go 两处 pages 列表均加入 prism_sankey.html;既有 TestNewHandlerDiskModeHasPrismTemplates 通过",
+        "verify_by": "test"
+      },
+      {
+        "desc": "JS 用 resp.data 解包(AD-8);IIFE + ES5(var/function) + Tailwind 原子类 + id 定位,风格对齐 prism_compare.html;统一比例尺(容器高度 clamp 0.5~1)与其 footnote 说明、单期大图与堆叠柱的 PNG 导出 toolbox 按 design-spec §5.2 实现",
+        "verify_by": "review"
+      },
+      {
+        "desc": "GOTOOLCHAIN=local go test ./internal/api/... -count=1 全绿",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "三种 404 在页面上必须给出**不同**的提示，不得混为「无数据」（TASK-011 discovery 的 contract_for_downstream）：(a) `no sankey template` — 该标的没配模板；(b) `unknown symbol` — 标的不在库里；(c) **路由未注册时 mux 的裸 404** — prism 未启用或模板全部加载失败，**此时响应体不是 JSON 错误结构**，按 `resp.error` 解析会拿到 undefined。第三种是要害：它使「功能未启用」与「该标的无数据」在页面上长得一模一样，用户会去查数据源而问题在配置。测试须构造三种情形并断言页面文案互不相同。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-011"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-23",
+  "packages": [
+    "./internal/api/handler/web",
+    "./internal/api"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "TASK-012 代码与测试已全部完成(变异测试 7 个变异体全 20/20 红、code-simplifier 已跑并自验、discovery 已落盘、全仓库 go test 全绿),但 dev_done 门禁卡在 `Task-scope coverage 61.6% < dev_minimum 80%`。实测证据:(1) 本任务新增的 prism_sankey.go 两个函数均 100.0% 覆盖;(2) 同范围 HEAD 基线 50.2%,本任务加入后 61.6%,即本任务净提升 +11.4pp;(3) 差额全部来自 ./internal/api 与 ./internal/api/handler/web 两个大包的既有未测代码(14 个既有函数 0% 覆盖:Settings/Watchlist/SymbolDetail/Start/Shutdown/GetWatchlist/GetNotifiers/GetRouterConfig 等),要够 80% 必须给大量与本任务无关的既有代码补测,远超本任务 scope(≤1 package/≤5 文件)。这正是 coverage_floor 注释说的「历史包袱重的包按其既有水位设定」,且 TASK-011 在相邻范围已有 coverage_floor:70 的先例。请 leader 决定本任务的 coverage_floor(建议 60,低于当前实测 61.6 留一点余量;若要求更严可设 61)。设 coverage_floor 是验收标准,属 leader 决定,我不自行设置。",
+      "asked_at": "2026-07-26T02:00Z",
+      "answer": null
+    },
+    {
+      "q": "附带事项(不阻塞本任务,但会阻塞 TASK-013):原 packages 含非 Go 路径 internal/api/templates,在 DOCS_ONLY=false 的任务上会让门禁 go test 直接 setup failed(package not in std)。我已将其移除并在 packages_note 说明——移除是门禁语义中性的:drift 交叉校验的 ACTUAL 仅由 .go 文件推出,非 Go 路径永远不会进入 drift 集合(已实测确认),声明它零收益;而该模板目录本就被 ./internal/api/handler/web 的 TestSankeyTemplateDirsInSync 与 TestNewHandlerDiskModeRendersSankey 真实读取覆盖。TASK-013 的 packages 声明与本任务完全相同且必为非 docs-only,会撞同一堵墙,请 leader 决定是统一从 packages 移除非 Go 路径,还是改门禁(门禁是 .claude/ 运行时资产,agent 只读,须走 project-template + 人类确认)。",
+      "asked_at": "2026-07-26T02:00Z",
+      "answer": null
+    }
+  ],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-9",
+  "discovery": ".arcforge/discoveries/TASK-012.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:25Z"
+  },
+  "packages_note": "原声明含非 Go 路径 internal/api/templates,在 DOCS_ONLY=false 的任务上会让门禁 go test 直接 setup failed(package not in std)。移除是门禁语义中性的:drift 交叉校验的 ACTUAL 仅由 .go 文件推出,非 Go 路径永远不进 drift 集合,声明它零收益;而该模板目录本就被 ./internal/api/handler/web 的 TestSankeyTemplateDirsInSync 与 TestNewHandlerDiskModeRendersSankey 实际读取覆盖。TASK-013 声明完全相同,会撞同一堵墙,请 leader 决定统一处置。",
+  "coverage_floor": 60,
+  "verifier": "test-agent-9"
+}

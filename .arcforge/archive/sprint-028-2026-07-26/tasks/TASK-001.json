@@ -1,0 +1,57 @@
+{
+  "id": "TASK-001",
+  "title": "EDGAR tag 回退链 + 主干流科目扩展",
+  "description": "client.go: 把 EPS/shares/equity 的内联 tag 字面量提为包级 tag 链变量并经既有 firstQuarterlyTag 传入;新增主干流五科目(GrossProfit/RnD/SGnA/OperatingIncome/IncomeTax)解析与 QuarterlyFact 扩字段;季度化后加三条推导回填(EPS=NetIncome/DilutedShares、GrossProfit=Revenue-Cost、SGnA=Selling+GA)。tag 链与推导规则见 01-design/design-spec.md §1.1。注意:既有 tag 辅助全是 FetchCompanyFacts 内部闭包,在函数内改即可;测试 helper 实际名为 factsFileServer(t, fixture, wantPath)(plan 写的 factsServerFile 不存在)。前置: 对 FetchCompanyFacts 跑 gitnexus impact(upstream) 并报告风险。",
+  "module": "collector-edgar",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/edgar/client.go",
+    "internal/collector/edgar/client_test.go",
+    "internal/collector/edgar/testdata/companyfacts_tag_fallback.json",
+    "internal/collector/edgar/testdata/companyfacts_mainflow.json"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestFetchCompanyFactsTagFallback: EarningsPerShareDiluted 缺失但 EarningsPerShareBasicAndDiluted 存在时 EPSDiluted 非 NaN;StockholdersEquity 缺失但 ...IncludingPortionAttributableToNoncontrollingInterest 存在时 Equity 非 NaN",
+      "同测试的推算季: EPS 两个 tag 皆缺但 NetIncome/DilutedShares 齐 → EPSDiluted == NetIncome/DilutedShares(InDelta 1e-9)",
+      "TestFetchCompanyFactsMainFlow: GrossProfit tag 缺失但 Revenue/CostOfRevenue 有值 → GrossProfit == Revenue-Cost;SellingGeneralAndAdministrativeExpense 缺失但分列有值 → SGnA == Selling+GA;OperatingIncome/IncomeTax 由 OperatingIncomeLoss/IncomeTaxExpenseBenefit 直取"
+    ],
+    "boundary": [
+      "回退只在首选缺失时生效(负向断言): 首选 tag 存在且含可用单季时,即使回退 tag 也存在,该字段结果与改动前逐字段一致;EPSDiluted 非 NaN 的季度绝不被推算值覆盖;Q4 的 DilutedShares 恒为 NaN,故 Q4 EPS 仍走 FY-ΣQ 而非推算",
+      "DilutedShares 为 0 或 NaN 时不做 EPS 推算(保持 NaN,不产生 Inf);SG&A 只有 Selling 或只有 G&A 单侧存在时不得求和(半个和比缺失更危险,保持 NaN);GrossProfit 推导出负值时保留负值不钳零;新增 5 字段无对应 tag 且无法推导时保持 NaN"
+    ],
+    "error_handling": [
+      "AD-18 golden 回归(高风险): 既有 9 个 fixture 经改动后 FetchCompanyFacts 输出逐季逐字段完全一致(值 + 期数 + FiscalPeriod 标签),重点覆盖 companyfacts_split / companyfacts_double_split / companyfacts_nonsplit_jump —— 因 detectSplits(epsFacts, sharesFacts) 的输入由单 tag 改为 tag 链,可能改变拆股比例投票与生效日聚簇,进而漂移 EPS/股本归一化与下游 PE/PB/PS 全序列;既有测试只断言少数字段,捕获不到这种全局漂移"
+    ],
+    "non_functional": [
+      {
+        "desc": "EPS/shares/equity/主干流 tag 链提为包级变量(供 TASK-005 复用,照 revenueTags 惯例);basic 近似 diluted 的口径差异有注释标注;Equity 两个 tag 都存在时口径不变(既有 equity 赋值是切片顺序最后一个赢,回退链不得改变该行为)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "gitnexus impact(upstream) 已对 FetchCompanyFacts 执行且无未处置 HIGH/CRITICAL;提交前跑 detect_changes;GOTOOLCHAIN=local go test ./internal/collector/edgar/ -count=1 全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-15",
+  "packages": [
+    "./internal/collector/edgar"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "impl_ref": "docs/superpowers/plans/2026-07-25-prism-m3.md#task-1",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-07-26T04:58:24Z"
+  },
+  "verifier": "test-agent-6",
+  "discovery": ".arcforge/discoveries/TASK-001.json"
+}
