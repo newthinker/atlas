@@ -52,6 +52,15 @@ EDGAR `companyfacts` API 免费、权威、历史完整(XBRL 2009 年至今,足�
 **D4 — 桑基图走「模板 + 数据」分离的配置驱动路线。**
 EDGAR 的分部(segment)数据在 XBRL 里极不规范,全自动解析不现实。方案:每家公司一个 YAML 模板定义收入分类结构和 XBRL tag 映射,数据自动拉取填充,模板人工维护。首批 5~10 家、上限 30~50 家热点公司的维护量可控。
 
+**D4 现实注记(M3 落地时修正,2026-07-25 用户决策)**——原文只说「数据自动拉取填充」,没说从哪拉;实施时发现这一步比预想的重:
+
+1. **companyfacts API 不含分部维度**。M2 已接入的 `companyfacts` 只返回合并口径的事实(每个 tag 一条时间序列),分部拆分存在于**报告实例文档**的 XBRL context 维度里,companyfacts 把它们压平丢弃了。**沿 M2 的数据通道拿不到分部数据,这不是参数问题而是接口能力问题。**
+2. **改走 submissions API + 报告实例文档解析**(用户决策):先请求 `submissions` 拿到该公司的 filing 列表与 `primaryDocument`,再按 `.htm → _htm.xml` 取 inline XBRL 的实例文档,用 `encoding/xml` 单遍扫描,收集带**分部维度 `explicitMember`** 的营收事实。新增请求量:submissions 每标的每日 1 次 + 缺失报告期的实例文档(稳态每季 1 次/家),串行即天然 <10 req/s。
+3. **公司自定义 member 名在模板中映射**——这正是 D4 原文「XBRL tag 映射」的本义,只是映射对象具体化为**实例文档 `explicitMember` 去命名空间后的 local name**(如 `IntelligentCloudMember`),而非 companyfacts 的 tag 名。分部维度轴默认 `StatementBusinessSegmentsAxis`,可在模板 `segment_axis` 逐家覆盖(首批 5 家实测:MSFT/GOOGL/AMZN 用默认轴,**AAPL/NVDA 必须覆盖为 `ProductOrServiceAxis`**,理由见 §7)。
+4. **manual YAML 兜底**:`configs/prism/segments/{symbol}.yaml` 直接给出各报告期的分部数值。任一公司自动解析失败即转 manual,**不阻塞其余公司交付**;渲染层不区分来源。IFRS/20-F filer(如 TSM)无 US-GAAP inline XBRL 实例,自动解析路线不适用,只能纯 manual 或跳过。
+
+**结论未变、路径变了**:D4「模板人工维护 + 数据自动填充」的判断成立,但「自动」的实现代价从「调一个现成 API」上升为「自建一个 XBRL 实例文档解析器」。
+
 **D6 — PE(FWD) 只做快照,不做历史序列。**
 前瞻 EPS 一致预期的历史数据是付费数据(IBES/FactSet),免费源只有当前快照。卡片上展示当前 PE(FWD),历史序列和百分位只基于 PE(TTM),避免口径污染。
 
@@ -290,36 +299,34 @@ CREATE TABLE etf_holdings (
 
 ## 7. 桑基图模板(D4 示例)
 
+**以下为 M3 落地后的实际 schema**(`internal/prism/sankey/template.go`),相对本节初稿**移除了 `flow` / `data_mapping` / `render` 三段**,理由见下方 AD-5 说明:
+
 ```yaml
 # configs/prism/templates/msft.yaml
+# Prism 财报桥模板:只定义分部与 XBRL member 映射。
+# 主干流(收入→毛利→营利→净利)不在此配置(AD-5),由 periods 引擎从 fundamental_q 自动构建。
+# xbrl_member = 实例文档 explicitMember 去命名空间后的 local name。
 company: MSFT
-cik: "0000789019"
-currency: USD
-structure:
-  revenue_segments:                  # 左侧收入来源
-    - key: productivity
-      name_zh: 生产力与业务流程
-      name_en: Productivity and Business Processes
-    - key: intelligent_cloud
-      name_zh: 智能云
-      name_en: Intelligent Cloud
-    - key: personal_computing
-      name_zh: 更多个人计算
-      name_en: More Personal Computing
-  flow:                              # 收入 → 毛利 → 营业利润 → 净利
-    - revenue -> [cogs, gross_profit]
-    - gross_profit -> [opex, operating_income]
-    - opex -> [rnd, sales_ga]
-    - operating_income -> [tax_other, net_income]
-data_mapping:
-  source: edgar_segment              # 优先 XBRL segment, 失败转 manual
-  fallback: manual
-render:
-  default_lang: zh
-  color_scheme: msft                 # 复用图7的绿=利润/红=成本配色
+cik: "789019"                                  # 纯数字,不带前导零填充
+segment_axis: StatementBusinessSegmentsAxis    # 可省略,默认即此值
+version: 1                                     # 分部口径重述时递增(§10 断点机制)
+segments:
+  - {key: productivity,       name_zh: 生产力与业务流程, name_en: Productivity and Business Processes, xbrl_member: ProductivityAndBusinessProcessesMember}
+  - {key: intelligent_cloud,  name_zh: 智能云,          name_en: Intelligent Cloud,                   xbrl_member: IntelligentCloudMember}
+  - {key: personal_computing, name_zh: 更多个人计算,     name_en: More Personal Computing,             xbrl_member: MorePersonalComputingMember}
+# since_fy: 2024                               # 可选,该模板版本自哪个财年起生效
 ```
 
-新增一家公司 = 新增一个 YAML + 校验一次数据,预计 30 分钟/家。
+**AD-5 — 主干流不进模板。** 初稿的 `flow` 段(revenue→cogs/gross_profit→opex/operating_income→tax/net_income)对**所有公司完全同构**,且这些科目已由 companyfacts 扩展科目落进 `fundamental_q`。写进模板等于让每家公司重复抄一遍同样的结构,并制造「模板写的流 ≠ 引擎实际构建的流」这一类脱节风险。故主干流由 `periods` 引擎硬编码构建,模板只负责**左侧分部定义与 XBRL member 映射**这一真正逐家不同的部分。
+
+同时移除的另两段:`data_mapping`(`source: edgar_segment` / `fallback: manual`)不必逐家声明——刷新编排固定「先自动解析、失败转 manual」;`render`(语言/配色)属前端展示偏好,已落在页面交互(中英切换按钮)与统一主题里,不需要每家配一份。
+
+**逐家真正要填的只有两件事**:该公司的分部维度轴、以及各分部的 member 名。两者都必须**读真实实例文档实测确定,不能靠猜**,M3 首批模板的两类实测陷阱:
+
+- **默认轴对部分公司零产出**:AAPL/NVDA 的**可报告分部**挂在 `ConsolidationItemsAxis × StatementBusinessSegmentsAxis` 的**双 member** context 上,而解析器只收「恰好一个 `explicitMember`」的 context(避免交叉维重复计数),故默认轴对它们**零产出**。改用单 member 的 `ProductOrServiceAxis`(产品线/市场平台维度)才可解析,且更适合收入桑基。
+- **必须排除汇总项 member**:实例文档里汇总 member 与其明细 member 并存(实测 AAPL `ProductMember` = iPhone+Mac+iPad+Wearables;NVDA `DataCenterMember` = Compute+Networking,均分毫不差)。一并映射会重复计算——AAPL 朴素合计为真实营收的 **1.74 倍**、NVDA 为 **1.90 倍**。模板只映射互不重叠的项,汇总 member 会作为「未映射 member」进 refresh 的 Degraded 文本,**属预期行为**。
+
+新增一家公司 = 新增一个 YAML + 用实例文档校验一次数字(Σ 分部 = 合并营收) + **重启 serve**(模板在启动时读入一次)。改模板后重拉历史数据需 `atlas prism refresh --full-segments`(AD-12)。
 
 ---
 
@@ -386,7 +393,23 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 - 明确不做:plist 注入 proxy env 的代理方案——引入「代理进程可用性」这一新故障面,劣于客户端自愈;Stooq 备源仍按 §10 既有条目独立演进。
 - **发布后记(2026-07-25,v1.4.1)**:节流+退避已上线并保留,但「不做代理」的前提被证伪——launchd 直连复测仍 20 failed,区分实验证实根因是 **yahoo 对本机直连出口的持续 IP 级 403 封禁**(非突发限流,客户端自愈无解)。经用户决策改为「代理先行+Stooq 立项」:6 个 yahoo 依赖服务 plist 注入代理 env(含 no_proxy 豁免本机侧车)后 launchd 实测 `25 ok, 0 failed, 5 degraded`(degraded=EDGAR tag 差异类,见 §10)。附带发现并救回 refresh-us 主管线(已静默停更 ~23 天)。
 
-**M3 — 财报桥主线(2~3 周;2026-07-25 拆批决策,计划见 `docs/superpowers/plans/2026-07-25-prism-m3.md`)**
+**M3 — 财报桥主线(已落地;2026-07-25 拆批决策,计划与验收记录见 `docs/superpowers/plans/2026-07-25-prism-m3.md`)**
+
+落地状态一览(判定对象 `ba40d70`,20 个任务 / 30 个 commit;**验收按 AD-7 二分,「实测」与「待人工验收」不混称**):
+
+| M3 范围项 | 状态 | 实测证据 / 缺口 |
+|---|---|---|
+| EDGAR tag 回退扩展 + Degraded 明细日志 | ✅ 已落地 | 回退链与明细打印均有单测 + 变异守护;**COST/V/CRM/WMT/AVGO 的生产实效未在本 sprint 实测**(不在首批模板池内),待人工在 prism-daily 日志确认 |
+| `internal/prism/sankey` 模板加载/校验/填充 + 主干流自动构建 | ✅ 已落地 | 模板 schema 见 §7(含 AD-5);主干流由 periods 引擎从 `fundamental_q` 构建,不进模板 |
+| 分部营收 XBRL filings 自动解析(submissions + 实例文档) | ✅ 已落地 | 见 D4 现实注记;首批 **5/5 全自动解析成功** |
+| manual YAML 兜底 | ⚠ 已实现但**无实证** | 5/5 自动成功 → `configs/prism/segments/` 目录至今未创建,该路径本 sprint **未被触发验证** |
+| 多期分析(§5.6:范围并行 / 小倍数网格 / 对比矩阵 / 智能对比上下文 / 年报由季度聚合) | ✅ 已落地 | 引擎侧有单测与变异守护(含 TASK-016/017 的标签冲突与跨季相加防御);**页面渲染效果待人工目检** |
+| 首批模板 5~10 家 | ✅ **下限达成:5 家**(MSFT/AAPL/GOOGL/AMZN/NVDA) | 逐家经真实 10-K/10-Q 实例文档实测(Σ 分部 = 合并营收);**META/TSLA/AVGO/LLY 未做;TSM 为 IFRS/20-F,自动解析不适用,未纳入本批** |
+| `/prism/fundamental` 财务趋势页 + `price_daily` 落库 | ✅ 已落地 | HTTP 200、DOM 锚点、404 语义均有变异守护;**双轴目视、中英切换、曲线形态待人工验收** |
+| 堆叠柱状图 + PNG 导出 | ✅ 已落地,**位置与本节初稿不同** | 两者都在**桑基页**(`sankey-stack` + 单期图/堆叠图各一个 `saveAsImage` toolbox);`/prism/fundamental` 页是否需要 PNG 导出未列入其 DoD,**未做**。**实际导出行为待人工验收** |
+| **null 语义的三处缺口(M-1/M-2/M-3)** | ⚠ **无自动化守护,已立人工验收清单** | 纯 JS 逻辑 Go 测试无法执行;静态守卫止于文本级。三处经变异实证「存活 0/10」,清单见计划文件验收记录 §3.2 |
+| Stooq 备源 / ETF 成分聚合(D3) | ➡ **移出 M3,归 M3.5** | 见下 |
+
 - **EDGAR tag 回退扩展(前置,2026-07-25 立项)**:EPS tag 回退链(EarningsPerShareBasicAndDiluted → NetIncome÷DilutedShares 推算)与股本/equity tag 扩展,救回 COST/V/CRM/WMT 的 EDGAR 全功能与 AVGO 的 PB;同时给 prism refresh 日志打印 Degraded/Failed 明细(观测缺口)。财报桥依赖 fundamental_q 数据完整性,故置于主线首位。
 - `internal/prism/sankey` 模板加载/校验/填充 + ECharts 桑基渲染;主干流(收入→毛利→营利→净利)由 companyfacts 扩展科目全自动。
 - **分部营收数据源(2026-07-25 用户决策)**:companyfacts API 不含分部(segment)维度——走 **XBRL filings 自动解析**(submissions API + 报告实例文档),公司自定义 member 名在模板中映射(即 D4「XBRL tag 映射」本义),manual YAML 数据文件兜底;任一公司解析失败转 manual,不阻塞交付。

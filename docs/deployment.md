@@ -309,6 +309,42 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
   详情页同源继承缺陷，后续与既有页统一修复（如同源会话票据或页面注入 key）；`/prism/board`
   为服务端渲染不受影响。
 
+### 财报桥模板目录 `configs/prism/`（M3 新增）
+
+财报桥（`/prism/sankey/<symbol>`）的分部结构由 YAML 配置驱动，**目录路径是代码常量、不在
+`config.yaml` 里**（`cmd/atlas/serve.go` 与 `cmd/atlas/prism.go`），且为**相对路径**，按进程
+cwd 解析——与 `db_path` 同样的约束，须在 runtime 目录内运行（launchd `WorkingDirectory` 已指向
+runtime）。
+
+| 目录 | 内容 | 缺失时的行为 |
+|---|---|---|
+| `configs/prism/templates/*.yaml` | 逐家的分部定义与 XBRL member 映射（schema 见设计 §7） | 目录不存在或无 yaml → **桑基服务不启用**，日志 `prism sankey disabled: no templates configured`；`/prism/sankey/*` 与 `/api/prism/sankey` 路由**仍注册**并返回 404（JSON API 返 JSON 404），不 panic、不影响其余 prism 页面 |
+| `configs/prism/segments/*.yaml` | 自动解析失败公司的 manual 兜底分部数值（按 `{symbol}.yaml` 小写命名） | 目录/文件不存在是**合法状态**（返回空集，不报错）。**当前首批 5 家全部自动解析成功，故该目录尚未创建** |
+
+- **rsync 白名单确认（结论：无需改 `deploy.sh`）**：`scripts/ops/deploy.sh` 的 rsync 用的是
+  **exclude 黑名单**而非白名单，`configs/` 不在任何 `--exclude` 中，因此 `configs/prism/`
+  **随 `deploy.sh` 自动同步到 runtime**，新增模板无需改部署脚本。三个连带事实：
+  1. `--delete` 生效——**从开发仓删掉一个模板，下次 deploy 会同时删掉 runtime 副本**；反过来，
+     只在 runtime 手写的模板会被下次 deploy 抹掉（与 `config.yaml` 同一纪律：**真相源在开发仓**）。
+  2. rsync 带 `-m`（prune empty dirs），**空目录不会被同步**——建了 `configs/prism/segments/`
+     却没放文件时，runtime 侧不会出现该目录。这不影响功能（缺目录是合法状态）。
+  3. 模板是 `.yaml`、不受 `--exclude='*.go'` 影响；`configs/config.yaml` 的 600 权限收紧只作用于
+     该文件，模板目录无密钥、保持默认权限。
+- **改模板后必须重启 serve**：模板在**启动时读入一次**（`sankey.LoadTemplates`），常驻进程不会
+  热加载。新增/修改模板后执行
+  `launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve`。
+  页面上「未配置模板」的 404 文案也明确写了「添加模板 YAML 后重启服务」。
+- **模板写坏会导致整个桑基服务不启用（而非只坏一家）**：`LoadTemplates` 对**格式错误的 YAML**
+  与**重复 company**返回 error，serve 记 `prism sankey disabled: loading templates failed` 并带
+  文件名继续运行。**故 deploy 后应查一次启动日志**确认 `prism sankey enabled templates=N` 的 N
+  与模板文件数一致——否则症状是「桑基页全体 404」，而不是某一家异常。
+- **改模板后要重拉历史分部数据**：分部刷新默认走增量锚点，改了 member 映射不会自动重算历史，
+  须显式跑 `bin/atlas prism refresh --full-segments -c configs/config.yaml`（AD-12）。
+- **未映射的汇总 member 会进 Degraded 文本，属预期**：如 AAPL 的 `ProductMember`、NVDA 的
+  `ComputeMember`/`NetworkingMember` 是明细项之和，模板刻意不映射（映射会重复计算，实测朴素合计
+  达真实营收的 1.74x/1.90x）。**看到这类 Degraded 条目不必处置**；真正需要关注的是某家公司
+  分部行数为 0（解析失败 → 应转 manual 兜底）。
+
 ### AKShare 侧车（aktools）部署要点
 
 Prism 的 A/H 公司(茅台/腾讯)与 A 股指数兜底数据源经本地 aktools HTTP 侧车拉取
