@@ -801,6 +801,9 @@ func TestBuildSankeyNaNStaysNaN(t *testing.T) {
 }
 
 // period_end 解析不了时不能猜：既不当作同一季合并，也不能崩。
+// 覆盖的是**真实数据形态**（合法桶与垃圾桶并存）；分支可达性由下面那个用例负责，
+// 两者不可互相替代——本用例里 segmentsAt 可能先遍历到合法桶就返回，
+// 于是 sameQuarter 的解析失败分支只是**概率性**地被执行（AD-27）。
 func TestBuildPeriodsUnparsablePeriodEnd(t *testing.T) {
 	funds := []prismstore.FundamentalRow{
 		fq("2026Q3", "2026-03-31", 70*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
@@ -813,6 +816,48 @@ func TestBuildPeriodsUnparsablePeriodEnd(t *testing.T) {
 	got, conflicts := BuildPeriods(funds, segs, "q")
 	require.Len(t, got, 1)
 	assert.InDelta(t, 34*b, got[0].Segments["cloud"], 1, "无法解析的期末不得被并进本期")
+	assert.NotEmpty(t, conflicts, "解析不了就当作不同季度，并记录冲突")
+}
+
+// 上一个用例的守护是概率性的：segmentsAt **命中即返回**，只要桶集合里还有一个能匹配上
+// 的合法桶，Go map 的随机遍历起点就可能让不可解析的桶根本不被送进 sameQuarter
+// ——「不可解析的期末被并进本期」这个真实错误因此只有部分跑动能抓住（AD-27）。
+//
+// 本用例把它改成**结构性保证**：桶集合里**只有**不可解析的那一个。
+// sameQuarter 的 time.Parse 失败分支被执行的充要条件是
+//
+//	(1) 循环体以某个 bucketEnd 执行；
+//	(2) bucketEnd != 本期 period_end（否则 sameQuarter 在 a == b 处就返回了）；
+//	(3) bucketEnd 不可被 time.Parse 解析。
+//
+// 一元 map 的遍历必然且仅有一次访问该键，不存在「另一个桶抢先返回」的可能，故 (1) 必然成立；
+// (2)(3) 是 fixture 的静态性质，与遍历顺序无关。三条合起来使该分支**必然**执行。
+// 这三条前提由下面的 require 自检锁住：后人若往 fixture 里加一个合法桶、或把桶的期末
+// 改成本期期末/改成合法日期，会立刻报错，而不是悄悄退回概率性守护。
+func TestBuildPeriodsOnlyUnparsableSegmentBucket(t *testing.T) {
+	funds := []prismstore.FundamentalRow{
+		fq("2026Q3", "2026-03-31", 70*b, 45*b, 32*b, 25*b, 8*b, 7*b, 5*b),
+	}
+	segs := []prismstore.SegmentRow{
+		sr("2026Q3", "n/a", "cloud", 26*b), // 本标签下**唯一**的桶，且不是日期
+	}
+
+	ends := make(map[string]bool)
+	for _, s := range segs {
+		ends[s.PeriodEnd] = true
+	}
+	require.Len(t, ends, 1, "只能有一个分部桶：多一个能匹配的桶，segmentsAt 就可能短路返回")
+	for end := range ends {
+		require.NotEqual(t, funds[0].PeriodEnd, end, "桶的期末必须与本期不同，否则 sameQuarter 在 a == b 处就返回了")
+		_, err := time.Parse(time.DateOnly, end)
+		require.Error(t, err, "桶的期末必须不可解析，否则走不到 time.Parse 失败分支")
+	}
+
+	got, conflicts := BuildPeriods(funds, segs, "q")
+
+	require.Len(t, got, 1, "分部对不上不影响主表行照常产出")
+	assert.InDelta(t, 70*b, got[0].Revenue, 1, "主表数字与分部无关")
+	assert.Empty(t, got[0].Segments, "不可解析的期末不得被并进本期：对不上就是没有分部数据，不能拿垃圾期末的值顶上")
 	assert.NotEmpty(t, conflicts, "解析不了就当作不同季度，并记录冲突")
 }
 
