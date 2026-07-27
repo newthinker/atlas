@@ -1,0 +1,141 @@
+{
+  "task_id": "TASK-004",
+  "title": "修复 /prism/fundamental 双轴叠加的时间轴错位：股价按报告期末重采样，与指标共用同一条 x 轴",
+  "owner": "dev-agent-31",
+  "predecessor": "dev-agent-30（epoch=1，代码工作全部由它完成；因 API 错误中断于 dev_done 之前。dev-agent-31 于 epoch=2 接手，独立复核后落盘）",
+  "outcome": "修复完成。错位从根上消除：图上只剩一条 x 轴，两条序列共用同一组报告期刻度，「同一横向位置 = 同一时间」由结构保证而非靠巧合。",
+  "key_findings": [
+    "**根因是「两条 category 轴」而不是「对齐算法不准」**。ECharts 的 category 轴按**索引**均匀铺开、dataZoom 又按**百分比**作用于索引，所以 71 个季度（2009Q1–2026Q3，17.5 年）与 2513 个交易日（2016-07-26–2026-07-24，10 年）被拉伸到同样的图宽，只在最右端偶然对齐，越往左偏越多（0% 处差 7.5 年）。这类缺陷没有「调准」的余地——只要两条轴各自按自己的索引铺开，任何缩放状态下的对应关系都是错的。因此修复方向必须是**消除第二条轴**，而不是在两条轴之间做映射。",
+    "**修复后的对齐是结构性的，不是数值性的**。单条 x 轴之下，两条序列吃的是同一组下标，dataZoom 作用于这组下标时对两条序列完全等效——「拖动后错位」这个失败模式在实现层面**不再存在**，而不是「被测出来是对的」。这也是 functional[2]（M-5 原始要求）能被模板配置断言间接覆盖的原因：只要模板里没有 xAxisIndex / xAxis.push，就没有第二条轴可错位。",
+    "**fiscal label 不能当日历季度解析**。COST 这类财年错位的标的，「2026Q1」实际结束于 2025-09-30；sankey 的测试 fixture 里 2026Q1 同样结束于 2025-09-30。要把报告期放到真实时间轴上重采样，必须拿 DB 里的 `period_end` 列，不能从标签推。这是 FundamentalView 新增 PeriodEnds 字段的**唯一**理由。",
+    "**把重采样放在服务端（Go）是为了让 functional[0] 的核心判定可被自动化测试**。AD-7 记载 go.mod 无 JS 引擎、JS 逻辑测不了。日期比较、休市回退、过期判定这三件事如果写在模板 JS 里，functional[0] 就只剩人工验收；写在 Go 里，它们变成 12 个子用例、100% 语句覆盖的普通单测。这是 non_functional[1]「哪些进自动化」的**主动设计**，不是事后妥协。",
+    "**/api/prism/fundamental 的响应逐字段未变**。api handler（internal/api/handler/api/sankey.go:111）自己构造 map，显式列出 dates/closes，不序列化整个 FundamentalView——所以给 struct 加 PeriodEnds 字段不会漏进 API 响应，日频数据对 API 消费方仍然完整可得。改的只是**页面 payload**。"
+  ],
+  "decisions": [
+    {
+      "decision": "选路径 (b)（报告期重采样 + 单条共享 category 轴），而非 (a)（改用 type: 'time' 轴保留日频股价）",
+      "rationale": "**说明：dev-agent-30 的 checkpoint 只记录了「选路径 (b)」这个结论，未留下推理过程。以下理由由 dev-agent-31 依据模板实际结构重建并逐条核实，如与前任本意有出入，以下述代码事实为准。**\n\n(a) 会与这个页面既有的三处设计正面冲突：\n\n1. **年度粒度视图没有单一日历时点可用**。`state.gran` 可切「年度」，此时 annualSum() 把 4 个季度聚合成 1 个点（17 个点），标签取该年最后一个季度的 fiscal label。一个「全年营收」的和**不属于任何一天**；要放上 time 轴就得给它编一个日期，而「给聚合值编一个时间位置」正是本任务在修的那类静默失真——换个地方再犯一次。\n2. **柱状图**。`state.kind` 可选 bar。time 轴按真实间隔画柱，季度长度 90/91/92 天不等，财年错位标的的报告期又不落在日历季度边界上，柱子会宽窄不一甚至重叠；category 轴才是柱状图的自然坐标系。\n3. **缩放时页面主体会消失**。(a) 若保留 2513 个日频价格点，dataZoom 缩到一个窄区间时可能一个财报点都不在视野内——而财报指标才是这个页面的主题，价格只是叠加参考。\n\n选 (b) 的代价（损失日内/日间波动）之所以可接受，是因为**这个页面的分析单位本来就是报告期**：它回答「这一期的营收变化时股价在什么水平」，不回答「这一天股价怎么走」。日频股价另有个股详情页承载，且 /api/prism/fundamental 仍原样返回完整日频序列——数据一点没丢，只是不在这张图上画。"
+    },
+    {
+      "decision": "重采样规则：取 ≤ period_end 的最近一个报价，且距期末不超过 7 天；否则 NaN（**不左延、不右延、不跨空洞**）",
+      "rationale": "三条边界各有独立理由，缺一条就会造出一种新的静默错误：\n\n- **不右延**（只取 ≤ period_end）：拿期末之后的报价解释这一期的财报，等于用**当时还不存在**的价格解释过去的报表。\n- **不左延**（j < 0 时返回 NaN 而非 closes[0]）：把最早的收盘价向左延伸 7 年，就是把「越往左偏得越多」换一种写法重犯——图上会出现一条从 2009 年就存在的假股价线。COST 的真实形态正是这样：营收从 2009Q1 起，股价从 2016-07-26 起。\n- **7 天窗口**：一周是所有现实休市的上界（长假、9/11 后停市四个交易日都在一周内）。超过一周就不是休市，而是这个标的的价格没同步上；此时画一段横线会被读成「市场很平静」，真相却是「数据卡住了」。7 天让「休市」与「缺数据」这两件事在图上表现不同——前者取前一交易日、后者断开。\n- **不跨空洞**：序列中间的缺口同理，拿 5 月的收盘价代表 6 月末，图上看不出任何异样。"
+    },
+    {
+      "decision": "FundamentalView 新增 PeriodEnds 字段承载报告期的日历日期，而不是在页面侧解析 fiscal label",
+      "rationale": "见 key_findings 第 3 条：财年错位的标的（COST）里 fiscal label 与日历季度可以差一整个季度，解析标签会得到系统性偏移一期的股价——又是一个「落在合理区间、不抛错」的静默错误。DB 里本来就有 period_end 列，原样带出是零成本的。TestFundamentalPeriodEnds 用一个 2026Q1 结束于 2025-09-30 的 fixture 钉住这一点。"
+    },
+    {
+      "decision": "页面 payload 去掉日频 dates/closes，只送重采样后的 period_closes",
+      "rationale": "日频序列正是当初逼出第二条 x 轴的东西；留着它，将来任何人都可能顺手再把它画上去、错位复现。同时 2500 个不参与绘图的点内联进 HTML 是纯粹的死重量。测试用 `assert.NotContains(page, \"data.dates\")` 把这条钉死，并在断言消息里写明「若要恢复日频股价，必须同时换成 time 轴，否则错位回归」——把约束连同理由一起留在失败信息里。API 侧不受影响（见 key_findings 第 5 条）。"
+    },
+    {
+      "decision": "在页面说明文字里主动写明「期内的日间波动不在本图显示（需要日频请看个股详情页）」",
+      "rationale": "**这是刻意的处置，不是遗漏。** 原缺陷最要命的地方不是对应关系错了，而是**页面上没有任何提示**——用户会把 2009Q1 的营收与 2016-07 的股价读成同一时点。方案 (b) 引入了一个新的信息损失（日频 → 期末），如果同样不作声明，就是用一个静默失真换掉另一个。所以把取舍写在用户看得见的地方：「叠加股价取各报告期末（或其前最近一个交易日）的收盘价，与指标共用同一条时间刻度：同一横向位置就是同一报告期」。"
+    },
+    {
+      "decision": "年度粒度下股价取 annualLast(periodCloses)，与 annualLabels() 取同一个下标 i+3",
+      "rationale": "年度视图把季度按 4 个一组聚合，标签取 periods[i+3]（该年最后一个季度）。股价若不跟着取同一个下标，年度视图会重新引入错位——只是这次是 4 倍粒度的、更难察觉的错位。复用既有的 annualLast()（原本用于 roe_ttm 这类不能求和的比率指标）而不是新写一个，让「同一下标」由代码共享保证。**诚实说明：这条路径在 JS 里，Go 测不到**，只有模板文本断言 + 前任的 node 桩件（17/17）覆盖，真实浏览器下的年度视图仍在人工清单上。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/sankey/service.go（FundamentalView 新增 PeriodEnds []string；Fundamental() 从 rows 带出 r.PeriodEnd）",
+    "internal/prism/sankey/service_test.go（新增 TestFundamentalPeriodEnds）",
+    "internal/api/handler/web/prism_fundamental.go（新增 closesAtPeriodEnds()；页面 payload 由 dates/closes 换成 period_closes）",
+    "internal/api/handler/web/prism_fundamental_test.go（sampleFundamental fixture 补 PeriodEnds）",
+    "internal/api/handler/web/prism_fundamental_align_test.go（**新增**；5 个测试 / 12 个子用例）",
+    "internal/api/templates/prism_fundamental.html（去掉第二条 x 轴与 xAxisIndex；新增 currentCloses()；页面说明补取舍声明）",
+    "internal/api/handler/web/templates/prism_fundamental.html（与上一份逐字节同步，AD-4）"
+  ],
+  "interfaces_exposed": [
+    "sankey.FundamentalView.PeriodEnds []string —— **新增导出字段**；与 Periods 等长同序，是报告期在日历上的真实位置。任何需要把报告期放到时间轴上的下游都应该用它，不要解析 fiscal label。",
+    "closesAtPeriodEnds(periodEnds, dates []string, closes []float64) []float64 —— internal/api/handler/web 包内；把日频收盘价重采样到报告期末。结果长度恒等于 len(periodEnds)（即使价格序列为空），缺失以 NaN 表示。dates 须为升序 ISO-8601（用 sort.SearchStrings，字典序即时间序）。",
+    "页面 payload 契约变更：/prism/fundamental/{symbol} 的内联 JSON 字段由 `dates`+`closes`（日频）改为 `period_closes`（与 periods 等长）。**/api/prism/fundamental 的响应未变**，仍返回完整日频 dates/closes。"
+  ],
+  "verification": {
+    "dod_functional_0": "「同一横向位置 = 同一时间」。**自动化**：TestClosesAtPeriodEnds（12 个子用例钉住重采样本身，收盘价两两不同，错位一格必红）+ TestFundamentalPageAlignsPriceToPeriods（落到真实渲染出的 payload，五个报告期逐个断言 `\"period_closes\":[null,20,30,40,50]`，并显式断言 **NotContains** `[10,20,21,30,40]`——那正是按索引对齐的缺陷形态）。DoD 要求的 0%/25%/50%/75%/100% 五点，在 category 轴上就是这五个索引。PASS",
+    "dod_functional_1": "实现路径 = (b)，理由见 decisions[0]。**自动化**：TestFundamentalChartUsesOneSharedXAxis 对**两份**模板断言无 xAxisIndex / 无 xAxis.push / 有 period_closes / 无 data.dates。PASS",
+    "dod_functional_2": "dataZoom 拖动后仍对齐（M-5）。**自动化只覆盖到结构层面**：单 x 轴之下 dataZoom 对两条序列等效，失败模式被结构性消除，由 TestFundamentalChartUsesOneSharedXAxis 守住「不得再出现第二条轴」。**真实拖动是渲染行为，Go 测不了（AD-7），已列入人工清单。** 部分 PASS + 人工待验。",
+    "dod_boundary_0": "两序列时间范围不重合的部分。**自动化**：TestClosesAtPeriodEnds/「早于价格序列起点：缺失」（含只差一天的相邻用例）+ TestFundamentalPagePriceMissingBeforeFirstQuote（COST 真实形态：`\"period_closes\":[null,null,160]` 且 `\"revenue\":[100,200,300]` 照常——股价缺失不连累指标）。**已被 Leader 的浏览器实测独立确认**：股价 nulls=31，截图显示灰线从 2017Q1 起笔、左侧空白。PASS",
+    "dod_error_0": "closes 为空。**自动化**：TestFundamentalPageEmptyPriceSeries（`\"period_closes\":[null,null]` 长度仍等于 periods、`\"revenue\":[900,950]` 照常、`id=\"price-toggle\"` 仍在）+ TestClosesAtPeriodEnds 的「整条价格序列为空」「没有报告期」「dates 与 closes 长度不一致」三个不 panic 用例。PASS",
+    "dod_non_functional_0_template_sync": "两份模板 sha256 均为 0af227666bbbc52005d4b337304b305aa28b5e9e00fcfb9ad91595e6d0faf3a5，`diff` 无输出；既有 TestFundamentalTemplateDirsInSync 仍通过。PASS",
+    "dod_non_functional_1_split": "见 automation_vs_manual 节——**这一条要求的正是「不得把测不了的说成测了」，故该节逐项标注了每条 DoD 有多少落在自动化里、多少落在人工清单上**。PASS",
+    "dod_non_functional_2_mutation": "见 mutation 节。8 个变异 × 作用域；dev-agent-31 独立重演其中 3 个确认可复现。PASS",
+    "coverage": "三包 union（./internal/api/handler/web,./internal/api,./internal/prism/sankey）**81.3% ≥ dev_minimum 80**，由 dev-agent-31 用与门禁完全相同的 -coverpkg 命令独立复算得到同一数字。closesAtPeriodEnds **100.0%**；sankey 包 97.8%。未设 coverage_floor（不需要）。",
+    "build_and_lint": "dev-agent-31 提交前自检：`go build ./...` exit 0；`go vet ./internal/api/... ./internal/prism/sankey/...` exit 0；本任务 5 个改动文件 `gofmt -l` 全部干净（仓库另有 25 个**既有**未格式化文件，含同包的 prism_web_test.go——已用 git stash 确认早于本任务存在，未触碰）；全仓 `go test ./...` **exit 0，58 个包 ok，0 FAIL**。"
+  },
+  "automation_vs_manual": {
+    "note": "non_functional[1] 明确要求划分且「不得把测不了的说成测了」。下面按**能不能在 CI 里重复跑**分三档：自动化回归 / 一次性工具核验（改动后须重做）/ 仍待人工。",
+    "automated_regression": [
+      "重采样算法本身 —— TestClosesAtPeriodEnds，12 个子用例（期末当天有报价 / 休市回退 / 早于起点 / 序列末尾之后 / 恰好一周与超过一周 / 内部空洞 / 日期非法 / 价格全空 / 无报告期 / 收盘价为 NaN / 两数组长度不一致）。closesAtPeriodEnds 语句覆盖 100.0%。",
+      "渲染出的页面 payload —— TestFundamentalPageAlignsPriceToPeriods（五点）、TestFundamentalPagePriceMissingBeforeFirstQuote（boundary）、TestFundamentalPageEmptyPriceSeries（error_handling）。走的是真实 HTTP handler，不是直接调函数。",
+      "模板关键配置项（**文本级**，两份模板各查一遍）—— TestFundamentalChartUsesOneSharedXAxis：无 xAxisIndex、无 xAxis.push、有 period_closes、无 data.dates。",
+      "上游数据 —— sankey TestFundamentalPeriodEnds（PeriodEnds 逐值 + 与 Periods 等长）。",
+      "两份模板逐字节一致 —— 既有 TestFundamentalTemplateDirsInSync（AD-4）。"
+    ],
+    "explicitly_not_automated": [
+      "**ECharts 运行后的 option 实际长什么样**。Go 测试断言的是模板**源码文本**里没有 xAxisIndex/xAxis.push——这与「ECharts 真的只建了一条轴」之间隔着一整个 JS 执行。文本断言能挡住「有人把第二条轴写回来」，挡不住「JS 以别的方式又造出一条轴」。go.mod 无 JS 引擎（AD-7）。",
+      "dataZoom 真实拖动后的对齐（functional[2] 的字面要求）。",
+      "connectNulls:false 在缺口处的**视觉**表现（断开 vs 被连成直线）。",
+      "年度粒度切换（currentCloses / annualLast）—— 纯 JS 函数，Go 完全够不着。",
+      "tooltip 在同一横向位置显示的指标与股价是否同属一期。",
+      "页面说明文字对用户的实际可见性与可读性。"
+    ],
+    "one_off_tool_verification_done": [
+      "**Leader 的 chrome-devtools 实测（本会话，探针与当初发现缺陷时完全相同）**：xAxisCount=1（原为 2）；两序列 xAxisIndex 均为 0；两序列 len 均为 71；股价 nulls=31；五点探针 0%(2009Q1) null / 50%(2017Q4) 158.24 / 100%(2026Q3) 1008.79；截图确认灰色股价线从 2017Q1 附近起笔、左侧空白（与错位时「填满整个宽度」形成对比）。**这一项覆盖了 explicitly_not_automated 的第 1 条与第 3 条（左端断点）。**",
+      "**dev-agent-30 的 node 桩件**（{scratchpad}/jscheck/run.js）跑模板 render()：xAxis.length=1、股价 series 无 xAxisIndex、71/71/71 逐点对应、年度视图 17/17。**覆盖了年度粒度**，但是在 node 桩件而非真实浏览器/真实 ECharts 下。",
+      "**dev-agent-30 的 sqlite 直查交叉验证**：COST 页面 period_closes 的 71 个点与 DB 里的 period_end + 最近报价逐点一致（2017Q4 → 2017-09-01 → 158.24），该值与 Leader 浏览器探针读到的 158.24 逐位吻合。"
+    ],
+    "manual_acceptance_checklist_pending": [
+      "**M-5 原始要求**：在浏览器里真实拖动 dataZoom 双端滑块到若干区间，确认指标与股价仍逐点对齐（结构上已不可能错位，但字面要求未在真实浏览器验证过）。",
+      "切到**年度**粒度并勾选叠加股价，确认两条线仍逐点对齐（node 桩件已过 17/17，真实浏览器未验）。",
+      "tooltip：把鼠标停在任意横向位置，确认弹出的指标与股价属于同一报告期。",
+      "**序列内部**空洞处画成断点而非直线（Leader 截图只覆盖了左端起笔前的空白；中间空洞未验，COST 数据里可能不存在这种空洞）。",
+      "页面说明中新增的取舍声明（「期内的日间波动不在本图显示」）在页面上实际可见、位置合理。"
+    ]
+  },
+  "mutation": {
+    "harness": "{scratchpad}/mutation/harness.py（dev-agent-30 编写），结果 {scratchpad}/mutation/result.txt。N=3。",
+    "ad29_scope_selfcheck": "8 条 -run 作用域在**原始代码**上全部「选中 >0 个测试且对照组 0 红」（1/14/12/1/1/1/1/11 个）。选中 0 个测试时 go test 退出 0 且无 FAIL 行，会冒充「存活」——这项自检是读数有意义的前提。",
+    "ad27_restore": "sha256 快照逐字节还原校验（工作区有未提交改动，git diff --quiet 恒为假且会诱使 git checkout -- 抹掉整个任务）。4 个文件还原后全部 OK。",
+    "results_ad28_scope_is_mandatory": [
+      "MUT-1 functional[0] 页面重新直接吃日频 closes（即被修复的缺陷本身）—— KILLED 3/3 @ 新 ^TestFundamentalPageAlignsPriceToPeriods$ | SURVIVED 0/3 @ 旧 TASK-013 全部用例",
+      "MUT-2 functional[0] 重采样过期窗口 7d→700d（拿几个月前的收盘价冒充期末价）—— KILLED 3/3 @ 新 ^TestClosesAtPeriodEnds$ | SURVIVED 0/3 @ 旧 TASK-013 全部用例",
+      "MUT-3 functional[1] 模板改回吃日频序列（放弃报告期重采样）—— KILLED 3/3 @ 新 ^TestFundamentalChartUsesOneSharedXAxis$ | SURVIVED 0/3 @ 旧 TASK-013 全部用例",
+      "MUT-4 functional[2] 给股价重新单开第二条 x 轴（dataZoom 一拖就错位）—— KILLED 3/3 @ 新 ^TestFundamentalChartUsesOneSharedXAxis$ | SURVIVED 0/3 @ 旧 TASK-013 全部用例",
+      "MUT-5 boundary[0] 把最早的收盘价向左延伸 —— KILLED 3/3 @ 新 ^TestFundamentalPagePriceMissingBeforeFirstQuote$；KILLED 3/3 @ 新 ^TestClosesAtPeriodEnds$ | SURVIVED 0/3 @ 旧 TASK-013 全部用例",
+      "MUT-6 error_handling[0] 结果长度跟着价格序列走（无价格时 period_closes 塌成空数组）—— KILLED 3/3 @ 新 ^TestFundamentalPageEmptyPriceSeries$ | **KILLED 3/3 @ 旧 TASK-013 全部用例（例外，如实记录）**",
+      "MUT-8 error_handling[0] 把「该标的没有价格数据」当成服务端错误（500，指标线一起消失）—— KILLED 3/3 @ 新 ^TestFundamentalPageEmptyPriceSeries$ | SURVIVED 0/3 @ 旧 TASK-013 全部用例",
+      "MUT-7 functional[0] 上游 service 不再带出 period_end（页面无从知道报告期落在日历何处）—— KILLED 3/3 @ 新 ^TestFundamentalPeriodEnds$ | SURVIVED 0/3 @ 旧 sankey Fundamental 用例"
+    ],
+    "mut6_exception_honestly_recorded": "MUT-6 在**旧**作用域也 3/3 红，即这个变异不是只有新用例才抓得住——旧的 TASK-013 用例本来就会因为 period_closes 长度塌陷而失败。这不影响 error_handling[0] 有判别力（MUT-8 在旧作用域 0/3、新作用域 3/3，是干净的对照），但按 AD-28 必须连作用域一起记，不能只报「8 个全 KILLED」把这个例外藏掉。",
+    "independent_replay_by_dev_agent_31": "dev-agent-31 在落盘前独立重演了 3 个变异（前任没有机会做最终自检）：**MUT-4**（模板重新加 xAxisIndex: 1）→ TestFundamentalChartUsesOneSharedXAxis FAIL；**MUT-2**（maxStale 7d→700d）→ TestClosesAtPeriodEnds 3 个子用例 FAIL；**MUT-5**（j<0 时改为 j=0，左延）→ TestFundamentalPagePriceMissingBeforeFirstQuote FAIL。每次以备份文件还原并用 `shasum -a 256 -c` 校验，3 次全部 OK——**工作区确认无变异残留**（4 个文件 sha256 与 harness 记录的还原值逐位一致）。"
+  },
+  "cost_disclosure": {
+    "what_is_lost": "股价从 2513 个日频点降到 71 个报告期末点（COST 实测）。期内的日间波动、盘中高低点、财报窗口之间的走势在这张图上**看不到了**。",
+    "why_acceptable": "这个页面的分析单位本来就是报告期——它回答「这一期的营收变化时股价在什么水平」，不回答「这一天股价怎么走」。见 decisions[0]。",
+    "not_a_data_loss": "日频数据一点没丢：/api/prism/fundamental 仍原样返回完整的 dates/closes（handler 显式构造 map，未受 struct 变更影响）；个股详情页承载日频视图。只是不在这张图上画。",
+    "disclosed_to_user": "**已在页面说明里主动写明**：「叠加股价取各报告期末（或其前最近一个交易日）的收盘价，与指标共用同一条时间刻度：同一横向位置就是同一报告期；期内的日间波动不在本图显示（需要日频请看个股详情页）。」这是刻意处置——原缺陷最致命处正是「错了却毫无提示」，新方案引入的信息损失若同样不作声明，就是用一个静默失真换掉另一个。"
+  },
+  "notes_for_downstream": [
+    "**想恢复日频股价的人请先读这条**：把 dates/closes 加回页面 payload 并画上去，会立刻重现本任务修的错位——除非**同时**把 x 轴换成 type:'time'，而那会连带撞上年度聚合视图（聚合值没有单一日历时点）和柱状图（不等宽间隔）。测试里 `assert.NotContains(page, \"data.dates\")` 的失败消息写了这句话。",
+    "**PeriodEnds 是把报告期放到时间轴上的唯一正确来源**。不要从 fiscal label 解析日历季度：COST 这类财年错位标的会差一整个季度，且错得毫无迹象。",
+    "closesAtPeriodEnds 假设 dates 升序（用 sort.SearchStrings，靠 ISO-8601 字典序 = 时间序）。若将来有数据源给出乱序日期，这个函数会静默取错值——上游若不再保证升序，必须在这里加显式排序或断言。",
+    "7 天过期窗口是「休市」与「数据缺口」的分界线，不是可随手调的美观参数。调大它会让「价格没同步上」伪装成「市场很平静」。",
+    "**functional[2]（dataZoom 拖动）与年度粒度对齐仍在人工清单上**——它们的自动化覆盖只到「模板文本里没有第二条轴」这一层。任何改动 render() / currentCloses() / annualLast() 的人都必须重做那两项人工验收，Go 测试全绿不代表它们没坏。",
+    "本任务的三档验证划分（自动化 / 一次性工具核验 / 待人工）可作为后续 web 模板类任务的模板：go.mod 无 JS 引擎（AD-7）这个约束不会自己消失，每个 web 任务都得做一次同样的诚实划分。"
+  ],
+  "post_simplifier_reverification": {
+    "why_this_section_exists": "全局规范要求 commit 前跑 code-simplifier。它**确实改了代码**，而 dev_done 门禁（以及 dev-agent-30 的整轮变异测试）跑的是**改动之前**的字节。因此本节记录改动内容与改后重跑的完整结果——不重跑就等于用旧证据背书新代码。",
+    "change": "internal/api/handler/web/prism_fundamental.go 中 closesAtPeriodEnds 的二分查找：`j := sort.SearchStrings(dates[:n], end); if j == n || dates[j] != end { j-- }` 改为 `j, quoted := slices.BinarySearch(dates[:n], end); if !quoted { j-- }`（import sort → slices）。仅此一处，2 行。",
+    "behavioral_equivalence": "slices.BinarySearch 与 sort.SearchStrings 返回同一个插入位（重复值取最早位置），额外返回 found 标志；j==n 时 found==false，仍走 j-- 落到最后一个元素，与原 `j == n || dates[j] != end` 的短路语义逐分支等价。Go 1.24.4，slices 自 1.21 起在标准库。**未触碰**任何模板、JSON 字段名、重采样规则。",
+    "reverification_by_dev_agent_31": [
+      "go build ./... exit 0；go vet ./internal/api/... ./internal/prism/sankey/... exit 0",
+      "gofmt -l 本任务 5 个文件全干净",
+      "全仓 GOTOOLCHAIN=local go test ./... **exit 0 / 0 FAIL**",
+      "三包 union 覆盖（与门禁完全相同的 -coverpkg 命令）仍为 **81.3%**；closesAtPeriodEnds 仍 **100.0%** —— 即门禁若此刻重跑同样会过",
+      "两份模板 sha256 仍为 0af227666bbbc520...（simplifier 未触碰模板，parity 由构造保持）",
+      "**变异重跑 4 个（含直接落在被改函数上的两个）：MUT-2（maxStale 7d→700d）、MUT-5（j<0 改 j=0 左延）、MUT-1（页面重新直接吃 view.Closes）、MUT-4（模板重开第二条 x 轴）—— 全部仍 KILLED**；对照组（未变异）绿。每次以备份还原并 `shasum -a 256 -c` 校验，3 个文件全 OK，工作区无变异残留。"
+    ],
+    "gate_timing_disclosure": "落盘顺序为 discovery → dev_done（门禁 PASS，81.3%）→ code-simplifier → 重跑验证 → commit。门禁本身未在 simplifier 之后重跑（transition 已是终态 dev_done，无法再次触发），但门禁跑的两件事——三包测试全绿与 union 覆盖 ≥ 80——已由上面同口径的手工命令逐项复现。"
+  }
+}

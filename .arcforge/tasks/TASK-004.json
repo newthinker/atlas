@@ -1,0 +1,71 @@
+{
+  "id": "TASK-004",
+  "title": "修复 /prism/fundamental 双轴叠加的时间轴错位",
+  "description": "**Leader 已用浏览器实测定位，因果明确。本任务是修复。**\n\n## 症状\n\nM3 人工验收项 **M-5**（「dataZoom 双端滑块：拖动后**两条序列仍对齐**（指标与价格不错位）」）**未通过**。而且实测发现问题比 M-5 描述的更根本——**不拖动时就已经错位**：\n\n| 图上位置 | 营收轴显示 | 股价轴显示 | 偏差 |\n|---|---|---|---|\n| 0% | 2009Q1 | 2016-07-26 | ~7.5 年 |\n| 25% | 2013Q3 | 2019-01-24 | ~5.5 年 |\n| 50% | 2017Q4 | 2021-07-22 | ~3.7 年 |\n| 75% | 2022Q2 | 2024-01-22 | ~1.8 年 |\n| 100% | 2026Q3 | 2026-07-24 | 对齐 |\n\n（COST，`atlas serve` 走磁盘模板实测，2026-07-26）\n\n## 根因（已定位到代码行）\n\n`internal/api/templates/prism_fundamental.html:192-199`：\n\n```js\n// 双轴：左轴指标、右轴股价。股价按日、指标按报告期，用第二条 x 轴承载。\nxAxis.push({ type: 'category', data: dates, show: false });\nseriesOpt.push({ name: '股价', ..., xAxisIndex: 1, yAxisIndex: 1, ... });\n```\n\n两条 `category` 轴的**数据点数与时间跨度都不同**（营收 71 点 / 2009Q1–2026Q3 共 17.5 年；股价 2513 点 / 2016-07-26–2026-07-24 共 10 年）。ECharts 的 `category` 轴按**索引**均匀分配横向位置，dataZoom 亦按**百分比**作用于索引 —— 于是两轴只在最右端偶然对齐，**越往左偏差越大**。\n\n## 为什么这是实质缺陷而非美观问题\n\n双轴叠加的**全部意义**就是让人看「营收变化时股价怎么走」。当前实现给出的对应关系是**错的**，且页面上**没有任何提示** —— 用户会把 2009Q1 的营收与 2016-07 的股价读成同一时点。这与本项目反复记录的「静默错误」同族：结果落在合理区间、不抛错、无人告警。",
+  "module": "web",
+  "complexity": "中等",
+  "estimated_files": 3,
+  "packages": [
+    "./internal/api/handler/web",
+    "./internal/api",
+    "./internal/prism/sankey"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "**同一横向位置必须对应同一时间。** 修复后，在任意缩放状态（含未缩放）下，图上任一 x 位置的指标点与股价点所代表的时间必须一致（容差不超过一个报告期）。**验证方式**：取 0%/25%/50%/75%/100% 五个位置，断言两轴对应的时间落在同一季度内——当前实现在 0% 处相差 7.5 年，必须消除。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**实现方式由你定并在 discovery 说明理由**，两条常见路径：(a) 改用 `type: 'time'` 轴让两序列共享同一时间坐标系（ECharts 原生按真实时间定位，跨度不同也不会错位）；(b) 保留 category 轴但把股价按报告期重采样到与指标同一组 x 值。**(a) 保留日频股价的全部细节，(b) 会损失日内波动** —— 选 (b) 须说明为何可接受。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**dataZoom 拖动后仍对齐**（M-5 的原始要求）：拖到任意区间后重复 functional[0] 的五点断言。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**两序列时间范围不重合的部分必须正确处理**：营收有 2009Q1–2016Q2 的数据而股价没有（股价始于 2016-07-26）。该区间内股价应为**断点**（`connectNulls: false` 已在），**不得**把最早的股价值向左延伸、也不得让指标线消失。断言该区间内指标有值而股价为 null。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "股价序列为空（`closes` 为空数组）时，不勾选叠加与勾选叠加都不得报错、不得使指标线消失。V 在 TASK-002 前曾是这种状态，是真实可达的场景。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "两处模板（`internal/api/templates/` 与 `internal/api/handler/web/templates/`）**逐字节一致**（AD-4），既有的同步断言须仍通过。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**JS 逻辑无法在 Go 里直接测**（`go.mod` 无 JS 引擎，AD-7 先例）。故 functional 三条的断言应落在**可测的那一侧**：能用 Go 断言的（如重采样后的数据结构、模板中的关键配置项）走 `verify_by: test`；纯渲染行为进人工验收清单。**在 discovery 中明确划分哪些进了自动化、哪些进了清单**，不得把测不了的说成测了。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "按 AD-27/AD-28：每条 functional 至少一个变异从 SURVIVED 翻 KILLED，**记「N 次中红了几次 @ 作用域」**（AD-28：作用域是必需字段，审查单个用例的判别力时必须 `-run` 收窄）；harness 须有 `-run` 作用域自检（AD-29：选中零测试会冒充存活）与 sha256 还原校验。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "verified",
+  "assigned_to": "dev-agent-31",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-13",
+  "last_transition": {
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-agent-13",
+    "at": "2026-07-26T23:55:06Z"
+  }
+}

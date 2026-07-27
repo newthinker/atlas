@@ -47,7 +47,10 @@
     "dev-agent-28": "e3e7e777c022105ac986d2658f075f30edeb1ec34650402bbc91d4f55e832886",
     "test-agent-11": "e455f25fd04f3d0784f93ac630e1f208555663f790e5c42a47d2dc5fc7dc29cb",
     "dev-agent-29": "1a2ed790b8a74c1d960b86ad5cf615ae5e4364b033f8e7bb1efb0d092a342738",
-    "test-agent-12": "422979e41fe4ff84f263e420e8d68b974fc4be99bd4993124fee2d6a22cd3264"
+    "test-agent-12": "422979e41fe4ff84f263e420e8d68b974fc4be99bd4993124fee2d6a22cd3264",
+    "dev-agent-30": "bce01bfc20cb3e771a416325f3f1486df51e842bc5a6a76c025813d69099c36c",
+    "dev-agent-31": "deb10d50514ef51c0b16f3a144ba8b6be3981923c3fbc79b435cef07da0d82eb",
+    "test-agent-13": "6003268b4e33b0ca13ad1ab1f8cfe573ef70058deca32fed06f9694cc7ec5026"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [
