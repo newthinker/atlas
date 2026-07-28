@@ -1134,6 +1134,37 @@ dev-agent-61 的诊断比 AD-46 正文更进一层：
    **暗示其缺失导致了那次损失**。真实成因是 leader 的两次归属改判 + 消息批量送达；
    第 4 条只会**缓解**，不构成因果。
 
+### AD-47 补充①：记录一个**没发生**的降级，与漏记一个**发生了**的降级，是同一类错误
+
+**实例**：leader 见 `validator-run.sh` 的用法行只有 `<validate|progress>`，
+即准备在 final-report 写「QA 前置的 transition-audit 一支不可用，**已降级**」。
+test-agent-49 驳回并给出调用点：
+
+```go
+// validator/cmd/arcforge-validate/main.go:53-57
+if m, merr := validator.LoadWriteMatrix(matrixPath); merr == nil {
+    issues = append(issues, validator.ValidateTransitionAudit(tasks, m)...)
+} else {
+    fmt.Fprintf(os.Stderr, "注意: %v——跳过 transition-audit(降级,防线 3 未生效)\n", merr)
+}
+```
+
+**`transition-audit` 是 `validate` 的内部规则，不是并列子命令。** 用法行列的是**工具**不是**规则**
+（`[orphan-obligation]` 同样不在用法行里，却照样会打出来）。且**降级路径自带显式告示**——
+本次运行未出现该行、矩阵可读（5680 字节、合法 object）⇒ **它确实跑了，且无发现**（leader 已复核）。
+
+**leader 的错法与本 sprint 早先那次同形**：判据取自「用法行里没有」而不是**调用点**——
+与「grep 套件没有该变量 ⇒ 宣布依赖锚假设被排除」（实际消费者是 harness）**是同一个错误**：
+**查了一个不承载该事实的载体，然后据此下结论。**
+
+**规则**（test-agent-49 提出）：
+
+> **记录一个没发生的降级，与漏记一个发生了的降级，是同一类错误**——都让 final-report 与事实脱节。
+
+⇒ **「如实记录」不等于「宁可多记」。** 本 sprint 一直在防漏记（工具层伪证据、静默假绿），
+**而多记是它的对称失效，且同样没有自发纠正动力**（AD-47 正文：没人会去反驳一个把情况说得更糟的记录）。
+**声明任何降级/缺失之前，必须给出该降级的调用点或其显式告示——「我没找到」不构成「它不存在」。**
+
 ---
 
 ## AD-48：相邻同类项的属性会被默认继承——AD-35 那条链的实际发生
