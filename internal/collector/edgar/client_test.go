@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -365,4 +366,83 @@ func TestFetchCompanyFactsSplitIgnoresNonIntegerRatio(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, facts, 1, "只有 Q1 单季,年度非整数跳变不产生归一化副作用")
 	assert.InDelta(t, 3.0, facts[0].EPSDiluted, 1e-9, "非整数比例不误判为拆股 → EPS 保持原值 3.0")
+}
+
+// [HOTFIX 2026-07-28] edgar 传输层重试 + 空响应误分类(prism-daily 生产告警实录:
+// TLS handshake timeout/EOF 整家失败;XOM 因 200+异常响应被误判为 IFRS filer):
+//   functional[0] 瞬态错误(连接断开→503→200)退避重试后成功 → TestFetchCompanyFactsRetriesTransientErrors
+//   functional[1] 200+空 facts 判为瞬态错误(非 IFRS)且参与重试 → TestFetchCompanyFactsEmptyFactsIsTransient
+//   boundary[0]   IFRS 确定性失败不重试                        → TestFetchCompanyFactsIFRSNoRetry
+//   boundary[1]   4xx(非 429)确定性失败不重试                  → TestFetchCompanyFactsClientErrorNoRetry
+
+func TestFetchCompanyFactsRetriesTransientErrors(t *testing.T) {
+	body, err := os.ReadFile("testdata/companyfacts_mini.json")
+	require.NoError(t, err)
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&attempts, 1) {
+		case 1: // 传输层错误:掐断连接,客户端观察到 EOF
+			hj, ok := w.(http.Hijacker)
+			require.True(t, ok)
+			conn, _, herr := hj.Hijack()
+			require.NoError(t, herr)
+			conn.Close()
+		case 2:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			w.Write(body)
+		}
+	}))
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	c.retryDelays = []time.Duration{0, 0, 0}
+	facts, err := c.FetchCompanyFacts("1045810")
+	require.NoError(t, err, "EOF→503→200 应在重试内自愈")
+	assert.NotEmpty(t, facts)
+	assert.EqualValues(t, 3, atomic.LoadInt32(&attempts))
+}
+
+func TestFetchCompanyFactsEmptyFactsIsTransient(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Write([]byte(`{}`)) // 代理/上游故障形态:200 + 空 JSON
+	}))
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	c.retryDelays = []time.Duration{0, 0}
+	_, err := c.FetchCompanyFacts("34088")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNotUSGAAP, "空响应不得误判为 IFRS filer")
+	assert.Contains(t, err.Error(), "empty companyfacts")
+	assert.EqualValues(t, 3, atomic.LoadInt32(&attempts), "空响应按瞬态处理:1 次原始 + 2 次重试")
+}
+
+func TestFetchCompanyFactsIFRSNoRetry(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Write([]byte(`{"cik": 1, "facts": {"ifrs-full": {"Revenue": {"units": {}}}}}`))
+	}))
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	c.retryDelays = []time.Duration{0, 0}
+	_, err := c.FetchCompanyFacts("1")
+	assert.ErrorIs(t, err, ErrNotUSGAAP)
+	assert.EqualValues(t, 1, atomic.LoadInt32(&attempts), "确定性失败不重试")
+}
+
+func TestFetchCompanyFactsClientErrorNoRetry(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := NewWithBaseURL("ua (t@e.com)", srv.URL)
+	c.retryDelays = []time.Duration{0, 0}
+	_, err := c.FetchCompanyFacts("1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "404")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&attempts), "4xx(非 429)不重试")
 }

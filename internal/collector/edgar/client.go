@@ -70,7 +70,12 @@ type Client struct {
 	// maxInstanceBytes 是单份实例文档的读取上限(AD-11)。做成字段而非常量,只为让测试能压低
 	// 阈值验证截断行为 —— 造 >64MB 的响应在 CI 上不现实。
 	maxInstanceBytes int64
+	// retryDelays 是 companyfacts 瞬态失败(传输层错误/429/5xx/截断或空响应)的退避序列。
+	// 2026-07-28 生产实测:代理链路抖动一次即整家失败,且 200+空响应会被误判为 IFRS filer。
+	retryDelays []time.Duration
 }
+
+var defaultRetryDelays = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
 
 func New(userAgent string) *Client {
 	return NewWithBaseURLs(userAgent, defaultBaseURL, defaultArchivesURL)
@@ -90,6 +95,7 @@ func NewWithBaseURLs(userAgent, baseURL, archivesURL string) *Client {
 		userAgent:        userAgent,
 		archivesURL:      archivesURL,
 		maxInstanceBytes: defaultMaxInstanceBytes,
+		retryDelays:      defaultRetryDelays,
 	}
 }
 
@@ -470,35 +476,75 @@ func normalizeSplits(facts []rawFact, events []splitEvent, invert bool) []rawFac
 	return out
 }
 
-// FetchCompanyFacts downloads and quarterizes the companyfacts of one CIK.
-// Full refetch every call — EDGAR has no incremental API; upserts are
-// idempotent downstream. Results are sorted by PeriodEnd ascending.
-func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
-	url := fmt.Sprintf("%s/api/xbrl/companyfacts/CIK%010s.json", c.baseURL, cik)
+// fetchFactsWithRetry 按 retryDelays 对瞬态失败退避重试;确定性失败(4xx 非 429、
+// 真 IFRS)立即返回。2026-07-28 生产实录:代理→data.sec.gov 链路抖动一次即整家失败,
+// edgar 是当时三个采集器里唯一无重试的客户端。
+func (c *Client) fetchFactsWithRetry(url, cik string) (factsDoc, error) {
+	var lastErr error
+	for attempt := 0; attempt <= len(c.retryDelays); attempt++ {
+		if attempt > 0 {
+			time.Sleep(c.retryDelays[attempt-1])
+		}
+		doc, retryable, err := c.fetchFactsOnce(url, cik)
+		if err == nil {
+			return doc, nil
+		}
+		lastErr = err
+		if !retryable {
+			return factsDoc{}, err
+		}
+	}
+	return factsDoc{}, lastErr
+}
+
+// fetchFactsOnce 单次拉取并解码 companyfacts。retryable 标记瞬态失败:传输层错误、
+// 429/5xx、截断 JSON、200+空 facts —— 2026-07-28 代理链路抖动产出过全部四种形态。
+func (c *Client) fetchFactsOnce(url, cik string) (doc factsDoc, retryable bool, err error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return doc, false, err
 	}
 	// SEC 要求 UA 携带可联系方式,缺失会被 403。
 	req.Header.Set("User-Agent", c.userAgent)
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("edgar: request failed: %w", err)
+		return doc, true, fmt.Errorf("edgar: request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return doc, true, fmt.Errorf("edgar: retryable HTTP status %d for CIK %s", resp.StatusCode, cik)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("edgar: unexpected HTTP status %d for CIK %s", resp.StatusCode, cik)
+		return doc, false, fmt.Errorf("edgar: unexpected HTTP status %d for CIK %s", resp.StatusCode, cik)
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return doc, true, fmt.Errorf("edgar: read companyfacts: %w", err)
 	}
-	var doc factsDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("edgar: decode companyfacts: %w", err)
+		return doc, true, fmt.Errorf("edgar: decode companyfacts (truncated response?): %w", err)
+	}
+	if len(doc.Facts) == 0 {
+		// 200 + 空 facts 是代理/上游故障形态,不是 IFRS filer —— 按 ErrNotUSGAAP 处理
+		// 会把瞬态网络问题报成「公司不支持」(2026-07-28 XOM 误报实录)。
+		return factsDoc{}, true, fmt.Errorf("edgar: empty companyfacts response for CIK %s", cik)
+	}
+	return doc, false, nil
+}
+
+// FetchCompanyFacts downloads and quarterizes the companyfacts of one CIK.
+// Full refetch every call — EDGAR has no incremental API; upserts are
+// idempotent downstream. Results are sorted by PeriodEnd ascending.
+func (c *Client) FetchCompanyFacts(cik string) ([]QuarterlyFact, error) {
+	url := fmt.Sprintf("%s/api/xbrl/companyfacts/CIK%010s.json", c.baseURL, cik)
+	doc, err := c.fetchFactsWithRetry(url, cik)
+	if err != nil {
+		return nil, err
 	}
 	gaap, ok := doc.Facts["us-gaap"]
 	if !ok || len(gaap) == 0 {
+		// Facts 非空但没有 us-gaap 命名空间 → 真·IFRS/外国 filer。
+		// (Facts 全空的「假 IFRS」形态已在 fetchFactsOnce 判为瞬态错误。)
 		return nil, ErrNotUSGAAP
 	}
 
