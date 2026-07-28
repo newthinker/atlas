@@ -262,7 +262,10 @@ prism:
     - {symbol: "V",     name: "Visa",         type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1403161", fallback_source: "engine"}
     - {symbol: "MA",    name: "万事达",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1141391", fallback_source: "engine"}
     - {symbol: "UNH",   name: "联合健康",      type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "731766",  fallback_source: "engine"}
-    - {symbol: "XOM",   name: "埃克森美孚",    type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "2115436", fallback_source: "engine"}
+    # XOM 2026 年控股公司重组:SEC company_tickers.json 已把 XOM 映射到新壳 CIK 2115436
+    # (ExxonMobil Holdings Corp,暂无 us-gaap 事实);全部历史财务在原运营主体 34088 下。
+    # 待新主体开始报 10-Q(约 2026Q3)后复核切换。
+    - {symbol: "XOM",   name: "埃克森美孚",    type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "34088",   fallback_source: "engine"}
     - {symbol: "WMT",   name: "沃尔玛",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "104169",  fallback_source: "engine"}
     - {symbol: "COST",  name: "好市多",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "909832",  fallback_source: "engine"}
     - {symbol: "ORCL",  name: "甲骨文",        type: "stock", market: "US", group: "美股公司", source: "edgar", cik: "1341439", fallback_source: "engine"}
