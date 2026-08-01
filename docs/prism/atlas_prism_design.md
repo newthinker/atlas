@@ -92,11 +92,11 @@ Atlas 实际无 TimescaleDB 实例(go.mod 仅 `modernc.org/sqlite`,hot storage �
 | A/H 公司估值时序+分位 | akshare(`collector/akshare`,经本地 aktools 侧车) | 理杏仁/eastmoney | 日 | ✅ M1 落地;茅台/腾讯经 aktools 拉取(source=akshare) |
 | A/H 指数估值+分位 | 理杏仁(`collector/lixinger`,已有) | akshare(aktools)降级 | 日 | ✅ 复用;理杏仁官方口径主源,不可用时降级 akshare(`fallback_source: akshare`) |
 | 美股宽基指数估值+分位 | 理杏仁(已有) | 成分聚合(D3) | 日 | ✅ 复用;覆盖清单以实测为准(M1 首项任务) |
-| A/H 财务报表科目 | 理杏仁(已有) | eastmoney | 季 | ✅ 复用;供财报桥模板填充 |
+| A/H 财务报表科目 | 东财利润表(`stock_profit_sheet_by_report_em`,经 aktools;含 NOTICE_DATE 真实披露日) | 理杏仁/eastmoney | 季 | ✅ 2026-08-01 落地;累计差分单季;原「理杏仁供填充」路线因公司端点权限改道 |
 | 宏观利率(估值背景) | FRED(`collector/fred`,已有,Cassandra 在用) | — | 日 | ✅ 复用;10Y 收益率用于 ERP 展示 |
 | 美股季报(营收/净利/EPS/股本) | **EDGAR companyfacts(`collector/edgar`)** | yahoo engine 重建 | 季 | ✅ M2 已落地;companyfacts 10Y + 真实 filing date 生效(防前视)+ 拆股归一化;失败降级 yahoo engine |
 | ETF 持仓权重 | 发行商 CSV(`collector/etfholdings`,拟建) | — | 周 | ★ M3(原 M2,经用户决策推迟成分聚合到 M3) |
-| 分部营收(segment) | 公司模板 + EDGAR/理杏仁科目 | 手工录入 | 季 | ★ M3;D4 配置驱动 |
+| 分部营收(segment) | 美股:EDGAR 实例文档解析;A 股:东财主营构成(`stock_zygc_em`,经 aktools) | 手工录入 | 季 | ✅ M3 落地(美股 5 家);✅ 2026-08-01 A 股落地(茅台/招行/东阿阿胶) |
 | 分析师前瞻 EPS | yahoo(已有,补充 info 快照) | — | 快照 | 仅当前值 |
 
 **限频与计费纪律**:yahoo 全量约 600 只(去重后),日线增量每天一次,批量 + 间隔 + 复用现有 `collector/cache`,单日约 700 次,安全——但**日总量安全 ≠ 突发安全**:2026-07-24 v1.4.0 首跑实测,prism-daily 20 家美股背靠背拉 10Y 行情即触发 yahoo 429,且 engine fallback 同依赖 yahoo 形成双失败(对策见 §9 M2.1 与 §10「yahoo 突发限流」)。理杏仁按理杏豆计量:所有请求先查本地库,只拉增量区间,禁止重复请求历史。
@@ -325,6 +325,8 @@ segments:
 
 - **默认轴对部分公司零产出**:AAPL/NVDA 的**可报告分部**挂在 `ConsolidationItemsAxis × StatementBusinessSegmentsAxis` 的**双 member** context 上,而解析器只收「恰好一个 `explicitMember`」的 context(避免交叉维重复计数),故默认轴对它们**零产出**。改用单 member 的 `ProductOrServiceAxis`(产品线/市场平台维度)才可解析,且更适合收入桑基。
 - **必须排除汇总项 member**:实例文档里汇总 member 与其明细 member 并存(实测 AAPL `ProductMember` = iPhone+Mac+iPad+Wearables;NVDA `DataCenterMember` = Compute+Networking,均分毫不差)。一并映射会重复计算——AAPL 朴素合计为真实营收的 **1.74 倍**、NVDA 为 **1.90 倍**。模板只映射互不重叠的项,汇总 member 会作为「未映射 member」进 refresh 的 Degraded 文本,**属预期行为**。
+
+**A 股注记(2026-08-01 落地:茅台/招商银行/东阿阿胶)**——A 股无 EDGAR,财报桥数据走已部署的 aktools 侧车:主干流科目来自东财利润表(累计差分单季,`NOTICE_DATE` 真实披露日防前视,与 EDGAR filing date 同口径);分部来自东财主营构成(按产品分类,同为累计)。三条 A 股特有取舍:① 模板 `xbrl_member` 语义变为**主营构成名称**,`aliases` 收编年份间的名称漂移(实测茅台「系列酒」↔「其他系列酒」、东阿阿胶五个历史名),**差分在映射到 segment_key 之后进行**——否则年内改名处断裂(首跑实锤茅台 2025Q4);② 仅中报/年报披露构成的公司(招行/东阿阿胶)产出**半年块**标 Q2/Q4:年度粒度聚合正确,季度粒度下 Q2/Q4 为半年累计;③ 银行无营业成本科目 → 毛利节点降级显示「—」,营收走 `OPERATE_INCOME` 回退链。
 
 新增一家公司 = 新增一个 YAML + 用实例文档校验一次数字(Σ 分部 = 合并营收) + **重启 serve**(模板在启动时读入一次)。改模板后重拉历史数据需 `atlas prism refresh --full-segments`(AD-12)。
 
