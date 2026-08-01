@@ -666,14 +666,14 @@ func TestRefreshSegmentsDeterministicOrdering(t *testing.T) {
 
 type fakeAkFin struct {
 	profits []akshare.ProfitQuarter
-	blocks  []akshare.SegmentBlock
+	points  []akshare.SegmentPoint
 }
 
 func (f *fakeAkFin) FetchProfitQuarters(symbol string) ([]akshare.ProfitQuarter, error) {
 	return f.profits, nil
 }
-func (f *fakeAkFin) FetchSegments(symbol string) ([]akshare.SegmentBlock, error) {
-	return f.blocks, nil
+func (f *fakeAkFin) FetchSegments(symbol string) ([]akshare.SegmentPoint, error) {
+	return f.points, nil
 }
 
 func maotaiTemplate() map[string]*sankey.Template {
@@ -697,11 +697,11 @@ func TestRefreshSegmentsAkshareSource(t *testing.T) {
 			Revenue: 100, GrossProfit: 70, OperatingIncome: 50, IncomeTax: 10,
 			NetIncome: 40, EPSDiluted: 1.0, RnD: math.NaN(), SGnA: 10,
 		}},
-		blocks: []akshare.SegmentBlock{
-			{FiscalPeriod: "2026Q1", PeriodEnd: end, Name: "茅台酒", Revenue: 80},
-			{FiscalPeriod: "2026Q1", PeriodEnd: end, Name: "其他系列酒", Revenue: 20},
-			{FiscalPeriod: "2026Q1", PeriodEnd: end, Name: "神秘业务", Revenue: 1},
-			{FiscalPeriod: "2025Q4", PeriodEnd: date(2025, 12, 31), Name: "神秘业务", Revenue: 1},
+		points: []akshare.SegmentPoint{ // 累计点,差分由 DiffSegments 在映射后进行
+			{PeriodEnd: end, Name: "茅台酒", Cum: 80},
+			{PeriodEnd: end, Name: "其他系列酒", Cum: 20},
+			{PeriodEnd: end, Name: "神秘业务", Cum: 1},
+			{PeriodEnd: date(2025, 12, 31), Name: "神秘业务", Cum: 1},
 		},
 	}
 	inst := config.PrismInstrument{Symbol: "600519.SH", Name: "贵州茅台", Type: "stock",

@@ -29,12 +29,21 @@ type ProfitQuarter struct {
 	OperatingIncome, IncomeTax, NetIncome, EPSDiluted float64
 }
 
+// SegmentPoint 是主营构成的一个**累计**观测点(未差分)。差分在 DiffSegments 中、
+// 映射到 segment_key **之后**进行——同一业务年内改名(茅台实锤:「系列酒」→「其他
+// 系列酒」)时按原始名差分会在改名处断裂,按 key 差分则天然连续。
+type SegmentPoint struct {
+	PeriodEnd time.Time
+	Name      string // 原始构成名,经 keyOf(模板 xbrl_member/aliases)归一
+	Cum       float64
+}
+
 // SegmentBlock 是差分后的一个分部营收块。半年披露的公司产出半年块,FiscalPeriod
 // 标期末季(H1→Q2、H2→Q4)。
 type SegmentBlock struct {
 	FiscalPeriod string
 	PeriodEnd    time.Time
-	Name         string // 主营构成名称,经模板 xbrl_member/aliases 映射为 segment_key
+	Key          string // 模板 segment_key
 	Revenue      float64
 }
 
@@ -159,20 +168,15 @@ func (c *Client) FetchProfitQuarters(symbol string) ([]ProfitQuarter, error) {
 	return out, nil
 }
 
-// FetchSegments 拉取主营构成(按产品分类)并按构成名差分。差分规则与利润表一致:
-// 单季块/半年块产出,异常跨度丢弃。
-func (c *Client) FetchSegments(symbol string) ([]SegmentBlock, error) {
+// FetchSegments 拉取主营构成(按产品分类)的累计观测点,不做差分——差分须在模板
+// 映射后按 key 进行,见 DiffSegments。
+func (c *Client) FetchSegments(symbol string) ([]SegmentPoint, error) {
 	params := url.Values{"symbol": {mapEMSymbol(symbol)}}
 	rows, err := c.get("stock_zygc_em", params)
 	if err != nil {
 		return nil, err
 	}
-
-	type point struct {
-		end time.Time
-		val float64
-	}
-	byName := map[string][]point{}
+	var out []SegmentPoint
 	for _, row := range rows {
 		if str(row, "分类类型") != "按产品分类" {
 			continue
@@ -185,27 +189,64 @@ func (c *Client) FetchSegments(symbol string) ([]SegmentBlock, error) {
 		if name == "" {
 			continue
 		}
-		byName[name] = append(byName[name], point{end: end, val: fnum(row, "主营收入")})
+		out = append(out, SegmentPoint{PeriodEnd: end, Name: name, Cum: fnum(row, "主营收入")})
+	}
+	return out, nil
+}
+
+// DiffSegments 把累计点经 keyOf 归一到 segment_key 后按 key 差分。规则与利润表一致:
+// 单季块/半年块产出、异常跨度丢弃;同期同 key 多名(改名过渡期并存)累计值相加。
+// 未映射名去重排序返回,供编排层聚合成 Degraded(一名一条,不按期爆炸)。
+func DiffSegments(points []SegmentPoint, keyOf func(name string) (string, bool)) ([]SegmentBlock, []string) {
+	type agg struct {
+		end time.Time
+		cum float64
+	}
+	byKey := map[string]map[string]*agg{} // key → period(YYYY-MM-DD) → 累计
+	unmappedSet := map[string]bool{}
+	for _, p := range points {
+		key, ok := keyOf(p.Name)
+		if !ok {
+			unmappedSet[p.Name] = true
+			continue
+		}
+		if math.IsNaN(p.Cum) {
+			continue
+		}
+		periods := byKey[key]
+		if periods == nil {
+			periods = map[string]*agg{}
+			byKey[key] = periods
+		}
+		d := p.PeriodEnd.Format("2006-01-02")
+		if a := periods[d]; a != nil {
+			a.cum += p.Cum
+		} else {
+			periods[d] = &agg{end: p.PeriodEnd, cum: p.Cum}
+		}
 	}
 
 	var out []SegmentBlock
-	for name, pts := range byName {
+	for key, periods := range byKey {
+		pts := make([]*agg, 0, len(periods))
+		for _, a := range periods {
+			pts = append(pts, a)
+		}
 		sort.Slice(pts, func(i, j int) bool { return pts[i].end.Before(pts[j].end) })
 		for i := range pts {
-			prev, keep := cumSpan(pts, i, func(p point) time.Time { return p.end })
+			prev, keep := cumSpan(pts, i, func(a *agg) time.Time { return a.end })
 			if !keep {
 				continue
 			}
-			cur := pts[i]
-			val := cur.val // 年内首期:累计值本身
+			val := pts[i].cum // 年内首期:累计值本身
 			if prev >= 0 {
-				val = diffNaN(cur.val, pts[prev].val)
+				val = diffNaN(pts[i].cum, pts[prev].cum)
 			}
 			if math.IsNaN(val) {
 				continue
 			}
 			out = append(out, SegmentBlock{
-				FiscalPeriod: fiscalOf(cur.end), PeriodEnd: cur.end, Name: name, Revenue: val,
+				FiscalPeriod: fiscalOf(pts[i].end), PeriodEnd: pts[i].end, Key: key, Revenue: val,
 			})
 		}
 	}
@@ -213,9 +254,14 @@ func (c *Client) FetchSegments(symbol string) ([]SegmentBlock, error) {
 		if !out[i].PeriodEnd.Equal(out[j].PeriodEnd) {
 			return out[i].PeriodEnd.Before(out[j].PeriodEnd)
 		}
-		return out[i].Name < out[j].Name
+		return out[i].Key < out[j].Key
 	})
-	return out, nil
+	unmapped := make([]string, 0, len(unmappedSet))
+	for name := range unmappedSet {
+		unmapped = append(unmapped, name)
+	}
+	sort.Strings(unmapped)
+	return out, unmapped
 }
 
 // str 取 row 中的字符串键,缺失/非字符串返回 ""。

@@ -1,8 +1,10 @@
 # 东阿阿胶 财报桥模板(A 股 akshare 路径;仅中报/年报披露构成 → 半年块标 Q2/Q4)。
+# aliases 收编历史年份构成名漂移(2026-08-01 首跑实测:阿胶系列产品/毛驴养殖及贸易|销售/其他产品)。
 company: 000423.SZ
 version: 1
 segments:
-  - {key: ejiao, name_zh: 阿胶及系列产品, name_en: Ejiao Products, xbrl_member: 阿胶及系列产品}
+  - {key: ejiao, name_zh: 阿胶及系列产品, name_en: Ejiao Products, xbrl_member: 阿胶及系列产品, aliases: [阿胶系列产品]}
   - {key: other_pharma, name_zh: 其他药品及保健品, name_en: Other Pharma, xbrl_member: 其他药品及保健品}
-  - {key: donkey, name_zh: 毛驴养殖及驴肉, name_en: Donkey Farming, xbrl_member: 毛驴养殖及驴肉产品销售}
-  - {key: other, name_zh: 其他, name_en: Other, xbrl_member: 其他, aliases: [其他(补充)]}
+  - {key: trade, name_zh: 医药贸易, name_en: Pharma Trading, xbrl_member: 医药贸易}
+  - {key: donkey, name_zh: 毛驴养殖及驴肉, name_en: Donkey Farming, xbrl_member: 毛驴养殖及驴肉产品销售, aliases: [毛驴养殖及贸易, 毛驴养殖及销售]}
+  - {key: other, name_zh: 其他, name_en: Other, xbrl_member: 其他, aliases: [其他(补充), 其他产品]}

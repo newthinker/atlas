@@ -23,7 +23,7 @@ type SegmentClient interface {
 // segment path (利润表 + 主营构成,2026-08-01).
 type AkshareFinancialsClient interface {
 	FetchProfitQuarters(symbol string) ([]akshare.ProfitQuarter, error)
-	FetchSegments(symbol string) ([]akshare.SegmentBlock, error)
+	FetchSegments(symbol string) ([]akshare.SegmentPoint, error)
 }
 
 // 期间分类阈值,与 edgar 客户端的 isSingleQuarter/isAnnual 同口径。FY 期与季度期在
@@ -380,26 +380,26 @@ func refreshAkshareSymbol(store Store, ak AkshareFinancialsClient, inst config.P
 		return nil, err
 	}
 
-	blocks, err := ak.FetchSegments(inst.Symbol)
+	points, err := ak.FetchSegments(inst.Symbol)
 	if err != nil {
 		return nil, fmt.Errorf("segment composition: %w", err)
 	}
+	// 差分在映射到 key 之后进行(DiffSegments):同一业务年内改名(茅台「系列酒」→
+	// 「其他系列酒」)经 aliases 归一到同 key,差分天然连续,不在改名处断裂。
 	byName := tpl.KeyByName()
-	var rows []prismstore.SegmentRow
-	unmapped := map[string]bool{}
+	blocks, unmapped := akshare.DiffSegments(points, func(name string) (string, bool) {
+		key, ok := byName[name]
+		return key, ok
+	})
+	rows := make([]prismstore.SegmentRow, 0, len(blocks))
 	for _, b := range blocks {
-		key, ok := byName[b.Name]
-		if !ok {
-			unmapped[b.Name] = true
-			continue
-		}
 		rows = append(rows, prismstore.SegmentRow{
 			PeriodEnd: b.PeriodEnd.Format("2006-01-02"), FiscalPeriod: b.FiscalPeriod,
-			SegmentKey: key, Revenue: b.Revenue, Source: "akshare",
+			SegmentKey: b.Key, Revenue: b.Revenue, Source: "akshare",
 		})
 	}
 	var deg []string
-	for _, name := range sortedKeys(unmapped) {
+	for _, name := range unmapped {
 		deg = append(deg, fmt.Sprintf("%s: unmapped segment name %q (add it or an alias to the template)",
 			inst.Symbol, name))
 	}

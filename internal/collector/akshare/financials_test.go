@@ -109,20 +109,60 @@ func TestFetchSegmentsQuarterlyAndHalfYear(t *testing.T) {
 	srv := finServer(t, `[]`, zygc)
 	defer srv.Close()
 
-	blocks, err := New(srv.URL).FetchSegments("600519.SH")
+	points, err := New(srv.URL).FetchSegments("600519.SH")
 	require.NoError(t, err)
+	ident := func(name string) (string, bool) {
+		if name == "丙" || name == "甲" || name == "乙" {
+			return name, true
+		}
+		return "", false
+	}
+	blocks, unmapped := DiffSegments(points, ident)
+	assert.Empty(t, unmapped)
 
-	type k struct{ fp, name string }
+	type k struct{ fp, key string }
 	got := map[k]float64{}
 	for _, b := range blocks {
-		got[k{b.FiscalPeriod, b.Name}] = b.Revenue
+		got[k{b.FiscalPeriod, b.Key}] = b.Revenue
 	}
 	assert.InDelta(t, 100, got[k{"2026Q1", "甲"}], 1e-9)
 	assert.InDelta(t, 90, got[k{"2026Q2", "甲"}], 1e-9, "季披露差分单季")
 	assert.InDelta(t, 50, got[k{"2026Q2", "乙"}], 1e-9, "半年披露:H1 块标 Q2")
 	assert.InDelta(t, 70, got[k{"2026Q4", "乙"}], 1e-9, "H2 = FY − H1,标 Q4")
 	for kk := range got {
-		assert.NotEqual(t, "丙", kk.name, "异常间隔差分块必须丢弃")
-		assert.NotEqual(t, "甲行业", kk.name, "只取按产品分类")
+		assert.NotEqual(t, "丙", kk.key, "异常间隔差分块必须丢弃")
+		assert.NotEqual(t, "甲行业", kk.key, "只取按产品分类")
 	}
+}
+
+// [跨名差分修复 2026-08-01] 同一业务在年内改名(茅台实锤:09-30「系列酒」→年报
+// 「其他系列酒」),差分必须发生在**映射到 segment_key 之后**——按原始名分组会在改名处
+// 断裂(旧名年内无后继、新名成年内首期跨度异常,双双丢块)。
+func TestDiffSegmentsMergesRenamedNames(t *testing.T) {
+	zygc := `[
+	 {"报告日期":"2026-09-30T00:00:00.000","分类类型":"按产品分类","主营构成":"系列酒","主营收入":178},
+	 {"报告日期":"2026-06-30T00:00:00.000","分类类型":"按产品分类","主营构成":"系列酒","主营收入":110},
+	 {"报告日期":"2026-03-31T00:00:00.000","分类类型":"按产品分类","主营构成":"系列酒","主营收入":60},
+	 {"报告日期":"2026-12-31T00:00:00.000","分类类型":"按产品分类","主营构成":"其他系列酒","主营收入":222},
+	 {"报告日期":"2026-12-31T00:00:00.000","分类类型":"按产品分类","主营构成":"神秘业务","主营收入":9}
+	]`
+	srv := finServer(t, `[]`, zygc)
+	defer srv.Close()
+	points, err := New(srv.URL).FetchSegments("600519.SH")
+	require.NoError(t, err)
+
+	keyOf := func(name string) (string, bool) {
+		if name == "系列酒" || name == "其他系列酒" {
+			return "series", true
+		}
+		return "", false
+	}
+	blocks, unmapped := DiffSegments(points, keyOf)
+	got := map[string]float64{}
+	for _, b := range blocks {
+		got[b.FiscalPeriod] = b.Revenue
+	}
+	assert.InDelta(t, 44, got["2026Q4"], 1e-9, "Q4 = 222(新名累计) − 178(旧名 9M 累计)")
+	assert.InDelta(t, 68, got["2026Q3"], 1e-9)
+	assert.Equal(t, []string{"神秘业务"}, unmapped, "未映射名由 DiffSegments 聚合上报")
 }
