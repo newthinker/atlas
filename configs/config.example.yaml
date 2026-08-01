@@ -243,6 +243,8 @@ prism:
     - {symbol: "000905.SH", name: "中证500", type: "index", market: "CN_A", group: "A股指数", source: "lixinger", fallback_source: "akshare"}
     # ---- A/H 公司(akshare 经 aktools) ----
     - {symbol: "600519.SH", name: "贵州茅台", type: "stock", market: "CN_A", group: "A股公司", source: "akshare"}
+    - {symbol: "600036.SH", name: "招商银行", type: "stock", market: "CN_A", group: "A股公司", source: "akshare"}
+    - {symbol: "000423.SZ", name: "东阿阿胶", type: "stock", market: "CN_A", group: "A股公司", source: "akshare"}
     - {symbol: "0700.HK",   name: "腾讯控股", type: "stock", market: "HK", group: "港股公司", source: "akshare"}
     # ---- 美股指数(理杏仁,live 验证仅标普500) ----
     - {symbol: "^GSPC", name: "标普500", type: "index", market: "US", group: "美股指数", source: "lixinger"}

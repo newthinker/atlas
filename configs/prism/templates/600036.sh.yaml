@@ -1,0 +1,8 @@
+# 招商银行 财报桥模板(A 股 akshare 路径;银行仅中报/年报披露构成 → 半年块标 Q2/Q4,
+# 年度粒度正确;利润表无营业成本 → 毛利节点降级显示「—」)。
+company: 600036.SH
+version: 1
+segments:
+  - {key: retail, name_zh: 零售金融, name_en: Retail Finance, xbrl_member: 零售金融业务}
+  - {key: wholesale, name_zh: 批发金融, name_en: Wholesale Finance, xbrl_member: 批发金融业务}
+  - {key: other, name_zh: 其他业务, name_en: Other, xbrl_member: 其他业务, aliases: [其他]}

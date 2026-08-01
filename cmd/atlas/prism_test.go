@@ -402,7 +402,7 @@ func TestSegmentReportBadTemplateDegradesNotSilently(t *testing.T) {
 		[]byte("company: BROKEN\nsegments:\n  - {key: cloud, name_zh: 云\n    xbrl_member: [unclosed\n"), 0o644))
 	seg := &fakeSegFetcher{}
 
-	rep := segmentReport(segTestCfg(), &fakeSegStore{}, seg, dir, "", false)
+	rep := segmentReport(segTestCfg(), &fakeSegStore{}, seg, nil, dir, "", false)
 
 	require.Len(t, rep.Degraded, 1, "模板加载失败必须可观测")
 	assert.Contains(t, rep.Degraded[0], "broken.yaml", "降级说明须含出错文件名(AD-16)")
@@ -423,7 +423,7 @@ func TestSegmentReportSkipsWhenNoTemplates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seg := &fakeSegFetcher{}
-			rep := segmentReport(segTestCfg(), &fakeSegStore{}, seg, tc.dir(t), "", false)
+			rep := segmentReport(segTestCfg(), &fakeSegStore{}, seg, nil, tc.dir(t), "", false)
 			assert.Equal(t, prism.Report{}, rep, "无模板时返回零值 Report")
 			assert.False(t, seg.called, "无模板时不得发起分部拉取")
 		})
@@ -437,14 +437,14 @@ func TestSegmentReportPassesForceAndManualDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "acme.yaml"), []byte(validTemplateYAML), 0o644))
 
 	segForce := &fakeSegFetcher{}
-	rep := segmentReport(segTestCfg(), &fakeSegStore{anchor: "2026-03-31"}, segForce, dir, "", true)
+	rep := segmentReport(segTestCfg(), &fakeSegStore{anchor: "2026-03-31"}, segForce, nil, dir, "", true)
 	require.Empty(t, rep.Failed)
 	require.True(t, segForce.called, "有模板时须发起分部拉取")
 	assert.Equal(t, "0000123456", segForce.cik, "CIK 取自模板")
 	assert.True(t, segForce.since.IsZero(), "force=true 须忽略锚点全量重拉")
 
 	segIncr := &fakeSegFetcher{}
-	rep = segmentReport(segTestCfg(), &fakeSegStore{anchor: "2026-03-31"}, segIncr, dir, "", false)
+	rep = segmentReport(segTestCfg(), &fakeSegStore{anchor: "2026-03-31"}, segIncr, nil, dir, "", false)
 	require.Empty(t, rep.Failed)
 	assert.Equal(t, "2026-03-31", segIncr.since.Format("2006-01-02"), "force=false 须用锚点增量")
 }

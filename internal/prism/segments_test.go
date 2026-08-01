@@ -3,6 +3,7 @@ package prism
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/prism/sankey"
@@ -150,7 +152,7 @@ func TestRefreshSegmentsIncrementalAndMapping(t *testing.T) {
 		}},
 	}}
 
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", false)
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, msftTemplate(), "", false)
 
 	require.Empty(t, rep.Failed, "未映射 member 不得让整体失败")
 	assert.Equal(t, 1, rep.Refreshed)
@@ -187,11 +189,11 @@ func TestRefreshSegmentsForceIgnoresAnchor(t *testing.T) {
 	cfg := segCfg(segInst("MSFT", "789019"))
 
 	// force=false:锚点已推进到 2026-03-31
-	RefreshSegments(cfg, store, seg, msftTemplate(), "", false)
+	RefreshSegments(cfg, store, seg, nil, msftTemplate(), "", false)
 	assert.Equal(t, "2026-03-31", seg.calls["789019"].since.Format("2006-01-02"))
 
 	// force=true:忽略锚点
-	RefreshSegments(cfg, store, seg, msftTemplate(), "", true)
+	RefreshSegments(cfg, store, seg, nil, msftTemplate(), "", true)
 	assert.True(t, seg.calls["789019"].since.IsZero(), "force=true 须传零值 since 全量重拉")
 	// 全量重拉的值照常覆盖
 	assert.Equal(t, 29.9e9, rowsByKey(t, store, "MSFT")["2026-03-31|productivity"].Revenue)
@@ -221,7 +223,7 @@ func TestRefreshSegmentsFiscalPeriodLookup(t *testing.T) {
 			seedFundamentals(t, store, "MSFT", map[string]string{fundEnd: "2026Q3"})
 			seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": period(q3End)}}
 
-			rep := RefreshSegments(cfg, store, seg, tpl, "", false)
+			rep := RefreshSegments(cfg, store, seg, nil, tpl, "", false)
 
 			require.Empty(t, rep.Failed)
 			row, ok := rowsByKey(t, store, "MSFT")["2026-03-31|productivity"]
@@ -246,7 +248,7 @@ func TestRefreshSegmentsFiscalPeriodLookup(t *testing.T) {
 			"2026-03-30": "2026Q3", "2026-04-01": "2026Q4",
 		})
 		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": period(q3End)}}
-		rep := RefreshSegments(cfg, store, seg, tpl, "", false)
+		rep := RefreshSegments(cfg, store, seg, nil, tpl, "", false)
 
 		assert.Equal(t, 0, rep.Refreshed)
 		require.Len(t, rep.Failed, 1)
@@ -281,7 +283,7 @@ func TestRefreshSegmentsQ4Derivation(t *testing.T) {
 		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
 			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 50, "ProductivityMember": 90}),
 		}}
-		rep := RefreshSegments(cfg, store, seg, tpl, "", true)
+		rep := RefreshSegments(cfg, store, seg, nil, tpl, "", true)
 		require.Empty(t, rep.Failed)
 
 		got := rowsByKey(t, store, "MSFT")
@@ -312,13 +314,13 @@ func TestRefreshSegmentsQ4Derivation(t *testing.T) {
 			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 50, "ProductivityMember": 90}),
 		}}
 
-		require.Empty(t, RefreshSegments(cfg, store, seg, tpl, "", true).Failed)
+		require.Empty(t, RefreshSegments(cfg, store, seg, nil, tpl, "", true).Failed)
 		require.Equal(t, 17.0, rowsByKey(t, store, "MSFT")["2026-06-30|intelligent_cloud"].Revenue,
 			"第一轮:50−33=17")
 
 		// 第二轮:年报重述,FY 从 50 改为 60 → Q4 应随之更新为 60−33=27
 		seg.periods["789019"] = fyPeriod(map[string]float64{"IntelligentCloudMember": 60, "ProductivityMember": 90})
-		require.Empty(t, RefreshSegments(cfg, store, seg, tpl, "", true).Failed)
+		require.Empty(t, RefreshSegments(cfg, store, seg, nil, tpl, "", true).Failed)
 
 		got := rowsByKey(t, store, "MSFT")
 		assert.Equal(t, 27.0, got["2026-06-30|intelligent_cloud"].Revenue,
@@ -344,7 +346,7 @@ func TestRefreshSegmentsQ4Derivation(t *testing.T) {
 			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 50, "ProductivityMember": 90}),
 		}}
 
-		require.Empty(t, RefreshSegments(cfg, store, seg, tpl, "", true).Failed)
+		require.Empty(t, RefreshSegments(cfg, store, seg, nil, tpl, "", true).Failed)
 
 		got := rowsByKey(t, store, "MSFT")
 		_, ok := got["2026-06-30|intelligent_cloud"]
@@ -363,7 +365,7 @@ func TestRefreshSegmentsQ4Derivation(t *testing.T) {
 		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
 			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 50, "ProductivityMember": 90}),
 		}}
-		rep := RefreshSegments(cfg, store, seg, tpl, "", true)
+		rep := RefreshSegments(cfg, store, seg, nil, tpl, "", true)
 		require.Empty(t, rep.Failed)
 
 		got := rowsByKey(t, store, "MSFT")
@@ -380,7 +382,7 @@ func TestRefreshSegmentsQ4Derivation(t *testing.T) {
 		seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{
 			"789019": fyPeriod(map[string]float64{"IntelligentCloudMember": 30, "ProductivityMember": 90}),
 		}}
-		rep := RefreshSegments(cfg, store, seg, tpl, "", true)
+		rep := RefreshSegments(cfg, store, seg, nil, tpl, "", true)
 		require.Empty(t, rep.Failed)
 
 		got := rowsByKey(t, store, "MSFT")
@@ -420,7 +422,7 @@ func TestRefreshSegmentsManualOverride(t *testing.T) {
 	}}
 	cfg := segCfg(segInst("MSFT", "789019"))
 
-	rep := RefreshSegments(cfg, store, seg, msftTemplate(), manualDir, true)
+	rep := RefreshSegments(cfg, store, seg, nil, msftTemplate(), manualDir, true)
 	require.Empty(t, rep.Failed)
 	got := rowsByKey(t, store, "MSFT")
 	ic := got["2026-03-31|intelligent_cloud"]
@@ -431,7 +433,7 @@ func TestRefreshSegmentsManualOverride(t *testing.T) {
 	assert.Equal(t, "edgar_segment", got["2026-03-31|productivity"].Source)
 
 	// 下一次 auto 刷新(manual 配置已移除)→ 自动值回归,manual 不粘
-	rep = RefreshSegments(cfg, store, seg, msftTemplate(), t.TempDir(), true)
+	rep = RefreshSegments(cfg, store, seg, nil, msftTemplate(), t.TempDir(), true)
 	require.Empty(t, rep.Failed)
 	ic = rowsByKey(t, store, "MSFT")["2026-03-31|intelligent_cloud"]
 	assert.Equal(t, 26.7e9, ic.Revenue, "下一次 auto 刷新会再次覆盖 manual 行")
@@ -448,7 +450,7 @@ func TestRefreshSegmentsManualUnresolvableFiscalPeriod(t *testing.T) {
 		[]byte("FY2026:\n  intelligent_cloud: 99000000000\n"), 0o644))
 
 	seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": nil}}
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), manualDir, true)
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, msftTemplate(), manualDir, true)
 
 	require.Empty(t, rep.Failed)
 	assert.Empty(t, store.segments["MSFT"], "无法定位 period_end 的 manual 行不得落库")
@@ -462,16 +464,16 @@ func TestRefreshSegmentsSkipsUntemplated(t *testing.T) {
 	seg := &fakeSegClient{}
 	cfg := segCfg(segInst("MSFT", "789019"), segInst("NVDA", "1045810"))
 
-	rep := RefreshSegments(cfg, store, seg, msftTemplate(), "", true)
+	rep := RefreshSegments(cfg, store, seg, nil, msftTemplate(), "", true)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed, "只有配了模板的 MSFT 被处理")
 	_, called := seg.calls["1045810"]
 	assert.False(t, called, "无模板的标的不得发起请求")
 
-	rep = RefreshSegments(cfg, newFakeStore(), &fakeSegClient{}, map[string]*sankey.Template{}, "", true)
+	rep = RefreshSegments(cfg, newFakeStore(), &fakeSegClient{}, nil, map[string]*sankey.Template{}, "", true)
 	assert.Equal(t, Report{}, rep, "空模板集返回零值 Report")
 
-	rep = RefreshSegments(cfg, newFakeStore(), &fakeSegClient{}, nil, "", true)
+	rep = RefreshSegments(cfg, newFakeStore(), &fakeSegClient{}, nil, nil, "", true)
 	assert.Equal(t, Report{}, rep, "nil 模板集同样返回零值 Report")
 }
 
@@ -490,7 +492,7 @@ func TestRefreshSegmentsPartialFailure(t *testing.T) {
 	}
 
 	rep := RefreshSegments(segCfg(segInst("MSFT", "789019"), segInst("NVDA", "1045810")),
-		store, seg, tpl, "", true)
+		store, seg, nil, tpl, "", true)
 
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "MSFT")
@@ -508,7 +510,7 @@ func TestRefreshSegmentsCIKMismatch(t *testing.T) {
 	tpl := msftTemplate()
 	tpl["MSFT"].CIK = "999999" // 与 config 的 789019 不一致
 
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, tpl, "", true)
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, tpl, "", true)
 
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
@@ -550,7 +552,7 @@ func TestRefreshSegmentsStoreFailures(t *testing.T) {
 			tc.setup(t, store)
 			seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": period}}
 
-			rep := RefreshSegments(cfg, store, seg, msftTemplate(), "", tc.force)
+			rep := RefreshSegments(cfg, store, seg, nil, msftTemplate(), "", tc.force)
 			assert.Equal(t, 0, rep.Refreshed, "失败的标的不得计入 Refreshed")
 			require.Len(t, rep.Failed, 1)
 			assert.Contains(t, rep.Failed[0], "MSFT")
@@ -568,7 +570,7 @@ func TestRefreshSegmentsManualFileMalformed(t *testing.T) {
 		[]byte("2026Q3:\n  intelligent_cloud: 1\nNOT_A_PERIOD:\n  productivity: 2\n"), 0o644))
 
 	seg := &fakeSegClient{periods: map[string][]edgar.SegmentPeriod{"789019": nil}}
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), manualDir, true)
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, msftTemplate(), manualDir, true)
 
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
@@ -590,7 +592,7 @@ func TestRefreshSegmentsAnnualOnlyReportsUnmappedMember(t *testing.T) {
 			Values: map[string]float64{"ProductivityMember": 90, "UnmappedMember": 5}}},
 	}}
 
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", true)
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, msftTemplate(), "", true)
 
 	require.Empty(t, rep.Failed)
 	require.Len(t, rep.Degraded, 1)
@@ -608,7 +610,7 @@ func TestRefreshSegmentsIgnoresCorruptFundamentalDate(t *testing.T) {
 			Values: map[string]float64{"ProductivityMember": 29.9e9}}},
 	}}
 
-	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", true)
+	rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, msftTemplate(), "", true)
 
 	require.Empty(t, rep.Failed)
 	row := rowsByKey(t, store, "MSFT")["2026-03-31|productivity"]
@@ -642,7 +644,7 @@ func TestRefreshSegmentsDeterministicOrdering(t *testing.T) {
 			}}},
 		}}
 
-		rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, msftTemplate(), "", true)
+		rep := RefreshSegments(segCfg(segInst("MSFT", "789019")), store, seg, nil, msftTemplate(), "", true)
 
 		require.Empty(t, rep.Failed)
 		require.Len(t, rep.Degraded, len(want))
@@ -650,4 +652,84 @@ func TestRefreshSegmentsDeterministicOrdering(t *testing.T) {
 			require.Contains(t, rep.Degraded[i], w, "第 %d 轮的第 %d 条 Degraded 须按 member 升序", round, i)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// [A 股财报桥 2026-08-01]:
+//   functional[0] akshare 标的:利润表落 fundamental_q(filing=披露日,Equity 显式 NaN)
+//                 + 构成经 xbrl_member/alias 映射落 segment_revenue → TestRefreshSegmentsAkshareSource
+//   functional[1] 未映射构成名**按名聚合**一条 Degraded(不按期爆炸,对照 edgar 路径
+//                 每期一条的噪音教训)                              → TestRefreshSegmentsAkshareSource
+//   error[0]      edgar 标的模板 CIK 为空 → Failed(编排守卫,配合模板层 CIK 放宽) →
+//                 TestRefreshSegmentsEdgarTemplateNeedsCIK
+// ---------------------------------------------------------------------------
+
+type fakeAkFin struct {
+	profits []akshare.ProfitQuarter
+	blocks  []akshare.SegmentBlock
+}
+
+func (f *fakeAkFin) FetchProfitQuarters(symbol string) ([]akshare.ProfitQuarter, error) {
+	return f.profits, nil
+}
+func (f *fakeAkFin) FetchSegments(symbol string) ([]akshare.SegmentBlock, error) {
+	return f.blocks, nil
+}
+
+func maotaiTemplate() map[string]*sankey.Template {
+	return map[string]*sankey.Template{
+		"600519.SH": {
+			Company: "600519.SH", Version: 1,
+			Segments: []sankey.Segment{
+				{Key: "maotai", NameZH: "茅台酒", NameEN: "Maotai", Member: "茅台酒"},
+				{Key: "series", NameZH: "系列酒", NameEN: "Series", Member: "系列酒", Aliases: []string{"其他系列酒"}},
+			},
+		},
+	}
+}
+
+func TestRefreshSegmentsAkshareSource(t *testing.T) {
+	store := newFakeStore()
+	end := date(2026, 3, 31)
+	ak := &fakeAkFin{
+		profits: []akshare.ProfitQuarter{{
+			FiscalPeriod: "2026Q1", PeriodEnd: end, NoticeDate: date(2026, 4, 25),
+			Revenue: 100, GrossProfit: 70, OperatingIncome: 50, IncomeTax: 10,
+			NetIncome: 40, EPSDiluted: 1.0, RnD: math.NaN(), SGnA: 10,
+		}},
+		blocks: []akshare.SegmentBlock{
+			{FiscalPeriod: "2026Q1", PeriodEnd: end, Name: "茅台酒", Revenue: 80},
+			{FiscalPeriod: "2026Q1", PeriodEnd: end, Name: "其他系列酒", Revenue: 20},
+			{FiscalPeriod: "2026Q1", PeriodEnd: end, Name: "神秘业务", Revenue: 1},
+			{FiscalPeriod: "2025Q4", PeriodEnd: date(2025, 12, 31), Name: "神秘业务", Revenue: 1},
+		},
+	}
+	inst := config.PrismInstrument{Symbol: "600519.SH", Name: "贵州茅台", Type: "stock",
+		Market: "CN_A", Group: "A股公司", Source: "akshare"}
+
+	rep := RefreshSegments(segCfg(inst), store, &fakeSegClient{}, ak, maotaiTemplate(), "", false)
+	require.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed)
+
+	funds := store.fundamentals["600519.SH"]
+	require.Len(t, funds, 1)
+	assert.Equal(t, "2026-04-25", funds[0].FilingDate, "filing = 披露日(防前视)")
+	assert.Equal(t, "akshare", funds[0].Source)
+	assert.InDelta(t, 70, funds[0].GrossProfit, 1e-9)
+	assert.True(t, math.IsNaN(funds[0].Equity), "利润表无净资产,必须显式 NaN 而非 0")
+
+	byKey := rowsByKey(t, store, "600519.SH")
+	assert.InDelta(t, 80, byKey["2026-03-31|maotai"].Revenue, 1e-9)
+	assert.InDelta(t, 20, byKey["2026-03-31|series"].Revenue, 1e-9, "别名「其他系列酒」命中 series")
+	require.Len(t, rep.Degraded, 1, "未映射名两期同名只聚合一条")
+	assert.Contains(t, rep.Degraded[0], "神秘业务")
+}
+
+func TestRefreshSegmentsEdgarTemplateNeedsCIK(t *testing.T) {
+	store := newFakeStore()
+	tpl := map[string]*sankey.Template{"MSFT": {Company: "MSFT", Version: 1,
+		Segments: []sankey.Segment{{Key: "cloud", NameZH: "云", NameEN: "Cloud", Member: "CloudMember"}}}}
+	rep := RefreshSegments(segCfg(segInst("MSFT", "")), store, &fakeSegClient{}, nil, tpl, "", false)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "cik")
 }

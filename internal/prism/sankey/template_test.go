@@ -120,15 +120,8 @@ segments:
 `,
 			wantErr: "company",
 		},
-		{
-			name: "empty cik",
-			yaml: `
-company: A
-segments:
-  - {key: cloud, name_zh: 云, name_en: Cloud, xbrl_member: CloudMember}
-`,
-			wantErr: "cik",
-		},
+		// 2026-08-01 语义变更:CIK 允许为空(A 股 akshare 模板无 CIK,EDGAR 路径
+		// 在编排层守卫)——原「empty cik 拒绝」用例由 TestTemplateEmptyCIKAllowed 取代。
 		{
 			name: "non numeric cik",
 			yaml: `
@@ -345,4 +338,59 @@ func keysOf(m map[string]*Template) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+
+// writeTpl 写一个模板文件到 dir(A 股模板测试辅助)。
+func writeTpl(t *testing.T, dir, name, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+}
+
+// Context Checkpoint: A 股模板支持(2026-08-01):
+//   functional[0] aliases 解析且 KeyByName 含别名   → TestTemplateAliasesKeyByName
+//   boundary[0]   别名与既有 member/别名冲突拒绝     → TestTemplateAliasDuplicateRejected
+//   boundary[1]   CIK 允许为空(A 股无 CIK)           → TestTemplateEmptyCIKAllowed
+
+func TestTemplateAliasesKeyByName(t *testing.T) {
+	dir := t.TempDir()
+	writeTpl(t, dir, "600519.sh.yaml", `
+company: 600519.SH
+version: 1
+segments:
+  - {key: series_liquor, name_zh: 系列酒, name_en: Series, xbrl_member: 系列酒, aliases: [其他系列酒]}
+`)
+	tpls, err := LoadTemplates(dir)
+	require.NoError(t, err)
+	tpl := tpls["600519.SH"]
+	require.NotNil(t, tpl)
+	m := tpl.KeyByName()
+	assert.Equal(t, "series_liquor", m["系列酒"])
+	assert.Equal(t, "series_liquor", m["其他系列酒"], "别名必须命中同一 key")
+}
+
+func TestTemplateAliasDuplicateRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeTpl(t, dir, "x.yaml", `
+company: X
+version: 1
+segments:
+  - {key: a, name_zh: 甲, name_en: A, xbrl_member: MA}
+  - {key: b, name_zh: 乙, name_en: B, xbrl_member: MB, aliases: [MA]}
+`)
+	_, err := LoadTemplates(dir)
+	require.Error(t, err, "别名撞既有 member 必须拒绝")
+}
+
+func TestTemplateEmptyCIKAllowed(t *testing.T) {
+	dir := t.TempDir()
+	writeTpl(t, dir, "y.yaml", `
+company: 000423.SZ
+version: 1
+segments:
+  - {key: ejiao, name_zh: 阿胶, name_en: Ejiao, xbrl_member: 阿胶及系列产品}
+`)
+	tpls, err := LoadTemplates(dir)
+	require.NoError(t, err, "A 股模板无 CIK 应合法")
+	assert.Equal(t, "", tpls["000423.SZ"].CIK)
 }

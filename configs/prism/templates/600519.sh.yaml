@@ -1,0 +1,8 @@
+# 贵州茅台 财报桥模板(A 股 akshare 路径:xbrl_member 为主营构成名称,东财按产品分类)。
+# 实测构成名随年份漂移:「系列酒」↔「其他系列酒」、「其他」↔「其他(补充)」→ aliases 吸收。
+company: 600519.SH
+version: 1
+segments:
+  - {key: maotai_liquor, name_zh: 茅台酒, name_en: Moutai Liquor, xbrl_member: 茅台酒}
+  - {key: series_liquor, name_zh: 系列酒, name_en: Series Liquor, xbrl_member: 系列酒, aliases: [其他系列酒]}
+  - {key: other, name_zh: 其他, name_en: Other, xbrl_member: 其他(补充), aliases: [其他]}

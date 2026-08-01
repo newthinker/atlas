@@ -27,7 +27,11 @@ type Segment struct {
 	Key    string `mapstructure:"key"`
 	NameZH string `mapstructure:"name_zh"`
 	NameEN string `mapstructure:"name_en"`
-	Member string `mapstructure:"xbrl_member"` // explicitMember local name
+	// Member: EDGAR 路径为 explicitMember local name;A 股(akshare)路径为主营构成名称。
+	Member string `mapstructure:"xbrl_member"`
+	// Aliases 是命中同一 key 的别名——A 股主营构成名称随年份漂移是常态
+	// (实测茅台「系列酒」↔「其他系列酒」),EDGAR member 改名同理适用。
+	Aliases []string `mapstructure:"aliases"`
 }
 
 // Template describes one issuer's segment layout. The trunk flow
@@ -108,9 +112,7 @@ func (t *Template) validate() error {
 	if t.Company == "" {
 		return fmt.Errorf("company is required")
 	}
-	if t.CIK == "" {
-		return fmt.Errorf("cik is required")
-	}
+	// CIK 仅 EDGAR 路径需要(编排层守卫);A 股(akshare)模板无 CIK,允许为空。
 	if strings.Trim(t.CIK, "0123456789") != "" {
 		return fmt.Errorf("cik %q must be digits only", t.CIK)
 	}
@@ -126,13 +128,32 @@ func (t *Template) validate() error {
 			return fmt.Errorf("segments[%d].xbrl_member is required (key=%s)", i, s.Key)
 		case keys[s.Key]:
 			return fmt.Errorf("duplicate segment key %q", s.Key)
-		case members[s.Member]:
-			return fmt.Errorf("duplicate xbrl_member %q", s.Member)
 		}
 		keys[s.Key] = true
-		members[s.Member] = true
+		for _, name := range append([]string{s.Member}, s.Aliases...) {
+			if name == "" {
+				return fmt.Errorf("segments[%d] has empty alias (key=%s)", i, s.Key)
+			}
+			if members[name] {
+				return fmt.Errorf("duplicate xbrl_member/alias %q", name)
+			}
+			members[name] = true
+		}
 	}
 	return nil
+}
+
+// KeyByName returns member/构成名(含别名) → segment key,供 EDGAR 与 akshare
+// 两条分部路径共用同一套映射逻辑。
+func (t *Template) KeyByName() map[string]string {
+	m := make(map[string]string, len(t.Segments))
+	for _, s := range t.Segments {
+		m[s.Member] = s.Key
+		for _, a := range s.Aliases {
+			m[a] = s.Key
+		}
+	}
+	return m
 }
 
 var fiscalPeriodRe = regexp.MustCompile(`^([0-9]{4}Q[1-4]|FY[0-9]{4})$`)

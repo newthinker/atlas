@@ -99,7 +99,7 @@ func prefixAll(msgs []string) []string {
 // 丢弃 error 的表现是 sankey 全站 404 且日志无痕;此处降级为 Degraded 条目,使其同时
 // 出现在 stdout 与告警里,且此轮不发起任何分部拉取。
 func segmentReport(pcfg config.PrismConfig, store prism.Store, seg prism.SegmentClient,
-	templatesDir, manualDir string, force bool) prism.Report {
+	ak prism.AkshareFinancialsClient, templatesDir, manualDir string, force bool) prism.Report {
 	templates, err := sankey.LoadTemplates(templatesDir)
 	if err != nil {
 		msg := fmt.Sprintf("sankey templates: %v (分部刷新已跳过)", err)
@@ -108,7 +108,7 @@ func segmentReport(pcfg config.PrismConfig, store prism.Store, seg prism.Segment
 	if len(templates) == 0 {
 		return prism.Report{}
 	}
-	return prism.RefreshSegments(pcfg, store, seg, templates, manualDir, force)
+	return prism.RefreshSegments(pcfg, store, seg, ak, templates, manualDir, force)
 }
 
 type prismRefreshDeps struct {
@@ -176,7 +176,7 @@ func runPrismRefresh(cmd *cobra.Command, args []string) error {
 	deps := prismRefreshDeps{
 		refresh: func() prism.Report {
 			valuation := prism.Refresh(pcfg, store, lix, yh, ak, ed, time.Now())
-			segments := segmentReport(pcfg, store, ed, sankeyTemplatesDir, sankeySegmentsDir, prismFullSegments)
+			segments := segmentReport(pcfg, store, ed, ak, sankeyTemplatesDir, sankeySegmentsDir, prismFullSegments)
 			return mergeReports(valuation, segments)
 		},
 		sender: buildCrisisSender(),

@@ -2,10 +2,12 @@ package prism
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/prism/sankey"
@@ -15,6 +17,13 @@ import (
 // SegmentClient is the subset of *edgar.Client used by RefreshSegments.
 type SegmentClient interface {
 	FetchSegmentRevenue(cik, axis string, since time.Time) ([]edgar.SegmentPeriod, error)
+}
+
+// AkshareFinancialsClient is the subset of *akshare.Client used by the A-share
+// segment path (利润表 + 主营构成,2026-08-01).
+type AkshareFinancialsClient interface {
+	FetchProfitQuarters(symbol string) ([]akshare.ProfitQuarter, error)
+	FetchSegments(symbol string) ([]akshare.SegmentBlock, error)
 }
 
 // 期间分类阈值,与 edgar 客户端的 isSingleQuarter/isAnnual 同口径。FY 期与季度期在
@@ -45,14 +54,22 @@ const (
 // 注意:Report.Degraded 只含本函数可观察到的降级。FetchSegmentRevenue 对单份报告
 // 失败(404/解析错)只写日志并跳过,不经返回值上报,故那部分明细不在此处体现。
 func RefreshSegments(cfg config.PrismConfig, store Store, seg SegmentClient,
-	templates map[string]*sankey.Template, manualDir string, force bool) Report {
+	ak AkshareFinancialsClient, templates map[string]*sankey.Template,
+	manualDir string, force bool) Report {
 	var rep Report
 	for _, inst := range cfg.Instruments {
 		tpl, ok := templates[strings.ToUpper(inst.Symbol)]
 		if !ok {
 			continue // 未配模板的标的不参与分部刷新
 		}
-		deg, err := refreshSymbolSegments(store, seg, inst, tpl, manualDir, force)
+		var deg []string
+		var err error
+		if inst.Source == "akshare" {
+			// A 股路径:利润表 + 主营构成,一次全量幂等(接口整段返回,无增量锚点)。
+			deg, err = refreshAkshareSymbol(store, ak, inst, tpl, manualDir)
+		} else {
+			deg, err = refreshSymbolSegments(store, seg, inst, tpl, manualDir, force)
+		}
 		for _, d := range deg {
 			rep.degrade(d)
 		}
@@ -69,6 +86,10 @@ func refreshSymbolSegments(store Store, seg SegmentClient, inst config.PrismInst
 	tpl *sankey.Template, manualDir string, force bool) ([]string, error) {
 	// AD-16(3):模板串号会把别家的分部数据写进本标的名下 —— 合法值、错误语义,
 	// 静默拉取比拉不到更糟,故先校验再发请求。
+	if tpl.CIK == "" {
+		// 模板层 CIK 已放宽为可空(A 股模板无 CIK),EDGAR 路径在此守卫。
+		return nil, fmt.Errorf("template cik is required for edgar-source segments")
+	}
 	if inst.CIK != "" && inst.CIK != tpl.CIK {
 		return nil, fmt.Errorf("template cik %s does not match configured cik %s", tpl.CIK, inst.CIK)
 	}
@@ -88,10 +109,7 @@ func refreshSymbolSegments(store Store, seg SegmentClient, inst config.PrismInst
 	if err != nil {
 		return nil, err
 	}
-	byMember := make(map[string]string, len(tpl.Segments))
-	for _, s := range tpl.Segments {
-		byMember[s.Member] = s.Key
-	}
+	byMember := tpl.KeyByName()
 
 	var deg []string
 	var quarters []prismstore.SegmentRow
@@ -321,4 +339,78 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// refreshAkshareSymbol 是 A 股标的的财报桥数据路径(2026-08-01):
+//   - 利润表(东财,累计已在采集层差分为单季)落 fundamental_q,filing_date 用真实披露日;
+//     Equity/DilutedShares 利润表不含,显式 NaN(零值 0 会污染 PB/ROE)。
+//   - 主营构成经模板 KeyByName(xbrl_member 语义为构成名,含 aliases)映射落 segment_revenue;
+//     未映射构成名**按名聚合**为一条 Degraded —— 对照 edgar 路径每期一条的告警噪音教训。
+//   - 半年披露公司(招行/东阿阿胶式)的构成块标期末季(Q2/Q4):年度粒度聚合正确,
+//     季度粒度下为半年累计,属已声明取舍(设计 §7 A 股注记)。
+//   - manual 兜底语义与 edgar 路径一致,最后写覆盖同键自动行。
+func refreshAkshareSymbol(store Store, ak AkshareFinancialsClient, inst config.PrismInstrument,
+	tpl *sankey.Template, manualDir string) ([]string, error) {
+	if ak == nil {
+		return nil, fmt.Errorf("akshare financials client not configured")
+	}
+	id, err := upsertMeta(store, inst)
+	if err != nil {
+		return nil, err
+	}
+
+	quarters, err := ak.FetchProfitQuarters(inst.Symbol)
+	if err != nil {
+		return nil, fmt.Errorf("profit sheet: %w", err)
+	}
+	frows := make([]prismstore.FundamentalRow, len(quarters))
+	for i, q := range quarters {
+		frows[i] = prismstore.FundamentalRow{
+			FiscalPeriod: q.FiscalPeriod,
+			PeriodEnd:    q.PeriodEnd.Format("2006-01-02"),
+			FilingDate:   q.NoticeDate.Format("2006-01-02"),
+			Revenue:      q.Revenue, NetIncome: q.NetIncome, EPSDiluted: q.EPSDiluted,
+			Equity: math.NaN(), DilutedShares: math.NaN(),
+			GrossProfit: q.GrossProfit, RnD: q.RnD, SGnA: q.SGnA,
+			OperatingIncome: q.OperatingIncome, IncomeTax: q.IncomeTax,
+			Source: "akshare",
+		}
+	}
+	if err := store.UpsertFundamentals(id, frows); err != nil {
+		return nil, err
+	}
+
+	blocks, err := ak.FetchSegments(inst.Symbol)
+	if err != nil {
+		return nil, fmt.Errorf("segment composition: %w", err)
+	}
+	byName := tpl.KeyByName()
+	var rows []prismstore.SegmentRow
+	unmapped := map[string]bool{}
+	for _, b := range blocks {
+		key, ok := byName[b.Name]
+		if !ok {
+			unmapped[b.Name] = true
+			continue
+		}
+		rows = append(rows, prismstore.SegmentRow{
+			PeriodEnd: b.PeriodEnd.Format("2006-01-02"), FiscalPeriod: b.FiscalPeriod,
+			SegmentKey: key, Revenue: b.Revenue, Source: "akshare",
+		})
+	}
+	var deg []string
+	for _, name := range sortedKeys(unmapped) {
+		deg = append(deg, fmt.Sprintf("%s: unmapped segment name %q (add it or an alias to the template)",
+			inst.Symbol, name))
+	}
+	if err := store.UpsertSegments(id, rows); err != nil {
+		return deg, err
+	}
+
+	mrows, d, err := manualRows(manualDir, inst.Symbol, frows)
+	deg = append(deg, d...)
+	if err != nil {
+		return deg, err
+	}
+	return deg, store.UpsertSegments(id, mrows)
 }
