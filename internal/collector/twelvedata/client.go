@@ -2,6 +2,14 @@
 // 角色 = 美股价格备源:yahoo 价格失败时的下一跳(spec §2 降级链)。
 // 免费层 8 req/min,故客户端内置 8s 最小间隔节流;apikey 只入 runtime
 // configs/config.yaml(gitignored),不入仓不入日志。
+//
+// 凭证一律走 Authorization 请求头,**绝不进 URL query**(ADR#7)。原因是本包的
+// error 会经 prism Report.Failed 一路外发到 Telegram 与 launchd 日志:传输层失败时
+// Go 返回的 *url.Error 携带完整 URL(net/url 的 stripPassword 只去 userinfo 密码、
+// 不去 query),query 里的 key 就此明文外泄且 Telegram 侧不可撤回。TD 是备源,
+// 只在主源已失败时调用,面对的正是网络抖动/代理故障这类传输层错误,触发面真实。
+// key 进 URL 还会落进正向代理的 access log。两道防线:凭证不进 URL(根因),
+// 且所有 error 出口经 redact 兜底(见 wrapErr)。
 package twelvedata
 
 import (
@@ -12,6 +20,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +56,22 @@ func NewWithBaseURL(apiKey, baseURL string) *Client {
 		hc:          &http.Client{Timeout: 30 * time.Second},
 		minInterval: defaultMinInterval,
 	}
+}
+
+// wrapErr 是本包**唯一**的 error 出口:统一加前缀,并把 apiKey 从最终文本里抹掉。
+// 凭证已不进 URL,这层是兜底——error 文本的来源(*url.Error、传输层、第三方库)
+// 无法穷举,而这些 error 会外发到 Telegram。故不做类型判别,一律对成文文本脱敏。
+// 空 key 时不替换:strings.ReplaceAll(s, "", x) 会在每个字符间插入 x。
+//
+// 刻意**不保留 error 链**(调用点用 %v 而非 %w):留了链,errors.Unwrap 就能取回
+// 未脱敏的原始 error,脱敏形同虚设。本包无 sentinel error,消费方(prism)只格式化
+// 文本,不做 errors.Is/As,故无损失。
+func (c *Client) wrapErr(format string, args ...any) error {
+	msg := fmt.Sprintf(format, args...)
+	if c.apiKey != "" {
+		msg = strings.ReplaceAll(msg, c.apiKey, "<redacted>")
+	}
+	return fmt.Errorf("twelvedata: %s", msg)
 }
 
 // throttle 阻塞到距上次请求满 minInterval 为止。
@@ -87,24 +112,32 @@ func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV
 		"start_date": {start.Format("2006-01-02")},
 		"end_date":   {end.AddDate(0, 0, 1).Format("2006-01-02")},
 		"outputsize": {outputSize},
-		"apikey":     {c.apiKey},
 	}
-	resp, err := c.hc.Get(c.baseURL + "/time_series?" + q.Encode())
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/time_series?"+q.Encode(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("twelvedata: %s: %w", symbol, err)
+		return nil, c.wrapErr("%s: build request: %v", symbol, err)
+	}
+	// 2026-08-02 实测:Authorization 头可用(无凭证与 X-TD-APIKEY 均 401)。
+	req.Header.Set("Authorization", "apikey "+c.apiKey)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, c.wrapErr("%s: %v", symbol, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("twelvedata: %s: read body: %w", symbol, err)
+		return nil, c.wrapErr("%s: read body: %v", symbol, err)
 	}
 
 	var env timeSeriesResponse
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("twelvedata: %s: decode: %w", symbol, err)
+		return nil, c.wrapErr("%s: decode: %v", symbol, err)
 	}
+	// 凭证无效时 TD 回 HTTP 401,但 body 仍是同一个 JSON 错误信封
+	// (2026-08-02 实测),故仍由这一条分支报出,无需按状态码分路。
 	if env.Status == "error" {
-		return nil, fmt.Errorf("twelvedata: %s: code %d: %s", symbol, env.Code, env.Message)
+		return nil, c.wrapErr("%s: code %d: %s", symbol, env.Code, env.Message)
 	}
 
 	out := make([]core.OHLCV, 0, len(env.Values))
