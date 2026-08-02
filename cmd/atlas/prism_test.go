@@ -461,3 +461,16 @@ func TestSankeyDirConstantsArePopulated(t *testing.T) {
 	assert.Equal(t, "configs/prism/templates", sankeyTemplatesDir,
 		"模板目录不得为空:空值会让分部刷新整体静默跳过")
 }
+
+// TASK-005 f4(cmd 接线):key 未配置 → 必须注入**无类型 nil**。
+// 直接返回 *tushare.Client(nil) 会得到「非 nil 接口包裹 nil 指针」,Refresh 里的
+// ts != nil 判定就会失真:未配置的备源被当成已配置,每个主源失败的标的都会去调用一个
+// nil 客户端。用 == nil 直接比较接口值断言 —— testify 的 assert.Nil 走反射,
+// 对 typed-nil 同样判 nil,抓不到这个陷阱。
+func TestPrismBackupClientsAreUntypedNilWhenUnconfigured(t *testing.T) {
+	assert.True(t, tushareClientOrNil("") == nil, "tushare key 为空须返回无类型 nil")
+	assert.True(t, twelvedataClientOrNil("") == nil, "twelvedata key 为空须返回无类型 nil")
+
+	assert.False(t, tushareClientOrNil("tok") == nil, "配置了 key 须返回可用客户端")
+	assert.False(t, twelvedataClientOrNil("key") == nil, "配置了 key 须返回可用客户端")
+}

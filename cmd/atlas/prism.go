@@ -12,6 +12,8 @@ import (
 	akshare "github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/tushare"
+	"github.com/newthinker/atlas/internal/collector/twelvedata"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/prism"
@@ -145,6 +147,24 @@ func runPrismRefreshWith(d prismRefreshDeps) error {
 	return nil
 }
 
+// tushareClientOrNil / twelvedataClientOrNil 在未配置 key 时返回**无类型 nil**。
+// 直接返回 (*tushare.Client)(nil) 会得到「非 nil 接口包裹 nil 指针」,让 Refresh 里的
+// ts != nil / td != nil 判定失真,未配置的备源会被当成已配置(typed-nil 陷阱,
+// 同 collectors.go 的 valuationSourceOrNil)。
+func tushareClientOrNil(apiKey string) prism.TushareClient {
+	if apiKey == "" {
+		return nil
+	}
+	return tushare.New(apiKey)
+}
+
+func twelvedataClientOrNil(apiKey string) prism.TwelvedataClient {
+	if apiKey == "" {
+		return nil
+	}
+	return twelvedata.New(apiKey)
+}
+
 func runPrismRefresh(cmd *cobra.Command, args []string) error {
 	// 配置装载与 telegram sender 构造复用同包既有 helper(与 crisis eval 同款,
 	// 见 crisis.go / export_ohlcv.go),不重写第二套。
@@ -172,10 +192,14 @@ func runPrismRefresh(cmd *cobra.Command, args []string) error {
 	yh := yahoo.New()
 	ak := akshare.New(pcfg.AkshareBaseURL)
 	ed := edgar.New(pcfg.EdgarUserAgent)
+	// M3.5a 备源(spec §2):未配置 key 时注入无类型 nil,该跳整条跳过,
+	// 行为与 M3.5a 之前完全一致(ADR#9)。
+	ts := tushareClientOrNil(cfg.Collectors["tushare"].APIKey)
+	td := twelvedataClientOrNil(cfg.Collectors["twelvedata"].APIKey)
 
 	deps := prismRefreshDeps{
 		refresh: func() prism.Report {
-			valuation := prism.Refresh(pcfg, store, lix, yh, ak, ed, time.Now())
+			valuation := prism.Refresh(pcfg, store, lix, yh, ak, ed, ts, td, time.Now())
 			segments := segmentReport(pcfg, store, ed, ak, sankeyTemplatesDir, sankeySegmentsDir, prismFullSegments)
 			return mergeReports(valuation, segments)
 		},

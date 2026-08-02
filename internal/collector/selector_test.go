@@ -239,3 +239,31 @@ func TestSelectExternalForSymbolOnlyQlibReturnsNil(t *testing.T) {
 		t.Fatalf("only qlib registered: SelectExternalForSymbol must return nil, got %v", got.Name())
 	}
 }
+
+// TASK-005 f5:tushare/baostock 作为 A 股行情二跳/三跳登记进 registry(ADR#10)后,
+// 既有路由必须零行为变更 —— A 股仍首选 eastmoney。登记新采集器会让
+// SelectExternalForSymbol 末尾的「任取一个」兜底循环多出候选(map 序不确定),
+// 这条断言锁住「只要 eastmoney 在册就必定选它」,防止备源意外抢主源。
+func TestSelectForSymbolUnchangedWithBackupCollectorsRegistered(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(&fakeCollector{name: "eastmoney", markets: []core.Market{core.MarketCNA}})
+	reg.Register(&fakeCollector{name: "yahoo", markets: []core.Market{core.MarketUS}})
+	reg.Register(&fakeCollector{name: "tushare", markets: []core.Market{core.MarketCNA, core.MarketHK}})
+	reg.Register(&fakeCollector{name: "baostock", markets: []core.Market{core.MarketCNA}})
+
+	cases := []struct{ symbol, want string }{
+		{"600519.SH", "eastmoney"}, // A 股公司
+		{"000300.SH", "eastmoney"}, // A 股指数
+		{"NVDA", "yahoo"},
+		{"0700.HK", "yahoo"},
+	}
+	for _, c := range cases {
+		got := SelectForSymbol(reg, c.symbol)
+		if got == nil {
+			t.Fatalf("%s: expected collector %q, got nil", c.symbol, c.want)
+		}
+		if got.Name() != c.want {
+			t.Errorf("%s: expected %q, got %q (备源不得抢主源)", c.symbol, c.want, got.Name())
+		}
+	}
+}

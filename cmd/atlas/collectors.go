@@ -5,10 +5,12 @@ import (
 
 	"github.com/newthinker/atlas/internal/app"
 	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/baostock"
 	"github.com/newthinker/atlas/internal/collector/crypto"
 	"github.com/newthinker/atlas/internal/collector/eastmoney"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/qlibpit"
+	"github.com/newthinker/atlas/internal/collector/tushare"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"go.uber.org/zap"
@@ -71,6 +73,25 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 		}
 		application.RegisterCollector(maybeCache(cryptoCollector, cacheEnabled, cacheTTL))
 		log.Info("crypto collector registered")
+	}
+
+	// M3.5a:A 股行情的二跳/三跳备源登记(spec §2「A股·行情」三跳三故障域,ADR#10)。
+	// 只是让 registry 能按名取到它们 —— 路由仍首选 eastmoney,Prism 编排不消费行情
+	// (ADR#6)。tushare 缺 key 不登记(必然 40203);baostock 随 Prism 一起启停,
+	// 因为那座桥是 Prism 的部署产物,Prism 关掉时桥通常没在跑。
+	if collectorCfg, ok := cfg.Collectors["tushare"]; ok && collectorCfg.Enabled && collectorCfg.APIKey != "" {
+		application.RegisterCollector(maybeCache(tushare.New(collectorCfg.APIKey), cacheEnabled, cacheTTL))
+		log.Info("tushare collector registered (A-share price 2nd hop)")
+	}
+	// 在本地副本上套默认值再读:buildCollectors 跑在 serve.go 的 prismCfg.ApplyDefaults()
+	// 之前(且那次作用在副本上),直接读 cfg.Prism.BaostockBaseURL 会拿到空串,
+	// 桥地址没显式写进 config 时三跳就静默缺席。
+	prismCfg := cfg.Prism
+	prismCfg.ApplyDefaults()
+	if prismCfg.Enabled && prismCfg.BaostockBaseURL != "" {
+		application.RegisterCollector(maybeCache(baostock.New(prismCfg.BaostockBaseURL), cacheEnabled, cacheTTL))
+		log.Info("baostock collector registered (A-share price 3rd hop)",
+			zap.String("bridge", prismCfg.BaostockBaseURL))
 	}
 
 	// Wire qlib warehouse collector after all external collectors are registered

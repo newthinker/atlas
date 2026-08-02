@@ -3,6 +3,7 @@
 package prism
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	akshare "github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/tushare"
 	"github.com/newthinker/atlas/internal/config"
 	"github.com/newthinker/atlas/internal/core"
 	prismstore "github.com/newthinker/atlas/internal/storage/prism"
@@ -55,6 +57,27 @@ type USClient interface {
 	FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error)
 }
 
+// TushareClient is the subset of *tushare.Client used by the M3.5a A/H fallback
+// hops (spec §2). index_dailybasic 无权限(TASK-001 live 探针 40203),故指数与港股
+// 链尾只取价格,不取估值。
+type TushareClient interface {
+	FetchDailyBasic(symbol string, start, end time.Time) ([]tushare.ValuationPoint, error)
+	FetchIndexDaily(symbol string, start, end time.Time) ([]tushare.PricePoint, error)
+	FetchHKDaily(symbol string, start, end time.Time) ([]tushare.PricePoint, error)
+}
+
+// TwelvedataClient is the subset of *twelvedata.Client used as the US price
+// second hop. 只补价格,EPS 链路不变。
+type TwelvedataClient interface {
+	FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error)
+}
+
+// errFallbackNoData:兜底源返回零行。兜底跳只在主源已失败时触发,此时「零行」无法与
+// 「符号形态不被上游接受」区分——实测 tushare hk_daily 对 ts_code="0700.HK" 返回
+// code=0 且 items 为空(非报错)。判成功会天天上报「fallback ok」却零写入,把真实缺口
+// 静默吞掉;故兜底跳一律把零行当失败,让缺口显性化。
+var errFallbackNoData = errors.New("fallback source returned no data")
+
 // Report summarizes one refresh run. Partial failures do not abort the run.
 type Report struct {
 	Refreshed int
@@ -62,16 +85,21 @@ type Report struct {
 	Degraded  []string // 主源失败但兜底成功的标的(可观测降级,进告警提示不算失败)
 }
 
-// degrade records one observable degradation; the empty string means "none".
-func (r *Report) degrade(msg string) {
-	if msg != "" {
-		r.Degraded = append(r.Degraded, msg)
+// degrade records observable degradations; empty strings mean "none".
+func (r *Report) degrade(msgs ...string) {
+	for _, msg := range msgs {
+		if msg != "" {
+			r.Degraded = append(r.Degraded, msg)
+		}
 	}
 }
 
 // Refresh updates every configured instrument: lixinger-sourced instruments
 // fetch incrementally (理杏豆计费), engine-sourced US stocks rebuild via yahoo.
-func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient, now time.Time) Report {
+// ts/td 为 nil 表示该备源未配置:此时行为与 M3.5a 之前完全一致,且不发「备源未配置」
+// 提示(ADR#9——未配置是永久状态,天天提示违反 spec §2「不得天天降级」)。
+func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient,
+	ts TushareClient, td TwelvedataClient, now time.Time) Report {
 	var rep Report
 	for _, inst := range cfg.Instruments {
 		var err error
@@ -85,21 +113,42 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 					err = nil
 				} else {
 					err = fmt.Errorf("lixinger: %v; akshare fallback: %v", err, fbErr)
+					// 链尾第三跳(spec §2 A股指数·估值):tushare 仅价格。
+					if ts != nil {
+						degs, tsErr := tushareFallback(cfg, store, ts, inst, now, fbErr, "lixinger+akshare")
+						rep.degrade(degs...)
+						if tsErr == nil {
+							err = nil
+						} else {
+							err = fmt.Errorf("%v; tushare fallback: %v", err, tsErr)
+						}
+					}
 				}
 			}
 		case "engine":
-			var deg string
-			deg, err = refreshEngine(cfg, store, us, inst, now)
-			rep.degrade(deg)
+			var degs []string
+			degs, err = refreshEngine(cfg, store, us, td, inst, now)
+			rep.degrade(degs...)
 		case "akshare":
 			err = refreshAkshare(cfg, store, ak, inst, now)
+			// 二跳(spec §2 A股公司·估值 / 港股·估值):A 股公司取 daily_basic 官方
+			// 口径估值,港股与指数只取价格。
+			if err != nil && ts != nil {
+				degs, tsErr := tushareFallback(cfg, store, ts, inst, now, err, "akshare")
+				rep.degrade(degs...)
+				if tsErr == nil {
+					err = nil
+				} else {
+					err = fmt.Errorf("akshare: %v; tushare fallback: %v", err, tsErr)
+				}
+			}
 		case "edgar":
-			var deg string
-			deg, err = refreshEdgar(cfg, store, ed, us, inst, now)
-			rep.degrade(deg)
+			var degs []string
+			degs, err = refreshEdgar(cfg, store, ed, us, td, inst, now)
+			rep.degrade(degs...)
 			if err != nil && inst.FallbackSource == "engine" {
-				fbDeg, fbErr := refreshEngine(cfg, store, us, inst, now)
-				rep.degrade(fbDeg)
+				fbDegs, fbErr := refreshEngine(cfg, store, us, td, inst, now)
+				rep.degrade(fbDegs...)
 				if fbErr == nil {
 					rep.Degraded = append(rep.Degraded,
 						fmt.Sprintf("%s: edgar failed (%v), engine fallback ok", inst.Symbol, err))
@@ -213,23 +262,24 @@ func upsertPrices(store Store, id int64, symbol string, closes []core.OHLCV) str
 // refreshEngine 每日全量重算美股公司近 us_lookback_years 年 PE 序列并整段 upsert
 // (幂等,无增量状态)。yahoo 路径 M1 口径:无 PB/PSTTM,仅 5Y 滚动分位。
 // 返回的首个值是降级说明("" 表示无降级),见 upsertPrices。
-func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config.PrismInstrument, now time.Time) (string, error) {
+func refreshEngine(cfg config.PrismConfig, store Store, us USClient, td TwelvedataClient,
+	inst config.PrismInstrument, now time.Time) ([]string, error) {
 	id, err := upsertMeta(store, inst)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	start := now.AddDate(-cfg.USLookbackYears, 0, 0)
 	// EPS 需要比价格多回看 1 年,保证首个交易日有可对齐的 EPS 点
 	eps, err := us.FetchEPSHistory(inst.Symbol, start.AddDate(-1, 0, 0), now)
 	if err != nil {
-		return "", fmt.Errorf("eps history: %w", err)
+		return nil, fmt.Errorf("eps history: %w", err)
 	}
-	closes, err := us.FetchHistory(inst.Symbol, start, now, "1d")
+	closes, fbDeg, err := fetchCloses(us, td, inst.Symbol, start, now)
 	if err != nil {
-		return "", fmt.Errorf("price history: %w", err)
+		return nil, err
 	}
 	// 价格是原始事实,紧随取得即落库:后续估值环节(熔断/重建)失败时行情不应一并丢失。
-	deg := upsertPrices(store, id, inst.Symbol, closes)
+	deg := []string{fbDeg, upsertPrices(store, id, inst.Symbol, closes)}
 	// 熔断:当前 EPS(TTM)<=0(真实亏损)→ 不入库,记入 Report.Failed,语义对齐
 	// valuation.ReconstructPEPercentile 的 ErrNonPositiveEPS。否则历史有 >=8 正 EPS
 	// 季但最新亏损的标的会静默入库截断到最后盈利日的过期序列,误导 board 展示。
@@ -251,6 +301,27 @@ func refreshEngine(cfg config.PrismConfig, store Store, us USClient, inst config
 		}
 	}
 	return deg, store.UpsertValuations(id, rows)
+}
+
+// fetchCloses 取美股价格:yahoo 失败且 td 已配置时,切 twelvedata 重取同一段
+// (spec §2 美股·价格二跳)。EPS 链路不受影响,twelvedata 只补价格。
+// td 为 nil 或兜底也失败时,错误保持既有的 "price history:" 前缀不变。
+func fetchCloses(us USClient, td TwelvedataClient, symbol string, start, end time.Time) ([]core.OHLCV, string, error) {
+	closes, err := us.FetchHistory(symbol, start, end, "1d")
+	if err == nil {
+		return closes, "", nil
+	}
+	if td == nil {
+		return nil, "", fmt.Errorf("price history: %w", err)
+	}
+	fb, fbErr := td.FetchHistory(symbol, start, end)
+	if fbErr == nil && len(fb) == 0 {
+		fbErr = errFallbackNoData
+	}
+	if fbErr != nil {
+		return nil, "", fmt.Errorf("price history: %v; twelvedata fallback: %v", err, fbErr)
+	}
+	return fb, fmt.Sprintf("%s: yahoo price failed (%v), twelvedata fallback ok", symbol, err), nil
 }
 
 // refreshAkshare 每日增量拉取 akshare(经 aktools)公司/指数估值,并在本地计算滚动
@@ -277,9 +348,28 @@ func refreshAkshare(cfg config.PrismConfig, store Store, ak AkshareClient, inst 
 	if len(pts) == 0 {
 		return nil // 无新数据,零写入
 	}
+	vps := make([]valPoint, len(pts))
+	for i, p := range pts {
+		vps[i] = valPoint{Date: p.Date, PETTM: p.PETTM, PB: p.PB, PSTTM: p.PSTTM}
+	}
+	return upsertWithLocalPercentile(store, id, inst.Symbol, vps)
+}
 
+// valPoint 是估值三件套的来源无关形态,让 akshare(百度)与 tushare(daily_basic)
+// 两条 A 股估值链共用同一套本地分位实现,避免两份会各自漂移的算法。
+type valPoint struct {
+	Date             time.Time
+	PETTM, PB, PSTTM float64
+}
+
+// upsertWithLocalPercentile 读回库内全历史与新点合并(同日新值覆盖),整段算 5Y/10Y
+// 滚动分位,但只为新点写行(历史行不回写)。上游数据源无官方分位时共用此路径。
+func upsertWithLocalPercentile(store Store, id int64, symbol string, pts []valPoint) error {
+	if len(pts) == 0 {
+		return nil
+	}
 	// 本地分位:历史(剔除 NaN PE)+ 新点合并(同日新值覆盖),升序后整段算 5Y/10Y 分位。
-	hist, err := store.Series(inst.Symbol, "")
+	hist, err := store.Series(symbol, "")
 	if err != nil {
 		return fmt.Errorf("read back series: %w", err)
 	}
@@ -289,7 +379,7 @@ func refreshAkshare(cfg config.PrismConfig, store Store, ak AkshareClient, inst 
 			peByDay[ds] = hist.PETTM[i]
 		}
 	}
-	newDays := make(map[string]akshare.ValuationPoint, len(pts))
+	newDays := make(map[string]valPoint, len(pts))
 	for _, p := range pts {
 		ds := p.Date.Format("2006-01-02")
 		newDays[ds] = p
@@ -328,6 +418,98 @@ func refreshAkshare(cfg config.PrismConfig, store Store, ak AkshareClient, inst 
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].D < rows[j].D })
 	return store.UpsertValuations(id, rows)
+}
+
+// tushareFallback 按「市场×类型」分派 A/H 兜底跳(spec §2 总表):
+// 港股与 A 股指数只取价格(index_dailybasic 无权限,TASK-001 live 探针),
+// A 股公司取 daily_basic 官方口径估值。chain 是已失败的上游链名,用于降级文案。
+func tushareFallback(cfg config.PrismConfig, store Store, ts TushareClient, inst config.PrismInstrument,
+	now time.Time, mainErr error, chain string) ([]string, error) {
+	// priceFetch 非 nil 即「仅价格」跳,同时决定走哪个 api;nil 表示 A 股公司估值跳。
+	var priceFetch func(symbol string, start, end time.Time) ([]tushare.PricePoint, error)
+	switch {
+	case inst.Market == "HK":
+		priceFetch = ts.FetchHKDaily
+	case inst.Type == "index":
+		priceFetch = ts.FetchIndexDaily
+	}
+	priceOnly := priceFetch != nil
+
+	var degs []string
+	var err error
+	if priceOnly {
+		var deg string
+		deg, err = refreshTusharePrices(cfg, store, inst, now, priceFetch)
+		degs = append(degs, deg)
+	} else {
+		err = refreshTushareValuation(cfg, store, ts, inst, now)
+	}
+	if err != nil {
+		// 永久性错误(积分/权限)不是临时故障:点明配置性问题,避免运维当抖动反复观察。
+		// 本跳只调用一次,永不重试(spec §2「永久不覆盖不重试」)。
+		if errors.Is(err, tushare.ErrNoPermission) {
+			degs = append(degs, fmt.Sprintf("%s: tushare 跳不可用(权限不足,配置性问题,不重试): %v",
+				inst.Symbol, err))
+		}
+		return degs, err
+	}
+	msg := fmt.Sprintf("%s: %s failed (%v), tushare fallback ok", inst.Symbol, chain, mainErr)
+	if priceOnly {
+		msg += "(仅价格,估值缺失)"
+	}
+	return append(degs, msg), nil
+}
+
+// refreshTushareValuation A 股公司估值二跳:daily_basic 官方口径 pe_ttm/pb/ps_ttm,
+// 分位与 akshare 路径共用同一套本地滚动窗口算法。
+func refreshTushareValuation(cfg config.PrismConfig, store Store, ts TushareClient,
+	inst config.PrismInstrument, now time.Time) error {
+	id, err := upsertMeta(store, inst)
+	if err != nil {
+		return err
+	}
+	start, skip, err := incrementalStart(store, id, cfg.LookbackYears, now)
+	if err != nil || skip {
+		return err
+	}
+	pts, err := ts.FetchDailyBasic(inst.Symbol, start, now)
+	if err != nil {
+		return err
+	}
+	if len(pts) == 0 {
+		return errFallbackNoData
+	}
+	vps := make([]valPoint, len(pts))
+	for i, p := range pts {
+		vps[i] = valPoint{Date: p.Date, PETTM: p.PETTM, PB: p.PB, PSTTM: p.PSTTM}
+	}
+	return upsertWithLocalPercentile(store, id, inst.Symbol, vps)
+}
+
+// refreshTusharePrices 是港股与 A 股指数链尾的「仅价格」跳:只写 price_daily。
+//
+// **刻意不写估值行**:LatestDate 取 MAX(d) FROM valuation_daily,是增量拉取的水位。
+// 若为这些天写下估值列全 NaN 的行,水位会被推到今天,主源恢复后 incrementalStart 判定
+// 「已是最新」直接 skip,这段窗口的真实估值将永久不回填。缺行与 NaN 行在 Series 视图上
+// 同样呈现为缺失,但只有缺行不会毒化水位。
+func refreshTusharePrices(cfg config.PrismConfig, store Store, inst config.PrismInstrument, now time.Time,
+	fetch func(symbol string, start, end time.Time) ([]tushare.PricePoint, error)) (string, error) {
+	id, err := upsertMeta(store, inst)
+	if err != nil {
+		return "", err
+	}
+	pts, err := fetch(inst.Symbol, now.AddDate(-cfg.LookbackYears, 0, 0), now)
+	if err != nil {
+		return "", err
+	}
+	if len(pts) == 0 {
+		return "", errFallbackNoData
+	}
+	closes := make([]core.OHLCV, len(pts))
+	for i, p := range pts {
+		closes[i] = core.OHLCV{Time: p.Date, Close: p.Close}
+	}
+	return upsertPrices(store, id, inst.Symbol, closes), nil
 }
 
 // maxTTMWindowDays 是 4 季 TTM 窗口首尾 period_end 的合理跨度上限。连续 4 季约跨
@@ -418,17 +600,18 @@ func seriesByDate(closes []core.OHLCV, pts []core.EPSPoint) map[string]float64 {
 // EPS_TTM 阶梯重建 PE 序列;PB(Close/BVPS)、PS(Close/RPS_TTM)同构对齐并入行。
 // 价格仍走 yahoo。CIK 空 → 报错提示配置。
 // 返回的首个值是降级说明("" 表示无降级),见 upsertPrices。
-func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, inst config.PrismInstrument, now time.Time) (string, error) {
+func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, td TwelvedataClient,
+	inst config.PrismInstrument, now time.Time) ([]string, error) {
 	if inst.CIK == "" {
-		return "", fmt.Errorf("edgar source requires cik in config")
+		return nil, fmt.Errorf("edgar source requires cik in config")
 	}
 	id, err := upsertMeta(store, inst)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	facts, err := ed.FetchCompanyFacts(inst.CIK)
 	if err != nil {
-		return "", fmt.Errorf("companyfacts: %w", err)
+		return nil, fmt.Errorf("companyfacts: %w", err)
 	}
 	frows := make([]prismstore.FundamentalRow, len(facts))
 	for i, f := range facts {
@@ -443,14 +626,14 @@ func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClie
 		}
 	}
 	if err := store.UpsertFundamentals(id, frows); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	closes, err := us.FetchHistory(inst.Symbol, now.AddDate(-cfg.EdgarLookbackYears, 0, 0), now, "1d")
+	closes, fbDeg, err := fetchCloses(us, td, inst.Symbol, now.AddDate(-cfg.EdgarLookbackYears, 0, 0), now)
 	if err != nil {
-		return "", fmt.Errorf("price history: %w", err)
+		return nil, err
 	}
-	deg := upsertPrices(store, id, inst.Symbol, closes)
+	deg := []string{fbDeg, upsertPrices(store, id, inst.Symbol, closes)}
 	epsPts := ttmPoints(facts, func(f edgar.QuarterlyFact) float64 { return f.EPSDiluted })
 	dates, pe, err := valuation.ReconstructPESeries(closes, epsPts)
 	if err != nil {
