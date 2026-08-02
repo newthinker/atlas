@@ -420,8 +420,25 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 - `/prism/fundamental` 财务趋势页(含股价叠加,新增 price_daily 落库)+ 堆叠柱状图 + PNG 导出。
 
 **M3.5 — 数据链路基建(与财报桥解耦,主线后另拆计划)**
-- **Stooq 备源接入(2026-07-25 用户立项)**:新增 `internal/collector/stooq` 作 yahoo 价格失败备源,消除「本机代理可用性」单点;先调研 Stooq 对首批标的的覆盖/复权口径。
-- ETF 成分聚合(D3)+ etfholdings(自 M2 顺延)。
+
+拆为 a/b 两期,spec `docs/superpowers/specs/2026-08-02-prism-m3.5-design.md`。
+~~Stooq 备源接入(2026-07-25 用户立项)~~ **已出局**:2026-08-02 实测全站 JS 工作量证明
+反爬墙,直连与代理均被拦(见 §10 首条),美股价格备源改用 Twelve Data。
+
+**M3.5a — 数据源与降级链(2026-08-02 落地,计划 `plans/2026-08-02-prism-m3.5a-datasources.md`)**
+
+| M3.5a 范围项 | 状态 | 实测证据 / 缺口 |
+|---|---|---|
+| `internal/collector/tushare`(A/H 估值+行情备源) | ✅ 已落地 | 单测全绿;基础档能力面已 live 实测(见 §10 积分边界条)。⚠ 40203 语义重载**未修**,见 §10 |
+| `internal/collector/twelvedata`(美股价格备源) | ✅ 已落地 | 单测全绿(含 8s 节流用例);复权口径 live 实证**一致**——NVDA 2026-07-16..07-31 共 11 个交易日与库内 `price_daily` 逐日比对,最大相对偏差 ~2e-8(float32 存储舍入),远低于 1% 阈值 ⇒ 与 yahoo 同为后复权,降级切换无口径跳变 |
+| baostock 桥(Python 侧车 + Go 客户端,A 股行情第三跳) | ✅ 已落地,**上游未实证** | 桥/客户端单测全绿(客户端覆盖率 95.8%);桥启动、404 路由、上游故障转 500 均本机实测。**但 baostock 上游 10030 端口本机连接超时,真实行情取数未实证**(见 §10 末条) |
+| 配置接线(`prism.baostock_base_url` 等) | ✅ 已落地 | 默认值时序 bug 已修并由测试锁定(`buildCollectors` 早于 `ApplyDefaults` 执行,直读字段会让该跳静默缺席) |
+| 编排层降级链扩展(`internal/prism/refresh.go`) | ✅ 已落地 | 各跳 fallback 与 Degraded 上报有单测;`ts/td` 全 nil 时行为与改动前一致(既有用例回归即断言) |
+| 部署与断源演练 | 见 §10 与 `docs/deployment.md` | baostock plist + ops 脚本装载已就位;演练结果记入实施计划文档 |
+| 港股跳(hk_daily) | ⚠ **未实证取到数据** | `ts_code="0700.HK"` 返回 code=0 但 items 空数组(静默空);文档形态为 5 位 `00700.HK`,两次探针均撞 hk_daily 限频(1 次/小时)未取到结论。ADR#8「symbol 形态天然一致」在 A 股成立、**港股未证实**;已把「零行结果判失败」做成机制,让该跳失效时显性报错而非假成功 |
+
+**M3.5b — ETF 成分聚合(D3)**:N-PORT 持仓解析、加权调和平均聚合引擎、首批 11 个 SPDR
+行业 ETF + `etf_holdings`(自 M2 顺延)。计划 `plans/2026-08-02-prism-m3.5b-etf-aggregate.md`。
 
 **M4 — 扩展(按需)**
 - 美股扩容至 Top 100;桑基模板逐家增补(上限 30~50 家)。
@@ -449,6 +466,13 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 | 股本变动(回购/增发)导致 EPS 阶梯跳变 | PE 曲线毛刺 | 用 diluted shares 逐季更新,跳变属真实信号,不平滑 |
 | SQLite 并发写(采集 job 与 serve 同时写) | 偶发 busy | WAL + busy_timeout;采集统一走 prism-daily 单进程串行 |
 | filing_date 升级影响线上 pe_percentile 策略 | 分位数字变动引发误报 | 升级带回归测试;上线首周对比新旧分位差异并在通知中标注口径切换 |
+| **Stooq 全站 PoW 反爬(M3.5 立项前实测推翻)** | 原定的 yahoo 价格备源方案整体作废——逐标的 CSV 与打包下载(db/h + static zip)是同一道 JS 工作量证明墙(SHA-256 换会话 cookie),直连与代理均被拦,zip 端点 401 | **已出局**,备源改用 Twelve Data。**记录在案防止未来重新踩坑**:这不是 IP 拦截也不是配额,换代理无用;跑 headless 浏览器做 PoW 的代价不值当 |
+| Twelve Data 免费层 800 次/天 | 额度不足以支撑 ETF 成分股场景(~500 只标的) | 成分股价格/PE **不走 TD**;TD 仅服务 Prism 标的池的美股备源(~21 标的增量足够)。客户端内置 8s 最小间隔节流(8 req/min 限制) |
+| tushare 积分边界(美股/财务/指数估值权限) | 能力面随积分档变动,越界接口返回 40203 | 能力面**以实测为准**:2026-08-02 实测基础档 `daily`/`index_daily`/`daily_basic`/`hk_daily` 可用,`us_daily`/`income` 与 `index_dailybasic` 均 40203 无权限 → **指数链尾降为仅价格备源**(不做估值) |
+| **tushare 40203 语义重载(2026-08-02 实测,TASK-005 发现)** | `code=40203` **同码不同义**:既表示「没有接口访问权限」(永久,配置性),也表示「访问频率超限」(临时,应往下跳)。客户端当前把 40203 一律映射为永久性 `ErrNoPermission`,于是**临时限频会被降级链判成永久配置问题**,Degraded 写「权限不足,配置性问题」而不重试 | 判别依据现成:**msg 含「频率超限」即为临时**。复现证据(同一 token 连续探针):第 1 次 hk_daily 正常 → 第 2 次 40203「频率超限(1次/分钟)」→ 约 75 秒后 40203「频率超限(1次/小时)」,**限频窗口本身也在变**。影响面集中在港股跳(hk_daily 限频最严),A 股 daily_basic/index_daily 未观测到限频。**修复未做**——改动会同时推翻 TASK-001 已验收的契约与 design-spec,留待后续任务决策 |
+| N-PORT 标识映射(CUSIP→ticker)与 ~2 月滞后(M3.5b 预告) | 映射失败则成分股缺失;持仓快照滞后于实际权重 | 映射走实施首任务 live 校验,**失败计入 `excluded_weight` 不阻塞**聚合;滞后在 D3「权重漂移可接受」语义内,`etf_holdings` 记 `snap_date` 供审计 |
+| **密钥卫生(tushare token / TD key)** | 密钥一旦进 git 历史即不可撤销,plist 与日志是易被忽略的泄漏面 | 只入 runtime `configs/config.yaml`(gitignored、deploy.sh 投递后 chmod 600);**不入 `config.example.yaml`(只留空值+注释)、不入 plist、不入日志**。每次 commit 前跑哨兵 grep(token 前 8 位从 runtime config 现取,不写死进任何文档);终检 `git log -p --all -S "$SENT"` 须为空 |
+| **baostock 桥成为新常驻服务**(M3.5a 新增) | 多一个需要 venv + launchd 运维的进程;桥挂了 A 股行情第三跳失效 | 仿 aktools 成熟模式(venv 隔离/launchd KeepAlive/独立日志),**失败仅影响该跳**,不波及估值链与其余市场。⚠ 实测风险:baostock 走**私有 TCP 协议 10030 端口**,`http_proxy` 对其无效——§10 上面那条 yahoo 403 的「plist 注入代理」修复手段在此**用不上**;2026-08-02 本机实测该端口连接超时,该跳当时取不到真实行情。部署要点与排障见 `docs/deployment.md` Baostock 桥段 |
 
 ---
 

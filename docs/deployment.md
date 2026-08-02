@@ -261,6 +261,7 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 | crisis-intraday-jpy | 每 30 分钟 | 盘中 JPY 检查（非 BREWING/CRISIS 态空跑近零） |
 | prism-daily | 每日 08:30 | Prism 估值刷新（理杏仁增量 + 美股 yahoo 重算，在 refresh-us 08:00 之后） |
 | aktools | 常驻 | AKShare HTTP 侧车（127.0.0.1:8180，Prism A/H 公司与指数兜底数据源） |
+| baostock | 常驻 | Baostock HTTP 桥（127.0.0.1:8181，A 股行情第三跳备源；失败只影响该跳） |
 
 ### 危机监控（Cassandra）部署要点
 
@@ -382,6 +383,56 @@ AKShare。侧车是独立 Python 进程（与 Go 主程序解耦，与 qlib_eval
   写入(其 PE 为 mcw 加权口径)、当日由 akshare 补(乐咕滚动市盈率,亦加权但口径不完全一致),
   故兜底日的分位是该混源序列上的排位,跨源衔接处存在轻微不连续,主源恢复后次日续拉即回归
   单一口径。指数兜底仅有 PE（PB/PS 为空），HK 公司仅有 PE/PB（无 PS）。
+
+### Baostock 桥部署要点
+
+A 股行情降级链的**第三跳**（yahoo → akshare → baostock）经本地 Baostock HTTP 桥拉取。
+桥是独立 Python 进程（stdlib `http.server`，不引 FastAPI），与 akshare 的 venv 完全隔离。
+该跳失败只影响 A 股行情备源，不影响估值链与其余市场。
+
+- **投递**：`scripts/baostock/`(setup.sh + bridge.py + requirements.txt + requirements.lock)
+  随 `deploy.sh` rsync 投递到 runtime 目录，**setup.sh 须在 runtime 侧执行**——venv 落在
+  `runtime/scripts/baostock/.venv`，与 plist `ProgramArguments` 的绝对路径一致
+  (`.venv/` 本身不入 git，仅 lock 追踪，且已在 deploy.sh 的 `--delete` 排除表内)。
+- **建 venv**：runtime 侧执行 `bash scripts/baostock/setup.sh`（幂等，重复执行安全）。
+  幂等结构与升级流程与 akshare 完全一致：有 `requirements.lock` 时按 lock 复现安装，
+  无 lock(首次)时按 `requirements.txt` 安装并 freeze 生成 lock；升级须显式
+  `bash scripts/baostock/setup.sh --upgrade`。默认解释器 `python3.11`，可传参覆盖。
+- **装载常驻**：`bash scripts/ops/install-services.sh` 会一并装载
+  （plist 真相源 `deploy/launchd/com.newthinker.atlas.baostock.plist`，`KeepAlive` 保活、
+  `RunAtLoad` 开机自启）。桥仅绑 `127.0.0.1:8181`，不对外暴露，**不含任何密钥**
+  （baostock 匿名登录，无 token 概念）。
+- **配置要点**：runtime `configs/config.yaml` 的 `prism.baostock_base_url`
+  （默认 `http://127.0.0.1:8181`）须与 bridge.py 内硬编码的监听地址一致。**端口不是 CLI
+  旗标**——改端口要同时改 `bridge.py` 与该配置项（这与 aktools 的 `--host/--port` 不同）。
+- **验证**：`curl --noproxy '*' 'http://127.0.0.1:8181/daily?code=sh.600519&start=2026-07-01&end=2026-08-01'`
+  应返回 `[{"date":"...","close":...}, ...]`。**`--noproxy '*'` 不能省**：本机 env 有
+  `http_proxy=127.0.0.1:7897`，curl 会把 127.0.0.1:8181 也走代理，桥未就绪时返回代理的
+  **502 而非真实错误**，足以把排障带偏（2026-08-02 实测踩过）。
+- **日志路径**：`logs/baostock.out.log` / `logs/baostock.err.log`。
+- **口径说明**：`adjustflag=3`（**不复权**，与 PE 计算口径一致）；桥只取 `date,close`
+  两列，`close` 为空字符串的行由桥跳过。Go 客户端传 Atlas 形态 symbol（`600519.SH`），
+  桥形态（`sh.600519`）的转换在 `internal/collector/baostock` 包内完成。
+
+**排障（含 2026-08-02 实测行为）**：
+
+- **启动慢是正常的，不是卡死**：`bs.login()` 在模块加载时执行，上游不可达时会先阻塞
+  **约 30 秒**（socket 超时重试）才轮到 `HTTPServer(...)` 开始监听。故**健康检查必须探
+  8181 端口**（`lsof -nP -i TCP:8181`）而非「进程存在」——进程起来了不等于端口已就绪。
+- **上游挂了桥不会崩溃循环**：login 失败不抛异常，桥照常常驻并监听，只是每个 `/daily`
+  返回 **500 + 错误文本**（如 `baostock query 10002007: 网络接收错误。`）。这是有意设计——
+  桥把上游故障显式转 500，降级链才知道该跳失败；若静默返回 `200 []`，下游会误判成
+  「该期无数据」而不触发下一跳。**看到 500 先查上游，别怀疑桥本身**。
+- **真正会触发 KeepAlive 重启循环的是端口被占**：8181 被别的进程占用时
+  `HTTPServer(("127.0.0.1", 8181))` 抛 `OSError: Address already in use` → 进程退出 →
+  `KeepAlive` 拉起 → 再失败。症状是 `logs/baostock.err.log` 反复出现同一条 traceback。
+  先 `lsof -i :8181` 找出占用者，再 `launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.baostock`。
+- **⚠ 代理对 baostock 无效**：baostock 走**私有 TCP 协议连 `www.baostock.com:10030`**，
+  不是 HTTP——`http_proxy`/`https_proxy` 环境变量对它**不起作用**，无法像 yahoo 那样靠给
+  plist 注入代理绕过出口封锁（§10 那条 yahoo 403 的修复手段在这里用不上）。判别方法：
+  `nc -z -v -w 10 www.baostock.com 10030`。2026-08-02 本机实测该端口**连接超时**（DNS 正常
+  解析到 114.94.20.92、HTTP 80 正常返回 301，唯独 10030 不通），故该跳当时无法取到真实
+  行情。若出口网络确实封 10030，只能走网络侧放通，桥侧无解。
 
 ---
 

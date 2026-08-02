@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.baostock</string>
+
+  <!-- 隔离 venv 解释器直跑桥脚本(stdlib http.server,无 CLI 旗标);
+       监听地址硬编码在 bridge.py 内为 127.0.0.1:8181,改端口须同时改
+       bridge.py 与 runtime config 的 prism.baostock_base_url -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/scripts/baostock/.venv/bin/python</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/scripts/baostock/bridge.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/baostock.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/baostock.err.log</string>
+</dict>
+</plist>

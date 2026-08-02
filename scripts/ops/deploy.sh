@@ -4,7 +4,7 @@
 #
 # 幂等、可重复执行。只覆盖二进制/脚本/配置；**绝不动 runtime 本地数据**
 # （data/ logs/ qlib_csv*/ fundamentals_csv*/ signals*.csv reports/ 以及 runtime 侧
-# 独立安装的 scripts/akshare/.venv/ 均被排除并受 --delete 保护）。
+# 独立安装的 scripts/akshare/.venv/、scripts/baostock/.venv/ 均被排除并受 --delete 保护）。
 #
 # 用法：
 #   bash scripts/ops/deploy.sh                 # 部署到默认 runtime
@@ -46,6 +46,7 @@ rsync -a -m --delete \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='.DS_Store' \
   --exclude='/data/' --exclude='/logs/' \
   --exclude='/scripts/akshare/.venv/' \
+  --exclude='/scripts/baostock/.venv/' \
   --exclude='/qlib_csv/' --exclude='/qlib_csv_hk/' --exclude='/qlib_csv_us/' \
   --exclude='/fundamentals_csv/' --exclude='/fundamentals_csv_us/' \
   --exclude='/signals*.csv' --exclude='/reports/' \

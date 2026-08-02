@@ -10,6 +10,7 @@
 #   - com.newthinker.atlas.crisis-intraday-jpy 每 30 分钟盘中 JPY 检查（非 BREWING/CRISIS 空跑近零）
 #   - com.newthinker.atlas.prism-daily   每天 08:30 Prism 估值刷新（排在 refresh-us 之后）
 #   - com.newthinker.atlas.aktools       常驻 AKShare HTTP 侧车（127.0.0.1:8180，需先跑 scripts/akshare/setup.sh）
+#   - com.newthinker.atlas.baostock      常驻 Baostock HTTP 桥（127.0.0.1:8181，需先跑 scripts/baostock/setup.sh）
 #
 # plist 真相源在 deploy/launchd/（路径指向 runtime 目录）。幂等：已加载会先 bootout 再 bootstrap。
 # 无需 sudo（用户级 LaunchAgent）。运维手册：docs/ops/qlib-warehouse-runbook.md
@@ -27,7 +28,7 @@ rm -f "$LA/com.newthinker.atlas.warehouse-dump.plist"
 mkdir -p "$LA"
 for L in com.newthinker.atlas.serve com.newthinker.atlas.refresh-us com.newthinker.atlas.refresh-cnhk com.newthinker.atlas.analysis \
          com.newthinker.atlas.crisis-daily com.newthinker.atlas.crisis-nfci com.newthinker.atlas.crisis-intraday-jpy \
-         com.newthinker.atlas.prism-daily com.newthinker.atlas.aktools; do
+         com.newthinker.atlas.prism-daily com.newthinker.atlas.aktools com.newthinker.atlas.baostock; do
   src="$DEV_ROOT/deploy/launchd/$L.plist"
   [ -f "$src" ] || { echo "[install] 缺少 plist: $src" >&2; exit 1; }
   plutil -lint "$src" >/dev/null
