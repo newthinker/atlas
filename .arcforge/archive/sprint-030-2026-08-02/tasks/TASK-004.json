@@ -1,0 +1,54 @@
+{
+  "id": "TASK-004",
+  "title": "配置接线(BaostockBaseURL + example 密钥条目)",
+  "description": "internal/config/config.go:PrismConfig 增 BaostockBaseURL 字段,ApplyDefaults 默认 http://127.0.0.1:8181(参照 AkshareBaseURL 先例 config.go:469/505)。configs/config.example.yaml 增 collectors.tushare/twelvedata 空 api_key 条目+「密钥只写 runtime config」注释。注意:runtime configs/config.yaml 已有真实 key(勿动勿打印);哨兵 grep 确认 example 与暂存区无 token。",
+  "module": "config",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "PrismConfig.BaostockBaseURL 空时 ApplyDefaults 置为 http://127.0.0.1:8181(照 TestPrismConfigApplyDefaults 追加断言)"
+    ],
+    "boundary": [
+      "显式配置的 BaostockBaseURL 不被默认值覆盖"
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "config.example.yaml 增 collectors.tushare 与 collectors.twelvedata 的 api_key: \"\" 空值+密钥卫生注释;不含任何真实 key 片段",
+        "verify_by": "review"
+      },
+      {
+        "desc": "密钥哨兵:SENT 取 runtime config key 前 8 位,git diff --cached 中出现次数为 0",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-33",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/config"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-agent-15",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-02T08:49:46Z"
+  },
+  "writes": [
+    "./internal/config",
+    "configs/config.example.yaml"
+  ]
+}

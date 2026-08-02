@@ -1,0 +1,132 @@
+{
+  "task_id": "TASK-001",
+  "title": "Tushare 客户端(A/H 估值+行情备源)",
+  "by": "dev-agent-32",
+  "key_findings": [
+    "【live 探针结论,TASK-005 直接依赖】index_dailybasic 在本 token(基础积分档)返回 code=40203「抱歉，您没有接口(index_dailybasic)访问权限」⇒ 无权限。因此**不追加** FetchIndexDailyBasic,指数降级链尾定为「仅价格」。",
+    "同 token 同日对照探针 index_daily(000300.SH, 20260720-20260801)返回 code=0 且有 10 条数据 ⇒ 指数链尾「价格可取、估值不可取」,TASK-005 的指数跳应只做价格 fallback、估值列留 NaN。",
+    "真实 API 响应实测为**日期倒序**(items[0]=20260731 ... items[9]=20260720),客户端内统一转升序的处理是必需的,非假设。",
+    "40203 响应体的 data 字段为 null(非空对象),故错误分支必须在解析 items 之前判定——实现中 code 检查先于 fields/items 处理。",
+    "tushare ts_code 与 Atlas symbol 形态天然一致(600519.SH / 000300.SH / 00700.HK),无需映射层(印证 architecture-decisions #8)。",
+    "【review_fix 轮次 1,S1 40203 语义拆分】code 40203 是重载码:无权限与限频共用,只能靠 msg 区分。已拆为两个哨兵错误——msg 含「频率超限」→ ErrRateLimited(临时性,窗口过后自愈),否则 ErrNoPermission(永久性,改配置前重试无意义)。判别只认「频率超限」四字、不匹配具体窗口,因为窗口口径本身会变(TASK-005 实测同一 token 先报「1次/分钟」、约 75 秒后报「1次/小时」)。原 TestErrNoPermission 用的 msg 不含该子串,故 functional[2] 被收窄而非推翻。",
+    "【review_fix 轮次 1,M5 https】默认端点由 http:// 改 https://api.tushare.pro:token 走 POST body,明文 http 会让凭证对路径上任意中间节点可见。已 live 探针确认 https 端点可用(index_daily 000300.SH 返回 code=0 且有数据),不是纸面改动。",
+    "【review_fix 轮次 2,S2】「判据与窗口口径无关」这条性质此前零测试守护:原限频用例的 msg 恰好是「1次/分钟」,把 rateLimitMarker 写死成完整串时整套用例仍全绿(test-agent-14 复验的唯一存活突变 C)。已补表驱动用例覆盖三种不同窗口口径(1次/分钟、1次/小时、200次/天)。**已做突变检验实证其鉴别力**:把常量改成「频率超限(1次/分钟)」后,新用例 3 个子用例转红 2 个,而旧的 TestErrRateLimited 仍绿 —— 正好复现并封堵了该存活突变;随后已还原实现并复验全绿。"
+  ],
+  "decisions": [
+    {
+      "decision": "40203 用 %w 包装 ErrNoPermission 并在文本中附 api 名与 msg",
+      "rationale": "调用方(TASK-005)需用 errors.Is 判永久性错误以跳过重试;同时降级文案要能指出是哪个 api 无权限,故错误文本保留 api 名与原始 msg。"
+    },
+    {
+      "decision": "节流用 const minInterval=200ms(包级常量)而非 Client 可配字段",
+      "rationale": "tushare 基础档限频兜底是全局属性,无按实例调整的需求;测试直接引用该常量断言,避免测试与实现各写一份 200ms 而漂移。代价是测试实耗 0.2s,可接受。twelvedata(TASK-002)因需 8s 间隔不可能在测试里实耗,那里才需要可覆写字段——两包此处刻意不同构。"
+    },
+    {
+      "decision": "节流基准 lastReq 记在请求**发出前**而非返回后",
+      "rationale": "间隔语义按「请求发起时刻」计,不把服务端耗时算进配额间隔。测试的计时起点因此取在第一次调用之前(lastReq>=t0),使断言 elapsed>=200ms 严格成立、无时钟竞态,不需容差。"
+    },
+    {
+      "decision": "非数值列与缺列一律填 math.NaN(),并对 items 行短于 fields 做长度保护",
+      "rationale": "响应行长度由外部数据源决定,行短于 fields 时按索引取值会 panic 并炸掉整个 refresh;NaN 与仓内 NaN↔NULL 既有约定一致,下游可用 math.IsNaN 识别缺失。参考实现无此保护,这是本任务加固的一处(唯一偏离参考实现的实质改动)。"
+    },
+    {
+      "decision": "items 为空时返回 make(...,0) 而非 nil 切片",
+      "rationale": "done_criteria boundary[0] 要求空切片且 err=nil;调用方 range 两者行为一致,但显式非 nil 便于下游区分「查得到但无数据」与「未调用」。"
+    },
+    {
+      "decision": "限频判别用 msg 子串「频率超限」,而非匹配完整窗口描述或 error_code 细分",
+      "rationale": "tushare 未对限频给出独立错误码,msg 是唯一判据。窗口描述会变(实测「1次/分钟」→「1次/小时」),匹配完整串会在窗口口径调整时静默失效——那正是这类字符串判据最典型的腐坏方式。只认不变的那四个字,并把该常量命名为 rateLimitMarker 集中一处,便于日后上游改文案时单点修改。"
+    },
+    {
+      "decision": "限频分支置于无权限分支之前(优先级更高),而非并列 if/else 判两次",
+      "rationale": "两者同码,唯一区别在 msg;限频串更具体,先判它再回落到无权限是唯一无歧义的顺序。加了 TestErrNoPermissionStillPermanentWhenNotRateLimited 锁定「非限频的 40203 仍是永久性」,防止日后有人把判据放宽成匹配 40203 就当限频。"
+    },
+    {
+      "decision": "本轮只改 internal/collector/tushare/,不动 refresh.go 的 Degraded 文案,也不动 design §10 措辞",
+      "rationale": "Leader 明确的范围纪律(scope 互斥:TASK-005 的返工随后单独派)。副作用需交接:拆分生效后,限频错误不再命中 refresh.go 的 errors.Is(ErrNoPermission) 分支,故当前限频只会产出普通 Failed 条目、没有专门的 Degraded 文案——这比原先写错的「权限不足,配置性问题」更好,但不是终态,终态由 TASK-005 返工消费 ErrRateLimited 补上。"
+    },
+    {
+      "decision": "S2 用表驱动覆盖多种窗口口径,而非只加一条「1次/小时」用例",
+      "rationale": "要守护的是「判据与窗口无关」这条**性质**,不是某个具体窗口。单条用例只能证明某一个窗口可用,表驱动才让性质本身可见;第三行放一个上游尚未出现过的口径(200次/天),使「按已知窗口枚举」的写法也会转红。加用例后按测试代理的方法做了突变检验(写死完整串→转红→还原),确认它不是摆设。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/tushare/client.go (新建, 168 行)",
+    "internal/collector/tushare/client_test.go (新建, 161 行)",
+    "docs/superpowers/plans/2026-08-02-prism-m3.5a-datasources.md (Task 1 Step 1-5 勾选 + Step 5 探针结论段)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/collector/tushare",
+    "constructors": [
+      "func New(token string) *Client                    // base http://api.tushare.pro",
+      "func NewWithBaseURL(token, baseURL string) *Client"
+    ],
+    "types": [
+      "type ValuationPoint struct{ Date time.Time; PETTM, PB, PSTTM float64 }",
+      "type PricePoint struct{ Date time.Time; Close float64 }"
+    ],
+    "methods": [
+      "func (c *Client) FetchDailyBasic(symbol string, start, end time.Time) ([]ValuationPoint, error)",
+      "func (c *Client) FetchIndexDaily(symbol string, start, end time.Time) ([]PricePoint, error)",
+      "func (c *Client) FetchHKDaily(symbol string, start, end time.Time) ([]PricePoint, error)",
+      "func (c *Client) FetchDaily(symbol string, start, end time.Time) ([]PricePoint, error)"
+    ],
+    "errors": [
+      "var ErrNoPermission = errors.New(\"tushare: no api permission\") // code 40203 且 msg 不含「频率超限」;**永久性**,不得重试,Degraded 应提示配置性问题",
+      "var ErrRateLimited  = errors.New(\"tushare: rate limited\")      // code 40203 且 msg 含「频率超限」;**临时性**,窗口过后自愈,可按可重试/下一跳处理,不得提示改配置",
+      "【契约增量,供 TASK-005 消费】两者均用 %w 包装,errors.Is 可判;错误文本形如 \"<sentinel>: <api 名> (<原始 msg>)\",原始 msg 保留便于运维定位。二者互斥:同一 error 不会同时 Is 成立。"
+    ],
+    "contract_notes": [
+      "返回切片一律按 Date 升序;空结果为非 nil 空切片。",
+      "缺失/非数值字段为 math.NaN(),下游需用 math.IsNaN 判定,勿当 0 用。",
+      "所有方法共享同一 Client 的 200ms 节流锁,并发调用会串行化。",
+      "签名与 design-spec.md 接口契约逐字一致,TASK-005 的 TushareClient interface 可直接被 *Client 满足。",
+      "默认端点为 https://api.tushare.pro(review_fix M5);NewWithBaseURL 仍可注入任意 base 供测试用。"
+    ]
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/collector/tushare/ -v -count=1 -cover",
+    "result": "PASS — 8 个顶层用例(TestFetchPriceAPIs 含 3 个子用例)全绿",
+    "coverage": "91.3% of statements (门槛 80%)",
+    "static": "go vet 无告警;gofmt -l 无输出",
+    "done_criteria_mapping": [
+      "functional[0] → TestFetchDailyBasic(断言 api_name/token/fields/params.ts_code/start_date/end_date 与 4 项解析值)",
+      "functional[1] → TestFetchPriceAPIs(表驱动 3 子用例,逐个断言 api_name=index_daily/hk_daily/daily 与 Close 解析)",
+      "functional[2] → TestErrNoPermission(errors.Is + 文本含 daily_basic 与原始 msg)",
+      "boundary[0]   → TestFetchDailyBasicEmpty(Empty + NotNil)",
+      "boundary[1]   → TestFetchDailyBasic(输入 items 倒序,断言 pts[0].Date 早于 pts[1].Date 且值对位正确)",
+      "error_handling[0] → TestBusinessError(code=2002 含 code 与 msg 且 NotErrorIs ErrNoPermission) + TestNetworkError(连接失败,错误文本含 hk_daily)",
+      "non_functional[0] → TestThrottleMinInterval(两次连续调用实耗 >=200ms,并断言 minInterval==200ms)",
+      "non_functional[1] → live curl 探针(manual),结论见 key_findings 前两条,已同步计划文档 Task 1 Step 5"
+    ],
+    "secret_hygiene": "token 前 8 位哨兵 grep 对 client.go / client_test.go / 计划文档 / checkpoint 均为 0 命中;探针 curl 的 token 由 shell 变量从 runtime configs/config.yaml 现取,输出经 sed 脱敏,未落任何文件。",
+    "not_done": "未执行 git add/commit(Leader 统一提交);计划文档 Task 1 Step 6(Commit)仍未勾选。",
+    "rework_round_1": {
+      "fix_items": [
+        "M5 默认端点改 https",
+        "S1 40203 拆分出 ErrRateLimited"
+      ],
+      "command": "GOTOOLCHAIN=local go test ./internal/collector/tushare/ -count=1 -cover",
+      "result": "PASS — 全包 17 个顶层用例(含子用例)全绿,新增 3 个用例",
+      "coverage": "94.2% (门槛 80%)",
+      "new_tests": [
+        "TestDefaultBaseURLIsHTTPS(M5:常量化断言,改回 http 立刻变红)",
+        "TestErrRateLimited(S1:限频 msg → ErrRateLimited 且 NotErrorIs ErrNoPermission)",
+        "TestErrNoPermissionStillPermanentWhenNotRateLimited(S1:非限频 40203 仍永久,防判据放宽)"
+      ],
+      "regression": "全仓 go test ./... 全绿;gofmt/vet 对本包无告警",
+      "live_check": "https 端点 live 探针 index_daily(000300.SH, 20260730-20260801)返回 code=0 且有 2 行数据,确认改端点后仍可用",
+      "not_done_out_of_scope": "QA 专项1 还建议同步修正 docs/prism/atlas_prism_design.md §10 第 6 条措辞(把「不重试」改为「文案误导」),以及 refresh.go 消费 ErrRateLimited 改 Degraded 文案——两者均在 internal/collector/tushare/ 之外,按 Leader 的范围纪律未做,交 Leader 路由(前者可并入 TASK-006/文档任务,后者是 TASK-005 返工)。"
+    },
+    "rework_round_2": {
+      "fix_items": [
+        "S2 固化「窗口无关」守护用例"
+      ],
+      "command": "GOTOOLCHAIN=local go test ./internal/collector/tushare/ -count=1 -cover",
+      "result": "PASS — 全包绿,新增 TestErrRateLimitedIsWindowAgnostic(3 子用例)",
+      "coverage": "94.2%",
+      "mutation_check": "把 rateLimitMarker 改为写死的「频率超限(1次/分钟)」→ 新用例 3 子用例转红 2(hk_daily 1次/小时、daily 200次/天),旧 TestErrRateLimited 仍绿 ⇒ 复现了 test-agent-14 报告的存活突变 C 并将其封堵;已还原实现,全包与全仓复验绿",
+      "regression": "全仓 go test ./... 全绿;gofmt/vet 无告警"
+    }
+  }
+}

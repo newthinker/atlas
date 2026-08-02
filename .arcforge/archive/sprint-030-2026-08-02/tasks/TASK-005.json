@@ -1,0 +1,104 @@
+{
+  "id": "TASK-005",
+  "title": "编排层降级链扩展(Refresh 9 参 + 4 条新跳 + cmd 接线)",
+  "description": "internal/prism/refresh.go:新增 TushareClient/TwelvedataClient 接口,Refresh 签名追加 ts/td 两注入参数(nil=未配置该跳);降级跳全部沿 refresh.go 既有 edgar→engine 同构结构复制改写:A 股公司估值 akshare→tushare(分位本地算,复用滚动分位逻辑提取共用 helper)、A 股指数链尾 tushare 跳(形态按 TASK-001 discovery 探针结论)、美股价格 yahoo→twelvedata(EPS 链路不变)、港股 akshare→hk_daily 仅价格。cmd/atlas/prism.go 构造注入(key 空→nil);tushare 与 baostock 客户端登记进 internal/collector registry 作 A 股行情二/三跳(读 registry.go+selector.go 现有模式照做,Prism 编排不消费行情)。定案:spec §3「备源未配置」Degraded 提示不实现,nil 时零行为变更(ADR#9)。开工前必读 TASK-001~004 的 discovery。",
+  "module": "prism-orchestration",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go",
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go",
+    "internal/collector/registry.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestRefreshAkshareFallsBackToTushare:akshare 失败且 ts!=nil → FetchDailyBasic 数据落库 + Degraded 含 akshare failed/tushare fallback ok",
+      "TestRefreshUSPriceFallsBackToTwelvedata:yahoo 价格失败且 td!=nil → td 数据参与 PE 重建 + Degraded 上报(EPS 链路不变)",
+      "港股:akshare 失败 → FetchHKDaily 仅价格落库,估值列 NaN,Degraded 注明仅价格/估值缺失",
+      "A 股指数估值链尾追加 tushare 跳,形态(估值/仅价格)按 TASK-001 discovery 结论实现",
+      "cmd 接线:key 空→注入 nil;tushare(FetchDaily)与 baostock 客户端均登记进 collector registry,作 A 股行情二跳/三跳备源(spec §2 三跳三故障域)"
+    ],
+    "boundary": [
+      "TestRefreshNilClientsSkipHops:ts/td 均 nil → 行为与改动前完全一致(既有用例全部回归通过即此断言;不发「备源未配置」Degraded,定案见 ADR#9)"
+    ],
+    "error_handling": [
+      "TestRefreshTusharePermissionNotRetried:ErrNoPermission → 该跳不重试,Degraded 文案含「权限不足,配置性问题」"
+    ],
+    "non_functional": [
+      {
+        "desc": "全回归 go test ./internal/prism/... ./cmd/atlas/... -count=1 全绿;既有链路(yahoo/akshare/lixinger/edgar)零行为变更",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-32",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/prism"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "M3b 无法自洽,需裁决。M3b 原文前提是「TASK-001 侧在 tushare 客户端做 %05s 归一后」,但 TASK-001 本轮 fix_items 只有 M5/S1,不含归一(QA 报告里 M3 属「不 gating」档),TASK-001 已按该范围 dev_done,客户端无归一逻辑。若照 M3b 把 fake 的 key 改成 5 位 00700.HK,refresh 传的仍是配置里的 4 位 0700.HK → fake 查不到 → 零行 → 按既定「零行判失败」语义该用例必红;而 DoD functional[2] 又要求港股仅价格跳可用。测试无法同时绿且诚实。QA 对「假测试」的批评本身成立(fake 以入参 symbol 为 key,原理上抓不到上游形态不匹配),但修法取决于产品决策。三条出路:(1) 给 TASK-001 再开一轮做 %05s 归一,并同步修订 ADR#8「symbol 形态天然一致,无需映射」,然后本任务照 M3b 改 fake 与断言;(2) 本任务内把 M3b 降级为如实记录:fake 保持 4 位,另补一条用例显式断言「生产形态 0700.HK 走该跳会零行→判失败」,把缺口固化成红线而非假绿;(3) 走 QA 报告 M3 的另一半,文档标 NOT AVAILABLE,宣告港股跳不可用。补充事实:至今没有任何一次探针实证过 00700.HK 能取到数据(两次都撞 hk_daily 限频,窗口已自升级到 1 次/小时),故选 (1) 前建议先由 TASK-006 演练拿到正向证据,否则归一做了可能仍是零行。",
+      "asked_at": "2026-08-02T07:52:00Z",
+      "answer": "【Leader 裁决,2026-08-02,归档人 dev-agent-32(owner)】选**方案 2:如实记录红线**,不做 %05s 归一、不重开 TASK-001。决定性理由:00700.HK 从未实证能取到数据(两次探针均撞 hk_daily 1 次/小时限频)——无正向证据前做归一并修订 ADR#8 是拿假设换假绿:归一后可能仍零行,而那时 ADR 已改、测试已绿,缺口反被掩盖。方案 1(归一)并入 D4 后续任务,届时一并修订 ADR#8,前置条件是先由 TASK-006 或限频窗口恢复后拿到一次 5 位形态的正向证据;方案 3(宣告不可用)过早,浪费已接线的工作。执行细节:(a) fake 保持生产形态 4 位 0700.HK;(b) 补一条用例显式断言「生产配置形态走该跳会零行 → 判失败」,用例名与注释写明这是**已知缺口的锁定测试**(tushare hk_daily 需 5 位、配置是 4 位、归一未做、5 位可用性未实证),并注明后续任务修复后此用例需同步改写;(c) 原 TestRefreshHKFallsBackToTusharePriceOnly 若因 fake 用配置形态为 key 而恒绿,须调整为诚实形态(改名标注为接线测试,只验分派与 Degraded 路径、不宣称生产可用),取舍由 dev 判断;(d) 文档标注归 TASK-006 的 D5。另:M3a(%05s 归一)未进 TASK-001 fix_items 是 Leader 的 plan.md 与 fix_items 不一致所致的疏漏,非 dev 过失,不追加返工。同批确认:C2 判据以 dev 的「至少一点三值非全 NaN」为准(QA 字面的「PE 全 NaN 即报错」会误伤亏损标的——daily_basic 对亏损股是 pe_ttm 为 null 而 pb/ps_ttm 有值,属有效估值);ErrRateLimited 消费点须在本轮 refresh.go:450 附近补上,Degraded 改临时性语义,算 M2 延伸不另计 fix_items。",
+      "answered_at": "2026-08-02T07:56:00Z"
+    },
+    {
+      "q": "门禁 scope 漂移误判,阻塞 dev_done,需 Leader 动作(非代码问题,本任务代码已全部完成且全绿)。根因(已手工复算证实):task-completed.sh 扣除「他人在途包」的状态白名单是 assigned/in_progress/dev_done/verifying/blocked_clarification,**不含 verified**。TASK-002(packages=[\"./internal/collector/twelvedata\"])已 verified 但改动未提交,脏文件留在共享工作区,被算成本任务的 scope 漂移 → transition dev_done 被 DENY。实测:工作区脏包={tushare,twelvedata,prism},门禁扣除集只有在途任务的包,twelvedata 未被扣除。影响面不限于本任务:只要存在「已 verified 但未提交」的任务,后续任何人的 dev_done 都会被它挡住,且 verified 越攒越多越严重。我无法自行解决:.claude/hooks/ 对全体 agent 只读;Leader 禁止我 git add/commit;把 twelvedata 加进本任务 packages 会把他人工作记到本任务头上、让本任务门禁去跑他人在途测试并破坏 scope 互斥不变量,故拒绝。建议处置(按推荐序):(1) 提交已 verified 的工作(TASK-002/003/004),工作区只剩在途改动后门禁按设计工作,我直接重跑 transition 即可;(2) 把 verified/accepted 补进门禁扣除白名单(运行时资产,须走 project-template→TDD→人类确认);(3) 临时放宽 packages(不推荐,理由同上)。解除阻塞后我只需重跑 transition dev_done,discovery 已写好,无需重做任何工作。",
+      "asked_at": "2026-08-02T08:10:00Z",
+      "answer": null
+    }
+  ],
+  "verifier": "test-agent-14",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-02T08:49:46Z"
+  },
+  "fix_items": [
+    {
+      "id": "C2",
+      "severity": "CRITICAL",
+      "desc": "refresh.go:475-486 refreshTushareValuation 守卫只有 len(pts)==0,只数行数不看值。亏损标的 daily_basic 返回 pe_ttm:null → client.go:112-119 置 NaN → 三值全 NaN 的行照写(sqlite.go:265 toNull(NaN)→nil),LatestDate=MAX(d) 无 NULL 过滤 ⇒ 水位推进、次日 start=latest+1、该日永不重访,且报 fallback ok。修:加「至少一点三值非全 NaN」门槛,判据照抄 akshare/client.go:85 guardSchemaDrift(同一 hazard 主源早有此守卫,两入口 stock.go:106/index.go:42 都调);不满足视同无数据(errFallbackNoData 同款语义)。必须加用例锁定。"
+    },
+    {
+      "id": "M1",
+      "severity": "MAJOR",
+      "desc": "refresh.go:512 refreshTusharePrices 的 upsertPrices 写失败未上抛(该跳价格是全部交付物)。QA 实证:注入 priceErr 后 Refreshed=1 / Failed=[] / 落库 0 行 / 两条自相矛盾 Degraded。修:写失败转 error 上抛 + 用例。"
+    },
+    {
+      "id": "M2",
+      "severity": "MAJOR",
+      "desc": "补两条零行守卫锁定用例:refresh.go:479-481(A 股估值零行)与 :318-320(美股 TD 零行,QA 新发现同样突变存活)。M8 范围从 1 处扩到 3 处(第 3 处即 C2)。"
+    },
+    {
+      "id": "M3b",
+      "severity": "MAJOR",
+      "desc": "港股形态假测试:TestRefreshHKFallsBackToTusharePriceOnly 的 fake 以 4 位 0700.HK 为 key,导致用例恒绿而生产恒零行。TASK-001 侧在 tushare 客户端做 %05s 归一后,本任务须把 fake 与断言改为反映生产形态(5 位 00700.HK),确保用例能抓到归一缺失。"
+    },
+    {
+      "id": "M4",
+      "severity": "MINOR",
+      "desc": "ADR#10「三跳三故障域」在路由层未实现(app.go:556-571 orderedCollectors 用 registry.GetAll() 的 map 遍历顺序不确定,且不读 SupportedMarkets)。Leader 裁决:本任务不实现跳序,改由 TASK-006 把文档措辞降级为「已登记,跳序未实现」,并立后续任务。本条仅作知悉,无需改代码。"
+    }
+  ],
+  "reason_class": "task_defect"
+}

@@ -55,7 +55,7 @@
   "dependencies": [],
   "wave": 1,
   "context_from": [],
-  "status": "verified",
+  "status": "accepted",
   "assigned_to": "dev-agent-31",
   "discovery": ".arcforge/discoveries/TASK-004.json",
   "assignment_epoch": 2,
@@ -63,9 +63,9 @@
   "questions": [],
   "verifier": "test-agent-13",
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-agent-13",
-    "at": "2026-07-26T23:55:06Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-02T03:05:58Z"
   }
 }

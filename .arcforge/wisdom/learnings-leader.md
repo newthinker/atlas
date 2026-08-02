@@ -1845,3 +1845,161 @@ dev-agent-26 实测发现**第二项也 404**，连 shares tag 也 404 ——
 宁可误报也不漏报是对的取舍。记下来是因为**绕法要合法**：
 改用 python 的 open().read() 读取、改写文本措辞，而不是找一个能骗过启发式的 shell 写法。
 **判断标准是「我在做什么」，不是「能不能通过检查」** —— 后者是逃逸，前者是换一种正当方式。
+
+## 2026-08-02 Sprint-030:dev_done 门禁 × Leader 统一提交策略的结构性冲突
+
+现象:TASK-003 transition dev_done 被 DENY,门禁把 TASK-001/002/004(verified 未提交)的
+工作区改动算成 TASK-003 的 scope 漂移。
+
+根因:task-completed.sh:50-53 的 OTHERS 排除集只收在途状态
+(assigned|in_progress|dev_done|verifying|blocked_clarification),verified 不在其中。
+门禁设计假设「verified 即已提交」,而本 Sprint 采用「dev 不 commit、Leader 在 verified 后
+统一提交」策略,两者组合出盲区:先完成未提交的任务必然卡住后完成的任务。
+
+处置:Leader 及时提交 verified 产物(本例 4 commits)后 dev 重试即通过。
+教训:采用统一提交策略时,Leader 必须把「verified 后尽快提交」当作调度义务,不能攒到
+Sprint 尾;或者(会话外人类决策)扩展 OTHERS 集合把 verified 未提交也计入排除。
+本例另一收获:dev-agent-34 首次只发 inbox 未落盘 questions,自纠后补 transition
+blocked_clarification——「inbox 只是通知,文件才是真相源」再次得到验证。
+
+## 2026-08-02 Sprint-030:断源演练方法论三条(TASK-006 实测教训)
+
+1. **演练前不能先跑正常基线**:基线把 LatestDate 水位推到当日,断源后增量路径整体
+   skip,首跑「27 ok, 3 failed, 0 degraded」看似有结论实则没验到降级链(3 个失败全在
+   不走水位的 segments 路径)。正确顺序:先断源再跑,或演练前构造回退水位。
+2. **WAL 模式下只 cp 主库备份不生效**:残留 -wal 会被重放,删除的行仍呈删除态;
+   备份/还原必须连 -wal/-shm 一起处理。
+3. **演练前必须重建二进制**:runtime/dev 的 bin/atlas 若早于被验代码(本例 8/1 构建,
+   不含降级链),演练跑的是旧代码且会得到看似正常的假结果。演练 checklist 首项 = make build。
+另:tushare 跳的周末盲区——按 [start,end] 精确取数的源在非交易日窗口必然零行,叠加
+「零行判失败」语义,周末断源演练该跳恒失败,不是缺陷但演练日期要选交易日。
+
+## 2026-08-02 Sprint-030:仓内派生目录会误触发他人的 scope 门禁
+
+第二例门禁误判(第一例见「dev_done 门禁 × Leader 统一提交」):test-agent-14 做突变验证时
+在仓内建 `internal/collector/tushare_mut/`(被测包完整副本),该路径不属任何任务的 packages
+声明,于是 task-completed.sh 的 OTHERS 排除集覆盖不到,被算成**另一个**正在 transition
+的任务(TASK-006)的 scope 漂移,门禁 DENY。
+
+两例的共同根因:门禁的「他人改动」排除集是按**任务 packages 声明**计算的,任何不在声明内的
+工作区改动都会落到当前 transition 者头上。
+
+对策(agent 侧,立即可行):验证类派生产物一律放仓外——scratchpad 临时目录,或 git worktree
+(qa-agent-7 本轮即用 worktree,验后 git worktree remove,零残留,是正例)。
+对策(机制侧,需人类会话外落地):门禁漂移判定忽略 `*_mut`/`*.orig` 等派生后缀,或要求
+验证者声明临时路径。
+
+## 2026-08-02 Sprint-030:追加需求与 owner 移交的时序错配(第三例流程摩擦)
+
+现象:QA 裁决后 Leader 追加 D5 给 TASK-006,但此前已把该任务从 dev_done 转入 verifying。
+dev 不再是 owner(verifying→in_progress 非法边),且中途改文档会让验证对象漂移——
+验证者正在验的就是那版文档。
+
+与前两例同源(门禁 OTHERS 集不含 verified / 变异派生目录不在 packages),都是
+**「谁在什么时刻持有什么」与实际工作流不对齐**。
+
+处置:选「等验完 → 转 review_fix 追加 → dev 接手 → 只复验追加项」,不选「让验证者
+判 rejected 并把追加项写进 reject_reason」——后者用假判定换流程便利,会污染验证记录
+的可信度,而验证记录可信是这套流程的根基。
+
+对策(Leader 侧,立即可行):**转 verifying 前先自问「还有追加项吗」**,把 QA 裁决产生的
+全部派生项一次性写进 fix_items 再交棒。成本最低。
+对策(机制侧,需人类会话外落地):增加 `verifying → review_fix` 边(leader 持有),
+省掉一次完整验证往返。
+
+### 更正(同日):上条「派生目录放 scratchpad 或 worktree」对 internal/ 包是错的
+
+test-agent-14 指出技术约束:**Go 的 `internal/` 可见性规则决定仓外 scratchpad 独立 module
+无法 import `github.com/newthinker/atlas/internal/...`,编译器直接拒绝**。故:
+
+- scratchpad 独立 module **仅适用于零 `internal/` 依赖的包**(如 TASK-001 首轮的 tushare
+  client.go 只依赖标准库时可行)。
+- 一旦被测包 import 任何 `internal/...`(本 Sprint 的 tushare collector.go → internal/collector、
+  baostock → internal/core、prism → internal/config|core|storage),**唯一可行的是
+  `git worktree add --detach`**(整 module 完整 checkout,internal 规则天然满足),
+  验后 `git worktree remove`。qa-agent-7 本轮即此做法,零残留。
+
+正确表述:**变异/派生副本一律用 git worktree;scratchpad 独立 module 仅限零 internal 依赖的包。**
+另记:test-agent-14 三次变异都在各自出裁决前删除并核实,但过程中确实存在窗口——
+仓内派生目录的问题真实存在,只是成因是编译约束而非疏忽。
+
+### 补充(同日):门禁白名单缺的不只是 verified,review_fix 也漏了
+
+dev-agent-32 在第二次撞上时补全了根因:`task-completed.sh` 扣除「他人在途包」的状态白名单是
+`assigned|in_progress|dev_done|verifying|blocked_clarification`——**`verified` 与 `review_fix`
+都不在内**。所以两类任务的未提交改动都会被算到当前 transition 者头上:
+- `verified` 未提交(第一例,TASK-003 撞上;本轮 TASK-002 再次撞上)
+- `review_fix` 期间(TASK-005 首次跑门禁时 tushare 漂移,因当时 TASK-001 处于 review_fix)
+
+且**随 verified 任务累积会越来越严重**——最后一个转 dev_done 的人承担全部未提交存量。
+
+正例值得记:dev-agent-32 拒绝了「把他人包加进自己 packages」的绕过方案,理由是那会污染
+scope 互斥赖以成立的信号,宁可卡住也不污染不变量。**这个取舍是对的**,应作为纪律固化。
+
+Leader 侧对策(已执行):verified 后尽快提交,不攒到 Sprint 尾。
+机制侧对策(需人类会话外落地):白名单补入 `verified` 与 `review_fix`。
+
+### 验证(同日):追加需求只发消息不进 fix_items,会被验证者合法漏掉
+
+上条「追加需求与 owner 移交时序错配」的现实后果已发生:D5 只经 Leader→dev 的 inbox 传达,
+从未写进 TASK-006 的 fix_items。dev 转 dev_done 后文档 mtime 再无变动 ⇒ D5 内容根本没落盘;
+而验证者 test-agent-15 逐条验完在册的 D1-D4 判 verified——**该判定在其证据范围内完全成立**,
+因为「验证者只能对在册项负责」。缺口是在它主动做补充核查时才发现的(spec 港股行备注栏空白,
+该跳仍作为正常可用二跳列在矩阵里,而它从未取到过数据)。
+
+固化纪律:**任何追加需求必须写进 fix_items/done_criteria,消息只作通知**。这与「文件系统是
+唯一真相源,inbox 只是通知」是同一条原则在需求层的应用——先前只在状态层强调过,需求层同样成立。
+
+Leader 侧检查点:转 verifying 前自问两句——①还有追加项吗?②已发出的口头要求都进 fix_items 了吗?
+
+## 2026-08-02 Sprint-030:文档里的代码行号引用会静默指向无关代码
+
+dev-agent-34 在 TASK-006 的 D7(行号引用改函数名)里实测到的危害比预期严重:M3.5a 计划文档写
+「沿 `refresh.go:80-90` 的 edgar→engine 同构结构复制改写」,而该行号**现在指向 Report 结构体
+定义与 degrade 方法**,与所声称内容毫无关系。
+
+即行号引用不是「可能过期」而是「静默指向语义完全无关的代码」——读者不会察觉,照此施工直接走错。
+本 Sprint 内另一例:QA 报告与 fix_items 里的 `refresh.go:450` 在 TASK-005 改动后已漂到 448。
+
+纪律:**文档中指向代码的引用一律用函数名/符号名,不用行号**(如「refreshTushareValuation 内」)。
+行号只在一次性的验证记录、探针输出里可用(那些有时间戳锚定,不会被当作长期指引)。
+
+附:D7 全仓扫描命中 34KB,绝大多数在历史计划文档中。dev 把改动限定在自己 writes 声明的 4 份
+文档内、建议全仓治理另立任务——这个范围判断是对的:批量改他人历史产物应有独立的范围声明与验收。
+
+## 2026-08-02 Sprint-030:突变测试的两条方法学教训(test-agent-14 实践所得)
+
+1. **必须能区分「突变生效但没被杀掉」与「突变根本没生效」**。用 shell perl 做替换时,含
+   `!` 和 `|` 的 Go 代码被**静默写坏**(refresh.go 一度变成以 `!` 开头的乱码,表现为
+   `[setup failed]`),差点被当成「突变没杀掉」而误判测试无效——结论方向正好相反。
+   对策:改用 Python 精确子串替换,**找不到目标就显式报 MUTATION-MISS**,让"没生效"无法
+   伪装成"没杀掉"。
+
+2. **存活突变要先判是不是等价突变,再下「测试缺口」的结论**。TASK-005 的 M2-a(A 股估值
+   零行守卫)突变存活,但 `hasAnyValuation` 对空切片本就返回 false、C2 守卫已覆盖零行,
+   行为完全不变 ⇒ **任何测试都杀不掉它**,是等价突变而非缺口。验证者用「同时废掉两道守卫」
+   证明了用例本身有判别力。若省掉这一步,会冤枉 dev 少写用例、白开一轮返工。
+
+3. 变异副本一律用 `git worktree`(本轮 test-agent-14 已改用 `../wt-verify-T001`,验后 remove,
+   主仓零派生目录),不再卡他人门禁——见前面「仓内派生目录」条与其 internal/ 编译约束更正。
+
+## 2026-08-02 Sprint-030:两条 CRITICAL 同一根因——新代码没沿用仓内既有的保护
+
+QA 复审时的元观察,比两个缺陷本身更值得沉淀:
+
+- **C1**(twelvedata apikey 随 `*url.Error` 外泄)→ 仓内 `fred` 采集器**早就有** `stripURLError`
+  防护,同一 hazard 同一防法。
+- **C2**(tushare 兜底跳写全 NaN 行毒化水位)→ 仓内 `akshare` 主源**早就有** `guardSchemaDrift`
+  (「>0 行但全部 PETTM 为 NaN → error」),同一 hazard 同一防法,且两个入口都调了。
+
+两次都不是「想不到这个风险」,而是**没发现旁边就有现成答案**。新增同类组件(又一个采集器、
+又一条降级跳)时,风险面与既有组件高度重合,但作者的注意力在「新东西怎么写」上。
+
+对策(写进任务 description 或 DoD):**新增同类组件前,先读一遍最相似的既有组件,列出它做了
+哪些防护、逐条问「我这个要不要」**。成本几分钟,本轮两条 CRITICAL 都能提前避免。
+QA 已顺带普查全仓携凭证的采集器,确认无 C1 同类残留(fred 有防护、lixinger/tushare 走
+POST body/header、baostock 无凭证)。
+
+配套:ADR#7「密钥卫生」原文只声明结果(「不入日志」)未声明机制,已补上具体机制
+(凭证不得进 URL query + 首选请求头方案 + 最低限度参照 fred 的 stripURLError)——
+声明结果不足以防重犯,要声明做法。

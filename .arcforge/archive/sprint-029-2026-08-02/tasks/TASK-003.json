@@ -47,7 +47,7 @@
   "context_from": [
     "TASK-002"
   ],
-  "status": "verified",
+  "status": "accepted",
   "assigned_to": "dev-agent-29",
   "discovery": ".arcforge/discoveries/TASK-003.json",
   "assignment_epoch": 1,
@@ -55,9 +55,9 @@
   "questions": [],
   "verifier": "test-agent-12",
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-agent-12",
-    "at": "2026-07-26T14:29:55Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-02T03:05:58Z"
   }
 }

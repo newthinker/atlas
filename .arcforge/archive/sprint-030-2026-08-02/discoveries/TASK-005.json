@@ -1,0 +1,158 @@
+{
+  "task_id": "TASK-005",
+  "title": "编排层降级链扩展(Refresh 9 参 + 4 条新跳 + cmd 接线)",
+  "by": "dev-agent-32",
+  "key_findings": [
+    "【真问题 1,须 QA/风险表跟进】tushare 的 code=40203 语义重载:hk_daily 触发限频时返回的也是 40203,msg 为「您访问接口(hk_daily)频率超限(1次/分钟)」,与「您没有接口(x)访问权限」同码不同义。复现证据(2026-08-02 live,同一 token):第 1 次 hk_daily 探针正常返回;紧接第 2 次返回 40203「频率超限(1次/分钟)」;约 75 秒后第 3 次返回 40203「频率超限(1次/小时)」——限频窗口本身也在变。TASK-001 把 40203 一律映射为永久性 ErrNoPermission,于是临时限频会被降级链判成永久配置问题:本任务的 Degraded 会写「权限不足,配置性问题」,而正确处置应是当临时错误往下跳。判别依据现成:msg 含「频率超限」即为临时。本任务按 DoD 实现、未擅改 TASK-001 已验收的契约(改它会同时推翻 TASK-001 的 done_criteria functional[2] 与 design-spec 契约),留给 Leader 决定是否立后续任务。影响面:港股跳(hk_daily 限频最严),A 股 daily_basic/index_daily 未观测到限频。",
+    "【真问题 2,已修+测试锁定】baostock 登记的默认值时序 bug:buildCollectors 在 serve.go:104 执行,而 prismCfg.ApplyDefaults() 在 serve.go:206 且作用于一份副本(prismCfg := cfg.Prism),故 buildCollectors 读到的 cfg.Prism.BaostockBaseURL 仍是 YAML 原值;runtime configs/config.yaml 并没有写 baostock_base_url(只有 config.example.yaml 有)。若直接读该字段,登记条件恒为假 —— A 股行情三跳静默缺席,无任何一层会报错。已在 buildCollectors 内对本地副本调 ApplyDefaults 后再读,并由 TestBuildCollectors_RegistersAShareBackupHops(刻意不设该字段)锁定。",
+    "【未实证,转 TASK-006 演练】港股 symbol 形态存疑:hk_daily 对 ts_code=\"0700.HK\"(Atlas/配置形态)返回 code=0 但 items 为空数组——不是报错,是静默空。tushare 文档的港股 ts_code 为 5 位(00700.HK),但两次 \"00700.HK\" 探针都撞上 hk_daily 限频(1次/小时)未取到结论。ADR#8「symbol 形态天然一致,无需映射」在 A 股成立,港股未证实。本任务未擅自加 4→5 位补零(与 ADR#8 冲突且缺正向证据),改为把「零行结果判失败」做成机制(见 decisions),让该跳失效时显性报错而非假成功。TASK-006 断源演练需确认此跳能否真取到港股数据。",
+    "LatestDate 取 MAX(d) FROM valuation_daily(internal/storage/prism/sqlite.go:255-263),它同时是 incrementalStart 的增量水位。这决定了「仅价格」跳绝不能写 NaN 估值行——否则水位被推到今天,主源恢复后 incrementalStart 判「已是最新」直接 skip,该窗口真实估值永久不回填。",
+    "Collector 接口(Name/SupportedMarkets/Init/Start/Stop/FetchQuote/FetchHistory)是 registry.Register 的唯一入参类型,故「登记进 registry」必然要求 tushare/baostock 实现全接口。仓内既有 5 个采集器(yahoo/eastmoney/crypto/lixinger/qlib)都在各自包内实现该接口(lixinger 是最近的先例:数据客户端 + Collector 双身份),故按此先例在各自包内加适配层,而非在 collector 包里造适配器(后者会让父包反向 import 子包,仓内无先例)。",
+    "登记新采集器会给 SelectExternalForSymbol 末尾的「任取一个」兜底循环增加候选(map 迭代序不确定)。已由 TestSelectForSymbolUnchangedWithBackupCollectorsRegistered 锁定:只要 eastmoney/yahoo 在册,A 股/美股/港股路由结果不变,备源不会抢主源。",
+    "【review_fix 轮次 1,C2 CRITICAL 根因】只数行数不看值的守卫挡不住「有行但全空」。亏损标的 daily_basic 返回 pe_ttm:null → 客户端置 NaN → 三值全 NaN 的行照写;sqlite 侧 NaN→NULL,而 LatestDate=MAX(d) **不过滤 NULL**,水位被推到这些天 ⇒ 次日 start=latest+1、该窗口永不重访、数据永久缺失,且当次还报 fallback ok。已加 hasAnyValuation 守卫。这是「新跳写了一张被水位管理的表却没继承主源守卫」的典型:同一 hazard 主源侧(akshare guardSchemaDrift)早有防护且两个入口都调了。",
+    "【C2 判据修正,Leader 已采纳】QA 原文写「照抄 guardSchemaDrift」,但那条判据是「PE 全 NaN 即报错」,直接照抄会**误伤亏损标的**——daily_basic 对亏损股的真实形态正是 pe_ttm 为 null 而 pb/ps_ttm 有值,那是有效估值数据。故判据取「至少一点三值非全 NaN」,并加 TestRefreshTushareValuationKeepsRowsWhenOnlyPEIsNaN 锁定该边界,防止守卫从「防漂移」退化成「拒收亏损股」。",
+    "【M1 根因】upsertPrices 的设计契约是「价格是估值链路的附属产物,写失败只降级不失败」——这在 refreshEngine/refreshEdgar 成立,但「仅价格」跳的交付物**只有**价格,沿用该契约就会产出 QA 实证的自相矛盾态:Refreshed=1 / Failed 空 / 落库 0 行 / 两条互相打架的 Degraded。已改为直接 store.UpsertPrices 并把写失败上抛,签名同时从 (string,error) 简化为 error。教训:复用 helper 时要连它的**失败语义**一起评估,而不只看返回值形状对不对。",
+    "【M3b 已知缺口,Leader 裁决方案 2】港股配置形态是 4 位 0700.HK,tushare hk_daily 要 5 位 00700.HK(4 位实测 code=0 且 items 为空,静默空)。客户端未做 %05s 归一(ADR#8「形态天然一致」在港股不成立)。裁决:**无 5 位正向实证前不做归一**——否则是拿假设换假绿(归一后可能仍零行,而 ADR 已改、测试已绿,缺口反被掩盖)。改为把缺口固化成红线用例。截至 2026-08-02 两次探针均撞 hk_daily 限频(窗口自升级到 1 次/小时),5 位可用性仍无证据。",
+    "【测试方法论】fake 以「被测代码会传的入参」为 key,原理上抓不到上游形态不匹配——用例恒绿而生产恒零行(QA 称之为假测试,批评成立)。修正做法:fake 按**真实上游契约**建键(只认 5 位),不迁就被测代码。据此把原用例拆成两条:TestRefreshHKPriceOnlyHopWiring 只验分派/仅价格语义/水位保护并在注释声明它不是生产可用性证据,TestRefreshHKProductionSymbolHitsKnownGap 按上游契约建键锁定生产现实。"
+  ],
+  "decisions": [
+    {
+      "decision": "「仅价格」跳(港股 hk_daily / A股指数 index_daily)只写 price_daily,不写任何估值行",
+      "rationale": "DoD 原文「仅价格落库,估值列 NaN」有两种读法。写 NaN 估值行会推高 LatestDate 增量水位,主源恢复后这段窗口的真实估值永久不回填(见 key_findings 第 4 条),是可论证的数据损坏;而缺行与 NaN 行在 Series 视图上同样呈现为 NaN,读侧无差别。故取「不写估值行」这一读法,并在测试里以 assert.Empty(store.upserts[...]) 显式锁定,附注释说明理由。"
+    },
+    {
+      "decision": "兜底跳的「零行结果」一律判失败(errFallbackNoData),不计 Refreshed、不发 fallback ok",
+      "rationale": "兜底只在主源已失败时触发,此时零行无法与「symbol 形态不被上游接受」区分——0700.HK 实测正是 code=0 + 空 items 的静默空。判成功会天天上报「fallback ok」却零写入,把真实缺口静默吞掉;判失败最坏是主源与备源同时失败的休市日多一条 Failed(本就处于异常态,且可见可自愈)。两害相权取显性。"
+    },
+    {
+      "decision": "ErrNoPermission 只在当次调用后停止,不做跨标的记忆化跳过",
+      "rationale": "「不重试」的机制含义是不把它当临时错误再走一遍、不继续往下级联,已由「该跳只调用一次 + 立即返回」满足(测试断言 calls==1)。跨标的记忆化(一个标的 40203 就跳过本轮其余标的)看似省调用,但 40203 是 per-api 而非 per-token 的(hk_daily 无权限不代表 daily_basic 无权限),做成全局跳过反而错;做成 per-api 记忆化则要引入状态,DoD 未要求。故不做,保持无状态。"
+    },
+    {
+      "decision": "抽出 valPoint + upsertWithLocalPercentile 共用 helper,akshare 与 tushare 两条 A 股估值链共用",
+      "rationale": "计划明确要求「分位本地算,复用滚动分位逻辑提取共用 helper」。两条链的分位算法若各写一份,必然随时间漂移出口径差(同一标的换个源分位就跳变)。valPoint 是来源无关的中间形态,避免 prism 包在 akshare/tushare 两个上游类型间做选择。TestRefreshTushareFallbackLocalPercentile 用与 akshare 路径同款的 300 天历史断言分位=100,证明走的确实是同一套逻辑。"
+    },
+    {
+      "decision": "cmd 层用 tushareClientOrNil/twelvedataClientOrNil 返回无类型 nil,而非直接传 *Client",
+      "rationale": "typed-nil 陷阱:直接返回 (*tushare.Client)(nil) 会得到「非 nil 接口包裹 nil 指针」,让 Refresh 里的 ts != nil 判定失真,未配置的备源被当成已配置并在每个主源失败的标的上调用 nil 客户端。仓内已有同款先例(collectors.go 的 valuationSourceOrNil/fundamentalSourceOrNil),照此同构。测试用 == nil 直接比较接口值断言——testify 的 assert.Nil 走反射,对 typed-nil 同样判 nil,抓不到这个陷阱。"
+    },
+    {
+      "decision": "buildCollectors 内对 cfg.Prism 的本地副本调 ApplyDefaults 后再读 BaostockBaseURL",
+      "rationale": "见 key_findings 第 2 条:不这么做,三跳登记条件恒为假。用本地副本(与 serve.go:205-206 同款写法)而不改全局 cfg,避免对其它读 cfg.Prism 的路径产生外溢。"
+    },
+    {
+      "decision": "tushare 的 Collector.FetchHistory 按 symbol 形态硬路由(.HK→hk_daily / A股指数→index_daily / 其余→daily)",
+      "rationale": "这三个 api 不通用,且走错不会报错、只返回空 items(与 0700.HK 同款静默空)。硬路由把「静默空」变成结构性正确;A 股指数判定复用 collector.IsAShareIndex(即 AShareIndexSecIDs 表),与 selector 同一判据,不另造一套。"
+    },
+    {
+      "decision": "非日线 interval 直接报错而非静默按日线返回(tushare/baostock 两个适配层同款)",
+      "rationale": "两个上游都只有日线。静默把 5m 当 1d 返回,调用方拿到的是与请求粒度不符的数据且无从察觉——又一类静默错值。"
+    },
+    {
+      "decision": "既有 ~34 处 Refresh 调用点全部显式补 nil, nil,不引入包装 helper",
+      "rationale": "boundary[0] 的验收方式就是「既有用例全部回归通过」,让既有用例直接以 nil 备源调用新签名,才是对「ts/td 为 nil 时行为与改动前完全一致」的真实断言;包装 helper 会把这条断言藏起来。"
+    },
+    {
+      "decision": "C2 守卫判据用「至少一点三值非全 NaN」,而非 akshare 的「PE 全 NaN 即报错」",
+      "rationale": "见 key_findings:daily_basic 对亏损标的会 null 掉 pe_ttm 但保留 pb/ps_ttm。按 PE 判会把这段真实估值整体拒收,把一个防漂移守卫变成拒收亏损股的 bug。Leader 已确认以此为准,优先于 QA 的字面措辞。"
+    },
+    {
+      "decision": "仅价格跳的价格写失败上抛 error,与 refreshEngine/refreshEdgar 的「写失败只降级」刻意不一致",
+      "rationale": "两处的价格在链路里的地位不同:那两处价格是估值链路的附属产物,写不进去不该拖垮估值主流程;本跳的交付物只有价格,写失败即等于零交付,继续报 fallback ok 是自相矛盾。不一致是有意的,已在函数注释里写明理由,避免后人「统一」掉。"
+    },
+    {
+      "decision": "M3b 保留原接线用例(改名 TestRefreshHKPriceOnlyHopWiring)而非删除,另加红线用例",
+      "rationale": "Leader 给了「改造为诚实形态」或「改名标注接线测试」两个选项,选后者并两条并存。删掉接线用例会连带失去分派逻辑、仅价格语义、水位保护这三项回归覆盖(它们与 symbol 形态无关、确实有效);只留接线用例则生产缺口无人锁定。两条分工写进注释,并注明 D4 归一落地后**两条都要同步改写**,否则红线用例会反过来把修复判成失败。"
+    },
+    {
+      "decision": "ErrRateLimited 与 ErrNoPermission 用 switch 分叉文案,而非在同一句里拼条件",
+      "rationale": "两者运维动作相反(等窗口 vs 改配置),文案必须互斥;switch 让「新增第三类 40203 语义」时的扩展点显式。限频文案写「本次跳过,下次自动重试」传达临时性,并用 NotContains 断言它不含「配置性问题」「权限不足」,防止日后有人合并分支时把误导文案又带回来。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go (+2 接口, +4 跳实现, +fetchCloses, 提取 upsertWithLocalPercentile/valPoint, Refresh 9 参, degrade 改可变参)",
+    "internal/prism/refresh_test.go (+8 用例 +fakeTushare/fakeTD, 既有 34 处调用点补 nil,nil)",
+    "cmd/atlas/prism.go (tushareClientOrNil/twelvedataClientOrNil + Refresh 接线)",
+    "cmd/atlas/prism_test.go (+TestPrismBackupClientsAreUntypedNilWhenUnconfigured)",
+    "cmd/atlas/collectors.go (tushare/baostock 登记 + Prism 副本 ApplyDefaults 修复)",
+    "cmd/atlas/collectors_test.go (+2 用例 +collectorNames helper)",
+    "internal/collector/selector_test.go (+TestSelectForSymbolUnchangedWithBackupCollectorsRegistered)",
+    "internal/collector/tushare/collector.go (新建, Collector 接口适配)",
+    "internal/collector/tushare/collector_test.go (新建, 7 用例)",
+    "internal/collector/baostock/collector.go (新建, Collector 接口适配)",
+    "internal/collector/baostock/collector_test.go (新建, 6 用例)"
+  ],
+  "interfaces_exposed": {
+    "package": "github.com/newthinker/atlas/internal/prism",
+    "refresh_signature": "func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient, ts TushareClient, td TwelvedataClient, now time.Time) Report",
+    "new_interfaces": [
+      "type TushareClient interface { FetchDailyBasic(symbol string, start, end time.Time) ([]tushare.ValuationPoint, error); FetchIndexDaily(...) ([]tushare.PricePoint, error); FetchHKDaily(...) ([]tushare.PricePoint, error) }",
+      "type TwelvedataClient interface { FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) }"
+    ],
+    "collector_adapters": [
+      "*tushare.Client 与 *baostock.Client 现已实现 collector.Collector 全接口,可直接 registry.Register;各自包内有 `var _ collector.Collector = (*Client)(nil)` 编译期约束",
+      "tushare.Name()=\"tushare\" markets=[CN_A,HK];baostock.Name()=\"baostock\" markets=[CN_A]"
+    ],
+    "degraded_wording": [
+      "A股公司: \"<symbol>: akshare failed (<err>), tushare fallback ok\"",
+      "港股/指数仅价格: 同上 + \"(仅价格,估值缺失)\";指数链尾 chain 名为 \"lixinger+akshare\"",
+      "美股价格: \"<symbol>: yahoo price failed (<err>), twelvedata fallback ok\"",
+      "永久性错误: \"<symbol>: tushare 跳不可用(权限不足,配置性问题,不重试): <err>\""
+    ]
+  },
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/prism ./cmd/atlas ./internal/collector ./internal/collector/tushare ./internal/collector/baostock -count=1",
+    "result": "5 个包全部 ok;全仓 go test ./... 全绿(零失败);go vet 三处包组均无告警",
+    "coverage": {
+      "gate_aggregate_coverpkg": "81.8% (dev_minimum 80%)",
+      "internal/prism": "93.3%",
+      "cmd/atlas": "74.3% (装配壳历史水位,低于 80% 但门禁按 -coverpkg 聚合口径判定)",
+      "internal/collector": "98.2%",
+      "internal/collector/tushare": "94.1%",
+      "internal/collector/baostock": "95.7%"
+    },
+    "done_criteria_mapping": [
+      "functional[0] → TestRefreshAkshareFallsBackToTushare(落库+Degraded 双格式串) + TestRefreshTushareFallbackLocalPercentile(证明复用同一套本地分位)",
+      "functional[1] → TestRefreshUSPriceFallsBackToTwelvedata(td 补价参与 PE 重建;断言 us.epsCalls 仍被调用 = EPS 链路不变)",
+      "functional[2] → TestRefreshHKFallsBackToTusharePriceOnly(price_daily 落库 + upserts 为空 + Degraded 含「仅价格」「估值缺失」)",
+      "functional[3] → TestRefreshIndexChainTailTushareIsPriceOnly(lixinger+akshare 双败后走 index_daily;断言未走 daily_basic)",
+      "functional[4] → TestPrismBackupClientsAreUntypedNilWhenUnconfigured + TestBuildCollectors_RegistersAShareBackupHops + TestBuildCollectors_SkipsBackupHopsWhenUnconfigured + tushare/baostock collector_test.go(各含编译期接口约束)+ TestSelectForSymbolUnchangedWithBackupCollectorsRegistered",
+      "boundary[0] → TestRefreshNilClientsSkipHops(Degraded 为空、错误文本不含 tushare)+ 既有 34 处调用点以 nil,nil 全量回归",
+      "error_handling[0] → TestRefreshTusharePermissionNotRetried(Degraded 含「权限不足」「配置性问题」;calls==1 断言不重试;标的仍进 Failed)",
+      "non_functional[0] → 全仓 go test ./... 全绿;既有 yahoo/akshare/lixinger/edgar 用例零修改通过(仅补 nil,nil 参数)"
+    ],
+    "not_done": [
+      "未执行 git add/commit(Leader 统一提交)",
+      "港股 hk_daily 跳未取得真实数据实证(限频阻断),转 TASK-006 断源演练",
+      "code-simplifier 本轮因 API 中断未跑完;中断后已核实工作区文件完整(两个适配层方法齐全、bridgeServer 无重复定义)、gofmt 对本次新增文件无告警、全仓测试全绿"
+    ],
+    "pre_existing_not_touched": "internal/collector/selector_test.go 在改动前(git show HEAD)就已不满足 gofmt(第 197 行附近 coveringCollector.Name 对齐),与本次无关,按外科手术原则未动。",
+    "rework_round_1": {
+      "fix_items_done": [
+        "C2(CRITICAL)",
+        "M1(MAJOR)",
+        "M2(MAJOR)",
+        "M3b(MAJOR,按 Leader 裁决方案 2)",
+        "M2 延伸:ErrRateLimited 消费点"
+      ],
+      "m4_note": "M4(路由层跳序未实现)按 Leader 裁决仅知悉,未改代码,文档措辞降级归 TASK-006 D5",
+      "command": "GOTOOLCHAIN=local go test ./internal/prism/ -count=1 -cover",
+      "result": "PASS — prism 全包绿",
+      "coverage": "94.0% (dev_minimum 80%)",
+      "regression": "全仓 go test ./... 全绿;gofmt/vet 对 internal/prism 无告警",
+      "new_tests": [
+        "TestRefreshTushareValuationAllNaNIsNotSuccess(C2:全 NaN 不落库、不推水位、不报 fallback ok)",
+        "TestRefreshTushareValuationKeepsRowsWhenOnlyPEIsNaN(C2 边界:守卫不误伤亏损标的)",
+        "TestRefreshTushareValuationEmptyIsNotSuccess(M2 零行守卫①:A 股估值)",
+        "TestRefreshUSPriceTwelvedataEmptyIsNotSuccess(M2 零行守卫②:美股 TD,保持 price history: 前缀)",
+        "TestRefreshTusharePricesUpsertFailureIsError(M1:写失败判失败,无矛盾 Degraded)",
+        "TestRefreshHKProductionSymbolHitsKnownGap(M3b 红线:fake 按上游契约建键,锁定生产零行)",
+        "TestRefreshTushareRateLimitedIsTemporary(M2 延伸:限频文案临时性,不含配置性问题)"
+      ],
+      "renamed_tests": [
+        "TestRefreshHKFallsBackToTusharePriceOnly → TestRefreshHKPriceOnlyHopWiring(标注为接线测试,不宣称生产可用)"
+      ],
+      "known_gap_followup": "D4 后续任务做 %05s 归一并修订 ADR#8 时,TestRefreshHKProductionSymbolHitsKnownGap 与 TestRefreshHKPriceOnlyHopWiring **两条都需同步改写**,否则红线用例会把修复判成失败。前置条件:先拿到 5 位形态的正向实证。"
+    }
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "id": "TASK-006",
+  "title": "部署、断源演练与文档(docs-only/产物类)",
+  "description": "deploy/launchd/com.newthinker.atlas.baostock.plist(照 aktools plist 改 Label/ProgramArguments 指 scripts/baostock/.venv/bin/python bridge.py、日志 logs/baostock.{out,err}.log、KeepAlive,不含密钥);scripts/ops/deploy.sh+install-services.sh 装载新 plist;docs/deployment.md 桥部署段;docs/prism/atlas_prism_design.md §10 风险表五条+§9 M3.5a 状态;断源演练(spec §6)。注意:docs-only 门禁口径——必须先 transition dev_done 再 git commit,顺序反了无补救(见 memory)。",
+  "module": "deploy-docs",
+  "complexity": "medium",
+  "estimated_files": [
+    "deploy/launchd/com.newthinker.atlas.baostock.plist",
+    "scripts/ops/deploy.sh",
+    "scripts/ops/install-services.sh",
+    "docs/deployment.md",
+    "docs/prism/atlas_prism_design.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "baostock plist 照 aktools 结构:Label/ProgramArguments/日志路径/KeepAlive 正确,不含任何密钥;deploy.sh 与 install-services.sh 装载该 plist 并 kickstart serve",
+        "verify_by": "review"
+      },
+      {
+        "desc": "docs/deployment.md 增 baostock 桥部署段(仿 aktools 段:setup/装载/日志/排障)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "atlas_prism_design.md §10 增五条风险(Stooq PoW 实测/TD 800 次边界/tushare 积分边界/N-PORT 预告/密钥卫生),§9 更新 M3.5a 状态",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "断源演练:runtime akshare_base_url 改错误端口→prism refresh→A 股标的经 tushare 恢复且 Degraded 上报;演练后改回。美股断源以单测覆盖为准并在演练记录注明",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "正常 refresh 27 ok 0 failed;密钥哨兵终检 git log -p --all -S $SENT 为空;验收结果记入计划文档",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-agent-34",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "docs/deployment.md",
+    "docs/prism",
+    "deploy/launchd",
+    "scripts/ops"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-agent-15",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-02T08:49:46Z"
+  },
+  "writes": [
+    "deploy/launchd/com.newthinker.atlas.baostock.plist",
+    "scripts/ops/deploy.sh",
+    "scripts/ops/install-services.sh",
+    "docs/deployment.md",
+    "docs/prism/atlas_prism_design.md",
+    "docs/superpowers/plans/2026-08-02-prism-m3.5a-datasources.md",
+    "docs/superpowers/specs/2026-08-02-prism-m3.5-design.md"
+  ],
+  "fix_items": [
+    {
+      "id": "D5",
+      "severity": "MAJOR",
+      "desc": "港股跳如实标注(首轮只有现象、缺定性与登记)。四点纯文档改动:①spec docs/superpowers/specs/2026-08-02-prism-m3.5-design.md:35 港股·估值行备注栏当前完全空白,该跳仍作为正常可用二跳列在矩阵里——加不可用注记(对照本轮 A 股估值行的容量注记待遇,不一致就是误导);②design §9:439 已有「未实证取到数据」定性,补上把「4 位 vs 5 位形态未归一」框定为待修缺陷(现仅记现象:0700.HK 返回空数组、文档形态是 5 位 00700.HK);③明确写出「不构成可用兜底」(当前全 docs/ grep 命中 0);④§9「限频感知退避」后续任务新增第 4 面:港股 symbol 归一 + 取数实证,并注明届时需修订 ADR#8(该 ADR 对 A 股成立、对港股不成立),ADR#8 处同步登记待修订。素材齐备:计划文档 :502 有遗留项汇总、:480-481 有 hk_daily 限频原始输出。"
+    },
+    {
+      "id": "D6",
+      "severity": "MINOR",
+      "desc": "design §9 后续工作第 1 面现写「TASK-001 已新增 ErrRateLimited …但分类目前无人消费」已过时:TASK-005 在你交付后(07:56)加了消费分支。改为准确表述,大意「分类已用于 Degraded 文案分叉(限频,本次跳过,下次自动重试),但尚未据此退避重试」。**别改过头**:「退避」至今确实未实现,§10 里「分类被消费(限频触发退避)属后续任务」的前向兼容措辞是准确的,保留。最终措辞以 TASK-005 验收后实际代码为准,若其复验导致变更需同步。"
+    },
+    {
+      "id": "D7",
+      "severity": "MINOR",
+      "desc": "docs/ 里指向代码的行号引用在并发改动下天然易腐(refresh.go:450 已漂到 448)。改成函数名引用(如「refreshTushareValuation 内」),逐处扫。"
+    },
+    {
+      "id": "D8",
+      "severity": "MINOR",
+      "desc": "design §9 twelvedata 行写「[07-16..07-31] 共 11 个交易日」,查库确认该闭区间实际 12 根(末日排他才 11)。不算错(描述的是当时那次比对的实际覆盖)但区间标注与条数不自洽,顺手校准。"
+    }
+  ],
+  "reason_class": "task_defect"
+}

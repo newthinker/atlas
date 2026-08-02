@@ -1,0 +1,66 @@
+{
+  "task_id": "TASK-002",
+  "rework": 1,
+  "key_findings": [
+    "【C1 返工】QA 的外泄实证成立,我复现确认:旧写法 hc.Get(带 apikey 的 URL) 在传输层失败时,error 文本为 `twelvedata: NVDA: Get \"http://127.0.0.1:1/time_series?apikey=<KEY>&symbol=NVDA\": dial tcp ...: connection refused`——key 明文在内。用同一探针对新实现跑,文本不含 key。该探针已删,其断言以 TestAPIKeyNeverInURLOrErrors 形式固化进包内。",
+    "TD 支持请求头鉴权,已实测三种形态:无凭证 → HTTP 401;`Authorization: apikey <key>` → status=ok(拿到数据);`X-TD-APIKEY: <key>` → HTTP 401。故采用 Authorization 头,apikey 完全不进 URL。",
+    "凭证无效时 TD 回 HTTP 401,但 body 仍是同一个 JSON 错误信封 {\"code\":401,\"message\":...,\"status\":\"error\"}(实测),故现有 env.Status==\"error\" 分支即可覆盖,无需按 HTTP 状态码分路。",
+    "换请求头后已做真机端到端复验:NVDA 2026-07-16..07-31 拿到 12 个交易日(含 07-31=200.75,与库内一致),证明鉴权方式变更未破坏取数;真实凭证下的 API 错误路径(NO_SUCH_SYMBOL_XYZ → code 404)文本亦不含 key。",
+    "同包 error/日志出口自查结论:全包现在只有 wrapErr 一处 fmt.Errorf,无 log/Print,URL 只在 http.NewRequest 一处拼装。所有 error 出口均经 wrapErr,不存在第二条把 URL 带进文本的路径。"
+  ],
+  "decisions": [
+    {
+      "decision": "两道防线同时上:凭证走 Authorization 头(根因)+ wrapErr 统一脱敏(兜底)",
+      "rationale": "Leader 倾向的单独脱敏方案能堵住 error 文本,但 key 仍在 URL 里,会落进正向代理 access log(本机 env 就有 http_proxy=127.0.0.1:7897,deployment.md:411 自陈踩过代理坑),且要求穷举所有 error 路径——Leader 自己也提醒『不要只处理 *url.Error 一种类型』,而 error 文本来源(传输层/第三方库)本就无法穷举。请求头方案从根上让凭证不进 URL,连代理日志一并解决;脱敏保留为兜底,防将来有人把 key 重新写进某个文本。两者成本都很低,没有取舍必要。"
+    },
+    {
+      "decision": "wrapErr 刻意不保留 error 链(调用点用 %v 而非 %w)",
+      "rationale": "若保留链,errors.Unwrap 就能取回未脱敏的原始 error,脱敏形同虚设。本包无 sentinel error,消费方(prism refresh.go)只格式化文本、不做 errors.Is/As,故无功能损失。已在函数注释写明,避免后人『好心』改回 %w。"
+    },
+    {
+      "decision": "wrapErr 在 apiKey 为空时跳过替换",
+      "rationale": "strings.ReplaceAll(s, \"\", x) 会在每个字符间插入 x,空 key(未配置该跳)时会把 error 文本彻底毁掉。已加用例 TestAPIKeyNeverInURLOrErrors/空_key_不破坏_error_文本 钉死。"
+    }
+  ],
+  "dod_deviation": [
+    {
+      "criterion": "functional[0] 「query 含 symbol/interval=1day/start_date/end_date/outputsize/apikey」",
+      "deviation": "apikey 已从 query 移除,改走 Authorization 请求头;其余五个 query 参数不变。",
+      "rationale": "key 留在 query 正是 C1 外泄的根因,DoD 字面要求与 C1 修复要求不可兼得,安全优先。已在 client_test.go 映射注释处显式标注偏离。**若 Leader 要求严格符合 DoD 字面,则只能退回『query 带 key + 仅脱敏』方案,请明示。**建议改为修订 DoD 文本。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/twelvedata/client.go (package doc 补外泄链路与两道防线说明;新增 wrapErr;hc.Get → http.NewRequest + Authorization 头;四处 error 出口全部改经 wrapErr)",
+    "internal/collector/twelvedata/client_test.go (新增 TestAPIKeyNeverInURLOrErrors 四个子用例;functional[0] 用例改断言 query 不含 apikey;映射注释标注 DoD 偏离)"
+  ],
+  "interfaces_exposed": [
+    "func New(apiKey string) *Client",
+    "func NewWithBaseURL(apiKey, baseURL string) *Client",
+    "func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error)  // [start,end] 闭区间,Time 升序;error 文本保证不含 apikey",
+    "对外签名与返工前完全一致,TASK-005 消费方无需改动"
+  ],
+  "verification": {
+    "test_command": "GOTOOLCHAIN=local go test ./internal/collector/twelvedata/ -count=1 -cover",
+    "result": "PASS 6 顶层用例(含 4 个 C1 子用例), coverage 92.7% (返工前 90.9%, dev_minimum 80%)",
+    "c1_fix_evidence": [
+      "鉴别力已验证:临时探针复现旧写法 → error 文本含 key = true;新实现同场景 → 不含。探针已删。",
+      "TestAPIKeyNeverInURLOrErrors/凭证走请求头 → 断言 Authorization 头正确 + query 既不含 key 值也不含 apikey 参数名",
+      "TestAPIKeyNeverInURLOrErrors/传输层失败 → dial 127.0.0.1:1 必然 refused,断言 error 文本不含假 key SUPERSECRETKEY123456",
+      "TestAPIKeyNeverInURLOrErrors/wrapErr 脱敏 → 任意含 key 文本被替换为 <redacted>",
+      "TestAPIKeyNeverInURLOrErrors/空 key → error 文本不被 ReplaceAll 空串病理行为破坏",
+      "真机复验:换头后取数正常(12 交易日,07-31=200.75 与库一致);真实凭证下 API 错误路径文本不含 key",
+      "go build ./... 与 go vet 均通过"
+    ],
+    "dod_mapping": [
+      "functional[0] GET /time_series + 五个 query 参数 + 字符串 close 解析 -> TestFetchHistoryParsesAndSorts (PASS,apikey 项见 dod_deviation)",
+      "functional[1] Time 升序 -> TestFetchHistoryParsesAndSorts (PASS)",
+      "boundary[0] values 空/缺失 -> TestFetchHistoryEmptyValues (PASS)",
+      "boundary[1] 坏 close/datetime 跳过该行 -> TestFetchHistorySkipsUnparsableClose (PASS)",
+      "error_handling[0] status=error -> 含 message 的 error -> TestFetchHistoryAPIError (PASS)",
+      "non_functional[0] 默认 8s + 注入 50ms -> TestThrottleMinInterval (PASS)",
+      "non_functional[1] live 复权口径 (manual) -> 首轮已完成(11 交易日最大相对偏差 ~2e-8);本轮换鉴权后复验取数一致,结论不变",
+      "non_functional[2] 密钥哨兵 (manual) -> 两 key 前 8 位在 git diff --cached / git diff / 本包新增源文件中命中数均为 0",
+      "C1(QA CRITICAL) 密钥不入 error/日志 -> TestAPIKeyNeverInURLOrErrors 四子用例 (PASS)"
+    ]
+  }
+}

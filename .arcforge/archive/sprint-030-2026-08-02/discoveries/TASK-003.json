@@ -1,0 +1,68 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "桥接口形态: GET http://127.0.0.1:8181/daily?code=<sh.600519>&start=<YYYY-MM-DD>&end=<YYYY-MM-DD> → 200 [{\"date\":\"2026-08-01\",\"close\":1350.6},...](升序,close 空字符串行由桥跳过);非 /daily → 404;任何桥内异常(含上游故障)→ 500 + 纯文本错误正文。",
+    "【偏离参考实现,重要】计划 Task 3 的 bridge.py 参考实现有一个静默数据缺失缺陷: baostock 的 query_history_k_data_plus 查询失败时不抛异常,而是把 error_code 挂在结果集上、rs.next() 直接返回假。照抄参考实现会把上游故障静默返回成 200 [] —— 下游会误判为「该期无数据」而不触发降级链下一跳(spec §2: 临时错误必须往下跳)。已在 bridge.py 加 `if rs.error_code != \"0\": raise RuntimeError(...)`,让上游故障显式转 500。此缺陷由本次 live 验证实测暴露(见 verification.live)。",
+    "【本机环境阻断,非代码问题】baostock 私有协议端口 TCP www.baostock.com:10030 在本机不可达(nc 连接超时);DNS 解析正常(114.94.20.92)、HTTP 80 可达(301)。因此 live 无法取到真实行情数据,只能验证到桥的错误面。",
+    "【部署风险,交 TASK-006】上游不可达时 bs.login() 会阻塞约 30 秒(socket 超时重试)后才执行 HTTPServer(...) 开始监听。即桥进程启动后有约 30s 的窗口端口未监听。launchd plist 若配 KeepAlive,上游长期不可达会导致反复重启;且健康检查不能用「进程存在」判定就绪,须探 8181 端口。",
+    "【验证环境坑】本机 env 有 http_proxy=http://127.0.0.1:7897,curl 访问 127.0.0.1:8181 会走代理并在桥未监听时返回 502(掩盖真实错误)。验证桥必须加 curl --noproxy '*'。",
+    "requirements.lock 由 setup.sh 首次运行生成并纳入 git 追踪(照 akshare 惯例);实测锁定 baostock 0.8.9 + pandas 3.0.5 + numpy 2.4.6 + python-dateutil 2.9.0.post0 + six 1.17.0(python3.11)。"
+  ],
+  "decisions": [
+    {
+      "decision": "bridge.py 显式检查 rs.error_code != \"0\" 并 raise(转 500),偏离计划参考实现",
+      "rationale": "参考实现会把上游故障静默变成 200 [],使降级链第三跳「失败」看起来像「无数据」,下一跳不触发、Report 也不记 Degraded。DoD functional[2] 的四条约束(adjustflag=3 / 仅绑 127.0.0.1:8181 / close 空跳过 / 非 /daily 404)全部保持不变,故此改动在 DoD 范围内而非范围扩张。"
+    },
+    {
+      "decision": "OHLCV 只填 Symbol/Interval(\"1d\")/Close/Time,OHLV 与 Volume 留零值",
+      "rationale": "桥只取 date,close 两列(DoD functional[0] 口径)。Symbol 回填调用方传入的 Atlas 形态(非桥形态),Interval 沿 internal/collector/qlib 的既有惯例填 \"1d\"。"
+    },
+    {
+      "decision": "symbol 转换规则用通用规则「点号后缀全为字母则转 lower(后缀)+\".\"+代码,否则原样透传」",
+      "rationale": "覆盖 DoD 要求的 600519.SH→sh.600519 与 000423.SZ→sz.000423,同时天然支持 .BJ 等其他交易所后缀,且已是桥形态(sh.600519,后缀含数字)时幂等透传,避免调用方需要知道该传哪种形态。"
+    },
+    {
+      "decision": "新增 .gitignore 一行 scripts/baostock/.venv/(已越界申报进 writes)",
+      "rationale": ".gitignore 逐个列出各侧车 venv 路径而非通配,不加这行则 setup.sh 产生的十几 MB venv(pandas/numpy)会在 Leader 提交时误入库。属于本任务改动引入的必要清理。"
+    }
+  ],
+  "files_modified": [
+    "scripts/baostock/bridge.py (新建)",
+    "scripts/baostock/setup.sh (新建,照抄 scripts/akshare/setup.sh 幂等结构改路径包名)",
+    "scripts/baostock/requirements.txt (新建,baostock==0.8.9)",
+    "scripts/baostock/requirements.lock (setup.sh 首次运行生成,纳入 git 追踪)",
+    "internal/collector/baostock/client.go (新建)",
+    "internal/collector/baostock/client_test.go (新建)",
+    ".gitignore (新增 scripts/baostock/.venv/ 一行)"
+  ],
+  "interfaces_exposed": [
+    "package baostock",
+    "func New(baseURL string) *Client  // baseURL 形如 http://127.0.0.1:8181,尾部斜杠会被裁掉",
+    "func (c *Client) FetchDaily(symbol string, start, end time.Time) ([]core.OHLCV, error)  // symbol 传 Atlas 形态 \"600519.SH\",包内转桥形态;返回按日期升序,Symbol 回填入参形态、Interval=\"1d\"、仅 Close/Time 有值",
+    "错误语义: 桥非 200 → error 含 \"HTTP <code>\" 与截断至 200 字节的正文;连接失败/解码失败 → 包装 error(前缀均为 \"baostock: daily <symbol>: \")。全部为临时性错误,调用方可据此触发降级链下一跳。"
+  ],
+  "verification": {
+    "go_test": "go test ./internal/collector/baostock/ -v -count=1 → PASS,6 个用例(TestFetchDailySymbolConversion 含 3 个子用例)全绿,coverage 95.8% of statements(门禁要求 ≥80%)",
+    "dod_test_mapping": {
+      "functional[0]": "TestFetchDailyParsesResponse — 断言 path=/daily、两行 [{date,close}] 解析为 OHLCV(Time/Close/Symbol/Interval)",
+      "functional[1]": "TestFetchDailySymbolConversion — 表驱动断言 query code: 600519.SH→sh.600519、000423.SZ→sz.000423、sh.600519→原样透传",
+      "functional[2]": "verify_by review — scripts/baostock/bridge.py;live 另测得 404 路由与 500 错误面(见 live)",
+      "boundary[0]": "TestFetchDailyEmpty — 桥返回 [] → 空切片 err=nil",
+      "error_handling[0]": "TestFetchDailyServerError — 桥 500 + 正文 \"baostock login failed\" → error 同时含 \"500\" 与该正文",
+      "extra": "TestFetchDailyBadJSON(解码失败)、TestFetchDailyUnreachableBridge(桥未启动的连接失败)——非 DoD 条目,为覆盖率与真实故障面补充",
+      "non_functional[0]": "verify_by review — setup.sh 幂等(venv 存在则跳过创建、有 lock 走复现安装、--upgrade 才刷新 lock);requirements.txt 冻结 baostock==0.8.9",
+      "non_functional[1]": "verify_by manual — 见 live"
+    },
+    "live": {
+      "status": "PARTIAL — 桥可启动、路由与错误面实测通过;真实行情数据因上游端口不可达未能取到(环境阻断,非代码问题)",
+      "setup": "bash scripts/baostock/setup.sh → OK,venv 建成,baostock 0.8.9 装成,requirements.lock 生成",
+      "bridge_start": "scripts/baostock/.venv/bin/python scripts/baostock/bridge.py 后台启动 → 约 30s 后 lsof -nP -i TCP:8181 显示 127.0.0.1:8181 (LISTEN)",
+      "curl_daily": "curl --noproxy '*' 'http://127.0.0.1:8181/daily?code=sh.600519&start=2026-07-01&end=2026-08-01' → HTTP 500,正文 'baostock query 10002007: 网络接收错误。'(修复前为 HTTP 200 + [],即静默数据缺失)",
+      "curl_404": "curl --noproxy '*' http://127.0.0.1:8181/nope → HTTP 404 ✅",
+      "sample_rows": "0 行;首尾日期不适用 —— 上游不可达,无法取样",
+      "root_cause": "baostock 私有协议端口 TCP www.baostock.com:10030 本机连接超时(nc -z -w 10 失败);DNS 正常(114.94.20.92)、HTTP 80 正常(301)。另试 2026-01..08 / 2025 全年 / 2024Q1 三个日期段均同样失败,排除「仅近月无数据」。python 直调 bs.login() 返回 error_code 10002007「网络接收错误」,确认是登录阶段即失败,与日期无关。",
+      "cleanup": "验证用桥进程(PID 48831 / 75204 / 75206 / 75630)已全部 kill,ps aux | grep -c '[b]ridge.py' → 0,lsof -nP -i TCP:8181 → 空",
+      "residual_risk": "真实行情解析路径([{date,close}] → OHLCV)只经假桥单测覆盖,未经真桥端到端验证。待网络放通 10030 端口后需补一次真桥取数(建议在 TASK-006 部署演练时补做),确认 baostock 实际返回的 date 格式确为 YYYY-MM-DD、close 为可解析数值。"
+    }
+  }
+}

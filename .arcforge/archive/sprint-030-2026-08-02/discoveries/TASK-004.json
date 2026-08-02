@@ -1,0 +1,43 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "PrismConfig 的默认值先例(AkshareBaseURL, config.go:469/505)是「空则填默认」而非 viper SetDefault,BaostockBaseURL 照此同构,故 ApplyDefaults 中新增一个 if 分支即可,零行为外溢。",
+    "既有测试名是 TestPrismConfigAkshareDefaults(任务描述里写的 TestPrismConfigApplyDefaults 在本仓不存在),新测试按同名法取 TestPrismConfigBaostockDefaults,与既有用例并列而非改写。",
+    "config.example.yaml 既有密钥条目一律用 ${ENV_VAR} 语法(fred/lixinger),但本任务 DoD 明确要求 tushare/twelvedata 用空串 \"\";已按 DoD 写空串并加三行密钥卫生注释说明真实 key 只入 runtime configs/config.yaml。二者语义不同:${ENV} 是「从环境注入」,\"\" 是「本文件不承载密钥」。",
+    "configs/config.yaml 由 .gitignore:30(模式 config.yaml)忽略,已用 git check-ignore 确认——真实 key 不会因误 add 入库。",
+    "新增 example 条目已用项目自身的 viper 加载器实测可解析并正确映射(prism.baostock_base_url、collectors.tushare/twelvedata.api_key 均为期望值),探针文件跑完即删。"
+  ],
+  "decisions": [
+    {
+      "decision": "example 的 prism 段同时补 baostock_base_url: \"http://127.0.0.1:8181\"(DoD 未要求)",
+      "rationale": "DoD 只要求 collectors 两条 api_key。但新增一个配置字段而示例文件不体现,等于把可发现性缺口留给部署者;akshare_base_url 就在紧邻行,补一行与既有风格完全一致、无行为影响。已在 writes 申报,若 Leader 认为超范围可要求撤回。"
+    },
+    {
+      "decision": "tushare/twelvedata 在 example 中 enabled: false",
+      "rationale": "示例文件不应默认开启需要密钥的备源;runtime config 里用户已自行置 true。"
+    },
+    {
+      "decision": "新测试同时断言 mapstructure 标签为 baostock_base_url",
+      "rationale": "PrismInstrument.FallbackSource 的既有测试(TestPrismInstrumentFallbackSourceTag)已确立「标签也要测」的惯例;标签写错时默认值测试仍会通过,但 YAML 配置静默失效——正是需要机制拦的失败形态。"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go (PrismConfig.BaostockBaseURL 字段 + ApplyDefaults 默认值)",
+    "internal/config/prism_test.go (TestPrismConfigBaostockDefaults + Context Checkpoint 映射注释)",
+    "configs/config.example.yaml (collectors.tushare/twelvedata 空 key 条目 + 密钥卫生注释;prism.baostock_base_url 示例行;已在 writes 申报,越界写)"
+  ],
+  "interfaces_exposed": [
+    "config.PrismConfig.BaostockBaseURL string `mapstructure:\"baostock_base_url\"`  // ApplyDefaults 空值→ http://127.0.0.1:8181",
+    "TASK-003 baostock 客户端与 TASK-005 cmd 接线可直接读 cfg.Prism.BaostockBaseURL,无需自带默认值"
+  ],
+  "verification": {
+    "test_command": "GOTOOLCHAIN=local go test ./internal/config/ -count=1 -cover",
+    "result": "PASS, coverage 95.9% of statements (dev_minimum 80%)",
+    "dod_mapping": [
+      "functional[0] 空值 ApplyDefaults → http://127.0.0.1:8181 -> TestPrismConfigBaostockDefaults (PASS)",
+      "boundary[0] 显式值不被默认覆盖 -> TestPrismConfigBaostockDefaults (PASS)",
+      "non_functional[0] example 增两条空 api_key + 卫生注释,不含真实 key 片段 (verify_by review) -> 已写入;两个 key 前 8 位在 example 中命中数 0;viper 实测可解析",
+      "non_functional[1] 密钥哨兵 (verify_by manual) -> tushare/twelvedata 前 8 位在 git diff --cached / git diff / config.example.yaml 中命中数均为 0;暂存区为空"
+    ]
+  }
+}

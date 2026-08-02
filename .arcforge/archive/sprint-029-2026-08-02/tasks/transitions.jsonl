@@ -22,3 +22,7 @@
 {"task":"TASK-004","from":"in_progress","to":"dev_done","by":"dev-agent-31","at":"2026-07-26T16:05:58Z"}
 {"task":"TASK-004","from":"dev_done","to":"verifying","by":"leader","at":"2026-07-26T16:50:05Z"}
 {"task":"TASK-004","from":"verifying","to":"verified","by":"test-agent-13","at":"2026-07-26T23:55:06Z"}
+{"task":"TASK-001","from":"verified","to":"accepted","by":"leader","at":"2026-08-02T03:05:58Z"}
+{"task":"TASK-002","from":"verified","to":"accepted","by":"leader","at":"2026-08-02T03:05:58Z"}
+{"task":"TASK-003","from":"verified","to":"accepted","by":"leader","at":"2026-08-02T03:05:58Z"}
+{"task":"TASK-004","from":"verified","to":"accepted","by":"leader","at":"2026-08-02T03:05:58Z"}

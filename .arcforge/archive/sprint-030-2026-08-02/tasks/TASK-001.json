@@ -1,0 +1,68 @@
+{
+  "id": "TASK-001",
+  "title": "Tushare 客户端(A/H 估值+行情备源)",
+  "description": "internal/collector/tushare 纯 Go POST JSON 客户端:daily_basic/index_daily/hk_daily/daily 四能力方法,40203 映射永久性 ErrNoPermission,200ms 节流。计划 Task 1 含完整参考实现与测试代码,照实现即可。完成后跑 live 探针 index_dailybasic 权限(token 从 runtime configs/config.yaml 现取,不入任何提交文件),结论记入计划文档勾选处与 discovery(TASK-005 依赖此结论)。commit 前密钥哨兵 grep。",
+  "module": "collector-tushare",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/tushare/client.go",
+    "internal/collector/tushare/client_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchDailyBasic 发出 POST JSON(api_name=daily_basic/token/params{ts_code,start_date,end_date}/fields)并把 items 解析为 ValuationPoint{Date,PETTM,PB,PSTTM}",
+      "FetchIndexDaily/FetchHKDaily/FetchDaily 分别调用 index_daily/hk_daily/daily 返回 PricePoint{Date,Close}",
+      "code=40203 响应映射为 ErrNoPermission(errors.Is 可判),error 文本含 api 名与 msg"
+    ],
+    "boundary": [
+      "items 为空数组时返回空切片且 err=nil",
+      "响应 items 日期倒序时输出仍按日期升序"
+    ],
+    "error_handling": [
+      "code!=0 且非 40203 时返回含 code 与 msg 的 error;HTTP/网络错误包装为含 api 名的 error"
+    ],
+    "non_functional": [
+      {
+        "desc": "连续两次请求最小间隔 200ms(节流)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "live 探针 index_dailybasic 权限(curl,token 现取):有权限→追加 FetchIndexDailyBasic 同款+测试;40203→指数链定为仅价格。结论写入计划文档与 discovery",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-agent-32",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/collector/tushare"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 2,
+  "questions": [
+    {
+      "q": "门禁 scope 漂移误判,阻塞 dev_done,需 Leader 动作(非代码问题,本任务代码已全部完成且全绿)。根因(已手工复算证实):task-completed.sh 扣除「他人在途包」的状态白名单是 assigned/in_progress/dev_done/verifying/blocked_clarification,**不含 verified**。TASK-002(packages=[\"./internal/collector/twelvedata\"])已 verified 但改动未提交,脏文件留在共享工作区,被算成本任务的 scope 漂移 → transition dev_done 被 DENY。实测:工作区脏包={tushare,twelvedata,prism},门禁扣除集只有在途任务的包,twelvedata 未被扣除。影响面不限于本任务:只要存在「已 verified 但未提交」的任务,后续任何人的 dev_done 都会被它挡住,且 verified 越攒越多越严重。我无法自行解决:.claude/hooks/ 对全体 agent 只读;Leader 禁止我 git add/commit;把 twelvedata 加进本任务 packages 会把他人工作记到本任务头上、让本任务门禁去跑他人在途测试并破坏 scope 互斥不变量,故拒绝。建议处置(按推荐序):(1) 提交已 verified 的工作(TASK-002/003/004),工作区只剩在途改动后门禁按设计工作,我直接重跑 transition 即可;(2) 把 verified/accepted 补进门禁扣除白名单(运行时资产,须走 project-template→TDD→人类确认);(3) 临时放宽 packages(不推荐,理由同上)。解除阻塞后我只需重跑 transition dev_done,discovery 已写好,无需重做任何工作。",
+      "asked_at": "2026-08-02T08:10:00Z",
+      "answer": null
+    }
+  ],
+  "verifier": "test-agent-14",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-02T08:49:46Z"
+  },
+  "fix_items": [
+    {
+      "id": "S2",
+      "severity": "MAJOR",
+      "desc": "「窗口无关」性质无测试守护(test-agent-14 复验唯一存活突变)。现有限频用例的 msg 恰好是「频率超限(1次/分钟)」,把 rateLimitMarker 写死成完整窗口串「频率超限(1次/分钟)」后整套用例仍全绿 ⇒ S1 的核心性质(判据只认「频率超限」四字、与窗口口径无关)目前零守护。风险:未来有人改成完整串匹配,失效极隐蔽——要等上游改窗口文案才暴露,届时限频重新被误判为永久错误,退回原问题。修:把 test-agent-14 的探针固化为常驻用例——用 msg「频率超限(1次/小时)」(与现有用例的窗口口径不同)断言 errors.Is(err, ErrRateLimited),使写死完整串的突变立即转红。可直接抄 .arcforge/docs/04-test/TASK-001-verification.md §5 给出的代码。"
+    }
+  ],
+  "reason_class": "task_defect"
+}
