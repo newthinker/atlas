@@ -80,6 +80,24 @@ func TestPrismConfigAkshareDefaults(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:9999", c2.AkshareBaseURL, "显式值不被覆盖")
 }
 
+// Context Checkpoint: TASK-004 done_criteria → test mapping
+//
+//	functional[0] "零值 ApplyDefaults 后 BaostockBaseURL=http://127.0.0.1:8181" → TestPrismConfigBaostockDefaults
+//	boundary[0]   "显式 BaostockBaseURL 不被默认值覆盖"                          → TestPrismConfigBaostockDefaults
+func TestPrismConfigBaostockDefaults(t *testing.T) {
+	c := PrismConfig{}
+	c.ApplyDefaults()
+	assert.Equal(t, "http://127.0.0.1:8181", c.BaostockBaseURL)
+
+	c2 := PrismConfig{BaostockBaseURL: "http://127.0.0.1:9999"}
+	c2.ApplyDefaults()
+	assert.Equal(t, "http://127.0.0.1:9999", c2.BaostockBaseURL, "显式值不被覆盖")
+
+	f, ok := reflect.TypeOf(PrismConfig{}).FieldByName("BaostockBaseURL")
+	require.True(t, ok)
+	assert.Equal(t, "baostock_base_url", f.Tag.Get("mapstructure"))
+}
+
 func TestPrismInstrumentFallbackSourceTag(t *testing.T) {
 	f, ok := reflect.TypeOf(PrismInstrument{}).FieldByName("FallbackSource")
 	require.True(t, ok)

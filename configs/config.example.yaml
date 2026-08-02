@@ -34,6 +34,19 @@ collectors:
   fred:
     enabled: false
     api_key: "${FRED_API_KEY}"
+  # Prism 降级链备源(M3.5a)。以下 api_key 一律留空:
+  # 真实密钥只写 runtime 的 configs/config.yaml(已被 .gitignore 忽略),
+  # 不入本示例文件、不入 launchd plist、不入日志。
+  # Tushare Pro: A/H 股估值与行情备源(积分制,基础档 200ms 最小间隔)
+  tushare:
+    enabled: false
+    api_key: ""
+    markets: ["CN_A", "HK"]
+  # Twelve Data: 美股价格备源(免费层 8 req/min,客户端内置 8s 最小间隔)
+  twelvedata:
+    enabled: false
+    api_key: ""
+    markets: ["US"]
 
 # Trading strategies
 strategies:
@@ -235,6 +248,7 @@ prism:
   low_pct: 15             # 低估阈值(百分位)
   high_pct: 85            # 高估阈值
   akshare_base_url: "http://127.0.0.1:8180"  # aktools 本地侧车地址(A/H 公司与指数兜底数据源)
+  baostock_base_url: "http://127.0.0.1:8181" # baostock 桥本地侧车地址(A 股行情备源)
   edgar_user_agent: "atlas-prism/1.0 (you@example.com)"  # SEC 要求 User-Agent 含联系邮箱,否则被 403
   edgar_lookback_years: 10                    # EDGAR 价格重建年数(价格仍走 yahoo)
   instruments:

@@ -467,6 +467,7 @@ type PrismConfig struct {
 	LowPct             float64           `mapstructure:"low_pct"`              // 低估阈值(百分位)
 	HighPct            float64           `mapstructure:"high_pct"`             // 高估阈值(百分位)
 	AkshareBaseURL     string            `mapstructure:"akshare_base_url"`     // aktools 本地侧车地址
+	BaostockBaseURL    string            `mapstructure:"baostock_base_url"`    // baostock 桥本地侧车地址
 	EdgarUserAgent     string            `mapstructure:"edgar_user_agent"`     // SEC 要求 UA 含联系邮箱
 	EdgarLookbackYears int               `mapstructure:"edgar_lookback_years"` // EDGAR 价格重建年数,默认 10
 	Instruments        []PrismInstrument `mapstructure:"instruments"`
@@ -504,6 +505,9 @@ func (c *PrismConfig) ApplyDefaults() {
 	}
 	if c.AkshareBaseURL == "" {
 		c.AkshareBaseURL = "http://127.0.0.1:8180"
+	}
+	if c.BaostockBaseURL == "" {
+		c.BaostockBaseURL = "http://127.0.0.1:8181"
 	}
 	if c.EdgarLookbackYears == 0 {
 		c.EdgarLookbackYears = 10
