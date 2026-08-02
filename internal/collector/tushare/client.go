@@ -13,15 +13,30 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-const defaultBaseURL = "http://api.tushare.pro"
+// token 走 POST body,必须 https:明文 http 会让凭证对路径上任意中间节点可见。
+const defaultBaseURL = "https://api.tushare.pro"
 
-// ErrNoPermission: code 40203,积分不足——**永久性**错误,调用方不得重试、
-// Degraded 文案应注明配置性问题(降级链原则,spec §2)。
-var ErrNoPermission = errors.New("tushare: no api permission")
+// code 40203 是**重载码**:无权限与限频共用它,只能靠 msg 区分。两者的处置相反,
+// 故拆成两个哨兵错误——分错不会走错执行路径(该跳本就只调一次),但会让降级链的
+// Degraded 文案把「等一会儿就好」写成「去改配置」,误导运维。
+var (
+	// ErrNoPermission:积分/权限不足——**永久性**,改配置前重试无意义,
+	// Degraded 文案应注明配置性问题(降级链原则,spec §2)。
+	ErrNoPermission = errors.New("tushare: no api permission")
+	// ErrRateLimited:访问频率超限——**临时性**,窗口过后自愈,
+	// 调用方可按可重试/下一跳处理,不应提示改配置。
+	ErrRateLimited = errors.New("tushare: rate limited")
+)
+
+// rateLimitMarker 是 tushare 限频 msg 的判别子串(实测原文形如
+// 「抱歉,您访问接口(daily_basic)频率超限(1次/分钟)」;窗口口径会自升级到 1 次/小时,
+// 故只认「频率超限」四字,不匹配具体窗口)。
+const rateLimitMarker = "频率超限"
 
 type Client struct {
 	token, baseURL string
@@ -85,6 +100,10 @@ func (c *Client) call(apiName string, params map[string]string, fields string) (
 		return nil, fmt.Errorf("tushare: %s: decode: %w", apiName, err)
 	}
 	if env.Code == 40203 {
+		// 限频分支优先:同码不同义,msg 是唯一判据。
+		if strings.Contains(env.Msg, rateLimitMarker) {
+			return nil, fmt.Errorf("%w: %s (%s)", ErrRateLimited, apiName, env.Msg)
+		}
 		return nil, fmt.Errorf("%w: %s (%s)", ErrNoPermission, apiName, env.Msg)
 	}
 	if env.Code != 0 {

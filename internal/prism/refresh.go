@@ -438,16 +438,21 @@ func tushareFallback(cfg config.PrismConfig, store Store, ts TushareClient, inst
 	var degs []string
 	var err error
 	if priceOnly {
-		var deg string
-		deg, err = refreshTusharePrices(cfg, store, inst, now, priceFetch)
-		degs = append(degs, deg)
+		err = refreshTusharePrices(cfg, store, inst, now, priceFetch)
 	} else {
 		err = refreshTushareValuation(cfg, store, ts, inst, now)
 	}
 	if err != nil {
-		// 永久性错误(积分/权限)不是临时故障:点明配置性问题,避免运维当抖动反复观察。
-		// 本跳只调用一次,永不重试(spec §2「永久不覆盖不重试」)。
-		if errors.Is(err, tushare.ErrNoPermission) {
+		// tushare 用同一个 code 40203 表达「无权限」与「限频」,客户端已按 msg 拆成两个
+		// 哨兵错误。两者的运维动作相反,文案必须跟着分叉:限频等窗口即可,报成配置问题
+		// 会把人支去查积分档(TASK-006 演练实锤过这种误导)。
+		switch {
+		case errors.Is(err, tushare.ErrRateLimited):
+			degs = append(degs, fmt.Sprintf("%s: tushare 限频,本次跳过,下次自动重试: %v",
+				inst.Symbol, err))
+		case errors.Is(err, tushare.ErrNoPermission):
+			// 永久性错误:改配置前重试无意义。本跳只调用一次,永不重试
+			// (spec §2「永久不覆盖不重试」)。
 			degs = append(degs, fmt.Sprintf("%s: tushare 跳不可用(权限不足,配置性问题,不重试): %v",
 				inst.Symbol, err))
 		}
@@ -483,7 +488,28 @@ func refreshTushareValuation(cfg config.PrismConfig, store Store, ts TushareClie
 	for i, p := range pts {
 		vps[i] = valPoint{Date: p.Date, PETTM: p.PETTM, PB: p.PB, PSTTM: p.PSTTM}
 	}
+	if !hasAnyValuation(vps) {
+		return fmt.Errorf("%w: %d rows fetched but PE/PB/PS are all NaN", errFallbackNoData, len(vps))
+	}
 	return upsertWithLocalPercentile(store, id, inst.Symbol, vps)
+}
+
+// hasAnyValuation 报告是否至少有一个点带上了任一估值。
+//
+// 只数行数不看值是不够的:亏损标的的 daily_basic 会把 pe_ttm 返成 null,客户端置 NaN;
+// 若三值全 NaN 的行照写,sqlite 侧 NaN→NULL,而 LatestDate=MAX(d) **不过滤 NULL**,
+// 水位就被推到了这些天 —— 次日 start=latest+1,该窗口永不重访,数据永久缺失。
+// 同一 hazard 主源侧早有守卫(akshare/client.go guardSchemaDrift),此处沿其形态。
+//
+// 判据取「三值全 NaN」而非 akshare 的「PE 全 NaN」:daily_basic 对亏损标的是
+// pe_ttm 缺失但 pb/ps_ttm 有值,那是有效估值,按 PE 判会误伤整段真实数据。
+func hasAnyValuation(pts []valPoint) bool {
+	for _, p := range pts {
+		if !math.IsNaN(p.PETTM) || !math.IsNaN(p.PB) || !math.IsNaN(p.PSTTM) {
+			return true
+		}
+	}
+	return false
 }
 
 // refreshTusharePrices 是港股与 A 股指数链尾的「仅价格」跳:只写 price_daily。
@@ -492,24 +518,30 @@ func refreshTushareValuation(cfg config.PrismConfig, store Store, ts TushareClie
 // 若为这些天写下估值列全 NaN 的行,水位会被推到今天,主源恢复后 incrementalStart 判定
 // 「已是最新」直接 skip,这段窗口的真实估值将永久不回填。缺行与 NaN 行在 Series 视图上
 // 同样呈现为缺失,但只有缺行不会毒化水位。
+// 价格写失败在这里是**硬失败**(与 refreshEngine/refreshEdgar 不同):那两处价格是
+// 估值链路的附属产物,写不进去不该拖垮估值;而本跳的交付物**只有**价格,写失败即等于
+// 该跳什么都没留下,再报 fallback ok 就是自相矛盾。
 func refreshTusharePrices(cfg config.PrismConfig, store Store, inst config.PrismInstrument, now time.Time,
-	fetch func(symbol string, start, end time.Time) ([]tushare.PricePoint, error)) (string, error) {
+	fetch func(symbol string, start, end time.Time) ([]tushare.PricePoint, error)) error {
 	id, err := upsertMeta(store, inst)
 	if err != nil {
-		return "", err
+		return err
 	}
 	pts, err := fetch(inst.Symbol, now.AddDate(-cfg.LookbackYears, 0, 0), now)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if len(pts) == 0 {
-		return "", errFallbackNoData
+		return errFallbackNoData
 	}
-	closes := make([]core.OHLCV, len(pts))
+	rows := make([]prismstore.PriceRow, len(pts))
 	for i, p := range pts {
-		closes[i] = core.OHLCV{Time: p.Date, Close: p.Close}
+		rows[i] = prismstore.PriceRow{D: p.Date.Format("2006-01-02"), Close: p.Close}
 	}
-	return upsertPrices(store, id, inst.Symbol, closes), nil
+	if err := store.UpsertPrices(id, rows); err != nil {
+		return fmt.Errorf("price upsert: %w", err)
+	}
+	return nil
 }
 
 // maxTTMWindowDays 是 4 季 TTM 窗口首尾 period_end 的合理跨度上限。连续 4 季约跨

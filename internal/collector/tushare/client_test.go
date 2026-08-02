@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,10 @@ import (
 //   error_handling[0] "code!=0 非 40203 → 含 code 与 msg 的 error"                     → TestBusinessError
 //   error_handling[0] "HTTP/网络错误包装为含 api 名的 error"                            → TestNetworkError
 //   non_functional[0] "连续两次请求最小间隔 200ms(节流)"                                → TestThrottleMinInterval
+// [review_fix 轮次 1,QA 提出]
+//   M5 "默认端点必须 https(token 走 POST body)"                                        → TestDefaultBaseURLIsHTTPS
+//   S1 "40203 重载码拆分:msg 含「频率超限」→ 临时性 ErrRateLimited"                     → TestErrRateLimited
+//   S1 "非限频的 40203 仍为永久性 ErrNoPermission(functional[2] 被收窄而非推翻)"        → TestErrNoPermissionStillPermanentWhenNotRateLimited
 
 func tsServer(t *testing.T, resp string, capture *map[string]any) *httptest.Server {
 	t.Helper()
@@ -158,4 +164,70 @@ func TestThrottleMinInterval(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, time.Since(t0), minInterval, "连续两次请求最小间隔 %v", minInterval)
 	assert.Equal(t, 200*time.Millisecond, minInterval)
+}
+
+// M5(QA MAJOR):默认端点必须是 https —— token 走 POST body,明文 http 会让凭证
+// 对路径上任意中间节点可见。常量化断言使「顺手改回 http」立刻变红。
+func TestDefaultBaseURLIsHTTPS(t *testing.T) {
+	assert.True(t, strings.HasPrefix(defaultBaseURL, "https://"),
+		"默认端点须为 https,否则 token 明文过网")
+	assert.Equal(t, "https://api.tushare.pro", defaultBaseURL)
+}
+
+// S1(QA 专项1):40203 是**重载码** —— 限频与无权限同码,只能靠 msg 区分。
+// 限频是临时错误(等窗口即可恢复),若沿用永久性的 ErrNoPermission,降级链会把它
+// 写成「权限不足,配置性问题」,运维会去查积分档而实际只需等窗口
+// (TASK-006 断源演练实锤:600036/000423 撞限频却被报成权限问题)。
+func TestErrRateLimited(t *testing.T) {
+	var got map[string]any
+	srv := tsServer(t, `{"code":40203,"data":null,"msg":"抱歉，您访问接口(daily_basic)频率超限(1次/分钟)，具体频次详情：https://tushare.pro/document/1?doc_id=108。"}`, &got)
+	defer srv.Close()
+	start, end := yesterdayToNow()
+	_, err := NewWithBaseURL("tok", srv.URL).FetchDailyBasic("600519.SH", start, end)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRateLimited)
+	assert.NotErrorIs(t, err, ErrNoPermission, "限频是临时错误,不得判为永久性权限问题")
+	assert.Contains(t, err.Error(), "daily_basic")
+	assert.Contains(t, err.Error(), "频率超限", "保留原始 msg 便于运维定位")
+}
+
+// 限频分支优先级更高,但不得吞掉真正的无权限:两者共存时按 msg 精确分流。
+func TestErrNoPermissionStillPermanentWhenNotRateLimited(t *testing.T) {
+	var got map[string]any
+	srv := tsServer(t, `{"code":40203,"data":null,"msg":"抱歉，您没有接口(index_dailybasic)访问权限"}`, &got)
+	defer srv.Close()
+	start, end := yesterdayToNow()
+	_, err := NewWithBaseURL("tok", srv.URL).FetchIndexDaily("000300.SH", start, end)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNoPermission)
+	assert.NotErrorIs(t, err, ErrRateLimited)
+}
+
+// S2(review_fix 轮次 2):守住「判据与窗口口径无关」这条性质本身。
+//
+// 为什么单独立一条:TestErrRateLimited 的 msg 恰好是「1次/分钟」,所以把 rateLimitMarker
+// 写死成完整串「频率超限(1次/分钟)」时整套用例仍全绿(test-agent-14 复验的唯一存活突变)。
+// 那样一来 S1 的核心性质零守护,而失效方式极隐蔽——要等上游改窗口文案才暴露,届时限频
+// 又会被误判成永久错误,退回原问题。
+//
+// 表里刻意放**不同窗口口径**:实测同一 token 先报「1次/分钟」、约 75 秒后报「1次/小时」,
+// 窗口是会变的量。任何把窗口写进判据的改动都会让这里至少一行转红。
+func TestErrRateLimitedIsWindowAgnostic(t *testing.T) {
+	windows := []string{
+		"抱歉，您访问接口(daily_basic)频率超限(1次/分钟)，具体频次详情：https://tushare.pro/document/1?doc_id=108。",
+		"抱歉，您访问接口(hk_daily)频率超限(1次/小时)，具体频次详情：https://tushare.pro/document/1?doc_id=108。",
+		"抱歉，您访问接口(daily)频率超限(200次/天)。", // 上游若再改窗口口径,判据仍须成立
+	}
+	for _, msg := range windows {
+		t.Run(msg[:min(len(msg), 40)], func(t *testing.T) {
+			var got map[string]any
+			srv := tsServer(t, `{"code":40203,"data":null,"msg":`+strconv.Quote(msg)+`}`, &got)
+			defer srv.Close()
+			start, end := yesterdayToNow()
+			_, err := NewWithBaseURL("tok", srv.URL).FetchDailyBasic("600519.SH", start, end)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrRateLimited, "判据须只认「频率超限」,与窗口口径无关")
+			assert.NotErrorIs(t, err, ErrNoPermission)
+		})
+	}
 }

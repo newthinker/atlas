@@ -1044,13 +1044,18 @@ func TestRefreshCNPathsNeverUpsertPrices(t *testing.T) {
 //   functional[1]     yahoo 价格失败 + td!=nil → td 数据参与 PE 重建(EPS 链路不变)
 //                       → TestRefreshUSPriceFallsBackToTwelvedata
 //   functional[2]     港股 akshare 失败 → hk_daily 仅价格,不写估值行,Degraded 注明
-//                       → TestRefreshHKFallsBackToTusharePriceOnly
+//                       → TestRefreshHKPriceOnlyHopWiring(**仅验接线,非生产可用性证据**)
+//                       + TestRefreshHKProductionSymbolHitsKnownGap(生产形态零行→判失败,已知缺口红线)
+//                       缺口:配置是 4 位 0700.HK,tushare hk_daily 要 5 位;归一未做(Leader 裁决
+//                       方案 2:无 5 位正向实证前不做),见 D4 后续任务,修复后两条用例都要同步改写
 //   functional[3]     A 股指数链尾 tushare 跳 = 仅价格(TASK-001 探针:index_dailybasic 40203)
 //                       → TestRefreshIndexChainTailTushareIsPriceOnly
 //   boundary[0]       ts/td 均 nil → 行为与改动前完全一致(不发「未配置」Degraded,ADR#9)
 //                       → TestRefreshNilClientsSkipHops(+ 本文件既有全部用例回归)
 //   error_handling[0] ErrNoPermission → 不重试 + Degraded 含「权限不足,配置性问题」
 //                       → TestRefreshTusharePermissionNotRetried
+//   error_handling[0] 延伸 ErrRateLimited(TASK-001 拆出)→ Degraded 用临时性语义,
+//                       不得写成配置问题 → TestRefreshTushareRateLimitedIsTemporary
 //   [证据驱动补充] 探针实测 ts_code="0700.HK" 返回 code=0 且 items 为空,若把空结果
 //   当兜底成功会产生「fallback ok 但零数据」的假成功 → TestRefreshTushareEmptyIsNotSuccess
 
@@ -1200,10 +1205,18 @@ func TestRefreshUSPriceFallsBackToTwelvedata(t *testing.T) {
 	assert.NotEmpty(t, store.prices["NVDA"], "兜底价格同样落 price_daily")
 }
 
-// functional[2]:港股 akshare 失败 → hk_daily 仅价格。
+// functional[2] 的**接线**部分:港股 akshare 失败 → 分派到 hk_daily、仅价格落库、
+// 不写估值行、Degraded 文案正确。
+//
+// ⚠ 本用例**不构成生产可用性证据**:fake 以配置形态 "0700.HK" 为 key,而真实 tushare
+// hk_daily 要 5 位 "00700.HK"(4 位实测返回 code=0 且 items 为空)。也就是说 fake 会命中
+// 只因为它按配置形态建键,真实上游不会命中。生产侧的已知缺口由
+// TestRefreshHKProductionSymbolHitsKnownGap 锁定;归一修复见 D4 后续任务。
+// 保留本用例的价值在于:分派逻辑、仅价格语义、水位保护这三件事仍需回归。
+//
 // 不写估值行是刻意设计:LatestDate 取 MAX(d) FROM valuation_daily,写 NaN 估值行会把
 // 增量水位推到今天,主源恢复后 incrementalStart 直接 skip,这些天的真实估值将永久不回填。
-func TestRefreshHKFallsBackToTusharePriceOnly(t *testing.T) {
+func TestRefreshHKPriceOnlyHopWiring(t *testing.T) {
 	store := newFakeStore()
 	ak := &fakeAkshare{fail: map[string]error{"0700.HK": errors.New("aktools down")}}
 	ts := &fakeTushare{hkPx: map[string][]tushare.PricePoint{
@@ -1305,4 +1318,175 @@ func TestRefreshTushareEmptyIsNotSuccess(t *testing.T) {
 	for _, d := range rep.Degraded {
 		assert.NotContains(t, d, "fallback ok", "零数据不得上报为兜底成功")
 	}
+}
+
+// Context Checkpoint (TASK-005 review_fix 轮次 1): QA fix_items → test mapping
+//   C2 "daily_basic 三值全 NaN 的行不得落库(会推进 LatestDate 水位致该日永不重访)"
+//        → TestRefreshTushareValuationAllNaNIsNotSuccess
+//   C2 边界 "只有 PE 为 NaN(亏损标的真实形态)时仍须落库,守卫不得误伤"
+//        → TestRefreshTushareValuationKeepsRowsWhenOnlyPEIsNaN
+//   M1 "仅价格跳的 upsertPrices 写失败须上抛为 error(价格是该跳全部交付物)"
+//        → TestRefreshTusharePricesUpsertFailureIsError
+//   M2 "零行守卫锁定:A 股估值零行 / 美股 TD 零行"
+//        → TestRefreshTushareValuationEmptyIsNotSuccess / TestRefreshUSPriceTwelvedataEmptyIsNotSuccess
+
+// C2(CRITICAL):亏损标的的 daily_basic 会返回 pe_ttm:null → 客户端置 NaN。三值全 NaN 的行
+// 一旦落库,sqlite 侧 NaN→NULL,而 LatestDate=MAX(d) **不过滤 NULL** ⇒ 水位被推进、
+// 次日 start=latest+1、该日永不重访,且当次还报 fallback ok。必须在写库前拦下。
+func TestRefreshTushareValuationAllNaNIsNotSuccess(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{fail: map[string]error{"600519.SH": errors.New("aktools down")}}
+	nan := math.NaN()
+	ts := &fakeTushare{valuation: map[string][]tushare.ValuationPoint{
+		"600519.SH": {
+			{Date: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC), PETTM: nan, PB: nan, PSTTM: nan},
+			{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), PETTM: nan, PB: nan, PSTTM: nan},
+		},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(aStockInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "600519.SH")
+	assert.Empty(t, store.upserts["600519.SH"], "全 NaN 行不得落库,否则推进 LatestDate 水位")
+	for _, d := range rep.Degraded {
+		assert.NotContains(t, d, "fallback ok", "全 NaN 不得上报为兜底成功")
+	}
+}
+
+// C2 边界:守卫判据是「三值全 NaN」而非「PE 为 NaN」。亏损标的的真实形态是
+// pe_ttm 缺失但 pb/ps_ttm 有值 —— 那是有效估值数据,必须照常落库,守卫不得误伤。
+func TestRefreshTushareValuationKeepsRowsWhenOnlyPEIsNaN(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{fail: map[string]error{"600519.SH": errors.New("aktools down")}}
+	ts := &fakeTushare{valuation: map[string][]tushare.ValuationPoint{
+		"600519.SH": {{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC),
+			PETTM: math.NaN(), PB: 6.2, PSTTM: 9.1}},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(aStockInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
+	assert.Empty(t, rep.Failed)
+	assert.Equal(t, 1, rep.Refreshed)
+	rows := store.upserts["600519.SH"]
+	require.Len(t, rows, 1, "PB/PS 有值即为有效估值,必须落库")
+	assert.True(t, math.IsNaN(rows[0].PETTM))
+	assert.InDelta(t, 6.2, rows[0].PB, 1e-9)
+}
+
+// M2 第 1 处零行守卫:A 股估值兜底拉到 0 行不得算成功。
+func TestRefreshTushareValuationEmptyIsNotSuccess(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{fail: map[string]error{"600519.SH": errors.New("aktools down")}}
+	ts := &fakeTushare{} // valuation 未预置 → 返回空切片,err=nil
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(aStockInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Empty(t, store.upserts["600519.SH"])
+	for _, d := range rep.Degraded {
+		assert.NotContains(t, d, "fallback ok")
+	}
+}
+
+// M2 第 2 处零行守卫:yahoo 失败后 TD 返回 0 行,同样不得算兜底成功
+// (否则 PE 会用一段空价格重建,或直接产出空序列却报 ok)。
+func TestRefreshUSPriceTwelvedataEmptyIsNotSuccess(t *testing.T) {
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	store := newFakeStore()
+	us := &fakeUS2{closes: []core.OHLCV{{Time: now.AddDate(0, 0, -1), Close: 100}},
+		eps:       okEPSSeries(now),
+		failPrice: map[string]error{"NVDA": errors.New("yahoo 503")}}
+	td := &fakeTD{} // closes 未预置 → 返回空切片,err=nil
+
+	rep := Refresh(engineCfg(), store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, nil, td, now)
+	assert.Equal(t, 0, rep.Refreshed)
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "NVDA")
+	assert.Contains(t, rep.Failed[0], "price history:", "须保持既有错误前缀")
+	assert.Empty(t, store.upserts["NVDA"])
+	for _, d := range rep.Degraded {
+		assert.NotContains(t, d, "twelvedata fallback ok")
+	}
+}
+
+// M1:仅价格跳的价格就是它的全部交付物 —— 写库失败必须让该标的判失败。
+// 修复前的行为(QA 实证):Refreshed=1、Failed 为空、落库 0 行,还发两条自相矛盾的
+// Degraded(一条说 fallback ok,一条说 price_daily upsert failed)。
+func TestRefreshTusharePricesUpsertFailureIsError(t *testing.T) {
+	store := newFakeStore()
+	store.priceErr["0700.HK"] = errors.New("disk full")
+	ak := &fakeAkshare{fail: map[string]error{"0700.HK": errors.New("aktools down")}}
+	ts := &fakeTushare{hkPx: map[string][]tushare.PricePoint{
+		"0700.HK": {{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), Close: 512.5}},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(hkInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
+	assert.Equal(t, 0, rep.Refreshed, "价格写失败 = 该跳无交付物,不得计成功")
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "0700.HK")
+	assert.Contains(t, rep.Failed[0], "disk full")
+	for _, d := range rep.Degraded {
+		assert.NotContains(t, d, "fallback ok", "写失败不得同时上报兜底成功")
+	}
+}
+
+// M3b(Leader 裁决方案 2:如实记录红线,不做归一)——**已知缺口的锁定测试**。
+//
+// 缺口本体:配置(configs/config.yaml)里的港股形态是 4 位 "0700.HK",而 tushare
+// hk_daily 要 5 位 "00700.HK";4 位实测返回 code=0 且 items 为空(静默空,不是报错)。
+// 客户端**未做** %05s 归一(ADR#8 认为形态天然一致,在港股上不成立),因此该跳在生产里
+// 恒零行、恒判失败——这正是本用例锁定的事实。
+//
+// 本用例的 fake 按**真实上游契约**建键(只认 5 位),故 refresh 传 4 位时查不到 → 零行。
+// 它与 TestRefreshHKPriceOnlyHopWiring 的分工:那条验接线,这条验生产现实。
+//
+// ⚠ 后续任务(D4)做完归一后,本用例必须同步改写为「归一后能命中 5 位并成功」,
+// 否则它会反过来把修复判成失败。改写前置条件:先拿到 5 位形态的正向实证
+// ——截至 2026-08-02 两次探针均撞 hk_daily 限频(窗口已自升级到 1 次/小时),尚无证据。
+func TestRefreshHKProductionSymbolHitsKnownGap(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{fail: map[string]error{"0700.HK": errors.New("aktools down")}}
+	// 真实 tushare 只认 5 位:fake 按上游契约建键,不迁就被测代码。
+	ts := &fakeTushare{hkPx: map[string][]tushare.PricePoint{
+		"00700.HK": {{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), Close: 512.5}},
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(hkInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
+
+	assert.Equal(t, 0, rep.Refreshed, "已知缺口:4 位配置形态取不到数据,该跳必然失败")
+	require.Len(t, rep.Failed, 1)
+	assert.Contains(t, rep.Failed[0], "0700.HK")
+	assert.Empty(t, store.prices["0700.HK"], "零行不得落库")
+	for _, d := range rep.Degraded {
+		assert.NotContains(t, d, "fallback ok", "已知缺口不得被上报为兜底成功")
+	}
+	assert.Equal(t, 1, ts.calls["hk_daily:0700.HK"], "确实是以 4 位形态发起的调用")
+}
+
+// M2 延伸(Leader 指定):消费 TASK-001 拆出的 ErrRateLimited。
+// 限频是**临时**错误——窗口过后自愈,运维什么都不用改。若沿用 ErrNoPermission 那套
+// 「权限不足,配置性问题」文案,运维会去查积分档(TASK-006 演练已实锤该误导)。
+func TestRefreshTushareRateLimitedIsTemporary(t *testing.T) {
+	store := newFakeStore()
+	ak := &fakeAkshare{fail: map[string]error{"600519.SH": errors.New("aktools down")}}
+	ts := &fakeTushare{failVal: map[string]error{
+		"600519.SH": fmt.Errorf("%w: daily_basic (抱歉，您访问接口(daily_basic)频率超限(1次/分钟))",
+			tushare.ErrRateLimited),
+	}}
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+
+	rep := Refresh(akCfg(aStockInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
+	require.NotEmpty(t, rep.Degraded)
+	assert.Contains(t, rep.Degraded[0], "限频")
+	assert.Contains(t, rep.Degraded[0], "下次自动重试", "须传达临时性语义")
+	assert.NotContains(t, rep.Degraded[0], "配置性问题", "限频不是配置问题,不得误导运维去改配置")
+	assert.NotContains(t, rep.Degraded[0], "权限不足")
+
+	require.Len(t, rep.Failed, 1, "本次兜底确实没成功,标的仍判失败")
+	assert.Equal(t, 0, rep.Refreshed)
 }
