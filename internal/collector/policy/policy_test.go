@@ -288,3 +288,134 @@ func TestNoImportOfCollectorRoot(t *testing.T) {
 		}
 	}
 }
+
+// ——— Table.Override（TASK-005）———
+//
+// functional[1] 只应用显式设置的字段 → TestOverrideAppliesOnlySetFields
+//                                     + TestOverrideExplicitZeroValues（指针语义的关键）
+// functional[2] 只覆盖 QuotaLimit 时保留 Window/Loc → TestOverrideQuotaLimitKeepsWindowAndLoc
+// boundary[0]   可为无 Quota 的主题新增配额     → TestOverrideCanAddQuotaToTopicWithout
+// boundary[1]   Override 未登记主题会将其登记   → TestOverrideRegistersUnknownTopic
+// （自补）Quota 必须复制而非就地改             → TestOverrideCopiesQuotaNotShares
+// （自补）Domain 须按主题名重推，不从通配条目继承 → TestOverrideRecomputesDomain
+
+func TestOverrideAppliesOnlySetFields(t *testing.T) {
+	tbl := NewTable()
+	ttl := 30 * time.Second
+	tbl.Override("yahoo.chart", Override{TTL: &ttl})
+
+	p, _ := tbl.Lookup("yahoo.chart")
+	if p.TTL != ttl {
+		t.Errorf("TTL = %v, want %v", p.TTL, ttl)
+	}
+	if p.MinInterval != 500*time.Millisecond {
+		t.Errorf("未设置的字段应保持内置值, MinInterval = %v", p.MinInterval)
+	}
+	if !p.Coalesce {
+		t.Error("未设置的 Coalesce 应保持内置 true")
+	}
+}
+
+// TestOverrideExplicitZeroValues 是**指针语义的立身之本**：Override 全用指针字段，
+// 就是为了区分「未设置」与「显式设为零值」。用零值判定的实现（if o.TTL != 0）会让
+// 这条红——而 TTL: 0 是合法取值，表示显式关掉该主题的缓存。
+func TestOverrideExplicitZeroValues(t *testing.T) {
+	tbl := NewTable()
+	zeroTTL := time.Duration(0)
+	no := false
+	tbl.Override("yahoo.chart", Override{TTL: &zeroTTL, Coalesce: &no})
+
+	p, _ := tbl.Lookup("yahoo.chart")
+	if p.TTL != 0 {
+		t.Errorf("显式 TTL=0 应关掉该主题的缓存, got %v", p.TTL)
+	}
+	if p.Coalesce {
+		t.Error("显式 Coalesce=false 应关掉合并")
+	}
+	if p.MinInterval != 500*time.Millisecond {
+		t.Errorf("未设置的字段仍应保持内置值, MinInterval = %v", p.MinInterval)
+	}
+}
+
+func TestOverrideQuotaLimitKeepsWindowAndLoc(t *testing.T) {
+	tbl := NewTable()
+	before, _ := tbl.Lookup("tushare.daily_basic")
+	limit := 20
+	tbl.Override("tushare.daily_basic", Override{QuotaLimit: &limit})
+
+	p, _ := tbl.Lookup("tushare.daily_basic")
+	if p.Quota == nil || p.Quota.Limit != 20 {
+		t.Fatalf("Quota = %+v, want Limit 20", p.Quota)
+	}
+	if p.Quota.Window != before.Quota.Window || p.Quota.Loc != before.Quota.Loc {
+		t.Errorf("只改 limit 时 Window/Loc 应保持: %+v", p.Quota)
+	}
+}
+
+func TestOverrideCanAddQuotaToTopicWithout(t *testing.T) {
+	tbl := NewTable()
+	limit, window := 100, time.Minute
+	tbl.Override("yahoo.chart", Override{QuotaLimit: &limit, QuotaWindow: &window})
+
+	p, _ := tbl.Lookup("yahoo.chart")
+	if p.Quota == nil || p.Quota.Limit != 100 || p.Quota.Window != time.Minute {
+		t.Fatalf("Quota = %+v", p.Quota)
+	}
+	if p.Quota.Loc == nil {
+		t.Error("新建 Quota 必须带时区（自然日边界对齐）")
+	}
+}
+
+func TestOverrideRegistersUnknownTopic(t *testing.T) {
+	tbl := NewTable()
+	iv := 3 * time.Second
+	tbl.Override("eastmoney.kline", Override{MinInterval: &iv})
+
+	p, ok := tbl.Lookup("eastmoney.kline")
+	if !ok {
+		t.Fatal("config 覆盖应能登记新主题")
+	}
+	if p.MinInterval != iv || p.Domain != "eastmoney" {
+		t.Errorf("p = %+v", p)
+	}
+}
+
+// TestOverrideCopiesQuotaNotShares 守护「复制而非共享」：Policy.Quota 是 *Quota，
+// 多个主题可能引用同一个。就地改会连带改掉别的主题的配额。
+func TestOverrideCopiesQuotaNotShares(t *testing.T) {
+	tbl := NewTable()
+	shared := &Quota{Limit: 5, Window: 24 * time.Hour, Loc: time.UTC}
+	tbl.Set("a.x", Policy{Quota: shared})
+	tbl.Set("a.y", Policy{Quota: shared})
+
+	limit := 99
+	tbl.Override("a.x", Override{QuotaLimit: &limit})
+
+	px, _ := tbl.Lookup("a.x")
+	py, _ := tbl.Lookup("a.y")
+	if px.Quota.Limit != 99 {
+		t.Errorf("a.x 的 Limit = %d, want 99", px.Quota.Limit)
+	}
+	if py.Quota.Limit != 5 {
+		t.Errorf("a.y 的 Limit = %d, want 5（Override 须复制 Quota，不得就地改共享实例）", py.Quota.Limit)
+	}
+	if shared.Limit != 5 {
+		t.Errorf("原 *Quota 被就地修改了: Limit = %d, want 5", shared.Limit)
+	}
+}
+
+// TestOverrideRecomputesDomain 守护「Domain 按主题名重推」：Lookup 命中通配条目时
+// 返回的是通配条目的 Domain，直接 Set 回去会让新主题继承错误的限流域。
+func TestOverrideRecomputesDomain(t *testing.T) {
+	tbl := NewTable()
+	// 通配条目显式指定了一个与主题名不同的域
+	tbl.Set("shared.*", Policy{Domain: "custom-domain", TTL: time.Minute})
+
+	iv := time.Second
+	tbl.Override("shared.endpoint", Override{MinInterval: &iv})
+
+	p, _ := tbl.Lookup("shared.endpoint")
+	if p.Domain != "shared" {
+		t.Errorf("Domain = %q, want \"shared\"（从通配条目继承 Domain 会让限流域串味）", p.Domain)
+	}
+}

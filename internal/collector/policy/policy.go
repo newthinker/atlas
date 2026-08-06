@@ -149,3 +149,55 @@ func domainOf(topic string) string {
 	}
 	return topic
 }
+
+// Override 是 config 对单个主题的**字段级**覆盖：nil 字段保持内置值。
+// 用指针而非零值判定，因为 0 是合法取值（TTL: 0 表示显式关掉该主题的缓存，
+// Coalesce: false 表示显式关掉合并）。
+type Override struct {
+	TTL         *time.Duration
+	MinInterval *time.Duration
+	Timeout     *time.Duration
+	Coalesce    *bool
+	QuotaLimit  *int
+	QuotaWindow *time.Duration
+}
+
+// Override 把 o 应用到 topic 上。主题未登记时从零策略起步（config 可以
+// 为 eastmoney 这类当前无策略的 collector 新增策略，设计 §4.1）——
+// 但**默认仍是零策略，只有显式 Override 才登记**，约束 C6 不受影响。
+//
+// ⚠ 只应在**构造阶段**调用（config 装载时）。Table 是裸 map 无锁，设计意图是
+// 构造后只读；拿它做运行期热更新会与并发读的 Lookup 竞争。会违反这一点的人
+// 是写 config 热加载的人，故写在这里。
+func (t *Table) Override(topic string, o Override) {
+	p, _ := t.Lookup(topic)
+	if o.TTL != nil {
+		p.TTL = *o.TTL
+	}
+	if o.MinInterval != nil {
+		p.MinInterval = *o.MinInterval
+	}
+	if o.Timeout != nil {
+		p.Timeout = *o.Timeout
+	}
+	if o.Coalesce != nil {
+		p.Coalesce = *o.Coalesce
+	}
+	if o.QuotaLimit != nil || o.QuotaWindow != nil {
+		q := Quota{Window: 24 * time.Hour, Loc: shanghai()}
+		if p.Quota != nil {
+			q = *p.Quota // 复制而非共享：内置表的 *Quota 可能被多主题引用
+		}
+		if o.QuotaLimit != nil {
+			q.Limit = *o.QuotaLimit
+		}
+		if o.QuotaWindow != nil {
+			q.Window = *o.QuotaWindow
+		}
+		p.Quota = &q
+	}
+	// 清空 Domain 让 Set 按 topic 重新推导：Lookup 命中通配条目时返回的是那条
+	// 通配条目的 Domain，原样带回会让新主题继承错误的限流域。
+	p.Domain = ""
+	t.Set(topic, p)
+}
