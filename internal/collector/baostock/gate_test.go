@@ -326,3 +326,53 @@ func TestPolicyErrorsDoNotLeak(t *testing.T) {
 		}
 	})
 }
+
+// TestCacheKeyTruncatesToMinute 覆盖 functional[4]：缓存键的时间精度**双向约束**。
+//
+// **(a) 聚合度** —— 以墙钟为 end 的相邻两次调用必须命中同一槽。生产路径
+// `app.go:451` 的 `end := time.Now()` 经 `:462` 传进 FetchHistory；键若保留秒/纳秒
+// 精度，每次调用键都不同 ⇒ **命中率恒为零**。这是「静默的错」：不报错、不出错数据、
+// 返回值完全正确，只有生产路径才暴露。而整套原测试对它完全无感，因为它们全用
+// **固定时刻**，固定时刻在 Truncate 前后相等。
+//
+// **(b) 粒度不得放粗** —— 只写 (a) 的话，把 Truncate 改成小时/天照样全绿，而那会让
+// 相隔几分钟的不同查询串槽、静默返回错区间数据（「吵闹的错」）。
+//
+// ⚠ 写法：**不字面用两次 `time.Now()`** —— 跨分钟边界会偶发假红。取当前分钟的中点
+// 作基准，两个偏移都落在确定的位置上。约 1e-7 的假红概率可以完全消除，就没理由留着。
+func TestCacheKeyTruncatesToMinute(t *testing.T) {
+	start := time.Unix(1600000000, 0)
+	base := time.Now().Truncate(time.Minute).Add(20 * time.Second) // 当前分钟的中点
+
+	t.Run("同分钟内的相邻调用聚合到同一槽", func(t *testing.T) {
+		srv, hits := countingBridge(t, http.StatusOK, dailyBody)
+		c := New(srv.URL)
+		c.gate = cachingGate()
+
+		for _, end := range []time.Time{base, base.Add(3 * time.Second)} {
+			if _, err := c.FetchHistory("600519.SH", start, end, "1d"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := hits(); n != 1 {
+			t.Errorf("相隔 3 秒的两次调用应命中同一缓存槽: HTTP 请求 %d 次, want 1"+
+				"（为 2 说明键保留了秒级精度——生产路径以 time.Now() 为 end，命中率会恒为零）", n)
+		}
+	})
+
+	t.Run("跨分钟的调用不得串槽", func(t *testing.T) {
+		srv, hits := countingBridge(t, http.StatusOK, dailyBody)
+		c := New(srv.URL)
+		c.gate = cachingGate()
+
+		for _, end := range []time.Time{base, base.Add(2 * time.Minute)} {
+			if _, err := c.FetchHistory("600519.SH", start, end, "1d"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := hits(); n != 2 {
+			t.Errorf("相隔 2 分钟的两次调用是不同区间，必须分槽: HTTP 请求 %d 次, want 2"+
+				"（为 1 说明截断粒度被放粗到小时/天——不同区间的查询会串槽，静默返回错区间数据）", n)
+		}
+	})
+}
