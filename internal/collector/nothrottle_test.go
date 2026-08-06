@@ -90,20 +90,11 @@ func scanPrivateThrottleState(root string) (scanResult, error) {
 			return fmt.Errorf("解析 %s 失败: %w", path, perr)
 		}
 		res.scanned = append(res.scanned, path)
-		ast.Inspect(f, func(n ast.Node) bool {
-			st, ok := n.(*ast.StructType)
-			if !ok || st.Fields == nil {
-				return true
+		forEachStructFieldName(f, func(name *ast.Ident) {
+			if forbiddenFields[name.Name] {
+				res.offenders = append(res.offenders,
+					path+":"+strconv.Itoa(fset.Position(name.Pos()).Line))
 			}
-			for _, fld := range st.Fields.List {
-				for _, name := range fld.Names {
-					if forbiddenFields[name.Name] {
-						res.offenders = append(res.offenders,
-							path+":"+strconv.Itoa(fset.Position(name.Pos()).Line))
-					}
-				}
-			}
-			return true
 		})
 		return nil
 	})
@@ -111,6 +102,25 @@ func scanPrivateThrottleState(root string) (scanResult, error) {
 		return scanResult{}, err
 	}
 	return res, nil
+}
+
+// forEachStructFieldName 对 f 里每个**结构体字段**的名字调用 fn。
+//
+// 「回潮的判据是状态被结构体持有」这条判据在两处要用（生产扫描、夹具行号现读），
+// 收在一处可保证二者永远看的是同一批节点。
+func forEachStructFieldName(f *ast.File, fn func(name *ast.Ident)) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		st, ok := n.(*ast.StructType)
+		if !ok || st.Fields == nil {
+			return true
+		}
+		for _, fld := range st.Fields.List {
+			for _, name := range fld.Names {
+				fn(name)
+			}
+		}
+		return true
+	})
 }
 
 // scanNoPanic 把 panic 转成断言失败。
@@ -157,21 +167,20 @@ func TestNoPrivateThrottleState(t *testing.T) {
 	// 下界断言：上面那条「没有 offender」在扫描器一个文件都没走时同样成立。
 	// DoD 点名的四个子包必须**每个**都确实贡献了被解析的文件。
 	for _, pkg := range gateMigratedPkgs {
-		if countScannedIn(res.scanned, pkg) == 0 {
+		if !anyScannedIn(res.scanned, pkg) {
 			t.Errorf("子包 %s 一个生产源码文件都没被扫到 —— 「不存在 lastReq」是空真的（共扫 %d 个文件）",
 				pkg, len(res.scanned))
 		}
 	}
 }
 
-func countScannedIn(scanned []string, pkg string) int {
-	n := 0
+func anyScannedIn(scanned []string, pkg string) bool {
 	for _, p := range scanned {
 		if strings.HasPrefix(p, pkg+string(filepath.Separator)) {
-			n++
+			return true
 		}
 	}
-	return n
+	return false
 }
 
 // TestScanDetectsThrottleState 是 DoD functional[1] 的**阳性对照**：把同一个
@@ -185,8 +194,9 @@ func countScannedIn(scanned []string, pkg string) int {
 // 失败处提前返回、根本走不到阳性夹具 —— 断言失败，而错误信息说的是「解析失败」，
 // 指向的方向完全不对。
 func TestScanDetectsThrottleState(t *testing.T) {
-	const fixture = "testdata/throttleback/collector.go"
-	res, err := scanNoPanic(t, filepath.Join("testdata", "throttleback"))
+	root := filepath.Join("testdata", "throttleback")
+	fixture := filepath.Join(root, "collector.go")
+	res, err := scanNoPanic(t, root)
 	if err != nil {
 		t.Fatalf("扫描阳性夹具失败: %v", err)
 	}
@@ -206,7 +216,7 @@ func TestScanDetectsThrottleState(t *testing.T) {
 func hasOffenderFor(t *testing.T, offenders []string, file, field string) bool {
 	t.Helper()
 	wantLine := lineOfField(t, file, field)
-	want := file + ":" + strconv.Itoa(wantLine)
+	want := filepath.ToSlash(file) + ":" + strconv.Itoa(wantLine)
 	for _, o := range offenders {
 		if filepath.ToSlash(o) == want {
 			return true
@@ -225,19 +235,10 @@ func lineOfField(t *testing.T, file, field string) int {
 		t.Fatalf("解析夹具 %s: %v", file, err)
 	}
 	line := 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		st, ok := n.(*ast.StructType)
-		if !ok || st.Fields == nil {
-			return true
+	forEachStructFieldName(f, func(name *ast.Ident) {
+		if name.Name == field {
+			line = fset.Position(name.Pos()).Line
 		}
-		for _, fld := range st.Fields.List {
-			for _, name := range fld.Names {
-				if name.Name == field {
-					line = fset.Position(name.Pos()).Line
-				}
-			}
-		}
-		return true
 	})
 	if line == 0 {
 		t.Fatalf("夹具 %s 里找不到字段 %s —— 夹具本身失效了", file, field)
