@@ -348,3 +348,60 @@ func TestPolicyErrorsDoNotLeak(t *testing.T) {
 		}
 	})
 }
+
+// TestCacheKeyAggregatesNearbyTimes 覆盖 functional[4]：缓存键的时间精度**双向约束**。
+//
+// **(a) 聚合度** —— 相邻时间必须落进同一槽。生产路径 `app.go:451` 的 `end := time.Now()`
+// 经 :462 传进 FetchHistory；键若保留秒/纳秒精度，每次调用键都不同 ⇒ **命中率恒为零**。
+// 这是「静默的错」：不报错、不出错数据、返回值完全正确，只有生产路径才暴露。而本包
+// 原有 8 个测试对它完全无感，因为它们**全用固定时刻**，固定时刻在 Truncate 前后相等。
+//
+// **(b) 粒度不得放粗** —— 只写 (a) 挡不住把 `Truncate(time.Minute)` 改成 `Truncate(time.Hour)`：
+// `base` 与 `base+15s` 仍落在同一小时，(a) 照样通过。而放粗会让相隔几分钟的不同区间
+// 串槽、静默返回错数据（「吵闹的错」）。
+//
+// ⚠ 写法两处：①**不字面用两次 `time.Now()`** —— 跨分钟边界会偶发假红，取当前分钟的中点
+// 作基准；②**偏移必须跨秒**（本包 key 用 `.Unix()`，秒级）—— 首版照搬了别包的 50ms/900ms
+// 偏移，去掉 Truncate 后 `.Unix()` 仍把它们归为同一秒，(a) 照样绿、变异测不出。
+// **照搬别包的测试形态时要检查它与本包 key 的精度单位是否匹配。**
+//
+// ⚠ 自我记录：`FetchHistory` 的注释里我本来就写了「让上层以 time.Now() 为 end 的抖动
+// 仍能命中同一槽」——**我知道这个行为、还写下来了，却没有为它写测试**。这正是契约
+// 教训 5 的形态：注释描述的究竟是「当前巧合」还是「被守护的契约」，写注释的人自己
+// 最容易分不清。
+func TestCacheKeyAggregatesNearbyTimes(t *testing.T) {
+	start := time.Unix(1600000000, 0)
+	base := time.Now().Truncate(time.Minute).Add(20 * time.Second) // 当前分钟的中点
+
+	t.Run("相邻时间落进同一槽", func(t *testing.T) {
+		srv, hits := countingServer(t, klineBody)
+		e := newWithHistoryURL(t, srv.URL)
+		e.gate = cachingGate()
+
+		for _, end := range []time.Time{base, base.Add(3 * time.Second), base.Add(15 * time.Second)} {
+			if _, err := e.FetchHistory("600519.SH", start, end, "1d"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := hits(); n != 1 {
+			t.Errorf("同一分钟内相隔数秒的三次调用应命中同一缓存槽: HTTP 请求 %d 次, want 1"+
+				"（大于 1 说明键保留了秒/纳秒精度——生产路径以 time.Now() 为 end，命中率会恒为零）", n)
+		}
+	})
+
+	t.Run("分钟粒度不得放粗", func(t *testing.T) {
+		srv, hits := countingServer(t, klineBody)
+		e := newWithHistoryURL(t, srv.URL)
+		e.gate = cachingGate()
+
+		for _, end := range []time.Time{base, base.Add(time.Minute)} {
+			if _, err := e.FetchHistory("600519.SH", start, end, "1d"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := hits(); n != 2 {
+			t.Errorf("相隔 1 分钟的两次调用是不同区间，必须分槽: HTTP 请求 %d 次, want 2"+
+				"（为 1 说明截断粒度被放粗到小时/天——不同区间的查询会串槽，静默返回错区间数据）", n)
+		}
+	})
+}
