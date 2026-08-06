@@ -131,6 +131,68 @@ func TestRouteFallsBackWhenCollectorMissing(t *testing.T) {
 	}
 }
 
+// TestHKSuffixBeatsCryptoPrefix 记录一处**刻意的行为统一**：旧实现里
+// "BTC.HK" 的路由与市场自相矛盾（SelectExternalForSymbol → crypto，
+// MarketForSymbol → HK）。统一到一张表后取 '.HK' 优先，两者一致。
+// 该形态在 watchlist 中不存在，此测试只为把决定钉死，防止后来者反复横跳。
+//
+// 同时锁住具体度优先的两条语义（done_criteria functional[2]）：更具体的
+// pattern 胜过更宽泛的，且排序结果与书写/注册顺序无关。
+func TestHKSuffixBeatsCryptoPrefix(t *testing.T) {
+	reg := newRegistryWith("yahoo", "eastmoney", "crypto")
+	if got := SelectExternalForSymbol(reg, "BTC.HK"); got.Name() != "yahoo" {
+		t.Errorf("SelectExternalForSymbol = %q, want yahoo", got.Name())
+	}
+	if m := MarketForSymbol("BTC.HK"); m != core.MarketHK {
+		t.Errorf("MarketForSymbol = %q, want %q", m, core.MarketHK)
+	}
+
+	// 内置表已按具体度降序排好——兜底 '*' 必然排在最后，'^HSI' 必然在 '^*' 之前。
+	for i := 1; i < len(routes); i++ {
+		if specificity(routes[i-1].Pattern) < specificity(routes[i].Pattern) {
+			t.Fatalf("routes 未按具体度降序：%q(%d) 排在 %q(%d) 之前",
+				routes[i-1].Pattern, specificity(routes[i-1].Pattern),
+				routes[i].Pattern, specificity(routes[i].Pattern))
+		}
+	}
+
+	// 与注册顺序无关：把「宽泛在前、具体在后」的表反过来写，查表结果不变。
+	specificFirst := sortRoutes([]Route{
+		{"^HSI", "yahoo", core.MarketHK},
+		{"^*", "yahoo", core.MarketUS},
+	})
+	broadFirst := sortRoutes([]Route{
+		{"^*", "yahoo", core.MarketUS},
+		{"^HSI", "yahoo", core.MarketHK},
+	})
+	if specificFirst[0].Pattern != "^HSI" || broadFirst[0].Pattern != "^HSI" {
+		t.Errorf("具体度优先应与书写顺序无关，got %q / %q",
+			specificFirst[0].Pattern, broadFirst[0].Pattern)
+	}
+}
+
+// TestRouteMissTableFallsBackConservatively 覆盖「表被改坏」这条防御路径：
+// 内置表末尾有 '*' 兜底，故 lookupRoute 实际总能命中；但它返回 ok 就是为了
+// 有人误删兜底行时保守回退而非 panic。抽掉兜底行验证这层承诺仍然成立。
+func TestRouteMissTableFallsBackConservatively(t *testing.T) {
+	saved := routes
+	defer func() { routes = saved }()
+	routes = sortRoutes([]Route{{"*.SH", "eastmoney", core.MarketCNA}}) // 无 '*' 兜底
+
+	if _, ok := lookupRoute("AAPL"); ok {
+		t.Error("无兜底行时 lookupRoute 应返回 ok=false")
+	}
+	if m := MarketForSymbol("AAPL"); m != core.MarketUS {
+		t.Errorf("查表落空应保守回退 US, got %q", m)
+	}
+	if n := routeCollector("AAPL"); n != "yahoo" {
+		t.Errorf("查表落空应保守回退 yahoo, got %q", n)
+	}
+	if _, ok := KnownIndexMarket("AAPL"); ok {
+		t.Error("查表落空的符号不得报告为已登记指数")
+	}
+}
+
 // coveringQlib 是 Covers() 恒真的 qlib 桩。
 type coveringQlib struct{ fakeCollector }
 

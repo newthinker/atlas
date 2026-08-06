@@ -6,31 +6,18 @@ import (
 	"github.com/newthinker/atlas/internal/core"
 )
 
-// cryptoTickers lists common crypto base symbols used for routing decisions.
-var cryptoTickers = []string{
-	"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA",
-	"DOT", "AVAX", "MATIC", "LINK", "UNI", "ATOM", "LTC",
-}
-
-// indexMarkets pins the market for the phase-1 international index list.
-// Symbols with a ^ prefix not present here default to MarketUS; the app
-// assembly layer logs a warning for such bindings (design §2.3).
-var indexMarkets = map[string]core.Market{
-	"^GSPC": core.MarketUS,
-	"^IXIC": core.MarketUS,
-	"^DJI":  core.MarketUS,
-	"^HSI":  core.MarketHK,
-	"^HSCE": core.MarketHK,
-}
-
-func isIndexSymbol(upper string) bool     { return strings.HasPrefix(upper, "^") }
-func isCommoditySymbol(upper string) bool { return strings.HasSuffix(upper, "=F") }
-
 // KnownIndexMarket reports whether a ^-prefixed symbol is in the phase-1
 // index list and its market. The app assembly layer warns on unknown ones.
+//
+// 「已登记」的口径 = 命中的路由不含通配符：'^HSI' 有精确条目故 known，
+// '^N225' 落到 '^*' 兜底故 unknown（设计 §6.5，与旧的 indexMarkets 表等价）。
 func KnownIndexMarket(symbol string) (core.Market, bool) {
-	m, ok := indexMarkets[strings.ToUpper(symbol)]
-	return m, ok
+	var zero core.Market
+	r, ok := lookupRoute(strings.ToUpper(symbol))
+	if !ok || strings.Contains(r.Pattern, "*") {
+		return zero, false
+	}
+	return r.Market, true
 }
 
 // warehouseCoverer is implemented by the qlib warehouse collector.
@@ -41,9 +28,7 @@ type warehouseCoverer interface{ Covers(symbol string) bool }
 //
 // Routing rules (in priority order):
 //  1. qlib warehouse collector covers the symbol → return qlib
-//  2. A-share symbols (.SH/.SZ) -> "eastmoney"
-//  3. crypto symbols (BTC*, *-USD, *USDT, ...) -> "crypto"
-//  4. everything else (US/HK stocks) -> "yahoo"
+//  2. 其余一律查路由表（route.go），具体度优先
 //
 // If the preferred collector is not registered it falls back to any available
 // collector, returning nil only when the registry is empty.
@@ -60,30 +45,15 @@ func SelectForSymbol(reg *Registry, symbol string) Collector {
 }
 
 // SelectExternalForSymbol routes to an external (non-qlib) collector.
-// It applies the same market-based routing as the original SelectForSymbol but
-// explicitly skips the qlib collector to prevent tail-fill delegation loops.
+// It applies the same market-based routing as SelectForSymbol but explicitly
+// skips the qlib collector to prevent tail-fill delegation loops.
 func SelectExternalForSymbol(reg *Registry, symbol string) Collector {
 	if reg == nil {
 		return nil
 	}
 
-	upper := strings.ToUpper(symbol)
-
-	switch {
-	case isAShareSymbol(upper), IsAShareIndex(symbol):
-		// 表成员判定覆盖 .CSI 后缀的中证跨市场指数（如 930713.CSI），
-		// 它们不带 .SH/.SZ 后缀但同样由 eastmoney 提供行情
-		if c, ok := reg.Get("eastmoney"); ok {
-			return c
-		}
-	case isIndexSymbol(upper), isCommoditySymbol(upper):
-		if c, ok := reg.Get("yahoo"); ok {
-			return c
-		}
-	case isCryptoSymbol(upper):
-		if c, ok := reg.Get("crypto"); ok {
-			return c
-		}
+	if c, ok := reg.Get(routeCollector(symbol)); ok {
+		return c
 	}
 
 	// Default to Yahoo for US/HK stocks.
@@ -104,41 +74,24 @@ func SelectExternalForSymbol(reg *Registry, symbol string) Collector {
 
 // MarketForSymbol infers the trading market from a symbol's pattern.
 func MarketForSymbol(symbol string) core.Market {
-	upper := strings.ToUpper(symbol)
-	switch {
-	case isAShareSymbol(upper), IsAShareIndex(symbol):
+	// 表前置规则（设计 §6.4 第 2 条）：AShareIndexSecIDs 覆盖 930713.CSI 这类
+	// 不带 .SH/.SZ 后缀的中证跨市场指数。键集离散，无法通配。
+	if IsAShareIndex(symbol) {
 		return core.MarketCNA
-	case isIndexSymbol(upper):
-		if m, ok := KnownIndexMarket(symbol); ok {
-			return m
-		}
-		return core.MarketUS
-	case isCommoditySymbol(upper):
-		return core.MarketUS
-	case strings.HasSuffix(upper, ".HK"):
-		return core.MarketHK
-	case isCryptoSymbol(upper):
-		return core.MarketCrypto
-	default:
-		return core.MarketUS
 	}
+	if r, ok := lookupRoute(strings.ToUpper(symbol)); ok {
+		return r.Market
+	}
+	return core.MarketUS
 }
 
-// isAShareSymbol reports whether an upper-cased symbol is a Shanghai or Shenzhen
-// A-share listing.
-func isAShareSymbol(upper string) bool {
-	return strings.HasSuffix(upper, ".SH") || strings.HasSuffix(upper, ".SZ")
-}
-
-// isCryptoSymbol reports whether an upper-cased symbol looks like a crypto asset.
-func isCryptoSymbol(upper string) bool {
-	if strings.HasSuffix(upper, "-USD") || strings.HasSuffix(upper, "USDT") {
-		return true
+// routeCollector 返回符号应走的 collector 名（同样先过 IsAShareIndex 前置规则）。
+func routeCollector(symbol string) string {
+	if IsAShareIndex(symbol) {
+		return "eastmoney"
 	}
-	for _, t := range cryptoTickers {
-		if upper == t || strings.HasPrefix(upper, t) {
-			return true
-		}
+	if r, ok := lookupRoute(strings.ToUpper(symbol)); ok {
+		return r.Collector
 	}
-	return false
+	return "yahoo"
 }
