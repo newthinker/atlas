@@ -3,6 +3,7 @@ package lixinger
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,12 +48,34 @@ func (l *Lixinger) request(endpoint string, payload any) ([]byte, error) {
 		return l.requestHTTP(endpoint, body)
 	})
 	if err != nil {
-		return nil, err
+		return nil, mapPolicyErr(err)
 	}
 	// Gate 命中缓存时不复制返回值，多个调用方拿到同一个切片；此处必须返回副本，
 	// 否则任一调用方改写就会污染缓存。[]byte 的元素是 flat value type，
 	// 浅复制即深复制。
 	return bytes.Clone(raw), nil
+}
+
+// mapPolicyErr 把 policy 包的哨兵错误换成本包的普通错误，防止它外泄给上层。
+//
+// **必须在 policy.Fetch 的返回值处调用，不得在更外层统一 catch**：更外层分不清
+// 「policy 产生的 timeout」与「HTTP 客户端自己的 timeout」。fn 自身产生的错误
+// 原样返回、不碰。
+//
+// 本包**没有哨兵错误**（实测 0 个 var Err / errors.New），故走「断链 + 本包前缀」
+// 这一支：用 %v 而非 %w。**用 %w 包一层前缀是挡不住的** —— 消息变了，但
+// errors.Is(err, policy.ErrTimeout) 仍然成立，policy 错误照样在调用方可见的链上。
+// （有哨兵的包如 tushare 走另一支：映射成本包哨兵并保留 %w，因为 refresh.go
+// 的降级链靠 errors.Is 分叉。）
+//
+// ⚠ **临时性绝不可映射成永久性**：ErrTimeout/ErrQuotaExceeded 都是可重试的临时
+// 故障，文案若写成「不支持/无此数据」会让运维照着去改配置，而问题只是要等窗口。
+// 故显式写 retryable 并保留原始原因备排障。
+func mapPolicyErr(err error) error {
+	if errors.Is(err, policy.ErrTimeout) || errors.Is(err, policy.ErrQuotaExceeded) {
+		return fmt.Errorf("lixinger: temporary gate failure (retryable): %v", err)
+	}
+	return err
 }
 
 // requestHTTP 发一次（或按退避调度多次）真实 HTTP 请求并校验信封。

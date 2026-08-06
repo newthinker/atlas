@@ -99,6 +99,16 @@ func (c *Client) call(apiName string, params map[string]string, fields string) (
 	if errors.Is(err, policy.ErrQuotaExceeded) {
 		return nil, fmt.Errorf("%w: %s (本地配额预判，未发出请求)", ErrRateLimited, apiName)
 	}
+	// ErrTimeout 与配额同属**临时性**故障（窗口/负载过去即自愈），故同样映射到
+	// ErrRateLimited —— refresh.go:450 那条分支的文案是「本次跳过，下次自动重试」，
+	// 正是超时该走的处置。**绝不可映射成 ErrNoPermission**（:453「永不重试」）。
+	//
+	// 本包**有**哨兵错误，故用 %w 而非 %v：refresh.go 的降级链靠 errors.Is 分叉，
+	// 断链会让它两个分支都匹配不上、退化成无分类的通用失败。这与 yahoo/twelvedata/
+	// lixinger 那三家「无哨兵 ⇒ 断链 + 前缀」的口径相反，是刻意的分支选择。
+	if errors.Is(err, policy.ErrTimeout) {
+		return nil, fmt.Errorf("%w: %s (闸门超时，未取得响应)", ErrRateLimited, apiName)
+	}
 	return cloneRows(rows), err
 }
 
