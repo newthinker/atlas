@@ -3,6 +3,7 @@ package eastmoney
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -437,12 +438,33 @@ func (e *Eastmoney) FetchHistory(symbol string, start, end time.Time, interval s
 		return e.fetchHistory(symbol, start, end, interval)
 	})
 	if err != nil {
-		return nil, err
+		return nil, mapPolicyError(symbol, err)
 	}
 	// Gate 不复制返回值：缓存命中时多个调用方共享同一底层数组，故在此 clone。
 	// core.OHLCV 今天全是值类型，浅元素拷贝即深拷贝——**该前提由 core/types.go 保证，
 	// 不是这里**（那边的注释已写明新增字段必须是值类型）。
 	return slices.Clone(data), nil
+}
+
+// mapPolicyError 把 policy 包的内部错误挡在本包边界内（policy 错误不外泄）。
+//
+// 本包**没有哨兵错误**（eastmoney 失败时由调用方走 lixinger 回退或整跳跳过、不区分
+// 错误类型），故按「包一层本包前缀」处理，并**断链**——用 %w 会让 policy.ErrXxx 仍
+// 留在调用方可见的 errors.Is 链上，那不算挡住（TASK-017 的变异 B8 实证过这一点：
+// 消息带了本包前缀但 errors.Is(err, policy.ErrQuotaExceeded) 照样为真）。
+//
+// ⚠ 配额与超时都是**临时性**错误（窗口过后 / 下次调用即可自愈），措辞不得暗示永久
+// 失败，更不得映射成「无此标的」那类——那会让调用方停止重试、运维照着去查标的代码，
+// 而问题只是要等窗口。
+// 非 policy 错误原样返回，保留 fetchHistory 的原始错误链（含 lixinger 回退的错误）。
+func mapPolicyError(symbol string, err error) error {
+	switch {
+	case errors.Is(err, policy.ErrQuotaExceeded):
+		return fmt.Errorf("eastmoney: history %s: 本地配额预判未通过，本次未发出请求（临时性，窗口过后自愈）", symbol)
+	case errors.Is(err, policy.ErrTimeout):
+		return fmt.Errorf("eastmoney: history %s: 请求超时（临时性，可重试）", symbol)
+	}
+	return err
 }
 
 func (e *Eastmoney) fetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {

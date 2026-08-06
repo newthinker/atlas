@@ -1,9 +1,11 @@
 package eastmoney
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -258,4 +260,91 @@ func TestErrorResponseIsNotCached(t *testing.T) {
 		t.Errorf("错误不得写缓存，两次调用应各发一次 HTTP, got %d"+
 			"（为 1 说明错误响应被当成功值缓存了）", n)
 	}
+}
+
+// TestPolicyErrorsDoNotLeak 覆盖 error_handling[1]：policy 包错误不得出现在调用方
+// 可见的错误链上（QA 前瞻：三家新接入若只包 Fetch 而不处理，config 可达的泄漏点
+// 会从 1 处变 4 处）。
+//
+// ⚠ **判据是 `errors.Is` 不成立，不是检查错误消息文本** —— 只查文本会被
+// `fmt.Errorf("eastmoney: ...: %w", err)` 这种写法骗过：消息变了、链还在，上层
+// `errors.Is(err, policy.ErrQuotaExceeded)` 照样为真（TASK-017 的变异 B8 实证）。
+//
+// ⚠ **ErrTimeout 不需要配额就能触发**：任何主题配上 Timeout 即可，而
+// `collector.topics.*.timeout` 是 TASK-005/006 已落地的可配置项（Override.Timeout），
+// **今天就能被配出来** —— 这不是「不可达所以测不出」。
+//
+// 映射后的消息必须体现**临时性**：配额与超时都是窗口过后/下次调用即可自愈的错误，
+// 不得暗示永久失败，更不得映射成「无此标的」那类 —— 那会让调用方停止重试。
+func TestPolicyErrorsDoNotLeak(t *testing.T) {
+	start, end := time.Unix(1600000000, 0), time.Unix(1700086400, 0)
+
+	t.Run("配额耗尽", func(t *testing.T) {
+		srv, _ := countingServer(t, klineBody)
+		tbl := policy.NewTable()
+		tbl.Set(topicHistory, policy.Policy{
+			Quota: &policy.Quota{Limit: 1, Window: 24 * time.Hour, Loc: time.UTC},
+		})
+		e := newWithHistoryURL(t, srv.URL)
+		e.gate = policy.New(tbl, policy.NewMemStore())
+
+		if _, err := e.FetchHistory("600519.SH", start, end, "1d"); err != nil {
+			t.Fatalf("首次应放行: %v", err)
+		}
+		_, err := e.FetchHistory("600519.SH", start, end.Add(time.Hour), "1d")
+		if err == nil {
+			t.Fatal("配额耗尽后应报错")
+		}
+		if errors.Is(err, policy.ErrQuotaExceeded) {
+			t.Errorf("policy.ErrQuotaExceeded 泄漏到调用方错误链: %v", err)
+		}
+		if !strings.Contains(err.Error(), "eastmoney") {
+			t.Errorf("映射后的错误应带本包前缀, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "临时") {
+			t.Errorf("配额是临时性错误，消息须体现（否则调用方会停止重试）, got %v", err)
+		}
+	})
+
+	t.Run("超时", func(t *testing.T) {
+		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(200 * time.Millisecond)
+			_, _ = w.Write([]byte(klineBody))
+		}))
+		t.Cleanup(slow.Close)
+
+		tbl := policy.NewTable()
+		tbl.Set(topicHistory, policy.Policy{Timeout: 20 * time.Millisecond})
+		e := newWithHistoryURL(t, slow.URL)
+		e.gate = policy.New(tbl, nil)
+
+		_, err := e.FetchHistory("600519.SH", start, end, "1d")
+		if err == nil {
+			t.Fatal("超时应报错")
+		}
+		if errors.Is(err, policy.ErrTimeout) {
+			t.Errorf("policy.ErrTimeout 泄漏到调用方错误链: %v", err)
+		}
+		if !strings.Contains(err.Error(), "eastmoney") {
+			t.Errorf("映射后的错误应带本包前缀, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "临时") {
+			t.Errorf("超时是临时性错误，消息须体现, got %v", err)
+		}
+	})
+
+	t.Run("非policy错误原样透传", func(t *testing.T) {
+		// 桥返回 5xx：错误应保留原始信息，不被映射层吞掉
+		srv, _ := countingServer(t, emptyKlineBody)
+		e := newWithHistoryURL(t, srv.URL)
+		e.gate = cachingGate()
+
+		_, err := e.FetchHistory("600519.SH", start, end, "1d")
+		if err == nil {
+			t.Fatal("空 klines 应报错")
+		}
+		if !strings.Contains(err.Error(), "no history") {
+			t.Errorf("非 policy 错误应原样透传，保留原始错误链, got %v", err)
+		}
+	})
 }
