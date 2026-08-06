@@ -304,3 +304,80 @@ func TestFirstRequestDoesNotWaitTwice(t *testing.T) {
 			"do() 不得在 attempt==0 时再 Wait", elapsed, iv)
 	}
 }
+
+// ——— TASK-007 review_fix：两条缺口的守护 ———
+
+// errorEnvelopeBody 是「HTTP 200 但业务失败」的响应：**result 非空**且 error 非空。
+//
+// ⚠ result 必须非空。fetchHistory 的校验顺序是 `Chart.Error != nil` 在
+// `len(Chart.Result) == 0` **之前**；若这里给空 result，短路掉 Error 校验的变异会被
+// 后一条兜底分支拦下、照样报错，测试就测不出东西了（「变异被另一个更早的分支拦截」）。
+const errorEnvelopeBody = `{"chart":{"result":[{"meta":{"symbol":"AAPL","regularMarketPrice":150,"chartPreviousClose":149,"regularMarketTime":1700000000},"timestamp":[1700000000],"indicators":{"quote":[{"open":[149],"high":[151],"low":[148],"close":[150],"volume":[1000]}]}}],"error":{"code":"Not Found","description":"No data found for symbol"}}}`
+
+// TestErrorEnvelopeIsNotCached 覆盖 error_handling[0] 的「错误不写缓存」在 yahoo 侧
+// 的那一半。
+//
+// **两个断言守的是两件事，缺一不可**：
+//   - 「返回 error」证明 200-but-error 被识别成了失败；
+//   - 「两次调用各发一次 HTTP」证明它**没有被缓存** —— 一个实现完全可以正确返回
+//     error 却仍然把它写进缓存，那时前一条照样绿。
+//
+// policy 层的 TestGateDoesNotCacheErrors 只保证「fn 返回 error 时 Gate 不缓存」，
+// 保证不了「yahoo 把 200-but-error 识别成 error」。**每一层都测了自己那部分，
+// 层与层之间的契约没人测** —— 这条就是补那个缝。
+func TestErrorEnvelopeIsNotCached(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK) // 注意：HTTP 层是成功的
+		_, _ = w.Write([]byte(errorEnvelopeBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	y := NewWithBaseURL(srv.URL)
+	y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true}) // 有 TTL 才谈得上「被缓存」
+
+	start, end := time.Unix(1600000000, 0), time.Unix(1700086400, 0)
+	for i := 0; i < 2; i++ {
+		if _, err := y.FetchHistory("AAPL", start, end, "1d"); err == nil {
+			t.Errorf("第 %d 次: 200-but-error 信封必须识别为错误, got nil", i)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 2 {
+		t.Errorf("错误不得写缓存，两次调用应各发一次 HTTP, got %d"+
+			"（为 1 说明错误响应被当成功值缓存了——一次瞬时故障会变成整个 TTL 期的持续故障）", hits)
+	}
+}
+
+// TestFetchEPSHistoryReturnsIndependentSlice 覆盖 boundary[0] 在 EPS 侧的那一半。
+// DoD 只点名了 FetchHistory，但 FetchEPSHistory 同样返回缓存里的切片。
+func TestFetchEPSHistoryReturnsIndependentSlice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"timeseries":{"result":[{"trailingDilutedEPS":[{"asOfDate":"2023-11-14","reportedValue":{"raw":6.42}}]}]}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	y := NewWithBaseURL(srv.URL)
+	y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+	start, end := time.Unix(1600000000, 0), time.Unix(1700086400, 0)
+	first, err := y.FetchEPSHistory("AAPL", start, end)
+	if err != nil || len(first) == 0 {
+		t.Fatalf("first: (%d points, %v)", len(first), err)
+	}
+	first[0].EPS = -999 // 调用方原地改写
+
+	second, err := y.FetchEPSHistory("AAPL", start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[0].EPS == -999 {
+		t.Error("缓存命中必须返回独立副本，否则调用方能污染缓存")
+	}
+}
