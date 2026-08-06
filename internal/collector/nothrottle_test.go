@@ -41,9 +41,8 @@ var forbiddenFields = map[string]bool{
 // skipDirs 是**生产扫描**要跳过的目录名。
 //
 //   - policy —— 闸门本体，它持有唯一合法的 lastReq，那里是实现而非回潮。
-//   - testdata —— 本文件自己的夹具就住在那儿，含**故意**写成回潮形态的源码
-//     和一个**故意**语法错误的文件；不跳过的话生产扫描会把阳性对照当成
-//     offender、并被解析失败夹具直接打断。
+//   - testdata —— 本文件自己的夹具就住在那儿，其中有**故意**写成回潮形态的
+//     阳性对照；不跳过的话生产扫描会把它当成 offender 报出来。
 //
 // ⚠ 跳过规则**对 root 自身不生效**：否则把 root 指进 testdata 做阳性对照时，
 // WalkDir 第一次回调拿到的就是 root 且名字叫 testdata，SkipDir 掉整棵子树 →
@@ -51,7 +50,7 @@ var forbiddenFields = map[string]bool{
 //
 // ⚠ testdata 这条规则在本文件出现之前**没有任何测试守护**（全树原本 0 个
 // testdata/*.go），删掉它不会有人发现。现在它由 TestNoPrivateThrottleState
-// 承重：去掉后该测试会因解析失败夹具而直接报错。
+// 承重：去掉本项后，生产扫描会走进阳性夹具并**把它检出为 offender**，该测试转红。
 var skipDirs = map[string]bool{"policy": true, "testdata": true}
 
 // scanResult 同时带出「检出了什么」与「扫了些什么」。
@@ -193,10 +192,14 @@ func anyScannedIn(scanned []string, pkg string) bool {
 // 它与 TestNoPrivateThrottleState 是 2×2 的两格，缺一不可 —— 只有阴性那格时，
 // 一个恒返回空的扫描函数照样全绿；只有阳性那格时，一个恒返回非空的照样全绿。
 //
-// root 精确指向 throttleback 而非 testdata：夹具之间**不能共用 root**。
-// WalkDir 按字典序走，parsefail 排在 throttleback 前面，指向 testdata 会在解析
-// 失败处提前返回、根本走不到阳性夹具 —— 断言失败，而错误信息说的是「解析失败」，
-// 指向的方向完全不对。
+// root 精确指向 throttleback 而非 testdata：**一个夹具一个专属 root，一次遍历
+// 只验一件事**。共用 root 时这次遍历会同时受多个夹具影响，其中任何一个先出问题
+// 都可能让遍历提前结束 —— 断言失败，而错误信息指向的是**另一个**夹具，方向完全
+// 不对；更麻烦的是它随目录名的字典序而变，夹具一改名就从假红翻转成静默假绿。
+//
+// （曾经有一个语法错误夹具排在本夹具之前、确定性地触发过这个形态；它已改为
+// t.TempDir() 运行时生成，故当下无法复现。**规则保留** —— 它防的是往 testdata
+// 里再放夹具的下一个人，不是已经消失的那一个。）
 func TestScanDetectsThrottleState(t *testing.T) {
 	root := filepath.Join("testdata", "throttleback")
 	fixture := filepath.Join(root, "collector.go")
