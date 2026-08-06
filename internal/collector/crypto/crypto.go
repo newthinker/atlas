@@ -164,10 +164,20 @@ func (c *CryptoCollector) FetchHistory(symbol string, start, end time.Time, inte
 	return slices.Clone(data), nil
 }
 
-// historyKey 是 FetchHistory 的缓存键，必须覆盖全部影响结果的参数。
-// 丢掉任一维度都会让不同查询落进同一槽、静默返回错标的或错区间的数据。
+// historyKey 是 FetchHistory 的缓存键。它要同时满足两个方向：
+//
+//   - **区分度**：覆盖全部影响结果的参数（symbol / 区间 / interval）。丢掉任一维度
+//     会让不同查询落进同一槽、静默返回错标的或错区间的数据。
+//   - **聚合度**：时间截断到**分钟**。上层 app.go 传的 end 是 `time.Now()`，
+//     若按原始精度入键，每次调用键都不同 ⇒ **缓存命中率恒为零**，而单测里用固定
+//     start/end 调两次是全绿的 —— 只有生产路径才失效。
+//
+// 分钟这个粒度不是随便取的：沿用被删除的 CachedCollector.cacheKey 的口径
+// （它用 `Truncate(time.Minute).UTC().Format(time.RFC3339)`），与 yahoo、eastmoney
+// 现行实现一致。粒度改粗（小时/天）会让相邻分钟的不同查询串槽，故两个方向都有测试钉住。
 func historyKey(symbol string, start, end time.Time, interval string) string {
-	return fmt.Sprintf("%s|%d|%d|%s", symbol, start.UnixNano(), end.UnixNano(), interval)
+	return fmt.Sprintf("%s|%d|%d|%s", symbol,
+		start.Truncate(time.Minute).Unix(), end.Truncate(time.Minute).Unix(), interval)
 }
 
 // fetchHistoryFromProviders 是被缓存的取数函数：依次尝试各 provider，首个成功即返。

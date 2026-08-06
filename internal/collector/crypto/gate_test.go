@@ -199,6 +199,56 @@ func TestCacheKeyCoversAllParams(t *testing.T) {
 	}
 }
 
+// 缓存键的**聚合度**：以墙钟为 end 的两次相邻调用必须落进同一个缓存槽。
+//
+// 这是 functional[1] 的另一半。原 criteria 只写了「区分度」（不同参数不得互相命中），
+// 我也只测了那一半，于是 `UnixNano()` 入键这个缺陷完整通过了全部测试——
+// **单测里用固定 start/end 调两次是全绿的，只有生产路径（app.go 传 end = time.Now()）
+// 才失效，且失效方式是「缓存命中率恒为零」这种不报错、不出错数据的静默无效。**
+// ⇒ 只约束一个方向的判据，会放过反方向的失效。
+//
+// 两条断言缺一不可：
+//   - 相邻时间聚合：去掉 Truncate 后转红
+//   - **分钟粒度不得放粗**：把 Truncate 改成小时/天也能让上一条通过，
+//     但那会让相隔几分钟的不同查询串槽、静默返回错区间数据
+//
+// 时间基准取「当前分钟的中点」而非直接 time.Now()：与生产同形（end 源自墙钟），
+// 但确定性地避开分钟边界，不引入概率性抖动。
+func TestCacheKeyAggregatesNearbyTimes(t *testing.T) {
+	start, _ := testRange()
+	base := time.Now().Truncate(time.Minute).Add(30 * time.Second)
+
+	t.Run("相邻时间落进同一槽", func(t *testing.T) {
+		p := &countingProvider{name: "stub", history: sampleBars()}
+		c := newGatedCollector(p, builtinGate())
+		for i, end := range []time.Time{base, base.Add(50 * time.Millisecond), base.Add(900 * time.Millisecond)} {
+			if _, err := c.FetchHistory("BTC", start, end, "1d"); err != nil {
+				t.Fatalf("第 %d 次: %v", i+1, err)
+			}
+		}
+		if got := p.count(); got != 1 {
+			t.Errorf("以墙钟为 end 的相邻调用未命中同一缓存槽：向 provider 取了 %d 次，want 1。"+
+				"生产路径 app.go 传的 end 是 time.Now()，键若按原始精度构造则命中率恒为零（args=%v）",
+				got, p.args)
+		}
+	})
+
+	t.Run("分钟粒度不得放粗", func(t *testing.T) {
+		p := &countingProvider{name: "stub", history: sampleBars()}
+		c := newGatedCollector(p, builtinGate())
+		for i, end := range []time.Time{base, base.Add(time.Minute)} {
+			if _, err := c.FetchHistory("BTC", start, end, "1d"); err != nil {
+				t.Fatalf("第 %d 次: %v", i+1, err)
+			}
+		}
+		if got := p.count(); got != 2 {
+			t.Errorf("相隔一分钟的两次查询落进了同一槽：向 provider 取了 %d 次，want 2。"+
+				"截断粒度被放粗到分钟以上会让不同区间的查询静默返回同一份数据（args=%v）",
+				got, p.args)
+		}
+	})
+}
+
 // functional[2]：两个构造函数都必须快照 policy.Default()。
 //
 // 这条不是形式要求（陷阱 12）：nil *Gate 是**透明的**（policy.Fetch 直接执行 fn），
