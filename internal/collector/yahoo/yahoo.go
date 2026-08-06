@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
 
@@ -45,12 +47,21 @@ func validateSymbol(symbol string) error {
 // 突发限流参数(设计 §9 M2.1):日总量安全 ≠ 突发安全——2026-07-24 v1.4.0
 // 首跑 20 家背靠背拉 10Y 行情即触发 429,且 engine fallback 同依赖 yahoo。
 // 取包内常量不进 config(无按环境调参需求)。
+//
+// 相邻请求最小间隔已迁到 policy 策略表的 yahoo 限流域(500ms 不变),
+// 三个主题同域共享同一个闸门。
 const (
-	minRequestInterval = 500 * time.Millisecond // 同实例相邻请求最小间隔
-	retryBackoffBase   = time.Second            // 指数退避基数:1s→2s→4s
-	maxRetryAttempts   = 3                      // 单请求最多重试次数
-	retryBudgetPerRun  = 20                     // 实例级重试预算(极端持续限流下快速失败)
-	maxRetryAfterWait  = 60 * time.Second       // Retry-After 上界:服务端给极大值时不阻塞调度窗口
+	retryBackoffBase  = time.Second      // 指数退避基数:1s→2s→4s
+	maxRetryAttempts  = 3                // 单请求最多重试次数
+	retryBudgetPerRun = 20               // 实例级重试预算(极端持续限流下快速失败)
+	maxRetryAfterWait = 60 * time.Second // Retry-After 上界:服务端给极大值时不阻塞调度窗口
+)
+
+// 策略主题名。chart/eps/quote 同属 yahoo 限流域,TTL 各自独立。
+const (
+	topicChart = "yahoo.chart"
+	topicEPS   = "yahoo.eps"
+	topicQuote = "yahoo.quote"
 )
 
 // Yahoo implements the Yahoo Finance collector
@@ -60,10 +71,11 @@ type Yahoo struct {
 	baseURL    string
 	epsBaseURL string
 
-	// 节流与退避状态(见 do);字段可在测试中覆盖以缩短用例耗时。
+	// gate 提供限流/缓存/合并/配额;退避与重试预算仍是本包自己的事(设计 §3.2)。
+	gate *policy.Gate
+
+	// 退避状态(见 do);字段可在测试中覆盖以缩短用例耗时。
 	mu            sync.Mutex
-	lastReq       time.Time
-	minInterval   time.Duration
 	backoffBase   time.Duration
 	maxRetries    int
 	retryBudget   int
@@ -91,7 +103,7 @@ func NewWithBaseURLs(chartURL, epsURL string) *Yahoo {
 		},
 		baseURL:       chartURL,
 		epsBaseURL:    epsURL,
-		minInterval:   minRequestInterval,
+		gate:          policy.Default(),
 		backoffBase:   retryBackoffBase,
 		maxRetries:    maxRetryAttempts,
 		retryBudget:   retryBudgetPerRun,
@@ -113,13 +125,18 @@ func (y *Yahoo) newRequest(reqURL string) (*http.Request, error) {
 	return req, nil
 }
 
-// do sends req through the shared throttle/backoff gate. Only idempotent
-// GETs with nil body go through here (newRequest 只构造这种请求),所以同一
-// *http.Request 可安全重发。重试耗尽或预算用尽时返回最后一个响应,交由
-// 调用点既有的 unexpected status 路径报错——错误语义零变更。
-func (y *Yahoo) do(req *http.Request) (*http.Response, error) {
+// do sends req through the retry/backoff loop. Only idempotent GETs with nil
+// body go through here (newRequest 只构造这种请求),所以同一 *http.Request
+// 可安全重发。重试耗尽或预算用尽时返回最后一个响应,交由调用点既有的
+// unexpected status 路径报错——错误语义零变更。
+//
+// 节流由 Gate 负责:首发请求已在 policy.Fetch 进入 fn 前节流过一次,故这里
+// 只对**重试**(attempt > 0)补一次 Wait,避免首发等两倍间隔。
+func (y *Yahoo) do(topic string, req *http.Request) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
-		y.throttle()
+		if attempt > 0 {
+			y.gate.Wait(topic)
+		}
 		resp, err := y.client.Do(req)
 		if err != nil {
 			return nil, err // 网络层错误不重试,与既有行为一致
@@ -132,17 +149,6 @@ func (y *Yahoo) do(req *http.Request) (*http.Response, error) {
 		_ = resp.Body.Close()
 		time.Sleep(wait)
 	}
-}
-
-// throttle 保证同实例相邻请求间隔 ≥ minInterval。刻意在持锁状态下 sleep:
-// 并发调用方会被依次串行放行,天然形成 500ms 一个的均匀节奏。
-func (y *Yahoo) throttle() {
-	y.mu.Lock()
-	defer y.mu.Unlock()
-	if wait := y.minInterval - time.Since(y.lastReq); wait > 0 {
-		time.Sleep(wait)
-	}
-	y.lastReq = time.Now()
 }
 
 // takeRetryToken 消耗一次实例级重试预算;预算耗尽后不再重试(快速失败,
@@ -205,10 +211,23 @@ func (y *Yahoo) toYahooSymbol(symbol string) string {
 }
 
 // FetchQuote fetches real-time quote
+// TTL=0(实时语义),但仍走 Gate 以共享 yahoo 限流闸门并合并同 symbol 的在途请求。
 func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 	if err := validateSymbol(symbol); err != nil {
 		return nil, err
 	}
+	q, err := policy.Fetch(y.gate, topicQuote, symbol, func() (*core.Quote, error) {
+		return y.fetchQuote(symbol)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 合并时多个调用方共享同一指针,返回副本避免相互污染。
+	out := *q
+	return &out, nil
+}
+
+func (y *Yahoo) fetchQuote(symbol string) (*core.Quote, error) {
 	yahooSymbol := y.toYahooSymbol(symbol)
 	reqURL := fmt.Sprintf("%s/%s?interval=1d&range=1d", y.baseURL, url.PathEscape(yahooSymbol))
 
@@ -217,7 +236,7 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 		return nil, err
 	}
 
-	resp, err := y.do(req)
+	resp, err := y.do(topicQuote, req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching quote: %w", err)
 	}
@@ -263,10 +282,27 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 }
 
 // FetchHistory fetches historical OHLCV data
+// 缓存键把 start/end 截断到分钟,让上层「以 time.Now() 为 end」的抖动仍能命中
+// 同一缓存槽(沿用被取代的 CachedCollector.cacheKey 的口径)。
 func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
 	if err := validateSymbol(symbol); err != nil {
 		return nil, err
 	}
+	key := fmt.Sprintf("%s|%d|%d|%s",
+		symbol, start.Truncate(time.Minute).Unix(), end.Truncate(time.Minute).Unix(), interval)
+	data, err := policy.Fetch(y.gate, topicChart, key, func() ([]core.OHLCV, error) {
+		return y.fetchHistory(symbol, start, end, interval)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Gate 不复制返回值:缓存命中时多个调用方共享同一底层数组,故在此 clone。
+	// core.OHLCV 今天全是值类型,浅元素拷贝即深拷贝——**这个前提由 core/types.go
+	// 保证,不是这里**;若将来给它加了 map/slice/指针字段,这里必须改成逐元素深拷贝。
+	return slices.Clone(data), nil
+}
+
+func (y *Yahoo) fetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
 	yahooSymbol := y.toYahooSymbol(symbol)
 	yahooInterval := y.toYahooInterval(interval)
 
@@ -278,7 +314,7 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 		return nil, err
 	}
 
-	resp, err := y.do(req)
+	resp, err := y.do(topicChart, req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching history: %w", err)
 	}

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
 
@@ -44,7 +46,19 @@ func (y *Yahoo) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPS
 	if err := validateSymbol(symbol); err != nil {
 		return nil, err
 	}
+	key := fmt.Sprintf("%s|%d|%d", symbol, start.Truncate(time.Minute).Unix(), end.Truncate(time.Minute).Unix())
+	pts, err := policy.Fetch(y.gate, topicEPS, key, func() ([]core.EPSPoint, error) {
+		return y.fetchEPSHistory(symbol, start, end)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 同 FetchHistory：Gate 不复制返回值，core.EPSPoint 是 flat value type 故
+	// 浅元素拷贝即深拷贝（前提由 core/types.go 保证，不是这里）。
+	return slices.Clone(pts), nil
+}
 
+func (y *Yahoo) fetchEPSHistory(symbol string, start, end time.Time) ([]core.EPSPoint, error) {
 	reqURL := fmt.Sprintf("%s/%s?type=trailingDilutedEPS&period1=%d&period2=%d",
 		y.epsBaseURL, url.PathEscape(y.toYahooSymbol(symbol)), start.Unix(), end.Unix())
 
@@ -53,7 +67,7 @@ func (y *Yahoo) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPS
 		return nil, err
 	}
 
-	resp, err := y.do(req)
+	resp, err := y.do(topicEPS, req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching eps history: %w", err)
 	}

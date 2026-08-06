@@ -7,13 +7,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/newthinker/atlas/internal/collector/policy"
 )
 
 // Context Checkpoint: done_criteria → test mapping (设计 §9 M2.1 验收项):
 //   functional[0]     "429 → 退避重试成功,恰 2 请求"      → TestDoRetries429ThenSucceeds
 //   functional[1]     "500 → 重试成功,恰 2 请求"          → TestDoRetries5xxThenSucceeds
 //   functional[2]     "Retry-After: 0 头优先于退避 <1s"    → TestDoHonorsRetryAfterHeader
-//   functional[3]     "minInterval=80ms 相邻间隔 ≥60ms"    → TestDoThrottlesConsecutiveRequests
+//   functional[3]     "同域闸门 80ms 相邻间隔 ≥60ms"        → TestDoThrottlesConsecutiveRequests(节流已迁至 policy Gate)
 //   error_handling[0] "连续 429 → 恰 4 请求后保留原错误"   → TestDoGivesUpAfterMaxRetries
 //
 // TASK-002 追加(done_criteria → test mapping):
@@ -49,7 +51,6 @@ func newRetryServer(t *testing.T, statuses ...int) (*Yahoo, func() []time.Time) 
 	}))
 	t.Cleanup(srv.Close)
 	y := NewWithBaseURL(srv.URL)
-	y.minInterval = 0
 	y.backoffBase = time.Millisecond
 	return y, func() []time.Time { mu.Lock(); defer mu.Unlock(); return append([]time.Time(nil), arrivals...) }
 }
@@ -95,7 +96,6 @@ func TestDoHonorsRetryAfterHeader(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	y := NewWithBaseURL(srv.URL)
-	y.minInterval = 0
 	y.backoffBase = 2 * time.Second
 	start := time.Now()
 	if err := fetchOnce(t, y); err != nil {
@@ -122,7 +122,8 @@ func TestDoGivesUpAfterMaxRetries(t *testing.T) {
 
 func TestDoThrottlesConsecutiveRequests(t *testing.T) {
 	y, arrivals := newRetryServer(t) // 全 200
-	y.minInterval = 80 * time.Millisecond
+	// 节流已迁到 Gate：经同域闸门注入同样的 80ms，断言与场景不变。
+	y.gate = gateWith(policy.Policy{MinInterval: 80 * time.Millisecond})
 	if err := fetchOnce(t, y); err != nil {
 		t.Fatalf("first fetch: %v", err)
 	}
@@ -153,7 +154,6 @@ func TestDoRetryAfterCapped(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	y := NewWithBaseURL(srv.URL)
-	y.minInterval = 0
 	y.maxRetryAfter = 100 * time.Millisecond
 	start := time.Now()
 	if err := fetchOnce(t, y); err != nil {
@@ -195,7 +195,6 @@ func TestFetchEPSHistoryRetries429(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	y := NewWithBaseURL(srv.URL)
-	y.minInterval = 0
 	y.backoffBase = time.Millisecond
 	pts, err := y.FetchEPSHistory("AAPL", time.Unix(1600000000, 0), time.Unix(1700086400, 0))
 	if err != nil {
@@ -228,7 +227,6 @@ func TestDoRetryAfterInvalidFallsBack(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	y := NewWithBaseURL(srv.URL)
-	y.minInterval = 0
 	y.backoffBase = 200 * time.Millisecond
 	if err := fetchOnce(t, y); err != nil {
 		t.Fatalf("expected success after fallback retry, got: %v", err)
@@ -250,7 +248,6 @@ func TestDoNetworkErrorNoRetry(t *testing.T) {
 	url := srv.URL
 	srv.Close() // 立即关闭,后续请求连接失败
 	y := NewWithBaseURL(url)
-	y.minInterval = 0
 	budgetBefore := y.retryBudget
 	if err := fetchOnce(t, y); err == nil {
 		t.Fatal("expected network error, got nil")
