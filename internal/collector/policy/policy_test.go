@@ -10,18 +10,23 @@ import (
 
 // Context Checkpoint: done_criteria → test mapping
 // functional[0]     "内置主题齐全且数值平移(yahoo 500ms/tushare 200ms/twelvedata 8s, Coalesce=true)"
-//                                                          → TestLookupBuiltinTopics
+//                                                          → TestLookupBuiltinTopics（8 个具体主题）
+//                                                          + TestLixingerWildcardTTLOnly（第 9 个登记主题 lixinger.* 的 Coalesce）
 // functional[1]     "daily_basic 带 Quota{5,24h,Asia/Shanghai}；其余 tushare 主题 Quota 为 nil"
 //                                                          → TestDailyBasicQuota / TestOtherTushareTopicsHaveNoQuota
 // functional[2]     "三段查表：精确 → <域>.* 通配 → 未登记；lixinger 只补 TTL"
-//                                                          → TestLixingerWildcardTTLOnly
+//                                                          → TestLixingerWildcardTTLOnly（含精确遮蔽通配的次序断言）
 // functional[3]     "Set 缺省 Domain 取主题名第一段，显式 Domain 保留"
 //                                                          → TestSetOverridesAndDefaultsDomain
 // boundary[0]       "ApplyTTL 只提升 TTL>0 的主题且 ttl<=0 为 no-op；DisableTTL 归零 TTL 不动限流"
 //                                                          → TestApplyTTLOnlyLiftsCachingTopics / TestApplyTTLNonPositiveIsNoop / TestDisableTTLKeepsThrottle
 // boundary[1]       "六个未登记主题 Lookup 一律 ok=false"    → TestLookupUnregisteredTopicIsZeroPolicy
-// error_handling[0] "shanghai() 加载失败退回 UTC 而非 panic；tzdata 已嵌入"
+// error_handling[0] 分句1 "LoadLocation 失败时退回 time.UTC 而非 panic"
+//                                                          → TestLoadLocFallsBackToUTCWithoutPanic
+// error_handling[0] 分句2 "tzdata 经 _ \"time/tzdata\" 嵌入，不依赖部署机装 tzdata"
 //                                                          → TestShanghaiLoadsEmbeddedTZData
+//   ⚠ 两条互补而非重叠：分句 2 验的是「加载成功」，钉不住分句 1 的失败分支
+//     （返工前只有后者，变异 M10 把 return time.UTC 换成 panic(err) 后套件仍全绿）。
 // non_functional[0] "policy 包不得 import internal/collector（约束 C3）"
 //                                                          → TestNoImportOfCollectorRoot
 
@@ -112,6 +117,19 @@ func TestLixingerWildcardTTLOnly(t *testing.T) {
 	if p.Domain != "lixinger" {
 		t.Errorf("Domain = %q, want lixinger", p.Domain)
 	}
+	// lixinger.* 是第 9 个登记主题，TestLookupBuiltinTopics 只覆盖了另外 8 个。
+	// functional[0] 要求「登记主题 Coalesce 默认 true」，这里补上最后一个。
+	if !p.Coalesce {
+		t.Error("lixinger.* 也是登记主题，Coalesce 应为 true")
+	}
+
+	// 精确条目必须遮蔽同域通配条目（functional[2] 指定的查表次序）。
+	// 今天没有任何域同时存在精确与通配条目，故次序对调时行为等价、测不出来；
+	// 但 config 覆盖一旦给 lixinger 追加精确主题，次序错误会静默生效错策略。
+	tbl.Set("lixinger.exact", Policy{TTL: time.Minute, MinInterval: 3 * time.Second})
+	if p, _ := tbl.Lookup("lixinger.exact"); p.MinInterval != 3*time.Second {
+		t.Errorf("精确匹配须优先于 <域>.* 通配, got %+v", p)
+	}
 }
 
 func TestSetOverridesAndDefaultsDomain(t *testing.T) {
@@ -171,7 +189,24 @@ func TestDisableTTLKeepsThrottle(t *testing.T) {
 	}
 }
 
-// TestShanghaiLoadsEmbeddedTZData 覆盖 error_handling[0]：tzdata 已嵌入，
+// TestLoadLocFallsBackToUTCWithoutPanic 覆盖 error_handling[0] 的分句 1：
+// 时区加载失败时退回 time.UTC 而非 panic——配额账本的时区退化不值得让进程起不来。
+//
+// 该分支在 shanghai() 里不可达（时区名是写死的字面量且 tzdata 已嵌入），
+// 故把时区名抽成 loadLoc 的参数后才能直接喂一个必然失败的名字。
+func TestLoadLocFallsBackToUTCWithoutPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("时区加载失败不得 panic: %v", r)
+		}
+	}()
+
+	if got := loadLoc("Not/AZone"); got != time.UTC {
+		t.Errorf("加载失败应退回 time.UTC, got %v", got)
+	}
+}
+
+// TestShanghaiLoadsEmbeddedTZData 覆盖 error_handling[0] 的分句 2：tzdata 已嵌入，
 // 即便部署机没装 tzdata（模拟为把 ZONEINFO 指向不存在的路径）也应拿到
 // Asia/Shanghai；万一加载失败也只能退回 UTC，绝不 panic。
 func TestShanghaiLoadsEmbeddedTZData(t *testing.T) {

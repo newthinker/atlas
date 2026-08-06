@@ -46,15 +46,21 @@ type Table struct {
 	policies map[string]Policy
 }
 
-// shanghai 返回配额自然日对齐用的时区。tzdata 已嵌入，加载失败只可能是
-// 时区名写错，此时退回 UTC 而不是 panic——配额账本不值得让进程起不来。
-func shanghai() *time.Location {
-	loc, err := time.LoadLocation("Asia/Shanghai")
+// loadLoc 加载时区，失败时退回 UTC 而不是 panic——配额账本不值得让进程起不来。
+//
+// 时区名是参数而非写死的字面量：tzdata 已嵌入，写死名字会让失败分支不可达，
+// 从而无法验证「失败时退回 UTC」这条行为（返工前正因如此，把该分支改成
+// panic(err) 也没有任何测试转红）。
+func loadLoc(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
 	if err != nil {
 		return time.UTC
 	}
 	return loc
 }
+
+// shanghai 返回配额自然日对齐用的时区。
+func shanghai() *time.Location { return loadLoc("Asia/Shanghai") }
 
 // NewTable 返回装好内置策略的表（设计 §4.2，数值全部从现有常量平移）。
 func NewTable() *Table {
