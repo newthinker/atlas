@@ -7,12 +7,14 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
 
@@ -23,11 +25,19 @@ const (
 	defaultFundHistoryURL = "https://api.fund.eastmoney.com/f10/lsjz"
 )
 
+// topicHistory 是 FetchHistory 的策略主题。内置表以 `eastmoney.*` 通配登记
+// （仅 TTL，无节流无配额）——被删除的 maybeCache 装饰器原本就为本包提供 OHLCV
+// 缓存，这里是把那份能力接回来。
+const topicHistory = "eastmoney.kline"
+
 // Eastmoney implements the Eastmoney collector for A-shares
 type Eastmoney struct {
 	client           *http.Client
 	config           collector.Config
 	lixingerFallback *lixinger.Lixinger // Fallback collector for when Eastmoney fails
+
+	// gate 提供 TTL 缓存与在途合并；本包没有也不新增节流/配额。
+	gate *policy.Gate
 
 	// Base URLs are instance fields so tests can inject httptest servers.
 	quoteURL       string
@@ -46,6 +56,7 @@ func New() *Eastmoney {
 		historyURL:     defaultHistoryURL,
 		fundURL:        defaultFundURL,
 		fundHistoryURL: defaultFundHistoryURL,
+		gate:           policy.Default(),
 	}
 }
 
@@ -228,14 +239,14 @@ func (e *Eastmoney) fetchStockQuote(symbol string) (*core.Quote, error) {
 	}
 
 	return &core.Quote{
-		Symbol:        symbol,
-		Market:        core.MarketCNA,
-		Price:         d.F43 / divisor,
-		Open:          d.F46 / divisor,
-		High:          d.F51 / divisor,
-		Low:           d.F52 / divisor,
-		PrevClose:     d.F60 / divisor,
-		Change:        d.F169 / divisor,
+		Symbol:    symbol,
+		Market:    core.MarketCNA,
+		Price:     d.F43 / divisor,
+		Open:      d.F46 / divisor,
+		High:      d.F51 / divisor,
+		Low:       d.F52 / divisor,
+		PrevClose: d.F60 / divisor,
+		Change:    d.F169 / divisor,
 		// f170 is percent×100 (fixed scale, independent of the price divisor).
 		ChangePercent: d.F170 / 100,
 		Volume:        int64(d.F47),
@@ -414,7 +425,27 @@ func (e *Eastmoney) fetchFundHistoryFromEastmoney(symbol string, start, end time
 }
 
 // FetchHistory fetches historical OHLCV data
+// 经 Gate 走 TTL 缓存。缓存键把 start/end 截断到分钟，让上层「以 time.Now() 为 end」
+// 的抖动仍能命中同一槽（沿用被取代的 CachedCollector.cacheKey 口径）。
+//
+// 包在**整个** FetchHistory 外层而非只包 fetchStockHistory：被删除的 maybeCache 装饰的
+// 是 Collector 接口，缓存的正是这个方法的最终结果（含 fund 分支与 lixinger 回退）。
 func (e *Eastmoney) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
+	key := fmt.Sprintf("%s|%d|%d|%s",
+		symbol, start.Truncate(time.Minute).Unix(), end.Truncate(time.Minute).Unix(), interval)
+	data, err := policy.Fetch(e.gate, topicHistory, key, func() ([]core.OHLCV, error) {
+		return e.fetchHistory(symbol, start, end, interval)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Gate 不复制返回值：缓存命中时多个调用方共享同一底层数组，故在此 clone。
+	// core.OHLCV 今天全是值类型，浅元素拷贝即深拷贝——**该前提由 core/types.go 保证，
+	// 不是这里**（那边的注释已写明新增字段必须是值类型）。
+	return slices.Clone(data), nil
+}
+
+func (e *Eastmoney) fetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
 	// Funds use different API for historical NAV
 	if e.isFund(symbol) {
 		return e.fetchFundHistory(symbol, start, end)

@@ -88,6 +88,18 @@ func NewTable() *Table {
 	// non_financial，共 8 个且会增长，故用通配主题登记。
 	t.Set("lixinger.*", Policy{TTL: builtinTTL, Coalesce: true})
 
+	// eastmoney / crypto / baostock：被删除的 maybeCache 装饰器**原本覆盖**这三家
+	// （设计 §1.3 明列 yahoo/eastmoney/crypto/tushare/baostock 五家），而首版内置表
+	// 只登记了 yahoo/tushare，导致它们丢失了 FetchHistory 的 TTL 缓存。
+	// eastmoney 尤其要紧：symbol_detail 是 HTTP 接口路径，每次请求都直打上游，
+	// 而它是非官方端点、本来也没有节流。
+	//
+	// 与 lixinger 同款：**只补 TTL，不新增任何它们今天没有的限流/配额行为**。
+	// 用通配主题登记，各 collector 用 <域>.<接口> 形式的具体主题名查表。
+	t.Set("eastmoney.*", Policy{TTL: builtinTTL, Coalesce: true})
+	t.Set("crypto.*", Policy{TTL: builtinTTL, Coalesce: true})
+	t.Set("baostock.*", Policy{TTL: builtinTTL, Coalesce: true})
+
 	return t
 }
 

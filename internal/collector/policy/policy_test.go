@@ -23,7 +23,9 @@ import (
 //                                                          → TestSetOverridesAndDefaultsDomain
 // boundary[0]       "ApplyTTL 只提升 TTL>0 的主题且 ttl<=0 为 no-op；DisableTTL 归零 TTL 不动限流"
 //                                                          → TestApplyTTLOnlyLiftsCachingTopics / TestApplyTTLNonPositiveIsNoop / TestDisableTTLKeepsThrottle
-// boundary[1]       "六个未登记主题 Lookup 一律 ok=false"    → TestLookupUnregisteredTopicIsZeroPolicy
+// boundary[1]       "未登记主题 Lookup 一律 ok=false"（TASK-015 后清单缩为 akshare/fred/edgar 三家，
+//                    eastmoney/crypto/baostock 已补登记为仅 TTL 通配主题）
+//                                                          → TestLookupUnregisteredTopicIsZeroPolicy
 // error_handling[0] 分句1 "LoadLocation 失败时退回 time.UTC 而非 panic"
 //                                                          → TestLoadLocFallsBackToUTCWithoutPanic
 // error_handling[0] 分句2 "tzdata 经 _ \"time/tzdata\" 嵌入，不依赖部署机装 tzdata"
@@ -67,11 +69,35 @@ func TestLookupBuiltinTopics(t *testing.T) {
 	}
 }
 
+// TestLookupUnregisteredTopicIsZeroPolicy 覆盖 boundary[1]：未登记主题一律零策略直通。
+//
+// ⚠ 清单在 TASK-015 缩短过：eastmoney / crypto / baostock 三家**已登记**为仅 TTL 的
+// 通配主题。原因是被删除的 maybeCache 装饰器本就覆盖它们（设计 §1.3 明列
+// yahoo/eastmoney/crypto/tushare/baostock 五家），首版内置表只登记 yahoo/tushare 造成了
+// 缓存丢失回归。**它们只补 TTL，不新增任何限流/配额**，所以「行为零变更」在限流这一面
+// 仍然成立——变的是「本来就该有的缓存回来了」。
+// akshare / fred / edgar 三家从未被 maybeCache 覆盖，仍是零策略直通。
 func TestLookupUnregisteredTopicIsZeroPolicy(t *testing.T) {
 	tbl := NewTable()
-	for _, topic := range []string{"eastmoney.kline", "akshare.valuation", "crypto.ticker", "fred.series", "edgar.facts", "baostock.daily"} {
+	for _, topic := range []string{"akshare.valuation", "fred.series", "edgar.facts"} {
 		if _, ok := tbl.Lookup(topic); ok {
 			t.Errorf("%s: 未登记主题不应命中策略表（设计 §4.1）", topic)
+		}
+	}
+
+	// 反向：三家已登记的通配主题必须命中，且**只有 TTL**（不得凭空多出限流或配额）
+	for _, topic := range []string{"eastmoney.kline", "crypto.ticker", "baostock.daily"} {
+		p, ok := tbl.Lookup(topic)
+		if !ok {
+			t.Errorf("%s: 应命中 <域>.* 通配主题（maybeCache 原本覆盖这三家）", topic)
+			continue
+		}
+		if p.TTL <= 0 {
+			t.Errorf("%s: 必须有 TTL（这正是要修复的缓存丢失回归）", topic)
+		}
+		if p.MinInterval != 0 || p.Quota != nil {
+			t.Errorf("%s: 只补缓存，不得新增限流/配额: MinInterval=%v Quota=%v",
+				topic, p.MinInterval, p.Quota)
 		}
 	}
 }
@@ -197,6 +223,8 @@ func TestDisableTTLKeepsThrottle(t *testing.T) {
 		"yahoo.chart", "yahoo.eps", "yahoo.quote",
 		"tushare.daily", "tushare.index_daily", "tushare.hk_daily", "tushare.daily_basic",
 		"twelvedata.time_series", "lixinger.*",
+		// TASK-015 补登记：maybeCache 原本覆盖这三家，首版内置表漏了 ⇒ 缓存丢失回归
+		"eastmoney.*", "crypto.*", "baostock.*",
 	}
 	got := tbl.Topics()
 	sort.Strings(got)
