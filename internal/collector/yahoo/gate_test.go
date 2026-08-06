@@ -381,3 +381,110 @@ func TestFetchEPSHistoryReturnsIndependentSlice(t *testing.T) {
 		t.Error("缓存命中必须返回独立副本，否则调用方能污染缓存")
 	}
 }
+
+// ——— TASK-007 review_fix：缓存键时间精度的双向守护（两处 key 各一条）———
+//
+// 本包有**两处**独立的缓存键：yahoo.go:312 的 FetchHistory 与 eps.go:49 的
+// FetchEPSHistory，各自需要独立实证 —— 一处修好不代表另一处也修好。
+//
+// **(a) 聚合度** —— 相邻时间必须落进同一槽。生产路径 `app.go:451` 的
+// `end := time.Now()` 经 :462 传进来；键若保留秒级精度 ⇒ 每次调用键都不同 ⇒
+// **命中率恒为零**。这是「静默的错」：不报错、不出错数据、返回值完全正确，
+// 只有观测 HTTP 请求数才看得见。本包原有测试对它完全无感 —— 它们**全用固定时刻**
+// （`time.Unix(1600000000,0)` 7 处），而固定时刻在 Truncate 前后相等。
+//
+// **(b) 粒度不得放粗** —— 只写 (a) 挡不住把 `Truncate(time.Minute)` 改成
+// `Truncate(time.Hour)`：相邻时刻仍落在同一小时，(a) 照样通过。而放粗会让相隔
+// 几分钟的不同区间串槽、静默返回错区间数据（「吵闹的错」）。
+//
+// ⚠ **偏移必须跨秒**：本包两处 key 都用 `.Unix()`（秒级）。照搬别包的毫秒级偏移
+// （如 `base+50ms/+900ms`）会让去掉 Truncate 的变异**测不出来** —— `.Unix()` 把
+// 亚秒差异归为同一秒，(a) 照样绿。我在 eastmoney 上踩过这一次。
+// 基准取当前分钟的中点而非字面 `time.Now()`，避免跨分钟边界的偶发假红。
+
+func TestFetchHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
+	start := time.Unix(1600000000, 0)
+	base := time.Now().Truncate(time.Minute).Add(20 * time.Second)
+
+	t.Run("相邻时间落进同一槽", func(t *testing.T) {
+		srv, arrivals := countingServer(t)
+		y := NewWithBaseURL(srv.URL)
+		y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+		for _, end := range []time.Time{base, base.Add(3 * time.Second), base.Add(15 * time.Second)} {
+			if _, err := y.FetchHistory("AAPL", start, end, "1d"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := len(arrivals()); n != 1 {
+			t.Errorf("同一分钟内相隔数秒的三次调用应命中同一缓存槽: HTTP 请求 %d 次, want 1"+
+				"（大于 1 说明键保留了秒级精度——生产以 time.Now() 为 end，命中率会恒为零）", n)
+		}
+	})
+
+	t.Run("分钟粒度不得放粗", func(t *testing.T) {
+		srv, arrivals := countingServer(t)
+		y := NewWithBaseURL(srv.URL)
+		y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+		for _, end := range []time.Time{base, base.Add(time.Minute)} {
+			if _, err := y.FetchHistory("AAPL", start, end, "1d"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := len(arrivals()); n != 2 {
+			t.Errorf("相隔 1 分钟的两次调用是不同区间，必须分槽: HTTP 请求 %d 次, want 2"+
+				"（为 1 说明截断粒度被放粗到小时/天——不同区间会串槽，静默返回错区间数据）", n)
+		}
+	})
+}
+
+func TestFetchEPSHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
+	epsBody := `{"timeseries":{"result":[{"trailingDilutedEPS":[{"asOfDate":"2023-11-14","reportedValue":{"raw":6.42}}]}]}}`
+	newEPSServer := func(t *testing.T) (*httptest.Server, func() int) {
+		t.Helper()
+		var mu sync.Mutex
+		hits := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits++
+			mu.Unlock()
+			_, _ = w.Write([]byte(epsBody))
+		}))
+		t.Cleanup(srv.Close)
+		return srv, func() int { mu.Lock(); defer mu.Unlock(); return hits }
+	}
+
+	start := time.Unix(1600000000, 0)
+	base := time.Now().Truncate(time.Minute).Add(20 * time.Second)
+
+	t.Run("相邻时间落进同一槽", func(t *testing.T) {
+		srv, hits := newEPSServer(t)
+		y := NewWithBaseURL(srv.URL)
+		y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+		for _, end := range []time.Time{base, base.Add(3 * time.Second), base.Add(15 * time.Second)} {
+			if _, err := y.FetchEPSHistory("AAPL", start, end); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := hits(); n != 1 {
+			t.Errorf("EPS 键同样须聚合到分钟: HTTP 请求 %d 次, want 1", n)
+		}
+	})
+
+	t.Run("分钟粒度不得放粗", func(t *testing.T) {
+		srv, hits := newEPSServer(t)
+		y := NewWithBaseURL(srv.URL)
+		y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+		for _, end := range []time.Time{base, base.Add(time.Minute)} {
+			if _, err := y.FetchEPSHistory("AAPL", start, end); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := hits(); n != 2 {
+			t.Errorf("EPS 键相隔 1 分钟须分槽: HTTP 请求 %d 次, want 2", n)
+		}
+	})
+}
