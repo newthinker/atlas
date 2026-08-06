@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
 
@@ -20,12 +21,16 @@ import (
 type Client struct {
 	baseURL string
 	hc      *http.Client
+
+	// gate 提供 TTL 缓存与在途合并；本包没有也不新增节流/配额。
+	gate *policy.Gate
 }
 
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		hc:      &http.Client{Timeout: 60 * time.Second}, // 全历史响应较大
+		gate:    policy.Default(),
 	}
 }
 
