@@ -2,21 +2,34 @@ package crypto
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/collector/crypto/binance"
 	"github.com/newthinker/atlas/internal/collector/crypto/coingecko"
 	"github.com/newthinker/atlas/internal/collector/crypto/okx"
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
+
+// topicHistory 是 FetchHistory 的策略主题，经 `<域>.*` 通配命中内置 crypto.* 条目
+// （仅 TTL 缓存，无节流无配额）。
+//
+// **域段（crypto）写错会静默失效**：Lookup 落到「未登记 → 零策略」时 Gate 直通，
+// 缓存彻底没了而不报任何错。接口段（history）在通配登记下写成什么都能命中。
+const topicHistory = "crypto.history"
 
 // CryptoCollector implements collector.Collector for cryptocurrency markets
 type CryptoCollector struct {
 	providers    []Provider
 	defaultQuote string
 	config       collector.Config
+	// gate 在构造时快照 policy.Default()，不是每次调用现取（契约陷阱 4）：
+	// 要替换默认闸门的调用方必须在构造之前 SetDefault。
+	gate *policy.Gate
 }
 
 // New creates a new CryptoCollector with default providers
@@ -29,6 +42,7 @@ func New() *CryptoCollector {
 			binance.New(),
 		},
 		defaultQuote: "USDT",
+		gate:         policy.Default(),
 	}
 }
 
@@ -40,6 +54,7 @@ func NewWithProviders(providers []Provider, defaultQuote string) *CryptoCollecto
 	return &CryptoCollector{
 		providers:    providers,
 		defaultQuote: defaultQuote,
+		gate:         policy.Default(),
 	}
 }
 
@@ -115,7 +130,16 @@ func (c *CryptoCollector) FetchQuote(symbol string) (*core.Quote, error) {
 	return nil, fmt.Errorf("all providers failed for %s: %w", normalized, lastErr)
 }
 
-// FetchHistory fetches historical OHLCV data with automatic fallback
+// FetchHistory fetches historical OHLCV data with automatic fallback.
+//
+// 闸门包在**整个** fallback 链外层——被删除的 maybeCache 装饰的正是 Collector 接口，
+// 缓存的是这个方法的最终结果。包进单个 provider 会让 fallback 本身丢缓存，
+// 也会把「哪一家返回的」错误地写进缓存键：providers 是 fallback 语义（依次尝试、
+// 首个成功即返），同 symbol 无论由哪家返回都是同一份数据，共用一条缓存槽是正确的。
+//
+// 返回值一律 slices.Clone 后交出：缓存命中时多个调用方拿到同一个切片，
+// 直接交出会让一方改写污染缓存与其他调用方。core.OHLCV 是 flat value type
+// （见 core/types.go 定义处的约束），故浅元素拷贝等于深拷贝。
 func (c *CryptoCollector) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
 	// Validate and normalize symbol
 	if err := ValidateCryptoSymbol(symbol); err != nil {
@@ -123,6 +147,32 @@ func (c *CryptoCollector) FetchHistory(symbol string, start, end time.Time, inte
 	}
 	normalized := NormalizeSymbol(symbol, c.defaultQuote)
 
+	data, err := policy.Fetch(c.gate, topicHistory,
+		historyKey(normalized, start, end, interval),
+		func() ([]core.OHLCV, error) {
+			return c.fetchHistoryFromProviders(normalized, start, end, interval)
+		})
+	if err != nil {
+		// policy 包的错误不得出现在调用方可见的错误链上：用 %v 而非 %w 收口，
+		// 保留可读文本但断开 errors.Is 链。crypto 今天没有 Quota/Timeout，
+		// 但 config 能给任何主题加配额，泄漏点随接入家数增长。
+		if errors.Is(err, policy.ErrQuotaExceeded) || errors.Is(err, policy.ErrTimeout) {
+			return nil, fmt.Errorf("crypto: %s 暂不可用（闸门限制，稍后自动恢复）: %v", normalized, err)
+		}
+		return nil, err
+	}
+	return slices.Clone(data), nil
+}
+
+// historyKey 是 FetchHistory 的缓存键，必须覆盖全部影响结果的参数。
+// 丢掉任一维度都会让不同查询落进同一槽、静默返回错标的或错区间的数据。
+func historyKey(symbol string, start, end time.Time, interval string) string {
+	return fmt.Sprintf("%s|%d|%d|%s", symbol, start.UnixNano(), end.UnixNano(), interval)
+}
+
+// fetchHistoryFromProviders 是被缓存的取数函数：依次尝试各 provider，首个成功即返。
+// 校验（空结果视为失败）留在这里面——挪到闸门外会让失败结果被当成功写进缓存。
+func (c *CryptoCollector) fetchHistoryFromProviders(normalized string, start, end time.Time, interval string) ([]core.OHLCV, error) {
 	// Try each provider in order
 	var lastErr error
 	for _, p := range c.providers {
