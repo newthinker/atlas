@@ -1,22 +1,18 @@
 package main
 
 // Context Checkpoint: done_criteria → test mapping (TASK-007)
-// functional[0]   "cache.enabled=true 普通 collector 被 CachedCollector 包装(TTL来自配置)" → TestMaybeCache_EnabledWrapsPlain
-// functional[1]   "cache.enabled=false 原样注册不包装"                                 → TestMaybeCache_DisabledNoWrap
-// boundary[0]     "FundamentalCollector 等扩展接口的 collector 不被包装破坏断言路径"    → TestMaybeCache_FundamentalNotWrapped
-// non_functional[0] "包装后 selector.SelectForSymbol 市场匹配行为不变(Name/Markets透传)" → TestMaybeCache_SelectorRoutingUnchanged
+// 【TASK-011】OHLCV 装饰器(CachedCollector/maybeCache)已删除，缓存改由 policy Gate 承担。
+// 原 TestMaybeCache_* 四条随之移除；其守护的「扩展接口不被包装遮蔽」由 collectors_test.go 的
+// TestBuildCollectorsRegistersUnwrappedCollectors 与 TestLixingerExtensionInterfacesSurviveAssembly
+// 以**正向断言**承接（cache.enabled=false 的语义由 Table.DisableTTL 承接，见 TASK-006）。
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/newthinker/atlas/internal/app"
-	"github.com/newthinker/atlas/internal/collector"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
-	"github.com/newthinker/atlas/internal/core"
 	"github.com/newthinker/atlas/internal/notifier/telegram"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -331,107 +327,5 @@ func TestEPSSourceOrNil_RealNonNil(t *testing.T) {
 	var _ app.EPSSource = yahoo.New() // compile-time impl check
 	if got := epsSourceOrNil(yahoo.New()); got == nil {
 		t.Error("epsSourceOrNil(real *Yahoo) = nil, want non-nil source")
-	}
-}
-
-// plainCollector implements only collector.Collector.
-type plainCollector struct {
-	name    string
-	markets []core.Market
-}
-
-func (p *plainCollector) Name() string                    { return p.name }
-func (p *plainCollector) SupportedMarkets() []core.Market { return p.markets }
-func (p *plainCollector) Init(cfg collector.Config) error { return nil }
-func (p *plainCollector) Start(ctx context.Context) error { return nil }
-func (p *plainCollector) Stop() error                     { return nil }
-func (p *plainCollector) FetchQuote(symbol string) (*core.Quote, error) {
-	return &core.Quote{Symbol: symbol}, nil
-}
-func (p *plainCollector) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) {
-	return nil, nil
-}
-
-// fundamentalCollectorStub implements collector.Collector AND the
-// collector.FundamentalCollector extension interface.
-type fundamentalCollectorStub struct {
-	plainCollector
-}
-
-func (f *fundamentalCollectorStub) FetchFundamental(symbol string) (*core.Fundamental, error) {
-	return &core.Fundamental{Symbol: symbol}, nil
-}
-func (f *fundamentalCollectorStub) FetchFundamentalHistory(symbol string, start, end time.Time) ([]core.Fundamental, error) {
-	return nil, nil
-}
-
-// functional[0]
-func TestMaybeCache_EnabledWrapsPlain(t *testing.T) {
-	plain := &plainCollector{name: "yahoo", markets: []core.Market{core.MarketUS}}
-
-	got := maybeCache(plain, true, 5*time.Minute)
-
-	if _, ok := got.(*collector.CachedCollector); !ok {
-		t.Fatalf("enabled cache must wrap a plain collector in *CachedCollector, got %T", got)
-	}
-	// Name/SupportedMarkets must pass through the wrapper.
-	if got.Name() != "yahoo" {
-		t.Errorf("wrapped Name() = %q, want yahoo", got.Name())
-	}
-	if mk := got.SupportedMarkets(); len(mk) != 1 || mk[0] != core.MarketUS {
-		t.Errorf("wrapped SupportedMarkets() = %v, want [US]", mk)
-	}
-}
-
-// functional[1]
-func TestMaybeCache_DisabledNoWrap(t *testing.T) {
-	plain := &plainCollector{name: "yahoo", markets: []core.Market{core.MarketUS}}
-
-	got := maybeCache(plain, false, 5*time.Minute)
-
-	if _, ok := got.(*collector.CachedCollector); ok {
-		t.Fatal("disabled cache must not wrap the collector")
-	}
-	if got != collector.Collector(plain) {
-		t.Fatal("disabled cache must return the original collector instance")
-	}
-}
-
-// boundary[0]
-func TestMaybeCache_FundamentalNotWrapped(t *testing.T) {
-	fund := &fundamentalCollectorStub{plainCollector{name: "lixinger", markets: []core.Market{core.MarketCNA}}}
-
-	got := maybeCache(fund, true, 5*time.Minute)
-
-	if _, ok := got.(*collector.CachedCollector); ok {
-		t.Fatal("a FundamentalCollector must not be wrapped (would hide extension methods)")
-	}
-	if _, ok := got.(collector.FundamentalCollector); !ok {
-		t.Fatal("type assertion to FundamentalCollector must still hold after maybeCache")
-	}
-	if got != collector.Collector(fund) {
-		t.Fatal("FundamentalCollector must be returned unwrapped (same instance)")
-	}
-}
-
-// non_functional[0]
-func TestMaybeCache_SelectorRoutingUnchanged(t *testing.T) {
-	crypto := &plainCollector{name: "crypto", markets: []core.Market{core.MarketCrypto}}
-	wrapped := maybeCache(crypto, true, time.Minute)
-
-	reg := collector.NewRegistry()
-	reg.Register(wrapped)
-
-	// Routing is by Name(); the wrapper must keep "crypto" reachable for a
-	// crypto symbol.
-	got := collector.SelectForSymbol(reg, "BTCUSDT")
-	if got == nil {
-		t.Fatal("selector returned nil for a crypto symbol")
-	}
-	if got.Name() != "crypto" {
-		t.Fatalf("selector routed to %q, want crypto", got.Name())
-	}
-	if got != wrapped {
-		t.Fatal("selector must return the registered (wrapped) collector instance")
 	}
 }

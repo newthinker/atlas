@@ -6,7 +6,10 @@ import (
 	"testing"
 
 	"github.com/newthinker/atlas/internal/app"
+	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/eastmoney"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
 	"go.uber.org/zap"
 )
@@ -138,3 +141,65 @@ func TestBuildCollectors_SkipsBackupHopsWhenUnconfigured(t *testing.T) {
 		t.Errorf("Prism 未启用时不得登记 baostock, got %v", got)
 	}
 }
+
+// ——— TASK-011：装饰器删除后的正向断言 ———
+//
+// 被删的 TestMaybeCache_FundamentalNotWrapped 证明的是「maybeCache **不会**包装
+// FundamentalCollector」。装饰器删掉后那条命题失去了主语，但它守护的性质仍在：
+// **扩展接口的 type assertion 必须在装配之后依然成立**（验收标准 6 / 设计 §1.3）。
+// 只删证据不算修复，故用下面两条正向断言承接。
+
+// TestBuildCollectorsRegistersUnwrappedCollectors 断言装配路径不再包装任何 collector。
+//
+// cache.Enabled 特意设为 true —— 那正是从前触发 maybeCache 包装的开关。若将来有人
+// 重新引入某种装饰器，registry 里的具体类型就不再是原始类型，这条会红。
+func TestBuildCollectorsRegistersUnwrappedCollectors(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Collector.Cache.Enabled = true // 从前这个开关会让 collector 被 CachedCollector 包住
+	cfg.Collectors = map[string]config.CollectorConfig{
+		"yahoo":     {Enabled: true},
+		"eastmoney": {Enabled: true},
+		"crypto":    {Enabled: true},
+	}
+	application := app.New(cfg, zap.NewNop())
+
+	cleanup, err := buildCollectors(cfg, application, zap.NewNop())
+	if err != nil {
+		t.Fatalf("buildCollectors: %v", err)
+	}
+	defer cleanup()
+
+	got := application.GetCollectors()
+	if len(got) == 0 {
+		t.Fatal("装配后 registry 为空，下面的断言会 vacuously true")
+	}
+	for _, c := range got {
+		switch v := c.(type) {
+		case *yahoo.Yahoo, *eastmoney.Eastmoney:
+			// 原始具体类型，未被任何装饰器包装
+		default:
+			if c.Name() == "yahoo" || c.Name() == "eastmoney" {
+				t.Errorf("%s 注册的是 %T 而非原始具体类型——装饰器会遮蔽扩展接口", c.Name(), v)
+			}
+		}
+	}
+}
+
+// lixinger 的两个扩展接口在**编译期**钉住。
+//
+// ⚠ 这里刻意用 var 断言而非运行期测试。我最初写的是 `var c collector.Collector =
+// lixinger.New(...)` 再 type assert 的测试，注入变异时发现它在「代码能编译」的前提下
+// **恒真** —— lixinger 直接实现这两个接口，经 collector.Collector 传递后动态类型不变，
+// 断言必然成功。**形式与内容不符的测试比没有更糟**：它看起来在守护运行期行为，实际
+// 什么都不防，还会让人以为这块已经有覆盖。
+//
+// 真正的运行期风险是「装配时被装饰器包住导致扩展接口被遮蔽」——那由
+// TestBuildCollectorsRegistersUnwrappedCollectors 覆盖（变异 D1 实证：注册一个只嵌入
+// collector.Collector 的包装类型即转红）。
+//
+// 注：DoD 写的 "ValuationCollector" 在仓库中不存在；valuation 能力的消费接口是
+// app.ValuationSource，buildCollectors 经 application.SetValuationSources 注入。
+var (
+	_ collector.FundamentalCollector = (*lixinger.Lixinger)(nil)
+	_ app.ValuationSource            = (*lixinger.Lixinger)(nil)
+)

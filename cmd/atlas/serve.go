@@ -434,20 +434,3 @@ func epsSourceOrNil(c *yahoo.Yahoo) app.EPSSource {
 	}
 	return c
 }
-
-// maybeCache wraps c in an OHLCV TTL CachedCollector when caching is enabled.
-//
-// Collectors exposing an extension interface consumed via type assertion (e.g.
-// collector.FundamentalCollector, implemented by lixinger) are returned
-// unwrapped: CachedCollector embeds only collector.Collector and would hide
-// those methods, breaking the assertion path. Name and SupportedMarkets pass
-// through the wrapper, so collector routing/selection is unaffected.
-func maybeCache(c collector.Collector, enabled bool, ttl time.Duration) collector.Collector {
-	if !enabled {
-		return c
-	}
-	if _, ok := c.(collector.FundamentalCollector); ok {
-		return c
-	}
-	return collector.NewCached(c, ttl)
-}

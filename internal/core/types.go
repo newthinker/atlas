@@ -65,6 +65,21 @@ func (q Quote) IsValid() bool {
 }
 
 // OHLCV represents a candlestick/bar
+//
+// ⚠ 新增字段必须是**值类型**（string / 数值 / bool / time.Time）。
+//
+// 各 collector 在 policy.Fetch 返回后用 slices.Clone 把缓存里的切片复制给调用方，
+// 而 slices.Clone 是**浅元素拷贝**——「浅元素拷贝等于深拷贝」当且仅当元素是
+// flat value type。一旦这里加了 map / slice / 指针字段（例如
+// `Adjustments []float64`），那些 Clone 会**静默退化成浅拷贝**：多个调用方共享
+// 同一底层数据，一方改写会污染缓存与其他调用方，而**不会有任何测试变红**。
+//
+// 若确需加引用类型字段，必须同步把各 collector 侧的 slices.Clone 改成逐元素深拷贝
+// （yahoo/twelvedata/lixinger 的 FetchHistory、以及任何缓存 []OHLCV 的新接入点）。
+//
+// 这段限定原本写在 internal/collector/cache.go 的 cloneOHLCV 上（「OHLCV is a flat
+// value type, so a shallow element copy is a deep copy」）。该函数已随 OHLCV 装饰器
+// 一并删除，故把约束移到**会被违反的这一侧**——改本文件的人看不到写在 collector 侧的注释。
 type OHLCV struct {
 	Symbol   string
 	Interval string // "1m", "5m", "1d"

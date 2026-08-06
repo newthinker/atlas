@@ -35,7 +35,7 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 	var yahooCollector *yahoo.Yahoo
 	if collectorCfg, ok := cfg.Collectors["yahoo"]; ok && collectorCfg.Enabled {
 		yahooCollector = yahoo.New()
-		application.RegisterCollector(maybeCache(yahooCollector, cacheEnabled, cacheTTL))
+		application.RegisterCollector(yahooCollector)
 	}
 
 	// Create Lixinger collector if configured (used as fallback for Eastmoney).
@@ -58,7 +58,7 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 			eastmoneyCollector.SetLixingerFallback(lixingerCollector)
 			log.Info("lixinger fallback configured for eastmoney collector")
 		}
-		application.RegisterCollector(maybeCache(eastmoneyCollector, cacheEnabled, cacheTTL))
+		application.RegisterCollector(eastmoneyCollector)
 	}
 
 	// Register Crypto collector for digital assets
@@ -71,7 +71,7 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 				Extra:   collectorCfg.Extra,
 			})
 		}
-		application.RegisterCollector(maybeCache(cryptoCollector, cacheEnabled, cacheTTL))
+		application.RegisterCollector(cryptoCollector)
 		log.Info("crypto collector registered")
 	}
 
@@ -80,7 +80,7 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 	// (ADR#6)。tushare 缺 key 不登记(必然 40203);baostock 随 Prism 一起启停,
 	// 因为那座桥是 Prism 的部署产物,Prism 关掉时桥通常没在跑。
 	if collectorCfg, ok := cfg.Collectors["tushare"]; ok && collectorCfg.Enabled && collectorCfg.APIKey != "" {
-		application.RegisterCollector(maybeCache(tushare.New(collectorCfg.APIKey), cacheEnabled, cacheTTL))
+		application.RegisterCollector(tushare.New(collectorCfg.APIKey))
 		log.Info("tushare collector registered (A-share price 2nd hop)")
 	}
 	// 在本地副本上套默认值再读:buildCollectors 跑在 serve.go 的 prismCfg.ApplyDefaults()
@@ -89,7 +89,7 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 	prismCfg := cfg.Prism
 	prismCfg.ApplyDefaults()
 	if prismCfg.Enabled && prismCfg.BaostockBaseURL != "" {
-		application.RegisterCollector(maybeCache(baostock.New(prismCfg.BaostockBaseURL), cacheEnabled, cacheTTL))
+		application.RegisterCollector(baostock.New(prismCfg.BaostockBaseURL))
 		log.Info("baostock collector registered (A-share price 3rd hop)",
 			zap.String("bridge", prismCfg.BaostockBaseURL))
 	}

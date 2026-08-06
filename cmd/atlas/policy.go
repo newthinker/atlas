@@ -21,7 +21,7 @@ func initPolicyGate(cfg *config.Config, log *zap.Logger) {
 	if cfg.Collector.Cache.Enabled {
 		tbl.ApplyTTL(cfg.Collector.Cache.TTL)
 	} else {
-		// 等价于今天 maybeCache 直接返回原 collector（设计 §4.2）：
+		// 等价于被本 Sprint 删除的 maybeCache 直接返回原 collector（设计 §4.2）：
 		// 只清 TTL，限流与配额不受影响。
 		tbl.DisableTTL()
 	}
