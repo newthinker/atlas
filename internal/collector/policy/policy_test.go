@@ -88,7 +88,10 @@ func TestDailyBasicQuota(t *testing.T) {
 	if p.Quota.Window != 24*time.Hour {
 		t.Errorf("Window = %v, want 24h", p.Quota.Window)
 	}
-	if p.Quota.Loc == nil || p.Quota.Loc.String() == "UTC" {
+	// 断言具体值而非「不是 UTC」：DoD 写明了 Asia/Shanghai，排除法只在候选集
+	// 二元时才等价。Loc 错成别的非 UTC 时区（如 Asia/Tokyo）会让配额在错误时刻
+	// 重置自然日窗口——tushare 的 5 次/天是北京时间口径。
+	if p.Quota.Loc == nil || p.Quota.Loc.String() != "Asia/Shanghai" {
 		t.Errorf("Loc = %v, want Asia/Shanghai", p.Quota.Loc)
 	}
 }
@@ -179,8 +182,22 @@ func TestApplyTTLNonPositiveIsNoop(t *testing.T) {
 func TestDisableTTLKeepsThrottle(t *testing.T) {
 	tbl := NewTable()
 	tbl.DisableTTL()
-	for _, topic := range tbl.Topics() {
-		p, _ := tbl.Lookup(topic)
+
+	// 「全部主题 TTL 归零」是量词断言，先给量词一个下界：Topics() 恒返空切片时
+	// 下面的循环零次执行，TTL 断言 vacuously true。这也顺带成为 Topics() 唯一的
+	// 直接断言（它是公开方法，Gate 可能用来枚举主题）。
+	topics := tbl.Topics()
+	if len(topics) != 9 {
+		t.Fatalf("内置主题数 = %d, want 9", len(topics))
+	}
+	for _, topic := range topics {
+		// 同理：Topics() 若返回不存在的主题名，Lookup 落空拿到零值 Policy，
+		// 其 TTL 恰好也是 0——不断言命中的话，下面那条 TTL 断言照样空转。
+		p, ok := tbl.Lookup(topic)
+		if !ok {
+			t.Errorf("%s: Topics() 返回的主题必须能被 Lookup 命中", topic)
+			continue
+		}
 		if p.TTL != 0 {
 			t.Errorf("%s: cache.enabled=false 时所有 TTL 须归零, got %v", topic, p.TTL)
 		}
