@@ -25,7 +25,9 @@ import (
 //   boundary[0]       "values 空或缺失 → 空切片 + err=nil"                     → TestFetchHistoryEmptyValues
 //   boundary[1]       "close 不可解析(空串/\"null\")跳过该行,不中断整段"      → TestFetchHistorySkipsUnparsableClose
 //   error_handling[0] "status=error → 含 message 的 error"                     → TestFetchHistoryAPIError
-//   non_functional[0] "最小间隔默认 8s;注入 50ms,两次调用耗时 ≥50ms"          → TestThrottleMinInterval
+//   non_functional[0] "最小间隔默认 8s;注入 50ms,两次调用耗时 ≥50ms"
+//                      → **已迁出**(TASK-008):8s 数值移入 policy 内置表,节流由 Gate 承接。
+//                      见本文件末尾的迁出说明与 gate_test.go。
 
 // tdServer 起一个记录 query 的 httptest server,返回 client 与取回 query 的闭包。
 func tdServer(t *testing.T, body string) (*Client, func() []url.Values) {
@@ -42,8 +44,8 @@ func tdServer(t *testing.T, body string) (*Client, func() []url.Values) {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
+	// 生产默认 8s 会让用例挂死;零间隔零 TTL 的闸门由 gate_test.go 的 TestMain 装上。
 	c := NewWithBaseURL("k1", srv.URL)
-	c.minInterval = 0 // 默认 8s 会让用例挂死,除节流用例外一律关闭
 	return c, func() []url.Values { mu.Lock(); defer mu.Unlock(); return queries }
 }
 
@@ -137,7 +139,6 @@ func TestAPIKeyNeverInURLOrErrors(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 		c := NewWithBaseURL(probeKey, srv.URL)
-		c.minInterval = 0
 		_, err := c.FetchHistory("NVDA", time.Now().AddDate(0, 0, -5), time.Now())
 		require.NoError(t, err)
 
@@ -149,7 +150,6 @@ func TestAPIKeyNeverInURLOrErrors(t *testing.T) {
 	// 传输层失败:127.0.0.1:1 必然 connection refused,Go 返回携带完整 URL 的 *url.Error。
 	t.Run("传输层失败的 error 文本不含 apikey", func(t *testing.T) {
 		c := NewWithBaseURL(probeKey, "http://127.0.0.1:1")
-		c.minInterval = 0
 		_, err := c.FetchHistory("NVDA", time.Now().AddDate(0, 0, -5), time.Now())
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), probeKey, "error 文本外泄 apikey:%v", err)
@@ -170,17 +170,6 @@ func TestAPIKeyNeverInURLOrErrors(t *testing.T) {
 	})
 }
 
-// non_functional[0]:默认间隔 8s(免费层 8 req/min),测试注入 50ms 断言节流生效。
-func TestThrottleMinInterval(t *testing.T) {
-	c, _ := tdServer(t, `{"values":[],"status":"ok"}`)
-	assert.Equal(t, 8*time.Second, New("k1").minInterval, "生产默认最小间隔须为 8s")
-
-	c.minInterval = 50 * time.Millisecond
-	start := time.Now()
-	for i := 0; i < 2; i++ {
-		_, err := c.FetchHistory("NVDA", time.Now().AddDate(0, 0, -5), time.Now())
-		require.NoError(t, err)
-	}
-	assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond,
-		"连续两次调用须被节流至少一个 minInterval")
-}
+// non_functional[0](TASK-002)的节流用例已随私有节流状态一并迁出:
+//   - 「生产默认最小间隔 8s」→ policy 包 TestLookupBuiltinTopics(twelvedata.time_series → 8s)
+//   - 「连续两次调用被节流」→ 本包 gate_test.go 的 TestFetchHistoryThrottledByGate

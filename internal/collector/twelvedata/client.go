@@ -1,6 +1,7 @@
 // Package twelvedata 直连 Twelve Data 的 time_series HTTP API(GET,apikey 鉴权)。
 // 角色 = 美股价格备源:yahoo 价格失败时的下一跳(spec §2 降级链)。
-// 免费层 8 req/min,故客户端内置 8s 最小间隔节流;apikey 只入 runtime
+// 免费层 8 req/min,对应的 8s 最小间隔由 policy Gate 按主题 topicTimeSeries
+// 承接(数值平移未调整),本包不再私有持有节流状态;apikey 只入 runtime
 // configs/config.yaml(gitignored),不入仓不入日志。
 //
 // 凭证一律走 Authorization 请求头,**绝不进 URL query**(ADR#7)。原因是本包的
@@ -18,21 +19,23 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
 
 const (
 	defaultBaseURL = "https://api.twelvedata.com"
-	// defaultMinInterval 对应免费层 8 req/min;字段可在测试中覆盖以缩短用例耗时。
-	defaultMinInterval = 8 * time.Second
 	// outputSize 是单次请求的最大返回条数(TD 上限 5000),覆盖 10Y 日线。
 	outputSize = "5000"
+	// topicTimeSeries 的 8s 最小间隔(免费层 8 req/min)登记在 policy 策略表里,
+	// 不再由本包私有持有——节流与 TTL 缓存统一由 Gate 承接。
+	topicTimeSeries = "twelvedata.time_series"
 )
 
 type Client struct {
@@ -40,21 +43,22 @@ type Client struct {
 	baseURL string
 	hc      *http.Client
 
-	mu          sync.Mutex
-	lastReq     time.Time
-	minInterval time.Duration
+	gate *policy.Gate
 }
 
 // New 指向生产端点。
 func New(apiKey string) *Client { return NewWithBaseURL(apiKey, defaultBaseURL) }
 
 // NewWithBaseURL 允许注入自定义端点(测试用 httptest server)。
+//
+// gate 在**构造时快照** policy.Default(),不是每次调用现取:测试里的
+// policy.SetDefault 必须发生在本函数之前才生效。
 func NewWithBaseURL(apiKey, baseURL string) *Client {
 	return &Client{
-		apiKey:      apiKey,
-		baseURL:     baseURL,
-		hc:          &http.Client{Timeout: 30 * time.Second},
-		minInterval: defaultMinInterval,
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		hc:      &http.Client{Timeout: 30 * time.Second},
+		gate:    policy.Default(),
 	}
 }
 
@@ -74,16 +78,6 @@ func (c *Client) wrapErr(format string, args ...any) error {
 	return fmt.Errorf("twelvedata: %s", msg)
 }
 
-// throttle 阻塞到距上次请求满 minInterval 为止。
-func (c *Client) throttle() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if wait := c.minInterval - time.Since(c.lastReq); wait > 0 {
-		time.Sleep(wait)
-	}
-	c.lastReq = time.Now()
-}
-
 // timeSeriesResponse 只取本包需要的字段;数值在 TD 响应中一律是字符串。
 type timeSeriesResponse struct {
 	Status  string `json:"status"`
@@ -95,7 +89,26 @@ type timeSeriesResponse struct {
 	} `json:"values"`
 }
 
-// FetchHistory 拉取 [start, end] 闭区间的日线,返回按 Time 升序的 OHLCV
+// FetchHistory 经 Gate 拉取 [start, end] 闭区间的日线,节流(8s)、TTL 缓存与
+// 请求合并均由 topicTimeSeries 的策略承接。
+//
+// 返回值一律 slices.Clone 一份再交出:Gate 命中缓存时**不复制**返回值,多个
+// 调用方拿到的是同一个底层数组,不复制就会被上层的就地改动污染。此处用
+// slices.Clone 成立的前提是 core.OHLCV 为 flat value type(字段全是
+// string/float64/int64/time.Time),浅元素复制即深复制;元素类型若将来加入
+// map/slice/指针字段,必须改为逐元素深拷贝。
+func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) {
+	key := fmt.Sprintf("%s|%s|%s", symbol, start.Format("2006-01-02"), end.Format("2006-01-02"))
+	out, err := policy.Fetch(c.gate, topicTimeSeries, key, func() ([]core.OHLCV, error) {
+		return c.fetchHistory(symbol, start, end)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return slices.Clone(out), nil
+}
+
+// fetchHistory 是真正发 HTTP 的那一层,返回按 Time 升序的 OHLCV
 // (仅 Symbol/Interval/Time/Close 填充——降级链只消费收盘价)。
 // 单行 datetime 或 close 不可解析时跳过该行,不中断整段解析:TD 停牌/缺数据
 // 会给出空串或 "null",丢一天好过丢整段。
@@ -103,9 +116,7 @@ type timeSeriesResponse struct {
 // TD 的 end_date 是**排他**的(2026-08-02 实测 NVDA:end_date=07-31 拿不到
 // 07-31,=08-01 才拿到),故此处发 end+1 天以兑现闭区间契约——否则作为 yahoo
 // 价格备源时会静默丢掉最新一根收盘价。start_date 是包含的,不作补偿。
-func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) {
-	c.throttle()
-
+func (c *Client) fetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) {
 	q := url.Values{
 		"symbol":     {symbol},
 		"interval":   {"1day"},
