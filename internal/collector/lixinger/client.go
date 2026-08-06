@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/newthinker/atlas/internal/collector/policy"
 )
 
 // userAgent mirrors a recent Chrome UA as required by the Lixinger skill docs.
@@ -28,13 +30,35 @@ type envelope struct {
 }
 
 // request POSTs payload as JSON to baseURL/endpoint and returns the raw body
-// after validating the Lixinger envelope (code==1). It applies the SKILL.md
-// backoff retry policy for 429/5xx when l.retry is enabled; 4xx never retries.
+// after validating the Lixinger envelope (code==1). 退避重试策略留在 fn 内部
+// （requestHTTP），Gate 只负责 TTL 缓存与在途合并。
+//
+// 这是设计 §1.3 缺陷的修复点：lixinger 的两条身份（eastmoney 的内部 fallback、
+// Valuation/Fundamental source）都汇流到这里，闸门放在这里两条同时被覆盖。
 func (l *Lixinger) request(endpoint string, payload any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
+	// 缓存键含完整请求体：同一 endpoint 不同标的/字段必须落到不同槽。
+	// 信封校验刻意留在 fn 内部——放到 Fetch 外面的话，HTTP 200 + code:0 的业务
+	// 错误会被当成功 body 写进缓存，后续同 key 调用永远拿到它且不再发请求。
+	raw, err := policy.Fetch(l.gate, "lixinger."+endpoint, string(body), func() ([]byte, error) {
+		return l.requestHTTP(endpoint, body)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Gate 命中缓存时不复制返回值，多个调用方拿到同一个切片；此处必须返回副本，
+	// 否则任一调用方改写就会污染缓存。[]byte 的元素是 flat value type，
+	// 浅复制即深复制。
+	return bytes.Clone(raw), nil
+}
+
+// requestHTTP 发一次（或按退避调度多次）真实 HTTP 请求并校验信封。
+// It applies the SKILL.md backoff retry policy for 429/5xx when l.retry is
+// enabled; 4xx never retries.
+func (l *Lixinger) requestHTTP(endpoint string, body []byte) ([]byte, error) {
 	url := fmt.Sprintf("%s/%s", l.baseURL, endpoint)
 
 	maxAttempts := 1

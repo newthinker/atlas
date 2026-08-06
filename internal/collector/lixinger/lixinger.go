@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/newthinker/atlas/internal/collector"
+	"github.com/newthinker/atlas/internal/collector/policy"
 	"github.com/newthinker/atlas/internal/core"
 )
 
@@ -25,6 +26,14 @@ type Lixinger struct {
 	client      *http.Client
 	retry       bool            // 429/5xx 退避重试开关
 	retryDelays []time.Duration // 退避调度；测试可置零加速
+
+	// gate 只给 lixinger 补 TTL 缓存（设计 §4.1 例外）：它从未走过任何缓存层
+	// ——既没被 RegisterCollector 注册，CachedCollector 装饰器对它也根本装不上
+	// （会遮蔽 FundamentalCollector 扩展方法）。不新增限流与配额。
+	//
+	// 在**构造时快照** policy.Default() 的当时值，不是每次调用现取：测试若要
+	// 替换默认闸门，SetDefault 必须发生在构造之前。
+	gate *policy.Gate
 }
 
 // Option configures a Lixinger collector.
@@ -60,6 +69,7 @@ func newWithBaseURL(apiKey, baseURL string) *Lixinger {
 		client:      &http.Client{Timeout: 30 * time.Second},
 		retry:       false,
 		retryDelays: defaultRetryDelays,
+		gate:        policy.Default(),
 	}
 }
 
