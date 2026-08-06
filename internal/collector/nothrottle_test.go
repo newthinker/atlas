@@ -1,9 +1,12 @@
 package collector
 
 // Context Checkpoint: done_criteria → test mapping
-// functional[0] "AST 扫描四个 collector 子包，断言不存在 lastReq 字段（验收标准 5）"
+// functional[0] "AST 解析**整棵 internal/collector 树**的生产源码（跳过 _test.go /
+//                policy/ / testdata/），断言不存在 lastReq 字段（验收标准 5）；
+//                扫描须抽成 scan(root string)"
 //                                    → TestNoPrivateThrottleState
-// functional[1] "变异验证内化为可重放用例：testdata 假源码须被检出、生产树须不检出"
+//                                      （root 参数化由阳性对照复用同一函数实证）
+// functional[1] "变异验证内化为可重放用例：假源码须被检出、生产树须不检出"
 //                                    → TestScanDetectsThrottleState（阳性）
 //                                      + TestNoPrivateThrottleState（阴性）
 // boundary[0]   "只覆盖生产源码，不误报测试文件中的同名标识符"
@@ -17,6 +20,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -302,14 +306,37 @@ func TestScanIgnoresNonFieldOccurrences(t *testing.T) {
 //
 // 「静默跳过」是守卫失效的第三种形态（陷阱 11）—— 它既不红也不绿，
 // 一个 `if perr != nil { return nil }` 会让整个扫描对畸形源码视而不见。
+//
+// 畸形源码**运行时现写进 t.TempDir()**，不作为夹具存在于仓库。原先它是
+// testdata/parsefail/bad.go，那形态有一个不可兼得的约束冲突：
+//
+//	packages 字段同时驱动漂移判据（task-completed.sh:58）与 go test（:112-119）。
+//	把畸形夹具的目录写进 packages ⇒ go test 对它 build failed ⇒ 此后任何
+//	dev_done 迁移被永久 BLOCKED，且报错显示「测试失败」，看不出根因在声明里；
+//	不写进 packages ⇒ 它一旦处于未提交状态就会被算成**别人**的 scope 漂移，
+//	拦掉那个恰好在 transition 的 agent（本 Sprint 实测发生过一次）。
+//
+// 根因是「仓库里存在一个故意不可编译的 .go 文件」，故消除它而非二选一。
+// 顺带也消掉了裸跑 gofmt -l internal/collector/ 对它的解析报错。
+//
+// 反过来，decoys/ 与 throttleback/ 两个夹具**刻意留在仓库**：它们可编译、
+// 对 go test 无害（[no tests to run] / [no test files]），且作为语料需要被人读。
 func TestScanReportsParseFailure(t *testing.T) {
-	root := filepath.Join("testdata", "parsefail")
+	root := t.TempDir()
+	const badFile = "bad.go"
+	// 缺右括号：parser 必然失败，且失败点在包子句之后，确保走的是
+	// ParseFile 的语法错误分支而不是「根本不是 Go 文件」。
+	if err := os.WriteFile(filepath.Join(root, badFile),
+		[]byte("package parsefail\n\nfunc broken(\n"), 0o644); err != nil {
+		t.Fatalf("写畸形源码失败: %v", err)
+	}
+
 	res, err := scanNoPanic(t, root)
 	if err == nil {
 		t.Fatalf("语法错误的源码必须报错，却返回了 offenders=%v scanned=%v（静默跳过 = 没有守护）",
 			res.offenders, res.scanned)
 	}
-	if !strings.Contains(err.Error(), "bad.go") {
+	if !strings.Contains(err.Error(), badFile) {
 		t.Errorf("错误信息必须指出是哪个文件，got: %v", err)
 	}
 }
