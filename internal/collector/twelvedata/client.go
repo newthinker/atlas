@@ -15,6 +15,7 @@ package twelvedata
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -78,6 +79,26 @@ func (c *Client) wrapErr(format string, args ...any) error {
 	return fmt.Errorf("twelvedata: %s", msg)
 }
 
+// mapPolicyErr 把 policy 包的哨兵错误换成本包的普通错误，防止它外泄给上层。
+//
+// **走 wrapErr 而不是自起一套**：wrapErr 是本包唯一 error 出口，它负责加前缀
+// 与凭证脱敏；绕过它就绕过了脱敏。它用 %v 断链这一点在这里恰好是需要的 ——
+// 留了链 errors.Is 照样能取回 policy 哨兵，映射等于没做。
+//
+// **必须在 policy.Fetch 的返回值处调用，不能在更外层统一 catch**：更外层分不清
+// 「policy 产生的 timeout」与「HTTP 客户端自己的 timeout」。fn 自身产生的错误
+// 已经过 wrapErr，原样返回、不再包一层。
+//
+// ⚠ **临时性绝不可映射成永久性**：ErrTimeout/ErrQuotaExceeded 都是可重试的临时
+// 故障，措辞若像「解析失败/业务错误码」，上层会停止重试并把错误结果落库。
+// 故文本里显式写 retryable，并保留原始原因备排障。
+func (c *Client) mapPolicyErr(err error) error {
+	if errors.Is(err, policy.ErrTimeout) || errors.Is(err, policy.ErrQuotaExceeded) {
+		return c.wrapErr("temporary gate failure (retryable): %v", err)
+	}
+	return err
+}
+
 // timeSeriesResponse 只取本包需要的字段;数值在 TD 响应中一律是字符串。
 type timeSeriesResponse struct {
 	Status  string `json:"status"`
@@ -103,7 +124,7 @@ func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV
 		return c.fetchHistory(symbol, start, end)
 	})
 	if err != nil {
-		return nil, err
+		return nil, c.mapPolicyErr(err)
 	}
 	return slices.Clone(out), nil
 }

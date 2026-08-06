@@ -51,7 +51,7 @@ func (y *Yahoo) FetchEPSHistory(symbol string, start, end time.Time) ([]core.EPS
 		return y.fetchEPSHistory(symbol, start, end)
 	})
 	if err != nil {
-		return nil, err
+		return nil, mapPolicyErr(err)
 	}
 	// 同 FetchHistory：Gate 不复制返回值，core.EPSPoint 是 flat value type 故
 	// 浅元素拷贝即深拷贝（前提由 core/types.go 保证，不是这里）。

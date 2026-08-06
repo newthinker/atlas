@@ -3,6 +3,7 @@ package yahoo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -212,6 +213,25 @@ func (y *Yahoo) toYahooSymbol(symbol string) string {
 
 // FetchQuote fetches real-time quote
 // TTL=0(实时语义),但仍走 Gate 以共享 yahoo 限流闸门并合并同 symbol 的在途请求。
+// mapPolicyErr 把 policy 包的哨兵错误换成本包的普通错误，防止它外泄给上层。
+//
+// **必须在每个 policy.Fetch 的返回值处调用，不能在更外层统一 catch**：更外层
+// 分不清「policy 产生的 timeout」与「HTTP 客户端自己的 timeout」，统一 catch 会
+// 把两类不同来源的错误压成一类。
+//
+// 用 %v 而非 %w 是**故意断链**：留了链，errors.Is 照样能取回 policy 哨兵，映射
+// 等于没做。fn 自身产生的错误原样返回，不碰 —— 本函数只处理 Gate 产生的那些。
+//
+// ⚠ **临时性绝不可映射成永久性**：ErrTimeout/ErrQuotaExceeded 都是可重试的临时
+// 故障，措辞若像「无此标的/无数据」，上层会停止重试并把错误结果落库 —— 那是一次
+// 静默的数据损坏，不是一次失败。故文本里显式写 retryable，并保留原始原因备排障。
+func mapPolicyErr(err error) error {
+	if errors.Is(err, policy.ErrTimeout) || errors.Is(err, policy.ErrQuotaExceeded) {
+		return fmt.Errorf("yahoo: temporary gate failure (retryable): %v", err)
+	}
+	return err
+}
+
 func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 	if err := validateSymbol(symbol); err != nil {
 		return nil, err
@@ -220,7 +240,7 @@ func (y *Yahoo) FetchQuote(symbol string) (*core.Quote, error) {
 		return y.fetchQuote(symbol)
 	})
 	if err != nil {
-		return nil, err
+		return nil, mapPolicyErr(err)
 	}
 	// 合并时多个调用方共享同一指针,返回副本避免相互污染。
 	out := *q
@@ -294,7 +314,7 @@ func (y *Yahoo) FetchHistory(symbol string, start, end time.Time, interval strin
 		return y.fetchHistory(symbol, start, end, interval)
 	})
 	if err != nil {
-		return nil, err
+		return nil, mapPolicyErr(err)
 	}
 	// Gate 不复制返回值:缓存命中时多个调用方共享同一底层数组,故在此 clone。
 	// core.OHLCV 今天全是值类型,浅元素拷贝即深拷贝——**这个前提由 core/types.go
