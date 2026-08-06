@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/collector/policy"
 )
 
 // Context Checkpoint: done_criteria → test mapping
@@ -147,23 +149,26 @@ func TestFetchDailyBasicEmpty(t *testing.T) {
 	assert.NotNil(t, pts, "空结果返回空切片而非 nil")
 }
 
-func TestThrottleMinInterval(t *testing.T) {
+// 节流已迁到 policy 策略表;这里断言 tushare 确实**经过**了闸门
+// (200ms 的生产取值由 policy 包的 TestLookupBuiltinTopics 守住)。
+func TestThrottleViaGate(t *testing.T) {
 	var got map[string]any
 	resp := `{"code":0,"data":{"fields":["ts_code","trade_date","close"],"items":[]},"msg":""}`
 	srv := tsServer(t, resp, &got)
 	defer srv.Close()
+
+	tbl := zeroTable()
+	tbl.Set("tushare.daily", policy.Policy{Domain: "tushare", MinInterval: 80 * time.Millisecond})
 	c := NewWithBaseURL("tok", srv.URL)
+	c.gate = policy.New(tbl, nil)
 	start, end := yesterdayToNow()
 
-	// t0 取在第一次调用之前:节流基准 lastReq 记于请求发出前(≥t0),故第二次
-	// 请求必然发出于 t0+minInterval 之后,断言无时钟竞态。
 	t0 := time.Now()
 	_, err := c.FetchDaily("600519.SH", start, end)
 	require.NoError(t, err)
-	_, err = c.FetchDaily("600519.SH", start, end)
+	_, err = c.FetchDaily("000001.SZ", start, end) // 换标的,避免命中缓存键
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, time.Since(t0), minInterval, "连续两次请求最小间隔 %v", minInterval)
-	assert.Equal(t, 200*time.Millisecond, minInterval)
+	assert.GreaterOrEqual(t, time.Since(t0), 60*time.Millisecond, "连续两次请求须被闸门拉开间隔")
 }
 
 // M5(QA MAJOR):默认端点必须是 https —— token 走 POST body,明文 http 会让凭证
