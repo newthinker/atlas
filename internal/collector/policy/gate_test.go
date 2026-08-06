@@ -161,7 +161,12 @@ func TestGateThrottleIsPerDomainConcurrent(t *testing.T) {
 // throttle 等的是绝对时刻 lastReq+MinInterval，不是「轮到我时再等 MinInterval」。
 // 两域几乎同时预热时，A 持全局锁等到 T+300ms 释放，B 拿到锁时它要等的绝对时刻
 // 也已经过了，于是立即返回，总耗时与按域隔离无异。**要暴露全局锁，必须让 B 要等的
-// 时刻显著晚于 A 的完成时刻**：故这里 a 域长等待、b 域完全不节流。
+// 时刻显著晚于 A 的完成时刻**：故这里 a 域长等待、b 域只等一个极小间隔。
+//
+// ⚠ b 域的 MinInterval **必须 > 0**：throttle 开头有 `if p.MinInterval <= 0 { return }`
+// 的快速路径，配成 0 则 b 域根本不进入持锁临界区，于是只能捕获「全局锁加在该
+// early-return **之前**」这一种形态，加在**之后**（只保护真正节流的路径，而
+// 「先做快速路径检查再拿锁」是很自然的写法）的形态会静默存活。
 //
 // ⚠ 局限（如实声明）：本测试靠一个短 sleep 让 A 先进入 throttle，是**概率性**的
 // —— throttle 的等待发生在持锁临界区内，包外没有任何可观测信号，无法确定性地
@@ -172,7 +177,11 @@ func TestGateThrottleDoesNotHoldGlobalLock(t *testing.T) {
 	for round := 0; round < rounds; round++ {
 		g := newTestGate(t, map[string]Policy{
 			"a.x": {MinInterval: 500 * time.Millisecond},
-			"b.x": {}, // 不节流：正确实现下必须立即返回
+			// b 域必须 MinInterval > 0：throttle 开头有 `if p.MinInterval <= 0 { return }`
+			// 的快速路径，配成 0 的话 b 域**根本不进入持锁临界区**，任何加在该
+			// early-return 之后的全局锁对它都不可见。取极小正值：既进入临界区，
+			// 正确实现下又几乎立即返回，不影响下面的 150ms 阈值。
+			"b.x": {MinInterval: time.Millisecond},
 		})
 		noop := func() (int, error) { return 0, nil }
 
