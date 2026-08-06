@@ -174,6 +174,95 @@ func TestFileStoreSelfHealsAfterCorruption(t *testing.T) {
 	}
 }
 
+// ——— I/O 层 fail-open（约束 C7）———
+//
+// TestFileStoreFailsOpenOnCorruptLedger 只覆盖了 **JSON 解析失败** 这一条路径。
+// 下面三条覆盖 I/O 故障：目录建不了、账本写不进去、账本读不出来。
+//
+// 这三类在生产里**比 JSON 损坏常见得多**（磁盘满、权限变更、只读挂载）。任一处
+// 返回 (false, err)，prism refresh 就会因为**账本写不进去**而拒绝发请求——配额机制
+// 本是为保护降级链，反而成了阻断它的原因。
+//
+// 我上一轮在 discovery 里写「这些分支无法在测试中可靠构造」，是错的：下面每一种
+// 都只用 t.TempDir() + 文件权限即可，不需要 root，macOS/Linux 通用。
+
+// TestFileStoreFailsOpenOnDirError 构造 lock() 里 MkdirAll 失败：把父路径做成
+// **文件**而不是目录。
+func TestFileStoreFailsOpenOnDirError(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 父路径是个文件 → MkdirAll 必失败
+	s := NewFileStore(filepath.Join(blocker, "sub", "collector-quota.json"))
+	q := Quota{Limit: 1, Window: 24 * time.Hour, Loc: time.UTC}
+
+	ok, err := s.Take("t", q, time.Now())
+	if !ok || err == nil {
+		t.Errorf("目录建不了时必须 fail-open: (%v, %v), want (true, 非nil)", ok, err)
+	}
+}
+
+// TestFileStoreFailsOpenOnWriteError 构造 write() 里 CreateTemp 失败：预热之后把
+// 目录改成不可写。预热是必要的——lock 文件与账本要先存在，否则失败会发生在更早的
+// lock() 而非 write()。
+func TestFileStoreFailsOpenOnWriteError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "collector-quota.json")
+	s := NewFileStore(path)
+	q := Quota{Limit: 100, Window: 24 * time.Hour, Loc: time.UTC}
+	now := time.Now()
+
+	if ok, err := s.Take("t", q, now); err != nil || !ok {
+		t.Fatalf("预热 Take: (%v, %v)", ok, err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil { // r-x：可读可进入，不可写
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // 还原，否则 TempDir 清理失败
+
+	// 先确认权限确实生效（root 会无视权限位）
+	if probe, err := os.CreateTemp(dir, "probe-*"); err == nil {
+		probe.Close()
+		os.Remove(probe.Name())
+		t.Skip("当前用户无视目录权限位（root?），无法构造 write 失败")
+	}
+
+	ok, err := s.Take("t", q, now)
+	if !ok || err == nil {
+		t.Errorf("账本写不进去时必须 fail-open: (%v, %v), want (true, 非nil)", ok, err)
+	}
+}
+
+// TestFileStoreFailsOpenOnReadError 构造 read() 里 ReadFile 失败（**非** JSON 解析
+// 失败）：账本文件存在但不可读。
+func TestFileStoreFailsOpenOnReadError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "collector-quota.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	// 先确认权限确实生效（root 会无视权限位）
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("当前用户可读 0o000 文件（root?），无法构造 read I/O 错误")
+	}
+
+	s := NewFileStore(path)
+	q := Quota{Limit: 1, Window: 24 * time.Hour, Loc: time.UTC}
+
+	ok, err := s.Take("t", q, time.Now())
+	if !ok || err == nil {
+		t.Errorf("账本读不出来时必须 fail-open: (%v, %v), want (true, 非nil)", ok, err)
+	}
+}
+
 func TestFileStoreMissingFileStartsEmpty(t *testing.T) {
 	s := NewFileStore(quotaPath(t)) // 文件不存在
 	q := Quota{Limit: 1, Window: 24 * time.Hour, Loc: time.UTC}
