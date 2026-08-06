@@ -218,19 +218,27 @@ func TestCallCachedByGate(t *testing.T) {
 	}
 }
 
-// boundary[1]（反审 A7）：缓存返回值的所有权。
+// boundary[1]（反审 A7）：缓存返回值的所有权 —— 解法 (b) 逐行 map 深拷贝。
 //
 // `policy.Fetch` 命中缓存时**不复制返回值**，多个调用方拿到同一份 []row，而
-// `row.values` 是 map —— 共享的是同一个 map header。DoD 明文禁止用 `slices.Clone`
-// 充数（它复制 row 结构体但 values 仍指向同一块底层数据，隔离不了）。
+// `row.values` 是 map，共享的是同一个 map header。`call` 在返回前 cloneRows 深拷贝，
+// 使每个调用方拿到独立的一份。
 //
-// 本任务选的是 DoD 的解法 (a)：不复制，改为**钉死「消费者只读」这条不变量**。
-// 测试形态：同一 Fetch* 连调两次，第二次必然命中 TTL 缓存、拿到与第一次同一份
-// []row；断言两次结果逐字段相等。若将来有人加一个写 `r.values[k]=...` 的消费者，
-// 第一次调用就会污染共享的 rows，第二次的返回值随即不同 → 转红。
+// 判据是「改返回值 → 再取 → 缓存未被污染」，直接观测**隔离本身**这个性质，
+// 而不是去观测调用方代码有没有写操作。
 //
-// 这是行为断言而非 AST 扫描：它覆盖所有现有消费者，且不依赖写法形状。
-func TestCachedRowsNotMutatedByConsumers(t *testing.T) {
+// 关键在于它能把 `slices.Clone` 与真深拷贝区分开（DoD 明文禁止前者）：
+// `slices.Clone` 复制 row 结构体但 values 仍指向同一块底层数据，第 1 段的 map
+// 写入会穿透到缓存里，第 2 次取值即转红。已用变异实测确认。
+//
+// **不要退回「用测试钉死消费者只读」那个方案**（首轮曾采用，验证后撤销）：
+// 行为测试可测的是「写**导致返回值可观测地变化**」，不可测的是「写本身」，
+// 两者的差集永远测不到。实测漏检的一类是**归一化写回**——消费者写
+// `if math.IsNaN(r.values["pe_ttm"]) { r.values["pe_ttm"] = 0 }` 时全套用例全绿，
+// 而 NaN 恰恰是本包自己造的（client.go 里非数值列与缺列一律填 NaN），
+// 消费者做 NaN→0 归一化是完全合理的需求。差集还包括幂等写与条件不触发的写。
+// (b) 没有这个差集：调用方拿到的本就是自己的副本，写什么都到不了缓存。
+func TestCachedRowsAreIsolatedFromCallers(t *testing.T) {
 	body := `{"code":0,"msg":"","data":{"fields":["ts_code","trade_date","pe_ttm","pb","ps_ttm"],"items":[["600519.SH","20260805",25.1,8.2,11.3],["600519.SH","20260804",24.9,8.1,11.2]]}}`
 	srv, hits := countingServer(t, body)
 	tbl := zeroTable()
@@ -238,49 +246,44 @@ func TestCachedRowsNotMutatedByConsumers(t *testing.T) {
 	c := NewWithBaseURL("tok", srv.URL)
 	c.gate = policy.New(tbl, nil)
 
-	start, end := time.Now().AddDate(0, 0, -5), time.Now()
-	first, err := c.FetchDailyBasic("600519.SH", start, end)
+	params := dateParams("600519.SH", time.Now().AddDate(0, 0, -5), time.Now())
+	const fields = "ts_code,trade_date,pe_ttm,pb,ps_ttm"
+
+	r1, err := c.call("daily_basic", params, fields)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.FetchDailyBasic("600519.SH", start, end)
-	if err != nil {
-		t.Fatal(err)
+	if len(r1) != 2 {
+		t.Fatalf("len(r1) = %d, want 2", len(r1))
 	}
 
+	// 调用方改自己拿到的那份：map 值、新增键、以及结构体字段本身。
+	r1[0].values["pe_ttm"] = -999
+	r1[0].values["injected"] = 1
+	r1[1].date = time.Time{}
+
+	r2, err := c.call("daily_basic", params, fields)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if hits() != 1 {
 		t.Fatalf("第二次必须命中缓存才构成本测试的前提, HTTP 请求 %d 次", hits())
 	}
-	if len(first) != 2 || len(second) != len(first) {
-		t.Fatalf("长度异常: first=%d second=%d", len(first), len(second))
+
+	if got := r2[0].values["pe_ttm"]; got != 24.9 { // 行按日期升序，r[0] 是 20260804
+		t.Errorf("缓存被调用方的 map 写入污染: pe_ttm = %v, want 24.9（slices.Clone 会走到这里）", got)
 	}
-	for i := range first {
-		if first[i] != second[i] {
-			t.Errorf("第 %d 行：缓存命中后返回值发生变化，说明有消费者写了共享的 row.values\n"+
-				"  first  = %+v\n  second = %+v", i, first[i], second[i])
-		}
+	if _, ok := r2[0].values["injected"]; ok {
+		t.Error("调用方新增的键穿透到了缓存条目，说明 values 仍是共享的同一个 map")
+	}
+	if r2[1].date.IsZero() {
+		t.Error("调用方对 row 结构体字段的写入穿透到了缓存条目")
 	}
 
-	// 同一份共享 rows 也会被**不同**消费者读到（fetchClose 走另一个 api，
-	// 这里退而验证 daily 侧同样满足只读不变量）。
-	priceSrv, priceHits := countingServer(t, `{"code":0,"msg":"","data":{"fields":["ts_code","trade_date","close"],"items":[["600519.SH","20260805",1680.5]]}}`)
-	tbl2 := zeroTable()
-	tbl2.Set("tushare.daily", policy.Policy{Domain: "tushare", TTL: time.Minute, Coalesce: true})
-	pc := NewWithBaseURL("tok", priceSrv.URL)
-	pc.gate = policy.New(tbl2, nil)
-	p1, err := pc.FetchDaily("600519.SH", start, end)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p2, err := pc.FetchDaily("600519.SH", start, end)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if priceHits() != 1 {
-		t.Fatalf("第二次必须命中缓存, HTTP 请求 %d 次", priceHits())
-	}
-	if len(p1) != 1 || len(p2) != 1 || p1[0] != p2[0] {
-		t.Errorf("fetchClose 侧：缓存命中后返回值发生变化 first=%+v second=%+v", p1, p2)
+	// 反向：两次取到的必须是不同的 map 实例，否则上面的断言只是碰巧成立。
+	r2[0].values["pe_ttm"] = -1
+	if r1[0].values["pe_ttm"] == r2[0].values["pe_ttm"] {
+		t.Error("两次调用返回了同一个 map 实例，未发生深拷贝")
 	}
 }
 
@@ -290,13 +293,58 @@ func TestCallKeyDistinguishesParams(t *testing.T) {
 	if a == b {
 		t.Error("不同 ts_code 必须产生不同缓存键")
 	}
-	// map 遍历顺序随机，键必须稳定
-	for i := 0; i < 20; i++ {
-		if callKey(map[string]string{"ts_code": "600519.SH", "start_date": "20260101"}, "close") != a {
-			t.Fatal("缓存键必须与 map 遍历顺序无关")
-		}
-	}
 	if callKey(map[string]string{"ts_code": "600519.SH"}, "close") == callKey(map[string]string{"ts_code": "600519.SH"}, "pe_ttm") {
 		t.Error("fields 不同必须产生不同缓存键")
+	}
+}
+
+// 排序守护单独立一条:它防的是**静默失效**——不排序时功能全对、只是同一次查询
+// 散落到多个缓存槽、命中率归零,没有任何断言会因「结果不对」而红。
+//
+// 首轮交付时这条守护是概率性的:只断言「重复算 N 次结果相同」,而 Go 的 map
+// 遍历顺序是每次 range 随机,2 个键时未排序实现有 1/2 概率碰巧一致
+// (验证者实测捕获率 90~95%,我当时误报成「连跑 5 次稳定红」)。现改为两条确定性判据:
+//
+//  1. **对着排好序的字面量断言**,而不是断言「两次算的一样」。判据不再依赖随机性,
+//     只要某次遍历吐出非字典序就必红;配合 4 个键 × 200 次,未排序实现要连续 200 次
+//     都恰好撞中字典序才能逃过,概率 (1/24)^200。
+//  2. **端到端断言散落多槽的后果本身**:同一组 params 用不同插入顺序构造两个 map,
+//     经完整 Fetch 路径只应发出 1 次 HTTP 请求。
+func TestCallKeyIsOrderIndependent(t *testing.T) {
+	const want = "end_date=20260131&start_date=20260101&ts_code=600519.SH&fields=close"
+	for i := 0; i < 200; i++ {
+		params := map[string]string{
+			"ts_code":    "600519.SH",
+			"start_date": "20260101",
+			"end_date":   "20260131",
+		}
+		if got := callKey(params, "close"); got != want {
+			t.Fatalf("第 %d 次:缓存键必须按键名字典序拼接\n got = %q\nwant = %q", i, got, want)
+		}
+	}
+
+	// 后果侧:插入顺序不同的两个等价 params 必须命中同一个缓存槽。
+	srv, hits := countingServer(t, `{"code":0,"msg":"","data":{"fields":["ts_code","trade_date","close"],"items":[["600519.SH","20260805",1680.5]]}}`)
+	tbl := zeroTable()
+	tbl.Set("tushare.daily", policy.Policy{Domain: "tushare", TTL: time.Minute, Coalesce: true})
+	c := NewWithBaseURL("tok", srv.URL)
+	c.gate = policy.New(tbl, nil)
+
+	p1 := map[string]string{}
+	for _, kv := range [][2]string{{"ts_code", "600519.SH"}, {"start_date", "20260101"}, {"end_date", "20260131"}} {
+		p1[kv[0]] = kv[1]
+	}
+	p2 := map[string]string{}
+	for _, kv := range [][2]string{{"end_date", "20260131"}, {"start_date", "20260101"}, {"ts_code", "600519.SH"}} {
+		p2[kv[0]] = kv[1]
+	}
+	if _, err := c.call("daily", p1, "ts_code,trade_date,close"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.call("daily", p2, "ts_code,trade_date,close"); err != nil {
+		t.Fatal(err)
+	}
+	if hits() != 1 {
+		t.Errorf("等价 params 散落到了多个缓存槽:HTTP 请求 %d 次, want 1", hits())
 	}
 }

@@ -83,14 +83,10 @@ type row struct {
 
 // call 经策略闸门发一次 api 并返回按 fields 列名索引的行(按日期升序)。
 //
-// 返回的 []row 在缓存命中时由多个调用方共享(policy.Fetch 命中缓存时不复制返回值),
-// 且 row.values 是 map ——**浅拷贝隔离不了它,slices.Clone 也不行**(复制的是 row
-// 结构体,每个副本的 values 仍是同一个 map header 指向同一块底层数据)。
-// 这里选择不复制,代价是本包所有消费者**必须只读 row**:FetchDailyBasic 与
-// fetchClose 都只读 values 并立即构造新的值类型切片。
-// 该不变量由 TestCachedRowsNotMutatedByConsumers 守护——**它不是一句注释约定**:
-// 任何写 r.values[k] 的新消费者都会污染共享的缓存条目,使第二次(命中缓存的)
-// 调用返回不同结果而转红。要改成复制的话必须逐行新建 map,不能用 slices.Clone。
+// policy.Fetch 命中缓存时**不复制返回值**,多个调用方会拿到同一份 []row,而
+// row.values 是 map ——共享的是同一个 map header。故这里在返回前 cloneRows 深拷贝,
+// 让每个调用方拿到独立的一份:调用方改自己那份不会污染缓存条目,也不会影响其他
+// 调用方(反审 A7)。**不能用 slices.Clone 代替**,理由见 cloneRows。
 func (c *Client) call(apiName string, params map[string]string, fields string) ([]row, error) {
 	rows, err := policy.Fetch(c.gate, topicPrefix+apiName, callKey(params, fields), func() ([]row, error) {
 		return c.callHTTP(apiName, params, fields)
@@ -103,7 +99,29 @@ func (c *Client) call(apiName string, params map[string]string, fields string) (
 	if errors.Is(err, policy.ErrQuotaExceeded) {
 		return nil, fmt.Errorf("%w: %s (本地配额预判，未发出请求)", ErrRateLimited, apiName)
 	}
-	return rows, err
+	return cloneRows(rows), err
+}
+
+// cloneRows 返回与入参完全独立的一份拷贝。
+//
+// **不能用 slices.Clone**:它只复制 row 结构体,每个副本的 values 字段仍是
+// 同一个 map header、指向同一块底层数据——调用方改一个键,所有共享该缓存条目
+// 的调用方都会看到。真隔离必须逐行新建 map,这也是 DoD 明文禁止 slices.Clone
+// 的原因。TestCachedRowsAreIsolatedFromCallers 用「改返回值 → 再取 → 断言缓存
+// 未被污染」守护本函数,并已实测能把 slices.Clone 与本实现区分开。
+func cloneRows(in []row) []row {
+	if in == nil {
+		return nil
+	}
+	out := make([]row, len(in))
+	for i, r := range in {
+		values := make(map[string]float64, len(r.values))
+		for k, v := range r.values {
+			values[k] = v
+		}
+		out[i] = row{date: r.date, values: values}
+	}
+	return out
 }
 
 // callKey 是缓存/合并键。map 遍历顺序随机,必须按键名排序后拼接,

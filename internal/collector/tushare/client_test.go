@@ -151,6 +151,12 @@ func TestFetchDailyBasicEmpty(t *testing.T) {
 
 // 节流已迁到 policy 策略表;这里断言 tushare 确实**经过**了闸门
 // (200ms 的生产取值由 policy 包的 TestLookupBuiltinTopics 守住)。
+//
+// 断言取 iv 本身而非留容差:Gate.throttle(gate.go:202-213)**先 sleep 到
+// 「上次请求时刻+MinInterval」再更新该时刻**,故首次记下的时刻 >= t0,
+// 第二次必然发出于 t0+iv 之后 —— time.Since(t0) >= iv 严格成立,无时钟竞态。
+// 实测:iv=80ms 时该断言连跑 20 次全绿;把策略削弱到 70ms 则 10 次全红,
+// 而写成 60ms 容差版本 10 次全绿 —— 容差会放过 60~80ms 整段错误空间(契约陷阱 6)。
 func TestThrottleViaGate(t *testing.T) {
 	var got map[string]any
 	resp := `{"code":0,"data":{"fields":["ts_code","trade_date","close"],"items":[]},"msg":""}`
@@ -158,7 +164,8 @@ func TestThrottleViaGate(t *testing.T) {
 	defer srv.Close()
 
 	tbl := zeroTable()
-	tbl.Set("tushare.daily", policy.Policy{Domain: "tushare", MinInterval: 80 * time.Millisecond})
+	const iv = 80 * time.Millisecond // 配置与断言共用同一个值,不留第二个数
+	tbl.Set("tushare.daily", policy.Policy{Domain: "tushare", MinInterval: iv})
 	c := NewWithBaseURL("tok", srv.URL)
 	c.gate = policy.New(tbl, nil)
 	start, end := yesterdayToNow()
@@ -168,7 +175,7 @@ func TestThrottleViaGate(t *testing.T) {
 	require.NoError(t, err)
 	_, err = c.FetchDaily("000001.SZ", start, end) // 换标的,避免命中缓存键
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, time.Since(t0), 60*time.Millisecond, "连续两次请求须被闸门拉开间隔")
+	assert.GreaterOrEqual(t, time.Since(t0), iv, "连续两次请求须被闸门拉开 %v 间隔", iv)
 }
 
 // M5(QA MAJOR):默认端点必须是 https —— token 走 POST body,明文 http 会让凭证
