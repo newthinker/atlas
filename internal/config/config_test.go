@@ -640,3 +640,89 @@ func TestConfig_Validate_SignalBackendValid(t *testing.T) {
 		}
 	}
 }
+
+// ——— collector.quota / collector.topics（TASK-006）———
+
+// TestLoad_LegacyConfigWithoutQuotaAndTopics 覆盖 boundary[1]（反审 A12）：
+// **生产在用的就是这份不含 collector.quota / collector.topics 的旧配置。**
+// 新增字段用的是指针语义、且 Load 里加了默认值填充，必须确认旧配置仍能装载、
+// 行为不变，并拿到默认账本路径（否则跨进程配额落不了盘）。
+func TestLoad_LegacyConfigWithoutQuotaAndTopics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.yaml")
+	// 只有 collector.cache，没有 quota / topics —— 旧版配置的形状
+	yaml := "collector:\n  cache:\n    enabled: true\n    ttl: 10m\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("旧配置必须仍能装载: %v", err)
+	}
+
+	// 既有行为不变
+	if !cfg.Collector.Cache.Enabled {
+		t.Error("cache.enabled 应为 true")
+	}
+	if cfg.Collector.Cache.TTL != 10*time.Minute {
+		t.Errorf("cache.ttl = %v, want 10m", cfg.Collector.Cache.TTL)
+	}
+	// 新字段拿到默认值 / 零值
+	if cfg.Collector.Quota.Path != defaultQuotaPath {
+		t.Errorf("未配置 quota.path 时应回落默认值: got %q, want %q",
+			cfg.Collector.Quota.Path, defaultQuotaPath)
+	}
+	if len(cfg.Collector.Topics) != 0 {
+		t.Errorf("未配置 topics 时应为空: got %v", cfg.Collector.Topics)
+	}
+}
+
+// TestLoad_TopicConfigPointerSemantics 守护指针语义：yaml 里**显式写 0/false**
+// 与**根本不写**必须可区分。写成值类型的话两者都是零值，配置里 `ttl: 0`
+// （显式关掉该主题缓存）会被当成「没配」而静默失效。
+func TestLoad_TopicConfigPointerSemantics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "topics.yaml")
+	yaml := "collector:\n" +
+		"  topics:\n" +
+		"    yahoo.chart:\n" +
+		"      ttl: 0\n" +
+		"      coalesce: false\n" +
+		"    yahoo.eps:\n" +
+		"      min_interval: 1s\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chart, ok := cfg.Collector.Topics["yahoo.chart"]
+	if !ok {
+		t.Fatal("yahoo.chart 未装载")
+	}
+	if chart.TTL == nil {
+		t.Error("显式写 ttl: 0 必须能与「未设置」区分，got nil")
+	} else if *chart.TTL != 0 {
+		t.Errorf("ttl = %v, want 0", *chart.TTL)
+	}
+	if chart.Coalesce == nil {
+		t.Error("显式写 coalesce: false 必须能与「未设置」区分，got nil")
+	} else if *chart.Coalesce {
+		t.Error("coalesce = true, want false")
+	}
+	if chart.MinInterval != nil {
+		t.Errorf("未设置的 min_interval 应为 nil, got %v", *chart.MinInterval)
+	}
+
+	eps := cfg.Collector.Topics["yahoo.eps"]
+	if eps.MinInterval == nil || *eps.MinInterval != time.Second {
+		t.Errorf("yahoo.eps.min_interval = %v, want 1s", eps.MinInterval)
+	}
+	if eps.TTL != nil {
+		t.Errorf("未设置的 ttl 应为 nil, got %v", *eps.TTL)
+	}
+}

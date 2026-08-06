@@ -80,6 +80,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("config validation failed: %w", err)
 	}
 
+	// 必须早于 buildCollectors：collector 在构造函数里取 policy.Default()。
+	// serve 不经 loadConfigOrDefaults，故在此单独接线。
+	initPolicyGate(cfg, log)
+
 	log.Info("starting ATLAS server",
 		zap.String("host", cfg.Server.Host),
 		zap.Int("port", cfg.Server.Port),

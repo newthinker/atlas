@@ -281,14 +281,21 @@ func requireBenchmark(symbols []string, market string) error {
 // (export-signals carries no config loading, so it cannot serve as a reference —
 // plan C1-5.)
 func loadConfigOrDefaults() (*config.Config, error) {
+	var cfg *config.Config
 	if cfgFile != "" {
-		cfg, err := config.Load(cfgFile)
+		loaded, err := config.Load(cfgFile)
 		if err != nil {
 			return nil, fmt.Errorf("loading config: %w", err)
 		}
-		return cfg, nil
+		cfg = loaded
+	} else {
+		cfg = config.Defaults()
 	}
-	return config.Defaults(), nil
+	// 装在 helper **内部**而非各调用点：prism refresh / crisis / export_signals /
+	// watchlist 都经由这里装载配置，且都在随后才构造 collector。放到外面会让这些
+	// 入口拿到懒构造的无账本 Gate，配额彻底失效而测试照常全绿（反审 A1）。
+	initPolicyGate(cfg, nil)
+	return cfg, nil
 }
 
 // newCollectorRegistry builds the CLI collector registry: yahoo, eastmoney and

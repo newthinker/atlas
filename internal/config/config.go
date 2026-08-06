@@ -59,12 +59,37 @@ type AnalysisConfig struct {
 // per-collector Collectors map). Top-level yaml key: "collector".
 type CollectorGlobalConfig struct {
 	Cache CacheConfig `mapstructure:"cache"`
+	Quota QuotaConfig `mapstructure:"quota"`
+	// Topics 按主题名字段级覆盖内置策略表（internal/collector/policy）。
+	// 键形如 "tushare.daily_basic" / "yahoo.chart"。
+	Topics map[string]TopicConfig `mapstructure:"topics"`
 }
 
-// CacheConfig holds OHLCV collector cache settings.
+// defaultQuotaPath 与 storage.signals.path 同风格，落在仓库的 data/ 下。
+const defaultQuotaPath = "data/collector-quota.json"
+
+// CacheConfig holds OHLCV collector cache settings. Enabled=false 会把**所有**
+// 主题的 TTL 强制归零（限流与配额不受影响）。
 type CacheConfig struct {
 	Enabled bool          `mapstructure:"enabled"`
 	TTL     time.Duration `mapstructure:"ttl"`
+}
+
+// QuotaConfig points at the cross-process collector quota ledger.
+type QuotaConfig struct {
+	Path string `mapstructure:"path"`
+}
+
+// TopicConfig 是单个策略主题的字段级覆盖。**指针字段**：未写的键保持内置值，
+// 写成 0 则是「显式关掉」（如 ttl: 0 关闭该主题缓存、coalesce: false 关闭合并）。
+// 用指针而非零值判定，因为 0 与 false 都是合法取值。
+type TopicConfig struct {
+	TTL         *time.Duration `mapstructure:"ttl"`
+	MinInterval *time.Duration `mapstructure:"min_interval"`
+	Timeout     *time.Duration `mapstructure:"timeout"`
+	Coalesce    *bool          `mapstructure:"coalesce"`
+	QuotaLimit  *int           `mapstructure:"quota_limit"`
+	QuotaWindow *time.Duration `mapstructure:"quota_window"`
 }
 
 type ServerConfig struct {
@@ -303,6 +328,16 @@ func Load(path string) (*Config, error) {
 	if cfg.Collector.Cache.TTL <= 0 {
 		cfg.Collector.Cache.TTL = 5 * time.Minute
 	}
+	// 旧配置不含 collector.quota 块，补默认账本路径（否则跨进程配额落不了盘）。
+	if cfg.Collector.Quota.Path == "" {
+		cfg.Collector.Quota.Path = defaultQuotaPath
+	}
+	// 主题名含点号，必须绕开 viper 的 Unmarshal 重建（详见 decodeTopics）。
+	topics, err := decodeTopics(v.Get("collector.topics"))
+	if err != nil {
+		return nil, fmt.Errorf("collector.topics: %w", err)
+	}
+	cfg.Collector.Topics = topics
 
 	// Signal store defaults to persistent sqlite so legacy configs without a
 	// storage.signals block load cleanly and persist by default (behaviour
@@ -356,6 +391,7 @@ func Defaults() *Config {
 				Enabled: true,
 				TTL:     5 * time.Minute,
 			},
+			Quota: QuotaConfig{Path: defaultQuotaPath},
 		},
 		Metrics: MetricsConfig{
 			Enabled: true,
@@ -532,5 +568,88 @@ func (c *Config) WarnHardcodedSecrets(logger func(string)) {
 		if f.value != "" && !strings.HasPrefix(f.value, "${") {
 			logger(fmt.Sprintf("WARNING: %s appears to be hardcoded (use ${ENV_VAR} syntax)", f.name))
 		}
+	}
+}
+
+// decodeTopics 从 viper 的**原始 map** 重建 collector.topics。
+//
+// 为什么不能直接靠 v.Unmarshal：viper 用 "." 作为 key 分隔符，而策略主题名本身
+// 含点（yahoo.chart、tushare.daily_basic）。Unmarshal 到 map[string]TopicConfig
+// 时会把主题名当成嵌套层级拆开，结果是 topics 里只剩 {"yahoo": {全字段 nil}} ——
+// **配置被静默丢弃，装载不报错、覆盖不生效**。
+// v.Get("collector.topics") 拿到的原始 map 保留了完整 key，故从它重建。
+//
+// duration 接受 "1s" 这类字符串与整数（纳秒），与 mapstructure 对其他 duration
+// 字段的既有行为一致。
+func decodeTopics(raw any) (map[string]TopicConfig, error) {
+	m, ok := raw.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]TopicConfig, len(m))
+	for topic, v := range m {
+		fields, ok := v.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s: expected a mapping, got %T", topic, v)
+		}
+		var tc TopicConfig
+		for name, val := range fields {
+			var err error
+			switch name {
+			case "ttl":
+				tc.TTL, err = topicDuration(val)
+			case "min_interval":
+				tc.MinInterval, err = topicDuration(val)
+			case "timeout":
+				tc.Timeout, err = topicDuration(val)
+			case "quota_window":
+				tc.QuotaWindow, err = topicDuration(val)
+			case "coalesce":
+				b, ok := val.(bool)
+				if !ok {
+					err = fmt.Errorf("expected bool, got %T", val)
+				} else {
+					tc.Coalesce = &b
+				}
+			case "quota_limit":
+				n, ok := val.(int)
+				if !ok {
+					err = fmt.Errorf("expected int, got %T", val)
+				} else {
+					tc.QuotaLimit = &n
+				}
+			default:
+				err = fmt.Errorf("unknown field")
+			}
+			if err != nil {
+				return nil, fmt.Errorf("%s.%s: %w", topic, name, err)
+			}
+		}
+		out[topic] = tc
+	}
+	return out, nil
+}
+
+// topicDuration 解析 TopicConfig 的 duration 字段：字符串走 ParseDuration，
+// 整数按纳秒（与 mapstructure 的既有 duration 行为一致）。
+func topicDuration(val any) (*time.Duration, error) {
+	switch x := val.(type) {
+	case string:
+		d, err := time.ParseDuration(x)
+		if err != nil {
+			return nil, err
+		}
+		return &d, nil
+	case int:
+		d := time.Duration(x)
+		return &d, nil
+	case int64:
+		d := time.Duration(x)
+		return &d, nil
+	case float64:
+		d := time.Duration(x)
+		return &d, nil
+	default:
+		return nil, fmt.Errorf("expected duration string or integer, got %T", val)
 	}
 }
