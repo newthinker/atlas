@@ -108,6 +108,16 @@ func TestWindowStartSubDayUsesTruncate(t *testing.T) {
 // 自然日对齐需要一个时区，Quota 由调用方构造、Loc 可能为 nil，此时按 UTC 自然日
 // 对齐而不是 panic。
 func TestWindowStartNilLocUsesUTC(t *testing.T) {
+	// 「不该 panic」型的 DoD 必须用 recover 把 panic 转成断言失败：裸 panic 会
+	// **中断整个测试二进制**，同一次运行里排在后面的测试根本跑不到，它们守护的
+	// DoD 在那次运行中完全失去检验（实测：删掉 Loc 兜底后 PASS 数从 50 掉到 38）。
+	// 红的方式决定了其他测试还能不能跑。
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Loc 为 nil 时不得 panic: %v", r)
+		}
+	}()
+
 	q := Quota{Limit: 1, Window: 24 * time.Hour} // Loc 为 nil
 	now := time.Date(2026, 8, 6, 23, 0, 0, 0, time.UTC)
 	want := time.Date(2026, 8, 6, 0, 0, 0, 0, time.UTC)
@@ -270,10 +280,15 @@ func TestCoalescedRequestsConsumeOneQuota(t *testing.T) {
 
 // TestUnregisteredTopicDoesNotTouchQuota 覆盖 boundary[2]③（约束 C6）。
 //
-// 这条针对的是 fetch 里 `if !ok { return fn() }` 这个直通短路：删掉它，在
-// takeQuota 还是空桩时是等价变异（零值 Policy 让后续步骤全部短路），但接入
-// 真实 QuotaStore 后未登记主题会被计入配额，而
-// TestGateUnregisteredTopicPassesThrough 测不出（它只断言 fn 次数与耗时）。
+// **它守护的是什么**：将来有人给未登记主题配上带 Quota 的兜底策略——那会让
+// 六家未接入的 collector 被计入配额，而 TestGateUnregisteredTopicPassesThrough
+// 测不出（它只断言 fn 调用次数与耗时）。
+//
+// **它不守护什么**：删掉 fetch 里 `if !ok { return fn() }` 这个直通短路（变异 G8）。
+// 实测该变异下本测试仍绿，因为「未登记主题不触达配额记账」由**两道各自独立充分的
+// 短路**保证：① 这里的直通短路；② takeQuota 开头的 `p.Quota == nil` 检查（未登记
+// 主题拿到零值 Policy，其 Quota 就是 nil）。删掉任一道，另一道仍然拦住。
+// ⇒ 「删掉守卫 X 后行为不变」不等于「X 无用」，可能只是存在另一道守卫。
 func TestUnregisteredTopicDoesNotTouchQuota(t *testing.T) {
 	store := &countingStore{allow: true}
 	g := New(&Table{policies: make(map[string]Policy)}, store) // 空表：任何主题都未登记
