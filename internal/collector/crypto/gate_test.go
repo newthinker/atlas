@@ -25,8 +25,15 @@ import (
 //               → TestFetchHistoryNotThrottled
 // boundary[1]   "缓存命中时返回独立切片"（[]core.OHLCV 全值类型 ⇒ slices.Clone 足够）
 //               → TestFetchHistoryReturnsIndependentSlice
-// error_handling "错误不写缓存（判据是请求次数）/ policy 错误不外泄"
-//               → TestErrorIsNotCached / TestPolicyErrorDoesNotLeak
+// error_handling 分句① "错误不写缓存（判据是请求次数）"
+//               → TestErrorIsNotCached（provider 返回 err != nil 那条路径）
+// error_handling 分句② "**校验必须留在被缓存的 fn 内部**"（陷阱 14）
+//               → TestEmptyResultIsNotCached（provider 返回「空切片 + nil error」那条路径）
+//               ⚠ 两条分句要分别守：分句①走的是 err != nil 路径，**测不到**把长度校验
+//                 移出 fn 的变异（C11）——那条变异只改「空结果」路径，两者互不相交。
+//                 复合句 DoD 必须分句取证（首轮我只写了①就以为整条有守护）。
+// error_handling 分句③ "policy 错误不外泄"
+//               → TestPolicyErrorDoesNotLeak
 
 // TestMain 把默认闸门换成零策略。
 //
@@ -387,7 +394,39 @@ func TestFetchHistoryReturnsIndependentSlice(t *testing.T) {
 	}
 }
 
-// error_handling：错误不得写进缓存。
+// error_handling 分句②（陷阱 14）：**空结果校验必须留在被缓存的 fn 内部**。
+//
+// 本包版本的「HTTP 200 但业务失败」是 provider 返回「**空切片 + nil error**」——
+// 上游通了、没数据。fetchHistoryFromProviders 里 `if err == nil && len(data) > 0`
+// 这条长度校验把它判为失败（最终落到 `no data available`），而失败不写缓存。
+//
+// 把那条校验移出被缓存的 fn（改由 policy.Fetch 返回后再判空）会让**空结果被当成功
+// 写进缓存**：「无数据」这个结论被冻结整个 TTL（内置 5 分钟），标的后来有数据也看不到。
+//
+// ⚠ TestErrorIsNotCached 抓不到这条：它走的是 err != nil 路径，而该变异只改
+// 「空结果」路径，两者互不相交。复合句 DoD 必须分句取证。
+//
+// 决定性判据是**取数次数**而不是返回的 error：空结果被缓存时第二次同样返回 error，
+// 断言 error 的写法两种实现都绿。
+func TestEmptyResultIsNotCached(t *testing.T) {
+	// history 与 err 均为 nil ⇒ provider 返回 (nil, nil)，即「通了但没数据」。
+	p := &countingProvider{name: "stub"}
+	c := newGatedCollector(p, builtinGate())
+	start, end := testRange()
+
+	for i := 1; i <= 2; i++ {
+		if _, err := c.FetchHistory("BTC", start, end, "1d"); err == nil {
+			t.Fatalf("第 %d 次应失败：provider 无数据时不得判成功", i)
+		}
+	}
+	if got := p.count(); got != 2 {
+		t.Errorf("空结果被写进了缓存：两次调用只向 provider 取了 %d 次，want 2。"+
+			"「无数据」这个结论会被冻结整个 TTL（内置 5 分钟），标的后来有数据也看不到——"+
+			"根因是长度校验被移出了被缓存的 fn", got)
+	}
+}
+
+// error_handling 分句①：错误不得写进缓存。
 //
 // 决定性判据是**请求次数**而不是返回的 error：错误被缓存时第二次同样返回 error，
 // 断言 error 的写法两种实现都绿。一次瞬时故障若被缓存，会变成整个 TTL 的持续故障。
