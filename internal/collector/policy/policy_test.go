@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -233,7 +234,13 @@ func TestNoImportOfCollectorRoot(t *testing.T) {
 	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
 	out, err := cmd.Output()
 	if err != nil {
-		t.Skipf("go list 不可用，跳过依赖约束检查: %v", err)
+		// 只有「PATH 里根本没有 go」才允许跳过（如 go test -c 后脱离工具链单独执行）。
+		// 其余错误（依赖解析失败等）本应转红——一律 Skip 会让 C3 守卫静默失效，
+		// 那与 M10「守卫看起来在、实际不设防」是同一类问题。
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skipf("PATH 中没有 go，无法执行 C3 依赖约束检查: %v", err)
+		}
+		t.Fatalf("go list -deps 失败，C3 约束无法验证: %v", err)
 	}
 
 	for _, dep := range strings.Split(strings.TrimSpace(string(out)), "\n") {
