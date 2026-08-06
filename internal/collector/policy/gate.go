@@ -32,6 +32,7 @@ var ErrTimeout = errors.New("policy: fn timeout")
 // 让未接线的调用点安全降级。
 type Gate struct {
 	table *Table
+	quota QuotaStore
 	warn  func(msg string, err error)
 
 	domainsMu sync.Mutex
@@ -68,13 +69,14 @@ func WithWarn(f func(msg string, err error)) Option {
 	return func(g *Gate) { g.warn = f }
 }
 
-// New 构造 Gate。table 为 nil 时用内置表。
-func New(t *Table, opts ...Option) *Gate {
+// New 构造 Gate。table 为 nil 时用内置表；q 为 nil 时不做配额预判。
+func New(t *Table, q QuotaStore, opts ...Option) *Gate {
 	if t == nil {
 		t = NewTable()
 	}
 	g := &Gate{
 		table:   t,
+		quota:   q,
 		warn:    func(string, error) {},
 		domains: make(map[string]*domainState),
 		entries: make(map[string]cacheEntry),
@@ -296,5 +298,23 @@ func runWithTimeout[T any](d time.Duration, fn func() (T, error)) (T, error) {
 	}
 }
 
-// takeQuota 在 Task 3 接入 QuotaStore 前先放行一切。
-func (g *Gate) takeQuota(topic string, p Policy) error { return nil }
+// takeQuota 做配额预判。账本异常时 fail-open：放行并告警，绝不因账本损坏
+// 阻断降级链（设计 §4.4 / 约束 C7）。
+//
+// 调用点位于执行链 ③：**查缓存之后、singleflight 内侧、节流之前**。这个位置
+// 是契约不是巧合——挪到查缓存之前会让缓存命中吃掉配额，挪到 singleflight 外侧
+// 会让 N 个合并请求各消耗一次，两者都由 boundary[2] 的测试钉住。
+func (g *Gate) takeQuota(topic string, p Policy) error {
+	if p.Quota == nil || g.quota == nil {
+		return nil
+	}
+	ok, err := g.quota.Take(topic, *p.Quota, time.Now())
+	if err != nil {
+		g.warn("collector quota ledger unavailable, failing open: topic="+topic, err)
+		return nil
+	}
+	if !ok {
+		return ErrQuotaExceeded
+	}
+	return nil
+}

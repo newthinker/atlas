@@ -55,7 +55,7 @@ func newTestGate(t *testing.T, topics map[string]Policy) *Gate {
 	for topic, p := range topics {
 		tbl.Set(topic, p)
 	}
-	return New(tbl)
+	return New(tbl, nil) // 不接配额账本：配额相关用例在 quota_test.go
 }
 
 func TestGateThrottlesSameDomain(t *testing.T) {
@@ -617,7 +617,7 @@ func TestWithWarnIsApplied(t *testing.T) {
 	var gotErr error
 	wantErr := errors.New("ledger broken")
 
-	g := New(nil, WithWarn(func(msg string, err error) { gotMsg, gotErr = msg, err }))
+	g := New(nil, nil, WithWarn(func(msg string, err error) { gotMsg, gotErr = msg, err }))
 	if g.table == nil {
 		t.Fatal("New(nil) 应使用内置表")
 	}
