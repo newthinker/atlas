@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -183,21 +185,36 @@ func TestDisableTTLKeepsThrottle(t *testing.T) {
 	tbl := NewTable()
 	tbl.DisableTTL()
 
-	// 「全部主题 TTL 归零」是量词断言，先给量词一个下界：Topics() 恒返空切片时
-	// 下面的循环零次执行，TTL 断言 vacuously true。这也顺带成为 Topics() 唯一的
-	// 直接断言（它是公开方法，Gate 可能用来枚举主题）。
-	topics := tbl.Topics()
-	if len(topics) != 9 {
-		t.Fatalf("内置主题数 = %d, want 9", len(topics))
+	// 三层断言，每层守一个**不同的被测对象**，不可合并也不可省略。
+	//
+	// ① 对 Topics() 做**集合等值**。此前用的「基数 + 逐元素 Lookup 命中」有三条
+	//    实测逃逸：返 9 个 lixinger.* 域内假名（Lookup 是三段查表，任何
+	//    lixinger.<任意> 都经通配段命中，该谓词**宽于**「已登记主题」）、返同一
+	//    主题重复 9 次、以及前者与「DisableTTL 只清 lixinger.*」组合后全绿逃逸。
+	//    集合等值不给任何逼近的余地。want 的 9 个主题名从实现直读
+	//    （grep 't\.Set("' policy.go），不凭记忆写。
+	want := []string{
+		"yahoo.chart", "yahoo.eps", "yahoo.quote",
+		"tushare.daily", "tushare.index_daily", "tushare.hk_daily", "tushare.daily_basic",
+		"twelvedata.time_series", "lixinger.*",
 	}
-	for _, topic := range topics {
-		// 同理：Topics() 若返回不存在的主题名，Lookup 落空拿到零值 Policy，
-		// 其 TTL 恰好也是 0——不断言命中的话，下面那条 TTL 断言照样空转。
+	got := tbl.Topics()
+	sort.Strings(got)
+	sort.Strings(want)
+	if len(got) != len(want) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Topics() = %v, want %v", got, want)
+	}
+
+	for _, topic := range got {
+		// ② 守 Lookup() 本身。**不能因为有了 ① 就删掉这条**：若 Lookup 恒返
+		//    ok=false，① 仍通过（Topics() 是对的）、③ 也仍通过（p 是零值、TTL
+		//    恰好为 0），漏检。强弱只在同一守护对象内可比。
 		p, ok := tbl.Lookup(topic)
 		if !ok {
 			t.Errorf("%s: Topics() 返回的主题必须能被 Lookup 命中", topic)
 			continue
 		}
+		// ③ 守 DisableTTL()。
 		if p.TTL != 0 {
 			t.Errorf("%s: cache.enabled=false 时所有 TTL 须归零, got %v", topic, p.TTL)
 		}
