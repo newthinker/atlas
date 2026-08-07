@@ -1,0 +1,60 @@
+{
+  "id": "TASK-004",
+  "title": "CurrentQuery 与 AsOfQuery",
+  "module": "internal/macro/bitemporal",
+  "complexity": "中等",
+  "estimated_files": 2,
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/macro/bitemporal"
+  ],
+  "writes": [
+    "./internal/macro/bitemporal/query.go",
+    "./internal/macro/bitemporal/query_test.go"
+  ],
+  "assigned_to": "dev-agent-39",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "description": "需求文档 Task 4（第 640-856 行）。产出 CurrentQuery(Spec) string 与 AsOfQuery(Spec) string。「当前行」由 revision 列派生（MAX）而非 is_current 列。**约束 C7：测试跑真 SQL 断言结果，不断言字符串字面量——唯一例外是注入防护那条**。",
+  "done_criteria": {
+    "functional": [
+      "CurrentQuery 在有修订时只返回最新那行;AsOfQuery 返回指定时点应看到的行(修订前后结果不同)",
+      "两套 Spec 形状行为一致(对 bothShapes 并行跑)**⚠ 措辞校准（test-agent-18 在 TASK-003 验收时追到源头，Leader 落盘）**：\n\n「**两套 Spec 形状**」= **hestia 形状 + crisis 形状，两者都是【两列】业务键**。\n`singleKeyShape`（单列键）是**另一条独立的边界需求**，不在「两套形状」之内。\n\n**失真链**：Leader 的 `requirements-analysis.md` 误写「crisis 形状**单列键**」（与 `spec.go` 包注释 `macro_observations: (ts, indicator)` **两列** 矛盾）⇒ TASK-003 的 `functional[0]` 写成「hestiaShape(多列键)与 singleKeyShape(单列键)两套」⇒ 而 dev 按权威源实现的是 `bothShapes={hestia, crisis}` + `allShapes=三套`。**dev 是对的**：`design-spec.md:42-43` 原文即「是 **hestia 形状**还是 **crisis 形状**的问题」；追溯矩阵把「`:660` 两套形状行为一致」与「`:663` 单列业务键可用」映射为**两条独立需求**。\n\n⇒ **本任务的实际约束**：\n- `functional[1]`「两套 Spec 形状行为一致」= 对 **`bothShapes`（hestia + crisis）** 并行跑\n- `boundary[2]`「单列业务键可用」= **`singleKeyShape` 单点覆盖**，**不在 bothShapes 里**\n\n**⚠ 若按「bothShapes 已覆盖」的字面理解执行，单列键会被误以为已覆盖而漏掉**——它只有 `boundary[2]` 一处守护。\n\n**附带（F2）**：两形状循环若**不用 `t.Run`**，其**自有断言**必须自带形状名——fixture 的 `failureContext` **只覆盖 fixture 侧失败**（如建表/插入），测试自身的 `assert` 失败不带形状名。test-agent-18 实测：`TestEachCallGetsAnIndependentDB` 自身断言失败时消息只有「第二个库不应看到第一个库写入的行」，无形状标识。\n",
+      "**⚠ 契约 T1（本任务最重要的一条）:必须有行为侧证明 Query 真的用了 Spec.correlate 的输出。** Task 1 的 TestCorrelate 断言的是字符串相等——那证明「函数会拼对」,**不证明「Query 用了它拼出来的东西」**。**变异判据:改 correlate 的实现(如把 AND 换成 OR),本任务的真 SQL 测试须转红**;若只红 Task 1 的 TestCorrelate 而本任务全绿,说明 Query 没真正用它(Sprint 031 的 tushare callKey 缺口同形——纯函数有单测、有一个方向的行为守护,唯独没人验「输出被用上了」)"
+    ],
+    "boundary": [
+      "空表 → CurrentQuery 返回零行",
+      "乱序插入后 CurrentQuery 仍返回 revision 最大的行",
+      "单列业务键可用(singleKeyShape 只有三列,Scan 目标数与主形状不同,须单独写)",
+      "**零值 Spec 传入 Query 的行为——引用设计文档的既有决定,不重新开放**(Leader 采纳独立 reviewer 的修正)。\n\n原 DoD 写「panic / 返回空串 / 文档声明 三者皆可」——**那是把一个已经决定的事重新开放**。hestia 设计文档 §6 第 3 行已明确:「**生成表名为空的 SQL,执行时立刻报语法错误。不额外防御**」。\n\n⇒ 判据:**须有一条测试或注释钉住这个既有决定**(零值 Spec → 生成的 SQL 含空表名 → 执行时报语法错误),**而不是自行选一种**。若实现者认为该决定应改,走澄清环报 Leader,不要在任务内自行裁量。\n\n(契约:沉默的排除等于没有排除——但**已有的决定必须被引用而非重新发明**,否则每个任务都会重新决定一遍同一件事。)",
+      "**AsOfQuery 的边界（独立 reviewer 指出原 DoD 三条 boundary 全是 CurrentQuery-only，AsOfQuery 仅在 functional 里与 CurrentQuery 捆绑出现一次）**:须补三条——①**as-of 恰好等于某个 revision 值**(`<=` vs `<` 的包含性边界,**变异判据:把 `<=` 改成 `<` 须转红**);②as-of 早于全部 revision → 返回零行;③空表上的 AsOfQuery。\n\n**①最要紧**:hestia 的 `published_at` 是**日期**,「我在发布当天知道什么」是常用查询;包含性差一位会让每个历史视图静默偏移一个修订——**而那正是本函数存在的理由**(区分「我判断错了」与「数据后来被修订了」)。reviewer 核实文档现有测试用 as-of `2026-08-01`/`2026-09-01` 对 revision `2026-07-15`/`2026-08-20`,**两个 as-of 都不等于任何 revision,所以把 `<=` 改成 `<` 两条断言都保持绿**。"
+    ],
+    "error_handling": [
+      "**T4 已重定向到 TASK-005（独立 reviewer 指出原判据不可构造，Leader 采纳）**:原文要求「造一个把业务键取值直接拼进 SQL 的变异」——**但 `CurrentQuery(Spec)` 与 `AsOfQuery(Spec)` 根本不接收业务键取值,没有东西可拼**。能让 `TestQueriesContainNoLiteralValues` 转红的只有人为变异(随便塞个引号),不对应任何真实缺陷。**真正有取值的是 `Lookup`,注入守护已改挂在 TASK-005 的 error_handling。**\n\n本任务保留的是 C7 的**禁止**那半(原文只写在 description 里、无 criteria):**query_test.go 与 lookup_test.go 中除 `TestQueriesContainNoLiteralValues` 外,不得出现任何对 SQL 字符串的断言**(如 `assert.Contains(sql, \"MAX(\")`)。判据:grep 测试文件,字符串断言仅此一处。",
+      "**「所有拼进 SQL 的标识符都取自校验过的 Spec」——本条由 TASK-004 承接**（dev-agent-39 在 TASK-001 交付时指出并主动移交）。\n\n它的原话：「本任务只证明了 NewSpec **拒收**非法标识符，**没证明所有拼进 SQL 的标识符都取自 Spec**。**什么会推翻它**：query.go 直接拼一个不过 Spec 的字符串（例如 alias、ORDER BY 列）。」\n\n⇒ 判据：**逐个核对 query.go 里进入 SQL 字符串的每一个标识符来源**——表名、业务键列、revision 列必须来自 `Spec` 的未导出字段；`correlate` 的 alias 参数是**调用方传入的字符串，不过 identRE**，须确认它要么是包内硬编码常量、要么也过校验。\n\n**这是包的架构声明「注入面为零」的另一半**：TASK-001 守住了「非法标识符进不了 Spec」，本条守「SQL 里的标识符只能来自 Spec」。两半缺一，声明就不成立。\n"
+    ],
+    "non_functional": [
+      "`go test` 绿、0 SKIP;文件头部写 Context Checkpoint 映射;注释中文;**业务键取值一律走 ? 占位符**",
+      "**⚠ 断言用的 map 必须以【完整业务键】为键，不得沿用文档的 `got[k1]`**（dev-agent-39 只读预备时实证发现，Leader 落盘）。\n\n需求文档的断言是 `got[k1] = val`，**以业务键第一列作 map 键**。而 TASK-003 按 T1 要求补入的键对 A=`(\"2026-06\",\"h1\")`、B=`(\"2026-06\",\"monthly\")` **第一列相同** ⇒ 实证：正确实现返回 3 行，但第一列只有 2 个不同值 ⇒ **A 与 B 在 map 里互相覆盖**：\n\n- `assert.Equal(t, 2.0, got[\"2026-06\"])` 取到哪个值**取决于行返回顺序** ⇒ **flaky**\n- `assert.Len(t, got, 2)` 变成对 3 行数据的错误断言\n\n⇒ 须用完整键（如 `strings.Join(keyVals, \"/\")`）作 map 键。\n\n**这条的普遍形态值得记**（dev-agent-39 的原话）：**「补了数据」和「断言能分辨这些数据」是两件事，第一件做了不蕴含第二件。** T1 要求补数据，但补完之后断言的分辨率是否跟得上，是另一个问题——而它恰好会以 flaky 而非红的形式表现出来。\n",
+      "**⚠「0 红」是唯一一种能被编译失败完美伪造的变异结论，报它时必须额外自证三条**（dev-agent-40 在 TASK-002 收尾后自我复核时提炼，Leader 采纳并推广至本 Sprint 全部任务）。\n\n**结构性不对称**（它的原话）：\n\n> KILLED 结论**天然自证**——能看到 `--- FAIL` 就说明测试跑起来了、代码编译过了。\n> **只有「0 红」这个结论，编译失败会完美伪造它**：编译不过 → 没有任何 `--- FAIL` 行 →\n> harness 的 `grep -cE '^\\s*--- FAIL'` 得 0 → 报「0 条转红」。\n\n⇒ **报「存活 / 等价变异」时必须同时给出**：\n\n1. **变异 diff 非空**（靶命中）——这条多数 harness 已有\n2. **`go vet` / `go build` exit 0**（可编译）\n3. **`--- PASS` 计数与基线一致**（测试确实执行了）——**这条比 (2) 更强**：它同时排除了「编译失败」「测试被 `-run` 过滤空」「panic 中断」三种情形\n\n**成本只落在报「存活」的条目上，KILLED 不需要这套。**\n\n**触发这条复核的是 test-agent-19 的自报**：它验 TASK-002 时，某个变异只改返回值、没删随之失效的 `import \"fmt\"` ⇒ 编译失败 ⇒ 它读到的「0 红」是无效结果。dev-agent-40 随即回头查自己那条「0 红」结论，**发现自己的 harness 也没有断言可编译性**——它那条当时是靠运气成立的（该变异恰好不动 import），**不是靠方法成立的**。\n\n（复核结果：结论不变，`>=` 确为等价变异，PASS 计数 21 与基线一致。）\n",
+      "**子代理（含 code-simplifier）报告「无改动」后仍须 `diff` 核实**（dev-agent-39 在 TASK-003 实撞，Leader 采纳为纪律）。\n\n**实例**：code-simplifier 最终回复「**No action — unchanged**」，而 `diff` 直读显示它**实际改了 4 处**（提取变量、提取 helper 消除两处取址循环、重命名避开内建、及调用点）。\n\n**这是本 Sprint 第二例「回显与文件不符」。子代理的最终回复同样属于不可信回显。**\n\n⇒ 判据：任何声称「未改动文件」的子代理回复之后，**必须 `git diff` / md5 核实**；若实际有改动，**全量复跑变异矩阵**，并针对新引入的代码路径补变异（dev-agent-39 为 simplifier 新引入的 `scanTargets` 补了 M15，KILLED）。**不得假设「语义等价」就跳过复验。**\n"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T13:41:30Z"
+  },
+  "verifier": "test-agent-19",
+  "discovery": ".arcforge/discoveries/TASK-004.json"
+}

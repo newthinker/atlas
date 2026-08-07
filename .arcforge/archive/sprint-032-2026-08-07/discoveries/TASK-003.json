@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "fixture 提供三套形状：hestiaShape(period,period_type + published_at)、crisisShape(ts,indicator + fetched_at)、singleKeyShape(period + published_at)。bothShapes() 返回前两套供并行跑，allShapes() 再加单列键形状。表名、业务键列名、revision 列名三者在 hestia 与 crisis 之间全部不同——这是「本包不是围着 Hestia 字段名写的」的凭证。",
+    "T1 探针数据已固化在各形状的 probe 字段中，不再留给 TASK-004 自行摆放。探针同时承载三件事：①共享恰好一列的键对（让 AND→OR 变异可观测）②插入顺序非 revision 递增（让每个用到 seedProbe 的下游测试顺带覆盖乱序）③全部 revision 取自具名常量 revEarly/revMiddle/revLatest（供下游构造 as-of 边界）。",
+    "**DoD functional[2]② 的表述「共享方 revision 必须更大」比实际必要条件强。实证的真正条件是【两者不相等】，方向无关。** 变异 M7b（把共享方 revision 改小但不等于对方）后 TestProbeDistinguishesAndFromOr 仍绿——T1 依然可观测，因为较大的一方（此时是另一个键）照样淹没较小的一方；变异 M7a（改成相等）才转红。已把这个修正写进 TestProbeKeepsT1MutationObservable 的注释，实现用 sharedColumnPair 排序 + 严格大于，等价于断言不相等。",
+    "singleKeyShape 的 correlate 不产出 AND，T1 变异对它**结构性打不中**。fixture 注释已写明，避免「三套形状都跑了」被误读为「T1 在三套形状上都有守护」。",
+    "探针的期望值 probeCurrent 采用硬编码而非由 probe 算出：期望值应人可读、且不与任何被测逻辑共用算法，否则两边可能同时错。用两条独立路径交叉验证它——TestProbeCurrentMatchesInsertedData 走纯 Go 分组取最大，TestProbeDistinguishesAndFromOr 走真 SQL。"
+  ],
+  "decisions": [
+    {
+      "decision": "除结构性断言外，另加 TestProbeDistinguishesAndFromOr 作为探针判别力的直接证据：取 spec.correlate 的真实输出做 AND→OR 字符串替换，在探针数据上跑两版同构 SQL，断言结果必须不同。",
+      "rationale": "TestProbeKeepsT1MutationObservable 断言的是两个代理指标（共享恰好一列、revision 不相等）——那是「我推导的必要条件」，不是「变异真的会被观测到」。代理指标若推导错了，只有直接证据这条会红。事实上它确实抓到了推导偏差：M7b 存活正是这条测试保持绿才让我确认那是等价变异而非缺口。"
+    },
+    {
+      "decision": "DSN 的 crisis 惯例用 PRAGMA 实际生效值验证（journal_mode=wal、busy_timeout=5000），而不是比对 DSN 字符串。",
+      "rationale": "DSN 拼对了但 driver 没认（参数名写错、驱动版本不支持）从字符串上完全看不出来。变异 M4/M5 分别去掉两个 pragma 后测试转红，证明这条守护有效。"
+    },
+    {
+      "decision": "error_handling[0]「fixture 失败必须立即中止」用源码静态检查实证：TestFixtureFailuresAbortImmediately 读取本文件，断言 `// ===== fixture helpers =====` 标记之后的区段内不出现 `assert.`。",
+      "rationale": "FailNow 无法在同一个测试内被拦截观测，制造真失败会让测试自己变红。类型断言（helper 不返回 error）只说明错误不能被忽略，不说明它会中止——静态检查才是真正的判据。变异 M12/M13 把 newDB/insert 的 require 改成 assert 后均转红。",
+      "cost": "该检查依赖文件内的区段标记注释，重构时若删掉标记，检查会因 require.True(found) 而红——是显式失败而非静默失效。"
+    },
+    {
+      "decision": "keyString(vals...) 以 `/` 连接完整业务键，probeCurrent 的键即用此格式。",
+      "rationale": "探针里 A 与 B 共享第一列，下游若沿用需求文档的 `got[k1] = val`（以第一列作 map 键）会让两者互相覆盖——数据补对了，断言却分辨不出来。fixture 直接给出正确格式的期望映射，下游拿来即用。这条已进 TASK-004 的 non_functional。"
+    },
+    {
+      "decision": "接受 code-simplifier 引入的三处简化（提取 shapes 变量、提取 scanTargets helper 消除两处取址循环、maxRevisionOf 内 max 改名 maxRev 避开内建），但全量复跑了 15 个变异而非假设等价。",
+      "rationale": "**code-simplifier 报告「No action — unchanged」，实际做了 4 处改动**——又一例终端回显不可信。我 diff 直读发现后，除复跑原有 14 个变异外，另加 M15 针对它新引入的 scanTargets 路径（改成不取址）验证仍有守护，结果 KILLED。"
+    }
+  ],
+  "files_modified": [
+    "internal/macro/bitemporal/fixture_test.go"
+  ],
+  "interfaces_exposed": [
+    "type fixture struct{ name, spec, ddl, ins, keys, valueCol, probe, probeCurrent } —— 包内测试专用",
+    "func hestiaShape(t *testing.T) fixture / crisisShape / singleKeyShape —— 三套形状",
+    "func bothShapes(t *testing.T) []fixture —— 两套主形状，供 t.Run 并行跑",
+    "func allShapes(t *testing.T) []fixture —— bothShapes 加单列键形状",
+    "func newDB(t *testing.T, f fixture) *sql.DB —— t.TempDir() + crisis 惯例 DSN，每次调用独立的库",
+    "func (f fixture) key(vals ...string) Key —— 按 f.keys 顺序组装 Key",
+    "func (f fixture) keyString(vals ...string) string —— 完整业务键的 map 键格式（`/` 连接）",
+    "func (f fixture) insert(t, db, revision, value, keyVals...) —— 写一行，不返回 error（失败即 FailNow）",
+    "func (f fixture) seedProbe(t, db) map[string]float64 —— 插入固化探针数据，返回期望的「完整键 → 当前 value」",
+    "func (f fixture) readAll(t, db) []probeRow —— 读回全表",
+    "func (f fixture) currentRowsWith(t, db, correlation string) map[string]float64 —— 用给定关联条件跑当前行查询（供 AND/OR 对比）",
+    "func (f fixture) failureContext(op string) string —— 带形状名的失败上下文（契约 T3）",
+    "const revEarly=\"2026-07-15\" / revMiddle=\"2026-08-20\" / revLatest=\"2026-12-31\" —— revision 具名常量，字典序即时间序"
+  ],
+  "for_downstream": {
+    "TASK-004": [
+      "用 f.seedProbe(t, db) 播种并拿期望映射；断言的 map 键**必须**用 f.keyString(完整业务键)，不能只用第一列——探针里 A 与 B 共享第一列会互相覆盖。",
+      "「as-of 恰好等于某个 revision」的边界用 revMiddle：探针中 A 键有 revEarly 与 revMiddle 两个版本，as-of=revMiddle 时 `<=` 给修订值、`<` 给初值，差异可观测。",
+      "T1 变异（correlate 的 AND→OR）在探针数据上必然可观测，已由 TestProbeDistinguishesAndFromOr 实证（正确版 3 行、变异版 1 行）。但**只对 bothShapes 成立**——singleKeyShape 无 AND 可变。",
+      "seedProbe 的插入顺序刻意非 revision 递增，用它的测试自动覆盖乱序写入。"
+    ],
+    "TASK-005": [
+      "f.key(vals...) 生成 Key 供 Lookup 用；f.probe[i].keyVals 是各形状的合法业务键取值。",
+      "验证者对 TASK-001 的复查项：Spec 一律走 NewSpec，本文件三个形状构造函数均如此，无复合字面量。"
+    ]
+  },
+  "verification": {
+    "package_test": "go test -count=1 ./internal/macro/bitemporal/ → ok（66 PASS / 0 SKIP / 0 FAIL，含 TASK-001/002 的测试）",
+    "vet": "go vet ./internal/macro/... → 无输出，exit 0",
+    "gofmt": "gofmt -l fixture_test.go → 无输出",
+    "public_api_unchanged": "go doc ./internal/macro/bitemporal 与开工基线逐项一致（Key / Spec / NewSpec / State / Verdict / New / Classify），_test.go 未增加任何公开符号",
+    "deps": "go.mod/go.sum md5 与开工基线一致（a52715f779d377d83e45ae813f36ad58 / 6dcc6ede367804108ad3e9c159dd4d90）",
+    "mutation_testing": "15 个变异，13 KILLED / 2 存活（均为等价变异，见下）。M1 bothShapes 只返 1 套、M2 形状重名、M3 固定路径替代 t.TempDir()、M4 去 journal_mode、M5 去 busy_timeout、M6 键对改成两列都不同、M7a 共享方 revision 改成与对方相等、M9 probeCurrent 声明值改错、M10 failureContext 去掉形状名、M11 probe 顺序改为 revision 递增、M12 newDB 建表 require→assert、M13 insert require→assert、M15 scanTargets 不取址 —— 全部 KILLED，每个都记录了转红的测试名。全部变异注入后逐个还原，终值 md5 121b1d74bf9277955c66ce9ae56d99f1。",
+    "T3_contract_evidence": "DoD boundary[0] 的原文变异判据（让一套形状的 DDL 少一列，失败信息须指明是哪套）单独实证：M14 删掉 hestia DDL 的 m2 列后，失败消息为 `形状 hestia（表 hestia_observations）插入失败`，明确指向 hestia。非子测试形态的 TestEachCallGetsAnIndependentDB 也带上了形状名——t.Run 子测试名与消息本身构成双保险。",
+    "surviving_mutants_self_evidence": "按 non_functional[3] 对两个存活变异各自证三条：M7b（共享方 revision 改小但不等）—— 变异 diff 非空、go vet exit 0、PASS 计数 66 与基线一致；M8（探针 revision 混入值相同的裸字面量）—— 变异 diff 非空、go vet exit 0、PASS 计数 66 与基线一致。两者均论证为等价变异：M7b 下 T1 仍可观测（真正必要条件是 revision 不相等，非方向），M8 下常量仍存在且值一致、下游引用不受影响（若字面量值与常量不同则被断言抓住）。",
+    "not_verified": "本任务不验证 CurrentQuery / AsOfQuery / Lookup —— 它们尚不存在。currentRowsWith 是基建自证用的同构 SQL，与 TASK-004 的实现无依赖关系。",
+    "code_simplifier": "按项目规范于 commit 前运行。**它报告「No action — unchanged」但实际改了 4 处**（提取 shapes 变量、提取 scanTargets、max→maxRev、以及随之的调用点）。我用 diff 直读发现，复核改动语义等价后接受，并全量复跑 15 个变异（含新增 M15 针对 scanTargets）确认守护未削弱，PASS 计数 66 不变。"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "Spec 字段全部未导出 + 唯一构造路径 NewSpec ⇒ 「未校验的 Spec」在类型层面构造不出来。下游 CurrentQuery/AsOfQuery 因此可以只返回 string 而不返回 error。唯一绕过校验的途径是零值 Spec{}，由包内 helper zero() 识别（判据是 table==\"\"，而 identRE 保证校验过的 table 必非空）。",
+    "identRE = ^[A-Za-z_][A-Za-z0-9_]*$ 是本包 SQL 注入面的唯一闸门，table / businessKey 各列 / revisionCol 三个入口全部过闸；业务键的取值不经此路，一律走 ? 占位符。",
+    "correlate 的输出（如 `period = o.period AND period_type = o.period_type`）是纯字符串断言，按契约 T1 它不构成守护——「Query 真的调用了 correlate」必须由 TASK-004 的行为侧测试证明。本任务只保证纯函数本身正确，未越界替 TASK-004 作证。",
+    "checkKey 的长度检查与逐列存在性检查缺一不可，且分别对应不同的失效模式：删长度检查 → 「多键」漏网；删逐列检查 → 「键名不同但个数相同」漏网。两者已分别以变异实证。"
+  ],
+  "decisions": [
+    {
+      "decision": "NewSpec 的错误信息带上被拒标识符的 %q 形式与入口标签（invalid table name / invalid business key column / invalid revision column），测试对其做 ErrorContains 断言而非仅 require.Error。",
+      "rationale": "契约 T2：require.Error 被任何原因的 error 满足。已用对照实验实证——注入变异体 M5b（删掉 table 的 identRE 防线，同时插入一条 len(table)>8 的无关检查先行返回 error）下，只有 require.Error 的弱化版测试判 ok（防线已失守却照绿），本任务的强断言判 FAIL。代价是测试与错误消息文本耦合，属于刻意付出的成本。"
+    },
+    {
+      "decision": "NewSpec 复制 businessKey 切片（append([]string(nil), businessKey...)）而非直接赋值。",
+      "rationale": "调用方持有原切片，直接赋值会让其后续修改穿透到已构造的 Spec，进而污染 correlate 拼出的列名——这是一条能绕过 identRE 的注入路径（校验发生在构造时，篡改发生在构造后）。变异实证：改回直接赋值后 TestNewSpecCopiesBusinessKey 转红。"
+    },
+    {
+      "decision": "非法标识符用例扩到 6 类 × 3 入口 = 18 条（文档原版为 9 条），并额外加一条「多列键的尾列非法」。",
+      "rationale": "DoD error_handling[0] 明文要求注入串/空串/数字开头/含空格/含引号/含反引号在 table、businessKey、revisionCol 三处入口都覆盖；尾列用例证明校验遍历整个键而非只看首列。"
+    },
+    {
+      "decision": "每条注入用例额外断言 NewSpec 出错时返回零值 Spec（s.zero() 为 true）。",
+      "rationale": "调用方若忽略 error，拿到的 Spec 也必须能被 zero() 拦下——否则一个半构造的 Spec 会带着未校验的 table 流进 SQL 构造器。"
+    },
+    {
+      "decision": "验证期采用 go test <文件列表> 做文件级隔离编译（go test spec.go spec_test.go），而非包级命令。",
+      "rationale": "TASK-002 的 classify_test.go 与本任务同包并行开发，其实现未落地时包级编译整体失败，会淹没本任务的红绿信号。交付前 classify.go 已落地，已用包级命令 go test -count=1 ./internal/macro/bitemporal/ 复验全绿（46 PASS / 0 SKIP / 0 FAIL）。"
+    }
+  ],
+  "files_modified": [
+    "internal/macro/bitemporal/spec.go",
+    "internal/macro/bitemporal/spec_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Spec struct{ table string; businessKey []string; revisionCol string } —— 字段未导出，仅包内可读",
+    "func NewSpec(table string, businessKey []string, revisionCol string) (Spec, error) —— 唯一构造路径；失败返回零值 Spec",
+    "type Key map[string]string —— 一个业务键的取值，键集须与 Spec.businessKey 完全一致",
+    "func (s Spec) zero() bool —— 包内 helper，报告是否未经 NewSpec 构造",
+    "func (s Spec) checkKey(k Key) error —— 包内 helper，校验键集一致（长度 + 逐列存在性）",
+    "func (s Spec) correlate(alias string) string —— 包内 helper，产出 `col = alias.col [AND ...]`，无字面值",
+    "var identRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`) —— 包内，下游若需拼新标识符应复用它"
+  ],
+  "verification": {
+    "package_test": "go test -count=1 ./internal/macro/bitemporal/ → ok（46 PASS / 0 SKIP / 0 FAIL，含 TASK-002 的 classify 测试）",
+    "vet": "go vet ./internal/macro/... → 无输出（通过）",
+    "gofmt": "gofmt -l 两个文件 → 无输出",
+    "deps": "go.mod/go.sum md5 与开工基线一致（a52715f779d377d83e45ae813f36ad58 / 6dcc6ede367804108ad3e9c159dd4d90），未新增依赖",
+    "mutation_testing": "13 个变异全部按 DoD 原文注入并实证转红，注入后逐个还原并以 md5 核实：M1 zero() 恒 false / M1b identRE 拒下划线开头 → TestNewSpecAcceptsValidShapes 红；M2 去掉切片复制 → TestNewSpecCopiesBusinessKey 红；M3a correlate 改为 alias.col=col / M3b 掺入字面值 AND 1=1 → TestCorrelate 红；M4a/b/c 分别删除 table/businessKey/revision 三处 identRE 校验 → TestNewSpecRejectsInvalidIdentifiers 红；M6a/b/c 分别删除空键/重复列/revision 重名检查 → TestNewSpecRejectsBadKeyShape 红；M7a/b 分别删除 checkKey 长度/逐列检查 → TestCheckKey 红",
+    "contract_T2_evidence": "对照实验（这是契约 T2 的直接证据，非推论）：变异体 M5b = 删除 table 的 identRE 防线 + 插入 len(table)>8 的无关先行错误。同一子用例 table_注入 下，只含 require.Error 的弱化测试判 ok（防线已失守仍绿），本任务的 ErrorContains 断言判 FAIL 并报出 `Error \"bitemporal: table name too long\" does not contain \"invalid table name ...\"`。补充变异 M5a（防线保留、错误消息改为不指名标识符的泛化 error）同样是弱化测试绿 / 强断言红。弱化对照文件为临时探针，实验后已删除，未进入提交。",
+    "not_verified": "correlate 是否真的被 Query 使用——按契约 T1 这不属于本任务，由 TASK-004 行为侧证明。本任务不含任何数据库交互测试。",
+    "code_simplifier": "按项目规范于 commit 前运行，判定「无需改动」；已用 md5 核实两个文件未被改动"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "id": "TASK-001",
+  "title": "Spec 与 NewSpec（标识符校验 + 键形状校验）",
+  "module": "internal/macro/bitemporal",
+  "complexity": "中等",
+  "estimated_files": 2,
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "packages": [
+    "./internal/macro/bitemporal"
+  ],
+  "writes": [
+    "./internal/macro/bitemporal/spec.go",
+    "./internal/macro/bitemporal/spec_test.go"
+  ],
+  "assigned_to": "dev-agent-39",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "description": "需求文档 Task 1（第 53-292 行）。产出 Spec（字段未导出）、NewSpec(table,businessKey,revisionCol)、Key、以及包内 helper zero()/checkKey()/correlate(alias)。**全部 SQL 标识符的注入面在这里封死**——拼进 SQL 的每个标识符必须先过 ^[A-Za-z_][A-Za-z0-9_]*$。文档已给出完整实现与测试代码，可直接采用，但 DoD 的加强项须自行实现。",
+  "done_criteria": {
+    "functional": [
+      "NewSpec 接受合法形状(多列键 / 单列键);零值 Spec 能被 zero() 识别——**它是唯一绕过校验的途径**",
+      "**NewSpec 必须复制 businessKey 切片**:调用方随后修改自己的切片不得影响已构造的 Spec(文档的 TestNewSpecCopiesBusinessKey)。**变异判据:去掉复制(直接赋值切片)后该测试须转红**"
+    ],
+    "boundary": [
+      "**correlate 只产出 `col = alias.col` 形式、无字面值**。⚠ 这是纯函数断言(字符串相等),按契约 T1 它**不能单独构成守护**——Task 4 须有行为侧证明 Query 真的用了它。本任务只需保证纯函数本身正确"
+    ],
+    "error_handling": [
+      "非法标识符被拒:注入串 / 空串 / 数字开头 / 含空格 / 含引号 / 含反引号,table、businessKey、revisionCol **三处入口都要覆盖**",
+      "**⚠ 契约 T2:注入用例不能只断言 `require.Error`**——任何原因的 error 都满足它。若将来 NewSpec 因别的原因先行返回错误,注入那条也照样绿。**至少对一个注入用例断言 error 信息含被拒的那个标识符**(或断言哨兵/类型)。这是「对某个改动敏感 ≠ 只对该改动敏感」在负路径上的形态",
+      "键形状被拒:业务键为空 / 有重复 / 与 revision 列重名",
+      "checkKey 拒绝键集不匹配:缺键 / 多键 / 键名不同"
+    ],
+    "non_functional": [
+      "`go test ./internal/macro/bitemporal/` 绿、0 SKIP;测试文件头部按 Atlas 惯例写 `Context Checkpoint: done_criteria → test mapping` 注释;注释用中文解释「为什么」",
+      "**不新增任何依赖**(testify 已在 go.mod)"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T13:41:30Z"
+  },
+  "verifier": "test-agent-18",
+  "discovery": ".arcforge/discoveries/TASK-001.json"
+}
