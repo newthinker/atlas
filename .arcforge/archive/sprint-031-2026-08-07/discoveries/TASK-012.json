@@ -1,0 +1,46 @@
+{
+  "key_findings": [
+    "**交付在分支 task/TASK-012 上，尚未合入 master**（worktree 隔离协议）。实现提交 f48a8e0，其父提交 7528f6d 是黄金值基线，已 rebase 到当前 master bac0de1 之上，合入是 fast-forward。**Leader 合入前，master 上不存在 route.go，验证者对着 master 会看不到本任务的交付物。**",
+    "验收标准 2（同一份黄金值对新旧实现均全绿）已用两个提交机制性证明：7528f6d = 旧实现 + 黄金值（实测 4 测试 / 25 子测试全 PASS，覆盖率 99.1%）；f48a8e0 = 新实现 + 同一份黄金值（同样全 PASS）。基线是独立提交，任何人可 checkout 7528f6d 复现。",
+    "两条前置规则都保留在路由表之外：qlib 的 Covers()（SelectForSymbol 内）与 IsAShareIndex()（routeCollector / MarketForSymbol 内）。IsAShareIndex 的键集离散（930713.CSI / 930604.CSI 这类中证跨市场指数不带 .SH/.SZ 后缀），无法用通配 pattern 表达；黄金值已显式登记这两个符号 → eastmoney / CN_A，删掉前置规则会让它们落到 '*' 兜底 → yahoo / US 并被测试立刻抓住。",
+    "覆盖率曾一度从 99.1% 掉到 96.5%：route.go 的 lookupRoute 防御分支（表被改坏时返回 ok=false）与 MarketForSymbol / routeCollector 对应的保守回退，在内置表带 '*' 兜底的前提下不可达。补 TestRouteMissTableFallsBackConservatively（临时替换包级 routes 为无兜底表，defer 还原）后回到 99.1%，与基线持平。",
+    "重构前后 collector 包覆盖率对照：28fe89a（改动前）98.2% → 99.1%（本次交付），高于 DoD 的 98% 水位。剩余唯一未满覆盖是既有的 cache.go:cloneOHLCV（80%，与本任务无关）。",
+    "残留取舍（已在 route.go 注释中登记）：'.HK 后缀优先于加密前缀' 只在具体度相等时成立。'*.HK' 具体度为 3，故胜过 BTC*/ETH*/SOL*/XRP*/ADA*/DOT*/UNI*/LTC*（同为 3，靠书写顺序决胜），但仍会输给 DOGE*/AVAX*/LINK*/ATOM*（4）与 MATIC*（5）。这些形态在 watchlist 中都不存在，故未额外加机制拉平；若将来真出现，应加一条精确路由而非改动具体度语义。"
+  ],
+  "decisions": [
+    {
+      "decision": "在方案给定的 TestHKSuffixBeatsCryptoPrefix 里追加两段断言：内置 routes 按具体度非递增有序，以及 sortRoutes 对「宽泛在前 / 具体在前」两种书写顺序产出相同首元素。",
+      "rationale": "DoD functional[2] 有三个断点——更具体胜过更宽泛、specificity 排序稳定、与注册顺序无关——而方案原文的该测试只验了 BTC.HK 一个点。只测 BTC.HK 无法证明「与注册顺序无关」：把表里两行对调仍会让 BTC.HK 通过。补的断言直接对着 sortRoutes 验证顺序无关性，是该条 DoD 唯一能被机制锁住的形态。"
+    },
+    {
+      "decision": "新增 TestRouteMissTableFallsBackConservatively，通过临时替换包级变量 routes 覆盖「查表落空」路径。",
+      "rationale": "lookupRoute 返回 ok 的全部意义就是「有人误删 '*' 兜底行时保守回退而非 panic」，但内置表下这条路径不可达，导致覆盖率跌破 DoD 的 98% 水位。与其为凑覆盖率删掉防御（那会让删兜底行变成静默 panic），不如把防御承诺本身变成可执行的断言——测试即该承诺的文档。替换用 defer 还原，包内无并行测试触碰 routes。"
+    },
+    {
+      "decision": "BTC.HK 统一为 SelectExternalForSymbol→yahoo 且 MarketForSymbol→MarketHK，即 '.HK' 后缀优先于加密前缀。",
+      "rationale": "DoD error_handling[0] 直接写死了这两个期望值。旧实现在此自相矛盾（Select 走 isCryptoSymbol 前缀命中判 crypto，Market 走 '.HK' 分支判 HK），收敛成一张表后必须二选一；取后缀是因为交易所后缀是显式标识，强于裸前缀这个启发式信号。"
+    },
+    {
+      "decision": "把 selector.go 里 name := routeCollector(symbol) 的中间变量直接内联进 reg.Get(...)。",
+      "rationale": "方案原文的中间变量只被用一次且无解释价值，内联后语句更短且语义不变；这是本次相对方案原文唯一的实现层偏离，不影响任何行为。"
+    },
+    {
+      "decision": "在自己的 git worktree（../wt-TASK-012，分支 task/TASK-012）中开发，并在完工前 rebase 到当前 master bac0de1 之上。",
+      "rationale": "同期 dev-agent-35 的 TASK-001 在 internal/collector/policy/ 新建包，共用工作区会互相污染 git diff 与 dev_done 门禁的 scope 判定。开工时 master 还是 28fe89a，完工时已前移到 bac0de1（TASK-001 的提交）；先 rebase 再交付，Leader 合入即 fast-forward，且我的验证是对着最终会进入 master 的树跑的，不是对着已过期的基点。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/route.go（新建，110 行：Route 类型、routes 路由表、sortRoutes / specificity / matchPattern / lookupRoute）",
+    "internal/collector/route_golden_test.go（新建，199 行：TestRouteGoldenValues 25 例 + TestRouteCaseInsensitive + TestQlibCoversTakesPrecedenceOverTable + TestRouteFallsBackWhenCollectorMissing + TestHKSuffixBeatsCryptoPrefix + TestRouteMissTableFallsBackConservatively）",
+    "internal/collector/selector.go（重写：删除 isAShareSymbol / isCryptoSymbol / isIndexSymbol / isCommoditySymbol 四个谓词与 cryptoTickers / indexMarkets 两张表，改为查表；新增包内 routeCollector）"
+  ],
+  "interfaces_exposed": [
+    "type Route struct { Pattern string; Collector string; Market core.Market }（包级导出类型，供后续 config 化路由表复用）",
+    "func lookupRoute(upper string) (Route, bool)（包内）",
+    "func matchPattern(pattern, s string) bool（包内，简化 glob：'*' 只允许在首、尾或独占全串）",
+    "func specificity(pattern string) int（包内，= 非通配字符数）",
+    "func routeCollector(symbol string) string（包内，含 IsAShareIndex 前置规则）",
+    "四个公开函数签名完全不变：SelectForSymbol(*Registry, string) Collector / SelectExternalForSymbol(*Registry, string) Collector / MarketForSymbol(string) core.Market / KnownIndexMarket(string) (core.Market, bool)"
+  ],
+  "verification": "全部在 worktree /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-012 内实测，GOTOOLCHAIN=local。(1) 基线 7528f6d（旧实现）: go test ./internal/collector/ -run 'TestRoute|TestQlibCovers|TestHKSuffix' -v → 4 顶层测试 / 25 子测试全 PASS；-cover 99.1%。(2) 实现 f48a8e0（新实现，同一份黄金值）: 同命令 → 6 顶层测试全 PASS；-cover 99.1%（DoD 水位 98%）。(3) 调用方全量: go test ./internal/collector/... ./internal/app/... ./internal/api/... ./internal/prism/... ./cmd/atlas/... → 全部 ok，无 FAIL；其中 collector / app / api / prism / cmd 另用 -race 复跑亦全 ok。(4) go build -buildvcs=false ./... 与 go vet ./internal/collector/... 均通过（-buildvcs=false 是 worktree 下 go 取 VCS 状态报 exit 128 的规避，主仓库合入后不需要）。(5) 旧谓词清除: grep -rnE '(isAShareSymbol|isCryptoSymbol|isIndexSymbol|isCommoditySymbol|cryptoTickers|indexMarkets)\\b' --include='*.go' internal/ cmd/ 排除注释行后无输出。(6) 调用点零改动: git diff --stat bac0de1..f48a8e0 仅 3 个文件（route.go / route_golden_test.go / selector.go），app.go / tushare/collector.go / symbol_detail.go / export_signals.go / backtest.go / qlib_wiring.go 全部未被触碰。(7) gofmt -l 对这三个文件无输出。"
+}

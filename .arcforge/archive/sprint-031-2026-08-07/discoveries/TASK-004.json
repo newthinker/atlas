@@ -1,0 +1,55 @@
+{
+  "key_findings": [
+    "FileStore 是跨进程 JSON 账本：`{\"tushare.daily_basic\": {\"window_start\": \"...\", \"count\": 3}}`。「读 → 判窗口 → 计数 → 原子写」全程持 flock 排他锁。锁加在**独立的 <path>.lock** 而非账本文件本身——账本靠 rename 原子替换，对被替换掉的 inode 加锁没有意义。",
+    "窗口判定与计数**复用 TASK-003 抽出的 take() 与 windowStart()**，与 MemStore 是同一套纯逻辑。这不只是省代码：两个后端必须语义一致，各写一遍就多一次漂移的机会。已用 F8 变异（FileStore 自写窗口逻辑）钉住，捕获者是 TestFileStoreMatchesMemStoreSemantics。",
+    "**账本损坏时的自愈路径**：read 解析失败返回「空账本 + err」，Take 据此重建条目并原子写回，err 照常带出去让 Gate 告警。所以一次 Take 同时完成了 fail-open、告警、账本重建三件事。若只报错不重写，配额会永久静默失效（反审 A10）。",
+    "**并发互斥有两道各自独立充分的机制**：同进程的 f.mu 与跨进程的 flock。实测：去掉 f.mu（留 flock 排他）→ 并发测试仍绿；flock 改共享锁（留 f.mu）→ 仍绿；两者同时失效 → 红。⇒ TestFileStoreConcurrentTakesRespectLimit 守护的是「同进程并发不超发」这个**性质**，不是 flock 这个**机制**；真正的跨进程 flock 保护需要多进程才能验证，单个 go test 进程内做不到。",
+    "**fd 泄漏必须直接观测，间接办法在本机完全无效**：ulimit -n = 1048576，泄漏几百个 fd 撞不到上限；且 os.File 带 finalizer，GC 会把泄漏的 fd 悄悄收掉。实测删掉 lf.Close() 后，「跑 300 次看是否报 too many open files」的间接版仍然全绿。",
+    "观测 fd 的可移植手段是**下一个可用 fd 号**（POSIX 保证 open 返回最小可用 fd，泄漏 N 个则该值增大约 N），而不是读目录：/proc/self/fd 是 Linux 专有；/dev/fd 在 macOS 的独立程序里可读，但**在 go test 进程内实测 os.ReadDir 读不到**，会让测试静默 SKIP。",
+    "write 的 temp+rename 路径在每个失败分支都 os.Remove(tmpName)，故任何一步失败都不在目录里留垃圾；成功路径的临时文件被 rename 消费掉。目录里的常驻物只有账本与 <path>.lock。",
+    "I/O 层 fail-open 有三条独立路径（lock/write/read），与 JSON 解析失败那条**互不覆盖**：2×2 实测，原有 12 条测试对这三条变异全绿。TASK-006 装配时若要改动账本路径或权限，这三条是回归防线。"
+  ],
+  "decisions": [
+    {
+      "decision": "为 error_handling[0] 的两个分句写两条独立测试，且第二条的判据不是「不再报错」，而是「配额功能确实恢复」（账本重建为合法 JSON、计数从新窗口起算、到达 Limit 时能正确拒绝）。",
+      "rationale": "复合句 DoD 的两个分句**证据方向相反**：分句 1 证明「坏事发生时系统仍走下去」，分句 2 证明「坏事发生后状态真的恢复」。已用 F1 变异（读到坏 JSON 只报错、不重建）实证二者不可互相替代：F1 下 TestFileStoreSelfHealsAfterCorruption 转红，而分句 1 的 TestFileStoreFailsOpenOnCorruptLedger **仍然绿**——只验分句 1 的话，配额永久静默失效这个故障完全不可见。"
+    },
+    {
+      "decision": "TestFileStoreFailsOpenOnCorruptLedger 加 defer recover()。",
+      "rationale": "「不该 panic」型断言若只断言返回值，变异注入后是裸 panic 中断整个测试二进制，同一次运行里排在后面的测试根本跑不到（TASK-003 实测：PASS 数从 50 掉到 38）。教训 10。"
+    },
+    {
+      "decision": "fd 泄漏检测从「撞上限」改为「观测下一个可用 fd 号」。",
+      "rationale": "间接版实测无效（见 key_findings）：删掉 lf.Close() 后仍全绿，是典型的「看起来在守护、实际不设防」。/dev/fd 目录法在 go test 进程内读不到会导致静默 SKIP——那是另一种形式的守卫失效。fd 号法可移植且已用 F4 变异实证有效（fd 号 5 → 55）。"
+    },
+    {
+      "decision": "在 TestFileStoreConcurrentTakesRespectLimit 的注释里写明它守护的是「同进程并发不超发」这个性质，而非 flock 这个机制，并列出三组变异实测结果。",
+      "rationale": "DoD 措辞是「并发 Take 在 flock 保护下不超发」，容易让人以为该测试守护 flock。实测 f.mu 与 flock 各自独立充分，单删任一道测试都不红——与 TASK-003 那两道短路是同一个结构。不写明的话，将来有人删掉 flock 看到测试全绿，会以为 flock 是冗余的。"
+    },
+    {
+      "decision": "补 TestFileStoreMatchesMemStoreSemantics（DoD 未点名）。",
+      "rationale": "MemStore 与 FileStore 是同一套 DoD 语义的两个持久化后端，共用 take()/windowStart() 正是为防漂移。这条用同一串操作序列对照两个后端的放行/拒绝结果，若将来有人在某一侧「就地优化」窗口判定就会红。"
+    },
+    {
+      "decision": "补三条 I/O 层 fail-open 测试：目录建不了（MkdirAll 失败）、账本写不进去（CreateTemp 失败）、账本读不出来（ReadFile 失败）。（R1 返工）",
+      "rationale": "TestFileStoreFailsOpenOnCorruptLedger 只覆盖 **JSON 解析失败**一条路径，而 I/O 故障（磁盘满、权限变更、只读挂载）在生产里比 JSON 损坏常见得多。把这三处的 `return true, err` 改成 `return false, err` 后原有 12 条测试**全部绿存活**（2×2 已实证）——任一处变成 false，prism refresh 会因为账本写不进去而拒绝发请求，配额机制本是为保护降级链，反而成了阻断它的原因（违反约束 C7）。"
+    },
+    {
+      "decision": "**收回上一轮 discovery 里「这些分支无法在测试中可靠构造」的说法**——三种构造都可行，方法记录如下。",
+      "rationale": "MkdirAll 失败：把父路径做成**文件**而非目录；CreateTemp 失败：预热后 `os.Chmod(dir, 0o500)`；ReadFile 失败：`os.Chmod(path, 0o000)`。三者都只用 t.TempDir() + 文件权限位，不需要 root，macOS/Linux 通用；后两条加了「先探测权限是否真的生效」的前置检查，root 环境下 t.Skip 而非误判。⇒ **「无法构造」是一个关于自己能力边界的断言，与「代码行为如何」不是一类判断**：后者能用变异证伪，前者只能靠别人试出来。写这类说明时应连同「我试过哪些方法、为什么不行」一起写，否则下一个接手的人会重复得出同样的错误结论。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/quota_file.go",
+    "internal/collector/policy/quota_file_test.go"
+  ],
+  "interfaces_exposed": [
+    "func NewFileStore(path string) *FileStore —— path 是账本文件路径；父目录不存在时在首次 Take 中自动创建（0o755）",
+    "func (f *FileStore) Take(topic string, q Quota, now time.Time) (bool, error) —— 实现 QuotaStore。**任何 I/O 或解析失败都返回 (true, err)**：调用方据此 fail-open 放行并告警。被拒时返回 (false, readErr)，不写盘。账本损坏时同时完成 fail-open、告警与账本重建",
+    "type FileStore struct{ path string; mu sync.Mutex } —— 未导出字段。mu 负责同进程串行，跨进程由 <path>.lock 上的 flock 负责",
+    "锁文件路径约定：<账本路径>.lock —— 与账本同目录，常驻不删。TASK-006 装配时若要清理旧账本，注意它",
+    "包级未导出：(f *FileStore) lock() (func(), error)（建目录+开锁文件+LOCK_EX，返回的释放函数负责解锁**并关闭 fd**）、read()（文件不存在返回空账本且不算错误；损坏返回空账本+err）、write()（temp+rename 原子替换，每个失败分支都清理临时文件）",
+    "平台约束：flock 是 unix 系统调用，本包只在 darwin/linux 运行，未加 build tag。将来若需 Windows 支持要拆 _unix.go / _other.go"
+  ],
+  "verification": "62 个测试全 PASS 0 SKIP（TASK-001 的 12 + TASK-002 的 24 + TASK-003 的 14 + 本任务 12）；`go test -race` 全绿（4.101s）；覆盖率 94.0%；go build ./... / go vet / gofmt 全过。【变异反证，每条都过四道门（改动量非空 → 编译通过 → 单独 -run → 断言正则核到 file:line）】F1 坏 JSON 只报错不重建 → SelfHealsAfterCorruption 红 :160，**同时对照 FailsOpenOnCorruptLedger 仍绿**（实证复合句两分句不可互相替代）；F2 损坏时返回 (false,err) → FailsOpenOnCorruptLedger 红 :129；F3 write 改直接覆写不 rename → LeavesNoTempFiles 红 :292（列出 5 个残留临时文件）；F4 释放函数不关闭 fd → DoesNotLeakFDs 红 :342（fd 号 5 → 55）；F5 read 恒返空账本 → QuotaSurvivesProcessRestart 红 :76；F6 被拒也写盘 → RejectedTakeDoesNotIncrement 红 :213；F7a 去 f.mu 留 flock → 绿 / F7b' flock 改共享锁留 f.mu → 绿 / F7c 两者同时失效 → 红 :252（放行 50 次），三组实证互斥的两道机制各自独立充分；F8 FileStore 自写窗口逻辑 → MatchesMemStoreSemantics 红 :368。另记：F7b 首版（直接删 flock 调用）被**门②拦下**（syscall 包未使用致编译失败），改为改共享锁后才是有效变异——这正是门②的作用。 【R1 返工】补三条 I/O fail-open 测试后：65 测试全 PASS 0 SKIP、-race 绿(4.132s)、覆盖率 91.8% → **94.0%**（lock 63.6%→72.7%、write 50.0%→55.6%）、build/vet/gofmt 全过；`git diff 1ca7a7d -- quota_file.go` 无输出——**实现零改动，纯补测试**。变异反证（四道门，门④为「=== RUN 数 > 0」）：F15 lock 失败返 false → FailsOpenOnDirError 红 :203；F16 write 失败返 false → FailsOpenOnWriteError 红 :235；F17 read 吞掉 I/O 错误 → FailsOpenOnReadError 红 :262。**2×2 闭环**（行=变异，列=测试集）：无变异下旧 12 条绿 / 新 3 条绿；F15、F16、F17 三种注入下**旧 12 条一律绿、新 3 条一律红**——实证三条新测试各自守护着原本无人看守的路径。门④自检：故意用不存在的测试名 → 被识别为「跑了 0 个测试，结果无意义」。"
+}

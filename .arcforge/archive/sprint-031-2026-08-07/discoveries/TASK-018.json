@@ -1,0 +1,71 @@
+{
+  "key_findings": [
+    "**两个包都没有任何哨兵错误常量，这让 DoD boundary[0] 的规定断言在本任务上空真。** boundary[0] 要求「逐个列举本包现有的永久性错误常量，对每个哨兵错误断言 errors.Is 到它们全都为 false」——yahoo 实测 0 个 `var Err`/`errors.New`（全是 ad-hoc fmt.Errorf），twelvedata 的 wrapErr 注释**明写**「本包无 sentinel error」。集合为空 ⇒ 遍历零次 ⇒ vacuously true ⇒ **什么都不做的实现照样全绿**（契约陷阱 6 的空真形态）。已改为列举本包真实存在的永久性判别**文本**（yahoo 5 条 / twelvedata 4 条）并加集合非空下界守卫。",
+    "**twelvedata 有一条会直接决定映射写法的既有设计约束，且它与我最初的建议相反。** `client.go:65-71`：wrapErr 是本包**唯一** error 出口，刻意用 `%v` 而非 `%w` **断链**，理由是凭证脱敏（留了链 `errors.Unwrap` 就能取回未脱敏的原始 error），并明写「本包无 sentinel error，消费方只格式化文本」。⇒ 「无哨兵」在 twelvedata 是**有理由的决策而非疏漏**；而 wrapErr 的断链特性在本任务里**恰好正是需要的映射手段**——走它一趟 `errors.Is(ret, policy.ErrTimeout)` 自动变 false。**我最初向 Leader 推荐「每包新增哨兵」，读到这段注释后主动更正为「沿用既有惯用法」**——推荐意见基于新证据改变时必须立刻更正，因为 Leader 可能正要据此裁定。",
+    "**任务描述的调用点计数有误：yahoo 是 3 处不是 4 处**（描述写「yahoo.go×3, eps.go×1」，实为 yahoo.go×2 + eps.go×1：`yahoo.go:219` topicQuote、`yahoo.go:293` topicChart、`eps.go:50` topicEPS）。twelvedata 确为 1 处。全任务共 4 处。",
+    "**参照形态本身只覆盖了一半**：tushare `client.go:99-101` 只映射 `ErrQuotaExceeded`，**没有映射 `ErrTimeout`**——而本任务的触发点恰恰是 ErrTimeout。所以「照 tushare 的形式做」在 ErrTimeout 这一半上没有参照物。**tushare 那个缺口不在本任务 scope 内，登记备查。**",
+    "**三条测试在实现之前就是绿的，它们本身不构成任何守护。** 原始 `policy: fn timeout` 文本恰好含 \"timeout\"、不含永久性措辞、且与 HTTP 错误文本天然不同 ⇒ KeepsDiagnosis / NotConfusable / MappingAtFetch 在**无映射**的基线上全绿。变异 Y1（mapPolicyErr 直接 return err）下**只有 SentinelLeak 转红，其余三条全绿**——这是「一写就绿」不设防的直接实证，也说明它们的真正守护者是 Y2/Y3/T2/T3/T4 那几个针对性变异，而不是它们自己。",
+    "**端到端的否定断言挡不住「更外层统一 catch」，必须直接观测该路径本身。** 变异 Y6（把**所有**错误都包一层 = 统一 catch）下 `TestNonPolicyErrorsUnaffected` 与 `TestMappingHappensAtFetch` **双双全绿**：被包过的 HTTP 错误文本里既仍含 `unexpected status`、又不含 `timeout`，两条文本断言同时被绕过。⇒ 补 `TestMapPolicyErrPassesThroughNonPolicyErrors`：直接断言非 policy 错误经 mapPolicyErr 后返回**同一个 error 值**（`got != in` 指针相等）。指针相等是最强的「未被改动」断言，且**与措辞无关**——换个包装文案不会让它悄悄失效。这是契约陷阱 8 的又一实例。",
+    "**【epoch 2 范围订正】我漏了一家，而参照形态自身也有缺口。** test-agent-17 精确清点后范围从两家扩到四家：我遗漏 **lixinger**（client.go:46 裸 `if err != nil { return nil, err }`）；而**参照形态 tushare 自身**只映射 ErrQuotaExceeded，`return cloneRows(rows), err` 把 **ErrTimeout 原样外泄**——本任务的触发点恰恰是 ErrTimeout（配 timeout 即可，不需要 Quota）。**这条是我在 epoch 1 就报给 Leader 的事实④，被采纳后纳入本任务。** ⇒ 教训：**「照参照形态做」的前提是参照形态本身完整**，接任务时应先核参照物覆盖了哪些分支，而不是默认它是权威的。",
+    "**两种相反的映射口径，按「本包有无哨兵错误」分派，不是风格选择而是由下游消费方式决定的。** **无哨兵**（yahoo / twelvedata / lixinger，均实测 0 个 `var Err`）⇒ 断链 + 本包前缀（`%v`）；**有哨兵**（tushare，且 `refresh.go:450/:453` 的降级链靠 `errors.Is` 分叉）⇒ 映射成本包哨兵并保留 `%w`——断链会让降级链两个分支都匹配不上、退化成无分类的通用失败（变异 T9 实证）。**关键陷阱**：用 `%w` 包一层本包前缀是挡不住的——消息变了但 `errors.Is(err, policy.ErrTimeout)` 仍成立，policy 错误照样在调用方可见的链上（变异 Y4/L2 实证）⇒ **判定断言必须是 errors.Is 不成立，而不是查消息文本**。",
+    "**tushare 的 boundary[0] 断言比其余三家强一个量级，因为它有哨兵。** 有哨兵 ⇒ 可写**正反两面的类型断言**：必须 `errors.Is(ErrRateLimited)`（refresh.go:450「本次跳过，下次自动重试」）、绝不可 `errors.Is(ErrNoPermission)`（:453「永久性错误，永不重试」）。变异 T8（ErrTimeout 映射成 ErrNoPermission）下**两条同时红**——那正是「临时性变永久性」的直接形态：该标的会被降级链**永久跳过、再也不重试**，而运维被文案支去查积分档。无哨兵的三家只能落在文本判别上，强度天然较弱——**这不是我偷懒，是那三个包没有可判定的类型**。",
+    "**正向断言与否定断言的可守护性不对称，同一条 DoD 在两个包里表现相反。** boundary[2]「文案传达临时性」在 lixinger 写成**正向**（必须含 retryable/temporary）⇒ 变异 L1（不映射）**直接抓到**；在 tushare 我写成**否定**（不得含「无权限/不支持/无此/配置」）⇒ 未映射时原始文本 `policy: fn timeout` 天然不含 ⇒ 变异 T7 下**恒绿**，必须专门造 T10（保留正确哨兵、只把文案改成误导性中文）才证明它有内容。⇒ **否定断言在「缺省状态就满足」时是空转的**；能写成正向就写正向。",
+    "**「摘掉映射层」的对照必须逐包单独跑，因为空转风险不同源——但结论是四包都没有空转的测试。** Leader/test-agent-17 提示 twelvedata 的 `wrapErr` 天然断链（`%v`），故 `functional[0]` 的 `errors.Is(ret, policy.ErrTimeout)==false` **可能不需要映射层就成立**。**逐包实测证伪了这个担忧**：摘掉 twelvedata 的映射层后 `SentinelLeak` **确实转红** —— 因为 `wrapErr` 只在 `fetchHistory`（fn 内部）用，而 `policy.Fetch` 的返回值是直接交给上层的，那条路径上没有 `wrapErr`。外泄是真的。逐包「摘层」结果：yahoo 仅 SentinelLeak 红；twelvedata 与 lixinger 另有 KeepsDiagnosis 红（缺本包前缀）；lixinger 再多一条 ReadsAsTemporary 红（它写成了正向断言）。",
+    "**`TestNonPolicyErrorsUnaffected` 与 `TestMapPolicyErrPassesThrough` 守的是「统一 catch」的两种强度，缺一不可。** 此前 23 个变异里**没有任何一个能打中 `NonPolicyErrorsUnaffected`**，一度像是占着「已守护」名分的空转测试。补造 **N-A**（统一 catch **且丢掉原始错误**，把所有错误压成一句通用文案）后，四包**全部转红** ⇒ 它有内容。两者的分工：**Y6/L5/T6**（包一层但用 `%v` 保留原文）只有 `PassesThrough`（指针相等）抓得到，文本断言被绕过；**N-A**（包一层且丢原文）两条都红。⇒ **同一类缺陷的不同强度需要不同判据**：温和形态要值断言（是不是同一个 error），激进形态文本断言才够。tushare 的等价形态（映射分支无条件成立）让 `40203 无权限` 子用例转红——**它把永久性错误也吞成了 ErrRateLimited**，正是「统一 catch 会把不同来源压成一类」的直接体现。"
+  ],
+  "decisions": [
+    {
+      "decision": "按 (A)「不新增导出哨兵」实现，而非最初建议的 (B)「每包新增 ErrTemporary」。",
+      "rationale": "(B) 与 twelvedata 已写下的「本包无 sentinel error（为脱敏刻意断链）」决策正面冲突；且实测上层**没有任何地方**对这两家的错误做 errors.Is 分支（grep prism 全树，只有 sankey/store 自己的哨兵）。(A) 满足全部 DoD 条款且沿用两包既有惯用法。**我最初推荐 (B) 是在读 wrapErr 注释之前**，属于「证据不全时的判断」，拿到新证据后立即更正并告知 Leader。"
+    },
+    {
+      "decision": "yahoo 的用例写成表驱动，逐个覆盖 3 处 policy.Fetch 调用点。",
+      "rationale": "三处调用点各自独立返回，**漏映射任何一处都是一个真实的外泄口**，只测 FetchHistory 时另外两处坏了照样全绿。已用 Y7/Y7b/Y7c 三个变异逐点实证：分别只还原 eps / quote / chart 一处，**每次恰好对应那一个子用例转红**。⚠ Y7 首版按行号区间定位，因我加导入后行号偏移而**只生效了一半**（只还原了 eps）——改动量非空、vet 通过、也确实转红了，**若不核对「红的是哪个子用例」就会误以为它证明了两处**。补 Y7b/Y7c 精确定位才拿到完整证据。"
+    },
+    {
+      "decision": "twelvedata 的映射走 c.wrapErr 而不是自起一套 fmt.Errorf。",
+      "rationale": "wrapErr 是本包唯一 error 出口并负责凭证脱敏，绕过它就绕过脱敏。已用变异 T2（绕过 wrapErr 直接 fmt.Errorf）钉住——断言「映射后错误必须带 `twelvedata: ` 前缀」正是「是否走了唯一出口」的可观测代理。"
+    },
+    {
+      "decision": "把两条端到端用例的 HTTP 500 改成 400。",
+      "rationale": "500 是 retryableStatus，会触发退避重试，两条用例各白等 7s（合计 14s）而与要验的东西无关；400 走**同一条** `unexpected status` 路径但不重试。**14s → 0.01s**，断言一字未改。"
+    },
+    {
+      "decision": "Y5（只映射 ErrTimeout、不映射 ErrQuotaExceeded）预期全绿并**在注入前写下**该预期。",
+      "rationale": "本任务的触发点是 Timeout；ErrQuotaExceeded 需要 QuotaStore 才造得出，本包测试无从触发 ⇒ 等价变异体。**事先声明**才不算事后找补——契约明确：预期绿实际绿不等于无守护，但必须写在注入前。生产上 ErrQuotaExceeded 仍被映射（代码里两个哨兵都判），只是本轮测试覆盖不到。"
+    },
+    {
+      "decision": "ErrTimeout 在 tushare 映射到 ErrRateLimited，而不是新增第三个哨兵或映射到 ErrNoPermission。",
+      "rationale": "`refresh.go:450` 对 ErrRateLimited 的处置是「本次跳过，下次自动重试」，正是超时该走的路径；`:453` 对 ErrNoPermission 是「永久性错误，永不重试」。超时与配额同属临时性（窗口/负载过去即自愈），语义与限频一致，复用既有哨兵**不改动 refresh.go 一行**（设计 §5.1：policy 错误绝不外泄到 prism 层）。新增第三个哨兵会要求 refresh.go 加分支，属跨包扩散且今天没有消费者。"
+    },
+    {
+      "decision": "端到端否定断言之外，另加「返回同一个 error 值」的指针相等断言（两包各一条）。",
+      "rationale": "变异 Y6（把**所有**错误都包一层 = 更外层统一 catch）下端到端断言**双双全绿**：被包过的 HTTP 错误文本里既仍含原判别词、又不含 timeout，两条文本断言同时被绕过。⇒ 改为**直接观测那条路径本身**（契约陷阱 8）：`mapPolicyErr(in) != in` 即红。指针相等是最强的「未被改动」断言，且**与措辞无关**——换包装文案不会让它悄悄失效。已做同环境 2×2：旧断言+Y6=绿（漏检）、新断言+Y6=红、两者在正确实现下均绿。"
+    },
+    {
+      "decision": "L3 与 T10 各补一个隔离变量的版本（L3b / T10），而不是接受「多红一条」。",
+      "rationale": "首版 L3（`API error: %v`）同时改了两个性质——加永久性措辞**且**去掉 retryable ⇒ NotConfusable 与 ReadsAsTemporary 双红，无法归因到底是哪条断言在守护。按控制变量原则重造 L3b（`API error (retryable): %v`，保留临时性措辞）后**只红 NotConfusable**。「变异只改一个变量」不只是整洁问题：多变量变异会让「哪条断言有效」这个结论失去分辨率。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/errmap_test.go",
+    "internal/collector/twelvedata/client.go",
+    "internal/collector/twelvedata/errmap_test.go",
+    "internal/collector/lixinger/client.go",
+    "internal/collector/lixinger/errmap_test.go",
+    "internal/collector/tushare/client.go",
+    "internal/collector/tushare/errmap_test.go"
+  ],
+  "interfaces_exposed": [
+    "func mapPolicyErr(err error) error —— yahoo 包内未导出。把 policy.ErrTimeout/ErrQuotaExceeded 换成 `yahoo: temporary gate failure (retryable): %v`（**%v 故意断链**）；**非 policy 错误原样返回同一个 error 值**。**必须在每处 policy.Fetch 的返回值处调用**，不得在更外层统一 catch",
+    "func (c *Client) mapPolicyErr(err error) error —— twelvedata 包内未导出。同上，但**经 c.wrapErr 出口**（唯一 error 出口，负责凭证脱敏；它本就用 %v 断链）",
+    "**未新增任何导出 API**。两包仍然没有哨兵错误常量——这是刻意保持的现状（twelvedata 侧是既有的安全决策）",
+    "各调用点行为变更：yahoo FetchQuote/FetchHistory/FetchEPSHistory 与 twelvedata FetchHistory 在 Gate 产生 timeout/quota 时返回的错误**不再** errors.Is 到 policy 哨兵；文本保留原始原因并显式标注 retryable",
+    "func mapPolicyErr(err error) error —— lixinger 包内未导出。无哨兵 ⇒ `%v` 断链 + `lixinger: ` 前缀；非 policy 错误原样返回同一个 error 值",
+    "tushare `(c *Client) call` 新增 ErrTimeout 分支：`fmt.Errorf(\"%w: %s (闸门超时，未取得响应)\", ErrRateLimited, apiName)`——**保留 %w**，refresh.go:450 的 errors.Is 分叉依赖它；既有 ErrQuotaExceeded 分支一字未动",
+    "**四包均未新增导出 API**（Leader 裁定 (A) 案）"
+  ],
+  "verification": "两包 **108 PASS / 0 FAIL / 0 SKIP**，`go test -race` 全绿（yahoo 23.627s、twelvedata 1.597s）；`go build ./...` 与 `go vet ./internal/collector/...` 通过；gofmt 对本次新增/修改文件全过。**既有测试文件一字未改**（`git diff --stat HEAD -- '*_test.go'` 空）。**覆盖率（口径：单包，非合并）**：yahoo 88.0% → **89.3%**、twelvedata 92.7% → **95.5%**，均高于基线。提交 253c1bc6ffcd49847624febc31455f5f8bfe6bc5（显式 pathspec，`git show --stat` 核对只含本任务 5 个文件）。【变异反证 13 个，**注入前先写下预期表**（scratchpad/exp-018.md），每条过四道门】Y1 mapPolicyErr 直接 return err → 仅 SentinelLeak 红 :99（**其余三条全绿，实证它们不自守**）；Y2 丢掉原因 → KeepsDiagnosis 红 :123 + MappingAtFetch 红 :247；Y3 映射成永久性措辞 `no data for symbol` → NotConfusable 红 :164；Y4 用 %w 保留链 → SentinelLeak 红 :99（钉住「故意断链」这条决策）；Y5 只映射 ErrTimeout → **全绿，等价变异体，预期已于注入前写下**；Y6 统一 catch（所有错误都包一层）→ **首轮全绿=真存活**，补 TestMapPolicyErrPassesThrough 后红 :241；Y7/Y7b/Y7c 分别只还原 eps/quote/chart 一处 → **每次恰好对应那一个子用例转红**；T1 twelvedata 不映射 → SentinelLeak 红 :55 + KeepsDiagnosis 红 :80；T2 绕过 wrapErr → KeepsDiagnosis 红 :80（钉住脱敏出口）；T3 丢原因 → 红 :75/:217；T4 映射成 `decode` → NotConfusable 红 :116；T5 调用点不调 mapPolicyErr → 红 :55/:80；T6 统一 catch → TestMapPolicyErrPassesThrough 红 :183。【Y6 的 2×2 同环境闭环】旧断言+Y6=**绿（漏检）**、新断言+Y6=红、两者在正确实现下均绿——左下角那格是补这条断言的全部理由。【一次工具缺陷，靠 RUN 数发现】新增测试名 `TestMapPolicyErrPassesThrough...` 不匹配 runner 的 `-run` 正则 `TestMapped`，**首次 Y6 复跑 RUN 数仍是 18（未变）而报绿**——若只看红/绿会误判「新断言也抓不到」。修正正则后 RUN=19 且转红。这是契约断裂点④「跑了 0 个测试」的变体：**测试跑了，但跑的不是新加的那条**。每个变异还原后均以 md5 与工作基线比对确认一致，收尾 `git status` 只余本任务文件。【环境限制】项目 CLAUDE.md 要求的 GitNexus detect_changes 未执行——工具集不含 gitnexus MCP 工具；已用全仓 go build + 两包 -race 替代。【既有 gofmt 漂移，非我引入】`internal/collector/yahoo/yahoo_test.go` 在 HEAD 上即不通过（`git diff --stat HEAD` 为 0 行），属已登记的 29 处之一，未修。 【epoch 2 范围订正后补做】新增 lixinger（1 处）与 tushare（ErrTimeout 缺口）。四包 `-race` 全绿、0 SKIP；`go build ./...` 与 `go vet ./internal/collector/...` 过。**覆盖率（口径：单包，非合并）**：yahoo 88.0→**89.3%**、twelvedata 92.7→**95.5%**、lixinger 92.2→**93.4%**、tushare **95.3%**。既有测试断言体与场景一字未改。提交 `4c92611ec5e4c375f66b15f3ea3e14e5ed2afedf`（显式 pathspec，`git show --stat` 核对只含 4 个文件）。【补充变异 10 个，合计 23 个，注入前均写下预期】L1 lixinger 不映射 → SentinelLeak + KeepsDiagnosis + ReadsAsTemporary 三红；L2 用 %w 保留链 → SentinelLeak 红（**实证「只查文本会被 %w 骗过」**）；L3 首版多红一条（改了两个性质）→ 重造 **L3b** 隔离后只红 NotConfusable；L4 文案去掉 retryable → ReadsAsTemporary 红；L5 统一 catch → PassesThrough 红；T7 删掉 ErrTimeout 分支 → 三红（**ReadsAsTemporary 未红，暴露否定断言恒绿，见 key_finding**）；T8 映射成 ErrNoPermission → IsRateLimitedNotPermission **正反两条同时红**；T9 用 %v 断链 → IsRateLimitedNotPermission 红（实证有哨兵包必须 %w）；T10 保留正确哨兵、只把文案改成误导性中文 → ReadsAsTemporary 红（补证该否定断言有内容）。【一个 zsh 坑，值得记】`P=\"./a/ ./b/\"` 后 `go test $P` —— **zsh 不对未加引号的变量做分词**（与 bash 相反），整串被当成一个路径，`go test` 报 `directory not found` 并 exit 1，而我的统计脚本随即算出 `PASS=0 FAIL=0 SKIP=0` —— **「0 失败」看起来像成功**。若只看 FAIL 数就会把「根本没跑」记成「全过」。这是断裂点④「跑了 0 个测试」的又一变体，触发源是 shell 方言差异。改用显式列路径后正常。【交付时的 scope 冲突，已上报 Leader】validator 报 ✗ `[scope-mutex] TASK-018 与在途 TASK-007 同时声明 ./internal/collector/yahoo`；我实际观测到 dev-agent-35 的在途改动（`M yahoo/gate_test.go`，内容为 TASK-007 review_fix 的缓存键时间精度守护，数分钟后消失）。**实质冲突为零**（它改 gate_test.go，我改 yahoo.go/eps.go，且我的 yahoo 部分早在 253c1bc 已提交）；转 dev_done 前已确认 TASK-007 转入 `dev_done`（不再改代码）、四包复跑全绿、我的改动完好、工作区干净。【环境限制】GitNexus detect_changes 未执行——工具集不含该 MCP 工具；已用全仓 go build + 四包 -race 替代。 【放行前按 Leader 条件②补做，合计 27 个变异】**逐包单独跑「摘掉本包映射层」对照**（不因 yahoo 转红就一并采信其余三家）：yahoo → 仅 SentinelLeak 红；twelvedata → SentinelLeak + KeepsDiagnosis 红（**证伪了「wrapErr 天然断链可能让 functional[0] 不需映射层就成立」的担忧**：`wrapErr` 只在 fn 内部用，`policy.Fetch` 的返回路径上没有它，外泄是真的）；lixinger → 再多 ReadsAsTemporary 红。**另补 N-A 四条**（统一 catch 且丢原始错误）：yahoo/twelvedata/lixinger 三包均让 `NonPolicyErrorsUnaffected` + `KeepsDiagnosis` + `PassesThrough` + `MappingAtFetch` 转红；tushare 等价形态（映射分支无条件成立）让 `NonPolicyErrorsUnaffected/40203_无权限` 转红。⇒ **四包中每一条测试都至少被一个变异打中，无空转测试**（此前 23 个变异中 `NonPolicyErrorsUnaffected` 一直未被命中，是 N-A 补上的这一格）。收尾复跑：四包 `-race` 全绿、工作区干净、还原态 md5 与基线一致。"
+}

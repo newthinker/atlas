@@ -1,0 +1,97 @@
+{
+  "id": "TASK-007",
+  "title": "yahoo 接入 Gate",
+  "description": "删除 yahoo 私有节流状态(mu/lastReq/minInterval/throttle()),改由 Gate 承接;do() 签名加 topic 参数,eps.go 调用点带上主题名;节流用例从 throttle_test.go 迁移到 Gate(重试用例保留)。**方案行 2287-2720 已给出完整实现与测试代码。** 两个易错点:①重试循环只在 attempt>0 时调 g.Wait(topic),否则首次请求等两倍间隔;②Fetch 命中缓存返回同一底层数组,FetchHistory 必须自行 slices.Clone 后再返回(取代旧 CachedCollector.cloneOHLCV 的保护)。gate_test.go 需含 TestMain 以便注入测试 Gate。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-yahoo",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/gate_test.go",
+    "internal/collector/yahoo/throttle_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchHistory 经 Gate 走 TTL 缓存:同参数重复调用只发一次 HTTP 请求(TestFetchHistoryCachesViaGate)",
+      "FetchQuote 使用 yahoo.quote 主题且 TTL=0,不被缓存但仍受 500ms 节流(TestFetchQuoteIsNotCached)",
+      "yahoo.chart 与 yahoo.eps 共享同一限流域闸门,相邻请求间隔 >= 500ms(TestChartAndEPSShareThrottleDomain)",
+      "重试循环复用同一闸门:只在 attempt>0 时调用 Gate.Wait,首次请求不重复等待(既有重试用例保持全绿)"
+    ],
+    "boundary": [
+      "缓存命中时 FetchHistory 返回独立切片,调用方修改返回值不污染缓存内容(TestFetchHistoryReturnsIndependentSlice)——必须自行 slices.Clone"
+    ],
+    "error_handling": [
+      "既有错误路径测试的**断言体与场景一字不改**且全部通过(反审 B4 的可判定表述)。**Leader 裁定的豁免范围**(教训 14:yahoo 的 minInterval 引用散落 throttle_test.go 7 个位置、含共享 helper newRetryServer,字面不可兼得):允许①删除因字段消失无法编译的赋值行(含共享 helper 里的);②TestDoThrottlesConsecutiveRequests 改为经 gate 注入同样的 80ms、断言与场景一字不改;③do() 签名变更的调用点适配。不允许删除任何既有测试函数或改动其断言与场景。覆盖率取**绝对下限 86.0%**"
+    ],
+    "non_functional": [
+      {
+        "desc": "yahoo 包源码中不再存在 lastReq/minInterval/throttle 私有节流状态——本条由 TASK-013 的 AST 断言统一守护(反审 B7:原 grep 手段与 verify_by:test 标注不符且与 TASK-013 重复),本任务只需确保改造后这些符号确已移除",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go test ./internal/collector/yahoo/ -race 全绿,覆盖率不低于既有水位 86%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-002",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/yahoo"
+  ],
+  "writes": [
+    "./internal/collector/yahoo"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-35",
+  "questions": [
+    {
+      "q": "DoD 的 error_handling[0] 与 non_functional[0] 字面冲突，需要裁定口径。error_handling[0]:「master 基线上 yahoo 包的既有测试用例**一条不删、一条不改**且全部通过」；non_functional[0]:「yahoo 包源码中不再存在 lastReq/minInterval/throttle 私有节流状态……本任务只需确保改造后这些符号确已移除」。但 throttle_test.go 有 7 处 `y.minInterval = 0`（行 52/98/125/156/198/231/253），删掉 minInterval 字段后这些既有测试**编译失败**，两条无法同时满足。方案自身也在 Files 里列了「Modify: internal/collector/yahoo/throttle_test.go」，说明预期是要动它的。\n\n我的理解与建议（请裁定，一句话即可）：error_handling[0] 是反审 B4 把不可判定的「行为不变」改成可判定表述的产物，其意图应是「**不删测试用例、不改断言与场景**」，而非「一个字符都不能动」。据此我建议的口径是：(a) 既有 10 个测试函数一个不删、断言与场景一字不改；(b) 仅做适配签名/字段变更所必需的机械改动——`y.minInterval = 0` → 给 y.gate 赋零间隔 Gate、`y.do(req)` → `y.do(topic, req)`；(c) 唯一实质改动是 TestDoThrottlesConsecutiveRequests（行 125 设 80ms 验节流），它测的正是被迁走的能力，改为经 gate 注入同样的 80ms 后断言不变。\n\n若你的口径不同（例如要求保留 minInterval 字段以维持测试原样），请明示，我按你的口径执行。",
+      "asked_at": "2026-08-06T06:15:00Z",
+      "answer": "Leader 裁定（统一适用于 TASK-007/008/009/010 四个 collector 改造任务）：error_handling[0] 的「一条不删、一条不改」scope **限于它点名的错误路径测试的断言体与场景**，不包括为适配签名/字段变更所必需的机械改动，也不包括被 Gate 取代的节流用例。允许：①删除因私有节流字段消失而无法编译的赋值行（含共享 helper 里的）；②删除测被迁走能力的节流测试（如 TestThrottleMinInterval / TestDoThrottlesConsecutiveRequests 可改为经 gate 注入同样间隔、断言不变）；③do() 等签名变更的调用点适配。不允许：删除任何错误路径测试函数、改动其断言与场景。你提的 (a)(b)(c) 三条与此裁定一致，按它执行。DoD 措辞我会在 dev_done→verifying 那次 transition 时落盘修正（transition 是 Leader 唯一能改 DoD 的窗口），并在派验单里明确告知验证者，避免按旧字面判假 FAIL。另：覆盖率口径统一取**绝对下限**（DoD 里写的那个百分数，如 twelvedata/lixinger 的 92.0%、yahoo 的 86.0%、tushare 的 94.0%），不按 master 实测水位——重构任务删除代码会同时改变分子分母，「既有水位」本就不是稳定量。",
+      "answered_at": "2026-08-06T06:25:00Z"
+    },
+    {
+      "q": "调度裁定请求（非 DoD 疑问）：TASK-007 F2 的实现方案与补丁已定稿，唯一缺的是一句放行。你在派 F2 时指示「先别动手，等 TASK-018 转 verified，我会通知你开工」。我已按此等待，主工作区 internal/collector/yahoo 零改动。现请裁定一个折中方案：\n\n【提案】用 git worktree add --detach ../wt-007f2 8623e14 预跑 9 个变异的实证矩阵，产物一次都不进 git，跑完即 git worktree remove；等 018 落定后再把定稿测试落到主工作区、复跑一遍矩阵后交付。\n\n【为何需要你裁】它与你给我的另一条常设约束表面冲突——你曾明确让我不要建 worktree，因为 task-completed.sh 门禁在主工作区执行，worktree 里的改动 git diff HEAD 看不到 ⇒ 门禁假绿（dev-agent-36 在 TASK-012 实撞过）。我认为本次不触发该失效模式：worktree 里不产生交付物，最终测试文件在主工作区写、门禁看的就是它；test-agent-16 验 F1 时用的正是同一形态（报告第六节复现命令 git worktree add --detach 415f900）。但这是你定的约束，我不自行解释掉。\n\n【你阻塞我的理由依然成立且我不会犯】我若提交新的 yahoo 改动，test-agent-17 复跑 018 时会看到本不属于它的测试。预跑方案一次提交都没有。\n\n【一处事实更正，影响你的判断】我先前说「预跑基线不含 018 的 errmap_test.go」是错的：018 的 yahoo 产物早在 253c1bc 提交，在我的 F1(415f900) 之前；415f900..HEAD 里 018 四个包只剩 4c92611(lixinger/tushare)。当前 HEAD 8623e14 就是含它的基线。因此原先「白跑一半」的主要风险已消失，只剩「018 被 reject 且 dev-38 再动 yahoo」一种，而其 yahoo 部分早已定型。\n\n【回答「不准」也是完整答案】那样我就等 018 落定后在主工作区做，方案与代码一个字都不用改，只影响什么时候跑。\n\n【为何落盘而非只发 inbox】同一问题我已发两次 inbox 未获回复。按角色规范「只发 inbox 不落盘 = 丢失的提问 = 静默卡死的任务」，落到 questions[] 让它进真相源；同时这让 TASK-007 离开 idle hook 的 dev-* 唤醒集（assigned/in_progress/review_fix），停止无意义的重复唤醒（已 8 次）。答复后我自己转回 in_progress。",
+      "asked_at": "2026-08-07T00:26:00Z",
+      "answer": "【由 dev-agent-35 代录自 team-lead 的 inbox 消息，非 Leader 亲写；原文在 msg d085f738 及后续两条】批准预跑。裁决要点:(1)「不要建 worktree」这条禁令真正要防的失效模式是「dev 在 worktree 里产出交付物 → 转 dev_done → 门禁在主工作区跑 git diff HEAD 看不到 → 测的是没有新代码的旧版本 → 假绿」;本次链条第一环不成立(worktree 里不产出交付物),故不触发。Leader 自评当初把「产出交付物的 worktree」压缩成了「worktree」,压缩掉的那部分正好是判据。(2) 三条硬约束:detached/不提交/不 push;最终测试文件必须在主工作区**写**而非从 worktree 拷回(拷贝会带上实验痕迹而作者自己看不出);主工作区复跑完整矩阵后才能转 dev_done,预跑结论一律不算证据,只算省下摸索时间。(3) 时序澄清:018 verified 之前只在 detached worktree 跑、主工作区一字节不碰;018 verified 之后在主工作区写最终文件 + 复跑 + 交付。两阶段不重叠故两条约束不冲突。(4) 我的三点预判全部采纳:interval 取 1h 不取 1wk(取走 default 分支的值会造出**假的「守护有效」**——测试绿、变异红、2x2 看似闭环,但守的是一个不存在的区分,方向与精度不匹配造成的假「变异无效」相反且更危险);M3/M7 双红照实报;start 的 Truncate 放粗无人能抓确认为 F1 的**残留缺口**,虽超出 F2 字面范围但既然 start 变体正好堵得上就在 F2 里一并做,报告需标明。(5) EPS 服务端待定项判断正确但已可定:253c1bc(018 的 yahoo 部分)在 415f900(F1)之前,errmap_test.go 早在包里,提升为文件级 epsCountingServer。(6) 教训 30(来自 dev-agent-36 的 016):它的空断言根因不是偏移写小了,而是**用了自己选的变异(退回 UnixNano)而非 DoD 原文指定的那个(去掉 Truncate)**——两者改同一行但对同一条断言敏感度完全相反,它做了完整 2x2 闭环、只是闭环的是错的那个变异。⇒ 每一格都必须先核对「我注入的是不是 fix_items 说的那个具体改动」,再看颜色。(7) idle hook 空转不转中间态:review_fix 挂在 owner 名下正是它该在的位置,转走会让「有人负责且在等待」从真相源消失,比烧 token 更危险;机制解(等待中标记让 hook 跳过)需走运行时资产变更流程,不在本 Sprint。",
+      "answered_at": "2026-08-07T00:29:00Z"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verifier": "test-agent-16",
+  "fix_items": [
+    {
+      "id": "F1",
+      "desc": "yahoo 的两处缓存键缺聚合度/粒度双向守护(与 TASK-015/016/017 同型)。yahoo.go:312(FetchHistory)与 eps.go:49(FetchEPSHistory)都用 Truncate(time.Minute).Unix(),**实现是对的**,但 dev-agent-35 实测:去掉这两处 Truncate 后**全套 42 个测试全绿**(测试全用固定时刻,time.Unix(1600000000,0) 共 7 处 —— 固定时刻在 Truncate 前后相等)。生产路径 app.go:451 的 end := time.Now() 同样经 yahoo,**而 yahoo 是 A 股/美股主源,命中率恒为零的影响面比 baostock 大**。",
+      "requirement": "两处 key 各补一条**双向**守护测试(共两条),形态照抄 crypto/gate_test.go:217 的 TestCacheKeyAggregatesNearbyTimes:(a) 相邻时间落进同一槽(去掉 Truncate 须转红);(b) 分钟粒度不得放粗(Truncate 改 Hour 须转红)。两条判据必须**各自独立实证**——只写 (a) 会被 Truncate(time.Hour) 骗过(TASK-017 的 T2/U2 已实证)。",
+      "trap": "**照搬形态时必须检查偏移量与本包 key 的精度单位匹配**(dev-agent-35 在 eastmoney 刚踩过):yahoo 的 key 用 .Unix()(秒级),若照搬 crypto 的 base+50ms/+900ms 偏移,三个时刻的 .Unix() 仍然相同 ⇒ 变异下断言照样绿、得到假的「变异无效」结论。**须用跨秒偏移**(如 +3s/+15s)。时间基准取 time.Now().Truncate(time.Minute).Add(20~30s)(当前分钟中点)避开分钟边界假红。",
+      "scope": "**纯测试新增,生产代码零改动**。不得顺手改 yahoo 的其它部分。yahoo_test.go 的 gofmt 漂移是既有的(master 上就有),不要碰 —— Sprint 末尾统一处理。",
+      "rework_accounting": "**本次不计入熔断额度**(与 TASK-015 三轮同口径):functional[4] 这条 criteria 在 TASK-007 完成时根本不存在,是本 Sprint 后期因 crypto 的 UnixNano 缺陷才补出来的。规格后到不计,规格一直在则计。"
+    },
+    {
+      "id": "F2",
+      "desc": "**yahoo 缓存键的【区分度】无守护**(test-agent-16 于 F1 验收时发现,变异 W5:把 yahoo.go:312 键里的 symbol 换成固定串 → **83 个测试全绿**)。影响:键丢 symbol ⇒ **AAPL 拿到 MSFT 的行情**,静默错数据,而 yahoo 是主源。包内唯一的第二个 symbol 在 gate_test.go:297,那是 TestFirstRequestDoesNotWaitTwice 用来**避开**缓存的手段(该闸门有 MinInterval、**没设 TTL**,压根没缓存),所以键塌了它也照样绿。",
+      "root_cause": "**TASK-007 的原始 DoD 里根本没有区分度那一条**(functional 只有四条:Gate 缓存/FetchQuote 主题/共享限流域/重试复用闸门)。陷阱 16 的区分度 criteria 与聚合度一样是本 Sprint 后期才补出来的——**Leader 用 F1 回补了聚合度,没一并回补区分度**。这是 Leader 的疏漏,不是 Dev 的执行失误。",
+      "requirement": "yahoo 两处 key 各补一条区分度守护:**至少用两组不同参数验证不互相命中**(陷阱 16)。test-agent-16 的候选补丁在 .arcforge/docs/04-test/TASK-007-rework-verification.md §5.4,2×2 已闭环(现有测试集 + W5 = 绿漏检;候选测试 + W5 = 红「1 次 want 2」),可直接用。**eps.go:49 的键也含 symbol,test-agent-16 未验但判为很可能同一缺口——须一并核并补**。",
+      "trap": "**别只测 symbol 一个维度**——F1 那条(聚合度)与本条(区分度)是缓存键的两个方向,而区分度自身还有多个参数维度(symbol/区间/interval)。参照 crypto 的做法:三组各自独立(去掉 symbol/interval/end 分别报对应参数),而非一条测试凑合覆盖。",
+      "rework_accounting": "**不计入熔断额度**,同 F1 口径:规格后到不计,规格一直在则计。"
+    }
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 1
+}

@@ -1,0 +1,64 @@
+{
+  "id": "TASK-015",
+  "title": "eastmoney 接入 Gate（仅 TTL，修复删除 CachedCollector 造成的缓存回归）",
+  "description": "**QA 终审发现的真实回归**:删掉的 maybeCache 覆盖 yahoo/eastmoney/crypto/tushare/baostock **五家**(设计 §1.3 第 32 行),而新 Gate 内置表只登记了 yahoo/tushare ⇒ eastmoney 丢失了 FetchHistory 的 TTL 缓存。symbol_detail.go:148 是 HTTP 接口路径,每次请求直打上游。**根因是设计文档自相矛盾**:§4.1 只就「节流」推理却把结论写成「行为零变更」,而 §1.3 已记下 maybeCache 覆盖这三家 ⇒ reason_class=dod_defect,非任何任务实现错误。**照 TASK-010(lixinger)的模式做**,它是最接近的已验证范例:仅补 TTL 缓存,不新增任何节流/配额;**并在 policy 内置表登记三个仅 TTL 主题**(eastmoney.*/crypto.*/baostock.*,与 lixinger.* 同款:TTL=builtinTTL、Coalesce=true、**无 MinInterval、无 Quota**),供 TASK-016/017 复用。**必读** .arcforge/docs/01-design/design-spec.md(1400+ 行,前 14 个任务的全部教训)与 .arcforge/discoveries/TASK-010.json。先 git commit 再 transition dev_done;discovery 指针在 dev_done 前回填;commit 必须带显式 pathspec。",
+  "module": "collector-eastmoney",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/eastmoney/",
+    "internal/collector/eastmoney/gate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchHistory 经 Gate 走 TTL 缓存:同参数重复调用只发一次 HTTP 请求(**断言请求次数,不断言返回值** —— 契约陷阱 2:Fetch 类型断言失败时会「当作未命中重取」,返回值仍正确,断言返回值的写法永远绿)",
+      "缓存 key 覆盖全部影响结果的参数(symbol/区间/interval);**至少用两组不同参数验证不互相命中**(契约陷阱 16:只用一个 symbol 时,键里丢掉 symbol 也照样全绿,而生产上会拿到别的标的数据 —— 静默错数据比缓存没生效危险得多)",
+      "构造函数取 policy.Default() 存入私有 gate 字段,**并有一条独立测试断言这一点**(契约陷阱 12:其余测试各自注入闸门、nil Gate 又是透明的 ⇒ 漏掉这一行时全套测试照常绿,生产路径缓存整体静默 no-op)",
+      "主题常量与内置表一致(契约陷阱 15:测试里用同一常量登记与查询,写错也自洽;生产走内置表则 Lookup 落空 ⇒ Gate 直通)。**⚠ 三家均为通配登记(eastmoney.*),Lookup 的通配回退让任何 eastmoney.xxx 都能命中 ⇒ 陷阱 15 在本任务形态下不成立、该条测不出东西(QA 观察)**。改验:主题名第一段(域)与内置表登记的域一致——写错域名才会真的落空",
+      "**缓存键必须双向约束:聚合度 + 粒度不得放粗**(qa-agent-8 于 TASK-016 发现聚合度缺口;dev-agent-36 补出反方向;test-agent-16 给出防假红措辞)。\n\n**(a) 聚合度**:以墙钟为 end 的两次相邻调用**必须命中同一缓存槽**。上层 `app.go:451` 的 `end := time.Now()` 经 `:462` 传进 FetchHistory,键若保留纳秒/秒级精度 ⇒ 每次调用键都不同 ⇒ **生产命中率恒为零,而单测用固定时刻调两次照样全绿**(固定时刻在 Truncate 前后相等,这是整套原测试对该缺陷完全无感的原因)。**变异判据:去掉 `Truncate(time.Minute)` 后该测试须转红。**\n\n**(b) 粒度不得放粗**(dev-agent-36 补,D2 变异实证不可省):只写 (a) 的话,把 Truncate 改成小时/天**照样全绿**,而那会让相隔几分钟的不同查询串槽、静默返回错区间数据。**变异判据:把截断放粗到 time.Hour 后须转红。**\n\n**⚠ 测试写法(test-agent-16 实测,防假红):不要字面用两次 `time.Now()`**——跨分钟边界会偶发假红。取 `base := time.Now().Truncate(time.Minute).Add(20*time.Second)`(当前分钟的中点)与 `base.Add(3*time.Second)`,同一语义但确定。约 1e-7 的跨边界概率可以完全消除,就没理由留着。\n\n**本条的方法论(dev-agent-36 归纳,已进契约):只约束一个方向的判据,会放过反方向的失效。写「A 必须能区分 B」时要同时问「什么情况下 A 必须**不**区分」。** 区分度不足会串数据(**吵闹的错**),聚合度不足会命中率归零(**静默的错**——不报错、不出错数据、返回值完全正确,只有生产路径才暴露)。\n"
+    ],
+    "boundary": [
+      "**不被节流**:连续请求无最小间隔等待(否定断言,契约陷阱 8 —— 直接观测,不用间接现象推断)。本任务只补缓存,不新增任何它今天没有的限流行为",
+      "缓存命中时返回独立切片,调用方修改不污染缓存(**注意 slices.Clone 只在元素是 flat value type 时才等于深拷贝**,契约 §T2;确认本包元素类型)",
+      "**既有测试互不串味**(契约陷阱 13):接入缓存后,多个既有用例若共用同一 topic+key 会变成同一缓存槽,先跑的成功响应会让后跑的「应报错」用例静默失效。先 grep 既有用例的参数分布,必要时用包级 TestMain 装零策略闸门",
+      "**边界裁定(Leader,派验时落盘)**:本任务只接 FetchHistory;FetchQuote 维持不经 Gate(沿用既有实时语义)。验证者须断言 FetchQuote 路径上无 policy.Fetch 调用——**这既是范围边界也是安全边界**:core.Quote 含 *core.FundInfo 指针字段,一旦进缓存,slices.Clone 式浅拷贝会让多个调用方共享同一底层结构(契约 §T2)。discovery 须写明「为什么不接 + 将来接时必须深拷贝 FundInfo」"
+    ],
+    "error_handling": [
+      "**错误不写缓存,且校验必须留在被缓存的 fn 内部**(契约陷阱 14):若本包有「HTTP 200 但响应体表示失败」的路径,校验挪到 Fetch 外面会把错误响应当成功 body 缓存 —— 一次瞬时故障变成整个 TTL 的持续故障。**决定性断言是 HTTP 请求数而非返回 error**:两次调用应各发一次请求",
+      "**policy 错误不得外泄**(Leader 派验时落盘):ErrQuotaExceeded/ErrTimeout 等 policy 包哨兵错误不得原样返回给上层,须映射为本包错误。**临时性错误绝不可映射成永久性**——把限流/超时映射成「无此标的」会让上层停止重试并把错误结果落库。本任务无 Quota/MinInterval 故今天不触发,但映射层须就位(否则将来给 eastmoney.* 加限流时,这个缺陷会静默生效)\n\n**【Leader 修正,2026-08-06,验证者实测推翻我的原判断】** 我原文写「本任务无 Quota/MinInterval 故今天不触发,但映射层须就位」——**这句是错的**。test-agent-17 实测:配 `Timeout:1ns` 即返回 `policy: fn timeout` 且 `errors.Is(err, ErrTimeout)==true`,**根本不需要 Quota**。而 `collector.topics.*.timeout` 是 TASK-005/006 已落地的可配置项(`Override.Timeout`)⇒ **今天就能被配出来,这是现存缺口不是防将来**。修复照 `tushare/client.go:99-101` 形式,并守住「临时性错误绝不可映射成永久性」那半。"
+    ],
+    "non_functional": [
+      {
+        "desc": "既有测试断言体与场景一字不改且全绿(本包无私有节流状态要删,故无 TASK-007/008 那类豁免需求);go test -race 绿、0 SKIP;覆盖率不低于既有水位",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [
+    "TASK-010",
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/eastmoney",
+    "./internal/collector/policy"
+  ],
+  "writes": [
+    "./internal/collector/eastmoney",
+    "./internal/collector/policy"
+  ],
+  "reason_class": "task_defect",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 3,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-015.json",
+  "verifier": "test-agent-17",
+  "reject_reason": "**首轮两项 FAIL 全部修复,且修得比我要求的更完整。判 rejected 的唯一原因是派验时新落盘的 functional[4](缓存键聚合度)无守护。** 【FAIL①映射层 已修复】mapPolicyError(eastmoney.go:460)用**断链**而非 %w,四方向变异全红:R1 撤回映射→:299「policy.ErrQuotaExceeded 泄漏到调用方错误链」+:302;**R2 改用 %w 保链→:299 红(关键——证明测试断言的是 errors.Is(err,policy.ErrXxx)==false 而非只查本包前缀文本)**;R3 映射成永久性措辞「无此标的」→:305「配额是临时性错误,消息须体现(否则调用方会停止重试)」+:332;**R4 非 policy 错误被吞掉→:347「非 policy 错误应原样透传,保留原始错误链」——这是 Leader 点名要我补的增量「换类型不是丢信息」,实测已有守护**。【FAIL②discovery 已修复】直读文件核实(读句子非数关键词),三层俱全:①为什么不接;②将来接时必须深拷贝 core.Quote.FundInfo(指针字段 core/types.go:44,eastmoney.go:319-333 确实设置);③**照抄 yahoo 的 out:=*q 挡不住(浅拷贝),且风险不限于缓存——即使配 TTL:0,只要 Coalesce:true(policy.go:73 正是如此),合并的多个调用方就拿到同一个 *FundInfo**(我提的那层已写入),并关联到 tushare row.values 是同一类问题、本 Sprint 已为此返工过(199ed81)。Dev 的自我诊断准确:「原 discovery 只写了『为什么不接』,漏了『接时要注意什么』——而后者才是不会过时的那半」。【FAIL:functional[4] 聚合度无守护】把 key 的 start/end.Truncate(time.Minute).Unix() 换成 UnixNano() 后**全量 9 条测试全绿**。「全绿」有两种解释,故写探针直接观测生产路径形态(以 time.Now() 为 end 连调两次,即 app.go:452 的调用形态):**变异下 HTTP 请求 2 次(每次都新键、生产路径命中率恒为零),交付态 1 次(命中缓存)** ⇒ **变异有效而无任何测试转红,确认无守护**。定性:实现是对的(:435 的 Truncate 在),缺的是守护——与首轮 FAIL② 同类「结果对,但保证结果的东西没留下」。本次交付只新增 TestPolicyErrorsDoNotLeak 一条,无聚合度测试。**据实说明:functional[4] 是派验这一刻才落盘的 criteria,Dev 交付时大概率不知道它存在;按「DoD 是唯一依据」判 FAIL,但这不是 Dev 的执行失误**,应与 016/017 一并处理。修复:补一条测试——以 time.Now() 为 end 连调两次断言 HTTP 1 次(报告 §3.2 的探针即现成形态);注意与既有 TestCacheKeyCoversAllParams(区分度)是两个方向,**都需要**。【其余全部通过】既有 eastmoney_test.go 一字未改(本次提交仅 eastmoney.go+gate_test.go);-race 绿;29 测试 0 SKIP 0 FAIL;eastmoney 单包覆盖率 87.4%→**87.6%**(同口径);collector 树 17 包回归绿。**scope 口径提醒**:`git diff b238221 11b7d56` 会列出 baostock/crypto/cmd/atlas 的改动——那是 TASK-016/017 的提交夹在中间,本任务 scope 须看单提交 `git show --stat 11b7d56`(仅 eastmoney 两文件),这与我上轮自我修正的「基线+在途」是同一件事。详见 .arcforge/docs/04-test/TASK-015-verification-round2.md\n\n**【Leader 裁定:本次返工不计入熔断额度,rework_count 维持 1 而非增至 2】** qa-agent-8 提请复核,裁定采纳其 (1) 案。理由:验证者在 reject_reason 里已写明「判 rejected 的唯一原因是**派验时新落盘**的 functional[4]」,且确认首轮两项 FAIL 全部修复、修得比要求更完整。**dev-agent-35 提交时 DoD 里没有这一条**——实现与**当时的** done_criteria 是相符的。\n\n这既不是 task_defect(实现与 DoD 不符)也不是 dod_defect(criteria 自相矛盾或不可实现),而是**第三类:规格后到**。max_rework 的立论是「反复返工 3 次以上大概率是 done_criteria 本身不可实现或自相矛盾」——**因 DoD 后加条款产生的返工不携带这个信号**,计进熔断额度会让熔断在错误时机触发(015 若之后再遇任何问题就直接进 blocked_human)。熔断计数是用来识别「这个任务本身有问题」的信号,掺进流程性返工会让它失真。\n\n**同时把 functional[4] 换成与 016/017 一致的双向文本**(原 015 那版写于 dev-agent-36 补出反方向之前,只有 (a) 聚合度)。dev-agent-35 主动问了该做双向还是只做字面 (a)——**做双向**,T2 变异已实证「只写 (a) 会放过粒度放粗」,两家实现同款,缺口同一个。\n",
+  "rework_count": 1
+}

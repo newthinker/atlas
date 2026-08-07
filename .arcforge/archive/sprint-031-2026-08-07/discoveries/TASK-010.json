@@ -1,0 +1,50 @@
+{
+  "key_findings": [
+    "闸门放在 request() 而非注册层是对的，且**不需要**改注册方式：lixinger 的两条身份（eastmoney 内部 fallback、Valuation/Fundamental source）以及包内 6 个 endpoint 的全部 10 处调用点，无一例外都汇流到 request()（grep 'l.request(' 实测：fund.go×4、fundamental.go×1、series.go×1、valuation.go×1、stock.go×1，加 client_test.go）。",
+    "**主题名拼错会静默失效，故缓存类测试一律用内置表构造闸门而非手搓策略。** topic = \"lixinger.\"+endpoint（如 lixinger.cn/company/fundamental/non_financial），经 Lookup 的三段查表命中内置 lixinger.* 通配条目。若漏掉前缀或写错域名，Lookup 落到「未登记 → 零策略直通」，缓存彻底失效而**不报任何错**。用 policy.New(policy.NewTable(), nil) 而不是自建 Table，才能把这条也守住。",
+    "**信封校验必须留在被缓存的 fn 内部**，这是本任务最值得记的落点。lixinger 的业务错误走 HTTP 200 + code:0；把 parseEnvelope 挪到 policy.Fetch 外面（一个很自然的分层写法）会让错误响应被当成功 body 写进缓存，此后同 key 调用永远返回那个错误、且再也不发请求 —— 一次瞬时故障被缓存成 5 分钟的持续故障。已由 TestLixingerErrorIsNotCached + 变异 L6 钉住。",
+    "**TestMain 必须把默认闸门换成零策略，否则既有测试互相串味。** 本包既有 10 个错误路径用例复用同一个 endpoint \"x\" + 空 payload —— 在缓存语义下那是**同一个缓存槽**。带 5m TTL 的默认闸门下，TestRequest_SendsHeaders 写进的成功 body 会被 TestRequest_MalformedEnvelopeIsError 命中，后者转绿失效。这类耦合在接入缓存前完全不可见，其它 collector 接入时值得同样自查一遍「有没有多个用例共用同一 topic+key」。",
+    "**nil *Gate 是透明的，所以「构造函数忘了取 Default()」是一个全绿的缺陷。** 变异 L5（newWithBaseURL 不设 gate 字段）下，7 个测试里只有 TestLixingerConstructorSnapshotsDefaultGate 转红，其余 6 个照常绿 —— 因为它们各自 l.gate = … 注入了闸门。若没写这条测试，生产路径上缓存整体静默 no-op 而全套测试一片绿。functional[3] 那句「构造函数取 policy.Default()」不是形式要求。",
+    "**否定断言「不被节流」的探针不能靠换 payload 避开缓存 —— 那会让它暗中依赖另一条 DoD。** 首版探针逐次换 payload 以确保每次都走到执行链 ④ 节流；变异 L2（缓存 key 去掉 payload）下三次调用塌成一个 key，后两次命中缓存跳过节流，对照组因而报「本轮不构成检验」。**结论正确、信息准确，但 boundary[0] 在 functional[1] 坏掉时会一起变哑。** 改为「取内置 lixinger 策略 + 只把 TTL 归零」的探针后完全解耦。",
+    "覆盖率 92.2%（基线 92.1%，floor 92），未被拉低。request 拆两层后 requestHTTP 的函数体与原 request 的循环逐字相同，既有测试一条未改。"
+  ],
+  "decisions": [
+    {
+      "decision": "缓存类测试用内置表闸门（policy.New(policy.NewTable(), nil)），不用方案给的手搓 gateTable(policy.Policy{TTL: time.Minute, Coalesce: true})。",
+      "rationale": "内置 lixinger.* 恰是 {TTL: 5m, Coalesce: true}，功能上等价；但手搓表把主题名换成了测试自己造的那份，于是「request() 拼出的 topic 是否真能命中内置通配条目」这一层完全没被验。用内置表后，若有人把内置 lixinger.* 条目删掉或把 TTL 归零，这几条测试会一起转红 —— 而那正是验收标准 6 要守的东西。手搓表只保留给需要精确控制策略的两处：TestMain 的零策略、节流对照组。"
+    },
+    {
+      "decision": "三条 key 隔离测试全部写成「a → b → a」重放序列，断言 HTTP 请求次数 == 2，而不是方案原版的「a → b，断言 == 2」。",
+      "rationale": "方案原版对「根本没缓存」是假绿：不缓存时 a、b 两次也恰好是 2 次请求，与正确实现无法区分。第三次重放 a 才把两种缺陷同时排除 —— key 不含该维度（第 2 次误命中 → 总数 1）与 压根没缓存（总数 3）。断言的是请求次数而非返回值，因为 Fetch 类型断言失败会静默降级成「多发一次请求」，返回值仍正确（契约陷阱 2）。"
+    },
+    {
+      "decision": "TestLixingerReturnsIndependentBytes 调用三次并每次改脏返回值，不是方案原版的两次。",
+      "rationale": "第 1 次走缓存未命中路径，第 2、3 次走命中路径。只验两次会漏掉「未命中时复制、命中时直接返回缓存原件」这种实现 —— 那种实现下第 2 次拿到的是干净的缓存原件，内容断言通过，而它被改脏之后要到第 3 次才暴露。末尾 hits()==1 的有效性判定放在行为断言**之后**（陷阱 10：反过来会让缺陷伪装成测试构造失败）。"
+    },
+    {
+      "decision": "TestLixingerNotThrottled 除了查策略表，还实际发请求计时，并自带一个 MinInterval=200ms 的对照组。",
+      "rationale": "方案原版只查一眼 policy.NewTable().Lookup(...) 的 MinInterval/Quota —— 那验的是 TASK-001 的表，验不到 lixinger 的请求路径（request() 里若自己加了 sleep，或干脆没接 Gate，它照样绿）。否定断言只能直接观测那条路径本身（陷阱 8），而「有没有等」唯一的观测量就是墙钟耗时。对照组的作用是证明这套观测手段确实看得见节流，否则被测组的「快」是空转的绿；它是**每次运行都执行的常驻自检**，比一次性变异更耐久。对照组 MinInterval 取正值而非 0，确保它真的进入 throttle 的持锁临界区（陷阱 9）。实测被测组 ~4ms、对照组 ~400ms，阈值 200ms，连跑 5 次无抖动。"
+    },
+    {
+      "decision": "节流探针改用「内置 lixinger 策略 + TTL 归零」，放弃「逐次换 payload 避开缓存」。",
+      "rationale": "见 key_findings 第 6 条。这是本任务唯一一次预期与实际不符（L2 预期 NotThrottled 绿、实际红），诊断方向是「预期绿/实际红 → 查我对被测系统的理解」，查出的是测试间的隐藏耦合而非代码缺陷。**同环境 2×2 闭环**（同一会话、同一工作区）：旧探针 无变异=绿 / L2=红（误报「不构成检验」），新探针 无变异=绿 / L2=绿；左下角那一格才是改它的理由。"
+    },
+    {
+      "decision": "没有为 boundary[0] 的分句①（内置表 lixinger.* 的 MinInterval==0 且 Quota==nil）注入变异。",
+      "rationale": "该变异必须改 internal/collector/policy/policy.go —— 超出本任务 writes 范围，且当时有三个 Dev 在并行跑依赖 policy 包的测试，瞬时改坏会给他们制造与自身改动无关的假红。**这是一条覆盖声明的边界，据实写出而非略过**：分句①目前只靠「谓词是等值形式」这一肉眼判据（契约陷阱 6 的谓词表），未经实测；分句②由变异 L1 实证（对照组转红）。验证者若要补这一格，建议在自己的隔离 worktree 里做。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/lixinger/client.go",
+    "internal/collector/lixinger/lixinger.go",
+    "internal/collector/lixinger/gate_test.go"
+  ],
+  "interfaces_exposed": [
+    "Lixinger.gate *policy.Gate —— 包内未导出字段。在 newWithBaseURL 里**构造时快照** policy.Default()（不是每次调用现取），故测试替换默认闸门时 SetDefault 必须先于 New/NewWithBaseURL（陷阱 4）；包内测试也可直接 l.gate = … 注入",
+    "func (l *Lixinger) request(endpoint string, payload any) ([]byte, error) —— 签名不变。现经 policy.Fetch，topic = \"lixinger.\"+endpoint、key = string(json.Marshal(payload))，返回值一律 bytes.Clone 后交出。包内 10 处调用点无需改动",
+    "func (l *Lixinger) requestHTTP(endpoint string, body []byte) ([]byte, error) —— 新增未导出方法，承载原 request 的退避重试循环与信封校验（函数体逐字未动）。**信封校验必须留在这里（即被缓存的 fn 内部）**，挪到 Fetch 外面会让 code:0 业务错误被缓存",
+    "gate_test.go 包内测试辅助：TestMain（把默认闸门换成零策略，本包所有测试共用）、gateTable(p policy.Policy) *policy.Table、builtinGate() *policy.Gate、scriptedLixServer(t, bodies ...string)、countingLixServer(t)、常量 gateFundamentalBody / gateEndpoint",
+    "**未新增任何限流行为**：lixinger 无 MinInterval、无 Quota，内置表 lixinger.* 仍是 {TTL: 5m, Coalesce: true}。policy 包一个字节未改（git diff --stat -- internal/collector/policy/ 为空）"
+  ],
+  "verification": "59 个测试全 PASS、0 FAIL、0 SKIP；go test -race -count=1 全绿（1.972s）；覆盖率 **92.2%**（基线 92.1%，未拉低）；gofmt -l 空、go build ./... 与 go vet ./internal/collector/lixinger/... ./internal/collector/policy/... 全过；既有测试文件 diff 为空（git diff <base> -- '*_test.go' ':!gate_test.go' 无输出）。提交 b0bc78a15ffa5be4811f5fa9a935d8f128be9d7e（先 commit 后 dev_done）。【变异反证 6 个，**注入前先写下预期表**（scratchpad/expectations.md），每条过四道门：① md5 已变 ② go vet 通过 ③ 人审 diff 语义确实变了 ④ === RUN == 59 > 0；判红只认 `<file>_test.go:NN: <消息>` 断言行，全程无 panic / 无编译红】L1 request 不经 Gate 直接调 requestHTTP → RequestIsCached 红 :101、CacheKeyIncludesPayload 红 :121、EndpointsAreSeparateKeys 红 :138、NotThrottled 红 :224（对照组看不见节流）、ReturnsIndependentBytes 红 :255；**ErrorIsNotCached 与 ConstructorSnapshots 如预期保持绿**；L2 缓存 key 去掉 payload → 仅 CacheKeyIncludesPayload 红 :121；L3 topic 去掉 endpoint（固定 \"lixinger\"）→ 仅 EndpointsAreSeparateKeys 红 :138；L4 去掉 bytes.Clone → 仅 ReturnsIndependentBytes 红 :248；L5 newWithBaseURL 不设 gate → **仅** ConstructorSnapshotsDefaultGate 红 :154/:157（其余 6 条全绿 —— 实证 nil Gate 透明、这条缺陷本可全绿溜过）；L6 信封校验移出被缓存的 fn（保留退避重试以免连带弄红 client_test.go 的重试用例）→ 仅 ErrorIsNotCached 红 :278。纪律 4：在 L1 下对验收标准 6 的守护者 TestLixingerRequestIsCached 单独 -run，确认它自己转红（:101），正确实现下单独 -run 绿、无假红。时序测试 TestLixingerNotThrottled -count=5 连跑 5/5 PASS。每个变异还原后均以 md5 与工作基线比对确认一致，收尾 git status --porcelain internal/collector/lixinger/ 为空。【预期不符 1 处】L2 首版预期 NotThrottled 绿、实际红 —— 诊断为测试间隐藏耦合（探针靠换 payload 避缓存，暗中依赖 functional[1]），非代码缺陷；改用「内置策略 + TTL 归零」探针并做同环境 2×2 闭环后复跑，L2 下仅 CacheKeyIncludesPayload 红。【未做的一格，据实声明】boundary[0] 分句①（内置表无 MinInterval/Quota）的变异需改 policy 包，超出 writes 范围且会干扰三个并行 Dev，**未注入**；它目前只有「等值谓词」这一肉眼判据，分句②已由 L1 实证。【环境限制】项目 CLAUDE.md 要求的 GitNexus detect_changes 未执行 —— 我的工具集不含 gitnexus MCP 工具；已用 go build ./... 全仓编译 + 全包 -race 替代。code-simplifier 按全局规范在 commit 前跑过，结论为无需修改（client.go/lixinger.go md5 未变）。"
+}

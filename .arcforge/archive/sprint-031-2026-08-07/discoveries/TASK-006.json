@@ -1,0 +1,45 @@
+{
+  "key_findings": [
+    "**【最高风险项 A1 已落地】initPolicyGate 装在 loadConfigOrDefaults 内部**（export_ohlcv.go:297），覆盖 prism refresh / crisis / export_signals / watchlist / export_ohlcv 五条入口；serve 不经该 helper，在 serve.go:85（cfg.Validate 之后、buildCollectors 之前）单独接线。按函数体核实顺序：runServe init@85<ctor@108、runPrismRefresh init@171<ctor@191、runWatchlist init@58<ctor@64。",
+    "**crisis 两条路径也被覆盖，且方式值得记**：runCrisisBackfill/runCrisisEval 自己不调 loadConfigOrDefaults，但它们在构造 collector 前调 resolveFREDKey(crisis.go:105)，而后者内部调了 loadConfigOrDefaults。⇒ 把装配放进 helper 内部的价值不止于「少写几行」：连「只是想读个 key」的 helper 都顺带完成了装配，无需在每个入口手工接线、也不会漏。",
+    "**viper 的 key 分隔符与策略主题名冲突，是个会静默丢配置的实质缺陷**（方案代码未处理）：viper 用 \".\" 作 key 分隔符，而主题名本身含点（yahoo.chart）。`v.Unmarshal` 到 `map[string]TopicConfig` 时会把主题名当嵌套层级拆开，结果只剩 `{\"yahoo\": {全字段 nil}}` —— **装载不报错、覆盖不生效**。但 `v.Get(\"collector.topics\")` 拿到的原始 map **保留完整 key**，故新增 decodeTopics 从它重建。",
+    "不能改 viper 的 KeyDelimiter 来绕开：Load 里有多处 `v.SetDefault(\"a.b.c\", ...)` 与 `v.AllKeys()` 依赖默认分隔符，改了会破坏既有配置行为。也没有引入新的 yaml/mapstructure 直接依赖（两者在 go.mod 里都是 indirect），decodeTopics 用标准库 type switch 手工解码。",
+    "TopicConfig 的 duration 字段接受 \"1s\" 这类字符串与整数（按纳秒），与 mapstructure 对其他 duration 字段的既有行为一致；`ttl: 0` 解析为 *time.Duration(0) 而非 nil —— 这正是指针语义要保住的东西。",
+    "cmd/atlas 覆盖率 74.4%，高于 coverage_floor=74（既有历史水位），本次改动未拉低。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增 decodeTopics + topicDuration（config.go），在 Load 的 Unmarshal 之后用 v.Get 的原始 map 重建 cfg.Collector.Topics。",
+      "rationale": "方案代码直接依赖 v.Unmarshal 装载 topics，实测**完全失效**（主题名被点号拆开）。这是 DoD functional[2]「collector.topics 的逐主题覆盖经 Table.Override 生效」的硬要求，不修则该 DoD 不成立。修法选「从 v.Get 的原始 map 重建」而非改分隔符或改 yaml schema：前者不影响任何既有配置行为、不引入新依赖、不改用户可见的配置格式。"
+    },
+    {
+      "decision": "TestInitPolicyGateAppliesCacheTTL 的判据从「两次 Fetch 命中缓存」改为「短 TTL + 跨过期点再取」。",
+      "rationale": "原判据（方案给的写法）是弱断言：内置 TTL 是 5 分钟，删掉 ApplyTTL 后两次 Fetch 照样命中，断言照样绿——实测变异 C2 下存活。它验的是「缓存生效」，而 functional[1] 要的是「cache.ttl **经 ApplyTTL 施加**」。改用 50ms TTL 并在 2×TTL 后再取，即可区分「TTL=配置值」与「TTL=内置值」。"
+    },
+    {
+      "decision": "为 A1 写一条走真实入口的测试 TestLoadConfigOrDefaultsInitsPolicyGate，判据是「账本文件是否出现在配置路径」。",
+      "rationale": "A1 的失败模式是**测试全绿本身就是症状**：把 initPolicyGate 挪到 export_ohlcv 的调用点后，四条直接调 initPolicyGate 的 functional 测试**全部照常绿**（已实测），而 prism refresh 拿到懒构造的无账本 Gate、配额彻底失效。所以必须有一条走 loadConfigOrDefaults 这条真实入口的测试。判据不能用「Gate 非 nil」——Default() 永不返回 nil，非 nil 证明不了任何事；账本落盘才能区分「装配过的 Gate」与「懒构造的 Gate」。"
+    },
+    {
+      "decision": "config 侧补 TestLoad_LegacyConfigWithoutQuotaAndTopics 与 TestLoad_TopicConfigPointerSemantics。",
+      "rationale": "前者对应 boundary[1]（反审 A12）——生产在用的就是那份不含 collector.quota/topics 的旧配置，新增字段又改了装载路径，必须有用例覆盖。后者守护指针语义：yaml 里显式写 `ttl: 0`/`coalesce: false` 与根本不写必须可区分，写成值类型的话「显式关掉」会被当成「没配」而静默失效。它同时是 decodeTopics 的守护者（D1 变异下转红）。"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "cmd/atlas/policy.go",
+    "cmd/atlas/policy_test.go",
+    "cmd/atlas/serve.go",
+    "cmd/atlas/export_ohlcv.go"
+  ],
+  "interfaces_exposed": [
+    "func initPolicyGate(cfg *config.Config, log *zap.Logger) —— cmd/atlas 包内。从配置构建 Gate 并 SetDefault；log 可为 nil（离线 CLI 路径）。**必须早于任何 collector 构造**",
+    "config.CollectorGlobalConfig 新增 Quota QuotaConfig 与 Topics map[string]TopicConfig",
+    "config.QuotaConfig{Path string} —— yaml: collector.quota.path；Load/Defaults 未配置时回落 data/collector-quota.json",
+    "config.TopicConfig{TTL, MinInterval, Timeout, QuotaWindow *time.Duration; Coalesce *bool; QuotaLimit *int} —— **全指针**，区分未设置与显式零值；yaml key 形如 collector.topics.\"yahoo.chart\"",
+    "config 包级未导出：const defaultQuotaPath、func decodeTopics(raw any) (map[string]TopicConfig, error)、func topicDuration(val any) (*time.Duration, error)",
+    "loadConfigOrDefaults 行为变更：**除装载配置外还会 initPolicyGate(cfg, nil)**。它的 7 个调用点因此全部自动获得策略闸门 —— 新增调用点无需手工接线，但也意味着**该 helper 不再是纯函数**（有进程内单例副作用）"
+  ],
+  "verification": "cmd/atlas 与 internal/config 全绿；collector 树 17 包全绿；go build ./... 与 go vet ./... 通过；**cmd/atlas 覆盖率 74.4%**（floor 74）。【变异反证 9 个，注入前先写下预期表再比对】A1 把 initPolicyGate 从 helper 内部挪到 export_ohlcv 调用点 → TestLoadConfigOrDefaultsInitsPolicyGate 红 :221，**同时 TestInitPolicyGateAppliesCacheTTL 与 UsesConfiguredQuotaPath 双双绿**（实证「四条 functional 测试测不到装配」这一 A1 的核心风险）；C1 不 DisableTTL → 红 :85；C2 不 ApplyTTL → **首轮绿、与预期不符**，归因为我的断言弱（非变异无效），加强判据后转红 :80；C3 不应用 topics Override → 红 :109；C4 忽略配置账本路径 → 红 :128；C5 log==nil 时不给 warn 兜底 → 红 :138（panic 经 recover 转断言）；D1 decodeTopics 恒返 nil → 红 config_test.go:705；D2 不填 quota.path 默认值 → 红 :673。接线顺序按**函数体**核实（首版按文件首个匹配比较，误报 prism.go 顺序错——实为 helper 函数 tushareClientOrNil 里的构造，不在执行流上）。"
+}

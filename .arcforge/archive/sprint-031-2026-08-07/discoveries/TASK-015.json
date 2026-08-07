@@ -1,0 +1,58 @@
+{
+  "key_findings": [
+    "**内置表补登记三个仅 TTL 通配主题**：`eastmoney.*` / `crypto.*` / `baostock.*`，与 `lixinger.*` 同款（`TTL: builtinTTL`、`Coalesce: true`、**无 MinInterval、无 Quota**）。TASK-016/017 直接用这三条，无需再改 policy 包。",
+    "eastmoney 的主题常量是 `eastmoney.kline`，经 `<域>.*` 通配命中。**接入点包在整个 FetchHistory 外层而非只包 fetchStockHistory**：被删除的 maybeCache 装饰的是 Collector 接口，缓存的正是这个方法的最终结果（含 fund 分支与 lixinger 回退），只包内层会让这两条路径丢缓存。",
+    "**改内置表会撞到 TASK-001 的两条有意守护**，两条都必须**有意识地**更新而不是改弱：①`TestDisableTTLKeepsThrottle` 的集合等值（9 → 12 个主题）；②`TestLookupUnregisteredTopicIsZeroPolicy` 的未登记清单（六家缩为 akshare/fred/edgar 三家）。后者我改成了双向断言——除了「这三家仍未登记」，还加了「eastmoney/crypto/baostock 必须命中且**只有 TTL、无限流无配额**」，把「只补缓存」这条契约也钉住。",
+    "**约束 C6「六家 collector 行为零变更」的范围随本任务缩小**：eastmoney/crypto/baostock 三家从「零策略直通」变为「仅 TTL 缓存」。这不是违反 C6 而是修复回归——它们本来就被 maybeCache 覆盖（设计 §1.3 明列五家），限流这一面仍然零变更。akshare/fred/edgar 三家从未被 maybeCache 覆盖，保持零策略。",
+    "**既有测试串味风险在本包是真实的**（陷阱 13）：既有 21 个用例里成功路径（eastmoney_test.go:209）与「应报错」路径（:239 / :261）共用 `600519.SH` + 同一区间 ⇒ 接入缓存后是同一个槽。用包级 TestMain 装零策略闸门挡住，**既有测试文件一字未改**。",
+    "eastmoney 的「HTTP 200 但业务失败」形态是 `result.Data == nil || len(result.Data.Klines) == 0`，校验在 fetchStockHistory 内部（被缓存的 fn 里），符合陷阱 14 的要求。",
+    "**FetchQuote 有意不接入 Gate**。①本任务只修复缓存丢失回归，而被删的 CachedCollector 本就只缓存 FetchHistory（原注释：FetchQuote is intentionally not cached (real-time freshness)）；②将来若要接入，**必须深拷贝 core.Quote.FundInfo**：它是指针字段（core/types.go:44），eastmoney 在 :319-333 从 lixingerFallback.FetchFundInfoPublic 取值设入；③**照抄 yahoo 的 `out := *q` 挡不住** —— 那是浅拷贝，指针字段照样共享。**且风险不限于缓存**：即使按 yahoo 的 yahoo.quote 那样配 TTL:0，只要 Coalesce: true（policy.go:73 正是如此），合并的多个调用方就拿到同一个 *FundInfo。与 tushare 的 row.values map 是同一类问题，本 Sprint 已为此返工过一次（199ed81）。",
+    "**policy 错误映射必须断链，`%w` 挡不住**：`errors.Is(err, policy.ErrQuotaExceeded)` 会穿透 %w 包装 ⇒ 「包一层本包前缀」若用 %w 实现，policy 错误照样在调用方可见的错误链上。相应地，守护测试的判据必须是 `errors.Is` 不成立，而非检查错误消息文本 —— 后者会被 %w 写法骗过。",
+    "**缓存键的时间精度是双向约束**：聚合度不足 → 生产命中率恒为零（**静默的错**，只有生产路径才暴露）；粒度过粗 → 不同区间串槽返回错数据（**吵闹的错**）。",
+    "⚠ **照搬别包的测试形态时必须检查它与本包 key 的精度单位是否匹配**：首版我照搬 crypto 的 `base+50ms / +900ms` 偏移，而本包 key 用 `.Unix()`（**秒级**）——去掉 Truncate 后这三个时刻的 `.Unix()` 仍相同，(a) 照样绿、变异测不出。改为跨秒偏移（+3s / +15s）后才有效。baostock 那条我用的是 +3s，本就跨秒，无此问题。"
+  ],
+  "decisions": [
+    {
+      "decision": "缓存类测试用**内置表**（`policy.New(policy.NewTable(), nil)`）而非手搓 Policy，并单独写 TestTopicMatchesBuiltinTable 拿常量去查真正的 NewTable()。",
+      "rationale": "沿用 TASK-010 的做法。测试里若用同一个常量既登记又查询，常量写错也自洽（陷阱 15）；生产走内置表则 Lookup 落空、Gate 直通、缓存静默失效。用内置表意味着测试跑的是生产查表路径。已用变异 E6（把常量改成 `eastmoneyX.kline`）实证。"
+    },
+    {
+      "decision": "TestCacheKeyCoversAllParams 用 **a → b → a 重放**序列，且覆盖 symbol / interval / 区间**三组**参数。",
+      "rationale": "只用一组参数时，键里丢掉任何一个维度都照样全绿，而生产上会拿到**别的标的**的数据——静默错数据比缓存没生效危险得多（陷阱 16）。三个子用例分别由变异 E2/E3/E4 实证。⚠ 写错误消息时我一开始把失效现象写成「为 3」，实测是「为 1」：键不区分该参数时 b 会**命中** a 的槽（不是覆盖），三次调用挤在一起只发 1 次。已修正消息与函数注释——错误消息里的推理写反不影响测试有效性，但会误导下一个读它的人。"
+    },
+    {
+      "decision": "TestNotThrottled 带一个 MinInterval=200ms 的**对照组**。",
+      "rationale": "否定断言（陷阱 8）：只断言「三次请求耗时 <150ms」的话，耗时短既可能是没节流，也可能是这套计时方式根本测不到节流。对照组先证明「这套计时确实能测出 200ms 间隔」，实际组的断言才有意义。"
+    },
+    {
+      "decision": "把 `TestLookupUnregisteredTopicIsZeroPolicy` 从单向断言改为双向。",
+      "rationale": "原测试只断言「这些主题未登记」。三家登记后若只是把它们从清单里删掉，就等于**删证据**——没有任何测试守护「它们确实被登记了且只有 TTL」。加反向断言后，变异 E7（给 eastmoney.* 加 MinInterval）会被 TestTopicMatchesBuiltinTable 捕获，而「漏登记」会被这条捕获。"
+    },
+    {
+      "decision": "【返工 FAIL①】补 mapPolicyError：把 policy.ErrQuotaExceeded / ErrTimeout **断链**映射为本包前缀错误。",
+      "rationale": "原实现的错误分支是 `return nil, err` 原样返回，映射层**根本没写**（不是「今天不可达所以测不出」）。验证者实测：配 Quota{Limit:1} 第二次返回「policy: quota exceeded」、errors.Is 为 true；配 Timeout:1ns 返回「policy: fn timeout」。**ErrTimeout 甚至不需要配额** —— 任何主题配上 Timeout 即触发，而 collector.topics.*.timeout 是 TASK-005/006 已落地的 Override.Timeout，**今天就能被配出来**。⚠ 断链而非 %w：TASK-017 的变异 B8 已实证 `fmt.Errorf(\"...: %w\", err)` 让消息变了但 errors.Is 仍为真 —— 「包一层本包前缀」若用 %w 是挡不住的。测试判据据此选 errors.Is 不成立而非检查文本（只查文本会被 %w 骗过，M2 变异实证）。"
+    },
+    {
+      "decision": "【返工 FAIL②】discovery 补写「将来接 FetchQuote 时必须深拷贝 FundInfo」，并把 Coalesce 这一层也写进去。",
+      "rationale": "原 discovery 只写了「为什么不接」，漏了「接时要注意什么」—— 而后者才是不会过时的那半（边界决定将来可能改，注意事项不会）。**风险比我原本理解的宽一层**（验证者指出）：不只是 TTL 缓存会共享 *FundInfo，**即使照抄 yahoo 的 TTL:0 不缓存，Coalesce 合并同样会让多个调用方拿到同一个指针** —— yahoo 的 `out := *q` 是浅拷贝，对指针字段无效。事实基础已自行核实：core/types.go:44 的 FundInfo 是指针字段；policy.go:73 的 yahoo.quote 是登记主题且 Coalesce: true；eastmoney.go:319-333 确实设置 FundInfo（来自 lixingerFallback.FetchFundInfoPublic）。"
+    },
+    {
+      "decision": "【返工 epoch=3】补 TestCacheKeyAggregatesNearbyTimes，双向约束缓存键时间精度。",
+      "rationale": "实现写了 Truncate 却无守护——本包原有 8 个测试**全用固定时刻**，而固定时刻在 Truncate 前后相等，整套测试对该缺陷完全无感。生产路径 app.go:451 的 `end := time.Now()` 会让键每次都不同 ⇒ 命中率恒为零，「修复缓存回归」实际没修好。做双向而非只做 DoD 字面的 (a)：U2 变异实证「放粗到 Hour 时 (a) 仍绿」，只写聚合度会放过粒度放粗。⚠ **自我记录**：FetchHistory 的注释里我本就写了「让上层以 time.Now() 为 end 的抖动仍能命中同一槽」——**我知道这个行为、还写下来了，却没为它写测试**。这正是契约教训 5 的形态：注释描述的究竟是「当前巧合」还是「被守护的契约」，写注释的人自己最容易分不清。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/policy.go（NewTable 补登记三个通配主题）",
+    "internal/collector/policy/policy_test.go（两条守护同步更新 + 头部映射注释）",
+    "internal/collector/eastmoney/eastmoney.go（gate 字段、topicHistory 常量、FetchHistory 拆两层）",
+    "internal/collector/eastmoney/gate_test.go（新建）"
+  ],
+  "interfaces_exposed": [
+    "policy 内置表新增：`eastmoney.*` / `crypto.*` / `baostock.*`，均为 `Policy{TTL: builtinTTL, Coalesce: true}`（无 MinInterval、无 Quota）。**TASK-016/017 直接用，不需要再动 policy 包**",
+    "Eastmoney.gate *policy.Gate —— 包内字段，New() 取 policy.Default()；包内测试可赋值注入。NewWithBaseURLs 内部调 New()，自动带上",
+    "包内常量 topicHistory = \"eastmoney.kline\"",
+    "新增包内私有内核 (e *Eastmoney) fetchHistory(symbol, start, end, interval) —— 原 FetchHistory 的函数体（fund 分支 + lixinger 回退），被 policy.Fetch 包住",
+    "公开 API 签名与错误语义零变更；FetchQuote 未接入（maybeCache 原本也只缓存 OHLCV）"
+  ],
+  "verification": "eastmoney 28 测试全 PASS 0 SKIP（既有 21 一个不删、**测试文件一字未改** + 新增 7）；policy 包全绿；`go test -race` 绿；覆盖率 eastmoney 87.0% → **87.4%**、policy 94.4%；`go build ./...` / `go vet ./internal/collector/...` 通过；**全量 `go test ./...` 全绿**（内置表变更的影响面回归）。⚠ `gofmt -l internal/collector/eastmoney/` 会列出 **eastmoney_test.go**——该文件在 **master 上就未格式化**（已用 `git show master:...|gofmt -l` 核实）且本任务改动 0 行；我碰过的 4 个文件全部已格式化。【变异反证 9 条，注入前先写预期表，实际与预期全部一致】E1 不走 policy.Fetch → CachesViaGate 红 :97（got 3）；E2/E3/E4 缓存键分别去掉 symbol/interval/区间 → 三个子用例分别红 :137（got 1）；E5 New 不设 gate → NewUsesDefaultGate 红 :158；E6 主题常量改名 → TopicMatchesBuiltinTable 红 :171；E7 内置表给 eastmoney.* 加 MinInterval → 同测试红 :176；E8 不 slices.Clone → ReturnsIndependentSlice 红 :233；E9 短路空 klines 校验 → ErrorResponseIsNotCached **两条断言都触发**（:254 ×2 识别为错误 + **:258 决定性的「两次调用应各发一次 HTTP, got 1」**）。 【返工 epoch=2】eastmoney 39 测试（含子测试）全 PASS 0 SKIP（既有 21 一个不删、**测试文件仍一字未改** + 新增 10 含子测试）；-race 绿；覆盖率 87.4% → 87.6%；build/vet/gofmt 全过；全量 go test ./... 全绿。新增 TestPolicyErrorsDoNotLeak 三格（配额耗尽 / 超时 / 非 policy 错误原样透传）。变异反证 4 条，注入前先写预期表，实际与预期全部一致：M1 不映射直接返回 → 红 :299（泄漏 policy: quota exceeded）；**M2 改用 %w → 红 :299**（消息已带 eastmoney 前缀但 errors.Is 仍为真 —— 实证判据不能只看文本）；M3 映射消息去掉「临时」字样 → 红 :305；M4 把非 policy 错误也吞掉 → 红 :347（「非 policy 错误应原样透传」）。 【返工 epoch=3】42 测试全 PASS 0 SKIP（既有 21 一个不删、测试文件仍一字未改）；-race 绿；覆盖率仍 87.6%；build/gofmt 通过。新增 TestCacheKeyAggregatesNearbyTimes 两格。双向变异判据均已实证：U1 去掉两个 `Truncate(time.Minute)` → (a) 红 `gate_test.go:387`（HTTP 请求 3 次 want 1），**且旧测试集全绿** —— 漏检的直接证据；U2 放粗到 `time.Hour` → (b) 红 `:403`（1 次 want 2），**而 (a) 仍绿** —— 实证只写聚合度会放过粒度放粗。⚠ U1 首版**预期红实际绿**，归因不是变异无效而是**测试构造与本包 key 精度不匹配**（照搬了 crypto 的毫秒级偏移，而本包 key 是 `.Unix()` 秒级），改为跨秒偏移后才拿到真红。"
+}

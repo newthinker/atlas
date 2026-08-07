@@ -1,0 +1,56 @@
+{
+  "key_findings": [
+    "QuotaStore 是单方法接口 `Take(topic string, q Quota, now time.Time) (bool, error)`，三态语义：(true,nil)=放行并已计数；(false,nil)=窗口已用尽**且不计数**（请求没发出去）；err!=nil=账本自身异常，调用方必须 fail-open。now 由调用方传入，便于测试注入固定时刻。",
+    "windowStart 双分支：Window>=24h 按 Quota.Loc 自然日对齐（tushare 的 5 次/天是自然日口径而非滑动 24 小时），Window<24h 按 UTC 截断到窗口整数倍（分钟级窗口无时区含义）。Loc 为 nil 时退回 UTC 而非 panic。",
+    "`take(e ledgerEntry, q Quota, now time.Time) (bool, ledgerEntry)` 是窗口判定+计数的纯逻辑，**已被抽出供 TASK-004 的 FileStore 复用**；ledgerEntry 带 JSON tag 也是为此。TASK-004 只需实现读写与并发控制，窗口语义无需重写。",
+    "`q.Limit <= 0` 表示**不设上限**（`q.Limit > 0` 是计数上限判定的前置条件）。内置表只有 tushare.daily_basic 配了 Quota，Limit=5。",
+    "**takeQuota 的调用点位于执行链 ③：查缓存之后、singleflight 内侧、节流之前。** 这个位置此前是「碰巧正确」（TASK-002 照方案摆的桩位，挪动不会有任何测试变红），本任务已用 Q1/Q2 两个变异把它钉成契约。",
+    "**未登记主题不触达 QuotaStore 由两道短路共同保证**，不是一道：①fetch 里的 `if !ok { return fn() }` 直通；②takeQuota 里的 `p.Quota == nil` 检查（零值 Policy 的 Quota 就是 nil）。删掉任一道，另一道仍然拦住。这是 G8 变异在接入真实 QuotaStore 后**仍然等价**的原因——详见 decisions。",
+    "MemStore 在 launchd 短命进程形态下无效（每次启动归零，设计 §1.5），仅供测试与不需要跨进程语义的场景；真正生效的是 TASK-004 的 FileStore。",
+    "New 签名已变更为 `New(t *Table, q QuotaStore, opts ...Option)`。q 为 nil 时不做配额预判（未接线的调用点安全降级）。gate_test.go 的 newTestGate 与 TestWithWarnIsApplied 已跟随更新，TASK-002 的 36 个用例保持全绿。",
+    "「变异转红」的证据链有**四个**可断裂点，本 Sprint 四类都实际发生过：① 改动量为空（静默失配，md5 门可挡）② 编译失败（构建的红，go test -c 门可挡）③ **语义未变**（如只改注释，无自动门，靠人审 diff）④ **红的是 panic 堆栈而非断言**（panic 也会打印 file:line，须用正则 `^\\s+\\w+_test\\.go:\\d+:\\s+\\S` 要求「file:NN: 后跟消息」的完整形状）。第 ④ 类尤其危险：它同时意味着后续测试被中断。"
+  ],
+  "decisions": [
+    {
+      "decision": "boundary[2] 的三条否定断言全部用可观测的假账本 countingStore 直接数 Take 调用次数，不看 MemStore.Count。",
+      "rationale": "计数值不变有两条产生路径：「Take 没被调用」与「Take 被调用了但返回 false 且被拒不计数」——而 boundary[0] 恰恰规定被拒不计数。两条路径在计数值上无法区分，用结果状态推断「某条路径未发生」是无效的，必须直接观测那条路径本身。"
+    },
+    {
+      "decision": "如实记录：**G8 变异（删掉 fetch 里未登记主题的直通短路）在接入真实 QuotaStore 后仍然是等价变异体**，我的 TestUnregisteredTopicDoesNotTouchQuota 捕获不了它。这与 test-agent-17 在 TASK-002 验证中的前瞻判断不一致。",
+      "rationale": "实测：注入 G8 后该测试仍绿。原因是存在**第二道短路**——takeQuota 开头的 `if p.Quota == nil || g.quota == nil { return nil }`，而未登记主题拿到的是零值 Policy，其 Quota 字段就是 nil，于是即便走进 takeQuota 函数也不会触达 QuotaStore.Take。验证者当初实测的是「注入 G8 + 让 takeQuota **函数本身** panic → 未登记主题触达配额逻辑」，那验证的是「进入了 takeQuota 函数」，与「触达了 QuotaStore.Take」被 p.Quota==nil 这道检查隔开，是两件事。⇒ 该测试仍有价值（它守护 DoD 明确要求的性质，且两道短路同时失效时会红——已用 G8+ 组合变异实证：Take 被调用 3 次，测试转红），但它**不是 G8 的守护者**，不应据此宣称 G8 已被覆盖。"
+    },
+    {
+      "decision": "补 TestWindowStartNilLocUsesUTC（DoD 未点名，方案实现有该分支）。",
+      "rationale": "自然日对齐需要一个时区，而 Quota 由调用方构造、Loc 可能为 nil。删掉兜底会在 time.Date(..., nil) 处 panic——已用 Q10 变异实证。这是「不可达错误分支」型断言，与 TASK-001 的 loadLoc 同构。"
+    },
+    {
+      "decision": "补 TestFailOpenWithoutWarnDoesNotPanic（error_handling[0] 的末句，方案测试未覆盖）。",
+      "rationale": "「未注入 WithWarn 时 fail-open 路径不得 panic」是复合句 DoD 的第三个分句。正常接线都会注入 WithWarn，只有未接线的调用点会走到兜底——典型的不可达分支。已用 Q7 变异实证（New 里 warn 改为 nil → nil 指针解引用 panic，测试转红）。"
+    },
+    {
+      "decision": "error_handling[0] 的两个分句由同一个测试的两条独立断言守护，而非合并成一条。",
+      "rationale": "「放行全部请求」（fnCalls==3）与「经 WithWarn 上报该 err」（errors.Is(warned, storeErr)）证据方向不同，且守的是不同代码路径：前者守 takeQuota 的 err 分支返回 nil，后者守该分支调了 warn。已分别用 Q4（返回 err 而非 nil）与 Q5（删掉 warn 调用）两个变异证实两条断言各自有守护对象。"
+    },
+    {
+      "decision": "TestWindowStartNilLocUsesUTC 补 defer recover()（R1 返工）；TestUnregisteredTopicDoesNotTouchQuota 的注释改为写明它守护什么、不守护什么，自证改用 Q13 形态（R2 返工）。",
+      "rationale": "R1：「不该 panic」型的 DoD，测试若只断言返回值而不 recover，变异注入后是**裸 panic 中断整个测试二进制**——2×2 实测：注入 Q10 后能跑到的 PASS 数，无 recover 时是 38、有 recover 时是 49（总数 50）。那 12 个测试守护的 DoD 在那次运行中完全失去检验。**红的方式决定了其他测试还能不能跑。** 同一文件里 TestFailOpenWithoutWarnDoesNotPanic 本就写对了，我两条同型测试一条对一条错。R2：原自证用的 G8+ 组合（删掉 p.Quota==nil 后 *p.Quota 解引用）产生的是 panic 堆栈，:289 只是堆栈里的调用点行号不是断言；且该形态会让所有 Quota 为 nil 的主题崩溃，不是「悄悄触达配额」的失效形态。改用 Q13（给未登记主题配带 Quota 的兜底策略，编译通过且不 panic）才拿到真断言红。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/quota.go",
+    "internal/collector/policy/quota_test.go",
+    "internal/collector/policy/gate.go",
+    "internal/collector/policy/gate_test.go"
+  ],
+  "interfaces_exposed": [
+    "var ErrQuotaExceeded = errors.New(\"policy: quota exceeded\") —— 语义为**临时性**（窗口过后自愈），与 tushare.ErrRateLimited 一致。各 collector 负责在自己包内映射成既有哨兵错误，policy 的错误不外泄到 prism 层（设计 §5.1）",
+    "type QuotaStore interface { Take(topic string, q Quota, now time.Time) (bool, error) } —— 实现必须并发安全。三态语义见 key_findings",
+    "func NewMemStore() *MemStore —— 进程内账本，launchd 短命进程下无效",
+    "func (m *MemStore) Take(topic string, q Quota, now time.Time) (bool, error)",
+    "func (m *MemStore) Count(topic string) int —— 测试辅助，返回当前窗口已用次数",
+    "func New(t *Table, q QuotaStore, opts ...Option) *Gate —— **签名已变更**（TASK-002 是 New(t, opts...)）。q 为 nil 时不做配额预判",
+    "包级未导出、**TASK-004 的 FileStore 应直接复用**：func windowStart(now time.Time, q Quota) time.Time（窗口起点，双分支）、func take(e ledgerEntry, q Quota, now time.Time) (bool, ledgerEntry)（窗口判定+计数纯逻辑）、type ledgerEntry struct{ WindowStart time.Time `json:\"window_start\"`; Count int `json:\"count\"` }（JSON tag 已备好）",
+    "(g *Gate) takeQuota(topic string, p Policy) error —— 未导出。p.Quota==nil 或 g.quota==nil 时放行；账本报错时 fail-open（warn 后返回 nil）；超额返回 ErrQuotaExceeded"
+  ],
+  "verification": "50 个测试全 PASS 0 SKIP（TASK-001 的 12 + TASK-002 的 24 + 本任务 14）；`go test -race` 全绿（3.827s）；覆盖率 **98.3%**；go build ./... / go vet ./internal/collector/... / gofmt -l 全过；`git diff 6a2a8df -- policy.go policy_test.go` 无输出，未动上游产物。【变异反证 13 个，全部转红，每个都单独 -run 目标测试并核到 file:line 确认红来自目标断言，注入后先校验改动量非空 + 编译通过】Q1 takeQuota 挪到查缓存之前 → :233（Take 调用 4 次）；Q2 挪到 singleflight 外侧 → :267（21 次）；Q3 被拒也计数 → :140；Q4 账本报错返回 err 不 fail-open → :305；Q5 fail-open 不调 warn → :312；Q6 Window>=24h 丢自然日对齐 → :83；Q7 New 不给 warn 兜底 → :324（nil 指针 panic）；Q8 takeQuota 移到 fn 成功之后 → :208（失败请求未计数）；Q9 <24h 不 Truncate → :103；Q10 删 Loc nil 兜底 → :115（panic）；Q11 窗口翻篇不重置 → :157；Q12 账本不按主题隔离 → :169；G8+ 组合（删直通短路 + 让 takeQuota 对零值 Quota 也调 Take）→ :289（Take 调用 3 次）。**单独的 G8（仅删直通短路）实测仍绿，判定为等价变异体，原因见 decisions——不宣称已覆盖它。** 【R1/R2 返工】R1 的 2×2 闭环（格子为能跑到的 PASS 数）：有 recover × 无变异=50 / 有 recover × Q10=49 / 无 recover × 无变异=50 / **无 recover × Q10=38**——修复使 11 个原本被 panic 中断的测试恢复执行，且报错形状从 panic 堆栈变为断言 `quota_test.go:117: Loc 为 nil 时不得 panic: time: missing Location in call to Time.In`。R2：Q13（给未登记主题配带 Quota 的兜底策略）→ 红且为**断言**（`quota_test.go:304: 未登记主题不得触达配额记账（约束 C6）: Take 调用 3 次 [eastmoney.kline akshare.valuation crypto.ticker], want 0`）；对照 G8（仅删直通短路）复核仍绿，等价变异体结论不变。判定门已改为要求断言完整形状、排除 panic 堆栈。复跑：50 测试全 PASS 0 SKIP、-race 绿(4.068s)、覆盖率仍 98.3%、build/vet/gofmt 全过、policy.* 未动。"
+}

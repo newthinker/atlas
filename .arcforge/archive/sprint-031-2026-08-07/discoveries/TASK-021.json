@@ -1,0 +1,44 @@
+{
+  "key_findings": [
+    "对抗变异的形态是「调用点多包一层 %v，映射函数一个字不动」。它同时躲过两类既有判据：直测映射函数的单测（函数没改 ⇒ 绿）与文本包含断言（%v 把原文原样带过 ⇒ 绿）。两者的判据分别是「是不是同一个 error 值」与「文本里还有没有原判别词」——**都不看链**，而 %v 恰好只切链、不改文本。",
+    "有哨兵错误的包免费拿到类型级守护（tushare 的测试天然写成 errors.Is 判据）；**无哨兵的包必须显式对某个上游可判定错误写 errors.As/errors.Is**，否则「链保留」这个属性没有任何东西钉住。这解释了为什么 tushare 已守住而五家全缺——不是谁更用心，是判据形态决定的。",
+    "`*json.SyntaxError` 与 `io.ErrUnexpectedEOF` **互斥**，由 body 形态唯一决定（独立实测：非法字符 body → SyntaxError；截断但前缀合法 → ErrUnexpectedEOF；空 body → io.EOF）。DoD 原文的「或」不成立——不是「随便哪个都行」，而是「用哪个 body 决定了断言只能写哪个」。test-agent-17 在 lixinger 照搬 yahoo 的 ErrUnexpectedEOF 导致基线就红，根因即此。",
+    "**两处「看起来能挂但挂不上」的假注入点**：baostock 的 TestFetchDailyBadJSON 用了 `not json`、看起来正好能挂，但它直测内层 FetchDaily，**绕过 Gate 与 mapPolicyError**；eastmoney 既有的「非policy错误原样透传」格用 emptyKlineBody，错误是纯 fmt.Errorf **本来就没有链**。拿它们充数会得到永远绿的断言。实测佐证：对抗变异下 TestFetchDailyBadJSON 仍 PASS。",
+    "同族形态：「包里已经有一个相关测试」不等于「它经过了你要守的那段代码」。这是本 Sprint 第三次遇到——TASK-007 F2 的第二个 symbol 在一个没设 TTL 的用例里（压根没缓存）、TASK-020 的 topic 注入点、本任务的两处假注入点。",
+    "crypto 与另四家**结构性不同**，照搬会打空：它没有 mapPolicy* 函数，policy 错误在 FetchHistory 里内联处理（errors.Is 双判 + fmt.Errorf），非 policy 错误走裸 `return nil, err`（crypto.go:163）。其 gate_test 用 countingProvider 而非 httptest，**没有 JSON 解码路径**，errors.As(*json.SyntaxError) 在基线就不成立。",
+    "yahoo 有**三处**独立调用点（yahoo.go:243 FetchQuote / :317 FetchHistory / eps.go:54 FetchEPSHistory），只在一处多包一层也是一个真实外泄口。逐处注入实证：每处变异只红对应那一格，三格相互独立——单格守护会漏掉三分之二。"
+  ],
+  "decisions": [
+    {
+      "decision": "五家统一新增独立测试函数 TestNonPolicyErrorChainPreserved，而非在既有表驱动用例里加字段",
+      "rationale": "boundary[2] 要求「既有测试断言体与场景一字不改」。既有用例（如 lixinger 的 TestNonPolicyErrorsUnaffected）用**位置初始化**的 case 结构体，给它加一个 wantChain 字段会强制改写全部既有 case 行 ⇒ 违反「场景一字不改」。新增独立函数是**零编辑**的追加，且让五家形态统一、失败消息统一说「链被切断」。DoD functional[0] 对 yahoo/lixinger 写的「直接追加断言」我理解为「不必新造服务端夹具（body 已在包内）」，不是要求原地改表。"
+    },
+    {
+      "decision": "四家判据统一 errors.As(*json.SyntaxError) + 非法字符 body；crypto 用包级具名哨兵 + errors.Is",
+      "rationale": "前者由 body 形态决定（见 key_findings）；crypto 没有解码路径，只能锚 provider 返回的错误。哨兵刻意具名而非沿用 TestErrorIsNotCached 里的内联 errors.New——errors.Is 需要可引用的目标值，而既有测试不能改。"
+    },
+    {
+      "decision": "yahoo 用表驱动逐调用点覆盖三格，另四家单格",
+      "rationale": "yahoo 有三处独立的 policy.Fetch 调用点，另四家各只有一处。沿用既有 yahooCallSites() 的理由：漏映射任何一处都是真实外泄口。已逐处注入实证三格相互独立。"
+    },
+    {
+      "decision": "每条新断言**先在无变异基线上确认为真**，再注入变异（boundary[0] 硬要求）",
+      "rationale": "否则「变异后转红」可能只是断言本身写错了。test-agent-17 在 lixinger 上正是这么踩的。五家全部先跑基线 PASS 才注入。"
+    },
+    {
+      "decision": "变异取证改用 go test -json 抓**失败消息内容**，不再只 grep `--- FAIL` 行",
+      "rationale": "每格通常有多条失败路径（t.Fatal(err) 的请求错误 / t.Errorf 的断言失败）**共用同一个 FAIL 行**，只抓那行拿到的是「哪一格红」而非「它为什么红」——「变异被检出」这个结论会建立在推断而非观察上。我在 TASK-007 F2 上正是栽在这里（9 格全如预期转红，太顺了就没往下追一层）。新 harness 已用「一条 t.Errorf + 一条 t.Fatal」的对照用例验证能区分两者。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/errmap_test.go(+50，三格逐调用点)",
+    "internal/collector/lixinger/errmap_test.go(+43)",
+    "internal/collector/eastmoney/gate_test.go(+40，新增格)",
+    "internal/collector/crypto/gate_test.go(+38，具名哨兵+新增格)",
+    "internal/collector/baostock/gate_test.go(+41，新增格)"
+  ],
+  "interfaces_exposed": [
+    "crypto 包新增包级 var errProbeUpstream（测试专用哨兵，仅 gate_test.go 内使用）"
+  ],
+  "verification": "commit 3c0299b，5 个 _test.go 共 +212 行，**生产代码零改动**（yahoo.go/eps.go/lixinger client.go/eastmoney.go/crypto.go/baostock collector.go 全程 md5 不变）。五包 -race 全绿 0 SKIP；单包覆盖率 yahoo 89.9% / lixinger 93.4% / eastmoney 88.1% / crypto 75.0% / baostock 96.4%，**门禁合并口径（-coverpkg 五包）89.4% ≥ dev_minimum 80%**（已用门禁同款命令预检）。我改的 5 个文件 gofmt 干净；eastmoney_test.go 的 gofmt 漂移是 master 上既有的（git show HEAD 核实过），未碰。【变异矩阵：每家先基线 PASS 再注入，注入形态一律为 fix_items 指定的「调用点多包一层 %v、不动映射函数」】lixinger（client.go:51）→ 只红新格，消息 `链被切断: ... lixinger: lixinger: decode envelope: invalid character 'o' ... (*errors.errorString)`，既有 TestMapPolicyErrPassesThroughNonPolicyErrors 与 TestNonPolicyErrorsUnaffected 三格**全绿**；eastmoney（eastmoney.go:441）→ 只红新格，既有 TestPolicyErrorsDoNotLeak 三格（含「非policy错误原样透传」）**全绿**；baostock（collector.go:51）→ 只红新格，**假注入点 TestFetchDailyBadJSON 仍 PASS**（实证它不在受守护路径上）、既有 TestPolicyErrorsDoNotLeak 两格全绿；crypto（crypto.go:163 那条裸 return）→ 只红新格，消息 `链被切断: ... crypto: all providers failed for BTCUSDT: crypto probe: upstream down (*errors.errorString)`，既有 TestErrorIsNotCached 与 TestPolicyErrorDoesNotLeak 全绿；yahoo **逐调用点三次注入**：Y-A(yahoo.go:243) 只红 FetchQuote/quote、Y-B(:317) 只红 FetchHistory/chart、Y-C(eps.go:54) 只红 FetchEPSHistory/eps ⇒ 三格相互独立；Y-B 期间既有两条守护（含 TestNonPolicyErrorsUnaffected 四格）**全绿**，全包除新格外无其他红。每次变异后 git checkout 还原并 md5 校验，8 次全部 OK。"
+}

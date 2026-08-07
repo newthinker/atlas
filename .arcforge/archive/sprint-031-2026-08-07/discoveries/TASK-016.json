@@ -1,0 +1,61 @@
+{
+  "key_findings": [
+    "**【第二轮返工 epoch=4,test-agent-16 发现】functional[4] 的 (a) 分句原是空断言。** DoD 明写「去掉 Truncate(time.Minute) 后该测试须转红」,实测**不转红**。根因:我的偏移用了毫秒级(+50ms/+900ms),而键里的时间是 Truncate(time.Minute).Unix()——**.Unix() 本身已是秒级**,毫秒偏移被压成同一个数,去掉 Truncate 后键依然不变。已改为跨秒偏移(+3s/+15s,仍落在 base 所在那一分钟内,聚合语义不变),实现零改动。",
+    "**这次失效的机理值得单记:我用「自己选的变异」验证过,却不是 DoD 指定的那个。** 首轮我跑的 D1 是「退回 UnixNano()」——把粒度放到纳秒,毫秒偏移可见,所以转红了,我据此认为守护成立。但 DoD 规定的变异是「去掉 Truncate(time.Minute)」(**留 .Unix()**),粒度停在秒,毫秒偏移不可见。两个变异改的是同一行代码,方向却不同。⇒ **DoD 明文给了变异判据时,必须按那个判据原文注入,不能用自己认为等价的替代品**;「我验过它会红」与「它满足了 DoD 的判据」是两件事。改后按原文复验:D1_prime 下聚合度子测试转红(取 3 次 want 1)、粒度子测试绿;D2(放粗到小时)只有粒度子测试转红,两者互补。",
+    "**【返工 epoch=3,test-agent-16 变异 C11 发现】error_handling[0] 是复合句,第二分句「校验必须留在被缓存的 fn 内部」原先无守护。** 变异 C11(把 fetchHistoryFromProviders 里 `if err == nil && len(data) > 0` 的长度校验移出被缓存的 fn、改由 policy.Fetch 返回后再判空)→ 21 个测试全绿。**实现本身是对的,缺的只是测试。** 本包确有该风险面:provider 返回「空切片 + nil error」= 上游 200 但无数据,是 crypto 版的 200-but-error;校验若移出闸门,「无数据」会被当成功写进缓存、冻结整个 TTL(内置 5 分钟),标的后来有数据也看不到。已补 TestEmptyResultIsNotCached(history 与 err 均为 nil 的 provider,连调两次断言取数次数==2)。2×2 闭环实测:C11 下新测试红(只取 1 次 want 2)、旧测试集全绿(缺口证据);还原后逐字节一致。实现零改动,覆盖率 73.9% → 75.0%。",
+    "**TestErrorIsNotCached 抓不到 C11 的原因值得单记**:它用的 provider 是 `err != nil` 路径,而 C11 只改「空结果」路径,**两条路径互不相交**。我首轮写了分句①就以为整条 error_handling 有守护——**复合句 DoD 必须分句取证**,而且要检查各分句覆盖的执行路径是否真的不同。gate_test.go 头部的 DoD↔测试映射注释已按三个分句拆开,并写明「分句①测不到 C11」。",
+    "**【我引入过的实质缺陷,已修】缓存键用 `UnixNano()` 会让生产命中率恒为零。** 上层 `app.go:452` 传的 `end` 是 `time.Now()`,纳秒精度 ⇒ 每次调用键都不同 ⇒ 缓存永不命中,接 Gate 的目标实质未达成。已改为 `Truncate(time.Minute).Unix()`,与 yahoo(`yahoo.go:292`)、eastmoney(`eastmoney.go:435`) 现行实现及被删的 `CachedCollector.cacheKey`(`Truncate(time.Minute).UTC().Format(RFC3339)`) 口径一致。**四家里 crypto 曾是唯一异类**。",
+    "**这个缺陷完整通过了原有全部测试,根因是 criteria 只约束了一个方向。** functional[1] 只写「区分度」(不同参数不得互相命中),没写「聚合度」(相近时间应落进同一槽)。我逐条满足了它,而单测里用**固定** start/end 调两次时纳秒键是全绿的——**只有生产路径才失效,且失效方式是不报错、不出错数据、不改变返回值的静默无效**。变异实证最能说明问题:退回 `UnixNano()` 后,`TestCacheKeyCoversAllParams` 与 `TestFetchHistoryCachedByGate` **全部保持绿**。⇒ **只约束一个方向的判据会放过反方向的失效;写「A 必须能区分 B」时要同时问「什么情况下 A 必须**不**区分」。**",
+    "**补的两条断言缺一不可,变异结果互补**:①「相邻时间落进同一槽」(以墙钟为 end 的三次相邻调用只发一次请求);②「分钟粒度不得放粗」(相隔一分钟的两次查询必须分槽)。实测:变异 D1(退回 UnixNano)→ ①红 ②绿;变异 D2(截断放粗到小时)→ ①绿 ②红。只写①的话,有人把 Truncate 改成小时/天照样全绿,而那会让相隔几分钟的不同查询串槽、静默返回错区间数据。",
+    "**时间基准取「当前分钟的中点」而非直接 `time.Now()`**:与生产同形(end 源自墙钟),但确定性地避开分钟边界。直接用 time.Now() 时,两次调用若恰好跨分钟边界会假红——概率虽约 1e-7,但那是可以完全消除的抖动,没有理由留着。",
+    "**【DoD 明文要求记录的将来风险】将来若给 `crypto.*` 加 MinInterval,必须先为三个子源(binance/okx/coingecko)指定独立的 `Policy.Domain`,否则 fallback 链上一家慢会拖住整条链。** 今天不成立的原因有两条,缺一不可:①闸门包在 **Collector 层**,三个 provider 不各自过闸门;②内置 `crypto.*` **无 MinInterval**,`Gate.throttle` 首行 `if p.MinInterval <= 0 { return }` ⇒ 一把锁都不拿。任一条件改变,风险即刻变真。**本条刻意用文档而非测试承载**——今天造不出可观测的坏后果,硬写只会得到一条永远绿的测试,而它会占着「已守护」的名分。",
+    "**我提出的替代判据(串缓存)是错的,Leader 否决正确**:`crypto.go` 的 providers 是 **fallback 语义**(依次尝试、首个成功即返),不是并列数据源——同 symbol 无论由哪家返回都是「crypto 的该标的日线」,**共用一条缓存槽是正确行为**。我正确地推翻了「三家会并发争锁」这个结论,却在替代方案里**继续沿用了它的模型**(三家并列)。被推翻的是前提的结论,沿用下来的是前提的模型。",
+    "**闸门位置的判据是「被删的装饰器装在哪」**:`git show 2a77803^:internal/collector/cache.go:54` 显示 `CachedCollector.FetchHistory` 装饰的是 Collector 接口。包进单个 provider 会让 fallback 链本身丢缓存,也会把「哪一家返回的」错误地编进缓存键。恢复回归类任务应先回看被删代码的形状。",
+    "**`New()` 与 `NewWithProviders()` 都要快照 `Default()`,且必须两个都验**。nil `*Gate` 是透明的,其余测试各自注入闸门 ⇒ 漏掉那行时全套照常绿、生产路径缓存整体静默 no-op(陷阱 12)。变异 C6 实证:去掉 `New()` 里的 `gate: policy.Default()` 后**只有 TestConstructorsSnapshotDefaultGate 转红,其余 19 个全绿**。",
+    "**policy 错误收口用 `%v` 而非 `%w`**:`%w` 会把 `policy.ErrQuotaExceeded` 留在 `errors.Is` 链上,仍算外泄(dev-agent-35 在 TASK-017 变异 B8 实测同一点)。crypto 没有既有哨兵错误可映射,故按 DoD 允许的「至少包一层本包前缀」用 `%v` 断链。**判据要选 `errors.Is` 不成立,而非检查消息文本**——只查文本会被 `%w` 写法骗过。",
+    "**门禁与 DoD 口径不一致(未决,已转 blocked_clarification)**:DoD 要求「覆盖率不低于既有水位」(crypto 既有 66.7%),而门禁按全局 `dev_minimum=80` 判。本次交付 73.9%,高出既有水位 7.2 个点但低于 80。缺口全在既有未测代码(Start/Stop/SetDefaultQuote/SetProviders 各 1 条语句、Init 31.2%、symbol.go 的 ParseSymbol/FormatDisplay)。**已算过:包内共 92 条语句,那四个平凡函数合计仅 4 条 ⇒ 补齐后 78.3% 仍不到 80**,要过线必须动 symbol.go 等与本任务无关的既有代码。crypto 是这批里唯一基线低于 80 的包,**TASK-017(baostock)可能撞同一堵墙**。"
+  ],
+  "decisions": [
+    {
+      "decision": "缓存键时间截断到**分钟**,并为聚合度与粒度各写一条断言。",
+      "rationale": "分钟不是随便取的粒度:沿用被删除的 CachedCollector.cacheKey 口径,与 yahoo/eastmoney 现行实现一致。两条断言分别钉住两个方向——只有聚合度断言时粒度可被放粗,只有区分度断言时(即原状)纳秒精度可以蒙混过关。变异 D1/D2 的结果互补,证明两条各自不可省。"
+    },
+    {
+      "decision": "缓存键 `historyKey` 用 `symbol|start|end|interval`,对三个维度各写一条 a→b→a 重放测试。",
+      "rationale": "「a→b 断言请求数==2」对『根本没缓存』是假绿——不缓存时 a、b 也恰好 2 次。第三次重放 a 才把两种缺陷同时排除:键里丢了该维度(第 2 次误命中 ⇒ 总数 1)、压根没缓存(总数 3)。测试把 1/2/3 三种计数给出不同错误信息,读者一眼能分辨。"
+    },
+    {
+      "decision": "「不被节流」的探针用「内置策略 + 只把 TTL 归零」,并自带 MinInterval=200ms 的常驻对照组。",
+      "rationale": "逐次换参数避开缓存会让这条否定断言**暗中依赖 functional[1]**:缓存键一旦坏掉,三次调用塌成一个 key、后两次命中缓存跳过节流,本测试随之变哑(TASK-010 实测踩过)。对照组证明「这套观测手段确实看得见节流」,否则被测组的「快」是空转的绿;其 MinInterval 取正值而非 0,确保真的进入 throttle 的持锁临界区(陷阱 9)。探针内还有「三次调用必须都到达 provider」的前提断言,TTL 未归零时直接 Fatal 而非给出误导的绿。"
+    },
+    {
+      "decision": "新增包级 TestMain 装零策略闸门,尽管本包目前只有一处 FetchHistory 调用。",
+      "rationale": "陷阱 13 的约束要随缓存一起落地。今天风险低是因为用例少,而下一个往本包加用例的人不会知道「共用同一 topic+key 的用例会落进同一缓存槽、先跑的成功响应让后跑的『应报错』用例静默失效」。把防护建在包级入口,新增用例自动受保护。"
+    },
+    {
+      "decision": "TestTopicMatchesBuiltinTable 用真实 `policy.NewTable()` 查询,并带「域段写错必须查不到」的阳性对照。",
+      "rationale": "用测试自造的表登记又查询是自洽的,主题名写错也发现不了(陷阱 15)。而只断言「正确主题能命中」也不够——通配登记下几乎什么都能命中,那条断言可能是空转的绿。按 Leader 裁定只验域段,不验接口段。"
+    },
+    {
+      "decision": "未自行设置 `coverage_floor`,转 `blocked_clarification` 请 Leader 裁定。",
+      "rationale": "该字段技术上在我可写范围内(不在写通道的受保护字段清单里),但它是**给自己的工作放宽质量门禁**,不应由被约束方自批。且只发 inbox 不落盘等于让任务静默卡死,故按澄清环把问题写进 questions[]。"
+    },
+    {
+      "decision": "变异实验时**测试文件也必须备份**,不只备份实现文件。",
+      "rationale": "本轮我为做 2×2 的「格 2」(移开新测试跑旧测试集),用 python 原地切割 gate_test.go,结果把文件搞成 862 行(重复了一份)、`multiple definitions of TestMain` 编译失败,而我一开始误读成「格 2 变红」。正确做法有两条:①`cp` 备份两个文件,还原时逐字节 diff 核对;②「跑旧测试集」用 `-run` 正则排除新测试即可,**根本不需要动文件**。原地切割源文件是不必要的风险。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/crypto/crypto.go(新增 topicHistory 常量、gate 字段、两个构造函数快照 Default();FetchHistory 外层包 policy.Fetch + policy 错误 %v 收口 + slices.Clone;抽出 historyKey(时间截断到分钟)与 fetchHistoryFromProviders)",
+    "internal/collector/crypto/gate_test.go(新建 438 行:TestMain 零策略 + 5 个辅助 + 9 个测试)"
+  ],
+  "interfaces_exposed": [
+    "const topicHistory = \"crypto.history\" —— 包内。经 `<域>.*` 通配命中内置 crypto.* 条目。**域段写错会静默失效**(Lookup 落空 ⇒ Gate 直通、缓存彻底没了且不报错);接口段在通配登记下写成什么都能命中",
+    "CryptoCollector.gate *policy.Gate —— 包内未导出。`New()` 与 `NewWithProviders()` **两处**都在构造时快照 policy.Default()(陷阱 4),测试替换默认闸门须先于构造;包内测试可直接 c.gate = … 注入",
+    "func (c *CryptoCollector) FetchHistory(...) —— **签名不变**。现经 policy.Fetch,返回值一律 slices.Clone 后交出",
+    "func historyKey(symbol string, start, end time.Time, interval string) string —— 包内。覆盖 symbol/区间/interval 三维,**时间截断到分钟**(聚合度,见 key_findings[0])",
+    "func (c *CryptoCollector) fetchHistoryFromProviders(...) —— 包内新增。原 FetchHistory 的 provider fallback 循环逐字迁入,**空结果视为失败的校验留在这里面**(被缓存的 fn 内部)",
+    "**未新增任何限流行为**:crypto 无 MinInterval、无 Quota,内置表 crypto.* 仍是 {TTL: 5m, Coalesce: true}。policy 包一个字节未改"
+  ],
+  "verification": "主工作区实测,GOTOOLCHAIN=local,提交 ee18812(接入)+ 0a1ed48(缓存键修复),父 519f99b。(1) go test -count=1 -v → **21 PASS / 0 SKIP / 0 FAIL**(既有 8 + 新增 9,含子测试)。(2) -race -count=1 覆盖 crypto 及 binance/coingecko/okx 三子包 → 全部 ok。(3) -cover → **73.9%**,既有水位 66.7%,上升 7.2 个点;**低于全局 dev_minimum 80,门禁 DENY,已转 blocked_clarification 待裁定**。(4) 变异验证 8 条,注入前均先写下预期;**每条都做落盘校验(与注入前备份 diff,非 git diff)与 go vet 编译校验后再看红绿**,并逐个测试单独 -run 归属:C1 去闸门 → 4 条缓存类全红、构造函数那条绿;C2' 直接返回缓存切片 → 只有 TestFetchHistoryReturnsIndependentSlice 红且报错在**第 2 次**调用;C3 键丢 symbol → 只有 /symbol 子测试红;C6 New() 不快照 Default() → **只有 TestConstructorsSnapshotDefaultGate 红,其余 19 全绿**;C8 %v→%w → 只有 TestPolicyErrorDoesNotLeak 红;**D1 退回 UnixNano → 只有 /相邻时间落进同一槽 红,而 TestCacheKeyCoversAllParams 与 TestFetchHistoryCachedByGate 全绿**(原 criteria 放过该缺陷的直接证据);**D2 截断放粗到小时 → 只有 /分钟粒度不得放粗 红**(与 D1 互补)。首版 C2 因留着未使用的 slices 导入而编译失败(断裂点②),已废弃重做。(5) 每次变异后均与备份逐字节 diff 确认还原,复跑全绿。(6) go build ./... 与 go vet 通过;gofmt -l 本包无输出。(7) **既有测试一字未改**:git diff --stat crypto_test.go symbol_test.go 无输出。(8) 调用方 ./internal/app/... ./cmd/atlas/... 全绿。(9) scope:两次提交均用显式 pathspec,git show --stat 只含 crypto 两个文件;同期 TASK-017 的 baostock 在途改动未被卷入。"
+}

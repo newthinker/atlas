@@ -56,7 +56,13 @@
     "dev-agent-34": "855f4cffe8b47b01ddc279f4b6bbd9f13845784b9301c09013c1e910bc50ea28",
     "test-agent-14": "510d526a0cb6e020e90d23ceb0365b92cb4d4e33ad367349fc218e0282ee4ff8",
     "test-agent-15": "1f307fdbadbc4359885131982500f3b61a71ba6759088ea3a460f5dac822be3f",
-    "qa-agent-7": "a204437c6c638c955da4a7998b02680dc4f53f8f61d0723afe5158f6bfa01e07"
+    "qa-agent-7": "a204437c6c638c955da4a7998b02680dc4f53f8f61d0723afe5158f6bfa01e07",
+    "dev-agent-35": "d90d809255ddfdf5bbf8ced4f7032496ad08a30c2f53dd9a7775102cb7c4d2c9",
+    "dev-agent-36": "a27061ee58280df30390d0a87fe7de6c0f3eedb403d40876bb84daeff57d1ca1",
+    "test-agent-16": "1efbee93f540776ff754de746d489761275aa0501fb3595e3c28b3501375b728",
+    "test-agent-17": "34fc07f430bcae87a683a035e943d8680b251396431bb0650740028fd27ebf25",
+    "dev-agent-37": "5d100358e35eafe380cf340e92c2f712a5caba893114dff17a1b84a7c8e1d49b",
+    "dev-agent-38": "caa591481e49a9bc357928b2271645b695af5b2cb63ba09240cd6c0adfd146bd"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [

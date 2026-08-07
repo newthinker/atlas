@@ -1,0 +1,73 @@
+{
+  "id": "TASK-004",
+  "title": "QuotaStore 文件实现（跨进程配额账本）",
+  "description": "实现 FileStore:flock + JSON 账本 + 原子写,让配额在 atlas prism refresh 这类短命进程形态下跨进程持久生效(MemStore 每次启动归零,launchd 部署下等于无效)。**方案行 1393-1762 已给出完整实现与测试代码。** syscall.Flock 仅 unix 可用,本仓库只在 darwin/linux 运行(launchd),不加 build tag。复用 TASK-003 的 ledgerEntry 与 take 纯逻辑,不要重复实现窗口判定。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-policy",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/policy/quota_file.go",
+    "internal/collector/policy/quota_file_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "两个独立 Gate/FileStore 实例指向同一账本文件时配额累计生效——模拟 launchd 两次启动,第二个实例看得见第一个实例的计数(TestFileStoreQuotaSurvivesProcessRestart,设计 §7.3 / 验收标准 3)",
+      "窗口翻篇后账本计数归零;不同主题账本互相隔离",
+      "账本文件不存在时从空账本起算,父目录不存在时自动创建"
+    ],
+    "boundary": [
+      "被拒的 Take 不写入计数,账本文件中的 count 不增长",
+      "并发 Take 在 flock 保护下不超发:N 个并发请求对 Limit=K 的配额恰好放行 K 次"
+    ],
+    "error_handling": [
+      "账本内容损坏(非法 JSON)时 Take 返回 err 触发上层 fail-open,不 panic 不阻断(约束 C7);**且损坏后必须能自愈**——下一次 Take 用新窗口覆盖重建账本并恢复正常计数(反审 A10:若每次读到坏 JSON 都只返回 err 而从不重写,配额将永久静默失效,只在日志留一行 Warn,这是长驻/定时任务里最常见的隐性故障)"
+    ],
+    "non_functional": [
+      {
+        "desc": "账本写入为原子写:Take 执行完毕后目录中除目标账本外无残留临时文件(反审 B2 —— 原措辞「进程中途被杀不留半截 JSON」在 go test 内无法可靠复现,改为可判定的等价断言)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "实现确实走 临时文件 + os.Rename 路径,且 flock 的文件描述符在 Take 返回前关闭(长驻进程反复 Take 不泄漏 fd)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go test ./internal/collector/policy/ -race 全包全绿",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/policy"
+  ],
+  "writes": [
+    "./internal/collector/policy"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:18Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verifier": "test-agent-17",
+  "reject_reason": "DoD error_handling[0] 与约束 C7 要求的 fail-open,现有测试只覆盖了「JSON 解析失败」一条路径,**I/O 层失败的 fail-open 语义三处全部无守护**:把 quota_file.go 里 (a)lock() 失败 :48、(b)write() 失败 :62、(c)read() 的 I/O 错误 :95 的 `return true, err` 改成 `return false, err`(或让 read 返回 nil map),**三条变异全部存活,无任何测试转红**(F15/F16/F17,均通过五道门校验:改动量非空且改语义、go test -c 编译通过、核到断言行、跑了 62 个测试、还原后 8 文件 md5 一致)。为什么重要:约束 C7(fail-open 不阻断降级链)是本 Sprint 核心约束;I/O 层故障(磁盘满、权限变更、只读挂载、目录被占)在真实环境里比 JSON 损坏常见得多;一旦任一处被改成 false,prism refresh 会因为账本写不进去而拒绝发请求——配额机制本是为保护降级链,反而成了阻断它的原因。覆盖率数据吻合:write 50.0%、lock 63.6%,未覆盖行 :48 :62 :71 :75 :78 :95 :109 :113 正是这些 fail-open 分支。**且 Dev「这些分支无法可靠构造」的说明经实测不成立**:我写探针跑通了两种稳定、可移植、不需要 root 的构造——(1)让父路径是一个文件而非目录 → MkdirAll 失败,实测 ok=true err=「policy: quota dir: mkdir .../blocker: not a directory」;(2)os.Chmod(dir, 0o500) 只读目录 → CreateTemp 失败,实测 ok=true err=「policy: temp quota ledger: open ...: permission denied」。两者都用 t.TempDir() 隔离,而且恰好验证了 fail-open 语义正确(ok=true 且 err!=nil)——正是 F15/F16 缺的那个断言。修复:补两条测试断言 (ok,err)==(true,非nil),报告 §八 已给出可直接用的代码;另修正 discovery 里「无法可靠构造」的说明,记下这两种构造方法。**其余 10 项 DoD 全部 PASS,质量很高**:Dev 自报的每一项我都独立复现且全部属实——F1 的复合句硬证据(分句2 红 :160 / 分句1 仍绿,证明只写分句1 时「配额永久静默失效」完全不可见)、f.mu 与 flock 各自独立充分(F5 绿/F6 绿/F7 红 :264,与 TASK-003 两道短路同构)、fd 泄漏的间接检测确实不设防(F4 下 nextFD 法红 fd 5→55 而间接版跑 300 次仍 PASS)、/dev/fd 在 go test 进程内确实读不到(lstat bad file descriptor,会致 t.Skip)。62 测试 0 SKIP 已核。另我补做两项取证:(1)**分句2 判据独立性的分水岭已证实**——构造 F1c(前两环全过,只把 !ok 时返回改成 true 使 Limit 判定失效),只有最后那条「第3次到达 Limit 应被拒」的断言转红 :173,证明「功能恢复」与「只是不再报错」的分界确实在那一条;(2)**真正的跨进程取证**——编译独立探针程序用真实 OS 进程验证:进程A放行6/进程B放行4/合计恰好10(Limit=10),以及 8 个真实进程并发各抢 20 次(共160次尝试)三轮合计均恰好 10、账本 count=10、无临时文件残留 ⇒ 验收标准 3 的取证现在是充分的,Dev 关于「单 go test 进程内验不了 flock 跨进程保护」的界定**可以接受**(该 DoD 的核心性质已由包内测试覆盖),建议把探针固化为 //go:build manual 的外部验证程序,但**不作为本轮 FAIL 依据**。等价变异体两处(F9 被拒也写盘——写的是原样账本 count 不增、DoD 仍满足;F10 rename 失败分支不可达),已如实标注。方法论:我自己造了两个无效变异,其中 F9x 是**新形态**——测试名打错导致 `go test -run` 匹配 0 个测试、exit 0、门③判成「绿存活」,差点报出不存在的缺口;已加**第④道门:确认 === RUN 数 > 0**,这是变异无效的第四种形态(前三:表达式静默失配、改坏代码致编译失败、改动量非空但语义未变),四者共同点是「红/绿的原因不是被测行为」。详见 .arcforge/docs/04-test/TASK-004-verification.md",
+  "reason_class": "task_defect",
+  "rework_count": 1,
+  "fix_items": [
+    {
+      "id": "F-IO",
+      "severity": "MAJOR",
+      "desc": "I/O 层 fail-open 三处全部无守护(约束 C7 是本 Sprint 核心约束)。把 quota_file.go 这三处的 return true, err 改成 return false, err,测试全部**绿存活**:F15 lock() 失败 :48、F16 write() 失败 :62、F17 read() I/O 错(返回 nil map) :95。现有 TestFileStoreFailsOpenOnCorruptLedger 只覆盖了 **JSON 解析失败**这一条路径。真实影响:I/O 故障(磁盘满、权限变更、只读挂载)在生产环境比 JSON 损坏常见得多;任一处变成 false,prism refresh 会因**账本写不进去**而拒绝发请求——**配额机制本为保护降级链,反而成了阻断它的原因**。覆盖率吻合:write 50.0%、lock 63.6%,未覆盖行正是这些分支。**你 discovery 里「无法可靠构造」的说明不成立**,验证者实测两种构造(均用 t.TempDir() 隔离、不需 root、macOS/Linux 通用):①MkdirAll 失败——把父路径设为**文件**而非目录,实测 ok=true err=...: not a directory;②CreateTemp 失败——os.Chmod(dir, 0o500),实测 ok=true err=...: permission denied。**这两种构造恰好同时验证了 fail-open 语义正确**(ok=true 且 err!=nil),正是 F15/F16 缺的那个断言。修复代码见 .arcforge/docs/04-test/TASK-004-verification.md 八。自证:三处变异逐个注入确认转红,并做 2x2 闭环"
+    }
+  ]
+}

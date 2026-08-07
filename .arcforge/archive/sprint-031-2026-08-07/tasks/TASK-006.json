@@ -1,0 +1,67 @@
+{
+  "id": "TASK-006",
+  "title": "config 扩字段 + cmd/atlas 装配接线",
+  "description": "方案 Task 5 的 cmd 侧半边(Step 5-12,行 1998-2286)。给 CollectorGlobalConfig 增 Quota/Topics 字段,新建 cmd/atlas/policy.go 的 initPolicyGate 从 config 构建 Gate 并 SetDefault,接进 serve.go 与 export_ohlcv.go 两条装配路径。**关键顺序要求:SetDefault 必须在构造任何 collector 之前调用**(方案 Step 11 要求核实两条路径均满足)。**本任务跨 internal/config 与 cmd/atlas 两个 package(AD-2 已说明理由:拆开会产生无消费者的空洞任务)。coverage_floor=74 是 cmd/atlas 的既有历史水位(实测 74.3%),不是本次改动造成的(AD-4);若实际跌破 74 请提问,不要自行下调。** **先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "cmd-assembly",
+  "complexity": "high",
+  "estimated_files": [
+    "cmd/atlas/policy.go",
+    "cmd/atlas/policy_test.go",
+    "internal/config/config.go",
+    "cmd/atlas/serve.go",
+    "cmd/atlas/export_ohlcv.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "config 新增 QuotaConfig{Path} 与 TopicConfig{TTL,MinInterval,Timeout,QuotaWindow,Coalesce,QuotaLimit},均为指针语义以区分未设置与零值;Defaults/Load 给出默认账本路径 data/collector-quota.json",
+      "initPolicyGate 把 collector.cache.ttl 经 Table.ApplyTTL 施加到缓存类主题(TestInitPolicyGateAppliesCacheTTL)",
+      "collector.topics 的逐主题覆盖经 Table.Override 生效,含配额覆盖(TestInitPolicyGateAppliesTopicQuotaOverride)",
+      "collector.quota.path 被用作 FileStore 账本路径(TestInitPolicyGateUsesConfiguredQuotaPath)"
+    ],
+    "boundary": [
+      "collector.cache.enabled=false 时所有主题 TTL 归零但限流仍生效(TestInitPolicyGateDisabledCacheStillThrottles)——等价于今天 maybeCache 直接返回原 collector 的语义",
+      "**不含 collector.topics / collector.quota 的旧 config.yaml 仍能正常装载且行为不变**(反审 A12:新增字段用指针语义且改了装载路径,生产在用的那份旧配置必须有用例覆盖)"
+    ],
+    "error_handling": [
+      "initPolicyGate 传入 nil logger 不 panic(测试即以 nil 调用);账本路径不可写时仍完成 SetDefault,由 FileStore 在 Take 时 fail-open"
+    ],
+    "non_functional": [
+      {
+        "desc": "**【本任务最高风险项,反审 A1】initPolicyGate 必须放在共享 helper loadConfigOrDefaults 内部,使 serve / export_ohlcv / prism refresh 三条入口全部覆盖,且均早于 collector 构造。** 依据:cmd/atlas/prism.go:171 调 loadConfigOrDefaults() 后于 :191-194 构造 collector;设计 §1.5 的全部立论是「launchd 短命进程下内存计数无效」,**prism refresh 是配额唯一真正生效的进程**。若把 initPolicyGate 放在 export_ohlcv 的调用点而非 helper 内部,prism 将拿到内置表+无账本的懒构造 Gate,配额彻底失效而全部测试仍然全绿(TASK-014 注入自己的 Gate,测不到装配)——这是整个特性静默失效的单点。必须有可执行断言:cmd/atlas 测试调用 loadConfigOrDefaults() 后断言 policy.Default() 使用的账本路径等于 cfg 中配置值(顺序错则拿到懒构造 Gate,路径为空)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "go build ./... && go vet ./... 通过;go test ./cmd/atlas/ ./internal/config/ 全绿;cmd/atlas 覆盖率不低于 74%(既有历史水位,实测基线见 01-design/requirements-analysis.md §5)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/config",
+    "./cmd/atlas"
+  ],
+  "coverage_floor": 74,
+  "writes": [
+    "./internal/config",
+    "./cmd/atlas"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verifier": "test-agent-17"
+}

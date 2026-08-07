@@ -1,0 +1,62 @@
+{
+  "id": "TASK-001",
+  "title": "policy 包 —— 策略表与查表",
+  "description": "创建 internal/collector/policy 包根:Policy/Quota/Table 结构、内置策略表、三段查表(精确→<域>.*通配→未登记)。**方案 docs/superpowers/plans/2026-08-06-collector-policy-gate.md 行 102-434 已给出完整实现与测试代码,照抄即可,不要自行设计。** 严格 TDD:先落 policy_test.go 跑红(undefined: NewTable),再写 policy.go 跑绿。限流数值只平移不调整(yahoo 500ms/tushare 200ms/twelvedata 8s)。**提交时序(AD-3):必须先 git commit 再 transition dev_done**——门禁的 scope 漂移校验不扣除已 verified 但未提交的改动,先提交可避免连锁阻塞后续任务;门禁跑 go test 不依赖工作区脏否,先提交无损其效力。提交信息格式 feat(collector): <中文描述>。",
+  "module": "collector-policy",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/policy/policy.go",
+    "internal/collector/policy/policy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "NewTable() 内置主题齐全且数值平移自现有常量:yahoo.{chart,eps,quote} Domain=yahoo 且 MinInterval=500ms、tushare.{daily,index_daily,hk_daily,daily_basic} 200ms、twelvedata.time_series 8s,登记主题 Coalesce 默认 true(TestLookupBuiltinTopics 全绿)",
+      "tushare.daily_basic 带 Quota{Limit:5, Window:24h, Loc:Asia/Shanghai};tushare.daily/index_daily/hk_daily 的 Quota 为 nil,不凭空设限(TestDailyBasicQuota + TestOtherTushareTopicsHaveNoQuota)",
+      "Lookup 按精确匹配→<主题名第一段>.*通配→未登记三段查表;lixinger.cn/company/fundamental/non_financial 命中 lixinger.* 且 TTL>0、MinInterval=0、Quota=nil、Domain=lixinger(TestLixingerWildcardTTLOnly)",
+      "Set 登记时 Domain 为空则缺省取主题名第一段,显式传入的 Domain 被保留(TestSetOverridesAndDefaultsDomain)"
+    ],
+    "boundary": [
+      "ApplyTTL 只提升本就 TTL>0 的主题,yahoo.quote 保持 TTL=0,且 ttl<=0 时为 no-op(TestApplyTTLOnlyLiftsCachingTopics);DisableTTL 令 Topics() 全部主题 TTL 归零而 MinInterval 不受影响(TestDisableTTLKeepsThrottle)",
+      "eastmoney.kline/akshare.valuation/crypto.ticker/fred.series/edgar.facts/baostock.daily 六个未登记主题 Lookup 一律返回 ok=false(TestLookupUnregisteredTopicIsZeroPolicy,约束 C6 各 collector 行为零变更)"
+    ],
+    "error_handling": [
+      "shanghai() 在 time.LoadLocation 失败时退回 time.UTC 而非 panic(tzdata 经 _ \"time/tzdata\" 嵌入,不依赖部署机装 tzdata)"
+    ],
+    "non_functional": [
+      {
+        "desc": "internal/collector/policy 不得 import internal/collector(约束 C3 避免循环导入),go list -deps ./internal/collector/policy 中不含 internal/collector",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/policy"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:18Z"
+  },
+  "assignment_epoch": 3,
+  "assigned_to": "dev-agent-35",
+  "writes": [
+    "./internal/collector/policy"
+  ],
+  "verifier": "test-agent-17",
+  "reject_reason": "本轮 Leader 指定的三项返工 R1/R2/R3 全部验证有效——首轮存活的 M10(loadLoc 失败分支改 panic)/M11(lixinger.* Coalesce 改 false)/M16(Lookup 通配段提到精确段之前) 经我独立注入后逐个转红,ebba14a 的 C3 守卫加固两条分支实测均有效(go.mod 改坏时 Fatal、PATH 无 go 时 Skip),13 条旧变异抽查无回归,覆盖率 97.7%(loadLoc/shanghai 均 100%)、-race 绿、collector 树 17 包全量回归绿、scope 无越界、可测性重构未改变外部行为(daily_basic 的 Quota.Loc 实测仍是 Asia/Shanghai / UTC+8)。判 rejected 的原因是本轮新造的 9 个变异中有 2 个存活,各自触及一条 DoD 明文子句:(R4)M21 把 NewTable 里 Loc: shanghai() 改成 Loc: loadLoc(Asia/Tokyo) 后套件全绿——functional[1] 明文要求 Quota.Loc 为 Asia/Shanghai,但 TestDailyBasicQuota 的断言是 Loc == nil || Loc.String() == \"UTC\" 即「不是 UTC」,没有钉住 Asia/Shanghai 这个值;首轮 M7 之所以转红只因它恰好落在这条弱断言唯一覆盖的值上,换成任何其它非 UTC 时区即静默通过。真实影响:Quota 语义是 Window>=24h 时按 Loc 自然日对齐,tushare 5 次/天是北京时间重置,Loc 错成 Tokyo 会让 TASK-002 的 Gate 在错误时刻重置配额进而撞 40203。修复一行:改成 Loc == nil || Loc.String() != \"Asia/Shanghai\"。(R5)M26 把 Topics() 的填充循环整段删掉、恒返回空切片后套件全绿——boundary[0] 明文要求 DisableTTL 令 Topics() 全部主题 TTL 归零,而 TestDisableTTLKeepsThrottle 遍历 tbl.Topics() 做断言,循环体零次执行时断言 vacuously true,「全部」这个量词没有下界;另注 Topics() 作为 Gate 可能用来枚举主题的公开方法,目前没有任何直接断言。修复一行:取 topics := tbl.Topics() 后先 if len(topics) != 9 { t.Fatalf(...) } 再遍历。两条均为一行修复、实现代码本身无缺陷,与首轮 R2/R3 同性质同量级,按首轮已确立的「变异存活即该 DoD 无有效守护」标准判定必须一致。说明:R4/R5 是本轮新造变异发现的、首轮 16 个变异未曾探测到的断言精度缺口,不属于 dev-agent-35 返工执行不到位;rework_count 将升至 2(max_rework 3),是否为两行断言消耗一次返工额度由 Leader 权衡,但 R4 触及会影响 TASK-002 配额记账正确性的 DoD 明文值,不建议放行。完整覆盖矩阵、15 个变异结果表、加固实测输出与复现命令详见 .arcforge/docs/04-test/TASK-001-verification-round2.md",
+  "reason_class": "task_defect",
+  "rework_count": 2,
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "fix_items": [
+    {
+      "id": "R5b",
+      "severity": "MAJOR",
+      "desc": "TestDisableTTLKeepsThrottle 的断言链改为三层形态,每层守一个不同的被测对象(不可合并、不可省略):①对 Topics() 做集合等值——构造 want(9 个主题名从实现直读 grep 't\\.Set(\"' policy.go,不凭记忆写)、把 Topics() 收进 got、len(topics)!=len(want)||!reflect.DeepEqual(got,want) 即 Fatalf(len 比较兼管去重);②保留 p,ok:=Lookup(topic) 并断言 ok——它守的是 Lookup 本身,若 Lookup 恒返 ok=false,①仍通过(Topics 是对的)且③也仍通过(p 是零值 TTL 恰为 0),漏检;③保留 if p.TTL!=0——守 DisableTTL。理由:现行「基数+逐元素 Lookup 命中」形态有三条实测逃逸(M26c 返 9 个 lixinger.* 域内假名——Lookup 三段查表使该谓词宽于「已登记主题」;M26d 返同一主题重复 9 次;M26c+M27 组合全绿逃逸使 boundary[0] 被完全架空)。修复方案见 .arcforge/docs/04-test/TASK-001-verification-round3-addendum.md 三,验证者已实测封堵全部 5 条。自证要求:注入 M26/M26b/M26c/M26d/M27 五条确认全部转红,并做闭环对比(退回旧形态确认 M26c/M26d 存活)。**本次不消耗 rework 额度**(分类=断言精度,实现完全正确、单点故障仍全部被守护、policy.go 一行不用改)"
+    }
+  ]
+}

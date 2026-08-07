@@ -1,0 +1,58 @@
+{
+  "id": "TASK-018",
+  "title": "policy 错误映射收口:yahoo 与 twelvedata",
+  "module": "internal/collector",
+  "complexity": "简单",
+  "description": "TASK-015 验证时 test-agent-17 实测证明:接入 Gate 的 collector 会把 policy 包哨兵错误原样外泄给上层。配 Timeout:1ns 即返回 'policy: fn timeout' 且 errors.Is(err, policy.ErrTimeout)==true——**不需要 Quota**,而 collector.topics.*.timeout 是 TASK-005/006 已落地的可配置项 ⇒ 今天就能被配出来,是现存缺口不是防将来。现状:tushare 一家有完整映射(client.go:99-101),yahoo(4 处 policy.Fetch)与 twelvedata(1 处)**均无映射**。015/016/017 各自 DoD 已含该要求,本任务补齐余下两家,使八家一致。\n\n**【范围订正,test-agent-17 精确清点,2026-08-06】** 我原文说「yahoo 4 处」并遗漏了一家。精确清点(排除注释与 _test.go):**yahoo 3 处**(yahoo.go:219 quote / :293 chart / eps.go:50)、**twelvedata 1 处**(client.go:102)、**lixinger 1 处**(client.go:46,其 :49-51 是裸 `if err != nil { return nil, err }`,与 eastmoney 完全同形)。**baostock(collector.go:70/:72)与 crypto(crypto.go:159)已有映射,不在本任务范围**。⇒ 需收口三家:yahoo、twelvedata、lixinger。\n\n**【范围再次扩大,Leader 裁定,dev-agent-38 事实④】** tushare 的 `client.go:99-101` **只映射了 `ErrQuotaExceeded`,没有映射 `ErrTimeout`**——`:103 return cloneRows(rows), err` 把 ErrTimeout 原样外泄。而本任务的触发点恰恰是 ErrTimeout(test-agent-17 实测:配 Timeout 即触发,不需要 Quota)。**参照形态自身有缺口**,故 tushare 一并纳入本任务,packages 增至四包。否则「八家一致」的结论是错的。",
+  "estimated_files": 8,
+  "dependencies": [],
+  "wave": 4,
+  "context_from": [
+    "TASK-015"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/yahoo",
+    "./internal/collector/twelvedata",
+    "./internal/collector/lixinger",
+    "./internal/collector/tushare"
+  ],
+  "writes": [
+    "./internal/collector/yahoo",
+    "./internal/collector/twelvedata",
+    "./internal/collector/lixinger",
+    "./internal/collector/tushare"
+  ],
+  "assigned_to": "dev-agent-38",
+  "assignment_epoch": 2,
+  "reason_class": null,
+  "done_criteria": {
+    "functional": [
+      "yahoo 全部 4 处 policy.Fetch 调用点、twelvedata 的 1 处,其返回错误均经映射后再返回上层;**断言方式:配 Override{Timeout:1ns} 触发真实的 policy.ErrTimeout,再断言 errors.Is(返回错误, policy.ErrTimeout) == false**(不是断言错误消息文本——文本断言在包装方式改变时会假绿/假红)",
+      "映射后的错误**仍保留可诊断信息**:断言返回错误的 Error() 文本中含原始原因(如 timeout/quota 字样)。只把哨兵错误吞掉换成一句无信息的通用错误,会让线上排障失去线索——**映射是换类型不是丢信息**"
+    ],
+    "boundary": [
+      "**「临时性绝不可映射成永久性」——按本包有无永久性哨兵分两种断言形态**(Leader 裁定,2026-08-06,dev-agent-38 核实后改写):\n\n**原文要求「逐个列举本包现有的永久性错误常量,断言 errors.Is 到它们全为 false」。dev-agent-38 现跑核实:yahoo 与 twelvedata **各有 0 个**哨兵错误常量(全是 ad-hoc fmt.Errorf)⇒ 该遍历零次执行、断言 vacuously true,**一个什么都不做的实现照样全绿**(契约陷阱 6 空真形态)。这不是断言写不出来,而是**风险面本身不存在**:没有永久性哨兵,就没有「映射成永久性」这个动作。**\n\n- **有永久性哨兵的包(tushare)**:原形式适用——断言映射结果 `errors.Is(ret, ErrNoPermission) == false`。\n- **无哨兵的包(yahoo/twelvedata,lixinger 待查)**:改为断言映射结果的 `Error()` 文本**不含**本包表达永久性条件的判别串——**逐条列举**(如 yahoo 的 `\"no data for symbol\"`、`\"invalid symbol format\"`)。这些是本包真实存在的永久性错误,只是以文本而非哨兵形式存在,所以断言也只能落在文本上。**这一条有内容、可被变异证伪**(把映射文案改成含 \"no data\" 即须转红)。",
+      "**非 policy 错误路径不受影响**:上游 HTTP 错误、解析错误等原本就存在的错误,映射前后 errors.Is 行为一字不变(否定断言,契约陷阱 8——直接断言这些错误仍可被原有方式识别,不用「测试没变红」间接推断)",
+      "**措辞不得暗示永久失败**(baostock/collector.go 已有正确样板,可直接引用其注释):配额与超时都是**临时性**错误,错误文案若写成「不支持/无此数据」会让运维照着去改配置,而问题只是要等窗口。参照 crypto 的「暂不可用(闸门限制,稍后自动恢复)」——**文案传达临时性**,与 boundary[0] 的类型断言是同一要求的两面(一个给程序判,一个给人读)"
+    ],
+    "error_handling": [
+      "**映射发生在正确的层**:必须在 policy.Fetch 的返回值处映射,**不得**在更外层统一 catch。参照 tushare/client.go:99-101 的形态。理由:更外层无法区分「policy 产生的 timeout」与「HTTP 客户端自己的 timeout」,统一 catch 会把两类不同来源的错误压成一类",
+      "**两种映射口径都合法,按「本包有无哨兵错误」分支选择,不要三家各写各的**(test-agent-17 归纳,dev-agent-35 变异实证):\n- **本包有哨兵错误 → 映射成它**,用 `fmt.Errorf(\"%w: ...\", 本包哨兵, ...)`。参照 tushare/client.go:99。tushare 必须这样做,因为 refresh.go:450 的降级链依赖 `errors.Is` 可判定性。\n- **本包无哨兵错误 → 断链 + 本包前缀**,用 `%v` 而非 `%w`。参照 baostock/collector.go:58-76(其注释已把理由写清楚)、crypto/crypto.go:159。\n\n**关键陷阱(dev-agent-35 变异 B8 实证):用 `%w` 包一层本包前缀是挡不住的**——消息变了,但 `errors.Is(err, policy.ErrQuotaExceeded)` **仍然成立**,policy 错误照样在调用方可见的链上。**所以本任务的判定断言必须是 `errors.Is` 不成立,而不是检查消息文本**——只查文本会被 `%w` 写法骗过。\n\n三家各属哪种须逐家判定并在 discovery 写明理由:yahoo 有哨兵错误 ⇒ 映射;twelvedata 的 wrapErr(client.go:70-72)刻意不保链 ⇒ 沿用断链;**lixinger 属哪种要先查它有没有哨兵错误**。",
+      "**不新增导出 API(Leader 裁定 (A) 案,否决 (B) 案)**:dev-agent-38 提议每包新增 `ErrTemporary` 哨兵,使 boundary[0] 可正向断言。**否决**,理由:它自己核实的事实③——**上层没有任何地方对 yahoo/twelvedata 的错误做 errors.Is 分支**(prism 只对 sankey/store 自己的哨兵判定)⇒ 新增的 ErrTemporary **今天没有消费者**,属投机性 API(契约「未来承重三形态」之「尚未承重」)。本任务目标是**堵住 policy 错误外泄**,该目标 (A) 已达成。**将来若上层真需要判定可重试性,那时统一给八家加,一次做对形态**——现在给三家各加一个没人用的哨兵,只会制造八家不一致。已登记进 Sprint 末尾清单。",
+      "**(A) 案的理由已被 dev-agent-38 的新证据强化,且修正了 Leader 的原表述**:`twelvedata/client.go:65-71` 的注释明写——wrapErr 是本包**唯一** error 出口,刻意**不保留 error 链**(用 %v 非 %w):「留了链,errors.Unwrap 就能取回**未脱敏**的原始 error,脱敏形同虚设。**本包无 sentinel error**,消费方(prism)只格式化文本,不做 errors.Is/As,故无损失。」\n\n⇒ **「本包无哨兵错误」在 twelvedata 不是疏漏,是有理由的既有决策(凭证脱敏)。(B) 会与它正面冲突。** 而 wrapErr 的 %v 断链**在本任务里恰好正是我们要的映射手段**——走它一趟,errors.Is(ret, policy.ErrTimeout) 自动变 false。\n\n**所以 (A) 在 twelvedata 不是「退而求其次」,而是沿用本包既有惯用法。** Leader 原表述「上层没有 errors.Is 消费者 ⇒ 新哨兵没有消费者」在 yahoo 成立;在 twelvedata 更强——**那里的不透明是故意的安全属性**,不是缺失。dev-agent-38 自己指出了这个区别(它先前说「(A) 只是把错误变得同样不透明」在 twelvedata 是错的)。\n\n**twelvedata 的实现必须走 c.wrapErr,不得绕过本包唯一出口**——绕过等于绕过脱敏。\n",
+      "**tushare 纳入本任务的承接义务(消 validator orphan-obligation 告警,Leader 补)**:tushare 与另三家形态不同——**它有哨兵错误**(`ErrRateLimited`/`ErrNoPermission`),故 `ErrTimeout` 须用 `%w` **映射成 `ErrRateLimited`**(与 `ErrQuotaExceeded` 同款,都是「等窗口即可」),**不是断链**。理由:`refresh.go:450` 的降级链依赖 `errors.Is` 可判定性,断链会让降级链失效。**绝不可映射成 `ErrNoPermission`**——`client.go:99-101` 的既有注释已写明:那会让降级链把「等窗口即可」报成「去改配置」,运维照着查积分档而问题根本不在那儿。\n\n**因此 tushare 的 boundary[0] 可以写成正反两面的类型断言**(必须 `Is(ErrRateLimited)` 为真、`Is(ErrNoPermission)` 为假),**比另三家的文本判别强一个量级**——这是「本包有哨兵」带来的可测性红利,验证时应按更高标准核。\n"
+    ],
+    "non_functional": [
+      "既有测试断言体与场景一字不改且全绿;go test -race 绿、0 SKIP;两包覆盖率各自不低于既有水位(**报告时须注明口径:单包还是合并**——本 Sprint 已三次因口径不同产生互相矛盾的数字)"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T00:36:25Z"
+  },
+  "verifier": "test-agent-17",
+  "discovery": ".arcforge/discoveries/TASK-018.json"
+}

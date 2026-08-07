@@ -1,0 +1,42 @@
+{
+  "key_findings": [
+    "**本轮为 dod_defect 返工(epoch 2,rework_count 未消耗)**:boundary[1] 由二选一收敛为 (b) 逐行 map 深拷贝。首轮交付 5a57ff8 走的是 (a)「钉死消费者只读」,本轮 199ed81 改为 (b)。**(a) 的变异证据本身成立**(验证者独立复核:M1 确实转红、原因确实是那条断言、既有测试保持绿,「形式存在断言空洞」未发生),它被撤销的原因是**只覆盖了不变量的一个子集**。",
+    "**(a) 不可达的精确边界(验证者给出,已入契约教训 16)**:行为测试可测的是「写**导致返回值可观测地变化**」,不可测的是「写本身」,**两者的差集永远测不到**。差集包括幂等写、条件不触发的写、写后读同一值。实测漏检的一类是**归一化写回**:消费者写 `if math.IsNaN(r.values[\"pe_ttm\"]) { =0 }` 时全套 25 用例全绿而缓存已被污染。**这不是人为角落**——NaN 恰恰是本包自己填的(client.go 里非数值列与缺列一律 NaN),消费者做 NaN→0 归一化是完全合理的需求。",
+    "**(b) 消除了那个差集,并已用 2×2 闭环实测确认,而非推理**:同一个 M1c 归一化消费者,(b) 下缓存中 pe_ttm 仍为 NaN(未穿透);把 cloneRows 退成不深拷贝则缓存被污染成 0。这一步很关键——M1c 在 (a) 下全绿是**漏检**,在 (b) 下全绿是**无害**,两者从套件看完全一样,只有直接探测缓存内容才能区分。用后即删的探针测试(ztmp_probe_test.go)已清理。",
+    "**排序守护首轮是概率性的,我自报不准确**:首轮只断言「重复算 N 次结果相同」,而 Go 每次 range 随机化遍历起点,2 个键时未排序实现有 1/2 概率碰巧一致(验证者实测捕获率 90~95%);我当时报的是「连跑 5 次稳定红」。本轮改为两条确定性判据:①对**排好序的字面量**断言(不再依赖随机性),4 键 × 200 次,未排序实现要连续 200 次都恰好撞中字典序才能逃过;②端到端断言散落多槽的**后果本身**——不同插入顺序构造的等价 params 只应发 1 次 HTTP。删 sort 后 **30/30 捕获**(原约 90%)。",
+    "节流断言的 60ms 容差已改为 `const iv = 80ms`,配置与断言共用一个常量。三组实测支撑严格边界成立:80ms 配置+80ms 断言 20/20 绿(无需容差);削弱到 70ms 时 80ms 断言 10/10 红、60ms 断言 **0/10 红**。那个 0/10 是关键——弱断言不是「偶尔放过」,是把 60~80ms **整段**错误空间无条件放行。",
+    "**首轮那句守护声明不准确,已删除**:(a) 的测试注释写「不依赖写法形状」,而 M1a(读后写,红)/M1b(写后读,绿漏检)/M1c(归一化,绿漏检)三种写法结果不同——**恰恰依赖写法形状**。不准确的守护声明与「错误的修复」同类:它让下一个人以为已经守住。(b) 的守护确实与写法无关(调用方拿到的本就是副本),那句话现在才名副其实,且新注释里写明了「不要退回 (a)」及其原因。"
+  ],
+  "decisions": [
+    {
+      "decision": "cloneRows 逐行新建 map,放在 call 返回前(含缓存命中与首次取数两条路径)。",
+      "rationale": "把保护从「消费者行为」前移到「函数契约」——新增消费者不需要知道任何约定,这是契约教训 6(防线要在违反者一侧)的推广。代价是每次缓存命中每行一个 map 分配(5 年日线约 1200 次),相对一次 HTTP 往返可忽略。DoD 明文禁止 slices.Clone:它复制 row 结构体但 values 仍是同一 map header,隔离不了。"
+    },
+    {
+      "decision": "排序守护另立 TestCallKeyIsOrderIndependent,判据从「多次结果相同」改为「等于排好序的字面量」。",
+      "rationale": "「多次结果相同」把捕获率交给了 map 遍历的随机性;「等于字面量」把判据变成确定的——只要某次遍历吐出非字典序就必红,不需要两次结果恰好不同。再加端到端的「只发 1 次请求」断言,直接观测 `散落多槽` 这个后果本身,而不是它的间接征兆。原 TestCallKeyDistinguishesParams 保留但只管区分性,实测删 sort 后它 0/30 捕获——排序守护已单一归属新测试,符合纪律第 4 条(对 DoD 专属守护者单独 -run 确认)。"
+    },
+    {
+      "decision": "用一次性探针测试验证「M1c 在 (b) 下是无害而非漏检」,验证后立即删除。",
+      "rationale": "教训 9:不采信推理链。我原本要写的结论是「(b) 下消费者只能改到自己的副本」——那是推理。M1c 在 (b) 下套件全绿,与它在 (a) 下漏检时的套件表现**完全一致**,靠套件红绿无法区分。只有直接探测缓存里那份 row 是否仍为 NaN 才能定论。探针是为回答这一个问题而写,答完即删,不留在套件里增加维护面。"
+    },
+    {
+      "decision": "首轮的 TestCachedRowsNotMutatedByConsumers 整体删除,不与 (b) 的测试并存。",
+      "rationale": "在 (b) 下它会永远绿(消费者写的是副本,公开 API 返回值自然稳定),成为一条不再守护任何东西的测试。留着比删掉更有害——它的名字暗示「消费者只读被守护着」,而实际的守护已经换成了 cloneRows 的契约。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/tushare/client.go(新增 cloneRows 逐行深拷贝;call 返回 cloneRows(rows);更新 call 的所有权注释)",
+    "internal/collector/tushare/gate_test.go(TestCachedRowsNotMutatedByConsumers → TestCachedRowsAreIsolatedFromCallers;新增 TestCallKeyIsOrderIndependent;TestCallKeyDistinguishesParams 收窄为只管区分性)",
+    "internal/collector/tushare/client_test.go(TestThrottleViaGate 的 60ms 容差 → const iv = 80ms,配置与断言共用)"
+  ],
+  "interfaces_exposed": [
+    "func cloneRows(in []row) []row —— 包内。逐行新建 map 的深拷贝;nil 入参返回 nil。**不可用 slices.Clone 替代**(复制 row 结构体但 values 仍共享同一 map header)",
+    "call 的所有权契约变更:**返回的 []row 及其 values map 归调用方独占**,写它不会影响缓存条目,也不影响其他调用方。首轮的「消费者必须只读」约定已作废",
+    "Client.gate *policy.Gate —— 构造时快照 policy.Default()(design-spec 陷阱 4),替换默认闸门须在 NewWithBaseURL 之前",
+    "const topicPrefix = \"tushare.\" —— topicPrefix + apiName 构成策略主题",
+    "func callKey(params map[string]string, fields string) string —— 包内,按键名字典序拼接 `k=v&...fields=<fields>`",
+    "公开 API 签名全部未变;**给 TASK-014 的锚点不变**:配额耗尽时返回 `fmt.Errorf(\"%w: %s (本地配额预判，未发出请求)\", ErrRateLimited, apiName)`,满足 errors.Is(err, tushare.ErrRateLimited) 且 NotErrorIs ErrNoPermission"
+  ],
+  "verification": "主工作区实测,GOTOOLCHAIN=local,提交 199ed81(父 5a57ff8)。(1) go test -count=1 -v → **26 PASS / 0 SKIP / 0 FAIL**。(2) -race -count=1 → ok。(3) -cover → **95.2%**(DoD 水位 94%,首轮 94.8%,改动前基线 94.2%)。(4) 变异验证,注入前均先写下预期且与实际一致,每条对 DoD 专属守护者单独 -run:变异 A(cloneRows 改用 slices.Clone,即 DoD 明文禁止的解法)→ TestCachedRowsAreIsolatedFromCallers **3 条断言命中**;变异 B(完全不拷贝)→ **4 条断言命中**(比 A 多命中「结构体字段写入穿透」,因 slices.Clone 确实复制了 row 结构体——说明各断言独立有效);变异 M2(删 sort.Strings)→ TestCallKeyIsOrderIndependent **30/30 捕获**,而 TestCallKeyDistinguishesParams 0/30(排序守护单一归属)。(5) 2×2 闭环:M1c 归一化消费者在 (b) 下缓存仍为 NaN,退回不深拷贝则被污染成 0——用后即删的探针已清理,`ls | grep ztmp` 为 0。(6) 节流:80/80 配置 20/20 绿;70ms 削弱下 80ms 断言 10/10 红、60ms 断言 0/10 红。(7) go build ./... 与 go vet ./internal/collector/tushare/... 通过;gofmt -l 本包无输出。(8) 收尾 grep 'lastReq|minInterval' internal/collector/tushare/*.go → 无输出。(9) 既有用例未删未改:git diff client_test.go 的删除行只有 TestThrottleViaGate 内部的 2 行(MinInterval 常量化与断言强化),其余 10 条既有用例与 collector_test.go 逐字未动。(10) 调用方 ./internal/prism/... ./cmd/atlas/... ./internal/app/... 全绿。(11) scope 干净:git status 中除 internal/collector/tushare/ 外无我的改动。(12) 实验 worktree ../wt-009-exp 已拆除。"
+}

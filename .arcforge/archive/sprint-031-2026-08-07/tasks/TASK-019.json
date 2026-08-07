@@ -1,0 +1,51 @@
+{
+  "id": "TASK-019",
+  "title": "crisis 路径的 Gate 接线缺口 + 装配守护",
+  "module": "cmd/atlas",
+  "complexity": "简单",
+  "description": "dev-agent-36 在末尾清单核实中发现,并修正了原声明的方向(原记「launchd 形态下不经 loadConfigOrDefaults」——实测 10 个 plist 的 EnvironmentVariables 均未设 FRED_API_KEY,launchd 下走的恰恰是配置分支、闸门是装上的)。**真实风险方向相反且更严重**:cmd/atlas/crisis.go:140(backfill)与 :230(run)先 resolveFREDKey,**环境变量非空时在 crisis.go:106-108 提前 return、不经 loadConfigOrDefaults**;紧接着 :148/:234 构造 crisis.NewIngestor(fred.New(apiKey), yahoo.New(), st) —— **此时 Gate 未接线,yahoo.New() 按陷阱 4 快照了未接线的 policy.Default()**。:241 的 buildCrisisSender 内含 loadConfigOrDefaults,但已在构造之后,救不回来。⇒ **谁设了 FRED_API_KEY,谁的 crisis 路径就静默丢失全部限流/缓存/配额**,而 configs/config.yaml:52 与 crisis-monitor.yaml:5 都在明确邀请用户设它。**根因是结构性的**:initPolicyGate 全仓只有两个调用点——serve.go:85(TASK-011 已守护)与 export_ohlcv.go:297,而后者**藏在 loadConfigOrDefaults 函数体内** ⇒ 接线与配置加载被隐式耦合,任何跳过配置加载的路径都会静默跳过接线。这与 TASK-011 修的 serve 缺口同型,是同一族的第三条路径。\n\n**【范围扩大,qa-agent-8 发现第四条路径,2026-08-06】** `cmd/atlas/backtest.go` **全文零 Gate 接线**(`grep -c loadConfigOrDefaults|initPolicyGate` = 0),`runBacktest:69` 在 :71-73 直接构造 yahoo/eastmoney/crypto 三家,全部拿到懒构造的无账本 Gate ⇒ cache.enabled/cache.ttl/整个 collector.topics 被静默忽略。与 crisis 同类。**prism 已排除**(runPrismRefresh:171 的 loadConfigOrDefaults 在全部四家构造之前,顺序正确)。",
+  "estimated_files": 3,
+  "dependencies": [],
+  "wave": 4,
+  "context_from": [
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas"
+  ],
+  "assigned_to": "dev-agent-36",
+  "assignment_epoch": 2,
+  "coverage_floor": 74,
+  "reason_class": null,
+  "done_criteria": {
+    "functional": [
+      "crisis 的**两条**路径(:140 backfill 与 :230 run)在 collector 构造之前完成 Gate 接线,**且 FRED_API_KEY 非空时也成立**。断言方式:**直接观测接线结果**——构造后 policy.Default() 非 nil 且含配置里的主题策略,不要用「没报错」推断(陷阱 8)",
+      "**AST 守护,照 cmd/atlas/wiring_test.go 的形态**(TASK-011 产物,同包内现成):对两条路径各断言「initPolicyGate 调用存在**且**在 collector 构造之前」。**复合句的两个分句各需独立变异证据**——只删调用能证明「存在」那半,挪到构造之后才能证明「顺序」那半(TASK-011 的 W1/W2 已实证一个只检查存在性的实现会放过后者)",
+      "**空真自检**:AST 扫描类测试最易静默落空(扫不到就默默通过)。须有下界守卫(照 wiring_test.go 的 found 字段形态),并加一条变异证明它有效——把被扫函数改名让目标消失,测试须转红而非 vacuously 通过(TASK-011 的 W3)",
+      "**范围封闭要求:穷举全部 collector 构造点并逐个反向追溯**(qa-agent-8 提出方法、Leader 采纳为 criteria)。\n\n**不要只修 DoD 点名的那几处**——那样只能保证「已知路径对了」,保证不了「没有别的绕过路径」。qa-agent-8 第一轮就是这样漏掉 crisis 的:它从 `loadConfigOrDefaults` **正向**看「之后有没有构造 collector」,而 `resolveFREDKey:106-108` 的环境变量提前 return 是一条**绕过**路径,正向检查看不见。\n\n**正确方法:从每个 collector 构造点反向追溯,确认所有到达路径上都有接线。** Leader 现跑的构造点清单(`cmd/atlas/*.go` 非测试,供起点用,**dev 须独立核实完整性**——我的 grep 词表可能漏了别名导入或工厂函数):\n\n```\nbacktest.go:71/72/73        yahoo/eastmoney/crypto      ← 零接线(qa-agent-8 发现,全文 grep 计数为 0)\ncrisis.go:148               yahoo(backfill 路径)        ← FRED_API_KEY 非空时未接线\ncrisis.go:234               yahoo(run 路径)             ← 同上\ncrisis.go:255               yahoo(executeCrisisIntraday) ← **第三处,须一并核**\nexport_ohlcv.go:309/311/320 yahoo/eastmoney/crypto      ← 在 :297 initPolicyGate 之后 ✓\nserve.go:176                yahoo                       ← 在 :85 之后 ✓\ncollectors.go:37..92        六家                        ← buildCollectors,serve 路径 ✓(须确认无其它调用方)\nprism.go:158/165/191/192    四家                        ← runPrismRefresh:171 在前 ✓(qa-agent-8 已核)\n```\n\n**backtest 的影响面小于 crisis**(回测是一次性离线命令,缓存收益本就低),但既然本任务已在做装配守护,一并纳入判据接近零成本,单开任务不划算。\n\n**判据同 functional[0]:直接观测接线结果**——构造后 `policy.Default()` 非 nil 且含配置里的主题策略。**每条路径各需独立证据**,不得用一条测试覆盖多条路径后声称全覆盖。\n\n**discovery 须记录反向追溯的完整清单与逐条结论**(含判为「已正确」的那些及其理由)——这是本任务范围封闭的证据,下一个人改装配时靠它判断有没有漏。\n"
+    ],
+    "boundary": [
+      "**判据必须限于目标函数体内**,不得把别处的 initPolicyGate 计入。注意 export_ohlcv.go:297 那处在 loadConfigOrDefaults 函数体内、与 crisis.go 不同文件——**若扫描按文件则天然隔离,若按包则必须显式排除**。请构造反例验证这条边界真在守(照 TASK-011 的 R4:删掉目标函数里那处、同时在同文件另一函数加一处,测试须仍红)",
+      "**静态 AST 只能保证词法位置,不能保证执行顺序**——defer/go 闭包包裹、恒假 if、提前 return 后的死代码都能绕过(TASK-011 的 R5/R6 已实证,判为可接受)。**失败信息的措辞必须与实际保证对齐**:不要写「必须早于」(读起来像执行顺序承诺),写明保证的是词法位置。这是 TASK-011 遗留的边界声明项,本任务一并修掉",
+      "**不得顺手重构 crisis.go 的其它部分**。若选择把 initPolicyGate 从 loadConfigOrDefaults 里提出来(推荐,消除隐式耦合),须确认 export_ohlcv 与其余调用方行为不变——那是**全仓所有 loadConfigOrDefaults 调用方**的行为变更,须逐个列举确认,不能只看编译过"
+    ],
+    "error_handling": [
+      "**配置加载失败时的行为须显式决定并写进 discovery**:crisis 路径在 FRED_API_KEY 非空时原本根本不读配置,补上接线后就会读。若配置文件损坏/缺失,原先能跑的路径会不会因此挂掉?**须断言这个场景**(配置不可读 + 环境变量有效 ⇒ crisis 仍能运行,Gate 退化为无策略而非 panic 或退出)。\n\n**⚠ 本条必须是【运行期】测试(实际调用 runCrisisBackfill / runCrisisEval 两条路径),不得写成静态断言或只测 resolveFREDKey 这类叶子函数**(test-agent-16 派发前精算,Leader 采纳)。两个理由:\n\n**① 本条自身的诉求**:契约陷阱 8——否定/边界断言要**直接观测**行为,不能用间接现象推断。「不 panic」只能靠真的跑一遍来证。\n\n**② 覆盖率余量只有 6 条语句,而新增代码正落在未覆盖区**。现状精算(cmd/atlas profile):总语句 T=1299、已覆盖 C=965 = **74.29%**,floor=74.00 ⇒ **再加 6 条未覆盖语句即破线**。而要改的两个函数当前恰是低覆盖:`runCrisisBackfill`(:117,接线点 :140/:148)**60.0%**、`runCrisisEval`(:223,接线点 :230)**75.0%**,且**未覆盖块恰好就在 crisis.go:144-156**——正是 FRED-key 分支、也正是要插入 initPolicyGate 的位置。\n\n**关键机制:AST 守护不产生覆盖率。** functional[1] 要求的 AST 断言是对的(顺序属性只能这么守),但它**解析源码文本、不执行被断言的代码**,对新增接线行贡献 **0 覆盖**。⇒ 只加 AST 守护的话,新增接线行 + 配置错误处理全部落在未覆盖区,很容易超过 6 条 ⇒ **一个完全正确的实现被门禁 DENY**(与 TASK-016 那次「Dev 什么都没做错但门禁拦下」同型)。\n\n**处置口径:不放宽门禁,而是让本来就该有的运行期证据同时承担覆盖率。** 若照此做完仍破线,报给 Leader 裁定 coverage_floor,**不要自批**(dev-agent-36 在 TASK-016 立的规矩:被约束方不该自己放宽约束)。\n"
+    ],
+    "non_functional": [
+      "既有测试断言体与场景一字不改且全绿;go test -race 绿、0 SKIP;cmd/atlas 覆盖率不低于 coverage_floor=74(**报数注明口径:单包**)"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-019.json",
+  "verifier": "test-agent-16"
+}

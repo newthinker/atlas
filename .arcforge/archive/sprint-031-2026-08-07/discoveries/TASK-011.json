@@ -1,0 +1,49 @@
+{
+  "key_findings": [
+    "三个符号已从 Go 源码中完全消失：`internal/collector/cache.go` 与 `cache_test.go` 整文件删除，`cmd/atlas/serve.go` 的 `maybeCache` 删除，`collectors.go` 的 5 处包装调用改为直接注册原实例。**精确核实要用符号引用模式而非字符串匹配**：`grep NewCached` 会命中 `internal/context/news.go` 的 `NewCachedNewsProvider`（无关同前缀符号）；`grep maybeCache` 会命中若干注释里的历史沿革说明。用 `grep -E '\\bNewCached\\(|\\bmaybeCache\\(|\\bCachedCollector\\b'` 排除注释后为空。",
+    "**`cloneOHLCV` 的知识已转移到 `internal/core/types.go` 的 `OHLCV` 定义处**（约束贴在会被违反的那一侧）：写明「新增字段必须是值类型」、失效机制（`slices.Clone` 是浅元素拷贝，加了 map/slice/指针字段就静默退化且**不会有任何测试变红**）、以及需要同步修改的地方（各 collector 的 `slices.Clone` 改逐元素深拷贝）。",
+    "**正向断言的分工**（反审 A8「只删证据不算修复」）：运行期风险由 `TestBuildCollectorsRegistersUnwrappedCollectors` 守护——它断言 registry 里注册的是原始具体类型，且刻意把 `cache.Enabled` 设为 true（那正是从前触发包装的开关）；类型层面由两条编译期 var 断言钉住。",
+    "**`collector.ValuationCollector` 在仓库中不存在**（DoD functional[3] 的表述不准确）。valuation 能力的消费接口是 **`app.ValuationSource`**，buildCollectors 经 `application.SetValuationSources(valuationSourceOrNil(lixingerCollector), epsSrc)` 注入。",
+    "两条编译期断言的冗余度不同，如实记录：`_ app.ValuationSource = (*lixinger.Lixinger)(nil)` 与 `serve.go:427` 的 `valuationSourceOrNil` 返回值约束**冗余**（该 helper 改动时仍有守护，故保留）；而 `_ collector.FundamentalCollector = (*lixinger.Lixinger)(nil)` **非冗余**——`SetLixingerFallback(l *lixinger.Lixinger)` 用的是具体类型，生产代码里没有任何 lixinger→FundamentalCollector 的编译期约束。",
+    "lixinger 实例**不进 registry**（只作为 eastmoney 的 fallback 与 app 的 ValuationSource），所以「装配后从 registry 取回 lixinger 断言扩展接口」这条路走不通；`app.valuationSrc` 是私有字段无 getter，装配后也无法从外部观测。这是 DoD functional[3] 字面要求在当前封装下的实际边界。",
+    "serve 与 loadConfigOrDefaults 是**两条独立的装配路径**，各自需要独立守护：前者由本次的 AST 测试守护，后者由 TASK-006 的 TestLoadConfigOrDefaultsInitsPolicyGate 守护。两条测试的失效形态相同（装配漏了但所有既有测试照常绿），判据不同（AST 静态断言 vs 账本文件落盘）。"
+  ],
+  "decisions": [
+    {
+      "decision": "把最初写的运行期测试 TestLixingerExtensionInterfacesSurviveAssembly 改成两条编译期 var 断言。",
+      "rationale": "原测试是 `var c collector.Collector = lixinger.New(...)` 再 type assert。注入变异时发现它在「代码能编译」的前提下**恒真**——lixinger 直接实现这两个接口，经 collector.Collector 传递后动态类型不变，断言必然成功。**形式与内容不符的测试比没有更糟**：它看起来在守护运行期行为，实际什么都不防，还会让人以为这块已有覆盖。改成 var 断言后形式与内容一致（它本来就是编译期性质），并已反证有效：把 lixinger 的 FetchValuationPercentile 改名后，`collectors_test.go:204` 报接口不满足。真正的运行期风险（装配时被装饰器包住）由 TestBuildCollectorsRegistersUnwrappedCollectors 覆盖。"
+    },
+    {
+      "decision": "TestBuildCollectorsRegistersUnwrappedCollectors 断言 registry 里的**具体类型**，而非「扩展接口断言成立」。",
+      "rationale": "断言「扩展接口成立」在无装饰器时恒真（同上）；断言具体类型才能捕获「有东西包了一层」。已用变异 D1 实证：注册一个只嵌入 collector.Collector 的包装类型 → 转红并报出 `*main.mutWrap`。另加了「registry 非空」前置断言，避免装配失败时下面的循环 vacuously true。"
+    },
+    {
+      "decision": "被删的 4 个 TestMaybeCache_* 在 serve_test.go 头部的 DoD 映射注释改为指向新测试，而非直接删掉那 4 行。",
+      "rationale": "删除类任务的风险是「知识随代码消失」。头部注释保留了「这些测试为何存在、被什么承接」的线索，读到 serve_test.go 的人不必去翻 git log 才知道 TestMaybeCache_* 去哪了。桩类型 plainCollector / fundamentalCollectorStub 确认只被这 4 个测试使用，一并删除不留孤儿。"
+    },
+    {
+      "decision": "补 cmd/atlas/wiring_test.go：用 AST 断言 runServe 函数体内存在 initPolicyGate 调用且早于 buildCollectors（review_fix S1）。**生产代码零改动**。",
+      "rationale": "serve 不经 loadConfigOrDefaults（那条路径由 TASK-006 的 TestLoadConfigOrDefaultsInitsPolicyGate 守护），它在 runServe 里单独接线，而那一行**零测试守护** —— QA 变异取证：换成 `_ = log` 后 `go test ./cmd/atlas/` 仍 ok。丢失后果比配额失效更广：serve 下 cache.enabled / cache.ttl / 整个 topics 覆盖会被静默忽略。我先前以「补测试需重构 runServe 单体函数」为由认为代价高，**那个判断不完整** —— 本 Sprint 已自建 AST 扫描机制（TASK-013），用同样手法十几行就够，不需要动生产代码。"
+    },
+    {
+      "decision": "阳性对照用**内联源码字符串**而非 testdata 夹具文件。",
+      "rationale": "`parser.ParseFile` 的 src 参数原生支持内联源码，把 src 参数化即可让同一个扫描函数分别指向真实文件与夹具。这样阳性对照不引入任何新文件路径 —— 本任务 writes 只有 `./cmd/atlas`，而 Go 语义下它**不包含子目录**，新建 `cmd/atlas/testdata/` 会形成一个未被声明的包路径。dev-agent-38 的 TASK-013 正因此让门禁报了 scope 漂移（它的 testdata 子目录未登记，拦住了我 TASK-007 的 dev_done）。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/cache.go（删除）",
+    "internal/collector/cache_test.go（删除）",
+    "cmd/atlas/serve.go（删 maybeCache）",
+    "cmd/atlas/serve_test.go（删 4 个 TestMaybeCache_* 与 2 个桩类型、清理孤儿 import、更新头部映射注释）",
+    "cmd/atlas/collectors.go（5 处包装调用改直接注册）",
+    "cmd/atlas/collectors_test.go（补正向断言）",
+    "cmd/atlas/policy.go（注释里「今天 maybeCache」改为「被本 Sprint 删除的 maybeCache」）",
+    "internal/core/types.go（OHLCV 定义处加值类型约束）"
+  ],
+  "interfaces_exposed": [
+    "已移除：collector.CachedCollector 类型、collector.NewCached 构造函数、cmd/atlas 的 maybeCache 函数、collector 包的 cloneOHLCV",
+    "cmd/atlas/collectors.go 的 buildCollectors 行为变更：RegisterCollector 直接注册原实例，不再有任何装饰器包装（cache.Enabled 不再影响注册形态，缓存语义由 policy Gate 承担）",
+    "internal/core.OHLCV 新增文档约束：新增字段必须是值类型，否则须同步修改各 collector 的 slices.Clone"
+  ],
+  "verification": "cmd/atlas / internal/collector / internal/core 三包全绿；**全量 `go test ./... -race` 全绿**（DoD non_functional[0] 的核心回归证据，覆盖 internal/app 与 cmd/atlas 这两个逐包 -race 从未覆盖的并发消费方；输出中的 `ld: warning: malformed LC_DYSYMTAB` 是 macOS 链接器噪音，非测试失败）；`go build ./...` 与 `go vet ./...` 通过；**`git diff master -- go.mod go.sum` 无输出**（硬约束 C1）。【覆盖率】三包合并口径（判定线，floor=74）：**76.5% → 75.8%**；cmd/atlas 单包（观测项）：**74.4% → 74.3%**，仅降 0.1pp——低于 Leader 粗估的 73.1%，原因是删掉的 `maybeCache`（原 100% 覆盖）与其 4 个测试对分子分母的影响被新增的 TestBuildCollectorsRegistersUnwrappedCollectors（走完整 buildCollectors 装配路径）补回了大部分。【变异反证，注入前先写预期表】D1 collectors.go 用只嵌入 collector.Collector 的包装类型注册 yahoo → TestBuildCollectorsRegistersUnwrappedCollectors 红 `collectors_test.go:182`（报出 `*main.mutWrap`）；D2 lixinger 去掉 FetchFundamental → **门②编译失败**（原因是 lixinger 包内 FetchFundamentalHistory 自引用该方法，非接口约束），换为改 FetchValuationPercentile 方法名后拿到编译期断言的有效性证据（`collectors_test.go:204` 报接口不满足）；D3 删除 types.go 的约束注释 → 绿，**这是已知边界不是缺陷**：注释类知识无法被测试守护，这也正是 DoD boundary[1] 要求把它贴到「会被违反的那一侧」的原因。【gofmt】我碰过的 8 个文件全部已格式化；`gofmt -l` 另会列出 backtest_test.go / crisis_test.go / core/errors.go / collector/fundamental_test.go / collector/selector_test.go 五个文件——已逐一核实**在 master 上就未格式化且本任务改动 0 行**。 【review_fix S1】新增 6 条 AST 测试全 PASS；cmd/atlas 全量绿；`go build ./...` / `go vet ./cmd/atlas/` / gofmt 通过；覆盖率三包合并 **75.8%**（floor 74，未变）、cmd/atlas 单包 74.3%；`git status --porcelain cmd/atlas/` 只列出新文件 wiring_test.go —— **生产代码零改动**。**2×2 闭环**（注入前先写预期表，实际与预期一致）：无变异下「新增 6 条」与「旧测试集」双绿；注入 S1（删掉 serve.go 的 initPolicyGate 那行）后 **新测试失败 1 条**（`wiring_test.go:97`「runServe 函数体内没有 initPolicyGate 调用」）而 **旧测试集全绿** —— 这正是 QA 报告的缺口的直接实证。阳性对照两格齐备：TestScanWiringDetectsMissingInitCall（漏调用被检出）与 TestScanWiringDetectsWrongOrder（顺序颠倒被区分），另有 TestScanWiringIgnoresOtherFunctions 守护「判据限于 runServe 函数体」（loadConfigOrDefaults 里也有一处 initPolicyGate 调用，不得计入）。行号一律现读不写死。"
+}

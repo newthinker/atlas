@@ -1,0 +1,65 @@
+{
+  "id": "TASK-013",
+  "title": "防回潮 AST 测试",
+  "description": "写 internal/collector/nothrottle_test.go:用 AST 扫描各 collector 子包源码,断言不再存在 lastReq 等私有节流状态,防止未来有人把节流写回 client 内部、绕过 Gate(验收标准 5 / 设计 §7.4)。**方案行 3962-4050 已给出完整测试代码。本任务无生产代码。** **依赖 TASK-011 有双重理由:①语义上要等 cache.go 删除与四个 collector 改造全部落地,断言才有意义;②机制上 TASK-011/012/013 同为 ./internal/collector 包,依赖关系保证三者不同时在途,满足 validator 的 scope 互斥不变量(AD-6 同类约束)。** **先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-guard",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/collector/nothrottle_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestNoPrivateThrottleState 用 AST 解析**整棵 internal/collector 树**的生产源码(跳过 _test.go、跳过 policy/ 闸门本体、**跳过 testdata/**),断言不存在 lastReq 字段(验收标准 5)。**Leader 裁定「按全树」而非仅四个已接入的子包**(dev-agent-38 提出):防回潮的价值恰在「将来新写的 collector 别把 mu+lastReq+sleep 抄回来」,限定四包等于放过所有新增者;已实测全树当前干净(grep 生产源码无输出)。**扫描须抽成 scan(root string)**,使生产扫描与阳性对照复用同一函数",
+      "**变异验证必须内化为可重放的用例**(反审 B3):在 testdata/ 放一个故意含 lastReq 字段的假源码文件,断言扫描函数对它返回「检出」、对真实生产包返回「未检出」。理由:原表述「把 lastReq 加回去看测试是否转红」是一次性人工实验,CI 无法重放,守护测试自身得不到守护——而一个永远返回 false 的扫描函数同样能让本任务全绿"
+    ],
+    "boundary": [
+      "扫描范围只覆盖生产源码,不误报测试文件中出于验证目的出现的同名标识符"
+    ],
+    "error_handling": [
+      "被扫描目录不存在或解析失败时测试给出清晰失败信息,不 panic 不静默跳过——静默跳过的守护测试等于没有守护"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/ 全绿,不引入生产代码改动",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-011",
+    "TASK-012"
+  ],
+  "wave": 9,
+  "context_from": [
+    "TASK-007",
+    "TASK-008",
+    "TASK-009",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector"
+  ],
+  "writes": [
+    "./internal/collector"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-38",
+  "verifier": "test-agent-17",
+  "reason_class": "dod_defect",
+  "discovery": ".arcforge/discoveries/TASK-013.json",
+  "fix_items": [
+    {
+      "id": "C1",
+      "severity": "MINOR",
+      "desc": "两处过时注释(dev-agent-38 自查发现,判据=「这句话里有没有一个会变的具体事物」)。①skipDirs 注释 :44-46/:52-54 说「含一个故意语法错误的文件」「去掉后会因解析失败夹具报错」——双假,畸形夹具已改运行时生成;改为描述真实机制:去掉后 TestNoPrivateThrottleState 因检出阳性夹具而红(验证者已实测 N2 红在 :167「发现私有节流状态字段」)。②TestScanDetectsThrottleState 注释 :195-198 用一个已不存在的夹具解释「夹具不能共用 root」;保留规则、换掉论据——写为什么(一次遍历同时受多个夹具影响时失败信息会指向错误的那个),并注明该具体场景已随夹具迁移消失。不改的两处(判据负例,复核同意):带「接任务时实测」时间戳的历史陈述(是历史事实不会变假)、只举例不承担论证的跨文件指针(坏了不误导)。⇒ 判据不是「凡具体事物皆需删」,而是「具体事物若承担论证,它失效时论证就塌了」"
+    }
+  ]
+}

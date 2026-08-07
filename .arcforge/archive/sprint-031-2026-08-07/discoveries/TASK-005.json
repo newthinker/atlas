@@ -1,0 +1,42 @@
+{
+  "key_findings": [
+    "`Default()` 用 RWMutex + 双重检查做懒初始化，**永不返回 nil**：`SetDefault(nil)` 只是清空，下次 `Default()` 会重新懒构造「内置表 + 无配额账本」的 Gate。这让 broker 等边缘 CLI 路径无需接线也能安全运行（限流与合并仍生效，只是拿不到 config 覆盖与跨进程配额）。",
+    "**`Override` 全指针字段是语义要求而非风格**：0 与 false 都是合法取值（TTL:0 = 显式关掉该主题缓存，Coalesce:false = 显式关掉合并），必须用 nil 区分「未设置」与「显式设为零值」。改成零值判定（`o.TTL != nil && *o.TTL != 0`）后 TestOverrideExplicitZeroValues 转红，而方案原有的 TestOverrideAppliesOnlySetFields **仍绿**——后者只验了「未设置的字段保持不变」，验不出零值语义。",
+    "**Override 必须复制 *Quota 而非就地改**：Policy.Quota 是指针，多个主题可能引用同一实例，就地改会连带改掉别的主题的配额。已用 O2' 变异钉住。",
+    "**Override 必须清空 Domain 让 Set 重新推导**：`Lookup` 命中通配条目时返回的是该通配条目的 Domain，原样带回会让新主题继承错误的限流域（例如 `shared.*` 显式指定 Domain=custom-domain 时，`shared.endpoint` 会继承它）。",
+    "**Override 只在构造阶段调用**（config 装载时），不破坏 TASK-001 确立的「Table 构造后只读」假设。该约束写在 Override 的文档注释里——会违反它的人是写 config 热加载的人，注释贴在他会读到的地方。",
+    "Override 一个未登记主题会将其登记进表（config 可为 eastmoney 等按需加策略），但**默认仍是零策略、只有显式 Override 才登记**，约束 C6 不受影响。"
+  ],
+  "decisions": [
+    {
+      "decision": "补 TestOverrideExplicitZeroValues（DoD 未点名）。",
+      "rationale": "指针语义的立身之本。方案给的 TestOverrideAppliesOnlySetFields 只覆盖「未设置的字段保持内置值」，对「显式设为零值必须生效」无守护——O1 变异（改用零值判定）下它仍绿。两条测的是指针语义的两面，缺一不可。"
+    },
+    {
+      "decision": "补 TestOverrideCopiesQuotaNotShares 与 TestOverrideRecomputesDomain（DoD 未点名，但方案实现里有对应的两行注释）。",
+      "rationale": "方案注释写了「复制而非共享」与「清空 Domain 让 Set 重新推导」，但没有测试守护——正是本 Sprint 反复出现的「注释描述的是被守护的契约还是当前巧合」。两条都已用变异钉住（O2' / O3）。"
+    },
+    {
+      "decision": "补 TestSetDefaultNilDoesNotPanic 与 TestDefaultIsConcurrencySafe（error_handling[0]，方案测试完全未覆盖）。",
+      "rationale": "前者是「不该 panic」型，用 defer recover，且判据不止「没崩」——SetDefault(nil) 后 Default() 必须重新懒构造出**可用**的 Gate（O7 变异下转红）。后者两个判据缺一不可：-race 检出数据竞争（O6 无锁变异下报 DATA RACE），以及**所有 goroutine 拿到同一实例**（O5「每次新建」变异下 -race 不报、但单例断言转红）。"
+    },
+    {
+      "decision": "在 Override 的文档注释里写明「只应在构造阶段调用」。",
+      "rationale": "Table 是裸 map 无锁、构造后只读（TASK-001 discovery）。Override 是唯一会在运行期被误用的入口——拿它做 config 热更新会与并发读的 Lookup 竞争。按「约束贴在会被违反的那一侧」，写在 Override 处而非 Table 处。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/default.go",
+    "internal/collector/policy/default_test.go",
+    "internal/collector/policy/policy.go",
+    "internal/collector/policy/policy_test.go"
+  ],
+  "interfaces_exposed": [
+    "func Default() *Gate —— 进程内单例，**永不返回 nil**；未 SetDefault 时懒构造「内置表 + 无配额账本」的 Gate。各 collector 应在**构造函数**里取它存入私有字段",
+    "func SetDefault(g *Gate) —— 替换单例；传 nil 表示清空，下次 Default() 重新懒构造。**必须在构造任何 collector 之前调用**（TASK-006 的装配顺序依赖这一点）",
+    "type Override struct { TTL, MinInterval, Timeout, QuotaWindow *time.Duration; Coalesce *bool; QuotaLimit *int } —— **全指针**：nil = 未设置保持内置值，非 nil = 显式覆盖（含零值）",
+    "func (t *Table) Override(topic string, o Override) —— 字段级覆盖；未登记主题从零策略起步并被登记；Quota 复制而非共享；Domain 按主题名重推。**只应在构造阶段调用**（Table 构造后只读）",
+    "包级未导出：defaultMu sync.RWMutex / defaultGate *Gate"
+  ],
+  "verification": "76 个测试全 PASS 0 SKIP（TASK-001~004 的 65 + 本任务 11）；`go test -race` 全绿（3.877s）；覆盖率 **94.4%**；go build ./... / go vet / gofmt 全过；`git diff 6183aba -- gate.go gate_test.go quota*.go quota*_test.go` 无输出，未动上游产物。【变异反证 8 个，每条都过四道门（改动量非空 → 编译通过 → === RUN 数 > 0 → 断言正则核到 file:line）】O1 Override 改零值判定 → ExplicitZeroValues 红 :330，**同时对照 AppliesOnlySetFields 仍绿**（实证两条测的是指针语义的两面）；O2' 就地改共享 *Quota → CopiesQuotaNotShares 红 :400；O3 不清 Domain → RecomputesDomain 红 :419；O4 只改 Limit 时重建整个 Quota → QuotaLimitKeepsWindowAndLoc 红 :351；O5 Default 每次新建 → IsLazyAndUsesBuiltinTable 红 :30 且 IsConcurrencySafe 红 :98；O6 Default 去掉锁 → -race 检出 DATA RACE；O7 SetDefault(nil) 后不重建 → SetDefaultNilDoesNotPanic 红 :67；O8 不登记未知主题 → RegistersUnknownTopic 红 :376。另记：O2 首版注入无效（用 defer 写回，但 defer 在 p.Quota 已被重新赋值之后执行，改的是新实例而非共享实例），门①②④都放行了它——**这是第③类断裂点「语义变错」，无自动门**，靠「结果与预期不符」才发现，重做为自然形态 O2' 后才拿到真红。"
+}

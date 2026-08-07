@@ -1,0 +1,62 @@
+{
+  "id": "TASK-021",
+  "title": "补「非 policy 错误的链保留」守护:五家 collector",
+  "module": "internal/collector",
+  "complexity": "简单",
+  "description": "test-agent-17 应 Leader 在 TASK-018 派验单里下的挑战(「若你能造出一个变异让 PassesThrough 与 NonPolicyErrorsUnaffected 两条**同时绿**,那就是真缺口」)造出了对抗变异,**缺口成立**。\n\n**对抗变异**:`mapPolicyErr` 完全不动,只在**调用点**多包一层——`return nil, mapPolicyErr(err)` → `return nil, fmt.Errorf(\"yahoo: %v\", mapPolicyErr(err))`。`PassesThrough` 直测 `mapPolicyErr` 单测(函数没改⇒绿)、`NonPolicyErrorsUnaffected` 是文本包含断言(`%v` 把原文原样带过⇒绿),**而 `%v` 切断了非 policy 错误的链**——正是 TASK-018 的 `boundary[1]` 明令禁止的「上游 HTTP/解析错误映射前后 errors.Is 行为一字不变」。实测**整个 yahoo 包无一转红**。2×2 探针证明变异真实有效(非等价变异)。\n\n**逐包边界**:yahoo(8 处 %w)、lixinger(12 处 %w)**有缺口**;twelvedata 唯一的 %w 在注释里、`wrapErr` 按设计对一切断链 ⇒ **无风险面**,不纳入;tushare **已守住**——它有哨兵,那条测试天然写成 `errors.Is` 判据(`wantIs`/`wantNot`),对抗变异下 `client_test.go:114/:200/:214` 三条转红。\n\n**根因(方法学)**:两条既有断言的判据分别是「是不是同一个 error 值」与「文本里还有没有原判别词」,**两者都不看 error 链**。⇒ **有哨兵错误的包免费拿到类型级守护;无哨兵的包必须显式对某个上游可判定错误写 errors.Is/errors.As,否则「链保留」这个属性没有任何东西钉住。**\n\n**为何另开任务而非返工 TASK-018**:Leader 为补一个 discovery 字段把 018 提前转了 `accepted`(终态),`accepted → review_fix` 被写通道 DENY ⇒ 返工路径已关闭。这是 Leader 的调度失误,已记入契约。",
+  "estimated_files": 5,
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-018",
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/yahoo",
+    "./internal/collector/lixinger",
+    "./internal/collector/eastmoney",
+    "./internal/collector/crypto",
+    "./internal/collector/baostock"
+  ],
+  "writes": [
+    "./internal/collector/yahoo",
+    "./internal/collector/lixinger",
+    "./internal/collector/eastmoney",
+    "./internal/collector/crypto",
+    "./internal/collector/baostock"
+  ],
+  "assigned_to": "dev-agent-35",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "done_criteria": {
+    "functional": [
+      "**判据统一为 `errors.As(err, &syntaxErr)`(`*json.SyntaxError`)+ `not-json` 式 body**——test-agent-17 预量消解了 Leader 原文那个「或」:**两条都对但互斥,由 body 形态唯一决定**:\n\n| body 形态 | `errors.As(*json.SyntaxError)` | `errors.Is(io.ErrUnexpectedEOF)` |\n|---|---|---|\n| `not-json` 式 | **true** | false |\n| 截断式 | false | **true** |\n\n⇒ 五包里四包(yahoo/lixinger/eastmoney/baostock)统一写法。**crypto 例外见下。**\n\n**⚠ Leader 原文「各自挂在既有的『畸形 JSON』那一格上」——只对 yahoo/lixinger 成立:**\n\n| 包 | 既有可挂的格 | 处置 |\n|---|---|---|\n| yahoo / lixinger | **有**(body=`not-json`) | 直接追加断言 |\n| **eastmoney** | **没有**——既有「非 policy 错误原样透传」格用 `emptyKlineBody`,错误是 `no history for symbol: ...`,**纯 fmt.Errorf 根本没有链**(实测两个判据都 false) | **须新增一格** |\n| **baostock** | **没有**——`TestPolicyErrorsDoNotLeak` 只有「配额耗尽」「超时」两格 | **须新增一格** |\n| **crypto** | 注入点已有但需具名哨兵 | **另起一小格**(Leader 裁定,见下) |\n\n**⚠⚠ baostock 的假注入点陷阱(test-agent-17 预量发现,必读)**:`client_test.go` 的 `TestFetchDailyBadJSON` 确实用了 `not json`、**看起来正好能挂**——**但它直测 `New(url).FetchDaily(...)`,绕过 Gate 与 mapPolicyError,不在受守护路径上**。拿它充数会得到一条**永远绿**的断言(对抗变异根本动不到它)。**这与 TASK-020 的 topic 注入点是同一类问题:看起来对的注入点,不在被守护的那条路径上。**\n\n**crypto 的裁定(Leader)**:注入点已存在且已在用——`countingProvider` 有 `err` 字段,`gate_test.go:447` 的 `TestErrorIsNotCached` 正在用它;实测 `countingProvider{err: 自定义哨兵}` ⇒ `errors.Is(err, 哨兵)=true`,**不必新加夹具**。唯一障碍是该测试用**内联** `errors.New(\"upstream down\")`、写 `errors.Is` 需具名哨兵。**裁定:另起一小格 + 包级具名哨兵 var,不改既有测试**——与 boundary[2]「既有测试断言体一字不改,只追加」一致。crypto 的链来自 `crypto.go:203 all providers failed for %s: %w`,**没有解码路径,不适用 `errors.As(*json.SyntaxError)`**。\n\n**预量已跑完三包 2×2(锚 `f6a78af`,隔离 worktree)**,对抗变异统一形态(调用点 `%v` 多包一层、不动映射函数):\n\n| 包 | 格A 无变异 | 格B 变异后 | 格C 既有全套 |\n|---|---|---|---|\n| eastmoney | PASS | **FAIL** `链被切断: eastmoney: decoding response: invalid character ...` | **全绿** |\n| baostock | PASS | **FAIL** `链被切断: baostock: baostock: daily ...: decode: ...` | **全绿** |\n| crypto | PASS | **FAIL** `链被切断: crypto: all providers failed for BTCUSDT: ...` | **全绿** |\n\n**格C 全绿独立复现了 test-agent-16 的横向结论**——三包确实全缺。三条候选断言均**先在基线确认为真再注入**(即 boundary[0] 那条纪律)。\n",
+      "**逐包现读判据,不要照搬——本条保留,即使 functional[0] 已把两包统一成 `errors.As`**(test-agent-17 明确建议保留,Leader 采纳)。\n\n**保留理由(它的原话)**:「它记的是**为什么必须逐包现读**,而不是某个具体 API 的选择。改成 `errors.As` 只是让这次恰好不用面对差异,不代表下次不会。**我踩的那个坑,价值在判据不在结论。**」\n\n**被记录的坑**:test-agent-17 的 lixinger 探针首版照搬 yahoo 的 `io.ErrUnexpectedEOF`,**两格都红**——断言在基线就不成立。**若只看「变异后转红」,就会把「探针写错了」误报成「缺口已证实」**。根因是两包解码方式不同:yahoo 用 `json.Decoder.Decode`、lixinger 用 `json.Unmarshal`,对同一畸形输入返回的错误类型不同。\n\n⇒ **动手前逐包现读:本包用什么解码、对本测试用的那个 body 实际返回什么错误类型。** 这与契约教训 23(照搬形态时被照搬那侧的前提未必在这边成立)同源,而这次的载体是**验证工具本身**——探针错了会同时污染判定的两个方向。\n",
+      "**变异判据**:在**调用点**用 `%v` 多包一层(`fmt.Errorf(\"<pkg>: %v\", mapPolicyErr(err))`),**不动 `mapPolicyErr` 本身**。新加的断言须转红,而 `PassesThrough` 与 `NonPolicyErrorsUnaffected` 两条**仍绿**——那正是本任务存在的理由(它们守不住这一面)。",
+      "**范围为五家(test-agent-16 横向排查后扩,2026-08-07)**:除 yahoo/lixinger 外,**eastmoney / crypto / baostock 三家同样真缺**。判定证据(每家两跑:移走探针跑既有测试看缺不缺 → 放回探针确认变异真切断了链):\n\n| 包 | 上游错误链 | 注入调用点 `%v` 后 | 判定 |\n|---|---|---|---|\n| eastmoney | `decoding response: %w` | 既有**全绿**、探针**红** | 真缺 |\n| crypto | `all providers failed for %s: %w` | 既有**全绿**、探针**红** | 真缺 |\n| baostock | `daily %s: decode: %w` | 既有**全绿**、探针**红** | 真缺 |\n\n**「既有全绿」是缺口证据,「探针红」排除了哑弹**——只跑前者无法区分「无守护」与「变异没打中」。\n\n五家完全同族:`mapPolicyError` 对非 policy 错误 `return err` 原样返回(保留链),而**调用点多包一层 `%v` 就把链切了,映射函数一个字不动 ⇒ 直测它的单测照常绿**。\n\n**⚠ crypto 的判据与其余四家不同,必须现读不得照搬**:它的 `gate_test` 用 `countingProvider` 而非 `httptest`,**根本没有 JSON 解码那条路**——上游错误由 `fetchHistoryFromProviders` 用 `%w` 包 `lastErr` 产生。⇒ **crypto 须用自定义哨兵**(`errors.New` 造一个,由 fake provider 返回),照搬 `io.ErrUnexpectedEOF` 会在基线就红。eastmoney/baostock 走 `json.NewDecoder(...).Decode` ⇒ 与 yahoo 同款 `errors.As(*json.SyntaxError)` 或 `io.ErrUnexpectedEOF`(**逐包现读实测,别推断**)。\n\n**规格后到,不计任何返工额度**:这个变异形态是 test-agent-17 在 TASK-018 上才造出来的,**比这三家的验收(015/016/017)晚**——三家的守护缺失不是当时验收的疏漏,与 TASK-007 F1 的 `rework_accounting` 同口径。\n",
+      "**⚠ 三处结构差异,会让「统一形态」的指令在部分包上失效(dev-agent-35 独立预备发现,与 test-agent-17 预量互补)**:\n\n**① crypto 没有 `mapPolicy*` 函数——变异注入点不同。** 它是**内联**的:`FetchHistory` 里一个 `if errors.Is(policy.ErrQuotaExceeded) || errors.Is(policy.ErrTimeout)` 块 + 兜底 `return nil, err`(`crypto.go:159-163`)。⇒ 另四家的变异注入点是调用点 `return nil, mapPolicyErr(err)`,**crypto 的注入点是那条裸 `return nil, err`**(改成 `%v` 包一层即断链)。**DoD 若统一写「注入在 mapPolicy 调用点」,crypto 无处可注。**\n\n注意区分两类注入点:**探针注入点**(造上游错误,crypto 用 `countingProvider{err:哨兵}`)与**变异注入点**(切断链,crypto 用那条裸 return)——两者都需要,不是一回事。\n\n**② 两处既有格根本到不了 mapper——比 body 选错更早一层:**\n- **baostock** `TestFetchDailyBadJSON` 调的是 **`FetchDaily`**(被 Gate 包在里面的**内层 fn**),**不经 `FetchHistory`** ⇒ 一次都不会经过 `mapPolicyError`;\n- **eastmoney** 的畸形 JSON 格在 **`FetchQuote`** 上,而按 TASK-015 的边界裁定**只有 `FetchHistory` 经 Gate**,`FetchQuote` 压根不进闸门。\n\n⇒ **这两格作为「链保留」探针是无效的——不是断言写错,是路径上没有被测对象。** 必须新写走 `FetchHistory` 的格,不能复用既有格。\n\n**这与 TASK-020 的 topic 注入点、TASK-007 F2 的「第二个 symbol 在没设 TTL 的用例里」是同一族**:**「包里已经有一个相关测试」不等于「它经过了你要守的那段代码」。**\n\n**③ 判据与 body 是配套的,不能分开写**(dev-35 实测 `encoding/json` 行为,与 test-agent-17 预量一致):\n\n| body 形态 | `errors.As(*json.SyntaxError)` | `errors.Is(io.ErrUnexpectedEOF)` |\n|---|---|---|\n| 非法字符(`not json`/`{not json`/`not-json`) | **true** | false |\n| 截断但前缀合法(`{\"a\":`) | false | **true** |\n| 空 body | false | false(是 `io.EOF`) |\n\n**五包既有的畸形 JSON body 全部是非法字符式**(yahoo `not-json`/`{not valid json`、lixinger `not-json`、eastmoney `{not json`、baostock `not json`)⇒ **全部落在 `*json.SyntaxError`**。**要用 `io.ErrUnexpectedEOF` 就必须同时改成截断 body,二者是一套。**\n\n**这就是 test-agent-17 在 lixinger 踩那一下的完整解释,而同一个坑在另外四包也全都在等着**——只要沿用既有 body 又照搬 `io.ErrUnexpectedEOF` 就会撞。\n\n**④ 链在今天五家都是通的**(现读):yahoo/eastmoney `decoding response: %w`、baostock `baostock: daily %s: decode: %w`、lixinger `lixinger: decode envelope: %w`、crypto `fetchHistoryFromProviders` 用 `%w` 包 `lastErr`(`crypto.go:130`)。**所以缺的确实只是守护,不是实现。**\n"
+    ],
+    "boundary": [
+      "**探针也是断言,也得先在基线上验证它为真**(test-agent-17 从踩坑里提炼,Leader 采纳为硬要求):写下任何新断言后,**先在无变异的基线上确认它通过**,再注入变异。否则「变异后转红」可能只是断言本身写错了。这与「照搬形态时被照搬那侧的前提未必在这边成立」是同一母题(契约教训 23)。",
+      "**不得改动生产代码**。实现是对的——交付并没有在调用点多包一层,缺的只是守护。若发现实现真有问题,报给 Leader 另行处置。",
+      "**既有测试断言体与场景一字不改**,只**追加**断言。twelvedata 与 tushare **不在本任务范围**(前者无风险面、后者已守住),不要顺手动它们。"
+    ],
+    "error_handling": [
+      "**新断言必须锚定一个【本包真实会产生】的上游可判定错误**,不能为了可断言而引入人造错误类型。yahoo 与 lixinger 的判据不同(见 functional[0]/[1])正是因为它们的 JSON 解码方式不同——**逐包现读确认,不要照搬**。\n\n**【Leader 于派验时订正,dev-agent-35 两次报过】** 本条原文「yahoo 与 lixinger 的判据不同」是 `functional[0]` **统一成 `errors.As` 之前**的表述,**现已作废**——两家同款(`not-json` body → `*json.SyntaxError`)。**真正不同的是 crypto**(无解码路径,用包级具名哨兵由 fake provider 返回)。**验证者按字面核会得到假 FAIL,请按本订正判。** 同批订正:`non_functional[0]` 的「两包」已改为「五包」(`packages` 字段是五个,以它为准)。\n\n**crypto 哨兵与本条「不得为可断言而引入人造错误类型」的张力,Leader 裁定为可接受**:哨兵是 `errors.New` 的普通 error 而非新类型,且被守护的属性(调用点是否保链)与错误类型无关。dev-agent-35 提的可选加强(让 fake provider 返回真实 `*json.SyntaxError`,生产上 okx/coingecko 的 decode 确实产生它)**是加强不是缺陷,本 Sprint 不做**,登记为后续项。"
+    ],
+    "non_functional": [
+      "**五包** `go test -race` 绿、0 SKIP;覆盖率不低于既有水位(**注明口径:单包**);既有测试零改动(只追加断言)。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-021.json",
+  "verifier": "test-agent-17"
+}

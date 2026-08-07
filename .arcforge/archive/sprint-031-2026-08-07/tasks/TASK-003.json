@@ -1,0 +1,75 @@
+{
+  "id": "TASK-003",
+  "title": "QuotaStore 接口 + 内存实现 + Gate 接线",
+  "description": "新建 quota.go(ErrQuotaExceeded / QuotaStore 接口 / windowStart / take 纯逻辑 / MemStore),并把配额预判接进 Gate:New 签名变更为 New(t *Table, q QuotaStore, opts ...Option),takeQuota 桩位落地实现,同步改 gate_test.go 的 newTestGate helper 跟随新签名。**方案行 1018-1391 已给出完整实现与测试代码。** 计数时机是本任务的核心语义:超额请求在发出前被拦下且不计数,已发出但失败的请求必须计数(服务端已计数)。账本异常一律 fail-open(放行+告警)。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-policy",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/collector/policy/quota.go",
+    "internal/collector/policy/quota_test.go",
+    "internal/collector/policy/gate.go",
+    "internal/collector/policy/gate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "windowStart 对 Window>=24h 按 Quota.Loc 自然日对齐(同一自然日任意时刻同窗口,跨日换窗口);Window<24h 按 UTC 截断到窗口整数倍",
+      "MemStore.Take 放行到 Limit 为止,第 Limit+1 次返回 (false,nil);窗口翻篇后计数归零;不同主题账本互相隔离",
+      "Gate 在配额用尽时返回 ErrQuotaExceeded 且 fn 一次都不被调用——请求必须在发出前被拦下",
+      "New 签名变更为 New(t *Table, q QuotaStore, opts ...Option),gate_test.go 的 newTestGate 已跟随更新,TASK-002 的全部 Gate 用例保持全绿"
+    ],
+    "boundary": [
+      "被拒的请求不计数(Limit=3 时第 4 次被拒后 Count 仍为 3);QuotaStore 为 nil 时一律放行",
+      "fn 已执行但返回错误的请求必须计数——请求已发出服务端已计数,本地账本须同步",
+      "**配额在执行链中的位置必须被钉死**(反审 A2/A3,两条都要有测试):①缓存命中不消耗配额——TTL 命中时 Take 不被调用(否则 daily_basic 的 5 次/天会被缓存命中吃掉,逻辑上只发 2 次 HTTP 却报配额耗尽,与设计 §4.4「未发出的请求不计数」直接冲突);②Coalesce 合并的 N 个并发同 key 请求只消耗 1 次配额——即 quota 必须在 singleflight 内侧(否则 errgroup 并发下 3 个 waiter 一次吃掉 3 次配额,5 次/天一轮见底、降级链无谓触发,而 HTTP 只发了 1 次)。**另补一条否定断言：未登记主题不得触达配额记账**(test-agent-17 在 TASK-002 验证中的前瞻发现)——G8 变异(删掉 fetch 里未登记主题的直通短路 `if !ok { return fn() }`)在 takeQuota 还是空桩时是**等价变异体**(零值 Policy 让后续步骤全部短路,36 测试含 -race 全绿);但接入真实 QuotaStore 后它不再等价:未登记主题会被计入配额,**违反约束 C6**(六家 collector 行为零变更),而既有的 TestGateUnregisteredTopicPassesThrough 测不出(它只断言 fn 调用次数与耗时)。⇒ 用可观测的假 QuotaStore 断言未登记主题的 Take 调用次数为 0"
+    ],
+    "error_handling": [
+      "QuotaStore.Take 返回 err 时 Gate 必须 fail-open:放行全部请求且经 WithWarn 回调上报该 err,绝不阻断降级链(约束 C7);未注入 WithWarn 时 fail-open 路径不得 panic(New 须给 warn 兜底空实现)"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/policy/ -race 全包全绿(含 TASK-001/002 既有用例)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/policy"
+  ],
+  "writes": [
+    "./internal/collector/policy"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:18Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verifier": "test-agent-17",
+  "reject_reason": "13 项 DoD 全部有有效守护,质量整体很高(50 测试全 PASS 0 SKIP、-race 绿、覆盖率 98.3% 且 quota.go 全函数 100%、17 包回归绿、scope 干净、三条否定断言都用了可观测假账本而非看计数值、位置契约三个方向 Q1/Q2/Q8 都有独立守护、另主动补了两条不可达错误分支测试)。判 rejected 集中在一件事:**Dev 把两次 panic 当成了断言捕获**,由此产生一个真实的测试健壮性缺陷和两处不准确的覆盖声明。(R1 MAJOR)TestWindowStartNilLocUsesUTC(quota_test.go:110)缺 recover:quota.go 注释明写「Loc 为 nil 缺时区不该 panic」,但测试只断言返回值、不断言「不 panic」。注入 Q10(删掉 windowStart 的 loc==nil 兜底)后是**裸 panic 中断整个测试二进制**,实测 go test -v 的 PASS 数从 **50 降到 38——12 个测试根本没跑到**,它们各自守护的 DoD 在那次运行中完全失去检验(守卫在,但它倒下时会带倒一片)。同文件 TestFailOpenWithoutWarnDoesNotPanic(:321)的写法是正确的(defer recover + t.Fatalf),实测 Q7 转红时是清晰的断言 :324 且不中断后续测试——直接对齐即可,修复 4 行。(R2 MAJOR)boundary[2]③ 的覆盖声明不准确:Dev 报 G8+ → quota_test.go:289,实测那是 **nil 指针解引用 panic**(删掉 takeQuota 的 p.Quota==nil 后 *p.Quota 解引用空指针,堆栈落在 gate.go:308),:289 只是 panic 堆栈里的调用点行号而非断言输出。G8+ 证明的是「删掉 nil 检查会崩」,不是「未登记主题会被计入配额」,且该形态会让所有 Quota 为 nil 的主题崩溃、不是悄悄触达配额的失效形态。**G8+ 不能作为该 DoD 的证据**。我另造 Q13(把 fetch 里 if !ok {return fn()} 换成 p = Policy{Quota: &Quota{Limit:100,Window:24h,Loc:UTC}},即给未登记主题配上带 Quota 的兜底策略)编译通过且拿到真正的断言红 :289「未登记主题不得触达配额记账(约束 C6): Take 调用 3 次 [eastmoney.kline akshare.valuation crypto.ticker], want 0」——该测试确实有守护价值,守的是「将来有人给未登记主题配默认配额策略」这类形态,**不是 G8**。建议在测试注释里写明这一点,避免下一位读者重走我踩过的推理链。另据实记录三件事:(1)**我的 G8 前瞻确实被推翻**,独立复现证实 Dev 是对的——G8 定向与全量均绿,断裂点在 gate.go:308 的 p.Quota==nil 第二道短路;我补的对照(仅删第二道短路不删 G8)也是绿,说明**两道短路各自独立充分**,不是「第二道掩盖了第一道」。(2)Q16(删 g.quota==nil 短路)也是 panic 型,但 TestGateWithoutQuotaStoreAllows 的 DoD 是「一律放行」而非「不 panic」,panic 只是附带后果,**不作为缺陷**;R1 的问题在于测试的设计意图(注释明写不该 panic)与其断言不匹配。(3)我自己造了一个无效变异:最初的 Q17 只删了注释、语义未变,门①(git diff --numstat 非空)放行了它因为注释也算改动——**diff 非空只证明字节变了不证明语义变了**,这是本 Sprint 第三类变异无效形态(前两类:表达式静默失配、改坏代码致编译失败);重做为 Q17b(takeQuota 挪到 fn 成功之后)后拿到断言红 :208。详见 .arcforge/docs/04-test/TASK-003-verification.md",
+  "reason_class": "task_defect",
+  "rework_count": 1,
+  "fix_items": [
+    {
+      "id": "R1",
+      "severity": "MAJOR",
+      "desc": "TestWindowStartNilLocUsesUTC 缺 defer recover()。quota.go 注释明写「缺时区不该 panic」,但该测试只断言返回值、不断言「不 panic」。注入 Q10(删 Loc 兜底)后是**裸 panic 中断整个测试二进制**:正常 50 个 PASS,注入后仅 38 个——**12 个测试根本没跑到**,它们守护的 DoD 在那次运行中完全失去检验。守卫在,但它倒下时会带倒一片。修:加 4 行 defer recover(),对齐同文件里已写对的 TestFailOpenWithoutWarnDoesNotPanic(:321)——那条实测 Q7 转红时是清晰断言 :324 且不中断后续测试"
+    },
+    {
+      "id": "R2",
+      "severity": "MINOR",
+      "desc": "G8+ 组合变异不能作为 TestUnregisteredTopicDoesNotTouchQuota 的证据。你报的 :289 实际是 **nil 指针解引用 panic 堆栈里的调用点行号**(删掉 p.Quota==nil 后 *p.Quota 解引用空指针),不是断言输出;且该形态会让所有 Quota 为 nil 的主题崩溃,不是「悄悄触达配额」的失效形态。验证者另造 Q13(给未登记主题配带 Quota 的兜底策略,编译通过不 panic)才拿到真实断言红 :289「Take 调用 3 次 [eastmoney.kline akshare.valuation crypto.ticker], want 0」。修:改用 Q13 形态做自证,并在测试注释里写明**本测试守护的是「将来有人给未登记主题配默认配额策略」,不守护 G8**——G8 已由 gate.go:308 的第二道短路独立充分地挡住(验证者补的对照:仅删该短路、不删 G8,同样不触达配额记账,两道短路各自独立充分)"
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "id": "TASK-011",
+  "title": "删除 CachedCollector 与 maybeCache",
+  "description": "拆掉装饰器层:删 internal/collector/cache.go 与 cache_test.go,删 cmd/atlas/serve.go 的 maybeCache 与 collectors.go 的包装,删 serve_test.go 的 TestMaybeCache_* 及随之无用的桩类型。缓存能力已由 TASK-007~010 在各 collector 的 HTTP 调用处接管,装饰器不再有存在理由(设计 §3.5)。**方案行 3455-3535 给出了逐步骤指引。** **调度纪律:本任务与 TASK-012 同为 ./internal/collector 包,派发前必须确认 TASK-012 不在途(AD-6 同类约束),否则 validator 的 scope 互斥校验会失败。** coverage_floor=74 是 cmd/atlas 既有历史水位(AD-4);删测试可能小幅拉低,若跌破 74 请提问不要自行下调。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "cmd-assembly",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/cache.go",
+    "internal/collector/cache_test.go",
+    "cmd/atlas/serve.go",
+    "cmd/atlas/collectors.go",
+    "cmd/atlas/serve_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "collector.CachedCollector / collector.NewCached / cmd/atlas 的 maybeCache 三个符号在仓库中完全消失,grep 核实无残留引用",
+      "cmd/atlas/collectors.go 不再用 maybeCache 包装任何 collector,直接返回原实例",
+      "cache.go 与 cache_test.go 已删除,serve_test.go 中 TestMaybeCache_* 及仅为其存在的桩类型一并删除(不留孤儿代码)",
+      "**必须补一条正向断言:装配完成后各 collector 的扩展接口 type assertion 成立**(反审 A8)——在装配路径上断言 lixinger 实例可被断言为 FundamentalCollector / ValuationCollector。理由:验收标准 6 与设计 §1.3 的诉求是「扩展接口不再被装饰器遮蔽」,而本任务恰好删掉了唯一覆盖「包装会遮蔽 FundamentalCollector」的 TestMaybeCache_* 测试。只删证据不算修复"
+    ],
+    "boundary": [
+      "collector.cache.enabled=false 的既有语义由 Table.DisableTTL 承接,不因删除装饰器而丢失(TASK-006 的 TestInitPolicyGateDisabledCacheStillThrottles 保持全绿)",
+      "**删除 cloneOHLCV 时必须把它注释里的知识转移出去,不能随函数一起消失**(dev-agent-35 发现的既有回归):cache.go:128-129 原注释写明「OHLCV is a flat value type, so a shallow element copy is a deep copy」——**浅元素拷贝等于深拷贝,当且仅当元素是 flat value type**。这个前提条件已在契约总表迁移时丢失过一次,导致 TASK-007~010 的 clone 指引一度不带限定。删除时须核实:各 collector 在 Fetch 之后的深拷贝对**其各自的元素类型**确实成立(OHLCV 是 flat value 故 slices.Clone 足够;tushare 的 row 含 map 字段则不足够),并确认 design-spec 契约总表 §T2 的限定表述仍在。**约束必须贴在会被违反的那一侧**(dev-agent-36 建议):在 internal/core/types.go 的 OHLCV 定义处加一句「新增字段必须是值类型,否则同步修改 collector 侧的深拷贝」——注释只写在 cache.go 里,改 types.go 的人根本看不到。破坏链很平常:给 OHLCV 加一个 Adjustments []float64 之类的字段,深拷贝立刻退化成浅拷贝且**不会有任何测试变红**(实测 cloneOHLCV 覆盖率 80%,未覆盖的正是 nil 入参路径;值路径的测试也察觉不到共享)"
+    ],
+    "error_handling": [
+      "go build ./... && go vet ./... 通过,无未使用 import/变量等因删除产生的孤儿"
+    ],
+    "non_functional": [
+      {
+        "desc": "**go test ./... -race 全量全绿**(反审 A11:Gate 是被 internal/app 的 errgroup 并发消费的进程内单例,而逐包 -race 从未覆盖 internal/app 与 cmd/atlas 这两个真正的并发消费方)——这是装饰器移除后的核心回归证据",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**git diff master -- go.mod go.sum 无输出**(反审 A4:Global Constraints 第 1 条「零新增第三方依赖」是硬约束却无任何 DoD 承接;本次有两个高诱惑点——文件锁 gofrs/flock 与 glob 匹配 gobwas/glob,加了也不会有任何门禁报警)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**覆盖率按三包合并口径判定**(与门禁 -coverpkg 一致,floor=74):go test ./internal/collector ./cmd/atlas ./internal/core -coverpkg=<三包> 的 total 不低于 74%。**口径说明(test-agent-16 在派发前发现门禁与 DoD 分叉)**:本任务**主动删除已被覆盖的代码**(maybeCache 函数 + serve_test.go 的 4 个 TestMaybeCache_*,后者独占约 5% 语句),删除已覆盖代码会把低于 100% 的总覆盖率**往下拉**——这是数学必然,不是质量下降。AD-4 取 74 是「既有历史水位」,而历史水位对「主动删代码」的任务不适用。**故不再用 cmd/atlas 单包口径判定**(实测 74.4%,删除后粗估 73.1%,余量仅 0.4pp,会让一个正确实现被判不过)。**但单包数值仍须记录**:Dev 在 discovery 里报告删除前后 cmd/atlas 单包覆盖率及变化原因,作为观测项而非判定线",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007",
+    "TASK-008",
+    "TASK-009",
+    "TASK-010"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-007",
+    "TASK-008",
+    "TASK-009",
+    "TASK-010"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector",
+    "./cmd/atlas",
+    "./internal/core"
+  ],
+  "coverage_floor": 74,
+  "writes": [
+    "./cmd/atlas"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "verifier": "test-agent-16",
+  "reason_class": "task_defect",
+  "fix_items": [
+    {
+      "id": "S1",
+      "severity": "MAJOR",
+      "desc": "serve.go:85 的 initPolicyGate(cfg, log) 接线零测试守护。QA 变异取证:换成 _ = log 后 go test ./cmd/atlas/ 仍 ok。丢失后果比配额失效更广——serve 下 cache.enabled / cache.ttl / 整个 topics 覆盖会被静默忽略。**Leader 先前以「补测试需重构 runServe 单体函数」为由不返工,该理由不完整**(QA 反驳成立):本 Sprint 已自建 AST 扫描机制(internal/collector/nothrottle_test.go),用同样手法断言 runServe 函数体内存在 initPolicyGate 调用是十几行的事,**不需要动生产代码**。修:在 cmd/atlas 加一条 AST 测试,解析 serve.go、定位 runServe 函数体、断言其中存在对 initPolicyGate 的调用,且该调用出现在任何 collector 构造之前(可参照 TASK-006 已有的接线顺序检查思路,但那次是按函数体比较、避免了 prism.go 的误报,见其 discovery)。**自证要求**:注入变异(删掉 serve.go:85 那行)确认新测试转红,并做 2x2 闭环(旧测试集在同变异下全绿)。参照 TASK-013 的 AST 实现:扫描函数抽出、行号现读不写死、阳性对照与阴性测试两格缺一不可"
+    }
+  ]
+}

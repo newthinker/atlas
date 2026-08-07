@@ -1,0 +1,58 @@
+{
+  "id": "TASK-014",
+  "title": "prism 配额降级链集成回归",
+  "description": "写 internal/prism/quota_degrade_test.go:验证 tushare 本地配额撞墙时,prism 的降级链行为与限频撞墙完全一致——配额错误在 HTTP 发出前就被拦下,且满足 errors.Is(err, ErrRateLimited) 的临时性判定(设计 §7.5/§7.6、验收标准 4)。**方案行 4051-4163 已给出完整测试代码,复用 refresh_test.go 里既有的 newFakeStore/akCfg/aStockInst/fakeAkshare/fakeLix/fakeUS/fakeEdgar 桩。** **本任务无生产代码,且 internal/prism/refresh.go 必须零改动(约束 C2 / 验收标准 1)——如果为了让测试通过需要改 refresh.go,那说明 TASK-009 的错误映射没做对,应提问而不是改 refresh.go。** **先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "prism-regression",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/quota_degrade_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "TestRefreshTushareLocalQuotaBlocksBeforeHTTP:本地配额耗尽时 refresh 流程中 tushare 的 HTTP 请求一次都不发出,配额在发请求前拦截。**⚠ 方案给的测试有 bug,不要照抄**(dev-agent-36 在 TASK-009 已被同一处坑到):方案行 4143 写 `Quota{Limit: 0}` 期待配额立即耗尽,但 policy 包 quota.go 的判定是 `if q.Limit > 0 && e.Count >= q.Limit` —— **`Limit <= 0` 的语义是「不设上限」**(TASK-003 的决策,方案写于其定稿之前、语义后来漂移而方案没跟着改)。**本任务的后果比 TASK-009 更糟**:TestQuotaErrorSatisfiesRateLimitedAssertion 的 httptest handler 里是 `t.Error(\\\"配额已满时不应发出请求\\\")`,照抄会**真的发出请求**并触发那个 t.Error,表现为一个看似「实现有问题」的失败。修法:`Limit: 1` + 先成功消耗一次,第二次才走到配额预判",
+      "TestQuotaErrorSatisfiesRateLimitedAssertion:配额撞墙产生的错误满足 prism 降级链所依赖的 errors.Is(err, tushare.ErrRateLimited) 判定(验收标准 4 的 prism 侧)",
+      "配额撞墙后降级链继续走向下一个数据源,与限频撞墙的行为路径一致,不被当成永久错误中断"
+    ],
+    "boundary": [
+      "配额未耗尽时 refresh 行为与改造前完全一致,既有 prism 测试全部保持通过"
+    ],
+    "error_handling": [
+      "policy 包的 ErrQuotaExceeded 不出现在 prism 层可见的错误链上(约束 C2 错误不外泄)"
+    ],
+    "non_functional": [
+      {
+        "desc": "internal/prism/refresh.go 零改动:git diff --stat master -- internal/prism/refresh.go 无输出(验收标准 1)",
+        "verify_by": "test"
+      },
+      {
+        "desc": "go test ./internal/prism/ -race 全绿,覆盖率不低于既有水位 94%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-009"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-003",
+    "TASK-009"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/prism"
+  ],
+  "writes": [
+    "./internal/prism"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-36",
+  "discovery": ".arcforge/discoveries/TASK-014.json",
+  "verifier": "test-agent-17"
+}

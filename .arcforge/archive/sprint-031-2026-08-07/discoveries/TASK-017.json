@@ -1,0 +1,45 @@
+{
+  "key_findings": [
+    "**baostock 与 eastmoney 不同构，不能照搬**：`FetchHistory` 是薄壳（interval 校验 + 转发 `FetchDaily`），没有 fallback；而 **`FetchQuote` 也调 `FetchDaily`**（由最近日线派生报价）。故 Fetch 只包 `FetchHistory`，`FetchQuote` 不经 Gate——与被删的 CachedCollector 语义一致（原注释：FetchQuote is intentionally not cached (real-time freshness)）。若包在 `FetchDaily` 内核上，quote 会连带走缓存，那是扩大范围。",
+    "主题常量 `baostock.daily`，经内置表的 `baostock.*` 通配命中（TASK-015 已登记，本任务未动 policy 包）。",
+    "**本包没有「HTTP 200 但响应体表示失败」的形态**：`FetchDaily` 对空数组返回空切片 + nil error，业务失败只经 HTTP 状态码表达。故陷阱 14 的「校验必须留在 fn 内部」在此无对应风险面——**没有硬造测试**，写进注释说明（一条永远绿的测试比一条注释更糟，它占着「已守护」的名分）。「错误不写缓存」这一面仍由 TestErrorIsNotCached（桥 5xx）守护。",
+    "**本包没有哨兵错误**（A 股行情降级链第三跳，上层失败即整跳跳过、不区分错误类型），故 policy 错误按 DoD 的第二选项「包一层本包前缀」处理，**并断链**。",
+    "⚠ **「包一层本包前缀」若用 `%w` 实现是不够的**：变异 B8 实证——`fmt.Errorf(\"baostock: ...: %w\", err)` 让消息变了但 `errors.Is(err, policy.ErrQuotaExceeded)` **仍然成立**，policy 错误照样出现在调用方可见的错误链上。所以 mapPolicyError 不用 %w，只保留可读消息。测试判据也据此选的是 `errors.Is` 不成立，而非检查消息文本——只查文本会被 %w 写法骗过。",
+    "内置表 `baostock.*` 的「MinInterval==0 且 Quota==nil」这条断言**无法在本任务内用变异验证**：要造该变异需改 `internal/collector/policy`，而它不在本任务 packages 内。断言本身有效（TASK-015 的变异 E7 在 policy 侧验过同型），此处如实记录该验证边界。",
+    "**缓存键的时间精度是双向约束**：聚合度不足 → 生产命中率恒为零（**静默的错**：不报错、不出错数据、返回值完全正确，只有生产路径才暴露）；粒度过粗 → 不同区间串槽返回错数据（**吵闹的错**）。测试写法上不字面用两次 `time.Now()`（跨分钟边界偶发假红），取 `time.Now().Truncate(time.Minute).Add(20*time.Second)` 作基准，两个偏移落在确定位置。"
+  ],
+  "decisions": [
+    {
+      "decision": "缓存键**不含 interval**（DoD functional[1] 字面要求 symbol/区间/interval 三者）。",
+      "rationale": "分两部分说明。**为什么原判据不适用**：DoD 的措辞是「覆盖全部**影响结果**的参数」，而本包 `FetchHistory` 只接受 \"\" 与 \"1d\"、二者取到同一份日线，其余值在进 Gate **之前**就被 interval 校验拒掉 ⇒ interval 不影响结果，放进键只会让两个等价调用各占一个槽。**替代方案基于什么语义**：桥只提供日线（`baostock: interval %q not supported (daily only)`），这是本包的既有约束，不是我引入的。已补 TestIntervalDoesNotSplitSlot 守护这个决定，并在其注释里写明失效条件——**若将来桥支持了别的粒度，该测试会因两次调用返回不同数据而失去意义，那时必须把 interval 加进键**。变异 B4（把 interval 放进键）实证该测试有效。"
+    },
+    {
+      "decision": "mapPolicyError 断链而非 %w 包装，且映射后的消息显式标注「临时性」。",
+      "rationale": "断链的理由见 key_findings（%w 挡不住 errors.Is）。标注临时性是因为配额与超时都是窗口过后/下次调用即可自愈的错误——措辞若暗示永久失败，运维会照着去改配置，而问题只是要等窗口（tushare 的注释里写过同一件事：绝不可映射成 ErrNoPermission）。非 policy 错误原样返回，保留 FetchDaily 的原始错误链。"
+    },
+    {
+      "decision": "TestTopicDomainMatchesBuiltinTable 只断言**域段**与 `Policy.Domain`，不针对接口段。",
+      "rationale": "三家均为通配登记（`<域>.*`），Lookup 的通配回退让 `baostock.任意后缀` 都命中同一条策略 ⇒ 接口段写错无害也测不出（QA 在 TASK-016 实证 E4 全绿且那是正确的）。真正可测的是域段：写错域名才会 Lookup 落空、Gate 退化为直通。变异 B6（域段改成 baostockX）实证。"
+    },
+    {
+      "decision": "包级 TestMain 装零策略闸门。",
+      "rationale": "collector_test.go 的 `TestCollectorFetchHistory`（成功）与「桥不可达应报错」用例都走 `FetchHistory` 且共用 `600519.SH`；两个 Client 实例不同但 **gate 同为 policy.Default()**，缓存共享 ⇒ 先跑的成功响应会让后跑的错误用例命中缓存而静默失效（陷阱 13）。既有 12 个测试因此**一个不删、文件一字未改**。"
+    },
+    {
+      "decision": "【返工 epoch=2】补 TestCacheKeyTruncatesToMinute，双向约束缓存键的时间精度。",
+      "rationale": "规格后到（functional[4] 在派验时才加），但缺口是真的：实现写了 Truncate 却无测试守护——现有 8 个测试**全用固定时刻**，而固定时刻在 Truncate 前后相等，整套测试对该缺陷完全无感。生产路径 app.go:451 的 `end := time.Now()` 会让键每次都不同 ⇒ 命中率恒为零，「修复缓存回归」实际没修好。**双向缺一不可**：只写聚合度的话，把 Truncate 放粗到小时照样全绿，而那会让相隔几分钟的不同区间串槽、静默返回错数据。两条 DoD 明文变异判据均已实证。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/baostock/client.go（gate 字段 + New 取 policy.Default()）",
+    "internal/collector/baostock/collector.go（topicDaily 常量、FetchHistory 接入 Gate、mapPolicyError）",
+    "internal/collector/baostock/gate_test.go（新建）"
+  ],
+  "interfaces_exposed": [
+    "Client.gate *policy.Gate —— 包内字段，New() 取 policy.Default()；包内测试可赋值注入",
+    "包内常量 topicDaily = \"baostock.daily\"（经内置表 `baostock.*` 通配命中）",
+    "包内 mapPolicyError(symbol string, err error) error —— 把 policy.ErrQuotaExceeded / ErrTimeout 断链映射为本包前缀错误；非 policy 错误原样返回",
+    "公开 API 签名与错误语义零变更；**FetchQuote 不经 Gate**（由最近日线派生，沿用 CachedCollector 的实时语义）"
+  ],
+  "verification": "28 个测试全 PASS 0 SKIP（既有 12 一个不删、**两个测试文件一字未改** + 新增，含子测试）；`go test -race` 绿；覆盖率 95.7% → **96.4%**；`go build ./...` / `go vet` / gofmt 通过；**全量 `go test ./...` 全绿**；scope 只动 baostock 三个文件。【变异反证 9 条，注入前先写预期表，实际与预期全部一致】B1 不走 policy.Fetch → CachesViaGate 红 :88（got 3）；B2/B3 键去掉 symbol/区间 → 两个子用例分别红 :123（got 1）；B4 键**加上** interval → IntervalDoesNotSplitSlot 红 :152（got 2）；B5 New 不设 gate → NewUsesDefaultGate 红 :170；B6 主题域段写错 → TopicDomainMatchesBuiltinTable 红 :188；B7 不 slices.Clone → ReturnsIndependentSlice 红 :249；**B8 mapPolicyError 改用 %w → PolicyErrorsDoNotLeak 红 :298**（消息已带 baostock 前缀但 errors.Is 仍成立，实证「包前缀」若用 %w 是不够的）；B9 不映射直接返回 → 同测试红 :298。 【返工 epoch=2】31 测试全 PASS 0 SKIP（既有 12 一个不删、两个测试文件仍一字未改）；-race 绿；覆盖率仍 96.4%；build/gofmt 通过。新增 TestCacheKeyTruncatesToMinute 两格。**DoD 明文规定的两条变异判据均已实证**：T1 去掉两个 `Truncate(time.Minute)` → (a) 同分钟聚合格红 `gate_test.go:358`（HTTP 请求 2 次 want 1），**且旧测试集全绿** —— 这正是漏检的直接证据；T2 截断放粗到 `time.Hour` → (b) 跨分钟分槽格红 `gate_test.go:374`（1 次 want 2），**而 (a) 仍绿** —— 实证只写聚合度会放过粒度放粗，双向不可省。"
+}

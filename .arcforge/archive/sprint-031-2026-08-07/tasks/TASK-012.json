@@ -1,0 +1,57 @@
+{
+  "id": "TASK-012",
+  "title": "路由表重写（黄金值先行）",
+  "description": "把 selector.go 五个散落的符号路由谓词收敛为 route.go 的一张具体度优先路由表。**本任务与 TASK-001~011 完全独立(不碰 policy 包),wave 1 即可与 TASK-001 并行启动,用于填满 policy 串行链的时间。** **方案行 3536-3960 已给出完整实现与测试代码。** 关键工序是黄金值先行:Step 1 先对着**旧**实现写 route_golden_test.go 并跑绿、单独提交作为基线,Step 4-5 才写 route.go 与重写 selector.go,Step 6 用同一份黄金值验证新实现——这是验收标准 2「对新旧实现均全绿」的唯一证明方式,**不可跳过基线提交这一步**。四个公开函数签名必须不变(约束 C4),6 个外部调用点零改动。**调度纪律:与 TASK-011/TASK-013 同为 ./internal/collector 包,不可同时在途。** **先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-route",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/collector/route.go",
+    "internal/collector/route_golden_test.go",
+    "internal/collector/selector.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "route_golden_test.go 先对着旧实现跑绿并单独提交为基线,重写后同一份黄金值仍全绿(TestRouteGoldenValues,验收标准 2 —— 新旧实现均通过)",
+      "SelectForSymbol / SelectExternalForSymbol / MarketForSymbol / KnownIndexMarket 四个公开函数签名完全不变,6 个外部调用点零改动(约束 C4)",
+      "查表按具体度优先:更具体的 pattern 胜过更宽泛的,specificity 排序稳定且与注册顺序无关(TestHKSuffixBeatsCryptoPrefix)",
+      "符号大小写不敏感,大小写混写的符号路由到同一结果(TestRouteCaseInsensitive)"
+    ],
+    "boundary": [
+      "qlib Covers() 作为表前置规则保留,优先级高于路由表(TestQlibCoversTakesPrecedenceOverTable)",
+      "**IsAShareIndex() 同样作为表前置规则保留**(反审 A9:设计 §6.4 列了两条前置规则,原 DoD 只锁了 qlib 那条)——930713.CSI / 930604.CSI 等中证跨市场指数必须仍路由到 eastmoney / CN_A,黄金值测试须显式登记这两个符号。漏掉的后果是它们落到 * 兜底→yahoo/US,A 股指数行情全错且不报错;而只写「同一份黄金值全绿」无法锁定表的内容,实现者删掉两行再跑绿,验证者对着 DoD 无从判 FAIL",
+      "路由表命中但对应 collector 未在 Registry 注册时正确回退(TestRouteFallsBackWhenCollectorMissing)"
+    ],
+    "error_handling": [
+      "BTC.HK 的自相矛盾行为被统一,**期望值直接写死在 DoD 中**(反审 B5):SelectExternalForSymbol(reg, \"BTC.HK\").Name() == \"yahoo\" 且 MarketForSymbol(\"BTC.HK\") == core.MarketHK(方案行 3930-3938);旧实现 Select→crypto 而 Market→HK 的矛盾即以此口径消除"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/ 及全部调用方包全绿;internal/collector 覆盖率不低于既有水位 98%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-36",
+  "writes": [
+    "./internal/collector/route.go",
+    "./internal/collector/route_golden_test.go",
+    "./internal/collector/selector.go"
+  ],
+  "progress_note": "交付在分支 task/TASK-012（实现 f48a8e0，其父 7528f6d 为黄金值基线），已 rebase 到 master bac0de1 之上，合入为 fast-forward。**合入前 master 上没有 internal/collector/route.go**，验证请先由 Leader 执行 git merge --ff-only task/TASK-012，或直接在该分支上验证。",
+  "verifier": "test-agent-16",
+  "discovery": ".arcforge/discoveries/TASK-012.json"
+}

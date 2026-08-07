@@ -1,0 +1,77 @@
+{
+  "key_findings": [
+    "**纯回归任务的唯一有效性证据是变异，而本任务的核心假绿形态是「扫描器恒返回空」。** 被测行为（四个 collector 已清干净）在写测试前就成立，六条测试一写就全绿；`offenders == 0` 既可能是真干净、也可能是一个文件都没走，两者输出完全一样。变异 N1（scanPrivateThrottleState 恒返回空）下**六条全部转红**——这是本任务全部断言非空转的直接证明，也是 DoD functional[1] 存在的理由。",
+    "**扫描范围取全树而非仅四个已接入的子包。** 全树是四包的超集，且四包各自确有文件被解析这一点由下界断言显式钉住（变异 N9 把 res.scanned 的 append 去掉 → 四条子包断言全红）。理由：防回潮的价值在于挡住**将来新写的** collector 抄回 mu+lastReq+sleep，限定四包等于放过所有新增者。**【2026-08-06 更正】** 我落地时 Leader 的裁定尚未到达（消息交错），故当时按「超集满足 DoD 字面」推进并声明了假设；**事后核实：Leader 已裁定按全树并同步改好 DoD functional[0]（现文本明确写「整棵 internal/collector 树，跳过 _test.go/policy/testdata，扫描须抽成 scan(root string)」并署明由我提出），我的实现与新措辞逐条吻合。⇒ 本条不存在 DoD 与实现的偏差，验证者无需追查。** 保留原始经过是因为它记录了一个可复用的处置：**裁定未到达时按最合理解读推进并留痕声明，比停下来等更好** —— 但声明一旦过时就必须更正，过时的偏差声明会让下一个人去追一个不存在的问题。",
+    "**夹具之间不能共用 root，否则阳性对照会被静默架空且错误信息指向相反方向。** WalkDir 按字典序遍历，`parsefail` 排在 `throttleback` 之前；把阳性对照的 root 指向 `testdata` 会在解析失败处提前返回、根本走不到阳性夹具——断言「应检出」失败，而错误信息说的是「解析失败」。更麻烦的是它的顺序依赖：夹具一改名（parsefail → zparsefail）就翻转成「对照通过、解析夹具没被走到」的静默假绿。处置：每个夹具一个专属 root，一次遍历只验一件事。",
+    "**「跳过规则对 root 自身不生效」这一行原本是无人守护的死代码，补测试后才成为承重结构。** 生产扫描 root 是 \".\"、三个夹具 root 都不叫 policy/testdata，所以 `path != root` 删掉不会有任何测试转红。补 TestScanRootExemptFromSkipRule（root 直接指向**真实 policy 包**）后由变异 N4 钉住。选 policy 而非再造一个夹具有额外价值：**policy/gate.go 不是我写的，是独立语料**——我自己造的夹具与我写的扫描器可能共享同一个盲区（教训 13），拿真实代码当阳性对照能绕开这一点。",
+    "**testdata 跳过规则今天才第一次承重。** 接任务时全树 testdata 里 `.go` 文件数为 0（edgar/testdata 39 个文件全是 json/xml），所以在我加入夹具之前，删掉这条规则不会有任何测试转红。加入后由 N2 钉住（不跳过 testdata → 生产扫描被 parsefail 夹具直接打断）。已写进注释，免得后人当死代码清掉。",
+    "**AST 相对 grep 的价值可量化**：decoys 夹具里三种形态（注释里的 lastReq、局部变量 lastReq/minInterval、_test.go 里的结构体字段）**AST 全部不检出，而 `grep lastReq` 三个全中**。这正是 boundary[0] 要的东西——各 collector 的 gate_test.go 确实会为验证节流而提到这些名字（如 yahoo/gate_test.go:291 的预热注释）。",
+    "**禁用字段取 {lastReq, minInterval, throttle} 三个而非 DoD 字面的 lastReq 一个**：接任务时实测三者在生产源码中的检出数都是 0，加固是免费的，且三者正是被本 Sprint 删掉的那套私有节流状态的组成部分（对应 DoD 「lastReq **等**私有节流状态」）。由 N7 钉住（只留 lastReq → 阳性对照的 minInterval 未检出）。",
+    "**观察到一次共享主工作区的瞬时污染**：交付前 `git status` 一度显示 `M internal/collector/yahoo/gate_test.go`（非我改动），数秒后自行消失——并行 agent 变异注入与还原之间的窗口。`git diff` 当时已为空。**这是「commit 必须带显式 pathspec」那条纪律的一次实况**：若我此刻跑不带 pathspec 的 commit，就会把别人注入到一半的变异提交进去。",
+    "**流程失误（自查并如实登记）**：全局规范要求 `git commit` 之前先跑 code-simplifier，我在 TASK-013 上**先提交（d2a6e37）后才跑**，TASK-010 上顺序是对的。同一条规则、同一个人、相隔两个任务，一次对一次错——按教训 11 的判据自问『当时有人问我这条规则，我答得出来吗』，答得出来，所以这是**应用失败而非判断偏差**，解药是机械化（把它写进交付前清单）而不是『下次注意』。后果已闭合：简化产出的改动经 10 个变异回归 + 新增 N11 验证后作为 38a3d9c 单独提交，未污染前一个提交的语义。",
+    "**【返工 R1，reason_class=dod_defect，未消耗 rework_count】仓库里存在「故意不可编译的 .go 夹具」会让两个约束不可兼得。** `packages` 字段**同时**驱动漂移判据（task-completed.sh:58 的 `comm -23`）与 `go test`（:112-119）。把畸形夹具目录写进 `packages` ⇒ `go test` build failed ⇒ 此后任何 `dev_done` 被永久 BLOCKED，**且报错显示「测试失败」，看不出根因在声明里**；不写进 `packages` ⇒ 它一旦处于未提交状态就被算成**别人**的 scope 漂移（实测拦过 dev-agent-35 一次）。「声明父目录」也不行：`comm -23` 是**精确集合差不是前缀匹配**（已实测）。⇒ 消除根因：畸形源码改为 `t.TempDir()` 运行时现写。**区分判据是「是否故意不可编译」，不是「是否在 testdata 下」**——decoys/ 与 throttleback/ 可编译、对 go test 无害（[no tests to run] / [no test files]）且作为语料需要被人读，故保留。",
+    "**「go 工具链忽略 testdata」这个心智模型只对通配模式成立，对显式路径不成立。** 三处按路径工作的工具会看见它：`gofmt`、门禁漂移判据、**门禁的 `go test $PKGS`**（`packages` 是显式路径，绕过了 `./...` 对 testdata 的忽略）。**我与 Leader 持有的是同一个错误模型**，双层结构（Dev 自证 + 独立验证）对此无效——它防的是「一个人没想到」，防不了「两个人想错到一处」，因为双方模型来自同一来源（Go 惯例）时视角差异不存在。**唯一拦下它的是去读 task-completed.sh 的实现**，而不是任何一层评审。",
+    "**【返工 R2】事实性声明是本 Sprint 唯一无守护的一类条目，而「写为什么而非是什么」把它从「靠运气发现」变成「有动作可执行」。** 本任务同一个文件、同一个人、同一天内出现**四处**过时声明（discovery 里「未获答复的 DoD 偏差」、头部映射注释「四个子包」、skipDirs 注释「含故意语法错误的文件」、TestScanDetectsThrottleState 注释「parsefail 排在 throttleback 前面」）—— **同一人同一天四次，排除「谁不够仔细」的解释，指向机制缺失**：注释与 discovery 的事实性声明既没有「写的时候照做」的机制，也不在五道门的核对范围内。Leader 提炼的缓解措施「优先描述为什么而非是什么」经我实测**是可机械执行的事后 checklist**：判据压缩为一句「这句话里有没有一个会变的具体事物」——该文件 10 处注释，4 处失效的全是前者、6 处稳的全是后者，**没有一处需要犹豫**。**两个负例定义边界**：带「接任务时实测」时间戳的历史陈述是历史事实不会变假；只举例而不承担论证的跨文件指针坏了也不误导。⇒ 判据不是「凡具体事物皆需删」，而是「**具体事物若承担论证，它失效时论证就塌了**」。**同源**：这与「行号现读不写死」是同一思路的两个载体——把「是什么」（行号是 12）换成「怎么得到」（现读）；区别在于**代码可以「现读」，散文不能**，所以散文只能靠这条 checklist 事后扫。"
+  ],
+  "decisions": [
+    {
+      "decision": "把方案的单函数写法重构为 `scanPrivateThrottleState(root string) (scanResult, error)`，root 作参数、返回值同时带出 offenders 与 scanned。",
+      "rationale": "方案原代码把 root 写死为 \".\"、只返回 offenders，与反审补出的 DoD functional[1] 直接冲突——它不跳过 testdata，我的阳性夹具会被生产扫描当成 offender，functional[0] 与 functional[1] 无法同时成立。root 参数化是把变异验证内化成可重放用例的前提；scanned 则是下界断言的材料（没有它，「不存在 lastReq」在扫描器空转时是空真）。这属于教训 13 的时间维度变种：方案写在 functional[1] 被补进 DoD 之前。"
+    },
+    {
+      "decision": "TestScanRootExemptFromSkipRule 以真实 policy 包为阳性语料，而不是再造一个夹具。",
+      "rationale": "一次钉住两件事：① root 豁免确实生效（N4 反证）；② 扫描器在**非我所写的代码**上确有检出能力。第二点是对「自造夹具与自写扫描器共享盲区」的直接对冲——夹具是我按扫描器行为造的，它证明不了扫描器对真实代码的行为。policy/gate.go 的 domainState.lastReq 是本仓库唯一合法的该字段，天然是最好的独立语料。反过来这条测试也解释了 skipDirs 里为什么必须有 policy（N3 反证：不跳过则生产扫描把闸门实现本身报成回潮）。"
+    },
+    {
+      "decision": "hasOffenderFor 用 lineOfField 从夹具现读行号，不写死字面量。",
+      "rationale": "夹具的注释或字段顺序一改，写死的期望行号就变成假红——而假红会被误诊为「扫描器坏了」。这与「验证命令的锚必须钉全 sha」「锚点文本要现读现取」同源：**依据在被使用时，必须还是写下时的那一份**。同时它让「只比对文件名」这种弱形态不成立——N8（offenders 只记路径不记行号）下 Detects 与 RootExempt 双红，证明行号确实参与判定。"
+    },
+    {
+      "decision": "scanNoPanic 用 defer recover 把 panic 转成断言失败。",
+      "rationale": "error_handling[0] 是「不该 panic」型 DoD。裸 panic 会**中断整个测试二进制**，同包其余测试根本跑不到，而汇总只显示「红了」——红的方式决定了别的测试还能不能跑（教训 10）。这里六条测试同包，一条裸 panic 会带倒五条。"
+    },
+    {
+      "decision": "不修 internal/collector/fundamental_test.go 与 selector_test.go 的 gofmt 漂移。",
+      "rationale": "两者 `gofmt -l` 不通过，但 `git diff --stat` 为空——是 HEAD 上的既有漂移，不是我引入的。按「只改与请求直接相关的行」，不顺手改动相邻代码；如实登记供 Leader 决定是否单独处理。"
+    },
+    {
+      "decision": "parsefail 夹具刻意保留为语法错误的 .go 文件，并在文件头注明。",
+      "rationale": "go build / vet / test 整体忽略 testdata，不受影响；但**裸跑 `gofmt -l internal/collector/` 会对它报解析错误**。这是夹具的必要代价（error_handling[0] 要求解析失败分支可测），注释写在文件头是为了让下一个撞见 gofmt 报错的人立刻知道这不是仓库坏了。我的 gofmt 检查因此限定到具体文件列表。"
+    },
+    {
+      "decision": "接受 code-simplifier 抽出的 forEachStructFieldName，但先用变异回归证明它保证据，再合入。",
+      "rationale": "它把生产扫描与夹具行号现读的两份 AST 遍历合成一份——**这让预言机（lineOfField 算期望值）与被测实现（scanPrivateThrottleState 算实际值）共用了同一段代码**，正是 design-spec 反复警告的『检验工具本身不被任何门检验』形态。我没有靠推理下结论（教训 7：论证的产物是假设，变异的产物才是证据），而是把全部 10 个变异在简化版上重跑：红集与简化前**逐条相同**、四道门全过。另补 N11 直接变异这个新抽出的共用函数（只访问 st.Fields.List[:1]），Detects 红在『扫描函数没有守护任何东西』这条**指向扫描器**的消息上，而非误导性的『夹具本身失效了』——共谋不成立，因为每条测试都在调用 lineOfField 之前先断言 len(offenders)!=0。N11 顺带演示了 scanNoPanic 的价值：policy 包里的空结构体让 [:1] 越界 panic，被 recover 转成断言失败，其余四条测试照常跑完而非被整个二进制带倒。它同时修掉一处只在 Windows 显形的缺陷：hasOffenderFor 的期望值来自 filepath.Join(OS 分隔符)，而实际值那侧已 ToSlash，期望侧漏了。"
+    },
+    {
+      "decision": "返工时把 11 个变异全部重跑，而不只是直接受影响的 N6/N10。",
+      "rationale": "改动触碰的是 TestScanReportsParseFailure 的**输入构造方式**，也就是证据来源本身。契约通则：改动触碰证据来源时要重新证明证据还有效。结果红集与改动前逐条相同。**其中 N2 的红机制变了但更直接**：原先 skipDirs 去掉 testdata 会让生产扫描撞上 parsefail 夹具、报「解析失败」而中断；夹具删除后，红来自 throttleback 夹具**被真正检出为 offender**（:167「发现私有节流状态字段」）——从附带崩溃变成语义检出。**这一格若只看红/绿会以为没变化，核到断言行才发现机制换了**，正是「判红要核到断言行」的价值。"
+    },
+    {
+      "decision": "第二处注释「保留规则、换掉论据」，而不是连规则一起删。",
+      "rationale": "「一个夹具一个专属 root」这条规则**本身仍然正确**，只是它在当前测试上已不再承重——我实测过：畸形夹具移走后把 root 指向 testdata，该测试**照样通过**。这是「未来承重」的第三种形态：**规则曾经承重，改动后退回待命状态**（前两种：规则尚未承重 = testdata 跳过项在我加夹具之前；承重方式转移 = N2 从「解析中断」变为「阳性夹具被检出」）。三种都源于同一件事：**规则的正确性与它当下是否被守护，是两个独立的问题。** 规则该留（它防的是往 testdata 里再放夹具的下一个人），论据该换（它指向一个不存在的世界）。"
+    },
+    {
+      "decision": "改写 skipDirs 注释后，先跑 N2 核实新注释所述机制属实，再提交。",
+      "rationale": "新注释对 N2 的失效机制做了一个**事实断言**（「去掉本项后生产扫描会走进阳性夹具并把它检出为 offender 而转红」）。**不能用一个未经验证的声明去替换另一个** —— 那只是把过时换成了臆测。实测：N2 红在 :166「发现私有节流状态字段」，offenders 恰为 testdata/throttleback/collector.go:22 与 :23，与注释逐字一致。这是本条 key_finding 的自我应用：既然事实性声明无人守护，写下它的人就得自己当那道守护。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/nothrottle_test.go",
+    "internal/collector/testdata/throttleback/collector.go",
+    "internal/collector/testdata/decoys/decoy.go",
+    "internal/collector/testdata/decoys/decoy_test.go",
+    "internal/collector/testdata/parsefail/bad.go",
+    "(提交 d2a6e37 新增五个文件；提交 38a3d9c 重构 nothrottle_test.go)"
+  ],
+  "interfaces_exposed": [
+    "**本任务无生产代码改动**（git status 确认 internal/ 下只有本任务的新增文件）。以下均为 internal/collector 包内的测试期符号。",
+    "func scanPrivateThrottleState(root string) (scanResult, error) —— 从 root 遍历 .go 生产源码（跳过 _test.go 与 skipDirs），AST 找出名字命中 forbiddenFields 的**结构体字段**。root 参数化是为了让同一函数既能扫生产树也能扫夹具",
+    "type scanResult struct{ offenders, scanned []string } —— offenders 形如 \"相对路径:行号\"；**scanned 不是调试信息而是断言材料**（下界，防空真）",
+    "var forbiddenFields = map[string]bool{lastReq, minInterval, throttle} —— 字段名黑名单，扩展只需加键",
+    "var skipDirs = map[string]bool{policy, testdata} —— **对 root 自身不生效**；policy 是闸门本体（唯一合法 lastReq），testdata 是本文件自己的夹具",
+    "func scanNoPanic(t, root) —— defer recover 包装，把 panic 转断言失败",
+    "testdata/throttleback|decoys|parsefail —— 三组夹具，**各占独立 root，不可合并**（WalkDir 字典序会让 parsefail 截断遍历）",
+    "六条测试：TestNoPrivateThrottleState（验收标准 5 主守护）/ TestScanDetectsThrottleState（阳性对照）/ TestScanRootExemptFromSkipRule（root 豁免 + 真实语料检出能力）/ TestScanIgnoresNonFieldOccurrences（boundary[0]）/ TestScanReportsParseFailure / TestScanReportsMissingRoot"
+  ],
+  "verification": "internal/collector 全包 **54 PASS / 0 FAIL / 0 SKIP**，`go test -race` 绿（1.511s）；`go build ./...` 与 `go vet ./internal/collector/...` 通过；gofmt 对本任务新增文件全过（parsefail 夹具按设计排除）。**本任务无生产代码改动**。提交 d2a6e3738ae59434a0409468090efca928200455，`git show --stat` 核对只含本任务 5 个文件（交付前观察到并行 agent 在 yahoo/gate_test.go 的瞬时改动，显式 pathspec 已隔离）。【变异反证 10 个，**注入前先写下预期表**（scratchpad/exp-013.md），每条过四道门：① md5 已变 ② go vet 通过 ③ 人审 diff 语义确实变了 ④ `=== RUN` == 6 > 0；判红只认 `nothrottle_test.go:NN: <消息>` 断言行，全程无 panic、无编译红。**10 条全部与预期一致，零不符**】N1 扫描函数恒返回空 → **六条全红**（本任务的存在理由：证明没有一条是空转的）；N2 skipDirs 去掉 testdata → 仅 NoPrivate 红 :149（被 parsefail 夹具打断）；N3 skipDirs 去掉 policy → 仅 NoPrivate 红 :153（检出 policy/gate.go 的 lastReq）；N4 去掉 `path != root` 豁免 → **仅** RootExempt 红 :267；N5 不跳过 _test.go → 仅 IgnoresNonField 红 :286/:294（检出 decoy_test.go:11/:12）；N6 解析失败静默跳过 → 仅 ParseFailure 红 :308；N7 forbiddenFields 只留 lastReq → 仅 Detects 红 :197（minInterval 未检出）；N8 offenders 不记行号 → Detects 红 :199 + RootExempt 红 :271；N9 res.scanned 不 append → NoPrivate 红 :161（四条子包下界）+ IgnoresNonField 红 :289；N10 WalkDir 遍历错误被吞 → 仅 MissingRoot 红 :320。**六条测试每一条都是至少一个变异的唯一守护者**（NoPrivate←N2/N3，Detects←N7，RootExempt←N4，IgnoresNonField←N5，ParseFailure←N6，MissingRoot←N10），无冗余测试、无未被单点钉住的测试。纪律 4：在 N3 下对 DoD functional[0] 点名的守护者 TestNoPrivateThrottleState 单独 `-run`，确认它自己转红（:153）；正确实现下单独 `-run` 绿、无假红。每个变异还原后均以 md5 与工作基线比对确认一致，收尾 `git status --porcelain internal/` 只余本任务文件。【开工前的只读预读】在 TASK-011 占用 ./internal/collector 期间未认领、未碰该目录，仅在 scratchpad 独立 module 里把扫描器原型验完（六格矩阵 + skip 规则承重 2×2），落地时直接复用已验证的设计。【未获答复的一项】扫描范围「全树 vs 四包」已向 Leader 请示但未获裁定，按超集满足 DoD 字面推进并在此显式声明。【环境限制】项目 CLAUDE.md 要求的 GitNexus detect_changes 未执行——工具集不含 gitnexus MCP 工具；已用全仓 go build + 全包 -race 替代。【code-simplifier】**顺序有误：先提交后跑**（见 key_findings 末条）。它确有产出（抽出 forEachStructFieldName + 修一处 Windows 路径分隔符比较缺陷），我未盲接：全部 10 个变异在简化版上重跑，红集与简化前逐条相同、四道门全过；另补 N11 直接变异新抽出的共用函数，确认归因消息仍指向扫描器而非夹具。简化后复验：54 PASS / 0 FAIL / 0 SKIP、-race 绿(1.503s)、vet/build 过、gofmt 过，作为 38a3d9c 单独提交。【既有 gofmt 漂移，非我引入】internal/collector/fundamental_test.go 与 selector_test.go 在 HEAD 上即 gofmt 不通过（git diff --stat 为空，确证未被我改动），按『不改动相邻代码』未修，登记供 Leader 决定。 【返工 R1（2026-08-06，dod_defect，rework_count 未消耗）】删 internal/collector/testdata/parsefail/ 整个目录；TestScanReportsParseFailure 改为 t.TempDir() 运行时现写畸形源码；同步头部映射注释 functional[0] 到裁定后的新措辞。复验：**54 PASS / 0 FAIL / 0 SKIP**，-race 绿(3.344s)，go build ./... 与 go vet 过，`go test ./internal/collector` 绿（门禁预演：packages 声明的路径现已全部可测）。**11 个变异全部重跑，红集与返工前逐条相同**，四道门全过；N6 红 :336、N10 红 :320、N2 红 :167（机制由「解析中断」变为「throttleback 被检出为 offender」，语义更直接，已核到断言行确认）。提交 b95d98dbe747ad5ab5e109892fddc9e6297e036d（显式 pathspec，git show --stat 核对只含 nothrottle_test.go 与被删的 bad.go）。**gofmt 复核**：我引入的那处解析报错已消失；`gofmt -l internal/collector/` 现列 9 个文件（akshare×3、eastmoney×2、fred×1、fundamental_test、selector_test、yahoo/yahoo_test），**逐个 git diff HEAD 确认改动行组均为 0 ⇒ 全部是既有漂移、非我引入**——Leader 待处置清单记的是四处，实际九处，请更新。 【返工 R2（2026-08-06，dod_defect，rework_count 未消耗）】修正两处随夹具迁移而失效的注释：① skipDirs 的 testdata 项（原「含一个故意语法错误的文件」「去掉后因解析失败夹具报错」双假）改为描述真实承重机制；② TestScanDetectsThrottleState 的「夹具不能共用 root」保留规则、换掉论据。**纯注释改动**（`git diff -U0` 机械核实：非注释行为 0）。**新注释的事实断言已实测核对**：N2 红 :166，offenders 恰为 testdata/throttleback/collector.go:22 与 :23，与注释逐字一致。抽验 N1(6红)/N4(1)/N6(1)/N9(2)/N11(2) 红数与改动前完全一致。复验 54 PASS / 0 FAIL / 0 SKIP、-race 绿(1.636s)、gofmt 与 vet 过。提交 884cb41f5a1df7d50b3dd0148f531cdc1eeb5c1d（显式 pathspec，只含 nothrottle_test.go）。**gofmt 全仓口径更正**：我先前报「internal/collector 树下 9 处」，验证者现跑全仓为 **29 处**——我、验证者、Leader 三方先前都在沿用一份累加而来的旧清单（4 处），**这是「依据在被使用时已不是写下时的那一份」的又一实例，且三方同时犯**；收尾请按 29 记。"
+}

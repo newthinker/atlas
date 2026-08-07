@@ -1,0 +1,48 @@
+{
+  "key_findings": [
+    "**DoD 内部字面互斥且不可兼得**:non_functional[0]「包源码中不再有 lastReq/minInterval/throttle」与 error_handling[0]「既有测试用例一条不删一条不改」在编译期互斥——client_test.go 有 4 处引用 c.minInterval(tdServer:46、TestAPIKeyNeverInURLOrErrors 两处、TestThrottleMinInterval 整个用例)。任务 description 自身与方案行 2901-2910 都要求删除它们。已写入 questions[0] + inbox 通知 leader,按唯一可编译读法执行:**错误路径测试的断言体一字未改**,只删了 3 行 minInterval 赋值与 TestThrottleMinInterval,并在原处留下迁出说明注释。建议 leader 按教训 8 改 DoD 措辞为「**除节流用例外**,既有测试断言体一字不改且全绿」。",
+    "**主题常量拼错是本任务最危险的静默缺口,而它天然逃过本包所有其它测试**:gate_test.go 的 gateWith() 用 topicTimeSeries 自己登记测试策略,常量写成什么都自洽;而生产上 Lookup 落空 = Gate 对未登记主题**直通不节流**(twelvedata 域下无 `twelvedata.*` 通配条目兜底,不同于 lixinger),直接撞 TD 免费层 8 req/min。补了 TestTopicMatchesBuiltinPolicy(经 policy.NewTable().Lookup 断言主题已登记 + MinInterval==8s)。M6 实证:常量改成 twelvedata.time_seriesX 后**其余 9 个测试全绿**,只有它转红。",
+    "**「同参数只发一次」测不出「缓存键少了参数」**:方案给的 TestFetchHistoryCachedByGate 只用一个 symbol,键里丢掉 symbol 时它照样 1 次请求全绿,而生产上 AAPL 会拿到 NVDA 的收盘价——是静默的**错数据**,比缓存没生效危险得多。补了 TestFetchHistoryCacheKeyCoversAllParams(逐次累计请求数,覆盖换 symbol / 换 start / 换 end / 回到首个组合仍命中)。M4 实证闭环左下格:去掉 symbol 后 CachedByGate **仍绿**,只有新用例红。",
+    "core.OHLCV 是 flat value type(字段全为 string/float64/int64/time.Time,无 map/slice/指针) ⇒ slices.Clone 等于深拷贝,满足契约 §T2 的限定。判据来自 cache.go:127-128 的原有注释(那句限定正是契约表迁移时丢过一次的),不是我重新措辞的。该限定已写进 FetchHistory 的注释,并注明元素类型将来加引用型字段时必须改逐元素深拷贝。",
+    "**方案原版 boundary[0] 用的是排除断言**(`if second[0].Close == -1`),踩陷阱 6①。改为等值断言 `second[0].Close != 101.5`,并另加一条「底层数组必须相异」(&first[0] == &second[0])。两条守的是同一对象的两个侧面:值断言若因将来改动失守,地址断言仍钉住所有权语义。M1b 下两条同时红。",
+    "**functional[0] 的观测量选服务端到达时刻,不选调用方总耗时**:DoD 原文说的是「相邻请求间隔符合策略」,那是服务端可直接观测的量;总耗时还掺着建连/解析开销,是间接现象(陷阱 11 附:别用可由多种原因产生的间接现象去推断)。probeServer 记录每次请求的 time.Now(),断言 at[1].Sub(at[0])。",
+    "**TestMain 换默认闸门后,临时 SetDefault 的用例 Cleanup 必须恢复到那个零策略闸门而非 nil**:policy.SetDefault(nil) 只是清空,下次 Default() 会**懒构造内置表闸门**(twelvedata.time_series = 8s),后续每个用例的 FetchHistory 会白等 8s,整包挂死。已把它存进包级 testDefaultGate 并在注释里写明理由。",
+    "**「错误不写缓存」这条的守护逻辑在 policy/gate.go,不在本包**,而 gate.go 是三个 dev 并发共用的文件——在主工作区注入变异会污染他人的测试运行。改在 `git worktree add --detach` 的一次性 worktree 里做(拷入本任务 3 个改动文件),验完在**主仓库**执行 remove。这是变异验证与并行开发冲突时的可复用做法。"
+  ],
+  "decisions": [
+    {
+      "decision": "补 TestTopicMatchesBuiltinPolicy 与 TestFetchHistoryCacheKeyCoversAllParams 两条 DoD 未点名的测试。",
+      "rationale": "两条堵的都是「本包所有其它测试天然看不见」的缺口,且失效形态都是**静默的错行为**而非崩溃:主题拼错 → 生产完全不节流;缓存键少参数 → 返回别的 symbol 的数据。M6/M4 各自的闭环对比都拿到了左下格(既有用例在同一变异下确实绿)。这正是方法论边界那条说的『变异只能证伪我写下的断言,不能证伪我没写的那些』——这两条是我主动想的,不是变异撞出来的。"
+    },
+    {
+      "decision": "TestFetchHistoryErrorNotCached 的 error 检查用 t.Errorf 而非 t.Fatalf。",
+      "rationale": "陷阱 10。「错误被缓存」的实现里第二次会拿到缓存的零值 + nil error,Fatalf 会在此中止,永远走不到下面那条请求次数断言,读者只看得到「want error got nil」而看不见「只发了 1 次 HTTP」——缺陷把自己伪装成了另一回事。M8 闭环实测:Errorf 版两条断言(:238 与 :242)同时输出,退回 Fatalf 版**只剩 :238**,请求次数这条证据完全丢失。"
+    },
+    {
+      "decision": "遇到 DoD 字面互斥时不转 blocked_clarification,而是落盘 questions[] + inbox 通知后继续。",
+      "rationale": "两种读法里只有一种能编译,不存在「猜」的空间——真正需要 leader 定的是**措辞**而非**做法**。阻塞会让一个 wave-7 任务空等,而三个 dev 正在并行。风险已用 questions[] 落盘 + 通知覆盖:若 leader 裁定与我不同,改的是措辞不是代码。"
+    },
+    {
+      "decision": "gate_test.go 里那个 80ms 的常量命名为 gateInterval 而非 minInterval。",
+      "rationale": "TASK-013 要加 AST 断言守护「包内不再有 minInterval」。AST 只看标识符不看注释,但一个叫 minInterval 的测试局部常量会**真的**被 AST 扫到而误伤。改名零成本,并在文件头注释写明这是刻意的,免得后人改回去。"
+    },
+    {
+      "decision": "package doc 与 client_test.go 头部的 DoD↔测试映射注释同步改掉。",
+      "rationale": "教训 5(注释描述的是当前巧合还是被守护的契约)。package doc 原写「客户端内置 8s 最小间隔节流」、映射注释指向已删除的 TestThrottleMinInterval——两处都是**我的改动造成的过期**,属于自己制造的孤儿,按 surgical changes 纪律必须一并清理。改后指明 8s 由 Gate 按 topicTimeSeries 承接、节流用例迁往何处。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/twelvedata/client.go",
+    "internal/collector/twelvedata/client_test.go",
+    "internal/collector/twelvedata/gate_test.go"
+  ],
+  "interfaces_exposed": [
+    "const topicTimeSeries = \"twelvedata.time_series\" —— 包内未导出;8s MinInterval 与 TTL 登记在 policy 内置表,本包不再私有持有节流状态",
+    "Client.gate *policy.Gate —— 未导出字段,NewWithBaseURL 里 **构造时快照** policy.Default()。包内测试直接赋值即可注入;policy.SetDefault 必须在 New/NewWithBaseURL **之前**调用(契约陷阱 4)",
+    "func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) —— **签名不变**。现为 Gate 外壳:缓存键 = \"symbol|start(2006-01-02)|end(2006-01-02)\",返回值一律 slices.Clone 后交出",
+    "func (c *Client) fetchHistory(...) —— 新增的包内未导出层,真正发 HTTP,由 policy.Fetch 的 fn 调用。原 FetchHistory 的 TD end_date 排他等注释随函数体移到这里",
+    "**已删除**:Client.mu/lastReq/minInterval 三个字段、(c *Client) throttle() 方法、defaultMinInterval 常量。包外无引用(go build ./... 通过)",
+    "测试侧(包内):TestMain 把 policy 默认闸门换成零策略;testDefaultGate 变量;gateWith(policy.Policy) / probeServer(t, body) / recentRange() 三个 helper"
+  ],
+  "verification": "**23 个测试(含子测试)全 PASS、0 SKIP**;`go test -race` 全绿(1.591s);**覆盖率 92.7%,与 master 基线 92.7% 持平**(基线用 git stash 在同环境实测,非引用旧数据);gofmt -l 无输出;go vet ./internal/collector/... 与 go build ./... 全过。既有 5 个测试函数(ParsesAndSorts/EmptyValues/SkipsUnparsableClose/APIError/APIKeyNeverInURLOrErrors)**断言体一字未改**且全绿。grep 确认 client.go 中 lastReq/minInterval/throttle/sync 零命中。【变异反证 9 个(M1b/M2/M3/M4/M5/M6/M6b/M7/M8),**每个都在注入前写下预期,实际与预期无一处不符**;四道门逐个过:①md5 已变 ②go vet 通过 ③人审 diff 语义 ④=== RUN 数 > 0;判红只认 `<file>_test.go:NN: 消息` 断言行,panic/构建红不计】M1(首版)删 slices.Clone 致 slices 未使用 → **vet 不过,门②判为变异无效**(第②类形态,本 Sprint 三个实例栽过的同一个坑),重做为保留引用的 M1b。M1b 不返回副本 → ReturnsIndependentSlice 红 :213 :217。M2 绕过 Gate → Throttled 红 :98 / Cached 红 :122 / CacheKey 红 :156,而 IndependentSlice、ErrorNotCached、NewSnapshots、TopicMatches **四条预期绿的确实绿**。M3 gate 置 nil → NewSnapshotsDefaultGate 红 :250 :253。M4 缓存键去掉 symbol → CacheKey/换_symbol 红 :156 而 **CachedByGate 仍绿**(闭环左下格)。M5 键去掉 end → CacheKey/换_end 红 :156。M6 主题常量拼错 → TopicMatches 红 :171,**其余 9 个测试全绿**(闭环左下格)。M6b 主题改成已登记但间隔不同的 yahoo.chart → TopicMatches 红 :174,证明「8s」那条断言本身也活着、没被 !ok 分支掩盖(变异捕获 ≠ 你以为的那条断言捕获)。M7 键掺时间戳 → Cached 红 :122 + CacheKey/回到首个组合 红 :156。M8(在一次性 worktree 内注入 policy/gate.go「失败也写缓存」,避免污染并发 dev 的共享文件) → ErrorNotCached 红 :238 **且** :242「只发 1 次 HTTP」,全量套件仅此 1 个 FAIL。**M8 的 2×2 闭环(同 worktree 同会话)**:同一变异下把 t.Errorf 退回 t.Fatalf → **只剩 :238**,请求次数证据丢失,实证陷阱 10 那处修改的必要性。每个变异跑完 cp 还原并校验 md5 == 基线 fcf634e4...;worktree 在**主仓库**执行 remove,git worktree list 已无残留,主工作区 client.go md5 与基线一致。**未触碰 internal/collector/policy/、其它 collector 目录或任何 .claude/ 运行时资产**;提交用显式 pathspec 只含本包 3 个文件(ec149a0)。"
+}

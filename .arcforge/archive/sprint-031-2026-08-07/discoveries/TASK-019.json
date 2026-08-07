@@ -1,0 +1,44 @@
+{
+  "key_findings": [
+    "**根因是结构性的,不是三处遗漏**:`initPolicyGate` 全仓只有两个调用点(`serve.go:85` 与 `export_ohlcv.go:297`),而**后者藏在 `loadConfigOrDefaults` 函数体内** ⇒ 接线与配置加载被隐式耦合。**任何跳过配置加载的路径都会静默跳过接线**,而不是「有人忘了写」。已知三条:crisis backfill / crisis eval(`resolveFREDKey:106-108` 在 FRED_API_KEY 非空时提前 return)、backtest(全文不读配置)。新增 `ensurePolicyGate()` 作为显式入口,但**隐式耦合本身没消除**——我按 boundary 的要求没有把 initPolicyGate 从 loadConfigOrDefaults 里提出来(那是全仓 6 个调用方的行为变更)。⇒ **第四条这样的路径将来仍可能出现**,守护靠的是 AST 测试的用例表,加新入口时必须同步加进去。",
+    "**AST 守护与运行期守护各有分工,缺一不可,已有互补变异实证。** 变异 W2(把 `ensurePolicyGate()` 挪到三家 collector 构造**之后**)→ **AST 测试转红,而运行期测试仍绿**——因为 `policy.Default()` 最终还是被设上了,运行期观测的是「闸门带没带配置」,看不出「collector 快照时闸门还没装」。反过来运行期测试能抓 AST 抓不到的(装配被包进 defer/恒假 if/死代码时词法位置照样在前)。⇒ 顺序属性只能靠静态断言,执行属性只能靠运行期断言,**把两者中任一条当成另一条的替代都会留缺口**。",
+    "**运行期判据用「配置里的独特 quota.path 是否落地账本」,不是「没报错」**(陷阱 8)。做法:写一份带独特 `collector.quota.path` 的配置 → `policy.SetDefault(nil)` 清空单例 → 跑目标路径 → 对带配额的主题做一次 `policy.Fetch` → 断言账本文件出现在配置指定的路径。**账本出现在那个路径唯一可能的来源就是「本次装配读到了这份配置」**。手法沿用 `policy_test.go` 的 `TestLoadConfigOrDefaultsInitsPolicyGate`,不是我新造的。",
+    "**覆盖率的机制陷阱被运行期测试化解,而非被放宽**:cmd/atlas 基线 74.29%、floor 74,余量只有 **5 条新增未覆盖语句**(算式:`965/(1299+N) ≥ 0.74` ⇒ N ≤ 5;Leader 给的 6 略宽,门禁比的是整数部分)。而 **AST 守护不产生任何覆盖率**(它解析源码文本、不执行被断言的代码)。真正救回来的是 `runBacktest` 原本 **0.0%** 覆盖——运行期测试驱动它到 92.3%,净增 16 条覆盖语句,最终 74.29% → **75.23%**。⇒ 这类任务里,「补运行期测试」同时满足陷阱 8 与覆盖率两个约束,是唯一的双赢解。",
+    "**`collectorCtors` 名单的判据是「构造函数是否快照 `policy.Default()`」,不是「是不是 collector」。** 实测相关 7 家(yahoo/eastmoney/crypto/tushare/lixinger/baostock/twelvedata),无关 5 家(akshare/fred/edgar/qlib/qlibpit)。把无关的列进来会产生与本约束无关的假红——例如 crisis 里的 `fred.New` 本就不需要闸门,`crisis.NewIngestor(fred.New(...), yahoo.New(), st)` 同一行里两个构造只有后者相关。",
+    "**Leader 给的构造点清单确有遗漏,我独立穷举补了 5 处**:`qlib_wiring.go:56`(qlib)、`prism.go:193/194`(akshare/edgar)、`collectors.go:111`(qlibpit)、`export_ohlcv.go:317`(lixinger)。**其中只有 export_ohlcv.go:317 是相关的**,且它在 :297 装配之后,结论不变。别名导入只有 `akshare \"…/akshare\"` 一处且 akshare 无关。⇒ 清单遗漏没有改变任何结论,但**这一点只有穷举完才能知道**,不能因为「大概率不影响」就跳过。",
+    "**W3(改名目标函数)是编译失败的红,证据无效,已换做法。** 我的运行期测试直接调用 `runBacktest`,把它改名会让测试文件编译不过——那是构建的红不是行为的红(本 Sprint 第七次撞这个坑,这次我当场识别出来了)。改为变异**测试自己的用例表**(把 `runBacktest` 换成不存在的 `runBacktestGone`),编译通过且精确命中空真守卫的 `t.Fatalf`,报文正是「在没有函数体时空真地成立」。⇒ 变异对象要选**不被测试代码直接引用的**那一侧,否则容易撞进编译红。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增 `ensurePolicyGate()` 显式入口,而**不**把 `initPolicyGate` 从 `loadConfigOrDefaults` 里提出来。",
+      "rationale": "提出来是更彻底的修法(消除隐式耦合),Leader 也推荐,但 boundary 明确要求「须逐个列举全仓所有 loadConfigOrDefaults 调用方确认行为不变,不能只看编译过」。那是 6 个调用方(crisis.go:109/420、export_signals.go:109、export_ohlcv.go:325、prism.go:171、watchlist.go:58)的行为变更,且其中 crisis.go:109 在 resolveFREDKey 内、420 在 buildCrisisSender 内,语义各不相同。本任务的目标是**堵住三条已知缺口**,把耦合重构一并做会让改动面从 3 行涨到 6 个调用方,风险与收益不匹配。**隐式耦合这个根因已写进 key_findings[0] 留给后续处置**。"
+    },
+    {
+      "decision": "配置不可读时**退化为内置策略表而不阻断**(`ensurePolicyGate` 里 `if err != nil { initPolicyGate(config.Defaults(), nil) }`)。",
+      "rationale": "error_handling[0] 要求显式决定这个行为。补接线带来一个**新**风险:crisis 在 FRED_API_KEY 非空时原本根本不读配置,现在会读——若配置损坏,原先能跑的路径不能因此挂掉。crisis 靠环境变量拿 FRED key、backtest 压根不需要配置,它们的可用性不应该新增一个「必须有合法配置」的前置。退化目标是内置策略表(限流/缓存按内置值、无 config 覆盖、无跨进程账本),由 `TestEnsurePolicyGateDegradesOnUnreadableConfig` 守护:断言不 panic、错误信息不含 `loading config`、且退化后的闸门仍可用。"
+    },
+    {
+      "decision": "新写一个 `scanGateOrder` 而不是改造 TASK-011 的 `scanWiring`。",
+      "rationale": "`scanWiring` 把被查的两个调用名写死为 `initPolicyGate`/`buildCollectors`,而本任务的三条路径用的是 `ensurePolicyGate` + 直接构造(`yahoo.New()` 等)。改造它需要动 TASK-011 已验收的产物,而 non_functional 要求「既有测试断言体与场景一字不改」。新写的 `scanGateOrder` 是严格更一般的形态(调用名集合参数化、按限定名 `pkg.Fn` 匹配),**将来可以把 wiring_test.go 收敛到它上面**——已留给末尾清单,本任务不做。"
+    },
+    {
+      "decision": "失败信息一律写「**词法位置**」,并在两个 AST 测试里都写明强度边界。",
+      "rationale": "boundary[1] 指出 TASK-011 的 `wiring_test.go:105-106` 写「必须早于」读起来像执行顺序承诺,而 AST 保证的只是源码里的先后。defer/go 闭包、恒假 if、提前 return 后的死代码都能让词法位置在前而运行期不执行。**不准确的守护声明与「错误的修复」同类**——它让下一个人以为这层已经守住了。已同时修掉 TASK-011 那处(仅改措辞与补注释,断言体与场景未动)。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/policy.go(新增 ensurePolicyGate,18 行含注释)",
+    "cmd/atlas/crisis.go(runCrisisBackfill 与 runCrisisEval 各加一行装配调用 + 注释)",
+    "cmd/atlas/backtest.go(runBacktest 加一行装配调用 + 注释)",
+    "cmd/atlas/gate_wiring_test.go(新建 430 行:scanGateOrder 扫描器 + 6 条 AST 测试 + 4 条运行期测试)",
+    "cmd/atlas/wiring_test.go(**仅**失败信息措辞「必须早于」→「词法位置须在…之前」+ 补强度边界注释;断言体与场景未动)"
+  ],
+  "interfaces_exposed": [
+    "func ensurePolicyGate() —— cmd/atlas 包内。供**不经 loadConfigOrDefaults 就构造 collector** 的入口显式装配闸门;配置不可读时退化为内置策略表,不阻断",
+    "func scanGateOrder(filename string, src any, fnName string) (gateOrder, error) —— 测试内。按**函数体**定位装配调用与最早的 collector 构造调用;src 参数化供阳性对照用内联源码;行号现读",
+    "func calleeQualifiedName(ce *ast.CallExpr) string —— 测试内。返回 `pkg.Fn` 或 `Fn`,**必须带包名**否则所有 X.New 塌成 New",
+    "var gateFns / var collectorCtors —— 测试内。**加新入口或新的用 Gate 的 collector 时必须同步更新 collectorCtors 与 TestEntrypointsWireGateBeforeCollectors 的用例表**,否则新路径不受守护",
+    "type gateOrder{gateLine, ctorLine, ctorName, found} —— 测试内。found 是空真自检的下界守卫"
+  ],
+  "verification": "主工作区实测,GOTOOLCHAIN=local,提交 63c8245(父 c638833)。**范围封闭——反向追溯全部 collector 构造点(functional[3] 的证据)**:我独立穷举 cmd/atlas 非测试文件里全部构造点,并按「构造函数是否快照 policy.Default()」筛出相关者,逐条追溯所有到达路径——(1)`backtest.go:71/72/73` yahoo/eastmoney/crypto:原**全文零接线**(qa-agent-8 发现),已在 :70 加 ensurePolicyGate ✓已修;(2)`crisis.go:150` yahoo(runCrisisBackfill):FRED_API_KEY 非空时未接线,已在函数首行加 ✓已修;(3)`crisis.go:236` yahoo(runCrisisEval daily/nfci):同上,同一函数首行覆盖 ✓已修;(4)`crisis.go:257` yahoo(runCrisisEval intraday):**与 236 同属 runCrisisEval 函数体**,同一处装配即覆盖 ✓已修;(5)`export_ohlcv.go:309/311/317/320` yahoo/eastmoney/lixinger/crypto:`runExportOHLCV` 在 :325 调 loadConfigOrDefaults——**经核实 :325 在 :309 之后**,但这四处位于 `buildExportRegistry` 而非 runExportOHLCV,其调用方在 loadConfigOrDefaults 之后 ✓已正确;(6)`collectors.go:37/49/55/66/83/92` 六家(buildCollectors):唯一调用方是 `serve.go:107`,而 serve.go:85 的 initPolicyGate 在前 ✓已正确(TASK-011 守护);(7)`prism.go:158/165/191/192` tushare/twelvedata/lixinger/yahoo:runPrismRefresh:171 的 loadConfigOrDefaults 在全部四家之前 ✓已正确;(8)`serve.go:176` yahoo:在 :85 之后 ✓已正确;(9)**判为无关的构造点**:`qlib_wiring.go:56`(qlib)、`prism.go:193/194`(akshare/edgar)、`collectors.go:111`(qlibpit)、crisis 的 `fred.New`——这 5 类的构造函数**不取 policy.Default()**(逐包 grep 实测),不受本约束。别名导入仅 `akshare \"…/akshare\"` 一处且无关。**门禁与测试**:(a) go test -count=1 -v → **196 PASS / 0 SKIP / 0 FAIL**;(b) -race → ok;(c) -cover → **75.23%**(基线 74.29%,floor 74;runBacktest 0.0% → 92.3%);(d) go build ./... 与 go vet ./cmd/atlas/ 通过,gofmt -l 对本任务新增/修改文件无输出(cmd/atlas 下 backtest_test.go 与 crisis_test.go 是既有历史债,见我在末尾清单核实里的 28 处清单);(e) **全仓回归 go test ./... 无任何失败**。**变异验证 4 类,每条先写预期、做落盘校验(与注入前备份 diff)与 go vet 编译校验后再看红绿,并单独 -run 归属**:W1(删 runBacktest 的装配调用)→ AST 红 + 运行期红;W2(装配挪到三家构造之后)→ **AST 红而运行期绿**(两层守护分工的直接证据);W3'(把 AST 用例表里的函数名改成不存在的)→ 红,报文命中空真守卫「在没有函数体时空真地成立」——原 W3(改名生产函数)是编译失败的红、证据无效已废弃;W4(目标函数删装配 + 同文件另一函数加 `initPolicyGate`)→ **仍红**,证明判据限于函数体内、不会把 loadConfigOrDefaults 那处算进来。每次变异后与备份逐字节 diff 确认还原。**scope**:git show --stat 63c8245 只含 cmd/atlas 下 5 个文件;同期他人在途改动未被卷入。"
+}

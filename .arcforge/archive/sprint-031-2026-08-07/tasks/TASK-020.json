@@ -1,0 +1,53 @@
+{
+  "id": "TASK-020",
+  "title": "缓存键区分度守护回补:tushare",
+  "module": "internal/collector",
+  "complexity": "简单",
+  "description": "test-agent-16 在 TASK-007 F1 验收时发现 yahoo 缓存键的**区分度**无守护(变异 W5:键里 symbol 换成固定串 → 83 个测试全绿),并建议横向排查。**Leader 用 jq 核实了根因,是确定事实而非推测**:陷阱 16 的区分度 criteria 是本 Sprint 后期才补出来的,而 TASK-007/008/009/010 四个早期任务的 done_criteria.functional 里**全都没有这一条**(逐个 jq 查证:各 3-4 条 functional,含区分度的为 0 条)。TASK-015/016/017 定稿在其后,已含该条(017 的 functional[1] 原文「缓存 key 覆盖全部影响结果的参数;至少用两组不同参数验证不互相命中」),故 eastmoney/crypto/baostock **不在本任务范围**。yahoo 由 TASK-007 的 F2 单独回补。**本任务覆盖余下三家:twelvedata(TASK-008)、tushare(TASK-009)、lixinger(TASK-010)**。",
+  "estimated_files": 1,
+  "dependencies": [
+    "TASK-018"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-007",
+    "TASK-018"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/tushare"
+  ],
+  "writes": [
+    "./internal/collector/tushare"
+  ],
+  "assigned_to": "dev-agent-38",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "done_criteria": {
+    "functional": [
+      "**判定已由 test-agent-16 在隔离 worktree(63c8245)用变异完成,范围已从三家收窄到 tushare 一家。** 本条不再需要 dev 重做判定,直接按下表施工:\n\n| 包 | 变异 | 结果 | 判定 |\n|---|---|---|---|\n| twelvedata | 键去 symbol | **红** `gate_test.go:156` | **有守护,已移出范围** |\n| lixinger | 键(payload)换固定串 | **红** `gate_test.go:121` | **有守护** |\n| lixinger | topic 去 endpoint | **红** `gate_test.go:138` | **有守护,已移出范围** |\n| **tushare** | 整个 `callKey(...)` 换固定串 | **绿(存活)** | **真缺 ⇐ 本任务目标** |\n\n**Leader 的 grep 在 lixinger 上判反了**(grep 说它无守护)。根因:lixinger 的 DoD `functional[1]/[2]` 原文是「缓存 key 包含请求 payload,不同 payload 不共享缓存」「不同 endpoint 使用互相独立的缓存 key」——**是区分度的实质,只是没用「区分度」三个字**。twelvedata 那条 `TestFetchHistoryCacheKeyCoversAllParams` 则是 dev-agent-37 **主动加的**,DoD 未要求。⇒ **DoD 没写 ≠ 没守护,反向也成立。**\n\n**tushare 缺得很典型:有聚合度、有纯函数单测,唯独没有区分度。** `TestCallKeyIsOrderIndependent` 两部分——①纯函数断言 `callKey(params,\"close\") == want`(跑 200 次防 map 顺序抖动);②行为侧断言:插入顺序不同的两个**等价** params 必须命中**同一槽**(`hits()==1`)。**两条守的都是聚合度(等价参数→同槽),没有任何测试断言「不同 params → 不同槽」。** 所以把整个 `callKey(...)` 换成固定串时:纯函数断言不受影响(改的是调用点、`callKey` 本身没动)、聚合度断言在固定键下仍然 `hits()==1` ⇒ 两条都通过、变异存活。全包只有两处 `c.call(...)` 用到多组参数,都是「同 api + 同/等价 params」。\n",
+      "对确实缺守护的包,补一条区分度测试:**至少用两组不同参数验证不互相命中**(陷阱 16)。**每个影响结果的参数各自独立验证**——参照 crypto 的做法(去掉 symbol/interval/end 分别报对应参数),而非一条测试凑合覆盖多个维度。**若某参数在本包语义下不影响结果**(如 TASK-017 判定 baostock 的 interval 只接受 \"\"/\"1d\" 且取同一份日线),须写明理由并加测试守护该判定,不得默默省略",
+      "**三家的缓存键构造方式不同,不得照搬同一形态**(契约教训 23,dev-agent-35 在 eastmoney 踩过):twelvedata 用 `Format(\"2006-01-02\")`(日粒度)、lixinger 用 `string(body)` 即整个 JSON payload 入键、tushare 需现读。**照搬前必须检查偏移量/参数形态与本包 key 的实际构造匹配**——不匹配时失效方向是**假的「变异无效」**,比假绿更隐蔽(它伪装成「这里本来就没问题」)",
+      "**topic 维度已判定为【真缺】,与 key 维度并列**(test-agent-16 于派发后用零连带注入实测,**推翻了 Leader 先前在本条写的处置方向**)。\n\n**⚠ Leader 原写的「换成内置表里存在的主题名以避开连带」——实测行不通。** 根因:内置表里四个 tushare 主题**策略并不等价**(`policy.go:75-82`):`daily`/`index_daily`/`hk_daily` 共用 `tusharePolicy`,而 `daily_basic` 多一个 `Quota{5,24h,SH}`。塌到任何一个已登记主题,都会让另一部分 api 的策略变掉 ⇒ **连带照旧,只是换了方向**(实测:塌到 `tushare.daily` 红 5 条、塌到 `tushare.daily_basic` 红 2 条)。「换成已登记主题」解决的是「Lookup 落空」,**没解决「策略不等价」——那才是连带的真来源**。\n\n**干净注入点在 `policy/gate.go`,不在 tushare 包内**:Gate 内部**策略解析与缓存槽是分离的**——`gate.go:133/:145` 的 `p, ok := g.table.Lookup(topic)` 管策略,`gate.go:155` 的 `ck := topic + \"|\" + key` 管缓存槽。注入 **`ck := topic + \"|\" + key` → `ck := key`**:Lookup 照旧按真实 topic 解析(配额/节流全对),**只有缓存槽不再按 topic 分**。实测零连带(tushare 43 个测试无任何配额/节流类失败)。\n\n**判定证据(跨包对照,证明该变异有效而非等价变异体)**:同一注入下 **tushare 绿(存活⇒真缺)**、**policy 红**(`TestCacheKeyIncludesTopic:303`/`TestCoalesceKeyIncludesTopic:350`)、**lixinger 红**(`TestLixingerEndpointsAreSeparateKeys`);yahoo/twelvedata 绿是因为它们的 topic 不承载可变参数、本就无此维度。\n\n**⚠ 给 dev 的取证方法(教训 25 的直接应用)**:上述干净注入点在 `policy/gate.go`,**超出本任务 `writes` ⇒ 对你不可达**(对验证者可达,它在隔离 worktree 里做的)。你自证时只能用本地的「topic 塌成常量」变异,**那必然带连带**。\n\n**但连带不废掉证据**——走纪律 4:对**你自己新加的那条测试**单独 `-run`,并核对失败信息确实来自那条断言。**连带影响的是别的测试,不影响对自己那条的归因。**\n\n**两个方向的错本 Sprint 都发生过,都要避免**:①看到一片红就以为变异无效(实际自己那条是真红);②把连带的红当成自己的证据(实际自己那条根本没红)。**判据只有一条:失败信息是不是来自你新加的那条断言。**\n"
+    ],
+    "boundary": [
+      "**不得改动生产代码**。本任务只补测试守护;若发现实现真有缺陷(如键确实漏了某参数),**报给 Leader 另行处置**,不要顺手改——那会让「补守护」与「修缺陷」两件事的证据混在一起",
+      "**既有测试断言体与场景一字不改**。特别注意 twelvedata 那个疑似守护文件:若判定它空转,**不要删它**,报给 Leader;若判定它有效,不要因为「看起来像可以合并」而重写"
+    ],
+    "error_handling": [
+      "**区分度与聚合度是两个方向,本任务只补区分度**(契约教训 19)。三家的聚合度情况已由 qa-agent-8 扫过:twelvedata 与 lixinger 用 `Format(\"2006-01-02\")` 按天,比分钟更粗,`time.Now()` 抖动天然落进同一槽,**不受聚合度缺陷影响**;tushare 需现读确认。**若发现 tushare 有聚合度缺口,报给 Leader 另开,不要扩本任务范围**",
+      "**【范围追加,test-agent-17 八家横表实测发现,Leader 落盘】tushare 缺「错误不写缓存 / 校验留在被缓存 fn 内」守护——七家里唯一一家没有。**\n\n**实现是对的**(40203 校验在 `callHTTP` 内,即被缓存的 `fn`),**但没有测试钉住**。变异 TS-C11b(业务错误在 fn 内被藏起当成功返回、错误在 Fetch 之外重抛):**既有全套无一转红**;验证者探针(40203 连调两次断言 HTTP 次数)基线绿、变异后红。\n\n**失效形态比其余各家更坏**:第二次调用**静默返回成功且无数据**——不是「错误持续一个 TTL」,是**错误变成了成功**,上层会当作「该标的今天没数据」并可能落库。\n\n**要求**:补一条守护,判据为「业务错误(如 40203)连续两次调用须各发一次 HTTP」,即错误不进缓存槽。**变异判据**:把校验从被缓存的 `fn` 内挪到 `Fetch` 之外(或在 fn 内吞掉错误改为成功返回),该测试须转红。\n\n**⚠ 取证陷阱(验证者踩过并自报)**:它的**首版变异是错的**——直接停用 `if env.Code == 40203`,5 条测试转红,**但那些红是「错误不再产生」而非「错误被缓存」,归因方向不对**。必须造**保留错误语义、只改缓存行为**的变异才拿得到有效证据。**变异改错了变量,红也是假的**——与「探针写错了」是同一回事,只是发生在另一侧。\n"
+    ],
+    "non_functional": [
+      "三包 `go test -race` 绿、0 SKIP;各包覆盖率不低于既有水位(**报数注明口径:单包**——本 Sprint 已八次出现口径分歧)"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "verifier": "test-agent-16",
+  "discovery": ".arcforge/discoveries/TASK-020.json"
+}

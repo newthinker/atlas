@@ -1,0 +1,36 @@
+{
+  "key_findings": [
+    "**缺口的精确位置：既有 `TestCallKeyDistinguishesParams` 是 `callKey` 的纯函数断言，不走 Fetch 路径。** 它断言 `callKey(A) != callKey(B)`，守的是「callKey 会区分」；而把**调用点** `callKey(params, fields)` 换成固定串时，`callKey` 本身没动 ⇒ 纯函数断言不受影响；`TestCallKeyIsOrderIndependent` 的聚合度断言在固定键下 仍然 `hits()==1` ⇒ 也通过。**两条都绿，变异存活。** ⇒ **缺的不是「callKey 会区分」，是「缓存槽真的用了 callKey 的输出」** —— 纯函数守护与行为守护是两个对象。本任务的三条新守护一律落在**行为侧**（HTTP 请求次数），K1 变异实测：新增 4 个子用例全红、**既有两条仍绿**，这一格既复现了 test-agent-16 的判定，也证明新测试正好补在那个缺口上。",
+    "**tushare 的 key 是日粒度，日期对照必须相差 ≥1 天 —— 这条是现读得到的，不能照搬别包（教训 23）。** `callKey` 按键名字典序拼 `k=v&` + `fields=<fields>`；日期经 `dateParams` 用 `Format(\"20060102\")`。照搬 crypto/eastmoney 的毫秒或秒级偏移会落进同一个键，失效方向是**假的「变异无效」**（它伪装成「这里本来就没问题」），比假绿更隐蔽。",
+    "**验证者踩过的错误变异形态，我用一次对照把它钉死了：我的测试在 E1 下红、在 E2 下绿。** E1（保留错误语义、只改缓存行为：错误在 fn 内被藏起当成功返回，Fetch 之后重抛）⇒ **红**；E2（验证者首版：停用 `if env.Code == 40203`）⇒ **绿**。E2 之所以不该红：40203 落到 `env.Code != 0` 分支后**仍然产生错误**，且**缓存行为一字未变** —— 验证者当时看到 5 条转红就采信，那些红是「错误类型变了」而非「错误被缓存」。⇒ **我的测试能区分这两者，正是 DoD 要求的判据。「变异改错了变量，红也是假的」在这里有了正反两面的实证。**",
+    "**topic 维度的本地变异必然带连带，但连带不废掉证据（纪律 4 的直接应用）。** 干净注入点在 `policy/gate.go:155`（`ck := topic+\"|\"+key` → `ck := key`）超出本任务 `writes`。我只能用「topic 塌成常量」，实测全量 **6 条红**（策略不等价导致的连带）。按纪律 4 对新增的 `TestCacheSlotDistinguishesTopic` 单独 `-run`：失败信息来自 **keyguard_test.go:165** 我自己的断言，归因干净。⇒ **判据只有一条：失败信息是不是来自你新加的那条断言**；一片红不等于变异无效，也不等于自己那条有效。",
+    "**我自己写的测试也犯了陷阱 10（有效性判定抢在行为断言之前），是变异把它暴露出来的。** 首版 `TestBusinessErrorIsNotCached` 把「每次调用都应报错」的循环写在 `hits()` 断言之前。注入 E1 后确实转红，但失败信息是「**第 1 次调用应返回业务错误 —— 本轮未构成检验**」—— **缺陷伪装成了测试构造失败，方向指反**。改为先断言请求次数（「错误有没有进缓存槽」的直接观测量）、再逐个检查错误后，同一变异下的消息变成「HTTP 请求 1 次, want 2 —— 业务错误被写进了缓存槽」+「第 1 次调用静默返回了成功 —— 上层会把它当作『该标的今天没数据』并可能落库」。⇒ **陷阱 10 不只发生在概率性并发测试里，任何「有效性判定 + 行为断言」并存的测试都可能踩。**"
+  ],
+  "decisions": [
+    {
+      "decision": "四个参数各写一个子用例，而不是一条测试覆盖多维度。",
+      "rationale": "DoD 明确要求（参照 crypto）。变异 K2（只把 `fields` 排除出 key）实测**仅 `fields` 子用例转红**，其余三个照常绿 —— 若写成一条测试凑合覆盖，任一维度漏进 key 都会被其余维度的差异掩盖，且失败信息指不出是哪个参数。**这不是形式条款，K2 给了它实证。**"
+    },
+    {
+      "decision": "topic 维度的对照取 `daily` 与 `index_daily`，不取 `daily_basic`。",
+      "rationale": "内置表里四个 tushare 主题**策略并不等价**（`policy.go:75-82`：`daily_basic` 比其余三个多一个 `Quota{5,24h,SH}`）。本测试要隔离的是**缓存槽**，若踩在策略不等价的两个主题上，配额会成为混淆因子。故自建 `ttlTable` 给两个策略等价的主题登记同一份带 TTL 的策略。"
+    },
+    {
+      "decision": "「错误不写缓存」那条自带一个「成功调用须命中缓存」的对照组。",
+      "rationale": "没有它，「两次调用各发一次 HTTP」在 **TTL 根本没生效**时也恒成立 —— 那时本测试与「缓存压根没开」无法区分，是一条恒真断言。对照组是它的下界。对照组放在行为断言**之后**（陷阱 10）。"
+    },
+    {
+      "decision": "用 base→variant→base 的**重放**序列，而不是只发两次断言 2。",
+      "rationale": "只发 base、variant 两次时，「根本没缓存」也恰好是 2 次请求，与正确实现无法区分。第三次重放 base 才把两种缺陷同时排除：该参数不进 key（第 2 次误命中 ⇒ 总数 1）、根本没缓存（总数 3）。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/tushare/keyguard_test.go"
+  ],
+  "interfaces_exposed": [
+    "**本任务无生产代码改动**（boundary[0]），`git status` 确认 tushare 包下只有本任务的新增测试文件；既有测试断言体与场景一字未改（boundary[1]，`git diff --stat HEAD` 除新文件外为空）。",
+    "包内测试辅助（新文件内，不与既有 helper 重名）：`ttlTable(topics ...string)`（给指定主题登记同一份带 TTL 的策略，避开内置表四个主题策略不等价的问题）、`scriptedServer(t, bodies ...string)`（按次序返回 body 并计数，既有 `countingServer` 只能返回固定 body）、`baseParams()` / `baseFields` / `keyGuardBody`。",
+    "三条新守护：`TestCacheSlotDistinguishesEachParam`（4 子用例：ts_code / start_date / end_date / fields）、`TestCacheSlotDistinguishesTopic`、`TestBusinessErrorIsNotCached`。"
+  ],
+  "verification": "tushare 包 **50 PASS / 0 FAIL / 0 SKIP**，`go test -race` 绿；`go build ./...` 与 `go vet` 过；gofmt 干净。**覆盖率（口径：单包）95.3%，与基线持平**（本任务只补测试、不新增生产语句，故覆盖率不变是预期结果）。提交 `792d915d047fe0c5214f79e0a6957a809ae0bbd0`（显式 pathspec，`git show --stat` 核对只含 1 个文件）。【变异反证 5 个，注入前先写下预期表（scratchpad/exp-020.md），每条过四道门】**K1** `callKey(params, fields)` 调用点换固定串 → 新增 4 个子用例**全红**，**且既有 `TestCallKeyDistinguishesParams` 与 `TestCallKeyIsOrderIndependent` 仍绿** ⇒ 复现 test-agent-16 的判定 + 证明新测试正好补上该缺口（闭环的左下格）；**K2** 只把 `fields` 排除出 key → **仅 `fields` 子用例红**，实证「每个参数各自独立验证」非形式条款；**T1** topic 塌成常量 → 全量 6 红（策略不等价的连带），按纪律 4 单独 `-run` 确认失败来自 `keyguard_test.go:165` 我自己的断言；**E1** 保留错误语义、只改缓存行为（错误在 fn 内被藏起当成功返回、Fetch 之后重抛）→ `BusinessErrorIsNotCached` 红 `:195`/`:199`；**E2** 停用 `if env.Code == 40203`（验证者首版的错误形态）→ **本测试保持绿**，因为 40203 落到 `env.Code != 0` 后仍产生错误且缓存行为未变 ⇒ **E1 红 / E2 绿的对照证明本测试确实在区分「错误被缓存」与「错误类型改变」，而非笼统地对任何改动都红**。每个变异还原后均以 md5 与基线比对确认一致，收尾工作区只余本任务文件。【自查发现并修正一处】首版 `TestBusinessErrorIsNotCached` 踩了陷阱 10（有效性判定在行为断言之前），E1 下的失败信息是「本轮未构成检验」，缺陷伪装成测试构造失败；调整断言顺序后消息正确指向「业务错误被写进了缓存槽」。【环境限制】GitNexus detect_changes 未执行——工具集不含该 MCP 工具；已用全仓 go build + 本包 -race 替代。"
+}

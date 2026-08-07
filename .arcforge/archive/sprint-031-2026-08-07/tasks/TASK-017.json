@@ -1,0 +1,62 @@
+{
+  "id": "TASK-017",
+  "title": "baostock 接入 Gate（仅 TTL，修复删除 CachedCollector 造成的缓存回归）",
+  "description": "**QA 终审发现的真实回归**:删掉的 maybeCache 覆盖 yahoo/eastmoney/crypto/tushare/baostock **五家**(设计 §1.3 第 32 行),而新 Gate 内置表只登记了 yahoo/tushare ⇒ baostock 丢失了 FetchHistory 的 TTL 缓存。symbol_detail.go:148 是 HTTP 接口路径,每次请求直打上游。**根因是设计文档自相矛盾**:§4.1 只就「节流」推理却把结论写成「行为零变更」,而 §1.3 已记下 maybeCache 覆盖这三家 ⇒ reason_class=dod_defect,非任何任务实现错误。**照 TASK-010(lixinger)的模式做**,它是最接近的已验证范例:仅补 TTL 缓存,不新增任何节流/配额。**必读** .arcforge/docs/01-design/design-spec.md(1400+ 行,前 14 个任务的全部教训)与 .arcforge/discoveries/TASK-010.json。先 git commit 再 transition dev_done;discovery 指针在 dev_done 前回填;commit 必须带显式 pathspec。",
+  "module": "collector-baostock",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/baostock/",
+    "internal/collector/baostock/gate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchHistory 经 Gate 走 TTL 缓存:同参数重复调用只发一次 HTTP 请求(**断言请求次数,不断言返回值** —— 契约陷阱 2:Fetch 类型断言失败时会「当作未命中重取」,返回值仍正确,断言返回值的写法永远绿)",
+      "缓存 key 覆盖全部影响结果的参数(symbol/区间/interval);**至少用两组不同参数验证不互相命中**(契约陷阱 16:只用一个 symbol 时,键里丢掉 symbol 也照样全绿,而生产上会拿到别的标的数据 —— 静默错数据比缓存没生效危险得多)",
+      "构造函数取 policy.Default() 存入私有 gate 字段,**并有一条独立测试断言这一点**(契约陷阱 12:其余测试各自注入闸门、nil Gate 又是透明的 ⇒ 漏掉这一行时全套测试照常绿,生产路径缓存整体静默 no-op)",
+      "主题常量与内置表一致(契约陷阱 15:测试里用同一常量登记与查询,写错也自洽;生产走内置表则 Lookup 落空 ⇒ Gate 直通)。**⚠ 注意:三家均为通配登记(<域>.*),Lookup 的通配回退让任何 eastmoney.xxx/crypto.xxx/baostock.xxx 都能命中 ⇒ 本条在通配形态下测不出东西(QA 观察)**。改为验:①主题名第一段与内置表登记的域一致(写错域名才会落空);②**若为子源指定了独立 Domain(见 boundary[0]),须断言 Lookup 返回的 Policy.Domain 确实是那个值**——那才是通配登记下真正可测的部分",
+      "**缓存键必须双向约束:聚合度 + 粒度不得放粗**(qa-agent-8 于 TASK-016 发现聚合度缺口;dev-agent-36 补出反方向;test-agent-16 给出防假红措辞)。\n\n**(a) 聚合度**:以墙钟为 end 的两次相邻调用**必须命中同一缓存槽**。上层 `app.go:451` 的 `end := time.Now()` 经 `:462` 传进 FetchHistory,键若保留纳秒/秒级精度 ⇒ 每次调用键都不同 ⇒ **生产命中率恒为零,而单测用固定时刻调两次照样全绿**(固定时刻在 Truncate 前后相等,这是整套原测试对该缺陷完全无感的原因)。**变异判据:去掉 `Truncate(time.Minute)` 后该测试须转红。**\n\n**(b) 粒度不得放粗**(dev-agent-36 补,D2 变异实证不可省):只写 (a) 的话,把 Truncate 改成小时/天**照样全绿**,而那会让相隔几分钟的不同查询串槽、静默返回错区间数据。**变异判据:把截断放粗到 time.Hour 后须转红。**\n\n**⚠ 测试写法(test-agent-16 实测,防假红):不要字面用两次 `time.Now()`**——跨分钟边界会偶发假红。取 `base := time.Now().Truncate(time.Minute).Add(20*time.Second)`(当前分钟的中点)与 `base.Add(3*time.Second)`,同一语义但确定。约 1e-7 的跨边界概率可以完全消除,就没理由留着。\n\n**本条的方法论(dev-agent-36 归纳,已进契约):只约束一个方向的判据,会放过反方向的失效。写「A 必须能区分 B」时要同时问「什么情况下 A 必须**不**区分」。** 区分度不足会串数据(**吵闹的错**),聚合度不足会命中率归零(**静默的错**——不报错、不出错数据、返回值完全正确,只有生产路径才暴露)。\n"
+    ],
+    "boundary": [
+      "**不被节流**:连续请求无最小间隔等待(否定断言,契约陷阱 8 —— 直接观测,不用间接现象推断)。本任务只补缓存,不新增任何它今天没有的限流行为",
+      "缓存命中时返回独立切片,调用方修改不污染缓存(**注意 slices.Clone 只在元素是 flat value type 时才等于深拷贝**,契约 §T2;确认本包元素类型)",
+      "**既有测试互不串味**(契约陷阱 13):接入缓存后,多个既有用例若共用同一 topic+key 会变成同一缓存槽,先跑的成功响应会让后跑的「应报错」用例静默失效。先 grep 既有用例的参数分布,必要时用包级 TestMain 装零策略闸门"
+    ],
+    "error_handling": [
+      "**错误不写缓存,且校验必须留在被缓存的 fn 内部**(契约陷阱 14):若本包有「HTTP 200 但响应体表示失败」的路径,校验挪到 Fetch 外面会把错误响应当成功 body 缓存 —— 一次瞬时故障变成整个 TTL 的持续故障。**决定性断言是 HTTP 请求数而非返回 error**:两次调用应各发一次请求。**policy 包错误不得外泄**(QA 前瞻:三家新接入若只包 Fetch 而不处理,config 可达的泄漏点会从 1 处变 4 处):policy.ErrQuotaExceeded / ErrTimeout 不得出现在调用方可见的错误链上,照 tushare/client.go:99 的形态映射到本包哨兵错误,或至少包一层本包前缀。**注意配额/超时是临时性错误,绝不可映射成永久性错误**"
+    ],
+    "non_functional": [
+      {
+        "desc": "既有测试断言体与场景一字不改且全绿(本包无私有节流状态要删,故无 TASK-007/008 那类豁免需求);go test -race 绿、0 SKIP;覆盖率不低于既有水位",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-015"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-010",
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/baostock"
+  ],
+  "writes": [
+    "./internal/collector/baostock"
+  ],
+  "reason_class": "task_defect",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-017.json",
+  "verifier": "test-agent-16",
+  "reject_reason": "functional[4]（缓存键聚合度）无守护。DoD 为该条明文规定了变异判据「去掉 Truncate 后该测试须转红」——我照做：把 collector.go:45-46 缓存键里的两个 Truncate(time.Minute) 去掉后，28 个测试全绿（四道门全过：md5 已变 / go vet 通过 / ===RUN=28 / 无任何断言行）。**实现是对的**（Truncate 已正确写入，与 yahoo.go:292 与 eastmoney.go:435 同款），**缺的只是测试**。生产影响真实且正是本任务的全部目的：app.go:451 的 end := time.Now() 经 :462 传进 FetchHistory，键若保留秒级精度则每次调用键都不同 ⇒ 缓存命中率恒为零 ⇒ 本任务要修的「被删 maybeCache 造成的缓存回归」实际未被修好，而测试一片绿。测试集抓不到的原因：现有 8 个测试全用固定时刻（time.Unix(1600000000,0) 等），固定时刻在 Truncate 前后相等；grep time.Now() 的命中全落在 client_test.go（走 FetchDaily 不经 Gate）、collector_test.go:79（单次调用无法验两次同槽）、gate_test.go:211（是计时用的 t0）。修复（仅一条，实现无需改动）：加一条测试，用同一分钟内的两个确定时刻作 end 连调两次并断言 HTTP 请求数为 1。**不要字面用两次 time.Now()**——跨分钟边界会偶发假红；用 base := time.Now().Truncate(time.Minute).Add(20*time.Second) 与 base.Add(3*time.Second) 表达同一语义且确定。我已验证该候选测试的 2x2 同环境闭环：有 Truncate 时绿、去掉 Truncate 时红（HTTP 请求 2 次 want 1），而现有测试集在同一变异下全绿（左下格 = 返工理由）。另请在 gate_test.go 头部的 DoD↔测试映射注释里补上 functional[4] 一行（现缺，这正是漏测的信号）。其余 7 条 DoD 全部通过，另 7 个变异（键去 symbol / 绕过 Gate / gate:nil / 域段写错 / 内置表加 MinInterval / 去 slices.Clone / mapPolicyError 改用 %w）全部被捕获；21 个测试 0 SKIP、-race 绿、覆盖率 96.4%、既有测试文件一字未改、scope 无越界。详见 .arcforge/docs/04-test/TASK-017-verification.md",
+  "rework_count": 1
+}

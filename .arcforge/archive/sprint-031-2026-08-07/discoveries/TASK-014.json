@@ -1,0 +1,40 @@
+{
+  "key_findings": [
+    "**纯回归测试任务没有 RED→GREEN 可以证明测试有效**——三条测试一写就全绿(被测行为在 TASK-009 已实现),而「一写就绿」恰恰是最大风险:空洞测试的表现与有效测试完全一样。本任务的有效性完全依赖变异自证。三条变异(N1 去掉 ErrQuotaExceeded→ErrRateLimited 映射 / N2 映射成永久性 ErrNoPermission / N3 takeQuota 恒放行使配额不拦截)**各自被三条测试全部捕获**,且逐条核对了红的是哪一行断言。",
+    "**变异证据链断裂点①(改动量为空)在本任务实际发生,并伪装成「N2 存活」。** 我第一次写 N2 的正则锚在 `return rows, err` 上,而 TASK-009 的 (b) 返工已把它改成 `return cloneRows(rows), err`,正则静默失配、文件一个字节没改、测试当然全绿。**若采信那次读数,我会报出一个假的「变异存活」发现。** 是加了落盘校验(`git diff --numstat` 必须非空 + 显式 `go build`)才发现的。⇒ 变异注入后**必须先证明变异真的落盘且能编译**,再看红绿;锚点文本要现读现取,不能凭记忆——**尤其是自己刚改过的代码**。",
+    "方案行 4143 的 `Quota{Limit: 0}` 地雷在本任务的后果比 TASK-009 更隐蔽:policy `quota.go:57` 是 `if q.Limit > 0 && ...`,`Limit<=0` 语义是**不设上限**,照抄会让配额永不触发、请求真的发出去,而方案那个 handler 写的是 `t.Error(\"配额已满时不应发出请求\")` —— 失败会**表现成「实现有问题」而不是「测试写错了」**,极易把人引去查 TASK-009 的映射。已按 DoD 指定修法改为 `Limit: 1` + 先成功消耗一次,并把首次调用当作**正向对照**(证明链路真的通,而不是整条配额链没接上)。**注意方案行 4096 的第一个测试没有这个 bug**——它用的是预填账本 count=5 + 内置 Limit=5。",
+    "**DoD functional[2]「行为路径一致」是一条关系性质,分别断言两次证明不了它。** 各自断言只能说明「各自符合我写下的期望」,若两组期望都写窄了,不一致仍会溜过去。故新增 TestLocalQuotaAndServerRateLimitDegradeIdentically **并排比对**两条路径产出的 Report 形状(Degraded/Failed 条数、Refreshed 计数、文案分类),判据不依赖我对文案的预设。",
+    "构造顺序依赖(契约陷阱 4)已用**结构**而非注释来防:`tushare.NewWithBaseURL` 在构造时快照 `policy.Default()`,故 SetDefault 必须在其之前。把两步封进 `newRealTushare(baseURL, gate)` 一个函数,**让顺序不可能写错**;配 `swapDefaultGate(t)` 返回还原函数。只写注释不够——对调后编译通过、断言大概率仍绿(拿到生产策略而非测试策略,表现为变慢/偶发失败),极易被当成 flaky 掩盖。",
+    "**共享主工作区存在一个提交层面的实质风险(与本任务无关但需登记)**:交付时 `git status` 显示 dev-agent-35 的 TASK-011 在途删除(`internal/collector/cache.go`、`cache_test.go`)已处于 **staged 状态**,`internal/core/types.go` 也被改。此时任何 agent 执行不带 pathspec 的 `git commit` 都会**把别人未完成的改动一并提交**。本次用 `git commit <显式 pathspec>` 规避,提交后核对 `git show --stat` 只含自己的 1 个文件、且他人改动仍未提交。⇒ 多 agent 共用工作区时,**提交必须带显式 pathspec,且提交后核对改动面**。"
+  ],
+  "decisions": [
+    {
+      "decision": "保留方案的设计:TestRefreshTushareLocalQuotaBlocksBeforeHTTP 用**真实 tushare client 而非桩**,只把 ts 换掉、其余装配与既有 TestRefreshTusharePermissionNotRetried 同构。",
+      "rationale": "验收标准 4 是一条跨包的端到端性质(tushare 侧映射 + prism 侧判定)。若两端都对着桩断言,只能各自证明「我这层没错」,证不了调用方真的走对了分支——桩会把两端的约定复制一遍,而复制的约定不构成验证。用真实 client 时,N1/N2 变异(改 tushare 的映射)才能穿透到 prism 侧的断言上,实测确实如此。"
+    },
+    {
+      "decision": "变异实验在隔离 worktree(`../wt-014-mut` @ 199ed81)中做,不在主工作区。",
+      "rationale": "N1/N2 要改 internal/collector/tushare,N3 要改 internal/collector/policy —— 两者都在我声明的 scope(./internal/prism)之外,且当时有 4 个 agent 在主工作区并行作业(dev-agent-35 的 TASK-011 正在途)。在主工作区做变异会让别人读到瞬时的坏状态。实验完拆除 worktree,主工作区全程只多一个新测试文件。"
+    },
+    {
+      "decision": "TestQuotaErrorSatisfiesRateLimitedAssertion 的 handler 用计数而非方案原文的 `t.Error`。",
+      "rationale": "改成 Limit:1 后首次请求是**合法**的,`t.Error` handler 会把它误报成失败。改为计数后能同时表达两件事:hits==1 证明链路真的通(正向对照,防止「0 次请求」是因为整条配额链根本没接上而非因为被拦下),第二次仍为 1 证明被拦的那次确实没发出去。这与我在 TASK-009 给否定断言加正向对照是同一手法。"
+    },
+    {
+      "decision": "断言 `errors.Is(err, policy.ErrQuotaExceeded) == false`,把 error_handling[0] 的不外泄做成可执行判据。",
+      "rationale": "「policy 的错误不外泄」若只靠 code review 或注释,回归时无人守护。N1 变异(去掉映射)下该断言的失败信息直接打出 `err = policy: quota exceeded`,把外泄的具体形态显示出来,比一句「不应外泄」更利于定位。"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/quota_degrade_test.go(新建,225 行:countingTushareServer / newRealTushare / swapDefaultGate / exhaustedLedger / builtinDailyBasicTable 五个辅助 + 三个测试)"
+  ],
+  "interfaces_exposed": [
+    "本任务**无生产代码**,不新增任何生产接口。internal/prism/refresh.go 零改动(验收标准 1,已用 git diff 核实无输出)",
+    "包内测试辅助(供 prism 包后续测试复用):func countingTushareServer(t, body) (*httptest.Server, func() int) —— 记录实际收到的 HTTP 请求数",
+    "func newRealTushare(baseURL string, g *policy.Gate) *tushare.Client —— **把 SetDefault 必须先于 NewWithBaseURL 这条顺序依赖封进函数**,让它不可能写错(契约陷阱 4)",
+    "func swapDefaultGate(t *testing.T) func() —— 保存并返回全局闸门的还原函数,调用方 defer 它",
+    "func exhaustedLedger(t *testing.T, topic string, count int) string —— 写一份「本窗口已用满」的 FileStore 账本,窗口起点按 Asia/Shanghai 自然日对齐(与 policy.windowStart 的 Window>=24h 分支一致)",
+    "func builtinDailyBasicTable(t *testing.T) *policy.Table —— 内置表,只归零 MinInterval/TTL 以加速,**保留生产 Quota(Limit=5)** 并断言其为 5(配额是被测对象,不能改)"
+  ],
+  "verification": "主工作区实测,GOTOOLCHAIN=local,提交 8356662(父 199ed81)。(1) go test ./internal/prism/ -count=1 -v → **68 PASS / 0 SKIP / 0 FAIL**(新增 3 条)。(2) -race -count=1 → ok。(3) -cover → **94.0%**,等于既有水位 94.0%、达到 DoD 水位 94%(本任务只加测试文件,不改变覆盖率分母)。(4) 变异验证 3 条,注入前先写下预期,**每条都先做落盘校验(git diff --numstat 非空)与编译校验,再看红绿**,并对三个测试分别 -run 归属:N1(去掉 ErrQuotaExceeded→ErrRateLimited 映射)→ 三条全红,test2 命中第 167 行 errors.Is(ErrRateLimited) 与第 171 行不外泄断言,错误原文显示为 `policy: quota exceeded`;N2(映射成 ErrNoPermission)→ 三条全红;N3(takeQuota 恒放行)→ 三条全红,test1 命中第 124 行 `assert.Zero(hits())`「配额已满时不得真的发出 HTTP 请求」即 DoD functional[0] 的专属断言。**N2 首轮曾因正则锚点失配而假阳性「存活」,加落盘校验后复现为全红**。(5) 验收标准 1:git diff --stat 199ed81 -- internal/prism/refresh.go → **无输出**。(6) go build ./... 与 go vet ./internal/prism/... 通过;gofmt -l internal/prism/ 无输出(sankey 子包的既有未格式化文件与本任务无关)。(7) 变异 worktree ../wt-014-mut 已拆除。(8) scope:git show --stat 8356662 只含 internal/prism/quota_degrade_test.go 一个文件 225 行;dev-agent-35 的在途 staged 改动未被卷入,提交后仍为未提交状态。"
+}

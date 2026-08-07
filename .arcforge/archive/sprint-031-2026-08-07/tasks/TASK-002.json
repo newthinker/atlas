@@ -1,0 +1,60 @@
+{
+  "id": "TASK-002",
+  "title": "Gate —— 节流 / 合并 / TTL / 超时",
+  "description": "在 policy 包内实现 Gate:TTL 缓存 → singleflight 合并 → 节流 → 执行 fn 的准入控制链(配额留桩,TASK-003 接入)。**方案行 438-1014 已给出完整实现与测试代码,照抄即可。** 严格 TDD:先落 gate_test.go 跑红,再写 gate.go 跑绿,最后必须跑 -race(coalesce 与 throttle 用例都有并发)。注意本任务的 New 签名是 New(t *Table, opts ...Option),TASK-003 会有意改为 New(t, q QuotaStore, opts ...Option),这是两步演进不是缺陷。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-policy",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/collector/policy/gate.go",
+    "internal/collector/policy/gate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "同一限流域内相邻请求间隔 >= MinInterval,且不同主题共享同域闸门(a.x 与 a.y 同域必须串行);**跨域必须并发验证**——两个域的请求同时发起时互不阻塞(反审 D:串行写法测不出「throttle 期间持有全局锁」这一最典型的抽层回归,twelvedata 的 8s 等待会卡死整个进程的所有 collector)",
+      "Coalesce=true 时 20 个并发同 key 请求只触发 1 次 fn 且全部拿到正确返回值;不同 key 不合并;**缓存 key 与 singleflight key 均必须包含 topic**(反审 A5:Fetch 是泛型的,yahoo.chart 与 yahoo.eps 对同一 symbol 天然同 key,不含 topic 会跨主题串味导致 type assertion 失败静默重发或 panic)",
+      "TTL 内重复 Fetch 只调用 fn 一次,TTL 过期后重新调用;**缓存命中必须不等待 MinInterval**(反审 A2:执行链 ① 在 ④ 之前,否则 twelvedata 缓存命中还要白等 8s,缓存等于没加)",
+      "Do 强制 TTL=0：不读缓存也不写缓存，**串行**重复调用时每次都执行 fn（TestDoForcesNoCache）。注意这**不**排除 singleflight 对并发同 key 请求的合并——Coalesce 是主题策略的独立维度，Do 不覆盖它，并发下 20 个 Do 只发生 1 次副作用是设计如此（已在 Do 的文档注释中警告并给出出路：用不同 key，或关闭该主题的 Coalesce）；Wait 只施加节流不碰缓存/合并/配额"
+    ],
+    "boundary": [
+      "未登记主题直通:不缓存、不节流,3 次 Fetch 触发 3 次 fn 且总耗时 <50ms",
+      "nil *Gate 完全透明:Fetch 直接执行 fn 返回,Wait 与 Do 均不 panic",
+      "缓存条目数超过 maxCacheEntries 时淘汰最旧条目,entryCount() 不超过上限"
+    ],
+    "error_handling": [
+      "fn 返回错误时不写缓存(两次调用触发两次 fn);fn 超过 Policy.Timeout 时返回 ErrTimeout 且同样不写缓存;**Coalesce 路径下 fn 失败时全部等待者共享同一错误**(反审 A6 / 设计 §5.2:若对 waiter 返回零值+nil error,20 个并发调用方会拿到「空数据但无错误」,上层降级链不触发、静默写入空结果——这是本次改造引入的新语义,最该被钉住)"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/policy/ -race 全绿,runWithTimeout 超时后 fn 的 goroutine 结果写入带缓冲 channel 不泄漏;Timeout=0 语义为不限时(内置表所有主题 Timeout 均为 0,不得实现成立即超时)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/policy"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:18Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-agent-35",
+  "writes": [
+    "./internal/collector/policy"
+  ],
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verifier": "test-agent-17",
+  "reject_reason": "DoD functional[0] 点名要防的「throttle 期间持有全局锁」有两种代码形态,现有三个跨域测试只覆盖其中一种。G1b-var2(全局锁加在 throttle 的 if p.MinInterval<=0 {return} 之前)→ TestGateThrottleDoesNotHoldGlobalLock 转红(dev 做的是这个,自述属实);**G1b-var1(全局锁加在该 early-return 之后,只保护真正节流的路径)→ IsPerDomain / IsPerDomainConcurrent / DoesNotHoldGlobalLock 三个测试连同全量套件全绿,变异存活**。根因:测试把 b 域配成 \"b.x\": {}(MinInterval=0 完全不节流),于是 b 域走 throttle 的 early-return,根本不进入持锁临界区——任何位于该 return 之后的全局锁对 b 域都不可见。这不是纸面洁癖:先做 MinInterval 快速路径检查再拿锁是很自然的写法,该形态是现实的回归风险,而 DoD 用「反审 D」特别标注这条正因为 twelvedata 的 8s 等待若持全局锁会卡死进程内所有 collector。**修复一行,已实测**:TestGateThrottleDoesNotHoldGlobalLock 里 \"b.x\": {} 改为 \"b.x\": {MinInterval: time.Millisecond}——b 域必须 MinInterval>0 才会进入持锁临界区,取极小值保证正确实现下几乎立即返回、不影响 150ms 阈值;实测修复后 var1 红、var2 红、正确实现连跑 5 次全绿无假红。建议同步更新该函数注释(现注释说「b 域完全不节流:正确实现下必须立即返回」,应改为说明 b 域必须也进入持锁路径、故取极小正值而非 0)。其余 12 项 DoD 全部 PASS:dev 自证的 7 个变异(G1/G2/G3/G4/G5/G6/G7)经我独立复现全部属实,且对 G1/G2/G3/G4/G5 均单独 -run 了 DoD 指定的专属守护者再确认(不以套件转红为准,防 TASK-001 的 M7→M21 式误判);我另补 G9~G14 共 7 个变异覆盖 boundary/error_handling/functional[3],全部转红。36 测试全 PASS 0 SKIP、-race 绿、覆盖率 97.3%(fetch 91.2%,未覆盖三处为 warn 默认空体/合并窗口二次查缓存/takeQuota 错误分支,均非 DoD 要求)、collector 树 17 包回归绿、C3 deps 仅 policy 自身、gofmt/vet 干净、scope 仅 gate.go+gate_test.go 无越界,且 policy.go/policy_test.go 的 md5 与 TASK-001 验收基线逐字节一致(未动上游产物)。另有两条不计入本次 FAIL 但需知悉:(1)G8(删掉未登记主题的直通短路)存活,判为**等价变异体**——零值 Policy 每个字段都让后续步骤短路,行为完全等价;但已实测验证它只在 takeQuota 还是桩时等价,TASK-003 接入真实 QuotaStore 后未登记主题会被计入配额(违反 C6)而现有测试仍测不出,建议 TASK-003 补一条「未登记主题不触达配额记账」的断言。(2)DoD functional[3] 措辞歧义需 Leader 定口径:写的是「Do 强制 TTL=0 每次都执行 fn」,而实现与文档是「Do 仍受 singleflight 合并,20 个并发 Do 只发生 1 次副作用」,并发下矛盾;我采用的口径是 functional[1] 已统一规定合并适用于所有走 fetch 的路径,故「每次都执行」应读作「不被缓存吞掉」,据此判 PASS(G13 顺序调用下转红有守护)——**这是措辞歧义非实现缺陷、不是 dev 的责任**,若 Leader 口径不同则应记 dod_defect 而非本条 task_defect。最后据实记录:dev 这次自查质量很高,7 个变异全部属实,还在 discovery 里自曝了自己最初的双域对称测试对全局锁是假绿(发现 throttle 等的是绝对时刻而非相对间隔)并据此补了非对称版、明确标注 IsPerDomain「不构成守护」、诚实声明 20ms sleep 是概率性且猜错是假绿而非假红。本轮发现正是那条论证链的延伸:方向对,落点差一步(为制造「B 的等待时刻晚于 A 的完成时刻」而把 b 域配成完全不节流,恰好绕开了持锁路径)。详见 .arcforge/docs/04-test/TASK-002-verification.md",
+  "reason_class": "task_defect",
+  "rework_count": 1
+}

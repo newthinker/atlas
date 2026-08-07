@@ -1,0 +1,61 @@
+{
+  "key_findings": [
+    "Gate 在 policy 包内，不 import internal/collector（TASK-001 的 TestNoImportOfCollectorRoot 继续守护；新增依赖只有 golang.org/x/sync/singleflight，它已在 go.mod 直接 require 块，无需改 go.mod）。",
+    "执行链固定为 ①查 TTL 缓存 → ②singleflight 合并 → ③配额预判 → ④节流 → ⑤执行 fn。**① 在 ④ 之前是契约不是巧合**：缓存命中不再等节流，否则 twelvedata 命中缓存还要白等 8s。已由 TestCacheHitSkipsThrottle 钉住（把 throttle 提到 load 前即转红）。",
+    "缓存键与合并键统一为 `topic + \"|\" + key`，两者是同一个 ck。不含 topic 会跨主题串味：缓存侧表现为「多调一次 fn」（类型断言失败当作未命中重取，返回值仍正确），合并侧表现为「静默返回零值 + nil error」。",
+    "节流锁的粒度是**每个域一把**（domainState.mu），不是全局一把。throttle 刻意在持锁状态下 sleep，让并发调用方依次串行放行、形成均匀节奏。",
+    "**跨域不阻塞有两种独立的失效形态，需要两个不同的测试，缺一不可**：(a)「所有域共享同一个 lastReq」由 TestGateThrottleIsPerDomainConcurrent（双域对称）捕获；(b)「每域独立 lastReq 但 throttle 额外持一把全局锁」只有 TestGateThrottleDoesNotHoldGlobalLock（a 域长等待 + b 域不节流）能捕获。方案原版的串行 TestGateThrottleIsPerDomain 两种都测不出，保留仅作基础回归。",
+    "**runWithTimeout 的结果 channel 必须带缓冲**：无缓冲时超时后没人再读，fn 的 goroutine 会永久阻塞在发送处而泄漏。Timeout<=0 语义是「不限时」直接调 fn，内置表所有主题 Timeout 均为 0，实现成立即超时会让全部主题一起失效。",
+    "takeQuota 目前是放行一切的桩（`return nil`）。TASK-003 接 QuotaStore 时 New 的签名会变为 New(t *Table, q QuotaStore, opts ...Option)，这是计划内的两步演进，不是缺陷。配额预判位于 ③，在节流之前——超额时不发请求也不占用节流配额。",
+    "Do 强制 noCache 但仍走同一个 fetch，因此在 Coalesce=true 的主题上照样被 singleflight 合并（内置表所有主题 Coalesce 均为 true）。已在 Do 的文档注释中标注，并给出出路：需要每次都发生时用不同的 key，或为该主题关闭 Coalesce。",
+    "Gate 只读 Table（仅调 Lookup），不在运行期改表——与 TASK-001 discovery 里「Table 是裸 map 非并发安全、构造后只读」的约束一致，无需给 Table 加锁。",
+    "跨域不阻塞的第二种形态（throttle 持全局锁）本身还要再分两种：锁加在 `if p.MinInterval <= 0 { return }` 之前 / 之后。测试里参与对照的那个域**必须 MinInterval > 0**，否则它走快速路径、不进入临界区，只能覆盖前一种。三个跨域测试的完整分工见 gate_test.go 头部映射注释。"
+  ],
+  "decisions": [
+    {
+      "decision": "为「跨域不阻塞」写两个互补的并发测试，而不是一个。",
+      "rationale": "我最初只设计了双域对称版（两域都预热、barrier 同时放行、测总耗时），并论证它「无论调度顺序如何，全局锁必然串行 600ms」。**自己注入变异时发现这个论证是错的**：throttle 等的是绝对时刻 lastReq+MinInterval，不是「轮到我时再等 MinInterval」；两域几乎同时预热时，A 持全局锁等到 T+300ms 释放后，B 要等的绝对时刻也已经过了，于是立即返回，总耗时与按域隔离无异——双域对称版对「额外全局锁」这一形态是假绿。补 TestGateThrottleDoesNotHoldGlobalLock（a 域长等待 500ms + b 域完全不节流）才能让 B 的等待时刻显著晚于 A 的完成时刻，从而暴露全局锁。两个变异 G1/G1b 分别验证了两者的分工。"
+    },
+    {
+      "decision": "TestGateThrottleDoesNotHoldGlobalLock 用一个 20ms 的 sleep 让 A 先进入 throttle，并在注释里如实声明这是概率性的。",
+      "rationale": "throttle 的等待发生在持锁临界区内，包外没有任何可观测信号，无法确定性地知道 A 已持锁——这也是我否定「预热后 sleep 猜时序」那版原始设计的理由。但此处猜错的后果是**假绿而非假红**（B 抢先拿锁则测不出问题），且可用多轮重复（rounds=3）降低漏检概率。与其假装确定性，不如把局限写在注释里让后人知道边界。"
+    },
+    {
+      "decision": "保留方案原版的串行 TestGateThrottleIsPerDomain，但在注释里写明它不构成守护。",
+      "rationale": "两个全局锁变异它都测不出（b 域 domainState 新建、lastReq 零值，顺序调用必然立即返回）。删掉会丢失一层基础回归，留着而不标注则会让人误以为跨域约束已被守护——标注清楚是成本最低的处理。"
+    },
+    {
+      "decision": "在 Fetch 的注释里写深拷贝限定，但同时写明「它不构成防线」。",
+      "rationale": "约束要贴在会被违反的那一侧。真正会违反「调用方须深拷贝」的是各 collector 的 FetchHistory，读 Fetch 定义的人是已经在关心缓存语义的人。限定表述沿用被取代的 cloneOHLCV 原文（「flat value type」那句经得起时间考验，重新措辞恰恰是上次丢失限定的成因）。真正的防线在 TASK-007~010 各自 DoD 里那条「缓存命中时返回独立切片」的测试。"
+    },
+    {
+      "decision": "额外补 TestWithWarnIsApplied（DoD 未要求）。",
+      "rationale": "WithWarn 覆盖率原为 0%、New 的 nil 分支未覆盖。TASK-003 的配额 fail-open 要靠这个回调上报账本异常，若 Option 没被应用，告警会静默丢失而一切测试照常绿——这正是本 Sprint 反复出现的「守卫看起来在、实际不设防」。已反证：删掉 New 里的 opts 应用循环后该测试转红。"
+    },
+    {
+      "decision": "20 并发的「全部拿到正确返回值」用定长切片 + 逐索引断言，不用 append 收集。",
+      "rationale": "量词断言必须有下界，否则集合为空时 vacuously true。定长切片的长度由测试自身控制、遍历必然执行 n 次，天然无空真风险；若改用 append 收集则必须先断言 len==n。已在测试注释里写明这个理由，避免后人改写成 append 时丢掉这层保证。"
+    },
+    {
+      "decision": "TestGateThrottleDoesNotHoldGlobalLock 的 b 域从 MinInterval=0 改为 time.Millisecond（返工修复，一行）。",
+      "rationale": "throttle 开头有 `if p.MinInterval <= 0 { return }` 的快速路径。b 域配成 0 时**根本不进入持锁临界区**，于是只能捕获「全局锁加在该 early-return 之前」这一种形态；加在**之后**（只保护真正节流的路径）的形态静默存活——而「先做 MinInterval 快速路径检查再拿锁」是很自然的写法，这是现实的回归风险。取极小正值让 b 域也进入临界区，同时正确实现下几乎立即返回、不影响 150ms 阈值。根因是我为了制造「B 的等待时刻晚于 A 的完成时刻」而把 b 域配成完全不节流，恰好绕开了要测的那条路径——**为满足一个约束而选的参数值，可能同时使另一个约束失效**。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/gate.go",
+    "internal/collector/policy/gate_test.go"
+  ],
+  "interfaces_exposed": [
+    "var ErrTimeout = errors.New(\"policy: fn timeout\") —— fn 自身超过 Policy.Timeout 时返回；用 errors.Is 判定",
+    "const maxCacheEntries = 512 —— 缓存条目上限，超出时按 seq 淘汰最旧一条",
+    "type Gate struct{...} —— 未导出字段；零值不可用，必须用 New 构造；**nil *Gate 是透明的**（Fetch 直接执行 fn，Wait/Do 不 panic），供未接线的调用点安全降级",
+    "type Option func(*Gate)",
+    "func WithWarn(f func(msg string, err error)) Option —— 注入告警回调，配额账本异常时 fail-open 放行并经此上报",
+    "func New(t *Table, opts ...Option) *Gate —— t 为 nil 时用内置表。**TASK-003 会改为 New(t *Table, q QuotaStore, opts ...Option)**，计划内的两步演进",
+    "func Fetch[T any](g *Gate, topic, key string, fn func() (T, error)) (T, error) —— 包级函数而非方法（Go 不支持泛型方法）。**命中缓存时不复制返回值**，多个调用方拿到同一个值；T 为切片/映射时调用方须自行深拷贝，且 slices.Clone 只在元素是 flat value type 时才等于深拷贝",
+    "func (g *Gate) Do(topic, key string, fn func() error) error —— 强制 TTL=0。**但仍受 singleflight 合并**：Coalesce=true 的主题上 20 个并发 Do 只发生 1 次副作用；需要每次都发生时用不同的 key 或关闭该主题的 Coalesce",
+    "func (g *Gate) Wait(topic string) —— 只施加限流域节流，不碰缓存/合并/配额。供 fn 内部的重试循环复用同一闸门；**Fetch 已在调用 fn 前节流一次，故重试循环只应在 attempt > 0 时调用**，否则首次请求等两倍间隔。未登记主题不节流",
+    "包级未导出：fetch[T]（Fetch/Do 的共同实现，noCache 参数区分）、runWithTimeout[T]（d<=0 = 不限时；结果 channel 带缓冲防泄漏）、(g *Gate) throttle/domainState/load/store/evictOldest/entryCount/takeQuota；type domainState{mu, lastReq}、type cacheEntry{val, storedAt, seq}"
+  ],
+  "verification": "36 个测试全 PASS 无 SKIP；`go test -race` 全绿（4.002s）；覆盖率 **97.3%**（gate.go 的 WithWarn/New/Fetch/Do/Wait/throttle/domainState/load/store/evictOldest/entryCount/runWithTimeout/takeQuota 均 100%，fetch 91.2%）；go build ./... / go vet ./internal/collector/... / gofmt -l 全过。【变异反证 7 个，全部转红】G1 domainState 退化为全局共享一个 state → 双域对称版红；G1b 每域独立 lastReq 但 throttle 额外持一把全局锁 → **仅 TestGateThrottleDoesNotHoldGlobalLock 红**，串行版与双域对称版均绿（两者分工的实证）；G2 ck 去掉 topic → TestCacheKeyIncludesTopic 与 TestCoalesceKeyIncludesTopic 双红；G3 throttle 提到查缓存之前 → TestCacheHitSkipsThrottle 红；G4 fn 失败时返回零值+nil error → TestCoalesceSharesErrorWithAllWaiters 红；G5 Timeout=0 实现成立即超时（d<=0 改 d<0）→ TestZeroTimeoutMeansNoLimit 红；G6 结果 channel 去掉缓冲 → TestRunWithTimeoutDoesNotLeakGoroutine 红；另 G7 删掉 New 里的 opts 应用循环 → TestWithWarnIsApplied 红。每个变异注入后均校验代码 md5 已变（防「没改代码的绿」被误记为存活），还原后 md5 与基线一致且复跑全绿。 【返工 R1（一行）】TestGateThrottleDoesNotHoldGlobalLock 的 b 域 MinInterval 0 → time.Millisecond。按验证者本轮新纪律，**对该测试单独 `-run` 验证而非以套件转红为准**：正确实现连跑 5 次全绿（无假红）；全局锁加在 early-return **之前**（var2）→ 红；加在**之后**（var1，本次漏掉的形态）→ 红。闭环对比：在 var1 变异下把 b.x 退回 `{}` → **绿**，实证修复前确实漏检。还原后 gate.go md5 与基线一致。复跑：36 测试全 PASS 0 SKIP、-race 绿（3.956s）、覆盖率仍 97.3%、build/vet/gofmt 全过；`git diff 92b0be6 -- policy.go policy_test.go` 无输出，未动 TASK-001 的上游产物。"
+}

@@ -1,0 +1,86 @@
+{
+  "key_findings": [
+    "yahoo 三个方法各走各的主题：FetchHistory→yahoo.chart、FetchEPSHistory→yahoo.eps、FetchQuote→yahoo.quote，三者同属 yahoo 限流域共享闸门，TTL 各自独立（chart/eps 有 TTL，quote 为 0 保实时语义）。",
+    "改造形状是**外壳 + 内核两层**：公开方法做参数校验 → 构造缓存键 → policy.Fetch 包住私有 fetchXxx；私有内核保留原全部逻辑，只把 y.do(req) 改成 y.do(topic, req)。既有错误路径一行未动。",
+    "`do()` 只在 **attempt > 0** 时 `gate.Wait(topic)`：policy.Fetch 在进入 fn 前已节流一次，无条件 Wait 会让首发请求等两倍间隔。已由 TestFirstRequestDoesNotWaitTwice 钉住（无条件 Wait 时实测 200ms vs 期望 100ms）。",
+    "缓存键把 start/end **截断到分钟**（沿用被取代的 CachedCollector.cacheKey 口径），让上层「以 time.Now() 为 end」的抖动仍能命中同一槽。",
+    "`slices.Clone` 在 FetchHistory/FetchEPSHistory 返回前调用。**core.OHLCV 与 core.EPSPoint 今天全是值类型这个前提由 core/types.go 保证，不是 yahoo 包保证**（教训 6）——注释已写明将来加 map/slice/指针字段时这里必须改成逐元素深拷贝。TASK-011 会把该约束转移到 types.go 定义处。",
+    "私有节流状态（lastReq / minInterval / throttle() / minRequestInterval 常量）已从 yahoo 包源码中全部移除；`mu` 保留给 retryBudget。",
+    "**既有 32 个测试函数一个不删**（throttle 10 + yahoo 17 + eps 5，与 master 逐文件比对相等）。按 Leader 裁定只做了机械适配：删除 6 处 `y.minInterval = 0`（其中一处在共享 helper newRetryServer 内，被文件里多个测试调用），以及把 TestDoThrottlesConsecutiveRequests 的 80ms 改为经 gate 注入、断言与场景一字未改。",
+    "**200-but-error 测试的决定性断言是 HTTP 请求数，不是「返回了 error」**：一个实现可以正确返回 error 却仍然把它缓存了，那时「返回 error」的断言照样绿。两个断言守的是两件事。实测 W1 变异下两条同时触发，其中 `got 1` 那条才证明「不被缓存」有独立守护。",
+    "**构造陷阱：错误信封响应的 result 必须非空**。fetchHistory 的校验顺序是 `Chart.Error != nil` 在 `len(Chart.Result) == 0` **之前**；给空 result 的话，短路 Error 校验的变异会被后一条兜底分支拦下、照样报错。已用 W1b 对照实证：把 result 改成 `[]` 后同一个变异下测试 **PASS**（测不出问题）。这是「变异被另一个更早的分支拦截」形态，与 TASK-005 的 O2「改对地方但语义没变」同族。",
+    "**变异形态判据**（验证者从 twelvedata 核查得出）：yahoo 的 fn 返回已解析的 []core.OHLCV，错误信号只存在于解析层内部、**结构上挪不出去**，故风险形态是「忘了写这个校验」而非「把校验上提」。变异应短路 fn 内的校验；用错形态会得出「不适用」的错误结论。",
+    "⚠ **本包两处 key 都用 `.Unix()`（秒级），测试偏移必须跨秒**。照搬别包的毫秒级偏移（crypto 的 base+50ms/+900ms）会让「去掉 Truncate」的变异**测不出来** —— `.Unix()` 把亚秒差异归为同一秒，聚合度断言照样绿。我在 eastmoney 上踩过一次，Leader 把它写进了本任务的 fix_items。**照搬别包测试形态时要检查它与本包 key 的精度单位是否匹配。**",
+    "F2(区分度)实证:把 yahoo.go:312 键里的 symbol 换成固定串,原有全套测试全绿——包内唯一的第二个 symbol 在 gate_test.go:297,但那个用例的闸门只有 MinInterval、没设 TTL(压根没缓存),所以键塌了它也照样绿。「包里出现过第二个取值」不等于「有测试断言过它们必须分槽」。",
+    "缓存键的两个方向必须各自立格:聚合度(该合的要合)与区分度(该分的要分)。本 Sprint 三次同型疏漏——聚合度补了没补区分度、end 守了没守 start、复合句守了前半句没守后半句。共同形态是「补一个方向时漏掉对称的另一半」。",
+    "F1 的残留缺口(M8/M9 实证):F1 的「粒度不得放粗」只变动 end,start 的 Truncate 被放粗到 Hour 原先无人能抓。这一条最初是**读代码推断**出来的,推断不等于验证,故专门设 M8/M9 打这一枪:结果 F1 两格保持绿、只有新增 start 格转红,推断成立。若 F1 跟着红,该改口而非硬套。",
+    "维度变体的取值必须落在**真分支**上:yahoo 的 toYahooInterval 是 switch + default 兜底成 1d,若 interval 变体取 1wk,两次请求的上游 URL 完全相同 ⇒ 断言即使通过、变异即使转红、2x2 看起来闭环,守的也是一个**并不存在的区分**。这与精度不匹配的坑方向相反:精度不匹配造出假的「变异无效」(伪装成这里没问题),取 default 分支的值造出假的「守护有效」。",
+    "fmt.Sprintf 变异必须 verb 与实参一并删(反面对照 X1 实证):只删 %d 保留实参时,go test 默认跑的 vet 会报 format %s has arg ... of wrong type int64 ⇒ build failed。那种红是编译失败的红,不是被测行为的红。判据必须看报错内容,不能只看退出码/颜色。"
+  ],
+  "decisions": [
+    {
+      "decision": "补 TestNewUsesDefaultGate（DoD 未点名）。",
+      "rationale": "**这是与最高风险项 A1 同型的盲区**：本包其余每个用例都自己给 y.gate 赋值，所以 New 里漏掉 `gate: policy.Default()` 时它们全都照常绿——而生产路径拿到 nil gate，policy.Gate 对 nil 是透明直通的，限流/缓存/配额全部静默失效。发现过程见 verification：变异 Y6 我原本瞄准 TestFetchHistoryCachesViaGate，预期红实际绿，查下来不是测试弱而是**我选错了目标测试**，且顺带暴露了这个无人守护的装配点。判据用指针相等而非行为推断。"
+    },
+    {
+      "decision": "补 TestEachMethodUsesItsOwnTopic（DoD 未点名）。",
+      "rationale": "其余用例都用 gateWith 给三个主题登记**同一份策略**，于是把 FetchQuote 或 FetchEPSHistory 的主题写成 topicChart 也照样绿。这里反过来只给 chart 配 TTL，用「是否被缓存」区分主题。后果不是纸面的：生产内置表 chart 的 TTL 是 5 分钟，FetchQuote 误用 chart 主题就会被缓存 5 分钟，实时报价直接失效。Y3/Y4 两个变异实证有效。"
+    },
+    {
+      "decision": "补 TestFetchQuoteStillThrottled（functional[1] 的后半句，方案未覆盖）。",
+      "rationale": "方案的 TestFetchQuoteIsNotCached 只验「不缓存」。「TTL=0 不缓存」与「仍受节流」是两个分句、证据方向不同：前者证明每次都真发了 HTTP，后者证明这些请求之间仍有间隔。把 quote 主题摘出限流域时前者照样绿。"
+    },
+    {
+      "decision": "转 blocked_clarification 等 Leader 裁定 DoD 冲突，而非自行解释。",
+      "rationale": "error_handling[0]「既有测试一条不删、一条不改」与 non_functional[0]「minInterval/throttle 确已移除」字面不可兼得——throttle_test.go 有 7 处 y.minInterval 赋值，删字段则编译失败。DoD 是验证的唯一依据、会被字面执行；自行解释的话验证时一比对就是 FAIL，而那时代码已改完。一轮往返成本远低于一次返工。裁定与我提的 (a)(b)(c) 三条一致。"
+    },
+    {
+      "decision": "补 TestErrorEnvelopeIsNotCached 与 TestFetchEPSHistoryReturnsIndependentSlice（review_fix F1/F2）。**生产代码零改动**——两条都是「实现对、缺守护」。",
+      "rationale": "F1 在 DoD error_handling[0]「错误不写缓存」明文范围内：yahoo 有 200-but-error 路径（yahoo.go:254/:332），若该校验缺失，fn 会返回成功值、被 Gate 缓存，**一次瞬时故障变成整个 TTL 期的持续故障**，而既有 40 个测试全绿。F2 是 boundary[0] 在 EPS 侧的另一半（DoD 只点名了 FetchHistory）。"
+    },
+    {
+      "decision": "【review_fix】两处 key 各补一条双向测试（FetchHistory 与 FetchEPSHistory），各自独立实证。",
+      "rationale": "本包有**两处**独立缓存键（yahoo.go:312 / eps.go:49），一处修好不代表另一处也修好——V1/V3 交叉验证了这一点：改 yahoo.go 时 EPS 两格全绿，改 eps.go 时 History 两格全绿。缺口来源是 functional[4] 规格后到（TASK-007 完成时它不存在），但缺口本身是真的：去掉两处 Truncate 后全套 42 个测试全绿，因为它们**全用固定时刻**（time.Unix(1600000000,0) 7 处），而固定时刻在 Truncate 前后相等。生产路径 app.go:451 的 `end := time.Now()` 经此传入，yahoo 是主源，命中率恒为零的影响面比已修的三家加起来都大。"
+    },
+    {
+      "decision": "按两处 key 的**实际组成**逐维立格(History 四格 symbol/start/end/interval,EPS 三格 symbol/start/end),不用一条测试凑合覆盖",
+      "rationale": "变异只打掉键里的某一个参数时,必须恰好只有对应那格转红,否则无从定位是哪个维度失守。若写成一条「至少两组参数不互相命中」的测试,用 symbol 一个维度就能交差,interval/start 失守时无人报警。"
+    },
+    {
+      "decision": "判据统一为 a→b→a 重放并断言 2 次 HTTP,而非只发 a、b 两次断言 2",
+      "rationale": "一条断言同时排除两种缺陷:键漏掉该维度 ⇒ b 误命中 a 的槽 ⇒ 总数 1;压根没缓存 ⇒ 总数 3。只发两次的写法对后者是假绿。"
+    },
+    {
+      "decision": "时间维度变体取**整分钟**偏移(不是任意不同时刻)",
+      "rationale": "键把 start/end 截断到分钟,亚分钟差异穿不过截断,会得到假的「变异无效」。同 F1 跨秒偏移那个坑,只是换了精度单位。整分钟偏移还顺带让 start 格对「Truncate 放粗到 Hour」敏感,堵上 F1 的残留缺口。"
+    },
+    {
+      "decision": "interval 变体取 1h 而非 1wk",
+      "rationale": "toYahooInterval 的 default 把未知值兜底成 1d,取未知值等于要求键区分两个上游 URL 完全相同的请求——守的是一个不存在的区分。1h 是 switch 的真分支。"
+    },
+    {
+      "decision": "把 TestFetchEPSHistoryCacheKeyAggregatesNearbyTimes 内的局部闭包 newEPSServer 提取为文件级 epsCountingServer",
+      "rationale": "聚合度与区分度两组用例共用,消重。当初写成局部是为避开与并行 dev 的包级符号冲突;018 已 accepted 且其产物 errmap_test.go 早在 253c1bc 入库(在 F1 的 415f900 之前),包内 60 个包级符号盘点确认 epsCountingServer/histArgs 均未占用,冲突风险已消失。"
+    },
+    {
+      "decision": "变异实证在 detached worktree 预跑、最终文件在主工作区**重写**(非拷回),并用预跑版做逐字节交叉核对",
+      "rationale": "Leader 批准的三条约束:detached/不提交/不 push;最终文件必须在主工作区写(拷回会带上实验痕迹而作者自己看不出);主工作区复跑完整矩阵后才能转 dev_done(预跑结论只算省下摸索时间,不算证据)。交叉核对是为在遵守「不拷回」的同时排除重写笔误,结果 IDENTICAL。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/yahoo/yahoo.go",
+    "internal/collector/yahoo/eps.go",
+    "internal/collector/yahoo/gate_test.go",
+    "internal/collector/yahoo/throttle_test.go",
+    "internal/collector/yahoo/gate_test.go(F2:+2 个区分度测试共 7 格,提取 epsCountingServer;生产代码零改动)"
+  ],
+  "interfaces_exposed": [
+    "func (y *Yahoo) do(topic string, req *http.Request) (*http.Response, error) —— **签名变更**（原 do(req)），包内。只在 attempt>0 时 gate.Wait",
+    "Yahoo.gate *policy.Gate —— 包内字段，构造时取 policy.Default()；包内测试可直接赋值注入",
+    "包内常量 topicChart=\"yahoo.chart\" / topicEPS=\"yahoo.eps\" / topicQuote=\"yahoo.quote\"",
+    "新增包内私有内核：fetchQuote / fetchHistory / fetchEPSHistory —— 公开方法的原逻辑移入，被 policy.Fetch 包住",
+    "公开 API（FetchQuote / FetchHistory / FetchEPSHistory / Name / SupportedMarkets / Init / Start / Stop）签名与错误语义**零变更**",
+    "已移除：minRequestInterval 常量、Yahoo.lastReq、Yahoo.minInterval、(y *Yahoo) throttle()"
+  ],
+  "verification": "40 个测试全 PASS 0 SKIP（既有 32 一个不删 + 新增 8）；`go test -race` 全绿（23.272s）；覆盖率 **87.3%**（DoD 绝对下限 86.0%，master 基线 86.2%）；go build ./... / go vet ./internal/collector/yahoo/ 通过。⚠ `gofmt -l internal/collector/yahoo/` 会列出 **yahoo_test.go**——该文件在 **master 上就未格式化**（已用 `git show HEAD:...|gofmt -l` 核实），且本任务未改动它（`git diff --stat` 无输出）；我改/新增的 4 个文件全部已格式化。【变异反证 6 个，注入前先写预期表】Y1 FetchHistory 不走 policy.Fetch → CachesViaGate 红 :85；Y2 不 slices.Clone → ReturnsIndependentSlice 红 :129（首版直接删 Clone 调用被**门②拦下**：slices 包未使用致编译失败，改为 `_ = slices.Clone(data)` 保留引用后才是有效变异）；Y3 FetchQuote 用 topicChart → EachMethodUsesItsOwnTopic 红 :210；Y4 FetchEPSHistory 用 topicChart → 同测试红 :214；Y5 do() 无条件 Wait → FirstRequestDoesNotWaitTwice 红 :281（实测 200.6ms）；Y6 New 不初始化 gate → **首轮瞄错目标测试（预期红实际绿），改瞄 TestNewUsesDefaultGate 后红 :86**。 【review_fix F1/F2】42 个测试全 PASS 0 SKIP（既有 40 + 新增 2）；-race 绿（23.261s）；覆盖率 87.3% → **88.0%**；`git status --porcelain internal/collector/yahoo/` 只列出 gate_test.go —— **生产代码零改动**。变异反证（注入前先写预期表）：W1 短路 fetchHistory 内的 Chart.Error 校验 → TestErrorEnvelopeIsNotCached 红，`gate_test.go:346` 两次「必须识别为错误」+ **`:353` 决定性断言「两次调用应各发一次 HTTP, got 1」**；Y8 eps.go 不 slices.Clone（用 `_ = slices.Clone(pts)` 保留引用避开门②）→ TestFetchEPSHistoryReturnsIndependentSlice 红 `:381`；W1b 对照 把 errorEnvelopeBody 的 result 改成空数组后重跑 W1 → **PASS（测不出）**，实证构造陷阱真实存在。 【review_fix：缓存键时间精度双向守护】46 测试全 PASS 0 SKIP（既有 42 一个不删）；-race 绿；覆盖率 88.0% → 89.3%；build/gofmt 通过；**生产代码零改动**（git status 只列 gate_test.go），yahoo_test.go 的既有 gofmt 漂移未碰。四条判据全部实证，且**交叉验证两处 key 相互独立**：V1 yahoo.go 去 Truncate → History(a) 红 `:420`（3 次 want 1）、**EPS 两格全绿**、**旧测试集全绿**（漏检证据）；V2 yahoo.go 放粗到 Hour → History(b) 红 `:436`、**History(a) 仍绿**；V3 eps.go 去 Truncate → EPS(a) 红 `:472`、**History 两格全绿**；V4 eps.go 放粗到 Hour → EPS(b) 红 `:487`、**EPS(a) 仍绿**。 【review_fix F2:缓存键区分度】commit f6a78af;92 个 === RUN 全绿 0 SKIP,-race 绿,覆盖率 89.3% → **89.9%**;gofmt 干净(yahoo_test.go 的既有漂移未碰);**生产代码零改动**——yahoo.go/eps.go 全程 md5 不变(1abf5d1141dde9464e4bf8b3e5ee4aff / a00933a402d40ab4f6a0d1d72602a96b)。9 个变异 + 1 个反面对照,**detached worktree @8623e14 预跑与主工作区复跑逐格一致**:M1 yahoo.go symbol→固定串(= fix_items 的 W5 原文) → 只红 History/symbol;M2 去 start → 只红 History/start;M3 去 end → **双红** History/end + F1(b)「分钟粒度不得放粗」(两条测试对同一变异都敏感,如实记录,**非单格命中**);M4 去 interval → 只红 History/interval;M5 eps.go symbol→固定串 → 只红 EPS/symbol;M6 去 start → 只红 EPS/start;M7 去 end → **双红** EPS/end + EPS F1(b);M8 yahoo.go 的 start 截断放粗到 Hour(end 不动) → 只红 History/start 且 **F1 两格保持绿**(证明该缺口原先确实无人能抓,此格超出 F2 字面范围、堵的是 F1 残留);M9 eps.go 同上 → 只红 EPS/start,EPS F1 两格保持绿。反面对照 X1(只删 end 的 %d 但保留实参) → vet 报 wrong type int64 ⇒ **build failed**,证明那样注入等于没注入、且红的是编译不是行为。交叉独立性:M1/M2/M4/M8 期间 EPS 三格全绿,M5/M6/M9 期间 History 四格全绿 ⇒ 两处 key 相互独立。每个变异后 git checkout 还原并 md5 校验,10 次全部 OK。"
+}

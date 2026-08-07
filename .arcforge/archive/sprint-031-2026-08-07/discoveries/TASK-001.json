@@ -1,0 +1,73 @@
+{
+  "key_findings": [
+    "policy 包已建，包路径 github.com/newthinker/atlas/internal/collector/policy，零仓内依赖（go list -deps 中唯一的本仓库包就是它自己），TASK-002 的 gate.go 应放同包内以复用 Table/Policy 而不引入新包边界。",
+    "Lookup 是三段查表：精确 topic → domainOf(topic)+\".*\" 通配 → (Policy{}, false)。未登记主题返回零值 Policy 且 ok=false，调用方据此走「零策略直通」路径，保证约束 C6（eastmoney/akshare/crypto/fred/edgar/baostock 六家行为零变更）。次序是契约的一部分：精确条目必须遮蔽同域通配条目，已由 TestLixingerWildcardTTLOnly 内的 lixinger.exact 断言钉住（返工补，变异 M16 反证有效）。",
+    "内置登记的主题共 9 个：yahoo.chart / yahoo.eps / yahoo.quote / tushare.daily / tushare.index_daily / tushare.hk_daily / tushare.daily_basic / twelvedata.time_series / lixinger.*（通配）。限流数值只平移未调整：yahoo 500ms、tushare 200ms、twelvedata 8s。9 个主题的 Coalesce 均为 true。",
+    "只有 tushare.daily_basic 带 Quota{Limit:5, Window:24h, Loc:Asia/Shanghai}（ea5ac30 实测 5 次/天）；其余主题 Quota 为 nil。yahoo.quote 是唯一 TTL=0 的登记主题（保持实时语义），但仍共享 yahoo 域的 500ms 闸门。",
+    "Table 非并发安全（裸 map，无锁）：设计意图是构造阶段完成 Set/ApplyTTL/DisableTTL 覆盖，构造后只读。Gate 若要在运行期改表需自行加锁或改为构造期定稿。",
+    "Policy.Timeout 字段已定义但内置表全部为 0（不设超时），留给 Gate（TASK-002）与 config 覆盖使用。注意 TASK-002 的 non_functional 明确要求 Timeout=0 语义为「不限时」，不得实现成立即超时。",
+    "tzdata 经 _ \"time/tzdata\" 嵌入二进制，配额的自然日边界不依赖部署机装 tzdata；已用 ZONEINFO 指向不存在路径的测试证明仍能拿到 Asia/Shanghai。",
+    "时区加载走 loadLoc(name) 而非写死字面量：失败时返回 time.UTC。TASK-003 的 QuotaStore 若需要其他时区，复用 loadLoc 即可获得同样的「失败退回 UTC 不 panic」语义。",
+    "C3 约束的守卫 TestNoImportOfCollectorRoot 依赖 exec go list -deps；它只在 PATH 中没有 go 时跳过（go test -c 脱离工具链的场景），其余错误转红。TASK-002 起在同包内加 gate.go 会引入 golang.org/x/sync/singleflight 依赖，该断言只针对 internal/collector 前缀，不受影响。",
+    "Table.Topics() 是公开方法且 Gate 可能用它枚举主题，但直到三轮返工才有直接断言（len==9 + 每项可被 Lookup 命中）。它返回的是内置表的 9 个主题名，含通配字面量 \"lixinger.*\"。"
+  ],
+  "decisions": [
+    {
+      "decision": "policy 包不 import internal/collector，并用 TestNoImportOfCollectorRoot（exec go list -deps .）把这条约束固化为测试。",
+      "rationale": "约束 C3：Gate 由各 collector 在发 HTTP 处反向调用，包一旦回指 collector 根包就是循环导入。断言时须先排除 policy 包自身——它本身就以 internal/collector 为前缀，朴素的 HasPrefix 会自伤。该测试已反向验证有效：临时给 policy.go 加 import _ \"internal/collector\" 后确实变红（验证者 M1 独立复核同样转红）。"
+    },
+    {
+      "decision": "Set 在 Domain 为空时缺省填 domainOf(topic)（主题名第一段），显式传入的 Domain 原样保留。",
+      "rationale": "设计 §3.3 限流域：同域主题共享一个服务端闸门（yahoo.chart 与 yahoo.eps 同域）。缺省规则让绝大多数主题不必显式写 Domain，显式覆盖则支持跨域名共享闸门（如 custom.x 声明 Domain=shared）。"
+    },
+    {
+      "decision": "lixinger 用通配主题 lixinger.* 登记，且只给 TTL，MinInterval=0、Quota=nil。",
+      "rationale": "lixinger 端点形如 cn/company/fundamental/non_financial，共 8 个且会增长，逐个登记会漏。§1.3 的缺陷是它今天完全拿不到缓存——只补缓存，不新增它今天没有的限流行为，避免把重构变成行为变更。"
+    },
+    {
+      "decision": "ApplyTTL 只提升本就 TTL>0 的主题，且 ttl<=0 时整体 no-op；DisableTTL 无条件把所有 TTL 归零但不动 MinInterval/Quota。",
+      "rationale": "ApplyTTL 对应 config collector.cache.ttl，若无差别覆盖会把 yahoo.quote 的「实时不缓存」语义抹掉；ttl<=0 表示未配置，此时应保留内置兜底值而非清零。DisableTTL 对应 cache.enabled=false，等价于今天 maybeCache 直接返回原 collector——缓存开关不该顺带关掉限流与配额（设计 §4.2）。"
+    },
+    {
+      "decision": "把时区名从写死的字面量抽成参数：新增 loadLoc(name string) *time.Location，shanghai() 退为 return loadLoc(\"Asia/Shanghai\")。（返工引入，行为零变更）",
+      "rationale": "error_handling[0] 要求「LoadLocation 失败时退回 time.UTC 而非 panic」。原实现把时区名写死，加之 tzdata 已嵌入，该失败分支在测试中不可达——验证者的变异 M10 把 return time.UTC 换成 panic(err) 后套件仍全绿，证明这条 DoD 当时没有任何测试证据（cover -func 显示 shanghai 仅 75%，缺的正是该分支）。抽成参数后可直接喂一个必然失败的时区名验证失败路径。这是纯可测性重构，外部行为与调用点完全不变。"
+    },
+    {
+      "decision": "error_handling[0] 拆成两条测试分别覆盖两个分句，而非一条测试兼顾。",
+      "rationale": "DoD 原文两个分句是互补而非重叠的：分句 2（tzdata 已嵌入，不依赖部署机）由 TestShanghaiLoadsEmbeddedTZData 验证「加载成功」，分句 1（失败时退回 UTC 不 panic）必须验证「失败分支的行为」。返工前只有前者，是我把「证明 tzdata 嵌入生效」误当成了「证明失败分支正确」，M10 存活即此判断失误的证据。现由 TestLoadLocFallsBackToUTCWithoutPanic（defer recover + 断言 == time.UTC）覆盖分句 1，原测试保留。"
+    },
+    {
+      "decision": "除方案给定的 8 个测试外自补 4 条：TestApplyTTLNonPositiveIsNoop、TestShanghaiLoadsEmbeddedTZData、TestNoImportOfCollectorRoot、TestLoadLocFallsBackToUTCWithoutPanic（末条为返工补），并在 TestLixingerWildcardTTLOnly 内追加两条断言（lixinger.* 的 Coalesce、精确遮蔽通配的次序）。",
+      "rationale": "方案代码未覆盖 DoD 的 boundary[0]「ttl<=0 为 no-op」、error_handling[0] 两个分句与 non_functional[0]「不 import internal/collector」；返工又补上 functional[0] 第 9 个登记主题的 Coalesce（M11 存活）与 functional[2] 指定的查表次序（M16 存活）。DoD 逐条必须有真正验证其描述行为的测试，而非仅仅存在一条名字相关的测试。"
+    },
+    {
+      "decision": "TestNoImportOfCollectorRoot 的降级收窄：只在 errors.Is(err, exec.ErrNotFound) 时 t.Skipf，其余错误一律 t.Fatalf。",
+      "rationale": "原写法对 go list 的任何错误都 Skip，把「依赖解析失败」这类本应转红的情况也静默跳过了——守卫看起来在、实际不设防，与变异 M10 是同一类问题。而测试本身是被 go test 跑起来的，go 工具链必然存在，真正会 exec.ErrNotFound 的只有 go test -c 编译后脱离工具链单独执行这一种场景。C3 是硬约束，守卫静默失效的代价远大于这 8 行。已反证：把 go list 的目标改成不存在的包后该测试 FAIL 而非 SKIP。"
+    },
+    {
+      "decision": "TestDailyBasicQuota 的 Loc 断言从「!= UTC」改为「== Asia/Shanghai」；TestDisableTTLKeepsThrottle 的量词遍历补下界 len(Topics())==9，并额外断言每个主题都能被 Lookup 命中。",
+      "rationale": "二轮验证新造的变异暴露两处空转断言：M21（Loc 换成 loadLoc(\"Asia/Tokyo\")）存活，因为原断言只钉住「不是 UTC」——排除法只在候选集二元时才等价于正断言，而 DoD 写明了 Asia/Shanghai；M26（Topics() 恒返空切片）存活，因为循环零次执行时 TTL 断言 vacuously true，「全部主题」这个量词没有下界。Loc 错成非 UTC 的其他时区有真实后果：Quota 语义是 Window>=24h 时按 Loc 自然日对齐，tushare 的 5 次/天是北京时间重置，错时区会让 Gate 在错误时刻重置窗口进而撞 40203。命中断言是我对新断言应用「能否构造一个错误实现让它仍然通过」自查的产物：只加 len 下界时，Topics() 返回 9 个不存在的主题名仍能全绿（Lookup 落空得零值 Policy，其 TTL 恰好也是 0），已用变异 M26b 闭环证明——去掉命中断言则 M26b 存活，加上则转红。"
+    },
+    {
+      "decision": "TestDisableTTLKeepsThrottle 改为三层断言：① 对 Topics() 做集合等值（排序后 len + reflect.DeepEqual）② 保留 Lookup 命中断言 ③ 保留 TTL 归零断言。（R5b 返工）",
+      "rationale": "原「基数 + 逐元素 Lookup 命中」形态有实测逃逸：Lookup 是三段查表，任何 lixinger.<任意> 都经通配段命中，**该谓词宽于「已登记主题」**，故返 9 个 lixinger 域内假名（M26c）或同一主题重复 9 次（M26d）都能满足「基数对 + 每项都命中」而集合完全错误。集合等值不给逼近余地。三层各守一个不同的被测对象、不可合并：② 守的是 Lookup 本身——若 Lookup 恒返 ok=false，① 仍通过（Topics 是对的）、③ 也仍通过（p 是零值、TTL 恰为 0），漏检；已用自造变异 M28 证实 ② 不是摆设。want 的 9 个主题名从实现直读（grep t.Set policy.go），不凭记忆写。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/policy.go",
+    "internal/collector/policy/policy_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Quota struct { Limit int; Window time.Duration; Loc *time.Location } —— Window>=24h 按 Loc 自然日对齐（今天 00:00 起算），否则按 UTC 截断到 Window 整数倍（此语义为文档约定，账本实现在 TASK-003）",
+    "type Policy struct { Domain string; TTL time.Duration; MinInterval time.Duration; Coalesce bool; Quota *Quota; Timeout time.Duration } —— 零值即零策略（不缓存/不限流/不合并/不计配额/不超时）；TTL=0 不缓存，MinInterval=0 不节流，Quota=nil 不计配额，Timeout=0 不设超时（作用于 fn 本身）",
+    "type Table struct{ policies map[string]Policy } —— 未导出字段，构造后视为只读，非并发安全",
+    "func NewTable() *Table —— 返回装好 9 条内置策略的表",
+    "func (t *Table) Set(topic string, p Policy) —— 登记或覆盖；p.Domain==\"\" 时填 domainOf(topic)",
+    "func (t *Table) Lookup(topic string) (Policy, bool) —— 精确 → <域>.* 通配 → (Policy{}, false)；次序是契约：精确条目遮蔽同域通配条目",
+    "func (t *Table) ApplyTTL(ttl time.Duration) —— ttl<=0 为 no-op；否则把 ttl 施加到所有 TTL>0 的主题",
+    "func (t *Table) DisableTTL() —— 所有主题 TTL 归零，MinInterval/Quota/Coalesce 不受影响",
+    "func (t *Table) Topics() []string —— 所有已登记主题名，顺序不定（map 遍历），含通配主题 \"lixinger.*\" 这个字面量（不是展开后的端点）",
+    "包级未导出辅助：func domainOf(topic string) string（取第一个 '.' 之前的段，无 '.' 则整名）、func loadLoc(name string) *time.Location（加载失败返回 time.UTC，不 panic）、func shanghai() *time.Location（= loadLoc(\"Asia/Shanghai\")）、const builtinTTL = 5 * time.Minute"
+  ],
+  "verification": "【返工后】GOTOOLCHAIN=local go test ./internal/collector/policy/ -count=1 -v → 12 个测试全 PASS；-cover → 97.7%（返工前 95.3%），loadLoc 与 shanghai 均 100.0%（返工前 shanghai 75.0%），其余函数 100%，仅 domainOf 66.7%（无 '.' 主题名分支，非 DoD 要求）。go build ./... 与 go vet ./internal/collector/... 均退出码 0，gofmt -l 无输出。collector 树 17 个包 go test -count=1 全部 ok，无既有测试被破坏。【变异反证】对验证者报告中 3 个存活变异逐个复现：M10（loadLoc 的 return time.UTC → panic(err)）→ 红，被 TestLoadLocFallsBackToUTCWithoutPanic 捕获；M11（lixinger.* Coalesce → false）→ 红，被 TestLixingerWildcardTTLOnly 捕获；M16（Lookup 通配段提到精确段之前）→ 红，被 TestLixingerWildcardTTLOnly 的次序断言捕获。三次还原后 md5 与基线一致、复跑全绿。TestNoImportOfCollectorRoot 亦做过有效性反证（临时 import collector 后 FAIL）。 【C3 守卫加固后复核】go test -count=1 全绿、-race 全绿（1.467s）、覆盖率仍 97.7%、build/vet/gofmt 全过；TestNoImportOfCollectorRoot 在 go 可用时仍为 PASS（非 SKIP），把 go list 目标换成不存在的包后转 FAIL（非静默 SKIP），加固有效性已反证，还原后 md5 与基线一致。交付 sha 更新为 ebba14aa8468fc899ff086eddb6db68ff77c3bd8。 【三轮返工 R4/R5】12 个测试全 PASS、-race 全绿（1.430s）、覆盖率仍 97.7%、build/vet/gofmt 全过、internal/collector 回归 ok。变异反证：M21（Loc: shanghai() → loadLoc(\"Asia/Tokyo\")）→ 红，被 TestDailyBasicQuota 捕获（Loc = Asia/Tokyo, want Asia/Shanghai）；M26（Topics() 恒返 nil）→ 红，被新增的 len 下界捕获（内置主题数 = 0, want 9）；M26b（Topics() 返回 9 个不存在的主题名，我自查构造）→ 红，被新增的 Lookup 命中断言捕获。另做闭环证明：临时退化测试到「只有 len 下界、无命中断言」时 M26b 存活转绿，证明命中断言非冗余。三次还原后 policy.go 与 policy_test.go 的 md5 均与基线一致、复跑全绿。交付 sha 见 task JSON。 【R5b 返工】变异归属逐条确认（不看退出码，看报错行号定位到具体断言）：M26(Topics 恒返 nil)/M26b(9 个不存在主题名)/M26c(9 个 lixinger 域内假名)/M26d(同一主题重复 9 次) → 全部由 ① policy_test.go:205 捕获；M27(DisableTTL 只清 lixinger.*) → 由 ③ :219 捕获；自造 M28(Lookup 恒返 (Policy{},false)) → 由 ② :214 捕获，证实 ② 非冗余。闭环对比：把 ① 退化回「仅基数比较」后，M26c 与 M26d **双双存活（ok）**，实证旧形态确实漏检。⚠ 首次闭环实验无效并已重做：退化时直接删掉 reflect.DeepEqual 会使 import \"reflect\" 未使用而**编译失败**，两个变异都报红——那个红来自编译器不是断言，差点据此得出「旧形态也能捕获」的错误结论；改用 `(false && !reflect.DeepEqual(...))` 保留引用后才拿到真实结果。复跑：36 测试全 PASS 0 SKIP、-race 绿(3.992s)、覆盖率仍 97.3%、build/vet/gofmt 全过；git diff 487e2ba -- gate.go gate_test.go 无输出，未动 TASK-002 产物。"
+}

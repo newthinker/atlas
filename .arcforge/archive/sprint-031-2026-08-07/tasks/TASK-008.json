@@ -1,0 +1,69 @@
+{
+  "id": "TASK-008",
+  "title": "twelvedata 接入 Gate",
+  "description": "删除 twelvedata 私有节流状态(mu/lastReq/minInterval/throttle()),改由 Gate 承接,主题 twelvedata.time_series(8s 间隔,数值平移不调整)。**方案行 2721-2926 已给出完整实现与测试代码。** 与 yahoo 同样的 clone 要求:返回切片的方法必须在 Fetch 之后 slices.Clone。既有 client_test.go 的节流用例需跟随改造。gate_test.go 需含 TestMain。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-twelvedata",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/twelvedata/client.go",
+    "internal/collector/twelvedata/client_test.go",
+    "internal/collector/twelvedata/gate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "FetchHistory 经 Gate 受 8s 最小间隔节流,相邻请求间隔符合策略(TestFetchHistoryThrottledByGate)",
+      "FetchHistory 经 Gate 走 TTL 缓存,同参数重复调用只发一次 HTTP 请求(TestFetchHistoryCachedByGate)",
+      "Client 持有 gate *policy.Gate 字段,构造函数取 policy.Default(),包内测试可直接赋值注入测试 Gate"
+    ],
+    "boundary": [
+      "缓存命中时返回独立切片,调用方修改不污染缓存(TestFetchHistoryReturnsIndependentSlice)"
+    ],
+    "error_handling": [
+      "既有错误路径测试的**断言体与场景一字不改**且全部通过(反审 B4——「行为不变」本身不可判定,改为可判定的等价表述)。**Leader 裁定的豁免范围**(教训 14:该表述只在被删符号引用集中时才自洽,twelvedata 的 `c.minInterval = 0` 位于共享 helper tdServer() 内、被文件全部 6 个测试调用,故字面不可兼得):允许①删除因 minInterval 字段消失而无法编译的赋值行(含共享 helper 里的);②删除被 TestFetchHistoryThrottledByGate 取代的 TestThrottleMinInterval;③签名变更的调用点适配。不允许删除任何错误路径测试函数(TestFetchHistoryParsesAndSorts / TestFetchHistoryEmptyValues / TestFetchHistorySkipsUnparsableClose / TestFetchHistoryAPIError / TestAPIKeyNeverInURLOrErrors)或改动其断言与场景。覆盖率口径取**绝对下限 92.0%**,不按 master 实测水位(重构删代码会同时改变分子分母)"
+    ],
+    "non_functional": [
+      {
+        "desc": "twelvedata 包源码中不再存在 lastReq/minInterval/throttle 私有节流状态(最终由 TASK-013 的 AST 断言统一守护)",
+        "verify_by": "review"
+      },
+      {
+        "desc": "go test ./internal/collector/twelvedata/ -race 全绿,覆盖率不低于既有水位 92%",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-002",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/twelvedata"
+  ],
+  "writes": [
+    "./internal/collector/twelvedata"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-37",
+  "questions": [
+    {
+      "q": "DoD error_handling[0]「master 基线上 twelvedata 包的既有测试用例一条不删、一条不改且全部通过」与 non_functional[0]「包源码中不再存在 lastReq/minInterval/throttle」字面互斥,且不可兼得(编译期):client_test.go 有 4 处引用 c.minInterval —— tdServer():46、TestAPIKeyNeverInURLOrErrors 两处 :140/:152、TestThrottleMinInterval :176-185(整个测试就是测私有节流)。删掉字段后这些行必然不编译。任务 description 自身也写「既有 client_test.go 的节流用例需跟随改造」,方案行 2901-2910 明确要求删除这 4 处 + 整个 TestThrottleMinInterval。",
+      "assumption": "按可编译的唯一读法执行:error_handling[0] 的「一条不删不改」scope 限于它点名的**错误路径**测试(API 错误码、网络错误),即 TestFetchHistoryAPIError / TestAPIKeyNeverInURLOrErrors / TestFetchHistoryEmptyValues / TestFetchHistorySkipsUnparsableClose / TestFetchHistoryParsesAndSorts 断言体一字不改;仅删除因字段消失而无法编译的 minInterval 赋值行与被 Gate 取代的 TestThrottleMinInterval。请 Leader 裁定并按教训 8(改规格而非加注释)修正 DoD 措辞,以免验证者按字面判 FAIL。",
+      "asked_at": "2026-08-06T06:25:00Z",
+      "answer": null
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verifier": "test-agent-16"
+}

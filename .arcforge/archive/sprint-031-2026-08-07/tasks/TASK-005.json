@@ -1,0 +1,58 @@
+{
+  "id": "TASK-005",
+  "title": "policy 全局单例 Default/SetDefault + Table.Override",
+  "description": "policy 包侧的最后一块:default.go 的懒初始化全局单例 Default()/SetDefault(),以及 policy.go 增补 Override 结构与 Table.Override 方法(供 config 逐字段覆盖内置策略)。**方案 Task 5 的 Step 1-4(行 1788-1997)已给出完整实现与测试代码。** 本任务是方案 Task 5 按 Realistic Scope 拆出的 policy 侧半边(见 AD-2),config 与 cmd/atlas 接线在 TASK-006。Override 语义关键:只覆盖显式设置(非 nil)的字段,未设置字段保持内置值。**先 git commit 再 transition dev_done(AD-3)**。",
+  "module": "collector-policy",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/policy/default.go",
+    "internal/collector/policy/default_test.go",
+    "internal/collector/policy/policy.go",
+    "internal/collector/policy/policy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "Default() 懒初始化并返回基于内置表的 Gate,重复调用返回同一实例;SetDefault(g) 后 Default() 返回被替换的实例(TestDefaultIsLazyAndUsesBuiltinTable + TestSetDefaultReplaces)",
+      "Table.Override 只应用显式设置(非 nil 指针)的字段,未设置的字段保持内置值不变(TestOverrideAppliesOnlySetFields)",
+      "只覆盖 QuotaLimit 时保留原 Quota 的 Window 与 Loc,不把自然日窗口和时区抹掉(TestOverrideQuotaLimitKeepsWindowAndLoc)"
+    ],
+    "boundary": [
+      "对原本无 Quota 的主题同时给 QuotaLimit 与 QuotaWindow 可新增配额(TestOverrideCanAddQuotaToTopicWithout)",
+      "Override 一个未登记主题会将其登记进表(TestOverrideRegistersUnknownTopic)——config 可为 eastmoney 等主题按需加策略,但默认仍是零策略"
+    ],
+    "error_handling": [
+      "SetDefault(nil) 或并发调用 Default() 不 panic,单例初始化并发安全(sync.Once 或等价机制)"
+    ],
+    "non_functional": [
+      {
+        "desc": "go test ./internal/collector/policy/ -race 全包全绿(TASK-001~004 既有用例保持通过)",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/collector/policy"
+  ],
+  "writes": [
+    "./internal/collector/policy"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T01:33:18Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-35",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verifier": "test-agent-17"
+}
