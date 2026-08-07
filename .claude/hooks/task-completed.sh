@@ -127,6 +127,14 @@ if [ -z "$TOTAL" ]; then
     echo "WARNING: Could not determine coverage. Proceeding."
     exit 0
 fi
+# 任务级 coverage_floor 覆盖全局 dev_minimum（历史包袱重的包按其既有水位设定）。
+# 必须放在这里而非文件头：TASK_ID 在第 26 行才解析出来。
+TASK_FLOOR=$(jq -r '.coverage_floor // empty' ".arcforge/tasks/${TASK_ID}.json" 2>/dev/null)
+if [ -n "$TASK_FLOOR" ]; then
+    echo "Task-level coverage_floor=${TASK_FLOOR} overrides dev_minimum=${DEV_MIN}"
+    DEV_MIN="$TASK_FLOOR"
+fi
+
 if [ "${TOTAL%.*}" -lt "$DEV_MIN" ]; then
     echo "BLOCKED: Task-scope coverage ${TOTAL}% < dev_minimum ${DEV_MIN}%." >&2
     go tool cover -func="$COVERPROFILE" | grep -v "100.0%" >&2
