@@ -439,27 +439,30 @@ func TestFetchHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
 	})
 }
 
-func TestFetchEPSHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
-	epsBody := `{"timeseries":{"result":[{"trailingDilutedEPS":[{"asOfDate":"2023-11-14","reportedValue":{"raw":6.42}}]}]}}`
-	newEPSServer := func(t *testing.T) (*httptest.Server, func() int) {
-		t.Helper()
-		var mu sync.Mutex
-		hits := 0
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			hits++
-			mu.Unlock()
-			_, _ = w.Write([]byte(epsBody))
-		}))
-		t.Cleanup(srv.Close)
-		return srv, func() int { mu.Lock(); defer mu.Unlock(); return hits }
-	}
+const epsCountingBody = `{"timeseries":{"result":[{"trailingDilutedEPS":[{"asOfDate":"2023-11-14","reportedValue":{"raw":6.42}}]}]}}`
 
+// epsCountingServer 是 countingServer 的 EPS 侧对应物：记录命中次数的 EPS 服务端。
+// 聚合度与区分度两组用例共用。
+func epsCountingServer(t *testing.T) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(epsCountingBody))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() int { mu.Lock(); defer mu.Unlock(); return hits }
+}
+
+func TestFetchEPSHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
 	start := time.Unix(1600000000, 0)
 	base := time.Now().Truncate(time.Minute).Add(20 * time.Second)
 
 	t.Run("相邻时间落进同一槽", func(t *testing.T) {
-		srv, hits := newEPSServer(t)
+		srv, hits := epsCountingServer(t)
 		y := NewWithBaseURL(srv.URL)
 		y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
 
@@ -474,7 +477,7 @@ func TestFetchEPSHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
 	})
 
 	t.Run("分钟粒度不得放粗", func(t *testing.T) {
-		srv, hits := newEPSServer(t)
+		srv, hits := epsCountingServer(t)
 		y := NewWithBaseURL(srv.URL)
 		y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
 
@@ -487,4 +490,112 @@ func TestFetchEPSHistoryCacheKeyAggregatesNearbyTimes(t *testing.T) {
 			t.Errorf("EPS 键相隔 1 分钟须分槽: HTTP 请求 %d 次, want 2", n)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// fix_items[F2]：缓存键的**区分度** —— 键必须含全部影响结果的参数（契约陷阱 16）。
+//
+// 上面两组守护的是键的**聚合度/粒度**（相邻时刻要落同一槽、分钟粒度不得放粗），
+// 方向是「该合的要合」；本组守护相反方向「该分的要分」。两个方向缺一不可 ——
+// 实测把 yahoo.go 键里的 symbol 换成固定串后**全包测试仍然全绿**：AAPL 会拿到
+// MSFT 的行情，静默错数据，而 yahoo 是美股/A 股主源。
+//
+// 判据统一为 **a → b → a 重放，期望 2 次 HTTP**，一条断言同时排除两种缺陷：
+//   - 键漏掉该维度 ⇒ b 误命中 a 的槽 ⇒ 总数 1（本组要抓的）
+//   - 压根没缓存   ⇒ 总数 3（只发 a、b 两次并断言 2 的写法对后者是假绿）
+//
+// 每个参数维度**各占独立一格**，不用一条测试凑合覆盖：变异只打掉键里的某一个
+// 参数时，必须恰好只有对应那格转红，否则无从定位是哪个维度失守。
+//
+// ⚠ 时间维度的变体取**整分钟**偏移：键把 start/end 截断到分钟，亚分钟差异穿不过
+// 截断，会得到假的「变异无效」（同上面那条跨秒偏移的坑，只是换了个精度单位）。
+// ---------------------------------------------------------------------------
+
+type histArgs struct {
+	symbol   string
+	start    time.Time
+	end      time.Time
+	interval string
+}
+
+func TestFetchHistoryCacheKeyDistinguishesParams(t *testing.T) {
+	base := histArgs{"AAPL", time.Unix(1600000000, 0), time.Unix(1700086400, 0), "1d"}
+
+	cases := []struct {
+		name   string
+		vary   func(*histArgs)
+		impact string
+	}{
+		{"symbol", func(a *histArgs) { a.symbol = "MSFT" }, "不同标的共用一槽，会返回别的标的的行情"},
+		// start 这一格顺带堵上聚合度那组的残留缺口：它的「粒度不得放粗」只变动
+		// end，start 的 Truncate 被放粗到小时原先无人能抓。故此处取整分钟偏移，
+		// 而不是随便找个不同的时刻。
+		{"start", func(a *histArgs) { a.start = a.start.Add(time.Minute) }, "不同起点共用一槽，会返回别的区间"},
+		{"end", func(a *histArgs) { a.end = a.end.Add(time.Minute) }, "不同终点共用一槽，会返回别的区间"},
+		// interval 变体取 "1h" 而非随手写个 "1wk"：toYahooInterval 是 switch +
+		// default 兜底成 "1d"，拿未知值当变体等于要求键区分两个**上游 URL 完全
+		// 相同**的请求 —— 那样断言即使绿，守的也是一个并不存在的区分。
+		{"interval", func(a *histArgs) { a.interval = "1h" }, "小时线与日线共用一槽，会返回错周期的数据"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, arrivals := countingServer(t)
+			y := NewWithBaseURL(srv.URL)
+			y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+			other := base
+			tc.vary(&other)
+			for _, a := range []histArgs{base, other, base} {
+				if _, err := y.FetchHistory(a.symbol, a.start, a.end, a.interval); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n := len(arrivals()); n != 2 {
+				t.Errorf("缓存键未区分 %s: HTTP 请求 %d 次, want 2"+
+					"（为 1 说明该参数没进键 —— %s；为 3 说明缓存压根没生效）",
+					tc.name, n, tc.impact)
+			}
+		})
+	}
+}
+
+func TestFetchEPSHistoryCacheKeyDistinguishesParams(t *testing.T) {
+	type epsArgs struct {
+		symbol string
+		start  time.Time
+		end    time.Time
+	}
+	base := epsArgs{"AAPL", time.Unix(1600000000, 0), time.Unix(1700086400, 0)}
+
+	cases := []struct {
+		name   string
+		vary   func(*epsArgs)
+		impact string
+	}{
+		{"symbol", func(a *epsArgs) { a.symbol = "MSFT" }, "不同标的共用一槽，会返回别家的 EPS"},
+		{"start", func(a *epsArgs) { a.start = a.start.Add(time.Minute) }, "不同起点共用一槽，会返回别的区间"},
+		{"end", func(a *epsArgs) { a.end = a.end.Add(time.Minute) }, "不同终点共用一槽，会返回别的区间"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, hits := epsCountingServer(t)
+			y := NewWithBaseURL(srv.URL)
+			y.gate = gateWith(policy.Policy{TTL: time.Minute, Coalesce: true})
+
+			other := base
+			tc.vary(&other)
+			for _, a := range []epsArgs{base, other, base} {
+				if _, err := y.FetchEPSHistory(a.symbol, a.start, a.end); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n := hits(); n != 2 {
+				t.Errorf("EPS 缓存键未区分 %s: HTTP 请求 %d 次, want 2"+
+					"（为 1 说明该参数没进键 —— %s；为 3 说明缓存压根没生效）",
+					tc.name, n, tc.impact)
+			}
+		})
+	}
 }
