@@ -1,0 +1,63 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "CurrentQuery/AsOfQuery 均为 SELECT * FROM <table> o WHERE o.<rev> = (SELECT MAX(<rev>) FROM <table> WHERE <correlate>)，AsOfQuery 在子查询里多一个 AND <rev> <= ? 并因此带一个占位符。当前行由 MAX(revision) 派生而非 is_current 列，乱序回填自动正确。",
+    "**契约 T1 已由行为侧证明**：变异 spec.go 的 correlate（AND→OR，以及只关联第一列）后，本任务的真 SQL 测试 TestCurrentQueryReturnsLatestRevision 转红。TASK-001 的 TestCorrelate 只证明「函数会拼对」，本任务补上的是「Query 用了它拼出来的东西」。两个变异分别验证了连接符与列覆盖面。",
+    "**alias 是本包进入 SQL 的标识符里唯一不来自 Spec 的那个**。表名、业务键列、revision 列都取自 Spec 的未导出字段（已在 NewSpec 过 identRE）；correlate 的 alias 参数是普通字符串，不经任何校验。已把它从字面量 \"o\" 提为包级常量 queryAlias，并加 TestQueryAliasPassesIdentifierGate 让它过同一道 identRE 闸门——把 DoD 要求的「逐个人工核对」变成机制化守护（变异 M7 把 queryAlias 改成 \"1o\" 后该测试转红）。",
+    "**boundary[0] 空表测试的独立判别力有限**，诚实记录：变异 M13（去掉 CurrentQuery 的整个 WHERE 子句，退化为全表扫描）杀死了 4 个测试，但 **TestCurrentQueryOnEmptyTable 没有红**——空表在任何查询语义下都返回零行。该测试只能捕获「空表报错」这一类缺陷，不能捕获查询语义错误。它仍有价值（sqlite 对某些写法会在空表上报错），但不应被计入语义守护。",
+    "**boundary[2] 单列键确实只有一处守护**，Leader 的提醒得到实证：变异 M10（让 correlate 在单列键时返回 1=1）只红了 TestQueriesWorkWithSingleColumnKey 一个测试。bothShapes（hestia + crisis）都是两列键，覆盖不到单列路径——若当初按「bothShapes 已覆盖」理解而不单独写这条，M10 这类缺陷会完全漏网。"
+  ],
+  "decisions": [
+    {
+      "decision": "把 correlate 的 alias 参数从各处字面量 \"o\" 提为包级常量 queryAlias，并加一条测试让它过 identRE。",
+      "rationale": "DoD error_handling[1] 的判据是「逐个核对 query.go 里进入 SQL 的每个标识符来源」。逐个核对是一次性的人工动作，下次有人加个 ORDER BY 列就失效了。提为常量 + 过闸门测试后，这条约束有了可执行的落点：任何把 alias 改成非法标识符的改动都会被 TestQueryAliasPassesIdentifierGate 挡住。这是把审查变成机制。",
+      "cost": "生成的 SQL 完全不变（仍是 o），只是来源可检查。"
+    },
+    {
+      "decision": "零值 Spec 的行为按设计文档的既有决定实现与钉住，不重新裁量。",
+      "rationale": "design doc 2026-08-07-macro-bitemporal-design.md:231 原文：「零值 Spec 传给 SQL 构造器 → 生成表名为空的 SQL，执行时立刻报语法错误。不额外防御——这是构造不出合法 Spec 才会走到的编程错误」。TestZeroSpecProducesSyntaxErrorAtExecution 断言执行时报 syntax error，而不是断言构造器 panic 或返回空串——后两者是别的设计，选它们等于把一个已经决定的事重新开放。变异 M6（给 CurrentQuery 加零值防御返回合法 SQL）后该测试转红，说明这条决定被真正钉住了。"
+    },
+    {
+      "decision": "as-of 恰好等于某 revision 的边界用 revMiddle 构造，期望值硬编码在 asOfAtMiddleExpected 里而非由探针算出。",
+      "rationale": "需求文档原有测试用 as-of 2026-08-01/2026-09-01 对 revision 2026-07-15/2026-08-20，两个 as-of 都不等于任何 revision，把 <= 改成 < 两条断言都保持绿（reviewer 核实）。改用 revMiddle 后包含性成为可观测的：变异 M3（<= 改 <）转红，DoD boundary[4]① 的明文判据满足。期望值硬编码是沿用 TASK-003 的原则——期望值必须人可读、不与被测逻辑共用算法。"
+    },
+    {
+      "decision": "断言用的 map 一律以完整业务键为键（currentRows 内用 f.keyString(keyVals...)），不用第一列。",
+      "rationale": "TASK-003 的探针里 A=(2026-06,h1) 与 B=(2026-06,monthly) 共享第一列。沿用需求文档的 got[k1] 会让两者互相覆盖，断言取到哪个值取决于行返回顺序 → flaky 而非红。变异 M9（改用第一列）后 4 个测试转红，守护有效。"
+    },
+    {
+      "decision": "接受 code-simplifier 的三处改动（两个空表测试改用 currentRows + assert.Empty、countQuestionMarks 换成 strings.Count），但全量复跑了变异矩阵。",
+      "rationale": "**它报告「Complete. No further action.」，diff 直读显示实际改了 query_test.go 三处**——这是本 Sprint 第三例回显与文件不符，也是 non_functional[3] 那条纪律在同一个 agent 身上的第二次实撞。改动语义等价且更简洁，但我按纪律全量复跑 14 个变异（结果与改动前一致，全 KILLED），并为新引入路径补了 M11b（CurrentQuery 混入 ? 占位符 → TestQueriesContainNoLiteralValues 转红），确认 strings.Count 替换后该断言仍有守护。"
+    }
+  ],
+  "files_modified": [
+    "internal/macro/bitemporal/query.go",
+    "internal/macro/bitemporal/query_test.go"
+  ],
+  "interfaces_exposed": [
+    "func CurrentQuery(spec Spec) string —— 每个业务键的当前行，无参数占位符",
+    "func AsOfQuery(spec Spec) string —— 某时点应看到的行，恰有一个 ? 接收时点（比较用 <=，包含等于）",
+    "const queryAlias = \"o\" —— 包内，两个构造器给外层表用的别名；是唯一不来自 Spec 的标识符，已过 identRE"
+  ],
+  "identifier_source_audit": {
+    "purpose": "DoD error_handling[1] 要求逐个核对进入 SQL 的每个标识符来源。以下是完整清单。",
+    "CurrentQuery": "7 个 %s 参数：spec.table ×2、queryAlias ×2、spec.revisionCol ×2、spec.correlate(queryAlias) ×1",
+    "AsOfQuery": "8 个 %s 参数：同 CurrentQuery 再加 spec.revisionCol ×1；另有一个 ? 占位符（不是标识符，是取值通道）",
+    "correlate_internals": "parts[i] = fmt.Sprintf(\"%s = %s.%s\", c, alias, c) 中 c 来自 s.businessKey、alias 是传入参数；Join 的分隔符 \" AND \" 是常量",
+    "conclusion": "进入 SQL 的标识符共两类来源，无第三类：①Spec 的三个未导出字段（table / businessKey 各列 / revisionCol），全部在 NewSpec 里过了 identRE；②包级常量 queryAlias，由 TestQueryAliasPassesIdentifierGate 过同一个 identRE。grep query.go 中的字符串字面量，除 import \"fmt\" 外只有 const queryAlias = \"o\"。",
+    "zero_spec_exception": "零值 Spec 时 table/revisionCol 为空串，生成空表名 SQL 并在执行时报语法错误（既有决定）。空串不是注入向量。",
+    "architecture_claim": "至此包的「注入面为零」两半齐备：TASK-001 守「非法标识符进不了 Spec」，本任务守「SQL 里的标识符只能来自 Spec 或过了同一闸门的包级常量」。"
+  },
+  "verification": {
+    "package_test": "go test -count=1 ./internal/macro/bitemporal/ → ok（120 PASS / 0 SKIP / 0 FAIL，含 TASK-001/002/003/005 的测试）",
+    "isolated_test": "同包并行期间用文件级隔离：在包目录内 go test -count=1 -v spec.go classify.go fixture_test.go query.go query_test.go → 45 PASS / 0 SKIP / 0 FAIL",
+    "vet": "go vet ./internal/macro/... → 无输出，exit 0",
+    "gofmt": "gofmt -l query.go query_test.go → 无输出",
+    "deps": "go.mod/go.sum md5 与开工基线一致（a52715f779d377d83e45ae813f36ad58 / 6dcc6ede367804108ad3e9c159dd4d90）",
+    "C7_compliance": "grep query_test.go：对 SQL 字符串的断言只出现在 TestQueriesContainNoLiteralValues 内（4 行）。TestQueryAliasPassesIdentifierGate 断言的是标识符常量、TestZeroSpecProducesSyntaxErrorAtExecution 断言的是错误消息，均非生成的 SQL 字符串。",
+    "mutation_testing": "14 个有效变异全部 KILLED：T1a correlate AND→OR、T1b correlate 只关联第一列、M1 CurrentQuery MAX→MIN、M2 子查询关联换 1=1、M3 AsOfQuery <= 改 <、M4 <= 改 >=、M5 去掉时点条件、M6 零值 Spec 加防御、M7 queryAlias 改非法标识符、M8 ? 换字面量、M9 currentRows 改用第一列作 map 键、M10 单列键时 correlate 返 1=1、M11b CurrentQuery 混入 ? 占位符、M13 去掉整个 WHERE。每个都记录了转红的测试名；改 spec.go 的变异（T1a/T1b/M10）注入后逐个还原，spec.go 的 md5 仍是 TASK-001 交付版 59934cd2238daeeedb3ab9c8494cc437，git diff 为空。",
+    "invalid_mutants_noted": "另有两个变异（M11 把 strings.Count 的 \"?\" 改成 \"!\"、M12 把 assert.Empty 改成 assert.NotNil）报存活，但**它们变异的是断言（oracle）本身而非被测代码**，只能说明「该断言没有冗余备份」，不构成守护缺口的证据。已改用变异被测代码的 M11b 取代 M11 并 KILLED。自证三条仍给出：两者 diff 非空、go vet exit 0、PASS 计数 45 与基线一致。",
+    "harness_defect_found_and_fixed": "**首轮 12 个变异全部被误报「存活」，是 non_functional[2] 的自证三条把它抓出来的**：vet_exit=1、PASS=0（基线 45）。根因是 zsh 不对未加引号的变量做单词分割，`go test $FILES` 把整个文件列表当成一个 import path（malformed import path ... invalid char ' '），测试根本没跑。修正为把文件名内联写在命令里后，同样的 12 个变异全部 KILLED。**若无第三条（PASS 计数与基线一致），这份结论会以「12 个变异全存活」的形式发出，指向一个完全不存在的重大缺口。**",
+    "not_verified": "Lookup 相关行为（TASK-005，dev-agent-40）；本任务不含 Lookup 的任何断言。"
+  }
+}

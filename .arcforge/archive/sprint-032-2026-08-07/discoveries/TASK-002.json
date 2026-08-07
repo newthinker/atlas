@@ -1,0 +1,106 @@
+{
+  "task_id": "TASK-002",
+  "title": "Classify 纯函数（四种 Verdict）",
+  "by": "dev-agent-40",
+  "key_findings": [
+    "Classify 是纯函数，唯一 import 是 fmt（供 Verdict.String() 兜底分支用），零 I/O、无包级状态，可与 TASK-001 完全并行——本任务两个文件不引用 Spec/NewSpec/Key（已 grep 取证）。",
+    "revision 采用字符串比较，成立的前提是取值为 ISO 8601 日期或 RFC3339 时间戳（字典序 == 时间序）。本包两个使用者 published_at / fetched_at 均满足。**若将来有使用者传入非 ISO 形态的 revision（如 '2026-7-15' 少补零、或纯数字版本号 '9' vs '10'），Classify 会静默判错**——下游 Lookup/Upsert 的实现者需要保证只喂 ISO 形态。",
+    "DoD boundary[1] 的变异判据「把 `<` 改成 `<=`（或反之）」靶子不存在，与 leader 已在 boundary[0] 中作废的是同一条缺陷，但 boundary[1] 未同步修正（详见 decisions[2]）。"
+  ],
+  "decisions": [
+    {
+      "decision": "State 与 Verdict/Classify 同放 classify.go，不放 lookup.go。",
+      "rationale": "State 是 Classify 的输入，与 Verdict 是同一判断逻辑的两端；同放使本任务在没有任何数据库代码时即可完成，与 TASK-001 真并行。此决策来自需求文档与任务描述，本任务照办。"
+    },
+    {
+      "decision": "Classify 以 `if !s.Exists { return New }` 早返回，不进入 revision 比较。",
+      "rationale": "DoD error_handling[0] 要求 Exists=false 的判定与 LatestRevision 取值无关。若调用方把 LatestRevision 填成残值，比较会把一次新增误判成 Duplicate（不写观测行=丢数据）或 OutOfOrder。已用变异 M1 取证：删掉早返回后 TestClassifyAbsentIgnoresRevision 的 4 个子测试全红。"
+    },
+    {
+      "decision": "boundary[1] 的变异判据按其**底层意图**执行，而非按其字面靶子；偏离已申报给 leader。",
+      "rationale": "字面判据「把 `<` 改成 `<=`」在指定的 Classify 里无靶可打——实测 `s/ < / <= /g` 对 classify.go 零命中（文件无任何 `<` 字符）；其『或反之』分支 `>` → `>=` 实测为**等价变异**（0 条测试转红，因 `==` 分支在前，`>=` 永远见不到相等值）。按 design-spec 二.2「变异靶不存在即失败」，字面判据在自己的条款下不成立。改用命中真实边界的两个非等价变异 M4a/M4b（见 verification），取证强度不低于原意图：证明 Duplicate 与 OutOfOrder 不共用断言。"
+    },
+    {
+      "decision": "TestClassifyAcrossVersions 由需求文档的顺序断言改写为表驱动 + t.Run 子测试。",
+      "rationale": "文档原版把 3 个版本场景下的 OutOfOrder / Duplicate / Revision 三条 assert 放在同一个测试函数体内，一次失败只红一个测试名，分不清是哪个边界错了。DoD boundary[0] 要求 Duplicate 与 OutOfOrder「各红一条」，故拆成独立子测试。断言的状态与期望值与文档逐条一致，只改了组织方式。"
+    }
+  ],
+  "files_modified": [
+    "internal/macro/bitemporal/classify.go（新建，60 行）",
+    "internal/macro/bitemporal/classify_test.go（新建，5 个测试函数 / 16 个子测试）"
+  ],
+  "interfaces_exposed": [
+    "type State struct{ Exists bool; LatestRevision string } —— 某业务键在库中的现状，由下游 Lookup 填充；Exists 为 false 时 LatestRevision 约定为空串，但 Classify 不依赖该约定。",
+    "type Verdict int，常量 New / Duplicate / Revision / OutOfOrder（iota 顺序，New==0 为零值）",
+    "func (v Verdict) String() string —— 具名值返回 'New'/'Duplicate'/'Revision'/'OutOfOrder'，未定义值返回 'Verdict(N)'",
+    "func Classify(s State, incoming string) Verdict —— 纯函数；!Exists→New，incoming==Latest→Duplicate，incoming>Latest→Revision，否则 OutOfOrder"
+  ],
+  "verification": {
+    "test_command": "go test ./internal/macro/bitemporal/ -count=1 -v -run 'TestClassify|TestVerdict'",
+    "result": "PASS —— 5 个测试函数 / 16 个子测试，共 21 条 --- PASS，0 SKIP",
+    "package_suite": "go test ./internal/macro/bitemporal/ -count=1 → ok（含 dev-agent-39 并行开发的 spec.go/spec_test.go，全包绿）",
+    "vet": "go vet ./internal/macro/... → exit 0",
+    "coverage": "classify.go 逐函数 100.0%（String 100.0% / Classify 100.0%），包 total 100.0%，门槛 dev_minimum=80",
+    "git_ref": "feat/macro-bitemporal @ a1c6ae4560ef3669702a19780566648a6bee22f3（开工基线）",
+    "mutation_evidence": [
+      {
+        "id": "M1",
+        "criterion": "error_handling[0]",
+        "mutation": "删除 Classify 的 `if !s.Exists { return New }` 早返回，使 Exists=false 时也去比较 revision",
+        "result": "KILLED —— TestClassifyAbsentIgnoresRevision 的 4 个子测试（LatestRevision= / 2020-01-01 / 2026-07-15 / 9999-12-31）全红，另连带红 TestClassify/业务键首次出现 与 TestClassifyAcrossVersions/零个版本——空库一律新增。符合判据「该条须转红」。"
+      },
+      {
+        "id": "M2",
+        "criterion": "functional[0]",
+        "mutation": "TestClassify 中互换 Revision 与 OutOfOrder 两个 Verdict 的期望值",
+        "result": "KILLED —— 恰好 2 个子测试转红且报出名字：TestClassify/同键更新的_revision——央行修订重发、TestClassify/同键更旧的_revision——回填乱序。符合判据「每种 Verdict 的失败能被单独定位」。"
+      },
+      {
+        "id": "M3",
+        "criterion": "boundary[0]",
+        "mutation": "TestClassifyAcrossVersions 中互换 Duplicate 与 OutOfOrder 的期望值",
+        "result": "KILLED —— 恰好 2 个子测试转红，一种 Verdict 各一条：三个版本——比最大者旧的是乱序、三个版本——与最大者相等的是重复。符合判据「互换这两者的期望值，须各红一条」。"
+      },
+      {
+        "id": "M4-literal",
+        "criterion": "boundary[1]（字面判据）",
+        "mutation": "对 classify.go 执行 `s/ < / <= /g`",
+        "result": "靶不存在 —— 变异未生效，文件零字节变化（classify.go 中不含任何 `<` 字符）。按 design-spec 二.2「变异靶不存在即失败」，该字面判据在自己的条款下不成立。"
+      },
+      {
+        "id": "M4-equiv",
+        "criterion": "boundary[1]（字面判据的『或反之』分支）",
+        "mutation": "`case incoming > s.LatestRevision` → `>=`",
+        "result": "等价变异（存活）—— 0 条测试转红。因 `case incoming == s.LatestRevision` 分支在前，`>=` 永远见不到相等值。实测确认了 leader 在 boundary[0] 中的论证。"
+      },
+      {
+        "id": "M4a",
+        "criterion": "boundary[1]（改造判据，乱序侧）",
+        "mutation": "`default: return OutOfOrder` → `return Duplicate`",
+        "result": "KILLED —— 在专为相邻边界设的 TestClassifyAdjacentBoundary 内**恰好只红一条**：小一天——乱序；相等——重复 与 大一天——修订 保持绿。另在其它测试中红了 2 条同为 OutOfOrder 期望的子测试。"
+      },
+      {
+        "id": "M4b",
+        "criterion": "boundary[1]（改造判据，重复侧）",
+        "mutation": "`case incoming == s.LatestRevision: return Duplicate` → `return OutOfOrder`",
+        "result": "KILLED —— 在 TestClassifyAdjacentBoundary 内**恰好只红一条**：相等——重复；小一天——乱序 与 大一天——修订 保持绿。M4a 与 M4b 红的是不同子测试，证明 Duplicate 与 OutOfOrder 两个相邻判定不共用断言。"
+      },
+      {
+        "id": "M5",
+        "criterion": "functional[1]（兜底分支）",
+        "mutation": "`fmt.Sprintf(\"Verdict(%d)\", int(v))` → `fmt.Sprintf(\"%d\", int(v))`",
+        "result": "KILLED —— TestVerdictString 转红。证明兜底分支的可读形态被断言钉住，而不只是『不为空』。"
+      },
+      {
+        "id": "M6",
+        "criterion": "functional[1]（具名分支）",
+        "mutation": "互换 String() 中 Duplicate 与 Revision 返回的字符串",
+        "result": "KILLED —— TestVerdictString 转红。"
+      }
+    ]
+  },
+  "notes_for_leader": [
+    "**DoD 缺陷申报**：boundary[1] 仍保留 leader 已在 boundary[0] 中作废的同一条变异判据（把 `<` 改成 `<=`）。我已实测两点：(a) `<` 在 classify.go 中零命中；(b) 其『或反之』的 `>` → `>=` 是等价变异，0 条转红。因此 boundary[1] 的字面判据无法被满足。我按其底层意图（相邻边界各自独立取证）用 M4a/M4b 取证并全部 KILLED，但**这是对 DoD 字面文本的偏离，需 leader / test agent 确认接受**；若不接受，请给出新的字面判据，我返工。",
+    "本任务 writes 声明与实际写入完全一致（仅 classify.go / classify_test.go），无 scope 漂移，无需补声明。"
+  ]
+}

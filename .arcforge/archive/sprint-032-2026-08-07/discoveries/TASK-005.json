@@ -1,0 +1,220 @@
+{
+  "task_id": "TASK-005",
+  "title": "Lookup（Querier 接口 + 状态查询）",
+  "by": "dev-agent-40",
+  "key_findings": [
+    "**需求文档样例的 TestLookupWrapsSQLError 守不住 error_handling[1]，这是实证不是推测。** 它只测「表不存在」，而 sqlite 的原始错误信息本身就是 `SQL logic error: no such table: no_such_table` —— 表名是驱动给的。变异 MT4（从包装里删掉 spec.table）后全套 27 条无一转红。已补「列不存在」子测试隔离包装的贡献：驱动信息是 `no such column: no_such_col`，不含表名，先用 errors.Unwrap 断言这个前提成立，再断言包装后的信息含表名。修正后 MT4 KILLED，而原「表不存在」子测试**仍然绿**——它从来就没守护过这条判据。",
+    "**「WHERE 用上业务键每一列」原本无人守护。** 文档样例的「另一个业务键不受影响」用的是 ('2026-05','monthly')，**两列都与库中数据不同**——WHERE 只用首列也照样查不到，变异存活。必须构造【首列相同、次列不同】的键对才能打中。已补 TestLookupUsesEveryKeyColumn，直接复用 TASK-003 探针里共享首列的 probe[0]/probe[1]（probe[0] 的 revision 更大，漏列时会被算进 MAX）。变异 MT7 现 KILLED 且**只红这一条**——正是它原本会漏掉的证据。",
+    "零值 Spec 之外，包内**没有第二处 Spec 构造点**（封装重查结论，见 verification.encapsulation_recheck）。TASK-001 建立的「未校验的 Spec 构造不出来」守卫在包写完之后仍然成立。",
+    "Lookup 不需要 Spec 未暴露的任何东西：table / businessKey / revisionCol 三个未导出字段 + zero() / checkKey() 两个未导出方法已足够。**没有触发 blocked_clarification，也没有给 spec.go 加任何 getter。**",
+    "revision 形态（ISO 8601 / RFC3339）的约束点确认只能在 Lookup 这一层，但**判定是不在这里校验**（理由见 decisions[2]），并用 TestLookupRevisionFormIsCallerGuaranteed 把该判定的可观测后果钉成可执行契约。",
+    "**review_fix 轮（QA 找到 3 条真缺口）**：三条都是「断言通过的原因不是被测代码做对了」的同一类问题，与我自己在首轮发现的两条（MT4 表名靠驱动信息满足、WHERE 漏列靠两列都不同的键掩盖）同族。**这类缺口 100% 靠变异跑出来，读代码看不出来**——三条在补测试前的全包 125 条无一转红。",
+    "**Q1 是其中后果最重的一条**：`sql.NullString` 声称分辨「没有这个业务键」与「有键但 revision 为空串」，第二种零覆盖（三套 fixture 都没插过空串 revision，而 DDL 只是 TEXT NOT NULL，空串完全合法）。后果链：已存在的键被判 `Exists:false` → `Classify` 给 `New` 而非 `Revision` → **重复入库，正是本包存在的理由被绕过**。",
+    "**Q3 暴露的是包的两半之间存在一条零覆盖的接缝**：`Lookup` 侧取最大值走 SQL 的 `MAX()`（字典序），`Classify` 侧走 Go 字符串比较（字典序），两者必须同序；而 QA grep 确认全测试集**没有任何一处把 Lookup 的返回值喂给 Classify**。两半各自被测得很细，接缝本身没人测——**排序假设错位不会被任何单侧测试发现**。"
+  ],
+  "decisions": [
+    {
+      "decision": "C8 适用范围裁定的执行与一处加强：注入防护跑 allShapes（含单列键）而非 bothShapes。",
+      "rationale": "Leader 的裁定按「这条路径是否真的走到 SQL、键形状是否进入 WHERE」划分。注入测试两者都满足，且**键列数会改变注入串与 WHERE 其余部分的相互作用**——单列键没有尾随的 ` AND ...` 可被 `--` 注释掉，多列键有。故取 allShapes。裁定原文未覆盖本任务新增的两条测试（注入、ISO 形态），此处按其原则外推：注入跑多套；ISO 形态只跑一套（验的是 revision 列，与业务键形状无关）。TestLookupUsesEveryKeyColumn 跑 bothShapes 而非 allShapes——单列键只有一列，「漏列」变异对它结构性打不中，同 TASK-003 对 T1 的处置。"
+    },
+    {
+      "decision": "boundary[1] 乱序测试由文档样例的单形状改为 bothShapes。",
+      "rationale": "Leader 的 C8 裁定明确把它划入「需要两套形状」——它真的执行 SQL，键形状进入 WHERE 子句。文档样例只跑 hestiaShape，照抄就会默默继承文档自身的不一致。"
+    },
+    {
+      "decision": "revision 的 ISO 8601 形态：本包【不】校验，明确判定由建表方与写入方保证；该判定用可执行测试钉住，而非停在注释。",
+      "rationale": "DoD 给了三个可选项（加校验 / 文档声明调用方保证 / 判定本包不管），要求选一个并写下来。选「不校验」的三条理由：①本包是薄机制层，只认识键的形状、不认识列的语义，加形态校验等于让它开始认识数据含义；②校验要在每次查询后跑一次正则，成本落在正常路径上；③把数据质量问题转成查询失败，会让调用方在**读**路径上遇到本该在**写**路径暴露的错误。判定已写进 Lookup 的文档注释，并由 TestLookupRevisionFormIsCallerGuaranteed 钉住——它断言喂进非 ISO 形态（纯数字版本号 '9' / '10'）时返回字典序结果 '9' 而非语义最新的 '10'。变异 MT8（给 Lookup 加上形态校验）后该条 KILLED，证明这颗钉子是承重的：将来谁想推翻这个判定，必须显式改这条测试，不能悄悄改掉。"
+    },
+    {
+      "decision": "接受 code-simplifier 对 lookup_test.go 的改动（提取 keyValsWithFirst 闭包、failureContext 结果提取为局部变量），但为它新引入的路径补了一条非空性前提检查。",
+      "rationale": "闭包本身是合理简化，但它引入了一个**静默失效**风险：若 keyValsWithFirst 被改成不再把载荷放进首列，注入测试就退化成「用良性取值查不到」的空测试，**却依然全绿**。已在循环内加 `require.Contains(t, vals, p, …载荷未进入 Key，本条测试是空的)`。变异 MT9（把 vals[0]=first 改成良性取值）现 KILLED 且红 7 条——没有这条前提检查它会存活。非空性必须自己守，不能假设 helper 一直正确。"
+    },
+    {
+      "decision": "变异 harness 改用文件级隔离（排除 query*.go），并在每次变异一律输出「0 红」三条自证。",
+      "rationale": "见 verification.concurrency_incident —— MT4/MT5 首跑因 dev-agent-39 正在写 query_test.go 而 vet 失败、零测试执行。三条自证里的 ③（PASS 计数与基线比对）拒绝了那两次结果，没让它们冒充结论。"
+    },
+    {
+      "decision": "Q3① 的字典序钉子刻意选用【能被 time.Parse 解析】的 RFC3339 取值（不同时区写法、带小数秒），而不是 \"2026-7-15\" 这类少补零形态。",
+      "rationale": "这是这条测试成不成立的关键。QA 给的变异是「Classify 改成 time.Parse 后按时间序比较」，而任何这样的实现都必须对**解析失败**有兜底——兜底只能退回字符串比较。若我用解析不了的取值（少补零、纯数字版本号），变异会走兜底路径、行为与原实现一致，**测试反而全绿、变异存活，这条钉子就白写了**。选的两组：①`2026-07-15T08:00:00+09:00`（== 2026-07-14T23:00Z）对 `2026-07-15T05:00:00Z`——字典序更大、时间上更早；②`2026-07-15T10:00:00.500Z` 对 `2026-07-15T10:00:00Z`——`'.'(0x2E) < 'Z'(0x5A)` 故字典序更小、时间上更晚。两组都是合法 RFC3339，实测变异后各红一条。**这两种形态对 `fetched_at`（RFC3339 时间戳）是现实风险，不是人造的**：写入方一旦输出非 UTC 偏移或小数秒，字典序即失效。"
+    },
+    {
+      "decision": "Q1 的测试带【对照组】：真的不存在的键仍须 Exists:false。",
+      "rationale": "只断言「空串 revision 判 true」的话，「一律返回 Exists:true」这种实现也能全绿。两条合起来才说明 Lookup 分辨的是「SQL NULL」而不是「空串」——这与我在 Q2 加非空性前提检查、在 MT4 加 errors.Unwrap 前提断言是同一条纪律：**断言必须能区分「代码做对了」与「恰好满足」**。"
+    },
+    {
+      "decision": "Q2 按「载荷位置」与「载荷字符类」两个维度分别遍历。",
+      "rationale": "Leader 与 QA 都强调这两个维度**正交**，我确认了：`where[i]` 是逐列循环，每一列是独立拼接点（位置维），而拼法决定哪类载荷能突破（字符类维，TASK-006 已补双引号系）。此前载荷恒在 `vals[0]`，于是「只对 i>0 的列裸拼」完全存活。现在 payloads × f.keys 全组合遍历，反向证明（含单引号的合法取值须能命中）同样逐列。"
+    }
+  ],
+  "files_modified": [
+    "internal/macro/bitemporal/lookup.go（新建）",
+    "internal/macro/bitemporal/lookup_test.go（新建，8 个测试函数 / 29 条 --- PASS）"
+  ],
+  "interfaces_exposed": [
+    "type Querier interface{ QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row } —— Lookup 需要的最小数据库能力；*sql.DB 与 *sql.Tx 均满足（后者有真事务测试，非仅编译期断言）",
+    "func Lookup(ctx context.Context, q Querier, spec Spec, key Key) (State, error) —— 查不到返回 State{Exists:false} 且 err==nil；零值 Spec 与键集不匹配返回 error；SQL 错误以 `bitemporal lookup <表名>: %w` 包装（表名由包装提供，可 errors.Unwrap 取回驱动错误）",
+    "下游注意：Lookup 读出的 LatestRevision 直接喂 Classify，两者都按字典序比较；**revision 必须是 ISO 8601 / RFC3339 形态，本包不校验**（见 decisions[2]）"
+  ],
+  "verification": {
+    "test_command": "go test ./internal/macro/bitemporal/ -count=1 -v -run TestLookup",
+    "result": "PASS —— 8 个测试函数 / 29 条 --- PASS，0 SKIP",
+    "package_suite": "go test ./internal/macro/bitemporal/ -count=1 → ok（全包，含 TASK-001/002/003/004 的文件）",
+    "vet": "go vet ./internal/macro/... → exit 0",
+    "gofmt": "gofmt -l 对两个文件均无输出",
+    "coverage": "lookup.go 的 Lookup 100.0%，包 total 100.0%（门槛 dev_minimum=80）",
+    "race": "**显式不做** —— 包内无 goroutine，收益为零。这是记录在案的排除，不是遗漏（DoD non_functional 要求显式记录而非沉默略过）。",
+    "baseline_pass_count": "29（go test <包内除 query*.go 外全部 .go> -count=1 -v -run TestLookup 的 --- PASS 行数）",
+    "encapsulation_recheck": {
+      "why": "TASK-001 的守卫「未校验的 Spec 构造不出来」只在包内没有第二处 Spec 构造点时成立。dev-agent-39 在 TASK-001 交付时 grep 确认过当时无第二处，但标注「只对此刻成立，003/004 新增文件后需重查」。该重查一度无 owner 也无触发时机，由 dev-agent-40 认领并归入 TASK-005——005 开工时 001-004 全部落地，是这个包最后一次被写入的时刻，覆盖面最全。",
+      "spec_composite_literals": "`grep -n 'Spec{' *.go` 命中 11 处，全部合规：spec.go 内 7 处（NewSpec 的错误返回 `Spec{}` × 6 + 唯一的带字段构造 spec.go:64，即 NewSpec 自身）、lookup_test.go:171 / query_test.go:127,132 / spec_test.go:38 共 4 处为**零值 `Spec{}`**（正是用来测 T5 守卫本身）。**无任何第二处带字段的 Spec 构造点**——守卫成立。",
+      "unexported_field_access": "`.table` / `.businessKey` / `.revisionCol` 的包内直接访问全部是**读**（lookup.go 拼 SQL、query.go 拼 SQL、fixture_test.go 建测试 SQL、spec.go 自身）。字段读不违反守卫——守卫防的是「构造出未校验的 Spec」，不是「读已校验 Spec 的字段」。",
+      "spec_methods": "`grep -nE '^func \\(s Spec\\)' *.go` → 仍然只有 zero() / checkKey() / correlate() 三个。**004 与 005 都没有新增 getter**，dev-agent-40 承诺的那条（「只加一个 getter」也属禁止范围）未被触碰。",
+      "conclusion": "TASK-001 的封装守卫在包写完之后仍然成立。**未发现需要报 Leader 的第二处构造点。**"
+    },
+    "concurrency_incident": {
+      "what": "MT4 与 MT5 首次运行时 vet_exit=1、PASS 计数 0。根因**不是我的变异**，而是 dev-agent-39 当时正在写 query_test.go（同包并行的 TASK-004），包内出现瞬时不可编译状态。",
+      "why_it_matters": "这正是「0 红」会被伪造的那个场景的真实发生：若 harness 只 grep FAIL 行，这两次会各报一条「0 红 → 变异存活」的假结论，而 MT4 当时**恰好确实存活**（真因是测试不足），两个原因会混在一起、无从分辨。",
+      "how_caught": "harness 内建的第 ③ 条自证（PASS 计数与基线比对）发现 PASS+FAIL==0，直接判定「测试根本没执行，本次结果无效」并以 exit 4 中止，没让结果冒充结论。",
+      "fix": "改用文件级隔离——变异运行只编译包内除 query*.go 外的文件集，基线 29 条不变。此后 9 个变异全部在隔离下运行。",
+      "note": "⇒ 「0 红三条自证」这条纪律在真实事件上生效了一次，不只是理论推演。"
+    },
+    "subagent_change_verification": {
+      "claim": "code-simplifier 最终回复：lookup.go 未改动、lookup_test.go 改动（提取 keyValsWithFirst 闭包、failureContext 提取局部变量）。",
+      "verification": "md5 直读核实两项声明**均属实**：lookup.go 前后同为 4000dbb25a03441e5da331c31250b68d（确未改动）；lookup_test.go 由 632a60df… 变为 1c7e87cc…（确已改动）。与 TASK-003 那次（声称 unchanged 实则改了 4 处）不同，本次声明与文件一致——但结论只来自 md5，不来自它的回复。",
+      "consequence": "因测试文件确实变更，按 DoD 全量复跑 8 个变异（不假设语义等价），并为新引入的 keyValsWithFirst 路径补 MT9。9 个变异全部 KILLED。"
+    },
+    "mutation_evidence": [
+      {
+        "id": "MT1",
+        "criterion": "error_handling[0] / error_handling[2]（契约 T1 对偶）",
+        "mutation": "删掉 `if err := spec.checkKey(key); err != nil { return State{}, err }`，让 Lookup 跳过 checkKey 直接查询",
+        "result": "KILLED —— PASS 25/29，红 4 条：TestLookupRejectsMismatchedKey 及其 缺键/多键/键名不符 三个子测试。这是「Lookup 真的调用了 checkKey」的行为侧证明——TASK-001 的 TestCheckKey 只能证明 checkKey 本身正确。"
+      },
+      {
+        "id": "MT2",
+        "criterion": "boundary[2]（契约 T5）",
+        "mutation": "删掉零值 Spec 检查",
+        "result": "KILLED —— PASS 28/29，红 1 条 TestLookupRejectsZeroSpec。"
+      },
+      {
+        "id": "MT3",
+        "criterion": "error_handling[3] 注入防护",
+        "mutation": "把 `where[i] = c + \" = ?\"` 改成 `fmt.Sprintf(\"%s = '%s'\", c, key[c])` 并去掉 args",
+        "result": "KILLED —— PASS 19/29，红 10 条，**全部集中在 TestLookupRejectsInjectionInKeyValues**（hestia/crisis/single-key 三套形状 × 两个子测试 + 父测试）。**其余全部 criteria 保持绿**——这实测确认了独立 reviewer 的判断：若没有这条测试，注入改写会完全无声通过。"
+      },
+      {
+        "id": "MT4",
+        "criterion": "error_handling[1] SQL 错误含表名",
+        "mutation": "`fmt.Errorf(\"bitemporal lookup %s: %w\", spec.table, err)` → `fmt.Errorf(\"bitemporal lookup: %w\", err)`",
+        "result": "**首轮存活（27/27 全绿，三条自证齐备：靶命中 ✓ / vet exit 0 / PASS=27==基线）→ 补测试后 KILLED**。补的是「列不存在」子测试。修正后 PASS 27/29，红 2 条：TestLookupWrapsSQLError 与其「列不存在——表名只可能来自包装」子测试；**原「表不存在」子测试仍绿**，证明它从来不是这条判据的守护。"
+      },
+      {
+        "id": "MT5",
+        "criterion": "functional[0] 取最大 / boundary[1] 乱序",
+        "mutation": "`SELECT MAX(%s)` → `SELECT MIN(%s)`",
+        "result": "KILLED —— PASS 19/29，红 10 条：HitAndMiss（两形状）、UsesEveryKeyColumn（两形状）、IgnoresInsertOrder（两形状）、RevisionFormIsCallerGuaranteed。"
+      },
+      {
+        "id": "MT6",
+        "criterion": "boundary[0] 空表非 error",
+        "mutation": "删掉 `if !latest.Valid { return State{}, nil }`，让查不到也报 Exists:true",
+        "result": "KILLED —— PASS 19/29，红 10 条：HitAndMiss（两形状，空表段）与注入测试的「注入载荷不得命中」（三形状）。"
+      },
+      {
+        "id": "MT7",
+        "criterion": "functional[0] WHERE 用上每一列",
+        "mutation": "`strings.Join(where, \" AND \")` → `where[:1]`，args 同步截断",
+        "result": "KILLED —— PASS 26/29，红 3 条，**只有 TestLookupUsesEveryKeyColumn（两形状）**。补这条测试之前该变异会完全存活（文档样例的键两列都不同，打不中）。"
+      },
+      {
+        "id": "MT8",
+        "criterion": "error_handling[5] ISO 形态判定的钉子",
+        "mutation": "给 Lookup 加上 revision 形态校验（非 ISO 即报错），模拟「将来有人推翻这个判定」",
+        "result": "KILLED —— PASS 28/29，红 1 条 TestLookupRevisionFormIsCallerGuaranteed。证明这条判定是被钉住的：推翻它必须显式改测试。"
+      },
+      {
+        "id": "MT9",
+        "criterion": "code-simplifier 新引入路径的非空性",
+        "mutation": "把 keyValsWithFirst 里的 `vals[0] = first` 改成良性取值 `vals[0] = \"h1\"`（载荷不再进入 Key）",
+        "result": "KILLED —— PASS 22/29，红 7 条注入相关子测试。**没有我补的 `require.Contains(t, vals, p, …)` 前提检查，这个变异会存活**：注入测试会退化成「用良性取值查不到」的空测试却依然全绿。"
+      }
+    ],
+    "surviving_mutations": "最终无存活变异。唯一一次存活是 MT4 首轮（三条自证齐备，见上），它暴露的是真实的测试不足，已补测试后 KILLED。",
+    "review_fix_round": {
+      "trigger": "qa-agent-9 范围维终审，5 条（3 WARNING 必修 + 2 SUGGESTION 登记）",
+      "commit": "631a9a8 test(macro): close three guard gaps found in package-level review",
+      "baseline_pass_count": "137（全包 go test -v 的 --- PASS 行数；修复前 125）",
+      "result": "全包 ok，137 PASS，0 SKIP，go vet exit 0，gofmt 干净；Lookup / Classify / String 覆盖率均 100.0%，包 total 100.0%",
+      "new_tests": [
+        "TestLookupDistinguishesEmptyRevisionFromMissingKey（bothShapes，带对照组）—— Q1",
+        "TestLookupFeedsClassify（bothShapes，四种 Verdict 端到端）—— Q3②接缝",
+        "TestLookupFeedsClassifyOnEmptyRevision（bothShapes）—— Q1 后果链在接缝上的直接体现",
+        "TestClassifyComparesLexicographically（classify_test.go，两组字典序≠时间序的合法 RFC3339）—— Q3①"
+      ],
+      "modified_tests": [
+        "TestLookupRejectsInjectionInKeyValues：keyValsWithFirst → keyValsAt(pos, payload)，载荷与反向证明均按 payloads × f.keys 逐列遍历 —— Q2"
+      ],
+      "mutation_evidence": [
+        {
+          "id": "MQ1",
+          "criterion": "Q1（fix_items 原文判据）",
+          "mutation": "`!latest.Valid` → `latest.String == \"\"`",
+          "result": "KILLED —— PASS 131/137，红 6 条：TestLookupDistinguishesEmptyRevisionFromMissingKey（两形状）+ TestLookupFeedsClassifyOnEmptyRevision（两形状）。修复前 QA 实测 125 PASS 全存活。"
+        },
+        {
+          "id": "MQ2",
+          "criterion": "Q2（fix_items 原文判据）",
+          "mutation": "对 `i>0` 的列改用 `fmt.Sprintf(\"%s = '%s'\", c, key[c])` 裸拼，首列仍走占位符",
+          "result": "KILLED —— PASS 130/137，红 7 条，全部在 TestLookupRejectsInjectionInKeyValues（hestia/crisis 的注入与反向证明两个子测试；single-key 只有一列，`i>0` 分支对它结构性打不中，符合预期）。**红的条数与 QA 反证时的 7 FAIL 一致。**"
+        },
+        {
+          "id": "MQ3",
+          "criterion": "Q3（fix_items 原文判据）",
+          "mutation": "Classify 改成 `time.Parse(time.RFC3339, …)` 后按时间序比较，解析失败退回字典序",
+          "result": "KILLED —— PASS 134/137，红 3 条：TestClassifyComparesLexicographically 及其两个子测试。**其余全绿**——这正说明原有用例（10 字符零填充 ISO 日期）对这个变异毫无判别力，与 QA 的实测一致。"
+        }
+      ],
+      "regression_matrices": {
+        "why": "Q3 改动跨到了 TASK-002 的 classify_test.go（该任务已 verified），Leader 要求复跑其变异矩阵确认零削弱。TASK-005 自身矩阵亦全量复跑。",
+        "task_002_matrix": "8 个变异全部复跑，结论与原验证一致且**不降反增**：M1(删 Exists 早返回) 由 6 红增至 12 红、M4a 由 3 红增至 11 红、M4b 由 3 红增至 9 红——增量全部来自新增的接缝测试 TestLookupFeedsClassify，即 Classify 的守护因接缝覆盖而**变强**。M2/M3（测试侧互换期望值）各红 3 条、定位精确不变；M5/M6 各红 1 条不变；M4-equiv(`>`→`>=`) 仍为**等价变异存活**，三条自证齐备（靶命中 ✓ / vet exit 0 / PASS=137==基线 137）。**零削弱。**",
+        "task_005_matrix": "MT1–MT9 全部复跑，全部仍 KILLED：MT1 4红 / MT2 1红 / MT3 10红 / MT4 2红 / MT5 15红 / MT6 16红 / MT7 3红 / MT8 7红 / MT9 9红（MT9 已按 keyValsAt 的新形态调整靶子：`vals[pos] = payload` → 良性值）。MT5/MT6 红的条数明显上升，同样来自新增的接缝与空串 revision 测试。"
+      },
+      "shared_workspace_incident": {
+        "what": "本轮改动**被整体抹掉过一次**：三个文件的在途编辑全部消失，`git status` 变干净、工作区回到 HEAD(456c85a)，`lookup.go`/`spec.go` 的 mtime 被刷新。当时无我自己的进程在跑。",
+        "cause": "**（本条已更正——原归因是我的推断，不是证据）** 已坐实的直接成因：**qa-agent-9 本人**在同一时间窗对同一目录做过两次整还原——先 `git checkout -- internal/macro/bitemporal/lookup_test.go`，后 `git checkout -- internal/macro/bitemporal/`；它当时以为在清理子代理的越权写入，实际抹的是我正在写的代码。它主动更正并坐实了自己这一份（**它本可以推给子代理**：子代理确实也在共享树上跑变异、也自报过 whole-file checkout）。⇒ 还原源**至少有两个**，qa-agent-9 是其中**唯一被直接坐实**的；子代理那条只有其自报。",
+        "how_detected": "改完跑测试时发现新加的测试函数不在 `grep '^func Test'` 的输出里；进一步查 `git status` 干净、PASS 计数回落到 125，确认是整体回退而非局部失败。",
+        "mitigation": "①把三条改动写成**幂等重放脚本**（scratchpad/apply_fix.py，每步断言靶命中，已应用则跳过），抹掉后重放成本接近零；②重放后**立即 git commit**，此后即使工作区再被抹，`git checkout` 即可恢复；③后续所有变异运行都在已提交状态上做。",
+        "note": "⇒ 同包并行时，**未提交的工作区编辑没有任何保护**。这条建议进 final-report：要么每人独立 worktree（框架本有此协议，本 Sprint 因 Leader 指定共用而未启用），要么约定「改完立刻提交，变异只在已提交状态上跑」。",
+        "my_own_attribution_error": {
+          "what_i_wrote": "原文写「另一个 agent 的变异 harness 走 `cp $BAK $FILE` 恢复整包」，并断言「这不是 linter，也不是我的 harness」。",
+          "what_was_evidenced": "我**有**证据的部分：工作区回到 HEAD(456c85a)、`git status` 干净、PASS 回落 125、我自己无进程在跑。这些只能证明**发生了整体还原**。",
+          "what_was_inference": "我**没有**证据的部分：**还原是怎么做到的**。`cp $BAK $FILE` 与 `git checkout -- <path>` 产出的终态**完全不可区分**——都是「文件回到某个较早版本、git status 干净」。我从自己熟悉的机制（我的 harness 正是 `cp $BAK $FILE`）反推了别人的机制，并把它当成因果写进了交付物。",
+          "shape": "**这与本轮其它几起是同一个形状**：把一次快照/一个终态当成事实，跳过「它是怎么来的」。区别只在于——子代理把「此刻 grep 不到」当成「从来没有过」，QA 把「它观察到 HEAD 变了」当成因果，而**我把「终态像我的 harness 会产生的样子」当成「就是那个 harness」**。三者都是可用性偏误，不是粗心。",
+          "what_would_have_been_right": "写「发生了整体还原，机制未知（终态不区分 `cp` 与 `git checkout`）」，并把归因留给能查到直接证据的人。**结论（共享工作区里未提交的编辑没有保护）不依赖机制，两种机制都成立**——所以那条建议不受影响，受影响的只是我对成因的确定性表述。"
+        }
+      },
+      "pollution_recheck": {
+        "trigger": "Leader 转达：一个 QA 子代理自报在共享工作区跑变异、并对 lookup_test.go 做过整文件 git checkout --，时间窗与本轮返工重叠，要求自查基线是否被污染。",
+        "method": "**不在共享工作区自查**（那正是被污染的地方），改用两个隔离的 git worktree 独立重测：`wt-before` 钉在 456c85a（修复前）、`wt-after` 钉在 631a9a8（修复后）。隔离 worktree 别的 agent 碰不到，基线可信。用完即拆（谁建谁拆）。",
+        "baselines": "wt-before 125 PASS / wt-after 137 PASS —— 与共享工作区所测完全一致。",
+        "before_side_now_self_measured": "**此前 discovery 里「修复前 125 条无一转红」是转引 QA 的数字，不是我自己测的。现在补测了**：在 wt-before 注入三条 fix_items 原文判据，MQ1/MQ2/MQ3 **全部存活，各自三条自证齐备**（靶命中 ✓ / vet exit 0 / PASS=125==基线，FAIL=0）。⇒ QA 的「修复前」结论**独立复现成立，未受污染**。",
+        "after_side_reverified": "在 wt-after 隔离重跑：三条 MQ（131/6、130/7、134/3）+ TASK-002 矩阵 8 条 + TASK-005 矩阵 9 条，**共 20 次变异的 PASS/FAIL 数字与共享工作区所测逐条完全相同**（含 M4-equiv 仍等价存活 137/0）。⇒ 我在共享工作区取得的证据**未被污染**。",
+        "why_the_in_tree_runs_were_already_trustworthy": "事后可验证的结构性论据：**20 次运行的 PASS+FAIL 恒等于 137**，且每次的 FAIL 集合都恰好是我这次变异应当打中的测试——**从未出现来自 query_test.go / spec_test.go / identifiers_test.go 的游离 FAIL**。若当时有别人的变异活在包内其它文件上，那些文件的测试会红并出现在我的 FAIL 列表里。这条不能替代重测，但与重测结论一致。",
+        "residual_limit": "隔离重测能证明「代码 + 测试」的因果关系，**不能**证明共享工作区在那段时间没发生过别的事（例如某次运行恰好落在别人两次 cp 之间）。真正的保障只有隔离本身——这也是建议每 dev 独立 worktree 的直接理由。"
+      }
+    }
+  },
+  "notes_for_leader": [
+    "**两处需求文档样例测试的不足是实证发现的，建议同步给 TASK-006 收尾与 QA**：①TestLookupWrapsSQLError 只测「表不存在」时守不住 error_handling[1]（sqlite 原始信息自带表名）；②「另一个业务键不受影响」用两列都不同的键，守不住「WHERE 用上每一列」。两者都不是笔误，而是**测试断言恰好被环境噪声满足**的同一类问题——断言通过的原因不是被测代码做对了。QA 若要抽查其它任务，这是一个值得复用的检查角度。",
+    "writes 声明与实际写入完全一致（仅 lookup.go / lookup_test.go），无 scope 漂移，无需补声明。未触碰 spec.go，未新增任何 Spec getter，未触发 blocked_clarification。",
+    "封装重查已完成，**未发现需要报 Leader 的第二处 Spec 构造点**，TASK-001 的守卫在包写完后仍成立（详见 verification.encapsulation_recheck）。",
+    "同包并行的一处实撞已记入 verification.concurrency_incident：dev-agent-39 写 query_test.go 期间我的变异运行读到瞬时不可编译状态。建议后续同包并行的任务在派发 prompt 里直接给出文件级隔离命令（Leader 已提到 dev-agent-39 的手法），我这次是撞上之后才改的。",
+    "**Q4 登记（本 Sprint 不修，Leader 判定）**：`spec.go:47-62` 的键形状 3 个错误出口只有 `require.Error`，让它们返回带字段的 `Spec{...}` 后变异存活（QA 实测 125 PASS）。风险是**忽略 error 的调用方拿到的 Spec 其 `zero()==false`，能穿过 Lookup 的零值闸门**——即契约 T5 的守护有一条绕行路径。不修的理由：需改 `spec.go`（属已 verified 的 TASK-001，改它会让那次验证结论失效）。**建议后续任务补「出错必返零值 Spec」的逐出口断言。**",
+    "**Q5 登记（本 Sprint 不修，Leader 判定）**：`query.go:12` 的标识符闸门按名字硬编码 `queryAlias` 一个；新增包级标识符常量（如 `[sub]` 这种 SQLite 合法但过不了 identRE 的）无覆盖，变异存活。不修的理由：要把闸门重构成遍历一张登记表，超出返工范围。**建议后续把闸门改为遍历登记表而非按名字断言。**",
+    "**共享工作区的数据丢失是真实发生的，不是理论风险**（详见 verification.shared_workspace_incident）：我的在途编辑被另一个 agent 的 harness 恢复动作整体覆盖，`git status` 干净得看不出发生过什么。建议进 final-report 待同步清单：同包并行要么各自 worktree，要么约定「改完立刻提交、变异只在已提交状态上跑」。",
+    "本轮 writes 超出原声明：因 Q3 需要，按你的**明示授权**改了 `classify_test.go`（TASK-002 的 writes）。**`classify.go` 生产代码一字未改**（仅在 MQ3 变异中临时改动并已恢复，git status 干净可证）。TASK-002 矩阵已复跑，**零削弱、且因接缝覆盖而增强**。",
+    "**污染自查已完成，结论：我的证据没有被污染，且「修复前」那一侧现在也是我自己测的了。** 方法是开两个隔离 git worktree（456c85a / 631a9a8）分别重测，20 次变异的数字与共享工作区逐条相同；修复前三条判据在 wt-before 全部存活、三条自证齐备，独立复现了 QA 的结论。worktree 用完即拆。**顺带说明：这正是我上一轮建议『每 dev 独立 worktree』的实操演示——它把「我的测量可信吗」从一个需要争论的问题变成了一条可复算的命令。**",
+    "**关于那个 QA 子代理的「归属争议」**：它在 631a9a8 提交之前 grep，发现四个测试函数在工作区和 HEAD 都不存在，据此质疑归属。它的**结论正确**（不是它写的），但推理链上「不存在 ⇒ 没人写」这一环是错的——**在共享工作区里，「此刻文件里没有」既可能是没人写，也可能是有人正在写、或刚被别人的 checkout 抹掉**（我本轮就实撞了后一种）。建议把这条写进 final-report：**共享工作区里的 grep 只能证明「此刻不在」，不能证明「不存在过」；要判断归属应查 git log / reflog，而不是查工作区。**",
+    "**我更正了自己 discovery 里的一处归因**（`shared_workspace_incident.cause`）：原文把成因写成「另一个 agent 的 `cp $BAK $FILE` harness」，那是**我的推断而非证据**——`cp $BAK $FILE` 与 `git checkout -- <path>` 的终态完全不可区分，我从自己熟悉的机制反推了别人的机制。已坐实的成因是 qa-agent-9 本人的两次 `git checkout --`。**我的错误与本轮其它几起同形**：子代理把「此刻 grep 不到」当成「从来没有过」，QA 把「观察到 HEAD 变了」当成因果，我把「终态像我的 harness 会产生的样子」当成「就是那个 harness」。⇒ final-report 若要收这条教训，**我这一例应当和另外两例并列**，否则会读成「只有别人犯了这个错」。**结论本身不受影响**：无论哪种机制，共享工作区里未提交的编辑都没有保护。"
+  ]
+}

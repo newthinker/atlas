@@ -1,0 +1,131 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "包级收尾共 4 处修复：Leader 指派 3 处（F1 空断言、F2 注入载荷、F4 抗回归静态检查），我在抽查中新发现 1 处（F3 双引号字面量盲区）。**四处都不是被红色发现的——都是变异实证发现的**。",
+    "**F3 是我自己在 TASK-004 写的测试的缺陷**：`TestQueriesContainNoLiteralValues` 只否定单引号。实证：在 AsOfQuery 的 SQL 里混入恒真且不改变行为的 `AND \"x\" = \"x\"` 后全套 120 条无一转红（三条自证齐备）。它与 Leader 指派的 F2 同形——都是「只覆盖单引号系」。",
+    "**F4 直接反驳了我在 TASK-004 的一句话**。我当时机制化 alias 的理由原话是「逐个核对是一次性人工动作，下次有人加个 ORDER BY 列就失效了」——test-agent-19 的 P2 实证：给 CurrentQuery 加 `ORDER BY rowid` 后 120 条无一转红。**我举的那个例子恰恰是我的新机制不覆盖的**。包里原有三处守卫（001 的 identRE、004 的来源核查、005 的复用 Spec）守的都是「当前代码正确」，没有一处守「将来加进来的东西也得正确」。",
+    "SQLite 里双引号本是标识符引用、不匹配列名时才回退为字符串字面量。正是这层歧义让双引号字面量比单引号更容易被当成「没问题」写进来，也让 Go 的 `%q`（反斜杠转义双引号）在 SQLite 下失效——F2 与 F3 同根。"
+  ],
+  "fixes": [
+    {
+      "id": "F1",
+      "file": "fixture_test.go",
+      "criterion": "functional[3]",
+      "defect": "TestFailureMessagesNameTheShape 对 hestia 是空断言——\"hestia\" 恰是表名 \"hestia_observations\" 的子串。",
+      "evidence_before": "注入 B0-a（failureContext 去掉形状名）后**只有 crisis 与 single-key 转红**，hestia 那次迭代空转，被另两套的红完全掩盖。",
+      "fix": "断言改为含 `\"形状 \"+f.name`；另把 `assert.NotEqual(hestia, crisis)` 换成交叉否定——NotEqual 在两条消息仅因表名不同而不等时也成立，那时它守的是表名而非形状名。",
+      "evidence_after": "再注入 B0-a，**三套形状全红**（does not contain \"形状 hestia\" / \"形状 crisis\" / \"形状 single-key\"），满足 DoD 判据。"
+    },
+    {
+      "id": "F2",
+      "file": "lookup_test.go",
+      "criterion": "functional[4]",
+      "defect": "注入载荷全是单引号系，漏掉双引号系。",
+      "independent_reproduction": "**未采信转述，独立复现机理**：①Go 实测 `%q` 产出——单引号载荷得 `\"x' OR 1=1 --\"`（无害），双引号载荷得 `\"x\\\" OR 1=1 --\"`（反斜杠转义）；②sqlite3 CLI 实测——被查业务键 (2026-06,h1) 真实 MAX 是 2026-07-15、全表 MAX 是 2026-12-31，双引号载荷经 %q 拼入后**返回 2026-12-31** ⇒ 确认是成功的布尔注入；单引号载荷被挡住。",
+      "evidence_before": "注入 MI-2（`fmt.Sprintf(\"%s = %q\", c, key[c])` 并去占位符）后 **0 红、PASS=120=基线、vet exit 0**——三条自证齐备。",
+      "fix": "payloads 新增 `` `x\" OR 1=1 --` `` + 机理注释。",
+      "evidence_after": "基线下被正确挡住；再注入 MI-2 后三套形状全红，消息「取值 \"x\\\" OR 1=1 --\" 绝不能命中任何行」。",
+      "note": "TASK-005 实现本身无漏洞（走真占位符）。根源是 DoD 示例载荷写窄了，照 DoD 执行不会产生双引号载荷 ⇒ TASK-005 判 PASS 正确。"
+    },
+    {
+      "id": "F3",
+      "file": "query_test.go",
+      "criterion": "boundary[2] 抽查产出（非 DoD 明文，抽查发现）",
+      "defect": "TestQueriesContainNoLiteralValues 只有 `assert.NotContains(sql, \"'\")`，对双引号字面量无守护。**这条测试是我自己在 TASK-004 写的。**",
+      "evidence_before": "两步实证：①先混入会改变行为的 `AND 1 = \"x\"` —— 变异被杀，但**红的是行为测试，该测试自己没红**，说明它被行为测试兜住而非自己守住；②再混入恒真且**不改变行为**的 `AND \"x\" = \"x\"` —— **0 红、PASS=120=基线、vet exit 0**，完全漏网。",
+      "fix": "对 CurrentQuery / AsOfQuery 各断言不含 `'` 与 `\"` 两条。",
+      "evidence_after": "复现 `AND \"x\" = \"x\"` 变异，该测试转红，消息「SQL 中不应出现双引号字面量」。"
+    },
+    {
+      "id": "F4",
+      "file": "identifiers_test.go（新增）",
+      "criterion": "error_handling[1]（Leader 在 epoch 2 收回重派时新增的第 11 条）",
+      "defect": "「注入面为零」无抗回归机制。新增一个不过 Spec 的标识符，120 条测试无一会红。",
+      "evidence_before": "复现 P2（给 CurrentQuery 格式串加 `ORDER BY rowid`）：**0 红、PASS=120=基线、vet exit 0**。",
+      "fix": "新增 TestSQLFragmentsIntroduceNoBareIdentifiers：用 go/ast 扫描**包内全部非测试源文件**的字符串字面量，凡 SQL 片段（含任一已登记关键字）中出现的标识符样式的词都必须是已登记关键字。白名单 sqlKeywords 刻意只列当前用到的五个（SELECT/FROM/WHERE/MAX/AND）——新增 SQL 语法会被报成裸标识符，迫使加它的人显式登记，**那一刻正是审视「这个标识符来自哪里」的时机**。",
+      "evidence_after": "两个方向都验：①P2 转红，报出 `ORDER`、`BY`、`rowid` 三个裸标识符；②另造拼接式变异 `where[i] = c + \" = ? AND rowid > 0\"`（lookup.go 的另一种引入路径）也转红，报出 `rowid`。当前实现下扫描 classify.go / lookup.go / query.go / spec.go 四个文件全绿。",
+      "design_notes": [
+        "扫**整个包目录**而非写死 query.go/lookup.go：新增文件自动纳入，否则「守将来」会被「将来新建一个文件」绕过。",
+        "用 require.NotZero(scanned) 守住扫描目标非空——若目录读取方式将来变了导致一个文件都没扫到，整条测试会静默全绿，那正是它要防的那类失效。",
+        "**限度（qa-agent-9 终审后更正）**：我最初写的限度是「只检查字符串字面量，变量拼接抓不到」——**这个表述不准确，真正的边界更窄**：检查只在【同一条字面量内既有已登记关键字、又有裸标识符】时生效。已实测的三种逃逸形态：①拼成独立字面量（`CurrentQuery(...) + \" ORDER BY rowid\"`，新字面量里一个已登记词都没有 ⇒ 整条被当作非 SQL 片段跳过）；②同形的其它子句（`+ \" LIMIT 1\"`）；③经包级常量注入（`const innerAlias = \"[sub]\"`，SQLite 合法、过不了 identRE）。它堵的是「在已有的 SQL 格式串里顺手加一段」这一种形态，不是「任何新增的 SQL 语法」。"
+      ]
+    }
+  ],
+  "regression_after_touching_verified_tasks": {
+    "why": "F1 改的 fixture_test.go 属已 verified 的 TASK-003，F2 改的 lookup_test.go 属已 verified 的 TASK-005。",
+    "TASK_003_matrix": "12 个变异全部仍 KILLED（M1/M2 形状集合、M3/M4/M5 DSN、M6/M7a 探针、M9 probeCurrent、M10=B0-a、M12/M13 require→assert、M15 scanTargets）。",
+    "TASK_005_matrix": "8 个变异全部仍 KILLED（MT1 删 checkKey、MT2 删零值检查、MT3 单引号拼值、**MI-2 双引号 %q 拼值：修复前存活、现已 KILLED**、MT4 删包装表名、MT5 MAX→MIN、MT6 删 !latest.Valid、MT7 WHERE 只用首列）。",
+    "conclusion": "两个矩阵零削弱，MI-2 由存活转 KILLED——修复是净增益。"
+  },
+  "T1_T5_audit": {
+    "T1": "落实。Query 侧：TASK-004 的 TestCurrentQueryReturnsLatestRevision，变异 correlate（AND→OR、只关联首列）后转红。Lookup 侧对偶：TASK-005 的 MT1（删 checkKey → TestLookupRejectsMismatchedKey 红）与 MT7（WHERE 只用首列 → TestLookupUsesEveryKeyColumn 红）。两侧齐备。",
+    "T2": "落实。TASK-001 用 require.ErrorContains(err, 入口标签+被拒标识符的 %q)，并用对照实验证明它严于 require.Error（M5b 下弱化断言判 ok、强断言判 FAIL）。",
+    "T3": "落实，**且本任务修补了其唯一漏洞**。F1 之前 T3 对三套形状中的一套（hestia）是不成立的。",
+    "T4": "落实，**本任务补强三处**。判据原挂 TASK-004，因 CurrentQuery(Spec) 不接收取值被重定向到 TASK-005（MT3 → 注入测试红）。TASK-004 侧保留 C7 禁止那半（grep 核实字符串断言仅一处）。本任务补：F2 双引号载荷、F3 双引号字面量断言、F4 抗回归静态检查。",
+    "T5": "落实，入口覆盖完整。三个接收 Spec 的公开入口全部有守护——CurrentQuery/AsOfQuery：TestZeroSpecProducesSyntaxErrorAtExecution（本任务另用「零值返回空串」变异复验 KILLED）；Lookup：TestLookupRejectsZeroSpec（MT2 KILLED）。Classify 与 NewSpec 不接收 Spec，无零值入口。"
+  },
+  "boundary2_audit_by_payload_shape": {
+    "method": "按 Leader 补充的用法细化——**逐载荷形态问，不是逐断言问**：对每一类输入形态各问一次「如果被测代码完全不做 X，这条断言还会通过吗」。",
+    "injection_single_quote": "不会通过（守住了）——MT3 单引号拼值变异被杀。",
+    "injection_double_quote": "**会通过（没守住）** ⇒ F2。同一条断言、同一个问题，不同载荷形态给出相反答案。",
+    "sql_literal_single_quote": "不会通过（守住了）——M8 把 ? 换成单引号字面量被杀。",
+    "sql_literal_double_quote": "**会通过（没守住）** ⇒ F3。",
+    "identifier_current_code": "不会通过（守住了）——M7 把 queryAlias 改成非法标识符被 TestQueryAliasPassesIdentifierGate 杀。",
+    "identifier_newly_added": "**会通过（没守住）** ⇒ F4。P2 加 ORDER BY rowid，120 条无一转红。",
+    "error_message_with_table_name": "已由 dev-agent-40 在 TASK-005 修（补「列不存在」子测试隔离包装的贡献），本任务复跑 MT4 确认仍 KILLED。",
+    "empty_table_assertion": "**判别力有限，非缺口**：M13（去掉 CurrentQuery 整个 WHERE）杀死 4 个测试但空表测试没红——空表在任何查询语义下都返回零行。它只能捕获「查询本身报错」（子代理用 `SELEC *` 语法错误变异验证过这半），不能捕获语义错误。两个方向都验过后这条 criteria 的边界才是清楚的。"
+  },
+  "excluded_from_this_package": {
+    "why": "契约：沉默的排除等于没有排除。以下三件是本包【刻意不做】的，不写下来下一个人会以为是遗漏。",
+    "1_table_ddl": "**建 hestia_observations 表（含 55 列）不属本包**。设计 §D1：「基座只管时态语义，**不知道表里有哪些业务列**。Hestia 的 55 列由调用方手写 SQL」。本包不建表、不管 schema、不提供写操作——go doc 公开面已核验无任何写/建表/Validate 符号。M1b 接入时须自行建表。",
+    "2_article_id_update": "**Duplicate 分支的 `UPDATE … SET article_id = ?` 属 M1b**。设计 §4.2：「Duplicate 分支必须刷新 article_id，否则会每次唤起都重抓这一期」——站点迁移后同一篇文章有了新 id，表里存的是旧 id，一级幂等检查 `SELECT 1 FROM hestia_observations WHERE article_id = ?` 会一直 miss，于是每月重抓、解析、Lookup、判 Duplicate 丢弃，结果正确但做无用功且反复请求政府站。本包只给出 Verdict、不执行写操作，这句 UPDATE 落在 hestia 侧。",
+    "3_adr_0009": "**ADR-0009 的登记是本计划之外的待办**（需求文档明确：「§10 的 ADR-0009 属于文档工作，不在本计划范围——它是本计划之外的一个待办」）。它要记录本设计对两条已批准 ADR 的偏离：①范围——ADR-0008 决策 1 列了 `bitemporal` 与 `ledger` 两个包，本设计只做 `bitemporal`（见 D3）；②实现——ADR-0006 决策 2 写「通过 `is_current` 标记当前最优估计」，本设计改为由 `published_at` 派生（见 D2）。两处都不改变原决策意图（双时态、修订产生新行、消费侧看到 v_hestia_current 全部保持），改的是实现手段与包划分；按 ADR「只追加不修改」的约定，须写新记录并在 0006 / 0008 的状态行标注。**此项无 owner，交付后仍待办。**"
+  },
+  "files_modified": [
+    "internal/macro/bitemporal/fixture_test.go",
+    "internal/macro/bitemporal/lookup_test.go",
+    "internal/macro/bitemporal/query_test.go",
+    "internal/macro/bitemporal/identifiers_test.go（新增）"
+  ],
+  "verification": {
+    "go_doc_public_api": "导出符号恰好是 CurrentQuery / AsOfQuery / Key / Querier / Spec / NewSpec / State / Lookup / Verdict（含 New,Duplicate,Revision,OutOfOrder 四常量与 String 方法）/ Classify。反向 grep 确认无 Insert/Write/Create/Upsert/Save/Validate/Migrate 类符号——与 DoD 清单完全吻合，无范围溢出。新增的 identifiers_test.go 是 _test.go，不影响公开面（已复核）。",
+    "deps": "git diff master --stat go.mod go.sum → 无输出（约束 C1 满足）。F4 只用标准库 go/ast、go/parser、go/token、regexp、unicode。",
+    "build_and_test": "go build ./... exit 0；go test ./... 全仓库 0 个 FAIL 包；包内 **125 PASS / 0 SKIP / 0 FAIL**（新增测试带来 5 条：1 父 + 4 个源文件子测试）；go vet ./internal/macro/... exit 0；gofmt -l 无输出。",
+    "scope_check_degraded": "**detect_changes 降级执行并说明**：本会话无 gitnexus MCP 工具，`.gitnexus/run.cjs` CLI 不暴露 detect-changes 子命令（只有 analyze/query/context/impact 等），且索引 stale（indexed 18339d6 vs current f2205ac）结果本就不可信。改用等效 git 验证回答同一问题：①git diff master --name-only 除 .arcforge/write-matrix.json（Leader 的框架文件，非 Go 代码）外仅涉及 internal/macro/bitemporal/；②grep 全仓库无任何既有代码 import 本包（M1a 只建包不接入）；③crisis / prism / collector 均未出现在改动清单；④go build ./... 与 go test ./... 全绿。",
+    "code_simplifier": "按项目规范于 commit 前运行，限定只看本次 git diff 的三处。它回复「Holding.」（措辞含糊），**未解读措辞而是直接 diff 核实**：三个文件与调用前备份逐字节一致，三处关键断言均在，PASS 数不变。",
+    "commits": "8c7c400（F1+F2+F3，三个测试文件 +25 -5）、456c85a（F4，新增 identifiers_test.go 121 行）",
+    "rework_recheck": "注释改动后复验：包内 137 PASS / 0 SKIP / 0 FAIL；go vet ./internal/macro/... exit 0；gofmt -l 无输出。变异实证全部在隔离 worktree 内完成并已 `git worktree remove`，主工作区仅含本次注释改动（git status 核实）。"
+  },
+  "epoch_2_note": "本任务经历一次 Leader 收回重派：epoch 1 下我完成 10 条 DoD 并 commit（8c7c400），转 dev_done 时被写通道 DENY（`assigned->dev_done` 非法迁移）。jq 直读发现 status 已被 leader 于 11:55:36Z 从 in_progress 收回为 assigned、epoch 变为 2、DoD 由 10 条增至 11 条——新增的正是 error_handling[1]。**epoch 机制在这里按设计生效**：它挡住了一次基于过期 DoD 的交付。我用 epoch 2 重新认领并落实了 F4。已完成的工作未丢失（代码已 commit、discovery 已落盘）。",
+  "dod_inconsistency_reported": {
+    "item": "non_functional[0]",
+    "text": "「`git log --oneline master..HEAD` 应有 5 个 commit（Task 1-5 各一）。**本任务自身无代码提交**」",
+    "conflict": "与 functional[3]（F1）、functional[4]（F2）、error_handling[1]（F4）三条冲突——它们都是 verify_by: test 的硬性交付项，都要求改测试代码，必然产生额外 commit。",
+    "actual": "master..HEAD 现为 **7 个 commit**：Task 1-5 各一（224c960 / 96641ec / d928dd8 / 89bc09c / f2205ac）+ 8c7c400（F1+F2+F3）+ 456c85a（F4）。",
+    "handling": "按 Leader 派发消息的明确要求执行修复。判断依据：三条修复项是 verify_by:test 的硬性交付且 Leader 逐条说明了做法，而 non_functional[0] 是写在修复项加入之前的 manual 核对项，显然未随之更新。**未走澄清环阻塞，因为任一读法下修复都必须做，差别只在 commit 计数这一句描述。** 请 Leader 确认是否更新该条表述。"
+  },
+  "rework_W2": {
+    "trigger": "qa-agent-9 终审 WARNING W2，TASK-006 由 verified 退回 review_fix（epoch 2 不变）",
+    "defect": "`identifiers_test.go` 的注释声称「任何新增的 SQL 语法都会让下面的测试把它报成裸标识符，**迫使加它的人来这里显式登记**」——**这句话声称了这条检查做不到的事**。",
+    "why_it_mattered": "问题不在覆盖不全（那可以登记为后续项），而在那句注释会让**下一个人认为已被机制覆盖，从而不再自查**。这正是本包 `error_handling[0]` 那条纪律的反面：**声称了没有的守护，比沉默更糟**。",
+    "independent_reproduction": "**未采信转述**：在隔离 worktree（`git worktree add --detach` @ 631a9a8）里独立复现四个变异，结果与 qa-agent-9 完全一致——①`CurrentQuery(...) + \" ORDER BY rowid\"` 存活（PASS=137=基线, vet exit 0, diff 非空）；②`lookup.go` 的 `+ \" LIMIT 1\"` 存活（同样三条自证）；③新增 `const innerAlias = \"[sub]\"` 拼进子查询存活（同样三条自证）；④对照组 `+ \" AND rowid > 0\"`（含已登记的 AND）**被抓出 2 红**。⇒ 覆盖边界确认为「**同一条字面量里有没有已登记关键字**」。",
+    "extra_finding": "形态③还揭示了一件 qa 未点明的事：`innerAlias` **同时逃过了 `TestQueryAliasPassesIdentifierGate`**——后者按名字硬编码 `queryAlias`，新增的别名常量它根本不看。这正是下面 Q5 指出的那条，两者是同一个缺口的两面。",
+    "fix": "只改注释，不扩大检查覆盖面（重构闸门超出返工范围）。改了两处：①文件头把「包括【将来加进来的】」改为指向 sqlKeywords 的覆盖边界说明，并明说「本测试补的是那一种形态，不是这一整类」；②sqlKeywords 上方改写为：先说明它同时是检查的**触发条件**、由此得出覆盖边界，再**逐条列出三种实测逃逸形态**（含 sha、PASS 计数与对照组结果），最后写明「在闸门重构之前，新增 SQL 语法仍需人工核对标识符来源」。",
+    "verify_against_criterion": "判据是「一个只读注释的人能否正确预测三个存活变异不会被抓住」。改后的注释直接列出了这三种形态、给出了触发条件这一机理、并给了被抓住的对照组——三者合起来足以让读者自行判断任一新改动是否落在覆盖内。",
+    "no_behavior_change": "仅注释改动，137 PASS / 0 SKIP / 0 FAIL 不变，gofmt 与 go vet 干净。"
+  },
+  "registered_not_fixed": {
+    "authority_note": "**权威源：`.arcforge/discoveries/TASK-005.json`；本处为导航副本，如有出入以权威源为准。**",
+    "why_duplicated_here": "复述让同一事实存在两份副本。放这里的理由是：归档后**最可能接手它们的人是读 TASK-006 的人**（它是包级收尾）。上面那行指针把两份副本变成「一份事实 + 一个指针」——**允许复制，但不允许两份都自称原件**。若将来有人只**部分**处置了 Q4，他大概率只更新手边那份，另一份会继续以完成时的措辞躺着，而读到它的人无从判断哪份是当前的。",
+    "Q4": {
+      "fact": "`NewSpec` 有 6 个错误出口，但只有 3 个被断言「必返零值 Spec」；键形状那 3 个（业务键为空 / 重复 / 与 revision 重名）仅 `require.Error`。⇒ 忽略 error 的调用方可能拿到一个 `zero()==false` 的 Spec，**穿过 `lookup.go:41` 的零值闸门**。",
+      "framing": "**立项时应表述为「契约 T5 的补完」，不是「spec.go 的测试补充」**（dev-agent-40 的论证，未验证）。T5 在 TASK-005 的 DoD 里被标为「安全边界不是形式条款」——**同一件事，前一个说法会让它排上队，后一个不会**。",
+      "status": "本 Sprint 未修，无 owner。"
+    },
+    "Q5": {
+      "fact": "标识符闸门 `TestQueryAliasPassesIdentifierGate` 按名字**硬编码** `queryAlias`，建议改为**遍历登记表**（把所有进入 SQL 的包级常量都过 identRE）。",
+      "corroboration": "**本任务的返工实测印证了这条**：新增 `const innerAlias = \"[sub]\"` 拼进子查询后，该闸门与 identifiers_test 两条都没抓住（见上面 rework_W2 的 extra_finding）。Q5 与 identifiers_test 的覆盖边界是同一个缺口的两面，扩大覆盖面时应一并处置。",
+      "status": "本 Sprint 未修，无 owner。"
+    }
+  }
+}

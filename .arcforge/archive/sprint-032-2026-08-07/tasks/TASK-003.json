@@ -1,0 +1,53 @@
+{
+  "id": "TASK-003",
+  "title": "测试基建：两套 Spec 形状的 fixture",
+  "module": "internal/macro/bitemporal",
+  "complexity": "中等",
+  "estimated_files": 1,
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/macro/bitemporal"
+  ],
+  "writes": [
+    "./internal/macro/bitemporal/fixture_test.go"
+  ],
+  "assigned_to": "dev-agent-39",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "description": "需求文档 Task 3（第 456-639 行）。产出 fixture 的 key()/insert()/newDB()/bothShapes()/singleKeyShape()/hestiaShape()，被 Task 4、5 的测试共用。用真实 SQLite + t.TempDir()，DSN 沿用 crisis 惯例 `file:<path>?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`。**这是纯测试文件（_test.go），不进生产二进制**。",
+  "done_criteria": {
+    "functional": [
+      "提供 hestiaShape(多列业务键)与 singleKeyShape(单列业务键)两套形状;bothShapes() 让下游测试对两套并行跑",
+      "newDB 用 t.TempDir() + crisis 惯例 DSN;**每个测试用例独立的库**,不得跨用例共享状态",
+      "**T1 的探针数据由本任务固化，不留给 TASK-004 自己摆**（Leader 裁定，采纳 dev-agent-39 的方案）。\n\n理由：**这个缺口已经漏过一次**——需求文档作者摆了数据，独立 reviewer 才发现 T1 变异打不中。若本任务只交付裸 helper、把「摆对数据」的责任留在 TASK-004，**同一个缺口有第二次机会重现**。固化进基建后，T1 变异由构造保证能打中，**而不靠下游实现者记得**。\n\n代价（明知并接受）：fixture 承担了一部分「测试意图」，不再是纯中立基建。\n\n## 具体要求（三条，缺一条 T1 仍打不中）\n\n**① 键对必须共享【恰好一列】**：如 A=`(\"2026-06\",\"h1\")`、B=`(\"2026-06\",\"monthly\")`。\n（文档原数据 `(\"2026-06\",\"h1\")` 与 `(\"2026-05\",\"monthly\")` **两列都不同**，`AND`→`OR` 变异下输出逐字节相同——dev-agent-39 用 `sqlite3` CLI 实证。）\n\n**② ⚠ B 的 revision 必须【更大】——这是必要条件，不只是好看**：\n`OR` 变异把 B 拉进 A 的 `MAX` 子查询，**只有当 B 的 revision 盖过 A 的最大值时，A 才会整组落选从而可观测**。**若 B 的 revision 更小，OR 变异仍然全绿。**\n实证：满足此条时正确实现返回 **3 行**、`OR` 变异只剩 **1 行**；不满足则两者相同。\n\n**③ revision 取值须以【具名常量】暴露**，供 TASK-004 构造「as-of 恰好等于某个 revision」的边界用。否则下游只能靠字面量重复书写，**一改数据就静默失配**。\n\n## 附带：一个结构性限制须写进注释\n\n**`singleKeyShape` 天然无 `AND` 可变，T1 对它结构性打不中。** fixture 注释里须写明——否则「三套形状都跑了」会被误读成「T1 在三套形状上都有守护」。\n\n\n**【实证修正，dev-agent-39 于交付时提供，Leader 采纳】上面②的表述比必要条件强。**\n\n原文写「**B 的 revision 必须【更大】**」。**实测：方向无关，真正的必要条件是【不相等】。**\n\n- **M7a** 把共享方 revision 改成与对方**相等** → `TestProbeKeepsT1MutationObservable` **转红** ✓\n- **M7b** 把共享方 revision 改**小**（但不等）→ **存活**，且 `TestProbeDistinguishesAndFromOr` 保持绿，即 **T1 仍然可观测**\n\n**机理**：`OR` 变异让两个键互相拉进对方的 `MAX` 子查询，**较大的一方淹没较小的一方使其整组落选——谁大谁小都行；相等时谁也淹没不了谁**。\n\n⇒ 交付的实现（`sharedColumnPair` 排序后断言严格大于）守护的正是「不相等」，**既满足 DoD 也更准确**。\n**照原表述字面执行的人会以为方向重要**——那是我写窄了。\n"
+    ],
+    "boundary": [
+      "**⚠ 契约 T3:bothShapes 并行跑时,失败信息必须能指出是哪套形状**。两套共用断言时若不带形状标识,红了也不知道是 hestia 还是 crisis 形状的问题。判据:用 `t.Run(shapeName, ...)` 子测试,或断言消息带形状名。**变异判据:故意让其中一套形状的 DDL 少一列,失败信息须指明是哪套**",
+      "insert() 必须能构造**乱序插入**(revision 不按插入顺序递增)——Task 4/5 的 boundary 依赖它"
+    ],
+    "error_handling": [
+      "fixture 自身的失败(建表失败/插入失败)必须 `t.Fatal` 立即中止,**不得让下游测试在残缺的库上继续跑**并产出一个指向别处的错误"
+    ],
+    "non_functional": [
+      "`go test` 绿、0 SKIP;文件头部写 Context Checkpoint 映射;注释中文",
+      "**本任务只产出 _test.go**,`go doc` 公开面不得因此增加任何符号",
+      "**⚠ 需求文档 L474-478 的 `fixture_test.go` 样例【没有】 `Context Checkpoint` 头注释**,而本任务 non_functional[0] 要求它(约束 C6)。**直接粘贴文档代码会不满足 DoD**——须自行补上。(文档在此处不符合它自己的 C6,独立 reviewer 核出。)",
+      "**⚠「0 红」是唯一一种能被编译失败完美伪造的变异结论，报它时必须额外自证三条**（dev-agent-40 在 TASK-002 收尾后自我复核时提炼，Leader 采纳并推广至本 Sprint 全部任务）。\n\n**结构性不对称**（它的原话）：\n\n> KILLED 结论**天然自证**——能看到 `--- FAIL` 就说明测试跑起来了、代码编译过了。\n> **只有「0 红」这个结论，编译失败会完美伪造它**：编译不过 → 没有任何 `--- FAIL` 行 →\n> harness 的 `grep -cE '^\\s*--- FAIL'` 得 0 → 报「0 条转红」。\n\n⇒ **报「存活 / 等价变异」时必须同时给出**：\n\n1. **变异 diff 非空**（靶命中）——这条多数 harness 已有\n2. **`go vet` / `go build` exit 0**（可编译）\n3. **`--- PASS` 计数与基线一致**（测试确实执行了）——**这条比 (2) 更强**：它同时排除了「编译失败」「测试被 `-run` 过滤空」「panic 中断」三种情形\n\n**成本只落在报「存活」的条目上，KILLED 不需要这套。**\n\n**触发这条复核的是 test-agent-19 的自报**：它验 TASK-002 时，某个变异只改返回值、没删随之失效的 `import \"fmt\"` ⇒ 编译失败 ⇒ 它读到的「0 红」是无效结果。dev-agent-40 随即回头查自己那条「0 红」结论，**发现自己的 harness 也没有断言可编译性**——它那条当时是靠运气成立的（该变异恰好不动 import），**不是靠方法成立的**。\n\n（复核结果：结论不变，`>=` 确为等价变异，PASS 计数 21 与基线一致。）\n"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T13:41:30Z"
+  },
+  "verifier": "test-agent-18",
+  "discovery": ".arcforge/discoveries/TASK-003.json"
+}

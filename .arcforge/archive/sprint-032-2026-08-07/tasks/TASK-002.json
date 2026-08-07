@@ -1,0 +1,47 @@
+{
+  "id": "TASK-002",
+  "title": "Classify 纯函数（四种 Verdict）",
+  "module": "internal/macro/bitemporal",
+  "complexity": "简单",
+  "estimated_files": 2,
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "packages": [
+    "./internal/macro/bitemporal"
+  ],
+  "writes": [
+    "./internal/macro/bitemporal/classify.go",
+    "./internal/macro/bitemporal/classify_test.go"
+  ],
+  "assigned_to": "dev-agent-40",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "description": "需求文档 Task 2（第 293-455 行）。产出 State{Exists,LatestRevision}、Verdict（New/Duplicate/Revision/OutOfOrder + String()）、Classify —— **纯函数，不碰数据库**。State 放在 classify.go 而非 lookup.go：它是 Classify 的输入，与 Verdict 是同一判断逻辑的两端，这样本任务可在没有任何数据库代码时完成，与 Task 1 并行。",
+  "done_criteria": {
+    "functional": [
+      "四种 Verdict 各自触发,**每种的失败必须能被单独定位**——独立断言或 `t.Run` 子测试均可。\n\n**（措辞已按独立 reviewer 意见放宽）**:原文写「不得用表驱动笼统覆盖」,**而需求文档的 `TestClassify`(L321-338)本身就是表驱动、且用 `t.Run(tc.name,…)` 包了每个 case**——互换两个 Verdict 的期望值会恰好红对应子测试并报出名字,已满足底层意图。原措辞禁止了一个已达标的模式,也禁止了文档让 dev 直接粘贴的代码。",
+      "Verdict.String() 可读(日志与告警要用);**含未定义 Verdict 值的兜底分支**"
+    ],
+    "boundary": [
+      "同一业务键 1 个 / 3 个版本时判定随之变化。\n\n**Duplicate 与 OutOfOrder 必须各有独立断言**——判据:**互换这两者的期望值,须各红一条**(而非笼统一条断言覆盖两个相邻边界)。\n\n**（原变异判据已作废——独立 reviewer 核实靶不存在）**:原文写「把 `<` 改成 `<=`(或反之)」,**但需求文档指定的 `Classify`(L425-432)里根本没有 `<`**——它是 `==` → Duplicate、`>` → Revision、`default` → OutOfOrder。把 `>` 改成 `>=` 是**等价变异**(`==` 分支在前,`>=` 永远见不到相等值,不会红)。按 design-spec 二.2「变异靶不存在即失败」,原判据在自己的条款下就不成立。",
+      "**边界值必须各自独立取证**:新旧 revision 相等(Duplicate)与新的更小(OutOfOrder)是相邻的两个判定。**变异判据(2026-08-07 更正)**:交换 Duplicate 与 OutOfOrder 的期望值,各自必须恰好只红一条——两条同时红说明共用了断言、分不清是哪个边界错了。\n\n**原判据「把 `<` 改成 `<=`」已作废:靶不存在**。`Classify` 的实现是 `==`→Duplicate / `>`→Revision / default→OutOfOrder,**全文没有 `<`**。test-agent-18 另证 `>` 改 `>=` 是**可证明的等价变异**(第一个 case 已捕获全部 `==`,求值到第二个 case 时 `incoming != LatestRevision` 恒成立,故 `>=` ≡ `>`),同样不可用作判据。"
+    ],
+    "error_handling": [
+      "**Exists=false 时的判定与 LatestRevision 取值无关**:即使 State{Exists:false, LatestRevision:<任意值>} 也必须判 New。**变异判据:让 Classify 在 Exists=false 时也去比较 revision,该条须转红**"
+    ],
+    "non_functional": [
+      "纯函数、零 I/O;`go test` 绿、0 SKIP;测试文件头部写 Context Checkpoint 映射;注释中文",
+      "**本任务不依赖 Task 1**(不引用 Spec/Key),可与之并行"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T13:41:30Z"
+  },
+  "verifier": "test-agent-19",
+  "discovery": ".arcforge/discoveries/TASK-002.json"
+}

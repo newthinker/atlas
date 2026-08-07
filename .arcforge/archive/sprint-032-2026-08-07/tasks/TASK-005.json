@@ -1,0 +1,105 @@
+{
+  "id": "TASK-005",
+  "title": "Lookup（Querier 接口 + 状态查询）",
+  "module": "internal/macro/bitemporal",
+  "complexity": "中等",
+  "estimated_files": 2,
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/macro/bitemporal"
+  ],
+  "writes": [
+    "./internal/macro/bitemporal/lookup.go",
+    "./internal/macro/bitemporal/lookup_test.go",
+    "./internal/macro/bitemporal/classify_test.go"
+  ],
+  "assigned_to": "dev-agent-40",
+  "assignment_epoch": 1,
+  "reason_class": null,
+  "description": "需求文档 Task 5（第 857-1080 行）。产出 Querier 接口与 Lookup(ctx, q Querier, s Spec, k Key) (State, error)。Querier 由 *sql.DB 与 *sql.Tx 共同满足。**本任务消费 Task 1 的 zero()/checkKey()、Task 2 的 State、Task 3 的 fixture**。",
+  "done_criteria": {
+    "functional": [
+      "Lookup 命中与未命中;多版本时 LatestRevision 取最大者",
+      "两套 Spec 形状行为一致(对 bothShapes 并行跑)",
+      "***sql.Tx 也满足 Querier**——须有一条测试真的传 Tx 进去(不是只靠编译期接口断言)"
+    ],
+    "boundary": [
+      "空表 → Exists:false 且**不是 error**(查不到不报错是设计决定,不是遗漏)",
+      "乱序插入后 LatestRevision 仍是最大者",
+      "**⚠ 契约 T5:零值 Spec 必须报错**(TestLookupRejectsZeroSpec)。零值是唯一绕过 NewSpec 校验的途径,**Lookup 是它能造成 SQL 注入的唯一入口**——本条是安全边界不是形式条款",
+      "**C8「所有涉及数据库的测试对两套形状并行跑」的适用范围裁定（Leader，独立 reviewer 指出文档自相矛盾）**：需求文档 L22 的约束写「所有」，**而它自己的样例代码（L926-985）把乱序、键不匹配、零值 Spec、SQL 错误四条全跑在 hestiaShape 上**。DoD 若照抄样例就是默默继承这个不一致。\n\n**裁定按「这条路径是否真的走到 SQL」划分**：\n\n- **需要两套形状**：boundary[1] 乱序插入后 LatestRevision 取最大——**它真的执行 SQL，形状（单列/多列键）会进入 WHERE 子句**\n- **不需要两套**：error_handling[0] 键不匹配、boundary[2] 零值 Spec——**它们在到达 SQL 之前就返回了**，与形状无关，跑两遍只是重复\n- **不需要两套**：error_handling[1] SQL 错误含表名——错误来自表不存在，与键形状无关\n\n**这个划分本身要写进 discovery**，否则下一个人只会看到「有的跑两套有的没跑」，分不清是裁定还是遗漏。\n"
+    ],
+    "error_handling": [
+      "Key 键集与 Spec 业务键不匹配 → 报错(复用 Task 1 的 checkKey)",
+      "**SQL 错误(表不存在)被包装且含表名**。⚠ 判据:断言错误信息**含表名**,不是只断言 `require.Error`——后者在任何原因的 error 下都成立(契约 T2 同族)",
+      "**⚠ 契约 T1 的对偶:必须有行为侧证明 Lookup 真的调用了 checkKey**。变异判据:让 Lookup 跳过 checkKey 直接查询,「键不匹配」那条须转红;若只有 Task 1 的 TestCheckKey 红而本任务全绿,说明 Lookup 没用上它",
+      "**⚠ 注入防护（独立 reviewer 判定为本 Sprint 最危险的遗漏，Leader 采纳）**:`Lookup` 是**包内唯一把调用方提供的【值】混进查询构造的函数**——包的架构声明「注入面为零」只可能在这里被打破。**须有一条测试:Key 的【取值】携带 SQL 元字符**(如 `Key{\"period\": \"2026-06' OR '1'='1\", \"period_type\": \"h1\"}`)**必须返回 Exists:false 或干净的 error,绝不能命中**。\n\n**为什么这条不可省**:reviewer 逐条核实——若把 `where[i] = c + \" = ?\"` 改写成 `fmt.Sprintf(\"%s = '%s'\", c, key[c])` 并去掉 args,**本任务现有的全部 criteria 仍然全绿**(命中/未命中、多版本取最大、乱序、键不匹配、零值 Spec、表名包装、*sql.Tx),因为所有测试取值都是良性字符串。唯一挡着它的是 non_functional 里那句「取值走 ? 占位符」——**那是一句未经验证的断言,不是守护**。\n\n**变异判据**:把取值拼进 SQL(去掉占位符)后本条须转红。成本:一条测试、三行、不需要新 fixture。",
+      "**标识符拼接必须复用 `Spec` 的方法，不得自行实现**（Leader 落盘，起因是 dev-agent-40 提出「004/005 并行时两边各自实现一套守护、口径不一致」的风险）。\n\n**为什么不用 `context_from` 解决**：TASK-004 与 005 是**并行**的（同 wave），005 开工时 004 的 discovery 可能还不存在——**并行任务之间的 `context_from` 是空的**，那条边给不了实际保障。\n\n**改用更强的约束**：包的架构声明是「全部 SQL 标识符来自校验过的 `Spec`」（需求文档 L7）。⇒ `Lookup` 拼 WHERE 子句时**只能用 `Spec` 的未导出字段与方法**（`table`/`businessKey`/`revisionCol`/`correlate`），**不得自行拼接任何未过 identRE 的字符串**。\n\n⇒ **口径由 `Spec` 保证，不依赖 004 产出什么**。判据：`lookup.go` 里进入 SQL 字符串的每个标识符都能追溯到 `Spec` 的字段；若发现需要 `Spec` 没提供的标识符（如新的 alias），**报 Leader 走澄清环，不要在本任务内自行拼**——那正是两边口径分裂的起点。\n\n**这与 TASK-001 移交给 TASK-004 的那条是同一件事的两个入口**：001 守「非法标识符进不了 Spec」，004 守 `query.go` 的标识符来源，**本条守 `lookup.go` 的**。三处合起来才构成「注入面为零」。\n",
+      "**具体形态补充：「只给 `Spec` 加一个 getter」也属于本条禁止的范围**（dev-agent-40 在开工前主动识别并承诺，Leader 落盘）。\n\n它的原话：\n\n> `spec.go` 不在我的 `writes` 里，**但「只加一个 getter」恰恰是最容易说服自己顺手做掉的改动**；而一旦我加了，`Spec` 的构造校验面就被我在 005 里悄悄改了口径，**「非法标识符进不了 `Spec`」那条守卫由谁负责就说不清了**。\n\n⇒ **泛泛的「不得自行拼接标识符」挡不住这个形态**——加 getter 在字面上不违反它，因为 getter 本身不拼任何东西。**但它把 `Spec` 的封装面撕开了一道口子，而封装正是 TASK-001 那条守卫的实现方式**（字段未导出 ⇒ 未校验的 Spec 构造不出来）。\n\n**判据**：`lookup.go` 若需要 `Spec` 当前未暴露的任何东西——字段、方法、getter，**一律走 `blocked_clarification` + `questions[]` 落盘**，不在本任务内改 `spec.go`。\n\n**这条的普遍形态**：约束写得越抽象，越挡不住「我这个不算」的具体合理化。**预先点名最可能的那个具体动作，比重申抽象原则有效。**\n",
+      "**revision 的 ISO 8601 形态约束须写成可测试条款，不能停在注释**（test-agent-19 在 TASK-002 验收时建议，Leader 采纳）。\n\n`Classify` 用**字符串比较** revision，正确性前提是取值为 ISO 8601（字典序 == 时间序）。若喂进 `2026-7-15`（少补零）或纯数字版本号（`\"9\" > \"10\"`），**会静默判错、零告警**。\n\ndev-agent-40 已在 `classify.go` 的注释和 discovery 里申报该前提，**但那只是注释、不是约束**。\n\n**执行点只能在本任务**（dev-agent-40 的论证）：`Classify` 是纯函数、看不见数据来源，在它内部加形态校验只能返回 error 或 panic，**两者都会污染「四种 Verdict」这个干净的返回契约**；而 `Lookup` 从库里读出 revision、知道列的语义，校验放这里才有意义。\n\n⇒ 判据：**须有一条测试或显式的文档化决定**钉住「`Lookup` 读出的 revision 是 ISO 形态」——是加校验、是文档声明「调用方保证」、还是明确判定「本包不管、由建表方保证」，**三者皆可，但必须选一个并写下来**。不得让它停在「某个注释里提过」的状态。\n"
+    ],
+    "non_functional": [
+      "`go test` 绿、0 SKIP;文件头部写 Context Checkpoint 映射;注释中文;**业务键取值走 ? 占位符**;**`go vet ./internal/macro/...` 通过**(需求文档 L1063 明确要求,且 query.go 有 5 参/6 参 fmt.Sprintf 调用,vet 能抓 arity 错误)。**`-race` 本任务显式不做**——包内无 goroutine,收益为零(**显式记录这个排除,而非沉默略过**)",
+      "**包级封装重查（dev-agent-40 主动认领，Leader 落盘）**：`Spec` 字段未导出 ⇒「未校验的 Spec 构造不出来」这条守卫，**只在包内没有第二处 `Spec{...}` 复合字面量时成立**。\n\ndev-agent-39 在 TASK-001 交付时 grep 确认过当时无第二处，**但明确标注「这只对此刻的代码成立，TASK-003/004 新增文件后需重查」**。\n\n⇒ **这条重查在 wave 1 为真，而让它变假的动作（003 的 fixture、004 的 query.go）全在后面——它一度没有 owner 也没有触发时机**，正是那种「说过了、但没人负责再看一眼」的项。\n\n**归 TASK-005 的理由（dev-agent-40 的时机论证）**：005 开工时 001-004 全部落地，**是这个包最后一次被写入的时刻，重查在这里覆盖面最全**。\n\n**具体动作**：grep 包内 `Spec{` 复合字面量、以及 `Spec` 未导出字段的包内直接访问（`.table` / `.businessKey` / `.revisionCol`），结果写进 TASK-005 的 discovery。**若发现第二处构造点，报 Leader**——那意味着 TASK-001 的守卫已被绕过，不是本任务能自行处置的。\n",
+      "**⚠「0 红」是唯一一种能被编译失败完美伪造的变异结论，报它时必须额外自证三条**（dev-agent-40 在 TASK-002 收尾后自我复核时提炼，Leader 采纳并推广至本 Sprint 全部任务）。\n\n**结构性不对称**（它的原话）：\n\n> KILLED 结论**天然自证**——能看到 `--- FAIL` 就说明测试跑起来了、代码编译过了。\n> **只有「0 红」这个结论，编译失败会完美伪造它**：编译不过 → 没有任何 `--- FAIL` 行 →\n> harness 的 `grep -cE '^\\s*--- FAIL'` 得 0 → 报「0 条转红」。\n\n⇒ **报「存活 / 等价变异」时必须同时给出**：\n\n1. **变异 diff 非空**（靶命中）——这条多数 harness 已有\n2. **`go vet` / `go build` exit 0**（可编译）\n3. **`--- PASS` 计数与基线一致**（测试确实执行了）——**这条比 (2) 更强**：它同时排除了「编译失败」「测试被 `-run` 过滤空」「panic 中断」三种情形\n\n**成本只落在报「存活」的条目上，KILLED 不需要这套。**\n\n**触发这条复核的是 test-agent-19 的自报**：它验 TASK-002 时，某个变异只改返回值、没删随之失效的 `import \"fmt\"` ⇒ 编译失败 ⇒ 它读到的「0 红」是无效结果。dev-agent-40 随即回头查自己那条「0 红」结论，**发现自己的 harness 也没有断言可编译性**——它那条当时是靠运气成立的（该变异恰好不动 import），**不是靠方法成立的**。\n\n（复核结果：结论不变，`>=` 确为等价变异，PASS 计数 21 与基线一致。）\n",
+      "**子代理（含 code-simplifier）报告「无改动」后仍须 `diff` 核实**（dev-agent-39 在 TASK-003 实撞，Leader 采纳为纪律）。\n\n**实例**：code-simplifier 最终回复「**No action — unchanged**」，而 `diff` 直读显示它**实际改了 4 处**（提取变量、提取 helper 消除两处取址循环、重命名避开内建、及调用点）。\n\n**这是本 Sprint 第二例「回显与文件不符」。子代理的最终回复同样属于不可信回显。**\n\n⇒ 判据：任何声称「未改动文件」的子代理回复之后，**必须 `git diff` / md5 核实**；若实际有改动，**全量复跑变异矩阵**，并针对新引入的代码路径补变异（dev-agent-39 为 simplifier 新引入的 `scanTargets` 补了 M15，KILLED）。**不得假设「语义等价」就跳过复验。**\n"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T13:41:30Z"
+  },
+  "verifier": "test-agent-18",
+  "fix_items": [
+    {
+      "id": "Q1",
+      "severity": "WARNING",
+      "source": "qa-agent-9 范围维终审，变异实证（三条自证齐备）",
+      "desc": "**NullString 的第二种情形零覆盖 —— 后果是本包要防的那件事**。`lookup.go:57-65` 声称要分辨「没有这个业务键」与「有但 revision 为空」两种情形，**第二种零覆盖**：三套 fixture 都没插过 `revision=''` 的行（DDL 只是 `TEXT NOT NULL`，**空串完全合法**）。变异 `if !latest.Valid` → `if latest.String == \"\"` ⇒ **125 PASS 存活**。**后果：已存在的键被判 `Exists:false`，`Classify` 随即给出 `New` 而非 `Revision` —— 正是本包存在的理由（防重复入库）被静默绕过。**",
+      "requirement": "补一条测试：插入 `revision=''` 的行后 `Lookup` 须返回 `Exists:true`（而非 false）。**变异判据**：把 `!latest.Valid` 换成 `latest.String == \"\"`，该测试须转红。"
+    },
+    {
+      "id": "Q2",
+      "severity": "WARNING",
+      "source": "qa-agent-9 范围维终审，变异实证 + 反证",
+      "desc": "**注入载荷只进过首列 —— 判据应覆盖 N 个列位置，实覆盖 1 个**。`lookup_test.go:263-270` 的 `keyValsWithFirst` 只填 `vals[0]`，其余列恒为 `\"h1\"`；而 `where[i]` 是**逐列循环**。变异：对 `i>0` 的列改用 `fmt.Sprintf(\"%s = '%s'\", ...)` 裸拼 ⇒ **125 PASS 存活**。**反证**：同一变异下仅把载荷移到末列，立即 **7 FAIL**（hestia/crisis 各报「取值绝不能命中任何行」）⇒ **缺口确由位置造成**。⚠ **这与 TASK-006 已补的双引号载荷【正交】** —— 那条补的是载荷**字符类**，这条是载荷**位置**。",
+      "requirement": "注入测试须让载荷**逐列**出现（至少覆盖首列与末列），而非固定在 `vals[0]`。**变异判据**：对 `i>0` 的列裸拼，须转红。"
+    },
+    {
+      "id": "Q3",
+      "severity": "WARNING",
+      "source": "qa-agent-9 范围维终审，变异实证 + grep 佐证",
+      "desc": "**ISO 形态的判定该守两处，只守了一处**。`lookup.go:30-33` 的判定**原话就是关于 `Lookup` 与 `Classify` 两个函数的**，但只有 `TestLookupRevisionFormIsCallerGuaranteed` 钉住 Lookup 侧。`classify_test.go` 中全部 revision 都是 10 字符零填充 ISO 日期 ⇒ **任何在其上与字典序一致的比较函数都存活**。变异：把 `Classify` 改成 `time.Parse` 后按时间序比较 ⇒ **125 PASS 存活**。**后果：接缝两侧用两种排序（SQL 的 `MAX` 用字典序 vs `Classify` 用时间序）静默错位。** 另经 grep 确认：**全测试集没有任何一处把 `Lookup` 返回的 `State` 喂给 `Classify`** —— 这个接缝本身零覆盖。",
+      "requirement": "①在 `Classify` 侧也钉住字典序假设（如用一组「字典序与时间序不一致」的取值断言 Classify 按字典序判定）；②补一条**接缝**测试：`Lookup` 的返回值直接喂给 `Classify`，断言端到端判定正确。**变异判据**：把 `Classify` 改成时间序比较，①须转红。",
+      "scope_note": "**Classify 在 `classify.go`（TASK-002 的 writes）**。本次 review_fix 授权你**跨文件改动**：`lookup.go`/`lookup_test.go`/`classify_test.go` 均可写，**但 `classify.go` 生产代码不得改**（本条只补测试）。改动后须复跑 TASK-002 的变异矩阵确认零削弱。"
+    },
+    {
+      "id": "Q4",
+      "severity": "SUGGESTION",
+      "source": "qa-agent-9",
+      "desc": "`spec.go:47-62` 的「出错必返零值 Spec」+「error 须指名被拒标识符」**只覆盖 6 个错误出口中的 3 个**（identRE 那 3 个），键形状 3 个出口只有 `require.Error`。变异：让这 3 个出口返回带字段的 `Spec{...}` ⇒ **125 PASS 存活**；忽略 error 的调用方拿到的 `Spec` 其 `zero()==false`，**能穿过 `Lookup` 的零值闸门**。",
+      "requirement": "**本 Sprint 不修**（`spec.go` 属 TASK-001，改它会让那次验证结论失效；且需要 `Spec` 侧改动）。**登记为后续项**，在 discovery 写明。"
+    },
+    {
+      "id": "Q5",
+      "severity": "SUGGESTION",
+      "source": "qa-agent-9",
+      "desc": "`query.go:12` 的标识符闸门**按名字硬编码 `queryAlias` 一个**。`identifiers_test.go` 补的是字符串**字面量**维度，对「新增包级标识符常量经 `%s` 注入 SQL」无覆盖。变异：新增 `const innerAlias = \"[sub]\"`（SQLite 合法的中括号引用，**过不了 identRE**）用作子查询别名 ⇒ **125 PASS 存活**。",
+      "requirement": "**本 Sprint 不修**，登记为后续项：建议把闸门改为**遍历一张登记表**而非按名字断言。"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-005.json"
+}

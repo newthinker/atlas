@@ -1,0 +1,112 @@
+{
+  "id": "TASK-006",
+  "title": "收尾：包级验证与回归",
+  "module": "internal/macro/bitemporal",
+  "complexity": "简单",
+  "estimated_files": 1,
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/macro/bitemporal"
+  ],
+  "writes": [
+    "./internal/macro/bitemporal"
+  ],
+  "assigned_to": "dev-agent-39",
+  "assignment_epoch": 2,
+  "reason_class": null,
+  "description": "需求文档 Task 6（第 1081-1138 行）。**无生产代码改动，仅验证与文档**。核对包的公开面、依赖零新增、全仓回归、变更范围。产出 discovery 记录 M1b 接入时需要的两件事。",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`go doc ./internal/macro/bitemporal` 的导出符号**恰好**是 Spec / NewSpec / Key / State / Classify / Verdict(含 New,Duplicate,Revision,OutOfOrder,String) / Querier / Lookup / CurrentQuery / AsOfQuery。**不应出现任何写操作、建表函数或 Validate 方法**——多出别的导出符号说明范围溢出,回头删掉",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`git diff master --stat go.mod go.sum` **无输出**(约束 C1:不新增任何依赖)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`go build ./... && go test ./...` **无 FAIL**(约束 C10:不触及既有包;本任务只新增包,不应影响 crisis / prism / collector)",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**修复 `fixture_test.go` 的一处空断言（F1，test-agent-18 在 TASK-003 验收时发现，dev-agent-39 拒绝越界改动后转由本任务承接）**。\n\n**缺陷**：`TestFailureMessagesNameTheShape` 对 **hestia 形状是空断言**——`assert.Contains(failureContext, f.name)` 中 `\"hestia\"` 恰是表名 `\"hestia_observations\"` 的**子串**，故变异「去掉形状名」时 hestia 那次迭代**照样通过**，只有 crisis / single-key 抓住。\n\n**修法**：断言改为含 `\"形状 \"+f.name`（一行）。\n\n**为什么归本任务**：该文件属 TASK-003 的 `writes`，而 **TASK-003 已 `verified`——改它的文件会让那次验证结论失效**（dev-agent-39 在 TASK-004 交付时明确拒绝越界并说明了这两条理由，处置正确）。本任务是包级收尾，`writes` 覆盖整个包路径。\n\n**⚠ 改动后必须复跑 TASK-003 的相关变异确认守护未被削弱**：至少复现 B0-a（去掉形状名）——修复后 **hestia 那次迭代也须转红**（修复前只有 crisis/single-key 红）。**若三套形状不是全红，说明修复没生效或引入了新的空断言。**\n\n**这条的形态值得记**：它是需求分析开篇点名的「测试看起来齐全但守不住」的**字面实例**——断言存在、变异下整体也 KILLED，**但其中一套形状的那次迭代是空转的**，被另两套的红掩盖了。\n",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**⚠ 注入载荷必须同时覆盖【单引号系】与【双引号系】——根源是 Leader 的 DoD 示例载荷写窄了**（test-agent-18 在 TASK-005 验收时用一个**能实际得手**的注入实证，Leader 落盘）。\n\n## 已实证的缺口\n\n它另造的变异 MI-2：取值改用 `fmt.Sprintf(\"%s = %q\", c, key[c])` 拼进 SQL（同样去掉占位符）⇒ **全套 120 条无一转红**，三条自证齐备（diff=11 行 / vet exit=0 / PASS=120 一致）。\n\n**它没有停在「存活」，写了探针直接观察**：\n\n| 载荷 | MI-2 下 | 基线下 |\n|---|---|---|\n| `x' OR 1=1 --`（现有测试用的单引号系） | 被挡住 | 被挡住 |\n| **`x\" OR 1=1 --`（双引号）** | **命中！`LatestRevision=2026-12-31`** | 被挡住 |\n\n`2026-12-31` 是**全表**最大 revision、**不属于被查的那个业务键** ⇒ **这是一次成功的布尔注入。**\n\n**机理**：Go 的 `%q` 用**反斜杠**转义 `\"`，而 **SQLite 不认反斜杠转义**——token 在 `\\` 后的 `\"` 处就结束了，剩下 ` OR 1=1 --` 被当 SQL 解析，`--` 注释掉尾部的 ` AND period_type = ...`，WHERE 恒真。\n\n## 根源在 DoD，不在实现\n\n**TASK-005 的 DoD 示例载荷是 `\"2026-06' OR '1'='1\"`——单引号系。** dev 的三条载荷全部覆盖了 DoD 点名的形态，还额外做了 allShapes + 反向证明（`O'Brien` 必须仍能命中）。**照 DoD 执行不会产生双引号载荷。** 交付实现本身没有漏洞（走真占位符），MI-2 描述的是**假想的未来回归**——故 TASK-005 判 PASS 正确。\n\n**而 `%q` 恰恰是「被告知不要裸拼值」的人最可能选的写法——它看起来像在转义。**\n\n## 本任务要做的（两件）\n\n**① 加一条双引号载荷** `` `x\" OR 1=1 --` `` 进 `TestLookupRejectsInjectionInKeyValues`（1 行）。test-agent-18 实测：该载荷在基线下**被正确挡住**，**加进去当前即绿**，同时能杀掉 MI-2。**加完须复现 MI-2 确认它转红。**\n\n**② 全包抽查同类**：凡是「构造恶意输入」的测试，检查载荷是否只覆盖了 DoD 点名的那一种形态。**根源在示例载荷，会同样影响任何抄它的任务。**\n",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**跑 `detect_changes({scope:\"compare\", base_ref:\"master\"})` 核对影响范围**:应仅新增 internal/macro/bitemporal 下的符号,无既有符号被修改。**若报告显示触及 crisis 或其他既有包,停下来查明原因**——M1a 的前提就是不动生产代码",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**契约四坐标的第四维(范围)自查**:逐条核对 design-spec 的 T1-T5 五条加强项是否都在某个任务里落实。**T1 与 T5 跨 Task 4/5,最易漏**——T1 要求 Query 与 Lookup 各有一条行为侧证明纯函数被用上,T5 要求零值 Spec 在 Query 侧也被钉住",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**抽查角度：「断言通过的原因不是被测代码做对了，而是恰好被环境噪声满足」**（dev-agent-40 在 TASK-005 用变异跑出两个实例，Leader 转为本任务的收尾抽查项）。\n\n**实例①（`error_handling[1]` SQL 错误含表名）**：需求文档的样例只测「表不存在」，而 **sqlite 的原始错误本身就是 `no such table: no_such_table`——表名是驱动给的，不是包装给的**。⇒ 从包装里删掉 `spec.table` 后**全套 27 条无一转红**。修法是补「列不存在」子测试（驱动信息 `no such column: ...` **不含表名**）来隔离包装的贡献，**并先 `errors.Unwrap` 断言这个前提成立**——前提不成立则后一条什么也证明不了。\n\n**实例②（WHERE 用上业务键每一列）**：样例的「另一个业务键不受影响」用 `(\"2026-05\",\"monthly\")`，**两列都与库中数据不同** ⇒ WHERE 只用首列也照样查不到。修法是复用 TASK-003 探针里**共享首列**的键对。\n\n⇒ **收尾时按这个角度抽查全包**：找出那些「断言成立可能有第二个解释」的测试——**尤其否定断言与错误信息断言**，它们最容易被环境自带的属性满足。\n\n**判据**：对任一条声称守护 X 的断言，问「**如果被测代码完全不做 X，这条断言还会通过吗**」。若答案取决于环境（驱动的错误文本、测试数据恰好的差异、库的默认行为），那条断言就没有守住 X。\n\n\n**【用法细化，test-agent-18 补，Leader 采纳】这条判据要【逐载荷形态】地问，不是逐断言地问。**\n\n以注入那条为例：问「如果代码完全不做防注入，这条断言还会通过吗」——\n\n- 对**单引号**载荷 `x' OR 1=1 --`：答案是「**不会**」（守住了）\n- 对**双引号**载荷 `x\" OR 1=1 --`：答案是「**会**」（没守住——`%q` 形态下它能实际命中）\n\n**同一条断言、同一个问题，不同载荷形态给出相反的答案。** 若只对现有载荷问一遍，会得出「这条守住了」的结论而漏掉整个双引号系。\n\n⇒ **抽查时对每一类输入形态各问一次**，而不是对每条断言问一次。同理适用于：错误路径的不同 driver 消息形态、边界值的不同符号方向、编码/转义的不同方言（本例的根源正是 **Go 的 `%q` 用反斜杠转义、而 SQLite 不认反斜杠**）。\n",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "discovery 须写明 M1b 接入时需要的两件事:①建 hestia_observations 表(含 55 列,**本包不管**);②Duplicate 分支的 `UPDATE … SET article_id`(设计 §4.2 明确属于 M1b)。**这两条是本包刻意不做的事,不写下来下一个人会以为是遗漏**(契约:沉默的排除等于没有排除) ③**ADR-0009 的登记**——需求文档 L1158 明确写它是「本计划之外的一个待办」。**原 DoD 只要求记两件,漏了这第三件**(独立 reviewer 核出,并指出这直接违反 design-spec 引用的「沉默的排除等于没有排除」——而那条正是 Leader 自己写的)。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**⚠「注入面为零」目前没有抗回归的机制守护——新增一个不过 Spec 的标识符，91 个测试无一会红**（test-agent-19 在 TASK-004 验收时用 P2 实证，Leader 转为本任务的落点）。\n\n## 已实证\n\ntest-agent-19 造了两个变异，结论**部分成立**：\n\n- **P1**：把 alias 换成 **sqlite 合法、identRE 拒收**的带引号标识符 ⇒ **90 PASS / 1 红，唯一红是 `TestQueryAliasPassesIdentifierGate`** ⇒ 行为测试全绿、SQL 仍合法，**只有那道闸门抓得住** ⇒ 对 **alias 而言**它是真持续约束。\n- **P2**：给 `CurrentQuery` 加一个不过 Spec 的 `ORDER BY rowid` ⇒ **91/91 全绿**（自证三条齐备）。\n\n**关键**：dev-agent-39 机制化 alias 时给的理由原话是「逐个核对是一次性人工动作，**下次有人加个 ORDER BY 列就失效了**」——**它举的那个例子，恰恰是新机制不覆盖的**。\n\n## 判定与本任务的要求\n\nTASK-004 的 `error_handling[1]` **判 PASS 是对的**：判据要的是「逐个核对**当前**代码 + alias 是常量或过校验」，dev 两条都做了（discovery 有完整 `identifier_source_audit`）**还额外机制化了 alias**。**判据没要求防未来改动。**\n\n⇒ **本任务补上那一半**：加一条**静态检查测试**，断言 `query.go` / `lookup.go` 中**进入 SQL 格式串的标识符只能来自 `spec.*` 的未导出字段、或已过 identRE 的包级常量**。\n\n**变异判据**：复现 P2（加 `ORDER BY rowid`），新测试须转红。**若仍全绿，说明这条静态检查没有覆盖到格式串里的字面标识符。**\n\n**这是 TASK-005 那条盯点「封装是否真的无旁路」在本包的第一个实例**——三处守卫（001 的 identRE、004 的来源核查、005 的复用 Spec）**守的都是「当前代码正确」，没有一处守「将来加进来的东西也得正确」**。\n",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`git log --oneline master..HEAD` 的提交数与各任务交付对应。**原文『应有 5 个 commit(Task 1-5 各一)』与『本任务自身无代码提交』均已过时,2026-08-07 更正**:本任务在 W2 返工轮有提交 `e0e46e3`(仅注释,+25 -8,闸门函数与 sqlKeywords 词表一行未动),TASK-005 返工轮另有 `631a9a8`。**四个生产文件 blob hash 全 Sprint 未变**(test-agent-18 核实),故本条若读作「不得改生产代码」,交付是满足的——冲突只在字面。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-07T13:41:30Z"
+  },
+  "verifier": "test-agent-19",
+  "fix_items": [
+    {
+      "id": "W2",
+      "severity": "WARNING",
+      "source": "qa-agent-9 终审，三条变异实证（自证齐备）",
+      "desc": "**`identifiers_test.go:33-35` 的注释声称了自己做不到的事**。那段写着「任何新增的 SQL 语法都会让下面的测试把它报成裸标识符,**迫使加它的人来这里显式登记**」——**这句被三个存活变异证伪**:①`CurrentQuery(...) + \" ORDER BY rowid\"`(拼接成独立字面量,ORDER/BY/rowid 一个都不在词表里)⇒ **137/137 存活**;②`lookup.go` 的 `+ \" LIMIT 1\"` ⇒ 存活;③新增包级常量 `innerAlias = \"[sub]\"`(SQLite 合法、过不了 identRE)拼进子查询 ⇒ 存活。**对照**:改成 `+ \" AND rowid > 0\"`(含已登记的 AND)⇒ **2 FAIL 被抓住** ⇒ 覆盖边界恰好是「**同一条字面量里有没有已登记关键字**」。\n\n**问题不在覆盖不全,在那句注释**——**下一个人读到它会认为已被机制覆盖而不再自查**,这正是本包 `error_handling[0]` 那条「沉默的排除等于没有排除」的反面:**声称了没有的守护,比沉默更糟**。",
+      "requirement": "**最小处置:改那段注释,诚实声明覆盖边界**（1 段）。须写明:该检查只在**同一条字符串字面量内含已登记关键字**时生效;**独立拼接的字面量、以及经包级常量注入的标识符不在覆盖内**。\n\n**不要求扩大检查的覆盖面**——那是重构（qa-agent-9 判为 §1 完整处置，超出返工范围）。**但注释必须与实际能力一致。**",
+      "verify": "**判据:改完后,一个读注释的人能否正确预测三个存活变异不会被抓住。** 建议在注释里直接列出那三种逃逸形态——它们是实测的，不是假想的。"
+    },
+    {
+      "id": "W2b",
+      "severity": "SUGGESTION",
+      "source": "qa-agent-9 + dev-agent-40",
+      "desc": "两条登记项（本 Sprint 不修，已在 TASK-005 discovery）:**Q4** `NewSpec` 6 个错误出口只有 3 个被断言「必返零值 Spec」,键形状那 3 个仅 `require.Error` ⇒ 忽略 error 的调用方能拿到 `zero()==false` 的 Spec **穿过 `lookup.go:41` 的零值闸门**（契约 T5 的一条绕行路径）;**Q5** 标识符闸门按名字硬编码 `queryAlias`,建议改为**遍历登记表**。",
+      "requirement": "**本任务不修**，仅在 discovery 复述这两条，确保它们不随 TASK-005 的 discovery 一起被埋没——**归档后读 TASK-006 的人是最可能接手它们的人**。\n\n**必须标明权威源方向（dev-agent-40 提）**：复述处显式写一行「**权威源：`.arcforge/discoveries/TASK-005.json`；本处为导航副本，如有出入以权威源为准**」。理由：复述让同一事实存在两份副本，将来若有人**部分**处置了 Q4（如只补 `spec.go` 三个出口中的一个），他只会更新手边那份，另一份继续以完成时的措辞躺着，而读到它的人无从判断哪份是当前的——**又一次「转述让它看起来更像事实，但没人重新测过」**。一行字把两份副本变成一份事实 + 一个指针：**允许复制，但不允许两份都自称原件。**\n\n**Q4 的立项措辞（dev-agent-40 论证，未验证）**：它的实质是**契约 T5 有一条绕行路径**，而 T5 在 TASK-005 的 DoD 里被标为「安全边界不是形式条款」。后续接手时应按「**T5 的补完**」而非「spec.go 的测试补充」立项——**同一件事，前一个说法会让它排上队，后一个不会。**"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-006.json"
+}
