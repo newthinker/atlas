@@ -488,3 +488,41 @@ func TestPolicyErrorDoesNotLeak(t *testing.T) {
 		t.Errorf("配额耗尽的那次不得到达 provider，实得 %d 次", prov.count())
 	}
 }
+
+// errProbeUpstream 是「链保留」守护专用的具名哨兵。
+//
+// 刻意具名而非沿用 TestErrorIsNotCached 里的内联 `errors.New("upstream down")`：
+// errors.Is 需要一个可引用的目标值，而既有测试的断言体与场景一字不改（只追加）。
+var errProbeUpstream = errors.New("crypto probe: upstream down")
+
+// TestNonPolicyErrorChainPreserved 守护「非 policy 错误的**链**保留」。
+//
+// 本包的注入点与另外四家**不同**，照搬会打空：crypto 没有 mapPolicyErr/mapPolicyError
+// 这样的映射函数，policy 错误是在 FetchHistory 里**内联**处理的，非 policy 错误走的是
+// 那条裸 `return nil, err`（crypto.go:163）。对抗变异形态相应地是：
+//
+//	return nil, err  →  return nil, fmt.Errorf("crypto: %v", err)
+//
+// `%v` 只切链、不改文本 ⇒ 文本类与「同一个 error 值」类的判据都看不见它。
+//
+// 判据也与另四家不同，同样是**现读**的结果而非推断：本包的 gate_test 用
+// countingProvider 而非 httptest，**根本没有 JSON 解码那条路**，
+// `errors.As(*json.SyntaxError)` 在基线就不成立。上游错误由
+// fetchHistoryFromProviders 用 `%w` 包 lastErr 产生（crypto.go:130/:203），
+// 所以这里锚一个由 fake provider 返回的哨兵，走 errors.Is。
+func TestNonPolicyErrorChainPreserved(t *testing.T) {
+	p := &countingProvider{name: "stub", err: errProbeUpstream}
+	c := newGatedCollector(p, builtinGate())
+	start, end := testRange()
+
+	_, err := c.FetchHistory("BTC", start, end, "1d")
+	if err == nil {
+		t.Fatal("provider 报错时 FetchHistory 必须返回错误 —— 本轮未构成检验")
+	}
+	if !errors.Is(err, errProbeUpstream) {
+		t.Errorf("链被切断: 上游 provider 错误必须能被 errors.Is 穿透\n"+
+			"  got: %v (%T)\n"+
+			"  FetchHistory 里那条非 policy 错误的返回若用 %%v 包一层（而非直接返回 err），"+
+			"文本一字不变，但上层再也无法按类型/值判别上游错误", err, err)
+	}
+}

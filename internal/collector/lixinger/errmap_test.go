@@ -17,6 +17,7 @@ package lixinger
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -222,5 +223,47 @@ func TestMappingHappensAtFetchNotOuterLayer(t *testing.T) {
 	}
 	if strings.Contains(decodeErr.Error(), "timeout") {
 		t.Errorf("解析错误被误标成 timeout（更外层统一 catch 的典型症状）: %v", decodeErr)
+	}
+}
+
+// TestNonPolicyErrorChainPreserved 守护 boundary[1] 的**第三面**：错误**链**本身。
+//
+// 前两条守不住这一面，这不是推测而是实测出来的（test-agent-17 在 TASK-018 上造的
+// 对抗变异）：`mapPolicyErr` 一个字不动，只在**调用点**多包一层——
+// `return nil, mapPolicyErr(err)` → `return nil, fmt.Errorf("lixinger: %v", mapPolicyErr(err))`
+// ——整个包**无一转红**。
+//
+//   - TestMapPolicyErrPassesThroughNonPolicyErrors 直测映射函数，函数没改 ⇒ 绿
+//   - TestNonPolicyErrorsUnaffected 判据是「文本里还有没有原判别词」，`%v` 把原文
+//     原样带过 ⇒ 绿
+//
+// 两者的判据分别是「是不是同一个 error 值」和「文本对不对」，**都不看链**。而 `%v`
+// 恰好只切链、不改文本。⇒ 有哨兵的包（tushare）靠 errors.Is 判据免费拿到类型级守护，
+// **无哨兵的包必须显式对某个上游可判定错误写 errors.As/errors.Is**，否则「链保留」
+// 这个属性没有任何东西钉住。
+//
+// 判据选 `*json.SyntaxError` 而非 `io.ErrUnexpectedEOF`：两者都对但**互斥**，由 body
+// 形态唯一决定——`not-json` 这类非法字符 body 产生 SyntaxError，`{"a":` 这类截断 body
+// 才产生 ErrUnexpectedEOF。test-agent-17 首版在本包照搬 yahoo 的 ErrUnexpectedEOF，
+// **基线就红**。本包用 json.Unmarshal、body 用 `not-json`，已现读实测确认走 SyntaxError。
+func TestNonPolicyErrorChainPreserved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	t.Cleanup(srv.Close)
+
+	l := NewWithBaseURL("key", srv.URL)
+	l.gate = policy.New(gateTable(policy.Policy{}), nil) // 零策略：不产生 policy 错误
+
+	_, err := l.request(gateEndpoint, map[string]any{"x": 1})
+	if err == nil {
+		t.Fatal("畸形 JSON 必须返回错误 —— 本轮未构成检验")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Errorf("链被切断: 上游解码错误必须能被 errors.As 穿透到 *json.SyntaxError\n"+
+			"  got: %v (%T)\n"+
+			"  调用点若用 %%v 多包一层（而非 %%w），文本一字不变、映射函数也没改，"+
+			"但上层再也无法按类型判别上游错误", err, err)
 	}
 }

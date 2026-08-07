@@ -15,6 +15,7 @@ package yahoo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -277,5 +278,54 @@ func TestMappingHappensAtFetchNotOuterLayer(t *testing.T) {
 	}
 	if strings.Contains(httpErr.Error(), "timeout") {
 		t.Errorf("HTTP 错误被误标成 timeout（更外层统一 catch 的典型症状）: %v", httpErr)
+	}
+}
+
+// TestNonPolicyErrorChainPreserved 守护 boundary[1] 的**第三面**：错误**链**本身。
+//
+// 上面两条守不住这一面，这是实测而非推测（test-agent-17 在 TASK-018 上造的对抗变异）：
+// `mapPolicyErr` 一个字不动，只在**调用点**多包一层——
+// `return nil, mapPolicyErr(err)` → `return nil, fmt.Errorf("yahoo: %v", mapPolicyErr(err))`
+// ——整个 yahoo 包**无一转红**。
+//
+//   - TestMapPolicyErrPassesThroughNonPolicyErrors 直测映射函数，函数没改 ⇒ 绿
+//   - TestNonPolicyErrorsUnaffected 判据是「文本里还有没有原判别词」，`%v` 把原文
+//     原样带过 ⇒ 绿
+//
+// 两者的判据分别是「是不是同一个 error 值」和「文本对不对」，**都不看链**；而 `%v`
+// 恰好只切链、不改文本。⇒ 有哨兵错误的包（tushare）靠 errors.Is 判据免费拿到类型级
+// 守护，**无哨兵的包必须显式对某个上游可判定错误写 errors.As/errors.Is**，否则
+// 「链保留」这个属性没有任何东西钉住。
+//
+// 逐调用点覆盖（沿用 yahooCallSites 的理由）：三处 policy.Fetch 各自独立返回，
+// **只在一处多包一层也是一个真实的外泄口**，只测 FetchHistory 时另两处坏了照样绿。
+//
+// 判据取 `*json.SyntaxError` 而非 `io.ErrUnexpectedEOF`：两者都对但**互斥**，由 body
+// 形态唯一决定——`not-json` 这类非法字符 body 产生 SyntaxError，`{"chart":` 这类截断
+// body 才产生 ErrUnexpectedEOF。已现读实测本包 `json.NewDecoder(...).Decode` 对该 body
+// 的实际返回类型（test-agent-17 在 lixinger 照搬别包判据，基线就红）。
+func TestNonPolicyErrorChainPreserved(t *testing.T) {
+	for _, cs := range yahooCallSites() {
+		t.Run(cs.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("not-json"))
+			}))
+			t.Cleanup(srv.Close)
+
+			y := NewWithBaseURL(srv.URL)
+			y.gate = gateWith(policy.Policy{}) // 零策略：错误只可能来自服务端，不来自闸门
+
+			err := cs.call(y)
+			if err == nil {
+				t.Fatal("畸形 JSON 必须返回错误 —— 本轮未构成检验")
+			}
+			var syntaxErr *json.SyntaxError
+			if !errors.As(err, &syntaxErr) {
+				t.Errorf("链被切断: 上游解码错误必须能被 errors.As 穿透到 *json.SyntaxError\n"+
+					"  got: %v (%T)\n"+
+					"  该调用点若用 %%v 多包一层（而非 %%w），文本一字不变、映射函数也没改，"+
+					"但上层再也无法按类型判别上游错误", err, err)
+			}
+		})
 	}
 }

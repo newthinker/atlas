@@ -1,6 +1,7 @@
 package eastmoney
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -404,4 +405,43 @@ func TestCacheKeyAggregatesNearbyTimes(t *testing.T) {
 				"（为 1 说明截断粒度被放粗到小时/天——不同区间的查询会串槽，静默返回错区间数据）", n)
 		}
 	})
+}
+
+// TestNonPolicyErrorChainPreserved 守护「非 policy 错误的**链**保留」。
+//
+// 上面 TestPolicyErrorsDoNotLeak 的「非policy错误原样透传」那一格挡不住这一面：
+// 它用 emptyKlineBody，错误是 `no history for symbol: ...`——**纯 fmt.Errorf，
+// 本来就没有链**，判据又是文本包含。于是对抗变异（调用点多包一层 `%v`、映射函数
+// 一个字不动）下它照常绿。
+//
+// 对抗变异形态（test-agent-17 在 TASK-018 上造出来的）：
+//
+//	return nil, mapPolicyError(symbol, err)
+//	  → return nil, fmt.Errorf("eastmoney: %v", mapPolicyError(symbol, err))
+//
+// `%v` 只切链、不改文本，所以「文本里还有没有原判别词」这类判据一律看不见它。
+// ⇒ 无哨兵错误的包必须**显式对某个上游可判定错误写 errors.As/errors.Is**，
+// 否则「链保留」这个属性没有任何东西钉住。
+//
+// 判据取 `*json.SyntaxError` 而非 `io.ErrUnexpectedEOF`：两者都对但**互斥**，由 body
+// 形态唯一决定——`{not json` 这类非法字符 body 走 SyntaxError，`{"data":` 这类截断
+// body 才走 ErrUnexpectedEOF。已现读实测本包 `json.NewDecoder(...).Decode` 对该 body
+// 的实际返回类型，不照搬别包（test-agent-17 在 lixinger 照搬 yahoo 的判据，基线就红）。
+func TestNonPolicyErrorChainPreserved(t *testing.T) {
+	start, end := time.Unix(1600000000, 0), time.Unix(1700086400, 0)
+	srv, _ := countingServer(t, `{not json`)
+	e := newWithHistoryURL(t, srv.URL)
+	e.gate = cachingGate()
+
+	_, err := e.FetchHistory("600519.SH", start, end, "1d")
+	if err == nil {
+		t.Fatal("畸形 JSON 必须返回错误 —— 本轮未构成检验")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Errorf("链被切断: 上游解码错误必须能被 errors.As 穿透到 *json.SyntaxError\n"+
+			"  got: %v (%T)\n"+
+			"  调用点若用 %%v 多包一层（而非 %%w），文本一字不变、映射函数也没改，"+
+			"但上层再也无法按类型判别上游错误", err, err)
+	}
 }

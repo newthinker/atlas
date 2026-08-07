@@ -1,6 +1,7 @@
 package baostock
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -375,4 +376,44 @@ func TestCacheKeyTruncatesToMinute(t *testing.T) {
 				"（为 1 说明截断粒度被放粗到小时/天——不同区间的查询会串槽，静默返回错区间数据）", n)
 		}
 	})
+}
+
+// TestNonPolicyErrorChainPreserved 守护「非 policy 错误的**链**保留」。
+//
+// TestPolicyErrorsDoNotLeak 只有「配额耗尽」「超时」两格，本包**没有任何测试**断言过
+// 非 policy 错误经映射层之后链还在。对抗变异（调用点多包一层 `%v`、`mapPolicyError`
+// 一个字不动）因此整包无一转红：
+//
+//	return nil, mapPolicyError(symbol, err)
+//	  → return nil, fmt.Errorf("baostock: %v", mapPolicyError(symbol, err))
+//
+// `%v` 只切链、不改文本 ⇒ 文本类判据一律看不见它。
+//
+// ⚠ **必须走 FetchHistory，不能挂到 client_test.go 的 TestFetchDailyBadJSON 上**：
+// 那条直测 `New(url).FetchDaily(...)`，是被 Gate 包在里面的**内层 fn**，
+// **绕过 Gate 与 mapPolicyError**。它用的 body 也是 `not json`、看起来正好能挂，
+// 但它不在受守护的那条路径上 —— 拿它充数会得到一条**永远绿**的断言，
+// 对抗变异根本动不到它。（与 TASK-020 的 topic 注入点同型：看起来对的注入点，
+// 不在被守护的那条路径上。）
+//
+// 判据取 `*json.SyntaxError` 而非 `io.ErrUnexpectedEOF`：两者都对但**互斥**，由 body
+// 形态唯一决定 —— `not json` 这类非法字符 body 走 SyntaxError，截断 body 才走
+// ErrUnexpectedEOF。已现读实测本包 `json.NewDecoder(...).Decode` 对该 body 的返回类型。
+func TestNonPolicyErrorChainPreserved(t *testing.T) {
+	srv, _ := countingBridge(t, http.StatusOK, `not json`)
+	c := New(srv.URL)
+	c.gate = cachingGate()
+
+	start, end := time.Unix(1600000000, 0), time.Unix(1700086400, 0)
+	_, err := c.FetchHistory("600519.SH", start, end, "1d")
+	if err == nil {
+		t.Fatal("畸形 JSON 必须返回错误 —— 本轮未构成检验")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Errorf("链被切断: 上游解码错误必须能被 errors.As 穿透到 *json.SyntaxError\n"+
+			"  got: %v (%T)\n"+
+			"  调用点若用 %%v 多包一层（而非 %%w），文本一字不变、映射函数也没改，"+
+			"但上层再也无法按类型判别上游错误", err, err)
+	}
 }
