@@ -221,6 +221,19 @@ func TestCacheKeyCoversAllParams(t *testing.T) {
 //
 // 时间基准取「当前分钟的中点」而非直接 time.Now()：与生产同形（end 源自墙钟），
 // 但确定性地避开分钟边界，不引入概率性抖动。
+// ⚠ 偏移必须**跨秒**（+3s/+15s），不能用亚秒级。
+//
+// 键里的时间是 `Truncate(time.Minute).Unix()`——**`.Unix()` 本身已经是秒级**，
+// 所以毫秒级偏移（首轮我写的 +50ms/+900ms）会被 `.Unix()` 压成同一个数，
+// 去掉 `Truncate(time.Minute)` 后键**依然不变** ⇒ 本子测试对 DoD 规定的那个变异
+// 完全无感，是一条空断言（test-agent-16 实测：D1 下整包 60 个测试无一转红）。
+//
+// 根因值得记：首轮我用「退回 `UnixNano()`」这个**我自己选的**变异验过它会转红，
+// 就以为守护成立。但 DoD 规定的变异是「去掉 `Truncate(time.Minute)`」（留 `.Unix()`），
+// 两者不是一回事——前者把粒度放到纳秒（毫秒偏移可见），后者停在秒（毫秒偏移不可见）。
+// **拿自己的变异验证，不等于满足了 DoD 指定的变异判据。**
+//
+// 偏移仍全部落在 base 所在的那一分钟内（30s + 15s = 45s < 60s），故聚合语义不变。
 func TestCacheKeyAggregatesNearbyTimes(t *testing.T) {
 	start, _ := testRange()
 	base := time.Now().Truncate(time.Minute).Add(30 * time.Second)
@@ -228,7 +241,7 @@ func TestCacheKeyAggregatesNearbyTimes(t *testing.T) {
 	t.Run("相邻时间落进同一槽", func(t *testing.T) {
 		p := &countingProvider{name: "stub", history: sampleBars()}
 		c := newGatedCollector(p, builtinGate())
-		for i, end := range []time.Time{base, base.Add(50 * time.Millisecond), base.Add(900 * time.Millisecond)} {
+		for i, end := range []time.Time{base, base.Add(3 * time.Second), base.Add(15 * time.Second)} {
 			if _, err := c.FetchHistory("BTC", start, end, "1d"); err != nil {
 				t.Fatalf("第 %d 次: %v", i+1, err)
 			}
