@@ -103,9 +103,14 @@ func TestServeWiresPolicyGateBeforeCollectors(t *testing.T) {
 	}
 	if got.initGateLine >= got.buildLine {
 		t.Errorf("initPolicyGate 在第 %d 行、buildCollectors 在第 %d 行："+
-			"闸门必须早于 collector 构造（各 collector 在构造函数里取 policy.Default()，"+
-			"晚了就拿到懒构造的空表 Gate）", got.initGateLine, got.buildLine)
+			"闸门的**词法位置**须在 collector 构造之前（各 collector 在构造函数里取 "+
+			"policy.Default()，晚了就拿到懒构造的空表 Gate）", got.initGateLine, got.buildLine)
 	}
+	// ⚠ 强度边界：本测试断言的是**源码里的词法位置**，不是执行顺序的承诺。
+	// 把 initPolicyGate 包进 defer/go 闭包、恒假 if、或写在提前 return 之后的
+	// 死代码里，词法位置照样在前而运行期根本不执行——那几类不在本测试的射程内。
+	// 运行期证据见 policy_test.go 的 TestLoadConfigOrDefaultsInitsPolicyGate
+	// 与 gate_wiring_test.go 里三条入口的运行期观测。
 }
 
 // runServeSrc 生成一段最小的 runServe 源码，body 由调用方给定。

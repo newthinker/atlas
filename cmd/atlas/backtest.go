@@ -67,6 +67,10 @@ func (s staticOHLCVProvider) FetchHistory(symbol string, start, end time.Time, i
 }
 
 func runBacktest(cmd *cobra.Command, args []string) error {
+	// backtest 全程不读配置，故必须显式装配闸门：下面三家 collector 在构造函数里
+	// 快照 policy.Default()，不装就拿到懒构造的无账本 Gate，
+	// cache.enabled / cache.ttl / 整个 collector.topics 静默失效。
+	ensurePolicyGate()
 	reg := collector.NewRegistry()
 	reg.Register(yahoo.New())
 	reg.Register(eastmoney.New())

@@ -115,6 +115,9 @@ func resolveFREDKey(envName string) string {
 }
 
 func runCrisisBackfill(cmd *cobra.Command, args []string) error {
+	// 必须在构造 collector（下方 yahoo.New()）之前：resolveFREDKey 在 FRED_API_KEY
+	// 非空时提前 return、不经 loadConfigOrDefaults，闸门就装不上。
+	ensurePolicyGate()
 	ccfg, st, err := openCrisisStore()
 	if err != nil {
 		return err
@@ -221,6 +224,9 @@ type crisisEvalDeps struct {
 var requiredDaily = []string{crisis.IndVIX, crisis.IndHYOAS, crisis.IndT10Y2Y, crisis.IndSOFREFFR}
 
 func runCrisisEval(cmd *cobra.Command, args []string) error {
+	// 同 runCrisisBackfill：本函数里有三处 collector 构造（daily/nfci 的 yahoo.New()
+	// 与 intraday 的 yahoo.New().FetchQuote），都必须在闸门装好之后。
+	ensurePolicyGate()
 	ccfg, st, err := openCrisisStore()
 	if err != nil {
 		return err
