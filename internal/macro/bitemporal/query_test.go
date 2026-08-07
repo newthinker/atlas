@@ -208,8 +208,14 @@ func TestQueriesContainNoLiteralValues(t *testing.T) {
 	s, err := NewSpec("t", []string{"period"}, "published_at")
 	require.NoError(t, err)
 
-	assert.NotContains(t, CurrentQuery(s), "'", "SQL 中不应出现字符串字面量")
-	assert.NotContains(t, AsOfQuery(s), "'", "SQL 中不应出现字符串字面量")
+	// 单引号与双引号都要否定。只否定单引号时这条对双引号字面量完全无守护：
+	// 实测在 SQL 里混入恒真的 `AND "x" = "x"`（不改变查询行为，故行为测试也不红）
+	// 后全套 120 条无一转红。SQLite 里双引号本是标识符引用、不匹配列名时才回退为
+	// 字符串，正因为这层歧义，双引号字面量比单引号更容易被当成「没问题」而写进来。
+	for _, q := range []string{CurrentQuery(s), AsOfQuery(s)} {
+		assert.NotContains(t, q, "'", "SQL 中不应出现单引号字面量")
+		assert.NotContains(t, q, `"`, "SQL 中不应出现双引号字面量")
+	}
 	assert.Equal(t, 0, strings.Count(CurrentQuery(s), "?"), "CurrentQuery 无参数")
 	assert.Equal(t, 1, strings.Count(AsOfQuery(s), "?"), "AsOfQuery 恰有一个时点参数")
 }

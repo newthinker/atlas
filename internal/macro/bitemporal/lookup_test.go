@@ -273,8 +273,16 @@ func TestLookupRejectsInjectionInKeyValues(t *testing.T) {
 				msg := f.failureContext("注入取值查询")
 				// 经典布尔注入 + 行尾注释：拼进 SQL 会让 WHERE 恒真而匹配全表；
 				// 走占位符则只是一个不存在的普通取值。
+				// ⚠ 单引号系与双引号系都要有。只测单引号会漏掉一整类得手的注入：
+				// 若有人把取值改成 fmt.Sprintf("%s = %q", c, key[c])——那看起来像
+				// 在转义，正是「被告知不要裸拼值」的人最可能选的写法——Go 的 %q 用
+				// 反斜杠转义双引号，而 SQLite 不认反斜杠转义，token 在 `\` 后的 `"`
+				// 处就结束，剩下的 ` OR 1=1 --` 被当 SQL 解析，`--` 注释掉尾部条件，
+				// WHERE 恒真。此时单引号载荷仍被 %q 的双引号包裹挡住，全套测试无一
+				// 转红，而双引号载荷会返回全表最大 revision（不属于被查的业务键）。
 				payloads := []string{
 					"x' OR 1=1 --",
+					`x" OR 1=1 --`,
 					"' OR '1'='1",
 					"2026-06'; DROP TABLE " + f.spec.table + "; --",
 				}

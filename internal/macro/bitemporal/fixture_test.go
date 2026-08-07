@@ -147,10 +147,16 @@ func TestProbeCurrentMatchesInsertedData(t *testing.T) {
 // fixture 生成失败消息的那个函数确实带上了形状名。
 func TestFailureMessagesNameTheShape(t *testing.T) {
 	for _, f := range allShapes(t) {
-		assert.Contains(t, f.failureContext("建表"), f.name, "失败消息必须指明形状名")
+		// 断言含「形状 <名>」而不是只含 <名>：形状名可能恰好是表名的子串
+		// （"hestia" 之于 "hestia_observations"）。只断言 f.name 时，hestia 那次
+		// 迭代是空转的——把形状名从消息里去掉它照样通过，且被另两套形状的红掩盖，
+		// 整条测试看上去仍然「有守护」。
+		assert.Contains(t, f.failureContext("建表"), "形状 "+f.name, "失败消息必须指明形状名")
 	}
-	// 两套形状的消息必须彼此可区分，否则「带了名字」也没用
-	assert.NotEqual(t, hestiaShape(t).failureContext("建表"), crisisShape(t).failureContext("建表"))
+	// 两套形状的消息不得串味。用交叉否定而不是 NotEqual：两条消息仅因表名不同
+	// 就已经不相等了，那时 NotEqual 守的是表名，与形状名无关。
+	assert.NotContains(t, hestiaShape(t).failureContext("建表"), "形状 "+crisisShape(t).name)
+	assert.NotContains(t, crisisShape(t).failureContext("建表"), "形状 "+hestiaShape(t).name)
 }
 
 // TestInsertSupportsOutOfOrderRevisions 钉住 insert 不对 revision 顺序做任何
