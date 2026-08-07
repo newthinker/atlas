@@ -1,25 +1,24 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **atlas** (7637 symbols, 20490 relationships, 290 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **atlas** (13619 symbols, 35519 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "master"})`.
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
+- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
 
 ## Resources
 
@@ -144,7 +143,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 | `verified` | done_criteria 逐条通过 | Test |
 | `rejected` | 验证不通过（带 `reject_reason`） | Test |
 | `review_fix` | QA 发现问题需返工（带 `fix_items`） | Leader |
-| `blocked_clarification` | Dev 对 done_criteria 有疑问，已写入 `questions[]` 等 Leader 答复 | Dev 提问；Leader 答复后改回 `assigned` |
+| `blocked_clarification` | Dev 对 done_criteria 有疑问，已写入 `questions[]` 等 Leader 答复 | Dev 提问；Leader 答复后**由 Dev 自己**转回 `in_progress`（`epoch` 不变） |
 | `blocked_human` | 返工超限或 CONTESTED，需人类介入（`/arcforge-status` 高亮） | Leader |
 | `accepted` | 最终验收通过（终态） | Leader |
 | `skipped` | 依赖被永久放弃，跳过 | Leader |
@@ -154,7 +153,9 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 **返工与澄清环：**
 - 验证不过：`verifying → rejected → assigned → ...`
 - QA 退回：`verified → review_fix → in_progress → ...`
-- 澄清环：`in_progress → blocked_clarification → assigned → ...`（Leader 周期扫描答复）
+- 澄清环：`in_progress → blocked_clarification → in_progress → ...`（Leader 周期扫描答复；
+  **答复后由 Dev 自己转回 `in_progress`，不是 Leader 改回 `assigned`** —— `blocked_clarification`
+  的合法出边只有 `→ in_progress`(dev-\*) 与 `→ blocked_human`(leader)，**没有 `→ assigned`**）
 - **Leader 调度边（均 leader 专属，置于 `rejected → assigned` 之后）**：
   `assigned → assigned`（`assigned` 超时**重派**，`assignment_epoch += 1`）、
   `in_progress → assigned`（**收回**卡住任务重新分配，`assignment_epoch += 1`）、

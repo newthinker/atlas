@@ -27,7 +27,11 @@
 
 ### 1.3 装饰器模式已在付出代价
 
-`cmd/atlas/serve.go:434-448` 的 `maybeCache` 显式跳过实现了扩展接口的 collector：`CachedCollector` 只嵌入 `collector.Collector`，包装后会遮蔽 `FundamentalCollector` 等扩展方法、打断 type assertion 路径。**结果是 lixinger 完全享受不到缓存。**
+`cmd/atlas/serve.go:434-448` 的 `maybeCache` 显式跳过实现了扩展接口的 collector：`CachedCollector` 只嵌入 `collector.Collector`，包装后会遮蔽 `FundamentalCollector` 等扩展方法、打断 type assertion 路径。
+
+实际装配情况比这更彻底（`cmd/atlas/collectors.go` 核实）：`maybeCache` 只作用于 yahoo / eastmoney / crypto / tushare / baostock 五个 collector（`:38 :61 :74 :83 :92`）。**lixinger 根本没有被 `RegisterCollector` 注册**，它只以两种身份存在——eastmoney 的内部 fallback（`:58`）与 Valuation/Fundamental source（`:114 :120`）。这两条路径都直接调用 lixinger，绕过任何缓存层。
+
+所以 `maybeCache` 里的 `FundamentalCollector` 守卫在生产装配中从未被触发，只有 `cmd/atlas/serve_test.go:404` 用合成类型覆盖到。**净结果仍是 lixinger 完全享受不到缓存**，只是成因是「装饰器装不上去」而非「装上后被跳过」。这恰恰说明装饰器方案的适用面比看上去更窄：它只能覆盖走 `Collector` 接口注册的那条路径。
 
 若继续以装饰器方式叠加 throttle / quota / coalesce，每加一层就多一次接口遮蔽，会让越来越多 collector 掉出策略层。
 
@@ -122,7 +126,9 @@ policy.Fetch[T](g, topic, key, fn) →
 
 **未登记的主题 = 零策略**（不缓存、不限流、不计配额）。
 
-`eastmoney` / `akshare` / `lixinger` / `crypto` / `fred` / `edgar` / `baostock` 当前均无任何节流，默认不进策略层，行为零变更。为它们加限流是后续的一次 config 改动，不属本次范围。
+`eastmoney` / `akshare` / `crypto` / `fred` / `edgar` / `baostock` 当前均无任何节流，默认不进策略层，行为零变更。为它们加限流是后续的一次 config 改动，不属本次范围。
+
+**例外：lixinger 登记为「仅 TTL」主题。** 它是 §1.3 要修复的对象，若不登记就仍然拿不到缓存，与 §8 验收标准 6 直接冲突。因此为它登记 `lixinger.<endpoint>` 主题，`TTL = Collector.Cache.TTL`、`Coalesce = true`、**无 MinInterval、无 Quota**——即只补上它从未有过的缓存，不新增任何它今天没有的限流行为。
 
 ### 4.2 内置默认表
 
@@ -137,6 +143,7 @@ policy.Fetch[T](g, topic, key, fn) →
 | `tushare.index_daily` | `tushare` | 200ms | — | 同上 |
 | `tushare.hk_daily` | `tushare` | 200ms | — | 同上 |
 | `twelvedata.time_series` | `twelvedata` | 8s | — | `client.go:33` |
+| `lixinger.<endpoint>` | — | — | — | 仅 TTL，见 §4.1 例外 |
 
 - TTL 沿用现有 `Collector.Cache.TTL` 配置值（`internal/config/config.go:303`，默认 5m），作为 OHLCV 类主题默认
 - 现有的 `Collector.Cache.Enabled` 开关保留语义：为 `false` 时**所有主题的 TTL 强制归零**（等价于今天 `maybeCache` 直接返回原 collector），限流与配额不受影响
