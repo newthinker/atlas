@@ -97,3 +97,50 @@ func TestVerdictString(t *testing.T) {
 	// 未定义值走兜底分支：日志里要看得出是哪个数，而不是空串。
 	assert.Equal(t, "Verdict(9)", Verdict(9).String())
 }
+
+// TestClassifyComparesLexicographically 钉住 Classify 的比较方式是【字典序】。
+//
+// 上面所有用例的 revision 都是 10 字符零填充的 ISO 日期，在那组取值上字典序与
+// 时间序完全一致——于是任何按时间序比较的实现（time.Parse 后比 Before）都会
+// 存活。QA 实证：把 Classify 换成时间序比较，全包 125 条无一转红。
+//
+// 本条改用一组【两种序不一致】的取值把假设钉住。这不是主张字典序更好，而是：
+// Lookup 侧取最大值走 SQL 的 MAX()（字典序），Classify 必须用同一种序，否则
+// 接缝两侧静默错位——而错位不会被任何单侧测试发现。要改成时间序，两侧必须
+// 一起改；本条会强制那次讨论发生，而不是让它悄悄溜过去。
+//
+// 两组取值都是**合法的 RFC3339**、能被 time.Parse 解析——这是刻意的：若用
+// "2026-7-15" 这种解析不了的形态，按时间序的实现会退回字典序兜底，变异反而
+// 存活，这条测试就白写了。
+func TestClassifyComparesLexicographically(t *testing.T) {
+	cases := []struct {
+		name        string
+		state       State
+		incoming    string
+		want        Verdict
+		ifTimeOrder string // 若改成时间序会得到什么——本条正是要挡住它
+	}{
+		{
+			"不同时区写法：字典序更大，时间上更早",
+			State{Exists: true, LatestRevision: "2026-07-15T05:00:00Z"},
+			// 08:00+09:00 == 2026-07-14T23:00Z，时间上比库中的更早
+			"2026-07-15T08:00:00+09:00",
+			Revision,
+			"按时间序会判 OutOfOrder",
+		},
+		{
+			"带小数秒：字典序更小，时间上更晚",
+			State{Exists: true, LatestRevision: "2026-07-15T10:00:00Z"},
+			// '.'(0x2E) < 'Z'(0x5A)，故字典序上它更小；时间上它更晚
+			"2026-07-15T10:00:00.500Z",
+			OutOfOrder,
+			"按时间序会判 Revision",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, Classify(tc.state, tc.incoming),
+				"Classify 必须按字典序判定（与 Lookup 侧 SQL MAX() 同序）；%s", tc.ifTimeOrder)
+		})
+	}
+}

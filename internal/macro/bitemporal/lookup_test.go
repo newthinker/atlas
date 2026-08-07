@@ -114,6 +114,42 @@ func TestLookupUsesEveryKeyColumn(t *testing.T) {
 	}
 }
 
+// TestLookupDistinguishesEmptyRevisionFromMissingKey 守 sql.NullString 的第二种情形。
+//
+// Lookup 用 NullString 是为了分辨两件事：「没有这个业务键」（MAX 返回 NULL）与
+// 「有这个键、但 revision 是空串」。**第二种此前零覆盖**——三套 fixture 都没插过
+// revision 为空串的行，而 DDL 只是 TEXT NOT NULL，**空串完全合法**。QA 实证：把
+// `!latest.Valid` 换成 `latest.String == ""`，全包 125 条无一转红。
+//
+// 这不是形式问题。把 revision 为空串的已存在键判成 Exists:false，Classify 会给出
+// New 而不是 Revision，于是重复入库——正是本包存在的理由被静默绕过。
+// 端到端的那一环由 TestLookupFeedsClassifyOnEmptyRevision 守。
+func TestLookupDistinguishesEmptyRevisionFromMissingKey(t *testing.T) {
+	for _, f := range bothShapes(t) {
+		t.Run(f.name, func(t *testing.T) {
+			db := newDB(t, f)
+			ctx := context.Background()
+
+			// 键存在，但 revision 是空串
+			f.insert(t, db, "", 1.0, "2026-06", "h1")
+
+			msg := f.failureContext("空串 revision 查询")
+			st, err := Lookup(ctx, db, f.spec, f.key("2026-06", "h1"))
+			require.NoError(t, err, msg)
+			assert.True(t, st.Exists, msg+
+				"：键存在、revision 为空串，必须判 Exists:true——判成 false 会让 Classify 给出 New 而重复入库")
+			assert.Equal(t, "", st.LatestRevision, msg+"：revision 就是空串")
+
+			// 对照组不可省：否则「一律返回 Exists:true」也能让上面全绿。真的不存在
+			// 的键仍须是 false——两条合起来才说明分辨的是「NULL」而不是「空串」。
+			msgMiss := f.failureContext("确实不存在的键查询")
+			st, err = Lookup(ctx, db, f.spec, f.key("2026-05", "monthly"))
+			require.NoError(t, err, msgMiss)
+			assert.False(t, st.Exists, msgMiss+"：这个键真的不存在，必须是 false")
+		})
+	}
+}
+
 // TestLookupIgnoresInsertOrder 验乱序写入后仍取最大 revision。
 //
 // 按 C8 裁定跑两套形状：这条路径真的执行 SQL，键形状会进入 WHERE 子句。
@@ -258,14 +294,21 @@ func TestLookupRejectsInjectionInKeyValues(t *testing.T) {
 			f.seedProbe(t, db)
 			ctx := context.Background()
 
-			// 受试取值只放在首列，其余列填一个良性取值——形状随 f.keys 的列数变化，
-			// 单列键就只有首列。
-			keyValsWithFirst := func(first string) []string {
+			// 受试取值要【逐列】出现，不能固定在首列。
+			//
+			// 理由是结构性的：lookup.go 里 where[i] 是**逐列循环**，每一列都是一个
+			// 独立的拼接点，判据要覆盖 N 个位置。此前只填 vals[0]、其余列恒为 "h1"，
+			// 于是「只对 i>0 的列裸拼」这个变异完全存活（QA 实证：125 PASS 无一转红；
+			// 同一变异下仅把载荷移到末列立即 7 FAIL——缺口确由**位置**造成）。
+			//
+			// ⚠ 这与载荷的**字符类**（单引号系 / 双引号系）是**正交**的两个维度：
+			// 字符类决定哪种拼法会被打中，位置决定哪个拼接点会被打中。两者都要遍历。
+			keyValsAt := func(pos int, payload string) []string {
 				vals := make([]string, len(f.keys))
-				vals[0] = first
-				for i := 1; i < len(vals); i++ {
+				for i := range vals {
 					vals[i] = "h1"
 				}
+				vals[pos] = payload
 				return vals
 			}
 
@@ -287,16 +330,21 @@ func TestLookupRejectsInjectionInKeyValues(t *testing.T) {
 					"2026-06'; DROP TABLE " + f.spec.table + "; --",
 				}
 				for _, p := range payloads {
-					vals := keyValsWithFirst(p)
-					// 前提检查：载荷必须真的进入业务键取值。keyValsWithFirst 若被
-					// 改坏（不再放入首列），本条就退化成「用良性取值查不到」的空测试，
-					// 却依然全绿——非空性必须自己守，不能靠 helper 一直正确。
-					require.Contains(t, vals, p, msg+"：载荷未进入 Key，本条测试是空的")
+					// 逐列：每一列都是独立的拼接点，都要单独承受一次载荷
+					for pos, col := range f.keys {
+						vals := keyValsAt(pos, p)
+						// 前提检查：载荷必须真的进入业务键取值。keyValsAt 若被改坏
+						// （不再放入指定列），本条就退化成「用良性取值查不到」的空
+						// 测试，却依然全绿——非空性必须自己守，不能靠 helper 一直正确。
+						require.Contains(t, vals, p, msg+"：载荷未进入 Key，本条测试是空的")
 
-					st, err := Lookup(ctx, db, f.spec, f.key(vals...))
-					require.NoError(t, err, msg+"：应是普通的查不到，不是 SQL 错误")
-					assert.False(t, st.Exists, msg+"：取值 %q 绝不能命中任何行", p)
-					assert.Empty(t, st.LatestRevision, msg)
+						st, err := Lookup(ctx, db, f.spec, f.key(vals...))
+						require.NoError(t, err,
+							msg+"：应是普通的查不到，不是 SQL 错误（列 %s）", col)
+						assert.False(t, st.Exists,
+							msg+"：取值 %q 放在列 %s 时绝不能命中任何行", p, col)
+						assert.Empty(t, st.LatestRevision, msg+"（列 %s）", col)
+					}
 				}
 			})
 
@@ -304,13 +352,16 @@ func TestLookupRejectsInjectionInKeyValues(t *testing.T) {
 				// 反向证明：不是「一律查不到」。占位符既要挡住注入，也要让含引号的
 				// 正常取值照常工作——只有这两条同时成立才说明走的是参数化查询。
 				msg := f.failureContext("含引号取值查询")
-				vals := keyValsWithFirst("O'Brien")
-				f.insert(t, db, "2026-07-15", 42.0, vals...)
+				// 同样逐列：每个拼接点既要挡住注入，也要让合法的含引号取值照常工作
+				for pos, col := range f.keys {
+					vals := keyValsAt(pos, "O'Brien")
+					f.insert(t, db, "2026-07-15", 42.0, vals...)
 
-				st, err := Lookup(ctx, db, f.spec, f.key(vals...))
-				require.NoError(t, err, msg)
-				assert.True(t, st.Exists, msg+"：含单引号的合法取值应能命中")
-				assert.Equal(t, "2026-07-15", st.LatestRevision, msg)
+					st, err := Lookup(ctx, db, f.spec, f.key(vals...))
+					require.NoError(t, err, msg+"（列 %s）", col)
+					assert.True(t, st.Exists, msg+"：含单引号的合法取值应能命中（列 %s）", col)
+					assert.Equal(t, "2026-07-15", st.LatestRevision, msg+"（列 %s）", col)
+				}
 			})
 		})
 	}
@@ -339,4 +390,68 @@ func TestLookupRevisionFormIsCallerGuaranteed(t *testing.T) {
 	require.True(t, st.Exists)
 	assert.Equal(t, "9", st.LatestRevision,
 		"字典序的结果，这【不是】语义上最新的版本；喂非 ISO 形态会静默判错，由调用方保证形态")
+}
+
+// TestLookupFeedsClassify 覆盖包的【两半之间的接缝】。
+//
+// QA 用 grep 确认过：此前全测试集**没有任何一处**把 Lookup 返回的 State 喂给
+// Classify。两半各自被测得很细，接缝本身零覆盖——而接缝正是两个排序假设必须
+// 一致的地方：Lookup 侧走 SQL 的 MAX()，Classify 侧走 Go 的字符串比较。两者
+// 一旦错位，任何**单侧**测试都发现不了。
+//
+// 本条按 Lookup → Classify 的真实调用顺序跑完四种 Verdict，端到端断言判定结果。
+func TestLookupFeedsClassify(t *testing.T) {
+	for _, f := range bothShapes(t) {
+		t.Run(f.name, func(t *testing.T) {
+			db := newDB(t, f)
+			ctx := context.Background()
+			msg := f.failureContext("Lookup→Classify 接缝")
+
+			lookup := func(t *testing.T) State {
+				t.Helper()
+				st, err := Lookup(ctx, db, f.spec, f.key("2026-06", "h1"))
+				require.NoError(t, err, msg)
+				return st
+			}
+
+			// 空库 → New：首次入库走的就是这条路径
+			assert.Equal(t, New, Classify(lookup(t), "2026-07-15"), msg+"：空库应判 New")
+
+			f.insert(t, db, "2026-07-15", 1.0, "2026-06", "h1")
+			st := lookup(t)
+			// 同 revision 重来——央行迁移站点换了 URL，发布日不变
+			assert.Equal(t, Duplicate, Classify(st, "2026-07-15"), msg+"：同 revision 应判 Duplicate")
+			assert.Equal(t, Revision, Classify(st, "2026-08-20"), msg+"：更新的 revision 应判 Revision")
+			assert.Equal(t, OutOfOrder, Classify(st, "2020-07-10"), msg+"：更旧的 revision 应判 OutOfOrder")
+
+			// 多版本后，判定必须以库中最大者为基准——这一步同时验了
+			// 「Lookup 取的最大者」与「Classify 拿它作比较基准」是同一个值
+			f.insert(t, db, "2026-09-30", 2.0, "2026-06", "h1")
+			st = lookup(t)
+			assert.Equal(t, Duplicate, Classify(st, "2026-09-30"), msg+"：应以最大 revision 为基准")
+			assert.Equal(t, OutOfOrder, Classify(st, "2026-08-20"),
+				msg+"：比最大者旧的应判 OutOfOrder，即使它确实在库里")
+		})
+	}
+}
+
+// TestLookupFeedsClassifyOnEmptyRevision 是 Q1 后果链在接缝上的直接体现。
+//
+// revision 为空串的行是已存在的键。若 Lookup 把它判成 Exists:false，Classify 就会
+// 给出 New 而不是 Revision——调用方随即重复入库。这条把「NullString 分辨的是 NULL
+// 而不是空串」从 Lookup 的内部细节，变成一条端到端的行为断言。
+func TestLookupFeedsClassifyOnEmptyRevision(t *testing.T) {
+	for _, f := range bothShapes(t) {
+		t.Run(f.name, func(t *testing.T) {
+			db := newDB(t, f)
+			msg := f.failureContext("空串 revision 的接缝")
+
+			f.insert(t, db, "", 1.0, "2026-06", "h1")
+
+			st, err := Lookup(context.Background(), db, f.spec, f.key("2026-06", "h1"))
+			require.NoError(t, err, msg)
+			assert.Equal(t, Revision, Classify(st, "2026-07-15"),
+				msg+"：键已存在（revision 为空串），必须判 Revision；判 New 就会重复入库")
+		})
+	}
 }
