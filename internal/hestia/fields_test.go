@@ -5,6 +5,7 @@ package hestia
 //                                                        → TestFieldGroupCounts
 // functional[1]      allFields 与 fieldOrder 元素完全一致 → TestAllFieldsMatchesFieldOrder
 // functional[2]      golden list：逐字写出的 54 元素、顺序敏感 → TestFieldOrderGoldenList
+//                    + 常量名↔值的绑定（返工 P1，变异 M11）  → TestFieldConstantBindings
 // boundary[0]        fieldOrder 内无重复                  → TestFieldOrderHasNoDuplicates
 // error_handling[0]  每个字段名匹配 ^[a-z][a-z0-9_]*$     → TestFieldNamesAreValidIdentifiers
 // non_functional[0]  fields.go 之外的非 _test.go 文件不得出现业务字段名字面量
@@ -27,72 +28,101 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// goldenFieldOrder 是 54 个字段名的逐字副本，顺序与 fieldOrder 必须完全一致。
+// goldenFields 是规格侧的 54 条 golden 记录：**左侧是常量、右侧是字面量**，
+// 顺序与 fieldOrder 必须完全一致。它同时钉住两件独立的事：
 //
-// 刻意用字符串字面量而不是 Field* 常量：用常量写这份清单等于把同一个值抄给自己看，
-// 常量值里的拼写错误（deposit_corp_ytd 写成 deposit_corp_yt）会同时出现在两边而全绿通过。
-// 那种错仍然唯一、合法、前缀正确、分组计数不变，包内又完全自洽（DDL 与 INSERT 都从
-// 同一常量派生），要等下游编译或 Grafana 列名对不上才暴露，那时改名已经需要数据迁移。
-var goldenFieldOrder = []string{
-	"tsf_stock",
-	"tsf_stock_yoy",
-	"tsf_flow_ytd",
-	"tsf_stock_rmb_loan",
-	"tsf_stock_rmb_loan_yoy",
-	"tsf_stock_fx_loan",
-	"tsf_stock_fx_loan_yoy",
-	"tsf_stock_entrust",
-	"tsf_stock_entrust_yoy",
-	"tsf_stock_trust",
-	"tsf_stock_trust_yoy",
-	"tsf_stock_bankaccept",
-	"tsf_stock_bankaccept_yoy",
-	"tsf_stock_corp_bond",
-	"tsf_stock_corp_bond_yoy",
-	"tsf_stock_govt_bond",
-	"tsf_stock_govt_bond_yoy",
-	"tsf_stock_equity",
-	"tsf_stock_equity_yoy",
-	"tsf_flow_rmb_loan_ytd",
-	"tsf_flow_govt_bond_ytd",
-	"tsf_flow_corp_bond_ytd",
-	"tsf_flow_fx_loan_ytd",
-	"tsf_flow_entrust_ytd",
-	"tsf_flow_trust_ytd",
-	"tsf_flow_bankaccept_ytd",
-	"tsf_flow_equity_ytd",
-	"m2",
-	"m2_yoy",
-	"m1",
-	"m1_yoy",
-	"m0",
-	"m0_yoy",
-	"deposit_balance",
-	"deposit_balance_yoy",
-	"deposit_flow_ytd",
-	"deposit_household_ytd",
-	"deposit_corp_ytd",
-	"deposit_fiscal_ytd",
-	"deposit_nbfi_ytd",
-	"loan_balance",
-	"loan_balance_yoy",
-	"loan_flow_ytd",
-	"loan_hh_short_ytd",
-	"loan_hh_mlt_ytd",
-	"loan_corp_total_ytd",
-	"loan_corp_short_ytd",
-	"loan_corp_mlt_ytd",
-	"loan_bill_ytd",
-	"loan_nbfi_ytd",
-	"rate_ibo",
-	"rate_repo",
-	"fx_reserve",
-	"fx_rate",
+//	want 之间的顺序 → fieldOrder 的值序列（TestFieldOrderGoldenList）
+//	got ↔ want 的配对 → 哪个常量名对应哪个值（TestFieldConstantBindings）
+//
+// want 侧刻意是字符串字面量而不是 Field* 常量：整份清单都用常量写等于把同一个值
+// 抄给自己看，常量值里的拼写错误（deposit_corp_ytd 写成 deposit_corp_yt）会同时
+// 出现在断言两边而全绿通过。那种错仍然唯一、合法、前缀正确、分组计数不变，包内
+// 又完全自洽（DDL 与 INSERT 都从同一常量派生），要等下游编译或 Grafana 列名对不上
+// 才暴露，那时改名已经需要数据迁移。
+//
+// 一侧常量一侧字面量则**不是自指**：got 来自实现，want 来自规格，两者独立可比。
+var goldenFields = []struct {
+	got  string // 实现侧：Field* 常量
+	want string // 规格侧：逐字写出的字面量
+}{
+	{FieldTSFStock, "tsf_stock"},
+	{FieldTSFStockYoY, "tsf_stock_yoy"},
+	{FieldTSFFlowYTD, "tsf_flow_ytd"},
+	{FieldTSFStockRMBLoan, "tsf_stock_rmb_loan"},
+	{FieldTSFStockRMBLoanYoY, "tsf_stock_rmb_loan_yoy"},
+	{FieldTSFStockFXLoan, "tsf_stock_fx_loan"},
+	{FieldTSFStockFXLoanYoY, "tsf_stock_fx_loan_yoy"},
+	{FieldTSFStockEntrust, "tsf_stock_entrust"},
+	{FieldTSFStockEntrustYoY, "tsf_stock_entrust_yoy"},
+	{FieldTSFStockTrust, "tsf_stock_trust"},
+	{FieldTSFStockTrustYoY, "tsf_stock_trust_yoy"},
+	{FieldTSFStockBankAccept, "tsf_stock_bankaccept"},
+	{FieldTSFStockBankAcceptYoY, "tsf_stock_bankaccept_yoy"},
+	{FieldTSFStockCorpBond, "tsf_stock_corp_bond"},
+	{FieldTSFStockCorpBondYoY, "tsf_stock_corp_bond_yoy"},
+	{FieldTSFStockGovtBond, "tsf_stock_govt_bond"},
+	{FieldTSFStockGovtBondYoY, "tsf_stock_govt_bond_yoy"},
+	{FieldTSFStockEquity, "tsf_stock_equity"},
+	{FieldTSFStockEquityYoY, "tsf_stock_equity_yoy"},
+	{FieldTSFFlowRMBLoanYTD, "tsf_flow_rmb_loan_ytd"},
+	{FieldTSFFlowGovtBondYTD, "tsf_flow_govt_bond_ytd"},
+	{FieldTSFFlowCorpBondYTD, "tsf_flow_corp_bond_ytd"},
+	{FieldTSFFlowFXLoanYTD, "tsf_flow_fx_loan_ytd"},
+	{FieldTSFFlowEntrustYTD, "tsf_flow_entrust_ytd"},
+	{FieldTSFFlowTrustYTD, "tsf_flow_trust_ytd"},
+	{FieldTSFFlowBankAcceptYTD, "tsf_flow_bankaccept_ytd"},
+	{FieldTSFFlowEquityYTD, "tsf_flow_equity_ytd"},
+	{FieldM2, "m2"},
+	{FieldM2YoY, "m2_yoy"},
+	{FieldM1, "m1"},
+	{FieldM1YoY, "m1_yoy"},
+	{FieldM0, "m0"},
+	{FieldM0YoY, "m0_yoy"},
+	{FieldDepositBalance, "deposit_balance"},
+	{FieldDepositBalanceYoY, "deposit_balance_yoy"},
+	{FieldDepositFlowYTD, "deposit_flow_ytd"},
+	{FieldDepositHouseholdYTD, "deposit_household_ytd"},
+	{FieldDepositCorpYTD, "deposit_corp_ytd"},
+	{FieldDepositFiscalYTD, "deposit_fiscal_ytd"},
+	{FieldDepositNBFIYTD, "deposit_nbfi_ytd"},
+	{FieldLoanBalance, "loan_balance"},
+	{FieldLoanBalanceYoY, "loan_balance_yoy"},
+	{FieldLoanFlowYTD, "loan_flow_ytd"},
+	{FieldLoanHHShortYTD, "loan_hh_short_ytd"},
+	{FieldLoanHHMLTYTD, "loan_hh_mlt_ytd"},
+	{FieldLoanCorpTotalYTD, "loan_corp_total_ytd"},
+	{FieldLoanCorpShortYTD, "loan_corp_short_ytd"},
+	{FieldLoanCorpMLTYTD, "loan_corp_mlt_ytd"},
+	{FieldLoanBillYTD, "loan_bill_ytd"},
+	{FieldLoanNBFIYTD, "loan_nbfi_ytd"},
+	{FieldRateIBO, "rate_ibo"},
+	{FieldRateRepo, "rate_repo"},
+	{FieldFXReserve, "fx_reserve"},
+	{FieldFXRate, "fx_rate"},
+}
+
+// TestFieldConstantBindings 钉住「哪个常量名对应哪个值」。
+//
+// 值序列的 golden list 挡不住这一类错：同时交换两个常量的值与它们在 fieldOrder 里的
+// 位置，值序列逐字不变、计数不变、去重与标识符合法性都不变，整套测试全绿，而此时
+// FieldDepositCorpYTD 已经等于 "deposit_fiscal_ytd"。下游拿它当 Values 的键，
+// 企业存款就静默写进财政存款列——无编译错、无运行错、无测试红。
+func TestFieldConstantBindings(t *testing.T) {
+	require.Len(t, goldenFields, 54, "绑定表自身必须是 54 条——它写错了后面的断言全无意义")
+	for i, g := range goldenFields {
+		assert.Equalf(t, g.want, g.got,
+			"goldenFields[%d]：常量与值的绑定错位，该位置的常量应当等于 %q", i, g.want)
+	}
 }
 
 func TestFieldOrderGoldenList(t *testing.T) {
-	require.Len(t, goldenFieldOrder, 54, "golden list 自身必须是 54 个——它写错了后面的断言全无意义")
-	assert.Equal(t, goldenFieldOrder, fieldOrder, "fieldOrder 与 golden list 必须逐字逐序相等")
+	// 期望序列只由 want 构造。用 got 构造会让这条断言退化成自指：
+	// 常量值怎么变，期望值就跟着怎么变，恒真。
+	wantOrder := make([]string, len(goldenFields))
+	for i, g := range goldenFields {
+		wantOrder[i] = g.want
+	}
+	assert.Equal(t, wantOrder, fieldOrder, "fieldOrder 与 golden list 必须逐字逐序相等")
 }
 
 func TestFieldGroupCounts(t *testing.T) {
@@ -167,20 +197,46 @@ func TestFieldNamesAppearOnlyInFieldsGo(t *testing.T) {
 		require.NoError(t, err, "解析 %s", name)
 
 		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
+			expr, ok := n.(ast.Expr)
+			if !ok {
 				return true
 			}
-			v, err := strconv.Unquote(lit.Value)
-			if err != nil {
+			// 只看字面量与**字面量之间的拼接**："deposit_" + "corp_ytd" 拼出的
+			// 也是写死的字段名，按 AST 逐个 BasicLit 比对会漏掉。
+			v, ok := foldStringLiteral(expr)
+			if !ok {
 				return true
 			}
 			assert.Falsef(t, allFields[v],
 				"%s:%d 出现业务字段名字面量 %q——字段清单只写一次，请遍历 fieldOrder",
-				name, fset.Position(lit.Pos()).Line, v)
+				name, fset.Position(expr.Pos()).Line, v)
 			return true
 		})
 	}
+}
+
+// foldStringLiteral 把纯字面量表达式折叠成它的值：单个字符串字面量，或全部
+// 操作数都是字面量的 + 拼接。任一操作数不是字面量（变量、函数调用、fmt.Sprintf、
+// []byte 往返）就返回 false——那些形态本检查抓不到，是已知的捕获上限，不是遗漏。
+func foldStringLiteral(e ast.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ast.BasicLit:
+		if x.Kind != token.STRING {
+			return "", false
+		}
+		v, err := strconv.Unquote(x.Value)
+		return v, err == nil
+	case *ast.ParenExpr:
+		return foldStringLiteral(x.X)
+	case *ast.BinaryExpr:
+		if x.Op != token.ADD {
+			return "", false
+		}
+		l, lok := foldStringLiteral(x.X)
+		r, rok := foldStringLiteral(x.Y)
+		return l + r, lok && rok
+	}
+	return "", false
 }
 
 // TestPackageDocDeclaresUnits 核验包注释声明了单位约定。单位不入库、也没有
