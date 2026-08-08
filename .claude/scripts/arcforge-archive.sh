@@ -28,12 +28,29 @@ command -v jq >/dev/null 2>&1 || { echo "ERROR: 本脚本依赖 jq(终态校验)
 # ---- 0. 前置校验:模板↔运行时漂移禁止归档(backlog-sprint-c #1,--force 不豁免) ----
 # 漂移归档会固化「运行时跑的不是入库版本」的不一致快照。同目录 check-runtime-sync.sh
 # 缺失(如脚本被单独分发)则跳过本门禁,不阻断归档。
+#
+# TASK-017:改按**退出码分派**,不再一句 `check || ABORT`。原写法把 check 的 exit 0
+# 当作「验证通过」,而 exit 0 在无运行时布局时表示「根本没比对」——门禁于是在零验证下
+# 完整放行(本任务 RED 实测:--force --dry-run exit 0 且无 ABORT)。绿必须能区分
+# 「验了且全过」与「没得验」,否则硬门禁就是摆设。
 SYNC_CHECK="$(dirname "$0")/check-runtime-sync.sh"
 if [ -f "$SYNC_CHECK" ]; then
-    bash "$SYNC_CHECK" || {
-        echo "ABORT: 模板↔运行时存在漂移,先完成人类同步再归档(--force 不豁免)。" >&2
-        exit 1
-    }
+    bash "$SYNC_CHECK"; SYNC_RC=$?
+    case "$SYNC_RC" in
+        0) : ;;   # 已实际比对 N>0 项且零漂移 —— 唯一的放行通道
+        3) # 不适用:本仓库没有模板侧(消费项目的正常形态)。放行,但把「未经校验」说出口,
+           # 不再靠一句 SYNC OK 冒充验证通过。
+           echo "WARN: 模板↔运行时同步校验不适用(本仓库无模板侧),本次归档未经漂移校验。" >&2 ;;
+        2) echo "ABORT: 模板↔运行时同步校验无从进行(无运行时布局或零比对项),归档不建立在「没验过」之上。" >&2
+           echo "       处置:确认是否在仓库根执行、运行时布局是否已安装。这不是检出差异,别去同步文件。" >&2
+           exit 1 ;;
+        *) echo "ABORT: 模板↔运行时存在漂移,先完成人类同步再归档(--force 不豁免)。" >&2
+           exit 1 ;;
+    esac
+else
+    # 缺件与 rc=3 同档:都是「没得验」。放行,但把它说出口——
+    # W4 的教训是静默,不是放行(零输出的 exit 0 读起来和「验过且全过」一模一样)。
+    echo "WARN: $SYNC_CHECK 缺失,本次归档未经模板↔运行时漂移校验。" >&2
 fi
 
 # ---- 1. 前置校验:tasks 缺失或无任务文件 = 无可归档内容(防误调/重复调用) ----
@@ -116,4 +133,18 @@ echo "已迁移:${MOVED:-(无)}"
 [ -n "$SKIPPED" ] && echo "跳过(不存在):$SKIPPED"
 echo "保留原地: $ARC/wisdom"
 echo "运行时目录已重置,可开始下一 Sprint。"
+
+# ---- 6. 收口 tag 提示:只给命令,不代打 ----
+#         被 tag 的对象是「把归档产物入库的那个 commit」,而它在此刻尚不存在(产物刚落盘、
+#         还没提交)。脚本若自己 git tag,只能打在上一个 commit 上 —— 那棵树里没有归档目录,
+#         tag 指向的内容与 tag 名描述的东西对不上。故与「待同步 hooks 清单」同构:
+#         脚本产出确定性命令,由 Leader/人类在正确时点执行。
+SPRINT_TAG=$(basename "$DEST")
+echo
+echo "=== Sprint 收口 tag(在归档提交之后执行)==="
+echo "  1) 提交归档产物"
+echo "  2) git tag -a ${SPRINT_TAG} -F <message 文件>"
+echo "  3) git push origin ${SPRINT_TAG}"
+echo "  tag 名与归档目录同名;message 须如实反映任务终态,"
+echo "  不得写与 tasks/*.json 不符的 accepted 计数(--force 归档时尤其注意)。"
 exit 0
