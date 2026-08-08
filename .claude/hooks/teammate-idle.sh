@@ -4,6 +4,17 @@
 #
 # ⚠️ exit 2 不分配任务;任务分配仍由 Leader 写 tasks/*.json 完成。
 #    按实例过滤避免 QA 阶段 Dev Agent 被全局开放任务反复唤醒空转烧 token。
+#
+# ⚠️ exit 0 是**不可逆停机点**,不是「这一轮先歇着」:TeammateIdle 是 teammate 转 idle 前的
+#    一次性拦截点,不是周期性心跳。放行后该实例停机,在收到新消息前本 hook 不会再被调用。
+#    实测取证(atlas sprint-028,idle-hook-debug.jsonl):test-agent-6 于 2026-07-25T11:49:01Z
+#    因当时无 verifying/dev_done 被放行,此后 89 分钟零调用;期间 12:45:00Z 派下的 TASK-016
+#    验证任务一直无人认领,直到 Leader 直接发消息才唤醒。
+#    ⇒ 两条推论,改本 hook 之前先读:
+#      1. 派发可靠性**不能**指望本 hook 兜底。已停机 agent 的自愈只能靠 Leader 侧活性确认
+#         + 消息唤醒(活性判据应锚定本轮派发的产物,而非 agent 的全局活动痕迹)。
+#      2. 不要用「宁可保活」来补偿 —— 那会让无关 agent 空转烧 token,正是上面 F6 要防的。
+#         放行条件本身是对的,问题不在这里。
 set -uo pipefail
 
 TASK_DIR=".arcforge/tasks"
