@@ -22,10 +22,16 @@ package hestia
 //                                                        → TestNewStoreDeploysViewFromItsOwnSpec
 
 import (
+	"context"
 	"database/sql"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -230,17 +236,77 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 
 // TestStoreExposesNoWriteMethods 钉住单一写入口约束。
 //
-// Save 在 TASK-005 引入，届时本条会转红——那是**刻意的**：新增任何导出方法都必须
-// 在这里显式登记一次，让「又开了一个写口」成为一个需要动手改测试的决定，而不是
-// 顺手加个方法就完成了。ADR-0003 在同机场景下唯一的防线就是 Save 的签名。
+// Save 在 TASK-005 引入，本条随之更新为 [Close, DB, Save]——**仍是精确集合相等，
+// 没有弱化成「包含」**：新增任何导出方法都必须在这里显式登记一次，让「又开了一个
+// 写口」成为一个需要动手改测试的决定。ADR-0003 在同机场景下唯一的防线就是 Save 的签名。
 func TestStoreExposesNoWriteMethods(t *testing.T) {
 	typ := reflect.TypeOf(&Store{})
 	got := make([]string, typ.NumMethod())
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	assert.Equal(t, []string{"Close", "DB"}, got,
-		"本任务只应导出 Close 与 DB；出现 Insert/Upsert 等写口即违反单一写入口约束")
+	assert.Equal(t, []string{"Close", "DB", "Save"}, got,
+		"只应导出 Close、DB 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
+}
+
+// TestPackageExposesNoWriteFunctions 把写口守卫从「*Store 的方法集」扩到**包导出面**。
+//
+// 上面那条用 reflect.TypeOf(&Store{})，只看 *Store 的方法，**包级函数不在它的视野内**。
+// 实测（T4 的 M10）：包级新增 func InsertRow(db *sql.DB, period string) error 直接
+// INSERT、绕过 ValidationReport，整套测试 43/43 全绿无人拦——而判据说的是「任何
+// 导出写口」，守卫窄于判据。
+//
+// 两条测试互补，不是替代：reflect 那条能看见**嵌入类型提升上来**的方法（AST 里看不到
+// 那些，它们没有对应的 FuncDecl）；本条能看见包级函数。删掉任一条都会重新开一个缺口。
+func TestPackageExposesNoWriteFunctions(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	var got []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoErrorf(t, err, "解析 %s", name)
+
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || !fn.Name.IsExported() {
+				continue
+			}
+			if fn.Recv == nil {
+				got = append(got, fn.Name.Name)
+				continue
+			}
+			// 方法：接收者类型不导出时，包外根本拿不到它，不构成导出面
+			recv := recvTypeName(fn.Recv.List[0].Type)
+			if ast.IsExported(recv) {
+				got = append(got, recv+"."+fn.Name.Name)
+			}
+		}
+	}
+	sort.Strings(got)
+
+	assert.Equal(t, []string{"NewStore", "Store.Close", "Store.DB", "Store.Save"}, got,
+		"包的导出函数/方法必须恰好是这四个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+}
+
+// recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
+func recvTypeName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.StarExpr:
+		return recvTypeName(x.X)
+	case *ast.IndexExpr: // 泛型接收者 T[P]
+		return recvTypeName(x.X)
+	case *ast.IndexListExpr: // 泛型接收者 T[P, Q]
+		return recvTypeName(x.X)
+	case *ast.Ident:
+		return x.Name
+	}
+	return ""
 }
 
 // TestNewStoreFailsOnUnopenablePath 证明失败路径不泄漏句柄也不返回半成品。
@@ -253,4 +319,424 @@ func TestNewStoreFailsOnUnopenablePath(t *testing.T) {
 	s, err := NewStore(filepath.Join(blocker, "sub", "hestia.db"))
 	require.Error(t, err)
 	assert.Nil(t, s)
+}
+
+// ---------------------------------------------------------------------------
+// TASK-005：Save 的输入校验与 INSERT 路径
+//
+// Context Checkpoint: done_criteria → test mapping (save)
+// functional[0]     New/Revision/OutOfOrder 三种 Verdict 各有明确行为，Revision 两行都保留
+//                                                       → TestSaveNewObservation、TestSaveRevisionKeepsBothRows、
+//                                                         TestSaveOutOfOrder
+// functional[1]     insert 取值顺序与 metaColumns、Meta 字段声明顺序三处同序
+//                                                       → TestSaveMetaValuesLandInMatchingColumns
+// functional[2]     Values 按 fieldOrder 拼列，不按 map 迭代顺序（抽出 insertSQL 以可机械判定）
+//                                                       → TestInsertSQLColumnOrderIsDeterministic
+// boundary[0]       部分字段 → 其余列为 NULL 而非 0     → TestSavePartialFieldsLeavesNulls
+// boundary[1]       空 Values 与全 54 字段两种极端      → TestSaveEmptyValues、TestSaveAllFields
+// error_handling[0] 白名单外键 → 报错且两张表零行      → TestSaveRejectsUnknownField
+// error_handling[1] Meta 非法 → 报错且零行             → TestSaveRejectsBadMeta
+// error_handling[2] IngestedAt 由 s.now() 覆写         → TestSaveOverwritesIngestedAt
+// error_handling[3] G10 自相矛盾的 ValidationReport → 报错且零行
+//                                                       → TestSaveRejectsSelfContradictoryReport
+// error_handling[4] G6 非有限值（NaN/±Inf）→ 报错且零行 → TestSaveRejectsNonFiniteValues
+// non_functional[1] 写口守卫扩到包导出面               → TestPackageExposesNoWriteFunctions
+
+func passing() ValidationReport {
+	return ValidationReport{Passed: true, Checks: []Check{
+		{ID: "monetary_hierarchy", Status: CheckPassed},
+	}}
+}
+
+func obsWith(values map[string]float64) Observation {
+	return Observation{Meta: validMeta(), Values: values}
+}
+
+func countRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, s.DB().QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&n))
+	return n
+}
+
+// assertNoRowsAnywhere 是全部错误路径的共同判据：只断言 error 非 nil 排除不掉
+// 「已经写了脏数据再报错」——那种实现在只看 error 的测试下完全隐形。
+func assertNoRowsAnywhere(t *testing.T, s *Store) {
+	t.Helper()
+	assert.Equal(t, 0, countRows(t, s, TableObservations), "报错时不得写观测表")
+	assert.Equal(t, 0, countRows(t, s, TablePending), "报错时也不得写 pending")
+}
+
+func TestSaveNewObservation(t *testing.T) {
+	s := newTestStore(t)
+	out, err := s.Save(context.Background(),
+		obsWith(map[string]float64{FieldM2: 356.71, FieldM2YoY: 8.0}), passing())
+	require.NoError(t, err)
+	assert.Equal(t, bitemporal.New, out.Verdict)
+	assert.Equal(t, TableObservations, out.Table)
+	assert.Equal(t, 1, countRows(t, s, TableObservations))
+	assert.Equal(t, 0, countRows(t, s, TablePending))
+
+	var m2 float64
+	require.NoError(t, s.DB().QueryRow(`SELECT m2 FROM `+TableObservations).Scan(&m2))
+	assert.Equal(t, 356.71, m2)
+}
+
+func TestSaveRevisionKeepsBothRows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Save(ctx, obsWith(map[string]float64{FieldM2: 356.71}), passing())
+	require.NoError(t, err)
+
+	// 同一期，更晚的发布日 = 央行修订重发
+	second := obsWith(map[string]float64{FieldM2: 357.00})
+	second.Meta.PublishedAt = "2026-08-20"
+	out, err := s.Save(ctx, second, passing())
+	require.NoError(t, err)
+	assert.Equal(t, bitemporal.Revision, out.Verdict)
+	assert.Equal(t, TableObservations, out.Table)
+
+	assert.Equal(t, 2, countRows(t, s, TableObservations), "修订产生新行而非覆盖")
+
+	// 视图只返回最新那行
+	var m2 float64
+	require.NoError(t, s.DB().QueryRow(`SELECT m2 FROM `+viewCurrent).Scan(&m2))
+	assert.Equal(t, 357.00, m2)
+}
+
+func TestSaveOutOfOrder(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	late := obsWith(map[string]float64{FieldM2: 357.00})
+	late.Meta.PublishedAt = "2026-08-20"
+	_, err := s.Save(ctx, late, passing())
+	require.NoError(t, err)
+
+	// 回填不保证按时间顺序：后写入一个更早的版本
+	early := obsWith(map[string]float64{FieldM2: 356.71})
+	early.Meta.PublishedAt = "2026-07-15"
+	out, err := s.Save(ctx, early, passing())
+	require.NoError(t, err)
+	assert.Equal(t, bitemporal.OutOfOrder, out.Verdict)
+	assert.Equal(t, TableObservations, out.Table, "乱序仍是权威数据，只是不是当前行")
+	assert.Equal(t, 2, countRows(t, s, TableObservations))
+
+	var m2 float64
+	require.NoError(t, s.DB().QueryRow(`SELECT m2 FROM `+viewCurrent).Scan(&m2))
+	assert.Equal(t, 357.00, m2, "当前行由 MAX(published_at) 决定，与写入顺序无关")
+}
+
+// TestSaveMetaValuesLandInMatchingColumns 是三处同序契约的**第三端**。
+//
+// Meta 字段声明顺序（types.go）→ metaColumns（schema.go）→ insert 取值顺序（本文件），
+// 三处必须同序。前两端已分别被 TestMetaFieldOrderIsCrossTaskContract 与
+// TestMetaColumnsMatchMetaStructByReflect 钉住，但那两条在 Meta 与 metaColumns 都
+// 没变时**都不会红**——insert 单方面把 args 写错序只有这里能发现。
+//
+// 判据不是「能写进去」：七列都是 TEXT，错位写入不触发任何数据库错误。所以让七个字段
+// 取**互不相同且可辨识**的值，再逐列读回比对；期望值用 reflect 按 Meta 的声明顺序取，
+// 读取列用 metaColumns 的顺序——任意两列互换，两边就对不上。
+func TestSaveMetaValuesLandInMatchingColumns(t *testing.T) {
+	s := newTestStore(t)
+	fixed := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return fixed }
+
+	obs := obsWith(map[string]float64{FieldM2: 1})
+	// 七个值互不相同：任意两列互换都会让下面的逐列比对红。
+	// 前三个受 Meta.validate 的形态约束，取合法但彼此不同的值。
+	obs.Meta.Period = "2026-06"
+	obs.Meta.PeriodType = "h1"
+	obs.Meta.PublishedAt = "2026-07-15"
+	obs.Meta.ArticleID = "article-id-sentinel"
+	obs.Meta.CaliberVersion = "2025-01"
+	obs.Meta.Extractor = "extractor-sentinel"
+	obs.Meta.IngestedAt = "1999-01-01T00:00:00Z" // 会被 s.now() 覆写
+
+	_, err := s.Save(context.Background(), obs, passing())
+	require.NoError(t, err)
+
+	// 期望值 = Meta 的声明顺序（reflect），且 IngestedAt 换成 Store 实际写的值
+	want := obs.Meta
+	want.IngestedAt = fixed.Format(time.RFC3339)
+	wantByDeclOrder := reflect.ValueOf(want)
+	require.Equal(t, wantByDeclOrder.NumField(), len(metaColumns))
+
+	// 先自证 fixture 够强：七个值必须互不相同，否则「互换必红」不成立
+	seen := map[string]bool{}
+	for i := 0; i < wantByDeclOrder.NumField(); i++ {
+		v := wantByDeclOrder.Field(i).String()
+		require.Falsef(t, seen[v], "fixture 太弱：值 %q 重复出现，列互换将无法被发现", v)
+		seen[v] = true
+	}
+
+	for i, col := range metaColumns {
+		var got string
+		require.NoError(t, s.DB().QueryRow(
+			`SELECT `+col+` FROM `+TableObservations).Scan(&got))
+		assert.Equalf(t, wantByDeclOrder.Field(i).String(), got,
+			"列 %s 里应是 Meta 第 %d 个字段的值——不同序会让写入静默错位", col, i)
+	}
+}
+
+// TestInsertSQLColumnOrderIsDeterministic 让「按 fieldOrder 遍历而非按 map」成为
+// 可机械判定的断言。
+//
+// SQL 构造抽在 insertSQL 里正是为此：若只有 insert 一个方法、它不返回生成的 SQL，
+// 包内就没有观测点，验证者只能读代码确认 range 的是 fieldOrder 不是 map——那是
+// review 不是 test。
+func TestInsertSQLColumnOrderIsDeterministic(t *testing.T) {
+	values := make(map[string]float64, len(fieldOrder))
+	for i, f := range fieldOrder {
+		values[f] = float64(i) + 0.5
+	}
+	obs := obsWith(values)
+	obs.Meta.IngestedAt = "2026-08-08T10:00:00Z"
+
+	wantCols := append(append([]string{}, metaColumns...), fieldOrder...)
+	q, args := insertSQL(obs)
+
+	assert.Equal(t, strings.Join(wantCols, ", "), sqlColumnList(t, q),
+		"列序必须是 metaColumns 后接 fieldOrder，逐项一致")
+	require.Len(t, args, len(wantCols))
+	for i, f := range fieldOrder {
+		assert.Equalf(t, values[f], args[len(metaColumns)+i], "第 %d 个业务参数应对应 %s", i, f)
+	}
+
+	// map 迭代顺序随机：同一 Observation 反复构造必须得到逐字相同的 SQL。
+	// 单次比对可能碰巧相同，所以多跑几轮。
+	for i := 0; i < 20; i++ {
+		got, _ := insertSQL(obs)
+		require.Equalf(t, q, got, "第 %d 轮生成的 SQL 与首轮不同——说明遍历的是 map", i)
+	}
+}
+
+// sqlColumnList 从 INSERT 语句里取出括号内的列清单。
+func sqlColumnList(t *testing.T, q string) string {
+	t.Helper()
+	open := strings.Index(q, "(")
+	closing := strings.Index(q, ")")
+	require.Greaterf(t, closing, open, "不是可解析的 INSERT 语句：%s", q)
+	return q[open+1 : closing]
+}
+
+// TestInsertSQLOmitsAbsentFields 钉住「键不存在即字段缺失」在 SQL 层的表示：
+// 缺失的字段根本不出现在列清单里，而不是补一个 0 或 NULL 参数。
+func TestInsertSQLOmitsAbsentFields(t *testing.T) {
+	obs := obsWith(map[string]float64{FieldM2: 1, FieldLoanBillYTD: 2})
+	q, args := insertSQL(obs)
+
+	cols := strings.Split(sqlColumnList(t, q), ", ")
+	assert.Equal(t, append(append([]string{}, metaColumns...), FieldM2, FieldLoanBillYTD), cols,
+		"只写实际存在的键，且仍按 fieldOrder 的相对顺序")
+	assert.Len(t, args, len(metaColumns)+2)
+}
+
+func TestSavePartialFieldsLeavesNulls(t *testing.T) {
+	s := newTestStore(t)
+	// 模拟 rule@v1：六板块报告没有任何社融字段
+	obs := obsWith(map[string]float64{FieldM2: 213.49, FieldM1: 60.43, FieldM0: 7.95})
+	obs.Meta.Extractor = "rule@v1"
+	obs.Meta.CaliberVersion = "2015-01"
+	_, err := s.Save(context.Background(), obs, passing())
+	require.NoError(t, err)
+
+	var tsf sql.NullFloat64
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT `+FieldTSFStock+` FROM `+TableObservations).Scan(&tsf))
+	assert.False(t, tsf.Valid, "未提供的字段应为 NULL，而不是 0")
+
+	// 0 与 NULL 必须可区分：显式写入的 0 要留下一个非 NULL 的 0
+	obs2 := obsWith(map[string]float64{FieldTSFFlowYTD: 0})
+	obs2.Meta.PublishedAt = "2026-08-20"
+	_, err = s.Save(context.Background(), obs2, passing())
+	require.NoError(t, err)
+
+	var flow sql.NullFloat64
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT `+FieldTSFFlowYTD+` FROM `+TableObservations+` WHERE published_at = '2026-08-20'`).
+		Scan(&flow))
+	assert.True(t, flow.Valid, "显式写入的 0 是「增量为零」，不是「未披露」")
+	assert.Equal(t, 0.0, flow.Float64)
+}
+
+func TestSaveEmptyValues(t *testing.T) {
+	s := newTestStore(t)
+	out, err := s.Save(context.Background(), obsWith(map[string]float64{}), passing())
+	require.NoError(t, err)
+	assert.Equal(t, TableObservations, out.Table)
+	assert.Equal(t, 1, countRows(t, s, TableObservations))
+
+	// nil map 与空 map 走同一条路
+	obs := obsWith(nil)
+	obs.Meta.PublishedAt = "2026-08-20"
+	_, err = s.Save(context.Background(), obs, passing())
+	require.NoError(t, err)
+	assert.Equal(t, 2, countRows(t, s, TableObservations))
+}
+
+func TestSaveAllFields(t *testing.T) {
+	s := newTestStore(t)
+	values := make(map[string]float64, len(fieldOrder))
+	for i, f := range fieldOrder {
+		values[f] = float64(i) + 0.5
+	}
+	_, err := s.Save(context.Background(), obsWith(values), passing())
+	require.NoError(t, err)
+
+	// 逐列读回：只查最后一列会让「中间某列错位」完全隐形
+	for i, f := range fieldOrder {
+		var got float64
+		require.NoErrorf(t, s.DB().QueryRow(
+			`SELECT `+f+` FROM `+TableObservations).Scan(&got), "读 %s", f)
+		assert.Equalf(t, float64(i)+0.5, got, "列 %s 的值错位", f)
+	}
+}
+
+func TestSaveRejectsUnknownField(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.Save(context.Background(),
+		obsWith(map[string]float64{FieldM2: 1, "m2_typo": 2}), passing())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "m2_typo")
+	assertNoRowsAnywhere(t, s)
+}
+
+func TestSaveRejectsBadMeta(t *testing.T) {
+	s := newTestStore(t)
+	obs := obsWith(map[string]float64{FieldM2: 1})
+	obs.Meta.Extractor = "" // 强制点 2
+	_, err := s.Save(context.Background(), obs, passing())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extractor")
+	assertNoRowsAnywhere(t, s)
+}
+
+func TestSaveOverwritesIngestedAt(t *testing.T) {
+	s := newTestStore(t)
+	s.now = func() time.Time { return time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC) }
+
+	obs := obsWith(map[string]float64{FieldM2: 1})
+	obs.Meta.IngestedAt = "1999-01-01T00:00:00Z" // 调用方撒谎
+	_, err := s.Save(context.Background(), obs, passing())
+	require.NoError(t, err)
+
+	var got string
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT ingested_at FROM `+TableObservations).Scan(&got))
+	assert.Equal(t, "2026-08-08T10:00:00Z", got, "入库时刻只能由 Store 决定")
+
+	// 调用方的 Observation 不应被就地改写——它是值传递的，但字段赋值容易写成指针语义
+	assert.Equal(t, "1999-01-01T00:00:00Z", obs.Meta.IngestedAt)
+}
+
+// TestSaveRejectsSelfContradictoryReport 落实 G10。
+//
+// 签名要求 ValidationReport 是 ADR-0003 在同机场景下的唯一防线，但类型只要求报告
+// **存在**。Passed=true 却带着 CheckFailed，正是「加了失败检查却忘了把 Passed 置
+// false」这一类 bug 的形状；而观测表不存任何校验痕迹（pending 才存 report），
+// 事后无从审计某行是否真跑过闸门——所以必须当场拒绝。
+func TestSaveRejectsSelfContradictoryReport(t *testing.T) {
+	cases := []struct {
+		name string
+		rep  ValidationReport
+	}{
+		{"failed check among passed", ValidationReport{Passed: true, Checks: []Check{
+			{ID: "monetary_hierarchy", Status: CheckPassed},
+			{ID: "deposit_sum", Status: CheckFailed, Reason: "residual 14%"},
+		}}},
+		{"single failed check", ValidationReport{Passed: true, Checks: []Check{
+			{ID: "deposit_sum", Status: CheckFailed},
+		}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			_, err := s.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}), tc.rep)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "deposit_sum", "错误须指明是哪个检查自相矛盾")
+			assertNoRowsAnywhere(t, s)
+		})
+	}
+
+	// 对照组：Passed=false 且有 CheckFailed 并不矛盾，不应被本条拦下
+	// （它该走 pending 路径——TASK-006 的桩会让它以另一个错误失败，
+	//   所以这里只断言错误不是「自相矛盾」那一个）。
+	s := newTestStore(t)
+	_, err := s.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}),
+		ValidationReport{Passed: false, Checks: []Check{{ID: "deposit_sum", Status: CheckFailed}}})
+	if err != nil {
+		assert.NotContains(t, err.Error(), "contradict",
+			"Passed=false 带失败检查是正常的未过闸，不是自相矛盾")
+	}
+
+	// 跳过的检查不构成矛盾：CheckSkipped 在 Passed=true 下合法
+	s2 := newTestStore(t)
+	_, err = s2.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}),
+		ValidationReport{Passed: true, Checks: []Check{{ID: "tsf_sum", Status: CheckSkipped}}})
+	require.NoError(t, err, "CheckSkipped 不是失败")
+	assert.Equal(t, 1, countRows(t, s2, TableObservations))
+}
+
+// TestSaveRejectsNonFiniteValues 落实 G6。
+//
+// NaN 写进 SQLite 后 typeof 是 null、isNull=1——**与「字段缺失」完全不可区分**，
+// 而「用 map 的键是否存在表示缺失」正是本设计区分「本就没有」与「解析漏了」的核心。
+// 比率型字段的 0/0 是最常见来源。另：json.Marshal(NaN) 直接报错，NaN 若流到 pending
+// 路径会让 savePending 失败 → Save 返回 error → 两张表都没有这条数据，而 pending
+// 存在的理由正是「不让那期数据彻底消失」。
+func TestSaveRejectsNonFiniteValues(t *testing.T) {
+	for name, v := range map[string]float64{
+		"NaN":       math.NaN(),
+		"+Inf":      math.Inf(1),
+		"-Inf":      math.Inf(-1),
+		"0/0 → NaN": 0.0 / func() float64 { return 0 }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			_, err := s.Save(context.Background(),
+				obsWith(map[string]float64{FieldM2: 1, FieldM2YoY: v}), passing())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), FieldM2YoY, "错误须指明是哪个字段")
+			assertNoRowsAnywhere(t, s)
+		})
+	}
+
+	// 先证明 NaN 一旦写进去确实与缺失不可区分——这是上面为什么必须拦的依据，
+	// 而不是凭空的谨慎。
+	s := newTestStore(t)
+	_, err := s.DB().Exec(
+		`INSERT INTO `+TableObservations+
+			` (period, period_type, published_at, article_id, caliber_version, extractor, ingested_at, `+
+			FieldM2+`) VALUES (?,?,?,?,?,?,?,?)`,
+		"2026-06", "h1", "2026-07-15", "a", "2025-01", "rule@v2", "2026-07-16T00:00:00Z",
+		math.NaN())
+	require.NoError(t, err, "SQLite 本身并不拒绝 NaN——所以拦截必须发生在 Save 里")
+
+	var typ string
+	var isNull int
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT typeof(`+FieldM2+`), `+FieldM2+` IS NULL FROM `+TableObservations).Scan(&typ, &isNull))
+	assert.Equal(t, "null", typ, "NaN 存进去读出来是 null")
+	assert.Equal(t, 1, isNull, "与「字段缺失」完全不可区分")
+}
+
+// TestSaveDuplicateIsLoudNotSilent 记录 Duplicate 的当前行为。
+//
+// DoD 只要求 New/Revision/OutOfOrder 三种；Duplicate（同键同 published_at）此刻
+// 没有专门处置，会撞上主键约束而**响亮地失败**。这不是缺陷——一级幂等（article_id）
+// 在 M1b-4，此前重复写入报错好过静默多一行。本条把这个行为钉住，以免将来有人
+// 「顺手加个 INSERT OR IGNORE」把它变成静默丢弃。
+func TestSaveDuplicateIsLoudNotSilent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	obs := obsWith(map[string]float64{FieldM2: 356.71})
+
+	_, err := s.Save(ctx, obs, passing())
+	require.NoError(t, err)
+
+	_, err = s.Save(ctx, obs, passing())
+	require.Error(t, err, "同键同 published_at 必须报错，不得静默写第二行或静默丢弃")
+	assert.Equal(t, 1, countRows(t, s, TableObservations))
 }
