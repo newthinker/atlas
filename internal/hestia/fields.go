@@ -14,6 +14,21 @@
 // 唯一真相源的约束是可机械核验的：本包除本文件外的**非 _test.go 文件**不得出现
 // 业务字段名的字符串字面量，schema/store 一律遍历 fieldOrder。测试文件豁免——
 // golden list 与分组计数必须写字面量才有意义。核验见 TestFieldNamesAppearOnlyInFieldsGo。
+//
+// # 并发契约
+//
+// 同一业务键（period + period_type）上的 Save **不保证并发安全，由调用方串行化**。
+//
+// Save 的 Lookup → Classify → INSERT/UPDATE 不在一个事务里：两个并发的 Save 同键时
+// 都可能读到 Exists=false、都判为 New、都执行 INSERT，主键约束让其中一方拿到 UNIQUE
+// 错误——那一次的数据随之丢失，且因为错误发生在 insert 阶段，它不会落进 pending 表。
+//
+// 记成契约而不是加事务，是因为要关掉这个窗口需要 BEGIN IMMEDIATE 级别的写锁，那会让
+// 每一次 Save 都持写锁，而不只是真正写入的那些。在出现「并发写同一业务键」的调用方
+// 之前，这个代价不值得付。若将来出现，改法是把 Lookup 到写入整段放进 IMMEDIATE 事务，
+// 而不是在 Go 侧加锁——Go 侧的锁挡不住另一个进程。
+//
+// go test -race 发现不了这件事：它只看 Go 层的数据竞争，SQL 层的 TOCTOU 在其视野之外。
 package hestia
 
 const (
