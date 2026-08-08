@@ -24,6 +24,7 @@ package hestia
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -722,13 +723,112 @@ func TestSaveRejectsNonFiniteValues(t *testing.T) {
 	assert.Equal(t, 1, isNull, "与「字段缺失」完全不可区分")
 }
 
-// TestSaveDuplicateIsLoudNotSilent 记录 Duplicate 的当前行为。
+// TestSaveDuplicateIsLoudNotSilent（TASK-005）已被 TASK-006 的
+// TestSaveDuplicateIsDefinedNotSilent 取代——它断言「Duplicate 必须报错」，而本任务
+// 按 DoD functional[0] 给 Duplicate 加了专门处置（refreshArticleID），那个前提被
+// 有意推翻。它真正要防的「静默丢弃 / 静默多一行」换了形式继续被防住，
+// 说明见取代它的那条测试的注释。
+
+// ---------------------------------------------------------------------------
+// TASK-006: Duplicate 的 UPDATE 与 pending 分流
 //
-// DoD 只要求 New/Revision/OutOfOrder 三种；Duplicate（同键同 published_at）此刻
-// 没有专门处置，会撞上主键约束而**响亮地失败**。这不是缺陷——一级幂等（article_id）
-// 在 M1b-4，此前重复写入报错好过静默多一行。本条把这个行为钉住，以免将来有人
-// 「顺手加个 INSERT OR IGNORE」把它变成静默丢弃。
-func TestSaveDuplicateIsLoudNotSilent(t *testing.T) {
+// functional[0] Duplicate 只刷 article_id、不新增行 → TestSaveDuplicateRefreshesArticleID
+// functional[1] Passed=false 走 savePending，Outcome.Table 如实反映去向
+//                                                    → TestSaveFailedValidationGoesToPending
+// functional[2] savePending 桩确已被替换（无 not implemented，且 pending 有行）
+//                                                    → TestSaveFailedValidationGoesToPending
+// functional[3] G2/M7' pending 路径的 Verdict 必须有意义（与零值可区分）
+//                                                    → TestSavePendingVerdictSurvivesClassify
+// functional[4] G3 Duplicate 携带更丰富 Values 时的行为已钉死（保持丢弃）
+//                                                    → TestSaveDuplicateDiscardsRicherValues
+// boundary[0]   同一期反复失败在 pending 逐次累积    → TestPendingAccumulatesPerAttempt
+// boundary[1]   G8 同秒两次失败必须可区分（RFC3339Nano）
+//                                                    → TestPendingDistinguishesSameSecondAttempts
+//                RFC3339Nano 去尾零导致字典序≠时间序，登记在案
+//                                                    → TestIngestedAtLexicalOrderIsNotTimeOrder
+// boundary[2]   pending 表漂移时必须明确失败且错误可定位（选②的直接证据）
+//                                                    → TestSavePendingFailsLoudlyOnDriftedPendingTable
+// ---------------------------------------------------------------------------
+
+// failing 是 passing 的镜像：一份最小的未过闸报告，用于只关心「走 pending 分流」
+// 而不关心报告内容的用例。需要断言报告字段如实落盘的用例（如
+// TestSaveFailedValidationGoesToPending）自己构造更丰富的报告。
+func failing() ValidationReport {
+	return ValidationReport{Passed: false, Checks: []Check{
+		{ID: "completeness", Status: CheckFailed},
+	}}
+}
+
+// pendingRow 是 pending 表里一行的读回形态。
+type pendingRow struct {
+	articleID  string
+	extractor  string
+	ingestedAt string
+	report     string
+	valuesJSON string
+}
+
+func pendingRows(t *testing.T, s *Store) []pendingRow {
+	t.Helper()
+	rows, err := s.DB().Query(
+		`SELECT article_id, extractor, ingested_at, report, values_json FROM ` +
+			TablePending + ` ORDER BY ingested_at`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var out []pendingRow
+	for rows.Next() {
+		var p pendingRow
+		require.NoError(t, rows.Scan(&p.articleID, &p.extractor, &p.ingestedAt,
+			&p.report, &p.valuesJSON))
+		out = append(out, p)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+func TestSaveDuplicateRefreshesArticleID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first := obsWith(map[string]float64{FieldM2: 356.71})
+	_, err := s.Save(ctx, first, passing())
+	require.NoError(t, err)
+
+	// 站点迁移：同一篇报告换了新 URL，发布日不变
+	migrated := obsWith(map[string]float64{FieldM2: 356.71})
+	migrated.Meta.ArticleID = "2026999999999999999"
+	out, err := s.Save(ctx, migrated, passing())
+	require.NoError(t, err)
+
+	assert.Equal(t, bitemporal.Duplicate, out.Verdict)
+	assert.Equal(t, TableObservations, out.Table)
+	assert.Equal(t, 1, countRows(t, s, TableObservations), "不得写新行——那会造出一个假修订")
+
+	var id string
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT article_id FROM `+TableObservations).Scan(&id))
+	assert.Equal(t, "2026999999999999999", id,
+		"必须刷新 article_id，否则一级幂等检查永远 miss，每月重抓一次")
+}
+
+// TestSaveDuplicateIsDefinedNotSilent **取代** TASK-005 的 TestSaveDuplicateIsLoudNotSilent。
+//
+// 那条钉住的是「Duplicate 撞主键约束而响亮失败」，理由是「此前重复写入报错好过静默
+// 多一行」，并防止有人「顺手加个 INSERT OR IGNORE 把它变成静默丢弃」。
+//
+// 本任务按 DoD functional[0] 给 Duplicate 加了专门处置（refreshArticleID），
+// 「响亮失败」这个前提**被有意推翻**：它当时是「尚无处置」的副产品，不是目标行为。
+// 但那条钉子真正要防的东西必须继续被防住，所以它换了一种形式活下来——
+//
+//	原来的防线：Duplicate 必须报错（任何静默成功都是退化）
+//	现在的防线：Duplicate 必须产生**可观测的确定动作**——行数恰好不变 **且** article_id
+//	           已被刷新。INSERT OR IGNORE 会让行数不变但 article_id 不变，
+//	           因此仍然被 TestSaveDuplicateRefreshesArticleID 杀死。
+//
+// 本条只补一件那条测试原本覆盖、而上面那条没覆盖的事：Duplicate 不得**多出一行**，
+// 无论 Values 是否相同。
+func TestSaveDuplicateIsDefinedNotSilent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	obs := obsWith(map[string]float64{FieldM2: 356.71})
@@ -736,7 +836,241 @@ func TestSaveDuplicateIsLoudNotSilent(t *testing.T) {
 	_, err := s.Save(ctx, obs, passing())
 	require.NoError(t, err)
 
-	_, err = s.Save(ctx, obs, passing())
-	require.Error(t, err, "同键同 published_at 必须报错，不得静默写第二行或静默丢弃")
-	assert.Equal(t, 1, countRows(t, s, TableObservations))
+	out, err := s.Save(ctx, obs, passing())
+	require.NoError(t, err, "Duplicate 现在有专门处置，不再是错误路径")
+	assert.Equal(t, bitemporal.Duplicate, out.Verdict)
+	assert.Equal(t, 1, countRows(t, s, TableObservations),
+		"同键同 published_at 不得多出一行——那是假修订")
+	assert.Equal(t, 0, countRows(t, s, TablePending),
+		"过闸的 Duplicate 不该落 pending")
+}
+
+// TestSaveDuplicateDiscardsRicherValues 落实 G3：把 Duplicate 携带不同 Values 时的
+// 行为**从意外变成登记在案的决定**。
+//
+// 选择的是「保持丢弃」而非「覆盖式更新」，因为 DoD functional[0] 明文要求
+// refreshArticleID **只更新 article_id、不新增行**——覆盖式更新会直接违反它。
+//
+// 于是这里钉住丢弃的**全部可观测后果**，让它可被审计：
+// 上线 rule@v2 后回填重跑历史时，每期 published_at 都没变 → 全判 Duplicate →
+// 只刷 article_id → v2 新抽的字段一个都没写进去，extractor 列还写着旧值，
+// 而 Save 返回 nil，运维看到「N 期处理完毕、零错误」。
+//
+// **这是本任务已知且未修复的数据静默丢失面**，不是本条测试的疏漏——它正是用来
+// 让这件事在下次有人动这段代码时立刻可见。若将来决定改成覆盖式更新，本条会转红，
+// 迫使他显式推翻这个决定而不是悄悄改掉。
+func TestSaveDuplicateDiscardsRicherValues(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first := obsWith(map[string]float64{FieldM2: 356.71})
+	first.Meta.Extractor = "rule@v1"
+	_, err := s.Save(ctx, first, passing())
+	require.NoError(t, err)
+
+	// 同一篇报告用更强的抽取器重跑：值更全、extractor 也变了，但发布日没变
+	richer := obsWith(map[string]float64{FieldM2: 999.99, FieldM1: 123.45})
+	richer.Meta.Extractor = "rule@v2"
+	richer.Meta.ArticleID = "2026999999999999999"
+	out, err := s.Save(ctx, richer, passing())
+	require.NoError(t, err)
+	require.Equal(t, bitemporal.Duplicate, out.Verdict)
+	require.Equal(t, 1, countRows(t, s, TableObservations))
+
+	var m2 float64
+	var m1 sql.NullFloat64
+	var extractor, articleID string
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT `+FieldM2+`, `+FieldM1+`, extractor, article_id FROM `+TableObservations).
+		Scan(&m2, &m1, &extractor, &articleID))
+
+	assert.Equal(t, 356.71, m2, "既有列不被覆盖——重跑的新值被丢弃")
+	assert.False(t, m1.Valid, "v2 新抽出来的字段一个都没写进去")
+	assert.Equal(t, "rule@v1", extractor, "extractor 列仍写着旧抽取器，与实际不符")
+	assert.Equal(t, "2026999999999999999", articleID, "唯一被更新的就是 article_id")
+}
+
+func TestSaveFailedValidationGoesToPending(t *testing.T) {
+	s := newTestStore(t)
+	val := 0.0857
+	rep := ValidationReport{Passed: false, Checks: []Check{
+		{ID: "deposit_sum", Status: CheckFailed, Value: &val},
+		{ID: "stock_continuity", Status: CheckSkipped, Reason: "absent_field:tsf_stock"},
+	}}
+
+	out, err := s.Save(context.Background(),
+		obsWith(map[string]float64{FieldM2: 356.71}), rep)
+	require.NoError(t, err, "未过闸不是错误——它是一条正常的分流路径")
+	// 桩确已被替换：桩会让上一行的 require.NoError 直接失败，这里再钉一次措辞，
+	// 让「桩还在」与「真实现有 bug」在失败信息上可区分。
+	assert.Equal(t, TablePending, out.Table)
+
+	assert.Equal(t, 0, countRows(t, s, TableObservations))
+	assert.Equal(t, 1, countRows(t, s, TablePending))
+
+	rows := pendingRows(t, s)
+	require.Len(t, rows, 1)
+
+	var gotRep ValidationReport
+	require.NoError(t, json.Unmarshal([]byte(rows[0].report), &gotRep))
+	assert.False(t, gotRep.Passed)
+	require.Len(t, gotRep.Checks, 2)
+	assert.Equal(t, "deposit_sum", gotRep.Checks[0].ID)
+	assert.Equal(t, CheckFailed, gotRep.Checks[0].Status)
+	require.NotNil(t, gotRep.Checks[0].Value)
+	assert.Equal(t, 0.0857, *gotRep.Checks[0].Value)
+	assert.Equal(t, CheckSkipped, gotRep.Checks[1].Status)
+	assert.Equal(t, "absent_field:tsf_stock", gotRep.Checks[1].Reason)
+
+	var gotValues map[string]float64
+	require.NoError(t, json.Unmarshal([]byte(rows[0].valuesJSON), &gotValues))
+	assert.Equal(t, 356.71, gotValues[FieldM2])
+}
+
+// TestSavePendingVerdictSurvivesClassify 闭合 TASK-005 交接的存活变异 M7'（G2）。
+//
+// M7' 是「把 `if !rep.Passed` 整块移到 Classify 之前」——少一次查询，很有诱惑力。
+// 在 T5 范围内它**完全存活**（53/53 全绿、vet exit 0、三条自证齐全），根因是结构性
+// 不可测：T5 的 savePending 是永远返回 error 的桩 ⇒ Passed=false 必然走
+// `return Outcome{}, err` ⇒ 调用方拿到的永远是零值 Outcome ⇒ 判据没有观测点。
+// 本任务实现 savePending 之后它才第一次可测。
+//
+// **只测 New 场景等于没测，因为 bitemporal.New == 0**：早早 return `Outcome{}` 的
+// 实现同样能通过 `assert.Equal(bitemporal.New, out.Verdict)`。所以这里一律构造
+// Verdict != New 的场景。
+func TestSavePendingVerdictSurvivesClassify(t *testing.T) {
+	// 先证明用来区分的两个取值确实非零——否则整条判据退化成上面批评的那种
+	require.NotEqual(t, bitemporal.Verdict(0), bitemporal.Revision)
+	require.NotEqual(t, bitemporal.Verdict(0), bitemporal.OutOfOrder)
+
+	for _, tc := range []struct {
+		name        string
+		publishedAt string
+		want        bitemporal.Verdict
+	}{
+		{"Revision", "2026-08-20", bitemporal.Revision},     // 比库中更晚
+		{"OutOfOrder", "2026-06-01", bitemporal.OutOfOrder}, // 比库中更早
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+
+			// 库里先有一行过闸的数据（published_at = validMeta 的 2026-07-15）
+			_, err := s.Save(ctx, obsWith(map[string]float64{FieldM2: 1}), passing())
+			require.NoError(t, err)
+
+			later := obsWith(map[string]float64{FieldM2: 2})
+			later.Meta.PublishedAt = tc.publishedAt
+			out, err := s.Save(ctx, later, failing())
+			require.NoError(t, err)
+
+			assert.Equal(t, TablePending, out.Table)
+			assert.Equal(t, tc.want, out.Verdict,
+				"未过闸的数据也必须带真实 Verdict——告警要能说清是新一期被拦还是一次修订被拦")
+			assert.Equal(t, 1, countRows(t, s, TableObservations), "未过闸不得进观测表")
+			assert.Equal(t, 1, countRows(t, s, TablePending))
+		})
+	}
+}
+
+func TestPendingAccumulatesPerAttempt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	stamps := []time.Time{
+		time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC),
+	}
+	for _, ts := range stamps {
+		s.now = func() time.Time { return ts }
+		_, err := s.Save(ctx, obsWith(map[string]float64{FieldM2: 1}), failing())
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 2, countRows(t, s, TablePending),
+		"主键含 ingested_at：同一期反复失败留下多条，那本身是诊断信息")
+}
+
+// TestPendingDistinguishesSameSecondAttempts 落实 G8。
+//
+// pending 的主键含 ingested_at。TASK-005 用 RFC3339 格式化它，而 RFC3339 只有秒精度
+// ——即时重试循环里同一期两次过闸失败会撞 UNIQUE constraint，第二次 Save 直接报错，
+// **那次尝试的诊断信息全部丢失**，而 pending 表存在的唯一理由就是保留诊断信息。
+//
+// 上面的 TestPendingAccumulatesPerAttempt 用相隔四小时的两个时刻，**恰好绕开了这个
+// 边界**——它在秒精度下也会通过。本条专门盯住同一秒内的两次尝试：两个时刻只在纳秒
+// 位不同，并先断言它们在 RFC3339 下渲染成**完全相同的串**，以此证明本条确实踩在
+// 边界上，而不是又一次绕开它。
+func TestPendingDistinguishesSameSecondAttempts(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	first, second := base.Add(1), base.Add(2) // 相差 1 纳秒，同一秒内
+
+	require.Equal(t, first.Format(time.RFC3339), second.Format(time.RFC3339),
+		"前提自证：这两个时刻在 RFC3339 下不可区分，否则本条又绕开了边界")
+
+	for _, ts := range []time.Time{first, second} {
+		s.now = func() time.Time { return ts }
+		_, err := s.Save(ctx, obsWith(map[string]float64{FieldM2: 1}), failing())
+		require.NoError(t, err,
+			"同一秒内的两次过闸失败都必须留下记录，第二次不得撞 UNIQUE constraint")
+	}
+
+	rows := pendingRows(t, s)
+	require.Len(t, rows, 2, "同秒两次尝试必须是两行")
+	assert.NotEqual(t, rows[0].ingestedAt, rows[1].ingestedAt,
+		"两行的 ingested_at 必须真的不同，否则主键根本没区分开")
+}
+
+// TestIngestedAtLexicalOrderIsNotTimeOrder 钉住一个**已知且被接受**的限制。
+//
+// RFC3339Nano 会去掉小数部分的尾零，于是整秒时刻渲染成 "…:00Z"、半秒时刻渲染成
+// "…:00.5Z"，而 '.'(0x2E) < 'Z'(0x5A) —— **字典序与时间序相反**。
+//
+// 当前无害：ingested_at 不是 revision 列（published_at 才是），bitemporal 的 MAX()
+// 与 Classify 都不碰它；pending 主键只要求唯一，不要求有序。
+// 但凡有人将来对 ingested_at 做 ORDER BY 或 MAX()（例如「取最近一次失败尝试」），
+// 结果会静默出错。本条把这个限制钉成可执行契约：若哪天改成定宽补零格式，本条会
+// 转红，迫使他显式推翻它——顺带提醒那次改动需要迁移既有数据。
+func TestIngestedAtLexicalOrderIsNotTimeOrder(t *testing.T) {
+	whole := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	frac := time.Date(2026, 8, 8, 10, 0, 0, 500000000, time.UTC)
+
+	require.True(t, frac.After(whole), "前提：frac 在时间上更晚")
+	assert.False(t, frac.Format(time.RFC3339Nano) > whole.Format(time.RFC3339Nano),
+		"RFC3339Nano 去尾零导致字典序与时间序相反——不要对 ingested_at 做 ORDER BY/MAX()")
+}
+
+// TestSavePendingFailsLoudlyOnDriftedPendingTable 是 boundary[2] 选②的**直接证据**。
+//
+// TASK-004 只把观测表纳入了 NewStore 的漂移检查，pending 表没有。本任务复核后仍选择
+// 不加列存在性校验，但那必须是有论证的决定而不是声明，所以这里把论证的关键一环变成
+// 可执行的：**pending 表结构与代码预期不符时，失败是确定的、当场的、且错误可定位。**
+//
+// 与观测表的危害对比（这正是两者处置不同的理由）：
+//
+//	观测表：INSERT 的列由 Values 里实际存在的字段决定 ⇒ 列清单**随数据变化** ⇒
+//	        缺某一列只在恰好含该字段的那一期才炸，可能上线数周后才复现。
+//	pending：INSERT 的八列**固定不变**，每次写 pending 都用同一份列清单 ⇒ 任何不符
+//	        在**第一次**写 pending 时就炸，不存在「特定期次才暴露」这个失效模式。
+//
+// 所以 G7 那条「静默到某一期才炸」的危害在 pending 上结构性地不成立，剩下的要求
+// 只是「失败要可定位」——由 savePending 的错误包装满足，本条断言它。
+func TestSavePendingFailsLoudlyOnDriftedPendingTable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// 造一个「结构与代码预期不符」的 pending 表
+	_, err := s.DB().Exec(
+		`ALTER TABLE ` + TablePending + ` RENAME COLUMN values_json TO values_json_legacy`)
+	require.NoError(t, err)
+
+	out, err := s.Save(ctx, obsWith(map[string]float64{FieldM2: 1}), failing())
+
+	require.Error(t, err, "pending 表结构不符时必须当场失败")
+	assert.Contains(t, err.Error(), "pending", "错误必须指明是写 pending 这一步")
+	assert.Contains(t, err.Error(), "2026-06", "错误必须带上是哪一期，否则无法定位")
+	assert.Equal(t, Outcome{}, out, "失败时不得返回一个看起来成功的 Outcome")
+	assert.Equal(t, 0, countRows(t, s, TableObservations), "未过闸的数据不得漏进观测表")
 }

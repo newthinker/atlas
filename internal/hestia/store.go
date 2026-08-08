@@ -3,6 +3,7 @@ package hestia
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -156,7 +157,18 @@ func (s *Store) Save(ctx context.Context, obs Observation, rep ValidationReport)
 
 	// 入库时刻只有 Store 知道，调用方传的一律覆盖——让调用方决定它等于允许它撒谎。
 	// 改的是值参数的副本，调用方手里的 Observation 不受影响。
-	obs.Meta.IngestedAt = s.now().UTC().Format(time.RFC3339)
+	//
+	// 用 RFC3339Nano 而非 RFC3339（G8）：pending 的主键含 ingested_at，而 RFC3339
+	// 只有秒精度——即时重试循环里同一期两次过闸失败会撞 UNIQUE constraint，第二次
+	// Save 直接报错，那次尝试的诊断信息全部丢失，而 pending 存在的唯一理由就是
+	// 保留诊断信息。
+	//
+	// 代价（已登记，见 TestIngestedAtLexicalOrderIsNotTimeOrder）：RFC3339Nano 去掉
+	// 小数尾零，于是整秒渲染成 "…:00Z"、半秒渲染成 "…:00.5Z"，而 '.' < 'Z' ——
+	// **字典序与时间序相反**。当前无害：ingested_at 不是 revision 列（published_at
+	// 才是），bitemporal 的 MAX() 与 Classify 都不碰它，pending 主键也只要求唯一。
+	// 但不要对 ingested_at 做 ORDER BY 或 MAX()。
+	obs.Meta.IngestedAt = s.now().UTC().Format(time.RFC3339Nano)
 
 	// 用 s.spec 而不是另造一个：NewStore 用它部署了视图，另造的那个与视图不同源时，
 	// 「当前行」和幂等判断会对不上，且不报错。
@@ -180,10 +192,46 @@ func (s *Store) Save(ctx context.Context, obs Observation, rep ValidationReport)
 		return Outcome{Verdict: verdict, Table: TablePending}, nil
 	}
 
+	if verdict == bitemporal.Duplicate {
+		// 站点迁移换了 article_id，发布日不变。写新行会造出一个假修订；
+		// 什么都不做则一级幂等检查（按 article_id 查）永远 miss，每月重抓一次。
+		// 正确动作是刷新那一行的 id——它记录「这行数据最后一次在哪个 URL 被看到」。
+		if err := s.refreshArticleID(ctx, obs); err != nil {
+			return Outcome{}, err
+		}
+		return Outcome{Verdict: verdict, Table: TableObservations}, nil
+	}
+
 	if err := s.insert(ctx, obs); err != nil {
 		return Outcome{}, err
 	}
 	return Outcome{Verdict: verdict, Table: TableObservations}, nil
+}
+
+// refreshArticleID 处置 Duplicate：只更新 article_id，不新增行。
+//
+// # 只更新 article_id 意味着重跑抽取的新值会被丢弃（G3，已登记的取舍）
+//
+// 上线 rule@v2 后回填重跑历史是必然操作，届时每期 published_at 都没变 → 全判
+// Duplicate → 走到这里 → **v2 新抽出来的字段一个都没写进去，extractor 列还写着
+// 旧抽取器**，而 Save 返回 nil，运维看到「N 期处理完毕、零错误」。
+//
+// 之所以仍然只刷 id：本任务的 DoD 明文要求「只更新 article_id，不新增行」，
+// 覆盖式更新会直接违反它；而覆盖也不是无代价的——它会无声地毁掉上一次抽取的
+// 结果，而本表没有「抽取器版本」这根轴来承载两次不同的读数。
+//
+// TestSaveDuplicateDiscardsRicherValues 把丢弃的**全部可观测后果**钉成契约：
+// 若将来决定改成覆盖式更新，那条会转红，迫使他显式推翻这个取舍。
+func (s *Store) refreshArticleID(ctx context.Context, obs Observation) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE `+TableObservations+` SET article_id = ?
+		 WHERE period = ? AND period_type = ? AND published_at = ?`,
+		obs.Meta.ArticleID, obs.Meta.Period, obs.Meta.PeriodType, obs.Meta.PublishedAt)
+	if err != nil {
+		return fmt.Errorf("hestia store refresh article_id %s/%s: %w",
+			obs.Meta.Period, obs.Meta.PeriodType, err)
+	}
+	return nil
 }
 
 // checkValues 把 Values 的键与值分别过一遍闸门。
@@ -295,10 +343,52 @@ func (s *Store) insert(ctx context.Context, obs Observation) error {
 	return nil
 }
 
-// savePending 在 TASK-006 实现真正的逻辑。
+// savePending 收未过闸的数据。
 //
-// 这是一个**有意的桩**：TASK-005 的全部测试都走 passing() 报告，不触达它。
-// 桩返回错误而不是静默成功，是为了让任何提前走到这条路径的调用大声失败。
+// 存 JSON 而非 54 列：消费者只有人，不做查询也不进 Grafana。让它结构上就
+// 不像观测表，是为了防止下游把「被拒绝的数据」当成权威数据用。
+//
+// # pending 表不做 schema 漂移检查，这是有论证的决定（boundary[2]）
+//
+// TASK-004 的 verifyObservationsSchema 只覆盖观测表。这里仍然不加列存在性校验，
+// 理由是 G7 那条「静默到某一期才炸」的危害在 pending 上**结构性地不成立**：
+//
+//	观测表：INSERT 的列由 Values 里实际存在的字段决定 ⇒ 列清单随数据变化 ⇒
+//	        缺某一列只在恰好含该字段的那一期才炸，可能上线数周后才复现。
+//	pending：下面这八列**固定不变**，每次写 pending 都用同一份列清单 ⇒ 任何不符
+//	        在第一次写 pending 时就确定性地炸，不存在「特定期次才暴露」。
+//
+// 剩下的要求只是「失败要可定位」，由下面的错误包装（步骤名 + 期次）满足。
+// TestSavePendingFailsLoudlyOnDriftedPendingTable 把这两点变成可执行证据，
+// 而不是停留在声明。
+//
+// 未覆盖的残余：某个版本只改 pendingDDL 而不动 fieldOrder（观测表检查不会触发），
+// 或有人手工改了 pending 表结构。两者都只会导致第一次写 pending 时确定性失败。
+//
+// 不加校验的代价评估（复核 TASK-004 的结论，仍然成立）：加校验需要一份 pending
+// 的期望列清单，而 pendingDDL 在 schema.go 里已经有一份——那会引入本包明确反对的
+// 「DDL 之外的第二份 schema 定义」，两份必然不同步。
 func (s *Store) savePending(ctx context.Context, obs Observation, rep ValidationReport) error {
-	return fmt.Errorf("hestia: savePending not implemented yet")
+	reportJSON, err := json.Marshal(rep)
+	if err != nil {
+		return fmt.Errorf("hestia: marshaling validation report: %w", err)
+	}
+	// Values 里的非有限值已被 checkValues 在 Save 入口拦下，所以这里不会因 NaN 失败。
+	// 两者是绑定的：放宽入口校验会让这一行开始报错，而那会让未过闸的数据两张表都进不去。
+	valuesJSON, err := json.Marshal(obs.Values)
+	if err != nil {
+		return fmt.Errorf("hestia: marshaling values: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO `+TablePending+`
+		 (period, period_type, published_at, article_id, extractor, ingested_at, report, values_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		obs.Meta.Period, obs.Meta.PeriodType, obs.Meta.PublishedAt,
+		obs.Meta.ArticleID, obs.Meta.Extractor, obs.Meta.IngestedAt,
+		string(reportJSON), string(valuesJSON))
+	if err != nil {
+		return fmt.Errorf("hestia store pending %s/%s: %w",
+			obs.Meta.Period, obs.Meta.PeriodType, err)
+	}
+	return nil
 }
