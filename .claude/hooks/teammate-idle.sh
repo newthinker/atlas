@@ -53,16 +53,29 @@ if [ -z "$ME" ]; then
     exit 0
 fi
 
+# UNLOCK 是**本角色的解锁条件**——「做什么这个 hook 才会放你走」。
+#
+# 为什么每个分支都要单独写:保活文案原先只有通用的一句「按你实例的角色职责继续」。
+# 判定是对的,但读者拿不到可行动信息。atlas sprint-033 实测:qa-agent-10 被连续唤醒
+# 约 1500 次(01–07 时每小时 190–321 次),每次都重扫、每次都确认"自己有相关任务",
+# 而它是被派为只读 lens 的实例——**结构上产不出解锁条件**,于是无限空转。
+#
+# 那次的判定完全正确(有 verified 任务且无裁决 ⇒ 该保活),错的是输出没说出
+# 「写一份 docs/05-review/*.md 就能停」。**判定正确而输出不可行动,等于把诊断留给读者**,
+# 而读者恰恰是那个信息最少的实例。
 case "$ME" in
   dev-*)
-    MINE=$(query_tasks 'select(.assigned_to == $me and (.status | IN("assigned","in_progress","review_fix"))) | .id' --arg me "$ME") ;;
+    MINE=$(query_tasks 'select(.assigned_to == $me and (.status | IN("assigned","in_progress","review_fix"))) | .id' --arg me "$ME")
+    UNLOCK="把名下任务推进到 dev_done(经写通道 transition dev_done;门禁不过则先修测试/覆盖率)" ;;
   test-*)
     MINE=$(query_tasks 'select((.verifier // "") == $me and .status == "verifying") | .id' --arg me "$ME")
     # dev_done 待领验证的任务对 Test Agent 也算相关
     PENDING_VERIFY=$(query_tasks 'select(.status == "dev_done") | .id')
-    MINE=$(printf '%s\n%s' "$MINE" "$PENDING_VERIFY") ;;
+    MINE=$(printf '%s\n%s' "$MINE" "$PENDING_VERIFY")
+    UNLOCK="把 verifier 指向你的 verifying 任务判成 verified 或 rejected;dev_done 任务需等 Leader 派验(dev_done->verifying 是 leader 专属边,你无法自领)" ;;
   qa-*)
     MINE=$(query_tasks 'select(.status == "verified") | .id')
+    UNLOCK="在 .arcforge/docs/05-review/ 下落一份裁决产物(*.md,须晚于全部 verified 任务文件的 mtime);若你是只读 lens 子代理则产不出它,把结论交回父实例由其落盘"
     # F6 防空转:最新裁决产物晚于全部 verified 任务文件 = 本轮已出过裁决,允许空闲
     if [ -n "$(echo "$MINE" | tr -d '[:space:]')" ]; then
         LATEST_REVIEW=$(ls -t .arcforge/docs/05-review/*.md 2>/dev/null | head -1)
@@ -73,11 +86,12 @@ case "$ME" in
         fi
     fi ;;
   *)
-    MINE="" ;;
+    MINE=""; UNLOCK="" ;;
 esac
 
 if [ -n "$(echo "$MINE" | tr -d '[:space:]')" ]; then
     echo "你($ME)仍有相关任务未走完:重读 .arcforge/tasks/,按你实例的角色职责继续(文件是真相源;你只能写你 own 的状态,写入一律经 .claude/hooks/arcforge-write.sh --as $ME)。" >&2
+    [ -n "${UNLOCK:-}" ] && echo "  解锁条件:${UNLOCK}。" >&2
     exit 2
 fi
 exit 0
