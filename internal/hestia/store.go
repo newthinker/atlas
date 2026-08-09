@@ -195,13 +195,16 @@ func (s *Store) DB() *sql.DB { return s.db }
 // 未过闸的数据不报错，而是分流到 hestia_pending。若只是拒绝，调用方总有可能忘记
 // 写 pending，那期数据就彻底消失了。一个入口、两个目的地。
 //
-// 四道输入校验全部排在写库之前，且任何一道不通过都**零行落盘**——「先写再报错」
+// 五道输入校验全部排在写库之前，且任何一道不通过都**零行落盘**——「先写再报错」
 // 在只看 error 的测试下完全隐形，而脏数据一旦进权威表就没有痕迹说明它没过闸。
 func (s *Store) Save(ctx context.Context, obs Observation, rep ValidationReport) (Outcome, error) {
 	if err := obs.Meta.validate(); err != nil {
 		return Outcome{}, err
 	}
 	if err := checkValues(obs.Values); err != nil {
+		return Outcome{}, err
+	}
+	if err := checkReportValues(rep); err != nil {
 		return Outcome{}, err
 	}
 	if err := checkReportConsistency(rep); err != nil {
@@ -321,6 +324,33 @@ func checkValues(values map[string]float64) error {
 		sort.Strings(unknown)
 		return fmt.Errorf("hestia: unknown field(s) %s (not in fieldOrder)",
 			strings.Join(unknown, ", "))
+	}
+	return nil
+}
+
+// checkReportValues 把 ValidationReport 里的实测值过一遍非有限值闸门。
+//
+// 它与 checkValues 是同一条推理的两半，而这一半原先漏了：savePending 的第一件
+// 事是 json.Marshal(rep)，JSON 编码器拒绝 NaN/Inf，于是未过闸的数据连 pending
+// 都进不去——两张表同时没有这一期，而 pending 存在的全部意义就是接住这种数据。
+// checkValues 的文档注释花四行论证「NaN 必须在入口拦」，理由逐字就是这个后果，
+// 只是当时只覆盖了 Observation.Values 那一半。
+//
+// 这不是假想：Check.Value 装的是比率型闸门的实测值，0/0 就是 NaN。
+//
+// 拦在入口而不是净化后放行：Value 是 NaN 说明闸门实现有 bug，应当响亮失败。
+// 那一期数据可以在修完闸门后重跑补回，而被掩盖的 bug 不会。
+func checkReportValues(rep ValidationReport) error {
+	for _, c := range rep.Checks {
+		if c.Value == nil {
+			continue
+		}
+		if math.IsNaN(*c.Value) || math.IsInf(*c.Value, 0) {
+			return fmt.Errorf(
+				"hestia: check %q has non-finite value %v: JSON encoding rejects it, "+
+					"which would keep this period out of hestia_pending as well",
+				c.ID, *c.Value)
+		}
 	}
 	return nil
 }

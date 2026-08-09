@@ -1325,3 +1325,54 @@ func TestSaveDuplicateOnlyTouchesTheMatchingRevision(t *testing.T) {
 	assert.Equal(t, "art-v1", got["2026-07-15"],
 		"历史修订行必须原值保留——盖掉它会毁掉逐行溯源，且让 article_id 幂等检查命中错误的行")
 }
+
+// ── M1b-1.5 · C-1：ValidationReport 里的非有限值 ───────────────────────────
+// error_handling[C-1] rep.Checks[].Value 为 NaN/Inf → 入口拒绝且信息指名 check
+//                                                    → TestSaveRejectsNonFiniteCheckValue
+// error_handling[C-1] 有限值与 nil 不受影响          → TestSaveAcceptsFiniteAndNilCheckValues
+
+func TestSaveRejectsNonFiniteCheckValue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			v := tc.val
+			rep := ValidationReport{Passed: false, Checks: []Check{
+				{ID: "deposit_sum", Status: CheckFailed, Value: &v},
+			}}
+
+			_, err := s.Save(context.Background(),
+				obsWith(map[string]float64{FieldM2: 356.71}), rep)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "deposit_sum", "错误应指名是哪道闸门")
+
+			// 两张表都没有——这是有意的，不是遗留缺陷。
+			// Check.Value 是 NaN 说明闸门实现有 bug（比率型 0/0 未处理），那是
+			// M1b-3 的代码错误，应当响亮失败让开发者立刻看见。若在此静默净化成
+			// null 写进 pending，闸门的 bug 会被掩盖，而那一期数据本来就可以在
+			// 修完闸门后重跑补回。
+			assert.Equal(t, 0, countRows(t, s, TableObservations))
+			assert.Equal(t, 0, countRows(t, s, TablePending))
+		})
+	}
+}
+
+func TestSaveAcceptsFiniteAndNilCheckValues(t *testing.T) {
+	s := newTestStore(t)
+	finite := 0.0857
+	rep := ValidationReport{Passed: false, Checks: []Check{
+		{ID: "deposit_sum", Status: CheckFailed, Value: &finite},
+		{ID: "monetary_hierarchy", Status: CheckFailed, Value: nil},
+		{ID: "stock_continuity", Status: CheckSkipped, Reason: "absent_field:tsf_stock"},
+	}}
+	_, err := s.Save(context.Background(),
+		obsWith(map[string]float64{FieldM2: 356.71}), rep)
+	require.NoError(t, err)
+	assert.Equal(t, 1, countRows(t, s, TablePending))
+}
