@@ -57,6 +57,23 @@ var (
 	publishedAtRE = regexp.MustCompile(`\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z`)
 )
 
+// periodEndMonth 规定期末月：年度数据的期末月必然是 12 月，上半年必然是 6 月。
+// monthly 不在表内，因为任意月份都合法。
+//
+// 为什么必须查这个组合：period 与 period_type 单独看都合法，配对却可能荒谬。
+// "2026-06/annual" 会用 12 去除半年报的期末月，让月均折算错一个量级——而本文件
+// 的 validPeriodTypes 正写着「这三个值决定除数 1/6/12，写错会让信号判定错一个
+// 量级」。更糟的是同一份年报若一次写 2026-12/annual、一次写 2026-06/annual，
+// 会成为两个不同的业务键：修订链就此分叉，下游双计，而两条记录各自看起来都正常。
+//
+// YYYY-12/monthly 刻意放行：央行每年 1 月的年报同时含全年与 12 月单月数据，
+// 解析器若把两者都抽出来，那就是真实期次；它与 YYYY-12/annual 的业务键本就
+// 不同（period_type 是主键的一部分），不会混淆。
+var periodEndMonth = map[string]string{
+	"h1":     "06",
+	"annual": "12",
+}
+
 // validCaliberVersions 是央行口径变更的三个已知版本，全部来自报告原文的注释段：
 //
 //	2015-01  存贷款含非银行业金融机构存放/拆放款项（2020H1 报告注 2）
@@ -113,6 +130,14 @@ func (m Meta) validate() error {
 	}
 	if !periodRE.MatchString(m.Period) {
 		return fmt.Errorf("hestia: meta.period %q must match YYYY-MM", m.Period)
+	}
+	// 排在 periodRE 之后：那道检查已保证形如 YYYY-MM，这里才能安全切片取月份。
+	if want, ok := periodEndMonth[m.PeriodType]; ok {
+		if got := m.Period[5:]; got != want {
+			return fmt.Errorf(
+				"hestia: period %q is not a valid %s period (month must be %s)",
+				m.Period, m.PeriodType, want)
+		}
 	}
 	if !publishedAtRE.MatchString(m.PublishedAt) {
 		return fmt.Errorf("hestia: meta.published_at %q must match YYYY-MM-DD", m.PublishedAt)

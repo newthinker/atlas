@@ -62,10 +62,18 @@ func TestMetaFieldOrderIsCrossTaskContract(t *testing.T) {
 }
 
 func TestMetaValidateAcceptsValid(t *testing.T) {
-	for _, pt := range []string{"monthly", "h1", "annual"} {
+	// period 必须随 period_type 一起给：H10 之后两者不再互相独立。原先固定用
+	// validMeta 的 "2026-06" 遍历三种类型，而 2026-06/annual 恰是 H10 要拦的
+	// 形态——用 12 去除半年报的期末月。
+	for _, tc := range []struct{ periodType, period string }{
+		{"monthly", "2026-06"},
+		{"h1", "2026-06"},
+		{"annual", "2026-12"},
+	} {
 		m := validMeta()
-		m.PeriodType = pt
-		require.NoError(t, m.validate(), "period_type=%s 应合法", pt)
+		m.PeriodType, m.Period = tc.periodType, tc.period
+		require.NoErrorf(t, m.validate(), "period_type=%s period=%s 应合法",
+			tc.periodType, tc.period)
 	}
 }
 
@@ -256,5 +264,49 @@ func TestMetaValidateRejectsUnknownExtractor(t *testing.T) {
 		err := m.validate()
 		require.Errorf(t, err, "extractor=%q 应被拒", bad)
 		assert.Contains(t, err.Error(), "extractor")
+	}
+}
+
+// ── M1b-1.5 · H10：period 与 period_type 的组合 ─────────────────────────────
+// error_handling[H10] 组合非法（两值单独合法、配对荒谬）→ 报错
+//                                          → TestMetaValidateRejectsBadPeriodCombination
+// functional[H10]     合法组合与任意月份的 monthly 均放行
+//                                          → TestMetaValidateAcceptsValidCombinations
+
+func TestMetaValidateRejectsBadPeriodCombination(t *testing.T) {
+	cases := []struct{ period, periodType string }{
+		{"2026-06", "annual"}, // 会用 12 去除半年报期末月，月均折算错一个量级
+		{"2026-03", "h1"},     // 上半年的期末月只能是 06
+		{"2026-01", "annual"},
+		{"2026-12", "h1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.period+"/"+tc.periodType, func(t *testing.T) {
+			m := validMeta()
+			m.Period, m.PeriodType = tc.period, tc.periodType
+			err := m.validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.periodType)
+		})
+	}
+}
+
+func TestMetaValidateAcceptsValidCombinations(t *testing.T) {
+	// 2026-12/monthly 放行：央行每年 1 月的年报同时含全年与 12 月单月数据，
+	// 若解析器把两者都抽出来，YYYY-12/monthly 就是真实期次；且它与
+	// YYYY-12/annual 的业务键本就不同（period_type 是主键的一部分）。
+	ok := []struct{ period, periodType string }{
+		{"2026-12", "annual"},
+		{"2026-06", "h1"},
+		{"2026-01", "monthly"},
+		{"2026-06", "monthly"}, // 6 月的月度数据与 h1 并存，业务键不同
+		{"2026-12", "monthly"},
+	}
+	for _, tc := range ok {
+		t.Run(tc.period+"/"+tc.periodType, func(t *testing.T) {
+			m := validMeta()
+			m.Period, m.PeriodType = tc.period, tc.periodType
+			require.NoError(t, m.validate())
+		})
 	}
 }
