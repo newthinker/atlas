@@ -71,7 +71,54 @@ func NewStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := verifyCurrentView(db, spec); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db, spec: spec, now: time.Now}, nil
+}
+
+// verifyCurrentView 比对库中实际部署的当前行视图与本版代码期望的定义。
+//
+// 存在的理由与 verifyObservationsSchema 相同、但对象不同：`CREATE VIEW IF NOT EXISTS`
+// 对**已存在**的视图同样空转，而列检查只读 pragma_table_info——视图完全不在它视野内。
+// 于是老库里一个业务键写错的旧视图会原样保留、NewStore 返回 nil，**而这个视图是全部
+// 下游读取的入口**：漏一个业务键就会让同一 period 的不同 period_type 互相吞掉，
+// 「当前行」跨期混算，静默给出错误数据。
+//
+// # 为什么是全等比对，而不像列检查那样只拦一个方向
+//
+// 列检查刻意放行「库里多出本版不认识的列」，因为多列对 INSERT 无害，一并失败会把回滚
+// 变成硬故障。视图没有这种不对称：它没有「多／少」的中间态，**定义不符即语义不符**，
+// 两个方向都会让本版代码按错误的当前行语义读数据。
+//
+// # 为什么是失败，而不是 DROP VIEW + 重建
+//
+// 重建确实近乎免费（视图不存数据），但会**丢掉信号**：视图对不上说明这个库出自另一个
+// 代码版本，而列检查对「多出来的列」是放行的——那种库的表也可能与本版不同。
+// 静默修好视图等于把「版本不一致」这条唯一还会响的警报也关掉。
+func verifyCurrentView(db *sql.DB, spec bitemporal.Spec) error {
+	var deployed string
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?`,
+		viewCurrent).Scan(&deployed); err != nil {
+		return fmt.Errorf("hestia: reading %s definition: %w", viewCurrent, err)
+	}
+
+	// 期望值由 currentViewDDL 派生而不是另写一份——另写就是 schema.go 之外的第二份
+	// 视图定义，两份必然不同步。SQLite 存进 sqlite_master 时只去掉 IF NOT EXISTS，
+	// 其余原样保留（已实测）。
+	want := strings.Replace(currentViewDDL(spec),
+		"CREATE VIEW IF NOT EXISTS ", "CREATE VIEW ", 1)
+	if deployed == want {
+		return nil
+	}
+	return fmt.Errorf(
+		"hestia: view %s was created by a different schema version and CREATE VIEW IF NOT "+
+			"EXISTS does not replace it.\n  deployed: %s\n  expected: %s\n"+
+			"Automatic migration is an explicit non-goal; migrate manually by dropping the "+
+			"view (it holds no data) or rebuild the database at a new path",
+		viewCurrent, deployed, want)
 }
 
 // verifyObservationsSchema 比对库中实际的列与本版代码期望的列（G7）。
@@ -86,8 +133,14 @@ func NewStore(path string) (*Store, error) {
 // 变成硬故障。两个方向的危害不对称，处置也就不该对称。
 // TestNewStoreToleratesUnknownExtraColumns 把这个决定钉成可执行契约。
 //
-// 只查观测表：它是唯一随 fieldOrder 增长的表。pending 表 8 列固定，同类漂移
-// 的可能性远低——这是范围裁剪，不是判它安全。
+// # 本函数的范围：只查观测表的列
+//
+// 观测表是唯一随 fieldOrder 增长的表。另外两个对象各自有归属，不要以为「这里没查」
+// 就等于「没人查」——也不要以为这里查了就等于全查了（QA 的 C1 正是这么漏的）：
+//   - `v_hestia_current` 视图 → verifyCurrentView（同样在 NewStore 里调用）。
+//     视图曾经完全无人检查，而它是全部下游读取的入口。
+//   - hestia_pending 表 → 刻意不做启动期校验，论证见 savePending 的文档注释
+//     （八列固定 ⇒ 任何不符在第一次写 pending 时确定性失败，不存在「特定期次才炸」）。
 func verifyObservationsSchema(db *sql.DB) error {
 	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, TableObservations)
 	if err != nil {
@@ -279,22 +332,58 @@ func checkValues(values map[string]float64) error {
 // bug 类——加了失败检查却忘了把 Passed 置 false。观测表不存任何校验痕迹
 // （pending 才存 report），那种行一旦落库，事后无从审计它是否真跑过闸门。
 //
-// 只拦「Passed 却有 CheckFailed」这一个方向：Passed=false 带失败检查是正常的
-// 未过闸，CheckSkipped 也不是失败。
+// # 用白名单而不是单值黑名单
+//
+// CheckStatus 是 string 具名类型，任何字符串都能构造出一个 Check。原实现只做
+// `c.Status == CheckFailed` 单值比较，等于默认「不等于 failed 就是好的」——
+// M1b-3 写成 "FAILED" / "fail" / 漏填（零值 ""），自相矛盾的报告就照常入库。
+// 同一文件的 checkValues 对 Values 的键用的是白名单，同一个包、同一条 Save
+// 路径、同一类外部输入，把关强度必须一致。
+//
+// 只在 Passed=true 时校验：Passed=false 带失败检查是正常的未过闸，该走 pending。
+// 未知状态在 Passed=false 时仍会随 report 存进 pending 的 JSON——那侧的消费者
+// 只有人，危害远低于静默进权威表，故不在此扩大拦截面。
 func checkReportConsistency(rep ValidationReport) error {
 	if !rep.Passed {
 		return nil
 	}
-	var failed []string
+
+	var failed, unknown, noReason []string
 	for _, c := range rep.Checks {
-		if c.Status == CheckFailed {
+		switch c.Status {
+		case CheckPassed:
+		case CheckSkipped:
+			// 让 types.go 里「Skipped 必填 Reason」那句注释真正成立。跳过而不说
+			// 为什么，事后无法区分「字段本就缺失」与「闸门自己出错跳过了」。
+			// 只要求非空；absent_field:<name> | no_prior_period 的形态归 M1b-3。
+			if c.Reason == "" {
+				noReason = append(noReason, c.ID)
+			}
+		case CheckFailed:
 			failed = append(failed, c.ID)
+		default:
+			// 回显原串：M1b-3 需要知道是哪个拼写出了问题
+			unknown = append(unknown, fmt.Sprintf("%s=%q", c.ID, string(c.Status)))
 		}
+	}
+
+	// 未知状态排在最前：状态无法解释时，「这份报告是否自洽」这个问题本身就无从
+	// 回答，先报它比报一个基于误读的结论准确。
+	if len(unknown) > 0 {
+		return fmt.Errorf(
+			"hestia: validation report has unknown check status: %s (want one of %q, %q, %q)",
+			strings.Join(unknown, ", "), CheckPassed, CheckFailed, CheckSkipped)
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf(
 			"hestia: validation report contradicts itself: Passed is true but check(s) %s failed",
 			strings.Join(failed, ", "))
+	}
+	if len(noReason) > 0 {
+		return fmt.Errorf(
+			"hestia: skipped check(s) %s have no reason: a skip without a reason cannot be "+
+				"told apart from a gate that silently failed",
+			strings.Join(noReason, ", "))
 	}
 	return nil
 }

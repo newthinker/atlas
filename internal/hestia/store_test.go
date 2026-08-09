@@ -186,6 +186,71 @@ func TestNewStoreRejectsSchemaDriftOnLegacyDB(t *testing.T) {
 // 两个方向的危害不对称：缺列会让 Save 在运行时炸且只在特定期次出现，必须拦；
 // 多列则无害——INSERT 显式列名，多出来的列取 NULL。若这里也失败，一次回滚
 // （用旧版二进制打开新版建的库）就会变成硬故障。
+// TestNewStoreRejectsDriftedCurrentView 修 QA 的 C1（CRITICAL）。
+//
+// 我在 T4 只把**表的列**纳入了一致性检查。但 `CREATE VIEW IF NOT EXISTS` 对已存在的
+// 视图同样**空转**，而 verifyObservationsSchema 只读 pragma_table_info——**视图完全不在
+// 视野内**。于是老库里一个业务键写错的旧视图会原样保留，NewStore 返回 nil，
+// 而那个视图是**全部下游读取的入口**。
+//
+// 这与 TASK-003 交接给 T4 的那条是同一位置的两个不同问题：
+// TestNewStoreDeploysViewFromItsOwnSpec 验的是「新建库时部署的视图对不对」，
+// 它每次都在空库上跑，**结构上碰不到「老库里已存在的错视图」**。
+//
+// 本条先证明该漂移**确有危害**（不只是「定义不一样」），再要求 NewStore 拦下它。
+func TestNewStoreRejectsDriftedCurrentView(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-view.db")
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	require.NoError(t, err)
+	for _, ddl := range []string{observationsDDL(), pendingDDL()} {
+		_, err := db.Exec(ddl)
+		require.NoError(t, err)
+	}
+	// 老版本建的视图：业务键漏了 period_type，只按 period 关联
+	_, err = db.Exec(`CREATE VIEW ` + viewCurrent + ` AS SELECT * FROM ` + TableObservations +
+		` o WHERE o.published_at = (SELECT MAX(published_at) FROM ` + TableObservations +
+		` WHERE period = o.period)`)
+	require.NoError(t, err)
+
+	// 先坐实危害：同一 period 的两个 period_type 应各出一行，坏视图只给一行。
+	//
+	// 两行的 published_at 必须**不同**——MAX() 是在漏掉 period_type 的分组上取的，
+	// 只有当两个 period_type 的 published_at 不同时，较早的那个才会被较晚的吞掉。
+	// （初版 fixture 给两行用了同一个 published_at，坏视图照样返回两行，
+	//   等于没复现出危害。这条前提自证就是为了逼出那种情况。）
+	rows := []struct{ periodType, publishedAt string }{
+		{"monthly", "2026-07-15"},
+		{"h1", "2026-08-20"},
+	}
+	for _, r := range rows {
+		_, err = db.Exec(`INSERT INTO `+TableObservations+
+			` (period, period_type, published_at, article_id, caliber_version, extractor, ingested_at)`+
+			` VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"2026-06", r.periodType, r.publishedAt, "art-"+r.periodType, "2025-01", "rule@v2",
+			"2026-07-16T00:00:00Z")
+		require.NoError(t, err)
+	}
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM `+viewCurrent).Scan(&n))
+	require.Equal(t, 1, n,
+		"前提自证：漏 period_type 的视图会让同一 period 的两个 period_type 互相吞掉")
+
+	var survivor string
+	require.NoError(t, db.QueryRow(`SELECT period_type FROM `+viewCurrent).Scan(&survivor))
+	require.Equal(t, "h1", survivor, "被吞掉的是 published_at 较早的 monthly")
+	require.NoError(t, db.Close())
+
+	s, err := NewStore(path)
+	if s != nil {
+		defer s.Close()
+	}
+	require.Error(t, err, "老库里业务键错误的视图必须被拦下——它是全部下游读取的入口")
+	assert.Contains(t, err.Error(), viewCurrent, "错误应指名是哪个视图")
+	assert.Contains(t, err.Error(), "migrat", "错误应带迁移提示")
+	assert.Nil(t, s, "失败时不应返回一个半可用的 Store")
+}
+
 func TestNewStoreToleratesUnknownExtraColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "future.db")
 
@@ -675,9 +740,86 @@ func TestSaveRejectsSelfContradictoryReport(t *testing.T) {
 	// 跳过的检查不构成矛盾：CheckSkipped 在 Passed=true 下合法
 	s2 := newTestStore(t)
 	_, err = s2.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}),
-		ValidationReport{Passed: true, Checks: []Check{{ID: "tsf_sum", Status: CheckSkipped}}})
+		ValidationReport{Passed: true, Checks: []Check{
+			{ID: "tsf_sum", Status: CheckSkipped, Reason: "absent_field:tsf_stock"},
+		}})
 	require.NoError(t, err, "CheckSkipped 不是失败")
 	assert.Equal(t, 1, countRows(t, s2, TableObservations))
+}
+
+// TestSaveRejectsUnknownCheckStatus 堵上 G10 守护的绕过口（返工 C2）。
+//
+// CheckStatus 是 string 具名类型，任何字符串都能构造出一个 Check。原实现只做
+// `c.Status == CheckFailed` 单值比较——M1b-3 写成 "FAILED" / "fail" / 任何错拼，
+// Passed=true 的自相矛盾报告就照常入库、Save 返回 nil。**而观测表不存校验痕迹**，
+// 那种行落库后无从审计它是否真跑过闸门，正是 G10 要防的后果。
+//
+// 同一文件的 checkValues 对 Values 的键用的是白名单（未知键拒绝且零行）；同一个包、
+// 同一条 Save 路径、同一类外部输入，把关强度必须一致。故此处也改白名单：
+// Passed=true 时每个 Status 必须 ∈ {CheckPassed, CheckSkipped}，其余一律拒绝。
+func TestSaveRejectsUnknownCheckStatus(t *testing.T) {
+	for _, bad := range []CheckStatus{
+		"FAILED",  // 大小写错拼——最可能的一种
+		"fail",    // 词形错拼
+		"",        // 零值：结构体字面量漏填 Status
+		"PASSED",  // 看起来像通过，实则不在白名单
+		"pending", // 合理但未定义的第四种状态
+		"passed ", // 尾随空格
+	} {
+		t.Run(string("status="+bad), func(t *testing.T) {
+			s := newTestStore(t)
+			_, err := s.Save(context.Background(),
+				obsWith(map[string]float64{FieldM2: 1}),
+				ValidationReport{Passed: true, Checks: []Check{
+					{ID: "monetary_hierarchy", Status: CheckPassed},
+					{ID: "deposit_sum", Status: bad},
+				}})
+			require.Error(t, err, "未知状态必须拒绝，不能默认「不等于 failed 就是好的」")
+			assert.Contains(t, err.Error(), string(bad),
+				"错误须回显原串，M1b-3 才知道是哪个拼写出了问题")
+			assert.Contains(t, err.Error(), "deposit_sum", "错误须指明是哪个检查")
+			assertNoRowsAnywhere(t, s)
+		})
+	}
+
+	// 对照组：白名单内的两个状态在 Passed=true 下必须放行，
+	// 否则「一律拒绝」同样是全绿测试发现不了的过度拦截。
+	s := newTestStore(t)
+	_, err := s.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}),
+		ValidationReport{Passed: true, Checks: []Check{
+			{ID: "monetary_hierarchy", Status: CheckPassed},
+			{ID: "mom_jump", Status: CheckSkipped, Reason: "no_prior_period"},
+		}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, countRows(t, s, TableObservations))
+}
+
+// TestSaveRejectsSkippedWithoutReason 让 types.go 里「Skipped 必填 Reason」的注释
+// 真正成立（返工 C2 的顺带项）。
+//
+// 在此之前那句注释宣称了一个没有任何机制强制的约束——与 G9 曾经的「宣称并发、
+// 机制不支持」是同一种形状。跳过而不说为什么，事后无法区分「字段本就缺失」与
+// 「闸门自己出错跳过了」。
+//
+// 只在 Passed=true 时校验，与 checkReportConsistency 的既有结构一致。
+func TestSaveRejectsSkippedWithoutReason(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}),
+		ValidationReport{Passed: true, Checks: []Check{
+			{ID: "stock_continuity", Status: CheckSkipped}, // Reason 为空
+		}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stock_continuity")
+	assert.Contains(t, err.Error(), "reason")
+	assertNoRowsAnywhere(t, s)
+
+	// 只要求非空，不校验格式——absent_field:<name> | no_prior_period 的形态归 M1b-3
+	s2 := newTestStore(t)
+	_, err = s2.Save(context.Background(), obsWith(map[string]float64{FieldM2: 1}),
+		ValidationReport{Passed: true, Checks: []Check{
+			{ID: "stock_continuity", Status: CheckSkipped, Reason: "whatever"},
+		}})
+	require.NoError(t, err, "本层只要求 Reason 非空，格式约定归闸门层")
 }
 
 // TestSaveRejectsNonFiniteValues 落实 G6。
