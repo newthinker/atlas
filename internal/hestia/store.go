@@ -210,6 +210,21 @@ func (s *Store) Save(ctx context.Context, obs Observation, rep ValidationReport)
 	if err := checkReportConsistency(rep); err != nil {
 		return Outcome{}, err
 	}
+	// 空 Values + Passed=true 是不可逆的：一次解析全失败若先占住业务键，之后
+	// 任何正确重跑都会判 Duplicate（同 period、同 published_at），字段永远补不
+	// 回来。而解析全失败正是 M1b-2 的必然路径之一。
+	//
+	// 它该走 pending——那条记录本身就是诊断信息，所以这道检查只在 Passed=true
+	// 时生效（见 TestSavePendingAcceptsEmptyValues）。
+	//
+	// 单独一道而不并进 checkReportConsistency：那个函数只看报告自不自洽，
+	// 这里要同时看报告与观测，是两件事。
+	if rep.Passed && len(obs.Values) == 0 {
+		return Outcome{}, fmt.Errorf(
+			"hestia: report claims Passed but Values is empty: a period with no data " +
+				"cannot have passed completeness; writing it would occupy the business " +
+				"key and make every later correct re-run a Duplicate")
+	}
 
 	// 入库时刻只有 Store 知道，调用方传的一律覆盖——让调用方决定它等于允许它撒谎。
 	// 改的是值参数的副本，调用方手里的 Observation 不受影响。
@@ -376,6 +391,16 @@ func checkReportValues(rep ValidationReport) error {
 func checkReportConsistency(rep ValidationReport) error {
 	if !rep.Passed {
 		return nil
+	}
+
+	// 上面那段注释点名了「ValidationReport{Passed: true} 是 22 个字符的旁路」，
+	// 但只挡住了「有失败检查却说通过」——一份**没有任何检查**的报告照样穿过，
+	// 因为下面的循环遍历空切片什么都不做。空报告与「每道闸门都被跳过」在数据上
+	// 无法区分，而它进的是权威表，观测表不留任何校验痕迹。
+	if len(rep.Checks) == 0 {
+		return fmt.Errorf(
+			"hestia: report claims Passed with zero checks: an empty report is " +
+				"indistinguishable from one where no gate ever ran")
 	}
 
 	var failed, unknown, noReason []string

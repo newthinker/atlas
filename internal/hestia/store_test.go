@@ -627,20 +627,10 @@ func TestSavePartialFieldsLeavesNulls(t *testing.T) {
 	assert.Equal(t, 0.0, flow.Float64)
 }
 
-func TestSaveEmptyValues(t *testing.T) {
-	s := newTestStore(t)
-	out, err := s.Save(context.Background(), obsWith(map[string]float64{}), passing())
-	require.NoError(t, err)
-	assert.Equal(t, TableObservations, out.Table)
-	assert.Equal(t, 1, countRows(t, s, TableObservations))
-
-	// nil map 与空 map 走同一条路
-	obs := obsWith(nil)
-	obs.Meta.PublishedAt = "2026-08-20"
-	_, err = s.Save(context.Background(), obs, passing())
-	require.NoError(t, err)
-	assert.Equal(t, 2, countRows(t, s, TableObservations))
-}
+// TestSaveEmptyValues 已删除（M1b-1.5）。它当初钉住「空 Values + Passed=true
+// 可写入权威表」，而那个行为现被判定为缺陷：一次解析全失败先占住业务键后，
+// 之后任何正确重跑都判 Duplicate，字段永远补不回来。
+// 取代它的是 TestSaveRejectsPassedWithNoValues 与 TestSavePendingAcceptsEmptyValues。
 
 func TestSaveAllFields(t *testing.T) {
 	s := newTestStore(t)
@@ -1376,4 +1366,63 @@ func TestSaveAcceptsFiniteAndNilCheckValues(t *testing.T) {
 		obsWith(map[string]float64{FieldM2: 356.71}), rep)
 	require.NoError(t, err)
 	assert.Equal(t, 1, countRows(t, s, TablePending))
+}
+
+// ── M1b-1.5 · Passed=true 的空内容 ─────────────────────────────────────────
+// error_handling[#7]  Passed=true 但 Checks 为空 → 拒绝  → TestSaveRejectsPassedWithNoChecks
+// error_handling[obs] Passed=true 但 Values 为空 → 拒绝  → TestSaveRejectsPassedWithNoValues
+// boundary[obs]       Passed=false 时空 Values 仍落 pending → TestSavePendingAcceptsEmptyValues
+
+func TestSaveRejectsPassedWithNoChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		checks []Check
+	}{
+		{"nil", nil},
+		{"empty", []Check{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			_, err := s.Save(context.Background(),
+				obsWith(map[string]float64{FieldM2: 356.71}),
+				ValidationReport{Passed: true, Checks: tc.checks})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "zero checks")
+			assert.Equal(t, 0, countRows(t, s, TableObservations))
+			assert.Equal(t, 0, countRows(t, s, TablePending))
+		})
+	}
+}
+
+func TestSaveRejectsPassedWithNoValues(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values map[string]float64
+	}{
+		{"empty map", map[string]float64{}},
+		{"nil map", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			_, err := s.Save(context.Background(), obsWith(tc.values), passing())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "empty")
+			assert.Equal(t, 0, countRows(t, s, TableObservations),
+				"空 Values 一旦占住业务键，之后任何正确重跑都判 Duplicate，字段永远补不回来")
+		})
+	}
+}
+
+func TestSavePendingAcceptsEmptyValues(t *testing.T) {
+	// 解析全失败时 Values 就是空的，而这正是 pending 要接住的情况——那条记录
+	// 本身是诊断信息。拒绝它会让「什么都没解析出来」这件事无处留痕。
+	s := newTestStore(t)
+	rep := ValidationReport{Passed: false, Checks: []Check{
+		{ID: "completeness", Status: CheckFailed},
+	}}
+	out, err := s.Save(context.Background(), obsWith(map[string]float64{}), rep)
+	require.NoError(t, err)
+	assert.Equal(t, TablePending, out.Table)
+	assert.Equal(t, 1, countRows(t, s, TablePending))
+	assert.Equal(t, 0, countRows(t, s, TableObservations))
 }
