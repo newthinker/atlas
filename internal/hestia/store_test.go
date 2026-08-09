@@ -1216,3 +1216,112 @@ func TestSavePendingFailsLoudlyOnDriftedPendingTable(t *testing.T) {
 	assert.Equal(t, Outcome{}, out, "失败时不得返回一个看起来成功的 Outcome")
 	assert.Equal(t, 0, countRows(t, s, TableObservations), "未过闸的数据不得漏进观测表")
 }
+
+// TestSavePendingColumnsMatchTheirValues 修 QA 的 C3。
+//
+// pending 的八列是 savePending 里**手写**的位置参数，与观测表不同——观测表的列序由
+// metaColumns/fieldOrder 派生且有三条同序测试钉住，pending 这份没有任何东西钉。
+// 原有的 pending 测试虽然 SELECT 了 article_id / extractor，却**从不断言它们的值**，
+// 于是同时交换 Period↔PeriodType 与 ArticleID↔Extractor 的变异完全存活。
+//
+// 「三处同序危害已闭合」这个说法当时只对观测表成立，pending 是漏掉的第四处。
+// 判据手法与 TestSaveMetaValuesLandInMatchingColumns 相同：取互不相同的可辨识值，
+// 逐列读回比对；先自证 fixture 够强，否则「互换必红」不成立。
+func TestSavePendingColumnsMatchTheirValues(t *testing.T) {
+	s := newTestStore(t)
+	fixed := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return fixed }
+
+	obs := obsWith(map[string]float64{FieldM2: 356.71})
+	// 前三个受 Meta.validate 的形态约束，取合法但彼此不同的值；后两个用哨兵串
+	obs.Meta.Period = "2026-06"
+	obs.Meta.PeriodType = "h1"
+	obs.Meta.PublishedAt = "2026-07-15"
+	obs.Meta.ArticleID = "article-id-sentinel"
+	obs.Meta.Extractor = "extractor-sentinel"
+
+	_, err := s.Save(context.Background(), obs, failing())
+	require.NoError(t, err)
+
+	want := []struct{ col, val string }{
+		{"period", "2026-06"},
+		{"period_type", "h1"},
+		{"published_at", "2026-07-15"},
+		{"article_id", "article-id-sentinel"},
+		{"extractor", "extractor-sentinel"},
+		{"ingested_at", fixed.Format(time.RFC3339Nano)},
+	}
+
+	// 先自证 fixture 够强：六个值必须互不相同，否则任意两列互换都发现不了
+	seen := map[string]bool{}
+	for _, w := range want {
+		require.Falsef(t, seen[w.val],
+			"fixture 太弱：值 %q 重复出现，列互换将无法被发现", w.val)
+		seen[w.val] = true
+	}
+
+	for _, w := range want {
+		var got string
+		require.NoError(t, s.DB().QueryRow(
+			`SELECT `+w.col+` FROM `+TablePending).Scan(&got))
+		assert.Equalf(t, w.val, got,
+			"pending 列 %s 的取值错位——八列是手写位置参数，错位不会有任何报错", w.col)
+	}
+
+	// report 与 values_json 是内容型而非位置型，单独确认没被互换
+	rows := pendingRows(t, s)
+	require.Len(t, rows, 1)
+	assert.Contains(t, rows[0].report, `"Passed"`, "report 列必须是序列化后的校验报告")
+	assert.Contains(t, rows[0].valuesJSON, FieldM2, "values_json 列必须是序列化后的 Values")
+}
+
+// TestSaveDuplicateOnlyTouchesTheMatchingRevision 修 QA 的 C4。
+//
+// refreshArticleID 的 WHERE 里带 published_at，但**现有两条 Duplicate 测试的库里都只有
+// 一行**——删掉 `AND published_at = ?` 之后行为完全不变，结构上打不中这个缺陷。
+//
+// 两行库下才看得出危害：同一业务键会有多个修订行（这正是双时态的常态），少了
+// published_at 约束，一次站点迁移的新 article_id 会被**盖到全部历史行上**，
+// 静默毁掉逐行溯源，并让 M1b-4 的 article_id 幂等检查命中错误的修订行。
+func TestSaveDuplicateOnlyTouchesTheMatchingRevision(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	original := obsWith(map[string]float64{FieldM2: 1})
+	original.Meta.PublishedAt = "2026-07-15"
+	original.Meta.ArticleID = "art-v1"
+	_, err := s.Save(ctx, original, passing())
+	require.NoError(t, err)
+
+	revised := obsWith(map[string]float64{FieldM2: 2})
+	revised.Meta.PublishedAt = "2026-08-20"
+	revised.Meta.ArticleID = "art-v2"
+	out, err := s.Save(ctx, revised, passing())
+	require.NoError(t, err)
+	require.Equal(t, bitemporal.Revision, out.Verdict)
+	require.Equal(t, 2, countRows(t, s, TableObservations), "前提自证：库里必须有两行修订")
+
+	// 站点迁移：最新那次修订换了 URL，发布日不变 ⇒ Duplicate
+	migrated := obsWith(map[string]float64{FieldM2: 2})
+	migrated.Meta.PublishedAt = "2026-08-20"
+	migrated.Meta.ArticleID = "art-v2-NEWURL"
+	out, err = s.Save(ctx, migrated, passing())
+	require.NoError(t, err)
+	require.Equal(t, bitemporal.Duplicate, out.Verdict)
+	assert.Equal(t, 2, countRows(t, s, TableObservations), "不得新增行")
+
+	got := map[string]string{}
+	rows, err := s.DB().Query(`SELECT published_at, article_id FROM ` + TableObservations)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var pub, id string
+		require.NoError(t, rows.Scan(&pub, &id))
+		got[pub] = id
+	}
+	require.NoError(t, rows.Err())
+
+	assert.Equal(t, "art-v2-NEWURL", got["2026-08-20"], "目标修订行的 article_id 必须刷新")
+	assert.Equal(t, "art-v1", got["2026-07-15"],
+		"历史修订行必须原值保留——盖掉它会毁掉逐行溯源，且让 article_id 幂等检查命中错误的行")
+}
