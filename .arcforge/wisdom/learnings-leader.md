@@ -2104,3 +2104,268 @@ qa-agent-8 的判断：
 
 这两句合起来是对「持续在场的只读观察者」这个角色最准确的定义：
 **它的产出集中在第四维（范围），而它自身的可靠性同样不能建立在自觉上。**
+## Sprint 033 — 新同步 hooks 首次真实运行暴露的三条缺陷
+
+本 Sprint 是 sprint-032 同步的那批 hooks 的首次生产运行。三条缺陷均由 teammate 在真实使用中发现，非推断。
+
+### D1 漂移口径改为「文件路径本身」后，游离的非 .go 文件会绊住每个任务
+
+新版 `task-completed.sh` 注释明写「漂移口径 = 变更的**文件路径本身**，不再只筛 `.go`（TASK-018）」。旧版 `grep '\.go$'` 会滤掉 `.html`/`.md`，所以这个坑在旧门禁下不存在。
+
+实际发生：`internal/hestia/testdata/` 三个 untracked 文件（Sprint 开始前就存在，需求文档标注「本子迭代不使用」）绊住了 TASK-001 的 `dev_done`，且会绊住此后每一个任务。
+
+**处置**：由 Leader 单独提交入库（`87acf57`），不补进任何任务的 `writes`——dev-agent-41 的理由：`writes` 同时驱动 scope 互斥与漂移判据，不实声明会让后续真正使用 testdata 的任务冲突，且 `dev_done` 后无人能改。
+
+**教训**：Sprint 开工前应扫一遍 untracked 文件，游离状态本身就是隐患。
+
+### D2 任务号跨 Sprint 复用，污染 COMMITTED_MINE 的匹配
+
+`COMMITTED_MINE` 靠 commit 主题里的任务号字面量匹配，而任务号跨 Sprint 重复使用。dev-agent-41 实测：TASK-001 的门禁 WARN 里列出了 4 条历史同号提交（`b18e81c` PaperBroker / `619faaf` / `7889c8b` / `02598e0` EDGAR），涉及 `internal/broker/paper/`、`internal/collector/edgar/`、`internal/notifier/telegram/`——与本 Sprint 毫无关系。
+
+**危害不在告警本身**（exit 0 不影响判定），在于它**训练人把整类 WARN 当背景噪音**。`check-runtime-sync.sh` 的注释里记过同形的另一例：「恒红会训练人忽略输出：实测四条 DRIFT 里三真一假，而人无从分辨」。
+
+**修法**：C5 那一侧已有的时间下界（`last_transition.at`）没用到这一侧，是个不对称。
+
+### D3 `teammate-idle.sh` 的 test-* 分支保活条件与任务归属无关（后果比预想严重）
+
+判据是「存在任意 `dev_done`」，**不看该任务的 `verifier` 指向谁**。而 `dev_done → verifying` 是 leader 专属边——被唤醒的 test agent **结构上无法消除那个唤醒条件**。
+
+`teammate-idle.sh` 自己的注释警告过这件事：「不要用『宁可保活』来补偿——那会让无关 agent 空转烧 token，正是 F6 要防的」。**这个分支恰好在做它自己警告过的事。**
+
+**第二个后果（test-agent-21 揭示，比第一个贵）**：它被唤醒约 200+ 轮、每轮完整重扫，但按角色定义的去重规则（同一 `dev_done` 只催一次）在两条催办后停止发消息。**于是从 Leader 视角，「活跃地无事可做」与「已停机」完全无法区分**——Leader 据此误判它停机并改派了任务。
+
+即：该缺陷不止浪费 token，它**改变了调度决策**。
+
+**修法方向**：`test-*` 分支加「且 `verifier` 未指定或指向本实例」。不要在症状层加信号（让「已确认无活」对 leader 可见）——那只会把噪音变成可见的噪音，根因是 hook 在唤醒一个结构上无法响应的对象。
+
+### D4 权限矩阵按模式给权，存在只能靠自觉堵的口子
+
+`bindings: {"test-*": "verifier"}` 让 test 实例只能写 `verifier` 指向自己的任务。但 test-agent-21 指出：`verifying` 状态的 owner 是 `test-*`，它**技术上写得动**别人的任务字段（抢走已派给他人的任务），矩阵挡不住。它选择不改。
+
+同类：`verified` 状态只有 `test-*` 能写，Leader 无权。本 Sprint 因此卡死 3 小时——`discovery` 字段未设导致 validator exit=1，写通道拒绝一切派发，而唯一有权补的实例正处于「不可见地活着」状态（D3）。
+
+**Leader 的逃生路径**：`verified → accepted` 是 leader 边，可带 `--field discovery=` 一并补。代价是任务提前终态化（`accepted → review_fix` 会被 DENY）。
+
+**教训**：Leader 卡在等待时，应主动核实自己是否有替代路径，而不是持续等待一个可能永远不来的响应。本次我在有解的情况下等了 3 小时。
+
+## Sprint 033 — 变异测试的对称盲区：全红同样可以被伪造
+
+**来源**：dev-agent-41 在 TASK-003 中自查发现并作废了自己的第一版证据。
+
+### 现象
+
+Leader 转述的实测教训是「把 `PRIMARY KEY` 整行删掉，需求文档全部测试依然全绿」。dev 照做后 **6 个测试一起红**——看起来是压倒性的 KILLED，足以证明「PK 断言很强」。
+
+它去查了红的原因：删掉那行后**前一个业务列残留尾逗号**，DDL 变成 `... fx_rate REAL,\n)`，SQL 语法错，所有走真实库的测试在 `db.Exec` 就 require 失败了。
+
+> 那证明的是「语法错会被抓」，**不是**「合法但无 PK 的表会被抓」——PK 断言到底有没有效，被语法错完全掩盖了。
+
+处置：把 `PRIMARY KEY` 行换成 `CHECK (1)` 占位重做（语法合法、仍 61 列、仅缺 PK），得到干净的单点红——只有 `TestObservationsStructureFromLiveDB` FAIL。**作废的第一版没有计入证据。**
+
+### 一般化判据
+
+> **一个变异杀死多个测试时，先怀疑它顺带破坏了别的东西**，而不是当成「测试很强」的证明。
+
+### 为什么这条是我们纪律体系的盲区
+
+现有全部纪律都在**防假绿**，没有一条防假杀：
+
+| 纪律 | 防的是 |
+|---|---|
+| 「0 红」三条自证（diff 非空 / vet exit 0 / PASS 计数等于基线） | 编译失败伪造的 SURVIVED |
+| 「靶不存在即失败」 | 变异根本没施加而误读为 SURVIVED |
+| 「判定落到哪一条红了，不是红了几条」 | 无关测试的红被当成该判据生效 |
+
+前两条防的都是**假绿**（不该活的活了）。第三条最接近，但它的用法一直是「在多条红里挑出该条」，**而不是「怀疑这堆红根本不是判据生效」**。
+
+dev-agent-41 的表述抓住了对称性：**「0 红可以被编译失败伪造」的反面是「全红可以被语法错伪造」。**
+
+### 可操作形态
+
+变异实证时，**KILLED 也需要自证**，最低一条：**红的测试数应与该变异应命中的判据数相符**。数量明显超出时，必须查每一条红的原因，而不是把「红得多」读成「守得严」。
+
+补充：本 Sprint test-agent-21 在 M10 上独立撞到同一族的另一面——perl 转义写坏源文件导致 `go vet` 报 `illegal character`，它按「有效性闸」判为无效变异、不计 KILLED。两例合起来说明：**变异的有效性必须先于它的结论被确认**。
+
+## Sprint 033 补正 — 「假杀」判据的收紧版，与一条包内常驻陷阱
+
+### 收紧：连带伤害的标志是「无因果关系」，不是「条数多」
+
+test-agent-21 复核 dev-agent-41 那条判据时给出反例并收紧：
+
+> 原：一个变异杀死多个测试时，先怀疑它顺带破坏了别的东西。
+> **收紧：连带伤害的标志是「红的测试与变异点无因果关系」，不是「红的条数多」。**
+
+反例 V5（手写视图主体）：红 2 条，但两条都在视图上、都由该变异直接引起（一条读 `sqlite_master` 实际部署的视图、一条查返回串是否原样含 `CurrentQuery`），属**合法多杀**，不该作废。
+
+**按原表述会误伤 V5。** 判据的正确形态是查因果，不是数条数。
+
+对照组数据（同一 PK 变异的两个版本）：
+
+| 版本 | DDL 合法 | 红的条数 | 其中与 PK 有因果 |
+|---|---|---|---|
+| 删 PK 留右括号（尾逗号语法错） | 否 | 6 | **1** |
+| `CHECK (1)` 占位（语法合法、仅缺 PK） | 是 | 1 | 1 |
+
+第一版那 6 条里 5 条与 PK 无因果——最直白的是 `TestPendingStructureFromLiveDB`：pending 表与观测表的 PK 毫无关系，它红只因 `openWithSchema` 执行**第一段** DDL 时就 `require.NoError` 失败、后面根本没跑到。
+
+### `internal/hestia` 包内常驻陷阱：`period` 是 `period_type` 的前缀
+
+**本 Sprint 已出现两次，分属不同任务、由不同验证者独立发现**：
+
+1. TASK-002 `error_handling[0]`：`assert.Contains(err.Error(), "period")` 在错误串为 `meta.period_type must not be empty` 时恒真 ⇒ 单侧误写的实现缺陷完全存活（test-agent-21 三组对照实测）。
+2. TASK-003 `schema_test.go:223`：`assert.Contains(ddl, "period")` 被下一行的 `assert.Contains(ddl, "period_type")` 蕴含 ⇒ 视图漏 `period` 键时四条 Contains 全 PASS（test-agent-21 的 V8 实证）。
+
+第 2 例中缺陷仍被另一条更强约束（「视图主体必须原样来自 bitemporal」）抓住——**即缺陷可被检出，但检出者不是名义上负责该 DoD 的那条**。若日后放宽那条强约束，保护会静默消失，而覆盖矩阵上它看起来仍有测试。
+
+⇒ **登记为该包的常驻陷阱**：凡对 `period` / `period_type` 之一使用子串类断言（`Contains`、`HasPrefix`），必被另一者蕴含。应改用词边界或独立标识符断言（如 `"o.period ="`）。同类风险字段对：任何 `X` 与 `X_type` / `X_id` 形态。
+
+**不要每次靠验证者临时发现**——本 Sprint 靠的正是这个，而它成功两次纯属验证者尽责。
+
+## Sprint 033 — D5：CLAUDE.md 的状态机边表与 write-matrix.json 实际不一致
+
+**test-agent-20 提出质疑，Leader 核实确认。**
+
+CLAUDE.md **三处**写明 `verifying → verifying` 是 leader 专属逃生边（AD-21）：
+
+- L165：「`verifying`：`transition verifying --field verifier=<新实例>`（自环改派验证者，`verify_baseline` 不刷新）」
+- L207-208：「**Leader 逃生边（`verifying → verifying`，leader 专属，AD-21）**：verifier 失联且**不可恢复**时，Leader 经 … **一步**收回并改派验证者」
+- L241：出边表中列有该行，标注「不受约束，且**不刷新**基线」
+
+**而 `.arcforge/write-matrix.json` 的 `transitions` 里只有 `verifying->rejected` 与 `verifying->verified`，两者均 `test-*` 专属。**
+
+实测：`transition verifying --field verifier=<新实例>` → `DENY: 非法迁移 verifying->verifying`。
+
+### 危害
+
+CLAUDE.md 明写该文档边表与矩阵**必须逐条对应**，并称有测试解析该表做**双向集合相等比对**。⇒ 那个测试要么不存在、要么没跑、要么比对的不是这张表。**这本身是「声称了没有的守护」的又一实例。**
+
+具体后果（本 Sprint 实际发生）：TASK-006 的 verifier 停机 6 小时，Leader 依文档认为有逃生边 → 尝试 → 被 DENY → 转而得出「`verifying` 是唯一无 leader 逃生边的阶段、结构性死锁」的结论并上报人类。**若那条边真的存在，6 小时前即可改派。**
+
+⇒ 文档与实现漂移的代价不止「读者被误导」，而是**基于错误前提做出的决策链**：我不仅自己走错，还把错误结论传给了人类。
+
+### 处置
+
+**二选一，必须做一个**：①在矩阵补上该边（并确保 `verify_baseline` 不刷新的语义一并实现）；②删掉 CLAUDE.md 那三处描述。
+
+**不可维持现状**——现状下任何 Leader 读文档都会做出同一个错误预期。
+
+### 关联
+
+这是本 Sprint 第五条机制发现，与 D2/D3/D4 同族（**告警/文档说了一件听起来具体、实则不成立的事**），但危害更高一级：D2-D4 影响的是注意力分配，D5 影响的是**可行动路径的判断**。
+
+## Sprint 033 后半程 — D6～D9
+
+### D6 `dev-*` 在整个 `docs/` 树下没有任何可写路径
+
+write-matrix 全部 13 条规则：`01-design`/`02-plan`/`03-progress`/`06-acceptance` → `leader`，`04-test` → `test-*`，`05-review` → `qa-*`，`07-deploy` → `ops-*`。**没有一条给 `dev-*`。**
+
+而执行状态机 `in_progress → dev_done` **只有 `dev-*` 能走**（`bindings: {dev-*: assigned_to, test-*: verifier}` 意味着 test 实例即使被设为 `assigned_to` 也走不了 `in_progress`）。
+
+⇒ **产出物落在 `docs/` 下的任务，没有任何角色既能走完状态机、又能写出交付物。** 本 Sprint 的 TASK-007 撞上（dev-agent-41 逐条查完 13 条规则才下结论，没有靠换写法硬试）。
+
+**记录员代理模式没覆盖这一种**：它解决的是「Leader 不在执行迁移的写者集合内」，用 `dev-*` 记录员承接状态机；但没处理「产出物落在别的角色专属目录」。
+
+处置：把产出物改为 `discoveries/<TASK>.json`（`dev-*` 有权写），验证者在自己的 04-test 报告中引用。
+
+### D7 idle hook 的 `qa-*` 分支：第一次评审永远无法放行
+
+`qa-*` 分支的 `MINE` = **全部 `verified` 任务**（刻意不按 `assigned_to` 过滤）。F6 防空转闸门仅当 `.arcforge/docs/05-review/*.md` 存在**且**新于全部 verified 任务文件时才放行。
+
+⇒ **`05-review/` 为空时 `LATEST_REVIEW` 为空，整个闸门块被跳过，`MINE` 恒非空，恒 `exit 2`。**
+
+两条衍生：
+- **闸门是 mtime 比较**：写了裁决产物后，任何一次 verified 任务文件的字段更新都会**重新武装全部 qa 实例**。
+- **多个 qa 实例共用同一个全局产物做出口**：谁先写谁替所有人解锁，而**被派为只读 lens 的实例结构上永远解不了自己的锁**。
+
+与 D3（`test-*` 分支保活条件与任务归属无关）同族：**保活条件与「这活是不是我的」脱钩**。
+
+### D8 scope 互斥死锁：validator 只拦 leader 的派发边
+
+**实测边界**（dev-agent-42 在同一时刻、同一份互斥违规下取证）：
+
+| 边 | 结果 |
+|---|---|
+| leader `dev_done → verifying` | **DENY**（validator exit=1） |
+| leader `in_progress → assigned` | **DENY**（同上） |
+| `dev-*` `in_progress → dev_done` | **exit 0** |
+| `dev-*` `update`（`dev_done` 状态下） | **exit 0** |
+
+⇒ 阻断只作用于 leader 的派发边。dev 边走的是 `task-completed` 的覆盖率门禁，输出形态完全不同。
+
+**死锁成立的条件**：多个任务 `writes` 相交且全部在途（`dev_done` **也算在途**）。此时：
+- leader 的所有 transition 被 DENY
+- 唯一能解的动作（推进到 `verified`）需要 `dev_done → verifying`，而那是 leader 专属边
+- 改 `writes` 需要 `update` 权限，而 leader 在 `in_progress`/`dev_done` 下都无权
+
+⇒ **只能由人类在会话外改文件。**
+
+**根因是我在开三个 review_fix 时没跑 validator。** 规则本来能拦住——**拦在派发前只会阻止我开第三个任务，拦在事后就成了死锁**。
+
+⇒ **派发前必跑 validator 不是建议，是唯一有效的时机。**
+
+dev-agent-42 拒绝了一条捷径值得记：它作为 owner 有权改窄 `writes` 来骗过规则，但**「`writes` 同时驱动漂移判据，改窄等于让真漂移不再告警」**。
+
+### D9 「显式 pathspec」这条纪律有盲区
+
+dev-agent-41 自陈：
+
+> 我用了 `git add internal/hestia/store.go internal/hestia/store_test.go`——**但显式 pathspec 只限制文件、不限制 hunk。**
+
+⇒ 它防的是**误提交别的文件**，防不住**同一文件里别人的在途改动**。「我以为自己遵守了纪律，实际上纪律的措辞覆盖不到这一种。」
+
+后果：dev-agent-42 的 C1 修复被一并提交进 TASK-005 的 commit，两边的测试计数、覆盖率、discovery 全部串了。
+
+**发现它的是测试计数差额**：dev-agent-42 只加 1 条测试却从 61/75 变成 64/84，差额对不上才去查。**如果它没核这个数，两边都会带着虚高数字上报。**
+
+**补法（dev-agent-42 提，比加禁令可靠）**：提交后 `git show --stat` + 按符号名 grep 确认没有他人产物。**它不依赖调度正确。**
+
+### 附：validator 的一处口径不一致（低优先级）
+
+同一组路径两种相反判断：
+- `[scope-writes-outside-packages]` 警告 `./internal/hestia/store.go` **不在** packages 口径 `./internal/hestia` 内
+- `[scope-mutex]` 的说明写着「**父子路径同属一棵子树，算相交**」
+
+一处认子树、一处不认。不影响判断，但持续制造噪声。
+
+## Sprint 033 — D10：混合信号无法通过「减去地板」来净化
+
+**背景**：dev-agent-41 用副本探测法（复制 `tasks/*.json` 到 scratchpad、改副本 status、跑 validator）验证「`verified` 是否移出在途口径」，得到 `scope-mutex 4→2→0`，结论正确。但它同时发现 **tB 的 `exit` 仍是 1**——那 6 个问题全是探测装置造成的 `missing-discovery` 伪影（discovery 路径相对任务目录解析，副本在 scratchpad）。
+
+**dev-agent-42 给出的补丁**（方向正确、听起来完全合理）：先跑未改动的 t0 副本量出「伪影地板」，后续读数减掉它。
+
+**dev-agent-41 实测后推翻了它**：
+
+| 副本 | missing-discovery 条数 |
+|---|---|
+| t0 | 4 |
+| tA | 5 |
+| tB | 6 |
+
+成因：`missing-discovery` 只对 `verified`/`accepted` 生效，而**被测变量恰恰就是 status**——每让一个任务变 verified 就多触发一条。
+
+> **地板 = f(被测变量)。**
+
+⇒ 按该补丁，tB 会被读成 `6-4=2` 条真实新问题，**实际是 0 条**。**这个补丁会制造一个不存在的问题，方向和它想防的正好相反。**
+
+### 可用的替代
+
+**按规则名切片，只读被测规则的计数——不读总数、不读 exit code。**
+
+dev-41 当时报 `scope-mutex 4→2→0` 而没报总数是凭直觉，现在有了依据。
+
+### 与「恒响告警」族的关系
+
+| 族内条目 | 危害 |
+|---|---|
+| D2（任务号跨 Sprint 复用）、D4（形状级假阳） | **假阳训练人忽略整类输出** |
+| **D10** | **假阳无法被扣除** |
+
+后者更麻烦：**它看起来是可以量化处理的**。「减去地板」是一个受过训练的人会自然想到的做法，而它在这里恰好失效——因为噪音源与被测量共享同一个自变量。
+
+⇒ **当多个规则的输出被加总成一个数字（或一个 exit code）时，任何一条规则的噪音都会污染整个读数，且污染量可能随被测对象变化。**
+
+### 附：副本探测法的第二个弱点（dev-41 自撞）
+
+它的 t0 快照是在三个任务都 `verifying` 时复制的，做地板对照时真实环境已推进到两个 `verified`。于是「t0 vs 真实」的差异里**既有伪影也有快照漂移**——它一开始把 4 条 scope-mutex 也算进了伪影，那其实是快照过期。
+
+⇒ **用副本法要记下快照时刻的真实状态，解读前先确认没变。** 与 checkpoint 纪律的「产物指针带 sha、恢复时先比对」同源。

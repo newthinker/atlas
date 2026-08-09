@@ -1,0 +1,84 @@
+{
+  "task_id": "TASK-007",
+  "title": "收尾验证（公开面、依赖、全量测试）",
+  "by": "dev-agent-41",
+  "is_deliverable": "**本文件即 TASK-007 的产出物**（Leader 裁定 C）。验证者请在 04-test 报告中**引用**本文件，不要复述——复述会产生第二份副本，而副本必然与正本不同步。",
+  "verified_at_commit": "ed776a0e68d9b52c3f79af69f3d94bc864fceb3e",
+  "baseline": "origin/master = d7c9c694f88e4f44497a4c08e38a30aaae985413",
+  "branch": "feat/hestia-store",
+  "why_sha_on_every_item": "不同 commit 的测试数可能相同，「数字对得上」不等于「测的是对的那个 commit」（sprint-032 教训）。本文件全部命令均在 ed776a0 上执行；ed776a0 = c1050d7（TASK-006 交付）+ 本任务补的一处包注释（G9，见 verification.functional_1）。该 commit 只改 internal/hestia/fields.go 的注释行，不含任何可执行语句改动。",
+  "delivery_path_note": {
+    "original": "DoD 原本要求产出 .arcforge/docs/04-test/TASK-007-final-verification.md。",
+    "why_changed": "写通道 DENY「dev-agent-41 无权写 docs/04-test/（合法写者: test-*）」。逐条查过 write-matrix 全部 13 条规则，**dev-* 在整个 docs/ 树下没有任何可写路径**。且改派 test-* 同样无解：bindings 为 {dev-*: assigned_to, test-*: verifier}，test 实例即使被设为 assigned_to 也走不了 in_progress（该边的写者是 dev-*）——**没有任何角色既能走执行状态机、又能写 04-test**。这类任务在当前矩阵下无解，不是派错人。",
+    "resolution": "Leader 裁定 (C)：产出物改为本 discovery，packages 改为 [.arcforge/discoveries]，writes 改为 [.arcforge/discoveries/TASK-007.json, ./internal/hestia/fields.go]，validator exit=0。",
+    "framework_gap_for_final_report": "CLAUDE.md 的『记录员代理模式』解决的是「Leader 不在执行迁移的合法写者集合内」，用 dev-* 记录员承接状态机；但没覆盖「**产出物落在别的角色专属目录**」——记录员能走完状态机，却写不出交付物。"
+  },
+  "verdict": "**六条 done_criteria 全部 PASS。**",
+  "verification": {
+    "functional_0_export_surface": {
+      "verdict": "PASS",
+      "commands": ["go doc ./internal/hestia", "go doc ./internal/hestia Store", "go doc -all ./internal/hestia"],
+      "counts": {
+        "Field*_常量": "54（期望 54）",
+        "表名常量": "TableObservations, TablePending",
+        "CheckStatus_三常量": "CheckPassed, CheckFailed, CheckSkipped",
+        "导出_type": "Check, CheckStatus, Meta, Observation, Outcome, Store, ValidationReport（7 个，与期望完全一致）",
+        "导出_func_方法": "NewStore, (*Store).Close, (*Store).DB, (*Store).Save —— 恰好四个，无第五个"
+      },
+      "negative_check": "go doc -all ./internal/hestia | grep -nE '^func .*(Insert|Upsert|Unchecked|Write|Put|Delete|Truncate)' 输出为空：**未发现 Insert / Upsert / SaveUnchecked 或任何不要求 ValidationReport 的导出写方法**",
+      "caveat": "go doc 是**一次性 manual 核验，回归接不住它**。包内有两条常驻测试守同一条约束且**视野互补，两条都不能删**：TestStoreExposesNoWriteMethods（reflect，看 *Store 方法集，能看见**嵌入类型提升**上来的方法）与 TestPackageExposesNoWriteFunctions（go/ast，看**包级导出函数**，reflect 对其完全不可见）。后者是 T5 应 T4 的 M10 发现而加——包级 func InsertRow(db *sql.DB, ...) 曾在 43/43 全绿下无人拦截。两条均为**精确集合相等**，未弱化成「包含」。"
+    },
+    "functional_1_build_race_vet": {
+      "verdict": "PASS",
+      "go_build_all": "go build ./... → exit 0",
+      "go_test_race": "go test ./internal/hestia/... -race -count=1 → ok github.com/newthinker/atlas/internal/hestia 1.951s",
+      "go_vet": "go vet ./internal/hestia/... → exit 0",
+      "package_tests_count1": "顶层 --- PASS 61 / 含子测试 75 / --- FAIL 0 / --- SKIP 0 / coverage 88.7% of statements",
+      "g9_concurrency_contract": {
+        "finding": "**派发时（c1050d7）契约是缺失的**。核验：grep -rn '并发|串行化|concurren|goroutine|事务|transaction' 扫 internal/hestia 全部非测试 .go 文件，**输出为空**——契约既不在包注释，也不在 Store 或 Save 的注释里。DoD 明令不得保持「宣称并发、机制不支持、判据测不到」的现状。",
+        "action": "按 DoD 选项①补入**包注释**（fields.go，即 go doc 第一屏的位置），提交为 ed776a0。",
+        "content": "同一业务键（period + period_type）上的 Save 不保证并发安全，由调用方串行化。写明了失效形状（两个并发 Save 同键都可能读到 Exists=false → 都判 New → 都 INSERT，主键约束让其中一方拿到 UNIQUE 错误——**那一次的数据随之丢失，且因为错误发生在 insert 阶段，它不会落进 pending 表**）、为什么不加事务（要关掉这个窗口需 BEGIN IMMEDIATE 级写锁，会让每一次 Save 都持写锁而不只是真正写入的那些）、将来要改怎么改（把 Lookup 到写入整段放进 IMMEDIATE 事务，**而不是在 Go 侧加锁——Go 侧的锁挡不住另一个进程**），以及 go test -race 为什么发现不了它（只看 Go 层数据竞争，SQL 层 TOCTOU 在其视野之外）。",
+        "implication": "**-race 通过不构成并发安全的证据**，这一点现已写进代码而非只在 DoD 里。契约是注释而非机制：没有任何测试能验证调用方是否遵守。"
+      }
+    },
+    "boundary_0_no_new_deps": {
+      "verdict": "PASS",
+      "command": "git diff origin/master --stat go.mod go.sum",
+      "output": "空（0 行）",
+      "cross_check": "两个基准结论一致：origin/master(d7c9c69) 0 行、本地 master(a1c6ae4) 0 行",
+      "existing_deps_on_baseline": "origin/master 上已有 github.com/stretchr/testify v1.11.1 与 modernc.org/sqlite v1.38.2，均非本子迭代引入"
+    },
+    "error_handling_0_full_repo": {
+      "verdict": "PASS",
+      "command": "go test ./... 2>&1 | grep -Ev '^ok|no test files'",
+      "exit_code": 0,
+      "filtered_lines": 0,
+      "ok_packages": 64,
+      "no_test_files_packages": 0,
+      "fail_lines": 0,
+      "scope_check": "git diff origin/master --name-only -- internal/ | grep -v '^internal/hestia/' → 输出为空：本子迭代**只新增 internal/hestia/**（11 个文件、3561 行），crisis / prism / collector / macro 一个文件都没碰"
+    },
+    "non_functional_0_report_with_sha": {
+      "verdict": "PASS",
+      "note": "本文件即产出物，逐条记录了实际执行的命令与输出摘要。全部命令的执行对象为 ed776a0e68d9b52c3f79af69f3d94bc864fceb3e，基准为 origin/master = d7c9c694f88e4f44497a4c08e38a30aaae985413。"
+    },
+    "non_functional_1_handoff": {
+      "verdict": "PASS",
+      "source_of_truth": ".arcforge/docs/01-design/handoff-to-later-iterations.md（H1–H7 共 7 条）",
+      "note": "**不复述**。DoD 点名的三件事对应该文件的 **H6**（需求文档 Self-Review 声明的交接项，原样保留）：M1b-2 的 Values 键须取自 Field* 常量、M1b-3 的 Check.Value 单位自定义、M1b-4 经 Store.DB() 做 article_id 一级幂等检查。另外六条（H1–H5、H7）同样有效，后续子迭代应读原文而非任何转述。"
+    }
+  },
+  "key_findings": [
+    "**G9 并发契约在 TASK-007 派发时确实缺失**（详见 verification.functional_1.g9_concurrency_contract），已补入包注释并提交 ed776a0。",
+    "**本地 master 落后 origin/master 三个 merge（PR#53/54/55）**。`git ls-tree master internal/macro/` 为空、`git ls-tree origin/master internal/macro/` 有 bitemporal。DoD 把基准从需求文档的 feat/macro-bitemporal 更正为 master 是对的（M1a 经 PR#53 合并），但**本地 master 分支停在 a1c6ae4 尚未 fetch**。照抄 `git diff master ...` 会把 M1a 的 10 个文件算进 M1b-1 的改动范围。对 go.mod/go.sum 那一条结论不变（两个基准均空输出，已交叉核验），但**范围类**判断会失真。**命令原文相同、基准不同、结果不同**——凡以 master 为基准的命令都应写全 origin/master。",
+    "**导出面的一次性核验与常驻守卫是两回事**：go doc 只在有人跑时有效；包内两条测试（reflect 看方法集 / go-ast 看包级函数）视野互补且都是精确集合相等，构成回归防线。"
+  ],
+  "files_modified": ["internal/hestia/fields.go"],
+  "interfaces_exposed": [],
+  "notes_for_downstream": [
+    "**G9 契约是注释而非机制**：写明了「不保证并发安全」，但没有任何测试能验证调用方是否遵守。若 M1b-2 的采集管线引入并发写同一业务键，必须改成 BEGIN IMMEDIATE 事务；Go 侧加锁无效（挡不住另一个进程）。",
+    "**凡以 master 为基准的命令都应改用 origin/master**，否则范围类结论会把 M1a 算进来。本地 master 停在 a1c6ae4。",
+    "**交接清单读 .arcforge/docs/01-design/handoff-to-later-iterations.md 原文**（H1–H7），不要读任何转述版本。",
+    "**给 Leader / final-report**：dev-* 在整个 docs/ 树下没有任何可写路径，且 test-* 走不了执行状态机 ⇒ 「产出物落在别的角色专属目录」的任务在当前 write-matrix 下无解。记录员代理模式未覆盖这一种。"
+  ]
+}

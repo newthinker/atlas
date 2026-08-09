@@ -1,0 +1,77 @@
+{
+  "id": "TASK-001",
+  "title": "字段常量与唯一真相源 (fields.go)",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/fields.go",
+    "./internal/hestia/fields_test.go"
+  ],
+  "description": "定义 54 个 Field* 字符串常量、fieldOrder（唯一真相源）、allFields（白名单）。DDL/INSERT 列/白名单全部从 fieldOrder 派生——手写多份必然不同步。",
+  "done_criteria": {
+    "functional": [
+      "`fieldOrder` 恰好 54 个字段，分组计数符合附录 A：`tsf_` 前缀 27 个、货币供应量 6 个（m0/m1/m2 及其 _yoy）、`deposit_` 7 个、`loan_` 10 个、`rate_`+`fx_` 4 个。**分组计数必须逐组断言**，只测总数 54 会让「某组多一个、另一组少一个」通过。",
+      "`allFields` 与 `fieldOrder` 元素完全一致（数量相等且每个 fieldOrder 元素都在 allFields 中）。两者是同一份事实的两种形态，允许派生但不允许各写一遍。",
+      "**golden list**：断言 `fieldOrder` 与一份逐字写出的 54 元素切片完全相等（顺序敏感）。理由：分组计数挡不住拼写错误——`deposit_corp_ytd` 写成 `deposit_corp_yt` 仍然唯一、合法、前缀正确、计数不变，全绿通过。而 DDL 与 INSERT 都从同一常量派生、包内自洽，要等 M1b-2 编译或 Grafana 列名对不上才暴露，那时改名已需迁移。"
+    ],
+    "boundary": [
+      "`fieldOrder` 内无重复字段名。重复会让 DDL 生成重复列而建表失败——但那是运行期才暴露，必须在此拦住。"
+    ],
+    "error_handling": [
+      "每个字段名匹配 `^[a-z][a-z0-9_]*$`。字段名会拼进 DDL 与 INSERT 的列名，与 bitemporal 的 identRE 同一把关态度——**这是本包注入面的第一道闸门**。"
+    ],
+    "non_functional": [
+      "`fieldOrder` 是包内唯一的字段名清单。**判据：`fields.go` 之外的**非 `_test.go`** 文件不得出现 54 个业务字段名的字符串字面量**（schema/store 必须遍历 fieldOrder）。核验命令：`grep -rn --include=*.go tsf_ internal/hestia/ | grep -v _test.go | grep -v fields.go` 应为空（对 deposit_/loan_/m0/m1/m2/rate_/fx_ 同理）。\n\n**原表述「任何文件都不得出现」是错的**：T1 自己的分组计数测试必须写 `\"tsf_\"` 等前缀字面量，按字面执行会自相矛盾地 REJECT 掉正确实现。",
+      "包注释写明单位约定（余额=万亿元、增量=亿元、比率=百分数）并声明单位是 schema 的一部分、改它属 breaking change、不设 units_version 列。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-09T07:17:07Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-41",
+  "questions": [
+    {
+      "q": "dev_done 门禁因 scope 漂移 DENY：internal/hestia/testdata/ 下 3 个 untracked 文件不在任何任务的 writes 声明之下，且非我产生。请 Leader 决策：(A) 单独提交 testdata 入库全场解阻 / (B) 授权我连同提交 / (C) 其他。",
+      "asked_at": "2026-08-08T02:05:00Z",
+      "answer": "Leader 采纳方案 A：commit 87acf57 把 testdata 三个文件入库。另确认门禁 hook 已由 145 行旧版同步为 414 行新版，漂移口径不再只筛 .go(TASK-018)、且漂移集含已提交改动但以 last_transition.at 为下界——转回 in_progress 会重置下界，87acf57 与 5dcc802 均落在其前，不进漂移集。",
+      "answered_by": "leader",
+      "answered_at": "2026-08-08T02:10:00Z"
+    }
+  ],
+  "verify_baseline": {
+    "head": "878660e4f6514da25ed3e787ec5666adb30b4265",
+    "discovery_sha256": "e544b9c2bbb40ced6608d3673efbddfdc4e337e345d639e475e5bc0e0e954039",
+    "at": "2026-08-08T15:45:27Z"
+  },
+  "verifier": "test-agent-20",
+  "reason_class": "dod_defect",
+  "fix_items": [
+    {
+      "id": "P1",
+      "severity": "WARNING",
+      "source": "test-agent-20 变异 M11（存活，三条自证齐全）",
+      "desc": "**常量名↔值的绑定无任何断言守卫**。golden list 钉的是「值的序列」，不是「哪个常量名对应哪个值」。\n\n变异 M11：同时交换 `FieldDepositCorpYTD` / `FieldDepositFiscalYTD` 的**值**与它们在 `fieldOrder` 里的**位置** ⇒ 值序列逐字不变 ⇒ **7 条测试全绿**，而此时 `FieldDepositCorpYTD = \"deposit_fiscal_ytd\"`。\n\n**下游后果**：M1b-2 拿 `FieldDepositCorpYTD` 当 `Values` 的键，绑定错位 ⇒ **企业存款静默写进财政存款列**，无编译错、无运行错、无测试红。\n\n**这与需求分析里标为 R1 的「Meta 七字段三处同序」是同一类失效模式**——R1 已被提升为 DoD，同族的这条却漏了。触发难度：需三处协同改动，单笔误不会产生；但 54 行视觉高度相似的 const 块做块状复制/重排时可能发生。",
+      "requirement": "golden list 由 `[]string` 改为绑定表 `[]struct{ got, want string }{{FieldDepositCorpYTD, \"deposit_corp_ytd\"}, ...}`，54 项逐一断言。\n\n**这不违反你「不用常量拼 golden list」的原论证**（test-agent-20 的分析）：那条论证针对的是**值序列自指**（用常量拼出的清单去校验常量本身，恒真）；而绑定表**一侧是常量、一侧是字面量**，恰恰是非自指的。",
+      "verify": "重跑 M11：交换两个常量的值与其在 fieldOrder 的位置 ⇒ 必须变红，且红的应是绑定断言。"
+    },
+    {
+      "id": "P2",
+      "severity": "SUGGESTION",
+      "source": "test-agent-20",
+      "desc": "`non_functional[0]` 的**核验命令比判据严**：判据写「不得出现字段名的字符串字面量」，而给的 `grep tsf_` 会命中 `\"deposit_\" + \"corp_ytd\"` 这种拼接（test-agent-20 的 M3d，AST 判据按字面措辞放行，**存活**）。\n\nAST 与 grep 的捕获集**部分不相交**：AST 免疫注释与子串误判，grep 能抓拼接。实现选 AST 对真实威胁形态是净改善，**不构成缺陷**。",
+      "requirement": "**本次不要求改实现**。若顺手，可在 AST 检查里补一条「二元字符串拼接表达式的各操作数也参与比对」；否则仅在 discovery 里记明这个捕获集差异，供后续参考。"
+    }
+  ],
+  "rework_count": 1,
+  "discovery": ".arcforge/discoveries/TASK-001.json"
+}

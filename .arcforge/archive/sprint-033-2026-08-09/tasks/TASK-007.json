@@ -1,0 +1,85 @@
+{
+  "id": "TASK-007",
+  "title": "收尾验证（公开面、依赖、全量测试）",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    ".arcforge/discoveries"
+  ],
+  "writes": [
+    ".arcforge/discoveries/TASK-007.json",
+    "./internal/hestia/fields.go"
+  ],
+  "description": "纯验证任务，无生产代码改动。核验公开面无绕过校验的写入口、无新增依赖、全量测试与竞态、未触及既有包。产出验证报告。",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`go doc ./internal/hestia` 的导出符号恰好是：54 个 Field* 常量、TableObservations、TablePending、Meta、Observation、CheckStatus 及三常量、Check、ValidationReport、Outcome、Store、NewStore、Close、DB、Save。**若出现 Insert/Upsert/SaveUnchecked 或任何不要求 ValidationReport 的导出写方法，判 FAIL 并指名**。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`go build ./... && go test ./internal/hestia/... -race && go vet ./internal/hestia/...` 全绿。\n\n**并发契约必须明确（G9）**：原表述「-race 不可省——Store 会被并发调用」声称了一个机制上不成立、判据上也测不到的性质。`Save` 的 `Lookup → Classify → INSERT` 没有事务，`-race` 只能发现 Go 层数据竞争，**发现不了 SQL 层的 TOCTOU**——两个并发 Save 同键都读到 Exists=false → 都判 New → 都 INSERT，有 PK 时一方拿 UNIQUE 错误（该次数据丢失且因是 insert 错误不落 pending），无 PK 时静默双行。\n\n本条要求二选一并落到包注释：①写明「同一业务键上 Save 不保证并发安全，由调用方串行化」；②把 Save 放进事务。**不得保持「宣称并发、机制不支持、判据测不到」的现状。**",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`git diff master --stat go.mod go.sum` 无输出（不新增任何依赖）。**注意需求文档写的基准是 feat/macro-bitemporal，已过时**：M1a 已合并 master（PR#53），基准应为 master。",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`go test ./...` 全仓无 FAIL。本子迭代只新增包，不应影响 crisis / prism / collector / macro。若有既有包变红，停下查明原因而非改测试。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**产出物为 `.arcforge/discoveries/TASK-007.json`**（2026-08-09 裁定改路径，原写 `docs/04-test/…` 是 Leader 的派单错误：`dev-*` 在整个 `docs/` 树下无任何可写路径，而执行状态机 `in_progress→dev_done` 只有 `dev-*` 能走——**没有任何角色既能走状态机又能写 04-test**，该任务在原声明下结构上不可完成）。\n\ndiscovery 中逐条记录实际执行的命令与输出摘要，并**写明各项验证所在的 commit sha**——不同 commit 的测试数可能相同，「数字对得上」不等于「测的是对的那个 commit」（sprint-032 教训）。\n\n验证者在自己的 04-test 报告中引用该 discovery，不复述。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "向后续子迭代交接三件事：M1b-2 的 Values 键须取自 Field* 常量；M1b-3 的 Check.Value 单位自定义；M1b-4 经 Store.DB() 做 article_id 一级幂等检查。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-09T07:17:08Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-41",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "questions": [
+    {
+      "q": "TASK-007 的产出物 docs/04-test/TASK-007-final-verification.md 落不了盘：dev-* 在整个 docs/ 树下无任何可写路径，任务在当前 write-matrix 下结构上不可完成。请裁定 (A) 改派 test-* 落盘 /(B) 给 04-test 加 dev-* /(C) 以 discovery 为产出形态。",
+      "asked_at": "2026-08-09T02:30:00Z",
+      "answer": "Leader 裁定 (C)：产出物即 .arcforge/discoveries/TASK-007.json，验证者在自己的 04-test 报告中引用而不复述。packages 改为 [.arcforge/discoveries]，writes 改为 [.arcforge/discoveries/TASK-007.json, ./internal/hestia/fields.go]，non_functional[0] 相应改写，validator exit=0。(A) 同样走不通：bindings 为 {dev-*: assigned_to, test-*: verifier}，test 实例即使被设为 assigned_to 也走不了 in_progress（该边写者是 dev-*）——没有任何角色既能走执行状态机、又能写 04-test。",
+      "answered_by": "leader",
+      "answered_at": "2026-08-09T02:45:00Z"
+    }
+  ],
+  "verify_baseline": {
+    "head": "ed776a0e68d9b52c3f79af69f3d94bc864fceb3e",
+    "discovery_sha256": "b325632cebf5b61d8de3db094878b01f935a4acf14b66c2ca3f0f303eebccd1d",
+    "at": "2026-08-08T23:49:48Z"
+  },
+  "verifier": "test-agent-21"
+}

@@ -1,0 +1,88 @@
+{
+  "task_id": "TASK-003",
+  "title": "由字段清单生成 DDL (schema.go)",
+  "by": "dev-agent-41",
+  "commit": "fb1526071bce20d4929258a24748f04431d4be84",
+  "branch": "feat/hestia-store",
+  "context_from": ["TASK-001", "TASK-002(间接:Meta 契约)"],
+  "key_findings": [
+    "**三处同序契约现在守住两端**。TASK-002 的 TestMetaFieldOrderIsCrossTaskContract 钉 Meta 一端；本任务的 TestMetaColumnsMatchMetaStructByReflect 用 reflect 从 Meta 取字段名转 snake_case 与 metaColumns 逐一比对，钉住第二端。**第三端（store.go 的 insert 取值顺序）仍然裸奔**，由 TASK-005 补：insert 必须按 metaColumns 的顺序从 Meta 取值，而没有任何现存测试能发现它单方面写错序。",
+    "metaColumns 顺序：period, period_type, published_at, article_id, caliber_version, extractor, ingested_at。前三个同时是双时态主键（PK 次序即此顺序）。",
+    "**DDL 列顺序 = metaColumns（7）+ fieldOrder（54）= 61 列**，业务列逐项按 fieldOrder 排列。PRIMARY KEY 是约束不是列，不计入 61。TASK-005 的 INSERT 列序必须与此同源——直接遍历同样的两个切片，不要手写。",
+    "**结构断言必须从真实库读，不能比对 DDL 字符串**，两条实测：①无 PK 的表在字符串断言下看不出来（且我实测按行数列的断言本来就跳过 PRIMARY KEY 行），而无 PK 时重复写入不再报 UNIQUE 错，退化成 QueryRow 静默取第一行；②业务列建成 TEXT 时 Scan 进 float64 照样成功，写回读回全绿，但 SQLite 按字典序比较，MAX() 与范围查询静默算错。本任务全部结构断言走 pragma_table_info 与 sqlite_master。",
+    "视图主体取自 bitemporal.CurrentQuery(spec)，不手写。CurrentQuery 生成 `SELECT * FROM hestia_observations o WHERE o.published_at = (SELECT MAX(published_at) FROM hestia_observations WHERE <相关子句>)`。视图是 SELECT *，所以列数与观测表一致（61）。",
+    "**pending 表刻意不像观测表**：8 列（period, period_type, published_at, article_id, extractor, ingested_at, report, values_json），存 JSON 而非 54 列，主键带 ingested_at（同一期反复失败要留多条记录，那是诊断信息）。测试显式断言 pending 表**不含**任何业务列。",
+    "**bitemporal.Spec 的构造**：`bitemporal.NewSpec(TableObservations, []string{\"period\", \"period_type\"}, \"published_at\")`，返回 (Spec, error)。TASK-004 的 NewStore 必须用同一组参数——业务键少一个会让「当前行」跨期混算，而那种错不报错。"
+  ],
+  "decisions": [
+    {
+      "decision": "metaColumns 的同序断言用 reflect 从 Meta 取字段名，而不是写第二份期望清单",
+      "rationale": "写第二份期望清单只是把「人眼比对两份」变成「人眼比对三份」。reflect 让 Meta 成为唯一真相源：谁改 Meta，本条立刻红并指出该同步 metaColumns。"
+    },
+    {
+      "decision": "为 toSnakeCase helper 自身加断言（ArticleID → article_id 等四例）",
+      "rationale": "helper 是断言的一部分。若 helper 把 ArticleID 转成 article_i_d，而 metaColumns 也恰好写成那样，两个错误互相印证、测试全绿。ArticleID 是七个字段里唯一有歧义（连续大写）的形态。"
+    },
+    {
+      "decision": "结构断言全部走 pragma_table_info / sqlite_master，DDL 字符串只用于否定断言（is_current / absent_fields）",
+      "rationale": "见 key_findings 第 4 条的两条实测。否定断言留在字符串层是因为它要证明的是「这个词根本没出现」，而库里查不到列名不足以排除它以别的形式出现（如注释或视图定义里）——所以否定断言两处都查。"
+    },
+    {
+      "decision": "本任务的真实库由测试内的 openWithSchema 建，不用 NewStore",
+      "rationale": "**NewStore 属于 TASK-004，本任务范围内它还不存在**。DoD non_functional[2] 的措辞是「NewStore 之后读 PRAGMA」，本任务只能验到「这三段 DDL 产生的结构正确」。**「NewStore 实际部署的那个视图」仍未被验**——它用的 spec 由 NewStore 自己构造，可能与测试构造的不同。这一条留给 TASK-004，见 notes_for_downstream。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/schema.go",
+    "internal/hestia/schema_test.go"
+  ],
+  "interfaces_exposed": [
+    "const TableObservations = \"hestia_observations\"（导出）",
+    "const TablePending = \"hestia_pending\"（导出）",
+    "const viewCurrent = \"v_hestia_current\"（**未导出**）",
+    "var metaColumns []string（**未导出**，7 项，顺序即建表列序即 INSERT 列序）",
+    "func observationsDDL() string（**未导出**，61 列：7 元数据 TEXT NOT NULL + 54 业务 REAL，PK(period, period_type, published_at)）",
+    "func pendingDDL() string（**未导出**，8 列，PK(period, period_type, published_at, ingested_at)）",
+    "func currentViewDDL(spec bitemporal.Spec) string（**未导出**，CREATE VIEW IF NOT EXISTS v_hestia_current AS <bitemporal.CurrentQuery(spec)>）",
+    "测试侧 helper（同包，TASK-004/005 可直接复用）：func testSpec(t) bitemporal.Spec、func openWithSchema(t) *sql.DB、type columnInfo、func tableInfo(t, db, table) []columnInfo、func toSnakeCase(string) string"
+  ],
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/hestia/ -v -cover",
+    "result": "整包 26 PASS / 0 FAIL / 0 SKIP（本任务 8 个 + TASK-001 的 8 + TASK-002 的 10），coverage 100.0% of statements",
+    "go_vet": "exit 0",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "coverage_caveat": "覆盖率不作充分性证据：schema.go 是三个纯生成函数，跑一次就全覆盖。判定锚变异证据。",
+    "tests": [
+      "TestObservationsColumnsDeriveFromFieldOrder → functional[0]（61 列 + 业务列逐项按 fieldOrder）",
+      "TestMetaColumnsMatchMetaStructByReflect → functional[1]（reflect 机制化同序断言）",
+      "TestCurrentViewDDLUsesBitemporal → functional[2]",
+      "TestDDLIsIdempotent → boundary[0]",
+      "TestDDLHasNoDerivableStateColumns → error_handling[0]",
+      "TestObservationsStructureFromLiveDB → non_functional[2]①②③（PK 次序 / REAL 亲和性 / 元数据 NOT NULL）",
+      "TestPendingStructureFromLiveDB → non_functional[2]④（pending PK 带 ingested_at，且无业务列）",
+      "TestCurrentViewStructureFromLiveDB → non_functional[2]⑤（从 sqlite_master 读实际部署的视图定义）"
+    ],
+    "mutation_evidence": {
+      "harness": "手工变异，隔离 worktree（git worktree add --detach <path> fb1526071bce20d4929258a24748f04431d4be84），用后 git worktree remove",
+      "baseline": "32 --- PASS（整包 -v 计数，含子测试）",
+      "self_proof": "每个变异均核对三条：git diff --numstat 非空、go vet exit 0、有实际 --- FAIL 行且 PASS 计数低于基线",
+      "mutants": [
+        "M1' 无 PK 但语法合法（PRIMARY KEY 行换成 CHECK(1) 占位，仍 61 列）：**KILLED**，仅 TestObservationsStructureFromLiveDB FAIL，PASS 31/32。",
+        "M2 业务列 REAL → TEXT：**KILLED**，仅 TestObservationsStructureFromLiveDB FAIL，PASS 31/32。",
+        "M3 metaColumns 单方面交换 caliber_version/extractor（Meta 不动）：**KILLED**，仅 TestMetaColumnsMatchMetaStructByReflect FAIL，PASS 31/32 —— 这正是 TASK-002 的测试抓不到的那一类。",
+        "M4 业务列倒序生成（不按 fieldOrder）：**KILLED**，仅 TestObservationsColumnsDeriveFromFieldOrder FAIL，PASS 31/32。",
+        "M5 去掉 observationsDDL 的 IF NOT EXISTS：**KILLED**，仅 TestDDLIsIdempotent FAIL，PASS 31/32。",
+        "M6 pending 主键去掉 ingested_at：**KILLED**，仅 TestPendingStructureFromLiveDB FAIL，PASS 31/32。",
+        "M7 元数据列去掉 NOT NULL：**KILLED**，仅 TestObservationsStructureFromLiveDB FAIL，PASS 31/32。",
+        "变异全部撤销后 PASS 回到 32，git status 干净。"
+      ],
+      "methodology_note": "**第一版 M1（直接删 PRIMARY KEY 整行）作废，不计入证据**：删行后前一个业务列残留尾逗号，DDL 变成 SQL 语法错，6 个测试一起红。那证明的是「语法错会被抓」，不是「合法但无 PK 的表会被抓」——PK 断言是否有效被语法错完全掩盖。改用 CHECK(1) 占位替换 PRIMARY KEY 行，得到语法合法、列数不变、仅缺 PK 的干净变异（并另跑一个探针测试打印 DDL、确认建表成功），才隔离出 M1' 的单点红。**一个变异杀死了多个测试时要先怀疑它顺带破坏了别的东西。**"
+    }
+  },
+  "notes_for_downstream": [
+    "**TASK-004（NewStore）**：必须用 `bitemporal.NewSpec(TableObservations, []string{\"period\",\"period_type\"}, \"published_at\")` 构造 spec，并把 observationsDDL/pendingDDL/currentViewDDL(spec) 三段都执行。**DoD non_functional[2] 里「NewStore 实际部署的那个视图从未被验过」这一条本任务无法覆盖**（NewStore 尚不存在）：本任务验的是测试自建库的结构。TASK-004 应补一条「用 NewStore 建库后从 sqlite_master 读视图定义」的断言，否则 NewStore 用错 spec（少一个业务键）不会被任何测试发现。",
+    "**TASK-005（insert）**：三处同序契约的第三端在你手上。INSERT 的列与取值都应遍历 metaColumns/fieldOrder 生成，不要手写；并补一条断言把「从 Meta 取值的顺序」与 metaColumns 绑定（reflect 或表驱动皆可），否则 insert 单方面写错序无人能发现——metaColumns 与 Meta 都没变，现有两条同序断言都不会红。",
+    "测试 helper 可直接复用：openWithSchema(t) 建库并执行三段 DDL、tableInfo(t, db, table) 读 pragma_table_info、testSpec(t) 造 spec。它们在 schema_test.go，同包可见。",
+    "写 schema.go 之外的非测试文件时，业务字段名一律遍历 fieldOrder——TASK-001 的 TestFieldNamesAppearOnlyInFieldsGo 会抓字面量（含纯字面量拼接），并报 file:line。"
+  ]
+}

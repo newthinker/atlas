@@ -1,0 +1,65 @@
+{
+  "id": "TASK-004",
+  "title": "NewStore 与建表 (store.go 骨架)",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "Store 结构（db/spec/now）、NewStore（建表+建视图）、Close、DB。now 字段可注入以便测试覆写 IngestedAt。",
+  "done_criteria": {
+    "functional": [
+      "`NewStore(path)` 在真实 SQLite 上创建全部表与视图，**可对同一路径重复调用而不报错**（幂等）。第二次调用后数据不丢失。",
+      "`Store` 含 `now func() time.Time` 字段，测试可覆写——TASK-005 的 IngestedAt 覆写判据与 TASK-006 的 pending 累积判据都依赖它。",
+      "`DB()` 返回底层 `*sql.DB`（M1b-4 的 article_id 幂等检查要用），`Close()` 正常释放。"
+    ],
+    "boundary": [
+      "父目录不存在时 `NewStore` 自动创建。判据：传入多级不存在路径仍能成功建库。",
+      "**schema 漂移必须大声失败（G7）**。`CREATE TABLE IF NOT EXISTS` 对已存在的老库静默无操作——字段清单刚从 ~20 涨到 54 且还会再涨，下次上线时老库上第一次 `Save` 才炸，错误是驱动层的 `no such column`，且只在恰好含新字段的那一期出现。\n\n二选一并明确落地：①`NewStore` 开库后比对 `PRAGMA table_info` 与 `fieldOrder`，不一致则带迁移提示失败；②包注释写明「不支持迁移，schema 变更需重建库」并作为显式非目标。**现在两者都没有**，这是本条要消除的状态。"
+    ],
+    "error_handling": [
+      "DSN 沿用 crisis 形态 `file:<path>?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`。**判据：开库后 `PRAGMA journal_mode` 必须返回 `wal`。**\n\n原判据「可在代码中核验该串**或**验证 WAL 已生效」的「或」是缺陷：肉眼比对字符串就能满足，而字符串对了完全不等于 pragma 生效（`_pragma` 拼错、路径含特殊字符都会静默失效）。reviewer 实测确认这条完全可机械化，没有理由保留更弱的替代分支。"
+    ],
+    "non_functional": [
+      "本任务不提供任何写数据的导出方法。`Save` 在 TASK-005 引入——此时若出现 Insert/Upsert 等导出写口，即违反单一写入口约束。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-09T07:17:08Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-42",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "823ca15fbea53c626e986419d8f91ad200f03859",
+    "discovery_sha256": "eb83127593606e3a6288bd8c736073e428d5207e11939a73b31300e093868b89",
+    "at": "2026-08-09T00:37:57Z"
+  },
+  "verifier": "test-agent-20",
+  "reason_class": "task_defect",
+  "fix_items": [
+    {
+      "id": "C1",
+      "severity": "CRITICAL",
+      "source": "qa-agent-10（Architect lens）实测，Leader 复核成立",
+      "desc": "**老库上业务键错误的 `v_hestia_current` 视图能静默存活。**\n\n机制：`CREATE VIEW IF NOT EXISTS` 对已存在视图**空转**（不重建），而 `verifyObservationsSchema`（store.go:91）只查 `pragma_table_info(TableObservations)`——**只查表的列，完全不看视图**。\n\n⇒ 老库里一个漏了 `period_type` 的旧视图会原样保留，`NewStore` 返回 nil 错误，而**该视图是全部下游读取的入口**。后果是「当前行」跨期混算，静默给出错误数据。\n\n**你在 T4 的论证本身成立**（pending 8 列固定 ⇒ 危害结构性不同），store.go:89-90 那段注释也没写错——**但它只讨论了表，视图不在视野内**。QA 的判词是准确的：**G7 为表建了机制，为视图只留了契约**。\n\n这与 T3 交接给 T4 的那条（「`NewStore` 实际部署的视图从未被验过」）是同一个位置的两个不同问题：T4 闭合的是「新建库时视图对不对」，**没有覆盖「老库里已存在的错视图」**。",
+      "requirement": "把视图纳入 schema 一致性检查：`NewStore` 开库后从 `sqlite_master` 读实际部署的视图定义，与 `currentViewDDL(s.spec)` 期望值比对，不符则失败并给迁移提示（与现有缺列检查同一形态、同样「大声失败」）。\n\n**注意不对称性的处理**：你在 T4 对表选择了「只拦缺列、多列放行」并论证充分。视图不同——它没有『多/少』的中间态，定义不符即语义不符，**建议直接比对全等**（T4 已实证：SQLite 存 `sqlite_master` 时只去掉 `IF NOT EXISTS`，其余原样，全等可行）。若你认为该放宽，需给出与 T4 同等强度的论证。",
+      "verify": "变异实证：构造一个漏 `period_type` 的老视图，`NewStore` 必须失败；且该变异只红新加的那条断言。另需确认修改后 store.go:89-90 的注释同步更新——**现在那段只说表，改完后它会成为一句误导**。"
+    }
+  ],
+  "rework_count": 1
+}

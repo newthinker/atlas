@@ -1,0 +1,54 @@
+{
+  "task": "TASK-006",
+  "title": "Duplicate 的 UPDATE 与 pending 分流",
+  "by": "dev-agent-42",
+  "commit": "823ca15fbea53c626e986419d8f91ad200f03859",
+  "commit_note": "本次返工（C3/C4）是**纯测试提交**，只改 store_test.go（109 行新增，已核实无他人改动混入）。初版交付在 c1050d76e46c8e4075c42f33ecfece4d043a56b8。",
+  "key_findings": [
+    "【C3/C4 都是缺判据，不是实现缺陷】两处生产代码本来就是对的——`savePending` 的八列顺序正确、`refreshArticleID` 的 WHERE 本来就带 published_at。缺的是**能发现它们被改坏的测试**，所以 QA 的两个变异完全存活。⇒ 本次返工**零行生产代码改动**，两条新测试写完即通过；真正的 RED 是「变异之前存活、之后被杀」。",
+    "【C3 根因：pending 是同序契约漏掉的第四处】观测表的列序由 metaColumns/fieldOrder 派生且有三条同序测试钉住；**pending 的八列是 savePending 里手写的位置参数，没有任何东西钉**。原有测试虽然 SELECT 了 article_id/extractor，却从不断言其值。⇒ 「三处同序危害已闭合」这个说法当时**只对观测表成立**。新测试 TestSavePendingColumnsMatchTheirValues 取互不相同的可辨识值逐列读回，并先自证 fixture 够强。",
+    "【C4 根因：单行库结构上打不中】现有两条 Duplicate 测试的库里都只有一行，删掉 `AND published_at = ?` 后行为完全不变。两行库下才看得出危害：同一业务键有多个修订行是双时态的常态，少了该约束，一次站点迁移的新 article_id 会**盖到全部历史行上**，静默毁掉逐行溯源，并让 M1b-4 的 article_id 幂等检查命中错误的修订行。新测试 TestSaveDuplicateOnlyTouchesTheMatchingRevision 预置两个不同 published_at 的行，断言只有目标行变化、历史行原值保留。",
+    "【初版交付的核心结论仍然成立，未改动】M7' 已闭合（TestSavePendingVerdictSurvivesClassify，含消融实验证明因果唯一）；IngestedAt 用 RFC3339Nano（G8）；G3 保持丢弃并钉住全部可观测后果；pending 不做启动期漂移校验（论证：八列固定 ⇒ 任何不符在第一次写 pending 时确定性失败，G7 的『特定期次才炸』结构性不成立）。",
+    "【与 TASK-005 的交互】dev-agent-41 在 572f2ce 给 checkReportConsistency 加了「Passed=true 时 Status 必须 ∈ {CheckPassed, CheckSkipped}」的白名单与「Skipped 必填 Reason」。该校验只在 `Passed == true` 时生效，**pending 路径（Passed=false）不受影响**——已实测全套通过，TestSaveFailedValidationGoesToPending 里的 CheckSkipped 条目本就带 Reason。"
+  ],
+  "decisions": [
+    {
+      "decision": "C3 的期望值在测试里写成显式的「列名 → 取值」表，而不是从某处派生",
+      "rationale": "pending 的列清单在 pendingDDL（schema.go）与 savePending（store.go）各有一份手写；测试若从其中任一份派生，就会与被测对象同源，互换错位时两边一起错、断言照样通过。golden 表是第三方视角，与 fields_test.go 的 goldenFields 同一手法（左侧常量、右侧字面量）。"
+    },
+    {
+      "decision": "C3 测试里先自证「六个取值互不相同」",
+      "rationale": "『任意两列互换必红』这个性质依赖取值互不相同。若 fixture 里有两个值相同，交换那两列不会被发现，而测试仍然全绿——判据会悄悄退化。手法沿用 TASK-005 的 TestSaveMetaValuesLandInMatchingColumns。"
+    },
+    {
+      "decision": "C4 测试里对「库里必须有两行修订」做前提自证（require）",
+      "rationale": "该判据的全部力量来自「库里有多行」。若前置的 Revision 写入哪天失败或被改成 Duplicate，库里只剩一行，删 published_at 的变异会重新存活而测试仍绿——正是它要修的那个缺陷复活。前提自证让这种退化直接失败。"
+    }
+  ],
+  "files_modified": ["internal/hestia/store_test.go"],
+  "interfaces_exposed": [
+    "本次返工不新增也不修改任何生产符号（纯测试）",
+    "新增测试：TestSavePendingColumnsMatchTheirValues、TestSaveDuplicateOnlyTouchesTheMatchingRevision"
+  ],
+  "verification": {
+    "commit": "823ca15fbea53c626e986419d8f91ad200f03859",
+    "result": "共享仓库 HEAD 上：**66 顶层 / 86 含子测试 / FAIL 0 / SKIP 0**。vet exit 0、gofmt 无输出。注：该计数含 dev-agent-41 在 572f2ce 引入的测试，不全是本任务的。本任务净增 2 条顶层测试。",
+    "coverage": "89.3%（go test -cover）／89.0%（cover -func total）。dev_minimum=80，达标。",
+    "race": "未跑 -race：不引入 goroutine、无共享状态。记录在案的排除。",
+    "mutation": {
+      "harness": "隔离 detached worktree（基于 ed776a0 + 我自己的三处改动重放），四条自证齐全",
+      "score": "3/3 killed（QA 报存活的两个 + 1 个单侧变异）",
+      "mutants": [
+        "C3 同时交换 Period↔PeriodType 与 ArticleID↔Extractor → **KILLED (77/78)** by TestSavePendingColumnsMatchTheirValues（QA 此前实测存活）",
+        "C3a 只交换 ArticleID↔Extractor（单侧，确认判据颗粒度不是靠双错抵消）→ **KILLED (77/78)** by 同一条",
+        "C4 删除 refreshArticleID 的 `AND published_at = ?` → **KILLED (77/78)** by TestSaveDuplicateOnlyTouchesTheMatchingRevision（QA 此前实测存活）"
+      ],
+      "causality": "三个变异各只红一条，且红的正是对应的新测试，无连带伤害。"
+    }
+  },
+  "notes_for_downstream": [
+    "**同序契约现在是四处**：Meta 字段声明顺序 → metaColumns → 观测表 insert 取值 → **pending 八列位置参数**。前三处有 reflect 派生的断言，第四处是 golden 表断言（pending 的列清单本身是手写的，无处可派生）。任何人动 savePending 的参数顺序，TestSavePendingColumnsMatchTheirValues 会红。",
+    "**给 Leader（仍未修，需裁定）**：G3 的数据静默丢失面——重跑抽取（v1→v2 回填）全判 Duplicate、只刷 article_id，新抽字段一个不写入、extractor 列与实际不符而 Save 返回 nil。已可见、未修复，需设计决策，建议单列任务（已在 handoff H3）。",
+    "**给 Leader**：pending 表仍无启动期列校验（boundary[2] 的②），论证与残余风险见初版 discovery 的 decisions；本次返工未改变该判断。"
+  ]
+}

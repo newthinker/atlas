@@ -1,0 +1,91 @@
+{
+  "task_id": "TASK-001",
+  "title": "字段常量与唯一真相源 (fields.go)",
+  "by": "dev-agent-41",
+  "commit": "878660e4f6514da25ed3e787ec5666adb30b4265",
+  "supersedes_commit": "5dcc8027bfd53cfd45cdef0a39ca1506da122ee5",
+  "branch": "feat/hestia-store",
+  "rework": "第 1 轮返工（reason_class=dod_defect，rework_count=1）：test-agent-20 变异 M11 存活暴露「常量名↔值的绑定无守卫」。fields.go 未改动，只改 fields_test.go。",
+  "key_findings": [
+    "fieldOrder 与 allFields 均为**包内未导出**变量（小写开头），只有 54 个 Field* 常量导出。下游 schema.go / store.go 与本包同属 package hestia，可直接引用；包外无法拿到清单，这是刻意的——字段清单不构成对外 API。",
+    "遍历约定：一律 `for _, f := range fieldOrder`，绝不 `for f := range allFields`。allFields 只用于**成员判定**（白名单 `if !allFields[k]`），因为 map 迭代顺序随机，用它生成 DDL/INSERT 会让每次 SQL 列序不同、日志无法比对。allFields 由 fieldOrder 在包初始化时派生，不是第二份手写清单。",
+    "fieldOrder 的索引顺序即 DDL 列顺序即 INSERT 列顺序。三者必须同源同序，下游若需要「列名列表」应直接用 fieldOrder，不要复制。",
+    "**测试钉住的是两件互相独立的事，缺一不可**：goldenFields 的 want 之间的顺序钉住 fieldOrder 的值序列；got↔want 的配对钉住「哪个常量名对应哪个值」。M11 变异实证二者不可互相替代——同时交换两个常量的值与它们在 fieldOrder 里的位置，值序列逐字不变，只有绑定断言会红。",
+    "**下游用 Field* 常量当 Values 的键时，绑定表是唯一守卫**。绑定错位（FieldDepositCorpYTD 等于 \"deposit_fiscal_ytd\"）不产生编译错、不产生运行错，DDL 与 INSERT 因同源而自洽，数据会静默写进错误的列。",
+    "分组计数是弱断言：M1 变异实证 deposit_corp_ytd 写成 deposit_corp_yt 时，分组计数 + 去重 + 标识符合法性 + allFields 一致性四条全 PASS。**新增字段必须同时改 fields.go 与 fields_test.go 的 goldenFields**，这是有意的双写摩擦。",
+    "TestFieldNamesAppearOnlyInFieldsGo 从 **TASK-002 起已真正生效**（types.go 一进包就进入扫描范围且合规），不是原先记的 TASK-003。它禁止本包内除 fields.go 外的非测试文件出现业务字段名字面量，含**字面量之间的拼接**（foldStringLiteral 折叠 `+`）。"
+  ],
+  "decisions": [
+    {
+      "decision": "golden list 由 []string 改为 []struct{got, want string} 绑定表（返工 P1）",
+      "rationale": "原 golden list 钉的是值的序列，不是常量名与值的配对。变异 M11（交换两常量的值 + 交换其在 fieldOrder 的位置）让值序列逐字不变，七条测试全绿而 FieldDepositCorpYTD 已等于 \"deposit_fiscal_ytd\"。绑定表**一侧常量一侧字面量**，got 来自实现、want 来自规格，不构成自指——这与我原先「不用常量拼 golden list」的论证不冲突：那条针对的是整份清单都用常量写所导致的恒真。"
+    },
+    {
+      "decision": "值序列断言的期望值只由 want 侧构造（wantOrder[i] = g.want）",
+      "rationale": "若用 got 侧构造，常量值怎么变期望值就跟着怎么变，这条断言退化为恒真——正是原设计要避免的自指，不能在改绑定表时把它重新引入。"
+    },
+    {
+      "decision": "AST 检查补字面量拼接折叠 foldStringLiteral（返工 P2，SUGGESTION 级，顺手做）",
+      "rationale": "test-agent-20 的 M3d 存活：`\"deposit_\" + \"corp_ytd\"` 拼出的是同一个写死的字段名，但逐个 BasicLit 比对时两个操作数都不是字段名。折叠 + 表达式后可抓。"
+    },
+    {
+      "decision": "non_functional[0] 用 go/ast 而非 DoD 给的 grep",
+      "rationale": "grep 会命中注释、且 \"m2\" 是 \"m2_yoy\" 的子串会误判；AST 精确比对且随测试常驻，不依赖有人记得手工跑。**捕获集与 grep 部分不相交**：AST 免疫注释与子串误判，grep 能抓变量拼接。补 foldStringLiteral 后差距缩小到只剩非字面量形态。"
+    },
+    {
+      "decision": "non_functional[1] 用 go/parser 读包注释做成测试",
+      "rationale": "单位不入库、无 units_version 列，唯一记录处就是这段注释——被顺手删掉不会有任何机制发现。"
+    },
+    {
+      "decision": "fieldOrder/allFields 保持未导出",
+      "rationale": "字段清单是实现细节；导出会让外部代码直接依赖列表长度与顺序，日后增删字段变成对外 breaking change。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/fields.go",
+    "internal/hestia/fields_test.go"
+  ],
+  "interfaces_exposed": [
+    "const Field* (54 个，导出，无类型字符串常量)：FieldTSFStock/FieldTSFStockYoY/FieldTSFFlowYTD、16 个 FieldTSFStock*（8 分项 × 余额+YoY）、8 个 FieldTSFFlow*YTD、FieldM2/FieldM2YoY/FieldM1/FieldM1YoY/FieldM0/FieldM0YoY、7 个 FieldDeposit*、10 个 FieldLoan*、FieldRateIBO/FieldRateRepo/FieldFXReserve/FieldFXRate",
+    "var fieldOrder []string（**未导出**，len==54，顺序即 DDL/INSERT 列序；遍历字段一律用它）",
+    "var allFields map[string]bool（**未导出**，由 fieldOrder 派生，仅用于成员判定/白名单，禁止用于遍历）"
+  ],
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/hestia/ -v -cover",
+    "result": "整包 18 PASS / 0 FAIL / 0 SKIP（本任务 8 个 + TASK-002 的 10 个），coverage 100.0% of statements",
+    "go_vet": "exit 0",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "coverage_caveat": "**100% 覆盖率在本任务不构成充分性证据**（test-agent-20 指出）：fields.go 除 allFields 的匿名初始化函数外没有可执行语句，100% 是结构性必然。判定应锚变异证据。",
+    "tests": [
+      "TestFieldConstantBindings → functional[2] 绑定侧（返工新增）",
+      "TestFieldOrderGoldenList → functional[2] 值序列侧",
+      "TestFieldGroupCounts → functional[0]",
+      "TestAllFieldsMatchesFieldOrder → functional[1]",
+      "TestFieldOrderHasNoDuplicates → boundary[0]",
+      "TestFieldNamesAreValidIdentifiers → error_handling[0]",
+      "TestFieldNamesAppearOnlyInFieldsGo → non_functional[0]",
+      "TestPackageDocDeclaresUnits → non_functional[1]"
+    ],
+    "mutation_evidence": {
+      "harness": "手工变异，隔离 worktree（git worktree add --detach <path> 878660e4f6514da25ed3e787ec5666adb30b4265），用后 git worktree remove",
+      "baseline": "24 --- PASS（整包，含 TASK-002 的测试）",
+      "self_proof": "每个变异均核对三条：git diff --numstat 非空、go vet exit 0、PASS 计数与基线之差等于 FAIL 数（排除编译失败伪造的「0 红」）",
+      "mutants": [
+        "M11（返工要验的那条）交换 FieldDepositCorpYTD/FieldDepositFiscalYTD 的值 + 交换其在 fieldOrder 的位置：**KILLED**，FAIL 的正是 TestFieldConstantBindings，而 TestFieldOrderGoldenList 仍 PASS —— 后者 PASS 恰恰实证了值序列确实逐字未变，即这条变异对旧测试确实不可见。PASS 23/24。",
+        "M3d（P2）违规文件写 `\"deposit_\" + \"corp_ytd\"`：**KILLED**，TestFieldNamesAppearOnlyInFieldsGo FAIL 并报 dummy.go:3 出现 \"deposit_corp_ytd\"。PASS 23/24。",
+        "回归 M1 常量值 deposit_corp_ytd → deposit_corp_yt：KILLED，绑定断言与值序列断言双红。PASS 22/24。",
+        "回归 M2 fieldOrder 内交换 m1/m0 位置：KILLED，仅 TestFieldOrderGoldenList FAIL。PASS 23/24。",
+        "回归 M4 删包注释 breaking change 行：KILLED，TestPackageDocDeclaresUnits FAIL。PASS 23/24。",
+        "变异全部撤销后复核 PASS 计数回到 24，工作区 git status 干净。"
+      ],
+      "known_capture_limits": [
+        "foldStringLiteral 只折叠**纯字面量**表达式。变量拼接（`prefix + \"corp_ytd\"`）、fmt.Sprintf、[]byte 往返、字符串常量间接引用都抓不到——这是已知上限，不是遗漏。真要绕过总能绕过；这条检查防的是「顺手写死」而非蓄意规避。"
+      ]
+    }
+  },
+  "notes_for_downstream": [
+    "TASK-003（schema）：DDL 列必须 for _, f := range fieldOrder 生成，写死任何字段名（含字面量拼接）会被 TestFieldNamesAppearOnlyInFieldsGo 抓住。表名、meta 列名不是业务字段，不受该约束。",
+    "新增/删除字段的正确改法：改 fields.go 常量 + fieldOrder，改 fields_test.go 的 goldenFields（含 got 与 want 两侧）与对应分组计数断言。只改一处必红。",
+    "**用 Field* 常量当 Values 的键时可以信任它的值**——绑定表已钉住配对；但反过来，任何绕过常量直接写字符串的地方都没有这层保护。"
+  ]
+}

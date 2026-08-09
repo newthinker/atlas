@@ -1,0 +1,100 @@
+{
+  "task_id": "TASK-005",
+  "title": "Save 的输入校验与 INSERT 路径",
+  "by": "dev-agent-41",
+  "commit": "572f2cebb6a2cb9121f62c24c9ca6498afe05962",
+  "supersedes_commit": "39aa8af0bff0d9c46b8a1a77e633aa1a1eb0c7fb",
+  "branch": "feat/hestia-store",
+  "rework": "第 1 轮返工（reason_class=task_defect，rework_count=1，QA 的 C2）：G10 的守护可被绕过——checkReportConsistency 只做 `c.Status == CheckFailed` 单值比较，而 CheckStatus 是 string 具名类型，错拼即穿透。改为白名单，并顺带让 types.go 的「Skipped 必填 Reason」注释真正成立。仅改 store.go + store_test.go。",
+  "key_findings": [
+    "**缺陷已复现并修复**：`CheckStatus` 是 `type CheckStatus string`，任何字符串都能构造出一个 Check。原实现的单值黑名单等于默认「不等于 failed 就是好的」。RED 阶段实测六种错拼（\"FAILED\" / \"fail\" / \"\"（零值漏填）/ \"PASSED\" / \"pending\" / \"passed \"（尾随空格））在 Passed=true 下**全部返回 nil 且全部入库**。",
+    "**根因是同一文件内两种把关强度**：`checkValues` 对 `Values` 的键用白名单（未知键拒绝且零行），`checkReportConsistency` 对 `Check.Status` 用单值黑名单。同一个包、同一条 Save 路径、同一类外部输入，强度必须一致。修复后两者都是白名单。",
+    "**错误信息回显原串**：未知状态报成 `deposit_sum=\"FAILED\"`（`%s=%q`），M1b-3 才知道是哪个拼写出了问题。只报「有未知状态」而不说是什么，等于把定位成本转嫁给下游。",
+    "**未知状态的错误排在 failed 之前**：状态无法解释时，「这份报告是否自洽」这个问题本身就无从回答，先报它比报一个基于误读的结论准确。",
+    "**「Skipped 必填 Reason」此前是一句没有机制强制的注释**（types.go:116），与 G9 曾经的「宣称并发、机制不支持」是同一形状。现由 checkReportConsistency 强制（只要求非空，`absent_field:<name>` / `no_prior_period` 的形态归 M1b-3）。**未改 types.go**——Check 没有 validate 方法，加一个会扩大 TASK-002 的范围；Save 是唯一写入口，校验归它。",
+    "**留了一个有意识的洞**：`Passed == false` 时不校验状态，未知状态会随 report 存进 pending 的 JSON。pending 的消费者只有人，人看得出 \"FAILED\" 不对；而静默进权威表无从审计。危害不对称，处置也就不对称。这一点写进了函数注释，不是遗漏。"
+  ],
+  "decisions": [
+    {
+      "decision": "白名单只覆盖 Passed=true 的路径，不扩大到 pending",
+      "rationale": "fix_items 的要求就是 Passed=true 时的白名单。扩大到 pending 会改变 TASK-006 已 verified 的接受面，且危害不对称（见 key_findings 末条）。作为观察记在这里，由 M1b-3 或 Leader 裁定是否收紧。"
+    },
+    {
+      "decision": "「Skipped 必填 Reason」在 store.go 强制而不在 types.go 加 Check.validate",
+      "rationale": "Check 目前没有校验方法，加一个等于把 TASK-002 的类型层扩成校验层；而 Save 已经是唯一写入口，所有输入校验都在这里，放在别处反而分散。types.go 的注释描述约束、Save 强制它，位置分离但职责清楚。"
+    },
+    {
+      "decision": "为白名单加对照组（CheckPassed + CheckSkipped 必须放行）",
+      "rationale": "「一律拒绝」和「正确拒绝」在只测拒绝路径的测试下长得一模一样。过度拦截同样是全绿测试发现不了的。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/store.go",
+    "internal/hestia/store_test.go"
+  ],
+  "interfaces_exposed": [
+    "func (s *Store) Save(ctx context.Context, obs Observation, rep ValidationReport) (Outcome, error)（**导出**，唯一写入口；接受面收窄：Passed=true 时每个 Check.Status 必须 ∈ {CheckPassed, CheckSkipped}，CheckSkipped 还须 Reason 非空）",
+    "func insertSQL(obs Observation) (string, []any)（**未导出**，未改动）",
+    "func checkValues(values map[string]float64) error（**未导出**，未改动）",
+    "func checkReportConsistency(rep ValidationReport) error（**未导出**，本轮改为白名单）",
+    "测试侧 helper（同包）：passing()、obsWith(values)、countRows(t, s, table)、assertNoRowsAnywhere(t, s)"
+  ],
+  "verification": {
+    "command": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -v -cover",
+    "result": "**本任务净计数：63 顶层 PASS / 83 含子测试 / 0 FAIL / 0 SKIP**（干净基线 61/75 + 本轮新增 2 顶层 / 8 含子测试）。⚠️ 提交时共享工作区被污染，见 contamination_note。",
+    "go_vet": "exit 0",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "race": "go test ./internal/hestia/... -race -count=1 → ok 1.956s",
+    "full_repo": "go test ./... → exit 0，64 个包全 ok，0 FAIL",
+    "new_tests": [
+      "TestSaveRejectsUnknownCheckStatus（6 个错拼子用例 + 白名单对照组）",
+      "TestSaveRejectsSkippedWithoutReason（缺 Reason 拒绝 + 任意非空 Reason 放行）"
+    ],
+    "mutation_evidence": {
+      "harness": "手工变异，隔离 worktree（git worktree add --detach <path> 572f2cebb6a2cb9121f62c24c9ca6498afe05962），用后 git worktree remove。替换用 python3 并对锚点做 assert，避免 perl 分隔符冲突把文件写坏。",
+      "baseline": "64 顶层 --- PASS（**混合基线**，含 dev-agent-42 的 1 条；本任务净基线 63）。KILLED 记录里的 62/64、63/64 相应应读作 61/63、62/63。",
+      "self_proof": "每个变异均核对四条：git diff --numstat 非空、**首行仍是 package hestia**、go vet exit 0、有实际 --- FAIL 行且顶层 PASS 低于基线",
+      "killed": [
+        "R1' 把 checkReportConsistency 整体退回返工前的单值黑名单实现（完整函数体替换，可编译）：KILLED，TestSaveRejectsUnknownCheckStatus 与 TestSaveRejectsSkippedWithoutReason 双红，62/64 —— 红两条但因果清晰：这一个变异同时撤销了本轮新增的两项守卫。",
+        "R2 default 分支不收集未知状态（静默放行）：KILLED，仅 TestSaveRejectsUnknownCheckStatus FAIL，63/64。",
+        "R3 未知状态错误里不回显原串（只报 c.ID）：KILLED，仅 TestSaveRejectsUnknownCheckStatus FAIL，63/64 —— 证明「回显原串」这条要求本身有测试保护，不只是写在注释里。",
+        "R4 去掉 Skipped 的 Reason 强制：KILLED，仅 TestSaveRejectsSkippedWithoutReason FAIL，63/64。",
+        "R5' failed 仍收集但不据此报错（`if false && len(failed) > 0`）：KILLED，仅 TestSaveRejectsSelfContradictoryReport FAIL，63/64 —— 原 G10 断言未因改白名单而失效。"
+      ],
+      "survived": [
+        {
+          "id": "M7'（沿用上一轮，未闭合）",
+          "mutation": "把 `if !rep.Passed { … }` 整块移到 `verdict := bitemporal.Classify(...)` 之前，pending 路径的 Outcome 不带 Verdict。",
+          "status": "**本轮未重跑，也未闭合**——它与 C2 无关，根因仍是 savePending 在 TASK-005 是桩。TASK-006 已 verified 且实现了 savePending，闭合规格见上一版 discovery 的 notes_for_downstream 第 1 条（Revision + Passed=false ⇒ out.Verdict == bitemporal.Revision）。若 TASK-006 未补该测试，这个洞仍然开着。"
+        }
+      ],
+      "methodology_notes": [
+        "**又撞了两次「编译失败伪造 0 红」**：R1 第一版把 `default: _ = 0` 插到 switch 开头 ⇒ `unknown` 声明未使用；R5 第一版 `case CheckPassed, CheckFailed:` ⇒ `failed` 声明未使用。两次都是 vet exit=1、顶层 PASS=0，脚本打印「无 FAIL（存活）」。**四条自证里的 `vet exit` 与 `PASS 计数低于基线`（而不是等于 0）是识别它们的关键**——只看「有没有 FAIL 行」两次都会误报存活。",
+        "**Go 的「声明未使用」让「关掉一个分支」的变异格外容易编译失败**：关掉收集逻辑，收集变量就没人用了。可编译的等效写法是保留收集、改为不据此报错（如 R5' 的 `if false && len(failed) > 0`），或整体替换成另一份完整实现（如 R1'）。",
+        "本轮改用 python3 替换并对锚点 `assert`，避免上一轮 perl 分隔符冲突把整个文件写坏那种静默失败。"
+      ]
+    },
+    "contamination_note": {
+      "what": "commit 572f2ce **含 dev-agent-42 的 TASK-004/006 C1 修复**（verifyCurrentView + NewStore 里的调用 + TestNewStoreRejectsDriftedCurrentView）。",
+      "how": "TASK-004/005/006 声明了完全相同的 writes（./internal/hestia/store.go、store_test.go）。我用了显式 pathspec `git add internal/hestia/store.go internal/hestia/store_test.go`，但**显式 pathspec 只限制文件、不限制 hunk**——同一文件里对方的在途改动一并被 add。「只提交你的文件」这条纪律防的是误提交别的文件，防不住这一种。",
+      "discovered_by": "dev-agent-42 通过测试计数差额发现（它只加 1 条测试，重测却从 61/75 变成 64/84，差额对不上）并主动通报。",
+      "corrected_numbers": {
+        "我上报过的（污染）": "64 顶层 / 84 含子测试；coverage 89.3%（门禁 89.0%）",
+        "本任务净计数（自测核算）": "63 顶层 / 83 含子测试",
+        "核算方法": "实测 dev-agent-42 的 TestNewStoreRejectsDriftedCurrentView 贡献 1 行 PASS、本轮两条新测试贡献 8 行（含 6 个 status= 子测试）；64-1=63、84-1=83，与干净基线 61/75 自洽。",
+        "覆盖率": "89.3% / 门禁 89.0% **同样虚高**，含 verifyCurrentView 的代码与测试；本任务单独的覆盖率未单测。"
+      },
+      "impact_on_mutation_evidence": "**变异结论不受影响**。5 个变异全部针对 checkReportConsistency，KILLED 判定依据是「单点红 + 顶层 PASS 低于基线」，而 dev-agent-42 那条测试与这些变异无因果关系、不会因它们变红。仅基线数字 64 含对方 1 条，KILLED 时的 62/64、63/64 相应应读作 61/63、62/63。",
+      "status": "已通报 dev-agent-42 与 Leader。C1 的归属需在 TASK-004/006 的 discovery 里记为落在 572f2ce；若 dev-agent-42 希望 C1 有独立 commit，由我配合拆分重做——代价由我承担。",
+      "c2_actual_output": "**本任务 C2 的真实产出**是 `checkReportConsistency` 的白名单化，以及 TestSaveRejectsUnknownCheckStatus / TestSaveRejectsSkippedWithoutReason 两条测试。**仅 C2 的贡献为 +2 顶层 / +8 含子测试**。commit 572f2ce 里的 verifyCurrentView、NewStore 中对它的调用、TestNewStoreRejectsDriftedCurrentView 均**不是**本任务产出，属 TASK-004 的 C1（dev-agent-42）。",
+      "root_cause_full": "两半：①**我这半**——显式 pathspec `git add <file>` 只限制文件、不限制 hunk，同一文件里他人的在途改动一并被 add；「只提交你的文件」这条纪律覆盖不到这一种。②**调度这半（Leader 已认领）**——T4/T5/T6 三个 review_fix 的 writes 完全相同且同时在途。**validator 有 scope 互斥规则且确实会拦**（派验 T5 时报 `[scope-mutex] TASK-005: 写入范围 \"./internal/hestia/store.go\" 与在途任务 TASK-004 相交`），但开 review_fix 时没跑 validator。规则是好的，是被跳过了。",
+      "resolution": "Leader 裁定**不重做提交**（回退代价大，且 dev-agent-42 的工作已验过）：C1 的归属在 TASK-004/006 的 discovery 里记为落在 572f2ce，本 discovery 记录混合计数与真实产出归属。dev-agent-42 直接基于 572f2ce rebase，只提交 C3/C4。"
+    }
+  },
+  "notes_for_downstream": [
+    "**M1b-3（validate）必须只用 CheckPassed / CheckFailed / CheckSkipped 三个常量**，不要写字符串字面量：Passed=true 时任何其它取值会被 Save 拒绝并回显原串。CheckSkipped 还必须填 Reason（非空即可，形态约定 `absent_field:<name>` / `no_prior_period` 由你定义并自行校验）。",
+    "**Passed=false 时状态不校验**：未知状态会随 report 存进 pending 的 JSON。若 M1b-3 认为这一侧也该收紧，改动点是 checkReportConsistency 开头的 `if !rep.Passed { return nil }`。",
+    "**TASK-006 若尚未闭合 M7'**（pending 路径的 Outcome.Verdict 无观测点），那个洞仍开着：把 `if !rep.Passed` 挪到 Classify 之前不会有任何测试变红。规格见上一版 discovery。",
+    "**不要删 TestStoreExposesNoWriteMethods 或 TestPackageExposesNoWriteFunctions 中的任何一条**，两者视野互补（嵌入提升的方法 vs 包级函数），均须保持精确集合相等。"
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "task": "TASK-002",
+  "title": "类型与 Meta 校验 (types.go)",
+  "by": "dev-agent-42",
+  "commit": "a087b989777f028f08b69b3fc690e83426262271",
+  "key_findings": [
+    "【跨任务契约·最高优先级】Meta 七个字段的声明顺序为：Period, PeriodType, PublishedAt, ArticleID, CaliberVersion, Extractor, IngestedAt（对应列名 period, period_type, published_at, article_id, caliber_version, extractor, ingested_at）。此顺序被另外两处复用，三处必须同序：(1) TASK-003 的 schema.go 中 metaColumns（既是建表列顺序也是 INSERT 列顺序）；(2) TASK-005 的 store.go 中 insert 按同样顺序从 Meta 取值填 args。任一处不同序 → 数据静默错位写入：这七列都是 TEXT，把 extractor 的值塞进 caliber_version 列不触发任何数据库错误，只让下游读到胡话。",
+    "该顺序已由 TestMetaFieldOrderIsCrossTaskContract 用 reflect 钉死（含字段数 7）。它只能保护 types.go 这一端：谁重排/增删 Meta 字段，本条转红逼他去同步另两处；但它无法发现 metaColumns 或 insert 单方面写错序。TASK-003/005 需各自补一条同序断言（建议 TASK-003 断言 metaColumns 与 reflect 取到的 Meta 字段名 snake_case 逐一相等）。",
+    "Meta.validate 是不导出的（小写）。TASK-005 的 Save 在包内直接调用即可；包外无法调用，这是刻意的——导出它等于给调用方一个「先自己校验、再绕过 Save 直接写库」的暗示。",
+    "IngestedAt 不参与校验。TASK-005 的 Save 必须自己覆写 IngestedAt（RFC3339），validate 不会替它兜底、也不会因调用方乱填而报错。",
+    "Outcome.Table 的取值应为 TASK-003 定义的 TableObservations / TablePending 常量。本任务未 import 它们（尚未存在），只在注释里写明；TASK-003 落地后无需回改 types.go。"
+  ],
+  "decisions": [
+    {
+      "decision": "validate 增加 published_at 与 period 的形态校验（正则 \\A[0-9]{4}-[0-9]{2}-[0-9]{2}\\z 与 \\A[0-9]{4}-[0-9]{2}\\z），需求文档示例代码中没有这一段",
+      "rationale": "落实 G1——M1a 明文指派给写入方的契约。internal/macro/bitemporal/lookup.go 的 Lookup 文档注释写死：MAX() 与 Classify 都是字典序，只有 ISO 8601 形态时字典序才等于时间序，喂进 2026-7-15 会静默判错、零告警，且『明确不在这里加形态校验……由建表方与写入方保证』。Store 就是那个写入方，PublishedAt 又取自外部 HTML 的 <meta name=\"PubDate\">，形态不受控是最可能发生的事。三种静默后果：少补零→当前行视图长期返回旧版本；混入 RFC3339→重复判成修订、refreshArticleID 永不触发；period 写成 2026-6→造出第二个业务键、下游环比同比算错。"
+    },
+    {
+      "decision": "正则用 \\A...\\z 而非 ^...$",
+      "rationale": "语义等价但意图更明确（RE2 无 (?m) 时 ^/$ 也只匹配文本首尾），且防止后来者加 (?m) 后静默放行含换行的取值。测试含 \"2026-07-15\\n\" 与 \"2026-06\\n\" 两条用例钉住这一点。"
+    },
+    {
+      "decision": "只校形态，不校日历有效性：\"2026-13\"、\"2026-02-31\" 仍会通过 validate",
+      "rationale": "形态是字典序失效的充分修复（定长补零即可）；日历有效性是另一个问题，属闸门层（M1b-3）职责。这是**已知的残留缺口**，已写进 types.go 的注释。若 Leader 认为该缺口需要在 Store 层堵，可另开任务，别默认它已被覆盖。"
+    },
+    {
+      "decision": "TestMetaValidateRejectsEmptyRequired 用 assert.EqualError 比对完整错误串，不用需求文档示例的 assert.Contains",
+      "rationale": "实证结论（下见 verification.mutation M8）：把 period 的错误标签误写成 period_type 这一变异，在 Contains 断言下 6 个子测试全部 PASS（完全存活），在 EqualError 下被 period 子测试杀死。注意需求文档/派单里『Contains 在两者搞混时照样通过』的说法要分情况：完整互换（period↔period_type 同时错）只被 Contains 半数捕获（period 子测误判 PASS、period_type 子测 FAIL）；只错一侧才是完全存活。结论不变——用完整串比对。"
+    },
+    {
+      "decision": "校验顺序：六个必填项按声明序 → period_type 枚举 → period 形态 → published_at 形态",
+      "rationale": "空值与形态是两类不同的错误，空值先报可给出更贴切的信息（否则 period=\"\" 会得到『must match YYYY-MM』这种绕弯的提示）。测试对空值断言完整错误串，已把这个顺序钉住。"
+    },
+    {
+      "decision": "TestMetaValidateIgnoresIngestedAt 断言『零值与任意值结果相同』，而不只是『两者都不报错』",
+      "rationale": "DoD boundary 的判据是『结果相同』。只断言 NoError 的话，一个只认某种 IngestedAt 取值的实现照样能通过；故同时用一个必填项为空的 Meta 在四种 IngestedAt 取值下断言错误串完全一致。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/types.go",
+    "internal/hestia/types_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Meta struct{ Period, PeriodType, PublishedAt, ArticleID, CaliberVersion, Extractor, IngestedAt string } —— 声明顺序为跨任务契约",
+    "func (m Meta) validate() error —— 不导出，仅包内可调用",
+    "var validPeriodTypes = map[string]bool{\"monthly\": true, \"h1\": true, \"annual\": true} —— 合法集合在代码中显式列出",
+    "var periodRE / publishedAtRE *regexp.Regexp —— 包内形态校验，不导出",
+    "type Observation struct{ Meta Meta; Values map[string]float64 } —— Values 键不存在即字段缺失，与值为 0 不同",
+    "type CheckStatus string + CheckPassed/CheckFailed/CheckSkipped（\"passed\"/\"failed\"/\"skipped\"）",
+    "type Check struct{ ID string; Status CheckStatus; Value *float64; Reason string }",
+    "type ValidationReport struct{ Passed bool; Checks []Check }",
+    "type Outcome struct{ Verdict bitemporal.Verdict; Table string }"
+  ],
+  "verification": {
+    "commit": "a087b989777f028f08b69b3fc690e83426262271",
+    "commands": [
+      "GOTOOLCHAIN=local go vet ./internal/hestia/",
+      "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -v",
+      "GOTOOLCHAIN=local go test ./internal/hestia/ -coverprofile=... && go tool cover -func=..."
+    ],
+    "result": "PASS 23 / FAIL 0 / SKIP 0（含 TASK-001 fields.go 的 7 条；本任务贡献 16 条，其中 TestMetaValidateRejectsEmptyRequired 含 6 个子测试）",
+    "coverage": "包语句覆盖率 100.0%；types.go:63 validate 100.0%（dev_minimum=80，达标）。注：fields.go 只有 var 声明、无语句，故 func 覆盖清单里只出现 validate。",
+    "race": "未跑 -race：本包无 goroutine、无共享状态，收益为零。这是记录在案的排除，不是遗漏。",
+    "mutation": {
+      "harness": "手工变异，隔离 detached worktree（git worktree add --detach <scratchpad>/wt-mut a087b989），完成后 git worktree remove --force",
+      "baseline": "worktree 基线 PASS=23，与主仓库基线 23 一致（已核对）",
+      "self_proof": "每个变异体均自证三条：git diff --stat 非空、go vet exit 0、PASS 计数与基线 23 比对",
+      "score": "7/7 killed",
+      "mutants": [
+        "M1 删除 published_at 形态校验 → KILLED (PASS=22) by TestMetaValidateRejectsMalformedPublishedAt",
+        "M2 删除 period 形态校验 → KILLED (PASS=22) by TestMetaValidateRejectsMalformedPeriod",
+        "M3 periodRE 换成 published_at 的正则 → KILLED (PASS=19)",
+        "M4 必填标签 period 与 period_type 完整互换 → KILLED (PASS=20)",
+        "M5 删除 extractor 必填项 → KILLED (PASS=20)",
+        "M6 重排 Meta 字段声明顺序（Extractor 提到 CaliberVersion 前）→ KILLED (PASS=22) by TestMetaFieldOrderIsCrossTaskContract",
+        "M7 period_type 枚举检查恒真 → KILLED (PASS=22) by TestMetaValidateRejectsBadPeriodType",
+        "M8（断言强度对照，不计入 7/7）period 标签单侧误写成 period_type：本任务的 EqualError 断言 → KILLED；换成需求文档示例的 assert.Contains 后同一实现 6/6 子测试全 PASS → 完全存活。这是『不照抄弱断言』的实证依据。"
+      ]
+    }
+  },
+  "notes_for_downstream": [
+    "TASK-003：metaColumns 必须写成 [period, period_type, published_at, article_id, caliber_version, extractor, ingested_at]，且建议补一条断言把它与 reflect 取到的 Meta 字段名（转 snake_case）逐一比对——本任务的 reflect 测试保护不到 schema.go 这一端。",
+    "TASK-005：insert 从 Meta 取值填 args 时必须同序；Save 需自行覆写 obs.Meta.IngestedAt 为 RFC3339，validate 不管这一项。",
+    "TASK-005：Save 内调用 obs.Meta.validate() 即可（同包）；validate 已经拦下 published_at/period 的形态问题，无需在 Save 里重复校验，但也别指望它拦日历有效性（2026-13 会放行）。"
+  ]
+}

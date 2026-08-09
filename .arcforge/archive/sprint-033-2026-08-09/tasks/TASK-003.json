@@ -1,0 +1,54 @@
+{
+  "id": "TASK-003",
+  "title": "由字段清单生成 DDL (schema.go)",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/schema.go",
+    "./internal/hestia/schema_test.go"
+  ],
+  "description": "表名常量、metaColumns、三个 DDL 生成函数（observationsDDL/pendingDDL/currentViewDDL）。列全部从 fieldOrder 派生，不手写。",
+  "done_criteria": {
+    "functional": [
+      "`observationsDDL()` 的业务列**逐列由 fieldOrder 派生并按其顺序排列**，不得手写列清单。**判据：列数恰好 61（7 个 metaColumns + 54 个业务字段）**，且业务列顺序与 fieldOrder 逐项一致。\n\n原表述「+主键等固定列」已删——`PRIMARY KEY (...)` 是**约束不是列**，那句会让一个验证者去找不存在的额外列而期望 62+，另一个直接算 61。PK 的断言独立成条（见 non_functional）。",
+      "`metaColumns` 顺序为 period, period_type, published_at, article_id, caliber_version, extractor, ingested_at——**与 TASK-002 的 Meta 字段声明顺序、TASK-005 的 insert 取值顺序三处同序**（见 TASK-002 discovery）。\n\n**必须用 reflect 机制化断言，不能只靠人眼比对**（dev-agent-42 与 test-agent-21 独立提出的同一要求）：断言 `metaColumns` 与 reflect 从 `Meta` 结构体取到的字段名（转 snake_case）**逐一相等**。\n\n理由：TASK-002 已有 `TestMetaFieldOrderIsCrossTaskContract` 钉住 `Meta` 一端，但它**只保护那一端**——`metaColumns` 单方面写错序不会让任何测试变红。三处同序的契约目前只守住三分之一，本任务补第二端（第三端由 TASK-005 补）。\n\n失效后果：所有列都是 TEXT，错位写入**不触发任何数据库错误**。",
+      "`currentViewDDL(spec bitemporal.Spec)` 生成的视图基于 M1a 的当前行语义（由 published_at 派生，非 is_current 列）。"
+    ],
+    "boundary": [
+      "三个 DDL 均可重复执行（`CREATE TABLE IF NOT EXISTS` 等），在真实 SQLite 上连续执行两次不报错且结果一致。"
+    ],
+    "error_handling": [
+      "DDL 中不得出现 `is_current` 与 `absent_fields` 列（spec §2 D5）。判据：对生成的 DDL 字符串做否定断言。"
+    ],
+    "non_functional": [
+      "字段名不得在本文件出现字符串字面量形式——全部经 fieldOrder 遍历取得。判据同 TASK-001 `non_functional[0]`：**只约束非 `_test.go` 文件**。",
+      "DDL 在真实 SQLite（t.TempDir()）上实际执行通过，不只做字符串比对。字符串对了而 SQLite 拒绝，等于没验。",
+      "**从真实库读结构逐项断言（G4+G5，reviewer 实测证明当前判据形同虚设）**。`NewStore` 之后读 `PRAGMA table_info(hestia_observations)` 与 `sqlite_master`，断言：①`PRIMARY KEY (period, period_type, published_at)` 存在；②业务列类型亲和性为 REAL；③元数据列的 NOT NULL 标志；④`hestia_pending` 的 PK；⑤`v_hestia_current` 确按 MAX(published_at) 且关联 period+period_type。\n\n**为什么必须从真实库读而不是比对 DDL 字符串**：reviewer 实测两条——①把 `PRIMARY KEY` 整行删掉，需求文档全部 7 个任务的测试**依然全绿**（其示例测试显式 `strings.HasPrefix(line, \"PRIMARY KEY\") → continue` 跳过了它），而无 PK 时重复写入不再是响亮的 UNIQUE 错误，变成 QueryRow 静默取第一行、UPDATE 同时改两行；②业务列建成 TEXT 而非 REAL 时，`Scan` 进 float64 照样成功（写进去读回来的测试全绿），但 SQLite 按字典序比较，`MAX()` 与 `WHERE m2 > 300` 全部静默算错。\n\n本条同时覆盖：`NewStore` 实际部署的那个视图从未被验过——现有视图测试用的是**测试自己造的** spec。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-09T07:17:07Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-41",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "fb1526071bce20d4929258a24748f04431d4be84",
+    "discovery_sha256": "1705a18bb68e674b6f7673601d32e7f74d09af5fe7571002de040aeb875019d0",
+    "at": "2026-08-08T16:03:15Z"
+  },
+  "verifier": "test-agent-21"
+}

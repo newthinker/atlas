@@ -1,0 +1,19 @@
+# ⚠️ 本文件是误创的垃圾，内容无效，请人类在会话外删除
+
+```bash
+rm .arcforge/docs/01-design/handoff-to-later-iterations.md.append
+```
+
+**成因**（Sprint 033，Leader 手误）：我在一条 bash 命令里拼错了写通道调用，把 `handoff-to-later-iterations.md` 写成了 `handoff-to-later-iterations.md.append`，内容是字符串 `placeholder`。
+
+**为什么删不掉**：
+- `rm` 被 write-guard 拒绝（`.arcforge/` 受保护，单写者模型 ISSUE-4）
+- 写通道的 `doc` 子命令**只能覆盖，没有删除操作**
+
+⇒ 只能把内容改成本说明，实际删除留给人类。
+
+**暴露的机制问题**（已记入 final-report 待同步清单）：写通道的 `doc` 子命令**接受任意相对路径，不校验文件名**——一次手误就产生一个 agent 无法回收的文件。而 `.arcforge/docs/` 会随 Sprint 归档进入版本库，垃圾会被永久保留。
+
+**建议**：`doc` 子命令校验扩展名（只接受 `.md`），或提供一个受控的删除操作（如 `doc <path> --retract`，仅允许删除本实例创建且未被引用的文件）。
+
+真正的交接内容在同目录的 `handoff-to-later-iterations.md`（无 `.append` 后缀）。

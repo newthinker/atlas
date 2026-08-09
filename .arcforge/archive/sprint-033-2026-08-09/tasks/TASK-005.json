@@ -1,0 +1,74 @@
+{
+  "id": "TASK-005",
+  "title": "Save 的输入校验与 INSERT 路径",
+  "status": "accepted",
+  "complexity": "复杂",
+  "dependencies": [
+    "TASK-004",
+    "TASK-002",
+    "TASK-001"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004",
+    "TASK-002",
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "Save(ctx, obs, rep) (Outcome, error)——唯一写入口，签名强制要求 ValidationReport。内部编排 bitemporal.Lookup → Classify → 分流。本任务覆盖 New/Revision/OutOfOrder 三条 INSERT 路径与全部输入校验；savePending 留桩由 TASK-006 替换。",
+  "done_criteria": {
+    "functional": [
+      "`Save` 编排 `bitemporal.Lookup` → `Classify`，对 New/Revision/OutOfOrder 三种 Verdict 各有明确行为，且 `Outcome.Verdict` 如实反映分类结果。Revision 情形**两行都保留**（当前行由 published_at 派生，不删旧行）。",
+      "`insert` 的取值顺序与 `metaColumns`（TASK-003）、`Meta` 字段声明顺序（TASK-002）**三处同序**。**判据不能只是「能写进去」**——须构造一个能区分错位的用例：让七个 Meta 字段取互不相同且可辨识的值，写入后逐列读回比对，任意两列互换都必须红。",
+      "`Values` 按 `fieldOrder` 顺序遍历拼列，不按 map 迭代顺序（map 顺序随机会让每次生成的 SQL 不同、日志无法比对）。\n\n**判据须可机械判定**：把 SQL 构造抽成 `insertSQL(obs) (string, []any)` 之类可直接断言的函数，对同一 Observation 多次调用断言列序完全相同。若不抽出，`insert` 不返回它生成的 SQL、包内无观测点，验证者只能读代码确认「range 的是 fieldOrder 不是 map」——**那是 review 不是 test**，此时须显式标注 verify_by: review。"
+    ],
+    "boundary": [
+      "部分字段：`Values` 只含少数键时，其余列为 NULL 而非 0。**0 与 NULL 在业务上不同**（「增量为零」vs「未披露」），必须能区分。",
+      "空 `Values`（len==0）与全 54 字段两种极端都能正确写入。"
+    ],
+    "error_handling": [
+      "`Values` 含白名单外的键时返回错误且**不写入任何行**。判据：错误返回后查库确认零行——只断言 error 非 nil 不能排除「已写脏数据再报错」。",
+      "`Meta` 非法时返回错误（复用 TASK-002 的 validate），同样不得留下部分写入。",
+      "`IngestedAt` 由 Store 用 `s.now()` 覆写，调用方填的值被忽略。判据：传入一个可辨识的假时间，读回必须是 now() 的值。",
+      "**拒绝自相矛盾的 ValidationReport（G10）**：`rep.Passed == true` 却存在 `Status == CheckFailed` 的 Check 时，`Save` 必须报错且零行。\n\n理由：签名要求 `ValidationReport` 是 ADR-0003 在同机场景下的唯一防线，但类型只要求报告**存在**——`ValidationReport{Passed: true}` 是 22 个字符的旁路，且观测表不存任何校验痕迹（pending 存 report，观测表不存），事后无从审计某行是否真跑过闸门。本条挡的是 M1b-3 一个很具体的 bug 类：加了失败检查却忘了把 Passed 置 false，那会让坏数据进权威表且不留痕迹。",
+      "**非有限值必须显式报错（G6）**：`Values` 含 NaN 或 ±Inf 时 `Save` 报错且零行。\n\nreviewer 实测：NaN 写进 SQLite 后 `typeof` 为 null、`isNull=1`——**与「字段缺失」完全不可区分**，而「用 map 表示缺失以区分『本就没有』与『解析漏了』」正是本设计的核心论证，NaN 恰好把它绕过去。比率型字段的 0/0 是最常见来源。另：`json.Marshal(NaN)` 直接报错，若 NaN 流到 pending 路径会让 savePending 失败 → Save 返回 error → **两张表都没有这条数据**，而 pending 存在的理由正是「不让那期数据彻底消失」。"
+    ],
+    "non_functional": [
+      "`savePending` 此时是**有意的桩**（返回 not implemented），TASK-006 替换。本任务全部测试走 `passing()` 报告，不触达该桩——**验证时不得据此判 REJECT**（需求文档 Self-Review 已明确标注）。",
+      "**把写口守卫从「`*Store` 方法集」扩到「包导出面」**（test-agent-20 在 T4 的 M10 发现，本任务是自然时机）。\n\n现状：`TestStoreExposesNoWriteMethods` 用 `reflect.TypeOf(&Store{})`，**只看 `*Store` 的方法**。M10 实证：包级新增 `func InsertRow(db *sql.DB, period string) error`（直接 INSERT、绕过 ValidationReport）⇒ **43/43 全绿，无人拦**。而 `non_functional[0]` 说的是「任何**导出写口**」——守卫窄于判据。\n\n**本任务无论如何都要改这个测试**（引入 `Save` 时它会转红，dev-agent-42 已在注释写明「那是刻意的」），改成 `[Close, DB, Save]` 时**顺手把视野扩到包导出面**，成本近乎为零。\n\n**不得弱化成「包含」断言**（dev-agent-42 交接原话）——必须是精确集合相等。\n\n为什么不能只靠 T7 兜底：T7 `functional[0]` 用 `go doc` 核验整个导出面，但 `verify_by: manual` 且**一次性**，T7 之后的回归接不住；包内测试是持续的。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-09T07:17:08Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-41",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "823ca15fbea53c626e986419d8f91ad200f03859",
+    "discovery_sha256": "4904898452a4df253c2db6dbaefd18c77e23fc11780df630b21923ad35b8ff4c",
+    "at": "2026-08-09T00:38:06Z"
+  },
+  "verifier": "test-agent-21",
+  "reason_class": "task_defect",
+  "fix_items": [
+    {
+      "id": "C2",
+      "severity": "WARNING",
+      "source": "qa-agent-10（Skeptic lens）实测，三条错拼状态的报告全部入库",
+      "desc": "**G10 的守护可被绕过。** `checkReportConsistency`（store.go:289）只做 `c.Status == CheckFailed` 单值比较，而 `CheckStatus` 是 **string 具名类型**——M1b-3 写成 `\"FAILED\"` / `\"fail\"` / 任何错拼即绕过，`Passed=true` 的自相矛盾报告照常入库、`Save` 返回 nil。\n\n**而观测表不存校验痕迹**，事后无从审计——**正是 G10 这条判据要防的后果**。\n\n同一文件的 `checkValues` 对 `Values` 的键做了白名单（未知键拒绝且零行），**此处标准不一致**：一个用白名单，一个用单值黑名单。",
+      "requirement": "改为白名单：`Passed == true` 时要求每个 `Check.Status` ∈ {`CheckPassed`, `CheckSkipped`}，未知状态一律拒绝并**在错误里回显原串**（便于 M1b-3 定位是哪个拼写）。\n\n顺带（types.go:116 观察级）：注释写「Skipped 必填 Reason」但无任何强制，可一并补。",
+      "verify": "变异实证：构造 `Status` 为 `\"FAILED\"` / `\"fail\"` / `\"\"` 的 `Passed=true` 报告，必须全部被拒且零行落盘。"
+    }
+  ],
+  "rework_count": 1
+}

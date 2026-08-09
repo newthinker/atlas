@@ -1,0 +1,79 @@
+{
+  "id": "TASK-006",
+  "title": "Duplicate 的 UPDATE 与 pending 分流",
+  "status": "accepted",
+  "complexity": "复杂",
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-005"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "refreshArticleID（Duplicate 情形只更新 article_id，不新增行）与真正的 savePending（校验未通过时写 pending 表，替换 TASK-005 的桩）。",
+  "done_criteria": {
+    "functional": [
+      "`Duplicate` 情形调用 `refreshArticleID`：**只更新 article_id，不新增行**。判据：写入前后行数不变且 article_id 已更新——只断言「无报错」无法区分「更新了」与「什么都没做」。\n\n**必须与零值可区分（TASK-005 交接的 M7' 缺口，dev-agent-41 给的具体规格）**：构造 **Revision** 场景——先用 `passing()` 写一行，再用**更晚的 published_at** + `Passed=false` 调 `Save`，断言 `out.Table == TablePending` **且 `out.Verdict == bitemporal.Revision`**。\n\n**只测 New 场景等于没测，因为 `bitemporal.New == 0`**——把 `if !rep.Passed` 整块移到 `Classify` 之前的变异（M7'）在 T5 范围内**完全存活**（53/53 全绿、vet exit 0、三条自证齐全）。\n\n根因是结构性不可测而非漏写测试：T5 里 `savePending` 是有意的桩、永远返回 error ⇒ `Passed=false` 必然走 `return Outcome{}, err` ⇒ 调用方拿到的永远是零值 Outcome ⇒ **该判据在 T5 没有任何观测点**。本任务实现了 `savePending` 后它才第一次可测。\n\ndev-agent-41 明确没有强行闭合，理由：给桩注入假实现等于把本任务的设计提前定死；给 Save 加「出错也返回部分 Outcome」则是为测试改生产行为。**两者都比一条明确交接更差。**",
+      "校验未通过（`rep.Passed == false`）时走 `savePending`，数据进 pending 表而非观测表，`Outcome.Table` 如实反映去向。",
+      "TASK-005 留下的 `savePending` 桩**确已被替换**。判据：对失败报告调用 Save 后不得出现 not implemented 类错误，且 pending 表确有对应行。",
+      "**pending 路径的 Verdict 必须有意义（G2）**：构造 `Verdict != New` 的用例——先用通过的报告存一行，再用同键、更晚 published_at、`Passed=false` 的报告调 Save，断言 `Outcome{Verdict: Revision, Table: TablePending}`。\n\n**为什么现有断言证明不了任何事**：需求文档的 `TestSaveFailedValidationGoesToPending` 断言 `assert.Equal(bitemporal.New, out.Verdict)`，而 **`bitemporal.New == 0`**——在「早早 return `Outcome{}`」的实现下同样通过。计划专门论证过 Passed 检查要排在 Classify 之后（否则未过闸数据被标成新增），而那个论证目前没有任何测试可证。若有人把 `if !rep.Passed` 挪到 Lookup 之前（少一次查询，很有诱惑力），全部测试仍绿，此后每条 pending 告警都写着 New。",
+      "**Duplicate 携带不同 Values 时的行为必须钉死（G3）**：同键同 published_at 但 Values 更丰富时，明确并断言行为——保持丢弃就断言列值未变、extractor 未变；改为覆盖式更新就断言已更新。\n\n理由：计划定义了三个抽取器版本（rule@v1/v2/llm-fallback@v1），且字段刚从 ~20 扩到 54，「上线 v2 后回填重跑历史」是必然操作。届时每期 published_at 都没变 → 全判 Duplicate → 只刷 article_id → **v2 新抽的 34 个字段一个都没写进去，extractor 列还写着 v1**，而 Save 返回 nil，运维看到「34 期处理完毕、零错误」。现在这是个意外，本条要让它变成一个看得见的决定。"
+    ],
+    "boundary": [
+      "同一观测多次校验失败会在 pending 表**逐次累积**（每次尝试一行），不是覆盖。判据：覆写 `s.now()` 造出可区分的两次尝试，断言两行都在。",
+      "**pending 表的时间精度必须能区分同秒两次失败（G8）**：PK 含 `ingested_at`，而 `RFC3339` 只有秒精度——即时重试循环里同一期两次过闸失败，第二次 Save 返回 `UNIQUE constraint failed`，那次尝试的诊断信息（pending 表存在的全部理由）丢失。改用 `RFC3339Nano` 即可。\n\n注意 `boundary[0]` 通过覆写 `s.now()` 造可区分时刻，**恰好绕开了这个边界**——本条必须用真实精度验证。",
+      "**pending 表的 schema 漂移检查（TASK-004 裁定移交至此）**。dev-agent-42 在 T4 只把观测表纳入了漂移检查，**这是范围裁剪不是判它安全**——它明确要求「别默认已被覆盖」。\n\n判据：本任务写 pending 的路径必须能在 pending 表结构与代码预期不符时**明确失败并给出可定位的错误**，而不是以驱动层 `no such column` 的形式在特定期次才炸。\n\n**允许的实现方式二选一**：①在 savePending 路径上做一次列存在性校验；②在包注释与 discovery 中显式声明 pending 表不做漂移检查、其风险由 T4 的观测表检查间接覆盖（因两表由同一 NewStore 建出，观测表通过则 DDL 整体执行成功）。\n\n**选②须给出论证为何间接覆盖成立**，不能只是声明。dev-agent-42 指出闭合它的代价是让 schema.go 暴露 pending 列清单，而那会引入本包明确反对的「第二份 schema 定义」——这个代价评估要一并复核。"
+    ],
+    "error_handling": [
+      {
+        "desc": "SQL 层错误被包装后返回，错误信息能定位到是哪一步（refresh / pending / insert），不得裸传 driver 错误。\n\n**降为 review**：真触发三种 SQL 错误需额外造注入点（关库、故意撞约束），成本不低而收益只是错误措辞。读代码确认三处都有带步骤名的 `fmt.Errorf` 包装即可，省下的注意力放到 functional 的两条静默数据错误上。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      "本任务不改变公开面：不新增任何导出符号。`refreshArticleID` 与 `savePending` 均为小写内部方法。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-09T07:17:08Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-42",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "823ca15fbea53c626e986419d8f91ad200f03859",
+    "discovery_sha256": "94fc146c1ff6a91ecee1bfd9b37843e41a22a38f4c5b79f57854dd2af18f8789",
+    "at": "2026-08-09T00:38:06Z"
+  },
+  "verifier": "test-agent-20",
+  "reason_class": "task_defect",
+  "fix_items": [
+    {
+      "id": "C3",
+      "severity": "WARNING",
+      "source": "qa-agent-10（Skeptic lens）变异存活，四条自证齐全",
+      "desc": "**pending 表的八列位置参数无守护。** 同时交换 `Period↔PeriodType` 与 `ArticleID↔Extractor`（store.go:382-388）⇒ **变异存活**（diff 非空、vet exit 0、PASS=75=基线、首行完整）。\n\n**H2 宣称的「三处同序危害已闭合」只对观测表成立**：观测表列序由 reflect 派生且三条测试钉住；**pending 这份是手写清单、零测试读回列值**——`pendingRows` 虽 SELECT 了 `article_id`/`extractor`，全文件无一处断言其值。",
+      "requirement": "让七个元数据字段取**可辨识**的值后逐列读回断言，手法同 `TestSaveMetaValuesLandInMatchingColumns`（TASK-005 已有范例）。",
+      "verify": "重跑该交换变异，必须变红且红的是新加的断言。"
+    },
+    {
+      "id": "C4",
+      "severity": "WARNING",
+      "source": "qa-agent-10（Skeptic lens）变异存活，已证非等价",
+      "desc": "**`refreshArticleID` 的 WHERE 里 `published_at` 无守护**（store.go:228）⇒ 变异存活（四条自证齐全）。\n\n**已证非等价**：造「原版 `2026-07-15` + 修订版 `2026-08-20`」两行后做 Duplicate——原版只改最新行（`art-v1` 保留），变异版把 `art-v2-NEWURL` **盖到历史行上**，静默毁掉逐行溯源，并让 M1b-4 的 `article_id` 幂等检查命中错误的修订行。\n\n**现有两条 Duplicate 测试都只有一行库，结构上打不中这个缺陷。**",
+      "requirement": "补一条**两行库**的 Duplicate 测试：预置同业务键的两个不同 `published_at` 行，做 Duplicate 后断言**只有目标行的 `article_id` 变化**、历史行原值保留。",
+      "verify": "重跑删 `AND published_at = ?` 的变异，必须变红。"
+    }
+  ],
+  "rework_count": 1
+}

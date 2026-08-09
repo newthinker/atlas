@@ -67,7 +67,12 @@
     "dev-agent-40": "a652c1033df63777433491702cb5f771a4cef12e395d8b07606aae179f9952ce",
     "test-agent-18": "37868cc3e1b72208905eb3fc5cc8d547aa7b8a9ca66a3f084c8e2b00d6161375",
     "test-agent-19": "f646bfd76e7d97043c2ac63973cac5bd92c378a354a9c7f146285bcb5aa4526c",
-    "qa-agent-9": "b07936159ea127cf3e7b39bd74939a694e0d8bf75d09c9c9531ff0443214c3b1"
+    "qa-agent-9": "b07936159ea127cf3e7b39bd74939a694e0d8bf75d09c9c9531ff0443214c3b1",
+    "dev-agent-41": "1dcbb148331293972065dc9690c71821f1970e8db7ac1772aba1eb8a344f1911",
+    "dev-agent-42": "9c9ff5ebc106ee79c5ff801be862fc739095e9da329cba04798a587a2ecb7feb",
+    "test-agent-20": "02dabd2e928dee8a1fa3dbefbb4ec371823577f67fe9df70a786be438cc41c2e",
+    "test-agent-21": "73c16ba072d5ef16be728f14234b75d2e6b670eb1b2129ccbd1e429371ca6e6d",
+    "qa-agent-10": "8eb255591e1762ead075b6c09d24020822e06a84a23c092b35ec86f03723cce8"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [
@@ -238,6 +243,9 @@
       "leader"
     ],
     "assigned->skipped": [
+      "leader"
+    ],
+    "verifying->verifying": [
       "leader"
     ]
   },
