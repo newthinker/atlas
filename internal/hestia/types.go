@@ -57,6 +57,38 @@ var (
 	publishedAtRE = regexp.MustCompile(`\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z`)
 )
 
+// validCaliberVersions 是央行口径变更的三个已知版本，全部来自报告原文的注释段：
+//
+//	2015-01  存贷款含非银行业金融机构存放/拆放款项（2020H1 报告注 2）
+//	2023-01  三类非存款类金融机构纳入统计（2025 年报告注 4）
+//	2025-01  M1 口径修订，纳入个人活期存款与非银支付机构备付金（2025 年报告注 5）
+//
+// 用枚举而不是形态正则（^\d{4}-\d{2}$）：形态检查会放行 "2024-07" 这种不对应任何
+// 真实变更的版本号，而 fields.go 里写着口径断裂「只能靠 caliber_version 标注」——
+// 它是那道断裂的唯一防线，放行一个虚构的边界等于让下游按它做跨期对比。
+//
+// 代价是央行下次改口径要改这里。那是数年一次的事，且届时本来就要人工整理受影响的
+// 字段清单。M1c 建起 hestia_caliber_changes 表（豁免机制需要它）之后，这个白名单
+// 应改为引用那张表。
+var validCaliberVersions = map[string]bool{
+	"2015-01": true,
+	"2023-01": true,
+	"2025-01": true,
+}
+
+// validExtractors 是已定义的抽取器标识。
+//
+// llm-fallback@v1 到 M1c 才实现，先列入是因为 Meta 的取值域应当由数据模型定义，
+// 而不是由「当前实现到哪一步」定义。
+//
+// 新增 rule@vN 时必须同步更新这里——那一步正是提醒去补 completeness 的 profile
+// （M1b-3）：两者不同步会让新模板的期次用错必填集，而那是静默的。
+var validExtractors = map[string]bool{
+	"rule@v1":         true,
+	"rule@v2":         true,
+	"llm-fallback@v1": true,
+}
+
 // validate 是小写的：校验是 Save 的内部环节。导出它等于给调用方一个
 // 「先自己校验、再绕过 Save 直接写库」的暗示，而 Save 是 ADR-0003 在同机
 // 场景下唯一的防线。
@@ -84,6 +116,16 @@ func (m Meta) validate() error {
 	}
 	if !publishedAtRE.MatchString(m.PublishedAt) {
 		return fmt.Errorf("hestia: meta.published_at %q must match YYYY-MM-DD", m.PublishedAt)
+	}
+	if !validCaliberVersions[m.CaliberVersion] {
+		return fmt.Errorf(
+			"hestia: unknown meta.caliber_version %q (want 2015-01|2023-01|2025-01)",
+			m.CaliberVersion)
+	}
+	if !validExtractors[m.Extractor] {
+		return fmt.Errorf(
+			"hestia: unknown meta.extractor %q (want rule@v1|rule@v2|llm-fallback@v1)",
+			m.Extractor)
 	}
 	return nil
 }

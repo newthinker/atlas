@@ -517,7 +517,7 @@ func TestSaveMetaValuesLandInMatchingColumns(t *testing.T) {
 	obs.Meta.PublishedAt = "2026-07-15"
 	obs.Meta.ArticleID = "article-id-sentinel"
 	obs.Meta.CaliberVersion = "2025-01"
-	obs.Meta.Extractor = "extractor-sentinel"
+	obs.Meta.Extractor = "rule@v1"  // 与其余值不同即可；白名单外的哨兵串已不被接受
 	obs.Meta.IngestedAt = "1999-01-01T00:00:00Z" // 会被 s.now() 覆写
 
 	_, err := s.Save(context.Background(), obs, passing())
@@ -1233,12 +1233,13 @@ func TestSavePendingColumnsMatchTheirValues(t *testing.T) {
 	s.now = func() time.Time { return fixed }
 
 	obs := obsWith(map[string]float64{FieldM2: 356.71})
-	// 前三个受 Meta.validate 的形态约束，取合法但彼此不同的值；后两个用哨兵串
+	// 六个值互不相同：任意两列互换都会让下面的逐列比对红。
+	// article_id 无取值域约束故用哨兵串；extractor 有白名单，取一个与其余不同的合法值
 	obs.Meta.Period = "2026-06"
 	obs.Meta.PeriodType = "h1"
 	obs.Meta.PublishedAt = "2026-07-15"
 	obs.Meta.ArticleID = "article-id-sentinel"
-	obs.Meta.Extractor = "extractor-sentinel"
+	obs.Meta.Extractor = "rule@v1"  // 与其余值不同即可；白名单外的哨兵串已不被接受
 
 	_, err := s.Save(context.Background(), obs, failing())
 	require.NoError(t, err)
@@ -1248,7 +1249,7 @@ func TestSavePendingColumnsMatchTheirValues(t *testing.T) {
 		{"period_type", "h1"},
 		{"published_at", "2026-07-15"},
 		{"article_id", "article-id-sentinel"},
-		{"extractor", "extractor-sentinel"},
+		{"extractor", "rule@v1"},
 		{"ingested_at", fixed.Format(time.RFC3339Nano)},
 	}
 

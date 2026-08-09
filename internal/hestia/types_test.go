@@ -214,3 +214,47 @@ func TestValidationReportAndOutcomeShape(t *testing.T) {
 	assert.Equal(t, bitemporal.Revision, out.Verdict)
 	assert.Equal(t, "hestia_observations", out.Table)
 }
+
+// ── M1b-1.5 · C-2：caliber_version 与 extractor 的取值域 ────────────────────
+// error_handling[C-2] caliber_version 非枚举值 → 报错 → TestMetaValidateRejectsUnknownCaliber
+// error_handling[C-2] extractor 非枚举值       → 报错 → TestMetaValidateRejectsUnknownExtractor
+// functional[C-2]     三个口径版本与三个抽取器均放行 → TestMetaValidateAcceptsKnownEnums
+
+func TestMetaValidateAcceptsKnownEnums(t *testing.T) {
+	for _, cv := range []string{"2015-01", "2023-01", "2025-01"} {
+		m := validMeta()
+		m.CaliberVersion = cv
+		require.NoErrorf(t, m.validate(), "caliber_version=%s 应合法", cv)
+	}
+	for _, ex := range []string{"rule@v1", "rule@v2", "llm-fallback@v1"} {
+		m := validMeta()
+		m.Extractor = ex
+		require.NoErrorf(t, m.validate(), "extractor=%s 应合法", ex)
+	}
+}
+
+func TestMetaValidateRejectsUnknownCaliber(t *testing.T) {
+	// "2024-07" 形态完全合法，却不对应任何真实的口径变更——形态正则拦不住它，
+	// 而放行一个虚构的边界等于让下游按它做跨期对比。这正是不用 ^\d{4}-\d{2}$
+	// 而用枚举的理由。
+	for _, bad := range []string{"garbage", "2099-99", "2024-07", "2025-1", " 2025-01", "2025-01 "} {
+		m := validMeta()
+		m.CaliberVersion = bad
+		err := m.validate()
+		require.Errorf(t, err, "caliber_version=%q 应被拒", bad)
+		assert.Contains(t, err.Error(), "caliber_version")
+	}
+}
+
+func TestMetaValidateRejectsUnknownExtractor(t *testing.T) {
+	// rule@v3 被拒是有意的：新增抽取器版本时必须同步更新白名单，而那一步正是
+	// 提醒去补 completeness 的 profile（M1b-3）——两者不同步会让新模板的期次
+	// 用错必填集，且那是静默的。
+	for _, bad := range []string{"garbage", "rule@v3", "rule", "RULE@V2", "rule@v2 "} {
+		m := validMeta()
+		m.Extractor = bad
+		err := m.validate()
+		require.Errorf(t, err, "extractor=%q 应被拒", bad)
+		assert.Contains(t, err.Error(), "extractor")
+	}
+}
