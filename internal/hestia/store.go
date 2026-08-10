@@ -35,6 +35,15 @@ type Store struct {
 	now  func() time.Time // 便于测试固定 ingested_at
 }
 
+// sqliteDSN 是本包连库的唯一形态，沿用 crisis 的约定：WAL + busy_timeout。
+//
+// 抽成函数是因为它有第二个使用者：store_test.go 的 rawDB 要另开一条裸连接。
+// 两处各写一份 DSN 会静默不同步——pragma 拼错或漏掉不会让 sql.Open 失败，
+// 只会让测试连接与生产连接在并发行为上不一样，而那种差异只表现为偶发的 flake。
+func sqliteDSN(path string) string {
+	return "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+}
+
 // NewStore 打开（或创建）库并建好表与视图。
 func NewStore(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
@@ -51,9 +60,7 @@ func NewStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("hestia: building bitemporal spec: %w", err)
 	}
 
-	// DSN 沿用 crisis 的约定：WAL + busy_timeout
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("opening hestia db: %w", err)
 	}
@@ -181,7 +188,10 @@ func verifyObservationsSchema(db *sql.DB) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Reader 是 Store 对外暴露的只读能力。
+// Querier 是 Store 对外暴露的只读能力。
+//
+// 名字与 bitemporal.Querier 一致：同一个概念（只读查询能力）在两个包里应当
+// 同名。曾叫 Reader，但那在调用点读起来像 io.Reader，是另一回事。
 //
 // DB() 曾返回 *sql.DB，那让任何拿到句柄的人都能绕过 Save 的五道校验直接写库——
 // 包注释里的「唯一写入通道」于是成了一句类型系统不兑现的话，而违反它完全静默：
@@ -192,7 +202,7 @@ func (s *Store) Close() error { return s.db.Close() }
 //
 // 包内测试若要制造「Store 管不到」的库状态（加列、直接写 NaN、改表结构），
 // 自己开一个裸连接——见 store_test.go 的 rawDB。
-type Reader interface {
+type Querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
@@ -200,7 +210,7 @@ type Reader interface {
 // DB 暴露只读句柄：Grafana 走插件直连，Go 侧的派生计算（窗口函数）与 M1b-4 的
 // article_id 一级幂等检查都需要自己发查询。写入只能走 Save，且这一点现在由
 // 返回类型保证，而不是靠调用方自觉。
-func (s *Store) DB() Reader { return s.db }
+func (s *Store) DB() Querier { return s.db }
 
 // Save 是唯一的写入口。
 //
@@ -226,20 +236,8 @@ func (s *Store) Save(ctx context.Context, obs Observation, rep ValidationReport)
 	if err := checkReportConsistency(rep); err != nil {
 		return Outcome{}, err
 	}
-	// 空 Values + Passed=true 是不可逆的：一次解析全失败若先占住业务键，之后
-	// 任何正确重跑都会判 Duplicate（同 period、同 published_at），字段永远补不
-	// 回来。而解析全失败正是 M1b-2 的必然路径之一。
-	//
-	// 它该走 pending——那条记录本身就是诊断信息，所以这道检查只在 Passed=true
-	// 时生效（见 TestSavePendingAcceptsEmptyValues）。
-	//
-	// 单独一道而不并进 checkReportConsistency：那个函数只看报告自不自洽，
-	// 这里要同时看报告与观测，是两件事。
-	if rep.Passed && len(obs.Values) == 0 {
-		return Outcome{}, fmt.Errorf(
-			"hestia: report claims Passed but Values is empty: a period with no data " +
-				"cannot have passed completeness; writing it would occupy the business " +
-				"key and make every later correct re-run a Duplicate")
+	if err := checkPassedHasValues(obs, rep); err != nil {
+		return Outcome{}, err
 	}
 
 	// 入库时刻只有 Store 知道，调用方传的一律覆盖——让调用方决定它等于允许它撒谎。
@@ -321,6 +319,14 @@ func (s *Store) refreshArticleID(ctx context.Context, obs Observation) error {
 	return nil
 }
 
+// isNonFinite 是 checkValues 与 checkReportValues 共用的判据。
+//
+// 抽出来不是为了省一次调用，而是让「非有限值」在两处是同一个定义：两者防的是同一件
+// 事（NaN 存进 SQLite 读出来是 null，且 json.Marshal 直接拒绝 NaN/Inf），只是入口
+// 不同——一处是 Observation.Values，一处是 ValidationReport 里的实测值。
+// 各写一遍条件式，放宽其中一处时另一处不会有任何提示。
+func isNonFinite(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
+
 // checkValues 把 Values 的键与值分别过一遍闸门。
 //
 // 键：白名单之外的键会拼进 INSERT 的列名，与 bitemporal 的 identRE 同一把关态度。
@@ -337,7 +343,7 @@ func checkValues(values map[string]float64) error {
 		if !ok {
 			continue
 		}
-		if math.IsNaN(v) || math.IsInf(v, 0) {
+		if isNonFinite(v) {
 			return fmt.Errorf(
 				"hestia: field %q has non-finite value %v: NaN and Inf are indistinguishable "+
 					"from a missing field once stored, and JSON encoding rejects them", f, v)
@@ -376,7 +382,7 @@ func checkReportValues(rep ValidationReport) error {
 		if c.Value == nil {
 			continue
 		}
-		if math.IsNaN(*c.Value) || math.IsInf(*c.Value, 0) {
+		if isNonFinite(*c.Value) {
 			return fmt.Errorf(
 				"hestia: check %q has non-finite value %v: JSON encoding rejects it, "+
 					"which would keep this period out of hestia_pending as well",
@@ -455,6 +461,27 @@ func checkReportConsistency(rep ValidationReport) error {
 			"hestia: skipped check(s) %s have no reason: a skip without a reason cannot be "+
 				"told apart from a gate that silently failed",
 			strings.Join(noReason, ", "))
+	}
+	return nil
+}
+
+// checkPassedHasValues 拒绝「报告说通过、观测却一个字段都没有」。
+//
+// 空 Values + Passed=true 是不可逆的：一次解析全失败若先占住业务键，之后任何正确
+// 重跑都会判 Duplicate（同 period、同 published_at），字段永远补不回来。而解析全
+// 失败正是 M1b-2 的必然路径之一。
+//
+// 它该走 pending——那条记录本身就是诊断信息，所以这道检查只在 Passed=true 时
+// 生效（见 TestSavePendingAcceptsEmptyValues）。
+//
+// 单独一道而不并进上面的 checkReportConsistency：那个函数只看报告自不自洽，
+// 这里要同时看报告与观测，是两件事。
+func checkPassedHasValues(obs Observation, rep ValidationReport) error {
+	if rep.Passed && len(obs.Values) == 0 {
+		return fmt.Errorf(
+			"hestia: report claims Passed but Values is empty: a period with no data " +
+				"cannot have passed completeness; writing it would occupy the business " +
+				"key and make every later correct re-run a Duplicate")
 	}
 	return nil
 }

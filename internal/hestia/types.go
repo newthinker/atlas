@@ -3,6 +3,8 @@ package hestia
 import (
 	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
@@ -87,11 +89,7 @@ var periodEndMonth = map[string]string{
 // 代价是央行下次改口径要改这里。那是数年一次的事，且届时本来就要人工整理受影响的
 // 字段清单。M1c 建起 hestia_caliber_changes 表（豁免机制需要它）之后，这个白名单
 // 应改为引用那张表。
-var validCaliberVersions = map[string]bool{
-	"2015-01": true,
-	"2023-01": true,
-	"2025-01": true,
-}
+var validCaliberVersions = []string{"2015-01", "2023-01", "2025-01"}
 
 // validExtractors 是已定义的抽取器标识。
 //
@@ -100,10 +98,21 @@ var validCaliberVersions = map[string]bool{
 //
 // 新增 rule@vN 时必须同步更新这里——那一步正是提醒去补 completeness 的 profile
 // （M1b-3）：两者不同步会让新模板的期次用错必填集，而那是静默的。
-var validExtractors = map[string]bool{
-	"rule@v1":         true,
-	"rule@v2":         true,
-	"llm-fallback@v1": true,
+var validExtractors = []string{"rule@v1", "rule@v2", "llm-fallback@v1"}
+
+// checkEnum 是取值域校验的共同形状：不在白名单里就报错，并把白名单**逐字**列进
+// 错误信息。
+//
+// 用切片而不是 map[string]bool，是为了让「合法取值」只有一份定义：错误信息里的
+// "want a|b|c" 由白名单本身拼出来，而不是另抄一遍。抄一遍的版本会在下次加口径版本
+// 或抽取器时静默过期——白名单放行了新值，错误信息却还在说旧的三个，而那条信息正是
+// 调用方判断自己该填什么的唯一依据。
+func checkEnum(field, val string, allowed []string) error {
+	if slices.Contains(allowed, val) {
+		return nil
+	}
+	return fmt.Errorf("hestia: unknown meta.%s %q (want %s)",
+		field, val, strings.Join(allowed, "|"))
 }
 
 // validate 是小写的：校验是 Save 的内部环节。导出它等于给调用方一个
@@ -132,25 +141,19 @@ func (m Meta) validate() error {
 		return fmt.Errorf("hestia: meta.period %q must match YYYY-MM", m.Period)
 	}
 	// 排在 periodRE 之后：那道检查已保证形如 YYYY-MM，这里才能安全切片取月份。
-	if want, ok := periodEndMonth[m.PeriodType]; ok {
-		if got := m.Period[5:]; got != want {
-			return fmt.Errorf(
-				"hestia: period %q is not a valid %s period (month must be %s)",
-				m.Period, m.PeriodType, want)
-		}
+	if want, ok := periodEndMonth[m.PeriodType]; ok && m.Period[5:] != want {
+		return fmt.Errorf(
+			"hestia: period %q is not a valid %s period (month must be %s)",
+			m.Period, m.PeriodType, want)
 	}
 	if !publishedAtRE.MatchString(m.PublishedAt) {
 		return fmt.Errorf("hestia: meta.published_at %q must match YYYY-MM-DD", m.PublishedAt)
 	}
-	if !validCaliberVersions[m.CaliberVersion] {
-		return fmt.Errorf(
-			"hestia: unknown meta.caliber_version %q (want 2015-01|2023-01|2025-01)",
-			m.CaliberVersion)
+	if err := checkEnum("caliber_version", m.CaliberVersion, validCaliberVersions); err != nil {
+		return err
 	}
-	if !validExtractors[m.Extractor] {
-		return fmt.Errorf(
-			"hestia: unknown meta.extractor %q (want rule@v1|rule@v2|llm-fallback@v1)",
-			m.Extractor)
+	if err := checkEnum("extractor", m.Extractor, validExtractors); err != nil {
+		return err
 	}
 	return nil
 }
