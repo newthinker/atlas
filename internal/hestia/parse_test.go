@@ -2,6 +2,11 @@ package hestia
 
 // Context Checkpoint: done_criteria → test mapping (TASK-006 parse)
 // functional[0]     Parse 串起四层，Values 键全在 allFields 内  → TestParseRealSamples、TestParseValuesKeysAreDeclared
+// ——— TASK-008（Parse 值正确性的常驻守护）———
+// T008 functional[0..1] Parse 输出的 Values 与 golden **逐键逐值**双向比对，
+//                   走 Parse 入口而非 extractFields                → TestParseRealSamples
+// T008 boundary[0]  非空转自证 require.NotEmpty(obs.Values)        → TestParseRealSamples
+// T008 error_handling[0] 差异能定位到具体字段名（扰动 golden 实测） → assertMatchesGolden 的 InDeltaf/Truef 带字段名
 // functional[1]     parseTitle 产出满足 Meta.validate 的两个正则 → TestParseTitle、TestParseTitlePadsMonth
 // functional[2]     caliberFor 取值在 validCaliberVersions 内   → TestCaliberForResultIsAlwaysValid
 // functional[2]     多条口径注同时适用取**最新**，且不依赖遍历顺序
@@ -157,14 +162,26 @@ func TestCaliberChangesAreDeclaredVersions(t *testing.T) {
 	}
 }
 
+// TestParseRealSamples 同时覆盖 Meta 七字段与 Values 的逐键逐值比对。
+//
+// Values 那一半（TASK-008 补）**不是 T5 的重复**，两者喂的输入不同：
+//
+//	T5 的 TestExtractFieldsOn*Sample → 喂 extractFields，输入是它自己构造的固定 sections
+//	本条                             → 喂 Parse，输入是原始 HTML，走完 strip→detect→scope→extract
+//
+// ⇒ **本条能抓住 T5 抓不到的：上游任一层的变化导致值错。** 在补上它之前，
+// parse_test.go 对 Values 只有 require.Len 的键数断言，于是 stripHTML 之类上游微变
+// 可以让 Parse 产出「键数仍是 54/27、值已经错」的结果而**常驻套件不红**。
+// 两条断言必须并存，不得以「重复」为由删掉任何一条。
 func TestParseRealSamples(t *testing.T) {
 	for _, tc := range []struct {
 		sample string
 		want   Meta
 		values int
+		golden map[string]float64
 	}{
-		{"pboc-2025-12-annual.html", goldenMeta2025, 54},
-		{"pboc-2020-06-h1.html", goldenMeta2020, 27},
+		{"pboc-2025-12-annual.html", goldenMeta2025, 54, golden2025},
+		{"pboc-2020-06-h1.html", goldenMeta2020, 27, golden2020},
 	} {
 		t.Run(tc.sample, func(t *testing.T) {
 			obs, err := Parse(readSample(t, tc.sample))
@@ -179,6 +196,15 @@ func TestParseRealSamples(t *testing.T) {
 			assert.Empty(t, obs.Meta.IngestedAt, "IngestedAt 由 Store.Save 填")
 
 			require.Len(t, obs.Values, tc.values)
+
+			// 非空转自证：放在比对之前，让「一个字段都没抽到」以这条的措辞失败，
+			// 而不是以下面 54 条「字段 X 没被抽到」的形式刷屏。
+			require.NotEmpty(t, obs.Values, "抽出 0 个字段，本比对毫无意义")
+
+			// 双向比对：golden 每项都要抽到且相等（InDelta 1e-6），
+			// 抽到的每项也都要在 golden 内。helper 复用 extract_test.go 的那一份，
+			// 不另写——两份比对逻辑迟早分叉。
+			assertMatchesGolden(t, obs.Values, tc.golden)
 		})
 	}
 
