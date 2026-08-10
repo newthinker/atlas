@@ -45,10 +45,32 @@ import (
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := NewStore(filepath.Join(t.TempDir(), "hestia.db"))
+	s, _ := newTestStoreAt(t)
+	return s
+}
+
+// newTestStoreAt 与 newTestStore 相同，另外返回库文件路径，供需要裸连接的测试。
+func newTestStoreAt(t *testing.T) (*Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "hestia.db")
+	s, err := NewStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
-	return s
+	return s, path
+}
+
+// rawDB 另开一个连接到同一个库文件，供测试制造「Store 管不到」的库状态——
+// 加列、直接写 NaN、把表改成结构不符的样子。
+//
+// 生产代码拿不到这样的句柄：DB() 收窄成只读接口后，测试要造脏数据得自己开连接，
+// 而不是从 Store 借一个写口。这正是收窄的目的——「唯一写入通道」不再靠自觉。
+func rawDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 // insertMetaOnlyRow 只填七个元数据列，业务列留空（它们可空）。
@@ -69,7 +91,8 @@ func TestNewStoreCreatesSchemaIdempotently(t *testing.T) {
 
 	s1, err := NewStore(path)
 	require.NoError(t, err)
-	insertMetaOnlyRow(t, s1.DB(), "2026-06")
+	// insertMetaOnlyRow 是写操作，DB() 收窄后拿不到写句柄——测试自己开一个
+	insertMetaOnlyRow(t, rawDB(t, path), "2026-06")
 	require.NoError(t, s1.Close())
 
 	// 第二次打开同一个库：CREATE ... IF NOT EXISTS 不应报错
@@ -80,14 +103,14 @@ func TestNewStoreCreatesSchemaIdempotently(t *testing.T) {
 	for _, name := range []string{TableObservations, TablePending, viewCurrent} {
 		var got string
 		require.NoErrorf(t,
-			s2.DB().QueryRow(`SELECT name FROM sqlite_master WHERE name = ?`, name).Scan(&got),
+			s2.DB().QueryRowContext(context.Background(), `SELECT name FROM sqlite_master WHERE name = ?`, name).Scan(&got),
 			"%s 不存在", name)
 	}
 
 	// 幂等不只是「不报错」，还必须「不丢数据」——建表语句若被写成 DROP+CREATE，
 	// 上面那圈存在性断言照样全过，而库已经被清空了。
 	var n int
-	require.NoError(t, s2.DB().QueryRow(`SELECT COUNT(*) FROM `+TableObservations).Scan(&n))
+	require.NoError(t, s2.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+TableObservations).Scan(&n))
 	assert.Equal(t, 1, n, "第二次 NewStore 之后原有数据必须还在")
 }
 
@@ -106,7 +129,7 @@ func TestNewStoreCreatesParentDir(t *testing.T) {
 func TestNewStoreEnablesWAL(t *testing.T) {
 	s := newTestStore(t)
 	var mode string
-	require.NoError(t, s.DB().QueryRow(`PRAGMA journal_mode`).Scan(&mode))
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&mode))
 	assert.Equal(t, "wal", strings.ToLower(mode))
 }
 
@@ -124,7 +147,7 @@ func TestNewStoreDeploysViewFromItsOwnSpec(t *testing.T) {
 
 	var deployed string
 	require.NoError(t,
-		s.DB().QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?`,
+		s.DB().QueryRowContext(context.Background(), `SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?`,
 			viewCurrent).Scan(&deployed),
 		"视图 %s 必须由 NewStore 实际部署到库里", viewCurrent)
 
@@ -256,7 +279,7 @@ func TestNewStoreToleratesUnknownExtraColumns(t *testing.T) {
 
 	s1, err := NewStore(path)
 	require.NoError(t, err)
-	_, err = s1.DB().Exec(`ALTER TABLE ` + TableObservations + ` ADD COLUMN from_a_newer_version REAL`)
+	_, err = rawDB(t, path).Exec(`ALTER TABLE ` + TableObservations + ` ADD COLUMN from_a_newer_version REAL`)
 	require.NoError(t, err)
 	require.NoError(t, s1.Close())
 
@@ -284,7 +307,8 @@ func TestStoreDBIsUsable(t *testing.T) {
 	require.NotNil(t, db)
 	// M1b-4 的 article_id 幂等检查要自己发查询，所以句柄必须是真的可用的
 	var n int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM `+TableObservations).Scan(&n))
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM `+TableObservations).Scan(&n))
 	assert.Equal(t, 0, n)
 }
 
@@ -296,7 +320,7 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 	// database/sql 在 Close 之后返回的是未导出的 errDBClosed（"sql: database is closed"），
 	// 没有可用的 sentinel，所以只能比对错误串。注意它不是 sql.ErrConnDone——
 	// 后者是「这条连接已还回池」，与「整个 DB 已关闭」是两回事。
-	err = s.DB().QueryRow(`SELECT COUNT(*) FROM ` + TableObservations).Scan(new(int))
+	err = s.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM ` + TableObservations).Scan(new(int))
 	assert.ErrorContains(t, err, "database is closed", "Close 之后句柄必须已释放")
 }
 
@@ -421,7 +445,7 @@ func obsWith(values map[string]float64) Observation {
 func countRows(t *testing.T, s *Store, table string) int {
 	t.Helper()
 	var n int
-	require.NoError(t, s.DB().QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&n))
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+table).Scan(&n))
 	return n
 }
 
@@ -444,7 +468,7 @@ func TestSaveNewObservation(t *testing.T) {
 	assert.Equal(t, 0, countRows(t, s, TablePending))
 
 	var m2 float64
-	require.NoError(t, s.DB().QueryRow(`SELECT m2 FROM `+TableObservations).Scan(&m2))
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), `SELECT m2 FROM `+TableObservations).Scan(&m2))
 	assert.Equal(t, 356.71, m2)
 }
 
@@ -467,7 +491,7 @@ func TestSaveRevisionKeepsBothRows(t *testing.T) {
 
 	// 视图只返回最新那行
 	var m2 float64
-	require.NoError(t, s.DB().QueryRow(`SELECT m2 FROM `+viewCurrent).Scan(&m2))
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), `SELECT m2 FROM `+viewCurrent).Scan(&m2))
 	assert.Equal(t, 357.00, m2)
 }
 
@@ -490,7 +514,7 @@ func TestSaveOutOfOrder(t *testing.T) {
 	assert.Equal(t, 2, countRows(t, s, TableObservations))
 
 	var m2 float64
-	require.NoError(t, s.DB().QueryRow(`SELECT m2 FROM `+viewCurrent).Scan(&m2))
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), `SELECT m2 FROM `+viewCurrent).Scan(&m2))
 	assert.Equal(t, 357.00, m2, "当前行由 MAX(published_at) 决定，与写入顺序无关")
 }
 
@@ -539,7 +563,7 @@ func TestSaveMetaValuesLandInMatchingColumns(t *testing.T) {
 
 	for i, col := range metaColumns {
 		var got string
-		require.NoError(t, s.DB().QueryRow(
+		require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 			`SELECT `+col+` FROM `+TableObservations).Scan(&got))
 		assert.Equalf(t, wantByDeclOrder.Field(i).String(), got,
 			"列 %s 里应是 Meta 第 %d 个字段的值——不同序会让写入静默错位", col, i)
@@ -609,7 +633,7 @@ func TestSavePartialFieldsLeavesNulls(t *testing.T) {
 	require.NoError(t, err)
 
 	var tsf sql.NullFloat64
-	require.NoError(t, s.DB().QueryRow(
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 		`SELECT `+FieldTSFStock+` FROM `+TableObservations).Scan(&tsf))
 	assert.False(t, tsf.Valid, "未提供的字段应为 NULL，而不是 0")
 
@@ -620,7 +644,7 @@ func TestSavePartialFieldsLeavesNulls(t *testing.T) {
 	require.NoError(t, err)
 
 	var flow sql.NullFloat64
-	require.NoError(t, s.DB().QueryRow(
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 		`SELECT `+FieldTSFFlowYTD+` FROM `+TableObservations+` WHERE published_at = '2026-08-20'`).
 		Scan(&flow))
 	assert.True(t, flow.Valid, "显式写入的 0 是「增量为零」，不是「未披露」")
@@ -644,7 +668,7 @@ func TestSaveAllFields(t *testing.T) {
 	// 逐列读回：只查最后一列会让「中间某列错位」完全隐形
 	for i, f := range fieldOrder {
 		var got float64
-		require.NoErrorf(t, s.DB().QueryRow(
+		require.NoErrorf(t, s.DB().QueryRowContext(context.Background(), 
 			`SELECT `+f+` FROM `+TableObservations).Scan(&got), "读 %s", f)
 		assert.Equalf(t, float64(i)+0.5, got, "列 %s 的值错位", f)
 	}
@@ -679,7 +703,7 @@ func TestSaveOverwritesIngestedAt(t *testing.T) {
 	require.NoError(t, err)
 
 	var got string
-	require.NoError(t, s.DB().QueryRow(
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 		`SELECT ingested_at FROM `+TableObservations).Scan(&got))
 	assert.Equal(t, "2026-08-08T10:00:00Z", got, "入库时刻只能由 Store 决定")
 
@@ -838,8 +862,8 @@ func TestSaveRejectsNonFiniteValues(t *testing.T) {
 
 	// 先证明 NaN 一旦写进去确实与缺失不可区分——这是上面为什么必须拦的依据，
 	// 而不是凭空的谨慎。
-	s := newTestStore(t)
-	_, err := s.DB().Exec(
+	s, path := newTestStoreAt(t)
+	_, err := rawDB(t, path).Exec(
 		`INSERT INTO `+TableObservations+
 			` (period, period_type, published_at, article_id, caliber_version, extractor, ingested_at, `+
 			FieldM2+`) VALUES (?,?,?,?,?,?,?,?)`,
@@ -849,7 +873,7 @@ func TestSaveRejectsNonFiniteValues(t *testing.T) {
 
 	var typ string
 	var isNull int
-	require.NoError(t, s.DB().QueryRow(
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 		`SELECT typeof(`+FieldM2+`), `+FieldM2+` IS NULL FROM `+TableObservations).Scan(&typ, &isNull))
 	assert.Equal(t, "null", typ, "NaN 存进去读出来是 null")
 	assert.Equal(t, 1, isNull, "与「字段缺失」完全不可区分")
@@ -902,7 +926,7 @@ type pendingRow struct {
 
 func pendingRows(t *testing.T, s *Store) []pendingRow {
 	t.Helper()
-	rows, err := s.DB().Query(
+	rows, err := s.DB().QueryContext(context.Background(), 
 		`SELECT article_id, extractor, ingested_at, report, values_json FROM ` +
 			TablePending + ` ORDER BY ingested_at`)
 	require.NoError(t, err)
@@ -938,7 +962,7 @@ func TestSaveDuplicateRefreshesArticleID(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, s, TableObservations), "不得写新行——那会造出一个假修订")
 
 	var id string
-	require.NoError(t, s.DB().QueryRow(
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 		`SELECT article_id FROM `+TableObservations).Scan(&id))
 	assert.Equal(t, "2026999999999999999", id,
 		"必须刷新 article_id，否则一级幂等检查永远 miss，每月重抓一次")
@@ -1012,7 +1036,7 @@ func TestSaveDuplicateDiscardsRicherValues(t *testing.T) {
 	var m2 float64
 	var m1 sql.NullFloat64
 	var extractor, articleID string
-	require.NoError(t, s.DB().QueryRow(
+	require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 		`SELECT `+FieldM2+`, `+FieldM1+`, extractor, article_id FROM `+TableObservations).
 		Scan(&m2, &m1, &extractor, &articleID))
 
@@ -1190,11 +1214,11 @@ func TestIngestedAtLexicalOrderIsNotTimeOrder(t *testing.T) {
 // 所以 G7 那条「静默到某一期才炸」的危害在 pending 上结构性地不成立，剩下的要求
 // 只是「失败要可定位」——由 savePending 的错误包装满足，本条断言它。
 func TestSavePendingFailsLoudlyOnDriftedPendingTable(t *testing.T) {
-	s := newTestStore(t)
+	s, path := newTestStoreAt(t)
 	ctx := context.Background()
 
 	// 造一个「结构与代码预期不符」的 pending 表
-	_, err := s.DB().Exec(
+	_, err := rawDB(t, path).Exec(
 		`ALTER TABLE ` + TablePending + ` RENAME COLUMN values_json TO values_json_legacy`)
 	require.NoError(t, err)
 
@@ -1253,7 +1277,7 @@ func TestSavePendingColumnsMatchTheirValues(t *testing.T) {
 
 	for _, w := range want {
 		var got string
-		require.NoError(t, s.DB().QueryRow(
+		require.NoError(t, s.DB().QueryRowContext(context.Background(), 
 			`SELECT `+w.col+` FROM `+TablePending).Scan(&got))
 		assert.Equalf(t, w.val, got,
 			"pending 列 %s 的取值错位——八列是手写位置参数，错位不会有任何报错", w.col)
@@ -1302,7 +1326,7 @@ func TestSaveDuplicateOnlyTouchesTheMatchingRevision(t *testing.T) {
 	assert.Equal(t, 2, countRows(t, s, TableObservations), "不得新增行")
 
 	got := map[string]string{}
-	rows, err := s.DB().Query(`SELECT published_at, article_id FROM ` + TableObservations)
+	rows, err := s.DB().QueryContext(context.Background(), `SELECT published_at, article_id FROM ` + TableObservations)
 	require.NoError(t, err)
 	defer rows.Close()
 	for rows.Next() {
@@ -1425,4 +1449,33 @@ func TestSavePendingAcceptsEmptyValues(t *testing.T) {
 	assert.Equal(t, TablePending, out.Table)
 	assert.Equal(t, 1, countRows(t, s, TablePending))
 	assert.Equal(t, 0, countRows(t, s, TableObservations))
+}
+
+// ── M1b-1.5 · #1：DB() 收窄为只读 ──────────────────────────────────────────
+// non_functional[#1] DB() 返回的类型不得具备写能力 → TestDBReturnsReadOnlyHandle
+
+func TestDBReturnsReadOnlyHandle(t *testing.T) {
+	// 查的是 DB() 的**静态**返回类型，不是动态类型。
+	//
+	// 直觉写法 `var h any = s.DB(); _, ok := h.(interface{ Exec(...) })` 是错的：
+	// Go 的类型断言看动态类型，而 Reader 接口里装的仍是 *sql.DB，断言必然成功——
+	// 那个测试即便在收窄之后也照样红，测不出任何东西。
+	//
+	// 真正要保证的是「调用方在编译期拿到的类型没有写方法」，所以查方法签名。
+	m, ok := reflect.TypeOf((*Store)(nil)).MethodByName("DB")
+	require.True(t, ok, "Store 应有 DB 方法")
+	ret := m.Type.Out(0)
+
+	require.Equal(t, reflect.Interface, ret.Kind(),
+		"DB() 必须返回接口而非具体类型——返回 *sql.DB 等于把写口一并交出去")
+
+	for _, bad := range []string{"Exec", "ExecContext", "Begin", "BeginTx", "Prepare"} {
+		_, has := ret.MethodByName(bad)
+		assert.Falsef(t, has, "DB() 的返回接口不得含 %s", bad)
+	}
+	// 只读能力必须真的可用，否则 M1b-4 的 article_id 幂等检查无从下手
+	for _, want := range []string{"QueryContext", "QueryRowContext"} {
+		_, has := ret.MethodByName(want)
+		assert.Truef(t, has, "DB() 的返回接口应提供 %s", want)
+	}
 }

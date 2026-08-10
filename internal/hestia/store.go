@@ -181,10 +181,26 @@ func verifyObservationsSchema(db *sql.DB) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// DB 暴露只读用途的句柄：Grafana 走插件直连，Go 侧的派生计算（窗口函数）
-// 与 M1b-4 的 article_id 一级幂等检查都需要自己发查询。
-// 写入仍然只能走 Save。
-func (s *Store) DB() *sql.DB { return s.db }
+// Reader 是 Store 对外暴露的只读能力。
+//
+// DB() 曾返回 *sql.DB，那让任何拿到句柄的人都能绕过 Save 的五道校验直接写库——
+// 包注释里的「唯一写入通道」于是成了一句类型系统不兑现的话，而违反它完全静默：
+// 不报错、不崩溃、数据看起来正常，只是没过闸。
+//
+// 收窄的时机有窗口：包外零调用方时改，成本为零；一旦 M1b-2 / M1b-4 用上写句柄
+// 就再也收不回来。M1b-4 的 article_id 一级幂等检查是只读的，不受影响。
+//
+// 包内测试若要制造「Store 管不到」的库状态（加列、直接写 NaN、改表结构），
+// 自己开一个裸连接——见 store_test.go 的 rawDB。
+type Reader interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// DB 暴露只读句柄：Grafana 走插件直连，Go 侧的派生计算（窗口函数）与 M1b-4 的
+// article_id 一级幂等检查都需要自己发查询。写入只能走 Save，且这一点现在由
+// 返回类型保证，而不是靠调用方自觉。
+func (s *Store) DB() Reader { return s.db }
 
 // Save 是唯一的写入口。
 //
