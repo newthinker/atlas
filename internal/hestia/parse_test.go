@@ -192,16 +192,12 @@ func TestParseRealSamples(t *testing.T) {
 
 // TestParseValuesKeysAreDeclared 覆盖 functional[0] 的后半句。
 func TestParseValuesKeysAreDeclared(t *testing.T) {
-	known := map[string]bool{}
-	for _, f := range fieldOrder {
-		known[f] = true
-	}
 	for _, sample := range []string{"pboc-2025-12-annual.html", "pboc-2020-06-h1.html"} {
 		obs, err := Parse(readSample(t, sample))
 		require.NoError(t, err)
 		require.NotEmpty(t, obs.Values, "抽出 0 个字段，本检查毫无意义")
 		for k := range obs.Values {
-			assert.Truef(t, known[k], "%s: Values 含 allFields 之外的键 %q", sample, k)
+			assert.Truef(t, allFields[k], "%s: Values 含 allFields 之外的键 %q", sample, k)
 		}
 	}
 }
@@ -311,20 +307,18 @@ func TestParseMetaPassesM1b1Validation(t *testing.T) {
 // 走 go/parser 而不是整文件子串匹配：注释里说明「本层不落库」时会写到
 // Save 这个词，整文件扫描会把说明文字判成违规。恒响的检查会被训练成忽略。
 func TestParseDoesNotTouchStorage(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "parse.go", nil, parser.ImportsOnly)
+	f, err := parser.ParseFile(token.NewFileSet(), "parse.go", nil, 0)
 	require.NoError(t, err)
 
 	require.NotEmpty(t, f.Imports, "解析出 0 个 import，本检查的绿色是假的")
 	for _, im := range f.Imports {
 		assert.NotEqual(t, `"database/sql"`, im.Path.Value, "parse.go 不得直接碰数据库")
+		// import 路径里也不该出现任何 sql 驱动
+		assert.NotContains(t, strings.ToLower(im.Path.Value), "sqlite")
 	}
 
-	full, err := parser.ParseFile(token.NewFileSet(), "parse.go", nil, 0)
-	require.NoError(t, err)
-
 	calls := 0
-	ast.Inspect(full, func(n ast.Node) bool {
+	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -336,9 +330,4 @@ func TestParseDoesNotTouchStorage(t *testing.T) {
 		return true
 	})
 	require.NotZero(t, calls, "没扫到任何函数调用，本检查的绿色是假的")
-
-	// import 路径里也不该出现任何 sql 驱动
-	for _, im := range f.Imports {
-		assert.NotContains(t, strings.ToLower(im.Path.Value), "sqlite")
-	}
 }
