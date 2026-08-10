@@ -327,6 +327,14 @@ type loanSpan struct {
 // 锚点在原文里本就按住户→企业→非银的顺序出现。这里不排序而是校验——若某期换了
 // 顺序，作用域边界会算错，那种错会让企业的短期贷款落进住户字段：值合理而字段错，
 // 是本文件最难在下游被发现的一类。
+//
+// ⚠️ 这道校验**同时是切片越界的唯一防线**，而不只是语义守卫。extractLoanSection
+// 用 `sec.Body[sp.start:end]` 切段，其中 `end = spans[i+1].start`——**升序保证一旦
+// 失效，那句切片就会 panic**（变异实测：去掉本校验后是 `panic: slice bounds out of
+// range [287:123]` 中断整个测试二进制，不是干净的断言失败）。生产路径上不会发生
+// （真实报告的锚点有序，无序时本函数已先返回 error），故不是缺陷；但删改本段的人
+// 需要知道自己动的是内存安全而不仅是字段归属。若将来改成「排序后再切」，
+// 记得排序本身也要保证严格递增——相等的起点同样会切出负长度。
 func loanScopeSpans(body string) ([]loanSpan, error) {
 	spans := make([]loanSpan, 0, len(loanScopes))
 	for _, sc := range loanScopes {

@@ -397,9 +397,22 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"NewStore", "Store.Close", "Store.DB", "Store.Save"}, got,
-		"包的导出函数/方法必须恰好是这四个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"NewStore", "Parse", "Store.Close", "Store.DB", "Store.Save"}, got,
+		"包的导出函数/方法必须恰好是这五个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
+
+// —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
+//
+// 本条守的是**写口**，而 Parse 是纯函数：输入 []byte、输出 Observation，不碰数据库。
+// 它被列进名单不是对守卫的放宽，而是这条断言用的是**全导出面精确相等**——那个形状
+// 会把任何新增导出物都判成违规，无论它是不是写口。精确相等是有意为之（它顺带
+// 逼着每次扩大导出面都要在这里留一行说明），所以正确的处置是登记而不是放松断言。
+//
+// Parse 不碰库这一点由 parse_test.go 的 TestParseDoesNotTouchStorage 独立守着：
+// 它用 go/parser 断言 parse.go 既不 import database/sql、也没有任何 .Save( 调用。
+// 两条测试的分工是「本条管导出面的**形状**，那条管 parse.go 的**行为**」——
+// 只有本条时，一个叫 Parse 却偷偷写库的函数照样在名单里；只有那条时，
+// 新增一个 InsertRow 无人拦。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
