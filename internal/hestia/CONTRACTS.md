@@ -136,6 +136,67 @@ H10 的实测把 `2026-12/monthly` 与 `2026-06/annual`、`2026-03/h1` 并列为
 
 理由：央行每年 1 月的年报同时含全年与 12 月单月数据，解析器若把两者都抽出来，`YYYY-12/monthly` 就是真实期次；且它与 `YYYY-12/annual` 的业务键本就不同（`period_type` 是主键的一部分），不会混淆。禁止它会拦掉合法数据。
 
+## Sprint 034（M1b-2 解析层）新增与变更
+
+本节由 Leader 于归档前折入，来源：TASK-007 discovery 的 `contracts_classification`（14 条）
++ QA 两轮评审（`05-review/sprint-034-review.md` 与 `-round2.md`）实证的增补。
+
+> **为什么折进来**：QA 两轮都指出「本 Sprint 一行未动本文件，T7 的分类只活在 discovery 里」，
+> 而本文件开篇自述的入库理由正是「**报告会随 Sprint 归档，而这些契约不会**」。
+
+**本 Sprint 对 `internal/hestia` 的导出面净增量恰好是 `func Parse(raw []byte) (Observation, error)`**
+（`go doc` 在 `6c51f78` 与交付态两侧 diff，差异恰好一行）。
+
+### a 类 —— 有机制（守卫经 grep 逐条核实存在，非转述）
+
+| # | 条目 | 守卫 |
+|---|---|---|
+| 29 | 导出面精确相等（新增导出物必须同步名单） | `TestPackageExposesNoWriteFunctions`（`store_test.go:368`） |
+| 30 | `Parse` 不碰存储 | `TestParseDoesNotTouchStorage`（`go/parser` 断言无 `database/sql` import、无 `.Save(`） |
+| 31 | `extractorV1/V2` 常量 ↔ `detectExtractor` 返回值绑定 | `TestExtractorConstantsMatchDetect` |
+| 32 | `monthly` 期次零样本 ⇒ **显式拒绝而非猜** | `TestParseRejectsMonthlyUntilSampled` |
+| 33 | `Parse` 产出的 `Observation` 是未完成的（`ArticleID`/`IngestedAt` 留空），直接喂 `Save` 必被拒 | `Meta.validate` + `TestParseMetaPassesM1b1Validation` |
+| 34 | `findSection` 只匹配 Title——**正文提及 ≠ 板块主题** | `TestFindSectionResolvesAllT5Keywords` / `…IgnoresBodyOnlyMentions` |
+| 35 | `section.Title/Body` 两端已 TrimSpace（下游因此不再 Trim） | `TestSplitSectionsTrimsTitleAndBody` |
+| 36 | 板块数硬断言 8/6（**多切与少切同样是 bug**） | `TestSplitSectionsOnRealSamples` 的 `require.Len` |
+| 37 | 未知版式一律 error 不降级 | `TestDetectExtractorRejectsUnknownLayout` |
+| **38** | **板块序号必须从「一、」起连续**（Sprint 034 返工新增） | `checkSectionOrdinals` + `TestDetectExtractorRejectsNonConsecutiveOrdinals`。QA 消融实证：恒返回 nil ⇒ 375 PASS / **5 FAIL** |
+| **39** | **每条清单模板恰好命中一次**（返工新增） | `mustMatch` 的 `len(all) != 1` 报错 + `TestListTemplatesHitExactlyOnceOnRealSamples`。QA 消融：退回最左优先 ⇒ 378 PASS / **2 FAIL** |
+| **40** | **`published_at` 形态在 Parse 与 Save 共用同一条 `publishedAtRE`**（返工新增） | `Parse` 的 `!ok \|\| pubDate == ""` + 形态校验；`TestParseRejectsBadPubDate` |
+
+### b 类 —— 有契约，无机制
+
+| # | 条目 | 为何不做成机制 |
+|---|---|---|
+| 41 | golden 期望值必须**手工抄自原文**，不得由解析器生成 | 无法用测试区分「人抄的」与「机器生成后粘进来的」——字面量完全相同。**可机械化的那半已做**：golden 先于全部实现落盘，判据 `git log --diff-filter=M -- golden_test.go` 当前仍为空。剩余敞口是「将来有人修改它」 |
+| 42 | golden 比对的 **`1e-6` 容差本身无守卫** | **这条可低成本机制化，建议做**：改成 1e-2 **不会有任何测试转红**，而那足以让真实抽取错误（48100 抽成 48101）漏网。两个 dev 在不同任务上独立命中 ⇒ 系统性。⚠️ 它同时有**依据缺失**这一层：**这个数从来没有人算过**——`1e-6` 太松会漏真错，严格相等又会被 ULP 噪声打红，**两个方向都不成立说明它是默认值不是算出来的**。修法分两步：① 机制＝严格相等 + 显式豁免清单；② 依据＝先逐项枚举哪些换算 bit-exact（**`4.81×10000` 不精确，而 `14.64/15.91/2.39` 精确** ⇒ 一份「某几个值通过」的证据**不能外推**） |
+| **43** | **「社融两节位于报告开头」——封闭性论证的前提，无任何断言守护** | 返工后两条守卫（序号连续 / 版式判据）的**覆盖并集封闭**这一结论，依赖「丢后缀 ⇒ 必保留社融节 ⇒ `hasTSF=true` ⇒ 不匹配任何版式」。**若某版报告把社融挪到尾部，丢掉它将同时满足「序号连续」与 `(6,false)`，封闭性失效。** 代码里没有任何断言钉住社融节的位置（`TestSectionOrdinalsAreConsecutiveInRealSamples` 钉的是序号连续，不是位置）。⇒ **当前的封闭性是「结构性质 + 当前模板」的合取，不是纯结构性质。** 低成本机制化：断言两份样本上社融节的序号为 1 与 2 |
+
+### c 类 —— 连契约都没有
+
+| # | 条目 | 现状与建议 |
+|---|---|---|
+| 44 | 万亿→亿 换算的 **float64 表示误差**（`loan_corp_short_ytd` 低 1 ULP，相对误差 8.12e-17 **输入侧** / 1.51e-16 **输出侧**） | 与 #10（量级错，10000×）**不是一回事**，不能算已登记。**建议至少升级为契约**：「增量类字段由 万亿×10000 得出，个别值存在 ≤1 ULP 表示误差，**下游不得对其做精确相等比较**」。⚠️ **对 M1b-3 尤其要紧**：若某道闸用 `==` 或恒等式校验（如分项加总 == 总额），这个 ULP 会让它在毫无实际问题时报红。⚠️ 易踩：**Go 的无类型常量算术是精确的**，源码里写 `4.81*10000` 得到精确的 48100 ⇒「在 Go 里手算一遍验证」会得出相反结论 |
+| 45 | `fields.go` 的单位约定**不覆盖** `fx_reserve`（万亿美元）与 `fx_rate`（元/美元） | 包注释声称三类覆盖，实际两个字段在三类之外；守卫 `TestPackageDocDeclaresUnits` **只查 4 个字串是否出现，不查覆盖完整性**，故缺口静默。**QA 判「现在就该改」**：现在改是纯注释 0 行代码；等 M1b-3 照错误前提写完 field→量级区间表再改，就是改一张已上线的闸门表，**而那张表错了不会响亮失败**（只是区间放宽）。建议②把该测试升级为「遍历 `fieldOrder`，每个字段都要能归入某一类」的覆盖性检查 |
+
+### 状态变更
+
+- **B3「`section.has` 不得用于板块定位」→ 关闭。** `section.has` 已在 Sprint 034 返工中删除（`grep` 0 命中），提交信息按要求写明「T3『留给 T5』的理由已随 T5 交付而过期」。**该条目曾被两次独立发现为死代码**（dev-45 在 T5 记「不是死代码，免得被清理」，QA 的 minimalist lens 在评审时判「删」）——保留理由过期而无人撤销，是它被反复发现的原因。
+
+### M1b-3 开工前必须定案的一件事（QA round1 提出，本 Sprint 不定案）
+
+**completeness 闸门在当前设计下恒真**：`extract.go` 的纪律是「任何模板未命中一律报错」，
+`extractFields` 要么全成要么返回 nil ⇒ `Parse` 的输出键数**只可能是 54 或 27**。两条互斥出路：
+
+- **(i) 认它是恒真的纵深防御** ⇒ 那就**别手写第四份字段划分表**，v1/v2 必填集应从
+  `sectionRules` + `v2Only` **派生**（`fields.go:3-5` 自己写着「手写多份必然不同步」）；
+- **(ii) 让抽取变成部分成功**（逐字段记命中/未命中）⇒ completeness 才有信号。
+
+⚠️ 注意 `types.go:187` 的 `Check.Reason = "absent_field:<name>"` 与整套 pending 机制，
+**读起来就是为 (ii) 准备的** —— **数据模型与 `extract.go` 的「全有或全无」纪律之间，
+有一条从未被声明的张力**。当前设计下，央行改一句话会让整期 54 个字段全部落空，
+没有「入 53 个、标 1 个 pending」的路径。
+
 ## 相关文档
 
 - **`.arcforge/docs/05-review/qa-review-sprint033.md`** —— QA 终审报告（403 行，含每条的实测取证）
