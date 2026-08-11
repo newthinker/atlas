@@ -1,0 +1,72 @@
+{
+  "task": "TASK-002",
+  "title": "completeness 必填集派生",
+  "by": "dev-agent-47",
+  "branch": "task/TASK-002",
+  "base": "125ad896fb096f7766cbb3c958ba2635a311c6ba",
+  "commit": "e24c0627df4adb3abcc662dc5027cc9dd48490c2",
+  "scope_note": "严格落在声明的 writes 两个路径内，无越界。未碰 store_test.go（本任务不新增任何导出物，tsfSectionFields/requiredFields 均非导出，不触发导出面守卫）。",
+  "key_findings": [
+    "reviewer 的复算成立：tsfStockItems(8)×2 + tsfFlowItems(8) + 3 总量 = 27；fieldOrder(54) 减去这 27 = 27，与 golden2020 键集双向一致，与 golden2025 亦双向一致。计划这部分可照抄，实测无偏差。",
+    "计划 Step 3 的 import \"slices\" 坑已按 DoD non_functional[2] 规避：Step 3 只写 tsfSectionFields（不需要任何 import），slices 到 Step 7 实现 requiredFields 时才加入。两次 RED 都因预期原因失败。",
+    "【本任务发现的守卫缺口，已补】DoD non_functional[0] 禁止用 strings.HasPrefix(f,\"tsf_\") 实现派生，但计划给出的三条断言（27 个 / 无重复 / 与 golden 双向一致）**一条都杀不掉前缀实现**——因为前缀与板块归属当前恰好一致，前缀版会给出一模一样的 27 个字段。消融实测证实：把 tsfSectionFields 换成 HasPrefix 筛 fieldOrder 后，计划的全部断言仍然全绿。这是典型的「守卫在场但参数无守」，即 DoD 写了禁令而无任何机制执行。",
+    "golden_test.go:288 的既有 TestGoldenTablesAreWellFormed 已把 golden2020 钉成「恰好 = 全部非 tsf_ 前缀字段」，故 v1 方向的双向一致在当前代码里是必然成立的，不是巧合——它验证的是「模板表派生 == 前缀口径」这一当前事实，而非独立佐证。这一点计划未说明，记此以免下游把该断言的强度读高。"
+  ],
+  "decisions": [
+    {
+      "decision": "在计划给出的四条测试之外，增补 TestTSFSectionFieldsDerivesFromTemplateTables",
+      "rationale": "它是 DoD non_functional[0]（禁 HasPrefix）唯一的执行机制。做法是往 tsfStockItems/tsfFlowItems 临时插入一个哨兵分项（字段名不带 tsf_ 前缀、也不在 fieldOrder 里），真派生会把它带出来，前缀实现不会。消融实验（对最终提交版代码重跑）：HasPrefix 变异体下，本条 FAIL 而其余四条全 PASS —— 证明它既有效、又是唯一有效的那一条。用 t.Cleanup 还原包级变量；本包 t.Parallel() 出现 0 次，测试函数串行执行，无并发风险。",
+      "scope_note": "改动仍在声明的 writes 之内（只写 required_test.go），未扩大范围。"
+    },
+    {
+      "decision": "requiredFields 对 llm-fallback@v1 / rule@v3 / \"\" 一律返回 nil，落 default 分支",
+      "rationale": "照 DoD error_handling[0]：Extractor 同时编码「抽取方式」与「模板版本」，llm-fallback@v1 只带前者，无从判断期次是 v1 还是 v2。返回 nil 是刻意的失败信号，让 M1c 启用 LLM 兜底当天 completeness 全部 skipped，逼实现者面对该模型缺陷，而不是悄悄拿 54 个字段去校验只有 27 个字段的期次。"
+    },
+    {
+      "decision": "extractorV2 分支用 slices.Clone(fieldOrder) 而非直接返回 fieldOrder",
+      "rationale": "DoD boundary[0]：fieldOrder 是 DDL、INSERT 列、白名单的共同真相源，交出底层数组等于把三者一起交出去，一次误写同时污染三处。由 TestRequiredFieldsReturnsCopy 钉住。"
+    },
+    {
+      "decision": "接受 code-simplifier 的一处改动：v1 分支的 make(map[string]bool, 27) 改为先取 section := tsfSectionFields() 再用 len(section)",
+      "rationale": "消除了实现里最后一个硬编码 27，与本包『禁止手写第五份字段清单』的纪律同向；行为不变。已逐行 diff 核实该子代理的实际改动（它只改了 required.go 这一处，required_test.go 未动，5 个测试函数与 12 条断言均完好），并在其改动之后重跑了全部门禁与消融实验——报告里的数字全部采自最终提交版。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/required.go（新建，51 行）",
+    "internal/hestia/required_test.go（新建，110 行）"
+  ],
+  "interfaces_exposed": [
+    "func tsfSectionFields() []string —— 包内非导出。社融两节的 27 个字段（8 存量分项×2 + 8 增量分项 + 3 总量）。往 tsfStockItems/tsfFlowItems 加一行即自动纳入。",
+    "func requiredFields(extractor string) []string —— 包内非导出。rule@v2 → fieldOrder 的副本（54）；rule@v1 → 54 减去社融两节（27）；其余一律 nil。返回值恒为副本，调用方可安全改动。"
+  ],
+  "verification": {
+    "red_1_expected": "undefined: tsfSectionFields",
+    "red_1_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/required_test.go:19:9: undefined: tsfSectionFields\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_2_expected": "undefined: requiredFields",
+    "red_2_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/required_test.go:46:11: undefined: requiredFields\ninternal/hestia/required_test.go:66:9: undefined: requiredFields\ninternal/hestia/required_test.go:80:16: undefined: requiredFields\ninternal/hestia/required_test.go:81:16: undefined: requiredFields\ninternal/hestia/required_test.go:82:16: undefined: requiredFields\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]",
+    "red_note": "两次 RED 均因预期的 undefined 失败，无一条是 imported and not used —— 计划 Step 3 的 slices import 坑（reviewer A3）按 DoD non_functional[2] 规避成功。",
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok（整包绿）",
+    "coverage": "89.8% of statements（改动前基线 89.4%）",
+    "gofmt": "GOTOOLCHAIN=local gofmt -l internal/hestia/ → 无输出",
+    "vet": "GOTOOLCHAIN=local go vet ./internal/hestia/ → 无输出",
+    "assertions_in_task_tests": 12,
+    "test_functions": [
+      "TestTSFSectionFieldsIsExactAndDistinct（functional[0]：Len 27 + seen map 查重）",
+      "TestTSFSectionFieldsDerivesFromTemplateTables（non_functional[0]：哨兵分项钉住真派生，本任务增补）",
+      "TestRequiredFieldsMatchGoldenKeySets/rule@v2（functional[1]：54，与 golden2025 双向）",
+      "TestRequiredFieldsMatchGoldenKeySets/rule@v1（functional[2]：27，与 golden2020 双向）",
+      "TestRequiredFieldsReturnsCopy（boundary[0]：改返回值不影响 fieldOrder）",
+      "TestRequiredFieldsRejectsAmbiguousExtractor（error_handling[0]：三个输入均 nil）"
+    ],
+    "ablation": {
+      "target": "把 tsfSectionFields 换成 strings.HasPrefix(f,\"tsf_\") 筛 fieldOrder",
+      "when": "对最终提交版 required.go（sha256 739eda4d3c325c3b4bcd00fc17667d49d4b1f5c1bb10e4eab015bb333549a67c）执行，即最后一次改动之后",
+      "validity_gate": "变异体 gofmt -l 无输出（语法有效）；变异体与原文的 diff 已逐行核对",
+      "result": "TestTSFSectionFieldsDerivesFromTemplateTables FAIL；其余四条测试（含计划原有的全部断言）全部 PASS",
+      "conclusion": "计划给出的断言对 non_functional[0] 零守护，增补的那条是唯一杀手",
+      "restore_proof": "变异后还原，required.go 的 sha256 与变异前逐字节一致（739eda4d…9a67c）；变异全程只作用于本 dev 私有 worktree，主仓库未触及"
+    },
+    "commit_numstat": "git show --numstat HEAD → required.go 51/0，required_test.go 110/0（纯新增，0 删除，与两个新建文件一致）",
+    "merge_pending": "本 discovery 落盘时代码仅存在于分支 task/TASK-002，尚未 merge 进 master。dev_done 门禁在主工作区跑测试，故按 Leader 指示等 merge 完成后才 transition dev_done。"
+  }
+}

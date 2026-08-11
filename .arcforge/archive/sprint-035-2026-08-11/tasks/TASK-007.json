@@ -1,0 +1,58 @@
+{
+  "id": "TASK-007",
+  "title": "口径豁免应用、Save 接线与 ULP 契约",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-001",
+    "TASK-006"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "description": "在 Validate 循环里应用口径豁免（记 skipped 而非 passed）、从 gates 派生 knownCheckIDs 并校验 SkipChecks 的 ID、钉住 ULP 浮点契约、验证 Validate 产出能被 Save 接受、更新 CONTRACTS.md。对应上游计划 Task 7（Step 1-12）。注：CONTRACTS.md 在 writes 但不在 packages —— 非 Go 路径进 -coverpkg 会弄坏覆盖率门禁（见 AD-035-4）。",
+  "done_criteria": {
+    "functional": [
+      "`knownCheckIDs()` **从 `gates` 派生**（不手写第二份 ID 列表），返回恰好七个 ID 且顺序为 `monetary_hierarchy, deposit_sum, corp_loan_reconcile, stock_continuity, yoy_sanity, completeness, magnitude_sanity`。\n\n这不是同义反复：M0 的两份契约样本已按这七个 ID 写好，Grafana 面板与 pending 的人工复核流程都依赖它们——加一道闸门就要同步改契约文档，这条测试是那个提醒。",
+      "**每道闸门都出现在报告里**，无论 passed/failed/skipped：`len(rep.Checks) == len(gates)` 且**逐位**断言 `rep.Checks[i].ID == gates[i].id`（在 v1 期次这种大量跳过的输入上测）。\n\n「某道闸门在某些输入下整个消失」是最难发现的失败模式——报告看起来正常，只是少了一行，而 `Passed` 照样是 true。",
+      "命中豁免记 `skipped{caliber_exemption:<version>}` 而**非 passed**，**保留 Value**，且 `rep.Passed` 仍为 true（被豁免的闸门不阻断入库）。判据：构造一个本该 failed 的输入（M1 > M2），配上豁免后必须变 skipped。\n\n豁免与通过在数据上**必须可分**：把「这次没查」记成「查了没问题」等于**伪造一次检查记录**。"
+    ],
+    "boundary": [
+      "**豁免不外溢到其他期次**：豁免配在 2025-01 而观测是 2026-06 时，该闸门必须照常 failed 且 `rep.Passed == false`。（与 TASK-001 的 `exemptionFor` 单元测试互补——这里测的是**接入 Validate 后**端到端仍不外溢。）"
+    ],
+    "error_handling": [
+      "`SkipChecks` 含未知 ID（如拼错的 `deposit_summ`）时 `Validate` 返回 error 且信息**含该 ID 原文**。ID 列表须从 `gates` 派生校验（TASK-001 时 `gates` 尚不存在，故这一步留到本任务）。\n\n不做的后果：打错一个字会**静默失效**——豁免看起来配上了，实际那道闸门照跑，而配置的人以为已经跳过。\n\n同时确认 TASK-001 的豁免校验测试**未被新增的 ID 校验破坏**（其 base 用的 `deposit_sum` 是合法 ID，应仍通过）。"
+    ],
+    "non_functional": [
+      "**Validate 的产出必须能被 Save 接受**（真库，v2 全字段与 v1 无社融各一例，落 `TableObservations`）；**没过闸的数据落 `TablePending`** 且报告本身可序列化。\n\n两边各自的测试都绿、接起来仍可能不通：`Save` 对报告另有要求（Checks 非空、skipped 必带 reason、Value 必须有限）。若报「skipped check has no reason」，说明某道闸门有一条 skip 路径漏了 Reason——**回去补，不要在测试里绕过**。本测试同时验证 `Store` 能当 `History` 用。",
+      "**ULP 契约**：测试钉住「万亿x10000 的换算误差存在」这个事实本身（`trillion := 4.81` 用**变量**，`assert.NotEqual(48100.0, got)` + `assert.InDelta(..., 1e-9)`），并在 `validate.go` 包内注释写下「闸门一律不得对这些值做精确相等比较」。\n\n**验证时不能在源码里手算**：Go 的无类型常量算术是精确的，写 `4.81*10000` 会得到精确的 48100，从而得出「没有误差」的**相反结论**。",
+      "`CONTRACTS.md` 追加 Sprint 035 一节，如实记录：①七道闸门的**真实防护力**（交付时只有三道半真正拦得住东西，逐道列出何时有声）；②留给 M1c 的三件事；③浮点契约。\n\n**另加两件事（Leader 追加，源自 test-agent-24 的复核）**：\n\n**㈠ 补 `monetary_hierarchy` 的两个边界测试。** `validate.go:139` 的 `m2 > m1 && m1 > m0` 是**两处**比较，改成 `>=` 后**均 SURVIVED**（验证者实测）。即「M2 恰好等于 M1」会被判 passed，而 **M2 严格含 M1，相等即可疑数据**。\n\n这条与 magnitude 的边界缺口同形，但**语义上更实在**：magnitude 恒 `skipped` 至 M1c，而 **monetary_hierarchy 每期都在跑**，是七道闸里当下就有信号的三道之一。构造 `M2 == M1` 与 `M1 == M0` 各一个用例断言 failed。\n\n**㈡ 把 M1c 的提醒挂到「必然会响的绊线」上。** 在 `thresholds_test.go` 的 `TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated`（`assert.Empty` 那条）的注释里**加一行**，指向 `02-plan/findings-carryover.md` 的 F12/F17/F19，说明「填表时除了改这条断言，还须补：遍历顺序守卫、`Min`/`Max` 两个边界方向、`Range.Unit` 的单位」。\n\n**为什么这么做**（验证者的论证，值得照抄）：F17 写在一份**需要被记起来**的文档里；而那条 `assert.Empty` 是**必然会响的绊线** —— 任何人填表都必须先撞红它、必须动手改它。M1c 填表那天的实际路径是「填表 → 测试红 → 改它 → **没有任何东西提示还要补边界测试**」，除非那人恰好想起 F17。**把提醒挂在绊线上，而不是挂在需要被记起来的文档里** —— 与本仓库导出面守卫「逼你留一行说明」是同一手法。\n\n`gofmt -l` 与 `go vet` 无输出；`go test ./internal/hestia/ -count=1` 与 `-race -count=1` **均全绿**；`go build ./...` 通过。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-46",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "4547631dc8fdf03aeb97e84635a4174a8f5cf05c",
+    "discovery_sha256": "3298ac99abdac22d778b73f8f37a530d2a9e0459cef62576c2939073bcafcdf3",
+    "at": "2026-08-11T11:05:02Z"
+  },
+  "verifier": "test-agent-24"
+}

@@ -1,0 +1,88 @@
+{
+  "task": "TASK-005",
+  "title": "deposit_sum 的绝对残差与漂移两判据合成",
+  "by": "dev-agent-47",
+  "branch": "master",
+  "base": "09183243cc1864a3f2920311e55bdf3bcbbfd06c",
+  "commit": "1716dfc69aef79d1ff4b69a80d3231886be411d8",
+  "scope_note": "严格落在声明的 writes 两项内（validate.go 113/0，validate_test.go 224/2）。validate_test.go 的 2 处删除**全部**是 wantGateIDs 那段的两行原地改写（注释 T5 加→已加、require 消息 五道→六道），无任何断言被删除或放松——`git diff -U1 | grep '^-'` 只有这两行。.arcforge/write-matrix.json 是 Leader 的未提交改动，已用显式 pathspec 避开。",
+  "key_findings": [
+    "【实测】DoD boundary[0] 点名的洞确实存在，且已被堵上：变异 M1（`r > DepositSumTolerance` 改 `>=`）在**只有计划原有测试**时无一转红（reviewer 早先的结论在本任务复现），加入 TestDepositSumBoundaryIsInclusive 后 KILLED。",
+    "【实测，超出 DoD 范围的发现】**同一形状的洞在漂移阈值上也存在**：变异 M2（`drift > DepositSumDriftMax` 改 `>=`）在补完 boundary[0] 之后**仍然存活**——DoD 只点名了 ±12% 一个边界，而这道闸有两个阈值。已追加漂移边界测试，重跑 M2 转 KILLED。判据仍是那句「改坏它有东西会红吗」。",
+    "【实测】TASK-004 留下的 wantGateIDs 字面量守卫**真的有效**：我把 deposit_sum 插进 gates 表、尚未更新 wantGateIDs 时跑测试，`TestReportAlwaysContainsEveryGate` 立即转红并打出 `+ (string) (len=11) \"deposit_sum\"`。这不是推断，是插表与改测试之间那一步的实际观察。已按要求**追加**字面量（位置与 gates 表一致，紧跟 monetary_hierarchy），未改成 Subset/Contains 之类的宽松形式。",
+    "【实测】计划称 golden2025 期实测残差 9.06% —— 独立复算（不经本实现，直接用 golden_test.go 里的五个数字：264100 / 146400 / 23100 / 6579 / 64100）得 **0.090576**，与计划一致，也与 spec 第 7 节单位表的 `0.0906` 一致。",
+    "【实测 + 一处存疑,不作断言】golden2020 同法复算得 **0.085649**（≈8.56%）。spec 与计划多处引用的 M0 契约样本值是 `0.0857`（8.57%），两者**不相等**。我没有 M0 契约样本原件（`internal/hestia/CONTRACTS.md` 里不含 deposit_sum），无法判断这是「同一期次的四舍五入差异」还是「M0 三期 7.65/8.57/9.06 里的 8.57 本就是 golden2020 之外的另一期」。**倾向后者但未证实**——M0 是三期而 golden 只有两期。此条不影响任何实现或断言（测试断的是实际算出的残差，不是这个字面量），仅记以免下游把 golden2020 与 0.0857 划等号。"
+  ],
+  "decisions": [
+    {
+      "decision": "boundary[0] 的边界值直接用默认容差 0.12 与「总额 100、住户 88」的自然构造，不绕道 2 的幂",
+      "rationale": "【实测】残差 12/100 与阈值字面量 0.12 是**同一个 float64**（二者打印的位模式都是 8646911284551352p-56），故「恰好等于」是真相等而非舍入巧合。DoD 要求「需实测确认 12.0/100 == 0.12 成立」，我用一段独立小程序打印位模式确认，而不是推理。**不写「必须用 2 的幂」**——Leader 转述的验证者结论是该条件充分但不必要，本构造的中间量（88/100/12）都是远小于 2^53 的整数，IEEE 除法正确舍入即可保证。"
+    },
+    {
+      "decision": "追加漂移阈值的边界测试（DoD 未要求）",
+      "rationale": "【实测】M2 变异在补完 DoD 要求的 boundary[0] 之后仍存活，说明同一道闸的第二个阈值仍无守卫。两个阈值同属一次交付，只堵一个会留下另一个。选数用自定义阈值 1/32=0.03125 而非默认 0.03：**0.03 不是精确可表示的二进制小数**，用它测「恰好等于」测的是舍入而非比较符。前三期残差 6.25% ⇒ 均值恰为 1/16，本期 9.375% ⇒ 残差恰为 3/32，drift 恰为 1/32 —— 四个值均已实测为精确等值。"
+    },
+    {
+      "decision": "追加 TestDepositSumDistinguishesNoHistoryFromShortHistory（DoD functional[0] 的可分性要求）",
+      "rationale": "DoD 明写「前两行的 Reason 必须可分」，但表驱动那六行用的是 assert.Contains —— 若实现把两个理由写成互相包含的超集字串（如 no_prior_period_or_insufficient），Contains 会**同时**放过两行。【实测】M4 变异（把 insufficient_history 直接写成 no_prior_period）同时打红表驱动的「历史不足三期」与本条；本条额外钉住「不得互相包含」这一表驱动测不到的方向。"
+    },
+    {
+      "decision": "追加 TestDepositSumSkipsOnZeroDenominator（DoD error_handling[0]）",
+      "rationale": "计划实现了 zero_denominator 分支却没有为 deposit_sum 写任何测试（corp_loan 有同形的 TestCorpLoanSkipsOnZeroDenominator）。DoD 要求这条，计划沉默 ⇒ 按 AD-035-5 直接补。【实测】M6 变异（让零分母不再短路、任其算出 Inf）被本条 KILLED。"
+    },
+    {
+      "decision": "gateDepositSum 与两个 helper 插在 gateMonetaryHierarchy 与 gateCorpLoanReconcile 之间，而不是文件末尾追加",
+      "rationale": "计划说「追加到 validate.go」，但既有文件的函数顺序与 gates 表顺序**逐项一致**（monetary→corp_loan→yoy→completeness→magnitude，helper 紧跟各自的闸门）。deposit_sum 在表里排第二，函数也放第二位以维持该约定。这是风格对齐，不改变任何行为。"
+    },
+    {
+      "decision": "spec functional[3] 与 7.1 冲突处按 Leader 裁定取 7.1（无历史 ⇒ passed + drift_skipped:no_prior_period）",
+      "rationale": "Leader 已在 DoD 里裁定并给出论证（绝对值确实查过并通过了）。【实测】M5 变异（改记 CheckSkipped）被表驱动首行与边界测试同时 KILLED，说明这一格现在有守卫——它是映射表最容易写错的一格。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go（+113/-0：minDriftHistory、depositPartFields、gateDepositSum、depositResidual，gates 表插一行）",
+    "internal/hestia/validate_test.go（+224/-2：四条新测试 + depositWith helper，wantGateIDs 追加 deposit_sum）"
+  ],
+  "interfaces_exposed": [
+    "const minDriftHistory = 3 —— 包内非导出，漂移检测所需最少历史期数",
+    "var depositPartFields []string —— 包内非导出，存款四个部门分项字段",
+    "func gateDepositSum(in gateInput) Check —— 包内非导出，两判据合成三态；Value 恒为绝对残差**占比**（与 corp_loan_reconcile 的亿元刻意不同，两处注释均写明）",
+    "func depositResidual(values map[string]float64) (float64, bool) —— 包内非导出；字段不全或总额为零返回 false，供本期与历史期共用",
+    "gates 表现为六行，deposit_sum 位于 monetary_hierarchy 之后（DoD functional[2]）",
+    "测试侧 helper depositWith(residualPct float64) map[string]float64 —— 供 deposit_sum 四条测试共用；T6 若要造存款观测可直接复用"
+  ],
+  "verification": {
+    "red_expected": "全部子测试 FAIL，报告里找不到 deposit_sum（findCheck 走 t.Fatalf）",
+    "red_actual_verbatim": "=== RUN   TestDepositSumCombinesTwoCriteria/无历史，绝对值通过\n    validate_test.go:511: 报告里没有 deposit_sum；实际有 5 道闸门\n--- FAIL: TestDepositSumCombinesTwoCriteria (0.00s)\n    --- FAIL: TestDepositSumCombinesTwoCriteria/无历史，绝对值通过 (0.00s)\n    --- FAIL: TestDepositSumCombinesTwoCriteria/无历史，绝对值超标 (0.00s)\n    --- FAIL: TestDepositSumCombinesTwoCriteria/历史不足三期 (0.00s)\n    --- FAIL: TestDepositSumCombinesTwoCriteria/三期历史，漂移在容许内 (0.00s)\n    --- FAIL: TestDepositSumCombinesTwoCriteria/三期历史，漂移超标 (0.00s)\n    --- FAIL: TestDepositSumCombinesTwoCriteria/绝对值超标时不谈漂移 (0.00s)",
+    "red_note": "六个子测试 + 另外三条新测试全部因同一原因失败（findCheck 的 Fatalf「报告里没有 deposit_sum；实际有 5 道闸门」），无编译错误、无 imported and not used。与 DoD non_functional[1] 的预期逐字一致。",
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok（整包绿）",
+    "coverage": "91.7%（go test -cover 包级）／91.6%（dev_done 门禁 -func 口径，dev_minimum 80%）；本任务前基线 90.1%",
+    "gofmt": "无输出",
+    "vet": "无输出",
+    "new_assertions": 31,
+    "golden_no_false_alarm": "DoD non_functional[0]：TestValidateOnGoldenSamples 与 TestEverySkippedCheckHasReason 加入本闸门后仍 PASS。独立复算 golden2025 残差 = 0.090576 ≤ 0.12，NoHistory ⇒ passed + drift_skipped:no_prior_period。",
+    "guard_observed_firing": "把 deposit_sum 插进 gates 表、尚未更新 wantGateIDs 时实跑：TestReportAlwaysContainsEveryGate FAIL，diff 打出 `+ (string) (len=11) \"deposit_sum\"`。随后按要求**追加**字面量（未改成 Subset/Contains），转绿。",
+    "ablation": {
+      "method": "隔离副本（git worktree --detach @09183243 + 拷入本任务两个未提交文件），主工作区一个字节不碰；harness 见 scratchpad/dev47-t005-mutate.sh",
+      "gates": "四道闸全部启用：①变异后 sha 必须变 ②gofmt -l 干净 ③`go test -c -o /dev/null` 必须编译通过（防编译失败被误记 KILLED）④每轮还原后 sha 与对照组比对；另打印每个变异体的 diff 供逐行核对（语义闸）",
+      "control_group": "变异前对照组先验全绿（ok），且每轮结束还原后 sha 逐字节回到 523a3bec85e2954cbf5c7abfa9ed3052bfb68c0fd63252a973c4f425f68f1eac",
+      "when": "对最终提交版（1716dfc 的内容）统一重跑一遍，非分批采样",
+      "results": [
+        "M1 `r > Tolerance` → `>=`：KILLED（TestDepositSumBoundaryIsInclusive/残差恰好等于容差判_passed）",
+        "M2 `drift > DriftMax` → `>=`：**补测试前 SURVIVED，补测试后 KILLED**（TestDepositSumBoundaryIsInclusive/漂移恰好等于上限判_passed）",
+        "M3 算不出残差的历史期次当成 0 计入均值：KILLED（TestDepositSumIgnoresUncomputablePriors）",
+        "M4 两个 drift_skipped 理由合并成同一串：KILLED（表驱动「历史不足三期」+ TestDepositSumDistinguishesNoHistoryFromShortHistory）",
+        "M5 无历史时记 skipped 而非 passed：KILLED（表驱动「无历史，绝对值通过」+ 边界测试）",
+        "M6 零分母不再短路、任其算出 Inf：KILLED（TestDepositSumSkipsOnZeroDenominator）"
+      ],
+      "final_state": "6/6 KILLED，隔离副本已完全还原并 git worktree remove"
+    },
+    "float_exactness_checks": [
+      "12.0/100 与字面量 0.12 位模式同为 8646911284551352p-56 ⇒ 恰好相等（实测打印，非推理）",
+      "6.25%⇒1/16、9.375%⇒3/32、drift⇒1/32、10.9375%⇒7/64 均实测为精确等值",
+      "对照组选值曾用 12.5%，实跑发现其残差 0.125 > 容差 0.12 ⇒ 判据一先命中，测到的是 tolerance_exceeded 而非漂移；改用 10.9375% 后正确。此坑已写进测试注释。"
+    ],
+    "commit_numstat": "git show --numstat HEAD → validate.go 113/0，validate_test.go 224/2；`git show --name-only` 确认只含这两个文件",
+    "known_gaps_not_touched": "按 Leader 指示记录但**未动手**的 TASK-004 遗留：①magnitude_sanity 改遍历 map 而非 fieldOrder 后全绿（该闸当前恒 skipped{not_calibrated}，实际影响为零）②cfg.validate() 移到闸门循环之后全绿（现有测试不区分前后）。两者均不在本任务 writes 范围内。"
+  }
+}

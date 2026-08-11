@@ -1,0 +1,55 @@
+{
+  "id": "TASK-003",
+  "title": "History 窄接口与 Store.Preceding",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "新建 validate.go 并放入 History 单方法接口与 NoHistory；给 Store 追加只读的 Preceding 与 scanObservation（用 NullFloat64 还原 absent 语义）。本任务只放接口，Validate 骨架属 TASK-004。对应上游计划 Task 3（Step 1-12）。",
+  "done_criteria": {
+    "functional": [
+      "`Preceding(ctx, period, periodType, n)` 返回 period **之前**最近 n 期，**按 period 降序**：造 4 期取 2 期时，`got[0]` 是最近一期、`got[1]` 次之，且**不含 period 自身**（LIMIT 与 `period <` 都要生效）。",
+      "走 `v_hestia_current` 视图 ⇒ **修订可见**：同一期次存两次（第二次为修订），`Preceding` 必须返回**修订后的值**且**只返回一条**（修订不产生第二期，只是同一期的新行）。",
+      "`store_test.go` 中存在编译期断言 `var _ History = (*Store)(nil)` 且编译通过。\n\n它比任何运行时测试都早发现签名漂移——TASK-004/005/006 全都依赖 `Store` 满足 `History`。"
+    ],
+    "boundary": [
+      "**absent 语义双向往返**，两个方向缺一不可：①未写入的字段读回来**不出现在 Values 里**（`_, ok := Values[f]; ok == false`）；②**显式写入的 0 必须保留**（`ok == true` 且值为 0）。\n\n**方向②比①更危险**：把 NULL 读成 0 会让 `stock_continuity` 拿这个 0 去算环比，得出 **-100% 的假警报**。只查①会放过「把 0 也读丢了」，只查②会放过「把 NULL 读成 0」。\n\n实现必须用 `sql.NullFloat64`，裸 `float64` 扫描会让方向①红。",
+      "**period_type 序列隔离**：同一个 period 字符串上同时存 monthly 与 annual 两条，查 monthly 序列时 annual 那条**不得混入**（月度与半年度是两条独立序列，社融存量的环比在它们之间比较毫无意义）。",
+      "**边缘输入返回空而非异常**，两种各测一次：①`n = 0` 与 `n = -1` 返回**空**而非全部；②空历史返回 `(empty, nil)` 而**非 error**。\n\n①的理由：SQLite 的 `LIMIT -1` 表示「**不限制**」——不挡住非正数，一次 `n=0` 的调用会把整个序列拉回来，而调用方以为自己什么都没要。②的理由：首期入库是正常路径，不是错误。"
+    ],
+    "error_handling": [
+      "查库真失败时返回 error，且错误要**包住底层 err**（可被 `errors.Is` 找到）并带上 period/periodType 上下文。"
+    ],
+    "non_functional": [
+      "**RED 阶段实际失败信息与计划预期一致**，实际输出原文（不是「符合预期」四个字）写进 discovery 的 `verification`：Step 4 预期 `s.Preceding undefined`。因**别的原因**失败的 RED 不算数。\n\n`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 均无输出；`go test ./internal/hestia/` 整包绿。\n\n⚠️ **新增导出方法 `Store.Preceding` 会同时打红两条导出面守卫**（reviewer 实跑证实）：`TestStoreExposesNoWriteMethods`（`store_test.go:349`，reflect 版，期望 `[Close DB Save]`）与 `TestPackageExposesNoWriteFunctions`（`:368`，AST 版）。两条互补不可互替（前者看得见嵌入提升的方法，后者看得见包级函数）。**两条都要登记 `Preceding`，且必须保持精确相等断言**——处置理由同 TASK-001。注意 TASK-001 已在 AST 那条里登记过 `DefaultThresholds`，你是在它的基础上追加，**不要覆盖掉**（本任务 wave 2，TASK-001 已 verified 并合入）。\n\n造历史行必须复用既有的 `passing()`（`Save` 拒绝 `Passed=true` 且 `len(Checks)==0` 的报告），用 monthly 而非 h1 期次（h1 的月份必须是 06，造六期连续历史会跨六年）。\n\n**好消息**：reviewer 实测计划给出的 `Preceding` 实现与六条测试**全部正确**（6/6 PASS），`slices.Concat` 在 Go 1.24 可用，既有 import 已够。这一段可以照抄。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-46",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "c693177fc1e14b1bf8d07e7ccffaf72b8a157881",
+    "discovery_sha256": "5ec1fce227c3172187f2d6e12922d83ef2fd1f2e19b06fbd167d4d738d5c97ee",
+    "at": "2026-08-11T09:30:24Z"
+  },
+  "verifier": "test-agent-24"
+}

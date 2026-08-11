@@ -1,0 +1,54 @@
+{
+  "id": "TASK-005",
+  "title": "deposit_sum 的绝对残差与漂移两判据合成",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go"
+  ],
+  "description": "实现 gateDepositSum：绝对残差与残差漂移两个判据合成一个三态，并插入 gates 表（monetary_hierarchy 之后）。对应上游计划 Task 5（Step 1-9）。",
+  "done_criteria": {
+    "functional": [
+      "**逐行验证映射表六种情形**（spec 7.1 的五行 + 历史不足一行）：\n\n| 历史期数 | 绝对残差 | Status | Reason |\n|---|---|---|---|\n| 0 | <=12% | passed | `drift_skipped:no_prior_period` |\n| 1-2 | <=12% | passed | `drift_skipped:insufficient_history` |\n| >=3 | <=12%，漂移 <=3pct | passed | **空** |\n| >=3 | <=12%，漂移 >3pct | failed | `drift_exceeded` |\n| 任意 | >12% | failed | `tolerance_exceeded` |\n\n第一行是最容易写错的一格：**绝对值确实查过并通过了，所以是 passed 而不是 skipped**——但「漂移没查」这件事不能丢，写进 Reason。\n\n**前两行的 Reason 必须可分**：`no_prior_period` 说「这是首期」，`insufficient_history` 说「再等几期就好」，对运维含义不同，合并成一个理由会让运维无法判断该等还是该查。\n\n⚠️ **spec 自身在此处有矛盾**：`functional[3]` 写的是无历史时漂移检测 = `skipped{no_prior_period}`，而 `functional[7]` 与 7.1 映射表写的是 `passed` + `drift_skipped:no_prior_period`。**以 7.1 为准**（它是详细规格且给出了论证：绝对值确实查了并通过了）。见 02-plan/requirement-dod-matrix.md 的「发现 1」。",
+      "`Check.Value` **恒为绝对残差占比**，不因漂移判据而变（与 M0 契约样本的 `0.0857` 一致）。六个用例每个都要 `require.NotNil(c.Value)` 并断言数值。",
+      "`deposit_sum` 插入 `gates` 表后位于 `monetary_hierarchy` **之后**（顺序即报告里 Checks 的顺序，让不同期次的报告可逐行对照）。此时 `gates` 为六行。"
+    ],
+    "boundary": [
+      "**残差恰好落在 ±12.0% 容差边界上时，判定方向必须明确**（spec `boundary[2]`）。\n\n判据：构造残差恰好 = `DepositSumTolerance` 的观测，断言它走 **passed** 分支（实现用 `r > tolerance` 判失败，故等于阈值时通过）；再构造略超阈值的观测断言 failed。\n\n⚠️ **本条是 Leader 独立追溯时发现的缺口，上游计划遗漏了它**：计划自审把 spec 的 `boundary[2]`（明说 ±12.0%，即 `DepositSumTolerance`）映射到了 T6 Step 6 的 `stock_continuity` 2% 边界测试——**张冠李戴**，而自审声称「无遗漏」。计划 T5 的映射表用的是 10%/20%/5%，**没有任何一个用例落在 12% 上**。\n\n选数注意（沿用计划 T6 的纪律）：**边界测试必须选精确可表示的比例**，否则测的是浮点舍入而不是判定逻辑。用「总额 100、单项 100-12」这类构造使残差恰为 0.12 时，需实测确认 `12.0/100 == 0.12` 成立；若不成立则改用能精确表示的构造，并在 discovery 中说明选数理由。",
+      "**历史中算不出残差的期次不计入均值，而不是当成 0**。判据：3 期有效（残差 10%）+ 2 期缺分项，本期 10% 必须 passed 且 **Reason 为空**（说明漂移是真算过的，不带 drift_skipped）。\n\n不做的后果：把算不出来的期次当成 0 会把均值拉向 0——三期 10% 加两期「0」，均值变成 6%，本期 10% 被判成漂移 4pct，**一个正常期次凭空变成告警**。"
+    ],
+    "error_handling": [
+      "存款总额为 0 时记 `skipped{zero_denominator:<field>}`，**不得产生 Inf/NaN**。\n\n`Save` 拒绝非有限的 `Check.Value`，那会让整期**既进不了观测表也进不了 pending**；而一期存款增量恰好为零是可能的，不该因此让数据整个消失。"
+    ],
+    "non_functional": [
+      "**新闸门不得在真实数据上误报**：`TestValidateOnGoldenSamples` 与 `TestEverySkippedCheckHasReason` 加入本闸门后**仍全绿**（2025 期实测残差 9.06% 在 12% 容差内，`NoHistory` ⇒ passed + `drift_skipped:no_prior_period`）。",
+      "**RED 阶段实际失败信息与计划预期一致**，实际输出原文（不是「符合预期」四个字）写进 discovery 的 `verification`：Step 2 预期全部子测试 FAIL 且报告里找不到 `deposit_sum`（`findCheck` 走 `t.Fatalf`）。因**别的原因**失败的 RED 不算数。\n\n`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 均无输出；`go test ./internal/hestia/` 整包绿。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-47",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "1716dfc69aef79d1ff4b69a80d3231886be411d8",
+    "discovery_sha256": "b9c19e6236d3964cd923edb36c4c8cfde3ad004b4ee7d11bd0bff082d9db4c94",
+    "at": "2026-08-11T10:22:49Z"
+  },
+  "verifier": "test-agent-24"
+}

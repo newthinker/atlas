@@ -1,0 +1,54 @@
+{
+  "id": "TASK-006",
+  "title": "stock_continuity 与三种跳过理由的优先级",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-005"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go"
+  ],
+  "description": "实现 gateStockContinuity（社融存量环比），三种跳过理由按「从根本到表面」排优先级，并插入 gates 表（corp_loan_reconcile 之后）。此后 gates 完整七道。对应上游计划 Task 6（Step 1-8）。",
+  "done_criteria": {
+    "functional": [
+      "有历史时环比判定**真正生效**，含边界方向：阈值内 passed（400->404 / 0.01）、**恰好在阈值上 passed**（400->408 / 恰好 0.02）、超阈值 failed（400->420 / 0.05），且 `Check.Value` 为环比变化率。\n\n选数注意：`8/400` 的浮点商恰好等于字面量 `0.02` 的表示，所以 `r <= max` 成立；换一组数（如 401->409）这个等式就不一定成立——**边界测试必须选精确可表示的比例**，否则测的是浮点舍入而不是判定逻辑。\n\n（reviewer 实测：计划给的 `TestStockContinuityDetectsJump` 四行**全部 PASS**，可照抄。）",
+      "**存量下跌同样判为跳变**（400->380 必须 failed）。\n\n用 `cur-prev` 而不加 `math.Abs` 的天真实现会**漏掉整个下跌方向**，而社融存量骤降恰恰是最该报警的情形。",
+      "插入 `gates` 表后位于 `corp_loan_reconcile` 之后，**此时 gates 恰好完整七道**。"
+    ],
+    "boundary": [
+      "**三种跳过理由的优先级必须报对**（从根本到表面）：①本期缺 `tsf_stock` ⇒ `absent_field:tsf_stock`；②有本期值但无历史 ⇒ `no_prior_period`；③有本期值有历史但上一期缺 ⇒ `prior_absent_field:tsf_stock`。\n\n⚠️ **计划给出的这条测试有 2/4 子测试必红，不要照抄**（reviewer 在隔离 worktree 实跑证实）：它的 `noStock()` 从 `golden2025` 克隆里 `delete` 掉 `tsf_stock` 得到 **53 个键**，而 `validMeta().Extractor == \"rule@v2\"` ⇒ `gateCompleteness` 拿 **54** 个必填字段一比判 **failed**（`missing 1: tsf_stock`）⇒ `rep.Passed == false`，于是末行 `assert.True(t, rep.Passed, \"跳过不阻断\")` 必然失败。\n\n**根因是断言观测错了对象**：它想说「`stock_continuity` 跳过不阻断」，写成的却是「整份报告没有任何闸门失败」，于是被同一份构造数据上的 `completeness` 污染。\n\n⇒ **正确写法二选一**：㈠把「不阻断」的断言**收窄到这道闸自己**（断言 `c.Status == CheckSkipped`，不断言 `rep.Passed`）；㈡改用 `extractorV1` 配 `golden2020` 构造，让 `completeness` 不失败。**推荐㈠**——它让断言的观测对象与被测对象一致，且不依赖别的闸门的行为。若选㈡须在 discovery 说明理由。",
+      "**v1 期次同时满足①和②时必须报①**（专列一个用例，spec `boundary[0]`）。\n\n报「没有历史」会让人去查回填进度，而真相是**那期报告压根没有社融板块**——报错理由会把排查引向完全错误的方向。"
+    ],
+    "error_handling": [
+      "上一期 `tsf_stock` 为 0 时记 `skipped{zero_denominator:tsf_stock}`，**不得产生 Inf**（同 TASK-005：非有限的 Value 会让整期既进不了观测表也进不了 pending）。"
+    ],
+    "non_functional": [
+      "`TestValidateOnGoldenSamples` **仍绿**：2025 期有 `tsf_stock` 但 `NoHistory` ⇒ 走 `no_prior_period`；2020 期没有该字段 ⇒ 走 `absent_field`。",
+      "**RED 阶段实际失败信息与计划预期一致**，实际输出原文（不是「符合预期」四个字）写进 discovery 的 `verification`：Step 2 预期全部子测试 FAIL 且报告里找不到 `stock_continuity`。因**别的原因**失败的 RED 不算数。\n\n⚠️ 注意计划 Step 5 写的「预期：四个子测试全 PASS」**是错的**（见 boundary[0]）——按修正后的写法应当四个全 PASS，若你照抄计划原文会得到 2 红 2 绿。\n\n`import` 按需增补；`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 均无输出；`go test ./internal/hestia/` 整包绿。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-47",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "9ec8a6ffcfc47d3a5124e9755672019d3a8205b8",
+    "discovery_sha256": "5c3161ba467b576bb514fa491692a8a9284f248b1f16a014ddcd047cc01b9360",
+    "at": "2026-08-11T10:42:19Z"
+  },
+  "verifier": "test-agent-24"
+}

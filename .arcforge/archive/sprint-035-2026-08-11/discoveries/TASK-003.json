@@ -1,0 +1,86 @@
+{
+  "task": "TASK-003",
+  "title": "History 窄接口与 Store.Preceding",
+  "by": "dev-agent-46",
+  "commit": "c693177fc1e14b1bf8d07e7ccffaf72b8a157881",
+  "branch": "master",
+  "base": "cfc24feb9afc926bd422895085c0c4b3417f77be",
+  "context_from": ["TASK-001"],
+  "key_findings": [
+    "reviewer 的判断成立：计划 Task 3 的 `Preceding` / `scanObservation` 实现与六条测试**照抄即全 PASS**（6/6），`slices.Concat` 在 Go 1.24 可用，`store.go` 既有 import（context/database\\/sql/fmt/slices/strings）已全部够用，**未新增任何 import**。本任务唯一需要自行增补的 import 是 `store_test.go` 的 `errors`（供我自补的错误包裹测试用）。",
+    "**计划的 Step 1-12 不覆盖 DoD error_handling[0]**（『查库失败返回 error 且包住底层 err、带 period/periodType 上下文』）—— 12 个 Step 里没有任何一条测试查库失败路径。这不是计划的错误（它没有写错的东西），而是**计划与 DoD 之间的缺口**；DoD 是唯一验收依据，故自补 `TestPrecedingWrapsQueryError`。**未走 blocked_clarification**，因为不存在需要 Leader 裁决的矛盾：计划沉默 + DoD 明确要求 = 照 DoD 写测试，属本职。已在交付报告中申报。",
+    "触发查库失败选用**已取消的 context** 而非**关掉的库**：`database/sql` 在 Close 之后返回未导出的 `errDBClosed`（`store_test.go:336-338` 的既有注释已记载此事），没有可用 sentinel，只能比对错误串；而 `context.Canceled` 是标准 sentinel，能真正把 DoD 说的『可被 errors.Is 找到』这条判据测出来，而不是退化成子串匹配。",
+    "`errors.Is(err, context.Canceled)` **单独不足以证明『包住了』**——若实现直接 `return nil, err`（完全不包），这条断言同样为真。故补两条：`errors.Unwrap(err)` 后仍有内层、且 `err != context.Canceled`。A6 消融（`%w`→`%v`）确认这组断言确实在守卫。",
+    "`Store.Preceding` 同时打红**两条**导出面守卫，而 TASK-001 的 `DefaultThresholds` 只打红一条 —— 差别在于前者是 `*Store` 的方法、后者是包级函数。这恰好实证了那两条测试『互补不可互替』的注释：reflect 版只看 `*Store` 方法集，AST 版只看 FuncDecl。`History`(接口类型) 与 `NoHistory`(变量) 两者都不是 FuncDecl，**不进 AST 版视野**，无需登记（已实测确认整包绿）。"
+  ],
+  "decisions": [
+    {
+      "what": "两条导出面守卫都登记 `Preceding`，保持 assert.Equal 精确相等；reflect 版 [Close, DB, Save] → [Close, DB, Preceding, Save]，AST 版六项 → 七项（`Store.Preceding` 插在 `Store.DB` 与 `Store.Save` 之间）。TASK-001 登记的 `DefaultThresholds` **原样保留未覆盖**。",
+      "rationale": "处置理由同 TASK-001：精确相等是有意为之，逼每次扩大导出面留一行说明。两处都补了注释说明 Preceding 扩大的是**读面**而非写面（只发 SELECT、走 v_hestia_current 视图，不碰写路径），ADR-0003 的『Save 是唯一写入口』不受影响。"
+    },
+    {
+      "what": "自补 `TestPrecedingWrapsQueryError` 覆盖 DoD error_handling[0]，未修改计划给出的任何实现代码。",
+      "rationale": "AD-035-5 禁止偏离计划的**实现方案**；补一条计划没写的测试不构成偏离实现，且 DoD 是唯一验收依据。实现侧三处 `%w` 包裹本就是计划原文，我只是给它加了守卫。"
+    },
+    {
+      "what": "消融实验在 `git worktree add --detach` 出的临时副本（/tmp/wt-ablate-003）里跑，把三个在改文件拷贝进去，主工作区一个字节不碰。",
+      "rationale": "本轮改动未提交（wave2 是先 transition 后 commit），无法用 `git worktree add` 直接取到含改动的树，故用『干净副本 + 拷入在改文件』。收尾用三文件**合并 sha256** 核实主工作区指纹与消融前一致（73b2682f…8128），比『git status 干净』可靠——sprint 进行中工作区本就有未提交改动。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go (新建, +31: History 接口 + NoHistory + noHistory)",
+    "internal/hestia/store.go (修改, +70/-0: Preceding + scanObservation，无新增 import)",
+    "internal/hestia/store_test.go (修改, +168/-4: saveMonthly helper + 七条测试 + 编译期断言 + 两条导出面守卫登记 + errors import)"
+  ],
+  "scope_note": "实际改动严格等于任务声明的 writes 三项，无越界，无需补声明。numstat 取自提交本身（git show --numstat c693177），采样时点在最后一次改动之后。-4 删除行 = 两条导出面守卫各自的 assert.Equal 期望行与消息行，无意外删除。",
+  "interfaces_exposed": [
+    "type History interface{ Preceding(ctx context.Context, period, periodType string, n int) ([]Observation, error) } —— 导出接口，TASK-004/005/006 的共同前提",
+    "var NoHistory History —— 导出变量。恒空实现，供无库 dry-run；**TASK-004 的 Validate 应据此拒绝 nil**（nil 一律是接线错误，而『确实没有历史』有 NoHistory 这个显式值表达）",
+    "func (s *Store) Preceding(ctx, period, periodType string, n int) ([]Observation, error) —— 导出方法，已在两条导出面守卫登记",
+    "func scanObservation(rows *sql.Rows) (Observation, error) —— 未导出，列顺序与 insertSQL 对称（metaColumns 在前、fieldOrder 在后）",
+    "测试 helper `saveMonthly(t, s, period, values)` —— 未导出，存一期已过闸的 monthly 观测。**下游任务造历史序列直接复用它**：用 monthly 而非 h1（h1 月份必须是 06，造六期连续历史要跨六年），内部已复用 passing()（Save 拒绝 Passed=true 且 Checks 为空的报告）。",
+    "⚠️ 给 TASK-004/005/006 的语义提醒：`Preceding` 返回的 `Observation.Values` **只含库里非 NULL 的字段**，缺失字段是『键不存在』而不是 0。闸门取值一律用 `v, ok := obs.Values[f]` 两值形式；单值取法会把缺失读成 0，stock_continuity 会据此得出 -100% 的假警报。"
+  ],
+  "verification": {
+    "red_step4_expected": "s.Preceding undefined",
+    "red_step4_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/store_test.go:1545:16: s.Preceding undefined (type *Store has no field or method Preceding)\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_causality_note": "RED 因预期原因失败，无 `imported and not used` 干扰。Step 1 的 validate.go 只 import context（该 Step 唯一用到的包），store.go 未新增任何 import，store_test.go 的 errors 在真正用到它的那条测试落盘时才加。",
+    "export_guards_red_verbatim": {
+      "reflect_ver": "TestStoreExposesNoWriteMethods: expected []string{\"Close\",\"DB\",\"Save\"} / actual []string{\"Close\",\"DB\",\"Preceding\",\"Save\"}",
+      "ast_ver": "TestPackageExposesNoWriteFunctions: expected []string{\"DefaultThresholds\",\"NewStore\",\"Parse\",\"Store.Close\",\"Store.DB\",\"Store.Save\"} / actual [...同前 + \"Store.Preceding\"]",
+      "note": "两条**同时**转红，与 TASK-001 只红一条形成对照，实证两条守卫互补不可互替。"
+    },
+    "ablation": {
+      "purpose": "回答『改坏它有东西会红吗』。在 git worktree add --detach 出的隔离副本上跑，主工作区三文件合并 sha256 消融前后一致（73b2682f5262e64a83070761d045fec3b2536a33b0d96059713411098b2b8128）。对照组（未变异的副本）先验证全绿，否则结论作废。",
+      "A1_nullfloat_to_bare": "让 `if vals[i].Valid` 恒真（等价于裸 float64 扫描）⇒ KILLED，致红断言=「未写入的字段读回来不该出现在 Values 里」(absent 方向①)",
+      "A2_drop_explicit_zero": "`vals[i].Valid` → `vals[i].Valid && vals[i].Float64 != 0` ⇒ KILLED，致红断言=「显式写入的 0 必须保留，不能被当成缺失」(absent 方向②，DoD 点名最危险的那个方向)",
+      "A3_period_lt_to_lte": "`period < ?` → `period <= ?` ⇒ KILLED，致红断言=「最近的一期排最前」（period 自身被捞回来）",
+      "A4_drop_nonpositive_guard": "`if n <= 0` → 恒假 ⇒ KILLED，致红断言=「n=-1 应返回空而不是全部」（实测确认 SQLite LIMIT -1 真的返回了全部）",
+      "A5_drop_periodtype_filter": "`period_type = ?` → `? IS NOT NULL` ⇒ KILLED，致红断言=「annual 那条不该混进 monthly 序列」（实测捞回 2 条）",
+      "A6_w_to_v": "三处 `%w` → `%v` ⇒ KILLED，致红断言=「必须用 %w 包住底层 err」（Target error should be in err chain）",
+      "A7_view_to_raw_table": "`viewCurrent` → `TableObservations` ⇒ KILLED，致红断言=「修订不产生第二期，只是同一期的新行」（实测捞回 2 条：修订行 305 与原行 300）",
+      "false_killed_caught": "A7 首次尝试写成 `tableObservations`（小写）⇒ `undefined: tableObservations` 编译失败致红。harness 的编译失败闸捕获并判**假 KILLED、作废**，改用正确常量 `TableObservations` 重跑才记 KILLED。这是 TASK-001 记下的同一陷阱（『失败了』≠『因为预期的原因失败了』）第二次实际发生，且**这次是被机制拦下的，不是靠人眼**。"
+    },
+    "suite": {
+      "cmd": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -cover",
+      "tree": "master @ c693177fc1e14b1bf8d07e7ccffaf72b8a157881（全 sha；数字均在最后一次改动之后统一重采）",
+      "result": "ok github.com/newthinker/atlas/internal/hestia  coverage: 90.0% of statements",
+      "gate_coverage": "dev_done 门禁口径 89.9%（-coverpkg 算法不同，两者均远高于 80 门槛）",
+      "baseline": "TASK-001 交付后为 89.7-89.8%，本任务再 +0.2pct",
+      "gofmt": "gofmt -l internal/hestia/ 无输出",
+      "vet": "go vet ./internal/hestia/ 无输出",
+      "new_cases": "TestPrecedingReturnsRecentPeriodsInDescendingOrder / TestPrecedingRestoresAbsenceNotZero / TestPrecedingIsolatesPeriodType / TestPrecedingSeesRevisions / TestPrecedingOnEmptyHistory / TestPrecedingRejectsNonPositiveN / TestPrecedingWrapsQueryError(自补) 全 PASS；两条导出面守卫登记后 PASS；编译期断言 `var _ History = (*Store)(nil)` 编译通过"
+    },
+    "dod_matrix": [
+      "functional[0] 降序 + LIMIT + 不含 period 自身 -> TestPrecedingReturnsRecentPeriodsInDescendingOrder（造 4 期取 2 期，逐个断言 got[0]=2025-12 / got[1]=2025-11）-> PASS（A3 消融证明有效）",
+      "functional[1] 走视图 ⇒ 修订可见且只返回一条 -> TestPrecedingSeesRevisions -> PASS（A7 消融证明有效）",
+      "functional[2] 编译期断言 var _ History = (*Store)(nil) 且编译通过 -> 已加在 store_test.go 末尾，整包编译通过 -> PASS",
+      "boundary[0] absent 语义双向往返（①未写入不出现 ②显式 0 保留）-> TestPrecedingRestoresAbsenceNotZero，两个方向各一条断言 -> PASS（A1 杀方向① / A2 杀方向②，分别证明两条都在守卫，非平凡为真）",
+      "boundary[1] period_type 序列隔离 -> TestPrecedingIsolatesPeriodType（同一 period 上并存 monthly+annual）-> PASS（A5 消融证明有效）",
+      "boundary[2] 边缘输入返回空而非异常（①n=0/-1 ②空历史）-> TestPrecedingRejectsNonPositiveN + TestPrecedingOnEmptyHistory -> PASS（A4 消融证明①有效）",
+      "error_handling[0] 查库失败返回 error、包住底层 err（errors.Is 可找到）、带 period/periodType 上下文 -> **TestPrecedingWrapsQueryError（计划未覆盖，本任务自补）** -> PASS（A6 消融证明有效）",
+      "non_functional[0] RED 因预期原因失败且原文入 discovery；gofmt/vet 无输出；整包绿；两条导出面守卫均登记且保持精确相等 -> 见 red_step4_actual_verbatim / export_guards_red_verbatim / suite -> PASS"
+    ],
+    "process_note": "本任务按 AD-035-1 的 wave2 流程：主工作区直接开发（未建 worktree），**先 transition dev_done 后 commit**，故门禁看到的是完整的未提交工作树改动，scope 漂移判定天然有效，commit 主题无需 TASK 锚点行。dev_done 时刻 09:26:38Z，commit c693177 在其后。"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "task": "TASK-001",
+  "title": "Thresholds 与配置自校验",
+  "by": "dev-agent-46",
+  "commit": "234baea4159d854dcf97c49cf8ace02d25f901f3",
+  "branch": "task/TASK-001",
+  "base": "125ad896fb096f7766cbb3c958ba2635a311c6ba",
+  "key_findings": [
+    "独立 reviewer 预告的 A1（Step 3 import 块是最终态、代码体一个都没用到）与 A2（DefaultThresholds 打红全导出面精确相等断言）**两条全部复现**，处置照 reviewer 结论执行，未产生返工。A1 的规避方式是 Step 3 实现体**零 import**（结构体定义 + 字面量返回不需要任何包），Step 8 才加 fmt/strconv/strings，Step 11 才加 slices。",
+    "A2 只打红 store_test.go:400 的 TestPackageExposesNoWriteFunctions（AST 版，看包级函数），reflect 版 TestStoreExposesNoWriteMethods 仍 PASS —— 因为 DefaultThresholds 是包级函数而非 *Store 方法。与 reviewer 判断一致（reflect 版要到 T3 的 Store.Preceding 才会红）。sort.Strings 是字节序，\"DefaultThresholds\" 排在 \"NewStore\" 之前，故登记进期望切片的**首位**。",
+    "checkEnum 解前缀后两处 Meta 调用的错误信息「逐字不变」不是推理，而是**观察**：用同一份探针测试在 125ad89 干净树与本分支上**背对背**各跑一次，两份输出 diff 为空。探针文件跑完即删，未进入交付物（git status 已核实）。",
+    "消融实验暴露了一个「KILLED 但因果是错的」实例，值得下游注意：把 slices.Contains(...) 直接替换成 true 会让 slices 这个 import 变成未使用 ⇒ 测试因 `imported and not used` 编译失败而红，**看上去是断言杀死了变异，实则不是**。这正是 AD-035-3 警告的形态（『失败了』不等于『因为预期的原因失败了』），只是发生在变异侧而非 RED 侧。改成保留 slices 用法的等价变异后，才由预期断言致红。"
+  ],
+  "decisions": [
+    {
+      "what": "store_test.go 的导出面断言采用「登记」而非「放松」：把 DefaultThresholds 按字典序加进期望切片首位，保持 assert.Equal 的全导出面精确相等，并在文件注释里补一段说明本迭代为什么扩大导出面。",
+      "rationale": "该测试自身注释（store_test.go:346-348、404-415）明写这个形状是有意为之——精确相等会把任何新增导出物判成违规（无论是不是写口），目的正是逼每次扩大导出面都留一行说明。改成 assert.Contains 或删断言会永久打开缺口，而它不会响亮失败。DoD non_functional[1] 亦明令不得放松。"
+    },
+    {
+      "what": "checkEnum 的 field 参数改为接收**完整**字段名，前缀从函数体挪到两处调用点（types.go:152/155 传 \"meta.caliber_version\" / \"meta.extractor\"）。",
+      "rationale": "Thresholds.validate 复用 checkEnum 校验豁免的 Version，而豁免不在 Meta 里。硬编码前缀会输出 `unknown meta.caliber_exemptions[0].Version` —— 那个字段路径根本不存在，照它去 Meta 里找只会白找一轮。前缀移到调用点后，Meta 两处输出逐字不变（已背对背验证）。"
+    },
+    {
+      "what": "exemptionFor 用 `ex.Period == period && slices.Contains(ex.SkipChecks, checkID)`，精确匹配，不做范围或前缀匹配。",
+      "rationale": "一次口径变更只豁免一个期次。写成 >= 或前缀匹配会让一次性豁免悄悄覆盖后续所有期次 —— 那是永久后门而不是定点豁免，且它不会失败，只会静默地一直放行。M1 消融（== 改 <=）确认 boundary[0] 的『相邻期次』断言能杀死它。"
+    },
+    {
+      "what": "MagnitudeRanges 在 DefaultThresholds 里不赋值（保持 nil）。",
+      "rationale": "区间必须用 M1c 回填分布标定。填几个看起来合理的数会让一道本该沉默的闸门产生未经验证的判定，而它错了不会响亮失败、只是区间悄悄放宽。M4 消融（填一条 m2 区间）确认 assert.Empty 能杀死它。"
+    },
+    {
+      "what": "未运行 code-simplifier（全局 CLAUDE.md 要求 commit 前运行）。",
+      "rationale": "AD-035-5 规定不得偏离上游计划的实现方案自由发挥，本任务代码逐字来自已批准的计划正文；自动简化会构成偏离。**此项为主动跳过并申报，不是遗漏**，是否补跑请 Leader 裁定。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/thresholds.go (新建, +120)",
+    "internal/hestia/thresholds_test.go (新建, +101)",
+    "internal/hestia/types.go (修改, +9/-3: checkEnum 解前缀 + 注释 + 两处调用点)",
+    "internal/hestia/store_test.go (修改, +9/-2: 导出面断言登记 DefaultThresholds + 说明注释)"
+  ],
+  "scope_note": "实际改动文件与任务声明的 writes 四项**逐项一致**，无越界，无需补 writes 声明。numstat 取自提交本身（git show --numstat 234baea），采样时点在最后一次改动之后。",
+  "interfaces_exposed": [
+    "type Thresholds struct{ DepositSumTolerance, DepositSumDriftMax, CorpLoanTolerance, StockContinuityMax, YoYSanityMax float64; MagnitudeRanges map[string]Range; CaliberExemptions []CaliberExemption } —— 导出",
+    "type Range struct{ Min, Max float64; Unit string } —— 导出",
+    "type CaliberExemption struct{ Version, Period string; SkipChecks []string; Reason string } —— 导出",
+    "func DefaultThresholds() Thresholds —— 导出（唯一新增的包导出面，已登记进 store_test.go 的守卫）",
+    "func (t Thresholds) validate() error —— 未导出，供 T4 的 Validate 在最前面调用",
+    "func (t Thresholds) exemptionFor(period, checkID string) *CaliberExemption —— 未导出，供 T7 的豁免应用调用",
+    "func checkEnum(field, val string, allowed []string) error —— 签名不变但**语义变了**：field 现在必须传完整字段名（含前缀）。T7 若复用它校验 SkipChecks 里的未知闸门 ID，请自行带上 caliber_exemptions[i].SkipChecks[j] 这类完整路径。"
+  ],
+  "verification": {
+    "red_step2_expected": "undefined: DefaultThresholds",
+    "red_step2_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/thresholds_test.go:20:7: undefined: DefaultThresholds\ninternal/hestia/thresholds_test.go:35:18: undefined: DefaultThresholds\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_step7_expected": "t.validate undefined",
+    "red_step7_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/thresholds_test.go:53:24: ok.validate undefined (type Thresholds has no field or method validate)\ninternal/hestia/thresholds_test.go:76:18: tt.cfg.validate undefined (type Thresholds has no field or method validate)\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_step10_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/thresholds_test.go:93:13: cfg.exemptionFor undefined (type Thresholds has no field or method exemptionFor)\ninternal/hestia/thresholds_test.go:97:20: cfg.exemptionFor undefined (type Thresholds has no field or method exemptionFor)\ninternal/hestia/thresholds_test.go:99:20: cfg.exemptionFor undefined (type Thresholds has no field or method exemptionFor)\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_causality_note": "三次 RED 均**因预期原因**失败，无一条出现 `imported and not used`（AD-035-3 / 计划 Global Constraints 第 27 条警告的干扰）。规避方式：每个 Step 只写该 Step 真正用到的 import —— Step 1 仅 testing+assert，Step 6 增 slices+require，Step 3 实现体零 import，Step 8 增 fmt/strconv/strings，Step 11 增 slices。",
+    "export_guard_red_verbatim": "store_test.go:400 expected: []string{\"NewStore\",\"Parse\",\"Store.Close\",\"Store.DB\",\"Store.Save\"} / actual: []string{\"DefaultThresholds\",\"NewStore\",\"Parse\",\"Store.Close\",\"Store.DB\",\"Store.Save\"} —— TestStoreExposesNoWriteMethods 同时仍 PASS",
+    "checkenum_verbatim_ab": {
+      "method": "同一份探针测试（构造非法 CaliberVersion / Extractor 并打印 m.validate() 的错误串）在 125ad896fb096f7766cbb3c958ba2635a311c6ba 的独立 worktree 与本分支上**背对背**各跑一次，diff 为空。探针文件跑完即删，两棵树均已核实无残留。",
+      "before_and_after_identical": "hestia: unknown meta.caliber_version \"2099-01\" (want 2015-01|2023-01|2025-01)\nhestia: unknown meta.extractor \"bogus@v9\" (want rule@v1|rule@v2|llm-fallback@v1)"
+    },
+    "ablation": {
+      "purpose": "回答「改坏它有东西会红吗」——证明断言在守卫，而不只是在场。变异只作用在本任务的隔离 worktree 内，每轮打印变异体 diff，收尾用 sha256 核实还原（一致）。",
+      "M1_period_exact_to_range": "`ex.Period == period` -> `<=` ⇒ KILLED，致红断言 = 「豁免按期次精确匹配，不该外溢到相邻期」",
+      "M2_skipchecks_to_true": "`slices.Contains(...)` -> `(slices.Contains(...) || checkID != \"\")` ⇒ KILLED，致红断言 = 「未列入 SkipChecks 的闸门不该被豁免」。⚠ 首版变异写成裸 `true` 时也 KILLED，但因果是 `imported and not used` 编译失败，**不是断言**；已改用保留 slices 用法的等价变异重测。",
+      "M3_deposit_tolerance_back_to_2pct": "`DepositSumTolerance: 0.12` -> `0.02`（被否决的初稿值）⇒ KILLED，致红断言 = 「0.02 is not greater than 0.0906 / 存款加总容差必须容得下 M0 实测的最大残差」",
+      "M4_magnitude_ranges_filled": "给 MagnitudeRanges 填一条看似合理的 m2 区间 ⇒ KILLED，致红断言 = 「Should be empty, but was map[m2:{200 400 万亿元}] / 区间表必须留空到 M1c 用回填分布标定」"
+    },
+    "suite": {
+      "cmd": "cd <worktree> && GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -cover",
+      "tree": "task/TASK-001 @ 234baea4159d854dcf97c49cf8ace02d25f901f3（全 sha；数字均在最后一次改动之后统一重采）",
+      "result": "ok github.com/newthinker/atlas/internal/hestia  coverage: 89.8% of statements",
+      "baseline": "89.4%（门槛 80，未跌破；本任务净 +0.4pct）",
+      "gofmt": "gofmt -l internal/hestia/ 无输出",
+      "vet": "go vet ./internal/hestia/ 无输出",
+      "new_cases": "TestDefaultThresholdsAdmitM0Measurements / TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated / TestThresholdsRejectMalformedExemptions(4 子测试) / TestExemptionForMatchesPeriodAndCheckExactly 全 PASS；TestMeta* 全部未变红"
+    },
+    "dod_matrix": [
+      "functional[0] 阈值容得下 M0 极值 -> TestDefaultThresholdsAdmitM0Measurements（用 assert.Greater 对 m0Max* 常量，非 assert.Equal 同义反复；M3 消融证明有效）-> PASS",
+      "functional[1] MagnitudeRanges 必须为空 -> TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated（M4 消融证明有效）-> PASS",
+      "functional[2] exemptionFor 精确命中返回非 nil 且 Version 正确 -> TestExemptionForMatchesPeriodAndCheckExactly 前两段 -> PASS",
+      "boundary[0] 豁免不外溢（未列入 SkipChecks / 相邻期次 两个方向）-> 同上测试后两条 assert.Nil（M1+M2 消融分别证明两条有效）-> PASS",
+      "error_handling[0] validate 拒绝四类畸形豁免且关键字正确，且先 require.NoError 确认 base 合法 -> TestThresholdsRejectMalformedExemptions（含 base 合法性前置断言 + 4 子测试）-> PASS",
+      "error_handling[1] checkEnum 解前缀后两处调用输出逐字不变、TestMeta 不变红 -> go test -run TestMeta 全 PASS + 背对背探针 diff 为空 -> PASS",
+      "non_functional[0] RED 因预期原因失败且原文入 discovery -> 见本节 red_step2/7/10_actual_verbatim 与 red_causality_note -> PASS",
+      "non_functional[1] gofmt/vet 无输出、整包绿、覆盖率不跌破 80、导出面守卫登记不放松 -> 见 suite 与 export_guard_red_verbatim -> PASS"
+    ],
+    "pending_leader_action": "代码只在 worktree ../wt-TASK-001（分支 task/TASK-001 @ 234baea）里，主仓库 internal/hestia 零改动（已用 git status --porcelain 核实）。按 AD-035-1，必须由 Leader 先 `git merge --ff-only task/TASK-001`，dev-agent-46 才 transition dev_done —— 否则 dev_done 门禁会在不含本次交付的旧树上跑并**成功**。"
+  }
+}

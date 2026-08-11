@@ -1,0 +1,102 @@
+{
+  "task": "TASK-007",
+  "title": "口径豁免应用、Save 接线与 ULP 契约",
+  "by": "dev-agent-46",
+  "commit": "4547631dc8fdf03aeb97e84635a4174a8f5cf05c",
+  "branch": "master",
+  "base": "9ec8a6ffcfc47d3a5124e9755672019d3a8205b8",
+  "context_from": ["TASK-001", "TASK-006"],
+  "key_findings": [
+    "**「精确可表示」这个措辞的更正范围比派单说的窄，我实测后只改了真错的那一处。** 派单要求把 validate_test.go 里「精确可表示的比例」一类措辞统一改成「两边舍入到同一个 double」。我用 big.Float 逐个验位模式后发现：`0.0625`(0x3fb0000000000000)、`0.03125`(0x3fa0000000000000)、`50.5`(0x4049400000000000) **确实精确可表示**，只有 `0.02`(0x3f947ae147ae147b) 与 `0.03`(0x3f9eb851eb851eb8) 不是。⇒ 若照字面全量替换，会把 TASK-004 的三处与 TASK-005 的一处**正确措辞改成错的**。实际只改了 stock_continuity 边界用例那一处（它谈的正是 0.02）。**Leader 的判断（0.02 不精确）完全正确，只是适用范围不是全部。**",
+    "**Leader 转述的 ULP 数字我复算过，成立**：`123→125.46` 低 **15 ULP**、`400.1→408.102` 低 **35 ULP**（后者派单未给数，我实测补上）；`400→408 / 300→306 / 250→255 / 350→357` 四组 ULP 差均为 **0**。⇒ 「让边界用例成立的是**参与运算的量精确**，不是算路短」这个更正是对的，已按此改写注释并明写「改常量时必须保持 cur−prev 与 prev 为精确整数」。",
+    "**`monetary_hierarchy` 的两处比较此前确实完全无守卫，本任务补上后成为唯一守卫**：把 `m2 > m1 && m1 > m0` 改成 `>=`，全量套件里**只有** `TestMonetaryHierarchyRejectsEquality` 转红，其余全绿 —— 既复现了验证者的 SURVIVED 结论，也证明新测试就是那道守卫本身（不是搭了别人的便车）。",
+    "**消融 harness 自身出过一次静默失效，被四闸之外的人工核对抓到。** A7 那轮 `ablate` 函数**一行输出都没有**（既非 KILLED 也非存活也非闸位提示），根因是 eval 的双引号里 `\\&\\&` 被 shell/sed 二次转义吃掉。⚠️ **失败模式比假 KILLED 更隐蔽**：无人值守时输出里只是「少了一行」，而 7 行 ✓ 看起来一切正常。单独重跑后确认 KILLED。⇒ 教训：harness 应对「每个变异必须恰好产出一行结论」做计数自证，而不只是逐条打印。",
+    "本任务的 `TestReportKeepsEveryGateUnderExemption` 与 TASK-004 的 `TestReportAlwaysContainsEveryGate` **确实互补**，且这句话是**被证伪实验检验过的**，不是声称：把豁免分支改成 `continue`（闸门从报告消失）后，TASK-004 那条**保持绿**（它跑的是无豁免配置，覆盖不到豁免分支），本任务这条转红。预先声明的判据是「若两条同时转红，则『互补而非重复』这句注释就是错的，必须改」——未发生。"
+  ],
+  "decisions": [
+    {
+      "what": "命中豁免时整体替换 Check 为 `{ID, Status: CheckSkipped, Value: c.Value, Reason: \"caliber_exemption:\"+Version}`，保留 Value，且不改 passed 标志。",
+      "rationale": "计划原文。豁免与通过在数据上必须可分——把「这次没查」记成「查了没问题」等于伪造一次检查记录。保留 Value 是因为闸门算出的残差仍是有用的观测，只是不据此判定。A2/A3 消融分别证明「记 passed」与「丢 Value」都会被杀。"
+    },
+    {
+      "what": "`SkipChecks` 的 ID 校验放在 `Thresholds.validate` 的 `len(ex.SkipChecks)==0` 检查之后，ID 列表经 `knownCheckIDs()` 从 `gates` 派生。",
+      "rationale": "计划原文。T1 写这个结构时 `gates` 尚不存在，故留到 T7。手写第二份 ID 列表会在加闸门时静默过期。已确认未破坏 TASK-001 的豁免校验测试（其 base 用的 `deposit_sum` 是合法 ID，四个子测试全绿）。"
+    },
+    {
+      "what": "新增 `TestReportKeepsEveryGateUnderExemption`，而**不是**照计划 Step 1 添加 `TestValidateAlwaysReportsEveryGate`。",
+      "rationale": "计划那条用 `len(rep.Checks)==len(gates)` + 逐位比对 `gates[i].id`，与 TASK-004 已有的 `TestReportAlwaysContainsEveryGate` 重复，且**更弱**（TASK-004 那条用字面量 ID 列表，删闸时不会跟着缩水——那正是 TASK-004 消融 M5 暴露并修掉的问题）。真正的新覆盖面是**本任务新加的豁免分支**：它整体替换 Check，若写成 `continue` 会让被豁免的闸门从报告里消失而 `rep.Passed` 照样为 true。故新测试配了豁免配置。DoD functional[1] 由两条共同满足（TASK-004 那条在 golden2020 这一 v1 大量跳过的输入上做全列表相等断言）。"
+    },
+    {
+      "what": "「精确可表示」措辞只改 stock_continuity 边界用例那一处，未全量替换。",
+      "rationale": "见 key_findings[0]，实测位模式表明其余三处措辞正确。全量替换会引入三处新错误。这也是本任务对派单指令的唯一一处**收窄执行**，已在交付报告里申报。"
+    },
+    {
+      "what": "CONTRACTS.md 的边界守卫收口表按**当前行号重新盘点**，未沿用派单给的行号。",
+      "rationale": "本任务在 validate.go 顶部加了浮点契约注释块、在 Validate 循环里加了豁免分支，派单列出的 `:139/:193/:216/:227/:290/:340/:365/:374/:425/:450` 全部已漂移。重新扫描得 12 个比较运算符（与派单的**总数一致**），并按归属重排。表里改为**只写归属与表达式、不写行号** —— 行号是必然过期的锚，与「验证命令不得钉 HEAD」同理。收口后为 8 个有守卫、4 个明确无守卫（2 个裁定不补 + 2 个留 M1c）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go (修改, +34/-0: 豁免应用分支 + knownCheckIDs + 包内浮点契约注释)",
+    "internal/hestia/thresholds.go (修改, +9/-0: SkipChecks 的 ID 校验，列表从 gates 派生)",
+    "internal/hestia/validate_test.go (修改, +244/-5: 计划的六条 + Leader 追加的 monetary 边界 + 豁免下的报告完整性；-5 是被替换的旧注释块)",
+    "internal/hestia/thresholds_test.go (修改, +22/-0: M1c 填表提醒挂到 assert.Empty 这条绊线上)",
+    "internal/hestia/CONTRACTS.md (修改, +91/-0: Sprint 035 一节)"
+  ],
+  "scope_note": "实际改动严格等于 writes 五项，无越界。numstat 取自提交本身（git show --numstat 4547631），采样时点在最后一次改动之后。CONTRACTS.md 在 writes 而不在 packages 是刻意的（非 Go 路径进 -coverpkg 会弄坏覆盖率门禁，AD-035-4）。",
+  "interfaces_exposed": [
+    "func knownCheckIDs() []string —— 包内非导出。从 gates 派生，返回七个 ID 的副本。**加闸门时无需改它，但必须同步改 CONTRACTS.md 与 M0 契约样本**（TestGatesMatchContractedCheckIDs 是那个提醒）",
+    "Validate 的豁免分支：命中 `cfg.exemptionFor(period, gateID)` 时整体替换 Check 为 skipped{caliber_exemption:<version>} 并保留 Value；不影响 rep.Passed",
+    "Thresholds.validate 现在额外校验 SkipChecks 的每个 ID ∈ knownCheckIDs()，错误信息形如 `hestia: unknown caliber_exemptions[0].SkipChecks \"deposit_summ\" (want ...)`",
+    "包内浮点契约注释（validate.go 顶部）：闸门一律不得对增量类字段做精确相等比较；并写明「边界用例成立的条件是两边舍入到同一个 double，取决于参与运算的量是否精确、不取决于算路长短」",
+    "⚠️ 给 M1c 的人：填 MagnitudeRanges 时必然撞红 thresholds_test.go 的 assert.Empty，那条注释里已写明**还须补的三件事**（遍历顺序守卫 F12、Min/Max 两个边界方向 F17#5/#6、Range.Unit 的单位）"
+  ],
+  "verification": {
+    "red_step2_expected": "undefined: knownCheckIDs",
+    "red_step2_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/validate_test.go:820:24: undefined: knownCheckIDs\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_causality_note": "RED 因预期原因失败，无 imported-and-not-used 干扰（本任务未新增任何 import：validate_test.go 已有 context/errors/maps/math/strings/testing/assert/require，validate.go 与 thresholds.go 的既有 import 已够）。",
+    "float_facts_measured": {
+      "method": "一次性探针用 math.Float64bits + big.Float(prec=200) 逐个比对十进制字面量与 double 的数学值，跑完即删（两次探针均已确认未进交付物）。",
+      "exactly_representable": "0.0625=0x3fb0000000000000 精确; 0.03125=0x3fa0000000000000 精确; 50.5=0x4049400000000000 精确",
+      "not_exactly_representable": "0.02=0x3f947ae147ae147b 不精确（实为 0.020000000000000000416，与 Leader 给的位模式逐位一致）; 0.03=0x3f9eb851eb851eb8 不精确",
+      "same_double_after_rounding": "8.0/400 与字面量 0.02 位模式相同 ⇒ == 为 true; 8192/131072 与 0.0625 相同且本身精确",
+      "ulp_of_ratio_vs_0_02": "400→408:0 / 300→306:0 / 250→255:0 / 350→357:0 / 123→125.46:-15 / 400.1→408.102:-35"
+    },
+    "ablation": {
+      "purpose": "回答『改坏它有东西会红吗』。隔离副本 `git worktree add --detach 9ec8a6f` + 拷入五个在改文件，主工作区不碰。四道闸：①变异生效 ②gofmt -e ③**go test -c -o /dev/null 编译闸** ④收尾还原。对照组先验全绿。收尾五文件合并 sha256 与消融前一致（350c8d77…5974）。",
+      "A1_exemption_makes_gate_vanish": "豁免分支改成 `continue` ⇒ KILLED（Not equal，ID 列表少一项）",
+      "A2_exemption_records_passed": "skipped → passed ⇒ KILLED",
+      "A3_exemption_drops_value": "`Value: c.Value` → `nil` ⇒ KILLED（Expected value not to be nil）",
+      "A4_checkids_wrong_order": "knownCheckIDs 末尾加 slices.Reverse ⇒ KILLED",
+      "A5_drop_id_validation": "删掉 thresholds.go 的 SkipChecks ID 校验循环 ⇒ KILLED（An error is expected but got nil）",
+      "A6_exemption_leaks": "exemptionFor 的 `ex.Period == period` → `<=` ⇒ KILLED",
+      "A7_monetary_relaxed": "`m2 > m1 && m1 > m0` → `>=` ⇒ KILLED，**且全量套件中只有 TestMonetaryHierarchyRejectsEquality 一条转红** —— 既复现验证者的 SURVIVED 结论，也证明新测试是该边界的唯一守卫",
+      "A9_skip_without_reason": "need() 的 skip 去掉 Reason ⇒ KILLED（Save 报错），证明 Save 接线测试确实在查 Save 对报告的额外要求，不是走过场",
+      "ULP_not_mutable": "ULP 契约测试钉的是 Go 浮点运算的既有事实，无可变异的生产代码；变异测试自身会退化成无效实验（同 TASK-004 的 M9），故不做。",
+      "falsification_predeclared": "**预先声明**：本任务 TestReportKeepsEveryGateUnderExemption 的注释写了它与 TASK-004 的 TestReportAlwaysContainsEveryGate『互补而非重复』；判据是「若 A1 变异下两条**同时**转红，则该句为错，必须改注释」。实测：TASK-004 那条**保持绿**（无豁免配置，覆盖不到豁免分支），本任务这条转红 ⇒ 该句成立。",
+      "harness_silent_failure": "⚠️ A7 首轮 ablate **一行输出都没有**（非 KILLED、非存活、非闸位提示），根因是 eval 双引号里 `\\&\\&` 的二次转义。**该失败模式比假 KILLED 更隐蔽**：输出里只是少一行，而其余 ✓ 看起来正常。单独重跑四闸逐步确认后计 KILLED。⇒ 建议 harness 增加「变异条数 == 结论行数」的计数自证。",
+      "summary": "8 条有效变异全部 KILLED，无假 KILLED；1 项不适用（ULP）；1 次 harness 静默失效已查明并单独重跑。"
+    },
+    "suite": {
+      "cmd": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -cover 与 -race -count=1",
+      "tree": "master @ 4547631dc8fdf03aeb97e84635a4174a8f5cf05c（全 sha；数字均在最后一次改动之后统一重采）",
+      "result": "-count=1: ok, coverage 92.0%；**-race -count=1: ok**",
+      "gate_coverage": "dev_done 门禁口径 92.0%",
+      "baseline": "TASK-006 交付后的基线之上再有提升；门槛 80",
+      "gofmt": "gofmt -l internal/hestia/ 无输出",
+      "vet": "go vet ./internal/hestia/ 无输出",
+      "build": "go build ./... 通过（全仓库，非仅本包）",
+      "new_cases": "TestGatesMatchContractedCheckIDs / TestCaliberExemptionRecordsSkipNotPass / TestCaliberExemptionDoesNotLeakToOtherPeriods / TestExemptionRejectsUnknownCheckID / TestTrillionConversionCarriesULPError / TestValidateOutputIsAcceptedBySave(2 子测试) / TestFailedValidationLandsInPending / TestMonetaryHierarchyRejectsEquality(2 子测试) / TestReportKeepsEveryGateUnderExemption 全 PASS"
+    },
+    "dod_matrix": [
+      "functional[0] knownCheckIDs 从 gates 派生、七个 ID 且顺序正确 -> TestGatesMatchContractedCheckIDs -> PASS（A4 消融证明有效）",
+      "functional[1] 每道闸门都出现在报告里、逐位对应（v1 大量跳过的输入上测）-> TASK-004 的 TestReportAlwaysContainsEveryGate（golden2020 子测试，字面量全列表相等，强于逐位+len）+ 本任务 TestReportKeepsEveryGateUnderExemption（覆盖新增的豁免分支）-> PASS（A1 消融证明有效；未添加计划 Step1 那条更弱的重复测试，理由见 decisions[2]）",
+      "functional[2] 命中豁免记 skipped{caliber_exemption:<version>} 非 passed、保留 Value、rep.Passed 仍 true -> TestCaliberExemptionRecordsSkipNotPass + TestReportKeepsEveryGateUnderExemption -> PASS（A2/A3 消融证明有效）",
+      "boundary[0] 豁免不外溢到其他期次（接入 Validate 后端到端）-> TestCaliberExemptionDoesNotLeakToOtherPeriods -> PASS（A6 消融证明有效）",
+      "error_handling[0] SkipChecks 含未知 ID 时返回 error 且含该 ID 原文；ID 列表从 gates 派生；TASK-001 的豁免校验测试未被破坏 -> TestExemptionRejectsUnknownCheckID + 回归跑 TestThresholds（4 子测试全绿）-> PASS（A5 消融证明有效）",
+      "non_functional[0] Validate 产出能被 Save 接受（真库 v2/v1 各一例落 TableObservations）；未过闸落 TablePending 且报告可序列化；Store 能当 History 用 -> TestValidateOutputIsAcceptedBySave + TestFailedValidationLandsInPending -> PASS（A9 消融证明该测试真在查 Save 的额外要求）",
+      "non_functional[1] ULP 契约用变量而非常量表达式钉住误差存在，且在 validate.go 包内注释写下契约 -> TestTrillionConversionCarriesULPError + validate.go 顶部注释块 -> PASS",
+      "non_functional[2] CONTRACTS.md 三节（真实防护力/留给 M1c 的三件事/浮点契约）+ Leader 追加㈠ monetary 两个边界测试 + ㈡ M1c 提醒挂到绊线上；gofmt/vet 无输出；-count=1 与 -race 均全绿；go build ./... 通过 -> CONTRACTS.md Sprint 035 一节（另加边界守卫收口表与 Value 单位表）+ TestMonetaryHierarchyRejectsEquality + thresholds_test.go 的绊线注释 + suite -> PASS（A7 消融证明 monetary 守卫有效且是唯一守卫）"
+    ],
+    "process_note": "按 AD-035-1 的 wave2+ 流程：主工作区直接开发（未建 worktree），先 transition dev_done（11:00:44Z）后 commit（4547631）。未运行 npx gitnexus analyze（计划 Step 11 提到）——索引重建属仓库级操作、且 hook 已提示索引陈旧，留给 Leader 在交付阶段统一处理，本任务未擅自执行。"
+  }
+}

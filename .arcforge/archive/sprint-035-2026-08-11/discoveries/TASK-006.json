@@ -1,0 +1,76 @@
+{
+  "task": "TASK-006",
+  "title": "stock_continuity 与三种跳过理由的优先级",
+  "by": "dev-agent-47",
+  "branch": "master",
+  "base": "1716dfc69aef79d1ff4b69a80d3231886be411d8",
+  "commit": "9ec8a6ffcfc47d3a5124e9755672019d3a8205b8",
+  "scope_note": "严格落在声明的 writes 两项内（validate.go 52/0，validate_test.go 124/3）。3 处删除**全部**是 wantGateIDs 段的原地改写（两行注释 + require 消息「六道」→「七道」），无任何断言被删除或放松——`git diff -U1 | grep '^-'` 只有这三行。.arcforge/write-matrix.json 是 Leader 的未提交改动，已用显式 pathspec 避开。",
+  "key_findings": [
+    "【实测】计划 T6 Step 1 那条测试的 2/4 必红已复现并绕开：根因确如 Leader 所述——它想说「stock_continuity 跳过不阻断」，写成的却是「整份报告没有任何闸门失败」，**观测对象比被测对象大**，被同一构造数据上的 completeness 污染（缺 tsf_stock ⇒ 53 键，而 validMeta() 是 rule@v2 ⇒ 需 54）。按 DoD 推荐的㈠收窄到本闸自己，四个子测试全 PASS。",
+    "【实测】选㈠丢掉的那条性质**不需要在本任务补回**：「跳过不阻断」已由 TestValidateOnGoldenSamples 守住。这不是推断——变异 M7（把聚合逻辑 `c.Status == CheckFailed` 改成 `c.Status != CheckPassed`，即让 skipped 也阻断）实测被 **TestValidateOnGoldenSamples 的两个子测试 + TestGatesSkipOnAbsentFields** 同时打红。**我先写下这条理由、再用变异去验证它**，若 M7 存活则那句注释就是错的、必须改写。",
+    "【实测】TASK-004 的 wantGateIDs 字面量守卫第二次实际开火：插表后、未改 wantGateIDs 时跑测试立即转红并打出 `+ (string) (len=16) \"stock_continuity\"`。已按要求**追加**（位置与 gates 表一致，紧跟 corp_loan_reconcile），未改成 Subset/Contains。gates 至此七道，与 M0 契约样本的 check ID 数量一致。",
+    "【实测】DoD non_functional[0] 对两份 golden 样本的预言**逐字成立**：用临时探针（仅存在于隔离副本，未进交付）实测 —— golden2025/rule@v2 ⇒ `status=skipped reason=\"no_prior_period\" value=<nil>`；golden2020/rule@v1 ⇒ `status=skipped reason=\"absent_field:tsf_stock\"`；两者 rep.Passed 均为 true，闸门数均为 7。这两个理由此前只是从数据推出来的，现在是量出来的。",
+    "【实测，不属于本任务范围，未动手】Leader 转来的 TASK-004 六处存活变异（`m2 > m1`、`m1 > m0` 无边界守卫，magnitude 区间两端，yoy 并列打破，firstN 文案）均在 TASK-004 的代码里、不在本任务 writes 内，按指示只记录不处置。本任务新增的第 20 处比较 `r <= StockContinuityMax` 已由变异 M2 证明有守卫（KILLED）。"
+  ],
+  "decisions": [
+    {
+      "decision": "跳过理由的断言按 DoD 推荐的㈠收窄到本闸自己，不断言 rep.Passed，也不改用 extractorV1/golden2020 构造（㈡）",
+      "rationale": "㈠让断言的观测对象与被测对象一致，且不依赖别的闸门的行为——㈡虽然也能让测试变绿，但它把「本闸跳过时报什么理由」这件事的正确性挂在了 completeness 恰好不失败上，换个期次或改动 completeness 就会再次被污染。省掉的 rep.Passed 断言经变异 M7 确认已被 golden 测试覆盖，不留空档。"
+    },
+    {
+      "decision": "边界选数沿用计划的 400→408（8/400 恰好等于字面量 0.02）",
+      "rationale": "reviewer 已实测该组 PASS，可直接用。**但不写成「必须」**：本闸算路是单次减法 + 单次除法，与 TASK-004 的单次除法同档，此处选精确可表示的比例是**求稳而非严格必要**（同形的 corp_loan 实测换成非 2 的幂同样杀得掉变异）。必要性取决于算路而非阈值字面量——「先求均值再相减」那类链式算路里就是必要的，TASK-005 的漂移实测 5%→8% 得 0.029999999999999992（低 2 ULP）会静默落到阈值下方。这条区分已写进测试注释，免得后人把它当成放之四海的教条。"
+    },
+    {
+      "decision": "追加 TestStockContinuitySkipsOnZeroDenominator（DoD error_handling[0]）",
+      "rationale": "计划实现了 prev == 0 分支却没有为它写任何测试，与 deposit_sum 那条同形。补测并断言理由是 `zero_denominator:tsf_stock` 而**不是** prior_absent_field——字段在、只是值为 0，与「上一期压根没这个字段」是两种不同处境，理由不该混。变异 M4 证明有效。"
+    },
+    {
+      "decision": "gateStockContinuity 插在 gateCorpLoanReconcile 与 gateYoYSanity 之间",
+      "rationale": "维持既有约定：文件里的函数顺序与 gates 表顺序逐项一致。stock_continuity 在表里排第四，函数也放第四位。纯风格对齐，不改变行为。"
+    },
+    {
+      "decision": "把两个测试 helper（stockObs / stockObsWithout）提到包级，而不是各测试内的闭包",
+      "rationale": "三条 stock_continuity 测试都要用；与我在 TASK-005 提的 depositWith 同一处理。T7 若要造社融存量观测可直接复用。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go（+52/-0：gateStockContinuity，gates 表插一行）",
+    "internal/hestia/validate_test.go（+124/-3：三条新测试 + 两个包级 helper，wantGateIDs 追加 stock_continuity）"
+  ],
+  "interfaces_exposed": [
+    "func gateStockContinuity(in gateInput) Check —— 包内非导出。三种跳过理由按「从根本到表面」排序：absent_field > no_prior_period > prior_absent_field，另有 zero_denominator。Value 为环比变化率（比例，与 deposit_sum 同类；corp_loan_reconcile 记亿元）",
+    "gates 表现为**完整七道**：monetary_hierarchy / deposit_sum / corp_loan_reconcile / stock_continuity / yoy_sanity / completeness / magnitude_sanity（DoD functional[2]）",
+    "测试侧 helper stockObs(v float64) Observation 与 stockObsWithout() Observation —— 供 T7 复用"
+  ],
+  "verification": {
+    "red_expected": "全部子测试 FAIL，报告里找不到 stock_continuity",
+    "red_actual_verbatim": "=== RUN   TestStockContinuitySkipReasons/本期没有社融板块，但有历史\n    validate_test.go:750: 报告里没有 stock_continuity；实际有 6 道闸门\n--- FAIL: TestStockContinuitySkipReasons (0.00s)\n    --- FAIL: TestStockContinuitySkipReasons/本期没有社融板块，但有历史 (0.00s)\n    --- FAIL: TestStockContinuitySkipReasons/v1_期次且无历史：两个理由同时成立，报最根本的那个 (0.00s)\n    --- FAIL: TestStockContinuitySkipReasons/本期有社融，但库里没有历史 (0.00s)\n    --- FAIL: TestStockContinuitySkipReasons/上一期没有社融板块 (0.00s)\n--- FAIL: TestStockContinuityDetectsJump (0.00s)\n    --- FAIL: TestStockContinuityDetectsJump/恰好在阈值上 (0.00s)\n    --- FAIL: TestStockContinuityDetectsJump/阈值内 (0.00s)\n    --- FAIL: TestStockContinuityDetectsJump/超过阈值 (0.00s)\n    --- FAIL: TestStockContinuityDetectsJump/存量下跌也算跳变 (0.00s)\n--- FAIL: TestStockContinuitySkipsOnZeroDenominator (0.00s)",
+    "red_note": "九个子测试全部因同一原因失败（findCheck 的 Fatalf「报告里没有 stock_continuity；实际有 6 道闸门」——此时 gates 是 TASK-005 之后的六道），无编译错误、无 imported and not used。与 DoD non_functional[1] 预期一致。GREEN 后按**修正写法**四个跳过子测试全 PASS（计划原文说「四个全 PASS」但其自身写法会得 2 红 2 绿）。",
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok（整包绿）",
+    "coverage": "91.9%（go test -cover 包级）／91.8%（dev_done 门禁 -func 口径，dev_minimum 80%）；本任务前基线 91.7%",
+    "gofmt": "无输出",
+    "vet": "无输出",
+    "new_assertions": 12,
+    "golden_measured": "临时探针实测（非推断）：golden2025/rule@v2 ⇒ skipped/no_prior_period；golden2020/rule@v1 ⇒ skipped/absent_field:tsf_stock；两者 rep.Passed=true、闸门数=7。探针文件只存在于隔离副本，跑完即删，未进交付。",
+    "guard_observed_firing": "插表后未改 wantGateIDs 时实跑：TestReportAlwaysContainsEveryGate FAIL，打出 `+ (string) (len=16) \"stock_continuity\"`。随后**追加**字面量转绿。",
+    "ablation": {
+      "method": "隔离副本（git worktree --detach @1716dfc + 拷入本任务两个未提交文件），主工作区一字节不碰；harness 见 scratchpad/dev47-t006-mutate.sh",
+      "gates": "四道闸全开：①sha 必须变 ②gofmt -l 干净 ③`go test -c -o /dev/null` 必须编译通过 ④每轮还原后 sha 比对；另打印每个变异体 diff 供逐行核对",
+      "control_group": "变异前对照组先验全绿；收尾 sha 逐字节回到 f28aa2d95312f56f93901d512bd79ae9e01120300787a5bc800eb61e3db8d740",
+      "when": "对最终提交版（9ec8a6f 的内容）跑",
+      "results": [
+        "M1 优先级对调（先判无历史再判缺字段）：KILLED —— 只打红「v1 期次且无历史：两个理由同时成立」那一条，正是 DoD boundary[1] 点名的用例",
+        "M2 `r <= StockContinuityMax` → `<`：KILLED（TestStockContinuityDetectsJump/恰好在阈值上）",
+        "M3 去掉 math.Abs 变成 (cur-prev)/prev：KILLED（TestStockContinuityDetectsJump/存量下跌也算跳变）",
+        "M4 零分母不短路、任其算出 Inf：KILLED（TestStockContinuitySkipsOnZeroDenominator）",
+        "M5 prior_absent_field 理由退化成 no_prior_period：KILLED（TestStockContinuitySkipReasons/上一期没有社融板块）",
+        "M7 聚合把 skipped 也当成不通过：KILLED（TestValidateOnGoldenSamples 两个子测试 + TestGatesSkipOnAbsentFields）—— 这条不测我的闸门，而是**验证我省略 rep.Passed 的那句理由**是否成立"
+      ],
+      "final_state": "6/6 KILLED，隔离副本已完全还原并 git worktree remove"
+    },
+    "commit_numstat": "git show --numstat HEAD → validate.go 52/0，validate_test.go 124/3；`git show --name-only` 确认只含这两个文件",
+    "known_gaps_not_touched": "按 Leader 指示记录但**未动手**：TASK-004 代码里的六处存活变异（`m2 > m1` 与 `m1 > m0` 无边界守卫、magnitude 区间两端 `v < Min`/`v > Max`、yoy 的 `a > worst` 并列打破、firstN 的 `len(s) <= n` 文案）。其中前两处最实质——monetary_hierarchy 要求严格大于，相等即可疑数据，而无测试守住等号方向。均不在本任务 writes 内。"
+  }
+}

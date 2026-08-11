@@ -1,0 +1,52 @@
+{
+  "id": "TASK-001",
+  "title": "Thresholds 与配置自校验",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/types.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "新建 Thresholds/Range/CaliberExemption 与 DefaultThresholds，实现配置自校验 validate() 与定点豁免查询 exemptionFor()；解开 checkEnum 硬编码的 meta. 前缀改由调用方传完整字段名。对应上游计划 Task 1（Step 1-13）。",
+  "done_criteria": {
+    "functional": [
+      "`DefaultThresholds()` 的阈值**容得下 M0 三期实测极值**：`DepositSumTolerance > 0.0906`、`CorpLoanTolerance > 0.0158`、`YoYSanityMax > 25.0`。\n\n**判据**：断言的是「阈值与真实数据的关系」，**不得写 `assert.Equal(t, 0.12, c.DepositSumTolerance)` 这类同义反复**——那只是把实现抄进测试，改坏实现时测试跟着改，等于没有守卫。\n\n理由：方案报告初稿的 ±2% 就是拍脑袋的代价——三期实测残差 7.65%/8.57%/9.06%，每一期都会被拦下。",
+      "`MagnitudeRanges` **必须为空**（`assert.Empty`）。这道断言防的是「有人顺手填了几个看起来合理的数」——那会让一道本该沉默的闸门产生未经验证的判定，**而它错了不会响亮失败，只是区间悄悄放宽**。区间必须留到 M1c 用回填分布标定。",
+      "`exemptionFor(period, checkID)` 对 (期次, 检查 ID) **精确匹配**命中时返回对应豁免（非 nil，且 Version 正确）。"
+    ],
+    "boundary": [
+      "**豁免不外溢**，两个方向都要断言：①未列入 `SkipChecks` 的闸门返回 nil；②相邻期次（如豁免配在 2025-01，查 2025-02）返回 nil。\n\n**这是本任务最容易写错的一格**：实现写成 `>=` 或前缀匹配就会让一次性豁免变成**永久后门**，而它不会失败——只会静默地一直放行。"
+    ],
+    "error_handling": [
+      "`Thresholds.validate()` 拒绝四类畸形豁免，错误信息各含对应关键字：未登记 Version（含 `unknown`）/ 缺 Period（含 `Period`）/ Reason 只有空白（含 `Reason`）/ SkipChecks 为空（含 `SkipChecks`）。\n\n**必须先用 `require.NoError` 确认 base 本身合法**（上游计划 Task1 Step6 明写此要求）。少了这步，每个用例都可能因为**别的原因**报错而测试照样绿——它只断言「有 error」，不关心是不是预期的那个。",
+      "`checkEnum` 解开 `meta.` 前缀后，`types.go` 两处调用（caliber_version / extractor）的**错误信息输出逐字不变**——前缀只是从函数体挪到了调用点。\n\n**判据**：既有 Meta 校验测试**全部不得变红**（`go test ./internal/hestia/ -run TestMeta`）。\n\n背景：Leader 已跑 gitnexus impact，`checkEnum` upstream 风险 LOW（d1 `Meta.validate`、d2 `Store.Save`），前提正是「输出不变」。这条 DoD 就是把那个前提钉住。"
+    ],
+    "non_functional": [
+      "**RED 阶段必须真的跑出计划预期的失败**，且把**实际输出原文**（不是「符合预期」四个字）写进 discovery 的 `verification`：Step 2 预期 `undefined: DefaultThresholds`；Step 7 预期 `t.validate undefined`。\n\n若 RED 因**别的原因**失败（例如 `imported and not used`——上游计划 Global Constraints 第 27 条专门警告过这个陷阱），**那条 RED 没有证明任何事**，必须修正后重跑。",
+      "`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 均无输出；`go test ./internal/hestia/` **整包绿**（基线 89.4%，不得跌破 80）。\n\n⚠️ **整包绿会被两条既有守卫拦住，这是本任务最容易卡死的地方**（独立 reviewer 在隔离 worktree 里实跑证实）：新增导出物 `DefaultThresholds` 会打红 `store_test.go:368` 的 `TestPackageExposesNoWriteFunctions` —— 它是**全导出面精确相等**断言（`assert.Equal([]string{\"NewStore\",\"Parse\",\"Store.Close\",\"Store.DB\",\"Store.Save\"}, got)`）。\n\n**正确处置是登记，不是放松断言**（该测试自己的注释 `store_test.go:346-348` 明写此意：「新增任何导出方法都必须在这里显式登记一次，让『又开了一个写口』成为一个需要动手改测试的决定」）。⇒ 把 `DefaultThresholds` 加进那个期望切片（**按字典序**，`got` 是 `sort.Strings` 过的），并在该测试的注释里补一行说明本迭代为什么扩大导出面。**不得改成 `assert.Contains` 或删除断言。**\n\n⚠️ **`import` 按需增补**：上游计划 Step 3 给出的 `thresholds.go` import 块是**最终态**（`fmt`/`slices`/`strconv`/`strings`），但 Step 3 的代码体一个都没用到 —— 照抄会得到 4 个 `imported and not used` 编译错误（reviewer 实测）。Go 拒绝未使用 import：**每个 Step 只写该 Step 真正用到的 import**。计划的 Global Constraints 第 27 条对测试文件写了这条纪律，实现文件同样适用。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:04Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-46",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "cfc24feb9afc926bd422895085c0c4b3417f77be",
+    "discovery_sha256": "23d297e36ec58a0fdf128a2fee01fc4b3b81cc4a388180f2f087211f509582c0",
+    "at": "2026-08-11T09:08:22Z"
+  },
+  "verifier": "test-agent-24"
+}

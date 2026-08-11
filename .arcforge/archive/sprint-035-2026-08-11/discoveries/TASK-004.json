@@ -1,0 +1,103 @@
+{
+  "task": "TASK-004",
+  "title": "Validate 骨架与五道无历史闸门",
+  "by": "dev-agent-46",
+  "commit": "09183243cc1864a3f2920311e55bdf3bcbbfd06c",
+  "branch": "master",
+  "base": "c693177fc1e14b1bf8d07e7ccffaf72b8a157881",
+  "context_from": ["TASK-001", "TASK-002", "TASK-003"],
+  "key_findings": [
+    "**spec 的单位裁定被数据独立证实，不只是权威裁决**：`sum - total` 在 golden2025 上得 **-1800**、在 golden2020 上得 **-1203** —— 前者恰是 spec 第 7 节举例的量级，后者与 M0 契约样本里已经存在的 `corp_loan_reconcile: -1203` **逐字一致**。两个数都不是从本实现算出来再抄进测试的，而是先存在于 spec/契约样本、再被实现命中。这把「以 spec 为准」从一次裁决升级成一次可核对的复算。",
+    "**`len(rep.Checks) == len(gates)` 这种写法抓不到「从 gates 表删掉一道闸」** —— 消融实测：删掉 `magnitude_sanity` 后该断言**存活**，因为等式两边一起缩水。这是「用被验对象的尺子量被验对象」在断言里的形态。已改为**字面量期望**（五个闸门 ID 的完整列表 + 一条钉住 gates 表本身的 `require.Equal`），重跑同一变异即 KILLED。代价是 T5/T6 每加一道闸要来改一次，而那正是想要的效果。",
+    "**`Validate` 只打红 AST 版一条导出面守卫**，reflect 版保持绿 —— 与 TASK-001 的 `DefaultThresholds` 同形，不同于 TASK-003 的 `Store.Preceding`（那个同时打红两条）。`History`（接口类型）与 `NoHistory`（变量）都不是 `FuncDecl`，不进 AST 版视野，实测确认无需登记。`Validate` 排在名单末位是字节序结果（\"V\" > \"S\"）。",
+    "计划 Step 3 给出的 import 块是**最终态**（context/errors/fmt/math/slices/strconv/strings），其中 math/slices/strconv/strings 要到 Step 4-5 才用到。本任务把 Step 3-5 的实现**合并为一次 GREEN** 而不是逐 Step 落盘，从而让整块 import 一次性全部被使用 —— RED 已在 Step 2 银行入账（`undefined: Validate`），Step 3/4/5 之间没有新的 RED，合并不损失任何 TDD 信号，反而避免了人为制造 `imported and not used`（A1 陷阱）。",
+    "`TestValidateHandlesEmptyValuesWithoutSpecialCase` 同时覆盖**空 map 与 nil map**：Go 里读 nil map 合法，两者在 `Validate` 里走同一条路径，但在别处常被写成不同分支。消融确认：在入口加一句 `if len(obs.Values)==0 { return ValidationReport{Passed:true}, nil }` 会被这条测试杀掉 —— spec 第 9 节那段论证从此有了回归防线。"
+  ],
+  "decisions": [
+    {
+      "what": "`gateCorpLoanReconcile` 的 `Value` 记 `sum - total`（亿元绝对量，保留符号），判定仍用比例 `r = |sum-total|/|total| <= CorpLoanTolerance`。两个口径的差异写进该函数的文档注释。",
+      "rationale": "DoD functional[2] 的裁定（spec 第 7 节 + M0 契约样本 > 计划原文）。符号表示方向：负值即分项之和小于合计。下游是 Grafana 面板与 pending 人工复核，把 1.16% 读成 -1203 亿元是量纲错读，而计划里没有任何测试守着它。spec 要求「差异写进各闸门的文档注释」，已在 `gateCorpLoanReconcile` 与 `gateYoYSanity` 的注释里写明各自单位。"
+    },
+    {
+      "what": "边界测试全部选 2 的幂：`corpTotal=131072(2^17)`、残差 `8192(2^13)` ⇒ 比例恰好 `1/16=0.0625`；对照残差 `12288(3*2^12)` ⇒ `3/32=0.09375`。容差在测试里显式设为 `0.0625`。yoy 用整数 50（默认上限）与 50.5。",
+      "rationale": "DoD boundary[0] 的选数纪律。比例若不精确可表示，「恰好等于阈值」测的就是浮点舍入而不是判定逻辑，`<=` 与 `<` 的差别会被舍入淹没。用 2 的幂让除法结果精确，等号成立与否只取决于比较符本身。"
+    },
+    {
+      "what": "`TestReportAlwaysContainsEveryGate` 的期望值写成字面量 ID 列表，并额外用 `require.Equal(wantGateIDs, gateIDs())` 把 `gates` 表本身钉住。",
+      "rationale": "消融发现原写法（对 `len(gates)` 比较）在删闸变异下存活。字面量期望让「闸门集合变更」成为一个必须动手改测试的决定，与 `store_test.go` 两条导出面守卫的思路一致。"
+    },
+    {
+      "what": "`Validate` 入口**不**对空 `obs.Values` 加特判，由 `completeness` 自然判 failed。",
+      "rationale": "spec 第 9 节的设计断言。入口特判会把一条自然性质换成一处需要自己被测试的分支，且会让空数据变成 `Passed: true`（消融实测正是这个后果）。已补回归防线守住它。"
+    },
+    {
+      "what": "M9（把导出面断言改成 `assert.Subset`）判定为**无效实验，不计入存活**。",
+      "rationale": "它变异的是断言自身（oracle），再跑同一条断言必然通过——这不构成发现。「没有机制阻止后人放松那条断言」是该守卫已知且被接受的性质，它靠文件里的说明注释与 review 兜住，不可能由同一套测试自证。记在此处以免被误读成一条存活变异。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go (修改, +262/-1: Validate 骨架 + gateInput/gate/gates + 五道闸门 + yoyFields/firstN；-1 是 `import \"context\"` 单行换成 import 块)",
+    "internal/hestia/validate_test.go (新建, +463: 计划的九条测试 + DoD 追加的五条)",
+    "internal/hestia/store_test.go (修改, +11/-2: 导出面守卫登记 Validate + 说明注释)"
+  ],
+  "scope_note": "实际改动严格等于 writes 三项，无越界。numstat 取自提交本身（git show --numstat 0918324），采样时点在最后一次改动之后。store_test.go 的 -2 是那条 assert.Equal 的期望行与消息行；validate.go 的 -1 是被 import 块替换的单行 import。",
+  "interfaces_exposed": [
+    "func Validate(ctx context.Context, obs Observation, h History, cfg Thresholds) (ValidationReport, error) —— 导出，已登记进 AST 版导出面守卫",
+    "const historyDepth = 6 —— 未导出。一次取满供两道闸共用；T5 的漂移检测要 6 期、T6 的 stock_continuity 要 1 期，**都从 in.prior 自取，不要再查库**",
+    "type gateInput struct{ obs Observation; prior []Observation; cfg Thresholds } —— 未导出。prior 按 period 降序，可能为空",
+    "func (in gateInput) need(fields ...string) *Check —— 缺任一字段即返回 absent_field skip；**新闸门一律先过 need 再取值**",
+    "func (in gateInput) v(f string) float64 —— 必须先过 need，否则缺失字段静默读成 0",
+    "type gate struct{ id string; fn func(gateInput) Check }；var gates []gate —— **T5 往表里插 deposit_sum、T6 插 stock_continuity**。闸门函数不写自己的 ID，由 Validate 统一回填",
+    "func yoyFields() []string —— 未导出，从 fieldOrder 筛 `_yoy` 后缀。⚠️ 实际是 **14** 个字段，不是计划正文说的 11。**本任务用一次性探针 `len(yoyFields())` 直接实测确认为 14**（探针跑完即删，未进交付物），不是采信 Leader 的转述。`make(..., 0, cap)` 只是容量提示，无害，本任务写成 16",
+    "func firstN(s []string, n int) []string —— 未导出，截断并追加省略号",
+    "测试侧 `fakeHistory{prior, err}` / `obsFrom(values, extractor)` / `findCheck(t, rep, id)` / `gateIDs()` —— **T5/T6 直接复用**。obsFrom 会 maps.Clone，改 Values 不会污染 golden",
+    "⚠️ 给 T5/T6 的接线提醒：新闸门加进 gates 表后，`TestReportAlwaysContainsEveryGate` 的 `wantGateIDs` 字面量**必须同步追加**，否则该测试会红。这是刻意设计（见 decisions），不是需要绕过的障碍"
+  ],
+  "verification": {
+    "red_step2_expected": "undefined: Validate",
+    "red_step2_actual_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/validate_test.go:51:16: undefined: Validate\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_causality_note": "RED 因预期原因失败，无 `imported and not used` 干扰。Step 1 的测试文件只 import 该 Step 用到的 context/maps/testing/assert/require；errors 在 Step 10 的用例落盘时才加，math/strings 在 DoD 追加用例落盘时才加。实现侧把 Step 3-5 合并为一次 GREEN，使计划给的整块 import 一次性全部被使用（见 key_findings[3]）。",
+    "export_guard_red_verbatim": "TestPackageExposesNoWriteFunctions: expected [DefaultThresholds NewStore Parse Store.Close Store.DB Store.Preceding Store.Save] / actual [... + Validate]；TestStoreExposesNoWriteMethods **保持 PASS**（Validate 是包级函数，不在 reflect 视野内）",
+    "ablation": {
+      "purpose": "回答『改坏它有东西会红吗』。在 `git worktree add --detach c693177` 的隔离副本上跑（拷入三个在改文件），主工作区不碰。**四道闸**：①变异生效(diff 非空) ②`gofmt -e` 语法 ③**`go test -c -o /dev/null` 编译闸** ④收尾还原比对。对照组（未变异副本）先验全绿。",
+      "compile_gate_rationale": "本 Sprint 至今 4 次假 KILLED 全部源于编译失败被误记为断言致红。闸③是 Leader 定的硬要求，本轮**没有**再出现假 KILLED。",
+      "M1_value_back_to_ratio": "`Check{Value: &residual}` → `&r`（退回计划原文的比例）⇒ KILLED，致红 TestCheckValueUnitsFollowSpec。**这条最关键**：在本任务之前，量纲错读不会有任何测试转红",
+      "M2_corp_boundary_strict": "`r <= tol` → `r < tol` ⇒ KILLED，致红 TestGateBoundariesAreInclusive。reviewer 实测计划原有测试对此**全部存活**，本任务补上了这道守卫",
+      "M3_yoy_boundary_strict": "`worst <= max` → `worst < max` ⇒ KILLED，同上",
+      "M4_entry_special_case": "在 Validate 入口加 `if len(obs.Values)==0 { return ValidationReport{Passed:true}, nil }` ⇒ KILLED，致红空 Values 测试（Should be false）。spec 第 9 节的设计断言从此有防线",
+      "M5_delete_a_gate": "从 gates 表删掉 magnitude_sanity ⇒ **首轮存活**（原写法比的是 len(gates)，两边一起缩水）⇒ 改成字面量期望后**重跑 KILLED**。见 key_findings[1]",
+      "M6_monetary_fabricates_value": "gateMonetaryHierarchy 的 passed 分支加 `Value: &m2` ⇒ KILLED，致红「Expected nil, but got: (*float64)」",
+      "M7_w_to_v": "Validate 里 `%w` → `%v` ⇒ KILLED，致红「Target error should be in err chain」+ Unwrap 断言",
+      "M8_skip_without_reason": "`need` 返回的 skip 去掉 Reason ⇒ KILLED，致红「Should NOT be empty」",
+      "M9_relax_export_assertion": "**无效实验，不计入存活** —— 变异的是断言自身，再跑同一条断言必然通过。见 decisions[4]",
+      "summary": "8 条有效变异全部 KILLED（M5 经修正测试后），1 条无效实验已剔除。无假 KILLED。"
+    },
+    "suite": {
+      "cmd": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -cover",
+      "tree": "master @ 09183243cc1864a3f2920311e55bdf3bcbbfd06c（全 sha；数字均在最后一次改动之后统一重采）",
+      "result": "ok github.com/newthinker/atlas/internal/hestia  coverage: 91.3% of statements",
+      "gate_coverage": "dev_done 门禁口径 91.2%（-coverpkg 算法不同）",
+      "baseline": "TASK-003 交付后 90.0%，本任务再 +1.3pct",
+      "gofmt": "gofmt -l internal/hestia/ 无输出",
+      "vet": "go vet ./internal/hestia/ 无输出",
+      "new_cases": "计划的 9 条（TestValidateOnGoldenSamples/TestGatesRejectMalformedData/TestMagnitudeSanity×2/TestGatesSkipOnAbsentFields/TestEverySkippedCheckHasReason/TestValidateReturnsErrorOnHistoryFailure/TestValidateRejectsNilHistory/TestValidateRejectsInvalidConfig）+ DoD 追加的 5 条（TestCheckValueUnitsFollowSpec/TestGateBoundariesAreInclusive/TestValidateHandlesEmptyValuesWithoutSpecialCase/TestReportAlwaysContainsEveryGate/TestCorpLoanSkipsOnZeroDenominator）全 PASS"
+    },
+    "dod_matrix": [
+      "functional[0] 两期 golden 无闸门 failed 且 Passed==true -> TestValidateOnGoldenSamples（两个子测试）-> PASS",
+      "functional[1] 每道闸各有失败样本，Reason 含关键字 -> TestGatesRejectMalformedData（4 个子测试：M1>M2 / 短期项×3 / 同比 88 / 删必填字段）-> PASS",
+      "functional[2] Check.Value 单位符合 spec 第 7 节且各有断言 -> TestCheckValueUnitsFollowSpec（corp=-1800/-1203 亿元带符号、yoy=最大同比百分数且独立复算、monetary=nil）-> PASS（M1/M6 消融证明有效）",
+      "boundary[0] corp_loan 与 yoy 各有「恰好等于阈值判 passed」+ 略超判 failed，选精确可表示的比例 -> TestGateBoundariesAreInclusive（4 个子测试，2 的幂选数）-> PASS（M2/M3 消融证明有效——这正是 reviewer 实测计划完全没守住的那两处）",
+      "boundary[1] v1 缺字段记 skipped 非 failed 且整期 Passed；completeness 用 v1 必填集故 passed；magnitude 空表 skipped{not_calibrated}、填表即生效且单位出现在错误信息 -> TestGatesSkipOnAbsentFields + TestMagnitudeSanitySkipsWhenUncalibrated + TestMagnitudeSanityActivatesWhenCalibrated -> PASS",
+      "error_handling[0] 四条路径：①History 查库失败 errors.Is 可找到 ②nil History 含 NoHistory ③配置非法含 unknown 且在跑闸门之前 ④空 Values 不 panic 不 error -> TestValidateReturnsErrorOnHistoryFailure（含 Unwrap 非空断言）/ TestValidateRejectsNilHistory / TestValidateRejectsInvalidConfig / TestValidateHandlesEmptyValuesWithoutSpecialCase -> PASS（M4/M7 消融证明有效）",
+      "non_functional[0] 每个 skipped 带非空 Reason（两份 golden 各遍历）+ 任何输入下报告行数恒等于闸门数 -> TestEverySkippedCheckHasReason + TestReportAlwaysContainsEveryGate（6 种输入）-> PASS（M5/M8 消融证明有效）",
+      "non_functional[1] RED 原文入 discovery / Validate 登记进导出面守卫且保持精确相等 / import 按需增补 / 零分母记 skipped / gofmt+vet 无输出 + 整包绿 -> 见 red_step2_actual_verbatim、export_guard_red_verbatim、TestCorpLoanSkipsOnZeroDenominator、suite -> PASS"
+    ],
+    "process_note": "按 AD-035-1 的 wave2 流程：主工作区直接开发（未建 worktree），先 transition dev_done（09:51:25Z）后 commit（0918324）。门禁看到完整未提交工作树改动。",
+    "leftover_for_downstream": [
+      "（Leader 已知，本任务未扩范围）`store.go` 三处 `%w` 只有 `:236` 被守住，`:244`/`:249` 改成 `%v` 整包仍全绿。落在 store.go/store_test.go，不在本任务 writes 内，留给收尾任务。",
+      "（Leader 已知）`checkEnum` 两行错误串无常驻守卫：把调用点改成 `meta.caliber_versionX` 后 `go test -run TestMeta` 仍全绿。",
+      "`noHistory.Preceding` 覆盖率：本任务大量用 NoHistory，已自然覆盖（整包 91.3%）。",
+      "计划正文称 `yoy_sanity` 字段数 = 11，**实为 14**。本任务未依赖该数字（`make` 的容量提示写成 16），但 T7 若要「用测试钉住数量」请以 14 为准。"
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "id": "TASK-004",
+  "title": "Validate 骨架与五道无历史闸门",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "实现 Validate 骨架、gateInput/gate/gates 表，以及五道不依赖历史的闸门：monetary_hierarchy、corp_loan_reconcile、yoy_sanity、completeness、magnitude_sanity。对应上游计划 Task 4（Step 1-12）。",
+  "done_criteria": {
+    "functional": [
+      "**两期真实 golden 数据上没有任何闸门 failed**，且 `rep.Passed == true`（golden2025/rule@v2 与 golden2020/rule@v1 各一个子测试）。\n\n**这是最重要的一条**：闸门的价值在于「异常时响、正常时静」，而在真实数据上误报是**最贵的失败模式**——它会让人开始忽略告警。",
+      "**每道闸门各有一个能让它失败的构造样本**（M1 超过 M2 / 企业贷款短期项翻三倍 / 贷款余额同比 88 / 删掉一个必填字段），失败时 `rep.Passed == false` 且对应 Check 的 Reason 含预期关键字。\n\n**只测绿色路径证明不了闸门在工作**：一个恒返回 `passed` 的实现同样能通过上一条。",
+      "**各闸门 `Check.Value` 的单位必须符合 spec 第 7 节的约定，并各有一条断言守着**：\n\n| 闸门 | Value | 单位 |\n|---|---|---|\n| `corp_loan_reconcile` | 残差**绝对量**（保留符号） | **亿元**（-1800 量级） |\n| `yoy_sanity` | 最大同比绝对值 | 百分数（25.0） |\n| `monetary_hierarchy` | nil | — |\n\n⚠️ **上游计划在此处与 spec 冲突，以 spec 为准**（Leader 裁定，reviewer 实测发现）：计划的 `gateCorpLoanReconcile` 写 `c := Check{Value: &r}`，而 `r` 是**比例**（实测 golden2025 得 `0.0116`）；spec 第 7 节与 **M0 契约样本**（已存在的数据，记的是 `corp_loan_reconcile: -1203`）都要求**亿元绝对量**。\n\n⇒ 实现改为：**判定仍用比例** `r = |sum-total|/|total| <= CorpLoanTolerance`，但 **`Value` 记 `sum - total`（保留符号，符号表示方向）**。spec 还要求「差异写进各闸门的文档注释」，一并落实。\n\n不改的后果：Grafana 面板与 pending 人工复核会把 `1.16%` 读成 `-1203 亿元`——**量纲错读，且计划里没有任何测试守着它，全套绿**。"
+    ],
+    "boundary": [
+      "**阈值边界方向必须被守住**：`corp_loan_reconcile` 与 `yoy_sanity` 各构造一个「残差/同比**恰好等于**阈值」的用例，断言走 **passed**（实现是 `<=`），并各配一个略超阈值的对照断言 failed。\n\n⚠️ **reviewer 做了消融实验**（每次只翻转一个比较符，跑计划全部测试）：`corp_loan_reconcile` 的 `r <= Tolerance` 改成 `<`、`yoy_sanity` 的 `worst <= Max` 改成 `<`，**均无一条测试转红**（对照组 `stock_continuity` 同样翻转则被杀）。⇒ 计划对这两道闸的边界**完全没有守卫**。\n\n选数纪律（沿用计划 T6）：**边界测试必须选精确可表示的比例**，否则测的是浮点舍入而不是判定逻辑。",
+      "v1 期次天然缺 27 个字段，缺字段的闸门必须记 **skipped 而非 failed**，且整期仍 `Passed == true`（「没数据」和「数据有问题」是两回事）；`completeness` 用的是 v1 的必填集，所以它应是 **passed** 而不是 skipped。\n\n`magnitude_sanity` 空表时记 `skipped{not_calibrated}`，**填表即生效且无需改代码**——填入 `FieldFXReserve: {3, 4, \"万亿美元\"}` 并把值设为 42 后必须 failed，且**区间的单位出现在错误信息里**。遍历须走 `fieldOrder` 而非 map（map 迭代顺序随机，同一份数据两次跑会报出不同的越界字段，让排查变成猜谜）。"
+    ],
+    "error_handling": [
+      "四条错误/边缘路径各一条测试：①`History` 查库失败 ⇒ 返回 error 且底层 err 能被 `errors.Is` 找到；②`nil` History ⇒ 返回 error 且信息含 `NoHistory`；③配置非法 ⇒ **在跑任何闸门之前**返回 error 且信息含 `unknown`；④**`obs.Values` 为空**（spec 第 9 节专门论证过的场景）⇒ 不 panic、不返回 error，五道闸门各自 skip 或由 `completeness` 判 failed。\n\n**闸门判定失败不是 Go error**——它进 `report.Checks`。两者混用会让调用方分不清「这期数据没过闸」（正常路径）和「数据库连不上」（该重试）。`nil` 一律是接线错误：让它退化成「所有需要历史的闸门都 skipped」会把一个 bug 变成一份看起来正常的报告。\n\n④是 reviewer 发现的缺口：spec 第 9 节花整段论证「空 Values 由 completeness 自然拦下，不需要在 Validate 入口加特判」，**而计划没有任何测试验证它**——一条论证充分的设计断言没有回归防线，将来有人加特判把它改坏不会有东西红。"
+    ],
+    "non_functional": [
+      "**每一个 skipped 都必须带非空 Reason**（在 golden2025 与 golden2020 两份数据上各遍历一遍断言）；且**任何输入下报告行数恒等于 `len(gates)`**，不得有闸门「整个消失」。\n\n`store.go:436` 的 `Save` 会拒绝无 reason 的 skip，漏一条就会让整期既进不了观测表也进不了 pending。而闸门消失是最难发现的失败模式——报告看起来正常，只是少了一行，`Passed` 照样是 true。",
+      "**RED 阶段实际失败信息与计划预期一致**，实际输出原文（不是「符合预期」四个字）写进 discovery 的 `verification`：Step 2 预期 `undefined: Validate`。因**别的原因**失败的 RED 不算数。\n\n⚠️ **新增导出物 `Validate` 会打红 `TestPackageExposesNoWriteFunctions`**（`store_test.go:368`，全导出面精确相等断言）。**正确处置是登记，不是放松断言**——把 `Validate` 按字典序加进期望切片，理由同 TASK-001/003。此时该切片应已含 TASK-001 的 `DefaultThresholds` 与 TASK-003 的 `Store.Preceding`，**在其基础上追加，不要覆盖**。\n\n⚠️ **`import` 按需增补**：计划给出的 import 块是最终态，每个 Step 只写该 Step 真正用到的（Go 拒绝未使用 import，reviewer 在 T1/T2 实测撞到过这个坑）。\n\n**零分母保护**：`corp_loan_reconcile` 在企业合计为 0 时记 `skipped{zero_denominator:...}`——Inf/NaN 会被 `Save` 的 `checkReportValues` 拒绝，导致整期既进不了观测表也进不了 pending。\n\n`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 均无输出；`go test ./internal/hestia/` 整包绿。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-46",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "09183243cc1864a3f2920311e55bdf3bcbbfd06c",
+    "discovery_sha256": "15a3219b4074883c5e17cb92fb8536485e84039e5865a1283bd1733d2d58f34e",
+    "at": "2026-08-11T09:55:52Z"
+  },
+  "verifier": "test-agent-24"
+}

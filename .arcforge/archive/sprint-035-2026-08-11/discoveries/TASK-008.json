@@ -1,0 +1,123 @@
+{
+  "task": "TASK-008",
+  "title": "Sprint 035 收尾：豁免边界修补与契约登记",
+  "by": "dev-agent-46",
+  "commit": "722aa2728723b573537160b602bb06a03b3169b4",
+  "branch": "master",
+  "base": "4547631dc8fdf03aeb97e84635a4174a8f5cf05c",
+  "context_from": [
+    "TASK-001",
+    "TASK-007"
+  ],
+  "key_findings": [
+    "**消融又一次抓到我自己的断言不合格，与 TASK-004 的 M5 同族。** 「枚举全部闸门即整期跳过」这条子测试原本断言 `Contains(err, \"整期跳过\")` —— 而 completeness 那条规则的文案里也含「豁免它等价于**整期跳过**校验」。⇒ 去掉『覆盖全部』校验后，全 ID 输入落到 completeness 规则上照样报错，**该子测试被错误的规则冒名满足**，只有「两种理由必须可区分」那条察觉。已把两条断言各自改钉**能区分两种形态**的那截文案（`跳过了全部` / `不得豁免 completeness`），重跑 M1 后「枚举全部」子测试自己就转红。**这正是『有没有一个我想排除的实现能让这条断言照样绿』的实例——而我是写完才问的，不是写的时候。**",
+    "**两条被堵路径的判据必须不同，不能合并成一条。** 「覆盖全部 ID」是集合覆盖关系；「只豁免 completeness」是特定 ID 的存在性。合并成任何数量阈值（`len(SkipChecks) > N`）都会误伤正常的多闸豁免 —— M3 消融证实：改成 `len > 5` 后「六道闸门（不含 completeness）仍合法」立刻转红。",
+    "**QA 关于 completeness 的成因判断，我用自己 TASK-004 的既有测试独立复核为真**：`TestValidateHandlesEmptyValuesWithoutSpecialCase` 早就逐条断言「空 Values 下 completeness failed、其余六道全 skipped」。所以「completeness 是七道里唯一会因数据缺失而 failed 的一道」不是转述，是我这边已有的断言。",
+    "**结构性根因（R2-1/R2-2）的代码层事实我直读确认了，行为后果没有复跑**：`Store.Preceding` 查 `v_hestia_current`，该视图由 `bitemporal.CurrentQuery(spec)` 从 `hestia_observations` 派生，而 `TablePending` 是另一张表（`schema.go:12` 自述「消费者只有人」）⇒ pending 行结构上进不了任何闸门的历史。**至于「连续 5 期均值冻结 0.0200」「级联失败偏离单调增大」这些具体数字，是 QA 实测、我未独立复跑**，CONTRACTS 里已按此分别标注。",
+    "**ULP 那条的归因我复核后确认是 DoD 欠规格、不是实现偏离**：直读 `TestTrillionConversionCarriesULPError` 函数体，对 `toYi`/`scaleOf`/`amount`/`Parse` 的引用数为 **0** —— 它确实完全不经过生产算路。而 TASK-007 的 DoD `non_functional[1]` 逐字要求的就是 `trillion := 4.81` 这种写法。**我当时逐字照做了，所以这条缺口的归属在 DoD 而不在实现**，CONTRACTS 已按此写明。",
+    "**addendum R2-14 是「结论对、理由错」的第六例，而这次错的是我写的注释。** `knownCheckIDs` 的注释原写「拼错的 ID 因为不在旧列表里反而被放行」—— 我直读 `checkEnum` 确认这不可能：它的语义是「不在 allowed 内**一律返回 error**」，与列表是否过期无关。手写清单真正的**静默**方向恰好相反：留着**已删除**闸门的 ID，会让针对一道不存在的闸的豁免照旧通过校验（`exemptionFor` 比对真实 gates，故它永不命中，是一条死配置）。⇒ 只改这半句，`knownCheckIDs` 从 gates 派生这个**结论不动**。",
+    "**addendum R2-13 我独立复跑证实，并复核了它的份量依据**：加总是置换不变量 ⇒ 同组分项互换时残差不变。实测 golden2025：企业短期↔中长期（48100/88200）与住户存款↔财政存款（146400/6579，**相差 22.3 倍**）两组互换均 `Passed=true`、failed 闸门数 **0**。份量依据也核对了原文——`profiles.go:194-195` 自述「『短期贷款』在两个作用域里各出现一次…**也是本任务存在的主要理由**」⇒ 分项错位是抽取层点名的头号风险，而校验层对它零覆盖。判 MINOR 仍正确：加总闸**数学上不可能**抓住置换。"
+  ],
+  "decisions": [
+    {
+      "what": "拒绝 `SkipChecks` **包含** `completeness`（任何组合），而不只是拒绝「SkipChecks 恰好等于 [\"completeness\"]」。",
+      "rationale": "DoD functional[1] 的判据是「构造只含 completeness 的 SkipChecks 必须返回 error」，窄读只需堵单元素集。但窄读**堵不住洞**：`[\"completeness\",\"yoy_sanity\"]` 同样能让残缺期次整期过闸（其余六道本就降级 skipped）。QA 的原始建议也是「拒绝 SkipChecks **覆盖** completeness」。故取强规则，它同时满足 DoD 的判据。代价已登记进 CONTRACTS：现在完全不能豁免 completeness，若 M1b-4 出现真实需求，要的是更细粒度（按字段豁免）而不是放开这条。"
+    },
+    {
+      "what": "先查『覆盖全部』再查『含 completeness』，顺序不可颠倒。",
+      "rationale": "全 ID 集合必然也包含 completeness。若顺序反了，枚举全部七个 ID 会报出「不得豁免 completeness」这条**次要**理由，掩盖「你在做整期跳过」这个**主要**事实。DoD error_handling[0] 要求两种形态的错误各自可区分，顺序是它的实现前提。"
+    },
+    {
+      "what": "新增包内常量 `checkCompleteness`，并加 `TestCheckCompletenessIDMatchesGates` 钉住它必须仍在 `knownCheckIDs()` 里。",
+      "rationale": "该常量是 `gates` 表里那个字面量的**第二处副本**（真相源仍是 gates）。改闸门 ID 时它会静默过期，而后果是**校验静默失效**：`slices.Contains` 找不到匹配 ⇒ 永不触发 ⇒ R2-3 的路径重新打开，且**没有任何测试会因此转红**（新 ID 照样通过 checkEnum，因为 checkEnum 的白名单也是从 gates 派生的）。M4 消融证实这条守卫有效。"
+    },
+    {
+      "what": "R2-1/R2-2/R2-4/R2-5/R2-6 与 R1-1 全部只登记不修。",
+      "rationale": "派单明确要求。它们的修法都含设计决策（阈值分档、基线过滤口径、豁免粒度、ULP 测试改取生产值），不宜在收尾时拍板。另有一条**权限性**理由：R2-5 的修法要改 `validate_test.go`，该文件不在本任务 `writes` 内，改它会构成范围漂移。"
+    },
+    {
+      "what": "CONTRACTS 里逐条标注「本任务作者已复核」与「QA 实测、我未独立复跑」。",
+      "rationale": "DoD non_functional[1] 的要求（F16/F25：别把理由写强）。这份文件会活得比 Review 报告久，读者无从分辨哪些结论有二次证据。四处标注：结构性根因的**代码层事实**已复核 / 其**行为数字**是转述 / `8.3%` 那个锚已复核确实在本文件 :121 / ULP 测试不触生产算路已直读确认。"
+    },
+    {
+      "what": "R2-14 只改注释里那半句错误理由，不动 knownCheckIDs 的实现，也不新增测试。",
+      "rationale": "派单明确要求「只改这半句理由，结论不动」。该改动无行为变更 ⇒ 无可变异的生产逻辑 ⇒ 对它做消融会退化成变异注释（无效实验，同 TASK-004 的 M9）。原有的 TestCheckCompletenessIDMatchesGates 与 TestGatesMatchContractedCheckIDs 已覆盖「清单必须与 gates 一致」这个实质。"
+    },
+    {
+      "what": "R2-13 写进 CONTRACTS「留给 M1c」第①项时，写的是**因果链**而不只是「优先覆盖同组分项」这条指令。",
+      "rationale": "派单点名要求（「别只列一句」）。在此之前该项只说「不得拍脑袋、要用回填分布标定」，**没说不标定会漏掉哪一类真实错误**。补上「加总是置换不变量 ⇒ 同组错位零覆盖 ⇒ 唯一抓得住的 magnitude_sanity 恒 skipped」这条链，标定的人才知道为什么要优先覆盖同组分项，而不是把它当成一条无来由的清单。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/thresholds.go (修改, +36/-0: checkCompleteness 常量 + 两条豁免宽度校验)",
+    "internal/hestia/thresholds_test.go (修改, +79/-0: TestThresholdsRejectWholePeriodSkip 四个子测试 + TestCheckCompletenessIDMatchesGates)",
+    "internal/hestia/CONTRACTS.md (修改, 累计 +128/-1: 原四项登记 + addendum 的置换盲区一节)",
+    "internal/hestia/validate.go (修改, +8/-2: 只改 knownCheckIDs 注释里那半句不成立的失败方向；无行为变更)"
+  ],
+  "scope_note": "本任务分两轮交付。**第二轮（QA addendum）需要改 validate.go，不在原 writes 内** —— 该文件在 addendum 到达时任务已是 dev_done，此时 owner 仍是 dev，故由本人经写通道 update 补进 writes（leader 在 dev_done 无写权，无法代办）。补后 writes 四项，实际改动严格在其内。numstat 取自两次提交：e45164d（第一轮）与 e6395619（addendum）。",
+  "interfaces_exposed": [
+    "const checkCompleteness = \"completeness\" —— 包内非导出。gates 表 ID 的第二处副本，由 TestCheckCompletenessIDMatchesGates 钉住不得脱节",
+    "Thresholds.validate() 新增两条拒绝：①SkipChecks 覆盖全部 knownCheckIDs ⇒ 「跳过了全部 N 道闸门…整期跳过校验」②SkipChecks 含 completeness ⇒ 「不得豁免 completeness…」。两条文案可区分，均带 caliber_exemptions[i] (period) 前缀",
+    "⚠️ 给 M1b-4 的人：**现在完全不能豁免 completeness**。这是刻意的（见 CONTRACTS「豁免能有多宽」一节）。若出现「模板变更导致某几个字段合法消失」的真实需求，要的是按字段豁免的更细粒度，不是放开这条校验",
+    "⚠️ 豁免键仍**缺 PeriodType**（R1-1，本任务未修）：同月的 annual 与 monthly 会被同一条豁免同时命中。CONTRACTS 已标注「M1b-4 装载前必须定案」"
+  ],
+  "verification": {
+    "red_actual_verbatim": "--- FAIL: TestThresholdsRejectWholePeriodSkip\n    --- FAIL: TestThresholdsRejectWholePeriodSkip/枚举全部闸门即整期跳过\n    --- FAIL: TestThresholdsRejectWholePeriodSkip/只豁免_completeness_也是整期跳过\n    --- FAIL: TestThresholdsRejectWholePeriodSkip/两种拒绝理由必须可区分\n    --- PASS: TestThresholdsRejectWholePeriodSkip/六道闸门（不含_completeness）仍合法\nError: An error is expected but got nil.（×3）",
+    "red_causality_note": "三条 RED 均因预期原因失败（校验尚不存在 ⇒ 期望 error 得 nil），无 imported-and-not-used 干扰（本任务未新增任何 import：thresholds.go 的 fmt/slices/strconv/strings 与 thresholds_test.go 的 slices/testing/assert/require 均已存在）。**第四条子测试（六道仍合法）在 RED 阶段就是 PASS，这是对的**——它是防「堵宽了」的守卫，实现前后都必须绿，它转红才说明出了问题。",
+    "exploit_reproduced": {
+      "method": "本任务作者用一次性探针复现 QA round2 R2-3 的两条利用路径（跑完即删，git status 已确认未进交付物），确认现在被堵在 Validate 入口而不只是 validate() 层。",
+      "form1_enumerate_all": "输入 M1>M2 且删掉 rate_ibo + SkipChecks=knownCheckIDs() ⇒ Validate err=「hestia: caliber_exemptions[0] (2026-06) 跳过了全部 7 道闸门: 这就是整期跳过校验，而豁免必须按检查 ID 精确指定（spec 4.6.3 约束 1）；要针对某几道闸放行就逐个列出，不要枚举全部」",
+      "form2_completeness_only": "只给 1 个字段 + SkipChecks=[\"completeness\"] ⇒ Validate err=「hestia: caliber_exemptions[0] (2026-06) 不得豁免 completeness: 其余六道遇缺字段一律降级 skipped，它是唯一会因数据缺失而 failed 的一道，豁免它等价于整期跳过校验（一个只有若干字段的残缺期次会直接进权威表）」",
+      "before": "QA 实测同样输入下 cfg.validate()=nil、0/7 闸门通过、Save 落 hestia_observations（权威表）"
+    },
+    "ablation": {
+      "purpose": "回答『改坏它有东西会红吗』。隔离副本 `git worktree add --detach 4547631` + 拷入在改文件，主工作区不碰。**四道闸 + F26 计数自证**。对照组先验全绿，且**对照组 PASS 计数 469 与主工作区基线 469 相等**（排除套件根本没跑）。收尾三文件合并 sha256 与消融前一致。",
+      "counting_self_proof": "尝试=4、结论=4 ⇒ ✅ 一致，无变异静默未跑。**这条是 F26 新增要求，也正是我在 TASK-007 撞到 harness 静默失效后提出的**；本轮首次自用，未再出现少一行的情况。",
+      "M1_drop_covers_all": "去掉『覆盖全部』校验 ⇒ KILLED。**首轮致红的是「两种理由必须可区分」而非「枚举全部」子测试**，暴露了我自己断言的不合格（见 key_findings[0]）；加强断言后重跑，「枚举全部」子测试自己转红，致红消息为「必须由『覆盖全部』那条规则拒绝——只断言共有的「整期跳过」会被 completeness 规则冒名满足」",
+      "M2_drop_completeness_check": "去掉 completeness 校验 ⇒ KILLED，致红子测试 [只豁免_completeness_也是整期跳过, 两种拒绝理由必须可区分]",
+      "M3_count_threshold": "把集合覆盖判据换成数量阈值 `len(SkipChecks) > 5` ⇒ KILLED，致红子测试 [六道闸门（不含_completeness）仍合法]，证明 DoD 点名「最容易写坏的一格」确实被守住",
+      "M4_const_drift": "`checkCompleteness` 改成 \"completeness_renamed\"（模拟与 gates 脱节）⇒ KILLED，致红 [只豁免_completeness_也是整期跳过, 两种拒绝理由必须可区分]。注：`TestCheckCompletenessIDMatchesGates` 亦覆盖此路径",
+      "summary": "4 条变异全部 KILLED，无假 KILLED，计数自证通过；其中 M1 首轮暴露并已修正一处我自己的弱断言。"
+    },
+    "regression": {
+      "requirement": "DoD boundary[0]：TASK-001 与 TASK-007 的既有豁免测试全部不得变红",
+      "result": "TestThresholdsRejectMalformedExemptions(4 子测试) / TestExemptionForMatchesPeriodAndCheckExactly / TestCaliberExemptionRecordsSkipNotPass / TestCaliberExemptionDoesNotLeakToOtherPeriods / TestExemptionRejectsUnknownCheckID / TestReportKeepsEveryGateUnderExemption **全部 PASS**。它们用的 SkipChecks 分别是 [deposit_sum]、[deposit_sum,stock_continuity]、[monetary_hierarchy]、[monetary_hierarchy,yoy_sanity]，均不含 completeness 也不覆盖全部，故不受新校验影响。"
+    },
+    "suite": {
+      "cmd": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -cover 与 -race -count=1；go build ./...",
+      "tree": "master @ 722aa2728723b573537160b602bb06a03b3169b4（全 sha；三次提交 e45164d -> e6395619 -> 722aa27，数字均在最后一次改动之后统一重采）",
+      "result": "-count=1: ok, coverage **92.1%**（DoD 要求不低于 92.0%）；**-race -count=1: ok**；go build ./... 通过",
+      "gate_coverage": "dev_done 门禁口径 92.1%",
+      "gofmt": "gofmt -l internal/hestia/ 无输出",
+      "vet": "go vet ./internal/hestia/ 无输出",
+      "baseline_pass_count": "469（主工作区与隔离副本对照组一致）"
+    },
+    "dod_matrix": [
+      "functional[0] validate() 拒绝 SkipChecks 覆盖全部 knownCheckIDs -> TestThresholdsRejectWholePeriodSkip/枚举全部闸门即整期跳过 -> PASS（M1 消融证明有效）",
+      "functional[1] 同时拒绝只豁免 completeness 的形态 -> TestThresholdsRejectWholePeriodSkip/只豁免_completeness_也是整期跳过 -> PASS（M2/M4 消融证明有效；实现取的是更强的『含 completeness 即拒』，理由见 decisions[0]）",
+      "functional[2] CONTRACTS.md 四项登记 -> ①结构性根因新增一节 + 「留给 M1c 的三件事」扩为五件 ②豁免一节补三条边界并标注 M1b-4 必须定案 ③浮点契约补 ULP 守卫现状与归因 ④StockContinuityMax 补「重新标定解决不了」 -> PASS",
+      "boundary[0] 合法的部分豁免仍通过；既有豁免测试全不变红；新增六道（不含 completeness）仍合法的用例 -> 见 regression 节 + TestThresholdsRejectWholePeriodSkip/六道闸门（不含_completeness）仍合法 -> PASS（M3 消融证明「不是数量阈值」这一点被守住）",
+      "error_handling[0] 两种拒绝理由各自可区分、指出第几条豁免、说清为什么 -> TestThresholdsRejectWholePeriodSkip/两种拒绝理由必须可区分 + 两条断言各钉可区分文案 -> PASS（M1 首轮正是被这条察觉）",
+      "non_functional[0] 对新增两条校验各做一次消融并核对致红断言；harness 带编译失败闸与计数自证 -> M1/M2 各一次，另加 M3/M4；四闸 + 尝试 4 == 结论 4 -> PASS",
+      "non_functional[1] 别把理由写强；CONTRACTS 注明哪些复核过哪些是转述 -> 四处标注（代码层事实已复核 / 行为数字转述 / 8.3% 锚已复核 / ULP 不触生产算路已直读）-> PASS",
+      "non_functional[2] gofmt+vet 无输出、-count=1 与 -race 均绿、go build ./... 通过、覆盖率不低于 92.0% -> 实测 92.1% -> PASS"
+    ],
+    "process_note": "按 AD-035-1 的 wave2+ 流程：主工作区直连，先 transition dev_done（12:07:25Z）后 commit（e45164d）。未跑 npx gitnexus analyze（仓库级操作，同 TASK-007 留给 Leader）。 ⚠️ **addendum 到达时本任务已 dev_done**（12:07:25Z 转入，提交 e45164d）。状态机没有 dev_done 的自环边、也没有 dev_done→in_progress 边，故无法重跑自动门禁；我在 dev_done 状态下（owner 仍是 dev）经写通道补了 writes、改代码、手工复跑等价检查后提交 e6395619。**派验时 verify_baseline 会锚在 e6395619 或其后，覆盖两轮全部交付物**。",
+    "not_fixed_by_design": [
+      "R2-1/R2-2 结构性根因（依赖历史的闸门无法自愈）—— 修法含设计决策，已登记",
+      "R2-4 单期豁免盖不住 6 期窗口且污染基线 —— 已登记在豁免一节",
+      "R2-5 ULP 守卫不观察生产算路 —— 修法要改 validate_test.go，**不在本任务 writes 内**，已登记并附 QA 给的 2 行修法",
+      "R2-6 StockContinuityMax 单标量服务不了三条序列 —— 已登记，含「重新标定解决不了」这个增量",
+      "R1-1 豁免键缺 PeriodType —— 已登记并标注「M1b-4 装载前必须定案」"
+    ],
+    "addendum": {
+      "note": "QA verdict 发出后补录的两条（sprint-035-review-round2-addendum.md），到达时本任务已 dev_done。",
+      "R2_14_verified_by_me": "直读 checkEnum 实现确认「不在 allowed 内一律 error」⇒ 原注释末句不成立。改后只保留两个真实方向：少了新 ID ⇒ 合法豁免被误拒（响亮）；留着已删 ID ⇒ 死配置被放行（静默）。",
+      "R2_13_reproduced_by_me": "**三种情形全部由本人独立复跑**（非转述）：①企业短期↔中长期 (48100/88200) ⇒ Passed=true, failed=0；②住户存款↔财政存款 (146400/6579, 22.3 倍) ⇒ Passed=true, failed=0；③两组**同时**互换 ⇒ Passed=true, failed=0。第③条说明这不是「单点错位碰巧躲过」——错得越多也一样不响，因为每组的和都没变。探针跑完即删，git status 已确认未进交付物。",
+      "profiles_anchor_verified_by_me": "profiles.go:194-195 原文确含「这是全篇唯一需要作用域的地方，也是本任务存在的主要理由」。",
+      "no_new_ablation": "两条追加均为注释/文档变更，无新增生产逻辑 ⇒ 无可施加的有效变异（变异注释会退化成无效实验）。原有 M1-M4 四条消融仍是本任务的守卫证据。",
+      "regate_after_addendum": "追加改动后**手工复跑了门禁的等价检查**：gofmt/vet 无输出、go build ./... 通过、-count=1 ok 覆盖率 92.1%、-race ok、PASS 计数 469 与基线一致。⚠️ 但**自动门禁本身没有再跑一次**（dev_done 无自环边，状态机不允许重跑），见 process_note。",
+      "qa_wording_not_adopted": "派单提示的两处 QA 措辞保留：①Minimalist 报「收口表漏 6 个」经 QA 实测那 6 处全部有测试，判为标签宽于规则 ⇒ **本任务的 8+4 收口表不改**；②Skeptic 与 QA 关于「今日可达」的分歧已公开登记，Leader 只对 R2-3 采纳 Skeptic 口径，其余不动。"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "id": "TASK-008",
+  "title": "Sprint 035 收尾：豁免边界修补与契约登记",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-001",
+    "TASK-007"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/validate.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "description": "QA 两轮 Review 判 PASS 附一条强制条件。本任务两件事：①窄返工修 R2-3（豁免可被枚举全部 check ID 绕过成整期跳过，而代码自己的错误文案声称禁止此事）；②把 QA 找到的 5 条 MAJOR 写进 CONTRACTS.md（它们的触发时刻全部晚于本 Sprint 归档，而 Review 报告会随 Sprint 归档）。不修 R2-1/2/5/6：那四条的修法都含设计决策（阈值分档、基线过滤口径、豁免粒度），不宜在收尾时拍板，登记后留给 M1b-4/M1c。",
+  "done_criteria": {
+    "functional": [
+      "`Thresholds.validate()` **拒绝「整期跳过校验」形态的豁免**：当一条豁免的 `SkipChecks` 覆盖**全部** `knownCheckIDs()` 时返回 error。\n\n**这不是新规矩，是把代码已经声称的规矩变成真的**：`thresholds.go:101-102` 现有错误文案逐字写着「豁免必须按检查 ID 精确指定，**不是整期跳过校验**」，而实现只检查 `len(SkipChecks) == 0` —— 枚举全部七个 ID 即可绕过。QA 实测：`cfg.validate()=nil`、`0/7` 闸门通过、数据进**权威表**。\n\n**代码自述与实际行为矛盾比潜伏缺陷更值得修** —— 错误文案会主动误导后人。",
+      "**同时拒绝只豁免 `completeness` 一个 ID 的形态**（QA 实测的「更便宜的整期跳过」）。\n\n成因：其余六道闸遇缺字段一律降级 `skipped`，所以单独豁免 `completeness` 就足以让一个空/残缺期次整期过闸进权威表。判据：构造只含 `\"completeness\"` 的 `SkipChecks`，`validate()` 必须返回 error。",
+      "`CONTRACTS.md` 追加/扩写四项（QA round2 第 6 节，**这是 QA 判 PASS 的强制条件**）：\n\n① 「留给 M1c 的三件事」**扩为五件**，补入 QA 的 R2-1/R2-2 结构性根因：\n**未过闸的期次落 pending ⇒ 不在 `v_hestia_current` ⇒ `Preceding` 看不见 ⇒ 依赖历史的闸门无法自愈**。\n具体后果要写明：`deposit_sum` 漂移在口径变更后**永不恢复**（均值冻结在旧口径，实测连续 5 期 `from 3-period mean 0.0200` 一字不变）；`stock_continuity` 更糟 —— **任意一期因任意理由落 pending，之后所有期次级联失败且偏离单调增大**（实测唯一缺陷是某期 m1/m2 抽反、与社融无关，却把后续全部钉死）。\n\n② 豁免一节补三条边界并标注「**M1b-4 装载前必须定案**」：整期跳过（本任务已堵）、单独豁免 `completeness`（已堵）、豁免键缺 `PeriodType`（R1-1：同月的 annual 与 monthly 会被同一条豁免同时命中，**本任务不修**，登记待定案）。\n\n③ 浮点契约一节标注 **ULP 守卫现状**：`TestTrillionConversionCarriesULPError` **不观察生产算术** —— QA 实测把 `amount.toYi` 改成整数化（ULP 误差被消除）后该测试**仍全绿**。⚠️ **这不是 dev 偏离**，dev 实现的正是 DoD 逐字要求的写法，**是 DoD 本身欠规格**。附 QA 给的 2 行修法。\n\n④ `StockContinuityMax` 一节补一句：CONTRACTS 已记「需重新标定」，**没记的是「重新标定解决不了」** —— 单一标量结构上服务不了 monthly/h1/annual 三条周期不同的序列（锚：`CONTRACTS.md:121` 自己记着 2025 年报「社融存量同比增长 8.3%」对 2% 阈值）。"
+    ],
+    "boundary": [
+      "**合法的部分豁免必须仍然通过** —— 这是本任务最容易写坏的一格。判据：TASK-001 与 TASK-007 的既有豁免测试**全部不得变红**（`SkipChecks: [\"deposit_sum\"]`、`[\"deposit_sum\",\"stock_continuity\"]`、`[\"monetary_hierarchy\"]` 等），且新增一条「豁免六道（七道减一，不含 completeness）仍合法」的用例。\n\n堵整期跳过时若写成「`len(SkipChecks) > N` 即拒绝」会误伤正常的多闸豁免 —— 判据必须是**集合覆盖关系**（是否覆盖全部 ID），不是数量阈值。"
+    ],
+    "error_handling": [
+      "两种被拒形态的错误信息**各自可区分**，且都要指出是第几条豁免（沿用既有 `caliber_exemptions[%d] (%s)` 文案风格），并说清**为什么**被拒 —— 与既有三条校验的风格一致（「豁免必须写清为什么，否则下一个人无从判断它是否还该留着」那种）。\n\n不做的后果：配置的人只知道被拒、不知道该怎么改。"
+    ],
+    "non_functional": [
+      "**写断言时先问「有没有一个我想排除的实现，能让这条断言照样绿？」**，并对新增的两条校验各做一次消融（去掉该校验 ⇒ 对应测试必须转红，且**核对到致红断言**）。\n\n消融 harness 必须带**编译失败闸**（`go test -c -o /dev/null`）**与计数自证**（`变异条数 == 结论行数`）—— 后者是本 Sprint F26 新增的要求：变异「根本没跑」时只是**少一行**输出，四道闸结构上拦不住。",
+      "**别把理由写强**：写「因为 X 所以 Y」先问「X 我实测过吗」；说「全部都要 Y」先问「我的实测覆盖了这个『全部』里的几个？」（F16/F25）。CONTRACTS 里引用 QA 的实测数据时，**注明哪些是你复核过的、哪些是转述**。",
+      "`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 无输出；`go test ./internal/hestia/ -count=1` 与 `-race -count=1` **均全绿**；`go build ./...` 通过；覆盖率不低于 **92.0%**（本 Sprint 交付水位）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-46",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "e6395619edb7a7335893851baabb37408c038922",
+    "discovery_sha256": "4591f7d962c03e209f6fe31bda70fc92587a4b1e3f69a6b46ccfea49e3729a5a",
+    "at": "2026-08-11T12:16:53Z"
+  },
+  "verifier": "test-agent-24"
+}

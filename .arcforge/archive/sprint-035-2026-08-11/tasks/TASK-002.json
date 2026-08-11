@@ -1,0 +1,50 @@
+{
+  "id": "TASK-002",
+  "title": "completeness 必填集派生",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/required.go",
+    "./internal/hestia/required_test.go"
+  ],
+  "description": "从模板表（tsfStockItems/tsfFlowItems）派生社融两节的 27 个字段，实现 requiredFields(extractor) 返回各版本应有的字段集。禁止手写第五份字段清单。对应上游计划 Task 2（Step 1-10）。",
+  "done_criteria": {
+    "functional": [
+      "`tsfSectionFields()` 返回**恰好 27 个字段且无重复**（8 存量分项 x 2 + 8 增量分项 + 3 总量）。\n\n**长度对不代表内容对**：遍历错一张表可能同时多算一个、漏算一个，`assert.Len` 单独立不住——必须同时用 seen map 断言无重复。",
+      "`requiredFields(extractorV2)` 返回 54 个字段，与 `golden2025` 的键集**双向一致**（必填集⊆golden 且 golden⊆必填集）。",
+      "`requiredFields(extractorV1)` 返回 27 个字段，与 `golden2020` 的键集**双向一致**。\n\n**双向是本任务的核心断言**：golden 是从两份真实报告**手工抄出**的，派生是从模板表**算出**的——两者独立得出同一集合才说明都对。只查一个方向会漏掉「派生多算了字段」这一半。"
+    ],
+    "boundary": [
+      "`requiredFields` 返回的必须是**副本**：改动返回值的元素不得影响 `fieldOrder`。\n\n理由：`fieldOrder` 是 DDL、INSERT 列、白名单的**共同真相源**，交出底层数组等于把三者一起交出去，一次误写同时污染三处。"
+    ],
+    "error_handling": [
+      "`requiredFields` 对 `\"llm-fallback@v1\"`、`\"rule@v3\"`、`\"\"` **均返回 nil**。\n\n对 `llm-fallback@v1` 返回 nil 是**刻意的失败信号**而非疏漏：`Extractor` 同时编码了「抽取方式」与「模板版本」，该值只带前者，无从知道它抽的是 v1 还是 v2 期次。M1c 启用 LLM 兜底的第一天 `completeness` 就会全部 skipped，逼实现者面对这个模型缺陷，而不是让它悄悄拿 54 个字段去校验一个只有 27 个字段的期次。"
+    ],
+    "non_functional": [
+      "`tsfSectionFields` 必须**遍历模板表派生**，不得用 `strings.HasPrefix(f, \"tsf_\")` 判断。\n\n前缀与板块归属**当前**恰好一致，但那是巧合，模板表才是事实；两个真相源分叉时先错的一定是前缀。三个总量字段是本包唯一允许手写的字段归属（`singletonFields()` 结构上无法按板块区分），由 golden 键集双向比对钉住。",
+      "**RED 阶段实际失败信息与计划预期一致**，实际输出原文写进 discovery：Step 2 预期 `undefined: tsfSectionFields`；Step 6 预期 `undefined: requiredFields`。因别的原因（如 `imported and not used`）失败的 RED 不算数。",
+      "⚠️ **`import` 按需增补**：上游计划 Step 3 给出的 `required.go` 写了 `import \"slices\"`，但该 Step 的 `tsfSectionFields()` 只用 `make`/`append` —— 照抄会得到 `\"slices\" imported and not used` 编译错误（reviewer 实测），于是 Step 4「预期：PASS」实际是编译失败。`slices.Clone` 要到 Step 7 才用到。**每个 Step 只写该 Step 真正用到的 import。**\n\n`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 均无输出；`go test ./internal/hestia/` 整包绿。\n\n（好消息：reviewer 独立复算并实跑确认「`tsfStockItems`(8)x2 + `tsfFlowItems`(8) + 3 = 27，且与 golden 键集双向一致」**成立**，本任务的核心断言可照抄。）"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T12:36:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-47",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "cfc24feb9afc926bd422895085c0c4b3417f77be",
+    "discovery_sha256": "a0eadd3172d013a94d6a4076407f022479f5b8cd401a4c719f532687642b6bef",
+    "at": "2026-08-11T09:08:24Z"
+  },
+  "verifier": "test-agent-24"
+}
