@@ -389,18 +389,19 @@ func TestValidateHandlesEmptyValuesWithoutSpecialCase(t *testing.T) {
 // 代价是 T5/T6 每加一道闸都要来改这里一次，那正是想要的：闸门集合的变更应当是
 // 一个需要动手的决定，而不是某处 append 的副作用。
 func TestReportAlwaysContainsEveryGate(t *testing.T) {
-	// 与 M0 契约样本一致的闸门 ID。T5 已加 deposit_sum，T6 加 stock_continuity，
-	// T7 断言恰好七道。
+	// 与 M0 契约样本一致的闸门 ID。T5 已加 deposit_sum，T6 已加 stock_continuity，
+	// 至此**七道齐全**——M0 契约样本确认 check ID 只有这七个，T7 断言恰好七道。
 	wantGateIDs := []string{
 		"monetary_hierarchy",
 		"deposit_sum",
 		"corp_loan_reconcile",
+		"stock_continuity",
 		"yoy_sanity",
 		"completeness",
 		"magnitude_sanity",
 	}
 	require.Equal(t, wantGateIDs, gateIDs(),
-		"gates 表本身必须恰好是这六道——少一道时下面的逐行比对会跟着缩水而发现不了")
+		"gates 表本身必须恰好是这七道——少一道时下面的逐行比对会跟着缩水而发现不了")
 
 	broken := obsFrom(golden2025, extractorV2)
 	broken.Values[FieldM1] = broken.Values[FieldM2] + 1
@@ -678,6 +679,126 @@ func TestDepositSumSkipsOnZeroDenominator(t *testing.T) {
 	c := findCheck(t, rep, "deposit_sum")
 	assert.Equal(t, CheckSkipped, c.Status)
 	assert.Contains(t, c.Reason, "zero_denominator:"+FieldDepositFlowYTD)
+	if c.Value != nil {
+		assert.False(t, math.IsInf(*c.Value, 0) || math.IsNaN(*c.Value),
+			"Value 不得是 Inf/NaN——Save 会拒绝，整期数据会消失")
+	}
+}
+
+// stockObs 造带指定 tsf_stock 值的观测，供 stock_continuity 的三条测试共用。
+func stockObs(v float64) Observation {
+	vals := maps.Clone(golden2025)
+	vals[FieldTSFStock] = v
+	return Observation{Meta: validMeta(), Values: vals}
+}
+
+// stockObsWithout 造缺 tsf_stock 的观测（模拟没有社融板块的 v1 期次）。
+func stockObsWithout() Observation {
+	o := stockObs(0)
+	delete(o.Values, FieldTSFStock)
+	return o
+}
+
+// 三种跳过理由必须报对，按「从根本到表面」排优先级。
+// v1 期次同时满足前两条，报错了会把排查引向错误方向。
+//
+// # 这里**不**断言 rep.Passed，是刻意的
+//
+// 上游计划在每个子测试末尾写了 assert.True(t, rep.Passed, "跳过不阻断")，
+// 它想说的是「stock_continuity 跳过不阻断」，写成的却是「整份报告没有任何闸门
+// 失败」——观测对象比被测对象大。缺 tsf_stock 的构造只有 53 个键，而
+// validMeta() 的 Extractor 是 rule@v2 ⇒ completeness 拿 54 个必填字段一比即
+// failed，于是 rep.Passed 恒为 false，那条断言 2/4 必红（reviewer 实跑证实）。
+//
+// 「跳过不阻断」这条性质本身**已经有守卫**：TestValidateOnGoldenSamples 在两份
+// 真实样本上断言 rep.Passed，而那两份样本里都含 skipped 的闸门——聚合逻辑若把
+// skipped 当成失败，那条测试会红（本任务消融 M7 实测确认）。所以这里收窄到
+// 本闸自己，不重复断言别的闸门的行为。
+func TestStockContinuitySkipReasons(t *testing.T) {
+	tests := []struct {
+		name   string
+		obs    Observation
+		prior  []Observation
+		reason string
+	}{
+		{
+			"本期没有社融板块，但有历史",
+			stockObsWithout(), []Observation{stockObs(400)},
+			"absent_field:" + FieldTSFStock,
+		},
+		{
+			"v1 期次且无历史：两个理由同时成立，报最根本的那个",
+			stockObsWithout(), nil,
+			"absent_field:" + FieldTSFStock,
+		},
+		{
+			"本期有社融，但库里没有历史",
+			stockObs(400), nil,
+			"no_prior_period",
+		},
+		{
+			"上一期没有社融板块",
+			stockObs(400), []Observation{stockObsWithout()},
+			"prior_absent_field:" + FieldTSFStock,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rep, err := Validate(context.Background(), tt.obs,
+				fakeHistory{prior: tt.prior}, DefaultThresholds())
+			require.NoError(t, err)
+
+			c := findCheck(t, rep, "stock_continuity")
+			assert.Equal(t, CheckSkipped, c.Status)
+			assert.Equal(t, tt.reason, c.Reason)
+		})
+	}
+}
+
+// 有历史时这道闸真正生效，含边界值的判定方向。
+func TestStockContinuityDetectsJump(t *testing.T) {
+	tests := []struct {
+		name       string
+		prev, cur  float64
+		wantStatus CheckStatus
+		wantRatio  float64
+	}{
+		// 8/400 的浮点商恰好等于字面量 0.02 的表示，所以 r <= max 成立。
+		// 此处选精确可表示的比例是**求稳**：本闸的算路只有一次减法加一次除法，
+		// 严格说并非必要（同形的 corp_loan 实测换成非 2 的幂同样杀得掉变异）。
+		// 但在「先求均值再相减」那类链式算路里就是必要的——TASK-005 的漂移实测
+		// 5%→8% 得 0.029999999999999992（低 2 ULP），会静默落到阈值下方。
+		{"恰好在阈值上", 400, 408, CheckPassed, 0.02},
+		{"阈值内", 400, 404, CheckPassed, 0.01},
+		{"超过阈值", 400, 420, CheckFailed, 0.05},
+		{"存量下跌也算跳变", 400, 380, CheckFailed, 0.05},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rep, err := Validate(context.Background(), stockObs(tt.cur),
+				fakeHistory{prior: []Observation{stockObs(tt.prev)}},
+				DefaultThresholds())
+			require.NoError(t, err)
+
+			c := findCheck(t, rep, "stock_continuity")
+			assert.Equal(t, tt.wantStatus, c.Status, "reason=%s", c.Reason)
+			require.NotNil(t, c.Value)
+			assert.InDelta(t, tt.wantRatio, *c.Value, 1e-9)
+		})
+	}
+}
+
+// 上一期存量为 0 时记 skipped 而不是算出 Inf（DoD error_handling[0]）。
+// 计划实现了这条分支却没有为它写测试，与 deposit_sum 那条同形。
+func TestStockContinuitySkipsOnZeroDenominator(t *testing.T) {
+	rep, err := Validate(context.Background(), stockObs(400),
+		fakeHistory{prior: []Observation{stockObs(0)}}, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "stock_continuity")
+	assert.Equal(t, CheckSkipped, c.Status)
+	assert.Equal(t, "zero_denominator:"+FieldTSFStock, c.Reason,
+		"上一期为 0 必须走零分母分支，而不是 prior_absent_field——字段在，只是值为 0")
 	if c.Value != nil {
 		assert.False(t, math.IsInf(*c.Value, 0) || math.IsNaN(*c.Value),
 			"Value 不得是 Inf/NaN——Save 会拒绝，整期数据会消失")

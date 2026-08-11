@@ -118,6 +118,7 @@ var gates = []gate{
 	{"monetary_hierarchy", gateMonetaryHierarchy},
 	{"deposit_sum", gateDepositSum},
 	{"corp_loan_reconcile", gateCorpLoanReconcile},
+	{"stock_continuity", gateStockContinuity},
 	{"yoy_sanity", gateYoYSanity},
 	{"completeness", gateCompleteness},
 	{"magnitude_sanity", gateMagnitudeSanity},
@@ -292,6 +293,57 @@ func gateCorpLoanReconcile(in gateInput) Check {
 	}
 	c.Status = CheckFailed
 	c.Reason = fmt.Sprintf("residual %.4f exceeds %.4f", r, in.cfg.CorpLoanTolerance)
+	return c
+}
+
+// gateStockContinuity 查社融存量的环比变化。
+//
+// 社融存量是累积量，相邻期变化超过阈值说明要么口径变了、要么抽取错了。
+//
+// ⚠️ StockContinuityMax 的 2% 未经真实数据验证——M0 的两份样本里只有一份
+// 含社融，算不出环比。M1c 回填出连续序列后必须重新标定。
+//
+// Value 是环比变化率（比例），与 deposit_sum 同为比例、与 corp_loan_reconcile
+// 的亿元不同。
+func gateStockContinuity(in gateInput) Check {
+	// 三种跳过理由按「从根本到表面」排优先级，顺序即下面三个 if 的顺序。
+	//
+	// 本期没有这个字段是最根本的原因，优先报它：v1 期次两个理由同时成立
+	// （没有 tsf_stock，且首期时也没有历史）。报「没有历史」会让人去查回填
+	// 进度，而真相是那期报告压根没有社融板块——理由会把排查引向错误方向。
+	if skip := in.need(FieldTSFStock); skip != nil {
+		return *skip
+	}
+	if len(in.prior) == 0 {
+		return Check{Status: CheckSkipped, Reason: "no_prior_period"}
+	}
+
+	// prior 按 period 降序，[0] 就是上一期。
+	prev, ok := in.prior[0].Values[FieldTSFStock]
+	if !ok {
+		return Check{Status: CheckSkipped, Reason: "prior_absent_field:" + FieldTSFStock}
+	}
+	if prev == 0 {
+		// 零分母会算出 Inf，而 Save 拒绝非有限的 Check.Value——那会让整期
+		// 既进不了观测表也进不了 pending。
+		// 与上一条分开：字段在、只是值为 0，与「上一期压根没这个字段」是
+		// 两种不同的处境，理由不该混。
+		return Check{Status: CheckSkipped, Reason: "zero_denominator:" + FieldTSFStock}
+	}
+
+	cur := in.v(FieldTSFStock)
+	// 取绝对值：存量下跌同样是跳变。用 cur-prev 会漏掉整个下跌方向，
+	// 而社融存量骤降恰恰是最该报警的情形。
+	r := math.Abs(cur-prev) / math.Abs(prev)
+
+	c := Check{Value: &r}
+	if r <= in.cfg.StockContinuityMax {
+		c.Status = CheckPassed
+		return c
+	}
+	c.Status = CheckFailed
+	c.Reason = fmt.Sprintf("%s moved %.4f from %g to %g, exceeds %.4f",
+		FieldTSFStock, r, prev, cur, in.cfg.StockContinuityMax)
 	return c
 }
 
