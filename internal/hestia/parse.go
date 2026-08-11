@@ -98,12 +98,40 @@ func caliberFor(period string) string {
 //
 // 元数据在剥离标签**之前**取：stripHTML 会把整个 <head> 一并抹掉。
 func Parse(raw []byte) (Observation, error) {
+	// PubDate 三态 + 形态，四种情形各自报错且措辞不同（返工补，QA WARNING-2）。
+	//
+	// published_at 是全包**唯一**一个逐字来自外部 HTML、不经任何模板的字段，因此
+	// 也是「凡从输入文本读来的东西认不出就报错、绝不猜」这条规则此前的唯一偏离点：
+	// 修复前只判 `ok`，于是 content=""、「2026-1-15」、「2026-01-15 09:30:00」
+	// 三种全部放行，错误一路推迟到 Store.Save 的 publishedAtRE 才现场——**而那时
+	// raw HTML 早已不在手上**，只剩一条「格式不对」要反推是哪篇文章的哪个 meta。
+	// 对照 ArticleTitle：把它挖空**会**在下面的 parseTitle 处响亮失败。
+	//
+	// 「不存在」与「存在但为空」分开报，是因为 metaContent 的第二返回值正是为此
+	// 设计的（strip.go 的注释：「调用方需要能分辨是站点没填还是选择器写错了」）——
+	// 两者的排障方向完全不同，合并成一条等于把那个刻意提供的区分丢掉。
+	//
+	// 形态校验复用 types.go 的 publishedAtRE，与 Store.Save 用的是**同一条**：
+	// 各写一份迟早分叉，而分叉的表现是「Parse 放行、Save 拒绝」的缝。
 	pubDate, ok := metaContent(raw, "PubDate")
-	if !ok {
+	switch {
+	case !ok:
 		return Observation{}, fmt.Errorf(
 			"hestia: missing <meta name=\"PubDate\">: it is the only trustworthy source " +
 				"of published_at — the article id in the URL is a site-migration timestamp " +
-				"and createDate is a CMS record time")
+				"and createDate is a CMS record time. A missing tag usually means the page " +
+				"structure changed or the selector is wrong, not that the site left it blank")
+	case pubDate == "":
+		return Observation{}, fmt.Errorf(
+			"hestia: <meta name=\"PubDate\"> is present but its content is empty: the site " +
+				"published the article without a date. Refusing to substitute today, the " +
+				"article id or createDate — published_at drives the bitemporal revision chain")
+	case !publishedAtRE.MatchString(pubDate):
+		return Observation{}, fmt.Errorf(
+			"hestia: <meta name=\"PubDate\"> content %q does not match YYYY-MM-DD: refusing "+
+				"to normalise it here — Store.Save enforces the same shape, and a value that "+
+				"only fails there arrives without the raw HTML needed to diagnose it",
+			pubDate)
 	}
 	title, ok := metaContent(raw, "ArticleTitle")
 	if !ok {

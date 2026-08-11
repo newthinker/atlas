@@ -357,3 +357,92 @@ func TestParseDoesNotTouchStorage(t *testing.T) {
 	})
 	require.NotZero(t, calls, "没扫到任何函数调用，本检查的绿色是假的")
 }
+
+// —— TASK-006 返工（QA WARNING-2）：PubDate 的三态与形态校验 ——
+
+// TestParseRejectsBadPubDate 覆盖返工判据。
+//
+// 修复前 `Parse` 只判 `metaContent` 的第二返回值（`ok`），于是 content=""、
+// 「2026-1-15」（月份未补零）、「2026-01-15 09:30:00」（带时分秒）**三种全部
+// err=nil 且照常抽出 54 个字段**——错误一路推迟到 `Store.Save` 的
+// `publishedAtRE` 才现场，**而那时 raw HTML 早已不在手上**，排障要从一个
+// 「格式不对」的报错反推是哪篇文章的哪个 meta。
+//
+// 这不是设计选择而是漏了一处：对照 `ArticleTitle` 挖空**会**在 Parse 内经
+// parseTitle 响亮失败。`published_at` 是全包唯一一个逐字来自外部 HTML、
+// 不经任何模板的字段，也是「凡从输入文本读来的东西认不出就报错、绝不猜」
+// 这条规则的唯一偏离点。
+//
+// 用**真实样本改一个字节**而不是构造最小 HTML：这样验的是整条流水线在
+// 一份完全正常的报告上因 PubDate 而停下，而不是一个玩具输入。
+func TestParseRejectsBadPubDate(t *testing.T) {
+	const orig = `<meta name="PubDate" content="2026-01-15">`
+	raw := string(readSample(t, "pboc-2025-12-annual.html"))
+	require.Contains(t, raw, orig, "样本里的 PubDate 原文变了，本用例的替换不再生效")
+
+	for _, tc := range []struct{ name, replacement string }{
+		{"content 为空", `<meta name="PubDate" content="">`},
+		{"月份未补零", `<meta name="PubDate" content="2026-1-15">`},
+		{"带时分秒", `<meta name="PubDate" content="2026-01-15 09:30:00">`},
+		{"整个 meta 缺失", ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs, err := Parse([]byte(strings.Replace(raw, orig, tc.replacement, 1)))
+			require.Error(t, err, "PubDate 认不出时必须在 Parse 就停下，不能推迟到 Save")
+			assert.Contains(t, err.Error(), "PubDate", "错误必须指名是哪个 meta")
+			assert.Empty(t, obs.Values, "不得先抽完 54 个字段再报错")
+		})
+	}
+}
+
+// TestParseDistinguishesPubDateFailureModes 钉住三种失败各有专属措辞。
+//
+// strip.go 的注释明写 metaContent 的第二返回值「区分『不存在』与『存在但为空』：
+// 站点确实会输出 content=""，调用方需要能分辨是站点没填还是选择器写错了」。
+//
+// ⚠️ 只断言「两条错误不相同」是不够的——变异实测发现的：空串同样过不了
+// publishedAtRE，会落到形态分支照样报错，于是 `case pubDate == ""` 那一支
+// **不承载任何断言**（变异「删掉空值分支」首轮 SURVIVED）。差异仅来自错误里
+// 引用的那个 %q 值，而排障方向并没有被区分出来。故这里额外断言**各自的关键词**，
+// 让那一支真正承重。
+func TestParseDistinguishesPubDateFailureModes(t *testing.T) {
+	const orig = `<meta name="PubDate" content="2026-01-15">`
+	raw := string(readSample(t, "pboc-2025-12-annual.html"))
+	parseWith := func(replacement string) error {
+		_, err := Parse([]byte(strings.Replace(raw, orig, replacement, 1)))
+		return err
+	}
+
+	missing := parseWith(``)
+	empty := parseWith(`<meta name="PubDate" content="">`)
+	malformed := parseWith(`<meta name="PubDate" content="2026-1-15">`)
+	require.Error(t, missing)
+	require.Error(t, empty)
+	require.Error(t, malformed)
+
+	assert.NotEqual(t, missing.Error(), empty.Error(), "「不存在」与「存在但为空」不得同措辞")
+	assert.NotEqual(t, empty.Error(), malformed.Error(), "「为空」与「形态不合」不得同措辞")
+	assert.NotEqual(t, missing.Error(), malformed.Error())
+
+	// 各带专属关键词：只有「不相同」的话，差异可能仅是被引用的值不同，
+	// 而三种情形的排障方向（选择器写错 / 站点没填 / 站点填了但格式变了）没被区分。
+	assert.Contains(t, missing.Error(), "missing", "缺失应指向「页面结构变了或选择器写错」")
+	assert.Contains(t, empty.Error(), "empty", "为空应指向「站点没填」，而不是复用形态不合的措辞")
+	assert.Contains(t, malformed.Error(), "YYYY-MM-DD", "形态不合应给出期望形态")
+}
+
+// TestParsePubDateShapeMatchesStoreContract 是与 M1b-1 的接缝检查。
+//
+// Parse 用的形态校验必须与 Store.Save 那道（types.go 的 publishedAtRE）**同一条**，
+// 否则会出现「Parse 放行而 Save 拒绝」的缝——那正是返工前的状态。
+func TestParsePubDateShapeMatchesStoreContract(t *testing.T) {
+	for _, s := range []string{"2026-1-15", "2026-01-15 09:30:00", "", "2026/01/15"} {
+		assert.Falsef(t, publishedAtRE.MatchString(s), "%q 不该被 M1b-1 的形态契约接受", s)
+	}
+	assert.True(t, publishedAtRE.MatchString("2026-01-15"))
+
+	obs, err := Parse(readSample(t, "pboc-2025-12-annual.html"))
+	require.NoError(t, err)
+	assert.True(t, publishedAtRE.MatchString(obs.Meta.PublishedAt),
+		"Parse 产出的 published_at 必须直接满足 Save 的形态契约")
+}
