@@ -1,0 +1,50 @@
+{
+  "task_id": "TASK-008",
+  "title": "Parse 值正确性的常驻守护",
+  "key_findings": [
+    "【缺口真实，但立项理由需更正——两处】DoD 与派发消息里写「T5 的测试**喂的是它自己构造的固定输入**不受影响」。**这对 `TestExtractFieldsOnV2Sample` / `OnV1Sample` 不成立**：源码（extract_test.go:286 起）是 `secs := splitSections(stripHTML(readSample(t, \"pboc-2025-12-annual.html\")))`，读真实样本并走完上游两层。实测同一上游变异（`stripHTML` 里把 340.29 换成 341.29）下**T5 那条也 FAIL**。⇒「`stripHTML` 之类上游微变 ⇒ 常驻套件不会红」不成立。（该说法对 T5 的**另外三条**成立：`TestExtractSeparatesLoanScopes` / `TestExtractHandlesBothLoanWordings` / `TestExtractIgnoresAdjacentDistractors` 确实用手工构造的 sections。）\n\n**正确表述**：`Parse` 这一层的 Values 值正确性此前**没有任何常驻断言**，它完全**借道** T5 的测试；而「T5 用真实样本」是**偶然，不是契约**——没有任何机制阻止那几条测试被改成用固定 sections。⇒ 当前的安全依赖一个没人承诺过的实现细节。",
+    "【2×2 消融：分工的正确轴是「共享路径 vs Parse 独有路径」，不是「上游 vs 下游」】隔离 worktree，判读锚定具名测试，每格都查 go vet（无 VET-KILL）：\n\n| 消融 | T5 `ExtractFieldsOnV2Sample` | T8 `ParseRealSamples` |\n|---|---|---|\n| A 破坏 `extractFields` 值（`setFlow` 结果 ×2） | FAIL | FAIL |\n| **B1 破坏上游 `stripHTML`** | **FAIL** | **FAIL** ← 无不对称，不构成证据 |\n| **B2 破坏 `detectExtractor`（恒返 rule@v1）** | **PASS** | **FAIL** ← **不对称在这里** |\n\nB1 两条都红的根因见上一条：strip/split 是两条断言**共享**的路径。B2 才是那一格——`extractFields` 在 T5 里拿的是**硬编码**的 `extractorV2`，`Parse` 是靠 `detectExtractor` 推的，这段路径 T5 结构上碰不到。\n\n⇒ 分工：**T5 覆盖 strip→split→extract（共享）；T8 额外覆盖 metaContent / parseTitle / detectExtractor / Parse 自身接线**。DoD functional[1]「两条断言必须并存、不得以重复为由删掉任一条」**由 B2 那一格提供证据**，不是由 B1。",
+    "【A/B 证明本条断言从盲变不盲，但判读边界要标清】注入上游变异（`extract.go` 余额归一 `toWanYi`→`toYi`，值差 10000 倍而**键数不变**）：改动前的 `parse_test.go` → `TestParseRealSamples` **PASS**（察觉不到）；改动后 → **FAIL**（接住了）。⚠️ 这证明的是**这条测试**从盲变不盲，**不是**「整个套件此前是盲的」——同一变异下 T5 那条也红。不标这句的话，A/B 表会被读成「套件此前完全没有守卫」，那是夸大。",
+    "【boundary[0] 的理由不严谨，但断言仍该加——理由不同】DoD 说「若 `Parse` 返回空 map 且 golden 也被误传空，比对会平凡通过」。**该场景本就被挡住**：`assertMatchesGolden` 内部第 313 行已有 `require.NotEmpty(t, want, \"golden 表为空，本比对毫无意义\")`；而「got 空 ∧ want 非空」会在第一个循环上逐条报「字段 X 没被抽到」。⇒ 该 helper 在两个方向上都不是平凡通过的。\n\n`require.NotEmpty(t, obs.Values, ...)` 仍值得加，理由换成两条：① **调用点 fail-fast**——让「一个字段都没抽到」以这一条的措辞失败，而不是刷出 54 条「字段 X 没被抽到」；② **不依赖 helper 的内部实现**——helper 将来被改动时这行还在。",
+    "【本条守护的强度上限是一个无人守卫的常量】断言复用 `assertMatchesGolden`，因而继承它的 `1e-6` 容差（`extract_test.go:320` 的 `assert.InDeltaf(t, w, g, 1e-6, \"字段 %s\", field)`）。**那个容差本身没有任何守卫**——把它改成 `1e-2` 不会有任何测试转红，而 `1e-2` 足以让「48100 抽成 48101」这类真实抽取错误漏网。⇒ 本任务把 `Parse` 层的值正确性从「无断言」提升到「有断言」，但**守护强度的上限即该常量**。这不是本任务能在 `writes`（只有 parse_test.go）范围内修的，登记为交接项。"
+  ],
+  "decisions": [
+    {
+      "decision": "复用 extract_test.go 已有的 assertMatchesGolden，不另写比对逻辑",
+      "rationale": "DoD non_functional 明确要求不引入新包级标识符，且两份比对逻辑迟早分叉。代价是继承了它的 1e-6 容差（见 key_findings 第 5 条）——这是本任务范围内无法规避的取舍：要么复用并继承容差，要么另写一份并制造第二真相源。选前者并把限制登记出来。"
+    },
+    {
+      "decision": "require.Len 与 assertMatchesGolden 并存，不删前者",
+      "rationale": "后者的双向性已蕴含键数相等，严格说前者冗余。保留的理由是失败信息的**可读性梯度**：键数不对时 require.Len 一行说清，而 assertMatchesGolden 会刷出几十条「字段 X 没被抽到」。这属于「同一事实的两种粒度」，不是重复守卫。"
+    },
+    {
+      "decision": "把 golden 作为表驱动的一列，而不是在子测试里 if/else 选表",
+      "rationale": "TestParseRealSamples 本就是表驱动（sample / want Meta / values 数），加一列 golden 与既有形状一致；if/else 会让两份样本的处理路径分叉，将来加第三份样本时容易只改一支。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/parse_test.go（+28/−2：Context Checkpoint 注释块补 TASK-008 映射、表驱动加 golden 列、两行断言 + 说明注释）"
+  ],
+  "interfaces_exposed": "**本任务不新增任何包级标识符**（`git diff | grep '^+\\(func\\|var\\|const\\|type\\) '` 零命中，DoD non_functional 的要求）。对下游的唯一影响是：`TestParseRealSamples` 从此对 `Parse` 输出的 Values 做逐键逐值双向比对，任何改动 `Parse` 路径（含 metaContent / parseTitle / detectExtractor / Parse 自身接线）而导致值错的修改，会在这条测试上转红。",
+  "verification": {
+    "commit": "9e773118ba6f9ca95a3e113054f9164e26b40bca",
+    "branch": "task/TASK-008 → 已由 Leader 快进合并进 feat/hestia-parse（Updating 4948f0f..9e77311），合并后主仓库 HEAD 与本 commit 相同",
+    "commit_scope": "git show --numstat：1 file，internal/hestia/parse_test.go +28/−2。与 writes 声明（单项 ./internal/hestia/parse_test.go）**完全一致，无越界**。",
+    "tests": "全包 `go test ./internal/hestia/ -count=1` ok，**358 PASS / 0 红**。gofmt 干净、go vet 绿。合并后在主仓库复跑一致（exit=0）。\n\n注：`--- PASS` 计数与 TASK-006 相同（358）——本任务是在既有子测试内**追加断言**，不新增测试函数，故计数不变。**计数不变不等于改动无效**：有效性由下面的 A/B 与 2×2 证明，不由计数证明。",
+    "coverage": "全包 89.5%（dev_minimum=80），与 TASK-006 相同——本任务只加测试断言，不改生产代码，覆盖率本就不应变化。",
+    "ablation_evidence": [
+      "**A/B（证明本条断言有牙）**：隔离 worktree 注入 `extract.go` 余额归一 `toWanYi`→`toYi`（值差 10000 倍、键数不变）⇒ 改动前 `parse_test.go` 的 `TestParseRealSamples` **PASS**，改动后 **FAIL**。判读边界见 key_findings 第 3 条。",
+      "**2×2（证明两条断言不是重复）**：见 key_findings 第 2 条的表。结论由 **B2** 那一格（破坏 `detectExtractor` ⇒ T5 PASS / T8 FAIL）提供；**B1（破坏 `stripHTML`）两条都红，不构成证据**，已如实上报而非换个说法凑成证据。",
+      "**error_handling[0] 扰动实测**：`golden2025[FieldM2]` 340.29 → 340.30（差 0.01，远大于 1e-6），失败信息为 `Error: Max difference between 340.3 and 340.29 allowed is 1e-06, but difference was 0.00999...` + `Messages: 字段 m2` ⇒ **含字段名与两个数值**，满足判据。",
+      "**还原与外溢自证**：每次扰动/变异后 `git checkout` 还原并核实 sha256 逐字节未变；收尾核对**主仓库与交付 worktree** 的 `strip.go` / `sections.go` / `extract.go` sha256 **逐项相同**（`da2e1247… / f90eb68c… / e18629b3…`），确认变异未外溢。三个探针 worktree（`wt-t008-probe` / `wt-t008-gap` / `wt-t008-2x2`）均已 remove + prune。",
+      "**判读纪律**：全部消融锚定**具名测试**的红绿，不看红了多少条；每格先跑 `go vet`，无 VET-KILL（无一格是靠编译失败「杀死」的）。"
+    ],
+    "gate_and_merge": "与 T5/T6 同形：worktree 隔离使 dev_done 门禁在主仓库空转。合并前在主仓库实测四条（**用 `git -C <绝对路径>` 执行，不依赖当前工作目录**）：`grep assertMatchesGolden` 0 处 / `go test` **exit=0** / `git diff HEAD -- internal/` 0 行 / `--staged` 0 行。故先经 blocked_clarification 停等 Leader 合并，合并后主仓库复跑绿再转 dev_done。\n\n⚠️ **本任务我第三次把目录敏感的自查跑在了 worktree 里**（命令里先 `cd` 到 worktree、标题却写「在主仓库」，输出中 `当前目录` 已显示为 worktree，`grep` 返回 1 正是因为改动就在那棵树上）。处置不是「下次注意」，而是改命令形式：**自查一律用 `git -C <绝对路径>` 或显式 `(cd X && …)`**，把正确性从「我记得先 cd 对」搬到命令本身。",
+    "code_simplifier": "已按全局规范运行。回复「无改动」，经 `git diff` 逐行核实**属实**——`+28/−2` 全部是我自己的编辑（注释块 + 表字段 + 两行断言），无额外改动。⇒ 本 Sprint 该子代理的记录应更正为 **3/4 不符**（T4 报「Unchanged」实则改了、T5 报「不变」实则改了 3 个文件、T6 只回「Holding.」实则改了；T8 这次准确）。**但结论不变：它的回复不作判据，仍靠 diff 核实**；它自跑的 `go test / vet / gofmt` 读数我未采信，全部自己重跑。",
+    "known_limits": [
+      "守护强度上限是 `assertMatchesGolden` 的 `1e-6` 容差，而该常量**无人守卫**（改成 `1e-2` 不会有任何测试转红，而 `1e-2` 足以让「48100 抽成 48101」这类真实抽取错误漏网）。修它需要动 `extract_test.go`，不在本任务 writes 内 ⇒ 登记为交接项。\n\n**独立佐证（Leader 转来）**：dev-agent-43 在 TASK-007 上**独立撞到同一条**，表述与我一致（1e-2 足以让 48100 抽成 48101 漏网）。**两个 dev、不同任务、各自发现** ⇒ 这不是个例，是系统性缺口。\n\n**可直接套用的判据（dev-43 的归纳）**：「**把这个常量／这份清单改坏，有东西会红吗？**」答「不会」就该记作「**有契约无机制**」，而不是「有机制」。⇒ 本任务把 Parse 层的值正确性从「无断言」提升到「有断言」，但**断言的分辨率仍由一个没有守卫的常量决定**。建议归入 M1b-3 范围处理（本 Sprint 不改）。",
+      "本条只覆盖两份**已有**样本（annual + h1）。monthly 路径在 TASK-006 里被 `Parse` 显式拒绝，故本断言对它无效——拿到月报样本后需同步补一份 golden 与本比对。",
+      "2×2 的 B2 用 `detectExtractor` 作为「Parse 独有路径」的代表。`metaContent` / `parseTitle` 这两段虽同属独有路径，但它们只影响 Meta 不影响 Values，故不构成本断言的守护对象——Meta 那侧由 TestParseRealSamples 的前七行断言与 TestParseMetaPassesM1b1Validation 覆盖。"
+    ]
+  }
+}

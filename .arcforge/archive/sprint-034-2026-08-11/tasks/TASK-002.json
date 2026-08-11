@@ -1,0 +1,48 @@
+{
+  "id": "TASK-002",
+  "title": "stripHTML 与 meta 提取",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/strip.go",
+    "./internal/hestia/strip_test.go"
+  ],
+  "description": "标签剥离、字符归一、<meta> 提取。纯函数，无 I/O。",
+  "done_criteria": {
+    "functional": [
+      "`stripHTML(raw []byte) string` 剥离标签并归一字符（含 `html.UnescapeString`）。**块级标签与内联标签的处理必须不同**：块级产生分隔、内联不得在数字中间插入空白。",
+      "`metaContent(raw []byte, name string) (string, bool)` 提取指定 `<meta>` 的 content，第二返回值区分「不存在」与「存在但为空」。"
+    ],
+    "boundary": [
+      "**F6 回归钉**：`4825</span><span>亿元` 必须复原为 `4825亿元`。这是内联标签切断数字与单位的真实形态——若复原失败，T4 的单位捕获会拿不到后缀而报错，而根因在这里。**须用这个具体串做断言，不能只测「标签被去掉了」**。"
+    ],
+    "error_handling": [
+      "**半角标点必须归一**（reviewer 样本实证）：2020 样本含 **2 个半角逗号**（`广义货币(M2)余额213.49万亿元,同比…`、`流通中货币(M0)余额7.95万亿元,同比…`）与 **1 个半角分号**（`票据融资增加9697亿元;非银行业…`）。\n\n**不做归一，2020 的 M2/M0 两组四个字段直接失配。** 判据：对这三处具体串做断言。\n\n（原条目「空输入不 panic」已删——`regexp`/`strings`/`html.UnescapeString` 在空输入上不可能 panic，为不可能的场景写错误处理会稀释注意力，reviewer 判为过度。）"
+    ],
+    "non_functional": [
+      "两个函数均为纯函数：不读文件、不访问网络、不依赖包级可变状态。**判据可用「同一输入连续调用两次结果相同」+ 代码审查**。",
+      "用真实 `testdata/` 样本各跑一次，断言输出中包含若干原文可见的锚点句（如「社会融资规模」「人民币存款余额」），确保剥离没有把正文一起吃掉。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-44",
+  "verify_baseline": {
+    "head": "acc5a96f452fa6c8f6a42a8f324600c82a7b73cd",
+    "discovery_sha256": "48046a2407cc37db53b71d90a2c7105a3340ec7450f3bf04b849f920495440fa",
+    "at": "2026-08-10T03:12:26Z"
+  },
+  "verifier": "test-agent-23",
+  "discovery": ".arcforge/discoveries/TASK-002.json"
+}

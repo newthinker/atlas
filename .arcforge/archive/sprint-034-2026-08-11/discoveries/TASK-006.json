@@ -1,0 +1,94 @@
+{
+  "task_id": "TASK-006",
+  "title": "Parse 组装、期次与口径推导",
+  "key_findings": [
+    "【M1b-1 的导出面断言与本任务硬冲突，是整包测试才暴露的】store_test.go 的 TestPackageExposesNoWriteFunctions 用**全导出面精确相等**锁死为 4 项（NewStore / Store.Close / Store.DB / Store.Save）。本任务按 DoD 新增导出 `Parse` 使它立刻转红。⚠️ **本任务的过滤跑（-run 'TestParse|TestCaliber'）52/52 全绿，只有整包 go test 才红**——若只跑自己那组测试就会带着一个红的包交付。处置：把 Parse 加进名单并在原处注明理由，**不放松断言形状**。理由：该断言的意图是「防新增包级写口绕过 Save 的签名防线」，而 Parse 是纯函数、意图并未被违反，是断言**过宽**而非被违反；精确相等是有意为之（它逼着每次扩大导出面都要留一行说明），所以正确处置是登记而不是放松。Parse 不碰库由 parse_test.go 的 TestParseDoesNotTouchStorage 独立守着，两条分工是「那条管导出面的**形状**，这条管 parse.go 的**行为**」——只有前者时一个叫 Parse 却偷偷写库的函数照样在名单里，只有后者时新增 InsertRow 无人拦。",
+    "【caliberFor 必须显式取最新，不能靠表的排列】2025 年报**同时**含注4（2023-01）与注5（2025-01），两条口径注都已生效。计划书的写法是「倒序表 + 首个命中」，正确性寄生在表的排列上：有人按时间正序重排一次表，2025-12 会静默变成 2023-01——而那是一个**合法**的 caliber_version，M1b-1 的白名单拦不住它，下游会拿它做跨期对比。改为「遍历全表，取所有已生效变更中 since 最大的那条」，并用 TestCaliberForIsOrderIndependent 把表**逐位旋转**后重跑钉住。变异 M6 实证：退化成「首个命中」后，击杀者含该测试**与** TestCaliberFor/2025-12，后者正是上述危害的直接体现。",
+    "【T3 的悬空承诺在本任务之前不存在于代码库任何位置】T3 接受 `splitSections(text) []section` **无 error** 的签名，依据是「切分失败由紧邻的 detectExtractor 报错」。test-agent-22 实测两个函数的生产调用点当时都是 **0** ⇒ 那个「紧邻」是对本任务的**预期**而非既有事实。本任务的 Parse 里那两行（splitSections 之后立即 detectExtractor、error 直接返回）是它第一次成为事实。判据两半都测了：错误信息含**实际**板块数（0/3，不是期望值——报「期望 6 或 8」而不说实际几个，排障等于没说），且该情形下**不产出任何 Values**（是「切分不认识就停」，不是「先抽取再报错」）。变异 M9（吞掉 error）与 M10（失败路径带出非空 Values）分别钉住这两半。",
+    "【monthly 选显式拒绝（boundary[2] 选项①），理由不是「没测过」而是「错了没人拦得住」】两份样本一份 annual 一份 h1，月报零样本；而月报正是孪生句问题最严重的形态——正文同时含期内累计句与当月句，哪句在前无样本可证，且 T5 的 cumulativePeriods 只认「全年/上半年」，对 5 月报的「1-5月」这类前缀会整条不命中。悄悄放行会让月报产出**看起来完全正常**的 Values：键数对、量级对、全在白名单内，而 `*_ytd` 字段里装的可能是当月数——下游没有任何闸门拦得住。守卫只加在 Parse 层（checkPeriodTypeSupported），parseTitle 仍正确解析 monthly 并有自己的测试；**拿到月报样本后删掉该函数与其唯一调用即可，parseTitle 及其测试一行都不用改**。",
+    "【F1 复核：同一次交付内两处自相矛盾，而我当时没察觉】profiles_test.go 的注释断言「放松成 `质押式回购加权.*利率为` 会静默取到 1.36」——在真实 2025 利率板块正文上实测为**错**。我自己复核（未直接采信他人读数，因为 F1 的教训恰恰是「未实测的断言被传播」，拿另一条未验证的断言去替换是重复同一个错误），五种形态的实际捕获：`质押式回购加权平?均利率为`→1.4（现行实现）/ `质押式回购加权.*利率为`→1.4 / `质押式回购.*利率为`→1.4 / `加权.*利率为`→1.4 / `加权.*?利率为`→**1.36**（只有非贪婪这一种真取错）。机制：保留 `质押式回购` 前缀把匹配**起点**锚在回购句上，1.36 在它之前、结构上取不到；`加权.*利率为` 起点虽落在拆借句，但贪婪的 `.*` 会一路吃到本段**最后**一个「利率为」，那正是回购句 ⇒ **危险程度取决于贪婪性**，而两份样本里回购句恰好都排在最后。⚠️ **这条正确机制我在 TASK-005 的 discovery `known_limits` 里已经写对了，却把错的留在代码注释里**——写对一次不等于改对所有副本。已把五行实测表原样写进注释（下一个人需要的是数据，不是「这里曾经错过」）。",
+    "【loanScopeSpans 的顺序校验同时是切片越界的唯一防线】extractLoanSection 用 `sec.Body[sp.start:end]`（end = 下一个 span 的 start）切段，**升序保证一旦失效那句切片就 panic**（T5 变异实测：去掉校验后是 `panic: slice bounds out of range [287:123]` 中断整个测试二进制，不是干净的断言失败）。生产路径不会发生（真实报告锚点有序，无序时该函数已先返回 error），非缺陷；但原注释只写了语义后果（字段归属错），删改的人不会知道自己动的是内存安全。已补注，并提示「若改成排序后再切，排序也要保证**严格**递增——相等起点同样会切出负长度」。",
+    "【返工（QA WARNING-2）：规则的唯一偏离点，恰好落在唯一不经模板的字段上】`published_at` 是全包唯一一个**逐字来自外部 HTML、不经任何模板**的字段，也是「凡从输入文本读来的东西认不出就报错、绝不猜」这条规则此前的唯一偏离点。初版只判 `metaContent` 的第二返回值（`ok`），于是 `content=\"\"`、`2026-1-15`、`2026-01-15 09:30:00` 三种**全部 err=nil 且照常抽出 54 个字段**，错误一路推迟到 `Store.Save` 的 `publishedAtRE` 才现场——**而那时 raw HTML 早已不在手上**。对照 `ArticleTitle`：把它挖空**会**在 Parse 内经 parseTitle 响亮失败。\n\n**这不是巧合**：其余字段都被模板顺带守住了（模板匹配不上就报错），只有 published_at 需要单独写一次守卫，而单独写的那次就漏了。⇒ **「被顺带守住」与「被专门守住」在代码里长得一样，但只有后者是可靠的**。"
+  ],
+  "decisions": [
+    {
+      "decision": "caliberFor 遍历全表取 since 最大者，而非倒序表首个命中",
+      "rationale": "见 key_findings 第 2 条。代价是多一次全表遍历（表长 2），收益是把正确性从「表的排列」上解耦。配套的 TestCaliberForIsOrderIndependent 逐位旋转表后重跑，覆盖全部循环排列而不只是正序/倒序两种。另加 TestCaliberChangesAreDeclaredVersions 从表的另一端封口：表里每个 version 都必须在 M1b-1 的 validCaliberVersions 内，新增口径注时立刻生效。"
+    },
+    {
+      "decision": "monthly 走 boundary[2] 的选项①：Parse 显式拒绝，parseTitle 照常解析",
+      "rationale": "见 key_findings 第 4 条。把守卫放在 Parse 而不是 parseTitle，是为了让恢复支持时的改动面最小（删一个函数与一处调用），且保持 parseTitle 作为纯映射可独立测试。DoD 明确允许二选一，本任务选①而非②（接受风险并登记），理由与全包一致：拿不准时不要猜；②在这里的具体后果是产出一份看起来完全正常的错数据。"
+    },
+    {
+      "decision": "store_test.go 的导出面名单加入 Parse，而不是放松断言形状",
+      "rationale": "见 key_findings 第 1 条。另一条被否掉的路是「把断言从精确相等改成子集检查（只禁写口关键词）」——否掉是因为那会让断言失去「每次扩大导出面都必须解释一次」的强制力，而这正是它最有价值的部分；而且「哪些名字算写口」是个需要维护的黑名单，比全量白名单更容易漏。"
+    },
+    {
+      "decision": "错误信息里给**实际**板块数而不是期望值",
+      "rationale": "DoD error_handling[2] 的判据明写「信息含**实际**板块数」。报「期望 6 或 8」而不说实际几个，排障时等于没说——拿到报错的人第一个问题必然是「那到底几个」。detectExtractor（T3）已经这么做了，本任务的测试断言的是这个性质而不是文案。"
+    },
+    {
+      "decision": "TestParseDoesNotTouchStorage 用 go/parser 而非整文件子串匹配",
+      "rationale": "与 T5 的 TestNoGreedyCaptureInTemplates 同一理由：注释里说明「本层不落库」时会写到 Save 这个词，整文件扫描会把说明文字判成违规，检查就会恒响。恒响的检查会被训练成忽略，比没有检查更糟。本条同时断言 import 里没有 database/sql、AST 里没有任何 .Save( 调用，并自带 `require.NotEmpty(f.Imports)` 与 `require.NotZero(calls)` 两条空转自证。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/parse.go（新建，170 行）",
+    "internal/hestia/parse_test.go（新建，344 行，14 个顶层测试）",
+    "internal/hestia/profiles_test.go（+20/−2，F1 注释修正）",
+    "internal/hestia/extract.go（+8/−0，F2 补注）",
+    "internal/hestia/store_test.go（+15/−2，导出面名单加入 Parse）"
+  ],
+  "interfaces_exposed": "【本子迭代唯一的导出函数】\nfunc Parse(raw []byte) (Observation, error) —— 串起 strip→detect→scope→extract 四层。**返回的 Observation 是未完成的**：ArticleID 留空（那是 URL 的属性，M1b-4 的 discover 填）、IngestedAt 留空（Store.Save 填）。因此直接喂给 Save 会被 Meta.validate 拒绝——这是边界不是缺陷。**当前对 period_type = monthly 显式返回 error**（零样本验证，见 decisions 第 2 条）。\n\n【包级私有，T7 可用】\nfunc parseTitle(title string) (period, periodType string, err error) —— 从 ArticleTitle 推期次；产出直接满足 M1b-1 的 periodRE 与 validPeriodTypes；月份补零。**对 monthly 正常返回**，拒绝只发生在 Parse 层。\nfunc caliberFor(period string) string —— 取所有已生效口径变更中最新的那条；结果保证在 validCaliberVersions 内。\nvar caliberChanges []caliberChange{since, version} —— 口径变更表，**排列顺序无语义**。\nconst caliberBaseVersion = \"2015-01\" —— 首次变更之前的兜底。\nfunc checkPeriodTypeSupported(periodType, title string) error —— 零样本期次形态的守卫，拿到月报样本后连同其调用一并删除即可。\nvar titleRE —— 标题正则，两端锚定且含「金融统计数据报告」后缀。\n\n【元数据来源，T7 可依赖】published_at 取自 <meta name=\"PubDate\">（2025→2026-01-15，2020→2020-07-10）；period/period_type 取自 <meta name=\"ArticleTitle\">（「2025年金融统计数据报告」/「2020年上半年金融统计数据报告」）。两者都必须在 stripHTML **之前**取——它会抹掉整个 <head>。\n\n【已被占用的包级名字，T7 需避开】上述全部符号，加上测试侧的 assertMatchesGolden（T5）、templateFields/sourceLiteral/stringLiteralsOf（T5）、abs/nonTSFFields（T1）、readSample/nonEmptyLines（T2）。",
+  "verification": {
+    "commit": "4948f0f317f2bcc67beb689dc397673b1f2f58b4（本任务共两个提交：4f84965 主体 + 4948f0f 的 code-simplifier 简化）",
+    "branch": "task/TASK-006（worktree ../wt-TASK-006，基线 8e4811d）→ 已由 Leader 快进合并进 feat/hestia-parse，合并后主仓库 HEAD 与本 commit 相同",
+    "commit_scope": "git show --numstat：4f84965 = 5 files（parse.go +170/−0、parse_test.go +344/−0、profiles_test.go +20/−2、extract.go +8/−0、store_test.go +15/−2）；4948f0f = parse_test.go +5/−16。合计与**申报后**的 writes 五项逐条一致，无越界。",
+    "scope_declaration": "越界申报已在 transition dev_done **之前**落盘（transitions.jsonl 09:46:42，keys=[\"writes\"]，added=[profiles_test.go, extract.go, store_test.go]，removed=[]）。其中 store_test.go 是计划外的真冲突（见 key_findings 第 1 条），profiles_test.go 与 extract.go 是 Leader 指派的 F1/F2。",
+    "red_phase": "先写测试跑出 RED：undefined: parseTitle / caliberFor / caliberChanges / caliberChange / Parse（build failed），证明断言非空转。",
+    "tests": "parse_test.go 14 个顶层测试，含子测试 **52 PASS / 52 RUN / 0 FAIL**（三者一致 ⇒ 无用例被静默跳过）。全包 go test ./internal/hestia/ ok，**358 PASS，0 红**。gofmt 干净、go vet 绿。合并后在主仓库复跑一致。",
+    "coverage": "全包 **89.5%**（dev_minimum=80）。parse.go：parseTitle / caliberFor / checkPeriodTypeSupported 均 **100.0%**；Parse 89.5%（未覆盖的是 extractFields 返回 error 的分支——真实样本上不触发，构造它需要一份板块数正确但句式残缺的输入，属 T7 端到端的范围）。",
+    "mutation_evidence": [
+      "13 个变异体，**13 杀 0 存活**，基线 --- PASS = 358；vet 全部 rc=0，**无一是靠编译错误「杀死」的**",
+      "M1 titleRE 去掉 \\z → KILLED by TestParseTitleRejectsUnknownShape/2025年金融统计数据报告(修订)（该用例是本任务新增，计划书没有）",
+      "M2 月份不补零（%02d→%d）→ KILLED by TestParseTitlePadsMonth",
+      "M3 月份越界不检查 → KILLED by TestParseTitleRejectsUnknownShape",
+      "M4 annual 期末月推成 -01 → KILLED by TestParseRealSamples + TestParseMetaPassesM1b1Validation（后者正是 M1b-1 的组合校验在起作用）",
+      "M5 h1 期末月推成 -12 → KILLED（同上）",
+      "M6 caliberFor 退化成「取首个命中」→ KILLED by **TestCaliberForIsOrderIndependent** + TestCaliberFor/2025-12 —— 后者正是「首个命中」把 2025 年报错标成 2023-01 的危害本身",
+      "M7 口径边界 <= 改成 < → KILLED by TestCaliberFor/2023-01 与 /2025-01（生效当期）",
+      "M8 兜底版本改成 2023-01 → KILLED by TestCaliberFor 三个早期期次 + TestParseRealSamples",
+      "M9 detectExtractor 的 error 被吞 → KILLED by TestParseStopsAtDetectExtractor 两个子用例",
+      "M10 失败路径带出非空 Values → KILLED by 同上（专测「不产出任何 Values」那一半）",
+      "M11 monthly 守卫恒放行 → KILLED by TestParseRejectsMonthlyUntilSampled",
+      "M12 Parse 自行编造 ArticleID → KILLED by TestParseRealSamples + TestParseMetaPassesM1b1Validation",
+      "M13 缺 PubDate 时不报错 → KILLED by TestParseRejectsMissingMeta/缺_PubDate",
+      "**一次自我纠错**：M6 首版是 **VET-KILL（编译期即死）**——变异让 bestSince 成为未使用变量。有效性闸挡住了这次假 KILLED，我没把它记成 KILLED，而是改成可编译的等价形态后重跑，并核实击杀者是谁。这正是那道闸存在的理由。",
+      "四条自证逐体记录：① 被变异文件 sha256 变化 **且** git diff --stat 非空 ② go vet 红绿都查（13 体全部 rc=0）③ 判据是 --- PASS 严格低于基线 358，不是「没有 FAIL」 ④ 每体打印失败用例完整首行（最多 5 条）。harness 另有两条：变异前 assert 锚点唯一；跑完复核还原基线仍为 358。",
+      "变异脚本：/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/40c35a6a-7fca-4173-a7fe-91f3abf71ce1/scratchpad/dev45-mutate-t6.py（MUT_WT 可覆写隔离目录）"
+    ],
+    "gate_and_merge": "与 T5 同形：worktree 隔离使 dev_done 门禁在主仓库空转。**已在主仓库实测四条**（不是推测）：ls internal/hestia/parse.go → No such file；go test ./internal/hestia/ → **exit=0**（没有本任务代码却仍通过）；git diff --name-only HEAD -- internal/ → 0 行；--staged → 0 行。故先经 blocked_clarification 停等，由 Leader 执行 git merge --ff-only（Updating 8e4811d..4f84965，5 files +557/−4），合并后主仓库复跑绿再转 dev_done。⚠️ **这四条自查我第一次跑在 worktree 里**（`ls parse.go` 当然存在），读数毫无意义；在主仓库重跑才得到上面的结果。⇒ **自查项必须连执行目录一起报**——「跑过了」这个事实本身不携带「跑在哪棵树上」的信息，与 verify_baseline 记错 sha 是同一形状。",
+    "purity": "parse.go 只 import fmt / regexp / strconv；无 I/O、无网络、无包级可变状态（包级 var 只有编译期常量正则与只读查表）。TestParseDoesNotTouchStorage 用 go/parser 断言无 database/sql import、无任何 .Save( 调用，并自带两条空转自证。",
+    "code_simplifier": "**已按全局规范运行**（先前一版 discovery 曾写「本任务未运行」，那是我漏了这一步，已补做）。子代理回复只有「Holding.」一个词，无信息量；经 git diff 直接核实**确有改动**：parse_test.go +5/−16，两处——① TestParseValuesKeysAreDeclared 里不再自己从 fieldOrder 拼一份 map，直接查 allFields（fields.go:148 的 allFields 本就由 fieldOrder 构建，我另跑探针实测两者 len 均 54 且全部 true，严格等价；直接查 allFields 也更贴合 DoD 措辞「Values 键全在 allFields 内」）；② TestParseDoesNotTouchStorage 合并两次 ParseFile（ImportsOnly 那次多余，完整解析同样填充 f.Imports），三条断言与两条空转自证 NotEmpty(f.Imports)/NotZero(calls) 逐条保留。两处均行为保持，予以接受。**因文件在变异测试之后变化，13 个变异体与全部指标已在此之后完整重跑/重采**：仍 13/13 全杀、基线 358 PASS、覆盖率 89.5%、52 PASS/52 RUN/0 FAIL。⚠️ 这是本会话**第三次**撞上 simplifier 的回复与实际改动不符（T4 报「Unchanged」实则改了一行断言、T5 报「不变」实则改了 3 个文件、本次只回「Holding.」）——**它的回复一律不可作为判据，必须 git diff 核实**。",
+    "known_limits": [
+      "monthly 路径当前显式拒绝，见 decisions 第 2 条。恢复支持时需要：一份真实月报样本、扩 T5 的 periodAlt/cumulativePeriods 以覆盖「1-N月」类前缀、并为「YTD 句与当月句哪句在前」补顺序无关性测试（T5 的 TestLoanFlowPrefersCumulativeRegardlessOfOrder 是现成的形状）。",
+      "caliberChanges 只有两条（2023-01 / 2025-01）加一个兜底。央行下次改口径要同时改这里与 types.go 的 validCaliberVersions —— TestCaliberChangesAreDeclaredVersions 会在只改一处时转红，但**不会**提醒「改了 validCaliberVersions 却没在 caliberChanges 里给生效期」：那种情况下新版本永远不会被推导出来，而它是静默的。这道缺口留给 M1c 的 hestia_caliber_changes 表（types.go 注释已指明该表建起后白名单应改为引用它）。",
+      "Parse 里 extractFields 返回 error 的分支未被覆盖（89.5% 的缺口就是它）。触发它需要一份「板块数正确但句式残缺」的输入——那是 T7 端到端的范围，本任务没有为凑覆盖率去构造。"
+    ],
+    "rework": {
+      "at": "2026-08-11",
+      "trigger": "QA REJECT · WARNING-2（reason_class=task_defect，rework_count 0→1；两个独立 lens 各自命中同一条）",
+      "commit": "29adc9e65ba8c30008f20d59c088b51d43fdd0b8（2 files +119/−2，仅 parse.go + parse_test.go，在 writes 内，无越界）",
+      "branch_note": "task/TASK-006b **基于 task/TASK-005b** 建，使 T6 的测试验证「T5 返工 + T6 返工」的**组合态**，避免两个分支各自绿、合起来没人测过。合并顺序因此有依赖：先 005b 后 006b，两次均快进。",
+      "change": "PubDate 由 `if !ok` 改为四态 switch：`!ok`（meta 不存在，多半是选择器写错或页面结构变了）/ `pubDate == \"\"`（存在但为空，站点没填）/ `!publishedAtRE.MatchString(pubDate)`（形态不合，给出期望形态）/ 正常。前两者分开是因为 metaContent 的第二返回值正是为此设计（strip.go 注释：「调用方需要能分辨是站点没填还是选择器写错了」）。形态校验**复用 types.go 的 publishedAtRE**，与 Store.Save 同一条——各写一份迟早分叉，而分叉的表现正是「Parse 放行、Save 拒绝」的缝。",
+      "new_tests": "`TestParseRejectsBadPubDate`（用**真实样本改一个字节**而非构造最小 HTML，验的是整条流水线在正常报告上因 PubDate 停下；四种输入各断言 error 含 PubDate 且**不产出任何 Values**）；`TestParseDistinguishesPubDateFailureModes`；`TestParsePubDateShapeMatchesStoreContract`（与 M1b-1 的接缝）。",
+      "mutation_evidence": [
+        "**T6-M1「删掉空值分支」首轮 SURVIVED**——空串同样过不了 publishedAtRE，会落到形态分支照样报错 ⇒ **那一支不承载任何断言**。我原来只断言「三条错误互不相同」，而差异仅来自被引用的 %q 值，**排障方向并没有被区分出来**。加上各自关键词断言（missing / empty / YYYY-MM-DD）后 M1 才被杀。",
+        "T6-M2 去掉形态校验 → KILLED；T6-M4 形态正则不锚定尾部 → KILLED；T6-M5 空值复用缺失文案 → KILLED",
+        "⚠️ **最终提交态复跑**：首轮变异跑在 code-simplifier **之前**，而它确实改了 parse_test.go（见 code_simplifier 字段）。已在**最终提交态 29adc9e** 上重跑 T5+T6 全部四个变异体：T5-M1 / T5-M2 / T6-M1 / T6-M2 **全部 KILLED**，vet 均为 0，基线 372 PASS 经断言。⇒ 结论不变，但现在锚定的是交付物本身。"
+      ],
+      "suite": "**372 PASS / 0 FAIL**（含 T5 返工的组合态），coverage 89.6%（Parse 90.5%），vet 绿、gofmt 干净。合并后主仓库复跑 exit=0。",
+      "code_simplifier": "已运行。**它对我回复「Unchanged」，而实际改了 `parse_test.go`**——把 `raw` 提成 string 变量（`string(raw)`→`raw`）、`Containsf`→`Contains`、内联中间变量 `bad`，均行为保持。**我当时只做了 stat/锚点级核实（diff --stat + grep 锚点 + 检查新增包级标识符），没有逐行读 diff，因而误判为「只有我的改动」并如此上报**——这与「自查跑错目录」同族：检查做了、粒度不够，而不够的粒度看起来和做过一样。⇒ 此后 simplifier 的核实一律**逐行读 diff**，不用 stat 代替。"
+    }
+  }
+}

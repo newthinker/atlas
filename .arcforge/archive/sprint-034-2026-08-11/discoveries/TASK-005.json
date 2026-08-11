@@ -1,0 +1,118 @@
+{
+  "task_id": "TASK-005",
+  "title": "模板表与字段抽取",
+  "key_findings": [
+    "【探针核对原文，发现两处需求文档没写而决定成败的事实】① **外币孪生句用的是美元单位**：2025 存/贷板块末句是「12月末，外币存款余额1.07万亿美元」「外币贷款余额5450亿美元」，2020 同形。若口径限定词表不含「外币」、或单位交替不含美元，这些句子**根本不会被匹配到**——不是被排除，是不可见，于是无从谈起「排除它」。变异 M14（currencyAlt 去掉「外币」）证实：真实样本仍然全绿，只有 TestBalanceRegexpClassifiesCurrencyQualifier 会红。② **2020 存款板块也有月度孪生句**「6月份，人民币存款增加2.9万亿元」——DoD 只点了贷款板块（G3），存款板块同形且同样危险。",
+    "【两类孪生句的统一解法：按捕获组挑并要求唯一，不靠最左优先】本任务把「口径限定词」与「期次前缀」都做成显式捕获组，全部候选句一律匹配，再按值挑并要求命中数恰为 1。失效模式因此全部变响：命中 0 ⇒ 报错（而不是退取隔壁那句），命中 2 ⇒ 报错（而不是最左优先静默选一个，两个值都合理、事后无从分辨）。这直接满足 boundary[0] 那条「只留本外币句、删掉人民币句必须报错或不赋值」的最强判据，且与文本顺序无关。",
+    "【期次与口径必须两个维度都判，只判其一都会漏】外币孪生句的期次前缀同样是「全年/上半年」（「全年外币存款增加2135亿美元」「上半年外币贷款增加774亿美元」），所以只按期次挑会取到外币值；而「6月份，人民币贷款增加1.81万亿元」的口径是人民币，只按口径挑会取到单月值。变异 M3（去掉币种维度）被杀，M2（退回最左优先）被顺序对调那条测试杀死。",
+    "【推翻计划书的 `[^外]人民币存款余额` 守卫，并发现它自身还有个缺陷】reviewer G8 已证明该守卫「去掉也照样通过」——理由本就不成立（`本外币存款余额` 里根本不含 `人民币存款余额` 这个子串）。本任务另外发现它**自身有假阴性风险**：`[^外]` 要求「人民币」前面必须存在一个字符，而 T3 的 section.Body 两端已 TrimSpace，某期正文若以该句开头就会匹配失败。改用捕获组分类后不再需要任何前缀断言。",
+    "【`加权均利率` 错字的安全容错边界】2025 正文写「质押式回购加权**均**利率」（缺「平」），2020 写「加权平均利率」。用 `平?` 容忍这一个字是安全的；**放松成 `加权.*?利率为` 会静默取到同业拆借的 1.36**——与 1.4 同量级、同格式、同小数位。变异 M4（去掉容错）与 M5（放松锚点）双向都被杀。注意 M5 的贪婪版 `加权.*利率为` 在两份样本上**碰巧仍然正确**（回购句都排在最后，贪婪 `.*` 会走到最后一个「利率为」），是**非贪婪**版才暴露危害——这说明「放松锚点」的危险程度取决于贪婪性，不能一概而论。",
+    "【`assert.Equal` 在 ×10000 换算上是按值碰运气的】`4.81 × 10000 = 48099.99999999999`，而 `14.64/15.91/2.39 × 10000` 都精确。我在 T4 的精度测试恰好选中了精确的那几个值，于是「看起来没问题」。契约是 `InDelta 1e-6`（DoD functional[0] 明写），本任务全部数值断言统一改用 InDelta，只有捕获组的字符串断言用 Equal。",
+    "【变异测试逼出一条真缺陷：测试因为错误的理由而绿】TestExtractFieldsRejectsUnknownExtractor 首版传的是 `nil` 板块，去掉版本校验后（变异 M11）报错换成了「找不到广义货币板块」，`require.Error` 照样满足 ⇒ **M11 存活**。改成喂真实 v2 样本 + 断言错误信息含 `unknown extractor` 之后，缺了校验就会**成功返回 27 个字段**，M11 随即被杀。⇒ 断言「有 error」而不断言「是哪种 error」，是一条会静默失效的判据。",
+    "【推演变异体时补出两处测试缺口】M8（作用域顺序校验失效）与 M9（作用域右边界失效）在原有测试下都会存活：真实样本里锚点本就按住户→企业→非银顺序出现，且两个部门各有一条「短期贷款」，最左优先仍取到自己那条 ⇒ 边界失效在真实数据上**不可观测**。补了 TestLoanScopesRejectOutOfOrderAnchors（构造换序输入）与 TestLoanScopeBoundsSubItemsToItsOwnSector（构造住户段缺短期贷款的输入，边界失效时会静默借用企业段的 4.81 万亿）后两者才被杀。",
+    "【源码级静态检查必须只作用于代码，不能整文件子串匹配】判据 A（禁贪婪捕获）的第一版扫整个 profiles.go 文本，结果被**注释**误报——注释里为讲清失效模式必须写出 `(.+)` 这个形态。改用 go/parser 只取字符串字面量（`stringLiteralsOf`）。恒响的检查会被训练成忽略，比没有检查更糟。同一改法也用在了「方向词不得被抄成独立字面量」那条上。",
+    "【extractor 版本标识此前是两份字面量】sections.go 的 detectExtractor 直接返回字面量 `\"rule@v1\"`/`\"rule@v2\"`（T3 的文件，本任务不改）。本任务在 profiles.go 命名了 extractorV1/V2 常量，并用 TestExtractorConstantsMatchDetect 在**真实样本**上把两处绑起来——若哪天分叉，extractFields 会安静地按 v1 去抽一份 v2 报告，少抽 27 个字段，而「缺失」在 M1b-1 的语义里是「本期模板本就没有」，完全无声。",
+    "【消融实验证明「≤1」与 T3 的 TestFindSectionResolvesAllT5Keywords 是互补而非重复】Leader 转来 test-agent-22 的提醒：`≤1`（不存在 ≥2）在**空集上平凡满足**，单独存在会空转。我做了**双向**消融（隔离 worktree ../wt-t5-ablation，基于 8e4811d，主工作区一字节未碰，做完已 remove）：\n\n消融A「findSection 恒返回 false」（只破坏查找、不破坏切分，噪声最小）⇒ **TestSectionKeywordsHitAtMostOneTitle 仍 PASS，TestFindSectionResolvesAllT5Keywords FAIL**。\n消融B「splitSections 末尾追加一个与首节同标题的板块」（模拟某期在预期板块之后新增同样命中的标题，首命中索引不变）⇒ **TestSectionKeywordsHitAtMostOneTitle FAIL，TestFindSectionResolvesAllT5Keywords 仍 PASS**。\n\n构成一张 2×2：每条测试恰好接住对方看不见的那一格。判读只锚定这两条**具名**测试的红绿，不看红了多少条（test-agent-22 在 T3 的教训：N1 打红 5 条但要守的那条并不在其中）。\n\n附带确认：`TestFindSectionResolvesAllT5Keywords` 位于 sections_test.go:325，最后修改于 T3 的提交 8ab45db，**本任务一行未动**（它不在我的 writes 内）。另外我的 ≤1 实现**直接遍历 secs 数标题命中、不经 findSection**——这正是消融A 能成为精准刀的前提，已实测确认。我的实现里还有一道 `require.NotEmpty(t, secs, \"切不出板块，本测试的绿色是假的\")`，它挡住的是「splitSections 返回空」这一种空转，但挡不住「secs 非空却无任何标题命中」——那一格正是靠配对测试接住的。",
+    "【返工（QA WARNING-1）：纪律自述与实现覆盖面不一致】`extract.go` 开头纪律 2 写着「孪生句一律**按捕获组挑并要求唯一**」，但该纪律此前**只落实在 `selectRMBBalance` / `selectRMBCumulativeFlow` 两族**；走 `mustMatch` 的约 30 条清单模板仍是 `FindStringSubmatch` + 最左优先，**且该选择零测试覆盖**——QA 的变异「`mustMatch` 取最后一个匹配」因此**存活**（358 PASS / 0 FAIL，与基线相同）。\n\n**危害与那两族同类，只是位置更深**（QA 的探针）：构造一个合法的存款板块、把单月分部门句排在累计句之前，`err=nil` 而 `deposit_household_ytd=21000`（应 146400）、`deposit_nbfi_ytd=+500`（应 **−64100，符号也翻了**）。两个值都落在合理量级内，下游没有任何闸门拦得住。\n\n**「今天不可触发」是排版事实不是契约**——2020 样本已含同体例的**板块级**单月孪生句（正是我在初版里亲自处理过的那两句 `6月份，人民币贷款增加1.81万亿元` / `6月份，人民币存款增加2.9万亿元`）。我当时在**板块级**认出了这个形态并做了期次限定，却没有把同一判断推广到**清单级**的 30 条模板——**同一份文件里，同一个失效模式，我只堵了看得见的那一半**。",
+    "【修复非破坏性，且这一点是 QA 先证明的】加上唯一性强制后**不打红任何真实样本**（QA 的变异 B：要求命中数为 1 → 358 PASS / 0 FAIL）。我复核一致：两份样本上每条清单模板本就命中一次，所以这是纯增守卫、零行为变更。⇒ 这类修复的风险评估应当先跑「按新规则会不会打红现状」，而不是先争论要不要改。"
+  ],
+  "decisions": [
+    {
+      "decision": "口径限定词与期次前缀都做成显式捕获组，用 selectUnique 按值挑并要求唯一",
+      "rationale": "计划书的做法是让正则只匹配「想要的那一句」，靠子串不包含（本外币）与最左优先（期次）达成目的——两者都是**巧合而非机制**：前者 reviewer 实测去掉守卫照样通过，后者两句顺序对调即取错。改成「全都匹配 + 按捕获组挑 + 要求唯一」之后，0 命中与 2 命中都变成显式错误。代价是多一层 selectUnique 与三个捕获组；收益是本 Sprint 最高风险点（本外币 336.14 冒充 328.64）从「碰巧没发生」变成「发生了会响」。变异 M1/M2/M3 分别对应三种退化写法，全部被杀。"
+    },
+    {
+      "decision": "6 处无方向词句式全部走 parsePlainAmount，生产文件里 `newAmount(\"` 零命中",
+      "rationale": "需求文档在社融存量总量、8 个存量分项、M2/M1/M0、存款余额、贷款余额上写的都是把字面量「增加」传给 newAmount——那些句子原文没有方向词，硬编码一个白名单内的词等于在约四分之一的调用点上把方向词校验结构性关闭。T4 已建 TestNoLiteralDirectionWordAtProductionCallSites（扫全部非 _test.go 文件），本任务的两个新文件自动进入其扫描范围；变异 M6（把 parsePlainAmount 换回字面量 newAmount）被它杀死，证明该守卫在新文件上确实生效而非空绿。"
+    },
+    {
+      "decision": "作用域合计的正则 scopeTotalRE 放进 profiles.go 而不是在 extract.go 里现拼",
+      "rationale": "计划书在 extractLoanSection 内部用 `regexp.MustCompile(sc.anchorRE.String() + dirPat + ...)` 现拼。那样它就不在 allTemplateRegexps() 的枚举里，也就不受「禁贪婪捕获」那道检查约束——拼在别处的正则在检查的视野之外。移进 profiles.go 后与其它模板同等受检。"
+    },
+    {
+      "decision": "extractFields 对认不出的 extractor 报错，而不是按「跳过 v2Only」降级",
+      "rationale": "不加这道校验时，`rule@v3` 会安静地走完非 v2 的五节、返回 27 个字段的合法结果——一份没见过的报告被套用已知模板抽出了「看起来正常」的数据。与全局的「形态不认识即报错」一致。这条判据本身还踩过一次坑，见 key_findings 第 7 条。"
+    },
+    {
+      "decision": "non_functional[1] 的判据写「≤ 1」而非「恰为 1」",
+      "rationale": "Leader 已把 test-agent-22 的原始建议改过来，本任务照此实现并在测试注释里记明理由：2020 样本的两个社融关键词标题命中数是 **0**，那是正确的「找不到」，T3 的 detectExtractor 正是靠它区分 v1/v2 期次。写成「恰为 1」等于用一条断言否掉版本探测机制，而那个红是判据错不是实现错。不变量是「命中数 ∈ {0,1}」，断言的是不存在 ≥2。实测：2025 七个关键词全为 1，2020 五个为 1、两个为 0。"
+    },
+    {
+      "decision": "全部数值断言用 InDelta 1e-6，只有捕获组的字符串断言用 Equal",
+      "rationale": "见 key_findings 第 6 条：×10000 换算的精确性按值碰运气。DoD functional[0] 本就规定 InDelta 1e-6，统一到这个口径可避免「换个样本值就假红」。"
+    },
+    {
+      "decision": "不在生产代码里加「人民币口径的单位必须是人民币量纲」的运行时校验",
+      "rationale": "考虑过在选中人民币句后再校验一次单位 ∈ {万亿元, 亿元}。放弃的理由是：口径限定词已经是「人民币」，一句「人民币存款余额X万亿美元」在源文本里语义上不可能存在，那属于 CLAUDE.md 明确列为不该写的「为不可能场景做错误处理」。它真正要防的是**我自己的正则写错**，而那是测试的职责——已由 TestBalanceIgnoresForeignCurrencyTwin 在捕获组层面断言（DoD boundary[0]② 要求的正是「断言捕获组本身而非最终值」）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/profiles.go（新建，328 行）",
+    "internal/hestia/profiles_test.go（新建，394 行，11 个顶层测试）",
+    "internal/hestia/extract.go（新建，420 行）",
+    "internal/hestia/extract_test.go（新建，400 行，18 个顶层测试）"
+  ],
+  "interfaces_exposed": "【供 T6 使用】\nfunc extractFields(secs []section, extractor string) (map[string]float64, error) —— extractor 必须是 extractorV1/extractorV2 之一，否则 error。v2 抽 54 项、v1 抽 27 项（社融两节按版本显式跳过，不是碰巧匹配不到）。任何模板未命中一律 error，返回值 nil。\nconst extractorV1 = \"rule@v1\" / extractorV2 = \"rule@v2\" —— 与 sections.go 的 detectExtractor 返回值绑定（TestExtractorConstantsMatchDetect 在真实样本上核验），T6 请用常量而不是字面量。\n\n【包级私有，T6/T7 勿重名】collector / newCollector / set / merge、sectionRules、mustMatch、selectUnique、selectRMBBalance、selectRMBCumulativeFlow、extractTSFStockSection、extractTSFFlowSection、extractMoneySection、extractDepositSection、extractLoanSection、extractRateSection、extractFXSection、extractPlainNumbers、loanSpan、loanScopeSpans、setBalanceAndYoY、setFlow、plainNumberItem、nameField；profiles.go 侧：numPat、dirPat、unitPat、currencyAlt/currencyPat/currencyRMB、periodAlt/periodPat、cumulativePeriods、tsfStockItem/tsfStockItems/tsfStockRE、tsfFlowItems/tsfFlowRE、moneyItems/moneyRE、depositItems/sectorFlowRE、loanScope/loanScopes/scopeTotalRE、depositBalanceRE/loanBalanceRE/balanceRE、depositFlowRE/loanFlowRE/flowRE、tsfFlowTotalRE/tsfStockTotalRE、rateIBORE/rateRepoRE、fxReserveRE/fxRateRE、singletonFields、allTemplateRegexps。测试侧还占用了 templateFields、sourceLiteral、stringLiteralsOf、assertMatchesGolden。\n\n【已被占用、T6/T7 必须避开的包级名字（含测试文件，因为测试与生产同包编译）】abs 与 nonTSFFields（golden_test.go，T1）、readSample 与 nonEmptyLines（strip_test.go，T2）、以及上面两段列出的全部符号。\n\n【给 T6 的三条注意】① extractFields 只产出 Values，不产出 Meta——period/period_type/caliber_version 的推导是 T6 的事。② 本任务不消费 section.has（T3 留给 T5 的那个）：七类句式都能靠固定锚点定位，没有需要「先定位板块再判断可选句式」的场景。它对 T6 仍然可用，不是死代码。③ extractFields 返回的 map 是新分配的，调用方可直接持有。",
+  "verification": {
+    "commit": "8e4811d0c6bc984a0df73e830f9653ae5b8bc648",
+    "branch": "task/TASK-005（git worktree ../wt-TASK-005，基线 8ab45dbf631d0038918f2fe2873a5d0678b0ca31）——**需由 Leader 合并回 feat/hestia-parse**",
+    "commit_scope": "git show --numstat HEAD 核实：4 files，420/400/328/394 行**纯新增、0 删除**，仅 profiles.go + profiles_test.go + extract.go + extract_test.go；与 writes 声明逐条一致，无越界。数字取自提交本身（`git show --numstat HEAD`），与交付物同源。",
+    "red_phase": "两轮 TDD 各自先 RED：Cycle 1（profiles）undefined: tsfStockItems / currencyAlt / dirPat …；Cycle 2（extract）undefined: newCollector / extractLoanSection / selectRMBBalance …，均 build failed，证明断言非空转。",
+    "tests": "本任务 29 个顶层测试（profiles_test 11 + extract_test 18），含子测试 **48 个 --- PASS / 48 个 === RUN / 0 个 --- FAIL**（三者一致 ⇒ 无用例被静默跳过）。全包 `go test ./internal/hestia/` ok，**315 个 --- PASS，0 红**（含 T1–T4 全部既有测试）。go vet 绿、gofmt 干净。",
+    "coverage": "全包 **89.1%**（dev_minimum=80）。profiles.go 的 9 个函数全部 100.0%；extract.go 未覆盖的是 parsePlainAmount/parseRatio/newAmount 的 error 分支——那些参数全部来自由 directionAlt/unitAlt/numPat 构造的捕获组，结构上不可能触发，属边界防御，未为凑覆盖率强行构造。",
+    "cross_task_guards": "T4 的两条守卫在本任务的新文件上做了回归：TestNoLiteralDirectionWordAtProductionCallSites（现已扫到 profiles.go 与 extract.go）绿，且被变异 M6 证明非空绿；TestNoAlternativeIsPrefixOfAnother（judged B 的原件）绿——本任务不改 directionAlt/unitAlt，另加 TestProfileAlternationsHaveNoPrefixPairs 把同一不变量延伸到新增的 currencyAlt / periodAlt。",
+    "mutation_evidence": [
+      "15 个变异体，**15 杀 0 存活**，基线 --- PASS = 315；vet 全部 rc=0，**无一是靠编译错误「杀死」的**",
+      "M1 存款余额退回最左优先（selectRMBBalance→mustMatch）→ KILLED：取到本外币 336.14",
+      "M2 贷款期内合计退回最左优先 → KILLED by TestLoanFlowPrefersCumulativeRegardlessOfOrder（顺序对调那一支）",
+      "M3 合计只判期次不判口径 → KILLED：外币孪生句同样合格，命中 2 条",
+      "M4 rateRepoRE 去掉 `平?` 容错 → KILLED：2025 的「加权均利率」匹配不上",
+      "M5 rateRepoRE 放松成 `加权.*?利率为` → KILLED：静默取到同业拆借的 1.36",
+      "M6 余额句改喂字面量方向词 newAmount(\"增加\",…) → KILLED by T4 的 TestNoLiteralDirectionWordAtProductionCallSites",
+      "M7 collector.set 允许覆盖 → KILLED by TestCollectorRejectsDuplicateAssignment",
+      "M8 作用域顺序校验失效 → KILLED by TestLoanScopesRejectOutOfOrderAnchors（**推演变异体时新补的测试**，原测试集下会存活）",
+      "M9 作用域右边界失效 → KILLED by TestLoanScopeBoundsSubItemsToItsOwnSector（**同上，新补**）",
+      "M10 v1 也跑社融两节 → KILLED by TestExtractFieldsOnV1Sample",
+      "M11 未知 extractor 放行 → 首轮 **SURVIVED**，因判据只断言「有 error」而变异后错误换成了「找不到板块」；改成喂真实 v2 样本 + 断言含 `unknown extractor` 后复跑 KILLED",
+      "M12 tsfStockRE 的 `余额为?` 改成 `余额为` → KILLED by TestGeneratedRegexpsAreWellFormed/社融存量分项",
+      "M13 moneyRE 的 `，同比` 放松成 `.*同比` → KILLED：2020 的 M2 同比贪到 M0 的 9.5",
+      "M14 currencyAlt 去掉「外币」→ KILLED by TestBalanceRegexpClassifiesCurrencyQualifier（真实样本仍全绿，只有这条捕获组测试会红——它证明了「外币句必须被匹配到才谈得上排除」）",
+      "M15 depositItems 少一个部门 → KILLED by TestTemplateTablesCoverAllFields + 两个 golden 比对",
+      "四条自证逐个变异体记录：① 被变异文件的 sha256 变化 **且** git diff --stat 非空（先 git add 使文件进入索引，否则新增文件的 diff 恒为空——TASK-002 踩过这个坑）② go vet 红绿都查，15 个变异体全部 rc=0 ③ 判据是 --- PASS 严格低于基线 315，不是「没有 FAIL」 ④ 每体打印失败用例完整首行（最多 5 条）",
+      "harness 另有两条自证：变异前 assert 锚点在文件中命中次数**唯一**；全部跑完后**复核还原基线仍为 315**",
+      "变异跑了两轮：第一轮在 code-simplifier 改动之前（14/15，M11 存活），修好 M11 的判据后第二轮 15/15；code-simplifier 改动之后**又完整重跑一轮**，仍为 15/15——因为「一切自证数字必须在最后一次改动之后统一重采」",
+      "变异脚本：/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/40c35a6a-7fca-4173-a7fe-91f3abf71ce1/scratchpad/dev45-mutate-t5.py（MUT_WT 可覆写隔离目录）"
+    ],
+    "purity": "profiles.go 只 import regexp，extract.go 只 import fmt/regexp/strings；无 I/O、无网络、无包级可变状态（包级 var 只有编译期常量正则与只读查表）。extractFields 每次调用新建 collector，可重入。",
+    "code_simplifier": "已按全局规范在提交前运行。子代理回复「不变」，经 git diff 直接核实**确有改动**：3 个文件 +42/−54 —— extract.go 抽出 extractPlainNumbers 供利率/外汇两节共用；profiles.go 把三处同形的匿名 struct 提成命名类型 nameField；profiles_test.go 把两个同形的表驱动循环合并成一个带 re 字段的表。三处均为行为保持的去重，予以接受。**因文件在变异测试之后发生变化，全部 15 个变异体与所有指标（覆盖率/PASS 计数/numstat）已在此之后统一重采。**",
+    "known_limits": [
+      "期次前缀只认「全年 / 上半年 / N月份」。将来若出现「前三季度」「一季度」等写法，flowRE 整条不命中 ⇒ extractDepositSection/extractLoanSection 报错。这是**期望行为**（形态不认识就响亮失败），但下一个做月度/季度期次的人需要在这里加词，且加词时要同时确认 TestProfileAlternationsHaveNoPrefixPairs 仍绿。",
+      "「放松锚点」的危险程度取决于贪婪性：`加权.*利率为`（贪婪）在两份样本上碰巧仍取到正确的 1.4，`加权.*?利率为`（非贪婪）才取到错误的 1.36。所以「不要用 .* 放松锚点」这条经验，其证据只覆盖非贪婪那一半；贪婪版之所以现在对，是因为回购句恰好排在最后。TestRateRegexpsRejectLoosePatterns 里对两条正则的 `.String()` 直接断言不含 `.*`/`.+`，堵的是两种形态。",
+      "extract.go 里 parsePlainAmount/parseRatio/newAmount 的 error 分支结构上不可达（参数全部来自受控捕获组），覆盖率上表现为未覆盖行。若将来有人放宽 numPat 或 unitAlt，这些分支会变成可达——届时应补用例而不是删掉它们。"
+    ],
+    "ablation_evidence": {
+      "purpose": "证明 non_functional[1] 的「≤1」与 T3 已有的 TestFindSectionResolvesAllT5Keywords 互补，而不是重复",
+      "isolation": "git worktree add --detach ../wt-t5-ablation task/TASK-005（基于 8e4811d），变异只作用于该副本，主工作区与交付 worktree 一字节未碰；两次消融之间 git checkout 还原并核实 diff 为空；实验结束 worktree remove --force",
+      "A-findSection恒false": "TestSectionKeywordsHitAtMostOneTitle=PASS（察觉不到）/ TestFindSectionResolvesAllT5Keywords=FAIL（接住了）；go vet exit=0，非编译错误致红",
+      "B-末尾追加同标题板块": "TestSectionKeywordsHitAtMostOneTitle=FAIL（接住了）/ TestFindSectionResolvesAllT5Keywords=PASS（察觉不到）；go vet exit=0",
+      "judging_rule": "只锚定两条具名测试的红绿，不看打红条数——红的条数不说明因果"
+    },
+    "gate_result": "dev_done 门禁在**合并后的主仓库**执行并实测到真东西：`Gate scope (TASK-005) ./internal/hestia` / `Task scope passes. Coverage: 89.0% (dev_minimum: 80%)`。合并前门禁会空转（主仓库无本任务文件、go test 仍 exit=0、git diff 为空——已实证），故先经 blocked_clarification 停等 Leader 合并（git merge --ff-only task/TASK-005，Updating 8ab45db..8e4811d，4 files +1542/-0），再转 dev_done。worktree 与分支 task/TASK-005 已按「谁建谁拆」移除。",
+    "rework": {
+      "at": "2026-08-11",
+      "trigger": "QA REJECT · WARNING-1（reason_class=task_defect，rework_count 0→1）",
+      "commit": "655157b36ff537b32c5461d5ecbd0eb36542e81f（2 files +172/−4，仅 extract.go + extract_test.go，在 writes 内，无越界）",
+      "change": "`mustMatch` 由 `FindStringSubmatch`（多命中静默取最左）改为 `FindAllStringSubmatch` + `switch len(all)`：1 命中返回、0 命中报错、**≥2 命中报错**且信息含命中数与模板名。与 `selectUnique` 的分工写进注释：那个用于「候选句需按捕获组筛选」（口径/期次），这个用于「模板本就该唯一命中」，故无谓词。",
+      "new_tests": "`TestMustMatchRequiresUniqueHit`（1/0/多 三种结果，多命中那条断言错误含命中数与模板名、且**不把候选值当结果带出来**）；`TestListTemplatesHitExactlyOnceOnRealSamples`（两份真实样本上每条清单模板命中数**恰为 1**）。后者的判据方向与 T3 的 `TestSectionKeywordsHitAtMostOneTitle` **相反**——那边是 `≤1`（板块关键词在某些期次正确地找不到），这边每条模板都必须命中，未命中本就该由 mustMatch 报错。枚举**从清单表本身派生**（tsfStockItems / tsfFlowItems / moneyItems / depositItems / loanScopes），不硬编码模板列表，末尾有 `want == checked` 计数自证防「枚举与表脱节后平凡通过」。",
+      "mutation_evidence": [
+        "隔离 worktree，harness **断言基线为绿**后才跑（这次的教训：首轮我在探针里跑了 `git checkout` 把复制进去的修复版还原成了未修复版，基线 363 PASS/exit=1 —— 是「基线必须先绿」这条自证抓住的，否则会在错误的载体上得出结论）",
+        "M1 退回最左优先（修复前行为）→ **KILLED**（vet=0，PASS 363<365）",
+        "M2 取最后一个匹配（QA 跑的那个）→ **KILLED**（vet=0，PASS 363<365）",
+        "两者的击杀者都是 `TestMustMatchRequiresUniqueHit/多命中必须报错而不是取最左`",
+        "另有两次 VET-KILL 被有效性闸挡下、未计为测试杀死：手抄锚点导致替换后留下悬空代码。改用**按行定位函数体整体替换**后才得到真 KILLED。"
+      ],
+      "suite": "既有 358 条全部仍绿，净增 7 条（2 函数 + 5 子测试）⇒ **365 PASS / 0 FAIL**，coverage 89.6%（mustMatch 100%），vet 绿、gofmt 干净。合并后主仓库复跑一致。",
+      "code_simplifier": "已运行，回复「不变」，`git diff` 逐行核实**属实**（改动全部是我自己的）。本 Sprint 该子代理累计 **6 次中 3 次不符**（T4/T5/T6 不符，T8/T5b/T6b 属实）——结论不变：回复不作判据，一律 diff 核实。"
+    }
+  }
+}

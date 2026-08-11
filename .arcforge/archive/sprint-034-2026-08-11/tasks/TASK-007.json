@@ -1,0 +1,76 @@
+{
+  "id": "TASK-007",
+  "title": "golden 端到端与收尾",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    ".arcforge/discoveries"
+  ],
+  "writes": [
+    ".arcforge/discoveries/TASK-007.json"
+  ],
+  "description": "纯验证任务，无生产代码改动。端到端跑两份样本与 golden 全值比对，核验导出面、无新增依赖、包外回归。",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "两份样本 `Parse` 的输出与 `golden2025`/`golden2020` **逐键逐值相等**（54 / 27 项），`Meta` 亦逐字段相等。**差异必须能定位到具体字段名**，不能只报「不相等」。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`go doc ./internal/hestia` 的导出面相比 M1b-1 只多出 `Parse`（若设计如此）。**多出别的导出符号说明范围溢出**。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "不新增依赖。判据命令**必须钉全 sha，不得写 `master`**：\n\n```\ngit diff --stat 6c51f788f1600aa4366a215b099ee6f929cb7ba5 HEAD -- go.mod go.sum\n```\n\n无输出即通过。\n\n**⚠️ 为什么钉 sha 而不是分支名**（CLAUDE.md 明文，立项案例 TASK-015 与此完全同形）：`master` 是**会过期的锚**——本 Sprint 分支基于**本地 master** `6c51f788f1600aa4366a215b099ee6f929cb7ba5`，而本地 master 领先 `origin/master` **21 个 commit**。若在你执行前有人推进本地 master，`git diff master …` 会**静默换成另一个基准**，而命令原文一个字都没变。TASK-015 那次是隔离命令钉了 `HEAD`，对方提交后同一条命令从「隔离」变成「包含」，套件由 577/0 变 571/6，验证者照抄会据此 reject 一个无关交付。\n\n**同理不能用 `origin/master`**：那会把 M1b-1 / M1b-1.5 的全部改动算进来。\n\n核验方法（执行时先跑一次，确认锚仍是本 Sprint 的分叉点）：\n\n```\ngit merge-base 6c51f788f1600aa4366a215b099ee6f929cb7ba5 HEAD\n```\n\n应当原样输出该 sha。不一致说明分支基准已变，**先停下来问 Leader**，不要自行改锚。",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`go test ./...` 全仓无 FAIL；`go vet ./internal/hestia/...` 干净。本 Sprint 只新增文件，不应影响既有包。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "产出 discovery，逐条记录实际执行的命令与输出摘要，**写明各项验证所在的 commit sha**。产出物为 discovery 而非 04-test 报告——`dev-*` 在整个 `docs/` 树下无可写路径（M1b-1 的 D6）。\n\n**另核一条 M1b-1 的文档缺口**（test-agent-22 在 T1 验证时暴露）：`fields.go:6-12` 的单位约定只列三类（余额=万亿元 / 增量=亿元 / 比率=百分数），而 **`fx_reserve` 是万亿美元、`fx_rate` 是元/美元**，两者都不属于任何一类。golden 忠实抄了原文所以值是对的，单位守护也为 `fx_rate` 开了特例分支。\n\n请在 discovery 中登记：这是 M1b-1 遗留的注释缺口，建议补进 `fields.go` 的约定。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "核对 `internal/hestia/CONTRACTS.md`：**本 Sprint 新增的每个导出符号与每条「拿不准时不要猜」的约束，各自属于 (a) 有机制 / (b) 有契约无机制 / (c) 连契约都没有 哪一类**，逐条列进 discovery。\n\n**原表述「不应增加靠自觉的条目数（当前 11 处、4 处静默）」不可操作**（reviewer A7）：「靠自觉」无定义、基线未绑定位置清单，两个 reviewer 数出来必然不同。改为逐条归类——**分类可复核，计数不可**。\n\n若出现 (b) 或 (c) 类新条目，须在 discovery 中说明为何不做成机制。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-43",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "4948f0f317f2bcc67beb689dc397673b1f2f58b4",
+    "discovery_sha256": "4ac62a29c5269ee200497180c922bf1180b0cdc88f175bad1619c893f380289f",
+    "at": "2026-08-10T14:03:17Z"
+  },
+  "verifier": "test-agent-22"
+}

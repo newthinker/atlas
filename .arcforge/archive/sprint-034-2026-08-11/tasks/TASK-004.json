@@ -1,0 +1,50 @@
+{
+  "id": "TASK-004",
+  "title": "数值原语 parseAmount",
+  "status": "accepted",
+  "complexity": "复杂",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/amount.go",
+    "./internal/hestia/amount_test.go"
+  ],
+  "description": "方向词→符号、单位→倍率。含 directionAlt/unitAlt 正则片段、amount 类型与两个换算方法，以及比率与裸数字的解析。",
+  "done_criteria": {
+    "functional": [
+      "`newAmount(dir, num, unit)` 从**方向词**读符号，`toYi()` / `toWanYi()` 按单位换算到统一量纲。\n\n**⚠️ 方向词白名单不得包含 `多增` / `少增` / `少减`**（Leader 原表述把它们列为正面例子，是错的）。它们修饰的是**同比**（如「同比多增1780亿元」「同比少减1873亿元」），是必须被**排除**的干扰词——若加进白名单，`tsfFlowRE` 等模板会匹配到「同比多增1780亿元」，直接触发重复赋值或取错值。\n\n判据：断言这三个词传入 `newAmount` 时**报错**。",
+      "`parseRatio(dir, num)` 处理百分数，`parsePlainNumber(num)` 处理无单位裸数字。",
+      "`directionAlt` / `unitAlt` 是可嵌入其它正则的片段常量——T5 的 7 类模板会复用它们，**不得让 T5 各自再写一份**（那是第二份真相源）。"
+    ],
+    "boundary": [
+      "**「净融资」的交替顺序**——机制是 **RE2 取首个可匹配而非最长匹配**，故 `净融资` 必须排在 `融资` 之前。\n\n**⚠️ 不是「方向词与数值位置反转」**（Leader 原表述错了）：样本里「企业债券净融资2.39万亿元」的顺序是 名称→方向词→数字→单位，与「委托贷款增加1203亿元」**完全相同**。\n\n判据：构造一个交替顺序写反的实现（`融资` 在前），断言「企业债券净」匹配不上任何清单项 ⇒ **静默漏一个字段**。按原表述去找「位置反转」用例会放过这个缺陷。"
+    ],
+    "error_handling": [
+      "**方向词表外的词一律报错，不默认为正**（全局约束）。判据：传入未知方向词必须返回 error，且错误信息含该词原文。",
+      "**单位捕获不到即报错，不默认某单位**（全局约束）。判据：`unit` 为空串或表外值时报错。\n\n这两条与 M1b-1 的「拿不准时不要猜」同源——**默认值会让错误数值静默流到 Values**，而下游任何校验都发现不了量级错误。",
+      "**无方向词句式必须走独立入口，不得用字面量假方向词绕过白名单**（reviewer 的结构性发现 G6）。\n\n需求文档在**所有余额/存量句**上写 `newAmount(\"增加\", m[1], m[2])`——社融存量总量、8 个存量分项、M2/M1/M0、存款余额、贷款余额，共 6 处代码 / 14 处字段赋值。**那些句子原文根本没有方向词**，靠硬编码一个白名单内的词骗过校验。\n\n⇒ 「方向词表外的词一律报错」这条全局约束在**约四分之一的调用点上被结构性关闭**：白名单在那里永远不可能触发。而孤立测 `newAmount` 全绿，看不见生产代码喂的是常量。\n\n判据：提供独立命名的恒正入口（如 `parsePlainAmount(num, unit)`），**禁止把字面量方向词传进 `newAmount`**，并断言调用点可枚举（静态扫描 `newAmount(\"` 应为零命中）。\n\n不做的后果：某期若把余额写成「余额较上年末**减少**…」，硬编码的「增加」保持正号——正是符号错发生在防线被关掉的地方。"
+    ],
+    "non_functional": [
+      "符号与量纲两个维度**各自独立可测**：方向词错误不应因单位正确而被掩盖，反之亦然。判据：为每个维度各设一组只变该维度的用例。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-45",
+  "verify_baseline": {
+    "head": "65a4db00c65920e49ade129a9c0afaf638fc6837",
+    "discovery_sha256": "7b9707c0756b89fdafc0374a1a30aabbb7019c712a8e048fd351bd8a109c1354",
+    "at": "2026-08-10T03:27:01Z"
+  },
+  "verifier": "test-agent-23",
+  "discovery": ".arcforge/discoveries/TASK-004.json"
+}

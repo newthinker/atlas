@@ -1,0 +1,101 @@
+{
+  "task_id": "TASK-003",
+  "title": "板块切分与版本探测（含 QA 返工：序号连续性 + 删除 section.has）",
+  "rework_round": 1,
+  "key_findings": [
+    "【CRITICAL·已独立复现】v2 恰好 = v1 + 社融两节，所以「丢掉且**仅**丢掉这两节」的残缺 v2，其 (板块数, 有无社融) = (6, false)，与一份**合法的 v1** 逐位相同。复现读数与 Leader 一致：基线 err=nil/rule@v2/54 值/tsf_stock=true；变异后 err=nil/rule@v1/**27 值**/tsf_stock=false，补 ArticleID 后 Meta.validate() 放行。",
+    "【复现的关键锚点——供后来者避坑】变异必须用 `<strong>一、` 与 `<strong>二、` 作锚（整份 HTML 各只 1 处命中）。**裸的「一、」会命中正文别处**：Leader 第一次复现就栽在这里，只做到 7 板块 + 响亮失败，因而一度误判 CRITICAL 不成立。这条记在这里，免得下一个复现的人重走一遍。",
+    "【复现时多看到的决定性细节】残缺后**存活的板块是「三–八」，起始序号不是「一」**。这就是可被检测的信号，也是修法的直接依据——原判据 (板块数, 有无社融) 恰好把这条信息丢掉了。",
+    "【根因·已复现】sectionTitleRE 的 `(?m)^` 要求标题落在行首，而 T2 的 spaceRE **折叠但从不删除**行首空白。实测 `stripHTML(\"<p> 一、甲</p><p>二、乙</p>\")` 只得 **1** 个板块；2025 样本 stripHTML 后 **578** 行以空白开头（与 Leader 复现值一致）。这条跨层依赖此前从未被任何注释或测试声明过。",
+    "【修法覆盖根因而非单个反例——7 组消融实证】用 7 种**不同机制**各构造一次丢节，修复后**全部拦截且 Values 均为 0**：`&nbsp;`(6段,首序号三、) / 全角空格(6,三、) / 半角空格(6,三、) / `<em>` 标签嵌套(6,三、) / 中间缺五(7,一、) / 尾部缺八(7,一、) / 仅缺社融存量一节(7,二、)。",
+    "【为何是覆盖而非碰巧——结构论证】社融两节位于报告**开头**（一、二），因此一份 v2 若要退化成 `(6, false)`，**必然丢的是前导节** ⇒ 序号必然不再从「一」起 ⇒ 必被序号校验抓住。这不是经验归纳，是位置决定的。",
+    "【两道校验互补】序号连续性抓**前导与中间缺失**（序号断裂）；既有的板块数校验抓**尾部缺失**（尾部缺节时序号仍从一起且连续，但数量对不上已知的 6/8）。消融里「尾部缺八」正是被板块数分支拦下的，首序号仍是「一、」。单独任一条都有盲区。",
+    "【第 4 项：删除 section.has】该项**来自 QA 报告 S1 节，经 Leader 消息追加，未能写进 fix_items**——Leader 试图追加时写通道 DENY「leader 无权执行 in_progress 写入」（我已领回）。这是本 Sprint 第三次「修复需求在 owner 转移之后才出现」。删除依据比「当下无调用者」强一层：① M1b-3 结构上够不到它（校验层消费 Observation，而 section 是解析层未导出类型，让它拿 []section 等于重新解析 HTML）；② has 是「部分成功」模型的残件，而 extract.go 的纪律是「任何模板未命中一律报错」、extractFields 要么全成要么 nil；③ 它该回来的时机只有 M1b-3 选了部分成功那条路，届时应**带着确定的消费者**重新引入。",
+    "【删除后读数与 QA 预期吻合】QA 删除实验是 358→357（差值恰为 TestSectionHas）；我这边 **367→366**，同样恰好差 1，确认**没有别的东西依赖 has**。has 的使用点全仓仅 4 处：方法定义 1、TestSectionHas 内 3 条断言、TestDetectExtractorJudgesTSFByTitleOnly 的 1 处前置条件（已改写为 `require.Contains` on Body，语义不变且更直接——本来要表达的就是 Body 命中）。",
+    "【变异首轮存活并已补测】N3「期望前缀去掉『、』」首轮存活：少了顿号后「十」会前缀匹配「十一」，于是「一…九、十一」（第十节丢了）被判成连续——**正是本次要堵的同一类缺节，只是发生在两位数段**。已补子测试杀死。",
+    "【等价变异，非缺口】N6「越界处 break 改 continue」存活，判定为**等价变异**：`i >= len(sectionOrdinals)` 时 break 退出循环，而 continue 进入的下一个 i 同样 `>= 20`，两者最终都返回 nil，**无可观察差异**。不登记为守护缺口，也不硬凑测试去杀它。",
+    "【code-simplifier 本轮两次调用，均自述不足采信（累计 5 次）】第一次回「Complete」实际把 `want := sectionOrdinals[i] + \"、\"` 提成变量并补了顿号承重的注释；第二次回「Unchanged」实际改了一处注释 `（而非 has）`→`（而非正文）`——**那是我漏掉的必要修正**（注释引用了刚被删除的符号）。两次改动都对、都已接受，且每次之后都**重采了全部自证数字**。结论不变：其自述不可作为判据，必须 md5 + diff 核实。"
+  ],
+  "decisions": [
+    {
+      "decision": "校验板块序号连续性，而不是去修「标题不得带前导空白」",
+      "rationale": "前导空白只是触发这次反例的直接原因，不是唯一成因——全角空格、HTML 实体、标签嵌套变化、抓取截断都会让标题行匹配不上，后果同为板块被静默丢掉。序号是报告自带的冗余信息，校验它把「丢了一节」变成可检测事件，与丢失机制解耦。7 组消融（各用不同机制）全部拦截，是这条选择的实证。"
+    },
+    {
+      "decision": "序号校验放在 detectExtractor 内、且置于版式分支**之前**",
+      "rationale": "残缺的 v2 在版式上与合法 v1 不可区分，等到版式分支才判就已经晚了——那时它已经是个『合法形态』，switch 会直接返回 rule@v1。放在最前面才能在它被认作合法之前拦下。同时保持 splitSections 的无 error 签名不变。"
+    },
+    {
+      "decision": "空输入（len==0）跳过序号校验",
+      "rationale": "那是「一个板块都没切出来」，属另一类失败，由版式分支报错信息更全（含板块数 0 与两个已知形态）。若让序号校验先报，既有的 TestDetectExtractorErrorNamesActualCount 期望的 '0 sections' 会拿不到。"
+    },
+    {
+      "decision": "sectionOrdinals 用 20 条字面表，不做汉字数字解析",
+      "rationale": "本校验只需**生成**期望序列去比对，不需要读懂任意汉字数字——生成比解析简单且不会误读。20 条远超任何已知模板，超出即属未知形态，交由版式分支报错。"
+    },
+    {
+      "decision": "把「真实样本序号连续」单独钉成一条测试，与守卫分开",
+      "rationale": "两者失效方式不同：守卫测『不连续时会报错』，这条测『守卫的前提仍然成立』。只有前者时，若真实样本的序号规律变了，症状是一个语焉不详的 detectExtractor 报错；有了后者，转红的是这条，直接指出前提没了。"
+    },
+    {
+      "decision": "删除 section.has 时在原位置留一段注释说明「理由为何过期」，而不是无声删掉",
+      "rationale": "它已被独立发现过两次（dev-agent-45 在 T5 专门记过「不是死代码，免得后续被清理」，test-agent-22 列为 P4 确认）。无声删除会让下一个人重新发现同一件事再争第三次；而保留原注释同样不行——它指名了一个**不存在的消费者**（说留给 T5，而 T5 已交付且没用它），按本项目自己的判据，说谎的注释比没有注释更糟。"
+    },
+    {
+      "decision": "CRITICAL 与第 4 项分成两个提交",
+      "rationale": "两者在同一文件但互不依赖（Leader 明确交由我定）。分开提交让「为什么删 has」的完整论证独立可查，不被淹没在序号校验那条里；回滚粒度也更细。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/sections.go（两次提交累计：28408bd +76/-0 新增序号校验；3058044 +19/-9 删除 has 并留说明注释）",
+    "internal/hestia/sections_test.go（28408bd +107/-0 新增两组测试；3058044 +2/-10 删除 TestSectionHas 并改写一处前置条件）"
+  ],
+  "interfaces_exposed": [
+    "func checkSectionOrdinals(secs []section) error —— 包级私有。校验板块序号从「一、」起连续；错误信息含实际板块数、断裂位置索引、实际首序号与期望序号。空切片不调用它。",
+    "var sectionOrdinals []string —— 包级私有，20 条中文序号字面表（一…二十）。**T5/T6/T7 勿重名。**",
+    "func firstOrdinalOf(title string) string —— 包级私有，取标题中「、」之前的部分用于报错；不参与判定。**勿重名。**",
+    "**已移除：func (s section) has(kw string) bool** —— 全仓无调用者。若 M1b-3 选择「部分成功」模型需要它，应带着确定的消费者重新引入，勿凭空恢复。",
+    "行为变更（下游需知）：detectExtractor 现在会对「序号不连续」返回 error，此前这类输入会被判成某个已知版本；Parse 随之对该类输入返回 error 且不产出任何 Values。两份真实样本行为**不变**（序号本就连续）。"
+  ],
+  "verification": {
+    "commits": [
+      "28408bd（CRITICAL：序号连续性校验）",
+      "3058044（第 4 项：删除 section.has）"
+    ],
+    "branch": "task/TASK-003-fix（基于 feat/hestia-parse @ 9e77311）",
+    "merge_status": "**已合并**：Leader 于 defdc5e 将 task/TASK-003-fix 并入 feat/hestia-parse（合并提交 defdc5e，含 28408bd 与 3058044 两个提交）",
+    "numstat": "28408bd: sections.go 76/0、sections_test.go 107/0 ｜ 3058044: sections.go 19/9、sections_test.go 2/10（均以 git show --numstat 复核，与提交同源）",
+    "all_numbers_resampled_after_last_change": "是，本轮共重采**三次**（第一次 simplifier 改动后、第二次删 has 后、第三次 simplifier 第二次改动 + 我补的注释排版后）。下列数字全部出自最终树：sections.go md5 = abd5c4cd8ac07a42db5628b22b4e4d78",
+    "tests": "全包 go test -count=1 ok；**--- PASS = 366**（删 has 前 367，差值恰为 TestSectionHas，与 QA 的 358→357 同形）；coverage **89.4%**；go vet exit 0；gofmt 无未格式化文件",
+    "red_phase": "先落测试跑出 RED：三个子测试均报 'An error is expected but got nil'，如实复现缺陷；再写实现转 GREEN",
+    "fix_items_coverage": {
+      "1_序号校验与错误信息": "已实现。QA 反例下 Parse 返回 error 且 Values 为空（另断言 Meta.Extractor 也为空）；错误信息含 '6 sections' 与实际首序号 '三、'，均有断言钉住",
+      "2_真实样本仍全绿": "是。2025→rule@v2、2020→rule@v1 未变；另将『序号连续』这条既有性质单独钉成 TestSectionOrdinalsAreConsecutiveInRealSamples（2025 一–八、2020 一–六）",
+      "3_覆盖根因": "7 组不同机制的消融全部拦截 + 『社融两节在开头 ⇒ 退化成 (6,false) 必然丢前导节 ⇒ 必被抓』的结构论证 + 两道校验互补的说明",
+      "4_删除_section_has（消息追加，非 fix_items）": "已完成。方法 + TestSectionHas 删除，一处前置条件改写为 require.Contains on Body；原位置留说明注释；提交信息含『T3「留给 T5」的理由已随 T5 交付而过期』。读数 367→366 与 QA 预期一致"
+    },
+    "mutation_evidence": {
+      "harness": "隔离 worktree（task/TASK-003-fix），6 个变异体，**5 KILLED / 1 等价**（最终树上重跑）",
+      "four_self_proofs": [
+        "变异生效：md5 比对（非 git diff）。注：本轮 sections.go 在返工分支上是**已跟踪**文件，git diff 确有输出（92 行），与首轮新建文件时恒为 0 的情形不同——判据固定用 md5 才不随任务形态变化",
+        "go vet 红绿都查：基线 exit 0，每个变异体单独记录 vet 退出码，无一靠编译失败充数",
+        "--- PASS 计数严格低于基线：基线 366，变异后 343/361/362/363/364，全部严格更小",
+        "首行完整：每个变异体记录首个 --- FAIL 行，确认打红的是预期的那条测试"
+      ],
+      "killed": "N1 整个序号校验不执行 / N2 首个匹配后即停 / N3 期望前缀不含顿号 / N4 期望恒为「一、」 / N5 校验恒通过",
+      "survived_equivalent": "N6 越界处 break→continue：i>=20 时两者都返回 nil，无可观察差异，判定为等价变异而非守护缺口"
+    },
+    "ablation_evidence": "7 种丢失机制 × 修复后行为：&nbsp;(6段,首序号三、,拦截) / 全角空格(6,三、,拦截) / 半角空格(6,三、,拦截) / <em>嵌套(6,三、,拦截) / 中间缺五(7,一、,拦截) / 尾部缺八(7,一、,拦截) / 仅缺一(7,二、,拦截)。全部 Values=0。",
+    "merged_commit": "defdc5e",
+    "post_merge_readings": {
+      "note": "以下是**合并后主仓库**（门禁与验证者实际面对的那棵树）上的读数，与合并前『我分支单独』的读数口径不同，两组都列出以免被当成前后矛盾",
+      "tests": "--- PASS = 380（我分支单独时 366；差额来自 dev-45 的 655157b/29adc9e 两个提交带来的测试）",
+      "coverage": "89.5%（我分支单独时 89.4%）",
+      "vet": "exit 0",
+      "gofmt": "无未格式化文件",
+      "merge_conflict": "无。那两个提交只碰 extract.go/extract_test.go/parse.go/parse_test.go，与本任务的 sections.go/sections_test.go 零重叠，无冲突是结构性的",
+      "cross_check": "合并前我在独立 detached worktree 里预演过一次合并，预演读数（380 / 89.5%）与合并后主仓库实测**逐位一致**；预演 worktree 已拆除，且预演全程未改动 task/TASK-003-fix（合并的仍是 Leader 核过的那两个提交）",
+      "interaction_verified": "dev-45 的 29adc9e 改了 Parse 的 PubDate 校验路径，而本任务的 QA 反例测试正好走 Parse——合并后该子测试仍绿（Parse 返回 error 且 0 Values），不是各自绿、合起来红"
+    }
+  }
+}

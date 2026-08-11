@@ -1,0 +1,69 @@
+{
+  "task_id": "TASK-002",
+  "title": "stripHTML 与 meta 提取",
+  "key_findings": [
+    "F6 真实形态已核对原文：2025 样本中是 `4825</span></span></span><span><span><span>亿元</span></span></span><span><span><span>；</span></span></span><span><span><span>政府债券净融资13.84万亿元`，六层 span。测试 raw 逐字抄自该处，非简化版。",
+    "2020 样本正文（剥离 script/style 与标签后）恰含 2 个半角逗号 + 1 个半角分号，位置与 DoD 完全一致：广义货币(M2)余额213.49万亿元,同比 / 流通中货币(M0)余额7.95万亿元,同比 / 票据融资增加9697亿元;非银行业。2025 样本为 0。原始文件里另有大量半角标点，但全在 <a href=\"javascript:...\">、onclick 属性与 <style> CSS 内，被标签删除与 script/style 剥离吃掉——这正是必须先删 script/style 的实测理由。",
+    "两份样本 HTML 实体数为 0（无 &nbsp; &amp; 等），故 html.UnescapeString 的行为只能用合成样本验证，真实数据永远暴露不出该路径的缺陷。",
+    "meta 标签属性间空白不规则：两份样本都写作 `<meta  name=\"createDate\"`（name 前双空格）、`<meta name=\"ColumnType\"  content=`（双空格）。正则用 \\s+ 而非单空格是必需的，不是防御性冗余——变异 M9 证明改成单空格会让 PubDate/ArticleTitle 全部取不到。",
+    "「存在但为空」有真实样本：SiteDomain 在两份样本里都是 content=\"\"，ContentSource/Keywords/Description 在 2020 亦然。第二返回值的区分能力用真实数据钉住，不必造合成输入。",
+    "「社会融资规模」在 2020 上半年样本出现 0 次（与 CONTRACTS H8 一致：该样本无社融板块）。锚点句断言必须按样本分别给，一刀切会造出永远失败的测试。",
+    "板块标题的真实形态是 `<p><strong>一、…`：<p> 换行、<strong> 删除，(?m)^[一-十]、 才锚得住。实测 2020=6 个、2025=8 个，与 Leader 给的 8/6 吻合，下游 splitSections 可直接依赖。"
+  ],
+  "decisions": [
+    {
+      "decision": "块级标签替换为换行，其余标签直接删除，两条正则分开",
+      "rationale": "两类语义相反：块级是真实段落边界（删掉则板块粘成一行，(?m)^ 锚定失效），内联只是排版（换行则把 4825 与「亿元」切开，T4 的单位捕获拿不到后缀而报错）。合并成一条必然牺牲其中一边。变异 M1（把 span 列入块级）与 M2（内联换成换行）各自被 F6 钉杀死，M5（块级也删除）被块级边界与板块计数杀死——三个方向都有测试守着。"
+    },
+    {
+      "decision": "半角 , ; 的归一放在 stripHTML 内一次完成，而非每条句式模板同时写两种标点",
+      "rationale": "模板侧重复写两种标点迟早漏一处，而漏掉的表现是字段静默失配（值不存在、无报错），排查时离根因很远。归一收在一处，判据也集中在一处。"
+    },
+    {
+      "decision": "实体还原排在标签剥离之后",
+      "rationale": "反过来会把正文里转义的 &lt;p&gt; 先还原成真标签、再被块级规则吃掉，造成原文字符静默消失。该顺序原先只写在注释里，变异 M10 首轮存活暴露它无测试守护，已补 TestStripUnescapesAfterTagRemoval 并复跑至杀死。"
+    },
+    {
+      "decision": "metaContent 的正则抽成 metaRE(name) 函数，name 走 regexp.QuoteMeta",
+      "rationale": "name 目前只来自本包常量，但拼进正则就该转义，与 bitemporal 对标识符的态度一致。抽成函数是为让「正则构造」这一步在测试与阅读时可单独定位。"
+    },
+    {
+      "decision": "不为空输入写专门的 panic 防护测试",
+      "rationale": "regexp/strings/html.UnescapeString 在空输入上不可能 panic，Leader 已据 reviewer 意见把该条 DoD 删除。为不可能的场景写测试会稀释注意力。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/strip.go（新增，88 行）",
+    "internal/hestia/strip_test.go（新增，250 行）"
+  ],
+  "interfaces_exposed": [
+    "func stripHTML(raw []byte) string —— 纯文本输出：块级标签成 \\n、内联标签删除、实体已还原、半角 , ; 已归一为全角、[ \\t\\u00a0] 折叠为单空格、连续 3+ 换行压成 2。真实样本上无残留 '<'。",
+    "func metaContent(raw []byte, name string) (string, bool) —— 值已 TrimSpace 且已 UnescapeString；false=该 meta 不存在，true+空串=存在但 content=\"\"。必须在 stripHTML 之前调用（后者会抹掉 <head>）。",
+    "func nonEmptyLines(s string) []string（strip_test.go 内，仅测试可见）—— 按行切分、去空行与首尾空白。T3 的 sections_test.go 可直接复用，**不要重复定义，否则同包编译冲突**。",
+    "下游可依赖的输出性质：splitSections 用 (?m)^[一二三四五六七八九十]、 在 stripHTML 输出上匹配，2020 样本得 6 段、2025 样本得 8 段（已由 TestStripRealSamplesKeepSectionAnchors 锁定）。"
+  ],
+  "verification": {
+    "commit": "acc5a96",
+    "commit_scope": "git show --stat 核实：2 files changed, 338 insertions，仅 strip.go + strip_test.go；dev-agent-45 在途的 amount.go/amount_test.go 仍为未跟踪，未混入",
+    "red_phase": "先写测试跑出 RED：undefined: stripHTML / undefined: metaContent（build failed），证明断言非空转",
+    "tests": "本任务 13 个测试全 PASS（含子测试共 23 个 --- PASS）：go test ./internal/hestia/ -run 'TestStrip|TestMetaContent'；全包 go test ./internal/hestia/ -count=1 ok；go vet 绿",
+    "coverage": "全包 92.8%（dev_minimum=80）；strip.go 三个函数 stripHTML/metaRE/metaContent 均 100.0%",
+    "mutation_evidence": [
+      "隔离 worktree（../wt-TASK-002，detached 6c51f78 + 仅复制本任务两文件）跑 10 个变异体，10 杀 0 存活 0 无效；基线 --- PASS = 23",
+      "M1 span 列入块级 → KILLED by TestStripRejoinsValueSplitByInlineTags（PASS 22<23）",
+      "M2 内联标签换成换行 → KILLED by TestStripRejoinsValueSplitByInlineTags（PASS 22<23）",
+      "M3 取消半角逗号归一 → KILLED by TestStripNormalizesPunctuation + …InRealSample（PASS 21<23）",
+      "M4 取消半角分号归一 → KILLED by 同上两条（PASS 21<23）",
+      "M5 块级标签删除而非换行 → KILLED by TestStripKeepsBlockBoundaries + TestStripRealSamplesKeepSectionAnchors（PASS 18<23）",
+      "M6 meta 空值当作不存在 → KILLED by TestMetaContentPresentButEmpty（PASS 19<23）",
+      "M7 不删 script → KILLED by TestStripDropsScriptAndStyle（PASS 22<23）",
+      "M8 不做实体还原 → KILLED by TestStripUnescapesEntities + …AfterTagRemoval（PASS 21<23）",
+      "M9 meta 属性间只容单空格 → KILLED by TestMetaContent（PASS 20<23）",
+      "M10 实体还原提前到标签处理之前 → 首轮 SURVIVED（PASS 22=22 基线），补 TestStripUnescapesAfterTagRemoval 后复跑 KILLED（PASS 22<23）",
+      "四条自证均逐个体记录：① diff 非空（每体报告具体变化行数）② go vet 红绿都查，10 个变异体 vet 全部 exit=0，无一是靠编译错误「杀死」的 ③ --- PASS 严格低于基线 23（不是「0 失败」）④ 每体打印测试输出首行",
+      "harness 自身踩过一次静默失效并被上述判据抓住：第一版用 git diff 判定变异是否生效，而 strip.go 在该 worktree 里是未跟踪文件，git diff 恒为空 ⇒ 10 个变异体全被误报为「未生效」。改为直接 diff BAK/SRC 后才得到真实结果。若当时只看「无 SURVIVED」就会误判为满分。",
+      "变异脚本：/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/40c35a6a-7fca-4173-a7fe-91f3abf71ce1/scratchpad/mutate.py（worktree 已按「谁建谁拆」移除）"
+    ],
+    "purity": "非 _test.go 侧 strip.go 仅 import html/regexp/strings；无 I/O、无网络、无包级可变状态（包级 var 只有编译期常量正则与 Replacer，只读）。TestStripAndMetaAreDeterministic 断言同输入连续两次结果相同。"
+  }
+}
