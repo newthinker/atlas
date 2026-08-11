@@ -12,14 +12,23 @@ type section struct {
 	Body  string
 }
 
-// has 报告标题或正文里是否出现 kw。
+// —— 关于曾经存在于此的 section.has ——
 //
-// 注意它**不是** findSection 的判据：findSection 只认标题，理由见那里。
-// has 保留「标题或正文」的宽松语义，供 T5 在**已经定位到正确板块之后**
-// 判断该板块里有没有某个可选句式（如 2020 期次没有的分项）。
-func (s section) has(kw string) bool {
-	return strings.Contains(s.Title, kw) || strings.Contains(s.Body, kw)
-}
+// 它是「标题或正文含 kw」的宽松判据，当初留给 T5 在已定位板块之后判断某个可选
+// 句式在不在。**那个理由已随 T5 交付而过期**：T5 实测七类句式全部靠固定锚点定位，
+// 一次都没消费它。删除依据（QA 报告 S1 节）比「当下无调用者」强一层：
+//
+//   - M1b-3 结构上够不到它：校验层消费 Observation，而 section 是解析层的**未导出**
+//     类型；让它拿到 []section 等于让它重新解析一遍 HTML。
+//   - has 是另一套设计的残件：extract.go 的纪律是「任何模板未命中一律报错」，
+//     extractFields 要么全成要么返回 nil。「本板块有没有某个**可选**句式」正是
+//     这个设计明确拒绝的模型。
+//   - 它该回来的时机只有一个：M1b-3 若选了「部分成功」那条路，届时应**带着确定的
+//     消费者**重新引入，而不是先留着等人来用。
+//
+// 留这段注释而不是无声删掉：它已经被独立发现过两次（dev-agent-45 在 T5 记过一笔
+// 「不是死代码，免得后续被清理」，test-agent-22 确认过），不写明理由为何过期，
+// 下一个人会重新发现同一件事再争第三次。
 
 // sectionTitleRE 匹配板块标题，形如「一、广义货币增长8.5%」。
 //
@@ -105,6 +114,73 @@ const (
 // tsfSectionKeyword 是判定「本期含社融板块」的标题锚点。
 const tsfSectionKeyword = "社会融资规模存量"
 
+// sectionOrdinals 是板块标题的中文序号，按顺序。
+//
+// 写成字面表而不是做汉字数字解析：本校验只需要**生成**期望序列去比对，不需要读懂
+// 任意汉字数字。二十条远超任何已知模板（已知 6 与 8），超出即属未知形态，由
+// detectExtractor 的版式分支去报错。
+var sectionOrdinals = []string{
+	"一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+	"十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+}
+
+// checkSectionOrdinals 校验板块序号从「一、」起连续。
+//
+// # 它挡的是什么
+//
+// v2 恰好 = v1 + 社融两节，所以「丢掉且**仅**丢掉这两节」的残缺 v2，其
+// (板块数, 有无社融) = (6, false)，与一份**合法的 v1** 逐位相同。只看这两个量的
+// 判据无法区分二者，会把一份年报判成 rule@v1：27 个字段各自正确地流进权威表，
+// 另 27 个在 M1b-1 的语义里读作「本期模板本就没有」——完全无声。
+//
+// # 为什么校验序号，而不是去修「标题带前导空白」
+//
+// 触发那个反例的直接原因是 sectionTitleRE 的 (?m)^ 要求标题落在行首，而 T2 的
+// spaceRE **折叠但从不删除**行首空白（实测：stripHTML("<p> 一、甲</p><p>二、乙</p>")
+// 只得 1 个板块；2025 样本剥离后有 578 行以空白开头）。但那只是**一种**成因：
+// 全角空格、实体、标签嵌套变化、抓取截断，任何让某个标题行匹配不上的原因，后果
+// 都是同一个——板块被静默丢掉。
+//
+// 序号是报告**自带的冗余**。校验它等于让「丢了一节」这件事本身可检测，与丢失的
+// 原因无关；而逐个去堵成因，永远只能堵住已经见过的那些。
+//
+// # 代价
+//
+// 若将来某版报告改用别的序号体系（阿拉伯数字、无序号），本校验会报错而不是猜。
+// 与 detectExtractor 的整体取向一致：宁可这一期人工看一眼。
+func checkSectionOrdinals(secs []section) error {
+	for i, s := range secs {
+		if i >= len(sectionOrdinals) {
+			break // 超出已知模板量级，交给版式分支报「未知形态」
+		}
+		// 期望前缀必须带「、」：少了它，「十」会前缀匹配「十一」，于是
+		// 「一…九、十一」（第十节丢了）被判成连续——正是本函数要抓的那类缺节。
+		want := sectionOrdinals[i] + "、"
+		if strings.HasPrefix(s.Title, want) {
+			continue
+		}
+		return fmt.Errorf(
+			"hestia: section ordinals are not consecutive from 一: got %d sections, "+
+				"section[%d] is %q but should start with %q. "+
+				"A section title that fails to anchor at line start is dropped silently, "+
+				"and a rule@v2 report missing exactly its two 社融 sections becomes "+
+				"indistinguishable from a valid rule@v1 one — so this is refused rather "+
+				"than guessed. Common cause: leading whitespace before the ordinal "+
+				"(stripHTML folds runs of spaces but does not remove them at line start)",
+			len(secs), i, firstOrdinalOf(s.Title), want)
+	}
+	return nil
+}
+
+// firstOrdinalOf 取标题里「、」之前的部分用于报错，取不到就退回整个标题。
+// 只为让错误信息说出**实际**首个序号，不参与任何判定。
+func firstOrdinalOf(title string) string {
+	if i := strings.Index(title, "、"); i > 0 {
+		return title[:i] + "、"
+	}
+	return title
+}
+
 // detectExtractor 按内容判定模板版本。
 //
 // # 为什么按内容而不按日期
@@ -121,11 +197,21 @@ const tsfSectionKeyword = "社会融资规模存量"
 // 宁可这一期人工看一眼，也不要让一个错误的 extractor 值流进权威表——它还会被
 // 写进 hestia_observations.extractor 列，事后连追查都无从下手。
 //
-// 只看标题（而非 has）判定社融：2025 的尾注段正文也含「社会融资规模存量」的完整
+// 只看标题（而非正文）判定社融：2025 的尾注段正文也含「社会融资规模存量」的完整
 // 字面（注 2），按正文判定会让任何含尾注的期次都被认成有社融板块。「标题含 kw 的
 // 第一个板块」正是 findSection 的语义，直接复用它，免得同一条判据有两份实现、
 // 将来只改了一处。
+//
+// 序号连续性先于版式判定：残缺的 v2 在版式上与合法的 v1 无法区分（见
+// checkSectionOrdinals），等到版式分支才判就已经晚了——那时它已经是个合法形态。
+// 空输入跳过：那是「一个板块都没切出来」，由下面的版式分支报，信息更全。
 func detectExtractor(secs []section) (string, error) {
+	if len(secs) > 0 {
+		if err := checkSectionOrdinals(secs); err != nil {
+			return "", err
+		}
+	}
+
 	_, hasTSF := findSection(secs, tsfSectionKeyword)
 
 	switch {
