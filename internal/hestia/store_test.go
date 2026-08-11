@@ -25,6 +25,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -346,14 +347,19 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 // Save 在 TASK-005 引入，本条随之更新为 [Close, DB, Save]——**仍是精确集合相等，
 // 没有弱化成「包含」**：新增任何导出方法都必须在这里显式登记一次，让「又开了一个
 // 写口」成为一个需要动手改测试的决定。ADR-0003 在同机场景下唯一的防线就是 Save 的签名。
+//
+// Preceding 在 M1b-3 / TASK-003 追加，本条随之更新为 [Close, DB, Preceding, Save]，
+// **仍是精确集合相等**。它是 Store 的第一个读方法：只发 SELECT、走 v_hestia_current
+// 视图，不碰任何写路径，因此扩大的是读面而不是写面。登记而不放松的理由同 Save——
+// 断言的形状会把任何新增导出方法都判成违规（无论读写），这正是它逼人留下这段说明的方式。
 func TestStoreExposesNoWriteMethods(t *testing.T) {
 	typ := reflect.TypeOf(&Store{})
 	got := make([]string, typ.NumMethod())
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	assert.Equal(t, []string{"Close", "DB", "Save"}, got,
-		"只应导出 Close、DB 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
+	assert.Equal(t, []string{"Close", "DB", "Preceding", "Save"}, got,
+		"只应导出 Close、DB、Preceding 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
 }
 
 // TestPackageExposesNoWriteFunctions 把写口守卫从「*Store 的方法集」扩到**包导出面**。
@@ -397,8 +403,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Save"}, got,
-		"包的导出函数/方法必须恰好是这六个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Preceding", "Store.Save"}, got,
+		"包的导出函数/方法必须恰好是这七个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -420,6 +426,14 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // 既不碰库也不带副作用；它必须导出，是因为 M1b-4 的 cobra 命令要拿它当
 // Validate 的默认入参——校验阈值属于调用方能覆盖的策略，而不是包的内部常量。
 // 它排在名单最前是 sort.Strings 的字节序结果（"D" < "N"），不是优先级。
+//
+// —— 为什么名单里多了 Store.Preceding（M1b-3 / TASK-003 追加）——
+//
+// 同样是登记。它是 Store 的第一个**读**方法（SELECT + v_hestia_current 视图），
+// 闸门层经 History 窄接口消费它。与上面 DefaultThresholds 的区别在于：Preceding 是
+// *Store 的方法，所以它**同时**打红本条（AST 版）与 TestStoreExposesNoWriteMethods
+// （reflect 版）；DefaultThresholds 是包级函数，只打红本条。两条都登记过才算数——
+// 这恰好也演示了那两条测试为什么互补而不能互替。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
@@ -1513,3 +1527,153 @@ func TestDBReturnsReadOnlyHandle(t *testing.T) {
 		assert.Truef(t, has, "DB() 的返回接口应提供 %s", want)
 	}
 }
+
+// —— TASK-003: History 窄接口与 Store.Preceding ——
+
+// saveMonthly 存一期已过闸的月度观测，供需要历史序列的测试造数据。
+//
+// 用 monthly 而不是 validMeta() 的 h1：h1 期次的月份必须是 06
+// （types.go 的 periodEndMonth 校验），造六期连续历史就要跨六年。
+func saveMonthly(t *testing.T, s *Store, period string, values map[string]float64) {
+	t.Helper()
+	_, err := s.Save(context.Background(), Observation{
+		Meta: Meta{
+			Period:         period,
+			PeriodType:     "monthly",
+			PublishedAt:    period + "-15",
+			ArticleID:      "art-" + period,
+			CaliberVersion: "2025-01",
+			Extractor:      extractorV2,
+		},
+		Values: values,
+	}, passing())
+	require.NoError(t, err)
+}
+
+func TestPrecedingReturnsRecentPeriodsInDescendingOrder(t *testing.T) {
+	s := newTestStore(t)
+	for _, p := range []string{"2025-10", "2025-11", "2025-12", "2026-01"} {
+		saveMonthly(t, s, p, map[string]float64{FieldM2: 300})
+	}
+
+	got, err := s.Preceding(context.Background(), "2026-01", "monthly", 2)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "LIMIT 必须生效，且不含 period 自身")
+	assert.Equal(t, "2025-12", got[0].Meta.Period, "最近的一期排最前")
+	assert.Equal(t, "2025-11", got[1].Meta.Period)
+}
+
+// 库里的 NULL 必须还原成「键不存在」，显式写入的 0 必须保留。
+//
+// 两个方向缺一不可：只查前者会放过「把 0 也读丢了」，只查后者会放过
+// 「把 NULL 读成 0」。后者更危险——stock_continuity 会拿这个 0 算环比。
+func TestPrecedingRestoresAbsenceNotZero(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{
+		FieldM2:             300,
+		FieldDepositCorpYTD: 0, // 显式的零：真的「增量为零」
+	})
+
+	got, err := s.Preceding(context.Background(), "2026-01", "monthly", 1)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	_, hasTSF := got[0].Values[FieldTSFStock]
+	assert.False(t, hasTSF, "未写入的字段读回来不该出现在 Values 里")
+
+	v, hasZero := got[0].Values[FieldDepositCorpYTD]
+	require.True(t, hasZero, "显式写入的 0 必须保留，不能被当成缺失")
+	assert.Equal(t, 0.0, v)
+}
+
+func TestPrecedingIsolatesPeriodType(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	// 同一个 period 字符串上再存一条 annual：期次相同，序列不同。
+	_, err := s.Save(context.Background(), Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-15",
+			ArticleID: "art-annual", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 999},
+	}, passing())
+	require.NoError(t, err)
+
+	got, err := s.Preceding(context.Background(), "2026-01", "monthly", 6)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "annual 那条不该混进 monthly 序列")
+	assert.Equal(t, 300.0, got[0].Values[FieldM2])
+}
+
+// 修订产生新行而非覆盖，Preceding 走 v_hestia_current 视图，必须看到修订后的值。
+func TestPrecedingSeesRevisions(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	_, err := s.Save(context.Background(), Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "monthly", PublishedAt: "2026-02-20",
+			ArticleID: "art-2025-12-rev", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 305},
+	}, passing())
+	require.NoError(t, err)
+
+	got, err := s.Preceding(context.Background(), "2026-03", "monthly", 6)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "修订不产生第二期，只是同一期的新行")
+	assert.Equal(t, 305.0, got[0].Values[FieldM2], "必须取修订后的值")
+}
+
+func TestPrecedingOnEmptyHistory(t *testing.T) {
+	s := newTestStore(t)
+	got, err := s.Preceding(context.Background(), "2026-01", "monthly", 6)
+	require.NoError(t, err, "首期入库是正常路径，不是错误")
+	assert.Empty(t, got)
+}
+
+// SQLite 的 LIMIT -1 表示不限制。不挡住非正数，n=0 会把整个序列拉回来。
+func TestPrecedingRejectsNonPositiveN(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	for _, n := range []int{0, -1} {
+		got, err := s.Preceding(context.Background(), "2026-01", "monthly", n)
+		require.NoError(t, err)
+		assert.Empty(t, got, "n=%d 应返回空而不是全部", n)
+	}
+}
+
+// 查库真失败时必须返回 error，且**包住底层 err**（errors.Is 找得到）并带上
+// period/periodType 上下文。
+//
+// 计划的 Step 1-12 没有覆盖这条（DoD error_handling[0] 要求），故本条为 TASK-003
+// 自行补写。用「已取消的 context」而不是「关掉的库」来触发：database/sql 在 Close
+// 之后返回的是未导出的 errDBClosed，没有可用的 sentinel，只能比对错误串；而
+// context.Canceled 是标准 sentinel，能真的把 errors.Is 这条判据测出来。
+//
+// 上下文之所以必测：三处 %w 的包裹都写着同一个前缀，漏掉任何一处都会让运维
+// 拿到一条不知道是哪个期次、哪条序列出的错。
+func TestPrecedingWrapsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 先取消，QueryContext 必然失败
+
+	got, err := s.Preceding(ctx, "2026-01", "monthly", 6)
+	require.Error(t, err, "查库失败必须返回 error")
+	assert.Nil(t, got, "出错时不得返回半截结果")
+	assert.ErrorIs(t, err, context.Canceled, "必须用 %w 包住底层 err，否则调用方无法分辨是取消还是真故障")
+	assert.ErrorContains(t, err, "2026-01", "错误信息要带 period")
+	assert.ErrorContains(t, err, "monthly", "错误信息要带 periodType")
+
+	// errors.Is 为真也可能是「err 本身就是 context.Canceled」（即根本没包）。
+	// 要的是「包住」，所以额外断言 Unwrap 后还剩东西、且外层不等于内层。
+	require.NotErrorIs(t, errors.Unwrap(err), err)
+	assert.NotEqual(t, context.Canceled, err, "应是包裹后的错误而不是裸 sentinel")
+}
+
+// Store 必须满足 History。签名一旦漂移，这行在编译期就红。
+var _ History = (*Store)(nil)

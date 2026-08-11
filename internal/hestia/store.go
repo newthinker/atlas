@@ -212,6 +212,76 @@ type Querier interface {
 // 返回类型保证，而不是靠调用方自觉。
 func (s *Store) DB() Querier { return s.db }
 
+// Preceding 返回 period 之前最近 n 期的当前行，按 period 降序。
+//
+// 只在同一个 period_type 内比较：月度与半年度是两条独立序列，社融存量的环比
+// 在它们之间比较毫无意义。period 是 YYYY-MM 定宽格式，字典序即时间序。
+//
+// 这是 Store 的第一个读方法。只读——DB() 在 M1b-1.5 已收窄成 Querier，
+// 「Save 是唯一写入口」不受影响。
+func (s *Store) Preceding(ctx context.Context, period, periodType string, n int) ([]Observation, error) {
+	// SQLite 的 LIMIT -1 表示「不限制」。不挡住非正数，一次 n=0 的调用会把
+	// 整个序列拉回来，而调用方以为自己什么都没要。
+	if n <= 0 {
+		return nil, nil
+	}
+
+	cols := slices.Concat(metaColumns, fieldOrder)
+	q := fmt.Sprintf(
+		"SELECT %s FROM %s WHERE period < ? AND period_type = ? ORDER BY period DESC LIMIT ?",
+		strings.Join(cols, ", "), viewCurrent)
+
+	rows, err := s.db.QueryContext(ctx, q, period, periodType, n)
+	if err != nil {
+		return nil, fmt.Errorf("hestia store preceding %s/%s: %w", period, periodType, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Observation
+	for rows.Next() {
+		obs, err := scanObservation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("hestia store preceding %s/%s: %w", period, periodType, err)
+		}
+		out = append(out, obs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hestia store preceding %s/%s: %w", period, periodType, err)
+	}
+	return out, nil
+}
+
+// scanObservation 把一行还原成 Observation。列顺序与 insertSQL 对称：
+// metaColumns 在前，fieldOrder 在后。
+//
+// 业务字段用 sql.NullFloat64：库里的 NULL 必须还原成「键不存在」而不是 0。
+// 写入时 Values 里没有的键就不写那一列（insertSQL 的注释），读回来若把 NULL
+// 当 0，「未披露」就变成了「增量为零」——stock_continuity 会拿这个 0 去算
+// 环比，得出 -100% 的假警报。
+func scanObservation(rows *sql.Rows) (Observation, error) {
+	var m Meta
+	vals := make([]sql.NullFloat64, len(fieldOrder))
+
+	dest := make([]any, 0, len(metaColumns)+len(fieldOrder))
+	dest = append(dest,
+		&m.Period, &m.PeriodType, &m.PublishedAt,
+		&m.ArticleID, &m.CaliberVersion, &m.Extractor, &m.IngestedAt)
+	for i := range vals {
+		dest = append(dest, &vals[i])
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return Observation{}, err
+	}
+
+	obs := Observation{Meta: m, Values: make(map[string]float64, len(fieldOrder))}
+	for i, f := range fieldOrder {
+		if vals[i].Valid {
+			obs.Values[f] = vals[i].Float64
+		}
+	}
+	return obs, nil
+}
+
 // Save 是唯一的写入口。
 //
 // 没有 ValidationReport 就调不了它——这是 ADR-0003 在同机场景下的类型级表达。
