@@ -10,6 +10,20 @@ import (
 	"strings"
 )
 
+// 关于浮点：增量类字段由 万亿×10000 得出，个别值带 ≤1 ULP 的表示误差
+// （实测 4.81×10000 = 48099.99999999999）。**闸门一律不得对它们做精确相等
+// 比较**。现有七道全是不等式或容差比较，误差被完全盖住——
+// 见 TestTrillionConversionCarriesULPError。
+//
+// ⚠️ 验证这件事时不能在源码里手算：Go 的**无类型常量**算术是精确的，写
+// 4.81*10000 得到精确的 48100，会得出「没有误差」的相反结论。必须用运行时变量。
+//
+// 相关但不同的一条，写给改边界测试的人：阈值边界用例之所以成立，条件是
+// **两边舍入到同一个 double**，不是「比例精确可表示」——0.02 本身就不是
+// （位模式 0x3f947ae147ae147b，实为 0.020000000000000000416）。
+// 而它成立与否取决于**参与运算的量是否精确**，不取决于算路长短：
+// 400→408 这类整数输入成立，123→125.46 就低 15 ULP 而失效。
+
 // History 是闸门层对历史数据的全部需求。
 //
 // 定义在消费方而不是 Store 那边：闸门只要「前 n 期」这一个能力，把它收成
@@ -76,12 +90,32 @@ func Validate(ctx context.Context, obs Observation, h History, cfg Thresholds) (
 	for _, g := range gates {
 		c := g.fn(in)
 		c.ID = g.id // 闸门函数不写自己的 ID，避免表与实现两处对不上
+		if ex := cfg.exemptionFor(obs.Meta.Period, g.id); ex != nil {
+			// 命中豁免记 skipped 而不是 passed：豁免与通过在数据上必须可分，
+			// 把「这次没查」记成「查了没问题」等于伪造一次检查记录。
+			//
+			// 保留 Value——闸门算出的残差仍是有用的观测，只是不据此判定。
+			c = Check{ID: g.id, Status: CheckSkipped, Value: c.Value,
+				Reason: "caliber_exemption:" + ex.Version}
+		}
 		if c.Status == CheckFailed {
 			passed = false
 		}
 		checks = append(checks, c)
 	}
 	return ValidationReport{Passed: passed, Checks: checks}, nil
+}
+
+// knownCheckIDs 从 gates 派生，不手写第二份 ID 列表。
+//
+// 手写的那份会在加闸门时静默过期：豁免配置照旧通过校验，而新闸门的 ID
+// 被当成拼写错误拒掉——或者更糟，拼错的 ID 因为不在旧列表里反而被放行。
+func knownCheckIDs() []string {
+	out := make([]string, len(gates))
+	for i, g := range gates {
+		out[i] = g.id
+	}
+	return out
 }
 
 // gateInput 是每道闸门拿到的全部输入。

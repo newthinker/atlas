@@ -33,6 +33,28 @@ func TestDefaultThresholdsAdmitM0Measurements(t *testing.T) {
 //
 // 这条测试防的是「有人顺手填了几个看起来合理的数」——那会让一道本该沉默的
 // 闸门开始产生未经验证的判定，**而它错了不会响亮失败，只是区间放宽**。
+//
+// # 读到这里的人：填表时改这条断言还不够，另有三件事必须一并补
+//
+// magnitude_sanity 现在恒 skipped{not_calibrated}，所以它的守卫缺口至今**影响为零**。
+// 填表的那一刻这道闸开始真正判定，三个缺口同时变成真的（详见
+// .arcforge/docs/02-plan/findings-carryover.md 的 F12 / F17 / F19）：
+//
+//  1. **遍历顺序守卫**（F12）：实现须遍历 fieldOrder 而非 map ——
+//     map 迭代顺序随机，同一份数据两次跑会报出不同的越界字段，排查变成猜谜。
+//     当前该缺口是**存活变异**（改成遍历 map 后整套测试全绿）。补救方法已实证。
+//  2. **Min / Max 两个边界方向**（F17 #5/#6）：`v < r.Min` 与 `v > r.Max` 各自的
+//     比较符现在都没有守卫。现有用例用 42 对区间 [3,4]，**离边界两个数量级**，
+//     把 `<` 改成 `<=` 不会有任何测试转红。
+//  3. **Range.Unit 的单位**：Unit 至今没有消费者。填表时写下单位就会发现，
+//     包注释声称的三类单位（万亿元/亿元/百分数）不覆盖 fx_reserve（万亿美元）
+//     与 fx_rate（元/美元）。
+//
+// 为什么把这段挂在这里而不是只写在那份文档里：**这条断言是必然会响的绊线** ——
+// 任何人填表都必须先撞红它、必须动手改它，于是必然读到这段。而 findings-carryover.md
+// 是一份**需要被记起来**的文档，M1c 那天的真实路径是「填表 → 红 → 改它 → 没有
+// 任何东西提示还要补边界测试」，除非那人恰好想起 F17。
+// 同 store_test.go 的导出面守卫：**把提醒挂在绊线上，而不是挂在需要被记起来的文档里。**
 func TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated(t *testing.T) {
 	assert.Empty(t, DefaultThresholds().MagnitudeRanges,
 		"区间表必须留空到 M1c 用回填分布标定")

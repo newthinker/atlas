@@ -763,11 +763,19 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 		wantStatus CheckStatus
 		wantRatio  float64
 	}{
-		// 8/400 的浮点商恰好等于字面量 0.02 的表示，所以 r <= max 成立。
-		// 此处选精确可表示的比例是**求稳**：本闸的算路只有一次减法加一次除法，
-		// 严格说并非必要（同形的 corp_loan 实测换成非 2 的幂同样杀得掉变异）。
-		// 但在「先求均值再相减」那类链式算路里就是必要的——TASK-005 的漂移实测
-		// 5%→8% 得 0.029999999999999992（低 2 ULP），会静默落到阈值下方。
+		// 8/400 的浮点商与字面量 0.02 **舍入到同一个 double**，所以 r <= max 成立。
+		//
+		// ⚠️ 注意措辞：0.02 **本身并不精确可表示**（位模式 0x3f947ae147ae147b，
+		// 实为 0.020000000000000000416）。这里成立的条件是两边落到同一个 double，
+		// 而不是「比例是精确值」。
+		//
+		// 让它成立的是**参与运算的量精确**（cur−prev 与 prev 都是精确整数），
+		// **不是算路短**。实测同一道闸在非整数输入下同样失效：
+		//   400→408 / 300→306 / 250→255 / 350→357  ⇒ r == 0.02 为 true
+		//   123→125.46                             ⇒ false（低 15 ULP）
+		//   400.1→408.102                          ⇒ false
+		// ⇒ **改这几行常量时必须保持 cur−prev 与 prev 为精确整数**；换成「看起来
+		// 更真实」的小数会让这条边界测试**静默失效**，而不会有任何东西转红。
 		{"恰好在阈值上", 400, 408, CheckPassed, 0.02},
 		{"阈值内", 400, 404, CheckPassed, 0.01},
 		{"超过阈值", 400, 420, CheckFailed, 0.05},
@@ -803,4 +811,235 @@ func TestStockContinuitySkipsOnZeroDenominator(t *testing.T) {
 		assert.False(t, math.IsInf(*c.Value, 0) || math.IsNaN(*c.Value),
 			"Value 不得是 Inf/NaN——Save 会拒绝，整期数据会消失")
 	}
+}
+
+// —— TASK-007: 豁免应用、Save 接线、ULP 契约 ——
+
+// gates 恰好七道，ID 与 M0 契约样本一致。
+//
+// 这不是同义反复：M0 的两份契约样本已按这七个 ID 写好，Grafana 面板与
+// pending 的人工复核流程都依赖它们。加一道闸门就要同步改契约文档——
+// 这条测试是那个提醒。
+func TestGatesMatchContractedCheckIDs(t *testing.T) {
+	want := []string{
+		"monetary_hierarchy", "deposit_sum", "corp_loan_reconcile",
+		"stock_continuity", "yoy_sanity", "completeness", "magnitude_sanity",
+	}
+	assert.Equal(t, want, knownCheckIDs(), "闸门清单与 M0 契约样本不一致")
+}
+
+// 命中豁免记 skipped 而不是 passed——豁免与通过在数据上必须可分。
+func TestCaliberExemptionRecordsSkipNotPass(t *testing.T) {
+	cfg := DefaultThresholds()
+	cfg.CaliberExemptions = []CaliberExemption{{
+		Version:    "2025-01",
+		Period:     validMeta().Period,
+		SkipChecks: []string{"monetary_hierarchy"},
+		Reason:     "M1 口径纳入个人活期存款，层次关系在切换期不成立",
+	}}
+
+	obs := obsFrom(golden2025, extractorV2)
+	obs.Values[FieldM1] = obs.Values[FieldM2] + 1 // 本该失败
+
+	rep, err := Validate(context.Background(), obs, NoHistory, cfg)
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "monetary_hierarchy")
+	assert.Equal(t, CheckSkipped, c.Status, "豁免不该记成 passed")
+	assert.Equal(t, "caliber_exemption:2025-01", c.Reason)
+	assert.True(t, rep.Passed, "被豁免的闸门不阻断入库")
+}
+
+// 豁免只对指定期次生效，不外溢。写成范围或前缀匹配会让一次性豁免变成永久后门。
+func TestCaliberExemptionDoesNotLeakToOtherPeriods(t *testing.T) {
+	cfg := DefaultThresholds()
+	cfg.CaliberExemptions = []CaliberExemption{{
+		Version: "2025-01", Period: "2025-01",
+		SkipChecks: []string{"monetary_hierarchy"},
+		Reason:     "口径切换期",
+	}}
+
+	obs := obsFrom(golden2025, extractorV2) // Period 是 validMeta() 的 2026-06
+	obs.Values[FieldM1] = obs.Values[FieldM2] + 1
+
+	rep, err := Validate(context.Background(), obs, NoHistory, cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, CheckFailed, findCheck(t, rep, "monetary_hierarchy").Status,
+		"别的期次的豁免不该在这期生效")
+	assert.False(t, rep.Passed)
+}
+
+// SkipChecks 里的 ID 必须真实存在。
+//
+// 打错一个字（deposit_summ）在没有校验时会静默失效——豁免看起来配上了，
+// 实际那道闸门照跑，而配置的人以为已经跳过。
+func TestExemptionRejectsUnknownCheckID(t *testing.T) {
+	cfg := DefaultThresholds()
+	cfg.CaliberExemptions = []CaliberExemption{{
+		Version: "2025-01", Period: "2025-01",
+		SkipChecks: []string{"deposit_summ"}, Reason: "拼错的 ID",
+	}}
+
+	_, err := Validate(context.Background(),
+		obsFrom(golden2025, extractorV2), NoHistory, cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deposit_summ")
+}
+
+// 增量类字段由 万亿×10000 得出，个别值存在 ≤1 ULP 的表示误差。
+//
+// 这条测试钉住的是**误差存在这个事实本身**。闸门一律不得对这些值做精确相等
+// 比较——现有七道全是不等式或容差比较，所以它现在不咬人，但下一个加闸门的人
+// 不会知道，除非有东西写着。
+//
+// ⚠️ 验证时不能在源码里手算：Go 的无类型常量算术是精确的，写 4.81*10000
+// 会得到精确的 48100，从而得出「没有误差」的相反结论。必须用运行时值。
+func TestTrillionConversionCarriesULPError(t *testing.T) {
+	trillion := 4.81 // 变量，不是编译期常量表达式
+	got := trillion * 10000
+
+	assert.NotEqual(t, 48100.0, got,
+		"若这个等式成立说明换算方式变了——去掉闸门里『不得精确相等比较』的契约")
+	assert.InDelta(t, 48100.0, got, 1e-9,
+		"误差必须小到闸门的容差完全盖住；不成立说明换算出了真问题")
+}
+
+// Validate 的产出必须能被 Save 接受。
+//
+// 两边各自的测试都绿，接起来仍可能不通：Save 对报告另有要求（Checks 非空、
+// skipped 必带 reason、Value 必须有限），而 Validate 是唯一的报告生产者。
+// 这条测试同时验证 Store 能当 History 用。
+func TestValidateOutputIsAcceptedBySave(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		values     map[string]float64
+		extractor  string
+		period     string
+		periodType string
+	}{
+		{"v2 全字段", golden2025, extractorV2, "2025-12", "annual"},
+		{"v1 无社融", golden2020, extractorV1, "2020-06", "h1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			obs := Observation{
+				Meta: Meta{
+					Period: tt.period, PeriodType: tt.periodType,
+					PublishedAt: tt.period + "-15", ArticleID: "art-" + tt.period,
+					CaliberVersion: "2025-01", Extractor: tt.extractor,
+				},
+				Values: maps.Clone(tt.values),
+			}
+
+			rep, err := Validate(ctx, obs, s, DefaultThresholds())
+			require.NoError(t, err)
+
+			out, err := s.Save(ctx, obs, rep)
+			require.NoError(t, err, "Validate 的产出必须能被 Save 接受")
+			assert.Equal(t, TableObservations, out.Table)
+		})
+	}
+}
+
+// 没过闸的数据进 pending，报告本身也要能被序列化。
+func TestFailedValidationLandsInPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	obs := Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "annual",
+			PublishedAt: "2026-01-15", ArticleID: "art-bad",
+			CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: maps.Clone(golden2025),
+	}
+	obs.Values[FieldM1] = obs.Values[FieldM2] + 1 // 层次倒置
+
+	rep, err := Validate(ctx, obs, s, DefaultThresholds())
+	require.NoError(t, err)
+	require.False(t, rep.Passed)
+
+	out, err := s.Save(ctx, obs, rep)
+	require.NoError(t, err)
+	assert.Equal(t, TablePending, out.Table)
+}
+
+// —— 以下两条是 Leader 追加的要求（DoD non_functional[2]），不在上游计划里 ——
+
+// monetary_hierarchy 的两处比较都必须是**严格**大于。
+//
+// 验证者实测：把 `m2 > m1 && m1 > m0` 改成 `>=`，两处**均无测试转红**。
+// 即「M2 恰好等于 M1」会被判 passed —— 而 M2 严格含 M1（M2 = M1 + 准货币），
+// 相等意味着准货币为零，那是可疑数据而不是正常数据。
+//
+// 这与 magnitude 的边界缺口同形，但语义上更实在：magnitude 恒 skipped 至 M1c，
+// 而 monetary_hierarchy **每期都在跑**，是七道闸里当下就有信号的三道之一。
+//
+// 选数：直接令两数相等，不涉及任何除法或换算，等号成立与否只取决于比较符。
+func TestMonetaryHierarchyRejectsEquality(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]float64)
+	}{
+		{"M2 恰好等于 M1", func(v map[string]float64) { v[FieldM2] = v[FieldM1] }},
+		{"M1 恰好等于 M0", func(v map[string]float64) { v[FieldM1] = v[FieldM0] }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obs := obsFrom(golden2025, extractorV2)
+			tt.mutate(obs.Values)
+
+			rep, err := Validate(context.Background(), obs, NoHistory, DefaultThresholds())
+			require.NoError(t, err)
+
+			c := findCheck(t, rep, "monetary_hierarchy")
+			assert.Equal(t, CheckFailed, c.Status,
+				"层次必须严格递减；这里变红说明比较符被放宽成了 >=")
+			assert.False(t, rep.Passed)
+		})
+	}
+}
+
+// 豁免生效时报告仍须逐行齐全。
+//
+// 与 TestReportAlwaysContainsEveryGate 互补而非重复：那条跑的是**无豁免**配置，
+// 覆盖不到本任务新加的豁免分支。豁免分支整个替换了 Check 值，若写成 `continue`
+// 就会让被豁免的闸门**从报告里消失** —— 而 rep.Passed 照样是 true，
+// 看起来正是「豁免生效了」的样子。删掉任一条都会重新开一个缺口。
+func TestReportKeepsEveryGateUnderExemption(t *testing.T) {
+	cfg := DefaultThresholds()
+	cfg.CaliberExemptions = []CaliberExemption{{
+		Version:    "2025-01",
+		Period:     validMeta().Period,
+		SkipChecks: []string{"monetary_hierarchy", "yoy_sanity"},
+		Reason:     "口径切换期，层次与同比均不可比",
+	}}
+
+	obs := obsFrom(golden2025, extractorV2)
+	obs.Values[FieldM1] = obs.Values[FieldM2] + 1 // 本该 failed 的输入
+
+	rep, err := Validate(context.Background(), obs, NoHistory, cfg)
+	require.NoError(t, err)
+
+	var gotIDs []string
+	for _, c := range rep.Checks {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	assert.Equal(t, knownCheckIDs(), gotIDs,
+		"豁免只改判定，不得让闸门从报告里消失")
+
+	// 被豁免的两道都记 skipped 且带 reason（Save 会拒绝无 reason 的 skip）
+	for _, id := range []string{"monetary_hierarchy", "yoy_sanity"} {
+		c := findCheck(t, rep, id)
+		assert.Equal(t, CheckSkipped, c.Status, "%s 应记 skipped", id)
+		assert.Equal(t, "caliber_exemption:2025-01", c.Reason)
+	}
+	// yoy_sanity 本来会算出 Value，豁免后必须保留——残差仍是有用的观测
+	assert.NotNil(t, findCheck(t, rep, "yoy_sanity").Value,
+		"豁免保留 Value：闸门算出的观测仍有用，只是不据此判定")
 }

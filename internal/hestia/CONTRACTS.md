@@ -238,6 +238,97 @@ H10 的实测把 `2026-12/monthly` 与 `2026-06/annual`、`2026-03/h1` 并列为
 有一条从未被声明的张力**。当前设计下，央行改一句话会让整期 54 个字段全部落空，
 没有「入 53 个、标 1 个 pending」的路径。
 
+## Sprint 035 · M1b-3 validate
+
+七道闸门与 `Validate` 落地。以下三节是**交付时的诚实状态**，不是缺陷清单。
+
+### 七道闸门的实际防护力
+
+交付时只有**三道半**真正拦得住东西：
+
+| 闸门 | 状态 | 何时有声 |
+|---|---|---|
+| `monetary_hierarchy` | ✅ 有信号 | 现在 |
+| `deposit_sum` | ⚠️ 弱信号 | 绝对值现在（±12% 容差，实测残差 7.6–9.1%，余量仅 3pct）；漂移判据待 M1c |
+| `corp_loan_reconcile` | ✅ 有信号 | 现在 |
+| `yoy_sanity` | ✅ 有信号 | 现在 |
+| `stock_continuity` | ⏸ 恒 skipped | M1c 回填出连续序列后 |
+| `completeness` | ⏸ 恒 passed | M1c 加 LLM 兜底、抽取变成部分成功后 |
+| `magnitude_sanity` | ⏸ 恒 skipped | M1c 用回填分布标定 `MagnitudeRanges` 后 |
+
+后三道都依赖 M1c 的回填数据，会在**同一时刻**一起从沉默变成有声。
+
+### 边界守卫收口表
+
+`validate.go` 现有 **12 个比较运算符**（按最宽正则扫描后逐个标注，方法论见
+`findings-carryover.md` 的 F19；**空缺明写为空缺，含判定不补的那些及理由**）：
+
+| # | 位置 | 归属 | 守卫 |
+|---|---|---|---|
+| 1–2 | `m2 > m1 && m1 > m0` | monetary_hierarchy | ✅ `TestMonetaryHierarchyRejectsEquality`（Sprint 035 收尾补） |
+| 3 | `r > DepositSumTolerance` | deposit_sum | ✅ |
+| 4 | `len(hist) < minDriftHistory` | deposit_sum | ✅ |
+| 5 | `drift > DepositSumDriftMax` | deposit_sum | ✅ |
+| 6 | `r <= CorpLoanTolerance` | corp_loan_reconcile | ✅ |
+| 7 | `r <= StockContinuityMax` | stock_continuity | ✅ |
+| 8 | `worst <= YoYSanityMax` | yoy_sanity | ✅ |
+| 9 | `a > worst`（取最大者） | yoy_sanity | ❌ **裁定不补**：只影响并列时 `Reason` 里报哪个字段名，不影响判定 |
+| 10 | `len(s) <= n`（firstN 截断） | 错误文案 | ❌ **裁定不补**：纯展示，不参与任何判定 |
+| 11–12 | `v < r.Min \|\| v > r.Max` | magnitude_sanity | ❌ **留 M1c**：该闸恒 skipped，缺口当前影响为零；填表时必补 |
+
+⇒ 8 个有守卫、4 个明确无守卫（2 个裁定不补 + 2 个留 M1c）。
+
+### 留给 M1c 的三件事
+
+1. **`MagnitudeRanges` 要用回填分布标定**，不得拍脑袋。填表时**另有三件事必须一并补**
+   （遍历顺序守卫、`Min`/`Max` 两个边界方向、`Range.Unit` 的单位）——
+   这段提醒已挂在 `thresholds_test.go` 的 `TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated`
+   上，那条 `assert.Empty` 是**必然会响的绊线**：任何人填表都必须先撞红它。
+   把提醒挂在绊线上，而不是挂在需要被记起来的文档里。
+2. **`StockContinuityMax = 0.02` 未经真实数据验证**。M0 的两份样本只有一份含社融，算不出环比。
+3. **`Extractor` 需要携带模板版本**。`llm-fallback@v1` 只说了「用了 LLM」，没说抽的是 v1 还是
+   v2 期次，所以 `requiredFields` 对它返回 nil、`completeness` 记 `skipped{unknown_extractor}`。
+   这是**刻意的失败信号**——M1c 启用兜底的第一天就会撞上。
+
+### 浮点契约
+
+增量类字段由 万亿×10000 得出，个别值带 ≤1 ULP 表示误差（实测
+`4.81×10000 = 48099.99999999999`）。**闸门一律不得对它们做精确相等比较。**
+现有七道全是不等式或容差比较，误差被完全盖住（`corp_loan_reconcile` 的残差是
+−1.16% 对 ±5% 容差，ULP 的相对占比约 5e-17）。见 `TestTrillionConversionCarriesULPError`。
+
+⚠️ 验证这件事时**不能在源码里手算**：Go 的**无类型常量**算术是精确的，写 `4.81*10000`
+得到精确的 48100，会得出「没有误差」的相反结论。必须用运行时变量。
+
+**一条容易写错的相关措辞**：阈值边界用例成立的条件是**两边舍入到同一个 double**，
+不是「比例精确可表示」——`0.02` 本身就不精确（位模式 `0x3f947ae147ae147b`，实为
+`0.020000000000000000416`）。而它取决于**参与运算的量是否精确**，不取决于算路长短：
+实测 `400→408` 成立、`123→125.46` 低 15 ULP 即失效。改边界用例的常量时，
+必须保持参与运算的量为精确整数，否则测试会**静默失效**。
+
+### `Check.Value` 的单位不统一，且这是刻意的
+
+| 闸门 | Value | 单位 |
+|---|---|---|
+| `deposit_sum` | 残差占比 | 比例（0.0906） |
+| `corp_loan_reconcile` | 残差绝对量（保留符号） | **亿元**（−1800） |
+| `stock_continuity` | 环比变化率 | 比例 |
+| `yoy_sanity` | 最大同比绝对值 | 百分数（25.0） |
+| `completeness` | 缺失字段数 | 个 |
+| `magnitude_sanity` | 越界字段的值 | 随字段 |
+| `monetary_hierarchy` | nil | 判的是序关系，无单一实测值 |
+
+`corp_loan_reconcile` 记亿元而非比例，是因为 spec 第 7 节与 **M0 契约样本已经这么记**
+（样本里是 `-1203`）。下游是 Grafana 面板与 pending 人工复核，把 `1.16%` 读成
+`-1203 亿元`是量纲错读。守卫见 `TestCheckValueUnitsFollowSpec`。
+
+### 口径豁免
+
+命中豁免记 `skipped{caliber_exemption:<version>}` 而**非 passed**，并**保留 Value**。
+豁免与通过在数据上必须可分——把「这次没查」记成「查了没问题」等于伪造一次检查记录。
+豁免按 `(期次, 检查 ID)` **精确匹配**，不做范围或前缀匹配（那会让一次性豁免变成永久后门）。
+`SkipChecks` 的 ID 从 `gates` 派生校验，打错一个字会响亮失败而不是静默失效。
+
 ## 相关文档
 
 - **`.arcforge/docs/05-review/qa-review-sprint033.md`** —— QA 终审报告（403 行，含每条的实测取证）

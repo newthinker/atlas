@@ -101,6 +101,15 @@ func (t Thresholds) validate() error {
 			return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 的 SkipChecks 为空: "+
 				"豁免必须按检查 ID 精确指定，不是整期跳过校验", i, ex.Period)
 		}
+		// ID 必须真实存在，且列表从 gates 派生——打错一个字（deposit_summ）在没有
+		// 这道校验时会**静默失效**：豁免看起来配上了，实际那道闸门照跑，而配置的
+		// 人以为已经跳过。M1b-3 的 T1 写这个结构时 gates 表尚不存在，故留到 T7。
+		for _, id := range ex.SkipChecks {
+			field := "caliber_exemptions[" + strconv.Itoa(i) + "].SkipChecks"
+			if err := checkEnum(field, id, knownCheckIDs()); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
