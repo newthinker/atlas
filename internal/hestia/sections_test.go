@@ -192,14 +192,6 @@ func TestSplitSectionsIgnoresInlineEnumeration(t *testing.T) {
 	assert.Contains(t, secs[0].Body, "一、二两个阶段")
 }
 
-func TestSectionHas(t *testing.T) {
-	s := section{Title: "一、社会融资规模存量同比增长8.3%", Body: "初步统计，对实体经济发放的人民币贷款…"}
-
-	assert.True(t, s.has("社会融资规模存量"), "标题命中")
-	assert.True(t, s.has("人民币贷款"), "正文命中——has 是 Title 或 Body")
-	assert.False(t, s.has("广义货币"))
-}
-
 // TestSplitSectionsIsPure 钉住 non_functional[0]：纯函数、无 I/O、
 // 不依赖包级可变状态，故同一输入重复调用必然相等。
 func TestSplitSectionsIsPure(t *testing.T) {
@@ -280,8 +272,8 @@ func TestDetectExtractorJudgesTSFByTitleOnly(t *testing.T) {
 	// 末节挂上尾注，正文里出现社融锚点的完整字面——正如 2025 样本的注 2
 	secs[5].Body = "注2：社会融资规模存量是指一定时期末实体经济从金融体系获得的资金余额。"
 
-	require.True(t, secs[5].has("社会融资规模存量"),
-		"前提：该板块正文确实含社融字面，has 看得见它")
+	require.Contains(t, secs[5].Body, "社会融资规模存量",
+		"前提：该板块正文确实含社融字面——按正文判定的话就会命中它")
 
 	got, err := detectExtractor(secs)
 	require.NoError(t, err, "六板块 + 仅正文提到社融，仍应是 rule@v1")
