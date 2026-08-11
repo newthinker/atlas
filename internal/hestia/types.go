@@ -107,11 +107,17 @@ var validExtractors = []string{"rule@v1", "rule@v2", "llm-fallback@v1"}
 // "want a|b|c" 由白名单本身拼出来，而不是另抄一遍。抄一遍的版本会在下次加口径版本
 // 或抽取器时静默过期——白名单放行了新值，错误信息却还在说旧的三个，而那条信息正是
 // 调用方判断自己该填什么的唯一依据。
+//
+// field 要传**完整**字段名（含 "meta." 之类的前缀）。前缀曾硬编码在这里，
+// M1b-3 挪到了调用点：Thresholds 的口径豁免复用本函数，而豁免不在 Meta 里，
+// 硬编码会让它输出 "unknown meta.caliber_exemptions[0].Version" —— 那是错的，
+// 它指向一个不存在的字段路径，照它去 Meta 里找只会白找一轮。
+// 两处 Meta 调用的输出因此逐字不变，前缀只是从函数体挪到了调用点。
 func checkEnum(field, val string, allowed []string) error {
 	if slices.Contains(allowed, val) {
 		return nil
 	}
-	return fmt.Errorf("hestia: unknown meta.%s %q (want %s)",
+	return fmt.Errorf("hestia: unknown %s %q (want %s)",
 		field, val, strings.Join(allowed, "|"))
 }
 
@@ -149,10 +155,10 @@ func (m Meta) validate() error {
 	if !publishedAtRE.MatchString(m.PublishedAt) {
 		return fmt.Errorf("hestia: meta.published_at %q must match YYYY-MM-DD", m.PublishedAt)
 	}
-	if err := checkEnum("caliber_version", m.CaliberVersion, validCaliberVersions); err != nil {
+	if err := checkEnum("meta.caliber_version", m.CaliberVersion, validCaliberVersions); err != nil {
 		return err
 	}
-	if err := checkEnum("extractor", m.Extractor, validExtractors); err != nil {
+	if err := checkEnum("meta.extractor", m.Extractor, validExtractors); err != nil {
 		return err
 	}
 	return nil
