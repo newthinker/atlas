@@ -108,8 +108,14 @@ func Validate(ctx context.Context, obs Observation, h History, cfg Thresholds) (
 
 // knownCheckIDs 从 gates 派生，不手写第二份 ID 列表。
 //
-// 手写的那份会在加闸门时静默过期：豁免配置照旧通过校验，而新闸门的 ID
-// 被当成拼写错误拒掉——或者更糟，拼错的 ID 因为不在旧列表里反而被放行。
+// 手写的那份会在闸门集合变动时静默过期，两个方向各有一种后果：
+//   - **少了**新增闸门的 ID ⇒ 一条合法的豁免被当成拼写错误拒掉（响亮，会被发现）
+//   - **留着**已删除闸门的 ID ⇒ 针对一道**不存在的闸**的豁免照旧通过校验，
+//     而它永远不会命中任何闸门（`exemptionFor` 比对的是真实的 gates）。
+//     配置看起来仍然有效，实际是一条死配置 —— 这个方向是**静默**的。
+//
+// 注意**拼错的 ID 任何时候都不会被放行**：checkEnum 的语义是「不在 allowed 内
+// 一律返回 error」，与列表是否过期无关。（此处原先写反了，Sprint 035 QA R2-14 纠正。）
 func knownCheckIDs() []string {
 	out := make([]string, len(gates))
 	for i, g := range gates {
