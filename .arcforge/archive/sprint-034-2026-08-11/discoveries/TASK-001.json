@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-001",
+  "title": "golden 期望值表（手工抄录）",
+  "key_findings": [
+    "两表 81 个数值全部由本 agent 逐条读原文 HTML 抄录。抄录方式：Read 工具全文读取 internal/hestia/testdata/pboc-2025-12-annual.html（正文 L319-L345）与 pboc-2020-06-h1.html（正文 L319-L335），按板块顺序逐句提取。每个 golden 条目在代码中带原文出处注释（行号 + 引号内原句），验证者可打开对应行核对。需求文档里已有一份表，但本次是独立重抄后比对，未直接照搬——比对结果：81 项全部一致，零分歧。",
+    "机械化抄录审计（一次性，未提交）：在隔离 worktree 里跑脚本检查『每个 golden 值的字面量能否在原文 HTML 中找到（原样或 ÷10000 的万亿形态）』，2025 的 54 项与 2020 的 27 项**未命中 0**。该审计只做字符串查找，不调用任何解析函数，因此不构成『由实现生成』。",
+    "⚠️ 计划书 Context Checkpoint 声称的守护不成立（与 DoD non_functional[0] 一致）：fields_test.go:193 明文 `strings.HasSuffix(name, \"_test.go\") → continue`，TestFieldNamesAppearOnlyInFieldsGo 对 golden_test.go 一行都不检查。已在 golden_test.go 头部注释显式写明『不要把它记作本文件的守护』，防止后续验证者照 Checkpoint 打勾。",
+    "2025 原文 L336 正文写「质押式回购加权**均**利率为1.4%」，缺「平」字；而同篇小标题 L334 写的是「质押式债券回购月加权平均利率为1.4%」，2020 正文 L331 则是「加权平均利率为1.89%」。T5 若按「加权平均利率」死锚，会在 2025 篇静默漏掉 rate_repo。",
+    "2020 原文混用半角标点：L320「213.49万亿元,同比增长11.1%」与「7.95万亿元,同比增长9.5%」用半角逗号；L323「票据融资增加9697亿元;非银行业金融机构贷款」用半角分号——而分号正是住户/企业作用域的边界。T5 的分句正则必须同时容忍全角与半角。",
+    "两篇的存款/贷款余额都必须取「人民币」口径，紧邻其前的「本外币」是干扰项：2025 是 328.64/271.91（干扰 336.14/275.74），2020 是 207.48/165.2（干扰 212.99/171.32）。锚点须含「人民币」三字。",
+    "「短期贷款」「中长期贷款」在同一句里出现两次，分属住户与企业两个作用域（2025 L332 / 2020 L323）。认错作用域会把住户的 -8351 记成企业的 48100。另：2020 的作用域词是「住户**部门**贷款」，2025 是「住户贷款」，措辞不同。",
+    "2025 L332「住户贷款增加4417亿元」与 L323 全部「同比多增/少增 N」都是**无对应字段的干扰值**（schema 无 loan_hh_total），不抄。每个增量分句后半截都跟着一个同比干扰数。",
+    "golden2020 的 27 项断言写成「恰好等于 fieldOrder 中全部非社融字段」（用 nonTSFFields() 从 fieldOrder 算出）而不是写死 27。写死的 27 会在下次 schema 加字段时变成一条说谎的断言。"
+  ],
+  "decisions": [
+    {
+      "decision": "goldenMeta2025 / goldenMeta2020 只填 5 项，ArticleID 与 IngestedAt 留空",
+      "rationale": "DoD functional[0] 已更正计划书的「填全七个字段」。ArticleID 是 URL 属性（M1b-4 填）、IngestedAt 由 Store.Save 覆写，golden 里填了值就永远无法与 Parse 输出相等，T7 的 Meta 比对会永久红。TestGoldenMetaIsValid 显式断言这两项为空（不只是不填），再补 ArticleID 占位后调 validate()，同时验证了 validate 要求 ArticleID 非空这条边界。"
+    },
+    {
+      "decision": "新增 TestGoldenUnitsMatchFieldClass 作为单位换算的量级守护（DoD 未点名要求测试，但 error_handling[0] 点名了这个失败模式）",
+      "rationale": "余额记万亿元、增量记亿元，两者差 10000 倍。照搬原文单位（把「2.39万亿元」记成 2.39）不会被项数或白名单检查发现，要到 T7 端到端才红，而那时现场在解析器、根因在 golden——正是 DoD 说要避免的误诊。按后缀分类断言量级：_yoy/rate_* ≤100，_ytd ≥100（全样本最小是 112 亿元），fx_rate <100，其余余额类 <1000（最大是社融存量 442.12）。它拦不住抄错数字（264100 抄成 264200 照样过），注释里写明了这个边界，没有假装它是完整守护。"
+    },
+    {
+      "decision": "逐键断言用 `for f := range fieldOrder { Contains(golden2025, f) }` 而非仅靠 Len+白名单",
+      "rationale": "DoD functional[1] 要求逐键。数学上 Len==54 且键全在 54 元素的 allFields 内已蕴含相等，但失败信息只会说「某键不在白名单」，不会指出**哪个字段漏了**。变异实测：把 FieldM0 键改成 \"bogus_field\" 后，逐键断言报出「字段 \"m0\" 未抄录」，这正是 T5 调试时需要的定位信息。"
+    },
+    {
+      "decision": "抄录审计脚本一次性执行后不提交",
+      "rationale": "它对小整数会平凡命中（如 yoy=6、flow=112 在 HTML 里必然出现），作为常驻测试会给出高于实际的信心。作为一次性审计它是有效的（变异实测：442.12→442.21 立即 MISS），结论记在本文件供抽查。"
+    },
+    {
+      "decision": "验证与变异实证在隔离 worktree 执行，而非共享工作目录",
+      "rationale": "开工时主仓库 internal/hestia/ 只有 M1b-1 的既有文件；GREEN 阶段中途（11:01）出现了他人的 strip_test.go，其引用的 stripHTML 尚未实现，导致**整个 package 编译失败**，我无法在主仓库跑任何测试。未触碰他人文件，改在 detached worktree（锚 6c51f78）里只放我的文件跑通，并 diff 确认 worktree 副本与主仓库副本逐字节一致。这同时证明了 DoD non_functional[1]：golden_test.go 只依赖 M1b-1 的 allFields/Meta/validate，在 T2-T6 全未完成时即可独立编译通过。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/golden_test.go（新建，374 行）"
+  ],
+  "interfaces_exposed": [
+    "var golden2025 map[string]float64 —— 54 项，pboc-2025-12-annual.html 的期望解析结果",
+    "var golden2020 map[string]float64 —— 27 项，pboc-2020-06-h1.html 的期望解析结果",
+    "var goldenMeta2025 Meta / var goldenMeta2020 Meta —— 各只填 5 项，ArticleID 与 IngestedAt 为空",
+    "func nonTSFFields() []string —— fieldOrder 中全部非 tsf_ 字段（27 个），供下游复用"
+  ],
+  "verification": {
+    "commit": "d6a1f59",
+    "commit_scope": "git show --stat 核实：1 file changed, 374 insertions，无他人产物混入",
+    "tests": "TestGoldenTablesAreWellFormed / TestGoldenUnitsMatchFieldClass / TestGoldenMetaIsValid 全 PASS（含 9 个子测试）",
+    "red_phase": "先以空表落盘跑出 RED：`\"map[]\" should have 54 item(s), but has 0` 与 `meta.period must not be empty`，证明断言非空转，再填值转 GREEN",
+    "mutation_evidence": [
+      "442.12→442.21：抄录审计报 MISS tsf_stock（未命中数 0→1）",
+      "键 FieldM0→\"bogus_field\"（项数仍 54）：白名单子测试报「键 \"bogus_field\" 不在 fieldOrder 中」，逐键子测试报「字段 \"m0\" 未抄录」——证明数量对而键错也会被抓",
+      "264100→26.41：单位守护报「\"deposit_flow_ytd\"=26.41 疑似仍是万亿元，增量应记亿元（×10000）」",
+      "三处变异复原后套件回到全绿（ok），证明红是变异所致而非环境问题"
+    ],
+    "coverage": "本任务不引入生产代码，无新增可覆盖语句；strip_test.go 出现前的最后一次全包测量为 90.8%",
+    "manual_transcription_mechanical_half": "golden 已于 d6a1f59 先于全部实现落盘。后续判据：`git log --diff-filter=M -- internal/hestia/golden_test.go` 在实现落地后应无修改记录。",
+    "blocked_note": "共享工作目录中他人在途的 strip_test.go 使 package 编译失败，主仓库内无法跑包测试；本任务的绿由隔离 worktree（6c51f78 + 仅本文件）证明。"
+  }
+}

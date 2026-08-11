@@ -2437,3 +2437,204 @@ test-agent-21 于 `00:00:05Z` 转空闲时 TASK-005 还不是 `verifying`（我 
 我在本 Sprint 的 final-report 里写过「转述别人的自我归咎最容易免检通过」（sprint-032 的教训），**然后原样犯了一次**：test-agent-21 那句是对**自身处境的诊断**，带着「我是当事人，我最清楚」的可信度，而它其实没读代码。
 
 **可核实的断言必须核实，无论它出自谁、听起来多合理。** 这条我已经写过三遍，这是第四次。
+
+## Sprint 034（M1b-2）— write-guard 的源/目标混淆误报
+
+**dev-agent-44 实测，三次复现，未绕过。**
+
+```bash
+cp -r .arcforge/tasks /private/tmp/.../scratchpad/tasks_exp
+→ DENY: 直接写 .arcforge/ 受保护文件被禁止(单写者模型,ISSUE-4)
+```
+
+**它把「从 `.arcforge/` 复制出来」判成了「写入 `.arcforge/`」——分不清源与目标。**
+
+第二例：命令里同时出现 `>` 重定向和 `bash .claude/scripts/validator-run.sh`（**只是调用 validator，不写它**）时，被判为写 `.claude/` 运行时资产。
+
+### 代价是真实的
+
+这次挡掉的是**一次为查清阻断风险而做的只读实验**——dev-agent-44 想用任务副本实测 `missing-discovery` 的确切触发状态（`verifying` 还是 `verified`），因此只能把结论标为「未确证」交给下游按最坏情况安排。
+
+⇒ **误报的代价不止是多打一条命令，而是让一个本可确证的事实停留在推断。**
+
+### 修法方向
+
+判据应看**重定向/写动词的目标路径**，而非命令行里是否出现受保护路径字符串。
+
+### 可行的变通（dev-agent-41 在 Sprint 033 用过）
+
+先在 scratchpad 里 `jq` 读出内容再重建文件，而不是 `cp -r` 整个目录——**读操作不触发启发式**。
+
+### 一条同族的登记
+
+本 Sprint 还撞上 `teammate-idle.sh` 把**子代理当成父实例**催办（code-simplifier 被当作 `dev-agent-44` 催了 6 次）。Sprint 033 同一问题发生过三次（当时是 `dev-agent-39`）。
+
+两条合起来看：**write-guard 与 idle-hook 的启发式各有一个「身份/目标判定不准」的失效面**，前者分不清源与目标，后者分不清父与子。**共同后果都是：正确的行为被挡住或错误的对象被唤醒，而机制本身不会告诉你它判错了。**
+
+### 附：dev 手册的那个警告需要扩写
+
+手册警告「`writes` 必须在 `dev_done` 之前补全，之后没有角色能合法补」。本 Sprint dev-agent-44 撞的是**同一个陷阱的第二个字段**——`discovery`。
+
+它 `dev_done` 后立刻被 test 接走转 `verifying`，**在那一刻失去写权**，自己去补被 DENY。
+
+⇒ 警告应从「`writes`」扩为「**任何只有 owner 能写的字段**」，并点明窗口关闭的时机是**下一次 transition**，而不是 `dev_done` 本身。
+
+## Sprint 034（M1b-2）— 按文件拆任务时，包级命名空间是共享的
+
+**本 Sprint 已发生两次，形状完全相同。**
+
+Go 的同包内所有文件（含 `_test.go`）共享一个标识符命名空间，**而任务是按文件拆的**——每个 dev 只看得见自己那两个文件。
+
+| 冲突 | 发现者 | 时机 |
+|---|---|---|
+| `golden_test.go:342` 的包级 `abs(float64)` vs T4 的 `amount.go`（金额解析文件加 `abs` 极自然） | test-agent-22 验 T1 时 | **发生前**预警 |
+| `strip_test.go:31` 的 `readSample` vs T3 的 `sections_test.go`（读 testdata 极自然） | test-agent-23 验 T2 时 | **发生前**预警 |
+
+**两次都是验证者发现的，不是 dev**——因为验证者会读整个包，而 dev 只读自己的文件。
+
+### 危害不对称
+
+- 若在 dev 写代码时冲突：编译失败，**立即可见**
+- 若在**下游任务**才冲突：**报错现场在下游、根因却在上游已冻结的文件里**（T1 的 golden 按 DoD 落盘后不得再改，只能由 T4 改名）
+
+### 处置
+
+**动手写新 helper 前先 `grep -rn "func <名字>" internal/hestia/`**，成本一秒。
+
+**更好的做法**：上游任务在 discovery 的 `interfaces_exposed` 里**列出自己声明的全部包级标识符**（不只是「产出的公开符号」）。dev-agent-44 列了 `nonEmptyLines` 却漏了 `readSample`——**它列的是「T3 可以复用什么」，而下游需要的是「有哪些名字不能再用」**，两者不是同一张表。
+
+### 附：scratchpad 也是共享命名空间
+
+dev-agent-45 报告：它用通用文件名 `ckpt.md`，被 dev-agent-44 的同名文件**静默覆盖**，导致它一度把**对方的 TASK-002 checkpoint 内容**写进了自己的文件——**写通道不校验内容归属，退出码 0，不会拦**。它是 grep 自己的任务 ID 才发现。
+
+TASK-002 的 discovery 里记的变异脚本路径也是 `scratchpad/mutate.py`，与 dev-45 同名，两边内容互相覆盖过。
+
+⇒ **scratchpad 文件名一律带实例名前缀。**
+
+### 同族的第三例：变异 harness 用 `git diff` 判定生效
+
+未跟踪文件的 `git diff` **恒为空** ⇒ 所有变异体被误报「未生效」。dev-agent-44 踩过一次（10 个全误报），dev-agent-45 因此改为先 `git add` 入索引，test-agent-23 更彻底——**自写 `difflib` 直接比对源文件内容、完全不经 git**。
+
+三者共同点：**默认了一个工具在当前上下文里的行为，而那个上下文（文件未跟踪 / 目录共享 / 命名空间共享）恰好让它失效。**
+
+## Sprint 034 更正 — 「dev_done 后失去写权」是两条独立的教训，我混成了一条
+
+**dev-agent-45 指出并核实，Leader 复核成立**（`write-matrix.json` 直读）。
+
+我先前写「dev-agent-44 与 dev-agent-45 各撞了一次『`dev_done` 后失去写权』」——**错的**。
+
+```
+owner_table:  dev_done: ["dev-*"]     ← dev 在 dev_done 时仍持有写权
+              verified: ["test-*"]
+transitions:  dev_done->verifying     ← 唯一出边
+```
+
+### 两条要分开登记
+
+**① 写权按 owner 表随 status 走。** `dev_done` 时仍在 dev 手上——dev-agent-45 正是靠这个权限把四条核实结果写进了 discovery。**真正失去写权的是 dev-agent-44**：它 `dev_done` 后被 test 接走转 `verifying`，那一刻 owner 变成 `test-*`，它去补 `discovery` 字段被 DENY。
+
+⇒ 「窗口关闭在**下一次 transition**，不是 `dev_done` 本身」——这句对的是**这一条**。
+
+**② 改代码的路径在 `dev_done` 那一刻就断了，与写权无关。** `dev_done` 的唯一出边是 `dev_done->verifying`，**没有 `dev_done->in_progress`**。dev-agent-45 想加一个 `currency()` 访问器，挡住它的不是「不能写」，是「没有合法路径回到开发态」。
+
+dev-agent-45 的表述值得原样保留：
+
+> 这条更早生效，也更容易被忽略：**dev 会以为「我还能写任务文件，所以还能补东西」，而实际能补的只有 discovery/task 字段，代码已经封板。**
+
+### 为什么这个区分重要
+
+混成一条会让下一个 dev 得出错误的应对：以为「在 `dev_done` 前把字段都补齐就安全了」——**而代码封板的时机更早，且补字段的权限在 `dev_done` 时其实还在**。
+
+两条的正确应对不同：
+- 对①：`dev_done` 前补齐**只有 owner 能写的字段**（`writes`、`discovery`）
+- 对②：`dev_done` 前确认**代码本身不需要再改**——因为之后只能走 `rejected` 打回，白涨 `rework_count`
+
+### 附：dev-agent-45 报的 validator 退出码，我实测不成立
+
+它说「validator 的问题报在 stdout 而 `VALIDATOR_EXIT=0`，若用退出码判断解阻会误判」。
+
+**我不经管道实测是 `exit=1`**（输出含 1 个 `✗`）。它的 `exit=0` 大概率来自管道——本 Sprint 已有三人各撞一次「跨管道取 `$?`」。
+
+⇒ **它对机制的修正是对的（已核实），对退出码的观察是错的（已实测）。同一条消息里两者并存。**
+
+## Sprint 034 — 跨管道取 $? 是「系统性报成功」，不是「丢失信息」
+
+**dev-agent-45 自查后给出的定性，比错误本身有价值。**
+
+```bash
+validator-run.sh … 2>&1 | tail -15; echo "VALIDATOR_EXIT=$?"   # → 0（tail 的）
+validator-run.sh … >/tmp/v.txt 2>&1; echo $?                   # → 1（真实）
+```
+
+它的原话：
+
+> 它打出的不是空值而是**非空且貌似合理的 `0`**，所以「空的自证字段=没自证」那条规则不会触发。而且 `tail`/`head` 几乎总是 exit 0 ⇒ **跨管道取 `$?` 不是「丢失信息」而是「系统性地报成功」——它只会把失败读成成功，不会反过来。**
+
+### 为什么这个定性重要
+
+我们已有的防线是「自证字段为空 = 没自证」。**这个陷阱恰好绕过它**：它给出一个非空、合法、且总是指向「通过」的值。
+
+⇒ **单向偏置的错误比随机噪音危险**：随机噪音会让你偶尔看到不该看到的失败从而起疑；单向偏置永远只朝一个方向骗你。
+
+### 同一个错误犯三次，只有一次造成后果
+
+dev-agent-45 自述在同一 session 里至少犯过三次（`transition dev_done … | tail -20; echo EXIT=$?` 也打了假的 0）：
+
+> **那两次结论没被带偏，是因为我没拿它当判据**——`dev_done` 是靠 `jq` 直读 `status=dev_done` 确认的。**这次我把退出码写进了报告，就直接把你带偏了。**
+
+⇒ **危害不取决于犯错次数，取决于该次结论有没有被当成判据往下游传。** 本 Sprint 已有四人各撞一次这个坑（dev-41 `| head`、dev-42 用 stderr 文案、Leader `| tail`、dev-45 `| tail`），**只有写进报告的那两次产生了后果**。
+
+### 附：认出重复比重新发现更有价值
+
+dev-agent-45 关于 D4（`scope-writes-outside-packages` 假阳）的自省：
+
+> 我的长期记忆里就写着这件事……**我这次是当成新发现重新推了一遍**，没有认出它就是 D4。结论虽然一致，但等于白花了一次成本，**也没能给你「这是第二次撞上」这个更有用的信息——那才是「已登记却还在复发」的证据**。
+
+⇒ 一个已登记缺陷被**重新发现**与被**认出是复发**，产出的信息完全不同：前者只是又一条结论，后者是「登记没有起到防护作用」的证据，而那才是决定要不要修它的依据。
+
+## Sprint 034 更正 — 变异 harness 不要用 `git add` 让 diff 生效
+
+**dev-agent-43 指出，Leader 采纳。**
+
+背景：dev-agent-44 的变异 harness 用 `git diff` 判定变异是否生效，而目标文件**未跟踪** ⇒ `git diff` 恒空 ⇒ 10 个变异体全被误报「未生效」。dev-agent-45 的解法是**先 `git add` 入索引**。
+
+**dev-agent-43 指出该解法在共享主工作区里引入新风险**：
+
+> `git add` 是有副作用的，它把文件留在索引里，此后任何人执行 `git commit`（不带显式 pathspec）或 `git commit -a`，你那个**半成品/变异态的文件就会被卷进别人的提交**。
+
+本 Sprint 四个 agent 共用一个工作目录，**这个窗口是真实的**——上个 Sprint 已经发生过一次整文件 `git add` 把他人在途工作一并提交的事故。
+
+### 正确做法：不经 git 的内容比对
+
+| 做法 | 副作用 |
+|---|---|
+| `git diff`（未跟踪文件） | 恒空，静默失效 |
+| `git add` 后 `git diff --cached` | **污染索引**，可能被卷进他人提交 |
+| **md5 校验和**（dev-agent-43） | 只读、无副作用 |
+| **Python `difflib` 比对源文件**（test-agent-23） | 同上 |
+
+⇒ **统一成「不经 git 的内容比对」。**
+
+### 附带一条：md5 可以反证备份未被串扰
+
+dev-agent-43 的 scratchpad 也用了通用名（`sections.go.orig` / `base_md5.txt`），同样有被覆盖的风险。**但它能反证这次没出事**：
+
+> 变异 harness 每轮从 `/tmp/sections.go.orig` 复原后都比对 md5，最终复原值与基线 md5 完全一致 ⇒ **若那个备份被他人覆盖过，最后一次比对必然不等。**
+
+⇒ **同一个 md5 自证同时挡住了两类风险**：变异是否真的施加了、备份是否被串扰过。
+
+## Sprint 034 裁决 — `abs` landmine 不拆，理由是代价不对称
+
+`golden_test.go:342` 的包级 `abs(float64)` 与「金额解析文件想加 `abs`」的冲突**没有发生**——dev-agent-45 用的是 `math.Abs`（stdlib 限定名，零冲突）。
+
+**拆掉它的代价**（dev-agent-43 指出）：改动要动 `golden_test.go`，而 TASK-001 的 DoD `non_functional[0]` 的机械化判据正是
+
+```bash
+git log --diff-filter=M -- internal/hestia/golden_test.go   # 必须无修改记录
+```
+
+**目前仍为空、判据成立。** 一次 helper 改名不碰任何 golden 数值，**但那条判据是机械的，改了就留痕** ⇒ 主动打掉一条已成立的验收证据。
+
+**裁决：不动。** 谁需要 `abs` 就用 `math.Abs`，自然解法已被采用且零成本。
+
+dev-agent-43 没有自己决定这件事，理由是「那会主动打掉 TASK-001 的一条验收证据，我不该自己决定」——**判断正确**。这类「修一个未发生的风险 vs 打掉一条已成立的证据」的取舍属 Leader 裁决范围。

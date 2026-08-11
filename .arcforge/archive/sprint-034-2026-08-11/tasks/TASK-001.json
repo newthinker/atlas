@@ -1,0 +1,47 @@
+{
+  "id": "TASK-001",
+  "title": "golden 期望值表（手工抄录）",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/golden_test.go"
+  ],
+  "description": "两份样本的 54 / 27 项期望值 + Meta，全部手工抄自原文 HTML，不得由解析器生成。含自检：计数、键在 allFields 内。",
+  "done_criteria": {
+    "functional": [
+      "`golden2025` 恰好 54 项、`golden2020` 恰好 27 项；`goldenMeta2025` / `goldenMeta2020` 按 M1b-1 的 `Meta` 定义填 `Parse` 应产出的那 5 项（`Period`/`PeriodType`/`PublishedAt`/`CaliberVersion`/`Extractor`）——**`ArticleID` 与 `IngestedAt` 留空**，前者是 URL 属性由 M1b-4 填、后者由 `Save` 覆写。原表述「填全七个字段」是错的，会让 golden Meta 永远无法与 `Parse` 输出相等。",
+      "每个键都在 `allFields` 内（M1b-1 的白名单）。**逐键断言而非只比数量**——数量对而键写错会在 T5/T7 才暴露，且那时会被误读成抽取错误。"
+    ],
+    "boundary": [
+      "2020 样本只有 27 项**是预期的**（社融当时单独发布，不在本篇）——须在注释中写明这不是抄漏，并指出它对应 6 板块无社融形态。"
+    ],
+    "error_handling": [
+      "数值的单位必须与 M1b-1 的约定一致（余额=万亿元、增量=亿元、比率=百分数）。**抄录时若原文单位不同必须换算并在注释标注原文值**，否则 T7 端到端会红而根因在这里。"
+    ],
+    "non_functional": [
+      "**期望值手工抄自原文，严禁由解析器生成**（全局约束）。若由实现产出，T7 的端到端比对会退化成「拿实现校验实现」的恒真断言。\n\n**这条无法用测试守住**——DoD 要求：在 discovery 中记录抄录方式（例如逐条对照原文行号/句子），供验证者抽查。\n\n**⚠️ 计划声称的一条守护不成立**（reviewer G7）：`golden_test.go` 的 Context Checkpoint 写「两表的键都来自 `Field*` 常量 → 由 `TestFieldNamesAppearOnlyInFieldsGo` 覆盖」，**而那个测试明文豁免 `_test.go` 文件**。照 Context Checkpoint 逐条打勾的验证者会把它记成已覆盖。**不要引用它作为守护。**\n\n**可机械化的那一半必须做**：golden 须**先于全部实现 commit 落盘，且落盘后不再被修改**。判据：`git log --diff-filter=M -- internal/hestia/golden_test.go` 在实现落地后应无修改记录。这把「手工抄录」从不可证伪的自述变成可查的事实。",
+      "golden 表本身不依赖任何本 Sprint 新增函数（`stripHTML`/`parseAmount` 等），保证它在 T2–T6 全部未完成时即可编译通过。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-43",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "d6a1f59e63ddcc98722f8f0eebbbbbf33db09bf4",
+    "discovery_sha256": "9083ecff1dc0d35d5d4fa7d45a74ea0d6754838261d5af0e9f9c8c122cf59dc4",
+    "at": "2026-08-10T03:06:20Z"
+  },
+  "verifier": "test-agent-22"
+}

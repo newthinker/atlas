@@ -1,0 +1,81 @@
+{
+  "task_id": "TASK-004",
+  "title": "数值原语 parseAmount",
+  "key_findings": [
+    "【推翻需求文档与 DoD 的一条断言】directionAlt / unitAlt 的**交替顺序在当前词表下没有语义**。需求文档与 TASK-004 的 boundary[0] 都断言「净融资 必须排在 融资 之前，否则 企业债券净融资2.39万亿元 会在 融资 处切开、名称变成 企业债券净 而静默漏一个字段」。实测把顺序整个颠倒，四种模板形态（无锚点 FindString、固定名称 QuoteMeta 模板、非贪婪名称捕获、贪婪名称捕获）的输出**逐字节相同**；变异体 M11（顺序颠倒）在 12 个变异体里是唯一存活的，且是**设计上不可能被杀死**的。根因：Go 的 regexp 是 leftmost-first，交替顺序只在两个分支能在**同一起始位置**都匹配时才有语义——即一个是另一个的**前缀**时。「融资」是「净融资」的**后缀**而非前缀，在「净」那个位置上「融资」压根匹配不上。六个方向词、四个单位两两前缀扫描均为零命中。",
+    "【真正的守卫条件】不是「长词在前」，而是「任何一项都不是另一项的前缀」。这条不变量由 TestNoAlternativeIsPrefixOfAnother 看着：一旦有人往 directionAlt 加「增」（「增加」「增长」的前缀）或往 unitAlt 加「亿」「万亿」，顺序会**立刻**开始决定语义，该测试转红并提示必须把长词排前。原判据（写反顺序）恒绿——实现对错都绿，是一条假防线；按它去找用例会一无所获。",
+    "【真正会漏掉企业债券那一项的失效模式】是**贪婪的名称捕获**。`^(.+)(dir)(num)(unit)$` 会让名称吃掉「净」、用「融资」收尾，得到 name=企业债券净 ⇒ 匹配不上任何清单项、静默漏字段；而这**与交替顺序无关，两种顺序下都发生**。非贪婪 `(.+?)` 与固定名称 `QuoteMeta(name)` 都不会踩到。⇒ **给 T5 的直接约束：模板里的名称要么用 QuoteMeta 固定，要么用非贪婪 `(.+?)`，绝不能用贪婪 `(.+)`。** TestGreedyNameCaptureSwallowsNetPrefix 把这个失效模式演示并钉住。",
+    "【G6 已落地】parsePlainAmount(num, unit) 是无方向词句式的独立恒正入口。需求文档在 6 处模板 / 14 处字段赋值（社融存量总量、8 个存量分项、M2/M1/M0、存款余额、贷款余额）上写的是把字面量「增加」传给 newAmount——那些句子原文没有方向词，硬编码一个白名单内的词等于在约四分之一的调用点上把方向词校验**结构性关闭**。TestNoLiteralDirectionWordAtProductionCallSites 扫描包内全部非 _test.go 文件，`newAmount(\"` 与 `parseRatio(\"` 必须零命中；测试自带 scanned!=0 自证，变异体 M10（在生产文件里插入一处字面量调用）确认它不是空绿。",
+    "【符号来源的第二个入口已在原语层堵死】numPat = ([0-9]+(?:\\.[0-9]+)?) 今天表示不了前导负号，但那是 T5 文件里的另一条约束；2025 年原文注5 的「M1 可比口径回溯」表**含显式负号数字**（−0.8%、−1.7%）。若哪天有人为够到那张表把 numPat 放宽成 (-?[0-9]+…)，符号就会同时从方向词和数字两个来源进来。newAmount / parseRatio / parsePlainAmount 一律拒绝自带 +/− 号的数字（TestNewAmountRejectsSignedNumber），那一刻会响亮失败而不是静默取到 +0.8。**注意这只堵住『负号传到原语』这一路；若 numPat 保持现状而模板够到那张表，负号在进入原语之前就被正则丢掉了，本任务无法拦截——这是留给 T5/T6 的已知边界，目前无害（那张表落在第八板块正文、无模板消费）。**",
+    "【零值 amount 不再静默算 0】toYi/toWanYi 经 scaleOf 取倍率，单位不在表内即 panic。map 的零值会让一个 unit=\"\" 的 amount 算出 0.0——一个看起来完全合理的数静默流进 Values，而下游查的是恒等式与量级区间，接不住。这种 amount 只可能来自「忽略了构造函数的 error」，属编码错误而非输入错误，故 panic 而非返回 error（返回 error 会改动 T5 的 20+ 个调用点签名）。变异体 M8（panic 换成 return 0）被 TestAmountZeroValueRefusesToScale 杀死。",
+    "【币种维度：已保留，T5 未被阻塞】Leader 提出「请考虑让 unit 的解析结果保留币种维度」。实测结论：**已经保留了**。amount 结构体保留原始 unit 字符串（`a.unit` 为 \"万亿美元\" / \"万亿元\"，两者不相等），T5 的模板捕获组也直接拿到 \"万亿美元\"。**丢掉币种的只有换算后的浮点数**：newAmount(\"增加\",\"1.07\",\"万亿美元\").toWanYi() 与 …\"万亿元\"… 都等于 1.07，完全相等——这正是风险③描述的「REAL 列里完全合法的数」。⇒ T5 的 DoD「断言捕获组本身而非最终值」**用现有接口今天就能满足**：断言 m[unit组] == \"万亿元\" 即可，不需要我改接口。另实测：即使把锚点从 `[^外]人民币存款余额` 放松成 `存款余额`，在「外币存款余额1.07万亿美元」上捕到的 unit 组**仍然是 \"万亿美元\"**——所以断言捕获组能抓住锚点放松这个失效模式，而断言最终值抓不住。",
+    "【币种维度可以做得更好，但需要新任务】现有做法要求 T5 用裸字符串比较 unit（分散、易写错、无防漂移）。更稳的做法是本文件提供 `currency()` 访问器 + unitCurrency 表 + 「表覆盖 unitAlt」的防脱节测试（与 directionSign/unitScale 同一套纪律），可选再加 requireCurrency(want) 统一错误信息。**本任务已 dev_done，而状态机里 `dev_done` 的唯一出边是 `dev_done->verifying`（leader 专属），没有 `dev_done->in_progress`，我无法自行回到开发态实现它。** 建议 Leader 择一：(a) T5 用现有 unit 捕获组断言（今天可行，零改动）；(b) 开一个小后继任务把 currency() 加进 amount.go。不建议为此走 verifying→rejected→assigned 把 T4 打回——那会白涨 rework_count，且现有交付并无缺陷。",
+    "【单位约定的文档缺口，已确认】fields.go:6-12 的单位约定只列三类（余额=万亿元 / 增量=亿元 / 比率=百分数），**不含 fx_reserve 的「万亿美元」与 fx_rate 的「元/美元」**。本任务的 unitAlt 已覆盖 万亿美元 / 亿美元（与人民币共用倍率表，只做量级换算不做币种区分）；fx_rate 的「元/美元」不是量纲单位而是汇率读数，走 parsePlainNumber、不经 unitAlt。⇒ **这两个单位不在 M1b-1 既有约定内**，是 M1b-1 的文档缺口（由 T1 验证暴露），建议在 fields.go 的约定注释里补第四类。",
+    "【包级测试命名空间已被占用的名字】Go 构建测试二进制时 _test.go 与非 test 文件并入同一 package，故 golden_test.go 里的包级函数会与生产文件抢名字。已占用：`abs`（golden_test.go:342）、`nonTSFFields`（golden_test.go:246）。本任务的 amount.go **未定义 abs**（测试里用的是限定名 math.Abs），当前 go vet 绿、无冲突；但 T5/T6 写 extract.go/parse.go 时要避开这两个名字，或用 absFloat / abs64 之类。"
+  ],
+  "decisions": [
+    {
+      "decision": "方向词白名单不含「多增」「少增」「少减」，传入即报错",
+      "rationale": "它们修饰的是**同比**（「同比多增1780亿元」「同比少减1873亿元」），是必须被排除的干扰词。若加进白名单，T5 的 tsfFlowRE 等模板会在同比子句上命中，造成重复赋值或取错值。除了断言 newAmount 拒收，还加了 TestComparativeSentenceDoesNotMatchDirectionTemplate 直接把后果演出来：用 directionAlt 拼的模板扫三条真实同比句必须一无所获——只测拒收不够，真正会出事的是模板命中。变异体 M3（把三个词同时加进 directionAlt 与 directionSign，两处一起改不留脱节线索）被这两条测试杀死。"
+    },
+    {
+      "decision": "无方向词句式走独立命名的恒正入口 parsePlainAmount(num, unit)，而不是给 newAmount 传字面量「增加」",
+      "rationale": "硬编码的方向词让白名单在那些调用点上**永远不可能触发**，而孤立测 newAmount 全绿、看不见生产代码喂的是常量。某期若把余额句改成「余额较上年末**减少**…」，硬编码的正号会照旧输出正值——符号错恰好发生在防线被关掉的地方。走独立入口后，「这里没有方向词可读」成为写在函数名上、可 grep、可枚举、可静态检出的事实。两个入口共用同一套单位/数字校验（checkUnit + parseUnsignedNumber），TestParsePlainAmount 断言两者量纲换算完全一致，不会分叉。"
+    },
+    {
+      "decision": "amount 保留原始单位，不在构造时归一",
+      "rationale": "归一目标由**字段类别**决定（余额/存量类记万亿元、增量类记亿元），那是调用方才知道的信息。在构造函数里提前归一等于让 amount 猜自己会被用作哪一类。倍率到 toYi / toWanYi 才取；构造时只校验单位在表内。"
+    },
+    {
+      "decision": "符号与量纲两个维度用**断言对象**而非用例数据来隔离",
+      "rationale": "non_functional[0] 要求两维度各自独立可测。做法不是各写一组用例就完事，而是让断言对象本身不经过另一张表：TestNewAmountSignDimensionOnly 断言 a.value（**未换算**，完全不经 unitScale），TestNewAmountScaleDimensionOnly 断言 math.Abs(toYi()/toWanYi())（**取绝对值**，完全不经 directionSign）。实测有效：变异 M1（符号表翻转）只打红符号组、M2（单位表改错）只打红量纲组，互不牵连。另设 TestNewAmountCombinesSignAndScale 接住「各自对、合起来乘反了」。"
+    },
+    {
+      "decision": "错误信息用 strconv.Quote(词) 断言，而不是 assert.Contains(err, 词)",
+      "rationale": "error_handling[0] 要求「错误信息含该词原文」，而未知方向词的用例里包含空串——assert.Contains(s, \"\") **恒真**，那是一条假绿的断言，空串这个用例等于没测。改为断言错误信息含 %q 形态（`\"\"`）后才真的检查到。"
+    },
+    {
+      "decision": "拒绝 NaN / Inf",
+      "rationale": "strconv.ParseFloat 接受 \"NaN\" / \"Inf\" / \"Infinity\" 且**不报错**。一个 NaN 落进 Observation.Values 是典型静默坏值：NaN 参与的比较一律为 false，恒等式与量级区间两类闸门都会直接放行。numPat 今天产不出这些串，但和负号同理，把不变量钉在原语上。"
+    },
+    {
+      "decision": "numPat 不在本任务声明，留给 T5",
+      "rationale": "需求文档把 numPat 定义在 T5 的 profiles.go；若本任务也声明会与 T5 重复声明而编译失败。代价是「正则捕得到什么」与「原语接受什么」分居两处——已用 parseUnsignedNumber / parseFiniteNumber 的拒绝规则从原语侧兜住（见 key_findings 第 5 条）。测试里用的是私有的 numPatForTest，明确标注不供生产使用。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/amount.go（新建，213 行）",
+    "internal/hestia/amount_test.go（新建，522 行，23 个顶层测试函数）"
+  ],
+  "interfaces_exposed": "【供 T5 直接使用】\nconst directionAlt = `净融资|融资|增加|减少|增长|下降` —— 可嵌入正则片段，**只此一份，T5 不得再写第二份词表**；不含 多增/少增/少减。\nconst unitAlt = `万亿美元|万亿元|亿美元|亿元` —— 同上。\ntype amount struct{ value float64; unit string } —— value 已带符号、尚未换算。\nfunc newAmount(dir, num, unit string) (amount, error) —— 三个参数**必须都来自文本捕获**；dir 不在白名单、unit 不在表内、num 不可解析/自带符号/非有限，一律 error。**禁止传字面量方向词**（有静态扫描测试守着）。\nfunc parsePlainAmount(num, unit string) (amount, error) —— 无方向词句式（余额/存量/M2M1M0/存贷款余额）用它，符号恒正。\nfunc (a amount) toYi() float64 —— 归一到亿元，增量/新增类字段用。\nfunc (a amount) toWanYi() float64 —— 归一到万亿元，余额/存量类字段用。**两者在 unit 不在表内时 panic**（只可能来自忽略构造函数 error）。\nfunc parseRatio(dir, num string) (float64, error) —— 同比百分数，走同一张方向词白名单。\nfunc parsePlainNumber(num string) (float64, error) —— 利率/汇率这类既无方向词也无单位的数；**这是唯一绕过方向词防线的入口，用它的地方必须少且明确**；不禁止负号（没有方向词与之冲突），但拒绝非有限值。\n\n【包级私有符号，T5 请勿重名】directionSign、unitScale、scaleOf、checkUnit、parseUnsignedNumber、parseFiniteNumber。\n\n【给 T5 的两条硬约束】① 模板里的名称用 QuoteMeta 固定或非贪婪 (.+?)，**绝不能用贪婪 (.+)**，否则「企业债券净融资」会被切成 name=企业债券净 而静默漏字段。② 需求文档第 1850/1870/1895/1926/1952/2007 行那 6 处 newAmount(\"增加\", m[1], m[2]) 必须改写成 parsePlainAmount(m[1], m[2])，否则 TestNoLiteralDirectionWordAtProductionCallSites 立刻转红。",
+  "verification": {
+    "commit": "65a4db00c65920e49ade129a9c0afaf638fc6837",
+    "commit_scope": "git show --stat 核实：2 files changed, 735 insertions(+)，仅 internal/hestia/amount.go + amount_test.go；显式 pathspec 提交，同包并发在途的其他任务文件未混入",
+    "red_phase": "先写测试跑出 RED：undefined: newAmount / undefined: directionAlt（build failed），证明断言非空转",
+    "tests": "本任务 23 个顶层测试函数、含子测试共 **76 个 --- PASS，0 红**（go test ./internal/hestia/ -v -run 'TestNewAmount|TestAmount|TestParseRatio|TestParsePlain|TestDirection|TestUnit|TestAlternation|TestNoLiteral|TestNoAlternative|TestGreedy|TestComparative'）；=== RUN 计数同为 76，二者一致即无用例被静默跳过。全包 go test ./internal/hestia/ ok（含他人已落地的 strip.go / golden_test.go）；go vet 绿；gofmt 干净。",
+    "coverage": "全包 92.9%（dev_minimum=80）；amount.go **全部 10 个函数均 100.0%** 语句覆盖",
+    "mutation_evidence": [
+      "隔离 worktree（.worktrees/mut2-TASK-004，基于 acc5a96 + 仅复制本任务两文件）跑 12 个变异体：**11 杀 1 存活**，基线 --- PASS = 76",
+      "M1 符号表 减少 由 -1 改 +1 → KILLED by TestNewAmountSignDimensionOnly/减少 等（PASS 71<76）",
+      "M2 单位表 万亿元 由 10000 改 1 → KILLED by TestNewAmountScaleDimensionOnly/万亿元 等（PASS 66<76）",
+      "M3 把 多增/少增/少减 同时加进 directionAlt 与 directionSign（两处一起改，不留脱节线索）→ KILLED by TestNewAmountRejectsComparativeDirections 三个子测试（PASS 69<76）",
+      "M4a newAmount 白名单判断短路（未知方向词默认为正）→ KILLED（PASS 65<76）",
+      "M4b parseRatio 白名单判断短路 → KILLED by TestParseRatioRejects（PASS 74<76）",
+      "M5 checkUnit 白名单判断短路（未知单位放行）→ KILLED by TestNewAmountRejectsUnknownUnit 各子测试（PASS 67<76）",
+      "M6 parseUnsignedNumber 前导符号检查失效 → KILLED by TestNewAmountRejectsSignedNumber（PASS 67<76）",
+      "M7 IsNaN||IsInf 改成 &&（永假）→ KILLED by TestNewAmountRejectsNonFiniteNumber（PASS 65<76）",
+      "M8 scaleOf 的 panic 换成 return 0 → KILLED by TestAmountZeroValueRefusesToScale（PASS 75<76）",
+      "M9 parsePlainAmount 返回 -v → KILLED by TestParsePlainAmount/恒正（PASS 73<76）",
+      "M10 在生产文件里插入一处 newAmount(\"增加\",…) 字面量调用 → KILLED by TestNoLiteralDirectionWordAtProductionCallSites（PASS 75<76）—— 这条专为证明静态扫描测试**不是空绿**",
+      "M11 directionAlt 顺序整个颠倒 → **SURVIVED（PASS 76=76，无任何失败用例）**。这是**预期且已证明的存活**，不是测试漏洞：见 key_findings 第 1 条，顺序在当前词表下无语义，TestAlternationOrderHasNoEffect 正是**断言两种顺序结果相同**，设计上不可能杀死 M11。真正的守卫是 TestNoAlternativeIsPrefixOfAnother（前缀不变量）与 TestGreedyNameCaptureSwallowsNetPrefix（真失效模式），二者均绿。",
+      "四条自证逐个变异体记录：① git diff --stat 非空（先 git add 使文件进入索引，否则未跟踪文件的 diff 恒为空——TASK-002 踩过这个坑）② go vet **红绿都查**，12 个变异体 vet 全部 rc=0，无一是靠编译错误「杀死」的 ③ 判据是 --- PASS 严格低于基线 76，不是「没有 FAIL」 ④ 每个体打印失败用例完整首行（最多 4 条）",
+      "harness 自身另有两条自证：变异前 assert 锚点在文件中命中次数**唯一**（M4 首轮就因锚点命中 2 次被拦下，拆成 M4a/M4b）；全部跑完后**复核还原基线仍为 76**",
+      "变异测试跑了两轮：第一轮在 code-simplifier 改动之前，第二轮在最终文件上重跑，两轮结果完全一致（11 杀 1 存活，同样的杀手用例）——因为 code-simplifier 改了一行断言形式（assert.True(math.Abs(...)<1e-6) → assert.InDelta），判定必须锚定最终文件内容",
+      "变异脚本：/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/40c35a6a-7fca-4173-a7fe-91f3abf71ce1/scratchpad/mutate.py（MUT_WT 可覆写隔离目录；两个 worktree 已按「谁建谁拆」移除并删分支）",
+      "交替顺序证伪实验：/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/40c35a6a-7fca-4173-a7fe-91f3abf71ce1/scratchpad/altorder/main.go"
+    ],
+    "purity": "amount.go 仅 import fmt / math / strconv / strings；无 I/O、无网络、无包级可变状态（包级 var 只有两张只读查表）。全部函数为纯函数，唯一的非纯行为是 scaleOf 在编码错误时 panic。",
+    "code_simplifier": "已按全局规范在提交前运行。子代理回复自相矛盾（先说 Unchanged 又描述了一处改动），经直读文件核实**确有改动**：amount_test.go:116 由 assert.True(t, math.Abs(a.toYi()-159100) < 1e-6) 改为 assert.InDelta(t, 159100.0, a.toYi(), 1e-6)，等价且更清晰，予以接受；amount.go 未改。改动后重跑了全部测试与全部 12 个变异体。",
+    "post_dev_done_notes": "dev_done 之后 Leader 补充了三条信息（负号边界、FX 单位缺口、币种无守卫）与一条 abs 命名冲突预警。四条均已核实并登记进 key_findings，**未改动任何源文件**——本任务交付物仍是 commit 65a4db00c65920e49ade129a9c0afaf638fc6837，与 dev_done 门禁判定的内容完全一致（避免 TASK-007/TASK-018 那种「判定对象与最终交付物不是同一个 commit」）。核实用的临时探针 internal/hestia/zz_dev45_probe_test.go 已删除，git status 确认工作区无本任务残留。"
+  }
+}

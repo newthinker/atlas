@@ -1,0 +1,69 @@
+{
+  "id": "TASK-003",
+  "title": "板块切分与版本探测",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/sections.go",
+    "./internal/hestia/sections_test.go"
+  ],
+  "description": "把剥离后的正文切成板块，按内容探测抽取器版本（8 板块含社融 / 6 板块无社融），形态不认识即报错。",
+  "done_criteria": {
+    "functional": [
+      "`splitSections(text)` 对两份真实样本分别切出 **8**（2025）与 **6**（2020）个板块，`section{Title, Body}` 的 Title 与原文小节标题一致。",
+      "`detectExtractor(secs)` 三分支：8 板块含社融 → 一个版本；6 板块无社融 → 另一个；**其余一律 error**。",
+      "`findSection(secs, kw)` 与 `(section).has(kw)` 供 T5 定位作用域。\n\n**⚠️ 关键词在 v2 样本中不唯一——计划自己的测试会红**（reviewer 样本实证 G1）：\n\n`findSection` 的定义是「Title **或 Body** 含 kw 的第一个板块」，而 2025 样本第一板块（社会融资规模存量）正文有：\n\n> 其中，**对实体经济发放的人民币贷款**余额为268.4万亿元\n\n⇒ `findSection(\"人民币贷款\")` 实测返回 **idx 0（社融板块）**，不是 idx 4（贷款板块）。2020 样本无社融板块所以返回正确——**典型的「一份样本过、另一份炸」**。\n\n计划 Task 3 的示例测试断言 `findSection(secs,\"人民币贷款\").Body` 含 `\"271.91万亿元\"`，**这条在真实 2025 样本上必红**。\n\n**判据**：对 T5 实际使用的**全部 7 个关键词**，在**两份样本**上分别断言解析到的板块 Title 或索引。\n\n不做的后果：定位到错板块后 `loan_*` 十个字段全错或全炸；而「修好」它最省事的路径是改测试期望，那会让整条贷款链路失去锚定。"
+    ],
+    "boundary": [
+      "**版本形态不认识时报错，不降级**（全局约束）。判据：构造一个「7 板块」或「8 板块但无社融」的中间态输入，必须返回 error 而非猜一个版本。\n\n理由：降级会让 T5 用错模板表，抽出的字段**数量看起来正常但内容对不上**——静默错误。"
+    ],
+    "error_handling": [
+      "切分失败（如无任何板块标题）返回 error，错误信息能指出实际切出几个板块，便于定位是样本变了还是切分规则错了。"
+    ],
+    "non_functional": [
+      "纯函数，无 I/O，不依赖包级可变状态。",
+      "**板块数是硬断言而非范围断言**：写 `require.Len(secs, 8)` 而非 `>= 6`。多切一个板块与少切一个同样是 bug，范围断言会放过前者。",
+      "**尾注段必须显式排除或断言不参与抽取**（reviewer G5）。2025 第八板块正文 = 跨境结算 + 注1–注5 + 整张 M1 月度表，其中注4 原文含「对社会融资规模中\"**对实体经济发放的人民币贷款**\"和\"贷款核销\"数据进行了调整」——**两条社融模板锚点名的完整字面**。\n\n目前靠 `findSection` 返回**第一个**命中板块才没踩上 ⇒ **G1 与本条互为对方的唯一防线，而 G1 已经坏了**。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-43",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "defdc5e68ac8a0443f00e5b823f4579eabe30948",
+    "discovery_sha256": "10373a57475aed33108f533fc571110bbec67c9fdd7d0746eda551816b5af8ec",
+    "at": "2026-08-11T01:41:58Z"
+  },
+  "verifier": "test-agent-22",
+  "fix_items": [
+    "**校验板块序号从「一、」起连续**：splitSections/detectExtractor 增加该校验，不满足即 error，信息须含**实际首个序号**与**实际板块数**。判据（QA 已实测的反例）：以 2025 样本、仅在 `<strong>一、` 与 `<strong>二、` 前各插入一个 `&nbsp;` 构造输入，`Parse` 必须返回 error 且**不产出任何 Values**。当前行为：`err=nil` / `extractor=\"rule@v1\"` / 27 个字段 / `tsf_stock=false` / `Meta.validate()` 放行——一份 v2 报告被静默判成 v1。Leader 已独立复现，读数一致。",
+    "**两份真实样本必须仍全绿**。序号连续性是已验证的既有性质，不是新假设：2025 为 一–八、2020 为 一–六，QA 与 Leader 各实测过一次。",
+    "**根因登记**：`(?m)^` 要求标题在行首，而 `spaceRE` 折叠但**从不删除**行首空白。Leader 实测 `stripHTML(\"<p> 一、甲</p><p>二、乙</p>\")` → 板块数=1（首个板块被整个吞掉）。触发面：2025 样本 stripHTML 后**578 行**以空白开头（QA 报 578 / 361，Leader 复现 578）。请在 discovery 中说明所选修法为何能覆盖这个根因，而不只是覆盖 QA 那个特定反例。"
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "返工代码已完成并提交 task/TASK-003-fix @ 28408bd（基于 feat/hestia-parse @ 9e77311，纯新增 76/0+107/0，可快进合并）。你的流程要求「dev_done 之前先让我合并」，但合并至今未发生（git branch --contains 28408bd 只有 task/TASK-003-fix；feat/hestia-parse 仍是 9e77311），我已发两次 inbox 请求无回音，且已被 idle hook 唤醒两次。我不强推 dev_done 的理由已用门禁源码核实（不是凭记忆）：task-completed.sh 的 CHANGED_FILES 只看主仓库工作树/暂存/未跟踪，对我全空；COMMITTED_BOUNDED 按 ^[a-z]+\\(TASK-003\\): 匹配提交主题，而我的主题是 fix(hestia): 也不匹配 ⇒ ACTUAL_FILES 为空 ⇒ 无漂移 ⇒ 直接对不含我修复的主仓库代码跑 go test 并通过 = 假绿，随后验证者会在没有修复的树上复现同一缺陷并 reject。请三选一并告知：(A) 你执行合并，我随后 transition dev_done；(B) 授权我像返工前那样把两个文件复制进主仓库并直接提交到 feat/hestia-parse（首轮 TASK-003 就是这么落的 commit 8ab45db），然后 dev_done；(C) 你确认接受上述假绿风险，我立即 dev_done。我倾向 A，但 B 同样可立即执行。",
+      "asked_at": "2026-08-11T09:30:00Z",
+      "answer": "选 (A)——我执行合并，你随后 dev_done。但**在合并之前还差一项**，这一项我发过两次 inbox 都没送达，所以这次写进文件。\n\n## ⚠️ 差的第 4 项：删除 section.has\n\n来源：QA 报告（.arcforge/docs/05-review/sprint-034-review.md）S1 专节的判定。它没能写进 fix_items——我试过追加，写通道 DENY「leader 无权执行 in_progress 写入」，那时你已领回。责任在我：追加项该在你领回前发，或发完确认送达，我两样都没做，然后两条 inbox 又都丢了。\n\n我核实过 28408bd：diff = 76/0 + 107/0（纯新增、0 删除）；git show task/TASK-003-fix:internal/hestia/sections.go 仍含 `func (s section) has(kw string) bool`（第 20 行）；sections_test.go 中 TestSectionHas 计数 = 1。\n\n**要做的**：删除 section.has 方法 + TestSectionHas，把那一处前置条件改写为 require.Contains on Body。\n\n**提交信息必须含一句**：「T3『留给 T5』的理由已随 T5 交付而过期。」\n理由：dev-agent-45 在 T5 时专门记过一笔「section.has 不是死代码，免得后续被清理掉」，test-agent-22 也把它列为 P4 确认过。而这已经是第二次有人发现它。不写明理由为何过期，下一个人会重新发现同一件事再争第三次。\n\n**QA 的判定理由**（比「当下无调用者」强一层，我核过成立）：① M1b-3 结构上够不到它——它消费 Observation，而 section 是解析层未导出类型，让校验层拿到 []section 等于让它重新解析 HTML；② has 是另一套设计的残件——extract.go 纪律 3 是「任何模板未命中一律报错」，extractFields 要么全成要么 nil，而「本板块有没有某个可选句式」正是这个设计明确拒绝的模型；③ 它该回来的时机只有 M1b-3 选了「部分成功」那条路，届时应带着确定的消费者重新引入。\n\n**当前那句文档注释指名了一个不存在的消费者**（说留给 T5，而 T5 已交付且没用它）。按本包自己的判据——恒响的检查会被训练成忽略——说谎的注释比没有注释更糟。\n\n**预期读数**：你基线 367 → 删后 366（差值恰为 TestSectionHas）。QA 的删除实验读数是 357 PASS / 0 FAIL / exit 0，vet 干净，基线 358 时差值同样恰为该测试。若你删后不是 366，停下来告诉我，说明还有别的东西依赖它。\n\n**两件连带的**：① 第二次重采全部自证数字（你这轮已因 simplifier 重采过一次）；② discovery 需要更新——你已落盘，但 verify_baseline 尚未锁（还在 blocked_clarification / in_progress），现在还能改，补上第 4 项的对应记录与新读数。\n\n## 明确回答你的三选一\n\n(A) 采纳。做完第 4 项、提交，报我，我一次快进合并，你再 dev_done --expect-epoch 1。\n\n(B) 不采纳。首轮 TASK-003 那样直接落进 feat/hestia-parse（8ab45db）是本 Sprint 早期的做法，本轮新加合并关卡正是为了让「谁在什么时候把什么合进来」有唯一入口。绕过它省不了多少，却让本轮三个并行返工的合并顺序失去控制。\n\n(C) 不采纳。你列的假绿后果我逐条确认成立，而且这个 Sprint 已有三个人分别独立说出这条结构冲突（dev-45 在 T5 和 T6、你的 simplifier 子代理、你本人）。\n\n## 你读门禁源码得出的那个副产品，我要单独记\n\n「我们的提交主题不带 task id（fix(hestia): 而非 fix(TASK-003):），所以 COMMITTED_MINE 这条路径对本 Sprint 的提交一直是空的，门禁实际只靠工作树推断；这也解释了为什么那些范围外漂移告警总匹配到 2026-06 的老提交——老提交才用 feat(TASK-001): 这种写法。」\n\n这条把两个此前分别登记的现象接上了：dev-45 在 T5/T6 报过「门禁列出前几个 sprint 复用同一批 task ID 的历史提交」，我当时记成「任务号跨 Sprint 复用污染」。你的解释更准：不是复用污染，是本 Sprint 的提交主题根本不进那条匹配，于是唯一能匹配上的只剩历史提交。会进 final-report 的待同步清单。\n\n## 你把阻塞落盘这件事做对了\n\n两条 inbox 都丢了，而 questions[0] 没丢。「文件是真相源，inbox 只是通知」在这一轮得到了本 Sprint 最直接的一次验证——我的两条追加要求全靠通知传递，全部落空；你的一条落盘，我看到了。",
+      "answered_at": "2026-08-11T01:35:00Z"
+    }
+  ]
+}

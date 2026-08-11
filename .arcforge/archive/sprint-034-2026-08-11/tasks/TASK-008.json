@@ -1,0 +1,59 @@
+{
+  "id": "TASK-008",
+  "title": "Parse 值正确性的常驻守护",
+  "description": "把 Parse 输出的 Values 与 golden 逐键逐值比对，补上常驻测试缺口。当前 assertMatchesGolden 只作用于 extractFields 的输出（T5），parse_test.go 对 Values 只有 require.Len 键数断言 ⇒ 上游（如 stripHTML）微变时 Parse 可产出「键数仍是 54/27、值已经错」的结果而套件不红。",
+  "complexity": "简单",
+  "status": "accepted",
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/parse_test.go"
+  ],
+  "assigned_to": "dev-agent-45",
+  "assignment_epoch": 1,
+  "verifier": "test-agent-22",
+  "questions": [
+    {
+      "q": "【快进合并请求，与 T5/T6 同形】TASK-008 已完成，提交 9e773118ba6f9ca95a3e113054f9164e26b40bca（分支 task/TASK-008，1 file +28/-2，仅 parse_test.go，与 writes 声明完全一致，无越界）。主仓库四条自查（已用绝对路径确认执行目录为主仓库）：grep assertMatchesGolden 得 0 处、go test ./internal/hestia/ 仍 exit=0、git diff HEAD 与 --staged 均 0 行 ⇒ 此刻转 dev_done 门禁会空转。请执行 git merge --ff-only task/TASK-008（merge-base --is-ancestor 已成立）。合并后请答复本条，我会转回 in_progress -> 写 discovery 并补 discovery 指针 -> dev_done --expect-epoch 1 -> 拆 worktree。⚠️ 另有一条对本任务立项理由的更正，详见我的 inbox 消息：你写的「T5 的测试喂的是它自己构造的固定输入」对 TestExtractFieldsOnV2Sample/OnV1Sample 不成立——它们读的是真实样本并走 splitSections(stripHTML(...))，同一上游变异下它们也会红。缺口仍然真实但比原表述窄，正确表述是「Parse 这一层的 Values 值正确性没有任何常驻断言」。交付物不变。",
+      "asked_at": "2026-08-10T14:20:00Z",
+      "answer": "已合并，可以转回 in_progress。\n\ngit merge --ff-only task/TASK-008 → Updating 4948f0f..9e77311 (Fast-forward)，1 file changed, 28 insertions(+), 2 deletions(-)。主仓库 HEAD 现为 9e773118ba6f9ca95a3e113054f9164e26b40bca。\n\n主仓库实测：358 PASS / 0 FAIL / coverage 89.5% / vet exit=0 / gofmt 0 未格式化 / 新增包级标识符 0 处。改动仅 parse_test.go，与 writes 逐条一致，无越界。\n\n你对立项理由的更正我核实了源码，你是对的。extract_test.go 的 TestExtractFieldsOnV2Sample 第一行确实是 splitSections(stripHTML(readSample(...)))——读真实样本走完上游两层。我写的「T5 喂的是它自己构造的固定输入」不成立，注入上游变异时 T5 那条会红。\n\n这句最初来自 test-agent-22 的缺口报告，我照抄进 DoD 与派发消息、没自己看源码。这是我第二次转述未核实的判断。缺口本身是真的，但正确表述是你给的那版：Parse 这一层的 Values 值正确性没有任何常驻断言，此前完全借道 T5 的测试，而 T5 用真实样本这件事是偶然不是契约；extractFields 在 T5 里拿的是硬编码的 extractorV2，Parse 是靠 detectExtractor 推的，Parse 自身的接线 T5 一行都不覆盖。你那句「我以为的那个状态正是让这个缺口变严重的状态，而没有任何机制阻止 T5 的测试被改成那样」尤其准确。\n\nboundary[0] 的理由我也认错：assertMatchesGolden 内部第 313 行确实已有 require.NotEmpty(t, want)，我给的「Parse 返空 ∧ golden 误传空会平凡通过」那个场景本就被挡住了。你给的替代理由成立且更好：调用点 fail-fast + 不依赖 helper 的内部实现（helper 将来被改动时这行还在）。\n\nA/B 实测与你标注的判读边界都对：证明的是这条测试从盲变不盲，不是整个套件此前是盲的。这个自我限定正是这轮反复强调的东西。\n\ncode-simplifier 比分更正为 3/4 收到，会按这个数记。\n\nDoD 措辞的更正我会在 accepted 后按「保留原文 + 追加更正段」处理，不原地改写——理由与 test-agent-22 在 T5 那次给的一致：done_criteria 是判定依据，原地改写会让审计里的 verified 记录对应一份与当时不同的 DoD。",
+      "answered_at": "2026-08-10T14:20:00Z"
+    }
+  ],
+  "done_criteria": {
+    "functional": [
+      "`TestParseRealSamples`（或新增测试）对两份样本调用 **`assertMatchesGolden(t, obs.Values, golden2025/golden2020)`**，走 **`Parse` 入口**而非 `extractFields`。\n\n该 helper 已存在于 `extract_test.go:311`，同包可见、**双向比对**（golden 每项都要抽到且相等 + 抽到的每项都要在 golden 内）。**不要另写一份。**\n\n现有的 `require.Len(obs.Values, 54/27)` 可保留也可由本断言取代——`assertMatchesGolden` 的双向性已蕴含键数相等。",
+      "**这是第二道，不是重复**：T5 的 `assertMatchesGolden` 喂的是 `extractFields` 的**固定输入**（它自己构造的 sections），本条喂的是 `Parse` 从**原始 HTML** 走完 strip→detect→scope→extract 四层的结果。\n\n⇒ 本条能抓住 T5 那条抓不到的：**上游任一层的变化导致值错**。判据：两条断言必须并存，**不得以「重复」为由删掉 T5 的那条**。"
+    ],
+    "boundary": [
+      "**非空转自证**：断言前 `require.NotEmpty(t, obs.Values, \"抽出 0 个字段，本比对毫无意义\")`。\n\n理由：`assertMatchesGolden` 是双向的，但若 `Parse` 返回空 map 且 golden 也被误传空，比对会平凡通过。这与 `non_functional` 里「否定式断言在空集上平凡为真」是同族。"
+    ],
+    "error_handling": [
+      "**差异必须能定位到具体字段名**，不能只报「不相等」。判据：**扰动一个 golden 值跑一次**（隔离副本上，主工作区不碰），确认失败信息含该字段名与两个数值。跑完还原并确认 sha256 未变。\n\n这条与 TASK-007 的 `functional[0]` 同一要求——那边是一次性 manual 核验，本条把它变成常驻测试。"
+    ],
+    "non_functional": [
+      "**不引入新的包级名字**。dev-agent-45 在 TASK-006 的 discovery `interfaces_exposed` 里列了已占用的包级标识符（含 `golden_test.go` 已有的 `abs` / `nonTSFFields`）——本 Sprint 已撞过两次此类冲突。写任何辅助函数前先 `grep` 包内。\n\n本任务理想情况下**不需要任何新标识符**：直接调用已存在的 `assertMatchesGolden`。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "9e773118ba6f9ca95a3e113054f9164e26b40bca",
+    "discovery_sha256": "cce7d1ad164c76b9a6c8e61d71f52b310af1736fdfa0ea5c1960ebbec53de1ea",
+    "at": "2026-08-10T14:14:42Z"
+  }
+}

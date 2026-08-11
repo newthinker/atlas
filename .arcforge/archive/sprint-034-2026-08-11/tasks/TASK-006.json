@@ -1,0 +1,73 @@
+{
+  "id": "TASK-006",
+  "title": "Parse 组装、期次与口径推导",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-005",
+    "TASK-002"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/parse.go",
+    "./internal/hestia/parse_test.go"
+  ],
+  "description": "Parse(raw) 串起四层流水线，从标题推导 period/periodType，从期次推导 caliber_version。",
+  "done_criteria": {
+    "functional": [
+      "`Parse(raw []byte) (Observation, error)` 串起 strip→detect→scope→extract 四层，产出的 `Values` 键全在 `allFields` 内。",
+      "`parseTitle(title)` 从标题解析出 `period`（`YYYY-MM`）与 `periodType`，形态须满足 M1b-1 `Meta.validate` 的两个正则。",
+      "`caliberFor(period)` 按期次区间推导 `caliber_version`，**取值必须在 M1b-1.5 新增的 `validCaliberVersions` 白名单内**——否则 `Save` 会拒绝。\n\n**⚠️ 多条口径注同时适用时取最新——这条规则 spec 里没有，本 DoD 现在把它写死**（test-agent-22 在 T1 验证时发现）。\n\n2025 年报**同时**含注4（`2023-01`）与注5（`2025-01`）。正确取值是 **`2025-01`**：2025-12 的数据确实处于 2025-01 口径，它蕴含 2023-01 的调整。\n\n但「多条同时适用取最新」这条规则在 `types.go` 与 `CONTRACTS.md` 里**都没写**。若实现成「取首个匹配」或「按出现顺序」，**T7 会红而根因是规则未定义**。\n\n判据：对 2025 样本断言 `caliberFor` 产出 `2025-01`，并在实现中显式表达「取最新」而非依赖遍历顺序。"
+    ],
+    "boundary": [
+      "两份样本各跑一次 `Parse`，`Meta` 七字段与 golden 的 `goldenMeta*` 逐字段相等。",
+      "**`period_type` 与 `period` 的组合须满足 M1b-1.5 落的组合校验**（`h1`→期末月必须 06、`annual`→必须 12、`monthly` 任意月放行）。判据：年报样本推出的组合能通过 `Meta.validate`。",
+      "**`monthly` 路径零样本、零判据，必须显式登记**（reviewer G9）。两份样本都不是月报（annual + h1），而 `parseTitle` 支持 monthly、`Meta.validate` 对 monthly 放行任意月份。\n\n更要紧的是：**孪生句问题（T5 boundary ①）在月报里更严重**——月报正文同时含 YTD 句与当月句，且哪句在前**无样本可证**。\n\n二选一并在 discovery 写明：①`Parse` 对 monthly 显式返回「暂不支持，无样本验证」；②接受未验证风险并登记为交接项。**不允许沉默地当它已支持。**"
+    ],
+    "error_handling": [
+      "标题形态不认识时报错，**不猜期次**。判据：构造无法解析的标题，断言 error 且信息含原标题。",
+      "`Parse` **不填 `ArticleID`**（全局约束：那是 URL 的属性，M1b-4 才知道）。判据：断言该字段为空。",
+      "**`Parse` 必须在 `splitSections` 之后立即调用 `detectExtractor`，并把它的 error 当致命**（直接返回，不进入后续层）。\n\n**理由（test-agent-22 在 T3 验证时实测发现，这是它接受 T3 现有签名的条件）**：T3 接受了 `splitSections(text) []section` **无 error** 的签名，依据是「切分失败由紧邻的 `detectExtractor` 报错，且其错误信息严格更多（除板块数外还带 `tsf_section` 与两个已知形态）」。该判断本身成立。\n\n**但 `grep -rn` 全仓实测：`splitSections` 与 `detectExtractor` 的生产调用点数量都是 0**，两者目前只被测试调用。⇒ **「两者紧邻」不是既有事实，是对 T6 的预期。T3 的 `error_handling[0]` 所要求的保证，目前不存在于代码库任何位置**，完全依赖 T6 按承诺书写，而没有任何机制强制。唯一缓解是 `splitSections` 包私有，误用半径限于 `package hestia`。\n\n本条把那个悬空的承诺落到 T6，使它可测。\n\n判据：构造板块数不符的输入（0 板块 / 3 板块），断言 `Parse` 返回 error 且信息含**实际**板块数；并断言该情形下 `Parse` **不产出任何 Values**——是「切分不认识就停」，不是「先抽取再报错」。"
+    ],
+    "non_functional": [
+      "`Parse` **不碰数据库、不调 `Store.Save`**。判据：`parse.go` 不 import `database/sql`，且包内静态检查该文件无 `Save(` 调用。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-11T01:58:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-45",
+  "questions": [
+    {
+      "q": "【T6 返工完成，请在 T5 之后合并】提交 29adc9e65ba8c30008f20d59c088b51d43fdd0b8（分支 task/TASK-006b，2 files +119/-2，仅 parse.go + parse_test.go，在 writes 声明内，无越界）。⚠️ 合并顺序：task/TASK-006b 基于 task/TASK-005b，所以必须先合 task/TASK-005b（提交 655157b）再合 task/TASK-006b，两次都是快进。这样叠是为了让 T6 的测试验证「T5 修复 + T6 修复」的组合态，避免两个分支各自绿、合起来没人测过。主仓库四条自查（锚点 func TestParseRejectsBadPubDate，主仓库=0 交付树=1）：主仓库无本次修复、go test 仍 exit=0、git diff HEAD 与 --staged 均 0 行 ⇒ 门禁会空转。合并后请答复本条与 TASK-005 的那条。",
+      "asked_at": "2026-08-11T00:40:00Z",
+      "answer": "两次快进合并都已完成，可以转回 in_progress 收尾。\n\ngit merge --ff-only task/TASK-005b → 9e77311..655157b（2 files +172/-4）\ngit merge --ff-only task/TASK-006b → 655157b..29adc9e（2 files +119/-2）\n主仓库 HEAD 现为 29adc9e65ba8c30008f20d59c088b51d43fdd0b8。\n\n主仓库实测（T5+T6 组合态，合并后）：go test exit=0 / 372 PASS / 0 FAIL / coverage 89.6% / go vet exit=0 / gofmt 0；TestParseRejectsBadPubDate 与 TestMustMatchRequiresUniqueHit 各 2 处引用，两条修复都在。diff 2 文件与 writes 声明逐条一致，无越界。与你报的 372 PASS 逐项相同。\n\n你设计的顺序依赖我照做了。这一步在本 Sprint 是新的：前面几轮返工都是独立分支，你这次主动堵了组合态那个空档——两个分支各自绿、合起来没人测过，这个形态此前一直存在，只是没人踩到。\n\n## 你从两条修复里看出的东西，比修复本身值得记\n\nT5：「我在板块级认出了单月孪生句这个形态并做了期次限定，却没把同一判断推广到清单级的 30 条模板。同一份文件、同一个失效模式，我只堵了看得见的那一半——而 extract.go 开头的纪律 2 白纸黑字写着『孪生句一律按捕获组挑并要求唯一』。自述的纪律与实现的覆盖面不一致，比没有纪律更危险：读注释的人会以为整份文件都守住了。」\n\n最后那句是本 Sprint 反复撞的那一族的又一形态。前面几次是「注释描述的机制与实际不符」（交替顺序、放松锚点、T5 喂固定输入、require.NotEmpty 不可达、[一-十] 码点区间），你这次是「纪律声明的覆盖面与实现不符」——同样是文档说了一件代码没做的事，但更险，因为纪律是给整份文件立的，而覆盖面只有局部。\n\nT6：「published_at 是全包唯一一个逐字来自外部 HTML、不经任何模板的字段——规则的唯一偏离点恰好落在唯一不经模板的那个字段上，这不是巧合：其余字段都被模板顺带守住了，只有它需要单独写一次守卫，而单独写的那次就漏了。」\n\n这个观察可以直接反过来用作查找法：找「唯一不走公共路径的那个」，那里最可能漏。\n\n## 变异逼出的那两处，第二处的定性我要接住\n\n「我在 T5 的探针里把基线跑坏了……是 harness 打印的基线（363 PASS / exit=1）不对劲抓住的。此后我把 harness 改成断言基线为绿而不只是打印——『基线只打印不断言』和『自查跑错目录』是同一类：读数出来了，但没人拦住你继续往下走。」\n\n同一类的第三个实例：我这个 Sprint 用 tail -1 跑 validator，输出里那条 ✓ 也是「读数出来了」，而被截掉的两条告警没人拦我。三者共同点是产出了一个看起来完整的读数，而它不完整这件事本身不产生任何信号。你把 harness 改成断言，正是把「读数」变成「闸门」。\n\nM1 那处（删掉空值分支首轮 SURVIVED，因为空串同样过不了 publishedAtRE 会落到下一分支照样报错）是「竞争性错误路径」的又一实例——本 Sprint 第三次。你的处置（断言各自关键词 missing/empty/YYYY-MM-DD 而不只是「三条错误互不相同」）正确：差异仅来自被引用的 %q 值时，排障方向并没有被区分出来。\n\n## code-simplifier 记分收到\n\n6 次中 3 次不符（T4/T5/T6 不符，T8/T5b/T6b 属实）。结论不变：回复不作判据，一律 diff 核实。\n\n## 后续\n\n转回 in_progress → 追加 discovery 返工段（按你在 T5 用的「保留原文 + 追加」方式，不覆盖原交付记录）+ 确认指针 → dev_done --expect-epoch 1 → 拆最后一个 worktree → 报我。\n\nT5 我已派验给 test-agent-22（baseline.head = 29adc9e = 当前 HEAD）。T6 你 dev_done 后我一并派验。",
+      "answered_at": "2026-08-11T02:00:00Z"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "29adc9e65ba8c30008f20d59c088b51d43fdd0b8",
+    "discovery_sha256": "da6e61e431f35461122eb585e220cac1bfaf7492db47316c1bd5083087a97a7d",
+    "at": "2026-08-11T01:36:34Z"
+  },
+  "verifier": "test-agent-22",
+  "fix_items": [
+    "**`Parse` 的 PubDate 判据改为 `!ok || pubDate == \"\"`**，两种情形给**不同措辞**（`metaContent` 的第二返回值就是为分辨「站点没填」与「选择器写错」而设计的，见 strip.go:80-81 的注释）。建议一并加 `publishedAtRE` 形态校验——该正则就在同包 `types.go:59`。",
+    "**判据（QA 已实测的三种输入）**：把 2025 样本的 PubDate 改成 `content=\"\"` / `2026-1-15` / `2026-01-15 09:30:00`，`Parse` 必须 error 且信息含 `PubDate`，且**不产出任何 Values**。当前三种**全部** `err=nil` + 54 个字段，错误推迟到 `Store.Save` 才现场——而那时 raw HTML 早已不在手上。",
+    "**为什么这不是设计选择而是漏了一处**：对照 `ArticleTitle` 挖空**会**在 `Parse` 内经 `parseTitle` 响亮失败。`published_at` 是全包唯一一个逐字来自外部 HTML、不经任何模板的字段，也是那条「凡从输入文本读来的东西认不出就报错、绝不猜」规则的**唯一偏离点**（QA 枚举了 14 处 error 分支 + 2 处静态表声明的静默跳过 + 1 处 panic，只有这里偏离）。",
+    "**两份真实样本必须仍全绿**，且全包保持 358 PASS / 0 FAIL。"
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 1
+}
