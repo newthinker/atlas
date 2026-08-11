@@ -7,6 +7,13 @@ import (
 	"strings"
 )
 
+// checkCompleteness 是 completeness 闸门的 ID，供豁免宽度校验引用。
+//
+// 它与 gates 表里的那个字面量是**两处**——真相源仍是 gates（knownCheckIDs 从它
+// 派生）。改闸门 ID 时这里会静默过期，故由 TestCheckCompletenessIDMatchesGates
+// 钉住：该常量必须仍在 knownCheckIDs() 里。
+const checkCompleteness = "completeness"
+
 // Thresholds 是七道闸门的全部可调参数。
 //
 // 它是 Go 结构体而不是 YAML——M1b-3 还没有读配置的调用方（cobra 命令属于
@@ -109,6 +116,35 @@ func (t Thresholds) validate() error {
 			if err := checkEnum(field, id, knownCheckIDs()); err != nil {
 				return err
 			}
+		}
+		// 以下两条堵的是同一件事——豁免宽到等价于「整期跳过校验」，而上面那条
+		// len(SkipChecks)==0 的文案早就声称这不可能。两条路径成因不同，故判据不同。
+		//
+		// ⚠️ 判据一律**不能是数量阈值**（len(SkipChecks) > N）：那会误伤正常的
+		// 多闸豁免——一次口径变更同时豁免六道是合法的。
+		known := knownCheckIDs()
+		coversAll := true
+		for _, id := range known {
+			if !slices.Contains(ex.SkipChecks, id) {
+				coversAll = false
+				break
+			}
+		}
+		if coversAll {
+			return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 跳过了全部 %d 道闸门: "+
+				"这就是整期跳过校验，而豁免必须按检查 ID 精确指定（spec 4.6.3 约束 1）；"+
+				"要针对某几道闸放行就逐个列出，不要枚举全部", i, ex.Period, len(known))
+		}
+		// completeness 是七道里**唯一**会因数据缺失而 failed 的闸门：其余六道遇缺
+		// 字段一律降级 skipped（由 validate_test.go 的
+		// TestValidateHandlesEmptyValuesWithoutSpecialCase 逐条断言）。所以单独
+		// 豁免它就足以让一个几乎空白的期次整期过闸进权威表——比枚举七个 ID 便宜得多，
+		// 而字面上完全符合「按检查 ID 精确指定」。
+		if slices.Contains(ex.SkipChecks, checkCompleteness) {
+			return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 不得豁免 %s: "+
+				"其余六道遇缺字段一律降级 skipped，它是唯一会因数据缺失而 failed 的一道，"+
+				"豁免它等价于整期跳过校验（一个只有若干字段的残缺期次会直接进权威表）",
+				i, ex.Period, checkCompleteness)
 		}
 	}
 	return nil

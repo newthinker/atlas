@@ -121,3 +121,82 @@ func TestExemptionForMatchesPeriodAndCheckExactly(t *testing.T) {
 	assert.Nil(t, cfg.exemptionFor("2025-02", "deposit_sum"),
 		"豁免按期次精确匹配，不该外溢到相邻期")
 }
+
+// —— TASK-008: 堵住「整期跳过校验」的两条路径（QA round2 的 R2-3）——
+
+// 豁免不得宽到等价于「整期跳过校验」。
+//
+// 这不是新规矩，是把 validate() 自己的错误文案（「豁免必须按检查 ID 精确指定，
+// **不是整期跳过校验**」）变成真的。在此之前该文案是**主动误导**：实现只查
+// len(SkipChecks)==0，枚举全部七个 ID 就能绕过，QA 实测 cfg.validate()=nil、
+// 0/7 闸门通过、数据进权威表。
+//
+// 两条路径的成因不同，故判据也不同：
+//   - 覆盖全部 ID：字面意义的整期跳过 ⇒ 判据是**集合覆盖关系**
+//   - 只豁免 completeness：其余六道遇缺字段一律降级 skipped，completeness 是
+//     七道里**唯一**在数据缺失时会 failed 的闸门（这一点由 validate_test.go 的
+//     TestValidateHandlesEmptyValuesWithoutSpecialCase 逐条断言：空 Values 下
+//     completeness failed、其余六道全 skipped）⇒ 豁免它即等价于整期跳过
+//
+// ⚠️ 判据**不能是数量阈值**（`len(SkipChecks) > N`）：那会误伤正常的多闸豁免。
+func TestThresholdsRejectWholePeriodSkip(t *testing.T) {
+	withSkips := func(ids []string) Thresholds {
+		c := DefaultThresholds()
+		c.CaliberExemptions = []CaliberExemption{{
+			Version: "2025-01", Period: "2025-01",
+			SkipChecks: ids, Reason: "口径切换期",
+		}}
+		return c
+	}
+
+	// ⚠️ 两条断言各自钉的是**能区分两种形态**的那截文案，不是它们共有的「整期跳过」。
+	// 消融实测：去掉覆盖全部的校验后，全 ID 输入会落到 completeness 那条规则上、
+	// 照样报错，而它的文案里也含「整期跳过」⇒ 若只断言这四个字，这条子测试会
+	// **被错误的规则满足**。这正是「有没有一个我想排除的实现能让断言照样绿」的实例。
+	t.Run("枚举全部闸门即整期跳过", func(t *testing.T) {
+		err := withSkips(knownCheckIDs()).validate()
+		require.Error(t, err, "覆盖全部 ID 就是整期跳过校验，必须拒绝")
+		assert.Contains(t, err.Error(), "caliber_exemptions[0]", "要指出是第几条豁免")
+		assert.Contains(t, err.Error(), "跳过了全部",
+			"必须由『覆盖全部』那条规则拒绝——只断言共有的「整期跳过」会被 completeness 规则冒名满足")
+	})
+
+	t.Run("只豁免 completeness 也是整期跳过", func(t *testing.T) {
+		err := withSkips([]string{"completeness"}).validate()
+		require.Error(t, err, "completeness 是唯一会因缺数据 failed 的闸门，豁免它等价于整期跳过")
+		assert.Contains(t, err.Error(), "caliber_exemptions[0]")
+		assert.Contains(t, err.Error(), "不得豁免 completeness", "要指出是哪个 ID 不能豁免")
+	})
+
+	t.Run("两种拒绝理由必须可区分", func(t *testing.T) {
+		all := withSkips(knownCheckIDs()).validate()
+		comp := withSkips([]string{"completeness"}).validate()
+		require.Error(t, all)
+		require.Error(t, comp)
+		assert.NotEqual(t, all.Error(), comp.Error(),
+			"两种形态的错误信息要能分辨，否则配置的人不知道该怎么改")
+	})
+
+	// 最容易写坏的一格：堵宽了会误伤正常的多闸豁免。
+	t.Run("六道闸门（不含 completeness）仍合法", func(t *testing.T) {
+		var six []string
+		for _, id := range knownCheckIDs() {
+			if id != "completeness" {
+				six = append(six, id)
+			}
+		}
+		require.Len(t, six, 6, "七道减去 completeness 应剩六道")
+		assert.NoError(t, withSkips(six).validate(),
+			"判据是集合覆盖关系而不是数量阈值；这里变红说明堵宽了")
+	})
+}
+
+// checkCompleteness 是 gates 表里那个 ID 的第二处副本，必须不过期。
+//
+// 它一旦与 gates 脱节，上面那条「不得豁免 completeness」的校验会**静默失效**：
+// slices.Contains 找不到匹配 ⇒ 永不触发 ⇒ QA 实测的那条整期跳过路径重新打开，
+// 而没有任何测试会因此转红（新 ID 照样通过 checkEnum，因为它是从 gates 派生的）。
+func TestCheckCompletenessIDMatchesGates(t *testing.T) {
+	assert.Contains(t, knownCheckIDs(), checkCompleteness,
+		"checkCompleteness 已与 gates 表脱节——豁免宽度校验会静默失效")
+}
