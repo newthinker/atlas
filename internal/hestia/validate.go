@@ -116,6 +116,7 @@ type gate struct {
 // 的顺序——让不同期次的报告可以逐行对照。
 var gates = []gate{
 	{"monetary_hierarchy", gateMonetaryHierarchy},
+	{"deposit_sum", gateDepositSum},
 	{"corp_loan_reconcile", gateCorpLoanReconcile},
 	{"yoy_sanity", gateYoYSanity},
 	{"completeness", gateCompleteness},
@@ -139,6 +140,118 @@ func gateMonetaryHierarchy(in gateInput) Check {
 	}
 	return Check{Status: CheckFailed,
 		Reason: fmt.Sprintf("m2=%g m1=%g m0=%g", m2, m1, m0)}
+}
+
+// minDriftHistory 是漂移检测所需的最少历史期数。
+//
+// 1–2 期的均值不稳，噪声会盖过信号：相邻两期残差本身就可能差 1pct，而漂移
+// 阈值只有 3pct。3 期是让均值有意义的最低要求。
+const minDriftHistory = 3
+
+// depositPartFields 是存款的四个部门分项。
+//
+// 它们加起来本就不等于总额——央行报告里的「其中」是部分列举而非穷尽，
+// M0 三期实测残差 7.65% / 8.57% / 9.06%。
+var depositPartFields = []string{
+	FieldDepositHouseholdYTD, FieldDepositCorpYTD,
+	FieldDepositFiscalYTD, FieldDepositNBFIYTD,
+}
+
+// gateDepositSum 查存款加总，两个判据合成一个状态。
+//
+// 判据一（绝对残差）：|Σ四部门 − 总额| / 总额 ≤ DepositSumTolerance。
+// 判据二（残差漂移）：本期残差与前几期残差均值的偏离 ≤ DepositSumDriftMax。
+//
+// 为什么合成一道闸而不是拆两道：M0 契约样本确认 check ID 只有七个，
+// deposit_sum_tolerance 与 deposit_sum_drift_max 是**阈值名，不是 check ID**。
+//
+// 为什么需要判据二：±12% 宽到几乎拦不住东西（实测 7.6–9.1%，余量仅 3pct）。
+// 口径突变会让残差跳档，而绝对值仍在容差内——漂移才是这道闸的实际价值。
+//
+// # Value 的单位：比例，与 corp_loan_reconcile 的亿元不同
+//
+// Value 恒为绝对残差**占比**（M0 契约样本记 0.0857），不因走了哪条判据而变。
+// 上面那道闸记的是亿元绝对量，两者刻意不同，见其注释。
+func gateDepositSum(in gateInput) Check {
+	if skip := in.need(FieldDepositFlowYTD); skip != nil {
+		return *skip
+	}
+	if skip := in.need(depositPartFields...); skip != nil {
+		return *skip
+	}
+	r, ok := depositResidual(in.obs.Values)
+	if !ok {
+		// 走到这里只可能是零分母：上面两道 need 已经保证字段齐全。
+		return Check{Status: CheckSkipped,
+			Reason: "zero_denominator:" + FieldDepositFlowYTD}
+	}
+
+	c := Check{Value: &r} // Value 恒为绝对残差占比，与 M0 契约样本一致
+
+	// 判据一优先：绝对值都超了，再谈漂移没有意义。
+	if r > in.cfg.DepositSumTolerance {
+		c.Status = CheckFailed
+		c.Reason = fmt.Sprintf("tolerance_exceeded: residual %.4f exceeds %.4f",
+			r, in.cfg.DepositSumTolerance)
+		return c
+	}
+
+	// 判据二。历史不足时绝对值确实查过并通过了，所以记 passed 而不是 skipped——
+	// 但漂移没查这件事不能丢，写进 Reason。
+	//
+	// 两个理由刻意可分：no_prior_period 说「这是首期」，insufficient_history
+	// 说「再等几期就好」，对运维含义不同——一个该等，一个该查。
+	if len(in.prior) == 0 {
+		c.Status = CheckPassed
+		c.Reason = "drift_skipped:no_prior_period"
+		return c
+	}
+	hist := make([]float64, 0, len(in.prior))
+	for _, p := range in.prior {
+		if pr, ok := depositResidual(p.Values); ok {
+			hist = append(hist, pr)
+		}
+	}
+	if len(hist) < minDriftHistory {
+		c.Status = CheckPassed
+		c.Reason = "drift_skipped:insufficient_history"
+		return c
+	}
+
+	var sum float64
+	for _, h := range hist {
+		sum += h
+	}
+	mean := sum / float64(len(hist))
+	if drift := math.Abs(r - mean); drift > in.cfg.DepositSumDriftMax {
+		c.Status = CheckFailed
+		c.Reason = fmt.Sprintf("drift_exceeded: residual %.4f drifted %.4f from %d-period mean %.4f",
+			r, drift, len(hist), mean)
+		return c
+	}
+	c.Status = CheckPassed
+	return c
+}
+
+// depositResidual 算一期的存款加总残差占比。字段不全或总额为零时返回 false。
+//
+// 历史期次可能缺字段（早期报告的部门划分不同），所以不能假定齐全。算不出来的
+// 期次**直接不计入均值**，而不是当成残差 0——那会把均值拉向 0，让正常期次
+// 看起来在漂移。
+func depositResidual(values map[string]float64) (float64, bool) {
+	total, ok := values[FieldDepositFlowYTD]
+	if !ok || total == 0 {
+		return 0, false
+	}
+	var sum float64
+	for _, f := range depositPartFields {
+		v, ok := values[f]
+		if !ok {
+			return 0, false
+		}
+		sum += v
+	}
+	return math.Abs(sum-total) / math.Abs(total), true
 }
 
 // gateCorpLoanReconcile 查企业贷款分项加总：短期 + 中长期 + 票据 vs 企业合计。

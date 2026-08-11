@@ -389,17 +389,18 @@ func TestValidateHandlesEmptyValuesWithoutSpecialCase(t *testing.T) {
 // 代价是 T5/T6 每加一道闸都要来改这里一次，那正是想要的：闸门集合的变更应当是
 // 一个需要动手的决定，而不是某处 append 的副作用。
 func TestReportAlwaysContainsEveryGate(t *testing.T) {
-	// 与 M0 契约样本一致的闸门 ID。T5 加 deposit_sum、T6 加 stock_continuity，
+	// 与 M0 契约样本一致的闸门 ID。T5 已加 deposit_sum，T6 加 stock_continuity，
 	// T7 断言恰好七道。
 	wantGateIDs := []string{
 		"monetary_hierarchy",
+		"deposit_sum",
 		"corp_loan_reconcile",
 		"yoy_sanity",
 		"completeness",
 		"magnitude_sanity",
 	}
 	require.Equal(t, wantGateIDs, gateIDs(),
-		"gates 表本身必须恰好是这五道——少一道时下面的逐行比对会跟着缩水而发现不了")
+		"gates 表本身必须恰好是这六道——少一道时下面的逐行比对会跟着缩水而发现不了")
 
 	broken := obsFrom(golden2025, extractorV2)
 	broken.Values[FieldM1] = broken.Values[FieldM2] + 1
@@ -456,6 +457,227 @@ func TestCorpLoanSkipsOnZeroDenominator(t *testing.T) {
 	c := findCheck(t, rep, "corp_loan_reconcile")
 	assert.Equal(t, CheckSkipped, c.Status)
 	assert.Contains(t, c.Reason, "zero_denominator")
+	if c.Value != nil {
+		assert.False(t, math.IsInf(*c.Value, 0) || math.IsNaN(*c.Value),
+			"Value 不得是 Inf/NaN——Save 会拒绝，整期数据会消失")
+	}
+}
+
+// depositWith 造残差可控的存款观测：四部门只有一项非零，总额固定 100，
+// 残差 = |household − 100| / 100，所以 residualPct 直接就是百分点。
+//
+// 包级 helper 而非各测试内的闭包：deposit_sum 的四条测试都要用它。
+func depositWith(residualPct float64) map[string]float64 {
+	v := maps.Clone(golden2025)
+	v[FieldDepositFlowYTD] = 100
+	v[FieldDepositHouseholdYTD] = 100 - residualPct
+	v[FieldDepositCorpYTD] = 0
+	v[FieldDepositFiscalYTD] = 0
+	v[FieldDepositNBFIYTD] = 0
+	return v
+}
+
+// deposit_sum 的两个判据合成一个三态，逐行验证映射表（spec 7.1 + 历史不足一行）。
+func TestDepositSumCombinesTwoCriteria(t *testing.T) {
+	priorWith := func(pcts ...float64) []Observation {
+		out := make([]Observation, 0, len(pcts))
+		for _, p := range pcts {
+			out = append(out, Observation{Meta: validMeta(), Values: depositWith(p)})
+		}
+		return out
+	}
+
+	tests := []struct {
+		name       string
+		residual   float64   // 本期残差百分点
+		prior      []float64 // 历史各期残差百分点
+		wantStatus CheckStatus
+		wantReason string // 空表示 Reason 必须为空
+		wantValue  float64
+	}{
+		{"无历史，绝对值通过", 10, nil, CheckPassed, "drift_skipped:no_prior_period", 0.10},
+		{"无历史，绝对值超标", 20, nil, CheckFailed, "tolerance_exceeded", 0.20},
+		{"历史不足三期", 10, []float64{10, 10}, CheckPassed, "drift_skipped:insufficient_history", 0.10},
+		{"三期历史，漂移在容许内", 10, []float64{10, 11, 9}, CheckPassed, "", 0.10},
+		{"三期历史，漂移超标", 5, []float64{10, 10, 10}, CheckFailed, "drift_exceeded", 0.05},
+		{"绝对值超标时不谈漂移", 20, []float64{10, 10, 10}, CheckFailed, "tolerance_exceeded", 0.20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obs := Observation{Meta: validMeta(), Values: depositWith(tt.residual)}
+			rep, err := Validate(context.Background(), obs,
+				fakeHistory{prior: priorWith(tt.prior...)}, DefaultThresholds())
+			require.NoError(t, err)
+
+			c := findCheck(t, rep, "deposit_sum")
+			assert.Equal(t, tt.wantStatus, c.Status)
+			if tt.wantReason == "" {
+				assert.Empty(t, c.Reason)
+			} else {
+				assert.Contains(t, c.Reason, tt.wantReason)
+			}
+			require.NotNil(t, c.Value, "Value 恒为绝对残差占比")
+			assert.InDelta(t, tt.wantValue, *c.Value, 1e-9)
+		})
+	}
+}
+
+// 前两行的 Reason 必须**可分**：no_prior_period 说「这是首期」，
+// insufficient_history 说「再等几期就好」——对运维含义不同，一个该等一个该查。
+//
+// 上面那张表用 assert.Contains 逐行比对，两个理由若合并成同一个字串，
+// 「历史不足三期」那行会拿 no_prior_period 去 Contains 而失败；但反过来，
+// 若实现把两者都写成 "drift_skipped:no_prior_period_or_insufficient" 之类的
+// 超集字串，Contains 会**同时**放过两行。这条把它们钉成互斥。
+func TestDepositSumDistinguishesNoHistoryFromShortHistory(t *testing.T) {
+	reasonFor := func(prior []Observation) string {
+		rep, err := Validate(context.Background(),
+			Observation{Meta: validMeta(), Values: depositWith(10)},
+			fakeHistory{prior: prior}, DefaultThresholds())
+		require.NoError(t, err)
+		return findCheck(t, rep, "deposit_sum").Reason
+	}
+
+	none := reasonFor(nil)
+	short := reasonFor([]Observation{{Meta: validMeta(), Values: depositWith(10)}})
+
+	assert.NotEqual(t, none, short, "首期与历史不足必须给出不同的理由，否则运维无法判断该等还是该查")
+	assert.NotContains(t, short, "no_prior_period",
+		"历史不足不是首期——理由串不得互相包含，否则 Contains 断言会同时放过两行")
+}
+
+// 残差**恰好等于** ±12.0% 容差边界时的判定方向（spec boundary[2]）。
+//
+// 上游计划遗漏了这一条：它的六行用的是 5%/10%/20%，没有一个落在 12% 上，
+// 而独立 reviewer 的消融证实把实现的 `r > Tolerance` 改成 `>=` 时，
+// 计划原有的测试**无一转红**。
+//
+// 选数：残差 12/100 与阈值字面量 0.12 实测是**同一个 float64**
+// （都是 8646911284551352p-56），故「恰好等于」是真的相等，不是舍入巧合。
+// 这里不必绕道 2 的幂——本构造的中间量（88、100、12）都是远小于 2^53 的整数，
+// IEEE 除法正确舍入到最近双精度，与 0.12 的字面量解析结果一致。
+func TestDepositSumBoundaryIsInclusive(t *testing.T) {
+	cfg := DefaultThresholds()
+	require.Equal(t, 0.12, cfg.DepositSumTolerance, "本测试挑的边界值锚在默认容差上")
+
+	t.Run("残差恰好等于容差判 passed", func(t *testing.T) {
+		rep, err := Validate(context.Background(),
+			Observation{Meta: validMeta(), Values: depositWith(12)}, NoHistory, cfg)
+		require.NoError(t, err)
+
+		c := findCheck(t, rep, "deposit_sum")
+		assert.Equal(t, CheckPassed, c.Status,
+			"实现是 r > tolerance 判失败，恰好等于必须通过；这里变红说明比较符被改成了 >=")
+		require.NotNil(t, c.Value)
+		assert.Equal(t, cfg.DepositSumTolerance, *c.Value, "残差必须恰好落在阈值上，否则测的不是边界")
+	})
+
+	t.Run("残差略超容差判 failed", func(t *testing.T) {
+		rep, err := Validate(context.Background(),
+			Observation{Meta: validMeta(), Values: depositWith(13)}, NoHistory, cfg)
+		require.NoError(t, err)
+
+		c := findCheck(t, rep, "deposit_sum")
+		assert.Equal(t, CheckFailed, c.Status)
+		assert.Contains(t, c.Reason, "tolerance_exceeded")
+	})
+
+	// —— 漂移阈值的边界（**超出 DoD boundary[0] 的范围，本任务自行追加**）——
+	//
+	// DoD 只点名了 ±12% 这一个边界。但同一形状的洞在漂移判据上也存在：消融实测
+	// 把 `drift > DriftMax` 改成 `>=` 时，上面那些用例**无一转红**（M2 存活）。
+	// 两个阈值同属一道闸、同一次交付，只堵一个会留下另一个。
+	//
+	// 选数：3pct 的默认值（0.03）不是精确可表示的二进制小数，故这里用自定义
+	// 阈值 1/32 = 0.03125。前三期残差 6.25% ⇒ 均值恰为 1/16，本期 9.375% ⇒ 残差
+	// 恰为 3/32，drift 恰为 1/32 —— 四个数实测都是精确值，等号成立与否只取决于
+	// 比较符本身，不掺浮点舍入。
+	driftCfg := DefaultThresholds()
+	driftCfg.DepositSumDriftMax = 0.03125
+
+	priorAt := func(pct float64, n int) []Observation {
+		out := make([]Observation, 0, n)
+		for range n {
+			out = append(out, Observation{Meta: validMeta(), Values: depositWith(pct)})
+		}
+		return out
+	}
+
+	t.Run("漂移恰好等于上限判 passed", func(t *testing.T) {
+		rep, err := Validate(context.Background(),
+			Observation{Meta: validMeta(), Values: depositWith(9.375)},
+			fakeHistory{prior: priorAt(6.25, minDriftHistory)}, driftCfg)
+		require.NoError(t, err)
+
+		c := findCheck(t, rep, "deposit_sum")
+		assert.Equal(t, CheckPassed, c.Status,
+			"实现是 drift > max 判失败，恰好等于必须通过；这里变红说明比较符被改成了 >=")
+		assert.Empty(t, c.Reason, "有三期有效历史，漂移是真算过的，不该带 drift_skipped")
+	})
+
+	// 对照组的残差必须**仍在绝对容差内**，否则判据一先命中，测到的是
+	// tolerance_exceeded 而不是漂移——初稿用 12.5% 就撞了这个（0.125 > 0.12）。
+	// 10.9375% ⇒ 残差 7/64，仍 ≤ 12%，而与均值 1/16 的偏离 3/64 已超 1/32。
+	t.Run("漂移超出上限判 failed", func(t *testing.T) {
+		rep, err := Validate(context.Background(),
+			Observation{Meta: validMeta(), Values: depositWith(10.9375)},
+			fakeHistory{prior: priorAt(6.25, minDriftHistory)}, driftCfg)
+		require.NoError(t, err)
+
+		c := findCheck(t, rep, "deposit_sum")
+		assert.Equal(t, CheckFailed, c.Status)
+		assert.Contains(t, c.Reason, "drift_exceeded",
+			"必须是漂移判据命中，而不是绝对容差——对照值要留在 ±12%% 以内")
+	})
+}
+
+// 历史里算不出残差的期次不计入均值，而不是当成 0。
+//
+// 早期报告的部门划分不同，缺字段是常态。把算不出来的期次当成残差 0 会把均值
+// 拉向 0——三期有效 10% 加两期「0」，均值变成 6%，本期 10% 就被判成漂移 4pct，
+// 一个正常期次凭空变成告警。
+func TestDepositSumIgnoresUncomputablePriors(t *testing.T) {
+	withResidual := func(pct float64) Observation {
+		return Observation{Meta: validMeta(), Values: depositWith(pct)}
+	}
+	// 缺一个部门分项 ⇒ depositResidual 返回 false
+	incomplete := func() Observation {
+		o := withResidual(10)
+		delete(o.Values, FieldDepositNBFIYTD)
+		return o
+	}
+
+	prior := []Observation{
+		withResidual(10), withResidual(10), withResidual(10),
+		incomplete(), incomplete(),
+	}
+
+	rep, err := Validate(context.Background(), withResidual(10),
+		fakeHistory{prior: prior}, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equal(t, CheckPassed, c.Status,
+		"三期有效历史的均值就是 10%%，本期 10%% 不该被判成漂移：%s", c.Reason)
+	assert.Empty(t, c.Reason, "有足够有效历史时漂移是真算过的，不该带 drift_skipped")
+}
+
+// 存款总额为 0 时记 skipped 而不是算出 Inf/NaN（DoD error_handling[0]）。
+// 与 TestCorpLoanSkipsOnZeroDenominator 同形——计划实现了这条分支却没测它。
+//
+// 一期存款增量恰好为零是可能的，而 Save 拒绝非有限的 Check.Value，
+// 那会让整期既进不了观测表也进不了 pending。
+func TestDepositSumSkipsOnZeroDenominator(t *testing.T) {
+	values := depositWith(10)
+	values[FieldDepositFlowYTD] = 0
+
+	rep, err := Validate(context.Background(),
+		Observation{Meta: validMeta(), Values: values}, NoHistory, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equal(t, CheckSkipped, c.Status)
+	assert.Contains(t, c.Reason, "zero_denominator:"+FieldDepositFlowYTD)
 	if c.Value != nil {
 		assert.False(t, math.IsInf(*c.Value, 0) || math.IsNaN(*c.Value),
 			"Value 不得是 Inf/NaN——Save 会拒绝，整期数据会消失")
