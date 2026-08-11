@@ -21,6 +21,7 @@ package hestia
 // functional[*]  贷款作用域把同名子项分派到不同字段        → TestExtractSeparatesLoanScopes
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -397,4 +398,147 @@ func TestLoanScopeBoundsSubItemsToItsOwnSector(t *testing.T) {
 	require.Error(t, err, "住户段没有短期贷款句时必须报错，不得借用企业段那条")
 	assert.Contains(t, err.Error(), "短期贷款")
 	assert.Nil(t, got)
+}
+
+// —— TASK-005 返工（QA WARNING-1）：mustMatch 的唯一性 ——
+
+// TestMustMatchRequiresUniqueHit 钉住 mustMatch 的第三种结果。
+//
+// 修复前它是 FindStringSubmatch + 最左优先：命中两次时**静默取第一个**。
+// 本文件开头纪律 2 自述「孪生句一律按捕获组挑并要求唯一」，但那条纪律此前
+// 只落实在 selectRMBBalance / selectRMBCumulativeFlow 两族，约 30 条清单模板
+// 走的仍是最左优先，且**该选择零测试覆盖**——QA 的变异「mustMatch 取最后一个」
+// 因此存活（358 PASS / 0 FAIL，与基线相同）。
+//
+// 危害不是理论的：构造一个合法的存款板块、把单月分部门句排在累计句之前，
+// 修复前 err=nil 且 deposit_household_ytd=21000（应 146400）、
+// deposit_nbfi_ytd=+500（应 −64100，**符号也翻了**）。
+// 「今天不可触发」是排版事实不是契约——2020 样本已含同体例的板块级单月孪生句。
+func TestMustMatchRequiresUniqueHit(t *testing.T) {
+	re := sectorFlowRE("住户存款")
+
+	t.Run("命中一次即返回", func(t *testing.T) {
+		m, err := mustMatch(re, "其中，住户存款增加14.64万亿元。", "存款分部门 住户存款")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"增加", "14.64", "万亿元"}, m[1:])
+	})
+
+	t.Run("零命中报错且指名模板", func(t *testing.T) {
+		_, err := mustMatch(re, "其中，财政性存款增加6579亿元。", "存款分部门 住户存款")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "住户存款", "错误必须指名是哪条模板")
+	})
+
+	t.Run("多命中必须报错而不是取最左", func(t *testing.T) {
+		// 累计句与单月句同体例并存——真实报告里已有这种排版
+		const twin = "6月份，住户存款增加2.1万亿元。上半年住户存款增加8.33万亿元。"
+		got, err := mustMatch(re, twin, "存款分部门 住户存款")
+		require.Error(t, err, "两句同形时必须报错，不得静默取最左那句")
+		assert.Nil(t, got)
+		assert.Contains(t, err.Error(), "2", "错误信息必须给出命中数")
+		assert.Contains(t, err.Error(), "住户存款", "错误必须指名是哪条模板")
+		assert.NotContains(t, err.Error(), "2.1", "不该把候选值当结果带出来")
+	})
+}
+
+// TestListTemplatesHitExactlyOnceOnRealSamples 是常驻守卫：两份真实样本上，
+// 每条清单模板在它所属板块内的命中数**恰为 1**。
+//
+// ⚠️ 判据方向与 T3 的 TestSectionKeywordsHitAtMostOneTitle **不同**：那边是
+// `≤ 1`（板块关键词在某些期次正确地找不到，如 2020 无社融）；这边是**恰为 1**
+// ——每条清单模板都必须命中，未命中本就该由 mustMatch 报错。
+//
+// 枚举**从清单表本身派生**，不另写一份模板列表：往 tsfStockItems / tsfFlowItems /
+// moneyItems / depositItems / loanScopes 里加一项，本测试自动覆盖它。硬编码的
+// 只有「每族属于哪个板块关键词」这 7 个常量，与 extract.go 的 sectionRules 同源。
+func TestListTemplatesHitExactlyOnceOnRealSamples(t *testing.T) {
+	for _, sample := range []struct {
+		file string
+		v2   bool
+	}{
+		{"pboc-2025-12-annual.html", true},
+		{"pboc-2020-06-h1.html", false},
+	} {
+		t.Run(sample.file, func(t *testing.T) {
+			secs := splitSections(stripHTML(readSample(t, sample.file)))
+			require.NotEmpty(t, secs, "切不出板块，本检查毫无意义")
+
+			bodyOf := func(kw string) string {
+				sec, ok := findSection(secs, kw)
+				require.Truef(t, ok, "找不到板块 %q", kw)
+				return sec.Body
+			}
+
+			checked := 0
+			once := func(what, text string, re *regexp.Regexp) {
+				n := len(re.FindAllStringSubmatch(text, -1))
+				assert.Equalf(t, 1, n, "%s: 命中 %d 次，应恰为 1（pattern %s）", what, n, re)
+				checked++
+			}
+
+			if sample.v2 {
+				stock := bodyOf(tsfSectionKeyword)
+				once("社融存量总量", stock, tsfStockTotalRE)
+				for _, it := range tsfStockItems {
+					once("社融存量分项 "+it.name, stock, tsfStockRE(it.name))
+				}
+				flow := bodyOf("社会融资规模增量")
+				once("社融增量总量", flow, tsfFlowTotalRE)
+				for _, it := range tsfFlowItems {
+					once("社融增量分项 "+it.name, flow, tsfFlowRE(it.name))
+				}
+			}
+
+			money := bodyOf("广义货币")
+			for _, it := range moneyItems {
+				once("货币 "+it.code, money, moneyRE(it.name, it.code))
+			}
+
+			deposit := bodyOf("人民币存款")
+			for _, it := range depositItems {
+				once("存款分部门 "+it.name, deposit, sectorFlowRE(it.name))
+			}
+
+			// 贷款子项按作用域切段后再数——与 extractLoanSection 的口径一致
+			loan := bodyOf("人民币贷款")
+			spans, err := loanScopeSpans(loan)
+			require.NoError(t, err)
+			for i, sp := range spans {
+				end := len(loan)
+				if i+1 < len(spans) {
+					end = spans[i+1].start
+				}
+				scopeText := loan[sp.start:end]
+				if sp.scope.totalField != "" {
+					once("作用域合计 "+sp.scope.anchorRE.String(), scopeText, scopeTotalRE(sp.scope))
+				}
+				for _, it := range sp.scope.items {
+					once("作用域子项 "+it.name, scopeText, sectorFlowRE(it.name))
+				}
+			}
+
+			rate := bodyOf("加权平均利率")
+			once("同业拆借利率", rate, rateIBORE)
+			once("质押式回购利率", rate, rateRepoRE)
+
+			fx := bodyOf("国家外汇储备")
+			once("国家外汇储备", fx, fxReserveRE)
+			once("人民币汇率", fx, fxRateRE)
+
+			// 自证：数到 0 条模板时上面全部断言都平凡通过
+			want := len(moneyItems) + len(depositItems) + 4
+			if sample.v2 {
+				want += 1 + len(tsfStockItems) + 1 + len(tsfFlowItems)
+			}
+			for _, sc := range loanScopes {
+				if sc.totalField != "" {
+					want++
+				}
+				want += len(sc.items)
+			}
+			assert.Equalf(t, want, checked,
+				"实际检查了 %d 条模板、清单表里有 %d 条——枚举与表脱节了", checked, want)
+		})
+	}
 }

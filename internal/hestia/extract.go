@@ -100,13 +100,37 @@ func extractFields(secs []section, extractor string) (map[string]float64, error)
 	return c.values, nil
 }
 
-// mustMatch 跑一条正则并要求命中，未命中时给出可定位的错误。
+// mustMatch 跑一条正则并要求它**恰好命中一次**。
+//
+// 零命中报错是显然的；**多命中同样报错**，这一半是返工补上的（QA WARNING-1）。
+// 此前它用 FindStringSubmatch，多命中时**静默取最左那个**——于是本文件开头
+// 纪律 2 自述的「孪生句一律按捕获组挑并要求唯一」实际只落实在
+// selectRMBBalance / selectRMBCumulativeFlow 两族，约 30 条清单模板仍在最左优先，
+// 而那个选择零测试覆盖（变异「取最后一个匹配」因此存活）。
+//
+// 危害与那两族完全同类，只是位置更深：把单月分部门句排在累计句之前（合法排版，
+// 2020 样本已有同体例的板块级孪生句），修复前 err=nil 而 deposit_household_ytd
+// 取到单月值、deposit_nbfi_ytd 连**符号都翻了**。两个值都在合理量级内，下游
+// 没有任何闸门拦得住。
+//
+// 与 selectUnique 的分工：那个用于**候选句需要按捕获组筛选**的场合（口径、期次），
+// 这个用于「模板本身就该唯一命中」的场合，故不需要谓词。两者的失败语义一致：
+// 0 命中与 ≥2 命中都报错，绝不替调用方挑一个。
 func mustMatch(re *regexp.Regexp, body, what string) ([]string, error) {
-	m := re.FindStringSubmatch(body)
-	if m == nil {
+	all := re.FindAllStringSubmatch(body, -1)
+	switch len(all) {
+	case 1:
+		return all[0], nil
+	case 0:
 		return nil, fmt.Errorf("hestia: %s not found (pattern %s)", what, re)
+	default:
+		return nil, fmt.Errorf(
+			"hestia: %s matched %d sentences (pattern %s): refusing to pick one — "+
+				"a template is expected to hit exactly once; more than one means the section "+
+				"carries twin sentences (e.g. a month-to-date and a current-month figure) and "+
+				"leftmost-first would choose silently, with both values looking plausible",
+			what, len(all), re)
 	}
-	return m, nil
 }
 
 // selectUnique 从全部候选句里按谓词挑出唯一一条。
