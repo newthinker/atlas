@@ -35,6 +35,7 @@ package hestia
 // 复用 strip_test.go 的 readSample / nonEmptyLines，不重复定义（同包会编译冲突）。
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -313,6 +314,112 @@ func TestDetectExtractorErrorNamesActualCount(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want,
 				"错误须说出实际板块数，才能分辨是样本变了还是切分规则错了")
+		})
+	}
+}
+
+// TestDetectExtractorRejectsNonConsecutiveOrdinals 关掉「残缺的 v2 长得像合法的 v1」这条静默错路。
+//
+// # 缺陷形态（QA 的 architect lens 发现，Leader 与我各独立复现一次）
+//
+// v2 恰好 = v1 + 社融两节。所以「丢掉且**仅**丢掉这两节」的残缺 v2，其 (板块数,
+// 有无社融) = (6, false) —— 与一份**合法的 v1** 完全一致。原判据只看这两个量，
+// 于是一份 2025 年报被判成 rule@v1：27 个字段各自正确、过下游每一道闸门，另 27 个
+// 在 M1b-1 的语义里读作「本期模板本就没有」。这正是 detectExtractor 注释里点名要防、
+// 而 M0 复盘列为最危险的那一类——完全无声。
+//
+// # 根因不在判据，在一条跨层假设
+//
+// sectionTitleRE 的 (?m)^ 要求标题落在行首，而 T2 的 spaceRE **折叠但从不删除**行首
+// 空白。实测 stripHTML("<p> 一、甲</p><p>二、乙</p>") 只得 1 个板块（首个被整个吞掉），
+// 2025 样本剥离后有 578 行以空白开头 —— 机制一直是活的，只是尚未落到标题行上。
+// 这条依赖此前从未被任何注释或测试声明过。
+//
+// # 为什么修法是「序号连续性」而不是「别让标题带前导空白」
+//
+// 前导空白只是**一种**成因。任何让某个标题行匹配不上的原因（实体、全角空格、
+// 标签嵌套变化、抓取截断），后果都是同一个：板块被静默丢掉。序号是报告**自带的
+// 冗余**，校验它等于让「丢了一节」这件事本身可检测，与丢失原因无关。
+func TestDetectExtractorRejectsNonConsecutiveOrdinals(t *testing.T) {
+	t.Run("QA 反例：2025 样本仅在一、二前各插一个 &nbsp;", func(t *testing.T) {
+		raw := readSample(t, "pboc-2025-12-annual.html")
+		mut := bytes.Replace(raw, []byte("<strong>一、"), []byte("<strong>&nbsp;一、"), 1)
+		mut = bytes.Replace(mut, []byte("<strong>二、"), []byte("<strong>&nbsp;二、"), 1)
+		require.NotEqual(t, raw, mut, "变异须真的改到了输入")
+
+		// 前提：这个输入确实退化成「6 段、无社融」——与合法 v1 在旧判据下不可分
+		secs := splitSections(stripHTML(mut))
+		require.Len(t, secs, 6, "反例的形态前提")
+		require.Contains(t, secs[0].Title, "三、", "首个板块的序号是三而不是一")
+
+		_, err := detectExtractor(secs)
+		require.Error(t, err, "残缺的 v2 不得被当成合法 v1")
+
+		// fix_items 的判据：Parse 必须 error 且不产出任何 Values
+		obs, err := Parse(mut)
+		require.Error(t, err, "Parse 必须失败")
+		assert.Empty(t, obs.Values, "失败时不得产出任何 Values")
+		assert.Empty(t, obs.Meta.Extractor, "失败时不得产出 extractor")
+	})
+
+	t.Run("错误信息含实际首个序号与实际板块数", func(t *testing.T) {
+		_, err := detectExtractor(mkSections("三、广义货币", "四、存款", "五、贷款",
+			"六、利率", "七、外汇", "八、跨境"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "三", "须说出实际首个序号")
+		assert.Contains(t, err.Error(), "6 sections", "须说出实际板块数")
+	})
+
+	t.Run("中间缺一节同样被抓", func(t *testing.T) {
+		// 丢的不是开头而是中间：起始序号仍是一，只有连续性能发现
+		_, err := detectExtractor(mkSections("一、A", "二、B", "四、D",
+			"五、E", "六、F", "七、G"))
+		require.Error(t, err, "中间断号也是丢了板块")
+		assert.Contains(t, err.Error(), "6 sections")
+	})
+
+	t.Run("两位数序号：十 不得前缀匹配 十一", func(t *testing.T) {
+		// 期望序号必须带「、」再比前缀。少了它，「十」会前缀匹配「十一」，于是
+		// 「一…九、十一」（第十节丢了）被判成连续——正是本次要堵的那类缺节，
+		// 只是发生在两位数段。变异实测：去掉 +"、" 时全套仍绿，唯本条能杀。
+		secs := mkSections("一、A", "二、B", "三、C", "四、D", "五、E",
+			"六、F", "七、G", "八、H", "九、I", "十一、K")
+		err := checkSectionOrdinals(secs)
+		require.Error(t, err, "第十节缺失，十一 顶上了")
+		assert.Contains(t, err.Error(), "十、", "错误须指出期望的是 十、")
+	})
+
+	t.Run("真实样本的序号本就连续，不受影响", func(t *testing.T) {
+		for sample, want := range map[string]string{
+			"pboc-2025-12-annual.html": "rule@v2",
+			"pboc-2020-06-h1.html":     "rule@v1",
+		} {
+			got, err := detectExtractor(sectionsOf(t, sample))
+			require.NoErrorf(t, err, "%s 的序号是 一…N 连续的既有性质", sample)
+			assert.Equal(t, want, got, sample)
+		}
+	})
+}
+
+// TestSectionOrdinalsAreConsecutiveInRealSamples 把「序号连续」这条**既有性质**
+// 单独钉住，与上面那条守卫分开。
+//
+// 分开的理由：上面测的是「不连续时会报错」（守卫生效），这条测的是「真实样本确实
+// 连续」（守卫的前提成立）。只有前者时，若哪天真实样本的序号规律变了，会表现为
+// 一个语焉不详的 detectExtractor 报错；有了后者，转红的是这条，直接指出前提没了。
+func TestSectionOrdinalsAreConsecutiveInRealSamples(t *testing.T) {
+	for sample, ordinals := range map[string][]string{
+		"pboc-2025-12-annual.html": {"一", "二", "三", "四", "五", "六", "七", "八"},
+		"pboc-2020-06-h1.html":     {"一", "二", "三", "四", "五", "六"},
+	} {
+		t.Run(sample, func(t *testing.T) {
+			secs := sectionsOf(t, sample)
+			require.Len(t, secs, len(ordinals))
+			for i, ord := range ordinals {
+				want := ord + "、"
+				assert.Truef(t, strings.HasPrefix(secs[i].Title, want),
+					"第 %d 个板块标题应以 %q 起头，实际 %q", i, want, secs[i].Title)
+			}
 		})
 	}
 }
