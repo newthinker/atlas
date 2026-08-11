@@ -403,8 +403,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Preceding", "Store.Save"}, got,
-		"包的导出函数/方法必须恰好是这七个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Preceding", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这八个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -434,6 +434,15 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // *Store 的方法，所以它**同时**打红本条（AST 版）与 TestStoreExposesNoWriteMethods
 // （reflect 版）；DefaultThresholds 是包级函数，只打红本条。两条都登记过才算数——
 // 这恰好也演示了那两条测试为什么互补而不能互替。
+//
+// —— 为什么名单里多了 Validate（M1b-3 / TASK-004 追加）——
+//
+// 同样是登记。Validate 是纯函数：吃 Observation + History + Thresholds，吐
+// ValidationReport，**不碰数据库**——它产出的正是 Save 要求的那份报告，属于
+// Save 签名防线的上游而不是绕过它。它是包级函数，所以只打红本条（同
+// DefaultThresholds），排在末位是字节序结果（"V" > "S"）。
+//
+// History（接口类型）与 NoHistory（变量）都不是 FuncDecl，不进本条视野，无需登记。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
