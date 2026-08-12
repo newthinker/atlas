@@ -27,6 +27,8 @@ func writeConfig(t *testing.T, body string) string {
 func TestLoadConfigKeepsDefaultsForOmittedThresholds(t *testing.T) {
 	p := writeConfig(t, `
 config_version: "2026-08-12"
+storage:
+  db_path: data/hestia.db
 discover:
   index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
   max_pages: 3
@@ -55,6 +57,8 @@ thresholds:
 func TestLoadConfigFull(t *testing.T) {
 	p := writeConfig(t, `
 config_version: "2026-08-12"
+storage:
+  db_path: data/hestia.db
 discover:
   index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
   max_pages: 3
@@ -96,7 +100,14 @@ thresholds:
 // T6 起 PeriodTypes 必填非空，且这道检查在 validate() 里排在 Reason 之前会抢先返回
 // —— 漏写会让用例红在 PeriodTypes 上，而不是它真正想测的那一项。
 func TestLoadConfigRejects(t *testing.T) {
-	const head = `
+	// storage 段与 discover 一样是每条夹具的「合法底座」：db_path 必填且排在
+	// validate() 第一位，缺它会让每条用例红在 db_path 上而不是它想测的那一项
+	// —— 与下面 period_types 那道注释是同一种抢先返回。
+	const storage = `
+storage:
+  db_path: data/hestia.db
+`
+	const head = storage + `
 discover:
   index_url: https://example.com/index.html
   max_pages: 3
@@ -108,9 +119,9 @@ discover:
 	tests := []struct {
 		name, body, want string
 	}{
-		{"缺 index_url", "discover:\n  max_pages: 3\n  timeout: 30s\n", "index_url"},
-		{"max_pages 为 0", "discover:\n  index_url: https://x/i.html\n  max_pages: 0\n  timeout: 30s\n", "max_pages"},
-		{"timeout 为 0", "discover:\n  index_url: https://x/i.html\n  max_pages: 3\n  timeout: 0s\n", "timeout"},
+		{"缺 index_url", storage + "discover:\n  max_pages: 3\n  timeout: 30s\n", "index_url"},
+		{"max_pages 为 0", storage + "discover:\n  index_url: https://x/i.html\n  max_pages: 0\n  timeout: 30s\n", "max_pages"},
+		{"timeout 为 0", storage + "discover:\n  index_url: https://x/i.html\n  max_pages: 3\n  timeout: 0s\n", "timeout"},
 		{"显式把容差写成 0", head + "thresholds:\n  deposit_sum_tolerance: 0\n", "deposit_sum_tolerance"},
 		// 另外四个阈值同族：DoD 只点名了 deposit_sum_tolerance，但那四条检查
 		// **写了却没人测** —— 删掉任一条都不会有东西变红（实测 validate 覆盖率
@@ -153,6 +164,8 @@ discover:
 // 认为自己配了 —— 若被静默忽略，跑起来用的却是别的值。
 func TestLoadConfigRejectsMalformedYAML(t *testing.T) {
 	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
 discover:
   index_url: https://x/i.html
   max_pages: [1, 2]
@@ -174,4 +187,84 @@ func TestLoadConfigMissingFile(t *testing.T) {
 	// 错误串一模一样，只有这两条分得出来。
 	require.NotNil(t, errors.Unwrap(err), "必须包住底层 err")
 	assert.ErrorIs(t, err, fs.ErrNotExist, "调用方要能判出这是「文件不存在」")
+}
+
+// db_path 是 4b 才需要的：4a 不开库。没有它，cmd 层不知道该打开哪个文件。
+func TestLoadConfigReadsStorage(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	cfg, err := LoadConfig(p)
+	require.NoError(t, err)
+	assert.Equal(t, "data/hestia.db", cfg.Storage.DBPath)
+}
+
+// 缺 db_path 要立刻报错，而不是等到开库时报一个「打不开空路径」。
+func TestLoadConfigRequiresDBPath(t *testing.T) {
+	p := writeConfig(t, `
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	_, err := LoadConfig(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "db_path", "错误要点名是哪个键缺了")
+	require.NotNil(t, errors.Unwrap(err), "校验失败的错误必须包住底层 err")
+}
+
+// **写了但写成空串**与漏写同样要拒。
+//
+// 这条不与上一条重复：漏写走的是「mapstructure 没覆盖，字段保持零值」，
+// 显式空串走的是「Unmarshal 如实覆盖成 ""」—— 与 thresholds 那组
+// 「预填只挡住『没写』，挡不住『写了 0』」是同一族。只按「键是否出现」
+// 判必填的实现能过上一条，过不了这一条。
+func TestLoadConfigRejectsEmptyDBPath(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: ""
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	_, err := LoadConfig(p)
+	require.Error(t, err, "显式空串必须与漏写同样被拒")
+	assert.Contains(t, err.Error(), "db_path")
+	require.NotNil(t, errors.Unwrap(err), "校验失败的错误必须包住底层 err")
+}
+
+// 相对 db_path 装载后必须**原样**留着，validate 不得把它解析成绝对路径。
+//
+// 约束 C8：按**进程 cwd** 解析，而解析发生在 cmd 层（status 命令负责把解析后的
+// 绝对路径打出来）。这里钉住两种会静默改变语义的实现：
+//   - 在 validate 里 filepath.Abs —— 那是按**测试进程的 cwd** 解析，与 cmd 层
+//     真正运行时的 cwd 未必相同；
+//   - 相对**配置文件所在目录**解析 —— 看起来更「贴心」，但 plist 的
+//     WorkingDirectory 指向 runtime 而配置文件在别处，两者会指向不同的库。
+//
+// 三条断言不是三道独立的闸：真正杀掉上面两种实现的是第一条 Equal，另两条被它
+// 蕴含（等于 "data/hestia.db" 就必然不是绝对路径、也必然不含临时目录）。留着是
+// 为了让「被排除的是哪两种实现」在失败信息里直接读得到，别当成三重保险。
+func TestLoadConfigKeepsDBPathRelative(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	cfg, err := LoadConfig(p)
+	require.NoError(t, err)
+
+	assert.Equal(t, "data/hestia.db", cfg.Storage.DBPath, "必须一字不改")
+	assert.False(t, filepath.IsAbs(cfg.Storage.DBPath), "装载不得把相对路径解析掉")
+	assert.NotContains(t, cfg.Storage.DBPath, filepath.Dir(p),
+		"更不得相对配置文件所在目录解析")
 }
