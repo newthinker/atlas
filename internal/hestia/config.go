@@ -7,6 +7,15 @@ import (
 	"github.com/spf13/viper"
 )
 
+// StorageCfg 是库文件位置。
+//
+// db_path 用相对路径，按进程 cwd 解析（约束 C8）——plist 的 WorkingDirectory
+// 已指向 runtime，手工执行时需自行 cd。status 命令会打印解析后的绝对路径，
+// 免得在错误的 cwd 下静默指向一个不存在的库然后报告「0 期」。
+type StorageCfg struct {
+	DBPath string `mapstructure:"db_path"`
+}
+
 // Config 是 configs/hestia.yaml 的内存形态。
 //
 // 独立文件、独立装载器，照 internal/crisis/config.go 的先例，不并进
@@ -16,6 +25,7 @@ type Config struct {
 	// ConfigVersion 不参与逻辑，只是让「这期用的是哪版配置」在契约里一眼可见
 	// （方案报告 5.3.2）。改配置时手工递增，用日期串。
 	ConfigVersion string      `mapstructure:"config_version"`
+	Storage       StorageCfg  `mapstructure:"storage"`
 	Discover      DiscoverCfg `mapstructure:"discover"`
 	Thresholds    Thresholds  `mapstructure:"thresholds"`
 }
@@ -46,6 +56,8 @@ func LoadConfig(path string) (Config, error) {
 // validate 检查配置自洽。装载即校验，不给「先读进来再说」留口子。
 func (c Config) validate() error {
 	switch {
+	case c.Storage.DBPath == "":
+		return errors.New("storage.db_path is required")
 	case c.Discover.IndexURL == "":
 		return errors.New("discover.index_url is required")
 	case c.Discover.MaxPages < 1:
@@ -74,5 +86,5 @@ func (c Config) validate() error {
 	case t.YoYSanityMax <= 0:
 		return errors.New("thresholds.yoy_sanity_max must be > 0")
 	}
-	return t.validate() // 豁免校验（含 T6 补的 PeriodTypes 必填非空）
+	return t.validate() // 豁免校验（含 M1b-4a 的 TASK-006 补的 PeriodTypes 必填非空）
 }
