@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -211,6 +212,41 @@ type Querier interface {
 // article_id 一级幂等检查都需要自己发查询。写入只能走 Save，且这一点现在由
 // 返回类型保证，而不是靠调用方自觉。
 func (s *Store) DB() Querier { return s.db }
+
+// HasPeriod 回答某期是否已在权威表里。Discover 用它决定翻页何时停。
+//
+// 查 v_hestia_current 而**不**查 hestia_pending：pending 里的期次不算已入库。
+// 这是刻意的 —— 没过闸的一期该被重新发现、重新尝试，否则一次解析失败会让那期
+// 永远不再被抓，而 pending 的设计意图是「人看一眼再决定」，不是「就此丢弃」。
+//
+// ⚠️ 与 CONTRACTS.md 里「落 pending 的期次对依赖历史的闸门永久不可见」是同一张
+// 表的两面：那里 pending 不可见是**缺陷**（基线冻结），这里不可见是**正确的**
+// （允许重试）。区别在消费者要的东西不同 —— 闸门要「历史事实」，discover 要
+// 「还需不需要抓」。
+//
+// 查库失败时返回 (false, err) 而不是 (true, err)：调用方若忽略 err，「没入库」
+// 会让那期被重抓一次（幂等，代价是一次多余请求），「已入库」则让它被永久跳过。
+//
+// ⚠️ 别把理由写强：承重的是「不查 pending」，**不是**「查视图而不查权威表」。
+// 视图按 (period, period_type) 分组只留 published_at 最大的那行，而这里的存在性
+// 判定用的正是同一组键 —— 视图只在业务键**内部**筛行，从不整个抹掉一个键，
+// 故对本查询而言 v_hestia_current 与 hestia_observations 恒等价（消融实测：
+// 换成权威表后整包无一变红，且非「无人守」而是**不可区分**）。选视图是为了与
+// Preceding 同源，也为了将来视图若加上过滤条件时这里能自动跟随。
+
+func (s *Store) HasPeriod(ctx context.Context, period, periodType string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM "+viewCurrent+" WHERE period = ? AND period_type = ? LIMIT 1",
+		period, periodType).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("hestia store has period %s/%s: %w", period, periodType, err)
+	}
+	return true, nil
+}
 
 // Preceding 返回 period 之前最近 n 期的当前行，按 period 降序。
 //

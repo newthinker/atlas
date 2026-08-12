@@ -352,14 +352,23 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 // **仍是精确集合相等**。它是 Store 的第一个读方法：只发 SELECT、走 v_hestia_current
 // 视图，不碰任何写路径，因此扩大的是读面而不是写面。登记而不放松的理由同 Save——
 // 断言的形状会把任何新增导出方法都判成违规（无论读写），这正是它逼人留下这段说明的方式。
+//
+// HasPeriod 在 M1b-4a / TASK-004 追加，本条随之更新为
+// [Close, DB, HasPeriod, Preceding, Save]，**仍是精确集合相等**。它是 Store 的第二个
+// 读方法：只发一条 SELECT ... LIMIT 1、走 v_hestia_current 视图，不碰任何写路径。
+// Discover 经 PeriodChecker 窄接口消费它，用来决定翻页何时停。
+//
+// HasPeriod 是 *Store 的方法，所以它**同时**打红本条（reflect 版）与
+// TestPackageExposesNoWriteFunctions（AST 版），两条都登记过才算数——这与
+// Store.Preceding 同形，也再次演示了那两条测试为什么互补而不能互替。
 func TestStoreExposesNoWriteMethods(t *testing.T) {
 	typ := reflect.TypeOf(&Store{})
 	got := make([]string, typ.NumMethod())
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	assert.Equal(t, []string{"Close", "DB", "Preceding", "Save"}, got,
-		"只应导出 Close、DB、Preceding 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
+	assert.Equal(t, []string{"Close", "DB", "HasPeriod", "Preceding", "Save"}, got,
+		"只应导出 Close、DB、HasPeriod、Preceding 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
 }
 
 // TestPackageExposesNoWriteFunctions 把写口守卫从「*Store 的方法集」扩到**包导出面**。
@@ -403,8 +412,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Preceding", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这九个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这十个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -452,6 +461,17 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // cmd 层要拿它当 Discover 的入参（discover 的测试则喂快照 fake，不碰网络）。
 // 它是包级函数，所以只打红本条（同 DefaultThresholds/Validate），排在
 // DefaultThresholds 之后是字节序结果（"D" < "N"，且 "NewP" < "NewS"）。
+//
+// —— 为什么名单里多了 Store.HasPeriod（M1b-4a / TASK-004 追加）——
+//
+// 同样是登记而不是放宽。HasPeriod 是 Store 的第二个**读**方法：一条
+// SELECT 1 FROM v_hestia_current ... LIMIT 1，不碰任何写路径。Discover 经
+// PeriodChecker 窄接口消费它，用来决定翻页何时停。
+//
+// 它与 Store.Preceding 同形：**是 *Store 的方法，所以同时打红本条（AST 版）与
+// TestStoreExposesNoWriteMethods（reflect 版）**，两条都登记过才算数。与之相对，
+// 同一迭代里 TASK-001 的 NewPBOCFetcher 是包级函数，只打红本条。**同一个 Sprint
+// 里两种形态各出现一次**，这比任何说明都更直接地演示了两条守卫为什么不能互替。
 //
 // 本迭代新增的另外两个导出物**实测确认不进本条视野**（跑一次只加它们的版本核对过，
 // 不是照抄推断）：Fetcher 是**接口类型**——本条只收 *ast.FuncDecl，类型声明是
@@ -1700,3 +1720,110 @@ func TestPrecedingWrapsQueryError(t *testing.T) {
 
 // Store 必须满足 History。签名一旦漂移，这行在编译期就红。
 var _ History = (*Store)(nil)
+
+func TestHasPeriod(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("已入库返回 true", func(t *testing.T) {
+		s := newTestStore(t)
+		saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+		has, err := s.HasPeriod(ctx, "2025-12", "monthly")
+		require.NoError(t, err)
+		assert.True(t, has)
+	})
+
+	t.Run("未入库返回 false", func(t *testing.T) {
+		s := newTestStore(t)
+		has, err := s.HasPeriod(ctx, "2025-12", "monthly")
+		require.NoError(t, err)
+		assert.False(t, has)
+	})
+
+	t.Run("period_type 不同不算命中", func(t *testing.T) {
+		s := newTestStore(t)
+		saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+		has, err := s.HasPeriod(ctx, "2025-12", "annual")
+		require.NoError(t, err)
+		assert.False(t, has, "同一个 period 字符串下 monthly 与 annual 是两条独立序列")
+	})
+
+	t.Run("修订后仍然命中", func(t *testing.T) {
+		s := newTestStore(t)
+		saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+		_, err := s.Save(ctx, Observation{
+			Meta: Meta{
+				Period: "2025-12", PeriodType: "monthly", PublishedAt: "2026-02-20",
+				ArticleID: "art-rev", CaliberVersion: "2025-01", Extractor: extractorV2,
+			},
+			Values: map[string]float64{FieldM2: 305},
+		}, passing())
+		require.NoError(t, err)
+
+		has, err := s.HasPeriod(ctx, "2025-12", "monthly")
+		require.NoError(t, err)
+		assert.True(t, has)
+	})
+}
+
+// pending 里的期次**不算已入库**。
+//
+// 这是刻意的：没过闸的一期该被重新发现、重新尝试。若 HasPeriod 也认 pending，
+// 一次解析失败就会让那期**永远不再被抓** —— 而 pending 的设计意图恰恰是
+// 「人看一眼再决定」，不是「就此丢弃」。
+//
+// ⚠️ 与 CONTRACTS.md 里「落 pending 的期次对依赖历史的闸门永久不可见」是同一张
+// 表的两面：那里 pending 不可见是**缺陷**（基线冻结），这里不可见是**正确的**
+// （允许重试）。区别在消费者要的东西不同 —— 闸门要「历史事实」，discover 要
+// 「还需不需要抓」。
+func TestHasPeriodIgnoresPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	out, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-11", PeriodType: "monthly", PublishedAt: "2025-12-15",
+			ArticleID: "art-pending", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, failing())
+	require.NoError(t, err)
+	require.Equal(t, TablePending, out.Table, "前置条件：这一期必须落在 pending")
+
+	has, err := s.HasPeriod(ctx, "2025-11", "monthly")
+	require.NoError(t, err)
+	assert.False(t, has, "pending 里的期次不算已入库，否则一次解析失败会让那期永远不再被抓")
+}
+
+// 查库真失败时必须返回 error，且**包住底层 err**并带 period/periodType 上下文。
+//
+// 计划的 Task 4 Step 1-7 没有覆盖这条（DoD error_handling[0] 要求），故本条自行补写。
+// 触发方式与邻居 TestPrecedingWrapsQueryError 一致（已取消的 context 而不是关掉的库）：
+// database/sql 在 Close 之后返回未导出的 errDBClosed，没有可用 sentinel，只能比错误串；
+// context.Canceled 是标准 sentinel，能真的把 errors.Is 这条判据测出来。
+//
+// ⚠️ 「包住了」这一条**刻意不照抄邻居的写法**：邻居用的
+// require.NotErrorIs(t, errors.Unwrap(err), err) 在不包裹时 Unwrap 返回 nil、
+// errors.Is(nil, err) 恒 false ⇒ **平凡为真**（Sprint 035 的 F8 实测）。
+// 这里用 require.NotNil(t, errors.Unwrap(err))，它在不包裹时会真的红。
+// （邻居那处存量写法属于 TASK-007 的清理范围，不在本任务 scope 内。）
+func TestHasPeriodWrapsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 先取消，QueryRowContext 必然失败
+
+	has, err := s.HasPeriod(ctx, "2025-12", "monthly")
+	require.Error(t, err, "查库失败必须返回 error")
+	assert.False(t, has, "出错时不得报告「已入库」——否则一次查库故障会让那期被永久跳过")
+	assert.ErrorIs(t, err, context.Canceled, "必须用 %w 包住底层 err，否则调用方无法分辨是取消还是真故障")
+	assert.ErrorContains(t, err, "2025-12", "错误信息要带 period")
+	assert.ErrorContains(t, err, "monthly", "错误信息要带 periodType")
+	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}
+
+// Store 必须满足 PeriodChecker。签名漂移在编译期就红。
+var _ PeriodChecker = (*Store)(nil)

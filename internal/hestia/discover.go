@@ -1,6 +1,7 @@
 package hestia
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -151,6 +152,19 @@ var articleLinkRE = regexp.MustCompile(`(?s)href="([^"]*?/(\d{14,})/index\.html)
 // 而防御性代码在真实语料上没有守卫，所以由 TestScanPageStripsInlineTags 用合成
 // 页面钉住——没有那条，删掉 tagRE 全部测试照样绿。
 var tagRE = regexp.MustCompile(`<[^>]+>`)
+
+// PeriodChecker 回答「这期是否已入库」。Discover 用它决定翻页何时停。
+//
+// 接口定义在**消费方**而不是 Store 侧：Discover 用它，Store 实现它。这样
+// discover 的测试可以喂一个 fake，不必开真库。
+//
+// 判停用**期次**而不是 article_id：M0 实测 2020 上半年报告的 article_id 是
+// 2025092212550713215 —— 2025-09-22 的时间戳，央行 2026-06-26 批量重建过站点。
+// 按 article_id 判停，一次迁移后全部 id 变新，每次唤起都会翻满上限，
+// 且每期都被当成新文章。
+type PeriodChecker interface {
+	HasPeriod(ctx context.Context, period, periodType string) (bool, error)
+}
 
 // Candidate 是 index 页上一条待抓的报告。
 //
