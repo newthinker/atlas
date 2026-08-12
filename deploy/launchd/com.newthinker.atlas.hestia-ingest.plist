@@ -39,26 +39,26 @@
     <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 
-  <!-- 三时点唤起（本地 +0800）。央行《金融统计数据报告》每月 10–15 日发布，
-       实测样本的 PubDate 落在 13–15 日（2026-01-15 年报 / 2026-04-13 一季度 /
-       2026-07-15 上半年 / 2025-10-15 前三季度），发布时刻多在下午。
+  <!-- 三时点唤起（本地 +0800）：**15:30 / 17:30 / 21:30**。
+       时刻取自方案计划 `2026-08-12-hestia-cli.md:1634-1638`，理由见其 1632 行：
+       「每日三个时点覆盖发布窗口与延迟发布，非发布期靠幂等空跑（方案报告 4.1）」。
 
-       16:20 覆盖当天下午发布；19:20 兜住晚发；次日 09:20 是最后一道兜底
-       ——任何一次唤起漏了，最多 14 小时内会被下一次捡起来。
+       ⚠️ **别按「看起来更合理」去改它** —— 这三个数是 spec 定的，不是本任务选的。
+       要改先改 spec；本文件只是它的实例。
 
-       ⚠️ 分钟取 :20 是**为了避开既有任务**，不是随手写的：07:30 crisis-daily、
-       08:00 refresh-us、08:30 prism-daily、20:00 refresh-cnhk、22:45/23:45 crisis-daily
-       都已占用整点/半点。改时间前先看一眼 deploy/launchd/ 里其它 plist。
-
-       ⚠️ **一天三次都空跑是常态，不是浪费**：一个月里只有 1–2 天真的有新报告，
-       其余每次唤起都会在 Discover 那里命中已见过的文章然后停（打印
+       ⚠️ **一天三次都空跑是常态，不是浪费**：一个月里只有 1–2 天真有新报告，其余每次
+       唤起都会在 Discover 那里命中已见过的文章然后停（打印
        `no new reports (stopped: seen_article)`）。真正要担心的是反过来
-       ——`stopped: max_pages` 意味着窗口外可能还有没发现的期次。 -->
+       ——`stopped: max_pages` 意味着窗口外可能还有没发现的期次。
+
+       （日历唤起冲突：实测已占用的是 07:30 / 08:00 / 08:30 / 20:00 / 21:00 / 22:00 /
+       22:45 / 23:45，本文件这三个时刻都空着。`analysis` 与 `crisis-intraday-jpy` 用的是
+       `StartInterval 1800`，从加载时刻起算、**不对齐日历格**，因此不构成时刻冲突。） -->
   <key>StartCalendarInterval</key>
   <array>
-    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>20</integer></dict>
-    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>20</integer></dict>
-    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>20</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
   </array>
 
   <!-- 加载时不立即跑：装服务不该顺带触发一轮抓取。 -->

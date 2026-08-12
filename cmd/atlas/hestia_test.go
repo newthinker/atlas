@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -372,6 +373,73 @@ func TestHestiaPlistSetsNoProxyKeys(t *testing.T) {
 	})
 }
 
+// 🔴 plist 必须**真的排了班**：三个时点，且与 spec 定的一致。
+//
+// ⚠️ **本条是我自己踩出来的**：改时刻那一步我误把整个 `StartCalendarInterval` 数组
+// 连同注释一起删了，而 **`plutil -lint` 照样报 `OK`** —— 一个没有排班键的 plist
+// 是**合法的 plist**，它只是**永远不会被唤起**。lint 管的是 XML 合不合法，管不了
+// 「这个 job 到底跑不跑」。
+//
+// 后果是最坏的那一类：`install-services.sh` 装得上、`launchctl list` 看得见、
+// 日志目录空着，而**一切看起来都正常**。
+//
+// 时刻取自方案计划 `2026-08-12-hestia-cli.md:1634-1638`（1632 行的理由：
+// 「每日三个时点覆盖发布窗口与延迟发布，非发布期靠幂等空跑」）。**改时刻要先改 spec。**
+func TestHestiaPlistSchedulesThreeTimes(t *testing.T) {
+	const plistPath = "../../deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
+	raw, err := os.ReadFile(plistPath)
+	require.NoError(t, err)
+
+	// 数 <key>Hour</key> / <key>Minute</key> 的配对值。用 XML 解析而不是子串，
+	// 理由同 plistEnvKeys：本文件注释里也写着这几个时刻。
+	hours, minutes := plistIntsUnderKey(t, raw, "Hour"), plistIntsUnderKey(t, raw, "Minute")
+
+	require.Len(t, hours, 3, "spec 定的是每日三个时点；解析不出三个说明排班键被改坏或删掉了")
+	require.Len(t, minutes, 3)
+
+	got := make([][2]int, 3)
+	for i := range hours {
+		got[i] = [2]int{hours[i], minutes[i]}
+	}
+	assert.Equal(t, [][2]int{{15, 30}, {17, 30}, {21, 30}}, got,
+		"时刻取自计划 2026-08-12-hestia-cli.md:1634-1638；要改先改 spec")
+}
+
+// plistIntsUnderKey 取出所有 `<key>NAME</key><integer>N</integer>` 里的 N，按出现顺序。
+func plistIntsUnderKey(t *testing.T, raw []byte, name string) []int {
+	t.Helper()
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	var (
+		out     []int
+		lastTxt string
+		want    bool
+	)
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch tv := tok.(type) {
+		case xml.CharData:
+			txt := strings.TrimSpace(string(tv))
+			if want && txt != "" {
+				n, convErr := strconv.Atoi(txt)
+				require.NoError(t, convErr, "<%s> 后面应当是整数，得到 %q", name, txt)
+				out = append(out, n)
+				want = false
+			}
+			if txt != "" {
+				lastTxt = txt
+			}
+		case xml.EndElement:
+			if tv.Name.Local == "key" && lastTxt == name {
+				want = true
+			}
+		}
+	}
+	return out
+}
+
 // plist 必须能过 `plutil -lint`（reviewer D2）。
 //
 // ⚠️ **纯字符串/XML 守卫挡不住这件事**：`install-services.sh:34` 会跑 `plutil -lint`，
@@ -409,5 +477,5 @@ func TestInstallServicesInstallsHestiaPlist(t *testing.T) {
 	assert.Contains(t, loop, "com.newthinker.atlas.hestia-ingest",
 		"hestia-ingest 必须在安装循环的标签列表里，否则 plist 不会被加载")
 	// 阴性对照：确认我们截到的确实是那段列表，而不是整个文件。
-	assert.NotContains(t, loop, "每天 16:20", "截取范围不该包含文件头的注释段")
+	assert.NotContains(t, loop, "每天 15:30", "截取范围不该包含文件头的注释段")
 }

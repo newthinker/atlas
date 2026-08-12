@@ -9,7 +9,7 @@
 #   - com.newthinker.atlas.crisis-nfci         周三 21:00/22:00 刷新周频 NFCI（不评估）
 #   - com.newthinker.atlas.crisis-intraday-jpy 每 30 分钟盘中 JPY 检查（非 BREWING/CRISIS 空跑近零）
 #   - com.newthinker.atlas.prism-daily   每天 08:30 Prism 估值刷新（排在 refresh-us 之后）
-#   - com.newthinker.atlas.hestia-ingest 每天 16:20/19:20/09:20 抓央行《金融统计数据报告》（一月只有 1-2 天真有新报告，其余空跑）
+#   - com.newthinker.atlas.hestia-ingest 每天 15:30/17:30/21:30 抓央行《金融统计数据报告》（一月只有 1-2 天真有新报告，其余空跑）
 #   - com.newthinker.atlas.aktools       常驻 AKShare HTTP 侧车（127.0.0.1:8180，需先跑 scripts/akshare/setup.sh）
 #   - com.newthinker.atlas.baostock      常驻 Baostock HTTP 桥（127.0.0.1:8181，需先跑 scripts/baostock/setup.sh）
 #

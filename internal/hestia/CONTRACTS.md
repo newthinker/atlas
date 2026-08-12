@@ -697,7 +697,7 @@ TASK-010 的依赖链）。**合入 master 无害且必需；部署才是那条�
 | 产物 | 要点 |
 |---|---|
 | `configs/hestia.yaml` | 每个阈值**带 M0 实测来源**；`stock_continuity_max` 明标**未经真实数据验证**（M1c 必须重标定） |
-| `deploy/launchd/com.newthinker.atlas.hestia-ingest.plist` | 三时点 16:20 / 19:20 / 09:20（避开既有任务占用的整点半点）；**一个代理键都不设** |
+| `deploy/launchd/com.newthinker.atlas.hestia-ingest.plist` | 三时点 **15:30 / 17:30 / 21:30**（取自方案计划 `2026-08-12-hestia-cli.md:1634-1638`，**要改先改 spec**）；**一个代理键都不设** |
 | `scripts/ops/install-services.sh` | 已把 hestia-ingest 加进安装列表 |
 
 🔴 **plist 一个代理键都不设**（约束 C6 的正解）✅亲验：hestia 直连央行
@@ -722,3 +722,17 @@ plist 里**还有一个 `no_proxy`**；更麻烦的是**位置在各模板之间
 
 ⚠️ **`plutil -lint` 必须过**：`install-services.sh` 会跑它，而纯 XML/字符串守卫挡不住
 ——`encoding/xml` 比 `plutil` 宽容，XML 写坏时 Go 断言可能照样绿、**安装时才炸**。
+
+🔴 **反过来同样成立，而且更险：`plutil -lint` 管不了语义** ✅亲验（两次实测）：
+
+| 变异 | `plutil -lint` | Go 守卫 |
+|---|---|---|
+| 插一个 `no_proxy` 键 | **OK** | 红（`TestHestiaPlistSetsNoProxyKeys`） |
+| **删掉整个 `StartCalendarInterval` 块** | **OK** | 红（`TestHestiaPlistSchedulesThreeTimes`） |
+
+第二行是本任务改时刻时**真的发生过**的：注释与排班数组挨着，一次删除把两者一起带走，
+而 lint 照报 `OK`。⇒ 一个**没有排班键的 plist 是合法的 plist，它只是永远不会被唤起** ——
+`install-services.sh` 装得上、`launchctl list` 看得见、日志目录空着，**一切看起来都正常**。
+
+⇒ **两道守卫各管一半，不可互替**：lint 管 XML 合不合法，Go 守卫管**这个 job 到底跑不跑、
+用什么环境跑**。只留任一道都会漏掉另一半。
