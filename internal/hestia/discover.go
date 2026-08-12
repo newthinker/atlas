@@ -97,10 +97,20 @@ func resolveURL(base, ref string) (string, error) {
 // ⚠️ 别写成「『金融统计数据报告』六个字紧跟期次段挡住了那条干扰项」：把末尾的
 // 「报告」删掉，那条干扰项**照样被拒**（实测），挡它的自始至终是「紧跟」。
 // 两个机制各由 TestParsePeriodRejects 里对应的用例守着。
-var reportTitleRE = regexp.MustCompile(`(\d{4})年(上半年|\d{1,2}月)?金融统计数据报告`)
+//
+// 季度段（TASK-001）写成 `[一二三四五六七八九十]季度` 而不是只列真实存在的
+// 「一季度」：多出来的那几个落进 parsePeriod 的**语义层**被显式拒绝，而不是在这里
+// 悄悄失配。两种写法可观测结果相同（都不产候选），差别是语义层的拒绝有位置、
+// 有注释、有用例钉住 —— 与「13月」「0月」由语义层挡下是同一个安排。
+var reportTitleRE = regexp.MustCompile(
+	`(\d{4})年(上半年|前三季度|[一二三四五六七八九十]季度|\d{1,2}月)?金融统计数据报告`)
 
 // parsePeriod 从标题解析期次。映射与 types.go 的 periodEndMonth 一致
-// （h1→06、annual→12），不新增第二份期末月约定。
+// （q1→03、h1→06、q1_q3→09、annual→12），不新增第二份期末月约定。
+//
+// 央行一年只发四份**年初起累计**的《金融统计数据报告》：一季度 / 上半年 /
+// 前三季度 / 全年，加上每月的月报。四种累计期次对应四个期末月，月均折算除数
+// 分别是 3 / 6 / 9 / 12。
 func parsePeriod(title string) (period, periodType string, ok bool) {
 	m := reportTitleRE.FindStringSubmatch(title)
 	if m == nil {
@@ -112,6 +122,20 @@ func parsePeriod(title string) (period, periodType string, ok bool) {
 		return year + "-12", "annual", true
 	case seg == "上半年":
 		return year + "-06", "h1", true
+	case seg == "前三季度":
+		// 「前三季度」= 1–9 月累计，不是第 3 季度单季。periodType 因此叫 q1_q3
+		// 而不是 q3：两者期末月同为 09，月均折算除数却是 9 与 3，而 types.go 的
+		// validPeriodTypes 写着「写错会让信号判定错一个量级」。
+		return year + "-09", "q1_q3", true
+	case strings.HasSuffix(seg, "季度"):
+		// 「一季度」是唯一真实存在的季度形态。二/三/四季度的《金融统计数据报告》
+		// 央行**不发**（那三段分别由上半年 / 前三季度 / 全年覆盖），五季度以上更
+		// 不成话。真出现了也必须拒：「三季度」字面上无法区分单季与累计，期末月同为
+		// 09 而除数一个 3 一个 9 —— 宁可静默漏一期由人补，不可猜一个口径写进权威表。
+		if seg != "一季度" {
+			return "", "", false
+		}
+		return year + "-03", "q1", true
 	default:
 		// 放宽正则（期次段可选）必须配一步语义校验，否则放宽会把非法值带进来：
 		// `\d{1,2}月` 匹配得上「13月」，也匹配得上「0月」。
@@ -135,7 +159,26 @@ func parsePeriod(title string) (period, periodType string, ok bool) {
 //	<a href="/goutongjiaoliu/113456/113469/2026071512340454869/index.html" ...>标题</a>
 //
 // 栏目路径不写死（同 parsePaging 的理由：栏目 ID 变了能自动跟随）；article_id 是
-// URL 里的长数字串，实测 19 位，这里用 \d{14,} 宽松匹配。
+// URL 里的数字串，**不设任何位数下界**。
+//
+// 🔴 此前这里写的是 `\d{14,}`（「实测 19 位」）。那是本包最贵的一次「用样本形状当
+// 契约」：央行 2026-06-26 重建过站点，重建后新发文章的 article_id 是 **7 位**
+// （2025 年前三季度报是 `5868082`）。实测（2026-08-12）分界在 p14/p15 之间 ——
+// p1/p2/p7/p12/p13/p14 每页 15 条全 19 位，p15/p16/p17/p18 每页 15 条全 7 位，
+// 页内不混合。于是 `\d{14,}` 在 p18 上**整页命中 0 条链接**：
+// 不是 0 条候选，是 `scanPage` 的循环体一次都不执行。而 Discover 照常翻满 MaxPages
+// 返回空，一个字的错都不报。
+//
+// 放宽的代价是每页多命中一批栏目导航链接（`/rmyh/105145/index.html` 这类，id 是
+// 6 位栏目号），它们的链接文本是「货币政策」这种栏目名，过不了 parsePeriod ——
+// 这句话由 TestScanPageIgnoresNavigationLinks 钉住，不是推断。
+//
+// ⚠️ 那条用例**刻意不钉「多出多少条」**：同一个问题按去没去重、算不算栏目自链接
+// 有四个各自都对的答案（44/43/43/42，见该用例的注释）。钉住的是「0 条候选」。
+//
+// **别再给它加位数下界**（也别加成 `\d{6,}`）：站点重建过一次就会重建第二次，
+// 任何下界都是对下一次 id 形态的猜测，而猜错的形态是静默的。真正的过滤器是
+// parsePeriod 对链接文本的判断，那一层看的是标题、不是 id。
 //
 // `[^>]*>` 要穿过 onclick/target/title/istitle 四个属性才够到 `>`；`(?s)(.*?)</a>`
 // 取的是**链接文本**而非 title= 属性值。
@@ -143,7 +186,7 @@ func parsePeriod(title string) (period, periodType string, ok bool) {
 // ⚠️ 快照是 LF 版：仓库里的两份 index 快照被 core.autocrlf=input 规范化过（各去掉
 // 67 个 CR）。`(?s)` 让 `.` 跨行匹配，所以行尾形态不影响本正则；但若哪天有人照着
 // 原始 HTTP 响应写 `\r\n` 的字面量断言，会在仓库版上失配。
-var articleLinkRE = regexp.MustCompile(`(?s)href="([^"]*?/(\d{14,})/index\.html)"[^>]*>(.*?)</a>`)
+var articleLinkRE = regexp.MustCompile(`(?s)href="([^"]*?/(\d+)/index\.html)"[^>]*>(.*?)</a>`)
 
 // tagRE 剥掉链接文本里的内联标签。
 //
