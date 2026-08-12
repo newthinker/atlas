@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -387,13 +388,26 @@ func TestHestiaPlistPassesPlutilLint(t *testing.T) {
 	require.NoErrorf(t, err, "plutil -lint 未通过，安装时会失败：%s", out)
 }
 
-// install-services.sh 必须真的装这个 plist。
+// install-services.sh 必须真的**装**这个 plist。
 //
 // 没有这条的话，plist 写得再对也只是一个没人加载的文件 —— 而那种失败是**静默**的：
 // 部署脚本照常成功，服务从来没起来过。
+//
+// 🔴 **断言的是「它在 `for L in …` 那个安装列表里」，不是「文件里出现过这个串」**。
+// 消融实测（本任务）：把标签从安装循环里删掉、只留文件头注释里那一行，
+// **子串版断言照样全绿** —— 而 plist 从此不再被安装。
+// 与 plist 那条守卫是同一条纪律：**注释里提到 ≠ 生效**。
 func TestInstallServicesInstallsHestiaPlist(t *testing.T) {
 	raw, err := os.ReadFile("../../scripts/ops/install-services.sh")
 	require.NoError(t, err)
-	assert.Contains(t, string(raw), "com.newthinker.atlas.hestia-ingest",
-		"install-services.sh 的安装列表里要有 hestia-ingest，否则 plist 不会被加载")
+
+	// 取 `for L in ... ; do` 之间那一段（可跨行续行），只在它里面找。
+	m := regexp.MustCompile(`(?s)for L in\s(.*?);\s*do`).FindStringSubmatch(string(raw))
+	require.Len(t, m, 2, "前置锚点：没找到安装循环，下面的断言会在错的文本上做")
+
+	loop := m[1]
+	assert.Contains(t, loop, "com.newthinker.atlas.hestia-ingest",
+		"hestia-ingest 必须在安装循环的标签列表里，否则 plist 不会被加载")
+	// 阴性对照：确认我们截到的确实是那段列表，而不是整个文件。
+	assert.NotContains(t, loop, "每天 16:20", "截取范围不该包含文件头的注释段")
 }
