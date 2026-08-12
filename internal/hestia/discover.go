@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // pagingRE 匹配分页控件的 JS 调用：
@@ -198,6 +199,80 @@ func scanPage(html []byte, base string) ([]Candidate, error) {
 			Period:     period,
 			PeriodType: periodType,
 		})
+	}
+	return out, nil
+}
+
+// DiscoverCfg 是发现阶段的可调参数。mapstructure tag 供 config.go 装载。
+type DiscoverCfg struct {
+	IndexURL string        `mapstructure:"index_url"`
+	MaxPages int           `mapstructure:"max_pages"`
+	Timeout  time.Duration `mapstructure:"timeout"`
+}
+
+// Discover 扫描央行发布页，返回尚未入库的报告期次，最近的排在前面。
+//
+// 为什么要翻页：index 是混杂的新闻列表（实测 6115 条 / 408 页 / 每页 15 条），
+// 每页只覆盖约 20 天，而月报每月 10–15 日发布 —— 发布约 3 周后必然掉出第 1 页。
+// 只抓第 1 页在正常运行的日子也会漏。
+//
+// 为什么碰到已入库的期次就停：index 按时间倒序，再往后只会更旧。
+//
+// ⚠️ **空库时会一直翻到 MaxPages**，这是 spec §4.3 定义的首跑行为，不是缺陷：
+// 提前返回的条件只有「命中已入库期次」，而空库下 HasPeriod 恒 false。
+// 别改成「发现候选就停」——那样首跑只能捡到最近一期，历史全部漏掉。
+//
+// 不抓文章页 —— 只产出候选清单，取正文是 4b 的 ingest 做的。
+func Discover(ctx context.Context, f Fetcher, known PeriodChecker, cfg DiscoverCfg) ([]Candidate, error) {
+	first, err := f.Get(ctx, cfg.IndexURL)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, totalPages, err := parsePaging(first)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := cfg.MaxPages
+	if limit > totalPages {
+		limit = totalPages // 别请求不存在的页
+	}
+
+	var out []Candidate
+	seen := make(map[string]bool) // 同一期在分页边界上可能出现两次
+
+	for page := 1; page <= limit; page++ {
+		html := first // 第 1 页已经取过了，不重复请求
+		if page > 1 {
+			u, err := pageURL(cfg.IndexURL, tmpl, page)
+			if err != nil {
+				return nil, err
+			}
+			if html, err = f.Get(ctx, u); err != nil {
+				return nil, err
+			}
+		}
+
+		items, err := scanPage(html, cfg.IndexURL)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			key := it.Period + "/" + it.PeriodType
+			if seen[key] {
+				continue // 翻页时新文章上架会把边界那条挤到下一页重复出现
+			}
+			has, err := known.HasPeriod(ctx, it.Period, it.PeriodType)
+			if err != nil {
+				// 查库失败不能当成「未入库」继续翻 —— 那会把整段历史重新抓一遍。
+				return nil, err
+			}
+			if has {
+				return out, nil
+			}
+			seen[key] = true
+			out = append(out, it)
+		}
 	}
 	return out, nil
 }

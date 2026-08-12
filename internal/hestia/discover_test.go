@@ -1,7 +1,9 @@
 package hestia
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,6 +288,11 @@ func TestScanPage(t *testing.T) {
 	t.Run("同页的干扰项不被收进来", func(t *testing.T) {
 		got, err := scanPage(readTestdata(t, "pboc-index-p2.html"), base)
 		require.NoError(t, err)
+		// ⚠️ 这个前置锚点是 TASK-005 补的（TASK-003 遗留）：没有它，`got` 为空时
+		// 下面的循环体一次都不执行、断言平凡通过。实测 scanPage 恒返回 nil 时
+		// **单跑本子测试是 PASS 的**（整包才被兄弟用例拦住）——而验证者按 DoD
+		// 逐条单跑取证时拿到的正是那个假绿，还会写进验收矩阵。
+		require.NotEmpty(t, got, "前置锚点：p2 上应当提取到候选，空集会让下面的遍历平凡通过")
 		for _, c := range got {
 			assert.NotContains(t, c.Title, "国新办",
 				"「介绍…金融统计数据情况」不是报告，不该进候选")
@@ -420,4 +427,445 @@ func TestScanPageFiltersRatherThanMisses(t *testing.T) {
 	// 那条守 parsePeriod 的行为，本条守的是「这条因果链在真实快照上成立」）。
 	_, _, ok := parsePeriod(jammer)
 	assert.False(t, ok, "干扰项被看见了，必须是被 parsePeriod 拒的")
+}
+
+const testIndexURL = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"
+
+// fakeFetcher 从快照喂页面并记录请求顺序。
+//
+// calls 是有意记的：「翻了几页」和「翻页顺序」本身就是要断言的行为。只看返回值
+// 的话，翻满上限的实现与碰到已知期次就停的实现给出同样的结果。
+type fakeFetcher struct {
+	pages map[string][]byte
+	calls []string
+	err   error
+}
+
+func (f *fakeFetcher) Get(_ context.Context, url string) ([]byte, error) {
+	f.calls = append(f.calls, url)
+	if f.err != nil {
+		return nil, f.err
+	}
+	b, ok := f.pages[url]
+	if !ok {
+		return nil, fmt.Errorf("fake: 没有为 %s 准备页面", url)
+	}
+	return b, nil
+}
+
+type fakePeriodChecker struct {
+	have map[string]bool // key: period + "/" + periodType
+	err  error
+}
+
+func (f fakePeriodChecker) HasPeriod(_ context.Context, p, pt string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.have[p+"/"+pt], nil
+}
+
+// twoPageFetcher 用真实快照拼一个两页的站点，并返回第 2 页的 URL。
+func twoPageFetcher(t *testing.T) (*fakeFetcher, string) {
+	t.Helper()
+	p1 := readTestdata(t, "pboc-index-p1.html")
+	p2 := readTestdata(t, "pboc-index-p2.html")
+
+	tmpl, _, err := parsePaging(p1)
+	require.NoError(t, err)
+	u2, err := pageURL(testIndexURL, tmpl, 2)
+	require.NoError(t, err)
+
+	return &fakeFetcher{pages: map[string][]byte{testIndexURL: p1, u2: p2}}, u2
+}
+
+// targetOnPage2 问出第 2 页快照上的那一期，供后续用例构造「已入库」状态。
+//
+// **不硬编码期次**：快照是 TASK-002 当天抓的，上面是哪一期取决于抓取日期。
+// 写死 `2026-06/h1` 的测试会在下次更新快照时红，而红的理由与它要守的东西无关。
+func targetOnPage2(t *testing.T) Candidate {
+	t.Helper()
+	items, err := scanPage(readTestdata(t, "pboc-index-p2.html"), testIndexURL)
+	require.NoError(t, err)
+	require.NotEmpty(t, items, "第 2 页快照里应有报告条目")
+	return items[0]
+}
+
+// 空库时翻到第 2 页找到报告 —— 这是首跑的常态，也是「只抓第 1 页会漏」的证明。
+//
+// ⚠️ MaxPages 必须是 **2** 而不是计划写的 3：`twoPageFetcher` 只备两页，而空库下
+// `HasPeriod` 恒 false ⇒ Discover 不会提前返回，会一路翻到 MaxPages。实测 MaxPages=3
+// 时 fake 报「没有为 .../11040-3.html 准备页面」。
+//
+// **是测试写错，不是实现写错**：「空库翻满 MaxPages」正是 spec §4.3 定义的首跑行为。
+// 若把 Discover 改成「发现候选就停」来让这条变绿，首跑就只能捡到最近一期、历史全漏。
+func TestDiscoverFindsReportOnSecondPage(t *testing.T) {
+	f, u2 := twoPageFetcher(t)
+	want := targetOnPage2(t)
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, got)
+	assert.Equal(t, want.Period, got[0].Period)
+	assert.Equal(t, want.ArticleID, got[0].ArticleID)
+	assert.Equal(t, []string{testIndexURL, u2}, f.calls, "应当只请求这两页")
+}
+
+// threePageFetcher 造一个三页站点：第 3 页复用 p1（无报告条目）。
+// 三页是「空库翻满」与「命中即停」这对对照能分开的最小规模——两页时两者
+// calls 都是 2，看不出区别。
+func threePageFetcher(t *testing.T) *fakeFetcher {
+	t.Helper()
+	p1 := readTestdata(t, "pboc-index-p1.html")
+	p2 := readTestdata(t, "pboc-index-p2.html")
+
+	tmpl, _, err := parsePaging(p1)
+	require.NoError(t, err)
+	u2, err := pageURL(testIndexURL, tmpl, 2)
+	require.NoError(t, err)
+	u3, err := pageURL(testIndexURL, tmpl, 3)
+	require.NoError(t, err)
+
+	return &fakeFetcher{pages: map[string][]byte{testIndexURL: p1, u2: p2, u3: p1}}
+}
+
+// 「空库翻满 MaxPages」与「命中已入库期次即停」是**两个方向相反的行为**，
+// 而它们**在返回值上可能完全相同**（都可能是一份候选清单）。本条把两者放进
+// 同一个场景 —— 同样的三页站点、同样的 MaxPages=3，**只有 checker 不同** ——
+// 并直接断言那个区别本身：calls 长度 3 vs 2。
+//
+// 这样写才能同时排除两种退化实现：
+//   - 「恒翻满」的实现让 B 变成 3 ⇒ 红
+//   - 「发现候选就停」的实现让 A 变成 2 ⇒ 红（且那会直接违反 spec §4.3：
+//     首跑只捡到最近一期，历史全部漏掉）
+//
+// 分开写两条用例是不够的：各自单看都只是「calls 等于某个数」，
+// 「两者必须不同」这个性质**不属于任何一条**。
+func TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly(t *testing.T) {
+	cfg := DiscoverCfg{IndexURL: testIndexURL, MaxPages: 3}
+	target := targetOnPage2(t)
+
+	// A：空库 —— 没有任何提前返回的条件，应翻满 MaxPages
+	fa := threePageFetcher(t)
+	gotA, err := Discover(context.Background(), fa,
+		fakePeriodChecker{have: map[string]bool{}}, cfg)
+	require.NoError(t, err)
+	assert.Len(t, fa.calls, 3, "空库下 HasPeriod 恒 false，应一路翻到 MaxPages（spec §4.3 首跑行为）")
+	require.NotEmpty(t, gotA, "第 2 页上的那一期应当被发现")
+
+	// B：那一期已入库 —— 在第 2 页命中，不该再翻第 3 页
+	fb := threePageFetcher(t)
+	gotB, err := Discover(context.Background(), fb,
+		fakePeriodChecker{have: map[string]bool{target.Period + "/" + target.PeriodType: true}}, cfg)
+	require.NoError(t, err)
+	assert.Len(t, fb.calls, 2, "第 2 页命中已入库期次就该停")
+	assert.Empty(t, gotB, "唯一的候选已入库，不该产出任何东西")
+
+	// 区别本身 —— 这一行才是本条的核心，前面两条各自都可能被退化实现满足
+	assert.Greater(t, len(fa.calls), len(fb.calls),
+		"「空库翻满」与「命中即停」必须在请求次数上可区分，只看返回值分不出来")
+}
+
+// 碰到已入库的期次立刻停，且**不再请求后续页**。
+//
+// 只断言返回值验不出这条：翻满上限的实现也会返回同样的空清单。必须看 calls。
+// 与上一条的分工：这条把上限设得远高于实际页数（10），验的是「上限没被用满」；
+// 上一条验的是「两种行为可区分」。
+func TestDiscoverStopsAtKnownPeriod(t *testing.T) {
+	f, _ := twoPageFetcher(t)
+	target := targetOnPage2(t)
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{target.Period + "/" + target.PeriodType: true}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 10})
+	require.NoError(t, err)
+
+	assert.Empty(t, got, "唯一的候选已入库，不该产出任何东西")
+	assert.Len(t, f.calls, 2, "在第 2 页命中已知期次就该停，不该翻第 3 页")
+}
+
+// MaxPages 生效：设成 1 就只看第 1 页，而第 1 页没有报告。
+func TestDiscoverRespectsMaxPages(t *testing.T) {
+	f, _ := twoPageFetcher(t)
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 1})
+	require.NoError(t, err)
+
+	assert.Empty(t, got)
+	assert.Equal(t, []string{testIndexURL}, f.calls, "MaxPages=1 只该请求第 1 页")
+}
+
+// 总页数小于 MaxPages 时不越界请求。
+func TestDiscoverDoesNotExceedTotalPages(t *testing.T) {
+	// 把 p1 的 jumpTo 总页数改成 2，模拟一个只有两页的栏目
+	p1 := readTestdata(t, "pboc-index-p1.html")
+	tmpl, total, err := parsePaging(p1)
+	require.NoError(t, err)
+	shrunk := []byte(strings.Replace(string(p1),
+		fmt.Sprintf("jumpTo(this,'%d'", total), "jumpTo(this,'2'", 1))
+	require.NotEqual(t, string(p1), string(shrunk), "总页数替换必须真的生效，否则本条测的是原样的 408 页")
+
+	u2, err := pageURL(testIndexURL, tmpl, 2)
+	require.NoError(t, err)
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL: shrunk,
+		u2:           readTestdata(t, "pboc-index-p2.html"),
+	}}
+
+	_, err = Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 50})
+	require.NoError(t, err, "MaxPages=50 但总共只有 2 页，不该请求第 3 页")
+	assert.Len(t, f.calls, 2)
+}
+
+// 同一期在两页上都出现时只产出一个候选。
+//
+// 真实成因：翻页期间有新文章上架，边界那条会被挤到下一页重复出现。
+//
+// ⚠️ `require.NotEmpty` 是**前置锚点，不是装饰**：本条的主断言是「遍历 got，每个期次
+// 计数为 1」，而 got 为空时循环体一次都不执行 ⇒ 全部平凡通过。reviewer 消融实证过：
+// 把 scanPage 改成恒返回 nil,nil，本条**仍然绿**（整包会被兄弟用例接住，但验证者按
+// DoD 逐条单跑取证时会拿到假绿，并写进验收矩阵）。
+func TestDiscoverDeduplicatesAcrossPages(t *testing.T) {
+	p1 := readTestdata(t, "pboc-index-p1.html")
+	p2 := readTestdata(t, "pboc-index-p2.html")
+	tmpl, _, err := parsePaging(p1)
+	require.NoError(t, err)
+	u2, err := pageURL(testIndexURL, tmpl, 2)
+	require.NoError(t, err)
+
+	// 两页给同样的内容 —— 同一期出现两次
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: p2, u2: p2}}
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+	require.NoError(t, err)
+	require.NotEmpty(t, got, "前置锚点：两页都喂 p2，至少该产出那一期；空集会让下面的计数断言平凡通过")
+	assert.Len(t, f.calls, 2, "两页都要真的被请求过，否则「跨页去重」无从谈起")
+
+	seen := map[string]int{}
+	for _, c := range got {
+		seen[c.Period+"/"+c.PeriodType]++
+	}
+	for k, n := range seen {
+		assert.Equal(t, 1, n, "期次 %s 重复产出了 %d 次", k, n)
+	}
+}
+
+// 查库失败必须中断，不能当成「未入库」继续翻 —— 那会把整段历史重新抓一遍。
+func TestDiscoverFailsOnCheckerError(t *testing.T) {
+	f, _ := twoPageFetcher(t)
+	want := errors.New("database is locked")
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}, err: want},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, want)
+	assert.Nil(t, got)
+	// ⚠️ 上面这句 Nil **证不出**「不返回部分结果」：checker 恒失败 ⇒ 第一次调用就返回
+	// 错误，那一刻 out 本来就是空的，`return out, err` 与 `return nil, err` 返回值相同。
+	// 真正守住这件事的是 TestDiscoverReturnsNoPartialResultOnCheckerError。
+}
+
+// failOnNthChecker 前 n 次正常返回「未入库」，第 n+1 次开始返回错误。
+//
+// 指针接收者是必须的：要跨调用计数。（fakePeriodChecker 是值接收者，复制一份就丢了计数。）
+type failOnNthChecker struct {
+	n    int
+	seen int
+	err  error
+}
+
+func (c *failOnNthChecker) HasPeriod(_ context.Context, _, _ string) (bool, error) {
+	c.seen++
+	if c.seen > c.n {
+		return false, c.err
+	}
+	return false, nil
+}
+
+// 查库失败发生在**已经收集到若干候选之后**时，仍然不得把那部分返回出去。
+//
+// ⚠️ 这条是消融逼出来的，而且是**同一个形态在本 Sprint 的第二次**：TASK-003 的
+// `TestScanPageFailsOnUnresolvableURL` 也写着 `assert.Nil(got, "不得返回部分结果")`
+// 却杀不掉 `return out, err` —— 因为它的场景里第一条就失败，out 本来就是空的。
+// 我在 T3 修了那个实例，写本条上游的 TestDiscoverFailsOnCheckerError 时**又犯了一遍**。
+// ⇒ 「错误路径断言 Nil」只有在**失败点之前已经收集过东西**时才有鉴别力。
+//
+// 为什么较真：返回「部分候选 + error」的调用方若只看结果不看 err，拿到的是一份
+// 看起来正常、实则残缺的清单，缺掉的那些期次就此静默丢失 —— 而查库失败恰恰是
+// 最可能被当成「偶发、重试就好」而忽略 err 的一类。
+func TestDiscoverReturnsNoPartialResultOnCheckerError(t *testing.T) {
+	// 合成一页两条报告 + 一个只有 1 页的分页控件：limit=1，一页内产出两个候选，
+	// 让 checker 在第 2 个候选上失败 —— 此时 out 已有 1 条，两种写法才分得开。
+	page := []byte(`
+<a href="/goutongjiaoliu/113456/113469/2026011512340454111/index.html">2025年金融统计数据报告</a>
+<a href="/goutongjiaoliu/113456/113469/2026011519015458333/index.html">2025年12月金融统计数据报告</a>
+<a href="###" onclick="jumpTo(this,'1','1','/goutongjiaoliu/113456/113469/11040-%1.html')">尾页</a>`)
+
+	// 前置自证：这一页确实产出两个候选，否则「第 2 个上失败」根本不成立
+	items, err := scanPage(page, testIndexURL)
+	require.NoError(t, err)
+	require.Len(t, items, 2, "本条依赖同页两个候选，合成页面必须真的产出两条")
+
+	want := errors.New("database is locked")
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: page}}
+
+	got, err := Discover(context.Background(), f,
+		&failOnNthChecker{n: 1, err: want},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 5})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, want)
+	assert.Nil(t, got, "第 1 条已收进 out、第 2 条查库失败——那 1 条也不得返回出去")
+}
+
+// 抓页失败必须中断。
+//
+// ⚠️ `fakeFetcher.err` 这个字段计划里定义了却**从未被任何用例用过**（reviewer 指出），
+// 即「抓页失败」这条路径原本零覆盖。两个子测试分别覆盖首页与翻页中途 ——
+// 后者更要紧：翻页中途失败若被吞掉，Discover 会拿着**残缺的**候选清单正常返回，
+// 而那一期就此静默丢失。
+func TestDiscoverFailsOnFetchError(t *testing.T) {
+	t.Run("第 1 页抓取失败", func(t *testing.T) {
+		f, _ := twoPageFetcher(t)
+		want := errors.New("connection refused")
+		f.err = want
+
+		got, err := Discover(context.Background(), f,
+			fakePeriodChecker{have: map[string]bool{}},
+			DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, want, "底层抓取错误必须能被调用方识别出来")
+		assert.Nil(t, got)
+	})
+
+	t.Run("翻页中途抓取失败", func(t *testing.T) {
+		p1 := readTestdata(t, "pboc-index-p1.html")
+		tmpl, _, err := parsePaging(p1)
+		require.NoError(t, err)
+		u2, err := pageURL(testIndexURL, tmpl, 2)
+		require.NoError(t, err)
+
+		// 只备第 1 页：翻到第 2 页时 fake 报错，且错误里带着那一页的 URL
+		f := &fakeFetcher{pages: map[string][]byte{testIndexURL: p1}}
+
+		got, err := Discover(context.Background(), f,
+			fakePeriodChecker{have: map[string]bool{}},
+			DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+
+		require.Error(t, err, "翻页中途失败必须中断，不能拿着残缺清单正常返回")
+		assert.Contains(t, err.Error(), u2,
+			"错误要带出是哪一页挂了——Discover 会连续请求多页，不带 URL 就分不清")
+		assert.Nil(t, got)
+		assert.Len(t, f.calls, 2, "失败发生在第 2 页，说明确实翻到了那里")
+	})
+}
+
+// 解析页面失败也必须中断。
+//
+// 这条路径在别的用例里都不可达（真实快照 + 正常 base 时 scanPage 从不出错），
+// 所以专门构造：把 IndexURL 设成不可解析的串，页面本身照常喂 —— 抓取成功、
+// 分页解析成功，卡在 scanPage 补全条目 URL 那一步。
+//
+// 不测它的话，Discover 里那句 `if err != nil { return nil, err }` 就是没人走过的代码，
+// 改成 `continue` 也不会有任何东西变红 —— 而那意味着整页候选被静默丢弃。
+func TestDiscoverFailsOnScanError(t *testing.T) {
+	const badBase = "://nope"
+	f := &fakeFetcher{pages: map[string][]byte{
+		badBase: readTestdata(t, "pboc-index-p2.html"),
+	}}
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: badBase, MaxPages: 1})
+
+	require.Error(t, err, "条目 URL 补全失败必须中断，不得静默丢弃整页候选")
+	assert.Contains(t, err.Error(), "bad base url")
+	assert.Nil(t, got)
+	require.NotNil(t, errors.Unwrap(err), "底层 url.Parse 的错误必须被 %%w 包住")
+}
+
+// 分页控件解析不出来时，Discover 必须把 parsePaging 的错误透传出去。
+//
+// T2 让 parsePaging 在解析不到分页控件时报错，理由是「不得静默退化成只扫第 1 页」。
+// 那条纪律要在 Discover 这一层才真正兑现：若这里把错误吞掉、拿第 1 页的条目继续，
+// 退化就照样发生了 —— 只是发生在调用方看不见的地方。
+func TestDiscoverFailsOnPagingParseError(t *testing.T) {
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL: []byte("<html><body>改版了，没有分页控件</body></html>"),
+	}}
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 5})
+
+	require.Error(t, err, "解析不到分页控件必须中断，不得退化成只扫第 1 页")
+	assert.Contains(t, err.Error(), "paging")
+	assert.Nil(t, got)
+	assert.Len(t, f.calls, 1, "第 1 页就解析失败，不该再请求任何页")
+}
+
+// 拼下一页 URL 失败也必须中断。
+//
+// 与上一条（scanPage 失败）是 Discover 里两条不同的错误出口，成因也不同：这条坏的是
+// **页面里解析出来的模板**，而不是调用方给的 base。构造法：把快照 jumpTo 里的模板塞
+// 一个控制字符 —— 第 1 页照常解析（p1 本来就没有报告），翻第 2 页时 pageURL 才炸。
+//
+// 若这里改成「break 掉、把已有的返回」，Discover 会拿着**只扫了第 1 页**的结果正常返回，
+// 而第 1 页恰恰是常态没有报告的那一页 —— 管线看起来在跑，实际什么都发现不了。
+func TestDiscoverFailsOnPageURLError(t *testing.T) {
+	p1 := readTestdata(t, "pboc-index-p1.html")
+	tmpl, _, err := parsePaging(p1)
+	require.NoError(t, err)
+
+	// ⚠️ 用 pagingRE 自己定位再改，别拿 tmpl 直接 Replace：实测该模板串在 p1 里
+	// **出现两次**，靠前的那处是 `jumpToPage(event,this,…)` 的 onkeydown（pagingRE
+	// 并不匹配它），`Replace(…, 1)` 会改中它，而 jumpTo 那处原封不动 ——
+	// 结果是「变异没生效但测试照样红」，红在 fake 缺页上，与本条要守的东西无关。
+	loc := pagingRE.FindIndex(p1)
+	require.NotNil(t, loc, "p1 里应当有 jumpTo 分页控件")
+	seg := strings.Replace(string(p1[loc[0]:loc[1]]), tmpl, tmpl+"\x7f", 1)
+	broken := append(append(append([]byte{}, p1[:loc[0]]...), seg...), p1[loc[1]:]...)
+
+	// 自证变异确实作用到了**被解析的那一处**，而不是页面上别处的同名串
+	brokenTmpl, _, err := parsePaging(broken)
+	require.NoError(t, err)
+	require.NotEqual(t, tmpl, brokenTmpl, "解析出的模板必须已被改坏，否则本条测的是好模板")
+
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: broken}}
+
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+
+	require.Error(t, err, "拼不出下一页 URL 必须中断，不得只扫第 1 页就正常返回")
+	assert.Contains(t, err.Error(), "bad url")
+	assert.Nil(t, got)
+	assert.Len(t, f.calls, 1, "第 2 页的 URL 都没拼出来，不该发出第二次请求")
+}
+
+// Discover 全程不碰文章页。取正文是 4b 的事。
+func TestDiscoverNeverFetchesArticlePages(t *testing.T) {
+	f, _ := twoPageFetcher(t)
+	got, err := Discover(context.Background(), f,
+		fakePeriodChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+	require.NoError(t, err)
+	require.NotEmpty(t, got, "前置条件：应当发现了候选（空集会让下面的遍历平凡通过）")
+
+	for _, c := range got {
+		assert.NotContains(t, f.calls, c.URL,
+			"候选的文章 URL 不该被请求：Discover 只发现，不取正文")
+	}
 }

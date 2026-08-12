@@ -412,8 +412,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这十个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "Discover", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这十一个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -477,6 +477,23 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // 不是照抄推断）：Fetcher 是**接口类型**——本条只收 *ast.FuncDecl，类型声明是
 // GenDecl；pbocFetcher.Get 的**接收者未导出**，被上面 ast.IsExported(recv) 那道
 // 分支排除，包外根本拿不到它。两者也都不打红 reflect 版（它只看 *Store 的方法集）。
+//
+// —— 为什么名单里多了 Discover（M1b-4a / TASK-005 追加）——
+//
+// 同样是登记而不是放宽：断言仍是 assert.Equal 的**全导出面精确集合相等**，只是切片里
+// 多了一项（十→十一），没有换成 Subset/Contains。Discover 是包级函数，读 index 页、
+// 产出候选清单，**不碰数据库**——它连 Store 都不持有，只经 PeriodChecker 窄接口问
+// 「这一期入库了没有」，那是个只读判定。它必须导出，是因为 M1b-4b 的 ingest 与 cmd 层
+// 要调它。排在 DefaultThresholds 之后是字节序结果（"De" < "Di" < "N"）。
+//
+// 它与 NewPBOCFetcher 同形：包级函数 ⇒ **只打红本条（AST 版）**，reflect 版全程绿
+// （实测确认，非推断）。同一迭代里 DiscoverCfg 与 Candidate 都是**结构体类型**，
+// 与 Fetcher 同理不进本条视野——本条只收 FuncDecl。
+//
+// ⚠️ 这一条的正确性**只能靠人逐字核对交付 diff**：把新增项从期望列表里删掉会让本条
+// 变红（那证明守卫确实在按精确集合相等工作），但**把 assert.Equal 换成 assert.Subset
+// 不会让任何东西变红**——「守卫的守卫」本身无人守。所以审查这一行时要看的不是
+// 「测试绿不绿」，而是「是不是追加一项、断言形状有没有被动过」。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
