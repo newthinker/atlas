@@ -403,8 +403,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Preceding", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这八个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.Preceding", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这九个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -443,6 +443,20 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // DefaultThresholds），排在末位是字节序结果（"V" > "S"）。
 //
 // History（接口类型）与 NoHistory（变量）都不是 FuncDecl，不进本条视野，无需登记。
+//
+// —— 为什么名单里多了 NewPBOCFetcher（M1b-4a / TASK-001 追加）——
+//
+// 同样是登记而不是放宽。NewPBOCFetcher 是构造器：返回一个只发 GET、把响应体
+// 原样吐出来的 Fetcher，**不碰数据库**，也没有任何通向 Save 的路径——它开的是
+// 一个「读外部 HTTP」的口，不是写口。它必须导出，是因为 M1b-4b 的 ingest 与
+// cmd 层要拿它当 Discover 的入参（discover 的测试则喂快照 fake，不碰网络）。
+// 它是包级函数，所以只打红本条（同 DefaultThresholds/Validate），排在
+// DefaultThresholds 之后是字节序结果（"D" < "N"，且 "NewP" < "NewS"）。
+//
+// 本迭代新增的另外两个导出物**实测确认不进本条视野**（跑一次只加它们的版本核对过，
+// 不是照抄推断）：Fetcher 是**接口类型**——本条只收 *ast.FuncDecl，类型声明是
+// GenDecl；pbocFetcher.Get 的**接收者未导出**，被上面 ast.IsExported(recv) 那道
+// 分支排除，包外根本拿不到它。两者也都不打红 reflect 版（它只看 *Store 的方法集）。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
