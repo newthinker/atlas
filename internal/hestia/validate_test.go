@@ -832,10 +832,14 @@ func TestGatesMatchContractedCheckIDs(t *testing.T) {
 func TestCaliberExemptionRecordsSkipNotPass(t *testing.T) {
 	cfg := DefaultThresholds()
 	cfg.CaliberExemptions = []CaliberExemption{{
-		Version:    "2025-01",
-		Period:     validMeta().Period,
-		SkipChecks: []string{"monetary_hierarchy"},
-		Reason:     "M1 口径纳入个人活期存款，层次关系在切换期不成立",
+		Version: "2025-01",
+		Period:  validMeta().Period,
+		// 与 Period 一样取自 validMeta()，而不是写死 "h1"：两个维度必须都命中
+		// 豁免才生效，写死会在 validMeta 改动时静默变成「豁免不命中」，
+		// 而那时这条测试红的理由与它要钉的 skipped-not-passed 无关。
+		PeriodTypes: []string{validMeta().PeriodType},
+		SkipChecks:  []string{"monetary_hierarchy"},
+		Reason:      "M1 口径纳入个人活期存款，层次关系在切换期不成立",
 	}}
 
 	obs := obsFrom(golden2025, extractorV2)
@@ -855,8 +859,12 @@ func TestCaliberExemptionDoesNotLeakToOtherPeriods(t *testing.T) {
 	cfg := DefaultThresholds()
 	cfg.CaliberExemptions = []CaliberExemption{{
 		Version: "2025-01", Period: "2025-01",
-		SkipChecks: []string{"monetary_hierarchy"},
-		Reason:     "口径切换期",
+		// period_type 取观测的那个，让 Period 成为**唯一**不匹配的维度：
+		// 若这里写成别的取值，下面的 failed 断言会同时有两个成因，
+		// 而它要钉的只是「豁免不外溢到别的期次」。
+		PeriodTypes: []string{validMeta().PeriodType},
+		SkipChecks:  []string{"monetary_hierarchy"},
+		Reason:      "口径切换期",
 	}}
 
 	obs := obsFrom(golden2025, extractorV2) // Period 是 validMeta() 的 2026-06
@@ -878,7 +886,8 @@ func TestExemptionRejectsUnknownCheckID(t *testing.T) {
 	cfg := DefaultThresholds()
 	cfg.CaliberExemptions = []CaliberExemption{{
 		Version: "2025-01", Period: "2025-01",
-		SkipChecks: []string{"deposit_summ"}, Reason: "拼错的 ID",
+		PeriodTypes: []string{"monthly"},
+		SkipChecks:  []string{"deposit_summ"}, Reason: "拼错的 ID",
 	}}
 
 	_, err := Validate(context.Background(),
@@ -1014,10 +1023,11 @@ func TestMonetaryHierarchyRejectsEquality(t *testing.T) {
 func TestReportKeepsEveryGateUnderExemption(t *testing.T) {
 	cfg := DefaultThresholds()
 	cfg.CaliberExemptions = []CaliberExemption{{
-		Version:    "2025-01",
-		Period:     validMeta().Period,
-		SkipChecks: []string{"monetary_hierarchy", "yoy_sanity"},
-		Reason:     "口径切换期，层次与同比均不可比",
+		Version:     "2025-01",
+		Period:      validMeta().Period,
+		PeriodTypes: []string{validMeta().PeriodType},
+		SkipChecks:  []string{"monetary_hierarchy", "yoy_sanity"},
+		Reason:      "口径切换期，层次与同比均不可比",
 	}}
 
 	obs := obsFrom(golden2025, extractorV2)
