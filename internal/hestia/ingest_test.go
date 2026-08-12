@@ -29,6 +29,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
 // indexEntry 是合成 index 页上的一条链接。
@@ -570,4 +572,165 @@ func TestQuarterlyReportEndToEnd(t *testing.T) {
 			assert.Positivef(t, passed, "至少要有闸门真的跑过并通过——全 skipped 说明抽取其实没给出值")
 		})
 	}
+}
+
+// ── T4：一级键三种情形的行为守卫（spec 第 2 节定案）─────────────────────────
+//
+// 一级幂等键是 article_id。spec 第 2 节把它拆成三种情形，各自的**期望行为不同**，
+// 而三者在「下一轮会不会重抓」这个可观测面上必须能分开：
+//
+//	A 抓取/解析失败  → 两张表都不写 → 下一轮**自然重试**（不需要 --force）
+//	B 新 article_id  → 一级键不命中 → **抓**
+//	C 同一篇没过闸    → 写了 pending 行 → 一级键**命中被挡**
+//
+// ⚠️ 这三条是**行为守卫**，不是实现测试：若某条红了，先怀疑实现（TASK-005/011）
+// 有疏漏，别改测试去迁就它（计划 716 行原话）。
+
+// A：抓取/解析失败**不留任何行** ⇒ 下一轮自然重试。
+//
+// 🔴 为什么不能用 HasPeriod 断言这件事（本用例存在的全部理由）：
+// `TestIngestContinuesAfterOneFailure` 里那句 `assert.False(has)` 用的是 HasPeriod，
+// 而 **HasPeriod 查 v_hestia_current，本来就看不见 pending** ⇒ 即使失败的那期真的
+// 落了一行 pending，那句断言**照样绿**。它证明的是「没进权威表」，不是「没留下行」。
+// 本条直接数 pending 表的行数，并**再跑一轮**证明重试真的发生了。
+func TestIngestLeavesNoRowOnFetchOrParseFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// 正文是垃圾 ⇒ Parse 失败 ⇒ 根本走不到 Save
+	broken := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}),
+		articleURL(annualID): []byte(`<html><body>这不是一篇报告</body></html>`),
+	}}
+	var out bytes.Buffer
+	require.Error(t, Ingest(ctx, IngestDeps{Store: s, Fetch: broken, Out: &out, Cfg: ingestCfg()}),
+		"解析失败必须让整批返回非零")
+
+	assert.Zero(t, countRows(t, s, TablePending),
+		"A：解析失败连 Save 都没走到，pending 不该有行")
+	assert.Zero(t, countRows(t, s, TableObservations),
+		"A：更不该进权威表")
+
+	// 「下一轮自然重试」—— 不加 --force，换成好的正文，应当直接入库。
+	var out2 bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out2, Cfg: ingestCfg(),
+	}), "A：上一轮没留下任何行 ⇒ 一级键不命中 ⇒ 这一轮应当照常处理")
+
+	has, err := s.HasPeriod(ctx, "2025-12", "annual")
+	require.NoError(t, err)
+	assert.True(t, has, "A：重试后应当真的入库了 —— 这一半才证明「自然重试」")
+}
+
+// B：新 article_id ⇒ 一级键不命中 ⇒ 抓。
+//
+// 与 A 的分工：A 证明「没留行 ⇒ 会重试」，B 证明「留了行、但**这一篇**没见过 ⇒ 仍然抓」。
+// 少了 B，一个「只要库里有任何行就跳过」的实现能让 A 照样绿。
+func TestIngestFetchesUnseenArticleEvenWhenStoreIsNotEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// 先让年报正常入库
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(),
+	}))
+	require.Equal(t, 1, countRows(t, s, TableObservations), "前置：年报应已入库")
+
+	// 再来一篇**没见过的** article_id（另一期），库非空但这一篇没见过
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:     syntheticIndex(t, indexEntry{h1ID, h1Title}),
+		articleURL(h1ID): readTestdata(t, h1File),
+	}}
+	var out2 bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out2, Cfg: ingestCfg()}))
+
+	assert.NotContains(t, out2.String(), "already ingested",
+		"B：这一篇的 article_id 没见过，不该被一级键挡住")
+	has, err := s.HasPeriod(ctx, "2020-06", "h1")
+	require.NoError(t, err)
+	assert.True(t, has, "B：没见过的文章应当被抓并入库")
+}
+
+// ── T4：--force 穿透**两层**幂等（TASK-011 之后的事实）────────────────────────
+//
+// 🔴 **本组的原计划描述已过期，此处按 TASK-011 合入后的实际行为重写**（leader
+// 2026-08-13 订正）。原文断言「--force 的作用域只到 pending —— 对已在观测表的期次
+// 结构上不可达」。那在 TASK-011 之前是对的：Discover 按**期次**判停，已入库的期次
+// 会让它当场返回空，--force 够不着。
+//
+// 现在 --force 穿透两层：
+//
+//	ingest.go 的 `if !d.Force`              → 跳过 ingestOne 的 HasArticle（原本就有）
+//	ingest.go 的 `if d.Force { known = neverSeen{} }` → 让 Discover 不提前判停（TASK-011 新加）
+//
+// ⇒ 这也顺带闭合了独立 reviewer 的 B4（「调了阈值想重跑一个已入库的期次目前没有出路」）。
+
+// ①（原文保留，仍然成立）：--force 重跑 **pending** 期次 ⇒ New 落观测表。
+func TestForceOnPendingPeriodLandsInObservations(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// 先把这一期做成 pending（校验不过）
+	_, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-15",
+			ArticleID: annualID, CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, failing())
+	require.NoError(t, err)
+	require.Equal(t, 1, countRows(t, s, TablePending), "前置：这一期必须先落 pending")
+
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(), Force: true,
+	}))
+
+	assert.Contains(t, out.String(), bitemporal.New.String(),
+		"①：pending 里的那期没进过权威表 ⇒ 这次应当判 New")
+	has, herr := s.HasPeriod(ctx, "2025-12", "annual")
+	require.NoError(t, herr)
+	assert.True(t, has, "①：--force 之后应当真的落进观测表")
+}
+
+// ②（TASK-011 带来的新行为）：--force 重跑**已在观测表**的期次 ⇒ **真的走到 Save**，
+// 且 bitemporal 判 **Duplicate**（同 article_id、同 published_at、业务键未变
+// ⇒ incoming == LatestRevision）。
+//
+// 🔴 **两半缺一不可**，这是本条最容易写错的地方：
+// 只断言「观测表仍是 1 行」的话，**「根本没走到 Save」时同样为绿** —— 而那正是
+// TASK-011 之前的真实行为（Discover 判停挡住 ⇒ 候选为空 ⇒ Ingest 直接打
+// no new reports 就返回）。⇒ 必须断言输出里出现 Duplicate，那是「走到了 Save」的证据。
+func TestForceOnObservedPeriodIsDuplicate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// 先正常入库一次
+	var first bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &first, Cfg: ingestCfg(),
+	}))
+	require.Equal(t, 1, countRows(t, s, TableObservations), "前置：先要有一行在权威表里")
+	require.Contains(t, first.String(), bitemporal.New.String(), "前置：第一次应当是 New")
+
+	// --force 再跑一次同一篇
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(), Force: true,
+	}))
+
+	// 第一半：**走到了 Save**。没走到的话 Ingest 会打 no new reports 就返回。
+	assert.NotContains(t, out.String(), "no new reports",
+		"②-a：--force 必须穿透 Discover 的判停，否则候选为空、根本走不到 Save")
+	require.NotEmpty(t, outPeriods(out.String()),
+		"②-a：走到 Save 的话每条候选都会打一行「期次 Verdict → 表」")
+
+	// 第二半：**结果是 Duplicate**。
+	assert.Contains(t, out.String(), bitemporal.Duplicate.String(),
+		"②-b：同 article_id、同 published_at、业务键未变 ⇒ incoming == LatestRevision ⇒ Duplicate")
+
+	assert.Equal(t, 1, countRows(t, s, TableObservations),
+		"②：Duplicate 只刷 article_id，不新增行")
+	assert.Zero(t, countRows(t, s, TablePending), "②：过闸的重跑不该落 pending")
 }
