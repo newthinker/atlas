@@ -1,0 +1,124 @@
+{
+  "task": "TASK-007",
+  "title": "LoadConfig 与 CONTRACTS",
+  "by": "dev-agent-50",
+  "base": "7b49b13c11f2649017a7f2393da481354dc530e2",
+  "branch": "master（wave5 主工作区直连，无 worktree／无 task 分支）",
+  "commit": "c101d6125d76ce1a8863342072a703c4c206d002",
+  "key_findings": [
+    "**F8 的自证按新判据做了，四格与 DoD 预告逐格吻合**。同一个 `%w`→`%v` 消融下，两版都 FAIL，但失败输出不同：已修版（`require.NotNil(errors.Unwrap(err))`）打出 `Target error should be in err chain:` **加** `Expected value not to be nil.`；未修版（`require.NotErrorIs(errors.Unwrap(err), err)`）**只有前者**。⇒ 那句话确实只有改写后的断言才产生，F8 修正承重。**若按旧判据「确认测试转红」，两版都红、都会得出「自证通过」** —— 这就是 G31 说的假自证。对照组是我把那行改回 `NotErrorIs` 再跑同一变异得到的，不是推断。",
+    "**`LoadConfig` 的三处 `%w` 原本一处都没人守**。我写完 config.go 后自查发现：`%w` 改成 `%v` 时**错误串一模一样**（`%v` 同样打印底层错误），而计划给的测试只断言 `require.Error` + `Contains(键名)` ⇒ 三处包裹全部可以静默丢失。补了两条断言：`TestLoadConfigMissingFile` 加 `require.NotNil(errors.Unwrap(err))` + `assert.ErrorIs(err, fs.ErrNotExist)`（探针实测该链路成立），`TestLoadConfigRejects` 每个子用例加 `require.NotNil(errors.Unwrap(err))`。消融 M8/M9 分别被它们杀死。`ErrorIs(fs.ErrNotExist)` 比 `NotNil` 更进一步：它证明 4b 的 cmd 层能判出「配置文件还没建」（可提示用户）与「配置写错了」（必须修）的区别。",
+    "**`Config.validate()` 的五条阈值检查里，有四条写了却没人测**（实测 validate 覆盖率仅 66.7%）。DoD boundary[0] 只点名 `deposit_sum_tolerance`，而 `deposit_sum_drift_max` / `corp_loan_tolerance` / `stock_continuity_max` / `yoy_sanity_max` 四条删掉都不会有东西变红 —— 「第二道防线有五条」在测试上只成立一条。补齐四条 + 一条负数用例后 `validate` 到 100%。消融 M6（删掉 yoy_sanity_max 那条）**只被我新补的那个子用例杀死**，证明它们不是冗余。",
+    "**`LoadConfig` 的 Unmarshal 错误出口原本零覆盖**（LoadConfig 90.0%）。补 `TestLoadConfigRejectsMalformedYAML`（`max_pages: [1, 2]` 类型对不上）。这条的危害与漏写不同也更隐蔽：`max_pages: [1,2]` 是**写了**的，写的人认为自己配了 —— 若被静默忽略，跑起来用的却是别的值。补后 LoadConfig 100%。",
+    "**mapstructure 预填一次通过，计划 Step 5 的退路（`v.SetDefault` 逐键预设）用不上** —— 与 reviewer 的预跑结论一致。`Config{Thresholds: DefaultThresholds()}` 再 `Unmarshal`，YAML 里没出现的键保持预填值。消融 M1（改成 `Config{}`）被三条用例杀死。另外我给 `TestLoadConfigKeepsDefaults...` 加了一条前提断言 `require.NotEqual(def.YoYSanityMax, 60.0)`：60 必须与默认值 50 不同，否则「写了的要被覆盖」那条在「什么都没覆盖」的实现下也平凡成立。",
+    "**`go doc` 缺陷已修并自证，但它没有留下任何防复发的守卫 —— 这是一个我主动没有实施的缺口，理由在 decisions**。修法是删 `store.go:236` 那个空行；自证：`go doc ./internal/hestia Store.HasPeriod` 从 **3 行（仅签名）变成 20 行（含全部注释正文）**，`grep '别把理由写强'` 从 0 到 1。⇒ 那段全包最该被看到的说明（pending 不算已入库的理由、与 CONTRACTS「pending 对闸门不可见」是同一张表两面的辨析）现在对 `go doc` 的读者可见了。",
+    "**探针误报提醒：判断「导出面」必须过滤未导出接收者**。我为评估「能否加自动守卫」写了个 AST 探针，它报 `validate.go: Preceding` 缺 Doc —— 实际那是 `func (noHistory) Preceding(...)`，**接收者 `noHistory` 未导出**，包外根本拿不到，不构成导出面。`store_test.go` 的导出面守卫用 `recvTypeName` + `ast.IsExported(recv)` 正确处理了这一点，我的临时探针没有。⇒ 一次性探针的结论同样要核实，不能因为「只是探一下」就免检。",
+    "**本任务所有单跑取证都用锚定式 `-run '^Top$'`**（DoD 新增要求）。`store_test.go` 的守卫两条与 `TestPrecedingWrapsQueryError` 的单跑全部写成 `^…$`，且判定只读 `--- PASS:`/`--- FAIL:` 那一行，不读整体退出码。"
+  ],
+  "decisions": [
+    {
+      "decision": "补两条 `%w` 包裹断言（`NotNil(Unwrap)` + `ErrorIs(fs.ErrNotExist)`）",
+      "rationale": "计划与 DoD 都只要求「报错且含键名」，而那两个判据对 `%w`/`%v` 完全无鉴别力（错误串一样）。硬要求 2 明文要求「断言『包住了』用 `require.NotNil(t, errors.Unwrap(err))`」。`ErrorIs(fs.ErrNotExist)` 是先用探针实测确认链路成立后才加的，不是推断。消融 M8/M9 证实两条都承重。"
+    },
+    {
+      "decision": "补齐另外四条阈值检查的用例 + 一条负数用例，把 validate 推到 100%",
+      "rationale": "DoD 只点名 deposit_sum_tolerance，但另外四条同族检查删掉都不会红 —— 「第二道防线」在测试上只成立五分之一。负数那条是另一侧：写 -1 的人多半想表达「关掉这道闸」，而阈值是「超过就拦」的上限，负数会让每一期都超标，与写 0 同族。这与我在 TASK-005 补四条错误出口是同一个理由（覆盖率暴露的无守卫分支）。"
+    },
+    {
+      "decision": "**不**为 `go doc` 缺陷加自动化守卫，只记录并上报",
+      "rationale": "加守卫需要两步都超出 DoD：① 给 `store.go: Close` 补文档注释（它是真的没写注释，不是空行隔开，但会让「所有导出物必须有 Doc」的守卫红）；② 新增一个 AST 测试。而**整包范围的守卫会碰 `validate.go`，那不在本任务 `writes` 里**，我无权改。⇒ 按「不擅自扩大范围」处理：修好 DoD 要求的那一处、按 DoD 要求手工 `go doc` 自证，把「修了一个溜过所有自动门禁的缺陷、却没留下防它复发的绊线」这个缺口写进交付报告，建议 Leader 写进下个 Sprint 的 DoD。"
+    },
+    {
+      "decision": "CONTRACTS.md 的 Sprint 036 一节标注每条的取证归属（✅亲验 4 处 / 📋转述 3 处）",
+      "rationale": "DoD non_functional[1] 明文要求「引用他人实测数据时注明哪些是你复核过的、哪些是转述」。区分不是客套：转述的结论若有误，追查要从原始出处开始而不是从 CONTRACTS 开始。亲验的是我本 Sprint 自己跑出来的（年报标题无期次段、index 408 页、分页解析失败必须报错、Discover 以 period/periodType 判停）；转述的是走代理仍 200（reviewer）、HasPeriod 不认 pending（TASK-004）、article_id 是迁移时间戳（更早 Sprint 的 testdata/README.md）。"
+    },
+    {
+      "decision": "把 milestone 前缀约定写进 CONTRACTS.md 的编码约定，而不是只改那一句注释",
+      "rationale": "Leader 明确指示这条的正确落点是 CONTRACTS.md（它对下一个 Sprint 生效，而不是「我记不记得」的问题）。一并给出了三种形态的对照表：残留分支、门禁 WARN 只是噪音，**代码注释里的编号会误导人改代码**。`thresholds.go` 那句同时改成「M1b-3 的 TASK-007（已兑现，就是紧接着这段的 checkEnum）」并附了为什么要带前缀。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/config.go（**新建**，78 行：Config + LoadConfig + Config.validate）",
+    "internal/hestia/config_test.go（**新建**，177 行：5 个顶层测试 + 11 个子用例）",
+    "internal/hestia/thresholds.go（+21/-15：13 处 mapstructure tag + 跨 Sprint 编号歧义修正）",
+    "internal/hestia/store.go（**+0/-1**：删掉 HasPeriod 注释与 func 之间那个空行）",
+    "internal/hestia/store_test.go（+25/-5：导出面守卫登记 LoadConfig 十一→十二 + F8 清理 + 两处注释更新）",
+    "internal/hestia/CONTRACTS.md（+67/-0，纯追加：Sprint 036 一节，四项 + milestone 前缀约定）"
+  ],
+  "interfaces_exposed": [
+    "type Config struct{ ConfigVersion string; Discover DiscoverCfg; Thresholds Thresholds } —— **导出结构体**，不进导出面守卫视野（只收 FuncDecl，实测确认）。三段都带 mapstructure tag。",
+    "func LoadConfig(path string) (Config, error) —— **包级导出函数**，已在 AST 导出面守卫**登记**（十一→十二，assert.Equal 全集合精确相等一字未动）。读 YAML → 预填 DefaultThresholds 后 Unmarshal → 立即 validate。三条错误出口全部 `%w` 包住底层：`reading config`（文件读不了，`errors.Is(err, fs.ErrNotExist)` 成立）、`parsing config`（类型对不上）、`invalid config`（校验不过）。",
+    "func (c Config) validate() error —— 包内未导出。先查 discover 三项（index_url 非空、max_pages >= 1、timeout > 0），再查**五个阈值全部 > 0**（第二道防线，挡「显式写 0/负数」），最后 `return t.validate()` 串起 T6 的豁免校验。**MagnitudeRanges 刻意不检查**（有意为空，等 M1c 标定；把「非空」当合法性要求会让默认配置自己就装载不了）。",
+    "Thresholds / Range / CaliberExemption 现在带 mapstructure tag（13 处），YAML 键名为 snake_case。**Range 的 `Min, Max float64` 被拆成两行**——同一行的多个字段无法各带不同 tag。"
+  ],
+  "verification": {
+    "all_numbers_sampled_at": "主工作区 HEAD=7b49b13c11f2649017a7f2393da481354dc530e2，六个文件改动**未提交**（wave2+ 时序：先 transition 让门禁看得见工作树改动，后 commit）。本节所有数字在最后一次改动之后**统一重采**。",
+    "red_output_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/config_test.go:34:14: undefined: LoadConfig\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_note": "RED 因预期原因失败（undefined: LoadConfig，计划 Step 3 的预期），**未被 imported and not used 污染**。config_test.go 的 import 按需增补：初版只有 os/path/filepath/testing/testify，写完整配置用例后加 time，补包裹断言后加 errors 与 io/fs。",
+    "f8_self_proof": {
+      "judgement_used": "**看哪条断言红，不看测试红不红**（DoD 的有效判据；旧判据「确认测试转红」已被 test-agent-25 预演证否）",
+      "how": "隔离树（锚 7b49b13）里把 Preceding 的三处 `hestia store preceding %s/%s: %w` 改成 `%v`（保留上下文串），跑 `-run '^TestPrecedingWrapsQueryError$'`（锚定式），只读 Error: 行",
+      "已修版_NotNil": "Error: Target error should be in err chain:\nError: Expected value not to be nil.        ← 只有改写后的断言才产生\n--- FAIL: TestPrecedingWrapsQueryError",
+      "未修版_NotErrorIs_对照": "Error: Target error should be in err chain:\n--- FAIL: TestPrecedingWrapsQueryError      ← 只有兄弟那条",
+      "conclusion": "与 DoD 预告的四格逐格吻合。两版都 FAIL（正如预告），但输出不同 ⇒ 修正承重。对照组是把那行改回 NotErrorIs 再跑同一变异实得的，非推断。基线闸：未变异时该测试绿。",
+      "why_not_in_main_harness": "F8 的判据是「哪条断言红」，而 harness 的 KILLED/SURVIVED 是聚合值，分不出四格 —— 放进去只会得到「KILLED」这个不携带因果的结论。故单独做对比。"
+    },
+    "go_doc_self_proof": {
+      "before": "go doc ./internal/hestia Store.HasPeriod → 3 行（包名 + 空行 + 签名），20 行注释一字不见",
+      "after": "→ **20 行**，注释正文完整输出；grep '别把理由写强' 由 0 变 1",
+      "negative_control": "go doc Store.Preceding（注释本就紧贴 func）修改前后都正常输出 —— 确认差异来自那个空行而非别的",
+      "gate_silence": "gofmt -l 与 go vet 修改前后**都无输出** —— 这正是它溜过所有自动门禁的原因",
+      "known_gap": "**修复本身没有任何自动化守卫**：下次有人在注释与 func 之间多敲一个回车，同样溜过 gofmt/vet。未实施守卫的理由见 decisions（需给 store.go:Close 补注释 + 新增 AST 测试，且整包范围会碰不在 writes 里的 validate.go）。**已在交付报告中建议写进下个 Sprint 的 DoD。**"
+    },
+    "suite": "go test ./internal/hestia/ -count=1 → ok；**-race -count=1 → ok**；go build ./... → 无输出",
+    "coverage": "整包 **93.2%**（≥ DoD 门槛 92.1%）。config.go **两个函数均 100.0%**（LoadConfig 起初 90.0%、validate 起初 66.7%，补齐用例后到 100%）。",
+    "test_case_count": "整包 **271** 个顶层 PASS / **577** 含子测试。本任务新增 5 个顶层测试 + 11 个子用例。",
+    "gofmt": "gofmt -l internal/hestia/ → 无输出",
+    "vet": "go vet ./internal/hestia/ → 无输出",
+    "export_guard_registration": {
+      "what_changed": "store_test.go 的 TestPackageExposesNoWriteFunctions 期望切片十一项 → 十二项（按字节序在 Discover 之后插入 \"LoadConfig\"，\"Di\" < \"Lo\" < \"Ne\"），消息文案「这十一个」→「这十二个」，另加一段说明注释。",
+      "assertion_shape_unchanged": "`assert.Equal` **一字未动**，仍是全导出面精确集合相等，未换成 Subset/Contains。",
+      "positive_verification": "消融 **M12：从期望列表删掉 LoadConfig ⇒ KILLED by TestPackageExposesNoWriteFunctions**（Leader 点名的 M9 同形正向验证）。",
+      "why_no_subset_mutation": "按 Leader 纠正后的判据不跑它 —— 它一定 SURVIVED（「守卫的守卫无人守」），证明不了本次登记。那一条靠人核对 diff，已核对：本次改动是**追加一项 + 文案数字**，断言形状未动。",
+      "which_guard_reddened": "只打红 AST 版；reflect 版全程绿（LoadConfig 是包级函数）。同任务新增的 `Config` 是结构体，**不进任一守卫视野**（实测确认）。"
+    },
+    "no_existing_assertion_relaxed": "本次删除行共 21 行，已逐行核实，**无一是放松断言**：\n· store.go **-1**：就是那个空行（go doc 缺陷本身）。\n· store_test.go **-5**：导出面守卫的 assert.Equal 断言行 + 消息行（被十二项版替换，即登记本身）、`require.NotErrorIs(t, errors.Unwrap(err), err)`（**被更强的 `require.NotNil(t, errors.Unwrap(err))` 替换**，即 F8 修正本身）、两行已过时的注释（其中一行原文是「邻居那处存量写法属于 TASK-007 的清理范围，不在本任务 scope 内」——本任务正是那个清理，故更新）。\n· thresholds.go **-15**：Thresholds 的 7 个字段行 + Range 的 2 行 + CaliberExemption 的 5 个字段行（**全部被加了 mapstructure tag 的同名字段替换**，Range 的 `Min, Max float64` 因为同行多字段无法各带 tag 而拆成两行）+ 「故留到 T7」那行注释（被带 milestone 前缀的版本替换）。\n· CONTRACTS.md **+67/-0**，纯追加，既有内容一行未删。",
+    "numstat_uncommitted": "git diff --numstat → CONTRACTS.md 67/0、store.go 0/1、store_test.go 25/5、thresholds.go 21/15；config.go 与 config_test.go 是新文件不在 diff 内（提交后应以 git show --numstat 复核）",
+    "run_flag_discipline": "本任务全部单跑取证使用**锚定式** `-run '^Top$'`（DoD 新增要求，因 Go 的 -run 对顶层名是前缀匹配），且判定**只读 `--- PASS:`/`--- FAIL:` 那一行，不读整体退出码**。",
+    "ablation": {
+      "harness": "/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/64844656-ea0e-444b-9aee-27e130e249e9/scratchpad/dev50-t7-ablate.sh",
+      "diff_log": "同目录 dev50-t7-ablate-diffs.txt（12 个变异的完整 diff，已逐条核对语义）",
+      "anchor": "隔离树锚点为**全 sha** 7b49b13c11f2649017a7f2393da481354dc530e2，经 ARCFORGE_T7_DEP_REF 可覆写；harness 同时打印锚点与主工作区 HEAD。",
+      "isolation": "git worktree add --detach 出独立树，拷入六个未提交文件后在其中变异（本轮变异**三个文件**：config.go / thresholds.go / store_test.go）；主工作区五个文件的 sha256 逐窗口校验 + 收尾校验，全程未变；收尾 worktree remove --force + prune。",
+      "gates": "基线闸 + 差异闸 + 编译闸 + 语义闸（diff 落盘并逐条核对）+ 主工作区指纹闸 + **计数自证**（12 == 12）",
+      "result": "12 变异 / 12 KILLED / 0 SURVIVED / 0 理由不符；计数自证 12 == 12。**一轮通过** —— 与 T3（三轮）、T5（两轮）不同，因为这次在写测试阶段就先补上了 `%w` 与四条阈值检查的断言，没等消融来暴露。",
+      "mutations": [
+        "M1 去掉预填 DefaultThresholds（阈值静默变零值）→ KILLED by KeepsDefaults + Full + Rejects",
+        "M2 去掉 index_url 必填检查 → KILLED **仅**by Rejects/缺_index_url",
+        "M3 max_pages 下界放宽（< 1 改 < 0）→ KILLED **仅**by Rejects/max_pages_为_0",
+        "M4 timeout 下界放宽（<= 0 改 < 0）→ KILLED **仅**by Rejects/timeout_为_0",
+        "M5 去掉 deposit_sum_tolerance > 0 检查 → KILLED by Rejects/显式把容差写成_0 + Rejects/容差写成负数",
+        "M6 去掉 yoy_sanity_max > 0 检查 → KILLED **仅**by Rejects/yoy_sanity_max_为_0（**我补的那四条之一，证明它们不是冗余**）",
+        "M7 不再串起 Thresholds.validate（豁免校验断开）→ KILLED **仅**by Rejects/豁免缺_period_types",
+        "M8 读文件错误不再包裹（%w 改 %v）→ KILLED **仅**by MissingFile（我补的 NotNil + ErrorIs）",
+        "M9 校验错误不再包裹（%w 改 %v）→ KILLED by Rejects 全部 10 个子用例（我补的 NotNil）",
+        "M10 Unmarshal 错误吞掉 → KILLED **仅**by RejectsMalformedYAML（我补的那条）",
+        "M11 mapstructure tag 写错（yoy_sanity_max → yoy_max）→ KILLED by KeepsDefaults + Rejects/yoy_sanity_max_为_0（证明 tag 承重）",
+        "M12 导出面守卫期望列表里删掉 LoadConfig → KILLED by TestPackageExposesNoWriteFunctions（Leader 点名的正向验证）"
+      ],
+      "semantic_gate_checked": "12 个变异的 diff 已逐条核对：每处只动目标那一行/那一段，无漏写续行、无误伤相邻代码。",
+      "not_covered": "**F8 那条不在本 harness 内**（判据是「哪条断言红」，聚合的 KILLED 分不出四格），单独做了对比，见 f8_self_proof。**`go doc` 修复也不在**（没有任何测试守它，做变异必然 SURVIVED，与 Subset 变异同理不构成证据），自证方式是手工 go doc，见 go_doc_self_proof。"
+    },
+    "contracts_md": {
+      "items": "五项齐备（各 grep 计数为 1）：三处对方案报告 4.1 的修正、discover 的三条判据、「pending 不可见」在两处含义相反、留给 M1b-4b 的张力、**注释里引用任务编号一律带 milestone 前缀**（Leader 指定落点）",
+      "attribution": "✅亲验 4 处 / 📋转述 3 处，节首有归属说明",
+      "placement": "插在「## 相关文档」之前，保持该节仍在文件末尾"
+    },
+    "not_done_by_design": [
+      "**未为 `go doc` 缺陷加自动化守卫** —— 理由见 decisions（超出 DoD，且整包范围会碰不在 writes 里的 validate.go）。已在交付报告建议写进下个 Sprint 的 DoD。",
+      "**未跑「assert.Equal 换 assert.Subset」变异** —— 按 Leader 纠正后的判据，它一定 SURVIVED、不构成证据，改由人工核对 diff（已核对）。"
+    ],
+    "numstat_from_commit": "git show --numstat c101d6125d76ce1a8863342072a703c4c206d002 → CONTRACTS.md 67/0、config.go 78/0、config_test.go 177/0、store.go 0/1、store_test.go 25/5、thresholds.go 21/15（与交付物同源）",
+    "numbers_corrected_after_commit": "⚠️ 首版 discovery 把 config_test.go 记成 143 行 —— 那是**补 %w 包裹断言与四条阈值用例之前**的行数，属于「自证数字采样早于最后一次改动」。提交后以 git show --numstat 复核时发现并订正为 177。记在这里而不是悄悄改掉：这正是本项目反复强调的那条纪律，我自己也踩了一次。"
+  }
+}

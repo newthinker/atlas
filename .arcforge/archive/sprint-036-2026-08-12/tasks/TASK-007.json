@@ -1,0 +1,60 @@
+{
+  "id": "TASK-007",
+  "title": "LoadConfig 与 CONTRACTS 登记",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-005",
+    "TASK-006"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/config.go",
+    "./internal/hestia/config_test.go",
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "description": "实现 LoadConfig（viper + mapstructure，照 internal/crisis/config.go 先例），给 Thresholds 及其成员加 mapstructure tag，登记 CONTRACTS。对应上游计划 Task 7（Step 1-10）。不创建 configs/hestia.yaml——实例配置属 M1b-4b。",
+  "done_criteria": {
+    "functional": [
+      "**YAML 里没写的阈值必须保持 `DefaultThresholds()` 的值，不能是零值** —— 这是本任务最要紧的一条。\n\n**不是便利性问题**：`deposit_sum_tolerance` 若静默变成 0，**每一期都会因残差超容差进 pending**（实测残差本就有 7.6–9.1%）—— 整条管线停摆，而现场看起来像「数据全都有问题」。\n\n实现：预填 `Config{Thresholds: DefaultThresholds()}` 再 `Unmarshal`，mapstructure 只覆盖 YAML 里出现的键。判据：只写 `yoy_sanity_max: 60` 的配置装载后，该值被覆盖为 60 而其余四个阈值**逐个等于默认值**。\n\n⚠️ 若实测发现 mapstructure 把未出现的键清零，改用 `v.SetDefault(...)` 逐键预设，**测试断言不变**。",
+      "完整配置能装载，**豁免连同 `period_types` 一起读出来**：`config_version`、`discover.{index_url,max_pages,timeout}`（`30s` 要解析成 `30*time.Second`）、`thresholds.caliber_exemptions[0].{period_types,skip_checks}` 全部断言。\n\n⚠️ **实操陷阱（dev-agent-50 预读 T6 后提出，Leader 落盘）**：T6 给 `CaliberExemption` 加的\n`PeriodTypes []string` 是**必填非空**，且 `validate()` 里这道检查插在 Period 非空之后、Reason 之前\n⇒ **会抢先返回**。故**本任务所有含 `caliber_exemptions` 的 YAML 样例与测试夹具都必须写 `period_types`**，\n否则 `LoadConfig` 之后一 validate 就被拒，而**报错理由会指向 PeriodTypes，而不是你真正想测的东西**。\n\n这正是 reviewer R8 那个形态：**测试红了，但红的理由与它要守的东西无关**——与 G31（只看红不看\n哪条红）是同一族。附带：`exemptionFor` 已是三参数（T6 的破坏性变更），若在 `thresholds.go`\n新增调用点要带上 period_type。"
+    ],
+    "boundary": [
+      "**显式把阈值写成 0 也要被拒** —— 这是第二道防线。\n\n预填只挡「没写」，**挡不住「写了 0」**。判据：`deposit_sum_tolerance: 0` 的配置必须装载失败且错误含该键名。\n\n（`MagnitudeRanges` **不检查** —— 它有意为空，等 M1c 用回填分布标定。这个例外要写进注释。）"
+    ],
+    "error_handling": [
+      "五种非法配置各自报错且错误信息**含对应的键名**：缺 `index_url` / `max_pages: 0` / `timeout: 0s` / 显式 `deposit_sum_tolerance: 0` / 豁免缺 `period_types`（错误含 `PeriodTypes`）。另加：**文件不存在**时返回 error。\n\n最后一条同时验证了 T6 的校验**经由 `Config.validate()` 串起来**（它末尾调 `t.validate()`）。"
+    ],
+    "non_functional": [
+      "**新增包级导出函数 `LoadConfig` 会打红 AST 版导出面守卫**（`Config` 是结构体类型，预期不打红 —— 实测确认）。\n\n登记而非放松；此时切片里应已含 `NewPBOCFetcher`(T1)、`Store.HasPeriod`(T4)、`Discover`(T5)，**在其基础上追加**。\n\n**另：顺手清理一处存量缺陷**（本任务本来就要改 `store_test.go`，成本极低）。\n\n`store_test.go` 里有一处 `require.NotErrorIs(t, errors.Unwrap(err), err)`（当前约 `:1697`，**行号会随本 Sprint 的改动漂移，按内容 grep**）—— 这是 Sprint 035 的 **F8**：不包裹时 `Unwrap` 返回 nil ⇒ `errors.Is(nil, x)` **恒 false** ⇒ **该断言在它本该抓住的场景里平凡为真**。\n\n正确写法：`require.NotNil(t, errors.Unwrap(err))`。\n\n⚠️ **改完要确认它仍在守它原本要守的东西** —— ⚠️ **但判据不是「测试转红」**（Leader 原先写的那句无效，test-agent-25 预演后证否）。\n\n**为什么「转红」是假自证**：`TestPrecedingWrapsQueryError` 有 **7 条断言**，F8 那条只是其一，\n兄弟里有 `assert.ErrorIs(err, context.Canceled)` 与两条 `assert.ErrorContains`（`\"2026-01\"` / `\"monthly\"`）\n—— **任何丢包裹的消融都会让它们红**。验证者在隔离 worktree 实跑的四格：\n\n| 消融 | 保持 `NotErrorIs`（未修） | 换成 `NotNil(Unwrap(err))`（已修） |\n|---|---|---|\n| 裸 `return err` | **FAIL**（兄弟 `ErrorContains` 红） | **FAIL** |\n| `%w` → `%v` | **FAIL**（兄弟 `ErrorIs` 红） | **FAIL** |\n\n⇒ **修与不修四格全红**，按「确认转红」判据，dev 无论有没有真修对都会得出「自证通过」。\n\n**有效判据：看哪条断言红，不看测试红不红。**\n\n```\n跑消融（`%w` → `%v`，保留上下文串），确认失败输出里出现：\n    Error: Expected value not to be nil.\n这一句【只有改写后的断言】才会产生。\n未修时的输出只有兄弟那条：Error: Target error should be in err chain\n```\n\n**诊断（验证者已实测，省你一步）**：裸 `return err` 时 `errors.Unwrap(err)` **返回 nil**\n⇒ 修正后的断言确实承重，不存在「驱动错误自己还包着一层」那种反例。\n\n若你看到的输出与上表不符，**先停下问我**。\n\n**为什么它还在**：Sprint 035 发现它时 TASK-003 已 `verified`、discovery 已冻结，改它会再造判定对象漂移，当时的处置只到「转达给后续任务别照抄」。⇒ **一个被完整诊断、有正确修法、写进两份文档的缺陷，在下一个 Sprint 仍然原样存在**，因为「谁在什么时候有权改它」当时没有答案。本任务给出答案。\n\n## ⚠️ 导出面守卫的验证判据（Leader 原先的要求不精确，test-agent-25 已纠正）\n\n我此前要求「复跑 M11 同形消融」（把 `assert.Equal` 换成 `assert.Subset`）。**那是错的要求** ——\nM11 **一定不红**（它正是「守卫的守卫无人守」的表现），跑它证明不了本次登记的正确性。\n\n**有效的正向验证是 M9 同形**：\n```\n从期望列表里【删掉】你新增的那一项  →  必须 KILLED\n```\n它证明的是「这条守卫确实在按精确集合相等工作、你的登记项确实被它盯着」。\n\n**M11 的用途只有一个**：说明为什么这一条**必须靠人逐字核对** ——\n判据不是「M11 会不会红」，而是**核对交付 diff 里那一行确实是「追加一项、断言仍是 `assert.Equal` 全集合相等」**，\n没有被改成 `Subset`/`Contains`。\n\n**另：修一处溜过所有自动门禁的文档缺陷**（test-agent-25 验 TASK-004 时发现，Leader 已复核）。\n\n`store.go` 里 `HasPeriod` 的 20+ 行文档注释与 `func` 之间**多了一个空行**，导致注释**不附着于函数**：\n\n```\n$ go doc ./internal/hestia Store.HasPeriod\nfunc (s *Store) HasPeriod(...) (bool, error)     ← 仅签名，注释一字未出\n$ go doc ./internal/hestia Store.Preceding\n    Preceding 返回 period 之前最近 n 期的当前行…   ← 对照组正常\n```\n\n**`gofmt` 与 `go vet` 都不报** —— 这正是它溜过所有自动门禁的原因。它是 `store.go` 里**唯一**有此问题的方法（验证者逐个扫过 `NewStore`/`DB`/`Preceding`/`Save`）。\n\n**修法**：删掉那个空行。**自证**：`go doc ./internal/hestia Store.HasPeriod` 必须输出注释正文。\n\n**为什么值得修**：那 20 多行恰好是本项目最看重的「为什么」内容 —— pending 不算已入库的理由、与 `CONTRACTS.md`「pending 对闸门不可见」是**同一张表两面**的辨析（那里是缺陷、这里是正确的，区别在消费者要「历史事实」还是「还需不需要抓」）。**现在只有读源码的人看得到。**\n\n---\n\n## ⚠️ 本条以及本任务所有「单跑取证」，`-run` 必须写成 `^Top$/^Sub$`\n\n**Go 的 `-run` 对顶层测试名是【前缀匹配】**（test-agent-25 在 T5 验证中撞上，Leader 已独立复现）。\n`-run 'TestScanPage/某子测试'` 实际跑出 **7 条 `=== RUN` 行 = 6 个顶层测试 + 1 个子测试**\n（多出的 5 个顶层是 `TestScanPageFiltersRatherThanMisses` 等全部以该串开头的），\n而**那些没有子测试的不受子测试过滤影响、整个跑完**\n\n〔口径更正：验证者最初把这个数写成「7 个顶层」——数的是 `=== RUN` 行却标成顶层数，\nLeader 核对时发现两人给出同一个 7 而「口径不同」做不出任何数值预测，遂重跑确认。\n锚定后是 2 条 RUN = 1 顶层 + 1 子测试。**报计数一律写清 `N 条 RUN = X 顶层 + Y 子测试`。**〕\n⇒ **兄弟测试的红会污染退出码**，你的单跑结论就变成了别人的结论。\n\n验证者差一步就用这样一份污染结果**反驳了 dev 一个正确的声称**；锚定成\n`^TestScanPage$/^同页的干扰项不被收进来$` 后三格才与实情吻合。\n\n**两条都要做**（第二条是第一条失手时的兜底）：\n\n1. 凡本任务 DoD 要求的单跑，一律写 `-run '^Top$/^Sub$'`；\n2. 即使写了锚定式，**也只读那一行 `--- PASS: TestFoo`，不读整体退出码**。\n\n**这与本条上面那个「看哪条断言红」是同一件事**：退出码和「测试红了」一样是**聚合值**，\n不携带因果。",
+      "`CONTRACTS.md` 追加 Sprint 036 一节，至少含四项：\n\n① **三处对方案报告 4.1 的实测修正**（正则漏 annual ⇒ 每年 1 月静默跳过；index 是 408 页混杂列表 ⇒ 只抓第 1 页会漏；「走代理可能失败」不成立 ⇒ 真实理由是**代理未必在跑**）\n② **discover 的三条判据**（判停用期次不用 `article_id`、分页模板解析失败要报错、`HasPeriod` 不认 pending）\n③ **`HasPeriod` 不认 pending 与「pending 对闸门不可见」是同一张表的两面** —— 那里是**缺陷**、这里是**正确的**，区别在消费者要「历史事实」还是「还需不需要抓」\n④ **留给 M1b-4b 的张力**：discover 让 pending 期次可被重新发现，但方案报告的一级幂等键 `article_id` 在 4b 的 ingest 里 —— **若它查的表包含 pending 行，重新发现的候选会在下一步被立刻跳过**，「允许重试」在 4a 成立、到 4b 悄悄失效，**且不会有任何报错**。两条路（一级键只查 `hestia_observations` / 给 pending 记重试次数）要在 4b 设计时明确回答。\n\n引用他人实测数据时**注明哪些是你复核过的、哪些是转述**。",
+      "**RED 因预期原因失败**（Step 3 预期 `undefined: LoadConfig`），实际输出原文入 discovery；`gofmt -l` 与 `go vet` 无输出；`go build ./...` 通过；`go test ./internal/hestia/ -count=1` **与 `-race -count=1` 均全绿**；覆盖率不低于 **92.1%**。",
+      "**顺手消除一处跨 Sprint 的任务编号歧义**（dev-agent-50 预读时发现，Leader 四项核实属实）。\n\n`internal/hestia/thresholds.go:137-139` 那句：\n\n> 「M1b-3 的 T1 写这个结构时 gates 表尚不存在，**故留到 T7**。」\n\n**那件事已经做完了**，四项证据：`checkEnum(field, id, knownCheckIDs())` 已在 `thresholds.go:141`；\n`knownCheckIDs()` 已在 `validate.go:119`；`TestExemptionRejectsUnknownCheckID` 已在\n`validate_test.go:885`；`git log -S` 确认该句写于 **`4547631`（2026-08-11，上一个 Sprint M1b-3）**。\n\n⇒ 句中「T7」指的是 **M1b-3 的 TASK-007**，是**已兑现的历史记录**；但它读起来像**待办**，\n而本 Sprint 恰好也有一个 TASK-007、也要改这个文件。\n\n**动作**：把「故留到 T7」改成「故留到 **M1b-3 的 TASK-007**（已兑现，见 `:141`）」。\n\n**为什么值得占一条 DoD**：这是任务 ID 跨 Sprint 复用咬人的**第三种形态**，前两种（残留\n`task/TASK-00x` 分支挡住 worktree、门禁吐历史同号任务的越界 WARN）只是噪音，**这一种会\n误导人去动一段已经正确且有测试守着的代码**。`verify_by: review`。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-50",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "c101d6125d76ce1a8863342072a703c4c206d002",
+    "discovery_sha256": "720ed5c0ab148d2598d07b59a81a81a6069112e5c80bf379d2bfb07be3a3c362",
+    "at": "2026-08-12T04:48:20Z"
+  },
+  "verifier": "test-agent-25"
+}

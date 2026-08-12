@@ -1,0 +1,52 @@
+{
+  "id": "TASK-006",
+  "title": "口径豁免的键补上 PeriodTypes",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/validate.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/validate_test.go"
+  ],
+  "description": "给 CaliberExemption 加 PeriodTypes 字段、exemptionFor 加 periodType 参数、validate 加校验。本 Sprint 唯一的破坏性改动。对应上游计划 Task 6（Step 1-9）。",
+  "done_criteria": {
+    "functional": [
+      "**豁免只对列出的 `period_type` 生效** —— 这是加这个字段的**全部理由**。\n\n判据：只声明 `PeriodTypes: [annual]` 时，`exemptionFor(period, \"annual\", check)` 命中，而 `\"monthly\"` 与 `\"h1\"` **都返回 nil**。\n\n在此之前同月的 annual 与 monthly 会被同一条豁免同时命中，而它们是两条独立序列 —— 一次只影响其中一条的口径变更会连带放行另一条。",
+      "**一条豁免可以覆盖多种 `period_type`**（一次口径变更常常三条序列都受影响）：声明 `[monthly, h1, annual]` 时三者都命中。"
+    ],
+    "boundary": [
+      "**空切片报错，不默认全部** —— 错误信息含 `PeriodTypes`。\n\n**理由要写进注释**：Go 零值让「忘了写 period_types」与「显式写全部三种」**不可分**，而两者后果差得很远（前者是配置疏漏、后者是深思熟虑的决定）。要求非空就把它们分开了 —— **疏漏会响亮失败，而不是静默放行三条序列**。",
+      "**Sprint 035 收尾堵的两条宽度绕过仍然生效，且 `PeriodTypes` 不是新的绕过路径**。三个子判据：\n\n① 三种 period_type + **一道闸** ⇒ **合法**（跳的仍是指定的那几道闸）\n② 三种 period_type + `SkipChecks: knownCheckIDs()` ⇒ **仍被拒**（错误含「全部」）\n③ 三种 period_type + `SkipChecks: [completeness]` ⇒ **仍被拒**（错误含 `completeness`）\n\n把这个组合钉住，**免得后人以为「宽度校验也该看 PeriodTypes」而在别处放松**。"
+    ],
+    "error_handling": [
+      "`PeriodTypes` 含未知取值时报错，且错误信息**含那个非法取值本身**与合法取值列表。\n\n实现须直接查 `validPeriodTypes`（`types.go:40`，是 `map[string]bool`）—— **不能用 `checkEnum`**（它收 `[]string`）。"
+    ],
+    "non_functional": [
+      "**改动顺序不可颠倒：先改签名，再加字段。**\n\n两类改动的**暴露方式不同**（Leader 已实测确认计划的清单）：\n- `exemptionFor` 加参数是**编译错误** ⇒ **4 处**调用点会被编译器立刻指出（生产代码仅 `validate.go:93`，其余 3 处在 `thresholds_test.go:115/119/121`）\n- 加必填字段**不是**编译错误（Go 允许省略字段）⇒ **10 处**构造点（`thresholds_test.go` 5、`validate_test.go` 5）要靠**跑测试**才发现\n\n顺序反了会漏构造点，而漏掉的那些会以「豁免不命中」的形式在别处红，**排查方向完全错**。",
+      "⚠️ **`thresholds_test.go` 的 `mutate` 闭包对 `SkipChecks` 做了 `slices.Clone` 浅拷贝防护，`PeriodTypes` 也必须一并 Clone** —— 否则某个用例改动它会污染其余用例。\n\n补构造点时：**豁免声明的 period_type 必须与该用例观测的 `Meta.PeriodType` 一致**，否则豁免不命中、测试会以另一种方式红。`validMeta()` 的 `PeriodType` 是 `\"h1\"`。\n\n⚠️ **计划说「其余 9 处」但只列了 7 个行号 —— reviewer 实测真正需要改的就是 7 处**：`thresholds_test.go:64/107/145` + `validate_test.go:834/856/879/1016`。\n\n`validate_test.go:212` **不需要改**：`validate()` 里 `Version` 的枚举校验排在新增的 `PeriodTypes` 检查**之前**，而该用例断言的正是版本非法，先行返回、走不到 `PeriodTypes`。\n\n⚠️⚠️ **更值得注意的是插入位置会改变既有用例的错误串**：reviewer 实测 `TestExemptionRejectsUnknownCheckID`（`:879`）在补 `PeriodTypes` 之前是红的，**红的原因是错误串变成了「PeriodTypes 为空」而不是 `deposit_summ`** —— **测试红了，但红的理由与它要守的东西无关**。\n\n⇒ 逐个补构造点时，**确认每条转红的用例是因为它自己的判据红，而不是被新校验抢先返回**。",
+      "**RED 因预期原因失败**，实际输出原文入 discovery；`gofmt`/`vet` 无输出；`go test ./internal/hestia/ -count=1` 整包绿；覆盖率不低于 **92.1%**。\n\n本任务**不新增任何导出物**（`PeriodTypes` 是既有导出结构体的字段）⇒ 预期**不打红**导出面守卫，`writes` 因此不含 `store_test.go`。若实测发现打红了，须先经写通道补进 `writes` 再改。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-51",
+  "verify_baseline": {
+    "head": "cfcbdbb668496da25a6a8dd7cca012258e1d23e7",
+    "discovery_sha256": "558709d0eb8075eb39b758315f8e9d3207f3228dd1b97a3b19ed673f44d70913",
+    "at": "2026-08-12T01:57:00Z"
+  },
+  "verifier": "test-agent-25",
+  "discovery": ".arcforge/discoveries/TASK-006.json"
+}

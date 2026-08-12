@@ -1,0 +1,56 @@
+{
+  "id": "TASK-004",
+  "title": "Store.HasPeriod 与 PeriodChecker 接口",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [
+    "TASK-003",
+    "TASK-001"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/discover.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "在 discover.go 定义 PeriodChecker 窄接口（定义在消费方），给 Store 加只读的 HasPeriod。对应上游计划 Task 4（Step 1-7）。依赖 TASK-001 是因为两者都改 store_test.go 的导出面守卫，须串行。",
+  "done_criteria": {
+    "functional": [
+      "`HasPeriod` 的两个基本方向：已入库返回 `true`、未入库返回 `false`。",
+      "**修订后仍然命中**：同一期次存两次（第二次为修订）后 `HasPeriod` 仍返回 `true`。\n\n实现查 `v_hestia_current` 视图 ⇒ 修订不产生第二期、只是同一期的新行。"
+    ],
+    "boundary": [
+      "**`period_type` 隔离**：同一个 `period` 字符串下存了 monthly，查 annual 必须返回 `false` —— 它们是两条独立序列。",
+      "**pending 里的期次不算已入库** —— 这是本任务最要紧的一条。\n\n判据：用 `failing()` 存一期（前置条件须先断言它确实落在 `TablePending`），再查 `HasPeriod` 必须返回 `false`。\n\n**这是刻意的**：没过闸的一期该被重新发现、重新尝试。若 `HasPeriod` 也认 pending，**一次解析失败就会让那期永远不再被抓** —— 而 pending 的设计意图恰恰是「人看一眼再决定」，不是「就此丢弃」。\n\n⚠️ 与 `CONTRACTS.md` 里「落 pending 的期次对依赖历史的闸门永久不可见」是**同一张表的两面**：那里 pending 不可见是**缺陷**（基线冻结），这里不可见是**正确的**（允许重试）。区别在消费者要的东西不同 —— 闸门要「历史事实」，discover 要「还需不需要抓」。**这层区别要写进 discovery。**"
+    ],
+    "error_handling": [
+      "查库失败返回 error（非 `sql.ErrNoRows`），错误包住底层 err 可被 `errors.Is` 找到，并带 period/periodType 上下文。\n\n⚠️ 断言「包住了」用 `require.NotNil(t, errors.Unwrap(err))` —— **不要**用 `NotErrorIs(errors.Unwrap(err), err)`，后者在不包裹时 `Unwrap` 返回 nil、`errors.Is(nil,x)` 恒 false，**平凡为真**（Sprint 035 的 F8 实测）。"
+    ],
+    "non_functional": [
+      "`store_test.go` 中存在编译期断言 `var _ PeriodChecker = (*Store)(nil)` 且编译通过 —— 签名漂移在编译期就红，比任何运行时测试都早。\n\n接口**定义在消费方**（`discover.go`）而非 Store 侧：`Discover` 用它、`Store` 实现它。接口注释须写明**判停用期次而不用 `article_id`** 的理由：M0 实测 2020H1 报告的 id 是 `2025092212550713215`（2025-09-22 时间戳），**央行 2026-06-26 批量重建过站点** ⇒ 按 id 判停，一次迁移后全部 id 变新，每次唤起都翻满上限且每期都被当成新文章。",
+      "**`Store.HasPeriod` 是 `*Store` 的方法 ⇒ 预期会打红两条导出面守卫**（`:361` reflect 版 `[Close,DB,Preceding,Save]` 与 `:406` AST 版）。\n\n**两条都要登记**（精确相等 + 各补一行说明），**不得改成 `Subset`/`Contains`**。Sprint 035 实证这两条**互补不可互替**：reflect 版看得见嵌入提升的方法，AST 版看得见包级函数。\n\n此时 AST 版切片里应已含 TASK-001 的 `NewPBOCFetcher`，**在其基础上追加，不要覆盖**。\n\n## ⚠️ 导出面守卫的验证判据（Leader 原先的要求不精确，test-agent-25 已纠正）\n\n我此前要求「复跑 M11 同形消融」（把 `assert.Equal` 换成 `assert.Subset`）。**那是错的要求** ——\nM11 **一定不红**（它正是「守卫的守卫无人守」的表现），跑它证明不了本次登记的正确性。\n\n**有效的正向验证是 M9 同形**：\n```\n从期望列表里【删掉】你新增的那一项  →  必须 KILLED\n```\n它证明的是「这条守卫确实在按精确集合相等工作、你的登记项确实被它盯着」。\n\n**M11 的用途只有一个**：说明为什么这一条**必须靠人逐字核对** ——\n判据不是「M11 会不会红」，而是**核对交付 diff 里那一行确实是「追加一项、断言仍是 `assert.Equal` 全集合相等」**，\n没有被改成 `Subset`/`Contains`。\n\n⚠️ **本任务多一层**：`Store.HasPeriod` 是 `*Store` 方法 ⇒ **两条守卫都会打红**\n（`:361` reflect 版与 `:406` AST 版）。**M9 同形消融要跑两遍**，各自确认「已追加登记、未被放宽」。",
+      "**RED 因预期原因失败**（Step 2 预期 `undefined: PeriodChecker` 与 `s.HasPeriod undefined`），实际输出原文入 discovery；`gofmt`/`vet` 无输出；整包绿；覆盖率不低于 **92.1%**。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-49",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "2b93ccd3916ec1cb52111da28cd2514dc9d73c37",
+    "discovery_sha256": "ec3c941775b7ccf8a771bc38f314da186a0b8174b7b8e15a04d223a688719d9c",
+    "at": "2026-08-12T03:47:52Z"
+  },
+  "verifier": "test-agent-25"
+}

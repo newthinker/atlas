@@ -1,0 +1,54 @@
+{
+  "id": "TASK-003",
+  "title": "标题正则、期次映射与条目提取",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/discover.go",
+    "./internal/hestia/discover_test.go"
+  ],
+  "description": "实现 parsePeriod（标题→期次映射）、Candidate、scanPage（从 index 页提取报告条目），并把 T2 的 pageURL 里的 URL 解析抽成 resolveURL 供两处复用。对应上游计划 Task 3（Step 1-11）。",
+  "done_criteria": {
+    "functional": [
+      "`parsePeriod` 的四种映射全部正确：`2026年上半年…`→`(2026-06, h1)`、`2026年7月…`→`(2026-07, monthly)`、`2026年12月…`→`(2026-12, monthly)`、`2025年金融统计数据报告`→`(2025-12, annual)`。\n\n映射与 `types.go` 的 `periodEndMonth` 一致（h1→06、annual→12），**不新增第二份期末月约定**。",
+      "`scanPage` 从**真实快照**提取条目，每个字段都被断言：`ArticleID` 是 URL 里的长数字串（`^\\d{14,}$`）、`URL` 补全为 `https://www.pbc.gov.cn/` 开头的绝对地址、`Title` 含「金融统计数据报告」、`Period` 形如 `^\\d{4}-\\d{2}$`、`PeriodType` ∈ {monthly,h1,annual}。\n\n同时断言 **p1 提取结果为空**（首页无报告是常态）。\n\n---\n\n⚠️ **遍历型断言必须有肯定式前置锚点，否则在空集上平凡为真**（test-agent-25 提出，dev 交付时已落实，验证时实测确认）：\n\n「每个字段都被断言」若写成 `for _, c := range got { assert... }`，`got` 为空时循环体一次都不执行、**全部断言平凡通过**；而 p1 那条「提取结果为空」在同一个破损实现下**也**通过 ⇒ **一个恒返回 `nil` 的 `scanPage` 能让本条整体全绿**。\n\n判据（交付实测）：\n- p2 侧遍历**之前**必须有 `require.NotEmpty(t, got)`（或钉住条数的 `require.Len`）作为锚点 —— 已在 `discover_test.go:266`，消融实测它是**唯一**排除上述平凡为真的断言。\n- p1 的「为空」必须与 p2 的肯定式断言**成对**并在注释里注明互补关系，免得后人当重复删掉 —— 已在 `:249`。\n\n🔴 **同一形态在本任务里还有一处未闭合（验证时实测确认，判定为 PASS 时的已知遗留）**：\n`TestScanPage/同页的干扰项不被收进来` 的 `for _, c := range got { assert.NotContains(c.Title, \"国新办\") }` **没有前置锚点**。实测：`scanPage` 恒返回 `nil` 时**单跑该子测试 PASS**（`-run 'TestScanPage/同页的干扰项不被收进来'`），整包才红。\n- **对交付物无影响**：整包运行下由同组 p2 的 `require.NotEmpty` 兜住，无变异逃逸（14 条变异全 KILLED）。\n- **对验证流程有影响**：按 DoD 逐条**单跑**取证时会拿到假绿，并可能作为「E1 已验证」写进覆盖矩阵。\n- **修法**：该子测试开头加一行 `require.NotEmpty(t, got)`。已交由 **TASK-005** 顺手补（其 `writes` 本就含 `discover_test.go`，零返工成本）。\n\n（另：DoD `error_handling[0]` 里「实现靠『金融统计数据报告』六个字必须紧跟期次段挡住干扰项」这句**归因有误**，Leader 已自陈。消融实测：挡干扰项的是「**紧跟**」这个结构，删掉末尾「报告」二字干扰项照样被拒；「报告」真正挡的是 `2026年7月金融统计数据情况` / `…简报` 这一类。代码注释已纠正。）"
+    ],
+    "boundary": [
+      "**期次段必须是可选的** —— 这是本任务最核心的一条。\n\n年度报告标题**既没有「上半年」也没有「N月」**（实测 `2025年金融统计数据报告`）。方案报告 4.1 的正则 `\\d{4}年(上半年|\\d{1,2}月)金融统计数据报告` 把这一段写成**必填**，会让**每年 1 月的年度数据被静默跳过** —— 不报任何错，只是看起来「今天没有新文章」。\n\n判据：`2025年金融统计数据报告` 必须解析成 `(2025-12, annual)`。",
+      "**`13月` 靠正则本身挡不住**，必须有一步**语义校验**。\n\n`\\d{1,2}月` 匹配得上 `13月`。判据：`2026年13月金融统计数据报告` 必须返回 `ok == false`。\n\n（这条与「期次段可选」是一对：放宽正则的同时必须收紧语义校验，否则放宽会带进非法值。）"
+    ],
+    "error_handling": [
+      "**同页的干扰项不被收录**。判据用真实快照：`国新办举行新闻发布会 介绍2026年上半年货币政策执行和金融统计数据情况` 与报告条目**在同一页**（Leader 已实测确认在 p2），它含「金融统计数据」但结尾是「情况」、中间隔着「货币政策执行和」。\n\n实现靠「『金融统计数据报告』六个字必须紧跟期次段」挡住它。另需拒绝：`2026年二季度金融机构贷款投向统计报告`、`2026年6月金融市场运行情况`、`中国人民银行公告〔2026〕第20号`。\n\n✅ **reviewer 已实测确认这条断言不是平凡为真**（这是好消息，省你一轮自证）：\n\n`国新办…金融统计数据情况` **确实被 `articleLinkRE` 提取到了**（它就在第 2 页的 15 条命中列表里），是被 `parsePeriod` 过滤掉的 ⇒ **过滤器在真实做功**，不是「压根没提取到」。\n\n**额外收获**：`TestParsePeriodRejects` 里用的 `2026年二季度金融机构贷款投向统计报告` 与 `2026年6月金融市场运行情况` **是第 1 页上真实存在的条目**，不是编的。这两条同时解释了「第 1 页产出 0 个候选」**不是因为提取失败** —— 第 1 页有 15 条被提取、**全被正确拒绝**。\n\n`articleLinkRE` 在两页各**恰好**命中 15 条 = 每页条目数，无漏无重；能穿过 `onclick`/`target`/`title`/`istitle` 四个属性，且 `(?s)(.*?)</a>` 取到的是链接文本而非 `title=` 属性值。**这一段可以照抄。**"
+    ],
+    "non_functional": [
+      "**`resolveURL` 从 `pageURL` 抽出后，T2 的 `TestPageURL` 必须仍绿** —— 重构不该改变行为。\n\n两处都要把站内绝对路径（`/goutongjiaoliu/...`）补成完整 URL，用 `url.ResolveReference` 而非手工拼 scheme+host（它同时处理站内绝对路径与相对路径两种形态）。",
+      "**RED 阶段因预期原因失败**，实际输出原文写进 discovery：Step 2 预期 `undefined: parsePeriod`、Step 7 预期 `undefined: scanPage`。因别的原因失败的 RED 不算数；`import` 按需增补。",
+      "`gofmt -l` 与 `go vet` 无输出；`go test ./internal/hestia/ -count=1` 整包绿；覆盖率不低于 **92.1%**。\n\n`Candidate` 是**结构体类型**，导出面守卫只看 `FuncDecl` ⇒ 预期**不打红**，但请实测确认（本任务 `writes` 因此不含 `store_test.go`；若实测发现打红了，须先经写通道补进 `writes` 再改）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-50",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "7576ad328ef527322bdb5830299e81a8e84654c4",
+    "discovery_sha256": "8c116b3d2c59b6daa00003ba4c502827a19d120ab2a9639f4f710ed0d602abc3",
+    "at": "2026-08-12T03:25:34Z"
+  },
+  "verifier": "test-agent-25"
+}

@@ -1,0 +1,107 @@
+{
+  "task": "TASK-005",
+  "title": "Discover 主循环",
+  "by": "dev-agent-50",
+  "base": "2b93ccd3916ec1cb52111da28cd2514dc9d73c37",
+  "branch": "master（wave4 主工作区直连，无 worktree／无 task 分支）",
+  "commit": "7b49b13c11f2649017a7f2393da481354dc530e2",
+  "key_findings": [
+    "**同一个「断言在场而无效」的形态，我在本 Sprint 撞了第二次 —— 而且是在刚修完第一次之后。** 消融 M11（把查库失败的 `return nil, err` 改成 `return out, err`）**首轮 SURVIVED**。我的 `TestDiscoverFailsOnCheckerError` 里明明写着 `assert.Nil(t, got, \"查库失败时不得返回部分候选\")`，但它的 `fakePeriodChecker` **恒失败**⇒ 第一次 HasPeriod 调用就返回错误，那一刻 `out` 本来就是空的，两种写法**返回值完全相同**。这与 TASK-003 的 M12（`TestScanPageFailsOnUnresolvableURL` 杀不掉 `return out, err`）**是同一个形态、同一个成因**。⇒ 我在 T3 修好了那个**实例**，却没有把「错误路径断言 Nil 只有在失败点之前已收集过东西时才有鉴别力」这条**规则**用到新写的代码上。补 `failOnNthChecker`（前 n 次正常、第 n+1 次报错）+ 合成页面（同页两个候选）后才被杀。**这条记下来不是为了记录一个 bug，是为了记录「改产物不改产线」这件事真实发生过两次。**",
+    "**计划的两条测试必定失败，我自己复现了一遍而不是照抄 reviewer 的输出**（DoD 明文要求）。实测原文：`fake: 没有为 https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/11040-3.html 准备页面`。成因：`twoPageFetcher` 只备两页，而两条用例都传 `MaxPages: 3`；空库下 `HasPeriod` 恒 false ⇒ `Discover` 没有任何提前返回的条件 ⇒ 一路翻到 page=3。**是测试写错，不是实现写错** —— 「空库翻满 MaxPages」正是 spec §4.3 定义的首跑行为。修法：两条的 `MaxPages` 改成 **2**。⚠️ 若改 `Discover`（如「发现候选就停」）来让它变绿，首跑就只能捡到最近一期、历史全漏 —— 消融 M1 正是这个变异，被新增的对照用例杀死。",
+    "**「空库翻满」与「命中即停」在两页站点上不可区分**，必须用**三页**才分得开。这两个行为的 DoD 判据是「calls 变短 vs calls 达到 MaxPages」，但在 `twoPageFetcher` 上：空库 MaxPages=2 ⇒ calls=2；target 已入库 ⇒ 也是 calls=2（因为 target 在第 2 页，必须翻到那里才发现）。⇒ 新增 `threePageFetcher`，并把两个方向放进**同一条测试**（同样的站点、同样的 MaxPages=3，**只有 checker 不同**）：A 空库 ⇒ calls=3、B 已入库 ⇒ calls=2，再**直接断言 `len(A.calls) > len(B.calls)`**。分开写两条用例是不够的——各自单看都只是「calls 等于某个数」，**「两者必须不同」这个性质不属于任何一条**。",
+    "**构造「模板被改坏」的测试时踩了一个坑，靠自证断言当场发现**。`TestDiscoverFailsOnPageURLError` 要把快照 jumpTo 里的模板改坏，我先写 `strings.Replace(p1, tmpl, tmpl+\"\\x7f\", 1)` —— **实测该模板串在 p1 里出现两次**：靠前的那处是 `jumpToPage(event,this,…)` 的 onkeydown（`pagingRE` 并不匹配它），`Replace(…,1)` 命中的是它，jumpTo 那处原封不动。结果是「变异没生效但测试照样红」，红在 fake 缺页上，**与本条要守的东西无关**。因为我在测试里加了 `require.NotEqual(tmpl, brokenTmpl)` 自证，一眼看出是变异没生效而不是实现有问题。⇒ 改用 `pagingRE.FindIndex` 自己定位再改。**这是 harness 语义闸的同一条道理下沉到了测试内部。**",
+    "**`Discover` 有四条错误出口原本零覆盖**，逐条补齐后 `Discover` 从 94.1% → **100.0%**：`parsePaging` 失败（透传 T2 那条「不得静默退化成只扫第 1 页」的纪律）、`pageURL` 失败（模板坏 ⇒ 若 break 会只扫第 1 页就正常返回，而第 1 页常态没有报告）、`scanPage` 失败（base 坏 ⇒ 若 continue 会静默丢弃整页候选）、抓页失败（`fakeFetcher.err` 字段计划里定义了却从未被任何用例用过，reviewer 指出）。四条都属同一族：**「本该继续的链路中断了要响，而不是拿着残缺结果正常返回」**。消融 M6/M8/M9/M10 分别杀死对应变异。",
+    "**导出面守卫的正向验证按 Leader 纠正后的判据做**：M12「从期望列表里删掉 `Discover`」⇒ **KILLED**，证明这条守卫确实在按精确集合相等工作、我登记的那一项确实被它盯着。**没有跑「assert.Equal 换 Subset」那个变异** —— 它一定 SURVIVED（那正是「守卫的守卫无人守」的表现），跑它证明不了本次登记的正确性。那一条只能靠人核对 diff，已核对并在此留证：`store_test.go` 的改动是**切片追加一项（十→十一）+ 消息文案十→十一**，`assert.Equal` 一字未动；全文件唯一出现 `assert.Subset` 的地方是第 494 行的**注释**（我写的说明），不是代码。实测只打红 AST 版，reflect 版全程绿（`Discover` 是包级函数）；`DiscoverCfg` 是结构体，如 DoD 预期**不**打红（已实测确认）。",
+    "**承接 TASK-003 遗留①已修并自证（含阴性对照）**。`TestScanPage/同页的干扰项不被收进来` 开头补 `require.NotEmpty(t, got)`。自证：把 `scanPage` 改成恒返回 `nil, nil`，**单跑**该子测试 ⇒ `--- FAIL`，死因 `Should NOT be empty, but was []`（正是新加的那条锚点拦住的）；**阴性对照**：未变异时同一条单跑 ⇒ `ok`。修之前它单跑是 PASS 的（整包才被兄弟用例拦住），而验证者按 DoD 逐条单跑取证时拿到的正是那个假绿。",
+    "**承接 TASK-003 遗留②已逐个核实**：`discover_test.go` 里全部 11 处 `range`（含 `for k, n := range seen` 这种我第一次 grep 漏掉的形态）。分三类：① 遍历**字面量表格**（`range tests`、`range []string{...}`，5 处）—— 编译期非空，不需要锚点；② 遍历 `got`（4 处：280/296/654/728）—— **全部有 `require.NotEmpty` 前置**，其中 296 是本次补的；③ 遍历 `articleLinkRE.FindAllSubmatch(...)`（1 处）与 `range seen`（1 处）—— 前者后续断言是**肯定式** `assert.Contains(titles, jammer)`，空集必红、非平凡；后者由 `require.NotEmpty(got)` 间接保护（got 非空 ⇒ seen 非空）。"
+  ],
+  "decisions": [
+    {
+      "decision": "把计划两条测试的 MaxPages 由 3 改成 2，**不动 Discover 的实现**",
+      "rationale": "DoD 与 Leader 都点名了这条，我自己复现了失败原文确认成因。「空库翻满 MaxPages」是 spec §4.3 定义的首跑行为：提前返回的唯一条件是「命中已入库期次」，而空库下 HasPeriod 恒 false。改实现让测试变绿（例如「发现候选就停」）会让首跑只捡到最近一期、历史全部漏掉 —— 消融 M1 就是那个变异，被新增的对照用例杀死，方向与 spec 一致。"
+    },
+    {
+      "decision": "新增 threePageFetcher 与 TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly，把两个相反方向放进同一条测试并断言差值",
+      "rationale": "DoD 要求「断言必须观测到那个区别本身」。两页站点上两个方向的 calls 都是 2，不可区分；三页才分得开（3 vs 2）。而且必须放进**同一条**测试：分成两条时，「两者必须不同」这个性质不属于任何一条，各自都可能被退化实现满足（恒翻满 / 恒提前停）。保留计划原有的 TestDiscoverStopsAtKnownPeriod（MaxPages=10）作为互补 —— 它验的是「上限远高于实际页数时也不会被用满」。"
+    },
+    {
+      "decision": "补 failOnNthChecker（指针接收者）而不是给 fakePeriodChecker 加计数",
+      "rationale": "fakePeriodChecker 是值接收者，被 Discover 复制后计数就丢了；改成指针接收者会波及全部既有用例的构造形式（`fakePeriodChecker{...}` → `&fakePeriodChecker{...}`），属于为一条用例改动大片既有测试。新增一个只服务于「第 n+1 次失败」这个场景的小类型更干净，也让那条用例的意图自解释。"
+    },
+    {
+      "decision": "M4 用「条件永假」而不是整段删除",
+      "rationale": "首轮实测：删掉 `if limit > totalPages { limit = totalPages }` 会让 totalPages 变成未使用变量、编译失败，被**编译闸**判 INVALID 而非 KILLED。崩溃型变异不构成证据 —— 这正是编译闸存在的理由（TASK-002 那轮也有 4 条被差异闸拦下）。改成 `if false && limit > totalPages` 保持 totalPages 被使用，变异体可编译，随后被 TestDiscoverDoesNotExceedTotalPages 杀死。"
+    },
+    {
+      "decision": "用 pagingRE.FindIndex 定位后再改模板，而不是直接对 tmpl 做 Replace",
+      "rationale": "见 key_findings 第 4 条：该模板串在 p1 里出现两次，靠前那处是 pagingRE 不匹配的 jumpToPage(onkeydown)。这个坑的可怕之处不是「测试红了」，而是**测试仍然红、但红的理由与它要守的东西无关** —— 与 reviewer 在 R8 里点名的形态同族。测试内部保留了 `require.NotEqual(tmpl, brokenTmpl)` 这条自证，让后来者改动这段时同样会当场发现。"
+    },
+    {
+      "decision": "补 Discover 的四条错误出口用例，把它推到 100%",
+      "rationale": "DoD 只点名了「抓页失败」一条（reviewer 指出 fakeFetcher.err 从未被用过），另三条是覆盖率暴露的。都不是凑覆盖率：四条的共同后果是「链路中断却拿着残缺结果正常返回」，而本迭代反复要防的正是这一族静默失效。消融 M6/M8/M9/M10 各自被对应用例杀死，证明它们承重。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/discover.go（+75/-0，纯新增：DiscoverCfg + Discover）",
+    "internal/hestia/discover_test.go（+448/-0，纯新增：2 个 fake + 2 个 helper + 11 个顶层测试）",
+    "internal/hestia/store_test.go（+19/-2，导出面守卫登记 Discover：切片十→十一 + 一段说明注释；2 行删除即被替换的 assert.Equal 断言行与消息行）"
+  ],
+  "interfaces_exposed": [
+    "type DiscoverCfg struct{ IndexURL string `mapstructure:\"index_url\"`; MaxPages int `mapstructure:\"max_pages\"`; Timeout time.Duration `mapstructure:\"timeout\"` } —— **导出结构体**，不进导出面守卫视野（守卫只收 FuncDecl，已实测确认）。T7 的 Config 引用它，mapstructure tag 供 viper 装载。",
+    "func Discover(ctx context.Context, f Fetcher, known PeriodChecker, cfg DiscoverCfg) ([]Candidate, error) —— **包级导出函数**，已在 store_test.go 的 AST 版导出面守卫**登记**（十→十一，断言仍是全集合精确相等）。扫 index 页翻页，返回尚未入库的候选（最近的在前）。**空库时翻满 MaxPages**（spec §4.3 首跑行为，不是缺陷）；**命中已入库期次立刻返回**（index 按时间倒序，再往后只会更旧）；`limit = min(MaxPages, totalPages)` 不请求不存在的页；同期跨页只产出一个候选；**全程不抓文章页**。五条错误出口（抓页 / parsePaging / pageURL / scanPage / HasPeriod）**一律中断并返回 nil**，绝不返回部分结果。",
+    "type failOnNthChecker / fakeFetcher / fakePeriodChecker / twoPageFetcher / threePageFetcher / targetOnPage2 —— discover_test.go 内的测试设施，**下游任务直接复用勿重复定义**（同包会编译冲突）。targetOnPage2 刻意**不硬编码期次**：快照是 TASK-002 当天抓的，写死 `2026-06/h1` 会在下次更新快照时以无关理由变红。"
+  ],
+  "verification": {
+    "all_numbers_sampled_at": "主工作区 HEAD=2b93ccd3916ec1cb52111da28cd2514dc9d73c37，三个文件改动**未提交**（wave2+ 时序：先 transition 让门禁看得见工作树改动，后 commit）。本节所有数字在最后一次改动之后**统一重采**。",
+    "red_output_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/discover_test.go:494:14: undefined: Discover\ninternal/hestia/discover_test.go:496:3: undefined: DiscoverCfg\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_note": "RED 因预期原因失败（undefined: Discover / undefined: DiscoverCfg），**未被 `\"time\" imported and not used` 污染** —— 按 reviewer 实测，计划 Step 1 的 import 清单多了 \"time\"（discover_test.go 全文无任何 time. 引用），我没加它。实现侧 discover.go 才需要 time（DiscoverCfg.Timeout），context 早已存在（T4 的 PeriodChecker 用了）。",
+    "plan_bug_reproduced_verbatim": "照计划原样写 MaxPages: 3 跑出的实际失败（**我自己复现的，非照抄 reviewer**）：\n=== RUN   TestDiscoverFindsReportOnSecondPage\n    discover_test.go:497: \n        \tError Trace:\t.../internal/hestia/discover_test.go:497\n        \tError:      \tReceived unexpected error:\n        \t            \tfake: 没有为 https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/11040-3.html 准备页面\n        \tTest:       \tTestDiscoverFindsReportOnSecondPage\n--- FAIL: TestDiscoverFindsReportOnSecondPage (0.00s)\n⇒ 改 MaxPages: 2 后 PASS。**修的是测试，不是实现。**",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；-race → ok；go build ./... → 无输出",
+    "coverage": "整包 **93.1%**（≥ DoD 门槛 92.1%，也 ≥ Leader 给的当前水位 92.8%）。discover.go **六个函数全部 100.0%**（parsePaging/pageURL/resolveURL/parsePeriod/scanPage/Discover）—— Discover 起初 94.1%，补齐四条错误出口后到 100%。",
+    "test_case_count": "整包 **266** 个 PASS 行（含子测试），TASK-003 交付时是 250 ⇒ 净增 16。本任务新增 11 个顶层测试。",
+    "gofmt": "gofmt -l internal/hestia/ → 无输出",
+    "vet": "go vet ./internal/hestia/ → 无输出",
+    "export_guard_registration": {
+      "what_changed": "store_test.go 的 TestPackageExposesNoWriteFunctions 期望切片十项 → 十一项（按字节序在 DefaultThresholds 之后插入 \"Discover\"），消息文案「这十个」→「这十一个」，另加一段说明注释。",
+      "assertion_shape_unchanged": "`assert.Equal` **一字未动**，仍是全导出面精确集合相等；未换成 Subset/Contains。全文件唯一出现 `assert.Subset` 的是第 494 行的**注释**（我写的说明「换成 Subset 不会让任何东西变红」），已 grep 确认不是代码。",
+      "positive_verification": "消融 **M12：从期望列表里删掉 Discover ⇒ KILLED by TestPackageExposesNoWriteFunctions** —— 证明守卫确实在按精确集合相等工作、本次登记项确实被它盯着。",
+      "why_no_subset_mutation": "按 Leader 纠正后的判据，**没有跑「assert.Equal 换 Subset」**：它一定 SURVIVED（那正是「守卫的守卫无人守」的表现），跑它证明不了本次登记的正确性。那一条只能靠人逐字核对 diff，已核对并在上面留证。",
+      "which_guard_reddened": "只打红 **AST 版**（TestPackageExposesNoWriteFunctions）；reflect 版（TestStoreExposesNoWriteMethods）全程绿 —— Discover 是包级函数，不在 *Store 的方法集里。DiscoverCfg 与 Candidate 都是结构体类型，**不进任一守卫视野**（实测确认，非推断）。"
+    },
+    "carryover_from_task_003": {
+      "item_1_fixed": "TestScanPage/同页的干扰项不被收进来 开头补 require.NotEmpty(t, got)。",
+      "item_1_self_proof": "把 scanPage 改成恒返回 nil,nil（隔离树，锚 2b93ccd），**单跑**该子测试：\n--- FAIL: TestScanPage/同页的干扰项不被收进来\n    Error: Should NOT be empty, but was []   ← 正是新加的锚点拦住的\n**阴性对照**（未变异，同一条单跑）：ok\n⇒ 修之前它单跑是 PASS（整包才红），修之后单跑必红。主工作区指纹校验未变。",
+      "item_2_audited": "本任务全部 11 处 range 逐个核实完毕，分类与依据见 key_findings 第 8 条。新写的 4 处遍历 got 的地方（TestDiscoverDeduplicatesAcrossPages、TestDiscoverNeverFetchesArticlePages 等）全部带 require.NotEmpty 前置。"
+    },
+    "no_existing_assertion_relaxed": "discover.go 与 discover_test.go **全部 +N/-0，零删除**。store_test.go 有 2 行删除，已逐行核实：正是被替换的 `assert.Equal(...)` 断言行与其消息行 —— **即登记本身**（与 TASK-001 当时 16/2 的形态一致）。未修改本包任何其他既有文件；既有断言无一被放松。",
+    "numstat_uncommitted": "git diff --numstat → discover.go 75/0、discover_test.go 448/0、store_test.go 19/2（改动尚未提交；提交后应以 git show --numstat 复核，两者应一致）",
+    "ablation": {
+      "harness": "/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/64844656-ea0e-444b-9aee-27e130e249e9/scratchpad/dev50-t5-ablate.sh",
+      "diff_log": "同目录 dev50-t5-ablate-diffs.txt（12 个变异的完整 diff，已逐条核对语义）",
+      "anchor": "隔离树锚点为**全 sha** 2b93ccd3916ec1cb52111da28cd2514dc9d73c37，经 ARCFORGE_T5_DEP_REF 可覆写；harness 同时打印锚点与主工作区 HEAD。",
+      "isolation": "git worktree add --detach 出独立树，拷入三个**未提交**文件后在其中变异（本轮变异**两个文件**：discover.go 与 store_test.go）；主工作区三个文件的 sha256 在每个变异窗口内校验、收尾再校验，全程未变；收尾 worktree remove --force + prune。",
+      "gates": "基线闸 + 差异闸 + **编译闸** + 语义闸（diff 落盘并逐条核对）+ 主工作区指纹闸 + **计数自证**（12 == 12）",
+      "result": "12 变异 / 12 KILLED / 0 SURVIVED / 0 理由不符；计数自证 12 == 12",
+      "iterations": "**跑了两轮，第一轮 FAIL，两处都是闸报出来的**：\n· M4 被**编译闸**拦下（整段删除让 totalPages 变成未使用变量）⇒ 计数自证 12 != 11 判 FAIL，**没有被记成 KILLED**。改用「条件永假」后通过。\n· **M11 真 SURVIVED** ⇒ 暴露 TestDiscoverFailsOnCheckerError 的 assert.Nil 无鉴别力（见 key_findings 第 1 条），补 failOnNthChecker 用例后才被杀。",
+      "mutations": [
+        "M1 发现候选就停（违反 spec §4.3 首跑行为）→ KILLED by TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly + Deduplicates",
+        "M2 去掉跨页去重 → KILLED **仅**by TestDiscoverDeduplicatesAcrossPages",
+        "M3 命中已入库不停（continue 代替 return）→ KILLED by TestDiscoverStopsAtKnownPeriod + EmptyStoreExhausts…",
+        "M4 limit 不夹逼 totalPages → KILLED **仅**by TestDiscoverDoesNotExceedTotalPages（首轮被编译闸拦下，见 iterations）",
+        "M5 查库失败当成「未入库」继续翻 → KILLED by TestDiscoverFailsOnCheckerError + ReturnsNoPartialResult…",
+        "M6 翻页抓取失败吞掉（break）→ KILLED **仅**by TestDiscoverFailsOnFetchError/翻页中途抓取失败",
+        "M7 第 1 页重复请求（page >= 1）→ KILLED by 9 条用例（calls 断言遍布各处）",
+        "M8 scanPage 失败吞掉（continue，静默丢弃整页候选）→ KILLED **仅**by TestDiscoverFailsOnScanError",
+        "M9 pageURL 失败吞掉（break，只扫第 1 页就返回）→ KILLED **仅**by TestDiscoverFailsOnPageURLError",
+        "M10 parsePaging 失败吞掉（静默退化成只扫第 1 页）→ KILLED **仅**by TestDiscoverFailsOnPagingParseError",
+        "M11 查库失败时返回已收集的部分候选 → **首轮 SURVIVED**，补用例后 KILLED **仅**by TestDiscoverReturnsNoPartialResultOnCheckerError",
+        "M12 导出面守卫期望列表里删掉 Discover → KILLED by TestPackageExposesNoWriteFunctions（Leader 点名的正向验证）"
+      ],
+      "semantic_gate_checked": "12 个变异的 diff 已逐条核对：每处只动目标那一行/那一段，无漏写续行、无误伤相邻代码。"
+    },
+    "not_done_by_design": [
+      "**未跑「assert.Equal 换 assert.Subset」变异**：按 Leader 纠正后的判据，它一定 SURVIVED、不构成证据，改由人工核对 diff（已核对，见 export_guard_registration）。"
+    ],
+    "numstat_from_commit": "git show --numstat 7b49b13c11f2649017a7f2393da481354dc530e2 → discover.go 75/0、discover_test.go 448/0、store_test.go 19/2（与交付物同源，与提交前工作树版逐字一致）"
+  }
+}

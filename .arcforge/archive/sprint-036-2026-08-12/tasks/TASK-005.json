@@ -1,0 +1,59 @@
+{
+  "id": "TASK-005",
+  "title": "Discover 主循环",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [
+    "TASK-001",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/discover.go",
+    "./internal/hestia/discover_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "实现 DiscoverCfg（带 mapstructure tag，供 T7 装载）与 Discover 主循环：逐页扫 index，碰到已入库的期次即停。对应上游计划 Task 5（Step 1-9）。",
+  "done_criteria": {
+    "functional": [
+      "**空库时翻到第 2 页找到报告**。这是首跑的常态，也是「只抓第 1 页会漏」的证明。\n\n判据须同时断言返回的候选（Period/ArticleID 与 `scanPage` 直接问出来的一致）**与 `f.calls` 的实际内容**。\n\n⚠️ **测试不得硬编码期次** —— 快照是 TASK-002 当天抓的，上面是哪一期取决于抓取日期。先用 `scanPage` 问出来再构造场景。\n\n🔴 **计划给的这条测试必定失败 —— 已由两条独立路径确认**（Leader 推演 + 独立 reviewer 实跑）：\n\n`twoPageFetcher` 只备**两页**，而本用例与 `TestDiscoverNeverFetchesArticlePages` 都传 `MaxPages: 3`。`Discover` **只在命中已入库期次时提前返回**，空库下 `HasPeriod` 恒 false ⇒ **翻到 page=3** ⇒ fake 报错。reviewer 实测输出：\n```\n--- FAIL: TestDiscoverFindsReportOnSecondPage\n        fake: 没有为 .../11040-3.html 准备页面\n--- FAIL: TestDiscoverNeverFetchesArticlePages\n（其余五条 PASS）\n```\n**修法（reviewer 实测有效）**：这两条的 `MaxPages` 改成 **2** ⇒ 七条全绿。\n\n⚠️⚠️ **是测试写错，不是实现写错** —— 「空库翻满 `MaxPages`」正是 spec §4.3 定义的首跑行为。\n**危害不止「测试红」**：RED→GREEN 循环里你看到红会**先怀疑自己的实现**，而计划的实现是对的。\n**若你去改 `Discover`（例如「发现候选就停」），那会直接违反 spec §4.3。**\n\n把实际失败输出原文与你确认的修法写进 discovery。",
+      "**碰到已入库的期次立刻停，且不再请求后续页**。\n\n⚠️ **只断言返回值验不出这条**：翻满上限的实现也会返回同样的空清单。**必须看 `f.calls` 的长度**。这正是 fake 要记录请求顺序的理由。"
+    ],
+    "boundary": [
+      "**`MaxPages` 生效**且**总页数夹逼 `MaxPages`**，两个方向都要测：\n\n① 设 `MaxPages: 1` ⇒ 只请求第 1 页（而第 1 页没有报告）\n② 把快照的 `jumpTo` 总页数改成 2、`MaxPages: 50` ⇒ 不得请求第 3 页（不请求不存在的页）\n\n⚠️ **另需覆盖 spec `functional[5]`「空库时翻满 `MaxPages` 后停」** —— 它与 `functional[4]`（碰到已入库即停）**共用同一个 fake，容易被合并成一个用例，但断言对象相反**：\n- 已入库即停 ⇒ 断言 `calls` **变短**\n- 空库翻满 ⇒ 断言 `calls` **达到 MaxPages**\n\n**只看返回值两者不可分**（空库翻满与提前停都可能返回同样的清单）。断言必须观测到那个区别本身。",
+      "**同一期在两页上都出现时只产出一个候选**。\n\n真实成因：翻页期间有新文章上架，边界那条会被挤到下一页重复出现。判据：两页喂同样的内容，每个 `period/period_type` 只出现一次。\n\n🔴 **计划给的这条用例在空集上平凡为真 —— reviewer 消融实证**：\n\n它断言「遍历 `got`，每个期次计数为 1」，**没有 `require.NotEmpty(t, got)`**。把 `scanPage` 改成恒返回 `nil, nil` 后：\n```\n--- FAIL: TestScanPage/第_2_页提取出报告条目\n--- FAIL: TestDiscoverNeverFetchesArticlePages\n（TestDiscoverDeduplicatesAcrossPages 未出现在 FAIL 列表 —— 它仍然绿）\n```\n⇒ **条目提取彻底失效时，这条「去重」用例照样 PASS，它自身不构成任何证据。**\n\n整包跑会被兄弟用例接住，但**验证者按 DoD 逐条单跑取证时会拿到假绿**，且会作为「已验证」写进验收矩阵。\n\n**修法一行：开头加 `require.NotEmpty(t, got)`。** 同理检查 `TestDiscoverNeverFetchesArticlePages`（计划那条已有 `require.NotEmpty`，确认保留）。\n\n这是「遍历型断言在空集上平凡为真」的又一例（Sprint 035 的 F14 同族）。"
+    ],
+    "error_handling": [
+      "**查库失败必须中断，不能当成「未入库」继续翻** —— 那会把整段历史重新抓一遍。\n\n判据：`fakePeriodChecker{err: ...}` 时 `Discover` 返回 error 且 `errors.Is` 找得到底层错误。\n\n**另需补一条抓页失败路径**（reviewer 指出）：`fakeFetcher.err` 字段**定义了却从未被独立测过**。任一页抓取失败必须中断并带页 URL —— 这与 TASK-001 的「错误信息要带 URL」是同一条链路的两端。"
+    ],
+    "non_functional": [
+      "**`Discover` 全程不碰文章页**。判据：遍历返回的每个候选，断言其 `URL` **不在** `f.calls` 里。\n\n这条边界让 discover 能用快照完整测试、不碰网络；取正文是 M1b-4b 的 ingest 做的。",
+      "**新增包级导出函数 `Discover` 会打红 AST 版导出面守卫**（`DiscoverCfg` 是结构体类型，预期不打红 —— 请实测确认）。\n\n**登记，不放松**：按字典序追加 + 补一行说明。此时切片里应已含 `NewPBOCFetcher`(T1) 与 `Store.HasPeriod`(T4)，**在其基础上追加**。\n\n## ⚠️ 导出面守卫的验证判据（Leader 原先的要求不精确，test-agent-25 已纠正）\n\n我此前要求「复跑 M11 同形消融」（把 `assert.Equal` 换成 `assert.Subset`）。**那是错的要求** ——\nM11 **一定不红**（它正是「守卫的守卫无人守」的表现），跑它证明不了本次登记的正确性。\n\n**有效的正向验证是 M9 同形**：\n```\n从期望列表里【删掉】你新增的那一项  →  必须 KILLED\n```\n它证明的是「这条守卫确实在按精确集合相等工作、你的登记项确实被它盯着」。\n\n**M11 的用途只有一个**：说明为什么这一条**必须靠人逐字核对** ——\n判据不是「M11 会不会红」，而是**核对交付 diff 里那一行确实是「追加一项、断言仍是 `assert.Equal` 全集合相等」**，\n没有被改成 `Subset`/`Contains`。",
+      "**RED 因预期原因失败**（Step 2 预期 `undefined: Discover` / `undefined: DiscoverCfg`），实际输出原文入 discovery；`import` 按需增补；`gofmt`/`vet` 无输出；整包绿；覆盖率不低于 **92.1%**。\n\n⚠️ **reviewer 实测：计划 Step 1 的 import 清单多了 `\"time\"`**（`discover_test.go` 全文**没有任何** `time.` 引用）⇒ `discover_test.go:9:2: \"time\" imported and not used`。\n\n这是计划三处 import 错误中的第三处（另两处在 T1、T2）。⇒ RED 阶段看到 `imported and not used` 时，**那不是有效的 RED**。\n\n---\n\n## ⚠️ 本任务额外承接两条来自 TASK-003 的遗留（它的 `writes` 与你重叠，零返工成本）\n\n### ① 修掉一条单跑会假绿的断言（TASK-003 遗留，已写进它的 DoD 并指名本任务）\n\n`discover_test.go` 的 `TestScanPage/同页的干扰项不被收进来` 直接 `for _, c := range got` 遍历，**无前置锚点**：\n\n```\nM1（scanPage 恒返回 nil）下：\n  go test -run TestScanPage/同页的干扰项不被收进来  → --- PASS   ← 单跑假绿\n  go test ./internal/hestia/ -count=1                    → FAIL      ← 整包被兄弟用例拦住\n```\n\n**对交付物无影响**（验证者已确认它是**冗余而非虚假**：干扰项真被收进来时 `got` 非空、该断言会红，14 条变异无一逃逸）。**危害在验证流程上** —— 后来者按 DoD 逐条**单跑取证**时会拿到假绿，并写进覆盖矩阵。\n\n**修法一行**：那条子测试开头加 `require.NotEmpty(t, got)`。**并跑一次消融自证**（`scanPage` 恒返回 `nil, nil` ⇒ 该子测试单跑必须红）。\n\n### ② 继承 TASK-003 那条「遍历型断言必须有肯定式前置锚点」的通用要求\n\n**它在 TASK-003 交付时已被实现，但当时没进 DoD 文本**（Leader 请 dev 代笔时它已交棒失去写权，后由验证者在 `verified` 后补上）。验证者指出：**它恰是复用 `scanPage` 时最该继承的一条。**\n\n⇒ **本任务凡是写 `for _, x := range got { assert... }` 的地方，必须有 `require.NotEmpty(t, got)` 或 `require.Len(t, got, N)` 作为前置**，否则 `got` 为空时循环体一次不执行、全部断言平凡通过。\n\n**本 Sprint 这一族已出现四次**（TASK-002 的去重用例、TASK-003 的字段遍历、TASK-003 的干扰项、以及真实样本恰好只有一条时「遍历每一条」形同虚设）⇒ **写下每个 `range` 时都过一遍。**"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-50",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "7b49b13c11f2649017a7f2393da481354dc530e2",
+    "discovery_sha256": "af70f285de7427d434d9301121e6acca6e71c831e69845bb44730a3deb92c418",
+    "at": "2026-08-12T04:18:22Z"
+  },
+  "verifier": "test-agent-25"
+}

@@ -1,0 +1,112 @@
+{
+  "task": "TASK-002",
+  "title": "index 快照与分页模板解析",
+  "by": "dev-agent-50",
+  "base": "f5a17d5cdf8128d8307c33e213a4b6441a058ab1",
+  "branch": "task/TASK-002",
+  "commit": "99c8c6a1fcbabd7fa1af2e4f6baa1118235b828e",
+  "key_findings": [
+    "**入库的快照不是逐字节的原始 HTTP 响应。** 本仓库 core.autocrlf=input，git add 把 CRLF 规范化成 LF，两份各少 67 字节（p1 38147→38080、p2 38692→38625），blob sha256 与抓取时的 sha256 全不相同。git 只在 commit 时打了一行 warning，**没有任何东西会让人发现自己测的树和入库的树不是同一棵**。发现后把工作区刷成入库版（rm 后 git checkout --）重跑，8 条用例全绿、覆盖率不变，故仓库里这一版才是被验证过的那一版。⇒ 下游若写跨行正则（如 (?s)(.*?)</a> 取链接文本）请按 LF 写断言；照原始响应写 \\r\\n 会在仓库版上失配。既有两份文章页快照同样 0 个 \\r，是同一条规则的既往结果。",
+    "**只用真实快照测 parsePaging，证不出「解析而不是写死栏目 ID」。** 一个 `return \"/goutongjiaoliu/113456/113469/11040-%1.html\", 408, nil` 的写死实现能让计划给的三条断言（含 %1、含栏目路径、total>100）全绿——它们断的正好都是真实快照里那个栏目的特征值。补 TestParsePagingFollowsChangedColumnID（喂栏目 ID/路径/页数全不同的 HTML）后写死实现必红。消融 M1 实证：不加这条，写死变异照样有别的用例杀它（M1 被 9 条杀），但**杀它的理由与「跟随 ID」无关**，DoD functional[1] 那句话仍是无实证的声明。",
+    "**`if err != nil || totalPages < 1` 里的 err != nil 半边，只有数字溢出能触达。** 正则的 (\\d+) 把负数与非数字挡在 strconv.Atoi 之前，它们落进「没有分页控件」分支而不是「总页数不合法」分支（实测确认，非推断）。⇒ 没有「溢出 int64」这条用例，那半个条件就是没人看得出来的死代码。消融 M4（删掉 err != nil）实测**只被「溢出_int64」一个子测试杀死**，精确证明它是那半边条件的唯一守卫。",
+    "**pageURL 第 1 页不套模板的理由，计划写错了。** 计划注释「模板生成的 11040-1.html 未必存在（实测 index_1.html 是 404）」用关于**另一个 URL** 的观察去论证；Leader 复验：11040-1.html 返回 200、38147 字节、与 index.html 逐字节相同。真实理由是①不为已在手上的字节再打一次请求（调用方是先取回 index 页才解析出模板的）②不给同一页制造第二个 URL 别名。行为不变，注释已改写并显式警告后人别再引用 index_1.html 那个观察。",
+    "**计划 Step 6 的 discover.go import 块多了 net/url**（reviewer F3/R3 已实测）。照抄会得到 `discover.go:6:2: \"net/url\" imported and not used`，让 Step 7 的「预期两条 PASS」不成立，也污染 RED 信号。本任务按 Step 拆分 import：Step 6 只写 fmt/regexp/strconv/strings，Step 9 实现 pageURL 时才加 net/url ⇒ 两次 RED 均为预期的 undefined。",
+    "**导出面守卫两条如预期均未打红。** parsePaging/pageURL/readTestdata 全部不导出，AST 版按 fn.Name.IsExported() 过滤，reflect 版只看 *Store 方法集 ⇒ 本任务不必登记、writes 不含 store_test.go。实测两条 PASS（与 Leader 派单里的预期一致）。",
+    "**快照分布已当场自验，与 Leader/reviewer 同日实测一致**：p1 15 条、无任何「金融统计数据」条目、日期 2026-07-21～2026-08-10（21 天）；p2 15 条、含 2026年上半年金融统计数据报告（2026-07-15 发布）与干扰项「国新办…金融统计数据情况」、日期 2026-06-28～2026-07-20（23 天）。两页均含 jumpTo(this,'408','N',...)、charset=utf-8（**不是 GB2312**，无需转码）。页内的 <meta name=\"createDate\" content=\"2026-08-10 18:21:00\"> 不是条目日期，统计范围时要排掉——p2 里那个孤零零的 2026-08-10 就是它。",
+    "**窗口确实在关闭**：报告在 p2 的第 5 条，而 p2 最旧一条是 2026-06-28（距报告 17 天）。按每页覆盖约 20 天算，再过两三周它会掉到第 3 页。README 已写明更新办法（重抓 p1 + 按报告所在页换第二份 + 回来改表）。"
+  ],
+  "decisions": [
+    {
+      "decision": "用 Go 的 net/http 默认 UA 抓快照，不用计划给的 curl",
+      "rationale": "reviewer 指出计划「不带 User-Agent —— 与生产实现一致」这句措辞是错的：curl 默认发 curl/8.x、Go 默认发 Go-http-client/1.1，两者都不是「不带 UA」，而且是**两个不同的 UA**。既然快照要用来代表生产实现看到的页面，就该用生产实现的那个 UA 抓。实测两页均 200。README 里同时纠正了这句措辞，免得后人照抄「不带 UA」。"
+    },
+    {
+      "decision": "补三条计划没有的用例：跟随变化的栏目 ID、两页解析结果一致、总页数非法（表驱动 5 例）",
+      "rationale": "第一条是 DoD functional[1]「ID 变了能自动跟随」的唯一实证（见 key_findings 第 2 条）。第二条钉住正则**不捕获当前页**那一组——真去用了它，p1（当前页 1）与 p2（当前页 2）会解析出不同结果，Discover 翻到第 2 页后再解析就断链；消融 M6 实证这条会红。第三条是 DoD error_handling 明文要求、reviewer R9 点名的「有实现无用例」缺口。"
+    },
+    {
+      "decision": "总页数非法用例采用「主断言 + wantErr 精确串」两层，并在注释里写明分工",
+      "rationale": "主断言（require.Error + 含 paging）守 DoD 本身，无论走哪条分支都成立；wantErr 精确串记录**当前实现下这个输入落进哪条分支**。若将来只有 wantErr 变红，看主断言即可判断 DoD 是否仍被满足。这是针对 reviewer R8 那个形态的预防——「测试红了，但红的理由与它要守的东西无关」会让人误以为守卫失效。注释里同时写明负数/非数字是被正则挡下的，别把理由写强成「Atoi 拒绝了它们」。"
+    },
+    {
+      "decision": "补 pageURL 的两条错误路径用例，断言用 require.NotNil(errors.Unwrap(err))",
+      "rationale": "只看错误串有没有那几个字是分不出 %w 和 %v 的——写成 %v 时错误串**一模一样**，只有 Unwrap 分得出来，而调用方要靠它拿到 *url.Error 判因。消融 M8（两处 %w 改 %v）实测被这条杀死，证明它承重而不只是在场。"
+    },
+    {
+      "decision": "README 同时记「HTTP 响应」与「入库后」两个字节数，并解释 CRLF 规范化",
+      "rationale": "两个数字不同不是笔误，而是 core.autocrlf=input 的必然结果。不写的话，后人拿仓库文件去对 38147 会对不上，且很可能怀疑快照被改过。同时警示下游写跨行正则要按 LF。"
+    },
+    {
+      "decision": "开工时删除并重建了同名残留分支 task/TASK-002",
+      "rationale": "上一个 Sprint 的同名分支仍在（指向 e24c062「feat(hestia): 从模板表派生 completeness 的必填集」），导致 git worktree add -b 失败。核实 git merge-base --is-ancestor task/TASK-002 master 为真、git log master..task/TASK-002 为空 ⇒ 该分支无任何 master 没有的内容，删除不丢东西。已在交付报告中申报。**这类残留不会自己消失**，Sprint 收尾时值得连同孤儿 worktree 一起扫一遍。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/discover.go（新建，68 行，本任务是它的第一个写者；T3/T4/T5 在其后接力）",
+    "internal/hestia/discover_test.go（新建，163 行）",
+    "internal/hestia/testdata/pboc-index-p1.html（新建，抓取快照）",
+    "internal/hestia/testdata/pboc-index-p2.html（新建，抓取快照）",
+    "internal/hestia/testdata/README.md（**纯追加** +51/-0，既有内容一行未删）"
+  ],
+  "interfaces_exposed": [
+    "func parsePaging(html []byte) (tmpl string, totalPages int, err error) —— 包内未导出。从 index 页任意一页的字节解析出分页模板（保留 %1 占位符，实测 /goutongjiaoliu/113456/113469/11040-%1.html）与总页数（实测 408）。三条错误出口，错误串都含 paging：no paging control found（正则不匹配，含负数/非数字/空的总页数）、bad paging total（匹配但 0 或溢出）、has no %1 placeholder。**绝不返回「退化到只扫第 1 页」的默认值。**",
+    "func pageURL(indexURL, tmpl string, page int) (string, error) —— 包内未导出。page<=1 原样返回 indexURL；page>=2 把 %1 换成页码后用 base.ResolveReference 补成绝对 URL（站内绝对路径与相对路径两种形态都能处理）。两条错误出口均以 %w 包住底层 url.Parse 错误：bad index url、bad paging template。",
+    "func readTestdata(t *testing.T, name string) []byte —— discover_test.go 内的 helper，读 testdata/ 下的文件。T3/T5 若要读同目录快照可直接复用，**不要重复定义**（同包内会编译冲突）。",
+    "var pagingRE —— 包级正则，刻意只捕获总页数与模板两组，**不捕获当前页**。"
+  ],
+  "verification": {
+    "all_numbers_sampled_at": "99c8c6a1fcbabd7fa1af2e4f6baa1118235b828e，git status --porcelain 为空；本节所有数字在最后一次改动（README 的 CRLF 说明）之后**统一重采**",
+    "red_output_verbatim_1": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/discover_test.go:26:22: undefined: parsePaging\ninternal/hestia/discover_test.go:39:15: undefined: parsePaging\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_output_verbatim_2": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/discover_test.go:59:15: undefined: pageURL\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_note": "两次 RED 均因预期原因失败（undefined: parsePaging / undefined: pageURL），**未被 imported and not used 污染** —— 已按 reviewer F3/R3 从计划 Step 6 的 import 块删掉 net/url，到 Step 9 才加。",
+    "suite": "go test ./internal/hestia/ -count=1 → ok（整包绿）；-race → ok；go build ./... → 无输出",
+    "coverage": "92.3%（go test -cover），≥ DoD 下限 92.1%",
+    "test_case_count": "整包 236 个 PASS 行（含子测试）；本任务新增 8 个顶层测试 + 7 个子测试",
+    "gofmt": "gofmt -l internal/hestia/ → 无输出",
+    "vet": "go vet ./internal/hestia/ → 无输出",
+    "export_guards": "TestStoreExposesNoWriteMethods 与 TestPackageExposesNoWriteFunctions 均 PASS —— 如派单预期未打红（parsePaging/pageURL/readTestdata 全部不导出），故未登记、writes 不含 store_test.go",
+    "no_existing_assertion_relaxed": "git show --numstat 显示 5 个文件全部 +N/-0，**零删除行**。唯一被修改的既有文件是 testdata/README.md（+51/-0，纯追加）；**没有碰过任何既有 .go 文件** ⇒ 结构上不可能放松既有断言。",
+    "numstat_from_commit": "git show --numstat 99c8c6a → discover.go 68/0、discover_test.go 163/0、testdata/README.md 51/0、pboc-index-p1.html 640/0、pboc-index-p2.html 640/0（数字取自提交本身，与交付物同源）",
+    "snapshot_blob_sha256": {
+      "note": "**入库 blob 的 sha256（LF 规范化后），不是抓取时的 sha256** —— 见 key_findings 第 1 条。抓取时分别是 1d0eaeac…（p1）/ 76fc9228…（p2）。",
+      "pboc-index-p1.html": "ec7cdc220158efcd12669810ed17a29f6ebd8f06696fbb4221d27ec5c300151a",
+      "pboc-index-p2.html": "ea30a8339dfbe6350c2977ddc49681f409efdb3266908ee0da4acafe3cfee7ee",
+      "fetched_at": "2026-08-12T01:41:18Z（CST 09:41），Go net/http 默认 UA，两页均 HTTP 200"
+    },
+    "ablation": {
+      "harness": "/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/64844656-ea0e-444b-9aee-27e130e249e9/scratchpad/dev50-ablate.sh",
+      "diff_log": "同目录 dev50-ablate-diffs.txt（9 个变异的完整 diff，供逐字核对语义）",
+      "isolation": "变异作用在 git worktree add --detach f5a17d5 出来的独立 worktree 上，拷入本任务 4 个文件后变异；我的 worktree 与主仓库一个字节不碰 —— **每个变异窗口内**都校验我的 discover.go/discover_test.go 指纹，收尾再校验一次，全部未变。消融跑完已 git worktree remove --force + prune。",
+      "gates": "有效性闸-差异（变异后 sha256 必须变，否则记 GATE-FAIL 不产出结论）+ **有效性闸-编译**（go test -run '^$' 必须通过，崩溃型变异会让整包假红）+ 语义闸（每个变异的 diff 落盘，已逐条核对）+ 主工作区指纹闸 + **计数自证**（变异条数 9 == 结论行数 9）",
+      "first_run_caught_by_gates": "首轮 9 条里有 4 条被「差异闸」拦下（M3/M4/M5/M7）：perl 的 s{}{} 分隔符与 Go 源码的花括号冲突，报 Unknown regexp modifier \"/t\"。**闸正确地没有把它们记成 SURVIVED**，计数自证 9 != 5 直接判 FAIL。改用 # 分隔符 + \\x27 写单引号后重跑 9/9。这条记下来是因为：若无差异闸，这 4 条会静默变成「无测试变红」＝假 SURVIVED，方向恰好是让我去加不必要的断言。",
+      "result": "9 变异 / 9 KILLED / 0 SURVIVED / 0 理由不符；计数自证 9 == 9",
+      "mutations": [
+        "M1 parsePaging 写死栏目 ID 与页数 → KILLED by TestParsePagingFollowsChangedColumnID（另有 8 条一起红）",
+        "M2 no paging control 分支改成静默返回 (\"/x-%1.html\", 1, nil) → KILLED by TestParsePagingFailsLoudly + 负数/非数字/空三个子测试。**这三个子测试原本只是记录「被正则挡下」，实测它们同时也在守「解析不到必须报错」**",
+        "M3 零页校验放宽（totalPages < 1 改 < 0）→ KILLED **仅**by TestParsePagingRejectsBadTotal/零页",
+        "M4 丢掉 Atoi 的 err 检查（只留 totalPages < 1）→ KILLED **仅**by TestParsePagingRejectsBadTotal/溢出_int64 —— 精确证明溢出用例是 err != nil 半边条件的唯一守卫",
+        "M5 去掉模板 %1 占位符检查（if false && …）→ KILLED by TestParsePagingRejectsTemplateWithoutPlaceholder",
+        "M6 正则改捕当前页而非总页数 → KILLED by TestParsePaging + TestParsePagingSamePagingOnEveryPage + TestParsePagingFollowsChangedColumnID 等",
+        "M7 第 1 页也套模板（page <= 1 改 page <= 0）→ KILLED by TestPageURL",
+        "M8 两处 %w 改 %v（不再包住底层错误）→ KILLED by TestPageURLRejectsUnparsableInput 的两个子测试",
+        "M9 页码不代入模板（strings.Replace 的 n 改 0）→ KILLED by TestPageURL"
+      ],
+      "semantic_gate_checked": "9 个变异的 diff 已逐条核对（见 diff_log）：每处改动都恰好只动了目标那一行/那一段，无漏写续行、无误伤相邻代码。"
+    },
+    "code_simplifier": {
+      "outcome": "**无改动** —— 一个字节都没改（gofmt/vet 均干净）。",
+      "how_i_verified_no_change": "子代理的回复含糊（只说「不执行。已完成并交付」），未说明是否改过文件。按纪律自行核实而非采信回复：三个文件 mtime（discover.go 09:44:39 / discover_test.go 09:47:17 / README.md 09:52:08）全部早于它的运行时段（09:53–09:56）；DoD 要求的四处关键注释 grep 全部命中；覆盖率与测试结果不变。⇒ 确认未改动。",
+      "why_the_reply_was_terse": "**事后由 Leader 转述才知道原因**：TeammateIdle hook 两次拦截该子代理，要求它「用 --as dev-agent-50 经写通道把名下任务推进到 dev_done」。**它两次都拒绝，没碰 .arcforge/ —— 这是正确行为**。理由（Leader 逐条认可）：它是子代理不是本尊，hook 按 **session 粒度**判定身份故命中宿主实例名；它不知道 TASK-ID、不持有 assignment_epoch（epoch 是认领时由认领者记下的，不在它上下文里）⇒ --expect-epoch 填不出来；--as dev-agent-50 正是写通道要挡的冒名写；且 transition dev_done 会在它没参与的交付范围上跑门禁。⇒ 这是「hook 身份判定粒度 = session 而非 agent」导致的**可复现误判，子代理场景会稳定重现**，Leader 已记入待同步 hooks 清单（.claude/hooks/ 属运行时资产，全体 agent 只读）。**对后来者的操作含义**：自己 spawn 的子代理若被 hook 要求写 .arcforge/，让它拒绝，结论带回由具名 teammate 本体落盘 —— 即 CLAUDE.md 的「记录员代理模式」。",
+      "findings_by_subagent": [
+        "**parsePaging 三段错误分支不可合并** —— 三条错误串各不相同，而 discover_test.go 的 wantErr 列正是按分支区分的；合并会让「负数/非数字被正则挡在 Atoi 之前」这个记录失效。【子代理判断；我未再独立复核，但方向与我写用例时的意图一致，且消融 M2/M5 分别由不同用例杀死，侧面支持三条分支各自承重】",
+        "**`err != nil || totalPages < 1` 的前半看似死代码，实为有守卫的活代码，不动** —— 只有溢出输入可达，且 TestParsePagingRejectsBadTotal 的「溢出 int64」一条钉着它。【这条我**已独立实证**：消融 M4 删掉 err != nil 后**只被「溢出_int64」一个子测试杀死**，见 ablation.mutations M4】",
+        "**pageURL 两个 url.Parse 不可合并** —— 各带独立错误串（bad index url / bad paging template），测试分别断言 errors.Unwrap 非 nil。【子代理判断；我未再独立复核，但消融 M8 证实 %w 包裹被 TestPageURLRejectsUnparsableInput 的两个子测试守着】",
+        "**唯一纯风格可选项，建议不改（Leader 同意，我也同意）**：discover.go:29 的 fmt.Errorf 无格式化动词，理论上可换 errors.New，但要新增 import 换零收益，vet 也不报。【这条我**已独立核实**：grep 确认该文件五处 fmt.Errorf 中只有 :29 无动词，其余四处带 %q/%w/%%1。**补一条子代理没提的理由**：五处保持同一个构造器，五条错误出口一眼看去同形，风格一致性比省一个 import 更值。】"
+      ],
+      "attribution_note": "上列四条中，第 2、4 条我独立复核过（分别有消融实证与 grep 核实）；第 1、3 条是子代理的设计判断，我认同且有消融证据侧面支持，但**未逐字重新推演** —— 按 Leader 要求在此标明来源，免得后人把它们当成我亲验的结论。"
+    },
+    "not_done_by_design": [
+      "**未自行 transition dev_done**：按派单等 Leader merge 后通知。worktree 隔离下 dev_done 门禁在主工作区跑 go test，代码只在 worktree 时它测的是不含本次代码的旧树 —— 它不会失败，它会成功，而我写的一行都没被看过。"
+    ]
+  }
+}

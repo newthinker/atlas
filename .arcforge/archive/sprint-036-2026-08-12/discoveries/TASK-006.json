@@ -1,0 +1,61 @@
+{
+  "task": "TASK-006",
+  "title": "口径豁免的键补上 PeriodTypes",
+  "by": "dev-agent-51",
+  "branch": "task/TASK-006",
+  "base": "f5a17d5cdf8128d8307c33e213a4b6441a058ab1",
+  "commit": "0601b63e29d864d766eb77111f7007d5edaceed3",
+  "key_findings": [
+    "RED（写完新行为测试、动实现之前）实际输出原文：`# github.com/newthinker/atlas/internal/hestia [.../hestia.test]` / `internal/hestia/thresholds_test.go:223:3: unknown field PeriodTypes in struct literal of type CaliberExemption` / `thresholds_test.go:229:57: too many arguments in call to cfg.exemptionFor` `have (string, string, string)` `want (string, string)` / …（同形共 10 条后 `too many errors`）/ `FAIL github.com/newthinker/atlas/internal/hestia [build failed]`。因预期原因失败：字段与三参签名都还不存在。",
+    "改签名后 `go build ./internal/hestia/` 实际输出原文：`internal/hestia/thresholds.go:165:23: ex.PeriodTypes undefined (type *CaliberExemption has no field or method PeriodTypes)` 与 `internal/hestia/validate.go:93:46: not enough arguments in call to cfg.exemptionFor` `have (string, string)` `want (string, string, string)`。⇒ 计划 Step 1/2 的意图（让编译器指出调用点）成立，但**Step 1 的代码块本身编译不过**——它引用了 Step 3 才加的字段。这是计划的表述不精确，不是错误：生产侧唯一调用点 validate.go:93 仍被编译器一次点名。已按 DoD 顺序先补 4 处调用点（validate.go:93 + thresholds_test.go:115/119/121），再加字段。",
+    "加字段后跑测试，实际转红 **7 个测试函数**，全部因 `PeriodTypes 为空` 抢先返回：`TestThresholdsRejectMalformedExemptions`（base :64）、`TestThresholdsRejectWholePeriodSkip` 的 4 个子测试（withSkips :145）、`TestCaliberExemptionRecordsSkipNotPass`（:834）、`TestCaliberExemptionDoesNotLeakToOtherPeriods`（:856）、`TestExemptionRejectsUnknownCheckID`（:879）、`TestReportKeepsEveryGateUnderExemption`（:1016）。**逐字复现了 reviewer 的 R8**：`:879` 的红是 `\"…PeriodTypes 为空…\" does not contain \"deposit_summ\"`——红的理由与它要守的东西无关；补上 PeriodTypes 后它重新因自己的判据而绿。",
+    "`validate_test.go:212`（TestValidateRejectsInvalidConfig）**实测始终未红**，确认 reviewer 的判断：Version 的 checkEnum 排在新增的 PeriodTypes 检查之前，先行返回。未改动它。",
+    "消融实测（7 条变异 × 隔离临时 worktree，编译闸 + diff 语义闸 + 计数自证 7==7，主 worktree sha256 与 git status 前后不变）：**7/7 KILLED，且杀手与预期逐条吻合**。其中最值得记的是分工——M5（宽度校验收紧成「仅覆盖三种 period_type 才算整期跳过」）**只被既有的 TestThresholdsRejectWholePeriodSkip 杀**；M6/M7（宽度校验与 completeness 规则改成「覆盖三种就放行」，即『后人以为宽度校验也该看 PeriodTypes』的那两个实现）**只被新增的 TestAllPeriodTypesIsNotAWidthBypass 杀**。⇒ 新增那组不是对既有断言的冗余确认，它堵的是既有测试够不着的方向。",
+    "合法取值列表 `monthly|h1|annual` 在错误文案里是**第三份硬编码副本**（types.go:143 的 Meta.validate 是第二份）。沿用既有房屋风格而非派生排序键，是为了与 types.go:143 的输出一致；代价用绊线抵消：`TestExemptionRejectsBadPeriodTypes/含未知取值` 遍历 `validPeriodTypes` **本身**逐个断言出现在错误串里，白名单加了第四种取值而文案没跟上就会红。"
+  ],
+  "decisions": [
+    {
+      "what": "按 DoD 顺序先改 exemptionFor 签名、补完 4 处调用点，再加 PeriodTypes 字段与校验",
+      "rationale": "两类改动的暴露方式不同：签名是编译错误（编译器一次点名），必填字段不是（Go 允许省略字段，只能靠跑测试发现）。先做编译器驱动的那半，才不会在 7 处构造点里漏掉一个——漏掉的会以「豁免不命中」的形式在别处红，排查方向完全错。"
+    },
+    {
+      "what": "validate_test.go:834/856/1016 的 PeriodTypes 写成 `[]string{validMeta().PeriodType}` 而不是字面量 \"h1\"",
+      "rationale": "这三处的 Period 也取自 validMeta()。两个维度必须都命中豁免才生效，写死 \"h1\" 会在 validMeta 改动时静默变成「豁免不命中」，那时测试红的理由与它要钉的东西无关——正是 R8 描述的那种红。:856（不外溢）尤其重要：period_type 取观测的那个，Period 才是**唯一**不匹配的维度，否则那条 failed 断言会有两个成因。"
+    },
+    {
+      "what": "TestExemptionRejectsBadPeriodTypes/为空 除断言含 \"PeriodTypes\" 外，另断言含 \"留空不等于\"",
+      "rationale": "两条新规则（为空 / 含未知取值）的错误信息都含 \"PeriodTypes\"，只断言它会让任一条被另一条冒名满足。沿用 Sprint 035 TestThresholdsRejectWholePeriodSkip 的钉法：钉能区分两种形态的那截文案。"
+    },
+    {
+      "what": "未在 TestThresholdsRejectMalformedExemptions 的 mutate 表里加 PeriodTypes 行",
+      "rationale": "该形态已由 TestExemptionRejectsBadPeriodTypes 两个子测试覆盖，且后者的断言更能区分（表里只断言 err 含某子串）。加一行是纯重复。base 与 mutate 闭包已按要求补 PeriodTypes 并一并 slices.Clone。"
+    },
+    {
+      "what": "同步更新 CaliberExemption 与 exemptionFor 的文档注释",
+      "rationale": "原注释写「按 (期次, 检查 ID) 精确指定」，加了第三个维度后该句已与代码不符。保留「方案报告 4.6.3」的出处不动，另起一句标注 M1b-4a 补的维度，避免把新维度误挂到 spec 名下。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/thresholds.go（CaliberExemption 加 PeriodTypes；validate 加两条校验；exemptionFor 加 periodType 参数）",
+    "internal/hestia/validate.go（:93 调用点补 obs.Meta.PeriodType 实参，1 行）",
+    "internal/hestia/thresholds_test.go（2 处构造点 + mutate 的 Clone + 3 处调用点；追加 4 组新测试）",
+    "internal/hestia/validate_test.go（4 处构造点）"
+  ],
+  "scope_note": "实际改动 = writes 声明的 4 个文件，无越界。不新增任何导出物（PeriodTypes 是既有导出结构体的字段），实测未打红 store_test.go 的导出面守卫。",
+  "interfaces_exposed": [
+    "type CaliberExemption struct{ Version, Period string; PeriodTypes []string; SkipChecks []string; Reason string } —— PeriodTypes 必填非空，取值须在 validPeriodTypes 内",
+    "func (t Thresholds) exemptionFor(period, periodType, checkID string) *CaliberExemption —— 三个维度全部精确匹配才返回非 nil（**破坏性签名变更**，下游若有新调用点须补 period_type 实参）",
+    "validate() 的两条新错误：`caliber_exemptions[%d] (%s) 的 PeriodTypes 为空: …留空不等于「全部」…` 与 `…含未知取值 %q (want monthly|h1|annual)`；插入位置在 Period 非空之后、Reason 之前 ⇒ 会抢先于 Reason/SkipChecks 的错误返回"
+  ],
+  "verification": {
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok 0.700s（整包绿）",
+    "coverage": "92.2% of statements（DoD 下限 92.1%）",
+    "gofmt": "gofmt -l internal/hestia/ 无输出",
+    "vet": "GOTOOLCHAIN=local go vet ./internal/hestia/ 无输出",
+    "build": "GOTOOLCHAIN=local go build ./... exit 0",
+    "new_tests": "TestExemptionIsolatesPeriodType / TestExemptionCanCoverMultiplePeriodTypes / TestExemptionRejectsBadPeriodTypes(2 子) / TestAllPeriodTypesIsNotAWidthBypass(3 子) 全部 PASS",
+    "ablation": "7 条变异 7/7 KILLED，杀手逐条吻合；隔离在临时 worktree（TASK006_MUT_REF 可覆写，实测锚 0601b63e29d864d766eb77111f7007d5edaceed3）；编译闸 + diff 语义闸 + 计数自证 7==7；主 worktree thresholds.go sha256 662a2bef6bb66afbf255412c8c6b73ff18333eed3c0900c88266c58851a1ef18 前后不变、git status 空。harness: scratchpad/dev-agent-51-ablation.sh，输出 scratchpad/dev-agent-51-ablation-out.txt",
+    "numstat": "git show --numstat 0601b63：thresholds.go 38/7、thresholds_test.go 151/12、validate.go 1/1、validate_test.go 21/11（删除行均为 gofmt 对齐后重写的既有行，非删功能）",
+    "dod_mapping": "functional[0]→TestExemptionIsolatesPeriodType；functional[1]→TestExemptionCanCoverMultiplePeriodTypes；boundary[0]→TestExemptionRejectsBadPeriodTypes/为空；boundary[1]→TestAllPeriodTypesIsNotAWidthBypass 三子测试；error_handling[0]→TestExemptionRejectsBadPeriodTypes/含未知取值；non_functional 三条见 key_findings 前三条与本节"
+  }
+}

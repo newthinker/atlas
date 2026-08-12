@@ -1,0 +1,78 @@
+{
+  "task": "TASK-004",
+  "title": "Store.HasPeriod 与 PeriodChecker 接口",
+  "by": "dev-agent-49",
+  "base": "7576ad328ef527322bdb5830299e81a8e84654c4",
+  "note_on_commit": "wave3 流程为「先 transition dev_done、后 git commit」，故本文件初写于提交之前；提交完成后回填了 commit 字段（此时 status=dev_done，discovery 尚可写；verified/accepted 后写通道会禁止覆盖）。判定对象即该 sha。",
+  "key_findings": [
+    "**两条导出面守卫都打红，与 TASK-001 形成同一 Sprint 内的对照**：`Store.HasPeriod` 是 `*Store` 方法 ⇒ reflect 版(:361 `[Close,DB,Preceding,Save]`)与 AST 版(:406)**同时**打红；而同一 Sprint 我做的 TASK-001 的 `NewPBOCFetcher` 是包级函数 ⇒ **只**打红 AST 版。两种形态各出现一次，实测演示了这两条守卫为什么互补不可互替（reflect 看得见嵌入提升的方法，AST 看得见包级函数）。两条均按字典序**登记**、断言仍是 `assert.Equal` 全集合相等，未改成 Subset/Contains。",
+    "**AST 版列表此刻已含 TASK-001 的 `NewPBOCFetcher`，本次是在其基础上追加而非覆盖**（八项→九项→十项）。这正是 Leader 把 T1/T4/T5/T7 分处四个 wave 串行的理由。",
+    "**pending 不算已入库这条 DoD 是承重的，且因果干净**：消融 P2（把 pending UNION 进查询）**只被 `TestHasPeriodIgnoresPending` 一条杀死**，没有旁的用例陪绑 —— 这条边界不是靠兄弟用例连坐接住的。",
+    "**【重要·一条 SURVIVED】`viewCurrent` vs `TableObservations` 无人守，但这不是测试缺口，而是语义等价**（消融 P8 + 追查 + 实证）。把 `HasPeriod` 改查权威表 `hestia_observations`，整包**无一变红**。追查机制：`bitemporal.NewSpec(TableObservations, []string{\"period\",\"period_type\"}, \"published_at\")` ⇒ 视图 = `WHERE published_at = (SELECT MAX(published_at) ... WHERE period=c.period AND period_type=c.period_type)`，**它按业务键分组只留最新 revision，从不整个抹掉一个业务键**；而本查询的存在性判定用的正是同一组键 ⇒ 两者对本查询**恒等价**。实证（临时探针，跑完即删）：同一期存两版后 `viewCurrent` 行数=1、`TableObservations` 行数=2，而**存在性判定两者都=1**。⇒ **不可区分，不是无人守** —— 写不出能区分它们的测试，不是漏写。",
+    "⇒ **由此纠正一处可能被写强的理由**：承重的是「**不查 pending**」（P1/P2 双双 KILLED），**不是**「查视图而不查权威表」。已把这层区别写进 `store.go` 的注释，免得后人把「必须用视图」当成安全属性引用。选视图的真实理由是与 `Preceding` 同源 + 将来视图若加过滤条件能自动跟随。",
+    "计划的 Task 4 Step 1-7 **没有覆盖 DoD 的 error_handling[0]**（查库失败返回 error、包住底层 err、带 period/periodType 上下文），按 AD-036-7「计划沉默而 DoD 有要求」自行补写 `TestHasPeriodWrapsQueryError`。触发用「已取消的 ctx」而非「关掉的库」——`database/sql` 在 Close 后返回未导出的 `errDBClosed`，没有可用 sentinel 只能比错误串；`context.Canceled` 是标准 sentinel，能真的把 `errors.Is` 这条判据测出来（与邻居 `TestPrecedingWrapsQueryError` 同法）。",
+    "**「包住了」刻意不照抄邻居写法**：邻居 `TestPrecedingWrapsQueryError` 用 `require.NotErrorIs(t, errors.Unwrap(err), err)`，它在不包裹时 `Unwrap` 返回 nil、`errors.Is(nil,x)` 恒 false ⇒ **平凡为真**（Sprint 035 F8）。本任务用 `require.NotNil(t, errors.Unwrap(err))`，消融 P5（`%w`→`%v`）确认它真的会红。**邻居那处存量写法属于 TASK-007 的清理范围，本任务未触碰**（避免扩大 scope）。"
+  ],
+  "decisions": [
+    {
+      "decision": "两条守卫各自登记并各补一段说明，断言形状原样保留",
+      "rationale": "守卫注释自己写着「新增任何导出方法都必须在这里显式登记一次，让『又开了一个写口』成为一个需要动手改测试的决定」。HasPeriod 是 Store 的第二个**读**方法（一条 SELECT 1 ... LIMIT 1，不碰写路径），扩大的是读面。M9 同形消融两遍（各删掉本次登记项）双双 KILLED，证明两条守卫确实在按精确集合相等盯着我登记的那一项。"
+    },
+    {
+      "decision": "查库失败返回 (false, err) 而非 (true, err)，并为此单独写一条断言",
+      "rationale": "调用方若忽略 err：「没入库」只会让那期被重抓一次（幂等，代价是一次多余请求），「已入库」则让它**被永久跳过**。两种失败模式代价不对称，故选前者。消融 P6（改成 return true）被 `TestHasPeriodWrapsQueryError` 杀死 —— 这条断言是我特意加的，不在计划里。"
+    },
+    {
+      "decision": "在 store.go 注释里明确写出「承重的是不查 pending，不是不查权威表」",
+      "rationale": "AD-036-6 第 4 条「别把理由写强」。P8 SURVIVED 暴露出这两个理由强度完全不同：前者有两条消融钉死，后者在语义上根本不可区分。不写清楚的话，后人会把「必须用 v_hestia_current」当成一条安全属性引用，而它不是。这与 TASK-003 撞上的『「报告」二字功劳被记错』是同一形态。"
+    },
+    {
+      "decision": "PeriodChecker 定义在消费方 discover.go，而非 store.go",
+      "rationale": "计划明确要求，且理由成立：Discover 用它、Store 实现它，discover 的测试可以喂 fake 不必开真库。接口注释写明判停用**期次**而不用 article_id —— M0 实测 2020H1 报告的 id 是 2025092212550713215（2025-09-22 时间戳），央行 2026-06-26 批量重建过站点，按 id 判停一次迁移后全部 id 变新，每次唤起都翻满上限且每期都被当成新文章。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/discover.go（+14/-0，PeriodChecker 接口 + context import）",
+    "internal/hestia/store.go（+36/-0，HasPeriod + errors import）",
+    "internal/hestia/store_test.go（+131/-4，6 个用例 + 两条守卫登记；-4 = 两条守卫各被替换的 assert.Equal 行与消息行）"
+  ],
+  "interfaces_exposed": [
+    "type PeriodChecker interface { HasPeriod(ctx context.Context, period, periodType string) (bool, error) } —— 定义在 discover.go（消费方）。**接口类型，不进任一导出面守卫视野**（AST 版只收 FuncDecl），实测确认未打红。T5 的 Discover 消费它。",
+    "func (s *Store) HasPeriod(ctx context.Context, period, periodType string) (bool, error) —— 查 v_hestia_current，pending 不算已入库；查库失败返回 (false, wrapped err)。**打红两条守卫，均已登记**。",
+    "var _ PeriodChecker = (*Store)(nil) —— store_test.go 里的编译期断言，签名漂移在编译期就红。"
+  ],
+  "verification": {
+    "red_output_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/store_test.go:1711:17: s.HasPeriod undefined (type *Store has no field or method HasPeriod)\ninternal/hestia/store_test.go:1718:17: s.HasPeriod undefined (type *Store has no field or method HasPeriod)\ninternal/hestia/store_test.go:1727:17: s.HasPeriod undefined (type *Store has no field or method HasPeriod)\ninternal/hestia/store_test.go:1745:17: s.HasPeriod undefined (type *Store has no field or method HasPeriod)\ninternal/hestia/store_test.go:1775:16: s.HasPeriod undefined (type *Store has no field or method HasPeriod)\ninternal/hestia/store_test.go:1799:16: s.HasPeriod undefined (type *Store has no field or method HasPeriod)\ninternal/hestia/store_test.go:1809:7: undefined: PeriodChecker\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]",
+    "red_note": "RED 因预期原因失败（`s.HasPeriod undefined` 与 `undefined: PeriodChecker`，DoD non_functional[2] 点名的两个信号），未被 imported and not used 等无关原因污染。",
+    "guard_red_output_verbatim": "--- FAIL: TestStoreExposesNoWriteMethods\n    expected: []string{\"Close\", \"DB\", \"Preceding\", \"Save\"}\n    actual  : []string{\"Close\", \"DB\", \"HasPeriod\", \"Preceding\", \"Save\"}\n--- FAIL: TestPackageExposesNoWriteFunctions\n    expected: []string{\"DefaultThresholds\", \"NewPBOCFetcher\", \"NewStore\", \"Parse\", \"Store.Close\", \"Store.DB\", \"Store.Preceding\", \"Store.Save\", \"Validate\"}\n    actual  : []string{..., \"Store.DB\", \"Store.HasPeriod\", \"Store.Preceding\", ...}\n（两条同时红 —— 与 TASK-001 只红 AST 版形成对照）",
+    "all_numbers_sampled_at": "工作树 HEAD=7576ad328ef527322bdb5830299e81a8e84654c4 + 我的三个未提交改动；本节所有数字在**最后一次改动（store.go 的 P8 说明注释）之后统一重采**",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；-race → ok；go build ./... → OK",
+    "gofmt": "gofmt -l internal/hestia/ → 无输出",
+    "vet": "go vet ./internal/hestia/ → 无输出",
+    "coverage": "整包 92.8%(go test -cover)/92.7%(go tool cover -func)；HasPeriod 100.0%。**背对背基线**（同一时刻两棵隔离树）：PRE(7576ad3)=92.7%/92.7%，POST=92.8%/92.7% ⇒ 未回退，高于 DoD 下限 92.1% 与当前水位 92.7%。",
+    "numstat": "git diff --numstat: discover.go 14/0 · store.go 36/0 · store_test.go 131/4",
+    "ablation": {
+      "harness": "/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/64844656-ea0e-444b-9aee-27e130e249e9/scratchpad/dev49-TASK-004-ablation.sh",
+      "isolation": "git archive HEAD 出隔离树，再把三个未提交文件覆盖进去（wave3 先 dev_done 后 commit，改动此刻在工作区）；主工作区一个字节不碰，收尾指纹与开跑前逐字节相同",
+      "anchor": "ARCFORGE_MUT_REF 可覆写；harness 把锚点 sha 与工作树 HEAD 打进输出",
+      "gates": "基线闸（未变异时整包全绿）+ 生效闸（diff 非空否则 INVALID）+ **编译/vet 失败闸**（不过记 INVALID 不记 KILLED）+ 语义闸（逐条打印变异 diff）+ **因果闸**（每条声明期望杀手，不在列则打「因果不符」）+ **计数自证**（变异条数 10 == 结论行数 10）",
+      "result": "10 变异：**9 KILLED、1 SURVIVED（P8，已查明为语义等价而非缺口）**；计数自证 10==10；全部 KILLED 的期望杀手均在列（因果✓）",
+      "mutations": [
+        "P1 改查 pending 表 → KILLED（已入库true / 修订后仍命中 / IgnoresPending 三条）",
+        "P2 把 pending UNION 进查询 → KILLED，**只被 TestHasPeriodIgnoresPending 一条杀死**（DoD 最要紧那条边界的干净因果）",
+        "P3 忽略 period_type（占位符个数不变，避免编译期假红）→ KILLED by period_type 不同不算命中",
+        "P4 ErrNoRows 时误报已入库 → KILLED（未入库false 等三条）",
+        "P5 %w→%v 不再包住底层错误 → KILLED by WrapsQueryError（证明 require.NotNil(errors.Unwrap) 真会红，不是 F8 那种平凡为真）",
+        "P6 查库失败时返回 true → KILLED by WrapsQueryError（我特意加的那条 assert.False 承重）",
+        "P7 错误信息丢掉 period/periodType → KILLED by WrapsQueryError",
+        "P8 【探针】改查 TableObservations → **SURVIVED**，追查后判定为语义等价（见 key_findings 第 4 条），非测试缺口",
+        "G1 M9同形·reflect 版：从期望列表删掉 HasPeriod → KILLED by TestStoreExposesNoWriteMethods",
+        "G2 M9同形·AST 版：从期望列表删掉 Store.HasPeriod → KILLED by TestPackageExposesNoWriteFunctions"
+      ],
+      "m9_note": "按 test-agent-25 纠正后的判据执行：**M9 同形（删掉本次登记项必须 KILLED）跑了两遍**（reflect 版一次、AST 版一次），双双 KILLED。**未**跑 M11（assert.Equal→Subset），因为它一定 SURVIVED、测的是守卫的元性质，与本次登记做得对不对无关，跑它不构成证据。代之以人工核对交付 diff：两处都是「追加一项、断言仍是 assert.Equal 全集合相等」，无 Subset/Contains。"
+    },
+    "human_verified_diff": "已逐字核对 store_test.go 的两处守卫改动：reflect 版 [Close,DB,Preceding,Save]→[Close,DB,HasPeriod,Preceding,Save]；AST 版九项→十项（Store.DB 与 Store.Preceding 之间插入 Store.HasPeriod）。两处 assert.Equal 原样保留，仅期望切片追加一项 + 消息里的数字随之更新。",
+    "scope_note": "改动严格落在 writes 声明的三个文件内，无越界。临时探针文件 zz_probe_p8_test.go 用完即删，已确认 git status 只剩这三个文件。"
+  },
+  "commit": "2b93ccd3916ec1cb52111da28cd2514dc9d73c37"
+}

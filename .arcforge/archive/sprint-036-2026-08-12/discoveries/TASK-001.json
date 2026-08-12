@@ -1,0 +1,78 @@
+{
+  "task": "TASK-001",
+  "title": "Fetcher 接口与绕代理的 PBOC client",
+  "by": "dev-agent-49",
+  "commit": "bf0ddf11d501c7ffe14c0d24da5aa7e7e4d2944f",
+  "branch": "task/TASK-001",
+  "base": "f5a17d5cdf8128d8307c33e213a4b6441a058ab1",
+  "key_findings": [
+    "导出面守卫实测确认 AD-036-2 的推断：新增 NewPBOCFetcher 后**只有 AST 版 TestPackageExposesNoWriteFunctions(store_test.go:406) 打红**，reflect 版 TestStoreExposesNoWriteMethods(:361) 保持绿。失败输出里 actual 只多出 NewPBOCFetcher 一项 —— Fetcher(接口类型，非 FuncDecl) 与 pbocFetcher.Get(接收者未导出，被 ast.IsExported(recv) 排除) 都不进任一守卫视野。这是实测，不是照抄推断。",
+    "reviewer 的 F4 复现：计划 Step 6 的 import 清单漏了 io。本任务在写 Step 6 用例时直接补齐，故 RED 阶段拿到的是预期信号(undefined: Fetcher / undefined: NewPBOCFetcher)，没有被 undefined: io 污染。",
+    "**计划正文的代码不是 gofmt-clean**（计划未提及）：Step 6 的 NewPBOCFetcher(5 * time.Second).Get(...) 这种「乘法表达式作为链式调用的实参」被 gofmt 收紧成 5*time.Second，五处。逐字落盘会让 DoD 的 `gofmt -l 无输出` 当场失败。已 gofmt -w 修正。这是格式层面的计划缺陷，不改变语义，故未走 blocked_clarification。",
+    "覆盖率：**逐字按计划落盘只能到 92.0%，低于 DoD 要求的 92.1% 下限**。缺口是 Get 的两条错误出口无人覆盖(fetch.go:48-50 构造请求失败、fetch.go:65-67 读响应体失败)。计划对这两条沉默而 DoD 有覆盖率硬要求 ⇒ 按 AD-036-7 补了两条用例(非放宽阈值)，fetch.go 随之到 100%。",
+    "**背对背测得的覆盖率基线**(同一时刻、同一轮、两棵隔离树)：PRE(f5a17d5)=92.1%(两个工具一致)，POST(bf0ddf1)=92.3%(go test -cover)/92.2%(go tool cover -func)。POST 的 0.1 差是真值落在 ~92.25% 上的舍入产物，PRE 无此现象。两个读数都高于 92.1% 下限。",
+    "`task/TASK-001` 分支名在开工时**已被 Sprint 035 的遗留分支占用**(234baea「加 Thresholds 与 M0 校准的默认阈值」)，git worktree add -b 直接失败。git merge-base --is-ancestor 确认该 commit 已完全并入 master(master..task/TASK-001 为空) ⇒ 用 git worktree add -B 重置到 master，零提交丢失。**此类同名遗留分支会随 Sprint 累积，需 leader 侧清理。**"
+  ],
+  "decisions": [
+    {
+      "decision": "导出面守卫按字典序登记 NewPBOCFetcher(八项→九项)，并在文件尾部补一段「为什么它不是写口」的说明",
+      "rationale": "该测试注释自己写着「新增任何导出方法都必须在这里显式登记一次，让『又开了一个写口』成为一个需要动手改测试的决定」。断言仍是**全导出面精确集合相等**，没有弱化成 assert.Contains，也没有删断言。NewPBOCFetcher 开的是「读外部 HTTP」的口，不碰数据库，没有通向 Save 的路径。"
+    },
+    {
+      "decision": "补一条「恰好等于上限被接受」的用例，与「超大响应被拒」成对",
+      "rationale": "计划只写了 +1 字节被拒那一侧。单有那一侧时，把实现写成 io.LimitReader(resp.Body, maxResponseBytes) 配 len(body) >= maxResponseBytes 仍会被它打红，但**恰好 10MB 的正常响应被误杀这个方向无人守**。DoD 的 boundary 明写「多读一个字节才能区分『恰好等于上限』与『超过上限』」——两侧都钉住才算区分。消融 M6(> 改成 >=)证明这条新用例是唯一杀死它的断言。"
+    },
+    {
+      "decision": "补两条错误出口用例(URL 非法 / 读响应体中途断流)，用 require.NotNil(t, errors.Unwrap(err)) 断言包裹",
+      "rationale": "既为补齐 92.1% 覆盖率下限，也因为这两条是 Get 仅有的另外两个错误出口，而 DoD error_handling 要求错误信息带 URL —— 不覆盖它们，这两种失败形态下「哪一页挂了」就断线。包裹断言按 AD-036-6 第 2 条用 NotNil(Unwrap(err))，不用平凡为真的 NotErrorIs(Unwrap(err), err)。"
+    },
+    {
+      "decision": "对 gofmt 差异直接修正而非走 blocked_clarification",
+      "rationale": "AD-036-7 划的界是「计划有错(编译不过/断言与实现矛盾/与 spec 冲突)走澄清」。gofmt 的空格收紧不改变任何语义、不影响任何断言，且 DoD 明写 gofmt -l 必须无输出 —— 属于计划沉默而 DoD 有要求。已在本文件申报，不是静默修正。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/fetch.go（新建，72 行）",
+    "internal/hestia/fetch_test.go（新建，147 行）",
+    "internal/hestia/store_test.go（+16/-2，导出面守卫登记）"
+  ],
+  "interfaces_exposed": [
+    "type Fetcher interface { Get(ctx context.Context, url string) ([]byte, error) } —— 窄接口，下游 T5 Discover 与 4b ingest 消费；测试可喂快照 fake 不碰网络",
+    "func NewPBOCFetcher(timeout time.Duration) Fetcher —— 构造器，Transport.Proxy 留零值直连；**唯一新增的包级导出物**",
+    "const maxResponseBytes = 10 << 20 —— 未导出，同包可见",
+    "type pbocFetcher struct{ c *http.Client } —— 未导出；fetch_test.go 的 transportOf 依赖它做类型断言，下游若改结构会打红那条"
+  ],
+  "verification": {
+    "red_output_verbatim": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/fetch_test.go:13:34: undefined: Fetcher\ninternal/hestia/fetch_test.go:31:23: undefined: NewPBOCFetcher\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]",
+    "red_note": "RED 因预期原因失败(undefined: Fetcher / undefined: NewPBOCFetcher)，未被 imported and not used 或 undefined: io 污染 —— reviewer F4 指出的 io 缺失已在写用例时补齐。",
+    "guard_red_output_verbatim": "--- FAIL: TestPackageExposesNoWriteFunctions (0.00s)\n    store_test.go:406: expected: []string{\"DefaultThresholds\", \"NewStore\", ...8 项}\n                       actual  : []string{\"DefaultThresholds\", \"NewPBOCFetcher\", \"NewStore\", ...9 项}\n（TestStoreExposesNoWriteMethods 未出现在 FAIL 列表 —— reflect 版保持绿）",
+    "all_numbers_sampled_at": "bf0ddf11d501c7ffe14c0d24da5aa7e7e4d2944f，工作树 git status --porcelain 为空；本节所有数字在最后一次改动之后**统一重采**",
+    "suite": "go test ./internal/hestia/ -count=1 → ok（整包绿，含登记后的两条守卫）；-race 同样 ok；go build ./... OK",
+    "test_case_count": "整包 478 个 PASS 行（含子测试）；本任务新增 1 个顶层 + 7 个子测试",
+    "gofmt": "gofmt -l internal/hestia/ → 无输出",
+    "vet": "go vet ./internal/hestia/ → 无输出",
+    "coverage": "整包 92.3%(go test -cover)/92.2%(go tool cover -func)，均 ≥ DoD 下限 92.1%；fetch.go 两个函数均 100.0%。基线背对背实测 PRE(f5a17d5)=92.1%。",
+    "numstat_from_commit": "git show --numstat --format= bf0ddf1 → fetch.go 72/0、fetch_test.go 147/0、store_test.go 16/2（store_test.go 的 2 处删除是被替换的 assert.Equal 期望切片与其消息行，即登记本身）",
+    "ablation": {
+      "harness": "/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/64844656-ea0e-444b-9aee-27e130e249e9/scratchpad/dev49-TASK-001-ablation.sh",
+      "isolation": "变异作用在 git archive 出的隔离树上(mktemp -d)，主工作区与我的 worktree 一个字节不碰；收尾校验 worktree 的 fetch.go sha256 与 git status --porcelain(空)",
+      "anchor": "锚点为**全 sha** bf0ddf11d501c7ffe14c0d24da5aa7e7e4d2944f，经 ARCFORGE_MUT_REF 可覆写；harness 同时打印锚点与工作树 HEAD，使「这批数字测自哪棵树」进入输出",
+      "gates": "基线闸(未变异时全绿，否则结论无意义) + 生效闸(diff 非空，替换没匹配到即 INVALID) + **编译失败闸**(go build 不过记 INVALID 不记 KILLED) + 语义闸(逐条打印变异 diff) + **计数自证**(变异条数 8 == 结论行数 8)",
+      "result": "8 变异 8 KILLED 0 SURVIVED；计数自证 8==8",
+      "mutations": [
+        "M1 Transport 改回 ProxyFromEnvironment → KILLED by TestPBOCFetcherDoesNotProxyPBOC",
+        "M2 非 200 错误去掉状态码 → KILLED，死因实测为 \"...抓取失败\" does not contain \"404\"",
+        "M3 非 200 错误去掉 URL → KILLED，死因实测为 \"hestia fetch: HTTP 404\" does not contain srv.URL",
+        "M4 改用不带 ctx 的 http.NewRequest → KILLED，死因实测为 Target error should be in err chain: expected \"context canceled\"（**不是**被 5s 超时本身打红，因果正确）",
+        "M5 LimitReader 不再多读一个字节 → KILLED by 超大响应被拒",
+        "M6 上限判定 > 改成 >= → KILLED by **恰好等于上限被接受**（本任务新增的那一侧，证明它承重）",
+        "M7 exceeds 改成别的词 → KILLED by 超大响应被拒",
+        "M8 %w 改 %v(不再包住底层错误) → KILLED，死因实测为 require.NotNil(errors.Unwrap(err)) 的 Expected value not to be nil"
+      ],
+      "causality_checked": "M2/M3/M4/M8 逐条打印了断言失败原文核对死因(见上)，不止看 FAIL 行 —— 「KILLED 但因果是错的」是历史上出现过 6 次的形态"
+    },
+    "not_done_by_design": [
+      "**未自行 transition dev_done**：worktree 隔离下 dev_done 门禁在主工作区跑 go test，测的是不含本次代码的旧树，会「成功」而一行都没被看过。按派单等 leader git merge --ff-only 后再转。"
+    ]
+  }
+}

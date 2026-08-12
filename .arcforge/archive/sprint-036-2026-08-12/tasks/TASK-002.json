@@ -1,0 +1,53 @@
+{
+  "id": "TASK-002",
+  "title": "index 快照与分页模板解析",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/discover.go",
+    "./internal/hestia/discover_test.go",
+    "./internal/hestia/testdata/pboc-index-p1.html",
+    "./internal/hestia/testdata/pboc-index-p2.html",
+    "./internal/hestia/testdata/README.md"
+  ],
+  "description": "抓存两份真实 index 页快照，实现 parsePaging（从 jumpTo 的 JS 解析分页模板与总页数）与 pageURL。对应上游计划 Task 2（Step 1-11）。本任务是 discover.go 的第一个写者，T3/T4/T5 在其之后串行接力。",
+  "done_criteria": {
+    "functional": [
+      "**抓存两份真实快照**（`index.html` 与 `11040-2.html`），**不带 User-Agent**（与生产实现一致，计划实测不带也返回 200）。\n\n⚠️ **这一步有时效性，先做** —— index 页每天都在变，报告条目会随新闻累积而下沉。\n\nLeader 在需求分析阶段已验证可达性（p1/p2 均 HTTP 200、约 38KB），**但没有代抓** —— 抓取是本任务的交付物，代抓会让「抓取日期」与交付脱节。",
+      "`parsePaging` 从 `jumpTo(this,'408','1','/goutongjiaoliu/113456/113469/11040-%1.html')` 解析出**模板**与**总页数**：模板须保留 `%1` 占位符、含栏目路径；总页数是个像样的数（实测 408）。\n\n**解析而不是写死栏目 ID 11040**：ID 变了能自动跟随。",
+      "`pageURL` 的两种形态：**第 1 页返回 `indexURL` 本身**（不套模板——实测 `index_1.html` 是 404）；第 N 页（N≥2）套模板并补全为绝对 URL。判据至少覆盖 page=1/2/408 三种。\n\n⚠️ **计划给这条的注释理由是错的，必须改写**（reviewer 实测，Leader 已亲自复验）：\n\n计划写「模板生成的 `11040-1.html` **未必存在**（实测 `index_1.html` 是 404）」——它用关于**另一个 URL** 的观察去论证。实测：\n```\n11040-1.html: HTTP 200, 38147 bytes\nindex.html:   HTTP 200, 38147 bytes\nindex_1.html: HTTP 404\ndiff 11040-1.html index.html  ⇒ 逐字节相同\n```\n**`11040-1.html` 存在、返回 200、与 `index.html` 逐字节相同。**\n\n**行为仍正确**（第 1 页复用已取回的字节 ⇒ 避免重复请求，也让 `f.calls` 的断言干净），**但理由要换成真实的那个**。\n\n⇒ 又一例「结论对、理由错」：**结论正确会让判断永不被复查，而理由是后人复现时的唯一入口**。别留一个会被后人当实测事实引用的错句。"
+    ],
+    "boundary": [
+      "**快照内容判据**：p1 应**无**报告条目（首页 15 条约覆盖 20 天，月报发布 3 周后就掉出去了 —— 这正是要测的常态），p2 应**有**报告条目。\n\nLeader 当日实测确认此分布成立（p2 含 `2026年上半年金融统计数据报告`，干扰项 `国新办…金融统计数据情况` 也在 p2）。**若你抓取时报告已下沉到第 3 页**，继续抓 `11040-3.html` 存成 p3，并把后续测试的页码相应改掉、在 README 注明。"
+    ],
+    "error_handling": [
+      "**解析不到分页控件必须报错，不得静默退化成「只扫第 1 页」**，错误信息含 `paging`。\n\n**静默退化是最坏的结果**：页面改版后 discover 每次只看 15 条最新新闻，而月报发布 3 周后就掉出这 15 条 —— **管线看起来在跑，实际再也发现不了任何东西**。\n\n判据：喂一段无分页控件的 HTML 必须返回 error。同时校验总页数可解析且 ≥1、模板含 `%1`。\n\n**另需覆盖「总页数非法」分支**（reviewer 指出：计划的实现里有这条分支、**但没有对应用例**）：总页数解析成 0、负数或非数字时同样必须报错。"
+    ],
+    "non_functional": [
+      "`testdata/README.md` 记录**两份快照各自的抓取日期与内容摘要**，并写明两点：①**为什么两份都要留**（p1 证明「本页没有报告」是常态而非异常，只留有报告的那份就测不出「翻页」这个核心行为）；②**测试断言的是「翻页直到找到」，不是「报告在第 2 页」** —— 后者会随时间失效。",
+      "**RED 阶段因预期原因失败**，实际输出原文写进 discovery：Step 5 预期 `undefined: parsePaging`。因别的原因失败的 RED 不算数；`import` 按需增补。\n\n⚠️ **reviewer 实测：计划 Step 6 给的 `discover.go` import 块多了 `\"net/url\"`**（该 Step 只实现 `parsePaging`，用不到它；`pageURL` 要到 Step 9 才出现）⇒ `discover.go:6:2: \"net/url\" imported and not used`，Step 7 的「预期两条 PASS」不成立。\n\n讽刺的是计划的 Global Constraints **逐字写了这条纪律**，但只覆盖**测试文件** —— 这次的违反发生在**实现文件**里。",
+      "`gofmt -l` 与 `go vet` 无输出；`go test ./internal/hestia/ -count=1` 整包绿；覆盖率不低于 **92.1%**。\n\n注意 `testdata/*` 是数据文件不是 Go 包 —— 它们在 `writes` 里但**不在** `packages` 里，这是刻意的（非 Go 路径进 `-coverpkg` 会弄坏覆盖率门禁）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-50",
+  "verify_baseline": {
+    "head": "0597fcaae306d299aea593957b696d69770641c4",
+    "discovery_sha256": "06a18b383ad916b7403ea418f9ee824d24a2574d615c5984491385ced792df97",
+    "at": "2026-08-12T02:06:36Z"
+  },
+  "verifier": "test-agent-25",
+  "discovery": ".arcforge/discoveries/TASK-002.json"
+}

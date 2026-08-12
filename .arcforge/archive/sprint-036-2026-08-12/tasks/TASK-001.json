@@ -1,0 +1,51 @@
+{
+  "id": "TASK-001",
+  "title": "Fetcher 接口与绕代理的 PBOC client",
+  "status": "accepted",
+  "complexity": "简单",
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/fetch.go",
+    "./internal/hestia/fetch_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "description": "新建 Fetcher 窄接口与 NewPBOCFetcher（Transport 不设 Proxy，直连央行站点）。对应上游计划 Task 1（Step 1-8）。store_test.go 在 writes 里是因为新增的包级导出函数会打红导出面守卫，须登记。",
+  "done_criteria": {
+    "functional": [
+      "`NewPBOCFetcher` 返回的 Transport **对真实 PBOC 域名不走代理**，即使环境里设了 `HTTP_PROXY`/`HTTPS_PROXY`。\n\n⚠️ **这条最容易写成无效版本**（计划已警告，判据来自实测）：\n`http.ProxyFromEnvironment` 对 **localhost 从不返回代理**——\n```\nhttp://127.0.0.1:8080/x   proxy=<nil>          ← 天然豁免\nhttp://www.pbc.gov.cn/x   proxy=http://127.0.0.1:1\n```\n⇒ 「起个 httptest server + `t.Setenv(HTTP_PROXY)` + 断言请求成功」这种写法**对代理行为零鉴别力**，用 `http.DefaultTransport` 的实现也照样绿。**必须拿真实 PBOC 域名去问 `Transport.Proxy`。**\n\n允许实现用「对 PBOC 返回 nil 的 Proxy 函数」——**测行为，不测结构**。",
+      "正常路径：`Get` 返回响应体原文，与服务端写入的字节一致。"
+    ],
+    "boundary": [
+      "响应体上限 `maxResponseBytes = 10 << 20`，**超过即报错**且信息含 `exceeds`。\n\n实现须用 `io.LimitReader(resp.Body, maxResponseBytes+1)` —— **多读一个字节**才能区分「恰好等于上限」与「超过上限」。判据：构造 `maxResponseBytes+1` 字节的响应必须被拒。"
+    ],
+    "error_handling": [
+      "非 200 报错，且错误信息**同时带状态码与 URL**。\n\n这不是凑数：`Discover` 会连续请求多页，**错误信息不带 URL 就分不清是哪一页挂了**；而 404 与 403 的处置完全不同（前者是页面没了，后者多半是被限速或代理串进来了），只说「抓取失败」看不出来。",
+      "`ctx` 取消能中断飞行中的请求，且 `errors.Is(err, context.Canceled)` 为真。\n\n实现必须走 `http.NewRequestWithContext` —— `*http.Client.Get` 本身不收 ctx，launchd 杀进程时正在飞的请求不会被取消。"
+    ],
+    "non_functional": [
+      "**新增的包级导出函数 `NewPBOCFetcher` 会打红 `store_test.go:406` 的 AST 版导出面守卫**（`TestPackageExposesNoWriteFunctions`，全导出面**精确集合相等**断言）。\n\n**处置是登记，不是放松**：按字典序加进期望切片，并在该测试注释里补一行说明本迭代为何扩大导出面。**绝不允许改成 `assert.Contains` 或删断言。**\n\n`Fetcher` 是**接口类型**，守卫只看 `FuncDecl` ⇒ 预期**不打红**——但请**实测确认**这个推断，别照抄。（Sprint 035 实证：包级函数只打红 AST 版，`*Store` 方法两条都打红。）\n\n⚠️ **独立 reviewer 实测：本任务的 `go test ./internal/hestia/`（Step 7，计划写「预期全绿」）就会撞上守卫** —— 它是 T1–T7 中第一个撞上的。计划全文**零处**提及导出面守卫，而 8 处「预期整包绿」中，**T1 Step 7 之后每一处都是假的**。别怀疑自己的实现。",
+      "**RED 阶段必须因预期原因失败**，实际输出原文（不是「符合预期」四字）写进 discovery 的 `verification`：Step 2 预期 `undefined: Fetcher` / `undefined: NewPBOCFetcher`。\n\n因**别的原因**失败（如 `imported and not used`）的 RED **不算数**。`import` 按需增补——每个 Step 只写该 Step 真正用到的。\n\n⚠️ **reviewer 实测：计划 Step 6 的 import 清单漏了 `io`**（「超大响应被拒」用例调 `io.Copy`）⇒ `fetch_test.go:81:11: undefined: io`。计划全文有**三处** import 清单错误，这是其一。\n\n⇒ **RED 阶段看到 `imported and not used` 或 `undefined: io` 时，那不是有效的 RED** —— 预期的失败信号是 `undefined: Fetcher` / `undefined: NewPBOCFetcher`。补齐 import 后重跑。",
+      "`gofmt -l internal/hestia/` 与 `go vet ./internal/hestia/` 无输出；`go test ./internal/hestia/ -count=1` 整包绿；覆盖率不低于 **92.1%**（本包当前水位）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-12T09:48:17Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-agent-49",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "cfcbdbb668496da25a6a8dd7cca012258e1d23e7",
+    "discovery_sha256": "5d74c7ca8f0d6a6b78e71786aba49bb5a671cea32f5e5673ec437824ccd8c661",
+    "at": "2026-08-12T01:55:40Z"
+  },
+  "verifier": "test-agent-25"
+}

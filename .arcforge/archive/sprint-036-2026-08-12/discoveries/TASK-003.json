@@ -1,0 +1,94 @@
+{
+  "task": "TASK-003",
+  "title": "标题正则、期次映射与条目提取",
+  "by": "dev-agent-50",
+  "base": "0597fcaae306d299aea593957b696d69770641c4",
+  "branch": "master（wave2 主工作区直连，无 worktree／无 task 分支）",
+  "commit": "7576ad328ef527322bdb5830299e81a8e84654c4",
+  "key_findings": [
+    "**「报告」二字是一段没人守着的代码，且功劳被记错了**（消融 M6 发现，非读代码读出的）。计划与 DoD 都写「实现靠『金融统计数据报告』六个字必须紧跟期次段挡住干扰项」。把正则末尾的「报告」删掉后**没有任何测试变红**。实测原因：干扰项 `国新办…介绍2026年上半年货币政策执行和金融统计数据情况` 之所以被拒，是因为「上半年」后面接的是「货币政策执行和」而不是「金融统计数据」——**挡它的自始至终是「紧跟」这个结构，不是「报告」二字**。「报告」真正挡的是 `2026年7月金融统计数据情况` / `2026年上半年金融统计数据简报` 这一类（期次段确实紧跟「金融统计数据」，只是后缀不对），而这一类**原本一条用例都没有**。⇒ 补了两条 reject 用例，M6 随即被杀。正则里两个独立机制的分工已写进 discover.go 注释。",
+    "**「报错时不得返回部分结果」这条断言，写了却没守住**（消融 M12 发现）。`TestScanPageFailsOnUnresolvableURL` 里明明白白写着 `assert.Nil(t, got, \"报错时不得返回部分结果\")`，但把 `return nil, err` 改成 `return out, err` 后它**照样 PASS**：该用例的场景是 base 坏，p2 里第一条报告就失败，那一刻 `out` 本来就是 nil，两种写法**返回值完全相同**。要区分必须「先成功收集若干条、再让后面某条失败」，于是补 `TestScanPageReturnsNoPartialResultOnError`（合成页面，第二条链接的 href 塞控制字符）。⇒ **这是 harness 的「理由不符」检查报出来的**：M12 第二轮显示 KILLED 但杀手是新用例而非旧用例；只看 KILLED 不看因果，就会以为旧断言一直有效。",
+    "**`tagRE` 在两份真实快照上是空操作，计划的理由不成立**。计划注释写「列表页的标题常被 <span> 之类包着」——实测两份快照共 30 条链接，文本全都紧跟在 `>` 之后，不含任何内联标签（`>2026年上半年金融统计数据报告</a>`）。⇒ 删掉 tagRE，所有基于快照的测试照样绿。保留它是**防御性**的（央行改版加一层 <span> 就会解析失败），故补 `TestScanPageStripsInlineTags` 用合成页面钉住（消融 M9 由它杀死）。注释已改成诚实版本。",
+    "**`parsePeriod` 里 `err != nil` 那一支当前不可达 —— 与 TASK-002 中同形状的分支结论相反**。实测：Go 的 `\\d` 只匹配 ASCII 0-9（全角「１２」、阿拉伯-印度「٣」、数学粗体「𝟛」全都不匹配，正则直接不匹配整个标题），加上 `{1,2}` 的长度上限，TrimSuffix 后必是 1-2 位 ASCII 数字 ⇒ `strconv.Atoi` 必成功。而 TASK-002 的 `parsePaging` 里同形状的 `err != nil` **是可达的**，因为那里的 `\\d+` **没有长度上限**，超长数字串会让 Atoi 溢出。**同一个代码形状，两处相反的结论，差别只在正则有没有长度上限。** 保留该分支（正则一旦放宽长度上限就立刻可达），注释已写明当前不可达，**不为它编造用例**。",
+    "**p2 只有 1 条报告条目 ⇒ 「返回整页全部候选」这个性质用真实快照测不出来**。一个「找到第一条就 break」的实现能让全部基于快照的断言照样绿，包括那条「遍历每一条」的字段断言（只有一条可遍历）。补 `TestScanPageReturnsEveryReportOnPage`（合成页面：年报 + 干扰项 + 同月月报，断言恰好收 2 条）。不是假想风险——Discover(T5) 要靠 scanPage 返回整页候选决定是否继续翻页，而央行每年 1 月同时发年报与 12 月月报，正是同页两条的形态；它们 period 同为 YYYY-12 但 period_type 不同，是两个不同的业务键。",
+    "**`resolveURL` 的抽取改变了 `pageURL` 的错误串，我在 TASK-002 补的两条断言因此需要更新**（已申报，详见 decisions）。`bad index url`→`bad base url`、`bad paging template`→`bad url`。DoD non_functional[0] 点名必须仍绿的 `TestPageURL` **确实仍绿**（行为未变）；红的只有我自己后加的错误串断言，且两条 `errors.Unwrap` 断言**当时没有红** ⇒ 重构没碰包裹性质。",
+    "**reviewer 关于 `articleLinkRE` 的实测已被固化成断言**。它手工验过「两页各恰好命中 15 条 = 每页条目数，干扰项就在 p2 的命中列表里」。我把它写成 `TestScanPageFiltersRatherThanMisses`：断言每页 15 条 + 干扰项确实在命中列表里 + parsePeriod 拒绝它。理由是**手工实测保不住将来**——消融 M10（把 `\\d{14,}` 放宽成 `\\d+`）正是被这条杀死的，而在写成断言之前，那个变异不会让任何测试变红。",
+    "**导出面守卫两条如 DoD 预期未打红，已实测确认**。`Candidate` 是结构体类型（AST 版守卫只收 `*ast.FuncDecl`），`parsePeriod`/`scanPage`/`resolveURL` 全部不导出 ⇒ `writes` 不含 `store_test.go` 是对的。"
+  ],
+  "decisions": [
+    {
+      "decision": "照计划抽出 resolveURL，并**更新** TASK-002 里两条错误串断言（`bad index url`→`bad base url`、`bad paging template`→`bad url`）",
+      "rationale": "DoD non_functional[0] 明文要求这次抽取。**这不是放松断言**：断言精度未变（仍是各自不同的确定串），两条 `errors.Unwrap(err) != nil` 一字未动且重构时没红（证明包裹性质没被碰），并且**净增了一条** `assert.NotContains(err, \"bad base url\")` —— 因为「bad url 不是 bad base url 的子串」只是串的偶然形状在替断言把关，谁把 base 那句改成「bad url (base)」两条就会同时绿。现在「两支必须可分」是被断言的性质。一处信息变化已记进注释：`bad url` 打印的是代入页码后的 ref 而非模板原文，排障时前者更有用，但『它来自模板』这个归因需看上下文。"
+    },
+    {
+      "decision": "补三条计划没有的测试：ReturnsEveryReportOnPage、StripsInlineTags、ReturnsNoPartialResultOnError，全部用**合成页面**",
+      "rationale": "三条对应三个真实快照测不出来的性质（p2 只有 1 条报告 ⇒ 测不出「返回全部」；快照标题无内联标签 ⇒ 测不出 tagRE 做功；第一条就失败 ⇒ 测不出「不返回部分结果」）。都是硬要求 3「有没有一个我想排除的实现能让这条断言照样绿」问出来的，且各自被消融 M8/M9/M12 证实承重。用合成页面不是偷懒：这些性质**本质上**需要真实快照不具备的形态。"
+    },
+    {
+      "decision": "补两条 reject 用例（`2026年7月金融统计数据情况`、`2026年上半年金融统计数据简报`）守住正则末尾的「报告」",
+      "rationale": "消融 M6 存活暴露它无守卫。更要紧的是**它顺带纠正了一处错误归因**：DoD 与计划都把干扰项被拒记在「报告」六个字上，实测那是「紧跟」的功劳。若不补这两条，将来有人为了兼容别的标题格式去掉「报告」，测试全绿而 `…金融统计数据情况` 这类会被当成报告收录。"
+    },
+    {
+      "decision": "保留 parsePeriod 里当前不可达的 `err != nil` 分支，注释写明不可达，**不为它编造用例**",
+      "rationale": "写不出能触达它的输入（正则的 `\\d{1,2}` 挡死了），硬编一个「看起来在测它」的用例只会制造假守卫。保留代码本身是因为正则一旦放宽长度上限它立刻可达——TASK-002 的 parsePaging 就是那个形态。**诚实记录一个已知的、写不出用例的分支，好过假装它被测了。**"
+    },
+    {
+      "decision": "消融跑在 `git worktree add --detach` 的隔离树上，而不是就地变异",
+      "rationale": "wave2 按 Leader 指示在主工作区直连开发、改动未提交，而主工作区是所有 agent 共享的。就地变异会让并发 agent 读到变异态、拿到与自己改动无关的假红。隔离树用可覆写锚点（ARCFORGE_T3_DEP_REF，默认全 sha 0597fcaa…）而非 HEAD/分支名，并把锚点与主工作区 HEAD 一起打进输出。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/discover.go（+127/-6；新增 reportTitleRE/parsePeriod/articleLinkRE/tagRE/Candidate/scanPage/resolveURL，重构 pageURL）",
+    "internal/hestia/discover_test.go（+262/-2；新增 8 个顶层测试，更新 2 条错误串断言）"
+  ],
+  "interfaces_exposed": [
+    "type Candidate struct{ ArticleID, URL, Title, Period, PeriodType string } —— **导出结构体**，但不进导出面守卫（守卫只看 FuncDecl），实测两条守卫未红。index 页上一条待抓的报告，Discover 只产出它、不抓文章页。",
+    "func parsePeriod(title string) (period, periodType string, ok bool) —— 包内未导出。四种映射：`YYYY年上半年…`→(YYYY-06,h1)、`YYYY年N月…`→(YYYY-0N,monthly)、`YYYY年…`→(YYYY-12,annual)。与 types.go 的 periodEndMonth 一致，不新增第二份期末月约定。非报告标题与非法月份（0/13）返回 ok=false。",
+    "func scanPage(html []byte, base string) ([]Candidate, error) —— 包内未导出。提取整页**全部**报告条目，非报告的链接安静跳过（一页 15 条通常只有 0～1 条是报告），但 **URL 补全失败必须报错且不返回部分结果**。T5 的 Discover 靠它的返回值决定是否继续翻页。",
+    "func resolveURL(base, ref string) (string, error) —— 包内未导出，从 pageURL 抽出供 scanPage 复用。两条错误出口 `bad base url` / `bad url`，均以 %w 包住底层 url.Parse 错误，**两串必须保持可分**（有断言守着）。",
+    "var articleLinkRE / tagRE / reportTitleRE —— 包级正则。articleLinkRE 在两份快照上各恰好命中 15 条；栏目路径与 article_id 位数都不写死。"
+  ],
+  "verification": {
+    "all_numbers_sampled_at": "数字采于改动未提交时（工作树 HEAD=0597fcaa…），提交后以 git show --numstat 7576ad32 复核，**逐字一致**（127/6、262/2）。本节所有数字在最后一次改动之后统一重采。",
+    "red_output_verbatim_1": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/discover_test.go:187:17: undefined: parsePeriod\ninternal/hestia/discover_test.go:211:16: undefined: parsePeriod\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_output_verbatim_2": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/discover_test.go:231:15: undefined: scanPage\ninternal/hestia/discover_test.go:237:15: undefined: scanPage\ninternal/hestia/discover_test.go:260:15: undefined: scanPage\ninternal/hestia/discover_test.go:284:10: undefined: articleLinkRE\ninternal/hestia/discover_test.go:291:20: undefined: articleLinkRE\ninternal/hestia/discover_test.go:292:45: undefined: tagRE\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL",
+    "red_note": "两次 RED 均因预期原因失败（undefined: parsePeriod / undefined: scanPage，后者连带我新增用例引用的 articleLinkRE、tagRE），**未被 imported and not used 污染**。本任务实现侧未新增任何 import（fmt/net/url/regexp/strconv/strings 已齐），测试侧只加了 strings。",
+    "refactor_red_verbatim": "重构 pageURL 后 TASK-002 的错误串断言按预期变红，死因原文：\n\"hestia discover: bad base url \\\"://nope\\\": parse \\\"://nope\\\": missing protocol scheme\" does not contain \"bad index url\"\n\"hestia discover: bad url \\\"/a/b-2\\\\x7f.html\\\": parse ...: net/url: invalid control character in URL\" does not contain \"bad paging template\"\n⇒ 死因纯粹是错误串变化；两条 errors.Unwrap 断言**没有红** ⇒ 重构未碰包裹性质。TestPageURL（DoD 点名的那条）全程绿。",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；-race → ok；go build ./... → 无输出",
+    "coverage": "整包 92.7%（≥ DoD 门槛 92.1%，也 ≥ Leader 给的当前水位 92.5%）。discover.go 五个函数 **全部 100.0%**（parsePaging/pageURL/resolveURL/parsePeriod/scanPage）。",
+    "test_case_count": "整包 250 个 PASS 行（含子测试），TASK-002 交付时是 236 ⇒ 净增 14。本任务新增 8 个顶层测试。",
+    "gofmt": "gofmt -l internal/hestia/ → 无输出",
+    "vet": "go vet ./internal/hestia/ → 无输出",
+    "export_guards": "TestStoreExposesNoWriteMethods 与 TestPackageExposesNoWriteFunctions 均 PASS —— Candidate 是结构体，AST 守卫只收 FuncDecl，如 DoD 预期未打红，无需登记。",
+    "no_existing_assertion_relaxed": "本次**有 8 行删除**（与 TASK-002 的零删除不同），已逐行核实，无一是放松断言：\n· discover.go -6：全部是 pageURL 里被 resolveURL 取代的实现行（2 次 url.Parse、2 条错误构造、1 行 ResolveReference、1 行注释）。等价物现在在 resolveURL 里，这正是 DoD non_functional[0] 要求的抽取；行为不变由 TestPageURL 全绿证明。\n· discover_test.go -2：正是那两条错误串 Contains 断言，被替换成新串的版本，且**净增一条** assert.NotContains ⇒ 断言数量与精度都没降。\n· 未修改本包任何其他既有文件。",
+    "numstat_uncommitted": "git diff --numstat → internal/hestia/discover.go 127/6、internal/hestia/discover_test.go 262/2（改动尚未提交，故取自工作树；提交后应以 git show --numstat 复核，两者应一致）",
+    "ablation": {
+      "harness": "/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/64844656-ea0e-444b-9aee-27e130e249e9/scratchpad/dev50-t3-ablate.sh",
+      "diff_log": "同目录 dev50-t3-ablate-diffs.txt（12 个变异的完整 diff，已逐条核对语义）",
+      "anchor": "隔离树锚点为**全 sha** 0597fcaae306d299aea593957b696d69770641c4，经 ARCFORGE_T3_DEP_REF 可覆写；harness 同时打印锚点与主工作区 HEAD，使「这批数字测自哪棵树」进入输出。",
+      "isolation": "git worktree add --detach 出独立树，拷入两个**未提交**文件后在其中变异；主工作区 discover.go/discover_test.go 的 sha256 在**每个变异窗口内**校验一次、收尾再校验一次，全程未变；收尾 worktree remove --force + prune。",
+      "gates": "基线闸（隔离树未变异时整包必须绿，否则终止）+ 有效性闸-差异（变异后 sha256 必须变）+ **有效性闸-编译**（go test -run '^$' 必须过）+ 语义闸（每个变异 diff 落盘并逐条核对）+ 主工作区指纹闸 + **计数自证**（12 == 12）",
+      "result": "12 变异 / 12 KILLED / 0 SURVIVED / 0 理由不符；计数自证 12 == 12",
+      "iterations": "**跑了三轮，前两轮都 FAIL，两处真问题都是闸报出来的**：\n· 第 1 轮：M7/M12 因 perl 表达式缩进层数写错（3 tab 实为 2 tab）被差异闸拦下，计数自证 12 != 10 判 FAIL；**闸没把它们记成 SURVIVED**。同轮 M6 真 SURVIVED ⇒ 发现「报告」二字无守卫。\n· 第 2 轮：M6 已被新用例杀死；M12 转为 KILLED 但被**「理由不符」检查**逮住——杀它的是新补的 ReturnsNoPartialResultOnError，而不是名字上像在守这件事的 FailsOnUnresolvableURL ⇒ 证明旧断言从头到尾没守住它。\n· 第 3 轮：12/12 全绿。",
+      "mutations": [
+        "M1 期次段改成必填（去掉 ?）→ KILLED by TestParsePeriod/2025年金融统计数据报告 —— DoD boundary[0] 最核心的一条，年报会被静默跳过",
+        "M2 去掉月份上界 n > 12 → KILLED **仅**by TestParsePeriodRejects/2026年13月金融统计数据报告",
+        "M3 去掉月份下界 n < 1 → KILLED **仅**by TestParsePeriodRejects/2026年0月金融统计数据报告（这一侧是我补的，计划只有 13月）",
+        "M4 h1 期末月 06→07（背离 periodEndMonth）→ KILLED by TestParsePeriod/上半年",
+        "M5 annual 期末月 12→01 → KILLED by TestParsePeriod/2025年",
+        "M6 正则去掉「报告」锚定 → **第 1 轮 SURVIVED**，补两条 reject 用例后 KILLED by …/2026年7月金融统计数据情况 + …/上半年金融统计数据简报。见 key_findings 第 1 条",
+        "M7 URL 补全失败改成 continue（静默跳过）→ KILLED by TestScanPageFailsOnUnresolvableURL + ReturnsNoPartialResultOnError",
+        "M8 scanPage 找到第一条就 break → KILLED by TestScanPageReturnsEveryReportOnPage（合成页面，真实快照测不出）",
+        "M9 去掉 tagRE 剥标签 → KILLED **仅**by TestScanPageStripsInlineTags（合成页面；真实快照上 tagRE 是空操作）",
+        "M10 articleLinkRE 的 \\d{14,} 放宽成 \\d+ → KILLED by TestScanPageFiltersRatherThanMisses 两页各 15 条那条断言",
+        "M11 resolveURL 两处 %w 改 %v → KILLED by TestPageURLRejectsUnparsableInput 两个子测试 + TestScanPageFailsOnUnresolvableURL",
+        "M12 报错时返回已收集的部分结果 → **第 2 轮以错误理由 KILLED**（被「理由不符」检查逮住），补 ReturnsNoPartialResultOnError 后由它 KILLED。见 key_findings 第 2 条"
+      ],
+      "semantic_gate_checked": "12 个变异的 diff 已逐条核对：每处只动目标那一行/那一段，无漏写续行、无误伤相邻代码。"
+    },
+    "not_done_by_design": [
+      "**parsePeriod 的 `err != nil` 分支没有对应用例**，因为写不出能触达它的输入（正则 `\\d{1,2}` 挡死）。这是有意的空缺而非遗漏，理由见 decisions；编一个「看起来在测它」的用例只会制造假守卫。"
+    ],
+    "numstat_from_commit": "git show --numstat 7576ad328ef527322bdb5830299e81a8e84654c4 → internal/hestia/discover.go 127/6、internal/hestia/discover_test.go 262/2（与交付物同源）"
+  }
+}
