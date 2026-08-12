@@ -1,0 +1,71 @@
+# hestia — 央行《金融统计数据报告》抓取与校验
+#
+# 独立文件、独立装载器（internal/hestia/config.go），不并进 internal/config 的大
+# Config：方案报告 5.3.1 的「单一读者原则」——这个文件只有 Atlas 读，Loom 从契约
+# JSON 的 thresholds 段取值。
+#
+# ⚠️ 改这个文件**不需要重新编译**：hestia 每次唤起都重读它。
+#    改完请同步递增 config_version，否则「这期用的是哪版配置」在契约里查不出来。
+
+# 不参与任何逻辑，只让「这期用的是哪版配置」一眼可见（方案报告 5.3.2）。
+# 手工递增，用日期串。
+config_version: "2026-08-13"
+
+storage:
+  # 相对路径，按进程 cwd 解析（约束 C8）。plist 的 WorkingDirectory 已指向 runtime；
+  # 手工执行时需自行 cd，否则会在错误的 cwd 下静默指向一个不存在的库然后报告「0 期」。
+  # `atlas hestia status` 会打印解析后的绝对路径，就是为了让这种情况当场可见。
+  db_path: data/hestia.db
+
+discover:
+  # 央行「沟通交流 > 新闻发布」栏目。栏目 ID 不写死在代码里（分页模板从页面解析），
+  # 但入口 URL 必须给。
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+
+  # 每页 15 条、约覆盖 20 天，而报告每月 10–15 日发布 ⇒ 发布约 3 周后掉出第 1 页。
+  # 3 页 ≈ 60 天窗口，足以覆盖「连着两天没跑起来」这类中断。
+  #
+  # ⚠️ 空库首跑会一路翻满 3 页（spec §4.3 定义的行为，不是缺陷）；`--force` 同样
+  # 会翻满——那是 --force 的语义。调大它会线性增加首跑与 --force 的请求数。
+  max_pages: 3
+
+  # 单次 HTTP 请求上限。央行站点实测响应在秒级；30s 宽到不会误伤慢响应，
+  # 又不会让一次卡死把 launchd 的这一轮拖到下一轮唤起。
+  timeout: 30s
+
+# 七道闸门的阈值。**每个数字都标出处**——没有出处的阈值等于没有阈值，
+# 下一个人既不敢调也不知道调了会怎样。
+thresholds:
+  # 存款分项加总残差占比上限。
+  # M0 三期真实数据实测：7.65% / 8.57% / 9.06%。
+  # 0.12 而不是方案报告初稿的 0.02：央行报告里的「其中」是**部分列举**而非穷尽，
+  # 四个部门加起来本就不等于总额，±2% 会让每一期都被拦下。
+  deposit_sum_tolerance: 0.12
+
+  # 本期残差与前几期残差均值的偏离上限。
+  # ±12% 宽到几乎拦不住东西（实测 7.6–9.1%，余量仅 3pct），**漂移检测才是这道闸的
+  # 实际价值**：口径突变会让残差跳档，而绝对值仍在容差内。
+  deposit_sum_drift_max: 0.03
+
+  # 「短期+中长期+票据 vs 企业合计」的残差占比上限。M0 三期实测 1.16% / 1.42% / 1.58%。
+  corp_loan_tolerance: 0.05
+
+  # 社融存量环比变化率上限。
+  # ⚠️ **未经真实数据验证**——M0 的两份样本里只有一份含社融，算不出环比。
+  #    M1c 回填出连续序列后必须重新标定。在那之前它是一个占位数，不是一个结论。
+  stock_continuity_max: 0.02
+
+  # 同比字段绝对值上限（百分数）。M0 实测最大 25%，50 留一倍余量。
+  yoy_sanity_max: 50
+
+  # magnitude_ranges 与 caliber_exemptions **有意不写**：
+  #
+  #   - magnitude_ranges：区间必须用 M1c 回填数据的实际分布标定，不得拍脑袋
+  #     （deposit_sum_tolerance 的 ±2% 就是拍脑袋的代价）。表为空时
+  #     magnitude_sanity 记 skipped{not_calibrated}，填表即生效、无需改代码。
+  #
+  #   - caliber_exemptions：当前没有任何期次需要豁免。
+  #     ⚠️ 将来要加时，**每条都必须写 period_types**（显式列出适用的 period_type）——
+  #     留空不等于「全部」，Thresholds.validate 会直接拒；同月的 annual 与 monthly
+  #     是两条独立序列。同时 version 必须在 validCaliberVersions 内、reason 必须写清
+  #     为什么、skip_checks 不得覆盖全部闸门、且不得含 completeness。

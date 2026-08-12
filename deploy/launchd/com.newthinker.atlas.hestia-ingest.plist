@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.hestia-ingest</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/bin/atlas</string>
+    <string>hestia</string>
+    <string>ingest</string>
+    <string>--hestia-config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/hestia.yaml</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <!-- ⚠️ 这里**只有 PATH，一个代理键都没有**，而且这是本文件最容易被改错的一处。
+
+       hestia 直连央行：internal/hestia/fetch.go 的 NewPBOCFetcher 显式给 http.Client
+       配了 `Transport: &http.Transport{}`（Proxy 留零值）来绕开进程级代理，理由写在
+       那里 —— **代理未必在跑**（launchd 唤起时若 clash 没启动，走代理会连接失败，
+       而直连本来能成），且境内站点绕境外代理本就是多余的一跳。
+
+       在这里设任何 *_proxy / *_PROXY 都不会影响那个 client（它不读环境变量），
+       但会**误导下一个人**以为 hestia 走代理，并在别处照此推理。
+
+       🔴 **别拿 crisis / refresh-cnhk / prism-daily 的 plist 当模板** —— 它们都设了
+       代理键，而三个模板里 no_proxy 的位置还不一样（crisis-* 里它被 PATH 和一段注释
+       与那两对隔开；refresh-cnhk / prism-daily 里三者相邻）⇒ 「照抄再删那两对」在前者
+       会漏删、在后者会删过头。**本文件抄的是 com.newthinker.atlas.analysis.plist**，
+       它是唯一一份本来就没有任何代理键的。
+       守卫：cmd/atlas/hestia_test.go 的 TestHestiaPlistSetsNoProxyKeys。 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- 三时点唤起（本地 +0800）。央行《金融统计数据报告》每月 10–15 日发布，
+       实测样本的 PubDate 落在 13–15 日（2026-01-15 年报 / 2026-04-13 一季度 /
+       2026-07-15 上半年 / 2025-10-15 前三季度），发布时刻多在下午。
+
+       16:20 覆盖当天下午发布；19:20 兜住晚发；次日 09:20 是最后一道兜底
+       ——任何一次唤起漏了，最多 14 小时内会被下一次捡起来。
+
+       ⚠️ 分钟取 :20 是**为了避开既有任务**，不是随手写的：07:30 crisis-daily、
+       08:00 refresh-us、08:30 prism-daily、20:00 refresh-cnhk、22:45/23:45 crisis-daily
+       都已占用整点/半点。改时间前先看一眼 deploy/launchd/ 里其它 plist。
+
+       ⚠️ **一天三次都空跑是常态，不是浪费**：一个月里只有 1–2 天真的有新报告，
+       其余每次唤起都会在 Discover 那里命中已见过的文章然后停（打印
+       `no new reports (stopped: seen_article)`）。真正要担心的是反过来
+       ——`stopped: max_pages` 意味着窗口外可能还有没发现的期次。 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>20</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>20</integer></dict>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>20</integer></dict>
+  </array>
+
+  <!-- 加载时不立即跑：装服务不该顺带触发一轮抓取。 -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/hestia-ingest.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/hestia-ingest.err.log</string>
+</dict>
+</plist>

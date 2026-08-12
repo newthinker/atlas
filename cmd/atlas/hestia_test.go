@@ -12,15 +12,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/hestia"
 )
 
 // 命令挂在 rootCmd 下，两个子命令挂在 hestia 下。
@@ -220,4 +225,175 @@ discover:
 	// 它必须真的打出计数（两者都表现为「0 期」，而那正是要被区分开的东西）。
 	assert.Contains(t, out.String(), "observations: 0")
 	assert.Contains(t, out.String(), "pending: 0")
+}
+
+// ── T7 / TASK-009：真实配置与 plist 的守卫 ──────────────────────────────────
+
+// 真实的 configs/hestia.yaml 必须能被 LoadConfig 装载成功（reviewer D3）。
+//
+// 先例：crisis_test.go 也读真实的 ../../configs/crisis-monitor.yaml。
+//
+// ⚠️ **不加这条的话，「这份配置本身能不能装载」的唯一验证是手工验收** —— 而手工
+// 验收被刻意排除在 DoD 之外，等于没有自动守卫。配置写错的后果不是编译失败，是
+// launchd 每天三次静默空跑、退出码却可能看起来正常。
+//
+// 🔴 它**隐含要求这份配置能过 `Config.validate()` 的每一条**，其中两条最容易漏：
+//   - `storage.db_path` 必填非空（TASK-002 新加）
+//   - `caliber_exemptions` 若出现则每条都必须写 `period_types`（留空不等于「全部」）
+//
+// 漏了 `storage` 段时本条**会红，但红的理由指向 db_path**，而不是它想测的东西 ——
+// 所以下面把 validate 关心的字段逐个断言出来，让「哪一条没写对」一眼可见。
+func TestRealHestiaConfigLoads(t *testing.T) {
+	cfg, err := hestia.LoadConfig("../../configs/hestia.yaml")
+	require.NoError(t, err, "真实配置必须能装载：它是 launchd 每天三次唤起时读的那一份")
+
+	assert.NotEmpty(t, cfg.ConfigVersion, "config_version 要写，否则契约里查不出用的哪版配置")
+	assert.NotEmpty(t, cfg.Storage.DBPath, "storage.db_path 必填（validate 的第一条）")
+	assert.NotEmpty(t, cfg.Discover.IndexURL)
+	assert.GreaterOrEqual(t, cfg.Discover.MaxPages, 1)
+	assert.Positive(t, cfg.Discover.Timeout)
+
+	// 五个阈值都必须 > 0：validate 的第二道防线挡的是「显式写 0」，
+	// 而 0 容差会让每一期都超差进 pending —— 与漏写的后果完全一样。
+	assert.Positive(t, cfg.Thresholds.DepositSumTolerance)
+	assert.Positive(t, cfg.Thresholds.DepositSumDriftMax)
+	assert.Positive(t, cfg.Thresholds.CorpLoanTolerance)
+	assert.Positive(t, cfg.Thresholds.StockContinuityMax)
+	assert.Positive(t, cfg.Thresholds.YoYSanityMax)
+}
+
+// plistEnvKeys 解析 plist 里 EnvironmentVariables 那个 dict 的**键名**。
+//
+// 用 encoding/xml 逐 token 扫，**不是子串匹配**：DoD 要求精确断言。子串匹配分不出
+// 「键是 http_proxy」与「注释里提到 http_proxy」—— 而本文件的 plist 注释里恰恰
+// 大段讨论了代理键，子串匹配会当场误报。
+func plistEnvKeys(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+
+	dec := xml.NewDecoder(f)
+	var (
+		lastKey  string   // 最近一个 <key> 的文本
+		inEnv    bool     // 已进入 EnvironmentVariables 的 dict
+		depth    int      // 相对该 dict 的嵌套深度
+		keys     []string //
+		wantDict bool     // 刚读到 EnvironmentVariables 这个键，下一个 <dict> 就是它
+	)
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t2 := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case inEnv && t2.Name.Local == "dict":
+				depth++
+			case wantDict && t2.Name.Local == "dict":
+				inEnv, wantDict, depth = true, false, 0
+			}
+		case xml.CharData:
+			lastKey = string(t2)
+		case xml.EndElement:
+			switch {
+			case t2.Name.Local == "key" && inEnv && depth == 0:
+				keys = append(keys, lastKey)
+			case t2.Name.Local == "key" && lastKey == "EnvironmentVariables":
+				wantDict = true
+			case t2.Name.Local == "dict" && inEnv:
+				if depth == 0 {
+					inEnv = false
+				}
+				depth--
+			}
+		}
+	}
+	return keys
+}
+
+// 🔴 hestia 的 plist **一个代理键都不设**（约束 C6 的正解）。
+//
+// hestia 直连央行：`NewPBOCFetcher` 给 http.Client 配了空 Transport 来绕开进程级
+// 代理，理由是「代理未必在跑」——launchd 唤起时若 clash 没启动，走代理会连接失败，
+// 而直连本来能成。
+//
+// ⚠️ **断言是「不存在任何 `*_proxy` / `*_PROXY` 键」，不是枚举四个名字**（reviewer C3）。
+// 计划给的实现只枚举 `http_proxy/https_proxy/HTTP_PROXY/HTTPS_PROXY`，而 crisis 的
+// plist 里还有一个 `no_proxy` ⇒ 照抄再删那两对，`no_proxy` 留下、测试全绿，而
+// 「一个代理键都不设」这句话是假的。
+//
+// 更要紧的是**位置也靠不住**（本任务实测）：`no_proxy` 在 `crisis-daily` /
+// `crisis-intraday-jpy` 里被 `PATH` 和一段注释与那两对隔开，在 `refresh-cnhk` /
+// `prism-daily` 里却与它们相邻 ⇒ 任何位置性或枚举性的判据都不可靠，只能按**后缀**判。
+//
+// ⚠️ **否定式断言在空集上平凡为真**（Sprint 036 G9）：解析失败返回空切片时，
+// 「不含代理键」照样通过。下面 require.NotEmpty + 断言 PATH 在场，就是那条**肯定式
+// 锚点**，与否定式那条**互补，不是重复** —— 删掉任一条都会开一个缺口。
+func TestHestiaPlistSetsNoProxyKeys(t *testing.T) {
+	const plistPath = "../../deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
+	keys := plistEnvKeys(t, plistPath)
+
+	// 肯定式锚点：解析真的产出了东西，且是我们要的那个 dict。
+	require.NotEmpty(t, keys, "前置锚点：解析不出任何环境变量键时，下面的否定式断言平凡为真")
+	assert.Contains(t, keys, "PATH", "PATH 必须在 —— 它也证明我们解析的确实是那个 dict")
+
+	// 否定式：按后缀判，不枚举名字。
+	for _, k := range keys {
+		lower := strings.ToLower(k)
+		assert.NotContainsf(t, lower, "proxy",
+			"plist 不得设任何代理键，实测到 %q；hestia 直连央行（NewPBOCFetcher 用空 Transport 绕开代理）", k)
+	}
+
+	// 🔴 **阳性对照：证明这个解析器真的看得见代理键。**
+	//
+	// 上面那圈断言在一个「恒返回 []string{"PATH"} 的坏解析器」上**同样全绿** ——
+	// 前置锚点挡得住空集，挡不住「解析出了东西但漏掉了代理键」。所以这里拿一份
+	// **真的设了代理键**的 plist 跑同一个解析器：它必须报出来。
+	//
+	// 用 crisis-daily 而不是合成 XML：合成的只证明解析器能处理我写的那种形状，
+	// 真实文件才证明它能处理**仓库里实际存在**的那种（含注释、含 PATH 夹在中间）。
+	t.Run("阳性对照：解析器在真的有代理键时必须报出来", func(t *testing.T) {
+		crisis := plistEnvKeys(t, "../../deploy/launchd/com.newthinker.atlas.crisis-daily.plist")
+		require.NotEmpty(t, crisis)
+
+		var proxies []string
+		for _, k := range crisis {
+			if strings.Contains(strings.ToLower(k), "proxy") {
+				proxies = append(proxies, k)
+			}
+		}
+		assert.NotEmpty(t, proxies,
+			"crisis-daily 确实设了代理键；这里报不出来说明上面那圈否定式断言是瞎的")
+		assert.Contains(t, proxies, "no_proxy",
+			"尤其是 no_proxy —— 它被 PATH 和一段注释与另两对隔开，最容易被漏掉")
+	})
+}
+
+// plist 必须能过 `plutil -lint`（reviewer D2）。
+//
+// ⚠️ **纯字符串/XML 守卫挡不住这件事**：`install-services.sh:34` 会跑 `plutil -lint`，
+// 而 XML 写坏时上面那些 Go 断言可能照样绿（encoding/xml 比 plutil 宽容），
+// **安装时才炸**。把它拉进测试，失败就落在这里而不是运维手上。
+//
+// macOS 专属工具；找不到就跳过，不把「环境没有 plutil」记成交付缺陷。
+func TestHestiaPlistPassesPlutilLint(t *testing.T) {
+	if _, err := exec.LookPath("plutil"); err != nil {
+		t.Skip("plutil 不可用（非 macOS），跳过；install-services.sh 仍会在安装时跑它")
+	}
+	const plistPath = "../../deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
+	out, err := exec.Command("plutil", "-lint", plistPath).CombinedOutput()
+	require.NoErrorf(t, err, "plutil -lint 未通过，安装时会失败：%s", out)
+}
+
+// install-services.sh 必须真的装这个 plist。
+//
+// 没有这条的话，plist 写得再对也只是一个没人加载的文件 —— 而那种失败是**静默**的：
+// 部署脚本照常成功，服务从来没起来过。
+func TestInstallServicesInstallsHestiaPlist(t *testing.T) {
+	raw, err := os.ReadFile("../../scripts/ops/install-services.sh")
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "com.newthinker.atlas.hestia-ingest",
+		"install-services.sh 的安装列表里要有 hestia-ingest，否则 plist 不会被加载")
 }
