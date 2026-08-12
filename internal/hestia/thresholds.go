@@ -24,36 +24,36 @@ type Thresholds struct {
 	// 0.12 而不是方案报告初稿的 0.02：M0 用三期真实数据实测，残差是
 	// 7.65% / 8.57% / 9.06%。原因是央行报告里的「其中」是**部分列举**而非
 	// 穷尽——四个部门加起来本就不等于总额。±2% 会让每一期都被拦下。
-	DepositSumTolerance float64
+	DepositSumTolerance float64 `mapstructure:"deposit_sum_tolerance"`
 
 	// DepositSumDriftMax 是本期残差与前几期残差均值的偏离上限。
 	//
 	// ±12% 宽到几乎拦不住东西（实测 7.6–9.1%，余量仅 3pct），漂移检测才是
 	// 这道闸的实际价值：口径突变会让残差跳档，而绝对值仍在容差内。
-	DepositSumDriftMax float64
+	DepositSumDriftMax float64 `mapstructure:"deposit_sum_drift_max"`
 
 	// CorpLoanTolerance 是「短期+中长期+票据 vs 企业合计」的残差占比上限。
 	// M0 三期实测 1.16% / 1.42% / 1.58%。
-	CorpLoanTolerance float64
+	CorpLoanTolerance float64 `mapstructure:"corp_loan_tolerance"`
 
 	// StockContinuityMax 是社融存量环比变化率的上限。
 	//
 	// ⚠️ 0.02 未经真实数据验证——M0 的两份样本里只有一份含社融，算不出环比。
 	// M1c 回填出连续序列后必须重新标定。
-	StockContinuityMax float64
+	StockContinuityMax float64 `mapstructure:"stock_continuity_max"`
 
 	// YoYSanityMax 是同比字段绝对值的上限（百分数）。M0 实测最大 25%。
-	YoYSanityMax float64
+	YoYSanityMax float64 `mapstructure:"yoy_sanity_max"`
 
 	// MagnitudeRanges 是 field → 合理区间。
 	//
 	// **有意为空**。区间必须用 M1c 回填数据的实际分布标定，不得拍脑袋——
 	// DepositSumTolerance 的 ±2% 就是拍脑袋的代价。表为空时 magnitude_sanity
 	// 记 skipped{not_calibrated}，填表即生效，无需改代码。
-	MagnitudeRanges map[string]Range
+	MagnitudeRanges map[string]Range `mapstructure:"magnitude_ranges"`
 
 	// CaliberExemptions 是口径变更期的定点豁免。
-	CaliberExemptions []CaliberExemption
+	CaliberExemptions []CaliberExemption `mapstructure:"caliber_exemptions"`
 }
 
 // Range 是单个字段的合理区间。
@@ -62,8 +62,9 @@ type Thresholds struct {
 // 就会发现包注释声称的三类单位（万亿元 / 亿元 / 百分数）不覆盖 fx_reserve
 // （万亿美元）与 fx_rate（元/美元）。
 type Range struct {
-	Min, Max float64
-	Unit     string
+	Min  float64 `mapstructure:"min"`
+	Max  float64 `mapstructure:"max"`
+	Unit string  `mapstructure:"unit"`
 }
 
 // CaliberExemption 让某个期次的某几道闸门跳过检查。
@@ -75,11 +76,11 @@ type Range struct {
 // M1b-4a 在「精确指定」上补了第三个维度 PeriodTypes：期次只到月份，而同一个月
 // 可能同时有 monthly 与 annual 两条独立序列。
 type CaliberExemption struct {
-	Version     string   // 口径版本，必须在 validCaliberVersions 内
-	Period      string   // 期末月，与 Meta.Period 同格式（"2025-01"）
-	PeriodTypes []string // 适用的 period_type，必填非空
-	SkipChecks  []string // 要跳过的检查 ID
-	Reason      string   // 必填，写清为什么这期该跳
+	Version     string   `mapstructure:"version"`      // 口径版本，必须在 validCaliberVersions 内
+	Period      string   `mapstructure:"period"`       // 期末月，与 Meta.Period 同格式（"2025-01"）
+	PeriodTypes []string `mapstructure:"period_types"` // 适用的 period_type，必填非空
+	SkipChecks  []string `mapstructure:"skip_checks"`  // 要跳过的检查 ID
+	Reason      string   `mapstructure:"reason"`       // 必填，写清为什么这期该跳
 }
 
 // DefaultThresholds 返回经 M0 真实数据校准的默认阈值。
@@ -135,7 +136,12 @@ func (t Thresholds) validate() error {
 		}
 		// ID 必须真实存在，且列表从 gates 派生——打错一个字（deposit_summ）在没有
 		// 这道校验时会**静默失效**：豁免看起来配上了，实际那道闸门照跑，而配置的
-		// 人以为已经跳过。M1b-3 的 T1 写这个结构时 gates 表尚不存在，故留到 T7。
+		// 人以为已经跳过。M1b-3 的 T1 写这个结构时 gates 表尚不存在，
+		// 故留到 **M1b-3 的 TASK-007**（已兑现，就是紧接着这段的 checkEnum）。
+		//
+		// ⚠️ 编号带 milestone 前缀不是啰嗦：任务 ID 每个 Sprint 从 001 重开，
+		// 光写「T7」会让下一个 Sprint 的 TASK-007 以为这是自己的待办，
+		// 进而去动一段已经正确、且有 TestExemptionRejectsUnknownCheckID 守着的代码。
 		for _, id := range ex.SkipChecks {
 			field := "caliber_exemptions[" + strconv.Itoa(i) + "].SkipChecks"
 			if err := checkEnum(field, id, knownCheckIDs()); err != nil {

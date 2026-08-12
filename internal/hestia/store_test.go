@@ -412,8 +412,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "Discover", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这十一个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "Discover", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这十二个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -494,6 +494,18 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // 变红（那证明守卫确实在按精确集合相等工作），但**把 assert.Equal 换成 assert.Subset
 // 不会让任何东西变红**——「守卫的守卫」本身无人守。所以审查这一行时要看的不是
 // 「测试绿不绿」，而是「是不是追加一项、断言形状有没有被动过」。
+//
+// —— 为什么名单里多了 LoadConfig（M1b-4a / TASK-007 追加）——
+//
+// 同样是登记而不是放宽：切片十一→十二，assert.Equal 的全导出面精确集合相等一字未动。
+// LoadConfig 是包级函数：读一个 YAML 文件、返回 Config 值，**不碰数据库**，也没有任何
+// 通向 Save 的路径——它开的是「读本地配置文件」的口。它必须导出，是因为 M1b-4b 的
+// ingest 与 cmd 层要拿它装载阈值与 discover 参数。排在 Discover 之后是字节序结果
+// （"Di" < "Lo" < "Ne"）。
+//
+// 它与 Discover/NewPBOCFetcher 同形：包级函数 ⇒ **只打红本条（AST 版）**，reflect 版
+// 全程绿（实测确认）。同一任务新增的 Config 是**结构体类型**，与 DiscoverCfg/Candidate
+// 同理不进本条视野——本条只收 FuncDecl。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
@@ -1731,7 +1743,12 @@ func TestPrecedingWrapsQueryError(t *testing.T) {
 
 	// errors.Is 为真也可能是「err 本身就是 context.Canceled」（即根本没包）。
 	// 要的是「包住」，所以额外断言 Unwrap 后还剩东西、且外层不等于内层。
-	require.NotErrorIs(t, errors.Unwrap(err), err)
+	//
+	// ⚠️ 这里原是 `require.NotErrorIs(t, errors.Unwrap(err), err)`（Sprint 035 的 F8），
+	// **它在自己本该抓住的场景里平凡为真**：不包裹时 Unwrap 返回 nil，而
+	// errors.Is(nil, x) 恒 false ⇒ NotErrorIs 恒成立。换成 NotNil 才真的在守
+	// 「包住了」这件事。M1b-4a / TASK-007 修正。
+	require.NotNil(t, errors.Unwrap(err), "必须包住底层错误：Unwrap 后应当还剩东西")
 	assert.NotEqual(t, context.Canceled, err, "应是包裹后的错误而不是裸 sentinel")
 }
 
@@ -1821,11 +1838,14 @@ func TestHasPeriodIgnoresPending(t *testing.T) {
 // database/sql 在 Close 之后返回未导出的 errDBClosed，没有可用 sentinel，只能比错误串；
 // context.Canceled 是标准 sentinel，能真的把 errors.Is 这条判据测出来。
 //
-// ⚠️ 「包住了」这一条**刻意不照抄邻居的写法**：邻居用的
+// ⚠️ 「包住了」这一条**刻意不照抄邻居当时的写法**：邻居原本用的
 // require.NotErrorIs(t, errors.Unwrap(err), err) 在不包裹时 Unwrap 返回 nil、
 // errors.Is(nil, err) 恒 false ⇒ **平凡为真**（Sprint 035 的 F8 实测）。
 // 这里用 require.NotNil(t, errors.Unwrap(err))，它在不包裹时会真的红。
-// （邻居那处存量写法属于 TASK-007 的清理范围，不在本任务 scope 内。）
+//
+// **邻居那处已于 M1b-4a / TASK-007 改成同一写法**，两处现在一致；这段说明保留，
+// 因为它记录的是「为什么是这个写法」——F8 那种平凡为真不会在代码里留下痕迹，
+// 删掉这段，下一个人很可能照着直觉又写回 NotErrorIs。
 func TestHasPeriodWrapsQueryError(t *testing.T) {
 	s := newTestStore(t)
 	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})

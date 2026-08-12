@@ -233,7 +233,6 @@ func (s *Store) DB() Querier { return s.db }
 // 故对本查询而言 v_hestia_current 与 hestia_observations 恒等价（消融实测：
 // 换成权威表后整包无一变红，且非「无人守」而是**不可区分**）。选视图是为了与
 // Preceding 同源，也为了将来视图若加上过滤条件时这里能自动跟随。
-
 func (s *Store) HasPeriod(ctx context.Context, period, periodType string) (bool, error) {
 	var one int
 	err := s.db.QueryRowContext(ctx,
