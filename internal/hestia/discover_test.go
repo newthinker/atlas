@@ -184,7 +184,8 @@ func TestPageURLRejectsUnparsableInput(t *testing.T) {
 // `\d{4}年(上半年|\d{1,2}月)金融统计数据报告` 要求这一段必填，会把每年 1 月的
 // 年度数据整个跳过 —— 且不报任何错，只是看起来「今天没有新文章」。
 //
-// 映射与 types.go 的 periodEndMonth 一致（h1→06、annual→12），不新增第二份约定。
+// 映射与 types.go 的 periodEndMonth 一致（q1→03、h1→06、q1_q3→09、annual→12），
+// 不新增第二份约定。
 func TestParsePeriod(t *testing.T) {
 	tests := []struct {
 		title      string
@@ -199,6 +200,16 @@ func TestParsePeriod(t *testing.T) {
 		// 单靠前四条，一个「按标题查表」的实现也能全绿；多一个任意年月不能证伪它，
 		// 但能让那张表荒谬到一眼可见。真正排除写死的是下面 Rejects 那组的配对。
 		{"2019年3月金融统计数据报告", "2019-03", "monthly"},
+
+		// —— 季报（TASK-001）。两条都是**真实标题**，各自的快照就在 testdata 里 ——
+		//
+		// 期末月与 types.go 的 periodEndMonth 一致（q1→03、q1_q3→09），仍是一份约定。
+		// 两者都是**年初起累计**口径，与 h1/annual 同族：央行一年只发这四份累计报告
+		// （一季度 / 上半年 / 前三季度 / 全年），没有「单独第三季度」那一份。
+		{"2026年一季度金融统计数据报告", "2026-03", "q1"},     // testdata/pboc-index-p7.html
+		{"2025年前三季度金融统计数据报告", "2025-09", "q1_q3"}, // testdata/pboc-index-p18.html
+		// 同上一条不同年，理由与 2019 年那条相同：排除按标题查表。
+		{"2020年一季度金融统计数据报告", "2020-03", "q1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.title, func(t *testing.T) {
@@ -236,6 +247,23 @@ func TestParsePeriodRejects(t *testing.T) {
 		"2026年0月金融统计数据报告",  // 月份下界：同一处校验的另一侧
 		"2026年7月金融统计数据情况",  // 「报告」后缀：期次段紧跟，只是后缀不对
 		"2026年上半年金融统计数据简报", // 同上，另一种后缀
+
+		// —— 季度分支的语义边界（TASK-001）——
+		//
+		// 正则的季度段写成 `[一二三四五六七八九十]季度` 而不是只列「一季度」，
+		// 为的是让下面这些落进**语义层**被显式拒绝，而不是在正则那里悄悄失配。
+		// 两种写法的可观测结果相同（都不产候选），差别在于：语义层拒绝是一个
+		// 有位置、可加注释、可被本组用例钉住的决定。
+		//
+		// 「二/三/四季度金融统计数据报告」央行**不发**（一年只有一季度/上半年/
+		// 前三季度/全年四份累计报告）。真出现了也必须拒：「三季度」字面上无法区分
+		// 「第三季度单季」（7-9 月）与「前三季度累计」（1-9 月），期末月同为 09 而
+		// 月均折算除数一个是 3 一个是 9 —— 猜错正是 validPeriodTypes 注释警告的
+		// 「错一个量级」。宁可静默漏一期由人补，不可猜一个口径写进权威表。
+		"2026年二季度金融统计数据报告",
+		"2026年三季度金融统计数据报告",
+		"2026年四季度金融统计数据报告",
+		"2026年五季度金融统计数据报告", // 季度上界：正则匹配得上，语义校验挡下（同 13月 那条）
 	} {
 		t.Run(title, func(t *testing.T) {
 			_, _, ok := parsePeriod(title)
@@ -256,6 +284,8 @@ func TestScanPage(t *testing.T) {
 	// 全部理由（只留有报告的那份就测不出「翻页」）。README 已预告报告再过两三周会掉到
 	// 第 3 页；将来更新快照时若把 p1 换成了含报告的页面，本条会红 —— 那正是它该响的
 	// 时候，说明「翻页直到找到」这条链路已经失去了它的阴性对照。**别为了让它绿而删它。**
+	// （TASK-001 补：放宽 articleLinkRE 后本条的空集**更需要**阴性对照 —— 循环体
+	// 现在每页转 59 次而不是 15 次。那份对照在 TestScanPageIgnoresNavigationLinks。）
 	t.Run("第 1 页没有报告条目", func(t *testing.T) {
 		got, err := scanPage(readTestdata(t, "pboc-index-p1.html"), base)
 		require.NoError(t, err)
@@ -269,20 +299,71 @@ func TestScanPage(t *testing.T) {
 
 		c := got[0]
 		assert.Contains(t, c.Title, "金融统计数据报告")
-		assert.Regexp(t, `^\d{14,}$`, c.ArticleID, "article_id 是 URL 里的长数字串")
+		// ⚠️ 断言只要求「是数字串」，**不设位数下界**。此前这里写的是 `^\d{14,}$`，
+		// 与 articleLinkRE 当时的 `\d{14,}` 互为镜像 —— 那不是在守护什么，是把缺陷
+		// 钉成了契约：央行 2026-06-26 重建站点后新发文章的 article_id 是 **7 位**
+		// （实测 p15 起全是 7 位），位数下界会让它们整批静默失配。
+		assert.Regexp(t, `^\d+$`, c.ArticleID, "article_id 是 URL 里的数字串")
 		assert.True(t, strings.HasPrefix(c.URL, "https://www.pbc.gov.cn/"),
 			"站内绝对路径要补成完整 URL，得到 %s", c.URL)
 		assert.Regexp(t, `^\d{4}-\d{2}$`, c.Period)
-		assert.Contains(t, []string{"monthly", "h1", "annual"}, c.PeriodType)
+		assert.Contains(t, periodTypeList(), c.PeriodType)
 
 		// 字段断言覆盖**每一条**而不只是 got[0]：只断言首条时，一个「第一条算对、
 		// 其余瞎填」的实现照样全绿，而 Discover 会把整页候选都交给下游。
 		for i, c := range got {
-			assert.Regexp(t, `^\d{14,}$`, c.ArticleID, "第 %d 条", i)
+			assert.Regexp(t, `^\d+$`, c.ArticleID, "第 %d 条", i)
 			assert.True(t, strings.HasPrefix(c.URL, "https://www.pbc.gov.cn/"), "第 %d 条", i)
 			assert.Regexp(t, `^\d{4}-\d{2}$`, c.Period, "第 %d 条", i)
-			assert.Contains(t, []string{"monthly", "h1", "annual"}, c.PeriodType, "第 %d 条", i)
+			assert.Contains(t, periodTypeList(), c.PeriodType, "第 %d 条", i)
 		}
+	})
+
+	// 🔴 第 7 页的一季度报（真实快照，抓取于 2026-08-12）。
+	//
+	// 它的 article_id 是 19 位，旧正则也认得 —— 本条钉的是**标题分支**：
+	// 「一季度」此前不在 reportTitleRE 的期次段里，整条链接会被 parsePeriod 拒掉，
+	// 与 p18 那条一样静默。两条一起才覆盖两处静默点（链接层 + 标题层）。
+	t.Run("第 7 页提取出一季度报", func(t *testing.T) {
+		got, err := scanPage(readTestdata(t, "pboc-index-p7.html"), base)
+		require.NoError(t, err)
+		require.NotEmpty(t, got, "前置锚点：p7 上应当提取到候选，空集会让下面的断言平凡通过")
+		require.Len(t, got, 1, "p7 上只有一条报告条目")
+
+		assert.Equal(t, "2026年一季度金融统计数据报告", got[0].Title)
+		assert.Equal(t, "2026041311133582598", got[0].ArticleID)
+		assert.Equal(t, "2026-03", got[0].Period)
+		assert.Equal(t, "q1", got[0].PeriodType)
+		assert.Equal(t,
+			"https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/2026041311133582598/index.html",
+			got[0].URL)
+	})
+
+	// 🔴 第 18 页的前三季度报：**本任务的核心用例**，钉住 articleLinkRE 的位数下界。
+	//
+	// 实测（2026-08-12，见 testdata/README.md）：articleLinkRE 写 `\d{14,}` 时，
+	// p18 整页**命中 0 条链接**（不是 0 条候选 —— 是循环体一次都不执行），而 p1/p2/p7
+	// 上它命中 15 条 ⇒ 从第 15 页起 `Discover` 翻页照常、返回空，一个字的错都不报。
+	//
+	// 断言钉的是**字面量 `5868082`**，不是「id 至少 N 位」：位数下界正是那个缺陷的
+	// 形状，换一个数字重钉一遍等于把它再钉一次。
+	//
+	// require.NotEmpty 是前置锚点，且这里**第一次真正兑现**：用旧正则跑本条时
+	// scanPage 返回的确实是 nil，没有它下面的 got[0] 会 panic 而不是给出可读的红。
+	t.Run("第 18 页提取出前三季度报（7 位 article_id）", func(t *testing.T) {
+		got, err := scanPage(readTestdata(t, "pboc-index-p18.html"), base)
+		require.NoError(t, err)
+		require.NotEmpty(t, got,
+			"前置锚点：p18 的 article_id 是 7 位，位数下界会让整页命中 0 条链接")
+		require.Len(t, got, 1, "p18 上只有一条报告条目")
+
+		assert.Equal(t, "2025年前三季度金融统计数据报告", got[0].Title)
+		assert.Equal(t, "5868082", got[0].ArticleID, "央行 2026-06-26 重建站点后的 id 是 7 位")
+		assert.Equal(t, "2025-09", got[0].Period)
+		assert.Equal(t, "q1_q3", got[0].PeriodType)
+		assert.Equal(t,
+			"https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/5868082/index.html",
+			got[0].URL)
 	})
 
 	t.Run("同页的干扰项不被收进来", func(t *testing.T) {
@@ -409,10 +490,29 @@ func TestScanPageReturnsNoPartialResultOnError(t *testing.T) {
 func TestScanPageFiltersRatherThanMisses(t *testing.T) {
 	const jammer = "国新办举行新闻发布会 介绍2026年上半年货币政策执行和金融统计数据情况"
 
-	for _, page := range []string{"pboc-index-p1.html", "pboc-index-p2.html"} {
+	// 「无漏无重」现在按**新闻栏目下的条目**数，而不是全页命中数。
+	//
+	// articleLinkRE 放宽到 `\d+` 之后，全页命中里混进了 44 条栏目导航链接
+	// （`/rmyh/105145/index.html` 这类，id 是 6 位栏目号）。用全页命中数当判据会把
+	// 「15 条新闻一条不漏」这个真正要守的性质，和「导航链接有多少条」这个与本包
+	// 无关的页面装修细节绑在一起 —— 央行改一次导航栏就会红，而那不说明任何问题。
+	//
+	// 16 = 15 条新闻 + 栏目自身那条 `/113469/index.html`（链接文本「新闻发布」）。
+	// 后者被 parsePeriod 拒掉，由下面那条「导航链接产出 0 候选」的用例覆盖。
+	const newsPath = "/goutongjiaoliu/113456/113469/"
+	for _, page := range []string{
+		"pboc-index-p1.html", "pboc-index-p2.html",
+		"pboc-index-p7.html", "pboc-index-p18.html",
+	} {
 		t.Run(page, func(t *testing.T) {
-			ms := articleLinkRE.FindAllSubmatch(readTestdata(t, page), -1)
-			assert.Len(t, ms, 15, "每页 15 条新闻，提取器应无漏无重")
+			var news int
+			for _, m := range articleLinkRE.FindAllSubmatch(readTestdata(t, page), -1) {
+				if strings.Contains(string(m[1]), newsPath) {
+					news++
+				}
+			}
+			assert.Equal(t, 16, news,
+				"每页 15 条新闻 + 1 条栏目自链接，提取器应无漏无重")
 		})
 	}
 
@@ -427,6 +527,56 @@ func TestScanPageFiltersRatherThanMisses(t *testing.T) {
 	// 那条守 parsePeriod 的行为，本条守的是「这条因果链在真实快照上成立」）。
 	_, _, ok := parsePeriod(jammer)
 	assert.False(t, ok, "干扰项被看见了，必须是被 parsePeriod 拒的")
+}
+
+// 🔴 放宽 articleLinkRE 的**否定式边界**：多进来的栏目导航链接必须产出 0 候选。
+//
+// 把 `\d{14,}` 放宽到 `\d+` 是本任务的核心改动，代价是每页多命中 43 条链接
+// （实测：全页命中 15 → 59，多出来的全是 `/rmyh/105145/index.html` 这类栏目导航页，
+// id 是 6 位栏目号；4 份快照上这个数完全一致）。放宽本身安全 —— 它们的链接文本是
+// 「货币政策」「金融市场」这种栏目名，过不了 parsePeriod。
+//
+// **但「安全」这件事必须有断言钉住，否则下一个放宽的人没有网**：articleLinkRE 已经
+// 没有任何位数约束了，再往下松只能松 href 的形态，而那一步的后果就没人测了。
+//
+// 本条与上面「第 1 页没有报告条目」是**互补的一对**：那条断言 p1 产出空集，本条
+// 断言那个空集**不是平凡的** —— 循环体确实转了 59 次，59 条全被 parsePeriod 拒掉。
+// 只有那条时，一个恒返回 nil 的 scanPage 与一个正确过滤的 scanPage 无从区分。
+func TestScanPageIgnoresNavigationLinks(t *testing.T) {
+	const base = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"
+	const newsPath = "/goutongjiaoliu/113456/113469/"
+
+	for _, page := range []string{
+		"pboc-index-p1.html", "pboc-index-p2.html",
+		"pboc-index-p7.html", "pboc-index-p18.html",
+	} {
+		t.Run(page, func(t *testing.T) {
+			var hrefs, titles []string
+			for _, m := range articleLinkRE.FindAllSubmatch(readTestdata(t, page), -1) {
+				if strings.Contains(string(m[1]), newsPath) {
+					continue
+				}
+				hrefs = append(hrefs, string(m[1]))
+				titles = append(titles, strings.TrimSpace(tagRE.ReplaceAllString(string(m[3]), "")))
+			}
+
+			// 前置锚点，两条：数量对得上，且**确实是**导航链接。少了任一条，
+			// 下面那个「全部被拒」的循环都可能在空集或错的集合上平凡通过。
+			require.Len(t, hrefs, 43, "放宽位数下界后，每页多命中的导航链接数")
+			assert.Contains(t, hrefs, "/rmyh/105145/index.html", "货币政策栏目那条应在其中")
+			assert.Contains(t, titles, "货币政策")
+
+			for i, title := range titles {
+				_, _, ok := parsePeriod(title)
+				assert.Falsef(t, ok, "导航链接 %s（%q）不该产出候选", hrefs[i], title)
+			}
+		})
+	}
+
+	// 整条链路上的同一件事：p1 全页 59 条命中，一条候选都不产。
+	got, err := scanPage(readTestdata(t, "pboc-index-p1.html"), base)
+	require.NoError(t, err)
+	assert.Empty(t, got, "p1 没有报告条目，59 条命中全被 parsePeriod 拒掉")
 }
 
 const testIndexURL = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"

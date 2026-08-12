@@ -18,6 +18,7 @@ package hestia
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,6 +70,8 @@ func TestMetaValidateAcceptsValid(t *testing.T) {
 		{"monthly", "2026-06"},
 		{"h1", "2026-06"},
 		{"annual", "2026-12"},
+		{"q1", "2026-03"},    // TASK-001：一季度
+		{"q1_q3", "2026-09"}, // TASK-001：前三季度（年初起累计，不是第三季度单季）
 	} {
 		m := validMeta()
 		m.PeriodType, m.Period = tc.periodType, tc.period
@@ -104,11 +107,87 @@ func TestMetaValidateRejectsEmptyRequired(t *testing.T) {
 }
 
 func TestMetaValidateRejectsBadPeriodType(t *testing.T) {
-	for _, bad := range []string{"quarterly", "H1", "yearly", " h1", "h1 ", "MONTHLY"} {
+	// "quarterly" / "q3" 是 TASK-001 加季度类型后**最可能被误填**的两个：前者是
+	// 通用叫法，后者的字面含义（第三季度单季）与真实期次「前三季度累计」不同。
+	// 白名单不认它们，必须被拒而不是当成 q1_q3 放行。
+	for _, bad := range []string{"quarterly", "H1", "yearly", " h1", "h1 ", "MONTHLY", "q3", "Q1"} {
 		m := validMeta()
 		m.PeriodType = bad
 		require.Error(t, m.validate(), "period_type=%q 应被拒", bad)
 	}
+}
+
+// 错误信息里的合法取值必须由 validPeriodTypes 派生，不是抄一遍。
+//
+// 抄一遍的版本在加了第四、第五种取值后会**静默过期**：白名单放行了新值，错误信息
+// 却还在说旧的三个 —— 而那条信息正是调用方判断自己该填什么的唯一依据。types.go 的
+// checkEnum 注释专门警告过这种写法，而 Meta.validate 的 period_type 分支恰是它自己
+// 没用 checkEnum 的两处之一（另一处是 thresholds.go 的 PeriodTypes 校验，由
+// thresholds_test.go 的 TestExemptionRejectsBadPeriodTypes/含未知取值 守着）。
+//
+// 本条是那份派生的绊线：把 Join 改回硬编码串，加了取值就红。
+func TestMetaValidateListsEveryValidPeriodTypeInError(t *testing.T) {
+	m := validMeta()
+	m.PeriodType = "quarterly"
+	err := m.validate()
+	require.Error(t, err)
+
+	require.NotEmpty(t, validPeriodTypes, "前置锚点：白名单为空时下面的循环平凡通过")
+	for pt := range validPeriodTypes {
+		assert.Containsf(t, err.Error(), pt,
+			"错误信息必须列出全部合法取值，%q 缺席说明文案已与白名单脱节", pt)
+	}
+}
+
+// 🔴 两张表的一致性守卫，**单向**（TASK-001）。
+//
+// ⚠️ 别把它写成双向：`monthly` **刻意**不在 periodEndMonth 里（任意月份都合法），
+// Meta.validate 正是靠「查不到就跳过」实现这一点。给 monthly 编一个期末月会让
+// **除该月外每一期月报都被拒**。
+//
+// 所以两条各自成立、合起来仍能防漏改：
+//   - ① periodEndMonth 的每个键都在 validPeriodTypes 里 —— 挡「给一个不存在的
+//     period_type 配了期末月」，那条约束永远不会被执行，是死配置。
+//   - ② 除 monthly 外，validPeriodTypes 的每个键都有期末月 —— 挡「加了新类型忘了
+//     配期末月」，那才是真正危险的一侧：period 与 period_type 的荒谬配对会静默放行，
+//     修订链分叉、下游双计，而两条记录各自看起来都正常。
+//
+// 加第六种取值时若它同样是「任意月份都合法」的形态，改的是下面这个豁免集合，
+// 并在 types.go 的注释里写清理由 —— 不要改成双向。
+func TestPeriodTypeMapsAreConsistent(t *testing.T) {
+	// monthly 是唯一豁免。写成集合而不是 `pt != "monthly"`，是为了让「豁免有几个」
+	// 在代码里一眼可数 —— 悄悄多一个豁免就是悄悄丢一条约束。
+	exempt := map[string]bool{"monthly": true}
+
+	require.NotEmpty(t, periodEndMonth, "前置锚点：表为空时 ① 平凡通过")
+	for pt := range periodEndMonth {
+		assert.Truef(t, validPeriodTypes[pt],
+			"① periodEndMonth 有 %q 的期末月，但它不是合法 period_type：这条约束永不执行", pt)
+	}
+
+	require.NotEmpty(t, validPeriodTypes, "前置锚点：白名单为空时 ② 平凡通过")
+	for pt := range validPeriodTypes {
+		if exempt[pt] {
+			assert.NotContainsf(t, periodEndMonth, pt,
+				"%q 是豁免项，给它配期末月会让除该月外每一期都被拒", pt)
+			continue
+		}
+		assert.Containsf(t, periodEndMonth, pt,
+			"② %q 是合法 period_type 却没有期末月：period/period_type 的荒谬配对会静默放行", pt)
+	}
+
+	// 期末月的形态：Meta.validate 拿它与 Period[5:] 直接比字符串，写成 "3" 而不是
+	// "03" 会让每一期该类型都被拒，且错误信息看起来完全合理（"month must be 3"）。
+	for pt, mm := range periodEndMonth {
+		assert.Regexpf(t, `^(0[1-9]|1[0-2])$`, mm, "%q 的期末月必须是零补齐的两位月份", pt)
+	}
+
+	// periodTypeList 必须**定序**：它的两个消费者都是错误信息，而 map 的迭代序是
+	// 随机的 —— 不排序的话同一个错误每次跑出来字段顺序都不同，日志无从 diff，
+	// 断言也只能退回 Contains。
+	got := periodTypeList()
+	assert.Len(t, got, len(validPeriodTypes), "白名单里每个取值都要出现，不多不少")
+	assert.True(t, slices.IsSorted(got), "顺序必须稳定，得到 %v", got)
 }
 
 // TestMetaValidateRejectsMalformedPublishedAt 覆盖 G1 —— M1a 明文指派给写入方的契约。
@@ -279,6 +358,12 @@ func TestMetaValidateRejectsBadPeriodCombination(t *testing.T) {
 		{"2026-03", "h1"},     // 上半年的期末月只能是 06
 		{"2026-01", "annual"},
 		{"2026-12", "h1"},
+		// TASK-001 的两种季度类型。前两条是**最容易真的写错**的那两个：q1_q3 与
+		// h1 的期末月差 3 个月、除数差 3，而 2026-06/q1_q3 两值单独看都合法。
+		{"2026-06", "q1_q3"},
+		{"2026-09", "q1"},
+		{"2026-12", "q1_q3"},
+		{"2026-09", "annual"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.period+"/"+tc.periodType, func(t *testing.T) {
@@ -287,6 +372,11 @@ func TestMetaValidateRejectsBadPeriodCombination(t *testing.T) {
 			err := m.validate()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.periodType)
+			// 必须是**组合**那道检查拒的，不能是别的。没有这句时，一个还没进白名单的
+			// period_type（TASK-001 加 q1/q1_q3 之前正是如此）会被枚举检查先拒掉，
+			// 用例照样全绿 —— 而它声称守的组合检查根本没被执行到。
+			assert.Contains(t, err.Error(), "month must be",
+				"要由期末月检查拒绝，不是被 period_type 枚举检查冒名满足")
 		})
 	}
 }
@@ -301,6 +391,11 @@ func TestMetaValidateAcceptsValidCombinations(t *testing.T) {
 		{"2026-01", "monthly"},
 		{"2026-06", "monthly"}, // 6 月的月度数据与 h1 并存，业务键不同
 		{"2026-12", "monthly"},
+		{"2026-03", "q1"},
+		{"2026-09", "q1_q3"},
+		// 与 h1/annual 同理：同一期末月的季报与月报是两条独立序列，都要放行。
+		{"2026-03", "monthly"},
+		{"2026-09", "monthly"},
 	}
 	for _, tc := range ok {
 		t.Run(tc.period+"/"+tc.periodType, func(t *testing.T) {

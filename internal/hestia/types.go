@@ -2,6 +2,7 @@ package hestia
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -35,9 +36,37 @@ type Meta struct {
 	IngestedAt     string // 由 Save 填，RFC3339
 }
 
-// validPeriodTypes 的三个取值决定月均折算的除数（1 / 6 / 12）。
-// 写错会让信号判定错一个量级，所以这里严格枚举而不是随便放行。
-var validPeriodTypes = map[string]bool{"monthly": true, "h1": true, "annual": true}
+// validPeriodTypes 的五个取值决定月均折算的除数（monthly 1 / q1 3 / h1 6 /
+// q1_q3 9 / annual 12）。写错会让信号判定错一个量级，所以这里严格枚举而不是随便放行。
+//
+// ⚠️ 该折算在本包**没有实现**，这行只是声明取值的含义。
+//
+// q1 / q1_q3 是 TASK-001 加的，对应央行的「一季度」与「前三季度」报告 —— 两者都是
+// **年初起累计**口径，与 h1（上半年）、annual（全年）同族。
+//
+// ⚠️ **`q1_q3` 不是 `q3`**：「前三季度」是 1–9 月累计，第三季度单季是 7–9 月，
+// 两者期末月同为 09，除数却是 9 与 3。取名写成 q3 就是在这行注释警告的那个量级上
+// 埋一个谁也看不出来的错。
+var validPeriodTypes = map[string]bool{
+	"monthly": true,
+	"q1":      true,
+	"h1":      true,
+	"q1_q3":   true,
+	"annual":  true,
+}
+
+// periodTypeList 把白名单排成定序切片，供错误信息使用。
+//
+// 存在的理由与 checkEnum 完全一样：合法取值只该有**一份**定义。此前有两处把
+// "monthly|h1|annual" 抄进了错误文案（本文件的 Meta.validate 与 thresholds.go 的
+// PeriodTypes 校验）—— 那正是 checkEnum 的注释警告过的写法，而这两处恰是它自己
+// 没用 checkEnum 的地方（那个函数收 []string，白名单这边是 map）。加季度类型时
+// 两份副本会**静默过期**：白名单放行了新值，错误信息却还在说旧的三个。
+//
+// 排序不是洁癖：map 的迭代序随机，不排的话同一个错误每次打印的取值顺序都不同。
+func periodTypeList() []string {
+	return slices.Sorted(maps.Keys(validPeriodTypes))
+}
 
 // periodRE / publishedAtRE 落实 M1a 明文指派给写入方的形态契约（G1）。
 //
@@ -59,8 +88,17 @@ var (
 	publishedAtRE = regexp.MustCompile(`\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z`)
 )
 
-// periodEndMonth 规定期末月：年度数据的期末月必然是 12 月，上半年必然是 6 月。
-// monthly 不在表内，因为任意月份都合法。
+// periodEndMonth 规定期末月：年度数据的期末月必然是 12 月，上半年必然是 6 月，
+// 一季度 3 月，前三季度 9 月。
+//
+// **monthly 是唯一不在表内的合法 period_type**，因为任意月份都合法；下面
+// Meta.validate 的「查不到就跳过」（`if want, ok := ...; ok && ...`）正是靠这一点
+// 实现豁免。
+//
+// ⚠️ 因此两张表的一致性守卫必须是**单向**的，别写成「反之亦然」：给 monthly 编一个
+// 期末月，会让**除该月外每一期月报都被拒**。TestPeriodTypeMapsAreConsistent 把这两条
+// 分开钉住 —— ① 本表的键都必须是合法 period_type（否则是永不执行的死配置）；
+// ② 除 monthly 外每个合法 period_type 都要有期末月（否则荒谬配对静默放行）。
 //
 // 为什么必须查这个组合：period 与 period_type 单独看都合法，配对却可能荒谬。
 // "2026-06/annual" 会用 12 去除半年报的期末月，让月均折算错一个量级——而本文件
@@ -72,7 +110,9 @@ var (
 // 解析器若把两者都抽出来，那就是真实期次；它与 YYYY-12/annual 的业务键本就
 // 不同（period_type 是主键的一部分），不会混淆。
 var periodEndMonth = map[string]string{
+	"q1":     "03",
 	"h1":     "06",
+	"q1_q3":  "09",
 	"annual": "12",
 }
 
@@ -141,7 +181,8 @@ func (m Meta) validate() error {
 		}
 	}
 	if !validPeriodTypes[m.PeriodType] {
-		return fmt.Errorf("hestia: invalid period_type %q (want monthly|h1|annual)", m.PeriodType)
+		return fmt.Errorf("hestia: invalid period_type %q (want %s)",
+			m.PeriodType, strings.Join(periodTypeList(), "|"))
 	}
 	if !periodRE.MatchString(m.Period) {
 		return fmt.Errorf("hestia: meta.period %q must match YYYY-MM", m.Period)

@@ -120,10 +120,16 @@ func (t Thresholds) validate() error {
 		// （types.go 的 Meta.validate 是第二份）；thresholds_test.go 的
 		// TestExemptionRejectsBadPeriodTypes/含未知取值 遍历 validPeriodTypes 本身，
 		// 是这份副本的绊线——加了第四种取值而文案没跟上就会红。
+		//
+		// TASK-001 兑现了那份预防，并把副本消掉：文案里的取值列表现在由
+		// periodTypeList() 从 validPeriodTypes 派生（types.go 的 Meta.validate 同此）。
+		// 改之前这里与 types.go 各硬编码着一句 "monthly|h1|annual"，加完 q1/q1_q3
+		// 两句都会**静默过期** —— 白名单放行了新值，而这条信息正是配置的人判断自己
+		// 该填什么的唯一依据。上面那条绊线现在守的是「别改回硬编码」。
 		for _, pt := range ex.PeriodTypes {
 			if !validPeriodTypes[pt] {
 				return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 的 PeriodTypes 含未知取值 %q "+
-					"(want monthly|h1|annual)", i, ex.Period, pt)
+					"(want %s)", i, ex.Period, pt, strings.Join(periodTypeList(), "|"))
 			}
 		}
 		if strings.TrimSpace(ex.Reason) == "" {
