@@ -361,14 +361,19 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 // HasPeriod 是 *Store 的方法，所以它**同时**打红本条（reflect 版）与
 // TestPackageExposesNoWriteFunctions（AST 版），两条都登记过才算数——这与
 // Store.Preceding 同形，也再次演示了那两条测试为什么互补而不能互替。
+//
+// HasArticle 在 M1b-4b / TASK-003 追加，本条随之更新为
+// [Close, DB, HasArticle, HasPeriod, Preceding, Save]，**仍是精确集合相等**。它是
+// Store 的第三个读方法：一条 SELECT ... UNION ALL ... LIMIT 1，不碰任何写路径。
+// 与 HasPeriod 同形（*Store 的方法 ⇒ 同时打红两条），登记理由见 AST 版下面那段。
 func TestStoreExposesNoWriteMethods(t *testing.T) {
 	typ := reflect.TypeOf(&Store{})
 	got := make([]string, typ.NumMethod())
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	assert.Equal(t, []string{"Close", "DB", "HasPeriod", "Preceding", "Save"}, got,
-		"只应导出 Close、DB、HasPeriod、Preceding 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
+	assert.Equal(t, []string{"Close", "DB", "HasArticle", "HasPeriod", "Preceding", "Save"}, got,
+		"只应导出 Close、DB、HasArticle、HasPeriod、Preceding 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
 }
 
 // TestPackageExposesNoWriteFunctions 把写口守卫从「*Store 的方法集」扩到**包导出面**。
@@ -412,8 +417,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "Discover", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这十二个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "Discover", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这十三个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -506,6 +511,24 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // 它与 Discover/NewPBOCFetcher 同形：包级函数 ⇒ **只打红本条（AST 版）**，reflect 版
 // 全程绿（实测确认）。同一任务新增的 Config 是**结构体类型**，与 DiscoverCfg/Candidate
 // 同理不进本条视野——本条只收 FuncDecl。
+//
+// —— 为什么名单里多了 Store.HasArticle（M1b-4b / TASK-003 追加）——
+//
+// 同样是登记而不是放宽：切片十二→十三，assert.Equal 的全导出面精确集合相等一字未动。
+// HasArticle 是 Store 的第三个**读**方法：一条 SELECT 1 ... UNION ALL ... LIMIT 1，
+// 只查存在性，不碰任何写路径。它是方案报告 4.1 的一级幂等键，M1b-4b 的 ingest 用它
+// 决定这篇文章要不要抓。
+//
+// 它与 Store.HasPeriod/Store.Preceding 同形：**是 *Store 的方法，所以同时打红本条
+// （AST 版）与 TestStoreExposesNoWriteMethods（reflect 版）**，两条都登记过才算数。
+//
+// 排在 Store.DB 之后、Store.HasPeriod 之前是 sort.Strings 的字节序结果
+// （"Store.D" < "Store.HasA" < "Store.HasP"），不是优先级。
+//
+// 本次登记的**正向自证**（实测，非推断）：把 "Store.HasArticle" 从上面的期望切片里
+// 删掉，本条立刻红在 assert.Equal 那一行——这证明守卫确实在按精确集合相等工作，
+// 而不是被悄悄放宽成了包含关系。反过来的「换成 assert.Subset」那种变异证明不了
+// 本次登记（它必然存活），所以没跑。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
@@ -1864,3 +1887,159 @@ func TestHasPeriodWrapsQueryError(t *testing.T) {
 
 // Store 必须满足 PeriodChecker。签名漂移在编译期就红。
 var _ PeriodChecker = (*Store)(nil)
+
+// —— M1b-4b / TASK-003：一级幂等键 Store.HasArticle ——
+//
+// Context Checkpoint: done_criteria → test mapping (has-article)
+// functional[0]     HasArticle 同时查 TableObservations 与 TablePending，任一命中即 true（真库）
+//                                          → TestHasArticle/观测表里的命中、TestHasArticle/pending_里的也命中
+// functional[1]     三种情形各一条测试      → TestHasArticle 的三个子测试
+//                   另加一条计划要求的：查全表而非当前行视图 → TestHasArticleSeesSupersededRows
+// boundary[0]       空 articleID 的行为被钉住（false, nil，理由见该测试与 discovery）
+//                                          → TestHasArticleOnEmptyID
+// error_handling[0] 查库失败必须用 %w 包住底层 err 并带上下文
+//                                          → TestHasArticleWrapsQueryError
+// non_functional[0] 新增导出方法登记进两条导出面守卫
+//                                          → TestStoreExposesNoWriteMethods（reflect 版）、
+//                                            TestPackageExposesNoWriteFunctions（AST 版）
+
+// 一级幂等键：这篇文章处理过没有？两张表都算。
+//
+// 「含 pending」是刻意的：落 pending 说明数据已抓到并跑过闸门，重抓必然得到
+// 同样的结果，一天三次唤起是纯浪费。而真正需要重试的两种情形都不被它挡 ——
+// 抓取/解析失败根本不写 pending 行；央行重发是**新的 article_id**。
+//
+// ⚠️ 与 TestHasPeriodIgnoresPending 恰好相反，而两条都对：HasPeriod 问的是
+// 「这一期入库了没有」（pending 不算，否则一次解析失败让那期永远不再被抓），
+// HasArticle 问的是「这篇文章处理过没有」（pending 算，重抓必然同样结果）。
+// 两个问题的答案对同一行数据不同，是因为**消费者要的东西不同**，不是不一致。
+func TestHasArticle(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("观测表里的命中", func(t *testing.T) {
+		s := newTestStore(t)
+		saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+		has, err := s.HasArticle(ctx, "art-2025-12") // saveMonthly 用 "art-"+period
+		require.NoError(t, err)
+		assert.True(t, has)
+	})
+
+	t.Run("pending 里的也命中", func(t *testing.T) {
+		s := newTestStore(t)
+		out, err := s.Save(ctx, Observation{
+			Meta: Meta{
+				Period: "2025-11", PeriodType: "monthly", PublishedAt: "2025-12-15",
+				ArticleID: "art-pending", CaliberVersion: "2025-01", Extractor: extractorV2,
+			},
+			Values: map[string]float64{FieldM2: 300},
+		}, failing())
+		require.NoError(t, err)
+		require.Equal(t, TablePending, out.Table, "前置条件：这一期必须落 pending")
+
+		has, err := s.HasArticle(ctx, "art-pending")
+		require.NoError(t, err)
+		assert.True(t, has, "落 pending 的文章也算处理过：重抓必然得到同样的结果")
+	})
+
+	t.Run("没见过的返回 false", func(t *testing.T) {
+		s := newTestStore(t)
+		saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+		has, err := s.HasArticle(ctx, "art-never-seen")
+		require.NoError(t, err)
+		assert.False(t, has)
+	})
+}
+
+// 修订产生新行，但被取代的旧行同样是「处理过的文章」。
+//
+// 所以查 hestia_observations 全表而不是 v_hestia_current —— 视图只保留当前行，
+// 用它会让旧 article_id 变成「没见过」，站点若把旧链接再挂出来就会重抓一遍。
+//
+// 这条是本任务里唯一能把「全表 vs 视图」区分开的断言：另外三个子测试在两种
+// 实现下都绿（它们查的都是当前行）。
+func TestHasArticleSeesSupersededRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	// 修订：同期次、更晚的 published_at、新的 article_id
+	_, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "monthly", PublishedAt: "2026-02-20",
+			ArticleID: "art-2025-12-rev", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 305},
+	}, passing())
+	require.NoError(t, err)
+
+	for _, id := range []string{"art-2025-12", "art-2025-12-rev"} {
+		has, err := s.HasArticle(ctx, id)
+		require.NoError(t, err)
+		assert.True(t, has, "%s 应当算处理过", id)
+	}
+}
+
+// 空 articleID 返回 (false, nil) —— 这是登记在案的决定，不是遗漏。
+//
+// 计划的实现没有空值分支，本条把那个行为钉住，理由有三：
+//
+//  1. **这个 false 是真话，不是平凡为真**：两张表的 article_id 都经 Meta.validate()
+//     把关（Save 的第一步，pending 路径也走它），空串写不进任何一张表 —— 所以
+//     「这个 ID 没处理过」确实是正确答案，不是「问题不合法所以随便答一个」。
+//  2. **幂等门唯一危险的答案是错误的 true**：错 true 让那篇文章被永久跳过；
+//     错 false 只多花一次抓取，而那正是幂等门 miss 的固有代价。守住 true 就够了。
+//  3. **校验是 Save 的职责，不该在读方法里再来一遍**：validate() 刻意不导出
+//     （见 types.go 那段注释），空 ArticleID 会在 Save 处以
+//     "meta.article_id must not be empty" 精确报出来，不会被吞掉。在这里加一道
+//     guard 会把同一份责任分到第二处，也与不校验入参的 HasPeriod/Preceding 不一致。
+//
+// 本条**不是**空断言：它先把两张表都填上真数据再问空串，所以实现若漏了
+// `WHERE article_id = ?`（或写成 LIKE、写成恒真谓词），这里会立刻红。
+func TestHasArticleOnEmptyID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+	out, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-11", PeriodType: "monthly", PublishedAt: "2025-12-15",
+			ArticleID: "art-pending", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, failing())
+	require.NoError(t, err)
+	require.Equal(t, TablePending, out.Table, "前置条件：两张表都得有行，空串才问得出东西")
+
+	has, err := s.HasArticle(ctx, "")
+	require.NoError(t, err, "空 ID 不是错误：它只是一个从未处理过的 ID")
+	assert.False(t, has, "空串不得命中任何一张表里的任何一行")
+}
+
+// 查库真失败时必须返回 error，且**包住底层 err**并带 articleID 上下文。
+//
+// 触发方式与邻居 TestHasPeriodWrapsQueryError / TestPrecedingWrapsQueryError 一致
+// （已取消的 context 而不是关掉的库）：database/sql 在 Close 之后返回未导出的
+// errDBClosed，没有可用 sentinel，只能比错误串；context.Canceled 是标准 sentinel，
+// 能真的把 errors.Is 这条判据测出来。
+//
+// ⚠️ 「包住了」这一条用 require.NotNil(t, errors.Unwrap(err))，**不是**
+// require.NotErrorIs(t, errors.Unwrap(err), err) —— 后者在不包裹时 Unwrap 返回 nil、
+// errors.Is(nil, err) 恒 false ⇒ **平凡为真**（Sprint 035 的 F8，跨 Sprint 存活了
+// 一整轮才被修）。也不能只靠上面那条 assert.ErrorIs：实现写成 `return false, err`
+// （完全不包）时它同样为真，NotNil 才把那个差集测掉。
+func TestHasArticleWrapsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 先取消，QueryRowContext 必然失败
+
+	has, err := s.HasArticle(ctx, "art-2025-12")
+	require.Error(t, err, "查库失败必须返回 error")
+	assert.False(t, has, "出错时不得报告「处理过」——否则一次查库故障会让那篇文章被永久跳过")
+	assert.ErrorIs(t, err, context.Canceled, "必须用 %w 包住底层 err，否则调用方无法分辨是取消还是真故障")
+	assert.ErrorContains(t, err, "art-2025-12", "错误信息要带 articleID")
+	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}

@@ -247,6 +247,52 @@ func (s *Store) HasPeriod(ctx context.Context, period, periodType string) (bool,
 	return true, nil
 }
 
+// HasArticle 回答这篇文章是否已处理过 —— 观测表与 pending 都算。
+//
+// 这是方案报告 4.1 的一级幂等键。**含 pending 是刻意的**：落 pending 说明数据
+// 已抓到并跑过闸门，同样的输入、同样的代码、同样的闸门，重抓必然得到同样的
+// 结果 —— 一天三次唤起重抓是纯浪费。
+//
+// 真正需要重试的两种情形都不被它挡：
+//   - 抓取或解析失败 ⇒ 根本没调 Save，不写任何行 ⇒ 下次唤起自然重试
+//   - 央行重发或站点迁移 ⇒ **新的 article_id** ⇒ 不命中 ⇒ 抓 ⇒ 双时态修订
+//
+// 「调了阈值想重跑」由 ingest 的 --force 提供，那是本定案的直接推论。
+//
+// ⚠️ 与 HasPeriod 对 pending 的态度**恰好相反，而两条都对**：HasPeriod 问的是
+// 「这一期入库了没有」（pending 不算，否则一次解析失败会让那期永远不再被抓），
+// 本方法问的是「这篇文章处理过没有」（pending 算）。同一行数据两个答案不同，
+// 是因为消费者要的东西不同，不是不一致。
+//
+// 查 hestia_observations **全表**而不是 v_hestia_current：修订会产生新行，
+// 但被取代的旧行同样是处理过的文章 —— 用视图会让旧 article_id 变成「没见过」，
+// 站点若把旧链接再挂出来就会重抓一遍。
+//
+// 空 articleID 返回 (false, nil) 而不报错，是登记在案的决定：两张表的 article_id
+// 都经 Meta.validate() 把关（Save 的第一步，pending 路径也走它），空串写不进任何
+// 一张表，所以「没处理过」是真话而非托词；而幂等门唯一危险的答案是**错误的
+// true**（让那篇文章被永久跳过），错的 false 只多花一次抓取。入参校验留给 Save，
+// 空 ArticleID 会在那里以 "meta.article_id must not be empty" 精确报出。
+//
+// 查库失败时返回 (false, err) 而不是 (true, err)，理由同 HasPeriod：调用方若忽略
+// err，「没处理过」只让这篇被重抓一次（幂等，代价是一次多余请求），「处理过」
+// 则让它被永久跳过。
+func (s *Store) HasArticle(ctx context.Context, articleID string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM `+TableObservations+` WHERE article_id = ?
+		 UNION ALL
+		 SELECT 1 FROM `+TablePending+` WHERE article_id = ?
+		 LIMIT 1`, articleID, articleID).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("hestia store has article %s: %w", articleID, err)
+	}
+	return true, nil
+}
+
 // Preceding 返回 period 之前最近 n 期的当前行，按 period 降序。
 //
 // 只在同一个 period_type 内比较：月度与半年度是两条独立序列，社融存量的环比
