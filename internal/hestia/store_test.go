@@ -366,14 +366,24 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 // [Close, DB, HasArticle, HasPeriod, Preceding, Save]，**仍是精确集合相等**。它是
 // Store 的第三个读方法：一条 SELECT ... UNION ALL ... LIMIT 1，不碰任何写路径。
 // 与 HasPeriod 同形（*Store 的方法 ⇒ 同时打红两条），登记理由见 AST 版下面那段。
+//
+// HasArticleInObservations 在 TASK-011 追加，本条随之更新，**仍是精确集合相等**。
+// 它是 Store 的第四个读方法：一条 SELECT ... LIMIT 1，只查权威表，不碰任何写路径。
+// 与 HasArticle 的分工写在 store.go 上（Discover 层判停 vs ingest 层幂等）。
+//
+// ⚠️ 期望清单与文案里的**个数**改由 len(want) 生成（TASK-011 一并闭合的缺口）：
+// 手写个数是同一事实的第二份副本，改一处不会让另一处变红 —— AST 版那条实测发生过
+// （「列表 16 项 vs 文案十七」，无人报警）。
 func TestStoreExposesNoWriteMethods(t *testing.T) {
 	typ := reflect.TypeOf(&Store{})
 	got := make([]string, typ.NumMethod())
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	assert.Equal(t, []string{"Close", "DB", "HasArticle", "HasPeriod", "Preceding", "RecentObservations", "RecentPending", "Save"}, got,
-		"只应导出 Close、DB、HasArticle、HasPeriod、Preceding、RecentObservations、RecentPending 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
+	want := []string{"Close", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "RecentObservations", "RecentPending", "Save"}
+	assert.Equalf(t, want, got,
+		"只应导出这 %d 个只读方法（%s）；出现 Insert/Upsert 等写口即违反单一写入口约束",
+		len(want), strings.Join(want, "、"))
 }
 
 // TestPackageExposesNoWriteFunctions 把写口守卫从「*Store 的方法集」扩到**包导出面**。
@@ -417,8 +427,17 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这十七个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	// 期望项数由 len(want) 生成，**不手写**（TASK-011 闭合的守卫缺口）。
+	//
+	// 此前文案里手写着「恰好是这十七个」，而**没有任何东西比对它与 len(want)** ——
+	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
+	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
+	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
+	want := []string{"DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
+	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
+	assert.Equalf(t, want, got,
+		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
+			"都会绕过 Save 的签名防线", len(want))
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -1931,8 +1950,12 @@ func TestHasPeriodWrapsQueryError(t *testing.T) {
 	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
 }
 
-// Store 必须满足 PeriodChecker。签名漂移在编译期就红。
-var _ PeriodChecker = (*Store)(nil)
+// Store 必须满足 ArticleChecker。签名漂移在编译期就红。
+//
+// TASK-011 把 Discover 的判停从 HasPeriod 换成 HasArticle，这条随之从 PeriodChecker
+// 改过来。**HasPeriod 本身没被删**（store.go 仍有它，ingest_test.go 用它断言库状态），
+// 删的只是「Discover 依赖它」这条关系。
+var _ ArticleChecker = (*Store)(nil)
 
 // —— M1b-4b / TASK-003：一级幂等键 Store.HasArticle ——
 //
@@ -2398,4 +2421,67 @@ func TestRecentPendingWrapsScanError(t *testing.T) {
 	assert.Nil(t, got, "出错时不得返回半截结果")
 	assert.ErrorContains(t, err, "recent pending", "错误要带上下文")
 	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}
+
+// HasArticleInObservations 只认权威表 —— 这正是它与 HasArticle 的**全部**差别。
+//
+// 两者对同一行数据给出不同答案不是不一致，是消费者要的东西不同：
+//   - HasArticle（查两表）：ingest 层的一级幂等键，「这篇处理过没有」，pending 算
+//   - HasArticleInObservations（只查权威表）：Discover 层的判停键，pending **不算**，
+//     好让落进 pending 的那一期仍能被交出来重试
+//
+// 本条把「pending 那行在两个方法下答案相反」钉成契约。把新方法改成查两表（最省事的
+// 那种「统一」）会让它红，而那个改动的真实后果是：落 pending 的期次再也不会被自动重试。
+func TestHasArticleInObservationsIgnoresPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	const pendingID, observedID = "pending-article-1", "observed-article-1"
+
+	// 一期落 pending
+	_, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-15",
+			ArticleID: pendingID, CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, failing())
+	require.NoError(t, err)
+
+	// 另一期进权威表
+	_, err = s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2026-06", PeriodType: "h1", PublishedAt: "2026-07-15",
+			ArticleID: observedID, CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 310},
+	}, passing())
+	require.NoError(t, err)
+
+	t.Run("pending 里的那篇：两个方法答案相反", func(t *testing.T) {
+		both, err := s.HasArticle(ctx, pendingID)
+		require.NoError(t, err)
+		assert.True(t, both, "HasArticle 查两表，pending 算「处理过」")
+
+		obs, err := s.HasArticleInObservations(ctx, pendingID)
+		require.NoError(t, err)
+		assert.False(t, obs,
+			"只查权威表时 pending 不算 —— 这一条正是让 pending 期次能被自动重试的原因")
+	})
+
+	t.Run("权威表里的那篇：两个方法都为真", func(t *testing.T) {
+		both, err := s.HasArticle(ctx, observedID)
+		require.NoError(t, err)
+		assert.True(t, both)
+
+		obs, err := s.HasArticleInObservations(ctx, observedID)
+		require.NoError(t, err)
+		assert.True(t, obs)
+	})
+
+	t.Run("没见过的：都为假", func(t *testing.T) {
+		obs, err := s.HasArticleInObservations(ctx, "never-seen")
+		require.NoError(t, err)
+		assert.False(t, obs)
+	})
 }

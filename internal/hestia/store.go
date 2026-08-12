@@ -293,6 +293,39 @@ func (s *Store) HasArticle(ctx context.Context, articleID string) (bool, error) 
 	return true, nil
 }
 
+// HasArticleInObservations 回答「这篇文章进过**权威表**没有」。Discover 用它判停。
+//
+// # 它与 HasArticle 的分工，正是 Discover 与 ingest 那两层（TASK-011）
+//
+//	HasArticle                查两表（含 pending）—— **ingest 层**的一级幂等键，
+//	                          挡住「同一篇重抓一遍」。
+//	HasArticleInObservations  只查权威表          —— **Discover 层**的判停键，
+//	                          让 pending 期次仍能被交出来重试。
+//
+// 两层分工是 TASK-003/005 定案的形状，TASK-011 只是把 Discover 那一层的判据从
+// **期次**换成 **article_id**（修静默停摆），没有把两层合并。
+//
+// ⚠️ **别拿 HasArticle 顶替它做判停**：那样 pending 里的那篇会让 Discover 当场停，
+// 于是那一期**再也不会被自动重试** —— 修了校验 bug 或调了阈值之后它不会自己回来，
+// 只能靠 --force。而 Sprint 035 已登记「落 pending 的期次对依赖历史的闸门永久不可见」
+// 是结构性问题，把「更难自愈」变成「不可能自愈」是在那上面再加一道。
+//
+// 其余取舍与 HasArticle 逐条相同，理由见上：查**全表**而非 v_hestia_current（被取代
+// 的旧行同样是处理过的文章）；空 articleID 返回 (false, nil)；查库失败返回 (false, err)
+// —— 幂等门唯一危险的答案是**错误的 true**。
+func (s *Store) HasArticleInObservations(ctx context.Context, articleID string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM `+TableObservations+` WHERE article_id = ? LIMIT 1`, articleID).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("hestia store has article in observations %s: %w", articleID, err)
+	}
+	return true, nil
+}
+
 // Preceding 返回 period 之前最近 n 期的当前行，按 period 降序。
 //
 // 只在同一个 period_type 内比较：月度与半年度是两条独立序列，社融存量的环比

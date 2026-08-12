@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
 func readTestdata(t *testing.T, name string) []byte {
@@ -623,16 +625,32 @@ func (f *fakeFetcher) Get(_ context.Context, url string) ([]byte, error) {
 	return b, nil
 }
 
-type fakePeriodChecker struct {
-	have map[string]bool // key: period + "/" + periodType
-	err  error
+// fakeArticleChecker 按 article_id 回答「见过没有」（TASK-011 起判停改用它）。
+//
+// have 的键是 **article_id**，不是期次 —— 这正是本任务改判据的地方。键写错会让
+// 用例静默退化成「库里什么都没有」（恒 false ⇒ 永不提前返回），而那样的测试全绿。
+type fakeArticleChecker struct {
+	have map[string]bool // key: article_id，语义是「**在权威表里**见过」
+	// havePeriod 的键是 period + "/" + periodType。**它不是给 Discover 用的** ——
+	// Discover 只调 HasArticle。它存在是为了让「修订版」这个形态可构造：同一期
+	// **期次已入库、而这一篇的 article_id 是新的**。没有它，那个场景在 fake 上
+	// 根本表达不出来，消融也就无从对照（把实现改回 HasPeriod 时它才被调到）。
+	havePeriod map[string]bool
+	err        error
 }
 
-func (f fakePeriodChecker) HasPeriod(_ context.Context, p, pt string) (bool, error) {
+func (f fakeArticleChecker) HasArticleInObservations(_ context.Context, id string) (bool, error) {
 	if f.err != nil {
 		return false, f.err
 	}
-	return f.have[p+"/"+pt], nil
+	return f.have[id], nil
+}
+
+func (f fakeArticleChecker) HasPeriod(_ context.Context, p, pt string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.havePeriod[p+"/"+pt], nil
 }
 
 // twoPageFetcher 用真实快照拼一个两页的站点，并返回第 2 页的 URL。
@@ -673,8 +691,8 @@ func TestDiscoverFindsReportOnSecondPage(t *testing.T) {
 	f, u2 := twoPageFetcher(t)
 	want := targetOnPage2(t)
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 	require.NoError(t, err)
 
@@ -720,19 +738,25 @@ func TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly(t *testing.T) {
 
 	// A：空库 —— 没有任何提前返回的条件，应翻满 MaxPages
 	fa := threePageFetcher(t)
-	gotA, err := Discover(context.Background(), fa,
-		fakePeriodChecker{have: map[string]bool{}}, cfg)
+	gotA, stopA, err := Discover(context.Background(), fa,
+		fakeArticleChecker{have: map[string]bool{}}, cfg)
 	require.NoError(t, err)
-	assert.Len(t, fa.calls, 3, "空库下 HasPeriod 恒 false，应一路翻到 MaxPages（spec §4.3 首跑行为）")
+	assert.Len(t, fa.calls, 3, "空库下 HasArticle 恒 false，应一路翻到 MaxPages（spec §4.3 首跑行为）")
 	require.NotEmpty(t, gotA, "第 2 页上的那一期应当被发现")
+	assert.Equal(t, StopMaxPages, stopA, "空库翻满上限，停止原因必须是 max_pages")
 
-	// B：那一期已入库 —— 在第 2 页命中，不该再翻第 3 页
+	// B：那一篇已见过 —— 在第 2 页命中，不该再翻第 3 页
 	fb := threePageFetcher(t)
-	gotB, err := Discover(context.Background(), fb,
-		fakePeriodChecker{have: map[string]bool{target.Period + "/" + target.PeriodType: true}}, cfg)
+	gotB, stopB, err := Discover(context.Background(), fb,
+		fakeArticleChecker{have: map[string]bool{target.ArticleID: true}}, cfg)
 	require.NoError(t, err)
-	assert.Len(t, fb.calls, 2, "第 2 页命中已入库期次就该停")
-	assert.Empty(t, gotB, "唯一的候选已入库，不该产出任何东西")
+	assert.Len(t, fb.calls, 2, "第 2 页命中已见过的文章就该停")
+	assert.Empty(t, gotB, "唯一的候选已见过，不该产出任何东西")
+	assert.Equal(t, StopSeen, stopB, "命中已见过的文章而停，原因必须是 seen_article")
+
+	// 🔴 TASK-011 的 error_handling[0]：两种停法的**候选清单都可能是空的**
+	//（A 若把 MaxPages 设成 1 就是空），必须靠 StopReason 才分得开。
+	assert.NotEqual(t, stopA, stopB, "「翻满上限」与「命中已见过」必须可区分")
 
 	// 区别本身 —— 这一行才是本条的核心，前面两条各自都可能被退化实现满足
 	assert.Greater(t, len(fa.calls), len(fb.calls),
@@ -748,8 +772,8 @@ func TestDiscoverStopsAtKnownPeriod(t *testing.T) {
 	f, _ := twoPageFetcher(t)
 	target := targetOnPage2(t)
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{target.Period + "/" + target.PeriodType: true}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{target.ArticleID: true}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 10})
 	require.NoError(t, err)
 
@@ -761,8 +785,8 @@ func TestDiscoverStopsAtKnownPeriod(t *testing.T) {
 func TestDiscoverRespectsMaxPages(t *testing.T) {
 	f, _ := twoPageFetcher(t)
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 1})
 	require.NoError(t, err)
 
@@ -787,8 +811,8 @@ func TestDiscoverDoesNotExceedTotalPages(t *testing.T) {
 		u2:           readTestdata(t, "pboc-index-p2.html"),
 	}}
 
-	_, err = Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	_, _, err = Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 50})
 	require.NoError(t, err, "MaxPages=50 但总共只有 2 页，不该请求第 3 页")
 	assert.Len(t, f.calls, 2)
@@ -813,8 +837,8 @@ func TestDiscoverDeduplicatesAcrossPages(t *testing.T) {
 	// 两页给同样的内容 —— 同一期出现两次
 	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: p2, u2: p2}}
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 	require.NoError(t, err)
 	require.NotEmpty(t, got, "前置锚点：两页都喂 p2，至少该产出那一期；空集会让下面的计数断言平凡通过")
@@ -834,8 +858,8 @@ func TestDiscoverFailsOnCheckerError(t *testing.T) {
 	f, _ := twoPageFetcher(t)
 	want := errors.New("database is locked")
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}, err: want},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}, err: want},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 
 	require.Error(t, err)
@@ -848,14 +872,14 @@ func TestDiscoverFailsOnCheckerError(t *testing.T) {
 
 // failOnNthChecker 前 n 次正常返回「未入库」，第 n+1 次开始返回错误。
 //
-// 指针接收者是必须的：要跨调用计数。（fakePeriodChecker 是值接收者，复制一份就丢了计数。）
+// 指针接收者是必须的：要跨调用计数。（fakeArticleChecker 是值接收者，复制一份就丢了计数。）
 type failOnNthChecker struct {
 	n    int
 	seen int
 	err  error
 }
 
-func (c *failOnNthChecker) HasPeriod(_ context.Context, _, _ string) (bool, error) {
+func (c *failOnNthChecker) HasArticleInObservations(_ context.Context, _ string) (bool, error) {
 	c.seen++
 	if c.seen > c.n {
 		return false, c.err
@@ -890,7 +914,7 @@ func TestDiscoverReturnsNoPartialResultOnCheckerError(t *testing.T) {
 	want := errors.New("database is locked")
 	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: page}}
 
-	got, err := Discover(context.Background(), f,
+	got, _, err := Discover(context.Background(), f,
 		&failOnNthChecker{n: 1, err: want},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 5})
 
@@ -911,8 +935,8 @@ func TestDiscoverFailsOnFetchError(t *testing.T) {
 		want := errors.New("connection refused")
 		f.err = want
 
-		got, err := Discover(context.Background(), f,
-			fakePeriodChecker{have: map[string]bool{}},
+		got, _, err := Discover(context.Background(), f,
+			fakeArticleChecker{have: map[string]bool{}},
 			DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 
 		require.Error(t, err)
@@ -930,8 +954,8 @@ func TestDiscoverFailsOnFetchError(t *testing.T) {
 		// 只备第 1 页：翻到第 2 页时 fake 报错，且错误里带着那一页的 URL
 		f := &fakeFetcher{pages: map[string][]byte{testIndexURL: p1}}
 
-		got, err := Discover(context.Background(), f,
-			fakePeriodChecker{have: map[string]bool{}},
+		got, _, err := Discover(context.Background(), f,
+			fakeArticleChecker{have: map[string]bool{}},
 			DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 
 		require.Error(t, err, "翻页中途失败必须中断，不能拿着残缺清单正常返回")
@@ -956,8 +980,8 @@ func TestDiscoverFailsOnScanError(t *testing.T) {
 		badBase: readTestdata(t, "pboc-index-p2.html"),
 	}}
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: badBase, MaxPages: 1})
 
 	require.Error(t, err, "条目 URL 补全失败必须中断，不得静默丢弃整页候选")
@@ -976,8 +1000,8 @@ func TestDiscoverFailsOnPagingParseError(t *testing.T) {
 		testIndexURL: []byte("<html><body>改版了，没有分页控件</body></html>"),
 	}}
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 5})
 
 	require.Error(t, err, "解析不到分页控件必须中断，不得退化成只扫第 1 页")
@@ -1015,8 +1039,8 @@ func TestDiscoverFailsOnPageURLError(t *testing.T) {
 
 	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: broken}}
 
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 
 	require.Error(t, err, "拼不出下一页 URL 必须中断，不得只扫第 1 页就正常返回")
@@ -1028,8 +1052,8 @@ func TestDiscoverFailsOnPageURLError(t *testing.T) {
 // Discover 全程不碰文章页。取正文是 4b 的事。
 func TestDiscoverNeverFetchesArticlePages(t *testing.T) {
 	f, _ := twoPageFetcher(t)
-	got, err := Discover(context.Background(), f,
-		fakePeriodChecker{have: map[string]bool{}},
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
 		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
 	require.NoError(t, err)
 	require.NotEmpty(t, got, "前置条件：应当发现了候选（空集会让下面的遍历平凡通过）")
@@ -1038,4 +1062,234 @@ func TestDiscoverNeverFetchesArticlePages(t *testing.T) {
 		assert.NotContains(t, f.calls, c.URL,
 			"候选的文章 URL 不该被请求：Discover 只发现，不取正文")
 	}
+}
+
+// 🔴 TASK-011 的存在理由：**已入库期次排在前面，会让它之后的所有未入库期次静默消失。**
+//
+// 用两份真实快照拼一个站点：p7 上是 2026-03/q1（**假设已入库**），p2 上是 2026-06/h1
+// （未入库）。真实央行页面正是这个形态——index 按**发布时间**倒序，而修订版重发时
+// 发布时间最新、期次却是旧的，于是「已入库的旧期次」会排到「未入库的新期次」前面。
+//
+// 判停注释写的理由是「index 按时间倒序，再往后只会更旧」——它把**发布时间倒序**
+// 和**期次倒序**当成了同一件事。这两者在重发/修订时分叉。
+func TestDiscoverDoesNotStopAtKnownPeriodAheadOfUnknownOne(t *testing.T) {
+	p7 := readTestdata(t, "pboc-index-p7.html")
+	p2 := readTestdata(t, "pboc-index-p2.html")
+
+	tmpl, _, err := parsePaging(p7)
+	require.NoError(t, err)
+	u2, err := pageURL(testIndexURL, tmpl, 2)
+	require.NoError(t, err)
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: p7, u2: p2}}
+
+	// 前置锚点：确认两份快照确实是「第 1 页一期、第 2 页另一期」的形态，
+	// 否则下面断言的空集可能来自快照本身没有条目，而不是判停规则。
+	first, err := scanPage(p7, testIndexURL)
+	require.NoError(t, err)
+	require.Len(t, first, 1, "p7 上应恰有一期")
+	second, err := scanPage(p2, testIndexURL)
+	require.NoError(t, err)
+	require.Len(t, second, 1, "p2 上应恰有一期")
+	require.NotEqual(t, first[0].Period, second[0].Period, "两页必须是不同期次")
+
+	got, _, err := Discover(context.Background(), f,
+		fakeArticleChecker{
+			// 🔴 这正是「修订版」的形态，也是本用例的全部要害：
+			//   - 期次 2026-03/q1 **已入库**（havePeriod 命中）
+			//   - 但这一篇的 article_id 是**新的**（have 不命中）——重发产生新 URL
+			// 按期次判停 ⇒ 第一条就停 ⇒ 第 2 页那期静默消失。
+			// 按 article_id 判停 ⇒ 不停 ⇒ 继续翻，第 2 页那期被发现。
+			have:       map[string]bool{},
+			havePeriod: map[string]bool{first[0].Period + "/" + first[0].PeriodType: true},
+		},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+
+	require.NoError(t, err)
+
+	// 🔴 这几条是本任务的全部理由。
+	require.NotEmpty(t, got, "第 1 页那期已入库，不该让第 2 页那期跟着消失")
+	assert.Len(t, f.calls, 2, "必须翻到第 2 页，而不是停在第 1 页")
+
+	var periods []string
+	for _, c := range got {
+		periods = append(periods, c.Period)
+	}
+	// 受害者：它在第 1 页那条之后，旧实现里整个消失。
+	assert.Containsf(t, periods, second[0].Period,
+		"第 2 页那期未入库的必须被发现，得到 %v", periods)
+	// 修订版自己也该被收进来 —— 它有新的 article_id，就是没见过的东西。
+	// ⚠️ 断言的是 Contains 而不是 got[0]：**顺序不是本用例要守的性质**，
+	// 写成 got[0] 会让它同时绑死「谁排第一」，那是另一条测试的事。
+	assert.Containsf(t, periods, first[0].Period,
+		"修订版有新 article_id，本身也是没见过的，应当一并收进候选，得到 %v", periods)
+}
+
+// 🔴 TASK-011 boundary[0]：**站点迁移后一轮自愈**，用真库实证而不是推理。
+//
+// 换成 article_id 判停时，`discover.go` 原有一段带 M0 实测支撑的反论证挡在前面：
+//
+//	按 article_id 判停，一次迁移后全部 id 变新，**每次唤起都会翻满上限**，
+//	且每期都被当成新文章。
+//
+// 那段论证的前半是对的（迁移后第一轮确实全 miss、确实翻满），**错在「每次」**。
+// 本用例证明代价只发生一轮：
+//
+//	第 1 轮：库里存**旧** id ⇒ HasArticle(新 id) miss ⇒ 不停 ⇒ 翻满 ⇒ 候选被交出来
+//	  ↓ 走一次 Save（模拟 ingest）
+//	Save 的 Lookup 按业务键 {period, period_type} 查 —— **article_id 不在业务键里**
+//	（store.go 的 NewSpec），迁移不改 published_at ⇒ Classify 判 Duplicate
+//	  ↓ Duplicate 分支调 refreshArticleID，把那一行的 article_id 刷成新的
+//	第 2 轮：HasArticle(新 id) 命中 ⇒ **当场停**，恢复正常
+//
+// ⚠️ **链条里最脆的一环是「Lookup 会不会把新 id 当成另一个业务键」** —— 若 article_id
+// 在业务键里，第 1 轮就会判 New、id 永不刷新，「一轮自愈」退化成「每轮全量重抓」，
+// 也就是那段反论证担心的东西换了个位置发生。本用例的第 1 轮断言 Verdict 就是钉它。
+func TestDiscoverSelfHealsAfterSiteMigration(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	f, _ := twoPageFetcher(t)
+	target := targetOnPage2(t) // 第 2 页快照上那一期，article_id 取自快照（= 迁移后的「新」id）
+	cfg := DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2}
+
+	const oldID = "2025092212550713215" // 迁移前的旧 id（M0 实测的那种时间戳形态）
+	require.NotEqual(t, oldID, target.ArticleID, "前置锚点：新旧 id 必须不同，否则本用例什么都没测")
+
+	// 库里那一行存的是**旧** id —— 这就是「站点迁移之后」的状态。
+	seed := Observation{
+		Meta: Meta{
+			Period: target.Period, PeriodType: target.PeriodType,
+			PublishedAt: "2026-07-15", ArticleID: oldID,
+			CaliberVersion: "2025-01", Extractor: "rule@v2",
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}
+	_, err := s.Save(ctx, seed, passing())
+	require.NoError(t, err)
+
+	// —— 第 1 轮：miss ⇒ 不停 ⇒ 翻满 ——
+	got1, stop1, err := Discover(ctx, f, s, cfg)
+	require.NoError(t, err)
+	require.NotEmpty(t, got1, "新 id 没见过，这一期必须被交出来")
+	assert.Equal(t, StopMaxPages, stop1, "迁移后第一轮没有任何 id 命中，应翻满上限")
+	assert.Len(t, f.calls, 2, "翻满 MaxPages=2")
+
+	var found *Candidate
+	for i := range got1 {
+		if got1[i].Period == target.Period && got1[i].PeriodType == target.PeriodType {
+			found = &got1[i]
+		}
+	}
+	require.NotNil(t, found, "那一期必须在候选里")
+	require.Equal(t, target.ArticleID, found.ArticleID, "候选带的是 index 上的新 id")
+
+	// —— 模拟 ingest 走一次 Save：这是自愈真正发生的地方 ——
+	migrated := seed
+	migrated.Meta.ArticleID = found.ArticleID // 只有 id 变了，期次与发布日都没变
+	out, err := s.Save(ctx, migrated, passing())
+	require.NoError(t, err)
+	// 🔴 最脆的一环：必须是 Duplicate。判 New 意味着 article_id 进了业务键，
+	// 那样 id 永不刷新，「一轮自愈」就退化成「每轮全量重抓」。
+	require.Equal(t, bitemporal.Duplicate, out.Verdict,
+		"同期次 + 新 article_id 必须判 Duplicate —— 这一环不成立的话整条自愈链都不成立")
+	assert.Equal(t, TableObservations, out.Table, "Duplicate 只刷 id，不写 pending")
+
+	// id 确实被刷新了（不看 Save 的返回值，直接问库）
+	has, err := s.HasArticle(ctx, found.ArticleID)
+	require.NoError(t, err)
+	require.True(t, has, "refreshArticleID 应当已把那一行的 id 刷成新的")
+
+	// —— 第 2 轮：命中 ⇒ 当场停 ——
+	f2, _ := twoPageFetcher(t)
+	got2, stop2, err := Discover(ctx, f2, s, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, StopSeen, stop2, "第 2 轮应当命中已见过的文章而停")
+	assert.Empty(t, got2, "没有新东西了")
+	assert.Len(t, f2.calls, 2,
+		"p1 无报告条目故仍会翻到 p2，在 p2 命中即停 —— 关键是 stop2 从 max_pages 变成了 seen_article")
+}
+
+// 去重键必须与判停键**是同一把标识**（都用 article_id），否则判停会漏判。
+//
+// 场景：同一期的**两篇**同时在榜 —— 修订版（新 id，没见过）排在前，原文（旧 id，
+// 已见过）紧随其后。这在重发那几天是真实形态。
+//
+//   - 按 article_id 去重：原文那条进得了 has 检查 ⇒ 命中 ⇒ **停**（StopSeen）
+//   - 按期次去重：修订版已把 `期次` 这个键占上 ⇒ 原文在**查库之前**就被 continue
+//     掉 ⇒ 那次命中根本没发生 ⇒ 一路翻到上限（StopMaxPages）
+//
+// ⚠️ 本条是补上去的：消融实测发现把去重键改回期次时**没有任何断言变红** ——
+// 我在 discover.go 那句「用期次去重会让判停漏判」当时只是一句没人守的声明。
+// 现在它由 StopReason 这个可观测差异钉住。
+//
+// 后果不是数据错，而是**每次唤起都白翻满上限**（判停失效 ⇒ 永远走不到提前返回）。
+func TestDiscoverDedupKeyMatchesStopKey(t *testing.T) {
+	const seenID, freshID = "5868082", "5999999"
+	page := []byte(`
+<a href="/goutongjiaoliu/113456/113469/` + freshID + `/index.html">2025年前三季度金融统计数据报告</a>
+<a href="/goutongjiaoliu/113456/113469/` + seenID + `/index.html">2025年前三季度金融统计数据报告</a>
+<a href="###" onclick="jumpTo(this,'9','1','/goutongjiaoliu/113456/113469/11040-%1.html')">尾页</a>
+`)
+	// 前置锚点：两条必须同期次、不同 id —— 场景本身要成立。
+	items, err := scanPage(page, testIndexURL)
+	require.NoError(t, err)
+	require.Len(t, items, 2, "合成页上应有两条同期次的报告")
+	require.Equal(t, items[0].Period, items[1].Period, "两条必须是同一期")
+	require.NotEqual(t, items[0].ArticleID, items[1].ArticleID, "两条必须是不同的文章")
+
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: page}}
+	got, stop, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{seenID: true}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 1})
+	require.NoError(t, err)
+
+	assert.Equal(t, StopSeen, stop,
+		"原文那条已见过，必须走到 has 检查并触发停止；按期次去重会让它被跳过 ⇒ 变成 max_pages")
+	require.Len(t, got, 1, "只有修订版那条是没见过的")
+	assert.Equal(t, freshID, got[0].ArticleID)
+}
+
+// 🔴 人类 2026-08-13 裁决 (B) 的**行为保证**：pending 里的期次必须仍被交出来。
+//
+// 判停若用 `HasArticle`（查两表），pending 那篇会让 Discover 当场停 ⇒ 那一期
+// **再也不会被自动重试**：修了校验 bug 或调了阈值之后它不会自己回来，只能靠 --force。
+// 而 Sprint 035 已登记「落 pending 的期次对依赖历史的闸门永久不可见」是结构性问题。
+//
+// 用 `HasArticleInObservations`（只查权威表）则：pending 那篇不命中 ⇒ 不停 ⇒ 候选
+// 照常交出 ⇒ 由 ingest 层的 `HasArticle` 挡住并打印 already ingested。**两层各司其职。**
+//
+// ⚠️ 这条与 store_test.go 的 TestHasArticleInObservationsIgnoresPending 是**互补的一对**：
+// 那条钉「两个方法对同一行答案相反」，本条钉「Discover 用的是不认 pending 的那个」。
+// 只有那条时，把 Discover 改回 HasArticle 不会有任何东西红。
+func TestDiscoverStillYieldsPendingPeriods(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	f, _ := twoPageFetcher(t)
+	target := targetOnPage2(t)
+
+	// 那一期落 pending，article_id 与 index 上的**完全一致**（即「上一轮抓过、没过闸」）
+	_, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: target.Period, PeriodType: target.PeriodType, PublishedAt: "2026-07-15",
+			ArticleID: target.ArticleID, CaliberVersion: "2025-01", Extractor: "rule@v2",
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, failing())
+	require.NoError(t, err)
+
+	// 前置锚点：确认它确实只在 pending 里 —— 否则本用例测的是另一件事。
+	inBoth, err := s.HasArticle(ctx, target.ArticleID)
+	require.NoError(t, err)
+	require.True(t, inBoth, "前置：这篇应当在 pending 里")
+	inObs, err := s.HasArticleInObservations(ctx, target.ArticleID)
+	require.NoError(t, err)
+	require.False(t, inObs, "前置：它不该在权威表里")
+
+	got, stop, err := Discover(ctx, f, s, DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, got, "pending 里的期次必须仍被交出来，否则它永远等不到重试")
+	assert.Equal(t, target.ArticleID, got[0].ArticleID)
+	assert.Equal(t, StopMaxPages, stop, "没有任何 id 在权威表里，应翻满上限而不是提前停")
 }

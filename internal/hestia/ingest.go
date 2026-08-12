@@ -22,6 +22,16 @@ type IngestDeps struct {
 	Force bool      // 绕过一级幂等键，用于改了阈值后重跑
 }
 
+// neverSeen 是 Force 用的 ArticleChecker：什么都没见过，于是 Discover 不会提前返回。
+//
+// 不用 nil 表示「不检查」：nil 接口会让 Discover 在调用处 panic，而「Force 时跳过
+// 判停」是一个**行为**，应当由一个说得出名字的实现承载，不是由一个特例分支承载。
+type neverSeen struct{}
+
+func (neverSeen) HasArticleInObservations(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 // Ingest 跑一轮发现与入库。
 //
 // 单期失败**不中断整批** —— 一期解析失败不该阻止其它期入库。逐期收集，最后
@@ -35,13 +45,29 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 		d.Out = io.Discard
 	}
 
-	cands, err := Discover(ctx, d.Fetch, d.Store, d.Cfg.Discover)
+	// Force 必须同时穿透**两层**幂等（TASK-011 修回归）。
+	//
+	// TASK-011 之前 Discover 按**期次**判停、ingestOne 按 **article_id** 跳过，两层
+	// 判据不同，Force 只需绕过后者。判停换成 article_id 之后两层同判据了：Discover
+	// 会在那篇上直接停 ⇒ 候选清单里根本没有它 ⇒ **Force 无从生效**（实测：
+	// TestIngestSkipsSeenArticleUnlessForce/Force 那条断言「应当真的被重新处理并
+	// 入库」失败）。所以 Force 时喂一个「什么都没见过」的 checker。
+	//
+	// 代价是 Force 会翻满 MaxPages —— 那正是 Force 的语义（重来一遍），不是意外。
+	var known ArticleChecker = d.Store
+	if d.Force {
+		known = neverSeen{}
+	}
+	cands, stop, err := Discover(ctx, d.Fetch, known, d.Cfg.Discover)
 	if err != nil {
 		// 此刻还没有任何期次，能给的定位上下文只有 index URL。
 		return fmt.Errorf("hestia ingest: discover %s: %w", d.Cfg.Discover.IndexURL, err)
 	}
 	if len(cands) == 0 {
-		fmt.Fprintln(d.Out, "no new reports")
+		// 带上停止原因（TASK-011）：`no new reports` 单独一句在两种情形下完全同形——
+		// 「命中已见过的文章、正常停」与「翻满上限仍一无所获」。后者意味着窗口外
+		// 可能还有发现不了的期次，而运维只看这一行是分不出来的。
+		fmt.Fprintf(d.Out, "no new reports (stopped: %s)\n", stop)
 		return nil
 	}
 
