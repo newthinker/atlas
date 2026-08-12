@@ -531,16 +531,28 @@ func TestScanPageFiltersRatherThanMisses(t *testing.T) {
 
 // 🔴 放宽 articleLinkRE 的**否定式边界**：多进来的栏目导航链接必须产出 0 候选。
 //
-// 把 `\d{14,}` 放宽到 `\d+` 是本任务的核心改动，代价是每页多命中 43 条链接
-// （实测：全页命中 15 → 59，多出来的全是 `/rmyh/105145/index.html` 这类栏目导航页，
-// id 是 6 位栏目号；4 份快照上这个数完全一致）。放宽本身安全 —— 它们的链接文本是
-// 「货币政策」「金融市场」这种栏目名，过不了 parsePeriod。
+// 把 `\d{14,}` 放宽到 `\d+` 是本任务的核心改动，代价是每页多命中一批链接——全是
+// `/rmyh/105145/index.html` 这类栏目导航页（id 是 6 位栏目号）。放宽本身安全：它们的
+// 链接文本是「货币政策」「网站地图」这种栏目名，过不了 parsePeriod。
 //
 // **但「安全」这件事必须有断言钉住，否则下一个放宽的人没有网**：articleLinkRE 已经
 // 没有任何位数约束了，再往下松只能松 href 的形态，而那一步的后果就没人测了。
 //
+// ⚠️ **断言钉的是「0 条候选」，刻意不钉「多出多少条」** —— 后者是快照的偶然属性。
+// 这不是审美判断，是实测：同一个问题「放宽多出几条」有**四个各自都对的答案**，
+// 差别只在你去没去重、以及算不算栏目自链接（p1 实测）：
+//
+//	44 = 全部命中数之差（59 − 15），**含重复**
+//	43 = 按 href 去重后多出的条数（网站坐标里「网站地图」那条在页头页尾各一次）
+//	43 = 非新闻栏目路径下的命中数，**含重复**（与上一个同值纯属巧合）
+//	42 = 非新闻栏目路径下的**去重**条数
+//
+// 任何一个数写进断言，都会在另一个口径的人重跑时红，而**红的理由与实现无关** ——
+// 那种红最容易被误读成「实现错了」然后去改实现。⇒ 前置锚点改用**内容式**
+// （NotEmpty + 钉住具体两条导航链接），它不随页头页脚增删而变。
+//
 // 本条与上面「第 1 页没有报告条目」是**互补的一对**：那条断言 p1 产出空集，本条
-// 断言那个空集**不是平凡的** —— 循环体确实转了 59 次，59 条全被 parsePeriod 拒掉。
+// 断言那个空集**不是平凡的** —— 循环体确实转过，转进来的每一条都被 parsePeriod 拒掉。
 // 只有那条时，一个恒返回 nil 的 scanPage 与一个正确过滤的 scanPage 无从区分。
 func TestScanPageIgnoresNavigationLinks(t *testing.T) {
 	const base = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"
@@ -560,23 +572,31 @@ func TestScanPageIgnoresNavigationLinks(t *testing.T) {
 				titles = append(titles, strings.TrimSpace(tagRE.ReplaceAllString(string(m[3]), "")))
 			}
 
-			// 前置锚点，两条：数量对得上，且**确实是**导航链接。少了任一条，
-			// 下面那个「全部被拒」的循环都可能在空集或错的集合上平凡通过。
-			require.Len(t, hrefs, 43, "放宽位数下界后，每页多命中的导航链接数")
+			// 前置锚点：**内容式**，不钉总数（理由见上面那张四个数的表）。
+			// 三条缺一不可 —— 没有它们，下面「全部被拒」的循环会在空集或错的
+			// 集合上平凡通过，而那正是本用例要防的事。
+			require.NotEmpty(t, hrefs, "放宽位数下界后应当有栏目导航链接被命中")
 			assert.Contains(t, hrefs, "/rmyh/105145/index.html", "货币政策栏目那条应在其中")
 			assert.Contains(t, titles, "货币政策")
+			assert.Contains(t, titles, "网站地图", "页头页尾各一次，也是上面 43/42 之差的来源")
 
+			// 钉 0：这才是本条断言的信息量所在。
+			var produced int
 			for i, title := range titles {
-				_, _, ok := parsePeriod(title)
-				assert.Falsef(t, ok, "导航链接 %s（%q）不该产出候选", hrefs[i], title)
+				if _, _, ok := parsePeriod(title); ok {
+					produced++
+					t.Errorf("导航链接 %s（%q）不该产出候选", hrefs[i], title)
+				}
 			}
+			assert.Zerof(t, produced, "多命中的 %d 条导航链接必须一条候选都不产", len(hrefs))
 		})
 	}
 
-	// 整条链路上的同一件事：p1 全页 59 条命中，一条候选都不产。
+	// 整条链路上的同一件事：p1 全页命中的每一条都进了 scanPage 的循环体，
+	// 一条候选都不产（同样钉 0，不钉命中总数）。
 	got, err := scanPage(readTestdata(t, "pboc-index-p1.html"), base)
 	require.NoError(t, err)
-	assert.Empty(t, got, "p1 没有报告条目，59 条命中全被 parsePeriod 拒掉")
+	assert.Empty(t, got, "p1 没有报告条目，命中的每一条都被 parsePeriod 拒掉")
 }
 
 const testIndexURL = "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html"
