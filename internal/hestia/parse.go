@@ -9,16 +9,37 @@ import (
 // 本文件是四层流水线的组装层：strip → detect → scope → extract，外加两处从
 // 期次推导元数据的纯函数。它是本子迭代**唯一的导出入口**。
 
-// titleRE 拆解报告标题的三种形态：
+// titleRE 拆解报告标题的五种形态：
 //
 //	2025年金融统计数据报告        → 年度
+//	2026年一季度金融统计数据报告   → 一季度（年初起累计，1–3 月）
 //	2020年上半年金融统计数据报告   → 半年度
+//	2025年前三季度金融统计数据报告 → 前三季度（年初起累计，1–9 月）
 //	2026年6月金融统计数据报告      → 月度
 //
 // 「金融统计数据报告」是必需的后缀，且两端都锚定：央行同期还发《社会融资规模
 // 统计数据报告》，不锚定后缀会把那篇也认下来，而它的板块结构完全不同——认下来
 // 会一路错到 extract，且错得像模像样。
-var titleRE = regexp.MustCompile(`\A([0-9]{4})年(上半年|[0-9]{1,2}月)?金融统计数据报告\z`)
+//
+// # 与 discover.go 的 reportTitleRE 是两份并行的解析，刻意不同（TASK-010）
+//
+// 那边看列表页的**链接文本**、这边看文章页的 `<meta name="ArticleTitle">`，两者
+// 期末月约定必须同源（q1→03、h1→06、q1_q3→09、annual→12），但**季度段的宽窄
+// 有意不同**：
+//
+//   - 那边写宽（`[一二三四五六七八九十]季度`）再由语义层只放行「一季度」——因为
+//     在列表页上「不匹配」是**安静**的（一页 15 条里 14 条本就不是报告），把二/三/
+//     四季度挡在语义层才留得下位置、注释和用例。
+//   - 这边只列 `一季度|前三季度` —— 因为在这里「不匹配」是**响亮**的：parseTitle
+//     直接返回 `unrecognized report title %q`，标题原文就在错误信息里。再加一层
+//     语义拒绝只是把同一句话换个地方说。
+//
+// ⚠️ 央行**不发**二/三/四季度的《金融统计数据报告》（那三段分别由上半年 / 前三
+// 季度 / 全年覆盖）。真出现「三季度」也必须拒：它字面上无法区分单季（7–9 月）与
+// 累计（1–9 月），期末月同为 09 而月均折算除数是 3 与 9 —— 猜错正是 types.go 的
+// validPeriodTypes 警告的「错一个量级」。
+var titleRE = regexp.MustCompile(
+	`\A([0-9]{4})年(一季度|上半年|前三季度|[0-9]{1,2}月)?金融统计数据报告\z`)
 
 // parseTitle 从标题推出 period 与 period_type。
 //
@@ -30,15 +51,23 @@ func parseTitle(title string) (period, periodType string, err error) {
 	if m == nil {
 		return "", "", fmt.Errorf(
 			"hestia: unrecognized report title %q "+
-				"(want 「YYYY年金融统计数据报告」/「YYYY年上半年…」/「YYYY年M月…」)", title)
+				"(want 「YYYY年金融统计数据报告」/「YYYY年一季度…」/「YYYY年上半年…」/"+
+				"「YYYY年前三季度…」/「YYYY年M月…」)", title)
 	}
 	year, qualifier := m[1], m[2]
 
 	switch qualifier {
 	case "":
 		return year + "-12", "annual", nil
+	case "一季度":
+		return year + "-03", "q1", nil
 	case "上半年":
 		return year + "-06", "h1", nil
+	case "前三季度":
+		// 「前三季度」= 1–9 月累计，不是第 3 季度单季。periodType 叫 q1_q3 而不是
+		// q3，理由与期末月一起定在 TASK-001 的 discovery 里：两者期末月同为 09，
+		// 月均折算除数却是 9 与 3。
+		return year + "-09", "q1_q3", nil
 	default:
 		// 「6月」→ 6 → "06"。不补零会产出 "2026-6"：bitemporal 按字典序比较业务键，
 		// 那会成为与 "2026-06" 不同的键，同一日历月在视图里出现两次。
@@ -175,24 +204,47 @@ func Parse(raw []byte) (Observation, error) {
 	}, nil
 }
 
-// checkPeriodTypeSupported 挡住零样本验证的期次形态。
+// checkPeriodTypeSupported 挡住抽取侧还接不了的期次形态。
 //
-// 目前只有 monthly 落在这里：两份样本一份 annual、一份 h1，月报**一份都没有**。
-// 而月报恰恰是孪生句问题最严重的形态——正文同时含期内累计句与当月句，且哪句在前
-// 无样本可证；extract 侧的 cumulativePeriods 只认「全年/上半年」，对 5 月报的
-// 「1-5月」这类前缀会整条不命中。
+// 悄悄放行会让这些期次产出**看起来完全正常**的 Values：键数对、量级对、全在白名单
+// 内，而里面装的是错口径的数——下游没有任何闸门拦得住。故显式拒绝。
 //
-// 悄悄放行会让一份月报产出**看起来完全正常**的 Values：键数对、量级对、全在白名单
-// 内，而 YTD 字段里装的可能是当月数——下游没有任何闸门拦得住。故显式拒绝。
+// # 判据是「默认拒绝」，不是「列出几个坏的」（TASK-010 改）
 //
-// 拿到月报样本后删掉这个函数与它的调用即可，parseTitle 及其测试一行都不用改。
+// 原来写的是 `if periodType != "monthly" { return nil }` —— 一条**默认放行**的规则。
+// TASK-001 往 validPeriodTypes 加了 q1 / q1_q3 之后，这两种抽取侧根本没接的期次
+// 就这样直接穿过去了，而**没有任何测试会红**。改成穷举 switch 之后，新增第六种
+// period_type 会由 TestEveryPeriodTypeHasAnExplicitSupportDecision 逼人明确表态。
+//
+// 解除的方式是**逐个删分支**，不是删整个函数：
+//   - monthly：拿到月报样本后删 monthly 分支。
+//   - q1 / q1_q3：TASK-004 把 periodAlt 与 cumulativePeriods 接上后删这两条。
+//
+// 两处解除都不用动 parseTitle 及其测试。
 func checkPeriodTypeSupported(periodType, title string) error {
-	if periodType != "monthly" {
-		return nil
+	switch periodType {
+	case "monthly":
+		// 月报是孪生句问题最严重的形态——正文同时含期内累计句与当月句，且哪句在前
+		// 无样本可证；extract 侧的 cumulativePeriods 只认「全年/上半年」，对 5 月报的
+		// 「1-5月」这类前缀会整条不命中。
+		return fmt.Errorf(
+			"hestia: period_type monthly is not supported yet (title %q): no monthly sample exists "+
+				"to validate against, and monthly reports carry both a period-to-date and a "+
+				"current-month sentence for the same field — refusing to guess which one the "+
+				"*_ytd fields should hold", title)
+	case "q1", "q1_q3":
+		// 中间态（TASK-001 与 TASK-010 已落、TASK-004 未落）：discover 认得季报、
+		// 标题层也认得，但 extract 侧的 periodAlt 只认「全年|上半年|N月份」，
+		// cumulativePeriods 只认「全年|上半年」。
+		//
+		// 错误信息里写死 TASK-004 这个出口，是因为**不写的话这里的失败会伪装成
+		// 抽取规则的 bug**：放行后真正报错的是 extract 深处的
+		// `not found among 0 candidate sentence(s)`，接手的人会去改抽取规则。
+		return fmt.Errorf(
+			"hestia: period_type %s is not supported yet (title %q): 季报抽取侧尚未接线——"+
+				"profiles.go 的 periodAlt 只认「全年|上半年|N月份」、cumulativePeriods 只认"+
+				"「全年|上半年」，放行会让期内累计句整条不命中而产出一份看起来正常的空壳。"+
+				"由 M1b-4b 的 TASK-004 接上后解除本分支", periodType, title)
 	}
-	return fmt.Errorf(
-		"hestia: period_type monthly is not supported yet (title %q): no monthly sample exists "+
-			"to validate against, and monthly reports carry both a period-to-date and a "+
-			"current-month sentence for the same field — refusing to guess which one the "+
-			"*_ytd fields should hold", title)
+	return nil
 }

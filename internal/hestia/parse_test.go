@@ -43,6 +43,15 @@ func TestParseTitle(t *testing.T) {
 		{"2026年6月金融统计数据报告", "2026-06", "monthly"},
 		{"2026年11月金融统计数据报告", "2026-11", "monthly"},
 		{"2026年1月金融统计数据报告", "2026-01", "monthly"},
+
+		// —— 季报（TASK-010）。期次值**逐字采用 TASK-001 discovery 里定的那一套** ——
+		//
+		// 两套会在 Meta.validate 处炸（periodEndMonth 的组合校验），而那是运行时。
+		// discover.go 的 parsePeriod 与这里的 parseTitle 是**两份并行的**期次解析，
+		// 一个看列表页链接文本、一个看文章页的 <meta name="ArticleTitle">，
+		// 期末月约定必须同源：q1→03、h1→06、q1_q3→09、annual→12。
+		{"2026年一季度金融统计数据报告", "2026-03", "q1"},
+		{"2025年前三季度金融统计数据报告", "2025-09", "q1_q3"},
 	} {
 		t.Run(tc.title, func(t *testing.T) {
 			period, pt, err := parseTitle(tc.title)
@@ -69,9 +78,17 @@ func TestParseTitlePadsMonth(t *testing.T) {
 	assert.Len(t, period, 7)
 }
 
+// ⚠️ TASK-010 起「季度」不再一律不认 —— `一季度` / `前三季度` 已是合法形态。
+// 本组里留下的几条季度标题各有各的拒绝理由，写在行末，别再笼统写成「季度报表不认」。
 func TestParseTitleRejectsUnknownShape(t *testing.T) {
 	for _, bad := range []string{
-		"2025年第三季度金融统计数据报告", // 季度报表：不是已知的三种期次
+		// 「第三季度」带「第」字，且央行发的是「前三季度」（1–9 月累计）而不是
+		// 第 3 季度单季（7–9 月）。两者期末月同为 09、月均折算除数却是 9 与 3
+		// ——认下来就是 types.go 警告的「错一个量级且完全看不出来」。
+		"2025年第三季度金融统计数据报告",
+		// 同上，去掉「第」字也不认：央行不发二/三/四季度的《金融统计数据报告》，
+		// 那三段分别由上半年 / 前三季度 / 全年覆盖（与 discover.go 的 parsePeriod 同口径）。
+		"2025年三季度金融统计数据报告",
 		"2025年社会融资规模统计数据报告", // 另一篇报告，板块结构完全不同
 		"金融统计数据报告",
 		"2025年13月金融统计数据报告",  // 月份越界
@@ -305,6 +322,97 @@ func TestParseRejectsMonthlyUntilSampled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "2026-06", period)
 	assert.Equal(t, "monthly", pt)
+}
+
+// 🔴 TASK-010：季度类型同样要被**显式拒绝**，直到 TASK-004 把抽取侧接上。
+//
+// 用 TASK-001 落在 testdata/ 的**真实季报正文**跑，而不是合成 HTML —— 合成 HTML
+// 只能证明「拒绝逻辑会触发」，真实样本才能证明「真拿到这篇报告时它确实触发」。
+// 两份样本的 <meta name="ArticleTitle"> 与 PubDate 都是真的（2026-04-13 / 2025-10-15）。
+//
+// ⚠️ **这条断言的寿命是有限的，而且这是设计**：TASK-004 接上抽取侧后会删掉
+// checkPeriodTypeSupported 里的季度分支，本条随之要改成「Parse 成功」。
+// 到那时**别把它删掉** —— 改成正例，它就变回一条端到端守卫。
+func TestParseRejectsQuarterlyUntilExtractorWired(t *testing.T) {
+	for _, tc := range []struct {
+		sample, title, period, periodType string
+	}{
+		{"pboc-2026-03-q1.html", "2026年一季度金融统计数据报告", "2026-03", "q1"},
+		{"pboc-2025-09-q3.html", "2025年前三季度金融统计数据报告", "2025-09", "q1_q3"},
+	} {
+		t.Run(tc.sample, func(t *testing.T) {
+			raw := readSample(t, tc.sample)
+
+			// ① 标题层认得它 —— 这是 TASK-010 的正面主张，先钉住。
+			title, ok := metaContent(raw, "ArticleTitle")
+			require.True(t, ok, "真实样本必须有 ArticleTitle")
+			require.Equal(t, tc.title, title, "样本标题与 TASK-001 记录的一致")
+
+			period, pt, err := parseTitle(title)
+			require.NoError(t, err, "季报标题必须被 parseTitle 认出")
+			assert.Equal(t, tc.period, period)
+			assert.Equal(t, tc.periodType, pt)
+
+			// ② 但整条 Parse 必须停在 checkPeriodTypeSupported，且**说明理由**。
+			//
+			// 断言 TASK-004 那个编号：中间态的错误信息要能自己指出「谁来解除」。
+			// 没有它，接手的人看到的是 extract 深处的 `not found among 0 candidate
+			// sentence(s)`，会以为是抽取规则写错了而去改规则。
+			obs, err := Parse(raw)
+			require.Error(t, err, "季报抽取侧尚未接线，必须显式拒绝而不是沉默放行")
+			assert.Contains(t, err.Error(), tc.periodType, "错误信息要指名是哪种 period_type")
+			assert.Contains(t, err.Error(), title, "错误信息必须带原标题，否则看不出是哪篇")
+			assert.Contains(t, err.Error(), "TASK-004", "要写明解除它的是谁")
+			assert.Empty(t, obs.Values, "拒绝时不得返回半份 Values")
+		})
+	}
+}
+
+// 🔴 每一个合法 period_type 都必须在 checkPeriodTypeSupported 里有**明确的**去向。
+//
+// 这条守的是那个函数**此前真实存在的缺口**：它写的是 `if periodType != "monthly"
+// { return nil }` —— 一条**默认放行**的规则。TASK-001 加了 q1 / q1_q3 之后，
+// 两种零样本的期次类型就这样直接穿过去了，而没有任何测试会红。
+//
+// ⚠️ 判据是**默认放行 vs 默认拒绝**，不是「列表全不全」：新增第六种 period_type 时，
+// 默认放行的写法会让它静默进入抽取层（产出看起来正常、实则口径不明的 Values），
+// 而本条会红并逼人**明确表态**。表里那句 why 就是逼人写下理由的地方。
+//
+// 与 types.go 的 TestPeriodTypeMapsAreConsistent 同族：都是「白名单加了新取值，
+// 另一处必须跟上」的绊线，只是那条守期末月，这条守抽取侧支持与否。
+func TestEveryPeriodTypeHasAnExplicitSupportDecision(t *testing.T) {
+	// supported[pt] = 是否允许进入抽取层；why 只写给读代码的人看，不参与断言。
+	decisions := map[string]struct {
+		supported bool
+		why       string
+	}{
+		"annual":  {true, "有真实样本 pboc-2025-12-annual.html"},
+		"h1":      {true, "有真实样本 pboc-2020-06-h1.html"},
+		"monthly": {false, "零样本；孪生句问题最严重，哪句在前无样本可证"},
+		"q1":      {false, "TASK-004 未接线：periodAlt 与 cumulativePeriods 都还不认「一季度」"},
+		"q1_q3":   {false, "TASK-004 未接线：同上，且「前三季度」是累计口径"},
+	}
+
+	// 前置锚点：表必须与白名单**一一对应**。少了会让下面的循环漏掉某个取值，
+	// 多了说明表里有个已经不存在的 period_type。
+	require.Len(t, decisions, len(validPeriodTypes),
+		"新增 period_type 必须在这里明确表态：进抽取层，还是显式拒绝并写明理由")
+	for pt := range validPeriodTypes {
+		require.Containsf(t, decisions, pt, "period_type %q 没有在本表里表态", pt)
+	}
+
+	for pt, d := range decisions {
+		t.Run(pt, func(t *testing.T) {
+			err := checkPeriodTypeSupported(pt, "2026年X金融统计数据报告")
+			if d.supported {
+				assert.NoErrorf(t, err, "%s 应当放行（%s）", pt, d.why)
+				return
+			}
+			require.Errorf(t, err, "%s 应当被显式拒绝（%s）", pt, d.why)
+			assert.Contains(t, err.Error(), pt, "错误信息要指名是哪种 period_type")
+			assert.Contains(t, err.Error(), "2026年X金融统计数据报告", "并带上原标题")
+		})
+	}
 }
 
 // TestParseMetaPassesM1b1Validation 是与 M1b-1 的接缝检查，同时覆盖 boundary[1]。
