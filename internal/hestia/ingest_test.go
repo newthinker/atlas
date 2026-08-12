@@ -66,10 +66,16 @@ func articleURL(articleID string) string {
 
 // 两份**能被 Parse 接受**的正文快照。
 //
-// ⚠️ 季报那两份（pboc-2026-03-q1 / pboc-2025-09-q3）**不能用在 ingest 链路上**：
-// TASK-001 放宽的是 discover.go 的 reportTitleRE（index 标题侧），而 parse.go 有
-// 自己独立的 titleRE（parse.go:21），没跟着放宽 —— 实测 Parse 对这两份直接报
-// "unrecognized report title"。正文侧归 TASK-004，届时它们才进得来。
+// ⚠️ **本注释在 M1b-4b / TASK-004 被更正过一次，成因值得记下**：它原先写着
+// 「季报那两份不能用在 ingest 链路上……实测 Parse 直接报 unrecognized report title」。
+// 那句话在写下时是对的，随后 TASK-010 让 parse.go 的 titleRE 认了季报、改为在
+// checkPeriodTypeSupported 里**显式拒绝**，于是**结论仍成立而理由整个换了** ——
+// 照着旧理由去找 titleRE 的人会扑空，真正要拆的是那条 not supported yet 分支。
+// 这正是「结论对但理由错」里危害较大的形态：**过期的理由指向一个已不存在的机制**。
+//
+// 现状（TASK-004 落地后）：两份季报快照**已经能被 Parse 接受**，那条拒绝分支已删。
+// 下面这两份年报/半年报常量仍是主路径用的样本，季报的端到端见
+// TestQuarterlyReportEndToEnd。
 const (
 	annualID    = "2026011509294440745" // 2025 年报的真实 id
 	annualTitle = "2025年金融统计数据报告"
@@ -493,4 +499,75 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 
 		requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))
 	})
+}
+
+// —— M1b-4b / TASK-004：季报端到端 ——
+//
+// Context Checkpoint: done_criteria → test mapping (TASK-004 端到端)
+// functional[1] 从真实季报 index 快照出发跑通 scanPage → parsePeriod → Parse →
+//
+//	extractFields → Validate，产出非空 ValidationReport
+//	                           → TestQuarterlyReportEndToEnd
+//
+// 这是本任务**唯一的真验收**：上游三环（articleLinkRE / reportTitleRE / titleRE）
+// 早已就位，缺的是 extract 侧的 periodAlt 与 cumulativePeriods。两处接上之前，
+// 这条链路会在 checkPeriodTypeSupported 处**响亮**停下（TASK-010 加的自解释分支）；
+// 接上之后它必须一路走到 ValidationReport。
+//
+// ⚠️ 断言 report 非空**不够**：Validate 对一份 Values 全空的 Observation 同样能
+// 返回一份 checks 齐全的报告（各闸门走 skipped 分支）。所以这里还钉住
+// **Values 里真的有值**、且**抽取器判成 rule@v2**（与年报同构，实测 8 板块）。
+func TestQuarterlyReportEndToEnd(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name, indexFile, bodyFile string
+		wantPeriod, wantType      string
+	}{
+		{"一季度", "pboc-index-p7.html", "pboc-2026-03-q1.html", "2026-03", "q1"},
+		{"前三季度", "pboc-index-p18.html", "pboc-2025-09-q3.html", "2025-09", "q1_q3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// ① scanPage + parsePeriod：从真实 index 快照认出这条季报候选
+			cands, err := scanPage(readTestdata(t, tc.indexFile), testIndexURL)
+			require.NoError(t, err)
+			require.Len(t, cands, 1, "该页上只有一条报告条目")
+			c := cands[0]
+			assert.Equal(t, tc.wantPeriod, c.Period)
+			assert.Equal(t, tc.wantType, c.PeriodType)
+
+			// ② Parse：标题层与正文层都要放行（TASK-004 删掉了那条季度拒绝分支）
+			obs, err := Parse(readTestdata(t, tc.bodyFile))
+			require.NoError(t, err, "季报正文必须能被 Parse 接受——若这里报 "+
+				"「period_type ... is not supported yet」，说明拒绝分支没删干净")
+			assert.Equal(t, tc.wantPeriod, obs.Meta.Period, "正文期次要与标题期次一致")
+			assert.Equal(t, tc.wantType, obs.Meta.PeriodType)
+			assert.Equal(t, extractorV2, obs.Meta.Extractor, "实测两份季报各 8 板块，与年报同构")
+
+			// ③ extractFields 的产物：非空且含期内累计口径的值
+			require.NotEmpty(t, obs.Values, "抽取必须产出字段——空 Values 会让下面的 Validate 平凡通过")
+			t.Logf("%s：抽到 %d 个字段，extractor=%s", tc.name, len(obs.Values), obs.Meta.Extractor)
+
+			// ④ Validate：产出非空报告
+			obs.Meta.ArticleID = c.ArticleID
+			rep, err := Validate(ctx, obs, NoHistory, DefaultThresholds())
+			require.NoError(t, err)
+			require.NotEmpty(t, rep.Checks, "ValidationReport 必须非空")
+
+			var passed, skipped, failed int
+			for _, ck := range rep.Checks {
+				switch ck.Status {
+				case CheckPassed:
+					passed++
+				case CheckSkipped:
+					skipped++
+				case CheckFailed:
+					failed++
+				}
+			}
+			t.Logf("%s：Validate → passed=%d skipped=%d failed=%d Passed=%v",
+				tc.name, passed, skipped, failed, rep.Passed)
+			assert.Positivef(t, passed, "至少要有闸门真的跑过并通过——全 skipped 说明抽取其实没给出值")
+		})
+	}
 }

@@ -218,33 +218,26 @@ func Parse(raw []byte) (Observation, error) {
 //
 // 解除的方式是**逐个删分支**，不是删整个函数：
 //   - monthly：拿到月报样本后删 monthly 分支。
-//   - q1 / q1_q3：TASK-004 把 periodAlt 与 cumulativePeriods 接上后删这两条。
+//   - q1 / q1_q3：**已由 M1b-4b 的 TASK-004 删除** —— periodAlt 加了「一季度|前三季度」、
+//     cumulativePeriods 加了同两个键，两份真实快照端到端跑通（各 8 板块、rule@v2）。
 //
 // 两处解除都不用动 parseTitle 及其测试。
 func checkPeriodTypeSupported(periodType, title string) error {
 	switch periodType {
 	case "monthly":
 		// 月报是孪生句问题最严重的形态——正文同时含期内累计句与当月句，且哪句在前
-		// 无样本可证；extract 侧的 cumulativePeriods 只认「全年/上半年」，对 5 月报的
-		// 「1-5月」这类前缀会整条不命中。
+		// 无样本可证；extract 侧的 cumulativePeriods 认不出 5 月报的「1-5月」这类前缀，
+		// 会整条不命中。
+		//
+		// ⚠️ 季报（q1/q1_q3）曾经也在这条 switch 里，TASK-004 接上抽取侧后删掉了。
+		// 月报**不能照抄那次解除**：季报的两个前缀是完整词（一季度 / 前三季度），
+		// 而月报是「1-5月」这种带范围的形态，periodAlt 现有的 `[0-9]{1,2}月份` 认的是
+		// 单月句（要排除的那半），两者不是一回事。
 		return fmt.Errorf(
 			"hestia: period_type monthly is not supported yet (title %q): no monthly sample exists "+
 				"to validate against, and monthly reports carry both a period-to-date and a "+
 				"current-month sentence for the same field — refusing to guess which one the "+
 				"*_ytd fields should hold", title)
-	case "q1", "q1_q3":
-		// 中间态（TASK-001 与 TASK-010 已落、TASK-004 未落）：discover 认得季报、
-		// 标题层也认得，但 extract 侧的 periodAlt 只认「全年|上半年|N月份」，
-		// cumulativePeriods 只认「全年|上半年」。
-		//
-		// 错误信息里写死 TASK-004 这个出口，是因为**不写的话这里的失败会伪装成
-		// 抽取规则的 bug**：放行后真正报错的是 extract 深处的
-		// `not found among 0 candidate sentence(s)`，接手的人会去改抽取规则。
-		return fmt.Errorf(
-			"hestia: period_type %s is not supported yet (title %q): 季报抽取侧尚未接线——"+
-				"profiles.go 的 periodAlt 只认「全年|上半年|N月份」、cumulativePeriods 只认"+
-				"「全年|上半年」，放行会让期内累计句整条不命中而产出一份看起来正常的空壳。"+
-				"由 M1b-4b 的 TASK-004 接上后解除本分支", periodType, title)
 	}
 	return nil
 }

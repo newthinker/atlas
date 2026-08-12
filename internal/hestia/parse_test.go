@@ -330,10 +330,15 @@ func TestParseRejectsMonthlyUntilSampled(t *testing.T) {
 // 只能证明「拒绝逻辑会触发」，真实样本才能证明「真拿到这篇报告时它确实触发」。
 // 两份样本的 <meta name="ArticleTitle"> 与 PubDate 都是真的（2026-04-13 / 2025-10-15）。
 //
-// ⚠️ **这条断言的寿命是有限的，而且这是设计**：TASK-004 接上抽取侧后会删掉
-// checkPeriodTypeSupported 里的季度分支，本条随之要改成「Parse 成功」。
-// 到那时**别把它删掉** —— 改成正例，它就变回一条端到端守卫。
-func TestParseRejectsQuarterlyUntilExtractorWired(t *testing.T) {
+// ⚠️ **本条已按原作者的指示完成那次转换**（M1b-4b / TASK-004）：它原名
+// TestParseRejectsQuarterlyUntilExtractorWired、断言的是「必须显式拒绝」，
+// 原注释写着「TASK-004 接上抽取侧后……**别把它删掉** —— 改成正例，它就变回
+// 一条端到端守卫」。现已改成正例并更名。
+//
+// 记下这段来历是因为**这类测试最容易被后人误删**：它此前断言的行为如今恰好相反，
+// 不知情的人会以为它已过时。而它守的东西没变，只是从「中间态说得清」变成
+// 「终态跑得通」。
+func TestParseAcceptsQuarterlyReports(t *testing.T) {
 	for _, tc := range []struct {
 		sample, title, period, periodType string
 	}{
@@ -353,17 +358,16 @@ func TestParseRejectsQuarterlyUntilExtractorWired(t *testing.T) {
 			assert.Equal(t, tc.period, period)
 			assert.Equal(t, tc.periodType, pt)
 
-			// ② 但整条 Parse 必须停在 checkPeriodTypeSupported，且**说明理由**。
+			// ② 整条 Parse 必须**跑通**（M1b-4b / TASK-004 起）。
 			//
-			// 断言 TASK-004 那个编号：中间态的错误信息要能自己指出「谁来解除」。
-			// 没有它，接手的人看到的是 extract 深处的 `not found among 0 candidate
-			// sentence(s)`，会以为是抽取规则写错了而去改规则。
+			// 本条原是拒绝断言，按原作者留下的指示改成正例而不是删掉 ——
+			// 它于是从「中间态的自解释守卫」变回「端到端守卫」，覆盖面不减反增。
 			obs, err := Parse(raw)
-			require.Error(t, err, "季报抽取侧尚未接线，必须显式拒绝而不是沉默放行")
-			assert.Contains(t, err.Error(), tc.periodType, "错误信息要指名是哪种 period_type")
-			assert.Contains(t, err.Error(), title, "错误信息必须带原标题，否则看不出是哪篇")
-			assert.Contains(t, err.Error(), "TASK-004", "要写明解除它的是谁")
-			assert.Empty(t, obs.Values, "拒绝时不得返回半份 Values")
+			require.NoError(t, err, "季报抽取侧已接线（periodAlt + cumulativePeriods），必须跑通")
+			assert.Equal(t, tc.period, obs.Meta.Period, "正文解析出的期次要与标题一致")
+			assert.Equal(t, tc.periodType, obs.Meta.PeriodType)
+			assert.Equal(t, extractorV2, obs.Meta.Extractor, "实测两份季报各 8 板块，与年报同构")
+			assert.NotEmpty(t, obs.Values, "跑通意味着真的抽到了值，不是返回一份空壳")
 		})
 	}
 }
@@ -389,8 +393,8 @@ func TestEveryPeriodTypeHasAnExplicitSupportDecision(t *testing.T) {
 		"annual":  {true, "有真实样本 pboc-2025-12-annual.html"},
 		"h1":      {true, "有真实样本 pboc-2020-06-h1.html"},
 		"monthly": {false, "零样本；孪生句问题最严重，哪句在前无样本可证"},
-		"q1":      {false, "TASK-004 未接线：periodAlt 与 cumulativePeriods 都还不认「一季度」"},
-		"q1_q3":   {false, "TASK-004 未接线：同上，且「前三季度」是累计口径"},
+		"q1":      {true, "TASK-004 已接线：periodAlt 加了「一季度」、cumulativePeriods 同步登记；真实样本 pboc-2026-03-q1.html"},
+		"q1_q3":   {true, "TASK-004 已接线：periodAlt 加了「前三季度」（**不是**「三季度」）；真实样本 pboc-2025-09-q3.html"},
 	}
 
 	// 前置锚点：表必须与白名单**一一对应**。少了会让下面的循环漏掉某个取值，

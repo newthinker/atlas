@@ -158,8 +158,33 @@ func stringLiteralsOf(t *testing.T, filename string) []sourceLiteral {
 // 两个交替片段上。
 //
 // 判据 B 的原件 TestNoAlternativeIsPrefixOfAnother 只看 directionAlt / unitAlt；
-// 本任务新增了 currencyAlt 与 periodAlt，同一条不变量必须同样成立——否则
+// 本包新增了 currencyAlt 与 periodAlt，同一条不变量必须同样成立——否则
 // 「顺序即语义」会在这两个片段上悄悄开始生效。
+//
+// # 判据保持 prefix，**没有**扩成 substring —— 这是实测后的决定（M1b-4b / TASK-004）
+//
+// 独立 reviewer 的 C2 建议把本条从 prefix 扩到 substring，用来防季报的「写成
+// `三季度` 而非 `前三季度`」。**实测表明那个扩法既抓不到目标、又会误伤既有词表**，
+// 故不采纳。四条实测（Go regexp，leftmost-first）：
+//
+//	A 前缀对，顺序有语义：  `人民|人民币` 对「人民币贷款」→ 捕获 "人民"
+//	                        `人民币|人民` 对「人民币贷款」→ 捕获 "人民币"
+//	B 子串但非前缀，顺序**无**语义：
+//	                        `外币|本外币` 对「本外币存款」→ 捕获 "本外币"
+//	                        `本外币|外币` 对「本外币存款」→ 捕获 "本外币"
+//	C 真正的陷阱是**只写了短词、根本没有长词**：
+//	                        `全年|上半年|三季度`   对「前三季度人民币贷款」→ 捕获 "三季度"
+//	                        `全年|上半年|前三季度` 对「前三季度人民币贷款」→ 捕获 "前三季度"
+//	D 而 C 里那个错**构不成任何子串对**（全年/上半年/三季度 两两无包含）
+//	   ⇒ 子串判据对它**全绿放行**。
+//
+// 结论：
+//   - **prefix 才是「顺序即语义」的真实边界**（A 有、B 无）——本条判据不动。
+//   - 扩成 substring 会把 currencyAlt 既有的 `外币` ⊂ `本外币` 判成违规（实测转红），
+//     而那一对**是安全的**（B）：那不是收紧，是误报。
+//   - 陷阱 C 是**单个词写错**、不是词对关系，任何交替**内部**的两两比对都看不见它。
+//     守住它的是语料锚定的正向断言 —— 见 TestFlowRECapturesQuarterlyPeriodVerbatim，
+//     它拿真实前三季度正文断言捕获组**逐字等于** "前三季度"，写成 `三季度` 立刻红。
 func TestProfileAlternationsHaveNoPrefixPairs(t *testing.T) {
 	for _, tc := range []struct{ name, alt string }{
 		{"currencyAlt", currencyAlt},
@@ -408,5 +433,108 @@ func TestRateRegexpsRejectLoosePatterns(t *testing.T) {
 	for _, re := range []*regexp.Regexp{rateIBORE, rateRepoRE} {
 		assert.NotContains(t, re.String(), `.*`)
 		assert.NotContains(t, re.String(), `.+`)
+	}
+}
+
+// —— M1b-4b / TASK-004：季报两个期次前缀 ——
+//
+// Context Checkpoint: done_criteria → test mapping (TASK-004)
+// functional[0]     periodAlt 与 cumulativePeriods 两处都加「一季度/前三季度」
+//                                   → TestQuarterlyPeriodsAreCumulative、TestFlowRECapturesQuarterlyPeriodVerbatim
+// boundary[0]       交替顺序陷阱：捕获组须逐字等于样本里的词
+//                                   → TestFlowRECapturesQuarterlyPeriodVerbatim
+// boundary[1]       外币孪生句仍被正确区分（两个季度各一条，实测都存在）
+//                                   → TestQuarterlyFXTwinSentencesStayDistinct
+// error_handling[0] 「一季度」与「前三季度」各一条断言（reviewer D8：后者有后缀陷阱、前者没有）
+//                                   → 上面两条测试都按 q1 / q1_q3 分子测试
+
+// 🔴 交替顺序陷阱的**真正**守卫：捕获组必须**逐字等于**样本里的那个词。
+//
+// 陷阱本身（reviewer C2）：若 periodAlt 里写的是 `三季度` 而不是 `前三季度`，
+// Go 的 leftmost-first 会对「前三季度人民币贷款…」在位置 0 匹不上、位置 1 匹上
+// ⇒ 捕获 `三季度`。此时若为了让它绿而把 `三季度` 也登记进 cumulativePeriods，
+// 就等于断言「三季度 = 1–9 月累计」——**没有任何样本支持**（前三季度是 1–9 月
+// 累计，第三季度单季是 7–9 月，期末月同为 09 而月均除数是 9 与 3）。
+//
+// ⚠️ **这条断言是唯一抓得到该陷阱的**：写成 `三季度` 时交替内部**构不成任何词对**
+// （全年/上半年/一季度/三季度 两两无包含关系），所以 TestProfileAlternationsHaveNoPrefixPairs
+// 与任何「子串对」式的判据都会**全绿放行**（实测，见那条测试的注释）。
+// 断言「能匹配」同样不够——写成 `三季度` 时它照样匹配得上，只是捕获错了。
+func TestFlowRECapturesQuarterlyPeriodVerbatim(t *testing.T) {
+	for _, tc := range []struct{ name, file, want string }{
+		{"q1 一季度", "pboc-2026-03-q1.html", "一季度"},
+		{"q1_q3 前三季度", "pboc-2025-09-q3.html", "前三季度"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := stripHTML(readTestdata(t, tc.file))
+
+			for _, re := range []struct {
+				name string
+				re   *regexp.Regexp
+			}{{"贷款", loanFlowRE}, {"存款", depositFlowRE}} {
+				all := re.re.FindAllStringSubmatch(text, -1)
+				require.NotEmptyf(t, all, "%s：真实正文里必须有能命中的期内合计句，否则下面的断言平凡为真", re.name)
+
+				var periods []string
+				for _, m := range all {
+					periods = append(periods, m[1])
+				}
+				assert.Containsf(t, periods, tc.want,
+					"%s：捕获组必须**逐字**等于 %q。捕获到 %v —— 若其中出现 %q 而非 %q，"+
+						"就是 periodAlt 写成了短词、leftmost 从中间起匹",
+					re.name, tc.want, periods, strings.TrimPrefix(tc.want, "前"), tc.want)
+			}
+		})
+	}
+}
+
+// 两个季度前缀都必须被认成**期内累计**口径。
+//
+// 这是与 periodAlt 相互独立的第二个硬卡点：periodAlt 决定「句子能不能被匹配」，
+// 本表决定「匹中的句子算不算累计」。只加前者会让候选句涨起来却全被口径判定筛掉
+// （命中 0），只加后者则正则根本不命中（候选恒为 1）——两者缺一都抽不到值。
+func TestQuarterlyPeriodsAreCumulative(t *testing.T) {
+	for _, p := range []string{"一季度", "前三季度"} {
+		assert.Truef(t, cumulativePeriods[p], "%q 必须在 cumulativePeriods 里，否则匹中的句子会被当成单月句筛掉", p)
+	}
+	assert.Falsef(t, cumulativePeriods["三季度"],
+		"「三季度」**不得**登记为累计口径：前三季度是 1–9 月累计、第三季度单季是 7–9 月，"+
+			"把它登记进来等于用一个没有样本支持的判断去掩盖 periodAlt 写错")
+}
+
+// 外币孪生句在两个季度里都真实存在，必须仍被按币种区分开。
+//
+// ⚠️ 这条**不会**落到「未观察到」分支：实测两份快照里都有外币句
+// （一季度：外币存款增加703亿美元 / 外币贷款增加329亿美元；
+//
+//	前三季度：外币存款增加1658亿美元 / 外币贷款增加123亿美元）。
+//
+// 期次与口径两个维度都判之后，币种仍必须靠捕获组 m[2] 分开——
+// 归一成浮点后「703 亿美元」与「703 亿元」完全无法区分。
+func TestQuarterlyFXTwinSentencesStayDistinct(t *testing.T) {
+	for _, tc := range []struct{ name, file, period string }{
+		{"q1 一季度", "pboc-2026-03-q1.html", "一季度"},
+		{"q1_q3 前三季度", "pboc-2025-09-q3.html", "前三季度"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := stripHTML(readTestdata(t, tc.file))
+
+			for _, re := range []struct {
+				name string
+				re   *regexp.Regexp
+			}{{"贷款", loanFlowRE}, {"存款", depositFlowRE}} {
+				byCurrency := map[string]string{} // 币种 → 单位
+				for _, m := range re.re.FindAllStringSubmatch(text, -1) {
+					if m[1] == tc.period {
+						byCurrency[m[2]] = m[5]
+					}
+				}
+				assert.Equalf(t, "万亿元", byCurrency[currencyRMB],
+					"%s：人民币句的单位应是万亿元", re.name)
+				assert.Equalf(t, "亿美元", byCurrency["外币"],
+					"%s：外币孪生句必须被单独认出且单位是亿美元 —— 实测两份季报里它都存在，"+
+						"这里为空说明币种维度没分开", re.name)
+			}
+		})
 	}
 }
