@@ -363,6 +363,94 @@ func scanObservation(rows *sql.Rows) (Observation, error) {
 	return obs, nil
 }
 
+// RecentObservations 返回最近 n 期的当前行摘要，按 period 降序。
+//
+// 查 viewCurrent 而不是 TableObservations，与 HasPeriod/Preceding 同口径：修订
+// 产生新行而非覆盖，查权威表会让同一期显示两遍，而运维读到的是「数据重复了」
+// 这个错误结论。
+//
+// n <= 0 返回空，与 Preceding 同约定 —— 理由见下面 RecentPending 的说明，两处
+// 是同一条：SQLite 的 LIMIT -1 是「不限行数」，不挡住会让一个防御性传 -1 的
+// 调用方拿到整张表。
+func (s *Store) RecentObservations(ctx context.Context, n int) ([]StatusRow, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT period, period_type, published_at, extractor FROM `+viewCurrent+`
+		 ORDER BY period DESC LIMIT ?`, n)
+	if err != nil {
+		return nil, fmt.Errorf("hestia store recent observations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []StatusRow
+	for rows.Next() {
+		var r StatusRow
+		if err := rows.Scan(&r.Period, &r.PeriodType, &r.PublishedAt, &r.Extractor); err != nil {
+			return nil, fmt.Errorf("hestia store recent observations: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hestia store recent observations: %w", err)
+	}
+	return out, nil
+}
+
+// RecentPending 返回最近 n 次未过闸的尝试，按 period 降序。
+//
+// 不按 ingested_at 排序：它用 RFC3339Nano，整秒渲染成 "…:00Z"、半秒渲染成
+// "…:00.5Z"，而 '.' < 'Z' —— **字典序与时间序相反**（Save 里有完整说明）。
+// 同一期的多次尝试会挨在一起，但它们之间的先后不保证。
+//
+// # n <= 0 返回空，与 Preceding 同约定
+//
+// SQLite 的 `LIMIT 0` 是零行、**`LIMIT -1` 是不限行数**——两者不对称，而把 n
+// 直接透传给 LIMIT 会让一个「防御性地传 -1」的调用方拿到**整张表**。挡在这里
+// 而不是留给调用方小心，是因为 Preceding 已经这么做了：同一个 Store 上两个读
+// 方法对 n <= 0 给出相反语义，本身就是缺陷。
+//
+// 代价是「拿全表」这个能力没有了。这是有意的：status 是给人看的摘要，要全表
+// 的消费者应当走 DB() 自己发查询，而不是靠一个负数触发隐藏语义。
+func (s *Store) RecentPending(ctx context.Context, n int) ([]PendingRow, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT period, period_type, published_at, ingested_at, report FROM `+TablePending+`
+		 ORDER BY period DESC LIMIT ?`, n)
+	if err != nil {
+		return nil, fmt.Errorf("hestia store recent pending: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []PendingRow
+	for rows.Next() {
+		var r PendingRow
+		var reportJSON string
+		if err := rows.Scan(&r.Period, &r.PeriodType, &r.PublishedAt, &r.IngestedAt, &reportJSON); err != nil {
+			return nil, fmt.Errorf("hestia store recent pending: %w", err)
+		}
+		var rep ValidationReport
+		if err := json.Unmarshal([]byte(reportJSON), &rep); err != nil {
+			return nil, fmt.Errorf("hestia store recent pending %s: bad report json: %w", r.Period, err)
+		}
+		for _, c := range rep.Checks {
+			if c.Status == CheckFailed {
+				r.Failed = append(r.Failed, c)
+			}
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hestia store recent pending: %w", err)
+	}
+	return out, nil
+}
+
 // Save 是唯一的写入口。
 //
 // 没有 ValidationReport 就调不了它——这是 ADR-0003 在同机场景下的类型级表达。

@@ -372,8 +372,8 @@ func TestStoreExposesNoWriteMethods(t *testing.T) {
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	assert.Equal(t, []string{"Close", "DB", "HasArticle", "HasPeriod", "Preceding", "Save"}, got,
-		"只应导出 Close、DB、HasArticle、HasPeriod、Preceding 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
+	assert.Equal(t, []string{"Close", "DB", "HasArticle", "HasPeriod", "Preceding", "RecentObservations", "RecentPending", "Save"}, got,
+		"只应导出 Close、DB、HasArticle、HasPeriod、Preceding、RecentObservations、RecentPending 与 Save；出现 Insert/Upsert 等写口即违反单一写入口约束")
 }
 
 // TestPackageExposesNoWriteFunctions 把写口守卫从「*Store 的方法集」扩到**包导出面**。
@@ -417,8 +417,8 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	assert.Equal(t, []string{"DefaultThresholds", "Discover", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasPeriod", "Store.Preceding", "Store.Save", "Validate"}, got,
-		"包的导出函数/方法必须恰好是这十三个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
+	assert.Equal(t, []string{"DefaultThresholds", "Discover", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}, got,
+		"包的导出函数/方法必须恰好是这十七个——任何新增的包级写口（如 InsertRow）都会绕过 Save 的签名防线")
 }
 
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
@@ -529,6 +529,52 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // 删掉，本条立刻红在 assert.Equal 那一行——这证明守卫确实在按精确集合相等工作，
 // 而不是被悄悄放宽成了包含关系。反过来的「换成 assert.Subset」那种变异证明不了
 // 本次登记（它必然存活），所以没跑。
+//
+// —— 为什么名单里多了 RenderStatus / Store.RecentObservations / Store.RecentPending
+//    （M1b-4b / TASK-006 追加）——
+//
+// 同样是登记而不是放宽：切片十三→十六，assert.Equal 的全导出面精确集合相等一字未动。
+// 三者都是 status 命令的读路径：两个 *Store 方法各发一条 SELECT（分别打 viewCurrent
+// 与 TablePending），RenderStatus 是纯函数——吃两个切片吐文本，连 Store 都不持有，
+// **不碰数据库**。没有任何一个通向 Save 的路径。
+//
+// 三者恰好把两条守卫的分工又演示了一遍，且这次**同一个任务里两种形态都出现**：
+//   - Store.RecentObservations / Store.RecentPending 是 *Store 的方法 ⇒ **同时**打红
+//     本条（AST 版）与 TestStoreExposesNoWriteMethods（reflect 版），两条都登记过才算数
+//   - RenderStatus 是包级函数 ⇒ **只**打红本条，reflect 版全程绿
+//
+// 同任务新增的 StatusRow / PendingRow 是**结构体类型**，与 DiscoverCfg/Candidate/Config
+// 同理不进本条视野——本条只收 *ast.FuncDecl，类型声明是 GenDecl。
+//
+// **这一条不需要单独跑实验，本条自己就是证据**：期望切片里没有 StatusRow / PendingRow，
+// 而断言是全集精确相等——它们若进了视野，本条此刻就是红的。（先前几段写的是「实测确认」
+// 那种形式，那对**当时**的作者是必要的；这里换成直接引用本条的绿，是因为它更强：
+// 不依赖另跑一次，也不依赖我记得跑过。）
+//
+// 排序是 sort.Strings 的字节序结果，不是优先级："Parse" < "RenderStatus" < "Store."，
+// 而三个 Store 方法之间 "Store.Preceding" < "Store.RecentObservations" <
+// "Store.RecentPending" < "Store.Save"（"Rec" < "S"，"RecentO" < "RecentP"）。
+//
+// —— 为什么名单里多了 Ingest（M1b-4b / TASK-005 追加）——
+//
+// 同样是登记而不是放宽：切片十六→十七，assert.Equal 的全导出面精确集合相等一字未动。
+// Ingest 是包级函数：跑一轮「发现→抓→解析→校验→入库」的编排。它**自己不写库** ——
+// 唯一的写动作是调 Store.Save，也就是说它走的正是 Save 那道签名防线，而不是绕过它。
+// 它必须导出，是因为 cmd 层要调它（cmd 只做装配）。
+//
+// 它与 Discover/LoadConfig/RenderStatus 同形：包级函数 ⇒ **只打红本条（AST 版）**，
+// reflect 版全程绿。同任务新增的 IngestDeps 是**结构体类型**，与 StatusRow/DiscoverCfg
+// 同理不进本条视野；它的方法 ingestOne 名字不导出，被上面 fn.Name.IsExported() 那道
+// 分支排除。**这两条同样不需要另跑实验**：期望切片里没有它们，而断言是全集精确相等
+// ——它们若进了视野，本条此刻就是红的（沿用上一段那个更强的论证形式）。
+//
+// 排在 Discover 之后、LoadConfig 之前是字节序结果（"Di" < "In" < "Lo"）。
+//
+// ⚠️ **本次登记撞上了一次真实的并发冲突，记在这里免得后人重蹈**：TASK-005 与 TASK-006
+// 同在 wave2、同一棵工作树，而两者都必须改这同一行。本条的作用域是**全包**（go/parser
+// 扫全部非 _test.go 文件），所以任一方的新导出物一落盘，另一方的包测试立刻红 —— 双向、
+// 必然、与代码对错无关。⇒ 同 wave 内有多人新增导出物时，**登记必须串行**，且后到的那个
+// 只能**追加**、不能把先到者的条目覆盖掉（这里 TASK-006 先落，TASK-005 追加 "Ingest"）。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
@@ -2041,5 +2087,315 @@ func TestHasArticleWrapsQueryError(t *testing.T) {
 	assert.False(t, has, "出错时不得报告「处理过」——否则一次查库故障会让那篇文章被永久跳过")
 	assert.ErrorIs(t, err, context.Canceled, "必须用 %w 包住底层 err，否则调用方无法分辨是取消还是真故障")
 	assert.ErrorContains(t, err, "art-2025-12", "错误信息要带 articleID")
+	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}
+
+// —— M1b-4b / TASK-006：status 的两个只读查询 ——
+//
+// Context Checkpoint: done_criteria → test mapping (status queries)
+// functional[0]     RecentObservations / RecentPending 真库测试
+//                                          → TestRecentObservations、TestRecentPendingExtractsFailedChecks
+// functional[1]     RecentObservations 查 viewCurrent（不是 TableObservations），与 HasPeriod 同口径
+//                                          → TestRecentObservationsShowsCurrentOnly
+//                   RecentPending 查 TablePending 且带上失败的 []Check
+//                                          → TestRecentPendingExtractsFailedChecks
+// boundary[0]       空库上两个查询都跑通、返回空且不报错
+//                                          → TestRecentQueriesOnEmptyStore
+// boundary[1]       n 为 0 与负数的行为各一条，且**判据不对称**
+//                                          → TestRecentObservationsLimitZeroVsNegative、
+//                                            TestRecentPendingLimitZeroVsNegative
+// error_handling[0] 查库失败 %w 包住并带上下文
+//                                          → TestRecentObservationsWrapsQueryError、
+//                                            TestRecentPendingWrapsQueryError、
+//                                            TestRecentPendingWrapsBadReportJSON
+// non_functional[1] 新增导出方法登记进两条导出面守卫
+//                                          → TestStoreExposesNoWriteMethods（reflect 版）、
+//                                            TestPackageExposesNoWriteFunctions（AST 版）
+
+func TestRecentObservations(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, p := range []string{"2025-10", "2025-11", "2025-12"} {
+		saveMonthly(t, s, p, map[string]float64{FieldM2: 300})
+	}
+
+	got, err := s.RecentObservations(ctx, 2)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "LIMIT 要生效")
+	assert.Equal(t, "2025-12", got[0].Period, "最近的排最前")
+	assert.Equal(t, "2025-11", got[1].Period)
+	assert.Equal(t, "monthly", got[0].PeriodType)
+	assert.Equal(t, extractorV2, got[0].Extractor)
+}
+
+// 只列当前行：修订后应看到新值那一行，不是两行。
+//
+// 这条是本任务里唯一能把「viewCurrent vs TableObservations」区分开的断言 ——
+// 其余用例在两种实现下都绿（没有修订就没有被取代的旧行）。查错了表不会报错，
+// 只会让 status 把同一期显示两遍，而运维读到的是「数据重复了」这个错误结论。
+func TestRecentObservationsShowsCurrentOnly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+	_, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-12", PeriodType: "monthly", PublishedAt: "2026-02-20",
+			ArticleID: "art-rev", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 305},
+	}, passing())
+	require.NoError(t, err)
+
+	got, err := s.RecentObservations(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "修订不产生第二期")
+	assert.Equal(t, "2026-02-20", got[0].PublishedAt, "应是修订后的那一行")
+}
+
+// pending 的失败闸门要解出来 —— 不解就等于让人去 sqlite 里读 JSON，
+// 而那正是 status 要消灭的事（pending 表自述「它的消费者只有人」，schema.go:13）。
+func TestRecentPendingExtractsFailedChecks(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	out, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-11", PeriodType: "monthly", PublishedAt: "2025-12-15",
+			ArticleID: "art-bad", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, failing())
+	require.NoError(t, err)
+	require.Equal(t, TablePending, out.Table)
+
+	got, err := s.RecentPending(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "2025-11", got[0].Period)
+	assert.NotEmpty(t, got[0].IngestedAt)
+	require.NotEmpty(t, got[0].Failed, "至少要解出一条 failed 检查")
+	assert.Equal(t, CheckFailed, got[0].Failed[0].Status)
+}
+
+// 只解出 failed 的那些，passed/skipped 不进 Failed。
+//
+// 与上一条互补：上一条只断言「至少解出一条」，在「把 Checks 原样抄进 Failed」
+// 的实现下同样为真。本条喂一份混合报告，把「筛选确实发生了」钉死。
+func TestRecentPendingKeepsOnlyFailedChecks(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	mixed := ValidationReport{Passed: false, Checks: []Check{
+		{ID: "monetary_hierarchy", Status: CheckPassed},
+		{ID: "completeness", Status: CheckFailed, Reason: "absent_field:m2"},
+		{ID: "magnitude_sanity", Status: CheckSkipped, Reason: "not_calibrated"},
+	}}
+	_, err := s.Save(ctx, Observation{
+		Meta: Meta{
+			Period: "2025-11", PeriodType: "monthly", PublishedAt: "2025-12-15",
+			ArticleID: "art-mixed", CaliberVersion: "2025-01", Extractor: extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, mixed)
+	require.NoError(t, err)
+
+	got, err := s.RecentPending(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Failed, 1, "三条里只有一条 failed，passed/skipped 不得混进来")
+	assert.Equal(t, "completeness", got[0].Failed[0].ID)
+	assert.Equal(t, "absent_field:m2", got[0].Failed[0].Reason, "理由要带出来，否则还是得开 sqlite")
+}
+
+// 空库两个查询都要跑通：返回空、不报错、不 panic。
+//
+// DoD boundary[0]：**配置装载错与库路径错的表现都是「0 期」**，空库 status 是
+// 唯一能把它们分开的东西 —— 它必须真的跑到底，而不是在空结果集上炸掉。
+func TestRecentQueriesOnEmptyStore(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	obs, err := s.RecentObservations(ctx, 10)
+	require.NoError(t, err, "空库不是错误")
+	assert.Empty(t, obs)
+
+	pending, err := s.RecentPending(ctx, 10)
+	require.NoError(t, err, "空库不是错误")
+	assert.Empty(t, pending)
+}
+
+// 🔴 n ≤ 0 一律返回空 —— 0 与 -1 **都**要测，因为底层不对称。
+//
+// SQLite 的 `LIMIT 0` 是零行、**`LIMIT -1` 是不限行数**。把 n 直接透传给 LIMIT
+// 时两者语义相反，一个「防御性地传 -1」的调用方会拿到**整张表**（reviewer D5）。
+// 只测 0 的话，未加守卫的实现照样全绿 —— 这正是「别只测 0」的原因。
+//
+// 本方法挡住 n <= 0，与 Preceding 同约定（store.go:303 已经这么做）。同一个 Store
+// 上两个读方法对 n <= 0 给出相反语义本身就是缺陷，所以这里不是加新规矩，是跟上
+// 既有的那条。
+//
+// ⚠️ 「两者都返回空」这个断言**在守卫被删掉时不足以全部转红**：n=0 在无守卫下
+// 也是空。所以下面第三段用**裸 SQL 走同一个库**跑一次未加守卫的查询，证明
+// 「若不挡，-1 确实会拿到整张表」—— 守卫因此是**承重的**，而不是一句空话。
+func TestRecentObservationsGuardsNonPositiveN(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, p := range []string{"2025-10", "2025-11", "2025-12"} {
+		saveMonthly(t, s, p, map[string]float64{FieldM2: 300})
+	}
+
+	zero, err := s.RecentObservations(ctx, 0)
+	require.NoError(t, err)
+	assert.Empty(t, zero, "n=0 返回空")
+
+	neg, err := s.RecentObservations(ctx, -1)
+	require.NoError(t, err)
+	assert.Empty(t, neg, "n=-1 也返回空 —— 不得漏给 LIMIT 变成「整张表」")
+
+	// 守卫承重性自证：同一个库上直接跑未加守卫的那条 SQL。
+	assert.Equal(t, 3, rawLimitCount(t, s, viewCurrent, -1),
+		"前提：裸 LIMIT -1 确实返回整张表(3 行)，故上面 n=-1 的空结果是守卫挡出来的，不是库本来就空")
+	assert.Equal(t, 0, rawLimitCount(t, s, viewCurrent, 0),
+		"对照：裸 LIMIT 0 本就是零行 —— 这说明只测 n=0 分辨不出守卫在不在")
+}
+
+// 同上，pending 侧独立钉一遍：两个查询各写各的 SQL，一处改对不代表另一处也对。
+func TestRecentPendingGuardsNonPositiveN(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, p := range []string{"2025-10", "2025-11"} {
+		_, err := s.Save(ctx, Observation{
+			Meta: Meta{
+				Period: p, PeriodType: "monthly", PublishedAt: p + "-15",
+				ArticleID: "art-p-" + p, CaliberVersion: "2025-01", Extractor: extractorV2,
+			},
+			Values: map[string]float64{FieldM2: 300},
+		}, failing())
+		require.NoError(t, err)
+	}
+
+	zero, err := s.RecentPending(ctx, 0)
+	require.NoError(t, err)
+	assert.Empty(t, zero, "n=0 返回空")
+
+	neg, err := s.RecentPending(ctx, -1)
+	require.NoError(t, err)
+	assert.Empty(t, neg, "n=-1 也返回空 —— 不得漏给 LIMIT 变成「整张表」")
+
+	assert.Equal(t, 2, rawLimitCount(t, s, TablePending, -1),
+		"前提：裸 LIMIT -1 确实返回整张表(2 行)，故上面 n=-1 的空结果是守卫挡出来的")
+	assert.Equal(t, 0, rawLimitCount(t, s, TablePending, 0),
+		"对照：裸 LIMIT 0 本就是零行")
+}
+
+// rawLimitCount 绕开 Store 的守卫，直接对 table 跑 `LIMIT ?` 数行数。
+//
+// 用 DB()（只读 Querier）而不是 rawDB：这里要的正是「Store 自己那条连接上、
+// 同一份数据、唯一区别是没有守卫」，换一条连接会多引入一个变量。
+func rawLimitCount(t *testing.T, s *Store, table string, n int) int {
+	t.Helper()
+	rows, err := s.DB().QueryContext(context.Background(),
+		`SELECT period FROM `+table+` ORDER BY period DESC LIMIT ?`, n)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	var count int
+	for rows.Next() {
+		count++
+	}
+	require.NoError(t, rows.Err())
+	return count
+}
+
+// 触发方式与邻居 TestPrecedingWrapsQueryError / TestHasArticleWrapsQueryError 一致
+// （已取消的 context 而不是关掉的库）：database/sql 在 Close 之后返回未导出的
+// errDBClosed，没有可用 sentinel，只能比错误串；context.Canceled 是标准 sentinel。
+//
+// ⚠️ 「包住了」用 require.NotNil(t, errors.Unwrap(err))，**不是** assert.ErrorIs ——
+// 实现写成 `return nil, err`（完全不包）时 ErrorIs 同样为真，NotNil 才把那个差集测掉。
+func TestRecentObservationsWrapsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 先取消，QueryContext 必然失败
+
+	got, err := s.RecentObservations(ctx, 10)
+	require.Error(t, err, "查库失败必须返回 error")
+	assert.Nil(t, got, "出错时不得返回半截结果")
+	assert.ErrorIs(t, err, context.Canceled, "必须用 %w 包住底层 err")
+	assert.ErrorContains(t, err, "recent observations", "错误要带上下文，否则运维不知是哪条查询")
+	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}
+
+func TestRecentPendingWrapsQueryError(t *testing.T) {
+	s := newTestStore(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := s.RecentPending(ctx, 10)
+	require.Error(t, err, "查库失败必须返回 error")
+	assert.Nil(t, got, "出错时不得返回半截结果")
+	assert.ErrorIs(t, err, context.Canceled, "必须用 %w 包住底层 err")
+	assert.ErrorContains(t, err, "recent pending", "错误要带上下文，否则运维不知是哪条查询")
+	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}
+
+// report 列存的是坏 JSON 时要报错并带上是**哪一期**，而不是静默给一个空的 Failed。
+//
+// 这是 RecentPending 的第二条错误出口（另一条是查库本身失败），走的是 Unmarshal。
+// 静默吞掉它的后果特别隐蔽：status 会显示「这期 pending，但没有任何失败检查」——
+// 看起来像闸门没记录理由，实际是报告存坏了。
+//
+// 用裸连接直接写行：Save 走的是 json.Marshal，产不出坏 JSON。
+func TestRecentPendingWrapsBadReportJSON(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+
+	db := rawDB(t, path)
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO `+TablePending+
+			` (period, period_type, published_at, article_id, extractor, ingested_at, report, values_json)
+		  VALUES ('2025-11','monthly','2025-12-15','art-x','rule@v2','2025-12-15T15:30:04Z','{ 不是 json','{}')`)
+	require.NoError(t, err, "前置条件：坏 JSON 必须真的写进去了")
+
+	got, err := s.RecentPending(ctx, 10)
+	require.Error(t, err, "坏 report JSON 必须报错，不得静默当成「没有失败检查」")
+	assert.Nil(t, got, "出错时不得返回半截结果")
+	assert.ErrorContains(t, err, "2025-11", "错误要带上是哪一期，否则无从下手")
+	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
+}
+
+// Scan 失败也要被 %w 包住并带上下文 —— 这是 RecentPending 的第三条错误出口。
+//
+// 触发方式：用裸连接把 pending 表换成没有 NOT NULL 约束的同名表，再写一行 NULL
+// period。database/sql 把 NULL 扫进 string 会失败（converting NULL to string is
+// unsupported），走的正是 rows.Scan 那条分支。
+//
+// 这正是 rawDB 注释里说的用途——「制造 Store 管不到的库状态：加列、直接写 NaN、
+// 把表改成结构不符的样子」。生产路径造不出这种行（Save 的七个元数据列都 NOT NULL），
+// 但库文件是外部对象，Grafana、手工 sqlite3、旧版本代码都可能留下这种行，
+// 而 status 是运维在库出问题时第一个会跑的命令：它必须报错，不能崩也不能装没事。
+func TestRecentPendingWrapsScanError(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+
+	db := rawDB(t, path)
+	_, err := db.ExecContext(ctx, `DROP TABLE `+TablePending)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE `+TablePending+` (
+		period TEXT, period_type TEXT, published_at TEXT, article_id TEXT,
+		extractor TEXT, ingested_at TEXT, report TEXT, values_json TEXT)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO `+TablePending+
+		` (period, period_type, published_at, ingested_at, report)
+		  VALUES (NULL, 'monthly', '2025-12-15', '2025-12-15T15:30:04Z', '{}')`)
+	require.NoError(t, err, "前置条件：NULL period 那一行必须真的写进去了")
+
+	got, err := s.RecentPending(ctx, 10)
+	require.Error(t, err, "Scan 失败必须报错，不得静默跳过那一行")
+	assert.Nil(t, got, "出错时不得返回半截结果")
+	assert.ErrorContains(t, err, "recent pending", "错误要带上下文")
 	require.NotNil(t, errors.Unwrap(err), "要的是「包住」：Unwrap 后必须还剩底层 err")
 }
