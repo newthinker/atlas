@@ -62,10 +62,11 @@ func TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated(t *testing.T) {
 
 func TestThresholdsRejectMalformedExemptions(t *testing.T) {
 	base := CaliberExemption{
-		Version:    "2025-01",
-		Period:     "2025-01",
-		SkipChecks: []string{"deposit_sum"},
-		Reason:     "M1 口径纳入个人活期存款，环比与同比均不可比",
+		Version:     "2025-01",
+		Period:      "2025-01",
+		PeriodTypes: []string{"monthly"},
+		SkipChecks:  []string{"deposit_sum"},
+		Reason:      "M1 口径纳入个人活期存款，环比与同比均不可比",
 	}
 
 	// 先确认 base 本身合法。少了这步，下面每个用例都可能因为别的原因报错，
@@ -77,6 +78,7 @@ func TestThresholdsRejectMalformedExemptions(t *testing.T) {
 	mutate := func(f func(*CaliberExemption)) Thresholds {
 		ex := base
 		ex.SkipChecks = slices.Clone(base.SkipChecks)
+		ex.PeriodTypes = slices.Clone(base.PeriodTypes)
 		f(&ex)
 		c := DefaultThresholds()
 		c.CaliberExemptions = []CaliberExemption{ex}
@@ -105,20 +107,24 @@ func TestThresholdsRejectMalformedExemptions(t *testing.T) {
 func TestExemptionForMatchesPeriodAndCheckExactly(t *testing.T) {
 	cfg := DefaultThresholds()
 	cfg.CaliberExemptions = []CaliberExemption{{
-		Version:    "2025-01",
-		Period:     "2025-01",
-		SkipChecks: []string{"deposit_sum", "stock_continuity"},
-		Reason:     "口径切换期，加总与环比均不可比",
+		Version:     "2025-01",
+		Period:      "2025-01",
+		PeriodTypes: []string{"monthly"},
+		SkipChecks:  []string{"deposit_sum", "stock_continuity"},
+		Reason:      "口径切换期，加总与环比均不可比",
 	}}
 	require.NoError(t, cfg.validate())
 
-	got := cfg.exemptionFor("2025-01", "deposit_sum")
+	// 三处调用一律传 "monthly"，与上面声明的 PeriodTypes 一致：本测试钉的是
+	// 期次与检查 ID 两个维度，period_type 维度另由 TestExemptionIsolatesPeriodType
+	// 单独钉。让它在这里恒匹配，下面两条 Nil 断言才只可能由各自那个维度造成。
+	got := cfg.exemptionFor("2025-01", "monthly", "deposit_sum")
 	require.NotNil(t, got)
 	assert.Equal(t, "2025-01", got.Version)
 
-	assert.Nil(t, cfg.exemptionFor("2025-01", "yoy_sanity"),
+	assert.Nil(t, cfg.exemptionFor("2025-01", "monthly", "yoy_sanity"),
 		"未列入 SkipChecks 的闸门不该被豁免——豁免按检查 ID 精确指定")
-	assert.Nil(t, cfg.exemptionFor("2025-02", "deposit_sum"),
+	assert.Nil(t, cfg.exemptionFor("2025-02", "monthly", "deposit_sum"),
 		"豁免按期次精确匹配，不该外溢到相邻期")
 }
 
@@ -144,7 +150,8 @@ func TestThresholdsRejectWholePeriodSkip(t *testing.T) {
 		c := DefaultThresholds()
 		c.CaliberExemptions = []CaliberExemption{{
 			Version: "2025-01", Period: "2025-01",
-			SkipChecks: ids, Reason: "口径切换期",
+			PeriodTypes: []string{"monthly"},
+			SkipChecks:  ids, Reason: "口径切换期",
 		}}
 		return c
 	}
@@ -199,4 +206,136 @@ func TestThresholdsRejectWholePeriodSkip(t *testing.T) {
 func TestCheckCompletenessIDMatchesGates(t *testing.T) {
 	assert.Contains(t, knownCheckIDs(), checkCompleteness,
 		"checkCompleteness 已与 gates 表脱节——豁免宽度校验会静默失效")
+}
+
+// —— TASK-006: 豁免键补上 PeriodTypes ——
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0]     只声明 annual 时 monthly/h1 都不命中     → TestExemptionIsolatesPeriodType
+// functional[1]     一条豁免可覆盖三种 period_type          → TestExemptionCanCoverMultiplePeriodTypes
+// boundary[0]       空切片报错、不默认全部                   → TestExemptionRejectsBadPeriodTypes/为空
+// boundary[1]       PeriodTypes 不是新的宽度绕过路径         → TestAllPeriodTypesIsNotAWidthBypass
+// error_handling[0] 未知取值报错，含非法值与合法取值列表      → TestExemptionRejectsBadPeriodTypes/含未知取值
+
+// 豁免只对列出的 period_type 生效。
+//
+// 这是加 PeriodTypes 的**全部理由**：在此之前同月的 annual 与 monthly 会被同一条
+// 豁免同时命中 —— 而它们是两条独立序列，一次只影响其中一条的口径变更会连带放行
+// 另一条，且那次放行在报告里长得和一次深思熟虑的豁免一模一样。
+func TestExemptionIsolatesPeriodType(t *testing.T) {
+	cfg := DefaultThresholds()
+	cfg.CaliberExemptions = []CaliberExemption{{
+		Version:     "2025-01",
+		Period:      "2025-01",
+		PeriodTypes: []string{"annual"},
+		SkipChecks:  []string{"deposit_sum"},
+		Reason:      "年度口径切换",
+	}}
+	require.NoError(t, cfg.validate())
+
+	assert.NotNil(t, cfg.exemptionFor("2025-01", "annual", "deposit_sum"))
+	assert.Nil(t, cfg.exemptionFor("2025-01", "monthly", "deposit_sum"),
+		"只声明了 annual，monthly 不该被命中")
+	assert.Nil(t, cfg.exemptionFor("2025-01", "h1", "deposit_sum"))
+}
+
+// 一条豁免可以覆盖多种 period_type —— 一次口径变更常常三条序列都受影响。
+//
+// 与上一条互补而非重复：上一条防的是「一条豁免外溢到没声明的序列」，这一条防的是
+// 「把匹配写成只取第一个 / 只允许单值」那类堵过头的实现。缺了它，一个恒取
+// PeriodTypes[0] 的实现能让上一条照样绿。
+func TestExemptionCanCoverMultiplePeriodTypes(t *testing.T) {
+	cfg := DefaultThresholds()
+	cfg.CaliberExemptions = []CaliberExemption{{
+		Version:     "2025-01",
+		Period:      "2025-01",
+		PeriodTypes: []string{"monthly", "h1", "annual"},
+		SkipChecks:  []string{"deposit_sum"},
+		Reason:      "M1 口径纳入个人活期存款，三条序列同时受影响",
+	}}
+	require.NoError(t, cfg.validate())
+
+	for _, pt := range []string{"monthly", "h1", "annual"} {
+		assert.NotNil(t, cfg.exemptionFor("2025-01", pt, "deposit_sum"), "period_type=%s", pt)
+	}
+}
+
+func TestExemptionRejectsBadPeriodTypes(t *testing.T) {
+	mk := func(pts []string) Thresholds {
+		c := DefaultThresholds()
+		c.CaliberExemptions = []CaliberExemption{{
+			Version: "2025-01", Period: "2025-01",
+			PeriodTypes: pts,
+			SkipChecks:  []string{"deposit_sum"},
+			Reason:      "测试用",
+		}}
+		return c
+	}
+
+	// 两条断言各自钉的是**能区分两种形态**的那截文案：两条规则的错误信息都含
+	// "PeriodTypes"，只断言它会让任一条被另一条冒名满足。
+	t.Run("为空", func(t *testing.T) {
+		err := mk(nil).validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PeriodTypes")
+		assert.Contains(t, err.Error(), "留空不等于",
+			"必须由『为空』那条规则拒绝，而不是被『含未知取值』冒名满足")
+	})
+	t.Run("含未知取值", func(t *testing.T) {
+		err := mk([]string{"monthly", "quarterly"}).validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "quarterly", "要指出是哪个取值非法")
+
+		// 合法取值列表在错误信息里是硬编码的第三份副本（types.go:143 是第二份）。
+		// 这个循环遍历 validPeriodTypes 本身，是那份副本的绊线：白名单加了第四种
+		// 取值而错误文案没跟上，这里就红。
+		for pt := range validPeriodTypes {
+			assert.Contains(t, err.Error(), pt,
+				"错误信息必须列出全部合法取值，%q 缺席说明文案已与白名单脱节", pt)
+		}
+	})
+}
+
+// 列出全部三种 period_type **不是**新的绕过路径。
+//
+// Sprint 035 收尾堵了两条「整期跳过校验」：SkipChecks 覆盖全部闸门、含 completeness。
+// 加 PeriodTypes 后要确认这两条判据**仍只看 SkipChecks** —— 一条覆盖三种序列的豁免，
+// 跳的仍是指定的那几道闸，是合法的。把这个组合钉住，免得后人以为「宽度校验也该看
+// PeriodTypes」而在别处放松。
+func TestAllPeriodTypesIsNotAWidthBypass(t *testing.T) {
+	all := []string{"monthly", "h1", "annual"}
+
+	t.Run("三种序列 + 一道闸：合法", func(t *testing.T) {
+		c := DefaultThresholds()
+		c.CaliberExemptions = []CaliberExemption{{
+			Version: "2025-01", Period: "2025-01", PeriodTypes: all,
+			SkipChecks: []string{"deposit_sum"}, Reason: "口径变更影响三条序列",
+		}}
+		assert.NoError(t, c.validate())
+	})
+
+	// 下面两条沿用 TestThresholdsRejectWholePeriodSkip 的钉法：断言的是能区分两种
+	// 形态的那截文案，不是它们共有的「整期跳过」——只断言共有部分会被另一条规则
+	// 冒名满足。
+	t.Run("三种序列 + 全部闸门：仍然被拒", func(t *testing.T) {
+		c := DefaultThresholds()
+		c.CaliberExemptions = []CaliberExemption{{
+			Version: "2025-01", Period: "2025-01", PeriodTypes: all,
+			SkipChecks: knownCheckIDs(), Reason: "试图整期跳过",
+		}}
+		err := c.validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "跳过了全部")
+	})
+
+	t.Run("三种序列 + completeness：仍然被拒", func(t *testing.T) {
+		c := DefaultThresholds()
+		c.CaliberExemptions = []CaliberExemption{{
+			Version: "2025-01", Period: "2025-01", PeriodTypes: all,
+			SkipChecks: []string{checkCompleteness}, Reason: "试图走便宜的整期跳过",
+		}}
+		err := c.validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "不得豁免 "+checkCompleteness)
+	})
 }

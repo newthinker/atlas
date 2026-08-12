@@ -90,7 +90,7 @@ func Validate(ctx context.Context, obs Observation, h History, cfg Thresholds) (
 	for _, g := range gates {
 		c := g.fn(in)
 		c.ID = g.id // 闸门函数不写自己的 ID，避免表与实现两处对不上
-		if ex := cfg.exemptionFor(obs.Meta.Period, g.id); ex != nil {
+		if ex := cfg.exemptionFor(obs.Meta.Period, obs.Meta.PeriodType, g.id); ex != nil {
 			// 命中豁免记 skipped 而不是 passed：豁免与通过在数据上必须可分，
 			// 把「这次没查」记成「查了没问题」等于伪造一次检查记录。
 			//

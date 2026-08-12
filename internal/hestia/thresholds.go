@@ -71,11 +71,15 @@ type Range struct {
 // 三条约束（方案报告 4.6.3）：按 (期次, 检查 ID) 精确指定、Version 必须已登记、
 // 命中记 skipped 而不是 passed。第三条是关键——豁免与通过在数据上必须可分，
 // 把「这次没查」记成「查了没问题」等于伪造一次检查记录。
+//
+// M1b-4a 在「精确指定」上补了第三个维度 PeriodTypes：期次只到月份，而同一个月
+// 可能同时有 monthly 与 annual 两条独立序列。
 type CaliberExemption struct {
-	Version    string   // 口径版本，必须在 validCaliberVersions 内
-	Period     string   // 期末月，与 Meta.Period 同格式（"2025-01"）
-	SkipChecks []string // 要跳过的检查 ID
-	Reason     string   // 必填，写清为什么这期该跳
+	Version     string   // 口径版本，必须在 validCaliberVersions 内
+	Period      string   // 期末月，与 Meta.Period 同格式（"2025-01"）
+	PeriodTypes []string // 适用的 period_type，必填非空
+	SkipChecks  []string // 要跳过的检查 ID
+	Reason      string   // 必填，写清为什么这期该跳
 }
 
 // DefaultThresholds 返回经 M0 真实数据校准的默认阈值。
@@ -99,6 +103,27 @@ func (t Thresholds) validate() error {
 		}
 		if ex.Period == "" {
 			return fmt.Errorf("hestia: caliber_exemptions[%d] 缺 Period", i)
+		}
+		// 空切片报错，**不默认全部**。
+		//
+		// Go 零值让「忘了写 period_types」与「显式写全部三种」不可分，而两者后果
+		// 差得很远：前者是配置疏漏，后者是深思熟虑的决定。要求非空就把它们分开了
+		// —— 疏漏会响亮失败，而不是静默放行三条序列。
+		if len(ex.PeriodTypes) == 0 {
+			return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 的 PeriodTypes 为空: "+
+				"必须显式列出适用的 period_type；留空不等于「全部」，"+
+				"同月的 annual 与 monthly 是两条独立序列", i, ex.Period)
+		}
+		// 直接查 validPeriodTypes 而不是 checkEnum：那个函数收 []string，而白名单
+		// 这边是 map[string]bool。合法取值因此在错误文案里是硬编码的第三份副本
+		// （types.go 的 Meta.validate 是第二份）；thresholds_test.go 的
+		// TestExemptionRejectsBadPeriodTypes/含未知取值 遍历 validPeriodTypes 本身，
+		// 是这份副本的绊线——加了第四种取值而文案没跟上就会红。
+		for _, pt := range ex.PeriodTypes {
+			if !validPeriodTypes[pt] {
+				return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 的 PeriodTypes 含未知取值 %q "+
+					"(want monthly|h1|annual)", i, ex.Period, pt)
+			}
 		}
 		if strings.TrimSpace(ex.Reason) == "" {
 			return fmt.Errorf("hestia: caliber_exemptions[%d] (%s) 缺 Reason: "+
@@ -150,14 +175,20 @@ func (t Thresholds) validate() error {
 	return nil
 }
 
-// exemptionFor 返回命中 (period, checkID) 的豁免，没有则返回 nil。
+// exemptionFor 返回命中 (period, periodType, checkID) 的豁免，没有则返回 nil。
 //
 // 精确匹配，不做范围或前缀匹配：一次口径变更豁免一个期次，写成范围就会让
 // 它悄悄覆盖后续所有期次，那是永久后门而不是定点豁免。
-func (t Thresholds) exemptionFor(period, checkID string) *CaliberExemption {
+//
+// periodType 是 M1b-4a 补上的第三个维度：在此之前同月的 annual 与 monthly 会被
+// 同一条豁免同时命中 —— 而它们是两条独立序列，一次只影响其中一条的口径变更
+// 会连带放行另一条。
+func (t Thresholds) exemptionFor(period, periodType, checkID string) *CaliberExemption {
 	for i := range t.CaliberExemptions {
 		ex := &t.CaliberExemptions[i]
-		if ex.Period == period && slices.Contains(ex.SkipChecks, checkID) {
+		if ex.Period == period &&
+			slices.Contains(ex.PeriodTypes, periodType) &&
+			slices.Contains(ex.SkipChecks, checkID) {
 			return ex
 		}
 	}
