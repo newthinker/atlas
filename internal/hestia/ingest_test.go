@@ -284,11 +284,23 @@ func TestIngestProcessesOldestFirst(t *testing.T) {
 // 用「把某个阈值收紧到几乎必然超差」来构造落 pending，不依赖任何快照的具体数值 ——
 // 依赖具体数值的构造会在换快照那天以无关的理由变红。
 //
-// ⚠️ 这里刻意**不**断言 Verdict 恒为 New：经 Ingest 的候选都已通过 Discover 的
-// HasPeriod 过滤（discover.go:303-318）⇒ Save 的 Lookup 必然查不到当前行 ⇒ Verdict
-// 结构上恒为 New，Duplicate/Revision 当前不可达。把这条钉成断言等于把当前的局限
-// 焊死，将来有人放开这条路时红的理由是反的。Verdict 仍然打进 Out，是为了那一天
-// 到来时它自己会显形。
+// ⚠️ 这里刻意**不**断言 Verdict 恒为某个值：**不要为当前的局限写断言** ——
+// 把当时的限制钉成契约，将来那条限制被放开时，红的理由是反的。
+//
+// 🔴 **这条理由现在有实证了**：同文件下方的 `TestForceOnObservedPeriodIsDuplicate`
+// 是**绿**的，它断言 `--force` 重跑已在权威表的期次会判 `Duplicate` ——
+// 也就是说那条限制**确实已经被放开了**，而本用例**从未因此红过一次**，
+// 因为它从一开始就没有假定它。
+//
+// ⚠️ **原注释在这里写着一段事实陈述**（「经 Discover 的 HasPeriod 过滤 ⇒ Verdict
+// 结构上恒为 New、Duplicate/Revision 当前不可达」），**三重过期**：判停早已不用
+// `HasPeriod`（`discover.go` 的 `Discover`，搜 `判据是 article_id`）、`Duplicate`
+// 已被上面那条绿测试证明可达、而那个 `file:line` 坐标漂移之后**正好指向了自己的反驳**。
+// ⇒ 事实陈述已删，**决定与理由保留**。
+//
+// 🔴 顺带一条纪律：注释里引用别处**一律用符号名 + 字串锚**，不要用 `file:line`
+// ——**注释里的 `file:line` 就是注释版的 `HEAD`**：它会随任何上游编辑静默漂移，
+// 而漂移之后**它仍然指向某个存在的东西**，于是看起来依然像个有效引用。
 func TestIngestReportsVerdictAndTable(t *testing.T) {
 	ctx := context.Background()
 
