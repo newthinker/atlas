@@ -23,8 +23,37 @@ TASK_DIR=".arcforge/tasks"
 HOOK_INPUT=$(cat)
 
 # --- Sprint E 2a 观测取证:完整 hook 输入落盘,用于确认子代理触发事件是否有可区分字段 ---
-# 只观测不过滤(硬过滤等取证一个 sprint 后再定);追加失败静默——观测是 best-effort,
-# 不得影响保活主逻辑。hook 由 harness 执行,不经 PreToolUse write-guard,可直写 coverage/。
+#
+# 🔴 取证已完成,结论是**否定的**:没有任何字段能区分「子代理触发」与「本体触发」。
+#    数据:atlas sprint-037 跑满一轮,idle-hook-debug.jsonl 共 163 条 ——
+#      · 字段集 163 条全同:cwd,hook_event_name,permission_mode,prompt_id,
+#        session_id,team_name,teammate_name,transcript_path
+#      · ppid 163 条全同(67878);team_name / permission_mode 各只有一种取值
+#      · 只读 lens 子代理**一条都没出现** —— 其空转以**父实例的名字**打进来
+#        (qa-agent-13 在 00:26:40Z–00:27:07Z 这 27 秒内打进 11 条,正是 lens 的
+#        空转期;两端闭区间,可直接复算)
+#        ⚠️ 「该 sprint 有三个 lens」这个**数量**来自 atlas 会话侧的 ListAgents,
+#           **在本文件里不可复算** —— 缺席方无法自证基数。可复算的只有
+#           「7 个 teammate_name 全是顶层实例、无 lens 名字」这一条。
+#
+#    ⇒ 这条结论**否掉了两条曾被设想的修法**,别再往这两个方向走:
+#      1. 「硬过滤子代理」—— 没有可过滤的字段
+#      2. 「给 lens 子代理打显式标记走 *) 分支」—— hook 看不到那个标记,
+#         因为子代理根本不作为独立调用方出现
+#
+#    ⇒ 剩下唯一可用的**机制**是给保活加界(hook 分不清调用方,只能约束自己),
+#      例如「同一实例连续 N 次被唤醒且任务集无变化 ⇒ 放行」。**本次不实现** ——
+#      exit 0 是不可逆停机点,放宽它会改变所有角色的保活语义,需单独设计与 TDD。
+#      ⚠️ 「唯一」限定在**机制**上:下面 qa-* 分支的 UNLOCK 文案里已有一条针对
+#         lens 的**文案级**缓解(「若你是只读 lens 子代理则产不出它,把结论交回
+#         父实例由其落盘」)。它靠读者照做,不靠 hook 判定 —— 现状不是零处置,
+#         但也不是机制。
+#
+#    ⚠️ 记这一条的理由:原注释写着「硬过滤等取证一个 sprint 后再定」,
+#      而取证已经跑完。不写下结论,下一个人会**再跑一个 sprint 的观测**去得到同一个答案。
+#
+# 观测保留(仍是 best-effort);追加失败静默——不得影响保活主逻辑。
+# hook 由 harness 执行,不经 PreToolUse write-guard,可直写 coverage/。
 # 修订④:HOOK_INPUT 是多行 JSON,必须 jq -c 压单行再落盘;jq 失败(非法 JSON)则整条
 # base64 作 raw_b64 落行,保证 jsonl 行语义永不被破坏(ParseTransitions 按行解析的教训)。
 {
