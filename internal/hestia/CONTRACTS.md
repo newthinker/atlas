@@ -736,3 +736,19 @@ plist 里**还有一个 `no_proxy`**；更麻烦的是**位置在各模板之间
 
 ⇒ **两道守卫各管一半，不可互替**：lint 管 XML 合不合法，Go 守卫管**这个 job 到底跑不跑、
 用什么环境跑**。只留任一道都会漏掉另一半。
+
+🔴 **第三处，而且它同时穿透两道守卫** ✅亲验：**`plutil` 接受标准 XML 拒绝的注释**。
+XML 规范不允许注释内出现 `--`，而 `com.newthinker.atlas.aktools.plist` 的注释里就有
+（`… CLI 为准(⚠ live 校验: --host/--port 旗标名)`）：Go 的 `encoding/xml` 与 Python 的
+`plistlib` **都拒绝**它，**`plutil -lint` 报 OK**。
+
+⇒ 这给出一个**同时骗过两道守卫**的构造，实测确认过：一份 plist 里放一个含 `--` 的注释、
+其后放一个真实的 `https_proxy` 键 ⇒ `plutil -lint` **OK**、`plutil -convert json` 读出的
+`EnvironmentVariables` 确实是 `['PATH', 'https_proxy']`，而 Go 守卫若把解析错误写成
+`if err != nil { break }`（静默返回已收集的部分键）⇒ **守卫 PASS**。
+
+⇒ **解析型守卫必须把解析错误当失败，不能当结束。** 「读到哪算哪」在正常输入上与正确实现
+无法区分，只在被构造的输入上分道扬镳 —— 而那正是它该起作用的时候。
+本仓库的守卫已改为 `errors.Is(err, io.EOF)` 才 break，其余一律 `require.NoError`。
+
+⚠️ `aktools.plist` 那处非法注释是**历史遗留**，不属本任务（不在其 `writes` 内），已登记待单开 chore。

@@ -13,8 +13,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,9 +287,15 @@ func plistEnvKeys(t *testing.T, path string) []string {
 	)
 	for {
 		tok, err := dec.Token()
-		if err != nil {
+		if errors.Is(err, io.EOF) {
 			break
 		}
+		// 🔴 **解析错误必须响亮失败，不能 break 了事**。原先这里是 `if err != nil { break }`
+		// —— 那会在遇到非法 XML 时**静默返回已收集的部分键**，而后面的代理键就此看不见。
+		// 这不是假想：`com.newthinker.atlas.aktools.plist` 的注释里含 `--`（XML 注释不允许），
+		// Go 的 encoding/xml 与 Python 的 expat 都拒绝它，而 **`plutil -lint` 报它 OK**。
+		// ⇒ 同类写法一旦进到本文件，静默截断会让这条守卫瞎掉。
+		require.NoErrorf(t, err, "解析 %s 失败：守卫不能在非法 XML 上静默返回部分结果", path)
 		switch t2 := tok.(type) {
 		case xml.StartElement:
 			switch {
@@ -416,9 +424,10 @@ func plistIntsUnderKey(t *testing.T, raw []byte, name string) []int {
 	)
 	for {
 		tok, err := dec.Token()
-		if err != nil {
+		if errors.Is(err, io.EOF) {
 			break
 		}
+		require.NoError(t, err, "解析 plist 失败：守卫不能在非法 XML 上静默返回部分结果")
 		switch tv := tok.(type) {
 		case xml.CharData:
 			txt := strings.TrimSpace(string(tv))
