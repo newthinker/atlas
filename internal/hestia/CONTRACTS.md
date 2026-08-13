@@ -588,7 +588,20 @@ ingest 里。**若它查的表包含 pending 行，重新发现的候选会在�
 
 **代价是它会翻满 `MaxPages`** —— 那是 `--force` 的语义（重来一遍），不是意外。
 
-⇒ **M1c 标定 `MagnitudeRanges` 后重跑已入库期次有出路。** reviewer 的 B4 原本登记为
+⇒ 🔴 **但「有出路」要限定：`--force` 穿透的是两层幂等，不是三层。**（QA WARNING-3，
+Architect lens 判原表述为假、Leader 复核成立、本任务改正。）
+
+对**已在权威表**的期次，`--force` 能让它重新走到 `Save`，**但走到之后是 no-op**：
+同一篇的 `published_at` 不变 ⇒ 恒判 `Duplicate` ⇒ `refreshArticleID` **只刷 `article_id`，
+新抽出来的 Values 一个都不写**，而 `Save` 返回 nil、退出码 0
+——运维看到的是「N 期处理完毕、零错误」。
+
+⇒ **M1c 标定 `MagnitudeRanges` 后：落在 pending 里的期次重跑有出路；已进权威表的没有。**
+该取舍本身早已登记在 `refreshArticleID` 自己的注释里（搜 `只更新 article_id 意味着`），
+本 Sprint 的新事实只是 **`--force` 成了第一个会批量触发它的调用方** ——
+在此之前那条路径要靠人手工构造才走得到。
+
+reviewer 的 B4 原本登记为
 「`--force` 的作用域只到 pending，对已在观测表的期次够不着 ⇒ 目前没有出路」——
 **那条现在是假的**，本 Sprint 加了层②之后被闭合。
 
@@ -729,6 +742,13 @@ plist 里**还有一个 `no_proxy`**；更麻烦的是**位置在各模板之间
 |---|---|---|
 | 插一个 `no_proxy` 键 | **OK** | 红（`TestHestiaPlistSetsNoProxyKeys`） |
 | **删掉整个 `StartCalendarInterval` 块** | **OK** | 红（`TestHestiaPlistSchedulesThreeTimes`） |
+| **把 `StartCalendarInterval` 键名改错一个字母** | **OK** | 红 —— ⚠️ **加固前它是绿的** |
+| **Hour / Minute 拆到不同的 `<dict>` 里**（排班从 3 次/天变成约 86 次/天） | **OK** | 红 —— ⚠️ **加固前它也是绿的** |
+
+⚠️ **后两行是 QA 变异实测出来的，而加固前那条守卫对它们全绿**：它原先在**全文档**范围数
+`Hour`/`Minute` 再**按下标**配对，从不断言这些整数位于 `StartCalendarInterval` 之下、
+也不断言两者出自同一个 dict。⇒ **「删掉」被守着，不等于「改名」和「错配」也被守着** ——
+只列「删掉」那一行会让读者以为整个键都被守住了。
 
 第二行是本任务改时刻时**真的发生过**的：注释与排班数组挨着，一次删除把两者一起带走，
 而 lint 照报 `OK`。⇒ 一个**没有排班键的 plist 是合法的 plist，它只是永远不会被唤起** ——

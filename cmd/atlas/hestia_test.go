@@ -398,29 +398,43 @@ func TestHestiaPlistSchedulesThreeTimes(t *testing.T) {
 	raw, err := os.ReadFile(plistPath)
 	require.NoError(t, err)
 
-	// 数 <key>Hour</key> / <key>Minute</key> 的配对值。用 XML 解析而不是子串，
-	// 理由同 plistEnvKeys：本文件注释里也写着这几个时刻。
-	hours, minutes := plistIntsUnderKey(t, raw, "Hour"), plistIntsUnderKey(t, raw, "Minute")
+	// 只认 StartCalendarInterval 之下的 dict，且 Hour/Minute 必须同出一个 dict。
+	// 用 XML 解析而不是子串：本文件注释里也写着这几个时刻。
+	got := plistSchedule(t, raw)
 
-	require.Len(t, hours, 3, "spec 定的是每日三个时点；解析不出三个说明排班键被改坏或删掉了")
-	require.Len(t, minutes, 3)
-
-	got := make([][2]int, 3)
-	for i := range hours {
-		got[i] = [2]int{hours[i], minutes[i]}
-	}
+	require.Len(t, got, 3,
+		"spec 定的是每日三个时点；解析不出三个说明排班键被改名、改坏或删掉了")
 	assert.Equal(t, [][2]int{{15, 30}, {17, 30}, {21, 30}}, got,
-		"时刻取自计划 2026-08-12-hestia-cli.md:1634-1638；要改先改 spec")
+		"时刻取自计划 2026-08-12-hestia-cli.md 的 StartCalendarInterval 段；要改先改 spec")
 }
 
-// plistIntsUnderKey 取出所有 `<key>NAME</key><integer>N</integer>` 里的 N，按出现顺序。
-func plistIntsUnderKey(t *testing.T, raw []byte, name string) []int {
+// plistSchedule 取出 `StartCalendarInterval` 数组里每个 `<dict>` 的 {Hour, Minute}。
+//
+// 🔴 **它替换的上一版是本 Sprint 第四个假通过，而且就在为修第三个而写的测试里。**
+// 上一版（`plistIntsUnderKey`）在**全文档**范围数 `<key>Hour</key>` 与 `<key>Minute</key>`，
+// 再**按下标**把两个独立列表配对 —— 从不断言这些整数位于 `StartCalendarInterval` 之下，
+// 也不断言 Hour 与 Minute 出自**同一个** dict。QA 的两条变异实测：
+//
+//   - 把键名打错一个字母 ⇒ launchd 忽略未知键、job 永不唤起，而断言**全绿**
+//   - Hour/Minute 跨 dict 错配（排班从 3 次/天变成约 86 次/天）⇒ **同样全绿**
+//
+// 两者的后果**与这条测试自述要防的完全相同**：装得上、`launchctl list` 看得见、
+// 日志目录空着，而一切看起来都正常。
+//
+// ⇒ 本版按 `plistEnvKeys` 的做法**限定作用域**：先认出 `StartCalendarInterval` 后面
+// 那个 `<array>`，再逐 `<dict>` 收成对的字段，**缺任一字段即失败**。
+func plistSchedule(t *testing.T, raw []byte) [][2]int {
 	t.Helper()
 	dec := xml.NewDecoder(bytes.NewReader(raw))
+
 	var (
-		out     []int
-		lastTxt string
-		want    bool
+		lastTxt   string
+		wantArray bool // 刚读到 StartCalendarInterval 这个键，下一个 <array> 就是它
+		inArray   bool
+		depth     int            // 相对该 array 的嵌套深度
+		cur       map[string]int // 当前 <dict> 已收到的字段
+		curKey    string         // 当前 <dict> 里最近一个 <key>
+		out       [][2]int
 	)
 	for {
 		tok, err := dec.Token()
@@ -428,21 +442,50 @@ func plistIntsUnderKey(t *testing.T, raw []byte, name string) []int {
 			break
 		}
 		require.NoError(t, err, "解析 plist 失败：守卫不能在非法 XML 上静默返回部分结果")
+
 		switch tv := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case wantArray && tv.Name.Local == "array":
+				inArray, wantArray, depth = true, false, 0
+			case inArray && tv.Name.Local == "dict":
+				depth++
+				if depth == 1 {
+					cur, curKey = map[string]int{}, ""
+				}
+			}
 		case xml.CharData:
 			txt := strings.TrimSpace(string(tv))
-			if want && txt != "" {
-				n, convErr := strconv.Atoi(txt)
-				require.NoError(t, convErr, "<%s> 后面应当是整数，得到 %q", name, txt)
-				out = append(out, n)
-				want = false
+			if txt == "" {
+				break
 			}
-			if txt != "" {
-				lastTxt = txt
+			// <integer> 的文本紧跟在它自己的 <key> 之后；只在 array 内的第一层 dict 里收。
+			if inArray && depth == 1 && curKey != "" {
+				if n, convErr := strconv.Atoi(txt); convErr == nil {
+					cur[curKey] = n
+					curKey = ""
+				}
 			}
+			lastTxt = txt
 		case xml.EndElement:
-			if tv.Name.Local == "key" && lastTxt == name {
-				want = true
+			switch {
+			case tv.Name.Local == "key" && !inArray && lastTxt == "StartCalendarInterval":
+				wantArray = true
+			case tv.Name.Local == "key" && inArray && depth == 1:
+				curKey = lastTxt
+			case tv.Name.Local == "dict" && inArray:
+				if depth == 1 {
+					h, okH := cur["Hour"]
+					m, okM := cur["Minute"]
+					// 缺字段即失败：Hour/Minute 必须出自**同一个** dict。
+					require.Truef(t, okH && okM,
+						"StartCalendarInterval 的第 %d 个 dict 缺字段（Hour=%v Minute=%v，收到的键 %v）",
+						len(out)+1, okH, okM, cur)
+					out = append(out, [2]int{h, m})
+				}
+				depth--
+			case tv.Name.Local == "array" && inArray && depth == 0:
+				inArray = false
 			}
 		}
 	}

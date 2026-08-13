@@ -70,7 +70,9 @@ func init() {
 	hestiaCmd.PersistentFlags().StringVar(&hestiaCfgPath, "hestia-config",
 		"configs/hestia.yaml", "hestia config path")
 	hestiaIngestCmd.Flags().BoolVar(&hestiaForce, "force", false,
-		"bypass the article_id idempotency key; use after changing thresholds")
+		"bypass both idempotency layers (Discover stop-key and ingest's article_id); "+
+			"NOTE: re-extracted values are DISCARDED for periods already in the observations "+
+			"table -- same published_at means Duplicate, which only refreshes article_id")
 	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd)
 	rootCmd.AddCommand(hestiaCmd)
 }
