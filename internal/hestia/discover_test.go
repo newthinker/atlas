@@ -1,6 +1,7 @@
 package hestia
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1292,4 +1293,85 @@ func TestDiscoverStillYieldsPendingPeriods(t *testing.T) {
 	require.NotEmpty(t, got, "pending 里的期次必须仍被交出来，否则它永远等不到重试")
 	assert.Equal(t, target.ArticleID, got[0].ArticleID)
 	assert.Equal(t, StopMaxPages, stop, "没有任何 id 在权威表里，应翻满上限而不是提前停")
+}
+
+// 🔴 `StopExhausted` 此前**没有任何测试断言过**（QA WARNING-1 实测：`grep StopExhausted`
+// 全仓仅 3 处，全在 discover.go 的注释/定义/返回）。
+//
+// 它与 `StopMaxPages` 的区别是运维要的：**exhausted = 站点翻完了，窗口外没有东西了；
+// max_pages = 上限拦住了，窗口外可能还有**。两者都返回「没更多候选」，只有 StopReason 分得开。
+func TestDiscoverReportsExhaustedWhenSiteIsShorterThanMaxPages(t *testing.T) {
+	// 合成站点只有 1 页（分页控件写 totalPages=1），而 MaxPages 要 3 ⇒ 翻完为止。
+	page := syntheticIndex(t, indexEntry{annualID, annualTitle})
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: page}}
+
+	got, stop, err := Discover(context.Background(), f,
+		fakeArticleChecker{have: map[string]bool{}},
+		DiscoverCfg{IndexURL: testIndexURL, MaxPages: 3})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, got, "前置锚点：这一页上有一条报告，空集会让下面的断言失去意义")
+	assert.Equal(t, StopExhausted, stop,
+		"站点只有 1 页而 MaxPages=3 ⇒ 是「翻完了」不是「被上限拦住」")
+	assert.Len(t, f.calls, 1, "只有 1 页可翻")
+}
+
+// 🔴 `Ingest` 必须把停止原因**说出来**，而且在**有候选时**也说（QA WARNING-1）。
+//
+// 原先它只在 `len(cands) == 0` 时打印 ⇒ 而 **`max_pages` 且有候选恰恰是主要形态**
+// （空库首跑必然如此）。那一轮之后 MaxPages 以外的历史**永久不可达**，
+// 而这条信息**在唯一会发生它的那一轮被静默吞掉**、退出码 0。
+//
+// ⚠️ 本条放在 discover_test.go 而不是 ingest_test.go：`ingest_test.go` 属 TASK-007 的
+// writes（两个返工任务同时在途，同一文件会撞 scope-mutex），而这条断言的对象是
+// `StopReason` 这个 discover 侧的契约**是否到达了运维**，放在它旁边也说得通。
+func TestIngestReportsStopReasonEvenWithCandidates(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}),
+		articleURL(annualID): readTestdata(t, annualFile),
+	}}
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg()}))
+
+	// 前置锚点：这一轮确实处理了候选（否则走的是 len(cands)==0 那条旧分支）。
+	require.NotEmpty(t, outPeriods(out.String()), "本用例要的是「有候选」那条路径")
+	assert.Contains(t, out.String(), "discover stopped:",
+		"有候选时也必须说明为何停 —— 否则 max_pages 这个「窗口外可能还有」的信号被吞掉")
+	assert.Contains(t, out.String(), string(StopExhausted),
+		"合成站点只有 1 页，应当报 exhausted")
+}
+
+// 🔴 **日常最常见的那一轮**：什么都没有新的，Discover 命中已见过的文章就停。
+//
+// ⚠️ 这条路径**在 TASK-011 之后一度没有任何测试**：判停键从期次换成 article_id 之后，
+// 原先唯一走到它的 `TestIngestSkipsSeenArticleUnlessForce/默认跳过` 改走了「候选交出来、
+// 由 ingestOne 挡住」那条（pending 里的文章不再让 Discover 停）⇒ `len(cands)==0`
+// 那个分支变成**未覆盖**，而它恰恰是**一个月里 28 天都会走的那条**。
+//
+// 覆盖率把这件事显出来了：加 cwd 守卫后 ingest.go 的 Ingest 掉到 89.7%，
+// 逐块看才发现少的不是新代码，是这条老路径。
+func TestIngestReportsNothingNewOnSecondRun(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// 第 1 轮：正常入库
+	var first bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &first, Cfg: ingestCfg(),
+	}))
+	require.NotEmpty(t, outPeriods(first.String()), "前置锚点：第 1 轮应当真的处理了一期")
+
+	// 第 2 轮：同一篇已在权威表 ⇒ Discover 命中即停 ⇒ 零候选
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(),
+	}))
+
+	assert.Empty(t, outPeriods(out.String()), "没有新东西可处理")
+	assert.Contains(t, out.String(), "no new reports")
+	assert.Contains(t, out.String(), string(StopSeen),
+		"必须说明是「命中已见过的文章」而停，不是「翻满上限」—— 两者在这一行上同形")
 }

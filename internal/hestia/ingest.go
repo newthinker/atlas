@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -19,7 +21,14 @@ type IngestDeps struct {
 	Fetch Fetcher
 	Cfg   Config
 	Out   io.Writer // nil 等价于 io.Discard
-	Force bool      // 绕过一级幂等键，用于改了阈值后重跑
+	// Force 绕过**两层**幂等（Discover 的判停 + ingestOne 的 article_id）。
+	//
+	// ⚠️ **它穿不透第三层**：对已在权威表的期次，同一篇的 `published_at` 不变
+	// ⇒ `Save` 恒判 `Duplicate` ⇒ `refreshArticleID` **只刷 article_id，新抽出来的
+	// Values 一个都不写**，且返回 nil、退出码 0。⇒ 「改了阈值后重跑」对**已入库**
+	// 的期次在数据层面是 **no-op**；它真正能救回来的是**落在 pending 里**的那些。
+	// 该取舍登记在 `refreshArticleID` 自己的注释里（搜 `只更新 article_id 意味着`）。
+	Force bool
 }
 
 // neverSeen 是 Force 用的 ArticleChecker：什么都没见过，于是 Discover 不会提前返回。
@@ -58,18 +67,54 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 	if d.Force {
 		known = neverSeen{}
 	}
+	// 🔴 **cwd 守卫**：先说清这一轮写的是哪个库（TASK-009 WARNING-4）。
+	//
+	// `db_path` 是相对路径、按进程 cwd 解析（约束 C8），而 `NewStore` 先 `MkdirAll`
+	// 再建库 ⇒ **在错误的 cwd 下不报错，会新建一个空库**。之后 ingest 会翻满 MaxPages、
+	// 全量入库、逐期打印正常、退出码 0，**而真库停在旧数据、没有任何提示**。
+	// `status` 一直有这道守卫（`RenderStatus` 打印解析后的绝对路径），`ingest` 此前没有
+	// —— 而 ingest 才是 launchd 每天三次唤起的那个。
+	//
+	// ⚠️ **打印放在这一层而不是 cmd 层**：`cmd/atlas/hestia.go` 有一条守卫明令它不得
+	// import `path/filepath`（搜 `不该 import path/filepath`）——「db_path 的解析归
+	// internal/hestia」是 TASK-008 定的分层。把解析塞回 cmd 层会打红那条守卫，
+	// 而那条守卫是对的：路径语义只该有一个归属。
+	// `filepath.Abs` 只在 `os.Getwd()` 失败时出错，而那种环境下「相对 db_path」这个
+	// 设计本身已无从谈起 ⇒ 不为它单开一条分支（那条分支测不到，只会变成一块永不执行
+	// 的未覆盖代码）。出错时 abs 为空串，退回打印原样路径，信息量不减。
+	abs, _ := filepath.Abs(d.Cfg.Storage.DBPath)
+	if abs == "" {
+		abs = d.Cfg.Storage.DBPath
+	}
+	fmt.Fprintf(d.Out, "db: %s\n", abs)
+
 	cands, stop, err := Discover(ctx, d.Fetch, known, d.Cfg.Discover)
 	if err != nil {
 		// 此刻还没有任何期次，能给的定位上下文只有 index URL。
 		return fmt.Errorf("hestia ingest: discover %s: %w", d.Cfg.Discover.IndexURL, err)
 	}
+	// 🔴 **停止原因在有候选时也必须说**（TASK-011 WARNING-1）。
+	//
+	// 原先它只在 `len(cands) == 0` 时打印，而 **`max_pages` 且有候选恰恰是它的主要形态**：
+	// 空库首跑必然如此。⇒ 那一轮之后 `MaxPages` 以外的历史**永久不可达**，
+	// 而这条信息**在唯一会发生它的那一轮被静默吞掉**，退出码 0。
+	//
+	// `max_pages` 走 **stderr**：它是「可能还有没发现的期次」这个警告，不是正常输出。
+	// ⚠️ **不改退出码** —— 首跑必然 `max_pages`，改退出码会产出**假红**，而假红会被
+	// 训练成忽略；那比不报还糟。
+	if stop == StopMaxPages {
+		fmt.Fprintf(os.Stderr,
+			"WARNING: discover stopped at max_pages (%d) with %d candidate(s): "+
+				"periods older than the window are not reachable this run\n",
+			d.Cfg.Discover.MaxPages, len(cands))
+	}
 	if len(cands) == 0 {
-		// 带上停止原因（TASK-011）：`no new reports` 单独一句在两种情形下完全同形——
-		// 「命中已见过的文章、正常停」与「翻满上限仍一无所获」。后者意味着窗口外
-		// 可能还有发现不了的期次，而运维只看这一行是分不出来的。
+		// 「命中已见过的文章、正常停」与「翻满上限仍一无所获」在这一行上完全同形，
+		// 靠 stop 才分得开。
 		fmt.Fprintf(d.Out, "no new reports (stopped: %s)\n", stop)
 		return nil
 	}
+	fmt.Fprintf(d.Out, "discover stopped: %s (%d candidate(s))\n", stop, len(cands))
 
 	// 按期次**升序**处理。Discover 给的是「最近的排在前面」，顺着跑会让
 	// stock_continuity / deposit_sum 的漂移检测一次都不真正执行（每一期都成了
@@ -158,9 +203,12 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
 	}
 
 	// Verdict 与 Table 都打出来。Table 是当下就必须区分的（入权威表 vs 落 pending
-	// 对运维的含义相反）；Verdict 当前恒为 New（经 Discover 过滤的候选必然不在
-	// 当前行里），打它是为了将来有人放开那条路时，Duplicate/Revision 自己会显形，
-	// 而不是悄悄混在「已入库」里。
+	// 对运维的含义相反）。
+	//
+	// Verdict 也打，理由是**不要为当前的局限写断言** —— 让 Duplicate/Revision 自己
+	// 显形，而不是悄悄混在「已入库」里。⚠️ 这条理由的实证是
+	// `TestForceOnObservedPeriodIsDuplicate`（`ingest_test.go`）：它现在是**绿**的，
+	// 而它**从未因为「那条局限被放开」而红过一次** —— 因为这里从一开始就没有假定它。
 	fmt.Fprintf(d.Out, "%s %s → %s\n", obs.Meta.Period, out.Verdict, out.Table)
 	return nil
 }

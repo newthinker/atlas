@@ -213,7 +213,12 @@ type Querier interface {
 // 返回类型保证，而不是靠调用方自觉。
 func (s *Store) DB() Querier { return s.db }
 
-// HasPeriod 回答某期是否已在权威表里。Discover 用它决定翻页何时停。
+// HasPeriod 回答某期是否已在权威表里。
+//
+// ⚠️ **它已不再是 Discover 的判停键**（TASK-011 起改为 `HasArticleInObservations`，
+// `PeriodChecker` 接口已删）。当前调用方只有测试（用它断言库状态）。
+// 保留它是因为「某期入库了没有」本身是个有用的问题，而下面那条 pending 语义
+// 是它与 `HasArticle` 的分工所在。
 //
 // 查 v_hestia_current 而**不**查 hestia_pending：pending 里的期次不算已入库。
 // 这是刻意的 —— 没过闸的一期该被重新发现、重新尝试，否则一次解析失败会让那期

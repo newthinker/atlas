@@ -356,7 +356,8 @@ func TestStoreCloseReleasesDB(t *testing.T) {
 // HasPeriod 在 M1b-4a / TASK-004 追加，本条随之更新为
 // [Close, DB, HasPeriod, Preceding, Save]，**仍是精确集合相等**。它是 Store 的第二个
 // 读方法：只发一条 SELECT ... LIMIT 1、走 v_hestia_current 视图，不碰任何写路径。
-// Discover 经 PeriodChecker 窄接口消费它，用来决定翻页何时停。
+// ⚠️ TASK-011 起 Discover 的判停键是 HasArticleInObservations，PeriodChecker 已删；
+// 本条守的仍是「它是只读方法」这个性质，与谁消费它无关。
 //
 // HasPeriod 是 *Store 的方法，所以它**同时**打红本条（reflect 版）与
 // TestPackageExposesNoWriteFunctions（AST 版），两条都登记过才算数——这与
@@ -490,7 +491,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 //
 // 同样是登记而不是放宽。HasPeriod 是 Store 的第二个**读**方法：一条
 // SELECT 1 FROM v_hestia_current ... LIMIT 1，不碰任何写路径。Discover 经
-// PeriodChecker 窄接口消费它，用来决定翻页何时停。
+// 窄接口消费它（TASK-011 起是 ArticleChecker，判停键为 HasArticleInObservations）。
 //
 // 它与 Store.Preceding 同形：**是 *Store 的方法，所以同时打红本条（AST 版）与
 // TestStoreExposesNoWriteMethods（reflect 版）**，两条都登记过才算数。与之相对，
@@ -506,7 +507,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 //
 // 同样是登记而不是放宽：断言仍是 assert.Equal 的**全导出面精确集合相等**，只是切片里
 // 多了一项（十→十一），没有换成 Subset/Contains。Discover 是包级函数，读 index 页、
-// 产出候选清单，**不碰数据库**——它连 Store 都不持有，只经 PeriodChecker 窄接口问
+// 产出候选清单，**不碰数据库**——它连 Store 都不持有，只经 ArticleChecker 窄接口问
 // 「这一期入库了没有」，那是个只读判定。它必须导出，是因为 M1b-4b 的 ingest 与 cmd 层
 // 要调它。排在 DefaultThresholds 之后是字节序结果（"De" < "Di" < "N"）。
 //
