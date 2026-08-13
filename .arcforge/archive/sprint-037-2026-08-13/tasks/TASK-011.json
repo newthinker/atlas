@@ -1,0 +1,84 @@
+{
+  "id": "TASK-011",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 1,
+  "title": "Discover 判停规则：HasPeriod → HasArticle（修复静默停摆）",
+  "description": "🔴 **人类 2026-08-13 定案**。test-agent-26 发现并实证、Leader 独立复现：\n\n`discover.go:313` 是 `if has { return out, nil }` —— **命中已入库期次就立刻停止翻页并返回**。注释理由「index 按时间倒序，再往后只会更旧」**把「发布时间倒序」和「期次倒序」当成了同一件事**；央行重发某期时分叉（修订版发布最新 ⇒ 排最前，而期次是旧的、已入库）。\n\n**实测**（第 1 页放已入库的 `2026-03/q1`，第 2 页放未入库的 `2026-06/h1`）：\n```\nDiscover 返回 0 条 · 翻了 1 页 · err == nil   ← 完全静默\n```\n\n⇒ **不只是「修订版不可达」，是「修订版之后的所有未入库期次都发现不了」**，且不自愈（每次唤起停在同一处）、返回空 + nil error **与「今天没有新报告」在调用方看来完全一样**。\n\n⚠️ **这不是 wave1 任何任务的缺陷**，是 Sprint 036 交付的既有行为，三个 VERIFIED 不受影响。\n\n⚠️ **签名会变** ⇒ 依赖 TASK-005（`Ingest` 调用 `Discover`），必须在它之后改，并同步它的调用点。\n\n---\n\n🔴 **TASK-001 扩大了这个 bug 的触发面**（dev-agent-52 指出，归属上它没制造这个 bug）：\n\n**停在哪，取决于哪些条目能成为候选。** 而 TASK-001 做的正是「让更多条目成为候选」——\n① 放宽 `articleLinkRE` ⇒ **p15 起的整段历史**从「0 候选」变成「有候选」；\n② `parsePeriod` 认季报 ⇒ **q1 / q1_q3 成了新的可能停止键**，在此之前它们压根进不了这个循环。\n\n⇒ 那个静默停摆的形态**在季报上从此可达了**。\n🔴 **明确：这不等于 TASK-001 引入了缺陷** —— 它主循环一行没碰，静默停摆在 Sprint 036 就存在。**验证者不要把这条算到 TASK-001 的账上**（dev-agent-52 特别要求写明这一点）。也不构成「TASK-001 该回滚」（不放宽则季报根本发现不了，是严格更差的状态），但它意味着 **TASK-011 的紧迫性因 TASK-001 而上升**，不是与它无关的存量问题。",
+  "wave": 3,
+  "dependencies": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "context_from": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/discover.go",
+    "./internal/hestia/discover_test.go",
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**判停从 `HasPeriod(period, periodType)` 换成 `HasArticle(articleID)`**（TASK-003 已交付，查 observations + pending 两张表）。\n\n修订版有**新 article_id** ⇒ 不命中 ⇒ **不停、继续翻、被收进候选**；正常已处理的报告 article_id 已见过 ⇒ **照常停**。\n\n🔴 **必须有一条测试逐字复现上面那个场景**：已入库期次排第 1 页、未入库期次在第 2 页 ⇒ **断言未入库那期被发现**（而不是返回 0 条）。这是本任务存在的唯一理由，缺它等于没做。",
+      "**接口调整**：`Discover` 的 `known PeriodChecker` 要改。由你定形态（换成 `ArticleChecker`、或合成一个同时提供两者的接口、或直接收 `*Store`），但**必须在 discovery 里写明选了哪种及理由**。\n\n⚠️ **同步改 TASK-005 的调用点**（`ingest.go` 已在你的 `writes` 里）。改完整包必须绿 —— **若 `ingest_test.go` 因签名变更而红，那不是你能改的文件**（属 TASK-007），**停下来告诉我**。"
+    ],
+    "boundary": [
+      "🔴 **必须正面处理 `discover.go:205-208` 那段既有反论证**（dev-agent-52 指出，Leader 核实属实）：\n\n> 判停用**期次**而不是 article_id：M0 实测 2020 上半年报告的 article_id 是 `2025092212550713215`\n> —— 2025-09-22 的时间戳，央行 **2026-06-26 批量重建过站点**。按 article_id 判停，\n> **一次迁移后全部 id 变新，每次唤起都会翻满上限，且每期都被当成新文章。**\n\n**那是一段有 M0 实测支撑的论证，不是随手写的。TASK-011 要么推翻它、要么说明为什么现在不同了 —— 别让它静默失效。**\n\n---\n\n**Leader 已找到「为什么现在不同」的依据，但要你实测确认，不要照抄**：\n\n`store.go:519-523` 的 `refreshArticleID` 注释**直接回应了同一个担忧**：\n\n> 站点迁移换了 article_id，发布日不变。写新行会造出一个假修订；\n> **什么都不做则一级幂等检查（按 article_id 查）永远 miss，每月重抓一次。**\n> 正确动作是**刷新那一行的 id** —— 它记录「这行数据最后一次在哪个 URL 被看到」。\n\n⇒ 迁移后第一轮：id 全 miss ⇒ 不停 ⇒ 翻满 `MaxPages` ⇒ 候选被抓 ⇒ `Save` 走 `Duplicate` ⇒ **`refreshArticleID` 把 id 刷新** ⇒ **下一轮就命中、恢复正常**。\n\n⇒ **代价从「每次唤起都翻满」降级为「迁移后一轮全量重抓，之后自愈」**，而 `MaxPages: 3` 把那一轮的范围限制在约 45 条候选内。\n\n🔴 **你必须用测试把这个自愈实证出来**（这是本条的核心，不是背景说明）：构造「库里存旧 id、index 上是新 id」⇒ 第一轮翻满且候选非空 ⇒ 走完 `Save` 后 ⇒ **第二轮命中、正常停** 。**贴出两轮的实跑输出。**\n\n⚠️ 若你实测发现自愈**不成立**（例如 `refreshArticleID` 只在 observations 表刷、而 pending 里的旧 id 留着），**停下来告诉我** —— 那意味着这个方案的代价比我估计的大，可能要重新裁决。\n\n---\n\n🔴 **链条里最可能断的那一环（dev-agent-52 指出，先钉它）**：\n\n> `Save` 要走到 `Duplicate` 分支、并触发 `refreshArticleID`，前提是它**按二级键认出这是同一期**。\n> **如果二级键的判定条件比我们以为的窄**（比如还要求某字段相等），那一轮就会变成 `New` 而不是 `Duplicate`，\n> **id 永不刷新，「一轮后自愈」退化成「每轮全量重抓」** —— 也就是 `discover.go` 那段反论证\n> 原本担心的东西，**只是换了个位置发生**。\n\n⇒ **先读 `bitemporal.Lookup`/`Classify` 的实际判定条件，确认「同期次 + 新 article_id」真的判 `Duplicate`**，再去测两轮自愈。这一环不成立的话，后面整条链都不用测了。**把这一环的实测结论单独写进 discovery。**\n\n---\n\n⚠️ **Leader 曾给过一条「参考证据」，dev-agent-52 指出它比结论弱，此处如实更正**：\n\n`bitemporal/classify_test.go:31` 有一条名为「同键同 revision —— **站点迁移换了 URL**」的用例判 `Duplicate`。**但它直接构造 `State`、不经过 `Lookup`** ⇒ 它证明的是「**给定**那个 State，`Classify` 判 `Duplicate`」，**不是**「站点迁移后系统真的会走到 `Duplicate`」。\n\n⇒ **它是待证命题的一个前件，不是那个命题本身。** 证据的重心**完全落在 `Lookup`** 上：`Exists` 与 `LatestRevision` 从哪张表、哪几列取，**是否还要求 article_id 相等**。\n\n**读断言，不读用例名** —— 用例名是作者对场景的描述，断言才是它实际验证的东西（见 H11）。",
+      "🔴 **空库首跑必须仍然翻满 `MaxPages`**（spec §4.3 的首跑行为，Sprint 036 有测试钉着）。换判据后这条**极易破**：若实现写成「发现候选就停」会直接违反 spec。**既有那条测试必须仍绿**，且你要在 discovery 里贴出它的实跑输出。",
+      "**要不要保留 `HasPeriod` 作为二级键，由你判断并说明理由**（人类未定案）。\n\n考虑点：`HasArticle` 查两表含 pending ⇒ 一个反复未过闸的期次其 article_id 已见过 ⇒ 会停在它那里。**分析这是否是想要的行为**（index 按发布时间倒序，卡住的那期若排在前面，停在它之后的都更旧 —— 但「更旧」正是本任务要质疑的那个假设）。**结论写进 discovery，无论选哪边。**"
+    ],
+    "error_handling": [
+      "**「因命中已见过而停」与「翻满 `MaxPages` 而停」必须在返回值或日志里可区分。**\n\n⚠️ 这条独立于判据本身：**当前最危险的属性是「静默」** —— 返回空 + `nil` error 与「今天真的没有新报告」完全同形。即使判据换了，**调用方仍应能知道 Discover 为何停下**。\n\n（TASK-005 的 dev-54 已实测：`Discover` 返回空时 ingest 打印 `no new reports` —— **那句话在停摆时也会打印**。）"
+    ],
+    "non_functional": [
+      "🔴 **顺手闭合一个真正的守卫缺口**（test-agent-26 核清，Leader 此前以为已修实为碰巧）：\n\n`TestPackageExposesNoWriteFunctions` 的失败文案里**手写着期望项数**（「恰好是这十七个」），而**没有任何东西比对它与 `len(want)`** —— 同一事实的两个副本，改一处不会让另一处变红。\n\n⚠️ **它此刻正确是副作用**：dev-53 交付时是「16 项 vs 文案十七」（**不一致且无人报警**），Leader 加 `\"Ingest\"` 后列表变 17，**文案碰巧变对了**。⇒ **下次加导出物时同样的不一致会再次发生。**\n\n**闭合方式**：让 message 由 `len(want)` 生成，而不是手写汉字数字。**一行的事。**\n\n（`store_test.go` 已在你的 `writes` 里，因为接口形态变更可能要动守卫。）",
+      "**导出面守卫**：若接口形态变更导致导出物增减，按同款规则**登记**（`assert.Equal` 一字不动，只改切片项）。⚠️ `store_test.go` 在你 `writes` 里正是为此 —— **但 TASK-005/006 也在改它**，**你开工前先确认它们都已 `dev_done`**，否则会撞上后写者静默覆盖（见 `plan.md` 的串行裁决）。",
+      "**消融自证**：把判停改回 `HasPeriod`，确认上面那条复现测试**转红**，且**红的是它**（贴出失败输出的具体那一行）。\n\n⚠️ 判据是「哪条断言红」不是「测试红不红」。",
+      "覆盖率不低于当时的基线；`gofmt`/`vet` 空；整包 `-count=1` 与 `-race` 全绿；`go build ./...` OK。单跑用 `-run '^Top$/^Sub$'` 锚定式。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-52",
+  "questions": [
+    {
+      "q": "🔴 TASK-011 撞上 TASK-005 刻意设计的两层契约，需要你裁决（我已发 inbox，此处落盘留痕）。把判停换成 HasArticle（DoD functional[0] 字面要求）后，TestIngestSkipsSeenArticleUnlessForce/默认跳过已处理过的文章 红，而 ingest_test.go 不在我 writes 内。根因：HasArticle 查 observations ∪ **pending**，而 TASK-005 刻意让两层判据不同（ingest_test.go:315-318 原话：「HasPeriod 不认 pending 所以 Discover 仍把这期当候选交出来，HasArticle 认 pending 所以这里挡住。两者方向相反而都对」）。我把两层合成了一层。归属已用隔离树严格验证（0e2c6fc + 仅我 4 个文件 ⇒ 同样只此一条红；反向消融判停改回 HasPeriod ⇒ 这条反而变绿）。注意 DoD 的 boundary[2] 把「要不要保留 HasPeriod 作二级键」明确交给我判断，所以**设计判断我可以做**；我做不了的只有「改 ingest_test.go 那一条断言」。",
+      "asked_at": "2026-08-12T17:03:24Z",
+      "answer": null
+    },
+    {
+      "q": "四个选项，请选一个（我推荐 D，其次 C）。(A) 保持 HasArticle 只改那条断言 —— 代价：落进 pending 的期次**再也不会被自动重试**，且 ingestOne 里那段 HasArticle 检查在非 Force 路径成为死码。(B) 判停只认 observations —— 保住 TASK-005 两层设计、pending 可自动重试，但要给 Store 加一个新方法（store.go 不在我 writes，需登记）+ 登记导出面。(C) = 我当前状态（已用 neverSeen 修好 Force 回归）+ 只改那条文案断言，代价同 A 但 Force 这条逃生通道是通的。**(D) 判停条件改成 HasArticle(id) && HasPeriod(period,type)** —— 只用**现有方法**，不加任何导出物、不动 store.go：文章在观测表 ⇒ 两者皆真 ⇒ 停；只在 pending ⇒ HasPeriod 假 ⇒ 不停 ⇒ 候选照常交出、ingest 打 already ingested ⇒ **TASK-005 的两层设计与那条测试都原样保住**；修订版 ⇒ HasArticle 假 ⇒ 不停。⚠️ D 的诚实缺陷：它是**近似**而非精确的「这篇在不在观测表」——当同一期的原文已在观测表、而修订版落了 pending 时，两者皆真会误停。我不想把这个近似偷偷塞进来，所以摆出来由你定。",
+      "asked_at": "2026-08-12T17:03:24Z",
+      "answer": null
+    },
+    {
+      "q": "一处我主动更正、免得你按错理由决策：我最初以为 (A)/(C) 还会造成「比 (B) 丢更多期次」，**自己复核后否掉了**。(B) 下 Discover 越过 pending 那条后，紧接着就会停在它后面那条已入观测表的文章上，**可达深度与 (A)/(C) 完全一样**。⇒ 四个选项的真实差别只在「pending 里的期次能否被自动重试」，不在丢数据。另：Force 失效那半我已经修好（neverSeen，Force 时喂一个「什么都没见过」的 checker），那是我引入的功能回归，不是文案问题。",
+      "asked_at": "2026-08-12T17:03:24Z",
+      "answer": null
+    }
+  ],
+  "verify_baseline": {
+    "head": "b6b13a4ac3ab314ac63e45e2170a8488e0fd4204",
+    "discovery_sha256": "090cce68f62894a2a2f687b6c157389038240d8aa27e57e99b46eb3b4956d449",
+    "at": "2026-08-13T00:56:36Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "fix_items": [
+    "**WARNING-1 — `StopReason` 在有候选时被整个丢掉**（`internal/hestia/ingest.go`）。\n\n**Leader 复核**：`stop` 全函数**只有两处引用** —— 一处赋值（`cands, stop, err := Discover(...)`），一处打印（`no new reports (stopped: %s)`），而后者关在 `if len(cands) == 0` 里。\n**qa-agent-14 复跑**：`grep -rn 'stopped:' --include='*_test.go' .` **exit=1，零命中**；`grep -rn 'StopExhausted' --include='*.go' .` **仅 3 处全在 `discover.go`**（注释/定义/返回），**无任何测试断言过它**。\n\n**为什么要紧**：plist 注释自述「真正要担心的是反过来 —— `stopped: max_pages` 意味着窗口外可能还有没发现的期次」，而 **`max_pages` 且有候选恰是它的主要形态**（空库首跑必然如此，见 `TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly` 的 A 组）。首跑之后 `MaxPages` 以外的历史**永久不可达**，而这条信息**在唯一会发生它的那一轮被静默吞掉**，退出码 0。\n\n**修法**（Architect lens 给的方向，Leader 采纳）：候选非空时也打停止原因；`stop == StopMaxPages` 时写 **stderr**。🔴 **不要改退出码** —— 首跑必然 `max_pages`，改退出码会变成**假红**，而假红会被训练成忽略。\n\n**并补断言**：现在**没有任何用例断言 `Ingest` 会输出停止原因**，也没有任何用例断言过 `StopExhausted`。请各补一条。",
+    "**WARNING-2（第 1、3 份副本）— 同一句过期结论在 `ingest.go` 与 `store.go` 各有一份**。详见 `.arcforge/docs/02-plan/qa-preregistered-items.md` 的 **QA-PRE-1** 与 **QA-PRE-1c**（Leader 在 QA 之前就登记了，Minimalist 与 Architect 两个 lens 又独立命中）。\n\n① `internal/hestia/ingest.go`（搜 `Verdict 当前恒为 New`）：「经 Discover 过滤的候选必然不在当前行里」—— TASK-011 之后假的，且 `ingest_test.go` 的 `TestForceOnObservedPeriodIsDuplicate` **是绿的、直接反证它**。\n\n② `internal/hestia/store.go`（搜 `Discover 用它决定翻页何时停`）：`HasPeriod` 的首行文档 —— **`Discover` 现在用的是 `HasArticleInObservations`，`PeriodChecker` 已删**。`store_test.go` 里还有三处说「Discover 经 PeriodChecker 窄接口消费它」（搜 `PeriodChecker`）。\n\n🔴 **改的时候不要把「决定」一起删掉**（这条护栏是 dev-agent-54 给的，逐字照做即可）：\n**保留**「不要为当前的局限写断言」这条理由，以及它的实证 —— `TestForceOnObservedPeriodIsDuplicate` 现在是绿的，而它**从未因为那条局限被放开而红过一次**。\n**删除**「恒为 `New` / `Duplicate`、`Revision` 当前不可达」这个**事实陈述**，以及过期坐标。\n\n🔴 **删掉行号锚，改用符号名 + 字串锚**（QA-PRE-1d）：`ingest_test.go` 里那个 `discover.go:303-318` **现在指向的正是它自己的反驳**。**注释里的 `file:line` 就是注释版的 `HEAD`。**",
+    "**WARNING-3 的 `ingest.go` 半**：`IngestDeps.Force` 字段注释现在写「绕过一级幂等键，用于改了阈值后重跑」—— 与 flag help 一样把它描述成「重来一遍」，**而数据层面对已在权威表的期次是 no-op**（恒判 `Duplicate` ⇒ `refreshArticleID` 只刷 `article_id`）。请点名这一点。**行为不改**（Duplicate 不覆盖是 `refreshArticleID` 注释里登记在案的取舍）。"
+  ],
+  "reason_class": "task_defect"
+}

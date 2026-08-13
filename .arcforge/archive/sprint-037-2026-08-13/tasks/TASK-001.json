@@ -1,0 +1,74 @@
+{
+  "id": "TASK-001",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "季报识别①：链接层 + discover 标题正则 + 期次类型定义（静默失败点）",
+  "description": "人类 2026-08-12 定案「季报支持，4b 之前补上」。\n\n🔴 **边界按『静默失败 vs 响亮失败』划**（独立 reviewer 实测重划，非原设想的 discover/extract）：\n```\narticleLinkRE(\\d{14,}) → reportTitleRE/parsePeriod → titleRE/parseTitle → periodAlt → cumulativePeriods\n   [本任务]                   [本任务]                    [本任务]              [TASK-004]   [TASK-004]\n        ↑ 静默跳过 ────────────────────────────────┘  ↑ 从这里起响亮报错\n```\n\n⚠️ **本任务与 TASK-004 必须同一分支、一次合入 master**（reviewer D6）：只落本任务会让季报从「静默消失」变成「每次唤起都失败」——`Discover` 只在命中已入库期次时提前返回，而失败的期次永远入不了库 ⇒ 该期在 `MaxPages` 窗口内（约 2 个月）**每天三次持续失败**，把退出码这个唯一报警通道淹掉约 4 个月/年。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/discover.go",
+    "./internal/hestia/discover_test.go",
+    "./internal/hestia/types.go",
+    "./internal/hestia/types_test.go",
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/testdata"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**先抓真实样本再动代码**。reviewer 已 curl 核实（可直接用）：\n\n| | 一季度 | 前三季度 |\n|---|---|---|\n| 标题 | `2026年一季度金融统计数据报告` | `2025年前三季度金融统计数据报告` |\n| URL | `…/113469/2026041311133582598/index.html` | `…/113469/**5868082**/index.html` |\n| article_id | 19 位 | **7 位** |\n| PubDate | 2026-04-13 | 2025-10-15 |\n| 所在页 | p7 | p18 |\n\n两份 index 快照 + 两份正文快照落 `testdata/`，记下抓取 URL 与日期。**不得用合成标题代替真实样本**。",
+      "🔴 **`articleLinkRE` 的 `\\d{14,}` 必须放宽**（reviewer B1，实测）——这是第一处静默失败点，**而原 DoD 曾要求断言 `^\\d{14,}$`，那是把缺陷钉成契约**。\n\n实测：p18 的前三季度报 article_id 是 **7 位**，`articleLinkRE` **整条链接根本不进入 `scanPage` 循环体**；逐页统计 id 位数，**分界在 p14/p15 之间**（p1–p14 全 19 位，p15–p18 全 7 位）⇒ **第 15 页起 `scanPage` 一条候选都产不出，且完全静默**（`Discover` 照常翻满 `MaxPages` 返回空）。\n\n改成 `\\d+` 或 `\\d{6,}`，并**断言 `scanPage` 能从真实 p18 快照提取到 `5868082` 那条**（钉字面量，不钉位数下界）。\n\n⚠️ **放宽必须配否定式边界**：多出来的那些链接全是栏目导航页（`/rmyh/105145/index.html` 这类），链接文本过不了 `parsePeriod` ⇒ 放宽本身安全（reviewer 与 test-agent-26 各自独立复现过：能过 `reportTitleRE` 的是 **0 条**）。**但这件事要有一条断言钉住**，否则下次有人再放宽就没有网了。\n\n🔴 **断言钉「0 条候选」，刻意不钉「多出多少条」**（leader 2026-08-12 澄清 + dev 实测对账）：原 DoD 写的「42 条」只对 `\\d{6,}` 成立，本任务选了 `\\d+`。更要紧的是 —— 同一个问题「多出几条」有**四个各自都对的答案**，p1 实测：全部命中数之差 **44**（含重复）、按 href 去重 **43**、非新闻栏目路径含重复 **43**（与前一个同值纯属巧合）、非新闻栏目路径去重 **42**；差别只在**去没去重**（「网站地图」在页头页尾各一次）与**算不算栏目自链接**（`/113469/index.html`，id 是 6 位的 `113469`）。任一个数写进断言，都会在另一个口径的人重跑时红，而**红的理由与实现无关**，最容易被误读成「实现错了」进而去改实现。⇒ 前置锚点用**内容式**（钉住具体两条导航链接 + `require.NotEmpty`），断言钉 **0**。",
+      "`parsePeriod` 对两种真实季报标题正确，且既有四种映射（h1/annual/monthly×2）**必须仍绿**。期次值与 periodType 由你定，但**必须与 `periodEndMonth` 一致，并写进 discovery 供 TASK-004 消费**。"
+    ],
+    "boundary": [
+      "**回归守卫（对季度分支零鉴别力，别算成季报覆盖）**：`2026年二季度金融机构贷款投向统计报告`（p1 真实条目）必须仍被拒。reviewer 实测两种季度改法它都被拒，拒它的是「期次段**紧跟**金融统计数据」那个机制，与季度分支正交。\n\n既有 `13月`/`0月` 语义校验必须仍绿；新增季度分支后若正则能匹配上非法季度值（如「五季度」），语义层必须拒。"
+    ],
+    "error_handling": [
+      "🔴 **两个 map 的一致性守卫必须是单向的**（reviewer B3 实测推翻原 DoD）：\n\n`types.go:62-77` 写明 **`monthly` 刻意不在 `periodEndMonth` 表内**（「任意月份都合法」），`types.go:150` 的校验正是靠 `if want, ok := periodEndMonth[...]; ok && ...`「查不到就跳过」实现。⇒ 原 DoD 的「反之亦然」**对现状即为假**，照做只有两条路：给 monthly 编一个期末月（**会让除该月外每一期月报都被 `Meta.validate` 拒**），或悄悄改成单向让 DoD 变空话。\n\n**改成两条可满足且真能防漏改的**：① `periodEndMonth` 的每个键必须在 `validPeriodTypes` 里；② **除 `monthly` 外**，`validPeriodTypes` 的每个键都要有期末月 —— 并在注释写明 monthly 是唯一豁免及其理由。\n\n---\n\n🔴 **同时：两处纯字符串的取值列表必须由 `validPeriodTypes` 派生**（`types.go:144` 的 `(want monthly|h1|annual)` 与 `thresholds.go:126` 的同一串）—— 加了季度类型后它们会**静默过期**。`types.go:116` 的 `checkEnum` 注释专门警告过这种抄一遍的写法，而这两处正是它自己没用 `checkEnum` 的地方。"
+    ],
+    "non_functional": [
+      "**消融自证**：删掉季度分支，确认新增季报用例转红且**红的是你新加的那条**（贴出失败输出的具体那一行）。⚠️ 判据是「哪条断言红」不是「测试红不红」。\n\n**同时对 `articleLinkRE` 做一次**：把它改回 `\\d{14,}`，确认 p18 那条断言转红 —— reviewer 指出 `require.NotEmpty` 那条前置锚点（G9）在这里**第一次真正兑现**，因为 `scanPage` 会返回 nil。",
+      "`types.go:38` 的注释「月均折算除数 1/6/12」在加了季度类型后会变成假的（该折算在本包**没有实现**，注释只是声明）——**顺手改**。",
+      "`types.go:38` 的注释「月均折算除数 1/6/12」加了季度类型后会变成假的（该折算在本包**没有实现**，注释只是声明）——**顺手改**。\n\n覆盖率不低于 93.2%；`gofmt`/`vet` 空、整包 `-count=1` 与 `-race` 全绿。**单跑取证一律 `-run '^Top$/^Sub$'` 锚定式**，且只读 `--- PASS:` 那一行不读退出码。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:04Z"
+  },
+  "assigned_to": "dev-agent-52",
+  "questions": [
+    {
+      "q": "🔴 交付时序与本任务 description 里的 D6 约束冲突，请裁决。D6 原话：「本任务与 TASK-004 必须同一分支、一次合入 master」。你给我的时序是「我提交 → 你 git merge --ff-only 回 master → 我转 dev_done」。但 TASK-004 现在是 pending、wave 3、依赖 TASK-001+TASK-010（TASK-010 也 pending）⇒ 严格守 D6 的话我的分支要挂到 wave3 之后。两条路各自的代价：(a) 现在就 ff-only 合我进 master —— 季报会从「静默消失」变成「响亮失败」，D6 说这会把退出码这个唯一报警通道淹掉约 4 个月/年，但响亮失败至少是可观测的；(b) 守 D6 让分支挂着 —— 那我现在该转什么状态？转 dev_done 会让门禁在主工作区那棵没有我代码的树上跑出假绿；留 in_progress 则 validator 对 in_progress 刻意不设阈值，我这个真实阻塞对你的周期扫描完全不可见（只能靠你读我的 inbox 消息，我已发两条无回音）。我倾向 (a)，但这是你的权衡不是我的。",
+      "asked_at": "2026-08-12T15:16:37Z",
+      "answer": "【裁决：走 (a)，已 merge】master 现在是 67249ffb，你的 710ef62e 已是祖先（我用三方 merge 而非 ff-only，因为 master 中途被 TASK-002 推进过 —— 保留你的原 sha，不 rebase 你的分支：rebase 会作废你已完成的背对背基线、四次消融与 sha256 核对）。\n\n🔴 **但更要紧的是：这个冲突是我的措辞造成的，不是你读错了。**\n\n独立 reviewer 的原话是「**建议两个任务同一分支、一次合入**」，而它 D6 那条论证的真正对象是 **部署到生产之后**的行为：「季报会在 MaxPages 窗口内每天三次持续失败约 2 个月，把退出码这个唯一报警通道淹掉约 4 个月/年」——**那个代价只在管线真的跑起来时才付**。我把它写成「必须同一分支、一次合入 master」，**把「不要部署中间态」写成了「不要合入 master」**，两者差得很远。\n\n实际约束应当是：**TASK-004 完成之前，不得执行计划 Step 9 的端到端部署**（`deploy.sh` + `launchctl load`）。那一步本来就排在 TASK-009 之后、由我在归档前亲自执行 —— 而 TASK-004 是 wave3，必然先于它完成。\n\n⇒ 合入 master 不但无害，而且**必需**：TASK-010 依赖 TASK-001，不合入的话它没有基点可开工，整条季报链在 wave2 就断了。\n\n你倾向 (a) 是对的，而且你把两条路的代价都摆了出来才交给我 —— 那正是这个问题该有的提法。",
+      "answered_at": "2026-08-12T16:05:00Z"
+    },
+    {
+      "q": "若走 (b)：../wt-TASK-001 这个 worktree 要留给将来做 TASK-004 的实例，还是我现在按「谁建谁拆」拆掉？拆了对方要重建，留着则会跨 wave 累积成孤儿 worktree（CLAUDE.md 说这类残留最后由你收）。",
+      "asked_at": "2026-08-12T15:16:37Z",
+      "answer": "【拆掉】走 (a) 之后这个问题消解了：TASK-004 在 wave3 才开工，届时 master 上已有你的代码，做它的实例从 master 建新 worktree 即可，不需要继承你的。按「谁建谁拆」现在拆掉 `../wt-TASK-001`。",
+      "answered_at": "2026-08-12T16:05:00Z"
+    },
+    {
+      "q": "补充事实（不是问题，供你判断用）：我的交付本身已完成且自洽 —— 分支 task/TASK-001 @ 13aefb649372a44dc3d348cba7a6f4c867c0c9cf 已 rebase 到 master 2e93115，ff-only 成立；整包 -count=1 与 -race 全绿、覆盖率 93.3%、gofmt/vet 空；discovery 已落盘；消融自证 ×3 已做。无论你选哪条，我这边没有待修的东西。",
+      "asked_at": "2026-08-12T15:16:37Z",
+      "answer": "【收到，无需动作】你这条不是问题而是事实陈述，我确认收到并已独立复核：主工作区 `grep -c q1_q3 internal/hestia/types.go` = 5、整包 282 顶层 PASS / 0 FAIL / 覆盖率 93.3% / gofmt 空 / vet 空 / -race 绿 / `go build ./...` OK。\n\n另外我要单独记一句：**你补的 M3 和 M4 是这次交付里最有价值的两处**。M3 证明了 M1 对那 4 条季度拒绝用例**零鉴别力**（删整个季度分支时它们照样绿）—— 不做 M3 就分不出「守卫在做功」与「守卫在场而无效」；M4 更进一步，你问了「有没有一个我想排除的实现能让这条断言照样绿」，然后**真找到了一个**（删三条内容锚点 + 正则改回 `\\d{14,}` ⇒ 非新闻集合为空 ⇒ `assert.Zero` 平凡为真 ⇒ 实测 PASS）。那是在给一条**刚刚才改对**的断言做阴性对照，没人会要求你做。",
+      "answered_at": "2026-08-12T16:05:00Z"
+    }
+  ],
+  "verify_baseline": {
+    "head": "67249ffb7961aa838f57b4cdfbfef3c94a2ffaaf",
+    "discovery_sha256": "f6023a996b399002810b956269b3fba53f9b27c61313122d402ebbb751549110",
+    "at": "2026-08-12T15:35:01Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-001.json"
+}

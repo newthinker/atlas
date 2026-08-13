@@ -1,0 +1,73 @@
+{
+  "id": "TASK-008",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 1,
+  "title": "T6：cobra 装配（atlas hestia ingest / status）",
+  "description": "计划 **Task 6（1311–1548 行）**。⚠️ 计划 1319 行：**这一层只做装配**，ingest 的真实行为已在 `internal/hestia` 测过，cmd 层只覆盖「装配对不对」。",
+  "wave": 4,
+  "dependencies": [
+    "TASK-002",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "context_from": [
+    "TASK-002",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 6（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 1311–1548 行）交付 `atlas hestia ingest` 与 `atlas hestia status` 两个子命令，装配 `LoadConfig`/`NewStore`/`NewPBOCFetcher`/`Ingest`/`RecentObservations`/`RecentPending`/`RenderStatus`。",
+      "`db_path` 的绝对路径解析**由 TASK-006 的 `RenderStatus` 负责**（本 Sprint 指定，见 TASK-006 `non_functional[0]`）；本任务只把配置里的相对路径原样交给下游，**不要在这一层再解析一次**。"
+    ],
+    "boundary": [
+      "flag 覆盖：`--hestia-config`、`--force`。配置文件不存在 / 非法时**错误要传播到命令退出码**，不是静默。",
+      "`status` 在**空库**上跑通（用 `newDiscardCmd()`，`crisis_test.go:496` 同包可用）。"
+    ],
+    "error_handling": [
+      "配置装载失败的错误信息**含配置文件路径** —— 否则用户不知道它读的是哪一份（`db_path` 与 cwd 的组合已经够绕）。",
+      "🔴 **必须设 `SilenceUsage`**（reviewer D4 实测）：`go run ./cmd/atlas crisis status --crisis-config /nonexistent/nope.yaml` 会在 `Error:` 之后打印 **9 行完整 usage**（`main.go:26-30` 没设 `SilenceUsage`/`SilenceErrors`）。\n\n本管线的设计意图是让退出码 + `hestia-ingest.err.log` 成为**唯一报警通道**，而每次失败灌一屏 usage 会把真正那行错误埋掉 —— 且本管线**预期会有连续两个月每天三次的稳定失败态**（见 TASK-001 的 D6 说明）。\n\n⚠️ 在 hestia 子命令层面设即可（**不要动 `main.go` 的 `rootCmd`**，那会波及 crisis 的现有测试；若确需动，先跑一遍 `go test ./cmd/atlas/ -count=1` 确认 crisis 全绿）。"
+    ],
+    "non_functional": [
+      "⚠️ **`cmd/atlas` 的历史覆盖率基线低于门禁阈值**（记忆：sprint-023 实测 75.9% < 80，AD-6）。若 `dev_done` 门禁因整包口径卡住，**不要自行调 config**——停下来告诉我，我按 AD-6 的处置流程走（亲跑 profile 核实文件级覆盖率 → 临时放行 → 立即恢复 → 记 AD + 验证者文件级独立复核）。",
+      "`gofmt -l cmd/atlas/` 空、`go vet ./...` 空、`go build ./...` 绿、`go test ./... -count=1` 全绿。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-53",
+  "questions": [
+    {
+      "q": "【AD-6 整包口径，需你处置】TASK-008 门禁 DENY：Task-scope coverage 75.6% < dev_minimum 80%。按 DoD non_functional[0] 指示未自行调 config。文件级：hestia.go 83.3%（25/30）高于阈值；整包 75.41%，排除我的文件 75.23% ⇒ +0.18pp 净正向。请三选一：(A) 走 AD-6 流程 (B) 告诉我具体改法 (C) 转 blocked_human。",
+      "asked_at": "2026-08-12T17:20:00Z",
+      "answer": "Leader 答复：**AD-6 那条处置已过期、作废**。真正的机制是每任务字段 `coverage_floor`（task-completed.sh:401-405 读它，`coverage_baseline` 是臆造字段名、门禁不看），sprint-028 已有四例先例。裁定 **coverage_floor=75**：整包 75.41% 截断为 75，门禁判 `75 < 75` = false ⇒ 放行；不需动全局 config、不需 AD 记录。\n\n⚠️ 该字段**只有 dev 在 in_progress 时能写**（leader 写不了任务文件），故由我填。\n\n另：Leader 先后给过 `coverage_floor=76` 与「hestia.go ≥90%」两个闸值，**均由其本人实测推翻并作废**（76 结构上不可达——我的文件仅 30 条语句，即使 100% 覆盖整包也只到 75.8%；90% 隐含「把 fetcher 改成可注入」这个从未要求的重构）。**最终判据不是百分比，是逐条说明未覆盖语句的处置**，已写进 discovery。"
+    }
+  ],
+  "coverage_floor": "75",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "f4d601753ac323ca37d5757da5a547493e3de090",
+    "discovery_sha256": "4e44dafe620851f79256f54e4233821bd07012b6833f852a4f6ef78dfa049b11",
+    "at": "2026-08-13T01:11:15Z"
+  },
+  "verifier": "test-agent-26",
+  "fix_items": [
+    "🔴 **CRITICAL — `--force` / `--hestia-config` 的 flag 绑定完全没有守卫**（qa-agent-13 报，Leader 与 test-agent-26 各自独立复核成立）。\n\n**变异**：`hestiaIngestCmd.Flags().BoolVar(&hestiaForce, …)` → `Bool(…)` —— flag 仍在、仍叫 `force`、`--help` 一模一样，**只是不再写回变量**。\n\n```\ngo test ./cmd/atlas/... ./internal/hestia/... -count=1   →   FAIL=0（948 PASS）\n行为：atlas hestia ingest --force  →  no new reports (stopped: seen_article)   ← 静默失效，exit 0\n```\n\n**三条独立复核**（Leader 跑）：\n`grep -rn 'SetArgs|ParseFlags|\"--force\"' --include='*_test.go' cmd/atlas/` → **grep_exit=1 零命中**；\n`grep -rn 'hestiaForce' --include='*_test.go' cmd/atlas/` → **grep_exit=1 一次没被设过**；\n`TestHestiaFlags` 的全部断言 = 三条 `Lookup(...)`。\n\n🔴 **本任务的 DoD `boundary[0]` 明文把它记为「两个 flag → TestHestiaFlags」** —— 而那条测试**只断言 flag 存在，从不断言它绑到哪个变量**。**这是本 Sprint 第五个假通过，也是唯一一个 DoD 自己声称已覆盖的。**\n\n⚠️ **为什么它是 CRITICAL 而不是 SUGGESTION**：`--force` 是 CONTRACTS 写明的**唯一恢复出口**；失效形态与「今天没有新报告」**逐字同形**且 exit 0 ⇒ **落在设计上唯一的报警通道之外**。",
+    "**修法：补经 cobra 参数解析的绑定守卫，判据用肯定式。**\n\n```go\nhestiaCmd.SetArgs([]string{\"ingest\", \"--force\"})\n// ParseFlags 后\nassert.True(t, hestiaForce)\n// 同理 --hestia-config X 后 assert.Equal(t, X, hestiaCfgPath)\n```\n\n🔴 **不得用「flag 存在」作判据** —— 那正是失效的那一条。\n\n⚠️ **`--force` 与 `--hestia-config` 的变异要分别做、不合并**：否则「红了」无法区分是哪一个绑定失效（G31「要看哪条红，不是红不红」在验收判据上的应用）。",
+    "🔴 **重要：这 38 行守卫 dev-agent-52 已经写好了，就在工作区里未提交**（`grep -c TestHestiaFlagsBindToVariables cmd/atlas/hestia_test.go` → 1，而 `git show HEAD:...` → 0，`git diff --stat` → 38 insertions）。\n\n⇒ **本次返工的主要动作是「把它提交到本任务名下」，不是重写。** 请先读工作区那份，确认它满足上面的判据后再提交；若不满足则补齐。\n\n**成因如实记（不算 dev 的疏漏）**：这条 CRITICAL 是 QA 第二轮在 TASK-009 已进 `in_progress` 之后报出的，Leader 当时**写不了 `fix_items`**（`in_progress` 的 owner 是 dev），只在消息里转达 —— **而 Leader 在同一条消息里刚写过「只在消息里说等于没说」**。⇒ dev 未把它落进 `fix_items`、验证者按 `fix_items` 逐条核因而未计入判定，**两者都是按机制正确行事**。",
+    "**验收判据（Leader 写死，验证者会照此核）**：\n\n| 变异 | 应当 |\n|---|---|\n| **M13** `BoolVar` → `Bool` | **红在 `TestHestiaFlagsBindToVariables/--force_绑到_hestiaForce`** |\n| **M14** `StringVar` → `String` | **红在 `TestHestiaFlagsBindToVariables/--hestia-config_绑到_hestiaCfgPath`** |\n\n**每条变异只杀它自己那个子断言、不误伤兄弟**（qa-agent-13 已在隔离 worktree 拷入未提交文件预演过，得到 `EXIT=1 FAIL=2`；**但请在真实 commit 上复跑，那次是拿未提交文件跑的**）。\n\n**请贴出两次失败输出的具体那一行**，不是「转红了」。"
+  ],
+  "reason_class": "task_defect"
+}

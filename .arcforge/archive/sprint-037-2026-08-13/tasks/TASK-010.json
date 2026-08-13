@@ -1,0 +1,72 @@
+{
+  "id": "TASK-010",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "季报识别②：parse.go 的 titleRE / parseTitle / checkPeriodTypeSupported",
+  "description": "独立 reviewer 实测发现 `parse.go` 的标题层**不在任何任务的 writes 里**（B2），而它是 `Parse` 的第一道门 —— 不改它，TASK-004 的端到端**结构上不可满足**（`Parse` 在 `parseTitle` 处返回 `unrecognized report title`，一步都走不到 `extractFields`）。\n\n实测：两条真实季报标题在 `parse.go:21` 的 `titleRE` 下均为 `[]`。\n\n⚠️ 本任务与 TASK-001 / TASK-004 **必须同一分支、一次合入**（见 TASK-001 的 D6 说明）。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-001"
+  ],
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/parse.go",
+    "./internal/hestia/parse_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`titleRE`（`parse.go:21`）与 `parseTitle` 认得两种真实季报标题，期次值与 periodType **逐字采用 TASK-001 discovery 里定的那一套**（不要另定一套——两套会在 `Meta.validate` 处炸，而那是运行时才发现）。各一条断言，用 TASK-001 落在 `testdata/` 的真实正文样本跑 `Parse` 的标题段。",
+      "既有三种形态（h1 / annual / monthly）的 `parseTitle` 必须仍绿——`titleRE` 是 `\\A…\\z` 全锚定的，放宽期次段是唯一改动点。"
+    ],
+    "boundary": [
+      "🔴 **`checkPeriodTypeSupported`（`parse.go:189`）目前只挡 `monthly`，季度类型会直接穿过去**。\n\n**本任务把新季度类型加进拒绝列表**，理由写进错误信息（形如「季报抽取侧尚未接线，见 M1b-4b 的 TASK-004」），**由 TASK-004 移除**。\n\n⚠️ 这不是多此一举：它让「001+010 已落、004 未落」的中间态给出**一句写明理由的拒绝**，而不是 extract 深处的 `not found among 0 candidate sentence(s)`——后者会让接手的人以为是抽取规则写错了。"
+    ],
+    "error_handling": [
+      "`parseTitle` 失败时错误信息**含原标题**；若包了底层错误须用 `%w`，自证用 `require.NotNil(t, errors.Unwrap(err))`，**不要用 `assert.ErrorIs`**（它证不了「包住」——不包也为真，Sprint 036 F8）。"
+    ],
+    "non_functional": [
+      "**消融自证**：删掉 `titleRE` 的季度分支，确认新增两条断言转红且**红的是它们**而非兄弟。贴出失败输出的具体那一行。",
+      "`gofmt`/`vet` 空、整包 `-count=1` 与 `-race` 全绿、覆盖率不低于 93.2%。单跑用 `-run '^Top$/^Sub$'` 锚定式。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-52",
+  "questions": [
+    {
+      "q": "🔴 dev_done 门禁被一条**不属于我**的红挡住，需要你裁决谁来修。失败项：store_test.go:420 TestPackageExposesNoWriteFunctions，expected 16 项导出面 / actual 17 项，多出的是 dev-agent-54 未跟踪的 ingest.go 新导出的 Ingest；dev-agent-53 已提交的 2ce68cd 里 golden 清单还是 16 项。归属三样已核（git status: ingest.go/ingest_test.go 为 ??，非我文件；git log: 2ce68cd = TASK-006；任务声明：store_test.go **同时**在 TASK-005 与 TASK-006 的 writes 里，scope 重叠）。我已试过 transition dev_done → DENY，未强推。三条路请选一条：(a) 指定 dev-agent-54 修（ingest.go 是它引入的）；(b) 指定 dev-agent-53 修（store_test.go 是它最近提交的）；(c) 授权我修——那我需要经写通道把 ./internal/hestia/store_test.go 补进我的 writes，但**我不推荐**：会与两个在途任务 scope 冲突，且 dev-agent-54 可能正在并发编辑同一文件。",
+      "asked_at": "2026-08-12T16:12:13Z",
+      "answer": "【裁决：**(a) dev-agent-54 修**，且它已有写权、我已催过两轮】\n\n**你不用做任何事，也不要把 `store_test.go` 补进你的 `writes`** —— 你自己判断的 (c) 不推荐是对的。\n\n事实核实（我查了 `transitions.jsonl`）：dev-54 在 **15:58:20Z** 就经写通道把 `./internal/hestia/store_test.go` 合规申报进了 TASK-005 的 `writes`（`dev_done` 之前，流程正确）⇒ **它自己有权登记，不需要 dev-53 代劳，也不需要你**。\n\n我已明确要求它「提交 `ingest.go` + `ingest_test.go` + 登记，**必须在同一个提交里**」——理由是 dev-53 本轮已犯过一次并 amend 修好：它用显式 pathspec 提交时带走了 dev-54 写在同一文件里的登记行，**导致那个提交单独拿出来是红的**。同一提交里做完，每个 commit 才自洽。\n\n---\n\n## 你替我做掉的那个判断，是本 Sprint 最重要的一条方法论，已记为 H9\n\n> 更新 golden 清单之前，真正该回答的是「**`Ingest` 是绕过 `Save` 还是经过 `Save`**」。\n> ……**这一步不能省**：若它真的自己写库，正确处置是改 `ingest.go` 而不是改清单 ——> 而「把红的那个名字加进 expected」是所有人的第一反应，**那样会把守卫本身消音**。\n\n我复核了你的依据：`ingest.go:129` → `d.Store.Save(ctx, obs, rep)`，全文件无 `db.Exec` / 裸 `INSERT` ⇒ **经过 Save，登记安全**。\n\n**这是「守卫在场 ≠ 守卫有效」的一个新形态**：前面记的都是「守卫写得太弱」；这一条是**守卫写得对，而被它挡住的人用「登记」把它绕过去了** ——**登记这个动作本身既可以是合规、也可以是消音，两者在 diff 里长得一模一样。**\n\n⇒ 判据已写进 H9：**每次往 expected 名单加东西时，先答「这个新增物属于守卫要防的那一类吗」。答『是』⇒ 该改的是实现不是名单。这个问题必须在改名单之前问，事后没人会回头问。**\n\n---\n\n## 你发现的 16 vs「十七」不一致，我复核属实\n\nexpected 列表当前 16 项，失败文案写「恰好是这十七个」。加上 `Ingest` 后正好一致。\n⇒ 已要求 dev-54 登记时**顺手确认文案数字与列表长度相符**。\n\n⚠️ 这条值得记的地方在于：**它已经不一致地存在了一段时间而无人发现**，因为**没有任何测试比对文案与列表长度**。已一并记进 H9。\n\n---\n\n## 你三次落盘的判断，我确认是对的\n\n> `in_progress` 在 validator 里刻意不设阈值，我这个阻塞对你的周期扫描完全不可见，> 只能靠你读 inbox 而消息会丢。\n\n**这次我确实又漏了你前两条 inbox。** 你这次不等到第三轮就落盘，是对的。\n\n⚠️ 补充一条我刚确认的机制：**`in_progress` 下我写不了 `questions[].answer`**（写通道 DENY），**`blocked_clarification` 下才能** —— 所以转它不只是「让阻塞可见」，**也是打开我答复的通道**。这条已记为 H3。\n\n你答复后自己转回 `in_progress` 即可（epoch 不变）。**红一消就转 `dev_done`。**",
+      "answered_at": "2026-08-13T00:40:00Z"
+    },
+    {
+      "q": "补充：这条修改**不是机械的**，我已替你查掉了其中的判断。该守卫的意图写在它自己的失败信息里——「任何新增的包级写口都会绕过 Save 的签名防线」。所以真正该回答的是「Ingest 是绕过还是经过 Save」。实测 ingest.go:129 调的是 d.Store.Save(ctx, obs, rep)，全文件无 db.Exec / 裸 INSERT ⇒ **经过 Save，加进清单是安全的**。这一步不能省：若它真的自己写库，正确处置是改 ingest.go 而不是改清单，而「把红的名字加进 expected」是所有人的第一反应，那样会把守卫消音。另：该断言的 expected 列表实际 16 项，而失败文案写着「必须恰好是这十七个」——两边本来就不一致，加上 Ingest 后恰好都变 17。",
+      "asked_at": "2026-08-12T16:12:13Z",
+      "answer": "【收到，已记为 H9，是本 Sprint 最重要的一条方法论】\n\n我复核了你的依据（`ingest.go:129` → `d.Store.Save`，全文件无 `db.Exec`/裸 `INSERT`）⇒ 登记安全。\n\n**你这一步的价值在于它揭示了一个新形态**：前面记的都是「守卫写得太弱」；这一条是**守卫写得对，而被它挡住的人用「登记」把它绕过去了** —— **登记这个动作本身既可以是合规、也可以是消音，两者在 diff 里长得一模一样。**\n\n判据已写进 H9：**每次往 expected 名单加东西时，先答「这个新增物属于守卫要防的那一类吗」。答『是』⇒ 该改的是实现不是名单。这个问题必须在改名单之前问，事后没人会回头问。**\n\n16 vs「十七」的不一致我复核属实，已要求 dev-54 登记时一并修。⚠️ 值得记的是**它已经不一致地存在了一段时间而无人发现** —— 因为**没有任何测试比对文案与列表长度**。",
+      "answered_at": "2026-08-13T00:25:00Z"
+    },
+    {
+      "q": "非问题，供你判断：我的交付本身已完成自洽。commit 062b460282bd0fd19430507d0bcef3e0fa35d0e0，在 detached 隔离树上验证 -count=1 ok / -race ok / 覆盖率 93.3%（门槛 93.2%）/ gofmt 空 / vet 空 / go build ./... OK；主工作区我的两个文件与提交逐字节一致；discovery 与 checkpoint 均已落盘；消融 A1/A2/A3 各给出具体失败行。**那条红一消我立刻转 dev_done，代码一行不用改。**",
+      "asked_at": "2026-08-12T16:12:13Z",
+      "answer": "【确认收到，无需你做任何事】\n\n你的交付自洽我核过：`062b460` 在隔离树上 `-count=1` ok / `-race` ok / 93.3% / gofmt 空 / vet 空。**那条红一消你就转，代码一行不用改** —— 我确认。\n\n⚠️ 你留在 `blocked_clarification` 而不转回 `in_progress` 的判断是对的：「转回去会让我重新对你的周期扫描隐形，而我确实还被卡着」。**这正是 H3 那条的正确用法** —— 那个状态同时承担「标记阻塞」与「打开 leader 写权」两个功能，你两个都需要。",
+      "answered_at": "2026-08-13T00:25:00Z"
+    }
+  ],
+  "verify_baseline": {
+    "head": "0e2c6fc976d90382ecb2122dbeb1ed18eaf8c9c9",
+    "discovery_sha256": "e73be6ed0c7232fa56a12624543da9b0c0627245058b64ae58299b98d0070f41",
+    "at": "2026-08-12T16:22:58Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-010.json"
+}

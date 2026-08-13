@@ -1,0 +1,67 @@
+{
+  "id": "TASK-006",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "T5：status 的查询与渲染",
+  "description": "计划 **Task 5（992–1310 行）**。读路径的渲染，与 `ingest.go`（写路径编排）刻意分文件。\n\n⚠️ **依赖 TASK-003 是 scope 序列化**（两者都改 `store.go`/`store_test.go`），不是逻辑依赖。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-003"
+  ],
+  "context_from": [
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/status.go",
+    "./internal/hestia/status_test.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 5（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 992–1310 行）交付 `StatusRow` / `PendingRow` 两个类型、`RecentObservations` / `RecentPending` 两个只读查询、以及 `RenderStatus` 渲染。真库测试。",
+      "`RecentObservations` 查 `viewCurrent`（**不是** `TableObservations`）——与 `HasPeriod` 同口径；`RecentPending` 查 `TablePending` 且带上失败的 `[]Check`。"
+    ],
+    "boundary": [
+      "**空库上必须跑通并输出可读内容**（不是 panic、不是空白）。这条是计划 Step 9 手工验收的第 2 步所依赖的：**配置装载错与库路径错的表现都是「0 期」**，空库 status 是唯一能把它们分开的东西。",
+      "`n` 为 **0 与负数**的行为都要被钉住（各一条测试 + discovery 说明）。\n\n⚠️ **判据不对称，别只测 0**（reviewer D5）：SQLite 的 `LIMIT -1` 是**不限行数**、`LIMIT 0` 是**零行** —— 一个「防御性地传 -1」的调用方会拿到整张表。"
+    ],
+    "error_handling": [
+      "查库失败 `%w` 包住并带上下文，用 `require.NotNil(errors.Unwrap(err))` 自证。"
+    ],
+    "non_functional": [
+      "🔴 **status 必须打印解析后的绝对路径**（Global Constraint + 计划自审第 4 节）：`db_path` 相对路径按 cwd 解析，**cwd 错了会指向空库并如实报告「0 期」** —— 那是一个「看起来正常的错误」。写一条测试钉住输出含绝对路径（`filepath.IsAbs`）。\n\n⚠️ **职责归属（reviewer D7）**：TASK-008 也写着「`db_path` 在 cmd 层解析成绝对路径，**这是唯一被解析的地方**」。**本 Sprint 指定：解析发生在 `RenderStatus` 内部**（计划 1260 行的写法），**TASK-008 那句「唯一」相应删去**。两处都实现会解析两次——行为无害，但下一个人读到「唯一」会去找另一处并删掉它。",
+      "新增导出物（`StatusRow`/`PendingRow`/`RecentObservations`/`RecentPending`/`RenderStatus`）按同款规则登记进导出面守卫，正向自证；`gofmt`/`vet` 空、整包全绿、覆盖率不低于 93.2%。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-53",
+  "questions": [
+    {
+      "q": "【第 1 问】导出面守卫的 scope 归属四选一。",
+      "asked_at": "2026-08-13T00:45:00Z",
+      "answer": "Leader 裁决 (A)：dev-53 先落登记再 dev_done。已执行——三个函数形态导出物的登记早在 2ce68cd 落进 master。StatusRow/PendingRow 是类型，两条守卫都只收 *ast.FuncDecl，写进名单反会让守卫变红，故不登记；Leader 已确认此纠正（其原话「一次写全五个」实为「写全这三个」）。"
+    },
+    {
+      "q": "【第 2 问】裁决 (A) 按字面执行不通：ingest.go 未提交但在盘上，守卫用 go/parser 扫磁盘文件，不需提交即进入视野 ⇒ 我跑门禁需它不在、dev-54 干活需它在，两需求互斥。请三选一：(甲) 让 dev-54 临时挪开一分钟；(乙) dev-54 先提交并自行登记；(丙) 转 blocked_human。",
+      "asked_at": "2026-08-13T01:05:00Z",
+      "answer": "Leader 裁决 **(乙)**，且在我提问前已在执行：dev-54 自己提交 ingest.go 并在**同一提交**里登记 Ingest。它 15:58:20Z 已合规申报 store_test.go 进 TASK-005 的 writes（早于 Leader 那条「别改声明范围」的消息），故无需额外授权、也不需我代劳。\n\n**明确不要用 (甲)**：让同伴挪走文件、我抢窗口跑门禁，是在共享工作树里对同伴文件做时序耦合，把「谁的门禁能过」变成靠掐表的事——与我自己刚检讨过的那次操作同类。我已就此向 dev-54 撤回先前的 stash 请求。\n\nLeader 同时确认：我指出的时序互斥属实，是它裁决 (A) 时没算到的一层（它默认守卫只看已提交内容，实则不是）；(乙) 之所以唯一自洽，是因为只有引入者在同一提交里连同登记一起交付，磁盘态与提交态才在任何时刻都一致。\n\n⇒ 我保持 in_progress 等待 dev-54 那一次提交即可，不需再做任何事。"
+    }
+  ],
+  "verify_baseline": {
+    "head": "0e2c6fc976d90382ecb2122dbeb1ed18eaf8c9c9",
+    "discovery_sha256": "c2faf3c744e6f00676e287c3503a52f0edf8db2e5ebce6be2fa55509b0f8b8dc",
+    "at": "2026-08-12T16:22:57Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-006.json"
+}

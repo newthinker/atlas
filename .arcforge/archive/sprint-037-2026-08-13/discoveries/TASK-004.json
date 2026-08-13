@@ -1,0 +1,77 @@
+{
+  "task": "TASK-004",
+  "title": "T5：季报抽取（periodAlt + cumulativePeriods）",
+  "by": "dev-agent-53",
+  "key_findings": [
+    "🔴 **我没有照 DoD boundary[0] 的建议②去做，因为实测证明那个建议既抓不到目标、又会误伤既有词表**。建议是「把 TestProfileAlternationsHaveNoPrefixPairs 的判据从 prefix 扩到 substring（改一行）」。四条实测（Go regexp，leftmost-first）：(A) **前缀对顺序有语义** —— `人民|人民币` 对「人民币贷款」捕获 `人民`，`人民币|人民` 捕获 `人民币`；(B) **子串但非前缀，顺序无语义** —— `外币|本外币` 与 `本外币|外币` 对「本外币存款」**都**捕获 `本外币`；(C) **真正的陷阱是「只写了短词、根本没有长词」** —— `全年|上半年|三季度` 对「前三季度人民币贷款」捕获 `三季度`，而 `全年|上半年|前三季度` 捕获 `前三季度`；(D) **C 里那个错构不成任何子串对**（全年/上半年/三季度 两两无包含）⇒ 子串判据对它**全绿放行**。⇒ prefix 才是「顺序即语义」的真实边界；扩成 substring 会把 currencyAlt 既有的 `外币` ⊂ `本外币` 判成违规（**实测转红**），那不是收紧而是误报。**真正守住陷阱的是建议① 的语料锚定正向断言**（捕获组逐字等于 `前三季度`），已实现为 TestFlowRECapturesQuarterlyPeriodVerbatim。",
+    "🔴 **发现一处 curl 核对看不见的一字模板漂移，且它卡住了端到端**：**一季度正文写「国家外汇储备余额3.34万亿美元」，没有「为」字**；前三季度、年报、半年报三份都写「余额**为**」。`fxReserveRE` 原本硬要求 `余额为`，于是一季度在 `mustMatch` 处报 `国家外汇储备 not found`。处置与既有的「加权**平?**均利率」同款：放宽成 `余额为?`，**不放松成 `国家外汇储备.*万亿美元`**（同段还有「较上月末减少…亿美元」句，放松会静默取错而 mustMatch 只在命中数≠1 时才报错）。加 `?` 不引入重复命中：板块标题在 sec.Title，抽取只看 sec.Body，四份样本实测各命中 1 条。\n\n⚠️ **这一处不在任何 curl 核对的视野内**：板块数(8)、七个 keyword 命中、detectExtractor(rule@v2) 三项在两份季报上完全一致，差异只在某一条句子的一个字 —— **「模板一致」不蕴含「每条句式一致」**，只有真跑一遍抽取才会暴露。已写进 testdata/README.md。",
+    "**2×2 消融四格给出可区分的失败签名**（DoD non_functional[0] 要求），实测（q3 贷款板块）：①两处都在 候选=2 命中=2 整包 0 红；②只删 periodAlt 候选=**0** 命中=0 整包 4 红；③只删 cumulativePeriods 候选=**2** 命中=**0** 整包 3 红；④两处都删 候选=0 命中=0 整包 5 红。⇒ 两次单删**签名不同**：②是「正则根本不匹配」（候选掉到 0），③是「匹配了但口径判定全筛掉」（候选不变、命中归零）。这正是原判据「删 cumulativePeriods 确认转红」不携带信息的原因 —— 四格里三格都红。\n\n⚠️ **我的绝对数与 DoD 里那句括注（3→1）不一致**：DoD 写「删 periodAlt 时候选数会掉（3→1）」，我实测是 2→0。**定性签名完全吻合**（一个掉候选、一个掉命中），差的是绝对值，应是量的口径不同（我数的是 q3 贷款板块 Body 上 loanFlowRE 的全部匹配：人民币句 + 外币句 = 2）。我报我自己量到的数。",
+    "**移除季度拒绝分支后有两条测试转红，都在 parse_test.go —— 那不在我原 writes 里**，已按规矩在 dev_done 之前经写通道补进声明（16:4x）。两条的处置不同：`TestParseRejectsQuarterlyUntilExtractorWired` **按其原作者留在注释里的指示改成正例并更名** 为 `TestParseAcceptsQuarterlyReports`（原注释：「到那时**别把它删掉** —— 改成正例，它就变回一条端到端守卫」）；`TestEveryPeriodTypeHasAnExplicitSupportDecision` 的决策表把 q1/q1_q3 从 {false,\"未接线\"} 改成 {true,\"已接线\"}。**两条都没有删**。",
+    "**端到端实跑输出**（DoD functional[1] 要求贴出）：一季度与前三季度**各抽到 54 个字段、extractor=rule@v2**，`Validate → passed=5 skipped=2 failed=0 Passed=true`。断言不止「report 非空」——Validate 对一份 Values 全空的 Observation 同样能返回 checks 齐全的报告（各闸门走 skipped），故另钉住 Values 非空、extractor 判定、以及 **passed>0**（全 skipped 说明抽取其实没给出值）。",
+    "**「三季度」被显式钉成不得登记为累计口径**（TestQuarterlyPeriodsAreCumulative 的第三条断言）。理由不是风格：前三季度是 1–9 月累计、第三季度单季是 7–9 月，**期末月同为 09 而月均折算除数是 9 与 3**。若将来有人把 periodAlt 写错成 `三季度`、再为了让它绿而把 `三季度` 登记进 cumulativePeriods，就等于用一个**没有任何样本支持**的判断去掩盖前一个错。实测佐证：q3 正文里 `三季度` 出现 14 次、`前三季度` 也是 14 次 —— **每一次都在 `前三季度` 内部**，不存在独立的「三季度」句。"
+  ],
+  "decisions": [
+    {
+      "decision": "不采纳 DoD boundary[0] 的建议②（prefix→substring），改为在原测试的注释里写明四条实测与不采纳的理由，判据保持 prefix。",
+      "rationale": "实测表明该扩法对目标陷阱**全绿放行**（陷阱是单词写错、不是词对关系），同时把 currencyAlt 既有且安全的 `外币` ⊂ `本外币` 判成违规。照做会得到一条既挡不住真问题、又制造假红的守卫 —— 假红比没有守卫更糟，它会被训练成忽略。⚠️ 这是对 🔴 级 DoD 条目的偏离，已在交付报告里显式请 Leader 复核；若 Leader 坚持，改回只需换一行判据 + 给 currencyAlt 加豁免。"
+    },
+    {
+      "decision": "fxReserveRE 放宽成 `余额为?`，而不是把一季度样本标成「不支持」。",
+      "rationale": "与既有的 `加权平?均利率` 是同一种一字模板漂移，处置同款、风险同级。标成不支持等于因为一个字放弃整个一季度期次，而 DoD functional[1] 要求端到端跑通。放宽范围严格限制在那一个字：仍要求「国家外汇储备余额」紧邻数值与「万亿美元」，不放松成通配。"
+    },
+    {
+      "decision": "把 TestParseRejectsQuarterlyUntilExtractorWired 改成正例并更名，而不是删除；并在注释里记下它的来历。",
+      "rationale": "原作者在注释里明确留了指示（「别把它删掉 —— 改成正例」）。记下来历是因为**这类测试最容易被后人误删**：它此前断言的行为如今恰好相反，不知情的人会以为它已过时，而它守的东西没变，只是从「中间态说得清」变成「终态跑得通」。"
+    },
+    {
+      "decision": "在**隔离 worktree**（master + 只有我的改动）里做全部消融与自证测量，主工作区一个字节没碰。",
+      "rationale": "dev-52 的 TASK-011 正在同一棵树上改 discover.go / ingest.go / store_test.go。就地变异会给它假红；而它的在途改动也会污染我的测量 —— 实际上确实污染了（见 notes_for_leader 第 1 条）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/profiles.go（periodAlt 加两分支、cumulativePeriods 加两键、fxReserveRE 放宽一字）",
+    "internal/hestia/profiles_test.go（新增 3 条季报测试；原前缀守卫保留判据、补实测说明）",
+    "internal/hestia/parse.go（删除 q1/q1_q3 拒绝分支）",
+    "internal/hestia/parse_test.go（拒绝测试改正例并更名；决策表 q1/q1_q3 改 true）—— 越界申报，已补进 writes",
+    "internal/hestia/ingest_test.go（新增季报端到端；更正一句过期注释）",
+    "internal/hestia/testdata/README.md（填入实测的模板/板块数，并记下一字漂移）"
+  ],
+  "interfaces_exposed": [
+    "periodAlt = `全年|上半年|一季度|前三季度|[0-9]{1,2}月份` —— **不得写 `三季度`**",
+    "cumulativePeriods 增加键 `一季度` / `前三季度`（`三季度` 显式不得加入，有测试守）",
+    "fxReserveRE = `国家外汇储备余额为?` + numPat + `万亿美元`",
+    "checkPeriodTypeSupported 现仅拒绝 monthly；q1/q1_q3 已放行",
+    "契约：季报两份快照各 8 板块、rule@v2、54 字段，端到端产出非空 ValidationReport"
+  ],
+  "verification": {
+    "anchor": "全部数字采自**最后一次改动（gofmt -w）之后**的同一棵树；基点 master 0e2c6fc976d9。测量在隔离 worktree（master + 仅我的改动）里做 —— 共享主工作区此刻有 dev-52 的在途 TASK-011 文件。",
+    "file_sha256": {
+      "internal/hestia/profiles.go": "9dca920ef0092d65",
+      "internal/hestia/profiles_test.go": "3f65d37f3d677b62",
+      "internal/hestia/parse.go": "caa755ddb903dbb3",
+      "internal/hestia/parse_test.go": "5de6a96fc7ba8a40",
+      "internal/hestia/ingest_test.go": "db605b1b84d24ca6",
+      "internal/hestia/testdata/README.md": "11187b7e20998686"
+    },
+    "baseline_back_to_back": "对 master 0e2c6fc 与我的隔离树**同一时刻并排**跑同一组 flag：base 308 顶层 / 339 子用例 / 0 FAIL / 93.5%；post 312 顶层 / 345 子用例 / 0 FAIL / 93.5%。差集：新增 5 条（TestQuarterlyReportEndToEnd / TestFlowRECapturesQuarterlyPeriodVerbatim / TestQuarterlyPeriodsAreCumulative / TestQuarterlyFXTwinSentencesStayDistinct / TestParseAcceptsQuarterlyReports），消失 1 条（TestParseRejectsQuarterlyUntilExtractorWired —— **是更名不是删除**，见 decisions）。",
+    "coverage": "93.509%（922/986），DoD 下限 93.2%",
+    "gofmt": "输出为空（⚠ 首次跑时 ingest_test.go 与 profiles_test.go 因注释缩进被标记，已 gofmt -w，其后全部数字为修正后重采）",
+    "vet": "退出码 0、无输出",
+    "race": "go test -count=1 -race → ok",
+    "e2e_output": "一季度：抽到 54 个字段，extractor=rule@v2；Validate → passed=5 skipped=2 failed=0 Passed=true / 前三季度：同上 54 字段、rule@v2、passed=5 skipped=2 failed=0",
+    "ablation_2x2": {
+      "protocol": "在隔离 worktree 内做，主工作区零改动；每格用一次性探针报告「候选句数 / 命中数」（候选=loanFlowRE 在 q3 贷款板块 Body 的全部匹配，命中=其中前缀被 cumulativePeriods 认成累计的）；收尾 cmp 校验还原、探针已删。",
+      "格1_两处都在": "候选=2 命中=2，整包 0 红（交付态）",
+      "格2_只删periodAlt": "候选=**0** 命中=0，整包 4 红 —— 签名：正则根本不匹配",
+      "格3_只删cumulativePeriods": "候选=**2** 命中=**0**，整包 3 红 —— 签名：匹配了但口径判定全筛掉",
+      "格4_两处都删": "候选=0 命中=0，整包 5 红（= 改动前现状）",
+      "结论": "两次单删的失败签名**不同**，故消融区分得开哪一处承重；这也解释了原判据（只看红不红）为何不携带信息——四格里三格都红。"
+    }
+  },
+  "notes_for_leader": [
+    "🔴 **请复核我对 DoD boundary[0] 建议②的偏离**（prefix→substring 未采纳，理由见 key_findings 第 1 条与 decisions 第 1 条）。这是本任务唯一的 🔴 级偏离，四条实测都可复现。若你坚持照做，改回成本很小，但那条守卫会对 currencyAlt 恒红。",
+    "🔴 **主工作区此刻整包有 1 条红，不是我的**：`TestIngestSkipsSeenArticleUnlessForce`（在**我的** ingest_test.go 里）因 dev-52 在途的 TASK-011 而红 —— 它在 discover.go 引入了 `StopSeen StopReason = \"seen_article\"` 并改了 Discover 的判停语义，输出从 `already ingested` 变成 `no new reports (stopped: seen_article)`。**我的隔离树（master + 仅我的改动）整包 0 红、93.5%**，已实测。\n\n⇒ 这与 TASK-006 那次是**同构的 scope 碰撞，只是方向相反**：那次是我的文件被别人的登记需求牵动，这次是别人的行为改动打红了我文件里的测试。**dev-52 无权改 ingest_test.go（不在它 writes 里），我也不该去适配它未提交的语义** —— 那会把我的交付耦合到它未完成的工作上。请你裁决时序：要么它落地后由我改那条测试，要么把 ingest_test.go 临时纳入它的 writes。",
+    "**越界申报**：`internal/hestia/parse_test.go` 不在原 writes 里，删除季度拒绝分支必然波及它的两条测试。已按规矩在 `transition dev_done` **之前**经写通道补进声明。",
+    "**给 TASK-007 的提示**：它也写 ingest_test.go，且依赖本任务。我在该文件尾部新增了 `TestQuarterlyReportEndToEnd`，并更正了文件头部那段关于季报的过期注释 —— 接手时请读那段注释的新版本，它记着「结论对但理由错」那次更正的来历。"
+  ]
+}

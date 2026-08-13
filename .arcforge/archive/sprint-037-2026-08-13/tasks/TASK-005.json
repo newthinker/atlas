@@ -1,0 +1,60 @@
+{
+  "id": "TASK-005",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 2,
+  "title": "T3：Ingest 编排与两处接缝",
+  "description": "计划 **Task 3（409–709 行）**。编排层放 `internal/hestia`（业务编排不是 CLI 关注点，且测试要用同包 testdata），`cmd` 只做装配。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-003"
+  ],
+  "context_from": [
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/ingest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 3（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 409–709 行）交付 `IngestDeps{Store, Fetch, Cfg, Out, Force}` 与 `Ingest(ctx, d) error`，端到端测试用 `syntheticIndex` 合成 index。",
+      "**接缝①：`ArticleID` 由 ingest 补**。`Parse` 只拿 raw bytes、看不到 URL，`parse.go` 写着「让 Parse 编造 ArticleID 才是缺陷」。这是两包之间唯一的手工装配点——**漏填不会静默**（`Meta.validate` 要求非空），**但填错会**。写一条测试钉住「填进去的就是候选的 ArticleID」。",
+      "**接缝②：期次交叉校验**。`Candidate.Period`（index 标题解析）与 `obs.Meta.Period`（正文解析）不一致时**拦下、不入库**——入了就是一期张冠李戴的数据，**而它在库里看起来完全正常**。\n\n（Sprint 036 消费者位的 W6 实测：不校验会导致**静默永久循环**——按正文键入库、按候选键问判停，永不收敛且无声。）"
+    ],
+    "boundary": [
+      "**单期失败不中断整批**（Global Constraint，也是人类 2026-08-12 对月报的定案）：一条候选失败时记日志继续下一条，**最后汇总返回非零**。测试要有「一页两条报告、第一条失败、第二条仍被处理」的用例。"
+    ],
+    "error_handling": [
+      "各错误出口都要**响亮**：`Discover` 失败、`Fetch` 失败、`Parse` 失败、`Validate` 失败、`Save` 失败——每条各一用例，错误信息含可定位的上下文（期次或 article_id）。\n\n⚠️ 用 `%w` 包住，并用 `require.NotNil(errors.Unwrap(err))` 自证（见 TASK-003 的同条）。"
+    ],
+    "non_functional": [
+      "**候选处理顺序必须倒序**（或按 period 升序）：Sprint 036 W2 实测——`Discover` 文档写明「最近的排在前面」，直接顺着 `for range` 会让 `stock_continuity`/`deposit_sum` 的漂移检测**一次都没真正执行**（首期恒 `no_prior_period`），而数据照进权威表、报告照样 `Passed=true`、**零告警**（`skipped` 不拉低 `Passed`，`validate.go:101`）。\n\n🔴 **断言必须是肯定式**（reviewer C1 实测推翻原写法）：原 DoD 写「较新那期的 `stock_continuity` **不应**是 `no_prior_period`」是纯否定式，而 `gateStockContinuity`（`validate.go:354-372`）有**四种** skip 理由 —— 只要该期缺 `tsf_stock` 就返回 `absent_field:tsf_stock`，**断言照样绿而顺序仍然是错的**。\n\n⚠️ 这不是假想：仓库唯一两份文章快照是 `pboc-2020-06-h1.html`（rule@v1，无社融板块 ⇒ 无 `tsf_stock`）与 `pboc-2025-12-annual.html`，而 `Preceding` 按 `period_type` 过滤（`validate.go:81`）—— 想构造「同 period_type 两期」现有 testdata 根本不够，凑出来的十有八九就是那个平凡绿。\n\n**改成两条择一（推荐第二条，不依赖任何数据）**：① 断言该期 `stock_continuity` 的 `Status == CheckPassed` **且 `Value != nil`**（闸门真的执行了）；② **断言 `Out` 里输出的期次序列是升序的** —— 那是对「顺序」本身的断言，不经过任何闸门。",
+      "`gofmt`/`vet` 空、整包全绿、`-race` 绿、覆盖率不低于 93.2%；新增导出物（`IngestDeps`/`Ingest`）按 TASK-003 同款规则**登记**进导出面守卫（`assert.Equal` 一字不动 + 正向自证）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-53",
+  "questions": [
+    {
+      "q": "导出面守卫的登记点在 store_test.go，而该文件已被 TASK-006（dev-agent-53，in_progress）声明进 writes —— 我们俩都必须改同两行 assert.Equal 的期望切片，且 wave2 没有 worktree，是同一棵工作树上并发编辑同一文件，后写者会静默覆盖先写者。更要紧的是：AST 守卫扫全部非 _test.go 文件做全导出面精确集合相等，所以我的 ingest.go 一落盘、dev-53 的包测试就会立刻红（反向亦然），这是必然不是可能。请裁决登记的串行顺序：(a) dev-53 先落它的 Recent* 登记，我随后把 Ingest 追加进去（我需要你把 ./internal/hestia/store_test.go 加进我的 writes，或授权我自己 update 补进去）；(b) 我先登记 Ingest，dev-53 随后追加；(c) 由你在两边都 dev_done 后统一登记。我推荐 (a)：dev-53 已 in_progress 且它本来就要改这个文件。在你答复前我会做完其余全部工作（ingest.go/ingest_test.go 全套测试+消融），只把这一处登记留到最后。",
+      "asked_at": "2026-08-12T16:05:00Z",
+      "answer": "【由接手方 dev-agent-53 于 16:30 补记，原问 q 一字未改】此问已被 leader 的处置**事实上解决**，而非通过答复：dev-agent-54 停机后，leader 收回本任务改派给我（epoch 1→2），并**亲自代提交** ingest.go/ingest_test.go 为 0e2c6fc，同时在该提交里把 \"Ingest\" 追加进 store_test.go 的 AST 守卫名单（字典序插在 Discover 与 LoadConfig 之间）。随后 leader 于 16:22:56Z 把 ./internal/hestia/store_test.go 从本任务 writes 中移除——登记既已完成，接手方无需再碰该文件。\n\n即：dev-54 推荐的 (a) 方案（dev-53 先落 Recent* 登记、TASK-005 随后追加 Ingest）**最终就是实际发生的顺序**，只是最后一步由 leader 代为执行。\n\n合法性已被两人独立核实（dev-52 查、leader 复核）：ingest.go:129 调 d.Store.Save，全文件无 db.Exec / 裸 INSERT ⇒ 经过 Save 而非绕过，守卫的语义关切不适用于 Ingest。我另做了正向自证（消融 M7）：从名单删掉 \"Ingest\" 后 TestPackageExposesNoWriteFunctions 立刻转红，证明该登记确实被精确集合相等守着。\n\n原问保留不删：那段分析是本次并发冲突的第一手记录，且它对「AST 守卫扫全部非 _test.go 文件、故双方必然互相打红」的判断完全正确——该判断后来被 leader 明确承认为其排 wave2 时未预见的一层。"
+    }
+  ],
+  "verify_baseline": {
+    "head": "0e2c6fc976d90382ecb2122dbeb1ed18eaf8c9c9",
+    "discovery_sha256": "3e283b5a5adab4c5a5c1e067b5f9ee490dbde0205a1f58ca9461e347162b5552",
+    "at": "2026-08-12T16:30:14Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-005.json"
+}

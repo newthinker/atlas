@@ -1,0 +1,61 @@
+{
+  "task": "TASK-005",
+  "title": "T3：Ingest 编排与两处接缝",
+  "by": "dev-agent-53（接手 dev-agent-54 的交付，epoch=2）",
+  "provenance": "⚠️ **代码不是我写的，我是接手方**。ingest.go / ingest_test.go 由 dev-agent-54 完成，因其停机由 leader 代提交为 0e2c6fc；导出面守卫里 `Ingest` 那一行的登记也由 leader 落。leader 于 16:22:37Z 把本任务收回改派给我（`in_progress → assigned`，epoch 1→2），并在 16:22:56Z 把 `store_test.go` 从 writes 移除（登记已完成，无需我再碰）。**我的贡献是独立验证 + 落盘，没有改一行代码** —— 交付已完整满足全部 DoD，为了「显得有产出」去改它是错的。",
+  "key_findings": [
+    "**七轮消融独立验证了这份继承来的交付，全部 KILLED 且各由预期的测试捕获**。我没有把它的绿当成结论：DoD 的每一条都对应至少一个我亲手做过的变异。对照组 0 红。",
+    "**dev-54 在错误链判据上做了一个精细且正确的区分，我实测确认它的『理由』也成立**（不只是结论成立）：在 `Ingest` 这一层，汇总错误自身是 `fmt.Errorf(..., %w, errors.Join(...))`，所以 **`errors.Unwrap(err)` 恒非 nil，哪怕每个 stage 的包裹全写成 `%v`** —— 照搬 TASK-003 的 `require.NotNil(errors.Unwrap(err))` 到这里就是一条**新形状的平凡为真**。我用探针实测：把 stage 的 `%w` 改成 `%v` 后，`errors.Unwrap(err) != nil` 仍为 **true**、而 `errors.Is(err, errBoom)` 变为 **false**。⇒ 它选 `errors.Is` + 哨兵是对的，且它写下的理由与机制一致。这是「结论对但理由也对」的一次难得的正面样本。",
+    "**reviewer C1 那条『断言必须是肯定式』被采纳为方案②（断言 Out 的期次序列升序），我实测它承重**：去掉 `slices.SortStableFunc` 后 `TestIngestProcessesOldestFirst` 与 `TestIngestContinuesAfterOneFailure` **双双转红**。选②而非①是对的 —— ① 依赖「构造同 period_type 的两期」，而当前 testdata 根本做不到（能被 `Parse` 接受的只有 2025-12/annual 与 2020-06/h1，是两条独立序列；两份季报快照 parse.go 还认不出），凑出来的十有八九正是 C1 警告的那个平凡绿。②不经过任何闸门，因此不会被闸门的四种 skip 理由蒙混。",
+    "**`TestIngestContinuesAfterOneFailure` 里那条顺序断言不是冗余**：它钉住「失败的那条排在前面」。没有它，即使失败的那条排在最后，该用例其余断言也全部成立 —— 测试名（continues after one failure）就与它实际证明的东西对不上。消融 M1 确认：去掉排序后它也红。",
+    "**`IngestDeps` 是结构体，正确地没有被登记进导出面守卫**。两条守卫都只收 `*ast.FuncDecl`（reflect 版只看 `*Store` 方法集），把类型名写进名单会让守卫立刻变红。这与我在 TASK-006 的 `StatusRow`/`PendingRow` 上得到的结论同构，同一 Sprint 内两次独立印证。",
+    "**接缝①（补 ArticleID）漏填不会静默，但填错会** —— 消融 M2 把赋值去掉后有 9 条测试转红（`Meta.validate` 要求非空，响亮失败）。所以 `TestIngestFillsArticleID` 钉的是**等值**而不是非空：填成整个 URL 那种错误才是真正会静默入库的那一类。"
+  ],
+  "decisions": [
+    {
+      "decision": "接手后**不改任何代码**，只做独立验证并落盘。",
+      "rationale": "逐条核对后确认 dev-54 的交付已完整覆盖全部 6 条 DoD，且 7 轮消融全部 KILLED。此时改动只会引入风险而不增加正确性；为了让交付『看起来是我做的』而重写，是拿他人已验证的工作去换我的产出感。接手方的职责是**确认它对**，不是**证明我干了活**。"
+    },
+    {
+      "decision": "把 dev-54 的错误链判据（Ingest 层用 errors.Is + 哨兵，ingestOne 层用 errors.Unwrap NotNil）**用探针实测验证其理由**，而不是只看结论。",
+      "rationale": "「结论对但理由错」的检查纪律：理由是别人复现时的唯一入口。这次实测下来理由完全成立（%v 变异下 Unwrap 仍非 nil、ErrorIs 转 false），所以它这段注释可以被后人放心引用 —— 而这一点只有实测才敢说。"
+    },
+    {
+      "decision": "在**隔离 worktree** 里做全部 7 轮消融，主工作区一个字节未碰。",
+      "rationale": "本 Sprint 的 wave2 无 worktree、多人共用一棵树，就地变异会给并发者假红。我在 TASK-006 里正因为在共享树上挪过一次同伴文件而做过检讨，这次从一开始就用隔离副本。"
+    }
+  ],
+  "files_modified": [],
+  "interfaces_exposed": [
+    "type IngestDeps struct{ Store *Store; Fetch Fetcher; Cfg Config; Out io.Writer; Force bool } —— Out 为 nil 时等价 io.Discard",
+    "func Ingest(ctx context.Context, d IngestDeps) error —— 发现→抓→解析→校验→入库；候选按 period 升序处理；单期失败不中断整批，最后以 errors.Join 汇总返回非零",
+    "契约：接缝① ArticleID 由 ingest 补（Parse 看不到 URL）；接缝② 标题期次与正文期次不一致时拦下不入库",
+    "契约：Out 每条候选打一行，含 Verdict 与 Table —— Table 区分「入权威表」与「落 pending」（对运维含义相反）；Verdict 当前结构上恒为 New，**刻意不写断言**"
+  ],
+  "verification": {
+    "anchor": "master 0e2c6fc976d9（dev-54 交付，leader 代提交）；对照基线 062b460。全部测量在按 sha 建的一次性隔离 worktree 里做，主工作区未碰。",
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok，0 FAIL",
+    "baseline_back_to_back": "对 062b460（dev-54 提交前）与 0e2c6fc **同一时刻并排**跑同一组 flag：base 300 顶层 / 330 子用例 / 0 FAIL / 93.3%；post 308 顶层 / 339 子用例 / 0 FAIL / 93.5%。新增 8 条顶层、**消失 0 条**。",
+    "coverage": "93.5%，DoD 下限 93.2%（较基线 93.3% 不降反升）",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "vet": "go vet ./internal/hestia/ 退出码 0、无输出",
+    "race": "go test -count=1 -race → ok",
+    "ablation": {
+      "protocol": "7 轮，全部在隔离 worktree（`git worktree add --detach <sha>`）内进行；每轮 cmp 验证变异生效 + go vet 有效性闸 + 打印 diff 逐字核对 + 还原后 cmp 校验（7/7 YES）。主工作区全程零改动。",
+      "control": "未变异对照组 0 条红",
+      "M1_去掉升序排序": "→ TestIngestProcessesOldestFirst + TestIngestContinuesAfterOneFailure（双双红，证明 C1 的肯定式断言承重，且第二条里的顺序断言非冗余）",
+      "M2_不补ArticleID接缝①": "→ 9 条红（含 TestIngestFillsArticleID）—— 漏填响亮失败，与 DoD 的判断一致",
+      "M3_去掉期次交叉校验接缝②": "→ 仅 TestIngestRejectsPeriodMismatch（精确，无连坐）",
+      "M4_首期失败即break中断整批": "→ 仅 TestIngestContinuesAfterOneFailure",
+      "M5_stage包裹%w改%v": "→ TestIngestWrapsStageErrors 的 Fetch/Parse/Validate/Save 四个子测试",
+      "M6_汇总层%w改%v": "→ 仅 TestIngestWrapsStageErrors/Fetch_失败 —— 证实 dev-54 注释所称「Fetch 那条同时证明汇总没有截断链」属实",
+      "M7_从AST名单删Ingest": "→ TestPackageExposesNoWriteFunctions（登记的正向自证，DoD non_functional[1] 要求）",
+      "probe_验证判据的理由": "在 M5 变异态下用一次性探针实测：`errors.Unwrap(err) != nil` 仍为 **true**、`errors.Is(err, errBoom)` 为 **false** ⇒ 若照搬 NotNil 判据则平凡为真。探针跑完即删，git status 已核实无残留。"
+    }
+  },
+  "notes_for_leader": [
+    "**`questions[0]` 是 dev-54 留下的、至今未答复的提问**（导出面守卫登记的串行顺序）。它已被你后来的处置**事实上解决**（你代提交并亲自登记 Ingest），我在接手时把结论补写进了 answer 字段，未改动它的 q 原文 —— 留着原问是因为那段分析本身就是这次冲突的第一手记录。",
+    "**残留 worktree 提醒**：`/Users/zuowei/workspace/go/src/github.com/newthinker/wt-005-run`（detached @ 67249ff）**不是我建的**，从命名看很可能是 dev-agent-54 失联前留下的孤儿；`wt-v-w2`（@ 0e2c6fc）也不是我的。按 CLAUDE.md「agent 中途失联时残留 worktree 由 Leader 收」，交给你处置。我自己建的 audit/base 两个已拆，无残留。",
+    "**一条跨任务的观察**：`IngestDeps`（本任务）与 `StatusRow`/`PendingRow`（TASK-006）在同一 Sprint 里各自独立地印证了「结构体类型不进导出面守卫视野」。这条规则目前只写在 store_test.go 的登记说明注释里，靠每个人自己重新发现；若哪天有人把类型名写进名单，唯一的反馈是守卫立刻变红（这其实是好的快速反馈，不必额外加机制）——记在这里供 final-report 取用。"
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "task_id": "TASK-007",
+  "title": "T4：一级键、--force 与错误路径的行为守卫",
+  "by": "dev-agent-52",
+  "at": "2026-08-13T02:30:00Z",
+  "git": {
+    "branch": "master（主工作区直连）",
+    "head": "b6b13a4",
+    "parent": "fd6a24c（TASK-011 判停改用 article_id）",
+    "note": "单 commit，只动 ingest_test.go（唯一 writes 项，未越界）。全部自证数字采自 076998b，在 `git worktree add --detach /tmp/chk007 076998b` 的干净隔离树上采（git status 空）。",
+    "commits": [
+      "b6b13a4 fix(TASK-007): 清第三份过期结论副本（QA review_fix，rework_count=1）"
+    ]
+  },
+  "key_findings": [
+    "🔴 **`syntheticIndex` 的变参化（DoD 说是「全计划唯一的破坏性改动」）已经不需要做** —— 它在 `ingest_test.go:47` 已经是 `entries ...indexEntry`，TASK-005/004 交付时就完成了。⇒ 本任务实际只写守卫，一行实现都没改（与计划 716 行「本 task 基本不写实现」一致）。",
+    "🔴 **`error_handling[0]` 要求的守卫也已存在**（`TestIngestContinuesAfterOneFailure`，一页两条 / 第一条失败 / 第二条入库 / 返回非零，且额外钉住了「失败那条排在前面」）。我**没有重写它**，避免造第二份同义守卫。",
+    "🔴 **既有那条守卫里有一个我发现的空洞，这是新增守卫 A 的全部理由**：`TestIngestContinuesAfterOneFailure` 用 `assert.False(s.HasPeriod(...))` 断言「失败的那期不得留下任何行」。而 **`HasPeriod` 查 `v_hestia_current`，本来就看不见 pending** ⇒ **即使失败那期真的落了一行 pending，那句断言照样绿**。它实际证明的是「没进权威表」，不是「没留下行」。⇒ 新增 `TestIngestLeavesNoRowOnFetchOrParseFailure` 直接数 `countRows(TablePending)`，并**再跑一轮**证明重试真的发生。",
+    "**DoD 的 boundary 被 leader 整体重写过一次，我核实了新版属实**：`--force` 现在穿透两层 —— `ingest.go` 的 `if !d.Force`（跳过 ingestOne 的 `HasArticle`，原本就有）与 `if d.Force { known = neverSeen{} }`（让 Discover 不提前判停，TASK-011 我加的）。原计划断言的「`--force` 作用域只到 pending、对已观测期次结构上不可达」在 TASK-011 之后是**假的**，照原文写会得到一条**断言错误行为**的守卫。",
+    "**`bitemporal.Verdict` 是 `int` 而不是 `string`** —— 我第一版写 `string(bitemporal.New)`，`go vet` 直接拦下（「conversion from Verdict (int) to string yields a string of one rune」）。改用 `.String()`。⇒ 记一句：**这条是 vet 抓的，不是测试抓的**；`string(intType)` 会产出一个 rune 而非报错，若 vet 没跑，断言会拿一个不可见字符去 `Contains`，**恒假且看不出原因**。"
+  ],
+  "decisions": [
+    {
+      "decision": "守卫 A 直接数 `pending` 表行数 + 再跑一轮，而不是沿用 `HasPeriod`",
+      "rationale": "见 key_findings 第 3 条：`HasPeriod` 看不见 pending，用它断言「没留下行」是**空洞的**。两半缺一不可 —— 只数行数不能证明「会重试」，只跑第二轮不能证明「第一轮没留行」。消融 M3（把 Parse 错误吞掉）确认它有鉴别力。"
+    },
+    {
+      "decision": "守卫 B 构造成「库非空、但这一篇没见过」",
+      "rationale": "与 A 的分工：A 证明「没留行 ⇒ 会重试」，B 证明「留了行、但**这一篇**没见过 ⇒ 仍然抓」。**少了 B，一个「只要库里有任何行就跳过」的实现能让 A 照样绿。** 这是「有没有一个我想排除的实现能让断言照样绿」问出来的缺口。"
+    },
+    {
+      "decision": "守卫 ② 必须**同时**断言「走到了 Save」与「结果是 Duplicate」",
+      "rationale": "DoD 明令，而它是对的且现在更容易踩：只断言 `countRows == 1` 的话，**「根本没走到 Save」时同样为绿** —— 而那正是 TASK-011 之前的真实行为（Discover 判停挡住 ⇒ 候选为空 ⇒ Ingest 打 `no new reports` 就返回）。⇒ 用 `NotContains(\"no new reports\")` + `NotEmpty(outPeriods(...))` 钉「走到了」，用 `Contains(Duplicate)` 钉「结果」。消融 M1 证明前一半确有鉴别力（红的正是那半）。"
+    },
+    {
+      "decision": "不写「端到端支持央行修订版」的测试（DoD functional[1] 要求不写）",
+      "rationale": "**并且我核实了 DoD 订正后的理由属实**：TASK-011 之后修订版**机制上进得了候选**（新 article_id ⇒ 判停不命中），所以「不可达」这个旧理由确实已是假的。不写它的真实理由是**「是否支持修订版」是契约决策**（人类 2026-08-12 定案「暂不支持」），不是本任务可断言的行为。⇒ 由 TASK-009 写进 CONTRACTS，且**措辞需重裁**（从「不可达」变成「可达但契约声明不支持」）。"
+    },
+    {
+      "decision": "不重写 `error_handling[0]` 的守卫",
+      "rationale": "`TestIngestContinuesAfterOneFailure` 已完整覆盖该条（含「失败那条排在前面」这个我原本没想到的加固）。再写一条同义守卫只会制造两份要同时维护的真相。**但我指出并补上了它的空洞**（见守卫 A）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/ingest_test.go：新增 4 条守卫（`TestIngestLeavesNoRowOnFetchOrParseFailure`、`TestIngestFetchesUnseenArticleEvenWhenStoreIsNotEmpty`、`TestForceOnPendingPeriodLandsInObservations`、`TestForceOnObservedPeriodIsDuplicate`）+ 一个 import（`bitemporal`）。**未动任何既有测试，未动任何实现文件。**"
+  ],
+  "interfaces_exposed": {
+    "no_new_exports": "本任务只写测试，无任何导出物变化，两条导出面守卫未受影响。",
+    "note_for_TASK_009": "🔴 **CONTRACTS 里两句必须改**：① **别再写「`--force` 的作用域只到 pending」** —— 它现在穿透两层，能重跑已在观测表的期次（reviewer B4 登记的「没有出路」已闭合），代价是会翻满 `MaxPages`。② **「不支持央行修订版」的措辞要重裁** —— TASK-011 之后它从「机制上不可达」变成了「机制上可达、但契约声明不支持」，两者写法完全不同：前者不需要防线，后者需要说明**为什么明明能做却不做**，否则后人会当成缺陷去「修」。"
+  },
+  "verification": {
+    "suite": "隔离树 076998b（`git worktree add --detach /tmp/chk007`，git status 空）：`go test ./internal/hestia/ -count=1` —— ok，0 FAIL",
+    "race": "隔离树：`-race` —— ok",
+    "coverage": "隔离树：**93.5%**，与任务文件 `coverage_baseline: \"93.5\"` 持平（本任务只加测试、不加实现，覆盖率本就不该下降）",
+    "gofmt_vet_build": "`gofmt -l` 空、`go vet` 空、`go build ./...` OK（均在隔离树）",
+    "scope": "只改 `ingest_test.go`，即 `writes` 的唯一一项，**无越界**。",
+    "ablation": {
+      "harness": "在 `git worktree add --detach /tmp/mut007 076998b` 的隔离副本里做，主工作区一个字节未碰（收尾 `git diff --stat HEAD -- internal/hestia/ingest_test.go` 为空）。每个变异体落盘后先 `go vet` 过语法闸。收尾已 `git worktree remove`。",
+      "M1_撤掉Force穿透判停那一层（DoD 指定）": {
+        "mutation": "`ingest.go` 的 `if d.Force { known = neverSeen{} }` 整段删掉，恢复成 `var known ArticleChecker = d.Store`",
+        "killed_by": "`ingest_test.go:724` `assert.NotContains(out, \"no new reports\")` —— 实际输出 `\"no new reports (stopped: seen_article)\\n\"`；紧接着 `:726` `require.NotEmpty(outPeriods(...))` 也红",
+        "full_impact": "**只有 `TestForceOnObservedPeriodIsDuplicate` 一条转红，外溢 0**",
+        "why_this_matters": "DoD 要求「确认是守卫②转红、且红在**走到 Save**那半而不是别的兄弟断言」—— 实测正是如此：红的是 ②-a 两条，`Duplicate` 那半（②-b）**根本没被执行到**。⇒ 这条是本次 DoD 订正的自证：**新守卫真的钉住了 TASK-011 带来的行为**，不是写了一条恰好绿的测试。"
+      },
+      "M2_撤掉Force的另一层": {
+        "mutation": "`ingestOne` 的 `if !d.Force {` → `{`（即 Force 不再跳过一级幂等键）",
+        "killed_by": "`ingest_test.go:730` `assert.Contains(out, \"Duplicate\")` —— 实际输出 `\"2025-12 already ingested (2026011509294440745)\\n\"`",
+        "full_impact": "3 条红：`TestForceOnObservedPeriodIsDuplicate`、`TestForceOnPendingPeriodLandsInObservations`、既有的 `TestIngestSkipsSeenArticleUnlessForce/Force`",
+        "why_this_matters": "与 M1 互补 —— M1 拆第二层（Discover 判停）红在 **②-a**，M2 拆第一层（ingestOne 幂等键）红在 **②-b**。⇒ 「`--force` 穿透**两层**」这句话的两半**各自都有守卫**，不是靠一条断言笼统盖住。"
+      },
+      "M3_把Parse错误吞掉": {
+        "mutation": "`ingestOne` 里 `return wrap(\"parse\", err)` → `return nil`",
+        "killed_by": "`ingest_test.go:606` `require.Error(...)` 「解析失败必须让整批返回非零」",
+        "full_impact": "3 条红：新增的守卫 A、既有的 `TestIngestContinuesAfterOneFailure`、`TestIngestWrapsStageErrors/Parse 失败`",
+        "note": "守卫 A 与既有两条同时红是预期的（同一个实现点），本条证明的是**守卫 A 确有鉴别力**，不是它独占该缺陷。"
+      }
+    },
+    "dod_coverage": [
+      {
+        "criterion": "functional[0] 按计划 Task 4 执行；第一步把 syntheticIndex 改成变参",
+        "evidence": "**已无需改动** —— `ingest_test.go:47` 已经是 `syntheticIndex(t *testing.T, entries ...indexEntry)`，TASK-005/004 交付时就完成了；TASK-005 的两处调用也已是变参形态。计划原文的「唯一破坏性改动」在本任务开工时已不存在。"
+      },
+      {
+        "criterion": "functional[1] 一级键三种情形各一条守卫（A/B/C）",
+        "evidence": "A → 新增 `TestIngestLeavesNoRowOnFetchOrParseFailure`（数 pending 行 + 再跑一轮）；B → 新增 `TestIngestFetchesUnseenArticleEvenWhenStoreIsNotEmpty`（库非空但这篇没见过）；C → **既有** `TestIngestSkipsSeenArticleUnlessForce/默认跳过已处理过的文章`（pending 里那篇被一级键挡住），未重写。消融 M3 证明 A 的鉴别力。"
+      },
+      {
+        "criterion": "functional[1] 不写「端到端支持修订版」的测试；且核实订正后的理由",
+        "evidence": "未写。并核实 DoD 订正属实：TASK-011 之后修订版机制上可达（`discover.go` 判停用 `HasArticleInObservations`，新 id 不命中）⇒ 旧理由「不可达」已假；真实理由是契约决策。已把「TASK-009 需重裁措辞」写进 interfaces_exposed。"
+      },
+      {
+        "criterion": "boundary ① --force 重跑 pending 期次 ⇒ New 落观测表",
+        "evidence": "`TestForceOnPendingPeriodLandsInObservations`：先 Save 成 pending（前置断言 `countRows(TablePending)==1`），--force 后断言输出含 `New` 且 `HasPeriod` 为真。消融 M2 会打红它。"
+      },
+      {
+        "criterion": "boundary ② --force 重跑已观测期次 ⇒ 走到 Save 且判 Duplicate，两半缺一不可",
+        "evidence": "`TestForceOnObservedPeriodIsDuplicate`：②-a 用 `NotContains(\"no new reports\")` + `NotEmpty(outPeriods)` 钉「走到了 Save」，②-b 用 `Contains(\"Duplicate\")` 钉结果，另加「仍是 1 行」「pending 为 0」。**没有只数行数。**"
+      },
+      {
+        "criterion": "boundary 专属消融：把 known = neverSeen{} 改回 d.Store，确认是守卫②转红且红在「走到 Save」那半",
+        "evidence": "M1，**外溢 0**，红在 `ingest_test.go:724`（②-a），`Duplicate` 那半未被执行到。见 ablation.M1。"
+      },
+      {
+        "criterion": "error_handling[0] 单期失败不中断整批（第二条仍入库 + 返回非零）",
+        "evidence": "**既有** `TestIngestContinuesAfterOneFailure` 已完整覆盖（且额外钉了「失败那条排在前面」）。未重写，理由见 decisions。**但我指出它用 `HasPeriod` 断言「不留任何行」是空洞的**，并由新增守卫 A 补上。"
+      },
+      {
+        "criterion": "non_functional[0] 每条守卫注释写明它守的是哪条 spec 定案",
+        "evidence": "四条守卫各自的注释都写明了：A/B/C 三情形对应 spec 第 2 节定案（注释里列出三者的期望行为差异）；①② 对应 `--force` 穿透两层，并写明 TASK-011 前后的事实变化。"
+      },
+      {
+        "criterion": "non_functional[1] 消融自证两条，必须含 boundary 守卫②",
+        "evidence": "做了三条：M1（守卫②，DoD 指定）、M2（守卫②的另一半 + ①）、M3（守卫 A）。每条都给出具体失败行号与断言原文。"
+      },
+      {
+        "criterion": "non_functional[2] gofmt/vet 空、整包全绿、覆盖率不低于 coverage_baseline(93.5)",
+        "evidence": "隔离树 076998b：空 / 空 / ok / **93.5%**（与基线持平）/ `-race` ok / build OK。"
+      }
+    ]
+  },
+  "open_items_for_leader": [
+    "🔴 **给 TASK-009 的两条硬输入**（见 interfaces_exposed）：CONTRACTS 里 ①「`--force` 作用域只到 pending」已是错的；②「不支持修订版」要从「机制上不可达」改写成「机制上可达、契约声明不支持」—— 后者需要说明**为什么明明能做却不做**，否则后人会当成缺陷去修。",
+    "**我发现既有守卫 `TestIngestContinuesAfterOneFailure` 有一处空洞并补上了**（它用 `HasPeriod` 断言「不留任何行」，而 `HasPeriod` 看不见 pending ⇒ 落了 pending 也照样绿）。**我没有改那条既有测试**，只是新增守卫 A 覆盖它证不了的那半 —— 若你认为该直接加固原测试而不是并列一条，说一声我改。",
+    "**计划 Task 4 说「第一步是把 `syntheticIndex` 改成变参，这是全计划唯一的破坏性改动」—— 那一步已经不存在了**（TASK-005/004 交付时就做了）。若计划文档还会被后续任务引用，这句值得订正，否则下一个人会去找一个不存在的改动。"
+  ],
+  "rework": {
+    "round_1": {
+      "WARNING-2 第三份副本": {
+        "三重过期": "① 「经 Discover 的 **HasPeriod** 过滤」—— 判停早已换成 `HasArticleInObservations`；② 「Duplicate/Revision **当前不可达**」—— 同文件下方的 `TestForceOnObservedPeriodIsDuplicate` 是**绿**的、直接反证；③ 那个 `discover.go:303-318` 坐标**漂移之后正好指向了自己的反驳**。",
+        "改法（照 dev-agent-54 的清单）": "**保留**「不要为当前的局限写断言」这条决定与理由，并补上它现在有的**实证**（那条限制确实已被放开，而本用例**从未因此红过一次**，因为它从一开始就没有假定它）；**删除**事实陈述与过期坐标。",
+        "顺带纪律": "注释里引用别处**一律用符号名 + 字串锚**。**注释里的 `file:line` 就是注释版的 `HEAD`** —— 它会随任何上游编辑静默漂移，而漂移之后**仍然指向某个存在的东西**，于是看起来依然像个有效引用。这次它漂到了自己的反驳上，属运气；下次可能漂到读起来毫无违和、却与论点无关的代码上。"
+      }
+    }
+  }
+}

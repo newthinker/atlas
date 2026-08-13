@@ -1,0 +1,59 @@
+{
+  "id": "TASK-007",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 1,
+  "title": "T4：一级键、--force 与错误路径的行为守卫",
+  "description": "计划 **Task 4（710–991 行）**。⚠️ 计划 716 行原话：**本 task 基本不写实现**——T3 已把逻辑写全。这些是**行为守卫**，验证实现符合 spec 第 2 节定案。**若某条红了，说明 TASK-005 有疏漏，那正是它们的价值**（别去改测试迁就实现）。\n\n⚠️ **依赖 TASK-004 是 scope 序列化，不是逻辑依赖** —— 两者都写 `ingest_test.go`（TASK-004 要改那句过期注释）。",
+  "wave": 4,
+  "dependencies": [
+    "TASK-005",
+    "TASK-004"
+  ],
+  "context_from": [
+    "TASK-005"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/ingest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 4（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 710–991 行）执行。第一步是把 `syntheticIndex` 改成变参（一页两条报告）——**这是全计划唯一的破坏性改动**，TASK-005 的两处调用同步改。",
+      "**一级键三种情形各一条守卫**（spec 第 2 节定案）：A 抓取/解析失败→**没写 pending 行**→下次自然重试；B 新 article_id→不命中→抓；C 同一篇没过闸→写了 pending→**命中被挡**。\n\n⚠️ **本任务不要写一条声称「端到端支持央行修订版」的测试**——理由已随 TASK-011 更换，见下。\n\n🔴 **订正（leader，2026-08-13，TASK-011 合入后重核）**：本条原先给的理由是「`Discover` 判停是 `if has { return out, nil }`（`HasPeriod`），修订版排最前时第一条就命中、它本身进不了候选」。**那个理由现在是假的**：TASK-011 已把判停换成 `HasArticleInObservations(article_id)`（`discover.go:363-368`），而修订版是**新 article_id** ⇒ 它**不再**被判停挡住，机制上进得了候选。\n\n⇒ **结论不变但理由必须换**：不写这条测试，是因为「是否支持修订版」是**契约决策**（人类 2026-08-12 定案「暂不支持，明确写进契约」），不是可由本任务断言的行为。**照旧由 TASK-009 写进 CONTRACTS。**\n\n⇒ 同时 **TASK-009 需要重新裁定**：机制已从「不可达」变成「可达但契约声明不支持」，这两者写进 CONTRACTS 的措辞完全不同。**这条由我（leader）在 TASK-009 派发前处理，本任务不必等它。**"
+    ],
+    "boundary": [
+      "🔴 **本条已整体重写（leader，2026-08-13，TASK-011 合入后重核）。原文断言「`--force` 的作用域只到 pending —— 对已在观测表的期次结构上不可达」，那是 TASK-011 之前的事实，现在是假的。若照原文写测试，会得到一条断言错误行为的守卫。**\n\n**现在的事实（逐行核实过，不是从记忆推的）**：`--force` 穿透**两层**幂等——\n① `ingest.go:113` `if !d.Force` 跳过 `ingestOne` 的 `HasArticle`（原本就有）；\n② `ingest.go:58` `if d.Force { known = neverSeen{} }` 让 `Discover` 不提前判停（TASK-011 新加，dev-agent-52 交付）。\n⇒ **`--force` 现在能重跑已在观测表的期次**，这也顺带闭合了独立 reviewer 的 B4。\n\n**要写的两条守卫**：\n① 「`--force` 重跑 **pending** 期次 ⇒ `New` 落观测表」——这条**从原文保留**，仍然成立。\n② 「`--force` 重跑**已在观测表**的期次 ⇒ 真的走到 `Save`，且 bitemporal `Classify` 判为 `Duplicate`」（同一 article_id、同一 `published_at`、业务键 `{period, period_type}` 未变 ⇒ `incoming == LatestRevision`）。**即计划原本的 `TestForceOnObservedPeriodIsDuplicate`，现在它应当是绿的。**\n\n🔴 **②必须同时断言「走到了 Save」与「结果是 Duplicate」两半，缺一不可。** 原文那段风险分析方向反了，但它指出的坑仍然真实、且现在更容易踩：只断言 `countRows == 1` 会在「根本没走到 `Save`」时同样为绿 ⇒ 请断言输出含 `Duplicate`（或直接断言 `Classify` 的返回），**不要**只数行数。\n\n🔴 **消融要求（本条专属）**：把 `ingest.go:58` 的 `known = neverSeen{}` 改回 `d.Store`，确认**是守卫②转红**、且红在「走到 Save」那半而不是别的兄弟断言，贴出失败输出的具体那一行。**这一条是本次订正的自证**——不做它，就没有证据表明新守卫真的钉住了 TASK-011 带来的行为。\n\n**不要**再向 CONTRACTS 写「`--force` 的作用域只到 pending」——那句话现在是错的。"
+    ],
+    "error_handling": [
+      "**单期失败不中断整批**的守卫：一页两条，第一条 Parse 失败，断言第二条**仍被处理且入库**，且 `Ingest` **返回非零错误**（不是 nil）。两个断言缺一不可——只断言「返回错误」不能排除「第二条被跳过」。"
+    ],
+    "non_functional": [
+      "**每条守卫都要能指出它守的是哪一条 spec 定案**（注释里写明），因为它们是行为守卫而非实现测试。",
+      "**消融自证**：任选两条守卫（其中**必须包含 boundary 的守卫②**），破坏 TASK-005/TASK-011 的对应实现，确认**是该守卫红**而不是兄弟。贴出失败输出的具体那一行（Sprint 036 G31）。",
+      "`gofmt`/`vet` 空、整包全绿、覆盖率**不低于派发时实测基线**（见任务文件 `coverage_baseline` 字段；原文写死的 93.2% 已过期）。"
+    ]
+  },
+  "coverage_baseline": "93.5",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-52",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "coverage_floor": "93",
+  "verify_baseline": {
+    "head": "b6b13a4ac3ab314ac63e45e2170a8488e0fd4204",
+    "discovery_sha256": "67291dc9b5583253d4b455e498c254655d5419a80831d2b076c3380608a8ce8e",
+    "at": "2026-08-13T00:56:34Z"
+  },
+  "verifier": "test-agent-26",
+  "fix_items": [
+    "**WARNING-2（第 2 份副本）— `internal/hestia/ingest_test.go`**（搜 `刻意**不**断言 Verdict 恒为 New`）。详见 `.arcforge/docs/02-plan/qa-preregistered-items.md` 的 **QA-PRE-1b**。\n\n🔴 **这一份比另外两份更误导，三重过期**：\n① 「经 Discover 的 **HasPeriod** 过滤」—— TASK-011 已换成 `HasArticleInObservations`；\n② 「`Duplicate`/`Revision` **当前不可达**」—— **同一个文件下方的 `TestForceOnObservedPeriodIsDuplicate` 是绿的，它断言 `Duplicate` 可达**，两者相隔约 416 行；\n③ 🔴 **那个坐标 `discover.go:303-318` 现在指向的正是它自己的反驳** —— 那 16 行今天写着「**判据是 article_id 而不是期次**（TASK-011）。别改回期次」。**一个过期指针指向了自己的反驳。**\n\n**改法（dev-agent-54 给的可执行清单，照着删/留，不必判断哪句是决定哪句是结论）**：\n**保留**「不要为当前的局限写断言」这条理由 + 它的实证（`TestForceOnObservedPeriodIsDuplicate` 现在是绿的，而它**从未因为那条局限被放开而红过一次**）。\n**删除**「恒为 `New` / 不可达」这个事实陈述，以及那个过期坐标。\n\n🔴 **删掉行号锚，改用符号名 + 字串锚**（QA-PRE-1d）：`file:line` 会随任何上游编辑静默漂移，**而漂移之后它仍然指向某个存在的东西** —— 这次正好漂到反驳自己的文字上，属于运气；下次可能漂到读起来毫无违和、却与论点无关的代码上。"
+  ],
+  "reason_class": "task_defect"
+}

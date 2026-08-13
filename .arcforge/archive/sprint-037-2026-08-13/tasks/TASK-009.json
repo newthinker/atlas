@@ -1,0 +1,70 @@
+{
+  "id": "TASK-009",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 1,
+  "title": "T7：配置实例、plist、CONTRACTS 与端到端验收",
+  "description": "计划 **Task 7（1549–1706 行）** + **Sprint 037 契约段（1707–1763 行）**。本任务是 M1b 的收尾。\n\n⚠️ 依赖 TASK-004 是因为 CONTRACTS 要登记季报支持；依赖 TASK-008 是 scope 序列化（都改 `hestia_test.go`）。",
+  "wave": 5,
+  "dependencies": [
+    "TASK-004",
+    "TASK-008"
+  ],
+  "context_from": [
+    "TASK-004",
+    "TASK-007",
+    "TASK-008"
+  ],
+  "packages": [
+    "./cmd/atlas",
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./configs/hestia.yaml",
+    "./deploy/launchd/com.newthinker.atlas.hestia-ingest.plist",
+    "./scripts/ops/install-services.sh",
+    "./cmd/atlas/hestia_test.go",
+    "./internal/hestia/CONTRACTS.md",
+    "./cmd/atlas/hestia.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 7（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 1549–1706 行）交付 `configs/hestia.yaml`（写全部阈值，**每个数字带 M0 实测来源**）与 launchd plist（三时点唤起）。\n\n⚠️ Sprint 036 消费者位实测：`configs/hestia.yaml` **此前不存在且不在任何任务的 writes 里** —— 本任务正式认领它。",
+      "🔴 **plist 一个代理键都不设**（约束 C6 的正解）。crisis 的 plist 设了代理（Yahoo 直连恒 403）——**别照抄**。\n\n⚠️ **不得照抄计划 1671 行的四名单**（reviewer C3）：计划给的实现只枚举 `http_proxy/https_proxy/HTTP_PROXY/HTTPS_PROXY` 四个，而 `com.newthinker.atlas.crisis-daily.plist` 里**还有一个 `no_proxy`** ⇒ 照抄再删那两对，`no_proxy` 留下、测试全绿，而「一个代理键都不设」这句话是假的。\n\n**断言必须是「不存在任何 `*_proxy` / `*_PROXY` 键」**，不是枚举四个名字。\n\n🔴 **订正（2026-08-13，dev-agent-52 复核推翻了 Leader 上一版的描述，Leader 已逐文件复算确认）**\n\nLeader 上一版写的是「`no_proxy` 在 `EnvironmentVariables` 最前、与两个代理键被 `PATH` 和注释隔开\n⇒ 视觉上不属于那一组 ⇒ 漏删概率高」。**那只描述了两种布局中的一种**，而另一种的风险方向**相反**：\n\n| plist | 布局（实测行号） | 「照抄再删那两对」的风险 |\n|---|---|---|\n| `crisis-daily` / `crisis-intraday-jpy` | `no_proxy`(26) → `PATH`(28) → 注释 → `http_proxy`(31/32) → `https_proxy`(33/34) | 三者**被拆开** ⇒ **漏删** `no_proxy` |\n| `refresh-cnhk` / `prism-daily` | `http_proxy`(21/22) → `https_proxy`(23/24) → `no_proxy`(25/26) | 三者**相邻** ⇒ **删过头**，把 `no_proxy` 一起删掉 |\n| **`analysis`** | **一个 proxy 键都没有**（只有 `PATH`(19)） | — |\n\n⇒ **结论不变、理由升级**：断言必须是「**不存在任何 `*_proxy` / `*_PROXY` 键**」，\n但真正的理由不是「怕漏删一个」，而是 **`no_proxy` 的位置在各模板之间不一致\n⇒ 任何位置性或枚举性的判据都不可靠**。\n\n⇒ 🔴 **抄模板就抄 `com.newthinker.atlas.analysis.plist`**（dev-52 提，Leader 采纳）：\n它是**唯一一份没有任何 proxy 键**的，而 hestia **直连央行、本就不该走代理**\n（`NewPBOCFetcher` 的注释写明了这一点）。从一份本来就干净的模板出发，\n比从一份有三个代理键的模板出发再删，**少一整类出错方式**。"
+    ],
+    "boundary": [
+      "**`deploy.sh` 检查**（计划自审第 2 节列为计划外新增）：配置没同步到 runtime，plist 起来会因找不到配置而失败，**而 launchd 的失败在日志里不显眼**。确认 `scripts/ops/deploy.sh` 会同步 `configs/hestia.yaml`；若不会，补上并在 discovery 说明。\n\n✅ **已核（Leader + test-agent-26 各自独立核过，2026-08-13）：它会同步，「若不会」那个分支不必走。**\n`deploy.sh:35` 是**整仓 rsync + 排除列表**，而排除列表里**没有 `configs/`、也没有 `deploy/launchd/`**\n（排除的是 `.git`/`.arcforge`/`.claude`/`*.go`/`docs`/`data`/`logs` 等）⇒ 两者都会被带到 runtime。\n**仍请你自己复核一次再写进 discovery** —— 这是交付物的自证，不该只引用别人的结论。\n\n---\n\n🔴 **`plutil -lint` 必须通过**（reviewer D2）：`install-services.sh:34` 会跑它，而计划的 Go 守卫是**纯字符串匹配** —— XML 写坏了 Go 测试照样绿，**安装时才炸**。把 `plutil -lint` 加进本任务的验收步骤。",
+      "🔴 **一条测试：`hestia.LoadConfig(\"../../configs/hestia.yaml\")` 必须成功**（reviewer D3）。有现成先例：`cmd/atlas/crisis_test.go:487` 就是读真实的 `../../configs/crisis-monitor.yaml`。\n\n⚠️ 不加这条的话，「配置文件本身能不能装载」的唯一验证是被我**刻意排除在 DoD 之外**的 Step 9 手工验收 —— 那等于没有自动守卫。\n\n---\n\n🔴 **这条隐含要求那份配置能过 `validate()` 的全部条款**（test-agent-26 于派发前核出，2026-08-13）：\n\n- **`storage.db_path` 必填非空**（TASK-002 新加）\n- **`caliber_exemptions` 若出现则必须写 `period_types`**（Sprint 036 的陷阱，`validate` 会抢先返回）\n\n⚠️ **漏了 `storage` 段的后果不是「测试红」，是「红的理由指向 `db_path`，而不是它想测的东西」**\n—— 与 TASK-002 里「5 处 `writeConfig` 都要补 storage」是同一个坑，只是这次搬到了**真实配置文件**上。\n**写 `configs/hestia.yaml` 时先把 `validate()` 的条款逐条对照一遍，再跑那条测试。**"
+    ],
+    "error_handling": [
+      "plist 守卫必须是**精确断言**而非「含某字符串」：断言 `EnvironmentVariables` 里**不存在**任何 `*_proxy` / `*_PROXY` 键。\n\n⚠️ **否定式断言在空集上平凡为真**（Sprint 036 G9）：若 plist 解析失败返回空 map，「不含代理键」照样通过。**必须配一条肯定式锚点**（如断言解析出的键数 > 0 或某个必有键在场），并注明两者互补免得后人当重复删掉。"
+    ],
+    "non_functional": [
+      "🔴 **CONTRACTS 必须记下四件，缺一不可**：\n\n① **一级键定案的三种情形**（A/B/C 表）+ `--force` 是情形 C 的直接推论；\n\n② **两处接缝**（ArticleID 由 ingest 补、期次交叉校验）；\n\n③ 🔴 **修订版的限定（人类 2026-08-12 定案；理由已于 2026-08-13 整体重写）**\n\n⚠️ **本条的原文理由已被 TASK-011 推翻，不得照抄。** 原文写的是：「判停是 `if has {{ return out, nil }}`，修订版排最前时第一条就命中、**它本身进不了候选**，故**结构上不可达**」。TASK-011 已把判停换成 `HasArticleInObservations(article_id)`（`discover.go:363-368`），而**修订版是新的 article_id** ⇒ 它**不再被判停挡住**。\n\n**要写进 CONTRACTS 的是现在这版（人类定案不变，理由变了）**：\n\n「一级键不挡修订版；`Discover` 的判停自 TASK-011 起按 **article_id** 而非期次，修订版**机制上进得了候选**。但**修订链端到端从未被测过**，Store 侧的双时态设计**当前仍无经过验证的生产者**。⇒ **本版契约声明「暂不支持修订版」** —— 这是一个**承诺范围**的声明，不是「做不到」的声明。」\n\n🔴 **两者的差别必须写明白**：旧表述说的是「**做不到**」，新表述说的是「**没测过，所以不承诺**」。把「没测过」写成「做不到」，会让后人以为要支持修订就得先改 `Discover` —— 而实际上那一步已经做完了，**真正欠的是一条端到端测试**。\n\n并附上 Sprint 036 消费者位的诚实限定：**只证明了「若发生则（当时的）管线看不见」，没有证据说明央行真的重发过同一期** —— 这个前提仍然值得单独确认。\n\n④ 🔴 **`--force` 的作用域（reviewer B4 已被闭合，不再是限制）**\n\n⚠️ **原文「`--force` 的作用域只到 pending，对已在观测表的期次够不着」现在是假的，不得写进 CONTRACTS。**\n\nTASK-011 加了 `ingest.go:58` 的 `known = neverSeen{}`，`--force` 现在穿透**两层**幂等（另一层是 `ingest.go:113` 的 `if !d.Force`）⇒ **`--force` 能重跑已在观测表的期次**，reviewer 的 B4 被**闭合**而非确认。\n\n**要写进 CONTRACTS 的**：「`--force` 绕过两层幂等（`Discover` 判停 + `ingestOne` 的 `HasArticle`），可重跑任意期次，**包括已在观测表的**。代价是它会翻满 `MaxPages` —— 那是 `--force` 的语义，不是意外。M1c 标定 `MagnitudeRanges` 后重跑已入库期次**有出路**。」\n\n🔴 **守卫在 TASK-007**（dev-agent-52 在写）：其 `boundary` 守卫②断言「`--force` 重跑已观测期次 ⇒ 真的走到 `Save` 且判 `Duplicate`」。**本任务写 CONTRACTS 前先确认 TASK-007 已 `verified`**，若它的实测与上面这段不符，**以实测为准并回报我**。\n\n✅ **前置确认已由 test-agent-26 答复（2026-08-13），不必再确认一遍**：TASK-007 已 `verified`，\n且实测与上面这段**逐条相符** ——\n① `--force` 绕两层：`ingest.go:113` `if !d.Force` + `ingest.go:58` `known = neverSeen{}`；\n② 可重跑已在观测表的期次：`TestForceOnObservedPeriodIsDuplicate` 断言「走到 Save」+「判 `Duplicate`」两半，\n消融证明它钉住了 `neverSeen{}`（红在 `:724` 的 ②-a）；\n③ 「代价是翻满 `MaxPages`，那是语义不是意外」在 `ingest.go` 注释里**逐字**存在。\n**⇒ 那段可以照写。** 另：dev-52 自补的 M2（撤掉 `if !d.Force`）红在 `:730` 的 ②-b\n⇒ **「两层」这句话的两半各自都有守卫且各自被消融证明过**，写进 CONTRACTS 时这一点是有底的。",
+      "**季报支持一并登记进 CONTRACTS**：TASK-001/004 定的期次类型、期末月、累计前缀，以及「季报每年 2/12 篇，此前静默消失」这个背景。",
+      "🔴 **部署闸（Leader 2026-08-12 裁决，dev-agent-52 提醒落盘）**：\n\n**TASK-004 完成之前，不得执行计划 Step 9 的端到端部署**（`bash scripts/ops/deploy.sh` + `launchctl load ~/Library/LaunchAgents/com.newthinker.atlas.hestia-ingest.plist`）。\n\n**理由**：独立 reviewer 的 D6 论证的真正对象是**部署之后**的行为 —— 季报若「能被发现但抽取不了」，会在 `MaxPages` 窗口内（约 2 个月）**每天三次持续失败**，把退出码这个唯一报警通道淹掉约 4 个月/年。该代价**只在管线真的跑起来时才付**。\n\n⚠️ Leader 最初把这条写成了「TASK-001 与 TASK-004 必须同一分支、一次合入 master」——**那是把「不要部署中间态」误写成了「不要合入 master」**，两者差得很远（且后者会切断 TASK-010 的依赖链）。合入 master 无害且必需；**部署才是那条线**。\n\n**本任务的动作**：① 在 `CONTRACTS.md` 里记下这条闸；② 交付时**不执行** Step 9 —— 那一步由 Leader 在归档前亲自执行。\n\n✅ **闸已满足（2026-08-13）**：TASK-004 已 `verified`（test-agent-26 判 8/8）⇒ Step 9 的前置条件解除。**但动作②不变** —— Step 9 仍由 Leader 执行、不属本任务；`CONTRACTS.md` 里这条闸要**如实记成「已满足的历史约束」**，不要写成仍然生效，也不要因为已满足就删掉它（它记录的是「为什么当时不能部署」，那个理由本身仍然有效）。\n\n---\n\n🔴 **订正（2026-08-13，test-agent-26 在验 TASK-008 时发现同一写法的结构性问题，Leader 已实测确认并前移到本任务）**\n\n原文写的是「`gofmt`/`vet` 空」，**未限定范围**。**这在存在历史遗留的目录里是任何任务都不可能满足的要求**：\n\n```\nGOTOOLCHAIN=local gofmt -l ./cmd/atlas/ ./internal/hestia/\n  cmd/atlas/backtest_test.go      ← 历史遗留，base 076998be 上就未格式化\n  cmd/atlas/crisis_test.go        ← 同上\n```\n\n这两个文件**不在本任务 `writes` 里，你去改反而越界**。\n\n⇒ **本条判据改为**：\n\n- **`gofmt -l <本任务实际改动的文件>` 为空**（不是 `-l <整个目录>`）\n- `go vet ./...` exit 0 · `go build ./...` exit 0 · `go test ./... -count=1` 全绿 · `-race` 绿\n- 🔴 **取退出码不要跨管道**（`cmd | tail; echo $?` 取到的是 `tail` 的 0，\n  **系统性报成功**）：一律 `cmd >file 2>&1; echo $?` 再看文件\n\n⚠️ **为什么这条要前移而不是等验证时再说**（test-agent-26 的原话）：\n「本次没造成损害，是因为我去核了 base。**若验证者不核 base，会把一个历史包袱记到当前交付头上**\n—— 而那看起来会完全像一次尽职的 reject。」\n\n**`backtest_test.go` / `crisis_test.go` 的格式化另开 chore 处理**（dev-53 的理由，采纳：\n「混进来会让『这是历史遗留』这个事实被我的提交掩盖」），**不属本任务**。\n\n**端到端手工验收（计划 Step 9）由 Leader 在归档前执行，不属本任务 DoD。**"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:05Z"
+  },
+  "assigned_to": "dev-agent-52",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "verify_baseline": {
+    "head": "b6b13a4ac3ab314ac63e45e2170a8488e0fd4204",
+    "discovery_sha256": "231c712e1cfbd557509770988b6df75cb25ca81fabd91cd03b0eb6b1428ae3aa",
+    "at": "2026-08-13T00:56:35Z"
+  },
+  "verifier": "test-agent-26",
+  "fix_items": [
+    "🔴 **CRITICAL-1 — 排班守卫不限定作用域**（`cmd/atlas/hestia_test.go` 的 `plistIntsUnderKey` 与 `TestHestiaPlistSchedulesThreeTimes`）。\n\n它在**全文档**范围数 `<key>Hour</key><integer>N</integer>` 与 `<key>Minute</key>`，再**按下标**把两个独立列表配对；**从不断言**这些整数位于 `StartCalendarInterval` 之下，也不断言 Hour/Minute 出自同一个 `<dict>`。\n\n**证据（Leader 与 qa-agent-14 各自实跑）**：`grep -rn 'StartCalendarInterval' --include='*.go' .` 全仓**只命中一行注释（搜 `本条是我自己踩出来的`），零断言**。\n\n**变异实测（Skeptic lens，隔离副本）**：M1 键名打错一字母 → 断言**全绿**、`plutil -lint` OK；M2 Hour/Minute 跨 dict 错配（实际排班变成约 86 次/天）→ **同样全绿**。\n\n**后果与该测试自述要防的完全相同**：launchd 忽略未知键 ⇒ job 永不唤起 ⇒「装得上、`launchctl list` 看得见、日志目录空着，而一切看起来都正常」。**这是本 Sprint 第四个假通过，且就在为修第三个而写的那条测试里。**\n\n**修法**：像 `plistEnvKeys` 那样限定作用域 —— 先认出 `StartCalendarInterval` 后面那个 `<array>`，逐 `<dict>` 收成对的 `{Hour, Minute}` 返回 `[][2]int`，缺任一字段即 `require.Fail`。**验收判据：M1 必须红在「找不到该键 ⇒ 0 个 interval」，M2 必须红在「dict 缺字段」——请贴出两次失败输出的具体那一行。**",
+    "**CRITICAL-1 配套** —— 补 `internal/hestia/CONTRACTS.md` 里那张「两道守卫各管一半」的表（搜 `删掉整个排班块`）。**它只列了「删掉」，读者会据此以为改名也被守着。** 请把「键名被改」这一行补进去，并写明加固前它是绿的。",
+    "**WARNING-3 的文案半**（行为不改）：\n\n① `cmd/atlas/hestia.go` 的 `--force` flag help（搜 `bypass the article_id idempotency key`，**qa-agent-14 复跑确认在 :72-73，不是我先前说的 :60**）——现在写的是 `use after changing thresholds`，而 `--force` **穿不透第三层幂等**：同篇 `published_at` 不变 ⇒ 恒判 `Duplicate` ⇒ `refreshArticleID` **只刷 `article_id`，新抽 Values 一个不写**，返回 nil、退出码 0。请点名「Duplicate 期次的重抽取值会被丢弃」。\n\n② 更正 `CONTRACTS.md` 里「M1c 标定 `MagnitudeRanges` 后重跑已入库期次**有出路**」那句（搜 `有出路`）——**Architect lens 判它为假，Leader 复核成立**：该取舍在 `refreshArticleID` 自己的注释里已登记（「上线 rule@v2 后回填重跑历史是必然操作……而 Save 返回 nil，运维看到『N 期处理完毕、零错误』」），但 `--force` 是**第一个会批量触发它的调用方**。",
+    "**WARNING-4 — `ingest` 没有 cwd 守卫**（`cmd/atlas/hestia.go`）。\n\n`status` 有（`internal/hestia/status.go` 的 `RenderStatus` 会打印解析后的绝对路径），**而 `ingest` 完全没有**。`NewStore` 先 `MkdirAll` 再建库 ⇒ 错误 cwd 下 `hestia ingest` 会**新建空库 → 翻满 MaxPages → 全量入库 → 逐期打印正常 → 退出码 0**，真库停在旧数据无任何提示。\n\n**修法**：`openHestia` 返回解析后的绝对路径，两条 `RunE` 各打一行。",
+    "🔴 **本条修复自身的纪律（WARNING-2 的教训，别在修它的过程中再犯）**：写进注释/CONTRACTS 的引用**一律不要用 `file:line`**，改用**符号名 + 字串锚**（如「`discover.go` 的 `Discover` 判停分支（搜 \"判据是 article_id\"）」）。\n\n理由：**注释里的 `file:line` 就是注释版的 `HEAD`** —— 会随任何上游编辑静默漂移，**而漂移之后它仍然指向某个存在的东西**。本 Sprint 实撞：`ingest_test.go` 里一个坐标漂到了**它自己的反驳**上。\n\n⚠️ 而我给你的上一版清单里**自己就带了两个过期行号**（`hestia.go:60` 实际是 `:72-73`；`status.go:24-35` 实际是 `:23-31`+`:32-36`）——**是 qa-agent-14 复跑抓出来的**。这条清单自己踩了它要修的那个坑。"
+  ],
+  "reason_class": "task_defect"
+}

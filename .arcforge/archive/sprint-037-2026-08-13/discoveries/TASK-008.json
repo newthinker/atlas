@@ -1,0 +1,95 @@
+{
+  "task": "TASK-008",
+  "title": "T6：cobra 装配（atlas hestia ingest / status）",
+  "by": "dev-agent-53",
+  "key_findings": [
+    "🔴 **我在自己写的注释里放了一条错的机制解释，靠实测抓了出来**。我先写下「cobra 的 SilenceUsage 沿命令链查找，三个都显式写是为了不依赖继承」——听起来完全合理，我差点就那样交了。实测：把 `hestiaStatusCmd` 那行去掉、**只留父命令 `hestiaCmd` 上的**，跑 `hestia status --hestia-config /nonexistent/nope.yaml` **仍打出完整 13 行 usage**。⇒ **cobra 判的是「被执行的那个命令」或「根命令」，不查中间祖先**。所以两个叶子命令各自设**不是防御性冗余，是必需**；而 `hestiaCmd` 那行才是真正的冗余（它没有 RunE、走不到出错路径）。**结论没变、理由整个换了** —— 注释已按实测改写，并把这次对照记在里面。",
+    "**D4 实测复现并量化**：改动前 `atlas crisis status --crisis-config /nonexistent/nope.yaml` 输出 **13 行**，其中只有第 1 行是真正的错误，其余 12 行是 usage；**全仓当时没有任何命令设过 SilenceUsage**（`grep -rn 'SilenceUsage\\|SilenceErrors' cmd/ internal/` 无结果）。接上之后 `hestia status` 同样场景**只剩 1 行程序输出**（另一行 `exit status 1` 是 `go run` 自己打的）。对照组：`crisis` 仍是 13 行 —— **确认没有波及**，这正是 DoD 要求「不动 rootCmd」的那半。",
+    "**`gofmt -l cmd/atlas/` 无法做到空，而那不是我造成的**：`backtest_test.go` 与 `crisis_test.go` 在 **master 版本上就未格式化**（我用 `git show master:<file>` 取出原版单独跑 gofmt 核实过，两份都被标记）。它们不在我的 `writes` 里，我没有动。**我的两个文件 gofmt 干净。** ⇒ DoD non_functional[1] 那句「`gofmt -l cmd/atlas/` 空」按字面不可达，除非越界改他人文件。",
+    "**AD-6 那个坑如期命中，且我这次是净正向**：`dev_done` 门禁 DENY（整包 75.5% < 80%）。按 DoD 指示**没有自行调 config**。文件级：**hestia.go 自身 83.3%（25/30），高于阈值**；整包 75.41% vs 排除我文件后的历史基线 75.23% ⇒ **+0.18pp**。⇒ 门禁卡的是 cmd/atlas 的历史欠账，不是本次交付。",
+    "**补那条 ingest 用例不是为了凑覆盖率，是补 DoD 的真实缺口**：boundary[0] 要求「配置文件不存在/非法时错误要传播到退出码」，而我最初**只测了 status**。两条 RunE 各自调一次 `openHestia`，是两条独立返回路径 —— 只测 status 时 `runHestiaIngest` 的错误分支一行都没执行过。而 **ingest 才是 launchd 的入口**：配置错却退 0，会让「每天三次静默不干活」看起来一切正常。",
+    "**`db_path` 不在这一层解析**（DoD functional[1]，reviewer D7 的裁决）。判据故意用「源码不 import `path/filepath`」而不是比对输出：`RenderStatus` 自己就会解析，所以**从输出上看不出这一层有没有多解析一次** —— 那正是它容易被悄悄加进来的原因。消融 M2（在本层加 `filepath.Abs`）确认只红这一条。",
+    "**关于 `cmd/atlas` 覆盖率下滑，我要更正一处对我的归因**。Leader 说「从 sprint-023 的 75.9% 跌到 75.1%，跌幅正好是新增了 30 条只覆盖 21 条的代码所致，这次有你一份」——那是基于我**中途**那版快照（21/30 = 70%）说的，已过期。实测最终态：**排除我的文件后基线是 75.23%**，而 sprint-023 是 75.9% ⇒ **那 0.67pp 的下滑发生在我之前、与我无关**；我的文件把整包从 75.23% 抬到 75.41%（**+0.18pp**）。⇒ 「这个包在变差」属实且值得记，但**本次交付是净正向的**，我不接受那半句归因——不是推卸，是那个数字现在可以复算。"
+  ],
+  "decisions": [
+    {
+      "decision": "三个命令都显式设 SilenceUsage，但注释里把两个叶子标为**必需**、父命令标为**冗余**。",
+      "rationale": "实测确定 cobra 只看「被执行命令」与「根命令」。若笼统写「三个都设是为了保险」，后人做清理时可能把叶子上的删掉留父命令的（看起来更 DRY）——那会静默恢复 12 行 usage。把哪一行承重、哪一行不承重分开写明，是让后人删对的唯一办法。"
+    },
+    {
+      "decision": "不动 `main.go` 的 rootCmd。",
+      "rationale": "DoD 明确要求，且实测确认动它会波及 crisis 等全部子命令的现有测试。代价是每个 hestia 叶子命令都要自己设一行 —— 这个代价换的是「本次改动的爆炸半径严格限制在 hestia」。已用 crisis 对照组（仍 13 行）证明未波及。"
+    },
+    {
+      "decision": "不修 `backtest_test.go` / `crisis_test.go` 的 gofmt 问题，只报告。",
+      "rationale": "两者在 master 上就未格式化、不在我的 writes 里。顺手 `gofmt -w` 会让我的提交混入两个与本任务无关的文件，且掩盖「这是历史遗留」这个事实。DoD 那句按字面不可达，我按「不越界」处理并显式申报。"
+    },
+    {
+      "decision": "cmd 层不碰网络：ingest 只测配置失败这一条路径。",
+      "rationale": "计划 1321 行明确「这一层只做装配，ingest 的真实行为已在 internal/hestia 测过」。配置正确的路径会真的发 HTTP（NewPBOCFetcher），在 cmd 层测它既慢又脆，且与 internal/hestia 的端到端测试重复。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia.go（新建）",
+    "cmd/atlas/hestia_test.go（新建）",
+    "cmd/atlas/hestia_test.go（返工追加 38 行 flag 绑定守卫，**作者 dev-agent-52**）"
+  ],
+  "interfaces_exposed": [
+    "atlas hestia ingest —— launchd 入口，--force 绕过 article_id 一级幂等键",
+    "atlas hestia status —— 打印近 10 期观测与 pending",
+    "--hestia-config（hestia 的持久化 flag，默认 configs/hestia.yaml）",
+    "三个 hestia 命令均设 SilenceUsage=true；**未设 SilenceErrors**（错误仍要进 err.log）",
+    "契约：db_path 原样传给下游，绝对路径解析归 hestia.RenderStatus"
+  ],
+  "verification": {
+    "anchor": "全部数字采自最后一次改动之后的同一棵树。交付提交 **d86de295b5405242c445d712fa7281c0a66dca94**（父 076998b），已实测单独拿出来跑：全量 64 包 ok / 0 FAIL。",
+    "file_sha256": {
+      "cmd/atlas/hestia.go": "eb6ce9d67c2ed98e",
+      "cmd/atlas/hestia_test.go": "f762ae92843de138"
+    },
+    "suite": "go test ./... -count=1 → **64 个包 ok / 0 FAIL**（本 Sprint 第一次全量，计划 Step 6 要求）",
+    "build_vet": "go build ./... exit 0；go vet ./... exit 0、无输出",
+    "gofmt": "我的两个文件为空；⚠️ cmd/atlas/ 下 backtest_test.go 与 crisis_test.go **在 master 上就未格式化**，不在我 writes 内，未动（见 key_findings 第 3 条）",
+    "coverage": "**门禁已由每任务字段 `coverage_floor=75` 解开**（我填；`in_progress` 下只有 dev 能写该字段）。整包 75.41% 截断为 75 ⇒ 门禁判 `75 < 75` = false ⇒ 放行。不需动全局 config、不需 AD 记录。\n\n文件级（Leader 追加的判据，见 notes_for_leader）：**cmd/atlas/hestia.go 83.3%（25/30 语句）**。整包含我的改动 75.41%（1006/1334）；**排除我的文件 75.23%（981/1304）** ⇒ 我的改动 **+0.18pp 净正向**。\n\n**返工后复测（提交 f4d6017）**：整包 75.41%（1006/1334）、hestia.go **83.3%（25/30）** —— 与返工前一致（新增的 38 行全在 _test.go，不计入被测语句）。`coverage_floor=75` 仍在任务文件里。",
+    "manual": "hestia --help 与 ingest --help 实跑核对：两个子命令都在，--force 说明写明「改了阈值之后用」",
+    "ablation": {
+      "protocol": "5 轮 + 1 轮机制验证，全部在隔离 worktree 内跑；每轮 cmp 验证变异生效 + go vet 有效性闸 + 还原后 cmp 校验（全部 YES）。主工作区零改动。",
+      "control": "未变异对照组 0 条红",
+      "M1_三个命令都去掉SilenceUsage": "→ TestHestiaCommandsSilenceUsage",
+      "M2_在本层解析绝对路径": "→ TestHestiaCmdDoesNotResolveDBPath（精确，无连坐）",
+      "M3_ingest去掉--force": "→ TestHestiaFlags",
+      "M4_不注册到rootCmd": "→ TestHestiaCommandIsRegistered",
+      "M5_吞掉配置错误": "→ 5 条红（SilenceUsage 的行为侧 + StatusFailsOnBadConfig + ConfigErrorNamesThePath 两个子测试）",
+      "机制验证_只在父命令设SilenceUsage": "**行为侧仍打 13 行 usage** ⇒ 证明 cobra 不查中间祖先，两个叶子各自设是必需而非冗余。这一轮验的是**我写在注释里的理由**，不是断言本身。"
+    },
+    "uncovered_disposition": {
+      "判据": "Leader 两次给过百分比闸值（coverage_floor=76、hestia.go ≥90%）并**均由其本人实测推翻**：76 结构上不可达（我的文件仅 30 条语句，即使 100% 覆盖整包也只到 75.8%）；90% 隐含「把 fetcher 改成可注入」这个从未要求的重构。**最终判据是逐条说明，不设百分比线。**",
+      "runHestiaIngest_3条": "**真实依赖装配缝，单测本就不该覆盖**：主路径构造真实 `hestia.NewPBOCFetcher` 并发 HTTP。要覆盖就得先把 fetcher 改成可注入——那是本任务范围外的重构（计划 1321 行：这一层只做装配）。⇒ 由计划 Step 9 的端到端手工验收覆盖。**我判断不该为覆盖率做那个重构，也没有做。**",
+      "runHestiaStatus_2条": "`RecentObservations` / `RecentPending` 的**查询中途出错**分支。要可靠触发得在行迭代中途制造连接故障，会引入时序 flake。⇒ 与本文件既有惯例一致（`runHestiaStatus` 主路径已测，未覆盖的恰是错误分支）。",
+      "已补掉的2条": "openHestia 的 NewStore 失败分支（补 TestHestiaStatusFailsWhenStoreCannotOpen 后 openHestia 达 100%）、runHestiaIngest 的配置失败分支（补 TestHestiaIngestPropagatesConfigError 后该函数 0%→50%）。**两条都不是为凑数补的**：前者是 launchd 首次部署最常见的失败（cwd 不对导致 db_path 解析错），后者是 DoD boundary[0] 我最初只测了 status 的真实缺口。"
+    }
+  },
+  "notes_for_leader": [
+    "🔴 **`gofmt -l cmd/atlas/` 按字面不可达**：`backtest_test.go` 与 `crisis_test.go` 在 master 上就未格式化（已用 `git show master:<file>` 单独核实），不在我 writes 内。我没有动它们。若你要清掉，建议单开一个 chore 任务，别混进本次交付 —— 混进来会让「这是历史遗留」这个事实被我的提交掩盖。",
+    "**AD-6 那条处置已由你自己作废**，改用每任务 `coverage_floor`（task-completed.sh:401-405 读它）。我已填 `coverage_floor=75`，门禁放行。你先后给的 `76` 与 `≥90%` 两个闸值也都由你本人实测推翻，最终判据是**逐条说明**，见 verification.uncovered_disposition。",
+    "**给 TASK-009（配置实例/plist/端到端验收）的提示**：`configs/hestia.yaml` 现在必须含 `storage.db_path`（TASK-002 起必填），且 **plist 的 WorkingDirectory 决定相对 db_path 解析到哪** —— status 会打印解析后的绝对路径，首次部署时拿它核对比读配置可靠。",
+    "**一处归因更正**：你说 `cmd/atlas` 的下滑「这次有你一份」，那是基于我中途那版（21/30=70%）。最终态实测：**排除我的文件后基线 75.23%**，sprint-023 是 75.9% ⇒ 那 0.67pp 与我无关；我的文件是 **+0.18pp**。包在变差属实，但本次交付净正向。",
+    "⚠️ **`teammate-idle` 的解锁文案与任务级禁令冲突**：它写「门禁不过则先修测试/覆盖率」，而 DoD non_functional[0] 明令「不要自行调 config、停下来告诉我」。我按 DoD 停手、没照 hook 做。**这是我第二次撞上这个形状**（记忆里记过一次），对不知情的实例有诱导性，建议进 final-report。",
+    "**返工成因你已如实记了，我只补一句**：dev-52 把守卫写好留在工作区却没提交、验证者按 fix_items 逐条核而未计入 —— 两者都按机制正确行事。⇒ 真正的缺口是「QA 第二轮的发现进不了 fix_items」（`in_progress` 时 leader 写不了任务文件），而不是任何人的疏漏。这与 `coverage_floor` 只有 dev 能填、`discovery` 指针只有 verified 前能挂，**是同一个结构陷阱的第三个实例**：修复需求在交棒之后才暴露，而交棒已经收走了写权。"
+  ],
+  "rework": {
+    "round_1": {
+      "trigger": "QA 第二轮报出 CRITICAL：--force / --hestia-config 的 flag 绑定完全没有守卫。TestHestiaFlags 只断言 flag 存在，而那正是失效的那一条 —— 把 BoolVar(&hestiaForce,…) 换成 Bool(…)，flag 仍在、仍叫 force、--help 一模一样，只是不再写回变量 ⇒ --force 静默失效且 exit 0，与「今天真的没有新报告」逐字同形，落在设计上唯一的报警通道之外。",
+      "🔴 provenance": "**那 38 行守卫的作者是 dev-agent-52，不是我（dev-agent-53）**。它在 QA 报出该 CRITICAL 后就写好并留在工作区未提交；Leader 判定本次返工的动作是「把它提交到本任务名下」而非重写。我读过全文、按 fix_items 的判据核过、在**真实提交**上复跑了 M13/M14 后提交（commit f4d601753ac323ca37d5757da5a547493e3de090，纯新增 38 行、0 删除）。commit message 里也写明了作者。⇒ transitions.jsonl 只记 by 不记「谁写的代码」，不写清后人会从 by=dev-agent-53 反推成我的。",
+      "为什么它是 CRITICAL 而非 SUGGESTION": "--force 是 CONTRACTS 写明的**唯一恢复出口**（调了阈值想重跑已入库的期次）。它的失效形态与正常「无新报告」逐字同形且 exit 0 ⇒ 退出码 + err.log 这条唯一报警通道**看不见它**。",
+      "我做的核对": "① 读工作区那 38 行全文，确认判据是**肯定式**（解析后变量等于传入值），而非「flag 存在」；② 确认两个 flag 拆成两个子测试（M13/M14 才分得开）；③ 确认改全局变量但有 t.Cleanup 还原、未用 t.Parallel；④ 提交前 git diff --stat 确认是纯新增 38 行、无删除，未卷入他人在途改动。",
+      "验收判据实测（在真实提交 f4d6017 上跑，非未提交文件）": {
+        "对照组": "cmd/atlas 与 internal/hestia 均 ok，全量 64 包 ok / 0 FAIL",
+        "M13 BoolVar→Bool": "**FAIL: TestHestiaFlagsBindToVariables/--force_绑到_hestiaForce**（hestia_test.go:559，`Should be true`）；**同测试的 --hestia-config 子测试 PASS** ⇒ 不误伤兄弟",
+        "M14 StringVar→String": "**FAIL: TestHestiaFlagsBindToVariables/--hestia-config_绑到_hestiaCfgPath**（hestia_test.go:567，`Not equal`）；**--force 子测试 PASS** ⇒ 不误伤兄弟",
+        "两轮均单独做、未合并": "合并做的话「红了」分不出是哪个绑定失效（G31 在验收判据上的应用）"
+      },
+      "⚠️ 我自己在这一轮差点报出假结论": "**第一次跑 M13 时 perl 模式没匹配上**（--force 的帮助文本已被 TASK-009 的返工改过，我照旧文本写的模式），文件**一个字节没变**而测试自然全 PASS。我当时已经打印了「vet 通过（变异有效）」——**那句话是错的**。是 diff 输出为空让我发现的。⇒ 若没发现，我会报出「M13 下守卫仍绿 ⇒ 这个守卫无效」，**那是对 dev-52 的一次错误指控**。教训：变异后必须 `cmp -s` 校验**变异确实生效**，「测试没红」有两种成因（守卫无效 / 变异没生效），二者结论相反。"
+    }
+  }
+}

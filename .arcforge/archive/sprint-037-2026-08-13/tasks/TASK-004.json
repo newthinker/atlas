@@ -1,0 +1,60 @@
+{
+  "id": "TASK-004",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "季报抽取：periodAlt + cumulativePeriods（两处，缺一即 no-op）",
+  "description": "人类定案「季报支持」的第三环（响亮失败点的末端）。\n\n🔴 **原标题称 `cumulativePeriods` 是「唯一硬卡点」，独立 reviewer 实测推翻**：`extract.go:187` 的谓词是 `cumulativePeriods[m[1]] && m[2] == currencyRMB`，而 `m[1]` **只可能是 `profiles.go:62` 的 `periodAlt` 产出的分支之一** ⇒ 往 `cumulativePeriods` 加一个 `periodAlt` 永远产不出的键 = **完全 no-op**。\n\nreviewer 的四格实测：\n```\n现状                     候选=1 [3月份/人民币]   命中=0 → 报错\n只改 cumulativePeriods    候选=1 [3月份/人民币]   命中=0 → 报错  ← 与现状逐字相同\n只改 periodAlt            候选=3                命中=0 → 报错\n两处都改                  候选=3                命中=1 → 抽到值\n```",
+  "wave": 3,
+  "dependencies": [
+    "TASK-001",
+    "TASK-010"
+  ],
+  "context_from": [
+    "TASK-001",
+    "TASK-010"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go",
+    "./internal/hestia/parse.go",
+    "./internal/hestia/testdata",
+    "./internal/hestia/ingest_test.go",
+    "./internal/hestia/parse_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**真实样本事实（reviewer 已 curl 核实，直接用，不必重抓）**：一季度正文累计前缀是 **`一季度`**，前三季度是 **`前三季度`**；一季度正文 8 个板块、`sectionRules` 七个 keyword 全命中 ⇒ **`detectExtractor` 判 `rule@v2`，与年报同构**。若你的实测与此不符，**停下来告诉我**。\n\n**两处都要改**：`profiles.go:62` 的 `periodAlt` 加两个分支、`profiles.go:70` 的 `cumulativePeriods` 加两个键。",
+      "**端到端跑通**（本任务唯一的真验收）：从真实季报 index 快照出发，`scanPage → parsePeriod → Parse → extractFields → Validate` 全链路产出非空 `ValidationReport`。**贴出实跑输出**。\n\n同时**移除 TASK-010 在 `checkPeriodTypeSupported` 里加的季度拒绝**（那是中间态的自解释，本任务落地即应撤掉）。"
+    ],
+    "boundary": [
+      "🔴 **交替顺序陷阱（reviewer C2 实测，现有守卫抓不到）**：`periodAlt` 写成 `…|三季度|…` 时，Go 的 leftmost 规则会对 `前三季度人民币贷款…` **从「三」起匹、捕获到 `三季度`**，而 `cumulativePeriods[\"前三季度\"]` 查不到 ⇒ 报错；若为了让它绿而把 `三季度` 也登记进 `cumulativePeriods`，**等于默认「三季度」是累计口径，而那个判断没有任何样本支持**。\n\n⚠️ `profiles_test.go:163` 的 `TestProfileAlternationsHaveNoPrefixPairs` **只查前缀对**（`strings.HasPrefix`），而这里是**后缀**关系，两个变体它都放行。\n\n**两条都要做**：① 用真实前三季度正文断言 `flowRE` 捕获组 `m[1]` **逐字等于** `前三季度`（不是「能匹配」）；② 把 `TestProfileAlternationsHaveNoPrefixPairs` 的判据从 prefix 扩到 **substring**（改一行，两个方向都覆盖）。",
+      "**外币孪生句必须仍被正确区分** —— reviewer 实测真实一季度正文里**确实存在**（`一季度外币存款增加703亿美元`、`一季度外币贷款增加329亿美元`）⇒ **这条不会落到「未观察到」分支，必须真写用例**。",
+      "🔴 **顺手更正 `ingest_test.go` 里一句已过期的注释**（dev-agent-52 发现、dev-agent-53 实测确认，Leader 判定由本任务改因为它与你的代码改动天然同处一次改动）。\n\n**注释声称**：「实测 `Parse` 对这两份直接报 `unrecognized report title`」\n\n**`master 0e2c6fc` 实测现在报的是**：\n```\nhestia: period_type q1 is not supported yet (title \"2026年一季度金融统计数据报告\")：\n  季报抽取侧尚未接线——profiles.go 的 periodAlt 只认「全年|上半年|N月份」、cumulativePeriods\n  只认「全年|上半年」，放行会让期内累计句整条不命中而产出一份看起来正常的空壳。\n  **由 M1b-4b 的 TASK-004 接上后解除本分支**\n```\n\n⇒ **结论仍成立**（季报正文仍进不了 ingest 链路），**但理由整个换了** —— 不再是「`parse.go` 的 `titleRE` 没跟着放宽」（TASK-010 已放宽），而是它加的**显式拒绝分支**。\n\n⚠️ **这是「结论对但理由错」中危害较大的形态**：过期的理由**指向一个已经不存在的机制** —— **照着它去找 `titleRE` 会扑空**，而真正要拆的是那条 `not supported yet` 分支。\n\n⇒ 你拆那条分支时**一并更正这句注释**。那条错误信息里自己写着「由 M1b-4b 的 TASK-004 接上后解除本分支」—— 代码与注释同处一次改动，不会漏。"
+    ],
+    "error_handling": [
+      "**「一季度」与「前三季度」各要一条断言**（reviewer D8 已替我们判断）：两者形态相同（都是 `periodAlt` 的独立分支 + `cumulativePeriods` 的独立键），**但 `前三季度` 有上面 C2 的后缀陷阱而 `一季度` 没有** ⇒ 不能共用一条。"
+    ],
+    "non_functional": [
+      "🔴 **消融必须做成 2×2**（reviewer B5：原判据「删 `cumulativePeriods` 确认转红」**四格里三格红，不携带信息** —— 正是 G31 那个形状）：**分别单删两处**，要求两次的失败**信息不同** —— 删 `periodAlt` 时**候选数会掉**（3→1），删 `cumulativePeriods` 时**候选数不变而命中为 0**。**把两次的候选数写进 discovery**，这样消融才区分得开哪一处承重。",
+      "覆盖率不低于 93.2%；`gofmt`/`vet` 空；整包 `-count=1` 与 `-race` 全绿。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:04Z"
+  },
+  "assigned_to": "dev-agent-53",
+  "verify_baseline": {
+    "head": "fd6a24cfcce8df205a09df057613a9314bc8f917",
+    "discovery_sha256": "c73166acb51060663b36e463725d66a3e692659d2a71a7e86c4af0292d810ab3",
+    "at": "2026-08-12T17:09:30Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-004.json"
+}

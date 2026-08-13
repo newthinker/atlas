@@ -1,0 +1,56 @@
+{
+  "id": "TASK-002",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "T1：Config 补 storage 段",
+  "description": "计划 `hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 的 **Task 1（103–242 行）**，请按其 Step 1–N 执行。本任务只服务 T6（cmd 层开库），**不卡 T3**——`Ingest` 收到的是已开好的 `*Store`（计划 72–74 行已核实）。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/config.go",
+    "./internal/hestia/config_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 1（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 103–242 行）交付 `StorageCfg{DBPath string}` 与 `Config.Storage` 字段，YAML 键 `storage.db_path` 能被 `LoadConfig` 装载并断言。",
+      "**`db_path` 缺失或空必须被 `validate()` 拒**，错误信息含键名。"
+    ],
+    "boundary": [
+      "⚠️ **计划 109 行明确警告**：加必填字段会让既有测试红，**但不是编译错误**（Go 允许 YAML 缺键）。`config_test.go` 里有 **5 处** `writeConfig` 构造的 YAML 全部要补 `storage` 段。**先加校验、跑测试、按红的逐个补**。\n\n⚠️ 同时注意 Sprint 036 的 T6 陷阱仍在：含 `caliber_exemptions` 的 YAML 必须写 `period_types`，否则 validate 抢先返回、报错理由指向 PeriodTypes 而不是你要测的东西。"
+    ],
+    "error_handling": [
+      "`db_path` 写成相对路径时**不在 `validate` 里解析成绝对路径**（约束 C8：按进程 cwd 解析，解析发生在 cmd 层）。写一条测试钉住「装载后拿到的就是原样的相对路径」。"
+    ],
+    "non_functional": [
+      "既有五处 `writeConfig` 补完 `storage` 后，**Sprint 036 的全部 config 测试必须仍绿**（尤其「YAML 没写的阈值保持 DefaultThresholds 不退化为零值」那条）。",
+      "`gofmt`/`vet` 空、整包 `-count=1` 全绿、覆盖率不低于 93.2%。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:04Z"
+  },
+  "assigned_to": "dev-agent-53",
+  "questions": [
+    {
+      "q": "【流程阻塞，非 done_criteria 疑问】交付协议（你在 spawn prompt 里定的 wave1 方案 C）是「我提交 → 告诉你 sha → 你 git merge --ff-only → 我再 transition dev_done」。我这边全部就绪：分支 task/TASK-002 @ f9136e298efdc82b61640fdaac31c05364530455，已 rebase 到 2e93115b 故可 ff（原 sha bcbcdad2 因 TASK-003 先 merge 致 master 前移而作废，已重采全部自证数字）。但 master 仍是 2e93115、NOT-MERGED，主工作区 grep -c StorageCfg internal/hestia/config.go = 0。我已发 3 次 inbox 通知无回应，teammate-idle 已催 3 次。我不 transition dev_done 是因为门禁在主工作区跑，会在一棵没有我代码的树上 go test 并成功、产出假绿；我也不自行 merge，因为隔离协议写明合并回 master 由 Leader 串行执行。请二选一：(A) 执行 git merge --ff-only task/TASK-002，回我一声，我随即转 dev_done 并拆 worktree；(B) 若你想改协议（例如授权我自己 merge，或让 verifier 直接验分支 sha 而不要求先进 master），请明示新做法。答复后我会自己把状态转回 in_progress 继续。",
+      "asked_at": "2026-08-12T15:50:00Z",
+      "answer": "【(A) 已完成，但有一个你必须知道的错位 —— 是我造成的】\n\n**你的代码已经在 master 里了，只是 sha 不是你以为的那个。**\n\n时序：你第一次报 `bcbcdad2` 时我正在核实，随后我用**三方 merge**（不是 ff-only，因为 master 已被 TASK-003 推进）把 `bcbcdad2` 合了进去 —— 而**与此同时**你 rebase 出了 `f9136e29`。我合完才读到你的 rebase 通知。\n\n⇒ `git merge-base --is-ancestor f9136e29 master` 确实是 **NOT-MERGED**，你的判据没错；**但那个判据在这里指错了对象** —— 我实测两个 sha 的交付文件内容**逐字符相同**：\n\n```\nmaster 的 config.go      sha256 352f16efc37d0bd2…\nf9136e29 的 config.go    sha256 352f16efc37d0bd2…  ← 相同\nmaster 的 config_test.go sha256 bda2fef7019569b1…\nf9136e29 的 config_test.go sha256 bda2fef7019569b1…  ← 相同\n```\n\n主工作区 `grep -c StorageCfg internal/hestia/config.go` 现在是 **3**（不再是 0）。\n\n⇒ **可以 `transition dev_done --expect-epoch 1` 了**。判据请改用**内容判据**：`grep -c StorageCfg internal/hestia/config.go` 非零，或 `git merge-base --is-ancestor bcbcdad22b20c8437521d575875a7eb65d83b24d master`（那个是真的祖先）。\n\n🔴 **这件事本身值得记**：sha 判据在「内容已合入但经由另一个 sha」时会给出**假的 NOT-MERGED**。你严格执行了协议、判据形式也完全正确，而它仍然指错了 —— 因为它锚的是**载体（sha）**而不是**内容**。我会把它写进结转。\n\n⚠️ **同时向你道歉：你发了 3 次通知、转了 blocked_clarification，而阻塞的是我。** 你的处置全部正确：不自行 merge（隔离协议）、不转 dev_done（会在没你代码的树上假绿）、把阻塞从 inbox 变成文件事实（「丢失的提问 = 静默卡死」）。**那第三步尤其对** —— 我确实是扫到 `blocked_clarification` 才注意到你被卡住的。",
+      "answered_at": "2026-08-12T16:05:00Z"
+    }
+  ],
+  "verify_baseline": {
+    "head": "67249ffb7961aa838f57b4cdfbfef3c94a2ffaaf",
+    "discovery_sha256": "fb1d4224c604d9c6169aa8dd629763a6c05c2200dbe5160f4e8f5773786d0598",
+    "at": "2026-08-12T15:34:28Z"
+  },
+  "verifier": "test-agent-26",
+  "discovery": ".arcforge/discoveries/TASK-002.json"
+}

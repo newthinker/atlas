@@ -1,0 +1,183 @@
+{
+  "task_id": "TASK-009",
+  "title": "T7：配置实例、plist、CONTRACTS 与端到端验收",
+  "by": "dev-agent-52",
+  "at": "2026-08-13T04:10:00Z",
+  "git": {
+    "branch": "master（主工作区直连）",
+    "head": "b6b13a4",
+    "commits": [
+      "1647683 feat: 五件交付物",
+      "f637f7c fix: install-services 守卫改断言安装循环（消融抓出的自身缺陷）",
+      "f55570f fix: plist 时刻改为 spec 定的 15:30/17:30/21:30 + 补排班守卫",
+      "bb825de fix: plist 解析型守卫改为「解析错误即失败」（堵掉能同时骗过两道守卫的构造）",
+      "4e59067 fix(TASK-009): 排班守卫限定作用域 + --force/cwd 文案（QA review_fix，rework_count=1）"
+    ],
+    "note": "返工后自证数字采自 `b6b13a4`（三个返工提交中最后一个），在隔离树上复核。"
+  },
+  "key_findings": [
+    "🔴 **`plutil -lint` 管不了语义，而它「管不了」的那一半正是最静默的** ✅亲验（两次实测，第二次是我真踩的）：① 往 plist 插一个 `no_proxy` 键 ⇒ lint 报 **OK**；② **删掉整个 `StartCalendarInterval` 块** ⇒ lint 仍报 **OK**。第二条是我改时刻时**真的发生过**的——注释与排班数组挨着，一次删除把两者一起带走。⇒ **一个没有排班键的 plist 是合法的 plist，它只是永远不会被唤起**：`install-services.sh` 装得上、`launchctl list` 看得见、日志目录空着，**一切看起来都正常**。⇒ 已补 `TestHestiaPlistSchedulesThreeTimes`，并把「两道守卫各管一半、不可互替」写进 CONTRACTS。",
+    "🔴 **存在一个能【同时】骗过 `plutil -lint` 与我的 Go 守卫的构造，实测确认** ✅亲验：XML 规范不允许注释内出现 `--`，而 **`plutil` 接受它**（仓库里 `aktools.plist` 就有这种注释，`plutil -lint` 报 OK，而 Go 的 `encoding/xml` 与 Python 的 `plistlib` 都拒绝）。⇒ 构造：plist 里放一个含 `--` 的注释、其后放一个真实的 `https_proxy` 键 ⇒ `plutil -lint` **OK**、`plutil -convert json` 读出的 `EnvironmentVariables` 确实是 `[PATH, https_proxy]`，而**旧写法的 Go 守卫（`if err != nil { break }`，静默返回已收集的部分键）PASS**。⇒ 通则：**解析型守卫必须把解析错误当「失败」，不能当「结束」** ——「读到哪算哪」在正常输入上与正确实现**无法区分**，只在被构造的输入上分道扬镳，而那正是它该起作用的时候。已改为 `errors.Is(err, io.EOF)` 才 break、其余 `require.NoError`；同一份输入下守卫红。⚠️ 线索来自 Leader 扫 plist 时 `plistlib` 报错，**不是我自己想到去查的**。",
+    "🔴 **我自己写的守卫里有一条是假的，消融抓出来了**：`TestInstallServicesInstallsHestiaPlist` 原先在**整个文件**里 grep `com.newthinker.atlas.hestia-ingest`。消融 M3 把标签从 `for L in …` 安装循环里删掉、**只留文件头注释里那一行** ⇒ **断言照样全绿，而 plist 从此不再被安装**。已改为截取 `for L in … ; do` 之间那段再断言，并加阴性对照确认截取范围不含注释段。⚠️ **同一条纪律我在 plist 守卫上做对了（用 XML 解析而非子串），在这条上没做** —— 差别不在我懂不懂，在于我只对「被 DoD 点名的那条」上了心。",
+    "🔴 **门禁的覆盖率口径是「declared packages 合并计算」，不是逐包** ✅亲验：`task-completed.sh` 跑的是 `go test $PKGS -coverpkg=<全部声明包>` 然后取 `go tool cover -func` 的 `total:`。本任务 `packages = [./cmd/atlas, ./internal/hestia]`，逐包看是 **75.4% / 93.5%**（前者低于全局闸 80），**合并后是 83.2%** ⇒ 门禁通过，**不需要 `coverage_floor`**。⚠️ 我原本以为「cmd/atlas 75.4% < 80 ⇒ 结构上过不了门禁」，那个判断只在 `packages` **仅含** `./cmd/atlas` 时成立。**这是测量推翻推理的一次。**",
+    "**`plutil -lint` 挡不住代理键** ✅亲验：消融 M1 往 plist 里插一个 `no_proxy`，`plutil -lint` 仍报 `OK`。⇒ 两道守卫各管各的：lint 管 XML 结构，Go 那条管语义。**只有 lint 的话，reviewer C3 说的那个场景（照抄再删两对、no_proxy 留下）会一路绿到运维手上。**",
+    "**`no_proxy` 的位置在各 plist 模板之间不一致** ✅亲验（本任务在 assigned 期间只读复核出、Leader 已采纳进 DoD）：`crisis-daily`/`crisis-intraday-jpy` 里它被 `PATH` 与一段注释同另两对隔开（⇒ 易**漏删**）；`refresh-cnhk`/`prism-daily` 里三者相邻（⇒ 易**删过头**）；`analysis` 一个代理键都没有。⇒ **任何位置性或枚举性判据都不可靠，只能按后缀判**；且**抄模板就抄 `analysis.plist`**，从一份本来就干净的出发比从一份有三个代理键的删起少一整类出错方式。",
+    "**`configs/hestia.yaml` 此前不存在且不在任何任务的 writes 里** 📋转述（Sprint 036 消费者位实测）—— 本任务正式认领它。这意味着在此之前 `atlas hestia` 的默认配置路径指向一个不存在的文件。"
+  ],
+  "decisions": [
+    {
+      "decision": "plist 三时点取 **15:30 / 17:30 / 21:30**（取自 spec，非我自选）",
+      "rationale": "🔴 **我最初自选了 16:20/17:20/09:20，那是错的，已按 spec 改回。** 计划文件 `hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md:1634-1638` 明确写了这三个时刻，1632 行的理由是「每日三个时点覆盖发布窗口与延迟发布，非发布期靠幂等空跑（方案报告 4.1）」。该文件在 hestia 仓、**本仓库读不到**，由 Leader 代读后指出。⚠️ **我给自选时刻的理由（避开既有任务占用的整点半点）经实测不成立**：日历唤起实际占用的是 07:30 / 08:00 / 08:30 / 20:00 / 21:00 / 22:00 / 22:45 / 23:45，而 spec 的三个时刻本来就是空的；且 `analysis` 与 `crisis-intraday-jpy` 用 `StartInterval 1800`，从加载时刻起算、**不对齐日历格**，根本不构成时刻冲突。我自己用 plistlib 逐文件复核过，确认 Leader 的更正属实。"
+    },
+    {
+      "decision": "plist 抄 `analysis.plist`，`EnvironmentVariables` 只留 `PATH`",
+      "rationale": "约束 C6 的正解。hestia 直连央行 —— `NewPBOCFetcher` 给 client 配空 `Transport` 绕开进程级代理，理由是**代理未必在跑**。在 plist 里设代理键不会影响那个 client（它不读环境变量），但会**误导下一个人**以为 hestia 走代理并在别处照此推理。"
+    },
+    {
+      "decision": "plist 守卫用 `encoding/xml` 逐 token 解析 `EnvironmentVariables` 的键，不做子串匹配",
+      "rationale": "DoD 要求精确断言。而这里有一个具体理由：**本文件的注释里大段讨论了代理键**（讲为什么不设、讲三种模板的差异），子串匹配会当场误报。⇒ 只能真去解析那个 dict。"
+    },
+    {
+      "decision": "给 plist 守卫加**阳性对照**：拿真的设了代理键的 `crisis-daily` 跑同一个解析器，必须报出 `no_proxy`",
+      "rationale": "前置锚点（`NotEmpty` + `PATH` 在场）只挡得住**空集**，挡不住「解析出了东西但漏掉代理键」——**一个恒返回 `[\"PATH\"]` 的坏解析器能让全部断言绿**。用真实文件而非合成 XML：合成的只证明解析器能处理我写的那种形状，真实文件才证明它能处理仓库里实际存在的那种（含注释、`PATH` 夹在中间）。"
+    },
+    {
+      "decision": "`configs/hestia.yaml` 不写 `magnitude_ranges` 与 `caliber_exemptions`",
+      "rationale": "前者**有意为空**（区间必须用 M1c 回填分布标定，拍脑袋的代价就是 `deposit_sum_tolerance` 的 ±2%）；后者当前无期次需要豁免。两处都在注释里写明**将来要加时的约束**（尤其 `period_types` 必填非空 —— 留空不等于「全部」，`validate` 会直接拒）。"
+    },
+    {
+      "decision": "CONTRACTS 里两处已过期的旧条目**加前向指针而不是删除或改写**",
+      "rationale": "Sprint 036 的「判停用期次不用 article_id」与「留给 M1b-4b 的一个张力」已被本 milestone 推翻/回答。删掉会让后人读不懂**推翻它的理由**（那段理由需要原文在场才成立）；直接改写则抹掉了「曾经这么认为过」这个事实。⇒ 保留原文 + 标注被推翻 + 指向新一节。这与 Leader 订正 DoD 时用的手法一致。"
+    },
+    {
+      "decision": "**不设 `coverage_floor`**",
+      "rationale": "门禁合并口径实测 **83.2% > 全局闸 80**（见 key_findings），不需要它来放行。设一个 83 的棘轮会在返工/别人改动导致包间比例变化时产生假阻断，而本任务并没有降低覆盖率（只加测试与非 Go 产物）。**若验证者认为该设棘轮，说一声我在 `in_progress` 期间还写得了。**"
+    }
+  ],
+  "files_modified": [
+    "configs/hestia.yaml（新增）：config_version / storage.db_path / discover 三项 / 五个阈值，每个数字带 M0 实测来源，`stock_continuity_max` 明标未经验证",
+    "deploy/launchd/com.newthinker.atlas.hestia-ingest.plist（新增）：三时点、只有 PATH、RunAtLoad=false、日志落 runtime/logs",
+    "scripts/ops/install-services.sh：文件头清单 + `for L in` 安装列表各加一项",
+    "cmd/atlas/hestia_test.go：新增 4 条守卫 + `plistEnvKeys` 解析助手 + import（encoding/xml, os/exec, regexp, strings, internal/hestia）",
+    "internal/hestia/CONTRACTS.md：新增「Sprint 037」整节（+181 行），并给 Sprint 036 两处过期条目加前向指针"
+  ],
+  "interfaces_exposed": {
+    "no_new_exports": "本任务不新增任何 Go 导出物（只加测试与非 Go 产物），两条导出面守卫未受影响。",
+    "contracts_recorded": "CONTRACTS 的 Sprint 037 节记下：一级键三情形 A/B/C + `--force` 是 C 的直接推论；`--force` 穿透两层（B4 已闭合）；判停规则改 `HasArticleInObservations` 并推翻 Sprint 036 那条；两处接缝；季报支持（四种累计期次 + `q1_q3` 不叫 `q3` 的理由 + `articleLinkRE` 不得设位数下界）；修订版「没测过所以不承诺」而非「做不到」；部署闸（已满足但保留）；部署产物三件与 plist 的代理键纪律。",
+    "note_for_step9": "**端到端手工验收（计划 Step 9）不属本任务，由 Leader 在归档前执行**。前置闸已满足（TASK-004 verified）。执行时注意：`deploy.sh` 是整仓 rsync + 排除列表，`configs/` 与 `deploy/launchd/` 都不在排除项 ⇒ 两个新产物会被带到 runtime（✅ 我自己复核过 `deploy.sh:35`，不是只引用他人结论）。"
+  },
+  "verification": {
+    "suite": "`go test ./... -count=1` EXIT=0（隔离树 bb825de 复核）",
+    "race": "`go test ./... -count=1 -race` EXIT=0",
+    "vet_build": "`go vet ./...` EXIT=0；`go build ./...` EXIT=0",
+    "gofmt": "`gofmt -l cmd/atlas/hestia_test.go` 输出为空（按 DoD 订正后的口径：只看本任务实际改动的文件）",
+    "coverage": "门禁口径（`-coverpkg=./cmd/atlas,./internal/hestia` 合并）**83.2%** > 全局 dev_minimum 80 ⇒ 通过，无需 `coverage_floor`。逐包：cmd/atlas 75.4%、internal/hestia 93.5%",
+    "plutil": "`plutil -lint` → OK；`plistlib` 解析：时刻 = [(15,30),(17,30),(21,30)]、`EnvironmentVariables` 键 = [PATH]",
+    "exit_code_discipline": "所有退出码一律 `cmd >file 2>&1; echo $?` 取，**不跨管道** —— 本任务中途踩过一次相关的坑：`cd` 进已被 `git worktree remove` 删掉的目录后继续跑命令，得到一串假的 `EXIT=1` 和一个假的「gofmt 空」（`gofmt` 实际报的是 `no such file or directory`）。已回仓库根目录重采。",
+    "ablation": {
+      "harness": "在 `git worktree add --detach /tmp/chk009 <sha>` 的隔离副本里做，主工作区未碰；收尾 `git worktree remove`。",
+      "M1_往plist插一个no_proxy": {
+        "mutation": "`EnvironmentVariables` 里加 `<key>no_proxy</key><string>localhost,127.0.0.1</string>`",
+        "killed_by": "`hestia_test.go:345` `assert.NotContainsf(lower, \"proxy\")` —— 报 `\"no_proxy\" should not contain \"proxy\"`，且错误信息直接点名是哪个键",
+        "note": "🔴 **同一变异体 `plutil -lint` 仍报 `OK`** ⇒ 证明 lint 挡不住这件事，两道守卫不可互相替代。这正是 reviewer C3 描述的场景。"
+      },
+      "M2_删掉配置的storage段": {
+        "mutation": "`configs/hestia.yaml` 去掉整个 `storage:` 段",
+        "killed_by": "`hestia_test.go:248` `require.NoError(err)` —— `LoadConfig` 返回 `storage.db_path is required`",
+        "note": "DoD 提醒过「漏了 storage 的后果是红的理由指向 db_path 而不是它想测的东西」。本条把 validate 关心的字段逐个断言出来，就是为了让「哪一条没写对」在失败信息里一眼可见。"
+      },
+      "M3_把hestia从install循环里删掉（只留注释）": {
+        "mutation": "从 `for L in …` 列表里去掉 `com.newthinker.atlas.hestia-ingest`，**保留文件头注释那一行**",
+        "result_before_fix": "🔴 **PASS —— 假绿。** 原断言在整个文件里找子串，注释那一行就够它通过了，而 plist 从此不再被安装。",
+        "killed_by_after_fix": "`hestia_test.go:409` —— 失败信息里直接打出截到的安装列表，可见其中没有 hestia-ingest",
+        "why_this_matters": "**这是我自己写的守卫，被自己的消融抓出来是假的。** 同一条纪律（注释里提到 ≠ 生效）我在 plist 守卫上做对了、在这条上没做 —— 差别不在懂不懂，在于我只对**被 DoD 点名的那条**上了心。"
+      },
+      "M4_删掉整个StartCalendarInterval块": {
+        "mutation": "把 `<key>StartCalendarInterval</key>` 到 `</array>` 整块删掉",
+        "plutil_result": "**OK** —— lint 完全看不见这件事",
+        "killed_by": "`hestia_test.go:397` `require.Len(hours, 3)` —— 报 `\"[]\" should have 3 item(s), but has 0`",
+        "why_this_matters": "**这不是假想的变异，是我改时刻时真的做过一次的操作。** 它证明 lint 与 Go 守卫各管一半：lint 管 XML 合不合法，Go 守卫管「这个 job 到底跑不跑」。只留 lint 的话，一个永不唤起的服务会一路绿到运维手上。"
+      },
+      "M5_非法注释掩盖一个真实代理键（最强的一条）": {
+        "mutation": "在 `EnvironmentVariables` 内插一个含 `--` 的注释，其后加 `<key>https_proxy</key>`",
+        "plutil_result": "**OK**",
+        "ground_truth": "`plutil -convert json` 读出 `EnvironmentVariables = [PATH, https_proxy]` —— 代理键确实存在",
+        "old_guard": "**PASS（假通过）** —— `if err != nil { break }` 在非法注释处静默停下，返回的键里只有 PATH",
+        "fixed_guard": "红：`解析 … 失败：守卫不能在非法 XML 上静默返回部分结果`",
+        "why_this_matters": "这是本任务唯一一条**同时穿透两道守卫**的构造。它说明「两道守卫互补」还不够 —— 还要求每道守卫**在自己失效时能自知**。静默降级的守卫比没有守卫更糟，因为它占着「已覆盖」这个位置。"
+      }
+    },
+    "dod_coverage": [
+      {
+        "criterion": "functional[0] 交付 configs/hestia.yaml（每个数字带 M0 实测来源）与 launchd plist（三时点唤起）",
+        "evidence": "两份都已交付。配置里五个阈值逐条标出处（7.65/8.57/9.06% 等），`stock_continuity_max` 明标**未经真实数据验证、M1c 必须重标定**。plist 三时点 **15:30/17:30/21:30**，取自 spec（计划 1634-1638 行），注释写明「要改先改 spec」。⚠️ 我最初自选的时刻与其理由均已被实测推翻并改回，见 decisions。另补 `TestHestiaPlistSchedulesThreeTimes` 钉住三个时点。"
+      },
+      {
+        "criterion": "functional[1] plist 一个代理键都不设；断言必须是「不存在任何 *_proxy/*_PROXY 键」而非枚举四个",
+        "evidence": "plist 的 `EnvironmentVariables` 只有 `PATH`（`plutil -convert json` 实测键列表 = `['PATH']`）。守卫 `TestHestiaPlistSetsNoProxyKeys` 用 XML 解析取键、按**后缀**判，不枚举名字。消融 M1 证明鉴别力。"
+      },
+      {
+        "criterion": "boundary[0] deploy.sh 会同步配置（要求自己复核一次再写进 discovery）",
+        "evidence": "✅ 我自己复核了 `scripts/ops/deploy.sh:35`：`rsync -a -m --delete` + 排除列表，排的是 `.git`/`.arcforge`/`.claude`/`*.go`/`docs`/`data`/`logs`/各 `.venv` 等，**`configs/` 与 `deploy/launchd/` 都不在排除项** ⇒ 两个新产物会被同步。「若不会」那个分支不必走。"
+      },
+      {
+        "criterion": "boundary[0] plutil -lint 必须通过",
+        "evidence": "`plutil -lint …` → `OK`，EXIT=0。另加 `TestHestiaPlistPassesPlutilLint` 把它拉进测试（非 macOS 环境 `t.Skip`，不把环境缺失记成交付缺陷）。⚠️ 消融 M1 证明它**不能替代**语义守卫。"
+      },
+      {
+        "criterion": "boundary[0] 一条测试：LoadConfig(\"../../configs/hestia.yaml\") 必须成功；隐含过 validate 全部条款",
+        "evidence": "`TestRealHestiaConfigLoads`。逐条对照过 `Config.validate()`：`storage.db_path` 非空、`discover` 三项、五个阈值 > 0、`caliber_exemptions` 未出现（出现则须写 `period_types`，已在配置注释里写明）。消融 M2 证明鉴别力。"
+      },
+      {
+        "criterion": "error_handling[0] plist 守卫必须精确断言，且否定式必须配肯定式锚点",
+        "evidence": "XML 解析而非子串（本 plist 注释里大段讨论代理键，子串匹配会误报）。锚点两条：`require.NotEmpty(keys)` + `assert.Contains(keys, \"PATH\")`，注释写明它们与否定式**互补不是重复**。另加**阳性对照**子测试（`crisis-daily` 必须被报出 `no_proxy`）—— 锚点挡空集，对照挡「解析出了东西但漏掉代理键」。"
+      },
+      {
+        "criterion": "non_functional[0] CONTRACTS 必须记下四件（一级键三情形+--force / 两处接缝 / 修订版限定 / --force 作用域）",
+        "evidence": "Sprint 037 节逐条写入。③ 按订正后的措辞写「**机制上可达，但没测过所以不承诺**」，并列表写明它与「做不到」会让后人做出不同判断。④ 写 `--force` 穿透两层、可重跑任意期次、代价是翻满 MaxPages，并注明 reviewer B4 被**闭合**而非确认。"
+      },
+      {
+        "criterion": "non_functional[0] 季报支持登记进 CONTRACTS",
+        "evidence": "四种累计期次的期末月与除数表、`q1_q3` 不叫 `q3` 的理由、正文侧 `periodAlt`/`cumulativePeriods` 两处都要认、以及 `articleLinkRE` 不得再设位数下界（p15 起整页命中 0 条的实测）。"
+      },
+      {
+        "criterion": "non_functional[0] 部署闸如实记成「已满足的历史约束」，不写成仍生效也不删掉",
+        "evidence": "CONTRACTS 里标 ✅ 闸已满足（TASK-004 verified），并写明**保留不删**的理由：它记录的是「为什么当时不能部署」，那个理由本身仍然有效。附带记下 Leader 最初把它误写成「必须同一分支合入 master」的更正。"
+      },
+      {
+        "criterion": "non_functional[1] gofmt（只看本任务改动文件）/ vet / build / test / race 全绿；退出码不跨管道",
+        "evidence": "gofmt 输出为空；vet=0；build=0；test=0；race=0。全部用 `cmd >file 2>&1; echo $?` 取码。"
+      },
+      {
+        "criterion": "端到端手工验收（Step 9）不属本任务",
+        "evidence": "未执行。前置闸已满足，执行方式与注意事项写进 interfaces_exposed 供 Leader 用。"
+      }
+    ]
+  },
+  "open_items_for_leader": [
+    "✅ **你问的那件事验了，答案是「会」**：Go 的 `encoding/xml` **拒绝** `--` 注释（`invalid sequence \"--\" not allowed in comments`），与 `plistlib` 一致、比 `plutil` 严。⇒ 但顺着它查出我自己的守卫有个假通过（见 key_findings 第 2 条），已修并单独提交 `bb825de`。**这条线索是你给的** —— 我不会自己想到去查解析器的错误处理。",
+    "🔴 **`aktools.plist` 是非法 XML（注释含 `--`），而 `plutil -lint` 报它 OK** —— 不属本任务（不在我 `writes` 内），已按你说的登记待单开 chore。⚠️ 附带一层：**任何用标准 XML 解析器读 plist 的工具/脚本都会在它上面失败**，而 `plutil` 不会提示 —— 若将来有别的守卫或运维脚本解析 `deploy/launchd/*.plist`，会撞上。",
+    "✅ **时刻已按 spec 改为 15:30/17:30/21:30**（你代读的计划 1634-1638 行）。我自己用 plistlib 逐文件复核了你对我「避冲突」理由的反驳，**属实** —— 那三个时刻本来就是空的，且两个 `StartInterval 1800` 的任务不对齐日历格。",
+    "🔴 **改时刻时我误删了整个排班块，而 `plutil -lint` 照报 OK** —— 已补守卫并写进 CONTRACTS。这是本任务第二个「我自己写的东西被自己的消融/操作抓出问题」的例子（第一个是 install-services 那条全文子串匹配）。⇒ 两次都不是能力问题，是**没有被点名的地方就没上心**；而两次都是**动作本身审计了我**，不是自觉。",
+    "**未设 `coverage_floor`**，因为门禁合并口径实测 83.2% > 80，不需要它放行。若你想要棘轮，我在 `in_progress` 期间还写得了 —— 说一声。",
+    "**我自己的一条守卫被自己的消融抓出是假的**（`TestInstallServicesInstallsHestiaPlist` 全文子串匹配 ⇒ 只留注释也能绿）。已在同一任务内修掉并单独提交（`f637f7c`）。⇒ 这条值得记进结转：**「注释里提到 ≠ 生效」这条纪律我在被 DoD 点名的那个守卫上执行了、在没被点名的那个上没执行** —— 说明纪律目前是靠「有没有人提醒」触发的，不是靠自查。",
+    "**门禁覆盖率是 declared packages 的合并口径**（`-coverpkg` 全部声明包后取 total），不是逐包 —— 这与我先前的理解相反（我以为 cmd/atlas 75.4% < 80 会结构性阻断）。若这条对别的任务也有用，值得写进结转。"
+  ],
+  "rework": {
+    "round_1": {
+      "CRITICAL-1 排班守卫不限定作用域": {
+        "缺陷": "`plistIntsUnderKey` 在**全文档**范围数 `Hour`/`Minute` 再**按下标**配对，从不断言它们位于 `StartCalendarInterval` 之下、也不断言两者出自同一个 dict。",
+        "为什么是我写的": "🔴 **它就在我为修上一个假通过而写的那条测试里** —— 我当时的注意力全在「排班块被整块删掉」这一种破坏上，写出的解析器只回答「文档里有没有三对 Hour/Minute」，而不是「排班键下有没有三个完整的 dict」。",
+        "修法": "仿 `plistEnvKeys` 限定作用域：先认出 `StartCalendarInterval` 后面的 `<array>`，逐 `<dict>` 收成对字段，缺任一字段即 `require.Truef` 失败。",
+        "验收消融（在提交态 b6b13a4 上跑）": {
+          "M1 键名改错一字母": "`plutil -lint` **OK**；守卫红在 `hestia_test.go:405` —— `\"[]\" should have 3 item(s), but has 0`，消息「排班键被改名、改坏或删掉了」",
+          "M2 Hour/Minute 跨 dict": "`plutil -lint` **OK**；守卫红在 `hestia_test.go:403`（经 `:481`）—— 「StartCalendarInterval 的第 1 个 dict 缺字段（Hour=true Minute=false）」",
+          "结论": "两条都命中 QA 指定的判据：M1 红在「找不到该键 ⇒ 0 个 interval」，M2 红在「dict 缺字段」。"
+        }
+      },
+      "CRITICAL-1 配套（CONTRACTS 表）": "「两道守卫各管一半」表补两行（改名 / 错配），并写明**加固前它们是绿的** —— 只列「删掉」会让读者以为整个键都被守住。",
+      "WARNING-3 文案（行为不改）": "① `--force` flag help 点名「Duplicate 期次的重抽取值会被丢弃」；② CONTRACTS 的「有出路」限定为「落 pending 的有出路、已进权威表的没有」，并注明该取舍早已登记在 `refreshArticleID` 的注释里，本 Sprint 的新事实只是 `--force` 成了第一个会批量触发它的调用方。",
+      "WARNING-4 cwd 守卫（落点与 fix_item 指定的不同，理由如下）": "🔴 **fix_item 写的是「`openHestia` 返回解析后的绝对路径，两条 RunE 各打一行」，我照做后打红了既有守卫 `TestHestiaCmdDoesNotResolveDBPath`** —— 它明令 `cmd/atlas/hestia.go` 不得 import `path/filepath`，理由是「db_path 的解析归 internal/hestia」（TASK-008 定的分层）。⇒ **我没有删那条守卫去迁就 fix_item** —— 它是对的：路径语义只该有一个归属。改为在 `internal/hestia/ingest.go` 的 `Ingest` 开头打印解析后的绝对路径，效果相同（ingest 才是 launchd 每天三次唤起的那个），而分层不破。⚠️ 代价：这处改动落在 **TASK-011 的 `writes`** 里（`ingest.go`），不在 TASK-009 的。两个返工任务同时在途且都归我，写入合法，但**归属需要人读 commit message 才看得出来** —— 已在两边 discovery 与 commit message 中双向注明。"
+    }
+  }
+}

@@ -89,7 +89,13 @@
     "dev-agent-51": "7019fe4a534365503cc214c2988e0dae74aa802bf4235e2024ddffadddec1b73",
     "test-agent-25": "7e3a12e3265dad43e6d9bc870e1f9c969b2f43f84bb7d97d779fc108c69e118c",
     "qa-reviewer": "de369629a2643bb91b17db913191095f17839047be8fb87edf19358fe4e04882",
-    "qa-consumer": "b3ea8a9e1541856bf5f8b326a474b36877ed649ea40dcf07709ccffb602cde96"
+    "qa-consumer": "b3ea8a9e1541856bf5f8b326a474b36877ed649ea40dcf07709ccffb602cde96",
+    "dev-agent-52": "69e048c5b42cb6da8f31cef2e0e9d9ce74cdd8092a0bcedb480a19ff4dd3f0cc",
+    "dev-agent-53": "dd9633365b3475c25269932b39d2dc249762e7d4f4ea6687eef198a277e20961",
+    "dev-agent-54": "2a686ae35828dd31a2614539c8ba011e47e17991489cdc0a3f68ed4d786c1c1d",
+    "test-agent-26": "c4c770dfecdbc32eda072bb2d678c484dbe1e5c3152e100b55c3fba534da5795",
+    "qa-agent-13": "e432c0b72fa2940e79ec1c7a7fc2661f0ecbebd05dc38c7173b57b51caf1dd96",
+    "qa-agent-14": "faa637828acd6570755d1bf2c74e352036c0aba8b295c876a30fee8032aaf83d"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [

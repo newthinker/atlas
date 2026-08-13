@@ -1,0 +1,157 @@
+{
+  "task_id": "TASK-011",
+  "title": "Discover 判停规则：HasPeriod → HasArticle（修复静默停摆）",
+  "by": "dev-agent-52",
+  "at": "2026-08-13T01:40:00Z",
+  "git": {
+    "branch": "master（wave2/3 协议：主工作区直连，不建 worktree）",
+    "head": "b6b13a4",
+    "parent": "c4e8d5c（TASK-004 季报抽取接线）",
+    "note": "单 commit，含代码 + 两条守卫登记 + 新方法测试。**未改 ingest_test.go** —— 选项 B 落地后它自己就绿了，故未申报该文件。全部自证数字采自 fd6a24c，在 `git worktree add --detach /tmp/chk011 fd6a24c` 的干净隔离树上采（git status 空）。",
+    "commits": [
+      "0ad7269 fix(TASK-011): StopReason 有候选时也要说 + 清两份过期结论（QA review_fix，rework_count=1）"
+    ]
+  },
+  "key_findings": [
+    "🔴 **判停键最终选 `HasArticleInObservations`（只查权威表），不是 DoD 字面的 `HasArticle`（查两表）** —— 人类 2026-08-13 裁决选项 B。字面照做会引入一个新的静默属性：**落进 pending 的期次再也不会被自动重试**（Discover 见到它的 id 就停，修了校验 bug 或调了阈值之后它不会自己回来，只能 --force）。Sprint 035 已登记「落 pending 的期次对依赖历史的闸门永久不可见」是结构性问题，那等于把「更难自愈」变成「不可能自愈」。",
+    "🔴 **DoD 字面做法会打破 TASK-005 刻意设计的两层契约**（`ingest_test.go:312-318` 的注释原文：「HasPeriod 不认 pending 所以 Discover 仍把这期当候选交出来，HasArticle 认 pending 所以这里挡住。**两者方向相反而都对**」）。那是一句写明设计意图的注释，不是实现细节描述。选项 B 把两层原样保住，只把 Discover 那一层的判据从**期次**换成 **article_id**。",
+    "**boundary[0] 最脆那一环：成立。** hestia 的 Spec 业务键是 `{period, period_type}`、revision 列是 `published_at`（store.go 的 `NewSpec`）；`Lookup` 拼的 SQL 就是 `SELECT MAX(published_at) FROM observations WHERE period = ? AND period_type = ?` —— **`article_id` 不在 WHERE 里**（lookup.go 全文 `article_id` 出现 0 次）。⇒ 迁移后新 id 不会变成另一个业务键，`published_at` 不变 ⇒ `Classify` 判 `Duplicate` ⇒ `refreshArticleID` 刷新 id ⇒ 下一轮命中。**这是读 SQL 构造得到的观察，不是照抄参考。**",
+    "**Leader 给的那条「参考证据」确实比结论弱**（我接单前指出、此处复核确认）：`classify_test.go:31` 那条名为「站点迁移换了 URL」的用例**直接构造 `State`**，不经过 `Lookup` ⇒ 它证明的是「给定那个 State，Classify 判 Duplicate」，**不是**「迁移后系统真的会走到 Duplicate」。证据重心完全落在 `Lookup` 上，而那一半是我自己查的。",
+    "**Leader 在 DoD 里举的那个「例如」指错了方向，且我实测了它的代价。** DoD 写「若自愈不成立（**例如 refreshArticleID 只在 observations 表刷、而 pending 里的旧 id 留着**）」。那条**属实但不是会断的那一环**：`refreshArticleID` 的 UPDATE 确实只作用于 observations，但 `savePending` 是 **INSERT 新行带新 id** ⇒ pending 路径同样会被命中，机制不同而结论相同。⚠️ **查完那条不成立时，我确实闪过「那自愈大概没问题」** —— 差一点就没去查真正的那一环（二级键）。⇒ 一个错的「例如」的代价不是不精确，是**把有限的怀疑预算导向空处**。",
+    "**`discover.go` 那段反论证不是「后来过期」，是写下时就没考虑到。** 用 git 查过：那段注释写于 `2b93ccd`，而 `refreshArticleID`（提供自愈出口的那段）写于 `c1050d7`，**注释写下时该机制已经存在**。⇒ 推翻它的正确说法是「它没把已有的自愈路径算进来」，而不是「情况变了」。这个区分影响后人要不要去找『什么时候变的』。",
+    "**去重键必须与判停键同一把标识。** 判停换成 article_id 而去重仍按期次时，同期次的另一篇（原文，已见过）会在**查库之前**被 `continue` 掉 ⇒ 那次命中根本没发生 ⇒ 判停失效、每轮白翻满上限。⚠️ 我在 discover.go 写下这句时**它没有任何测试守着** —— 消融一试（去重键改回期次）什么都不红。已补 `TestDiscoverDedupKeyMatchesStopKey`。",
+    "🔴 **`neverSeen` 顺手闭合了独立 reviewer 的 B4（leader 2026-08-13 指出，不在我 DoD 里）**：`independent-review.md:133` 登记着「`--force` 重跑**已观测**期次 ⇒ Duplicate 不成立 —— `--force` 只绕过 `HasArticle`，不绕过 Discover 的判停 ⇒ 已在观测表的期次会让 Discover 当场返回空」，并建议写进 CONTRACTS：「`--force` 的作用域**只到 pending**，调了阈值想重跑一个已入库的期次**目前没有出路**」。⇒ 本任务的 `known = neverSeen{}` 让 Force **绕过判停这一层**，那条「没有出路」现在有出路了。⚠️ **这不是我为闭合 B4 而做的** —— 我是为修自己引入的 Force 回归而做，闭合 B4 是副产品；但结论一样成立：**Force 现在能重跑已在观测表的期次**（Discover 不再提前停 ⇒ 候选交得出来 ⇒ ingestOne 在 Force 下跳过 `HasArticle` ⇒ 走到 Save ⇒ 按双时态判 Duplicate/Revision）。⇒ **TASK-009 写 CONTRACTS 时不要再写「--force 作用域只到 pending」，那句已不成立。**"
+  ],
+  "decisions": [
+    {
+      "decision": "判停键 = `Store.HasArticleInObservations`（新增，只查权威表）；`ArticleChecker` 接口只含这一个方法",
+      "rationale": "人类裁决 B。三种情形同时满足：修订版（新 id、不在权威表）⇒ 不停、继续翻（本任务存在的理由）；正常已处理（id 在权威表）⇒ 停；pending 期次（id 只在 pending）⇒ **仍交出候选**，由 ingest 层 `HasArticle`（查两表）挡住并打印 already ingested。⇒ 修了新目标又没牺牲旧设计。**`ingest_test.go` 因此一个字都没改，也没申报进 writes。**"
+    },
+    {
+      "decision": "**保留** `HasPeriod`，但把它从 Discover 的判停路径上摘掉（boundary[2] 要求的结论）",
+      "rationale": "`HasPeriod` 本身没被删（store.go 仍有、ingest_test.go 用它断言库状态、CONTRACTS.md 记着它的语义）；删掉的只是「Discover 依赖它」这条关系。**不把它保留成二级判停键**：`hasArticle || hasPeriod` 会让修订版仍然命中期次 ⇒ **完全抵消本任务的修复**；`hasArticle && hasPeriod` 看似能保住两层（pending 那篇 HasPeriod 假 ⇒ 不停），但它是**近似**而非精确的「这篇在不在权威表」—— 当同一期原文已在权威表、修订版落 pending 时两者皆真会误停。**拿近似判据当精确用正是本 bug 的成因家族**，故不采用。"
+    },
+    {
+      "decision": "去重键从期次改为 article_id",
+      "rationale": "与判停同一把标识（见 key_findings）。可观测差异：同期次两篇（新旧 id 各一）在一页上时，按 article_id 去重会走到 has 检查并 `StopSeen`，按期次去重则跳过它 ⇒ `StopMaxPages`。由 `TestDiscoverDedupKeyMatchesStopKey` 钉住。"
+    },
+    {
+      "decision": "新增 `StopReason`（`seen_article` / `max_pages` / `exhausted`），`Discover` 返回三值；ingest 空候选时打印停止原因",
+      "rationale": "error_handling[0]。**当前最危险的属性是「静默」**：返回空 + nil error 时「正常停」与「翻满上限、窗口外可能还有」完全同形，而后者意味着窗口外的期次发现不了。判据换成 article_id 并不会让这件事自己消失，它是独立的一条。`StopReason` 是类型/常量，不进导出面守卫（那两条只收 `*ast.FuncDecl` 与 `*Store` 方法）。"
+    },
+    {
+      "decision": "`Force` 必须同时穿透两层（新增 unexported `neverSeen`）",
+      "rationale": "**这是我自己引入的功能回归，不是文案问题。** 改判据之前两层判据不同（Discover 按期次、ingest 按 article_id），Force 只需绕过后者；改完两层同判据 ⇒ Discover 直接停 ⇒ 候选清单里根本没有它 ⇒ Force 无从生效（实测 `TestIngestSkipsSeenArticleUnlessForce/Force` 那条断言「应当真的被重新处理并入库」失败）。用一个说得出名字的实现承载「Force 时不判停」这个行为，而不是用 nil 或特例分支。 ⚠️ **选项 B 落地后这个修复仍然必要，但理由变了**（leader 一度认为 B 下它不需要，随后自行更正）：B 下判停只查权威表 ⇒ pending 那篇确实不再被判停挡住 ⇒ 就那个场景而言 Force 无需绕过判停。**但 Force 的主要用途是重跑【已在观测表】的期次**（调了阈值之后），而那种期次的 article_id **在**权威表里 ⇒ 判停命中 ⇒ Discover 当场停 ⇒ Force 够不着它。⇒ `neverSeen` 在 B 下依然是必需的，它闭合的正是 reviewer B4 登记的那个「没有出路」。"
+    },
+    {
+      "decision": "导出面守卫的期望项数改由 `len(want)` 生成（两条守卫都改）",
+      "rationale": "non_functional[0]。手写个数是同一事实的第二份副本，改一处不会让另一处变红 —— AST 版实测发生过（「列表 16 项 vs 文案十七」不一致且无人报警，后来加 Ingest 使文案**碰巧**变对）。⇒ 「现在是对的」与「它被修好了」是两回事。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/store.go：**只追加** `HasArticleInObservations`（一条 `SELECT 1 ... LIMIT 1`，只查权威表），既有代码一行未动。注释写明它与 `HasArticle` 的分工正是 Discover 层与 ingest 层那两层",
+    "internal/hestia/discover.go：`PeriodChecker` → `ArticleChecker`（只含 `HasArticleInObservations`）；判停与去重都改用 article_id；新增 `StopReason` 三态；`Discover` 返回三值；改写那段反论证并写明为何选只查权威表",
+    "internal/hestia/ingest.go：调用点改三值；空候选时打印停止原因；新增 `neverSeen` 让 Force 穿透判停层",
+    "internal/hestia/discover_test.go：fake 改 `fakeArticleChecker`（带 `havePeriod` 供消融构造修订版形态）；新增 4 条测试（见下）",
+    "internal/hestia/store_test.go：`var _ ArticleChecker = (*Store)(nil)`；两条守卫登记新方法 + 项数改由 `len(want)` 生成；新增 `TestHasArticleInObservationsIgnoresPending`"
+  ],
+  "interfaces_exposed": {
+    "new_export": "`(*Store).HasArticleInObservations(ctx, articleID) (bool, error)` —— 只查 hestia_observations 全表（不是 v_hestia_current：被取代的旧行同样是处理过的文章）。已登记进 AST 与 reflect 两条守卫，并各做过正向自证（从清单里摘掉 ⇒ 对应那条转红）。",
+    "signature_change": "`Discover(ctx, f, known ArticleChecker, cfg) ([]Candidate, StopReason, error)` —— 由两值变三值。包内唯一调用点是 `ingest.go`（已同步）；`ingest_test.go` 不直接调 `Discover`，未受影响。",
+    "note_for_downstream": "判停语义变了：**从「这期入库了没有」变成「这篇进过权威表没有」**。下游若依赖「Discover 不会返回已入库期次的候选」这个旧性质要注意 —— 现在修订版（同期次、新 id）会被交出来，那正是本任务的目的；`ingest.go:143` 的期次一致性校验与 `Save` 的双时态判定各自仍然成立。"
+  },
+  "verification": {
+    "suite": "隔离树 fd6a24c（`git worktree add --detach /tmp/chk011`，git status 空）：`go test ./internal/hestia/ -count=1` —— ok，0 FAIL",
+    "race": "隔离树：`-race` —— ok",
+    "coverage": "隔离树：**93.5%**（基线 93.5%，不低于它）",
+    "gofmt_vet_build": "`gofmt -l` 空、`go vet` 空、`go build ./...` OK（均在隔离树）",
+    "ingest_test_untouched": "**`ingest_test.go` 一个字未改且全绿** —— 这是选项 B 相对 A/C 的直接可观测差别（A/C 下它必红，见消融 A2）。",
+    "ablation": {
+      "harness": "在 `git worktree add --detach /tmp/chk011 fd6a24c` 的隔离副本里做，主工作区一个字节未碰（收尾 `git diff --stat HEAD -- <我的 5 个文件>` 为空）。每个变异体落盘后先 `go vet` 过语法闸。收尾已 `git worktree remove`。",
+      "A1_判停改回期次": {
+        "mutation": "`known.HasArticleInObservations(ctx, it.ArticleID)` → `known.HasPeriod(ctx, it.Period, it.PeriodType)`",
+        "killed_by": "`discover_test.go:1114` `require.NotEmpty(t, got, \"第 1 页那期已入库，不该让第 2 页那期跟着消失\")`",
+        "full_impact": "5 条转红，全部是本任务相关：DoesNotStopAtKnownPeriodAheadOfUnknownOne、SelfHealsAfterSiteMigration、DedupKeyMatchesStopKey、EmptyStoreExhaustsWhileKnownStopsEarly、StopsAtKnownPeriod"
+      },
+      "A2_判停改用查两表的HasArticle（即被否决的选项A/C）": {
+        "mutation": "`HasArticleInObservations` → `HasArticle`",
+        "killed_by": "`discover_test.go:1300` `require.NotEmpty(t, got, \"pending 里的期次必须仍被交出来，否则它永远等不到重试\")`；同时 `TestIngestSkipsSeenArticleUnlessForce/默认跳过已处理过的文章` 转红",
+        "why_this_ablation": "**证明裁决 B 这个决定本身有守卫**。没有它，把判停改成查两表不会有任何东西红（TASK-005 那条测试是别人的，不能算我这边的网），于是「保住两层设计」就只是 discovery 里的一句话。"
+      },
+      "A3_去重键改回期次": {
+        "mutation": "`seen[it.ArticleID]` → `seen[it.Period+\"/\"+it.PeriodType]`",
+        "result_before_fix": "**什么都不红** —— 我在 discover.go 写的那句「用期次去重会让判停漏判」当时是一句无人守的声明",
+        "killed_by_after_fix": "补 `TestDiscoverDedupKeyMatchesStopKey` 后红在 `discover_test.go:1246`（`StopSeen` 变成 `StopMaxPages`）"
+      },
+      "A4_自愈测试的阴性对照": {
+        "mutation": "把「迁移」去掉（库里存的就是 index 上那个 id）",
+        "killed_by": "第 1 轮 `require.NotEmpty(got1)` 即红 ⇒ 该测试非平凡，不是靠空集通过的"
+      },
+      "A5_两条导出面守卫各自的正向自证": {
+        "mutation": "把 `HasArticleInObservations` 分别从 reflect 版与 AST 版的期望清单里摘掉",
+        "killed_by": "各自对应的那条转红（`TestStoreExposesNoWriteMethods` / `TestPackageExposesNoWriteFunctions`）⇒ 两条都真的登记上了，不是只改了一处"
+      }
+    },
+    "dod_coverage": [
+      {
+        "criterion": "functional[0] 判停换成 article_id，且必须有一条测试逐字复现「已入库期次排第 1 页、未入库在第 2 页」",
+        "evidence": "`TestDiscoverDoesNotStopAtKnownPeriodAheadOfUnknownOne`：真快照 p7（2026-03/q1）+ p2（2026-06/h1）拼站点，构造成**修订版**形态（期次已入库、article_id 是新的），断言第 2 页那期被发现、翻了 2 页。消融 A1 红在 :1114。⚠️ 我第一版构造错了——把「那一篇已见过」当成场景，那其实是**合法该停**的情形；为表达真实场景给 fake 加了 `havePeriod`。"
+      },
+      {
+        "criterion": "functional[1] 接口调整由我定形态并写明理由 + 同步 ingest.go 调用点",
+        "evidence": "选 `ArticleChecker{HasArticleInObservations}`（接口定义在消费方，沿用原设计）。理由见 decisions。`ingest.go` 调用点已同步；`ingest_test.go` **不直接调 Discover**，未受签名影响，且在选项 B 下行为也未变 ⇒ 一个字未改、全绿。"
+      },
+      {
+        "criterion": "boundary[0] 正面处理 discover.go 那段反论证；用测试实证自愈；先钉最脆的那一环",
+        "evidence": "① 反论证已在 discover.go 里逐条改写并说明「它没把已有的自愈路径算进来」（附 git 溯源：注释写于 2b93ccd、refreshArticleID 写于 c1050d7，**写下时机制已存在**）。② `TestDiscoverSelfHealsAfterSiteMigration`：真库两轮，第 1 轮 `StopMaxPages` + 候选带新 id，Save 判 **`Duplicate`**、id 被刷新（直接问库而非看返回值），第 2 轮 `StopSeen`。阴性对照见 A4。③ 最脆那一环单独查明并写进 key_findings（业务键不含 article_id，读 Lookup 的 SQL 构造得出）。"
+      },
+      {
+        "criterion": "boundary[1] 空库首跑必须仍翻满 MaxPages（spec §4.3），既有测试仍绿并贴实跑输出",
+        "evidence": "`TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly` 仍绿，且我给它补了 `StopReason` 断言（A 组 `StopMaxPages`、B 组 `StopSeen`、并断言两者不等）。实跑：`--- PASS: TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly`，其中 `assert.Len(t, fa.calls, 3)` 即「翻满 MaxPages=3」。"
+      },
+      {
+        "criterion": "boundary[2] 要不要保留 HasPeriod 作二级键，由我判断并写明理由",
+        "evidence": "**保留方法本身、但不做二级判停键**，两种组合各自的否决理由见 decisions（`||` 会完全抵消修复；`&&` 是近似判据，正是本 bug 的成因家族）。pending 那个考虑点由裁决 B 正面回答：pending **不**参与判停，故不会停在它那里。"
+      },
+      {
+        "criterion": "error_handling[0] 「因命中而停」与「翻满 MaxPages 而停」必须可区分",
+        "evidence": "`StopReason` 三态；`ingest.go` 空候选时打印 `no new reports (stopped: <reason>)`。`TestDiscoverEmptyStoreExhaustsWhileKnownStopsEarly` 里 `assert.NotEqual(stopA, stopB)` 把「必须可区分」钉成性质而非巧合。"
+      },
+      {
+        "criterion": "non_functional[0] 闭合守卫缺口：期望项数由 len(want) 生成",
+        "evidence": "AST 版与 reflect 版**都**改了（原 DoD 只点了 AST 那条；reflect 版有同样的手写文案，一并闭合）。"
+      },
+      {
+        "criterion": "non_functional[1] 导出面守卫按同款规则登记新导出物",
+        "evidence": "`Store.HasArticleInObservations` 登记进两条清单，`assert.Equal` 的结构未动（只改切片项 + 文案生成方式）。正向自证见 A5。"
+      },
+      {
+        "criterion": "non_functional[2] 消融自证：判停改回 HasPeriod 确认复现测试转红且红的是它",
+        "evidence": "A1，给出 `discover_test.go:1114` 与断言原文；全量 5 条转红全部与本任务相关。另自补 A2/A3/A4/A5。"
+      },
+      {
+        "criterion": "non_functional[3] 覆盖率不低于基线、gofmt/vet 空、-count=1 与 -race 全绿、go build OK",
+        "evidence": "隔离树 fd6a24c：93.5%（基线 93.5%）/ 空 / 空 / ok / ok / OK。"
+      }
+    ]
+  },
+  "open_items_for_leader": [
+    "**`ingest_test.go` 我最终没改、也没申报进 `writes`** —— 你授权了，但选项 B 落地后它自己就绿了。按「声明与实际写入一致」的纪律，多申报一个文件只会平白占住它的 scope。",
+    "🔴 **关于你说我上一条报告谎报交付：文件系统与那个说法不符，请你复核来源。** 我逐条自查过：`4b3e08a4` 确实不存在（`git cat-file` 报 could not get object info），但 `transitions.jsonl` 里 TASK-011 只有 3 条（pending→assigned→in_progress→blocked_clarification），**没有任何 dev_done 记录**；而我发给你的两条消息里都明写「代码仍未提交（提交会让 HEAD 从绿变红）」。另外你那条消息说「status = in_progress、最后一条 transition 是 assigned→in_progress」，而我在 17:03:24Z 就已转 `blocked_clarification` ⇒ **你读到的是一份早于我那次迁移的快照**。⇒ 我不认为那次「谎报」出自我；请在把它记成 H-条目之前核一下来源。**理由不是面子**：错误归属会制造一条不存在的频次证据，而本 Sprint 正是靠频次证据在区分「反复发生的机制问题」与「偶发的个人失误」。若你手上确有我发的那条原文，贴给我，我认。",
+    "**你在 DoD 里举的那个「例如」我建议改**（H19 你已记下）：`refreshArticleID` 只刷 observations **属实**，但它不是会断的那一环（`savePending` 是 INSERT 新行带新 id ⇒ pending 路径同样命中）。真正该写进 DoD 的是二级键那一条。⚠️ 我实测了它的代价：**查完那条不成立时我确实闪过「那自愈大概没问题」**，差一点就没去查真正的那一环。⇒ 但 DoD 现在归我写，我没有自作主张改它 —— 因为改 DoD 会改变验证者的判定依据，那是你的决定，不是我的。你说改我就改。",
+    "🔴 **给 TASK-009（写 CONTRACTS）的输入**：reviewer B4 建议写的那句「`--force` 的作用域只到 pending，调了阈值想重跑一个已入库的期次目前没有出路」**在本任务之后已不成立** —— `neverSeen` 让 Force 绕过判停层。正确的表述是：`--force` 同时穿透两层幂等（Discover 的判停 + ingestOne 的一级幂等键），代价是它会翻满 `MaxPages`（那正是 Force 的语义）。"
+  ],
+  "rework": {
+    "round_1": {
+      "WARNING-1 StopReason 有候选时被丢掉": {
+        "缺陷": "`stop` 只在 `len(cands)==0` 时打印，而 **`max_pages` 且有候选恰是它的主要形态**（空库首跑必然如此）⇒ 那一轮之后窗口外的历史**永久不可达**，而这条信息在唯一会发生它的那一轮被静默吞掉、退出码 0。",
+        "修法": "候选非空时 stdout 也打一行；`stop == StopMaxPages` 时另写 **stderr** 警告。🔴 **不改退出码** —— 首跑必然 `max_pages`，改退出码会产出**假红**，而假红会被训练成忽略，那比不报还糟。",
+        "补的断言": "`TestDiscoverReportsExhaustedWhenSiteIsShorterThanMaxPages`（`StopExhausted` 此前**全仓零断言**）与 `TestIngestReportsStopReasonEvenWithCandidates`。⚠️ 放在 `discover_test.go` 而非 `ingest_test.go`：后者属 TASK-007 的 `writes`，两个返工任务同时在途，同一文件会撞 `scope-mutex`。"
+      },
+      "WARNING-2 两份过期结论": "`ingest.go` 与 `store.go` 各一份。**保留**「不要为当前的局限写断言」这条决定与理由，**删除**「恒为 New / Duplicate 不可达」这个事实陈述与过期坐标。`store.go` 的 `HasPeriod` 首行改为写明它**已不再是 Discover 的判停键**；`store_test.go` 三处 `PeriodChecker` 说法一并更正。",
+      "WARNING-3 Force 字段注释": "点名它**穿不透第三层**：对已在权威表的期次恒判 `Duplicate` ⇒ `refreshArticleID` 只刷 `article_id`、新抽 Values 一个不写 ⇒ 「改了阈值后重跑」对已入库期次在数据层面是 **no-op**，它真正能救的是落在 pending 里的那些。**行为不改**（该取舍登记在案）。",
+      "🔴 顺带发现：一条日常路径在 TASK-011 之后失去了唯一的测试": "判停键从期次换成 `article_id` 之后，原先唯一走到 `len(cands)==0` 的 `TestIngestSkipsSeenArticleUnlessForce/默认跳过` 改走了「候选交出来、由 ingestOne 挡住」那条 ⇒ **「零候选」这条一个月里 28 天都会走的路径变成未覆盖，而无人察觉**。⇒ 是**覆盖率把它显出来的**：加 cwd 守卫后 `Ingest` 掉到 89.7%，逐块看才发现少的不是新代码、是这条老路径。已补 `TestIngestReportsNothingNewOnSecondRun`（断言 `no new reports` 且原因是 `seen_article`）。⚠️ 教训：**改判据时要问「哪些既有测试原本靠旧判据才走到某条分支」** —— 那些测试不会红，它们只是**换了一条路走**，而原来那条路就此无人经过。",
+      "一处不可达分支的处理": "cwd 守卫最初写成 `if abs, err := filepath.Abs(...); err == nil { … } else { … }`，而 `filepath.Abs` 只在 `os.Getwd()` 失败时出错 —— 那种环境下「相对 db_path」这个设计本身已无从谈起。⇒ 不为它单开分支（那会变成一块永不执行的未覆盖代码），改为出错时退回打印原样路径。"
+    }
+  }
+}

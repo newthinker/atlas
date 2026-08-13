@@ -1,0 +1,72 @@
+{
+  "task": "TASK-002",
+  "title": "T1：Config 补 storage 段",
+  "by": "dev-agent-53",
+  "key_findings": [
+    "计划 109 行的警告准确：加必填字段不是编译错误，而是 3 个既有顶层用例在运行时红（TestLoadConfigKeepsDefaultsForOmittedThresholds / TestLoadConfigFull / TestLoadConfigRejects 的 base 前置断言），错误统一为 'storage.db_path is required'。TestLoadConfigRejects 的 base 用 require.NoError，红在这里会**整条中断**、10 个子用例一个都不跑——这也是它作为绊线的设计意图生效的样子。",
+    "5 处 writeConfig 夹具的实际分布是 4 个测试函数、5 个调用点：TestLoadConfigRejects 内部有 2 个（base 的 head 与表驱动的 tt.body）。表里 10 条子用例中有 3 条不走 head 而是自带完整 YAML（缺 index_url / max_pages 为 0 / timeout 为 0），必须单独补 storage，否则它们会红在 db_path 上而不是各自要测的那一项。",
+    "补完后每条 rejection 子用例仍命中原来的 want 字符串——这一点是**机制验证的**而非目测：assert.Contains(err, want) 在报错理由被 db_path 抢走时必然失配变红，全绿即证明每条都因原本那个理由失败。",
+    "`db_path` 缺失与显式写成空串在 validate() 眼里是**同一个 Config**（都是零值 \"\"），因此两者只能靠 LoadConfig 层的实现区分。消融 B 实测：把必填检查换成 viper 的 IsSet（只看键出现过没有），TestLoadConfigRequiresDBPath 照样 PASS 而 TestLoadConfigRejectsEmptyDBPath 变红——空串那条排除了一个真实实现，不是冗余用例。",
+    "本包对 Config 无任何外部消费点：全仓 grep 不到 hestia.LoadConfig / hestia.Config 的引用，也还没有 configs/hestia.yaml（T7 才建）。所以这个必填字段的爆炸半径完全落在 internal/hestia 包内，不会连坐别的包或既有实例配置。",
+    "【已知缺口，本任务按 Leader 指示不改，供下个 Sprint 取用】`timeout: 30`（写的人想写 30 秒）会被解析成 **30 纳秒且通过校验**。我用一次性探针实测确认：LoadConfig 返回 err=nil，cfg.Discover.Timeout == 30*time.Nanosecond 为 true。成因是 validate 对 Timeout 只有下界 `> 0`，30ns 满足。危害形态与 deposit_sum_tolerance 写 0 同族——配置看起来配了，跑起来是另一个值，且现场表现为「抓取全部超时」而不是「配置错了」。修法建议：给 Timeout 加一条合理下界（如 >= 1s）而不是仅 > 0。既有 TestLoadConfigFull 已有一条 '30s 要被解析成 duration 而不是字符串或 30 纳秒' 的断言，但它守的是**写对了**的情形，守不住写成裸整数的情形。"
+  ],
+  "decisions": [
+    {
+      "decision": "db_path 必填检查放在 validate() 第一个 switch 的**首位**（Storage 在 Discover 之前），而不是塞在末位以避开既有夹具。",
+      "rationale": "与 Config 的字段顺序一致，可读性上「校验顺序 = 声明顺序」。放末位确实能让 3 条自带 YAML 的子用例不改就继续因原本理由失败，但那是**靠检查顺序的巧合**维持的正确性：以后任何人调整 switch 次序，这 3 条就会静默改判到 db_path 上。显式给每条夹具补 storage 段，把正确性钉在夹具自身而不是钉在顺序上。"
+    },
+    {
+      "decision": "TestLoadConfigRejects 里新增 `const storage`，让 head = storage + discover 段，3 条自带 YAML 的子用例改写成 storage + 原字面量。",
+      "rationale": "只补一处 head 会漏掉那 3 条。抽成具名常量后，「storage 是每条夹具的合法底座」这件事在代码里只写一遍，且与既有那段 period_types 的警告注释形成同一种表达——两者都是「必填项漏写会让用例红在错误的理由上」。"
+    },
+    {
+      "decision": "为「显式空串」单独写一条用例，而不是并进 TestLoadConfigRejects 的表。",
+      "rationale": "表里每条 body 都以 head 打头，而 head 已含 storage 段；再追加一个 storage 键会造出**重复 YAML 键**，解析行为取决于库而非我的意图，用例会变得脆且难读。独立用例还能把「漏写 vs 写成空」这层区分写进注释。"
+    },
+    {
+      "decision": "TestLoadConfigKeepsDBPathRelative 保留 3 条断言，但在注释里写明它们**不是**三道独立的闸。",
+      "rationale": "真正杀掉两种错误实现的是第一条 assert.Equal；IsAbs 与 NotContains 被它逻辑蕴含（等于 'data/hestia.db' 就必然非绝对路径、必然不含临时目录）。留着是为了让失败信息直接读出「被排除的是哪两种实现」，但若不写明，后人会把 3 条断言当成三重保险——「守卫在场」不等于「守卫独立有效」。"
+    },
+    {
+      "decision": "顺带把 config.go 末行注释的 `T6` 改成 `M1b-4a 的 TASK-006`（计划 Step 5）。",
+      "rationale": "任务 ID 每个 Sprint 从 001 重开而注释跨 Sprint 存活，裸编号会被后人读成本 Sprint 的待办。这是 Sprint 036 契约点名过的编码约定。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/config.go",
+    "internal/hestia/config_test.go"
+  ],
+  "interfaces_exposed": [
+    "type StorageCfg struct { DBPath string `mapstructure:\"db_path\"` } —— 库文件位置",
+    "Config.Storage StorageCfg `mapstructure:\"storage\"` —— 位于 ConfigVersion 之后、Discover 之前",
+    "契约：storage.db_path 必填非空，缺失或空串时 LoadConfig 返回 error，错误串含 'storage.db_path is required' 且底层 err 被 %w 包住（errors.Unwrap 非 nil）",
+    "契约：相对 db_path 装载后**一字不改**，LoadConfig/validate 均不解析成绝对路径。约束 C8——按进程 cwd 解析，解析发生在 cmd 层（T6/status 负责打印解析后的绝对路径）"
+  ],
+  "verification": {
+    "anchor": "全部数字采自 **rebase 之后**的同一棵树。交付提交 f9136e298efdc82b61640fdaac31c05364530455，父提交 2e93115b6e88de55b357026ca086890ea87ba93b（TASK-003 的 Store.HasArticle）。⚠ 本文件早先记的锚 63ac5b6/bcbcdad2 已因 rebase 作废——内容与结论未变，但那批数字采自旧树，已整体替换为下面这批。rebase 未改动交付内容：numstat 仍 config.go +13/-1、config_test.go +97/-4，两文件 sha256 与 rebase 前逐字节一致。",
+    "file_sha256": {
+      "internal/hestia/config.go": "352f16efc37d0bd2783cd738c196410ab6012a2a977a21e594c7ebbd5508e0c2",
+      "internal/hestia/config_test.go": "bda2fef7019569b10c2fe2e183d6a1a68e3bb98dae4215c26b3a35db44ffdccb"
+    },
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok，0 FAIL",
+    "baseline_back_to_back": "对 master 2e93115b 建一次性 worktree，**同一时刻并排**跑同一组 flag：base 275 顶层 PASS / 297 子用例 / 0 FAIL / cover 93.3%；post 279 顶层 PASS / 297 子用例 / 0 FAIL / cover 93.3%。顶层测试名差集恰为新增的 4 条、无一条消失——「全绿」因此不是「测试没跑」。基线 worktree 已拆。",
+    "coverage": "整包 93.3%（DoD 下限 93.2%，高于下限）；config.go 的 LoadConfig 与 validate 均 100.0%。注：由 rebase 前的 93.2% 变为 93.3% 是 TASK-003 带进来的代码覆盖良好所致，非本任务改动的效果——分母变了。",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "vet": "go vet ./internal/hestia/ 退出码 0、无输出",
+    "ablation": {
+      "protocol": "rebase 后重跑全部四轮。变异只作用于本 dev 独占 worktree 内的 config.go，每轮 go vet 有效性闸 + 还原后 sha256 比对（4/4 YES），config_test.go 全程未被触碰（收尾 sha256 一致）。结果与 rebase 前逐条一致。",
+      "control": "未变异对照组 0 条红",
+      "A_删掉_db_path_必填case": "2 条红：TestLoadConfigRequiresDBPath、TestLoadConfigRejectsEmptyDBPath",
+      "B_换成viper_IsSet只挡漏写": "1 条红：仅 TestLoadConfigRejectsEmptyDBPath（RequiresDBPath 照样绿）—— 证明空串用例非冗余",
+      "C1_装载时filepath_Abs": "4 条红，含 TestLoadConfigKeepsDBPathRelative（断言实录：expected \"data/hestia.db\" / actual \"<cwd>/data/hestia.db\"）。另 3 条被连坐是因为 filepath.Abs(\"\") 返回 cwd 这个非空值，必填检查随之失效",
+      "C2_相对配置文件目录解析": "4 条红，含 TestLoadConfigKeepsDBPathRelative（actual 落在 t.TempDir() 下，NotContains 那条也命中）"
+    },
+    "reproduce": "锚一律钉全 sha，勿写 HEAD/分支名：git checkout f9136e298efdc82b61640fdaac31c05364530455 -- . && GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -cover",
+    "blast_radius": "全仓无 hestia.LoadConfig / hestia.Config 外部引用，无既有 hestia.yaml 实例配置；改动不出 internal/hestia 包"
+  },
+  "notes_for_downstream": [
+    "T6（cmd 层装配）：cfg.Storage.DBPath 拿到的是**原样的相对路径**，开库前须自行按进程 cwd 解析，并按计划让 status 打印解析后的绝对路径。",
+    "T7（configs/hestia.yaml 实例配置）：storage.db_path 现在是必填，实例配置漏写会在装载期直接失败。",
+    "下个 Sprint：timeout 裸整数 → 30ns 的缺口见 key_findings 末条，本任务未改。"
+  ]
+}

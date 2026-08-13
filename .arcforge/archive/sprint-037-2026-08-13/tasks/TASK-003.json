@@ -1,0 +1,48 @@
+{
+  "id": "TASK-003",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "T2：Store.HasArticle（一级幂等键，查两张表）",
+  "description": "计划 **Task 2（243–408 行）**。这是一级幂等键，spec 第 2 节定案：**查两张表含 pending**——被它挡住的重试本来就没有意义（同输入、同代码、同闸门，重抓必然得到同样的结果）。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "按计划 Task 2（`hestia/docs/superpowers/plans/2026-08-12-hestia-cli.md` 243–408 行）交付 `func (s *Store) HasArticle(ctx, articleID string) (bool, error)`，**同时查 `TableObservations` 与 `TablePending`**，任一命中即 true。真库测试（`newTestStore`）。",
+      "三条各一测试：只在 observations 里 → true；只在 pending 里 → true；两张表都没有 → false。"
+    ],
+    "boundary": [
+      "空 `articleID` 的行为必须被钉住（返回 false 还是报错由你定，但要有测试且在 discovery 里说明理由）。"
+    ],
+    "error_handling": [
+      "查库失败必须**用 `%w` 包住底层错误**并带上下文。\n\n⚠️ Sprint 036 F8 的教训：`assert.ErrorIs` **证不了「包住」**——实现写成 `return nil, err`（完全不包）时它同样为真。要用 `require.NotNil(t, errors.Unwrap(err))` 把差集测掉。**别写 `require.NotErrorIs(t, errors.Unwrap(err), err)`**，那条在 unwrapped 为 nil 时平凡为真（跨 Sprint 存活了一整轮才被修）。"
+    ],
+    "non_functional": [
+      "**导出面守卫会打红**：`store_test.go` 有两条精确集合相等断言（AST 版 12 项、reflect 版 5 项），新增导出方法必须**登记**进去。\n\n⚠️ **登记不是放宽**：`assert.Equal` 一字不能动，只在切片里加一项。**正向自证**：把你新加的那一项从期望列表里删掉，确认转红（这证明守卫在按精确集合相等工作）。**不要跑「换成 assert.Subset」那种变异**——它必然存活，证明不了本次登记。",
+      "`gofmt`/`vet` 空、整包全绿、`-race` 绿、覆盖率不低于 93.2%。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-13T01:22:04Z"
+  },
+  "assigned_to": "dev-agent-54",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "67249ffb7961aa838f57b4cdfbfef3c94a2ffaaf",
+    "discovery_sha256": "38b28e814a44dbd9357817c5dfe8481650cbf64bb9e124cfea3c187c6346aaa4",
+    "at": "2026-08-12T15:29:40Z"
+  },
+  "verifier": "test-agent-26"
+}

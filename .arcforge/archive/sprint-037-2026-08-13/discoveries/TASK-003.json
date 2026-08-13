@@ -1,0 +1,71 @@
+{
+  "task": "TASK-003",
+  "title": "T2：Store.HasArticle（一级幂等键，查两张表）",
+  "by": "dev-agent-54",
+  "key_findings": [
+    "HasArticle 与 HasPeriod 对 pending 的态度**恰好相反，而两条都对**。HasPeriod 问「这一期入库了没有」——pending 不算，否则一次解析失败会让那期永远不再被抓；HasArticle 问「这篇文章处理过没有」——pending 算，因为同输入/同代码/同闸门重抓必然得到同样结果。同一行数据两个答案不同，是消费者要的东西不同，不是不一致。两处代码注释与测试注释都交叉指了对方，免得后人把其中一条当 bug 改掉。",
+    "「查 observations 全表而不是 v_hestia_current」是本任务里唯一有区分力的实现选择，且只有一条断言守着它（TestHasArticleSeesSupersededRows）。消融实测：把 TableObservations 换成 viewCurrent，其余三个测试（含三个子测试）全部保持绿，只有它红。原因是另外三个查的都是当前行。⇒ **删掉那条测试等于把这个选择变成无人守**。",
+    "两张表的 article_id 都经 Meta.validate() 把关（Save 的第一步，pending 路径也走它，见 store.go:331-378），所以**空串写不进任何一张表**。这是「空 articleID 返回 false 是真话而非托词」这一决定的事实前提，不是推理。",
+    "refreshArticleID 的存在意味着 HasArticle 有一个天然盲区（不是缺陷）：站点迁移换 article_id 且 published_at 不变时，Save 判 Duplicate 并**原地刷新**那一行的 article_id，旧 id 随之从 observations 消失 ⇒ 旧 id 下次问 HasArticle 会答 false。这与 TestHasArticleSeesSupersededRows 覆盖的「修订产生新行、旧行保留」是两种不同的写路径，别混为一谈。下游若要「旧 id 也永远命中」，需要的是一张 article_id 历史表，不是改 HasArticle。"
+  ],
+  "decisions": [
+    {
+      "decision": "空 articleID 返回 (false, nil)，不加 guard 分支（DoD boundary[0] 把选择权交给我）",
+      "rationale": "三条理由，按承重顺序：①**这个 false 是真话不是平凡为真**——两张表的 article_id 都经 Meta.validate() 把关，空串写不进任何一张表，所以「这个 ID 没处理过」确实是正确答案；②**幂等门唯一危险的答案是错误的 true**（让那篇文章被永久跳过），错的 false 只多花一次抓取，而那正是幂等门 miss 的固有代价，守住 true 就够了；③**入参校验是 Save 的职责**——validate() 刻意不导出（types.go 那段注释写明理由），空 ArticleID 会在 Save 处以 \"meta.article_id must not be empty\" 精确报出来不会被吞掉；在读方法里再加一道会把同一份责任分到第二处，也与同样不校验入参的 HasPeriod/Preceding 不一致。此外 discover 侧 articleLinkRE 的捕获组是 (\\d{14,})，结构上产不出空 ID，所以这条路径只可能来自调用方 bug。",
+      "counter_argument_considered": "反方是「空 ID 是调用方 bug，报错能最早暴露」。不采纳的原因：bug 仍会暴露（在 Save 处，且错误信息更准确），而报错会让一个畸形候选有可能拖垮整批 ingest；相比之下多一次抓取是有界代价。"
+    },
+    {
+      "decision": "TestHasArticleOnEmptyID 先把两张表都填上真数据再问空串，而不是在空库上问",
+      "rationale": "空库上问空串会**平凡为真**——任何实现（哪怕漏掉 WHERE article_id = ?）都返回 false。填满两张表之后，恒真谓词的实现会返回 true 而红。消融实测确认：去掉两处 WHERE 谓词后本条红在 store_test.go:2017 的 assert.False。"
+    },
+    {
+      "decision": "错误注入用「已取消的 context」而不是「关掉的库」",
+      "rationale": "与邻居 TestHasPeriodWrapsQueryError / TestPrecedingWrapsQueryError 一致：database/sql 在 Close 之后返回未导出的 errDBClosed，没有可用 sentinel，只能比错误串；context.Canceled 是标准 sentinel，能真的把 errors.Is 这条判据测出来。"
+    },
+    {
+      "decision": "「包住」用 require.NotNil(t, errors.Unwrap(err))，不用 NotErrorIs、也不单靠 ErrorIs",
+      "rationale": "NotErrorIs(errors.Unwrap(err), err) 在不包裹时 Unwrap 返回 nil、errors.Is(nil, err) 恒 false ⇒ 平凡为真（Sprint 035 的 F8，跨 Sprint 存活一整轮）。单靠 assert.ErrorIs 也不够：实现写成 return false, err（完全不包）时它同样为真。消融实测（%w→%v）确认 NotNil 那条真的会红（store_test.go:2044）。"
+    },
+    {
+      "decision": "两条导出面守卫按惯例登记，assert.Equal 一字未动（AST 版 12→13、reflect 版 5→6），并按文件惯例补一段「为什么名单里多了 Store.HasArticle」",
+      "rationale": "登记不是放宽：断言仍是全导出面精确集合相等，只在切片里加一项。正向自证已实测（见 verification.ablations 的 A1/A2）：删掉新增项两条各自转红，且**互不牵连**（删 AST 版那项时 reflect 版仍绿，反之亦然），这正好再次实证了那两条守卫互补而不能互替。按 leader 指示**没有**跑「换成 assert.Subset」那种变异——它必然存活，证明不了本次登记。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/store.go（+46/-0，纯追加：HasArticle 及其注释，插在 HasPeriod 之后）",
+    "internal/hestia/store_test.go（+183/-4，4 处删除全部来自两条守卫各自的 assert.Equal 期望切片行与消息行被整行替换）"
+  ],
+  "interfaces_exposed": [
+    "func (s *Store) HasArticle(ctx context.Context, articleID string) (bool, error) —— 同时查 hestia_observations（全表）与 hestia_pending，任一命中即 true；未命中 (false, nil)；查库失败 (false, err) 且用 %w 包住底层 err、错误串带 articleID"
+  ],
+  "verification": {
+    "worktree": "/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-003 分支 task/TASK-003，基于 master 63ac5b628d8375e7f15835920c3a817292ddae1b",
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 → ok；-race → ok；gofmt -l internal/hestia/ 空；go vet 空",
+    "counts_backtoback": "背对背同一时刻采样：master(63ac5b6) 577 PASS / coverage 93.2%；task/TASK-003 584 PASS / coverage 93.3%。+7 = TestHasArticle(1) + 其 3 个子测试 + SeesSupersededRows + OnEmptyID + WrapsQueryError。DoD 门槛 93.2% 已过。",
+    "func_coverage": "go tool cover -func：HasArticle 100.0%（三个分支——命中、ErrNoRows、其他 err——都有测试）",
+    "done_criteria_mapping": [
+      "functional[0] 同时查两表、真库测试 → TestHasArticle/观测表里的命中 + TestHasArticle/pending 里的也命中（均用 newTestStore 真库）",
+      "functional[1] 三条各一测试 → TestHasArticle 的三个子测试；另加计划要求的 TestHasArticleSeesSupersededRows",
+      "boundary[0] 空 articleID 行为钉住 → TestHasArticleOnEmptyID（(false, nil)，理由见 decisions[0]）",
+      "error_handling[0] %w 包住 + 上下文 → TestHasArticleWrapsQueryError（ErrorIs + ErrorContains(articleID) + NotNil(Unwrap)）",
+      "non_functional[0] 两条导出面守卫登记 → TestStoreExposesNoWriteMethods / TestPackageExposesNoWriteFunctions（消融 A1/A2 正向自证）",
+      "non_functional[1] gofmt/vet/整包/-race/覆盖率 → 见 suite 与 counts_backtoback"
+    ],
+    "ablations": [
+      "A1 AST 版期望切片删掉 \"Store.HasArticle\" → 红在 store_test.go:420（assert.Equal），reflect 版保持绿",
+      "A2 reflect 版期望切片删掉 \"HasArticle\" → 红在 store_test.go:375（assert.Equal），AST 版保持绿",
+      "A3 实现改查 viewCurrent 而非 TableObservations → **只有** TestHasArticleSeesSupersededRows 红在 store_test.go:1980，其余三个测试全绿（这正是「只有一条断言守着全表 vs 视图」的实证）",
+      "A4 去掉 UNION ALL 的 pending 半边（同步去掉多余实参，避免以错误理由致红）→ **只有** TestHasArticle/pending 里的也命中 红在 store_test.go:1942",
+      "A5 %w 改成 %v → TestHasArticleWrapsQueryError 红在 store_test.go:2042（ErrorIs）与 2044（NotNil(Unwrap)）——2044 正是 F8 平凡为真所测不到的那个差集",
+      "A6 去掉两处 WHERE article_id = ? 谓词（恒真）→ TestHasArticle/没见过的返回 false 红在 store_test.go:1951，TestHasArticleOnEmptyID 红在 store_test.go:2017（证明空 ID 那条不是空断言）"
+    ],
+    "ablation_hygiene": "变异全部作用在我自己的 worktree（与其他 dev 隔离）上，逐个变异体先 diff 逐字核对再跑、gofmt 作语法闸；六轮结束后校验 store.go / store_test.go 的 sha256 与变异前逐字节一致（a04f31e8… / 028a7a19…）。A4 第一版曾以「实参多一个」的错误理由致红，已修正为语义纯净的变异后重跑。",
+    "resampled_after_last_edit": "本 discovery 里的全部自证数字（PASS 计数、覆盖率、numstat、sha256）均在最后一次代码改动之后统一重采，代码此后未再改动。"
+  },
+  "notes_for_downstream": [
+    "TASK-006（status，也改 store.go）：我只在 HasPeriod 之后**纯追加** 46 行，没有动任何既有函数，合并冲突面接近零。",
+    "下游若要给 HasArticle 加窄接口（形如 discover.go 的 PeriodChecker），请照 store_test.go 末尾 `var _ PeriodChecker = (*Store)(nil)` 的写法加一行编译期断言——签名漂移才会在编译期红。本任务没加，因为 T2 阶段还没有消费者，凭空造接口会是无消费者的抽象。",
+    "**别把「查全表而非视图」当成可有可无的细节**：只有 TestHasArticleSeesSupersededRows 一条断言守着它（A3 实测），删掉它这个选择就无人守了。",
+    "已知盲区（见 key_findings[3]）：站点迁移触发 Save 的 Duplicate 分支时 refreshArticleID 会**原地覆盖** article_id，旧 id 从此不再命中 HasArticle。这是既有设计的直接推论，不是本任务引入的，但 ingest 侧若假设「见过的 id 永远见过」会踩到。"
+  ]
+}

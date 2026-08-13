@@ -1,0 +1,110 @@
+{
+  "task_id": "TASK-010",
+  "title": "季报识别②：parse.go 的 titleRE / parseTitle / checkPeriodTypeSupported",
+  "by": "dev-agent-52",
+  "at": "2026-08-13T00:20:00Z",
+  "git": {
+    "branch": "master（wave2 协议：主工作区直连，不建 worktree）",
+    "head": "062b460282bd0fd19430507d0bcef3e0fa35d0e0",
+    "parent": "2ce68cd（TASK-006 status 的查询与渲染）",
+    "note": "单 commit。全部自证数字采自 062b460，且**在干净隔离树上采**（理由见 verification.workspace_caveat）。 交付提交 062b460 未被改写，现为 master(0e2c6fc) 的祖先。"
+  },
+  "key_findings": [
+    "🔴 **`checkPeriodTypeSupported` 原来是「默认放行」（`if periodType != \"monthly\" { return nil }`）** —— 这不是风格问题，是 TASK-001 往 `validPeriodTypes` 加了 q1/q1_q3 之后**真实存在的缺口**：两种抽取侧根本没接的期次直接穿过标题层进入 extract，而没有任何测试会红。已改为穷举 switch（默认拒绝），并加 `TestEveryPeriodTypeHasAnExplicitSupportDecision` 作绊线。",
+    "🔴 **默认放行的后果已实测，不是预测**：消融 A2（把函数改回默认放行）跑真实季报样本，`Parse` 的实际错误是 `hestia: 人民币存款期内合计 not found among 0 candidate sentence(s) []: refusing to fall back to a neighbouring one...`。**这正是 DoD 预言的那句会误导人的错误** —— 它指向抽取规则，接手的人会去改 profiles.go 的正则，而真正的原因是「这个期次压根没接线」。我的守卫把它换成一句写明 TASK-004 的拒绝。",
+    "`parse.go` 的 `titleRE` 与 `discover.go` 的 `reportTitleRE` 是**两份并行的期次解析**，此前只有后者被 TASK-001 放宽 ⇒ 中间态是「Discover 发现得了季报，Ingest 抓回来必定 Parse 失败」（dev-agent-54 在 ingest 链路上实测撞到）。本任务闭合标题层这一半。",
+    "两份正则的**季度段宽窄我刻意做得不同**，不是疏漏：discover 侧写宽（`[一二三四五六七八九十]季度`）+ 语义层只放行「一季度」，因为在列表页上「不匹配」是**安静**的，把二/三/四季度挡在语义层才留得下位置与用例；parse 侧只列 `一季度|前三季度`，因为这里「不匹配」是**响亮**的（`unrecognized report title %q`，标题原文就在错误信息里），再加一层语义拒绝只是把同一句话换个地方说。理由写进了 titleRE 的注释。",
+    "`parseTitle` 的「不认识」错误信息里**硬编码着一份可接受形态清单**（`want 「YYYY年金融统计数据报告」/…`）—— 与 TASK-001 在 types.go/thresholds.go 处理的那两处同形状（取值列表抄一遍会静默过期）。本次我**手工同步**了它（补上两种季度形态）而**没有做成派生**：这里的清单是给人读的自然语言模板（含「YYYY年…」占位形态），不是 `validPeriodTypes` 那种可枚举集合，派生会产出一句更难读的错误。⚠️ **代价是它仍然可能过期**，且没有绊线守着——TASK-004 若再动 titleRE，请一并检查这句。"
+  ],
+  "decisions": [
+    {
+      "decision": "期次值逐字采用 TASK-001 discovery 的定义：一季度 → q1 / YYYY-03，前三季度 → q1_q3 / YYYY-09",
+      "rationale": "DoD 明令，且两套定义会在 Meta.validate 的 periodEndMonth 组合校验处炸，而那是运行时才发现。TestParseTitle 里那两条同时断言 `validPeriodTypes[pt]` 与 `\\A[0-9]{4}-[0-9]{2}\\z`（既有断言，自动覆盖新增行）。"
+    },
+    {
+      "decision": "`checkPeriodTypeSupported` 从「默认放行」改为**穷举 switch（默认拒绝）**，并加穷举绊线测试",
+      "rationale": "DoD 只要求「把新季度类型加进拒绝列表」，那样做**能过 DoD 但留着同一个洞**：第六种 period_type 出现时照样静默穿过。判据应当是「默认放行 vs 默认拒绝」而不是「列表全不全」。绊线 `TestEveryPeriodTypeHasAnExplicitSupportDecision` 用 `require.Len(decisions, len(validPeriodTypes))` + 逐键 `require.Contains` 双向锁死，消融 A3 实证：往 validPeriodTypes 加第六种取值（并给它期末月，避开 types_test 那条网）⇒ 本条红在 parse_test.go:398「新增 period_type 必须在这里明确表态」。"
+    },
+    {
+      "decision": "季度拒绝的错误信息里写死 `TASK-004` 这个出口",
+      "rationale": "DoD 要求，而消融 A2 给出了它的实证价值（见 key_findings 第 2 条）。⚠️ 这是**有意写死的任务编号**，与 thresholds.go 那条「编号带 milestone 前缀不是啰嗦」的告诫同类：TASK-004 是本 Sprint 的编号，下个 Sprint 的 TASK-004 是别的任务。解除时连注释一起删。"
+    },
+    {
+      "decision": "解除方式设计成**逐个删 case**，而不是删掉整个函数",
+      "rationale": "原注释写「拿到月报样本后删掉这个函数与它的调用即可」—— 加了季度分支后那句话变成**危险的**：照做会把季度那两条一起放行。已改写为逐分支解除说明。"
+    },
+    {
+      "decision": "用真实季报正文样本（TASK-001 落的 testdata/pboc-2026-03-q1.html、pboc-2025-09-q3.html）跑 Parse，而不是合成 HTML",
+      "rationale": "DoD 要求。合成 HTML 只能证明「拒绝逻辑会触发」，真实样本才证明「真拿到这篇报告时它确实触发」。测试里先断言 `metaContent(raw,\"ArticleTitle\")` 等于 TASK-001 记录的标题——这条同时校验了样本没被换掉。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/parse.go：titleRE 加 `一季度|前三季度`（并补注释说明与 discover.go 两份正则宽窄不同的理由）；parseTitle 加两条 case；unrecognized 错误信息补两种形态；checkPeriodTypeSupported 改为穷举 switch + 季度分支",
+    "internal/hestia/parse_test.go：TestParseTitle +2 例；TestParseTitleRejectsUnknownShape 补「2025年三季度…」并改写陈旧注释；新增 TestParseRejectsQuarterlyUntilExtractorWired、TestEveryPeriodTypeHasAnExplicitSupportDecision"
+  ],
+  "interfaces_exposed": {
+    "no_new_exports": "本任务**不新增任何导出物**（leader 要求）。改动全在既有的包内标识符 titleRE / parseTitle / checkPeriodTypeSupported 上。",
+    "note_for_TASK_004": "解除季报拒绝要做两件事，缺一即 no-op：① profiles.go 的 `periodAlt`（现为 `全年|上半年|[0-9]{1,2}月份`）加「一季度」「前三季度」；② `cumulativePeriods`（现为 {全年, 上半年}）同样加这两个 —— 那张表判的是「期内累计 vs 单月」，季报两种都是**年初起累计**，必须进表。做完之后删掉 parse.go 里 checkPeriodTypeSupported 的 `case \"q1\", \"q1_q3\"` 分支，并把 TestParseRejectsQuarterlyUntilExtractorWired **改成正例而不是删掉**（它那时就变回一条端到端守卫）。⚠️ 正文里的期次前缀与标题同词（「一季度」/「前三季度」），但 periodAlt 现有的月份形态是「N月份」带「份」字，别照着标题的「N月」写。"
+  },
+  "verification": {
+    "workspace_caveat": "本任务交付期间主工作区一度整包红，**红的不是我**：TestPackageExposesNoWriteFunctions（store_test.go:420）期望 16 项导出面、实际 17 项，多出的是 dev-agent-54 未跟踪的 ingest.go 新导出的 Ingest。归属三样已核（git status / git log / 任务声明，且 store_test.go 同在 TASK-005 与 TASK-006 的 writes 里 ⇒ scope 重叠）。我未碰该文件，dev_done 三次判据不过即停在 in_progress，最后转 blocked_clarification 把阻塞落盘。**已由 leader 于 0e2c6fc 解除**（dev-54 停机，收回改派被 validator 的 scope-mutex 阻断，leader 代提交并登记 Ingest）。⇒ 期间我的全部自证数字采自隔离树（detached at 062b460，git status 空）；**解除后已在转绿的主工作区 0e2c6fc 上重采一遍，两处结论一致**。",
+    "suite": "隔离树 062b460：go test ./internal/hestia/ -count=1 —— ok，0 FAIL。解除后主工作区 0e2c6fc 重采：ok，0 FAIL。",
+    "race": "隔离树 062b460：-race ok。主工作区 0e2c6fc 重采：-race ok。",
+    "coverage": "隔离树 062b460：**93.3%**（当时树内不含 ingest.go/status.go）。主工作区 0e2c6fc：**93.5%**。两者都在门槛 93.2% 之上；差异来自树内文件集不同，不是我的改动。",
+    "gofmt_vet": "gofmt -l 空；go vet 空；go build ./... OK",
+    "main_workspace_status": "已转绿。我的两个文件与 062b460 逐字节一致（git diff HEAD -- 为空），且 062b460 仍在 master 祖先链上（内容判据：parse.go 含季度分支 10 处、parse_test.go 两个新测试均在）。",
+    "ablation": {
+      "harness": "在 `git worktree add ../wt-t010-verify 062b460 --detach` 的隔离副本里做，主工作区一个字节未碰（收尾 `git diff --stat HEAD -- parse.go parse_test.go` 为空）；每个变异体落盘后先 `go vet` 过语法闸。收尾已 `git worktree remove`。",
+      "A1_删掉titleRE的季度分支": {
+        "mutation": "titleRE 去掉 `一季度|前三季度`，parseTitle 删掉那两条 case",
+        "killed_by": "parse_test.go:58 `require.NoError(t, err)`（TestParseTitle 的两条季度用例）与 parse_test.go:352 `require.NoError(t, err, \"季报标题必须被 parseTitle 认出\")`",
+        "full_impact": "恰好 4 条转红且全是本任务新增：TestParseTitle/{2026年一季度, 2025年前三季度} + TestParseRejectsQuarterlyUntilExtractorWired/{q1, q3} 两份样本。既有用例 0 条受影响 ⇒ 「titleRE 是 \\A…\\z 全锚定的，放宽期次段是唯一改动点」这句由此实证。"
+      },
+      "A2_checkPeriodTypeSupported改回默认放行": {
+        "mutation": "改回 `if periodType != \"monthly\" { return nil }`（即 DoD 修复前的原样）",
+        "killed_by": "TestEveryPeriodTypeHasAnExplicitSupportDecision/{q1, q1_q3}（`An error is expected but got nil`）+ TestParseRejectsQuarterlyUntilExtractorWired 两份样本，红在 parse_test.go:363 `assert.Contains(err, periodType)`",
+        "actual_error_observed": "hestia: 人民币存款期内合计 not found among 0 candidate sentence(s) []: refusing to fall back to a neighbouring one, it has the right magnitude and format but the wrong meaning",
+        "why_this_matters": "这行不是我编的，是消融跑出来的真实输出 —— **DoD 预言的「会让接手的人以为是抽取规则写错了」得到实证**。它指向 profiles.go 的抽取规则，而真因是这个期次压根没接线。"
+      },
+      "A3_往validPeriodTypes加第六种取值": {
+        "mutation": "types.go 的 validPeriodTypes 加 `q1_q2`，并给它期末月 06（避开 types_test 那条一致性网，确保红的是本条而不是别处）",
+        "killed_by": "parse_test.go:398 `require.Len(decisions, len(validPeriodTypes))` —— 「新增 period_type 必须在这里明确表态：进抽取层，还是显式拒绝并写明理由」",
+        "why_this_ablation": "A2 只证明「q1/q1_q3 现在被拦住了」，证不了「**下一个**新增的类型也会被拦住」。而后者才是我把默认放行改成默认拒绝的全部理由。不做 A3，那个理由就只是声明。"
+      }
+    },
+    "dod_coverage": [
+      {
+        "criterion": "functional[0] titleRE/parseTitle 认得两种真实季报标题，期次值逐字采用 TASK-001 的定义，用真实正文样本跑 Parse 的标题段",
+        "evidence": "TestParseTitle +2 例（含既有的 validPeriodTypes 与 periodRE 断言）；TestParseRejectsQuarterlyUntilExtractorWired 用 testdata/pboc-2026-03-q1.html 与 pboc-2025-09-q3.html，先断言 metaContent 取到的标题与 TASK-001 记录一致，再断言 parseTitle → 2026-03/q1、2025-09/q1_q3。消融 A1 证明鉴别力。"
+      },
+      {
+        "criterion": "functional[1] 既有三种形态仍绿",
+        "evidence": "TestParseTitle 原 5 例、TestParseTitlePadsMonth、TestParseRealSamples、TestParseMetaPassesM1b1Validation、TestParseRejectsMonthlyUntilSampled 全绿；消融 A1 的全量影响里既有用例 0 条 ⇒ 改动确实只在期次段。"
+      },
+      {
+        "criterion": "boundary[0] checkPeriodTypeSupported 加季度拒绝，理由写进错误信息，由 TASK-004 移除",
+        "evidence": "已加，且**超出 DoD 做成默认拒绝**（见 decisions）。错误信息含 period_type、原标题、失败根因（periodAlt/cumulativePeriods 认不出）与出口 TASK-004。TestParseRejectsQuarterlyUntilExtractorWired 逐条断言；TestEveryPeriodTypeHasAnExplicitSupportDecision 守穷举性。消融 A2/A3。"
+      },
+      {
+        "criterion": "error_handling[0] parseTitle 失败时错误信息含原标题；若包了底层错误须用 %w，自证用 require.NotNil(errors.Unwrap(err))",
+        "evidence": "**前半满足**：TestParseTitleRejectsUnknownShape 逐条 `assert.Contains(err.Error(), bad)`（我新增的「2025年三季度…」一并被它覆盖），我新增的两条季度拒绝用例也各自断言含原标题。⚠️ **后半在本任务下不适用，我没有为了满足它而制造包裹**：parseTitle 不包任何底层错误 —— 唯一的候选是 `strconv.Atoi` 的 err，而 `[0-9]{1,2}月` 使它**不可达**（与 discover.go 里同形状分支的结论一致，那里的注释已写明）。凭空 `%w` 一个不可达错误，只会让 `require.NotNil(errors.Unwrap(err))` 变成一条恒真断言。请 leader/验证者确认这个判断。"
+      },
+      {
+        "criterion": "non_functional[0] 消融自证：删掉 titleRE 的季度分支，确认新增断言转红且红的是它们",
+        "evidence": "A1，给出 parse_test.go:58 与 :352 两处具体行号与断言原文；全量影响 4 条全是新增，既有 0 条。另自补 A2、A3。"
+      },
+      {
+        "criterion": "non_functional[1] gofmt/vet 空、-count=1 与 -race 全绿、覆盖率 ≥93.2%",
+        "evidence": "隔离树 062b460：ok / ok / 93.3% / 空 / 空。⚠️ 主工作区因他人在途改动而红，见 workspace_caveat。"
+      }
+    ],
+    "gate_result": "dev_done 门禁在主工作区 0e2c6fc 上通过：`Gate scope (TASK-010) ./internal/hestia` → `Task scope passes. Coverage: 93.5% (dev_minimum: 80%)`。落盘核实：status=dev_done，epoch=1，rework=0。"
+  },
+  "open_items_for_leader": [
+    "~~主工作区红挡住 dev_done~~ **已解除**（leader 于 0e2c6fc 代 dev-agent-54 提交并登记 Ingest）。登记的合法性依据由我提供并经 leader 复核：ingest.go:129 调 d.Store.Save、全文件无裸写库 ⇒ 经过 Save 而非绕过，故加进导出面 golden 清单不违背该守卫的意图。我另发现该断言的 expected 列表实际 16 项而失败文案写「十七」，加 Ingest 后两边恰好一致，已一并修。",
+    "**给 dev-agent-54 的一条陈旧注释**（我改不了，`ingest_test.go` 不在我 writes 内）：`ingest_test.go:69-72` 写着「parse.go 有自己独立的 titleRE，没跟着放宽 —— 实测 Parse 对这两份直接报 unrecognized report title」。**本任务落地后这两句都不再成立**：现在报的是 `period_type q1 is not supported yet …TASK-004`。**结论（这两份暂不能进 ingest 链路）仍然对，但理由变了** —— 结论对而理由错最不容易被复查，请它改。",
+    "**error_handling[0] 的 `%w` 那一半我判为不适用**（parseTitle 不包底层错误，Atoi 分支不可达），没有为满足 DoD 而制造包裹。若你或验证者认为该做，请明确说，我改。",
+    "**一处已知会过期而无绊线守着的地方**：`parseTitle` 的 unrecognized 错误信息里硬编码了可接受形态清单，我这次手工同步了，但没做成派生（它是自然语言模板，派生会更难读）。TASK-004 若再动 titleRE，请一并检查。",
+    "🔴 **给 TASK-011 的输入（leader 已确认并写进其 DoD）**：本任务的上游 TASK-001 **扩大了 Discover 静默停摆的触发面**——Discover 的判停是「第一条已入库期次即 return」，停在哪取决于哪些条目能成为候选，而 TASK-001 做的正是让更多条目成为候选（p15 起从 0 候选变有候选；q1/q1_q3 成为新的可能停止键，此前它们连候选都不是）。不构成 TASK-001 该回滚（不放宽则季报根本发现不了，严格更差），但 TASK-011 的紧迫性因 TASK-001 上升，不是无关的存量问题。另：discover.go 有一段带 M0 实测支撑的反论证（为何当初选期次判停而非 article_id），TASK-011 必须推翻它或说明为何现在不同，leader 已把「用测试实证 refreshArticleID 的自愈」写进其 boundary[0]。"
+  ]
+}
