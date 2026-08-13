@@ -531,3 +531,41 @@ func TestInstallServicesInstallsHestiaPlist(t *testing.T) {
 	// 阴性对照：确认我们截到的确实是那段列表，而不是整个文件。
 	assert.NotContains(t, loop, "每天 15:30", "截取范围不该包含文件头的注释段")
 }
+
+// 🔴 flag 必须**真的绑到变量上** —— 经 cobra 的参数解析验，不是查 flag 存不存在。
+//
+// ⚠️ **`TestHestiaFlags` 只断言 flag 存在，而那正是失效的那一条**：把
+// `BoolVar(&hestiaForce, …)` 换成 `Bool(…)`，flag 仍在、仍叫 `force`、`--help` 一模一样，
+// **只是不再写回 `hestiaForce`** ⇒ `--force` 静默失效。实测（QA M13/M14，我独立复现）：
+// 两处一起换掉之后 `go test ./cmd/atlas/ ./internal/hestia/ -count=1` **EXIT=0、零 FAIL**。
+//
+// 后果落在设计上唯一的报警通道之外：`atlas hestia ingest --force` 打出
+// `no new reports (stopped: seen_article)` 然后 **exit 0** —— 与「今天真的没有新报告」
+// **逐字同形**。而 `--force` 是 CONTRACTS 写明的**唯一恢复出口**
+// （搜 `否则调了阈值之后没有任何办法重跑`）。
+//
+// 🔴 **判据是肯定式的**：「解析之后变量等于我传进去的值」。
+// 「flag 存在」是否定式判据的近亲 —— 它在**绑定断裂**这个失效上恒真。
+//
+// ⚠️ 本用例改全局变量，故**不能 t.Parallel**，并用 t.Cleanup 还原
+// （同包其它用例直接读写这两个变量）。
+func TestHestiaFlagsBindToVariables(t *testing.T) {
+	oldForce, oldCfg := hestiaForce, hestiaCfgPath
+	t.Cleanup(func() { hestiaForce, hestiaCfgPath = oldForce, oldCfg })
+
+	t.Run("--force 绑到 hestiaForce", func(t *testing.T) {
+		hestiaForce = false
+		require.NoError(t, hestiaIngestCmd.Flags().Parse([]string{"--force"}))
+		assert.True(t, hestiaForce,
+			"--force 必须写回 hestiaForce；绑定断裂时 flag 照样存在、--help 一模一样，而 --force 静默失效")
+	})
+
+	t.Run("--hestia-config 绑到 hestiaCfgPath", func(t *testing.T) {
+		const want = "/tmp/some-explicit-hestia.yaml"
+		hestiaCfgPath = ""
+		require.NoError(t, hestiaCmd.PersistentFlags().Parse([]string{"--hestia-config", want}))
+		assert.Equal(t, want, hestiaCfgPath,
+			"绑定断裂时会静默读默认路径的配置 —— 生产上因 plist 的 WorkingDirectory 碰巧无害，"+
+				"手工在别处跑就会读错配置而不报错")
+	})
+}
