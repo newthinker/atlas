@@ -114,7 +114,8 @@ var (
 // 更不是「backfillItemRE 认得出」（后者把守卫退化成 `n == n`，部分失效从此永不报警）。
 // 三者只差一个谓词，各由 TestScanBackfillPageCountBaselineExcludesExternalLinks 的
 // 三格分别钉住 —— 尤其第三格（href 形态从 `.html` 变 `.htm`）：**在补它之前，
-// 「按形态分」那个变异跑出来是 850 全绿 SURVIVED**，整段论证没有任何东西守着。
+// 「按形态分」那个变异是 SURVIVED（当时套件 850 条全绿、红 0 条）**，整段论证
+// 没有任何东西守着；补上之后该变异红 2 条，且杀它的**只有**第三格。
 func backfillInternalIstitleCount(html []byte) int {
 	n := 0
 	for _, tag := range backfillIstitleAnchorRE.FindAll(html, -1) {
