@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -828,10 +829,17 @@ func TestRunBackfillReconcilesFetchedNotPlanned(t *testing.T) {
 //   - 把产物根目录 chmod 成只读、但**预先建好** index/ 与 search/ 子目录
 //     ⇒ 前两格照常写入（写的是子目录），而 manifest 的 os.CreateTemp(根目录) 失败
 //
-// ⚠️ **`AppendFailed` / `AppendArticle` 内部那两次 Save 不在本表内**：它们发生在
-// 第 114 行那次 Save **之后**，与它写同一个目录 ⇒ 静态的文件系统构造没法让前者成功、
-// 后者失败；而要注入就得改 `backfill_manifest.go`，那**不在本任务的 writes 里**。
-// 已向 Leader 申报，未擅自扩大范围。
+// 🔴 **第五格是我第一版判成「结构上不可构造」的那一条，判错了**（test-agent-28 实测证伪）。
+//
+// 我当时的探针只试了**静态预置**（`manifest.json` 预置为只读文件 / 预置为目录），
+// 据此得出「必须让 Save 可注入 ⇒ 得改 backfill_manifest.go ⇒ 不在 writes 里」。
+// **但 `runBackfill(ctx, f Fetcher, …)` 的 Fetcher 本来就是注入点**：让 fake 在
+// **被问到文章 URL 那一刻**把产物根目录改成不可写，第一次 `store.Save()` 已经成功、
+// 而循环内 `AppendFailed` 的那次必然失败 —— **正是我说「没有中间态」的那个中间态**。
+//
+// ⚠️ 手法与第四格**完全相同**（`os.Chmod(out, 0555)` + `t.Cleanup` 改回），
+// 差别只在**施加时点**：第四格是**跑前静态预置**，第五格是**跑到一半**。
+// ⇒ 教训不是「scope 不够」，是**我的穷举只覆盖了静态构造那一类，却把结论写成了一般命题**。
 func TestBackfillFetchAbortsOnEveryDiskFailurePath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("以 root 运行时挡不住写入，构造不出落盘失败")
@@ -839,7 +847,9 @@ func TestBackfillFetchAbortsOnEveryDiskFailurePath(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		setup func(t *testing.T, out string)
-		want  string // 错误里应出现的片段 —— 钉住「红在哪一格」，不只是「红了」
+		// wrap 可选：需要**跑到一半**才施加的构造用它（第五格）。nil 表示只做静态预置。
+		wrap func(t *testing.T, inner Fetcher, out string) Fetcher
+		want string // 错误里应出现的片段 —— 钉住「红在哪一格」，不只是「红了」
 		//
 		// 🔴 **子测试名里不许出现 want 的字面量**：`t.TempDir()` 的路径**包含子测试名**，
 		// 于是 `Contains(err, "manifest")` 会被临时目录路径满足 —— 断言看起来钉住了
@@ -877,6 +887,18 @@ func TestBackfillFetchAbortsOnEveryDiskFailurePath(t *testing.T) {
 			},
 			want: "manifest.json",
 		},
+		{
+			// 第五格：循环内 `AppendFailed` 的那次 Save。见上方注释——它需要**跑到一半**
+			// 才把根目录改成不可写，静态预置做不到。判据 `建临时文件于` 来自
+			// `manifestStore.Save` 的 `os.CreateTemp`，与第四格同源但**触发时点不同**。
+			name:  "第五步：循环内记录失败时落盘失败",
+			setup: func(*testing.T, string) {},
+			wrap: func(t *testing.T, inner Fetcher, out string) Fetcher {
+				t.Cleanup(func() { _ = os.Chmod(out, 0o755) }) // 否则 TempDir 清理失败
+				return chmodOnArticleFetcher{inner: inner, out: out, on: "/" + bfTwoArticles()[0].ID + "/"}
+			},
+			want: "建临时文件于",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			out := t.TempDir()
@@ -884,13 +906,40 @@ func TestBackfillFetchAbortsOnEveryDiskFailurePath(t *testing.T) {
 			arts := bfTwoArticles()
 			tt.setup(t, out)
 
-			_, err := bfRun(t, bfSite(t, cfg, arts...), cfg)
+			var f Fetcher = bfSite(t, cfg, arts...)
+			if tt.wrap != nil {
+				f = tt.wrap(t, f, out)
+			}
+			_, err := bfRun(t, f, cfg)
 
 			require.Error(t, err, "落盘失败必须中止，不能继续抓")
 			assert.Contains(t, err.Error(), tt.want,
 				"错误要点名是哪一格落盘失败了——只断言「有错」时，任何一格坏了这条都绿")
 		})
 	}
+}
+
+// chmodOnArticleFetcher 在被问到某篇文章的 URL 那一刻，把产物根目录改成只读，然后报错。
+//
+// ⇒ 第一次 `store.Save()`（写 manifest 元数据）此时**已经成功**，而这次失败会走进
+// `store.AppendFailed` ⇒ 它内部的 `Save()` 在只读目录上 `os.CreateTemp` 失败。
+// 这是**唯一**能让「前一次 Save 成功、后一次失败」同时成立的构造：两次写的是同一个目录，
+// 静态预置只能让它们同生共死。
+//
+// ⚠️ `on` 要匹配**文章 URL**而不是栏目页：栏目页的路径里也含数字段，匹配宽了会在
+// 第一次 Save 之前就把目录改成只读，那样测的就变成第四格了。
+type chmodOnArticleFetcher struct {
+	inner Fetcher
+	out   string
+	on    string
+}
+
+func (f chmodOnArticleFetcher) Get(ctx context.Context, url string) ([]byte, error) {
+	if strings.Contains(url, f.on) {
+		_ = os.Chmod(f.out, 0o555)
+		return nil, errors.New("chmodOnArticleFetcher: 单篇抓取失败")
+	}
+	return f.inner.Get(ctx, url)
 }
 
 // mustWriteBlocker 把 path 造成一个**普通文件**，于是任何以它为目录的写入必然失败。
