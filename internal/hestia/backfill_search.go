@@ -170,12 +170,6 @@ func parseBackfillSearchPage(html []byte, page int) ([]backfillSearchHit, int, e
 	if err != nil {
 		return nil, 0, err
 	}
-	// 🔴 records 与 totalPages 必须互校（QA R2-3）。站点少报 totalPages 时既有守卫
-	// **一条都拦不住**：每页自洽校验 `want = min(records-(page-1)*12, 12)` 在第 1 页恒等于
-	// got；日期区间守卫也不触发（第 1 页最新，必在窗口内）。QA 实测 records=137/pages=1
-	// ⇒ 只翻 1 页、命中 12 条、`err=nil` ⇒ **交叉校验静默退化到 26%**，`only_in_index`
-	// 被灌满而无错无警。做这条校验的材料代码里本来就全有，只是从没比过。
-	//
 	ms := backfillSearchItemRE.FindAllSubmatch(html, -1)
 
 	// 🔴 `records == 0` 是**合法空集**，不是版式变了（QA R2-6）。

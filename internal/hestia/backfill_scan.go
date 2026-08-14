@@ -266,11 +266,11 @@ func scanBackfillPage(html []byte, base string) (backfillPage, error) {
 			"the page layout likely changed; refusing to report it as an empty page")
 	}
 	allIstitle, internalIstitle := backfillIstitleCounts(html, base)
-	if n := len(backfillDateSpanRE.FindAllIndex(html, -1)); n != allIstitle {
+	if dateBlocks := len(backfillDateSpanRE.FindAllIndex(html, -1)); dateBlocks != allIstitle {
 		return backfillPage{}, fmt.Errorf(
 			`hestia backfill: %d istitle="true" anchors but %d date blocks on this page: `+
 				"the page layout likely changed (the two counts move together only if a tag name changed)",
-			allIstitle, n)
+			allIstitle, dateBlocks)
 	}
 	if internalIstitle != len(page.Items) {
 		return backfillPage{}, fmt.Errorf(

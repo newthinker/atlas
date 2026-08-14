@@ -136,6 +136,10 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 		to = time.Now()
 	}
 	lim := &backfillLimiter{inner: f, sleep: sleep}
+	// 只解一次：落进 manifest 的那个值与 reconcileBackfill 实际用的那个值**必须是同一个**。
+	// 分别写两遍 cmp.Or 时，改一处漏一处就会让 manifest 记下一个「这一趟没用过」的 cutover
+	// ——而 manifest 里这个字段存在的全部理由就是「产出它时实际用的参数」（QA R2-8）。
+	cutover := cmp.Or(cfg.Cutover, backfillCutover)
 
 	scan, err := scanBackfillIndex(ctx, lim, backfillIndexCfg{
 		IndexURL: cfg.IndexURL, From: cfg.From, MaxPages: cfg.MaxPages,
@@ -163,7 +167,7 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 	store.Manifest.SearchSkippedReason = cc.SearchSkippedReason
 	// 产出这份 manifest 时**实际用的参数**（QA R2-8）：下游被要求「只读这份文件」，
 	// 而重算对账离不开这几样。cutover 尤其要紧——猜错一期就会凭空报出两条假缺篇。
-	store.Manifest.Cutover = cmp.Or(cfg.Cutover, backfillCutover)
+	store.Manifest.Cutover = cutover
 	store.Manifest.To = to.Format("2006-01-02")
 	store.Manifest.Keywords = backfillSearchKeywords
 	store.Manifest.KeepPrefix = backfillSearchKeepPrefix
@@ -218,7 +222,7 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 	// 能发现** —— 它不被调用，等于那条链根本没接上。
 	rc := reconcileBackfill(
 		backfillReconcileItemsFromArticles(store.Manifest.Articles),
-		cmp.Or(cfg.Cutover, backfillCutover),
+		cutover,
 		backfillExpect{Periods: cfg.ExpectPeriods, Articles: cfg.ExpectArticles},
 	)
 	writeBackfillReconcileReport(backfillReportWriter(cfg.Report), rc)
