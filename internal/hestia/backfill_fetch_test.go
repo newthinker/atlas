@@ -1,0 +1,570 @@
+package hestia
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Context Checkpoint: TASK-006 done_criteria → test mapping
+// functional[0]   断点续抓：已抓的不重发请求        → TestBackfillFetchSkipsAlreadyFetchedArticles
+// functional[1]   index/search 页存盘               → TestBackfillFetchSavesIndexAndSearchSnapshots
+//                                                     TestBackfillSearchSlugsCoverAllKeywords
+// functional[2]   SearchSkippedReason 落盘          → TestBackfillFetchRecordsSearchSkippedReason
+//                                                     TestBackfillFetchOmitsSearchSkippedReasonWhenSearchWorks
+// error_handling[0] 单篇失败 → failed[] + 继续 + 非零 → TestBackfillFetchRecordsFailedArticleAndContinues
+// error_handling[1] 落盘失败 → 立刻中止              → TestBackfillFetchAbortsOnDiskFailure
+// non_functional[0] sleep 次数 == 请求次数 − 1       → TestBackfillFetchSleepsBetweenEveryRequest
+// boundary[0]     manifest 为字面量 null ⇒ 报错     → TestBackfillFetchRejectsNullManifest
+//                                                     TestLoadManifestRejectsJSONNull
+// boundary[1]     交集取 index 侧 URL/Published     → TestCrossCheckBackfillIntersectionTakesIndexSideFields
+
+// —— 合成站点 ——
+//
+// 一份 index（1 页）+ 三个关键词各 1 页搜索结果 + 每篇文章一页正文。
+// 请求总数 = 1 + 3 + 待抓篇数，这个等式是 sleep 计数用例的基准。
+
+type bfArticle struct{ ID, Title, Date string }
+
+func bfArticleURL(id string) string {
+	return "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/" + id + "/index.html"
+}
+
+func bfArticleHTML(id string) []byte {
+	return []byte("<html><body>正文 " + id + "</body></html>")
+}
+
+func bfConfig(t *testing.T, out string) BackfillConfig {
+	t.Helper()
+	return BackfillConfig{
+		IndexURL: testIndexURL,
+		From:     backfillDate(t, "2020-01-01"),
+		To:       backfillDate(t, "2020-12-31"),
+		Out:      out,
+		MaxPages: 200,
+	}
+}
+
+// bfSite 造站点：arts 既是 index 上的报告条目，也各有一页正文。
+// 搜索侧三个关键词都只索到 arts[0]，于是它 Source=both、其余 Source=index
+// ——交集与差集同时非空，别让用例落在「两侧完全一致」这种退化输入上。
+func bfSite(t *testing.T, cfg BackfillConfig, arts ...bfArticle) *fakeFetcher {
+	t.Helper()
+	items := make([]string, 0, len(arts))
+	for _, a := range arts {
+		items = append(items, backfillReportItem(a.ID, a.Title, a.Date))
+	}
+	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: backfillIndexPageHTML(1, items...)}}
+	for _, kw := range backfillSearchKeywords {
+		f.pages[backfillSearchURL(kw, cfg.From, cfg.To, 1)] = searchPageHTML(1, 1,
+			searchItemHTML(bfArticleURL(arts[0].ID), arts[0].Title, "2020年01月10日"))
+	}
+	for _, a := range arts {
+		f.pages[bfArticleURL(a.ID)] = bfArticleHTML(a.ID)
+	}
+	return f
+}
+
+func bfTwoArticles() []bfArticle {
+	return []bfArticle{
+		{ID: "9001", Title: "2020年1月金融统计数据报告", Date: "2020-01-10"},
+		{ID: "9002", Title: "2020年2月金融统计数据报告", Date: "2020-01-10"},
+	}
+}
+
+// bfFailOn 让内层 Fetcher 对含某个子串的 URL 报错，其余照常。
+// 用子串而不是全等：三个关键词的搜索 URL 各不相同，但都含同一个 base。
+type bfFailOn struct {
+	inner    Fetcher
+	contains string
+	err      error
+}
+
+func (f bfFailOn) Get(ctx context.Context, url string) ([]byte, error) {
+	if strings.Contains(url, f.contains) {
+		if f.err != nil {
+			return nil, f.err
+		}
+		return nil, fmt.Errorf("bfFailOn: %s", url)
+	}
+	return f.inner.Get(ctx, url)
+}
+
+// recordingSleeper 记录每次 sleep 的时长。计数等式是 non_functional[0] 的判据，
+// 所以记的是**每一次**的时长而不只是次数。
+type recordingSleeper struct{ calls []time.Duration }
+
+func (r *recordingSleeper) sleep(d time.Duration) { r.calls = append(r.calls, d) }
+
+func bfRun(t *testing.T, f Fetcher, cfg BackfillConfig) (*recordingSleeper, error) {
+	t.Helper()
+	rec := &recordingSleeper{}
+	err := runBackfill(context.Background(), f, rec.sleep, cfg)
+	return rec, err
+}
+
+// TestBackfillFetchSkipsAlreadyFetchedArticles 对应 functional[0]。
+//
+// 判据是**那些 URL 根本没进 fetcher**，不是「manifest 没变多」——重发一次拿到相同内容时，
+// 后者照样绿，而 400 次请求已经白发了。
+func TestBackfillFetchSkipsAlreadyFetchedArticles(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+
+	// 预置：9001 已抓过（manifest 有记录 + 文件在盘上），9002 没有。
+	seed, err := loadManifest(out)
+	if err != nil {
+		t.Fatalf("预置 loadManifest: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(out, "articles"), 0o755); err != nil {
+		t.Fatalf("建 articles 目录: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(out, articleFile(arts[0].ID)), bfArticleHTML(arts[0].ID), 0o644); err != nil {
+		t.Fatalf("预置文章文件: %v", err)
+	}
+	if err := seed.AppendArticle(Article{ID: arts[0].ID, File: articleFile(arts[0].ID), URL: bfArticleURL(arts[0].ID)}); err != nil {
+		t.Fatalf("预置 manifest: %v", err)
+	}
+
+	f := bfSite(t, cfg, arts...)
+	if _, err := bfRun(t, f, cfg); err != nil {
+		t.Fatalf("runBackfill: %v", err)
+	}
+
+	if slices.Contains(f.calls, bfArticleURL(arts[0].ID)) {
+		t.Errorf("已抓过的 %s 不该再发请求，实际请求了\n全部请求: %v", arts[0].ID, f.calls)
+	}
+	if !slices.Contains(f.calls, bfArticleURL(arts[1].ID)) {
+		t.Errorf("没抓过的 %s 必须请求，实际没有\n全部请求: %v", arts[1].ID, f.calls)
+	}
+
+	got := readManifestFile(t, out)
+	if len(got.Articles) != 2 {
+		t.Errorf("manifest 应含两篇（一篇沿用、一篇新抓），实得 %d 篇", len(got.Articles))
+	}
+}
+
+// TestBackfillFetchSavesIndexAndSearchSnapshots 对应 functional[1]。
+//
+// index 快照名按设计附录 §A3 用「序号 + 日期区间」而不是页码——页码随新文章上架而漂移，
+// 重跑时同一个文件名会对应不同内容的页。
+func TestBackfillFetchSavesIndexAndSearchSnapshots(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	if _, err := bfRun(t, f, cfg); err != nil {
+		t.Fatalf("runBackfill: %v", err)
+	}
+
+	idx, err := os.ReadDir(filepath.Join(out, "index"))
+	if err != nil {
+		t.Fatalf("index 快照目录不存在: %v", err)
+	}
+	if len(idx) != 1 {
+		t.Fatalf("应存 1 页 index 快照，实得 %d 个: %v", len(idx), dirNames(idx))
+	}
+	if want := "001-2020-01-10_2020-01-10.html"; idx[0].Name() != want {
+		t.Errorf("index 快照命名应为 %q（§A3：序号-最新_最老），实得 %q", want, idx[0].Name())
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "index", idx[0].Name()))
+	if err != nil {
+		t.Fatalf("读 index 快照: %v", err)
+	}
+	if string(raw) != string(f.pages[testIndexURL]) {
+		t.Error("index 快照内容与站点返回的原始响应体不一致")
+	}
+
+	sr, err := os.ReadDir(filepath.Join(out, "search"))
+	if err != nil {
+		t.Fatalf("search 快照目录不存在: %v", err)
+	}
+	if len(sr) != len(backfillSearchKeywords) {
+		t.Fatalf("应存 %d 页搜索快照（每关键词 1 页），实得 %d 个: %v",
+			len(backfillSearchKeywords), len(sr), dirNames(sr))
+	}
+	for _, e := range sr {
+		if !strings.HasSuffix(e.Name(), "-p01.html") {
+			t.Errorf("搜索快照名应带页码后缀 -pNN.html，实得 %q", e.Name())
+		}
+	}
+}
+
+func dirNames(es []os.DirEntry) []string {
+	out := make([]string, 0, len(es))
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// TestBackfillSearchSlugsCoverAllKeywords：每个关键词都要有自己的快照文件名片段，
+// 且互不相同。两个关键词落到同一个文件名 ⇒ 后写的静默覆盖先写的，而快照的全部用途
+// 就是事后离线核对。
+func TestBackfillSearchSlugsCoverAllKeywords(t *testing.T) {
+	seen := map[string]string{}
+	for i, kw := range backfillSearchKeywords {
+		s := backfillSearchSlug(kw, i)
+		if s == "" {
+			t.Errorf("关键词 %q 没有 slug", kw)
+			continue
+		}
+		if prev, dup := seen[s]; dup {
+			t.Errorf("slug %q 被两个关键词共用: %q 与 %q", s, prev, kw)
+		}
+		seen[s] = kw
+		if strings.ContainsAny(s, `/\ `) {
+			t.Errorf("slug %q 含路径分隔符或空格，不能直接做文件名", s)
+		}
+	}
+}
+
+// TestBackfillFetchRecordsSearchSkippedReason 对应 functional[2]。
+//
+// 搜索侧失效 ⇒ fail-open：主路径照常抓完（返回 nil），但**必须在 manifest 里留下痕迹**。
+// 这个字段的全部意义是让「这次没做校验」与「校验通过」在读者看来不一样。
+func TestBackfillFetchRecordsSearchSkippedReason(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	fail := bfFailOn{inner: f, contains: backfillSearchBase}
+
+	if _, err := bfRun(t, fail, cfg); err != nil {
+		t.Fatalf("搜索侧失效必须 fail-open（主路径照常完成），实得错误: %v", err)
+	}
+
+	got := readManifestFile(t, out)
+	if got.SearchSkippedReason == "" {
+		t.Fatal("搜索侧失效时 search_skipped_reason 必须非空——否则「没做校验」与「校验通过」在 manifest 里长得一样")
+	}
+	if len(got.Articles) != len(arts) {
+		t.Errorf("fail-open 后主路径应照常抓完 %d 篇，实得 %d 篇", len(arts), len(got.Articles))
+	}
+	// 差集必须留空：宣称「搜索没索到这几篇」是谎报，事实是根本没问过搜索。
+	if len(got.OnlyInIndex) != 0 || len(got.OnlyInSearch) != 0 {
+		t.Errorf("跳过校验时两个差集必须留空，实得 only_in_index=%v only_in_search=%v",
+			got.OnlyInIndex, got.OnlyInSearch)
+	}
+}
+
+// TestBackfillFetchOmitsSearchSkippedReasonWhenSearchWorks：正常完成时该字段
+// 不出现在 JSON 里（omitempty）。与上一条成对——只有上一条时，实现把字段写成常量
+// 非空也能绿。
+func TestBackfillFetchOmitsSearchSkippedReasonWhenSearchWorks(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	if _, err := bfRun(t, f, cfg); err != nil {
+		t.Fatalf("runBackfill: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(out, "manifest.json"))
+	if err != nil {
+		t.Fatalf("读 manifest: %v", err)
+	}
+	if strings.Contains(string(raw), "search_skipped_reason") {
+		t.Errorf("交叉校验正常完成时不该出现 search_skipped_reason\n实际内容: %s", raw)
+	}
+}
+
+// TestBackfillFetchRecordsFailedArticleAndContinues 对应 error_handling[0]：
+// 单篇抓取失败是**外部世界**的事 ⇒ 记 failed[]、继续抓后面的、跑完返回非零。
+func TestBackfillFetchRecordsFailedArticleAndContinues(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	fail := bfFailOn{inner: f, contains: "/" + arts[0].ID + "/"}
+
+	if _, err := bfRun(t, fail, cfg); err == nil {
+		t.Error("有单篇失败时跑完必须返回非零")
+	}
+
+	got := readManifestFile(t, out)
+	if len(got.Failed) != 1 || got.Failed[0].ID != arts[0].ID {
+		t.Fatalf("失败那篇必须记进 failed[]，实得 %+v", got.Failed)
+	}
+	if got.Failed[0].Error == "" {
+		t.Error("failed[] 条目必须带错误原因")
+	}
+	// 「继续抓后面的」——这是与 error_handling[1] 处置相反的那一半。
+	if !slices.Contains(f.calls, bfArticleURL(arts[1].ID)) {
+		t.Errorf("单篇失败后必须继续抓后面的，实际没请求 %s\n全部请求: %v", arts[1].ID, f.calls)
+	}
+	if len(got.Articles) != 1 || got.Articles[0].ID != arts[1].ID {
+		t.Errorf("成功那篇应进 articles[]，实得 %+v", got.Articles)
+	}
+	if _, err := os.Stat(filepath.Join(out, articleFile(arts[1].ID))); err != nil {
+		t.Errorf("成功那篇的正文应已落盘: %v", err)
+	}
+}
+
+// TestBackfillFetchAbortsOnDiskFailure 对应 error_handling[1]：
+// 落盘失败是**本机**的事 ⇒ 立刻中止，不继续抓。
+//
+// 判据必须是「**后面那篇根本没被请求**」——只断言返回错误的话，「记 failed 继续抓」
+// 那种实现照样绿，而两条 DoD 的处置刻意相反正是这一点。
+func TestBackfillFetchAbortsOnDiskFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("以 root 运行时挡不住写入，构造不出落盘失败")
+	}
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	// articles 是个**普通文件** ⇒ 往 articles/<id>.html 落盘必然失败。
+	if err := os.WriteFile(filepath.Join(out, "articles"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("构造不可写的 articles 路径: %v", err)
+	}
+
+	f := bfSite(t, cfg, arts...)
+	if _, err := bfRun(t, f, cfg); err == nil {
+		t.Fatal("落盘失败必须返回错误")
+	}
+
+	fetched := 0
+	for _, a := range arts {
+		if slices.Contains(f.calls, bfArticleURL(a.ID)) {
+			fetched++
+		}
+	}
+	if fetched != 1 {
+		t.Errorf("落盘失败后必须立刻中止：应只请求到第 1 篇就停，实际请求了 %d 篇\n全部请求: %v",
+			fetched, f.calls)
+	}
+}
+
+// TestBackfillFetchSleepsBetweenEveryRequest 对应 non_functional[0]。
+//
+// 判据是**计数等式** `sleep 次数 == 请求次数 − 1`，不是「两次请求之间调用了 sleep」
+// ——后者字面上一次 sleep 就满足（1 条 sleep + 365 条请求也算数）。
+func TestBackfillFetchSleepsBetweenEveryRequest(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	rec, err := bfRun(t, f, cfg)
+	if err != nil {
+		t.Fatalf("runBackfill: %v", err)
+	}
+
+	// 1 页 index + 3 页搜索 + 2 篇文章 = 6 次请求。写死期望值是为了让「请求数」本身
+	// 也被钉住——只比两个观测值相等的话，实现少发一半请求时等式照样成立。
+	if len(f.calls) != 6 {
+		t.Fatalf("本用例应发 6 次请求（1 index + 3 search + 2 文章），实得 %d: %v", len(f.calls), f.calls)
+	}
+	if len(rec.calls) != len(f.calls)-1 {
+		t.Errorf("sleep 次数必须等于请求次数 − 1，实得 sleep=%d 请求=%d", len(rec.calls), len(f.calls))
+	}
+	for i, d := range rec.calls {
+		if d != backfillInterval {
+			t.Errorf("第 %d 次 sleep 时长应为 %v，实得 %v", i+1, backfillInterval, d)
+		}
+	}
+	if backfillInterval != time.Second {
+		t.Errorf("backfillInterval 应为 1s（自我约束的限速），实得 %v", backfillInterval)
+	}
+}
+
+// TestBackfillFetchRejectsNullManifest 对应 boundary[0]。
+//
+// `null` 是**合法 JSON**，所以它走的是 Unmarshal 的成功路径、留下一个零值 Manifest。
+// 静默当空的后果不是少一条记录，是断点续抓退化成**全量重抓 400+ 次请求且不报错**。
+// 判据除了「报错」，还要断言**一次请求都没发**——否则「先重抓再说」的实现也能绿。
+func TestBackfillFetchRejectsNullManifest(t *testing.T) {
+	out := t.TempDir()
+	if err := os.WriteFile(filepath.Join(out, "manifest.json"), []byte("null\n"), 0o644); err != nil {
+		t.Fatalf("写 null manifest: %v", err)
+	}
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+
+	if _, err := bfRun(t, f, cfg); err == nil {
+		t.Fatal("manifest 内容为字面量 null 时必须报错，不得当成空 manifest")
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("manifest 不可用时不该发任何请求，实得 %d 次: %v", len(f.calls), f.calls)
+	}
+}
+
+// TestLoadManifestRejectsJSONNull 是上一条在读取层的单元版本：`null` 与「文件不存在」
+// 必须分开——后者是首跑的正常路径，前者是一份坏掉的 manifest。
+func TestLoadManifestRejectsJSONNull(t *testing.T) {
+	for _, content := range []string{"null", " null ", "null\n"} {
+		t.Run(fmt.Sprintf("%q", content), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(content), 0o644); err != nil {
+				t.Fatalf("写 manifest: %v", err)
+			}
+			s, err := loadManifest(dir)
+			if err == nil {
+				t.Fatalf("内容为 null 时必须报错，实得 nil error（store=%+v）", s)
+			}
+			if s != nil {
+				t.Errorf("报错时不该同时返回 store，实得 %+v", s)
+			}
+		})
+	}
+}
+
+// TestCrossCheckBackfillIntersectionTakesIndexSideFields 对应 boundary[1]。
+//
+// TASK-005 的设计决定是「交集那条取 index 侧字段」，但它的用例只让两侧的 **Title** 不同
+// ⇒ 把 URL / Published 改成取搜索侧，没有任何测试会红（实测两个 SURVIVED）。
+//
+// 风险由抓取层引入：index 侧 URL 是相对路径经 resolveURL(base, href) 补全，而 base 由
+// 本层传入；搜索侧本就是绝对 URL。`http` vs `https`、有无末尾斜杠，任一不同即分叉——
+// 分叉那天这条设计会**零信号失效**，而拿去下载的正是这个 URL。
+func TestCrossCheckBackfillIntersectionTakesIndexSideFields(t *testing.T) {
+	const id = "9001"
+	index := []backfillItem{{
+		ArticleID: id,
+		URL:       "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/9001/index.html",
+		Title:     "2020年1月金融统计数据报告",
+		Published: "2020-02-10",
+	}}
+	search := []backfillSearchHit{{
+		ArticleID: id,
+		URL:       "http://www.pbc.gov.cn/goutongjiaoliu/113456/113469/9001/index.html/", // scheme 与末尾斜杠都不同
+		Title:     "2020年1月金融统计数据报告（搜索侧重建）",
+		Published: "2020-02-11", // 日期也不同
+	}}
+
+	got := crossCheckBackfill(index, search, nil)
+	if len(got.Fetch) != 1 {
+		t.Fatalf("两侧同一篇应合成 1 条，实得 %d 条: %+v", len(got.Fetch), got.Fetch)
+	}
+	c := got.Fetch[0]
+	if c.URL != index[0].URL {
+		t.Errorf("交集条目的 URL 必须取 index 侧\n实得: %q\n期望: %q", c.URL, index[0].URL)
+	}
+	if c.Published != index[0].Published {
+		t.Errorf("交集条目的 Published 必须取 index 侧\n实得: %q\n期望: %q", c.Published, index[0].Published)
+	}
+	if c.Title != index[0].Title {
+		t.Errorf("交集条目的 Title 必须取 index 侧\n实得: %q\n期望: %q", c.Title, index[0].Title)
+	}
+	if c.Source != backfillSourceBoth {
+		t.Errorf("两侧都有的条目 Source 应为 %q，实得 %q", backfillSourceBoth, c.Source)
+	}
+}
+
+// TestBackfillFetchEntryPointWiresRealFetcher 覆盖导出入口本身（TASK-007 接 cobra 用的那一个）。
+//
+// 用**已取消的 ctx**：请求在进网络栈之前就被 ctx 掐断，于是这条用例既不碰网络、也不依赖
+// 站点可达，同时证明了 BackfillFetch 确实接上了真实 Fetcher 并把错误原样透传。
+func TestBackfillFetchEntryPointWiresRealFetcher(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg := bfConfig(t, t.TempDir())
+	cfg.Timeout = time.Second
+	if err := BackfillFetch(ctx, cfg); err == nil {
+		t.Fatal("ctx 已取消时必须返回错误")
+	}
+}
+
+// TestBackfillFetchWritesManifestMetadata：把扫描规模与来源差异落进 manifest。
+// 下游 M1c-2/-3 只读这份文件，字段空着等于这次回填没留下可核对的记录。
+func TestBackfillFetchWritesManifestMetadata(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	if _, err := bfRun(t, f, cfg); err != nil {
+		t.Fatalf("runBackfill: %v", err)
+	}
+
+	got := readManifestFile(t, out)
+	if got.From != "2020-01" {
+		t.Errorf("from 应为 %q，实得 %q", "2020-01", got.From)
+	}
+	if got.PagesScanned != 1 {
+		t.Errorf("pages_scanned 应为 1，实得 %d", got.PagesScanned)
+	}
+	if got.SearchPagesScanned != len(backfillSearchKeywords) {
+		t.Errorf("search_pages_scanned 应为 %d，实得 %d", len(backfillSearchKeywords), got.SearchPagesScanned)
+	}
+	if got.ScannedAt == "" {
+		t.Error("scanned_at 不该为空")
+	}
+	// 搜索侧只索到 arts[0] ⇒ arts[1] 落进 only_in_index；两侧都有的那条 Source=both。
+	if len(got.OnlyInIndex) != 1 || got.OnlyInIndex[0] != arts[1].ID {
+		t.Errorf("only_in_index 应恰为 [%s]，实得 %v", arts[1].ID, got.OnlyInIndex)
+	}
+	var sources []string
+	for _, a := range got.Articles {
+		sources = append(sources, a.ID+"="+a.Source)
+	}
+	want := []string{arts[0].ID + "=" + backfillSourceBoth, arts[1].ID + "=" + backfillSourceIndex}
+	if !slices.Equal(sources, want) {
+		t.Errorf("Source 标记不对\n实得: %v\n期望: %v", sources, want)
+	}
+	for _, a := range got.Articles {
+		if a.SHA256 != articleSHA256(bfArticleHTML(a.ID)) {
+			t.Errorf("%s 的 sha256 应是正文内容的哈希，实得 %q", a.ID, a.SHA256)
+		}
+		if a.FetchedAt == "" {
+			t.Errorf("%s 缺 fetched_at", a.ID)
+		}
+	}
+}
+
+// TestBackfillFetchAbortsWhenIndexScanFails：index 页抓取失败是硬失败
+// （少一页 index = 静默少 15 条候选），不记 failed 继续。
+func TestBackfillFetchAbortsWhenIndexScanFails(t *testing.T) {
+	out := t.TempDir()
+	arts := bfTwoArticles()
+	cfg := bfConfig(t, out)
+	f := bfSite(t, cfg, arts...)
+	fail := bfFailOn{inner: f, contains: "113469/index.html"}
+
+	if _, err := bfRun(t, fail, cfg); err == nil {
+		t.Fatal("index 侧抓取失败必须直接返回错误")
+	}
+	for _, a := range arts {
+		if slices.Contains(f.calls, bfArticleURL(a.ID)) {
+			t.Errorf("index 扫描失败后不该继续抓文章，实际请求了 %s", a.ID)
+		}
+	}
+}
+
+func TestBackfillManifestSearchSkippedReasonRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s, err := loadManifest(dir)
+	if err != nil {
+		t.Fatalf("loadManifest: %v", err)
+	}
+	s.Manifest.SearchSkippedReason = "search side failed, cross-check skipped: boom"
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := loadManifest(dir)
+	if err != nil {
+		t.Fatalf("重新 loadManifest: %v", err)
+	}
+	if back.Manifest.SearchSkippedReason != s.Manifest.SearchSkippedReason {
+		t.Errorf("search_skipped_reason 往返不一致\n实得: %q\n期望: %q",
+			back.Manifest.SearchSkippedReason, s.Manifest.SearchSkippedReason)
+	}
+
+	var top map[string]json.RawMessage
+	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("读 manifest: %v", err)
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := top["search_skipped_reason"]; !ok {
+		t.Errorf("非空时 JSON 必须含 search_skipped_reason\n实际内容: %s", raw)
+	}
+}

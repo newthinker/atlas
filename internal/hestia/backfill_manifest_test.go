@@ -45,6 +45,8 @@ func fullManifest() Manifest {
 		Failed:       []Failed{{ID: "2025092212550638999", URL: "https://www.pbc.gov.cn/x/index.html", Error: "HTTP 404"}},
 		OnlyInIndex:  []string{"1111111"},
 		OnlyInSearch: []string{"2222222"},
+		// 非零值：TASK-006 新增字段，往返测试对留零值的字段平凡为真
+		SearchSkippedReason: "search side failed, cross-check skipped: boom",
 	}
 }
 
@@ -103,6 +105,7 @@ func TestBackfillManifestJSONKeysAreVerbatim(t *testing.T) {
 	assertExactKeys(t, "Manifest", top, []string{
 		"from", "scanned_at", "pages_scanned", "search_pages_scanned",
 		"articles", "failed", "only_in_index", "only_in_search",
+		"search_skipped_reason", // TASK-006 新增；omitempty，fullManifest 里非空故必然出现
 	})
 
 	var arts []map[string]json.RawMessage

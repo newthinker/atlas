@@ -1,6 +1,7 @@
 package hestia
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,15 @@ type Manifest struct {
 	Failed             []Failed  `json:"failed"`
 	OnlyInIndex        []string  `json:"only_in_index"`
 	OnlyInSearch       []string  `json:"only_in_search"`
+
+	// SearchSkippedReason 非空 ⇒ 这一轮**根本没做**交叉校验（搜索侧失效，fail-open）。
+	//
+	// ⚠️ 它必须落进 manifest，不能只打一行 WARN（ADR-M1c1-02）：manifest 的读者是
+	// M1c-2/-3，没有这个字段时「这次没做校验」与「校验通过」在他们看来完全一样
+	// ——那正是本机制要防的失效模式本身。
+	//
+	// `omitempty`：正常完成时它不出现，于是「字段在不在」本身就是信号。
+	SearchSkippedReason string `json:"search_skipped_reason,omitempty"`
 }
 
 // Article 是一篇已抓到并落盘的文章。
@@ -90,6 +100,13 @@ func loadManifest(dir string) (*manifestStore, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("读 %s: %w", p, err)
+	}
+	// 字面量 `null` 单独挡一道：它是**合法 JSON**，Unmarshal 会成功并留下一个零值
+	// Manifest ⇒ 走到下面就是「0 篇已抓」，断点续抓静默退化成全量重抓 400+ 次请求
+	// 且不报错。触发面窄（截断写产不出 null，jq 管道误操作可能），但代价与
+	// 「manifest 丢了」等同，而它偏偏不走错误分支。
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, fmt.Errorf("解析 %s: 内容是 JSON null —— 既不是「文件不存在」（首跑）也不是有效 manifest，拒绝当空处理", p)
 	}
 	var m Manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
