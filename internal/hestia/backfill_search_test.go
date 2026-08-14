@@ -32,11 +32,13 @@ import (
 //	                  → TestFetchBackfillSearchPageRejectsOutOfRangePublished（主判据）
 //	                  → TestFetchBackfillSearchPageAcceptsBoundaryDates（反向：闭区间端点放行）
 //	                  → TestFetchBackfillSearchPageChecksAllColumnsDates（校验在栏目筛之前）
-//	                  → TestParseBackfillSearchPageRejectsAbsurdTotal（粗上界，**不再**指认 advtime）
-//	                  → TestParseBackfillSearchPageAcceptsLargestMeasuredTotal（反向：692 与 1136 都放行）
+//	                  → TestFetchBackfillSearchPageDateGuardIsNotVacuousOnRealSample（非空验证）
+//	                  ⚠️ 原「总条数骤增 ⇒ 报错」的量级上界与其两条用例**已按裁决删除**，
+//	                     见文件中段那条「对验证者」的说明。
 //	返工 FIX-2       "本页条数自洽，静默丢条 ⇒ 报错"
-//	                  → TestParseBackfillSearchPageChecksCountAgainstSiteReported（检测层，含末页反向）
-//	                  → TestParseBackfillSearchPageRejectsMisalignedItems（只钉错误文案，非独立防线）
+//	                  → TestParseBackfillSearchPageChecksCountAgainstSiteReported（日常检测层）
+//	                  → TestParseBackfillSearchPageRejectsMisalignedItems（另一条依赖路径：
+//	                     不依赖 backfillSearchPageSize 常量；非独立防线，见实现注释）
 //	error_handling[0] "Fetcher 错误 / HTTP 非 200 原样上抛，本层不降级"
 //	                  → TestFetchBackfillSearchPagePropagatesFetchError
 
@@ -81,7 +83,9 @@ func TestBackfillSearchURLCarriesMeasuredParams(t *testing.T) {
 	require.NoError(t, err)
 
 	// 逐参数断言（全部来自 requirements-analysis §4 的实测）。
-	// ⚠️ qAll 而不是 q：实测同一关键词 q=1324 条 / qAll=24 条，差 25 倍。
+	// ⚠️ qAll 而不是 q：**严格单变量对照**实测 qAll 严格窄于 q —— searchArea=title +
+	// 日期窗口 qAll=137 vs q=276（2.0×）、无日期窗口 qAll=240 vs q=610（2.5×）。
+	// 原先写的「1324 vs 24 = 25 倍」同时动了三个变量，不能用来说明这件事（返工 FIX-3）。
 	for _, c := range []struct{ key, want string }{
 		{"pageId", "c177a85bd02b4114bebebd210809f691"},
 		{"advSearch", "true"},
@@ -97,7 +101,7 @@ func TestBackfillSearchURLCarriesMeasuredParams(t *testing.T) {
 	}
 
 	// 分词 OR 的 q 与「等于空查询」的 advepq/adveq 一个都不能出现 ——
-	// 前者差 25 倍，后两者实测返回全站 549141 条。
+	// 前者放宽 2.0～2.5×（见上），后两者实测返回的是没有计数字段的空壳页。
 	for _, forbidden := range []string{"q", "advepq", "adveq"} {
 		_, present := q[forbidden]
 		assert.False(t, present, "不该出现参数 %s", forbidden)
@@ -238,47 +242,15 @@ func TestParseBackfillSearchPageAcceptsPageWithNoKeptColumn(t *testing.T) {
 	assert.Empty(t, filterBackfillSearchHits(hits))
 }
 
-// TestParseBackfillSearchPageRejectsAbsurdTotal：条数大到不可能 ⇒ 报错。
+// 🔴 **这里曾经有两条上界守卫的用例（RejectsAbsurdTotal / AcceptsLargestMeasuredTotal），
+// 随 backfillSearchMaxRecords 一并删除**（M1c-1 返工，人类 leader 2026-08-14 裁决）。
+// 删除理由见 backfill_search.go 里那段「这里曾经有一条…上界，已删」的注释。
 //
-// ⚠️ **返工要点（FIX-1）：这条守卫的错误文案不再指认 `advtime`。**
-// 原文案写着「advtime 日期过滤可能已失效」，而 advtime 失效时实测返回的是 240 /
-// 1136 条（该关键词的全部历史结果），**远在 5000 以下、这条守卫根本不会触发**。
-// 认那个失效模式的是 TestFetchBackfillSearchPageRejectsOutOfRangePublished。
-//
-// 本条现在只是一道**没有已知触发场景**的粗上界，见实现里的注释（我实测过它名义上
-// 的两个场景都由别的守卫拦下）。断言里显式钉住「不出现 advtime」——否则文案改回去
-// 也没有任何东西会红。
-// ⚠️ 页面刻意造成**满页 12 条**、与计数字段自洽：否则页容量守卫会抢先报错，
-// 把上界抬高的变异「替它答掉」（实测：一开始只放 1 条，抬高上界后该变异存活）。
-// 断言也钉住 ceiling 这个词 —— 只判「有没有错」认不出报错的是谁。
-func TestParseBackfillSearchPageRejectsAbsurdTotal(t *testing.T) {
-	page := searchPageHTML(549141, 45762, searchItems(backfillSearchPageSize)...)
-
-	_, _, err := parseBackfillSearchPage(page, 1)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ceiling", "报错的必须是上界守卫本身")
-	assert.Contains(t, err.Error(), "549141", "错误信息必须带上实际条数")
-	assert.NotContains(t, err.Error(), "advtime",
-		"这条守卫不认 advtime 失效（实测 240/1136 条根本触发不到它），文案不得再这样指认")
-}
-
-// TestParseBackfillSearchPageAcceptsLargestMeasuredTotal 是上一条的**反向**用例：
-// 实测单关键词全区间最大值（`金融统计数据报告` = 692 条）必须放行。
-// 没有这条，把阈值设成 1 也「测试全绿」，而那会让搜索侧一次都跑不起来。
-//
-// ⚠️ 返工后这个数字有了新下界：`advtime` 失效时实测 1136 条（三关键词最大），
-// **上界必须高于它**才不会把 FIX-1 那个失效模式误报成「条数骤增」——两条守卫要
-// 各司其职，别让粗上界抢先报出一个指错方向的错误。
-func TestParseBackfillSearchPageAcceptsLargestMeasuredTotal(t *testing.T) {
-	for _, records := range []int{692, 1136} {
-		page := searchPageHTML(records, 58, searchItems(backfillSearchPageSize)...)
-
-		hits, totalPages, err := parseBackfillSearchPage(page, 1)
-		require.NoError(t, err, "records=%d 必须放行", records)
-		assert.Equal(t, 58, totalPages)
-		assert.Len(t, hits, backfillSearchPageSize)
-	}
-}
+// ⚠️ **对验证者**：DoD `boundary[1]` 的字面表述（「总条数骤增到全站量级 ⇒ 报错」）
+// **不再有对应实现**，这是**显式裁决**不是遗漏。它被 FIX-1 取代为判**性质**的
+// checkBackfillSearchDateRange（每条 Published 落在 [from,to] 内），对应用例是
+// TestFetchBackfillSearchPageRejectsOutOfRangePublished 及其反向用例。
+// 取代的依据：原判据对它自己命名的失效场景实测不会触发（240/1136 条 ≪ 5000）。
 
 // TestParseBackfillSearchPageRejectsMisalignedItems（FIX-2）：条目数与结构标记数
 // 不一致 ⇒ 报错。
@@ -291,8 +263,14 @@ func TestParseBackfillSearchPageAcceptsLargestMeasuredTotal(t *testing.T) {
 //
 // ⚠️ **这条用例钉的是「错误文案指出成因」，不是「有没有报错」** —— 我消融实测过：
 // 把结构标记那一步短路掉，本输入**照样报错**（丢了条必然与 total-records 对不上，
-// 由 ChecksCountAgainstSiteReported 那条守卫接住）。别据本用例说搜索侧有两道独立的
-// 丢条防线；检测层只有一道，这一条升级的是诊断。
+// 由 ChecksCountAgainstSiteReported 那条守卫接住）。**别据本用例说搜索侧有两道独立的
+// 丢条防线** —— 构造不出「只有它能发现」的输入。
+//
+// 那为什么留着它：它**不依赖 backfillSearchPageSize 常量**，因而在该常量过期时能把
+// **真丢条**与**页容量变更的噪音**区分开。实测（每页 12→15）：页完好时检测层误报
+// 「15 items but expected 12」，页里真有一条缺日期时**本守卫**先报「parsed 14 items
+// from 15 result blocks」。删掉它，后者会退化成前者那句话 ⇒ 真缺陷被误判成已知无害的
+// 噪音而被打发掉。**防的是误归因，不是多一道检测。**
 func TestParseBackfillSearchPageRejectsMisalignedItems(t *testing.T) {
 	page := searchPageHTML(2, 1,
 		searchItemHTMLNoDate(searchSampleKeptURL, "2025年8月社会融资规模存量统计数据报告"),
@@ -308,9 +286,13 @@ func TestParseBackfillSearchPageRejectsMisalignedItems(t *testing.T) {
 // TestParseBackfillSearchPageChecksCountAgainstSiteReported（FIX-2）：本页条数必须与
 // **站点自报的** total-records 及页容量自洽。
 //
-// **这一条才是丢条的检测层**（上一条只升级错误文案，见那里的说明）：它锚在站点自己
-// 报的数字上，不与 item 正则共享形态假设；若站点把某些条目渲染成别的形态，页内标记数
-// 与匹配数会**一起**少掉、看上去「自洽」，而与 total-records 一比就现形。
+// **这一条是日常的检测层**：它锚在站点自己报的数字上，不与 item 正则共享形态假设；
+// 若站点把某些条目渲染成别的形态，页内标记数与匹配数会**一起**少掉、看上去「自洽」，
+// 而与 total-records 一比就现形。
+//
+// 代价是它依赖 backfillSearchPageSize —— 站点改每页条数时它会对每页误报（实测：
+// 每页 12→15 时完好的页也报「15 items but expected 12」），此时区分真丢条与该噪音的
+// 是上一条守卫。两条认同一种失效，但依赖路径不同。
 //
 // 页容量 12 与末页算术都是实测（2026-08-14，qAll=社会融资规模存量统计数据报告，
 // 137 条 / 12 页）：pNo=2 与 pNo=11 各 12 条，pNo=12 恰好 5 条 = 137 − 11×12。
