@@ -28,9 +28,15 @@ import (
 //	boundary[0]       "0 条结果 ⇒ 报错"
 //	                  → TestParseBackfillSearchPageRejectsZeroResults
 //	                  → TestParseBackfillSearchPageAcceptsPageWithNoKeptColumn（反向：筛后 0 条不报错）
-//	boundary[1]       "总条数骤增到全站量级 ⇒ 报错，指向 advtime 失效"
-//	                  → TestParseBackfillSearchPageRejectsSiteWideTotal
-//	                  → TestParseBackfillSearchPageAcceptsLargestMeasuredTotal（反向：实测最大值不报错）
+//	boundary[1]       "日期过滤失效 ⇒ 报错"（返工 FIX-1 后判**性质**不判数量）
+//	                  → TestFetchBackfillSearchPageRejectsOutOfRangePublished（主判据）
+//	                  → TestFetchBackfillSearchPageAcceptsBoundaryDates（反向：闭区间端点放行）
+//	                  → TestFetchBackfillSearchPageChecksAllColumnsDates（校验在栏目筛之前）
+//	                  → TestParseBackfillSearchPageRejectsAbsurdTotal（粗上界，**不再**指认 advtime）
+//	                  → TestParseBackfillSearchPageAcceptsLargestMeasuredTotal（反向：692 与 1136 都放行）
+//	返工 FIX-2       "本页条数自洽，静默丢条 ⇒ 报错"
+//	                  → TestParseBackfillSearchPageChecksCountAgainstSiteReported（检测层，含末页反向）
+//	                  → TestParseBackfillSearchPageRejectsMisalignedItems（只钉错误文案，非独立防线）
 //	error_handling[0] "Fetcher 错误 / HTTP 非 200 原样上抛，本层不降级"
 //	                  → TestFetchBackfillSearchPagePropagatesFetchError
 
@@ -109,7 +115,7 @@ func TestBackfillSearchURLEncodesChineseKeyword(t *testing.T) {
 }
 
 func TestParseBackfillSearchPageExtractsFields(t *testing.T) {
-	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"))
+	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"), 1)
 	require.NoError(t, err)
 	require.Len(t, hits, searchSampleItems)
 
@@ -139,7 +145,7 @@ func TestParseBackfillSearchPageStripsHighlightIsNotVacuous(t *testing.T) {
 }
 
 func TestFilterBackfillSearchHitsKeepsOnlyGoutongjiaoliu(t *testing.T) {
-	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"))
+	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"), 1)
 	require.NoError(t, err)
 
 	// 筛之前：那个标题出现两次（两个栏目各一份）。
@@ -168,7 +174,7 @@ func TestFilterBackfillSearchHitsKeepsOnlyGoutongjiaoliu(t *testing.T) {
 // goutongjiaoliu 侧的 id 形态完全撞形。按「32 位 hex」筛会把那 4 条放进来，
 // 而它们的 id 在 index 侧根本不存在，TASK-005 的差集会凭空多出 4 条假信号。
 func TestFilterBackfillSearchHitsDropsByPrefixNotByIDShape(t *testing.T) {
-	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"))
+	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"), 1)
 	require.NoError(t, err)
 	require.True(t, containsURL(hits, searchSampleHexURL), "样本前提变了：32 位 hex 那条不在了")
 	require.True(t, containsURL(hits, searchSampleDigitDropURL), "样本前提变了：19 位数字的调统司那条不在了")
@@ -182,21 +188,27 @@ func TestFilterBackfillSearchHitsDropsByPrefixNotByIDShape(t *testing.T) {
 }
 
 func TestParseBackfillSearchPageReadsTotalPages(t *testing.T) {
-	_, totalPages, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"))
+	_, totalPages, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"), 1)
 	require.NoError(t, err)
 	assert.Equal(t, searchSampleTotalPages, totalPages)
 }
 
 // TestParseBackfillSearchPageRejectsMissingTotals：解析不到计数字段 ⇒ 报错。
 // 与 parsePaging 同则 —— 静默退化成「只看第 1 页」时，调用方永远发现不了还有 11 页。
+//
+// ⚠️ 断言**钉具体文案**而不是只 require.Error：返工加了页容量守卫之后，「计数字段
+// 缺失时静默返回 0」这个变异会让**那条守卫**代为报错（records=0 ⇒ 期望 0 条、实得
+// 1 条），只判「有没有错」的话该变异会存活（实测：它确实存活过一轮）。
+// 报错的是谁，和有没有报错，是两件事。
 func TestParseBackfillSearchPageRejectsMissingTotals(t *testing.T) {
-	for _, tc := range []struct{ name, page string }{
-		{"没有 total-pages", `<input id="default-result-total-records" value="137"/>` + searchItemHTML(searchSampleKeptURL, "标题", "2025年09月12日")},
-		{"没有 total-records", `<input id="default-result-total-pages" value="12"/>` + searchItemHTML(searchSampleKeptURL, "标题", "2025年09月12日")},
+	for _, tc := range []struct{ name, page, want string }{
+		{"没有 total-pages", `<input id="default-result-total-records" value="137"/>` + searchItemHTML(searchSampleKeptURL, "标题", "2025年09月12日"), "no total-pages field"},
+		{"没有 total-records", `<input id="default-result-total-pages" value="12"/>` + searchItemHTML(searchSampleKeptURL, "标题", "2025年09月12日"), "no total-records field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := parseBackfillSearchPage([]byte(tc.page))
+			_, _, err := parseBackfillSearchPage([]byte(tc.page), 1)
 			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want, "报错的必须是计数字段守卫本身")
 		})
 	}
 }
@@ -204,7 +216,7 @@ func TestParseBackfillSearchPageRejectsMissingTotals(t *testing.T) {
 // TestParseBackfillSearchPageRejectsZeroResults：一条都解析不到 ⇒ 报错。
 // 计数字段俱全（137 条 / 12 页）却匹配不到任何结果，只可能是结果结构改版。
 func TestParseBackfillSearchPageRejectsZeroResults(t *testing.T) {
-	_, _, err := parseBackfillSearchPage(searchPageHTML(137, 12))
+	_, _, err := parseBackfillSearchPage(searchPageHTML(137, 12), 1)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "0 results")
 }
@@ -216,42 +228,112 @@ func TestParseBackfillSearchPageRejectsZeroResults(t *testing.T) {
 // 「筛完 0 条也报错」这个 bug 写进去测试照样绿，而某一页 12 条恰好全是调统司栏目
 // 是完全可能的，那时报错会把整条交叉校验打断。
 func TestParseBackfillSearchPageAcceptsPageWithNoKeptColumn(t *testing.T) {
-	page := searchPageHTML(137, 12,
+	page := searchPageHTML(2, 1,
 		searchItemHTML(searchSampleHexURL, "2025年8月社会融资规模存量统计数据报告", "2025年09月12日"),
 		searchItemHTML(searchSampleDigitDropURL, "2025年6月社会融资规模存量统计数据报告", "2025年07月14日"),
 	)
-	hits, _, err := parseBackfillSearchPage(page)
+	hits, _, err := parseBackfillSearchPage(page, 1)
 	require.NoError(t, err)
 	require.Len(t, hits, 2)
 	assert.Empty(t, filterBackfillSearchHits(hits))
 }
 
-// TestParseBackfillSearchPageRejectsSiteWideTotal：条数骤增到全站量级 ⇒ 报错。
+// TestParseBackfillSearchPageRejectsAbsurdTotal：条数大到不可能 ⇒ 报错。
 //
-// 549141 是实测的空查询返回值（advepq/adveq 单用）。`advtime=5` 是前端已注释掉、
-// 后端仍接受的未公开参数，它哪天失效时返回的正是这个量级，而**那种结果看起来完全
-// 正常，只是多得多**。
-func TestParseBackfillSearchPageRejectsSiteWideTotal(t *testing.T) {
-	page := searchPageHTML(549141, 45762,
-		searchItemHTML(searchSampleKeptURL, "随便什么标题", "2025年09月12日"))
+// ⚠️ **返工要点（FIX-1）：这条守卫的错误文案不再指认 `advtime`。**
+// 原文案写着「advtime 日期过滤可能已失效」，而 advtime 失效时实测返回的是 240 /
+// 1136 条（该关键词的全部历史结果），**远在 5000 以下、这条守卫根本不会触发**。
+// 认那个失效模式的是 TestFetchBackfillSearchPageRejectsOutOfRangePublished。
+//
+// 本条现在只是一道**没有已知触发场景**的粗上界，见实现里的注释（我实测过它名义上
+// 的两个场景都由别的守卫拦下）。断言里显式钉住「不出现 advtime」——否则文案改回去
+// 也没有任何东西会红。
+// ⚠️ 页面刻意造成**满页 12 条**、与计数字段自洽：否则页容量守卫会抢先报错，
+// 把上界抬高的变异「替它答掉」（实测：一开始只放 1 条，抬高上界后该变异存活）。
+// 断言也钉住 ceiling 这个词 —— 只判「有没有错」认不出报错的是谁。
+func TestParseBackfillSearchPageRejectsAbsurdTotal(t *testing.T) {
+	page := searchPageHTML(549141, 45762, searchItems(backfillSearchPageSize)...)
 
-	_, _, err := parseBackfillSearchPage(page)
+	_, _, err := parseBackfillSearchPage(page, 1)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "advtime", "错误信息必须指向 advtime 过滤失效")
+	assert.Contains(t, err.Error(), "ceiling", "报错的必须是上界守卫本身")
 	assert.Contains(t, err.Error(), "549141", "错误信息必须带上实际条数")
+	assert.NotContains(t, err.Error(), "advtime",
+		"这条守卫不认 advtime 失效（实测 240/1136 条根本触发不到它），文案不得再这样指认")
 }
 
 // TestParseBackfillSearchPageAcceptsLargestMeasuredTotal 是上一条的**反向**用例：
 // 实测单关键词全区间最大值（`金融统计数据报告` = 692 条）必须放行。
-// 没有它，把阈值设成 1 也「测试全绿」，而那会让搜索侧一次都跑不起来。
+// 没有这条，把阈值设成 1 也「测试全绿」，而那会让搜索侧一次都跑不起来。
+//
+// ⚠️ 返工后这个数字有了新下界：`advtime` 失效时实测 1136 条（三关键词最大），
+// **上界必须高于它**才不会把 FIX-1 那个失效模式误报成「条数骤增」——两条守卫要
+// 各司其职，别让粗上界抢先报出一个指错方向的错误。
 func TestParseBackfillSearchPageAcceptsLargestMeasuredTotal(t *testing.T) {
-	page := searchPageHTML(692, 58,
-		searchItemHTML(searchSampleKeptURL, "2025年8月金融统计数据报告", "2025年09月12日"))
+	for _, records := range []int{692, 1136} {
+		page := searchPageHTML(records, 58, searchItems(backfillSearchPageSize)...)
 
-	hits, totalPages, err := parseBackfillSearchPage(page)
-	require.NoError(t, err)
-	assert.Equal(t, 58, totalPages)
-	assert.Len(t, hits, 1)
+		hits, totalPages, err := parseBackfillSearchPage(page, 1)
+		require.NoError(t, err, "records=%d 必须放行", records)
+		assert.Equal(t, 58, totalPages)
+		assert.Len(t, hits, backfillSearchPageSize)
+	}
+}
+
+// TestParseBackfillSearchPageRejectsMisalignedItems（FIX-2）：条目数与结构标记数
+// 不一致 ⇒ 报错。
+//
+// 立项理由是 test-agent-28 的最小复现：某条目**缺日期**时，非贪婪的结果正则会
+// **静默错配并丢条** —— 2 条只匹配出 1 条，且那 1 条是「A 的 URL/标题 + **B 的
+// 日期**」，B 整条消失、A 的日期是错的，**全程无错误**。
+// 「0 条 ⇒ 报错」看不见这种**部分**丢失，而部分丢失正是「manifest 少几十期」的
+// 最可能成因。与 index 侧 TASK-001 的 boundary[2]（匹配数须等于 istitle 计数）同族。
+//
+// ⚠️ **这条用例钉的是「错误文案指出成因」，不是「有没有报错」** —— 我消融实测过：
+// 把结构标记那一步短路掉，本输入**照样报错**（丢了条必然与 total-records 对不上，
+// 由 ChecksCountAgainstSiteReported 那条守卫接住）。别据本用例说搜索侧有两道独立的
+// 丢条防线；检测层只有一道，这一条升级的是诊断。
+func TestParseBackfillSearchPageRejectsMisalignedItems(t *testing.T) {
+	page := searchPageHTML(2, 1,
+		searchItemHTMLNoDate(searchSampleKeptURL, "2025年8月社会融资规模存量统计数据报告"),
+		searchItemHTML(searchSampleDigitDropURL, "2025年6月社会融资规模存量统计数据报告", "2025年07月14日"),
+	)
+
+	_, _, err := parseBackfillSearchPage(page, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2 result blocks", "错误要指出结构标记数")
+	assert.Contains(t, err.Error(), "1", "错误要指出实际匹配数")
+}
+
+// TestParseBackfillSearchPageChecksCountAgainstSiteReported（FIX-2）：本页条数必须与
+// **站点自报的** total-records 及页容量自洽。
+//
+// **这一条才是丢条的检测层**（上一条只升级错误文案，见那里的说明）：它锚在站点自己
+// 报的数字上，不与 item 正则共享形态假设；若站点把某些条目渲染成别的形态，页内标记数
+// 与匹配数会**一起**少掉、看上去「自洽」，而与 total-records 一比就现形。
+//
+// 页容量 12 与末页算术都是实测（2026-08-14，qAll=社会融资规模存量统计数据报告，
+// 137 条 / 12 页）：pNo=2 与 pNo=11 各 12 条，pNo=12 恰好 5 条 = 137 − 11×12。
+func TestParseBackfillSearchPageChecksCountAgainstSiteReported(t *testing.T) {
+	t.Run("非末页少一条 ⇒ 报错", func(t *testing.T) {
+		page := searchPageHTML(137, 12, searchItems(11)...)
+		_, _, err := parseBackfillSearchPage(page, 2)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "12")
+	})
+
+	t.Run("末页不满 ⇒ 放行", func(t *testing.T) {
+		page := searchPageHTML(137, 12, searchItems(5)...)
+		hits, _, err := parseBackfillSearchPage(page, 12)
+		require.NoError(t, err, "末页 137−11×12=5 条是正常的，不能误报")
+		assert.Len(t, hits, 5)
+	})
+
+	t.Run("单页结果必须全给出", func(t *testing.T) {
+		page := searchPageHTML(5, 1, searchItems(4)...)
+		_, _, err := parseBackfillSearchPage(page, 1)
+		require.Error(t, err, "只有一页却少给一条，同样是静默丢条")
+	})
 }
 
 // TestParseBackfillSearchPageRejectsIDlessKeptURL：要保留的栏目里取不出
@@ -260,20 +342,20 @@ func TestParseBackfillSearchPageAcceptsLargestMeasuredTotal(t *testing.T) {
 // 这条用例把两者都跑一遍。
 func TestParseBackfillSearchPageRejectsIDlessKeptURL(t *testing.T) {
 	t.Run("保留栏目取不出 id ⇒ 报错", func(t *testing.T) {
-		page := searchPageHTML(137, 12, searchItemHTML(
+		page := searchPageHTML(1, 1, searchItemHTML(
 			"https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/5837468/index.shtml",
 			"2025年8月社会融资规模存量统计数据报告", "2025年09月12日"))
-		_, _, err := parseBackfillSearchPage(page)
+		_, _, err := parseBackfillSearchPage(page, 1)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no article id")
 	})
 
 	t.Run("其他栏目取不出 id ⇒ 不报错，随后被筛掉", func(t *testing.T) {
-		page := searchPageHTML(137, 12,
+		page := searchPageHTML(2, 1,
 			searchItemHTML("https://www.pbc.gov.cn/diaochatongjisi/116219/116225/whatever",
 				"2025年8月社会融资规模存量统计数据报告", "2025年09月12日"),
 			searchItemHTML(searchSampleKeptURL, searchSampleDupTitle, "2025年09月12日"))
-		hits, _, err := parseBackfillSearchPage(page)
+		hits, _, err := parseBackfillSearchPage(page, 1)
 		require.NoError(t, err)
 		require.Len(t, hits, 2)
 		assert.Empty(t, hits[0].ArticleID)
@@ -290,7 +372,7 @@ func TestParseBackfillSearchPageRejectsOverflowingCount(t *testing.T) {
 		<input type="hidden" id="default-result-total-records" value="999999999999999999999999"/>
 		<input type="hidden" id="default-result-total-pages" value="12"/>`)
 
-	_, _, err := parseBackfillSearchPage(page)
+	_, _, err := parseBackfillSearchPage(page, 1)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bad total-records")
 }
@@ -308,6 +390,81 @@ func TestFetchBackfillSearchPagePropagatesParseError(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, hits)
 	assert.Zero(t, totalPages)
+}
+
+// TestFetchBackfillSearchPageRejectsOutOfRangePublished（FIX-1，本次返工的核心）：
+// 解析出的**每条** Published 都必须落在 [from, to] 内，越界即报错并指向日期过滤失效。
+//
+// 为什么判「性质」而不判「数量」——原守卫（总条数上界 5000）**对它自己命名的失效
+// 场景实测不会触发**，我逐条复现过（qAll=社会融资规模存量统计数据报告，
+// searchArea=title，只动 advtime）：
+//
+//	现状 advtime=5 + 日期范围 → 137 条，asc 首条 2020-01-16（区间内）
+//	advtime 参数被丢弃        → 240 条，asc 首条 **2015-02-10**（区间外）
+//	advtime=0                → 240 条，asc 首条 **2015-02-10**（区间外）
+//	金融统计数据报告无日期过滤 → 1136 条（三关键词最大）
+//
+// 240 / 1136 距 5000 差 4.4 倍 ⇒ 量级判据永远不触发；而**区间外的日期立刻出现**，
+// 与语料规模无关。
+//
+// ⚠️ 已知边界，别当它比实际强：`sr=dateTime desc` 下第 1 页是最新的，全在区间内
+// ⇒ 本守卫在翻到**含区间外条目的那一页**时才触发（实测那些是靠后的页）。TASK-005
+// 会翻完 totalPages，所以一定会触发；但**只取第 1 页的调用方挡不住**。
+func TestFetchBackfillSearchPageRejectsOutOfRangePublished(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	kw := "社会融资规模存量统计数据报告"
+
+	// 第 20 页（末页，240−19×12=12 条满页）：advtime 失效后多出来的正是 2020 年
+	// 以前的报告，这里放 11 条区间内 + 1 条 2015 年的。
+	page := searchPageHTML(240, 20, append(searchItems(11),
+		searchItemHTML(searchSampleKeptURL, "2015年1月社会融资规模存量统计数据报告", "2015年02月10日"))...)
+	u := backfillSearchURL(kw, from, to, 20)
+	f := &fakeFetcher{pages: map[string][]byte{u: page}}
+
+	_, _, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 20)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2015-02-10", "错误要指出越界的那条日期")
+	assert.Contains(t, err.Error(), "advtime", "错误要指向日期过滤（advtime）失效")
+}
+
+// TestFetchBackfillSearchPageAcceptsBoundaryDates 是上一条的**反向**用例：
+// 区间是**闭区间**，恰好等于 from / to 的两条必须放行。
+// 没有它，把判据写成开区间（`<=` 写成 `<`）测试照样绿，而那会让每次回填的首末两天
+// 变成假报错 —— 假报错走 fail-open 会静默跳过整条交叉校验。
+func TestFetchBackfillSearchPageAcceptsBoundaryDates(t *testing.T) {
+	from := time.Date(2020, 1, 16, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2025, 9, 12, 0, 0, 0, 0, time.UTC)
+	kw := "社会融资规模存量统计数据报告"
+
+	page := searchPageHTML(2, 1,
+		searchItemHTML(searchSampleKeptURL, "2025年8月社会融资规模存量统计数据报告", "2025年09月12日"),
+		searchItemHTML(searchSampleDigitDropURL, "2019年12月社会融资规模存量统计数据报告", "2020年01月16日"),
+	)
+	u := backfillSearchURL(kw, from, to, 1)
+	f := &fakeFetcher{pages: map[string][]byte{u: page}}
+
+	hits, _, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
+	require.NoError(t, err, "端点日期是闭区间，必须放行")
+	assert.Len(t, hits, 1) // 另一条是调统司栏目，被前缀筛掉
+}
+
+// TestFetchBackfillSearchPageChecksAllColumnsDates：区间校验发生在**栏目筛之前**。
+// 日期过滤失效对两个栏目一视同仁，只查保留的那半会让证据少一半；更要紧的是
+// 若某页恰好全是调统司栏目，筛后为空 ⇒ 区间守卫在空集上平凡通过。
+func TestFetchBackfillSearchPageChecksAllColumnsDates(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	kw := "社会融资规模存量统计数据报告"
+
+	// 唯一越界的那条在**会被筛掉**的栏目里。
+	page := searchPageHTML(1, 1,
+		searchItemHTML(searchSampleHexURL, "2015年1月社会融资规模存量统计数据报告", "2015年02月10日"))
+	u := backfillSearchURL(kw, from, to, 1)
+	f := &fakeFetcher{pages: map[string][]byte{u: page}}
+
+	_, _, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
+	require.Error(t, err, "越界条目在被筛掉的栏目里，同样要报错")
 }
 
 // TestFetchBackfillSearchPagePropagatesFetchError：Fetcher 的错误原样上抛。
@@ -377,6 +534,33 @@ func searchItemHTML(url, title, date string) string {
 			<i></i>
 		</p>
 	</div>`, url, title, url, url, date)
+}
+
+// searchItemHTMLNoDate 合成一条**缺日期**的结果 —— test-agent-28 复现的那个形态。
+// 非贪婪的结果正则会跨过它去吃下一条的日期，两条静默变一条。
+func searchItemHTMLNoDate(url, title string) string {
+	return fmt.Sprintf(`<h3>
+		<a href="%s" target="_blank" key="k" appId="a">%s</a>
+	</h3>
+	<div class="content clearfix">
+		<p class="txtCon hasImg">摘要</p>
+		<p class="dates">
+			<a href="%s"><span class="date_"> %s</span></a>
+			<i></i>
+		</p>
+	</div>`, url, title, url, url)
+}
+
+// searchItems 造 n 条互不相同、日期都在区间内的正常结果。
+func searchItems(n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, searchItemHTML(
+			fmt.Sprintf("https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/%d/index.html", 5837468+i),
+			fmt.Sprintf("2025年%d月社会融资规模存量统计数据报告", i%12+1),
+			"2025年09月12日"))
+	}
+	return out
 }
 
 // searchPageHTML 合成一页搜索结果：计数字段 + 若干条目（可为零条）。

@@ -42,26 +42,54 @@ const (
 	// 这句话由 TestFilterBackfillSearchHitsDropsByPrefixNotByIDShape 钉住。
 	backfillSearchKeepPrefix = "/goutongjiaoliu/113456/113469/"
 
-	// backfillSearchMaxRecords 是总条数的上界，超过即判 `advtime` 过滤失效。
+	// backfillSearchMaxRecords 是总条数的粗上界。
 	//
-	// 为什么需要上界：`advtime=5`（自定义时间范围）**是前端 radio 里已被注释掉、
-	// 后端仍接受的未公开参数**（2026-08-14 实测有效）。未公开行为会在无预告的情况下
-	// 变，而它失效时返回的是**全站量级**（实测空查询 549141 条）—— 那种结果看起来
-	// 完全正常，只是多得多，不设上界就只会静默地把几万条无关结果当成候选。
+	// 🔴 **它不认 `advtime` 失效，别再那样理解**（M1c-1 返工 FIX-1，本 sprint 实测推翻）。
+	// 原注释写着「advtime 失效时返回全站量级（549141）」并据此设 5000。**那句话把两个
+	// 不同的失效模式混成了一个**，我逐条实测过（同关键词、同 searchArea=title，只动
+	// advtime）：
 	//
-	// 取值 5000 的依据（两侧都留够余量）：
-	//   - 下侧：实测单关键词全区间最大 692 条（`金融统计数据报告`）。三个关键词每月
-	//     各新增 2～3 条，再跑十年也不到 1100 条 ⇒ 5000 不会误伤正常增长。
-	//   - 上侧：失效时的量级是 549141，与 5000 差 100 倍 ⇒ 不会漏判。
-	// 两端各有一条用例钉住（Rejects·SiteWideTotal / Accepts·LargestMeasuredTotal）。
+	//	advtime=5 + 日期范围 → 137 条
+	//	advtime 参数被丢弃   → **240 条**
+	//	advtime=0           → **240 条**
+	//	金融统计数据报告无日期过滤 → **1136 条**（三关键词里最大）
+	//
+	// 240 / 1136 距 5000 差 4.4 倍 ⇒ **这条守卫永远不会因 advtime 失效而触发**。
+	// 549141 是**无关键词空查询**的值，而那种响应实测连 `default-result-*` 计数字段
+	// 都整个不存在（HTTP 200、16KB 的空壳、0 个结果块）⇒ 由 backfillSearchCount 的
+	// 「计数字段缺失 ⇒ 报错」拦下，同样轮不到这条。
+	//
+	// ⇒ 认 advtime 失效的是 checkBackfillSearchDateRange（判**性质**：每条日期是否
+	// 落在 [from,to] 内），不是这里的数量判据。
+	//
+	// **那为什么还留着它**：它现在是一道**没有已知触发场景**的粗上界，只防「计数字段
+	// 还在、但数字大到不可能」这类未知失效。留着的代价是零，但**别把它算进任何失效
+	// 模式的防线里** —— 一条守卫最危险的时候不是它不存在，而是它在场却认不出它名字里
+	// 那个东西。取值 5000 的下界依据仍成立且更紧了：正常最大 692，advtime 失效时
+	// 1136，上界必须高于 1136 才不会抢在日期守卫之前报出一个指错方向的错误。
 	backfillSearchMaxRecords = 5000
+
+	// backfillSearchPageSize 是每页条数（实测 2026-08-14，requirements-analysis §4
+	// 亦记「每页固定 12 条」）：qAll=社会融资规模存量统计数据报告 / 137 条 / 12 页，
+	// pNo=2 与 pNo=11 各 12 条，pNo=12 恰好 5 条 = 137 − 11×12。
+	//
+	// ⚠️ 站点若改了每页条数，本常量会让**每一页**都判不自洽 ⇒ 调用方按 ADR-M1c1-02
+	// fail-open（打 WARN、跳过交叉校验、主路径照常）。这是刻意选的方向：交叉校验停摆
+	// 有声，静默丢条无声。
+	backfillSearchPageSize = 12
 )
 
 // backfillSearchKeywords 是三个 AND 关键词，调用方各查一遍。
 //
-// 用 `qAll`（AND 语义）而不是 `q`（分词 OR）：实测同一关键词、同为
-// `searchArea=title`，`q`=1324 条 / `qAll`=24 条，**差 25 倍**。
-// `advepq` / `adveq` 单用等于空查询（返回全站 549141 条），别用。
+// 用 `qAll`（AND 语义）而不是 `q`（分词 OR）：**严格单变量对照**实测，qAll 严格窄于 q——
+//
+//	searchArea=title + 日期窗口：qAll=137 vs q=276  → 2.0×
+//	searchArea=title 无日期窗口：qAll=240 vs q=610  → 2.5×
+//
+// ⚠️ 原注释写的「1324 vs 24 = 25 倍」是**同时动了三个变量**的对照（默认含正文 /
+// q vs qAll / 有无日期窗口），不能用来说明 q 与 qAll 的差别（M1c-1 返工 FIX-3）。
+// 1324 是「默认含正文 + q + 无日期」那一格的数字。
+// `advepq` / `adveq` 单用等于空查询，别用。
 var backfillSearchKeywords = []string{
 	"金融统计数据报告",
 	"社会融资规模存量统计数据报告",
@@ -76,12 +104,20 @@ var backfillSearchKeywords = []string{
 var backfillSearchItemRE = regexp.MustCompile(
 	`(?s)<h3>\s*<a href="([^"]+)"[^>]*>(.*?)</a>.*?<span>(\d{4})年(\d{2})月(\d{2})日</span>`)
 
-// 计数字段（隐藏 input）。两个都必须解析得到：
-// 总页数供调用方决定翻到第几页，总条数供上面那条 advtime 守卫。
+// 计数字段（隐藏 input）。两个都必须解析得到：总页数供调用方决定翻到第几页，
+// 总条数既供粗上界、也做本页条数自洽校验的**独立锚**。
 var (
 	backfillSearchTotalPagesRE   = regexp.MustCompile(`id="default-result-total-pages" value="(\d+)"`)
 	backfillSearchTotalRecordsRE = regexp.MustCompile(`id="default-result-total-records" value="(\d+)"`)
 )
+
+// backfillSearchBlockRE 只匹配「一个结果块的开头」，用来独立数出本页有几条结果。
+//
+// 它比 backfillSearchItemRE 短得多，**刻意不含日期段** —— 这正是它的用处：某条目
+// 缺日期时，非贪婪的 item 正则会跨过它去吃下一条的日期，两条静默变一条，而块计数
+// 仍然是 2 ⇒ 不一致暴露出来（M1c-1 返工 FIX-2）。反过来用日期段计数就看不见这件事：
+// 那时日期数与匹配数会**一起**变成 1，「自洽」。
+var backfillSearchBlockRE = regexp.MustCompile(`(?s)<h3>\s*<a href="`)
 
 // backfillSearchIDRE 从结果 URL 末段取 article_id。
 // 与 articleLinkRE 同则**不设位数下界、不限字符集**：站点重建过一次
@@ -125,12 +161,15 @@ func backfillSearchURL(keyword string, from, to time.Time, page int) string {
 	return backfillSearchBase + "?" + q.Encode()
 }
 
-// parseBackfillSearchPage 解析一页搜索结果，返回**未经栏目筛**的条目与总页数。
+// parseBackfillSearchPage 解析第 page 页搜索结果，返回**未经栏目筛**的条目与总页数。
 //
 // 不在这里筛的理由是「0 条 ⇒ 报错」那条守卫的判据：它要判的是**解析失效**
 // （检索服务改版），而不是「这一页没有我要的栏目」。某一页 12 条恰好全是调查统计司
 // 栏目是完全可能的，那时报错会把整条交叉校验打断。两者由两条用例分开钉住。
-func parseBackfillSearchPage(html []byte) ([]backfillSearchHit, int, error) {
+//
+// 收 page 是为了 backfillSearchCheckCount 的末页算术（M1c-1 返工 FIX-2）：
+// 「本页该有几条」只有知道页码才回答得出。
+func parseBackfillSearchPage(html []byte, page int) ([]backfillSearchHit, int, error) {
 	records, err := backfillSearchCount(html, backfillSearchTotalRecordsRE, "total-records")
 	if err != nil {
 		return nil, 0, err
@@ -141,14 +180,16 @@ func parseBackfillSearchPage(html []byte) ([]backfillSearchHit, int, error) {
 	}
 	if records > backfillSearchMaxRecords {
 		return nil, 0, fmt.Errorf("hestia backfill search: %d results exceed the %d ceiling: "+
-			"the advtime date filter likely stopped working (an empty query returns the whole site)",
-			records, backfillSearchMaxRecords)
+			"the query is not being constrained as expected", records, backfillSearchMaxRecords)
 	}
 
 	ms := backfillSearchItemRE.FindAllSubmatch(html, -1)
 	if len(ms) == 0 {
 		return nil, 0, fmt.Errorf("hestia backfill search: 0 results parsed while the page claims %d: "+
 			"the result layout likely changed", records)
+	}
+	if err := backfillSearchCheckCount(html, len(ms), records, page); err != nil {
+		return nil, 0, err
 	}
 
 	hits := make([]backfillSearchHit, 0, len(ms))
@@ -175,6 +216,68 @@ func parseBackfillSearchPage(html []byte) ([]backfillSearchHit, int, error) {
 	return hits, totalPages, nil
 }
 
+// backfillSearchCheckCount 判本页条数是否自洽（M1c-1 返工 FIX-2）。
+//
+// **承重的是第 2 条，第 1 条只升级诊断质量 —— 我消融实测过，别把它算成第二道防线。**
+//
+//  1. 与页内结构标记数（`<h3><a href=`）比。它认的是「正则错配丢条」：某条目缺日期
+//     时非贪婪的 item 正则会跨过它去吃下一条的日期，2 条静默变 1 条，留下的那条是
+//     「A 的 URL/标题 + B 的日期」。
+//     ⚠️ **实测：把这一条整个短路掉，那个输入照样报错** —— 因为丢了条就必然与
+//     records 对不上，第 2 条接住了。它唯一的增量是错误文案直接指向成因（"an item
+//     likely lacks its date"），以及它不依赖 backfillSearchPageSize 这个常量。
+//     我构造不出「只有它能发现」的输入；若你能，请补一条用例并改掉这段话。
+//  2. 与**站点自报的** total-records + 页容量比。这是真正的检测层：任何原因导致的
+//     少条（错配、整块缺失、响应截断）都会在这里现形，而它锚在站点自己的数字上，
+//     不与 item 正则共享形态假设。
+//
+// 末页算术：前 page-1 页各占满 backfillSearchPageSize 条，本页应有
+// records-(page-1)*size 与 size 中的较小者（实测 137 条 / 12 页：pNo=12 恰好 5 条）。
+func backfillSearchCheckCount(html []byte, got, records, page int) error {
+	if blocks := len(backfillSearchBlockRE.FindAllIndex(html, -1)); blocks != got {
+		return fmt.Errorf("hestia backfill search: parsed %d items from %d result blocks: "+
+			"an item likely lacks its date and the item regex mis-associated it with the next one",
+			got, blocks)
+	}
+
+	want := records - (page-1)*backfillSearchPageSize
+	if want > backfillSearchPageSize {
+		want = backfillSearchPageSize
+	}
+	if got != want {
+		return fmt.Errorf("hestia backfill search: page %d yielded %d items but the site reports "+
+			"%d records over pages of %d (expected %d): results are being dropped",
+			page, got, records, backfillSearchPageSize, want)
+	}
+	return nil
+}
+
+// checkBackfillSearchDateRange 断言每条 Published 都落在 [from, to] **闭区间**内。
+//
+// 🔴 这是本层认「日期过滤失效」的**唯一**判据（M1c-1 返工 FIX-1）。原先那条按总条数
+// 判量级的守卫对该失效**实测不会触发**：advtime 被丢弃或置 0 时返回 240 条、无日期
+// 过滤的 `金融统计数据报告` 返回 1136 条，都远低于 5000 的上界，而返回内容里立刻就有
+// 区间外的条目（asc 首条 2015-02-10，实测 2026-08-14）。
+//
+// 判**性质**而不判**数量**，因此与语料规模无关：站点条目再怎么增长，区间外就是区间外。
+//
+// ⚠️ 已知边界，别高估它：`sr=dateTime desc` 下第 1 页是最新的、必然在区间内 ⇒ 本守卫
+// 在翻到含区间外条目的那一页（实测是靠后的页）才触发。翻完全部页的调用方一定会撞上；
+// **只取第 1 页的调用方挡不住**。
+//
+// 日期用字符串比较：两端都是 `YYYY-MM-DD` 定长格式，字典序即时间序，省掉一次可能
+// 失败的解析（而解析失败又要决定怎么处置）。
+func checkBackfillSearchDateRange(hits []backfillSearchHit, from, to time.Time) error {
+	lo, hi := from.Format("2006-01-02"), to.Format("2006-01-02")
+	for _, h := range hits {
+		if h.Published < lo || h.Published > hi {
+			return fmt.Errorf("hestia backfill search: result published %s falls outside [%s, %s]: "+
+				"the advtime date filter likely stopped working (%q)", h.Published, lo, hi, h.Title)
+		}
+	}
+	return nil
+}
+
 // filterBackfillSearchHits 只保留沟通交流栏目那一份，见 backfillSearchKeepPrefix。
 func filterBackfillSearchHits(hits []backfillSearchHit) []backfillSearchHit {
 	var out []backfillSearchHit
@@ -195,8 +298,13 @@ func fetchBackfillSearchPage(ctx context.Context, f Fetcher, keyword string, fro
 	if err != nil {
 		return nil, 0, err
 	}
-	hits, totalPages, err := parseBackfillSearchPage(html)
+	hits, totalPages, err := parseBackfillSearchPage(html, page)
 	if err != nil {
+		return nil, 0, err
+	}
+	// 区间校验放在**栏目筛之前**：日期过滤失效对两个栏目一视同仁，只查保留的那半会
+	// 少一半证据；更要紧的是某页若恰好全是调统司栏目，筛后为空 ⇒ 守卫在空集上平凡通过。
+	if err := checkBackfillSearchDateRange(hits, from, to); err != nil {
 		return nil, 0, err
 	}
 	return filterBackfillSearchHits(hits), totalPages, nil
