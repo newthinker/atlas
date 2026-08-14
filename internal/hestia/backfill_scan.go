@@ -2,8 +2,10 @@ package hestia
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"regexp"
+	"time"
 )
 
 // backfillTitleRE 匹配本迭代要回填的三种报告标题。
@@ -144,4 +146,205 @@ func scanBackfillPage(html []byte, base string) (backfillPage, error) {
 		}
 	}
 	return page, nil
+}
+
+// ============================================================================
+// M1c-1 的 TASK-002：翻页与按日期停止
+// ============================================================================
+
+// backfillMaxPages 是翻页的兜底上限（design-spec §3.3）。
+//
+// 它**不是正常出口**：正常出口是日期判停。翻满它意味着日期判定没生效，
+// 所以那一支报错而不是返回已收集的部分（见 scanBackfillIndex）。
+const backfillMaxPages = 200
+
+// backfillDateLayout 是列表页日期的形态，也是本文件比较日期的唯一形态。
+const backfillDateLayout = "2006-01-02"
+
+// backfillIndexCfg 是 index 侧翻页的可调参数。
+//
+// From 用 time.Time 而不是字符串：与同批的 backfillSearchURL(…, from, to time.Time, …)
+// 保持同一个边界类型，TASK-005 的交叉校验要同时喂两侧，类型不一致会在那里变成一处转换。
+//
+// ⚠️ From 的语义是**发布日期**，不是期次（设计附录 §A1）。index 按发布时间倒序，
+// 期次在页面上根本不成序，翻页判停本来就只能看发布日期。推论：`--from 2020-01` 的产出
+// **包含 2019 年度的三篇**（实测发布于 2020-01-16）——这是刻意的，不是缺陷。
+type backfillIndexCfg struct {
+	IndexURL string
+	From     time.Time
+	MaxPages int // <= 0 时用 backfillMaxPages
+}
+
+// backfillIndexPage 是翻页过程中经过的一页。
+//
+// 带上 HTML 与日期区间，是因为**只有翻页循环知道这两样**：
+//
+//   - design-spec §7.3 要求 index 页也存盘（它们同样不可再生，存了之后重跑与 M1c-2
+//     的核对都能离线做）；
+//   - 设计附录 §A3 规定快照落名 `<抓取序号>-<该页最新条目日期>_<该页最老条目日期>.html`
+//     ——**页码不能作唯一键**，因为页码随新文章上架而漂移，重跑时同一个文件名会对应
+//     不同内容的页。
+//
+// 不交出去的话，TASK-006 要么把 150 页重抓一遍，要么把这个循环重写一遍。
+type backfillIndexPage struct {
+	Page   int    // 站点页码，1 起
+	URL    string // 实际请求的 URL（第 1 页是 IndexURL 本身）
+	HTML   []byte // 原始响应体
+	Newest string // 该页最新条目的发布日期 YYYY-MM-DD
+	Oldest string // 该页最老条目的发布日期
+}
+
+// backfillScanResult 是一次 index 侧扫描的产出。
+type backfillScanResult struct {
+	// Reports 是去重后的目标报告，按发现顺序（新 → 旧），且**发布日期均 >= From**。
+	//
+	// 判停是**页级**的、过滤是**条目级**的，两件事：判停那一页横跨 From，页上既有
+	// ≥From 的也有 <From 的，前者必须留下（boundary[0]）、后者必须滤掉——否则
+	// 「From 比最新一期还新 ⇒ 返回空」（boundary[2]）就不成立，第 1 页的报告会被
+	// 原样带回来。两条 DoD 合起来唯一确定了这个语义。
+	//
+	// 推论：产出**不含**发布早于 From 的报告，所以判停页不会往下游漏进一个残缺期次
+	// （那会让 TASK-008 的逐期对账报一条假的「缺篇」）。
+	Reports []backfillItem
+	// Pages 是实际翻过的页，含判停那一页。
+	Pages []backfillIndexPage
+}
+
+// backfillDateRange 取一页里最新/最老的发布日期。
+//
+// 取整页的 max/min，**不取首末条**：真实语料确实是倒序的，但那是观测值不是契约，
+// 而相邻页连续性守卫的正确性直接依赖这两个数的定义。页内顺序哪天变了，
+// 取首末条会让守卫比较到错误的两个数、且不会有任何东西报错。
+//
+// 比较用**字典序**：Published 已被 backfillItemRE 钉成 `\d{4}-\d{2}-\d{2}`，
+// ISO-8601 定长形态下字典序与时序等价，且避开时区与解析失败两种新的失败模式。
+// 调用方保证 items 非空（scanBackfillPage 的 0 条守卫已经拦在前面）。
+func backfillDateRange(items []backfillItem) (newest, oldest string) {
+	newest, oldest = items[0].Published, items[0].Published
+	for _, it := range items[1:] {
+		newest = max(newest, it.Published)
+		oldest = min(oldest, it.Published)
+	}
+	return newest, oldest
+}
+
+// scanBackfillIndex 逐页扫描 index，收集目标报告，按**发布日期**停止翻页。
+//
+// # 为什么按日期停而不按页码
+//
+// 页码随新文章上架而漂移——今天的第 150 页明天就不是（design-spec §3.3）。
+//
+// # 判停那一页必须先完整扫描、再停
+//
+// 实测：以 From=2020-01-01 为例，p151 的条目跨 2019-12-25..2020-01-09，其中
+// 2020-01-02..2020-01-09 那批**是 ≥ From 的**。把停止判断放在扫描之前会把它们
+// 连同整页一起丢掉。⚠️ 实测 p151 上恰好 0 条目标报告 ⇒ **这个 bug 在真实语料上
+// 一个测试都不会红**，守着它的是 TestScanBackfillIndexScansStopPageBeforeBreaking
+// 那份合成页面。
+//
+// # 三条出口，两种性质
+//
+//   - **日期判停**（正常出口）：某页最老一条早于 From ⇒ 扫完该页后返回。
+//   - **翻完站点自称的 totalPages**（正常出口）：没有更多页可翻了。
+//   - **翻满 MaxPages**（失败出口）：报错。那说明日期判定没生效，静默返回已收集的
+//     部分会让「回填看起来跑完了」而窗口外的期次一个都没抓。
+//
+// ⚠️ 后两者**必须分开**：合并成报错的话，totalPages < MaxPages 的小栏目（或 From 早于
+// 站点最早一篇）会在**已经看完全部页面**的情况下失败；合并成放行的话，MaxPages 那条
+// 兜底就没人守着了。这与 discover.go 的 StopExhausted / StopMaxPages 是同一个区分。
+//
+// # index 页抓取失败：立刻中止，原样返回
+//
+// **不**当成「这页没有」继续翻，也**不**记 failed 继续 —— 这与「单篇文章抓取失败记
+// failed 并继续」（TASK-006）处置相反，是刻意的：少一页 index = 静默少 15 条候选，
+// 与「整页 0 条」等价危害。
+func scanBackfillIndex(ctx context.Context, f Fetcher, cfg backfillIndexCfg) (backfillScanResult, error) {
+	first, err := f.Get(ctx, cfg.IndexURL)
+	if err != nil {
+		return backfillScanResult{}, err
+	}
+	tmpl, totalPages, err := parsePaging(first)
+	if err != nil {
+		return backfillScanResult{}, err
+	}
+
+	limit := cfg.MaxPages
+	if limit <= 0 {
+		limit = backfillMaxPages
+	}
+	exhausted := false
+	if limit > totalPages {
+		limit = totalPages // 别请求不存在的页
+		exhausted = true   // 翻完就是翻完了，不是「上限拦住了」
+	}
+
+	from := cfg.From.Format(backfillDateLayout)
+	var res backfillScanResult
+	seen := make(map[string]bool) // 按 article_id 去重：边界那条会在翻页时重复出现
+	prevOldest := ""
+
+	for page := 1; page <= limit; page++ {
+		html, url := first, cfg.IndexURL // 第 1 页已经取过了，不重复请求
+		if page > 1 {
+			if url, err = pageURL(cfg.IndexURL, tmpl, page); err != nil {
+				return backfillScanResult{}, err
+			}
+			if html, err = f.Get(ctx, url); err != nil {
+				return backfillScanResult{}, err
+			}
+		}
+
+		scanned, err := scanBackfillPage(html, cfg.IndexURL)
+		if err != nil {
+			return backfillScanResult{}, err
+		}
+		newest, oldest := backfillDateRange(scanned.Items)
+
+		// 相邻页连续性：p(N).oldest >= p(N+1).newest。违反 ⇒ 中间漏了一段。
+		//
+		// 抓的是「翻页期间条目被下架/撤回，后面的往前移，已抓过那页覆盖的位置被跳过」
+		// ⇒ 静默少一整页。⚠️ 「整页 0 条」守卫对这种漏**完全看不见**：那一页有 15 条
+		// 列表项，只是不是原来那 15 条。
+		//
+		// ⚠️ 必须是 `>=` 不是 `>`：实测 41 对相邻页 41/41 成立，其中 **19 对取等号**
+		// （同日发布被页边界劈开，占 46%，是常态不是异常）。写成 `>` 会把近一半的
+		// 正常翻页判成错误。
+		if prevOldest != "" && newest > prevOldest {
+			return backfillScanResult{}, fmt.Errorf(
+				"hestia backfill: page %d starts at %s which is newer than page %d's oldest entry %s: "+
+					"the listing shifted while paging and a page range was skipped",
+				page, newest, page-1, prevOldest)
+		}
+
+		res.Pages = append(res.Pages, backfillIndexPage{
+			Page: page, URL: url, HTML: html, Newest: newest, Oldest: oldest,
+		})
+		for _, r := range scanned.Reports {
+			// 条目级过滤与页级判停是**两件事**：判停那一页横跨 From，页上 ≥From 的
+			// 必须留（boundary[0]），<From 的必须滤（否则 boundary[2]「From 比最新
+			// 一期还新 ⇒ 返回空」不成立）。少了这一句，第 1 页的报告会被原样带回。
+			if r.Published < from {
+				continue
+			}
+			if seen[r.ArticleID] {
+				continue
+			}
+			seen[r.ArticleID] = true
+			res.Reports = append(res.Reports, r)
+		}
+
+		// 停止判断放在**收集之后**：见上面「判停那一页必须先完整扫描」。
+		if oldest < from {
+			return res, nil
+		}
+		prevOldest = oldest
+	}
+
+	if exhausted {
+		return res, nil
+	}
+	return backfillScanResult{}, fmt.Errorf(
+		"hestia backfill: reached max_pages=%d without any page falling before from=%s: "+
+			"the date cutoff never took effect; refusing to return a partial result silently",
+		limit, from)
 }

@@ -1,9 +1,11 @@
 package hestia
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -349,4 +351,449 @@ func TestScanBackfillPageCountMustMatchIstitle(t *testing.T) {
 		require.Error(t, err, "计数基准消失 = 守卫失效，必须出声")
 		assert.Contains(t, err.Error(), "istitle")
 	})
+}
+
+// ============================================================================
+// M1c-1 的 TASK-002：翻页与按日期停止
+//
+// Context Checkpoint: done_criteria → test mapping
+//
+//	functional[0]      第 1 页不重复请求   → TestScanBackfillIndexDoesNotRefetchFirstPage
+//	functional[1]      跨页去重           → TestScanBackfillIndexDedupesAcrossPages
+//	boundary[0] 前半    按日期停、不按页码  → TestScanBackfillIndexStopsByDateNotPageCount
+//	boundary[0] 后半    判停页先扫完再 break → TestScanBackfillIndexScansStopPageBeforeBreaking
+//	boundary[1]        翻满 MaxPages ⇒ 报错 → TestScanBackfillIndexErrorsWhenMaxPagesRunOut
+//	boundary[2]        from 太新 ⇒ 空+nil  → TestScanBackfillIndexFromNewerThanEverything
+//	boundary[3]        相邻页日期连续性     → TestScanBackfillIndexAdjacentPageContinuity
+//	error_handling[0]  抓取失败 / 分页解析失败 → TestScanBackfillIndexFailsLoudly
+//	（自定，见函数注释）翻完站点 ⇒ 正常返回  → TestScanBackfillIndexExhaustedSiteIsNotAnError
+// ============================================================================
+
+// backfillIndexPageHTML 造一页带**分页控件**的 index 页。
+//
+// 分页控件是 parsePaging 的输入，形态照抄 discover.go 的注释（真实站点逐字）：
+//
+//	jumpTo(this,'408','1','/goutongjiaoliu/113456/113469/11040-%1.html')
+//
+// 与 TASK-001 的 backfillPageHTML 分开而不是改它：那份被 TASK-001 的 8 个用例用着，
+// 给它加分页控件会**改变已验证用例的输入**，而那些用例与分页无关。
+func backfillIndexPageHTML(totalPages int, items ...string) []byte {
+	return []byte(fmt.Sprintf(
+		`<html><body><table><tbody><tr>%s</tr></tbody></table>`+
+			`<a href="###" onclick="jumpTo(this,'%d','1','/goutongjiaoliu/113456/113469/11040-%%1.html')">尾页</a>`+
+			`</body></html>`,
+		strings.Join(items, ""), totalPages))
+}
+
+// backfillIndexURL 是合成站点里第 n 页的 URL。第 1 页是 testIndexURL 本身
+// （pageURL 对 page<=1 直接返回 indexURL，不套模板——理由见 discover.go 的 pageURL 注释）。
+func backfillIndexURL(n int) string {
+	if n <= 1 {
+		return testIndexURL
+	}
+	return fmt.Sprintf("https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/11040-%d.html", n)
+}
+
+// backfillDate 把 YYYY-MM-DD 解析成 time.Time，测试里用来喂 cfg.From。
+func backfillDate(t *testing.T, s string) time.Time {
+	t.Helper()
+	d, err := time.Parse("2006-01-02", s)
+	require.NoError(t, err)
+	return d
+}
+
+// backfillSite 拼一个合成站点：pages[i] 是第 i+1 页的条目列表。
+//
+// totalPages 单独传：站点自称的总页数与**这次准备了几页快照**是两件事，
+// 「翻满 MaxPages」与「翻完站点」两条分支要靠它们不同才能构造出来。
+func backfillSite(totalPages int, pages ...[]string) *fakeFetcher {
+	f := &fakeFetcher{pages: map[string][]byte{}}
+	for i, items := range pages {
+		f.pages[backfillIndexURL(i+1)] = backfillIndexPageHTML(totalPages, items...)
+	}
+	return f
+}
+
+// backfillItemsOn 造一页条目：dates 逐条给日期，标题按序号编，**都不是报告**。
+// 需要报告条目时由调用方自己 append 一条 backfillListItemHTML。
+func backfillItemsOn(idPrefix string, dates ...string) []string {
+	out := make([]string, 0, len(dates))
+	for i, d := range dates {
+		title := fmt.Sprintf("中国人民银行公告〔2020〕第%d号", i+1)
+		out = append(out, backfillListItemHTML(fmt.Sprintf("%s%03d", idPrefix, i), title, title, d))
+	}
+	return out
+}
+
+func backfillReportItem(id, title, date string) string {
+	return backfillListItemHTML(id, title, title, date)
+}
+
+func backfillReportTitles(res backfillScanResult) []string {
+	out := make([]string, 0, len(res.Reports))
+	for _, r := range res.Reports {
+		out = append(out, r.Title)
+	}
+	return out
+}
+
+// 🔴 functional[0]：第 1 页的字节在进循环前已经取回（parsePaging 要用它），
+// 循环体**不能再请求一次**。
+//
+// ⚠️ 断言的是 fake 收到的 **URL 序列**，不是返回值：多请求一次第 1 页时，
+// 候选清单一条不差（去重把它吃掉了），只有请求序列会露馅。
+// 理由见 discover.go 的 pageURL 注释：不重复请求 + 不制造别名。
+func TestScanBackfillIndexDoesNotRefetchFirstPage(t *testing.T) {
+	f := backfillSite(3,
+		backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+		backfillItemsOn("920", "2020-03-10", "2020-02-20"),
+		backfillItemsOn("930", "2020-01-09", "2019-12-25"), // oldest < from ⇒ 停在这页
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Pages, 3, "前置锚点：应当真的翻了 3 页，否则下面的计数是平凡的")
+
+	var firstPageHits int
+	for _, u := range f.calls {
+		if u == testIndexURL {
+			firstPageHits++
+		}
+	}
+	assert.Equal(t, 1, firstPageHits, "第 1 页只能请求一次，实际请求序列: %v", f.calls)
+	assert.Equal(t, []string{backfillIndexURL(1), backfillIndexURL(2), backfillIndexURL(3)}, f.calls)
+}
+
+// 🔴 functional[1]：同一 article_id 在分页边界重复出现时只产出一次。
+//
+// 不是假想：回填要跑约 9 分钟，这个窗口内央行发新文会把边界那条挤到下一页
+// （discover.go 的 seen map 注释）。第 2 页刻意重复第 1 页的最后一条。
+func TestScanBackfillIndexDedupesAcrossPages(t *testing.T) {
+	const dupID, dupTitle = "2025092212550537670", "2020年2月金融统计数据报告"
+	dup := backfillReportItem(dupID, dupTitle, "2020-03-11")
+
+	f := backfillSite(3,
+		append(backfillItemsOn("910", "2020-03-25"), dup),
+		append([]string{dup}, backfillItemsOn("920", "2020-03-10")...),
+		backfillItemsOn("930", "2020-01-09", "2019-12-25"),
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err)
+
+	var n int
+	for _, r := range res.Reports {
+		if r.ArticleID == dupID {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "边界重复的那条只能产出一次，实际标题清单: %v", backfillReportTitles(res))
+}
+
+// 🔴 boundary[0] 前半：停止条件按**日期**，不按页码 —— 判停后**不再请求下一页**。
+//
+// ⚠️ 断言 fake 的**调用次数**，不是只断言返回值：返回值对而多翻了 100 页时，
+// 只看返回值的断言照样绿（多翻回来的都是更老的，进不了候选或被去重吃掉）。
+// 而多翻 100 页 = 多打 100 次真实请求。
+func TestScanBackfillIndexStopsByDateNotPageCount(t *testing.T) {
+	f := backfillSite(200,
+		backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+		backfillItemsOn("920", "2020-03-10", "2020-02-20"),
+		backfillItemsOn("930", "2020-01-09", "2019-12-25"), // oldest 早于 from ⇒ 停
+	)
+	// 第 4 页刻意**不准备**：真去请求它，fakeFetcher 会报「没有为 … 准备页面」。
+	// 这比断言次数更早暴露问题，两道一起留着。
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err, "站点自称 200 页，但日期判定应当在第 3 页就停下")
+	assert.Len(t, f.calls, 3, "停在第 3 页 ⇒ 一共 3 次请求，实际: %v", f.calls)
+	assert.Len(t, res.Pages, 3)
+}
+
+// 🔴 boundary[0] 后半：**判停那一页必须先完整扫描、再 break**。
+//
+// 实测依据：以 --from 2020-01 为例，p151 的条目跨 2019-12-25..2020-01-09，
+// 其中 2020-01-02..2020-01-09 那批**是 ≥ from 的**。break 写在扫描之前会把它们
+// 连同整页一起丢掉。
+//
+// ⚠️ **实测 p151 上恰好 0 条目标报告 ⇒ 把这个 bug 写进去，真实语料测试照样绿。**
+// 所以这条只能用合成页面钉：判停页上放一条 ≥from 的目标报告，断言它出现在结果里。
+// 同一页上还放一条**早于 from** 的报告，断言它被滤掉 —— 这两条是**成对的**：
+// 判停是页级的、过滤是条目级的，只断言「≥from 的留下」时，一个「整页照单全收」的
+// 实现照样绿，而它会让 boundary[2]（from 比最新一期还新 ⇒ 返回空）不成立。
+// 反过来只断言「<from 的滤掉」时，一个「判停页整页丢弃」的实现也照样绿。
+func TestScanBackfillIndexScansStopPageBeforeBreaking(t *testing.T) {
+	const wantTitle = "2019年金融统计数据报告"
+	const dropTitle = "2019年12月社会融资规模存量统计数据报告"
+
+	stopPage := append(
+		[]string{
+			backfillReportItem("2025092212550999001", wantTitle, "2020-01-05"), // ≥from，必须留
+			backfillReportItem("2025092212550999002", dropTitle, "2019-12-27"), // <from，必须滤
+		},
+		backfillItemsOn("930", "2020-01-02", "2019-12-25")..., // oldest 早于 from ⇒ 本页判停
+	)
+	f := backfillSite(200,
+		backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+		stopPage,
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err)
+	require.Len(t, f.calls, 2, "判停页仍然要被请求和扫描，只是不再往下翻")
+
+	got := backfillReportTitles(res)
+	assert.Contains(t, got, wantTitle,
+		"判停页上 ≥from 的报告必须留在结果里 —— break 写在扫描之前就会连它一起丢掉")
+	assert.NotContains(t, got, dropTitle,
+		"判停页上早于 from 的报告必须滤掉 —— 留着会让 TASK-008 的逐期对账多出一个假的残缺期次")
+}
+
+// 🔴 boundary[1]：翻满 MaxPages 仍未触发日期停止 ⇒ **报错**，不是静默返回已收集的部分。
+//
+// 那说明日期判定没生效。MaxPages 只是兜底，不是正常出口 —— 静默返回会让「回填看起来
+// 跑完了」而窗口外的期次一个都没抓。
+func TestScanBackfillIndexErrorsWhenMaxPagesRunOut(t *testing.T) {
+	// 三页全都 ≥ from ⇒ 永远不会日期停止；MaxPages 设 2 ⇒ 翻满即报错。
+	f := backfillSite(200,
+		backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+		backfillItemsOn("920", "2020-03-10", "2020-02-20"),
+		backfillItemsOn("930", "2020-02-19", "2020-02-01"),
+	)
+
+	_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 2,
+	})
+	require.Error(t, err, "静默返回部分结果 = 回填看起来跑完了")
+	assert.Contains(t, err.Error(), "max_pages")
+	assert.Len(t, f.calls, 2, "报错也不该多翻，实际: %v", f.calls)
+}
+
+// 🔴 boundary[2]：`from` 比最新一期还新 ⇒ 第一页就停，返回空 + **nil error**。
+//
+// ⚠️ 这条主动开了一条**静默零通道**（--from 打错一位 ⇒ 0 篇 + 退出码 0，与「今天没有
+// 新报告」在调用方看来完全一样）。它由 **TASK-008 的完整性对账**兜住 ——
+// 本任务只保证「不报错」，**不在这里加任何期望值判断**，那是 TASK-008 的 scope。
+func TestScanBackfillIndexFromNewerThanEverything(t *testing.T) {
+	f := backfillSite(200,
+		append(backfillItemsOn("910", "2020-03-25"),
+			backfillReportItem("2025092212550537670", "2020年2月金融统计数据报告", "2020-03-11")),
+		backfillItemsOn("920", "2020-03-10", "2020-02-20"),
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2026-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err, "「没有要抓的」是正常结果，不是失败")
+	assert.Empty(t, res.Reports)
+	assert.Len(t, f.calls, 1, "第一页就该停，实际: %v", f.calls)
+	assert.Len(t, res.Pages, 1, "那一页仍然翻过了，Pages 要如实记")
+}
+
+// 🔴 boundary[3]：相邻页日期连续性 `p(N).oldest >= p(N+1).newest`，违反即报错。
+//
+// 它抓的是「翻页期间页码漂移导致**跳页**」：条目被下架/撤回会让后面的往前移，
+// 已抓过那页覆盖的位置被跳过 ⇒ **静默少一整页**。
+// ⚠️ 「整页 0 条」守卫对这种漏**完全看不见** —— 那一页有 15 条列表项，
+// 只是**不是原来那 15 条**。
+//
+// ⚠️ 必须是 `>=` 而不是 `>`：实测 41 对相邻页 41/41 成立，其中 **19 对取等号**
+// （同日发布被页边界劈开，是常态不是异常）。写成 `>` 会把近一半的正常翻页判成错误。
+func TestScanBackfillIndexAdjacentPageContinuity(t *testing.T) {
+	t.Run("跳页：p2 的最新比 p1 的最老还新 ⇒ 报错", func(t *testing.T) {
+		f := backfillSite(200,
+			backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+			// p2 最新 2020-03-20 > p1 最老 2020-03-11 ⇒ 中间漏了一段
+			backfillItemsOn("920", "2020-03-20", "2020-02-20"),
+		)
+
+		_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "2020-03-11")
+		assert.Contains(t, err.Error(), "2020-03-20")
+	})
+
+	// 阴性对照，**不是重复**：写成 `>` 的实现能让上面那条照样绿，只有本条会红。
+	// 实测 41 对相邻页里 19 对是这个形态（同日跨页），占 46%。
+	t.Run("同日跨页：p1 最老 == p2 最新 ⇒ 放行", func(t *testing.T) {
+		f := backfillSite(200,
+			backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+			backfillItemsOn("920", "2020-03-11", "2020-02-20"), // 取等号
+			backfillItemsOn("930", "2020-01-09", "2019-12-25"),
+		)
+
+		res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.NoError(t, err, "同日跨页是常态（实测 46% 的页边界），判成错误会让近一半的翻页失败")
+		assert.Len(t, res.Pages, 3)
+	})
+}
+
+// 🔴 error_handling[0]：两种失效都必须**原样报错**，不退化。
+//
+// ⚠️ 与「单篇文章抓取失败记 failed 并继续」（TASK-006）**处置相反，是刻意的**：
+// 少一页 index = 静默少 15 条候选，与「整页 0 条」等价危害。
+func TestScanBackfillIndexFailsLoudly(t *testing.T) {
+	// 第 1 页与中途某页是**两条不同的代码路径**（第 1 页在循环外取、要喂给 parsePaging），
+	// 只测其中一条时另一条无人守。写这条时确实是先漏了第 1 页那支，靠覆盖率报出来的。
+	t.Run("第 1 页抓取失败 ⇒ 原样返回错误", func(t *testing.T) {
+		f := urlFailFetcher{inner: backfillSite(200, backfillItemsOn("910", "2020-03-25")), failOn: testIndexURL}
+
+		_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errBoom)
+	})
+
+	t.Run("index 页抓取失败 ⇒ 立刻中止并原样返回错误", func(t *testing.T) {
+		inner := backfillSite(200,
+			backfillItemsOn("910", "2020-03-25", "2020-03-11"),
+			backfillItemsOn("920", "2020-03-10", "2020-02-20"),
+		)
+		f := urlFailFetcher{inner: inner, failOn: backfillIndexURL(2)}
+
+		_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errBoom, "原样返回抓取错误，不包装成「这页没有」也不记 failed 继续")
+	})
+
+	// ⚠️ 复用 parsePaging **不等于该分支被覆盖**：backfill 路径要有自己的用例走到它，
+	// 否则「翻页退化成只扫第 1 页」在本函数上无人守着（月报发布 3 周后必然掉出第 1 页）。
+	t.Run("分页控件解析失败 ⇒ 报错，不退化成只扫第 1 页", func(t *testing.T) {
+		f := &fakeFetcher{pages: map[string][]byte{
+			// 有正常的列表项，只是**没有分页控件** —— 单页扫描能成功，翻页不能。
+			testIndexURL: []byte(`<html><body><table><tbody><tr>` +
+				strings.Join(backfillItemsOn("910", "2020-03-25", "2020-03-11"), "") +
+				`</tr></tbody></table></body></html>`),
+		}}
+
+		_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "paging")
+	})
+
+	// 中途某页**版式失效**（TASK-001 的 0 条守卫在那一页报错）⇒ 一路返回，
+	// 不当成「这页没有报告」继续翻。与「抓取失败」是不同的失效源、同一种处置。
+	t.Run("中途某页版式失效 ⇒ 报错，不继续翻", func(t *testing.T) {
+		f := backfillSite(200, backfillItemsOn("910", "2020-03-25", "2020-03-11"))
+		f.pages[backfillIndexURL(2)] = backfillIndexPageHTML(200) // 有分页控件、0 条列表项
+
+		_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "layout")
+		assert.Len(t, f.calls, 2, "第 2 页报错后就不该再翻，实际: %v", f.calls)
+	})
+
+	// 分页模板拼不出合法 URL ⇒ 报错。与 TASK-001 的「href 补不成绝对 URL 就报错」同处置：
+	// 悄悄跳过会让翻页从第 2 页起静默断掉，而返回值看起来只是「第 1 页没有报告」。
+	t.Run("分页模板拼出非法 URL ⇒ 报错", func(t *testing.T) {
+		f := &fakeFetcher{pages: map[string][]byte{
+			testIndexURL: []byte(`<html><body><table><tbody><tr>` +
+				strings.Join(backfillItemsOn("910", "2020-03-25", "2020-03-11"), "") +
+				`</tr></tbody></table>` +
+				// %zz 不是合法的百分号转义，url.Parse 直接拒
+				`<a href="###" onclick="jumpTo(this,'9','1','/goutongjiaoliu/%zz/11040-%1.html')">尾页</a>` +
+				`</body></html>`),
+		}}
+
+		_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "bad url")
+	})
+}
+
+// MaxPages <= 0 时用兜底常量 backfillMaxPages，**不是**「一页都不翻」。
+//
+// 这条不在 DoD 里，是我加的：`for page := 1; page <= cfg.MaxPages` 在 MaxPages 为零值时
+// 循环体一次都不执行 ⇒ 返回空 + nil error，与「今天没有要抓的」在调用方看来完全一样。
+// 那正是本 sprint 反复在防的那类静默零 —— 一个没填 cfg 的调用方拿不到任何提示。
+func TestScanBackfillIndexZeroMaxPagesUsesDefault(t *testing.T) {
+	f := backfillSite(200,
+		append(backfillItemsOn("910", "2020-03-25"),
+			backfillReportItem("2025092212550537670", "2020年2月金融统计数据报告", "2020-03-11")),
+		backfillItemsOn("930", "2020-01-09", "2019-12-25"),
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), // MaxPages 留零值
+	})
+	require.NoError(t, err)
+	assert.Len(t, f.calls, 2, "零值不该退化成「一页都不翻」")
+	assert.Contains(t, backfillReportTitles(res), "2020年2月金融统计数据报告")
+}
+
+// 翻完站点自称的 totalPages 而没触发日期停止 ⇒ **正常返回**，不报错。
+//
+// ⚠️ 这条**不在 DoD 里**，是我判的：DoD 只规定了「翻满 MaxPages ⇒ 报错」。
+// 依据是 discover.go 已有的 StopExhausted / StopMaxPages 之分 ——「翻完就是翻完了，
+// 不是上限拦住了」。把两者合并成报错，会让 totalPages < MaxPages 的小栏目（或
+// --from 早于站点最早一篇）在**已经看完全部页面**的情况下失败。
+//
+// 与上面 MaxPages 那条是互补的一对：合并任一条，另一条的语义就没人守着。
+func TestScanBackfillIndexExhaustedSiteIsNotAnError(t *testing.T) {
+	// 站点自称只有 2 页，两页都 ≥ from ⇒ 翻完也不会日期停止。MaxPages 远大于 2。
+	f := backfillSite(2,
+		append(backfillItemsOn("910", "2020-03-25"),
+			backfillReportItem("2025092212550537670", "2020年2月金融统计数据报告", "2020-03-11")),
+		backfillItemsOn("920", "2020-03-10", "2020-02-20"),
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err, "站点只有 2 页且都翻完了——这不是「上限拦住了」")
+	assert.Len(t, f.calls, 2)
+	assert.Contains(t, backfillReportTitles(res), "2020年2月金融统计数据报告")
+}
+
+// Pages 要如实记下每页的 URL 与日期区间。
+//
+// ⚠️ 这两个数**只有翻页循环知道**：设计附录 A3 规定 index 快照落名
+// `<抓取序号>-<该页最新条目日期>_<该页最老条目日期>.html`（页码会随新文章上架漂移，
+// 不能作唯一键），而 §7.3 要求 index 页也存盘。不交出去的话 TASK-006 只能把 150 页
+// 重抓一遍。HTML 原样带出，同理。
+//
+// newest/oldest 取整页的 max/min 而不是首末条：**不假设页内有序**。真实语料是倒序的，
+// 但那是观测值不是契约，而连续性守卫的正确性直接依赖这两个数的定义。
+func TestScanBackfillIndexRecordsPageDateRange(t *testing.T) {
+	f := backfillSite(200,
+		// 刻意**乱序**：首条不是最新、末条不是最老。
+		backfillItemsOn("910", "2020-03-11", "2020-03-25", "2020-03-20"),
+		backfillItemsOn("930", "2020-01-09", "2019-12-25"),
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Pages, 2)
+
+	assert.Equal(t, 1, res.Pages[0].Page)
+	assert.Equal(t, testIndexURL, res.Pages[0].URL)
+	assert.Equal(t, "2020-03-25", res.Pages[0].Newest, "取整页最大值，不是首条")
+	assert.Equal(t, "2020-03-11", res.Pages[0].Oldest, "取整页最小值，不是末条")
+	assert.NotEmpty(t, res.Pages[0].HTML, "原始字节要带出去——index 页同样不可再生（§7.3）")
+
+	assert.Equal(t, 2, res.Pages[1].Page)
+	assert.Equal(t, backfillIndexURL(2), res.Pages[1].URL)
 }
