@@ -70,18 +70,40 @@ func rcRow(t *testing.T, r backfillReconcile, period string) backfillPeriodRow {
 //
 // 排序必须稳定且可 diff —— 这份表是 spec §10 Q3 的答案，也是 M1c-3 的直接输入，
 // 会被人反复跑、反复比对。输入顺序变一下就重排的表，diff 出来全是噪声。
-func TestReconcileBackfillPerPeriodTable(t *testing.T) {
-	items := rcItems(append(slices.Concat(
+// rcTableFixture 是 PerPeriodTable 与 KindsShowFactsNotRules **共用**的一份 fixture。
+//
+// 它刻意造出两个在原 fixture 里不存在、因而让两条断言失去鉴别力的形态
+// （FIX-B，验证者实测：原 fixture 下删掉排序、或把两个口径合并，全包无一变红）：
+//
+//   - **同一期同一种类两篇**（2020-03 的社融存量有「3月」与「一季度」两种表述）。
+//     排序只在这种情形下才起作用；原 fixture 每期每种恰好一篇，`sort.Strings(row.Titles)`
+//     删掉与不删掉结果一模一样。⚠️ 两篇的标题必须**不同**且**输入顺序 ≠ 字典序**
+//     （这里先喂「一季度」版、后喂「3月」版，而 '3'(0x33) 字节序在 '一' 之前）。
+//   - **v2 期次里出现了社融存量**（2025-10）。规则说 v2 只应有金融统计，而事实是它出现了；
+//     两个口径的区分只有在这种情形下才可观测。原 fixture 里 v2 期次只有金融统计一种，
+//     `Kinds` 走全部三种还是只走 wanted，结果相同。
+//
+// 「修订重发」不是假想：`discover.go` 的 ArticleChecker 注释登记过央行重发某期（修订版有新 id）。
+func rcTableFixture() []backfillReconcileItem {
+	return rcItems(append(slices.Concat(
 		rcTrio("2020", "2月", "2月", "2月"),
-		rcTrio("2020", "一季度", "3月", "一季度"),
-	), "2020年4月金融统计数据报告")...)
+		rcTrio("2020", "一季度", "一季度", "一季度"), // 存量先来「一季度」版
+	),
+		"2020年3月社会融资规模存量统计数据报告", // 同期同种类的第二篇，字典序在前、输入顺序在后
+		"2020年4月金融统计数据报告",
+		"2025年10月金融统计数据报告",
+		"2025年10月社会融资规模存量统计数据报告", // v2 期次里冒出来的存量：规则说不该有，事实是有
+	)...)
+}
 
+func TestReconcileBackfillPerPeriodTable(t *testing.T) {
+	items := rcTableFixture()
 	r := reconcileBackfill(items, "2025-09", backfillExpect{})
 
-	assert.Equal(t, []string{"2020-02", "2020-03", "2020-04"}, rcPeriods(r), "按期次升序，每期一行")
+	assert.Equal(t, []string{"2020-02", "2020-03", "2020-04", "2025-10"}, rcPeriods(r), "按期次升序，每期一行")
 	assert.False(t, r.Empty)
-	assert.Equal(t, 3, r.Periods)
-	assert.Equal(t, 7, r.Articles)
+	assert.Equal(t, 4, r.Periods)
+	assert.Equal(t, 10, r.Articles)
 
 	feb := rcRow(t, r, "2020-02")
 	assert.Equal(t, 3, feb.Got)
@@ -94,11 +116,56 @@ func TestReconcileBackfillPerPeriodTable(t *testing.T) {
 	assert.Equal(t, 1, apr.Got)
 	assert.Equal(t, []string{backfillKindStock, backfillKindFlow}, apr.Missing, "缺的是哪几种要点名")
 
+	// 🔴 排序的鉴别力：2020-03 的存量有两篇，输入顺序是「一季度」在前，字典序是「3月」在前。
+	// 删掉 sort.Strings(row.Titles) 时这一条会红——原 fixture（每期每种恰好一篇）下它不会。
+	mar := rcRow(t, r, "2020-03")
+	assert.Equal(t, 4, mar.Got, "该期存量两篇 ⇒ 篇数 4")
+	// 期望值按**字节序**独立核算过（`sort.Strings` 是字节序，不是拼音序）：
+	// `3`=0x33 < `一`=0xE4…；三条「一季度」里 `社`=0xE7 < `金`=0xE9，
+	// 而 `增`=0xE5A29E < `存`=0xE5AD98 ⇒ 增量在存量之前、金融统计**在最后**。
+	// ⚠️ 我第一次是凭直觉排的（把「金融统计」放在第二位），被这条断言当场证伪 ——
+	// 汉字的字节序与阅读直觉无关，别手排，算一遍。
+	assert.Equal(t, []string{
+		"2020年3月社会融资规模存量统计数据报告",
+		"2020年一季度社会融资规模增量统计数据报告",
+		"2020年一季度社会融资规模存量统计数据报告",
+		"2020年一季度金融统计数据报告",
+	}, mar.Titles, "Titles 必须按字典序，且**同种类内部**也排序 —— 这是排序唯一可观测的地方")
+
 	// 输入顺序不影响输出：把同一批条目倒过来喂，表必须逐字相同。
 	rev := slices.Clone(items)
 	slices.Reverse(rev)
 	assert.Equal(t, r.Rows, reconcileBackfill(rev, "2025-09", backfillExpect{}).Rows,
 		"排序必须稳定 —— 输入顺序变了就重排的表，diff 出来全是噪声")
+}
+
+// 🔴 FIX-B①：`Kinds`/`Got`/`Titles` 报**事实**，`Missing` 报**规则** —— 两个口径刻意不同。
+//
+// 我在实现注释里写了「v2 期次若真出现了社融存量，必须在表上看得见」，
+// 而验证者实测：把 `Kinds/Got/Titles` 也改成只走 `wanted` 之后 **全包测试无一变红**
+// ⇒ 那句话当时是**空声明**。本用例把它变成可执行的断言。
+//
+// 为什么这个区分要紧：`Missing` 回答「按现行规则该有的少了吗」，用的是规则；
+// `Kinds` 回答「实际出现了什么」，用的是事实。若把 `Kinds` 也按规则过滤，
+// **站点行为变化（v2 期次又开始发社融存量）会被静默抹掉**——而对账层存在的全部理由
+// 就是不让东西静默消失。
+//
+// ⚠️ 与 PerPeriodTable **共用同一份 fixture**，不另造一套：两条断言防的是同一个 fixture
+// 缺口的两个面（同种类多篇 / v2 期次多种类）。
+func TestReconcileBackfillKindsShowFactsNotRules(t *testing.T) {
+	r := reconcileBackfill(rcTableFixture(), "2025-09", backfillExpect{})
+
+	oct := rcRow(t, r, "2025-10")
+	require.Equal(t, backfillRuleV2, oct.Rule, "前置锚点：2025-10 必须是 v2，否则本条测的不是那件事")
+	assert.Equal(t, 1, oct.Want, "规则：v2 期次只应有金融统计一种")
+
+	assert.Equal(t, []string{backfillKindFinance, backfillKindStock}, oct.Kinds,
+		"事实：社融存量确实出现了，表上必须看得见——按规则过滤 Kinds 会把站点行为变化静默抹掉")
+	assert.Equal(t, 2, oct.Got, "Got 同样报事实：实得两篇")
+	assert.Len(t, oct.Titles, 2)
+
+	assert.Empty(t, oct.Missing, "而 Missing 报规则：v2 应有的那一种在，就不缺")
+	assert.NotContains(t, r.MissingPeriods, "2025-10", "多出一种不是缺篇")
 }
 
 // 🔴 functional[1]：缺篇判定用**结构规则**，切换点作为**参数**传入。
