@@ -1098,3 +1098,31 @@ func TestScanBackfillIndexRecordsPageDateRange(t *testing.T) {
 	assert.Equal(t, 2, res.Pages[1].Page)
 	assert.Equal(t, backfillIndexURL(2), res.Pages[1].URL)
 }
+
+// backfillSameHost / backfillIstitleCounts 的**防御性分支**。
+//
+// ⚠️ 这两条分支从 scanBackfillPage 那条路径**够不到**（调用方先 resolveURL 硬失败、
+// 且真实语料里 istitle 锚必带 href），所以直接单测函数。不写的话它们是纯装饰 ——
+// 而「解析失败判成站外」是一个**方向性选择**（保守），选择就该有断言钉住。
+func TestBackfillSameHostFailsClosedOnUnparsableURL(t *testing.T) {
+	assert.True(t, backfillSameHost("https://www.pbc.gov.cn/a/", "https://www.pbc.gov.cn/b/"))
+	assert.False(t, backfillSameHost("https://www.pbc.gov.cn/a/", "https://evil.example.com/b/"))
+
+	// base 解析不了 ⇒ 判站外（不是判站内）：判错方向会把外站条目放进 Items。
+	assert.False(t, backfillSameHost("://bad-base", "https://www.pbc.gov.cn/b/"),
+		"base 解析不了时必须判站外——保守方向")
+	// abs 解析不了 ⇒ 同样判站外。
+	assert.False(t, backfillSameHost("https://www.pbc.gov.cn/a/", "://bad-abs"))
+}
+
+// istitle 锚**没有 href** 时不算站内条目（而不是崩掉、也不是算进去）。
+//
+// 它同时说明基准的两个数为什么必须分开：这条锚仍然计入 `all`（页面确实声明了一条），
+// 只是不计入 `internal` ⇒ 站内数与解析出的条目数对不上 ⇒ 守卫照常报错。
+func TestBackfillIstitleCountsSkipsAnchorWithoutHref(t *testing.T) {
+	html := []byte(`<a istitle="true">没有 href 的锚</a><span class="hui12">2020-03-11</span>`)
+
+	all, internal := backfillIstitleCounts(html, backfillTestBase)
+	assert.Equal(t, 1, all, "页面确实声明了一条 —— 它要计入总数")
+	assert.Equal(t, 0, internal, "取不出 href 就不能算站内")
+}

@@ -1103,3 +1103,41 @@ func TestBackfillFetchRecordsReconcileContext(t *testing.T) {
 	// MissingPeriods / Unclassified 是**结论**，不是明细：下游重算最容易算歪的正是这两项。
 	assert.NotNil(t, got.Reconcile.MissingPeriods, "空与缺字段不是一回事——JSON 里要看得见 []")
 }
+
+// chmodOnReportWriter 在**对账报告写出的那一刻**把根目录改成不可写。
+//
+// 🔴 它存在的理由与 C3 那条教训完全同构：TASK-010 给 `runBackfill` 加了**第 6 条写盘
+// 路径**（完成标记 + 对账摘要那次 `store.Save()`），而它夹在「最后一次 AppendArticle」
+// 与「返回」之间 —— 静态预置够不到（前面的 Save 会先失败），跑到一半 chmod 也够不到
+// （AppendArticle 会先失败）。**唯一夹在中间的注入点是 `cfg.Report` 这个 io.Writer**。
+//
+// ⚠️ 这正是 C3 记的那句话的第二个实例：「我没找到构造」不等于「构造不存在」，
+// 而找得到的那个注入点往往**已经在签名里**了。
+type chmodOnReportWriter struct{ out string }
+
+func (w chmodOnReportWriter) Write(p []byte) (int, error) {
+	_ = os.Chmod(w.out, 0o555)
+	return len(p), nil
+}
+
+// 🔴 第 6 条写盘路径：完成标记 + 对账摘要落盘失败 ⇒ **中止**，不能静默当作跑完了。
+//
+// 少了这一格，一个「最后那次 Save 的错误被忽略」的实现会让 manifest **没有
+// completed_at 却退出码为 0** —— 恰好制造出 R2-7 要消灭的那种「夭折与完整不可分辨」。
+func TestBackfillFetchAbortsWhenFinalSaveFails(t *testing.T) {
+	out := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) }) // 否则 TempDir 清理失败
+
+	cfg := bfConfig(t, out)
+	cfg.Report = chmodOnReportWriter{out: out}
+	err := runBackfill(context.Background(), bfSite(t, cfg, bfTwoArticles()...), func(time.Duration) {}, cfg)
+
+	require.Error(t, err, "完成标记写不下去 ⇒ 必须报错，否则「跑完了」这个结论没有依据")
+	assert.Contains(t, err.Error(), "建临时文件于", "错误要来自 manifestStore.Save 的落盘路径")
+
+	// 前置锚点：文章确实抓完了（说明失败点真的在最后那次 Save，不是更早）。
+	require.NoError(t, os.Chmod(out, 0o755))
+	got := readManifestFile(t, out)
+	assert.Len(t, got.Articles, 2, "两篇都抓到了 —— 失败发生在它们之后")
+	assert.Empty(t, got.CompletedAt, "既然没写成，就不该有完成标记")
+}
