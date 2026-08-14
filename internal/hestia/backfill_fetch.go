@@ -1,11 +1,14 @@
 package hestia
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -55,7 +58,54 @@ type BackfillConfig struct {
 	Out      string
 	MaxPages int           // <= 0 时用 backfillMaxPages
 	Timeout  time.Duration // 仅 BackfillFetch 用：单次 HTTP 的超时
+
+	// —— 完整性对账（M1c-1 的 TASK-009 接入）——
+
+	// Report 是对账报告的去向。**nil ⇒ os.Stdout**。
+	//
+	// 默认可见而不是默认丢弃：这个机制的全部意义就是不让缺口静默消失，
+	// 一个忘了设 Report 的调用方若因此什么都看不到，等于把它又关掉了一次。
+	Report io.Writer
+
+	// Cutover 是模板切换点（期次 YYYY-MM）。空 ⇒ 用 backfillCutover。
+	//
+	// 它是**参数**不是常量：真跑时要能核对、能随实测调整（caller_contract 第 4 条
+	// 「别在调用方那侧再写死一份」——所以默认值放在本包的 backfillCutover 一处，
+	// 命令层不传即用它，而不是命令层自己写一个 "2025-09"）。
+	Cutover string
+
+	// ExpectPeriods / ExpectArticles 是总数期望值，对应 CLI 的 --expect-periods /
+	// --expect-articles。**零值 = 未显式传入 ⇒ 走推算值告警路径**（TASK-008 的
+	// notes_for_downstream 已定死这个语义）。
+	//
+	// 摊平成两个 int 而不是内嵌 backfillExpect：后者是**非导出**类型，
+	// 内嵌进导出结构体会让 cmd/atlas 根本没法给它赋值。
+	ExpectPeriods  int
+	ExpectArticles int
 }
+
+// backfillCutover 是模板切换点的**唯一**定义处（实测 2025-09）。
+//
+// 实测依据：社融存量/增量的最后一期是「2025年8月…」，同日发布于 2025-09-12；
+// 自 2025-09 起每期恰好一篇。⚠️ 它是**对照值**——真跑时核对它，别把它当判据。
+const backfillCutover = "2025-09"
+
+// 对账报告里的段落标签。**提成常量是为了让测试钉住具体文案而不是钉住「非空」**：
+// 「输出非空」对「只打印了 Rows」同样为真，而本 sprint 已在弱断言上翻车多次。
+//
+// ⚠️ **任何两个标签都不许互为子串**。第一版把 Complete 写成「缺篇期次: 无（…）」，
+// 它**字面包含** Missing 的「缺篇期次:」⇒ `NotContains(报告, Missing)` 在「全部齐全」
+// 的报告上**永不成立**，而那条断言看起来完全合理。是我自己写的用例当场撞上的。
+// ⇒ 共享前缀的标签会让所有子串断言变得不可靠，而失败方式是「断言恒假」不是「漏判」。
+const (
+	backfillReconcileHeader            = "=== 完整性对账 ==="
+	backfillReconcileMissingLabel      = "缺篇期次:"
+	backfillReconcileCompleteLabel     = "各期均满足结构规则（无缺篇）"
+	backfillReconcileEmptyLabel        = "零期次: 对账表为空"
+	backfillReconcileUnclassifiedLabel = "无法归类的标题:"
+	backfillReconcileWarningLabel      = "告警:"
+	backfillReconcileViolationLabel    = "违规（显式期望值不符）:"
+)
 
 // BackfillFetch 跑一次完整回填。**本包对外的唯一入口**（cmd/atlas 接 cobra 用）。
 //
@@ -148,10 +198,88 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 		}
 	}
 
+	// —— 完整性对账（M1c-1 的 TASK-009）——
+	//
+	// 🔴 **位置在 `failed > 0` 判断之前**，不是之后：先 return 会让「抓取有失败」把
+	// 对账违规**整个吞掉**，而那趟跑已经花了约 9 分钟，人拿到的错误信息里少一半。
+	//
+	// 入参取 **manifest 里已抓到的篇目**而不是 cc.Fetch：对账要回答的是
+	// 「**手上这份产物完不完整**」，抓取失败造成的缺口同样要算进来。
+	//
+	// 🔴 为什么这一步非有不可：`reconcileBackfill` 有 12 个测试、12 个变异全 KILLED，
+	// 而在此之前**生产路径一次都不碰它**。「整页被静默跳过」这个失效（翻页层对下架
+	// 方向完全沉默，见 backfill_scan.go 的连续性守卫注释）在本 sprint 里**只有对账层
+	// 能发现** —— 它不被调用，等于那条链根本没接上。
+	rc := reconcileBackfill(
+		backfillReconcileItemsFromArticles(store.Manifest.Articles),
+		cmp.Or(cfg.Cutover, backfillCutover),
+		backfillExpect{Periods: cfg.ExpectPeriods, Articles: cfg.ExpectArticles},
+	)
+	writeBackfillReconcileReport(backfillReportWriter(cfg.Report), rc)
+
+	// 两类问题**互不吞没**：抓取失败与对账违规同时发生时，errors.Join 让两条都在
+	// Error() 文本里。缺篇本身**不**进这里 —— 它是要报告的事实不是失败
+	// （caller_contract 第 1 条：历史上本来就有期次不齐，判成失败会让正常回填收不了工）。
+	var errs []error
 	if failed > 0 {
-		return fmt.Errorf("回填完成但有 %d 篇抓取失败（详见 %s 的 failed[]）", failed, store.Path())
+		errs = append(errs, fmt.Errorf("回填完成但有 %d 篇抓取失败（详见 %s 的 failed[]）", failed, store.Path()))
 	}
-	return nil
+	if rc.Failed() {
+		errs = append(errs, fmt.Errorf("完整性对账不通过: %s", strings.Join(rc.Violations, "; ")))
+	}
+	return errors.Join(errs...)
+}
+
+// backfillReportWriter 决定对账报告写去哪：**nil ⇒ os.Stdout，不是 io.Discard**。
+//
+// 这是一个刻意的方向选择，不是随手填的默认值：本机制的全部意义是不让缺口静默消失，
+// 而「调用方忘了设 Report ⇒ 什么都看不到」等于把它又关掉了一次——**默认值决定了
+// 忘记的后果**，而忘记是一定会发生的。
+//
+// ⚠️ 由 TestBackfillReportWriterDefaultsToStdout 钉住。没有那条用例时，有人把它改成
+// io.Discard 全包不会有任何反应——这正是本 sprint 反复出现的「注释里写着意图、
+// 删掉却无一变红」的形状（我在 TASK-008 上因此返工过一轮）。
+func backfillReportWriter(w io.Writer) io.Writer {
+	return cmp.Or(w, io.Writer(os.Stdout))
+}
+
+// writeBackfillReconcileReport 把对账结果的**四个可见面**写出去。
+//
+// ⚠️ 四个面都要写（DoD functional[1]）：`Rows` 说每期什么情况、`MissingPeriods` 说哪几期缺、
+// `Unclassified` 说哪些标题没认出来（可能是站点改了期次表述）、`Warnings` 说总数与推算值
+// 差多少。少写任何一面，那一面的信息就只活在内存里。
+//
+// 「零期次」与「全部齐全」各有**自己的**特征文本：两者的 MissingPeriods 都是空的
+// （caller_contract 第 3 条），只靠缺篇段读者分不出「什么都没抓到」和「抓全了」。
+func writeBackfillReconcileReport(w io.Writer, rc backfillReconcile) {
+	fmt.Fprintln(w, backfillReconcileHeader)
+	fmt.Fprintf(w, "期数 %d / 篇数 %d\n", rc.Periods, rc.Articles)
+
+	if rc.Empty {
+		fmt.Fprintln(w, backfillReconcileEmptyLabel)
+	}
+	for _, row := range rc.Rows {
+		line := fmt.Sprintf("  %s  %s  %d/%d", row.Period, row.Rule, row.Got, row.Want)
+		if len(row.Missing) > 0 {
+			line += "  缺: " + strings.Join(row.Missing, ", ")
+		}
+		fmt.Fprintln(w, line)
+	}
+
+	if len(rc.MissingPeriods) > 0 {
+		fmt.Fprintf(w, "%s %s\n", backfillReconcileMissingLabel, strings.Join(rc.MissingPeriods, ", "))
+	} else if !rc.Empty {
+		fmt.Fprintln(w, backfillReconcileCompleteLabel)
+	}
+	if len(rc.Unclassified) > 0 {
+		fmt.Fprintf(w, "%s %s\n", backfillReconcileUnclassifiedLabel, strings.Join(rc.Unclassified, " / "))
+	}
+	for _, s := range rc.Warnings {
+		fmt.Fprintf(w, "%s %s\n", backfillReconcileWarningLabel, s)
+	}
+	for _, s := range rc.Violations {
+		fmt.Fprintf(w, "%s %s\n", backfillReconcileViolationLabel, s)
+	}
 }
 
 // errBackfillDisk 标记「本机落盘故障」，用来把它与搜索侧的取回/解析失败区分开：
