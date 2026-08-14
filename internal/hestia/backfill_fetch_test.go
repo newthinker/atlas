@@ -1141,3 +1141,45 @@ func TestBackfillFetchAbortsWhenFinalSaveFails(t *testing.T) {
 	assert.Len(t, got.Articles, 2, "两篇都抓到了 —— 失败发生在它们之后")
 	assert.Empty(t, got.CompletedAt, "既然没写成，就不该有完成标记")
 }
+
+// ============================================================================
+// M1c-1 的 TASK-011：交叉校验的「有声跳过」对**看终端的人**也要成立
+// ============================================================================
+
+// 🔴 搜索侧被跳过时，**stdout 报告**必须说得出来。
+//
+// 现状（QA 补充项）：`search_skipped_reason` 确实按 ADR-M1c1-02 写进了 manifest，
+// **但报告一个字不提、退出码 0** ⇒ 「有声跳过」只对**读 manifest 的人**成立，
+// 对**跑命令的人**不成立。而跑命令的人才是当场能重试的那个。
+//
+// ⚠️ 判据要求**同时**含「未生效」这个事实与 reason 的内容：只断言标签时，
+// 一个打印固定标签、丢掉 reason 的实现照样绿，而 reason 才说得出「为什么」。
+func TestRunBackfillReportsSearchSkipped(t *testing.T) {
+	cfg := bfConfig(t, t.TempDir())
+	f := bfFailOn{inner: bfSite(t, cfg, bfTwoArticles()...), contains: backfillSearchBase}
+
+	report, err := bfRunReport(t, f, cfg)
+	require.NoError(t, err, "前置锚点：搜索侧失效仍要 fail-open，本任务只加可见性")
+
+	assert.Contains(t, report, backfillReconcileSearchSkippedLabel,
+		"看终端的人必须看得到「这次没做交叉校验」")
+	assert.Contains(t, report, "search side failed",
+		"光有标签不够——reason 的内容才说得出为什么跳过")
+}
+
+// 与上一条**互补**：搜索侧正常时该说明**不得出现**。
+//
+// ⚠️ 少了本条，一个**无条件打印**那句话的实现在上一条上照样绿 —— 而那等于每次跑都
+// 喊一声「未生效」，喊到没人再看它。这与本包 `exhausted` 那对、
+// `search_skipped_reason` 的 omitempty 那对是同一个形状：**否定式与肯定式必须成对**。
+func TestRunBackfillOmitsSearchSkippedWhenSearchWorks(t *testing.T) {
+	cfg := bfConfig(t, t.TempDir())
+
+	report, err := bfRunReport(t, bfSite(t, cfg, bfTwoArticles()...), cfg)
+	require.NoError(t, err)
+
+	// 前置锚点：这确实是一份正常产出的报告（否则「不含某串」在空字符串上平凡为真）。
+	require.Contains(t, report, backfillReconcileHeader)
+	assert.NotContains(t, report, backfillReconcileSearchSkippedLabel,
+		"搜索正常时不该出现「未生效」——每次都喊等于没喊")
+}
