@@ -817,3 +817,127 @@ func TestRunBackfillReconcilesFetchedNotPlanned(t *testing.T) {
 	assert.Contains(t, report, backfillKindFlow, "缺的正是抓失败的那一种")
 	assert.NotContains(t, report, backfillReconcileCompleteLabel)
 }
+
+// 🔴 functional[2](a)：**逐条钉住写盘失败路径**，不是只钉一条。
+//
+// 验证者实测：`AbortsOnDiskFailure` 只钉住 articles/ 那一条，其余写盘点**实现全对但
+// 无断言** —— 改坏它们全包不会红。表驱动跑满可构造的每一格。
+//
+// 构造法全部靠**文件系统**，不动实现（DoD：这是「补背书」不是「改行为」）：
+//   - 把某个本该是目录的路径预置成**普通文件** ⇒ 那一格的 MkdirAll 必然失败
+//   - 把产物根目录 chmod 成只读、但**预先建好** index/ 与 search/ 子目录
+//     ⇒ 前两格照常写入（写的是子目录），而 manifest 的 os.CreateTemp(根目录) 失败
+//
+// ⚠️ **`AppendFailed` / `AppendArticle` 内部那两次 Save 不在本表内**：它们发生在
+// 第 114 行那次 Save **之后**，与它写同一个目录 ⇒ 静态的文件系统构造没法让前者成功、
+// 后者失败；而要注入就得改 `backfill_manifest.go`，那**不在本任务的 writes 里**。
+// 已向 Leader 申报，未擅自扩大范围。
+func TestBackfillFetchAbortsOnEveryDiskFailurePath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("以 root 运行时挡不住写入，构造不出落盘失败")
+	}
+	for _, tt := range []struct {
+		name  string
+		setup func(t *testing.T, out string)
+		want  string // 错误里应出现的片段 —— 钉住「红在哪一格」，不只是「红了」
+		//
+		// 🔴 **子测试名里不许出现 want 的字面量**：`t.TempDir()` 的路径**包含子测试名**，
+		// 于是 `Contains(err, "manifest")` 会被临时目录路径满足 —— 断言看起来钉住了
+		// 失败来源，实际匹配的是自己造的路径。我第一版就是这么写的（子测试叫
+		// 「manifest 落盘失败」），消融「忽略第 114 行 Save 的错误」时**四格全绿**，
+		// 是「看哪一格红」把它揪出来的：那一格当时报的其实是 articles 的错。
+	}{
+		{
+			name:  "第一步：栏目页快照落盘失败",
+			setup: func(t *testing.T, out string) { mustWriteBlocker(t, filepath.Join(out, "index")) },
+			want:  "/index:",
+		},
+		{
+			name: "第二步：检索页快照落盘失败",
+			setup: func(t *testing.T, out string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(out, "index"), 0o755)) // 让 index 那格先过
+				mustWriteBlocker(t, filepath.Join(out, "search"))
+			},
+			want: "/search:",
+		},
+		{
+			name:  "第三步：文章正文落盘失败",
+			setup: func(t *testing.T, out string) { mustWriteBlocker(t, filepath.Join(out, "articles")) },
+			want:  "/articles:",
+		},
+		{
+			name: "第四步：清单落盘失败（根目录不可写）",
+			setup: func(t *testing.T, out string) {
+				// index/ 与 search/ 预先建好 ⇒ 它们的写入只需子目录可写；
+				// 而 manifest 的 os.CreateTemp 写在**根目录**上，必然失败。
+				require.NoError(t, os.MkdirAll(filepath.Join(out, "index"), 0o755))
+				require.NoError(t, os.MkdirAll(filepath.Join(out, "search"), 0o755))
+				require.NoError(t, os.Chmod(out, 0o555))
+				t.Cleanup(func() { _ = os.Chmod(out, 0o755) }) // 否则 t.TempDir 清理失败
+			},
+			want: "manifest.json",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := t.TempDir()
+			cfg := bfConfig(t, out)
+			arts := bfTwoArticles()
+			tt.setup(t, out)
+
+			_, err := bfRun(t, bfSite(t, cfg, arts...), cfg)
+
+			require.Error(t, err, "落盘失败必须中止，不能继续抓")
+			assert.Contains(t, err.Error(), tt.want,
+				"错误要点名是哪一格落盘失败了——只断言「有错」时，任何一格坏了这条都绿")
+		})
+	}
+}
+
+// mustWriteBlocker 把 path 造成一个**普通文件**，于是任何以它为目录的写入必然失败。
+func mustWriteBlocker(t *testing.T, path string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o644))
+}
+
+// 🔴 functional[2](b)：两侧 URL **不分叉** —— 在 `runBackfill` 层证伪，不在 crossCheck 层。
+//
+// index 侧给的是**站内相对路径** href，搜索侧给的是**绝对 URL**，两者指向同一个
+// article_id。只有 `resolveURL(cfg.IndexURL, href)` 的产出与搜索侧**逐字相同**时，
+// 交叉校验才会把它们认成同一篇（Source=both）、抓取才会命中 fake 里注册的那个 URL。
+//
+// 🔴 **为什么必须在 runBackfill 层**（DoD 已订正过一次）：在 `crossCheckBackfill` 层断言
+// 「两侧同值时输出等于它」是**恒真**的 —— 那个函数收的是**已构造好**的两侧条目，
+// **它看不到 base**；两侧同值时「取哪一侧」在输出上不可观测，取 index 也对、取 search
+// 也对、随机取也对。放到这一层之后，把 `cfg.IndexURL` 写成 `http://` 或多一个末尾斜杠，
+// 它立刻红（我实测过，见 discovery 的消融记录）。
+func TestRunBackfillIndexAndSearchURLsDoNotDiverge(t *testing.T) {
+	out := t.TempDir()
+	cfg := bfConfig(t, out)
+	arts := bfTwoArticles()
+	// bfSite 的 index 用相对 href（backfillListItemHTML），搜索用绝对 URL（bfArticleURL），
+	// 且搜索侧只索到 arts[0] ⇒ 那一篇是两侧都有的那个交集元素。
+	f := bfSite(t, cfg, arts...)
+
+	_, err := bfRun(t, f, cfg)
+	require.NoError(t, err, "两侧 URL 一致时不该有抓取失败")
+
+	st, err := loadManifest(out)
+	require.NoError(t, err)
+	got := map[string]Article{}
+	for _, a := range st.Manifest.Articles {
+		got[a.ID] = a
+	}
+
+	both := got[arts[0].ID]
+	require.NotEmpty(t, both.ID, "前置锚点：交集那一篇必须真的进了 manifest")
+	assert.Equal(t, bfArticleURL(arts[0].ID), both.URL,
+		"index 侧相对 href 经 resolveURL 后必须与搜索侧绝对 URL 逐字相同")
+	assert.Equal(t, backfillSourceBoth, both.Source,
+		"两侧认成同一篇才会是 both——分叉时会变成两条 index/search 各一份")
+
+	// 阴性对照：只有 index 侧索到的那一篇，URL 同样由 resolveURL 产出。
+	onlyIndex := got[arts[1].ID]
+	require.NotEmpty(t, onlyIndex.ID)
+	assert.Equal(t, bfArticleURL(arts[1].ID), onlyIndex.URL)
+	assert.Equal(t, backfillSourceIndex, onlyIndex.Source)
+}
