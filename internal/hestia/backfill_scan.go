@@ -236,8 +236,8 @@ func backfillDateRange(items []backfillItem) (newest, oldest string) {
 //
 // # 判停那一页必须先完整扫描、再停
 //
-// 实测：以 From=2020-01-01 为例，p151 的条目跨 2019-12-25..2020-01-09，其中
-// 2020-01-02..2020-01-09 那批**是 ≥ From 的**。把停止判断放在扫描之前会把它们
+// 实测：以 From=2020-01-01 为例，p151 的 15 条跨 **2019-12-25..2020-01-14**，其中
+// **7 条 ≥ From**（DoD 与本注释上一版写的上界 2020-01-09 是笔误，实测到 01-14）。把停止判断放在扫描之前会把它们
 // 连同整页一起丢掉。⚠️ 实测 p151 上恰好 0 条目标报告 ⇒ **这个 bug 在真实语料上
 // 一个测试都不会红**，守着它的是 TestScanBackfillIndexScansStopPageBeforeBreaking
 // 那份合成页面。
@@ -300,19 +300,34 @@ func scanBackfillIndex(ctx context.Context, f Fetcher, cfg backfillIndexCfg) (ba
 		}
 		newest, oldest := backfillDateRange(scanned.Items)
 
-		// 相邻页连续性：p(N).oldest >= p(N+1).newest。违反 ⇒ 中间漏了一段。
+		// 相邻页连续性：p(N).oldest >= p(N+1).newest。
 		//
-		// 抓的是「翻页期间条目被下架/撤回，后面的往前移，已抓过那页覆盖的位置被跳过」
-		// ⇒ 静默少一整页。⚠️ 「整页 0 条」守卫对这种漏**完全看不见**：那一页有 15 条
-		// 列表项，只是不是原来那 15 条。
+		// # 它检测的是「列表前移导致的**重复**」，**不是**跳页
 		//
-		// ⚠️ 必须是 `>=` 不是 `>`：实测 41 对相邻页 41/41 成立，其中 **19 对取等号**
-		// （同日发布被页边界劈开，占 46%，是常态不是异常）。写成 `>` 会把近一半的
-		// 正常翻页判成错误。
+		// 🔴 别把它读成「抓跳页」——**方向正好相反**，这是 TASK-002 返工时由 test-agent-27
+		// 构造观察出来的（非推理）：
+		//
+		//   - **新文上架** ⇒ 后续条目整体**下移** ⇒ p(N+1) 的开头重新出现 p(N) 已见过的条目
+		//     ⇒ `newest` 变新 ⇒ **本守卫触发**。这一支没有数据丢失，重复由下面的 seen 去重吃掉。
+		//   - **条目下架/撤回** ⇒ 后续条目整体**前移** ⇒ p(N) 与 p(N+1) 之间那段被整个略过
+		//     ⇒ `newest` 变**老** ⇒ 判据更满足 ⇒ **本守卫永不触发**。
+		//
+		// ⇒ **下架导致的整页跳过，本守卫抓不到**，而那一支才是有数据丢失的一支。
+		// 由 TestScanBackfillIndexSkipIsInvisibleToContinuityGuard 钉住这个盲区。
+		//
+		// **跳页检测归 M1c-1 的 TASK-008（完整性对账）**：它按 (年, 期次表述) 归组、
+		// 用结构规则（v1 期次应 3 篇 / v2 期次应 1 篇）列缺篇——那是个**全局正向**判据，
+		// 不需要知道翻页时发生了什么。本层只报「序乱了」，不报「少了哪几期」。
+		//
+		// ⚠️ 必须是 `>=` 不是 `>`：验证者三批独立快照实测 22 对，**取等号约占一半**
+		// （同日发布被页边界劈开，是常态不是异常）。写成 `>` 会把近一半的正常翻页判成错误。
+		//
+		// ⚠️ 上一版注释这里写的是「实测 41 对相邻页 41/41 成立」——**那个数没有任何人验过**，
+		// 传播链是 reviewer → DoD → 本注释。现在这句换成了独立三批实测（0 反例，delta ∈ [0,5]）。
 		if prevOldest != "" && newest > prevOldest {
 			return backfillScanResult{}, fmt.Errorf(
 				"hestia backfill: page %d starts at %s which is newer than page %d's oldest entry %s: "+
-					"the listing shifted while paging and a page range was skipped",
+					"the listing shifted while paging (entries may repeat across pages)",
 				page, newest, page-1, prevOldest)
 		}
 

@@ -518,9 +518,12 @@ func TestScanBackfillIndexStopsByDateNotPageCount(t *testing.T) {
 
 // 🔴 boundary[0] 后半：**判停那一页必须先完整扫描、再 break**。
 //
-// 实测依据：以 --from 2020-01 为例，p151 的条目跨 2019-12-25..2020-01-09，
-// 其中 2020-01-02..2020-01-09 那批**是 ≥ from 的**。break 写在扫描之前会把它们
+// 实测依据（我自抓 p151 快照独立复核，非转述）：以 --from 2020-01 为例，p151 的 15 条跨
+// **2019-12-25..2020-01-14**，其中 **7 条 ≥ 2020-01-01**。break 写在扫描之前会把这 7 条
 // 连同整页一起丢掉。
+// （DoD 与本注释上一版写的上界 `2020-01-09` 是笔误——实测最新条目是 **2020-01-14**；
+//
+//	方向与结论不变，但数字以实测为准。）
 //
 // ⚠️ **实测 p151 上恰好 0 条目标报告 ⇒ 把这个 bug 写进去，真实语料测试照样绿。**
 // 所以这条只能用合成页面钉：判停页上放一条 ≥from 的目标报告，断言它出现在结果里。
@@ -600,18 +603,27 @@ func TestScanBackfillIndexFromNewerThanEverything(t *testing.T) {
 
 // 🔴 boundary[3]：相邻页日期连续性 `p(N).oldest >= p(N+1).newest`，违反即报错。
 //
-// 它抓的是「翻页期间页码漂移导致**跳页**」：条目被下架/撤回会让后面的往前移，
-// 已抓过那页覆盖的位置被跳过 ⇒ **静默少一整页**。
-// ⚠️ 「整页 0 条」守卫对这种漏**完全看不见** —— 那一页有 15 条列表项，
-// 只是**不是原来那 15 条**。
+// 🔴 **它检测的是「列表前移导致的重复」，不是跳页 —— 方向正好相反。**
+// 这是 TASK-002 返工时由 test-agent-27 构造观察出来的（非推理），上一版这里写着
+// 「抓的是跳页」，那句话是错的：
 //
-// ⚠️ 必须是 `>=` 而不是 `>`：实测 41 对相邻页 41/41 成立，其中 **19 对取等号**
+//   - **新文上架** ⇒ 后续条目整体**下移** ⇒ p(N+1) 开头重新出现 p(N) 已见过的条目
+//     ⇒ newest 变新 ⇒ **本守卫触发**。这一支没有数据丢失，重复由 seen 去重吃掉。
+//   - **条目下架** ⇒ 后续条目整体**前移** ⇒ 中间那段被整个略过 ⇒ newest 变**老**
+//     ⇒ 判据更满足 ⇒ **本守卫永不触发**。而这一支才是有数据丢失的一支。
+//
+// 那个盲区由 TestScanBackfillIndexSkipIsInvisibleToContinuityGuard 单独钉住；
+// 跳页的真正检测归 M1c-1 的 TASK-008（完整性对账）。
+//
+// ⚠️ 必须是 `>=` 而不是 `>`：验证者三批独立快照实测 22 对，**取等号约占一半**
 // （同日发布被页边界劈开，是常态不是异常）。写成 `>` 会把近一半的正常翻页判成错误。
+// （上一版这里写「41 对 41/41 成立」——那个数没人验过，传播链是 reviewer → DoD → 本注释。）
 func TestScanBackfillIndexAdjacentPageContinuity(t *testing.T) {
-	t.Run("跳页：p2 的最新比 p1 的最老还新 ⇒ 报错", func(t *testing.T) {
+	t.Run("列表下移：p2 的最新比 p1 的最老还新 ⇒ 报错", func(t *testing.T) {
 		f := backfillSite(200,
 			backfillItemsOn("910", "2020-03-25", "2020-03-11"),
-			// p2 最新 2020-03-20 > p1 最老 2020-03-11 ⇒ 中间漏了一段
+			// p2 最新 2020-03-20 > p1 最老 2020-03-11 ——「新文上架把后续条目整体下移」
+			// 的表现：p2 开头重新出现了本该在 p1 上的那一段。
 			backfillItemsOn("920", "2020-03-20", "2020-02-20"),
 		)
 
@@ -624,7 +636,7 @@ func TestScanBackfillIndexAdjacentPageContinuity(t *testing.T) {
 	})
 
 	// 阴性对照，**不是重复**：写成 `>` 的实现能让上面那条照样绿，只有本条会红。
-	// 实测 41 对相邻页里 19 对是这个形态（同日跨页），占 46%。
+	// 验证者三批独立快照实测 22 对，取等号约占一半（同日发布被页边界劈开）。
 	t.Run("同日跨页：p1 最老 == p2 最新 ⇒ 放行", func(t *testing.T) {
 		f := backfillSite(200,
 			backfillItemsOn("910", "2020-03-25", "2020-03-11"),
@@ -635,9 +647,48 @@ func TestScanBackfillIndexAdjacentPageContinuity(t *testing.T) {
 		res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
 			IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
 		})
-		require.NoError(t, err, "同日跨页是常态（实测 46% 的页边界），判成错误会让近一半的翻页失败")
+		require.NoError(t, err, "同日跨页是常态（约占一半的页边界），判成错误会让近一半的翻页失败")
 		assert.Len(t, res.Pages, 3)
 	})
+}
+
+// 🔴 **已知盲区**：条目下架导致的**跳页**，上面那条连续性守卫**抓不到**。
+//
+// 本用例**不是**在描述一个待修的缺陷，而是把「守卫抓不到什么」从注释里的一句声称
+// 变成**可执行的断言**。这个 sprint 的教训正是「没人验过的声称会被后人当依据引用」——
+// 一条写在注释里的「本守卫抓不到 X」，和一条断言它确实抓不到 X 的用例，可信度差一个量级。
+//
+// 机制（构造观察，非推理）：条目下架 ⇒ 后续整体**前移** ⇒ p(N) 与 p(N+1) 之间那段被
+// 整个略过 ⇒ `p(N+1).newest` 变**老** ⇒ 判据 `oldest >= newest` 更满足 ⇒ **永不触发**。
+// 下面这份合成站点里，本该出现在 p1/p2 之间、发布于 2020-03-18 的那篇报告
+// **从未出现在任何一页上**，而扫描全程 nil error。
+//
+// ⚠️ 若将来有人真把跳页检测加进翻页层，本用例会红 —— **那时该改的是本用例，不是把它删掉**：
+// 请把它改成断言新守卫确实报错，别让「翻页层管跳页」这件事再次退回无人验证的状态。
+// 跳页的真正检测归 M1c-1 的 TASK-008（完整性对账），它用 (年, 期次表述) 的结构规则
+// 判「少了哪几期」，那是个全局正向判据，不需要知道翻页时发生了什么。
+func TestScanBackfillIndexSkipIsInvisibleToContinuityGuard(t *testing.T) {
+	const skipped = "2020年2月金融统计数据报告" // 本该在 2020-03-18，被跳过
+
+	// 正常序列应是 p1[03-25, 03-20] → p2[**03-18**, 03-15] → p3[…]。
+	// 03-18 那条所在的位置因前面有条目下架而整体前移，p2 直接从 03-15 开始。
+	f := backfillSite(200,
+		append(backfillItemsOn("910", "2020-03-25"),
+			backfillReportItem("2025092212550000001", "2020年1月金融统计数据报告", "2020-03-20")),
+		append(backfillItemsOn("920", "2020-03-15"),
+			backfillReportItem("2025092212550000003", "2020年3月社会融资规模存量统计数据报告", "2020-03-12")),
+		backfillItemsOn("930", "2020-01-09", "2019-12-25"),
+	)
+
+	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.NoError(t, err,
+		"p1.oldest=2020-03-20 >= p2.newest=2020-03-15（delta=+5）⇒ 连续性守卫满足，不会报错")
+
+	assert.NotContains(t, backfillReportTitles(res), skipped,
+		"被跳过的那篇从未进入任何一页 ⇒ 翻页层无从发现它 —— 这正是本守卫的盲区")
+	assert.Len(t, res.Reports, 2, "只拿到了没被跳过的那两篇")
 }
 
 // 🔴 error_handling[0]：两种失效都必须**原样报错**，不退化。
