@@ -501,6 +501,41 @@ func TestFetchBackfillSearchPageFetchesConstructedURL(t *testing.T) {
 	assert.Len(t, hits, searchSampleKept)
 }
 
+// TestFetchBackfillSearchPageDateGuardIsNotVacuousOnRealSample：真实样本页 1 的
+// **每一条**日期都必须是有效日期且落在区间内。
+//
+// 这是 checkBackfillSearchDateRange 的**非空验证**。上面那条用例只断言真实样本
+// 「不报错」，而「不报错」有两种成因分不开：日期确实都在区间内（想要的），或者
+// 日期解析坏掉返回了空串/无效值而比较恰好不落进越界分支（不想要的）。
+//
+// ⚠️ 另一半同样重要，写在这里免得被误读：**真实样本页 1 上这条守卫本来就不会
+// 触发**。`sr=dateTime desc` ⇒ 越界的老条目排在靠后的页。我实测了 advtime 失效
+// 状态（去掉 advtime、240 条）下各页的越界情况：
+//
+//	pNo=1  2025-09-12..2025-04-13  越界 0 条
+//	pNo=11 2020-09-11..2020-03-11  越界 0 条
+//	pNo=12 2020-03-11..2019-09-11  越界 **7 条** ← 守卫在此才触发
+//	pNo=13 2019-09-11..2019-03-10  越界 12 条
+//
+// ⇒ 「守卫会报错」这件事只能由**合成页**用例证明
+// （TestFetchBackfillSearchPageRejectsOutOfRangePublished），本条证的是另一半：
+// 真实语料喂进去时它走的是「逐条比较且都通过」，不是「没有东西可比」。
+func TestFetchBackfillSearchPageDateGuardIsNotVacuousOnRealSample(t *testing.T) {
+	hits, _, err := parseBackfillSearchPage(readTestdata(t, "pboc-search-p1.html"), 1)
+	require.NoError(t, err)
+	require.Len(t, hits, searchSampleItems, "非空前提：样本页 1 必须有 12 条可比")
+
+	const lo, hi = "2020-01-01", "2026-08-14"
+	for _, h := range hits {
+		// 逐条钉「是个合法日期」而不只是「非空」：空串与 "0000-00-00" 都能悄悄
+		// 通过字典序比较的下界，而它们不是日期。
+		_, perr := time.Parse("2006-01-02", h.Published)
+		require.NoError(t, perr, "日期解析坏了: %q（%s）", h.Published, h.Title)
+		assert.GreaterOrEqual(t, h.Published, lo, "%s", h.Title)
+		assert.LessOrEqual(t, h.Published, hi, "%s", h.Title)
+	}
+}
+
 func countTitle(hits []backfillSearchHit, title string) int {
 	n := 0
 	for _, h := range hits {
