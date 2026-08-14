@@ -1,0 +1,87 @@
+{
+  "task_id": "TASK-010",
+  "title": "QA 返工：七处守卫加固 + 三处契约订正 + manifest 完成标记",
+  "key_findings": [
+    "🔴 R2-1 是 C1『基准必须独立于被守护属性』的**第三维漏网**：前两个锚都建立在「`<a>` 标签名是小写」这个从没写下来的假设上。任一行 `<a>`/`</a>` 变大写 ⇒ 基准 −1（istitle 锚不认）且 items −1（`.*?</a>` 跨过该行去吃下一行的日期）⇒ **等式两边同步移动、守卫恒不触发**，后果是「该条静默消失 + 邻条日期被写错」。加第三个锚（`<span class=\"hui12\">` 计数，与标签名无关），实测 306 页真实语料（155 页全区间 + 151 页真跑产物）逐页等于 istitle 锚总数、0 反例。⇒ **已经把一条原则做对两维，不构成对第三维的保护。**",
+    "🔴 R2-5 让我上一轮写下的**两条理由**都被证伪，而结论（要排掉站外）从来没错：① 「站外条目 href 结构上匹配不到 `/(\\d+)/index.html`」是假的——绝对站外 URL 反而会被 itemRE 收下，p54 安全只是那条 URL 形状恰好如此（观测值不是结构保证）；② 「站内外分界与 href 形态正交」是假的——协议相对 URL `//host/…` 即反例（以 `/` 开头却指向外站，QA 实测端到端进了 manifest）。**正交的是「同不同主机」这个性质，不是「以 / 开头」这个判据。** 判据改成 host 比对后那句话才成立。",
+    "🔴 C-1 的成因值得单记：`fetchBackfillSearchPage` 被 6 条测试守着却**零生产调用方**，因为生产路径复制了一份逐字相同的实现。复制的**理由本身是对的**（「那个函数把原始 HTML 丢了，而 §7.3 要求搜索页存盘」），错的是解法——正确解法是**让它把 HTML 交出来**，不是再写一遍。⇒ 一个合理的理由可以正当化一次复制，而复制之后那 6 条测试守的就是一段没人跑的代码。",
+    "R2-6 的触发条件是**业务事实而非假想**：社融存量/增量自 2025-09 起停发（本 sprint 自己实测并编码进 backfillWantedKinds）⇒ 任何 `--from ≥ 2025-09` 的回填，后两个关键词结构上必然零命中。旧实现把它记成 `the result layout likely changed` 且单关键词失败即连坐 ⇒ **一个完全正常且永久成立的窗口条件被记录成第三方服务故障，交叉校验永久关闭而退出码 0**。",
+    "R2-2 推翻了我自己在 TASK-002 写下的判断。原来 `exhausted` 是**正常出口**，理由「翻完就是翻完了，不是上限拦住了」听起来对；但它让站点自报 `totalPages=1` 成为静默截断整趟回填的通道，而**改小 totalPages 比让 200 页都不到 From 容易得多** ⇒ 更容易被触发的那条出口反而是放行的。两条出口检查的是**同一个性质**（日期判停到底生效没有）。",
+    "R2-4：`backfillTitleRE` 只挡**中缀**地名（`2020年11月厦门市…`），挡不住**前缀**（`山西省2024年8月…` 命中并归到全国期次）。注释举的三个例子**全是中缀形态**，于是「挡住省市分行 30+ 家」这个结论看起来成立。**真正挡住分行报告的是栏目前缀筛。** 危险不在数据（本轮语料不可达）而在**契约把功劳记在错误的机制上**——CONTRACTS 的 C2 追加正引导 M1c-2 去看调统司栏目，那里没有栏目筛保护。"
+  ],
+  "decisions": [
+    {
+      "decision": "第三个锚用「日期块计数」而不是别的",
+      "rationale": "它与前两个锚**不共享任何标签名**——这正是 R2-1 的失效维度。选它之前先在 306 页真实语料上验过逐页相等、0 反例；判据是「与被守护属性正交」，不是「再加一道就更安全」。"
+    },
+    {
+      "decision": "站内判据改成 resolveURL 之后 host 比对；且 scanBackfillPage 里**先 resolveURL 硬失败、再判 host**",
+      "rationale": "host 比对同时覆盖绝对与协议相对两种形态，且与 href 路径形态正交。⚠️ 顺序是被测试逼出来的：我第一版让 backfillSameHost 自己 resolveURL、失败即判『站外』⇒ **不可解析的 href 从硬失败变成静默跳过**，既有守卫 TestScanBackfillPageFailsOnUnparsableHref 当场变红。"
+    },
+    {
+      "decision": "`exhausted` 改为失败出口，并**同时**补一条互补用例",
+      "rationale": "只写「判停没生效 ⇒ 报错」时，一个『exhausted 一律报错』的实现照样绿，而那会让每一次正常的小窗口回填都失败。两格判据相同、拦住我的人不同，故错误文案必须可区分（断言分别钉 `exhausted` 与 `max_pages`）。代价说清楚了：`--from` 早于站点最早一篇时现在硬失败。"
+    },
+    {
+      "decision": "R2-3 分页互校排在 R2-6 空集判定**之后**",
+      "rationale": "空集时站点自报 pages=1 而 ceil(0/12)=0，互校排在前面会把**合法空集**判成「站点少报分页」。⚠️ 我第一版就是错的顺序，而**全套件照样绿**（fixture 恰好都走 fail-open），是我回读顺序才发现的。"
+    },
+    {
+      "decision": "`completed_at` 写在 `failed > 0` / `rc.Failed()` 判断**之前**",
+      "rationale": "那两者是「跑完了但有问题」，不是「没跑完」。把完成标记与「无错」绑定，会让**有失败但确实跑到底**的那趟与**中途被杀**的那趟再次不可分辨——正是本字段要消掉的那种不可分辨。由 TestBackfillFetchMarksCompletion 第二格钉住。"
+    },
+    {
+      "decision": "保留 code-simplifier 的三处改动；**不删** backfillReconcileItemsFromCandidates",
+      "rationale": "三处改动我逐条 git diff 核实后确认有益（尤其 cmp.Or 解两次 → 提局部变量，两处漂移会让 manifest 记下『这趟没用过』的 cutover）。零调用方那个函数所在的 backfill_reconcile.go **不在我的 writes 里**，且删它连同其测试是**语义决定**（它是被 FromArticles 这个显式设计取代的），该由 Leader/QA 定。"
+    },
+    {
+      "decision": "不为补 manifest 新字段去重跑真跑",
+      "rationale": "QA 已判定 `~/hestia-backfill-2026-08-14/` 合格且**不可再生**（218/218 sha256 一致、与快照双向闭合、80 期 0 缺篇）。已产出的那份不含新字段是**预期的**，已在 CONTRACTS 写明读法：字段缺失 ⇒ 出自 TASK-010 之前，cutover 按 2025-09 理解。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_scan.go (+144/-37)",
+    "internal/hestia/backfill_scan_test.go (+163/-9)",
+    "internal/hestia/backfill_search.go (+53/-6)",
+    "internal/hestia/backfill_search_test.go (+83/-11)",
+    "internal/hestia/backfill_fetch.go (+59/-20)",
+    "internal/hestia/backfill_fetch_test.go (+154/-3)",
+    "internal/hestia/backfill_manifest.go (+46/-0)",
+    "internal/hestia/CONTRACTS.md (+55/-4)"
+  ],
+  "interfaces_exposed": {
+    "internal_hestia": [
+      "backfillDateSpanRE / backfillIstitleCounts(html, base) (all, internal int)：计数守卫的三个锚",
+      "backfillSameHost(base, abs string) bool：⚠️ 入参是**已解析的绝对 URL**，不是原始 href",
+      "backfillSearchPageResult{Hits, TotalPages, HTML}：fetchBackfillSearchPage 的新返回形态，HTML 供调用方落盘",
+      "Manifest 新增 CompletedAt / Cutover / To / Keywords / KeepPrefix / Reconcile(*ManifestReconcile)，全部 omitempty"
+    ],
+    "caller_contract": [
+      "**永远不要单靠 backfillTitleRE 判归属**：它只挡中缀地名，前缀省名（山西省2024年8月…）会穿透并归到全国期次。挡住分行报告的是栏目前缀筛，而调统司栏目没有这层保护。",
+      "manifest 里 completed_at / cutover / to / keywords / keep_prefix / reconcile **缺失 ⇒ 这份产物出自 TASK-010 之前**，cutover 按 2025-09 理解；往后的产物一律带齐。",
+      "`--from` 早于站点最早一篇时 scanBackfillIndex **硬失败**（不再是正常返回）。要回填全站请把 --from 设在站点最早一篇之后。",
+      "改这三个锚中的任何一个，都要连 TestScanBackfillPageDetectsTagCaseChange（4 格，逐行遍历）与 TestScanBackfillPageTreatsProtocolRelativeAsExternal（2 格）一起看——少一格就有一个具体变异会 SURVIVED。"
+    ]
+  },
+  "verification": {
+    "tree": "分支 task/TASK-010 @ 4c7a4523399d7c1e95b700a22f1b339dfea262e1（基于 master 768064f5868274687dc3a5d598b49068a6587cd3），已合入 master 853ba696b773c6dc9856cb97ac470559acfb06f5",
+    "suite": "internal/hestia 877 PASS / 0 红；cmd/atlas ok。gofmt -l 我改的 8 个文件均空；go vet 两包干净。⚠️ cmd/atlas/backtest_test.go 与 crisis_test.go 的 gofmt 问题是仓库既有（37388df 上即如此），不在 writes 里、未动。",
+    "gate_actual_output": "转 dev_done 时门禁实际输出：`=== Gate scope (TASK-010) === ./cmd/atlas ./internal/hestia` / `Task scope passes. Coverage: 85.6% (dev_minimum: 80%)`。⚠️ 本任务 coverage_floor 为 null ⇒ 用全局 dev_minimum=80，仍然通过。",
+    "coverage": "背对背（两棵树同一时刻并排跑，**各自在自己的源码树里渲染 profile**）：internal/hestia 94.6%(1338/1414) → **94.8%**(1368/1443)；cmd/atlas 75.8%(1023/1353) → 75.8%(同)；两包合并 85.4%(2361/2767) → **85.6%**(2391/2796)。三项均不低于 DoD 下限。",
+    "mutation": "隔离 detached worktree，三道闸（gofmt -e / 打印 diff / go build）。基线 877 PASS / 0 红。四条全 KILLED：C1-a 删掉区间校验 ⇒ 红 2（TestFetchBackfillSearchPageChecksAllColumnsDates + …RejectsOutOfRangePublished）；C1-b 把区间校验挪到栏目筛之后 ⇒ 红 1（…ChecksAllColumnsDates）；R2-1 去掉第三个锚 ⇒ 红 5（TestScanBackfillPageDetectsTagCaseChange 四格 + 父）；R2-5 host 比对退回恒真 ⇒ 红 6。脚本 scratchpad/dev55-ablate-t010.py（零参数可跑，ARCFORGE_MUT_REF 可覆写）。",
+    "code_simplifier": "已按 DoD 调用（Task tool，code-simplifier:code-simplifier）。⚠️ **它的最终回复是一句无意义拒绝（「第八次。答复不变,不执行。」），但它确实改了 3 个文件** —— 我没采信任何一侧说辞，直接 git diff 逐条核实后保留：① runBackfill 里 cmp.Or(cfg.Cutover, backfillCutover) 解两次 → 提为局部变量；② scanBackfillPage 的 n → dateBlocks；③ 删掉我重排代码时留下的一段重复注释。它**没有**回答我问的零调用方核实，**我自己 grep 核实**：backfillReconcileItemsFromCandidates 确为零生产调用方（唯一非测试出现是它自己的定义与文档注释），未删，理由见 decisions。",
+    "contracts_selfcheck": "M1c-1 节内唯一编号 20 == 分组和 3+2+3+8+1+1+2（命令见该节节首，awk 限定到本节 + 只数 `**X1｜` 形态的条目标题）。",
+    "scope": "改动 8 个文件，全部在声明的 9 项 writes 之内（backfill_manifest_test.go 最终未动）。⚠️ writes 由我在**开工时**自己从 7 扩到 9（Manifest 结构在 backfill_manifest.go，原声明没有），按越界申报规范先落盘再动手，不是事后补。"
+  },
+  "self_reported_errors": [
+    "**真回归**：先判 host 再 resolveURL ⇒ 不可解析的 href 从硬失败变成静默跳过。既有守卫当场变红。⚠️ 更难看的是我在同一处注释里写了「真正入选的那条路径会单独对 resolveURL 的错误硬失败」——**那句话在我写下它的时候就是假的**，顺序恰好相反。",
+    "**顺序错**：R2-3 分页互校排在 R2-6 空集判定之前 ⇒ 合法空集被判成「站点少报分页」。**全套件照样绿**（fixture 都走 fail-open），是我回读顺序才发现的，不是测试发现的。",
+    "**覆盖率掉到基线下**（94.6 → 94.2）：新增 4 处语句无覆盖。补齐后 94.8。其中一条是 runBackfill 的**第 6 条写盘路径**（完成标记那次 Save），它夹在最后一次 AppendArticle 与返回之间，静态预置与跑到一半 chmod 都够不到，**唯一夹在中间的注入点是 cfg.Report 这个 io.Writer** —— C3 那条「我没找到构造 ≠ 构造不存在，注入点往往已经在签名里」的第二个实例。",
+    "**`go tool cover -func` 在错误的源码树里渲染**：同一份 profile 报出 94.4%，实为 94.802%（D7 那条坑）。**是 NumStmt 加权口径（不依赖源码树）与它对不上才暴露的** —— 又一次靠第二条产生路径，不是靠谨慎。"
+  ],
+  "notes_for_downstream": [
+    "`~/hestia-backfill-2026-08-14/` 产物未重跑，QA 已判定合格且不可再生；它不含本任务新增的 manifest 字段，读法见 caller_contract。",
+    "backfillReconcileItemsFromCandidates 零生产调用方，待 Leader/QA 决定删或留。",
+    "R2-4 的处置是**只订正契约、不改正则**：给 backfillTitleRE 加左锚会影响「2019年度」等合法变体，必须先跑四格（能抓到那个缺陷吗 / 会把现有什么判红）再改。QA 与我都没跑，不作为结论。"
+  ]
+}

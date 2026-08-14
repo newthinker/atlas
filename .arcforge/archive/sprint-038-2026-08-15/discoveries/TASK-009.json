@@ -1,0 +1,132 @@
+{
+  "task": "TASK-009",
+  "title": "把完整性对账接进回填管线",
+  "by": "dev-agent-55",
+  "commit": "407451b28172697b1a0dc44e0877e62143f7ba0e（第 1 轮返工：补第五格）",
+  "branch": "task/TASK-009-fix",
+  "base": "master 578a68ff1cd29b0453893b717f6cc816e6c73463",
+  "key_findings": [
+    "🔴 **接入点必须在 `failed > 0` 判断之前**。原实现是「`if failed > 0 { return ... }`」收尾；把对账放在它之后，一趟有抓取失败的回填会把**对账违规整个吞掉** —— 而那趟已经花了约 9 分钟、400+ 请求，人拿到的错误信息里少一半。改成先算对账、再用 `errors.Join` 把两类问题合起来返回，既有的 `failed > 0` 行为一字不变（TASK-006 的 11 条用例全绿）。",
+    "🔴 **对账入参取 `store.Manifest.Articles`（已抓到的）而不是 `cc.Fetch`（计划抓的）**。两者在「有篇目抓取失败」时**结论相反**：用 `cc.Fetch` 会把抓失败的那篇算成「有」⇒ 报告说该期齐全，而磁盘上根本没有它。对账要回答的是「**手上这份产物完不完整**」。⚠️ 这条我写在注释里、**原本没有守卫**——变异 S10 存活才补上 TestRunBackfillReconcilesFetchedNotPlanned。",
+    "🔴 **`cfg.Cutover` 原本也没有守卫**：DoD functional[0] 明写「cutover 经 BackfillConfig 传入，不在 runBackfill 里写死一份」，而全包没有任何用例传过一个**与默认值不同**的 cutover ⇒ 变异 S9（`cmp.Or(cfg.Cutover, backfillCutover)` 换成 `backfillCutover`）**存活**。补的用例用同一批输入 + 两个 cutover 得出**相反结论**（v1 缺篇 vs v2 齐全），写死实现给不出后者。",
+    "🔴 **两个报告标签互为子串会让子串断言恒假**。第一版 `Complete` 写成「缺篇期次: 无（各期均满足结构规则）」，它**字面包含** `Missing` 的「缺篇期次:」⇒ `NotContains(报告, Missing)` 在「全部齐全」的报告上**永不成立**。是我自己写的用例当场撞上的，失败方式是「断言恒假」而不是「漏判」。已改成 7 个标签**两两不互为子串**（代码里有自证）。",
+    "**`Report` 为 nil 时默认 `os.Stdout` 而不是 `io.Discard`**：默认值决定了「调用方忘记设」的后果，而忘记一定会发生。一个**防静默**的机制不该以**静默**的方式失效。⚠️ 这个方向选择同样需要守卫——`backfillReportWriter` 抽成独立函数就是为了让 TestBackfillReportWriterDefaultsToStdout 能钉住它（变异 S8 只杀这一条）。",
+    "**`backfillExpect` 是非导出类型，不能内嵌进导出的 `BackfillConfig`** —— 那样 `cmd/atlas` 根本没法赋值。摊平成 `ExpectPeriods` / `ExpectArticles` 两个 int，与 CLI 的两个 flag 一一对应。",
+    "🔴 **我自己第一版埋了一个假阳，靠「看哪一格红」才揪出来**：`t.TempDir()` 的路径**包含子测试名**，而我把那格叫「manifest 落盘失败」⇒ `assert.Contains(err, \"manifest\")` 匹配到的是**临时目录路径**而不是错误来源。消融「忽略第 114 行 store.Save() 的错误」时**四格全绿**才暴露——那一格当时实际报的是 articles 的错。⇒ **表驱动用例的 `want` 字面量不得出现在子测试名里**，否则断言会被自己造的路径满足。现已改成两者互不包含（代码里有自证），且两条消融**互补**：a1（吞掉 writeBackfillFile 的错）只红前三格、a2（忽略第 114 行 Save 的错）只红第四格。",
+    "🔴 **functional[2](a) 的 6 条里有 2 条在本任务 scope 内不可构造**：`AppendFailed` 与 `AppendArticle` 内部那两次 `Save()` 发生在第 114 行那次 Save **之后**、写**同一个目录** ⇒ 静态的文件系统构造没法让前者成功、后者失败；而要注入就得改 `backfill_manifest.go`，**那不在本任务的 writes 里**。已向 Leader 申报并给出两条可选路径，**未擅自扩大范围**（DoD 明写「发现问题停下来找 Leader，别顺手改」）。",
+    "**可构造的 4 格靠两种文件系统技巧**：①把本该是目录的路径预置成**普通文件** ⇒ 那一格 MkdirAll 必失败（index / search / articles）；②把产物根目录 chmod 0555 但**预先建好** index/ 与 search/ ⇒ 前两格照写（写的是子目录），而 manifest 的 `os.CreateTemp(根目录)` 失败。第②种是唯一能隔离第 114 行 Save 的办法。",
+    "**functional[2](b) 必须在 runBackfill 层**：DoD 已订正过一次——在 `crossCheckBackfill` 层断言「两侧同值时输出等于它」是**恒真**的（那个函数收的是已构造好的两侧条目，**它看不到 base**）。放到 runBackfill 层后可证伪，我实测两种消融都转红：`cfg.IndexURL` 换成 `http://`、或多一个末尾斜杠。"
+  ],
+  "decisions": [
+    {
+      "decision": "对账放在 runBackfill 结尾、failed 判断之前；两类问题用 errors.Join",
+      "rationale": "DoD error_handling[1] 要求两者信息都能看到。errors.Join 让两条都进 Error() 文本，且既有那条消息原样保留 ⇒ TASK-006 的用例不受影响。"
+    },
+    {
+      "decision": "`backfillCutover = \"2025-09\"` 常量放在 backfill_fetch.go，`cfg.Cutover` 为空时回落",
+      "rationale": "caller_contract 第 4 条要求「别在调用方那侧再写死一份」⇒ 默认值必须有**唯一**定义处，命令层不传即用它。放在本包而不是命令层，命令层就不必写第二个 \"2025-09\"。"
+    },
+    {
+      "decision": "报告的段落标签提成常量，且要求两两不互为子串",
+      "rationale": "提常量是为了让测试钉**具体文案**而不是「非空」（弱断言本 sprint 已翻车多次）；不互含是因为共享前缀会让子串断言恒假——我自己撞过一次。"
+    },
+    {
+      "decision": "既有测试助手 bfRun 里加 `cfg.Report = io.Discard`",
+      "rationale": "默认走 os.Stdout 之后，TASK-006 的 11 条用例会把对账报告刷进测试输出。设成 Discard 只影响噪声，不影响它们的任何断言。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_fetch.go（+130/−2，接入本体）",
+    "internal/hestia/backfill_fetch_test.go（+249 +124 = +373）"
+  ],
+  "interfaces_exposed": {
+    "note": "本任务**零新增导出 FuncDecl**（导出守卫绿）；`BackfillConfig` 是既有导出结构体，本次**加字段**。",
+    "types": [
+      "type BackfillConfig struct{ …既有字段…; Report io.Writer; Cutover string; ExpectPeriods int; ExpectArticles int }"
+    ],
+    "funcs": [
+      "func backfillReportWriter(w io.Writer) io.Writer  // nil ⇒ os.Stdout（非 io.Discard）",
+      "func writeBackfillReconcileReport(w io.Writer, rc backfillReconcile)  // 四个可见面全写"
+    ],
+    "consts": [
+      "backfillCutover = \"2025-09\"  // 模板切换点的**唯一**定义处；对照值不是判据",
+      "backfillReconcileHeader / MissingLabel / CompleteLabel / EmptyLabel / UnclassifiedLabel / WarningLabel / ViolationLabel —— 7 个，**两两不互为子串**"
+    ],
+    "caller_contract": [
+      "**TASK-007（CLI）要设 `Report`**（建议 `cmd.OutOrStdout()`）。不设也不会丢——默认写 os.Stdout。",
+      "**`--expect-periods` / `--expect-articles` 直接映射到 ExpectPeriods / ExpectArticles**，不传就是 0 ⇒ 走推算值告警路径（TASK-008 已定死此语义）。",
+      "**`--cutover`（若做成 flag）不传就留空**，别在命令层写第二个 \"2025-09\" ——本包的 backfillCutover 是唯一定义处。",
+      "**退出码语义**：`BackfillFetch` 返回非 nil 有两种成因（抓取有失败 / 对账违规），两者可**同时**出现在 Error() 文本里。**缺篇不在其中**——它是要报告的事实，只出现在报告里。",
+      "报告写的是**四个可见面**（Rows / MissingPeriods / Unclassified / Warnings）+ Violations；spec §10 的三个问题可直接从这份输出读出：期数篇数在首行、切换点由各行的 rule@v1/v2 呈现、缺篇在 MissingPeriods 段。"
+    ]
+  },
+  "verification": {
+    "anchor": "全部数字采自返工后的同一棵树：task/TASK-009-fix @ 407451b28172697b1a0dc44e0877e62143f7ba0e（工作树干净），基线 master dd1090c",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；**口径写全**：PASS 顶层 429 + 子测试 406 + 子子测试 12 = **847**；FAIL=0 / SKIP=0。（⚠️ 我先前报的 834 漏了子子测试那一层——口径不完整比口径不同更糟。）",
+    "own_tests": "本任务 11 个测试函数（8 个 TestRunBackfill* + ReportWriter + AbortsOnEveryDiskFailurePath(4 格) + IndexAndSearchURLsDoNotDiverge），单跑全 PASS",
+    "no_regression": "TASK-006 既有 11 条 TestBackfillFetch* 全绿 ⇒ error_handling[1] 要求的「既有 failed>0 行为不变」成立",
+    "gofmt": "空",
+    "vet": "空",
+    "export_guard": "TestPackageExposesNoWriteFunctions → ok（零新增导出 FuncDecl；给已导出 struct 加字段不进该守卫视野）",
+    "coverage": "背对背：pre = master dd1090c 1332/1409 = 94.535%；post = 407451b 1333/1409 = **94.606%（+0.071pp）**",
+    "numstat": "git show --numstat HEAD = 55/6（仅测试文件）",
+    "mutation": {
+      "anchor": "被变异文件 sha256 = 4724986a30aa5f70dce0cf5e42145113d041b97b390d7995485f3c2ede08e35d，与交付的 backfill_fetch.go 一致；隔离副本是 master 578a68f 的 detached worktree，跑完已 remove；主 worktree 指纹全程未变",
+      "gates": "语法闸(gofmt -e) + 语义闸(逐条打印 diff) + 编译闸(build failed 不计 KILLED)",
+      "result": "**11 个变异全部 KILLED，0 存活**（首轮 S9/S10 存活 ⇒ 补了两条用例；S6 首轮 perl 未匹配属无效，改写后重跑）",
+      "detail": [
+        "S1  对账整段删掉（回到缺口本身）→ 我的 8 条全红",
+        "S2  算了但不写报告（『调用了、结果被丢弃』那个变种）→ 7 条红 ⇒ 端到端断言确实不接受间接证据",
+        "S3  缺篇也算失败 → MissingPeriodsIsNotFailure + 多条既有用例红",
+        "S4  Violations 不进 error → ViolationsCauseNonZeroExit + BothVisible",
+        "S5  error 文本换成笼统的『对账失败』→ 同上两条（它们断言含具体内容）",
+        "S6  MissingPeriods 段永不触发 → 4 条红",
+        "S7  丢掉 Unclassified 段 → **只有 ReportsAllFourFaces**",
+        "S8  Report 默认改 io.Discard → **只有 BackfillReportWriterDefaultsToStdout**",
+        "S9  cutover 写死无视 cfg → **只有 HonorsConfiguredCutover**（首轮存活，补的这条）",
+        "S10 入参换成 cc.Fetch → **只有 ReconcilesFetchedNotPlanned**（首轮存活，补的这条）",
+        "S11 零期次与全部齐全用同一文案 → **只有 EmptyDiffersFromComplete**"
+      ],
+      "first_round_survivors": "🔴 首轮 S9 / S10 **存活**，两条都对应我在注释里写了、却没有任何用例钉住的声称。这是本 sprint 第三次撞到同一形状（TASK-008 的 FIX-B 是前两次），**这次是变异先发现的、不是验证者**。"
+    },
+    "stats_tooling": "统计用 python3 / awk / grep -c，未使用裸 sort -u / uniq",
+    "ablation_functional2": {
+      "a1": "writeBackfillFile 吞掉错误 → **只红前三格**（栏目页/检索页/文章正文），第四格绿",
+      "a2": "忽略第 114 行 store.Save() 的错误 → **只红第四格**（清单），前三格绿",
+      "note": "两条互补且各自精确 ⇒ 四格各自有鉴别力，不是一条 require.Error 撑着四格。",
+      "b1": "cfg.IndexURL 换成 http:// → IndexAndSearchURLsDoNotDiverge 红",
+      "b2": "cfg.IndexURL 多一个末尾斜杠 → 同上红",
+      "self_check": "子测试名与各自的 want 字面量**互不包含**（代码里有自证），修的正是我第一版那个被临时目录路径满足的假阳。"
+    },
+    "mutation_4_1": {
+      "result": "**§4.1 六条 6/6 KILLED、0 SURVIVED**（TASK-006 时 1 KILLED / 5 SURVIVED）",
+      "mapping": [
+        "A9 文章正文 → 第三格",
+        "A17 index 快照 → 第一格",
+        "A18 搜索快照 → 第二格",
+        "A19 store.Save() 本体 → 第四格",
+        "A20 store.AppendFailed() → **第五格**",
+        "A16 errBackfillDisk 例外 → 第二格"
+      ],
+      "complementarity": "A20 只红第五格、A19 只红第四格 ⇒ 两格各自唯一命中，不是一条 require.Error 撑着。",
+      "note_on_A16": "A16 与 A18 落在同一格（第二格）——**同一触发点上的两道守卫**（写盘失败本身 / 那道 errBackfillDisk 例外），删任一个都会让第二格的 err 变 nil。⚠️ 第一版我并不知道 A16 存在，**覆盖是碰巧的，理解是后补的**。"
+    }
+  },
+  "notes_for_downstream": [
+    "TASK-007：`BackfillConfig` 现在有 4 个新字段，其中 `Report` 建议设成 `cmd.OutOrStdout()`；`Cutover` 留空即可（别在命令层写第二个 \"2025-09\"）。",
+    "TASK-007 的真跑报告：spec §10 三个问题的答案直接从对账报告读——期数/篇数在首行、v1→v2 切换点由各行 rule 呈现、缺篇在 MissingPeriods 段。",
+    "本任务的 packages/writes 声明与实际写入完全一致，无越界文件。",
+    "A20 的缺口**已闭合**（第五格），先前那条『不可构造、建议挂账』作废。registry 的 C3 若仍写着『已知未修』需要订正——那条现在只剩历史价值。"
+  ],
+  "epoch_note": "⚠️ Leader 在我开工后把任务收回重派（in_progress → assigned，epoch 1 → 2）并新增了 functional[2]。本 discovery 覆盖新 DoD 全 8 条。",
+  "rework": {
+    "round": 1,
+    "reason_class": "task_defect",
+    "what": "functional[2](a) 实得 5/6，store.AppendFailed 那条仍 SURVIVED",
+    "🔴 my_error": "**我判成「scope 内结构上不可构造」，判错了。** test-agent-28 实测证伪：`runBackfill(ctx, f Fetcher, …)` 的 **Fetcher 本来就是注入点**——让 fake 在**被问到文章 URL 那一刻**执行 `os.Chmod(out, 0555)` 再报错，第一次 `store.Save()` 此时已成功、而循环内 `AppendFailed` 的那次必然失败。**正是我说「没有中间态」的那个中间态。**",
+    "why_i_was_wrong": "我的探针只试了**静态预置**（manifest.json 预置为只读文件 / 预置为目录），在**静态构造**这一类里结论成立；我却把它写成了**一般命题**（「没有中间态」）。⇒ 与我同日记下的『排除法没封闭却拿来当论据』是同一个形状，而这次它直接导致一次返工。",
+    "how_close_it_was": "手法与既有第四格**完全相同**（`os.Chmod(out,0555)` + `t.Cleanup` 改回），差别**只在施加时点**：第四格跑前静态预置，第五格跑到一半。⇒ 不是「scope 不够」，是我没想到把已经在用的手法挪个时点。",
+    "also_falsified": "我先前说「A19 与 A20 是同一失败模式，第四格已覆盖」——消融证伪：**A20 只红第五格、A19 只红第四格**，两者各自唯一命中 ⇒ 它们是**两个**可分辨的失效。",
+    "implementation_unchanged": "实现零改动，git diff master 只有 backfill_fetch_test.go（55/6）。"
+  }
+}

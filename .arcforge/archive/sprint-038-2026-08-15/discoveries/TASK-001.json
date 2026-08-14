@@ -1,0 +1,119 @@
+{
+  "task": "TASK-001",
+  "title": "index 侧：列表项扫描与三种报告标题识别",
+  "by": "dev-agent-55",
+  "commit": "97ae2a3c39c47546a0f949a97322c353026f95ae",
+  "branch": "task/TASK-001",
+  "key_findings": [
+    "🔴 design-spec §3.1 给的 backfillItemRE 有一处真 bug，已订正：原式 `href=\"([^\"]*?/(\\d+)/index\\.html)\"[^>]*title=\"([^\"]*)\"` 里的 `[^>]*` 会贪进 `istitle=\"true\"`，捕获组拿到的是字面量 `true`。实测 p146 上 15 条**全部**如此。危险之处在于它不是「少匹配几条」那种失效：条数一条不少、日期一天不差 ⇒ **计数守卫接不住**，表现为整页静默产出 0 篇报告。修法是 `[^>]*?\\stitle=\"`——`\\s` 让 `title=` 必须以空白开头，而 `istitle=` 里 `title` 前面是 `s`，结构上落不进去；配套把 `*` 改 `*?`（贪婪版即使有 `\\s` 边界也会先试最右那个）。变异 M1 实测：还原成原式后 5 个测试红，而计数守卫**不红**——证实两者互补、缺一不可。",
+    "p146 样本的字节数三个口径都不同，别拿任何一个当契约：curl 落盘 **38133** 字节（含 67 个 CR），任务描述写的是 38201，git 以 core.autocrlf=input 规范化入库后是 **38066** 字节（0 个 CR）。⇒ 主工作区 checkout 出来的是 LF 版。已在 LF 版上单独重跑确认全绿（正则用 `(?s)` + `\\s*`，对行尾形态不敏感）。",
+    "p146 实测计数：`istitle=\"true\"` **15** 个、`class=\"hui12\"` **21** 个、`<span class=\"hui12\">` **15** 个——与 DoD 给的 p145 数字一致（21 = 15×span + 5×td + 1×table）。计数基准取 `istitle=\"true\"`。",
+    "p146 三种报告**同日发布 2020-03-11**，id 均 19 位：金融统计=2025092212550537670、社融存量=2025092212550538131、社融增量=2025092212550540285。整页 15 条日期区间 2020-03-25（首条）..2020-03-11（末条）——TASK-002 的相邻页连续性守卫可直接用这两个值。",
+    "p18 实测 1 篇《2025年前三季度金融统计数据报告》，id `5868082`（**7 位**），发布 2025-10-15。变异 M7（给 id 加回 `\\d{14,}` 下界）实测只让 p18 那条红，**p146 那条不红**——因为 p146 全是 19 位。这逐字复现了 Sprint 037 的盲区形状：单靠新页样本永远发现不了位数下界的问题。",
+    "链接文本截断的真实形态是 **ASCII 三点 `...`**（不是省略号 `…`）。本仓库 5 份 index 快照 75 条列表项里 16 条截断（21%），与 Leader 语料统计的 124/748（16%）同量级。截断点约在 38 字。",
+    "🔴 **「标题取 title= 属性」这条在真实语料上确实完全没有守卫**——这不是推断，是变异实测（M2p）：把标题源换成链接文本后，**只有那一条合成用例红**，p146/p18/p1 三份真实快照的全部断言照样绿。理由是三种目标报告标题最长 23 字，当前恰好都没被截断。⇒ 那条合成用例是唯一的守卫，别删。"
+  ],
+  "decisions": [
+    {
+      "decision": "scanBackfillPage 交出**整页**列表项（Items）与其中的报告（Reports）两个集合，而不是只交报告",
+      "rationale": "TASK-002 有两处判据要用整页日期：按发布日期判停（oldestOnPage.Before(from)）与相邻页连续性（p(N).oldest >= p(N+1).newest，附录 B1/B2）。只交报告的话，一页 15 条里通常 0～1 条是报告，那两条守卫会建立在一个几乎恒空的集合上。"
+    },
+    {
+      "decision": "不把 `istitle=\"true\"` 写进 backfillItemRE",
+      "rationale": "写进去两个数就恒相等，计数守卫退化成 `n == n`——用被验对象自己的尺子量自己。两者必须来自互相独立的判据：正则看「href + title + 日期三件套齐不齐」，计数基准看「页面自称有几个条目」，站点只改其中一侧时才有东西会红。变异 M4/M5 各自单独致红，证实两条判据没有耦合。"
+    },
+    {
+      "decision": "Published 保持 `string`（`YYYY-MM-DD`），不转 time.Time",
+      "rationale": "manifest 只记原文（design-spec §6），转换会在这一层引入时区/解析失败两种新的失败模式。TASK-002 需要比较日期时自己 time.Parse(\"2006-01-02\", …)——那一层本来就要处理解析失败（它是判停条件，错了必须出声）。"
+    },
+    {
+      "decision": "href 补不成绝对 URL 时**报错**，不跳过那一条",
+      "rationale": "跳过会同时踩两条守卫的空子：条目数少一条 ⇒ 计数守卫报的是「部分失效」这个**错误的成因**，真实成因（href 不合法）再也看不见。与 discover.go 的 scanPage 同处置。"
+    },
+    {
+      "decision": "0 条列表项守卫的错误信息含 `layout`；计数守卫的含 `istitle` + `layout`",
+      "rationale": "两条守卫的成因不同（整页失效 vs 部分失效），错误信息必须可区分，否则排障时分不清是版式全变了还是只改了某一类条目。测试按这两个关键词断言。"
+    },
+    {
+      "decision": "全部标识符保持包内未导出（backfillItem / backfillPage / scanBackfillPage）",
+      "rationale": "与 discover.go 的 scanPage/parsePeriod 同级。后续 cmd/atlas 需要的是 TASK-006 的导出入口函数，中间层不必导出。"
+    },
+    {
+      "decision": "13 类干扰项 + 6 条正例放在**同一份合成页面、同一次断言**里（ElementsMatch）",
+      "rationale": "阴性断言在空集上平凡为真——一个恒返回 nil 的实现能让 13 条 NotContains 全绿。同页 + ElementsMatch 让「多一条 = 干扰项漏网、少一条 = 正例被误拒」都红。变异 M6/M8/M9（三种不同的正则放宽）实测均只让这一个测试红。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_scan.go（新建，147 行）",
+    "internal/hestia/backfill_scan_test.go（新建，352 行，9 个测试函数 / 49 处 assert+require）",
+    "internal/hestia/testdata/pboc-index-p146-2020.html（新建，入库 38066 字节 LF 版）"
+  ],
+  "interfaces_exposed": {
+    "note": "均在 package hestia 内、未导出。TASK-002 与本文件同包，直接调用即可。",
+    "types": [
+      "type backfillItem struct { ArticleID string; URL string; Title string; Published string }  // ArticleID=URL 里的数字串(位数不定); URL=绝对URL(经 resolveURL); Title=title= 属性全文; Published=YYYY-MM-DD",
+      "type backfillPage struct { Items []backfillItem; Reports []backfillItem }  // Items=整页列表项(页面顺序); Reports=Items 中命中三种报告标题的子集(同序)"
+    ],
+    "funcs": [
+      "func scanBackfillPage(html []byte, base string) (backfillPage, error)  // base 用于把站内路径补成绝对 URL(传 index 页 URL 即可，同 discover.go 的 scanPage)"
+    ],
+    "vars": [
+      "var backfillTitleRE *regexp.Regexp  // 三种报告标题，期次段可选且必须紧跟报告种类",
+      "var backfillItemRE *regexp.Regexp   // 一条列表项，捕获组 1=href 2=article_id 3=title属性 4=日期",
+      "var backfillIstitleMark []byte      // = []byte(`istitle=\"true\"`)，计数守卫基准"
+    ],
+    "test_helpers": [
+      "const backfillTestBase = \"https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html\"",
+      "func backfillListItemHTML(articleID, title, text, date string) string  // 造一条与真实 index 页同形态的列表项(text 与 title 分开传，用于钉『取 title= 属性』)",
+      "func backfillPageHTML(items ...string) []byte  // 把若干条列表项裹进最小页面骨架",
+      "func backfillTitles(items []backfillItem) []string"
+    ],
+    "caller_contract": [
+      "scanBackfillPage **只在 HTTP 200 的响应体上调用**。站点越界页(实测 11040-409.html / 11040-500.html)返回 HTTP 404 / 146 字节，那一支必须由抓取层在进到这里之前处置——本函数看到 0 条只会报『版式变了』，把 404 喂进来会得到误导性的错误。",
+      "本函数**不翻页、不判停、不解析期次**。翻页与按日期停止是 TASK-002；期次解析(存量说 3月、增量说 一季度)留给 M1c-2，parsePeriod 本迭代不调用。"
+    ]
+  },
+  "verification": {
+    "anchor": "全部数字采自最后一次改动之后的同一棵树：task/TASK-001 @ 97ae2a3c39c47546a0f949a97322c353026f95ae（已 merge master 3a7889e，含 TASK-003 的 manifest 代码）",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；-v 计数 PASS(含子测试)=714 / FAIL=0 / SKIP=0",
+    "gofmt": "gofmt -l internal/hestia/ → 空",
+    "vet": "go vet ./internal/hestia/ → 空",
+    "coverage": "背对背同一时刻采样：pre = master 3a7889e（无本任务文件）992/1063 = 93.321%；post = 97ae2a3 1006/1077 = 93.408%；差 +0.087pp，未降低。backfill_scan.go 全部语句被覆盖。 ⚠️ 这是 97ae2a3 树上的单变量对照；交付树的绝对值见 delivery_tree.coverage。",
+    "numstat": "git show --numstat HEAD（提交本身，与交付物同源）= 147/0 + 352/0 + 640/0，纯新增 0 删除，未触碰任何既有文件",
+    "lf_recheck": "git 规范化去掉 67 个 CR 后（38133→38066 字节）在 LF 版上单独重跑，仍 ok —— 主工作区门禁拿到的正是这一版",
+    "mutation": {
+      "harness": "隔离副本（git worktree add --detach ../wt-TASK-001-mut master + 拷入本任务三份文件），跑完已 remove；每个变异窗口内校验主 worktree 两份源文件 sha256 未变，全程一致",
+      "gates": "语法闸(gofmt -e) + 语义闸(逐条打印 diff 核对) + 编译失败不计 KILLED",
+      "result": "10 个变异全部 KILLED，0 存活。**记录的是哪些测试红、不是红不红**：",
+      "detail": [
+        "M1 去掉 `\\stitle=` 的 `\\s`（还原 spec 原式）→ 5 红（三种标题/日期/id/干扰项/title属性），**计数守卫不红** ⇒ 证实计数守卫接不住这类失效",
+        "M2p 标题改取链接文本 → **仅 1 红**（TakesTitleAttributeNotLinkText），真实语料全绿 ⇒ 证实 DoD 说的『真实语料上无守卫』",
+        "M3p 0 条守卫失效 → 仅 ErrorsOnZeroListItems 红",
+        "M4 计数守卫恒真 → 仅 CountMustMatchIstitle 红",
+        "M5 计数基准换成 class=\"hui12\" → 真实快照相关 5 红",
+        "M6 报告种类放宽成 `.*统计数据报告` → 仅 RejectsLookalikes 红",
+        "M7 给 id 加回 `\\d{14,}` → ArticleIDHasNoDigitFloor(p18) + CountMustMatchIstitle 红，**FindsThreeReportKinds 不红**（p146 全 19 位）⇒ 复现 Sprint 037 盲区",
+        "M8 期次段紧跟改成允许中间插任意字符 → 仅 RejectsLookalikes 红",
+        "M9 期次段由可选改必填 → 仅 RejectsLookalikes 红（年度形态 2025年金融统计数据报告 掉出去）",
+        "M10 Reports 过滤器恒真 → 4 个测试红"
+      ],
+      "invalid_variants": "首轮 M2 与 M3 被闸拦下并重做：M2 加捕获组后索引错位（Title 取到日期），是以**错误理由**致红，语义闸判无效；M3 的 sed 造出语法非法的变异体，语法闸拦下。两者重做为 M2p / M3p 后才计入。"
+    },
+    "stats_tooling": "统计一律用 python3 / awk / grep -c，**未使用裸 sort -u / uniq**（macOS 默认 locale 把任意两个汉字判为相等，对本语料会静默少 25%）",
+    "delivery_tree": {
+      "anchor": "master 62b924300415fb109e7355aea0785b4c1ab4903b（含本任务 + TASK-003 manifest + TASK-004 search），即 dev_done 门禁与验证者实际会跑的那棵树",
+      "why_numbers_differ": "与下面 anchor=97ae2a3 那组数字不同，是因为交付树上另外并入了 TASK-004 的代码与测试，不是本任务产物有变——master 上本任务三份文件的 sha256 与 97ae2a3 逐字节一致（已核实）。两组都保留：97ae2a3 那组是单变量对照（只有我的改动），本组是交付树实测。",
+      "suite": "go test ./internal/hestia/ -count=1 → ok；-v 计数 PASS(含子测试)=735 / FAIL=0 / SKIP=0",
+      "own_tests": "go test -run TestScanBackfill -v → 9 个顶层测试函数全 PASS",
+      "gofmt": "gofmt -l internal/hestia/ → 空",
+      "vet": "go vet ./internal/hestia/ → 空",
+      "coverage": "1058/1129 = 93.711%（绝对值；本任务自身的增量对照见下面 97ae2a3 那组的背对背采样 +0.087pp）"
+    }
+  },
+  "notes_for_downstream": [
+    "TASK-007 登记 CONTRACTS 时要更正两处：(a) discover.go 里『p15/p16/p17/p18 每页 15 条全 7 位，页内不混合』已为假；(b) design-spec §3.1 的 backfillItemRE 原式有 istitle 贪婪 bug，正文写的正则不能照抄。",
+    "TASK-006 登记 testdata/README.md 时，p146 的字节数请写**入库后的 38066**（LF），不是 curl 的 38133，也不是任务描述里的 38201。",
+    "本任务的 packages/writes 声明与实际写入**完全一致**，无越界文件。"
+  ],
+  "merged_into_master": "863cdfe（leader 串行 merge；已核实 master 上三份文件的 sha256 与 97ae2a3 逐字节一致，且 97ae2a3 是 master 的祖先）"
+}

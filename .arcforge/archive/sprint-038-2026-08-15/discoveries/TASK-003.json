@@ -1,0 +1,75 @@
+{
+  "task": "TASK-003",
+  "title": "manifest 的类型、逐篇追加落盘与「已抓」判据",
+  "by": "dev-agent-56",
+  "commit": "3a7889e69aa317b09946a54d42d0794c8e0727bc",
+  "branch": "task/TASK-003",
+  "key_findings": [
+    "包内既有守卫 store_test.go:TestPackageExposesNoWriteFunctions 用 AST 扫全部非测试 .go 文件，断言导出函数/方法集合恰好等于一份写死的 18 项名单。本 sprint 任何在 internal/hestia 新增导出函数的任务都会撞红它，而 store_test.go 不在任何任务的 writes 里。本任务的处置是全部用非导出名，不动那份名单（详见 decisions[0]）。",
+    "loadManifest 对「--out 路径落在一个普通文件底下」（如 ~/somefile/out/manifest.json）拿到的是 ENOTDIR 而非 ENOENT，因此判据写 os.IsNotExist 时它会**报错而不是当作首跑**——这是想要的：否则回填要跑到第一次落盘才炸，那时 400 次请求已经发完。",
+    "design-spec §6 与 addendum §A2 对 sha256 的说法冲突，实现按 §A2：只在首次抓取时计算、用途是让下游验证本地文件未被篡改/截断，不是发现站点改版（§5.2『已抓就跳过』把重抓比对关掉了）。代码注释里没有留 §6 那句『唯一能发现改版的途径』。"
+  ],
+  "decisions": [
+    {
+      "decision": "manifest 的读写 API 全部不导出：loadManifest / manifestStore / articleFile / articleSHA256；只有类型 Manifest / Article / Failed 导出。",
+      "rationale": "TestPackageExposesNoWriteFunctions 钉死导出函数集合，新增导出函数必须改 store_test.go 的 want 列表——而该文件不在任何任务 writes 内，且同包 6 个并行任务会争抢同一行。本任务的调用方 TASK-006（fetch）与 TASK-008（reconcile）都在 package hestia 内，本来就不需要导出。该守卫只看 FuncDecl，导出类型不受影响，故 DoD 要求的三个类型名照常导出，JSON 契约不变。若 TASK-007（cmd/atlas，包外）确实要直接读 manifest，则需导出并由**唯一一个**任务持有 store_test.go 的 writes。"
+    },
+    {
+      "decision": "时间字段一律用 string，不用 time.Time：ScannedAt / FetchedAt 是 RFC3339，Published 是 YYYY-MM-DD。",
+      "rationale": "与本包既有 Meta 的『全部为字符串』同一约定；且 Published 是日期不是时刻，混用两种类型会让读的人得逐字段记住哪个是哪个。往返相等也因此是逐字节的，不受时区/精度影响。"
+    },
+    {
+      "decision": "Save 用『同目录临时文件 + rename』原子写，并在序列化前把 nil 切片归一成空切片（在副本上做，不改内存态）。",
+      "rationale": "原子写保证落盘失败时磁盘上那份仍是之前的完整内容——直接 O_TRUNC 覆盖会留下截断的 JSON，而那份 JSON 恰好会让下次 loadManifest 报错，整趟回填记录作废。切片归一是为了首跑产出 `[]` 而非 `null`，下游用 jq/Go 读时行为与『抓到 0 篇』一致。"
+    },
+    {
+      "decision": "「已抓」判据 = id 在 articles **且** Article.File 指向的文件在磁盘存在；File 为空一律判未抓。",
+      "rationale": "两条缺一不可（DoD functional[3]）：只查 manifest ⇒ 文件被删后跳过重抓、下游拿到不存在的路径；只查文件 ⇒ manifest 丢失后重复记录同一篇。File 为空时 filepath.Join(dir, \"\") 就是 dir 本身、恒存在，会让该篇被永远当成已抓。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_manifest.go（新增，203 行）",
+    "internal/hestia/backfill_manifest_test.go（新增，504 行）"
+  ],
+  "interfaces_exposed": {
+    "note": "下游（TASK-006 fetch / TASK-008 reconcile）在 package hestia 内直接用这些非导出标识符。类型是导出的，JSON tag 是与 M1c-2/-3 的对外契约。",
+    "types": {
+      "Manifest": "struct{ From string `json:\"from\"`; ScannedAt string `json:\"scanned_at\"`; PagesScanned int `json:\"pages_scanned\"`; SearchPagesScanned int `json:\"search_pages_scanned\"`; Articles []Article `json:\"articles\"`; Failed []Failed `json:\"failed\"`; OnlyInIndex []string `json:\"only_in_index\"`; OnlyInSearch []string `json:\"only_in_search\"` }",
+      "Article": "struct{ ID string `json:\"id\"`; Title string `json:\"title\"`; Published string `json:\"published\"`; URL string `json:\"url\"`; File string `json:\"file\"`; SHA256 string `json:\"sha256\"`; FetchedAt string `json:\"fetched_at\"`; Source string `json:\"source\"` }",
+      "Failed": "struct{ ID string `json:\"id\"`; URL string `json:\"url\"`; Error string `json:\"error\"` }",
+      "manifestStore": "struct{ Manifest Manifest; dir string } —— Manifest 字段可直接改（如 PagesScanned / From / ScannedAt / OnlyInIndex），改完自行调 Save()"
+    },
+    "functions": [
+      "func loadManifest(dir string) (*manifestStore, error) —— dir 是产物根目录（--out）。manifest.json 不存在 ⇒ 空 Manifest + nil error；内容非法或读失败 ⇒ (nil, error)，绝不静默当空。",
+      "func (s *manifestStore) AppendArticle(a Article) error —— 追加一篇并立刻整份落盘",
+      "func (s *manifestStore) AppendFailed(f Failed) error —— 追加一条失败记录并立刻整份落盘",
+      "func (s *manifestStore) Save() error —— 原子写整份 manifest（临时文件 + rename），必要时 MkdirAll 产物目录",
+      "func (s *manifestStore) HasArticle(id string) bool —— 「已抓」判据，id 在 articles 且 file 在磁盘存在",
+      "func (s *manifestStore) Path() string —— <dir>/manifest.json 的完整路径",
+      "func articleFile(id string) string —— 返回 \"articles/<id>.html\"，即 Article.File 的口径（相对产物根目录、分隔符固定 /）",
+      "func articleSHA256(content []byte) string —— 内容的 sha256 十六进制小写，写进 Article.SHA256"
+    ],
+    "layout": "<out>/manifest.json + <out>/articles/<article_id>.html（design-spec §8）。抓取侧落盘文章文件时请用 articleFile(id) 拼相对路径、用 articleSHA256(body) 填 SHA256，HasArticle 按同一口径解析。"
+  },
+  "verification": {
+    "measured_at_commit": "3a7889e69aa317b09946a54d42d0794c8e0727bc",
+    "note": "以下数字全部在最后一次改动之后、于该 commit 上统一重采，同源于交付物。",
+    "suite": "go test ./internal/hestia/ -count=1 全绿；-run TestBackfill 计 24 条 RUN = 15 顶层 + 9 子测试，24 PASS / 0 FAIL",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "vet": "go vet ./internal/hestia/ 输出为空",
+    "coverage": "背对背（同一时刻并排跑）baseline 93.6%（去掉本任务两文件的副本）→ post 93.3%（含本任务），门禁线 dev_minimum=80。差值 0.3pp 全部来自 Save 的 7 条错误返回分支（Marshal / tmp.Write / tmp.Close / Chmod / Rename / MkdirAll 失败），无可移植的构造手段，未为凑数注入 hook 变量。",
+    "coverage_stronger_claim": "既有代码覆盖率**逐函数一致**：base 与 post 两份 profile 归一化空白后 diff 为空，113 个既有函数百分比逐个相同 ⇒ 『不降低既有覆盖率』在逐函数口径上严格成立。",
+    "mutation": "7 个变异全部 KILLED，且每个都由**预期的那条**测试杀死（隔离副本上做，主工作区被测文件 sha256 前后一致）：M1 改 json tag『pages_scanned→pagesScanned』只红 JSONKeysAreVerbatim（RoundTrip 仍绿 ⇒ 两条互补非重复）；M2 追加不落盘只红 AppendPersistsImmediately；M3 sha256 输出改大写只红 SHA256KnownContent；M4「只查 manifest」只红『文件被删』子用例；M5「只查文件」只红『manifest 没记』子用例；M6 非法 JSON 静默当空只红 LoadInvalidJSONErrors；M7 改非原子写（os.WriteFile 直写）只红 SaveFailureKeepsPreviousFile。",
+    "mutation_caveat": "M7 第一遍因 harness 的 python 引号转义错误未落盘（diff 为空），而 harness 仍打印了一行『SURVIVED』——那行是假的。M7 的上述结论来自单独重跑（先验 diff 非空、go vet 通过再判）。",
+    "dod_mapping": {
+      "functional[0]": "TestBackfillManifestRoundTrip + TestBackfillManifestJSONKeysAreVerbatim + TestBackfillManifestSaveWritesEmptyArraysNotNull",
+      "functional[1]": "TestBackfillManifestAppendPersistsImmediately + TestBackfillManifestAppendFailedPersistsImmediately（均绕开被测读路径，直接 os.ReadFile 断言）",
+      "functional[2]": "TestBackfillArticleSHA256KnownContent（断言具体值 c066d572…818d60 与空内容 e3b0c442…7852b855，由 shasum 与 python3 hashlib 双工具交叉核对）",
+      "functional[3]": "TestBackfillManifestHasArticleNeedsBothManifestAndFile（4 子用例）+ RejectsEmptyFile + ScansPastOtherIDs",
+      "boundary[0]": "TestBackfillManifestLoadMissingFile",
+      "boundary[1]": "TestBackfillManifestLoadInvalidJSONErrors（3 子用例：非 JSON / 截断 / 合法 JSON 但非对象）+ LoadUnreadableErrors + LoadRejectsBrokenOutPath",
+      "error_handling[0]": "TestBackfillManifestSaveFailureKeepsPreviousFile（chmod 0555 制造落盘失败，断言磁盘内容逐字节等于失败前 + 无临时文件残留；root 下 skip）",
+      "non_functional[0]": "见 gofmt / vet / suite / coverage 各项"
+    }
+  }
+}

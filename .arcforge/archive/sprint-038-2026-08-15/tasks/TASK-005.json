@@ -1,0 +1,68 @@
+{
+  "id": "TASK-005",
+  "title": "两侧交叉校验：并集、两个差集与搜索侧 fail-open",
+  "description": "实现 `.arcforge/docs/01-design/design-spec.md` 的 **§5（交叉校验）**。**纯函数**——输入两侧候选集，输出抓取集与两个差集；不碰网络、不碰磁盘，可完整单测。抓取本身是 TASK-006 的事。\n\n立项理由见 `.arcforge/docs/01-design/architecture-decisions.md` 的 **ADR-M1c1-01**：实测搜索侧有一处 21 条的不自洽（2020 全年 24 条完美齐全，全区间 137 条 vs 理论 158 条），**搜索漏了搜索自己不会说** ⇒ 用 index 侧做独立第二来源把它变成可观测的差集。\n\n开工前**先读 `TASK-002` 与 `TASK-004` 的 discovery** 拿到两侧候选项的实际类型名与字段，别照着文档臆测。\n\n## ⚠️ 包级导出守卫（本 sprint 实测，dev-agent-56 发现）\n\n`internal/hestia/store_test.go` 的 `TestPackageExposesNoWriteFunctions` **用 AST 扫包内所有非测试 `.go` 文件**，断言导出函数/方法的集合**恰好等于**一份写死的名单。\n\n⇒ **你新增任何导出函数（首字母大写）都会让它变红**，而 `store_test.go` **不在你的 writes 里**（本 sprint 唯一持有者是 TASK-006）。\n\n**处置：全部用非导出名。** 你的调用方都在同一个 package 内，本来就不需要导出。**导出的 `type` 不受影响**——该守卫只看 `FuncDecl`。\n\n已在 TASK-003 上验证这条路走得通（`loadManifest`/`manifestStore` 全非导出，守卫绿）。",
+  "wave": 3,
+  "dependencies": [
+    "TASK-002",
+    "TASK-004"
+  ],
+  "context_from": [
+    "TASK-002",
+    "TASK-004"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_crosscheck.go",
+    "./internal/hestia/backfill_crosscheck_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**抓取集 = index 侧 ∪ 搜索侧**（按 article_id 求并集；index 侧的站内路径先经 `resolveURL` 归一，两侧筛完栏目前缀后 URL 同形态 ⇒ id 可直接比）。宁可多抓，不漏。断言：给两侧各喂一组有交有差的候选，断言并集的 id 集合正确、**且交集那几条只出现一次**。",
+      "**`only_in_index` = A \\ B**（搜索没索到的，实测已知会发生）。断言具体的 id 集合，不是只断言条数。",
+      "**`only_in_search` = B \\ A**（index 没翻到的）。这是**真风险信号**——它意味着 index 翻页漏了。但它是**告警不是失败**：并集已把这些收进抓取集，交付物不缺。断言具体的 id 集合。"
+    ],
+    "boundary": [
+      "两侧候选集**完全相同** ⇒ 两个差集都为空，并集等于任一侧。",
+      "**搜索侧返回空集（非错误）** ⇒ `only_in_index` = 全部 A、`only_in_search` 空、并集 = A。\n\n⚠️ 这与下面 `error_handling` 的「搜索侧失效」是**两种不同情形，必须分开判**：空集是「搜索确实一条都没索到」（可能是真的，也可能是关键词写错了），失效是「搜索这条路没走通」。前者 `search_skipped_reason` 应为空，后者非空。两条各一个断言——⚠️ 若把两者合成一种处置，「关键词写错导致 0 条」会被当成「服务挂了」而静默放过。",
+      "🟡 **补上 TASK-004 遗留的一个测试缺口：日期范围守卫的『上界』那半没有测试背书。**\n\n来源：test-agent-28 复验 TASK-004 时的一个 SURVIVED 变异——\n```\n- if h.Published < lo || h.Published > hi {\n+ if h.Published < lo {\n```\n**本任务用例 / 整包 / `go test ./...` 三级全部 exit 0** ⇒ `> hi` 这半边删掉无人发现。\n\n成因：TASK-004 的越界用例日期全在 `from` **之下**（2015-02-10）；`AcceptsBoundaryDates` 用的是恰好等于 `to` 的日期，只能证明比较不是 `>=`，**证不了上界存在**。\n\n⚠️ **该函数语句覆盖率是 100%，对这个缺口毫无信号** —— 整个 `if` 是一条语句，两个半边共用一格。这是「**覆盖率 ≠ 守卫有效**」一个很干净的实例。\n\n**为什么不回炉 TASK-004 而放在你这里**：该分支在本 sprint **不可达**（CLI 只有 `--from`、没有 `--to`，`to` 恒为今天）；而 `checkBackfillSearchDateRange(hits, from, to)` 是**导出给你和 TASK-006 的接口**，`to` 是**参数不是常量** —— 你是它的第一个真实消费者，在消费点补测试比在生产点补更贴近真实用法。\n\n🔴 **必须在有人加 `--to` 之前补上**：M1c-2 一旦回填某个历史区间，上界就变成 `desc` 排序下**第 1 页就触发**的那一半（即最早的检测点），而它现在零测试背书，任何重构都能悄悄删掉它。\n\n闭合成本一行：补一条 `to` 之后的日期、断言报错（test-agent-28 实测现有实现**会**正确报错）。"
+    ],
+    "error_handling": [
+      "**搜索侧失效**（TASK-004 抛错）⇒ **跳过交叉校验、抓取集退化为 index 侧、返回 nil error**（fail-open，见 `.arcforge/docs/01-design/architecture-decisions.md` 的 ADR-M1c1-02：交叉校验是附加防线，不该让一个不可控的第三方检索服务有权否决主路径交付）。\n\n⚠️ **有声跳过，不静默**：必须把原因写进 `search_skipped_reason`。否则「这次没做校验」与「校验通过」在读者看来完全一样——**那正是本机制要防的失效模式本身**。断言：搜索侧报错时返回 nil error、抓取集仍等于完整的 A、**且 `search_skipped_reason` 非空**（三个断言都要，缺任一条都测不出这个行为）。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、`go test ./internal/hestia/ -count=1` 全绿，且不降低既有覆盖率。"
+    ]
+  },
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-57",
+  "questions": [
+    {
+      "q": "【阻塞】TASK-005 交付 commit `task/TASK-005` @ a9d75720b0616a2b836a04e3a311f41c2da122b2 尚未合入 master（判据两样：`git merge-base --is-ancestor a9d7572 HEAD` → NO；`grep -c 'func crossCheckBackfill' internal/hestia/backfill_crosscheck.go` → 0，即「我要的东西不在」）。基于 d4b4866，纯新增两个文件 133/0 + 308/0，无冲突面。请三方合并，别让我 rebase（会作废 13/13 变异与背对背覆盖率的核实锚点）。合并后由我自己转 in_progress → dev_done。自证数字（采自 a9d7572）：10 顶层 + 7 子测试 PASS、0 FAIL；gofmt/vet 空；覆盖率 94.0%→94.2% 背对背；新文件 2 函数全 100%、零导出标识符；包级导出守卫绿。",
+      "asked_at": "2026-08-14T11:10:00Z",
+      "answer": "【由 test-agent-28 于 2026-08-14 补记，只记可核查的事实，不代 leader 转述裁决理由】已解决：a9d75720b0616a2b836a04e3a311f41c2da122b2 已在 master 上。核实（2026-08-14，判定锚 a9d7572）：① git merge-base --is-ancestor a9d7572 HEAD → YES；② 内容判据 grep -c 'func crossCheckBackfill' internal/hestia/backfill_crosscheck.go → 1（即提问时报的「我要的东西不在」已不再成立）。未 rebase：判定锚与 dev 自证数字的采样锚一致，其变异与背对背覆盖率核实未被作废。"
+    },
+    {
+      "q": "【待裁决，不阻塞交付，但会卡住 TASK-006】Manifest 缺 `search_skipped_reason` 字段。ADR-M1c1-02 与 TASK-005 的 error_handling[0] 都要求把跳过原因写进 manifest，但 TASK-003 定的 Manifest 结构没有该字段（grep 全包 0 处）。**我已查实：没有任何在建任务的 writes 覆盖 backfill_manifest.go**（TASK-006.writes = fetch.go/fetch_test.go/store_test.go；TASK-008.writes = reconcile 两个；TASK-006 的 done_criteria 里 search_skipped_reason 出现 0 次），而 TASK-003 已 verified ⇒ **当前没有任何角色能合法添加它**。选项：② 开小任务，或把 backfill_manifest.go 加进 TASK-006 的 writes **并同时在其 DoD 加一条**（否则字段会被写进去却无用例钉它）；③ 判定不进 manifest 只进 final-report（需改 ADR-M1c1-02 措辞，我不建议：manifest 是 M1c-2 会反复读的那份，「这次没做校验」该跟着数据走）。⚠️ 最坏的是停在现状：backfillCrossCheck.SearchSkippedReason 在代码里存在会让人以为已落盘，比压根没有这个设计更糟。",
+      "asked_at": "2026-08-14T11:10:00Z",
+      "answer": "【由 test-agent-28 于 2026-08-14 补记，只记可核查的事实；裁决理由见 design-spec §6 与 TASK-006 的 DoD，不在此转述】已解决，走的是选项②：由 TASK-006 承接。核实（2026-08-14 直读 .arcforge/tasks/TASK-006.json）：① writes 已含 ./internal/hestia/backfill_manifest.go 与 ./internal/hestia/backfill_manifest_test.go（2 项）；② done_criteria 含 search_skipped_reason 的落盘要求（1 处）。⇒ 提问中担心的「字段被写进去却无用例钉它」与「当前没有任何角色能合法添加它」两点均已不成立。"
+    }
+  ],
+  "verify_baseline": {
+    "head": "a9d75720b0616a2b836a04e3a311f41c2da122b2",
+    "discovery_sha256": "d4acd0283bb7135a412b2902fa818d4bc5a942c6ccb92dc44e66391d9dae752b",
+    "at": "2026-08-14T11:05:11Z"
+  },
+  "verifier": "test-agent-28",
+  "discovery": ".arcforge/discoveries/TASK-005.json"
+}

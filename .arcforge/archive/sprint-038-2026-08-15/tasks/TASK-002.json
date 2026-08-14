@@ -1,0 +1,64 @@
+{
+  "id": "TASK-002",
+  "title": "index 侧：翻页与按日期停止",
+  "description": "实现 `.arcforge/docs/01-design/design-spec.md` 的 **§3.3（停止条件按日期）**，把 TASK-001 的单页扫描串成翻页主循环。\n\n**复用包内既有未导出部件**：`parsePaging`（解析分页模板与总页数）、`pageURL`（拼第 N 页 URL，第 1 页直接返回 indexURL 不套模板）、`resolveURL`、`Fetcher`。⚠️ 先读 `discover.go` 里这几个函数的注释——`pageURL` 为什么第 1 页特殊、`parsePaging` 为什么解析失败必须报错，都写在那里，别重新发明。\n\n⚠️ **本任务与 TASK-001 写同一个文件** `backfill_scan.go`。它在 wave 2、TASK-001 在 wave 1，串行不并行；开工前先确认 TASK-001 已 `verified`，并读它的 discovery 拿到 `BackfillItem` 的实际字段名。\n\n## ⚠️ 包级导出守卫（本 sprint 实测，dev-agent-56 发现）\n\n`internal/hestia/store_test.go` 的 `TestPackageExposesNoWriteFunctions` **用 AST 扫包内所有非测试 `.go` 文件**，断言导出函数/方法的集合**恰好等于**一份写死的名单。\n\n⇒ **你新增任何导出函数（首字母大写）都会让它变红**，而 `store_test.go` **不在你的 writes 里**（本 sprint 唯一持有者是 TASK-006）。\n\n**处置：全部用非导出名。** 你的调用方都在同一个 package 内，本来就不需要导出。**导出的 `type` 不受影响**——该守卫只看 `FuncDecl`。\n\n已在 TASK-003 上验证这条路走得通（`loadManifest`/`manifestStore` 全非导出，守卫绿）。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-001"
+  ],
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_scan.go",
+    "./internal/hestia/backfill_scan_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "翻页主循环逐页扫描，**第 1 页复用已取回的字节、不重复请求**（与 `Discover` 同一处置，理由见 `pageURL` 注释）。断言方式：给 fake Fetcher 记录收到的 URL 序列，断言第 1 页 URL **只出现一次**。",
+      "**跨页去重**：同一 `article_id` 在分页边界重复出现时只产出一次。用两页样本钉住，其中第 2 页刻意重复第 1 页的最后一条。\n\n理由（`discover.go` 的 `seen` map 注释）：翻页期间新文章上架会把边界那条挤到下一页重复出现。回填要跑 9 分钟，这个窗口内央行发新文是完全可能的。"
+    ],
+    "boundary": [
+      "**停止条件按日期，不按页码**：某页最老一条的发布日期早于 `from` ⇒ 停止翻页、**不再请求下一页**。断言 fake Fetcher 的**调用次数**（不是只断言返回值——返回值对而多请求了 100 页时那个断言照样绿）。\n\n⚠️ **判停那一页必须先完整扫描、再 break**。以 `--from 2020-01` 为例（实测）：p151 的条目跨 **2019-12-25..2020-01-09**，其中 **2020-01-02..2020-01-09 那批是 ≥ from 的**。`break` 写在扫描之前就会**把它们连同整页一起丢掉**。（实测 p151 上恰好 0 条目标报告 ⇒ **这个 bug 写进去，真实语料测试照样绿**，必须用合成页面钉住：判停页上放一条 ≥from 的目标报告，断言它出现在结果里。）",
+      "**翻满 `MaxPages` 仍未触发日期停止 ⇒ 报错**，不是静默返回已收集的部分。那说明日期判定没生效。`MaxPages` 设 200，仅作兜底。",
+      "**`from` 比最新一期还新 ⇒ 第一页就停，返回空 + nil error**，不报错。\n\n⚠️ 这条主动开了一条**静默零通道**（`--from` 打错一位 ⇒ 0 篇 + 退出码 0，与「今天没有新报告」在调用方看来完全一样）。它由 **TASK-008 的完整性对账**兜住——本任务只需保证「不报错」，**别在这里加期望值判断**（那是 TASK-008 的 scope）。",
+      "**相邻页日期连续性**：`p(N).oldest >= p(N+1).newest`，违反即**报错**。\n\n实测 41 对相邻页 **41/41 成立**，其中 **19 对取等号**（同日跨页，故必须是 `>=` 不是 `>`）。\n它抓的是「翻页期间页码漂移导致**跳页**」——条目被下架/撤回会让后面的往前移，已抓过那页覆盖的位置被跳过 ⇒ **静默少一整页**。⚠️ 「整页 0 条」守卫对这种漏**完全看不见**：那一页有 15 条列表项，只是**不是原来那 15 条**。"
+    ],
+    "error_handling": [
+      "**index 页抓取失败 ⇒ 立刻中止并原样返回错误**，不当成「这页没有」继续翻，也**不记 failed 继续**。\n\n⚠️ 这与「单篇文章抓取失败记 failed 并继续」（TASK-006）**处置相反，是刻意的**：少一页 index = 静默少 15 条候选，与「整页 0 条」等价危害。\n\n同一条 DoD 覆盖第二种：**`parsePaging` 解析失败 ⇒ 原样返回错误，不退化成只扫第 1 页**（`discover.go` 的注释：月报发布 3 周后必然掉出第 1 页）。⚠️ 复用 `parsePaging` **不等于该分支被覆盖**——backfill 路径要有自己的用例走到它。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、`go test ./internal/hestia/ -count=1` 全绿，且不降低既有覆盖率。"
+    ]
+  },
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 1,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:11Z"
+  },
+  "assigned_to": "dev-agent-55",
+  "verify_baseline": {
+    "head": "d4b48661d40abfaefefd4fe63a6023640e2699d7",
+    "discovery_sha256": "34a962d4cb88cd388d90e79e5436008bbf2d2117be3620f9a9210c6f7d9d0256",
+    "at": "2026-08-14T10:34:50Z"
+  },
+  "verifier": "test-agent-27",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "fix_items": [
+    {
+      "id": "FIX-A",
+      "severity": "high",
+      "title": "boundary[3] 的注释与错误文案必须删掉「抓跳页」——守卫方向与该失效相反",
+      "why": "**这不是你的实现缺陷**：`boundary[3]` 写明的规则（`>=`、违反即报错）你实现得逐字无误，有承重测试，验证者三批独立快照实测 **0 反例**（`delta ∈ [0,5]`，取等号约占一半），判据本身**成立**。错的是 DoD 给的**理由**，而你连注释里的数字都是照 DoD 抄的。\n\ntest-agent-27 直接构造观察到（非推理）：**守卫的方向与它声称要防的失效相反**。\n\n| 场景 | 守卫表现 |\n|---|---|\n| **真跳页**（条目下架 ⇒ 后续前移 ⇒ 整页被略过） | 🔴 **完全沉默** |\n| 插入导致重复（新文上架 ⇒ 内容下移） | 报错，文案却写「a page range was **skipped**」 |\n\n必然如此：**下架 ⇒ `p(N+1).newest` 变老 ⇒ 判据更满足 ⇒ 永不触发**。跳页表现为 delta **变大**，而守卫卡的是 delta **变小**那一侧。\n\n⚠️ **Leader 自己写下过「跳页表现为 delta 变大」这句话**（在给你的订正消息里），**它足以证伪这个守卫，而我没有把它和守卫的方向对上**。\n\n**为什么测试和变异都没发现**：`AdjacentPageContinuity` 里那个名叫「跳页」的子用例，构造的其实是「插入导致重复」那一支；N4/N5 也都在这套自洽定义内互相验证 ⇒ **用被验对象自己的尺子量自己**，全部 KILLED，而被验证的不是 DoD 声称的那个东西。",
+      "how": "**只改注释与错误文案，不改判据逻辑**（判据成立，实测 0 反例）：\n1. `backfill_scan.go` 那段注释：如实改成「检测翻页期间**列表前移（新文上架）导致的重复**」，**删掉「抓跳页」「a page range was skipped」这类表述**，并写明「**下架导致的整页跳过本守卫抓不到**」。\n2. 错误文案 `a page range was skipped` → 改成「列表在翻页期间发生移位（可能有重复条目）」之类如实的描述。\n3. 注释里加一句：**跳页检测归 TASK-008 的完整性对账**（我已写进它的 DoD）。\n4. 名叫「跳页」的那个子用例改名，让名字与它实际构造的场景一致。\n5. 顺带订正 p151 的笔误：DoD 与注释写 `2019-12-25..2020-01-09`，实测 newest 是 **2020-01-14**（验证者独立复核过；「7 条 ≥from」与「0 条目标报告」两个前提都成立，不影响行为）。\n\n⚠️ **别删这个守卫**：它确实在防「新文上架导致的重复」这一支，只是名字和文案说错了防的是什么。"
+    }
+  ],
+  "reason_class": "dod_defect"
+}

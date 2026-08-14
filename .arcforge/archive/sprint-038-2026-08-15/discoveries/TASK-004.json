@@ -1,0 +1,168 @@
+{
+  "task_id": "TASK-004",
+  "title": "搜索侧：wzdig 查询构造、结果解析与栏目前缀筛",
+  "by": "dev-agent-57",
+  "at": "2026-08-14T10:55:00Z",
+  "key_findings": [
+    "⚠️ **调查统计司那份的 article_id 不都是 32 位 hex —— 判据必须是栏目前缀，不能是 id 形态。** 样本 6 条 `/diaochatongjisi/` 里只有 2 条是 32 位 hex（`35ec0aa27604417888826e7ff128cc4a`），另 4 条是 **19 位纯数字**（`2025080618505078072`），与 goutongjiaoliu 侧 id 形态完全撞形。按「32 位 hex」筛会把那 4 条放进候选，而它们的 id 在 index 侧根本不存在 ⇒ TASK-005 的差集会凭空多出 4 条假信号。由 TestFilterBackfillSearchHitsDropsByPrefixNotByIDShape 钉住（该用例先 require 两条反例都在样本里，再断言都被丢）。",
+    "`sr=dateTime desc` 的空格用 `+`（url.Values.Encode 的输出）与 `%20` **实测等价**，且 `sr` 确实生效不是被忽略：两种编码下总条数均 137、首条日期均 2025-09-12；换 `asc` 后两者同步变成 2020-01-16；`sr=garbage` 返回 HTTP 302。⇒ 别为了「看起来像实测那条 URL」把 Encode 改回手工拼接。",
+    "样本 `testdata/pboc-search-p1.html`（2026-08-14 抓，HTTP 200）：total-records=137 / total-pages=12 / 12 条结果 = 6 条 goutongjiaoliu + 6 条 diaochatongjisi 完美成对；12 条标题各被拆成 5 段 `<font color='#FF0000'>` 高亮（共 60 个），每个标题恰好出现两次。**入库版是 LF（32372 字节）**，原始响应 32405 字节含 33 个 CR，被 core.autocrlf=input 规范化 —— 已在入库版上重跑全部测试（绿），不只是在 CRLF 工作副本上。",
+    "结果 HTML 的日期在 `<p class=\"dates\">` 里有两个 span：`<span class=\"date_\">`（内容是 URL 本身）与 `<span>2025年09月12日</span>`。日期正则写成**不带属性**的 `<span>` 正好排除前者，这不是巧合而是判据 —— 若改成 `<span[^>]*>` 会先吃到那个 URL span 而失配。",
+    "两条 DoD 未要求、但堵静默失效口子的守卫：① 要保留的栏目里取不出 article_id ⇒ 报错（它是交叉校验的键，留空会让 TASK-005 把多条归到同一个 \"\" 键上，差集算错而无任何错误）；② 计数字段 Atoi 溢出 ⇒ 报错（正则 `\\d+` 无长度上限，该分支可达，与 parsePaging 同形状同理由）。"
+  ],
+  "decisions": [
+    {
+      "decision": "本层做「单页取 + 解析 + 栏目筛」，**翻页循环留给调用方**",
+      "rationale": "design-spec §1 的文件职责表把「翻页」也划给了 backfill_search.go，但 DoD functional[3] 写的是「总页数供**调用方**决定翻到第几页」，且限速（§7.1 的可注入 sleep）与逐页落盘都在抓取层 —— 翻页循环放这里会与它们打架，且会让本文件从「纯函数 + 一次取回」变成需要 fake clock 才能测。已在交付报告里向 leader 显式申报这是解读而非漏做，要收进来说一声即可。",
+      "consumed_by": "TASK-005 / TASK-006"
+    },
+    {
+      "decision": "栏目筛的判据是 URL 里含 `/goutongjiaoliu/113456/113469/`，不是 article_id 形态",
+      "rationale": "见 key_findings 第 1 条：实测反例证明 id 形态判据会漏掉 4/6 条。前缀是栏目的定义本身，id 形态只是它当前的伴随属性 —— 而央行 2026-06-26 重建过一次站点，id 形态变过（19 位 → 7 位）。",
+      "consumed_by": "TASK-005（交叉校验按 article_id 比对两侧的前提）"
+    },
+    {
+      "decision": "「解析到 0 条 ⇒ 报错」与「筛完剩 0 条 ⇒ 不报错」分成两条判、两条用例",
+      "rationale": "与 design-spec §3.2 index 侧那两条同则。只写前者时，把「筛完 0 条也报错」这个 bug 写进去测试照样绿；而某一页 12 条恰好全是调查统计司栏目是完全可能的，那时报错会把整条交叉校验打断。",
+      "consumed_by": "TASK-005"
+    },
+    {
+      "decision": "总条数上界取 `backfillSearchMaxRecords = 5000`",
+      "rationale": "下侧：实测单关键词全区间最大 692 条（`金融统计数据报告`），三个关键词每月各新增 2～3 条，再跑十年也不到 1100 ⇒ 不误伤正常增长。上侧：`advtime` 失效时的量级是 549141（实测空查询），与 5000 差 100 倍 ⇒ 不漏判。两端各有一条用例钉住（RejectsSiteWideTotal / AcceptsLargestMeasuredTotal），且两条都经变异证明有鉴别力（阈值抬到 999999999 / 压到 1 分别杀掉对应那条）。",
+      "consumed_by": "TASK-005（fail-open 的触发条件之一）"
+    },
+    {
+      "decision": "本层不降级：Fetcher 错误、解析错误一律原样上抛",
+      "rationale": "ADR-M1c1-02 的 fail-open 属于调用方（打 WARN、跳过交叉校验、写 manifest 的 search_skipped_reason、主路径照常完成）。在这一层降级 = 调用方永远不知道校验没做过，那正是该 ADR 要防的失效模式本身。两条返回路径（fetch 失败 / parse 失败）各有一条用例 + 一个变异。",
+      "consumed_by": "TASK-005"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_search.go（首交付新增 229 行；返工 128/20；裁决轮 41/44）",
+    "internal/hestia/backfill_search_test.go（首交付新增 390 行；返工 220/36；非空验证 35/0；裁决轮 33/51）",
+    "internal/hestia/testdata/pboc-search-p1.html（新增，入库 460 行 / 32372 字节 LF）"
+  ],
+  "interfaces_exposed": {
+    "types": {
+      "backfillSearchHit": "struct{ ArticleID, URL, Title, Published string } —— Published 是 `YYYY-MM-DD`；Title 已剥净 `<font>` 高亮；URL 是绝对 URL；ArticleID 取自 URL 末段 `/([^/]+)/index.html`（**不设位数下界、不限字符集**，同 articleLinkRE 的理由）。"
+    },
+    "funcs": {
+      "backfillSearchURL(keyword string, from, to time.Time, page int) string": "构造第 page 页查询 URL。日期按 `2006-01-02` 格式化，调用方传 time.Time 即可。",
+      "filterBackfillSearchHits(hits []backfillSearchHit) []backfillSearchHit": "只留 `/goutongjiaoliu/113456/113469/` 前缀。**不报错**（筛完剩 0 条是合法的）。",
+      "fetchBackfillSearchPage(ctx context.Context, f Fetcher, keyword string, from, to time.Time, page int) ([]backfillSearchHit, int, error)": "取回 + 解析 + 筛，返回**已筛**条目与总页数。TASK-005 的主要入口。错误原样上抛。",
+      "parseBackfillSearchPage(html []byte, page int) ([]backfillSearchHit, int, error)": "解析第 page 页，返回**未经栏目筛**的条目与总页数。守卫：计数字段缺失/溢出、解析到 0 条、本页条数不自洽（结构标记数 + total-records×页容量）、保留栏目取不出 article_id。",
+      "checkBackfillSearchDateRange(hits []backfillSearchHit, from, to time.Time) error": "断言每条 Published 落在 [from,to] **闭区间**内。⚠️ 已知边界：sr=dateTime desc 下第 1 页必然在区间内 ⇒ 守卫在翻到含区间外条目的那一页（实测靠后的页）才触发；**只取第 1 页的调用方挡不住**。",
+      "backfillSearchCheckCount(html []byte, got, records, page int) error": "本页条数自洽校验，见 rework.leader_rulings.Q3。"
+    },
+    "consts_vars": {
+      "backfillSearchKeywords": "[]string{金融统计数据报告, 社会融资规模存量统计数据报告, 社会融资规模增量统计数据报告} —— 三个 AND 关键词，**调用方各查一遍**（本文件不遍历它）。",
+      "backfillSearchKeepPrefix": "\"/goutongjiaoliu/113456/113469/\"",
+      "backfillSearchPageSize": "12（实测 2026-08-14：pNo=2 与 pNo=11 各 12 条，pNo=12 恰好 5 条 = 137 − 11×12）。站点若改每页条数，本常量会让每页都判不自洽 ⇒ 调用方按 ADR-M1c1-02 fail-open。",
+      "🔴 backfillSearchMaxRecords": "**已按裁决删除**，别再加回来，理由见 rework.leader_rulings.Q2 与代码里的墓碑注释。",
+      "backfillSearchBase / backfillSearchPageID": "https://wzdig.pbc.gov.cn/search/pcRender / c177a85bd02b4114bebebd210809f691"
+    },
+    "note_for_TASK_005": "① 翻页循环在你那边：先 fetchBackfillSearchPage(kw, …, 1) 拿 totalPages，再翻 2..totalPages（实测三个关键词共 82 页）。② 交叉校验按 ArticleID 比对时，index 侧的站内路径要先经 resolveURL 归一（design-spec §5）。③ 我这层的**任何** error 都要你 fail-open 接住：打 WARN + 写 manifest 的 search_skipped_reason + 主路径照常完成（ADR-M1c1-02），别让它冒泡成非零退出。④ 实测已知不自洽：`社会融资规模存量统计数据报告` 全区间 137 条，而理论值 79 个月 × 2 栏目 = 158 条，差 21 条 —— 筛掉调统司那半之后搜索侧候选约 69 条，`A \\ B` 非空是**预期内**的，别当失败。",
+    "🔴 签名变更（TASK-005 必读）": "`parseBackfillSearchPage(html []byte, **page int**) ([]backfillSearchHit, int, error)` —— 返工新增第二个参数。收 page 是为了 backfillSearchCheckCount 的末页算术（「本页该有几条」只有知道页码才回答得出）。`fetchBackfillSearchPage` 的签名**未变**，它是你的主要入口。"
+  },
+  "verification": {
+    "anchor": "🔴 **裁决轮的全部数字采自 `ce843924e742926ee3a6ba0639fe13c9949a6c48`**（最后一次改动之后统一重采）。此前各轮的数字见 history 字段，**别横向比**：树不同。",
+    "suite": "go test ./internal/hestia/ -count=1 —— ok，0 FAIL。本任务 **21 顶层 + 7 子测试 PASS**（删掉上界两条用例后由 23 降为 21）。",
+    "coverage": "93.8%（本任务新增文件 **8 个函数全 100%**）。⚠️ 各轮覆盖率测自不同的树，不可横向比：94.0%（仅含我的改动，基线 e0f0715）/ 93.6%（含 TASK-003 的预演树）/ 93.7%→93.8%（含 TASK-001/002/003 的返工树，背对背同一 worktree）。",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/ 空",
+    "snapshot_form": "样本已按**入库版**（LF、32372 字节、CR=0）验证：rm + git checkout -- 刷成入库版后重跑全绿。工作副本是 CRLF（32405 字节、33 个 CR），两者测试结果一致（正则全用 `(?s)` 与 `\\s*`，行尾形态不影响）",
+    "numstat_of_commit": "逐轮：首交付 229/0 + 390/0 + 460/0；返工 128/20 + 220/36；非空验证 35/0；裁决轮 41/44 + 33/51",
+    "scope": "三个文件全部在声明的 writes 内，**无越界**",
+    "ablation": {
+      "harness": "变异只作用在本 dev 独占的 worktree 上，主工作区一个字节未碰。每个变异体先过 `go build` 语法/类型闸（崩溃型变异不计 KILLED），打印与原文的 diff 供逐字核对，只跑 `-run '^TestXxx$'` 锚定的目标用例，跑完从备份还原并**校验 sha256 与基线逐字相符**（最终基线 baac46e0fa3d4a236a3b496b00b79320df938e5717d381ae5480f954a4b5dce1）。",
+      "result": "**25/25 KILLED、0 SURVIVED**，在裁决轮的最终树上重跑。另有 1 个多点变异（页容量换成总页数）单独跑，**KILLED，4 条用例转红**。合计 26。",
+      "🔴 本轮最有价值的发现": "**返工新增的宽守卫会静默削弱既有用例的鉴别力。** 把返工前的 16 个变异在返工后的树上原样重跑时，`RejectsAbsurdTotal` 与 `RejectsMissingTotals` **SURVIVED** —— 我新加的页容量守卫**替它们答了题**（前者的错误文案恰好含 549141 且不含 advtime，后者 records=0 时页容量守卫会报错让 require.Error 通过）。两处都是同一形状：**只判「有没有报错」，认不出报错的是谁**。已改为钉具体错误文案后 KILLED。⇒ 发现它的唯一动作是**把返工前的变异集在返工后的树上原样重跑** —— 这不是常规回归（常规回归问「旧测试还绿吗」，答案是绿），而是问「**旧测试还在守着它该守的东西吗**」。",
+      "验证者预告的两条我已自测": "① 「页容量换成总页数」（三重数字撞车）→ KILLED，5 条用例转红（我的合成页里 pages 有 1/12/20/58 等多种取值，三者本就分开）；② 「Published 置空」（非空验证）→ KILLED，红在「日期解析坏了」那条 require 上。"
+    },
+    "dod_coverage": [
+      {
+        "criterion": "functional[0] URL 逐参数含全部实测参数 + 中文正确 URL 编码",
+        "evidence": "TestBackfillSearchURLCarriesMeasuredParams 用 url.ParseQuery 逐参数 assert.Equal 九项（pageId/advSearch/searchArea/sr/qAll/advtime/startTime/endTime/pNo），并断言 q / advepq / adveq 三个**都不出现**；TestBackfillSearchURLEncodesChineseKeyword 断言 qAll 的 percent-encoding 字面量，且遍历整条 URL 断言无未编码非 ASCII 字符。变异 qAll→q、searchArea→\"\"、advtime→advtimeX 各杀一次。"
+      },
+      {
+        "criterion": "functional[1] 取绝对 URL/标题/发布日期三样，标题剥 <font> 且不含 '<'",
+        "evidence": "TestParseBackfillSearchPageExtractsFields 对第一条整个 struct 逐字 assert.Equal（ArticleID 5837468 / URL / Title `2025年8月社会融资规模存量统计数据报告` / Published 2025-09-12），并对 12 条逐条断言 NotContains '<'、Published 非空、URL 以 https:// 开头。配 TestParseBackfillSearchPageStripsHighlightIsNotVacuous 证明这条断言**不是在空集上平凡为真**（样本原文含 60 个 `<font color='#FF0000'>` = 12 条 × 5 段）。变异「tagRE 去掉」「日期少一段」各杀一次。"
+      },
+      {
+        "criterion": "functional[2] 只保留 goutongjiaoliu 前缀；某标题出现两次，筛后剩一条且保留的是 goutongjiaoliu 那条",
+        "evidence": "TestFilterBackfillSearchHitsKeepsOnlyGoutongjiaoliu：筛前 require 该标题计数==2（前提变了会直接红并说明「样本前提变了」）、筛后 assert==1、且那一条的 URL 与 ArticleID 逐字等于 goutongjiaoliu 那份，另对 6 条逐条断言含前缀。配 TestFilterBackfillSearchHitsDropsByPrefixNotByIDShape 钉住判据是前缀而非 id 形态（见 key_findings 第 1 条）。"
+      },
+      {
+        "criterion": "functional[3] 总页数从 default-result-total-pages 解析",
+        "evidence": "TestParseBackfillSearchPageReadsTotalPages 断言样本 == 12；TestParseBackfillSearchPageRejectsMissingTotals 两条子测试断言 total-pages / total-records 任一缺失都报错（不静默退化成「只看第 1 页」）。变异「总页数正则读成总条数」「计数缺失静默返回 0」各杀一次。"
+      },
+      {
+        "criterion": "boundary[0] 0 条结果 ⇒ 报错",
+        "evidence": "TestParseBackfillSearchPageRejectsZeroResults（计数字段俱全但一条都匹配不到 ⇒ 报错，错误含 \"0 results\"）。**反向**用例 TestParseBackfillSearchPageAcceptsPageWithNoKeptColumn：解析到 2 条但全是调统司栏目 ⇒ 不报错、筛后为空 —— 两条分开判，否则「筛完 0 条也报错」这个 bug 写进去照样绿。"
+      },
+      {
+        "criterion": "error_handling[0] Fetcher 错误 / HTTP 非 200 原样返回，本层不吞不降级",
+        "evidence": "TestFetchBackfillSearchPagePropagatesFetchError 用 fakeFetcher{err: errBoom}，assert.ErrorIs 到同一个哨兵错误（HTTP 非 200 由 pbocFetcher.Get 转成 error，走同一条路径）；另补 TestFetchBackfillSearchPagePropagatesParseError 覆盖「取回成功但解析失败」这条**不同的**返回路径。两条各由一个「错误被吞成 nil」的变异杀掉。"
+      },
+      {
+        "criterion": "non_functional[0] gofmt/vet/test 干净且不降低既有覆盖率",
+        "evidence": "gofmt -l 空、go vet 空、go test -count=1 ok（341 顶层 PASS / 0 FAIL）；覆盖率 93.6% → 94.0%（**升**，背对背同一 worktree 采样）。全部采自 30dc06f。"
+      },
+      {
+        "criterion": "boundary[1]（**返工后已被裁决取代**）「总条数骤增到全站量级 ⇒ 报错，信息指向 advtime 失效」",
+        "evidence": "🔴 **字面表述不再有对应实现**（人类 leader 2026-08-14 显式裁决删除，理由见 rework.leader_rulings.Q2）。取代它的是判**性质**的 checkBackfillSearchDateRange：TestFetchBackfillSearchPageRejectsOutOfRangePublished（合成页含 2015-02-10 ⇒ 报错，断言含该日期且指向 advtime）+ 三条配套：AcceptsBoundaryDates（闭区间端点放行）、ChecksAllColumnsDates（校验在栏目筛之前，否则某页全是调统司栏目时会在空集上平凡通过）、DateGuardIsNotVacuousOnRealSample（真实样本 12 条逐条 time.Parse 成功且在区间内 —— 非空验证）。取代依据：原判据对其命名场景实测不触发（240/1136 ≪ 5000）。"
+      },
+      {
+        "criterion": "返工 FIX-2（DoD 之外新增）「本页条数自洽，静默丢条 ⇒ 报错」",
+        "evidence": "TestParseBackfillSearchPageChecksCountAgainstSiteReported 三条子测试（非末页少一条 ⇒ 报错 / 末页不满 ⇒ 放行 / 单页结果必须全给出），末页算术依据实测 pNo=12 恰好 5 条；配 TestParseBackfillSearchPageRejectsMisalignedItems（缺日期条目导致错配丢条，**钉错误文案**而非「有没有报错」——见 Q3 裁决）。"
+      }
+    ],
+    "post_merge": {
+      "merged_as": "c661e45（leader 三方合并 ce84392）；此前各轮：62b9243←30dc06f、2fd7b58←95881e1、93be0af←fceb572",
+      "content_identity": "主工作区 backfill_search.go = baac46e0fa3d4a236a3b496b00b79320df938e5717d381ae5480f954a4b5dce1、backfill_search_test.go = e67fbc7d69eb4a97bede1cc2b80b650ac5e9e2dc4df453db4298dae272cbc142，**与 `git show ce84392:<file>` 逐字节相同**；另按「我要的东西在不在」正向核实：墓碑注释在、Q3 新理由在、`^\\s+backfillSearchMaxRecords = ` 声明 0 行、`records > backfillSearchMaxRecords` 引用 0 处。",
+      "suite_in_main_worktree": "go test ./internal/hestia/ -count=1 → ok，覆盖率 94.0%；本任务 21 顶层 + 7 子测试 PASS、0 FAIL；包级导出守卫 TestPackageExposesNoWriteFunctions → ok；gofmt -l 空、go vet 空",
+      "🔴 我自己踩了一次「判据选错对象」": "第一次查上界是否删净时我用 `grep -c 'backfillSearchMaxRecords = 5000'`，**命中的是我自己写的墓碑注释里的字面量** ⇒ 假阳（报「还在」）。同一小时里我刚因这个形状纠正过 leader 的合并核实判据，转头自己犯了一遍。正确判据要问「**这个东西作为代码还存在吗**」：`^\\s+backfillSearchMaxRecords = `（常量声明）与 `records > backfillSearchMaxRecords`（编译期引用）各 0。⇒ **写墓碑注释时，注释里的字面量会污染后续所有基于该字面量的检查**。",
+      "coverage_note": "94.0%（主工作区，含 TASK-001/002/003）。⚠️ 与我此前报的 94.0%（仅含我的改动，基线 e0f0715）**数值巧合但不是同一棵树**，别当成同一个数。各轮口径见 verification.coverage。",
+      "collision_check": "合入前在 93be0af 上用一次性 detached worktree 预演过，全绿、包级守卫绿、与 TASK-001/002/003 无符号冲突；预演 worktree 已 remove + prune。"
+    }
+  },
+  "git": {
+    "branch": "task/TASK-004-fix",
+    "head": "ce843924e742926ee3a6ba0639fe13c9949a6c48",
+    "history": [
+      "30dc06f 首交付（已由 62b9243 合入）",
+      "95881e1 返工 FIX-1/2/3（已由 2fd7b58 合入）",
+      "fceb572 非空验证 35/0（**未单独合入**，是 ce84392 的祖先）",
+      "ce84392 Q2/Q3 裁决"
+    ],
+    "base": "62b9243",
+    "note": "请三方合并 ce84392，**别让我 rebase**（会作废各轮已做完的变异与背对背核实）。它含 fceb572 那 35 行，一并解决。"
+  },
+  "open_items_for_leader": [
+    "**翻页循环的归属**：design-spec §1 把「翻页」划给 backfill_search.go，我按 DoD functional[3]（「总页数供调用方决定翻到第几页」）把循环留给了 TASK-005/006。这是我的解读，不是漏做 —— 要收进本文件说一声即可。",
+    "**testdata/README.md 归 TASK-007 的 writes，我没碰**。请它登记本样本：pboc-search-p1.html / 2026-08-14 抓 / 源 URL 见 backfill_search.go 头部与任务描述 / 入库 32372 字节（原始响应 32405 含 33 个 CR）/ 12 条 = 6 对两栏目重复 / total-records 137、total-pages 12。",
+    "**给 TASK-005 的预期值**：搜索侧 `社会融资规模存量统计数据报告` 全区间 137 条，筛掉调统司那半后约 69 条候选；ADR-M1c1-01 记的「理论 158 条、差 21 条」是**筛前**口径，两侧对账时别把口径混了。"
+  ],
+  "rework": {
+    "round": 1,
+    "reason_class": "dod_defect",
+    "why": "DoD boundary[1] 的**前提**是 Leader 写错的，不是实现问题：原判据「总条数 > 5000 ⇒ advtime 失效」对它自己命名的失效场景**实测不会触发**。",
+    "fix_items_delivered": {
+      "FIX-1": "日期过滤失效改判**性质**：checkBackfillSearchDateRange 断言每条 Published 落在 [from,to] **闭区间**内，越界即报错。判性质不判数量 ⇒ 不依赖任何实测量级、不随语料增长失效。",
+      "FIX-2": "backfillSearchCheckCount 判本页条数自洽：与站点自报 total-records + 页容量比（日常检测层）、与页内结构标记数比（另一条依赖路径）。",
+      "FIX-3": "q vs qAll 倍数按**严格单变量对照**订正为 2.0–2.5×（title+日期窗口 137 vs 276、title 无日期 240 vs 610）。原「25×」同时动了三个变量。已同步到实现与测试**两个**文件。"
+    },
+    "leader_rulings_2026_08_14": {
+      "Q2_删除总条数上界": {
+        "ruling": "**删除** backfillSearchMaxRecords（连同 TestParseBackfillSearchPageRejectsAbsurdTotal / TestParseBackfillSearchPageAcceptsLargestMeasuredTotal 两条用例）",
+        "rationale": "三层：① 无任何已知触发场景（实测：advtime 失效 → 240/1136 条，远低于 5000，由日期守卫认；空查询 → HTTP 200 + 16KB 空壳、default-result-* 字段整个不存在，由计数字段缺失守卫认）；② **它是有害的** —— 留着隐含「上界须 > 1136」的约束，而站点内容每月在长，撞上那天它会抢在日期守卫之前报出**方向错误**的错误；③ 它占着「量级守卫」的位置，让后来者以为量级异常已防住（『一个已验证的假象比一个未验证的空白更糟 —— 空白会被人填，假象不会』）。",
+        "🔴 对验证者": "**DoD `boundary[1]` 的字面表述（「总条数骤增到全站量级 ⇒ 报错」）自此没有对应实现，这是显式裁决不是遗漏。** 取代它的是 FIX-1 的 checkBackfillSearchDateRange。此事已同时写在 backfill_search.go 的常量段注释与 backfill_search_test.go 中段那条「对验证者」的说明里。"
+      },
+      "Q3_保留结构标记守卫": {
+        "ruling": "**保留**那 4 行，但把注释里的理由**换掉**",
+        "rejected_rationale": "「错误文案对 final-report 读者有用」—— leader 判定诊断文案不值一道守卫，我接受。",
+        "leader_rationale_as_given": "「不依赖 backfillSearchPageSize 常量 ⇒ 站点改每页条数时检测层整条静默失效，而它照常工作」",
+        "⚠️ 我实测后对该理由的订正": "**「整条检测静默失效」不成立**。实验（每页 12→15、records=30/pages=2、第 1 页 15 条）：(A) 页完好时检测层**误报**「15 items but expected 12 … results are being dropped」；(B) 页里真有一条缺日期时**结构标记守卫**先报「parsed 14 items from 15 result blocks: an item likely lacks its date」。⇒ 常量过期时**两种情况都会报错**，没有任何东西是静默的。**真正成立的理由**：B 仍可与 A **区分**。删掉标记守卫，B 会退化成 A 那句关于页容量的话 ⇒ 一个**真实**的丢条会被误判成「站点改了每页条数」这种已知无害的噪音而被打发掉。**防的是误归因，不是多一道检测。** 代码与测试注释均按此写，未采用 leader 的原措辞。"
+      }
+    }
+  }
+}

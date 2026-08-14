@@ -1,0 +1,140 @@
+{
+  "task": "TASK-002",
+  "title": "index 侧：翻页与按日期停止",
+  "by": "dev-agent-55",
+  "commit": "d4b48661d40abfaefefd4fe63a6023640e2699d7（FIX-A 返工；原交付 8322023 已合入 master 并 verified 过 8/8）",
+  "branch": "task/TASK-002-fix",
+  "base": "master c661e453920182c04e4f5e7f3d56932c8675f042",
+  "key_findings": [
+    "🔴 **DoD 的 boundary[0] 与 boundary[2] 合起来唯一确定了一个不在任何一条里明说的语义**：判停是**页级**的、过滤是**条目级**的，两件事。判停那一页横跨 From ⇒ 页上既有 ≥From 也有 <From 的报告；boundary[0] 要求 ≥From 的必须留下，而 boundary[2]（From 比最新一期还新 ⇒ 返回**空**）要求 <From 的必须滤掉——只做页级判停时第 1 页的报告会被原样带回，boundary[2] 当场不成立。我最初判「不做条目级过滤」，是先写的测试把它证伪的（TestScanBackfillIndexFromNewerThanEverything 红）。⇒ 单独读任何一条 DoD 都推不出这个语义，两条一起读才能。",
+    "**「翻完站点 totalPages」与「翻满 MaxPages」必须是两个出口**，DoD 只规定了后者。合并成报错的话，totalPages < MaxPages 的小栏目（或 From 早于站点最早一篇）会在**已经看完全部页面**的情况下失败；合并成放行的话 MaxPages 那条兜底就没人守着。这与 discover.go 已有的 StopExhausted / StopMaxPages 是同一个区分，不是新发明。两条各由 N6/N7 两个变异守着，且互为对方的阴性对照。",
+    "**第 1 页与中途某页是两条不同的抓取路径**（第 1 页在循环外取、要先喂给 parsePaging），我最初只测了中途那条。是**覆盖率**把它报出来的（scanBackfillIndex 90.9%，四个未覆盖块之一正是 DoD 明写的「index 页抓取失败 ⇒ 原样返回错误」）。⇒ 覆盖率在这里不是指标，是**漏测清单**。",
+    "**相邻页连续性判据必须是 `>=` 不是 `>`**：实测 41 对相邻页 41/41 成立，其中 **19 对取等号**（同日发布被页边界劈开，占 46%）。写成 `>` 会把近一半的正常翻页判成错误——变异 N4 实测确认「同日跨页」那条子测试是唯一守着它的。而它与「跳页 ⇒ 报错」（N5）是**互补的一对**：只留其中一条，另一个方向的错法就没人守。",
+    "**日期比较用字典序，不转 time.Time**：Published 已被 TASK-001 的 backfillItemRE 钉成 `\\d{4}-\\d{2}-\\d{2}`，ISO-8601 定长形态下字典序与时序等价，且避开时区与解析失败两种新的失败模式。cfg.From 仍用 time.Time（与 TASK-004 的 backfillSearchURL 边界类型一致），进函数后 Format 一次。",
+    "**每页日期区间取整页 max/min，不取首末条**：真实语料确实倒序，但那是观测值不是契约，而连续性守卫的正确性直接依赖这两个数的定义。变异 N9（改成取首末条）只被 TestScanBackfillIndexRecordsPageDateRange 杀掉——那条用了**刻意乱序**的合成页；顺序正常的页面上两种实现结果相同，真实语料对它无守卫。"
+  ],
+  "decisions": [
+    {
+      "decision": "结果里带 `Pages []backfillIndexPage{Page,URL,HTML,Newest,Oldest}`，不只交报告清单",
+      "rationale": "design-spec §7.3 要求 index 页也落盘（同样不可再生），而设计附录 §A3 规定快照落名 `<抓取序号>-<该页最新条目日期>_<该页最老条目日期>.html`——**页码不能作唯一键**（页码随新文章上架漂移，重跑时同名文件会对应不同内容的页）。这两个日期**只有翻页循环知道**。不交出去的话 TASK-006 要么把约 150 页重抓一遍，要么把这个循环重写一遍。"
+    },
+    {
+      "decision": "全部标识符非导出（scanBackfillIndex / backfillIndexCfg / backfillScanResult / backfillIndexPage / backfillDateRange）",
+      "rationale": "store_test.go 的 TestPackageExposesNoWriteFunctions 用 AST 扫包内非测试文件，断言导出 FuncDecl 集合恰好等于一份写死名单，而该文件本 sprint 唯一持有者是 TASK-006。调用方（TASK-005/006）都在同包内，本来就不需要导出。**类型也没导出**——守卫只看 FuncDecl，但同包调用同样用不着。"
+    },
+    {
+      "decision": "MaxPages <= 0 时回落到常量 backfillMaxPages(200)，不是「一页都不翻」",
+      "rationale": "`for page := 1; page <= cfg.MaxPages` 在零值下循环体一次都不执行 ⇒ 返回空 + nil error，与「今天没有要抓的」在调用方看来完全一样。这正是本 sprint 反复在防的静默零。不在 DoD 里，是我加的；由 TestScanBackfillIndexZeroMaxPagesUsesDefault 与变异 N10 守着。"
+    },
+    {
+      "decision": "index 页抓取失败 / 中途某页版式失效 / 分页模板拼不出合法 URL —— 三者一律立刻中止返回错误",
+      "rationale": "与「单篇文章抓取失败记 failed 并继续」（TASK-006）**处置相反，是刻意的**：少一页 index = 静默少约 15 条候选，与「整页 0 条」等价危害。抓取错误**原样返回**（不包装），与 discover.go 的 Discover 同处置，测试用 errors.Is 断言哨兵一路通到底。"
+    },
+    {
+      "decision": "复用 parsePaging / pageURL / resolveURL / Fetcher，不新写",
+      "rationale": "discover.go 的注释已论证过 pageURL 为什么第 1 页不套模板（不重复请求 + 不制造别名）、parsePaging 为什么解析失败必须报错（退化成只扫第 1 页 ⇒ 月报发布 3 周后必然掉出去）。⚠️ 但**复用不等于该分支被覆盖**：backfill 路径有自己的 parsePaging 失败用例。"
+    },
+    {
+      "decision": "code-simplifier 把 backfillDateRange 改用 Go 内置 min/max（go.mod 是 go 1.24.4）",
+      "rationale": "语义等价、更短。⚠️ 这是**最后一次改动**，所以全部变异与覆盖率数字都在它之后**统一重采**了一遍（见 verification.mutation.anchor）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_scan.go（+203 行，追加 TASK-002 段；TASK-001 段一字未改）",
+    "internal/hestia/backfill_scan_test.go（+447 行，11 个测试函数；TASK-001 的 9 个测试函数逐字未改，已 diff 核实）"
+  ],
+  "interfaces_exposed": {
+    "note": "均在 package hestia 内、未导出。TASK-005（交叉校验）与 TASK-006（抓取）同包，直接调用即可。",
+    "types": [
+      "type backfillIndexCfg struct { IndexURL string; From time.Time; MaxPages int }  // MaxPages<=0 时回落 backfillMaxPages(200); From 语义是**发布日期**不是期次(附录 A1)",
+      "type backfillIndexPage struct { Page int; URL string; HTML []byte; Newest string; Oldest string }  // Newest/Oldest 是该页条目日期的 max/min，YYYY-MM-DD",
+      "type backfillScanResult struct { Reports []backfillItem; Pages []backfillIndexPage }  // Reports 已去重、已按 >=From 过滤、按发现顺序(新→旧); Pages 含判停那一页"
+    ],
+    "funcs": [
+      "func scanBackfillIndex(ctx context.Context, f Fetcher, cfg backfillIndexCfg) (backfillScanResult, error)",
+      "func backfillDateRange(items []backfillItem) (newest, oldest string)  // 取整页 max/min，调用方保证 items 非空"
+    ],
+    "consts": [
+      "const backfillMaxPages = 200   // 兜底上限，**不是正常出口**：翻满它报错",
+      "const backfillDateLayout = \"2006-01-02\""
+    ],
+    "test_helpers": [
+      "func backfillIndexPageHTML(totalPages int, items ...string) []byte  // 带分页控件的合成 index 页",
+      "func backfillIndexURL(n int) string  // 合成站点第 n 页 URL；n<=1 返回 testIndexURL 本身",
+      "func backfillSite(totalPages int, pages ...[]string) *fakeFetcher",
+      "func backfillItemsOn(idPrefix string, dates ...string) []string  // 造若干**非报告**条目",
+      "func backfillReportItem(id, title, date string) string",
+      "func backfillDate(t *testing.T, s string) time.Time",
+      "func backfillReportTitles(res backfillScanResult) []string"
+    ],
+    "caller_contract": [
+      "**Reports 已经按 >=cfg.From 过滤过**，调用方不需要再滤一遍；判停页上早于 From 的报告不会漏进来（否则 TASK-008 的逐期对账会报一条假的「缺篇」）。",
+      "**Reports 已按 article_id 去重**，跨页边界的重复只出现一次。",
+      "**Pages 含判停那一页**，且每页都带原始 HTML —— TASK-006 落盘 index 快照时直接用，不要重抓。",
+      "错误一律是**硬失败**：抓取失败、版式失效、翻满 MaxPages、相邻页跳页，四种都返回 (零值, err)，没有「部分成功」这种返回形态。调用方拿到 err 就该中止，不要当成「这次没抓到」继续。",
+      "本函数**不碰磁盘、不解析期次、不做交叉校验**。交叉校验是 TASK-005，落盘与限速是 TASK-006。"
+    ]
+  },
+  "verification": {
+    "anchor": "全部数字采自 FIX-A 返工后的同一棵树：task/TASK-002-fix @ d4b48661d40abfaefefd4fe63a6023640e2699d7（工作树干净），基线 master c661e45",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；-v 计数 PASS(含子测试)=761 / FAIL=0 / SKIP=0",
+    "own_tests": "本任务测试函数 12 个（原 11 + 返工新增的盲区用例）",
+    "gofmt": "gofmt -l internal/hestia/ → 空",
+    "vet": "go vet ./internal/hestia/ → 空",
+    "coverage": "背对背同一时刻采样：pre = master c661e45 1122/1193 = 94.049%；post = d4b4866 **同为 1122/1193 = 94.049%**（+0.000pp）—— 新用例走的是已覆盖路径，不降不升。scanBackfillPage / backfillDateRange / scanBackfillIndex 仍全部 100% 语句覆盖。",
+    "numstat": "git show --numstat HEAD = 25/10 + 62/11（有删除行，因为是改注释而非纯追加）",
+    "no_regression_on_task001": "diff 核实：backfill_scan_test.go 前 352 行（TASK-001 段）除我加的两行 import(context/time) 外与 master 逐字一致；TASK-001 的 9 个测试函数一个没动。",
+    "export_guard": "go test -run TestPackageExposesNoWriteFunctions → ok（本任务未新增任何导出 FuncDecl）",
+    "mutation": {
+      "anchor": "**返工后统一重跑**。被变异文件 sha256 = 5872e86af988303f7561a578e89577a0d2023edda0c82f6989a4f277a58bb23c，与交付的 backfill_scan.go 一致；隔离副本是 master c661e45 的 detached worktree，跑完已 remove；主 worktree 指纹全程未变。",
+      "gates": "语法闸(gofmt -e) + 语义闸(逐条打印 diff 核对) + 编译闸(build failed 不计 KILLED) + 每窗口校验主 worktree 两份源文件 sha256 未变(全程一致)",
+      "result": "**12 个变异全部 KILLED，0 存活，0 无效**（N1–N10 原样重跑 + 新增 N11）",
+      "detail": [
+        "N1  判停改成扫描前 break（整页丢弃）→ 7 红，含 ScansStopPageBeforeBreaking",
+        "N1b **外科版**：判停页照记、只是页上报告不收 → **仅 ScansStopPageBeforeBreaking 红** ⇒ 把 N1 的连带影响剥开后，因果是干净的",
+        "N2  取消条目级 from 过滤 → FromNewerThanEverything + ScansStopPageBeforeBreaking 红（正是那两条 DoD）",
+        "N3  取消跨页去重 → 仅 DedupesAcrossPages 红",
+        "N4  连续性判据 > 改 >= → 仅『同日跨页』相关红 ⇒ 46% 那个实测数字有守卫",
+        "N5  删掉连续性守卫 → 仅『跳页』相关红 ⇒ 与 N4 互为阴性对照",
+        "N6  翻满 MaxPages 静默返回部分结果 → 仅 ErrorsWhenMaxPagesRunOut 红",
+        "N7  『翻完站点』与『翻满上限』合并 → 仅 ExhaustedSiteIsNotAnError 红 ⇒ 与 N6 互补",
+        "N8  第 1 页重复请求 → 9 红，含 DoesNotRefetchFirstPage",
+        "N9  日期区间取首末条 → 仅 RecordsPageDateRange 红（该用例的合成页刻意乱序）",
+        "N10 MaxPages<=0 不兜底 → 仅 ZeroMaxPagesUsesDefault 红",
+        "N11 让守卫也抓跳页 → SkipIsInvisibleToContinuityGuard 红（因果已隔离核实），另连带 10 条"
+      ],
+      "earlier_invalid_variants": "首轮有两个变异体编译失败（missing return / declared and not used），被编译闸拦下、**未计 KILLED**，改写后成为本批的 N6/N7。首轮 N9 的 perl 模式在 code-simplifier 改用内置 min/max 后失配，本批已按新代码改写——这也是为什么整批要在最后一次改动之后重跑，而不是沿用先前的结果。",
+      "n11": "N11：把守卫改成 `newest != prevOldest`（即也去抓跳页）⇒ 新增的盲区用例转红。⚠️ 该变异**很粗**，同时打红 11 条测试 —— 聚合信号不携带因果，故隔离单跑读了失败原因：失败发生在那条 require.NoError 上，报的正是 delta=+5 的跳页场景 ⇒ 因果正确。但它**不是**唯一被杀的，本变异集里没有更外科的写法（合成页的正常 delta 也有 +42 的，任何阈值型跳页检测都会连带打红别的用例）。"
+    },
+    "stats_tooling": "统计一律用 python3 / awk / grep -c，**未使用裸 sort -u / uniq**"
+  },
+  "notes_for_downstream": [
+    "TASK-005（交叉校验）：index 侧候选集就是 backfillScanResult.Reports（[]backfillItem，字段见 TASK-001 discovery）。它已去重、已按 >=From 过滤，article_id 与搜索侧经栏目前缀筛之后可直接比对（design-spec §5 的前提）。",
+    "TASK-006（抓取）：**别重抓 index 页** —— backfillScanResult.Pages 里每页都带原始 HTML 与 Newest/Oldest，落盘按附录 §A3 的 `<抓取序号>-<Newest>_<Oldest>.html` 命名即可。",
+    "TASK-008（对账）：Reports 不含早于 From 的条目，所以判停页不会给你送来一个残缺期次；但 From 按**发布日期**算，`--from 2020-01` 会正常包含 2019 年度的三篇（实测发布于 2020-01-16，附录 A1）。",
+    "本任务的 packages/writes 声明与实际写入完全一致，无越界文件。"
+  ],
+  "rework": {
+    "round": 1,
+    "reason_class": "dod_defect",
+    "fix_item": "FIX-A —— boundary[3] 守卫的注释与错误文案声称「抓跳页」，而守卫方向与该失效相反",
+    "not_an_implementation_defect": "判据逻辑一行未改。git diff master 里 backfill_scan.go 的非注释改动只有一行错误文案。三批独立快照实测 0 反例，判据本身成立。",
+    "mechanism_verified_by_me": "我构造了一个「下架 ⇒ 前移 ⇒ 跳页」的合成站点直接观察（非推理）：err=nil、p1.oldest=2020-03-20 >= p2.newest=2020-03-15（delta=+5）⇒ 守卫沉默，被跳过那篇从未进入任何一页。验证者的断言成立。",
+    "p151_recheck": "用我自抓的 p151 快照独立复核：15 条 / 2019-12-25..2020-01-14 / 7 条 ≥2020-01-01 / 0 条目标报告 —— 三项全对，DoD 与旧注释写的上界 2020-01-09 是笔误。",
+    "items_done": [
+      "注释改为「检测列表前移（新文上架）导致的重复」，写明下架跳页抓不到",
+      "错误文案 a page range was skipped → entries may repeat across pages",
+      "注释指明跳页检测归 TASK-008 完整性对账",
+      "子用例「跳页」改名「列表下移」，与实际构造的场景一致",
+      "p151 笔误订正（两处 prose）",
+      "删掉「实测 41 对 41/41 成立」——那个数无人验过（reviewer → DoD → 注释三层传播）"
+    ],
+    "test_added": "TestScanBackfillIndexSkipIsInvisibleToContinuityGuard —— 把「守卫抓不到跳页」从注释里的声称变成可执行断言（超出 fix_items，已请 leader 确认保留）"
+  },
+  "open_question_for_leader": {
+    "title": "这个守卫从不在有数据丢失时触发 —— 定性该换，但我没擅自改",
+    "finding": "净插入 ⇒ 条目重复（seen 去重吃掉）⇒ 无数据丢失，而守卫**触发**；净下架 ⇒ 整段被略过 ⇒ 有数据丢失，而守卫**沉默**。按「防数据丢失」读，真阳性率为 0。",
+    "my_proposal": "它不是跳页检测器，是 **churn 检测器**：触发 ⇒ 那两页之间发生了净插入 ⇒ 列表正在翻页期间变动 ⇒ 别的页边界可能是净下架（有丢失）。硬失败读作「列表在我们脚下动了，这份 manifest 混了时间点，重跑」。验证者实测「约 7 分钟上架 1 篇 vs 回填 3.6 秒/页」量化了它：churn 罕见，硬失败不会烦人。",
+    "why_not_written_into_comment": "这是我的推理、没有独立验证 —— 正是本 sprint 反复出问题的那类东西。交 leader 裁决：认可则我加一句注释；想先验则交 test-agent-27 构造 churn 场景；若判定降级成告警，请作为**独立决定**记录，别再挂在已被证伪的「抓跳页」理由上。"
+  }
+}

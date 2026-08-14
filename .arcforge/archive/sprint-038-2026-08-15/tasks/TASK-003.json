@@ -1,0 +1,50 @@
+{
+  "id": "TASK-003",
+  "title": "manifest 的类型、逐篇追加落盘与「已抓」判据",
+  "description": "实现 `.arcforge/docs/01-design/design-spec.md` 的 **§6（manifest）**。纯 I/O，与扫描/抓取都不耦合，可与 TASK-001/004 并行。\n\nJSON 形状照 §6 那段示例，`json` tag 逐字一致（下游 M1c-2/-3 会读它）。\n\n⚠️ 本任务**不需要**新增 testdata 样本，全部用 `t.TempDir()`。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_manifest.go",
+    "./internal/hestia/backfill_manifest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`Manifest` / `Article` / `Failed` 三个类型按 `.arcforge/docs/01-design/design-spec.md` §6 的 JSON 形状定义，`json` tag 与文档**逐字一致**（含 `only_in_index` / `only_in_search` / `search_pages_scanned` / `source` 这几个本 sprint 新增的字段）。写出再读回，字段全等（往返测试）。",
+      "**逐篇追加落盘**：追加一篇后**立刻**把整份 manifest 写到磁盘，不是攒到最后写。断言方式：连续追加两篇，**中途直接读文件**（不调用任何 Flush/Close），两条都在。理由：400+ 次请求中途断掉（网络、Ctrl-C）不该让前面的白抓——这是断点续抓的前提。",
+      "`sha256` 字段是文章 HTML 内容的 sha256 **十六进制小写**。用一段已知内容断言**具体的期望值**（别写成「长度是 64」——那样改错算法照样绿）。",
+      "**「已抓」判据 = `id` 在 `articles` 里 **且** 对应的 `file` 在磁盘上存在**。两个条件缺一不可，各写一条断言：只查 manifest ⇒ 文件被删后会跳过重抓（下游拿到不存在的路径）；只查文件 ⇒ manifest 丢失后会重复记录同一篇。"
+    ],
+    "boundary": [
+      "manifest 文件**不存在** ⇒ 返回空 `Manifest` + nil error（首跑的正常路径，不是错误）。",
+      "manifest 文件存在但**内容不是合法 JSON ⇒ 报错**，**不静默当空**。理由：静默当空会让断点续抓退化成**全量重抓 400 次请求，而且不报错**——这正是本 sprint 反复在防的那类静默失效。"
+    ],
+    "error_handling": [
+      "落盘失败（目标目录不可写）⇒ 返回错误，**且不破坏既有 manifest**：用**原子写**（写临时文件再 `rename`）。断言方式：先写一份好的，再让下一次写失败，断言磁盘上那份**仍是**之前的完整内容（不是截断的、也不是空的）。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、`go test ./internal/hestia/ -count=1` 全绿，且不降低既有覆盖率。"
+    ]
+  },
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-56",
+  "verify_baseline": {
+    "head": "62b924300415fb109e7355aea0785b4c1ab4903b",
+    "discovery_sha256": "8172a39ec104ad5888540acbdecb27b7fb810acbb0f130b5895773dfca749486",
+    "at": "2026-08-14T09:15:56Z"
+  },
+  "verifier": "test-agent-27",
+  "discovery": ".arcforge/discoveries/TASK-003.json"
+}

@@ -1,0 +1,92 @@
+{
+  "id": "TASK-004",
+  "title": "搜索侧：wzdig 查询构造、结果解析与栏目前缀筛",
+  "description": "实现 `.arcforge/docs/01-design/design-spec.md` 的 **§4（搜索侧扫描）**。这是本 sprint **在上游 spec 之外新增**的一条路径，立项理由见 `.arcforge/docs/01-design/architecture-decisions.md` 的 **ADR-M1c1-01**：站内搜索比翻 index 精确（82 页 vs 150 页），但实测它自己有一处 21 条的不自洽（2020 全年 24 条完美齐全，全区间 137 条 vs 理论 158 条），**搜索漏了搜索自己不会说** ⇒ 它做交叉校验的第二来源，不做主路径。\n\n⚠️ **本任务要新增一份进 git 的搜索结果样本** `internal/hestia/testdata/pboc-search-p1.html`，自己抓（下面这条 URL 实测 2026-08-14 有效，`\\u0026` 是 shell 里的 `&`，注意整条加引号）：\n```\ncurl -A 'Mozilla/5.0' -o internal/hestia/testdata/pboc-search-p1.html \\\n  'https://wzdig.pbc.gov.cn/search/pcRender?pageId=c177a85bd02b4114bebebd210809f691&advSearch=true&searchArea=title&sr=dateTime%20desc&pNo=1&advtime=5&startTime=2020-01-01&endTime=2026-08-14&qAll=%E7%A4%BE%E4%BC%9A%E8%9E%8D%E8%B5%84%E8%A7%84%E6%A8%A1%E5%AD%98%E9%87%8F%E7%BB%9F%E8%AE%A1%E6%95%B0%E6%8D%AE%E6%8A%A5%E5%91%8A'\n```\n抓完**先自己看一眼**它含不含 `/diaochatongjisi/` 那份重复（DoD functional[2] 要用），不含就换个关键词或页码再抓。\n\n⚠️ 本层**只解析、不决定降级**：HTTP 错误原样往上抛，降级是 TASK-005 调用方的事。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_search.go",
+    "./internal/hestia/backfill_search_test.go",
+    "./internal/hestia/testdata/pboc-search-p1.html"
+  ],
+  "done_criteria": {
+    "functional": [
+      "查询 URL 构造函数产出的 URL **逐参数**断言含全部实测参数：`pageId=c177a85bd02b4114bebebd210809f691`、`advSearch=true`、`searchArea=title`、`sr=dateTime desc`、`qAll=<关键词>`、`advtime=5`、`startTime=YYYY-MM-DD`、`endTime=YYYY-MM-DD`、`pNo=<页码>`，且中文关键词**正确 URL 编码**。\n\n⚠️ 用 `qAll`（AND 语义）**不是** `q`（分词 OR）：实测同一关键词 `q`=1324 条 / `qAll`=24 条，差 25 倍。`advepq`/`adveq` 单用等于空查询（返回全站 549141 条），别用。",
+      "结果解析：在 `testdata/pboc-search-p1.html` 上取到每条的**绝对 URL、标题、发布日期**三样。标题必须**剥掉 `<font color='#FF0000'>` 高亮标签**（复用包内既有 `tagRE`）——断言某条标题**逐字**等于剥净后的期望值，并断言它**不含** `<`。",
+      "**只保留 `/goutongjiaoliu/113456/113469/` 前缀的结果**。实测同一篇报告在两个栏目各有一份，调查统计司那份形如 `/diaochatongjisi/116219/116225/<32位hex>/index.html`，其 article_id 是 **32 位 hex**、与 index 侧口径不同 ⇒ 必须丢弃，否则 TASK-005 的交叉校验没法按 article_id 比对。断言：样本里某个标题出现两次，筛后只剩一条，**且保留的是 goutongjiaoliu 那条**。",
+      "总页数从 `id=\"default-result-total-pages\" value=\"(\\d+)\"` 解析出来，供调用方决定翻到第几页。"
+    ],
+    "boundary": [
+      "**0 条结果 ⇒ 报错**。检索服务改版同样是静默失效，与 index 侧「某页 0 条 ⇒ 报错」同则。",
+      "**总条数骤增到全站量级 ⇒ 报错**，错误信息指向「`advtime` 过滤可能已失效」。理由：`advtime=5`（自定义时间范围）**是前端已注释掉、后端仍接受的未公开参数**（实测 2026-08-14 有效）。它哪天失效时返回的是全站量级（实测 549141 条），而**那种结果看起来完全正常，只是多得多** ⇒ 必须有个上界把它变成显式错误。阈值自己定并在注释里写清依据（实测单关键词全区间最大 692 条）。"
+    ],
+    "error_handling": [
+      "`Fetcher` 返回错误 / HTTP 非 200 ⇒ **原样返回错误，本层不吞不降级**。降级（跳过交叉校验、打 WARN、主路径照常完成）是 TASK-005 调用方的职责——见 `.arcforge/docs/01-design/architecture-decisions.md` 的 ADR-M1c1-02。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、`go test ./internal/hestia/ -count=1` 全绿，且不降低既有覆盖率。"
+    ]
+  },
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 1,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-57",
+  "verify_baseline": {
+    "head": "c661e453920182c04e4f5e7f3d56932c8675f042",
+    "discovery_sha256": "d1fdb375c8937b3578c7cf6116a43908c8940aeaf900a503788bd61674b3177a",
+    "at": "2026-08-14T10:23:39Z"
+  },
+  "verifier": "test-agent-28",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "fix_items": [
+    {
+      "id": "FIX-1",
+      "severity": "critical",
+      "title": "boundary[1] 的守卫改为「每条 Published 落在 [from,to] 内」，不再看总条数量级",
+      "why": "DoD 的**前提是 Leader 写错的**，不是你的实现问题——你照 DoD 做了且做对了（两端用例齐全）。\n错在我把「空查询返回全站 549141」当成了「advtime 失效的量级」，那是**两个不同的失效模式**。\ntest-agent-28 实测、我逐条复现（四个数字逐字相符）：\n  advtime 被丢弃      → 240 条\n  advtime=0           → 240 条\n  金融统计数据报告无日期 → 1136 条（三关键词最大值）\n⇒ 距 5000 上界差 4.4 倍，**这个守卫永远不会因 advtime 失效而触发**，而它的错误文本恰恰写着「advtime 日期过滤可能已失效」。\n549141 是**无关键词空查询**的值，那种失效连 total-records 字段都取不到，由另一条守卫拦下。\n⇒ 留着它比没有更糟：它给人「已经防住了」的错觉。",
+      "how": "在 `fetchBackfillSearchPage`（它知道 from/to）加断言：**解析出的每条 `Published` 都必须落在 `[from, to]` 内**，越界即报错并指明是日期过滤失效。\n这个判据检测的是**结果的性质**而不是**结果的数量** ⇒ 与语料规模无关，对上面两种失效都立即触发。\n原来那条量级上界**可以保留**（它对「空查询」那类失效仍有意义），但错误文案要改成不再指认 advtime。\n用例：喂一份含越界日期条目的样本，断言报错。"
+    },
+    {
+      "id": "FIX-2",
+      "severity": "medium",
+      "title": "补一条「本页解析条数与页容量/total-records 一致」的守卫",
+      "why": "test-agent-28 做了最小复现：某条目**缺日期**时，结果正则会**静默错配并丢条**——2 条只匹配出 1 条，且那条是「A 的 URL/标题 + **B 的日期**」，B 整条消失，**全程无错误**。\n「0 条 ⇒ 报错」看不见这种**部分**丢失。\n⇒ 这与 TASK-001 的 `boundary[2]`（匹配数必须等于 `istitle=\"true\"` 计数）是**同一族守卫**，index 侧有、搜索侧缺。而「部分失效」正是本 sprint 认定的「manifest 少几十期」的最可能成因。",
+      "how": "解析后断言本页条数与页容量/`total-records` 自洽（非末页应为满页；末页 = total-records % 页容量）。\n用例：喂一份缺日期条目的样本，断言报错而不是静默少一条。"
+    },
+    {
+      "id": "FIX-3",
+      "severity": "low",
+      "title": "订正注释里「q 比 qAll 多 25 倍」的说法",
+      "why": "**也是我的错**。严格单变量对照（我已复现 test-agent-28 的结论）：\n  searchArea=title + 日期窗口：qAll=137 vs q=276  → 2.01×\n  searchArea=title 无日期    ：qAll=240 vs q=610  → 2.54×\n我写的「1324 vs 24 = 25 倍」同时混了**三个变量**（searchArea 默认含正文 / q vs qAll / 有无日期窗口）；1324 是「默认含正文 + q + 无日期」的数字。\n你代码里另一处注释「默认搜正文 1324 vs title 610」**是对的**，实测逐字吻合。",
+      "how": "把倍数改成实测的 2.0–2.5×，并写清对照是单变量的。结论不变（qAll 严格窄于 q）。"
+    }
+  ],
+  "reason_class": "dod_defect",
+  "questions": [
+    {
+      "q": "【阻塞·更新】合并只合了一半：master 2fd7b58 含 95881e1，但**不含 fceb57260f7377cbc54a5f6ce88c0ececfd21a36**（`git merge-base --is-ancestor fceb572 HEAD` → NO；`grep -c DateGuardIsNotVacuousOnRealSample internal/hestia/backfill_search_test.go` → 0）。⚠️ 易看漏：backfill_search.go 在两个 commit 里逐字节相同（fceb572 只动测试文件），只比实现文件 sha256 会误判为已合入。缺的 35 行是 test-agent-28 告警②追加的**非空验证**用例（真实样本每条 Published 须 time.Parse 成功且落在区间内）——不在 master 上时，『日期解析坏掉返回空串导致守卫平凡通过』无人挡。请三方合并 fceb572（merge-base=95881e1，那侧只有 35/0 一行不删，无冲突面）。⚠️ 别被 `git diff --numstat 2fd7b58 fceb572` 显示的 backfill_scan.go 0/203 吓到：那是 diff 不是 merge，我的分支基于 62b9243 没有 TASK-002 那两个文件，三方合并两侧改动都留。已在 2fd7b58 上预演：整包 ok、覆盖率 94.1%、本任务 23 顶层+7 子测试全绿、gofmt/vet 空，预演 worktree 已拆。",
+      "asked_at": "2026-08-14T10:45:00Z",
+      "answer": null
+    },
+    {
+      "q": "【待拍板，不阻塞】backfillSearchMaxRecords（5000 粗上界）留还是删？无任何已知触发场景：advtime 失效实测 240/1136 条（由日期区间守卫认）、空查询实测 HTTP 200+16KB 空壳且 default-result-* 字段整个不存在（由计数字段缺失守卫认）。补充理由（test-agent-28 提出、我认同）：240/1136 本身也只是单次采样，且站点内容每月在长 ⇒ 任何量级阈值都会过期，而日期区间判据不依赖任何实测量级。这加强了『直接删掉』。",
+      "asked_at": "2026-08-14T10:20:00Z",
+      "answer": null
+    },
+    {
+      "q": "【待拍板，不阻塞】FIX-2 里那条『页内结构标记计数』守卫（4 行）留还是删？消融实测它不是独立检测层：短路掉它，缺日期那个输入照样报错（页容量/total-records 守卫接住），测试只在错误文案断言上红。增量是诊断文案更准 + 不依赖 backfillSearchPageSize 常量。我倾向留，注释与用例均已注明它不是第二道防线。",
+      "asked_at": "2026-08-14T10:20:00Z",
+      "answer": null
+    }
+  ]
+}

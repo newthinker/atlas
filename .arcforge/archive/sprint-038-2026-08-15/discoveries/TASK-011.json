@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-011",
+  "title": "交叉校验的「有声跳过」对看终端的人也要成立",
+  "key_findings": [
+    "缺陷的形状值得记：`search_skipped_reason` **确实**按 ADR-M1c1-02 落进了 manifest，机制本身没坏 —— 坏的是**它只对一部分读者成立**。跑命令的人看到的是一份完整的对账报告 + 退出码 0，而**跑命令的人才是当场能重试的那个**。⇒ 「有声」要问清楚**对谁有声**。",
+    "🔴 `only_in_index = []` / `only_in_search = []` 有**两个截然不同的含义**（校验做了且两侧一致 / 校验根本没做过），而**打印出来的形态完全相同**。这是「否定式断言在空集上平凡为真」的**输出侧版本** —— 所以本任务**选择不打印差集**，等于拒绝制造一个新的歧义源。",
+    "两条用例的互补性不是形式要求：`T11-b`（改成**无条件**打印）实测**只红否定式那一格**。⇒ 缺了那一格，一个每次都喊「未生效」的实现在肯定式那格上照样绿 —— 而那等于喊到没人再看它。"
+  ],
+  "decisions": [
+    {
+      "decision": "改 `writeBackfillReconcileReport` 的签名（加 `cc backfillCrossCheck`），而不是在调用点补 `Fprintf`",
+      "rationale": "两者**功能等价**——`cc` 在调用点本就在作用域内（QA 原话「必须改函数签名」不成立，我读载体后订正、Leader 采纳）。选传参是为了让**「报告里有什么」只有一个产出点**：在调用点打印会让报告内容分散两处，改格式的人只会改那个函数、漏掉这几行；想知道「报告长什么样」的人读那个函数会读到一份不完整的答案。⚠️ 这正是本 sprint 反复出账的形状（C-1 孪生实现、`cmp.Or` 解两次）——**为省 3 行再开一个同形的口子不划算**。"
+    },
+    {
+      "decision": "说明排在表头之后、**逐期明细之前**",
+      "rationale": "它是**读下面所有数字的前提**：交叉校验没生效时，`only_in_*` 为空不代表两侧一致，逐期对账也只看得见 index 一侧。排在末尾会让人先读完 80 行明细、形成结论之后才看到「这些数字缺一条来源」。DoD 没规定位置，这是我加的。"
+    },
+    {
+      "decision": "只报「跳过 + 原因」，**不报两个差集**",
+      "rationale": "跳过时差集**必须留空**（宣称「搜索没索到这几篇」是谎报，事实是根本没问过搜索）。在报告里打印一对空数组**既无信息、又容易被读成「校验做了且两侧一致」** —— 恰好是本条要消灭的那个误读。DoD functional[0] 只要求「未生效 + 原因」，没有扩范围。"
+    },
+    {
+      "decision": "断言**标签 + reason 内容**两样，而不只断标签",
+      "rationale": "只断标签时，一个「打印固定标签、丢掉 reason」的实现照样绿 —— **而 reason 才说得出为什么跳过**。⚠️ 这与「肯定式 / 否定式那一对」是**两件事**，不是重复，别当冗余删掉。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_fetch.go (+33/-2)",
+    "internal/hestia/backfill_fetch_test.go (+42/-0)"
+  ],
+  "interfaces_exposed": {
+    "internal_hestia": [
+      "writeBackfillReconcileReport(w io.Writer, rc backfillReconcile, cc backfillCrossCheck)：签名变更，多收一个交叉校验结果",
+      "backfillReconcileSearchSkippedLabel = \"交叉校验未生效:\"：报告里的特征文本"
+    ],
+    "caller_contract": [
+      "新增标签与既有 7 个标签**互不为子串**（本包那条规矩：共享前缀会让 NotContains 类断言恒假，而失败方式是「断言恒假」不是「漏判」）。加新标签前先跑一遍两两包含检查。",
+      "报告里出现「交叉校验未生效:」⇒ 该轮 `only_in_index` / `only_in_search` **不可解释为「两侧一致」**，它们只是留空。",
+      "退出码语义**未变**：搜索侧失败仍 fail-open（`errBackfillDisk` 例外除外）。本任务只增加可见性。"
+    ]
+  },
+  "verification": {
+    "tree": "分支 task/TASK-011 @ 64ac5593e56cdb56984e2c1c4e008fab0f562033（基于 master 853ba696b773c6dc9856cb97ac470559acfb06f5），已合入 master abaca101d54065ba1803b98d19a25558d8692a4f",
+    "suite": "internal/hestia 879 PASS / 0 红；cmd/atlas ok；gofmt -l 空；go vet 两包干净",
+    "gate_actual_output": "转 dev_done 时门禁实际输出：`=== Gate scope (TASK-011) === ./internal/hestia` / `Task scope passes. Coverage: 94.8% (dev_minimum: 80%)`。⚠️ 本任务 coverage_floor 为 null ⇒ 门禁用全局 dev_minimum=80，**它守不了「不低于 TASK-010 基线」这条 DoD**（绝对下限表达不了相对判据）——守它的是下面那对背对背数字。",
+    "coverage": "背对背（两棵树同一时刻并排跑），**NumStmt 加权口径**：internal/hestia 94.802%(1368/1443) → **94.810%**(1370/1445)，下限 94.802 ✅；两包合并 85.515%(2391/2796) → **85.525%**(2393/2798)，下限 85.515 ✅。⚠️ 用加权口径而非 `go tool cover -func`，因为**加权不依赖源码树** —— 后者在错误的树里渲染会给出假数字（TASK-010 我踩过一次，同一份 profile 报出 94.4% 而实为 94.802%）。",
+    "mutation": "隔离 detached worktree，三道闸（gofmt -e / 打印 diff / go build）。基线 879 PASS / 0 红。两条**各自只红一条**，正是 DoD 要的「且只红它」：T11-a 删掉那几行输出 ⇒ 红 1（TestRunBackfillReportsSearchSkipped）；T11-b 改成无条件打印 ⇒ 红 1（TestRunBackfillOmitsSearchSkippedWhenSearchWorks）。脚本 scratchpad/dev55-ablate-t011.py（零参数可跑，ARCFORGE_MUT_REF 可覆写）。",
+    "label_disjointness": "8 个报告标签两两包含检查：**无任何一对互为子串**（脚本化跑过，不是目测）。",
+    "scope": "改动 2 个文件 = 声明的 2 项 writes，无越界。numstat 取自交付提交本身：backfill_fetch.go +33/-2、backfill_fetch_test.go +42/-0。"
+  },
+  "self_reported_errors": [
+    "**harness 锚点被二次转义**：第一版消融脚本由 python 拼接生成，锚点里的反斜杠 n 被二次解释成真换行 ⇒ 匹配 0 次。**有效性闸当场报 `FAIL 锚点出现 0 次`，没有打印任何假 KILLED。** 改成 raw 三引号写死、不再由脚本拼接。",
+    "**docstring 提前闭合**：改写时在文档字符串里写了三引号 ⇒ SyntaxError。同样是**响的失败**。",
+    "⇒ 两次都没有污染结论。与本 sprint 那次「语义闸打印了 diff 却没读」正好成对：**同一类闸，执行者是人时失效，执行者是机器时生效** —— 把锚点从『人读 diff 核对』挪到『机器精确匹配』是同一个方向的改进。",
+    "**流程上的半条错**：我做对了「请对方推进状态之前先查自己手上还有什么要落盘」，却**漏了另一半** —— 请求发出之后我把自己留在 `in_progress` 等，而那个状态在真相源里显示成「dev 正在开发」，实际是「卡在 Leader 那里」。idle hook 第二次催我做被禁动作时才按机械触发条件转了 `blocked_clarification`。⇒ 补齐成一句：**发请求之前查自己手上的事，发请求之后把自己的状态改成实话。**"
+  ],
+  "notes_for_downstream": [
+    "M1c-2 读报告时：出现「交叉校验未生效:」那一行 ⇒ 该轮两个差集为空**不构成**「两侧一致」的证据。",
+    "已产出的 ~/hestia-backfill-2026-08-14/ 产物早于本任务，其报告不含这一行（那趟搜索侧正常，本来也不该有）。"
+  ]
+}

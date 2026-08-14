@@ -1,0 +1,65 @@
+{
+  "id": "TASK-010",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "QA 返工：七处守卫加固 + 三处契约订正 + manifest 完成标记",
+  "description": "## 来源\n\nQA 两轮审查（`qa-m1c1`，审查对象树 `768064f`）判 **REJECT**，产出三份报告：\n`.arcforge/docs/05-review/{code-review-round1,adversarial-review,qa-verdict}.md`。\n**逐项修法与量级见 `adversarial-review.md` 的 §6 处置建议表**，本任务的 DoD 与它一一对应。\n\n🔴 **REJECT 的是守卫与契约，不是交付物。** `~/hestia-backfill-2026-08-14/` 经 QA 全量复核合格、**不需重抓**（218/218 sha256 逐篇一致、与 151 页 index + 82 页 search 快照双向闭合、80 期 0 未归类 0 缺篇、`manifest.title` 与文件内 `<title>` 218/218 逐字相同、两个差集为 0 且**非空集平凡为真**）。\n\n## ⚠️ 这批缺陷的共同形状 —— 开工前先读这段\n\n> **九份 DoD 逐条验证全部通过，而这八条一条都没被任何 DoD 问到。**\n> 它们是 **DoD 覆盖不到的空白**，不是 DoD 有缺陷（故 `reason_class=task_defect` 而非 `dod_defect`）。\n\n具体地说，本 sprint 的 DoD 体系问的是「**这条断言有没有承重消融**」，**没有任何一条问「这个守卫装在生产路径上吗」「这个出口检查过它该检查的性质吗」**。⇒ 修的时候请顺着这个方向想一步：**你补的每一道守卫，生产路径会不会真的经过它？**\n\n## Realistic Scope 超限，已记账\n\n本任务 **7 个 writes**（上限 5）。理由：八项里 `backfill_fetch.go` 被「守卫加固」与「manifest 元数据」两组同时要动，拆成两个任务会 scope 互斥、必须串行，反而多一轮。代码总量约 **25 行 + 3 处纯注释**。\n\n## 🔴 code-simplifier：本 sprint 未跑，这轮必须跑\n\n全局规范要求「commit 之前必须先运行 code-simplifier」，**这批提交没有遵守**（Leader 的疏漏）。\n我先前的理由被 QA 逐条推翻：\n- 「会作废 `verify_baseline`」**不成立** —— 它只约束 `verifying → verified` 那条边，九个任务已全 `verified`，本轮走的是 `review_fix` 正常返工路径；\n- 「会作废消融结论」**成立但被高估** —— 消融按文件绑定，QA 用第二条路径重跑 C1 那三条只花了两分钟。\n\n⚠️ **而它确实挡住了东西**：`fetchBackfillSearchAll` / `fetchBackfillSearchPage` 这对**死孪生函数**（本任务 functional[0]）与 `backfillReconcileItemsFromCandidates` **零生产调用方**，**都是 simplifier 的典型命中项，其中前者是一条 CRITICAL 而不是可读性问题**。",
+  "wave": 7,
+  "dependencies": [
+    "TASK-007",
+    "TASK-009"
+  ],
+  "context_from": [
+    "TASK-007",
+    "TASK-009"
+  ],
+  "packages": [
+    "./internal/hestia",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_search.go",
+    "./internal/hestia/backfill_search_test.go",
+    "./internal/hestia/backfill_scan.go",
+    "./internal/hestia/backfill_scan_test.go",
+    "./internal/hestia/backfill_fetch.go",
+    "./internal/hestia/backfill_fetch_test.go",
+    "./internal/hestia/backfill_manifest.go",
+    "./internal/hestia/backfill_manifest_test.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**C-1｜让生产路径成为被测路径**：`fetchBackfillSearchAll` 复用 `fetchBackfillSearchPage`，消掉孪生实现。\n\n🔴 现状：`fetchBackfillSearchPage` 被 **6 条测试守着，却零生产调用方** ⇒ 删掉 `backfill_fetch.go:316` 那三行区间校验 **红 0**；把它移到栏目筛之后（注释最强调那条顺序反过来）**也红 0**。\n\n**验收**：消掉孪生后，上述两个消融**必须各自变红**，且报告写明**红在哪一条**。",
+      "**R2-2｜`exhausted` 出口补日期判停判据**：现状是站点自报 `totalPages=1` ⇒ `err=nil`、翻 1 页、**退出码 0**，整趟回填静默截断。\n\n⚠️ **对照就在 4 行之后**：MaxPages 分支对**完全相同的性质**硬失败，注释写着 `refusing to return a partial result silently`。⇒ 两个出口对同一性质应当同口径。**~4 行 + 1 格用例。**",
+      "**R2-3｜搜索侧 `total-records` 与 `total-pages` 互校**：加 `ceil(records/size) == totalPages`。现状 pages 少报即静默只翻第 1 页（QA 实测 records=137 / pages=1 ⇒ 3 次请求、36 条命中、`err=nil`，**交叉校验静默退化到 26%**）。**~4 行 + 1 格。**"
+    ],
+    "boundary": [
+      "**R2-1｜给计数守卫加第三个独立锚**：任一行标签大小写变化 ⇒ 守卫两边**同步移动** ⇒ 该条静默消失、**邻条日期被写错**，而等式仍成立（QA 四行页实测：`111@2020-03-11` 拿了 222 的日期、222 整条消失、**无错**）。\n\n⇒ **C1「基准必须独立于被守护属性」在「标签名」这一维没做到**。**~5 行 + 4 格用例。**",
+      "**R2-5｜站内判据改成 host 比对**：协议相对外链 `//host/...` 被判站内，**端到端进 manifest**（QA 实测 `url=https://evil.example.com/...`、文件内容为外站内容）。`href` 以 `/` 开头这个判据挡不住它。**~3 行 + 2 格。**"
+    ],
+    "error_handling": [
+      "**R2-6｜`--from ≥ cutover` 不得关闭交叉校验**：`records==0` 返回空集 + `nil`；**单关键词失败不连坐**。\n\n⚠️ 触发条件是**业务事实**不是假想：社融存量/增量 2025-09 停发，**本 sprint 自己把它编码进了 `backfillWantedKinds`** ⇒ `--from ≥ 2025-09` 时交叉校验**永久关闭**，而成因被记成 `the result layout likely changed`（把业务事实记成检索服务故障）。**~8 行 + 2 格。**"
+    ],
+    "non_functional": [
+      "**R2-7 / R2-8｜manifest 补完成标记与上下文**：增 `completed_at` + `cutover` / `to` / `keywords` + reconcile 摘要。\n\n🔴 现状：**一次夭折的回填与一次完整回填在文件层面同形**；且下游 M1c-2 被要求「只读这份文件」，却必须**猜 cutover 魔数**（猜错一期即产假缺篇）。\n\n**不降级的理由（QA 给的，我采纳）**：现在改是加两行 `omitempty`，**等 M1c-2 开始消费后再改就是跨 sprint 契约变更**。\n\n⚠️ **已产出的 `~/hestia-backfill-2026-08-14/manifest.json` 早于本次变更、不含新字段，这是预期的** —— 请在 `CONTRACTS.md` 里注明这一点，**不要为了补字段去重跑**（QA 已判定该产物合格且不可再生）。**~15 行。**",
+      "**三处契约订正（纯注释/文档，不改代码逻辑）**：\n① `backfill_scan.go:17-24` 声称标题正则挡住省市分行 —— 实测只挡**中缀**省名，**前缀**省名（`山西省2024年8月金融统计数据报告`）**穿透并归到全国期次**；真正挡住它的是**栏目前缀筛**，功劳记错了。\n② `backfill_scan.go:85` 与 `CONTRACTS.md:859` 的「站外条目**结构上**匹配不到」**是假的** —— 绝对站外 URL 反被 `itemRE` 收下，p54 安全只是那条 URL 的形状恰好如此。\n③ `CONTRACTS.md:869` 的「站内外分界与 href 形态**正交**」**是假的** —— 协议相对 URL 即是反例。\n\n⚠️ **①这条对下游尤其要紧**：CONTRACTS 的 C2 追加指引下游去看调统司栏目，**而那里没有栏目筛保护** ⇒ 前缀省名会混进去。",
+      "🔴 **必须跑 `code-simplifier`**（全局规范要求、本 sprint 未遵守）：用 Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，作用于本任务改动的文件。\n\n**并把结论写进 discovery**：它命中了什么、你采纳了哪些、拒绝了哪些及理由。⚠️ QA 已预告两处典型命中（死孪生函数、`backfillReconcileItemsFromCandidates` 零调用方）—— **若 simplifier 没命中它们，说明你没把它作用到正确的文件上**。\n\n**外加**：`gofmt -l` 空（⚠️ `cmd/atlas/backtest_test.go` 与 `crisis_test.go` 是**仓库既有**未格式化文件，在 `37388df` 上即如此，**不在你的 writes 里、别动**）、`go vet ./internal/hestia/ ./cmd/atlas/` 空、两包 `go test -count=1` 全绿、覆盖率不低于本轮基线（`internal/hestia` 94.6% / `cmd/atlas` 75.6% / 合并 85.4%）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-55",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "verify_baseline": {
+    "head": "853ba696b773c6dc9856cb97ac470559acfb06f5",
+    "discovery_sha256": "51491f8c2096b39528db6f676c062ac4ae8025c632377b7a35f17c32597f1474",
+    "at": "2026-08-14T22:18:15Z"
+  },
+  "verifier": "test-agent-27"
+}

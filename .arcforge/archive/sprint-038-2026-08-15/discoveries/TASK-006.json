@@ -1,0 +1,87 @@
+{
+  "task": "TASK-006",
+  "title": "限速抓取、断点续抓与两类错误的不同处置",
+  "by": "dev-agent-56",
+  "commit": "993e9565bb40950fe1bb7a19046559149d37d47e",
+  "branch": "task/TASK-006",
+  "base": "a9d7572",
+  "key_findings": [
+    "**限速做成 Fetcher 装饰器，使「sleep 次数 == 请求次数 − 1」由构造保证。** index 翻页循环在 TASK-002 里、搜索翻页在本层、文章逐篇在本层——三处调用点分散，逐个插 sleep 既漏得掉也数不清。装饰器让三类请求都经同一个计数点，DoD 的计数等式因此不是「测出来碰巧成立」而是结构性成立。",
+    "**`fetchBackfillSearchPage` 把原始 HTML 丢了，而 §7.3 要求搜索页存盘** ⇒ 本层走 `Get` + `parseBackfillSearchPage` + `checkBackfillSearchDateRange` + `filterBackfillSearchHits`，与它内部**逐字同序**（区间校验必须在栏目筛之前：某页若恰好全是调统司栏目，筛后为空会让守卫平凡通过）。这不是重复实现，是那一层拿不到我要存的东西。",
+    "🔴 **`go tool cover -func` 必须在与 profile 同源的代码树里渲染，否则会产出「看起来很像真的」的假差异。** 我在 post 树（manifest 比 master 多 17 行）里渲染 **baseline** 的 profile，块按行号被归到了错误的函数上，于是 base 侧出现 `Path 0.0%` / `AppendArticle 50.0%` / `Save 73.7%` 这类根本不可能的数（`Path` 由 `Save` 调用，`Save` 跑了它不可能 0%）。**percentage 是从 profile 算的，函数归属却是从源码解析的**——两者不同源时只有后者错，而错法是整片平移。判据：同一构造跑两次得逐字节一致的 profile；渲染结果反常时先问「我是在哪棵树里渲染的」。⇒ 验证者复算覆盖率时请在各自的树里渲染，别在一棵树里渲染两份 profile。",
+    "🔴 **linked worktree 的目录副本不是独立仓库：副本里的 `git` 命令会作用到原 worktree。** `cp -R <worktree> /tmp/base` 复制过去的 `.git` 是一个 `gitdir:` 指针文件，仍指向原仓库；我在副本里跑 `git checkout a9d7572 -- internal/hestia/` 想造基线，实际把**原 worktree** 的三个已跟踪文件回退了（`MM` 状态），同时污染了那一轮正在并行跑的两次覆盖率测量。提交完好，`git restore --source=HEAD --staged --worktree` 即可复原，并逐文件 sha256 与 HEAD 比对确认。⇒ 造基线要么 `rm -f <副本>/.git` 切断联系再用 `git show <sha>:<path> >` 落文件，要么用 `git worktree add --detach`，**不要在副本里跑任何 git 写命令**。这与 CLAUDE.md 已登记的「worktree 里调写通道会写进副本」是同一族，但方向相反：那条是写到了副本、真相源没变；这条是**以为在写副本、实际写了原树**。"
+  ],
+  "decisions": [
+    {
+      "decision": "唯一导出入口 `BackfillFetch(ctx, BackfillConfig) error`，内部委托非导出的 `runBackfill(ctx, f Fetcher, sleep func(time.Duration), cfg)`。",
+      "rationale": "`TestPackageExposesNoWriteFunctions` 用 AST 钉死导出函数集合，本 sprint 我是唯一被授权改那份名单的人 ⇒ 只追加 `BackfillFetch` 一项，既有 18 项一字未动（`git show --numstat` 该文件为 1/1，就是那一行）。`BackfillConfig` 是导出**类型**且无方法，该守卫只看 FuncDecl，不受影响。runBackfill 让 Fetcher 与 sleep 可注入，全部用例离线跑，不碰网络也不引入 fake clock。"
+    },
+    {
+      "decision": "两类错误的处置**刻意相反**，并用 `errBackfillDisk` 把「本机落盘故障」与「搜索侧失效」区分开。",
+      "rationale": "单篇抓取失败是外部世界的事 ⇒ 记 `failed[]`、继续抓、跑完返非零；落盘失败是本机的事 ⇒ 立刻中止（继续抓只会浪费请求，且后面每一篇都会失败）。搜索侧的**取回/解析**失败要 fail-open（ADR-M1c1-02），但搜索侧的**落盘**失败仍是本机故障 ⇒ 必须中止，两者靠 `errors.Is(err, errBackfillDisk)` 分流，而不是靠「发生在哪一段代码里」。"
+    },
+    {
+      "decision": "index 快照名 `<序号3位>-<newest>_<oldest>.html`；搜索快照名 `<slug>-p<NN>.html`，slug 用 ASCII 短名表（finstats / tsf-stock / tsf-flow）+ `kw<N>` 兜底。",
+      "rationale": "index 按设计附录 §A3：页码随新文章上架而漂移，重跑时同一文件名会对应不同内容的页，而存快照的全部目的正是离线核对。搜索侧用 ASCII 而非关键词原文：文件名要能被人和工具直接用，中文名在 macOS 上还会被规范化成 NFD。兜底保证任何关键词都有唯一名字——表漏一项只是名字难看，不会让两个关键词写进同一个文件（那会静默互相覆盖），并配了 `TestBackfillSearchSlugsCoverAllKeywords` 守住漂移。"
+    },
+    {
+      "decision": "`Manifest` 补 `SearchSkippedReason string \\`json:\"search_skipped_reason,omitempty\"\\``，fail-open 时落盘；`loadManifest` 增设字面量 `null` 守卫。两处都只加不改 TASK-003 的既有行为。",
+      "rationale": "前者是 Leader 的设计缺口（ADR-M1c1-02 要求写进 manifest，而 design-spec §6 的 JSON 形状与 TASK-003 的 DoD 都漏了它），TASK-005 返回了这个值却没人能存；`omitempty` 让「字段在不在」本身成为信号。后者是 test-agent-27 用探针实测发现的：`null` 是合法 JSON，走成功路径留下零值 Manifest ⇒ 断点续抓静默退化成全量重抓 400+ 次请求且不报错。TASK-003 的既有测试全部仍绿（含 JSON 往返那条，`fullManifest()` 已补该字段以保持「每字段非零」）。"
+    },
+    {
+      "decision": "`crossCheckBackfill` 的「交集取 index 侧」补上 URL 与 Published 的可观测断言（测试放在本任务，未改 TASK-005 的实现）。",
+      "rationale": "test-agent-28 实测该行为在 URL/Published 上有两个 SURVIVED——TASK-005 的用例只让两侧 Title 不同。缺口在 TASK-005 是不可达的（两侧同值），而**分叉由本层引入**：index 侧 URL 经 `resolveURL(base, href)` 补全而 base 由本层传入，搜索侧本就是绝对 URL，`http` vs `https`、末尾斜杠任一不同即分叉。测试放在风险引入点比放在决定点更能防住它。消融确认：把交集字段改成取搜索侧，该用例转红（此前无人守）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_fetch.go（新增，240 行）",
+    "internal/hestia/backfill_fetch_test.go（新增，570 行）",
+    "internal/hestia/backfill_manifest.go（+17，加 SearchSkippedReason 字段与 null 守卫）",
+    "internal/hestia/backfill_manifest_test.go（+3，fullManifest 补字段、期望 key 集合追加）",
+    "internal/hestia/store_test.go（1/1，导出面 want 名单只追加 BackfillFetch）"
+  ],
+  "interfaces_exposed": {
+    "note": "只有 BackfillFetch 与 BackfillConfig 是导出的（cmd/atlas 用）；其余均在 package hestia 内非导出，TASK-007/008 同包直接调用。",
+    "exported": {
+      "BackfillFetch(ctx context.Context, cfg BackfillConfig) error": "跑一次完整回填。**cmd/atlas 接 cobra 的唯一入口**（TASK-007）。返回非 nil 不等于「什么都没抓到」：单篇失败会记进 manifest 的 failed[] 并继续，跑完才返非零，产物仍可用，调用方据此决定要不要重跑补齐。",
+      "BackfillConfig": "struct{ IndexURL string; From time.Time; To time.Time; Out string; MaxPages int; Timeout time.Duration } —— From 语义是**发布日期**不是期次（附录 §A1，`--from` 帮助文本要写明）；To 是搜索侧区间上界，零值时用 time.Now()；Out 是产物根目录（应为仓库外绝对路径）；MaxPages<=0 时回落 backfillMaxPages(200)；Timeout 只被 BackfillFetch 用（单次 HTTP 超时）。"
+    },
+    "unexported": {
+      "runBackfill(ctx, f Fetcher, sleep func(time.Duration), cfg BackfillConfig) error": "BackfillFetch 的可注入版本，全部用例走它。",
+      "backfillLimiter": "struct{ inner Fetcher; sleep func(time.Duration); n int } —— 实现 Fetcher；n>0 时先 sleep(backfillInterval) 再请求 ⇒ sleep 次数恒等于请求次数 − 1。",
+      "backfillInterval": "time.Second（自我约束的 1 req/s；央行站点无公开速率限制）",
+      "fetchBackfillSearchAll(ctx, f Fetcher, out string, from, to time.Time) ([]backfillSearchHit, int, error)": "遍历三个关键词逐页取回并存快照，返回全部命中与已抓页数。错误交给 crossCheckBackfill 走 fail-open，**唯独** errBackfillDisk 由调用方中止。",
+      "backfillSearchSlug(keyword string, i int) string": "关键词在快照文件名里的 ASCII 短名，未登记时回落 kw<i+1>。",
+      "saveBackfillIndexPages(out string, pages []backfillIndexPage) error": "按 §A3 落 index 快照。",
+      "writeBackfillFile(path string, body []byte) error": "建目录 + 写文件，错误一律裹 errBackfillDisk。",
+      "errBackfillDisk": "哨兵错误，标记「本机落盘故障」，用 errors.Is 判别。"
+    },
+    "manifest_new_field": "Manifest.SearchSkippedReason string `json:\"search_skipped_reason,omitempty\"` —— 非空 ⇒ 这一轮根本没做交叉校验。**TASK-008 读 manifest 做对账时必须先看它**：非空时 only_in_index/only_in_search 都是空的（不是「没有差异」，是「没问过搜索」），据此下「两侧一致」的结论会是谎报。",
+    "note_for_TASK_007": "① 入口是 `hestia.BackfillFetch(ctx, hestia.BackfillConfig{...})`，`--out` 必填、`--from` 按 `YYYY-MM` 解析成 time.Time（语义是发布日期，帮助文本要写明附录 §A1 的推论：`--from 2020-01` 的产出包含 2019 年度那三篇）。② 返回非零时产物仍可用，别把它当成「整趟失败」——失败清单在 manifest 的 failed[] 里。③ Timeout 不设时 http.Client 无超时，建议命令层给个默认值。",
+    "note_for_TASK_008": "① 逐期对账的输入是 manifest 的 articles[]（已是并集、已带 Source）。② **先判 search_skipped_reason 是否非空**，理由见上。③ 已抓判据与本层一致：id 在 articles 且 file 在磁盘存在。"
+  },
+  "verification": {
+    "measured_at_commit": "993e9565bb40950fe1bb7a19046559149d37d47e",
+    "note": "以下数字全部在**最后一次改动之后**、于该 commit 上统一重采，与交付物同源。",
+    "suite": "go test ./internal/hestia/ -count=1 全绿；本任务用例 18 条 RUN = 15 顶层 + 3 子测试，0 FAIL",
+    "gofmt": "gofmt -l internal/hestia/ 输出为空",
+    "vet": "go vet ./internal/hestia/ 输出为空",
+    "export_guard": "go test -run '^TestPackageExposesNoWriteFunctions$' 绿；该文件 numstat 为 1/1，即 want 名单那一行，既有 18 项一字未动",
+    "coverage": "背对背（同一时刻并排跑）baseline 94.2%（master a9d7572）→ post 93.6%，门禁线 dev_minimum=80。⚠️ 两份 profile **各自在自己的源码树里渲染**——详见 key_findings 第 3 条，混渲会产出假差异。",
+    "coverage_stronger_claim": "既有代码覆盖率**逐函数一致**：135 个既有函数百分比逐个相同，diff 为空 ⇒ 『不降低既有覆盖率』在逐函数口径上严格成立。0.6pp 的下降全部来自新文件未覆盖的错误分支（runBackfill 86% / fetchBackfillSearchAll 85% / saveBackfillIndexPages 80% / writeBackfillFile 80%，均为磁盘与网络故障的返回路径），未为凑数注入 hook 变量。",
+    "mutation": "10 个变异**全部 KILLED，且每个都由预期的那条测试杀死**（隔离副本，主工作区被测文件 sha256 前后未变）：M1 去掉断点续抓→SkipsAlreadyFetched；M2 index 快照改用页码命名→SavesIndexAndSearchSnapshots；M3 不存搜索快照→同上；M4 不把 SearchSkippedReason 写进 manifest→RecordsSearchSkippedReason；M5 去掉 omitempty→OmitsSearchSkippedReasonWhenSearchWorks；M6 单篇失败改成直接 return→RecordsFailedArticleAndContinues；M7 落盘失败改成记 failed 继续→AbortsOnDiskFailure；M8 sleep 改成每次都调→SleepsBetweenEveryRequest；M9 去掉 null 守卫→RejectsNullManifest + LoadManifestRejectsJSONNull；M10 交集改取搜索侧字段→CrossCheckBackfillIntersectionTakesIndexSideFields。",
+    "mutation_gates": "harness 的三道闸都**早退**（先于任何 KILLED/SURVIVED 输出）：变异 diff 为空 / go vet 不过 / 变异脚本报错。首轮 M2、M3、M6 正是被 vet 闸拦下（我的变异脚本留下未使用变量与 unreachable code），**没有打出任何假结论**，修好后单独重跑才得到上面的结果。",
+    "dod_mapping": {
+      "functional[0] 断点续抓": "TestBackfillFetchSkipsAlreadyFetchedArticles —— 断言那些 URL **根本没进 fetcher.calls**，同时断言没抓过的那篇确实请求了",
+      "functional[1] index/search 存盘": "TestBackfillFetchSavesIndexAndSearchSnapshots（含 §A3 命名与内容逐字节比对）+ TestBackfillSearchSlugsCoverAllKeywords",
+      "functional[2] SearchSkippedReason": "TestBackfillFetchRecordsSearchSkippedReason（失效时非空 + 主路径照常完成 + 两个差集留空）与 TestBackfillFetchOmitsSearchSkippedReasonWhenSearchWorks（正常时 JSON 里不出现）成对——只有前者时，把字段写成常量非空也能绿",
+      "error_handling[0] 单篇失败": "TestBackfillFetchRecordsFailedArticleAndContinues（failed[] 有记录且带原因 + 后面那篇确实被请求 + 返回非零）",
+      "error_handling[1] 落盘失败": "TestBackfillFetchAbortsOnDiskFailure —— 判据是**后面那篇根本没被请求**；只断言返回错误的话「记 failed 继续」那种实现照样绿，而两条处置刻意相反正是这一点",
+      "non_functional[0] sleep 计数": "TestBackfillFetchSleepsBetweenEveryRequest —— 计数等式 + 每次时长 + 请求总数写死（只比两个观测值相等的话，实现少发一半请求时等式照样成立）",
+      "non_functional[1] gofmt/vet/test/覆盖率": "见上",
+      "boundary[0] null manifest": "TestBackfillFetchRejectsNullManifest（报错 + **一次请求都没发**）+ TestLoadManifestRejectsJSONNull（3 个子用例：null / 带空白 / 带换行）",
+      "boundary[1] 交集取 index 侧": "TestCrossCheckBackfillIntersectionTakesIndexSideFields —— 两侧 URL（scheme 与末尾斜杠都不同）与 Published 都不同，逐字段断言取的是 index 侧"
+    },
+    "extra_tests_beyond_dod": "TestBackfillFetchWritesManifestMetadata（from/pages_scanned/search_pages_scanned/Source 标记/sha256/fetched_at）、TestBackfillFetchAbortsWhenIndexScanFails（index 侧硬失败，不记 failed 继续）、TestBackfillFetchEntryPointWiresRealFetcher（用已取消的 ctx 覆盖导出入口，不碰网络）"
+  }
+}

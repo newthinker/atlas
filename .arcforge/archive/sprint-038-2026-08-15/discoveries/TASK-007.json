@@ -1,0 +1,120 @@
+{
+  "task_id": "TASK-007",
+  "title": "cobra 装配 + CONTRACTS 登记 + 真跑一次",
+  "key_findings": [
+    "🔴 计数守卫的基准在真实语料上不成立：央行列表页会混进指向站外的条目。实测我自己抓的 p1..p155（2325 条 istitle 锚），站外恰好 1 条（p54 的 https://www.gov.cn/zhengce/content/202401/content_6926806.htm，发布 2024-01-18），它带全套 istitle/title/日期属性，只有 href 是绝对 URL ⇒ backfillItemRE 的 /(\\d+)/index.html 结构上匹配不到 ⇒ 14 vs 15，整条回填在 p54 硬失败。计数不符的页也恰好这 1 页（0.043% 的条目钉死整条链）。",
+    "🔴 本轮最重要的发现是消融查出来的：『守卫的基准必须与被守护属性正交』这段论证原本没有任何断言守着。把基准改成『只数 href 形如 /<id>/index.html 的 istitle 锚』当变异跑，红 0 条、850 条全绿 SURVIVED。论证正确 ≠ 有东西在守它。补第三格（站内条目 href 从 .html 变 .htm ⇒ 仍须报错）后该变异 KILLED，且杀它的只有第三格。",
+    "真跑成功（exit 0）：80 期 / 218 篇 / 0 失败 / 0 缺篇；v1→v2 切换点实测为 2025-09（与 addendum 预告一致，本轮是核对而非发现）。",
+    "交叉校验两个差集都为 0，且非空集平凡为真（218 个 id 我独立扫快照逐一核对全部出现在搜索侧）。但同一遍扫描查出搜索侧另有 263 条带报告标题、不在 manifest 的条目（/diaochatongjisi/ 206 + /taiyuan/ 57，goutongjiaoliu 栏目恰好 0 条）⇒ 交叉校验只在同栏目内成立，是『同栏目不一致』检测而非『完整性』检测；接住整栏目缺口的是 TASK-008 的逐期结构对账。",
+    "推算值 79 期 / 217 篇 vs 实得 80 期 / 218 篇，差额来源查明：多的正是 2026-07 期（《2026年7月金融统计数据报告》，发布 2026-08-14 即真跑当天）。v1=69 期×3 篇 + v2=11 期×1 篇 = 218，与推算的 69×3+10=217 只差这一期。",
+    "Leader 那条 CONTRACTS 自检判据（grep -oE '\\b[A-G][0-9]\\b' 全文数 20）在 CONTRACTS.md 上跑出 24：该文件是跨 sprint 累积的，全文另有 B3 B4 C2 C6 F1 G9。已改为限定到 M1c-1 节；同时发现 B1/B2 在文档里是散文形态（**B1** 而非 **B1｜**），与『同一份清单两种格式而判据只认一种』是同一成因，已补成统一形态。"
+  ],
+  "decisions": [
+    {
+      "decision": "计数守卫基准由 bytes.Count(html, `istitle=\"true\"`) 改为『href 以 / 开头（站内）的 istitle 锚』数",
+      "rationale": "这改的是 TASK-001 已 verified 的 boundary[2]（原判据：匹配条数 == 页面上 istitle=\"true\" 的出现次数）。原判据在真实语料上不成立——它把站外条目算进基准，而站外条目结构上进不了 Items。守卫本身没写错，是判据把一个正常形态判成了失效。不是放宽守卫：改动后『少匹配一条站内条目』仍然硬失败（消融实测红 52 条）。"
+    },
+    {
+      "decision": "拒绝『只数 href 形如文章页的锚』这个更自然的修法",
+      "rationale": "那会让守卫跟着被守护的东西一起坏：href 形态哪天变了（如 /index.htm），基准同步下降，两个数照样相等，守卫恒绿。⇒ 守卫的基准必须独立于它要守护的那个属性；基准与被测量共用一个来源时，它测不出那个来源的变化。『站内/站外』与 href 具体形态正交，形态变化仍会告警。同形状旧伤：articleLinkRE 的 \\d{14,}（Sprint 037，站点重建后整页命中 0 条、一个字都不报）。"
+    },
+    {
+      "decision": "补第三格测试，把上面那条 rationale 从论证变成观察",
+      "rationale": "跑消融才发现整段论证零守卫（850 全绿 SURVIVED）。判据不是『我论证得对不对』而是『改坏它有东西会红吗』——答不会就不是守卫。第三格给出论证描述的具体输入：站内条目 href 从 .html 变 .htm，正确实现 2 vs 1 报错、形态实现 1 vs 1 放行。"
+    },
+    {
+      "decision": "订正我自己写下的两处未经消融的断言",
+      "rationale": "① 注释里写『本格是唯一能区分那两种实现的输入』——实测 n==n 变异红 6 条，既有『部分失效』『istitle 被换掉』两格同样杀得掉，已改为准确描述（第二格加的是共存场景）。② 覆盖率我先前报的 75.592% 测自块①当时的树（1022/1352），交付树重采为 75.610%（1023/1353）——分批采的数字合进一份报告不构成对最终产物的自证，已按『最后一次改动后统一重采』全部重测。"
+    },
+    {
+      "decision": "新增条目不占 M1c-1 的编号，折进 C1/C2 作追加",
+      "rationale": "DoD 的自检判据要求节内唯一编号 == 20 == 分组和 3+2+3+8+1+1+2，而编号来源 contracts-registry.md（7 组 20 条）不在我的 writes 里。基准原则与 C1（同一条守卫的正则）同源、交叉校验盲区与 C2（搜索侧栏目前缀）同源，折进去比新开编号更贴题也不破坏与登记表的对应。"
+    },
+    {
+      "decision": "撞号按『节内编号 + 节首声明』处理，不改编号",
+      "rationale": "M1c-1 是独立一节且节内自洽（编号来自本 sprint 的登记表）。改编号会让本节与 contracts-registry.md 逐条对不上；声明成本为零。已在节标题下注明『本节编号为 M1c-1 内部编号，与其它 Sprint 的同号条目无关』并点名 C2/F1 撞号。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia.go (+126/-1)",
+    "cmd/atlas/hestia_test.go (+174/-0)",
+    "internal/hestia/CONTRACTS.md (+247/-0，相对 master 纯追加)",
+    "internal/hestia/backfill_scan.go (+55/-7)",
+    "internal/hestia/backfill_scan_test.go (+124/-0)",
+    "internal/hestia/discover.go (+8/-2，只改注释)",
+    "internal/hestia/testdata/README.md (+68/-0)"
+  ],
+  "interfaces_exposed": {
+    "cli": "atlas hestia backfill fetch --from YYYY-MM --out <dir> [--expect-periods N] [--expect-articles N]（--out 必填；--from 是发布日期不是期次）",
+    "internal_hestia": [
+      "backfillIstitleAnchorRE / backfillInternalHrefRE：计数守卫基准的两条正则（各自的 \\s 前缀挡 data-istitle= / data-href=）",
+      "backfillInternalIstitleCount(html []byte) int：站内 istitle 条目数 = 计数守卫基准"
+    ],
+    "caller_contract": [
+      "改基准时必须连 TestScanBackfillPageCountBaselineExcludesExternalLinks 三格一起看：第一格守『站外不计入』、第二格守『排除站外 ≠ 排除所有认不出的』、第三格守『基准不随 href 形态一起坏』。少任何一格都有一个具体变异会 SURVIVED。",
+      "两个交叉校验差集为 0 不等于『完整』：搜索侧被 backfillSearchKeepPrefix 限定在 goutongjiaoliu 栏目，整栏目缺口两侧都不出现。完整性由逐期结构对账负责。"
+    ]
+  },
+  "verification": {
+    "tree": "worktree /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-007，分支 task/TASK-007，交付 HEAD = a00fc22f5686e4a613b5d8cfdc226b32c471d68d（基于 master 37388df5223685112f214f0fb19ac371ed96a766）",
+    "suite": "go test ./internal/hestia/ ./cmd/atlas/ 全绿；internal/hestia 基线 851 PASS / 0 红（测自 a00fc22）",
+    "gofmt_vet": "gofmt -l 对我改的 7 个文件均空；go vet ./internal/hestia/ ./cmd/atlas/ 干净。⚠️ gofmt -l ./cmd/atlas 会报 backtest_test.go 与 crisis_test.go——切到 master 复验确认是既有问题，不是我引入的。",
+    "coverage": "cmd/atlas 背对背（两棵树同一时刻并排跑，各自在自己的源码树里渲染 profile）：pre 37388df = 1006/1334 = 75.412%，post a00fc22 = 1023/1353 = 75.610%（+0.198pp，floor 72）。post 连测两次同值，稳定。",
+    "mutation": "隔离 detached worktree（主工作区 sha 与 git status 指纹收尾校验均未变），三道闸：gofmt -e 语法闸 / 打印 diff 语义闸 / go build 编译闸。基线 851 PASS 0 红。M1 基准回退成『全部 istitle 锚』⇒ 红 2（只有第一格）；M2 让 backfillItemRE 少匹配一条站内条目 ⇒ 红 52（既有守卫仍报错）；M3 基准改松成 n==n ⇒ 红 6（第二、三格 + 既有两格）；M4 基准改成『href 形如文章页』⇒ 补第三格前 0（SURVIVED），补后红 2（只有第三格）。脚本：scratchpad/dev55-ablate-final.py",
+    "contracts_selfcheck": "实际用的命令（写进 CONTRACTS 节首）：awk '/^## Sprint M1c-1 /{f=1;next} /^## /{f=0} f' internal/hestia/CONTRACTS.md | grep -oE '\\*\\*[A-G][0-9]+｜' | grep -oE '[A-G][0-9]+' | LC_ALL=C sort -u | wc -l ⇒ 20；分组 A=3 B=2 C=3 D=8 E=1 F=1 G=2，和 = 20，两条判据同时满足。",
+    "real_run": {
+      "command": "go run ./cmd/atlas hestia backfill fetch --from 2020-01 --out $HOME/hestia-backfill-2026-08-14",
+      "tree_head": "9e8d7e56c85837e9eb1d315a883cecfc06359785（真跑时的树；其后只有测试与文档改动，未动抓取逻辑）",
+      "start": "2026-08-14 23:18:58 CST",
+      "end": "2026-08-14 23:27:22 CST（耗时 8 分 24 秒，exit 0）",
+      "column_total_pages_at_run": "409（我自己从首页 totalpage=\"409\" 取，未用他人转述值）",
+      "manifest_path": "/Users/zuowei/hestia-backfill-2026-08-14/manifest.json",
+      "manifest_sha256": "e824866e2f992b221842e432e1e93ce795a1b5765f0a4e16ae72712e24d03a40",
+      "artifacts": "452 个文件 / 15M：index 151 页、search 82 页、articles 218 篇",
+      "requests": "451 = 151 index + 82 search + 218 article（spec 预估 447）",
+      "spec_10_q1": "80 期 / 218 篇（spec 说『应接近 80』）。v1 69 期（2019-12..2025-08）×3 篇 + v2 11 期（2025-09..2026-07）×1 篇 = 218。最老发布日 2020-01-16（2019 年度三篇，--from 是发布日期故被包含，addendum A1 已预告），最新 2026-08-14。",
+      "spec_10_q2": "v1→v2 切换点 = 2025-09（实测，与 addendum 预告一致）。",
+      "spec_10_q3": "0 缺篇——80 期全部满足结构规则（v1 3/3、v2 1/1）。",
+      "cross_check_diffs": "only_in_index = 0，only_in_search = 0，218 篇全部 source=both。非空集平凡为真：独立扫 82 页搜索快照，manifest 的 218 个 id 全部出现。",
+      "warnings": "两条告警（不阻断）：期数实得 80 vs 推算 79、篇数实得 218 vs 推算 217。差额已查明为 2026-07 期（真跑当天发布），不是缺陷。",
+      "prior_failures": "本次是第 3 次尝试。第 1 次死于我把 cfg.Discover.MaxPages（配置里是 3）传给回填，被 TASK-002『翻满 MaxPages ⇒ 报错』守卫 3 秒内拦下——那条守卫若当初写成『翻满就返回已收集的部分』，这里会静默只抓最近三页而回填看起来跑完了。第 2 次死于 p54 外链（本次修的就是它）。"
+    },
+    "scope": "改动文件恰好 7 个 = 声明的 writes 7 项，无越界。CONTRACTS.md / testdata/README.md 相对 master 是纯追加（0 删除）；backfill_scan.go 的 7 处删除逐行核对过，全部是被替换的旧基准代码与 bytes 导入；discover.go 的 2 处删除是被订正的注释行。numstat 取自交付提交本身（git diff --numstat 37388df..a00fc22）。"
+  },
+  "notes_for_downstream": [
+    "M1c-2 直接输入：产物在 /Users/zuowei/hestia-backfill-2026-08-14（仓库外），人类需在会话外立刻单独备份。",
+    "『差集为 0』别读成『完整』——见 interfaces_exposed.caller_contract 第 2 条。",
+    "推算值 79/217 已被实测 80/218 取代；差额是真跑当天新发布的 2026-07 期，推算逻辑本身没错。"
+  ],
+  "rework_round_1": {
+    "round": 1,
+    "reason_class": "dod_defect",
+    "trigger": "TASK-007 判 VERIFIED(7/7) 后 Leader 走 verified → review_fix 补两条；两条都指向 DoD/声明，不是交付缺陷",
+    "tree": "分支 task/TASK-007-fix @ 9579ff2392194457efeec78348f2049331d535fb（基于 master f58014f），已合入 master 768064f5868274687dc3a5d598b49068a6587cd3",
+    "FIX-A": {
+      "title": "functional[1] 的「不传 ⇒ 零值」子用例存在但无鉴别力",
+      "independently_reproduced": "🔴 未采信转述：我自己写 harness 跑消融 G1（把两个 IntVar 默认值 0 改成 DoD 原文点名的错误实现 79/217），在 f58014f 上实测 **红 0 条 / 282 全绿 ⇒ SURVIVED**，验证者的结论成立。",
+      "root_cause": "cobra 的 IntVar 默认值是在 init() 注册时写进变量的，Execute() 对未传的 flag 不会重新应用；而 bfResetFlags 在每个子用例开头把四个变量显式清零 ⇒ 重置动作把默认值抹掉，assert.Zero 恒真。⚠️ bfResetFlags 本身是正确的测试隔离（第一个子用例必须要它）——它恰好摧毁了第二个子用例的鉴别力。⇒ 测试隔离与鉴别力可以互相拆台，而且都不出声。",
+      "fix": "改查 flag 注册时声明的默认值（不依赖变量、不受重置影响）：assert.Equal(\"0\", hestiaBackfillFetchCmd.Flags().Lookup(\"expect-periods\"/\"expect-articles\").DefValue)。DefValue 是字符串，故断言 \"0\" 而非 0。+25 行，只动 cmd/atlas/hestia_test.go。",
+      "ablation_after_fix": "同一条 G1 在 9579ff2 上：**红 2 条 / PASS 280（基线 282）**。红在 TestHestiaBackfillFlagsBindThroughCobra/「--expect-* 不传 ⇒ 保持零值」，**断言行 694（expect-periods 的 DefValue）与 696（expect-articles 的 DefValue）**，两条各自都触发了。",
+      "which_assertions_did_NOT_fire": "🔴 **698/699 那两条 assert.Zero 一条都没红** —— 它们对这个变异至今没有鉴别力。留着是因为它们守的是**另一件事**（解析路径没往变量里塞东西），已在注释写明两者不是重复、别当冗余删掉。**只报「红了」会掩盖这一半。**",
+      "harness": "scratchpad/dev55-ablate-g1.py（零参数可跑，自建/自拆隔离 worktree；ARCFORGE_MAIN / ARCFORGE_MUT_REF 可覆写）。三道闸：gofmt -e 语法闸 / 打印 diff 语义闸 / go build 编译闸。",
+      "why_it_matters": "默认值若真是 79/217，生产路径（无重置）下不传 --expect-* 就会走硬失败分支 ⇒ 让一个**推算值**取得阻断交付的权力，而那正是 TASK-008 的 notes_for_downstream 反复声明不许发生的事。"
+    },
+    "FIX-B": {
+      "title": "packages 漏了 ./internal/hestia（Leader 的声明缺口）",
+      "change": "packages: [\"./cmd/atlas\"] → [\"./cmd/atlas\",\"./internal/hestia\"]（经写通道 update，已直读核实）",
+      "gate_actual_output": "转 dev_done 时门禁实际输出（**不是我的反事实预跑**）：`=== Gate scope (TASK-007) === ./cmd/atlas ./internal/hestia` / `Task-level coverage_floor=72 overrides dev_minimum=80` / `Task scope passes. Coverage: 85.4% (dev_minimum: 72%)`。⇒ 门禁这次**真的跑全了两个包**，85.4% 对 floor 72 有 13.4pp 余量。",
+      "counterfactual_matched": "我在返工前跑的反事实预测就是 85.4%，与门禁自己的输出**逐字相同**——但那不能替代门禁证，这正是本条缺口的意义。",
+      "validator_warning_prediction_FALSIFIED": "⚠️ Leader 预测 validator 的 scope-writes-outside-packages 会从 7 条降到 2 条 —— **实测仍是 7 条，一条没少**，连 ./cmd/atlas/hestia.go 都在报（而 ./cmd/atlas 就在 packages 里）。",
+      "observation": "9 个任务的天然对照：单 package + 文件级 writes 的 8 个任务（TASK-001…006/008/009）**0 条告警**；唯一的两 package 任务 TASK-007 **全中 7 条**。TASK-001 的 writes 里就有 ./internal/hestia/backfill_scan.go、packages 是 [\"./internal/hestia\"] ⇒ 不报；TASK-007 写同一个文件、packages 多一项 ⇒ 报。",
+      "inference_UNVERIFIED": "推断（**推出来的，未验证**）：判据可能是 ∀（每个 writes 项须落在**每一个** packages 之下）而非 ∃，故一旦 packages 有两项就全体上报。⚠️ 我想造合成探针验证（同一份 writes、只改 packages 数量），**write-guard 连拦三次**（写动词与 .arcforge/.claude 同现即拦，哪怕 .arcforge 在读的一侧）；**我停手了，没有继续改写命令去绕它**。validator 源码不在本仓库（解析到 $HOME/.arcforge/bin/），读不到实现。",
+      "implication": "Leader 新写的判别式（writes 里的 .go 是否都被 packages 覆盖 ⇒ 是则假阳）作为**人读告警**的判据仍然成立且推荐，但**不能用告警条数确认它** —— 这条规则自己的判据不是那个。同名规则、两把尺子；判别式要自己求值，不能靠计数验证。"
+    },
+    "post_rework_numbers": {
+      "note": "全部测自合入后的主仓库树 master 768064f（含返工提交 9579ff2）",
+      "suite": "go test ./cmd/atlas/ ./internal/hestia/ 全绿；cmd/atlas 282 PASS / 0 红",
+      "gate_coverage": "85.4%（门禁口径 go tool cover -func total，两包 -coverpkg 合并），floor 72"
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "id": "TASK-009",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 3,
+  "title": "把对账接进生产管线（TASK-008 的产出目前一次都不会执行）",
+  "description": "## 缺口（实测，2026-08-14 由 dev-agent-55 在预读 TASK-007 上游契约时发现，Leader 已核实载体）\n\n```\nreconcileBackfill 的非测试调用点 : 0     （只有定义行与两处注释）\n测试里的调用                     : 20\nbackfill_reconcile.go 导出标识符 : 0\nrunBackfill 结尾                 : failed>0 判断 → return nil，**无对账**\n```\n\n⇒ **TASK-008 有 12 个测试、12 个变异全 KILLED，而生产路径一次都不会碰它。** 它是非导出的，`cmd/atlas`（不同 package）在语言层面也调不到。\n\n🔴 **这是 Leader 的拆分错误**：TASK-008 是独立 reviewer 发现缺口后新建的任务，我给它定的 scope 是 `backfill_reconcile.go` + 测试，**却没有包含「接进管线」这一步**。\n\n⚠️ **危害形态**：`TASK-008 verified` 会让人以为跳页/缺篇有人管了。**一个「已验证」的假象比一个空白更糟**——空白会被下一轮审查发现，假象不会。\n\n## 为什么单独立项（不并进 006 也不并进 007）\n\n- **不并进 TASK-006**：它那轮返工性质是 `dod_defect`（Leader 在派验后才改 DoD 造成的），塞进一个**新功能**会混淆返工性质；且 dev-agent-56 没有对账层的上下文。\n- **不并进 TASK-007**：接入的测试必须写在 `internal/hestia` 包内（`runBackfill` 非导出，`cmd/atlas` 调不到），那会让 TASK-007 变成 **7 文件 / 8 条 DoD**，明显超出 Realistic Scope。\n- **本任务很小**（约 15 行实现 + 3 组测试），且与 TASK-007 可由同一个 dev 连着做，上下文不丢。\n\n## 🔴 调用方约定：去读，别照我复述\n\n约定写在 `.arcforge/discoveries/TASK-008.json` 的 **`.interfaces_exposed.caller_contract`**，**现有 5 条**。\n\n⚠️ **条数是锚**：若你读到的不是 5 条，说明 discovery 变了，**停下来找 Leader**，别自己判断哪条该忽略。\n\n⚠️ **注意它不是一个顶层 `caller_contract` 节**——dev-agent-55 自己回报时说「我写在 caller_contract 里」，实际路径是 `.interfaces_exposed.caller_contract`，且它记成了 4 条（漏掉「本函数不碰网络、不碰磁盘、不返回 error」那条）。**这就是本 sprint 反复撞到的那件事：作者的自陈不等于载体，去看载体。**\n\n另外 `.notes_for_downstream` 已经定死了两个 flag 的语义（`--expect-*` 不传即零值，走推算值告警路径）——那部分在 TASK-007，本任务只需让 `BackfillConfig` 能把它们传进来。\n\n## ⚠️ 包级导出守卫（不在你的 writes 里）\n\n`internal/hestia/store_test.go` 的 `TestPackageExposesNoWriteFunctions` 用 AST 扫包内所有非测试 `.go` 文件，断言导出函数集合**恰好等于**一份写死的名单。**你新增任何导出函数都会让它变红**，而该文件本 sprint 唯一持有者是 TASK-006。\n\n**处置：全部用非导出名。** 你的改动都在 package hestia 内，本来就不需要导出。导出的 `type` 不受影响（守卫只看 `FuncDecl`）。若确实必须新增导出标识符 —— **停下来找 Leader**，不要自己去改 `store_test.go`。\n\n## 🔴 交出写权之前：discovery 的「文件」与「指针字段」必须一起写完\n\n```bash\n# ① 先写 discovery 文件\nARCFORGE_TOKEN=… bash .claude/hooks/arcforge-write.sh --as <你> discovery TASK-009 < 你的 json\n# ② 再写任务 JSON 里的指针字段  ← 本 sprint 被漏了四次\nARCFORGE_TOKEN=… bash .claude/hooks/arcforge-write.sh --as <你> \\\n  task TASK-009 update --field discovery=.arcforge/discoveries/TASK-009.json --expect-epoch <N>\n# ③ 最后才 transition dev_done\n```\n\n转 `dev_done` 之后 owner 变成 `test-*`，你再也写不了这个任务的任何字段；而 validator 的 `missing-discovery` 只在 `verified` 时触发 ⇒ 转之前查不出来，转之后只剩验证者能补。\n\n**自查一行**：`jq -r '.discovery // \"缺\"' .arcforge/tasks/TASK-009.json`，非「缺」才转。",
+  "wave": 5,
+  "dependencies": [
+    "TASK-006",
+    "TASK-008"
+  ],
+  "context_from": [
+    "TASK-006",
+    "TASK-008"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_fetch.go",
+    "./internal/hestia/backfill_fetch_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`runBackfill` 在抓取循环结束后调用 `reconcileBackfill`，入参经 `backfillReconcileItemsFromArticles(store.Manifest.Articles)` 构造。`cutover` 与 `backfillExpect` 经 `BackfillConfig` 由调用方传入，**不在 runBackfill 里写死一份**（caller_contract 第 4 条）。测试须有**端到端正向断言**（见下面第三段）。⚠️ 调用次数断言**可以有但不充分**，**不得作为本条的唯一证据**。（原措辞是「须钉住『被调用且只调一次』」，与第三段「不接受 mock 计数」**自相矛盾**——test-agent-28 预读指出：我的本意是「两者都要」，字面却读成「先要求 A 再禁止 A」。⚠️ 它另问了一句我答不上来的：**「只调一次」防的是什么？** 重复调用一个纯函数没有任何可观测后果 ⇒ 那条断言钉的是**实现细节而非行为**，故直接去掉、不保留。）\n\n🔴 **「调用点存在」≠「调用点被执行」**（test-agent-28 提，它正是核实出本缺口的人）：`reconcileBackfill` 有 12 个测试、12 个变异全 KILLED，而生产路径一次都不碰它 —— **单元层每条断言都有鉴别力，而整层的可达性没有任何断言在管**。这是「守卫在场但不可达」在**集成层**的版本。\n\n⇒ 本条必须用**端到端正向断言**：跑完整个 `runBackfill`（fake 网络 + 临时目录），断言对账的**具体产出**出现在最终输出里。**不接受**「某个 mock 被调用了 1 次」这类间接证据 —— 那条断言对「**调用了、但结果被丢弃**」同样为真，而那正是本缺口的下一个变种。",
+      "对账结果的四个可见面 `Rows` / `MissingPeriods` / `Unclassified` / `Warnings` **全部输出**。测试给一份三者皆非空的输入，逐个断言其**具体内容**出现在输出里。⚠️ **不许只断言「输出非空」**——那条对「只打印了 Rows」同样为真（否定式/弱断言在本 sprint 已翻车多次）。",
+      "**补两处「实现正确但无测试背书」的缺口** —— 来自 test-agent-28 的 TASK-006 验证报告 §4.1 / §4.4（它自己设计的 20 个变异里 5 个 SURVIVED，全部落在这一类）。\n\n**(a) 6 条写盘路径逐条钉住**：`AbortsOnDiskFailure` 目前只钉住 1 条，另 5 条写盘点**实现全对但无断言**。最低成本做法（验证者给的）：改成表驱动，用一个「第 N 次写盘失败」的 fake 跑满 6 格。\n\n**(b) 当前 `base` 不会造成两侧 URL 分叉**：在 **`runBackfill` 的端到端用例**里，喂一份 index 页（**相对路径 href**）与一份搜索页（**绝对 URL**）指向**同一个 article_id**，断言 `resolveURL(base, href)` 的产出与搜索侧 URL **逐字相同**。🔴 **本条原先写成「在 `crossCheckBackfill` 层断言两侧同值时输出等于它」——那是恒真的**：该函数收的是已构造好的两侧条目，**它看不到 `base`**；两侧同值时「取哪一侧」在输出上**不可观测**，取 index 也对、取 search 也对、随机取也对。⚠️ **那正是 test-agent-28 在 TASK-005 找到那两个 SURVIVED 的同一个成因**——我把一个已知产生 SURVIVED 的形状原样写成了 DoD。改到 `runBackfill` 层之后才可证伪：`base` 写成 `http://` 或多一个末尾斜杠，它立刻红。⚠️ 因此本条**写在 `backfill_fetch_test.go`**（不再是 `backfill_crosscheck_test.go`（**已加进本任务 writes**——TASK-005 已 `verified` 不占用它；TASK-006 因为它不在自己 writes 里，**结构上不可能**写这条，那是 Leader 派活时的疏漏不是 dev 的）。\n\n🔴 **两条都是「补背书」，不是「改行为」。** 若你在补的过程中发现实现真的错了 —— **停下来找 Leader**，别顺手改：那会让一个「补测试」任务静默变成「改实现」任务，而验证者是按前者的预期来看你的 diff 的。"
+    ],
+    "boundary": [
+      "**`Empty=true`（一期都没有）与「全部齐全」必须能从输出区分开**——两者的 `MissingPeriods` 都是空（caller_contract 第 3 条）。测试须有这两个用例，并断言两者输出**不相同**。⚠️ 断言「不相同」还不够，要**各自钉住自己那句特征文本**，否则将来两边一起改成同一句话，「不相同」会先红、但红在哪不清楚。",
+      "**`MissingPeriods` 非空、`Violations` 为空 ⇒ 退出码 0**（缺篇是**要报告的事实**不是失败，caller_contract 第 1 条）。这条与 error_handling[0] 是**一对**：一条钉「该失败时失败」，一条钉「不该失败时不失败」，缺任一条另一条都可能被平凡满足。"
+    ],
+    "error_handling": [
+      "**`Violations` 非空 ⇒ 非零退出**，且返回的 error 文本里含**具体的 violation 内容**（不是笼统的「对账失败」）。",
+      "抓取阶段既有的 `failed > 0` 非零退出**行为不变**；当 `failed > 0` 与 `Violations` 非空**同时发生**时，两者的信息**都要能看到**，不能一个把另一个吞掉。测试须有这个同时发生的用例。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、`go test ./internal/hestia/ -count=1` 全绿，**且 `TestPackageExposesNoWriteFunctions` 保持绿**（= 未新增任何导出 `FuncDecl`）。不降低既有覆盖率。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-55",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "verify_baseline": {
+    "head": "37388df5223685112f214f0fb19ac371ed96a766",
+    "discovery_sha256": "4501e4c9e8e0f081a3d5fe5484e7acbbd555b6ce56f099162b092cc2610016a3",
+    "at": "2026-08-14T14:40:46Z"
+  },
+  "verifier": "test-agent-28",
+  "reason_class": "task_defect",
+  "reject_reason": "functional[2](a) 要求「6 条写盘路径逐条钉住」，实得 5 条：store.AppendFailed() 那条仍 SURVIVED（我把 TASK-006 §4.1 的原 6 个变异原样重跑，5 KILLED / 1 SURVIVED；TASK-006 时是 1/6，推进很大但未达 DoD）。⚠️ 免除理由「scope 内结构上不可构造」经我实测不成立：runBackfill 的 Fetcher 本来就是注入点，让 fake 在被问到文章 URL 那一刻 os.Chmod(out,0555) 再返回错误，即可让首次 Save 成功而 AppendFailed 那次失败——正是 dev 说「没有中间态」的那个中间态。我在一次性副本里跑通了：未变异 PASS（返回「建临时文件于…permission denied」），打上 D5 变异后 FAIL，有鉴别力；只用 backfill_fetch_test.go，没碰 backfill_manifest.go、没给生产代码加注入点。且它与既有第四格是同一手法（os.Chmod+t.Cleanup），差别只在施加时点（跑前静态预置 vs 跑到一半）。⇒ 故为 task_defect 而非 dod_defect：DoD 可测试、可实现，不自相矛盾。★ 其余 8 条 DoD 全部 PASS 且逐条有承重消融（27 个变异 KILLED 25），覆盖率 94.0%→94.5% 升，无越界，零漂移 ⇒ 返工只需补一格用例、实现代码一行不用改，复验我只重跑 D1–D6 与全量回归，不重验那 8 条。可直接照抄的 15 行构造见报告 .arcforge/docs/04-test/TASK-009-verification.md §2.2。"
+}

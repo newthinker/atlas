@@ -1,0 +1,60 @@
+{
+  "id": "TASK-006",
+  "title": "限速抓取、断点续抓与两类错误的不同处置",
+  "description": "实现 `.arcforge/docs/01-design/design-spec.md` 的 **§7（抓取）**，把交叉校验产出的抓取集真的下载到磁盘。\n\n开工前**先读 `TASK-003`（manifest）与 `TASK-005`（交叉校验）的 discovery** 拿到实际签名。\n\n⚠️ 本任务的两条 `error_handling` **处置刻意相反**，别统一成一种。\n\n## ⚠️ 你是本 sprint 唯一被授权改 `store_test.go` 的人\n\n`internal/hestia/store_test.go` 的 `TestPackageExposesNoWriteFunctions` 用 AST 扫包内非测试 `.go` 文件，断言导出函数/方法集合**恰好等于**一份写死的名单。\n\n**TASK-007（`cmd/atlas`）需要一个包外可见的入口来接 cobra**，那个入口函数定义在你的 `backfill_fetch.go` 里、必然是导出的 ⇒ **守卫一定会被你撞到**。所以 `store_test.go` 已加进你的 `writes`，你是唯一持有者。\n\n**规则**：\n- 只往 want 名单里**追加**你新增的那一个导出入口，**别动既有的 18 项**\n- **只导出那一个入口**，其余一律非导出名（TASK-001/003/004 都已按此交付，别因为你有写权就把内部函数也导出了）\n- 改完跑 `go test ./internal/hestia/ -run TestPackageExposesNoWriteFunctions -count=1` 确认绿\n\n⚠️ 该守卫的注释写明了它与 `reflect` 那条**互补不重复**（reflect 看得见嵌入类型提升的方法，AST 里没有对应 FuncDecl；AST 这条看得见包级函数）。**别删任何一条**。\n\n## 🔴 交出写权之前：**discovery 的「文件」与「指针字段」必须一起写完**\n\n前四个任务（001/003/004/005）**全部只写了文件、没写指针字段**，四次都靠验证者事后补。这不是偶发疏漏，是位置问题——所以这次前置告诉你：\n\n```bash\n# ① 先写 discovery 文件\nARCFORGE_TOKEN=… bash .claude/hooks/arcforge-write.sh --as <你> discovery <ID> < 你的 json\n# ② 再写任务 JSON 里的指针字段  ← 就是这一步被漏了四次\nARCFORGE_TOKEN=… bash .claude/hooks/arcforge-write.sh --as <你> \\\n  task <ID> update --field discovery=.arcforge/discoveries/<ID>.json --expect-epoch <N>\n# ③ 最后才 transition dev_done\n```\n\n**为什么顺序不能反**：转 `dev_done` 之后 owner 变成 `test-*`，你**再也写不了这个任务的任何字段**。而 validator 的 `missing-discovery` 是**阻断级**规则、**只在 `verified` 时触发** ⇒ 你转之前跑 validator 查不出来，转之后只剩验证者能补。\n\n⚠️ 一般形式（本 sprint 反复撞到，三个角色各一次）：**在交出写权之前，把所有还需要写的东西写完。**\n判别式：**做任何 transition 之前问一句「这一步之后我还写得了这个任务的什么？」**\ndev-agent-57 在 TASK-005 上是唯一一次做对的——它**先写 discovery 再转 `dev_done`**，理由是「转完 owner 变了我就写不了它」。照它做。\n\n**自查一行**：`jq -r '.discovery // \"缺\"' .arcforge/tasks/<ID>.json`，非「缺」才转。",
+  "wave": 4,
+  "dependencies": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "context_from": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_fetch.go",
+    "./internal/hestia/backfill_fetch_test.go",
+    "./internal/hestia/store_test.go",
+    "./internal/hestia/backfill_manifest.go",
+    "./internal/hestia/backfill_manifest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**断点续抓**：已在 manifest 且文件存在的**跳过，不重发请求**。断言 fake Fetcher **没有收到**那些 URL——⚠️ 不是只断言「manifest 没变多」，重发了但结果相同时那个断言照样绿。",
+      "**index 页与搜索结果页也存盘**（`index/` 与 `search/` 两个子目录）。它们同样不可再生，存了之后重跑与 M1c-2 的离线核对都能做。",
+      "🔴 **给 `Manifest` 补上 `SearchSkippedReason string `json:\"search_skipped_reason,omitempty\"``，并在 fail-open 时落盘。**\n\n**这是 Leader 的设计缺口，不是 TASK-003 的疏漏**：ADR-M1c1-02 从一开始就要求「跳过必须打 WARN 并**写进 manifest**」，但 design-spec §6 的 JSON 形状漏了它、TASK-003 的 DoD 列举新增字段时也漏了 ⇒ 实现方按较具体的那个做了，字段不存在。dev-agent-57 在 TASK-005 交付时发现：**它返回了这个值，而没人能存**（`backfill_manifest.go` 不在它的 `writes` 里，TASK-003 已 `verified`）。\n\n⇒ 你的 `writes` 已加 `backfill_manifest.go` + `backfill_manifest_test.go`。**只加字段与落盘逻辑，别动 TASK-003 的既有行为**；改完必须跑一遍 TASK-003 的全部既有测试确认仍绿（尤其 JSON 往返一致那条）。\n\n⚠️ **这个字段的全部意义是让「这次没做校验」与「校验通过」在读者看来不一样。** 它的读者是 M1c-2/-3（会读 manifest），不是只读 final-report 的人 —— 所以必须进 manifest。\n断言：搜索侧失效时该字段非空且内容指向失效原因；正常完成时该字段为空（`omitempty` 不出现在 JSON 里）。"
+    ],
+    "error_handling": [
+      "**单篇抓取失败**（网络抖动、单篇 404）⇒ 记入 manifest 的 `failed[]` 并**继续抓后面的**，跑完**返回非零**。这是外部世界的事。",
+      "**落盘失败**（磁盘满、权限）⇒ **立刻中止，不继续抓**。这是本机的事——继续抓只会浪费请求，而且后面每一篇都会失败。\n\n⚠️ 这两条**处置相反是刻意的**（上游 spec §9 末尾专门解释了这一点），两条各写一个独立用例，别统一成一种处置。"
+    ],
+    "non_functional": [
+      "**sleep 调用次数 == 请求次数 − 1**，每次传入的时长都是 `backfillInterval = time.Second`。\n\n⚠️ **别写成「两次请求之间调用了 sleep」**——那句话字面上**一次 sleep 就满足**：记录器里出现 1 条 sleep、365 条请求，该 DoD 照样绿。必须是**计数等式**。\n\n用**可注入的 sleep**（`func(time.Duration)`）实现，测试注入记录器；**不引入 fake clock**。理由（写进注释）：央行站点没有公开的速率限制，1 req/s 是自我约束——回填是一次性动作，跑 9 分钟完全可以接受，没有理由更快。",
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、`go test ./internal/hestia/ -count=1` 全绿，且不降低既有覆盖率。"
+    ],
+    "boundary": [
+      "**manifest 内容是字面量 `null` ⇒ 报错，不得静默当空 manifest。**\n\n来源：test-agent-27 验证 TASK-003 时用探针实测发现——`null` 是**合法 JSON**，所以 `loadManifest` 走的是成功路径、返回空 store、`err=nil`；而 `\"\"` / `true` / `123` / `\"abc\"` / `[]` 全部正确报错。\n\n⚠️ 它**不违反** TASK-003 的 `boundary[1]`（那条的字面要求是「不是合法 JSON ⇒ 报错」），但它落在那条 DoD 想防的**同一类失效**里：静默当空 ⇒ 断点续抓退化成**全量重抓 400+ 次请求，而且不报错**。触发面窄（截断写产不出 `null`，`jq` 管道误操作可能），所以不回炉 TASK-003，在**消费侧**（你这里）堵。\n\n你是 manifest 的直接消费者（断点续抓要读它），这条守卫放在你这里最贴切。断言：喂一份内容为 `null` 的 manifest，确认返回错误而不是「0 篇已抓」。",
+      "🟡 **补上「交集条目取 index 侧字段」在 `URL` 与 `Published` 上的可观测性**（test-agent-28 在 TASK-005 验证中找到的两个 SURVIVED）。\n\nTASK-005 有一条明确的设计决定：**交集那条取 index 侧的字段**（理由：交叉校验是附加防线，不该反过来改写主路径的数据）。它的用例注释自己写着「刻意让两侧的 Title 不同，**否则『取哪一侧』在测试里根本不可观测**」——**原则识别对了，但只应用到了 Title 一个字段**：`URL` 与 `Published` 在用例里两侧逐字相同 ⇒ 把它们改成取搜索侧，**没有任何测试会红**（实测两个 SURVIVED；对照组「取搜索侧 Title」是 KILLED）。\n\n🔴 **这是活的缺口，而且风险由你引入**：index 侧 URL 是**相对路径**（实测 `pboc-index-p1.html` 里是 `/goutongjiaoliu/113456/113469/<id>/index.html`）经 `resolveURL(base, href)` 补全，搜索侧本就是绝对 URL；而 **`base` 由你传入**。两侧 URL 是否同形，**在已提交的代码里还没被确定**——`http` vs `https`、有无末尾斜杠，任一不同即分叉。\n分叉那天，「交叉校验不改写主路径数据」这条设计会**零信号失效**，而你正拿着那个 URL 去下载。\n\n⇒ **为什么放在你这里而不是回炉 TASK-005**：那个缺口在 TASK-005 是**不可达**的（两侧同值），而**你是引入分叉的那一方**。测试放在风险引入点，比放在决定点更能防住它。\n**断言**：喂一组两侧 `URL` 与 `Published` **都不同**的交集数据，确认结果取的是 index 侧那份。（成本两行 + 两条断言；`crossCheckBackfill` 是纯函数，你可以直接调它。）"
+    ]
+  },
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-56",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "ffb1d60e970295b536d10052dde3587ab591ecd7",
+    "discovery_sha256": "7cb895a589bc634c28496b628c298fa6f8ae89684cdd3369efb9346e642e06b8",
+    "at": "2026-08-14T11:45:25Z"
+  },
+  "verifier": "test-agent-28"
+}

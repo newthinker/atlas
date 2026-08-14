@@ -1,0 +1,101 @@
+{
+  "task_id": "TASK-005",
+  "title": "两侧交叉校验：并集、两个差集与搜索侧 fail-open",
+  "by": "dev-agent-57",
+  "at": "2026-08-14T11:20:00Z",
+  "key_findings": [
+    "🔴 **跨任务缺口（已由 leader 裁决补进 TASK-006）：`Manifest` 缺 `search_skipped_reason` 字段。** ADR-M1c1-02 明写「跳过必须打 WARN 并**写进 manifest**」，而 design-spec §6 的 JSON 形状与 TASK-003 的 DoD **都没列它** ⇒ 同一份设计的两个载体不一致，实现方按较具体的那个（JSON 形状）做了。缺口只在**下游真正要落盘时**才暴露。裁决：`backfill_manifest.go` + `_test.go` 加进 TASK-006 的 writes 并配一条 DoD。⚠️ 本任务把它放在返回值 `backfillCrossCheck.SearchSkippedReason` 里 —— **在 TASK-006 落盘之前，它是「返回了但没人存」的状态**，而代码里存在这个字段会让人以为已落盘。一个「有声跳过」的机制，若那个声音无处可放，等于机制不存在。",
+    "**「搜索侧空集」与「搜索侧失效」的差别不止在 `search_skipped_reason`，还会污染差集本身。** DoD `boundary[1]` 只要求两者的 reason 不同；但把空集的处置复用到失效上时，`only_in_index` 会变成**全部 A（可能几百条）** —— 那不是数据错误，是**一句谎报**：宣称「搜索没索到这几百篇」，而事实是根本没问过搜索。读 manifest 的人无从分辨。故失效路径两个差集**必须留空**（TestCrossCheckBackfillSkipLeavesDiffsEmpty，有独立消融）。",
+    "**`if inIndex[id] || seenSearch[id]` 与 TASK-004 那个日期守卫完全同形**：一条语句、两个半边共用一格覆盖率。只喂「两侧都有」的重复时，`seenSearch` 那半永远走不到，而 `go tool cover` 显示 **100%**。⇒ 两侧 dedup 拆成两条子测试分开钉，并各做一次消融（删 index 侧那半 → `index 侧重复` 红；删 `||` 后半 → `搜索侧重复` 红）。这是 boundary[2] 那条教训在**新位置**的应用，不是重复。",
+    "**`Article.Source`（index|search|both）只有交叉校验这一层知道答案。** 不在这里给出，TASK-006 就得把交集算法再实现一遍，而两份实现迟早不一致。⇒ 把知识留在唯一知道它的那一层。"
+  ],
+  "decisions": [
+    {
+      "decision": "交集那条的字段取 **index 侧**（主路径）",
+      "rationale": "index 侧标题来自列表项的 `title=` 属性（原文），URL 经 resolveURL 归一；搜索侧标题是剥过 <font> 高亮的重建值。两者通常一致，**不一致时以主路径为准** —— 交叉校验是附加防线，不该反过来改写主路径的数据。用例刻意让两侧 Title 不同，否则「取哪一侧」在测试里根本不可观测。",
+      "consumed_by": "TASK-006（manifest 的 Article 字段来源）"
+    },
+    {
+      "decision": "输出**定序**：index 侧原序在前，搜索侧独有的按其原序追加",
+      "rationale": "manifest 要能逐次比对，顺序随机会让每次重跑都产生一堆假 diff。map 迭代序不可用。",
+      "consumed_by": "TASK-006 / TASK-008"
+    },
+    {
+      "decision": "失效路径两个差集**留空**，不是「全 A 进 only_in_index」",
+      "rationale": "见 key_findings 第 2 条：那是谎报而非保守估计。",
+      "consumed_by": "TASK-006"
+    },
+    {
+      "decision": "本层是纯函数，`searchErr` 由调用方传入而不是自己去抓",
+      "rationale": "DoD 明写「输入两侧候选集」；抓取与限速在 TASK-006。这样 fail-open 的判定逻辑可以完全离线测试，不需要 fake clock 或 fake fetcher。",
+      "consumed_by": "TASK-006"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_crosscheck.go（新增 133 行）",
+    "internal/hestia/backfill_crosscheck_test.go（新增 308 行）"
+  ],
+  "interfaces_exposed": {
+    "note": "均在 package hestia 内、**未导出**（包级导出守卫 TestPackageExposesNoWriteFunctions 要求；本文件零导出标识符）。TASK-006 / TASK-008 同包直接调用。",
+    "types": {
+      "backfillCandidate": "struct{ backfillItem; Source string } —— 内嵌 backfillItem（ArticleID/URL/Title/Published），Source ∈ {\"index\",\"search\",\"both\"}，即 manifest `Article.Source` 的口径",
+      "backfillCrossCheck": "struct{ Fetch []backfillCandidate; OnlyInIndex []string; OnlyInSearch []string; SearchSkippedReason string }"
+    },
+    "funcs": {
+      "crossCheckBackfill(index []backfillItem, search []backfillSearchHit, searchErr error) backfillCrossCheck": "纯函数，**不返回 error**。searchErr 非 nil ⇒ fail-open：Fetch = 全部 index（Source 全标 index）、两个差集留空、SearchSkippedReason 非空。"
+    },
+    "consts": {
+      "backfillSourceIndex / backfillSourceSearch / backfillSourceBoth": "\"index\" / \"search\" / \"both\""
+    },
+    "🔴 note_for_TASK_006": "① **`SearchSkippedReason` 需要你落盘** —— `Manifest` 目前没有该字段，加字段与落盘逻辑已划进你的 writes（`backfill_manifest.go` + `_test.go`）与 DoD。**别只加字段不加用例**，那个字段的全部意义就是让「没做校验」与「校验通过」不一样。② `Fetch` 已定序、已去重、已带 Source，直接遍历落 manifest 即可，**不要再自己算交集**。③ 本层不返回 error，所以 fail-open 已经在这里完成了 —— 你那侧只需把 `SearchSkippedReason` 透传进 manifest 并打 WARN，不要再判一次。④ `OnlyInSearch` 非空是**告警不是失败**（ADR-M1c1-01）：并集已收进抓取集，交付物不缺。",
+    "note_for_TASK_008": "逐期对账的输入是 `Fetch`（已是并集），不是单侧。`OnlyInIndex` / `OnlyInSearch` 是**来源差异**，与「缺篇」是两件事：某期三篇不齐是 reconcile 的判据，而差集说的是「哪一侧没索到这篇」。别混。"
+  },
+  "verification": {
+    "anchor": "全部数字采自 **a9d75720b0616a2b836a04e3a311f41c2da122b2**（= 合并后的 master，fast-forward，无 merge commit）",
+    "suite": "go test ./internal/hestia/ -count=1 → ok，0 FAIL。本任务 **10 顶层 + 7 子测试 PASS**。",
+    "coverage": "94.0% → **94.2%**（同一 worktree 背对背：把两个新文件移出 package 跑一次、移回再跑一次）。新文件 **2 个函数全 100%**。",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/ 空；包级导出守卫 TestPackageExposesNoWriteFunctions 绿；`grep -cE '^func [A-Z]|^type [A-Z]|^var [A-Z]|^const [A-Z]' backfill_crosscheck.go` = **0**",
+    "numstat_of_commit": "git show --numstat a9d7572：backfill_crosscheck.go 133/0、backfill_crosscheck_test.go 308/0 —— 纯新增，0 删除，无越界",
+    "post_merge": "主工作区两个文件与 `git show a9d7572:<file>` **逐字节相同**；另按「我要的东西在不在」正向核实：`func crossCheckBackfill` 1 处、`DedupsEachSide` 2 处、`RejectsAboveUpperBound` 3 处。",
+    "ablation": {
+      "harness": "变异只作用在本 dev 独占的 worktree 上。每个变异体先过 `go build` 语法/类型闸（崩溃型变异不计 KILLED），打印与原文的 diff 逐字核对，只跑 `-run '^TestXxx$'` 锚定的目标用例，跑完还原并**校验 sha256 与基线逐字相符**。",
+      "result": "**13/13 KILLED、0 SURVIVED**，在最终树上重跑。",
+      "list": [
+        "并集丢掉搜索侧独有 → UnionsBothSides",
+        "交集不去重(搜索侧那份也加进来) → UnionsBothSides",
+        "OnlyInIndex 算成全部 index → UnionsBothSides",
+        "交集字段取搜索侧 → PrefersIndexSideOnOverlap",
+        "Source 一律标 index → TagsSource",
+        "fail-open 时把 A 全塞进 OnlyInIndex → SkipLeavesDiffsEmpty",
+        "fail-open 时抓取集清空 → FailsOpenOnSearchError",
+        "fail-open 时静默跳过(reason 留空) → FailsOpenOnSearchError",
+        "把空搜索侧也当成失效 → EmptySearchIsNotFailure",
+        "日期守卫删掉上界（test-agent-28 的 SURVIVED 原样复现）→ RejectsAboveUpperBound + GuardsBothEnds/高于上界",
+        "日期守卫删掉下界（镜像）→ GuardsBothEnds/低于下界",
+        "index 侧 dedup 删掉 → DedupsEachSide/index 侧重复",
+        "搜索侧 dedup 删掉（|| 的后半）→ DedupsEachSide/搜索侧重复"
+      ],
+      "🔴 boundary[2] 的自证":"没有停在「我写了两条用例」：把 test-agent-28 那个 SURVIVED 变异**原样打回去跑**，确认 RejectsAboveUpperBound 与 GuardsBothEnds 双双转红，且**红在 `高于上界` 那一格**（不是别的兄弟断言先红）；镜像变异（只删下界）红在 `低于下界` ⇒ 两半各自承重。**判据是哪条红，不是红不红。**"
+    },
+    "dod_coverage": [
+      {"criterion":"functional[0] 抓取集 = A ∪ B，交集只出现一次","evidence":"TestCrossCheckBackfillUnionsBothSides 断言并集 id 序列逐个相等（4 条，交集那 2 条各一次）。构造刻意让交集有**两条**而非一条 —— 只有一条时「交集去重」与「碰巧只留了第一条」分不开。配 TestCrossCheckBackfillPrefersIndexSideOnOverlap（交集取哪一侧可观测）。"},
+      {"criterion":"functional[1] only_in_index = A \\ B，断言具体 id","evidence":"同上用例中 `assert.Equal([]string{xcIDOnlyIndex}, got.OnlyInIndex)` —— 断言**具体 id 序列**，不是条数（条数相同而内容错位的实现能过条数断言）。"},
+      {"criterion":"functional[2] only_in_search = B \\ A，断言具体 id","evidence":"`assert.Equal([]string{xcIDOnlySearch}, got.OnlyInSearch)`。变异「并集丢掉搜索侧独有」KILLED。"},
+      {"criterion":"boundary[0] 两侧完全相同 ⇒ 两差集空、并集 = 任一侧","evidence":"TestCrossCheckBackfillIdenticalSides，另断言每条 Source 都是 both。"},
+      {"criterion":"boundary[1] 搜索侧空集（非错误）⇒ only_in_index = 全部 A、only_in_search 空、并集 = A、reason **为空**","evidence":"TestCrossCheckBackfillEmptySearchIsNotFailure 四个断言齐全。与失效路径由变异「把空搜索侧也当成失效」分开钉住 —— 合并处置会让「关键词写错导致 0 条」被当成「服务挂了」静默放过。"},
+      {"criterion":"boundary[2] 补 TASK-004 日期守卫「上界」那半的测试背书","evidence":"TestCheckBackfillSearchDateRangeRejectsAboveUpperBound（历史区间 to=2022-12-31，越界条目 2025-08-13 ⇒ 报错，断言错误里同时含越界日期与被越过的上界）+ TestCheckBackfillSearchDateRangeGuardsBothEnds 五格表驱动（低于下界/恰好下界/区间内/恰好上界/高于上界）把两半成对钉住。已复现原 SURVIVED 变异确认杀得掉，见 ablation。"},
+      {"criterion":"error_handling[0] 搜索侧失效 ⇒ 跳过校验、抓取集 = A、返回 nil error、reason 非空","evidence":"TestCrossCheckBackfillFailsOpenOnSearchError（抓取集 = 完整 A、reason 非空且含原始错误文本、每条 Source = index —— 没做校验就不能声称某条也在搜索侧）+ **DoD 之外的** TestCrossCheckBackfillSkipLeavesDiffsEmpty（两个差集必须为空，见 key_findings 第 2 条）。本函数不返回 error，「nil error」由签名保证。"},
+      {"criterion":"non_functional[0] gofmt/vet/test 干净且不降低既有覆盖率","evidence":"gofmt 空、vet 空、整包 ok；覆盖率 94.0% → 94.2%（**升**，背对背同一 worktree 采样）。"}
+    ]
+  },
+  "git": {
+    "branch": "task/TASK-005",
+    "head": "a9d75720b0616a2b836a04e3a311f41c2da122b2",
+    "base": "d4b4866",
+    "note": "leader 合并后 master 即为 a9d7572（fast-forward，无 merge commit）。分支保留给验证者复现。"
+  },
+  "open_items_for_leader": [
+    "**`search_skipped_reason` 已裁决进 TASK-006**（选项①）。请确保它的 DoD 里那条既要求「加字段」也要求「加用例」—— 只加字段不加用例的话，这个字段会以「已经防住了」的假象存在，而它防的恰恰就是这种假象。",
+    "「交集取 index 侧字段」这个设计决定请验证者复核：理由是「交叉校验是附加防线，不该反过来改写主路径数据」，用例通过让两侧 Title 不同使其可观测。"
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "id": "TASK-011",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "交叉校验的「有声跳过」对看终端的人也要成立",
+  "description": "## 来源与性质\n\nQA（`qa-m1c1`）在主报告落盘**之后**、经迟到的 lens inbox 消息补充的一项。**它不在 TASK-010 的九条 DoD 里**——我当时想加，而 dev 已领回任务、写通道 DENY。\n\n⚠️ **不是 dev 的遗漏**：它在 `dev_done` 之后主动报告了这件事，并指出自己当时既走不了 `blocked_clarification` 也回不到 `in_progress`（`dev_done` 的合法出边只有 `→ verifying`）。**是我给了它两条它执行不了的路。**\n\n## 缺陷\n\n搜索侧 503 时，`search_skipped_reason` 确实按 ADR-M1c1-02 **写进了 manifest**，**但 stdout 报告一个字不提、退出码 0** ⇒ **跑命令的人看不到异常**。\n\n⇒ 「有声跳过」目前**只对读 manifest 的人成立，对看终端的人不成立**。\n\n## 🔴 修法：两种形态都可以，**别按「必须改签名」估时**\n\nQA 说「修它要改函数签名，不是加两行 `Fprintln`」——**dev 读载体后订正了前半句，我采纳它的版本**：\n\n```go\n// runBackfill 内，同一个函数体：\ncc := crossCheckBackfill(scan.Reports, hits, searchErr)          // ~159 行\n...\nwriteBackfillReconcileReport(backfillReportWriter(cfg.Report), rc)  // ~228 行\n```\n\n`cc`（含 `SearchSkippedReason` 与两个差集）**在报告写出那一行仍在作用域内** ⇒ 在调用点补几行 `Fprintf` 到同一个 writer **功能上就够，不需要动签名**。\n\n改签名（把 reason 与差集传进 `writeBackfillReconcileReport`）是**更好的形态**（报告内容都由报告函数产出、测试可只针对它），但那是**内聚性偏好，不是必要条件**。**两种都在 3–8 行量级，差别只在测试挂在哪一层——你选，并在 discovery 写明为什么。**\n\n⚠️ 已确认的事实：`writeBackfillReconcileReport(w, rc backfillReconcile)` 的 `rc` **没有任何 search / cross / skip 字段**（QA 读代码、dev 复核、Leader 确认，三方一致）。",
+  "wave": 8,
+  "dependencies": [
+    "TASK-010"
+  ],
+  "context_from": [
+    "TASK-010"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_fetch.go",
+    "./internal/hestia/backfill_fetch_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**搜索侧被跳过时，stdout 报告必须可见地说明**：至少包含 `SearchSkippedReason` 的内容，以及「本次交叉校验未生效」这一事实。**验收消融**：让搜索侧返回 503 ⇒ 断言 stdout **出现**该说明；把那几行输出删掉 ⇒ **该断言必须红，且只红它**（报告「红在哪一条」）。"
+    ],
+    "boundary": [
+      "**搜索侧正常时不得出现该说明**（否则每次跑都打一句「未生效」，等于没说）。⇒ 两格用例成对：503 ⇒ 出现；正常 ⇒ 不出现。\n\n⚠️ **这一对是互补的，缺任一条另一条都可能被平凡满足**——只测「出现」时，一个无条件打印的实现照样绿。"
+    ],
+    "error_handling": [
+      "**退出码语义不变**：搜索侧失败仍 fail-open（`errBackfillDisk` 例外除外），**本任务只增加可见性，不改变任何退出码或中止行为**。⇒ 验收：既有的 `TestCrossCheckBackfillEmptySearchIsNotFailure` 等用例**全部保持绿**，且 `internal/hestia` 全套件零红。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、全套件绿；覆盖率**不低于 TASK-010 交付基线**（`internal/hestia` **94.802%**，两包合并 **85.515%**，均为 NumStmt 加权口径、背对背各自树内渲染）。\n\n⚠️ **门禁守不了这条**（`coverage_floor` 是绝对下限，表达不了相对判据）—— **这条只能由你自己背对背测出来并报给验证者**，和 TASK-010 那轮一样。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-14T22:59:12Z"
+  },
+  "assigned_to": "dev-agent-55",
+  "questions": [
+    {
+      "q": "TASK-011 已完成并推到 task/TASK-011 @ 64ac5593e56cdb56984e2c1c4e008fab0f562033（基于 master 853ba69），请合入。⚠️ 合入前我无法转 dev_done：门禁在主仓库跑 go test，而主仓库当前没有这次改动（内容判据：backfillReconcileSearchSkippedLabel 在 master 上命中 0 次）⇒ 转过去会在一棵没有我代码的树上判「通过」，是假绿。合入后我会自行 transition in_progress 领回并转 dev_done。收尾自检已过：gofmt 空、vet 干净、两包全绿、改动 2 文件=声明 2 项 writes；消融 T11-a/T11-b 各只红一条；覆盖率 internal/hestia 94.802→94.810、合并 85.515→85.525（均不低于基线）。",
+      "asked_at": "2026-08-15T03:20:00Z",
+      "answer": null
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "verify_baseline": {
+    "head": "abaca101d54065ba1803b98d19a25558d8692a4f",
+    "discovery_sha256": "9cc7cd512de91fa1f2269d171f815a21bc650c08a08260b995559bfba2057036",
+    "at": "2026-08-14T22:51:19Z"
+  },
+  "verifier": "test-agent-27"
+}

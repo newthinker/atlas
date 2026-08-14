@@ -1,0 +1,145 @@
+{
+  "task": "TASK-008",
+  "title": "完整性对账：逐期缺篇表与结构不变量",
+  "by": "dev-agent-55",
+  "commit": "578a68ff1cd29b0453893b717f6cc816e6c73463（FIX-B 返工；原交付 70c8620 已合入 master ffb1d60 并 verified 9/9）",
+  "branch": "task/TASK-008-fix",
+  "base": "master a9d75720b0616a2b836a04e3a311f41c2da122b2",
+  "key_findings": [
+    "🔴 **归组的关键是按「期末月」而不是「期次段的字面量」**。一季度→03 而 3月→03；上半年→06 而 6月→06；前三季度→09 而 9月→09；无期次段→12。⇒ DoD functional[3] 那四种表述形态**自动坍缩到同一个键**，不需要维护一张「哪些说法算同一期」的映射表。这也是为什么 3/6/9/12 月不会与累计期次撞车——央行那几个月**不单独发月报**，由累计期次覆盖（设计附录 §E）。期末月映射直接沿用 types.go 的 periodEndMonth / discover.go 的 parsePeriod，**不新增第二份约定**。",
+    "🔴 **DoD 字面的「不足 N 篇即缺篇」会漏掉一整类，我改成了按种类判**。反例：「2 篇社融存量（同期修订重发 / 跨页重复未去净）+ 1 篇增量 + 0 篇金融统计」⇒ Got=3 == Want=3 ⇒ **按篇数判放行**，而这一期实际缺了《金融统计数据报告》。按种类判是按篇数判的**严格加强**：Got < Want ⇒ 至多覆盖 Got 个种类 ⇒ 必有应有种类缺席 ⇒ 同样被抓到，反过来不然。⇒ 不放过 DoD 要求抓的任何一种，只多抓这一类。变异 R1（退回按篇数）**只杀掉** TestReconcileBackfillCountEqualButKindMissing ⇒ 那条用例是这处加强的唯一守卫，其余全部测试在 DoD 字面实现下照样绿。",
+    "🔴 **v2 期次的 Missing 不能相对全部三种算**。社融存量/增量自 2025-09 起央行**不再发**（实测最后一期是「2025年8月…」，同日发布于 2025-09-12）⇒ 对 v2 期次列出「缺存量、缺增量」是**误导**：那两种在该期本来就不存在。这个错误是**先写的测试抓到的**——我最初照「全部三种」实现，TestReconcileBackfillMissingByStructuralRule 当场红。",
+    "**Kinds/Got/Titles 走全部三种，Missing 才走 wanted**：v2 期次若真出现了社融存量，那是站点行为变了，必须在表上**看得见**，不能因为「v2 不该有它」就把它从实得里抹掉。两个口径刻意不同。",
+    "**「零期次」与「全部齐全」在缺篇表上无法区分**（两者 MissingPeriods 都是空的）⇒ 必须有独立的 Empty 标记 + 告警。这正是本任务要兜住的静默零通道：`--from` 打错一位 ⇒ 0 篇 + 退出码 0。TestReconcileBackfillEmptyInputIsMarked 把「两者在缺篇表上不可分」这件事也写成了断言。",
+    "**无法归类的标题不 continue 掉**（不在 DoD 里，我加的）：对账的全部意义是「不让东西静默消失」，而一个解析不出期次的标题若被丢弃，它就从这张表上彻底消失了——与本任务要防的失效**完全同形**。收进 Unclassified 并计入告警，人才有机会发现「站点改了期次表述」。月份上下界（13月 / 0月）同理：`\\d{1,2}月` 匹配得上，若静默接受会造出 \"2020-13\" / \"2020-00\" 这种期次键把表污染得无人能看懂。",
+    "**两个适配器守的是跨任务契约，不是内部逻辑**：对账在抓取**前**（对候选集，可在花掉约 250 次请求前发现缺口）与抓取**后**（对 manifest，同时覆盖抓取失败造成的缺口）都有意义。本 sprint 反复出问题的正是「两个任务各自以为对方会做」的接缝，所以两个入口都钉住，而不是留给下游各写一个循环。"
+  ],
+  "decisions": [
+    {
+      "decision": "核心函数吃 []backfillReconcileItem{ID,Title}，另配两个适配器（from candidates / from articles）",
+      "rationale": "归组与判缺篇**全部依据标题**，id 只用于把「是哪一篇」报回去。不直接吃 backfillCandidate 或 Article，是因为对账在抓取前后两个位置都有意义，而两者是同一批文章的两种载体。TestReconcileBackfillItemAdapters 断言两条入口给出**逐字相同**的表。"
+    },
+    {
+      "decision": "缺篇判据 = len(row.Missing) > 0，不是 row.Got < row.Want",
+      "rationale": "见 key_findings 第 2 条：前者是后者的严格加强，且 DoD 要求抓的每一种它都抓得到。Want/Got 仍留在表里作信息列。"
+    },
+    {
+      "decision": "cutover 是参数不是常量，比较用 `p >= cutover`（切换点**当期**已属 v2）",
+      "rationale": "写死会让判定无法随实测调整，也让「边界不偏移一期」没法被单独证伪（TestReconcileBackfillMissingByStructuralRule 里换一个 cutover 再判一次，写死的实现只有那一条会红）。`>=` 而非 `>`：实测切换点当期 2025-09 用的是累计表述「2025年前三季度」，且该期起每期恰好一篇。"
+    },
+    {
+      "decision": "缺篇本身**不构成 Failed()**，只有显式传入的期望值不符才算失败",
+      "rationale": "「哪些期缺篇」正是 spec §10 Q3 要的答案，也是 M1c-3 的输入——把它判成失败会让一次正常的回填（历史上本来就有期次不齐）无法收工。而推算值 79/217 只有告警权：让未经实测的数有权阻断交付，会在推算偏差时卡死整个 sprint。"
+    },
+    {
+      "decision": "显式传入时不再走告警路径（同一件事只报一次）",
+      "rationale": "既告警又失败会让读者以为是两个问题。TestReconcileBackfillExpectations 里「显式传入且不符」那条断言 Warnings 为空。"
+    },
+    {
+      "decision": "全部标识符非导出",
+      "rationale": "store_test.go 的 TestPackageExposesNoWriteFunctions 用 AST 扫包内非测试文件，断言导出 FuncDecl 集合恰好等于写死名单，而该文件本 sprint 唯一持有者是 TASK-006。调用方（TASK-006/007）同包，本来就不需要导出。**类型也没导出。**"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_reconcile.go（新建，296 行）",
+    "internal/hestia/backfill_reconcile_test.go（新建，425 行，11 个测试函数）"
+  ],
+  "interfaces_exposed": {
+    "note": "均在 package hestia 内、**未导出**。TASK-006（fetch）与 TASK-007（CLI）同包直接调用。",
+    "types": [
+      "type backfillReconcileItem struct { ID string; Title string }  // 对账最小输入",
+      "type backfillExpect struct { Periods int; Articles int }  // **零值 = 未显式传入 ⇒ 走告警路径**",
+      "type backfillPeriodRow struct { Period string; Rule string; Want int; Got int; Kinds []string; Missing []string; Titles []string }  // Period 是期末月 YYYY-MM；Kinds/Got/Titles 走全部三种，Missing 只走该 Rule 应有的种类",
+      "type backfillReconcile struct { Rows []backfillPeriodRow; Periods int; Articles int; MissingPeriods []string; Unclassified []string; Empty bool; Warnings []string; Violations []string }"
+    ],
+    "funcs": [
+      "func reconcileBackfill(items []backfillReconcileItem, cutover string, expect backfillExpect) backfillReconcile  // cutover 是期次 YYYY-MM，实测 \"2025-09\"；**该期及其之后**按 rule@v2",
+      "func backfillReconcileItemsFromCandidates(cs []backfillCandidate) []backfillReconcileItem  // 抓取前：喂 TASK-005 的 Fetch",
+      "func backfillReconcileItemsFromArticles(as []Article) []backfillReconcileItem  // 抓取后：喂 manifest 的 Articles",
+      "func backfillPeriodOf(title string) (period, kind string, ok bool)  // 标题 → (期末月, 报告种类)；ok=false 的进 Unclassified",
+      "func (r backfillReconcile) Failed() bool  // 只看 Violations —— 缺篇不是失败",
+      "func backfillWantedKinds(rule string) []string"
+    ],
+    "consts": [
+      "backfillKindFinance / backfillKindStock / backfillKindFlow  // 三种报告种类字面量",
+      "backfillRuleV1 = \"rule@v1\" / backfillRuleV2 = \"rule@v2\"",
+      "backfillExpectedPeriods = 79 / backfillExpectedArticles = 217  // **推算不是实测**，只有告警权"
+    ],
+    "caller_contract": [
+      "**Failed() 为 true 时才该非零退出**。缺篇（MissingPeriods 非空）是**要报告的事实**不是失败——它正是 spec §10 Q3 的答案。",
+      "**Warnings 一定要打出来**：零期次、有无法归类的标题、与推算值不符，三种都只走 Warnings。吞掉 Warnings 等于把本任务的全部价值关掉。",
+      "**Empty 字段不能用「Rows 为空」替代判断**：调用方要把「一期都没有」与「全部齐全」区分开来告诉人，两者的 MissingPeriods 都是空的。",
+      "cutover 由调用方传入（实测 \"2025-09\"），**别在调用方那侧再写死一份**——它是参数正是为了能随实测调整。",
+      "本函数**不碰网络、不碰磁盘、不返回 error**：所有异常都表达成 Warnings / Violations / Unclassified 三个字段。"
+    ]
+  },
+  "verification": {
+    "anchor": "全部数字采自 FIX-B 返工后的同一棵树：task/TASK-008-fix @ 578a68ff1cd29b0453893b717f6cc816e6c73463（工作树干净），基线 master ffb1d60",
+    "suite": "go test ./internal/hestia/ -count=1 → ok；-v 计数 PASS(含子测试)=819 / FAIL=0 / SKIP=0",
+    "own_tests": "本任务 12 个测试函数（原 11 + 返工新增 KindsShowFactsNotRules），单跑全 PASS",
+    "gofmt": "gofmt -l internal/hestia/ → 空",
+    "vet": "go vet ./internal/hestia/ → 空",
+    "export_guard": "go test -run TestPackageExposesNoWriteFunctions → ok（本任务零导出标识符，含类型）",
+    "coverage": "背对背同一时刻采样：pre = master ffb1d60 1301/1384 = 94.003%；post = 578a68f **同为 1301/1384 = 94.003%**（+0.000pp）—— 只加测试不加实现，走的是已覆盖路径。backfill_reconcile.go 6 个函数仍全部 100%。",
+    "numstat": "git show --numstat HEAD = 74/7（仅测试文件；实现零改动）",
+    "mutation": {
+      "anchor": "🔴 **在交付树上重跑**（leader 要求，理由与我上次自己撤回的那条相同）：隔离副本 = master 578a68ff1cd29b0453893b717f6cc816e6c73463 的 detached worktree，被变异文件 sha256 = f6ae5719ef16446716f77596deec84c9022f2852f95a7b1049035028f8a038d0，与交付的 backfill_reconcile.go 一致；跑完已 remove；主 worktree 指纹全程未变。",
+      "gates": "语法闸(gofmt -e) + 语义闸(逐条打印 diff 核对) + 编译闸(build failed 不计 KILLED)",
+      "result": "**12 个变异全部 KILLED，0 存活，0 无效**（采自交付树 578a68f）",
+      "detail": [
+        "R1  缺篇判据退回 DoD 字面的「按篇数」→ **只杀 CountEqualButKindMissing** ⇒ 那条用例是这处加强的唯一守卫",
+        "R2  缺篇判据恒假 → 4 条与缺篇有关的测试红",
+        "R3  切换点 >= 改 > → CutoverBoundary + MissingByStructuralRule",
+        "R4  v2 也要求三种 → CutoverBoundary + MissingByStructuralRule + **KindsShowFactsNotRules**（新 fixture 后多出的这条）",
+        "R5  年度映射 12→01 → 仅 GroupsFourPeriodForms/年度",
+        "R6  上半年映射 06→05 → GroupsFourPeriodForms 的**两条**上半年用例（2020 与 2025 两组实例各守一条）",
+        "R7  一季度映射 03→01 → GroupsFourPeriodForms/一季度 + PerPeriodTable + ItemAdapters + DetectsSilentlySkipped",
+        "R8  无法归类的标题静默丢弃 → 仅 DoesNotSilentlyDropUnclassified",
+        "R9  零期次不再标记 Empty → 仅 EmptyInputIsMarked",
+        "R10 显式期望值不符降级成告警 → 仅 Expectations/显式传入且不符",
+        "R11 未显式传入时也硬失败 → 仅 Expectations 的两条告警路径用例",
+        "R12 去掉期次排序 → 仅 PerPeriodTable（强度见 r12_strength）",
+        "E2  Kinds/Got/Titles 也只走 wanted（FIX-B 定向）→ **只红 KindsShowFactsNotRules**",
+        "E10 删 sort.Strings(row.Titles)（FIX-B 定向）→ **只红 PerPeriodTable**"
+      ],
+      "caveat": "R12 形式上仍是概率性变异（依赖 map 迭代序），实测存活率见 r12_strength：新 fixture 上自测 200/200 KILLED。其余 11 个 + E2/E10 均为确定性。",
+      "r12_strength": {
+        "correction": "🔴 **我原来标的「约 1/6 存活率」是错的，且错在机制不在保守度**。我只数了**一个**排序约束（rcPeriods 必须等于升序表），漏了同一条测试里的**第二个独立约束**——「倒序喂入后 Rows 必须逐字相同」。两个约束都要碰巧满足 ⇒ 存活率是 (1/n!)² 而非 1/n!；返工后 fixture 有 4 个期次 ⇒ 约 (1/24)² ≈ 0.17%，不是 1/6 ≈ 17%。",
+        "measured_by_me": "自测 **200 次独立试验（go test -count=200，Go 每次 range map 都重新随机化迭代序）⇒ 200/200 KILLED、0 存活**。按三倍法则，95% 置信上界约 1.5%。",
+        "measured_by_verifier": "test-agent-27 独立跑 30 个进程 ⇒ 30/30 KILLED、0 存活。",
+        "conclusion": "形式上仍是**概率性**变异（依赖 map 迭代序），但实测存活率 < 1.5%，**实践上可当确定性用**。⚠️ 保留「概率性」这个限定：它的杀伤力来自 fixture 的期次数，期次数减少会让存活率回升。",
+        "lesson": "**诚实的自我限制也该被实测校准**：一个偏保守的标注会让后人对那条变异的信心低于它应得的。而我这次偏差的成因不是「保守」，是**漏数了一个约束** —— 那不是态度问题，是没把测试读完。"
+      },
+      "rerun_changed_results": "🔴 **重跑不是形式：结果确实变了。** 我当时的理由是「实现零改动 ⇒ 变异结果不会变」，**实测证伪**：R4（v2 也要求三种）在旧 fixture（70c8620）上杀 2 条 [CutoverBoundary, MissingByStructuralRule]，在交付树上杀 **3 条**——多出 **KindsShowFactsNotRules**。成因是 FIX-B 换的新 fixture 让 v2 期次里出现了社融存量，R4 因此变得更有鉴别力。⇒ 「实现没变」不蕴含「变异结果不变」：**变异的杀伤集是实现与 fixture 的联合函数**，而我只考虑了实现那一半。"
+    },
+    "stats_tooling": "统计一律用 python3 / awk / grep -c，**未使用裸 sort -u / uniq**（macOS 默认 locale 把任意两个汉字判为相等，对本语料会静默少 25%，而少掉的恰好是「存量」/「增量」这一对）",
+    "delivery_tree": {
+      "anchor": "master ffb1d60e970295b536d10052dde3587ab591ecd7（含本任务 + TASK-006 的 fetch 层），即 dev_done 门禁与验证者实际会跑的那棵树",
+      "why_numbers_differ": "与 anchor=70c8620 那组不同，是因为交付树上另外并入了 TASK-006 的代码与测试，**不是本任务产物有变**——已核实我那两个文件在两个 sha 上逐字节相同。两组都保留：70c8620 那组是单变量对照（只有我的改动），本组是交付树实测。",
+      "suite": "go test ./internal/hestia/ -count=1 → ok；-v 计数 PASS(含子测试)=818 / FAIL=0 / SKIP=0",
+      "own_tests": "go test -run TestReconcileBackfill -v → 11 个测试函数全 PASS",
+      "gofmt": "空",
+      "vet": "空",
+      "export_guard": "TestPackageExposesNoWriteFunctions → ok",
+      "coverage": "1301/1384 = 94.003%（绝对值）。⚠️ 低于我在 70c8620 上测的 94.543%，成因是 TASK-006 的新代码覆盖率较低，**不是本任务的回归**——本任务的增量对照见下面 70c8620 那组的背对背采样 +0.348pp。",
+      "integration_precheck": "合并前我在临时 detached worktree 上真跑过一次三方合并：无冲突、全绿。特意核对了跨任务接缝——我的 backfillReconcileItemsFromArticles 依赖 Article{ID,Title}，而 TASK-006 改的是 Manifest（加 SearchSkippedReason），Article 一个字没动。"
+    }
+  },
+  "notes_for_downstream": [
+    "TASK-006/007：对账**不返回 error**，判「要不要非零退出」只看 `Failed()`（= Violations 非空 = 显式期望值不符）。缺篇不是失败。",
+    "TASK-007（CLI）：`--expect-periods` / `--expect-articles` 映射到 backfillExpect 的两个字段，**不传就是零值**，那时走推算值告警路径。cutover 也该是 flag 或常量传入，别在 CLI 侧再写死一份。",
+    "M1c-3：`MissingPeriods` + 每行的 `Missing` 就是「哪些期会缺字段、缺哪几种」的直接输入。`Unclassified` 非空意味着站点可能改了期次表述，需要人看一眼。",
+    "本任务的 packages/writes 声明与实际写入完全一致，无越界文件。"
+  ],
+  "merged_into_master": "ffb1d60e970295b536d10052dde3587ab591ecd7（leader 三方合并；已核实 master 上我那两个文件的 sha256 与 70c8620 逐字节一致，且 70c8620 是 master 的祖先）",
+  "rework": {
+    "round": 1,
+    "reason_class": "task_defect（交付物测试覆盖不足，非实现错误）",
+    "fix_items": "FIX-B（两条空声明）+ FIX-C（R12 强度自估订正）",
+    "implementation_unchanged": "实现**零改动** —— git diff master 只动了 backfill_reconcile_test.go（74/7）。两处实现原本就正确、DoD 规则也满足，缺的是守卫。",
+    "what_was_hollow": "我在实现注释里写了两句意图，验证者实测**删掉后全包无一变红** ⇒ 当时是空声明：① 「v2 期次若真出现社融存量，必须在表上看得见」（Kinds/Got/Titles 走事实、Missing 走规则）；② sort.Strings(row.Titles) 的排序。⚠️ 两条同根：排序只在「同一种类多篇」时起作用，而那正是 ① 存在的理由（修订重发），原 fixture 每期每种恰好一篇、v2 期次只有一种 ⇒ 两条都不可观测。",
+    "fix": "换一份共用 fixture（rcTableFixture）造出原 fixture 缺的两个形态：**同一期同一种类两篇**（2020-03 存量有「3月」与「一季度」两种表述，输入顺序 ≠ 字节序）+ **v2 期次里出现社融存量**（2025-10）。不新增第二套 fixture。",
+    "ablation": "**判据是哪条红**：E2（Kinds/Got/Titles 也只走 wanted）→ **只红** TestReconcileBackfillKindsShowFactsNotRules；E10（删 sort.Strings(row.Titles)）→ **只红** TestReconcileBackfillPerPeriodTable。两条各自唯一，无交叉。",
+    "byte_order_note": "期望的标题序按**字节序**独立核算（社 0xE7 < 金 0xE9；增 0xE5A29E < 存 0xE5AD98 ⇒ 金融统计排最后）。⚠️ 我第一次凭直觉排错（把「金融统计」放第二位），被这条断言当场证伪 —— **汉字的字节序与阅读直觉无关，别手排**。这也说明该断言本身有鉴别力。"
+  }
+}
