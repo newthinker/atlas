@@ -1,7 +1,6 @@
 package hestia
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"regexp"
@@ -72,11 +71,58 @@ var backfillTitleRE = regexp.MustCompile(
 var backfillItemRE = regexp.MustCompile(
 	`(?s)href="([^"]*?/(\d+)/index\.html)"[^>]*?\stitle="([^"]*)"[^>]*>.*?</a>\s*</font>\s*<span class="hui12">\s*(\d{4}-\d{2}-\d{2})\s*</span>`)
 
-// backfillIstitleMark 是计数守卫的基准。
+// backfillIstitleAnchorRE / backfillInternalHrefRE / backfillInternalIstitleCount
+// 一起构成计数守卫的基准：**站内**的 `istitle="true"` 条目数。
 //
 // ⚠️ 基准是 `istitle="true"` 而**不是** `class="hui12"`：实测 p146 上 `class="hui12"`
 // 共 21 处 = 15×span（日期）+ 5×td + 1×table（页面骨架），拿它作基准会让守卫恒假、天天报错。
-var backfillIstitleMark = []byte(`istitle="true"`)
+//
+// # 为什么要再排掉站外条目（TASK-007 真跑时撞出来的）
+//
+// 原基准是 `bytes.Count(html, []byte("istitle=\"true\""))`，在真实语料上**不成立**：
+// 央行列表页会混进指向站外的条目（实测 p54 一条 gov.cn 的国务院决定），它带全套
+// istitle / title / 日期属性，只有 href 是绝对 URL ⇒ backfillItemRE 的
+// `/(\d+)/index\.html` 结构上匹配不到 ⇒ 14 vs 15，整条回填在 p54 硬失败。
+// 实测 p1..p155 共 2325 条 istitle 锚，**站外恰好 1 条、不符的页恰好 1 页**，
+// 新基准 0 反例。
+//
+// # 为什么不是「只数 href 形如文章页的锚」
+//
+// 那个修法更自然，但它让**守卫跟着被守护的东西一起坏**：href 形态哪天变了
+// （如 `/index.htm`），基准会同步下降，两个数照样相等，守卫恒绿。
+//
+//	⇒ **守卫的基准必须独立于它要守护的那个属性。**
+//	  基准与被测量共用一个来源时，它测不出那个来源的变化。
+//
+// 「站内 / 站外」这个分界与 href 的具体形态**正交**，形态变化仍会告警。这与上面
+// 「不把 istitle 写进 backfillItemRE」是同一条理由的第二次应用。
+//
+// # 两条正则各自的 `\s` 都不是装饰
+//
+// `\sistitle=` 与 `\shref=`：前缀必须是空白，挡的是 `data-istitle=` / `data-href=`
+// 这类**后缀同名**属性 —— 与本文件上面 `\stitle="` 挡 `istitle="true"` 完全同构，
+// 那次的后果是「条数一条不少、只有标题全错」。`(?:[^>]*\s)?` 让 `istitle` 出现在
+// 第一个属性位（`<a istitle="true" …>`）时也数得到，不依赖属性顺序。
+var (
+	backfillIstitleAnchorRE = regexp.MustCompile(`<a\s(?:[^>]*\s)?istitle="true"[^>]*>`)
+	backfillInternalHrefRE  = regexp.MustCompile(`\shref="/`)
+)
+
+// backfillInternalIstitleCount 数该页**站内**的 istitle 条目数，即计数守卫的基准。
+//
+// ⚠️ 判据是「href 以 `/` 开头」这一条，**不是**「backfillItemRE 认得出」。后者会把
+// 守卫退化成 `n == n`（拿被验对象自己的尺子量自己），部分失效从此永不报警。
+// 两种实现只差一个谓词，唯一能区分它们的输入是「同页既有站外条目、又有站内条目
+// 解析失败」，由 TestScanBackfillPageCountBaselineExcludesExternalLinks 第二格钉住。
+func backfillInternalIstitleCount(html []byte) int {
+	n := 0
+	for _, tag := range backfillIstitleAnchorRE.FindAll(html, -1) {
+		if backfillInternalHrefRE.Match(tag) {
+			n++
+		}
+	}
+	return n
+}
 
 // backfillItem 是 index 页上的一条列表项 —— **不论它是不是目标报告**。
 //
@@ -133,11 +179,11 @@ func scanBackfillPage(html []byte, base string) (backfillPage, error) {
 		return backfillPage{}, fmt.Errorf("hestia backfill: no list items matched on this page: " +
 			"the page layout likely changed; refusing to report it as an empty page")
 	}
-	if n := bytes.Count(html, backfillIstitleMark); n != len(page.Items) {
+	if n := backfillInternalIstitleCount(html); n != len(page.Items) {
 		return backfillPage{}, fmt.Errorf(
-			"hestia backfill: matched %d list items but the page declares %d %s entries: "+
-				"the page layout likely changed (partial parse failure)",
-			len(page.Items), n, backfillIstitleMark)
+			"hestia backfill: matched %d list items but the page declares %d site-internal "+
+				`istitle="true" entries: the page layout likely changed (partial parse failure)`,
+			len(page.Items), n)
 	}
 
 	for _, it := range page.Items {
