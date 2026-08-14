@@ -18,8 +18,8 @@ import (
 // × 2 栏目、完美齐全，而全区间同一关键词只有 137 条，理论值 79 个月 × 2 栏目 = 158
 // 条，**差 21 条**。搜索漏了搜索自己不会说，所以它做校验、不做唯一依据。
 //
-// ⚠️ 本文件**只解析、不决定降级**。HTTP 非 200、条数骤增、解析不到计数字段一律
-// 原样返回错误；「打 WARN、跳过交叉校验、主路径照常完成」是调用方的职责
+// ⚠️ 本文件**只解析、不决定降级**。HTTP 非 200、日期落在区间外、本页条数不自洽、
+// 解析不到计数字段一律原样返回错误；「打 WARN、跳过交叉校验、主路径照常完成」是调用方的职责
 // （ADR-M1c1-02 的 fail-open）。在这一层降级 = 调用方永远不知道校验没做过。
 const (
 	backfillSearchBase   = "https://wzdig.pbc.gov.cn/search/pcRender"
@@ -42,32 +42,23 @@ const (
 	// 这句话由 TestFilterBackfillSearchHitsDropsByPrefixNotByIDShape 钉住。
 	backfillSearchKeepPrefix = "/goutongjiaoliu/113456/113469/"
 
-	// backfillSearchMaxRecords 是总条数的粗上界。
+	// 🔴 **这里曾经有一条 `backfillSearchMaxRecords = 5000` 的总条数上界，已删**
+	// （M1c-1 返工，人类 leader 2026-08-14 裁决）。别再加回来 —— 三条理由：
 	//
-	// 🔴 **它不认 `advtime` 失效，别再那样理解**（M1c-1 返工 FIX-1，本 sprint 实测推翻）。
-	// 原注释写着「advtime 失效时返回全站量级（549141）」并据此设 5000。**那句话把两个
-	// 不同的失效模式混成了一个**，我逐条实测过（同关键词、同 searchArea=title，只动
-	// advtime）：
+	//  1. **没有任何已知触发场景**。它名义上认「advtime 失效」，而实测（同关键词、同
+	//     searchArea=title，只动 advtime）：advtime=5 + 日期范围 → 137 条；advtime 被
+	//     丢弃 → 240 条；advtime=0 → 240 条；`金融统计数据报告` 无日期过滤 → 1136 条。
+	//     全都远低于 5000。另一个名义场景「空查询返回全站 549141」实测返回的是 HTTP
+	//     200 + 16KB 空壳、`default-result-*` 计数字段整个不存在 ⇒ 由 backfillSearchCount
+	//     的「计数字段缺失 ⇒ 报错」拦下，同样轮不到它。
+	//  2. **它是有害的**：留着就隐含一条「上界必须 > 1136」的约束，而站点内容每月在长；
+	//     撞上那天它会**抢在日期守卫之前**报出一个**指错方向**的错误。会抢先报错且方向
+	//     错的守卫，比没有守卫糟。
+	//  3. **它占着「量级守卫」这个位置**，让后来者以为量级异常已经防住了。
 	//
-	//	advtime=5 + 日期范围 → 137 条
-	//	advtime 参数被丢弃   → **240 条**
-	//	advtime=0           → **240 条**
-	//	金融统计数据报告无日期过滤 → **1136 条**（三关键词里最大）
-	//
-	// 240 / 1136 距 5000 差 4.4 倍 ⇒ **这条守卫永远不会因 advtime 失效而触发**。
-	// 549141 是**无关键词空查询**的值，而那种响应实测连 `default-result-*` 计数字段
-	// 都整个不存在（HTTP 200、16KB 的空壳、0 个结果块）⇒ 由 backfillSearchCount 的
-	// 「计数字段缺失 ⇒ 报错」拦下，同样轮不到这条。
-	//
-	// ⇒ 认 advtime 失效的是 checkBackfillSearchDateRange（判**性质**：每条日期是否
-	// 落在 [from,to] 内），不是这里的数量判据。
-	//
-	// **那为什么还留着它**：它现在是一道**没有已知触发场景**的粗上界，只防「计数字段
-	// 还在、但数字大到不可能」这类未知失效。留着的代价是零，但**别把它算进任何失效
-	// 模式的防线里** —— 一条守卫最危险的时候不是它不存在，而是它在场却认不出它名字里
-	// 那个东西。取值 5000 的下界依据仍成立且更紧了：正常最大 692，advtime 失效时
-	// 1136，上界必须高于 1136 才不会抢在日期守卫之前报出一个指错方向的错误。
-	backfillSearchMaxRecords = 5000
+	// ⇒ 认「日期过滤失效」的是 checkBackfillSearchDateRange，判的是**性质**（每条日期
+	// 是否落在 [from,to] 内），因此**不依赖任何实测量级、不会随语料增长而失效**。
+	// 任何量级阈值都会过期 —— 上面那组 240/1136 本身也只是 2026-08-14 的一次采样。
 
 	// backfillSearchPageSize 是每页条数（实测 2026-08-14，requirements-analysis §4
 	// 亦记「每页固定 12 条」）：qAll=社会融资规模存量统计数据报告 / 137 条 / 12 页，
@@ -105,7 +96,7 @@ var backfillSearchItemRE = regexp.MustCompile(
 	`(?s)<h3>\s*<a href="([^"]+)"[^>]*>(.*?)</a>.*?<span>(\d{4})年(\d{2})月(\d{2})日</span>`)
 
 // 计数字段（隐藏 input）。两个都必须解析得到：总页数供调用方决定翻到第几页，
-// 总条数既供粗上界、也做本页条数自洽校验的**独立锚**。
+// 总条数做本页条数自洽校验的**独立锚**（不与 item 正则共享形态假设）。
 var (
 	backfillSearchTotalPagesRE   = regexp.MustCompile(`id="default-result-total-pages" value="(\d+)"`)
 	backfillSearchTotalRecordsRE = regexp.MustCompile(`id="default-result-total-records" value="(\d+)"`)
@@ -141,7 +132,8 @@ type backfillSearchHit struct {
 //   - `searchArea=title` 只搜标题（默认搜正文，同一关键词 1324 条 vs 610 条）
 //   - `sr=dateTime desc` 按发布时间倒序 —— 值非法时服务端返回 **302**（实测
 //     `sr=garbage` 即 302），不是忽略该参数
-//   - `advtime=5` + `startTime` / `endTime` 是自定义时间范围，见上面的守卫注释
+//   - `advtime=5` + `startTime` / `endTime` 是自定义时间范围；它失效时由
+//     checkBackfillSearchDateRange 认出来（判性质，不判量级），见那里的注释
 //
 // ⚠️ url.Values.Encode 把 `sr` 的空格编码成 `+`（而非 `%20`），**实测两者等价**：
 // 同一查询下 `dateTime+desc` 与 `dateTime%20desc` 的总条数（137）与首条日期
@@ -178,11 +170,6 @@ func parseBackfillSearchPage(html []byte, page int) ([]backfillSearchHit, int, e
 	if err != nil {
 		return nil, 0, err
 	}
-	if records > backfillSearchMaxRecords {
-		return nil, 0, fmt.Errorf("hestia backfill search: %d results exceed the %d ceiling: "+
-			"the query is not being constrained as expected", records, backfillSearchMaxRecords)
-	}
-
 	ms := backfillSearchItemRE.FindAllSubmatch(html, -1)
 	if len(ms) == 0 {
 		return nil, 0, fmt.Errorf("hestia backfill search: 0 results parsed while the page claims %d: "+
@@ -218,18 +205,28 @@ func parseBackfillSearchPage(html []byte, page int) ([]backfillSearchHit, int, e
 
 // backfillSearchCheckCount 判本页条数是否自洽（M1c-1 返工 FIX-2）。
 //
-// **承重的是第 2 条，第 1 条只升级诊断质量 —— 我消融实测过，别把它算成第二道防线。**
+// 两条检查认的是**同一种失效**（本页少了条），但**依赖路径不同** —— 这才是两条都留着
+// 的理由（人类 leader 2026-08-14 裁决）。**别把它们说成「两道独立防线」**：我消融实测
+// 过，构造不出「只有第 1 条能发现」的输入。
 //
-//  1. 与页内结构标记数（`<h3><a href=`）比。它认的是「正则错配丢条」：某条目缺日期
-//     时非贪婪的 item 正则会跨过它去吃下一条的日期，2 条静默变 1 条，留下的那条是
-//     「A 的 URL/标题 + B 的日期」。
-//     ⚠️ **实测：把这一条整个短路掉，那个输入照样报错** —— 因为丢了条就必然与
-//     records 对不上，第 2 条接住了。它唯一的增量是错误文案直接指向成因（"an item
-//     likely lacks its date"），以及它不依赖 backfillSearchPageSize 这个常量。
-//     我构造不出「只有它能发现」的输入；若你能，请补一条用例并改掉这段话。
-//  2. 与**站点自报的** total-records + 页容量比。这是真正的检测层：任何原因导致的
-//     少条（错配、整块缺失、响应截断）都会在这里现形，而它锚在站点自己的数字上，
-//     不与 item 正则共享形态假设。
+//  1. 与页内结构标记数（`<h3><a href=`）比。认「正则错配丢条」：某条目缺日期时非贪婪
+//     的 item 正则会跨过它去吃下一条的日期，2 条静默变 1 条，留下的那条是「A 的
+//     URL/标题 + B 的日期」。
+//     **它不依赖 backfillSearchPageSize 这个常量** ← 承重点在这里，但成立的方式与
+//     直觉不同，我实测过（站点每页 12→15、records=30/pages=2、第 1 页 15 条）：
+//
+//     A. 页完好：第 2 条误报「15 items but expected 12 … results are being dropped」
+//     B. 页里真有一条缺日期：**这一条**先报「parsed 14 items from 15 result blocks:
+//     an item likely lacks its date」
+//
+//     ⇒ 常量过期时**两种情况都会报错**，没有「静默失效」这回事；真正的价值是 B 仍然
+//     **可与 A 区分**。删掉这一条，B 会退化成 A 那句关于页容量的话 ⇒ 一个**真实**的
+//     丢条会被误判成「站点改了每页条数」这种已知无害的噪音而被打发掉。
+//     防的是**误归因**，不是「多一道检测」。
+//
+//  2. 与**站点自报的** total-records + 页容量比。**日常的检测层**：任何原因导致的少条
+//     （错配、整块缺失、响应截断）都会在这里现形，且它锚在站点自己的数字上，不与
+//     item 正则共享形态假设。代价是依赖上面那个常量。
 //
 // 末页算术：前 page-1 页各占满 backfillSearchPageSize 条，本页应有
 // records-(page-1)*size 与 size 中的较小者（实测 137 条 / 12 页：pNo=12 恰好 5 条）。
