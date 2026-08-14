@@ -368,10 +368,13 @@ func TestFetchBackfillSearchPagePropagatesParseError(t *testing.T) {
 	u := backfillSearchURL(kw, from, to, 1)
 	f := &fakeFetcher{pages: map[string][]byte{u: []byte("<html>改版了</html>")}}
 
-	hits, totalPages, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
+	res, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
 	require.Error(t, err)
-	assert.Nil(t, hits)
-	assert.Zero(t, totalPages)
+	assert.Nil(t, res.Hits)
+	assert.Zero(t, res.TotalPages)
+	// ⚠️ HTML 仍要交出来：解析失败那一页的原始响应体是事后查因唯一的材料，
+	// 调用方在判错之前就得把它落盘（M1c-1 的 TASK-010 / QA C-1）。
+	assert.NotEmpty(t, res.HTML, "解析失败也要把原始 HTML 交给调用方落盘")
 }
 
 // TestFetchBackfillSearchPageRejectsOutOfRangePublished（FIX-1，本次返工的核心）：
@@ -404,7 +407,7 @@ func TestFetchBackfillSearchPageRejectsOutOfRangePublished(t *testing.T) {
 	u := backfillSearchURL(kw, from, to, 20)
 	f := &fakeFetcher{pages: map[string][]byte{u: page}}
 
-	_, _, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 20)
+	_, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 20)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "2015-02-10", "错误要指出越界的那条日期")
 	assert.Contains(t, err.Error(), "advtime", "错误要指向日期过滤（advtime）失效")
@@ -426,9 +429,9 @@ func TestFetchBackfillSearchPageAcceptsBoundaryDates(t *testing.T) {
 	u := backfillSearchURL(kw, from, to, 1)
 	f := &fakeFetcher{pages: map[string][]byte{u: page}}
 
-	hits, _, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
+	res, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
 	require.NoError(t, err, "端点日期是闭区间，必须放行")
-	assert.Len(t, hits, 1) // 另一条是调统司栏目，被前缀筛掉
+	assert.Len(t, res.Hits, 1) // 另一条是调统司栏目，被前缀筛掉
 }
 
 // TestFetchBackfillSearchPageChecksAllColumnsDates：区间校验发生在**栏目筛之前**。
@@ -445,7 +448,7 @@ func TestFetchBackfillSearchPageChecksAllColumnsDates(t *testing.T) {
 	u := backfillSearchURL(kw, from, to, 1)
 	f := &fakeFetcher{pages: map[string][]byte{u: page}}
 
-	_, _, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
+	_, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
 	require.Error(t, err, "越界条目在被筛掉的栏目里，同样要报错")
 }
 
@@ -456,7 +459,7 @@ func TestFetchBackfillSearchPageChecksAllColumnsDates(t *testing.T) {
 func TestFetchBackfillSearchPagePropagatesFetchError(t *testing.T) {
 	f := &fakeFetcher{err: errBoom}
 
-	_, _, err := fetchBackfillSearchPage(context.Background(), f,
+	_, err := fetchBackfillSearchPage(context.Background(), f,
 		"社会融资规模存量统计数据报告",
 		time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), 1)
@@ -474,13 +477,13 @@ func TestFetchBackfillSearchPageFetchesConstructedURL(t *testing.T) {
 	u := backfillSearchURL(kw, from, to, 1)
 	f := &fakeFetcher{pages: map[string][]byte{u: readTestdata(t, "pboc-search-p1.html")}}
 
-	hits, totalPages, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
+	res, err := fetchBackfillSearchPage(context.Background(), f, kw, from, to, 1)
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{u}, f.calls)
-	assert.Equal(t, searchSampleTotalPages, totalPages)
+	assert.Equal(t, searchSampleTotalPages, res.TotalPages)
 	// 入口返回的是**筛后**的结果 —— 调用方拿到的直接就是可比对的那一份。
-	assert.Len(t, hits, searchSampleKept)
+	assert.Len(t, res.Hits, searchSampleKept)
 }
 
 // TestFetchBackfillSearchPageDateGuardIsNotVacuousOnRealSample：真实样本页 1 的
@@ -588,4 +591,73 @@ func searchPageHTML(records, pages int, items ...string) []byte {
 		<input type="hidden" id="default-result-total-pages" value="%d"/>
 		<input type="hidden" id="default-result-total-curPageNo" value="1"/>
 	</div>`, records, pages))
+}
+
+// ============================================================================
+// M1c-1 的 TASK-010（QA 返工）
+// ============================================================================
+
+// 🔴 QA R2-3：`total-records` 与 `total-pages` 必须互校，站点少报 pages 即静默只翻第 1 页。
+//
+// **既有守卫为什么一条都拦不住**（这才是本条的价值所在）：
+//
+//	每页自洽校验 want = min(records-(page-1)*12, 12)  → 第 1 页恒等于 got，永不触发
+//	日期区间守卫                                       → 第 1 页最新，必在窗口内，永不触发
+//
+// QA 实测 records=137 / pages=1 ⇒ 取回 1 页、命中 12 条、`err=nil`
+// ⇒ **交叉校验静默退化到 26%**，`only_in_index` 被灌满而无错无警。
+// ⚠️ `backfill_search.go` 里那句「只取第 1 页的调用方挡不住」原是**已知边界**，
+// 在这条上从「已知」变成了**实际发生**——已知边界不等于已被接受的风险。
+func TestParseBackfillSearchPageCrossChecksRecordsAgainstPages(t *testing.T) {
+	cases := []struct {
+		name           string
+		records, pages int
+		wantErr        bool
+	}{
+		{"自洽：137 条 / 12 页", 137, 12, false},
+		{"自洽：整除边界 24 条 / 2 页", 24, 2, false},
+		{"少报：137 条却自称 1 页", 137, 1, true},
+		{"少报：137 条却自称 0 页", 137, 0, true},
+		{"多报：12 条却自称 5 页", 12, 5, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// 页上放满 12 条：少报 pages 时第 1 页本来就是满的，这正是既有守卫看不见它的原因。
+			html := searchPageHTML(c.records, c.pages, searchItems(backfillSearchPageSize)...)
+
+			_, totalPages, err := parseBackfillSearchPage(html, 1)
+			if !c.wantErr {
+				require.NoError(t, err)
+				assert.Equal(t, c.pages, totalPages)
+				return
+			}
+			require.Error(t, err, "records 与 pages 对不上 ⇒ 必须有声，否则只翻第 1 页且无人知道")
+			assert.Contains(t, err.Error(), "total pages", "错误要点名是分页对不上，不是别的守卫")
+		})
+	}
+}
+
+// 🔴 QA R2-6：`records == 0` 是**合法空集**，不是「检索服务改版」。
+//
+// 触发条件是**业务事实而非假想**：社融存量/增量自 2025-09 起央行停发（本 sprint 自己实测
+// 并编码进了 `backfillWantedKinds`）⇒ 任何 `--from ≥ 2025-09` 的回填，后两个关键词
+// **结构上必然零命中**。旧写法把它记成 `the result layout likely changed`
+// ⇒ 一个**完全正常、且永久成立**的窗口条件被记录成检索服务故障，交叉校验永久关闭、退出码 0。
+//
+// ⚠️ 与下一格**互补**：`records > 0 && 0 条` 仍然必须报错。少了那一格，
+// 一个「零条一律放行」的实现会让真正的版式失效彻底静默——而那正是这条守卫原本要防的。
+func TestParseBackfillSearchPageTreatsZeroRecordsAsLegalEmpty(t *testing.T) {
+	t.Run("records=0 且 0 条 ⇒ 空集 + nil", func(t *testing.T) {
+		// 站点在空结果页上自报 pages=1（不是 0）——分页互校不能把这一支误伤。
+		hits, totalPages, err := parseBackfillSearchPage(searchPageHTML(0, 1), 1)
+		require.NoError(t, err, "关键词在窗口内确实没有结果，这是业务事实不是故障")
+		assert.Empty(t, hits)
+		assert.Equal(t, 1, totalPages)
+	})
+
+	t.Run("records>0 但 0 条 ⇒ 仍须报错（版式真的变了）", func(t *testing.T) {
+		_, _, err := parseBackfillSearchPage(searchPageHTML(12, 1), 1)
+		require.Error(t, err, "站点说有 12 条而一条都解析不出来 —— 这才是版式变了")
+		assert.Contains(t, err.Error(), "layout")
+	})
 }

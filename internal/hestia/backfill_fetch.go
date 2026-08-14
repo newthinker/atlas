@@ -161,6 +161,12 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 	store.Manifest.OnlyInIndex = cc.OnlyInIndex
 	store.Manifest.OnlyInSearch = cc.OnlyInSearch
 	store.Manifest.SearchSkippedReason = cc.SearchSkippedReason
+	// 产出这份 manifest 时**实际用的参数**（QA R2-8）：下游被要求「只读这份文件」，
+	// 而重算对账离不开这几样。cutover 尤其要紧——猜错一期就会凭空报出两条假缺篇。
+	store.Manifest.Cutover = cmp.Or(cfg.Cutover, backfillCutover)
+	store.Manifest.To = to.Format("2006-01-02")
+	store.Manifest.Keywords = backfillSearchKeywords
+	store.Manifest.KeepPrefix = backfillSearchKeepPrefix
 	if err := store.Save(); err != nil {
 		return err
 	}
@@ -216,6 +222,27 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 		backfillExpect{Periods: cfg.ExpectPeriods, Articles: cfg.ExpectArticles},
 	)
 	writeBackfillReconcileReport(backfillReportWriter(cfg.Report), rc)
+
+	// —— 完成标记 + 对账摘要落盘（M1c-1 的 TASK-010 / QA R2-7、R2-8）——
+	//
+	// 🔴 `CompletedAt` 只在这里写，且**必须在这一句之前的所有步骤都跑完**：它要回答的
+	// 正是「这一趟结束了没有」。进程在第 218 篇被杀时，manifest 依然是合法 JSON、
+	// sha256 全对、与磁盘完全闭合——**下游做的一切闭合性检查在夭折的产物上同样全绿**，
+	// 唯一的差别就是这个字段在不在。
+	//
+	// ⚠️ 它写在 `failed > 0` / `rc.Failed()` 判断**之前**是刻意的：那两者是「跑完了但有问题」，
+	// 不是「没跑完」。把完成标记和「无错」绑在一起，会让**有失败但确实跑到底**的那趟
+	// 与**中途被杀**的那趟再次不可分辨——正是本字段要消掉的那种不可分辨。
+	store.Manifest.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+	store.Manifest.Reconcile = &ManifestReconcile{
+		Periods:        rc.Periods,
+		Articles:       rc.Articles,
+		MissingPeriods: rc.MissingPeriods,
+		Unclassified:   rc.Unclassified,
+	}
+	if err := store.Save(); err != nil {
+		return err
+	}
 
 	// 两类问题**互不吞没**：抓取失败与对账违规同时发生时，errors.Join 让两条都在
 	// Error() 文本里。缺篇本身**不**进这里 —— 它是要报告的事实不是失败
@@ -291,36 +318,44 @@ var errBackfillDisk = errors.New("落盘失败")
 // 返回的 error 一律交给 crossCheckBackfill 走 fail-open（ADR-M1c1-02：不让一个不可控的
 // 第三方检索服务有权否决主路径交付），**唯独** errBackfillDisk 例外，由调用方中止。
 //
-// 这里不用 fetchBackfillSearchPage：那个函数把原始 HTML 丢了，而 design-spec §7.3 要求
-// 搜索页也存盘（同样不可再生）。取回 → 解析 → 区间校验 → 栏目筛的**顺序与它逐字一致**，
-// 尤其区间校验必须在栏目筛**之前**（某页若恰好全是调统司栏目，筛后为空会让守卫平凡通过）。
+// 🔴 **生产路径就走 fetchBackfillSearchPage**（QA C-1）。上一版在这里复制了一份逐字相同的
+// 取回→解析→区间校验→栏目筛，于是那个函数**零生产调用方**：删掉它里面的区间校验、
+// 或把区间校验挪到栏目筛之后（注释最强调的那条顺序），**全包一条测试都不会红** ——
+// 6 条测试守着一段没人跑的代码。复制的理由是「那个函数把原始 HTML 丢了」，
+// 而正确的解法是**让它把 HTML 交出来**，不是再写一遍。
+//
+// ⚠️ **单个关键词失败不连坐**（QA R2-6 第 2 步）：上一版任一关键词出错即 `return nil, …`，
+// 把**已经收到的其它关键词的命中一起丢掉**。而触发条件是业务事实——社融存量/增量自
+// 2025-09 停发，`--from ≥ 2025-09` 时后两个关键词必然零命中。现在逐关键词收集错误、
+// 跑完全部，errors.Join 后交给 crossCheckBackfill 走 fail-open。
+//
+// errBackfillDisk 仍然立刻中止：落盘故障是本机问题，继续跑只会写出更多半截产物。
 func fetchBackfillSearchAll(ctx context.Context, f Fetcher, out string, from, to time.Time) ([]backfillSearchHit, int, error) {
 	var all []backfillSearchHit
+	var errs []error
 	pages := 0
 	for i, kw := range backfillSearchKeywords {
 		total := 1
 		for page := 1; page <= total; page++ {
-			html, err := f.Get(ctx, backfillSearchURL(kw, from, to, page))
+			res, err := fetchBackfillSearchPage(ctx, f, kw, from, to, page)
+			// 快照先落盘再判错：解析失败那一页的原始 HTML 恰恰是事后查因唯一的材料。
+			// res.HTML 为空只可能是 Fetcher 自己失败（那时没有响应体可存）。
+			if len(res.HTML) > 0 {
+				pages++
+				name := fmt.Sprintf("%s-p%02d.html", backfillSearchSlug(kw, i), page)
+				if werr := writeBackfillFile(filepath.Join(out, "search", name), res.HTML); werr != nil {
+					return nil, pages, werr // 落盘故障：立刻中止，不 join
+				}
+			}
 			if err != nil {
-				return nil, pages, fmt.Errorf("搜索 %q 第 %d 页: %w", kw, page, err)
+				errs = append(errs, fmt.Errorf("搜索 %q 第 %d 页: %w", kw, page, err))
+				break // 这个关键词到此为止，换下一个——不连坐
 			}
-			pages++
-			name := fmt.Sprintf("%s-p%02d.html", backfillSearchSlug(kw, i), page)
-			if err := writeBackfillFile(filepath.Join(out, "search", name), html); err != nil {
-				return nil, pages, err
-			}
-			hits, totalPages, err := parseBackfillSearchPage(html, page)
-			if err != nil {
-				return nil, pages, fmt.Errorf("搜索 %q 第 %d 页: %w", kw, page, err)
-			}
-			if err := checkBackfillSearchDateRange(hits, from, to); err != nil {
-				return nil, pages, fmt.Errorf("搜索 %q 第 %d 页: %w", kw, page, err)
-			}
-			all = append(all, filterBackfillSearchHits(hits)...)
-			total = totalPages
+			all = append(all, res.Hits...)
+			total = res.TotalPages
 		}
 	}
-	return all, pages, nil
+	return all, pages, errors.Join(errs...)
 }
 
 // backfillSearchSlug 是关键词在快照文件名里的短名。
