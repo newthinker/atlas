@@ -171,6 +171,37 @@ func parseBackfillSearchPage(html []byte, page int) ([]backfillSearchHit, int, e
 		return nil, 0, err
 	}
 	ms := backfillSearchItemRE.FindAllSubmatch(html, -1)
+
+	// 🔴 `records == 0` 是**合法空集**，不是版式变了（QA R2-6）。
+	//
+	// 触发条件是**业务事实而非假想**：社融存量/增量自 2025-09 起央行停发（本 sprint 自己
+	// 实测并编码进了 `backfillWantedKinds`）⇒ 任何 `--from ≥ 2025-09` 的回填，后两个关键词
+	// **结构上必然零命中**。旧写法把它记成 `the result layout likely changed`，于是一个
+	// **完全正常、且永久成立**的窗口条件被记录成「检索服务改版」，交叉校验永久关闭而退出码 0。
+	//
+	// ⇒ 判据拆开：`records == 0 && len(ms) == 0` 是空集；`records > 0 && len(ms) == 0` 才是失效。
+	//
+	// ⚠️ 这一支必须排在下面那条分页互校**之前**：空集时站点自报 `pages=1`（而 ceil(0/12)=0），
+	// 互校排在前面会把合法空集判成「站点少报分页」——我第一版就是这个顺序，
+	// 全套件照样绿（fixture 恰好都走 fail-open），**是我自己回读顺序才发现的**。
+	if records == 0 && len(ms) == 0 {
+		return nil, totalPages, nil
+	}
+
+	// 🔴 records 与 totalPages 必须互校（QA R2-3）。站点少报 totalPages 时既有守卫
+	// **一条都拦不住**：每页自洽校验 `want = min(records-(page-1)*12, 12)` 在第 1 页恒等于
+	// got；日期区间守卫也不触发（第 1 页最新，必在窗口内）。QA 实测 records=137/pages=1
+	// ⇒ 只翻 1 页、命中 12 条、`err=nil` ⇒ **交叉校验静默退化到 26%**，`only_in_index`
+	// 被灌满而无错无警。做这条校验的材料代码里本来就全有，只是从没比过。
+	//
+	// ⚠️ 排在 `len(ms)==0` **之前**：pages 少报时第 1 页是满的，走不到那条。
+	if want := (records + backfillSearchPageSize - 1) / backfillSearchPageSize; want != totalPages {
+		return nil, 0, fmt.Errorf(
+			"hestia backfill search: page claims %d records but %d total pages (expected %d at %d per page): "+
+				"the site under-reports paging; refusing to silently scan only page 1",
+			records, totalPages, want, backfillSearchPageSize)
+	}
+
 	if len(ms) == 0 {
 		return nil, 0, fmt.Errorf("hestia backfill search: 0 results parsed while the page claims %d: "+
 			"the result layout likely changed", records)
@@ -286,25 +317,41 @@ func filterBackfillSearchHits(hits []backfillSearchHit) []backfillSearchHit {
 	return out
 }
 
-// fetchBackfillSearchPage 取回并解析第 page 页，返回**筛后**的条目与总页数。
+// backfillSearchPageResult 是取回并解析一页搜索结果的产出。
+//
+// 带上 HTML 是为了让**生产路径能直接用这个函数**：design-spec §7.3 要求搜索页也存盘
+// （同样不可再生），而落盘只有抓取层做得了。上一版为此在 `fetchBackfillSearchAll` 里
+// 复制了一份**逐字相同**的取回→解析→区间校验→栏目筛，于是本函数**零生产调用方**
+// —— 6 条测试守着一段没人跑的代码（QA C-1）。
+type backfillSearchPageResult struct {
+	Hits       []backfillSearchHit // **已筛**（只剩沟通交流栏目）
+	TotalPages int
+	HTML       []byte // 原始响应体，供调用方落盘
+}
+
+// fetchBackfillSearchPage 取回并解析第 page 页，返回**筛后**的条目、总页数与原始 HTML。
 //
 // Fetcher 的错误（含 HTTP 非 200）原样上抛 —— 本层不吞不降级，见文件头注释。
 // 翻页由调用方按 totalPages 决定：限速与逐页落盘都在抓取层（design-spec §7）。
-func fetchBackfillSearchPage(ctx context.Context, f Fetcher, keyword string, from, to time.Time, page int) ([]backfillSearchHit, int, error) {
+func fetchBackfillSearchPage(ctx context.Context, f Fetcher, keyword string, from, to time.Time, page int) (backfillSearchPageResult, error) {
 	html, err := f.Get(ctx, backfillSearchURL(keyword, from, to, page))
 	if err != nil {
-		return nil, 0, err
+		return backfillSearchPageResult{}, err
 	}
+	// HTML 无论后续解析成不成功都交出去：调用方要在**解析之前**落盘，
+	// 否则一页解析失败就等于那页快照永久丢失，而它恰恰是事后查因唯一的原始材料。
+	res := backfillSearchPageResult{HTML: html}
 	hits, totalPages, err := parseBackfillSearchPage(html, page)
 	if err != nil {
-		return nil, 0, err
+		return res, err
 	}
 	// 区间校验放在**栏目筛之前**：日期过滤失效对两个栏目一视同仁，只查保留的那半会
 	// 少一半证据；更要紧的是某页若恰好全是调统司栏目，筛后为空 ⇒ 守卫在空集上平凡通过。
 	if err := checkBackfillSearchDateRange(hits, from, to); err != nil {
-		return nil, 0, err
+		return res, err
 	}
-	return filterBackfillSearchHits(hits), totalPages, nil
+	res.Hits, res.TotalPages = filterBackfillSearchHits(hits), totalPages
+	return res, nil
 }
 
 // backfillSearchCount 读一个隐藏 input 里的计数字段。

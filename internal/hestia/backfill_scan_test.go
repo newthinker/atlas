@@ -477,6 +477,99 @@ func TestScanBackfillPageCountBaselineExcludesExternalLinks(t *testing.T) {
 	})
 }
 
+// 🔴 QA R2-1：**任一行**的标签大小写变化 ⇒ 前两个锚**同步移动** ⇒ 静默吞条 + 邻条日期被写错。
+//
+// 机理（QA 跑出来的，我复现）：`<A` 让 istitle 锚不认 ⇒ **基准 −1**；`</A>` 让
+// `backfillItemRE` 的 `.*?</a>` **跨过该行**去吃下一行的 `</a></font><span>` ⇒ **items −1，
+// 且存活那条拿到下一行的日期**。一次改动同时移动等式两边 ⇒ `internal != len(Items)` 恒不成立。
+//
+//	第 0 行大写 ⇒ 无错！基准=3 items=3，111 拿了 222 的日期、222 整条消失
+//	第 3 行大写 ⇒ 无错！末条消失
+//
+// ⇒ **这是 C1「基准必须独立于被守护属性」在「标签名」这一维的漏网**：前两个锚都默认
+// `<a>` 是小写，而这个假设从没被写下来过。第三个锚（日期块数）与标签名无关。
+//
+// ⚠️ 本用例逐行遍历**每一个**位置，不是只测第 0 行：QA 实测**首行 / 中间 / 末行的后果各不相同**
+// （首行与中间是「邻条拿错日期」，末行是「末条消失」），只测一格会漏掉另外两种。
+func TestScanBackfillPageDetectsTagCaseChange(t *testing.T) {
+	rows := []string{
+		backfillListItemHTML("111", "中国人民银行公告〔2020〕第1号", "中国人民银行公告〔2020〕第1号", "2020-02-11"),
+		backfillListItemHTML("222", "中国人民银行公告〔2020〕第2号", "中国人民银行公告〔2020〕第2号", "2020-03-11"),
+		backfillListItemHTML("333", "中国人民银行公告〔2020〕第3号", "中国人民银行公告〔2020〕第3号", "2020-04-11"),
+		backfillListItemHTML("444", "中国人民银行公告〔2020〕第4号", "中国人民银行公告〔2020〕第4号", "2020-05-11"),
+	}
+
+	// 前置锚点：原样 4 行必须正常通过，否则下面每一格的红都可能来自别的原因。
+	page, err := scanBackfillPage(backfillPageHTML(rows...), backfillTestBase)
+	require.NoError(t, err, "前置锚点：未改动的四行页本身要是好的")
+	require.Len(t, page.Items, 4)
+
+	for i := range rows {
+		t.Run(fmt.Sprintf("第 %d 行的 <a>/</a> 变大写 ⇒ 报错", i), func(t *testing.T) {
+			mutated := append([]string(nil), rows...)
+			mutated[i] = strings.NewReplacer("<a ", "<A ", "</a>", "</A>").Replace(mutated[i])
+			require.NotEqual(t, rows[i], mutated[i], "前置锚点：这一行确实被改了")
+
+			_, err := scanBackfillPage(backfillPageHTML(mutated...), backfillTestBase)
+			require.Error(t, err, "标签名变化会让前两个锚同步移动 —— 只有第三个锚（日期块）拦得住")
+			assert.Contains(t, err.Error(), "date blocks", "红的必须是新加的那条锚，不是别的守卫")
+		})
+	}
+}
+
+// 🔴 QA R2-5：**协议相对**外链 `//host/path` 被判站内 ⇒ 静默抓下外站内容写进 manifest。
+//
+// 旧判据是「href 以 `/` 开头」——`//evil.example.com/...` 正好以 `/` 开头。QA 实测这条
+// 端到端跑通了：manifest 里 `url=https://evil.example.com/...`，落盘文件是外站内容。
+//
+// ⚠️ 它同时证伪了本文件与 CONTRACTS 里那句「站内外分界与 href 形态**正交**」——
+// **正交的是「同不同主机」这个性质，不是「以 / 开头」这个判据**。判据换成 host 比对之后，
+// 那句话才成立。这是「结论对、理由假」的又一例（结论「要排掉站外」从来没错）。
+func TestScanBackfillPageTreatsProtocolRelativeAsExternal(t *testing.T) {
+	// 与站内条目逐字段同形，**只有** href 换成协议相对的外站地址。
+	evil := `<td height="22" align="left"><font class="newslist_style" style="margin-right:10px;">` +
+		`<a href="//evil.example.com/goutongjiaoliu/113456/113469/2025092212550536990/index.html" onclick="void(0)" ` +
+		`target="_blank" title="2020年3月金融统计数据报告" istitle="true">2020年3月金融统计数据报告</a></font>` +
+		`<span class="hui12">2020-04-11</span></td>` + "\n"
+
+	t.Run("协议相对外链不进 Items，也不进 Reports", func(t *testing.T) {
+		html := backfillPageHTML(
+			backfillListItemHTML("2025092212550537670", "2020年2月金融统计数据报告", "2020年2月金融统计数据报告", "2020-03-11"),
+			evil,
+		)
+
+		page, err := scanBackfillPage(html, backfillTestBase)
+		require.NoError(t, err, "站外条目是站点常态，不是解析失效")
+		require.Len(t, page.Items, 1, "只有站内那一条该进来")
+		assert.Equal(t, "2025092212550537670", page.Items[0].ArticleID)
+		for _, it := range page.Items {
+			assert.NotContains(t, it.URL, "evil.example.com", "外站 URL 一旦进 Items 就会被真的抓下来")
+		}
+		// Reports 是 Items 的子集，但**单独断言**：漏在这一层意味着它进了 manifest。
+		for _, r := range page.Reports {
+			assert.NotContains(t, r.URL, "evil.example.com")
+		}
+	})
+
+	// 🔴 判据必须认得出**绝对**站外 URL 也是站外 —— 而这一格证伪了旧注释里那句
+	// 「站外条目结构上匹配不到 `/(\d+)/index\.html`」：下面这条**形状完全合规**，
+	// 旧实现会把它当成站内文章收下。p54 那条真实外链之所以安全，纯属它的形状恰好不合规。
+	t.Run("形状合规的绝对站外 URL 同样不进 Items", func(t *testing.T) {
+		abs := strings.Replace(evil, `href="//evil.example.com/`, `href="https://evil.example.com/`, 1)
+		require.Contains(t, abs, "https://evil.example.com/", "前置锚点：确实换成了绝对 URL")
+
+		html := backfillPageHTML(
+			backfillListItemHTML("2025092212550537670", "2020年2月金融统计数据报告", "2020年2月金融统计数据报告", "2020-03-11"),
+			abs,
+		)
+
+		page, err := scanBackfillPage(html, backfillTestBase)
+		require.NoError(t, err)
+		require.Len(t, page.Items, 1)
+		assert.Equal(t, "2025092212550537670", page.Items[0].ArticleID)
+	})
+}
+
 // ============================================================================
 // M1c-1 的 TASK-002：翻页与按日期停止
 //
@@ -490,7 +583,8 @@ func TestScanBackfillPageCountBaselineExcludesExternalLinks(t *testing.T) {
 //	boundary[2]        from 太新 ⇒ 空+nil  → TestScanBackfillIndexFromNewerThanEverything
 //	boundary[3]        相邻页日期连续性     → TestScanBackfillIndexAdjacentPageContinuity
 //	error_handling[0]  抓取失败 / 分页解析失败 → TestScanBackfillIndexFailsLoudly
-//	（自定，见函数注释）翻完站点 ⇒ 正常返回  → TestScanBackfillIndexExhaustedSiteIsNotAnError
+//	（TASK-010 / QA R2-2）翻完站点而判停没生效 ⇒ 报错 → TestScanBackfillIndexExhaustedWithoutDateStopIsAnError
+//	（同上，互补的一半）判停生效后翻完 ⇒ 正常返回     → TestScanBackfillIndexExhaustedAfterDateStopIsFine
 // ============================================================================
 
 // backfillIndexPageHTML 造一页带**分页控件**的 index 页。
@@ -917,15 +1011,25 @@ func TestScanBackfillIndexZeroMaxPagesUsesDefault(t *testing.T) {
 	assert.Contains(t, backfillReportTitles(res), "2020年2月金融统计数据报告")
 }
 
-// 翻完站点自称的 totalPages 而没触发日期停止 ⇒ **正常返回**，不报错。
+// 🔴 翻完站点自称的 totalPages 而日期判停**从未生效** ⇒ **报错**（M1c-1 的 TASK-010 / QA R2-2）。
 //
-// ⚠️ 这条**不在 DoD 里**，是我判的：DoD 只规定了「翻满 MaxPages ⇒ 报错」。
-// 依据是 discover.go 已有的 StopExhausted / StopMaxPages 之分 ——「翻完就是翻完了，
-// 不是上限拦住了」。把两者合并成报错，会让 totalPages < MaxPages 的小栏目（或
-// --from 早于站点最早一篇）在**已经看完全部页面**的情况下失败。
+// ⚠️ **这条推翻了本用例的上一版**，上一版叫 `…ExhaustedSiteIsNotAnError`、断言 NoError，
+// 理由是我自己判的：「翻完就是翻完了，不是上限拦住了」。那个理由听起来对，
+// **但它让站点自报 `totalPages=1` 成为一条静默截断整趟回填的通道**：只拿最近 15 条、
+// `err=nil`、**退出码 0**、manifest 看起来完好。QA 实测复现（From=2020-01-01、
+// 实际需约 150 页 ⇒ 翻 1 页、报告 1 条、无错）。
 //
-// 与上面 MaxPages 那条是互补的一对：合并任一条，另一条的语义就没人守着。
-func TestScanBackfillIndexExhaustedSiteIsNotAnError(t *testing.T) {
+// 说服力在于**孪生分支**：同一函数 4 行之后，MaxPages 那条出口对**完全相同的性质**
+// （日期判停没生效）硬失败，注释写着 `refusing to return a partial result silently`
+// —— 两条出口对同一件事一个报错一个放行，**而放行的那条更容易被站点触发**
+// （改小 totalPages 比让 200 页都不到 From 容易得多）。
+//
+// **代价是知情选择**：`--from` 早于站点最早一篇时也会硬失败。「站点确实没有更早内容」
+// 与「totalPages 报小了」在这一层不可区分 —— 宁可硬失败。
+//
+// 与 MaxPages 那条仍是互补的一对：**判据相同、拦住我的人不同**，故各自的错误信息
+// 必须能区分（下面两条断言分别钉住 `exhausted` 与 `max_pages`）。
+func TestScanBackfillIndexExhaustedWithoutDateStopIsAnError(t *testing.T) {
 	// 站点自称只有 2 页，两页都 ≥ from ⇒ 翻完也不会日期停止。MaxPages 远大于 2。
 	f := backfillSite(2,
 		append(backfillItemsOn("910", "2020-03-25"),
@@ -933,10 +1037,32 @@ func TestScanBackfillIndexExhaustedSiteIsNotAnError(t *testing.T) {
 		backfillItemsOn("920", "2020-03-10", "2020-02-20"),
 	)
 
+	_, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
+		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
+	})
+	require.Error(t, err, "翻完全站而判停从未生效 ⇒ 只能是「站点少报了页数」或「窗口开得太早」，两者都不该静默")
+	assert.Contains(t, err.Error(), "exhausted", "错误要说清是哪条出口拦下的——与 max_pages 那条不能混")
+	assert.NotContains(t, err.Error(), "max_pages", "这不是上限拦住的，别把两条出口的文案写成一样")
+	assert.Len(t, f.calls, 2, "报错之前该翻的页要翻完——不是翻到一半就放弃")
+}
+
+// 与上一条**互补**：日期判停正常生效时，翻完站点页数是**正常返回**。
+//
+// ⚠️ 别把这两条读成重复。上一条钉「判停没生效 ⇒ 报错」，本条钉「判停生效了 ⇒ 不报错」
+// —— 少了本条，一个「exhausted 一律报错」的实现在上一条上照样绿，而那会让**每一次
+// 正常的小窗口回填**都失败。
+func TestScanBackfillIndexExhaustedAfterDateStopIsFine(t *testing.T) {
+	// 第 2 页最老一条早于 from ⇒ 日期判停在翻完之前就生效。
+	f := backfillSite(2,
+		append(backfillItemsOn("910", "2020-03-25"),
+			backfillReportItem("2025092212550537670", "2020年2月金融统计数据报告", "2020-03-11")),
+		backfillItemsOn("920", "2020-03-10", "2019-12-20"),
+	)
+
 	res, err := scanBackfillIndex(context.Background(), f, backfillIndexCfg{
 		IndexURL: testIndexURL, From: backfillDate(t, "2020-01-01"), MaxPages: 200,
 	})
-	require.NoError(t, err, "站点只有 2 页且都翻完了——这不是「上限拦住了」")
+	require.NoError(t, err, "日期判停生效了，这是唯一的正常出口")
 	assert.Len(t, f.calls, 2)
 	assert.Contains(t, backfillReportTitles(res), "2020年2月金融统计数据报告")
 }
@@ -971,4 +1097,32 @@ func TestScanBackfillIndexRecordsPageDateRange(t *testing.T) {
 
 	assert.Equal(t, 2, res.Pages[1].Page)
 	assert.Equal(t, backfillIndexURL(2), res.Pages[1].URL)
+}
+
+// backfillSameHost / backfillIstitleCounts 的**防御性分支**。
+//
+// ⚠️ 这两条分支从 scanBackfillPage 那条路径**够不到**（调用方先 resolveURL 硬失败、
+// 且真实语料里 istitle 锚必带 href），所以直接单测函数。不写的话它们是纯装饰 ——
+// 而「解析失败判成站外」是一个**方向性选择**（保守），选择就该有断言钉住。
+func TestBackfillSameHostFailsClosedOnUnparsableURL(t *testing.T) {
+	assert.True(t, backfillSameHost("https://www.pbc.gov.cn/a/", "https://www.pbc.gov.cn/b/"))
+	assert.False(t, backfillSameHost("https://www.pbc.gov.cn/a/", "https://evil.example.com/b/"))
+
+	// base 解析不了 ⇒ 判站外（不是判站内）：判错方向会把外站条目放进 Items。
+	assert.False(t, backfillSameHost("://bad-base", "https://www.pbc.gov.cn/b/"),
+		"base 解析不了时必须判站外——保守方向")
+	// abs 解析不了 ⇒ 同样判站外。
+	assert.False(t, backfillSameHost("https://www.pbc.gov.cn/a/", "://bad-abs"))
+}
+
+// istitle 锚**没有 href** 时不算站内条目（而不是崩掉、也不是算进去）。
+//
+// 它同时说明基准的两个数为什么必须分开：这条锚仍然计入 `all`（页面确实声明了一条），
+// 只是不计入 `internal` ⇒ 站内数与解析出的条目数对不上 ⇒ 守卫照常报错。
+func TestBackfillIstitleCountsSkipsAnchorWithoutHref(t *testing.T) {
+	html := []byte(`<a istitle="true">没有 href 的锚</a><span class="hui12">2020-03-11</span>`)
+
+	all, internal := backfillIstitleCounts(html, backfillTestBase)
+	assert.Equal(t, 1, all, "页面确实声明了一条 —— 它要计入总数")
+	assert.Equal(t, 0, internal, "取不出 href 就不能算站内")
 }

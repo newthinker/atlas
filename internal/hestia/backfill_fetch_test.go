@@ -60,12 +60,18 @@ func bfConfig(t *testing.T, out string) BackfillConfig {
 // bfSite 造站点：arts 既是 index 上的报告条目，也各有一页正文。
 // 搜索侧三个关键词都只索到 arts[0]，于是它 Source=both、其余 Source=index
 // ——交集与差集同时非空，别让用例落在「两侧完全一致」这种退化输入上。
+//
+// ⚠️ 页上多放一条**早于 cfg.From** 的非报告条目（`2019-12-31`），让日期判停正常生效。
+// 这不是凑数：M1c-1 的 TASK-010（QA R2-2）之后，「翻完站点自称的页数而日期判停从未
+// 生效」是**失败出口**——少了这条，每个用例都会死在那条守卫上，而它们要测的根本不是翻页。
+// 用非报告条目是为了不动任何用例对 `articles` 条数的断言。
 func bfSite(t *testing.T, cfg BackfillConfig, arts ...bfArticle) *fakeFetcher {
 	t.Helper()
-	items := make([]string, 0, len(arts))
+	items := make([]string, 0, len(arts)+1)
 	for _, a := range arts {
 		items = append(items, backfillReportItem(a.ID, a.Title, a.Date))
 	}
+	items = append(items, backfillItemsOn("8999", "2019-12-31")...)
 	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: backfillIndexPageHTML(1, items...)}}
 	for _, kw := range backfillSearchKeywords {
 		f.pages[backfillSearchURL(kw, cfg.From, cfg.To, 1)] = searchPageHTML(1, 1,
@@ -178,7 +184,10 @@ func TestBackfillFetchSavesIndexAndSearchSnapshots(t *testing.T) {
 	if len(idx) != 1 {
 		t.Fatalf("应存 1 页 index 快照，实得 %d 个: %v", len(idx), dirNames(idx))
 	}
-	if want := "001-2020-01-10_2020-01-10.html"; idx[0].Name() != want {
+	// 最老是 2019-12-31：bfSite 现在必放一条早于 From 的条目，好让日期判停生效
+	// （M1c-1 的 TASK-010 / QA R2-2 之后，「翻完站点页数而判停从未生效」是失败出口）。
+	// 名字里两个日期不再相同，反而更能看出「最新_最老」这个格式确实各取各的。
+	if want := "001-2020-01-10_2019-12-31.html"; idx[0].Name() != want {
 		t.Errorf("index 快照命名应为 %q（§A3：序号-最新_最老），实得 %q", want, idx[0].Name())
 	}
 	raw, err := os.ReadFile(filepath.Join(out, "index", idx[0].Name()))
@@ -671,7 +680,8 @@ func TestRunBackfillEmptyDiffersFromComplete(t *testing.T) {
 	// A：index 上有列表项但一条报告都没有 ⇒ 抓取集为空 ⇒ 对账零期次。
 	cfgA := bfConfig(t, t.TempDir())
 	fA := &fakeFetcher{pages: map[string][]byte{
-		testIndexURL: backfillIndexPageHTML(1, backfillItemsOn("910", "2020-03-25", "2020-03-11")...),
+		// 末尾那条 2019-12-31 早于 cfgA.From，让日期判停生效（同 bfSite 的理由）。
+		testIndexURL: backfillIndexPageHTML(1, backfillItemsOn("910", "2020-03-25", "2020-03-11", "2019-12-31")...),
 	}}
 	for _, kw := range backfillSearchKeywords {
 		fA.pages[backfillSearchURL(kw, cfgA.From, cfgA.To, 1)] = searchPageHTML(0, 1)
@@ -989,4 +999,145 @@ func TestRunBackfillIndexAndSearchURLsDoNotDiverge(t *testing.T) {
 	require.NotEmpty(t, onlyIndex.ID)
 	assert.Equal(t, bfArticleURL(arts[1].ID), onlyIndex.URL)
 	assert.Equal(t, backfillSourceIndex, onlyIndex.Source)
+}
+
+// ============================================================================
+// M1c-1 的 TASK-010（QA 返工）
+// ============================================================================
+
+// 🔴 QA R2-6 第 2 步：**单个关键词失败不连坐**，其余关键词的命中必须留下。
+//
+// 上一版任一关键词出错即 `return nil, …`，把**已经收到的其它关键词的命中一起丢掉**。
+// 触发条件是业务事实而非假想：社融存量/增量自 2025-09 起停发（本 sprint 自己实测并编码进
+// `backfillWantedKinds`）⇒ 任何 `--from ≥ 2025-09` 的回填，后两个关键词**结构上必然零命中**。
+//
+// ⚠️ 本用例让**第一个**关键词失败：它是最难的一格 —— 上一版在第一个就 return，
+// 后两个关键词根本不会被请求，「丢掉已收到的」这个说法在那时甚至看不出来。
+// 判据因此是双份的：**其余关键词确实被请求了** ∧ **它们的命中确实留下了**。
+func TestFetchBackfillSearchAllDoesNotLetOneKeywordSinkTheRest(t *testing.T) {
+	out := t.TempDir()
+	from := backfillDate(t, "2020-01-01")
+	to := backfillDate(t, "2020-12-31")
+
+	pages := map[string][]byte{}
+	for i, kw := range backfillSearchKeywords {
+		u := backfillSearchURL(kw, from, to, 1)
+		if i == 0 {
+			pages[u] = []byte("<html>改版了</html>") // 解析失败：计数字段都读不到
+			continue
+		}
+		pages[u] = searchPageHTML(1, 1, searchItemHTML(
+			bfArticleURL(fmt.Sprintf("770%d", i)),
+			fmt.Sprintf("2020年%d月金融统计数据报告", i), "2020年01月10日"))
+	}
+	f := &fakeFetcher{pages: pages}
+
+	hits, scanned, err := fetchBackfillSearchAll(context.Background(), f, out, from, to)
+
+	require.Error(t, err, "失败的那个关键词仍要出声——静默吞掉等于交叉校验悄悄缩水")
+	assert.Contains(t, err.Error(), backfillSearchKeywords[0], "错误要点名是哪个关键词")
+	assert.Len(t, hits, len(backfillSearchKeywords)-1, "其余关键词的命中必须留下")
+	assert.Equal(t, len(backfillSearchKeywords), scanned, "每个关键词都该被请求过一页")
+	assert.NotErrorIs(t, err, errBackfillDisk, "这不是落盘故障，调用方应当 fail-open 而不是中止")
+}
+
+// 🔴 QA R2-7：`completed_at` 让「夭折的回填」与「完整的回填」在**文件层面**可分。
+//
+// `AppendArticle` 每篇立刻整份 Save（断点续抓的前提，设计正确），副作用是进程被杀时
+// 产出的 manifest 依然是合法 JSON、sha256 全对、与磁盘完全闭合 —— **下游的一切闭合性
+// 检查在夭折的产物上同样全绿**。`scanned_at` 是扫描**开始**时刻，答不了「结束了没有」。
+//
+// ⚠️ 第二格是本条真正的承重点：**有抓取失败但确实跑到底**的那趟，`completed_at` 也必须在。
+// 把完成标记和「无错」绑在一起，会让它与「中途被杀」再次不可分辨 —— 正是本字段要消掉的那种。
+func TestBackfillFetchMarksCompletion(t *testing.T) {
+	t.Run("正常跑完 ⇒ completed_at 存在且不早于 scanned_at", func(t *testing.T) {
+		out := t.TempDir()
+		cfg := bfConfig(t, out)
+		_, err := bfRun(t, bfSite(t, cfg, bfTwoArticles()...), cfg)
+		require.NoError(t, err)
+
+		got := readManifestFile(t, out)
+		require.NotEmpty(t, got.CompletedAt, "跑完了就必须留下完成标记")
+		assert.GreaterOrEqual(t, got.CompletedAt, got.ScannedAt, "完成不可能早于开始")
+	})
+
+	t.Run("有抓取失败但跑到底 ⇒ completed_at 仍在", func(t *testing.T) {
+		out := t.TempDir()
+		cfg := bfConfig(t, out)
+		arts := bfTwoArticles()
+		f := bfFailOn{inner: bfSite(t, cfg, arts...), contains: bfArticleURL(arts[1].ID)}
+
+		_, err := bfRun(t, f, cfg)
+		require.Error(t, err, "前置锚点：确实有一篇抓不到")
+
+		got := readManifestFile(t, out)
+		require.NotEmpty(t, got.Failed, "前置锚点：失败确实被记下了")
+		assert.NotEmpty(t, got.CompletedAt, "「跑完了但有失败」不是「没跑完」——两者必须分开")
+	})
+}
+
+// 🔴 QA R2-8：产出这份 manifest 时**实际用的参数**与对账摘要必须落盘。
+//
+// 下游 M1c-2 被要求「只读这份文件」，而重算对账需要 cutover / to / keywords / keep_prefix
+// —— 一个都没有。⚠️ cutover 尤其要紧：`backfill_reconcile.go` 明写它「是**参数**不是常量」，
+// 而参数值不随产物落盘，在下游就变成一个必须靠猜的数；**猜成 2025-10 就会让 2025-09 期
+// 凭空报出「缺存量、缺增量」两条假缺篇**。
+//
+// ⚠️ cutover 那一格用**非默认值**：默认值恰好等于常量时，一个「写死常量」的实现照样绿。
+func TestBackfillFetchRecordsReconcileContext(t *testing.T) {
+	out := t.TempDir()
+	cfg := bfConfig(t, out)
+	cfg.Cutover = "2021-07" // 非默认：写死 backfillCutover 的实现会在这里红
+	_, err := bfRun(t, bfSite(t, cfg, bfTwoArticles()...), cfg)
+	require.NoError(t, err)
+
+	got := readManifestFile(t, out)
+	assert.Equal(t, "2021-07", got.Cutover, "落盘的必须是**这一趟实际用的** cutover，不是常量")
+	assert.Equal(t, cfg.To.Format("2006-01-02"), got.To, "only_in_* 的作用域靠它才可复核")
+	assert.Equal(t, backfillSearchKeywords, got.Keywords, "被丢弃的那批要可复核")
+	assert.Equal(t, backfillSearchKeepPrefix, got.KeepPrefix)
+
+	require.NotNil(t, got.Reconcile, "design-spec §10 Q3 要的就是「哪些期缺篇」")
+	assert.Equal(t, 2, got.Reconcile.Articles, "两篇都抓到了")
+	assert.NotZero(t, got.Reconcile.Periods)
+	// MissingPeriods / Unclassified 是**结论**，不是明细：下游重算最容易算歪的正是这两项。
+	assert.NotNil(t, got.Reconcile.MissingPeriods, "空与缺字段不是一回事——JSON 里要看得见 []")
+}
+
+// chmodOnReportWriter 在**对账报告写出的那一刻**把根目录改成不可写。
+//
+// 🔴 它存在的理由与 C3 那条教训完全同构：TASK-010 给 `runBackfill` 加了**第 6 条写盘
+// 路径**（完成标记 + 对账摘要那次 `store.Save()`），而它夹在「最后一次 AppendArticle」
+// 与「返回」之间 —— 静态预置够不到（前面的 Save 会先失败），跑到一半 chmod 也够不到
+// （AppendArticle 会先失败）。**唯一夹在中间的注入点是 `cfg.Report` 这个 io.Writer**。
+//
+// ⚠️ 这正是 C3 记的那句话的第二个实例：「我没找到构造」不等于「构造不存在」，
+// 而找得到的那个注入点往往**已经在签名里**了。
+type chmodOnReportWriter struct{ out string }
+
+func (w chmodOnReportWriter) Write(p []byte) (int, error) {
+	_ = os.Chmod(w.out, 0o555)
+	return len(p), nil
+}
+
+// 🔴 第 6 条写盘路径：完成标记 + 对账摘要落盘失败 ⇒ **中止**，不能静默当作跑完了。
+//
+// 少了这一格，一个「最后那次 Save 的错误被忽略」的实现会让 manifest **没有
+// completed_at 却退出码为 0** —— 恰好制造出 R2-7 要消灭的那种「夭折与完整不可分辨」。
+func TestBackfillFetchAbortsWhenFinalSaveFails(t *testing.T) {
+	out := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) }) // 否则 TempDir 清理失败
+
+	cfg := bfConfig(t, out)
+	cfg.Report = chmodOnReportWriter{out: out}
+	err := runBackfill(context.Background(), bfSite(t, cfg, bfTwoArticles()...), func(time.Duration) {}, cfg)
+
+	require.Error(t, err, "完成标记写不下去 ⇒ 必须报错，否则「跑完了」这个结论没有依据")
+	assert.Contains(t, err.Error(), "建临时文件于", "错误要来自 manifestStore.Save 的落盘路径")
+
+	// 前置锚点：文章确实抓完了（说明失败点真的在最后那次 Save，不是更早）。
+	require.NoError(t, os.Chmod(out, 0o755))
+	got := readManifestFile(t, out)
+	assert.Len(t, got.Articles, 2, "两篇都抓到了 —— 失败发生在它们之后")
+	assert.Empty(t, got.CompletedAt, "既然没写成，就不该有完成标记")
 }

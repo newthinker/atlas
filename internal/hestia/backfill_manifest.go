@@ -46,6 +46,52 @@ type Manifest struct {
 	//
 	// `omitempty`：正常完成时它不出现，于是「字段在不在」本身就是信号。
 	SearchSkippedReason string `json:"search_skipped_reason,omitempty"`
+
+	// —— 以下由 M1c-1 的 TASK-010（QA R2-7 / R2-8）新增 ——
+
+	// CompletedAt 只在**正常收尾**时写，格式同 ScannedAt（RFC3339）。
+	//
+	// 🔴 它解决的是一个结构性的不可分辨（QA R2-7）：`AppendArticle` 每篇立刻整份 `Save()`
+	// （断点续抓的前提，设计正确），副作用是**进程在第 218 篇被杀，与跑完 400 篇正常退出，
+	// 产出的 manifest 结构上无法区分** —— 两者都是合法 JSON、sha256 全对、`articles[]`
+	// 与磁盘完全闭合。下游做的一切闭合性检查在夭折的产物上**同样全绿**。
+	// `ScannedAt` 是**扫描开始**时刻，没有任何字段记录「这一趟结束了」。
+	//
+	// `omitempty` + 同一形状复用：字段在不在本身就是信号，与 SearchSkippedReason 同则。
+	CompletedAt string `json:"completed_at,omitempty"`
+
+	// Cutover / To / Keywords / KeepPrefix 是**产出这份 manifest 时实际用的参数**。
+	//
+	// 🔴 下游 M1c-2 被要求「只读这份文件」，而重算对账需要这几样（QA R2-8）：
+	//
+	//	cutover 缺失 ⇒ 只能从散文里抄一个魔数；抄成 2025-10 就会让 2025-09 期凭空
+	//	              报出「缺存量、缺增量」两条**假缺篇**
+	//	to 缺失      ⇒ only_in_* 的作用域不可复核
+	//	keywords /   ⇒ 被丢弃的那批（真跑 749 条）不可复核
+	//	keep_prefix
+	//
+	// ⚠️ 尤其讽刺的一点：`backfill_reconcile.go` 明写 cutover「是**参数**不是常量 ——
+	// 写死会让判定无法随实测调整」。这个正确的决定，因为**参数值没有随产物落盘**，
+	// 在下游变成了一个必须靠猜的数。
+	Cutover    string   `json:"cutover,omitempty"`
+	To         string   `json:"to,omitempty"`
+	Keywords   []string `json:"keywords,omitempty"`
+	KeepPrefix string   `json:"keep_prefix,omitempty"`
+
+	// Reconcile 是逐期对账的摘要。design-spec §10 Q3 要的就是「哪些期缺篇」，
+	// 而 manifest 顶层原本**没有一个键**是对账结果 —— 下游只能自己重算。
+	Reconcile *ManifestReconcile `json:"reconcile,omitempty"`
+}
+
+// ManifestReconcile 是落盘的对账摘要（M1c-1 的 TASK-010 / QA R2-8）。
+//
+// 只记结论不记全表：逐期明细可由 articles[] + cutover 重算，而**结论**里的
+// missing_periods / unclassified 恰恰是重算最容易算歪的两项（判据在本包里）。
+type ManifestReconcile struct {
+	Periods        int      `json:"periods"`
+	Articles       int      `json:"articles"`
+	MissingPeriods []string `json:"missing_periods"`
+	Unclassified   []string `json:"unclassified"`
 }
 
 // Article 是一篇已抓到并落盘的文章。
