@@ -105,6 +105,13 @@ const (
 	backfillReconcileUnclassifiedLabel = "无法归类的标题:"
 	backfillReconcileWarningLabel      = "告警:"
 	backfillReconcileViolationLabel    = "违规（显式期望值不符）:"
+
+	// backfillReconcileSearchSkippedLabel 是「本轮交叉校验未生效」的特征文本（TASK-011）。
+	//
+	// ⚠️ 与上面所有标签**互不为子串**（见本组注释开头那条规矩）：它既不含
+	// `告警:`，也不被 `违规（显式期望值不符）:` 之类包含 —— 否则 `NotContains`
+	// 那一半断言会恒假，而它看起来完全合理。
+	backfillReconcileSearchSkippedLabel = "交叉校验未生效:"
 )
 
 // BackfillFetch 跑一次完整回填。**本包对外的唯一入口**（cmd/atlas 接 cobra 用）。
@@ -225,7 +232,7 @@ func runBackfill(ctx context.Context, f Fetcher, sleep func(time.Duration), cfg 
 		cutover,
 		backfillExpect{Periods: cfg.ExpectPeriods, Articles: cfg.ExpectArticles},
 	)
-	writeBackfillReconcileReport(backfillReportWriter(cfg.Report), rc)
+	writeBackfillReconcileReport(backfillReportWriter(cfg.Report), rc, cc)
 
 	// —— 完成标记 + 对账摘要落盘（M1c-1 的 TASK-010 / QA R2-7、R2-8）——
 	//
@@ -282,9 +289,33 @@ func backfillReportWriter(w io.Writer) io.Writer {
 //
 // 「零期次」与「全部齐全」各有**自己的**特征文本：两者的 MissingPeriods 都是空的
 // （caller_contract 第 3 条），只靠缺篇段读者分不出「什么都没抓到」和「抓全了」。
-func writeBackfillReconcileReport(w io.Writer, rc backfillReconcile) {
+//
+// # 为什么 cc 是参数，而不是在调用点补几行 Fprintf（TASK-011）
+//
+// 两种形态功能等价——`cc` 在调用点本来就在作用域内，补几行就够（我向 Leader 订正过
+// 「必须改签名」这个说法，它不成立）。**选传参是为了让「报告里有什么」只有一个产出点。**
+//
+// 在调用点打印会让报告的内容分散在两处：改格式的人只会改这个函数，而漏掉那几行；
+// 想知道「报告长什么样」的人读这个函数会读到一份**不完整**的答案。
+// ⚠️ 这正是本 sprint 反复出的那类账：**C-1 的孪生实现、`cmp.Or` 解两次**——
+// 都是「同一件事有两个产出点，靠人记得同步」。为省 3 行再开一个同形的口子不划算。
+//
+// # 只报「跳过」，不报两个差集
+//
+// DoD functional[0] 要的是「未生效」这个事实 + 原因。差集的**内容**已经在 manifest 里
+// （`only_in_index` / `only_in_search`），而跳过时它们**必须留空**（宣称「搜索没索到这几篇」
+// 是谎报，事实是根本没问过搜索）⇒ 在报告里打印一对空数组既无信息、又容易被读成
+// 「校验做了且两侧一致」——**恰好是本条要消灭的那个误读**。
+func writeBackfillReconcileReport(w io.Writer, rc backfillReconcile, cc backfillCrossCheck) {
 	fmt.Fprintln(w, backfillReconcileHeader)
 	fmt.Fprintf(w, "期数 %d / 篇数 %d\n", rc.Periods, rc.Articles)
+
+	// 🔴 放在最前面（紧跟表头、在逐期明细之前）：这句话是**读下面所有数字的前提**。
+	// 交叉校验没生效时，`only_in_*` 为空不代表两侧一致，而逐期对账只看得见 index 一侧。
+	// 排在末尾会让人先读完 80 行明细、形成结论之后才看到「这些数字缺一条来源」。
+	if cc.SearchSkippedReason != "" {
+		fmt.Fprintf(w, "%s %s\n", backfillReconcileSearchSkippedLabel, cc.SearchSkippedReason)
+	}
 
 	if rc.Empty {
 		fmt.Fprintln(w, backfillReconcileEmptyLabel)
