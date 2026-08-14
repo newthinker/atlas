@@ -3,6 +3,7 @@ package hestia
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"regexp"
 	"time"
 )
@@ -17,8 +18,25 @@ import (
 // ⚠️ 期次段必须**紧跟**在报告种类之前 —— 挡住的是这几类真实存在的干扰项：
 //
 //   - `2019年三季度小额贷款公司统计数据报告` —— 期次段 +「统计数据报告」，只差中间那段
-//   - `2020年11月厦门市金融统计数据报告` —— 省市分行 30+ 家同名报告
+//   - `2020年11月厦门市金融统计数据报告` —— 地名在**中缀**（`年11月` 与种类之间）
 //   - `2020年一季度地区社会融资规模增量统计表` —— 只差「地区」二字与后缀
+//
+// 🔴 **订正：本条只挡「中缀」地名，挡不住「前缀」地名，而上一版把功劳记错了**
+// （QA R2-4 实测，我复现）。上面三个例子**全是中缀形态**，于是「挡住省市分行 30+ 家」
+// 这个结论看起来成立。实际上：
+//
+//	山西省2024年8月金融统计数据报告              → 命中，归到全国期次 2024-08
+//	太原市2024年8月金融统计数据报告              → 命中
+//	广东省2024年上半年社会融资规模增量统计数据报告 → 命中，归到 2024-06
+//
+// 地名落在正则**起点之前**，而 `FindStringSubmatch` 从中间起匹即命中。
+// ⇒ **真正挡住分行报告的是 `backfillSearchKeepPrefix` 栏目筛，不是这条正则。**
+// 本轮语料上不可达（manifest 218 篇无一是省份前缀形态），但**契约把功劳记在错误的机制上**
+// 会让下游按错误的前提设计——尤其 CONTRACTS 的 C2 追加正引导 M1c-2 去看调统司栏目，
+// **那里没有栏目筛保护**。给 M1c-2 的契约：**永远不要单靠标题正则判归属。**
+//
+// ⚠️ **不要顺手给本正则加左锚**（`^`）来"修"它：那会影响「2019年度」等合法变体，
+// 必须先跑四格（能抓到那个缺陷吗 / 会把现有什么判红）再改。QA 与我都没跑，不作为结论。
 //
 // **别放宽成「标题里含『金融统计数据报告』」**：那一条 `.*统计数据报告` 能让「三种都识别」
 // 的验收满分通过，同时把小额贷款公司报告和 30+ 家省市分行的报告一起收进来。
@@ -71,20 +89,23 @@ var backfillTitleRE = regexp.MustCompile(
 var backfillItemRE = regexp.MustCompile(
 	`(?s)href="([^"]*?/(\d+)/index\.html)"[^>]*?\stitle="([^"]*)"[^>]*>.*?</a>\s*</font>\s*<span class="hui12">\s*(\d{4}-\d{2}-\d{2})\s*</span>`)
 
-// backfillIstitleAnchorRE / backfillInternalHrefRE / backfillInternalIstitleCount
-// 一起构成计数守卫的基准：**站内**的 `istitle="true"` 条目数。
+// 计数守卫的三个锚：日期块数 / istitle 锚总数 / 其中**站内**的那些。
 //
-// ⚠️ 基准是 `istitle="true"` 而**不是** `class="hui12"`：实测 p146 上 `class="hui12"`
-// 共 21 处 = 15×span（日期）+ 5×td + 1×table（页面骨架），拿它作基准会让守卫恒假、天天报错。
+// ⚠️ 基准不能只用 `class="hui12"` 这个字串：实测 p146 上它共 21 处 = 15×span（日期）
+// + 5×td + 1×table（页面骨架）。要数的是 `<span class="hui12">` 这个**开标签**（15 处）。
 //
-// # 为什么要再排掉站外条目（TASK-007 真跑时撞出来的）
+// # 为什么要排掉站外条目（TASK-007 真跑时撞出来的）
 //
 // 原基准是 `bytes.Count(html, []byte("istitle=\"true\""))`，在真实语料上**不成立**：
-// 央行列表页会混进指向站外的条目（实测 p54 一条 gov.cn 的国务院决定），它带全套
-// istitle / title / 日期属性，只有 href 是绝对 URL ⇒ backfillItemRE 的
-// `/(\d+)/index\.html` 结构上匹配不到 ⇒ 14 vs 15，整条回填在 p54 硬失败。
-// 实测 p1..p155 共 2325 条 istitle 锚，**站外恰好 1 条、不符的页恰好 1 页**，
-// 新基准 0 反例。
+// 央行列表页会混进指向站外的条目（实测 p54 一条 gov.cn 的国务院决定）⇒ 14 vs 15，
+// 整条回填在 p54 硬失败。实测 p1..p155 共 2325 条 istitle 锚，**站外恰好 1 条、
+// 不符的页恰好 1 页**。
+//
+// 🔴 **订正一处假的理由**（QA R2-5，我采纳）：上一版写「站外条目的 href 结构上匹配不到
+// `/(\d+)/index\.html`」——**那是假的**。绝对站外 URL `https://evil.example.com/x/999/index.html`
+// 反而会被 backfillItemRE 收下。p54 那条之所以没进 Items，只是它的**形状**恰好不以
+// `/数字/index.html` 结尾，**是观测值不是结构保证**。结论没变，理由换成了可验证的那个：
+// 现在由 `backfillSameHost` 显式排除，`scanBackfillPage` 里 `continue` 那一句。
 //
 // # 为什么不是「只数 href 形如文章页的锚」
 //
@@ -94,8 +115,13 @@ var backfillItemRE = regexp.MustCompile(
 //	⇒ **守卫的基准必须独立于它要守护的那个属性。**
 //	  基准与被测量共用一个来源时，它测不出那个来源的变化。
 //
-// 「站内 / 站外」这个分界与 href 的具体形态**正交**，形态变化仍会告警。这与上面
-// 「不把 istitle 写进 backfillItemRE」是同一条理由的第二次应用。
+// 🔴 **再订正一处**：上一版由此推出「站内/站外这个分界与 href 形态**正交**」——
+// **也是假的，协议相对 URL `//host/path` 即是反例**（它以 `/` 开头 ⇒ 旧判据判站内，
+// 而它指向外站）。正交的不是「以 `/` 开头」这个**判据**，是「**同不同主机**」这个**性质**。
+// 判据换成 host 比对之后，那句话才真正成立 —— 见 backfillSameHost。
+//
+// ⚠️ 这两处订正合起来是同一个教训的两半：**结论对，两条理由都是假的**，而且都因为
+// 结论对而没人回头查（CONTRACTS 的 D 组反复登记的那一族）。
 //
 // # 两条正则各自的 `\s` 都不是装饰
 //
@@ -105,25 +131,74 @@ var backfillItemRE = regexp.MustCompile(
 // 第一个属性位（`<a istitle="true" …>`）时也数得到，不依赖属性顺序。
 var (
 	backfillIstitleAnchorRE = regexp.MustCompile(`<a\s(?:[^>]*\s)?istitle="true"[^>]*>`)
-	backfillInternalHrefRE  = regexp.MustCompile(`\shref="/`)
+	backfillAnchorHrefRE    = regexp.MustCompile(`\shref="([^"]*)"`)
+
+	// backfillDateSpanRE 是**第三个**计数锚，与上面两条**不共享任何标签名**。
+	//
+	// 🔴 立它的理由（QA R2-1 实测，我复现过）：前两个锚都建立在「`<a>` 标签名是小写」
+	// 这个从没被写下来的假设上。把一行的 `<a>`/`</a>` 改成大写，
+	// **等式两边同步 −1** ⇒ 守卫恒不触发，而后果是**该条静默消失 + 邻条日期被写错**
+	// （`.*?</a>` 跨过大写那行去吃下一行的 `</a></font><span>`）——
+	// 「条数一条不少、只有内容错」，正是 C1 最怕的那一种。
+	//
+	// ⇒ **C1「基准必须独立于被守护的属性」在「标签名」这一维没做到。** 本锚数的是
+	// 日期块，`<a>` 怎么变都不动它。实测 306 页真实语料（155 页全区间扫描 + 151 页
+	// 真跑产物）**逐页等于 istitle 锚总数，0 反例**。
+	backfillDateSpanRE = regexp.MustCompile(`<span class="hui12">`)
 )
 
-// backfillInternalIstitleCount 数该页**站内**的 istitle 条目数，即计数守卫的基准。
+// backfillSameHost 判定 href 解析后是否仍指向 base 所在的**主机**。
 //
-// ⚠️ 判据是「href 以 `/` 开头」这一条，**不是**「href 形如 `/<id>/index.html`」，
-// 更不是「backfillItemRE 认得出」（后者把守卫退化成 `n == n`，部分失效从此永不报警）。
-// 三者只差一个谓词，各由 TestScanBackfillPageCountBaselineExcludesExternalLinks 的
-// 三格分别钉住 —— 尤其第三格（href 形态从 `.html` 变 `.htm`）：**在补它之前，
-// 「按形态分」那个变异是 SURVIVED（当时套件 850 条全绿、红 0 条）**，整段论证
-// 没有任何东西守着；补上之后该变异红 2 条，且杀它的**只有**第三格。
-func backfillInternalIstitleCount(html []byte) int {
-	n := 0
+// 🔴 判据是 **host 比对**，不是「href 以 `/` 开头」（QA R2-5 实测：协议相对外链
+// `//evil.example.com/x/999/index.html` 以 `/` 开头 ⇒ 被判站内 ⇒ **端到端进了 manifest**，
+// 文件内容是外站的）。resolveURL 会把它解析成 `https://evil.example.com/...`，host 一比即露。
+//
+// ⚠️ 同时订正一处**假的理由**（QA R2-5 修正了我的论证）：本文件原先写「站外条目的
+// href 结构上匹配不到 `/(\d+)/index\.html`」——**那是假的**。绝对站外 URL
+// `https://www.gov.cn/…/999/index.html` 反而会被 backfillItemRE 收下；p54 那条之所以
+// 安全，只是它的**形状**恰好不以 `/数字/index.html` 结尾，是观测值不是结构保证。
+// 结论（要排掉站外）没变，理由换成了可验证的那个。
+//
+// ⚠️ 入参是**已解析过的绝对 URL**，不是原始 href。这一点是被测试逼出来的：
+// 我第一版让本函数自己 resolveURL、失败即判「站外」⇒ **不可解析的 href 从此被静默跳过**，
+// 而它原先是**硬失败**（`TestScanBackfillPageFailsOnUnparsableHref` 当场变红）。
+// 更难看的是我在这里写过一句「真正入选的那条路径会单独对 resolveURL 的错误硬失败」——
+// **那句话在我写下它的时候就是假的**，顺序恰好相反。⇒ 现在调用方先 resolveURL（错即硬失败），
+// 再拿绝对 URL 进来比 host，两道守卫互不吞没。
+func backfillSameHost(base, abs string) bool {
+	b, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	a, err := url.Parse(abs)
+	if err != nil {
+		return false
+	}
+	return a.Host == b.Host
+}
+
+// backfillIstitleCounts 数该页的 istitle 条目：全部 / 其中站内的。
+//
+// 两个数各有用处，别合并：
+//   - all 与日期块数（第三个锚）比 —— 挡「标签名大小写」这类让**两边同步移动**的改动；
+//   - internal 与解析出的站内条目数比 —— 挡部分解析失效。
+//
+// ⚠️ 这里 href 解析失败只是「不算站内」，**不报错** —— 与 scanBackfillPage 里那条
+// 硬失败刻意不同：本函数数的是**页面自称有几条**，它是基准；把基准也做成会报错的路径，
+// 等于让同一个异常在等式两边各拦一次，先拦到的那次会把另一次的信息吃掉。
+func backfillIstitleCounts(html []byte, base string) (all, internal int) {
 	for _, tag := range backfillIstitleAnchorRE.FindAll(html, -1) {
-		if backfillInternalHrefRE.Match(tag) {
-			n++
+		all++
+		m := backfillAnchorHrefRE.FindSubmatch(tag)
+		if m == nil {
+			continue
+		}
+		abs, err := resolveURL(base, string(m[1]))
+		if err == nil && backfillSameHost(base, abs) {
+			internal++
 		}
 	}
-	return n
+	return all, internal
 }
 
 // backfillItem 是 index 页上的一条列表项 —— **不论它是不是目标报告**。
@@ -162,12 +237,21 @@ type backfillPage struct {
 //     3 条而不是全部时它一个字都不报，而站点改版往往只改**某一类**列表项的属性顺序。
 //     「部分失效」正是「三个月后发现 manifest 少了几十期」最可能的成因。
 //   - **有条目但 0 条是报告 ⇒ 正常返回空 + nil**：大多数页都是这个形态，不是失效。
+//   - **istitle 总数 ≠ 日期块数 ⇒ 报错**：让**等式两边同步移动**的改动（标签名大小写）
+//     现出来。前两条都建立在「`<a>` 是小写」这个假设上，这一条不依赖它。
 func scanBackfillPage(html []byte, base string) (backfillPage, error) {
 	var page backfillPage
 	for _, m := range backfillItemRE.FindAllSubmatch(html, -1) {
+		// ⚠️ 顺序是**先 resolveURL 硬失败、再判 host**，两者不能换（换了之后不可解析的
+		// href 会被当成「站外」静默跳过，那条既有守卫就没了）。
 		abs, err := resolveURL(base, string(m[1]))
 		if err != nil {
 			return backfillPage{}, err
+		}
+		// 🔴 站外条目在这里就丢掉，不进 Items（QA R2-5 实测端到端进过 manifest）。
+		// 判据是 host 比对而不是「href 以 / 开头」—— 协议相对 URL `//host/…` 两者判定相反。
+		if !backfillSameHost(base, abs) {
+			continue
 		}
 		page.Items = append(page.Items, backfillItem{
 			ArticleID: string(m[2]),
@@ -181,11 +265,18 @@ func scanBackfillPage(html []byte, base string) (backfillPage, error) {
 		return backfillPage{}, fmt.Errorf("hestia backfill: no list items matched on this page: " +
 			"the page layout likely changed; refusing to report it as an empty page")
 	}
-	if n := backfillInternalIstitleCount(html); n != len(page.Items) {
+	allIstitle, internalIstitle := backfillIstitleCounts(html, base)
+	if n := len(backfillDateSpanRE.FindAllIndex(html, -1)); n != allIstitle {
+		return backfillPage{}, fmt.Errorf(
+			`hestia backfill: %d istitle="true" anchors but %d date blocks on this page: `+
+				"the page layout likely changed (the two counts move together only if a tag name changed)",
+			allIstitle, n)
+	}
+	if internalIstitle != len(page.Items) {
 		return backfillPage{}, fmt.Errorf(
 			"hestia backfill: matched %d list items but the page declares %d site-internal "+
 				`istitle="true" entries: the page layout likely changed (partial parse failure)`,
-			len(page.Items), n)
+			len(page.Items), internalIstitle)
 	}
 
 	for _, it := range page.Items {
@@ -292,14 +383,23 @@ func backfillDateRange(items []backfillItem) (newest, oldest string) {
 //
 // # 三条出口，两种性质
 //
-//   - **日期判停**（正常出口）：某页最老一条早于 From ⇒ 扫完该页后返回。
-//   - **翻完站点自称的 totalPages**（正常出口）：没有更多页可翻了。
-//   - **翻满 MaxPages**（失败出口）：报错。那说明日期判定没生效，静默返回已收集的
-//     部分会让「回填看起来跑完了」而窗口外的期次一个都没抓。
+//   - **日期判停**（正常出口）：某页最老一条早于 From ⇒ 扫完该页后返回。这是**唯一**的正常出口。
+//   - **翻完站点自称的 totalPages 而日期判停从未生效**（失败出口）：报错。
+//   - **翻满 MaxPages**（失败出口）：报错。
 //
-// ⚠️ 后两者**必须分开**：合并成报错的话，totalPages < MaxPages 的小栏目（或 From 早于
-// 站点最早一篇）会在**已经看完全部页面**的情况下失败；合并成放行的话，MaxPages 那条
-// 兜底就没人守着了。这与 discover.go 的 StopExhausted / StopMaxPages 是同一个区分。
+// 🔴 **两个失败出口检查的是同一个性质**：日期判停到底生效没有。它们只在「是谁先拦住我」
+// 上不同，错误信息因此分开写，判据合并。
+//
+// ⚠️ **这推翻了本函数上一版的设计**（QA R2-2，我采纳）。原来的第二条是**正常出口**，
+// 理由是「翻完就是翻完了，不是上限拦住了」——听起来对，但它让站点自报
+// `totalPages=1` 成为一个**静默截断整趟回填**的通道：只拿最近 15 条、`err=nil`、
+// **退出码 0**、manifest 看起来完好。而**改小 totalPages 比让 200 页都不到 From 容易得多**
+// ⇒ 更容易被触发的那条出口反而是放行的。
+//
+// **代价说清楚**：`--from` 早于站点最早一篇时（如 `--from 2005-01`），本函数现在**硬失败**。
+// 「站点确实没有更早内容」与「totalPages 报小了」在这一层**不可区分** —— 设计文档反复声明
+// 的「宁可硬失败」正是为这种不可区分准备的。要回填全站请把 `--from` 设成站点最早一篇
+// **之后**的某个日期，让日期判停正常生效。
 //
 // # index 页抓取失败：立刻中止，原样返回
 //
@@ -403,8 +503,15 @@ func scanBackfillIndex(ctx context.Context, f Fetcher, cfg backfillIndexCfg) (ba
 		prevOldest = oldest
 	}
 
+	// 走到这里 = 循环跑满而**没有任何一页**落到 from 之前 ⇒ 日期判停从未生效。
+	// 两条失败出口判据相同、只是拦住我的人不同，故错误信息分开写。
 	if exhausted {
-		return res, nil
+		return backfillScanResult{}, fmt.Errorf(
+			"hestia backfill: exhausted the site's %d page(s) without any page falling before from=%s: "+
+				"the date cutoff never took effect; the site may under-report total pages "+
+				"(refusing to return a partial result silently -- if the site genuinely has nothing "+
+				"older, set --from after its earliest article)",
+			limit, from)
 	}
 	return backfillScanResult{}, fmt.Errorf(
 		"hestia backfill: reached max_pages=%d without any page falling before from=%s: "+

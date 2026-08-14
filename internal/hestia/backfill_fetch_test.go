@@ -60,12 +60,18 @@ func bfConfig(t *testing.T, out string) BackfillConfig {
 // bfSite 造站点：arts 既是 index 上的报告条目，也各有一页正文。
 // 搜索侧三个关键词都只索到 arts[0]，于是它 Source=both、其余 Source=index
 // ——交集与差集同时非空，别让用例落在「两侧完全一致」这种退化输入上。
+//
+// ⚠️ 页上多放一条**早于 cfg.From** 的非报告条目（`2019-12-31`），让日期判停正常生效。
+// 这不是凑数：M1c-1 的 TASK-010（QA R2-2）之后，「翻完站点自称的页数而日期判停从未
+// 生效」是**失败出口**——少了这条，每个用例都会死在那条守卫上，而它们要测的根本不是翻页。
+// 用非报告条目是为了不动任何用例对 `articles` 条数的断言。
 func bfSite(t *testing.T, cfg BackfillConfig, arts ...bfArticle) *fakeFetcher {
 	t.Helper()
-	items := make([]string, 0, len(arts))
+	items := make([]string, 0, len(arts)+1)
 	for _, a := range arts {
 		items = append(items, backfillReportItem(a.ID, a.Title, a.Date))
 	}
+	items = append(items, backfillItemsOn("8999", "2019-12-31")...)
 	f := &fakeFetcher{pages: map[string][]byte{testIndexURL: backfillIndexPageHTML(1, items...)}}
 	for _, kw := range backfillSearchKeywords {
 		f.pages[backfillSearchURL(kw, cfg.From, cfg.To, 1)] = searchPageHTML(1, 1,
@@ -178,7 +184,10 @@ func TestBackfillFetchSavesIndexAndSearchSnapshots(t *testing.T) {
 	if len(idx) != 1 {
 		t.Fatalf("应存 1 页 index 快照，实得 %d 个: %v", len(idx), dirNames(idx))
 	}
-	if want := "001-2020-01-10_2020-01-10.html"; idx[0].Name() != want {
+	// 最老是 2019-12-31：bfSite 现在必放一条早于 From 的条目，好让日期判停生效
+	// （M1c-1 的 TASK-010 / QA R2-2 之后，「翻完站点页数而判停从未生效」是失败出口）。
+	// 名字里两个日期不再相同，反而更能看出「最新_最老」这个格式确实各取各的。
+	if want := "001-2020-01-10_2019-12-31.html"; idx[0].Name() != want {
 		t.Errorf("index 快照命名应为 %q（§A3：序号-最新_最老），实得 %q", want, idx[0].Name())
 	}
 	raw, err := os.ReadFile(filepath.Join(out, "index", idx[0].Name()))
@@ -671,7 +680,8 @@ func TestRunBackfillEmptyDiffersFromComplete(t *testing.T) {
 	// A：index 上有列表项但一条报告都没有 ⇒ 抓取集为空 ⇒ 对账零期次。
 	cfgA := bfConfig(t, t.TempDir())
 	fA := &fakeFetcher{pages: map[string][]byte{
-		testIndexURL: backfillIndexPageHTML(1, backfillItemsOn("910", "2020-03-25", "2020-03-11")...),
+		// 末尾那条 2019-12-31 早于 cfgA.From，让日期判停生效（同 bfSite 的理由）。
+		testIndexURL: backfillIndexPageHTML(1, backfillItemsOn("910", "2020-03-25", "2020-03-11", "2019-12-31")...),
 	}}
 	for _, kw := range backfillSearchKeywords {
 		fA.pages[backfillSearchURL(kw, cfgA.From, cfgA.To, 1)] = searchPageHTML(0, 1)
