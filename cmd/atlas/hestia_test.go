@@ -670,6 +670,31 @@ func TestHestiaBackfillFlagsBindThroughCobra(t *testing.T) {
 		err := bfExec(t, "hestia", "backfill", "fetch", "--from", "2020-01", "--out", "/tmp/bf-probe")
 		require.Error(t, err)
 
+		// 🔴 下面两条查的是 **flag 注册时声明的默认值**，不是变量的当前值。
+		//
+		// 这不是重复，两条查的是**不同的东西**，缺一条就有一个错误实现钻得过去：
+		//
+		//	Lookup(...).DefValue  → 「注册时声明的默认值是 0」
+		//	assert.Zero(变量)      → 「解析路径没有往变量里塞东西」
+		//
+		// ⚠️ 只有下面那对 assert.Zero 时，**本子用例对它声称要防的实现没有鉴别力** ——
+		// 实测：把 `IntVar(..., 0, ...)` 改成 `79` / `217`（DoD 原文点名的那个错误实现），
+		// 全包 282 条**无一变红**。成因是 cobra 的默认值在 **init() 注册时**就写进了变量，
+		// `Execute()` 对**未传**的 flag 不会重新应用它，而 bfResetFlags 在子用例开头把变量
+		// 显式清零了 ⇒ **重置动作把默认值抹掉，assert.Zero 恒真**。
+		//
+		// 🔴 讽刺的是 bfResetFlags 本身是**正确**的测试隔离（上面那条注释记了它为什么必须存在），
+		// 它恰好摧毁了本子用例的鉴别力。⇒ **测试隔离与鉴别力可以互相拆台，而且都不出声。**
+		//
+		// 危害是实的：默认值若真是 79/217，生产路径（无重置）下不传 `--expect-*` 就会走
+		// **硬失败**分支 ⇒ 让一个**推算值**取得阻断交付的权力，而那正是 TASK-008 的
+		// notes_for_downstream 反复声明不许发生的事。
+		//
+		// DefValue 是字符串（pflag 存的是注册时的字面量），所以断言 "0" 而不是 0。
+		assert.Equal(t, "0", hestiaBackfillFetchCmd.Flags().Lookup("expect-periods").DefValue,
+			"注册时的默认值必须是 0 —— 非零默认值会让推算值有权阻断交付")
+		assert.Equal(t, "0", hestiaBackfillFetchCmd.Flags().Lookup("expect-articles").DefValue)
+
 		assert.Zero(t, hestiaBackfillExpectPeriods, "零值 = 未显式传入 ⇒ 走推算值告警路径")
 		assert.Zero(t, hestiaBackfillExpectArticles)
 	})
