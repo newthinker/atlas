@@ -110,10 +110,11 @@ var (
 
 // backfillInternalIstitleCount 数该页**站内**的 istitle 条目数，即计数守卫的基准。
 //
-// ⚠️ 判据是「href 以 `/` 开头」这一条，**不是**「backfillItemRE 认得出」。后者会把
-// 守卫退化成 `n == n`（拿被验对象自己的尺子量自己），部分失效从此永不报警。
-// 两种实现只差一个谓词，唯一能区分它们的输入是「同页既有站外条目、又有站内条目
-// 解析失败」，由 TestScanBackfillPageCountBaselineExcludesExternalLinks 第二格钉住。
+// ⚠️ 判据是「href 以 `/` 开头」这一条，**不是**「href 形如 `/<id>/index.html`」，
+// 更不是「backfillItemRE 认得出」（后者把守卫退化成 `n == n`，部分失效从此永不报警）。
+// 三者只差一个谓词，各由 TestScanBackfillPageCountBaselineExcludesExternalLinks 的
+// 三格分别钉住 —— 尤其第三格（href 形态从 `.html` 变 `.htm`）：**在补它之前，
+// 「按形态分」那个变异跑出来是 850 全绿 SURVIVED**，整段论证没有任何东西守着。
 func backfillInternalIstitleCount(html []byte) int {
 	n := 0
 	for _, tag := range backfillIstitleAnchorRE.FindAll(html, -1) {

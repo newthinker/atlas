@@ -419,10 +419,14 @@ func TestScanBackfillPageCountBaselineExcludesExternalLinks(t *testing.T) {
 
 	// 🔴 防「改松」：把基准写成「istitle 锚里 backfillItemRE 认得出的那些」同样能让
 	// 上一格通过 —— 那是拿被验对象自己的尺子量自己，守卫退化成 n == n。
-	// 本格是**唯一**能区分这两种实现的输入：一页里同时有站外条目**和**站内部分失效。
 	//
 	//	正确实现：站内 istitle 3 条 vs 匹配 2 条 ⇒ 报错 ✓
 	//	改松实现：2 vs 2                        ⇒ 放行 ✗
+	//
+	// ⚠️ 本格**不是唯一**杀得掉那个变异的输入 —— 实测该变异红 5 条，既有的
+	// 「部分失效」「istitle 属性整体被换掉」两格同样杀得掉。本格加的是**共存场景**：
+	// 站外条目与站内部分失效**同页**时，排除动作必须仍然只排站外那一条。
+	// （这句话原先写成「本格是唯一…」，是没跑消融就下的断言，实测证伪后改的。）
 	t.Run("同页既有站外条目、又有站内条目解析失败 ⇒ 仍须报错", func(t *testing.T) {
 		brokenInternal := `<td height="22" align="left"><font class="newslist_style">` +
 			`<a href="/goutongjiaoliu/113456/113469/2025092212550536990/index.html" onclick="void(0)" ` +
@@ -437,6 +441,38 @@ func TestScanBackfillPageCountBaselineExcludesExternalLinks(t *testing.T) {
 
 		_, err := scanBackfillPage(html, backfillTestBase)
 		require.Error(t, err, "排除站外 ≠ 排除所有认不出的 —— 后者会让这条守卫彻底失效")
+		assert.Contains(t, err.Error(), "istitle")
+	})
+
+	// 🔴 这一格是把**论证**变成**观察**的那一格。
+	//
+	// 「基准按站内/站外分，不按 href 形态分」原本只有一段论证撑着（形态变了基准会
+	// 跟着掉 ⇒ 守卫恒绿）。我把「基准 = href 形如 `/<id>/index.html` 的 istitle 锚」
+	// 当变异跑了一遍：**红 0 条、850 全绿、SURVIVED** —— 整个套件区分不了这两种实现。
+	// 论证正确不等于有东西在守它（[守卫在场 ≠ 守卫有效]）。
+	//
+	// 本格给出那个论证所描述的**具体输入**：一条站内 istitle 条目，href 从
+	// `/index.html` 变成 `/index.htm`（站点改版最可能的形态）。
+	//
+	//	正确实现（站内/站外）：基准 2 vs 匹配 1 ⇒ **报错**，改版被发现 ✓
+	//	href 形态实现：        基准 1 vs 匹配 1 ⇒ 放行，改版静默 ✗
+	//
+	// ⚠️ 这不是「假设的将来」才有用：`articleLinkRE` 的 `\d{14,}` 就是同一形状的旧伤
+	// （Sprint 037，站点重建后整页命中 0 条、一个字都不报）。
+	t.Run("站内条目的 href 形态变了 ⇒ 基准不跟着掉，仍须报错", func(t *testing.T) {
+		// 与站内正常条目逐字段同形，**只有** index.html → index.htm 一处不同。
+		reshapedHref := `<td height="22" align="left"><font class="newslist_style" style="margin-right:10px;">` +
+			`<a href="/goutongjiaoliu/113456/113469/2025092212550536990/index.htm" onclick="void(0)" ` +
+			`target="_blank" title="中国人民银行公告〔2020〕第5号" istitle="true">中国人民银行公告〔2020〕第5号</a></font>` +
+			`<span class="hui12">2024-01-18</span></td>` + "\n"
+
+		html := backfillPageHTML(
+			backfillListItemHTML("2025092212553763198", "中美金融工作组举行第三次会议", "中美金融工作组举行第三次会议", "2024-01-19"),
+			reshapedHref,
+		)
+
+		_, err := scanBackfillPage(html, backfillTestBase)
+		require.Error(t, err, "站内条目的 href 形态变了必须出声 —— 这正是基准不能与 href 形态同源的理由")
 		assert.Contains(t, err.Error(), "istitle")
 	})
 }
