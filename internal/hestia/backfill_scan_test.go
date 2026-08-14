@@ -353,6 +353,130 @@ func TestScanBackfillPageCountMustMatchIstitle(t *testing.T) {
 	})
 }
 
+// backfillExternalItemHTML 是一条**站外**列表项，逐字取自真实语料 p54
+// （抓于 2026-08-14，发布日期 2024-01-18）。整条只改了一处：把日期做成参数。
+//
+// 它与站内条目的差别**只有 href**：`istitle="true"`、`title=`、`target=`、
+// `<span class="hui12">` 日期块全都在，`onclick` 换成了 recordLinkArticleHits(...)。
+// 这正是为什么旧基准（数全部 istitle 锚）会把它算进来。
+func backfillExternalItemHTML(date string) string {
+	return `<td height="22" align="left"><font class="newslist_style" style="margin-right:10px;">` +
+		`<a href="https://www.gov.cn/zhengce/content/202401/content_6926806.htm" ` +
+		`onclick="recordLinkArticleHits('5211540','113469','国务院关于修改部分行政法规和国务院决定的决定',this)" ` +
+		`target="_blank" title="国务院关于修改部分行政法规和国务院决定的决定" istitle="true">` +
+		`国务院关于修改部分行政法规和国务院决定的决定</a></font>` +
+		`<span class="hui12">` + date + `</span></td>` + "\n"
+}
+
+// 🔴 计数守卫的基准改了：从「全部 istitle 锚」收窄为「**站内**的 istitle 锚」。
+//
+// # 这条改的是 TASK-001 boundary[2] 已 verified 的行为
+//
+// 原判据「匹配条数 == 页面上 istitle="true" 的出现次数」**在真实语料上不成立**：
+// 央行列表页会混进指向站外的条目（实测 p54 上一条 gov.cn 的国务院决定），它带全套
+// istitle/title/日期属性，但 href 是绝对 URL，backfillItemRE 的 `/(\d+)/index\.html`
+// 结构上匹配不到 ⇒ 14 vs 15，整个回填在 p54 硬失败。
+//
+// 实测覆盖面（我自己抓的 p1..p155，2325 条 istitle 锚）：**站外条目恰好 1 条、
+// 计数不符的页恰好 1 页**，新基准 0 反例。占比 0.043% —— 万分之四的条目把整条回填链
+// 钉死，这正是「硬失败守卫」的代价必须被正确定价的地方：判据错的时候它同样硬。
+//
+// # 为什么基准不是「只数 href 形如文章页的锚」
+//
+// 那个修法更自然，但它会让**守卫跟着被守护的东西一起坏**：href 形态哪天变了
+// （如 `/index.htm`），基准会同步下降，两个数照样相等，守卫恒绿。
+//
+//	⇒ **守卫的基准必须独立于它要守护的那个属性。**
+//	  基准与被测量共用一个来源时，它测不出那个来源的变化。
+//
+// 「站内 / 站外」这个分界与 href 的**具体形态**正交，所以形态变化仍会告警 ——
+// 这与本文件里「不把 istitle 写进 backfillItemRE」是同一条理由的第二次应用。
+func TestScanBackfillPageCountBaselineExcludesExternalLinks(t *testing.T) {
+	// 承重消融：把基准改回「全部 istitle 锚」⇒ 这一条必红（14 vs 15 那个真实失败）。
+	t.Run("站外条目不计入基准，整页正常返回", func(t *testing.T) {
+		html := backfillPageHTML(
+			backfillListItemHTML("2025092212553763198", "中美金融工作组举行第三次会议", "中美金融工作组举行第三次会议", "2024-01-19"),
+			backfillExternalItemHTML("2024-01-18"),
+			backfillListItemHTML("2025092212550537670", "2020年2月金融统计数据报告", "2020年2月金融统计数据报告", "2024-01-17"),
+		)
+
+		page, err := scanBackfillPage(html, backfillTestBase)
+		require.NoError(t, err, "站外条目是站点常态，不是解析失效")
+		assert.Len(t, page.Items, 2, "站外条目没有 /<id>/index.html 形态，本来就进不了 Items")
+
+		// 钉具体位置的肯定式断言：交出来的**就是**那两条站内条目，不是「数量对就行」。
+		//
+		// ⚠️ 这里第一版写的是 `NotContains(it.URL, "gov.cn")`，它把站内 URL 也判红了
+		//     —— 本站就是 **pbc**.gov.cn。`外币` ⊂ `本外币` 的同一个坑：子串判据在
+		//     「目标串是合法串的后缀」时恒假。判 URL 归属要判**主机名整体**。
+		var ids []string
+		for _, it := range page.Items {
+			ids = append(ids, it.ArticleID)
+			assert.NotContains(t, it.URL, "//www.gov.cn/", "站外条目不该被当成候选文章")
+		}
+		assert.Equal(t, []string{"2025092212553763198", "2025092212550537670"}, ids)
+	})
+
+	// 🔴 防「改松」：把基准写成「istitle 锚里 backfillItemRE 认得出的那些」同样能让
+	// 上一格通过 —— 那是拿被验对象自己的尺子量自己，守卫退化成 n == n。
+	//
+	//	正确实现：站内 istitle 3 条 vs 匹配 2 条 ⇒ 报错 ✓
+	//	改松实现：2 vs 2                        ⇒ 放行 ✗
+	//
+	// ⚠️ 本格**不是唯一**杀得掉那个变异的输入 —— 实测该变异红 5 条，既有的
+	// 「部分失效」「istitle 属性整体被换掉」两格同样杀得掉。本格加的是**共存场景**：
+	// 站外条目与站内部分失效**同页**时，排除动作必须仍然只排站外那一条。
+	// （这句话原先写成「本格是唯一…」，是没跑消融就下的断言，实测证伪后改的。）
+	t.Run("同页既有站外条目、又有站内条目解析失败 ⇒ 仍须报错", func(t *testing.T) {
+		brokenInternal := `<td height="22" align="left"><font class="newslist_style">` +
+			`<a href="/goutongjiaoliu/113456/113469/2025092212550536990/index.html" onclick="void(0)" ` +
+			`target="_blank" title="中国人民银行公告〔2020〕第5号" istitle="true">中国人民银行公告〔2020〕第5号</a></font></td>` + "\n"
+
+		html := backfillPageHTML(
+			backfillListItemHTML("2025092212553763198", "中美金融工作组举行第三次会议", "中美金融工作组举行第三次会议", "2024-01-19"),
+			backfillExternalItemHTML("2024-01-18"),
+			brokenInternal,
+			backfillListItemHTML("2025092212550537670", "2020年2月金融统计数据报告", "2020年2月金融统计数据报告", "2024-01-17"),
+		)
+
+		_, err := scanBackfillPage(html, backfillTestBase)
+		require.Error(t, err, "排除站外 ≠ 排除所有认不出的 —— 后者会让这条守卫彻底失效")
+		assert.Contains(t, err.Error(), "istitle")
+	})
+
+	// 🔴 这一格是把**论证**变成**观察**的那一格。
+	//
+	// 「基准按站内/站外分，不按 href 形态分」原本只有一段论证撑着（形态变了基准会
+	// 跟着掉 ⇒ 守卫恒绿）。我把「基准 = href 形如 `/<id>/index.html` 的 istitle 锚」
+	// 当变异跑了一遍：**红 0 条、850 全绿、SURVIVED** —— 整个套件区分不了这两种实现。
+	// 论证正确不等于有东西在守它（[守卫在场 ≠ 守卫有效]）。
+	//
+	// 本格给出那个论证所描述的**具体输入**：一条站内 istitle 条目，href 从
+	// `/index.html` 变成 `/index.htm`（站点改版最可能的形态）。
+	//
+	//	正确实现（站内/站外）：基准 2 vs 匹配 1 ⇒ **报错**，改版被发现 ✓
+	//	href 形态实现：        基准 1 vs 匹配 1 ⇒ 放行，改版静默 ✗
+	//
+	// ⚠️ 这不是「假设的将来」才有用：`articleLinkRE` 的 `\d{14,}` 就是同一形状的旧伤
+	// （Sprint 037，站点重建后整页命中 0 条、一个字都不报）。
+	t.Run("站内条目的 href 形态变了 ⇒ 基准不跟着掉，仍须报错", func(t *testing.T) {
+		// 与站内正常条目逐字段同形，**只有** index.html → index.htm 一处不同。
+		reshapedHref := `<td height="22" align="left"><font class="newslist_style" style="margin-right:10px;">` +
+			`<a href="/goutongjiaoliu/113456/113469/2025092212550536990/index.htm" onclick="void(0)" ` +
+			`target="_blank" title="中国人民银行公告〔2020〕第5号" istitle="true">中国人民银行公告〔2020〕第5号</a></font>` +
+			`<span class="hui12">2024-01-18</span></td>` + "\n"
+
+		html := backfillPageHTML(
+			backfillListItemHTML("2025092212553763198", "中美金融工作组举行第三次会议", "中美金融工作组举行第三次会议", "2024-01-19"),
+			reshapedHref,
+		)
+
+		_, err := scanBackfillPage(html, backfillTestBase)
+		require.Error(t, err, "站内条目的 href 形态变了必须出声 —— 这正是基准不能与 href 形态同源的理由")
+		assert.Contains(t, err.Error(), "istitle")
+	})
+}
+
 // ============================================================================
 // M1c-1 的 TASK-002：翻页与按日期停止
 //

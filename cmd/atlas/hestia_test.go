@@ -24,8 +24,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -568,4 +570,176 @@ func TestHestiaFlagsBindToVariables(t *testing.T) {
 			"绑定断裂时会静默读默认路径的配置 —— 生产上因 plist 的 WorkingDirectory 碰巧无害，"+
 				"手工在别处跑就会读错配置而不报错")
 	})
+}
+
+// ============================================================================
+// M1c-1 的 TASK-007：backfill fetch 子命令装配
+//
+// Context Checkpoint: done_criteria → test mapping
+//   functional[0] 两层子命令注册   → TestHestiaBackfillFetchIsRegistered
+//   functional[1] 四个 flag 真解析 → TestHestiaBackfillFlagsBindThroughCobra
+//   boundary[0]   --out 必填       → TestHestiaBackfillFetchRequiresOut
+//   boundary[1]   --from 格式校验  → TestHestiaBackfillFetchRejectsBadFrom
+// ============================================================================
+
+// bfResetFlags 把四个绑定变量清零、**并清掉 flag 自己的 Changed 状态**。
+//
+// ⚠️ 两样都要清，少一样就会跨用例污染 —— 而这是我实测撞出来的：
+// 只清变量时，`TestHestiaBackfillFetchRequiresOut` **单跑 PASS、与其它用例同跑 FAIL**。
+// 成因是 `hestiaBackfillFetchCmd` 是**包级全局**，pflag 把「这个 flag 被显式传过」
+// 记在 `flag.Changed` 上并**跨 Execute 保留**；前面的用例传过 `--out`，
+// 于是 cobra 的 required 校验认为它「已提供」，那条用例就静默失去了鉴别力。
+//
+// 🔴 **单跑绿、同跑红**这种形态最容易被读成「测试不稳定」而加 `-run` 绕过去 ——
+// 它其实是在报告一个真实的共享状态。
+func bfResetFlags(t *testing.T) {
+	t.Helper()
+	oF, oO, oP, oA := hestiaBackfillFrom, hestiaBackfillOut, hestiaBackfillExpectPeriods, hestiaBackfillExpectArticles
+	t.Cleanup(func() {
+		hestiaBackfillFrom, hestiaBackfillOut = oF, oO
+		hestiaBackfillExpectPeriods, hestiaBackfillExpectArticles = oP, oA
+	})
+	hestiaBackfillFrom, hestiaBackfillOut = "", ""
+	hestiaBackfillExpectPeriods, hestiaBackfillExpectArticles = 0, 0
+	hestiaBackfillFetchCmd.Flags().VisitAll(func(f *pflag.Flag) { f.Changed = false })
+}
+
+// bfExec 从**根命令**按真实路径跑一次，输出丢弃。
+//
+// ⚠️ 用 `SetArgs` + `Execute()` 而不是 `Flags().Parse()`：后者绕过了命令树查找与
+// required-flag 校验，而本任务要验的恰恰是「装配对不对」——两层嵌套走不走得通、
+// `--out` 缺失会不会被 cobra 拦下。
+func bfExec(t *testing.T, args ...string) error {
+	t.Helper()
+	old := os.Args
+	t.Cleanup(func() { os.Args = old })
+	rootCmd.SetArgs(args)
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetErr(io.Discard)
+	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	return rootCmd.Execute()
+}
+
+// 🔴 functional[0]：`atlas hestia backfill fetch` **两层嵌套**都要装上。
+//
+// 判据是**从根命令按路径找得到**，而不是「那个变量非 nil」——后者对一个建了命令
+// 却忘了 AddCommand 的实现同样为真，而那种实现在 CLI 上根本调不出来。
+func TestHestiaBackfillFetchIsRegistered(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"hestia", "backfill", "fetch"})
+	require.NoError(t, err, "从根命令按 hestia→backfill→fetch 必须找得到")
+	require.NotNil(t, cmd)
+
+	assert.Equal(t, "fetch", cmd.Name())
+	assert.NotNil(t, cmd.RunE, "叶子命令必须有 RunE，否则它只会打印 usage")
+
+	// 中间层也要能单独找到 —— 少了它，`atlas hestia backfill` 会被当成未知命令。
+	mid, _, err := rootCmd.Find([]string{"hestia", "backfill"})
+	require.NoError(t, err)
+	assert.Equal(t, "backfill", mid.Name())
+	assert.True(t, mid.HasSubCommands(), "backfill 是中间层，必须挂着子命令")
+}
+
+// 🔴 functional[1]：四个 flag **经 cobra 真实解析**后写进了正确的变量。
+//
+// ⚠️ 不查 `Lookup("from") != nil`——那只证明 flag 存在，证不了它绑到了哪个变量。
+// 绑定断裂时 `--help` 一模一样、flag 也照样存在，而值静默丢失。
+//
+// 🔴 `--expect-*` **不传即零值**（TASK-008 的 notes_for_downstream 定死）：零值走
+// 推算值告警路径，**不是**「默认某个数」。所以下面第二个子用例是必须的——
+// 少了它，一个「不传就填 79/217」的错误实现在第一个子用例上照样绿。
+func TestHestiaBackfillFlagsBindThroughCobra(t *testing.T) {
+	t.Run("四个都传 ⇒ 四个变量都拿到值", func(t *testing.T) {
+		bfResetFlags(t)
+		withConfig(t, "discover:\n  index_url: \"\"\n") // 让 RunE 在装配之后、触网之前失败
+
+		err := bfExec(t, "hestia", "backfill", "fetch",
+			"--from", "2020-01", "--out", "/tmp/bf-probe",
+			"--expect-periods", "79", "--expect-articles", "217")
+		require.Error(t, err, "前置锚点：配置无效 ⇒ RunE 报错；若这里 nil 说明它真去抓了网")
+
+		assert.Equal(t, "2020-01", hestiaBackfillFrom)
+		assert.Equal(t, "/tmp/bf-probe", hestiaBackfillOut)
+		assert.Equal(t, 79, hestiaBackfillExpectPeriods)
+		assert.Equal(t, 217, hestiaBackfillExpectArticles)
+	})
+
+	t.Run("--expect-* 不传 ⇒ 保持零值（不是默认 79/217）", func(t *testing.T) {
+		bfResetFlags(t)
+		withConfig(t, "discover:\n  index_url: \"\"\n")
+
+		err := bfExec(t, "hestia", "backfill", "fetch", "--from", "2020-01", "--out", "/tmp/bf-probe")
+		require.Error(t, err)
+
+		assert.Zero(t, hestiaBackfillExpectPeriods, "零值 = 未显式传入 ⇒ 走推算值告警路径")
+		assert.Zero(t, hestiaBackfillExpectArticles)
+	})
+}
+
+// 🔴 boundary[0]：`--out` **必填**，缺失即报错。
+//
+// 不给默认值是刻意的：产物目录必须是仓库外的绝对路径（人类裁决），
+// **让「误落进仓库」需要显式打出来才会发生**。
+func TestHestiaBackfillFetchRequiresOut(t *testing.T) {
+	bfResetFlags(t)
+	withConfig(t, "discover:\n  index_url: \"\"\n")
+
+	err := bfExec(t, "hestia", "backfill", "fetch", "--from", "2020-01")
+
+	require.Error(t, err, "--out 缺失必须报错，不能落到某个默认目录")
+	assert.Contains(t, err.Error(), "out", "错误要点名是哪个 flag 缺了")
+}
+
+// 🔴 boundary[1]：`--from` 格式非法即报错。至少两条：格式不对的、月份越界的。
+//
+// ⚠️ 月份越界那条单独列，是因为 `\d{4}-\d{2}` 这类宽松校验**认得 2020-13 与 2020-00**——
+// 放过去之后它会变成一个语义非法的 time.Time，而回填按发布日期判停，
+// 错一个月就少抓/多抓一整批。
+func TestHestiaBackfillFetchRejectsBadFrom(t *testing.T) {
+	for _, tt := range []struct{ name, from string }{
+		{"格式不对：缺月份", "2020"},
+		{"格式不对：带日", "2020-01-15"},
+		{"格式不对：单位数月", "2020-1"},
+		{"月份越界：13 月", "2020-13"},
+		{"月份越界：0 月", "2020-00"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bfResetFlags(t)
+			withConfig(t, "discover:\n  index_url: \"\"\n")
+
+			err := bfExec(t, "hestia", "backfill", "fetch", "--from", tt.from, "--out", "/tmp/bf-probe")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "from", "错误要点名是 --from，否则读的人分不清是哪个参数错了")
+		})
+	}
+}
+
+// 🔴 回填**不继承** `discover.max_pages`，而是留零值走 hestia 包的兜底上限。
+//
+// 实撞：我第一版传了 `cfg.Discover.MaxPages`，真跑**第一秒**就被拦下 ——
+// configs 里那个值是 **3**（日常增量每天翻三页），而回填要翻约 150 页。
+//
+// ⚠️ 拦下它的是 TASK-002 那条「翻满 MaxPages ⇒ 报错」守卫。**若当初把它写成
+// 「翻满就返回已收集的部分」，这里会静默只抓最近三页，而回填看起来跑完了。**
+// ⇒ 这条用例钉住的是**装配**，不是那条守卫：下一个人「顺手」把 MaxPages 补回去时，
+// 它会红，而不是等到下一次真跑才发现。
+func TestHestiaBackfillConfigDoesNotInheritDiscoverMaxPages(t *testing.T) {
+	bfResetFlags(t)
+	hestiaBackfillOut = "/tmp/bf-probe"
+
+	cfg := hestia.Config{}
+	cfg.Discover.IndexURL = "https://example.invalid/index.html"
+	cfg.Discover.MaxPages = 3 // 日常增量的窗口
+	cfg.Discover.Timeout = 30 * time.Second
+
+	got := hestiaBackfillConfig(cfg, io.Discard, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	assert.Zero(t, got.MaxPages,
+		"回填必须留零值走自己的兜底上限；继承 discover.max_pages=3 会让它只翻三页")
+	assert.Equal(t, cfg.Discover.IndexURL, got.IndexURL, "入口 URL 仍来自配置")
+	assert.Equal(t, cfg.Discover.Timeout, got.Timeout, "单次请求超时可以共用，它与翻多少页无关")
+	assert.Empty(t, got.Cutover,
+		"Cutover 留空 ⇒ 用 hestia 包里的唯一定义；命令层再写一个 2025-09 会造出第二个定义处")
+	assert.Equal(t, "/tmp/bf-probe", got.Out)
+	assert.NotNil(t, got.Report, "报告要有去向")
 }
