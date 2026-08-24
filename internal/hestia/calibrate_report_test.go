@@ -321,18 +321,20 @@ func TestRenderCalibrateReportCountsFetchFailuresWhenParseFailuresAreEmpty(t *te
 func TestRenderCalibrateReportMarksFieldsWithoutSamples(t *testing.T) {
 	out := renderToString(t, renderFixture())
 
+	// ⚠️ 本条**不断言 n 列** —— n 由 TestRenderCalibrateReportShowsPerFieldSampleCount
+	// 独占。两处都断的话，「删掉 n 列」这个消融会同时红两条测试，
+	// 而 DoD 要的验收是「红且**只红那一条**」：一个消融红几条，本身就是它精确度的度量。
 	m1 := reportRow(t, out, FieldM1) // 零样本
-	assert.Equal(t, "0", m1[1])
 	assert.Contains(t, strings.Join(m1, " "), noValueMark,
 		"零样本字段的分位数必须打 %q，不得打 0——0 是一个合法的实测值", noValueMark)
 
 	m2 := reportRow(t, out, FieldM2) // n=6，有建议
-	assert.Equal(t, "6", m2[1])
 	assert.NotContains(t, strings.Join(m2, " "), noValueMark)
 
 	// n=2 ⇒ 不给建议，但分位数照常给：**「没有建议」不等于「没有数据」**。
 	tsf := reportRow(t, out, FieldTSFStock)
-	assert.Equal(t, "2", tsf[1])
+	assert.NotContains(t, strings.Join(tsf[2:len(tsf)-1], " "), noValueMark,
+		"n=2 仍有分位数，不该打 —")
 	assert.Equal(t, noSuggestionMark, tsf[len(tsf)-1],
 		"n<3 时建议列必须显式标注「不给建议」，留空会被读成「区间就是这么宽」")
 }
