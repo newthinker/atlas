@@ -1,0 +1,351 @@
+package hestia
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// M1c-2 的 TASK-002：批量解析 M1c-1 抓下来的快照，产出**字段样本**与**失败清单**。
+//
+// 样本喂给 T3 的分布报告（人据此填 MagnitudeRanges）；失败清单是 M1c-4（LLM 兜底）的
+// 工作量依据，也是 M1c-3 入库前要清零或显式豁免的东西。
+//
+// # 本文件反复出现的一条原则：不让东西静默消失
+//
+// 一篇文章走到这里有四种去向，**每一种都要能被数出来**：
+//
+//	① 出样本      —— 解析成功
+//	② 本迭代不解析 —— 社融存量/增量两篇（M1c-3 的活）、monthly 期次（parse.go 显式拒绝）
+//	③ 解析失败    —— 该支持却失败了，M1c-4 要兜的就是这批
+//	④ 解析不出期次 —— 标题形态变了
+//
+// ②③ 混成一格的代价是**具体**的：v1 期次每期两篇社融，68 期就是 136 条假失败；
+// monthly 在本轮语料里约 53 篇，混进去会是 53 条一模一样的
+// "monthly is not supported yet" —— 真失败被淹没在里面。
+// ④ 若 continue 掉就彻底消失了，backfill_reconcile.go:196 对同一处写过这条理由。
+
+// CalibrateDeps 是标定所需的输入。
+//
+// Dir 是 M1c-1 的产出目录（fetch 的 --out），**不是** manifest.json 的路径：
+// loadManifest 收目录，且 Article.File 存的是相对该目录的路径 —— 收文件路径就要在这里
+// 再 filepath.Dir() 一次，凭空多一处可能出错的地方。
+//
+// Out 用来把「这一趟看到了什么」写给人看。nil 表示不打印（纯取数的调用方）。
+type CalibrateDeps struct {
+	Dir             string
+	Out             io.Writer
+	AllowIncomplete bool
+}
+
+// ParseFailure 是一篇的去向记录：Failures 里是「该支持却失败了」，
+// Unsupported 里是「本迭代不解析」。两格共用同一形状，因为要填的四样完全相同 ——
+// 期次、种类、文件、以及**为什么**。
+type ParseFailure struct {
+	Period, Kind, File, Err string
+}
+
+// CalibrateResult 是分布统计的原料。
+//
+// Periods 只数**受支持的**《金融统计数据报告》（含解析失败的那些）—— 它是「本轮尝试了
+// 多少期」，不是「manifest 里有多少篇」。
+type CalibrateResult struct {
+	Periods int
+	Samples map[string][]float64 // field → 各期实测值，未排序
+
+	Failures     []ParseFailure // ③ 该支持却失败了
+	Unsupported  []ParseFailure // ② 本迭代不解析（社融两篇 + monthly）
+	Unclassified []string       // ④ 标题解析不出期次，原文照录
+
+	// FetchFailed 是 manifest.failed 的转录：fetch 阶段就没抓到的篇目。
+	// 它们既不在 articles 里也不在上面任何一格里，不带出来的话，报告会显示「失败：无」
+	// —— 而失败表的用途正是「M1c-3 入库前要清零」。
+	FetchFailed []Failed
+
+	// Warnings 是「这份产物可不可信」的存疑项。不阻断：它们说的是语料的性质，
+	// 不是本次标定出了错。
+	Warnings []string
+}
+
+// collectSamples 读 manifest、解析《金融统计数据报告》、汇总各字段的取值。
+//
+// 只取这一种报告：M1b-2 的 Parse 只认它的格式，rule@v1 期次的 27 个社融字段在另外两篇
+// 独立报告里，本迭代没有解析器。
+func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
+	// loadManifest 对**文件不存在**返回空 Manifest + nil error —— 那是回填首跑的正常路径，
+	// 在那边是对的。但在这里「目录里没有 manifest」意味着 --dir 指错了，若沿用那条语义，
+	// 标定会拿一份零篇的 manifest 一路走下去。故先自己确认它在。
+	p := filepath.Join(d.Dir, manifestFileName)
+	switch _, err := os.Stat(p); {
+	case os.IsNotExist(err):
+		return nil, fmt.Errorf("%s 不存在：--dir 要指向 backfill 的产物目录（内含 %s 与 %s/），不是 manifest 文件本身",
+			p, manifestFileName, articlesDirName)
+	case err != nil:
+		return nil, fmt.Errorf("查看 %s: %w", p, err)
+	}
+
+	st, err := loadManifest(d.Dir)
+	if err != nil {
+		return nil, err
+	}
+	m := st.Manifest
+
+	// 夭折的 manifest 与正常完成的**结构上无法区分**（backfill_manifest.go 的 CompletedAt
+	// 注释）：两者都是合法 JSON、sha256 全对、articles[] 与磁盘完全闭合，下游做的一切
+	// 闭合性检查在夭折的产物上同样全绿。⇒ 判据只能是那个字段在不在，不能用「产物内部
+	// 自洽」去替代。用半份数据标定会得出**偏窄**的区间，而偏窄的区间会在 M1c-3 回填时
+	// 批量误拦 —— 那时人只会怀疑数据，不会怀疑区间。
+	if m.CompletedAt == "" && !d.AllowIncomplete {
+		return nil, errors.New("manifest 里没有 completed_at：这份产物可能是中途夭折的，" +
+			"而夭折与正常完成在结构上无法区分；用半份数据标定会得出偏窄的区间。" +
+			"若你有产物之外的证据能证明这趟跑完了，传 --allow-incomplete")
+	}
+
+	res := &CalibrateResult{Samples: map[string][]float64{}}
+	res.FetchFailed = append(res.FetchFailed, m.Failed...)
+	res.Warnings = manifestWarnings(m)
+
+	items := classifyArticles(res, m.Articles)
+
+	var shaUnverified int
+	for _, it := range items {
+		res.Periods++
+		fail := func(reason string) {
+			res.Failures = append(res.Failures, ParseFailure{
+				Period: it.period, Kind: it.kind, File: it.a.File, Err: reason,
+			})
+		}
+
+		raw, err := os.ReadFile(filepath.Join(d.Dir, filepath.FromSlash(it.a.File)))
+		if err != nil {
+			fail(fmt.Sprintf("读文件: %v", err))
+			continue
+		}
+
+		// Article.SHA256 的用途（backfill_manifest.go:102）是「让下游验证本地文件未被
+		// 篡改/截断」，而 calibrate 就是第一个下游。**必须在 Parse 之前查**：被截断的
+		// HTML 可能仍 Parse 成功、只是少抽几个字段，那时该期会静默贡献一份残缺样本。
+		if it.a.SHA256 == "" {
+			shaUnverified++ // 出声跳过，收尾时汇总成一条 warning
+		} else if got := articleSHA256(raw); got != it.a.SHA256 {
+			fail(fmt.Sprintf("sha256 不符：manifest 记 %s，实际 %s —— 文件被改过或截断，"+
+				"而截断的 HTML 仍可能 Parse 成功但少抽字段", it.a.SHA256, got))
+			continue
+		}
+
+		obs, err := Parse(raw)
+		if err != nil {
+			// 原样带出 Parse 的错误：把它换成一句通用话，失败清单上 N 条就会长得一模一样，
+			// 而 M1c-4 要按成因分工。
+			fail(err.Error())
+			continue
+		}
+
+		// 免费的交叉校验：Parse 从 HTML 自解期次，backfillPeriodOf 从 manifest 标题推期次
+		// —— 两条独立推导。manifest 与文件错配时（AppendArticle 每篇立刻落盘，中途出错
+		// 有窗口），没有这条则样本**静默来自错误期次**。
+		if obs.Meta.Period != it.period {
+			fail(fmt.Sprintf("期次交叉校验不一致：标题推出 %s，正文自解 %s —— manifest 与文件错配，"+
+				"放行会让这一期的样本静默来自另一期", it.period, obs.Meta.Period))
+			continue
+		}
+
+		for f, v := range obs.Values {
+			res.Samples[f] = append(res.Samples[f], v)
+		}
+	}
+
+	if shaUnverified > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"⚠ %d 篇的 manifest 没有 sha256，未做完整性校验：被截断的 HTML 仍可能 Parse 成功但少抽字段",
+			shaUnverified))
+	}
+
+	// 先渲染再判错：即使下面拒绝了，看终端的人也该知道那 N 篇都去哪了。
+	writeCollectSummary(d.Out, d.Dir, res)
+
+	// 「空」的判据是**可用样本数为 0**，不是 len(Articles)==0：一份 400 篇全是社融、
+	// 或标题形态全变了的目录，len(Articles) 不为 0 却一个样本都产不出 —— 那时报告会打印
+	// 54 行全 `—`，退出码 0。
+	if len(res.Samples) == 0 {
+		return nil, fmt.Errorf("这份产物可用样本为 0（尝试解析 %d 篇、解析失败 %d 篇、"+
+			"本迭代不解析 %d 篇、标题解析不出期次 %d 条）：没有样本标不出分布，"+
+			"放行只会产出一份每格都是 — 的报告",
+			res.Periods, len(res.Failures), len(res.Unsupported), len(res.Unclassified))
+	}
+	return res, nil
+}
+
+// calibrateItem 是一篇**确定要解析**的文章：期次已定、种类已定。
+type calibrateItem struct {
+	period string
+	kind   string
+	a      Article
+}
+
+// classifyArticles 把 manifest 里的篇目分成「要解析的」与另外三格。
+//
+// 返回的 items 按期次升序 —— 失败清单与样本顺序由它决定，稳定才能逐次 diff。
+func classifyArticles(res *CalibrateResult, articles []Article) []calibrateItem {
+	var items []calibrateItem
+	for _, a := range articles {
+		period, kind, ok := backfillPeriodOf(a.Title)
+		if !ok {
+			// **不 continue 掉**：解析不出期次的标题若被丢弃，它就从这张表上彻底消失了
+			// ——而「站点改了期次表述」正是最需要被人看见的一类变化。
+			res.Unclassified = append(res.Unclassified, a.Title)
+			continue
+		}
+		if kind != backfillKindFinance {
+			// ⚠️ 这里**不读文件**是刻意的：真实产物里社融两篇是抓下来了的，但即便没抓到，
+			// 它们也不该产生「读文件失败」—— 那不是失败，是本迭代不解析。
+			res.Unsupported = append(res.Unsupported, ParseFailure{
+				Period: period, Kind: kind, File: a.File,
+				Err: "本迭代不解析该报告种类（社融存量/增量的解析器是 M1c-3 的活）",
+			})
+			continue
+		}
+		if reason := unsupportedPeriodType(a.Title); reason != "" {
+			res.Unsupported = append(res.Unsupported, ParseFailure{
+				Period: period, Kind: kind, File: a.File, Err: reason,
+			})
+			continue
+		}
+		items = append(items, calibrateItem{period: period, kind: kind, a: a})
+	}
+
+	sort.SliceStable(items, func(i, j int) bool { return items[i].period < items[j].period })
+	sort.SliceStable(res.Unsupported, func(i, j int) bool {
+		return res.Unsupported[i].Period < res.Unsupported[j].Period
+	})
+	sort.Strings(res.Unclassified)
+	return items
+}
+
+// unsupportedPeriodType 回答「这个标题的 period_type，本迭代的解析器接不接」。
+// 接 ⇒ 返回空串；不接 ⇒ 返回可读的理由。
+//
+// 判据取自 parse.go 的 checkPeriodTypeSupported，**不另写一份名单**：解除支持的方式是
+// 删它的分支（monthly 那条在等月报样本），删掉后这里自动跟着放行。自己维护一份「哪些
+// 不支持」会在解除时留下第二个必须同步的地方，而漏同步的表现是**静默少解析一批期次**。
+//
+// 只在 parseTitle 认得出标题时预判 —— 认不出的（如「山西省2024年8月金融统计数据报告」
+// 这类分行报告，backfillTitleRE 不锚定起点会认下来）不猜，照常读文件走 Parse：Parse 看的
+// 是 HTML 里的 ArticleTitle，报出的错误严格更多。
+func unsupportedPeriodType(title string) string {
+	_, periodType, err := parseTitle(title)
+	if err != nil {
+		return ""
+	}
+	if err := checkPeriodTypeSupported(periodType, title); err != nil {
+		return fmt.Sprintf("本迭代解析器不支持 period_type=%s（parse.go 的 checkPeriodTypeSupported 显式拒绝，等样本）",
+			periodType)
+	}
+	return ""
+}
+
+// manifestWarnings 把 manifest 里「这份产物可不可信」的三个字段读成人话。
+//
+// 三条都是**有声跳过**：不出声的话，「没做过这项检查」与「检查通过了」在读者看来完全
+// 一样 —— 那正是 SearchSkippedReason 当初被要求落盘的理由（backfill_manifest.go:47，
+// 而那句注释里的「读者」指的就是本迭代）。
+func manifestWarnings(m Manifest) []string {
+	var out []string
+	if m.SearchSkippedReason != "" {
+		out = append(out, fmt.Sprintf(
+			"⚠ 这份产物没有做 index×search 交叉校验（原因：%s）：可能有整页被静默跳过，"+
+				"那些篇目既不在 articles 里，也不在任何差集里", m.SearchSkippedReason))
+	}
+	if n := len(m.Failed); n > 0 {
+		ids := make([]string, 0, n)
+		for _, f := range m.Failed {
+			ids = append(ids, f.ID)
+		}
+		out = append(out, fmt.Sprintf(
+			"⚠ fetch 阶段有 %d 篇没抓到（manifest.failed）：它们既不在 articles 里，也不在下面的失败表里 —— %s",
+			n, strings.Join(ids, " / ")))
+	}
+	switch {
+	case m.Reconcile == nil:
+		// 真跑用的那份产物出自 M1c-1 的 TASK-010 之前，**没有**这个字段。静默略过会让
+		// 「序列没有洞」与「压根没对过账」看起来一样。
+		out = append(out, "⚠ manifest 没有 reconcile 对账摘要（出自 TASK-010 之前）："+
+			"看不出这份分布是不是算在一条有洞的序列上")
+	case len(m.Reconcile.MissingPeriods) > 0:
+		out = append(out, fmt.Sprintf("⚠ 对账记了 %d 个缺篇期次，这份分布算在一条有洞的序列上 —— %s",
+			len(m.Reconcile.MissingPeriods), strings.Join(m.Reconcile.MissingPeriods, " / ")))
+	}
+	return out
+}
+
+// writeCollectSummary 把四格去向写给人看。w 为 nil ⇒ 不打印。
+//
+// 四格的**计数每次都打**（含 0），明细只在非空时展开：只打非空格子的话，读者无从判断
+// 「这一格是 0」还是「这个实现根本没有这一格」。
+func writeCollectSummary(w io.Writer, dir string, res *CalibrateResult) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, "标定输入: %s\n", dir)
+	fmt.Fprintf(w, "  待解析（%s，受支持期次）: %d 篇\n", backfillKindFinance, res.Periods)
+
+	fmt.Fprintf(w, "  本迭代不解析: %d 篇\n", len(res.Unsupported))
+	for _, line := range groupUnsupported(res.Unsupported) {
+		fmt.Fprintf(w, "    - %s\n", line)
+	}
+
+	fmt.Fprintf(w, "  解析失败（M1c-4 的兜底工作量）: %d 篇\n", len(res.Failures))
+	for _, f := range res.Failures {
+		fmt.Fprintf(w, "    - %s  %s  %s\n", f.Period, f.File, f.Err)
+	}
+
+	fmt.Fprintf(w, "  标题解析不出期次: %d 条\n", len(res.Unclassified))
+	for _, t := range res.Unclassified {
+		fmt.Fprintf(w, "    - %s\n", t)
+	}
+
+	fmt.Fprintf(w, "  fetch 阶段未抓到: %d 篇\n", len(res.FetchFailed))
+	for _, f := range res.FetchFailed {
+		fmt.Fprintf(w, "    - %s  %s\n", f.ID, f.Error)
+	}
+
+	for _, warn := range res.Warnings {
+		fmt.Fprintf(w, "  %s\n", warn)
+	}
+}
+
+// groupUnsupported 把「本迭代不解析」按 (种类, 理由) 归并成每因一行。
+//
+// 不逐篇打：真语料上 monthly 约 53 篇，逐篇打就是 53 行同一句话，把另外几行淹掉
+// ——而「淹掉真信号」正是这一格与失败表分开的理由，在渲染层再犯一次就白分了。
+func groupUnsupported(us []ParseFailure) []string {
+	type group struct {
+		kind, reason string
+		periods      []string
+	}
+	// groups 按首次出现的顺序存 *group（us 已按期次排过），byKey 只用来找已有的那一组
+	// —— 存 key 再回查一次 map 是多绕一道。
+	var groups []*group
+	byKey := map[string]*group{}
+	for _, u := range us {
+		key := u.Kind + "\x00" + u.Err
+		g := byKey[key]
+		if g == nil {
+			g = &group{kind: u.Kind, reason: u.Err}
+			byKey[key] = g
+			groups = append(groups, g)
+		}
+		g.periods = append(g.periods, u.Period)
+	}
+
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, fmt.Sprintf("%d × [%s] %s: %s",
+			len(g.periods), g.kind, g.reason, strings.Join(g.periods, ", ")))
+	}
+	return out
+}
