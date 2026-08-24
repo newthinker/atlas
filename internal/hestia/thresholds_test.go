@@ -1,6 +1,7 @@
 package hestia
 
 import (
+	"maps"
 	"slices"
 	"testing"
 
@@ -27,6 +28,43 @@ func TestDefaultThresholdsAdmitM0Measurements(t *testing.T) {
 		"企业贷款容差必须容得下 M0 实测的最大残差")
 	assert.Greater(t, c.YoYSanityMax, m0MaxYoY,
 		"同比上限必须容得下 M0 实测的最大同比")
+}
+
+// 社融存量环比上限必须按 period_type 分成两档（M1c-2 的 TASK-001）。
+//
+// # 只断「五键齐全且都 > 0」是不够的
+//
+// 那样的话**把五个值写成同一个数的实现照样绿** —— 而分档正是这次改动的全部内容。
+// 所以下面既钉住键集，也钉住两档之间的序关系。
+//
+// 键集用 periodTypeList() 而不是硬编码：加第六种 period_type 时这条会红，迫使那人
+// 给新序列定一个上限。留着不定的话闸门对那条序列记 skipped{no_threshold} 整条消失，
+// 而**那是静默的**。
+//
+// # 为什么是两档而不是五档
+//
+// Preceding 按 period_type 隔离序列 ⇒ 每年只有一个 h1 期次，h1 的「上一期」是
+// **去年的 h1**。q1 / h1 / q1_q3 / annual 四种都是年初起累计口径，相邻两期一律相隔
+// 12 个月，只有 monthly 相隔 1 个月。
+//
+// ⚠️ 不写成「月均上限 × 间隔月数」：那样只需一个数，但它**假设存量线性增长**，
+// 而这道闸恰恰是用来抓「不该出现的跳变」的 —— 用线性模型定义「什么叫不线性」是循环的。
+func TestDefaultStockContinuityIsTieredByPeriodType(t *testing.T) {
+	m := DefaultThresholds().StockContinuityMax
+
+	assert.Equal(t, periodTypeList(), slices.Sorted(maps.Keys(m)),
+		"每个 period_type 都要有上限：缺一档不报错，只是那条序列的闸门静默消失")
+	for pt, v := range m {
+		assert.Positive(t, v, "stock_continuity_max[%s] 必须 > 0", pt)
+	}
+
+	assert.Less(t, m["monthly"], m["annual"],
+		"monthly 相邻两期相隔 1 个月、annual 相隔 12 个月，前者的上限必须更紧；"+
+			"两者相等说明分档只做了形式")
+	for _, pt := range []string{"q1", "h1", "q1_q3"} {
+		assert.Equal(t, m["annual"], m[pt],
+			"%s 与 annual 同为年初起累计、相邻两期同样相隔 12 个月，应当同档", pt)
+	}
 }
 
 // 区间表有意留空：必须用 M1c 回填分布标定，不得拍脑袋。

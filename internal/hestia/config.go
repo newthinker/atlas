@@ -3,6 +3,9 @@ package hestia
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -47,10 +50,62 @@ func LoadConfig(path string) (Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return Config{}, fmt.Errorf("hestia: parsing config %s: %w", path, err)
 	}
+	// 必须查 v（用户显式写了什么）而不是 cfg（merge 之后的结果）——理由见函数注释。
+	if err := checkStockContinuityComplete(v); err != nil {
+		return Config{}, fmt.Errorf("hestia: invalid config %s: %w", path, err)
+	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("hestia: invalid config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// stockContinuityKey 是分档表在配置文件里的完整键路径。
+const stockContinuityKey = "thresholds.stock_continuity_max"
+
+// checkStockContinuityComplete 要求：**显式写了**分档表，就必须每个 period_type
+// 都写（M1c-2 的 TASK-001）。
+//
+// # 为什么非查不可
+//
+// LoadConfig 先预填 DefaultThresholds 再 Unmarshal，而 mapstructure 的 ZeroFields
+// 默认 false ⇒ **merge 不是 replace**。于是「写了 map 但漏一档」会让那一档**静默
+// 继承默认值**：配置里写的和实际生效的不一致，而两者都不报错。M1c-3 拿标定结果
+// 重填阈值时最可能干的正是这个 —— 改窄 monthly、顺手删一档，那条序列的闸门实质
+// 放宽了 7.5 倍，没有任何东西会说一声。
+//
+// # 为什么只在 IsSet 为 true 时查
+//
+// 完全不写这张表是**正常路径**（用默认值，与另外四个阈值一样）。一律要求齐全会把
+// 它也判成配置错误。这两种情形成对，缺一不可——见 config_test.go 里那两条用例。
+//
+// ⚠️ 拿 viper 的 GetStringMap 取**用户显式写的键**，不能拿 Unmarshal 后的 cfg：
+// 后者已经 merge 过默认值，五档永远齐全，查不出任何东西。
+//
+// ⚠️ 旧格式标量（stock_continuity_max: 0.02）**到不了这里** —— 预填的是 map，
+// mapstructure 塞不进 float64，Unmarshal 就先失败了。所以这里不为标量写分支：
+// 写了也永远进不去，只是让人以为有守卫。
+func checkStockContinuityComplete(v *viper.Viper) error {
+	if !v.IsSet(stockContinuityKey) {
+		return nil
+	}
+	written := v.GetStringMap(stockContinuityKey)
+	// 遍历 periodTypeList() 而不是硬编码五个键：加第六种 period_type 时这里自动
+	// 要求配置也补上一档。顺序也由它定——map 迭代序随机，不定序的话同一份错配置
+	// 每次报出的档序都不同，排查变成猜谜。
+	var missing []string
+	for _, pt := range periodTypeList() {
+		if _, ok := written[pt]; !ok {
+			missing = append(missing, pt)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s 缺 period_type: %s"+
+		"（显式写了这张表就必须每档都写：漏掉的那档会静默继承默认值，"+
+		"配置里写的和实际生效的不一致，而两者都不报错）",
+		stockContinuityKey, strings.Join(missing, ", "))
 }
 
 // validate 检查配置自洽。装载即校验，不给「先读进来再说」留口子。
@@ -81,10 +136,21 @@ func (c Config) validate() error {
 		return errors.New("thresholds.deposit_sum_drift_max must be > 0")
 	case t.CorpLoanTolerance <= 0:
 		return errors.New("thresholds.corp_loan_tolerance must be > 0")
-	case t.StockContinuityMax <= 0:
-		return errors.New("thresholds.stock_continuity_max must be > 0")
 	case t.YoYSanityMax <= 0:
 		return errors.New("thresholds.yoy_sanity_max must be > 0")
+	}
+
+	// stock_continuity_max 是一张分档表，**逐档**查（M1c-2 的 TASK-001）。
+	// 只查「表非空」的话，把某一档写成 0 会让那条序列的每一期都超标进 pending ——
+	// 与另外四个阈值写 0 是同一族后果，只是现在有五个地方能写坏。
+	//
+	// 错误点名是哪一档：只说「stock_continuity_max 非正」的话，配置的人得自己把
+	// 五个数看一遍。排序遍历是因为 map 迭代序随机——同一份错配置每次报出的档不同
+	// 会让排查变成猜谜。
+	for _, pt := range slices.Sorted(maps.Keys(t.StockContinuityMax)) {
+		if t.StockContinuityMax[pt] <= 0 {
+			return fmt.Errorf("thresholds.stock_continuity_max[%s] must be > 0", pt)
+		}
 	}
 	return t.validate() // 豁免校验（含 M1b-4a 的 TASK-006 补的 PeriodTypes 必填非空）
 }

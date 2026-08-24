@@ -36,11 +36,25 @@ type Thresholds struct {
 	// M0 三期实测 1.16% / 1.42% / 1.58%。
 	CorpLoanTolerance float64 `mapstructure:"corp_loan_tolerance"`
 
-	// StockContinuityMax 是社融存量环比变化率的上限。
+	// StockContinuityMax 是社融存量环比变化率的上限，**按 period_type 分档**
+	// （period_type → 上限）。
 	//
-	// ⚠️ 0.02 未经真实数据验证——M0 的两份样本里只有一份含社融，算不出环比。
-	// M1c 回填出连续序列后必须重新标定。
-	StockContinuityMax float64 `mapstructure:"stock_continuity_max"`
+	// 分档而不是单值：Preceding 按 period_type 隔离序列 ⇒ 每年只有一个 h1 期次，
+	// h1 的「上一期」是**去年的 h1**。q1 / h1 / q1_q3 / annual 四种都是年初起累计
+	// 口径，相邻两期一律相隔 12 个月，只有 monthly 相隔 1 个月。拿同一个数卡这两
+	// 种序列，只能二选一：月度那档形同虚设，或者年度那档每期都被拦下。
+	//
+	// ⚠️ 不写成「月均上限 × 间隔月数」：那样只需一个数，但它**假设存量线性增长**，
+	// 而这道闸恰恰是用来抓「不该出现的跳变」的 —— 用线性模型定义「什么叫不线性」
+	// 是循环的。
+	//
+	// 缺档在两处的处置**刻意相反**，因为是两种处境：
+	//   - 运行时（gateStockContinuity）缺档记 skipped{no_threshold:<pt>} 而不是
+	//     failed —— 那是「代码里有了新 period_type、配置还没跟上」，判 failed 会让
+	//     那条序列的每一期都进 pending，而数据本身没问题。
+	//   - 装载时（LoadConfig）**显式写了这张表却漏档**一律拒绝 —— 那是配置疏漏，
+	//     而 mapstructure 的 merge 语义会让漏掉的那档静默继承默认值。
+	StockContinuityMax map[string]float64 `mapstructure:"stock_continuity_max"`
 
 	// YoYSanityMax 是同比字段绝对值的上限（百分数）。M0 实测最大 25%。
 	YoYSanityMax float64 `mapstructure:"yoy_sanity_max"`
@@ -89,8 +103,28 @@ func DefaultThresholds() Thresholds {
 		DepositSumTolerance: 0.12,
 		DepositSumDriftMax:  0.03,
 		CorpLoanTolerance:   0.05,
-		StockContinuityMax:  0.02,
+		StockContinuityMax:  defaultStockContinuityMax(),
 		YoYSanityMax:        50,
+	}
+}
+
+// defaultStockContinuityMax 是社融存量环比上限的默认分档表。
+//
+// ⚠️ 两个数**都是占位，都未经真实数据验证** —— M0 的两份样本里只有一份含社融，
+// 算不出环比。0.02 是 M1b 起就在的占位数；0.15 同为占位，量级只取自「年度序列的
+// 相邻两期相隔 12 个月，跳变幅度必然显著大于月度」这一**定性**事实，**不是**
+// 0.02 × 12（那是线性外推，见 Thresholds.StockContinuityMax 的注释）。
+// M1c 回填出连续序列后由标定结果替换（M1c-3）。
+//
+// 每次调用返回新 map：调用方（含测试）会就地改它，共用一份会让一处改动波及全局。
+func defaultStockContinuityMax() map[string]float64 {
+	return map[string]float64{
+		"monthly": 0.02, // 相邻两期相隔 1 个月
+		// 以下四种都是年初起累计口径，相邻两期一律相隔 12 个月，故同档。
+		"q1":     0.15,
+		"h1":     0.15,
+		"q1_q3":  0.15,
+		"annual": 0.15,
 	}
 }
 

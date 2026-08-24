@@ -340,15 +340,31 @@ func gateCorpLoanReconcile(in gateInput) Check {
 //
 // 社融存量是累积量，相邻期变化超过阈值说明要么口径变了、要么抽取错了。
 //
-// ⚠️ StockContinuityMax 的 2% 未经真实数据验证——M0 的两份样本里只有一份
-// 含社融，算不出环比。M1c 回填出连续序列后必须重新标定。
+// ⚠️ StockContinuityMax 的两档（monthly 0.02 / 其余 0.15）**都仍是占位数**——
+// M0 的两份样本里只有一份含社融，算不出环比。M1c-2 的 TASK-001 只把它从单值改成
+// 按 period_type 分档（相邻两期相隔 1 个月 vs 12 个月），**没有**用真实数据标定
+// 取值；标定由 M1c-3 拿回填序列做。
 //
 // Value 是环比变化率（比例），与 deposit_sum 同为比例、与 corp_loan_reconcile
 // 的亿元不同。
 func gateStockContinuity(in gateInput) Check {
-	// 三种跳过理由按「从根本到表面」排优先级，顺序即下面三个 if 的顺序。
+	// 四种跳过理由按「从根本到表面」排优先级，顺序即下面四个 if 的顺序。
 	//
-	// 本期没有这个字段是最根本的原因，优先报它：v1 期次两个理由同时成立
+	// 缺档排第一：它是这道闸**能否判定的前提**，且与本期数据无关——整条序列的每
+	// 一期都会命中，改一处配置就全好。先报数据侧理由会把排查引向逐期查数据，而
+	// 那些期次的数据可能一点问题都没有。
+	//
+	// ⚠️ 记 skipped 而不是 failed：period_type 已经从 3 种扩到 5 种一次
+	// （Sprint 037 补 q1 / q1_q3）。下次再扩时若判 failed，那一批期次会**全部进
+	// pending**，而真实情况只是「还没给这种序列定上限」。装载时的缺档是另一回事
+	// ——那是配置疏漏，由 LoadConfig 响亮拒绝。
+	limit, ok := in.cfg.StockContinuityMax[in.obs.Meta.PeriodType]
+	if !ok {
+		return Check{Status: CheckSkipped,
+			Reason: "no_threshold:" + in.obs.Meta.PeriodType}
+	}
+
+	// 本期没有这个字段是最根本的数据侧原因，优先报它：v1 期次两个理由同时成立
 	// （没有 tsf_stock，且首期时也没有历史）。报「没有历史」会让人去查回填
 	// 进度，而真相是那期报告压根没有社融板块——理由会把排查引向错误方向。
 	if skip := in.need(FieldTSFStock); skip != nil {
@@ -377,13 +393,13 @@ func gateStockContinuity(in gateInput) Check {
 	r := math.Abs(cur-prev) / math.Abs(prev)
 
 	c := Check{Value: &r}
-	if r <= in.cfg.StockContinuityMax {
+	if r <= limit {
 		c.Status = CheckPassed
 		return c
 	}
 	c.Status = CheckFailed
 	c.Reason = fmt.Sprintf("%s moved %.4f from %g to %g, exceeds %.4f",
-		FieldTSFStock, r, prev, cur, in.cfg.StockContinuityMax)
+		FieldTSFStock, r, prev, cur, limit)
 	return c
 }
 

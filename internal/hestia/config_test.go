@@ -44,8 +44,14 @@ thresholds:
 	assert.Equal(t, def.DepositSumTolerance, cfg.Thresholds.DepositSumTolerance,
 		"没写的必须保持默认，不能是 0")
 	assert.Equal(t, def.CorpLoanTolerance, cfg.Thresholds.CorpLoanTolerance)
-	assert.Equal(t, def.StockContinuityMax, cfg.Thresholds.StockContinuityMax)
 	assert.Equal(t, def.DepositSumDriftMax, cfg.Thresholds.DepositSumDriftMax)
+
+	// M1c-2 的 TASK-001：这条与 TestLoadConfigRejects 的「显式写了 map 但漏一档」
+	// **成对**。那格要求「写了这张表就必须五档齐全」；缺了本条的话，一个「一律要求
+	// 五档齐全」的实现会把「完全不写、用默认值」这条正常路径也判成配置错误。
+	assert.Equal(t, def.StockContinuityMax, cfg.Thresholds.StockContinuityMax)
+	assert.Len(t, cfg.Thresholds.StockContinuityMax, len(validPeriodTypes),
+		"完全不写时必须拿到齐全的默认分档表")
 
 	// 覆盖值必须真的**不同于**默认值，否则上面那条 Equal 在「什么都没覆盖」的
 	// 实现下也成立 —— 60 与默认的 50 不同，这条把「覆盖确实发生了」钉死。
@@ -128,7 +134,47 @@ discover:
 		// 只有 66.7%）。第二道防线要么每条都守，要么它就只是看起来有五条。
 		{"drift_max 为 0", head + "thresholds:\n  deposit_sum_drift_max: 0\n", "deposit_sum_drift_max"},
 		{"corp_loan_tolerance 为 0", head + "thresholds:\n  corp_loan_tolerance: 0\n", "corp_loan_tolerance"},
-		{"stock_continuity_max 为 0", head + "thresholds:\n  stock_continuity_max: 0\n", "stock_continuity_max"},
+		// —— M1c-2 的 TASK-001：stock_continuity_max 的三种失效，三个 want ——
+		//
+		// ⚠️ 三条的 want **必须互不相同、且互不包含**：字段名 stock_continuity_max
+		// 在三者的错误里都出现，拿它当 want 一条都区分不开 —— 那样把三种失效实现成
+		// 同一条分支（或干脆漏掉其中两条）测试照样全绿。
+		// 验收方式：把任一格的 want 换成另一格的，该格必须变红。
+		//
+		// 第三种（旧格式标量）在 TestLoadConfigRejectsLegacyScalarStockContinuity
+		// ——它不在这张表里，因为它要断言的不止「错误串含某几个字」，还有**错误出自
+		// 哪一层**，而本表的循环体只做 Contains。
+		{
+			// 显式写了这张表却漏一档：**这才是真正静默的那个**。
+			// LoadConfig 先预填 DefaultThresholds 再 Unmarshal，而 mapstructure 的
+			// ZeroFields 默认 false ⇒ merge 不是 replace，漏掉的 annual 会**悄悄保留
+			// 默认的 0.15**。有人改窄 monthly 时顺手删一档，那条序列的闸门就实质
+			// 放宽了 7.5 倍，而没有任何东西会说一声。
+			"显式写了 map 但漏一档",
+			head + `thresholds:
+  stock_continuity_max:
+    monthly: 0.008
+    q1: 0.15
+    h1: 0.15
+    q1_q3: 0.15
+`,
+			"缺 period_type: annual",
+		},
+		{
+			// 值非正：与另外四个阈值同族的第二道防线，只是现在要逐档查。
+			// 错误必须点名是哪一档 —— 只说「stock_continuity_max 非正」的话，
+			// 配置的人得自己把五个数看一遍。
+			"某一档写成 0",
+			head + `thresholds:
+  stock_continuity_max:
+    monthly: 0
+    q1: 0.15
+    h1: 0.15
+    q1_q3: 0.15
+    annual: 0.15
+`,
+			"stock_continuity_max[monthly] must be > 0",
+		},
 		{"yoy_sanity_max 为 0", head + "thresholds:\n  yoy_sanity_max: 0\n", "yoy_sanity_max"},
 		// 负数与 0 同样要拒：写 -1 的人多半想表达「关掉这道闸」，而阈值是
 		// 「超过就拦」的上限，负数会让每一期都超标 —— 与写 0 的后果同族。
@@ -155,6 +201,42 @@ discover:
 			require.NotNil(t, errors.Unwrap(err), "校验失败的错误必须包住底层 err")
 		})
 	}
+}
+
+// 旧格式（stock_continuity_max 写成标量）必须响亮失败，且**失败在 Unmarshal 层**。
+//
+// # 这条测试要钉的是「守卫在哪一层」，不只是「有没有报错」
+//
+// 上游计划在四处反复陈述「旧格式不会报错——viper 把标量塞进 map 得到空 map，
+// 一道闸门无声消失」，并据此要求实现里写一段 `if len(...)==0 { …"scalar"… }`。
+// **实跑证伪**：LoadConfig 先 `cfg := Config{Thresholds: DefaultThresholds()}`
+// 预填、再 Unmarshal，预填的是 map ⇒ mapstructure 塞不进 float64，当场报错。
+// ⇒ 那段守卫在 LoadConfig 路径上**不可达**，写了只是一段假装守卫存在的死分支。
+//
+// 所以这里断言的是**真实的**那一层：错误出自 `parsing config`（不是 `invalid
+// config`），文案是 mapstructure 的，且点名了是哪个键。谁哪天真去加了那段死分支
+// 并让它抢先返回，这三条会一起红——而只断「有 error」的话不会。
+func TestLoadConfigRejectsLegacyScalarStockContinuity(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://x/i.html
+  max_pages: 3
+  timeout: 30s
+thresholds:
+  stock_continuity_max: 0.02
+`)
+	_, err := LoadConfig(p)
+	require.Error(t, err, "旧格式标量必须报错，不得被当成空 map 静默放过")
+
+	assert.Contains(t, err.Error(), "parsing config",
+		"错误必须出自 Unmarshal 层：换成 invalid config 说明有人加了那段不可达的守卫分支")
+	assert.Contains(t, err.Error(), "expected type 'map[string]float64'",
+		"要说清期望的形状，配置的人才知道该怎么改")
+	assert.Contains(t, err.Error(), "stock_continuity_max",
+		"要点名是哪个键——thresholds 段有五个阈值")
+	require.NotNil(t, errors.Unwrap(err), "必须包住 mapstructure 的底层错误")
 }
 
 // YAML 结构对不上类型时必须报错，不能把那个键当成没写而静默用默认值。

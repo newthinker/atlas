@@ -17,10 +17,12 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -264,8 +266,24 @@ func TestRealHestiaConfigLoads(t *testing.T) {
 	assert.Positive(t, cfg.Thresholds.DepositSumTolerance)
 	assert.Positive(t, cfg.Thresholds.DepositSumDriftMax)
 	assert.Positive(t, cfg.Thresholds.CorpLoanTolerance)
-	assert.Positive(t, cfg.Thresholds.StockContinuityMax)
 	assert.Positive(t, cfg.Thresholds.YoYSanityMax)
+
+	// M1c-2 的 TASK-001：stock_continuity_max 改成按 period_type 分档后，这里是
+	// **唯一**能抓住「真实 YAML 与代码脱节」的检查 —— 编译不管 configs/hestia.yaml
+	// 里写的是标量还是 map，也不管它写了几档。
+	// 键集与代码的默认表逐一比对，不写死 5：加第六种 period_type 时这条会红，
+	// 迫使那人也给真实配置补上一档。
+	require.ElementsMatch(t,
+		slices.Sorted(maps.Keys(hestia.DefaultThresholds().StockContinuityMax)),
+		slices.Sorted(maps.Keys(cfg.Thresholds.StockContinuityMax)),
+		"真实配置的分档表必须与代码的默认表同键集")
+	for pt, v := range cfg.Thresholds.StockContinuityMax {
+		assert.Positive(t, v, "stock_continuity_max[%s] 必须 > 0", pt)
+	}
+	assert.Less(t, cfg.Thresholds.StockContinuityMax["monthly"],
+		cfg.Thresholds.StockContinuityMax["annual"],
+		"两档必须真的不同：真实配置把五档写成同一个数等于没分档，"+
+			"而 LoadConfig 只查齐全与正负，查不出这个")
 }
 
 // plistEnvKeys 解析 plist 里 EnvironmentVariables 那个 dict 的**键名**。

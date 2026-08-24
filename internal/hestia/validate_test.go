@@ -692,6 +692,17 @@ func stockObs(v float64) Observation {
 	return Observation{Meta: validMeta(), Values: vals}
 }
 
+// stockObsOf 是 stockObs 的分档版（M1c-2 的 TASK-001）。
+//
+// stock_continuity 的上限现在按 period_type 查表，而 stockObs 用的 validMeta() 是
+// **h1**（上限 0.15）。凡是判定结果取决于阈值的用例都必须显式写出序列类型，否则
+// 边界值与阈值对不上，用例会静默变成平凡真。
+func stockObsOf(periodType string, v float64) Observation {
+	o := stockObs(v)
+	o.Meta.PeriodType = periodType
+	return o
+}
+
 // stockObsWithout 造缺 tsf_stock 的观测（模拟没有社融板块的 v1 期次）。
 func stockObsWithout() Observation {
 	o := stockObs(0)
@@ -756,9 +767,21 @@ func TestStockContinuitySkipReasons(t *testing.T) {
 }
 
 // 有历史时这道闸真正生效，含边界值的判定方向。
+//
+// # ⚠️ 每一格都必须写死 periodType —— 这里踩过一次
+//
+// M1c-2 把上限改成按 period_type 查表之前，本表用的是 stockObs()，即 validMeta()
+// 的 **h1**。分档后 h1 的上限是 0.15，于是四格里两格转红（0.05 的跳变在 h1 下本就
+// 该放行），而「恰好在阈值上」那格**静默退化为平凡真**：0.02 <= 0.15 无论边界写成
+// `<` 还是 `<=` 都成立，连同它下面那段关于 ULP 的精细论证一起失效。
+// **会有人去修红的那两格，绿的那格不会引起任何注意。**
+//
+// ⇒ 下面 monthly 四格是原样保留的边界论证（阈值仍是 0.02），annual 三格是新增的，
+// 用来钉住「分档真的生效」：第五格与第三格是同一个 5% 跳变，判定相反。
 func TestStockContinuityDetectsJump(t *testing.T) {
 	tests := []struct {
 		name       string
+		periodType string
 		prev, cur  float64
 		wantStatus CheckStatus
 		wantRatio  float64
@@ -776,15 +799,23 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 		//   400.1→408.102                          ⇒ false
 		// ⇒ **改这几行常量时必须保持 cur−prev 与 prev 为精确整数**；换成「看起来
 		// 更真实」的小数会让这条边界测试**静默失效**，而不会有任何东西转红。
-		{"恰好在阈值上", 400, 408, CheckPassed, 0.02},
-		{"阈值内", 400, 404, CheckPassed, 0.01},
-		{"超过阈值", 400, 420, CheckFailed, 0.05},
-		{"存量下跌也算跳变", 400, 380, CheckFailed, 0.05},
+		{"monthly 恰好在阈值上", "monthly", 400, 408, CheckPassed, 0.02},
+		{"monthly 阈值内", "monthly", 400, 404, CheckPassed, 0.01},
+		{"monthly 超过阈值", "monthly", 400, 420, CheckFailed, 0.05},
+		{"monthly 存量下跌也算跳变", "monthly", 400, 380, CheckFailed, 0.05},
+
+		// 同一个 5% 跳变在年度序列上必须**放行** —— annual 的相邻两期相隔 12 个月。
+		// 这一格与上面第三格是对照：把五档写成同一个数，两格里必有一格红。
+		{"annual 同样的 5% 跳变放行", "annual", 400, 420, CheckPassed, 0.05},
+		// 60/400 与 64/400 同为精确整数相除，与上面 8/400 同理落在与字面量同一个
+		// double 上 —— 改这两行常量时同样必须保持 cur−prev 与 prev 为精确整数。
+		{"annual 恰好在阈值上", "annual", 400, 460, CheckPassed, 0.15},
+		{"annual 超过阈值", "annual", 400, 464, CheckFailed, 0.16},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rep, err := Validate(context.Background(), stockObs(tt.cur),
-				fakeHistory{prior: []Observation{stockObs(tt.prev)}},
+			rep, err := Validate(context.Background(), stockObsOf(tt.periodType, tt.cur),
+				fakeHistory{prior: []Observation{stockObsOf(tt.periodType, tt.prev)}},
 				DefaultThresholds())
 			require.NoError(t, err)
 
@@ -811,6 +842,53 @@ func TestStockContinuitySkipsOnZeroDenominator(t *testing.T) {
 		assert.False(t, math.IsInf(*c.Value, 0) || math.IsNaN(*c.Value),
 			"Value 不得是 Inf/NaN——Save 会拒绝，整期数据会消失")
 	}
+}
+
+// 运行时缺档记 skipped{no_threshold}，**不是 failed**（M1c-2 的 TASK-001）。
+//
+// 「装载时必须齐全」与「运行时容忍缺档」看似矛盾，实为两种不同的处境，故落在
+// **两处不同的实现**上，各自单独可消融：
+//
+//   - 装载时缺档 = 配置疏漏 ⇒ LoadConfig 响亮失败
+//     （TestLoadConfigRejects 的「显式写了 map 但漏一档」那格）
+//   - 运行时缺档 = **代码里有了新 period_type、配置还没跟上** ⇒ 本条
+//
+// period_type 已经从 3 种扩到 5 种一次（Sprint 037 补 q1 / q1_q3）。下次再扩时若判
+// failed，那一批期次会**全部进 pending**，而真实情况只是「还没给这种序列定上限」。
+func TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold(t *testing.T) {
+	cfg := DefaultThresholds()
+	delete(cfg.StockContinuityMax, "monthly")
+
+	t.Run("数据与历史都在，只是没给这条序列定上限", func(t *testing.T) {
+		rep, err := Validate(context.Background(), stockObsOf("monthly", 420),
+			fakeHistory{prior: []Observation{stockObsOf("monthly", 400)}}, cfg)
+		require.NoError(t, err)
+
+		c := findCheck(t, rep, "stock_continuity")
+		assert.Equal(t, CheckSkipped, c.Status,
+			"缺档必须 skipped：判 failed 会让那条序列的每一期都进 pending，"+
+				"而数据本身没有任何问题")
+		assert.Equal(t, "no_threshold:monthly", c.Reason)
+	})
+
+	// 缺档与缺字段同时成立时报哪个：报 no_threshold。
+	//
+	// 沿用本闸原有的「从根本到表面」原则——缺档是**闸门能否判定的前提**，且与本期
+	// 数据无关：整条序列的每一期都会命中，改一处配置就全好。报 absent_field 会把
+	// 排查引向逐期查数据，而那些期次的数据可能一点问题都没有。
+	t.Run("同时还缺 tsf_stock：报最根本的那个", func(t *testing.T) {
+		obs := stockObsOf("monthly", 0)
+		delete(obs.Values, FieldTSFStock)
+
+		rep, err := Validate(context.Background(), obs,
+			fakeHistory{prior: []Observation{stockObsOf("monthly", 400)}}, cfg)
+		require.NoError(t, err)
+
+		c := findCheck(t, rep, "stock_continuity")
+		assert.Equal(t, CheckSkipped, c.Status)
+		assert.Equal(t, "no_threshold:monthly", c.Reason,
+			"缺档优先于 absent_field")
+	})
 }
 
 // —— TASK-007: 豁免应用、Save 接线、ULP 契约 ——
