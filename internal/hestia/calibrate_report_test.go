@@ -204,14 +204,22 @@ func renderedFieldOrder(out string) []string {
 // ⚠️ 夹具的数**不照抄生产语料**（真语料是 22 / 4，且那两个数历经两次错数）。
 // 这里用 6 与 2 是为了同时覆盖「给建议」与「不给建议」两条路径。
 func renderFixture() *CalibrateResult {
+	// ⚠️ Samples **由 Records 派生**，不手写第二份。
+	// 同一事实的两个副本，改一处不会让另一处变红 —— 而夹具里的不一致会产出一条
+	// 「看起来在测某件事、实际数据自相矛盾」的用例。生产侧同理（见 collectSamples）。
+	recs := []SampleRecord{
+		// 期次升序。M2 跨三种 period_type ⇒ 用来验「每行标注样本来自哪几种」。
+		{Period: "2021-12", PeriodType: "annual", Values: map[string]float64{FieldM2: 100, FieldTSFStock: 700}},
+		{Period: "2022-06", PeriodType: "h1", Values: map[string]float64{FieldM2: 400}},
+		{Period: "2022-12", PeriodType: "annual", Values: map[string]float64{FieldM2: 200, FieldTSFStock: 900}},
+		{Period: "2023-03", PeriodType: "q1", Values: map[string]float64{FieldM2: 600}},
+		{Period: "2023-06", PeriodType: "h1", Values: map[string]float64{FieldM2: 500}},
+		{Period: "2023-12", PeriodType: "annual", Values: map[string]float64{FieldM2: 300}},
+	}
 	return &CalibrateResult{
-		Periods: 9,
-		Samples: map[string][]float64{
-			// n=6 ⇒ 有建议；整数取值，便于精确断言
-			FieldM2: {100, 200, 300, 400, 500, 600},
-			// n=2 ⇒ 无建议（且两值不同，span>0）
-			FieldTSFStock: {700, 900},
-		},
+		Periods:      9,
+		Records:      recs,
+		Samples:      samplesFromRecords(recs), // M2 n=6（有建议）、tsf_stock n=2（无建议）
 		Failures:     []ParseFailure{{Period: "2019-12", Kind: "finance", File: "articles/a.html", Err: "loan scope anchor not found"}},
 		Unsupported:  []ParseFailure{{Period: "2024-06", Kind: "tsf_stock", File: "articles/b.html", Err: "本迭代不解析该报告种类"}},
 		Unclassified: []string{"某某省2024年上半年金融统计数据报告"},
@@ -337,4 +345,119 @@ func TestRenderCalibrateReportMarksFieldsWithoutSamples(t *testing.T) {
 		"n=2 仍有分位数，不该打 —")
 	assert.Equal(t, noSuggestionMark, tsf[len(tsf)-1],
 		"n<3 时建议列必须显式标注「不给建议」，留空会被读成「区间就是这么宽」")
+}
+
+// —— functional[2]: 每行必须标注样本来自哪几种 period_type ——
+
+// 🔴 混池的危害是**具体**的：fieldOrder 里相当比例是 `*_ytd` **累计量**，
+// q1 与 annual 的量纲根本不同（前者 3 个月、后者 12 个月）。混在一起算 min/max，
+// 跨度会横跨整个范围，再加上余量 ⇒ **得到一个宽到拦不住任何东西的区间**。
+//
+// 而 MagnitudeRanges 是 map[string]Range（**只有 field 一维**，gateMagnitudeSanity
+// 也只按 field 查表）⇒ 工具**不替他解决**，但必须**让他看见**。
+func TestRenderCalibrateReportAnnotatesPeriodTypeMix(t *testing.T) {
+	out := renderToString(t, renderFixture())
+
+	// M2 的 6 个样本来自 annual×3 / h1×2 / q1×1 —— 三种都要出现，且带各自的条数。
+	m2 := reportRow(t, out, FieldM2)
+	mix := m2[2]
+	for _, want := range []string{"annual×3", "h1×2", "q1×1"} {
+		assert.Contains(t, mix, want,
+			"每行必须标注样本来自哪几种 period_type 及各自条数；实际列内容=%q", mix)
+	}
+
+	// 单一来源的字段只标那一种 —— 否则「混了」与「没混」在报告上不可分。
+	tsf := reportRow(t, out, FieldTSFStock)
+	assert.Equal(t, "annual×2", tsf[2], "只来自一种 period_type 时不得虚报其它种类")
+}
+
+// —— functional[3]: tsf_stock 逐 period_type 的相邻期环比变化率 ——
+
+// rateFixture 造一份专供环比用的记录集。**故意留洞**，见下面那条测试。
+func rateFixture() []SampleRecord {
+	return []SampleRecord{
+		// annual：2019 → 2021，**中间缺 2020**（真语料里 2024 就没有一季度，
+		// 且 3 篇 Parse 失败另挖了三个洞）
+		{Period: "2019-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 200}},
+		{Period: "2021-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 220}},
+		{Period: "2022-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 231}},
+		// h1：两期 ⇒ 1 个环比
+		{Period: "2022-06", PeriodType: "h1", Values: map[string]float64{FieldTSFStock: 400}},
+		{Period: "2023-06", PeriodType: "h1", Values: map[string]float64{FieldTSFStock: 300}}, // 下跌也算跳变
+		// 只有一期 ⇒ 0 个环比（不是 1 个 0）
+		{Period: "2023-03", PeriodType: "q1", Values: map[string]float64{FieldTSFStock: 500}},
+	}
+}
+
+// 环比必须**在同一 period_type 内**算，绝不跨类型。
+//
+// 跨类型算是没有意义的：Preceding 按 period_type 隔离序列，annual 的「上一期」是
+// **去年的 annual**。把 2022-06/h1 当成 2021-12/annual 的下一期，算出的是两条
+// 不同序列之间的差，而它看起来和一个真实的环比一模一样。
+func TestStockContinuityRatesGroupedByPeriodType(t *testing.T) {
+	got := stockContinuityRates(rateFixture())
+
+	// annual: 200→220 (0.10)、220→231 (0.05)；h1: 400→300 (0.25)；q1: 单期无环比
+	require.Contains(t, got, "annual")
+	require.Contains(t, got, "h1")
+	assert.Equal(t, 2, got["annual"].N, "annual 三期 ⇒ 两个相邻对")
+	assert.Equal(t, 1, got["h1"].N)
+	assert.NotContains(t, got, "q1", "只有一期时没有相邻对，不得凭空产生一个 0")
+
+	assert.InDelta(t, 0.05, got["annual"].Min, 1e-12)
+	assert.InDelta(t, 0.10, got["annual"].Max, 1e-12)
+	// 下跌同样是跳变：取绝对值，否则整个下跌方向都漏掉。
+	assert.InDelta(t, 0.25, got["h1"].Min, 1e-12)
+}
+
+// 🔴 「相邻期」= **排序后相邻的两个样本**，不是「相差一个季度/一年」。
+//
+// 实测序列**有洞**：2024 年只有年报/上半年/前三季度，**没有一季度**；另有 3 篇
+// Parse 失败（2019-12 / 2020-09 / 2022-09）各挖一个洞。
+// 若实现按「期次必须相差固定间隔」配对，**跨洞的那一对会被整个丢掉** ——
+// 而丢掉不会有任何东西报错，只会让 n 悄悄变小、分布悄悄变窄。
+func TestStockContinuityRatesPairAdjacentSamplesAcrossGaps(t *testing.T) {
+	got := stockContinuityRates(rateFixture())
+
+	// 夹具里 annual 是 2019 → 2021 → 2022（**2020 缺席**）。
+	// 按「相邻样本」配对 ⇒ 2 对；按「相差一年」配对 ⇒ 只剩 2021→2022 这 1 对。
+	require.Equal(t, 2, got["annual"].N,
+		"跨洞的 2019→2021 也是一对相邻样本；按固定间隔配对会把它丢掉，而丢掉是静默的")
+	assert.InDelta(t, 0.10, got["annual"].Max, 1e-12, "2019→2021 那对（20/200）必须在里面")
+}
+
+// 上一期为 0 时跳过该对，不产生 Inf。
+//
+// 与 gateStockContinuity 的 zero_denominator 分支同源：Inf 会污染整段分位数，
+// 而报告上的 +Inf 会被读成「这个字段疯了」，实际只是分母恰好为 0。
+func TestStockContinuityRatesSkipZeroDenominator(t *testing.T) {
+	recs := []SampleRecord{
+		{Period: "2021-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 0}},
+		{Period: "2022-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 220}},
+		{Period: "2023-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 231}},
+	}
+	got := stockContinuityRates(recs)
+
+	assert.Equal(t, 1, got["annual"].N, "分母为 0 的那一对必须跳过，只剩 220→231")
+	assert.False(t, math.IsInf(got["annual"].Max, 0), "不得产生 Inf")
+	assert.InDelta(t, 0.05, got["annual"].Max, 1e-12)
+}
+
+// 这一节必须真的出现在报告里，且**沿用 n<3 的规则，不为它破例**。
+//
+// 预期样本很少（Parse 拒绝 monthly ⇒ monthly 档零样本；年度间隔档约个位数），
+// 正因为少，才更不能给一个靠两三个点撑起来的「建议」。
+func TestRenderCalibrateReportIncludesStockContinuitySection(t *testing.T) {
+	res := renderFixture()
+	res.Records = rateFixture()
+	res.Samples = samplesFromRecords(res.Records)
+
+	out := renderToString(t, res)
+
+	require.Contains(t, out, stockRateSectionTitle, "环比变化率一节必须出现在报告里")
+	// 该节按 period_type 一行一档，行首是 period_type。
+	annual := reportRow(t, out, "annual")
+	assert.Equal(t, "2", annual[1], "annual 两个相邻对")
+	assert.Equal(t, noSuggestionMark, annual[len(annual)-1],
+		"n<3 的规则对这一节同样适用，不得为「样本本来就少」破例")
 }

@@ -57,6 +57,21 @@ type CalibrateResult struct {
 	Periods int
 	Samples map[string][]float64 // field → 各期实测值，未排序
 
+	// Records 是逐期的原始观测，**带 period 与 period_type**（M1c-2 的 TASK-003 加）。
+	//
+	// 为什么必须有它：Samples 把 Meta 丢掉了（下面那个循环原本只取 obs.Values），
+	// 而报告要回答两个问题，两个都需要 period_type：
+	//   ① fieldOrder 里相当比例是 *_ytd **累计量** —— q1 与 annual 的量纲根本不同，
+	//      混池算出的 min/max 会横跨整个范围，得到一个宽到拦不住任何东西的区间。
+	//      MagnitudeRanges 只有 field 一维（不在本迭代改），所以工具**不替人解决**，
+	//      但必须**让人看见样本混了哪几种**。
+	//   ② tsf_stock 的环比变化率必须**在同一 period_type 内**算 —— Preceding 按
+	//      period_type 隔离序列，annual 的「上一期」是去年的 annual。
+	//
+	// ⚠️ Samples **由 Records 派生**（见 samplesFromRecords），不是各写一份：
+	// 同一事实的两个副本，改一处不会让另一处变红。
+	Records []SampleRecord
+
 	Failures     []ParseFailure // ③ 该支持却失败了
 	Unsupported  []ParseFailure // ② 本迭代不解析（社融两篇 + monthly）
 	Unclassified []string       // ④ 标题解析不出期次，原文照录
@@ -154,10 +169,16 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 			continue
 		}
 
-		for f, v := range obs.Values {
-			res.Samples[f] = append(res.Samples[f], v)
-		}
+		// 连 Meta 一起留下。此前这里只取 obs.Values，period_type 在采集的这一刻
+		// 就在手边、却被丢掉了 —— 而下游报告恰恰需要它（见 CalibrateResult.Records）。
+		res.Records = append(res.Records, SampleRecord{
+			Period: obs.Meta.Period, PeriodType: obs.Meta.PeriodType, Values: obs.Values,
+		})
 	}
+
+	// Samples 由 Records 派生，不在上面的循环里另写一份：两份副本会各自演化。
+	// 顺序不变（items 按期次升序 ⇒ Records 升序 ⇒ 每个字段的切片也升序）。
+	res.Samples = samplesFromRecords(res.Records)
 
 	if shaUnverified > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf(
@@ -346,6 +367,33 @@ func groupUnsupported(us []ParseFailure) []string {
 	for _, g := range groups {
 		out = append(out, fmt.Sprintf("%d × [%s] %s: %s",
 			len(g.periods), g.kind, g.reason, strings.Join(g.periods, ", ")))
+	}
+	return out
+}
+
+// SampleRecord 是**一期**的观测：期次、期次类型、以及该期抽出的全部字段值。
+//
+// 它比 Samples 多的就是 Meta 那两项 —— 而报告要按 period_type 分组/标注，全靠它们。
+//
+// ⚠️ **不要给它加导出方法**（如 String()）：store_test.go 的
+// TestPackageExposesNoWriteFunctions 断言包的导出面**精确相等**，导出接收者上的
+// 导出方法会被记作 SampleRecord.String 而让它变红，而那个文件不在本任务的 writes 里。
+type SampleRecord struct {
+	Period     string // "YYYY-MM"，字典序即时间序
+	PeriodType string // monthly | q1 | h1 | q1_q3 | annual
+	Values     map[string]float64
+}
+
+// samplesFromRecords 把逐期记录摊平成 field → 各期值。
+//
+// 保序：入参按期次升序时，每个字段的切片也按期次升序 —— tsf_stock 的环比要用这个顺序
+// （而 computeFieldStats 刻意不就地排序，正是为了不毁掉它）。
+func samplesFromRecords(recs []SampleRecord) map[string][]float64 {
+	out := map[string][]float64{}
+	for _, r := range recs {
+		for f, v := range r.Values {
+			out[f] = append(out[f], v)
+		}
 	}
 	return out
 }
