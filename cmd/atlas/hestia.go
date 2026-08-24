@@ -29,10 +29,13 @@ var (
 // 那时 `reconcileBackfill` 走推算值告警路径（TASK-008 的 notes_for_downstream 定死）。
 // **别给它们非零默认值** —— 那会让一个未经实测的推算数取得阻断交付的权力。
 var (
-	hestiaBackfillFrom           string
-	hestiaBackfillOut            string
-	hestiaBackfillExpectPeriods  int
-	hestiaBackfillExpectArticles int
+	hestiaBackfillFrom string
+	hestiaBackfillOut  string
+	// —— backfill calibrate 的两个 flag（M1c-2 的 TASK-004）——
+	hestiaCalibrateDir             string
+	hestiaCalibrateAllowIncomplete bool
+	hestiaBackfillExpectPeriods    int
+	hestiaBackfillExpectArticles   int
 )
 
 var hestiaCmd = &cobra.Command{
@@ -86,6 +89,22 @@ worktree removal, cannot be committed by accident, and back up with a plain cp -
 	SilenceUsage: true,
 }
 
+var hestiaBackfillCalibrateCmd = &cobra.Command{
+	Use:   "calibrate",
+	Short: "Summarise field distributions from a fetched artefact directory",
+	Long: `Parse every supported report under --dir and print the observed distribution
+of each field, so a human can fill MagnitudeRanges from evidence rather than guesswork.
+
+The tool only produces evidence: it never edits configs/hestia.yaml.
+
+--allow-incomplete accepts a manifest that has no completed_at. That marker was
+introduced later than some artefact directories, so its absence does NOT by itself
+mean the fetch was aborted -- but the two cases are indistinguishable from the
+artefact alone, so the report says so out loud.`,
+	RunE:         runHestiaBackfillCalibrate,
+	SilenceUsage: true,
+}
+
 // —— 为什么三个命令都显式设 SilenceUsage（reviewer D4）——
 //
 // 改动前实测：`atlas crisis status --crisis-config /nonexistent/nope.yaml` 输出 **13 行**，
@@ -132,7 +151,17 @@ func init() {
 	if err := hestiaBackfillFetchCmd.MarkFlagRequired("out"); err != nil {
 		panic(err) // 只会在 flag 名写错时触发，属编程错误
 	}
-	hestiaBackfillCmd.AddCommand(hestiaBackfillFetchCmd)
+	cal := hestiaBackfillCalibrateCmd.Flags()
+	cal.StringVar(&hestiaCalibrateDir, "dir", "",
+		"artefact directory produced by `backfill fetch` (the --out of that run)")
+	cal.BoolVar(&hestiaCalibrateAllowIncomplete, "allow-incomplete", false,
+		"accept a manifest without completed_at; the report will say why it was accepted")
+	// --dir 必填，与 fetch --out 对称：没有默认值可言，猜一个只会让人标定错目录。
+	if err := hestiaBackfillCalibrateCmd.MarkFlagRequired("dir"); err != nil {
+		panic(err) // 只会在 flag 名写错时触发，属编程错误
+	}
+
+	hestiaBackfillCmd.AddCommand(hestiaBackfillFetchCmd, hestiaBackfillCalibrateCmd)
 
 	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd)
 	rootCmd.AddCommand(hestiaCmd)
@@ -224,6 +253,22 @@ func runHestiaBackfillFetch(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	return hestia.BackfillFetch(cmd.Context(), hestiaBackfillConfig(cfg, cmd.OutOrStdout(), from))
+}
+
+// runHestiaBackfillCalibrate 装配并跑一次标定。
+//
+// 🔴 **Out 必须显式传 cmd.OutOrStdout()**。漏掉它是一个既真实又完全隐形的错误：
+// 若 Calibrate 把 nil 当成 io.Discard，这个命令就会**静默打印零字节、退出码 0**，
+// 而「子命令注册了吗」「flag 解析对吗」这类测试全部通过。
+// Calibrate 因此对 nil Out **报错**（见它的注释），本行是它的另一半。
+//
+// 不读 hestia 配置：标定只读产物目录，不碰库、不碰阈值。
+func runHestiaBackfillCalibrate(cmd *cobra.Command, _ []string) error {
+	return hestia.Calibrate(hestia.CalibrateDeps{
+		Dir:             hestiaCalibrateDir,
+		Out:             cmd.OutOrStdout(),
+		AllowIncomplete: hestiaCalibrateAllowIncomplete,
+	})
 }
 
 // hestiaBackfillConfig 把 hestia 配置 + flag 拼成一次回填的参数。

@@ -434,7 +434,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
+	want := []string{"BackfillFetch", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -468,6 +468,26 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // *Store 的方法，所以它**同时**打红本条（AST 版）与 TestStoreExposesNoWriteMethods
 // （reflect 版）；DefaultThresholds 是包级函数，只打红本条。两条都登记过才算数——
 // 这恰好也演示了那两条测试为什么互补而不能互替。
+//
+// —— 为什么名单里多了 Calibrate（M1c-2 / TASK-004 追加）——
+//
+// 同上三条，是**登记而不是放宽**。Calibrate 是标定的导出入口，`cmd/atlas` 的
+// `hestia backfill calibrate` 要调它；它做三件事：读产物目录（os.ReadFile / os.Stat）、
+// 统计分布、把报告写进调用方给的 io.Writer。**不碰 Store，不碰 database/sql，没有任何写口。**
+//
+// 它排在 "BackfillFetch" 与 "DefaultThresholds" 之间是 sort.Strings 的字节序结果
+// （"BackfillFetch" < "Calibrate" < "DefaultThresholds"），不是优先级。
+//
+// ⚠️ 加它**必然**打红本条断言 —— 这是设计如此，不是意外：精确相等的形状会把任何新增
+// 导出物判成违规，无论它是不是写口。**上一版 DoD 曾写「只加 Calibrate 这一个就不会红」，
+// 那是错的**，而当时 store_test.go 不在任何任务的 writes 里 ⇒ 那份任务结构上无法完成。
+// 记此是因为下一个要加导出入口的人会撞上同一件事：**正确处置是来这里留一段，
+// 不是去改断言。**
+//
+// Calibrate 不碰库这一点目前**没有**像 Parse 那样的独立 AST 守卫（parse_test.go 的
+// TestParseDoesNotTouchStorage）。⇒ 本条只守住了导出面的**形状**；若将来有人把写库
+// 逻辑塞进 calibrate.go，名单不会变红。**这是一个已知缺口，不是遗漏**——
+// 记在这里，好过让下一个人以为它已经被守着。
 //
 // —— 为什么名单里多了 Validate（M1b-3 / TASK-004 追加）——
 //
