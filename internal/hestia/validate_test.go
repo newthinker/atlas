@@ -785,6 +785,11 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 		prev, cur  float64
 		wantStatus CheckStatus
 		wantRatio  float64
+		// atBoundary 标记「这格声称恰好落在阈值上」。见循环体里那条 require ——
+		// 它是本表**唯一**能挡住「静默退化」的东西：wantStatus/wantRatio 都挡不住，
+		// 把 periodType 从 monthly 改成 h1 后 0.02 <= 0.15 照样 Passed、比例照样
+		// 0.02，四条断言全绿，而这格已经不再测边界了。
+		atBoundary bool
 	}{
 		// 8/400 的浮点商与字面量 0.02 **舍入到同一个 double**，所以 r <= max 成立。
 		//
@@ -799,18 +804,18 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 		//   400.1→408.102                          ⇒ false
 		// ⇒ **改这几行常量时必须保持 cur−prev 与 prev 为精确整数**；换成「看起来
 		// 更真实」的小数会让这条边界测试**静默失效**，而不会有任何东西转红。
-		{"monthly 恰好在阈值上", "monthly", 400, 408, CheckPassed, 0.02},
-		{"monthly 阈值内", "monthly", 400, 404, CheckPassed, 0.01},
-		{"monthly 超过阈值", "monthly", 400, 420, CheckFailed, 0.05},
-		{"monthly 存量下跌也算跳变", "monthly", 400, 380, CheckFailed, 0.05},
+		{"monthly 恰好在阈值上", "monthly", 400, 408, CheckPassed, 0.02, true},
+		{"monthly 阈值内", "monthly", 400, 404, CheckPassed, 0.01, false},
+		{"monthly 超过阈值", "monthly", 400, 420, CheckFailed, 0.05, false},
+		{"monthly 存量下跌也算跳变", "monthly", 400, 380, CheckFailed, 0.05, false},
 
 		// 同一个 5% 跳变在年度序列上必须**放行** —— annual 的相邻两期相隔 12 个月。
 		// 这一格与上面第三格是对照：把五档写成同一个数，两格里必有一格红。
-		{"annual 同样的 5% 跳变放行", "annual", 400, 420, CheckPassed, 0.05},
+		{"annual 同样的 5% 跳变放行", "annual", 400, 420, CheckPassed, 0.05, false},
 		// 60/400 与 64/400 同为精确整数相除，与上面 8/400 同理落在与字面量同一个
 		// double 上 —— 改这两行常量时同样必须保持 cur−prev 与 prev 为精确整数。
-		{"annual 恰好在阈值上", "annual", 400, 460, CheckPassed, 0.15},
-		{"annual 超过阈值", "annual", 400, 464, CheckFailed, 0.16},
+		{"annual 恰好在阈值上", "annual", 400, 460, CheckPassed, 0.15, true},
+		{"annual 超过阈值", "annual", 400, 464, CheckFailed, 0.16, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -823,6 +828,14 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, c.Status, "reason=%s", c.Reason)
 			require.NotNil(t, c.Value)
 			assert.InDelta(t, tt.wantRatio, *c.Value, 1e-9)
+
+			// **精确**相等，不是 InDelta：这格的全部意义就是「r == max 时 r <= max
+			// 成立」，容差会把它测没。上面那段 ULP 注释论证的也正是这个等号。
+			if tt.atBoundary {
+				require.Equal(t, DefaultThresholds().StockContinuityMax[tt.periodType], *c.Value,
+					"这格声称恰好落在阈值上，就必须真的落在上面——改 periodType 或改"+
+						"prev/cur 常量都会让它静默退化成一个普通的「阈值内」用例")
+			}
 		})
 	}
 }
