@@ -481,8 +481,14 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 
 	t.Run("Validate 失败", func(t *testing.T) {
 		// Validate 最前面调 Thresholds.validate()，而它查的是 CaliberExemptions
-		// 的自洽（**不是** Config.validate() 那几条 >0 —— 那是 LoadConfig 的活，
-		// 实测：把 StockContinuityMax 设成 0 Validate 照样通过）。
+		// 的自洽（**不是** Config.validate() 那几条 >0 —— 那是 LoadConfig 的活）。
+		//
+		// M1c-2 的 TASK-001：这里原本举的例子是「把 StockContinuityMax 设成 0
+		// Validate 照样通过」。分档后它是一张 map，「设成 0」不再成立。等价的例子
+		// 是**删掉其中一档**——Validate 同样照过，那道闸只会记
+		// skipped{no_threshold}（validate_test.go 的
+		// TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold 就是这么构造的）。
+		//
 		// PeriodTypes 留空是它明确拒绝的一种：留空不等于「全部」。
 		cfg := ingestCfg()
 		cfg.Thresholds.CaliberExemptions = []CaliberExemption{{
