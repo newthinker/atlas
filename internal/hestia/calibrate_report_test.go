@@ -457,7 +457,22 @@ func TestRenderCalibrateReportIncludesStockContinuitySection(t *testing.T) {
 	require.Contains(t, out, stockRateSectionTitle, "环比变化率一节必须出现在报告里")
 	// 该节按 period_type 一行一档，行首是 period_type。
 	annual := reportRow(t, out, "annual")
+
+	// 🔴 中间五列此前**无人守**（TASK-003 验证者三组消融全部 SURVIVED、完全静默）：
+	// 原来这里只读 annual[1]（n）、最后一列（建议区间）、和「有没有 —」
+	// ⇒ 环比一节丢掉 p5 列、或把 p5·median·p95·max 全打成 min，**无一变红**。
+	// ⚠️ TASK-003 的 DoD **字面列举了** n/min/p5/median/p95/max 六个 —— 六个里四个
+	// 可以被替换成 min 而没有任何东西出声。**「列在 DoD 里」不蕴含「有断言守着」。**
+	//
+	// 修法（比整行列数 + 两端取值）：列数挡住「少一列」，min/max 取值挡住「全打成同一个数」。
+	require.Len(t, annual, 8,
+		"环比表一行 8 列：period_type n min p5 median p95 max 建议区间；"+
+			"少一列说明有列被删掉了，而删列此前完全静默")
 	assert.Equal(t, "2", annual[1], "annual 两个相邻对")
+	// annual 的两个环比是 0.05 与 0.1（200→220→231）⇒ min≠max，
+	// 「把中间几列全打成 min」的实现会让 max 这一列变成 0.05 而红。
+	assert.Equal(t, "0.05", annual[2], "min 列")
+	assert.Equal(t, "0.1", annual[6], "max 列——与 min 不同，故「全打成 min」会红")
 	assert.Equal(t, noSuggestionMark, annual[len(annual)-1],
 		"n<3 的规则对这一节同样适用，不得为「样本本来就少」破例")
 }
