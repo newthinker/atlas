@@ -2,6 +2,7 @@ package hestia
 
 import (
 	"math"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -457,7 +458,128 @@ func TestRenderCalibrateReportIncludesStockContinuitySection(t *testing.T) {
 	require.Contains(t, out, stockRateSectionTitle, "环比变化率一节必须出现在报告里")
 	// 该节按 period_type 一行一档，行首是 period_type。
 	annual := reportRow(t, out, "annual")
+
+	// 🔴 中间五列此前**无人守**（TASK-003 验证者三组消融全部 SURVIVED、完全静默）：
+	// 原来这里只读 annual[1]（n）、最后一列（建议区间）、和「有没有 —」
+	// ⇒ 环比一节丢掉 p5 列、或把 p5·median·p95·max 全打成 min，**无一变红**。
+	// ⚠️ TASK-003 的 DoD **字面列举了** n/min/p5/median/p95/max 六个 —— 六个里四个
+	// 可以被替换成 min 而没有任何东西出声。**「列在 DoD 里」不蕴含「有断言守着」。**
+	//
+	// 修法（比整行列数 + 两端取值）：列数挡住「少一列」，min/max 取值挡住「全打成同一个数」。
+	require.Len(t, annual, 8,
+		"环比表一行 8 列：period_type n min p5 median p95 max 建议区间；"+
+			"少一列说明有列被删掉了，而删列此前完全静默")
 	assert.Equal(t, "2", annual[1], "annual 两个相邻对")
+	// annual 的两个环比是 0.05 与 0.1（200→220→231）⇒ min≠max，
+	// 「把中间几列全打成 min」的实现会让 max 这一列变成 0.05 而红。
+	assert.Equal(t, "0.05", annual[2], "min 列")
+	assert.Equal(t, "0.1", annual[6], "max 列——与 min 不同，故「全打成 min」会红")
 	assert.Equal(t, noSuggestionMark, annual[len(annual)-1],
 		"n<3 的规则对这一节同样适用，不得为「样本本来就少」破例")
+}
+
+// —— M1c-2 的 TASK-004: 导出入口 Calibrate ——
+//
+// ⚠️ 这几条本该住在 calibrate_test.go（那里有夹具 helper），但那个文件**不在 TASK-004
+// 的 writes 里**。同包可以调它的 helper，所以放这里；换句话说位置是 scope 决定的，
+// 不是内聚性决定的。
+
+// 🔴 同一个 Out 字段，两套契约，而且**刻意相反** —— 这条把它钉住。
+//
+// collectSamples 的产出是**数据**，打印是副产品 ⇒ nil 合法（纯取数的调用方）。
+// Calibrate 的产出**就是那份报告** ⇒ nil 报错。
+//
+// 不钉住的话，下一个人重构时看到「一个函数收 nil 报错、另一个不报」，最省事的
+// 「统一一下」就是给 Calibrate 加 `if out == nil { out = io.Discard }` ——
+// 而那正是 DoD 点名要防的失效：cmd 层漏填 Out ⇒ **命令静默打印零字节、退出码 0**，
+// 而「子命令注册了吗」「flag 解析对吗」这类测试全部通过。
+func TestCalibrateRejectsNilOutWhileCollectSamplesAllowsIt(t *testing.T) {
+	dir := completedFixture(t)
+
+	// 同一个 Dir、同一个 nil Out —— 唯一的变量是走哪个入口。
+	err := Calibrate(CalibrateDeps{Dir: dir})
+	require.Error(t, err, "Calibrate 收 nil Out 必须报错，不得退化成 io.Discard")
+	assert.Contains(t, err.Error(), "Out",
+		"错误要点名是哪个字段——调用方漏填的就是它")
+
+	_, err = collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err,
+		"collectSamples 收 nil Out 合法：它的产出是数据，打印是副产品")
+}
+
+// 正常路径：报告写进调用方给的 Writer。
+func TestCalibrateWritesReportToOut(t *testing.T) {
+	var b strings.Builder
+	require.NoError(t, Calibrate(CalibrateDeps{Dir: completedFixture(t), Out: &b}))
+
+	out := b.String()
+	require.NotEmpty(t, out)
+	assert.Contains(t, out, "字段分布", "报告表头")
+	assert.Contains(t, out, FieldM2, "至少一个字段名")
+}
+
+// —— boundary[1]: --allow-incomplete 生效时必须说明为什么 ——
+//
+// 🔴 **两格夹具只差 `completed_at` 一个变量**，且**两格都配正向锚**。
+//
+// 缺任一条这对断言就会平凡为真：否定式那格（「不出现说明」）在**任何**失败路径上
+// 都成立 —— 比如夹具没有可解析文章、`collectSamples` 返回「可用样本为 0」，
+// 那句说明同样不会出现，而测试照绿。正向锚（报告正文确实产出了）把这条堵死。
+func TestCalibrateExplainsWhyIncompleteWasAccepted(t *testing.T) {
+	// 两份夹具的**唯一**差别是 CompletedAt；文章、SHA、From 全部相同。
+	articles := []Article{
+		{ID: "a2025", Title: "2025年金融统计数据报告", File: "articles/a2025.html",
+			SHA256: testdataSHA(t, "pboc-2025-12-annual.html")},
+	}
+	files := map[string]string{"articles/a2025.html": "pboc-2025-12-annual.html"}
+
+	t.Run("缺 completed_at + --allow-incomplete ⇒ 打印说明", func(t *testing.T) {
+		dir := writeCalibrateFixture(t,
+			Manifest{From: "2020-01", Articles: articles}, files) // ← CompletedAt 为空
+		var b strings.Builder
+		require.NoError(t, Calibrate(CalibrateDeps{Dir: dir, Out: &b, AllowIncomplete: true}))
+
+		out := b.String()
+		assert.Contains(t, out, "字段分布", "正向锚：报告正文必须真的产出了")
+		assert.Contains(t, out, incompleteNotice, "放行必须有声，不能静默")
+		// 措辞不得声称已确认完整 —— 工具分辨不了「缺标记但完整」与「确实夭折」。
+		//
+		// ⚠️ 这里**必须用正向断言**（要求那句对冲在场），不能写
+		// `assert.NotContains(out, "已确认完整")`：我第一版就是那么写的，当场红了 ——
+		// 因为 notice 里那句「**这不代表已确认完整**」本身就含这四个字。
+		// 否定式断言撞上共有词，挡的不是错误实现，是正确实现。
+		assert.Contains(t, out, "这不代表已确认完整",
+			"必须显式对冲：一个声称「已确认完整」的实现不会有这句")
+	})
+
+	t.Run("有 completed_at ⇒ 不打印（否则每次跑都打一句，等于没说）", func(t *testing.T) {
+		dir := writeCalibrateFixture(t,
+			Manifest{From: "2020-01", CompletedAt: "2026-08-24T10:00:00Z", Articles: articles}, files)
+		var b strings.Builder
+		require.NoError(t, Calibrate(CalibrateDeps{Dir: dir, Out: &b, AllowIncomplete: true}))
+
+		out := b.String()
+		assert.Contains(t, out, "字段分布",
+			"正向锚：这一格必须走到与上一格**同样**的成功路径，"+
+				"否则「不出现说明」在任何失败路径上都平凡为真")
+		assert.NotContains(t, out, incompleteNotice)
+	})
+}
+
+// boundary[0]: --dir 指向不存在的目录 ⇒ 错误串必须含该路径。
+//
+// ⚠️ 只断 require.Error 会放过一个把用户引向错误处置的实现（报「没有 completed_at，
+// 请传 --allow-incomplete」）。**TASK-002 已经把这条堵上了**（collectSamples 在调
+// loadManifest 之前先 os.Stat），本条是**验收现状**，不是要求重构。
+func TestCalibrateOnMissingDirNamesThePath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope-not-here")
+	var b strings.Builder
+
+	err := Calibrate(CalibrateDeps{Dir: missing, Out: &b})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), missing,
+		"错误必须指向真实成因（那个路径），而不是把人引去加 --allow-incomplete")
+	assert.NotContains(t, err.Error(), "allow-incomplete",
+		"目录不存在时不该提这个 flag——那是第二条误导性错误的入口")
 }

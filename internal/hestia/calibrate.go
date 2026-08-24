@@ -35,7 +35,16 @@ import (
 // loadManifest 收目录，且 Article.File 存的是相对该目录的路径 —— 收文件路径就要在这里
 // 再 filepath.Dir() 一次，凭空多一处可能出错的地方。
 //
-// Out 用来把「这一趟看到了什么」写给人看。nil 表示不打印（纯取数的调用方）。
+// Out 用来把「这一趟看到了什么」写给人看。
+//
+// 🔴 **同一个字段，两套契约，刻意不同**：
+//   - `collectSamples` 收 **nil 合法** —— 纯取数的调用方（只要 Samples/Records，不要报告）；
+//   - 导出入口 `Calibrate` 收 **nil 报错** —— 见 Calibrate 的注释。
+//
+// 理由：`collectSamples` 的产出是**数据**，打印是副产品；`Calibrate` 的产出**就是那份报告**。
+// 一个「把报告写出来」的函数默认丢弃输出，等于把调用方的疏漏变成合法配置。
+// ⚠️ 这条区别由 TestCalibrateRejectsNilOutWhileCollectSamplesAllowsIt 钉住 ——
+// 光写在注释里的区别，下一个人重构时不会知道它是有意的。
 type CalibrateDeps struct {
 	Dir             string
 	Out             io.Writer
@@ -84,6 +93,16 @@ type CalibrateResult struct {
 	// Warnings 是「这份产物可不可信」的存疑项。不阻断：它们说的是语料的性质，
 	// 不是本次标定出了错。
 	Warnings []string
+
+	// IncompleteAccepted 记「这份 manifest 没有 completed_at，是靠 AllowIncomplete 放行的」。
+	//
+	// 只有 collectSamples 知道这件事（它消费 d.AllowIncomplete 与 m.CompletedAt），而
+	// Calibrate 要据此打印一句说明 —— 不带出来的话，放行就是**静默**的，报告的读者
+	// 无从知道这批数据是在「缺完成标记」的前提下算出来的。
+	//
+	// ⚠️ 它**不表示「已确认完整」**：工具分辨不了「缺标记但完整」与「确实夭折」
+	// （见上面 CompletedAt 那段——闭合性检查在夭折产物上同样全绿）。
+	IncompleteAccepted bool
 }
 
 // collectSamples 读 manifest、解析《金融统计数据报告》、汇总各字段的取值。
@@ -121,6 +140,8 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 	}
 
 	res := &CalibrateResult{Samples: map[string][]float64{}}
+	// 走到这里而 CompletedAt 为空 ⇒ 必然是 AllowIncomplete 放行的（上面那个 if 已排除另一支）。
+	res.IncompleteAccepted = m.CompletedAt == ""
 	res.FetchFailed = append(res.FetchFailed, m.Failed...)
 	res.Warnings = manifestWarnings(m)
 
@@ -396,4 +417,44 @@ func samplesFromRecords(recs []SampleRecord) map[string][]float64 {
 		}
 	}
 	return out
+}
+
+// incompleteNotice 是「为什么放行了一份没有完成标记的 manifest」那句说明。
+//
+// 措辞刻意**不声称已确认完整**：工具分辨不了「缺标记但完整」（本次真跑用的那份产物
+// 早于 M1c-1 的 TASK-010 引入 completed_at）与「确实夭折」（进程中途被杀）——
+// CompletedAt 的注释写明闭合性检查在夭折产物上同样全绿。⇒ 只能把事实摆出来，
+// 让读报告的人自己判断，不能替他下结论。
+const incompleteNotice = "⚠ 该 manifest 无完成标记（completed_at），已按 --allow-incomplete 放行；" +
+	"若它出自 TASK-010 之前的 fetch，属预期。**这不代表已确认完整** —— " +
+	"夭折的产物与正常完成的在结构上无法区分。"
+
+// Calibrate 是标定的导出入口：读产物目录、统计分布、把报告写给 d.Out。
+//
+// 形态与 BackfillFetch 类似（一个导出入口 + 一个 Deps 结构体 + 返回 error），
+// 但**不收 ctx**：collectSamples 全是本地文件 IO，没有网络也没有可取消的长操作，
+// 收一个用不到的 ctx 只会让调用方以为它能取消。
+//
+// 🔴 **d.Out 为 nil 时报错，不退化成 io.Discard。**
+// 本函数的产出**就是那份报告**；默认丢弃输出会把调用方的疏漏变成合法配置 ——
+// 具体的失效形态是：cmd 层装配时漏填 Out 字段 ⇒ 命令静默打印零字节、退出码 0，
+// 而「子命令注册了吗」「flag 解析对吗」这类测试**全部通过**。
+// ⚠️ 与 collectSamples 相反（那边 nil 合法），区别的理由见 CalibrateDeps.Out。
+func Calibrate(d CalibrateDeps) error {
+	if d.Out == nil {
+		return errors.New("hestia: Calibrate 需要 Out：本函数的产出就是那份报告，" +
+			"没有 Out 就没有产出。（collectSamples 允许 Out 为 nil，那是纯取数的路径）")
+	}
+
+	res, err := collectSamples(d)
+	if err != nil {
+		return err
+	}
+
+	// 放行说明排在报告**之前**：它是读下面每一个数的前提，放在末尾等于让人读完才知道。
+	if res.IncompleteAccepted {
+		fmt.Fprintf(d.Out, "%s\n\n", incompleteNotice)
+	}
+
+	return renderCalibrateReport(d.Out, res)
 }

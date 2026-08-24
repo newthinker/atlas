@@ -12,6 +12,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"go/parser"
@@ -785,4 +786,126 @@ func TestHestiaBackfillConfigDoesNotInheritDiscoverMaxPages(t *testing.T) {
 		"Cutover 留空 ⇒ 用 hestia 包里的唯一定义；命令层再写一个 2025-09 会造出第二个定义处")
 	assert.Equal(t, "/tmp/bf-probe", got.Out)
 	assert.NotNil(t, got.Report, "报告要有去向")
+}
+
+// ── M1c-2 / TASK-004：backfill calibrate ────────────────────────────────────
+
+// calExec 从根命令按真实路径跑一次 calibrate，**把输出收进 buffer**。
+//
+// 与同文件的 bfExec 只差一点：那个把输出丢进 io.Discard（它验的是「装配通不通」），
+// 而本任务要验的恰恰是**输出里有没有东西** —— 丢弃输出的 harness 对
+// 「命令静默打印零字节」这个失效**结构上不可见**。
+func calExec(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	var buf bytes.Buffer
+	old := os.Args
+	t.Cleanup(func() { os.Args = old })
+	rootCmd.SetArgs(args)
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(io.Discard)
+		rootCmd.SetErr(io.Discard)
+		hestiaCalibrateDir, hestiaCalibrateAllowIncomplete = "", false
+		hestiaBackfillCalibrateCmd.Flags().VisitAll(func(f *pflag.Flag) { f.Changed = false })
+	})
+	// ⚠️ **必须先 Execute 再读 buf**：写成 `return buf.String(), rootCmd.Execute()`
+	// 时 Go 从左到右求值，buf 在命令跑之前就被读走了 ⇒ 输出恒为空。
+	// 第一版就是那么写的，被 TestHestiaBackfillCalibrateWritesReport 当场逮住 ——
+	// 而那条用例要防的**恰好**就是「输出为空」，只是那次的成因在 harness 里。
+	err := rootCmd.Execute()
+	return buf.String(), err
+}
+
+// calibrateFixture 造一份 backfill 产物目录：manifest.json + 一篇可解析报告。
+//
+// ⚠️ HTML 取自 `../../internal/hestia/testdata/` —— **本包此前没有跨包读 testdata 的
+// 先例**，我加了这一处。理由：那份快照 40K，复制一份进 cmd/atlas/testdata 就有了两份
+// 需要同步的真实语料，而它们**没有任何机制保证同步**；跨包读则永远是同一份。
+// 代价是这条测试依赖 internal/hestia 的 testdata 布局——真移动了会红，那是可接受的红。
+func calibrateFixture(t *testing.T, completedAt string) string {
+	t.Helper()
+	const src = "../../internal/hestia/testdata/pboc-2025-12-annual.html"
+	raw, err := os.ReadFile(src)
+	require.NoError(t, err, "跨包读 testdata：%s", src)
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "articles"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "articles", "a.html"), raw, 0o600))
+
+	m := hestia.Manifest{
+		From:        "2020-01",
+		CompletedAt: completedAt, // ← 两格夹具**唯一**的变量
+		Articles: []hestia.Article{{
+			ID: "a2025", Title: "2025年金融统计数据报告", File: "articles/a.html",
+		}},
+	}
+	buf, err := json.Marshal(m)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), buf, 0o600))
+	return dir
+}
+
+// functional[1]：两层嵌套注册 + 两个 flag 经 cobra 真实解析。
+func TestHestiaBackfillCalibrateIsRegistered(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"hestia", "backfill", "calibrate"})
+	require.NoError(t, err, "从根命令按 hestia→backfill→calibrate 必须找得到")
+	require.Equal(t, "calibrate", cmd.Name())
+
+	// 🔴 默认值断言用 DefValue，**不是**读变量：上个 sprint（M1c-1 TASK-010 FIX-A）
+	// 实测过——测试里的重置逻辑会把注册时的默认值抹掉，断变量的用例对
+	// 「默认值被改成 true」的错误实现**照样绿**。
+	assert.Equal(t, "false", cmd.Flags().Lookup("allow-incomplete").DefValue,
+		"--allow-incomplete 的注册默认值必须是 false")
+	assert.NotNil(t, cmd.Flags().Lookup("dir"))
+}
+
+func TestHestiaBackfillCalibrateFlagsParse(t *testing.T) {
+	dir := calibrateFixture(t, "2026-08-24T10:00:00Z")
+	_, err := calExec(t, "hestia", "backfill", "calibrate", "--dir", dir, "--allow-incomplete")
+	require.NoError(t, err)
+
+	// 经 SetArgs+Execute 之后读绑定变量：验的是「cobra 真的把值送到了这两个变量」，
+	// 不是「Lookup != nil」。
+	assert.Equal(t, dir, hestiaCalibrateDir)
+	assert.True(t, hestiaCalibrateAllowIncomplete)
+}
+
+// 🔴 functional[2]：走全链路，断言 OutOrStdout 真的收到了东西。
+//
+// 这条堵的是一个既真实又完全隐形的错误实现：装配时漏填 `Out` ⇒ 若 Calibrate 把 nil
+// 当 io.Discard，命令就**静默打印零字节、退出码 0**，而上面两条测试全部通过。
+// ⚠️ 它同时堵住「RunE 是个 `return nil` 空壳」——那种实现也过得了「注册了吗」。
+func TestHestiaBackfillCalibrateWritesReport(t *testing.T) {
+	dir := calibrateFixture(t, "2026-08-24T10:00:00Z")
+
+	out, err := calExec(t, "hestia", "backfill", "calibrate", "--dir", dir)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, out, "命令必须真的打印报告——零字节 + 退出码 0 是本条要防的形态")
+	assert.Contains(t, out, "字段分布", "表头")
+	assert.Contains(t, out, "m2", "至少一个字段名")
+}
+
+// boundary[2]：--dir 必填，与 fetch --out 对称。
+func TestHestiaBackfillCalibrateRequiresDir(t *testing.T) {
+	_, err := calExec(t, "hestia", "backfill", "calibrate")
+	require.Error(t, err, "缺 --dir 必须被 cobra 拦下")
+	assert.Contains(t, err.Error(), "dir")
+}
+
+// boundary[0]：--dir 指向不存在的目录 ⇒ 错误指向真实成因（那个路径）。
+//
+// ⚠️ 这是**验收现状**：TASK-002 的 collectSamples 已经在调 loadManifest 之前
+// 先 os.Stat 了。不要因为这条 DoD 去「把它做成第一道检查」——那件事已经做完了。
+func TestHestiaBackfillCalibrateOnMissingDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope-not-here")
+
+	_, err := calExec(t, "hestia", "backfill", "calibrate", "--dir", missing)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), missing, "错误必须点名那个路径")
+	assert.NotContains(t, err.Error(), "allow-incomplete",
+		"目录不存在时不该把人引去加这个 flag")
 }
