@@ -450,3 +450,193 @@ func setFlow(c *collector, field, dir, num, unit string) error {
 	}
 	return c.set(field, a.toYi())
 }
+
+// —— M1c-3a 的 TASK-002：社融存量/增量**独立报告**的整篇抽取 ——
+//
+// 央行同期发三篇：《金融统计数据报告》（有板块结构，走 splitSections →
+// detectExtractor → extractFields）与社融存量/增量两篇独立报告。后两篇**没有板块
+// 结构**——整篇就是一段正文，没有「一、二、三」标题可切。
+//
+// 整篇当一节即可复用既有抽取函数：section 只有 Title / Body 两个字段，而
+// extractTSF*Section 只读 Body——它本就不知道自己是被板块切分喂的还是被整篇喂的。
+//
+// 这两个函数在 M1c-3a 的 TASK-007（Parse 按 kind 分派）接上之前**没有生产调用方**，
+// 这是刻意的分层，不是漏接。
+
+// extractTSFStockArticle 抽取一篇《社会融资规模存量统计数据报告》的全文。
+//
+// 存量侧真的只是一行包装：全量实测 69 篇，整篇喂进去与板块喂进去的结果没有差别。
+// 报告第二段「从结构看」里分项名逐字相同而数值是占比，既有模板已经挡住了它
+// （tsfStockRE 要求「余额」后紧跟数值 + 单位，tsfStockTotalRE 要求「存量**为**」），
+// 故这里不需要增量侧那样的作用域切分。TestTSFStockArticleTakesBalanceNotStructureShare
+// 钉住这个已经正确的性质。
+func extractTSFStockArticle(text string) (map[string]float64, error) {
+	return extractTSFStockSection(section{Body: text})
+}
+
+// tsfFlowArticleTotalRE 匹配独立增量报告里的**任意一条**总量句，两种措辞都收。
+//
+// 捕获组：1=年 2=月（仅「YYYY年M月」这种前缀才有）3=「累计」标记 4=数值 5=单位。
+//
+// # 为什么它不在 profiles.go
+//
+// 按本包分工它属于那边（「数据：字段清单表与句式模板」）。放这里是**范围约束**：
+// profiles.go 本 wave 归 M1c-3a 的 TASK-001 与 TASK-005，不在本任务的 writes 里。
+// 代价是它落在 profiles_test.go 的 TestNoGreedyCaptureInTemplates 覆盖之外——
+// extract_test.go 的 TestExtractGoArticleTemplatesHaveNoGreedyCapture 按同一判据补上。
+// profiles.go 空出来之后应当把这条挪过去，并登记进 allTemplateRegexps()。
+//
+// # 为什么不是把 tsfFlowTotalRE 放宽成「增量(?:累计)?为」
+//
+// 全量实测 69 篇，总量句是**四类**而不是两类：
+//
+//	仅「累计为」                19 篇   ← 现状已成功
+//	仅「为」且 1 月报            6 篇   ← 1 月的累计=当月，安全
+//	仅「为」且非 1 月           19 篇   ← 那句是**当月**值，报告不含累计数据
+//	两者都有                    25 篇   ← 现状已成功
+//
+// 天真放宽会让最后那 25 篇同时命中两句，mustMatch 报 matched 2 sentences ——
+// **原本成功的 25 篇会被打坏**。所以这里不放宽模板，而是把两种措辞都收下来，
+// 再按口径挑唯一一条，与 selectRMBCumulativeFlow 对付孪生句的手法同构。
+var tsfFlowArticleTotalRE = regexp.MustCompile(
+	`(?:([0-9]{4})年([0-9]{1,2})月)?社会融资规模增量(累计)?为` + numPat + unitPat)
+
+// tsfFlowTotal 是一条总量句：捕获组 + 它在原文里的起点。
+//
+// 起点是必需的，不是顺手记的：分项句紧跟总量句，口径由**所在段**决定，
+// 故分项只能在被选中的那条总量句的作用域内抽。
+type tsfFlowTotal struct {
+	groups []string
+	start  int
+}
+
+// isCumulative 判定一条总量句是不是「年初至今累计」口径。
+//
+// 两条判据，缺一不可：
+//
+//	带「累计」二字                          → 累计（19 + 25 篇）
+//	「YYYY年1月」前缀且不带「累计」          → 累计（6 篇：1 月的年初至今就是当月）
+//
+// 其余一律当单月。**「YYYY年10月…增量为」必须判成单月**：那 19 篇报告确实
+// 只有当月数，把它填进名为 _ytd 的字段会得到一个量级完全合理而口径错误的值，
+// 下游 calibrate 会拿它跨期比——本包反复禁止的失败方式。
+//
+// ⚠️ 判据落在「1 月」而不是「一位数月份」：`([0-9]{1,2})` 对「10月」捕获的是
+// 「10」，与「1」不等，靠的是捕获组而不是字符串前缀。
+func (h tsfFlowTotal) isCumulative() bool {
+	if h.groups[3] == "累计" {
+		return true
+	}
+	return h.groups[1] != "" && h.groups[2] == "1"
+}
+
+// label 只输出用于分辨的限定词，不输出数值——错误信息里带上隔壁句的数字
+// 会让人误以为那是结果（与 selectUnique 的 label 同一约定）。
+func (h tsfFlowTotal) label() string {
+	period := "无期次前缀"
+	if h.groups[1] != "" {
+		period = h.groups[1] + "年" + h.groups[2] + "月"
+	}
+	caliber := "单月"
+	if h.isCumulative() {
+		caliber = "累计"
+	}
+	return period + "/" + caliber
+}
+
+// extractTSFFlowArticle 抽取一篇《社会融资规模增量统计数据报告》的全文。
+//
+// 与存量侧不同，这里**不能**只做一行包装：增量报告常同时载有累计段与当月段，
+// 两段各带一整套同形的分项句。实测 2022 年 7/8/10/11 四篇的体例是「当月句 +
+// 一整套当月分项……累计句孤悬段末」，整篇直接喂给 extractTSFFlowSection 会
+// err=nil 而抽出**累计总量 + 当月分项**：
+//
+//	tsf_flow_ytd          = 287000   ← 段末「1-10月，…累计为28.7万亿元」
+//	tsf_flow_rmb_loan_ytd =   4431   ← 段首「10月…人民币贷款增加4431亿元」
+//
+// 量级差约 30 倍，两个值又都在合法区间内，下游没有任何闸门拦得住。故这里按
+// 作用域切分：总量句按口径挑唯一一条，分项只在**该句之后、下一条总量句之前**
+// 的文本里抽。切法与 extractLoanSection 的 loanScopeSpans 同构，只是边界由
+// 总量句而不是部门锚点划定。
+func extractTSFFlowArticle(text string) (map[string]float64, error) {
+	totals := findTSFFlowTotals(text)
+
+	labels := make([]string, 0, len(totals))
+	cumulative := make([]tsfFlowTotal, 0, 1)
+	for _, h := range totals {
+		labels = append(labels, h.label())
+		if h.isCumulative() {
+			cumulative = append(cumulative, h)
+		}
+	}
+
+	switch len(cumulative) {
+	case 1:
+	case 0:
+		return nil, fmt.Errorf(
+			"hestia: 社融增量总量（年初至今累计口径）not found among %d candidate sentence(s) [%s]: "+
+				"refusing to fall back to a current-month sentence — it has the right magnitude "+
+				"and format but the wrong caliber, and the field is named *_ytd",
+			len(totals), strings.Join(labels, " "))
+	default:
+		return nil, fmt.Errorf(
+			"hestia: 社融增量总量 matched %d cumulative sentences [%s]: refusing to pick one, "+
+				"both values look plausible and leftmost-first would choose silently",
+			len(cumulative), strings.Join(labels, " "))
+	}
+	total := cumulative[0]
+
+	c := newCollector()
+	a, err := parsePlainAmount(total.groups[4], total.groups[5]) // 总量句无方向词
+	if err != nil {
+		return nil, err
+	}
+	if err := c.set(FieldTSFFlowYTD, a.toYi()); err != nil {
+		return nil, err
+	}
+
+	scope := text[total.start:tsfFlowScopeEnd(totals, total.start, len(text))]
+	for _, it := range tsfFlowItems {
+		m, err := mustMatch(tsfFlowRE(it.name), scope, "社融增量分项 "+it.name)
+		if err != nil {
+			return nil, err
+		}
+		if err := setFlow(c, it.field, m[1], m[2], m[3]); err != nil {
+			return nil, err
+		}
+	}
+	return c.values, nil
+}
+
+// findTSFFlowTotals 找出全文所有总量句。用 FindAllStringSubmatchIndex 而不是
+// FindAllStringSubmatch，因为作用域切分要的正是位置。
+func findTSFFlowTotals(text string) []tsfFlowTotal {
+	locs := tsfFlowArticleTotalRE.FindAllStringSubmatchIndex(text, -1)
+	out := make([]tsfFlowTotal, 0, len(locs))
+	for _, loc := range locs {
+		groups := make([]string, len(loc)/2)
+		for i := range groups {
+			// 未参与匹配的可选组，起止都是 -1 —— 留空串
+			if loc[2*i] >= 0 {
+				groups[i] = text[loc[2*i]:loc[2*i+1]]
+			}
+		}
+		out = append(out, tsfFlowTotal{groups: groups, start: loc[0]})
+	}
+	return out
+}
+
+// tsfFlowScopeEnd 求作用域右边界：位置上**紧随其后**的那条总量句的起点，
+// 没有则到文末。
+//
+// 边界按位置取、不按口径取：2022 年 10 月那一篇被选中的累计句就是最后一条，
+// 于是作用域里一个分项都没有 ⇒ mustMatch 零命中 ⇒ 响亮失败。那正是期望行为，
+// 该报告确实不含累计口径的分项。
+func tsfFlowScopeEnd(totals []tsfFlowTotal, start, end int) int {
+	for _, h := range totals {
+		if h.start > start && h.start < end {
+			end = h.start
+		}
+	}
+	return end
+}

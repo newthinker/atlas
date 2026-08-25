@@ -21,6 +21,7 @@ package hestia
 // functional[*]  贷款作用域把同名子项分派到不同字段        → TestExtractSeparatesLoanScopes
 
 import (
+	"math"
 	"regexp"
 	"strings"
 	"testing"
@@ -541,4 +542,401 @@ func TestListTemplatesHitExactlyOnceOnRealSamples(t *testing.T) {
 				"实际检查了 %d 条模板、清单表里有 %d 条——枚举与表脱节了", checked, want)
 		})
 	}
+}
+
+// —— M1c-3a 的 TASK-002：社融独立报告的整篇抽取 ——
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3a 的 TASK-002)
+// functional[1]     两个包装函数存在且整篇当一节可跑通
+//                                              → TestExtractTSFStockArticleOnSnapshot、
+//                                                TestExtractTSFFlowArticleOnSnapshot
+// functional[2]     存量 18 字段 / 增量 9 字段，**逐字段数值**双向比对
+//                                              → 同上两条（tsfStockArticle2025_08 / tsfFlowArticle2025_08）
+// boundary[0]       不抽到「从结构看」段的占比值（钉住已正确的性质）
+//                                              → TestTSFStockArticleTakesBalanceNotStructureShare
+// boundary[1]       四种方向词 / 同句万亿元与亿元混用 / 负值带符号
+//                                              → TestTSFFlowArticleKeepsDirectionSign
+// boundary[2]       总量句四类形态（Leader 裁决 A：第 3 类报错）
+//                                              → TestTSFFlowArticleTotalSentenceForms
+// boundary[2]       口径混装：累计总量 + 当月分项必须响亮失败
+//                                              → TestTSFFlowArticleRefusesCaliberMix
+// error_handling[0] 缺分项报错且错误信息含分项名
+//                                              → TestTSFArticleNamesTheMissingItem
+// non_functional[0] 新模板不受 allTemplateRegexps 覆盖，本文件自补贪婪捕获检查
+//                                              → TestExtractGoArticleTemplatesHaveNoGreedyCapture
+
+// tsfStockArticle2025_08 逐条抄自 testdata/pboc-2025-08-tsf-stock.html 的总量段原句，
+// **不由解析器生成**——那样就是拿实现验证实现。原句：
+//
+//	初步统计，2025年8月末社会融资规模存量为433.66万亿元，同比增长8.8%。其中，
+//	对实体经济发放的人民币贷款余额为265.42万亿元，同比增长6.6%；……
+//
+// 余额归一到万亿元（原文即万亿元），同比是带符号的百分数（「下降」为负）。
+var tsfStockArticle2025_08 = map[string]float64{
+	FieldTSFStock:    433.66, // 社会融资规模存量为433.66万亿元
+	FieldTSFStockYoY: 8.8,    // 同比增长8.8%
+
+	FieldTSFStockRMBLoan:    265.42, // 对实体经济发放的人民币贷款余额为265.42万亿元
+	FieldTSFStockRMBLoanYoY: 6.6,    // 同比增长6.6%
+	FieldTSFStockFXLoan:     1.19,   // 对实体经济发放的外币贷款折合人民币余额为1.19万亿元
+	FieldTSFStockFXLoanYoY:  -21,    // 同比下降21%
+	FieldTSFStockEntrust:    11.15,  // 委托贷款余额为11.15万亿元
+	FieldTSFStockEntrustYoY: -0.6,   // 同比下降0.6%
+	FieldTSFStockTrust:      4.49,   // 信托贷款余额为4.49万亿元
+	FieldTSFStockTrustYoY:   5.5,    // 同比增长5.5%
+
+	FieldTSFStockBankAccept:    2.12,  // 未贴现的银行承兑汇票余额为2.12万亿元
+	FieldTSFStockBankAcceptYoY: -4.1,  // 同比下降4.1%
+	FieldTSFStockCorpBond:      33.47, // 企业债券余额为33.47万亿元
+	FieldTSFStockCorpBondYoY:   3.7,   // 同比增长3.7%
+	FieldTSFStockGovtBond:      91.36, // 政府债券余额为91.36万亿元
+	FieldTSFStockGovtBondYoY:   21.1,  // 同比增长21.1%
+	FieldTSFStockEquity:        11.99, // 非金融企业境内股票余额为11.99万亿元
+	FieldTSFStockEquityYoY:     3.4,   // 同比增长3.4%
+}
+
+// tsfFlowArticle2025_08 逐条抄自 testdata/pboc-2025-08-tsf-flow.html 的总量段原句。
+// 增量字段一律归一到**亿元**，故「12.93万亿元」写作 129300。
+//
+//	初步统计，2025年前八个月社会融资规模增量累计为26.56万亿元，比上年同期多4.66万亿元。其中，
+//	对实体经济发放的人民币贷款增加12.93万亿元，同比少增4851亿元；……
+var tsfFlowArticle2025_08 = map[string]float64{
+	FieldTSFFlowYTD: 265600, // 社会融资规模增量累计为26.56万亿元
+
+	FieldTSFFlowRMBLoanYTD:    129300, // 对实体经济发放的人民币贷款增加12.93万亿元
+	FieldTSFFlowFXLoanYTD:     -816,   // 对实体经济发放的外币贷款折合人民币减少816亿元
+	FieldTSFFlowEntrustYTD:    -855,   // 委托贷款减少855亿元
+	FieldTSFFlowTrustYTD:      1942,   // 信托贷款增加1942亿元
+	FieldTSFFlowBankAcceptYTD: -223,   // 未贴现的银行承兑汇票减少223亿元
+	FieldTSFFlowCorpBondYTD:   15600,  // 企业债券净融资1.56万亿元
+	FieldTSFFlowGovtBondYTD:   102700, // 政府债券净融资10.27万亿元
+	FieldTSFFlowEquityYTD:     2669,   // 非金融企业境内股票融资2669亿元
+}
+
+func TestExtractTSFStockArticleOnSnapshot(t *testing.T) {
+	got, err := extractTSFStockArticle(stripHTML(readSample(t, "pboc-2025-08-tsf-stock.html")))
+	require.NoError(t, err)
+
+	require.Len(t, got, 18, "存量独立报告应抽出总量 2 + 8 分项 ×（余额 + 同比）= 18 个字段")
+	assertMatchesGolden(t, got, tsfStockArticle2025_08)
+}
+
+func TestExtractTSFFlowArticleOnSnapshot(t *testing.T) {
+	got, err := extractTSFFlowArticle(stripHTML(readSample(t, "pboc-2025-08-tsf-flow.html")))
+	require.NoError(t, err)
+
+	require.Len(t, got, 9, "增量独立报告应抽出总量 1 + 8 分项 = 9 个字段")
+	assertMatchesGolden(t, got, tsfFlowArticle2025_08)
+}
+
+// TestTSFStockArticleTakesBalanceNotStructureShare 钉住一个**已经正确**的性质，
+// 不是在修 bug：报告第二段「从结构看」里分项名逐字相同而数值是占比。
+//
+//	（总量段）委托贷款余额为11.15万亿元，同比下降0.6%
+//	（结构段）委托贷款余额占比2.6%，同比低0.2个百分点
+//
+// 抽错得到 2.6——量级差四倍，**而 2.6 是个完全合法的余额**，magnitude_sanity
+// 现在是空表（skipped{not_calibrated}），拦不住它。
+//
+// 现有 tsfStockRE 要求「余额」后紧跟**数值 + 单位**，而结构段是「余额占比2.6%」
+// （「占」不是数字、缺单位）；tsfStockTotalRE 要求「存量**为**」而结构段写
+// 「占同期社会融资规模存量**的**61.2%」。两条各自挡住一半。
+//
+// 消融（验证本断言真的在守卫，harness 见 discovery）：把 tsfStockRE 的 unitPat
+// 去掉，本测试的 entrust / fx_loan 两格必须转红。
+func TestTSFStockArticleTakesBalanceNotStructureShare(t *testing.T) {
+	got, err := extractTSFStockArticle(stripHTML(readSample(t, "pboc-2025-08-tsf-stock.html")))
+	require.NoError(t, err)
+	// 下面的否定式断言在 got 为空表时会**平凡为真**（缺键读出 0，与任何占比值都不等）。
+	// 先钉住表是满的，否则那半个测试的绿色不代表任何东西。
+	require.Len(t, got, 18)
+
+	// 逐格钉住「取的是总量段的余额」而不是「结构段的占比」。左值是余额、
+	// 右注是同一分项在结构段的占比——两者都是合法数值，只有位置能区分。
+	assert.InDelta(t, 11.15, got[FieldTSFStockEntrust], 1e-9)   // 结构段占比 2.6
+	assert.InDelta(t, 1.19, got[FieldTSFStockFXLoan], 1e-9)     // 结构段占比 0.3
+	assert.InDelta(t, 2.12, got[FieldTSFStockBankAccept], 1e-9) // 结构段占比 0.5
+	assert.InDelta(t, 33.47, got[FieldTSFStockCorpBond], 1e-9)  // 结构段占比 7.7
+	assert.InDelta(t, 91.36, got[FieldTSFStockGovtBond], 1e-9)  // 结构段占比 21.1
+	assert.InDelta(t, 11.99, got[FieldTSFStockEquity], 1e-9)    // 结构段占比 2.8
+	// 总量：结构段写「占同期社会融资规模存量的61.2%」，取错会得到 61.2
+	assert.InDelta(t, 433.66, got[FieldTSFStock], 1e-9)
+	assert.InDelta(t, 265.42, got[FieldTSFStockRMBLoan], 1e-9)
+
+	// 否定式与上面的肯定式**互补，不是重复**：肯定式钉住取到的是哪个值，
+	// 否定式钉住结构段那 8 个占比值一个都没进结果表。删掉任一半都会放过一类错误。
+	for f, share := range map[string]float64{
+		FieldTSFStockEntrust: 2.6, FieldTSFStockFXLoan: 0.3,
+		FieldTSFStockBankAccept: 0.5, FieldTSFStockCorpBond: 7.7,
+		FieldTSFStockGovtBond: 21.1, FieldTSFStockEquity: 2.8,
+		FieldTSFStock: 61.2,
+	} {
+		assert.Greaterf(t, math.Abs(got[f]-share), 1e-9,
+			"%s 取到了「从结构看」段的占比值 %v", f, share)
+	}
+}
+
+// —— 增量总量句的四类形态（M1c-3a 的 TASK-002 全量实测：69 篇分布 19/6/19/25）——
+//
+// 下面四段 body 逐字抄自真实语料的总量段，只删掉与本测试无关的尾注。
+
+// tsfFlowBodyCumulativeOnly：仅「累计为」（19 篇，2025 年 8 月体例）
+const tsfFlowBodyCumulativeOnly = "初步统计，2025年前八个月社会融资规模增量累计为26.56万亿元，比上年同期多4.66万亿元。" +
+	"其中，对实体经济发放的人民币贷款增加12.93万亿元，同比少增4851亿元；" +
+	"对实体经济发放的外币贷款折合人民币减少816亿元，同比少减767亿元；委托贷款减少855亿元，同比多减307亿元；" +
+	"信托贷款增加1942亿元，同比少增1614亿元；未贴现的银行承兑汇票减少223亿元，同比少减2566亿元；" +
+	"企业债券净融资1.56万亿元，同比少2214亿元；政府债券净融资10.27万亿元，同比多4.63万亿元；" +
+	"非金融企业境内股票融资2669亿元，同比多1093亿元。"
+
+// tsfFlowBodyJanuaryBare：仅「为」且是 1 月报（6 篇）。1 月的年初至今累计**就是**当月，
+// 故这一句虽无「累计」二字，口径仍是累计。抄自 2025 年 1 月报。
+const tsfFlowBodyJanuaryBare = "初步统计，2025年1月社会融资规模增量为7.06万亿元，比上年同期多5833亿元。" +
+	"其中，对实体经济发放的人民币贷款增加5.22万亿元，同比多增3793亿元；" +
+	"对实体经济发放的外币贷款折合人民币减少392亿元，同比多减1381亿元；委托贷款增加449亿元，同比多增808亿元；" +
+	"信托贷款增加623亿元，同比少增109亿元；未贴现的银行承兑汇票增加4653亿元，同比少增983亿元；" +
+	"企业债券净融资4454亿元，同比多134亿元；政府债券净融资6933亿元，同比多3986亿元；" +
+	"非金融企业境内股票融资473亿元，同比多51亿元。"
+
+// tsfFlowBodyNonJanuaryBare：仅「为」且非 1 月（19 篇）。这句是**当月**值，
+// 报告本身不含年初至今累计——抄自 2020 年 10 月报。
+const tsfFlowBodyNonJanuaryBare = "初步统计，2020年10月社会融资规模增量为1.42万亿元，比上年同期多5493亿元。" +
+	"其中，对实体经济发放的人民币贷款增加6663亿元，同比多增1193亿元；" +
+	"对实体经济发放的外币贷款折合人民币减少175亿元，同比多减165亿元；委托贷款减少174亿元，同比少减493亿元；" +
+	"信托贷款减少875亿元，同比多减251亿元；未贴现的银行承兑汇票减少1089亿元，同比多减36亿元；" +
+	"企业债券净融资2522亿元，同比多490亿元；政府债券净融资4931亿元，同比多3060亿元；" +
+	"非金融企业境内股票融资927亿元，同比多747亿元。"
+
+// tsfFlowBodyBothCumulativeFirst：两者都有、**累计段在前**（25 篇里的多数体例）。
+// 抄自 2020 年 2 月报——两段各带一整套分项，是本包纪律 2 说的孪生句最完整的形态。
+const tsfFlowBodyBothCumulativeFirst = "初步统计，2020年前两个月社会融资规模增量累计为5.92万亿元，比上年同期多2717亿元。" +
+	"其中，对实体经济发放的人民币贷款增加4.21万亿元，同比少增1183亿元；" +
+	"对实体经济发放的外币贷款折合人民币增加765亿元，同比多增527亿元；委托贷款减少382亿元，同比少减826亿元；" +
+	"信托贷款减少109亿元，同比多减417亿元；未贴现的银行承兑汇票减少2558亿元，同比多减3241亿元；" +
+	"企业债券净融资7747亿元，同比多2043亿元；政府债券净融资9437亿元，同比多3391亿元；" +
+	"非金融企业境内股票融资1058亿元，同比多650亿元。\n\n" +
+	"2月当月，社会融资规模增量为8554亿元，比上年同期少1111亿元。" +
+	"其中，对实体经济发放的人民币贷款增加7202亿元，同比少增439亿元；" +
+	"对实体经济发放的外币贷款折合人民币增加252亿元，同比多增357亿元；委托贷款减少356亿元，同比少减152亿元；" +
+	"信托贷款减少540亿元，同比多减503亿元；未贴现的银行承兑汇票减少3961亿元，同比多减858亿元；" +
+	"企业债券净融资3860亿元，同比多2985亿元；政府债券净融资1824亿元，同比少2523亿元；" +
+	"非金融企业境内股票融资449亿元，同比多330亿元。"
+
+// tsfFlowBodyBothMonthlyFirst：两者都有、**当月段在前而累计句孤悬段末**（2022 年 7/8/10/11 共 4 篇）。
+// 抄自 2022 年 10 月报。这一篇是本任务发现的静默错误现场，见 TestTSFFlowArticleRefusesCaliberMix。
+const tsfFlowBodyBothMonthlyFirst = "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。" +
+	"其中，对实体经济发放的人民币贷款增加4431亿元，同比少增3321亿元；" +
+	"对实体经济发放的外币贷款折合人民币减少724亿元，同比多减691亿元；委托贷款增加470亿元，同比多增643亿元；" +
+	"信托贷款减少61亿元，同比少减1000亿元；未贴现的银行承兑汇票减少2157亿元，同比多减1271亿元；" +
+	"企业债券净融资2325亿元，同比多64亿元；政府债券净融资2791亿元，同比少3376亿元；" +
+	"非金融企业境内股票融资788亿元，同比少58亿元。1-10月，社会融资规模增量累计为28.7万亿元，比上年同期多2.31万亿元。"
+
+// TestTSFFlowArticleTotalSentenceForms 覆盖增量总量句的四类形态。
+//
+// 🔴 第 3 类（仅「为」且非 1 月，19 篇）**刻意报错**，不是没做完：那句是当月值，
+// 而字段名是 tsf_flow_ytd（年初至今累计），与 deposit_flow_ytd / loan_flow_ytd 同族、
+// 下游 calibrate 会拿它跨期比。把当月值填进去，量级看起来完全合理而口径是错的——
+// 正是本包反复禁止的失败方式。人类在同构问题（月报分部门口径）上已选「只接安全的，
+// 其余响亮失败」，这里执行同一裁决。
+//
+// 🔴 天真放宽成「社会融资规模增量(?:累计)?为」不可行：第 4/5 类那 25 篇会命中两次，
+// mustMatch 直接报 matched 2 sentences——原本成功的 25 篇会被打坏。
+func TestTSFFlowArticleTotalSentenceForms(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr string // 非空则要求报错且错误信息含它
+		wantYTD float64
+		// wantRMBLoan 钉住**分项**与总量同口径——只断总量的话，累计总量配当月分项
+		// （2022 年 10 月体例）会照样绿。
+		wantRMBLoan float64
+	}{
+		{
+			name: "类1 仅累计为", body: tsfFlowBodyCumulativeOnly,
+			wantYTD: 265600, wantRMBLoan: 129300,
+		},
+		{
+			// 1 月的累计=当月，故无「累计」二字仍是累计口径
+			name: "类2 仅为_1月报", body: tsfFlowBodyJanuaryBare,
+			wantYTD: 70600, wantRMBLoan: 52200,
+		},
+		{
+			// 报告本身不含累计数据 ⇒ 响亮失败，不拿 14200 冒充 ytd
+			name: "类3 仅为_非1月", body: tsfFlowBodyNonJanuaryBare,
+			wantErr: "2020年10月/单月",
+		},
+		{
+			// 分项有两套，必须取累计段那套（4.21万亿元=42100），不是当月的 7202
+			name: "类4 两者都有_累计段在前", body: tsfFlowBodyBothCumulativeFirst,
+			wantYTD: 59200, wantRMBLoan: 42100,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractTSFFlowArticle(tc.body)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr,
+					"错误信息要说清候选句的期次与口径，否则排障只能回去翻原文")
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, got, 9)
+			assert.InDelta(t, tc.wantYTD, got[FieldTSFFlowYTD], 1e-9)
+			assert.InDelta(t, tc.wantRMBLoan, got[FieldTSFFlowRMBLoanYTD], 1e-9)
+		})
+	}
+}
+
+// TestTSFFlowArticleRefusesCaliberMix 钉住本任务发现的**静默错误现场**。
+//
+// 2022 年 7/8/10/11 四篇的体例是「当月句 + 一整套当月分项……累计句」——累计总量
+// 孤悬段末，它后面一个分项都没有。加作用域切分之前，extractTSFFlowSection 对
+// 2022 年 10 月 **err=nil** 且抽出：
+//
+//	tsf_flow_ytd           = 287000  ← 段末「1-10月，…累计为28.7万亿元」
+//	tsf_flow_rmb_loan_ytd  =   4431  ← 段首「10月…人民币贷款增加4431亿元」= 当月
+//
+// 总量是累计、分项是当月，量级差约 30 倍，没有任何闸门拦得住（AD-6 里「住户短期
+// 贷款跑进企业字段」的同族）。作用域切分把分项限定在被选中的总量句之后、下一条
+// 总量句之前，于是这一篇的累计作用域里零分项 ⇒ 响亮失败。
+func TestTSFFlowArticleRefusesCaliberMix(t *testing.T) {
+	got, err := extractTSFFlowArticle(tsfFlowBodyBothMonthlyFirst)
+	require.Error(t, err, "累计总量配当月分项必须失败，而不是产出口径混装的 Values")
+	assert.Nil(t, got)
+
+	// 钉住**是哪条断言**在守卫：必须是分项在累计作用域内找不到，
+	// 而不是别的原因碰巧也让它红。
+	assert.Contains(t, err.Error(), "社融增量分项",
+		"失败必须来自分项抽取，说明作用域切分生效了")
+	assert.Contains(t, err.Error(), "对实体经济发放的人民币贷款")
+
+	// 反向钉住：这一篇的两个值都在原文里，只是分属不同口径。若哪天实现退回
+	// 「总量全篇找、分项全篇找」，err 会变 nil 而上面的断言全部失效——所以
+	// 这里额外确认那对混装值确实是危险的（量级差 ~30 倍，都在合法区间内）。
+	assert.Contains(t, tsfFlowBodyBothMonthlyFirst, "累计为28.7万亿元")
+	assert.Contains(t, tsfFlowBodyBothMonthlyFirst, "人民币贷款增加4431亿元")
+}
+
+// TestTSFFlowArticleKeepsDirectionSign 覆盖 boundary[1]：增量句的方向词比存量丰富
+// （增加 / 减少 / 净融资 / 融资），**同一句里万亿元与亿元混用**，且负值必须带符号。
+//
+// 方向词丢失是静默的——绝对值对、符号错，而两个值都在合法量级内。
+func TestTSFFlowArticleKeepsDirectionSign(t *testing.T) {
+	got, err := extractTSFFlowArticle(tsfFlowBodyCumulativeOnly)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		field, dir, unit string
+		want             float64
+	}{
+		// 「增加」+ 万亿元
+		{FieldTSFFlowRMBLoanYTD, "增加", "万亿元", 129300},
+		// 「减少」+ 亿元 —— 必须是 -816 而不是 816
+		{FieldTSFFlowFXLoanYTD, "减少", "亿元", -816},
+		{FieldTSFFlowEntrustYTD, "减少", "亿元", -855},
+		{FieldTSFFlowBankAcceptYTD, "减少", "亿元", -223},
+		// 「增加」+ 亿元
+		{FieldTSFFlowTrustYTD, "增加", "亿元", 1942},
+		// 「净融资」+ 万亿元 / 亿元混用
+		{FieldTSFFlowCorpBondYTD, "净融资", "万亿元", 15600},
+		{FieldTSFFlowGovtBondYTD, "净融资", "万亿元", 102700},
+		// 「融资」（无「净」）+ 亿元
+		{FieldTSFFlowEquityYTD, "融资", "亿元", 2669},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			assert.InDelta(t, tc.want, got[tc.field], 1e-9)
+			// 符号必须来自方向词，不是来自「负数长这样」的巧合
+			if tc.dir == "减少" {
+				assert.Negativef(t, got[tc.field], "方向词「减少」必须产出负值")
+			} else {
+				assert.Positivef(t, got[tc.field], "方向词「%s」必须产出正值", tc.dir)
+			}
+		})
+	}
+}
+
+// TestTSFArticleNamesTheMissingItem 覆盖 error_handling[0]：缺任一分项一律报错、
+// 不静默补零，且错误信息里含**缺失的分项名**，不是一句笼统的「抽取失败」。
+func TestTSFArticleNamesTheMissingItem(t *testing.T) {
+	stock := stripHTML(readSample(t, "pboc-2025-08-tsf-stock.html"))
+	flow := stripHTML(readSample(t, "pboc-2025-08-tsf-flow.html"))
+
+	for _, tc := range []struct {
+		name, from, to, want string
+		fn                   func(string) (map[string]float64, error)
+		text                 string
+	}{
+		{
+			name: "存量_委托贷款", text: stock, fn: extractTSFStockArticle,
+			from: "委托贷款余额为", to: "委托贷款余额约为", want: "委托贷款",
+		},
+		{
+			name: "存量_政府债券", text: stock, fn: extractTSFStockArticle,
+			from: "政府债券余额为", to: "政府债券余额约为", want: "政府债券",
+		},
+		{
+			name: "增量_信托贷款", text: flow, fn: extractTSFFlowArticle,
+			from: "信托贷款增加", to: "信托贷款约增加", want: "信托贷款",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Contains(t, tc.text, tc.from, "原文里没有这句，本用例改的是空气")
+			broken := strings.Replace(tc.text, tc.from, tc.to, 1)
+			require.NotEqual(t, tc.text, broken)
+
+			got, err := tc.fn(broken)
+			require.Error(t, err, "缺分项必须报错，不能静默补零")
+			assert.Nil(t, got)
+			assert.Containsf(t, err.Error(), tc.want,
+				"错误信息必须指名缺的是哪个分项，否则排障要回去逐条比对原文")
+		})
+	}
+}
+
+// TestExtractGoArticleTemplatesHaveNoGreedyCapture 补一个本任务**新造出来的**缺口。
+//
+// profiles_test.go 的 TestNoGreedyCaptureInTemplates 只扫 allTemplateRegexps() 与
+// profiles.go 的字面量。本任务把 tsfFlowArticleTotalRE 定义在 extract.go（理由见
+// 该变量上方注释），于是它落在那条检查的**覆盖范围之外**——检查还在，只是不再
+// 覆盖新增的这一条。这里按同一判据补上 extract.go。
+func TestExtractGoArticleTemplatesHaveNoGreedyCapture(t *testing.T) {
+	greedy := []string{`(.+)`, `(.*)`}
+
+	for _, g := range greedy {
+		assert.NotContainsf(t, tsfFlowArticleTotalRE.String(), g,
+			"模板 %s 含贪婪捕获 %s", tsfFlowArticleTotalRE, g)
+	}
+
+	lits := stringLiteralsOf(t, "extract.go")
+	require.NotEmpty(t, lits, "没解析出任何字符串字面量，本测试的绿色是假的")
+	for _, lit := range lits {
+		for _, g := range greedy {
+			assert.NotContainsf(t, lit.text, g, "%s: 字面量 %s 含贪婪捕获 %s", lit.pos, lit.text, g)
+		}
+	}
+}
+
+// TestTSFFlowArticleRefusesTwoCumulativeSentences 钉住选择的**另一半**失败语义：
+// 零条累计句报错是显然的，两条同样报错——不替调用方挑一个。
+//
+// 与 mustMatch / selectUnique 的态度一致：两个值都在合法量级内，最左优先会静默
+// 选中其一，事后无从分辨。真实语料里暂无这种体例（69 篇实测累计句恒 ≤ 1 条），
+// 但「暂无」不是「不会有」——央行改一次排版就会有，而那时应当响亮失败。
+func TestTSFFlowArticleRefusesTwoCumulativeSentences(t *testing.T) {
+	// 把 2025 年 8 月的累计句复制一份、只改数值，构造两条累计候选
+	twin := tsfFlowBodyCumulativeOnly +
+		"\n\n初步统计，2025年前八个月社会融资规模增量累计为26.57万亿元，比上年同期多4.67万亿元。"
+
+	got, err := extractTSFFlowArticle(twin)
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "matched 2 cumulative sentences",
+		"必须说清是「两条都算累计」，而不是笼统的抽取失败")
+	assert.Contains(t, err.Error(), "refusing to pick one")
+
+	// 对照：只留一条时同一段文本是能抽通的——否则上面的 Error 可能来自别的原因，
+	// 这条断言就不再是在测「拒绝二义」了。
+	ok, err := extractTSFFlowArticle(tsfFlowBodyCumulativeOnly)
+	require.NoError(t, err)
+	require.Len(t, ok, 9)
 }
