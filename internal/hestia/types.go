@@ -32,7 +32,7 @@ type Meta struct {
 	PublishedAt    string // 必填，取自 <meta name="PubDate">，双时态的时间轴
 	ArticleID      string // 必填，一级幂等键；会随站点迁移而变，故需二级键兜底
 	CaliberVersion string // 必填，2015-01 | 2023-01 | 2025-01
-	Extractor      string // 必填，rule@v1 | rule@v2 | llm-fallback@v1
+	Extractor      string // 必填，取值域见 validExtractors（本行刻意不抄一份）
 	IngestedAt     string // 由 Save 填，RFC3339
 }
 
@@ -131,6 +131,23 @@ var periodEndMonth = map[string]string{
 // 应改为引用那张表。
 var validCaliberVersions = []string{"2015-01", "2023-01", "2025-01"}
 
+// —— 月报与社融独立报告的抽取器标识（M1c-3a 的 TASK-003，AD-1）——
+//
+// 命名与定义方式沿用 profiles.go 的 extractorV1 / extractorV2；定义在本文件而不是
+// 那里，只是因为 M1c-3a 这一 wave 里 profiles.go 被另一个任务占用。
+//
+// 为什么不让月报复用 rule@v1：requiredFields 是 completeness 的唯一依据。月报正文
+// **根本没有**国家外汇储备板块（55 篇实测只有 2 篇有），复用 rule@v1 会让每篇月报
+// 恒报「缺 fx_reserve / fx_rate」；社融独立报告复用 rule@v1 则恒报「缺 27 个字段」。
+// 那些字段在那种报告里不是缺失，是 absent-by-design——把 by-design 的缺席记成
+// failed，completeness 这个指标就废了。
+const (
+	extractorMonthlyV1 = "rule-monthly@v1" // 4/5 节月报，25 个字段
+	extractorMonthlyV2 = "rule-monthly@v2" // 7 节月报（含社融两节），52 个字段
+	extractorTSFStock  = "tsf-stock@v1"    // 社融存量独立报告，18 个字段
+	extractorTSFFlow   = "tsf-flow@v1"     // 社融增量独立报告，9 个字段
+)
+
 // validExtractors 是已定义的抽取器标识。
 //
 // llm-fallback@v1 到 M1c 才实现，先列入是因为 Meta 的取值域应当由数据模型定义，
@@ -138,7 +155,16 @@ var validCaliberVersions = []string{"2015-01", "2023-01", "2025-01"}
 //
 // 新增 rule@vN 时必须同步更新这里——那一步正是提醒去补 completeness 的 profile
 // （M1b-3）：两者不同步会让新模板的期次用错必填集，而那是静默的。
-var validExtractors = []string{"rule@v1", "rule@v2", "llm-fallback@v1"}
+//
+// 后四个是 M1c-3a 的 TASK-003 加的（AD-1），它们的必填集见 required.go。
+// ⚠️ 加完之后**还没有任何生产代码会返回它们**：detectExtractor 认出它们是
+// TASK-004、extractFields 消费是 TASK-006、Parse 分派是 TASK-007。取值域先行
+// 是刻意的——Meta 的取值域应当由数据模型定义，而不是由「当前实现到哪一步」
+// 定义（llm-fallback@v1 早就是这么处理的）。
+var validExtractors = []string{
+	"rule@v1", "rule@v2", "llm-fallback@v1",
+	extractorMonthlyV1, extractorMonthlyV2, extractorTSFStock, extractorTSFFlow,
+}
 
 // checkEnum 是取值域校验的共同形状：不在白名单里就报错，并把白名单**逐字**列进
 // 错误信息。
