@@ -1,0 +1,86 @@
+{
+  "id": "TASK-005",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "真跑标定并交付验收结论（人工填表边界写清）",
+  "description": "从原计划 T4 的 Step 9 拆出。**独立 reviewer 建议，Leader 采纳**：\n\n> Step 9 依赖一次真跑 + **人工填表** + 观察绊线转红，**当前形态下 T4 无法在无网络的验证环境里被判定**。\n\n⚠️ Leader 补的第二条理由：Step 9 含「人工填 `configs/hestia.yaml`」，而 Global Constraints 明写「**工具只产出依据，不改 `configs/hestia.yaml`**」——**那是人改不是工具改**，但 DoD 必须写清**归谁、算不算完成条件**。混在实现任务里，验证者面对「配置没填」时无法判定是缺陷还是待人类操作。\n\n## 产物：复用不重跑（人类 2026-08-24 确认）\n\n```\n--dir data/hestia-backfill-2026-08-14      452 文件，QA 全量复核合格\n--allow-incomplete                          该 manifest 无 completed_at\n```\n\n🔴 **那份 manifest 不是夭折的，是早于 M1c-1 TASK-010 引入该字段**（`CONTRACTS.md:964` 已注明）。\n⚠️ **唯一能证明「那趟跑完了」的是进程正常退出这个进程外事实**（Sprint 038 真跑 exit 0 / 8m24s / 451 请求），**而它不在产物里** —— 产物内部的一切闭合性检查（sha256、双向闭合、差集为 0）**在夭折的产物上同样全绿**（`CompletedAt` 的注释原文）。**报告不得声称已确认完整。**\n\n## 本任务的性质\n\n**它不写生产代码。** 交付物是一份**结论**：报告本身 + 对三个问题的回答 + 数字与其测量条件。⇒ 全部 `done_criteria` 用 `verify_by: manual|review`。",
+  "wave": 4,
+  "dependencies": [
+    "TASK-004"
+  ],
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./.arcforge/docs/06-acceptance/calibrate-report.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "criterion": "**真跑一次**：`go run ./cmd/atlas hestia backfill calibrate --dir data/hestia-backfill-2026-08-14 --allow-incomplete`，报告原文存档到 `.arcforge/docs/06-acceptance/calibrate-report.md`。\n\n**报告头部必须记下产出条件**（数字与测量条件同行落地）：产物目录**绝对路径**、manifest 的 `completed_at`（本次为**缺失**）/ `cutover` / `search_skipped_reason`、工作树 **HEAD 全 sha**、跑的时刻。",
+        "verify_by": "manual"
+      },
+      {
+        "criterion": "🔴 **回答三个问题，并把预期与实测的差异写出来**：\n\n1. **每个字段的 `n` 分别是多少？**\n   ⚠️ **这个差异已经裁决完了，别再当成开放问题**：计划的「78 / 10」错；reviewer 推算的「26 / 4」也错（它按 `parse.go:229` 拒 monthly 推的，没算上 3 个 Parse 失败）。**实测 22 / 4。**\n   ⇒ **本条的核心因此变了**：不是「去测出真值」，而是 **「全链路 `Calibrate` 打印的 n，是否等于直调 `collectSamples` 得到的 22 / 4」**。不等 ⇒ TASK-004 的装配层丢了东西。\n2. **失败/跳过清单各类分别几条？** 尤其：「monthly 不支持」几条？社融两篇是否确实**不在**其中？未归类标题几条？\n\n🔴 **对账用的独立锚（TASK-002 提供，jq/awk 直接数 `manifest.json` 的标题，不经任何实现）**：\n\n    218 篇 = 社融存量 69 + 社融增量 69 + 金融统计(monthly) 55 + 金融统计(非 monthly) 25 + 其他 0\n    受支持期次 Periods = 25\n\n⚠️ **这组数不是 TASK-002 的实现跑出来的**，dev 明确划了这条界线：两者**可能不一致**\n（例如 `backfillPeriodOf` 对某些标题返回 `!ok`，而 awk 规则认下来了）。\n⇒ **正因为它不由被验代码产生，它才是有效的锚**。本任务必须把**实得四格**与这组数逐项对账，\n**不一致就是发现**，一致才算这条 DoD 真被证。\n⚠️ 计划里的「53 条」与 Leader spawn prompt 里的「53+136≈189」**都已被实测推翻**\n（实测 `Unsupported = 193 = 69 存量 + 69 增量 + 55 monthly`）—— 若你在任何地方读到那两个数，\n那是回流不是证据。\n\n🔴 **第二个基线：实现在 `6bb60b4689…` 上的实际输出**（Leader 直跑 `collectSamples` 读出，`AllowIncomplete=true`）：\n\n✅ **已在 `37735e9`（含 TASK-003 + TASK-004）复核，逐位一致、零漂移** —— 即 TASK-003 加 `Records`、TASK-004 加 `Calibrate` **都没有改变 `collectSamples` 的输出**。⇒ 这既让下面这组数在你真跑时仍然可用，也是「加性扩展是真的加性」的一条硬证据。\n⚠️ **但你真跑时的 master 可能又前进了** —— 若对不上，**先查 `6bb60b4..HEAD` 里有没有动 `internal/hestia`，再决定是发现还是漂移**。\n\n⚠️ **这个不是「独立锚」，别把它当成独立锚用** —— 它**就是这套实现本身**跑出来的。\n它能回答的是「**TASK-004 的装配层有没有在 `6bb60b4` 之后弄丢/改变什么**」（回归基线），\n**不能**回答「这套实现算得对不对」。\n⇒ 回答后者的只有上面那个 **awk 锚**（不经任何实现）以及**逐条人工抽查**。\n（这是「**锚的独立性是分层的：跨层的锚才算锚**」——两份数据若共用同一套解析代码，\n那套代码错了它们会**一起错、而且一起自洽**。）\n\n    Periods=25  Failures=3  Unsupported=193  Unclassified=0  FetchFailed=0  Warnings=1\n    小计 218 = len(articles)，无一篇遗失\n    n=22 的字段数 = 27（非社融）   n=4 的字段数 = 27（社融）\n\n⚠️ 🔴 **`Failures` 实测是 3，不是 0** —— `discoveries/TASK-002.json` 给下游的预期写的是 0，**那条是错的**。\n三条都是真实的上游 `Parse` 失败（验证者绕开 calibrate 直调 `Parse` 复现，Leader 独立复跑一致）：\n\n| 期次 | 错误 |\n|---|---|\n| `2019-12` | `loan scope anchor 企（事）业单位贷款 not found` |\n| `2020-09` | `unrecognized layout: 5 sections`（**`q1_q3`**） |\n| `2022-09` | `unrecognized layout: 5 sections`（**`q1_q3`**） |\n\n⇒ 后两条同形，说明 M1b-4b 接 `q1_q3` 抽取时用的两份快照**不含这个形态**\n（同 [[test-corpus-representativeness]]：样本正好落在少数派上）。\n⇒ **本任务该查的是「`Failures` ≠ 3」或「三条不是这三个期次」**，不是「≠ 0」。\n3. **有几个字段 `HasSuggestion=false`？** 分别因为什么（n<3 / 无样本）？\n   ⚠️ 若社融字段真的只有约 4 个样本，`minSamplesForSuggestion=3` **恰好放行** ⇒ 会给出由 4 个点构成的建议区间 —— **正是计划自己说的「过窄的建议比没有建议更危险：它看起来是个结论」**。**这一条要单独判断并写结论。**",
+        "verify_by": "manual"
+      },
+      {
+        "verify_by": "manual",
+        "criterion": "🔴 **五条派发前预检发现（dev-m1c2-b 只读预检，Leader 逐条复核）——这些不是可选提示，是本任务的验收内容**\n\n## ① 🔴 环比一节**必然整节是 `—`**，这是预期结果不是缺陷\n\n**Leader 直跑 `collectSamples` 核实**（`9c74a13`）：\n\n    tsf_stock 总样本 = 4     分档 = {annual:1, h1:1, q1:1, q1_q3:1}\n    ⇒ 无一档有 >= 2 期相邻样本 ⇒ stockContinuityRates 每档都 continue ⇒ 整节打印 `—`\n\n成因：`tsf_stock` 只在 cutover(2025-09) 之后的 v2 期次里被解析（4 期：2025 前三季度 / 2025 年报 / 2026 一季度 / 2026 上半年），而这 4 期的 `period_type` **两两不同**。\n\n⇒ **第 4 问（必答）**：**环比一节有没有任何一档出数？若没有（预期如此），必须在报告与结论里写明：本次标定对 `StockContinuityMax` 分档给不出任何实测证据，两档取值（monthly 0.02 / 其余 0.15）仍是未经真实数据验证的占位数。**\n\n⚠️ **不写会往两个相反方向出错**：dev 看到整节 `—` 当成 TASK-003/004 的缺陷去追（可能 reject 一个正确实现）；或者归档时「标定做完了」这句话**顺带把分档也算成有据可依**。\n\n✅ `validate.go:343` 那条注释 **TASK-001 已经写对了**（「两档都仍是占位数……**没有**用真实数据标定取值」），**本任务不要去改它**。\n⚠️ 但它说「标定由 M1c-3 拿回填序列做」——**按本次语料，M1c-3 也做不到**，除非先支持解析社融存量报告（v1 期次的 `tsf_stock` 在那里）。**这条写进结论供 M1c-3 交接。**\n\n## ② `completed_at` / `cutover` / `search_skipped_reason` —— **三项全都缺失**，不只第一项\n\n**Leader 复核 manifest 顶层键**：`articles / failed / from / only_in_index / only_in_search / pages_scanned / scanned_at / search_pages_scanned`。\n⇒ `has(\"completed_at\")=false`、`has(\"cutover\")=false`、`has(\"search_skipped_reason\")=false`、`has(\"reconcile\")=false`。\n\n首版 DoD **只给 `completed_at` 标了「本次为缺失」**，读起来像另外两个是有的 ⇒ dev 会去找、找不到。\n⇒ 报告头部按此记：**三项均缺失**；`cutover` 缺失按 `CONTRACTS.md:964` 记「按 2025-09 理解」；`search_skipped_reason` 缺失 ⇒ **那一轮做过交叉校验**（字段在不在本身就是信号）。\n✅ 顺带：`Warnings=1` 的成因确认为 **`reconcile == nil` 单独命中**（其余三种触发源均不满足），与基线自洽。\n\n## ③ 🔴 「报告头部」= **存档 `.md` 的头部**，**不要求 CLI 打印**\n\n**歧义消解**：`renderCalibrateReport` 的头部只有一句「标定报告：尝试解析 %d 期」；**产物目录绝对路径 / cutover / HEAD 全 sha / 跑的时刻**四项 `CalibrateResult` 结构上就没有，渲染函数拿不到（与 TASK-004 `boundary[1]` 对 `AllowIncomplete` 的论证**完全同形**），而 **TASK-004 的 DoD 没有任何一条要求打印这六项**。\n\n⇒ 按「CLI 打印」读，本任务**结构上不可满足**（那时 TASK-004 的 `writes` 已关，而本任务 `writes` 只有一个 md）。\n⇒ **按「存档 `.md` 的头部」读，完全可行**：六项全部在真跑之外拿得到（`pwd` / `jq` 读 manifest / `git rev-parse HEAD` / `date`）。**照后者做。**\n\n## ④ 第 3 问改写：答案已确定，该查的是**判断题**不是计数题\n\n`minSamplesForSuggestion = 3`（`calibrate_report.go:32`），而 22 ≥ 3 且 4 ≥ 3 ⇒ **54 个字段全部 `HasSuggestion=true` ⇒ 「几个 false」的答案是 0**。\n⇒ **该查的是「`HasSuggestion=false` 的字段数 ≠ 0」**（≠0 就是发现）。\n⇒ **真正开放的那半留住**：**由 4 个点构成的社融字段建议区间，要不要采信？** 计划自己写过「**过窄的建议比没有建议更危险：它看起来是个结论**」——正指这里。这是判断题，请给出你的判断与理由。\n\n## ⑤ 🔴 补一条**跨层**抽查（Q1 目前没有任何跨层锚）\n\nawk 锚锚的是**四格计数**，锚不了 `n=22/4`，更锚不了 54 个字段的**取值**。而 Q1 要求的「全链路打印的 n == 直调 `collectSamples` 的 22/4」**是同一套实现的两次运行** ⇒ 跨层无锚。\n\n⇒ **最小抽查（必做，约 5 分钟）**：从报告里挑 **1 期 × 2 个字段**，回到 `data/hestia-backfill-2026-08-14/articles/<id>.html` **原文核对数值**。\n💡 **2025 年报那期最省事**：`golden_test.go` 的 `golden2025` 就是同一篇的逐字段期望值，**由 M1b 独立写死、不由 calibrate 产生** ⇒ 现成的跨层锚。\n\n## ⑥ 中转文件不要落在仓库里\n\n真跑本身不会在仓库落任何文件（`go run` 产物进 GOCACHE；`data/` 整个在 `.gitignore:64`；`cmd/atlas` 无 `PersistentPreRun`、`NewStore` 不在 `backfill` 分支下 —— 三条均预检读出、Leader 采信）。\n⚠️ **唯一现实风险是你自己**：把 CLI 输出重定向成仓库里的中转文件（如 `report.txt`）⇒ 撞 scope 漂移。**中转文件放 `/tmp` 或 scratchpad。**"
+      }
+    ],
+    "boundary": [
+      {
+        "criterion": "🔴 **`--allow-incomplete` 的放行说明必须出现在报告里，且措辞不得声称已确认完整**。\n验收：报告中该说明的原文抄进交付结论；同时确认**有 `completed_at` 的 manifest 不会打印它**（TASK-004 的成对用例已覆盖，此处只需确认真跑输出与之一致）。",
+        "verify_by": "review"
+      },
+      {
+        "verify_by": "review",
+        "criterion": "🔴 **本任务全程在主仓库执行，不要建 worktree。**（Leader 实测坐实，非推测）\n\n`data/` 在 `.gitignore:64` 里 ⇒ **`git worktree` 不会带 gitignore 的文件**：\n\n    主仓库    data/hestia-backfill-2026-08-14/articles/  →  218 个\n    worktree  同路径                                     →  0 个（目录都不存在）\n\n⇒ 在 worktree 里跑 `--dir data/hestia-backfill-2026-08-14` 会得到「目录不存在」，\n**而那不是发现，是环境**。\n\n⚠️ **这条是实撞出来的**：`test-m1c2-v1` 在验 TASK-004 时报「本机没有 backfill 产物目录，\n`data/hestia-backfill*` 不存在」——**它的观察在它的 worktree 里为真，在这台机器上为假**。\n（同本 sprint 反复出现的形状：**观察在作出它的作用域内为真，被推广到了作用域之外**。）\n\n**另有两条独立理由指向同一个结论**：\n1. 本任务是 docs-only，**不改任何代码** ⇒ 建 worktree 没有隔离收益；\n2. 产物要经写通道落到 `.arcforge/docs/` 下，而**写通道在 linked worktree 里是无条件 DENY**\n   （判别式：`git rev-parse --git-dir` ≠ `--git-common-dir`）。\n\n⇒ **三条理由同向：主仓库执行。**\n⚠️ 若你出于别的原因确实需要 worktree，`--dir` 必须写**主仓库的绝对路径**\n（`/Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14`），\n且写通道调用仍必须 `cd` 回主仓库。"
+      }
+    ],
+    "error_handling": [
+      {
+        "criterion": "**人工填表的边界写清**（本任务不做，但必须写明）：\n- 「把区间填进 `configs/hestia.yaml` 的 `magnitude_ranges`」是**人类动作**，**不属于本 sprint 任何任务的完成条件**（Global Constraints：工具只产出依据）；\n- 「确认绊线变红」同理，是人类在填表之后的验证动作。\n⇒ 交付结论里列出**移交给人类的动作清单**，每条写明依赖哪份产出。\n⚠️ 不写这一节的话，下一个读 sprint 归档的人会以为标定做完了区间就已经生效了。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "criterion": "⚠️ **一切自证数字在最后一次改动之后统一重采**；**统计证据用 `jq`/`python3`/`LC_ALL=C`，禁裸 `sort -u`**（macOS 的 `sort` 默认 locale 把任意两个汉字判相等，对本语料静默少 25%）。\n⚠️ **本任务不改生产代码** —— 交付物是结论。若真跑暴露出实现缺陷，**走 `rejected` 退回 TASK-004，不要在本任务里顺手改**。",
+        "verify_by": "review"
+      },
+      {
+        "verify_by": "review",
+        "criterion": "🔴 **交付顺序：推荐先 `transition dev_done`、后 `git commit`。**\n\n⚠️ **订正（预检推翻 Leader 的首版断言）**：首版写「**反了没有补救路径**」并标注「Leader 派发前核实，非转述」——**那个标注是假的**：Leader 读了 `task-completed.sh:77-81` 的 docs-only **判定**，**没读 `:329-356` 的 docs-only 分支**。\n\n**实际（预检读出、Leader 复核原文）**：`DOCS_SOURCES = CHANGED_FILES ∪ COMMITTED_MINE`（**无下界**）⇒ **已提交的改动照样算「范围内有变更」**。`:349` 的注释还点名了这件事：「W1 侧包含不足会让 **TASK-005 修的死锁**复发」——**那个死锁钩子已经为它改过了。**\n\n本任务是**合法的 docs-only 任务**（5 条 done_criteria 全为对象且 `verify_by ∈ {manual,review}`，`task-completed.sh:79-81` 的判据）⇒ **跳过整个 Go 门禁**，改为校验「**声明范围内存在未提交变更**」（`git diff HEAD` + `--staged` + `ls-files --others`）。\n\n🔴 **真正的坑挪位了，而且更窄**：`COMMITTED_MINE` 的判据**锚死在提交主题前缀** `^[a-z]+\\(TASK-005\\):` 上。\n\n⇒ 写成 `chore: 存档标定报告` 或 `docs(M1c-2): …` ⇒ **判据失效 ⇒ BLOCKED**（钩子刻意「宁可漏放行不误放行」）。\n⇒ **补救是 `git commit --amend` 改写主题，仅限未推送。** ⚠️ **不要 `reset`**——改写共享历史是禁止的。\n\n**所以**：若你不小心先提交了，**你不是不可救**，只要主题严格是 `docs(TASK-005): …` 这一形态。\n\n**正确顺序**：写报告（**经写通道**）→ 自查 → `transition dev_done` → **然后才** `git commit`。\n\n🔴 **写报告必须经写通道，不能直接 Write/Edit**（`.arcforge/` 被 write-guard 拦）：\n\n    ARCFORGE_TOKEN=<你的> bash .claude/hooks/arcforge-write.sh --as <你的实例名> \\\n      doc docs/06-acceptance/calibrate-report.md < <报告文件>\n\n⚠️ `doc` 子命令**只接受 `docs/` 下的相对路径**（不是 `.arcforge/docs/...`，也不是绝对路径），且是**全量覆盖写**（无 `--append`）。\n\n⚠️ **`.arcforge/` 是漂移检查的唯一豁免区** ⇒ 你在那里的写入对漂移检查隐形，这**不影响 docs-only 门禁**（它查的是 `writes` 范围内有没有未提交变更，不是漂移），但意味着**你无法靠漂移告警发现自己写错了地方**。落盘后用 `ls -la` + `head` 直读核实。"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-25T08:46:40Z"
+  },
+  "assigned_to": "dev-m1c2-b",
+  "questions": [
+    {
+      "q": "TASK-005 的 writes 指向 .arcforge/docs/06-acceptance/calibrate-report.md，而 write-matrix 的 rules 里 docs/06-acceptance/* 的合法写者是 [\"leader\"]。我按 DoD 给的命令 (doc docs/06-acceptance/calibrate-report.md) 执行被 DENY：「dev-m1c2-b 无权写…(合法写者: [\"leader\"])」。报告全文已备好（515 行 / 62410 字节，sha256 94c7a8a8f45010cc2f524fe9e0c017d844770971e545879b3badf04caf1a0400），路径见 inbox 消息。请二选一：(a) 由 Leader 经写通道落盘该文件（我已核实 docs-only 门禁只看文件在不在、不看谁写的：CHANGED_FILES 含 untracked 且不过滤 .arcforge/，path_under_scope 精确匹配该 writes 条目）；(b) 把 writes 改到某个 dev 可写的路径。运行时矩阵只读，(c) 改矩阵不在本 sprint 的选项内。",
+      "asked_at": "2026-08-24T23:58:00Z",
+      "answer": "【裁决 · leader · 2026-08-25】\n\n**采纳方案 (a)：已由 leader 落盘。** 这是 Leader 的 DoD 缺陷 —— 我把 writes 设成\n./.arcforge/docs/06-acceptance/calibrate-report.md 时，没有查 dev 能不能写那个路径。\n矩阵 docs/06-acceptance/* → [\"leader\"]（我已核实原文），所以这条 writes 从一开始就\n不是 dev 能满足的。你的预检没查到不是失误：你当时声明的搜索空间里没有 write-matrix.json，\n而那正是唯一能看出这件事的地方。\n\n**落盘核实（内容判据）**：\n  .arcforge/docs/06-acceptance/calibrate-report.md\n  515 行 / 62410 字节 / sha256 94c7a8a8f45010cc2f524fe9e0c017d844770971e545879b3badf04caf1a0400\n  与你 scratchpad 源文件逐位相同；git ls-files --others 可见（未被 gitignore）\n\n**你对门禁的三条读法我逐条复核，全部成立**：\n  - CHANGED_FILES（task-completed.sh:246）= git diff --name-only HEAD ∪ --staged ∪\n    ls-files --others --exclude-standard，**不过滤 .arcforge/**（那个 grep -vE '^\\.arcforge/'\n    只加在 ACTUAL_FILES 即漂移侧）；\n  - docs-only 分支（:329）用的正是 CHANGED_FILES ∪ COMMITTED_MINE；\n  - path_under_scope 两侧都剥 ./ ⇒ 与 writes 条目精确匹配。\n⇒ 文件在不在决定门禁过不过，谁写的不影响。\n\n**方案 (b) 否掉**，理由与你一致：dev 可写路径里没有一个是「验收报告」该待的地方。\n**方案 (c)（改矩阵）不在选项内**：运行时资产对全体 agent 只读，含我。\n\n**我读过全文才落的盘** —— 落盘一份自己没写的交付物之前必须先读，这不是形式。\n§1 结论摘要、§3 跨层抽查的非循环论证、§4「标定做完 ≠ 区间已生效」那句，都核过。\n\n**你现在**：转回 in_progress（--expect-epoch 1）→ 自查 → dev_done → 写 discovery + 挂指针\n（两个动作）→ 才叫我派验。\n\n⚠️ discovery 里请记一条 provenance：**报告内容由 dev-m1c2-b 产出，落盘动作由 leader 执行\n（矩阵限制），不是交接也不是返工，rework_count 仍为 0**。否则后人从 doc 写入的 by=leader\n反推会以为报告是 Leader 写的。"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "204a0a816c9bcc3002880f40a7b0fdfd8b435b77",
+    "discovery_sha256": "c13e68edfe020879085f0a99174612608202b03fb0fa667ab33286dcfa4fa5a1",
+    "at": "2026-08-25T00:05:23Z"
+  },
+  "verifier": "test-m1c2-v1"
+}

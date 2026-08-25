@@ -1,0 +1,211 @@
+{
+  "task_id": "TASK-003",
+  "title": "分布统计与报告渲染（纯函数，不碰文件系统）",
+  "owner": "dev-m1c2-a",
+  "git": {
+    "baseline": "6bb60b4689eaecc8cd6979d17cd3c2b4f2164ae7",
+    "delivered_branch_sha": "c1147fe475a90689e212b0683f9f0cb9d7a223c9",
+    "branch": "task/TASK-003-m1c2",
+    "merged_into_master": "9c74a13ee2a8072723da7ce057cf58d29d690386",
+    "note": "全 sha，不写 HEAD/分支名。delivered_branch_sha 是分支上的最后一个 commit；merged_into_master 是 Leader 的 merge commit（9c74a13）。验证者应验后者。"
+  },
+  "key_findings": [
+    "【读代码读出来的】DoD 内部矛盾：functional[1] 钉死 renderCalibrateReport(w io.Writer, res *CalibrateResult) error ⇒ 数据只能来自 res，而 CalibrateResult.Samples 是 map[string][]float64，**不带 period 也不带 period_type**（calibrate.go 原第 157-159 行只取 obs.Values，obs.Meta 就在手边被丢弃；全文 PeriodType 仅出现在 unsupportedPeriodType 的标题预判里，与样本无关）⇒ functional[2]（按 period_type 分组/标注）与 functional[3]（tsf_stock 逐 period_type 的相邻期环比）**无数据可依**。已落 questions[0]，Leader 裁决批准方案 A（加性扩展 Records），权威版本在 docs/03-progress/plan.md。",
+    "【跑出来的】报告类断言天生高危：所有断言都在同一份文本上做 Contains。本任务实撞一次真冒名——环比一节标题原写作「tsf_stock 相邻期环比变化率（按 period_type 分档）」，**行首恰好等于字段名** ⇒ 按列解析把标题行也当成该字段的数据行，reportRow 的「恰好 1 行」断言报「实际 2 行」。**处置是把字段名挪出行首（消掉共有词本身），不是在断言那边绕开** —— 绕开只会让下一个按列读报告的人再撞一次。⚠️ 这次是**守卫先逮住的，不是消融**。",
+    "【跑出来的】机制核实（我自己读源码，未采信转述）：validator.go:104 的 inFlightStatuses = {assigned,in_progress,dev_done,verifying,blocked_clarification}，**不含 verified** ⇒ verified 任务的 writes 路径已释放，可被后续任务声明。store_test.go:399 TestPackageExposesNoWriteFunctions 的收录规则只收 *ast.FuncDecl 且导出；导出接收者上的导出方法记作 Type.Method ⇒ **导出 struct 类型安全，导出方法不安全**（该文件不在本任务 writes 里，撞上无 dev 侧出路）。",
+    "【推出来的，已配断言】「相邻期」必须是**排序后相邻的两个样本**，不是「相差固定间隔」。真实序列有洞：2024 年只有年报/上半年/前三季度、无一季度；另有 3 篇 Parse 失败（2019-12 / 2020-09 / 2022-09）各挖一个。按固定间隔配对会**静默丢掉跨洞的那些对**，只让 n 悄悄变小、分布悄悄变窄，然后有人拿这份变窄的分布去定阈值。消融 B3 证实：改成「必须相差一年」⇒ 红 3 条含 PairAdjacentSamplesAcrossGaps。",
+    "【跑出来的】分位数不能写 math.Ceil(0.05*float64(n))：0.05 与 0.95 都不可精确表示，n=100 时**碰巧**舍入到整数上，换个 n 就可能差一名 —— 而**差一名不会有任何东西报错**，只会让报告上的分位数悄悄错一格。改用整数上取整 (pct*n+99)/100。",
+    "【推出来的，已配断言】computeFieldStats **不得就地排序**入参：入参是 Samples 的切片本身，其顺序是期次升序，functional[3] 的环比正依赖它。就地排序会毁掉它，而**本函数自己的全部断言照样绿** —— 受害的是另一个函数，跨函数副作用在本函数的测试里结构上不可见。"
+  ],
+  "decisions": [
+    {
+      "decision": "CalibrateResult 加性扩展 Records []SampleRecord{Period, PeriodType string; Values map[string]float64}，Samples 一字不改；且 **Samples 改为由 Records 派生**（samplesFromRecords）",
+      "rationale": "加性 ⇒ TASK-002 的 27 条 CollectSamples 测试全部保持全绿（顺序也不变：items 按期次升序 ⇒ Records 升序 ⇒ 每字段切片升序）。派生而非各写一份 ⇒ 同一事实不留两个副本，改一处不会让另一处静默过期（Leader 从 store_test.go 的「期望项数由 len(want) 生成、不手写」那条教训转述而来，本任务生产侧与夹具侧都照此办理）。"
+    },
+    {
+      "decision": "functional[2] 选「每行标注样本来自哪几种 period_type 及条数」（annual×3,h1×2,q1×1），而不是按 (field, period_type) 全分组",
+      "rationale": "DoD 明写「不要改 MagnitudeRanges 的类型，本条只要求让填表的人看见这件事，不要求工具替他解决」。全分组会产出 54×5 行，且 MagnitudeRanges 只有 field 一维、消费不了。标注是「至少」那一支，成本最低而信息到位：*_ytd 是累计量，q1（3 个月）与 annual（12 个月）量纲不同，混池 min/max 横跨整个范围 + 余量 ⇒ 宽到拦不住任何东西的区间。"
+    },
+    {
+      "decision": "建议区间的上界常量 K=3 **写死在测试里**，且 3 是加性规则的精确值而非拍脑袋余量",
+      "rationale": "(max+span)-(min-span) = 3*span。写死在测试而不是从实现取，因为它要挡的正是「实现自己说了算」那一类：只断 SuggestMin<Min && SuggestMax>Max 时，±MaxFloat64 两条全绿。消融 A3 证实——±1e308 下 SuggestMin<=Min 那条**没红**（-1e308 确实 <= -8200），只有 K 上界红。⚠️ 夹具取值必须是精确可表示的整数，否则精确 <= 会因 1 ULP 而 flaky，而那种红看起来像真缺陷。"
+    },
+    {
+      "decision": "环比一节的标题刻意不以字段名开头",
+      "rationale": "见 key_findings 第 2 条。这是「消掉共有词本身」而非「在断言那边绕开」的一次实践。"
+    },
+    {
+      "decision": "n<3 的规则对环比一节**照常适用，不为「样本本来就少」破例**",
+      "rationale": "DoD 明令。预期样本本就少（Parse 拒绝 monthly ⇒ monthly 档零样本；年度间隔档个位数），正因为少才更不能给一个靠两三个点撑起来的建议 —— 过窄的建议比没有建议更危险，它看起来是个结论。消融 B5 证实：破例 ⇒ 只红 IncludesStockContinuitySection。"
+    },
+    {
+      "decision": "不给 FieldStats / SampleRecord 添加任何导出方法",
+      "rationale": "store_test.go:399 断言包的导出面**精确相等**，导出接收者上的导出方法会被记作 Type.Method 而让它变红；而该文件不在本任务 writes 里 ⇒ 撞上改不了，且 dev 侧无出路（补进 writes 是假声明）。正确处置是登记，但那属于 TASK-004 的范围。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/calibrate.go",
+    "internal/hestia/calibrate_report.go",
+    "internal/hestia/calibrate_report_test.go"
+  ],
+  "scope": {
+    "declared_writes_after_update": 3,
+    "actual_changed": 3,
+    "drift": "无。writes 在动手**之前**经 update 补入 calibrate.go，审计行 changes=[{key:writes, added:[\"./internal/hestia/calibrate.go\"]}]",
+    "go_mod_or_sum_touched": false,
+    "scope_mutex": "validator 退出码 0。calibrate.go 亦在 TASK-004 的 writes 里，但 004 是 wave3 且依赖 003 ⇒ 不同时在途"
+  },
+  "interfaces_exposed": [
+    "SampleRecord{Period, PeriodType string; Values map[string]float64} —— 包内导出**类型**（无方法）。Period 是 \"YYYY-MM\"，字典序即时间序",
+    "CalibrateResult.Records []SampleRecord —— 逐期原始观测，带 Meta。**Samples 现由它派生**，两者内容恒一致",
+    "samplesFromRecords(recs) map[string][]float64 —— 包内小写，保序摊平",
+    "computeFieldStats(field string, samples []float64) FieldStats —— 包内小写。nearest-rank 不插值；**不就地排序入参**",
+    "FieldStats{Field; N; Min,P5,Median,P95,Max; SuggestMin,SuggestMax; HasSuggestion} —— 导出**类型**（无方法）。SuggestMin/Max 仅在 HasSuggestion 为 true 时有意义",
+    "renderCalibrateReport(w io.Writer, res *CalibrateResult) error —— 包内小写。不碰文件系统/网络",
+    "stockContinuityRates(recs []SampleRecord) map[string]FieldStats —— period_type → 相邻期环比变化率分布",
+    "报告的列格式：字段表 = field n 期次类型 min p5 median p95 max 建议区间（9 列，空白分隔，**每格内不含空格**，可被 strings.Fields 按列解析）；环比表少「期次类型」一列，行首是 period_type"
+  ],
+  "verification": {
+    "suite": "全仓 go build / go vet / go test ./... -count=1 退出码均为 0，64 个 ok 包；internal/hestia + cmd/atlas 两包 -v: PASS 1220 / FAIL 0（本任务新增 23 条）",
+    "task_002_unaffected": "TASK-002 的 CollectSamples 系列 27 条全绿（Samples 改为派生后内容与顺序均不变）",
+    "no_filesystem": "grep -nE 'os\\.(Open|ReadFile|WriteFile|Stat)|filepath\\.|net/http' calibrate_report.go 为空（io.Writer 由调用方注入，不计）",
+    "gofmt": "两条判据均过：① 本任务 3 个文件 gofmt -l 为空；② 全仓 gofmt -l 输出与 base(6bb60b4) **逐字节一致**（28 个存量文件，无新增）",
+    "coverage": {
+      "method": "NumStmt 加权；背对背两轮同轮负载；两棵树各自在自己的源码树里渲染 profile；两轮数字逐字节一致",
+      "internal/hestia": {
+        "base_6bb60b4": "95.241% (1501/1576)",
+        "delivered_c1147fe": "95.312% (1606/1685)",
+        "verdict": "上升"
+      },
+      "warning": "⚠️ 基线是 6bb60b4。**不可与 TASK-001 报的 94.874% 相比** —— 那是 fba0feb→fa7c70f 那一对，分母不同（TASK-002 的代码之后才进入本包）。绝对覆盖率值的分母属于整棵树，不属于某次改动。",
+      "baseline_tree": "git worktree add --detach ../wt-T003-base 6bb60b4689eaecc8cd6979d17cd3c2b4f2164ae7"
+    },
+    "numstat": "51/3 internal/hestia/calibrate.go；336/0 calibrate_report.go；463/0 calibrate_report_test.go（取自最终 HEAD，与交付物同源）",
+    "ablations": [
+      {
+        "id": "A1",
+        "mutation": "n 列恒打 0",
+        "red": [
+          "TestRenderCalibrateReportShowsPerFieldSampleCount"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "functional[1] n 列不可省；**第一次跑红 2 条判为不达标**，遂把 n 收归单一测试独占（一个消融红几条，本身就是它精确度的度量）"
+      },
+      {
+        "id": "A2",
+        "mutation": "加性余量换成乘性 min*0.5/max*1.5",
+        "red": [
+          ":117 SuggestMin<=Min —— \"-4100\" is not less than or equal to \"-8200\""
+        ],
+        "not_red": [
+          "上界 K 那条"
+        ],
+        "proves": "boundary[0] 负值字段上乘性会把实测最小值排除在外，DoD 描述的失效原样复现"
+      },
+      {
+        "id": "A3",
+        "mutation": "建议区间改成 ±1e308",
+        "red": [
+          ":123 上界 K —— \"+Inf\" is not less than or equal to \"463800\""
+        ],
+        "not_red": [
+          "🔴 :117 的 SuggestMin<=Min **没红**（-1e308 确实 <= -8200）"
+        ],
+        "proves": "**上界断言是唯一挡得住「建议任何值都合法」的那条**，reviewer 的建议由推理变成观察"
+      },
+      {
+        "id": "A4",
+        "mutation": "n<3 判据换成 span>0",
+        "red": [
+          "TestSuggestionWithheldBelowMinSamples/n=2（两值不同）"
+        ],
+        "not_red": [
+          "n=0/1/3 三格"
+        ],
+        "proves": "boundary[1] 夹具用两个**不同**的值才挡得住这种写法（用 [100,100] 则 span=0，错误实现照样绿）"
+      },
+      {
+        "id": "A5",
+        "mutation": "遍历 map（随机序）再补零样本字段 —— 54 个一个不少，只是序错",
+        "red": [
+          "TestRenderCalibrateReportFollowsFieldOrder"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "functional[1] fieldOrder 全序；**连跑 6 次 6 次都红**，确认非 flaky（两两比较式断言才会 flaky）"
+      },
+      {
+        "id": "B1",
+        "mutation": "期次类型只列种类、不给条数",
+        "red": [
+          "TestRenderCalibrateReportAnnotatesPeriodTypeMix"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "functional[2] 条数是信息的一部分：只说「混了 annual 和 q1」看不出混了多少"
+      },
+      {
+        "id": "B2",
+        "mutation": "环比不按 period_type 分组，全部混在一起算",
+        "red": [
+          "Grouped",
+          "PairAdjacentAcrossGaps",
+          "SkipZeroDenominator",
+          "IncludesStockContinuitySection"
+        ],
+        "not_red": [
+          "字段表相关全部"
+        ],
+        "proves": "functional[3] 分档。🔴 **订正（Leader 追问后我回头逐条查了断言消息）**：红 4 条**不是**「四个不同性质各被破坏」，而是**同一个近因**——分组键没了，`got` 里只剩 \"all\"，于是另外三条测试对 `got[\"annual\"]` 的取值全部拿到零值 FieldStats。实测断言消息：`:401` map does not contain \"annual\"；`:424` / `:441` 都是 N 取到 0；`:459` 报「字段 annual 应当恰好占一行，实际 0 行」。⇒ **B2 只证明了「分档」这一条性质**，它的击杀数 4 高估了它的鉴别力。我原先写的理由「混池会同时破坏这四条性质」是**推理，且是错的**。「跨洞配对」与「零分母」两条性质分别由 B3 / B4 独立证明（见下）。"
+      },
+      {
+        "id": "B3",
+        "mutation": "改成「期次必须相差一年」配对",
+        "red": [
+          "Grouped",
+          "PairAdjacentSamplesAcrossGaps",
+          "IncludesStockContinuitySection"
+        ],
+        "not_red": [
+          "SkipZeroDenominator"
+        ],
+        "proves": "functional[3]「相邻期 = 排序后相邻的两个样本」；跨洞的对被静默丢掉正是要防的坑。🔴 **同样订正**：红 3 条也是**同一个近因**——2019→2021 那一对被丢掉 ⇒ annual 的 N 由 2 变 1，三条测试都在读这个 N。实测断言消息：`:403`「annual 三期 ⇒ 两个相邻对」、`:424`「跨洞的 2019→2021 也是一对相邻样本」、`:460`「annual 两个相邻对」。⇒ B3 确实**只**证明「跨洞配对」这一条，且 `:424` 是专门为它写的那条断言 —— 结论成立，但击杀数 3 同样不构成「三个性质」。"
+      },
+      {
+        "id": "B4",
+        "mutation": "零分母不跳过",
+        "red": [
+          "TestStockContinuityRatesSkipZeroDenominator"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "Inf 会污染整段分位数，且报告上的 +Inf 会被读成「这个字段疯了」"
+      },
+      {
+        "id": "B5",
+        "mutation": "环比一节为「样本本来就少」破例，n<3 也给建议",
+        "red": [
+          "TestRenderCalibrateReportIncludesStockContinuitySection"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "DoD 明令不得破例"
+      }
+    ],
+    "ablation_hygiene": "变异一律作用在本 dev 的隔离 worktree 内；每例落盘前经 go build 有效性闸（A2/A3 第一版因未使用变量/缺 import 编译不过，当场作废重做，未记 KILLED）；每例复原后校验 git status 与 sha256。⚠️ B3 的 harness 报「复原失败」是**假警报**——我分两步变异（先改 import 再改逻辑），快照取在 import 改动之后；已用 `git diff HEAD --stat` 为空 + 文件 sha256 与 HEAD 逐位相同 + strconv 零残留三重核实真实已复原。",
+    "self_measurement_note": "以上全部数字在最后一次改动 c1147fe 之后统一重采，未跨时点拼接。",
+    "ablation_kill_count_caveat": "🔴 **击杀数不等于性质数**（Leader 在 dev_done 之后追问，我回头逐条查了断言消息才发现）：B2 的 4 条红与 B3 的 3 条红各自只有**一个近因**，多出来的红是别的测试共用了同一个查表键 `got[\"annual\"]`。真正做到「一个变异只红一条、且红在为它写的那条断言上」的是 A1 / A5 / B1 / B4 / B5；A2 / A3 是同一测试内的不同断言（且 A3 下 A2 那条**没红**，这才证明了上界断言的不可替代）。⇒ 这与本任务自己立的判据（「一个消融红几条，本身就是它精确度的度量」）一致：**按那条判据，B2/B3 的击杀数是高估，不是加分。** 结论未变（两条性质分别由 B3、B4 的目标断言证明），变的是**举证强度**：原先写的「混池会同时破坏这四条性质」是推理且错误，已删。"
+  },
+  "carryover_for_T4_T5": [
+    "TASK-004 若新增导出入口 Calibrate，**必须同时登记进 store_test.go 的 want 列表** —— 那个断言是**精确相等**，加一个也红。store_test.go 已在 TASK-004 的 writes 里（Leader 预检时补的）。Parse / DefaultThresholds / Store.Preceding 三段是现成的登记范本。",
+    "报告是**按列**可解析的（strings.Fields），每格内不含空格（建议区间写作 [a,b] 无空格、期次类型写作 annual×3,h1×2）。若 T4/T5 要机器读这份报告，靠列位而不是 Contains；**且注意别让任何新增标题行以字段名或 period_type 名开头**，否则会被按列解析当成数据行（本任务实撞一次）。",
+    "环比一节现在是 TASK-001 那两个默认阈值（monthly 0.02 / 其余 0.15）**唯一可能的经验依据**。M1c-3 拿真语料跑出来后，若 n 仍 <3，报告会打 n<3 而不给建议 —— 那时**不要为了拿到一个数而放松规则**，正确处置是承认样本不足。",
+    "真语料上 monthly 档会是**零样本**（parse.go 的 checkPeriodTypeSupported 显式拒绝 monthly），⇒ 环比一节不会出现 monthly 行。这不是缺陷。"
+  ]
+}

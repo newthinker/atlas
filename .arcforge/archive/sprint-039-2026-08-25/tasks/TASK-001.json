@@ -1,0 +1,59 @@
+{
+  "id": "TASK-001",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "StockContinuityMax 改为按 period_type 分档（含旧格式配置的响亮失败）",
+  "description": "计划 T1。**不依赖 M1c-1 产物，与 TASK-002 可并行**（scope 不重叠）。\n\n## 🔴 本任务的主要风险，也是它存在的理由\n\n`stock_continuity_max` 从**标量**改成 **map** 后，旧格式 YAML（`stock_continuity_max: 0.02`）**不会报错** —— viper 把标量塞进 map 得到**空 map**，于是每期 `skipped{no_threshold:…}`、`Passed` 仍为 true、**数据照常入库**。⇒ **一道闸门无声消失，且编译期抓不到**（配置是运行时读的）。\n\n⚠️ 这与上个 sprint（M1c-1）的主线**完全同形**：守卫在场、不设防、且沉默。那个 sprint 一共逮到九种这个形状，其中六种是自己人在自查中发现的 —— **本任务是第一次事前就知道它在哪**。\n\n## 为什么是两档而不是五档\n\n`Preceding` 按 `period_type` 隔离序列 ⇒ **每年只有一个 h1 期次**，h1 的「上一期」是**去年的 h1**。四种累计期次（`q1`/`h1`/`q1_q3`/`annual`）全是**年度间隔**，只有 `monthly` 是月度间隔。\n\n| period_type | 相邻两期相隔 | 默认上限 |\n|---|---|---|\n| `monthly` | 1 个月 | 0.02 |\n| `q1`/`h1`/`q1_q3`/`annual` | 12 个月 | 0.15 |\n\n⚠️ **不写成「月均上限 × 间隔月数」**：那样只需一个数，但它**假设存量线性增长** —— 而这道闸恰恰是用来抓「不该出现的跳变」的。**用线性模型定义「什么叫不线性」是循环的。**\n\n## ⚠️ Realistic Scope 超限已记账\n\n**9 个 writes**（上限 5）、**跨 2 个 package**。理由：改类型是**原子改动** —— 不同时改全部引用点会编译失败，拆开无法各自 `dev_done`。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/config.go",
+    "./internal/hestia/validate.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/config_test.go",
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/ingest_test.go",
+    "./cmd/atlas/hestia_test.go",
+    "./configs/hestia.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`Thresholds.StockContinuityMax` 改为 `map[string]float64`（period_type → 上限），`DefaultThresholds()` **五个键齐全**且都 > 0，取值两档：`monthly` 0.02、其余四种 0.15。\n\n**断言须包含** `monthly < annual`（附理由：monthly 相邻 1 个月、annual 相邻 12 个月，前者上限必须更紧）—— 只断「五个键都在且 > 0」的话，**把五个值写成同一个数的实现照样绿**。",
+      "`gateStockContinuity` 改为查表。**缺键 ⇒ 记 `skipped{no_threshold:<pt>}`，不是 `failed`**。\n\n理由（与下面 boundary[0] 不矛盾，两种情形不同）：装载时缺键是**配置疏漏**，运行时缺键是**代码里有了新 period_type、配置还没跟上**。`period_type` 已从 3 种扩到 5 种一次（Sprint 037 补 `q1`/`q1_q3`），下次再扩时若判 `failed`，那一批期次会**全部进 pending**，而真实情况只是「还没给这种序列定阈值」。"
+    ],
+    "boundary": [
+      "🔴 **本条整条重写 —— 计划的前提是假的，Leader 与独立 reviewer 各自实跑证伪**\n\n计划在 4 处反复写「旧格式 YAML **不会报错**，viper 把标量塞进 map 得到**空 map**，一道闸门无声消失」。\n**实测相反**（viper v1.21.0 + go-viper/mapstructure v2.4.0，即 `go.mod` 锁定版本；隔离 worktree、本地 struct 复现 `LoadConfig` 的预填形态，2026-08-24）：\n\n```\n旧格式标量        → UNMARSHAL-ERR  'stock_continuity_max' expected type 'map[string]float64',\n                                    got unconvertible type 'float64'\nmap 缺 annual     → err=<nil>  len=5  map[annual:0.15 h1:0.15 monthly:0.02 q1:0.15 q1_q3:0.15]\nmap 只写 monthly  → err=<nil>  len=5  monthly:0.008，其余四档**保留默认**\n```\n\n**结构性原因**（读 `config.go` 确认）：`LoadConfig` 先 `cfg := Config{Thresholds: DefaultThresholds()}` **预填**再 `v.Unmarshal(&cfg)`，mapstructure 默认 `ZeroFields=false` ⇒ **merge 不是 replace**；且 `Unmarshal` 排在 `cfg.validate()` **之前**。\n\n⇒ **两条推论，都要写进实现**：\n1. **标量已被 Unmarshal 层挡住** ⇒ 计划设想的 `if len(...)==0 { …\"scalar\"… }` 分支**在 LoadConfig 路径上不可达**。**不要写那段代码** —— 它是一段假装守卫存在的死分支。\n   仍要有一条测试钉住这个行为，但**断言真实的错误层**：错误来自 `parsing config`，含 `unconvertible` 或 `expected type`，**且含 `stock_continuity_max`**。\n2. 🔴 **真正的静默陷阱是「写了 map 但漏键」** —— 计划完全没提。M1c-3 拿标定结果重填阈值时最可能干的正是这个（改窄 monthly、顺手删一个键，那档**悄悄退回 0.15**，闸门实质放宽 7.5 倍），**没有任何东西会告诉你**。",
+      "🔴 **堵住「写了 map 但漏键」这个真陷阱 —— 实现方式你选，但必须堵**\n\n现状：漏键静默继承 `DefaultThresholds()`。**这是 merge 语义的必然结果，不是 bug**，但它让「配置里写了什么」与「实际生效什么」可以不一致，而**两者都不报错**。\n\n**判据（不锁实现）**：给定一份**显式写了 `stock_continuity_max` 但只有 4 个键**的 YAML，`LoadConfig` **必须报错**，且错误信息**点名缺的那个键**。\n同时：**完全不写** `stock_continuity_max` 的 YAML **必须成功**（用默认值）—— 这两格成对，缺后者的话「一律要求五键齐全」的实现会破坏「用默认值」这个正常路径。\n\n参考实现方向（任选，或另想）：`v.IsSet(\"thresholds.stock_continuity_max\")` 为 true 时，用 `v.GetStringMap` 取**用户显式写的键集合**与 `validPeriodTypes` 比对。\n\n⚠️ **测试的 `want` 必须能区分三种失效**：旧格式标量 / 漏键 / 值非正。**字段名 `stock_continuity_max` 在三者里都出现，用它当 `want` 一条都区分不开** —— 这条精度要求来自计划（它对「scalar」提过同样的话），**只是它挑错了区分词**。",
+      "**值非正**（如 `monthly: 0` 或 `-1`）⇒ 报错。⚠️ 与上两条合起来是三格，**三格的 `want` 互不相同**才算达标（验收：把任一格的 `want` 换成另一格的，该格必须变红）。"
+    ],
+    "error_handling": [
+      "「装载时必须齐全」与「运行时容忍缺键」两条**各有用例且各自单独红**。\n⇒ 消融「让 `LoadConfig` 也容忍缺键」⇒ 只红装载那条；消融「让 `gateStockContinuity` 判 failed」⇒ 只红闸门那条。"
+    ],
+    "non_functional": [
+      "`configs/hestia.yaml:53-56` 从一行标量改成一块五键，**且 `go run ./cmd/atlas hestia status --hestia-config configs/hestia.yaml` 能装载**。\n⚠️ 这一步是本任务唯一能抓住「YAML 与代码脱节」的检查 —— **编译不管它**。",
+      "🔴 **两条会过期的注释都要改**（带 `M1c-2 的 TASK-001` 前缀）：\n1. `ingest_test.go:485`「实测：把 `StockContinuityMax` 设成 0 Validate 照样通过」——改 map 后「设成 0」不再成立；\n2. **`validate.go:343`「⚠️ StockContinuityMax 的 2% 未经真实数据验证——M0 的两份样本里只有一份」** —— **这条计划漏了，是 Leader 核实时发现的**：分档后「2%」与「未经验证」**都会变**（本迭代产出的正是真实数据依据）。\n⇒ 上个 sprint 抓了三次「注释描述的是当时的意图，代码改了它不会跟着改」，**这次是第一次事前发现**。",
+      "`gofmt -l` 空、`go vet ./...` 空、`go test ./... -count=1` 全绿、`go build ./...` 成功；两个包覆盖率不低于当前基线（`internal/hestia` 94.810%、`cmd/atlas` 75.610%，NumStmt 加权、背对背各自树内渲染）。\n⚠️ **门禁守不了「不低于基线」这条**（`coverage_floor` 是绝对下限，表达不了相对判据）—— **须你自己背对背测出来报给验证者**。\n\n⚠️ **G2 无新增依赖**（计划 Global Constraints，追溯矩阵查出的孤儿需求）：`go.mod` / `go.sum` **不得出现在本任务的实际改动里** —— 验收：`git diff --name-only <基线>..<交付> | grep -E 'go\\.(mod|sum)'` 应为空。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-25T08:46:39Z"
+  },
+  "assigned_to": "dev-m1c2-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "6bb60b4689eaecc8cd6979d17cd3c2b4f2164ae7",
+    "discovery_sha256": "8d8d6e23c7173780c932e9782f3f011fa2b34daec9927bc596ffa4fac49d96d7",
+    "at": "2026-08-24T09:13:25Z"
+  },
+  "verifier": "test-m1c2-v1"
+}

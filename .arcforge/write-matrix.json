@@ -101,7 +101,16 @@
     "dev-agent-57": "bf48eca9112bfd351c7f2d2bbae1926a385067d5695ee27898cb23905c5a043a",
     "test-agent-27": "09245808f6a93ce76c884bd94fd7bd814a4165aa499e2b9189455787b4a223db",
     "test-agent-28": "369d1059cd611db6f7098be3c1fd127cd1da42d6b8bef53aa1364bbd9cccc7b3",
-    "qa-m1c1": "7771456f67170bddad4410bcb27deec6bce6a6c99cb87e3f654bfa01fdb1c807"
+    "qa-m1c1": "7771456f67170bddad4410bcb27deec6bce6a6c99cb87e3f654bfa01fdb1c807",
+    "dev-m1c2-a": "17352fc2183d8be72a81f665715c5374e70979a48b41e79f231a6a54d92d9204",
+    "dev-m1c2-b": "07e2cc1db4e14e89756bc98801a9afef4d5515873af24ee407c2197f0f7d3682",
+    "test-m1c2-a": "525a9e5213ebe0e7f9bf1437a769dc7af5679a61e9730993e06034fee2c7fc5c",
+    "test-m1c2-b": "bcdccbbd9a673ee88e5e6c4270eb7127010fa263e6b3bdb8e9eed8e95f90b144",
+    "test-m1c2-v1": "b58e0757edf4ba409221192358f3823526bc722a23b9c6451b1ed84ff65ad584",
+    "test-m1c2-v2": "61d5f5ac089ab5c104f4951b324947c8a97b7a116f06611b2298b49d0de47800",
+    "dev-m1c2-a2": "547b1c8fcf9279c7143641aa82d5f1e30ebe6bd0f028b57aa9266f221920d464",
+    "qa-m1c2": "7de81108ed3f302705d5d228a3a857c932faa551420ee9d14ca34ed9d96c5c7b",
+    "qa-m1c2-r2": "8f6f30ed52ab3fd0ab11365854a4cfa5cb8d39aae10918529d10ede7b6bffa4c"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [

@@ -1,0 +1,261 @@
+{
+  "task": "TASK-002",
+  "title": "批量解析快照与失败清单（collectSamples）",
+  "by": "dev-m1c2-b",
+  "base": "fba0feb1e5ca8ae65277b9957e76b8acc1d7f1bf",
+  "branch": "task/TASK-002-m1c2",
+  "commit": "380b9f46a4dd95e2240745b3c7616dcec17ab9d0",
+  "merged_into_master": "6bb60b4689eaecc8cd6979d17cd3c2b4f2164ae7",
+  "key_findings": [
+    "一篇文章走到 calibrate 有**四种**去向（出样本 / 本迭代不解析 / 该支持却失败了 / 标题解析不出期次），计划给的 `if !ok || kind != finance { continue }` 把后三种一起吞掉。真实语料上这一行的代价可以数出来：218 篇里 193 篇（社融存量 69 + 社融增量 69 + monthly 55）本迭代不解析，混进失败表就是 193 条假失败，真失败被淹没。",
+    "monthly 与社融两篇**同类**（都是「本迭代不解析」），但计划只把社融排除掉、漏了 monthly。判据来自 parse.go:229 的 checkPeriodTypeSupported —— 它对 monthly 显式返回 error，且 TestParseRejectsMonthlyUntilSampled 把这个决定钉成了契约。",
+    "「manifest 里没有文章」不是有用的空判据。判据必须是**可用样本数为 0**：一份 400 篇全是社融、或标题形态全变了的目录，len(Articles) 不为 0 却一个样本都产不出，那时报告打印 54 行全 `—` 而退出码 0。",
+    "loadManifest 对「文件不存在」返回空 Manifest + nil error —— 那在回填首跑是对的，在标定这里会让 `--dir` 指错悄悄变成「零篇产物」。故 collectSamples 先自己 Stat 一次 manifest.json，且把 ENOTDIR 与 NotExist 分开报（os.IsNotExist 对 ENOTDIR 为 false，合并会把一条文件系统错误说成「--dir 指错了」，排障方向正好反）。",
+    "真实产物 data/hestia-backfill-2026-08-14/manifest.json **既没有 completed_at 也没有 reconcile**（都出自 M1c-1 的 TASK-010 之后）。⇒ 真跑必须 --allow-incomplete，且「无对账摘要」这条 warning 一定会出现，不是异常。",
+    "标题级实测（jq/awk 直接数 manifest.articles[].title，独立于本实现；端到端真跑是 TASK-005 的事）：218 = 社融存量 69 + 社融增量 69 + 金融统计 monthly 55 + 金融统计非 monthly 25 + 其他 0。⇒ 受支持期次 Periods 应为 **25**，不是计划 CONTRACTS 写的 78。非 monthly 的 25 篇里，cutover 2025-09 之后的 v2 期次有 4 期（2025 前三季度 / 2025 年报 / 2026 一季度 / 2026 上半年）⇒ **社融字段 n≈4、非社融字段 n=25**（25 是数出来的，4 是按 cutover 推的）。T3 的 n 列与 `n < 3 不给建议` 这条规则会直接吃到这个差异。",
+    "同一份 manifest 里 2024 年只有年报 / 上半年 / 前三季度，**没有一季度** —— 序列真的有洞。而那份产物没有 reconcile.missing_periods 可读，所以「分布算在一条有洞的序列上」这件事只能靠 warning 提醒人。",
+    "🔴 **断言可以被另一条规则冒名满足，而它在未变异时全绿**——本轮由消融撞出来，不是读代码读出来的：`TestCollectSamplesRendersEveryCategoryToOut` 里那条 `Contains(out, \"monthly\")` 本意是「不解析的 period_type 要写出来」，但夹具里 monthly 那篇的文件名当时叫 `articles/nope-monthly.html` ⇒ 实现**即使把它错记成「读文件失败」**，`monthly` 三个字照样出现在失败行的**文件名**里，该断言仍为真。表现是消融 M2 只红 1 条而不是 2 条。改夹具文件名为 `articles/nope-m.html`（消掉共有词本身，而不是绕开它）后 M2 红 2 条。⇒ **「断言是活的」与「断言测到了我想测的东西」是两件事**；判据是「有没有一个我想排除的实现，能让这条断言照样绿」。同形自查手法：把各规则/各成因的文案并排，划掉共有词，断言只能用剩下的部分。"
+  ],
+  "decisions": [
+    {
+      "decision": "CalibrateResult 在计划的 {Periods, Samples, Failures} 之外增加 Unsupported / Unclassified / FetchFailed / Warnings 四个字段；计划那三个的**名字与类型一字未改**。",
+      "rationale": "DoD functional[2] 要求「三类各有一格，且各类计数分别可见」，error_handling[1] 要求 manifest 的四个可信度字段被消费。三个字段的结构装不下四类去向 —— 硬塞会让「本迭代不解析」与「解析失败」共用一格，那正是 DoD 点名要防的形态。FetchFailed 单列而不并进 Failures：fetch 阶段没抓到的篇目连 Period/Kind 都无从填（manifest.Failed 只有 id/url/error），并进去会让四个字段有两个恒空。"
+    },
+    {
+      "decision": "monthly 的判据是**直接调 parse.go 的 checkPeriodTypeSupported**，不在 calibrate 里另写一份「哪些 period_type 不支持」的名单。",
+      "rationale": "解除支持的方式是删它那条 switch 分支（注释里写明「逐个删分支」）。自己维护第二份名单，漏同步的表现是**静默少解析一批期次** —— 拿到月报样本后，calibrate 仍然把 55 篇 monthly 划到「不解析」，而没有任何测试会红。"
+    },
+    {
+      "decision": "只在 parseTitle 认得出标题时预判 period_type；认不出的照常读文件走 Parse。",
+      "rationale": "backfillTitleRE **不锚定起点**（backfill_scan.go 的订正说得很清楚：挡住省市分行报告的是栏目筛 backfillSearchKeepPrefix，不是这条正则）。「山西省2024年8月金融统计数据报告」会被 backfillPeriodOf 认成 2024-08 的金融统计报告，它的期次段是「8月」—— 若照着 manifest 标题预判，就会被静默归进「本迭代不解析 monthly」那一格，一篇本不该在语料里的文章从此不再有人看。交给 Parse 则它以「失败」的身份被人看见（Parse 读的是 HTML 里的 ArticleTitle，报出的错误严格更多）。TestCollectSamplesDoesNotPrejudgeUnparseableTitles 钉住这一点。"
+    },
+    {
+      "decision": "Article.SHA256 的校验放在 Parse **之前**；manifest 缺这个字段时出声跳过（warning）而不是静默放行，也不判失败。",
+      "rationale": "backfill_manifest.go:102 写明这个字段是「让下游验证本地文件未被篡改/截断」，而 calibrate 是第一个下游。放在 Parse 之后就晚了：被截断的 HTML 可能仍 Parse 成功、只是少抽几个字段，那一期会静默贡献一份残缺样本。缺字段判失败则过头 —— 那是老产物的形态，不是文件坏了。"
+    },
+    {
+      "decision": "增加一条计划里没有的期次交叉校验：obs.Meta.Period 必须等于 backfillPeriodOf(a.Title) 推出的期次，不等则记一类失败且**不贡献样本**。",
+      "rationale": "两条推导彼此独立（一条读 HTML 的 meta，一条读 manifest 的 title），代价为零。AppendArticle 每篇立刻整份落盘，manifest 与文件错配有窗口；没有这条则样本静默来自错误期次 —— 而标定的产出是要填进生产配置的区间。"
+    },
+    {
+      "decision": "三条错误路径（缺 completed_at / manifest 不存在 / 可用样本为 0）的措辞互不相同，并用一条表驱动测试**逐对反向断言**（每格断言自己的 want 命中、其余每一格的 want 都不命中）。",
+      "rationale": "计划原来的空-manifest 用例断言 Contains(err, \"没有\")，而 completed_at 的错误里也含「没有」⇒ 同一个 want 命中两条完全不同的失败。DoD 要求「把任一条的 want 换成另一条的，该用例必须变红」；写成反向断言就是把那个手工步骤机制化，加一条新错误路径时也不会漏做。"
+    },
+    {
+      "decision": "collectSamples 在返回「可用样本为 0」这个错误**之前**先把四格摘要写给 Out。",
+      "rationale": "拒绝得越硬，人越需要知道那 N 篇都去哪了。先渲染再判错，报错时终端上仍有完整的四格计数。"
+    },
+    {
+      "decision": "Out 上的「本迭代不解析」按 (种类, 理由) 归并成每因一行，不逐篇打。",
+      "rationale": "真语料 55 篇 monthly，逐篇打就是 55 行同一句话，把另外两行淹掉 —— 而「淹掉真信号」正是这一格与失败表分开的理由，在渲染层再犯一次就白分了。"
+    },
+    {
+      "decision": "`non_functional` 的「`gofmt -l` 空」按**两条**验收，而不是按字面：① 我改动的 .go 文件 `gofmt -l` 为空；② 全仓 `git ls-files '*.go' | xargs gofmt -l` 的输出与 base 树**逐字节一致**。",
+      "rationale": "Leader 2026-08-24 裁定，DoD 原文按字面不可满足——本仓库 base(fba0feb) 上就有 28 个与本迭代无关的存量未格式化文件。判据形式由 dev-m1c2-a 提出，写成「按未新增验收」不够：下一个人仍要自己发明怎么算「未新增」，**而最省事的发明方式恰好是只看自己的文件、不做那个 diff**——那样别人引入的不整洁会算到他头上，或反过来被他掩盖。⚠️ 反面动作是「把那 28 个存量文件格式化掉让它按字面达标」——那是一次大范围越界改动，而且**看起来完全像是在满足 DoD**。TASK-001 忍住了，本任务也忍住了。⚠️ 该裁决只能落在 discovery 里：TASK-002 派发后 owner 是 dev，Leader 已无权改它的 DoD。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/calibrate.go（新建，351 行）",
+    "internal/hestia/calibrate_test.go（新建，654 行）"
+  ],
+  "interfaces_exposed": {
+    "CalibrateDeps": "struct{ Dir string; Out io.Writer; AllowIncomplete bool } —— Dir 是产物**目录**不是 manifest 路径；Out 为 nil 表示不打印",
+    "ParseFailure": "struct{ Period, Kind, File, Err string } —— Failures 与 Unsupported 共用此形状",
+    "CalibrateResult": "struct{ Periods int; Samples map[string][]float64; Failures, Unsupported []ParseFailure; Unclassified []string; FetchFailed []Failed; Warnings []string }",
+    "collectSamples": "func(CalibrateDeps) (*CalibrateResult, error) —— 包内可见，T3 的 renderCalibrateReport 与 T4 的 Calibrate 消费它",
+    "note_for_T3": "Samples 的键是 fields.go 的字段名常量，值**未排序**；社融字段的 n 会显著小于非社融字段（实测语料 4 vs 25），T3 的 n 列就是为这个差异设的。Warnings / Unsupported / Unclassified / FetchFailed 是报告要一并渲染的东西 —— 只渲染 Samples 会让「失败：无」这句话变成假话。",
+    "note_for_T4": "真实产物既无 completed_at 也无 reconcile ⇒ CLI 必须能传 --allow-incomplete，且报告里要说清「为什么允许」；「无对账摘要」的 warning 在真跑里必然出现，不是异常。",
+    "CalibrateResult_fields": {
+      "Periods": "int —— 本轮**尝试解析**的期数（受支持的《金融统计数据报告》，含解析失败的那些）。不是 len(Articles)",
+      "Samples": "map[string][]float64 —— field 名（fields.go 的常量）→ 各期实测值，**未排序**；同一字段内的顺序 = 期次升序",
+      "Failures": "[]ParseFailure —— ③ 该支持却失败了。M1c-4 的兜底工作量、M1c-3 入库前要清零的就是这格",
+      "Unsupported": "[]ParseFailure —— ② 本迭代不解析（社融存量/增量 + monthly）。**不是失败**，混进 Failures 会在真语料上产生 193 条假失败",
+      "Unclassified": "[]string —— ④ 标题解析不出期次，**原文照录**、升序。非 0 意味着站点改了期次表述",
+      "FetchFailed": "[]Failed —— manifest.failed 的转录（fetch 阶段就没抓到）。不渲染它，报告会显示「失败：无」",
+      "Warnings": "[]string —— 「这份产物可不可信」的存疑项，不阻断。真跑必然出现「无 reconcile 对账摘要」那条"
+    },
+    "note_reconcile_warning": "⚠️ **「manifest 没有 reconcile 对账摘要」这条 warning 在真跑里必然出现，是预期内的，不要当缺陷去追。**成因：data/hestia-backfill-2026-08-14/ 产于 M1c-1 的 TASK-010 引入 reconcile/completed_at **之前**。保留这条 warning 的理由是——静默略过会让「序列没有洞」与「压根没对过账」在读者看来完全一样，与 SearchSkippedReason 当初被要求落盘是同一失效模式。而这份语料**确实有洞**（2024 年只有年报/上半年/前三季度，没有一季度），所以这条提醒不是形式主义。"
+  },
+  "verification": {
+    "suite": "go test ./internal/hestia/ -run TestCollectSamples -count=1 -v => 27 PASS / 0 FAIL（19 顶层 + 8 子测试）；整包 go test ./internal/hestia/ -count=1 绿；试合并树上 go test ./... 无非 ok 包；merge 后在主仓库复跑（master @ 6bb60b4）：27 PASS / 0 FAIL、整包绿、gofmt 空、vet 空；两文件内容与我 worktree 里的逐位相同（sha256 比对）",
+    "build_vet": "go vet ./internal/hestia/ 退出码 0",
+    "gofmt": "两条口径都跑了（Leader 裁定的验收口径，见 decisions）：① `gofmt -l internal/hestia/calibrate.go internal/hestia/calibrate_test.go` 输出为空；② 全仓 `git ls-files '*.go' | xargs gofmt -l | sort`：base 树 fba0feb 28 个、交付树 6bb60b4 28 个，两份输出 `diff` **逐字节一致** ⇒ 这 28 个存量未格式化文件不是本任务引入的。（base 树用 `git worktree add --detach /tmp/wt-T002-gofmt-base fba0feb…` 现开现拆，已 remove+prune。）",
+    "scope": "git show --numstat 380b9f46a4dd95e2240745b3c7616dcec17ab9d0 => 351/0 calibrate.go + 654/0 calibrate_test.go；纯新增 0 删除，只此两文件，无 go.mod/go.sum（G2 ✓）。数字取自提交本身。",
+    "coverage": {
+      "method": "NumStmt 加权（直接从 coverprofile 求和，非 go test 的一位小数）；背对背同轮；两棵树各自在自己的源码树里渲染 profile；两轮数字逐位一致",
+      "internal/hestia": {
+        "base": "94.810% (1370/1445) @ fba0feb1e5ca8ae65277b9957e76b8acc1d7f1bf",
+        "delivered": "95.186% (1483/1558) @ 380b9f46a4dd95e2240745b3c7616dcec17ab9d0",
+        "verdict": "上升，且高于 DoD 要求的 94.810% 基线"
+      },
+      "calibrate.go": "六个函数全部 100.0%，coverprofile 里 count==0 的块为空",
+      "merged_tree": "与 0a05c4e43c514efb2c516692d480a5c00999f07c 试合并后 95.241% (1501/1576)",
+      "caveat": "重取时主仓库 HEAD 已前移到 0a05c4e（TASK-001 已 merge），其 internal/hestia 为 94.874%。DoD 判据是「不低于 94.810%」，两个口径下都满足；但「PRE 94.874 vs POST 95.186」不是单变量对照，不据此下结论。"
+    },
+    "ablations": [
+      {
+        "id": "M1",
+        "mutation": "社融两篇改记进失败表（**计划原写法**）",
+        "red": [
+          "TestCollectSamplesIgnoresNonFinanceKinds",
+          "TestCollectSamplesSeparatesThreeCategories",
+          "TestCollectSamplesRendersEveryCategoryToOut"
+        ],
+        "not_red": [
+          "其余 16 个顶层测试"
+        ],
+        "proves": "functional[1]"
+      },
+      {
+        "id": "M2",
+        "mutation": "去掉 monthly 预判（monthly 篇被当成待解析的）",
+        "red": [
+          "TestCollectSamplesSeparatesThreeCategories",
+          "TestCollectSamplesRendersEveryCategoryToOut"
+        ],
+        "not_red": [
+          "其余 17 个顶层测试"
+        ],
+        "proves": "functional[2] 类 1 里的 monthly 那半"
+      },
+      {
+        "id": "M3",
+        "mutation": "解析不出期次的标题 continue 丢弃（**计划原写法**）",
+        "red": [
+          "TestCollectSamplesSeparatesThreeCategories",
+          "TestCollectSamplesRendersEveryCategoryToOut"
+        ],
+        "not_red": [
+          "其余 17 个顶层测试"
+        ],
+        "proves": "functional[2] 类 3 不得静默消失"
+      },
+      {
+        "id": "M4",
+        "mutation": "去掉 sha256 完整性校验",
+        "red": [
+          "TestCollectSamplesVerifiesArticleSHA256（含子测试 不符则记失败且不贡献样本）"
+        ],
+        "not_red": [
+          "其余 18 个顶层测试，含 字段缺失时出声跳过 那个子测试——它测的是另一条路径，不红是对的"
+        ],
+        "proves": "error_handling[1] Article.SHA256"
+      },
+      {
+        "id": "M5",
+        "mutation": "去掉期次交叉校验",
+        "red": [
+          "TestCollectSamplesCrossChecksPeriodAgainstTitle"
+        ],
+        "not_red": [
+          "其余 18 个顶层测试"
+        ],
+        "proves": "error_handling[1] 免费的交叉校验"
+      },
+      {
+        "id": "M6",
+        "mutation": "「空」判据换成 len(m.Articles)==0",
+        "red": [
+          "TestCollectSamplesRejectsZeroUsableSamples",
+          "TestCollectSamplesErrorPathsAreDistinguishable/有_manifest_但可用样本为_0"
+        ],
+        "not_red": [
+          "其余 17 个顶层测试"
+        ],
+        "proves": "boundary[0] 「空」的判据"
+      },
+      {
+        "id": "M7",
+        "mutation": "去掉 completed_at 守卫",
+        "red": [
+          "TestCollectSamplesRejectsIncompleteManifest",
+          "TestCollectSamplesErrorPathsAreDistinguishable/缺_completed_at"
+        ],
+        "not_red": [
+          "TestCollectSamplesAllowsIncompleteWhenAsked——它走 AllowIncomplete=true，本就不该被这条守卫影响，不红是对的"
+        ],
+        "proves": "boundary[0] completed_at"
+      },
+      {
+        "id": "M8",
+        "mutation": "去掉 manifest 存在性检查（沿用 loadManifest 的「不存在=空」语义）",
+        "red": [
+          "TestCollectSamplesErrorPathsAreDistinguishable/目录或_manifest_不存在"
+        ],
+        "not_red": [
+          "TestCollectSamplesRejectsUnreadableManifest（走 loadManifest 的解析错误，另一条路径）",
+          "TestCollectSamplesRejectsUnstatableDir（走 ENOTDIR 分支）"
+        ],
+        "proves": "boundary[1]"
+      },
+      {
+        "id": "M9",
+        "mutation": "失败原因换成一句通用话（只保条数、不保内容）",
+        "red": [
+          "TestCollectSamplesRecordsParseFailure",
+          "TestCollectSamplesFailuresCarryDistinctReasons",
+          "TestCollectSamplesRecordsMissingFileAndContinues",
+          "TestCollectSamplesCrossChecksPeriodAgainstTitle",
+          "TestCollectSamplesVerifiesArticleSHA256"
+        ],
+        "not_red": [
+          "其余 14 个顶层测试"
+        ],
+        "proves": "error_handling[0] 「只断条数的话，把所有失败写成同一句话的实现照样绿」已被堵住"
+      },
+      {
+        "id": "M10",
+        "mutation": "不消费 SearchSkippedReason",
+        "red": [
+          "TestCollectSamplesSurfacesSearchSkippedReason"
+        ],
+        "not_red": [
+          "其余 18 个顶层测试"
+        ],
+        "proves": "error_handling[1] SearchSkippedReason"
+      },
+      {
+        "id": "M11",
+        "mutation": "三格明细不渲染到 Out（只留计数）",
+        "red": [
+          "TestCollectSamplesRendersEveryCategoryToOut"
+        ],
+        "not_red": [
+          "TestCollectSamplesSeparatesThreeCategories——它查结构体不查终端输出，不红是对的（两者刻意互补）"
+        ],
+        "proves": "functional[2] 「渲染出来」"
+      },
+      {
+        "id": "M12",
+        "mutation": "不带出 manifest.failed",
+        "red": [
+          "TestCollectSamplesSurfacesFetchFailed"
+        ],
+        "not_red": [
+          "其余 18 个顶层测试"
+        ],
+        "proves": "error_handling[1] Manifest.Failed"
+      }
+    ],
+    "ablation_summary": "12 变异 / 12 KILLED / 0 SURVIVED / 0 INVALID",
+    "ablation_hygiene": "变异一律作用在本 dev 独占的 worktree（wt-T002）内，其他 agent 不读这棵树；每例落盘前打印变异 diff 逐字核对（语义闸）、跑 go build 作有效性闸（编译不过即作废、早退、不记 KILLED）；每例复原后校验 calibrate.go 的 sha256 与 git status --porcelain，收尾再校验一次并复跑全套 —— 全部通过，收尾 sha256 与基线逐位相同。harness: scratchpad/dev-m1c2-b-ablate-task002.py",
+    "ablation_finding": "🔴 消融抓到了一条**我自己写的、会平凡满足的断言**：M2 第一轮只红 1 条，因为夹具里 monthly 那篇的文件名叫 articles/nope-monthly.html —— 实现即使把它错记成「读文件失败」，Contains(out, \"monthly\") 也会被失败行里的**文件名**满足。改名成 nope-m.html 后 M2 红 2 条。测试里留了注释记这件事。",
+    "self_measurement_note": "以上全部数字在最后一次改动之后统一重采（最后一次改动是 calibrate.go 的 sha256 只算一次那次重构；重构改掉了 M4 的锚点，harness 锚点同步更新后 12 例全部重跑）。numstat 取自 git show HEAD，与交付物同源。",
+    "not_verified": [
+      "**端到端真跑没做**（DoD 未要求，计划把真跑放在 TASK-004/005）：本任务的测试全部用 t.TempDir() + testdata 里的真实报告拼夹具，从未对 data/hestia-backfill-2026-08-14/ 跑过 collectSamples。上面那组 218 篇的分类计数是 jq/awk 数标题得来的，**不是我的实现跑出来的** —— 两者可能不一致（例如 backfillPeriodOf 对某些标题返回 !ok 而我的 awk 规则认下来了）。TASK-005 真跑时应把实得的四格计数与这里的 69/69/55/25 对一遍，不一致就是本实现或 awk 规则有偏差。",
+      "sha256 校验只在「不符」与「缺字段」两格测过，**没有构造真被截断的 HTML 仍 Parse 成功的样本** —— 那需要一份特制快照，超出本任务 writes 范围。"
+    ]
+  },
+  "notes_for_downstream": [
+    "T3（renderCalibrateReport）：只渲染 Samples 会让报告说假话。Failures / Unsupported / Unclassified / FetchFailed / Warnings 都要能出现在报告里 —— 尤其 FetchFailed，不渲染它报告就会显示「失败：无」，而失败表的用途正是 M1c-3 入库前要清零。",
+    "T3：Samples 里社融字段的 n 与非社融字段的 n 差一个量级（实测语料 4 vs 25）。`n < 3 不给建议` 这条规则在社融字段上是**贴着边**的 —— 若语料再少一期就会整批不给建议，那时报告必须说清「为什么没有建议」，不能留空。",
+    "T4（CLI）：真实产物 data/hestia-backfill-2026-08-14/ 既无 completed_at 也无 reconcile，⇒ 必须 --allow-incomplete，且真跑输出里一定会有「manifest 没有 reconcile 对账摘要」这条 warning。它是**正常的**，不要当成缺陷。",
+    "TASK-005（真跑验收）：预期 Periods=25、Unsupported=193（69+69+55）、Unclassified=0、Failures 目标为 0。**任何一格对不上都值得查**，尤其 Unclassified 非 0 意味着站点表述变了。",
+    "永远不要单靠标题正则判归属（backfill_scan.go 的订正）：backfillTitleRE 不锚定起点，省市前缀的分行报告会被它认下来。本实现的处置是「不预判、交给 Parse 报错」，而不是再加一条正则。"
+  ],
+  "provenance": {
+    "code": "calibrate.go / calibrate_test.go 由 dev-m1c2-b 编写，唯一例外见下条。",
+    "code_simplifier": "`groupUnsupported` 里「有序切片直接存 *group」这个写法（取代原先「order 存 key + 出结果时回查 byKey[key]」）出自 code-simplifier 子代理（按全局规范在提交前调用），含它补的两行注释。行为逐字等价：首次出现顺序、分组键 Kind+\"\\x00\"+Err、输出格式均未变。**它的改动在提交 380b9f4 之内**，且本任务全部自证数字（27 PASS、覆盖率、12/12 KILLED）都是在**含该改动的树上**测的（消融 harness 的基线 sha256 32ceb8bc… 与 master 上该文件的 sha256 逐位相同）。calibrate_test.go 它一个字未改。",
+    "my_error_worth_recording": "⚠️ 我一度用 **mtime** 判定「子代理没改过文件」，结论是**错的**——我把 16:52:28 那个 mtime 认成了自己上一次编辑，而按子代理运行时长倒推，那个时刻落在它的窗口里。**mtime 是关于文件的弱信号，不是关于「谁改了什么」的信号**；决定性判据是**看内容**（master 上 groupUnsupported 确实是 *group 那一版）。教训与「子代理报告须 diff 核实」同族：正确性附着在载体上，不附着在「我推断过」上。"
+  }
+}

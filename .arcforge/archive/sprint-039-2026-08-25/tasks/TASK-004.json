@@ -1,0 +1,61 @@
+{
+  "id": "TASK-004",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 2,
+  "title": "cobra 装配、导出入口与 CONTRACTS 登记（不含真跑）",
+  "description": "计划 T4。依赖 TASK-002（`collectSamples`）与 TASK-003（`renderCalibrateReport`），二者都是包内未导出的，`cmd/atlas` 用不了 ⇒ 加导出包装 `Calibrate`，**形态与 `BackfillFetch` 一致**。\n\n## 🔴 真跑已拆出为 TASK-005\n\n独立 reviewer 指出：Step 9 依赖**一次真跑 + 人工填表 + 观察绊线转红**，**当前形态下本任务无法在无网络的验证环境里被判定**。Leader 采纳并拆分。\n⚠️ Leader 补的第二条理由：Step 9 里有「人工填 `configs/hestia.yaml`」，而 Global Constraints 明写「**工具只产出依据，不改 `configs/hestia.yaml`**」——**那是人改不是工具改，但 DoD 必须写清归谁、算不算完成条件**，混在实现任务里验证者无法判定。\n\n## 🔴 `--allow-incomplete` 的理由必须进报告（本任务实现，TASK-005 验收）\n\n```\n--dir data/hestia-backfill-2026-08-14      （452 文件，QA 全量复核合格）\n--allow-incomplete                          （该 manifest 无 completed_at）\n```\n\n⚠️ **那份 manifest 不是夭折的，是早于 TASK-010 引入该字段** —— `CONTRACTS.md:964` 已注明。但 flag 的名字（`incomplete`）与计划 T4 测试注释里的说法（「拒绝**夭折的** manifest」）**指的不是同一件事**：\n\n| 出处 | 语义 |\n|---|---|\n| Global Constraints | 允许**缺标记** ← 我们的情况 |\n| T4 测试注释 | 允许**夭折** |\n\n⇒ **报告必须打印「为什么允许」**，否则读报告的人会以为这批数据出自一次夭折的回填。\n\n**见 DoD**（boundary[1] 已覆盖对应义务）。以下为背景 —— Leader 在需求分析阶段自我推翻的一个判断，记此免得重犯：\n我曾拟「若 manifest 含 `scanned_at` 且 `failed` 为空就认定完整」—— **那是错的**，`CompletedAt` 的注释明说「**下游做的一切闭合性检查在夭折的产物上同样全绿**」。**唯一能证明「这趟跑完了」的是进程正常退出这个进程外事实**（Sprint 038 真跑 exit 0 / 8m24s / 451 请求），而**它不在产物里**。",
+  "wave": 3,
+  "dependencies": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/hestia/calibrate.go",
+    "./internal/hestia/calibrate_report.go",
+    "./internal/hestia/calibrate_report_test.go",
+    "./internal/hestia/store_test.go",
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      "导出入口 `func Calibrate(d CalibrateDeps) error`。\n\n⚠️ **订正**：首版写「形态与 `BackfillFetch` 一致」——**错的**，`BackfillFetch(ctx context.Context, cfg BackfillConfig) error` **带 ctx**（`backfill_fetch.go:121`，预检读出、Leader 复核）。本任务**不收 ctx**：`calibrate.go` 里 `context.` / `http.` / `net/` 命中 **0**，纯文件 IO，功能上不需要。⇒ 以**签名那句**为准，「形态类似」只指「一个导出入口 + 一个 Deps 结构体 + 返回 error」。\n\n🔴 **加 `Calibrate` 这一个就会让 `TestPackageExposesNoWriteFunctions` 变红——这是设计如此，你必须去登记它。**\n\n`store_test.go:429` 那条断言是**全导出面精确相等**（`assert.Equalf(t, want, got)`，`want` 是写死的 19 项名单），**不是「不许有写口」**。文件里的注释写明了这是有意为之：\n\n> 精确相等是有意为之（它顺带**逼着每次扩大导出面都要在这里留一行说明**），所以正确的处置是**登记而不是放松断言**。\n\n⚠️ **Leader 首版 DoD 在这里是错的**：原文写「不得新增其它导出标识符……新增导出会让它变红且你改不了它 ⇒ 只加 `Calibrate` 这一个」——**加一个也红**，而当时 `store_test.go` 不在任何任务的 `writes` 里 ⇒ **本任务结构上无法完成**。已把它加进本任务 `writes`。\n\n**要求**（照该文件已有体例，`Parse` / `DefaultThresholds` / `Store.Preceding` 三段都是范本）：\n1. 把 `\"Calibrate\"` 加进 `want`（注意 `sort.Strings` 字节序：`\"BackfillFetch\" < \"Calibrate\" < \"DefaultThresholds\"`）；\n2. **在文件末尾追加一段「—— 为什么名单里多了 Calibrate ——」**，说明它为什么不是写口（只读产物目录、渲染报告、不碰 `Store`）；\n3. ⚠️ **不要动那句 `len(want)` 的动态计数**——文件注释记着 TASK-011 闭合的缺口：手写「恰好是这十七个」曾与实际 16 项不一致而无人报警。\n\n⚠️ **不得新增 `Calibrate` 之外的导出函数/方法**。导出**类型**不受这条约束（断言只收 `FuncDecl`），但 `*FieldStats` 这类导出类型上的**方法**会被收进去。",
+      "`backfill calibrate` 子命令注册成功，两个 flag（`--dir`、`--allow-incomplete`）**经 cobra 真实解析验证**（`cmd.SetArgs`+`Execute` 后读绑定变量），不是只查 `Lookup != nil`。\n🔴 **`--allow-incomplete` 的默认值断言必须用 `Flags().Lookup(...).DefValue == \"false\"`**，不能只断变量为 `false` —— 上个 sprint（M1c-1 TASK-010 FIX-A）实测过：测试里的重置逻辑会把注册时的默认值抹掉，**断变量的用例对「默认值被改成 true」的错误实现照样绿**。",
+      "🔴 **必须走 cobra 全链路跑一次，断言 `cmd.OutOrStdout()` 收到的内容非空且含表头与至少一个字段名**（独立 reviewer 实测指出）\n\n⚠️ 这条堵的是一个**既真实又完全隐形**的错误实现：装配时写 `hestia.Calibrate(hestia.CalibrateDeps{Dir: calibrateDir, AllowIncomplete: …})` —— **漏掉 `Out` 字段**。`Calibrate` 里若有 `if out == nil { out = io.Discard }`，它就变成合法路径 ⇒ **命令静默打印零字节、退出码 0，而计划的三条测试全部通过。**\n\n⇒ 两条要求：\n1. 全链路断言输出非空（上面那条）；\n2. 🔴 **`Calibrate` 在 `Out == nil` 时应当报错，而不是 `io.Discard`** —— **一个「把报告写出来」的函数默认丢弃输出，是把调用方的疏漏变成了合法配置。**\n\n🔴 **配套要求：同时改 `calibrate.go:38` 那条结构体注释。** 它现在写着：\n\n> Out 用来把「这一趟看到了什么」写给人看。**nil 表示不打印（纯取数的调用方）。**\n\n⇒ 加上 `Calibrate` 的报错之后，**同一个 `CalibrateDeps.Out` 字段就有了两套契约**：`collectSamples` 收 nil 合法（纯取数），`Calibrate` 收 nil 报错。**注释只写了前一套。**\n\n⚠️ 只加 `if d.Out == nil { return err }` 而不动注释，会留下**注释与实际行为矛盾**——正是本 sprint 反复出现的「意图写在注释里、和代码对不上」。`calibrate.go` 在本任务 `writes` 里，注释改得动。\n\n**验收**：注释须明写「`collectSamples` 允许 nil（纯取数），**而导出入口 `Calibrate` 拒绝 nil**」及其理由；且**这条区别要有一个测试钉住**（`Calibrate(CalibrateDeps{Dir: 有效目录})` ⇒ error，而 `collectSamples` 同参数 ⇒ 无 error）。\n\n⚠️ 另：`TestHestiaBackfillCalibrateIsRegistered` 只查子命令名字 ⇒ 一个 `RunE: func(...) error { return nil }` 的**空壳**也能过。全链路那条同时堵住它。"
+    ],
+    "boundary": [
+      "🔴 **`--dir` 指向不存在的目录 ⇒ 报错，且错误信息必须指向真实成因**（独立 reviewer 实测指出）\n\n⚠️ **只断 `require.Error(...)` 会放过一个把用户主动引向错误处置的实现**：\n`loadManifest` 对不存在的目录返回「空 Manifest + **nil error**」（首跑的正常路径）⇒ 流程走到 `CompletedAt == \"\"` ⇒ 报错「manifest 没有 completed_at：这份产物可能是中途夭折的…请传 `--allow-incomplete`」。\n**测试绿，而用户被告知去加 `--allow-incomplete`，然后撞上第二条误导性错误。**\n\n🔴 **订正：上面那条失效链在 shipped 代码上不可达，TASK-002 已经把它堵上了。**\n\n预检读出、Leader 复核：`collectSamples` 在调 `loadManifest`（`:106`）**之前**就有一道 `os.Stat` 守卫（`:98-99`，`os.IsNotExist` 直接返回错误、错误串带完整 manifest 路径），且它排在 `CompletedAt` 检查（`:117`）**之前**；`:94` 还有一条注释专门解释这个顺序。\n\n⇒ **本条改为验收现状**：断言 `--dir` 指向不存在目录时错误串**含该路径**。\n🔴 **不要按首版 DoD 去「把它做成独立的第一道检查」——那件事已经做完了。** `calibrate.go` 在你 `writes` 里，改得动，**但改它就是重构一段已经正确的代码**（同 TASK-001「不要写计划里那段 scalar 死分支」）。\n（⚠️ 计划 Step 1 的注脚说「`len(m.Articles)==0` 检查同时兜住了这一种」—— **它没有兜住，因为 `CompletedAt` 检查排在它前面**，见计划 Step 3 的代码顺序。）",
+      "🔴 **`--allow-incomplete` 生效时，报告必须打印「为什么允许」** —— 不能静默放行。\n\n输出须能让读者区分**两种截然不同的情形**：\n- **缺标记但完整**（本次：产物早于 TASK-010 引入 `completed_at`，见 `CONTRACTS.md:964`）；\n- **确实夭折**（进程中途被杀）。\n\n⚠️ 工具**无法自行分辨这两者**（`CompletedAt` 的注释：闭合性检查在夭折产物上同样全绿）⇒ 所以输出的措辞只能是「**该 manifest 无完成标记，已按 --allow-incomplete 放行；若它出自 TASK-010 之前的 fetch，属预期**」，**不得声称已确认完整**。\n\n🔴 **由 `Calibrate` 打印这句，不是 `renderCalibrateReport`。**\n\n预检读出、Leader 复核：`AllowIncomplete` **只存在于 `CalibrateDeps`**（`calibrate.go:42`，消费于 `:117`），**`CalibrateResult` 里没有**；`manifestWarnings` 只产三类 warning，无一关于 `completed_at` ⇒ **`renderCalibrateReport(w, res)` 结构上无法知道是否用了 `--allow-incomplete`**。\n⚠️ 而 **`calibrate_report.go` 不在本任务 `writes` 里** ⇒ 按字面把它实现在「报告」里会撞上一个**你改不了的文件**，而那时你已 `in_progress`、Leader 也改不了你的 DoD。\n⇒ 由 `Calibrate` 自己往 `d.Out` 写（它同时持有 `d.AllowIncomplete` 与 `d.Out`），`calibrate.go` 在 `writes` 里。\n\n**验收成对**：`AllowIncomplete=true` 且缺标记 ⇒ 出现该说明；manifest **有** `completed_at` ⇒ **不出现**（否则每次跑都打一句，等于没说）。\n\n🔴 **两条补充约束（预检指出，否则否定式那格平凡为真）**：\n1. **两格夹具必须只差 `completed_at` 一个变量**；\n2. **两格都要配一条正向锚**（断言报告正文确实产出了内容）。\n⚠️ 否则：带 `completed_at` 的那份若因**别的原因**失败（最可能是「没有可解析文章 ⇒ 可用样本为 0」），那句说明**同样不会出现** ⇒ **断言在错误路径上白绿**。\n\n⚠️ **成本提醒**：`cmd/atlas` 现无任何 manifest 相关代码、无造 manifest 的 helper、也无跨包读 `internal/hestia/testdata` 的先例（预检搜索空间：`cmd/atlas/*.go` 全部）。`Manifest`/`Article`/`Failed` 都导出带 json tag ⇒ 夹具造得出，但**要让第二格真跑通需要至少一篇可解析 HTML 进 `cmd/atlas`**。这是本任务被低估的成本。",
+      "**`--dir` 必填**（`MarkFlagRequired`，与 `fetch --out` 对称）—— 独立 reviewer 指出计划漏了这条。"
+    ],
+    "non_functional": [
+      "按 `CONTRACTS.md` 现有体例登记本迭代契约（新起 **Sprint M1c-2** 一节，**编号自成一节、与其它 sprint 同号条目无关**，节标题下注明这一点 —— M1c-1 那节已是此形态）。\n🔴 **数字以本 DoD 为准，不要采信 `context_from` 指向的 discovery。**\n`discoveries/TASK-002.json` 至今写着「**非社融字段 n=25**」——**已被实测推翻**（25 是**尝试期数**，减 3 篇 Parse 失败 = **22**）。那份 discovery **谁也改不了**（TASK-002 `verified`，owner 是 `test-*`）。\n⚠️ 本条要求把这个数写进 **`CONTRACTS.md`**（长寿文档）⇒ **采信错载体，错数就被固化进契约链**（同 `coverage_baseline=93.5` 那个形状：编造/过期的值走完全流程、进归档、被复述）。\n⚠️ 另有第四个版本在流通：TASK-005 的 DoD 提到「reviewer 推算的 26/4」——**也错**。**唯一正确的是 22 / 4。**\n\n**至少登记**：`StockContinuityMax` 两档的依据与「旧格式 YAML 静默停用闸门」这个坑；标定只覆盖可解析字段（实测 `Periods=25`、`Failures=3` ⇒ **报告打印的 n 是\n非社融 22 / 社融 4**；⚠️ **计划的「78 期 / 10 期」与 Leader 首次订正的「n≈25」都已被实测推翻**\n—— 25 是尝试期数，25−3=22）；建议区间为何用加性余量。",
+      "`gofmt -l <本任务改动的 .go 文件>` 空（**不是全仓** —— 本仓库有 28 个与本迭代无关的存量未格式化文件，「全仓 gofmt -l 空」按字面不可满足，TASK-001 实撞并申报），**且全仓 `gofmt -l` 的输出与你的 base 逐字节一致**（证明未新增）。`go vet` 空、`go test -count=1` 全绿、`go build ./...` 成功；覆盖率不低于前序任务交付后的基线（背对背 × 同轮负载 × 各自在自己源码树里渲染，NumStmt 加权口径）。\\n⚠️ 门禁守不了「不低于基线」（`coverage_floor` 只能表达绝对下界），须自测自报。",
+      "🔴 **两条从 TASK-003 结转的一行修补**（验证者 test-m1c2-v1 发现，Leader 独立复核；TASK-003 已 `verified`、原作者写不了那两个文件，故落在本任务）\n\n⚠️ **这是本任务 scope 超限的记账**：`writes` 由 5 → 7 个文件。理由是这两条各约一行，另开任务要多一个 wave，代价不成比例。**不要因此扩大到「顺便改改 calibrate_report」**——只做下面两条。\n\n**① `calibrate_report_test.go`：中间五列无人守。**\n验证者三组消融**全部 SURVIVED、完全静默**：环比一节丢掉 p5 列 / 环比一节把 p5·median·p95·max 全打成 min / 字段表同样。\n成因：那三条渲染测试只读 `annual[1]`（n，`:460`）、最后一列、和「有没有 `—`」⇒ **中间五列的存在与取值，两张表里都没人守**。\n⚠️ TASK-003 的 `functional[3]` **字面列举了** `n / min / p5 / median / p95 / max` 六个 —— 六个里四个可以被替换成 min 而无一变红。\n**要求**：把 `IncludesStockContinuitySection` 的 `assert.Equal(\"2\", annual[1])` 扩成**比整行列数 + min/max 两列**（验证者给的最小修法）。\n**验收消融**：把 p5 列删掉 ⇒ 必须有断言变红；把 p5/median/p95/max 全打成 min ⇒ 必须有断言变红。**两格都要红。**\n\n**② `calibrate_report.go`：`nearestRank` 的注释把机制说反了。**\n注释现写「`math.Ceil(0.05*float64(n))` 在 **n=100 时碰巧对**，**换个 n** 就可能差一名」。\n**实测推翻**（验证者 Go/Python 双实现互核，Leader 独立复跑，`n ∈ [1,200000]` 全扫）：\n\n    pct = 5 / 50 / 95（本报告实际用的三个） → 差异处数 0，换任何 n 都不差\n    pct = 7  → 1612 处差异，首个恰在 n=100\n    pct = 14 → 3222 处，首个 n=50\n    pct = 28 → 6442 处，首个 n=25\n\n⇒ **脆弱性在 `pct` 不在 `n`**。「首个差异在 n=100」这个现象真实存在，但发生在 **pct=7** 上。\n⚠️ **危害**：照现注释「换个 n 去验」的人**一无所获**，可能因此判定这道防御多余而改掉它。\n**要求**：注释改成**按 pct 举例**（如「pct=7 时 n=100 即差一名；本报告用的 5/50/95 在 n≤200000 内无差异，但那是这三个 pct 的性质，不是算法的性质」）。**结论（用整数上取整）不变，只改理由。**"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-25T08:46:40Z"
+  },
+  "assigned_to": "dev-m1c2-a2",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "37735e9eaef69937deab37290bc98be849f9de7f",
+    "discovery_sha256": "e538eeab93c94548c2decde675d46d8e9c61cb28b1c3cfe088ddfb333317209c",
+    "at": "2026-08-24T23:37:07Z"
+  },
+  "verifier": "test-m1c2-v1"
+}

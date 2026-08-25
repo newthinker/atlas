@@ -1,0 +1,60 @@
+{
+  "id": "TASK-003",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "分布统计与报告渲染（纯函数，不碰文件系统）",
+  "description": "计划 T3。**纯函数** —— 用构造数据完整测试，不碰 manifest 也不碰文件系统。\n\n## 这份报告的读者会拿它做决定\n\n标定的输出是**证据**不是**决定**（Global Constraints：工具只产出依据，不改 `configs/hestia.yaml`）。但它的读者会照着填 `MagnitudeRanges` —— **所以报告的每一处含糊都会变成一个填错的区间**。\n\n本任务两条最要紧的 DoD（`n` 列、`n<3` 不给建议）都属于这一族，理由都写在下面。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-002"
+  ],
+  "context_from": [
+    "TASK-002"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/calibrate_report.go",
+    "./internal/hestia/calibrate_report_test.go",
+    "./internal/hestia/calibrate.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`computeFieldStats(field string, samples []float64) FieldStats`：分位数用 **nearest-rank，不插值**。\n验收用 1..100 乱序输入：`P5=5`（`ceil(0.05*100)=5` ⇒ 第 5 小）、`Median=50`、`P95=95`、`Min=1`、`Max=100`、`N=100`。\n⚠️ 不插值的理由要留在注释里：**这份报告是给人看分布的，插值带来的精度对「区间该定多宽」没有任何影响，却多一处能算错的地方。**",
+      "🔴 `renderCalibrateReport(w io.Writer, res *CalibrateResult) error` 按 `fieldOrder`（`fields.go:115`）渲染，**`n` 列不可省**。\n\n**为什么不可省**：非社融字段与社融字段的样本数**差一个数量级**。\n\n🔴 **实测（Leader 在 `6bb60b4689…` 上跑 `collectSamples` 直接读出，非转述）**：\n\n    Periods=25  Failures=3  Unsupported=193  Unclassified=0  FetchFailed=0  Warnings=1\n    n=22 的字段数 = 27   ← 非社融\n    n=4  的字段数 = 27   ← 社融\n\n⇒ **报告会打印的 n 是 22 与 4。**（社融字段在 `rule@v1` 期次里位于另外两篇报告，目前无解析器。）\n\n⚠️ **`25` 是「尝试期数」不是「样本数」**：25 − 3 个 Parse 失败 = 22。\n**这两个数在报告里长得一样，但只有 22 会被打印。**\n⚠️ 本条历经**两次错数**：计划原写「78 期 / 10 期」（错）；Leader 首次订正改成「n≈25」\n（**仍错——把尝试期数当成了样本数**）。⇒ 若你在任何地方读到 `78` / `10` / 非社融 `25`，\n**那都是回流，不是证据**。\n⚠️ **本条的断言仍钉在夹具上，不钉生产语料**：上面的数只是「为什么要有 `n` 列」的理由，\n**不是期望值**——别照着它去构造 25 期或 78 期的夹具。\n⚠️ **「这个差异不写在脸上，填表的人会用同样的信心对待两种区间。」**\n**验收消融**：删掉 `n` 列 ⇒ 必须有断言变红，且**只红那一条**。\n\n🔴 **断言必须钉住整行形状，不能只 `Contains(s, \"78\")`**（独立 reviewer 指出）：表头那行 `字段分布（%d 期样本）` 本身就含那个数 ⇒ **一个完全不输出 n 列的实现，断言直接命中**。\n⇒ 断言「存在一行**同时**含字段名与该 n 值」。\n\n⚠️ 同理 `fieldOrder` 全序断言**不能只比两个字段的相对位置** —— 遍历 map（随机序）再补零样本字段的实现，54 个里只查 2 个有相当概率通过，**是 flaky 绿**。⇒ 切出渲染的字段名序列，`assert.Equal(t, fieldOrder, got)`。",
+      "🔴 **报告必须带 `period_type` 维度**（独立 reviewer 指出，Leader 核实成立）\n\n`MagnitudeRanges` 是 `map[string]Range`（**只有 field 一维**，`gateMagnitudeSanity` 也只按 field 查表），而 `fieldOrder` 的 54 个字段里相当比例是 `*_ytd` **累计量** —— q1 与 annual 的量纲根本不同。\n⇒ 混池后 min/max 跨越整个范围，加性余量再翻倍，**得到宽到拦不住任何东西的区间**。\n\n⚠️ **计划自己的夹具就是这个问题的实例**：`deposit_household_ytd` 用 `{-8200, 1200, 78000, 146400}`（递增四档，形态就是 q1/h1/q1_q3/annual）⇒ span=154600 ⇒ 建议 `[-162800, 301000]`。\n\n**要求**：报告按 `(field, period_type)` 分组，**或至少每行标注样本来自哪几种 period_type**。\n🔴 **不要改 `MagnitudeRanges` 的类型** —— 那是生产配置结构，超出本迭代。本条只要求**让填表的人看见这件事**，不要求工具替他解决。",
+      "🔴 **必须输出 `tsf_stock` 逐 `period_type` 的环比变化率分布**（Leader 采纳 reviewer 的一条越界建议，理由记此）\n\nreviewer 的原话：**「这个 sprint 存在的目的是标定阈值，而它产出的报告里没有任何一个数能用来检验它这次改的那个阈值。」**\n报告只输出字段**原始值**分布，而 `StockContinuityMax` 是**环比变化率**的上限 ⇒ **TASK-001 把一个拍脑袋的数（0.02）改成了两个拍脑袋的数（0.02 / 0.15），而同一个 sprint 里那台专门产出标定依据的机器对它一言不发。**\n\n**要求**：报告新增一节，给出 `tsf_stock` 按 `period_type` 分组的**相邻期环比变化率**的 n / min / p5 / median / p95 / max。\n⚠️ **这超出计划范围，是 Leader 的决定** —— 但它是 TASK-001 那两个默认值**唯一可能的经验依据**，而 TASK-001 的 DoD 已明令「数值不被锁死为正确、注释须写明未经真实数据验证」。**两条是一对。**\n\n⚠️ 预期样本很少（`Parse` 拒绝 monthly ⇒ monthly 档**零样本**；年度间隔档约个位数）⇒ **`n` 与 `HasSuggestion` 的规则照常适用**，不得为这一节破例。"
+    ],
+    "boundary": [
+      "🔴 **建议区间用加性余量 `[min-span, max+span]`（`span = max-min`），不是乘性。**\n\n**乘性规则在负值字段上会把已观测到的真实值排除在外**：`deposit_household_ytd` 可以为负（住户存款净减少），`min=-8200` 时 `min*0.5 = -4100 > -8200` ⇒ **建议区间把实测最小值排除在外，而它看起来完全像一个正常区间。**\n**验收**：必须有一格用**负值样本**，断言 `SuggestMin <= Min`；把规则换成乘性 ⇒ 该格必红。\n\n🔴 **必须同时有上界断言**（独立 reviewer 指出）：只断 `SuggestMin < Min` / `SuggestMax > Max` 时，`SuggestMin, SuggestMax = -math.MaxFloat64, math.MaxFloat64; HasSuggestion = true` **两条全绿** —— 而那是一个「建议任何值都合法」的实现。\n⇒ 加 `SuggestMax - SuggestMin <= K * (Max - Min)`，**K 写死在测试里并注明选它的理由**。",
+      "🔴 **`n < 3` 时不给建议**（`HasSuggestion=false`）。\n理由：`span` 太小或为 0 时，任何余量规则都会退化成一个几乎没有宽度的区间 —— **而过窄的建议比没有建议更危险：它看起来是个结论。**\n**验收**：`n=0/1/2` 三格都断 `HasSuggestion=false`，`n=3` 断 `true`；边界值 3 必须单独有一格。\n\n⚠️ **`n=2` 那格的两个值必须不同**（独立 reviewer 指出）：计划夹具用 `[100, 100]` ⇒ `span=0`，于是把判据写成 `if span > 0` 的错误实现**照样绿** —— 而它在 `n=2` 且两值不同时会给建议，`minSamplesForSuggestion` 这个常量的存在理由就此落空。"
+    ],
+    "non_functional": [
+      "本任务**不得引入任何文件系统或网络访问** —— 全部用构造数据。\n⚠️ 验收方式：`grep -E 'os\\.(Open|ReadFile|WriteFile)|filepath\\.' calibrate_report.go` 应为空（`io.Writer` 不算——它由调用方注入）。",
+      "`gofmt -l <本任务改动的 .go 文件>` 空（**不是全仓** —— 本仓库有 28 个与本迭代无关的存量未格式化文件，「全仓 gofmt -l 空」按字面不可满足，TASK-001 实撞并申报），**且全仓 `gofmt -l` 的输出与你的 base 逐字节一致**（证明未新增）。`go vet` 空、`go test -count=1` 全绿、`go build ./...` 成功；覆盖率不低于前序任务交付后的基线（背对背 × 同轮负载 × 各自在自己源码树里渲染，NumStmt 加权口径）。\\n⚠️ 门禁守不了「不低于基线」（`coverage_floor` 只能表达绝对下界），须自测自报。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-25T08:46:39Z"
+  },
+  "assigned_to": "dev-m1c2-a",
+  "questions": [
+    {
+      "q": "DoD functional[2]/[3] 与 functional[1] 钉死的签名矛盾：renderCalibrateReport 只能从 CalibrateResult 取数，而 Samples 是 map[string][]float64，不带 period_type。",
+      "asked_at": "2026-08-24T13:20:00Z",
+      "answer": "Leader 2026-08-24 裁决（权威版本在 .arcforge/docs/03-progress/plan.md，此处是抄录）：矛盾属实，是 DoD 缺陷。批准方案 A —— 由 dev-m1c2-a 在 calibrate.go 里加性扩展 CalibrateResult（新增 Records []SampleRecord{Period, PeriodType, Values}），Samples 一字不改。否掉「走 verified->review_fix 让 dev-b 加」：(1) 我原以为 TASK-002 verified 期间 dev-b 没有 calibrate.go 的写权——**这个前提是错的**，owner_table 管的是 .arcforge/tasks/*.json，源码文件由 writes + scope-mutex 管，而 inFlightStatuses（validator.go:104，我自己读过）= {assigned,in_progress,dev_done,verifying,blocked_clarification}，**不含 verified** ⇒ calibrate.go 当时是自由的；(2) 走 review_fix 会由写通道自动给 dev-b 的 rework_count +1，而这是 DoD 缺陷不是它的交付缺陷，用返工机制做 scope 移交是误用。已按裁决经 update 补 writes（审计行 added=[\"./internal/hestia/calibrate.go\"]），validator 退出码 0、与 TASK-004 无 scope-mutex 冲突（004 是 wave3 且依赖 003，不同时在途）。注：answer 由 dev 自己抄录——TASK-003 在 in_progress，owner_table 决定 Leader 写不了本文件任何字段。"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "9c74a13ee2a8072723da7ce057cf58d29d690386",
+    "discovery_sha256": "aa0b123be04d1c4d3e26dbec0b5d222082793a83fb215a2c5e565f1717887897",
+    "at": "2026-08-24T14:31:02Z"
+  },
+  "verifier": "test-m1c2-v1"
+}

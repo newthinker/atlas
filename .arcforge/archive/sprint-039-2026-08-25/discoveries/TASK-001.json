@@ -1,0 +1,195 @@
+{
+  "task_id": "TASK-001",
+  "title": "StockContinuityMax 改为按 period_type 分档",
+  "owner": "dev-m1c2-a",
+  "git": {
+    "baseline": "fba0feb1e5ca8ae65277b9957e76b8acc1d7f1bf",
+    "delivered": "fa7c70f393196eedcd51b2aca6e6c61c473d1e8f",
+    "branch": "task/TASK-001-m1c2",
+    "commits": [
+      "bfc2ca8 feat(TASK-001): stock_continuity_max 按 period_type 分档",
+      "fa7c70f test(TASK-001): 钉住「恰好在阈值上」那格真的落在阈值上"
+    ],
+    "note": "baseline/delivered 是分支 sha；merged_into_master 是 Leader merge 后的主线 sha。三者均为全 sha，不写 HEAD/分支名。",
+    "merged_into_master": "0a05c4e43c514efb2c516692d480a5c00999f07c"
+  },
+  "key_findings": [
+    "【跑出来的】计划在四处陈述的前提是假的：旧格式标量**会**报错，且报在 Unmarshal 层。实测错误原文 `'thresholds.stock_continuity_max' expected type 'map[string]float64', got unconvertible type 'float64'`，包在 `hestia: parsing config <path>` 里。成因：LoadConfig 先 `cfg := Config{Thresholds: DefaultThresholds()}` 预填（预填的是 map），mapstructure 塞不进 float64。⇒ 计划要求的 `if len(...)==0 { …\"scalar\"… }` 守卫在 LoadConfig 路径上不可达，**没有实现它**。",
+    "【跑出来的】真正静默的是「写了 map 但漏一档」：mapstructure 的 ZeroFields 默认 false ⇒ merge 不是 replace，漏掉的那档静默继承默认值，err=nil、len=5，配置写的与实际生效的不一致而两边都不报错。",
+    "【跑出来的】`TestStockContinuityDetectsJump` 加了 periodType 列**仍不够**。消融 E2：把边界格 periodType 从 monthly 改回 h1、且不加新守卫 ⇒ `go test` 退出码 0、零条红。wantStatus 与 wantRatio 都挡不住（0.02 <= 0.15 照样 Passed、比例照样 0.02）。故补 `atBoundary` 列 + 一条**精确相等**断言（不是 InDelta——容差会把边界测没）。消融 E1 证明加了之后只红那一格。",
+    "【跑出来的】DoD 的「gofmt -l 空」按字面不可满足：全仓 28 个存量文件未格式化。base 树与交付树的 `gofmt -l .` 输出逐字节一致 ⇒ 无一由本任务引入。",
+    "【跑出来的】覆盖率两个口径不同：`go tool cover -func` 的 total 对 cmd/atlas 报 75.8%，NumStmt 加权报 75.610%（-func 只统计落在已解析函数外延内的 block）。DoD 引用的基线数与 NumStmt 加权的 base 值逐位相同 ⇒ DoD 用的是 NumStmt 口径。",
+    "【跑出来的】跨树渲染确实产生假差异：mine 的 profile 在 base 树里渲染得 94.8%，正确渲染 94.9%。"
+  ],
+  "decisions": [
+    {
+      "decision": "缺档的处置在装载期与运行期**刻意相反**，且落在三处彼此独立的实现上",
+      "rationale": "装载时缺档=配置疏漏（且 merge 语义会让它静默继承默认值）⇒ LoadConfig 拒绝；运行时缺档=代码里有了新 period_type 而配置没跟上（period_type 已从 3 种扩到 5 种一次）⇒ 记 skipped{no_threshold:<pt>}，判 failed 会让那批期次全进 pending 而数据本身没问题。三处分离（LoadConfig 查齐全 / Config.validate 逐档查正负 / 闸门查表容缺）使消融可各自单独红——消融 A 只红装载，消融 B 只红闸门。"
+    },
+    {
+      "decision": "齐全性检查查 viper 的 `v.GetStringMap`（用户显式写的键），不查 Unmarshal 后的 cfg",
+      "rationale": "cfg 已经 merge 过默认值，五档永远齐全，查它等于什么都没查。"
+    },
+    {
+      "decision": "只在 `v.IsSet(\"thresholds.stock_continuity_max\")` 为 true 时要求齐全",
+      "rationale": "完全不写这张表是正常路径（用默认值，与另外四个阈值一样）。一律要求齐全会把它也判成配置错误。这两格成对，config_test.go 里各有一条用例。"
+    },
+    {
+      "decision": "`no_threshold` 在闸门的跳过理由里排第一，优先于 absent_field / no_prior_period",
+      "rationale": "缺档是闸门能否判定的前提，且与本期数据无关：整条序列每期都命中、改一处配置就全好。先报数据侧理由会把排查引向逐期查数据，而那些期次的数据可能完全正常。**这条 DoD 没锁，是我选的**，已在 validate.go 注释里写明并由测试钉住；要反过来是一行改动 + 一条断言。"
+    },
+    {
+      "decision": "遍历 `periodTypeList()` 而不是硬编码五个键（齐全性检查与默认表的测试都是）",
+      "rationale": "加第六种 period_type 时自动要求配置补一档，且错误里的档序定序（map 迭代序随机，不定序的话同一份错配置每次报出的档不同）。默认表本身仍是硬编码五个键，由 TestDefaultStockContinuityIsTieredByPeriodType 与 periodTypeList() 比对，加第六种时它会红。"
+    },
+    {
+      "decision": "三格错误的 want 互不相同且互不包含：`expected type 'map[string]float64'` / `缺 period_type: annual` / `stock_continuity_max[monthly] must be > 0`",
+      "rationale": "字段名 stock_continuity_max 在三者里都出现，拿它当 want 一条都区分不开。消融 C1–C6 六组两两互换，每次只红被换那格。标量那格单独成测试而不进大表：它要断言的不止「错误串含某几个字」，还有**错误出自哪一层**，而大表的循环体只做 Contains。"
+    },
+    {
+      "decision": "0.15 不是 0.02 × 12，也不是任何线性外推",
+      "rationale": "「月均上限 × 间隔月数」假设存量线性增长，而这道闸恰恰是用来抓「不该出现的跳变」的——用线性模型定义「什么叫不线性」是循环的。0.15 与 0.02 **都仍是占位数**，量级只取自「年度序列相邻两期相隔 12 个月，跳变幅度必然显著大于月度」这一定性事实。标定留给 M1c-3。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/thresholds.go",
+    "internal/hestia/config.go",
+    "internal/hestia/validate.go",
+    "internal/hestia/thresholds_test.go",
+    "internal/hestia/config_test.go",
+    "internal/hestia/validate_test.go",
+    "internal/hestia/ingest_test.go",
+    "cmd/atlas/hestia_test.go",
+    "configs/hestia.yaml"
+  ],
+  "scope": {
+    "declared_writes": 9,
+    "actual_changed": 9,
+    "drift": "无。git diff --name-only fba0feb..fa7c70f 与 writes 声明逐条相同",
+    "go_mod_or_sum_touched": false
+  },
+  "interfaces_exposed": [
+    "hestia.Thresholds.StockContinuityMax 类型由 float64 变为 map[string]float64（period_type -> 上限）。**这是破坏性变更**：任何构造 Thresholds 字面量或读该字段的代码都要改。全仓当时只有 thresholds.go / config.go / validate.go / cmd/atlas/hestia_test.go 四处引用。",
+    "hestia.DefaultThresholds().StockContinuityMax 每次返回**新 map**（调用方会就地改它，共用一份会让一处改动波及全局）",
+    "闸门新增跳过理由 `no_threshold:<period_type>`（下游若按 Check.Reason 分类需登记；已有的 absent_field / no_prior_period / prior_absent_field / zero_denominator 语义不变）",
+    "configs/hestia.yaml 的 stock_continuity_max 由标量变为五键 map，**旧格式配置会装载失败**（响亮，非静默）"
+  ],
+  "verification": {
+    "suite": "go test ./... -count=1 退出码 0（64 个 ok 包）；两包 -v: PASS 1170 / FAIL 0",
+    "build_vet": "go build ./... OK；go vet ./... 退出码 0",
+    "cli": "go run ./cmd/atlas hestia status --hestia-config configs/hestia.yaml 退出码 0",
+    "gofmt": "本任务所改 9 个文件 gofmt -l 为空；全仓 28 个存量未格式化文件，base 树与交付树的 gofmt -l . 输出逐字节一致",
+    "coverage": {
+      "method": "NumStmt 加权；背对背同轮同负载；两棵树各自在自己的源码树里渲染 profile；两轮数字逐字节一致",
+      "internal/hestia": {
+        "base": "94.810% (1370/1445)",
+        "delivered": "94.874% (1388/1463)",
+        "verdict": "上升"
+      },
+      "cmd/atlas": {
+        "base": "75.610% (1023/1353)",
+        "delivered": "75.610% (1023/1353)",
+        "verdict": "持平"
+      },
+      "baseline_tree": "git worktree add --detach ../wt-T001-base fba0feb1e5ca8ae65277b9957e76b8acc1d7f1bf"
+    },
+    "ablations": [
+      {
+        "id": "A",
+        "mutation": "拿掉 LoadConfig 的 checkStockContinuityComplete 调用",
+        "red": [
+          "TestLoadConfigRejects/显式写了_map_但漏一档"
+        ],
+        "not_red": [
+          "TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold（闸门那条）"
+        ],
+        "proves": "error_handling[0] 装载侧单独可红"
+      },
+      {
+        "id": "B",
+        "mutation": "gateStockContinuity 缺档改判 CheckFailed",
+        "red": [
+          "TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold 的 2 个子测试"
+        ],
+        "not_red": [
+          "TestLoadConfigRejects/显式写了_map_但漏一档（装载那条）"
+        ],
+        "proves": "error_handling[0] 运行侧单独可红"
+      },
+      {
+        "id": "C1-C4",
+        "mutation": "漏一档格与非正格的 want 两两互换（4 组）",
+        "red": [
+          "每次只红被换那一格"
+        ],
+        "not_red": [
+          "另一格"
+        ],
+        "proves": "boundary[2] 三格 want 互不相同"
+      },
+      {
+        "id": "C5-C6",
+        "mutation": "标量格的 expected type 断言换成另两格的 want",
+        "red": [
+          "TestLoadConfigRejectsLegacyScalarStockContinuity"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "同上"
+      },
+      {
+        "id": "C7",
+        "mutation": "把计划要求的 scalar 死分支加回来并抢在 Unmarshal 之前",
+        "red": [
+          "TestLoadConfigRejectsLegacyScalarStockContinuity 的 `parsing config` 与 `expected type` 两条断言"
+        ],
+        "not_red": [
+          "同一测试里 `stock_continuity_max` 那条断言——两种错误文案里都含这个字段名，它区分不开，正是 DoD 指出的那点"
+        ],
+        "proves": "boundary[0] 断言钉的是错误**层**而非只是「有报错」"
+      },
+      {
+        "id": "D",
+        "mutation": "defaultStockContinuityMax 五档写成同一个数",
+        "red": [
+          "TestDefaultStockContinuityIsTieredByPeriodType（monthly<annual 那条）",
+          "TestStockContinuityDetectsJump/monthly_恰好在阈值上",
+          "TestStockContinuityDetectsJump/monthly_超过阈值",
+          "TestStockContinuityDetectsJump/monthly_存量下跌也算跳变"
+        ],
+        "not_red": [
+          "TestRealHestiaConfigLoads——它查 YAML 不查 Go 默认值，不红是正确的"
+        ],
+        "proves": "functional[0] 「把五个值写成同一个数照样绿」已被堵住"
+      },
+      {
+        "id": "E1",
+        "mutation": "边界格 periodType 由 monthly 改成 h1（atBoundary 守卫在场）",
+        "red": [
+          "TestStockContinuityDetectsJump/monthly_恰好在阈值上（只有 atBoundary 那条断言）"
+        ],
+        "not_red": [
+          "其余全部"
+        ],
+        "proves": "守卫抓得住这次退化"
+      },
+      {
+        "id": "E2",
+        "mutation": "同样改成 h1，但同时用 `if false &&` 关掉 atBoundary 守卫（E1 的对照组）",
+        "red": [],
+        "not_red": [
+          "全部——go test 退出码 0"
+        ],
+        "proves": "**没有这条守卫，这次退化完全静默**。守卫非冗余。"
+      }
+    ],
+    "ablation_hygiene": "变异一律作用在本 dev 的隔离 worktree 内；每例落盘前打印 diff 逐字核对、跑 go build 作有效性闸（编译不过即作废，不记 KILLED）；每例复原后校验被变异文件的 sha256 与 git status --porcelain，全部通过",
+    "self_measurement_note": "以上全部数字在最后一次改动 fa7c70f 之后统一重采，未跨时点拼接"
+  },
+  "carryover_for_M1c-3": [
+    "0.02 与 0.15 **都是占位数**，标定是 M1c-3 的活。改它们时会先撞红 TestDefaultStockContinuityIsTieredByPeriodType（monthly<annual）与 TestStockContinuityDetectsJump 的两个「恰好在阈值上」格——后者的 prev/cur 常量必须保持 cur−prev 与 prev 为**精确整数**，否则那两格会因浮点低几个 ULP 而失效。",
+    "改 configs/hestia.yaml 时**五档必须全写**：删一档 LoadConfig 会拒（这正是本任务加的那道闸），不会静默继承默认值。",
+    "加第六种 period_type 时会红两处：TestDefaultStockContinuityIsTieredByPeriodType（键集比对 periodTypeList()）与 cmd/atlas 的 TestRealHestiaConfigLoads（真实配置键集比对代码默认表）。"
+  ]
+}

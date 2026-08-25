@@ -1,0 +1,50 @@
+{
+  "id": "TASK-002",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "批量解析快照与失败清单（collectSamples）",
+  "description": "计划 T2。**与 TASK-001 可并行**（scope 不重叠）。\n\n## 产物：复用，不重跑（人类 2026-08-24 确认）\n\n⚠️ **计划的「前置：M1c-1 的产物尚不存在」在写作时成立，执行时已不成立。**\n\n```\n计划指定 /Users/zuowei/workspace/runtime/atlas/data/backfill   ✗ 不存在\n实际产物 data/hestia-backfill-2026-08-14/                      ✓ 452 文件\n```\n\n**不重跑的理由不是省时间**：站点在漂（上个 sprint 实测两天掉 2 条）⇒ **重抓拿不到同一份快照**，而现有这份经 QA 全量复核。⇒ 真跑验收（TASK-004）用 `--dir data/hestia-backfill-2026-08-14`。\n\n🔴 **但本任务的测试不需要产物** —— 夹具用 `t.TempDir()` + `testdata` 里那两份真实报告拼出来。\n\n## `--manifest` 改 `--dir`（计划已核实，我复核成立）\n\n`loadManifest(dir string)` 收的是**目录**，且 `Article.File` 存的是**相对该目录**的路径。用文件路径就要在 calibrate 里再 `filepath.Dir()` 一次，**凭空多一处可能出错的地方**。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/calibrate.go",
+    "./internal/hestia/calibrate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`collectSamples(d CalibrateDeps) (*CalibrateResult, error)`：读 manifest 目录、按期次归组、**只解析《金融统计数据报告》**（`backfillKindFinance`），汇总 `Samples map[string][]float64`。\n类型按计划：`CalibrateDeps{Dir string; Out io.Writer; AllowIncomplete bool}`、`ParseFailure{Period, Kind, File, Err string}`、`CalibrateResult{Periods int; Samples; Failures}`。",
+      "🔴 **社融存量/增量两篇不计入失败表** —— 它们不是「解析失败」，是「本迭代不解析」。\n⚠️ **守卫的构造是刻意的**：测试里那两篇的**文件根本不存在**，若实现把它们当成待解析的，会产生「读文件失败」的假失败。\n**为什么要紧**：混进失败表会让 M1c-4（LLM 兜底）的工作量凭空翻倍 —— v1 期次每期两篇，**68 期就是 136 条假失败**。",
+      "🔴 **任何一篇都不得静默消失；失败/跳过按成因分类**（独立 reviewer 指出，且上游有明文先例）\n\n**三类必须可分，且各自可见**：\n1. **本迭代解析器不支持** —— ⚠️ `parse.go:229` 的 `checkPeriodTypeSupported` 对 **`monthly` 显式返回 error**（`TestParseRejectsMonthlyUntilSampled` 已把这个决定钉成契约）。**这不是解析失败，与社融两篇同类** ⇒ 混进失败表会产生**约 53 条**同一句话的假失败，把真失败淹没；\n2. **该支持却失败了** —— 真正要 M1c-4 兜底的那批；\n3. **标题解析不出期次**（`backfillPeriodOf` 返回 `!ok`）⇒ **进 `Unclassified` 并渲染出来，不得 `continue` 丢弃**。\n\n⚠️ **第 3 条上游有明文先例**：`backfill_reconcile.go:196` 对同一处写着「**不 continue 掉**：对账的全部意义是『不让东西静默消失』，而一个解析不出期次的标题若被丢弃，它就从这张表上彻底消失了」。**计划给的实现（`if !ok || kind != finance { continue }`）正是上游明令禁止的那个写法。**\n\n**验收**：三类各有一格；断言**各类的计数分别可见**，不是只断「有 N 条失败」。"
+    ],
+    "boundary": [
+      "🔴 **`CompletedAt` 缺失 ⇒ 默认报错**；`AllowIncomplete=true` ⇒ 放行。两格用例成对。\n\n⚠️ **不要用「产物内部自洽」去判断完整性**（如「有 `scanned_at` 且 `failed` 为空就算完整」）——`CompletedAt` 的注释明说：**进程在第 218 篇被杀与跑完 400 篇正常退出，产出的 manifest 结构上无法区分，下游做的一切闭合性检查在夭折的产物上同样全绿**。⇒ **判据只能是那个字段在不在。**\n\n🔴 **错误串必须能区分两条路径**（独立 reviewer 实测指出）：计划的空-manifest 用例断言 `Contains(err, \"没有\")`，而 `CompletedAt` 的错误里也含「没有」⇒ **同一个 `want` 命中两条完全不同的失败**。\n⇒ 三条错误路径（缺 `completed_at` / 目录或 manifest 不存在 / 有 manifest 但**可用样本为 0**）**`want` 互不相同**，验收：把任一条的 `want` 换成另一条的，该用例必须变红。\n\n⚠️ 且「空」的判据必须是**可用样本数为 0**，不是 `len(Articles)==0` —— 一个含 400 篇**全是社融两篇**（或标题格式变化导致 `backfillPeriodOf` 全部 `!ok`）的目录，`len(Articles)` 不为 0 但**一个样本都产不出**，那时 `err=nil`、报告打印 54 行全 `—`、**退出码 0**。",
+      "`Dir` 指向不存在的目录 / manifest 不可读 ⇒ **报错**，不是产出一份空结果。"
+    ],
+    "error_handling": [
+      "单篇解析失败 ⇒ 记进 `Failures` 并**继续**，不中止整趟；`ParseFailure` 四个字段都要填（`Period`/`Kind`/`File`/`Err`），**测试须断言 `Err` 的内容而不只是「有一条失败」** —— 只断条数的话，一个把所有失败都写成同一句话的实现照样绿。",
+      "🔴 **manifest 里用于判断「这份产物可不可信」的字段，必须被消费或在代码注释里显式声明忽略**（独立 reviewer 指出，逐条都有上游明文理由）：\n\n| 字段 | 上游为它写下的理由 | 不消费的后果 |\n|---|---|---|\n| `SearchSkippedReason` | `backfill_manifest.go:47`：**「manifest 的读者是 M1c-2/-3，没有这个字段时『这次没做校验』与『校验通过』在他们看来完全一样」** | **M1c-2 就是本迭代** —— 分布可能算在一条没做过交叉校验的语料上 |\n| `Manifest.Failed` | fetch 阶段没抓到的篇目 | 它们既不在 `Articles` 也不在解析失败表 ⇒ 报告显示「失败：无」，**而失败表的用途正是「M1c-3 入库前要清零」** |\n| `Reconcile.MissingPeriods` | 逐期缺篇 | 看不出分布是在一条**有洞的序列**上算的 |\n| `Article.SHA256` | `backfill_manifest.go:102`：「让下游验证本地文件未被篡改/截断」 | **calibrate 是第一个下游**；被截断的 HTML 可能仍 `Parse` 成功但少抽字段 ⇒ 该期静默贡献残缺样本 |\n\n⚠️ **免费的交叉校验也别丢**：`Parse` 从 HTML 自解 period/period_type，与 `backfillPeriodOf(a.Title)` 是**两条独立推导** ⇒ 断言 `obs.Meta.Period == it.period`；不一致时记为一类失败。manifest 与文件错配时，没有这条则样本**静默来自错误期次**。\n\n**验收**：每个字段要么有消费它的用例，要么在代码里有一行注释写明为何本迭代忽略它——**「没想到」和「想过并决定忽略」在代码里长得一样，只有注释能区分**。"
+    ],
+    "non_functional": [
+      "`gofmt -l` 空、`go vet ./internal/hestia/` 空、整包 `go test -count=1` 全绿；覆盖率不低于 `internal/hestia` 当前基线 **94.810%**（NumStmt 加权、背对背）。⚠️ 门禁守不了这条，须自测自报。\n\n⚠️ **G2 无新增依赖**（计划 Global Constraints，追溯矩阵查出的孤儿需求）：`go.mod` / `go.sum` **不得出现在本任务的实际改动里** —— 验收：`git diff --name-only <基线>..<交付> | grep -E 'go\\.(mod|sum)'` 应为空。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-25T08:46:39Z"
+  },
+  "assigned_to": "dev-m1c2-b",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "6bb60b4689eaecc8cd6979d17cd3c2b4f2164ae7",
+    "discovery_sha256": "3b5ac2e9ea294c3d293116f70948f35a807936c3478b20c2ab6a09d941d44de4",
+    "at": "2026-08-24T09:22:03Z"
+  },
+  "verifier": "test-m1c2-v2"
+}
