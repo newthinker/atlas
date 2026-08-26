@@ -1213,3 +1213,347 @@ func TestExtractFieldsRejectsNonSectionPathExtractors(t *testing.T) {
 		assert.NoErrorf(t, err, "%s 走板块路径，不应被 extractor 白名单挡下", e)
 	}
 }
+
+// —— M1c-3a 的 TASK-009：分部门口径守卫 ——
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3a 的 TASK-009)
+// functional[0]   分部门段之前最近的期次前缀查 cumulativePeriods，不在表里 ⇒ 报错
+//                 两侧（贷款「分部门看」/ 存款「其中，住户存款」）都守
+//                                          → TestSectorCaliberGuardsBothSides
+// functional[1]   判据是结构性的：同一份正文只改期次前缀就翻转结论，数值一字未动
+//                                          → TestSectorCaliberIsStructuralNotNumeric
+// functional[2]   既有季报/年报一字不变（回归底线）
+//                                          → TestSectorCaliberKeepsCumulativeSamplesIntact
+//                                            + 既有 TestExtractFieldsOnV1/V2Sample 保持绿
+// boundary[0]     A 类通过 / B 类被拒，两侧都有用例
+//                                          → TestSectorCaliberGuardsBothSides
+// boundary[2]     C' 类（2022-08）不顺手去救；C 类（2020-04）同样被拒
+//                                          → TestSectorCaliberRejectsNonCumulativeSamples
+// error_handling  错误信息含实际前缀，且与「板块缺失」「锚点找不到」可区分
+//                                          → TestSectorCaliberErrorIsDistinguishable
+// non_functional  🟡 N2：两种 extractor 拒绝必须可区分（TASK-006 的 decision 升级成契约）
+//                                          → TestExtractFieldsDistinguishesTwoRejectionKinds
+
+// TestSectorCaliberGuardsBothSides 是本任务的核心格：A 类通过、B 类被拒，**两侧各测一次**。
+//
+// ⚠️ **两侧必须分别直调 extractLoanSection / extractDepositSection**，不能只跑 extractFields：
+// sectionRules 里存款节排在贷款节**之前**，所以端到端喂一份 B 类月报时**存款守卫先触发**，
+// 贷款侧那道守卫**一次都没执行**。只跑端到端的话，把贷款侧守卫整个删掉测试照样绿。
+func TestSectorCaliberGuardsBothSides(t *testing.T) {
+	for _, tc := range []struct {
+		sample  string
+		class   string
+		wantErr bool
+		prefix  string // 期望在错误信息里看到的实际前缀
+	}{
+		{sample: "pboc-2025-08-monthly.html", class: "A 类：分部门跟在累计句后", wantErr: false, prefix: "前八个月"},
+		{sample: "pboc-2023-08-monthly.html", class: "B 类：分部门跟在当月句后", wantErr: true, prefix: "8月份"},
+	} {
+		secs := splitSections(stripHTML(readSample(t, tc.sample)))
+
+		for _, side := range []struct {
+			name string
+			kw   string
+			fn   func(section) (map[string]float64, error)
+			// 该侧分部门字段的一个代表，用来钉「产出/没产出」
+			field string
+		}{
+			{"贷款侧", "人民币贷款", extractLoanSection, FieldLoanHHShortYTD},
+			{"存款侧", "人民币存款", extractDepositSection, FieldDepositHouseholdYTD},
+		} {
+			t.Run(tc.sample+"/"+side.name, func(t *testing.T) {
+				sec, ok := findSection(secs, side.kw)
+				require.Truef(t, ok, "样本缺 %q 节，本用例测不到东西", side.kw)
+
+				got, err := side.fn(sec)
+				if tc.wantErr {
+					require.Errorf(t, err, "%s：%s 必须报错，不能把当月值装进 *_ytd", tc.class, side.name)
+					assert.Contains(t, err.Error(), tc.prefix,
+						"错误信息要写明**实际读到的**前缀，否则排障要回去翻原文")
+					assert.Contains(t, err.Error(), "累计口径")
+					assert.NotContains(t, got, side.field, "被拒时不得产出任何分部门字段")
+					return
+				}
+				require.NoErrorf(t, err, "%s：%s 应当正常抽取", tc.class, side.name)
+				assert.Contains(t, got, side.field, "累计口径下分部门字段应当产出")
+			})
+		}
+	}
+}
+
+// TestSectorCaliberIsStructuralNotNumeric 钉住 functional[1]：判据是**结构性**的。
+//
+// 同一段正文、**数值一字不改**，只把分部门段之前的期次前缀在「累计」与「当月」之间切换，
+// 结论必须跟着翻转。若实现写成了数值启发式（分部门合计 vs 累计句偏差比），这两格会
+// 得到同一个结论——因为两组输入的数值完全相同。
+//
+// 这是「守卫判的是性质还是数量」的直接检验：数量在两格里是常量，只有性质变了。
+func TestSectorCaliberIsStructuralNotNumeric(t *testing.T) {
+	const tail = "，住户贷款增加3922亿元，其中，短期贷款增加2320亿元，中长期贷款增加1602亿元；" +
+		"企（事）业单位贷款增加9488亿元，其中，短期贷款减少401亿元，中长期贷款增加6444亿元，" +
+		"票据融资增加3472亿元；非银行业金融机构贷款减少358亿元。"
+	const head = "8月末，本外币贷款余额237.23万亿元，同比增长10.5%。" +
+		"人民币贷款余额232.28万亿元，同比增长11.1%。前八个月人民币贷款增加17.44万亿元。"
+
+	// ⚠️ bridge 用「新增贷款」而不是「人民币贷款」：flowRE 要求币种限定词紧贴「贷款」，
+	// 所以这一句**不会**被期内合计模板命中——head 里那句才是唯一的合计句。
+	// 若 bridge 也写成「人民币贷款增加…」，累计那格会因两条合计句命中而报
+	// 「matched 2 sentences」，两格就不再是最小对了（实撞）。
+	for _, tc := range []struct {
+		name    string
+		bridge  string // 分部门段之前的最后一句，**两格只有期次前缀这一个 token 不同**
+		wantErr bool
+	}{
+		{"当月前缀_拒绝", "8月份新增贷款1.36万亿元。分部门看", true},
+		{"累计前缀_通过", "前八个月新增贷款1.36万亿元。分部门看", false},
+		// 1 月报：当月**就是**年初至今累计，`1月份` 已在 cumulativePeriods 里
+		// （M1c-3a 的 TASK-001 加），查表自然命中 ⇒ **不需要任何特例分支**。
+		// 这一格与上面「当月前缀_拒绝」只差前缀里的月份数字，却结论相反——
+		// 若实现写成了「N月份一律拒」这类形状匹配而不是查表，这一格会红。
+		//
+		// ⚠️ DoD boundary[0] 本来要用真实快照 pboc-2025-01-monthly.html 测这一格，
+		// 但那份快照属于 TASK-007 的 writes，交付时尚未合入 master（我不去抓别人
+		// writes 里的文件）。故改用合成输入钉同一条性质，并在 discovery 里申报。
+		{"1月报当月即累计_通过", "1月份新增贷款1.36万亿元。分部门看", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractLoanSection(section{Body: head + tc.bridge + tail})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.NotContains(t, got, FieldLoanHHShortYTD)
+				return
+			}
+			require.NoError(t, err)
+			// 数值与上一格逐字相同——翻转结论的只有前缀
+			assert.InDelta(t, 2320.0, got[FieldLoanHHShortYTD], 1e-9)
+		})
+	}
+}
+
+// TestSectorCaliberRejectsNonCumulativeSamples 覆盖 boundary[2]：C / C' 类同样被拒。
+//
+// 🔴 **这两篇在到达本守卫之前就已经失败**（既有的「期内合计」守卫先触发：C 类根本
+// 没有累计合计句、C' 类那句「1-8月…累计增加」不被 flowRE 命中）。所以**不能**用
+// 「报错了」来证明本守卫覆盖它们——那是因为错误的理由绿，把本守卫整个删掉照样红。
+//
+// 故拆成两半，各自钉各自的事：
+//
+//	① 端到端仍被拒、不产出数据 —— 既有行为，本任务的回归底线
+//	② checkSectorCaliber 直调这两篇的正文 —— 证明**本守卫**也认定它们非累计
+//
+// ⚠️ 不把本守卫前移到抽取合计之前来「抢先报错」：既有那条信息（「期内合计 not found
+// among N candidate(s) [4月份/人民币]」）指出的是更根本的成因——这篇报告压根没有累计
+// 数据。让更具体的那条先说话，与 checkSectorCaliber 注释里「锚点不存在时不表态」同源。
+//
+// ⚠️ C' 类（2022-08）**刻意不救**：它有「1-8月，人民币贷款累计增加15.61万亿元」，
+// 看着像累计句，但它的分部门段同样跟在当月句之后。救了那句会把这一篇从「安全失败」
+// 变成「口径混杂」。
+func TestSectorCaliberRejectsNonCumulativeSamples(t *testing.T) {
+	for _, tc := range []struct{ sample, class, prefix string }{
+		{"pboc-2022-08-monthly.html", "C' 类：有 1-N月 累计句但分部门是当月", "8月份"},
+		{"pboc-2020-04-monthly.html", "C 类：无累计句", "4月份"},
+	} {
+		secs := splitSections(stripHTML(readSample(t, tc.sample)))
+		for _, side := range []struct {
+			name, kw, anchor string
+			fn               func(section) (map[string]float64, error)
+		}{
+			{"贷款侧", "人民币贷款", loanSectorAnchor, extractLoanSection},
+			{"存款侧", "人民币存款", depositSectorAnchor, extractDepositSection},
+		} {
+			t.Run(tc.sample+"/"+side.name, func(t *testing.T) {
+				sec, ok := findSection(secs, side.kw)
+				require.True(t, ok)
+
+				// ① 回归底线：仍被拒、不产出数据（拒它的是既有的期内合计守卫）
+				got, err := side.fn(sec)
+				require.Errorf(t, err, "%s 必须被拒", tc.class)
+				assert.Empty(t, got)
+
+				// ② 本守卫对同一份正文的独立判定
+				cerr := checkSectorCaliber(sec.Body, side.anchor, "测试")
+				require.Errorf(t, cerr, "%s：本守卫也应判它非累计", tc.class)
+				assert.Containsf(t, cerr.Error(), tc.prefix, "要报出**实际读到的**前缀")
+				assert.Contains(t, cerr.Error(), "累计口径")
+			})
+		}
+	}
+}
+
+// TestSectorCaliberKeepsCumulativeSamplesIntact 是 functional[2] 的回归底线：
+// 既有季报/年报的分部门段前缀是 全年 / 一季度 / 前三季度 / 上半年，都在表内，
+// 本守卫对它们必须完全透明。
+//
+// 逐样本 × 逐侧断言「无错 + 分部门字段仍在」，比「整包测试没红」精确：后者会被
+// 别的测试掩盖，也说不清是哪一篇哪一侧。
+func TestSectorCaliberKeepsCumulativeSamplesIntact(t *testing.T) {
+	for _, sample := range []string{
+		"pboc-2025-12-annual.html", "pboc-2020-06-h1.html",
+		"pboc-2025-09-q3.html", "pboc-2026-03-q1.html",
+	} {
+		secs := splitSections(stripHTML(readSample(t, sample)))
+		for _, side := range []struct {
+			name, kw string
+			fn       func(section) (map[string]float64, error)
+			field    string
+		}{
+			{"贷款侧", "人民币贷款", extractLoanSection, FieldLoanHHShortYTD},
+			{"存款侧", "人民币存款", extractDepositSection, FieldDepositHouseholdYTD},
+		} {
+			t.Run(sample+"/"+side.name, func(t *testing.T) {
+				sec, ok := findSection(secs, side.kw)
+				require.True(t, ok)
+				got, err := side.fn(sec)
+				require.NoError(t, err, "累计期报告不得被本守卫误伤")
+				assert.Contains(t, got, side.field)
+			})
+		}
+	}
+}
+
+// TestSectorCaliberErrorIsDistinguishable 覆盖 error_handling：三种失败的排障方向
+// 完全不同，措辞必须可区分。
+//
+// 判据不是「各自的信息里有没有自己的关键词」——那样把三条文案改成同一句也能全绿。
+// 而是**交叉**：每条必须含自己的标志串**且不含**另外两条的。
+func TestSectorCaliberErrorIsDistinguishable(t *testing.T) {
+	const (
+		markCaliber = "累计口径"               // 本任务新增：分部门口径不对
+		markSection = "requires a section" // 板块整节缺失
+		markAnchor  = "scope anchor"       // 贷款作用域锚点找不到
+	)
+	secs := splitSections(stripHTML(readSample(t, "pboc-2023-08-monthly.html")))
+	loanSec, ok := findSection(secs, "人民币贷款")
+	require.True(t, ok)
+
+	for _, tc := range []struct {
+		name    string
+		run     func() error
+		want    string
+		notWant []string
+	}{
+		{
+			name: "口径不对",
+			run:  func() error { _, err := extractLoanSection(loanSec); return err },
+			want: markCaliber, notWant: []string{markSection, markAnchor},
+		},
+		{
+			name: "板块整节缺失",
+			run: func() error {
+				// 喂一份**不含**任何必需板块的输入：含「广义货币」标题的话会进
+				// extractMoneySection 报「货币 M2 not found」，那是另一种失败（实撞）。
+				_, err := extractFields([]section{{Title: "九、与本包无关的一节", Body: "略"}}, extractorMonthlyV1)
+				return err
+			},
+			want: markSection, notWant: []string{markCaliber, markAnchor},
+		},
+		{
+			name: "作用域锚点找不到",
+			run: func() error {
+				// 累计前缀（守卫放行）+ 有「分部门看」但没有任何部门锚点
+				_, err := extractLoanSection(section{Body: "月末人民币贷款余额232.28万亿元，同比增长11.1%。" +
+					"前八个月人民币贷款增加17.44万亿元。分部门看，没有任何部门。"})
+				return err
+			},
+			want: markAnchor, notWant: []string{markCaliber},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			require.Error(t, err)
+			assert.Containsf(t, err.Error(), tc.want, "缺自己的标志串")
+			for _, nw := range tc.notWant {
+				assert.NotContainsf(t, err.Error(), nw,
+					"含了另一种失败的标志串 %q ⇒ 两者不可区分，排障会被指错方向", nw)
+			}
+		})
+	}
+}
+
+// TestExtractFieldsDistinguishesTwoRejectionKinds 是 non_functional 里那条 🟡：
+// 把 M1c-3a 的 TASK-006 只写在 decision 里的设计意图升级成契约。
+//
+// 那条 decision 说「两种拒绝的排障方向完全不同，合并会把两边都指错方向」，但当时
+// 没有任何断言守着它——test-m1c3a-v2 的变异 N2 把「合法但走错路」那条 case 改成恒 false，
+// 三个值（含**已知合法的 llm-fallback@v1**）全落进 default 报成 unknown extractor，
+// **全套零条红**。原因是既有断言只查「回显 extractor 名」+「含全部白名单值」，
+// 而**两条分支都满足**——查的是共有属性，而要守的是「两者可区分」这个关系性属性。
+//
+// 交叉断言：各自含**只有自己才有**的标志串，且**不含**对方的。
+func TestExtractFieldsDistinguishesTwoRejectionKinds(t *testing.T) {
+	const (
+		markWrongPath = "does not take the section path"
+		markUnknown   = "unknown extractor"
+	)
+	secs := splitSections(stripHTML(readSample(t, "pboc-2025-12-annual.html")))
+
+	for _, tc := range []struct{ name, extractor, want, notWant string }{
+		{"合法但走错路_存量", extractorTSFStock, markWrongPath, markUnknown},
+		{"合法但走错路_增量", extractorTSFFlow, markWrongPath, markUnknown},
+		{"合法但走错路_llm兜底", "llm-fallback@v1", markWrongPath, markUnknown},
+		{"值本身认不出", "rule@v3", markUnknown, markWrongPath},
+		{"空串", "", markUnknown, markWrongPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := extractFields(secs, tc.extractor)
+			require.Error(t, err)
+			assert.Containsf(t, err.Error(), tc.want, "缺自己的标志串")
+			assert.NotContainsf(t, err.Error(), tc.notWant,
+				"含了另一种拒绝的标志串 ⇒ 两者不可区分，而它们的排障方向相反")
+		})
+	}
+}
+
+// TestSectorCaliberStaysSilentWhenNoSectorSegment 钉住 checkSectorCaliber 的第三种
+// 返回：**锚点不存在时不表态**（DoD 里的 E 类，实测 55 篇月报中 2022-04 是这一类）。
+//
+// 🔴 **这条是消融逼出来的**：M1c-3a 的 TASK-009 变异 D4 把「锚点不存在 ⇒ return nil」
+// 改成「⇒ 报错」，**全套零条红、SURVIVED**。那个决定当时只写在 checkSectorCaliber 的
+// 注释里，没有任何断言守着它——与 test-m1c3a-v2 在 TASK-006 用 N2 发现的形态同族：
+// **被写进 rationale 的设计价值，本身没有守卫。**
+//
+// 决定本身的理由：没有分部门段时「口径」这个问题不适用，而分部门字段是必需的，
+// 紧随其后的 mustMatch / loanScopeSpans 会报**更具体**的那条（「缺的是哪个分部门」
+// 或「哪个作用域锚点找不到」）。让更具体的先说话。
+//
+// 故断言分两层：① 本守卫直调返回 nil；② 端到端的错误必须是**那条更具体的**，
+// 而不是任何一条来自本守卫的。只写 ② 不够——「不含本守卫的标志串」在 D4 那种
+// 换个措辞的变异下照样成立。
+func TestSectorCaliberStaysSilentWhenNoSectorSegment(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, anchor, wantMark string
+		fn                           func(section) (map[string]float64, error)
+	}{
+		{
+			name: "贷款侧",
+			body: "月末人民币贷款余额232.28万亿元，同比增长11.1%。" +
+				"前八个月人民币贷款增加17.44万亿元。",
+			anchor: loanSectorAnchor, wantMark: "scope anchor", fn: extractLoanSection,
+		},
+		{
+			name: "存款侧",
+			body: "月末人民币存款余额278.76万亿元，同比增长10.5%。" +
+				"前八个月人民币存款增加20.24万亿元。",
+			anchor: depositSectorAnchor, wantMark: "存款分部门", fn: extractDepositSection,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotContainsf(t, tc.body, tc.anchor,
+				"用例前提：正文里不能有锚点 %q，否则测的不是这一格", tc.anchor)
+
+			// ① 本守卫对「无分部门段」不表态
+			assert.NoError(t, checkSectorCaliber(tc.body, tc.anchor, "测试"),
+				"锚点不存在时本守卫必须放行，让更具体的那条错误先说话")
+
+			// ② 端到端仍然失败，但报的是**更具体**的那条
+			got, err := tc.fn(section{Body: tc.body})
+			require.Error(t, err, "分部门字段是必需的，缺了整段仍须失败")
+			assert.Contains(t, err.Error(), tc.wantMark,
+				"错误必须来自更具体的那条（缺哪个分部门 / 哪个作用域锚点），"+
+					"而不是一句笼统的「没有分部门段」")
+			assert.NotContains(t, err.Error(), "累计口径",
+				"无分部门段不是口径问题，不该报成口径错误")
+			assert.Empty(t, got)
+		})
+	}
+}
