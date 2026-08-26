@@ -41,6 +41,22 @@ var directionSign = map[string]float64{
 	"下降":  -1,
 }
 
+// directionFlat 是「同比持平」里的那个词。它**刻意不在** directionAlt / directionSign 里。
+//
+// 报告的分项余额句有 3 处写「…余额为2.55万亿元，同比持平」（2023-07 / 2025-06 社融存量，
+// 以及 2026-05 v2 月报社融板块那句没有「为」字的）：既无方向词也无数字，语义是变化率为零。
+//
+// 🔴 **为什么不把它加进上面那两张表**（M1c-3a 的 TASK-005，team-lead 裁决的约束①）：
+// 全语料 218 篇里「同比持平」共 50 处，**其中 45+ 处落在「从结构看」占比段**
+// （`委托贷款余额占比2.6%，同比持平`），那些本就不该命中。`持平` 一旦进 directionAlt
+// 就落进全局 dirPat，占比段那些句子全部变成候选 ⇒ mustMatch 的「恰好命中一次」退化成
+// 多命中报错。挡在表外，「数值+单位」的结构要求才继续把它们排除在外。
+//
+// ⇒ 只由 parseRatio 在**开头**特判，且只认这一个词；模板侧由 profiles.go 的 tsfStockRE
+// 单独在尾部接它，不经 dirPat。TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord
+// 把「认它」与「它不是方向词」这两件事同时钉住——否则后人会顺手把它补进 directionAlt。
+const directionFlat = "持平"
+
 // unitAlt 是单位的正则交替片段，与 directionAlt 一样只此一份、供模板嵌入。
 const unitAlt = `万亿美元|万亿元|亿美元|亿元`
 
@@ -143,6 +159,13 @@ func scaleOf(unit string) float64 {
 // 走同一张方向词白名单——「同比下降18%」的符号与「减少2043亿元」同源，
 // 两处用不同的表迟早会分叉。
 func parseRatio(dir, num string) (float64, error) {
+	// 「同比持平」= 变化率为零。判据是**方向词位恰好是「持平」**，不是「num 为空」——
+	// 后者会把「正则没匹上、捕获组是空串」这种真失败静默变成 0（约束③）。
+	// 空方向词与表外方向词都继续走下面的白名单，照常报错。
+	if dir == directionFlat {
+		return 0, nil
+	}
+
 	sign, ok := directionSign[dir]
 	if !ok {
 		return 0, fmt.Errorf(

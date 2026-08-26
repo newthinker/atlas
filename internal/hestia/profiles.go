@@ -73,7 +73,15 @@ const (
 // ——**每一次 `三季度` 都在 `前三季度` 内部**，不存在独立的「三季度」句。
 //
 // 写成 `前三季度` 后位置 0 直接匹中整个前缀，与交替内部顺序无关。
-// TestProfileAlternationsHaveNoSubstringPairs 把这条从「前缀对」扩到「子串对」守住。
+// TestProfileAlternationsHaveNoPrefixPairs 把「任何一项都不是另一项的前缀」守住。
+//
+// ⚠️ 判据是**前缀对**，**没有**扩成「子串对」——这不是遗漏，是实测后的决定：某轮
+// reviewer 建议扩成子串对来防「写成 `三季度` 而非 `前三季度`」，实测表明它**对目标
+// 缺陷全绿放行**（单个词写错构不成任何词对，交替内部的两两比对看不见它），**同时**
+// 把既有安全的 `外币` ⊂ `本外币` 判红 —— 既挡不住真问题又恒响的假红，故不扩。
+// 真正守住那个陷阱的是语料锚定的正向断言 TestFlowRECapturesQuarterlyPeriodVerbatim。
+// （M1c-3a 的 TASK-005 订正：此处原先写的 `...HaveNoSubstringPairs` 这个测试从不存在，
+// 它描述了一次**没有发生的改动**；把否定结论留在原地，免得下一个人再提一次同样的建议。）
 //
 // # 月报累计前缀（M1c-3a 的 TASK-001 接上）
 //
@@ -174,9 +182,27 @@ var tsfStockItems = []tsfStockItem{
 
 // tsfStockRE 要求「余额」后紧跟数字与单位，因此不会命中同板块第二段的占比句
 // 「委托贷款余额占比2.6%，同比低0.1个百分点」——那句「余额」后是「占」。
+// 「余额为」与数字之间可能有**一个空格**（M1c-3a 的 TASK-005）：实测 3 篇
+// （2019年 / 2020-01 / 2020-02 社融存量），全部是「对实体经济发放的外币贷款折合人民币」这一项。
+//
+// 🔴 语料里其实是**两种字符**，但到这一层只剩一种：2020 两篇用 `0x20`，**2019 那篇用
+// `0xa0` NO-BREAK SPACE**。Go 的 `\s` = `[\t\n\f\r ]`，**不含 U+00A0** ⇒ 写成 `\s*`
+// 会修好 2 篇、静默漏掉 2019 那篇。而 strip.go 的 `spaceRE = [ \t\x{00a0}]+` 把两者
+// 都折叠成**单个普通空格**，所以这里 ` ?` 就够，且**不能**用 `\s*` 去「保险」。
+// 这个跨文件依赖由 TestTSFStockREToleratesSpaceAfterBalancePrefix 的第一个子测试钉住
+// （从 U+00A0 原文出发、经 stripHTML 再匹配），strip.go 改了折叠规则那里会红。
+//
+// 尾部还要认「，同比持平」（M1c-3a 的 TASK-005，3 处实测：2023-07 / 2025-06 社融存量，
+// 与 2026-05 v2 月报社融板块那句**没有「为」字**的）。做法是把 `持平` **单独**接在这条
+// 模板的方向词位上，**不经 dirPat**——`持平` 刻意不在 directionAlt 里，理由见 amount.go
+// 的 directionFlat：它一旦进全局词表，占比段那 45+ 处「同比持平」全部变成候选。
+//
+// 数值与 `%` 一起做成可选组：持平句没有它们，捕获组 4 取空串，由 parseRatio 特判成 0。
+// 捕获组编号保持 1=数值 2=单位 3=方向词 4=同比值不变（extract.go 按位取 m[1..4]）。
 func tsfStockRE(name string) *regexp.Regexp {
 	return regexp.MustCompile(
-		regexp.QuoteMeta(name) + `余额为?` + numPat + unitPat + `，同比` + dirPat + numPat + `%`)
+		regexp.QuoteMeta(name) + `余额为? ?` + numPat + unitPat +
+			`，同比(` + directionFlat + `|` + directionAlt + `)(?:` + numPat + `%)?`)
 }
 
 // —— 模板 2：社融增量分项（8 字段）——
@@ -226,9 +252,16 @@ var moneyItems = []struct {
 	{"流通中货币", "M0", FieldM0, FieldM0YoY},
 }
 
+// 括号**全角与半角都要认**（M1c-3a 的 TASK-005）：实测 218 篇里全角「（M2）」4 篇
+// （2026-07 / 2026-04 / 2023-11 / 2023-10）、半角「(M2)」76 篇。7 节月报 2026-07 的
+// 探针输出正是 `货币 M2 not found (pattern 广义货币\(M2\)余额…)`。
+//
+// ⚠️ 不能指望 stripHTML 抹平：它的 punctNormalizer **只**归一逗号、分号与全角空格，
+// **不碰括号**（读 strip.go 核实，非推断）⇒ 全角括号原样到达模板层。
+// M1 / M0 与 M2 共用本函数，一处放宽三项同时生效。
 func moneyRE(name, code string) *regexp.Regexp {
 	return regexp.MustCompile(
-		regexp.QuoteMeta(name) + `\(` + code + `\)余额` + numPat + unitPat +
+		regexp.QuoteMeta(name) + `[(（]` + code + `[)）]余额` + numPat + unitPat +
 			`，同比` + dirPat + numPat + `%`)
 }
 
@@ -285,7 +318,15 @@ var loanScopes = []loanScope{
 		},
 	},
 	{
-		anchorRE:   regexp.MustCompile(`企（事）业单位贷款`),
+		// v1（2019 及更早）写「非金融企业及机关团体贷款」，v2 写「企（事）业单位贷款」
+		// ——与住户侧同构，一条正则覆盖两版（M1c-3a 的 TASK-005）。
+		//
+		// 🔴 **交替必须包在非捕获组 `(?:…)` 里**：scopeTotalRE 做的是**字符串拼接**
+		// （`sc.anchorRE.String() + dirPat + numPat + unitPat`），裸交替拼接后结合律
+		// 错位成 `A|B(dir)(num)(unit)` ⇒ 在 v2 报告里 `A` 单独命中、三个捕获组全空，
+		// 取符号的入口收到三个空串后报「unknown direction word」。独立 reviewer 照原文
+		// 实现时实撞过。TestScopeTotalREKeepsCaptureGroupsAfterAnchorAlternation 守着它。
+		anchorRE:   regexp.MustCompile(`(?:企（事）业单位贷款|非金融企业及机关团体贷款)`),
 		totalField: FieldLoanCorpTotalYTD,
 		items: []nameField{
 			{"短期贷款", FieldLoanCorpShortYTD},
