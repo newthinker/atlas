@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Context Checkpoint: done_criteria → test mapping（TASK-002）
+// Context Checkpoint: done_criteria → test mapping（M1c-2 的 TASK-002）
 //
 //	functional[0]      collectSamples 签名/类型、按期次归组、只解析金融统计报告、汇总 Samples
 //	                   → TestCollectSamplesCountsDifferPerField
@@ -113,12 +113,19 @@ func TestCollectSamplesCountsDifferPerField(t *testing.T) {
 
 // —— functional[1] ——
 
-// 社融存量/增量两篇不计入失败表。
+// TestCollectSamplesParsesNonFinanceKinds —— 由 TestCollectSamplesIgnoresNonFinanceKinds
+// **转正例**而来（M1c-3a 的 TASK-010）。
 //
-// 构造是刻意的：那两篇的**文件根本不存在**。若实现把它们当成待解析的，会产生两条
-// 「读文件失败」的假失败 —— 而 v1 期次每期两篇，68 期就是 136 条假失败，M1c-4 的
-// 工作量凭空翻倍。
-func TestCollectSamplesIgnoresNonFinanceKinds(t *testing.T) {
+// # 来历：它此前断言的行为如今恰好相反，**别把它当过时测试删掉**
+//
+// 原测试断言社融两种「不被读文件、直接进本迭代不解析」，夹具因此刻意给它们**不存在的文件**
+// ——那时 `classifyArticles` 硬过滤掉它们，理由写着「社融存量/增量的解析器是 M1c-3 的活」。
+// **而本迭代就是 M1c-3**：解析器（M1c-3a 的 TASK-002/003/007）已经做好并接进 `Parse` 的
+// 三路分派，calibrate 再不喂给它，报告里社融字段的 n 就永远停在原地。
+//
+// 转换后它守的东西没变——「社融两篇不得从表上消失」——只是从「不解析所以进另一格」
+// 变成「照常解析，文件缺失就是真失败」。这与 M1c-3a 的 TASK-007 对月报那次转换是同一手法。
+func TestCollectSamplesParsesNonFinanceKinds(t *testing.T) {
 	dir := writeCalibrateFixture(t, Manifest{
 		From:        "2020-01",
 		CompletedAt: "2026-08-24T10:00:00Z",
@@ -132,16 +139,17 @@ func TestCollectSamplesIgnoresNonFinanceKinds(t *testing.T) {
 	got, err := collectSamples(CalibrateDeps{Dir: dir})
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, got.Periods, "只数金融统计数据报告")
-	assert.Empty(t, got.Failures,
-		"社融两篇的文件根本不存在，若把它们当成待解析的就会产生两条假失败")
+	assert.Equal(t, 3, got.Periods, "三种报告都进入解析流程，不再只数金融统计")
+	assert.Empty(t, got.Unsupported,
+		"社融两种不再是「本迭代不解析」——那句理由（解析器是 M1c-3 的活）在本迭代已过期")
 
-	require.Len(t, got.Unsupported, 2, "但它们也不能消失——进「本迭代不解析」那一格")
-	kinds := []string{got.Unsupported[0].Kind, got.Unsupported[1].Kind}
+	// 文件不存在 ⇒ 现在是**真失败**，而不是「不解析」。关键是它们**仍在表上**。
+	require.Len(t, got.Failures, 2, "两篇社融的文件缺失是真失败，但一篇都不能消失")
+	kinds := []string{got.Failures[0].Kind, got.Failures[1].Kind}
 	assert.ElementsMatch(t, []string{backfillKindStock, backfillKindFlow}, kinds)
-	for _, u := range got.Unsupported {
-		assert.NotEmpty(t, u.Period, "期次要填，否则看不出是哪一期没解析")
-		assert.NotEmpty(t, u.Err, "要写明为什么没解析")
+	for _, f := range got.Failures {
+		assert.NotEmpty(t, f.Period, "期次要填，否则看不出是哪一期")
+		assert.Contains(t, f.Err, "读文件", "理由要写明是文件读不到，不是别的")
 	}
 }
 
@@ -152,7 +160,7 @@ func TestCollectSamplesIgnoresNonFinanceKinds(t *testing.T) {
 // 🔴 **monthly 那篇已从「本迭代不解析」改为「正常样本」**（M1c-3a 的 TASK-007）。
 //
 // 原来它的文件刻意不存在，因为 `checkPeriodTypeSupported` 对 monthly 显式返回 error，
-// 它与社融两篇同类。TASK-007 删掉那个分支后**月报是受支持的期次**，于是这里给它
+// 它与社融两篇同类。M1c-3a 的 TASK-007 删掉那个分支后**月报是受支持的期次**，于是这里给它
 // 一份真实月报，让本夹具直接体现这一点——而不是只把「不解析」的期望值从 3 改成 2。
 //
 // 原注释里那句「若实现把它当成待解析的，真语料上会产生约 53 条同一句
@@ -169,9 +177,14 @@ func threeCategoryFixture(t *testing.T) string {
 			// 月报（M1c-3a 的 TASK-007 起受支持）：给真实文件，走正常解析
 			{ID: "m", Title: "2026年7月金融统计数据报告", File: "articles/m.html",
 				SHA256: testdataSHA(t, "pboc-2026-07-monthly.html")},
-			// 类 1：本迭代不解析（社融两篇），两篇的文件都不存在
-			{ID: "s", Title: "2020年3月社会融资规模存量统计数据报告", File: "articles/nope-stock.html"},
-			{ID: "f", Title: "2020年一季度社会融资规模增量统计数据报告", File: "articles/nope-flow.html"},
+			// 社融两种（M1c-3a 的 TASK-010 起受支持）：给真实文件，走正常解析
+			{ID: "s", Title: "2025年8月社会融资规模存量统计数据报告", File: "articles/stock.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-tsf-stock.html")},
+			{ID: "f", Title: "2025年8月社会融资规模增量统计数据报告", File: "articles/flow.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-tsf-flow.html")},
+			// 类 1：本迭代不解析 —— 该期报告只有当月数、没有累计数（M1c-3a 的 TASK-010）
+			{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
 			// 类 2：该支持却失败了 —— 正文给一个 index 页，Parse 必然失败
 			{ID: "bad", Title: "2024年金融统计数据报告", File: "articles/bad.html",
 				SHA256: testdataSHA(t, "pboc-index-p1.html")},
@@ -179,9 +192,12 @@ func threeCategoryFixture(t *testing.T) string {
 			{ID: "u", Title: "2024年三季度金融统计数据报告", File: "articles/u.html"},
 		},
 	}, map[string]string{
-		"articles/ok.html":  "pboc-2025-12-annual.html",
-		"articles/m.html":   "pboc-2026-07-monthly.html",
-		"articles/bad.html": "pboc-index-p1.html",
+		"articles/ok.html":    "pboc-2025-12-annual.html",
+		"articles/m.html":     "pboc-2026-07-monthly.html",
+		"articles/stock.html": "pboc-2025-08-tsf-stock.html",
+		"articles/flow.html":  "pboc-2025-08-tsf-flow.html",
+		"articles/c.html":     "pboc-2020-04-monthly.html",
+		"articles/bad.html":   "pboc-index-p1.html",
 	})
 }
 
@@ -191,26 +207,46 @@ func TestCollectSamplesSeparatesThreeCategories(t *testing.T) {
 	got, err := collectSamples(CalibrateDeps{Dir: threeCategoryFixture(t)})
 	require.NoError(t, err)
 
-	// 类 1：本迭代不解析 —— **2 篇**（社融两种；monthly 自 M1c-3a 的 TASK-007 起受支持），
-	// 且**没有一篇被读过文件**（它们的文件都不存在，若被读过就会变成「读文件失败」跑进 Failures）
-	require.Len(t, got.Unsupported, 2)
-	for _, u := range got.Unsupported {
-		assert.NotContains(t, u.Err, "读文件", "不解析的篇目不该被读")
-		assert.NotContains(t, u.Err, "monthly",
-			"monthly 已受支持，不该再出现在「本迭代不解析」里——"+
-				"它若回到这里，说明 checkPeriodTypeSupported 的分支被人加了回去")
+	// 类 1：本迭代不解析 —— **1 篇**。
+	//
+	// 这一格的住户换过两轮，来历都留着：最初是 monthly + 社融两种；M1c-3a 的 TASK-007
+	// 让月报受支持、M1c-3a 的 TASK-010 让社融两种受支持，如今只剩「报告本身没有累计数据」这一类。
+	// ⚠️ 下面三条 NotContains 是**前两轮住户的墓碑**：它们回到这一格，就说明对应的解除被撤销了。
+	require.Len(t, got.Unsupported, 1)
+	u := got.Unsupported[0]
+	assert.Equal(t, "2020-04", u.Period, "只有当月数、没有累计数的那一篇")
+	assert.Contains(t, u.Err, "只有当月数", "理由要说清是数据不存在，不是解析器不支持")
+	assert.NotContains(t, u.Err, "M1c-3 的活",
+		"那句理由在本迭代已过期——社融解析器就是本迭代做的")
+	assert.NotContains(t, u.Err, "monthly is not supported",
+		"月报已受支持，它若回到这一格说明 checkPeriodTypeSupported 的分支被人加了回去")
+	for _, k := range []string{backfillKindStock, backfillKindFlow} {
+		assert.NotEqualf(t, k, u.Kind,
+			"社融 %s 已受支持，它若回到这一格说明 classifyArticles 的硬过滤被人加了回去", k)
 	}
 
 	// 类 2：该支持却失败了 —— 只有 index 页那一篇
 	require.Len(t, got.Failures, 1)
 	assert.Equal(t, "2024-12", got.Failures[0].Period)
+	assert.NotEqual(t, u.Err, got.Failures[0].Err,
+		"两格的理由必须不同——B 类（写法问题）与 C 类（数据不存在）后续动作完全不同")
 
 	// 类 3：标题解析不出期次 —— 原文进 Unclassified，不得 continue 丢弃
 	assert.Equal(t, []string{"2024年三季度金融统计数据报告"}, got.Unclassified)
 
-	// 正常那两期照常出样本（年报 + 月报；月报是 TASK-007 新接的那一类）
-	assert.Len(t, got.Samples[FieldM2], 2, "年报与月报各贡献一个 m2 读数")
-	assert.Equal(t, 3, got.Periods, "Periods 只数受支持的金融统计报告（含失败的那篇）")
+	// 正常那几期照常出样本（年报 + 7 节月报 + 社融两种）。
+	//
+	// 🔴 **两个 n 不相等，这正是 functional[1] 要的「独立统计」**（数字按实跑填，不按臆测）：
+	//   m2        = 2 —— 只有年报与月报产它；社融两种不含货币板块
+	//   tsf_stock = 3 —— 社融存量报告，**外加**年报与 7 节月报里自带的社融板块
+	//
+	// ⚠️ 我最初写的是 `tsf_stock == 1`（以为只有社融存量报告产它），实跑得 3 才发现
+	// **年报与 rule-monthly@v2 月报本身就含社融两节**。留下这句是因为下一个人很可能
+	// 做同样的假设：社融字段的来源**不止社融报告**。
+	assert.Len(t, got.Samples[FieldM2], 2, "年报与月报各贡献一个 m2；社融两种不产 m2")
+	assert.Len(t, got.Samples[FieldTSFStock], 3,
+		"社融存量报告 + 年报 + 7 节月报三个来源 —— 与 m2 的 n 不同，正说明两类字段各数各的")
+	assert.Len(t, got.Samples[FieldTSFFlowYTD], 3, "社融增量同理，三个来源")
 }
 
 // 三类都要**渲染出来**：一个只把它们记在结构体里、不写给人看的实现，与「静默消失」
@@ -223,15 +259,18 @@ func TestCollectSamplesRendersEveryCategoryToOut(t *testing.T) {
 	s := out.String()
 	assert.Contains(t, s, "2024年三季度金融统计数据报告", "解析不出期次的标题原文必须出现")
 	assert.Contains(t, s, "articles/bad.html", "失败要定位到文件")
-	assert.Contains(t, s, backfillKindStock, "不解析的种类要写出来")
-	assert.Contains(t, s, backfillKindFlow, "两种社融各自写出来，合并成一条会看不出缺哪一种")
+	assert.Contains(t, s, "只有当月数",
+		"「本迭代不解析」那一格的**理由**必须渲染出来——只写篇数等于没说为什么")
 
 	// ⚠️ **这条原本断言的是 "monthly"**（那时月报属「本迭代不解析」），夹具里那篇的文件名
 	// 因此刻意不含 "monthly"——否则实现即使把它错记成「读文件失败」，断言也会被失败行里的
 	// 文件名平凡满足（消融实测过，那时本用例不红）。
 	//
-	// M1c-3a 的 TASK-007 让月报受支持后，那个断言已无对象。**防平凡满足的手法本身仍然成立**，
-	// 所以换成对社融两种的同形断言，并保留这段来历：判据不是「输出里有没有这个词」，
+	// M1c-3a 的 TASK-007 让月报受支持后换成了社融两种；**M1c-3a 的 TASK-010 让社融也受支持，于是
+	// 那个对象又一次消失**——这是同一手法第二次失去对象。这次改锚在「只有当月数」这个
+	// **分类理由**上：它只可能由 writeParseFailures 渲染那条 Err 时产生，
+	// 文件名、期次、别的错误文本里都不会出现它。**换对象要留痕，别让第三个人以为它一直如此。**
+	// 判据不是「输出里有没有这个词」，
 	// 而是「这个词只可能由**我要验的那一行**产生」。
 	assert.NotContains(t, s, "本迭代不解析该报告种类（社融存量/增量的解析器是 M1c-3 的活）: 2026-07",
 		"月报不该再出现在「本迭代不解析」那一段")
@@ -536,7 +575,7 @@ func TestCollectSamplesSurfacesMissingPeriods(t *testing.T) {
 	})
 
 	t.Run("没有对账摘要也要出声", func(t *testing.T) {
-		// 真跑用的那份产物出自 TASK-010 之前，**没有** reconcile 字段。静默略过会让
+		// 真跑用的那份产物出自 M1c-3a 的 TASK-010 之前，**没有** reconcile 字段。静默略过会让
 		// 「序列没有洞」与「压根没对过账」看起来一样 —— 与 SearchSkippedReason 同一失效。
 		got, err := collectSamples(CalibrateDeps{Dir: writeCalibrateFixture(t, base, files)})
 		require.NoError(t, err)
@@ -664,4 +703,297 @@ func TestCollectSamplesDoesNotPrejudgeUnparseableTitles(t *testing.T) {
 	assert.Empty(t, got.Unsupported, "认不出的标题不猜 period_type")
 	require.Len(t, got.Failures, 1, "它要以「失败」的身份被人看见，而不是被归进不解析那一格")
 	assert.Equal(t, "2024-08", got.Failures[0].Period)
+}
+
+// —— M1c-3a 的 TASK-010：放行社融两种 kind + 月报按段级口径分流 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-3a 的 TASK-010）
+// functional[0]     社融两种进入解析流程、字段计入 Samples
+//                                    → TestCollectSamplesParsesTSFReports
+// functional[1]     社融字段与非社融字段的 n 独立统计
+//                                    → TestCollectSamplesKeepsTSFAndFinanceFieldsIndependent
+// functional[2]     无累计数据的月报归「本迭代不解析」而非「解析失败」
+//                                    → TestCollectSamplesSeparatesNoDataFromParseFailure
+// boundary[0]       四格加总恒等于总篇数（任何一篇都不得静默消失）
+//                                    → TestCollectSamplesAccountsForEveryArticle
+// boundary[1]       B 类（口径混杂）与 C 类（无累计数据）在报告里可区分
+//                                    → TestCollectSamplesSeparatesNoDataFromParseFailure
+// error_handling[0] 单篇失败仍继续，且断言 Err 内容而非只数条数
+//                                    → TestCollectSamplesSeparatesNoDataFromParseFailure
+
+// 社融两种报告必须**进入解析流程**，字段计入 Samples。
+//
+// 🔴 在此之前 `classifyArticles` 硬过滤掉它们（`kind != backfillKindFinance` 即 continue），
+// 那句 Err 写的是「社融存量/增量的解析器是 M1c-3 的活」——**而本迭代就是 M1c-3**：
+// 解析器（M1c-3a 的 TASK-002/003/007）已经做好，calibrate 仍不喂给它，
+// 于是报告里社融字段的 n 原地不动。
+//
+// ⚠️ **社融两种的 Observation 不能 Save**（同期三篇共享 (period, period_type) 业务键），
+// 但 calibrate **只统计字段值、不入库**，所以这里安全——见实现处注释。
+func TestCollectSamplesParsesTSFReports(t *testing.T) {
+	dir := writeCalibrateFixture(t, Manifest{
+		From: "2025-08", CompletedAt: "2026-08-24T10:00:00Z",
+		Articles: []Article{
+			{ID: "s", Title: "2025年8月社会融资规模存量统计数据报告", File: "articles/stock.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-tsf-stock.html")},
+			{ID: "f", Title: "2025年8月社会融资规模增量统计数据报告", File: "articles/flow.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-tsf-flow.html")},
+		},
+	}, map[string]string{
+		"articles/stock.html": "pboc-2025-08-tsf-stock.html",
+		"articles/flow.html":  "pboc-2025-08-tsf-flow.html",
+	})
+
+	got, err := collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err)
+
+	assert.Empty(t, got.Unsupported, "社融两种不再是「本迭代不解析」——解析器就是本迭代做的")
+	assert.Empty(t, got.Failures, "两份都是真实快照，应当解析成功")
+	assert.NotEmpty(t, got.Samples[FieldTSFStock], "存量字段必须真的采到样本，不是「没报错」就算过")
+	assert.NotEmpty(t, got.Samples[FieldTSFFlowYTD], "增量字段同理")
+}
+
+// 社融字段与非社融字段的 n **独立统计**，互不混淆。
+//
+// 只断「有样本」不够：一个把两类字段混进同一个池子的实现照样非空。
+// 这里用三篇不同 kind 的真实快照，逐字段断言各自的 n。
+func TestCollectSamplesKeepsTSFAndFinanceFieldsIndependent(t *testing.T) {
+	dir := writeCalibrateFixture(t, Manifest{
+		From: "2025-08", CompletedAt: "2026-08-24T10:00:00Z",
+		Articles: []Article{
+			{ID: "m", Title: "2025年8月金融统计数据报告", File: "articles/m.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
+			{ID: "s", Title: "2025年8月社会融资规模存量统计数据报告", File: "articles/stock.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-tsf-stock.html")},
+			{ID: "f", Title: "2025年8月社会融资规模增量统计数据报告", File: "articles/flow.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-tsf-flow.html")},
+		},
+	}, map[string]string{
+		"articles/m.html":     "pboc-2025-08-monthly.html",
+		"articles/stock.html": "pboc-2025-08-tsf-stock.html",
+		"articles/flow.html":  "pboc-2025-08-tsf-flow.html",
+	})
+
+	got, err := collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err)
+	require.Empty(t, got.Failures, "三份都该解析成功")
+
+	// m2 只来自金融统计报告；tsf_stock 只来自社融存量报告 —— 两个 n 互相独立。
+	assert.Len(t, got.Samples[FieldM2], 1, "m2 的样本只应来自那一篇金融统计报告")
+	assert.Len(t, got.Samples[FieldTSFStock], 1, "tsf_stock 的样本只应来自那一篇社融存量报告")
+
+	// Records 必须**逐篇**记入（社融两种也在内）——否则报告里那 69 期看不出期次分布。
+	//
+	// ⚠️ 用「这条记录贡献了哪个字段」来区分三篇，而不是给 SampleRecord 加一个
+	// Extractor 字段：本任务的 writes 只有 calibrate.go / calibrate_test.go，
+	// 而三种报告产出的字段本就互不相交，已经够分辨了。
+	var nStock, nFlow, nFinance int
+	for _, r := range got.Records {
+		assert.Equal(t, "2025-08", r.Period, "三篇同期")
+		assert.NotEmpty(t, r.PeriodType, "period_type 必须填，社融两种也不例外")
+		switch {
+		case r.Values[FieldTSFStock] != 0:
+			nStock++
+		case r.Values[FieldTSFFlowYTD] != 0:
+			nFlow++
+		case r.Values[FieldM2] != 0:
+			nFinance++
+		}
+	}
+	assert.Equal(t, 1, nStock, "社融存量那篇必须记进 Records")
+	assert.Equal(t, 1, nFlow, "社融增量那篇必须记进 Records")
+	assert.Equal(t, 1, nFinance, "金融统计那篇照旧")
+	assert.Len(t, got.Records, 3, "三篇都在，一篇都不能少")
+}
+
+// 🔴 **无累计数据的月报归「本迭代不解析」，不是「解析失败」** —— 这是一个显式的设计决策。
+//
+// # 为什么不归 Failures
+//
+// `Failures` 在报告里的标题是「解析失败（该支持却失败了，M1c-3 入库前要清零）」，
+// 而 calibrate.go 顶部注释写着「③ 解析失败 —— M1c-4 要兜的就是这批」。
+// 这类报告**正文里根本没有累计数据**（小标题全是当月），LLM 兜底也变不出不存在的数——
+// 归进去等于给 M1c-4 凭空加一批**永远清不了零**的工作量。
+//
+// # 判别用的是**正向属性**，不是错误串匹配
+//
+// 判据：这篇报告的正文里**没有任何期内累计口径的合计句**——复用 `cumulativePeriods`
+// 这张唯一真相源的表去问，而不是去匹配「期内合计 not found」那句错误文本。
+// 错误文本会随实现措辞改动而失配；「有没有累计句」是报告本身的性质。
+//
+// # B 类与 C 类必须可区分
+//
+// B 类（2023-07/08/10/11）**有累计合计句**、但分部门段紧邻的是当月句，被 M1c-3a 的 TASK-009 的
+// 口径守卫拒绝 —— 那是站点某几期的写法问题，仍归 Failures。
+// C 类（本例）是数据根本不存在。两者后续动作完全不同，所以必须分在两格。
+func TestCollectSamplesSeparatesNoDataFromParseFailure(t *testing.T) {
+	dir := writeCalibrateFixture(t, Manifest{
+		From: "2020-04", CompletedAt: "2026-08-24T10:00:00Z",
+		Articles: []Article{
+			// C 类：只有当月数、没有累计数（正文零个累计前缀句）
+			{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+			// 该支持却失败了：正文给一个 index 页
+			{ID: "bad", Title: "2024年金融统计数据报告", File: "articles/bad.html",
+				SHA256: testdataSHA(t, "pboc-index-p1.html")},
+			// 正常样本
+			{ID: "ok", Title: "2025年8月金融统计数据报告", File: "articles/ok.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
+		},
+	}, map[string]string{
+		"articles/c.html":   "pboc-2020-04-monthly.html",
+		"articles/bad.html": "pboc-index-p1.html",
+		"articles/ok.html":  "pboc-2025-08-monthly.html",
+	})
+
+	got, err := collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err)
+
+	// C 类进「本迭代不解析」，且理由**不得**沿用「解析器是 M1c-3 的活」（那句在本迭代已过期）
+	require.Len(t, got.Unsupported, 1, "无累计数据的那篇归「本迭代不解析」")
+	u := got.Unsupported[0]
+	assert.Equal(t, "2020-04", u.Period)
+	assert.NotContains(t, u.Err, "M1c-3 的活",
+		"这句理由在本迭代已过期——解析器就是本迭代做的，不能再拿它当不解析的理由")
+	assert.Contains(t, u.Err, "累计", "理由要说清是「报告里没有累计数据」")
+	assert.NotEmpty(t, u.File, "四个字段都要填，否则看不出是哪一篇")
+	assert.NotEmpty(t, u.Kind)
+
+	// ⚠️ 原始解析错误必须**保留**在理由里：C 类的判别用的是「有没有累计句」这个正向属性，
+	// 它与「这篇为什么解析失败」是两件事。真语料里 2023-05 就是判为 C 类、
+	// 而直接错误是「板块序号不连续」——若不保留原错误，那个结构问题会被标签盖掉。
+	assert.Contains(t, u.Err, "hestia:", "原始解析错误要一并带上，别让分类标签盖掉真实成因")
+
+	// 该支持却失败的仍在 Failures，且 Err 是它自己的原因（不是同一句话）
+	require.Len(t, got.Failures, 1)
+	assert.Equal(t, "2024-12", got.Failures[0].Period)
+	assert.NotEqual(t, u.Err, got.Failures[0].Err,
+		"两格的理由必须不同——一个把所有失败写成同一句话的实现照样能让「有 N 条」通过")
+
+	assert.Len(t, got.Samples[FieldM2], 1, "正常那篇照常出样本，失败不中止整趟")
+}
+
+// 🔴 **任何一篇都不得静默消失**：四格加总必须恰好等于 manifest 里的篇数。
+//
+// 上游纪律见 backfill_reconcile.go:196——「不 continue 掉：对账的全部意义是
+// 『不让东西静默消失』」。这条断言是那条纪律在 calibrate 侧唯一的机械保证。
+//
+// ⚠️ 用**恒等式**而不是逐格数字：逐格数字会随语料与实现演进而过期，
+// 而「加起来等于总数」在任何演进下都必须成立。
+func TestCollectSamplesAccountsForEveryArticle(t *testing.T) {
+	articles := []Article{
+		{ID: "ok", Title: "2025年8月金融统计数据报告", File: "articles/ok.html",
+			SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
+		{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
+			SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+		{ID: "s", Title: "2025年8月社会融资规模存量统计数据报告", File: "articles/stock.html",
+			SHA256: testdataSHA(t, "pboc-2025-08-tsf-stock.html")},
+		{ID: "bad", Title: "2024年金融统计数据报告", File: "articles/bad.html",
+			SHA256: testdataSHA(t, "pboc-index-p1.html")},
+		{ID: "u", Title: "2024年三季度金融统计数据报告", File: "articles/u.html"},
+	}
+	dir := writeCalibrateFixture(t, Manifest{
+		From: "2020-04", CompletedAt: "2026-08-24T10:00:00Z", Articles: articles,
+	}, map[string]string{
+		"articles/ok.html":    "pboc-2025-08-monthly.html",
+		"articles/c.html":     "pboc-2020-04-monthly.html",
+		"articles/stock.html": "pboc-2025-08-tsf-stock.html",
+		"articles/bad.html":   "pboc-index-p1.html",
+	})
+
+	got, err := collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err)
+
+	parsed := len(got.Records)
+	sum := parsed + len(got.Failures) + len(got.Unsupported) + len(got.Unclassified)
+	assert.Equalf(t, len(articles), sum,
+		"四格加总必须等于总篇数：已解析 %d + 解析失败 %d + 本迭代不解析 %d + 标题解析不出期次 %d = %d，"+
+			"而 manifest 里有 %d 篇——差额就是被静默丢掉的那些",
+		parsed, len(got.Failures), len(got.Unsupported), len(got.Unclassified), sum, len(articles))
+}
+
+// 🔴 判别器的**两个半边各自承重** —— `any` 与 `!cumulative` 都不能少（M1c-3a 的 TASK-010）。
+//
+// 这条是直接喂构造串给 `onlyCurrentMonthFlowSentences`，不经 collectSamples。
+// 理由是那两个半边**各自只在特定输入上显形**，而夹具里凑不齐这两种输入：
+//
+//   - `any` 那半：只有喂「压根没有合计句」的文本（如 index 页）才显形 —— 去掉它，
+//     index 页会被判成「该期报告只有当月数」，**一句关于它的假话**，
+//     还会把一条真失败从 M1c-4 的清单上抹掉。这是实撞出来的，不是设想。
+//   - `!cumulative` 那半：只有喂「解析失败**且**含累计句」的报告才显形。真语料里那是
+//     B 类（2023-07/08/10/11，合计句累计而分部门段当月），**但 testdata 里没有这四篇**
+//     ⇒ 走 collectSamples 的用例杀不动它（实测 SURVIVED），只能在这一层钉。
+//
+// ⇒ 两个半边、两个独家杀手，缺一个都会让对应的消融存活。
+func TestOnlyCurrentMonthFlowSentencesNeedsBothHalves(t *testing.T) {
+	const cumulative = "前八个月人民币贷款增加13.46万亿元。8月份人民币存款增加1.26万亿元。"
+	const currentOnly = "4月份人民币贷款增加1.7万亿元。4月份人民币存款增加1.27万亿元。"
+	const noFlow = "首页 金融统计数据报告 2025年 更多>>"
+
+	assert.True(t, onlyCurrentMonthFlowSentences(currentOnly),
+		"只有当月合计句 ⇒ 这就是「报告有数据但全是当月口径」，本函数要认出它")
+
+	assert.False(t, onlyCurrentMonthFlowSentences(cumulative),
+		"含累计合计句 ⇒ 不属本类。杀 `!cumulative` 那半：把 cumulativePeriods 查表改成恒 false，"+
+			"本条立刻红，而走 collectSamples 的用例杀不动它（testdata 里没有 B 类快照）")
+
+	assert.False(t, onlyCurrentMonthFlowSentences(noFlow),
+		"压根没有合计句 ⇒ 不属本类。杀 `any` 那半：去掉它，index 页会被判成"+
+			"「该期报告只有当月数」，既是假话又会抹掉一条真失败")
+
+	// 阴性对照：不是「含任意期次前缀就算」——当月与累计混在一起时以累计为准。
+	assert.False(t, onlyCurrentMonthFlowSentences(cumulative+currentOnly),
+		"混合文本里只要有一条累计句就不属本类，顺序无关")
+}
+
+// 「本迭代不解析」那一格必须**按期次排序** —— 多条时顺序不能随机。
+//
+// 真语料里这一格有 23 条（全是只有当月数的月报），报告要按期次读才看得出
+// 「哪几年是这个形态」；顺序随机的话，人得自己在脑子里排一遍。
+//
+// ⚠️ **订正：本条并没有覆盖 `classifyArticles` 末尾那个排序比较器**（我最初以为它会）。
+//
+// 实测覆盖 profile：`sort.SliceStable(res.Unsupported, …)` 的**调用本身**已覆盖，
+// 而**闭包体**（`296.56,298.3`）计数为 0 —— 比较器一次都没被调用过，本条却通过了。
+//
+// 查清的机制：C 类条目是在**解析循环里**追加进 `res.Unsupported` 的，而那次 sort 位于
+// `classifyArticles` 末尾、**执行得更早**。排序结果之所以正确，是因为解析循环遍历的
+// `items` **本身已按期次排好** —— 顺序是那条路径顺带保证的，不是这个比较器给的。
+//
+// ⇒ 本条钉住的是**性质**（这一格按期次升序），与它由谁保证无关；这才是它该断言的东西。
+// 而那个比较器目前**没有生产者**（社融已受支持、五种 period_type 全部放行 ⇒
+// `classifyArticles` 内部不再往 Unsupported 里塞东西），属于「配置变了之后暂时不可达、
+// 但必须留着等下次启用」的分支，与 M1c-3a 的 TASK-007 里 `checkPeriodTypeSupported`
+// 那条错误路径同类。**把它记在这里，免得后人看到闭包没覆盖就去删排序。**
+//
+// ⚠️ 夹具用同一份快照配两个不同标题：两篇都会在「没有累计数据」处失败，
+// **期次交叉校验（标题 vs 正文自解）在 Parse 失败时根本走不到**，所以这里
+// 期次取自标题、互不相同，正好用来验排序。
+func TestCollectSamplesSortsUnsupportedByPeriod(t *testing.T) {
+	dir := writeCalibrateFixture(t, Manifest{
+		From: "2020-04", CompletedAt: "2026-08-24T10:00:00Z",
+		Articles: []Article{
+			// 刻意逆序放入，若实现不排序就会原样输出
+			{ID: "later", Title: "2020年5月金融统计数据报告", File: "articles/b.html",
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+			{ID: "earlier", Title: "2020年4月金融统计数据报告", File: "articles/a.html",
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+			// 至少一篇正常样本：collectSamples 对「可用样本为 0」有既有守卫，
+			// 只放两篇不解析的会在那里就报错、走不到排序。
+			{ID: "ok", Title: "2025年金融统计数据报告", File: "articles/ok.html",
+				SHA256: testdataSHA(t, "pboc-2025-12-annual.html")},
+		},
+	}, map[string]string{
+		"articles/a.html":  "pboc-2020-04-monthly.html",
+		"articles/b.html":  "pboc-2020-04-monthly.html",
+		"articles/ok.html": "pboc-2025-12-annual.html",
+	})
+
+	got, err := collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err)
+
+	require.Len(t, got.Unsupported, 2, "两篇都只有当月数，都该进这一格")
+	assert.Equal(t, []string{"2020-04", "2020-05"},
+		[]string{got.Unsupported[0].Period, got.Unsupported[1].Period},
+		"必须按期次升序 —— 输入是逆序放的，不排序就会原样吐出来")
 }

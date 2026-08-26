@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -175,6 +176,33 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 
 		obs, err := Parse(raw)
 		if err != nil {
+			// 🔴 **先分流「报告本身没有累计数据」，再记失败**（M1c-3a 的 TASK-010）。
+			//
+			// 这类报告（真语料 23 篇，全是 2020–2023 年间的月报）正文只有当月数、
+			// 没有任何期内累计口径的合计句 —— 小标题都写成「三、4月份人民币存款增加…」。
+			// 它们不是解析器不行，是**数据根本不存在**。
+			//
+			// 归 Failures 的代价是具体的：那一格在报告里的标题是「解析失败（该支持却
+			// 失败了，M1c-3 入库前要清零）」、本文件顶部注释写着「M1c-4 要兜的就是这批」
+			// —— 而 LLM 兜底也变不出不存在的数，等于给 M1c-4 加一批**永远清不了零**的工作量。
+			//
+			// ⚠️ 判据是**正向属性**而不是错误串匹配：问「这篇正文里有没有任何累计口径的
+			// 合计句」，复用 cumulativePeriods 这张唯一真相源的表。错误文本会随实现措辞
+			// 改动而失配，「有没有累计句」是报告本身的性质。
+			//
+			// ⚠️ **原始解析错误一并带上**：分类用的属性与「这篇为什么解析失败」是两件事。
+			// 真语料里 2023-05 就是判为本类、而直接错误是「板块序号不连续」——不带上原错误，
+			// 那个结构问题会被分类标签盖掉。
+			if it.kind == backfillKindFinance && onlyCurrentMonthFlowSentences(stripHTML(raw)) {
+				res.Unsupported = append(res.Unsupported, ParseFailure{
+					Period: it.period, Kind: it.kind, File: it.a.File,
+					Err: "本迭代不解析：该期报告只有当月数、正文无任何期内累计口径的合计句，" +
+						"*_ytd 字段无源可抽（不是解析器不支持，LLM 兜底也变不出不存在的数）" +
+						"；原始解析错误：" + err.Error(),
+				})
+				res.Periods-- // 它没被真正尝试解析成功过，不计入「本轮尝试了多少期」
+				continue
+			}
 			// 原样带出 Parse 的错误：把它换成一句通用话，失败清单上 N 条就会长得一模一样，
 			// 而 M1c-4 要按成因分工。
 			fail(err.Error())
@@ -242,15 +270,19 @@ func classifyArticles(res *CalibrateResult, articles []Article) []calibrateItem 
 			res.Unclassified = append(res.Unclassified, a.Title)
 			continue
 		}
-		if kind != backfillKindFinance {
-			// ⚠️ 这里**不读文件**是刻意的：真实产物里社融两篇是抓下来了的，但即便没抓到，
-			// 它们也不该产生「读文件失败」—— 那不是失败，是本迭代不解析。
-			res.Unsupported = append(res.Unsupported, ParseFailure{
-				Period: period, Kind: kind, File: a.File,
-				Err: "本迭代不解析该报告种类（社融存量/增量的解析器是 M1c-3 的活）",
-			})
-			continue
-		}
+		// 🔴 **社融两种不再被硬过滤**（M1c-3a 的 TASK-010）。
+		//
+		// 这里原先写着「本迭代不解析该报告种类（社融存量/增量的解析器是 M1c-3 的活）」
+		// 并 `continue` —— 而**本迭代就是 M1c-3**：解析器由 M1c-3a 的 TASK-002/003/007
+		// 做完并接进了 `Parse` 的三路分派，calibrate 却仍不喂给它，于是报告里社融字段的
+		// n 原地不动。那句 Err 是它自己过期的证据。
+		//
+		// ⚠️ **社融两种的 Observation 不能 Save**：同一期的三篇报告共享 (period, period_type)
+		// 业务键，入库会撞主键。但 **calibrate 只统计字段值、不入库**（本函数下游只往
+		// Records / Samples 里塞数，没有任何 Store 调用），所以这里安全。
+		// 合并成一个 Observation 是 M1c-3b 的事。**下一个读到这里的人会问同样的问题，
+		// 所以答案写在这里而不是提交信息里。**
+
 		if reason := unsupportedPeriodType(a.Title); reason != "" {
 			res.Unsupported = append(res.Unsupported, ParseFailure{
 				Period: period, Kind: kind, File: a.File, Err: reason,
@@ -403,6 +435,36 @@ type SampleRecord struct {
 	Period     string // "YYYY-MM"，字典序即时间序
 	PeriodType string // monthly | q1 | h1 | q1_q3 | annual
 	Values     map[string]float64
+}
+
+// onlyCurrentMonthFlowSentences 回答「这篇报告**有**存/贷款合计句，但**没有一条是累计口径**」。
+//
+// 用途只有一个：把「报告本身没有累计数据」与「该支持却失败了」分开（M1c-3a 的 TASK-010）。
+//
+// 🔴 **两个条件缺一不可，`any` 那半是实撞出来的**：最初只判「没有累计句」，
+// 结果一个 index 页（正文里连合计句都没有、`Parse` 在 `missing <meta name="PubDate">`
+// 就失败了）被判成「该期报告只有当月数」——**一句关于它的假话**，而且会把一条真失败
+// 从 M1c-4 的清单上抹掉。「没有累计句」是必要条件，不是充分条件：
+// **要先证明它确实是一篇有数据的报告**（至少有一条合计句），再说它的数据全是当月口径。
+//
+// 🔴 **复用唯一真相源，不另写判据**：期次前缀交给 loanFlowRE / depositFlowRE 捕获，
+// 口径交给 cumulativePeriods 查表 —— 与 extract.go 的 selectRMBCumulativeFlow 问的是
+// 同一个问题（「这个前缀算不算累计」），只是这里问「有没有」、那里问「是哪一条」。
+// 自己在这里列一份「哪些前缀算累计」的名单，会在 profiles.go 加新前缀时静默分叉。
+//
+// ⚠️ 只对《金融统计数据报告》有意义：社融两种的正文没有存贷款合计句，对它们调用会
+// 恒返回 false —— 调用点已用 kind 限定，这里不再重复判断，但改动调用点时要记得。
+func onlyCurrentMonthFlowSentences(text string) bool {
+	var any, cumulative bool
+	for _, re := range []*regexp.Regexp{loanFlowRE, depositFlowRE} {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			any = true
+			if cumulativePeriods[m[1]] {
+				cumulative = true
+			}
+		}
+	}
+	return any && !cumulative
 }
 
 // samplesFromRecords 把逐期记录摊平成 field → 各期值。
