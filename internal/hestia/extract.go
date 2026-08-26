@@ -3,6 +3,7 @@ package hestia
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -53,34 +54,115 @@ func (c *collector) merge(other map[string]float64) error {
 // 在一份报告里最多命中一个标题」——由 TestSectionKeywordsHitAtMostOneTitle 守护。
 type sectionRule struct {
 	keyword string
-	v2Only  bool // 社融两节只在 rule@v2 期次存在
-	fn      func(section) (map[string]float64, error)
+	// v2Only：社融两节只在 **v2 版式**存在（rule@v2 / rule-monthly@v2）。
+	v2Only bool
+	// noMonthly：月报族不含本节。目前只有外汇节 —— 55 篇月报实测 53 篇正文里
+	// 根本没有「国家外汇储备余额」字样（缺口 G1），那不是抓取缺失，是
+	// absent-by-design（M1c-3a 的 TASK-006，AD-3）。
+	//
+	// ⚠️ 刻意**不**拿它去派生 coreSectionKeywords（那边仍按关键词判外汇节）：
+	// 「月报族没有本节」与「本节不算核心板块」是两个不同的概念，一个板块完全可能
+	// 月报没有却仍属核心。合并成一个标记会让将来给第二个板块打 noMonthly 时，
+	// coreSectionKeywords 静默变松 —— 而它变松不会有任何东西转红。
+	noMonthly bool
+	fn        func(section) (map[string]float64, error)
 }
 
 var sectionRules = []sectionRule{
-	{tsfSectionKeyword, true, extractTSFStockSection},
-	{"社会融资规模增量", true, extractTSFFlowSection},
-	{"广义货币", false, extractMoneySection},
-	{"人民币存款", false, extractDepositSection},
-	{"人民币贷款", false, extractLoanSection},
-	{"加权平均利率", false, extractRateSection},
-	{"国家外汇储备", false, extractFXSection},
+	{keyword: tsfSectionKeyword, v2Only: true, fn: extractTSFStockSection},
+	{keyword: "社会融资规模增量", v2Only: true, fn: extractTSFFlowSection},
+	{keyword: "广义货币", fn: extractMoneySection},
+	{keyword: "人民币存款", fn: extractDepositSection},
+	{keyword: "人民币贷款", fn: extractLoanSection},
+	{keyword: "加权平均利率", fn: extractRateSection},
+	{keyword: fxSectionKeyword, noMonthly: true, fn: extractFXSection},
+}
+
+// sectionPathExtractors 是走「切板块 → 逐节抽取」这条路的全部 extractor。
+//
+// tsf-stock@v1 / tsf-flow@v1 **不在其中**：社融独立报告没有板块结构，整篇当一节
+// 由 extractTSFStockArticle / extractTSFFlowArticle 处理（M1c-3a 的 TASK-002）。
+// 它们是合法的 extractor 值（validExtractors 收了它们），只是走错了路 —— 所以
+// extractFields 收到它们要报错，而不是返回空表。
+var sectionPathExtractors = []string{
+	extractorV1, extractorV2, extractorMonthlyV1, extractorMonthlyV2,
+}
+
+// appliesTo 是「本板块在该 extractor 下适不适用」的**唯一**定义（M1c-3a 的 TASK-006）。
+//
+// 收敛成一处而不是在 extractFields 的循环体里堆并列 if：两个维度堆两个 if 还能读，
+// 第三个维度出现时就不能了，而且那时「板块归属」会散落在循环里，没有任何地方能
+// 一眼看全。extract_test.go 的 TestSectionAppliesToIsTheSingleSourceOfScope 拿一张
+// 逐字面量的期望表对着它验。
+//
+// 判据是**声明式跳过**，不是「碰巧 findSection 找不到就放过」——后者是巧合，
+// 而巧合会在某期正文里偶然出现社融字样时失效（extractFields 原注释的理由，
+// 同样适用于外汇节）。声明式跳过还让「适用板块缺失」仍然响亮失败，
+// 两者由 TestExtractFieldsSkipsVsMissesSections 成对钉住。
+func (r sectionRule) appliesTo(extractor string) bool {
+	if r.v2Only && !isV2Layout(extractor) {
+		return false
+	}
+	if r.noMonthly && isMonthlyFamily(extractor) {
+		return false
+	}
+	return true
+}
+
+// isV2Layout / isMonthlyFamily 把 extractor 名切成两个**互相正交**的轴：
+// 版式（v1 / v2）× 报告族（累计期 / 月报）。四个 sectionPathExtractors 正好
+// 是这两个轴的四种组合。
+//
+// 用穷举比较而不是 strings.HasSuffix("@v2") / HasPrefix("rule-monthly")：
+// 字符串形状与语义**当前**恰好一致，但那是命名的巧合，常量表才是事实
+// （与 required.go 头部「不用 strings.HasPrefix(f, "tsf_") 代替」同一条理由）。
+func isV2Layout(extractor string) bool {
+	return extractor == extractorV2 || extractor == extractorMonthlyV2
+}
+
+func isMonthlyFamily(extractor string) bool {
+	return extractor == extractorMonthlyV1 || extractor == extractorMonthlyV2
 }
 
 // extractFields 按模板版本抽取全部字段。
 //
-// rule@v1 显式跳过社融两节——那期报告没有它们。显式跳过比「碰巧匹配不到」更
-// 清楚：前者是声明，后者是巧合，而巧合会在某期正文里偶然出现社融字样时失效。
+// 哪些板块适用由 sectionRule.appliesTo 一处决定（M1c-3a 的 TASK-006，AD-3）：
+// rule@v1 跳过社融两节、月报族跳过外汇节。显式跳过比「碰巧匹配不到」更清楚：
+// 前者是声明，后者是巧合，而巧合会在某期正文里偶然出现社融字样时失效。
+//
+// 跳过的板块与 requiredFields 必须归属一致，否则 completeness 会把「本期本就
+// 没有」记成「缺失」（或反过来把没人要的字段当成抽到了）。两者是各自独立派生的，
+// 由 TestExtractFieldsScopeMatchesRequiredFields 做双向相等比对。
 func extractFields(secs []section, extractor string) (map[string]float64, error) {
-	if extractor != extractorV1 && extractor != extractorV2 {
+	// 两种拒绝分开报，因为**排障方向完全不同**：一个是路由错了（值是对的，
+	// 该走另一条抽取路径），一个是值本身认不出（模板集无从选起）。合并成一条
+	// 会让前者的读者去查取值域、后者的读者去查路由，两边都被指错方向。
+	// 这与 Parse 把 PubDate 的三种缺陷分开报是同一条理由。
+	//
+	// 「合法但不走板块路径」由 validExtractors 减去 sectionPathExtractors **派生**，
+	// 不另列一份：llm-fallback@v1 与社融两种都落在这里，将来再加也自动归位。
+	switch {
+	case slices.Contains(sectionPathExtractors, extractor):
+		// 走板块路径，继续
+	case slices.Contains(validExtractors, extractor):
 		return nil, fmt.Errorf(
-			"hestia: unknown extractor %q (known: %s, %s): refusing to guess a template set",
-			extractor, extractorV1, extractorV2)
+			"hestia: extractor %q is valid but does not take the section path "+
+				"(section-path extractors: %s): its reports carry no section structure — "+
+				"%s and %s go through extractTSFStockArticle / extractTSFFlowArticle. "+
+				"Returning an empty field set here would look like a report with no data",
+			extractor, strings.Join(sectionPathExtractors, ", "),
+			extractorTSFStock, extractorTSFFlow)
+	default:
+		return nil, fmt.Errorf(
+			"hestia: unknown extractor %q (section-path extractors: %s): refusing to guess "+
+				"a template set — guessing would read a report this package has never seen "+
+				"and report its fields as if they came from a known layout",
+			extractor, strings.Join(sectionPathExtractors, ", "))
 	}
 
 	c := newCollector()
 	for _, rule := range sectionRules {
-		if rule.v2Only && extractor != extractorV2 {
+		if !rule.appliesTo(extractor) {
 			continue
 		}
 		sec, ok := findSection(secs, rule.keyword)
