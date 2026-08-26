@@ -247,9 +247,20 @@ func TestParseRatio(t *testing.T) {
 	assert.Equal(t, -18.0, v, "「同比下降18%」的符号同样来自方向词")
 }
 
+// ⚠️ **`持平` 曾经在下面这张拒绝清单里，M1c-3a 的 TASK-005 把它移走了** —— 这是一次
+// 有意的语义反转，不是把守卫改松，理由留在原地免得后人「修回去」：
+//
+//   - 当时它被拒，是因为它**不在方向词白名单里**，而不是因为「持平句永远不该被解析」。
+//     那时也确实没有任何模板会把 `持平` 送进来。
+//   - 现在 tsfStockRE 会送它进来（3 处真实语料，见 TestTSFStockREAcceptsFlatYoY），
+//     语义是明确的：变化率为零。
+//   - **它仍然不在白名单里** —— 这条连续性才是关键，由
+//     TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord 钉住。
+//
+// 与它形近的 `走平` / `回落` 等仍在本清单内：只有 `持平` 这一个词被特判。
 func TestParseRatioRejects(t *testing.T) {
 	t.Run("方向词走同一张白名单", func(t *testing.T) {
-		for _, dir := range []string{"持平", "多增", "回落", ""} {
+		for _, dir := range []string{"多增", "回落", ""} {
 			_, err := parseRatio(dir, "0")
 			require.Errorf(t, err, "比率的方向词 %q 应被拒", dir)
 			assert.Contains(t, err.Error(), strconv.Quote(dir))
@@ -519,4 +530,62 @@ func reverseAlternation(alt string) string {
 		words[i], words[j] = words[j], words[i]
 	}
 	return strings.Join(words, "|")
+}
+
+// —— M1c-3a 的 TASK-005：`同比持平` ⇒ 变化率为零 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-3a 的 TASK-005 functional[3](b)）
+// 约束①  `持平` **不得**进入 directionSign / directionAlt
+//                                   → TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord
+// 约束②  「parseRatio 认它」与「它不是方向词」同时为真，需一条断言钉住
+//                                   → 同上
+// 约束③  特判必须能区分「持平」与「解析失败」
+//                                   → 同上的「空方向词仍须报错」子测试
+//
+// 三条约束的来源：team-lead 2026-08-26 的裁决消息，已由我逐字转录进
+// `.arcforge/tasks/TASK-005.json` 的 `questions[0].answer`（标注了非 leader 亲笔）。
+
+// 🔴 `同比持平` = 变化率为零，但 `持平` **不是方向词**——两件事同时为真是刻意的。
+//
+// 报告里有 3 处分项余额句写「…余额为2.55万亿元，同比持平」（2023-07 / 2025-06 存量，
+// 以及 2026-05 v2 月报社融板块那句**没有「为」字**的）。它们既无方向词也无数字。
+//
+// # 为什么在 parseRatio 开头特判，而不是把 `持平` 加进那两张表
+//
+// 全语料 218 篇里「同比持平」共 50 处，**其中 45+ 处落在「从结构看」占比段**
+// （`委托贷款余额占比2.6%，同比持平`），那些**本就不该命中**。一旦 `持平` 进了
+// directionAlt，它就落进全局 dirPat，占比段那些句子全部变成候选 ⇒ mustMatch 的
+// 「恰好命中一次」退化成多命中报错。把它挡在表外，「数值+单位」的结构要求才继续生效。
+//
+// 顺带：不动那两张表，TestDirectionSignCoversDirectionAlt 的双射断言也不受影响。
+//
+// ⚠️ **这条断言存在的理由**：后人看到 parseRatio 认得 `持平`，很自然会想「那它怎么
+// 不在 directionAlt 里」并顺手加进去——那恰好破坏上面那条。把否定结论钉在这里。
+func TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord(t *testing.T) {
+	t.Run("持平 ⇒ 0，且无 error", func(t *testing.T) {
+		got, err := parseRatio(directionFlat, "")
+		require.NoError(t, err)
+		assert.Equal(t, 0.0, got, "「同比持平」的变化率就是 0，不是缺失、不是跳过")
+	})
+
+	t.Run("但它不是方向词：两张表里都没有", func(t *testing.T) {
+		_, ok := directionSign[directionFlat]
+		assert.Falsef(t, ok, "%q 不得登记进 directionSign", directionFlat)
+		assert.NotContainsf(t, directionAlt, directionFlat,
+			"%q 不得进入 directionAlt——它会落进全局 dirPat，让占比段那 45+ 处"+
+				"「同比持平」全变成候选，mustMatch 的「恰好命中一次」随即退化成多命中报错", directionFlat)
+	})
+
+	t.Run("约束③：空方向词仍须报错，不得被特判吞成 0", func(t *testing.T) {
+		// 正则没匹上时捕获组是空串。若把特判写成「num 为空就返回 0」，
+		// 这里会静默返回 0 —— 把「无从解析」变成「解析出 0」，是最坏的那种沉默。
+		_, err := parseRatio("", "")
+		require.Error(t, err, "空方向词是解析失败，必须与「持平」走不同的路")
+		assert.Contains(t, err.Error(), "unknown direction word", "错误形态保持不变")
+	})
+
+	t.Run("约束③续：表外方向词仍须报错", func(t *testing.T) {
+		_, err := parseRatio("走平", "")
+		require.Error(t, err, "只有 `持平` 这一个词被特判，形近词不得跟着放行")
+	})
 }

@@ -759,3 +759,282 @@ func TestSelectRMBCumulativeFlowPicksMonthlyCumulative(t *testing.T) {
 		assert.Equal(t, []string{"前八个月", "人民币", "增加", "15.6", "万亿元"}, m[1:])
 	})
 }
+
+// —— M1c-3a 的 TASK-005：模板措辞变体（企业锚点 / 全角括号 / 余额为后空格）——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-3a 的 TASK-005）
+// functional[1]     企业锚点认两版称呼，且**必须**是非捕获组
+//                                 → TestLoanScopeAnchorsCoverBothVintages
+//                                 → TestScopeTotalREKeepsCaptureGroupsAfterAnchorAlternation
+// functional[2]     moneyRE 认全角与半角括号，M2/M1/M0 三项都断言
+//                                 → TestMoneyREAcceptsBothParenWidths
+// functional[3](a)  tsfStockRE 容忍「余额为」后的一个空格
+//                                 → TestTSFStockREToleratesSpaceAfterBalancePrefix
+// boundary[0]       五个子项字段**各归各位**（真实 2019 年报逐字段）
+//                                 → TestLoanScopeAnchorsCoverBothVintages/2019年报
+// boundary[1]       两种括号各有用例，半角既有形态保持绿（扩大而非替换）
+//                                 → TestMoneyREAcceptsBothParenWidths（两份真实快照）
+// error_handling[0] 锚点找不到时响亮失败，且错误信息含锚点原文
+//                                 → TestLoanScopeAnchorMissingIsLoudFailure
+
+// realSection 从整篇正文里切出一个真实板块喂给模板层。
+//
+// 本任务测的是**模板/锚点层**，板块切分是 sections.go 的职责（本 wave 归 M1c-3a 的
+// TASK-004），这里不重复实现、也不依赖它：只按「`一、`…`六、`」这种小标题行把正文
+// 切开，取标题含 kw 的那一段。
+//
+// ⚠️ 标题必须与正文分开：小标题本身就是一个完整句（「二、全年人民币贷款增加16.81万亿元」），
+// 把它留在 Body 里会让 loanFlowRE 命中两次、`selectUnique` 直接报 matched 2 sentences
+// ——实测过，这正是 section 类型区分 Title / Body 的理由。
+func realSection(t *testing.T, text, kw string) section {
+	t.Helper()
+	headRE := regexp.MustCompile(`(?m)^[一二三四五六七八九十]+、.*$`)
+	locs := headRE.FindAllStringIndex(text, -1)
+	require.NotEmpty(t, locs, "正文里一个小标题都没有——切分前提不成立")
+
+	for i, loc := range locs {
+		title := text[loc[0]:loc[1]]
+		if !strings.Contains(title, kw) {
+			continue
+		}
+		end := len(text)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		return section{Title: title, Body: text[loc[1]:end]}
+	}
+	t.Fatalf("没有标题含 %q 的板块", kw)
+	return section{}
+}
+
+// 企业作用域锚点必须同时认两版称呼，且五个子项字段**各归各位**。
+//
+// 2019 年报用旧称呼「非金融企业及机关团体贷款」，2025 起用「企（事）业单位贷款」。
+// 旧称呼认不出时整个贷款板块抽不出来（`loan scope anchor … not found`）。
+//
+// 🔴 **为什么是逐字段断言而不是「无 error」**：锚点错位的后果不是「抽不到」，是
+// **住户的短期贷款跑进企业字段** —— 两个值都是合法量级，而 corp_loan_reconcile 是
+// **加总**校验，错位后总和不变，七道闸门一道也拦不住。所以这里逐条钉住五个字段。
+//
+// 🔴 **住户侧一个字都没改**（Leader 实测 C5）：现有 `住户(?:部门)?贷款` 已覆盖两版。
+// 我在 2019 快照上复核过：`住户部门贷款` 出现 1 次、`住户贷款` 0 次 ⇒ 已命中，改它是空动作。
+func TestLoanScopeAnchorsCoverBothVintages(t *testing.T) {
+	t.Run("2019年报：旧称呼「非金融企业及机关团体贷款」", func(t *testing.T) {
+		text := stripHTML(readTestdata(t, "pboc-2019-annual.html"))
+		got, err := extractLoanSection(realSection(t, text, "人民币贷款增加"))
+		require.NoError(t, err, "旧称呼认不出会让整个贷款板块抽不出来")
+
+		// 原文：住户部门贷款增加7.43万亿元，其中，短期贷款增加1.98万亿元，中长期贷款增加5.45万亿元；
+		//       非金融企业及机关团体贷款增加9.45万亿元，其中，短期贷款增加1.52万亿元，
+		//       中长期贷款增加5.88万亿元，票据融资增加1.84万亿元；非银行业金融机构贷款减少933亿元。
+		for _, tc := range []struct {
+			field string
+			want  float64
+		}{
+			{FieldLoanHHShortYTD, 19800},   // 住户 短期 1.98 万亿
+			{FieldLoanHHMLTYTD, 54500},     // 住户 中长期 5.45 万亿
+			{FieldLoanCorpShortYTD, 15200}, // 企业 短期 1.52 万亿
+			{FieldLoanCorpMLTYTD, 58800},   // 企业 中长期 5.88 万亿
+			{FieldLoanBillYTD, 18400},      // 票据融资 1.84 万亿
+		} {
+			assert.InDeltaf(t, tc.want, got[tc.field], 1e-6,
+				"%s 取到 %v —— 锚点错位时住户与企业的同名子项会互换，两个值都是合法量级、加总校验也拦不住",
+				tc.field, got[tc.field])
+		}
+
+		assert.InDelta(t, 94500.0, got[FieldLoanCorpTotalYTD], 1e-6, "企业合计 9.45 万亿")
+		assert.InDelta(t, -933.0, got[FieldLoanNBFIYTD], 1e-6, "非银行业金融机构贷款减少933亿元（方向为负）")
+	})
+
+	t.Run("2025 式新称呼「企（事）业单位贷款」仍绿（扩大而非替换）", func(t *testing.T) {
+		got, err := extractLoanSection(section{Body: "月末人民币贷款余额271.91万亿元，同比增长6.4%。" +
+			"全年人民币贷款增加16.27万亿元。分部门看，住户贷款增加4417亿元，" +
+			"其中，短期贷款减少8351亿元，中长期贷款增加1.28万亿元；" +
+			"企（事）业单位贷款增加15.47万亿元，其中，短期贷款增加4.81万亿元，" +
+			"中长期贷款增加8.82万亿元，票据融资增加1.66万亿元；" +
+			"非银行业金融机构贷款减少1103亿元。"})
+		require.NoError(t, err)
+		assert.InDelta(t, -8351.0, got[FieldLoanHHShortYTD], 1e-6)
+		assert.InDelta(t, 48100.0, got[FieldLoanCorpShortYTD], 1e-6)
+		assert.InDelta(t, 16600.0, got[FieldLoanBillYTD], 1e-6)
+	})
+}
+
+// 🔴 锚点里的交替**必须**是非捕获组 —— 这条守的是 `scopeTotalRE` 的字符串拼接。
+//
+//	scopeTotalRE: regexp.MustCompile(sc.anchorRE.String() + dirPat + numPat + unitPat)
+//
+// 裸交替 `A|B` 拼接后结合律错位 ⇒ `A|B(dir)(num)(unit)`：在 2025 式报告里 `A` 单独
+// 命中、三个捕获组全空，`newAmount("","","")` 报「unknown direction word」。
+// 独立 reviewer 照 DoD 原文实现时实撞过这个坑。
+//
+// 断言写成「三个捕获组都非空」而不是「能匹配」：**裸交替下它照样匹配得上**，
+// 只是捕获组是空的 —— 这与 M1c-3a 的 TASK-001 里「能匹配不等于捕获对」是同一课。
+func TestScopeTotalREKeepsCaptureGroupsAfterAnchorAlternation(t *testing.T) {
+	var corp loanScope
+	for _, sc := range loanScopes {
+		if sc.totalField == FieldLoanCorpTotalYTD {
+			corp = sc
+		}
+	}
+	require.NotNil(t, corp.anchorRE, "没找到企业作用域")
+
+	// 模板只取决于作用域本身、与句子无关，故建一次给两个 vintage 共用。
+	re := scopeTotalRE(corp)
+	require.Equal(t, 3, re.NumSubexp(), "作用域合计句模板必须恰好三个捕获组：方向词/数值/单位")
+
+	for _, tc := range []struct{ name, sentence string }{
+		{"v2 企（事）业单位贷款", "企（事）业单位贷款增加15.47万亿元，其中，短期贷款增加4.81万亿元"},
+		{"v1 非金融企业及机关团体贷款", "非金融企业及机关团体贷款增加9.45万亿元，其中，短期贷款增加1.52万亿元"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := re.FindStringSubmatch(tc.sentence)
+			require.NotNilf(t, m, "%q 必须命中", tc.sentence)
+			for i, what := range []string{"方向词", "数值", "单位"} {
+				assert.NotEmptyf(t, m[i+1], "%s 捕获组为空 —— 锚点交替没有用 `(?:…)`，"+
+					"拼接后结合律错位成 `A|B(dir)(num)(unit)`，锚点单独命中而三个组全空", what)
+			}
+		})
+	}
+}
+
+// moneyRE 必须同时认全角「（M2）」与半角「(M2)」。M1/M0 与 M2 共用 moneyRE，三项都断言。
+//
+// 全角实测 4 篇（2026-07 / 2026-04 / 2023-11 / 2023-10），半角 76 篇。
+// ⚠️ `stripHTML` 的 punctNormalizer **不碰括号**（只归一逗号、分号、全角空格），
+// 所以全角括号会原样到达模板层 —— 这个前提我读 strip.go 核实过，不是推断。
+//
+// ⚠️ 判据不能写成「能匹配到数字就行」：**两个值都要断言**，否则一个把括号连同代码
+// 整段吞掉的正则（如 `广义货币.*余额`）照样绿。
+func TestMoneyREAcceptsBothParenWidths(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+		want       map[string]float64
+	}{
+		{"全角（）：2026-07 月报", "pboc-2026-07-monthly.html", map[string]float64{
+			FieldM2: 355.51, FieldM2YoY: 7.7,
+			FieldM1: 115.46, FieldM1YoY: 4,
+			FieldM0: 14.82, FieldM0YoY: 11.6,
+		}},
+		{"半角()：2025-12 年报（既有形态，必须仍绿）", "pboc-2025-12-annual.html", map[string]float64{
+			FieldM2: 340.29, FieldM2YoY: 8.5,
+			FieldM1: 115.51, FieldM1YoY: 3.8,
+			FieldM0: 14.13, FieldM0YoY: 10.2,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := stripHTML(readTestdata(t, tc.file))
+			got, err := extractMoneySection(realSection(t, text, "广义货币"))
+			require.NoError(t, err)
+
+			for field, want := range tc.want {
+				assert.InDeltaf(t, want, got[field], 1e-6,
+					"%s 取到 %v —— 余额与同比两个值都要对，只断言「有值」挡不住吞掉括号的正则",
+					field, got[field])
+			}
+		})
+	}
+}
+
+// tsfStockRE 必须容忍「余额为」与数字之间的一个空格。
+//
+// 实测 3 篇带空格（2019年 / 2020-01 / 2020-02 社融存量），全部是「对实体经济发放的
+// 外币贷款折合人民币」这一项。
+//
+// 🔴 **语料里是两种字符，但到模板层只剩一种** —— 这个链条必须有测试连着：
+//   - 2020-01 / 2020-02 用 `0x20` 普通空格；**2019 年那篇用 `0xa0` NO-BREAK SPACE**
+//   - Go 的 `\s` = `[\t\n\f\r ]`，**不含 U+00A0** ⇒ 写 `\s*` 会静默漏掉 2019 那篇
+//   - 但 `strip.go` 的 `spaceRE = [ \t\x{00a0}]+` 会把两者都折叠成**单个普通空格**
+//
+// ⇒ 模板只需容忍至多一个普通空格。**下面第一个子测试特意从 U+00A0 原文出发、经
+// stripHTML 再匹配**：否则「模板只认 0x20」这件事的正确性依赖 strip.go 的折叠规则，
+// 而没有任何测试连接两者，strip.go 改了这里会静默坏掉。
+func TestTSFStockREToleratesSpaceAfterBalancePrefix(t *testing.T) {
+	const item = "对实体经济发放的外币贷款折合人民币"
+	re := tsfStockRE(item)
+
+	for _, tc := range []struct{ name, raw string }{
+		{"U+00A0（2019年那篇的真实形态），经 stripHTML 折叠", item + "余额为 2.11万亿元，同比下降4.6%"},
+		{"普通空格（2020-01/02 的形态）", item + "余额为 2.11万亿元，同比下降4.6%"},
+		{"无空格（既有形态，必须仍绿）", item + "余额为2.11万亿元，同比下降4.6%"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := re.FindStringSubmatch(stripHTML([]byte(tc.raw)))
+			require.NotNilf(t, m, "必须命中 %q", tc.raw)
+			assert.Equal(t, []string{"2.11", "万亿元", "下降", "4.6"}, m[1:],
+				"四个捕获组必须逐字对上——空格被吞进数值捕获组会让 parsePlainAmount 报错")
+		})
+	}
+
+	t.Run("阴性对照：占比句仍不得命中", func(t *testing.T) {
+		assert.Nil(t, tsfStockRE("委托贷款").FindStringSubmatch("委托贷款余额占比2.6%，同比低0.1个百分点"),
+			"「余额」后是「占」不是数字——放宽空格不得把占比段放进来")
+	})
+}
+
+// 锚点找不到时必须**响亮失败**，且错误信息带得出是哪个锚点。
+//
+// 阴性对照的意义：抽不到若被当成「这期本来就没有」，会静默返回空 map，
+// 下游拿到一份缺字段但无错误的结果，比报错难查得多。
+func TestLoanScopeAnchorMissingIsLoudFailure(t *testing.T) {
+	got, err := extractLoanSection(section{Body: "月末人民币贷款余额271.91万亿元，同比增长6.4%。" +
+		"全年人民币贷款增加16.27万亿元。本段刻意不含任何作用域锚点。"})
+
+	require.Error(t, err, "两个作用域都没有时必须报错，不能返回空 map 伪装成「这期没有」")
+	assert.Nil(t, got, "报错时不得同时返回半份结果")
+	assert.Contains(t, err.Error(), "loan scope anchor", "错误形态保持不变")
+	assert.Contains(t, err.Error(), "住户", "错误信息必须带出锚点原文，否则无从诊断是哪一版称呼没认出")
+}
+
+// tsfStockRE 必须认「，同比持平」这一尾形（M1c-3a 的 TASK-005 functional[3](b)）。
+//
+// 实测 3 处，逐字取自语料：
+//
+//	2023年7月社融存量：未贴现的银行承兑汇票余额为2.55万亿元，同比持平
+//	2025年6月社融存量：委托贷款余额为11.18万亿元，同比持平
+//	2026年5月金融统计数据报告：委托贷款余额11.22万亿元，同比持平   ← v2 月报，**没有「为」字**
+//
+// 🔴 **放宽的方式有讲究**：全语料 50 处「同比持平」里 45+ 处在「从结构看」占比段。
+// 不能把 `持平` 加进 dirPat（那会让占比段全部变成候选、mustMatch 退化成多命中报错），
+// 而是**保持「数值+单位」的结构要求**——占比句是 `余额占比2.6%`，「余额」后面是「占」
+// 不是数字，因此原样落在模板之外。阴性对照就钉这条。
+func TestTSFStockREAcceptsFlatYoY(t *testing.T) {
+	for _, tc := range []struct {
+		name, sentence, item string
+		want                 []string
+	}{
+		{"2023-07 未贴现的银行承兑汇票（有「为」）", "未贴现的银行承兑汇票余额为2.55万亿元，同比持平",
+			"未贴现的银行承兑汇票", []string{"2.55", "万亿元", "持平", ""}},
+		{"2025-06 委托贷款（有「为」）", "委托贷款余额为11.18万亿元，同比持平",
+			"委托贷款", []string{"11.18", "万亿元", "持平", ""}},
+		{"2026-05 委托贷款（v2 月报，**无「为」**）", "委托贷款余额11.22万亿元，同比持平",
+			"委托贷款", []string{"11.22", "万亿元", "持平", ""}},
+		{"既有数值形态必须仍绿", "委托贷款余额为11.18万亿元，同比下降26.6%",
+			"委托贷款", []string{"11.18", "万亿元", "下降", "26.6"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tsfStockRE(tc.item).FindStringSubmatch(tc.sentence)
+			require.NotNilf(t, m, "必须命中 %q", tc.sentence)
+			assert.Equal(t, tc.want, m[1:],
+				"四个捕获组：数值/单位/方向词/同比值。持平句的第四组是空串——"+
+					"由 parseRatio 特判成 0，见 TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord")
+		})
+	}
+
+	t.Run("🔴 阴性对照：占比段的「同比持平」仍不得命中", func(t *testing.T) {
+		for _, tc := range []struct{ item, sentence string }{
+			{"委托贷款", "委托贷款余额占比2.6%，同比持平"},
+			{"未贴现的银行承兑汇票", "未贴现的银行承兑汇票余额占比1.2%，同比持平"},
+		} {
+			assert.Nilf(t, tsfStockRE(tc.item).FindStringSubmatch(tc.sentence),
+				"%q 必须仍不命中：「余额」后面是「占」不是数字——"+
+					"全语料 50 处「同比持平」有 45+ 处是这个形态，放进来会让 mustMatch 多命中报错", tc.sentence)
+		}
+	})
+
+	t.Run("阴性对照：`持平` 没有泄漏进全局 dirPat", func(t *testing.T) {
+		assert.NotContains(t, dirPat, "持平",
+			"dirPat 由 amount.go 的 directionAlt 拼出，`持平` 一旦进去，"+
+				"社融增量/存款/贷款那几族模板都会跟着放宽")
+	})
+}
