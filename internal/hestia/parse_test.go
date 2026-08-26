@@ -745,3 +745,106 @@ func TestParseRefusesMonthlyWithoutPeriodToDateSentence(t *testing.T) {
 			"换个理由失败也会让 ③ 之外的断言绿——本条钉住失败原因没有漂移到 %q", unrelated)
 	}
 }
+
+// —— M1c-3a 的 TASK-008：本迭代成果在 CI 里的唯一守卫 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-3a 的 TASK-008）
+// functional[1]  六种 extractor 逐格断言 Extractor 与字段数 → TestParseCoversAllKinds
+// functional[1]  至少一格阴性（B 类月报必须报错）          → TestParseCoversAllKinds/阴性
+//
+// 🔴 **为什么这条测试重要**：真跑验收依赖 `data/hestia-backfill-2026-08-14`（15MB 产物目录），
+// 那个目录**不在仓库里**，CI 跑不到。⇒ 本迭代九个任务的成果，在 CI 里**只有这一条测试守着**。
+// 它红了就意味着某个 extractor 的端到端路径断了，而真跑验收要等到下一次有人手工执行。
+func TestParseCoversAllKinds(t *testing.T) {
+	// 期望值**全部按真跑实测填**。
+	//
+	// ⚠️ 需求文档把两份月报的 extractor 写成 `rule@v2` / 54 字段，**实测是
+	// `rule-monthly@v1` / 25** —— 照抄它会让这张表绿着而断言的是错的期望。
+	cases := []struct {
+		file      string
+		period    string
+		extractor string
+		fields    int
+	}{
+		// rule@v1：6 节（核心四 + 外汇 + 跨境），27 字段
+		{"pboc-2019-annual.html", "2019-12", extractorV1, 27},
+		{"pboc-2020-06-h1.html", "2020-06", extractorV1, 27},
+		{"pboc-2020-q1q3.html", "2020-09", extractorV1, 27},
+		{"pboc-2025-03-monthly.html", "2025-03", extractorV1, 27},
+
+		// rule@v2：8 节（多社融两节），54 字段
+		{"pboc-2025-12-annual.html", "2025-12", extractorV2, 54},
+		{"pboc-2026-03-q1.html", "2026-03", extractorV2, 54},
+		{"pboc-2025-09-q3.html", "2025-09", extractorV2, 54},
+
+		// rule-monthly@v1：4/5 节月报，25 字段
+		{"pboc-2025-08-monthly.html", "2025-08", extractorMonthlyV1, 25},
+		{"pboc-2025-01-monthly.html", "2025-01", extractorMonthlyV1, 25}, // 1 月特例走通用路径
+
+		// rule-monthly@v2：7 节月报（含社融两节），52 字段
+		{"pboc-2026-07-monthly.html", "2026-07", extractorMonthlyV2, 52},
+
+		// 社融两种独立报告：kind 直接决定 extractor，不经 detectExtractor
+		{"pboc-2025-08-tsf-stock.html", "2025-08", extractorTSFStock, 18},
+		{"pboc-2025-08-tsf-flow.html", "2025-08", extractorTSFFlow, 9},
+	}
+
+	covered := map[string]bool{}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			obs, err := Parse(readTestdata(t, tc.file))
+			require.NoError(t, err)
+			assert.Equal(t, tc.period, obs.Meta.Period)
+			assert.Equal(t, tc.extractor, obs.Meta.Extractor,
+				"extractor 错 = 分派或版式探测判错了")
+			assert.Len(t, obs.Values, tc.fields,
+				"字段数错 = 路径对但抽取不全；只断 extractor 挡不住这种")
+		})
+		covered[tc.extractor] = true
+	}
+
+	// 🔴 **白名单逐项表态**：`validExtractors` 里每一个都必须在上表里有真实样本，
+	// 除非它在下面这张豁免表里写明了理由。
+	//
+	// 判据是「**默认要求覆盖**」而不是「列出几个要测的」：新增第八个 extractor 时，
+	// 默认放行的写法会让它**没有任何端到端样本**却无人察觉，而本条会红并逼人表态。
+	// 与 TestEveryPeriodTypeHasAnExplicitSupportDecision 同族。
+	exempt := map[string]string{
+		"llm-fallback@v1": "M1c-4 才实现；取值域先行是刻意的（见 types.go 的 validExtractors 注释），" +
+			"实现之前不可能有真实样本",
+	}
+	for _, ex := range validExtractors {
+		if why, ok := exempt[ex]; ok {
+			assert.NotEmptyf(t, why, "%q 的豁免必须写明理由", ex)
+			continue
+		}
+		assert.Truef(t, covered[ex],
+			"extractor %q 没有任何真实样本覆盖 —— 要么补一格，要么写进 exempt 并说明理由。"+
+				"CI 里没有 15MB 产物目录，这张表是它唯一的端到端守卫", ex)
+	}
+
+	// 🔴 至少一格**阴性**：全是阳性用例的表证明不了守卫在工作。
+	//
+	// 两格覆盖两种**不同**的拒绝理由——它们的后续动作完全不同，合并成一格就分不出来了。
+	t.Run("阴性/B类口径混装必须报错", func(t *testing.T) {
+		// 2023-08：合计句是累计（前八个月）而分部门段是当月（8月份）——同一篇之内分段口径不同。
+		// 这是 M1c-3a 的 TASK-009 那道口径守卫，端到端仍必须生效。
+		obs, err := Parse(readTestdata(t, "pboc-2023-08-monthly.html"))
+		require.Error(t, err, "把当月分部门值装进 *_ytd 必须被拒")
+		assert.Empty(t, obs.Values, "报错时不得返回半份结果")
+		assert.Contains(t, err.Error(), "不是累计口径",
+			"失败原因必须是口径守卫本身；换个理由失败说明中间有东西变了")
+	})
+
+	t.Run("阴性/C类无累计数据必须报错", func(t *testing.T) {
+		// 2020-04：正文里**没有任何累计句**（小标题全是当月），*_ytd 无源可抽。
+		// 与 B 类的区别：B 类有累计数据只是分段口径不一致，C 类是数据根本不存在。
+		obs, err := Parse(readTestdata(t, "pboc-2020-04-monthly.html"))
+		require.Error(t, err, "没有累计数据可抽时必须响亮失败")
+		assert.Empty(t, obs.Values)
+		assert.Contains(t, err.Error(), "期内合计",
+			"C 类的失败点在「取不到期内合计」，与 B 类的口径守卫不是同一条")
+		assert.NotContains(t, err.Error(), "不是累计口径",
+			"两类的错误必须可区分——合并成同一句会让 calibrate 的分流失去依据")
+	})
+}
