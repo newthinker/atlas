@@ -232,8 +232,17 @@ var tsfFlowItems = []nameField{
 	{"非金融企业境内股票", FieldTSFFlowEquityYTD},
 }
 
+// 方向词与数字之间可能有**一个空格**（M1c-3a 的 TASK-005 返工轮）：
+// 「对实体经济发放的人民币贷款增加 16.88万亿元」——实测 2 处，2019年 与 2020年1月 社融增量，
+// 都是这一项。**码位是数出来的**：这 2 处是 `0x20`，与存量那条 `余额为 ` 变体里
+// 2019 年那份的 `0xa0`(NBSP) 不同；两者都被 strip.go 的 spaceRE 折叠成单个普通空格，
+// 故这里同样用 ` ?` 而非 `\s*`（`\s` 不含 U+00A0，理由见 tsfStockRE 上面那段）。
+//
+// **只改本条、不动 sectorFlowRE / scopeTotalRE**：全语料 218 篇扫「名称+方向词+空白+数字」
+// 命中**恰好 2 处，全在社融增量报告**，金融统计数据报告类 0 处 ⇒ 存款分部门与贷款作用域
+// 不受这个变体影响。这是范围的封闭性论证，不是「只找到这些」。
 func tsfFlowRE(name string) *regexp.Regexp {
-	return regexp.MustCompile(regexp.QuoteMeta(name) + dirPat + numPat + unitPat)
+	return regexp.MustCompile(regexp.QuoteMeta(name) + dirPat + ` ?` + numPat + unitPat)
 }
 
 // —— 模板 3：货币供应量（3 项 × 余额 + 同比 = 6 字段）——
