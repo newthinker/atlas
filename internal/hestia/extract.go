@@ -334,6 +334,83 @@ func extractMoneySection(sec section) (map[string]float64, error) {
 	return c.values, nil
 }
 
+// —— M1c-3a 的 TASK-009：分部门口径守卫 ——
+//
+// 月报的分部门数字有两种口径，而**两者都是合法量级**。2023-08 实读：
+//
+//	前八个月人民币贷款增加17.44万亿元。          ← 累计句 → loan_flow_ytd = 174400
+//	8月份人民币贷款增加1.36万亿元。分部门看，住户贷款增加3922亿元，
+//	  其中，短期贷款增加2320亿元…                ← 分部门跟在**当月句**后面
+//
+// 不加守卫时 loan_hh_short_ytd 会装 2320（8 月单月），而同一份 Observation 里
+// loan_flow_ytd 是 174400（累计）——**同一份观测内部口径混杂**，而七道闸门一道
+// 也拦不住：corp_loan_reconcile 查的是分部门**内部**自洽（错位后仍成立）、
+// gateDepositSum 在 validate 阶段而 calibrate 不跑闸门、所有值都在合法量级内
+// 而 magnitude_sanity 是空表。3a 的 calibrate 报告又是 M1c-3b 填 magnitude_ranges
+// 的唯一输入 ⇒ 混杂值会污染下游标定。
+//
+// 判据是**结构性**的：「分部门段之前最近的那个期次前缀，决定分部门的口径」。
+// Leader 对 54 篇有分部门段的月报逐篇比对该判据与数值分类，54/54 一致、0 例外。
+//
+// ⚠️ **刻意不用数值启发式**（「分部门合计与累计句偏差 > X%」）：那是拿一个测量值
+// 当判据，会随语料漂移而坏，且阈值本身无人守护。⚠️ **也不用期次黑名单**：新增期次
+// 时静默失效，而失效方向是**放行错数据**。
+//
+// ⚠️ 1 月报不需要特例分支：`1月份` 已在 cumulativePeriods 里（M1c-3a 的 TASK-001 加），
+// 查表自然命中。若发现需要为它写分支，说明判据实现偏了。
+const (
+	// 贷款侧与存款侧的分部门段锚点。两侧是同一个切换点、同一个结论（Leader 实测）。
+	loanSectorAnchor    = "分部门看"
+	depositSectorAnchor = "其中，住户存款"
+)
+
+// sectorPeriodRE 用来在分部门段之前找**最近的**期次前缀。
+//
+// 它直接由 profiles.go 的 periodPat 编译，**不另写一份期次词表**——两份词表迟早
+// 分叉，而分叉的表现是某类报告静默走错口径分支（与本文件开头纪律同源）。
+//
+// 按本包分工这条编译结果属于 profiles.go；放这里是**范围约束**：profiles.go 不在
+// M1c-3a 的 TASK-009 的 writes 里。词表本身仍只有一份，所以分叉风险没有被引入。
+var sectorPeriodRE = regexp.MustCompile(periodPat)
+
+// checkSectorCaliber 校验分部门段的口径：取锚点之前**最近**的期次前缀，查
+// cumulativePeriods。不在表里就报错，一个分部门字段都不产出。
+//
+// 三种返回：
+//
+//	锚点不存在        → nil，本守卫**不表态**（见下）
+//	锚点前无期次前缀   → 报错（读不出口径，不猜）
+//	前缀不在累计表里   → 报错（当月口径，拒绝装进 *_ytd）
+//
+// **锚点不存在时刻意放行**，不是漏判：那意味着这一节根本没有分部门段（实测 55 篇
+// 月报里 2022-04 是这一类），而分部门字段是必需的，紧随其后的 mustMatch 会以
+// 「分部门 X not found」报错——那条信息比「读不出口径」更具体。让更具体的那条先说话。
+func checkSectorCaliber(body, anchor, what string) error {
+	i := strings.Index(body, anchor)
+	if i < 0 {
+		return nil
+	}
+	prefixes := sectorPeriodRE.FindAllString(body[:i], -1)
+	if len(prefixes) == 0 {
+		return fmt.Errorf(
+			"hestia: %s锚点 %q 之前没有任何期次前缀，读不出它是累计还是当月口径: "+
+				"refusing to guess — 猜错会把当月值装进 *_ytd 字段，量级完全合理而口径是错的",
+			what, anchor)
+	}
+
+	// 取**最近**的那个：累计句与当月句可能同时出现（2023-08 两句都有），
+	// 决定分部门口径的是紧挨着它的那一句，不是本节里的第一句。
+	last := prefixes[len(prefixes)-1]
+	if !cumulativePeriods[last] {
+		return fmt.Errorf(
+			"hestia: %s的期次前缀 %q 不是累计口径，拒绝把当月分部门值装进 *_ytd 字段: "+
+				"同一份观测里合计字段取的是累计值，混进当月的分部门值会让内部口径不一致，"+
+				"而两者都在合法量级内、下游没有任何闸门拦得住",
+			what, last)
+	}
+	return nil
+}
+
 func extractDepositSection(sec section) (map[string]float64, error) {
 	c := newCollector()
 
@@ -350,6 +427,12 @@ func extractDepositSection(sec section) (map[string]float64, error) {
 		return nil, err
 	}
 	if err := setFlow(c, FieldDepositFlowYTD, m[3], m[4], m[5]); err != nil {
+		return nil, err
+	}
+
+	// 分部门段的口径守卫（M1c-3a 的 TASK-009）：必须在抽任何分部门字段**之前**。
+	// 放在循环里逐项判等于把同一个结论算四遍，且第一项抽完再报错时 collector 已脏。
+	if err := checkSectorCaliber(sec.Body, depositSectorAnchor, currencyRMB+"存款分部门段"); err != nil {
 		return nil, err
 	}
 
@@ -386,6 +469,12 @@ func extractLoanSection(sec section) (map[string]float64, error) {
 		return nil, err
 	}
 	if err := setFlow(c, FieldLoanFlowYTD, m[3], m[4], m[5]); err != nil {
+		return nil, err
+	}
+
+	// 分部门段的口径守卫（M1c-3a 的 TASK-009），先于作用域切分：
+	// 口径不对时整段分部门都不该抽，没必要先算作用域边界。
+	if err := checkSectorCaliber(sec.Body, loanSectorAnchor, currencyRMB+"贷款分部门段"); err != nil {
 		return nil, err
 	}
 
