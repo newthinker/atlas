@@ -37,12 +37,22 @@ func TestParseTitle(t *testing.T) {
 		title      string
 		period     string
 		periodType string
+		kind       string
 	}{
-		{"2025年金融统计数据报告", "2025-12", "annual"},
-		{"2020年上半年金融统计数据报告", "2020-06", "h1"},
-		{"2026年6月金融统计数据报告", "2026-06", "monthly"},
-		{"2026年11月金融统计数据报告", "2026-11", "monthly"},
-		{"2026年1月金融统计数据报告", "2026-01", "monthly"},
+		{"2025年金融统计数据报告", "2025-12", "annual", kindFinance},
+		{"2020年上半年金融统计数据报告", "2020-06", "h1", kindFinance},
+		{"2026年6月金融统计数据报告", "2026-06", "monthly", kindFinance},
+		{"2026年11月金融统计数据报告", "2026-11", "monthly", kindFinance},
+		{"2026年1月金融统计数据报告", "2026-01", "monthly", kindFinance},
+
+		// —— 社融两种（M1c-3a 的 TASK-007）——
+		//
+		// kind 与 (period, periodType) **相互独立**：同一个期次段落在三种报告上都合法，
+		// 所以下面四条刻意让期次与 kind 交叉，别只测「社融+annual」一种组合。
+		{"2025年8月社会融资规模存量统计数据报告", "2025-08", "monthly", kindTSFStock},
+		{"2025年前三季度社会融资规模增量统计数据报告", "2025-09", "q1_q3", kindTSFFlow},
+		{"2025年社会融资规模存量统计数据报告", "2025-12", "annual", kindTSFStock},
+		{"2020年一季度社会融资规模增量统计数据报告", "2020-03", "q1", kindTSFFlow},
 
 		// —— 季报（TASK-010）。期次值**逐字采用 TASK-001 discovery 里定的那一套** ——
 		//
@@ -50,14 +60,15 @@ func TestParseTitle(t *testing.T) {
 		// discover.go 的 parsePeriod 与这里的 parseTitle 是**两份并行的**期次解析，
 		// 一个看列表页链接文本、一个看文章页的 <meta name="ArticleTitle">，
 		// 期末月约定必须同源：q1→03、h1→06、q1_q3→09、annual→12。
-		{"2026年一季度金融统计数据报告", "2026-03", "q1"},
-		{"2025年前三季度金融统计数据报告", "2025-09", "q1_q3"},
+		{"2026年一季度金融统计数据报告", "2026-03", "q1", kindFinance},
+		{"2025年前三季度金融统计数据报告", "2025-09", "q1_q3", kindFinance},
 	} {
 		t.Run(tc.title, func(t *testing.T) {
-			period, pt, err := parseTitle(tc.title)
+			period, pt, kind, err := parseTitle(tc.title)
 			require.NoError(t, err)
 			assert.Equal(t, tc.period, period)
 			assert.Equal(t, tc.periodType, pt)
+			assert.Equal(t, tc.kind, kind, "kind 决定 Parse 走哪条抽取路径，错了会拿板块切分去处理整篇一段的社融报告")
 
 			// functional[1]：产出必须直接满足 M1b-1 的两个形态契约
 			assert.Regexp(t, `\A[0-9]{4}-[0-9]{2}\z`, period, "period 必须形如 YYYY-MM")
@@ -72,7 +83,7 @@ func TestParseTitle(t *testing.T) {
 // 万一那道校验被放宽：bitemporal 用字典序比较业务键，"2026-6" 会成为与
 // "2026-06" 不同的键，同一日历月在视图里出现两次，下游环比同比静默算错。
 func TestParseTitlePadsMonth(t *testing.T) {
-	period, _, err := parseTitle("2026年6月金融统计数据报告")
+	period, _, _, err := parseTitle("2026年6月金融统计数据报告")
 	require.NoError(t, err)
 	assert.Equal(t, "2026-06", period, "月份必须补零")
 	assert.Len(t, period, 7)
@@ -89,7 +100,12 @@ func TestParseTitleRejectsUnknownShape(t *testing.T) {
 		// 同上，去掉「第」字也不认：央行不发二/三/四季度的《金融统计数据报告》，
 		// 那三段分别由上半年 / 前三季度 / 全年覆盖（与 discover.go 的 parsePeriod 同口径）。
 		"2025年三季度金融统计数据报告",
-		"2025年社会融资规模统计数据报告", // 另一篇报告，板块结构完全不同
+		// ⚠️ 「社会融资规模统计数据报告」少了「存量/增量」二字，是**第三篇**报告
+		// （M1c-3a 的 TASK-007 之后，存量与增量两种已被 titleRE 认下来，这一种仍不认）。
+		// 它是「后缀锚定不能放松成 `社会融资规模.*报告`」的活证据。
+		"2025年社会融资规模统计数据报告",
+		// DoD error_handling[0] 点名的例子：完全另一类报告
+		"2026年二季度金融机构贷款投向统计报告",
 		"金融统计数据报告",
 		"2025年13月金融统计数据报告",  // 月份越界
 		"2025年0月金融统计数据报告",   // 月份下界
@@ -97,10 +113,26 @@ func TestParseTitleRejectsUnknownShape(t *testing.T) {
 		"",
 	} {
 		t.Run(bad, func(t *testing.T) {
-			_, _, err := parseTitle(bad)
+			_, _, _, err := parseTitle(bad)
 			require.Error(t, err, "不认识的标题形态必须报错，不能猜")
 			if bad != "" {
 				assert.Contains(t, err.Error(), bad, "错误信息必须带上原标题，否则排障看不出是哪篇")
+			}
+			// M1c-3a 的 TASK-007：认三种报告之后，「形态不认识」这条错误必须把**三种**
+			// 都列出来，否则拿到一篇社融报告的人只会看到「想要金融统计数据报告」，方向被指反。
+			//
+			// ⚠️ **只对这一条错误路径断言**：`2025年13月…` / `2025年0月…` 走的是另一条
+			// （`invalid month in report title`）——那两个标题的**形态是认得的**，坏在月份取值。
+			// 在那里也列三种形态只会把「你给的月份越界」这个真实原因淹没。
+			// 判据用错误前缀区分，而不是靠标题内容反推，免得将来加了新形态时这里悄悄失配。
+			if strings.Contains(err.Error(), "unrecognized report title") {
+				for _, k := range []string{kindFinance, kindTSFStock, kindTSFFlow} {
+					assert.Containsf(t, err.Error(), k, "错误信息必须列出 %q 这种形态", k)
+				}
+			} else {
+				assert.Contains(t, err.Error(), "invalid month",
+					"除「形态不认识」外，本组只应出现「月份越界」这一条错误路径；"+
+						"冒出第三种说明 parseTitle 多了一条没人知道的失败路径")
 			}
 		})
 	}
@@ -293,35 +325,45 @@ func TestParseStopsAtDetectExtractor(t *testing.T) {
 	}
 }
 
-// TestParseRejectsMonthlyUntilSampled 覆盖 boundary[2]，本任务选择**选项①**。
+// TestParseAcceptsMonthlyReports —— 由 TestParseRejectsMonthlyUntilSampled **转正例**而来
+// （M1c-3a 的 TASK-007）。
 //
-// monthly 路径零样本、零判据：两份样本一份 annual 一份 h1。而 T5 已实测，
-// 月报正是孪生句问题最严重的形态——正文同时含期内累计句与当月句，
-// 且哪句在前**无样本可证**；T5 的 cumulativePeriods 只认「全年/上半年」，
-// 对 5 月报的「1-5月」这类前缀会整条不命中。
+// # 来历：它此前断言的行为如今恰好相反，**别把它当过时测试删掉**
 //
-// 两条路里选显式拒绝，理由与全包一致：拿不准时不要猜。悄悄放行会让一份月报
-// 产出**看起来完全正常**的 Values——键数对、量级对、全在白名单内，而 YTD 字段
-// 装的可能是当月数。那种错下游没有任何闸门拦得住。
+// 原测试覆盖 boundary[2]，断言「monthly 必须被显式拒绝」，理由是那时**零样本零判据**：
+// 月报正文同时含期内累计句与当月句，哪句在前无样本可证，而当时的 cumulativePeriods
+// 只认「全年/上半年」。原注释写明「拿到月报样本后删掉这道守卫即可」。
 //
-// parseTitle 仍然解析 monthly（它只做标题→期次的映射，本身可测且正确），
-// 拒绝只发生在 Parse 这一层——拿到月报样本后删掉这道守卫即可，
-// 那时 parseTitle 与它的测试一行都不用改。
-func TestParseRejectsMonthlyUntilSampled(t *testing.T) {
-	raw := []byte(`<html><head><meta name="PubDate" content="2026-07-10">` +
-		`<meta name="ArticleTitle" content="2026年6月金融统计数据报告"></head><body>` +
-		`<p>一、甲</p><p>二、乙</p></body></html>`)
+// 这与 TASK-004 对季报那次转换是**同一手法**（见下一条测试的注释）：守的东西没变，
+// 只是从「中间态说得清」变成「终态跑得通」。删掉它等于把这条路径的端到端证据一起删掉。
+//
+// ⚠️ **原拒绝理由里有一句是错的，一并记在这里免得后人照它推断**：原注释称
+// 「cumulativePeriods 认不出 5 月报的『1-5月』这类前缀」。Leader 全量实读 55 篇月报，
+// **「1-5月」这种带范围的形态一次都没出现**——真实形态是「前八个月」这类中文数字前缀
+// （累计）与「8月份」（当月，要排除），1 月报的「1月份」是累计特例。那句写于零样本时期，
+// 是**推测**而非实测。（同一句话在 parse.go 的 checkPeriodTypeSupported 注释里也订正了。）
+//
+// 现在四份真实月报快照端到端跑通，解除条件已满足：TASK-001 给了「前N个月」十项与
+// 「1月份」特例，TASK-004 让板块切分认 4/5/7 节月报，TASK-006 让抽取侧按 extractor
+// 决定板块适用性。
+func TestParseAcceptsMonthlyReports(t *testing.T) {
+	obs, err := Parse(readTestdata(t, "pboc-2025-08-monthly.html"))
+	require.NoError(t, err, "月报解除支持后必须端到端跑通")
+	assert.Equal(t, "monthly", obs.Meta.PeriodType)
+	assert.NotEmpty(t, obs.Values, "跑通不等于抽到东西——空 Values 同样是失败")
 
-	obs, err := Parse(raw)
-	require.Error(t, err, "月报无样本验证，必须显式拒绝而不是沉默放行")
-	assert.Contains(t, err.Error(), "monthly")
-	assert.Empty(t, obs.Values)
+	// checkPeriodTypeSupported 的 monthly 分支已删，但**函数与穷举 switch 保留**：
+	// 那道「新增第六种 period_type 逼人明确表态」的防线由
+	// TestEveryPeriodTypeHasAnExplicitSupportDecision 使用，函数没了就无处可问。
+	require.NoError(t, checkPeriodTypeSupported("monthly", "2026年6月金融统计数据报告"),
+		"monthly 分支已删，这里必须放行")
 
-	// parseTitle 这一层不受影响：它对月报标题仍然正确
-	period, pt, err := parseTitle("2026年6月金融统计数据报告")
+	// parseTitle 这一层始终不受影响：它只做标题→期次/种类的映射
+	period, pt, kind, err := parseTitle("2026年6月金融统计数据报告")
 	require.NoError(t, err)
 	assert.Equal(t, "2026-06", period)
 	assert.Equal(t, "monthly", pt)
+	assert.Equal(t, kindFinance, kind)
 }
 
 // 🔴 TASK-010：季度类型同样要被**显式拒绝**，直到 TASK-004 把抽取侧接上。
@@ -353,7 +395,7 @@ func TestParseAcceptsQuarterlyReports(t *testing.T) {
 			require.True(t, ok, "真实样本必须有 ArticleTitle")
 			require.Equal(t, tc.title, title, "样本标题与 TASK-001 记录的一致")
 
-			period, pt, err := parseTitle(title)
+			period, pt, _, err := parseTitle(title)
 			require.NoError(t, err, "季报标题必须被 parseTitle 认出")
 			assert.Equal(t, tc.period, period)
 			assert.Equal(t, tc.periodType, pt)
@@ -392,7 +434,7 @@ func TestEveryPeriodTypeHasAnExplicitSupportDecision(t *testing.T) {
 	}{
 		"annual":  {true, "有真实样本 pboc-2025-12-annual.html"},
 		"h1":      {true, "有真实样本 pboc-2020-06-h1.html"},
-		"monthly": {false, "零样本；孪生句问题最严重，哪句在前无样本可证"},
+		"monthly": {true, "M1c-3a 的 TASK-007 已接线：TASK-001 给了「前N个月」十项与「1月份」特例、TASK-004 让切分认 4/5/7 节月报、TASK-006 让抽取侧按 extractor 定板块适用性；四份真实月报端到端跑通"},
 		"q1":      {true, "TASK-004 已接线：periodAlt 加了「一季度」、cumulativePeriods 同步登记；真实样本 pboc-2026-03-q1.html"},
 		"q1_q3":   {true, "TASK-004 已接线：periodAlt 加了「前三季度」（**不是**「三季度」）；真实样本 pboc-2025-09-q3.html"},
 	}
@@ -557,4 +599,149 @@ func TestParsePubDateShapeMatchesStoreContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, publishedAtRE.MatchString(obs.Meta.PublishedAt),
 		"Parse 产出的 published_at 必须直接满足 Save 的形态契约")
+}
+
+// —— M1c-3a 的 TASK-007：三路分派的端到端表 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-3a 的 TASK-007）
+// functional[0]     parseTitle 认三种报告并返回 kind      → TestParseTitle（表里四条社融用例）
+// functional[0]     不认识的标题报错且列出三种形态        → TestParseTitleRejectsUnknownShape
+// functional[1]     Parse 按 kind 三路分派                → TestParseDispatchesByKindEndToEnd
+// functional[2]     删 monthly 分支、保留穷举 switch      → TestParseAcceptsMonthlyReports、
+//                                                          TestEveryPeriodTypeHasAnExplicitSupportDecision
+// boundary[0]       逐格断言 extractor 与字段数            → TestParseDispatchesByKindEndToEnd
+// boundary[1]       *_ytd 取累计句不取当月句               → TestParseTakesPeriodToDateNotCurrentMonth
+// boundary[2]       1 月报特例 loan_flow_ytd 非零且等于实值 → TestParseTakesPeriodToDateNotCurrentMonth
+
+// 🔴 端到端逐格断言 `extractor` 与**字段数**，走完整 `Parse`（不是直调抽取函数）。
+//
+// 期望值**全部按实跑填**：需求文档把两份月报的 extractor 写成 `rule@v2`/54，
+// 实测是 `rule-monthly@v1`/25。这一格写错会让测试**绿着而断言的是错的期望**。
+//
+// 断 extractor **和** 字段数两样：只断 extractor 的话，一个走对了路径却少抽一半字段的
+// 实现照样绿；只断字段数的话，两条路径恰好字段数相同时就分不出走的是哪条。
+func TestParseDispatchesByKindEndToEnd(t *testing.T) {
+	for _, tc := range []struct {
+		file       string
+		period     string
+		periodType string
+		extractor  string
+		fields     int
+	}{
+		// —— kindFinance：切分 + detectExtractor 探测版式 ——
+		{"pboc-2025-08-monthly.html", "2025-08", "monthly", extractorMonthlyV1, 25},
+		{"pboc-2026-07-monthly.html", "2026-07", "monthly", extractorMonthlyV2, 52},
+		{"pboc-2025-01-monthly.html", "2025-01", "monthly", extractorMonthlyV1, 25},
+		{"pboc-2025-03-monthly.html", "2025-03", "monthly", extractorV1, 27},
+		{"pboc-2020-q1q3.html", "2020-09", "q1_q3", extractorV1, 27},
+
+		// —— 社融两种：kind 直接决定 extractor，不经探测 ——
+		//
+		// 这两行是三路分派的第二、三条路。若实现漏了分派、对它们照样走
+		// splitSections + detectExtractor，会命中 missingCoreSections 而报
+		// 「新版式/别的报告/抓取被截断」——一句方向完全错的错误信息。
+		{"pboc-2025-08-tsf-stock.html", "2025-08", "monthly", extractorTSFStock, 18},
+		{"pboc-2025-08-tsf-flow.html", "2025-08", "monthly", extractorTSFFlow, 9},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			obs, err := Parse(readTestdata(t, tc.file))
+			require.NoError(t, err)
+			assert.Equal(t, tc.period, obs.Meta.Period)
+			assert.Equal(t, tc.periodType, obs.Meta.PeriodType)
+			assert.Equal(t, tc.extractor, obs.Meta.Extractor,
+				"extractor 错 = 走错了分派分支，或版式探测判错")
+			assert.Len(t, obs.Values, tc.fields,
+				"字段数错 = 路径对但抽取不全；只断 extractor 挡不住这种")
+		})
+	}
+}
+
+// 🔴 `*_ytd` 必须取**累计句**的值，不是当月句。
+//
+// 2025-08 月报正文同时含两句：
+//
+//	前八个月人民币贷款增加13.46万亿元   ← 要这个（134600）
+//	8月份人民币贷款增加…               ← 不是这个
+//
+// **为什么必须逐值断言**：当月值同样是合法量级、同样在白名单内，只是口径错——
+// `magnitude_sanity` 是空表，拦不住。断「有值」或「非零」都放得过去。
+func TestParseTakesPeriodToDateNotCurrentMonth(t *testing.T) {
+	t.Run("2025-08：累计句 vs 当月句", func(t *testing.T) {
+		obs, err := Parse(readTestdata(t, "pboc-2025-08-monthly.html"))
+		require.NoError(t, err)
+		assert.InDelta(t, 134600.0, obs.Values[FieldLoanFlowYTD], 1.0,
+			"取到当月值而非「前八个月」那句的话，量级同样合法、下游无人拦得住")
+		assert.InDelta(t, 331.98, obs.Values[FieldM2], 1e-9)
+	})
+
+	// 1 月报特例：`1月份` 既是当月也是累计（1 月的累计就是当月），
+	// 它是 M1c-3a 的 TASK-001 那条特例在端到端的唯一体现。
+	//
+	// ⚠️ **不能只断 NotZero**：一个把当月句错当累计句的实现在这里同样非零。
+	// 实读原文「1月份人民币贷款增加5.13万亿元」⇒ 51300。
+	t.Run("2025-01：1 月报特例", func(t *testing.T) {
+		obs, err := Parse(readTestdata(t, "pboc-2025-01-monthly.html"))
+		require.NoError(t, err)
+		require.NotZero(t, obs.Values[FieldLoanFlowYTD],
+			"`1月份` 不在 cumulativePeriods 时这里会是 0（整篇命中 0）")
+		assert.InDelta(t, 51300.0, obs.Values[FieldLoanFlowYTD], 1.0,
+			"只断非零挡不住「把当月句错当累计句」——1 月这两者恰好同值，"+
+				"所以真正区分它们的是别的月份，这里钉住具体值是为了防实现改坏后仍非零")
+	})
+}
+
+// 🔴 只有当月数、没有累计数的月报 —— `Parse` **必须响亮报错**（M1c-3a 的 TASK-007）。
+//
+// # 这一格推翻了 DoD boundary[0] 原写的期望
+//
+// DoD 原写 `pboc-2020-04-monthly.html` →「`rule-monthly@v1` / 25 字段」。实测**报错**，
+// 而报错才是正确行为。裁决人 team-lead，依据是它在主仓库独立复核的词频统计。
+//
+// **机制**（不是结论）：这份报告正文里**没有任何累计句**——`前四个月` / `1-4月` / `累计`
+// 各出现 **0** 次，四条小标题全是当月（「三、4月份人民币存款增加1.27万亿元」）。
+// 于是 `selectRMBCumulativeFlow` 找到一条候选（`4月份/人民币`）却**拒绝采用**：
+// 把当月值装进 `*_ytd` 正是 M1c-3a 的 TASK-009 那道口径守卫要拦的事。
+//
+// ⚠️ **不是个例**：用 `Parse` 真跑全部 55 篇月报，通过 25 / 失败 30，
+// 其中 **22 篇**正是这一条原因。2020-04 是它们的代表，不是异常值。
+//
+// ⚠️ 「让这类月报也能解析（`*_ytd` 记为缺失而非报错）」是一次**真实的设计变更**，
+// 涉及 `extract.go` / `required.go`，不在本任务 `writes` 内 —— 留给 TASK-010 定夺，
+// **本任务不为它改自己的交付**。
+//
+// # 断言为什么要交叉写
+//
+// 只断「有 error」的话，实现换个理由失败（版式认不出、板块缺失、标题不认）同样绿，
+// 而那三种的排障方向完全不同。所以既钉**正向**（错误必须指向「期内合计取不到」，
+// 且带上那条被拒的当月候选），也钉**反向**（不得是版式/板块/标题那三类无关错误）。
+func TestParseRefusesMonthlyWithoutPeriodToDateSentence(t *testing.T) {
+	raw := readTestdata(t, "pboc-2020-04-monthly.html")
+
+	// ① 版式探测这一步是**对的** —— DoD 原期望里仍然成立的那半，一并钉住。
+	//    错在更后面：探测出 rule-monthly@v1 之后，抽取层才发现没有累计句。
+	secs := splitSections(stripHTML(raw))
+	require.Len(t, secs, 4, "这份是 4 节月报")
+	ex, err := detectExtractor(secs, "monthly")
+	require.NoError(t, err, "版式探测本身不该失败")
+	assert.Equal(t, extractorMonthlyV1, ex, "4 节月报仍应被判成 rule-monthly@v1")
+
+	// ② 端到端必须报错，且**不产出半份结果**
+	obs, err := Parse(raw)
+	require.Error(t, err, "没有累计数可抽时必须响亮失败——静默产出会让 *_ytd 装上当月值")
+	assert.Empty(t, obs.Values, "报错时不得同时返回半份 Values")
+
+	// ③ 正向：错误必须指向真实原因
+	assert.Contains(t, err.Error(), "期内合计", "错误要指出取不到的是「期内合计」这个口径")
+	assert.Contains(t, err.Error(), "4月份",
+		"要带上那条被拒的当月候选——排障的人据此才知道「不是没句子，是句子口径不对」")
+
+	// ④ 反向：不得是另外三类无关错误
+	for _, unrelated := range []string{
+		"unrecognized report title", // 标题层
+		"missing core section",      // 板块层
+		"unknown extractor",         // 版式层
+	} {
+		assert.NotContainsf(t, err.Error(), unrelated,
+			"换个理由失败也会让 ③ 之外的断言绿——本条钉住失败原因没有漂移到 %q", unrelated)
+	}
 }

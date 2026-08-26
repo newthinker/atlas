@@ -149,10 +149,15 @@ func TestCollectSamplesIgnoresNonFinanceKinds(t *testing.T) {
 
 // threeCategoryFixture 一次覆盖三类跳过/失败成因，外加一期正常样本。
 //
-// 🔴 monthly 那篇的**文件同样不存在**：`parse.go` 的 checkPeriodTypeSupported 对 monthly
-// 显式返回 error（TestParseRejectsMonthlyUntilSampled 把这个决定钉成了契约），所以它与
-// 社融两篇同类——本迭代不解析。若实现把它当成待解析的，真语料上会产生**约 53 条**
-// 同一句 "monthly is not supported yet" 的假失败，把真失败淹没。
+// 🔴 **monthly 那篇已从「本迭代不解析」改为「正常样本」**（M1c-3a 的 TASK-007）。
+//
+// 原来它的文件刻意不存在，因为 `checkPeriodTypeSupported` 对 monthly 显式返回 error，
+// 它与社融两篇同类。TASK-007 删掉那个分支后**月报是受支持的期次**，于是这里给它
+// 一份真实月报，让本夹具直接体现这一点——而不是只把「不解析」的期望值从 3 改成 2。
+//
+// 原注释里那句「若实现把它当成待解析的，真语料上会产生约 53 条同一句
+// "monthly is not supported yet" 的假失败」**已随分支删除而失效**，留在这里是因为
+// 它记录了当初为什么要让那篇不可读：**那个理由消失了，不是那个判断错了**。
 func threeCategoryFixture(t *testing.T) string {
 	t.Helper()
 	return writeCalibrateFixture(t, Manifest{
@@ -161,8 +166,10 @@ func threeCategoryFixture(t *testing.T) string {
 		Articles: []Article{
 			{ID: "ok", Title: "2025年金融统计数据报告", File: "articles/ok.html",
 				SHA256: testdataSHA(t, "pboc-2025-12-annual.html")},
-			// 类 1：本迭代不解析（monthly + 社融两篇），三篇的文件都不存在
-			{ID: "m", Title: "2026年7月金融统计数据报告", File: "articles/nope-m.html"},
+			// 月报（M1c-3a 的 TASK-007 起受支持）：给真实文件，走正常解析
+			{ID: "m", Title: "2026年7月金融统计数据报告", File: "articles/m.html",
+				SHA256: testdataSHA(t, "pboc-2026-07-monthly.html")},
+			// 类 1：本迭代不解析（社融两篇），两篇的文件都不存在
 			{ID: "s", Title: "2020年3月社会融资规模存量统计数据报告", File: "articles/nope-stock.html"},
 			{ID: "f", Title: "2020年一季度社会融资规模增量统计数据报告", File: "articles/nope-flow.html"},
 			// 类 2：该支持却失败了 —— 正文给一个 index 页，Parse 必然失败
@@ -173,6 +180,7 @@ func threeCategoryFixture(t *testing.T) string {
 		},
 	}, map[string]string{
 		"articles/ok.html":  "pboc-2025-12-annual.html",
+		"articles/m.html":   "pboc-2026-07-monthly.html",
 		"articles/bad.html": "pboc-index-p1.html",
 	})
 }
@@ -183,17 +191,15 @@ func TestCollectSamplesSeparatesThreeCategories(t *testing.T) {
 	got, err := collectSamples(CalibrateDeps{Dir: threeCategoryFixture(t)})
 	require.NoError(t, err)
 
-	// 类 1：本迭代不解析 —— 3 篇，且**没有一篇被读过文件**（它们的文件都不存在，
-	// 若被读过就会变成「读文件失败」跑进 Failures）
-	require.Len(t, got.Unsupported, 3)
-	var monthly int
+	// 类 1：本迭代不解析 —— **2 篇**（社融两种；monthly 自 M1c-3a 的 TASK-007 起受支持），
+	// 且**没有一篇被读过文件**（它们的文件都不存在，若被读过就会变成「读文件失败」跑进 Failures）
+	require.Len(t, got.Unsupported, 2)
 	for _, u := range got.Unsupported {
 		assert.NotContains(t, u.Err, "读文件", "不解析的篇目不该被读")
-		if strings.Contains(u.Err, "monthly") {
-			monthly++
-		}
+		assert.NotContains(t, u.Err, "monthly",
+			"monthly 已受支持，不该再出现在「本迭代不解析」里——"+
+				"它若回到这里，说明 checkPeriodTypeSupported 的分支被人加了回去")
 	}
-	assert.Equal(t, 1, monthly, "monthly 与社融两篇同类，但理由要写得出来")
 
 	// 类 2：该支持却失败了 —— 只有 index 页那一篇
 	require.Len(t, got.Failures, 1)
@@ -202,9 +208,9 @@ func TestCollectSamplesSeparatesThreeCategories(t *testing.T) {
 	// 类 3：标题解析不出期次 —— 原文进 Unclassified，不得 continue 丢弃
 	assert.Equal(t, []string{"2024年三季度金融统计数据报告"}, got.Unclassified)
 
-	// 正常那期照常出样本
-	assert.Len(t, got.Samples[FieldM2], 1)
-	assert.Equal(t, 2, got.Periods, "Periods 只数受支持的金融统计报告（含失败的那篇）")
+	// 正常那两期照常出样本（年报 + 月报；月报是 TASK-007 新接的那一类）
+	assert.Len(t, got.Samples[FieldM2], 2, "年报与月报各贡献一个 m2 读数")
+	assert.Equal(t, 3, got.Periods, "Periods 只数受支持的金融统计报告（含失败的那篇）")
 }
 
 // 三类都要**渲染出来**：一个只把它们记在结构体里、不写给人看的实现，与「静默消失」
@@ -218,10 +224,17 @@ func TestCollectSamplesRendersEveryCategoryToOut(t *testing.T) {
 	assert.Contains(t, s, "2024年三季度金融统计数据报告", "解析不出期次的标题原文必须出现")
 	assert.Contains(t, s, "articles/bad.html", "失败要定位到文件")
 	assert.Contains(t, s, backfillKindStock, "不解析的种类要写出来")
-	// ⚠️ 夹具里 monthly 那篇的文件名**刻意不含 "monthly"**（articles/nope-m.html）：
-	// 叫 nope-monthly.html 的话，即使实现把它错记成「读文件失败」，这条断言也会被
-	// 失败行里的文件名平凡满足 —— 消融实测过，那时本用例不红。
-	assert.Contains(t, s, "monthly", "不解析的 period_type 要写出来")
+	assert.Contains(t, s, backfillKindFlow, "两种社融各自写出来，合并成一条会看不出缺哪一种")
+
+	// ⚠️ **这条原本断言的是 "monthly"**（那时月报属「本迭代不解析」），夹具里那篇的文件名
+	// 因此刻意不含 "monthly"——否则实现即使把它错记成「读文件失败」，断言也会被失败行里的
+	// 文件名平凡满足（消融实测过，那时本用例不红）。
+	//
+	// M1c-3a 的 TASK-007 让月报受支持后，那个断言已无对象。**防平凡满足的手法本身仍然成立**，
+	// 所以换成对社融两种的同形断言，并保留这段来历：判据不是「输出里有没有这个词」，
+	// 而是「这个词只可能由**我要验的那一行**产生」。
+	assert.NotContains(t, s, "本迭代不解析该报告种类（社融存量/增量的解析器是 M1c-3 的活）: 2026-07",
+		"月报不该再出现在「本迭代不解析」那一段")
 }
 
 // —— boundary[0] ——
