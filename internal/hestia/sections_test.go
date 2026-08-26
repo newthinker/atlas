@@ -36,6 +36,7 @@ package hestia
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 
@@ -207,13 +208,13 @@ func TestSplitSectionsIsPure(t *testing.T) {
 
 func TestDetectExtractor(t *testing.T) {
 	t.Run("八板块含社融 → rule@v2", func(t *testing.T) {
-		got, err := detectExtractor(sectionsOf(t, "pboc-2025-12-annual.html"))
+		got, err := detectExtractor(sectionsOf(t, "pboc-2025-12-annual.html"), "annual")
 		require.NoError(t, err)
 		assert.Equal(t, "rule@v2", got)
 	})
 
 	t.Run("六板块无社融 → rule@v1", func(t *testing.T) {
-		got, err := detectExtractor(sectionsOf(t, "pboc-2020-06-h1.html"))
+		got, err := detectExtractor(sectionsOf(t, "pboc-2020-06-h1.html"), "h1")
 		require.NoError(t, err)
 		assert.Equal(t, "rule@v1", got)
 	})
@@ -232,27 +233,45 @@ func mkSections(titles ...string) []section {
 // 中间态一律报错，不降级。七个板块缺社融可能是央行改版，也可能是页面抓残了；
 // 静默当 v1 会让 M1b-3 的 completeness 用少字段的必填集，于是「解析漏了」被当成
 // 「本期模板本就没有」——那是完全无声的一类错。
+//
+// ⚠️ M1c-3a 的 TASK-004 改判据后，本测试的用例集**做过一次实质修订**，不是简单
+// 换个期望字串。原来的四个「N 板块但…」用例是冲着旧判据的节数魔数去的，且它们的
+// 合成标题被缩写成「二、贷款」「三、C」——在新判据下这些标题连核心板块都凑不齐，
+// 于是**因为另一个理由**变红。测试仍然绿，但守的不再是它名字说的那件事。
+// （require 失败即中止，这类「换了理由的红」不会有任何东西提醒你。）
+//
+// 修订后每个用例的标题都写成真实报告的形态，各自只缺它名字说的那一样：
+//   - 缺核心板块 → 报错（本测试）
+//   - 有增量节没有存量节 → 报错（本测试，守卫见 detectExtractor 内注释）
+//   - 节数多出来但核心齐全 → **不再报错**，是刻意接受的
+//     （移到 TestDetectExtractorAcceptsExtraIrrelevantSections，理由写在那里）
 func TestDetectExtractorRejectsUnknownLayout(t *testing.T) {
-	cases := map[string][]section{
-		"七板块缺社融（可能抓残了）": mkSections("一、广义货币", "二、贷款", "三、存款",
-			"四、利率", "五、外汇", "六、跨境", "七、多出来的"),
-		"八板块但无社融（新模板？）": mkSections("一、A", "二、B", "三、C", "四、D",
-			"五、E", "六、F", "七、G", "八、H"),
-		"六板块却有社融": mkSections("一、社会融资规模存量", "二、B", "三、C",
-			"四、D", "五、E", "六、F"),
-		// 只有社融增量节、没有存量节：八板块的数字对上了，但形态是没见过的。
-		// 判据锚在「社会融资规模存量」而不是更宽的「社会融资规模」正是为了这里——
-		// 用宽锚点会把它当成正常的 rule@v2，按已知模板去抽一份结构未知的报告。
-		"八板块但只有社融增量节": mkSections("一、社会融资规模增量", "二、B", "三、C",
-			"四、D", "五、E", "六、F", "七、G", "八、H"),
-		"空文档": {},
+	cases := map[string]struct {
+		secs []section
+		want string
+	}{
+		"缺核心板块之一（人民币贷款）": {mkSections(
+			"一、广义货币增长8.5%", "二、人民币存款增加26万亿元",
+			"三、同业拆借月加权平均利率为1.4%", "四、国家外汇储备余额3.3万亿美元"),
+			"missing core section"},
+		"核心板块一个都没有（抓到的是别的页面）": {mkSections(
+			"一、A", "二、B", "三、C", "四、D"), "missing core section"},
+		// 只有社融增量节、没有存量节：形态是没见过的。判据锚在「社会融资规模存量」
+		// 而不是更宽的「社会融资规模」是刻意的；这条守的是那个窄锚点的另一侧——
+		// 否则它会因「核心齐 + 有外汇」被判成 rule@v1，把增量数据静默丢掉。
+		"有社融增量节但没有存量节": {mkSections(
+			"一、社会融资规模增量累计为35万亿元", "二、广义货币增长8.5%",
+			"三、人民币贷款增加16万亿元", "四、人民币存款增加26万亿元",
+			"五、同业拆借月加权平均利率为1.4%", "六、国家外汇储备余额3.3万亿美元"),
+			"found a 社融 section but not"},
+		"空文档": {nil, "missing core section"},
 	}
-	for name, secs := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := detectExtractor(secs)
+			_, err := detectExtractor(tc.secs, "annual")
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "unrecognized layout",
-				"错误须自述形态不可识别，便于人工判断是改版还是抓残")
+			assert.Contains(t, err.Error(), tc.want,
+				"错误须自述是哪一类形态问题，便于人工判断是改版还是抓残")
 		})
 	}
 }
@@ -267,17 +286,22 @@ func TestDetectExtractorRejectsUnknownLayout(t *testing.T) {
 // 真实样本抓不到这个错：2020 样本通篇不含「社会融资规模」，2025 样本按哪种判据
 // 都是 v2（变异实测：改成按正文判定，两份样本全绿）。所以用合成输入钉。
 func TestDetectExtractorJudgesTSFByTitleOnly(t *testing.T) {
-	secs := mkSections("一、广义货币", "二、贷款", "三、存款",
-		"四、利率", "五、外汇", "六、跨境")
+	// 标题写成真实报告的形态（M1c-3a 的 TASK-004 改判据后，缩写标题会因
+	// 「核心板块不齐」先红，本测试就测不到它自称的那个性质了）
+	secs := mkSections("一、广义货币增长8.5%", "二、人民币贷款增加16万亿元",
+		"三、人民币存款增加26万亿元", "四、同业拆借月加权平均利率为1.4%",
+		"五、国家外汇储备余额3.3万亿美元", "六、跨境贸易人民币结算业务发生3万亿元")
+	require.Empty(t, missingCoreSections(secs),
+		"前提：核心四节齐全——否则红的是核心板块闸，不是「按标题判社融」这条")
 	// 末节挂上尾注，正文里出现社融锚点的完整字面——正如 2025 样本的注 2
 	secs[5].Body = "注2：社会融资规模存量是指一定时期末实体经济从金融体系获得的资金余额。"
 
 	require.Contains(t, secs[5].Body, "社会融资规模存量",
 		"前提：该板块正文确实含社融字面——按正文判定的话就会命中它")
 
-	got, err := detectExtractor(secs)
+	got, err := detectExtractor(secs, "annual")
 	require.NoError(t, err, "六板块 + 仅正文提到社融，仍应是 rule@v1")
-	assert.Equal(t, "rule@v1", got)
+	assert.Equal(t, extractorV1, got)
 }
 
 // TestDetectExtractorErrorNamesActualCount 钉住 error_handling[0]。
@@ -302,7 +326,7 @@ func TestDetectExtractorErrorNamesActualCount(t *testing.T) {
 			mkSections("一、A", "二、B", "三、C"), "3 sections"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := detectExtractor(tc.secs)
+			_, err := detectExtractor(tc.secs, "annual")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want,
 				"错误须说出实际板块数，才能分辨是样本变了还是切分规则错了")
@@ -344,7 +368,7 @@ func TestDetectExtractorRejectsNonConsecutiveOrdinals(t *testing.T) {
 		require.Len(t, secs, 6, "反例的形态前提")
 		require.Contains(t, secs[0].Title, "三、", "首个板块的序号是三而不是一")
 
-		_, err := detectExtractor(secs)
+		_, err := detectExtractor(secs, "annual")
 		require.Error(t, err, "残缺的 v2 不得被当成合法 v1")
 
 		// fix_items 的判据：Parse 必须 error 且不产出任何 Values
@@ -356,7 +380,7 @@ func TestDetectExtractorRejectsNonConsecutiveOrdinals(t *testing.T) {
 
 	t.Run("错误信息含实际首个序号与实际板块数", func(t *testing.T) {
 		_, err := detectExtractor(mkSections("三、广义货币", "四、存款", "五、贷款",
-			"六、利率", "七、外汇", "八、跨境"))
+			"六、利率", "七、外汇", "八、跨境"), "annual")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "三", "须说出实际首个序号")
 		assert.Contains(t, err.Error(), "6 sections", "须说出实际板块数")
@@ -365,7 +389,7 @@ func TestDetectExtractorRejectsNonConsecutiveOrdinals(t *testing.T) {
 	t.Run("中间缺一节同样被抓", func(t *testing.T) {
 		// 丢的不是开头而是中间：起始序号仍是一，只有连续性能发现
 		_, err := detectExtractor(mkSections("一、A", "二、B", "四、D",
-			"五、E", "六、F", "七、G"))
+			"五、E", "六、F", "七、G"), "annual")
 		require.Error(t, err, "中间断号也是丢了板块")
 		assert.Contains(t, err.Error(), "6 sections")
 	})
@@ -382,13 +406,13 @@ func TestDetectExtractorRejectsNonConsecutiveOrdinals(t *testing.T) {
 	})
 
 	t.Run("真实样本的序号本就连续，不受影响", func(t *testing.T) {
-		for sample, want := range map[string]string{
-			"pboc-2025-12-annual.html": "rule@v2",
-			"pboc-2020-06-h1.html":     "rule@v1",
+		for _, tc := range []struct{ sample, periodType, want string }{
+			{"pboc-2025-12-annual.html", "annual", "rule@v2"},
+			{"pboc-2020-06-h1.html", "h1", "rule@v1"},
 		} {
-			got, err := detectExtractor(sectionsOf(t, sample))
-			require.NoErrorf(t, err, "%s 的序号是 一…N 连续的既有性质", sample)
-			assert.Equal(t, want, got, sample)
+			got, err := detectExtractor(sectionsOf(t, tc.sample), tc.periodType)
+			require.NoErrorf(t, err, "%s 的序号是 一…N 连续的既有性质", tc.sample)
+			assert.Equal(t, tc.want, got, tc.sample)
 		}
 	})
 }
@@ -541,4 +565,262 @@ func TestFootnoteSectionNeverWinsFindSection(t *testing.T) {
 		assert.NotEqualf(t, footnote.Title, got.Title,
 			"%q 定位到了尾注段——尾注不得参与抽取", kw)
 	}
+}
+
+// ── M1c-3a 的 TASK-004：判据从「数节数」换成「板块集合 × period_type」（AD-2）──
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0]     "三份快照进 testdata"                       → TestDetectExtractorNewLayouts（消费它们）
+// functional[1]     "签名加 periodType，六条出口"                → TestDetectExtractorNewLayouts / …RejectsTruncatedFXOutsideMonthly / …RejectsMissingCoreSection
+// functional[2]     "coreSectionKeywords 从 sectionRules 派生"   → TestCoreSectionKeywordsIsDerivedNotHandwritten
+// boundary[0]       "三份新快照判定正确，既有用例不变"            → TestDetectExtractorNewLayouts
+// boundary[1] 下界  "真截断仍被拒"                              → TestDetectExtractorRejectsTruncatedFXOutsideMonthly
+// boundary[1] 上界  "节数上界没了 —— 显式决定接受"                → TestDetectExtractorAcceptsExtraIrrelevantSections
+// boundary[2]       "缺核心板块一律拒，不论 periodType"           → TestDetectExtractorRejectsMissingCoreSection
+// error_handling[0] "两类错误措辞可区分"                         → TestDetectExtractorErrorsAreDistinguishable
+
+// coreSectionKeywords() 必须**真的遍历 sectionRules**，不是手抄第二份清单。
+//
+// 分成两条断言，各防一种走样：
+//   - 逐字面量的 ElementsMatch 防「派生规则写错」（比如漏掉 v2Only 判断）
+//   - 哨兵防「手抄清单」——手抄版在 sectionRules 变化时纹丝不动
+//
+// ⚠️ 只有前者会漏掉手抄实现（它给出一模一样的四个词，全绿）；只有后者会漏掉
+// 「派生对了但排错了板块」。两条互补，别当重复删掉。
+func TestCoreSectionKeywordsIsDerivedNotHandwritten(t *testing.T) {
+	core := coreSectionKeywords()
+
+	// 肯定式：与 AD-2 判据描述的四个核心板块逐字对应
+	assert.ElementsMatch(t,
+		[]string{"广义货币", "人民币存款", "人民币贷款", "加权平均利率"}, core)
+
+	// 否定式在空集上平凡为真 ⇒ 先证明被排除的那两类**确实存在**于 sectionRules。
+	var nV2Only, nFX int
+	for _, r := range sectionRules {
+		if r.v2Only {
+			nV2Only++
+		}
+		if r.keyword == fxSectionKeyword {
+			nFX++
+		}
+	}
+	require.Equal(t, 2, nV2Only, "前提：sectionRules 里确实有两条 v2Only（社融存量/增量）")
+	require.Equal(t, 1, nFX, "前提：sectionRules 里确实有一条外汇节")
+	assert.NotContains(t, core, tsfSectionKeyword, "社融节只在含社融的期次有，不是核心")
+	assert.NotContains(t, core, fxSectionKeyword,
+		"53/55 篇月报没有外汇节（AD-1/G1），把它算进核心会让全部月报被拒")
+}
+
+// 哨兵：往 sectionRules 临时插两条，看派生有没有跟着动、且**落在正确的一边**。
+//
+// 手抄清单的实现对本测试免疫不了——它不会长出哨兵。这与 TASK-003 里钉
+// tsfStockFields 用的是同一手法。
+func TestCoreSectionKeywordsFollowsSectionRules(t *testing.T) {
+	orig := sectionRules
+	t.Cleanup(func() { sectionRules = orig })
+
+	sectionRules = append(slices.Clone(orig),
+		sectionRule{keyword: "哨兵核心节", v2Only: false},
+		sectionRule{keyword: "哨兵社融节", v2Only: true},
+	)
+
+	core := coreSectionKeywords()
+	assert.Contains(t, core, "哨兵核心节",
+		"往 sectionRules 加了一条非 v2Only 的板块，core 却没跟着长——没在遍历模板表")
+	assert.NotContains(t, core, "哨兵社融节", "v2Only 的板块不属于核心")
+}
+
+// 六条出口逐条走一遍：三份新快照 + 两份既有样本 + 一条合成的 7 节月报。
+//
+// 既有两份必须**逐字不变**——本任务换的是判据，不是结论。
+func TestDetectExtractorNewLayouts(t *testing.T) {
+	for _, tc := range []struct{ name, periodType, want string }{
+		// —— 本任务新增的三份快照 ——
+		{"pboc-2020-q1q3.html", "q1_q3", extractorV1},
+		{"pboc-2025-08-monthly.html", "monthly", extractorMonthlyV1},
+		{"pboc-2020-04-monthly.html", "monthly", extractorMonthlyV1},
+		// —— 既有样本，结论必须不变 ——
+		{"pboc-2025-12-annual.html", "annual", extractorV2},
+		{"pboc-2020-06-h1.html", "h1", extractorV1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := detectExtractor(sectionsOf(t, tc.name), tc.periodType)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	// 第六条出口（含社融的月报）没有真实快照——AD-1 记了 7 篇，取快照是
+	// TASK-009 的事。合成输入先把这条分支钉住，免得它无人走过。
+	t.Run("7 节月报（含社融、无外汇）→ rule-monthly@v2", func(t *testing.T) {
+		got, err := detectExtractor(mkSections(
+			"一、社会融资规模存量同比增长", "二、社会融资规模增量累计为",
+			"三、广义货币增长", "四、人民币贷款增加", "五、人民币存款增加",
+			"六、同业拆借月加权平均利率", "七、经常项下跨境人民币结算"), "monthly")
+		require.NoError(t, err)
+		assert.Equal(t, extractorMonthlyV2, got)
+	})
+}
+
+// 🔴 新判据引入的缝：「无外汇节」原先是未知布局（响亮失败），现在成了月报的**特征**。
+//
+// 一篇累计期报告若外汇节恰好被抓取截断，会被静默降级成 25 字段的月报 extractor，
+// completeness 认为它本就不该有外汇字段 —— **没有任何闸门会响**。
+//
+// 用真实的 5 节季报砍掉末节（外汇节正是第五节）来构造，而不是合成标题：
+// 合成输入证明不了「真实报告被截断后长什么样」。砍末节不破坏序号连续性，
+// 所以 checkSectionOrdinals 不会抢先报错 —— 本条测的确实是 FX 那道闸。
+func TestDetectExtractorRejectsTruncatedFXOutsideMonthly(t *testing.T) {
+	secs := sectionsOf(t, "pboc-2020-q1q3.html")
+	require.Len(t, secs, 5, "前提：这份季报是 5 节")
+	_, hasFX := findSection(secs, fxSectionKeyword)
+	require.True(t, hasFX, "前提：它确实有外汇节")
+
+	truncated := secs[:4]
+	_, stillFX := findSection(truncated, fxSectionKeyword)
+	require.False(t, stillFX, "前提：外汇节确实被砍掉了")
+	require.Empty(t, missingCoreSections(truncated),
+		"前提：核心四节仍齐全——否则红的是别的闸，本条就测不到它自称的性质")
+
+	_, err := detectExtractor(truncated, "q1_q3")
+	require.Error(t, err,
+		"累计期报告缺外汇节 = 抓取截断，必须响亮失败，不得静默降级成 25 字段的月报 extractor")
+	assert.Contains(t, err.Error(), fxSectionKeyword)
+
+	// 同一份输入，periodType 换成 monthly 就是合法的月报形态 —— 这一对
+	// 才说明判据真的用上了 periodType，而不是碰巧对。
+	got, err := detectExtractor(truncated, "monthly")
+	require.NoError(t, err, "同样缺外汇节，月报是正常形态")
+	assert.Equal(t, extractorMonthlyV1, got)
+}
+
+// 🔴 同一处的第二条缝：原判据 len(secs)==6 同时是下界和**上界**，
+// 换成「核心板块齐全」后上界没了。
+//
+// 【显式决定：接受多出来的无关板块，不设节数上界】理由三条——
+//
+//  1. 节数从来不是模板身份的代理。真实语料里同族报告是 4/5/6/7/8 节，而
+//     5 节季报正是被那条上界**误拒**的（本任务要修的就是它）。任何基于节数的
+//     上界都会把这个 bug 换个数字重新引入一遍。
+//  2. 真正的上界在别处，而且更强：checkSectionOrdinals 要求序号从「一、」连续
+//     （残缺的 v2 靠它挡下），extractFields 对每条模板要求**恰好命中一次**
+//     （换了模板的报告会在抽取层响亮失败，不会静默产出错值）。
+//  3. 多出来的板块对抽取是**结构性无害**的：extractFields 按关键词 findSection，
+//     从不遍历「所有板块」，没被任何规则认领的节永远不会被读到。
+//
+// 下面第三组断言把理由 3 变成可核查的观察，而不是一句声称。
+func TestDetectExtractorAcceptsExtraIrrelevantSections(t *testing.T) {
+	secs := sectionsOf(t, "pboc-2020-q1q3.html")
+	extra := append(slices.Clone(secs),
+		section{Title: "六、无关板块甲"}, section{Title: "七、无关板块乙"})
+
+	got, err := detectExtractor(extra, "q1_q3")
+	require.NoError(t, err, "多出无关板块不改变判定——节数不是模板身份的代理")
+	assert.Equal(t, extractorV1, got)
+
+	// 理由 3 的观察：没有任何 sectionRule 的关键词会命中这两节，
+	// 所以它们在抽取层结构上不可达。
+	for _, r := range sectionRules {
+		for _, s := range extra[len(secs):] {
+			assert.NotContainsf(t, s.Title, r.keyword,
+				"多出的板块 %q 命中了规则关键词 %q，理由 3 不成立", s.Title, r.keyword)
+		}
+	}
+}
+
+// 核心四节谁都不能缺 —— 与上一条是**不同的一格**：
+// 上一条是「外汇节可缺，但仅限月报」，这一条是「核心节任何 periodType 都不能缺」。
+//
+// ⚠️ 构造时重排了序号：直接从真实样本里删掉中间一节会让序号断掉，
+// checkSectionOrdinals 抢先报错，本条就变成「因为别的理由红」——
+// require 失败即中止，它后面的断言对那种消融完全不可见。
+func TestDetectExtractorRejectsMissingCoreSection(t *testing.T) {
+	// 完整的 v1 形态（序号连续），再去掉「人民币贷款」那节并重排序号
+	missingLoan := mkSections(
+		"一、广义货币增长8.5%", "二、人民币存款增加26万亿元",
+		"三、同业拆借月加权平均利率为1.4%", "四、国家外汇储备余额3.3万亿美元")
+	require.NoError(t, checkSectionOrdinals(missingLoan),
+		"前提：序号连续——否则红的是序号闸，不是核心板块闸")
+
+	for _, pt := range []string{"annual", "h1", "q1", "q1_q3", "monthly"} {
+		t.Run(pt, func(t *testing.T) {
+			_, err := detectExtractor(missingLoan, pt)
+			require.Error(t, err, "缺核心板块，不论 periodType 是什么都必须拒")
+			assert.Contains(t, err.Error(), "人民币贷款", "错误须说出缺的是哪一节")
+		})
+	}
+
+	// 缺**多**节时必须**全部**列出。
+	//
+	// 上面每个用例都只缺一节，所以「只报第一个缺失项」的实现照样全绿——
+	// 而错误信息的全部意义正是「缺了哪几个」。这条是那半边的钉子。
+	t.Run("缺多节时逐个列出", func(t *testing.T) {
+		_, err := detectExtractor(mkSections(
+			"一、广义货币增长8.5%", "二、国家外汇储备余额3.3万亿美元"), "annual")
+		require.Error(t, err)
+		for _, kw := range []string{"人民币贷款", "人民币存款", "加权平均利率"} {
+			assert.Containsf(t, err.Error(), kw, "缺失清单里少了 %s", kw)
+		}
+		assert.NotContains(t, err.Error(), "广义货币", "在场的板块不该出现在缺失清单里")
+	})
+}
+
+// 两类错误的措辞必须**可区分**：「缺核心板块 X」与「累计期报告缺外汇节」
+// 指向完全不同的排障方向（前者改切分/模板，后者重抓页面）。
+//
+// 做法是**交叉断言**：每条错误既要含自己的标志串，又要**不含**另一条的。
+// 只断言各自含有什么，两条错误合并成同一句话时照样全绿。
+func TestDetectExtractorErrorsAreDistinguishable(t *testing.T) {
+	_, errCore := detectExtractor(mkSections(
+		"一、广义货币增长8.5%", "二、人民币存款增加26万亿元",
+		"三、同业拆借月加权平均利率为1.4%", "四、国家外汇储备余额3.3万亿美元"), "annual")
+	require.Error(t, errCore)
+
+	_, errFX := detectExtractor(mkSections(
+		"一、广义货币增长8.5%", "二、人民币贷款增加16万亿元",
+		"三、人民币存款增加26万亿元", "四、同业拆借月加权平均利率为1.4%"), "annual")
+	require.Error(t, errFX)
+
+	assert.Contains(t, errCore.Error(), "missing core section")
+	assert.NotContains(t, errCore.Error(), "cumulative-period report",
+		"缺核心板块被说成缺外汇节，会把人支去重抓页面")
+
+	assert.Contains(t, errFX.Error(), "cumulative-period report")
+	assert.NotContains(t, errFX.Error(), "missing core section",
+		"缺外汇节被说成缺核心板块，会把人支去改切分规则")
+}
+
+// monthly 必须是**唯一**豁免外汇节的 period_type。
+//
+// 遍历的是 validPeriodTypes 本身而不是手写五个值：将来加第六种 period_type 时，
+// 它会**自动**进入本测试并被要求表态（新类型若也该豁免，本测试会红，逼人明确决定）。
+// 这与 types.go 的 TestEveryPeriodTypeHasAnExplicitSupportDecision 是同一个用意。
+func TestMonthlyIsTheOnlyPeriodTypeExemptFromFX(t *testing.T) {
+	require.True(t, validPeriodTypes[periodTypeMonthly],
+		"前提：periodTypeMonthly 得是 validPeriodTypes 里的合法取值。两处字面量分叉时，"+
+			"豁免要么永不触发（全部月报被拒），要么永远触发（截断检测失效）——都是静默的")
+
+	// 核心四节齐全、无外汇节、无社融：只有 period_type 这一个变量在动
+	noFX := mkSections("一、广义货币增长8.5%", "二、人民币贷款增加16万亿元",
+		"三、人民币存款增加26万亿元", "四、同业拆借月加权平均利率为1.4%")
+	require.Empty(t, missingCoreSections(noFX), "前提：核心四节齐全")
+
+	var exempt int
+	for pt := range validPeriodTypes {
+		t.Run(pt, func(t *testing.T) {
+			got, err := detectExtractor(noFX, pt)
+			if pt == periodTypeMonthly {
+				require.NoError(t, err, "月报没有外汇节是正常形态（55 篇里 53 篇如此）")
+				assert.Equal(t, extractorMonthlyV1, got)
+				return
+			}
+			require.Error(t, err, "累计期报告缺外汇节 = 抓取截断，必须拒")
+			assert.Contains(t, err.Error(), "cumulative-period report")
+		})
+		if pt == periodTypeMonthly {
+			exempt++
+		}
+	}
+	assert.Equal(t, 1, exempt, "豁免的必须**恰好**是一个 period_type")
+	assert.Len(t, validPeriodTypes, 5, "取值域增删了——请确认新类型该不该豁免外汇节")
 }
