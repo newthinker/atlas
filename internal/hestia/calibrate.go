@@ -279,7 +279,7 @@ func classifyArticles(res *CalibrateResult, articles []Article) []calibrateItem 
 // 这类分行报告，backfillTitleRE 不锚定起点会认下来）不猜，照常读文件走 Parse：Parse 看的
 // 是 HTML 里的 ArticleTitle，报出的错误严格更多。
 func unsupportedPeriodType(title string) string {
-	_, periodType, err := parseTitle(title)
+	_, periodType, _, err := parseTitle(title)
 	if err != nil {
 		return ""
 	}

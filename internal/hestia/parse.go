@@ -38,44 +38,68 @@ import (
 // 季度 / 全年覆盖）。真出现「三季度」也必须拒：它字面上无法区分单季（7–9 月）与
 // 累计（1–9 月），期末月同为 09 而月均折算除数是 3 与 9 —— 猜错正是 types.go 的
 // validPeriodTypes 警告的「错一个量级」。
+//
+// # 三种报告（M1c-3a 的 TASK-007）
+//
+// 后缀从「只认金融统计数据报告」扩到三种，并作为 kind 返回给 Parse 做分派。
+// 社融两种的正文结构与金融统计报告完全不同（无板块小标题、整篇一段），所以
+// **kind 决定走哪条抽取路径**，不是同一条路径上的一个参数。
+//
+// ⚠️ 三个后缀两两互不为前缀，交替顺序在此无语义；但仍把两个较长的社融后缀写在
+// 前面，与本包既有习惯一致（理由见 profiles.go 的 cumulativeMonthAlt 那段：
+// 顺序真正有语义的前提是两个分支都能走完整条正则，这里不构成那个前提）。
+//
+// ⚠️ **与 backfill_reconcile.go 的 backfillPeriodOf 是两份并行的解析**：那边服务对账、
+// 看 manifest 里的标题、返回 (period, kind) 不返回 periodType；这边看文章页的
+// <meta name="ArticleTitle">、返回三者。**本任务不合并两处**（那会扩大 scope），
+// 但**期末月约定必须同源**（q1→03、h1→06、q1_q3→09、annual→12、N月→N）——
+// 两边任一处改了期末月而另一处没改，表现是同一期在对账表与观测表里落在不同键上。
 var titleRE = regexp.MustCompile(
-	`\A([0-9]{4})年(一季度|上半年|前三季度|[0-9]{1,2}月)?金融统计数据报告\z`)
+	`\A([0-9]{4})年(一季度|上半年|前三季度|[0-9]{1,2}月)?` +
+		`(社会融资规模存量统计数据报告|社会融资规模增量统计数据报告|金融统计数据报告)\z`)
+
+// 三种报告种类。kindFinance 走板块切分 + detectExtractor；社融两种整篇直抽。
+const (
+	kindFinance  = "金融统计数据报告"
+	kindTSFStock = "社会融资规模存量统计数据报告"
+	kindTSFFlow  = "社会融资规模增量统计数据报告"
+)
 
 // parseTitle 从标题推出 period 与 period_type。
 //
 // period 是**期末月**：年度报告的数据截至 12 月、上半年截至 6 月。M1b-1 的
 // periodEndMonth 组合校验会兜住这里推错的情况——那道校验存在的理由正是
 // 「2026-06/annual 会用 12 去除半年报期末月，让月均折算错一个量级」。
-func parseTitle(title string) (period, periodType string, err error) {
+func parseTitle(title string) (period, periodType, kind string, err error) {
 	m := titleRE.FindStringSubmatch(title)
 	if m == nil {
-		return "", "", fmt.Errorf(
+		return "", "", "", fmt.Errorf(
 			"hestia: unrecognized report title %q "+
-				"(want 「YYYY年金融统计数据报告」/「YYYY年一季度…」/「YYYY年上半年…」/"+
-				"「YYYY年前三季度…」/「YYYY年M月…」)", title)
+				"(want 「YYYY年[一季度|上半年|前三季度|M月]」+ one of "+
+				"「%s」/「%s」/「%s」)", title, kindFinance, kindTSFStock, kindTSFFlow)
 	}
-	year, qualifier := m[1], m[2]
+	year, qualifier, kind := m[1], m[2], m[3]
 
 	switch qualifier {
 	case "":
-		return year + "-12", "annual", nil
+		return year + "-12", "annual", kind, nil
 	case "一季度":
-		return year + "-03", "q1", nil
+		return year + "-03", "q1", kind, nil
 	case "上半年":
-		return year + "-06", "h1", nil
+		return year + "-06", "h1", kind, nil
 	case "前三季度":
 		// 「前三季度」= 1–9 月累计，不是第 3 季度单季。periodType 叫 q1_q3 而不是
 		// q3，理由与期末月一起定在 TASK-001 的 discovery 里：两者期末月同为 09，
 		// 月均折算除数却是 9 与 3。
-		return year + "-09", "q1_q3", nil
+		return year + "-09", "q1_q3", kind, nil
 	default:
 		// 「6月」→ 6 → "06"。不补零会产出 "2026-6"：bitemporal 按字典序比较业务键，
 		// 那会成为与 "2026-06" 不同的键，同一日历月在视图里出现两次。
 		n, convErr := strconv.Atoi(qualifier[:len(qualifier)-len("月")])
 		if convErr != nil || n < 1 || n > 12 {
-			return "", "", fmt.Errorf("hestia: invalid month in report title %q", title)
+			return "", "", "", fmt.Errorf("hestia: invalid month in report title %q", title)
 		}
-		return fmt.Sprintf("%s-%02d", year, n), "monthly", nil
+		return fmt.Sprintf("%s-%02d", year, n), "monthly", kind, nil
 	}
 }
 
@@ -168,7 +192,7 @@ func Parse(raw []byte) (Observation, error) {
 			"hestia: missing <meta name=\"ArticleTitle\">: period and period_type are derived from it")
 	}
 
-	period, periodType, err := parseTitle(title)
+	period, periodType, kind, err := parseTitle(title)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -176,17 +200,45 @@ func Parse(raw []byte) (Observation, error) {
 		return Observation{}, err
 	}
 
-	// 切分之后**立即**探测版本，并把 error 当致命：不认识的形态就停在这里，
-	// 不进入抽取层。splitSections 的签名没有 error，它能这样设计的前提正是
-	// 「紧邻的 detectExtractor 会报错，且错误信息严格更多」——那个前提由这两行
-	// 兑现，不是别处已有的事实。删掉或挪后这一段，T3 的保证就随之消失。
-	secs := splitSections(stripHTML(raw))
-	extractor, err := detectExtractor(secs, periodType)
-	if err != nil {
-		return Observation{}, err
+	// —— 按 kind 三路分派（M1c-3a 的 TASK-007）——
+	//
+	// 三种报告的正文结构不同，**不是同一条路径上的一个参数**：金融统计数据报告有
+	// 板块小标题、需要切分后探测版式；社融两种整篇一段，没有可切的板块，因此
+	// extractor 直接由 kind 决定，不经探测。
+	//
+	// ⚠️ `detectExtractor` 只对 kindFinance 有意义。对社融两种调用它会命中
+	// missingCoreSections 而报「这是新版式/别的报告/抓取被截断」——一句**方向完全
+	// 错**的错误信息：它们本来就没有那四个核心板块。
+	var (
+		extractor string
+		values    map[string]float64
+	)
+	switch kind {
+	case kindFinance:
+		// 切分之后**立即**探测版本，并把 error 当致命：不认识的形态就停在这里，
+		// 不进入抽取层。splitSections 的签名没有 error，它能这样设计的前提正是
+		// 「紧邻的 detectExtractor 会报错，且错误信息严格更多」——那个前提由这两行
+		// 兑现，不是别处已有的事实。删掉或挪后这一段，T3 的保证就随之消失。
+		secs := splitSections(stripHTML(raw))
+		extractor, err = detectExtractor(secs, periodType)
+		if err != nil {
+			return Observation{}, err
+		}
+		values, err = extractFields(secs, extractor)
+	case kindTSFStock:
+		extractor = extractorTSFStock
+		values, err = extractTSFStockArticle(stripHTML(raw))
+	case kindTSFFlow:
+		extractor = extractorTSFFlow
+		values, err = extractTSFFlowArticle(stripHTML(raw))
+	default:
+		// 不可达：kind 来自 titleRE 的捕获组，取值受正则约束。留着是为了让「将来
+		// 往 titleRE 加第四种后缀却忘了在这里加分支」响亮失败，而不是静默走到
+		// 下面用零值 extractor 造出一份 Observation。
+		return Observation{}, fmt.Errorf(
+			"hestia: unhandled report kind %q from title %q: titleRE recognises it but "+
+				"Parse has no dispatch branch for it", kind, title)
 	}
-
-	values, err := extractFields(secs, extractor)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -217,27 +269,27 @@ func Parse(raw []byte) (Observation, error) {
 // period_type 会由 TestEveryPeriodTypeHasAnExplicitSupportDecision 逼人明确表态。
 //
 // 解除的方式是**逐个删分支**，不是删整个函数：
-//   - monthly：拿到月报样本后删 monthly 分支。
 //   - q1 / q1_q3：**已由 M1b-4b 的 TASK-004 删除** —— periodAlt 加了「一季度|前三季度」、
 //     cumulativePeriods 加了同两个键，两份真实快照端到端跑通（各 8 板块、rule@v2）。
+//   - monthly：**已由 M1c-3a 的 TASK-007 删除** —— periodAlt 加了「前N个月」十项与
+//     「1月份」特例（TASK-001）、板块切分认 4/5/7 节月报（TASK-004）、抽取侧按
+//     extractor 决定板块适用性（TASK-006），四份真实月报快照端到端跑通。
 //
-// 两处解除都不用动 parseTitle 及其测试。
+// ⚠️ **原分支里那句「extract 侧认不出 5 月报的『1-5月』这类前缀」是错的**，一并记在这里
+// 免得后人照它推断：Leader 全量实读 55 篇月报，「1-5月」这种带范围的形态**一次都没出现**；
+// 真实形态是「前八个月」这类中文数字前缀（累计）与「8月份」（当月，要排除），
+// 1 月报的「1月份」则是累计特例。那句注释写于零样本时期，是**推测**而非实测。
+//
+// 三处解除都不用动 parseTitle 及其测试。
 func checkPeriodTypeSupported(periodType, title string) error {
 	switch periodType {
-	case "monthly":
-		// 月报是孪生句问题最严重的形态——正文同时含期内累计句与当月句，且哪句在前
-		// 无样本可证；extract 侧的 cumulativePeriods 认不出 5 月报的「1-5月」这类前缀，
-		// 会整条不命中。
-		//
-		// ⚠️ 季报（q1/q1_q3）曾经也在这条 switch 里，TASK-004 接上抽取侧后删掉了。
-		// 月报**不能照抄那次解除**：季报的两个前缀是完整词（一季度 / 前三季度），
-		// 而月报是「1-5月」这种带范围的形态，periodAlt 现有的 `[0-9]{1,2}月份` 认的是
-		// 单月句（要排除的那半），两者不是一回事。
-		return fmt.Errorf(
-			"hestia: period_type monthly is not supported yet (title %q): no monthly sample exists "+
-				"to validate against, and monthly reports carry both a period-to-date and a "+
-				"current-month sentence for the same field — refusing to guess which one the "+
-				"*_ytd fields should hold", title)
+	// 目前五种 period_type 全部受支持，故本 switch 暂时没有分支。
+	//
+	// 🔴 **不要因此删掉这个函数**（M1c-3a 的 TASK-007 删 monthly 分支时的决定）：
+	// 空 switch 看起来像死代码，但它承载的是**「新增第六种 period_type 必须明确表态」**
+	// 这条防线 —— TestEveryPeriodTypeHasAnExplicitSupportDecision 遍历 validPeriodTypes
+	// 逐个来问，函数没了那道遍历就无处可问。删掉它的代价不是少一层校验，是让
+	// 「加了新期次却没人想过抽取侧接不接」重新变成静默的。
 	}
 	return nil
 }
