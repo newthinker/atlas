@@ -585,9 +585,21 @@ func TestCumulativeMonthAltEnumeratesTenMonths(t *testing.T) {
 		"cumulativeMonthAlt 必须穷举这十项：三/六/九在真实语料里不出现（那三个月走 q1/h1/q1_q3 报告），"+
 			"仍然列上——多一个无害，漏一个是静默失效")
 
-	assert.Containsf(t, periodAlt, cumulativeMonthAlt,
-		"periodAlt 必须由 cumulativeMonthAlt 拼出、不得另抄一份：抄一份之后两处会各自漂移，"+
-			"而漂移的表现是整篇命中 0（periodAlt=%q）", periodAlt)
+	// 🔴 **等值**而不是 Contains —— 收口 M1c-3a 的 TASK-001 验证者发现的残余缺口 V6。
+	//
+	// Contains 只断言「cumulativeMonthAlt 出现在 periodAlt 里」，管不住**另外**塞进去的分支：
+	// 实测把一个累计前缀绕开常量直接写进 periodAlt（`…|前十二个月|[0-9]{1,2}月份`），
+	// 本节全部新测试无一转红（V6 SURVIVED）——因为下面那条正向断言遍历的是
+	// cumulativeMonthAlt，看不见常量之外的分支。而**注释比断言宽**正是这类缺口的来源：
+	// 「periodAlt 认得的每个累计前缀都必须在口径表里」这句话，只有把 periodAlt 钉死成
+	// 「四个既有 + cumulativeMonthAlt + 数字月份」之后才**真的**成立。
+	//
+	// 等值断言是本包既有惯用法（见 TestTemplatesReuseAmountFragments 对 dirPat/unitPat）。
+	// 代价是后续扩 periodAlt（如 M1c-3a 的 TASK-007）必须同步改这一行 —— 那正是要的信号：
+	// 让「periodAlt 的组成变了」成为一次显式的、有人看见的改动，而不是静默扩面。
+	assert.Equal(t, `全年|上半年|一季度|前三季度|`+cumulativeMonthAlt+`|[0-9]{1,2}月份`, periodAlt,
+		"periodAlt 的组成必须逐字等于「四个既有期次 + cumulativeMonthAlt + 数字月份」："+
+			"累计前缀一律经 cumulativeMonthAlt 登记，绕开常量直接插分支会让它躲过下面的一一对应守卫")
 }
 
 // cumulativePeriods 的键集必须**逐字**等于这 15 个。
@@ -620,6 +632,9 @@ func TestCumulativePeriodsKeySet(t *testing.T) {
 //	反向：cumulativePeriods 里的每个键，periodPat 必须能逐字整段捕获
 //	      —— 缺了就是「正则根本不命中」，与现状逐字相同的 no-op
 func TestCumulativeMonthAltAndCumulativePeriodsAgree(t *testing.T) {
+	// ⚠️ 本条遍历的是 **cumulativeMonthAlt**，不是 periodAlt 的全部分支。两者等价**依赖**
+	// TestCumulativeMonthAltEnumeratesTenMonths 里那条把 periodAlt 钉死的等值断言——
+	// 少了它，绕开常量插进 periodAlt 的累计分支对本条不可见（V6）。两条互补，别当重复删掉。
 	t.Run("正向：正则认得的必须在口径表里", func(t *testing.T) {
 		for _, w := range strings.Split(cumulativeMonthAlt, "|") {
 			assert.Truef(t, cumulativePeriods[w],
@@ -705,7 +720,7 @@ func TestFlowRECapturesMonthlyPeriodVerbatim(t *testing.T) {
 // 挑出唯一正确的那句。判据 `cumulativePeriods[m[1]] && m[2] == currencyRMB`
 // 两个维度都要过：外币孪生句的期次前缀与本币句相同，只判期次会取到亿美元那句。
 //
-// ⚠️ 合成正文，形态取自 Leader 实读的记述；真实月报端到端由 TASK-007 确认。
+// ⚠️ 合成正文，形态取自 Leader 实读的记述；真实月报端到端由 M1c-3a 的 TASK-007 确认。
 func TestSelectRMBCumulativeFlowPicksMonthlyCumulative(t *testing.T) {
 	t.Run("前十一个月：从三句里挑出人民币累计句", func(t *testing.T) {
 		const body = "前十一个月人民币贷款增加1.09万亿元，同比多增1474亿元。" +
