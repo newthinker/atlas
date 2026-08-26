@@ -642,8 +642,28 @@ func TestExtractTSFFlowArticleOnSnapshot(t *testing.T) {
 // （「占」不是数字、缺单位）；tsfStockTotalRE 要求「存量**为**」而结构段写
 // 「占同期社会融资规模存量**的**61.2%」。两条各自挡住一半。
 //
-// 消融（验证本断言真的在守卫，harness 见 discovery）：把 tsfStockRE 的 unitPat
-// 去掉，本测试的 entrust / fx_loan 两格必须转红。
+// # 消融实测：DoD 指定的那个消融**不能证伪本断言**（M1c-3a 的 TASK-002 实测）
+//
+// DoD boundary[0] 写的验收方式是「把 tsfStockRE 的单位要求去掉，该断言必须转红；
+// 若仍绿，说明这条断言测的不是它自称的那个性质」。照做的结果是**仍绿**——但结论
+// 不是「断言测错了」，而是**那个消融没有打开它以为打开的那条路**：
+//
+//	A4  只去掉 unitPat                       → 本断言 SURVIVED（只有 golden 测试红，
+//	                                           且红因是捕获组少了一个、不是取到占比值）
+//	A4b 占比中缀 + % 入单位 + 低/高 入方向词  → 红（两句同时命中 ⇒ matched 2 sentences）
+//	A4d 8 个分项全部改指结构段                → 红，错误是 unknown unit "%"
+//
+// 「不抽到占比值」由**四道互相独立**的机制守着，去掉任何一道其余三道仍然拦得住：
+//
+//	① 「占比」/「占同期社会融资规模存量的」中缀 —— 余额为? 后必须紧跟数字
+//	② unitPat 白名单 —— 占比句的「单位」是 %，不在表内
+//	③ dirPat 白名单 —— 占比句的方向词是「低/高」，不在表内
+//	④ amount.go 的 unknown unit 兜底 —— 正则全放开也进不了结果表（A4d 实测）
+//
+// ⇒ **没有任何单点变异能让抽取器返回 2.6**。故本测试钉的是**结果**而不是某一道闸：
+// 它在 A4b/A4d 下确实转红，但转红路径是 require.NoError（抽取整体失败），不是
+// 「entrust 取到了 2.6」。把它当成「守卫②的单元测试」会高估它——它守的是那四道
+// 合起来的**净效果**。harness 与全部输出见 discovery。
 func TestTSFStockArticleTakesBalanceNotStructureShare(t *testing.T) {
 	got, err := extractTSFStockArticle(stripHTML(readSample(t, "pboc-2025-08-tsf-stock.html")))
 	require.NoError(t, err)
