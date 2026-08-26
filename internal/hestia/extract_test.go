@@ -689,8 +689,13 @@ func TestTSFStockArticleTakesBalanceNotStructureShare(t *testing.T) {
 
 	// 否定式与上面的肯定式**互补，不是重复**：肯定式钉住取到的是哪个值，
 	// 否定式钉住结构段那 8 个占比值一个都没进结果表。删掉任一半都会放过一类错误。
+	//
+	// RMBLoan 与 Trust 两条是 M1c-3a 的 TASK-006 补的：test-m1c3a-v1 在 TASK-002
+	// 验证中实跑变异 N5（强制「信托贷款=1」）时本测试**保持绿**，只有 golden 测试红
+	// ——那个性质仍被覆盖，但不是被本测试覆盖。补齐后 8 个分项 + 总量全在表内。
 	for f, share := range map[string]float64{
-		FieldTSFStockEntrust: 2.6, FieldTSFStockFXLoan: 0.3,
+		FieldTSFStockRMBLoan: 61.2, FieldTSFStockFXLoan: 0.3,
+		FieldTSFStockEntrust: 2.6, FieldTSFStockTrust: 1,
 		FieldTSFStockBankAccept: 0.5, FieldTSFStockCorpBond: 7.7,
 		FieldTSFStockGovtBond: 21.1, FieldTSFStockEquity: 2.8,
 		FieldTSFStock: 61.2,
@@ -963,4 +968,248 @@ func TestTSFFlowArticleRefusesTwoCumulativeSentences(t *testing.T) {
 	ok, err := extractTSFFlowArticle(tsfFlowBodyCumulativeOnly)
 	require.NoError(t, err)
 	require.Len(t, ok, 9)
+}
+
+// —— M1c-3a 的 TASK-006：extractFields 按 extractor 决定板块适用性（AD-3）——
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3a 的 TASK-006)
+// functional[0][1]  适用性收敛成 sectionRule.appliesTo 一处
+//                                      → TestSectionAppliesToIsTheSingleSourceOfScope
+// functional[2]     只接受 4 种走板块路径的 extractor，拒 tsf-stock@v1/tsf-flow@v1 与未知值
+//                                      → TestExtractFieldsRejectsNonSectionPathExtractors
+// boundary[0]       板块归属与 requiredFields **双向**相等 + 逐字面量锚
+//                                      → TestExtractFieldsScopeMatchesRequiredFields
+// boundary[1]       rule-monthly@v1 下外汇节是**声明式跳过**（输入**含**外汇节）
+//                                      → 同上（wantAbsent 列）+ TestExtractFieldsSkipsVsMissesSections
+// boundary[2]       rule-monthly@v2 保留社融两节但仍跳外汇 ⇒ 两个维度独立
+//                                      → 同上（rule-monthly@v2 一行）
+// error_handling[0] 适用板块缺失仍报错 / 不适用板块缺失才放行（成对）
+//                                      → TestExtractFieldsSkipsVsMissesSections
+
+// sectionPathSample 载入 8 节 v2 年报并前置断言它**含全部 7 个板块**。
+//
+// 这个前置断言是本组测试成立的**前提**，不是装饰：若样本本就缺外汇节，
+// 「声明式跳过」与「碰巧 findSection 找不到」两种实现都会绿，
+// 整组关于「跳过」的断言零信息量（DoD boundary[1] 点名的假绿）。
+func sectionPathSample(t *testing.T) []section {
+	t.Helper()
+	secs := splitSections(stripHTML(readSample(t, "pboc-2025-12-annual.html")))
+	for _, r := range sectionRules {
+		_, ok := findSection(secs, r.keyword)
+		require.Truef(t, ok,
+			"样本缺板块 %q —— 缺了它，本组测试无法区分「声明式跳过」与「碰巧找不到」", r.keyword)
+	}
+	return secs
+}
+
+// TestExtractFieldsScopeMatchesRequiredFields 是 boundary[0] 的机械保证：
+// **同一份输入**喂给四种走板块路径的 extractor，抽出的字段集必须与
+// requiredFields(该 extractor) **双向**相等。
+//
+// 两侧是**独立派生**的，这是本断言有意义的前提：
+//
+//	左侧 = 真跑 extractFields 的实际产出（sectionRules × appliesTo，抽取侧）
+//	右侧 = requiredFields 的清单（fieldOrder − 各板块字段，completeness 侧）
+//
+// 若改成「左侧也用 fieldOrder 减去被跳过板块的字段」，两侧就共用了同一套减法，
+// 断言退化成恒真——那正是本包反复警告的「守卫的基准与被守护属性同源」。
+//
+// 少了这条，「跳过了却仍在必填集里」（completeness 把抽不到的字段记成缺失）
+// 与「留着却不在必填集里」（抽到了却没人要）都不会有任何东西转红。
+//
+// ⚠️ **逐字面量锚不是重复**：集合恒等式抓不到「划反」——M1c-3a 的 TASK-003 实测，
+// 三个社融总量字段划反后「18+9==27 且交集为空」全部保持绿。wantPresent /
+// wantAbsent 两列钉的是**具体哪个字段在哪一侧**，只有它们抓得到。
+//
+// ⚠️ tsf-stock@v1 / tsf-flow@v1 **刻意不在本表内**：它们整篇当一节，走
+// extractTSFStockArticle / extractTSFFlowArticle，根本不经 extractFields
+// （M1c-3a 的 TASK-002 交付）。喂给 extractFields 应当报错，那一格由
+// TestExtractFieldsRejectsNonSectionPathExtractors 单独钉。
+// 写在这里是因为「沉默地不测」与「想过并决定不测」在代码里长得一模一样。
+func TestExtractFieldsScopeMatchesRequiredFields(t *testing.T) {
+	secs := sectionPathSample(t)
+
+	for _, tc := range []struct {
+		extractor   string
+		wantN       int
+		wantPresent []string
+		wantAbsent  []string
+	}{
+		{
+			extractor: extractorV2, wantN: 54,
+			wantPresent: []string{FieldTSFStock, FieldTSFFlowYTD, FieldFXReserve, FieldFXRate, FieldM2},
+		},
+		{
+			// 社融两节不适用；外汇节适用
+			extractor: extractorV1, wantN: 27,
+			wantPresent: []string{FieldFXReserve, FieldFXRate, FieldM2, FieldLoanBalance},
+			wantAbsent:  []string{FieldTSFStock, FieldTSFStockYoY, FieldTSFFlowYTD, FieldTSFStockGovtBond},
+		},
+		{
+			// 🔴 两个维度独立：社融两节**保留**、外汇节**跳过**
+			extractor: extractorMonthlyV2, wantN: 52,
+			wantPresent: []string{FieldTSFStock, FieldTSFStockYoY, FieldTSFFlowYTD, FieldTSFStockGovtBond, FieldM2},
+			wantAbsent:  []string{FieldFXReserve, FieldFXRate},
+		},
+		{
+			// 两个维度同时生效
+			extractor: extractorMonthlyV1, wantN: 25,
+			wantPresent: []string{FieldM2, FieldLoanBalance, FieldDepositBalance, FieldRateIBO},
+			wantAbsent:  []string{FieldTSFStock, FieldTSFFlowYTD, FieldFXReserve, FieldFXRate},
+		},
+	} {
+		t.Run(tc.extractor, func(t *testing.T) {
+			got, err := extractFields(secs, tc.extractor)
+			require.NoError(t, err)
+
+			keys := make([]string, 0, len(got))
+			for f := range got {
+				keys = append(keys, f)
+			}
+
+			// ⚠️ **顺序与 assert/require 的选择都是刻意的**：逐字面量锚放在最前，
+			// 且全组一律用 assert（不用 require）。require 失败会**中止本子测试**，
+			// 它后面的断言对任何触发它的消融都不可见——那样消融只能得到「红了」，
+			// 得不到「红在哪一条」，而后者才是归因需要的信息。
+			for _, f := range tc.wantPresent {
+				assert.Containsf(t, got, f, "%s 下 %s 应当被抽到", tc.extractor, f)
+			}
+			for _, f := range tc.wantAbsent {
+				assert.NotContainsf(t, got, f,
+					"%s 下 %s 必须**不存在**（键不存在，不是取零值）", tc.extractor, f)
+			}
+
+			// 双向相等：ElementsMatch 是互相包含，不是只比数量。
+			// 只比数量的话，「抽到 A 缺 B」与「抽到 B 缺 A」无法区分。
+			assert.ElementsMatch(t, requiredFields(tc.extractor), keys,
+				"抽取侧的板块归属与 completeness 侧的必填集分叉了")
+
+			// 数量单独断一次：它是给人读的锚（25/27/52/54 是 TASK-003 discovery
+			// 里写死的四个数），也让 ElementsMatch 的失败更好定位。
+			assert.Len(t, got, tc.wantN)
+		})
+	}
+}
+
+// TestExtractFieldsSkipsVsMissesSections 把「跳过」与「缺失」放成一对，覆盖
+// error_handling[0]。
+//
+// 单独测「外汇节缺失时放行」是不够的：把 extractFields 写成「任何板块找不到
+// 都放行」同样会绿。必须同时钉住「**适用**板块缺失仍然报错」，两格合起来才
+// 说明放行是有条件的。
+func TestExtractFieldsSkipsVsMissesSections(t *testing.T) {
+	full := sectionPathSample(t)
+
+	drop := func(keyword string) []section {
+		out := make([]section, 0, len(full))
+		for _, s := range full {
+			if strings.Contains(s.Title, keyword) {
+				continue
+			}
+			out = append(out, s)
+		}
+		require.Lenf(t, out, len(full)-1, "应当恰好删掉一节 %q", keyword)
+		return out
+	}
+
+	t.Run("不适用板块缺失_放行", func(t *testing.T) {
+		// 月报族本就没有外汇节 ⇒ 缺了也应当抽满 25 个字段
+		got, err := extractFields(drop(fxSectionKeyword), extractorMonthlyV1)
+		require.NoError(t, err)
+		assert.Len(t, got, 25)
+	})
+
+	t.Run("适用板块缺失_报错", func(t *testing.T) {
+		// 同一个 extractor、同样是缺一节，只因这节适用 ⇒ 必须报错
+		got, err := extractFields(drop("人民币贷款"), extractorMonthlyV1)
+		require.Error(t, err, "适用板块缺失必须报错，「跳过」不能退化成「所有缺失都放行」")
+		assert.Contains(t, err.Error(), "人民币贷款", "错误信息要指名缺的是哪个板块")
+		assert.Contains(t, err.Error(), extractorMonthlyV1)
+		assert.Nil(t, got)
+	})
+
+	t.Run("外汇节缺失_在累计期仍报错", func(t *testing.T) {
+		// 同一份缺外汇的输入，换成 rule@v1（外汇节适用）就必须报错。
+		// 这一格证明放行是**按 extractor** 决定的，不是「外汇节永远可选」。
+		got, err := extractFields(drop(fxSectionKeyword), extractorV1)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fxSectionKeyword)
+		assert.Nil(t, got)
+	})
+}
+
+// TestSectionAppliesToIsTheSingleSourceOfScope 钉住 functional[0]：适用性有且只有
+// 一处定义，且它对四种走板块路径的 extractor 都给得出答案。
+//
+// 逐字面量列出期望，而不是把 appliesTo 的实现再写一遍——后者是拿被验对象的
+// 尺子量它自己。
+func TestSectionAppliesToIsTheSingleSourceOfScope(t *testing.T) {
+	// 期望表：板块关键词 → 该板块适用的 extractor 集合（逐字面量，照 description 的表抄）
+	want := map[string][]string{
+		tsfSectionKeyword: {extractorV2, extractorMonthlyV2},
+		"社会融资规模增量":        {extractorV2, extractorMonthlyV2},
+		fxSectionKeyword:  {extractorV1, extractorV2},
+		"广义货币":            {extractorV1, extractorV2, extractorMonthlyV1, extractorMonthlyV2},
+		"人民币存款":           {extractorV1, extractorV2, extractorMonthlyV1, extractorMonthlyV2},
+		"人民币贷款":           {extractorV1, extractorV2, extractorMonthlyV1, extractorMonthlyV2},
+		"加权平均利率":          {extractorV1, extractorV2, extractorMonthlyV1, extractorMonthlyV2},
+	}
+	require.Len(t, want, len(sectionRules),
+		"期望表与 sectionRules 条数不符——新增板块必须在这里表态，不能默认全适用")
+
+	for _, r := range sectionRules {
+		t.Run(r.keyword, func(t *testing.T) {
+			applicable, ok := want[r.keyword]
+			require.Truef(t, ok, "sectionRules 里的 %q 没在期望表里表态", r.keyword)
+
+			var got []string
+			for _, e := range sectionPathExtractors {
+				if r.appliesTo(e) {
+					got = append(got, e)
+				}
+			}
+			assert.ElementsMatch(t, applicable, got)
+		})
+	}
+}
+
+// TestExtractFieldsRejectsNonSectionPathExtractors 覆盖 functional[2]。
+//
+// 三类都要拒，且理由不同：
+//
+//	tsf-stock@v1 / tsf-flow@v1 —— 合法 extractor，但**走错了路**（整篇当一节）
+//	rule@v3 / ""               —— 根本不认识
+//
+// 早先那条 TestExtractFieldsRejectsUnknownExtractor 的教训在这里同样适用：
+// 必须喂**真实的合法板块**，否则去掉校验后报错换成「找不到广义货币板块」，
+// require.Error 照样满足——测试会因为错误的理由绿。
+func TestExtractFieldsRejectsNonSectionPathExtractors(t *testing.T) {
+	secs := sectionPathSample(t)
+
+	for _, tc := range []struct{ name, extractor string }{
+		{"社融存量独立报告走的是整篇路径", extractorTSFStock},
+		{"社融增量独立报告走的是整篇路径", extractorTSFFlow},
+		{"根本不认识的版本标识", "rule@v3"},
+		{"空串", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractFields(secs, tc.extractor)
+			require.Error(t, err)
+			assert.Nil(t, got)
+			assert.Contains(t, err.Error(), tc.extractor, "错误信息要回显收到的是什么")
+
+			// 白名单由**同一份**常量拼出，测试也照那份比对——两处各抄一份必然分叉
+			for _, e := range sectionPathExtractors {
+				assert.Containsf(t, err.Error(), e,
+					"错误信息要列全走板块路径的 extractor，缺 %s", e)
+			}
+		})
+	}
+
+	// 反向对照：白名单里的四个都不该被这道校验挡下。
+	// 少了它，把校验写成「一律拒绝」也能让上面四格全绿。
+	for _, e := range sectionPathExtractors {
+		_, err := extractFields(secs, e)
+		assert.NoErrorf(t, err, "%s 走板块路径，不应被 extractor 白名单挡下", e)
+	}
 }
