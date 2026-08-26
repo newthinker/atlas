@@ -552,10 +552,14 @@ func reverseAlternation(alt string) string {
 //
 // # 为什么在 parseRatio 开头特判，而不是把 `持平` 加进那两张表
 //
-// 全语料 218 篇里「同比持平」共 50 处，**其中 45+ 处落在「从结构看」占比段**
-// （`委托贷款余额占比2.6%，同比持平`），那些**本就不该命中**。一旦 `持平` 进了
-// directionAlt，它就落进全局 dirPat，占比段那些句子全部变成候选 ⇒ mustMatch 的
-// 「恰好命中一次」退化成多命中报错。把它挡在表外，「数值+单位」的结构要求才继续生效。
+// ⚠️ **裁决当时给的理由已被实测证伪，这里是订正版**：原说法是「`持平` 进 directionAlt
+// ⇒ 占比段那 45+ 处全变成候选 ⇒ mustMatch 多命中报错」。验证者把 `持平` 加进 directionAlt
+// 真跑了一遍，**全语料结果与未变异逐字相同**——占比句「余额**占**比2.6%」在 tsfStockRE 的
+// **numPat 处即刻失败**，早于 dirPat，够不着方向词那一段。
+//
+// 结论不变，理由换成实测支持的三条：① `持平` **没有符号语义**（directionSign 每项都是 ±1）；
+// ② 那两张表**多族模板共用**，加词的影响面远大于本任务；③ 两张表由
+// TestDirectionSignCoversDirectionAlt 钉成双射，只加一处就会红——**那条既有测试才是真守卫**。
 //
 // 顺带：不动那两张表，TestDirectionSignCoversDirectionAlt 的双射断言也不受影响。
 //
@@ -572,8 +576,9 @@ func TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord(t *testing.T) {
 		_, ok := directionSign[directionFlat]
 		assert.Falsef(t, ok, "%q 不得登记进 directionSign", directionFlat)
 		assert.NotContainsf(t, directionAlt, directionFlat,
-			"%q 不得进入 directionAlt——它会落进全局 dirPat，让占比段那 45+ 处"+
-				"「同比持平」全变成候选，mustMatch 的「恰好命中一次」随即退化成多命中报错", directionFlat)
+			"%q 不得进入 directionAlt：它没有符号语义（directionSign 每项都是 ±1），"+
+				"而这两张表是多族模板共用的词表；且它们被 TestDirectionSignCoversDirectionAlt "+
+				"钉成双射，只加一处必红", directionFlat)
 	})
 
 	t.Run("约束③：空方向词仍须报错，不得被特判吞成 0", func(t *testing.T) {

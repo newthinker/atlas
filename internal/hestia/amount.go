@@ -46,11 +46,21 @@ var directionSign = map[string]float64{
 // 报告的分项余额句有 3 处写「…余额为2.55万亿元，同比持平」（2023-07 / 2025-06 社融存量，
 // 以及 2026-05 v2 月报社融板块那句没有「为」字的）：既无方向词也无数字，语义是变化率为零。
 //
-// 🔴 **为什么不把它加进上面那两张表**（M1c-3a 的 TASK-005，team-lead 裁决的约束①）：
-// 全语料 218 篇里「同比持平」共 50 处，**其中 45+ 处落在「从结构看」占比段**
-// （`委托贷款余额占比2.6%，同比持平`），那些本就不该命中。`持平` 一旦进 directionAlt
-// 就落进全局 dirPat，占比段那些句子全部变成候选 ⇒ mustMatch 的「恰好命中一次」退化成
-// 多命中报错。挡在表外，「数值+单位」的结构要求才继续把它们排除在外。
+// 🔴 **为什么不把它加进上面那两张表**（M1c-3a 的 TASK-005，team-lead 裁决的约束①）。
+//
+// ⚠️ **裁决当时给的理由已被实测证伪，这里记订正后的版本**：原说法是「`持平` 进了
+// directionAlt 就落进全局 dirPat ⇒ 占比段那 45+ 处『同比持平』全部变成候选 ⇒ mustMatch
+// 的『恰好命中一次』退化成多命中报错」。验证者真跑了那一半（把 `持平` 加进 directionAlt），
+// **全语料结果与未变异逐字相同**。成因：tsfStockRE 是
+// `QuoteMeta(name) + 余额为? ? + numPat + unitPat + ，同比 + dirPat`，占比句
+// 「余额**占**比2.6%」在 **numPat 处即刻失败**——**早于** dirPat，`持平` 在不在词表里
+// 对它够不着的那一段毫无影响。
+//
+// **约束本身仍然成立，只是理由换了**（这三条才是实测支持的）：
+//  1. `持平` **没有符号语义**——directionSign 的每一项都是 ±1，给它编一个符号是无中生有；
+//  2. directionAlt / directionSign 是**多族模板共用**的词表，往里加词的影响面远大于本任务；
+//  3. 两张表由 TestDirectionSignCoversDirectionAlt 钉成**双射**，只加一处就会红——
+//     那条既有测试才是真正守住这件事的东西。
 //
 // ⇒ 只由 parseRatio 在**开头**特判，且只认这一个词；模板侧由 profiles.go 的 tsfStockRE
 // 单独在尾部接它，不经 dirPat。TestParseRatioTreatsFlatAsZeroWithoutMakingItADirectionWord

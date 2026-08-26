@@ -995,9 +995,13 @@ func TestLoanScopeAnchorMissingIsLoudFailure(t *testing.T) {
 //	2026年5月金融统计数据报告：委托贷款余额11.22万亿元，同比持平   ← v2 月报，**没有「为」字**
 //
 // 🔴 **放宽的方式有讲究**：全语料 50 处「同比持平」里 45+ 处在「从结构看」占比段。
-// 不能把 `持平` 加进 dirPat（那会让占比段全部变成候选、mustMatch 退化成多命中报错），
-// 而是**保持「数值+单位」的结构要求**——占比句是 `余额占比2.6%`，「余额」后面是「占」
-// 不是数字，因此原样落在模板之外。阴性对照就钉这条。
+// 做法是**保持「数值+单位」的结构要求**——占比句是 `余额占比2.6%`，「余额」后面是「占」
+// 不是数字，在 **numPat 处即刻失败**，因此原样落在模板之外。阴性对照就钉这条。
+//
+// ⚠️ 订正（返工轮）：DoD 原先给的理由是「`持平` 进 dirPat 会让占比段变成候选、
+// mustMatch 退化成多命中报错」。验证者真跑了那一半——**把 `持平` 加进 directionAlt 后
+// 全语料结果与未变异逐字相同**。占比句在 numPat 就断了，**早于** dirPat，够不着方向词那一段。
+// 结论（不把 `持平` 放进共用词表）仍然对，理由见 amount.go 的 directionFlat。
 func TestTSFStockREAcceptsFlatYoY(t *testing.T) {
 	for _, tc := range []struct {
 		name, sentence, item string
@@ -1028,7 +1032,7 @@ func TestTSFStockREAcceptsFlatYoY(t *testing.T) {
 		} {
 			assert.Nilf(t, tsfStockRE(tc.item).FindStringSubmatch(tc.sentence),
 				"%q 必须仍不命中：「余额」后面是「占」不是数字——"+
-					"全语料 50 处「同比持平」有 45+ 处是这个形态，放进来会让 mustMatch 多命中报错", tc.sentence)
+					"全语料 50 处「同比持平」有 45+ 处是这个形态——它们在 numPat 处即刻失败", tc.sentence)
 		}
 	})
 
@@ -1036,5 +1040,49 @@ func TestTSFStockREAcceptsFlatYoY(t *testing.T) {
 		assert.NotContains(t, dirPat, "持平",
 			"dirPat 由 amount.go 的 directionAlt 拼出，`持平` 一旦进去，"+
 				"社融增量/存款/贷款那几族模板都会跟着放宽")
+	})
+}
+
+// tsfFlowRE 必须容忍方向词与数字之间的一个空格（M1c-3a 的 TASK-005 返工轮，boundary[1]）。
+//
+// 这是 `余额为 2.11万亿元` 那个变体的**同族**，但落在**另一条模板**上：
+//
+//	对实体经济发放的人民币贷款增加 16.88万亿元   ← 2019年 社融增量
+//	对实体经济发放的人民币贷款增加 3.49万亿元    ← 2020年1月 社融增量
+//
+// 🔴 **码位实测：这 2 处都是 `0x20` 普通空格**，与存量那 3 篇不同（存量里 2019 年那份是
+// `0xa0` NBSP）。两者最终都由 strip.go 的 `spaceRE = [ \t\x{00a0}]+` 折叠成单个普通空格，
+// 所以模板侧统一用 ` ?`；但**码位是数出来的，不是推出来的**——DoD 要求先数再决定改法。
+//
+// # 为什么只改这一条模板，不动 sectorFlowRE / scopeTotalRE
+//
+// 全语料 218 篇扫「名称+方向词+空白+数字」这个形态：**命中恰好 2 处，全在社融增量报告、
+// 全是 `0x20`、全是「对实体经济发放的人民币贷款增加」这一项**；金融统计数据报告类
+// **0 处** ⇒ 存款分部门（sectorFlowRE）与贷款作用域（scopeTotalRE）不受影响，不动它们。
+// 这是**范围的封闭性**，不是「我只找到这些」。
+func TestTSFFlowREToleratesSpaceBeforeNumber(t *testing.T) {
+	const item = "对实体经济发放的人民币贷款"
+	re := tsfFlowRE(item)
+
+	for _, tc := range []struct {
+		name, raw string
+		want      []string
+	}{
+		{"2019年 社融增量（0x20）", item + "增加 16.88万亿元，同比多增1.19万亿元", []string{"增加", "16.88", "万亿元"}},
+		{"2020年1月 社融增量（0x20）", item + "增加 3.49万亿元，同比少增7442亿元", []string{"增加", "3.49", "万亿元"}},
+		{"无空格（既有形态，必须仍绿）", item + "增加15.91万亿元", []string{"增加", "15.91", "万亿元"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := re.FindStringSubmatch(stripHTML([]byte(tc.raw)))
+			require.NotNilf(t, m, "必须命中 %q", tc.raw)
+			assert.Equal(t, tc.want, m[1:],
+				"三个捕获组：方向词/数值/单位。空格被吞进数值捕获组会让 newAmount 报错")
+		})
+	}
+
+	t.Run("阴性对照：同比干扰句仍不得命中", func(t *testing.T) {
+		// 「同比多增1780亿元」的「多增」不在方向词白名单里，放宽空格不得把它放进来。
+		assert.Nil(t, re.FindStringSubmatch(item+"同比多增 1780亿元"),
+			"「多增」修饰的是同比，不是方向词——容忍空格不等于容忍别的词")
 	})
 }
