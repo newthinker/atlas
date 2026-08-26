@@ -330,17 +330,21 @@ func assertMatchesGolden(t *testing.T, got, want map[string]float64) {
 // TestExtractorConstantsMatchDetect 把本包的 extractorV1/V2 常量与 sections.go 的
 // detectExtractor 返回值绑在一起。
 //
-// sections.go 里那两个字串是**字面量**（T3 的文件，本任务不改它）。若两处哪天
-// 分叉，extractFields 会安静地按 v1 去抽一份 v2 报告——少抽 27 个字段，而
-// 「缺失」在 M1b-1 的语义里是「本期模板本就没有」，完全无声。
+// ⚠️ M1c-3a 的 TASK-004 起，sections.go **直接返回这两个常量**，不再是各写一份的
+// 字面量 —— 「两处分叉」那类缺陷因此在结构上不可能发生，本测试不再是它的守卫。
+// （原注释：字面量分叉会让 extractFields 安静地按 v1 去抽一份 v2 报告，少抽 27 个
+// 字段，而「缺失」在 M1b-1 的语义里是「本期模板本就没有」，完全无声。）
+//
+// 它现在守的是**探测行为本身**：两份真实样本经 splitSections → detectExtractor
+// 必须得到各自的 extractor。这一半从来不是恒真的，消融可杀。
 func TestExtractorConstantsMatchDetect(t *testing.T) {
-	for _, tc := range []struct{ sample, want string }{
-		{"pboc-2025-12-annual.html", extractorV2},
-		{"pboc-2020-06-h1.html", extractorV1},
+	for _, tc := range []struct{ sample, periodType, want string }{
+		{"pboc-2025-12-annual.html", "annual", extractorV2},
+		{"pboc-2020-06-h1.html", "h1", extractorV1},
 	} {
 		t.Run(tc.sample, func(t *testing.T) {
 			secs := splitSections(stripHTML(readSample(t, tc.sample)))
-			got, err := detectExtractor(secs)
+			got, err := detectExtractor(secs, tc.periodType)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got, "常量与 detectExtractor 的返回值必须一致")
 		})

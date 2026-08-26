@@ -105,14 +105,92 @@ func findSection(secs []section, kw string) (section, bool) {
 	return section{}, false
 }
 
-// 两种已知模板的板块数。社融并入《金融统计数据报告》之前是六个板块，之后是八个。
-const (
-	sectionsV1 = 6
-	sectionsV2 = 8
-)
+// —— 关于曾经存在于此的 sectionsV1 / sectionsV2（板块数 6 与 8）——
+//
+// 它们是旧判据 `len(secs)==6 → v1 / len(secs)==8 → v2` 的两个魔数，随 M1c-3a 的
+// TASK-004 换判据一起删除（AD-2）。
+//
+// **不要加回来当「节数上界」**：节数从来不是模板身份的代理。218 篇实测里同一族
+// 报告是 4/5/6/7/8 节，差别只在有没有「经常项下跨境人民币结算」这类**不产出任何
+// 字段**的板块——那条上界正是把 5 节季报（2020-09/2022-09）和全部四种月报布局
+// 挡在门外的原因，共 74 篇。任何基于节数的上界都会把同一个 bug 换个数字重来一遍。
+//
+// 真正的上界在别处，而且更强：checkSectionOrdinals 要求序号从「一、」连续
+// （残缺的 v2 靠它挡），extractFields 对每条模板要求恰好命中一次（换了模板的
+// 报告会在抽取层响亮失败）。见 TestDetectExtractorAcceptsExtraIrrelevantSections。
 
 // tsfSectionKeyword 是判定「本期含社融板块」的标题锚点。
 const tsfSectionKeyword = "社会融资规模存量"
+
+// periodTypeMonthly 是**唯一**豁免外汇节的 period_type（M1c-3a 的 TASK-004）。
+//
+// 与 types.go 的 validPeriodTypes 是同一个取值域，由
+// TestMonthlyIsTheOnlyPeriodTypeExemptFromFX 的前提断言绑住：这个字串若与白名单
+// 分叉，豁免就永远不触发（全部月报被拒），或永远触发（截断检测失效）。
+const periodTypeMonthly = "monthly"
+
+// fxSectionKeyword 是外汇板块的标题锚点（M1c-3a 的 TASK-004）。
+//
+// 它在判据里有**独立于其它板块**的地位：53/55 篇月报正文根本没有这一节
+// （AD-1 / 缺口 G1 实测），所以它既不是核心板块、也不像社融那样由 v2Only 标出，
+// 只能单独点名排除。
+//
+// ⚠️ extract.go 的 sectionRules 里那一条仍写着同样的字面量（那个文件本任务只读）。
+// 两处分叉时 coreSectionKeywords() 会把外汇当成核心板块，于是**全部月报被拒**——
+// 由 TestCoreSectionKeywordsIsDerivedNotHandwritten 里
+// `require.Equal(t, 1, nFX)` 那条前提断言钉住：分叉时它先红。
+const fxSectionKeyword = "国家外汇储备"
+
+// coreSectionKeywords 返回「任何一期《金融统计数据报告》都必须有」的板块关键词，
+// 从 sectionRules **派生**（M1c-3a 的 TASK-004，AD-2）。
+//
+// 派生规则：非 v2Only（社融两节只在含社融的期次有）且非外汇节（见上）。
+//
+// 不手写第二份清单：sectionRules 才是「本包认得哪些板块」的事实，手抄的那份会在
+// 下次加板块时静默过期——而它的过期方式是**判据变松**（少要求一个板块），
+// 不会有任何东西转红。这与 required.go 头部「模板表才是事实」是同一条理由。
+func coreSectionKeywords() []string {
+	out := make([]string, 0, len(sectionRules))
+	for _, r := range sectionRules {
+		if r.v2Only || r.keyword == fxSectionKeyword {
+			continue
+		}
+		out = append(out, r.keyword)
+	}
+	return out
+}
+
+// hasAnyTSFSection 回答「社融那两节里出现了任意一节吗」，从 sectionRules 的 v2Only
+// 标记派生（M1c-3a 的 TASK-004），不另抄一份社融关键词。
+//
+// 它与 findSection(secs, tsfSectionKeyword) 的差别正是下面那道守卫要用的：
+// 前者宽（存量**或**增量），后者只认存量。
+func hasAnyTSFSection(secs []section) bool {
+	for _, r := range sectionRules {
+		if !r.v2Only {
+			continue
+		}
+		if _, ok := findSection(secs, r.keyword); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// missingCoreSections 返回缺失的核心板块关键词，按 coreSectionKeywords 的顺序。
+// 返回空切片表示核心齐全。
+//
+// 返回**清单**而不是 bool：新判据下「一共几节」已不再是充分的诊断信息，
+// 排障要的是「缺了哪几节」。
+func missingCoreSections(secs []section) []string {
+	var missing []string
+	for _, kw := range coreSectionKeywords() {
+		if _, ok := findSection(secs, kw); !ok {
+			missing = append(missing, kw)
+		}
+	}
+	return missing
+}
 
 // sectionOrdinals 是板块标题的中文序号，按顺序。
 //
@@ -205,27 +283,77 @@ func firstOrdinalOf(title string) string {
 // 序号连续性先于版式判定：残缺的 v2 在版式上与合法的 v1 无法区分（见
 // checkSectionOrdinals），等到版式分支才判就已经晚了——那时它已经是个合法形态。
 // 空输入跳过：那是「一个板块都没切出来」，由下面的版式分支报，信息更全。
-func detectExtractor(secs []section) (string, error) {
+func detectExtractor(secs []section, periodType string) (string, error) {
 	if len(secs) > 0 {
 		if err := checkSectionOrdinals(secs); err != nil {
 			return "", err
 		}
 	}
 
+	// 判据问「必需板块在不在」，不问「一共几节」。四个维度：
+	// 核心板块齐全 × hasFX × hasTSF × periodType。
+	if missing := missingCoreSections(secs); len(missing) > 0 {
+		return "", fmt.Errorf(
+			"hestia: missing core section(s) %s: got %d sections. "+
+				"Every 金融统计数据报告 carries these four regardless of template "+
+				"version, so this is a new template, a different kind of report, or a "+
+				"truncated fetch — all three need a human look. Guessing an extractor "+
+				"would let a wrong completeness profile treat missing fields as "+
+				"absent-by-design",
+			strings.Join(missing, ", "), len(secs))
+	}
+
+	_, hasFX := findSection(secs, fxSectionKeyword)
 	_, hasTSF := findSection(secs, tsfSectionKeyword)
 
-	switch {
-	case hasTSF && len(secs) == sectionsV2:
-		return "rule@v2", nil
-	case !hasTSF && len(secs) == sectionsV1:
-		return "rule@v1", nil
-	default:
+	// 有社融增量节却没有存量节 = 自相矛盾的形态，拒。
+	//
+	// 这道守卫是**旧判据顺带提供、新判据会弄丢的**，故显式补回（M1c-3a 的 TASK-004）：
+	// 旧判据靠 len(secs)==8 && !hasTSF 落进 default 报错；新判据不数节数，于是这种
+	// 输入会因「核心齐 + 有外汇」被判成 rule@v1，而 rule@v1 **完全跳过** v2Only 两节
+	// ——增量数据被静默丢掉，completeness 认为本期本就没有社融字段。
+	//
+	// 判据锚在「存量」而不是更宽的「社会融资规模」是刻意的（见 findSection 的注释与
+	// TestDetectExtractorJudgesTSFByTitleOnly）；这道守卫补的正是那个窄锚点的另一侧。
+	//
+	// 实践中它够不到：v2 版式里存量/增量是相邻的第一、二节，丢掉存量会让序号从「二、」
+	// 起，checkSectionOrdinals 先一步拦下。留着是防**新模板**，不是防截断。
+	if hasAnyTSFSection(secs) && !hasTSF {
 		return "", fmt.Errorf(
-			"hestia: unrecognized layout: %d sections, tsf_section=%v "+
-				"(known: %d without tsf = rule@v1, %d with tsf = rule@v2). "+
-				"This is either a new report template or a truncated fetch; "+
-				"both need a human look — guessing an extractor would let a wrong "+
-				"completeness profile treat missing fields as absent-by-design",
-			len(secs), hasTSF, sectionsV1, sectionsV2)
+			"hestia: found a 社融 section but not %q: got %d sections. The v2 layout "+
+				"always carries 存量 and 增量 as its first two sections, so this is an "+
+				"unseen template. Judging it rule@v1 would skip both 社融 sections "+
+				"entirely and read their 27 fields as absent-by-design",
+			tsfSectionKeyword, len(secs))
+	}
+
+	// 🔴 新判据引入的缝，必须堵在这里。
+	//
+	// 「无外汇节」原先是**未知布局**（响亮失败），现在成了月报的**特征**。一篇
+	// 累计期报告若外汇节恰好被抓取截断，会被静默降级成 25 字段的 rule-monthly@v1，
+	// completeness 认为它本就不该有 fx_reserve / fx_rate —— 没有任何闸门会响。
+	//
+	// 只有 monthly 允许没有外汇节：55 篇月报实测 53 篇正文根本没有这一节（G1），
+	// 而累计期报告（q1 / h1 / q1_q3 / annual）四种版式全都有。
+	if !hasFX && periodType != periodTypeMonthly {
+		return "", fmt.Errorf(
+			"hestia: cumulative-period report (period_type=%q) has no %q section: "+
+				"got %d sections. Monthly reports legitimately lack it (53 of 55 "+
+				"sampled), but every 累计期 report carries it, so this is a truncated "+
+				"fetch. Accepting it would silently downgrade the report to the "+
+				"25-field monthly profile, under which the two missing 外汇 fields "+
+				"read as absent-by-design and no gate ever fires",
+			periodType, fxSectionKeyword, len(secs))
+	}
+
+	switch {
+	case hasTSF && hasFX:
+		return extractorV2, nil
+	case !hasTSF && hasFX:
+		return extractorV1, nil
+	case hasTSF && !hasFX:
+		return extractorMonthlyV2, nil
+	default: // !hasTSF && !hasFX
+		return extractorMonthlyV1, nil
 	}
 }

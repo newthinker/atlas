@@ -181,7 +181,7 @@ func Parse(raw []byte) (Observation, error) {
 	// 「紧邻的 detectExtractor 会报错，且错误信息严格更多」——那个前提由这两行
 	// 兑现，不是别处已有的事实。删掉或挪后这一段，T3 的保证就随之消失。
 	secs := splitSections(stripHTML(raw))
-	extractor, err := detectExtractor(secs)
+	extractor, err := detectExtractor(secs, periodType)
 	if err != nil {
 		return Observation{}, err
 	}
