@@ -14,6 +14,15 @@ import (
 
 // Context Checkpoint: done_criteria → test mapping（M1c-2 的 TASK-002）
 //
+// ⚠️ **这是 M1c-2 的 TASK-002 定稿那一刻的映射，逐字保留**：它记的是那一轮的 done_criteria，
+// 改了就不再是那一轮的记录。但里面有两句在今天已经不成立，**读它要带上这个前提**：
+//
+//   · functional[0] 的「只解析金融统计报告」—— M1c-3a 的 TASK-010 删掉 kind 硬过滤后不再成立；
+//   · functional[1] 指的 TestCollectSamplesIgnoresNonFinanceKinds 已在同一任务里**转正例**
+//     并改名为 TestCollectSamplesParsesNonFinanceKinds（来历见下面 functional[1] 那一段）。
+//     判据是机械的：把本文件注释里引用的每个 Test 名逐个比对实际存在的函数。
+//     ⚠️ **这里不写「共 N 处」**——那种自证数字下一次改动就过期，而它过期时不会报错。
+//
 //	functional[0]      collectSamples 签名/类型、按期次归组、只解析金融统计报告、汇总 Samples
 //	                   → TestCollectSamplesCountsDifferPerField
 //	functional[1]      社融存量/增量两篇不计入失败表（文件根本不存在）
@@ -274,6 +283,70 @@ func TestCollectSamplesRendersEveryCategoryToOut(t *testing.T) {
 	// 而是「这个词只可能由**我要验的那一行**产生」。
 	assert.NotContains(t, s, "本迭代不解析该报告种类（社融存量/增量的解析器是 M1c-3 的活）: 2026-07",
 		"月报不该再出现在「本迭代不解析」那一段")
+}
+
+// summaryLine 从 writeCollectSummary 的输出里切出以 prefix 开头的那一行。
+//
+// 断言整份输出的 Contains 会让「这句话出现在别的行里」也算数；而本文件要验的几条
+// 恰恰是**某一行内部**的措辞，切出来再断言才是在验它。
+func summaryLine(t *testing.T, s, prefix string) string {
+	t.Helper()
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	require.FailNowf(t, "输出里没有以 "+prefix+" 开头的行", "完整输出:\n%s", s)
+	return ""
+}
+
+// 表头不得点名一个它并不专指的报告种类。
+//
+// 🔴 **M1c-3a 的 TASK-010 返工（QA F1）**：这一行原本写死 `backfillKindFinance`
+// ——「待解析（金融统计数据报告，受支持期次）: 195 篇」。而本任务删掉 `classifyArticles`
+// 的 kind 硬过滤之后，这一格装的是 **195 = 57 金融统计 + 138 社融**，标称的那一种只占 29%。
+// 这不是「文档不好看」：标定报告是本迭代唯一的人类可读交付物，那句话已经逐字进了验收产物。
+//
+// ⚠️ **成因留在这里**：删硬过滤时同时删掉了紧邻的一句过期 `Err`，而**过期的标签没删**
+// ——同一形状修了一处漏了一处。所以这条钉的是「表头与这一格的实际住户相符」，不是那行的字面。
+//
+// ⚠️ **钉性质不钉取值**：195 换一份 manifest 就变，
+// 「这一格跨多种报告时表头不得点名任何单一种类」不会变。
+func TestCollectSummaryHeaderDoesNotNameASingleKind(t *testing.T) {
+	dir := threeCategoryFixture(t)
+	var out bytes.Buffer
+	got, err := collectSamples(CalibrateDeps{Dir: dir, Out: &out})
+	require.NoError(t, err)
+
+	// —— 前提①：这一格的输入确实**跨多种报告**。
+	// 少了它，下面那条否定式断言会在「夹具恰好只剩一种」时**平凡为真**，
+	// 而那正是这条守卫失效却仍全绿的样子。
+	st, err := loadManifest(dir)
+	require.NoError(t, err)
+	kinds := map[string]bool{}
+	for _, a := range st.Manifest.Articles {
+		if _, _, kind, err := parseTitle(a.Title); err == nil {
+			kinds[kind] = true
+		}
+	}
+	require.Len(t, kinds, 3,
+		"前提：夹具输入须跨三种报告，否则「表头不得点名单一种类」无从谈起")
+
+	// —— 前提②：表头那一行在。整行被删时，下面两条都会退化成平凡真。
+	line := summaryLine(t, out.String(), "  待解析")
+
+	// ① 篇数必须印出来。6 篇进这一格、C 类那篇被减掉 ⇒ 5。
+	//    独家杀手：把数字印错或不印 —— 它对种类名一无所知，②照样绿。
+	require.Equal(t, 5, got.Periods, "夹具 6 篇进这一格、C 类那篇被减掉")
+	assert.Contains(t, line, "5 篇", "这一格的篇数必须印在表头上")
+
+	// ② 表头不得点名任何单一种类。
+	//    独家杀手：把种类名塞回表头 —— 那时 ①仍然绿（数字没动），只有这里红。
+	for _, k := range backfillKindOrder {
+		assert.NotContainsf(t, line, k,
+			"表头点名了「%s」，而这一格装着 %d 种报告 —— 这是一句用户可见的假话",
+			k, len(kinds))
+	}
 }
 
 // —— boundary[0] ——
