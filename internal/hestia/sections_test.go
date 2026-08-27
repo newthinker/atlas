@@ -687,11 +687,36 @@ func TestDetectExtractorRejectsTruncatedFXOutsideMonthly(t *testing.T) {
 		"累计期报告缺外汇节 = 抓取截断，必须响亮失败，不得静默降级成 25 字段的月报 extractor")
 	assert.Contains(t, err.Error(), fxSectionKeyword)
 
-	// 同一份输入，periodType 换成 monthly 就是合法的月报形态 —— 这一对
-	// 才说明判据真的用上了 periodType，而不是碰巧对。
+	// 🔴 **M1c-3a 的 TASK-012（QA fix 5）改了这里的第二格。**
+	//
+	// 原先这一格是「同一份输入换成 monthly ⇒ 放行」，用来证明判据真的用上了 periodType。
+	// 那个前提**现在不成立**：这份输入的合计句自称「前三季度」，而真实月报永远不会那么写。
+	// 豁免的依据是「月报本就不含外汇节」，一篇自称季度口径的报告不在那个前提里。
+	//
+	// 拆成两格之后，原来的用意（判据真用上了 periodType，不是碰巧对）由第三格承担，
+	// 而第二格新增覆盖 fix 5：**period_type=monthly 但正文自称累计期 ⇒ 仍然拒**。
+	// 这正是 2024-03 / 2025-03 那两篇 3 月报被截断时的形态。
 	got, err := detectExtractor(truncated, "monthly")
-	require.NoError(t, err, "同样缺外汇节，月报是正常形态")
-	assert.Equal(t, extractorMonthlyV1, got)
+	require.Error(t, err,
+		"period_type 是 monthly 但合计句自称「前三季度」——豁免的前提（月报本就没有外汇节）"+
+			"对它不成立，截断必须仍被拦下，否则 rule@v1 会静默降级成 25 字段的 rule-monthly@v1")
+	assert.Contains(t, err.Error(), "declare a quarter-or-longer period",
+		"错误信息要说清是**哪条路径**触发的：真累计期报告 vs 自称季度口径的月报，"+
+			"两者排障方向不同（前者查抓取，后者还要确认这篇到底是不是 3 月报）")
+	assert.Empty(t, got)
+
+	// 第三格：**真正的**月报形态（合计句用「前八个月」），缺外汇节仍然放行。
+	// 它与上一格合起来才说明豁免是按**报告自称的口径**决定的，而不是「monthly 一律放行」
+	// 或「一律不放行」——单独任何一格都区分不出这三种实现。
+	monthly := sectionsOf(t, "pboc-2025-08-monthly.html")
+	if _, hasFXMonthly := findSection(monthly, fxSectionKeyword); hasFXMonthly {
+		t.Fatal("前提：这份月报不该有外汇节")
+	}
+	require.False(t, declaresQuarterOrLonger(monthly),
+		"前提：真实月报的合计句用「前八个月」这类月度累计前缀，不自称季度口径")
+	gotM, errM := detectExtractor(monthly, "monthly")
+	require.NoError(t, errM, "月报没有外汇节是正常形态（55 篇里 53 篇如此），豁免必须仍在")
+	assert.Equal(t, extractorMonthlyV1, gotM)
 }
 
 // 🔴 同一处的第二条缝：原判据 len(secs)==6 同时是下界和**上界**，
@@ -823,4 +848,69 @@ func TestMonthlyIsTheOnlyPeriodTypeExemptFromFX(t *testing.T) {
 	}
 	assert.Equal(t, 1, exempt, "豁免的必须**恰好**是一个 period_type")
 	assert.Len(t, validPeriodTypes, 5, "取值域增删了——请确认新类型该不该豁免外汇节")
+}
+
+// TestQuarterOrLongerPeriodsIsExactly 钉住派生结果（M1c-3a 的 TASK-012，QA fix 5）。
+//
+// quarterOrLongerPeriods() 是从 cumulativePeriods **减**出来的（去掉月度累计与单月），
+// 派生保证了「新增月度前缀不会误入」，但**不保证减法本身是对的**——比如某天
+// numericMonth 那条正则写错，`1月份` 会漏进来，于是所有月报都被当成自称季度口径、
+// 全部被截断守卫拒掉。逐字钉住结果让这类改动必须显式表态。
+func TestQuarterOrLongerPeriodsIsExactly(t *testing.T) {
+	assert.Equal(t, map[string]bool{
+		"全年": true, "上半年": true, "一季度": true, "前三季度": true,
+	}, quarterOrLongerPeriods(),
+		"季度及以上的累计前缀恰好是这四个：新增一个累计期形态时要显式表态，"+
+			"漏掉它 ⇒ 该形态的截断不再被拦（放行错数据）；多进一个月度前缀 ⇒ 月报被全部误拒")
+
+	// 反向：月度累计与单月一个都不许在里面——它们进来会让豁免失效
+	for _, w := range append(strings.Split(cumulativeMonthAlt, "|"), "1月份") {
+		assert.Falsef(t, quarterOrLongerPeriods()[w],
+			"%q 是月度口径，混进「季度及以上」会让月报的外汇节豁免失效", w)
+	}
+}
+
+// TestDeclaresQuarterOrLongerReadsTheReportsOwnClaim 钉住 fix 5 判据的**性质**：
+// 它读的是报告**自己**合计句里的期次前缀，不是标题里的日期。
+//
+// 三格覆盖三种实现：读正文（正确）、读日期黑名单、恒真/恒假。
+// 只有「同一份 secs 只改合计句前缀就翻转结论」能把它们区分开。
+func TestDeclaresQuarterOrLongerReadsTheReportsOwnClaim(t *testing.T) {
+	mk := func(prefix string) []section {
+		return []section{
+			{Title: "一、广义货币增长8.5%", Body: "略"},
+			{Title: "二、人民币贷款", Body: prefix + "人民币贷款增加9.78万亿元。"},
+			{Title: "三、人民币存款", Body: prefix + "人民币存款增加12.9万亿元。"},
+		}
+	}
+	for _, tc := range []struct {
+		prefix string
+		want   bool
+		why    string
+	}{
+		{"一季度", true, "3 月报按季度口径写，它在口径上就是一篇累计期报告"},
+		{"全年", true, "季度及以上"},
+		{"前八个月", false, "月度累计，是真正的月报形态"},
+		{"8月份", false, "单月"},
+		{"1-8月", false, "2022 年月报的月度累计写法——本次 R3 新增的形态也必须留在月报侧"},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			assert.Equalf(t, tc.want, declaresQuarterOrLonger(mk(tc.prefix)), "%s", tc.why)
+		})
+	}
+
+	// 缺节的那条分支：贷款/存款节任一缺失时跳过它，不因此判成「自称季度口径」。
+	// 判成 true 会让一篇缺核心节的月报被截断守卫拒掉，而缺核心节应当由
+	// missingCoreSections 报——两条错误的排障方向不同。
+	t.Run("缺存款节_只看得到的那节", func(t *testing.T) {
+		onlyLoan := []section{
+			{Title: "一、广义货币增长8.5%", Body: "略"},
+			{Title: "二、人民币贷款", Body: "一季度人民币贷款增加9.78万亿元。"},
+		}
+		assert.True(t, declaresQuarterOrLonger(onlyLoan), "看得到的那节自称季度口径")
+	})
+	t.Run("两节都缺_不表态", func(t *testing.T) {
+		assert.False(t, declaresQuarterOrLonger([]section{{Title: "一、广义货币", Body: "略"}}),
+			"没有合计句可读时不得判成自称季度口径——那会把「缺核心节」误报成「截断」")
+	})
 }

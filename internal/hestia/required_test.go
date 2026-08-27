@@ -299,3 +299,54 @@ func TestExtractorEnumErrorListsEveryValidValue(t *testing.T) {
 	}
 	assert.Len(t, validExtractors, 7, "白名单增删了取值——请同步本测试的逐字清单")
 }
+
+// ── M1c-3a 的 TASK-012（QA fix 6）：validExtractors 的逐项表态 ──────────────
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3a 的 TASK-012)
+// functional[3]  遍历 validExtractors，新增第八个而不登记 requiredFields 必须红
+//                                          → TestEveryValidExtractorHasARequiredFieldsDecision
+
+// TestEveryValidExtractorHasARequiredFieldsDecision 要求 validExtractors 里的**每一个**值
+// 都对 requiredFields 有明确归属：要么返回非空必填集，要么登记在下面的豁免表里并写明理由。
+//
+// 遍历取值域本身而不是手写七个值：将来加第八个 extractor 时它会**自动**进入本测试并被
+// 要求表态——不登记就红。这与本包既有的两处范式同一用意（sections_test.go 的
+// TestMonthlyIsTheOnlyPeriodTypeExemptFromFX 遍历 validPeriodTypes、types.go 的
+// TestEveryPeriodTypeHasAnExplicitSupportDecision）。
+//
+// 🔴 **少了它的失效方式是静默的**：新 extractor 落进 requiredFields 的 default 分支返回 nil，
+// completeness 记 skipped 而不是 failed —— 那一期看起来「本就没有这些字段」，没有任何闸门会响。
+// 这正是 QA fix 6 指出的缺口。
+func TestEveryValidExtractorHasARequiredFieldsDecision(t *testing.T) {
+	// 豁免表：键是 extractor，值是**为什么**它拿不到必填集。
+	// 写理由而不是只写 true —— 「想过并决定豁免」与「忘了登记」在代码里长得一样。
+	exempt := map[string]string{
+		"llm-fallback@v1": "Extractor 同时编码「抽取方式」与「模板版本」，这个值只带前者，" +
+			"无从知道它抽的是 v1 还是 v2 期次。返回 nil 是刻意的失败信号，见 " +
+			"TestRequiredFieldsRejectsAmbiguousExtractor。",
+	}
+
+	require.NotEmpty(t, validExtractors, "取值域为空，本测试的绿色是假的")
+	for _, ex := range validExtractors {
+		t.Run(ex, func(t *testing.T) {
+			got := requiredFields(ex)
+			if reason, ok := exempt[ex]; ok {
+				assert.NotEmpty(t, reason, "豁免必须写明理由")
+				assert.Nilf(t, got, "%s 登记为豁免，requiredFields 就该返回 nil；"+
+					"若它现在有必填集了，请把它从豁免表里删掉", ex)
+				return
+			}
+			assert.NotEmptyf(t, got, "%s 在 validExtractors 里却拿不到必填集："+
+				"它会落进 requiredFields 的 default 分支返回 nil，completeness 记 skipped 而非 "+
+				"failed —— 那一期看起来「本就没有这些字段」，没有任何闸门会响。"+
+				"新增 extractor 时必须在 requiredFields 里加分支，或登记进本测试的豁免表并写明理由", ex)
+		})
+	}
+
+	// 反向：豁免表里不得有 validExtractors 之外的键——那种键永远不会被求值，
+	// 是一条看起来在豁免、实际零效力的记录。
+	for ex := range exempt {
+		assert.Containsf(t, validExtractors, ex,
+			"豁免表里的 %q 不在 validExtractors 里：这条豁免永远不会被求值", ex)
+	}
+}
