@@ -61,8 +61,12 @@ type ParseFailure struct {
 
 // CalibrateResult 是分布统计的原料。
 //
-// Periods 只数**受支持的**《金融统计数据报告》（含解析失败的那些）—— 它是「本轮尝试了
-// 多少期」，不是「manifest 里有多少篇」。
+// Periods 数**全部受支持种类**里被真正尝试解析的那些篇（含解析失败的）—— 它是「本轮
+// 尝试了多少篇」，不是「manifest 里有多少篇」。
+//
+// ⚠️ **它一度只数《金融统计数据报告》**，M1c-3a 的 TASK-010 删掉 classifyArticles 的
+// kind 硬过滤后就不是了。同一句过期声称还留在
+// 渲染表头上，直到 QA 查出来 —— 别再按「只有金融统计」去读这个数。
 type CalibrateResult struct {
 	Periods int
 	Samples map[string][]float64 // field → 各期实测值，未排序
@@ -106,10 +110,11 @@ type CalibrateResult struct {
 	IncompleteAccepted bool
 }
 
-// collectSamples 读 manifest、解析《金融统计数据报告》、汇总各字段的取值。
+// collectSamples 读 manifest、解析**全部受支持种类**的报告、汇总各字段的取值。
 //
-// 只取这一种报告：M1b-2 的 Parse 只认它的格式，rule@v1 期次的 27 个社融字段在另外两篇
-// 独立报告里，本迭代没有解析器。
+// ⚠️ **这里一度只取《金融统计数据报告》**，理由是「Parse 只认它的格式，社融字段在另外
+// 两篇独立报告里、本迭代没有解析器」。M1c-3a 的 TASK-010 做了社融两种的解析器并删掉了
+// 那道硬过滤，理由随之失效 —— 现在三种报告都进来，各自贡献自己有的字段。
 func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 	// loadManifest 对**文件不存在**返回空 Manifest + nil error —— 那是回填首跑的正常路径，
 	// 在那边是对的。但在这里「目录里没有 manifest」意味着 --dir 指错了，若沿用那条语义，
@@ -365,7 +370,16 @@ func writeCollectSummary(w io.Writer, dir string, res *CalibrateResult) {
 		return
 	}
 	fmt.Fprintf(w, "标定输入: %s\n", dir)
-	fmt.Fprintf(w, "  待解析（%s，受支持期次）: %d 篇\n", backfillKindFinance, res.Periods)
+	// ⚠️ **表头不点名种类**（M1c-3a 的 TASK-010 返工，QA F1）：这一格原本写死
+	// `backfillKindFinance`，而本任务删掉 classifyArticles 的 kind 硬过滤之后，
+	// 它装的是全部受支持的种类，标称的那一种只占少数 —— 那句话是**用户可见的假话**，
+	// 且已逐字进了标定验收报告。
+	//
+	// 实测构成（**条件与数字同行**：M1c-3a 标定验收那次真跑，manifest 218 篇，2026-08）：
+	// `195 = 57 金融统计 + 138 社融（69 存量 + 69 增量）` ⇒ 标称种类占 29%。
+	// ⚠️ 换一份 manifest 这三个数就变，**别拿它们当判据** —— 判据在测试里，钉的是性质。
+	// 由 TestCollectSummaryHeaderDoesNotNameASingleKind 钉住（钉性质不钉取值）。
+	fmt.Fprintf(w, "  待解析（受支持期次）: %d 篇\n", res.Periods)
 
 	fmt.Fprintf(w, "  本迭代不解析: %d 篇\n", len(res.Unsupported))
 	for _, line := range groupUnsupported(res.Unsupported) {
