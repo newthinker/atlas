@@ -1613,6 +1613,123 @@ func TestExtractFieldsDistinguishesTwoRejectionKinds(t *testing.T) {
 	}
 }
 
+// —— M1c-3a 的 TASK-011 · error_handling[0]（从 M1c-3a 的 TASK-012 转入）——
+
+// 🔴 **两种成因完全不同的失败，一度收敛成同一条错误信息**。
+//
+// `flowRE` = `periodPat` + 「，?」+ 句尾模板。期次前缀不在 `periodAlt` 里时**整条正则
+// 不命中** ⇒ 那句话根本没进候选集 ⇒ `selectUnique` 报的是「没找到」，与「本节确实
+// 没有累计句」**逐字同形**：
+//
+//	2020-04（正文真的没有累计句）      → not found among 1 candidate(s) [4月份/人民币]
+//	2022-10（有「1-10月…累计增加」，只是前缀不认识）
+//	                                  → not found among 2 candidate(s) [10月份/人民币 10月份/外币]
+//
+// 结构完全相同，唯一差别是候选数，**而那个数不携带「为什么」**。
+//
+// 🔴 **两者的后续动作相反**：前者是解析器缺口（该往 `periodAlt` / `cumulativePeriods` 加，
+// M1c-4 要修），后者是报告本身没数据（修不了，正确的是标注）。R3 的原始损害正是
+// 这一条——「该期报告只有当月数」被写进了验收报告与 CONTRACTS，**而数据就在正文里**。
+//
+// ⚠️ **交叉断言**：两条错误串**互不出现**在对方那一格里。「两条分支可区分」是**关系性**
+// 属性，两边都满足「有报错」时它照样可以被破坏（M1c-3a 的 TASK-006 的 N2 同族）。
+func TestCumulativeFlowDistinguishesUnknownPrefixFromNoCumulativeSentence(t *testing.T) {
+	const (
+		markerNoSentence = "not found among" // A 类：候选集里没有累计口径的那一条
+		markerUnknown    = "期次前缀不被识别"        // B 类：有那句话，只是前缀不认识
+	)
+
+	t.Run("A_本节确实没有累计句_真实语料2020-04", func(t *testing.T) {
+		secs := splitSections(stripHTML(readSample(t, "pboc-2020-04-monthly.html")))
+		sec, ok := findSection(secs, "人民币贷款")
+		require.True(t, ok)
+
+		// 前提：本节没有任何「形状正确、只是前缀不认识」的合计句 —— 否则这一格测的是 B 类
+		require.Empty(t, unrecognisedPeriodPrefixes(sec.Body, loanFlowRE),
+			"用例前提：2020-04 必须是纯 A 类")
+
+		_, err := selectRMBCumulativeFlow(loanFlowRE, sec.Body, currencyRMB+"贷款期内合计")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), markerNoSentence)
+		assert.NotContains(t, err.Error(), markerUnknown,
+			"交叉：A 类不得报成「前缀不认识」——那会把一篇没数据的报告送进 M1c-4 的兜底清单")
+	})
+
+	// 🔴 **我先写下「TASK-012 之后全语料已无 B 类」，随后实测把它证伪了**——留着这句
+	// 是因为下一个人很可能做同样的假设。真值（本任务在 `05b50be` 上扫 218 篇、160 个板块）：
+	//
+	//	2022-05 存款侧 / 贷款侧   前缀「今年前5个月」   ← **活的 B 类**，本诊断当场抓到
+	//	2020-02 / 2020-03 两侧    前缀「N月当月」        ← 惰性：那一节另有被认识的累计句
+	//	                                                （`hits>0`，诊断根本不会被问到）
+	//
+	// 「今年前5个月，人民币贷款累计增加10.87万亿元」就在正文里，而 TASK-012 补的是
+	// `1-N月` 一族、没有覆盖它 ⇒ **R3 的失效方式此刻仍然活着，只是换了个前缀写法**。
+	//
+	// ⚠️ 本格仍用**合成**正文，是刻意的：真实的 2022-05 一旦有人把「今年前N个月」补进
+	// `periodAlt`（那是正确的修复），这一格就会红——**守卫会被一次正确的修复打坏**。
+	// 合成前缀「今年以来」不会有人去加，所以它钉住的是**性质**而不是某一期语料的现状。
+	// 合成的只有「前缀」这一个变量，句尾与真实 2022 年月报逐字同形。
+	t.Run("B_有累计句但前缀不被认识_合成", func(t *testing.T) {
+		const body = "4月末，月末人民币贷款余额201.66万亿元，同比增长10.9%。" +
+			"4月份人民币贷款增加6454亿元，同比少增8231亿元。" +
+			"今年以来，人民币贷款累计增加18.7万亿元。"
+
+		// 前提①：那句话确实在正文里，且句尾与真实体例同形
+		require.Contains(t, body, "人民币贷款累计增加18.7万亿元")
+		// 前提②：`flowRE` 确实认不出它 —— 否则这一格根本不成立
+		require.NotContains(t, loanFlowRE.String(), "今年以来")
+		require.Len(t, unrecognisedPeriodPrefixes(body, loanFlowRE), 1,
+			"用例前提：恰好一句「形状正确但前缀不认识」")
+
+		_, err := selectRMBCumulativeFlow(loanFlowRE, body, currencyRMB+"贷款期内合计")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), markerUnknown)
+		assert.Contains(t, err.Error(), "今年以来",
+			"要报出**实际读到的**那个前缀，否则下一个人还得自己去正文里找")
+		assert.NotContains(t, err.Error(), markerNoSentence,
+			"交叉：B 类不得报成「没找到」——那正是 R3 那句假话的来源")
+	})
+
+	// 🔴 **这一格是消融逼出来的**：变异「把 `!slices.ContainsFunc(ms, keep)` 这道门放宽成
+	// 『合口径命中 <= 1』」在补它之前**全套零条红、SURVIVED** —— 而那道门是承重的：真语料 2020-02 / 2020-03
+	// 两侧正是这个形态（另有被认识的累计句 `前两个月` / `一季度`，同时存在前缀不被认识的
+	// 「N月当月」句）。门一旦松掉，这两期会从**抽取成功**变成报一句「前缀不认识」的假话。
+	//
+	// 与 A / B 构成最小三元组：三格的正文只差「有没有被认识的累计句」这一个变量。
+	t.Run("C_既有被认识的累计句也有不被认识的前缀_必须照常抽出", func(t *testing.T) {
+		const body = "前两个月人民币贷款累计增加4.24万亿元，同比多增1.06万亿元。" +
+			"2月当月人民币贷款增加9057亿元，同比多增199亿元。"
+
+		// 前提：诊断器**确实有话可说** —— 否则这一格测不到那道门
+		require.NotEmpty(t, unrecognisedPeriodPrefixes(body, loanFlowRE),
+			"用例前提：必须存在前缀不被认识的句子，否则门开不开都一样")
+
+		m, err := selectRMBCumulativeFlow(loanFlowRE, body, currencyRMB+"贷款期内合计")
+		require.NoError(t, err, "有被认识的累计句时必须照常抽出，不得被诊断器抢先报错")
+		assert.Equal(t, "前两个月", m[1], "取的必须是那条累计句，不是隔壁的当月句")
+	})
+}
+
+// TestFlowTailIsDerivedFromFlowRENotRewritten 钉住诊断器**不另写一份模板**。
+//
+// `unrecognisedPeriodPrefixes` 要问「句尾对了、只是前缀没对」，就需要一条「去掉期次
+// 前缀的 flowRE」。它是从 `flowRE` 自身的 pattern **切出来**的，不是照着抄一份 ——
+// 抄一份就会分叉，而分叉的表现是诊断器悄悄失效（M1c-3a 的 TASK-011 的 R1 同族：
+// 两份实现之间的一致性只能靠断言维持，而分叉正是缺陷的形状）。
+//
+// ⚠️ 这一条同时挡住**静默失效**：切不出前缀时诊断器返回 nil（不适用），
+// 若哪天 `flowRE` 换了形状而没人发现，本条会红，而不是让诊断器无声地永远返回空。
+func TestFlowTailIsDerivedFromFlowRENotRewritten(t *testing.T) {
+	for _, re := range []*regexp.Regexp{loanFlowRE, depositFlowRE, flowRE("贷款")} {
+		tail := cumulativeFlowTail(re)
+		require.NotNilf(t, tail, "%s 切不出句尾 ⇒ 诊断器对它恒返回空，等于没有", re)
+		assert.Truef(t, strings.HasSuffix(re.String(), tail.String()),
+			"句尾必须是 flowRE 的真后缀，否则两者已经分叉")
+		assert.Equalf(t, periodPat+"，?"+tail.String(), re.String(),
+			"flowRE 必须恰好是「期次前缀 + 句尾」，多一段少一段都说明形状变了")
+	}
+}
+
 // —— M1c-3a 的 TASK-011 · R2：判据必须与「抽取的覆盖面」同源 ——
 
 // 🔴 **锚点缺席即放行，而抽取根本不看锚点**（QA R2）。

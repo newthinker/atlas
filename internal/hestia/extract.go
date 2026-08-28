@@ -259,14 +259,103 @@ func selectRMBBalance(re *regexp.Regexp, body, what string) ([]string, error) {
 		func(m []string) string { return m[1] })
 }
 
+// —— 「前缀不认识」与「本节没有累计句」的分辨（M1c-3a 的 TASK-011，从 TASK-012 转入）——
+//
+// `flowRE` = `periodPat` + 「，?」+ 句尾模板。期次前缀不在 `periodAlt` 里时**整条正则
+// 不命中**，那句话根本没进候选集 ⇒ `selectUnique` 报「没找到」，与「本节确实没有累计句」
+// **逐字同形**，而两者的后续动作相反：前者是解析器缺口（该往 `periodAlt` /
+// `cumulativePeriods` 加），后者是报告本身没数据（只能标注）。
+//
+// R3 的原始损害正是这一条：`1-10月` 那句因为前缀不被认识而没进候选集，于是
+// 「该期报告只有当月数」被写进了验收报告与 CONTRACTS —— **而数据就在正文里**。
+
+// sentenceLeadRE 取某个位置**所在句**的前半段（上一个句号/分号/换行之后的部分）。
+var sentenceLeadRE = regexp.MustCompile("[^。；\n]*$")
+
+// cumulativeFlowTail 从 flowRE 自身的 pattern 里**切出**去掉期次前缀的句尾。
+//
+// 🔴 **切，不是照着抄一份**：抄一份必然分叉，而分叉的表现是诊断器悄悄失效
+// （与本任务 R1 是同一条教训——两份实现之间的一致性只能靠断言维持）。切不出前缀时
+// 返回 nil，表示「本诊断对这条模板不适用」，由
+// TestFlowTailIsDerivedFromFlowRENotRewritten 挡住它静默变成「对谁都不适用」。
+func cumulativeFlowTail(re *regexp.Regexp) *regexp.Regexp {
+	tail, ok := strings.CutPrefix(re.String(), periodPat+`，?`)
+	if !ok {
+		return nil
+	}
+	return regexp.MustCompile(tail)
+}
+
+// unrecognisedPeriodPrefixes 回答一个问题：**正文里有没有一句句尾完全正确的合计句，
+// 只是它的期次前缀 `periodAlt` 不认识？**
+//
+// 判据就是那个机制本身，不做形状猜测：句尾模板在某处命中、而完整的 `flowRE` 没有在
+// **同一个结束位置**命中 ⇒ 挡住它的只可能是前缀（`flowRE` 恰好是「前缀 + 该句尾」）。
+// 返回那些句子实际用的前缀文本，供错误信息点名。
+func unrecognisedPeriodPrefixes(body string, re *regexp.Regexp) []string {
+	tail := cumulativeFlowTail(re)
+	if tail == nil {
+		return nil
+	}
+	flowEnds := map[int]bool{}
+	for _, loc := range re.FindAllStringIndex(body, -1) {
+		flowEnds[loc[1]] = true
+	}
+	var out []string
+	for _, loc := range tail.FindAllStringSubmatchIndex(body, -1) {
+		if flowEnds[loc[1]] {
+			continue // 这一句 flowRE 认得，前缀不是问题
+		}
+		// 🔴 **只看人民币句**，与 selectRMBCumulativeFlow 的谓词同一个定义域。
+		//
+		// 少了这一句，2020-04 的「当月外币贷款增加207亿美元」会被报成「前缀不认识」——
+		// 机制上它确实是（`当月` 不在 periodAlt 里），但**即使前缀被认识，那一句也会被
+		// 谓词的 `m[2] == currencyRMB` 挡掉**，它对本次失败一点关系都没有。
+		// 诊断器的定义域必须与被诊断动作的定义域一致，否则它报的是**与结论无关的真事实**
+		// ——那和报假话一样会把人引到错的方向（与本任务 R2 是同一条教训）。
+		//
+		// 组 1 是币种：tail 恰好是 flowRE 去掉首个捕获组（期次）后的部分，
+		// 这层对应关系由 TestFlowTailIsDerivedFromFlowRENotRewritten 钉住。
+		if loc[2] < 0 || body[loc[2]:loc[3]] != currencyRMB {
+			continue
+		}
+		lead := strings.TrimSuffix(strings.TrimSpace(sentenceLeadRE.FindString(body[:loc[0]])), "，")
+		if r := []rune(lead); len(r) > 16 {
+			lead = "…" + string(r[len(r)-16:])
+		}
+		out = append(out, lead)
+	}
+	return out
+}
+
 // selectRMBCumulativeFlow 挑出人民币口径、期内累计（非单月）的合计句。
 // 捕获组：1=期次 2=口径 3=方向词 4=数值 5=单位。
 //
 // 两个维度都要判：外币孪生句的期次前缀同样是「全年/上半年」，只判期次会取到
 // 「全年外币存款增加2135亿美元」。
 func selectRMBCumulativeFlow(re *regexp.Regexp, body, what string) ([]string, error) {
-	return selectUnique(re.FindAllStringSubmatch(body, -1), what,
-		func(m []string) bool { return cumulativePeriods[m[1]] && m[2] == currencyRMB },
+	ms := re.FindAllStringSubmatch(body, -1)
+	keep := func(m []string) bool { return cumulativePeriods[m[1]] && m[2] == currencyRMB }
+
+	// 🔴 **一条都没挑出来时，先问「是不是前缀不认识」**（M1c-3a 的 TASK-011，
+	// 从 TASK-012 转入的 error_handling[0]）。
+	//
+	// 只在 0 命中时问：「挑出了 2 条」是另一类失败（孪生句），前缀认不认识与它无关，
+	// 在那里插一句诊断只会把两类失败又混到一起 —— 而本条要做的恰恰是把它们分开。
+	if !slices.ContainsFunc(ms, keep) {
+		if unknown := unrecognisedPeriodPrefixes(body, re); len(unknown) > 0 {
+			return nil, fmt.Errorf(
+				"hestia: %s 失败的成因是**期次前缀不被识别**，不是本节没有累计句: "+
+					"正文里有 %d 句人民币合计句的句尾完全正确，但它们的前缀 %s 不在 periodAlt 里，"+
+					"于是整条模板不命中、根本没进候选集。这是**解析器缺口**——该往 periodAlt 与 "+
+					"cumulativePeriods 同步加一项；与「本节确实没有累计句」的后续动作相反："+
+					"后者修不了，正确的做法是标注。误判成后者会让真实可恢复的数据被永久写销"+
+					"（M1c-3a 的 TASK-012 的 R3 就是这么发生的）",
+				what, len(unknown), strings.Join(unknown, " / "))
+		}
+	}
+
+	return selectUnique(ms, what, keep,
 		func(m []string) string { return m[1] + "/" + m[2] })
 }
 
