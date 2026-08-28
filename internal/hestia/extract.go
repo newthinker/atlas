@@ -259,14 +259,103 @@ func selectRMBBalance(re *regexp.Regexp, body, what string) ([]string, error) {
 		func(m []string) string { return m[1] })
 }
 
+// —— 「前缀不认识」与「本节没有累计句」的分辨（M1c-3a 的 TASK-011，从 TASK-012 转入）——
+//
+// `flowRE` = `periodPat` + 「，?」+ 句尾模板。期次前缀不在 `periodAlt` 里时**整条正则
+// 不命中**，那句话根本没进候选集 ⇒ `selectUnique` 报「没找到」，与「本节确实没有累计句」
+// **逐字同形**，而两者的后续动作相反：前者是解析器缺口（该往 `periodAlt` /
+// `cumulativePeriods` 加），后者是报告本身没数据（只能标注）。
+//
+// R3 的原始损害正是这一条：`1-10月` 那句因为前缀不被认识而没进候选集，于是
+// 「该期报告只有当月数」被写进了验收报告与 CONTRACTS —— **而数据就在正文里**。
+
+// sentenceLeadRE 取某个位置**所在句**的前半段（上一个句号/分号/换行之后的部分）。
+var sentenceLeadRE = regexp.MustCompile("[^。；\n]*$")
+
+// cumulativeFlowTail 从 flowRE 自身的 pattern 里**切出**去掉期次前缀的句尾。
+//
+// 🔴 **切，不是照着抄一份**：抄一份必然分叉，而分叉的表现是诊断器悄悄失效
+// （与本任务 R1 是同一条教训——两份实现之间的一致性只能靠断言维持）。切不出前缀时
+// 返回 nil，表示「本诊断对这条模板不适用」，由
+// TestFlowTailIsDerivedFromFlowRENotRewritten 挡住它静默变成「对谁都不适用」。
+func cumulativeFlowTail(re *regexp.Regexp) *regexp.Regexp {
+	tail, ok := strings.CutPrefix(re.String(), periodPat+`，?`)
+	if !ok {
+		return nil
+	}
+	return regexp.MustCompile(tail)
+}
+
+// unrecognisedPeriodPrefixes 回答一个问题：**正文里有没有一句句尾完全正确的合计句，
+// 只是它的期次前缀 `periodAlt` 不认识？**
+//
+// 判据就是那个机制本身，不做形状猜测：句尾模板在某处命中、而完整的 `flowRE` 没有在
+// **同一个结束位置**命中 ⇒ 挡住它的只可能是前缀（`flowRE` 恰好是「前缀 + 该句尾」）。
+// 返回那些句子实际用的前缀文本，供错误信息点名。
+func unrecognisedPeriodPrefixes(body string, re *regexp.Regexp) []string {
+	tail := cumulativeFlowTail(re)
+	if tail == nil {
+		return nil
+	}
+	flowEnds := map[int]bool{}
+	for _, loc := range re.FindAllStringIndex(body, -1) {
+		flowEnds[loc[1]] = true
+	}
+	var out []string
+	for _, loc := range tail.FindAllStringSubmatchIndex(body, -1) {
+		if flowEnds[loc[1]] {
+			continue // 这一句 flowRE 认得，前缀不是问题
+		}
+		// 🔴 **只看人民币句**，与 selectRMBCumulativeFlow 的谓词同一个定义域。
+		//
+		// 少了这一句，2020-04 的「当月外币贷款增加207亿美元」会被报成「前缀不认识」——
+		// 机制上它确实是（`当月` 不在 periodAlt 里），但**即使前缀被认识，那一句也会被
+		// 谓词的 `m[2] == currencyRMB` 挡掉**，它对本次失败一点关系都没有。
+		// 诊断器的定义域必须与被诊断动作的定义域一致，否则它报的是**与结论无关的真事实**
+		// ——那和报假话一样会把人引到错的方向（与本任务 R2 是同一条教训）。
+		//
+		// 组 1 是币种：tail 恰好是 flowRE 去掉首个捕获组（期次）后的部分，
+		// 这层对应关系由 TestFlowTailIsDerivedFromFlowRENotRewritten 钉住。
+		if loc[2] < 0 || body[loc[2]:loc[3]] != currencyRMB {
+			continue
+		}
+		lead := strings.TrimSuffix(strings.TrimSpace(sentenceLeadRE.FindString(body[:loc[0]])), "，")
+		if r := []rune(lead); len(r) > 16 {
+			lead = "…" + string(r[len(r)-16:])
+		}
+		out = append(out, lead)
+	}
+	return out
+}
+
 // selectRMBCumulativeFlow 挑出人民币口径、期内累计（非单月）的合计句。
 // 捕获组：1=期次 2=口径 3=方向词 4=数值 5=单位。
 //
 // 两个维度都要判：外币孪生句的期次前缀同样是「全年/上半年」，只判期次会取到
 // 「全年外币存款增加2135亿美元」。
 func selectRMBCumulativeFlow(re *regexp.Regexp, body, what string) ([]string, error) {
-	return selectUnique(re.FindAllStringSubmatch(body, -1), what,
-		func(m []string) bool { return cumulativePeriods[m[1]] && m[2] == currencyRMB },
+	ms := re.FindAllStringSubmatch(body, -1)
+	keep := func(m []string) bool { return cumulativePeriods[m[1]] && m[2] == currencyRMB }
+
+	// 🔴 **一条都没挑出来时，先问「是不是前缀不认识」**（M1c-3a 的 TASK-011，
+	// 从 TASK-012 转入的 error_handling[0]）。
+	//
+	// 只在 0 命中时问：「挑出了 2 条」是另一类失败（孪生句），前缀认不认识与它无关，
+	// 在那里插一句诊断只会把两类失败又混到一起 —— 而本条要做的恰恰是把它们分开。
+	if !slices.ContainsFunc(ms, keep) {
+		if unknown := unrecognisedPeriodPrefixes(body, re); len(unknown) > 0 {
+			return nil, fmt.Errorf(
+				"hestia: %s 失败的成因是**期次前缀不被识别**，不是本节没有累计句: "+
+					"正文里有 %d 句人民币合计句的句尾完全正确，但它们的前缀 %s 不在 periodAlt 里，"+
+					"于是整条模板不命中、根本没进候选集。这是**解析器缺口**——该往 periodAlt 与 "+
+					"cumulativePeriods 同步加一项；与「本节确实没有累计句」的后续动作相反："+
+					"后者修不了，正确的做法是标注。误判成后者会让真实可恢复的数据被永久写销"+
+					"（M1c-3a 的 TASK-012 的 R3 就是这么发生的）",
+				what, len(unknown), strings.Join(unknown, " / "))
+		}
+	}
+
+	return selectUnique(ms, what, keep,
 		func(m []string) string { return m[1] + "/" + m[2] })
 }
 
@@ -293,31 +382,32 @@ func extractTSFStockSection(sec section) (map[string]float64, error) {
 	return c.values, nil
 }
 
+// extractTSFFlowSection 是 v2 板块路径的入口，**逐字走整篇路径的同一段代码**。
+//
+// 🔴 **它一度是独立的一份实现，而缺陷就藏在那份差异里**（M1c-3a 的 TASK-011，QA R1）：
+// 原实现用窄模板 tsfFlowTotalRE 取总量、再拿**整节**去抽分项，没有作用域切分。对真实的
+// 2023-08 正文（累计句 → 当月句 → 分项）实测 err=nil 且抽出
+// `tsf_flow_ytd=252100`（1–8 月累计）配 `tsf_flow_rmb_loan_ytd=13400`（8 月当月），
+// 错位 18.8×，两个值又都在合法量级内 —— 下游没有任何闸门拦得住。
+//
+// M1c-3a 的 TASK-002 做作用域切分时刻意「板块路径一个字不改」（越界 + 当时无样本），
+// 那个判断在当时成立；代价是同一个缺陷在另一条路上原样留了下来。⚠️ **而板块路径正是
+// v2 月报走的那条**（央行 2025-10 起把社融并进月报的 going-forward 格式）⇒ 不是历史
+// 遗留，是会持续产生错数据的路径。
+//
+// 🔴 **修法选的是「两条路径共用同一段代码」而不是「给板块路径也补一份切分」**：
+// 后者仍是两份实现，「同一段正文得同一结论」只能靠断言维持，而**分叉恰恰是这个缺陷的
+// 形状**；共用之后那条性质由构造保证，断言只是把它钉住。
+// 由 TestTSFFlowSectionAndArticleAgreeOnSameBody 与
+// TestTSFFlowSectionRefusesCaliberMixOnRealArticle 守着。
+//
+// ⚠️ **留下一笔债**：窄模板 `tsfFlowTotalRE` 自此**没有生产调用方**了（它被
+// `tsfFlowArticleTotalRE` 完全覆盖）。它仍登记在 profiles.go 的 `allTemplateRegexps()`
+// 里、且 extract_test.go 的模板点名仍在滚它 —— profiles.go 不在本任务 writes 内，
+// 删不了。**profiles.go 解冻时应删掉它，并把 `tsfFlowArticleTotalRE` 挪过去**
+// （与 M1c-3a 的 TASK-002 记下的那笔债是同一件事）。
 func extractTSFFlowSection(sec section) (map[string]float64, error) {
-	c := newCollector()
-
-	m, err := mustMatch(tsfFlowTotalRE, sec.Body, "社融增量总量")
-	if err != nil {
-		return nil, err
-	}
-	a, err := parsePlainAmount(m[1], m[2]) // 「增量累计为35.6万亿元」无方向词
-	if err != nil {
-		return nil, err
-	}
-	if err := c.set(FieldTSFFlowYTD, a.toYi()); err != nil {
-		return nil, err
-	}
-
-	for _, it := range tsfFlowItems {
-		m, err := mustMatch(tsfFlowRE(it.name), sec.Body, "社融增量分项 "+it.name)
-		if err != nil {
-			return nil, err
-		}
-		if err := setFlow(c, it.field, m[1], m[2], m[3]); err != nil {
-			return nil, err
-		}
-	}
-	return c.values, nil
+	return extractTSFFlowArticle(sec.Body)
 }
 
 func extractMoneySection(sec section) (map[string]float64, error) {
@@ -373,29 +463,95 @@ const (
 // M1c-3a 的 TASK-009 的 writes 里。词表本身仍只有一份，所以分叉风险没有被引入。
 var sectorPeriodRE = regexp.MustCompile(periodPat)
 
-// checkSectorCaliber 校验分部门段的口径：取锚点之前**最近**的期次前缀，查
-// cumulativePeriods。不在表里就报错，一个分部门字段都不产出。
+// —— 分部门抽取的覆盖面（M1c-3a 的 TASK-011，QA R2）——
+//
+// 这两个函数列出**抽取真正会去命中的全部模板**，供 checkSectorCaliber 定位被守护的那一段。
+// 它们与 extractDepositSection / extractLoanSection 从**同一批数据**（depositItems /
+// loanScopes）派生，不另写一份名单 —— 判据的定义域与被守护动作的定义域必须同源，
+// 而「两份名单迟早分叉」正是本文件开头那条纪律。
+func depositSectorCoverage() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, len(depositItems))
+	for _, it := range depositItems {
+		out = append(out, sectorFlowRE(it.name))
+	}
+	return out
+}
+
+// loanSectorCoverage 比存款侧多收作用域锚点：extractLoanSection 先用 loanScopeSpans
+// 按锚点切段、再在段内抽子项，**锚点本身也是抽取会碰到的定位点**。
+func loanSectorCoverage() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, 2*len(loanScopes))
+	for _, sc := range loanScopes {
+		out = append(out, sc.anchorRE)
+		for _, it := range sc.items {
+			out = append(out, sectorFlowRE(it.name))
+		}
+	}
+	return out
+}
+
+// sectorSegmentStart 求「被守护那一段」的起点，判据与**抽取的覆盖面同源**。
+//
+// 取锚点与全部覆盖面模板里**最靠前**的那个命中位置：抽取会碰到的最早那一句，其口径由
+// 它之前的期次前缀决定。全都不命中 → -1，表示本节没有分部门段。
+//
+// ⚠️ **锚点这一项实测是惰性的，仍然保留**——这话是量出来的，不是推的：把它整项去掉后
+// 全语料 **160 个分部门段判定变化 0 个**（`05b50be`），变异 M8 在测试套件上同样 SURVIVED
+// （**那一格是预先声明「应当绿」的**，不是事后解释）。保留的理由只有一条：它只会让被
+// 检查的前缀窗口**变宽**，即失效方向是「多报一次口径不对」而不是「静默放行」；去掉它则
+// 判据完全依赖模板位置，某天出现「锚点在前、模板命中在后且中间夹着累计前缀」的新体例时
+// 会往放行的方向错。⇒ 一行、失效方向安全、已标明惰性。**别把它当成「有守卫的东西」。**
+func sectorSegmentStart(body, anchor string, coverage []*regexp.Regexp) int {
+	start := -1
+	take := func(i int) {
+		if i >= 0 && (start < 0 || i < start) {
+			start = i
+		}
+	}
+	take(strings.Index(body, anchor))
+	for _, re := range coverage {
+		if loc := re.FindStringIndex(body); loc != nil {
+			take(loc[0])
+		}
+	}
+	return start
+}
+
+// checkSectorCaliber 校验分部门段的口径：取**被守护那段的起点**之前最近的期次前缀，
+// 查 cumulativePeriods。不在表里就报错，一个分部门字段都不产出。
 //
 // 三种返回：
 //
-//	锚点不存在        → nil，本守卫**不表态**（见下）
-//	锚点前无期次前缀   → 报错（读不出口径，不猜）
-//	前缀不在累计表里   → 报错（当月口径，拒绝装进 *_ytd）
+//	本节没有分部门段    → nil，本守卫**不表态**（见下）
+//	起点前无期次前缀    → 报错（读不出口径，不猜）
+//	前缀不在累计表里    → 报错（当月口径，拒绝装进 *_ytd）
 //
-// **锚点不存在时刻意放行**，不是漏判：那意味着这一节根本没有分部门段（实测 55 篇
-// 月报里 2022-04 是这一类），而分部门字段是必需的，紧随其后的 mustMatch 会以
-// 「分部门 X not found」报错——那条信息比「读不出口径」更具体。让更具体的那条先说话。
-func checkSectorCaliber(body, anchor, what string) error {
-	i := strings.Index(body, anchor)
+// **没有分部门段时刻意放行**，不是漏判：那时「口径」这个问题不适用，而分部门字段是
+// 必需的，紧随其后的 mustMatch / loanScopeSpans 会以「分部门 X not found」或
+// 「scope anchor not found」报错——那条信息比「读不出口径」更具体。让更具体的先说话。
+// 由 TestSectorCaliberStaysSilentWhenNoSectorSegment 钉住（那是 D4 消融逼出来的）。
+//
+// 🔴 **「有没有分部门段」一度只问锚点短语在不在，那是错的**（M1c-3a 的 TASK-011，QA R2）：
+// 抽取侧 `extractDepositSection` 拿 `sectorFlowRE` 扫整节、`extractLoanSection` 按
+// `loanScopeSpans` 的锚点切段，**两者都不依赖那个文本锚点** ⇒ 锚点缺席时守卫沉默放行
+// 而抽取照做。真实语料 2022-04 两侧都是这一类（全语料 160 个段里也只有这 2 个）。
+// 它今天不出事只因那一期恰好也没有累计合计句、在更早一道闸就被拒了 ——
+// **安全性来自与本守卫无关的巧合**。
+//
+// ⚠️ **修法不是换一个更宽的锚点短语**：失效模式是**判据的定义域与被守护动作的定义域
+// 不一致**，换个短语仍然是两个不同的定义域。故起点改由 sectorSegmentStart 从**抽取
+// 用的同一批模板**求出（depositSectorCoverage / loanSectorCoverage）。
+func checkSectorCaliber(body, anchor, what string, coverage []*regexp.Regexp) error {
+	i := sectorSegmentStart(body, anchor, coverage)
 	if i < 0 {
 		return nil
 	}
 	prefixes := sectorPeriodRE.FindAllString(body[:i], -1)
 	if len(prefixes) == 0 {
 		return fmt.Errorf(
-			"hestia: %s锚点 %q 之前没有任何期次前缀，读不出它是累计还是当月口径: "+
+			"hestia: %s（起点在第 %d 字节）之前没有任何期次前缀，读不出它是累计还是当月口径: "+
 				"refusing to guess — 猜错会把当月值装进 *_ytd 字段，量级完全合理而口径是错的",
-			what, anchor)
+			what, i)
 	}
 
 	// 取**最近**的那个：累计句与当月句可能同时出现（2023-08 两句都有），
@@ -432,7 +588,7 @@ func extractDepositSection(sec section) (map[string]float64, error) {
 
 	// 分部门段的口径守卫（M1c-3a 的 TASK-009）：必须在抽任何分部门字段**之前**。
 	// 放在循环里逐项判等于把同一个结论算四遍，且第一项抽完再报错时 collector 已脏。
-	if err := checkSectorCaliber(sec.Body, depositSectorAnchor, currencyRMB+"存款分部门段"); err != nil {
+	if err := checkSectorCaliber(sec.Body, depositSectorAnchor, currencyRMB+"存款分部门段", depositSectorCoverage()); err != nil {
 		return nil, err
 	}
 
@@ -474,7 +630,7 @@ func extractLoanSection(sec section) (map[string]float64, error) {
 
 	// 分部门段的口径守卫（M1c-3a 的 TASK-009），先于作用域切分：
 	// 口径不对时整段分部门都不该抽，没必要先算作用域边界。
-	if err := checkSectorCaliber(sec.Body, loanSectorAnchor, currencyRMB+"贷款分部门段"); err != nil {
+	if err := checkSectorCaliber(sec.Body, loanSectorAnchor, currencyRMB+"贷款分部门段", loanSectorCoverage()); err != nil {
 		return nil, err
 	}
 
