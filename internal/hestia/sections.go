@@ -353,15 +353,34 @@ func detectExtractor(secs []section, periodType string) (string, error) {
 	//
 	// 只有 monthly 允许没有外汇节：55 篇月报实测 53 篇正文根本没有这一节（G1），
 	// 而累计期报告（q1 / h1 / q1_q3 / annual）四种版式全都有。
-	if !hasFX && periodType != periodTypeMonthly {
+	// M1c-3a 的 TASK-012（QA fix 5）：monthly 豁免必须区分「本就没有外汇节」与「被截断」。
+	//
+	// 上面那条豁免的前提是「月报本就不含这一节」（55 篇实测 53 篇如此）。但**3 月报是
+	// 例外**：它的 period_type 是 monthly，正文却按**一季度**口径写（「二、一季度人民币
+	// 贷款增加9.78万亿元」），且两篇实测**都有**外汇节。若它在外汇节处被截断，豁免会
+	// 让它从 rule@v1（27 字段）静默降级成 rule-monthly@v1（25 字段）、err=nil、缺失=0。
+	//
+	// 判据不是「日期是不是 3 月」（黑名单，新增期次时静默失效），而是**报告自己声明的
+	// 口径**：合计句用季度及以上的累计前缀 ⇒ 它在口径上就是一篇累计期报告 ⇒ 上面那条
+	// 「累计期报告必有外汇节」的前提对它同样成立，豁免不该覆盖它。
+	//
+	// ⚠️ 这不是一条新的经验断言，是**把既有守卫的前提一致地应用到月报上**。
+	// 全语料 55 篇月报实测：声明季度口径的 2 篇（2024-03 / 2025-03）hasFX 全为 true，
+	// 未声明的 53 篇 hasFX 全为 false —— **55/55 一致，0 例外**。
+	//
+	// ⚠️ 覆盖不到的那一半要说清：截断若发生在**外汇节之前**，正文里连「国家外汇储备」
+	// 字样都不剩，与「本就没有」在**任何**结构信号上都不可区分（实测：55 篇里
+	// findSection 命中与「正文含该字样」**完全等价**，故文本检查零判别力）。本守卫堵的是
+	// 「报告自称累计期却没有外汇节」这一类。
+	if !hasFX && (periodType != periodTypeMonthly || declaresQuarterOrLonger(secs)) {
 		return "", fmt.Errorf(
-			"hestia: cumulative-period report (period_type=%q) has no %q section: "+
-				"got %d sections. Monthly reports legitimately lack it (53 of 55 "+
+			"hestia: cumulative-period report (period_type=%q%s) has no %q "+
+				"section: got %d sections. Monthly reports legitimately lack it (53 of 55 "+
 				"sampled), but every 累计期 report carries it, so this is a truncated "+
 				"fetch. Accepting it would silently downgrade the report to the "+
 				"25-field monthly profile, under which the two missing 外汇 fields "+
 				"read as absent-by-design and no gate ever fires",
-			periodType, fxSectionKeyword, len(secs))
+			periodType, quarterClaimNote(periodType), fxSectionKeyword, len(secs))
 	}
 
 	switch {
@@ -374,4 +393,60 @@ func detectExtractor(secs []section, periodType string) (string, error) {
 	default: // !hasTSF && !hasFX
 		return extractorMonthlyV1, nil
 	}
+}
+
+// declaresQuarterOrLonger 回答「这篇报告的合计句声明的是季度及以上的累计口径吗」
+// （M1c-3a 的 TASK-012，QA fix 5）。
+//
+// 口径来自报告**自己**的合计句前缀，不是标题里的日期——后者是黑名单，新增期次时
+// 会静默失效，而失效方向是**放行截断**。
+//
+// 只看人民币贷款/存款两节：它们是全部四种版式都有的核心节，且合计句的期次前缀
+// 正是 flowRE 已经在捕获的东西，不需要第二套解析。
+func declaresQuarterOrLonger(secs []section) bool {
+	for _, kind := range []string{"贷款", "存款"} {
+		sec, ok := findSection(secs, currencyRMB+kind)
+		if !ok {
+			continue
+		}
+		for _, m := range flowRE(kind).FindAllStringSubmatch(sec.Body, -1) {
+			if quarterOrLongerPeriods()[m[1]] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// quarterOrLongerPeriods 从 cumulativePeriods **派生**出「季度及以上」的那一批：
+// 减去月度累计（cumulativeMonthAlt 那两族）与单月（`N月份`），剩下的就是。
+//
+// 派生而不手写第二份清单：手抄的那份会在下次加累计前缀时静默过期，而过期方向是
+// **漏掉一个季度前缀 ⇒ 该形态的截断不再被拦**（放行错数据）。
+// TestQuarterOrLongerPeriodsIsExactly 逐字钉住当前结果，新增时必须显式表态。
+func quarterOrLongerPeriods() map[string]bool {
+	monthly := map[string]bool{}
+	for _, w := range strings.Split(cumulativeMonthAlt, "|") {
+		monthly[w] = true
+	}
+	numericMonth := regexp.MustCompile(`^[0-9]{1,2}月份$`)
+
+	out := map[string]bool{}
+	for k := range cumulativePeriods {
+		if monthly[k] || numericMonth.MatchString(k) {
+			continue
+		}
+		out[k] = true
+	}
+	return out
+}
+
+// quarterClaimNote 让错误信息能区分两种触发路径：真正的累计期报告，
+// 与「period_type 是 monthly 但正文自称季度口径」的 3 月报。
+// 两者的排障方向不同——前者查抓取，后者还要确认这篇到底是不是 3 月报。
+func quarterClaimNote(periodType string) string {
+	if periodType == periodTypeMonthly {
+		return ", but its 合计 sentences declare a quarter-or-longer period"
+	}
+	return ""
 }

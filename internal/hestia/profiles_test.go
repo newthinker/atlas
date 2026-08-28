@@ -544,7 +544,7 @@ func TestQuarterlyFXTwinSentencesStayDistinct(t *testing.T) {
 //
 // Context Checkpoint: done_criteria → test mapping（M1c-3a 的 TASK-001）
 // functional[0]     cumulativeMonthAlt 穷举十项，periodAlt 由它拼出（不另抄一份）
-//                                    → TestCumulativeMonthAltEnumeratesTenMonths
+//                                    → TestCumulativeMonthAltEnumeratesEveryCumulativePrefix
 // functional[1]     cumulativePeriods 增 11 键（10 个「前N个月」+「1月份」特例）
 //                                    → TestCumulativePeriodsKeySet
 // functional[2]     两处硬卡点一一对应的**机械**守卫（双向）
@@ -576,14 +576,21 @@ func TestQuarterlyFXTwinSentencesStayDistinct(t *testing.T) {
 // 但**它不是这里的安全性来源**。真正的守卫是下面两条：一一对应（漏词会被查出）
 // 与逐字捕获（捕获错会被查出）。另实测：交替里**缺**「前十一个月」时结果是
 // NO MATCH（selectUnique 报 0 candidate sentence、响亮失败），不是静默捕获成「前十个月」。
-func TestCumulativeMonthAltEnumeratesTenMonths(t *testing.T) {
+func TestCumulativeMonthAltEnumeratesEveryCumulativePrefix(t *testing.T) {
+	// 「前N个月」族十项（M1c-3a 的 TASK-001）
 	want := []string{
 		"前两个月", "前三个月", "前四个月", "前五个月", "前六个月",
 		"前七个月", "前八个月", "前九个月", "前十一个月", "前十个月",
 	}
+	// 「N-M月」族十一项（M1c-3a 的 TASK-012，QA R3）——2022 年月报的写法。
+	// 实测只出现 1-7/1-8/1-10/1-11 四种，其余七种一并登记：只登记见过的，
+	// 将来出现 `1-9月` 会是**静默 0 命中**，正是 R3 要修的那个失效方式。
+	want = append(want, "1-10月", "1-11月", "1-12月", "1-2月", "1-3月",
+		"1-4月", "1-5月", "1-6月", "1-7月", "1-8月", "1-9月")
+
 	assert.Equal(t, want, strings.Split(cumulativeMonthAlt, "|"),
-		"cumulativeMonthAlt 必须穷举这十项：三/六/九在真实语料里不出现（那三个月走 q1/h1/q1_q3 报告），"+
-			"仍然列上——多一个无害，漏一个是静默失效")
+		"cumulativeMonthAlt 必须穷举这两族共 21 项：真实语料里不出现的（前三/前六/前九个月走 "+
+			"q1/h1/q1_q3 报告；N-M月 只见过四种）仍然列上——多一个无害，漏一个是静默失效")
 
 	// 🔴 **等值**而不是 Contains —— 收口 M1c-3a 的 TASK-001 验证者发现的残余缺口 V6。
 	//
@@ -602,11 +609,12 @@ func TestCumulativeMonthAltEnumeratesTenMonths(t *testing.T) {
 			"累计前缀一律经 cumulativeMonthAlt 登记，绕开常量直接插分支会让它躲过下面的一一对应守卫")
 }
 
-// cumulativePeriods 的键集必须**逐字**等于这 15 个。
+// cumulativePeriods 的键集必须**逐字**等于这 26 个。
 //
 // 这条是整张表的**性质**断言（哪些前缀算累计），不是条数断言：
 //   - 既有四键「全年/上半年/一季度/前三季度」原样保留（3 月报靠「一季度」工作）；
-//   - 新增 10 个「前N个月」+「1月份」；
+//   - 10 个「前N个月」+「1月份」（M1c-3a 的 TASK-001）；
+//   - 11 个「N-M月」（M1c-3a 的 TASK-012，QA R3：2022 年月报的写法）；
 //   - 除「1月份」外**没有**任何 `N月份` 键——当月数落进累计表会让 *_ytd 装上当月数。
 //
 // 「1月份」是特例：1 月的累计就是当月，报告直接写「1月份人民币贷款增加5.13万亿元」，
@@ -618,9 +626,13 @@ func TestCumulativePeriodsKeySet(t *testing.T) {
 		"前两个月": true, "前三个月": true, "前四个月": true, "前五个月": true, "前六个月": true,
 		"前七个月": true, "前八个月": true, "前九个月": true, "前十一个月": true, "前十个月": true,
 		"1月份": true,
+		// M1c-3a 的 TASK-012（QA R3）：2022 年月报的「N-M月」族
+		"1-2月": true, "1-3月": true, "1-4月": true, "1-5月": true, "1-6月": true,
+		"1-7月": true, "1-8月": true, "1-9月": true, "1-10月": true, "1-11月": true, "1-12月": true,
 	}
 	assert.Equal(t, want, cumulativePeriods,
-		"cumulativePeriods 的键集不对：既有四键必须原样保留，`N月份` 只许有「1月份」一个")
+		"cumulativePeriods 的键集不对：既有四键必须原样保留，`N月份` 只许有「1月份」一个，"+
+			"「N-M月」族必须与 cumulativeRangeAlt 一一对应")
 }
 
 // 🔴 两处硬卡点的**机械**一一对应守卫 —— 把「记得两边都改」这件事变成可查的。
@@ -633,7 +645,7 @@ func TestCumulativePeriodsKeySet(t *testing.T) {
 //	      —— 缺了就是「正则根本不命中」，与现状逐字相同的 no-op
 func TestCumulativeMonthAltAndCumulativePeriodsAgree(t *testing.T) {
 	// ⚠️ 本条遍历的是 **cumulativeMonthAlt**，不是 periodAlt 的全部分支。两者等价**依赖**
-	// TestCumulativeMonthAltEnumeratesTenMonths 里那条把 periodAlt 钉死的等值断言——
+	// TestCumulativeMonthAltEnumeratesEveryCumulativePrefix 里那条把 periodAlt 钉死的等值断言——
 	// 少了它，绕开常量插进 periodAlt 的累计分支对本条不可见（V6）。两条互补，别当重复删掉。
 	t.Run("正向：正则认得的必须在口径表里", func(t *testing.T) {
 		for _, w := range strings.Split(cumulativeMonthAlt, "|") {
@@ -1085,4 +1097,127 @@ func TestTSFFlowREToleratesSpaceBeforeNumber(t *testing.T) {
 		assert.Nil(t, re.FindStringSubmatch(item+"同比多增 1780亿元"),
 			"「多增」修饰的是同比，不是方向词——容忍空格不等于容忍别的词")
 	})
+}
+
+// ── M1c-3a 的 TASK-012（QA R3）：「N-M月」累计前缀 ─────────────────────────
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3a 的 TASK-012)
+// functional[0] periodAlt 认「N-M月」+ flowRE 容忍「累计」二字，**分别断言**
+//                            → TestPeriodAltRecognisesRangePrefix（前半）
+//                              TestFlowRETargetsCumulativeKeyword（后半）
+// functional[1] cumulativePeriods 对新形态返回 true，且与 cumulativeRangeAlt 一一对应
+//                            → TestCumulativePeriodsKeySet、TestCumulativeMonthAltAndCumulativePeriodsAgree
+// boundary[1]   那 4 篇（2022-07/08/10/11）取值与正文逐字对得上
+//                            → TestFlowREExtractsRangePrefixSamples
+// boundary[2]   阴性对照：1月份 / 7月份 的判定不因本次放宽而改变
+//                            → TestRangePrefixDoesNotDisturbMonthlyVerdicts
+
+// TestPeriodAltRecognisesRangePrefix 只钉**前半个性质**：periodPat 认不认得「N-M月」。
+//
+// 与下面 TestFlowRETargetsCumulativeKeyword 分开，是因为 R3 的两处硬卡点**各自**
+// 都会让整篇命中 0，症状相同而成因不同：这里管「期次前缀认不认得」，那里管
+// 「认得之后整条句子能不能匹完」。合成一条断言的话，两处只改一处也会绿。
+func TestPeriodAltRecognisesRangePrefix(t *testing.T) {
+	anchored := regexp.MustCompile(`^` + periodPat + `$`)
+	// 全语料实测出现的四种（各 2 篇：金融统计 + 社融增量，全部是 2022 年）
+	for _, w := range []string{"1-7月", "1-8月", "1-10月", "1-11月"} {
+		m := anchored.FindStringSubmatch(w)
+		if assert.NotNilf(t, m, "periodPat 认不得 %q —— 该形态的累计句一条都不进候选，整篇命中 0", w) {
+			assert.Equalf(t, w, m[1], "periodPat 对 %q 必须逐字整段捕获", w)
+		}
+		assert.Truef(t, cumulativePeriods[w], "%q 是累计口径，口径表里必须有", w)
+	}
+	// 未观测到但一并登记的七种：只登记见过的，将来出现会是**静默 0 命中**
+	for _, w := range []string{"1-2月", "1-3月", "1-4月", "1-5月", "1-6月", "1-9月", "1-12月"} {
+		assert.NotNilf(t, anchored.FindStringSubmatch(w), "periodPat 认不得 %q", w)
+		assert.Truef(t, cumulativePeriods[w], "%q 不在口径表里", w)
+	}
+}
+
+// TestFlowRETargetsCumulativeKeyword 只钉**后半个性质**：flowRE 容忍指标与方向词
+// 之间的「累计」二字。
+//
+// 真实句是「1-8月，人民币贷款**累计**增加15.61万亿元」，而 dirPat 不含「累计」。
+// **只放宽 periodAlt 不够**——本条用一个期次前缀**已经认得**（`全年`）的句子来测，
+// 从而把两处硬卡点彻底分开：若只改了 periodAlt 没改这里，本条会红而上一条仍绿。
+func TestFlowRETargetsCumulativeKeyword(t *testing.T) {
+	re := flowRE("贷款")
+	for _, tc := range []struct{ name, sentence, wantNum string }{
+		{"带「累计」二字", "全年，人民币贷款累计增加15.61万亿元", "15.61"},
+		{"不带（既有形态，不得回归）", "全年，人民币贷款增加16.27万亿元", "16.27"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := re.FindStringSubmatch(tc.sentence)
+			require.NotNil(t, m, "flowRE 匹不上 %q", tc.sentence)
+			assert.Equal(t, "全年", m[1])
+			assert.Equal(t, currencyRMB, m[2])
+			assert.Equal(t, "增加", m[3], "「累计」不该被当成方向词捕获——它是口径词")
+			assert.Equal(t, tc.wantNum, m[4])
+		})
+	}
+}
+
+// TestFlowREExtractsRangePrefixSamples 覆盖 boundary[1]：那 4 篇的**取值**与正文逐字对得上。
+//
+// ⚠️ 断言的是**值**而不是「不报错了」——「不报错」与「抽对了」是两个性质，
+// 一个把所有值都填成同一个数的实现同样不报错。
+//
+// ⚠️ 用逐字抄自正文的句子而不是快照：那 4 篇（2022-07/08/10/11 金融统计数据报告）
+// 不在 testdata 里，而 testdata 不在 M1c-3a 的 TASK-012 的 writes 内。
+//
+// 🔴 **四句连同「同比多增…」尾巴都是从语料正文原样取出的**（正则
+// `1-[0-9]{1,2}月[^。]{0,60}` 跑全语料，输出见 discovery）。第一版我照记忆写尾巴，
+// 四句错了三句 —— 而 flowRE 到单位就收尾，**两种写法测试都绿**，这个错永远不会被
+// 断言抓到。「逐字抄自正文」这句话本身没有守卫，只能靠真去取一次。
+func TestFlowREExtractsRangePrefixSamples(t *testing.T) {
+	for _, tc := range []struct{ period, sentence, wantNum string }{
+		{"1-7月", "1-7月，人民币贷款累计增加14.35万亿元，同比多增5150亿元", "14.35"},
+		{"1-8月", "1-8月，人民币贷款累计增加15.61万亿元，同比多增5540亿元", "15.61"},
+		{"1-10月", "1-10月，人民币贷款累计增加18.7万亿元，同比多增1.15万亿元", "18.7"},
+		{"1-11月", "1-11月，人民币贷款累计增加19.91万亿元，同比多增1.09万亿元", "19.91"},
+	} {
+		t.Run(tc.period, func(t *testing.T) {
+			m, err := selectRMBCumulativeFlow(flowRE("贷款"), tc.sentence, "贷款期内合计")
+			require.NoError(t, err,
+				"这一句是该期唯一的累计合计句，抽不到它就等于判定「本期没有累计数据」——"+
+					"而数据就在正文里，那正是 QA R3 指出的假结论")
+			assert.Equal(t, tc.period, m[1], "期次前缀必须逐字捕获")
+			assert.Equal(t, currencyRMB, m[2])
+			assert.Equal(t, "增加", m[3])
+			assert.Equal(t, tc.wantNum, m[4], "数值必须与正文逐字一致")
+			assert.Equal(t, "万亿元", m[5])
+		})
+	}
+}
+
+// TestRangePrefixDoesNotDisturbMonthlyVerdicts 是 boundary[2] 的阴性对照：
+// 本次放宽**不得**改变既有月份前缀的判定。
+//
+// ⚠️ 「1月份」是零特判的（M1c-3a 的 TASK-001）：它就是 cumulativePeriods 里的一个普通键，
+// 代码里针对 1 月的分支 0 处。本次也**没有**为「N-M月」加任何特判分支——它同样只是
+// cumulativeRangeAlt 里的一批普通交替项 + 口径表里的一批普通键。
+func TestRangePrefixDoesNotDisturbMonthlyVerdicts(t *testing.T) {
+	anchored := regexp.MustCompile(`^` + periodPat + `$`)
+	for _, tc := range []struct {
+		prefix     string
+		cumulative bool
+		why        string
+	}{
+		{"1月份", true, "1 月的年初至今累计就是当月，报告与当月句同形"},
+		{"7月份", false, "当月口径，装进 *_ytd 会让累计字段拿到单月数"},
+		{"11月份", false, "同上；且它含「1月份」子串，若被切错会误判成累计"},
+		{"1-7月", true, "2022 年月报的累计写法"},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			m := anchored.FindStringSubmatch(tc.prefix)
+			require.NotNilf(t, m, "periodPat 必须认得 %q（认不出的话它根本不进候选）", tc.prefix)
+			assert.Equalf(t, tc.prefix, m[1], "必须逐字整段捕获 %q", tc.prefix)
+			assert.Equalf(t, tc.cumulative, cumulativePeriods[tc.prefix], "%s", tc.why)
+		})
+	}
+
+	// ⚠️ 「零特判」这条性质本身**没有机械守卫**，只有上面这张表在守它的**后果**
+	// （新旧前缀的判定都只由 cumulativePeriods 决定）。我试过用 stringLiteralsOf 扫
+	// profiles.go 断言「不出现月份字面量」，但 "1月份" 本来就是口径表里的合法键，
+	// 那条断言必然为假 ⇒ 写不出来。这里如实记下，而不是放一句看起来在断言的代码。
 }
