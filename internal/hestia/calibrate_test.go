@@ -339,7 +339,7 @@ func TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists(t *testin
 	// ③ **「移出 Unsupported」不等于「能抽出来」**：它仍然产不出样本（存款侧无源）。
 	//    少了这一条，一个「把所有失败都当成可恢复」的实现照样绿。
 	for _, r := range got.Records {
-		assert.NotEqualf(t, "2022-08", r.Period, "2022-08 不该贡献样本：存款侧仍无源")
+		assert.NotEqual(t, "2022-08", r.Period, "2022-08 不该贡献样本：存款侧仍无源")
 	}
 }
 
