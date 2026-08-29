@@ -1,0 +1,68 @@
+{
+  "id": "TASK-005",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 2,
+  "title": "模板措辞变体：企业贷款锚点 + M2 全角括号",
+  "description": "**AD-6**。两处**互不相干**的措辞变体，合并成一个任务**只因为它们同改 `profiles.go`**\n（scope 互斥要求）。做的时候当成两件事，别互相牵连。\n\n## (a) 企业贷款作用域锚点：2019 年报用旧称呼\n\n```\n2019 年报：…住户部门贷款增加7.43万亿元…非金融企业及机关团体贷款增加9.45万亿元…\n2025 月报：…住户贷款增加7110亿元…企（事）业单位贷款增加12.22万亿元…\n```\n\n现有企业锚点是 `regexp.MustCompile(\"企（事）业单位贷款\")` ⇒ 2019 年报找不到，\n整个贷款板块抽不出来（这是基线 3 条失败中的第 1 条）。\n\n🔴 **Leader 实测更正 C5：住户侧不要动。**\n\n现有住户锚点已是 `regexp.MustCompile(\"住户(?:部门)?贷款\")`，注释明写「v1 写『住户部门\n贷款』，v2 写『住户贷款』——一条正则覆盖两版」。2019 年报实测 `住户部门贷款`×1 /\n`住户贷款`×0 ⇒ **已命中**。需求文档要求「住户侧同样加变体」是**基于过时信息**，\n改它是空动作。**只改企业侧。**\n\n⚠️ 正则交替**长的写在前**（Go 最左优先）：\n`企（事）业单位贷款|非金融企业及机关团体贷款` —— 两者互不为前缀，此处顺序其实无碍，\n但请保持「长的在前」的既有习惯，与 `cumulativeMonthAlt` 的 `十一|十` 同一条纪律。\n\n## (b) moneyRE 的全角括号\n\n```go\n// 现状（profiles.go 的 moneyRE）\nregexp.QuoteMeta(name) + `\\(` + code + `\\)余额` + ...   // 只认半角\n```\n\nLeader 实测 218 篇：\n\n| 括号 | 篇数 | 样本 |\n|---|---|---|\n| 全角 `（M2）` | **4** | 2026-07、2026-04、2023-11、2023-10 |\n| 半角 `(M2)` | 76 | 其余金融统计数据报告 |\n| 不含 | 138 | 社融独立报告 |\n\n7 节月报 2026-07 的探针输出正是\n`hestia: 货币 M2 not found (pattern 广义货币\\(M2\\)余额…)`。\n**M1 / M0 同句同形**，一并受影响（`moneyItems` 三项共用 `moneyRE`）——**见 DoD functional 第 3 条**，三项都要有断言。\n\n## 抓两份快照\n\n```bash\ncd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas\npython3 - <<'EOF'\nimport json, shutil, os\nD = 'data/hestia-backfill-2026-08-14'\nm = json.load(open(D + '/manifest.json'))\nfor title, dst in [('2019年金融统计数据报告',   'pboc-2019-annual.html'),\n                   ('2026年7月金融统计数据报告','pboc-2026-07-monthly.html')]:\n    a = next(x for x in m['articles'] if x['title'] == title)\n    shutil.copy(os.path.join(D, a['file']), os.path.join('internal/hestia/testdata', dst))\n    print(dst, '<-', a['file'])\nEOF\n```\n\n## 边界\n\n⚠️ 测试写在 **`profiles_test.go`**，不是 `extract_test.go` —— 后者本 wave 归 TASK-006。\n⚠️ 端到端过 `Parse` 的验证在 TASK-007。本任务测到**模板/锚点层**即可\n（可直接调 `extractLoanSection` / `extractMoneySection`，它们只吃 `section`）。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-001"
+  ],
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go",
+    "./internal/hestia/amount.go",
+    "./internal/hestia/amount_test.go",
+    "./internal/hestia/testdata/pboc-2019-annual.html",
+    "./internal/hestia/testdata/pboc-2026-07-monthly.html"
+  ],
+  "done_criteria": {
+    "functional": [
+      "抓两份快照进 `testdata/`（脚本见 description）。\n\n🔴 **把 manifest 里的原 `file` 名记进 discovery** —— **第 1 轮的唯一阻断项就是这后半句**：\n```\npboc-2019-annual.html      ← articles/2025092212551494470.html\npboc-2026-07-monthly.html  ← articles/2026081414193264304.html\n```\n同 Sprint 先例：TASK-002 记作 `(新增，原 manifest file = articles/5837468.html)`。\ndescription 里的抓取脚本本身就 `print(dst, '<-', a['file'])`，**输出即所需**。\n它有真实用途——验证者查 NBSP 与全角括号时正是靠 manifest 反查走了这一步。",
+      "企业侧锚点加变体：`企（事）业单位贷款|非金融企业及机关团体贷款`。\n\n🔴 **住户侧一个字都不改**（Leader 实测 C5：`住户(?:部门)?贷款` 已覆盖两版）。若你改了它，请在交付报告里说明为什么——默认应当不改。\n\n🔴 **必须用非捕获组 `(?:A|B)`，裸交替会打断现有功能**（独立 reviewer 实施时实撞，Leader 读代码确认）。\n\n`profiles.go:316` 的 `scopeTotalRE` 做的是**字符串拼接**：\n```go\nreturn regexp.MustCompile(sc.anchorRE.String() + dirPat + numPat + unitPat)\n```\n裸交替拼接后结合律错位 ⇒ `A|B(dir)(num)(unit)`：在 2020 年后的报告里 `A` 单独命中、三个捕获组为空，`newAmount(\"\",\"\",\"\")` 报「unknown direction word」。\n\n✅ 正确：`(?:企（事）业单位贷款|非金融企业及机关团体贷款)`，与既有的 `住户(?:部门)?贷款` 一致。\n\n**验收**：改完后既有的 2025/2024 期次用例必须仍绿——若它们红了，你多半就是踩了这个坑。",
+      "`moneyRE` 认全角与半角两种括号。M1 / M0 因共用 `moneyRE` 一并生效——**三项都要有断言**，不能只测 M2。",
+      "🔴 **社融存量模板 `tsfStockRE` 的两处措辞变体**（由 M1c-3a 的 TASK-002 移交——模板在 `profiles.go:126`，属你的 scope；dev-m1c3a-b 实跑发现、Leader 复验）：\n\n**(a) `余额为` 后带空格**（3 篇，全部是「对实体经济发放的外币贷款折合人民币」这一项）：\n`2019年` / `2020-01` / `2020-02` 社融存量报告写 `…折合人民币余额为 2.11万亿元`。\n现模板是 `余额为?` + `numPat`，中间不容空白 ⇒ 这 3 篇该项零命中、整篇失败。\n\n**(b) `同比持平`**（无方向词、无 `%`，共 3 处）：\n```\n2023年7月社融存量：未贴现的银行承兑汇票余额为2.55万亿元，同比持平\n2025年6月社融存量：委托贷款余额为11.18万亿元，同比持平\n2026年5月金融统计数据报告：委托贷款余额11.22万亿元，同比持平   ← v2 月报的社融板块，注意**没有「为」字**\n```\n现模板尾部是 `，同比` + `dirPat` + `numPat` + `%`，而 `dirPat` 不含「持平」⇒ 零命中。\n处置：`同比持平` ⇒ yoy **= 0**（不是缺失、不是跳过）。\n\n⚠️ **Leader 复验的全语料分布（218 篇）**：「同比持平」共 **50 处**，其中 **47 处**落在「从结构看」占比段（`…余额占比2.6%，同比持平` 之类，**本就不该命中，放宽后也不能命中**），只有上列 3 处在总量段的分项余额句里。\n\n🔴 **这决定了放宽的方式**：不能简单地把 `持平` 加进 `dirPat` 就完事——那会让占比段的 47 处变成候选，`mustMatch` 的「恰好命中一次」随即变成多命中报错。必须保持「数值 + 单位」的结构要求（占比句是 `占比2.6%`，无单位）——这正是 TASK-002 boundary[0] 钉住的那条性质，**别在这里把它破坏掉**。\n\n**验收**：三处各有用例（可直接喂构造字符串给 `tsfStockRE`，不需要新快照）；**并配一条阴性对照**：`委托贷款余额占比2.6%，同比持平` 必须**仍不命中**。\n\n---\n\n## 🔴 `同比持平 ⇒ yoy=0` 的实现约束（Leader 裁决，2026-08-26）\n\n**裁决：选方案 1** —— `amount.go` + `amount_test.go` 已加进本任务 `writes`（6 项），在 `parseRatio` **开头特判**。\n\n理由：① 该语义属 **amount 层**（「持平」就是变化率为零），放消费点是打补丁、要在多处重复，且与 TASK-006/009 的主题无关；② Leader 复核 `parseRatio` 的**生产调用点只有 `extract.go:438` 一处**，爆炸半径可控；③ `amount.go` / `amount_test.go` **无任何任务声明**，无 scope 冲突。\n\n### 约束①：`持平` 不得进入 `directionSign` / `directionAlt`\n\n在 `parseRatio` 开头特判，**不动那两张表**。\n🔴 进了表 ⇒ `持平` 落入全局 `dirPat` ⇒ **占比段那 45+ 处「同比持平」全部变成候选** ⇒ `mustMatch` 的「恰好命中一次」退化成**多命中报错**。\n这条同时保证 DoD「必须保持数值+单位的结构要求」仍成立，也不破坏 `amount_test.go:393` `TestDirectionSignCoversDirectionAlt` 的双射断言。\n\n### 约束②：补一条断言钉住「`持平` 不是方向词」\n\n特判之后 `parseRatio(\"持平\",\"\")` 返回 0，而 `directionSign[\"持平\"]` **仍不存在**。\n**这两件事同时为真是刻意的**，需一条断言钉住并在注释写明理由 —— 否则后人看到 `parseRatio` 认 `持平`，会顺手把它加进 `directionAlt`，那正好破坏约束①。\n\n### 约束③：特判必须能区分「持平」与「解析失败」\n\n`parseRatio(\"\",\"\")`（正则没匹上、捕获组为空）与 `parseRatio(\"持平\",\"\")` **必须走不同的路**，前者仍应报错。\n🔴 **不得写成「`num` 为空就返回 0」** —— 那会把真失败静默变成 0。\n同族先例：TASK-003 的变异 N3，`return []string{}` 让 `gateCompleteness` 从 `skipped` 变 `passed`，**把「无从校验」静默变成「校验通过」**。\n\n⚠️ **本节由 Leader 在 `blocked_clarification` 窗口内直接写入 DoD**（此前三次同类决定只到了 inbox，全靠 dev/验证者事后发现）。验收按本节，不按任何 inbox 消息。"
+    ],
+    "boundary": [
+      "🔴 **逐字段数值断言，五个字段各归各位**（2019 年报，实读原文：住户部门贷款增加7.43万亿元，其中短期1.98、中长期5.45；非金融企业及机关团体贷款增加9.45万亿元，其中短期1.52、中长期5.88、票据1.84）：\n\n| 字段 | 期望（亿元） |\n|---|---|\n| `loan_hh_short_ytd` | 19800 |\n| `loan_hh_mlt_ytd` | 54500 |\n| `loan_corp_short_ytd` | 15200 |\n| `loan_corp_mlt_ytd` | 58800 |\n| `loan_bill_ytd` | 18400 |\n\n🔴 **为什么必须逐字段而不是断言「无 error」**：锚点错位的后果不是「抽不到」，是**住户的短期贷款跑进企业字段**——两个值都是合法量级，而 `corp_loan_reconcile` 是**加总**校验，错位后总和不变，**七道闸门一道也拦不住**。\n\n**消融**：把企业锚点改成也能匹配住户句（如加 `|住户`），上述断言必须转红。⚠️ **要看哪一条红**，不是红不红——若是 `loan_corp_total_ytd` 先红而五条明细没红，说明这五条断言并没有在守护「各归各位」这个性质。",
+      "全角与半角两种括号**各有用例**：`pboc-2026-07-monthly.html`（全角）与一份既有半角快照。半角的既有用例保持绿——这是「不是收紧、也不是放松，是扩大」的自证。\n\n⚠️ 别把判据写成「只要能匹配到数字就行」：`广义货币（M2）余额355.51万亿元，同比增长7.7%` 要断言 **355.51 与 7.7 两个值**，否则一个把括号整段吞掉的正则照样绿。\n\n---\n\n🔴 **补上 TASK-002 移交的 5 篇里剩余的 2 篇**（验证者在第 1 轮发现它们当前**无人认领、会静默消失**）：\n\n本任务原 DoD 只覆盖了 **3 篇存量**（`tsfStockRE` 的 `余额为` 后空格）。TASK-002 移交的是 **5 篇**，另 **2 篇是增量报告**（`2019年` / `2020年1月` 社融增量），形态是**同一变体**：\n```\n对实体经济发放的人民币贷款增加 3.49万亿元      ← 数字前一个空格\n```\n但模板是 **`tsfFlowRE`**，不是 `tsfStockRE`。\n\n⚠️ **第 1 轮不算违规**（原 DoD 明写 `tsfStockRE`），这是**我的 DoD 覆盖不全**。现在补上。\n⚠️ 请一并核实这 2 篇的空格是 `0x20` 还是 `0xa0`——存量那 3 篇里 2019 年那份是 **NBSP**，而 `strip.go` 的 `spaceRE` 已折叠它。**先数码位再决定改法。**\n\n验收：全量语料的增量抽取数从当前的 40/69 上升（具体值实跑填），且 3 篇存量的既有结论不变。"
+    ],
+    "error_handling": [
+      "锚点找不到时错误信息仍可诊断（含锚点原文），既有 `loan scope anchor %s not found` 的形态不变。\n\n加一条阴性对照：给一段**两个作用域都没有**的文本，必须报错而不是返回空 map——否则「抽不到」会伪装成「这期本来就没有」。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-005`，不要只写 `TASK-005` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。\n\n---\n\n🔴 **顺手修一处失效的守卫声明**（dev-m1c3a-a 交付 TASK-001 时发现，Leader 核实成立）：\n\n`profiles.go:76` 的注释写着：\n```\n// TestProfileAlternationsHaveNoSubstringPairs 把这条从「前缀对」扩到「子串对」守住。\n```\n**而那个测试不存在。** 实际存在的是 `profiles_test.go:189` 的 `TestProfileAlternationsHaveNo**Prefix**Pairs`，且它自己的注释明确写着判据**没有**扩成 substring。\n\n⚠️ **这比名字写错更糟**：它描述了一次**没有发生的改动**，声称一个守卫存在而那个守卫不存在。历史是——某轮 reviewer 建议「判据从 prefix 扩到 substring」，实测发现该建议对目标缺陷**全绿放行**（同时把既有安全的 `外币`⊂`本外币` 判红），于是**没有扩**；但这条注释留下了。\n\n**处置**：把注释改成描述**实际存在**的守卫（`...HaveNoPrefixPairs`，判据是前缀对），并在同处用一句话记明「曾评估过扩成子串对，实测对目标缺陷全绿放行且产生假红，故不扩」——**别只改名字**，那样下一个人还会再提一次同样的建议。\n\n⚠️ 这处改动在 `profiles.go`（你的 `writes` 内），是**注释级**改动，不影响任何断言。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-a",
+  "questions": [
+    {
+      "q": "functional[3](b)「同比持平 ⇒ yoy=0」结构上无法在本任务声明的 writes 内实现，需要裁决。链路：extract.go:207 setBalanceAndYoY → amount.go:145 parseRatio(dir,num)，而「…余额2.55万亿元，同比持平」句中既无方向词也无数字，正则无法造出 m[3]/m[4]；parseRatio(\"持平\",\"\") 必然报错 ⇒ 让 tsfStockRE 匹上它比匹不上更糟（现在是整篇失败，那时会变成一个看似无关的 unknown direction word）。要成立只能改 amount.go（目前无任何任务声明）或 extract.go（归 TASK-006/TASK-009）。三选一：(1) 把 amount.go + amount_test.go 加进本任务 writes；(2) 把 functional[3](b) 整条移交给拥有 extract.go 的 TASK-006/009；(3) 本 sprint 不做。我倾向 (1)：在 parseRatio 开头特判「持平」返回 0，不动 directionSign/directionAlt，因此 amount_test.go:393 的双射测试不受影响，「持平」也不会进入全局 dirPat——恰好满足 DoD「必须保持数值+单位的结构要求」。⚠️ 我不会自行扩 writes。其余四块（企业锚点、moneyRE 全角括号、余额为后空格、失效守卫声明订正）已全部 GREEN 且消融通过，只等这一条。",
+      "asked_at": "2026-08-26T01:05:00Z",
+      "answer": "【由 dev-m1c3a-a 从 team-lead 的 inbox 消息转录落盘，非 leader 亲自书写】\n转录理由：leader 的裁决与约束只在消息里，而 owner_table.in_progress=[\"dev-*\"]\n使 leader 在作出决定的那一刻已失去写权。按「文件系统是唯一真相源，inbox 只是\n通知」，故在此转录。若与 leader 本意有出入，以其原始 inbox 消息为准。\n\n—— 裁决 ——\n「同比持平 ⇒ yoy=0」三选一中选 (1)：把 amount.go + amount_test.go 加进 writes，\n在 parseRatio 开头特判。理由：① 该语义属 amount 层（\"持平\"就是变化率为零），\n放消费点是打补丁、要在多处重复，且与 TASK-006/009 的主题无关；② leader 复核\nparseRatio 的生产调用点只有 extract.go:438 一处，爆炸半径可控；③ amount.go /\namount_test.go 无任何任务声明，无 scope 冲突。\n\n—— 约束①：`持平` 不得进入 directionSign / directionAlt ——\n在 parseRatio 开头特判，不动那两张表。理由：进了表 ⇒ `持平` 落入全局 dirPat\n⇒ 占比段那 45+ 处「同比持平」全部变成候选 ⇒ mustMatch 的「恰好命中一次」退化\n成多命中报错。这条同时保证 DoD「必须保持数值+单位的结构要求」仍然成立，也\n不破坏 amount_test.go 里 directionSign 与 directionAlt 的双射测试。\n\n—— 约束②：补一条断言钉住「`持平` 不是方向词」——\n特判之后 parseRatio(\"持平\",\"\") 返回 0，而 directionSign[\"持平\"] 仍不存在。\n这两件事同时为真是刻意的，需一条断言钉住并在注释写明理由；否则后人看到\nparseRatio 认 `持平`，会顺手把它加进 directionAlt，那正好破坏约束①。\n\n—— 约束③：特判必须能区分「持平」与「解析失败」——\nparseRatio(\"\",\"\")（正则没匹上、捕获组为空）与 parseRatio(\"持平\",\"\") 必须走不同\n的路，前者仍应报错。不得写成「num 为空就返回 0」——那会把真失败静默变成 0。\n（同族先例：TASK-003 的变异 N3，`return []string{}` 让 gateCompleteness 从\nskipped 变 passed，把「无从校验」静默变成「校验通过」。）",
+      "answered_at": "2026-08-26T01:20:00Z"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "b87de0cfc8c5a231a903345b2c5bea7adac26f22",
+    "discovery_sha256": "525ca8759a7157576959b610764c43a586401849523046bffd52a9a125d1ef04",
+    "at": "2026-08-26T06:43:09Z"
+  },
+  "verifier": "test-m1c3a-v1",
+  "reason_class": "task_defect",
+  "reject_reason": "functional[0] 后半句未满足：「把 manifest 里的原 file 名记进 discovery，便于复现」——全域搜索 discoveries/TASK-005.json，2025092212551494470 / 2026081414193264304 / articles/ / manifest 各 0 次，代码注释里也没有。真值：pboc-2019-annual.html ← articles/2025092212551494470.html；pboc-2026-07-monthly.html ← articles/2026081414193264304.html。三条佐证非吹毛求疵：① 同 sprint 先例 TASK-002 对同一条款记作「原 manifest file = articles/5837468.html」；② description 给的抓取脚本本身就 print(dst,'<-',a['file'])，输出即所需；③ 我验证时确实需要它反查原文（NBSP/全角括号）。修复=discovery 加两个文件名。⚠️ 时机：discovery 守卫是 case status in verified|accepted) + [-f]，转 verified 后任何角色都改不了，只能退 review_fix（同样 +1），故现在退回代价相同且更干净。其余 7 条全部 PASS 且证据强度高：全量语料 存量 64/69 → 69/69 零回归、合计 104→109；我自采 1064 RUN / 1706/1783=95.6814%（不降反升）与 dev 一致；我设计的 V1（生成集外）补上了 DoD 指定消融 A1 证不到的『五条断言确实守住各归各位』；A1 作废判断正确（红在 require.NoError 上游、五条明细未执行）。非阻断三条见报告 §6：增量 2 篇同类空格无人认领、约束①理由不可复现（N1 实测危害不存在，真正守它的是既有双射测试）、discovery 的 RUN 分层用数斜杠法。详见 .arcforge/docs/04-test/TASK-005-verification.md"
+}

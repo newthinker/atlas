@@ -1,0 +1,95 @@
+{
+ "task": "TASK-002",
+ "title": "M1c-3a 的 TASK-002：社融存量/增量独立报告的整篇抽取包装",
+ "provenance": "全部代码与测试由 dev-m1c3a-b 编写。commit 8256ccb 已 rebase 到 master 4f469e9（含他人的 TASK-001），rebase 换过 sha：原 sha 66a42e5 / c49c99d 已作废，以 8256ccbfd3366177a106fcd07b59bea15c583f1d 为准。",
+ "key_findings": [
+  "【探针，三分支处置表落点】整篇当一节对 2025-08 两份快照直接全中：存量 18 字段、增量 9 字段、err=nil。存量侧因此真的只是一行包装（return extractTSFStockSection(section{Body: text})）。",
+  "【🔴 DoD 的二分与实测不符】增量总量句全量实测是**四类**而不是 DoD boundary[2] 写的两类。69 篇分布：仅『累计为』19 / 仅『为』且 1 月报 6 / 仅『为』且非 1 月 19 / 两者都有 25。19+6+19+25=69。",
+  "【🔴 天真放宽会打坏原本成功的 25 篇】把 tsfFlowTotalRE 放宽成『社会融资规模增量(?:累计)?为』后，『两者都有』那 25 篇会同时命中累计句与当月句，mustMatch 报 matched 2 sentences。DoD 只写了『只认累计为会让 25 篇零命中』，没写放宽会打坏另外 25 篇。故实现不放宽模板，而是两种措辞都收下、再按口径挑唯一一条（与 selectRMBCumulativeFlow 对付孪生句同构）。",
+  "【🔴 修掉一个现状就存在的静默错误，且是 8 篇不是 4 篇】2022 年**与 2023 年各** 7/8/10/11 月，共 8 篇，把当月分项与累计总量放在同一段。旧 extractTSFFlowSection 对它们 err=nil 而抽出累计总量 + 当月分项。实测对照（同一批次跑旧函数与新函数）：2022-10 ytd=287000/rmb_loan=4431、2022-11 304900/11400、2022-07 217700/4088、2022-08 241700/13300、2023-10 311900/4837、2023-11 336500/11100、2023-07 220800/364、2023-08 252100/13400。量级差约 30 倍，两个值都在合法区间内，magnitude_sanity 是空表拦不住。⚠️ Leader 派单与多轮消息里一直写『2022 年 7/8/10/11 四篇』——2023 年那 4 篇是本任务实测新增的，成因是第三种体例（累计句 → 当月句 → 分项，分项属当月）。",
+  "【复验结论：『同比持平』确实存在】DoD boundary[2] 要求复验的那条 reviewer 线索**成立**，Leader 此前未能复现是其搜索式漏了逗号（原文是『余额为2.55万亿元，同比持平』）。全 138 篇实测 29 处：27 处落在『从结构看』占比段（无害，本就不该命中），2 处落在总量段的分项余额句 —— 2023 年 7 月『未贴现的银行承兑汇票余额为2.55万亿元，同比持平』与 2025 年 6 月『委托贷款余额为11.18万亿元，同比持平』，恰好让这 2 篇零命中。**已移交 TASK-005**（模板 tsfStockRE 在 profiles.go，不在本任务 writes 里）。",
+  "【🔴 DoD boundary[0] 指定的消融不能证伪它所指名的断言】DoD 写『把 tsfStockRE 的单位要求去掉，该断言必须转红；若仍绿说明断言测的不是它自称的性质』。实测：只去掉 unitPat 时 TestTSFStockArticleTakesBalanceNotStructureShare **SURVIVED**（红的是 golden 测试，红因是捕获组少一个、不是取到占比值）。结论不是断言测错了，而是那个消融没有打开它以为打开的那条路：『不抽到占比值』由**四道互相独立**的机制守着 —— ①『占比』/『占同期社会融资规模存量的』中缀（余额为? 后必须紧跟数字）②unitPat 白名单（占比句单位是 %）③dirPat 白名单（占比句方向词是低/高）④amount.go 的 unknown unit 兜底。A4d（把 8 个分项全部改指结构段）实测最终被 ④ 拦下，报 `unknown unit \"%\"` ⇒ **没有任何单点变异能让抽取器返回 2.6**。测试注释里原先那句『去掉 unitPat 本测试必须转红』是假的，已订正为实测结论。",
+  "【CRLF】两份快照原文是 CRLF，仓库 core.autocrlf=input 会在提交时归一成 LF，而既有 testdata 也都是 LF。已在提交后的干净检出上重跑全部测试确认通过（不是假设）。"
+ ],
+ "decisions": [
+  {
+   "decision": "存量侧只做一行包装，不加作用域切分",
+   "rationale": "全量 69 篇实测整篇喂进去与板块喂进去无差别。报告第二段『从结构看』的占比句由四道机制挡着（见 key_findings 第 6 条），不需要切分。加切分是无依据的复杂度。"
+  },
+  {
+   "decision": "增量侧不放宽 tsfFlowTotalRE，改为『两种措辞都收 + 按口径挑唯一一条 + 作用域切分』",
+   "rationale": "放宽会让 25 篇由成功变报错（实测）。挑法与 selectRMBCumulativeFlow 同构：命中 0 报错、命中 2 报错，绝不替调用方挑一个。作用域切分与 extractLoanSection 的 loanScopeSpans 同构，只是边界由总量句而非部门锚点划定。"
+  },
+  {
+   "decision": "口径判据 = 『带累计二字』或『YYYY年1月前缀』二者其一",
+   "rationale": "1 月的年初至今累计就是当月，与 profiles.go 里『1月份是累计句特例』同源。判据落在捕获组 groups[2]==\"1\" 而不是字符串前缀 —— 『10月』捕获的是『10』，与『1』不等，靠捕获组而不是前缀匹配。"
+  },
+  {
+   "decision": "第 3 类 19 篇（仅『为』且非 1 月）报错，不填当月值",
+   "rationale": "人类裁决 A（Leader 转达，执行已有裁决而非新决策）。那句是当月值，而字段名是 tsf_flow_ytd，与 deposit_flow_ytd / loan_flow_ytd 同族、下游 calibrate 会跨期比。量级完全合理而口径错，是本包反复禁止的失败方式。⚠️ boundary[2] 原文『25 篇不再失败』的期望已作废，改为『第 2 类 6 篇接上、第 3 类 19 篇报错』。"
+  },
+  {
+   "decision": "tsfFlowArticleTotalRE 定义在 extract.go 而不是 profiles.go",
+   "rationale": "按本包分工（profiles.go=数据/模板，extract.go=代码）它属于 profiles.go，放这里纯粹是**范围约束**：profiles.go 本 wave 归 TASK-001 与 TASK-005，不在本任务 writes 里。代价是它落在 profiles_test.go 的 TestNoGreedyCaptureInTemplates 覆盖之外 —— 已在 extract_test.go 补 TestExtractGoArticleTemplatesHaveNoGreedyCapture 按同一判据扫 extract.go。**profiles.go 空出来后应把这条挪过去并登记进 allTemplateRegexps()**，这是本任务留下的一笔技术债，明确记在此处。"
+  },
+  {
+   "decision": "extractTSFFlowSection（v2 板块路径）一个字不改",
+   "rationale": "本任务只负责独立报告路径。v2 板块路径上是否有同样的孪生段问题是另一件事（月报接入是 TASK-009 的范围），在这里顺手改会越界且无样本支持。"
+  }
+ ],
+ "files_modified": [
+  "internal/hestia/extract.go (+190/-0，纯新增)",
+  "internal/hestia/extract_test.go (+418/-0，纯新增)",
+  "internal/hestia/testdata/pboc-2025-08-tsf-stock.html (新增，原 manifest file = articles/5837468.html)",
+  "internal/hestia/testdata/pboc-2025-08-tsf-flow.html (新增，原 manifest file = articles/5837454.html)"
+ ],
+ "scope_note": "实际改动**未超出**声明的 writes（4 个文件逐一对应）。numstat 取自提交本身 git show --numstat 8256ccb，与交付物同源。",
+ "interfaces_exposed": [
+  "extractTSFStockArticle(text string) (map[string]float64, error) —— 整篇当一节，返回 18 个字段",
+  "extractTSFFlowArticle(text string) (map[string]float64, error) —— 按口径挑总量句 + 作用域切分，返回 9 个字段",
+  "⚠️ 两者在 TASK-007（Parse 按 kind 分派）接上之前**没有生产调用方**，这是刻意的分层，不是漏接。TASK-007 应当在 kindTSFStock / kindTSFFlow 两条路上调它们，入参是 stripHTML(raw) 的整篇文本（不经 splitSections）。"
+ ],
+ "handoff_to_TASK_005": [
+  "数字前空格（5 篇）：模板 tsfStockRE 的 `余额为?` 与 tsfFlowRE 的 dirPat 后需容忍一个可选空白。样本：存量 2019 年报/2020-01/2020-02 的『对实体经济发放的外币贷款折合人民币余额为 2.11万亿元』；增量 2019 年报/2020-01 的『对实体经济发放的人民币贷款增加 16.88万亿元』。",
+  "同比持平（2 篇）：tsfStockRE 的 `，同比` + dirPat + numPat + `%` 需容忍『同比持平』（yoy=0）。样本：存量 2023-07 未贴现的银行承兑汇票、2025-06 委托贷款。⚠️ 放宽时要保证仍挡得住占比段的『同比低0.2个百分点』。",
+  "Leader 另报第 3 处『同比持平』在 2026 年 5 月金融统计数据报告的 v2 月报社融板块（无『为』字）——本任务未独立复核该处。"
+ ],
+ "verification": {
+  "sampled_at_head": "8256ccbfd3366177a106fcd07b59bea15c583f1d",
+  "sampling_note": "以下每一个数字都采于**最后一次改动之后**，同一批次统一重采；覆盖率走背对背 × 同等负载（两棵树同一批次交替各跑 2 轮，两轮逐字一致 ⇒ 无漂移）。harness 锚点可覆写（ABLATE_REF/ABLATE_MAIN/RESAMPLE_MINE/RESAMPLE_BASE），实际锚点打进输出。",
+  "suite": "999 条 RUN = 498 顶层 + 489 一级子测试 + 12 二级子测试；FAIL 0（自洽校验 498+489+12=999）",
+  "coverage": "95.5250% (1665/1743)，采于 8256ccb",
+  "coverage_backtoback_baseline": "95.5136% (1618/1694)，采于 master 4f469e961e0c56c7730c250a8cc14d3c2efb653d，与上一行同批次交替测得",
+  "coverage_delta": "+0.0114pp（语句 +49、覆盖 +47）。go tool cover -func 口径两者都是 95.5% ⇒ DoD『不低于 95.5%』达标",
+  "gofmt": "gofmt -l internal/hestia/ 空",
+  "vet": "go vet ./internal/hestia/ 空",
+  "no_new_deps": "go.mod / go.sum 不在本次改动里（git show --numstat 8256ccb 只有 4 个文件）",
+  "numstat": "extract.go 190/0、extract_test.go 418/0、testdata flow 421/0、testdata stock 422/0 —— **纯新增，0 删除**，取自提交本身",
+  "corpus_138": {
+   "存量": "64/69 抽满",
+   "增量": "40/69 抽满",
+   "合计": "104/138 抽满，34 失败",
+   "失败精确分类（同一 sha 实测，非推断）": {
+    "移交 TASK-005 · 数字前空格": "5 篇（存量 2019/2020-01/2020-02，增量 2019/2020-01）",
+    "移交 TASK-005 · 同比持平": "2 篇（存量 2023-07、2025-06）",
+    "刻意报错 · 类3 只有当月值": "19 篇（人类裁决 A）",
+    "刻意报错 · 口径混装": "8 篇（2022 与 2023 年各 7/8/10/11）"
+   },
+   "归本任务的缺口": "0 —— 34 篇失败要么是刻意的响亮失败，要么已移交 TASK-005"
+  },
+  "ablation": {
+   "纪律": "每个变异体一个临时 git worktree（隔离副本），主工作区一个字节不碰；每窗口内 + 收尾各校验主工作区三个文件的 sha256 与 git status --porcelain —— 全程未变。变异体落盘后过语法闸（gofmt -e）与语义闸（逐字打印 diff）。判据是**哪一条断言红**，不是红不红。",
+   "A1 去掉作用域切分": "KILLED by TestTSFFlowArticleRefusesCaliberMix + 类4。并直接观察到消融后 2022-10 体例的实际产出：err=<nil> tsf_flow_ytd=287000 tsf_flow_rmb_loan_ytd=4431 —— 即 Leader 指定的那一对具体值。",
+   "A5 右边界恒为文末（只切左边界）": "KILLED by 类4（分项命中两套）",
+   "A6 左边界恒为文首（只切右边界）": "KILLED by RefusesCaliberMix",
+   "A2 isCumulative 去掉 1 月分支": "KILLED by 类2",
+   "A3 isCumulative 恒真（完全不判口径）": "KILLED by 类3 + 类4 + RefusesCaliberMix",
+   "A4 DoD boundary[0] 指定（去掉 unitPat）": "🔴 对其指名的断言 **SURVIVED**。详见 key_findings 第 6 条；追加 A4b/A4c/A4d 三个生成集之外的变异定位到真正的四道机制，并确认错值不可达。"
+  },
+  "not_verified_by_me": [
+   "两个新函数在 TASK-007 之前没有生产调用方 —— 端到端行为（Parse 分派后的实际表现）本任务无法验证",
+   "Leader 报的第 3 处『同比持平』（2026 年 5 月月报 v2 社融板块）未独立复核",
+   "extractTSFFlowSection（v2 板块路径）是否也有孪生段口径混装问题 —— 未查，超出本任务范围"
+  ]
+ }
+}

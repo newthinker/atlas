@@ -1,0 +1,96 @@
+{
+ "task": "TASK-012",
+ "title": "M1c-3a 的 TASK-012：QA 返工 R3（HIGH）/ fix5 / fix6",
+ "provenance": "全部代码与测试由 dev-m1c3a-b 编写，基于 master f74dc49d4678a7599681ef2dae29f41ee3f2908e。交付 commit cc8baf69847c0836b8adf8ad754b8b77d17ac846（⚠️ amend 一次，作废 sha e82064c，以最后一个为准）。缺陷由 QA 两轮 Code Review 第二轮发现、team-lead 独立复核（全语料 grep + Go 探针 + 交付物实际输出三样）。",
+ "key_findings": [
+  "【R3 两处硬卡点，只改一处仍是整篇命中 0】真实句是「1-8月，人民币贷款**累计**增加15.61万亿元」。`periodAlt` 不认「N-M月」是一处，`flowRE` 的 dirPat 不含「累计」二字是另一处。两处**各自**都会让整篇命中 0，症状相同而成因不同 ⇒ 测试分开写（TestPeriodAltRecognisesRangePrefix / TestFlowRETargetsCumulativeKeyword），并用互为镜像的两个变异证明它们**分别**敏感（见 verification.ablation R1/R2）。",
+  "【收益与代价并排量过 —— 零代价】DoD boundary[0] 点名的那一步。全部 80 篇金融统计数据报告，**改动后**的累计命中数分布：贷款侧 `0/1/≥2 = 19/61/`**`0`**、存款侧 `23/57/`**`0`**。**`≥2` 一篇都没有 ⇒ 没有任何原本成功的篇目被打坏**；变化的恰好是那 4 篇（0→1）。本 sprint 有过一次反例（修法会让另外 25 篇同时命中两句而报错），所以量的是改动后的分布，不是改动前的零命中数。",
+  "【全语料 N-M月 只有 4 种取值】`1-7月` / `1-8月` / `1-10月` / `1-11月`，各 2 篇（金融统计 + 社融增量），共 8 篇，全部是 2022 年。与 team-lead 的实测数吻合。仍**穷举 1-2月…1-12月 十一项**：只登记见过的四种，将来出现 `1-9月` 会是**静默 0 命中**——正是 R3 要修的那个失效方式。",
+  "【🔴 DoD boundary[1] 的端到端那一格在本任务 writes 范围内不可达 —— team-lead 已裁决按模板层交付】\n\n**模板层做到了**：`selectRMBCumulativeFlow(flowRE(\"贷款\"), …)` 对四篇取到 `1-7月/1-8月/1-10月/1-11月` + `人民币` + `增加` + `14.35/15.61/18.7/19.91` + `万亿元`，与正文逐字对得上。\n\n**端到端做不到**，两道阻挡都不在本任务 writes 里：\n① **存款侧全篇只有当月句、零累计句**（我在**整篇**、不限存款节搜「人民币存款(累计)?增加/减少」，四篇皆然；team-lead 独立复核确认）。而存款节在 sectionRules 里排在贷款节**之前** ⇒ extractFields 先在存款节失败，n=0。\n② 分部门是当月口径，被 M1c-3a 的 TASK-009 的 checkSectorCaliber 正确拒绝。\n\n⇒ 那 4 期可恢复的是 **loan_flow_ytd 一个字段**，不是整份 Observation。要真正端到端产出，需要 `extractFields` 支持**按节部分抽取**——那是 extract.go（TASK-011 的 writes）的设计变更，team-lead 已裁决**结转 M1c-3b**。\n\n🔴 **team-lead 裁决：DoD boundary[1] 是它写 DoD 时没想清楚端到端要穿过存款节，按模板层断言 + 本条申报交付，这是正确履行、不是打折。**（原话）\n\n⚠️ 验收时请注意：**「裁决过的不做」与「漏做」在交付物里同形**，这段就是用来区分它们的。",
+  "【🔴 主动复核了 R3 与 TASK-009 的 DoD 是否矛盾 —— 不矛盾，实测确认】TASK-009 的 DoD 明写「C' 类不要顺手去救：救了那条 `1-N月` 累计句会把它从『安全失败』变成『口径混杂』——它的分部门同样是当月值」。\n\n实测：那 4 篇的 `N-M月` 累计句位置在**分部门段之后**（贷款节里锚点「分部门看」在偏移 271~308，`N-M月` 在 590~625）⇒ 放宽后「分部门看」之前**最近**的期次前缀仍是 `N月份` ⇒ checkSectorCaliber 照常拒绝，**没有引入口径混杂**。四篇实测的守卫输出逐篇确认过。\n\n⚠️ 这个复核**没有人要求我做**。不做的话，本次修改看起来会像在违反一条既有明文禁令，而那条禁令的作者不在场。",
+  "【🔴 两条等值断言按设计红了 —— 本 sprint 少见的「守卫按设计生效」正面实例】`TestCumulativeMonthAltEnumeratesTenMonths` 与 `TestCumulativePeriodsKeySet` 是刻意的**等值**断言，注释明写：「代价是后续扩 periodAlt 必须同步改这一行 —— **那正是要的信号**：让『periodAlt 的组成变了』成为一次显式的、有人看见的改动，而不是静默扩面。」\n\n**它真的响了。** 我扩 `cumulativeMonthAlt` 后两条立刻转红，被迫显式更新。前者改名为 `TestCumulativeMonthAltEnumeratesEveryCumulativePrefix`——名字里的「Ten」已过时（现在 21 项）。",
+  "【🔴 `...Agree` 守卫未红这件事，做了实测判别】一一对应守卫 `TestCumulativeMonthAltAndCumulativePeriodsAgree` 在本次改动后**未红**。team-lead 指出：「未红」既可能是「对应成立」也可能是「**守卫没覆盖新族**」，两者同形。\n\n⇒ **单边变异实测**（隔离 worktree，主工作区未变）：\n- A1 只删口径表里的 `1-8月` ⇒ **正向**子测试红，错误信息逐字含 `\"1-8月\" 在 cumulativeMonthAlt 里、却不在 cumulativePeriods 里`；反向仍 PASS\n- A2 只删正则里的 `1-8月` ⇒ **反向**子测试红，错误信息逐字含 `\"1-8月\" 登记在 cumulativePeriods 里、periodPat 却整段匹不上它`；正向仍 PASS\n\n两个方向各只红一个子测试，且错误信息**指名新族的成员** ⇒ 守卫确实覆盖了新族，「未红」= 对应成立。",
+  "【fix 5 的判别式：报告自己声明的口径，不是日期黑名单】3 月报 period_type 是 monthly 却按一季度口径写，且两篇实测**都有**外汇节；在外汇节处截断会让 rule@v1(27) 静默降级成 rule-monthly@v1(25)、err=nil、缺失=0。\n\n判据是「合计句前缀是否季度及以上」。⚠️ **这不是一条新的经验断言，是把既有守卫的前提（累计期报告必有外汇节）一致地应用到月报上** —— 一篇自称季度口径的报告不在「月报本就不含这一节」那个豁免前提里。全语料 55 篇月报实测：声明季度口径的 2 篇 hasFX 全 true、未声明的 53 篇 hasFX 全 false，**55/55 一致、0 例外**。",
+  "【fix 5 覆盖不到的那一半，已写进注释】截断若发生在**外汇节之前**，正文里连「国家外汇储备」字样都不剩，与「本就没有」在**任何**结构信号上都不可区分。实测依据：55 篇月报里 `findSection` 命中与「正文含该字样」**完全等价**（4+42+2+7=55 全部一致）⇒ 文本检查零判别力。本守卫堵的是「报告自称累计期却没有外汇节」这一类。"
+ ],
+ "decisions": [
+  {
+   "decision": "cumulativeRangeAlt 穷举 1-2月…1-12月，拼进 cumulativeMonthAlt 而不是与它并列",
+   "rationale": "拼进去之后一一对应守卫（遍历 cumulativeMonthAlt）**自动**覆盖新族，不需要改守卫本身——已用单边变异实测确认覆盖（见 key_findings 第 7 条）。穷举而不用字符类，理由与既有十项完全相同：字符类没法枚举成 map 键，一一对应关系就不再可被机械核对。"
+  },
+  {
+   "decision": "flowRE 用 `(?:累计)?` 而不是把「累计」加进 dirPat",
+   "rationale": "「累计」是**口径词**不是方向词。加进 dirPat 会让它被当成方向词捕获，parseRatio/newAmount 拿到它会报 unknown direction；而且方向词白名单是全包共用的，污染面远超本处。TestFlowRETargetsCumulativeKeyword 断言 m[3]==\"增加\" 钉住这一点。"
+  },
+  {
+   "decision": "fix 5 的 quarterOrLongerPeriods() 从 cumulativePeriods **派生**（减月度累计、减 N月份），不手写第二份清单",
+   "rationale": "手抄的那份会在下次加累计前缀时静默过期，而过期方向是**漏掉一个季度前缀 ⇒ 该形态的截断不再被拦**（放行错数据）。但派生只保证「新增月度前缀不会误入」，**不保证减法本身对**，故 TestQuarterOrLongerPeriodsIsExactly 逐字钉住结果（消融 F3/F4 各打中它的一个半边）。"
+  },
+  {
+   "decision": "错误文案保留 `cumulative-period report` 这个字串，只在括号里追加一句区分路径的说明",
+   "rationale": "我一度把开头改成 `report claiming a cumulative period`，导致 sections_test.go 里两条**可区分性**断言转红——那个字串是既有测试用来区分「缺外汇节」与「缺核心板块」的标志。为装饰改动一个被当作判别标志的字串是净损失，已改回。"
+  },
+  {
+   "decision": "TestDetectExtractorRejectsTruncatedFXOutsideMonthly 从两格重构成三格",
+   "rationale": "它原本的第二格是「同一份输入换成 monthly ⇒ 放行」，用来证明判据真用上了 periodType。那个前提**现在不成立**：那份输入（2020-q1q3）的合计句自称「前三季度」，真实月报不会那么写。拆成「自称季度的月报仍拒」（新增，覆盖 fix 5）+「真实月报（前八个月）仍放行」（承接原用意）。**两格合起来才能区分三种实现**：按口径决定 / monthly 一律放行 / 一律不放行。"
+  },
+  {
+   "decision": "不为「N-M月」加任何特判分支",
+   "rationale": "DoD boundary[2] 要求。M1c-3a 的 TASK-001 已用零特判方式处理 1 月（`\"1月份\": true` 就是通用表里的普通键）。本次同样只是 cumulativeRangeAlt 里的一批普通交替项 + 口径表里的一批普通键，代码里针对具体月份/范围的条件分支 **0 处**。"
+  }
+ ],
+ "files_modified": [
+  "internal/hestia/profiles.go (+52/-2)",
+  "internal/hestia/profiles_test.go (+143/-8)",
+  "internal/hestia/required_test.go (+51/-0)",
+  "internal/hestia/sections.go (+79/-4)",
+  "internal/hestia/sections_test.go (+94/-4)"
+ ],
+ "scope_note": "实际改动**恰好等于**声明的 5 个 writes，无越界。go.mod / go.sum 不在改动里。CONTRACTS D 表（属 TASK-008）与 calibrate.go 重跑分流（属 TASK-010）**均未碰**。numstat 取自提交本身 git show --numstat cc8baf6。",
+ "interfaces_exposed": [
+  "const cumulativeRangeAlt（profiles.go）—— 「N-M月」族的正则交替片段，已拼进 cumulativeMonthAlt。新增该族成员时**必须同时**加进 cumulativePeriods，一一对应守卫会红。",
+  "func declaresQuarterOrLonger(secs []section) bool（sections.go，包内）—— 报告的合计句是否声明季度及以上的累计口径。detectExtractor 用它收窄 monthly 的外汇节豁免。",
+  "func quarterOrLongerPeriods() map[string]bool（sections.go，包内）—— 从 cumulativePeriods 派生的「季度及以上」集合，当前恰好 {全年,上半年,一季度,前三季度}。",
+  "⚠️ 对 TASK-010：那 4 篇端到端仍 n=0，**分类理由要改成三句版**（贷款侧可抽 / 存款侧确实无源 / 分部门被口径守卫拒绝），不是「移出 Unsupported」。team-lead 已裁决。",
+  "⚠️ 对 TASK-008（CONTRACTS）：D 表「『1-5月』/『1-8月』这类带范围前缀，55 篇月报里一次都没出现」**是假的**——`1-5月` 确实 0 篇，但整个形态 8 篇（4 篇金融统计 + 4 篇社融增量）。订正属 TASK-008，本任务未碰。"
+ ],
+ "verification": {
+  "sampled_at_head": "cc8baf69847c0836b8adf8ad754b8b77d17ac846",
+  "sampling_note": "每个数字都采于**最后一次改动之后**、同一批次统一重采（上一版数字已作废）。覆盖率走背对背 × 同等负载：两棵树同批次交替各跑 2 轮，两轮逐字一致。harness 锚点可覆写（ABLATE_REF/ABLATE_MAIN/RESAMPLE_MINE/RESAMPLE_BASE）。",
+  "suite": "1196 条 RUN = 548 顶层 + 636 一级子测试 + 12 二级子测试；FAIL 0（自洽校验 548+636+12=1196）。分层用**缩进**口径（0/4/8/12 四级正则），不是「名字里几个 /」；三级桶实测为 0。",
+  "coverage": "**95.7065% (1761/1840)**，采于 cc8baf6。DoD 判**绝对值**，≥95.5% ✓",
+  "coverage_backtoback_baseline": "95.6570% (1740/1819)，采于 master f74dc49d4678a7599681ef2dae29f41ee3f2908e，同批次交替测得",
+  "coverage_delta": "语句 +21、覆盖 **+21**（新增语句全部被覆盖）。go tool cover -func 口径两者都是 95.7%",
+  "coverage_anchor_warning": "🔴 **给验证者**：基线锚是 f74dc49，而 master 此后已前进（至少到 2a33511）。你在 merge 后的 master 上量会得到不同值，**那不是我报错了** —— 覆盖率的分母属于整棵树。merge 后我会在验证者的锚上复测并补报。",
+  "gofmt": "gofmt -l internal/hestia/ 空",
+  "vet": "go vet ./internal/hestia/ 空",
+  "no_new_deps": "go.mod / go.sum 不在改动里（numstat 只有 5 个文件）",
+  "hit_distribution_after_change": {
+   "说明": "DoD boundary[0] 指定：放宽模式前量的是**改动后**的命中数分布，不是改动前的零命中数。语料 = 全部 80 篇金融统计数据报告。",
+   "贷款侧": "0 命中 19 篇 / 1 命中 61 篇 / ≥2 命中 **0 篇**",
+   "存款侧": "0 命中 23 篇 / 1 命中 57 篇 / ≥2 命中 **0 篇**",
+   "变化的篇目": "恰好 2022-07 / 2022-08 / 2022-10 / 2022-11 四篇贷款侧，0→1；其余全部不变",
+   "结论": "收益 4 篇、代价 **0** —— `≥2` 那一列为空意味着没有任何原本成功的篇目会因放宽而变成多命中报错"
+  },
+  "ablation": {
+   "纪律": "每个变异体一个临时 git worktree（隔离副本），主工作区一个字节不碰、指纹全程未变。四道有效性闸 + 核 RUN 行数。**逐格预先声明「应当只红哪一格」再比对**。",
+   "R1 periodAlt 不认 N-M月（只废前半个硬卡点）": "KILLED。红：PeriodAltRecognisesRangePrefix、FlowREExtractsRangePrefixSamples、两条等值断言、Agree 正反两向。**TestFlowRETargetsCumulativeKeyword 仍 PASS** —— 与预先声明一致。",
+   "R2 flowRE 去掉 (?:累计)?（只废后半个硬卡点）": "KILLED。红：FlowRETargetsCumulativeKeyword（子测试「带「累计」二字」）、FlowREExtractsRangePrefixSamples 四格。**TestPeriodAltRecognisesRangePrefix 仍 PASS** —— 与预先声明一致。\n\n🔴 **R1/R2 互为镜像、各留一绿，这就是 DoD functional[0]「两处都改完才抽得出来，请分别断言」的证据**：任一处被废，**只有**对应那条断言红。",
+   "R3 口径表不收 N-M月": "KILLED（5 顶层红），含 Agree 的正向子测试。",
+   "F1 截断守卫去掉 declaresQuarterOrLonger（回到全豁免）": "KILLED（1 红）。**TestMonthlyIsTheOnlyPeriodTypeExemptFromFX 仍 PASS** —— 说明豁免本身没被误伤。",
+   "F2 declaresQuarterOrLonger 恒真（豁免全废）": "KILLED（3 红），子测试红在 monthly / 前八个月 / 8月份 / 1-8月。⚠️ 第一版变异是 **0 条 RUN**（range 变量未使用、编译失败），按纪律记 NO-VERDICT 并重做，不得记 KILLED。",
+   "F3 numericMonth 正则写坏（1月份 漏进季度集）": "KILLED（1 红：QuarterOrLongerPeriodsIsExactly）。ReadsTheReportsOwnClaim 仍 PASS（它的五个前缀都不是 `1月份`）。",
+   "F4 月度集不减（cumulativeMonthAlt 全漏进季度集）": "KILLED（3 红），子测试红在「前八个月」「1-8月」——正是 QuarterOrLongerPeriodsIsExactly 的**反向**半边。F3/F4 各打中它的一个半边。",
+   "A1/A2 单边变异（专为判别「Agree 未红」的成因）": "见 key_findings 第 7 条。A1 只红正向、A2 只红反向，错误信息均逐字指名 `1-8月` ⇒ 守卫确实覆盖新族。",
+   "全部 7 格在最终 sha cc8baf6 上复跑": "7/7 KILLED"
+  },
+  "self_correction": "🔴 **交付过程中我自己犯了一个错，已订正，写在这里是因为它的失效方式值得记**：TestFlowREExtractsRangePrefixSamples 里那四句，我按记忆写了「同比多增…」尾巴并在注释里标「逐字抄自正文」——**四句错三句**（1-7月 实为 5150 非 5088、1-10月 实为 1.15万亿 非 1.63万亿、1-11月 实为 1.09万亿 非 1.19万亿）。而 flowRE 到单位就收尾，**两种写法测试都绿，这个错永远不会被任何断言抓到**。用正则 `1-[0-9]{1,2}月[^。]{0,60}` 跑全语料取真文订正。另删掉一段假装在断言「零特判」的 stringLiteralsOf 代码——它断言不了它声称的东西，如实写明「这条性质没有机械守卫」。\n\n---\n\n🔴 **第二条（返工时补记）：DoD→测试映射块是「从我的测试往回列」的，不是「从 DoD 逐条往下核」的。**\n\n我在 profiles_test.go 写了 `Context Checkpoint: done_criteria → test mapping`，列了 functional[0]/[1] 与 boundary[1]/[2]；required_test.go 列了 functional[3]；sections_test.go 列了 fix5 相关。**`error_handling[0]` 一次都没出现在任何映射块里** —— 它既没被实现，也没被申报，**也没有在任何地方留下「我看过它」的痕迹**。\n\n成因不是没读到（开工时 jq 打印过完整 DoD），是**映射块的构造方向**：我是写完测试后回头列「这条测试对应哪条 DoD」，而不是拿 DoD 的条目清单逐条问「它有对应物吗」。\n**正向构造下，一条没被处理的 DoD 条目不会留下任何痕迹** —— 它只是不出现，而「不出现」和「不存在」在映射块里长得一样。\n\n⇒ 可操作形式：**映射块的左列必须是 DoD 的完整条目清单**（functional[0..n] / boundary[0..n] / error_handling[0..n] / non_functional[0..n] 一个不落），没有对应物的写「未实现，理由见 X」。这样「漏了」会表现为**一行空着**，而不是**一行不存在**。",
+  "not_verified_by_me": [
+   "🔴 **`error_handling[0]` 未实现，这是一次显式决定，不是遗漏后的补记**（M1c-3a 的 TASK-012 返工，epoch=2）。\n\nDoD 要求「新形态**认不出来时**的错误信息要能区分『这个期次前缀我不认识』与『这一节没有累计句』」，并自标「这正是 R3 的根因」。\n\n**我在修复前的树 f74dc49 上自己复现了根因**（不采信转述）：\n  2022-10（**有**累计句「1-10月，人民币贷款累计增加18.7万亿元」，只是前缀不被认识）\n    → hestia: 人民币贷款期内合计 not found among **2** candidate sentence(s) [10月份/人民币 10月份/外币]\n  2020-04（**真的**没有累计句）\n    → hestia: 人民币贷款期内合计 not found among **1** candidate sentence(s) [4月份/人民币]\n⇒ 两条**结构完全相同**，唯一差别是候选数（2 vs 1），而那个数不携带「为什么」。认不出的前缀根本没进候选列表，所以「解析器缺口」与「报告本身没数据」在错误信息里不可区分。\n\n🔴 **完整修法必须动 `selectUnique`（`extract.go`）—— `extract.go` 不在本任务 writes 内**（本任务 writes 是 profiles.go / profiles_test.go / sections.go / sections_test.go / required_test.go；`extract.go` 属 M1c-3a 的 TASK-011，dev-a 正在其上作业，动它会撞 scope）。\n\n**team-lead 已裁决：实现转由 TASK-011 承接**（与 R1/R2 同源——R3 的根因『两种失败被合并成同一个结论』和 R1/R2 是同一个文件里的同一类问题）。本任务按显式申报交付。\n\n⚠️ **本次修复的射程要说清**：我修好了今天这 11 个前缀，**但没有让这个失效方式变得可检测**——下一个新形态出现时，R3 会原样复现，且症状与「本期真的只有当月数」逐字相同。",
+   "**fix 5 的「2024-03 / 2025-03 各有一格」用替代方案覆盖，team-lead 已确认接受**（M1c-3a 的 TASK-012 返工）。\n\n原因：2024-03 快照不在 testdata，而 **testdata 不在本任务 writes 内**。替代方案是三格：① 2020-q1q3 截断 + periodType=q1_q3 ⇒ 拒（既有）② 同一份输入 + periodType=monthly ⇒ **仍拒**（新增，覆盖 fix 5：自称季度口径的月报被截断）③ 真实月报 2025-08（合计句用「前八个月」）无外汇节 ⇒ 放行（豁免仍在）。\n\n三格合起来能区分三种实现（按口径决定 / monthly 一律放行 / 一律不放行），**DoD 的意图被覆盖**。\n🔴 **team-lead 原话：「我接受。DoD 要的是『能区分本就没外汇节 vs 被截断』，你的三格做到了；而抓快照要动 testdata，同样不在你 writes 内。」**\n\n⚠️ 写在这里是因为「裁决过的替代」与「没做到」在交付物里同形。",
+   "那 4 篇端到端的完整行为 —— 见 key_findings 第 4 条，两道阻挡都不在本任务 writes 内",
+   "2024-03 的真实截断行为 —— 该快照不在 testdata 且 testdata 不在本任务 writes 内；fix 5 用 2020-q1q3 截断 + 真实月报（2025-08）两格覆盖同一性质",
+   "QA 报告里 fix_items 3 的后半、以及 fix 1/2/4/7 —— 属 TASK-011 / TASK-010 / TASK-008"
+  ]
+ }
+}

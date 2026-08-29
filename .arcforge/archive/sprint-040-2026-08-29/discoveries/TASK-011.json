@@ -1,0 +1,94 @@
+{
+  "task": "TASK-011",
+  "provenance": "全部代码与测试由 dev-m1c3a-a 编写；R1 的真实语料复现最初由 team-lead 给出，本任务在 05b50be 上独立复跑确认（数字逐字相同）。R2 的「锚点缺席但分部门模板仍命中 = 2 段」由 qa-m1c3a-1 首报，本任务独立复算确认。",
+  "measured_at": {
+    "head": "f280d3c072fd8b2b4879a102cdc36afa08345803",
+    "branch": "task/TASK-011-m1c3a",
+    "base": "05b50be (master, 含 TASK-012)",
+    "corpus": "data/hestia-backfill-2026-08-14（218 篇，.gitignore，CI 取不到）",
+    "note": "本文件里每个数字都在**最后一次改动之后**统一重采（含 code-simplifier 那次改动之后）；采样时工作树 git status --porcelain 为空 ⇒ 数字与 commit f280d3c 同源。第一批数（R1/R2）测自 e600b39，第二批（error_handling）测自 f280d3c，两者在文中分别标注。"
+  },
+  "key_findings": [
+    "【R1 逐字复现，且两条路径结论相反】真实 2023-08 社融增量正文：extractTSFFlowArticle 报「社融增量分项 对实体经济发放的人民币贷款 not found」（正确），extractTSFFlowSection err=nil 且 tsf_flow_ytd=252100（1-8月累计）/ tsf_flow_rmb_loan_ytd=13400（8月当月），错位 18.8×。体例是「累计句 → 当月句 → 一整套当月分项」，窄模板 tsfFlowTotalRE 只认得累计句，而分项在当月段里。",
+    "【R1 改法的影响面先量后改】全语料有社融增量板块的期次共 11 个：改后 10 个结论逐字相同，唯一变化的是 2026-01——**两条都失败**，新错误更具体（列出候选总量句及口径）。⇒ 没有任何一个原本成功的板块被打坏。",
+    "【R2 影响面：160 段里只有 2 段改判】80 篇金融统计 × 存款/贷款两侧 = 160 个分部门段，把判据从「锚点在不在」换成「抽取覆盖面的最靠前命中位置」后，判定变化的**恰好 2 个**：2022-04 存款侧与贷款侧，均由 nil(不表态) → ERR(非累计:4月份)。**没有一个原本放行的段被判红**（这正是 DoD 要求的「收紧判据前先跑一次它会把现有什么判红」）。",
+    "【2022-04 是唯一的真实反例，且它今天不出事纯属巧合】存款节缺「其中，住户存款」、贷款节缺「分部门看」，但两节各有一整套分部门句会被抽取命中；最近的期次前缀是「4月份」。它没炸只因这一期也没有累计合计句，在更早一道闸（人民币贷款期内合计 not found）就被拒了 ⇒ **端到端报错证明不了本守卫覆盖它**，故用例直调 checkSectorCaliber。",
+    "【🔴 M5：「起点取最靠前」这个选择原本没有守卫】把 take 的比较从 i<start 改成 i>start（取最靠后），补最小对之前**全套零条红 SURVIVED**——真实语料上两种取法碰巧同结论（2022-04 里最后一个当月前缀恰好又排在累计前缀之后）。与 TASK-009 的 D4、TASK-006 的 N2 同族：**写在注释里的设计选择本身没有守卫**。已补三格最小对，M5 转 KILLED 且只红那一格。",
+    "【🔴 M8 是预先声明「应当绿」的变异，结果符合】起点里的锚点项实测**惰性**：去掉后测试套件 SURVIVED，语料级复核 160 段判定变化 0 个。仍保留，理由只有一条——它只让前缀窗口变宽（失效方向是多报一次口径不对，而非静默放行）。已在注释里标明「别把它当成有守卫的东西」。",
+    "【我自己写错过一个测试名，靠追查消融结果发现】原先加的 TestSectorCaliberStillPassesCumulativeSectionsWithoutAnchor 用的四个样本**锚点其实都在场**（实测 true），名字是假的，而且与既有 TestSectorCaliberKeepsCumulativeSamplesIntact 重复。已删掉换成真正新的三格最小对。发现它的触发点是「M9 的实红名单里出现了这个名字，我去核它到底测了什么」。",
+    "【窄模板 tsfFlowTotalRE 自此没有生产调用方】它被 tsfFlowArticleTotalRE 完全覆盖。profiles.go 不在本任务 writes 内，删不掉；已在 extractTSFFlowSection 的注释与 extract_test.go 的模板点名处各标注一次，免得后人把那条 once(...) 当成「生产模板有守卫」的证据。",
+    "【🔴 error_handling[0]：两种成因不同的失败一度逐字同形】flowRE = periodPat + 「，?」+ 句尾模板。期次前缀不在 periodAlt 里 ⇒ **整条正则不命中** ⇒ 那句话根本没进候选集 ⇒ selectUnique 报「not found among N candidate sentence(s)」，与「本节确实没有累计句」结构完全相同，唯一差别是候选数，**而那个数不携带「为什么」**。两者后续动作相反（解析器缺口 vs 报告没数据）。R3 的原始损害正是这一条。",
+    "【🔴 全语料实测把我自己的注释证伪了：B 类还活着】我先写下「TASK-012 之后全语料已无 B 类」，随后扫 218 篇 / 160 个板块（05b50be）得：**2022-05 存款侧与贷款侧，前缀「今年前5个月」**——「今年前5个月，人民币贷款累计增加10.87万亿元」就在正文里，而 TASK-012 补的是 `1-N月` 一族、没覆盖它 ⇒ **R3 的失效方式此刻仍然活着，只是换了个前缀写法**，本诊断当场抓到。另有 2020-02 / 2020-03 两侧前缀「N月当月」，但那两期另有被认识的累计句（合口径命中=1）⇒ 诊断器根本不会被问到，是惰性命中。⚠️ 2022-05 目前还被 `onlyCurrentMonthFlowSentences` 判成「只有当月数」进了 Unsupported —— **那也是一句假话**，与 TASK-010 的分类逻辑直接相关。",
+    "【诊断器的定义域必须与被诊断动作同源 —— 实测逼出来的】首版对 2020-04 报出「当月外币贷款增加207亿美元」：机制上它确实是「前缀不认识」，但**即使前缀被认识，那一句也会被谓词的 m[2]==currencyRMB 挡掉**，与本次失败毫无关系。⇒ 报**与结论无关的真事实**和报假话一样会把人引到错的方向。收窄到人民币句后 2020-04 变纯 A 类。这与本任务 R2 是同一条教训的第二次出现。",
+    "【🔴 N6 又是消融逼出来的：`合口径 0 命中` 那道门原本没有守卫】把它放宽成 `<=1` 时**全套零条红 SURVIVED**。而那道门承重：真语料 2020-02 / 2020-03 正是「另有被认识的累计句 + 同时存在不被认识的前缀」，门一松这两期会从**抽取成功**变成报一句假话。testdata 里原本没有这个形态 ⇒ 补 C 格最小对（A/B/C 三格正文只差「有没有被认识的累计句」这一个变量），N6 转 KILLED 且只红 C。**本任务内第二次同形**（前一次是 M5「取最靠前」）。",
+    "【两条 done_criteria 转录已落盘并逐字核实】原文**从 `docs/06-acceptance/transcription-originals.md` 用正则取出**、不凭记忆抄；落盘后再从任务文件读回与存档原文做 `==` 比较，两条均 True（长度 1029 / 895）。TASK-011 进 `error_handling`（追加为第 2 条）、TASK-010 进 `functional`（追加为第 5 条）——leader 未指定 TASK-010 放哪一格，选 functional 是因为该条描述的是**活的行为**加一条措辞要求。"
+  ],
+  "decisions": [
+    {
+      "decision": "R1 选 DoD 的修法①（补作用域切分），并且实现成**两条路径共用同一段代码**，而不是给板块路径也写一份切分",
+      "rationale": "选①而不是②（声明板块路径不支持双口径并报错）：板块路径正是 v2 月报的 going-forward 格式，选②等于让 2025-10 之后的月报全部报错。实现成共用而不是各写一份：后者仍是两份实现，「同一段正文得同一结论」只能靠断言维持，而**分叉恰恰是这个缺陷的形状**；共用之后那条性质由构造保证，断言只是把它钉住。代价是 extractTSFFlowArticle 这个名字对板块入口略不贴切——改名要动 parse.go，不在本任务 writes 内，故保留并在注释说明。"
+    },
+    {
+      "decision": "R2 的起点判据取「锚点 ∪ 抽取会用到的全部模板」里最靠前的命中位置",
+      "rationale": "DoD 明写「判据必须与抽取的覆盖面同源」。名单由 depositItems / loanScopes 派生而不是另写一份——两份名单迟早分叉，而分叉的表现正是本缺陷。取**最靠前**：抽取会碰到的最早那一句，其口径由它之前的期次前缀决定；取最靠后会把中间夹着的累计前缀读成本段口径（M5 最小对钉住）。贷款侧的覆盖面比存款侧多收作用域锚点，因为 extractLoanSection 先按锚点切段再抽子项，锚点本身也是抽取会碰到的定位点。"
+    },
+    {
+      "decision": "两份 testdata 用真实快照，不用构造串",
+      "rationale": "team-lead 复现 R1 时先用自己构造的短语料**没能复现**（两条路径都报错，只是错在不同分项上）——构造语料不完整会掩盖真缺陷。2022-04 同理：它是全语料里唯一的「锚点缺席但分部门句仍在」的段，构造不出它那种「巧合安全」。快照按仓库既有约定去 CR 后落盘，字节数与 sha256 登记在 testdata/README.md 的 C1 节。"
+    },
+    {
+      "decision": "扩大 writes 到 5 项（+2 份 testdata + README），并在动手前就落盘",
+      "rationale": "越界申报必须在 transition dev_done 之前由 dev 自己落盘——任务一进 dev_done，leader 写不了该任务文件、dev 交棒进 verifying 也失去写权，那一刻没有任何角色能合法补这个字段。且 writes 同时驱动 scope 互斥与漂移判据，声明与实际不一致 = 范围外的真漂移不会告警。"
+    },
+    {
+      "decision": "checkSectorCaliber 的守卫位置不前移，沿用 TASK-009 的裁决",
+      "rationale": "2022-04 端到端仍由更早的「期内合计 not found」拒绝，那条信息指出的成因更根本（这篇报告压根没有累计数据）。本任务只让守卫**能表态**，不改谁先说话。"
+    },
+    {
+      "decision": "error_handling[0] 的实现落在 selectRMBCumulativeFlow，且**不改它的签名**",
+      "rationale": "profiles_test.go 有 5 处调用它，而那个文件不在本任务 writes 内。改签名会逼我越界。改为从 `re` 自身的 pattern 里切出句尾（`cumulativeFlowTail`），完全不需要额外入参 —— 顺带让「诊断器与被诊断模板不会分叉」成为**结构性质**而不是断言维持的性质。"
+    },
+    {
+      "decision": "诊断只在「合口径 0 命中」时才问",
+      "rationale": "「挑出了 2 条」是另一类失败（孪生句），前缀认不认识与它无关；在那里插一句诊断只会把两类失败又混回一起——而本条要做的恰恰是把它们分开。这道门承重，由 C 格最小对钉住（N6 消融证实）。"
+    },
+    {
+      "decision": "B 类用**合成**正文，不用真实的 2022-05",
+      "rationale": "真实 2022-05 一旦有人把「今年前N个月」补进 periodAlt（那是**正确的修复**），这一格就会红——**守卫会被一次正确的修复打坏**。合成前缀「今年以来」不会有人去加，钉住的是性质而非某一期语料的现状。真实的 2022-05 发现写进 key_findings 与交付报告，供 leader 决定是否开新任务。⚠️ 代价：CI 里没有语料，「诊断器在真数据上会不会响」没有测试守着，只有这份 discovery 记着。"
+    },
+    {
+      "decision": "两条错误串刻意**无交集**（`not found among` vs `期次前缀不被识别`）",
+      "rationale": "DoD 要求交叉断言（两种错误串互不出现在对方的测试里）。若用 %w 包住原错误，B 类消息里就会含 A 类的标志串，交叉断言直接不成立。故 B 类另写一条完整消息、不 wrap。"
+    },
+    {
+      "decision": "R1 修法选①并实现成「共用同一段代码」——team-lead 事后确认，理由一并记下",
+      "rationale": "team-lead 追加的理由：选②（声明不支持并报错）会让「修好一个缺陷」变成「新增一批失败」——2025-10 之后的月报全部走板块路径，把它们从「静默产出错数据」改成「全部报错」，在标定报告里表现为失败清单再涨一大批，**那不是修好，是把问题换了个位置**。配套代价由 DoD boundary[0] 的阴性对照守住（单口径体例在板块路径上仍须抽取成功），本任务已覆盖。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/extract.go（e600b39 +106/−39；f280d3c +91/−2）",
+    "internal/hestia/extract_test.go（e600b39 +265/−7；f280d3c +117/−0）",
+    "internal/hestia/testdata/README.md（+42/−0，新增 C1 一节）",
+    "internal/hestia/testdata/pboc-2023-08-tsf-flow.html（新增，24643 B，sha256 0d69c317202d917cb82d568da3819efa910473517b17f58029987f0fab503c48）",
+    "internal/hestia/testdata/pboc-2022-04-monthly.html（新增，27318 B，sha256 4bee1c75bda7cbac8ebb03eed46615a19a1a225cb3939689711dd8d350836a99）"
+  ],
+  "interfaces_exposed": [
+    "checkSectorCaliber(body, anchor, what string, coverage []*regexp.Regexp) error —— **签名变了**，多一个覆盖面参数；调用方须传 depositSectorCoverage() 或 loanSectorCoverage()",
+    "sectorSegmentStart(body, anchor string, coverage []*regexp.Regexp) int —— 被守护那段的起点，-1 表示本节没有分部门段",
+    "depositSectorCoverage() []*regexp.Regexp / loanSectorCoverage() []*regexp.Regexp —— 抽取覆盖面，从 depositItems / loanScopes 派生",
+    "extractTSFFlowSection(sec section) —— 现在是 extractTSFFlowArticle(sec.Body) 的一行委托，两条路径逐字同一段代码",
+    "⚠️ tsfFlowTotalRE（profiles.go）**自此无生产调用方**，待 profiles.go 解冻时删除，并把 tsfFlowArticleTotalRE 挪回 profiles.go（与 TASK-002 记的那笔债是同一件）",
+    "cumulativeFlowTail(re *regexp.Regexp) *regexp.Regexp —— 从 flowRE 的 pattern 里切出去掉期次前缀的句尾；切不出返回 nil（本诊断不适用）",
+    "unrecognisedPeriodPrefixes(body string, re *regexp.Regexp) []string —— 「句尾对了、只是前缀没对」的人民币合计句，返回它们实际用的前缀文本",
+    "⚠️ selectRMBCumulativeFlow 签名**未变**（profiles_test.go 的 5 处调用不受影响），但**0 命中时的错误信息可能变成另一条**——下游若在匹配错误串，注意现在有两类"
+  ],
+  "verification": {
+    "suite": "go test ./internal/hestia/ -count=1 ⇒ ok；RUN 行 1219 条（测自 f280d3c）",
+    "gofmt": "gofmt -l internal/hestia/ 空",
+    "vet": "go vet ./internal/hestia/ 空",
+    "coverage": "95.9%（go tool cover -func，测自 f280d3c，绝对值判据 ≥95.5% 达标）；cumulativeFlowTail 80.0% / unrecognisedPeriodPrefixes 88.2% / selectRMBCumulativeFlow 100.0%",
+    "ablation": "隔离 worktree 副本，10 格，逐格预先声明该红哪一格再比对：M1(换入口)/M2/M3/M4/M5/M6/M7/M9/M10 KILLED，M8 预声明 SURVIVED 且符合。⚠️ 两处预声明写得不准，如实记下：M4 我少写了一条应红的测试（行为正确，是我预判不全）；M9 的预声明用了一个我随后改掉的旧测试名。M3 的击杀面覆盖多条 golden 测试（板块路径就是生产路径，任何取值分叉都会波及），但**在它自己那条测试内**只有「取值相同」那半边能触发——红的 5 格全是两条路径都成功的用例，此时①②不可能发言。 —— 第二批（error_handling[0]，测自 f280d3c，6 格逐格预声明）：N1 去掉币种收窄 KILLED（红 A + 一条既有端到端用例）；N2 诊断器恒返回 nil KILLED（只红 B）；N3 B 的错误里混入 A 的文案 KILLED（只红 B 的交叉否定半边）；N4 A 的 0 分支文案改词 KILLED（红 A + 一条既有用例，预声明写的是「至少」）；N5 句尾改成手写一份 KILLED（只红派生性测试）；N6 把 0 命中的门放宽成 <=1 **SURVIVED** ⇒ 补 C 格最小对后转 KILLED 且只红 C。⚠️ code-simplifier 把那道门从计数循环改写成 slices.ContainsFunc 之后，我**用新表达式重跑了 N6**，仍 KILLED 且仍只红 C。",
+    "corpus_checks": "R1 影响面 11 期（10 同 / 1 仅错误文本更具体）；R2 影响面 160 段（变化 2，均为预期）；M8 语料级复核 160 段变化 0。全部测自 05b50be + 本次改动。",
+    "transcriptions": "两条 done_criteria 转录：原文用正则从 docs/06-acceptance/transcription-originals.md 取出（不凭记忆），落盘后读回与存档原文 `==` 比较均为 True。TASK-011.done_criteria.error_handling 2 条、TASK-010.done_criteria.functional 5 条（jq 直读核实）。"
+  }
+}

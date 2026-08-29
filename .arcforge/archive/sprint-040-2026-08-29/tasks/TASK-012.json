@@ -1,0 +1,62 @@
+{
+  "id": "TASK-012",
+  "title": "periodAlt 认「N-M月」+ 截断守卫 monthly 豁免 + validExtractors 逐项表态",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [],
+  "wave": 7,
+  "context_from": [
+    "TASK-001",
+    "TASK-004",
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go",
+    "./internal/hestia/sections.go",
+    "./internal/hestia/sections_test.go",
+    "./internal/hestia/required_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "description": "**来源：M1c-3a 的 QA 两轮 Code Review 第二轮，fix_items 3(前半) / 5 / 6。**\n\n⚠️ 单开任务而不打回 TASK-001/004/003，理由同 M1c-3a 的 TASK-011：这批缺陷横跨多个任务的产物，分别打回会撞 scope，且会把跨任务缺陷记成某个 dev 的返工。\n\n## 🔴 R3（HIGH）：`periodAlt` 不认「N-M月」⇒ 4 期可恢复的数据被判定为「不存在」\n\n**team-lead 独立复核（全语料 grep + 探针 + calibrate 输出三样）**：\n\n全语料 218 篇里 **8 篇**含 `(?<![0-9])[0-9]{1,2}-[0-9]{1,2}月` 形态（带词边界，避免 `11月` 子串假阳），其中 **4 篇金融统计报告**的正文是**累计合计句**：\n\n```\n2022-07   1-7月，人民币贷款累计增加14.35万亿元\n2022-08   1-8月，人民币贷款累计增加15.61万亿元\n2022-10   1-10月，人民币贷款累计增加18.7万亿元\n2022-11   1-11月，人民币贷款累计增加19.91万亿元\n```\n\n探针实测：`periodPat` 对 `1-7月` / `1-8月` 命中 **false**。\n\n**下游后果（已在交付物里逐字查到）**：`.arcforge/docs/06-acceptance/calibrate-AFTER-report.md` 里这 4 期被贴上\n\n> 「本迭代不解析：**该期报告只有当月数、正文无任何期内累计口径的合计句**，`*_ytd` 字段无源可抽（**不是解析器不支持，LLM 兜底也变不出不存在的数**）」\n\n🔴 **这是一句关于那 4 篇报告的假话，而数据就在正文里。** 配合 CONTRACTS G 的「那 23 篇**不是** M1c-4 的兜底工作量」⇒ **照办会把 4 期真实可恢复的数据永久写销。**\n\n⚠️ **CONTRACTS D 表现在写着「『1-5月』/『1-8月』这类带范围前缀，55 篇月报里一次都没出现」——那是假的**（`1-5月` 确实 0 篇，但整个形态有 8 篇）。**该表的订正属 M1c-3a 的 TASK-008，不在本任务 writes 内，别去改。**\n\n## fix 5（MEDIUM）：截断可静默降级\n\n`sections.go:356` 的截断守卫对 monthly 有豁免，而 **2024-03 / 2025-03 在外汇节处截断** ⇒ `rule@v1`(27 字段, fx=3.24) 静默降级成 `rule-monthly@v1`(25)、**err=nil、缺失=0**。\n\n⚠️ QA 原判 LOW，复核后自行上调为 **MEDIUM**：**不是记号错，是截断可静默降级，且正落在那道守卫自己豁免掉的那一类。**\n\n## fix 6（MEDIUM）：`validExtractors` 缺逐项表态\n\n加一条遍历 `validExtractors` 的「`requiredFields` 非 nil，或写明理由豁免」断言。**本包有两处现成范式**（M1c-3a 的 TASK-004 的 `TestEveryPeriodTypeHasAnExplicitSupportDecision`、TASK-008 的白名单逐项表态），照抄即可，零成本。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**。⚠️ **无新增依赖**。",
+  "done_criteria": {
+    "functional": [
+      "**R3-a**：`periodAlt` 认「N-M月」形态（`1-7月` / `1-11月` 等）。\n\n⚠️ **同时要让 flowRE 容忍「贷款」与「增加」之间的「累计」二字**——真实句是「人民币贷款**累计**增加14.35万亿元」，只改 `periodAlt` 不够。**两处都改完才能真正抽出来**，请分别断言。",
+      "**R3-b**：`cumulativePeriods` 对新形态返回 true（它是累计口径）。\n\n⚠️ 该表与 `cumulativeMonthAlt` 是**一一对应**关系（`profiles.go:134` 的注释：少一个键 ⇒ 那句被当成单月句筛掉；多一个键 ⇒ 正则认不出、永远查不到）。**新增形态时两边都要动，并断言这个对应关系仍成立。**",
+      "**fix 5**：截断守卫的 monthly 豁免要能区分「**本就没有外汇节**」与「**被截断**」。2024-03 / 2025-03 必须各有一格。",
+      "**fix 6**：遍历 `validExtractors` 的逐项表态断言——新增第八个 extractor 而不登记 `requiredFields` 时**必须红**，豁免必须写理由。"
+    ],
+    "boundary": [
+      "🔴 **R3 的收益与代价必须在同一张表上并排量**：打印全部 55 篇月报在**改动后**的命中数分布（每篇命中 0 / 1 / ≥2 条累计合计句）。\n\n⚠️ **`≥2` 那一列就是会被打坏的**——本 sprint 有过一次：DoD 正确指出「只认『累计为』会让 25 篇零命中」，而隐含的修法「放宽成 `(?:累计)?`」会让**另外 25 篇**同时命中两句而报错，**原本成功的被打坏**。收益与代价在同一张表里，只是没并排算过。\n\n⇒ **放宽模式前量的是改动后的命中数分布，不是改动前的零命中数。**",
+      "**那 4 篇（2022-07/08/10/11）改动后必须能抽出 `*_ytd`**，且值与正文逐字对得上（`14.35万亿` / `15.61万亿` / `18.7万亿` / `19.91万亿`）。\n\n⚠️ 断言**取值**而不只是「不报错了」——「不报错」与「抽对了」是两个性质。",
+      "**阴性对照**：`1月份`（1 月的累计=当月，已在 `cumulativePeriods` 里）与 `7月份`（当月，不在表里）的判定**不得因本次放宽而改变**。\n\n⚠️ M1c-3a 的 TASK-001 已用**零特判**的方式处理 1 月（`\"1月份\": true` 就在那张通用表里，代码里针对 1 月的 if/case 分支 **0 处**）。**不要为了新形态加特判分支**，那会把一个正常工作的零特判实现改坏。"
+    ],
+    "error_handling": [
+      "新形态**认不出来时**的错误信息要能区分「这个期次前缀我不认识」与「这一节没有累计句」——两者的后续动作完全不同（前者是解析器缺口、后者是报告本身没数据）。\n\n⚠️ 这正是 R3 的根因：两种情况被合并成同一个结论「只有当月数」，而其中一种是假的。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率**绝对值**不低于 **95.5%**（`go tool cover -func` 口径，**判绝对值不判相对下降**）。报数时把测量时的 HEAD 全 sha 与数字同行写进 discovery。",
+      "🔴 **消融：每条断言的每个半边都要有独家杀手**，逐个预先声明该只红哪一格再比对，并**看失败行号**。⚠️ 只写「必须转红」，不要预写「若仍绿则说明…」的解释。\n\n⚠️ 特别针对 R3：**「periodAlt 认得它」与「真的抽出来了」是两个性质**，请确认有断言分别对它们敏感——本 sprint 实测过「加了一个区分维度但没有断言对那个维度敏感」（关掉新守卫再跑，退出码 0、零条红）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-b",
+  "discovery": ".arcforge/discoveries/TASK-012.json",
+  "verify_baseline": {
+    "head": "05b50be0bcf788fcf9792fb54b0158aad12dbe77",
+    "discovery_sha256": "400ff26ab3422d9c4b33e7d2f815fbd2969bb04c1516ca37cf42c6bd0e3084b7",
+    "at": "2026-08-28T08:09:31Z"
+  },
+  "verifier": "test-m1c3a-v1",
+  "reason_class": "task_defect",
+  "reject_reason": "error_handling[0] 未覆盖——未实现、未映射、未申报。DoD 原文要求「新形态认不出来时的错误信息要能区分『这个期次前缀我不认识』与『这一节没有累计句』」并自标「这正是 R3 的根因」。实测：本次 diff 新增 fmt.Errorf/errors.New = 0 处；新增非测试函数只有 declaresQuarterOrLonger/quarterOrLongerPeriods/quarterClaimNote，三个都属 fix5；selectUnique(extract.go:244) 未被改动。dev 自己的 done_criteria→test 映射块只列了 functional[0]/[1]/[3] 与 boundary[1]/[2]，无 error_handling[0]；sections_test.go:580 那条映射是既有的（f74dc49 树里就有，测的是缺核心板块 vs 缺外汇节另一对错误）；not_verified_by_me 申报三项不含此条；无 questions。我在 pre 树复现了根因：2022-10 贷款侧报 'not found among 2 candidate sentence(s) [10月份/人民币 10月份/外币]'，与「本期真的只有当月数」逐字同形——1-10月 那句因前缀不被认识根本没进候选。⇒ 修 11 个前缀解决了今天这一例，未让失效方式可检测，下一个新形态会原样复现 R3。完整修法需动 extract.go（不在 writes 内），故不要求直接改：建议提 question 走裁决（TASK-005 先例），或显式申报进 not_verified_by_me——要的是一次显式决定，不是大返工。其余 9 条全部 PASS 且证据强：真实语料端到端确认四期恢复且取值正确（1-7月/14.35、1-8月/15.61、1-10月/18.7、1-11月/19.91 万亿元）；改动后命中数分布 贷款 19/61/0、存款 23/57/0（≥2 两侧皆 0，无一篇被打坏）；A1/A2 单边变异各自只红一半，陷阱确被破；四句 range 样本我自取语料比对 4/4 逐字命中；存款侧裁决成立（四篇整篇累计存款句数均为 0）；改名后 TASK-001 的两条守卫（21 项穷举 + periodAlt 等值断言）逐字仍在；覆盖率 1761/1840=95.7065%。详见 .arcforge/docs/04-test/TASK-012-verification.md"
+}

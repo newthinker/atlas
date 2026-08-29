@@ -1,0 +1,58 @@
+{
+  "id": "TASK-006",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "extractFields 按 extractor 决定板块适用性",
+  "description": "**AD-3**。TASK-003 定义了月报族 extractor，本任务让 `extractFields` 真的按它们工作。\n\n## 现状只有一个维度\n\n```go\nfor _, rule := range sectionRules {\n    if rule.v2Only && extractor != extractorV2 { continue }\n    sec, ok := findSection(secs, rule.keyword)\n    if !ok { return nil, fmt.Errorf(\"...requires a section whose title contains %q...\") }\n    ...\n}\n```\n\n月报族需要第二个维度：**外汇节在 `rule-monthly@*` 下不适用**（53/55 篇月报正文里\n根本没有「国家外汇储备余额」字样，Leader 实测）。不处理的话 `findSection` 返回\n`!ok`，直接 `return err`——月报全军覆没。\n\n## 做法：收敛成一个函数，别在循环里堆 if\n\n「板块是否适用于该 extractor」应当有**一处**定义。两个维度（v2Only、fxOnly）\n现在堆两个 if 还能读，第三个维度出现时就不能了。\n\n🔴 **板块归属必须与 `requiredFields` 同源**，否则会出现「跳过了却仍在必填集里」\n或反之——两者分叉时先错的一定是手抄的那份。这条由 DoD 的双向相等断言机械守住。\n\n⚠️ 判据是**声明式跳过**，不是「碰巧 `findSection` 找不到就放过」。\n`extractFields` 现有注释写得很清楚：「显式跳过比『碰巧匹配不到』更清楚：前者是声明，\n后者是巧合，而巧合会在某期正文里偶然出现社融字样时失效」。同一条理由适用于外汇节。\n\n## 适用规则\n\n| 板块 | 适用的 extractor |\n|---|---|\n| 社融存量 / 社融增量（`v2Only`） | `rule@v2`、`rule-monthly@v2` |\n| 国家外汇储备 | `rule@v1`、`rule@v2`（**月报族不适用**） |\n| 广义货币 / 人民币存款 / 人民币贷款 / 加权平均利率 | 全部四种走板块路径的 extractor |\n\n⚠️ `tsf-stock@v1` / `tsf-flow@v1` **不走板块路径**（它们整篇当一节，由\n`extractTSFStockArticle` / `extractTSFFlowArticle` 处理，TASK-002 已交付）。\n`extractFields` 遇到这两个值应当**报错**而不是返回空——它们走错路了。\n\n---\n\n## 🔴 顺手订正一处**错误的实测声明**（test-m1c3a-v2 在 TASK-004 验证中证伪，Leader 复核确认）\n\n`sections.go:309-312` 现在写着：\n\n```go\n// 这道守卫是**旧判据顺带提供、新判据会弄丢的**，故显式补回（M1c-3a 的 TASK-004）：\n// 旧判据靠 len(secs)==8 && !hasTSF 落进 default 报错；……\n```\n\n**这句话对 8 节成立、对 6 节不成立。** 验证者在 `20c05ea` 的隔离副本上直接调旧 `detectExtractor`：\n\n| 输入 | 旧判据结果 |\n|---|---|\n| **6 节**：增量 + 核心四 + 外汇（无存量） | **判成 `rule@v1`** ← 保护缺失 |\n| 7 节：同形态 + 一个无关节 | 报错（受保护） |\n| 8 节：同形态 + 两个无关节 | 报错（受保护） |\n\n旧判据是 `!hasTSF && len(secs)==6 → rule@v1`（Leader 已在 `20c05ea` 上复核原文）\n⇒ **保护是节数依赖的**，6 节形态上有洞。\n\n🔴 **最说明问题的一点**：dev 为这道守卫写的那条用例，输入**正好是 6 节** ⇒\n**那条用例守的性质在旧代码里根本不成立**。\n\n### 订正成什么\n\n那道守卫**不是**「补回旧判据顺带提供的保护」，而是**新增一道旧代码从未完整提供的保护**\n——旧保护在 6 节形态上有洞，新守卫把那个洞也堵上了。**它的正确性比原注释陈述的更强。**\n\n⚠️ **只改注释，不动那道守卫的代码**（验证者已判定守卫本身 KILLED 精确命中、从 `v2Only` 双向派生、\n六种组合全报错）。`sections.go` 已为此加进你的 `writes`。\n\n⚠️ **别只删掉那句错话**——把订正后的事实留在原地（「旧判据只在 `len != 6` 时挡得住，\n本守卫覆盖了包括 6 节在内的全部形态」），否则后人会再提一次同样的描述。\n这与本 Sprint 记过的「否定结论不留痕，下一个人会原样再提一次」是同一条。",
+  "wave": 3,
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/extract.go",
+    "./internal/hestia/extract_test.go",
+    "./internal/hestia/sections.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "把「板块是否适用于该 extractor」收敛成**一个**函数（或 `sectionRule` 上的一个声明式字段），`extractFields` 调用它。**不在循环体里堆并列 if。**",
+      "适用规则按 description 的表实现：社融两节仅 `rule@v2`/`rule-monthly@v2`；外汇节仅 `rule@v1`/`rule@v2`；核心四节全部适用。",
+      "`extractFields` 的 `unknown extractor` 保护相应更新：接受 4 种走板块路径的值（`rule@v1`/`rule@v2`/`rule-monthly@v1`/`rule-monthly@v2`），**拒绝** `tsf-stock@v1`/`tsf-flow@v1`（它们不走板块路径）与未知值。错误信息由白名单拼出，不另抄一份。"
+    ],
+    "boundary": [
+      "🔴 **板块归属与 `requiredFields` 双向相等**：对四种走板块路径的 extractor 各断言一次\n\n```\n{适用板块产出的字段集} == {requiredFields(该 extractor)}\n```\n\n**双向**（互相包含），不是只断数量相等。这是防「跳过了却仍在必填集里」的唯一机械保证。\n\n⚠️ 该断言对 `tsf-stock@v1`/`tsf-flow@v1` 不适用（不走板块路径），**要显式排除并在注释里写明理由**——沉默地不测和「想过并决定不测」在代码里长得一样。",
+      "🔴 **`rule-monthly@v1` 下外汇节是声明式跳过，不是碰巧找不到**。\n\n验收用例：喂一份**含外汇节**的 `[]section` + `rule-monthly@v1` ⇒ 结果里**不应**出现 `fx_reserve` / `fx_rate`。\n\n⚠️ 这一格是本任务最容易写成假绿的地方：若你只用「月报快照（本就没有外汇节）」测，那么「声明式跳过」与「碰巧找不到」**两种实现都会绿**，断言零信息量。**必须用含外汇节的输入。**",
+      "`rule-monthly@v2` 下社融两节**适用**（7 节月报含它们），外汇节仍跳过。这一格证明两个维度是独立的、不是耦合成一个开关。"
+    ],
+    "error_handling": [
+      "适用的板块缺失时仍报错（既有行为不变）：`rule-monthly@v1` 缺「人民币贷款」节 ⇒ 报错。\n\n把它与「外汇节缺失但被跳过」放成一对用例——前者报错、后者放行，**两格都要有**，否则「跳过」可能被写成「所有缺失都放行」。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-006`，不要只写 `TASK-006` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。\n\n---\n\n🟡 **顺手补两行否定式断言**（test-m1c3a-v1 在 TASK-002 验证中用变异 N5 发现，**非阻断、非本任务引入**）：\n\n`extract_test.go` 的 `TestTSFStockArticleTakesBalanceNotStructureShare` 里，否定式断言集合覆盖 **6/8 分项 + 总量**，缺 `RMBLoan`(结构段占比 61.2) 与 `Trust`(结构段占比 1)。\n\n📋 **处方证据等级：已实跑**（test-m1c3a-v1 在 TASK-002 验证中亲跑，非推断）。\n\n验证者的 N5（强制 `信托贷款=1`）下该测试**保持绿**，只有 golden 测试红 ⇒ **性质仍被覆盖，但不是被 DoD 指定的那条测试覆盖**。\n\n补两行即可（照现有 6 条的写法）。⚠️ 该测试文件在你的 `writes` 内，是顺手能做的；**若你判断不该做，在 discovery 里写明理由即可，不强制。**"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-b",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "b4d0c9df250ed15104e0fcb3d0b3b3a8ffedb7ee",
+    "discovery_sha256": "a76165c89dea5ab4b497342cd94ea90eae07fdabb92d3cb2a1d086aff6e8c3d4",
+    "at": "2026-08-26T06:17:38Z"
+  },
+  "verifier": "test-m1c3a-v2"
+}

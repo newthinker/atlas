@@ -1,0 +1,84 @@
+{
+ "task": "TASK-006",
+ "title": "M1c-3a 的 TASK-006：extractFields 按 extractor 决定板块适用性（AD-3）",
+ "provenance": "全部代码与测试由 dev-m1c3a-b 编写，基于 master 33f3ed7cb4afabec0c1dae5d1ca2416d9421955f。交付 commit b04c40ce439481d46fc92db8cd76c3f5f55c8851。上游 TASK-003 的四个 extractor 常量由 dev-m1c3a-c 定义，本任务只消费不修改。",
+ "key_findings": [
+  "【scope 约束决定了实现形状，不是我的偏好】`sectionRule` 的 `v2Only` 字段**不能重命名**：`sections_test.go:623-624` 按字段名构造 `sectionRule{keyword:..., v2Only:...}`，而**该文件不在本任务的 writes 里**。故第二个维度只能**新增字段**（`noMonthly`）而不能把两个维度重构成一个 `appliesTo []string` 声明。DoD functional[0] 给的两个选项（一个函数 / 一个声明式字段）里，只有前者在 scope 内可行。",
+  "【两个轴是正交的，四个 extractor 正好是它们的四组合】`isV2Layout`（v1/v2 版式）× `isMonthlyFamily`（累计期/月报族）。社融两节 v2Only、外汇节 noMonthly，于是 rule@v1=27、rule@v2=54、rule-monthly@v1=25、rule-monthly@v2=52，与 TASK-003 discovery 里那四个数逐一吻合。boundary[2] 要求的『两个维度独立』由 rule-monthly@v2 那一格证明：社融两节保留、外汇节仍跳过。",
+  "【穷举比较而不是字符串形状】`isV2Layout` 写成 `e==extractorV2 || e==extractorMonthlyV2`，不写 `strings.HasSuffix(e, \"@v2\")`。形状与语义**当前**恰好一致，但那是命名的巧合，常量表才是事实——与 required.go 头部『不用 strings.HasPrefix(f, \"tsf_\") 代替』同一条理由。",
+  "【🔴 想过并决定不做：不拿 noMonthly 去派生 coreSectionKeywords】`sections.go:155` 现在写 `if r.v2Only || r.keyword == fxSectionKeyword`，看起来正好可以换成 `r.v2Only || r.noMonthly`，而且 `sections.go` 在我的 writes 里。**刻意不改**：『月报族没有本节』与『本节不算核心板块』是两个不同的概念，一个板块完全可能月报没有却仍属核心。合并成一个标记后，将来给第二个板块打 noMonthly 会让 coreSectionKeywords **静默变松**（少要求一个核心板块），而变松不会有任何东西转红。理由已写进 noMonthly 的字段注释，免得后人再提一次。",
+  "【两种拒绝分开报，且由白名单派生】extractFields 收到非板块路径的 extractor 时，『合法但走错路』（tsf-stock@v1 / tsf-flow@v1 / llm-fallback@v1）与『值本身认不出』（rule@v3 / 空串）**排障方向完全不同**：前者该去查路由，后者该去查取值域。合并成一条会把两边都指错方向。前者由 `validExtractors − sectionPathExtractors` **派生**而不是另列一份，所以 llm-fallback@v1 自动归位、将来新增也自动归位。",
+  "【🔴 断言顺序与 assert/require 的选择是为消融归因服务的】boundary[0] 那组测试里逐字面量锚放在**最前**、全组一律用 `assert` 不用 `require`。理由是 `require` 失败会中止子测试，它后面的断言对任何触发它的消融**不可见**——那样消融只得到『红了』，得不到『红在哪一条』。这条在本任务实测中直接生效：M5/M6 因为红在 `require.Error` 上被判 VOID，逼出了 M5b/M5c/M6b 三个『保留报错、只破坏错误信息』的变异。",
+  "【集合恒等式抓不到划反，所以配了逐字面量锚】DoD boundary[0] 的双向相等（ElementsMatch）若单独存在，抓不到『字段被划到另一侧』——TASK-003 实测过三个社融总量字段划反后集合恒等式全绿。故每个 extractor 各配 wantPresent / wantAbsent 两列逐字面量锚。M1–M4 四个消融的**带子测试名归因**证明这些锚确实在分别守着四个格子。"
+ ],
+ "decisions": [
+  {
+   "decision": "保留 v2Only 字段名，新增 noMonthly 布尔，适用性收敛成 sectionRule.appliesTo",
+   "rationale": "sections_test.go 不在 writes 里且按字段名构造 sectionRule ⇒ 重命名会让它编译失败而我无权修。新增字段对它是兼容的（零值 false）。"
+  },
+  {
+   "decision": "不把 noMonthly 用于派生 coreSectionKeywords",
+   "rationale": "两个概念不同（见 key_findings 第 4 条）。合并后的失效方式是判据**变松**且无任何东西转红。"
+  },
+  {
+   "decision": "boundary[0] 的左侧用**真跑 extractFields 的实际产出**，不用 fieldOrder 减去被跳过板块的字段",
+   "rationale": "后者与 requiredFields 共用同一套减法，断言会退化成恒真——『守卫的基准与被守护属性同源』。用同一份输入（8 节 v2 年报，含全部 7 个板块）喂四种 extractor，左侧来自抽取侧的真实行为、右侧来自 completeness 侧的清单，两侧独立。"
+  },
+  {
+   "decision": "用含外汇节的真实样本，并加前置断言 sectionPathSample 确认 7 个板块都在",
+   "rationale": "DoD boundary[1] 点名的假绿：若样本本就缺外汇节，『声明式跳过』与『碰巧 findSection 找不到』两种实现都会绿，整组断言零信息量。前置断言让这个前提可证伪。"
+  },
+  {
+   "decision": "extractFields 的两种拒绝分开报，且『合法但走错路』由白名单差集派生",
+   "rationale": "排障方向不同（见 key_findings 第 5 条）；派生而非另列，避免新增 extractor 时静默过期。"
+  },
+  {
+   "decision": "sections.go 只改注释，守卫代码一行未动",
+   "rationale": "DoD 明确要求，且验证者已判定该守卫本身 KILLED 精确命中、从 v2Only 双向派生、六种组合全报错。订正**留在原地**而不是删掉错话——否则后人会再提一次同样的描述。"
+  }
+ ],
+ "files_modified": [
+  "internal/hestia/extract.go (+97/-15)",
+  "internal/hestia/extract_test.go (+250/-1)",
+  "internal/hestia/sections.go (+22/-4，**只改注释**)"
+ ],
+ "scope_note": "实际改动**恰好等于**声明的 3 个 writes，无越界。go.mod / go.sum 不在改动里。numstat 取自提交本身 git show --numstat b04c40c，与交付物同源。",
+ "interfaces_exposed": [
+  "func (r sectionRule) appliesTo(extractor string) bool —— 『本板块在该 extractor 下适不适用』的**唯一**定义。新增板块或新增维度都改这里，不要在调用方堆 if。",
+  "var sectionPathExtractors []string —— 走『切板块 → 逐节抽取』这条路的四个 extractor。TASK-007 分派时可用它判断该走板块路径还是整篇路径。",
+  "func isV2Layout(extractor string) bool / func isMonthlyFamily(extractor string) bool —— 两个正交轴，包内可复用。",
+  "sectionRule 新增字段 noMonthly bool —— 目前只有外汇节为 true。⚠️ **不要**拿它派生 coreSectionKeywords，理由见字段注释。",
+  "extractFields 现在接受 4 种 extractor 并拒绝其余；tsf-stock@v1 / tsf-flow@v1 走 TASK-002 交付的 extractTSFStockArticle / extractTSFFlowArticle。"
+ ],
+ "verification": {
+  "sampled_at_head": "b04c40ce439481d46fc92db8cd76c3f5f55c8851",
+  "sampling_note": "每个数字都采于**最后一次改动之后**、同一批次统一重采。覆盖率走背对背 × 同等负载：两棵树在同一批次里交替各跑 2 轮，两轮逐字一致 ⇒ 无漂移。harness 锚点可覆写（ABLATE_REF/ABLATE_MAIN/RESAMPLE_MINE/RESAMPLE_BASE），实际锚点打进输出。",
+  "suite": "1059 条 RUN = 516 顶层 + 531 一级子测试 + 12 二级子测试；FAIL 0（自洽校验 516+531+12=1059）",
+  "coverage": "95.6400% (1711/1789)，采于 b04c40c",
+  "coverage_backtoback_baseline": "95.6204% (1703/1781)，采于 master 33f3ed7cb4afabec0c1dae5d1ca2416d9421955f，与上一行同批次交替测得",
+  "coverage_delta": "+0.0196pp（语句 +8、覆盖 +8 ⇒ **新增语句 100% 被覆盖**）。go tool cover -func 口径两者都是 95.6% ⇒ DoD『不低于 95.5%』达标",
+  "gofmt": "gofmt -l internal/hestia/ 空",
+  "vet": "go vet ./internal/hestia/ 空",
+  "no_new_deps": "go.mod / go.sum 不在改动里（numstat 只有 3 个文件）",
+  "ablation": {
+   "纪律": "每个变异体一个临时 git worktree（隔离副本），主工作区一个字节不碰；每窗口内 + 收尾校验三个文件的 sha256 与 git status --porcelain —— 全程未变。有效性闸四道：模式命中 / 内容确实变了 / gofmt -e 语法合法 / 逐字打印 diff。**归因用行号不用红绿**：锚定单跑 + -v，打印每条 FAIL 的行号并标出 assert 还是 require；同时核 RUN 行数（-run 拼错时 0 条 RUN 也是 rc=0）。锚定单跑同样在隔离树里做。",
+   "M1 appliesTo 去掉 noMonthly 维度": "KILLED —— 红在 rule-monthly@v1 + rule-monthly@v2 两个子测试",
+   "M2 appliesTo 去掉 v2Only 维度": "KILLED —— 红在 rule@v1 + rule-monthly@v1",
+   "M3 isV2Layout 漏掉 rule-monthly@v2": "KILLED —— 只红在 rule-monthly@v2（wantPresent tsf_*）",
+   "M4 isMonthlyFamily 漏掉 rule-monthly@v1": "KILLED —— 只红在 rule-monthly@v1",
+   "M1-M4 的二次归因": "🔴 第一轮 harness 把行号去重，四格红在同样三行、分不出子测试。补跑一次**带子测试名**的归因：四格红的子测试集合**互不相同**且与事先声称的**逐一相符**（M1={monthly@v1,monthly@v2}、M2={rule@v1,monthly@v1}、M3={monthly@v2}、M4={monthly@v1}）⇒ 四个格子是各自独立被守住的，不是同一条断言在响。",
+   "M5 去掉 extractor 白名单校验": "🔴 **VOID**：只红在 require.Error 上 ⇒ 它后面的错误信息断言一条都没执行。只证明了『必须报错』这一半。",
+   "M6 板块缺失一律放行": "🔴 **VOID**：同上，只红在两条 require.Error 上。",
+   "M5b default 分支错误信息丢掉白名单（保留报错）": "KILLED —— 红在 assert.Containsf(白名单)，钻到了 require 后面",
+   "M5c valid-but-wrong-path 分支错误信息丢掉白名单（保留报错）": "KILLED —— 同上",
+   "M6b 板块缺失错误信息丢掉板块名（保留报错）": "KILLED —— 红在 assert.Contains(\"人民币贷款\") 与 assert.Contains(fxSectionKeyword) 两条",
+   "M7 强制信托贷款取结构段占比 1": "KILLED —— 红在新补的 FieldTSFStockTrust 否定式断言。这一格证明 DoD non_functional 那条 🟡 处方（补 RMBLoan/Trust 两行）落地后确实是活的：test-m1c3a-v1 报告补之前同样的变异下该测试保持绿。"
+  },
+  "not_verified_by_me": [
+   "月报族的端到端行为 —— detectExtractor 返回 rule-monthly@* 是 TASK-004、Parse 分派是 TASK-007，本任务只让 extractFields 接受它们。我用的是 8 节 v2 年报**换 extractor** 喂进去，不是真实月报快照。",
+   "真实月报快照上 extractFields 能否抽满 25/52 个字段 —— 需要月报 testdata，不在本任务 writes 里。",
+   "sections.go 那道守卫的代码本身 —— 我只改注释，其正确性由 test-m1c3a-v2 在 TASK-004 验证中判定。"
+  ],
+  "coverage_on_merged_master": "🔴 **给验证者：你在 master 上量会得到 95.7007% (1714/1791)，与我上面报的 95.6400% (1711/1789) 不同，两个都是对的。** 差异全部来自**分母属于整棵树**：我的分支基于 master 33f3ed7，而 TASK-005 在 14:06:08 merge 进来（+2 条语句），我的 TASK-006 在 14:15:15 merge（合并 commit b4d0c9df250ed15104e0fcb3d0b3b3a8ffedb7ee）。1789 + 2 = 1791 正好对上。两个值都 ≥ DoD 要求的 95.5%。\n\n复测于 b4d0c9d（merge 后立即，gofmt -l 空、go vet 空、整包 go test 全绿）。写这一条是因为：验证者会用 master 这个锚，而一个『看起来像我报错了』的差异最省事的解释是『dev 报错了』——所以把第三个值和它的成因一起写在这里，而不是等人来问。"
+ }
+}

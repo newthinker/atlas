@@ -1,0 +1,69 @@
+{
+  "id": "TASK-002",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "社融存量/增量独立报告的整篇抽取包装",
+  "description": "需求文档 T2 的前半（抽取部分）。**138 篇语料**（69 存量 + 69 增量）的入口。\n\n## 整篇当一节即可复用，不需要新模板\n\n`section` 只有 `Title` / `Body` 两个字段，而 `extractTSFStockSection` **只读 `Body`**\n——它本就不知道自己是被板块切分喂的还是被整篇喂的。Leader 已读代码确认。\n\n⇒ 两个包装函数各一行：`return extractTSFStockSection(section{Body: text})`。\n\n## 本任务的边界\n\n只做**抽取包装 + 测试 + 快照**。`Parse` 怎么分派到它们是 TASK-007，\nextractor 取值域与必填集是 TASK-003。本任务的两个函数在 TASK-007 之前\n**没有生产调用方**，这是刻意的分层。\n\n## 抓快照\n\n```bash\ncd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas\npython3 - <<'EOF'\nimport json, shutil, os\nD = 'data/hestia-backfill-2026-08-14'\nm = json.load(open(D + '/manifest.json'))\nfor title, dst in [('2025年8月社会融资规模存量统计数据报告', 'pboc-2025-08-tsf-stock.html'),\n                   ('2025年8月社会融资规模增量统计数据报告', 'pboc-2025-08-tsf-flow.html')]:\n    a = next(x for x in m['articles'] if x['title'] == title)\n    shutil.copy(os.path.join(D, a['file']), os.path.join('internal/hestia/testdata', dst))\n    print(dst, '<-', a['file'])\nEOF\n```\n\n## 先探一次再写实现\n\n`extractTSFStockSection` 第一步跑 `tsfStockTotalRE`，而独立报告的总量句带\n「初步统计，」前缀、月份是「8月末」——未必与 v2 板块同形。\n\n| 探针结果 | 处置 |\n|---|---|\n| 18 个字段全中 | 直接实现，`tsfStockTotalRE` 不用动 |\n| 分项全中、总量失败 | **只放宽 `tsfStockTotalRE`**，不动分项模板 |\n| 分项也失败 | 停下来逐项对照原文，**别整体重写模板** |\n\n⚠️ 探针是探针不是测试，跑完就删（`zz_` 前缀 + `rm`），别留在仓库里。\n⚠️ **探针要在隔离 worktree 里跑**，别在主工作区留 `zz_*.go`。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/extract.go",
+    "./internal/hestia/extract_test.go",
+    "./internal/hestia/testdata/pboc-2025-08-tsf-stock.html",
+    "./internal/hestia/testdata/pboc-2025-08-tsf-flow.html"
+  ],
+  "done_criteria": {
+    "functional": [
+      "抓两份快照进 `testdata/`（脚本见 description）。把 manifest 里的原 `file` 名记进 discovery，便于复现。",
+      "`extractTSFStockArticle(text string) (map[string]float64, error)` 与 `extractTSFFlowArticle(text string) (map[string]float64, error)`：整篇当一节，复用既有 section 抽取函数。\n\n**不新增模板**——若探针显示必须放宽某条正则，只放宽那一条，并在注释里写明放宽的是什么、为什么。",
+      "存量抽出 **18** 个字段（总量 2 + 8 分项 × (余额 + 同比)），增量抽出 **9** 个字段（总量 1 + 8 分项）。\n\n**逐字段数值断言，不只断条数**：只断 `Len(got, 18)` 的话，一个把所有值都填成同一个数的实现照样绿。至少覆盖总量、同比、一个「万亿元」分项、一个「亿元」分项。"
+    ],
+    "boundary": [
+      "🔴 **钉住「不会抽到『从结构看』那段的占比值」**。\n\n报告里分项名完全相同但值是占比：\n```\n（总量段）委托贷款余额为11.15万亿元，同比下降0.6%\n（结构段）委托贷款余额占比2.6%，同比低0.2个百分点\n```\n抽错得到 2.6——量级差 4 倍，**而 2.6 是个完全合法的数**，`magnitude_sanity` 现在是空表（`skipped{not_calibrated}`），拦不住它。\n\n⚠️ **这条不是在修 bug**：现有正则**已经**挡住了（`tsfStockRE` 要求 `数值+单位`，占比句是 `占比2.6%`；`tsfStockTotalRE` 要求「存量**为**」而结构段是「存量**的**」）。是**钉住一个已经正确的性质**——与 `tsfStockTotalRE` 注释里那条「不能放松成 `加权.*利率为`」同构。\n\n**验收要给出能证伪它的消融**：把 `tsfStockRE` 的单位要求去掉，该断言必须转红。若去掉后仍绿，说明这条断言测的不是它自称的那个性质。",
+      "增量句的方向词比存量丰富（增加 / 减少 / **净融资** / 融资），且**同一句里万亿元与亿元混用**（「政府债券净融资10.27万亿元」与「委托贷款减少855亿元」）。两类都要有用例。\n\n**负值要断言**：`委托贷款减少855亿元` → **-855**（不是 855）。方向词丢失是静默的——绝对值对、符号错。",
+      "🔴 **增量总量句是四类不是两类**（dev-m1c3a-b 全量实跑，Leader 已独立复验，数字完全一致）：\n\n| 类 | 篇数 | 形态 | 本任务期望 |\n|---|---|---|---|\n| 1 | 19 | 仅 `增量累计为` | ✅ 抽到累计值 |\n| 2 | **6** | 仅 `增量为`，**1 月报**（当月即累计） | ✅ **接上** |\n| 3 | **19** | 仅 `增量为`，非 1 月（当月值，报告不含累计数据） | 🔴 **响亮报错** |\n| 4 | 25 | 两者都有 | ✅ 抽到累计值 |\n\n⚠️ **不要天真放宽成 `社会融资规模增量(?:累计)?为`**：第 4 类那 25 篇会从「成功」变成 `matched 2 sentences` 报错。这条是 dev 实跑发现的，原 DoD 的二分描述是错的。\n\n⚠️ 第 3 类报错的理由：`tsf_flow_ytd` 与 `deposit_flow_ytd`/`loan_flow_ytd` 同族，下游 calibrate 会跨期比；把当月值填进名为 `_ytd` 的字段与人类对月报分部门口径的裁决（「只接安全的，其余响亮失败」）冲突。\n\n🔴 **另修一处现状就存在的静默口径混装**（不是本任务引入，但本任务是它进入生产路径的入口）：\n\n2022 年 7/8/10/11 四篇增量报告是「当月句在前、累计句在末尾」。以 2022-10 为例，现有 `extractTSFFlowSection` 对它 **`err=nil`**：\n```\ntsf_flow_ytd          = 287000   ← 文末「1-10月，…增量累计为28.7万亿元」\ntsf_flow_rmb_loan_ytd = 4431     ← 开头「10月…人民币贷款增加4431亿元」= 当月\n```\n**总量累计、分项当月，量级差约 30 倍，`err=nil`，没有任何闸门拦得住。**\n（Leader 复验：分项句在偏移 2326，总量句在 2545。）\n\n修法：给增量抽取加**作用域切分**，与 `extractLoanSection` 的 `loanScopeSpans` 同构——分项只在被选中的那条总量句之后、下一条总量句之前的文本里抽。这 4 篇随即转为响亮报错。\n\n**消融**：去掉作用域切分后，2022-10 必须**重新产出 `tsf_flow_ytd=287000` 与 `tsf_flow_rmb_loan_ytd=4431` 这一对具体的值**——判据是看到那两个值，不是「测试红了」。\n\n⚠️ **「余额为 <空格>」与「同比持平」两条已移交 M1c-3a 的 TASK-005**（模板在 `profiles.go`，不在你的 writes 里）。本任务**不实现、不测试**这两条；实跑中因它们失败的 5 篇存量报告**不算本任务的缺口**，在 discovery 里写明移交去向即可。"
+    ],
+    "error_handling": [
+      "缺任一分项**一律报错，不静默补零**（`mustMatch` 的既有纪律，本任务不放宽）。错误信息里含**缺失的分项名**，不是一句笼统的「抽取失败」。\n\n验收：把某个分项名在文本里改掉一个字（如 `委托贷款余额为` → `委托贷款余额约为`），必须 `Error()` 且错误信息含「委托贷款」。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-002`，不要只写 `TASK-002` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-b",
+  "questions": [
+    {
+      "q": "TASK-002 boundary[2] 把增量总量句写成两种形态（累计为/为）。我对 69 篇增量报告全量实跑，实测是**四类**，且天真放宽 `社会融资规模增量(?:累计)?为` 会让 25 篇由『成功』变成『matched 2 sentences』报错。四类：(1) 仅累计句 19 篇；(2) 仅『为』句且为 1 月报 6 篇（当月即累计，安全）；(3) 仅『为』句且非 1 月 19 篇（如 2020年10月『2020年10月社会融资规模增量为1.42万亿元』——这是**当月**值，该报告根本不含累计数据）；(4) 两者都有 25 篇。19+6+19+25=69。问题：第 (3) 类 19 篇怎么处置？选项 A=报错（保持 mustMatch 纪律，不把当月值填进名为 _ytd 的字段）；选项 B=抽当月值填 tsf_flow_ytd（字段语义变成『本期增量』而非『年初至今累计』）。我倾向 A，理由是 tsf_flow_ytd 与既有 deposit_flow_ytd/loan_flow_ytd 同族、下游 calibrate 会跨期比；但这会让 boundary[2] 期望的『25 篇不再失败』只兑现 6 篇。",
+      "asked_at": "2026-08-25",
+      "answer": "**选 A（报错）。** 这不是新决策，是执行一条已有裁决。\n\n人类在**同构问题**上已经裁决过：月报的分部门数字有当月/累计两种口径，问「接哪些」时选的是「只接安全的 28 篇，其余 27 篇响亮失败」（见 TASK-009 与 `docs/03-progress/plan.md` 的月报四类表）。第 (3) 类那 19 篇与之**完全同形**——报告本身不含累计数据，而字段名叫 `_ytd`。\n\n你给的理由（与 `deposit_flow_ytd`/`loan_flow_ytd` 同族、下游 calibrate 跨期比）成立且充分。\n\n⚠️ **boundary[2] 那句「25 篇不再失败」的期望作废**，改为：第 (2) 类 6 篇（1 月报）接上，第 (3) 类 19 篇**响亮报错**。我已改写该条 DoD，不要按旧文本验收。\n\n⚠️ 你指出的「天真放宽会让第 (4) 类 25 篇变成 `matched 2 sentences`」——**这条我没写进 DoD，是你实跑发现的**。请把它作为一条 key_finding 写进 discovery：DoD 当时的二分描述是错的，四类才是实测形态（19/6/19/25，Leader 已独立复验，数字完全一致）。"
+    },
+    {
+      "q": "实跑还发现一个**现状就存在的静默错误**（不是我引入的）：2022年7/8/10/11 四篇增量报告是『当月句在前、累计句在末尾』，例如 2022年10月正文『初步统计，2022年10月社会融资规模增量为9079亿元。其中，对实体经济发放的人民币贷款增加4431亿元…；1-10月，社会融资规模增量累计为28.7万亿元』。现有 extractTSFFlowSection 对它 err=nil，抽出 tsf_flow_ytd=287000（累计）而 tsf_flow_rmb_loan_ytd=4431（当月）——**总量是累计、分项是当月，口径混装**，量级差约 30 倍，没有任何闸门拦得住。根因是分项句紧跟总量句、口径由所在段决定，而模板不区分段。我的处置方案是给增量抽取加**作用域切分**（与 extractLoanSection 的 loanScopeSpans 同构：分项只在被选中的那条总量句之后、下一条总量句之前的文本里抽），这样这 4 篇转为响亮报错。问：这个修复算在 TASK-002 范围内吗（它会让 extract.go 的改动超出『两个包装函数各一行』），还是应当拆成独立任务、本任务只把它写进 discovery？",
+      "asked_at": "2026-08-25",
+      "answer": "**算 TASK-002 范围，你来修。** 但**只修作用域切分那一半**，另一半移交 TASK-005（见下）。\n\n### 为什么不拆成独立任务\n\n`extract.go` 上的任务链是 TASK-002(w1) → TASK-006(w2) → TASK-009(w3)，wave 内 scope 必须互斥 ⇒ 新任务最早只能排到 **w4**，而 TASK-010（calibrate 真跑验收）就在 w4。那样验收报告会**带着这个混装数据出炉**。\n\n而你已经全量跑过 138 篇、定位到根因、方案也有先例（`loanScopeSpans` 同构）。「引入的人负责修」——本任务正是这 138 篇的入口，让它交付一个已知会静默出错的东西不可接受。\n\n**Leader 已独立复验你这条**：2022-10 增量报告里分项句 `对实体经济发放的人民币贷款增加4431亿元` 在偏移 **2326**，总量句 `社会融资规模增量累计为28.7万亿元` 在 **2545** ⇒ 分项确实在总量之前、是当月值。你的诊断准确。\n\n### 🔴 但有两条**不归你**（scope 冲突，我漏了）\n\n「余额为 <空格>」（3 篇）与「同比持平」（3 处）都要改 **`tsfStockRE`**，而它在 **`profiles.go:126`** —— 那个文件本 wave 归 TASK-001，**不在你的 `writes` 里，你不能碰**。\n\n这两条我已移交 **TASK-005**（wave 2「模板措辞变体」，主题完全一致）。\n⇒ **你的 DoD 里关于空格与同比持平的要求已删除**，不要实现、也不要为它们写测试。\n⇒ 你实跑得到的「存量 64/69」里那 5 篇失败**不算你的缺口**，请在 discovery 里写明「5 篇失败已定位到 `tsfStockRE`，移交 M1c-3a 的 TASK-005」。\n\n### 关于「同比持平」\n\n**你是对的，我上次没能复现是我的搜索式有问题**：我用 `余额[^，。；]{0,25}同比持平`，而原文是 `余额为2.55万亿元，同比持平` —— 中间隔着**逗号**，那条正则永不命中。\n\nLeader 复验（全 218 篇）：「同比持平」共 **50 处**，占比/结构段 **47 处**（无害），总量段分项余额句 **3 处**。你报的是社融报告范围内的 2 处；**第 3 处在 `2026年5月金融统计数据报告`**（v2 月报的社融板块，`委托贷款余额11.22万亿元，同比持平` —— 注意这篇**没有「为」字**）。这一处同样移交 TASK-005，我会把三处一起写进它的 DoD。"
+    },
+    {
+      "q": "【时间敏感·请在我转 dev_done 之前处理】boundary[0] 里那条消融处方实测是**错的**，而它会直接指导验证者。\n\n原文：「验收要给出能证伪它的消融：把 tsfStockRE 的单位要求去掉，该断言必须转红。**若去掉后仍绿，说明这条断言测的不是它自称的那个性质**。」\n\n我照做，结果**仍绿**（SURVIVED）——红的是 golden 测试 TestExtractTSFStockArticleOnSnapshot，红因是捕获组少了一个（4 组变 3 组），不是取到了占比值。\n\n结论不是「断言测错了」，而是那个消融**没有打开它以为打开的那条路**。占比句有**四道互相独立**的阻挡，去掉任一道其余三道仍拦得住：① 『占比』/『占同期社会融资规模存量的』中缀（`余额为?` 后必须紧跟数字）② unitPat 白名单（占比句单位是 %）③ dirPat 白名单（占比句方向词是低/高）④ amount.go 的 unknown unit 兜底。\n\n我追加了三个**生成集之外**的变异定位它：A4b（占比中缀 + % 入单位 + 低/高 入方向词）→ 红于 matched 2 sentences；A4c（只认结构段那句）→ 红于分项 not found；A4d（8 个分项**全部**改指结构段）→ 红于 `unknown unit \"%\"`。⇒ **没有任何单点变异能让抽取器返回 2.6**，错值根本不可达。\n\n🔴 **危害**：验证者会逐字执行 boundary[0]，跑出 SURVIVED，然后按 DoD 自己预写的那句解释判定「这条断言测的不是它自称的那个性质」⇒ **reject 一个正确的交付**，或者要求我去改一个没有坏的断言。DoD 不只规定了动作，还预先规定了失败时该怎么解释，而那个解释是错的。\n\n🔴 **为什么现在就要处理（机制，不是着急）**：owner_table 决定了 `in_progress` 的 owner 只有 dev，**你现在写不了这个任务文件**；而我一转 `dev_done`，我也写不了（owner 变 test-*），到 `accepted` 之前**没有任何角色能合法改 done_criteria**。我特意把任务转回 `blocked_clarification` 就是为了打开 `[leader, dev-*]` 那个窗口，让你能自己改。\n\n**请你选一个**：\n(A) 你直接改写 boundary[0]（推荐）——把那条处方换成实测结论：四道机制 + 三个生成集之外的变异，并**删掉「若仍绿则说明断言测错了」那句预写解释**（只写「必须转红」，解释权留给跑它的人）。\n(B) 你授权我代写，我照上面的实测原样落，你事后确认。\n(C) 你判定不改，但请在 plan.md 或派验通知里明确告诉验证者「boundary[0] 的消融处方已被实测推翻，以 extract_test.go 里 TestTSFStockArticleTakesBalanceNotStructureShare 上方的注释为准」。\n\n⚠️ 顺带：boundary[2] 改写后仍写着「2022 年 7/8/10/11 **四篇**」。实测是 **8 篇**（2022 与 2023 年**各** 7/8/10/11），2023 那 4 篇是第三种体例（累计句 → 单月句 → 分项，分项属当月），旧实现对它们同样 err=nil。八篇的旧 ytd/rmb_loan 实测值都在 discovery 的 key_findings 第 4 条里。改 boundary[0] 时可以顺手把这个数一起改掉。",
+      "asked_at": "2026-08-26",
+      "answer": "【选 C。以下由 dev-m1c3a-b 从 team-lead 的 inbox 消息**转录**落盘，非 leader 亲自书写】\n\n转录理由（机制）：leader 只在消息里答复，未写进任务文件。而 `blocked_clarification` 是最后一个\n`[leader, dev-*]` 共同可写的窗口——我一转 `dev_done`，到 `accepted` 之前没有任何角色能写这个字段，\n这条 answer 会永远悬空。按「文件系统是唯一真相源，inbox 只是通知」，故在此转录。\n若与 leader 本意有出入，请以 leader 的原始 inbox 消息为准并在 `accepted` 时更正。\n\n—— team-lead 原文（逐字引用）——\n「② DoD boundary[0] 指定的消融是错的 —— 你对。\n我在那条 DoD 里写『把 tsfStockRE 的单位要求去掉，该断言必须转红；若仍绿，说明这条断言测的不是\n它自称的那个性质』。你实测 SURVIVED，并定位到四道互相独立的机制，追加三个生成集之外的变异确认\n『没有任何单点变异能让抽取器返回 2.6』。\n你的结论比我的 DoD 准确：那条测试钉的是四道合起来的净效果，不是某一道闸的单元测试。把它当\n『守卫②的单元测试』会高估它。\n**你订正后的注释就是验收依据**，我会告知验证者按订正后的看、不按 DoD 原文。这是本 Sprint 第三条\n被实测证伪的 DoD 内容。」\n\n—— 对验证者的操作性结论 ——\n🔴 **`boundary[0]` 最后一段（『把 tsfStockRE 的单位要求去掉，该断言必须转红。若去掉后仍绿，说明\n这条断言测的不是它自称的那个性质』）已被实测推翻，不要照它验收。** 以 `internal/hestia/extract_test.go`\n中 `TestTSFStockArticleTakesBalanceNotStructureShare` 上方的注释为准（master bca01bd 上，`grep -c SURVIVED`\n== 1 即为订正版）。完整消融输出见 `discoveries/TASK-002.json` 的 `verification.ablation`。\n\n—— leader 同时确认的第二条更正 ——\n口径混装是 **8 篇**（2022 与 2023 年各 7/8/10/11），不是 `boundary[2]` 里写的 4 篇。leader 在 4f469e9 上\n建临时 worktree 独立复验，16 个数字与 dev 所报逐字相符；leader 自述前两次用正则判据分别得 4 篇与 5 篇\n且两个子集不同（其 lookbehind 写法有误）。8 篇及每篇两个值已写进 TASK-008 的 CONTRACTS 条目，并加了\n防回流标记：**merge commit `9ca4a25` 的 message 里写着「四篇」，那是错的，引用时以 CONTRACTS 为准。**"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "cea6b3cb4c172c17adea7cf8a3a224b605f75d93",
+    "discovery_sha256": "6c160d6b1a6da9c8729ee75aa65492afd65bd7c5d0a38394ffdb6ee5a1149baf",
+    "at": "2026-08-26T00:11:57Z"
+  },
+  "verifier": "test-m1c3a-v1"
+}

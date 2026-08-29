@@ -1,0 +1,59 @@
+{
+  "id": "TASK-004",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "detectExtractor 判据重构：板块集合 × period_type",
+  "description": "**AD-2**。本迭代**杠杆最高**的一个任务：一处判据同时接上四类共 74 篇。\n\n## 现状：两条判据都是「数节数」\n\n```go\ncase hasTSF && len(secs) == sectionsV2:  return \"rule@v2\"   // 8 节\ncase !hasTSF && len(secs) == sectionsV1: return \"rule@v1\"   // 6 节\ndefault:                                 return error\n```\n\n于是 5 节 v1（2020-09/2022-09，差一个**无关**板块）与**全部四种月报布局**一律落进 default。\n\n## Leader 实测的布局全景（218 篇）\n\n| 布局 | 篇数 | 核心四板块 | 外汇节 | 社融节 | 应判为 |\n|---|---|---|---|---|---|\n| 6 节 | 19 | 齐 | 有 | 无 | `rule@v1` |\n| 8 节 | 4 | 齐 | 有 | 有 | `rule@v2` |\n| 5 节（季报） | 2 | 齐 | **有** | 无 | `rule@v1` ← 现在被拒 |\n| 5 节（月报） | 43 | 齐 | **无** | 无 | `rule-monthly@v1` |\n| 4 节（月报） | 3 | 齐 | **无** | 无 | `rule-monthly@v1` |\n| 7 节（月报） | 7 | 齐 | **无** | 有 | `rule-monthly@v2` |\n| 6 节（3 月报） | 2 | 齐 | 有 | 无 | `rule@v1` |\n\n**4 节与 5 节月报是同一族**——只差一个无关的「经常项下跨境人民币结算」节。\n5 节季报差的第六节是「跨境贸易人民币结算业务」，**同样不在 54 个字段里**。\n\n⇒ 判据应当问「必需板块在不在」，不是「一共几节」。\n\n## 新判据\n\n```go\ncore   := hasAllSections(secs, coreSectionKeywords())  // 广义货币/人民币存款/人民币贷款/加权平均利率\nhasFX  := findSection(secs, \"国家外汇储备\")\nhasTSF := findSection(secs, tsfSectionKeyword)\n\nswitch {\ncase !core:                                  → error（列出缺了哪几个核心板块）\ncase !hasFX && periodType != \"monthly\":      → error（见下，这是必须堵的缝）\ncase hasTSF && hasFX:                        → rule@v2\ncase !hasTSF && hasFX:                       → rule@v1\ncase hasTSF && !hasFX:                       → rule-monthly@v2\ncase !hasTSF && !hasFX:                      → rule-monthly@v1\n}\n```\n\n`coreSectionKeywords()` 从 `sectionRules`（在 **`extract.go`**，不是 sections.go）派生：\n非 `v2Only` 且非「国家外汇储备」的那些。**不手写第二份清单。**\n\n## 抓三份快照\n\n```bash\ncd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas\npython3 - <<'EOF'\nimport json, shutil, os\nD = 'data/hestia-backfill-2026-08-14'\nm = json.load(open(D + '/manifest.json'))\nfor title, dst in [('2025年8月金融统计数据报告',   'pboc-2025-08-monthly.html'),\n                   ('2020年4月金融统计数据报告',   'pboc-2020-04-monthly.html'),\n                   ('2020年前三季度金融统计数据报告','pboc-2020-q1q3.html')]:\n    a = next(x for x in m['articles'] if x['title'] == title)\n    shutil.copy(os.path.join(D, a['file']), os.path.join('internal/hestia/testdata', dst))\n    print(dst, '<-', a['file'])\nEOF\n```\n\n⚠️ **签名变更**（`detectExtractor` 加 `periodType`）是编译错误，调用点由编译器逐个点出。\n本 wave 里 `parse.go` 归 TASK-007，若你的改动让 `parse.go` 编译不过，\n**在本任务里把调用点改到能编译即可**（传 `periodType`），但不要顺手做 TASK-007 的其它事（见 DoD non_functional）。\n⚠️ `parse.go` **不在你的 `writes` 里** —— 若确实必须动它，先经写通道\n`update --json-field writes=...` 把它补进声明**再改**，并在交付报告里申报。",
+  "wave": 2,
+  "dependencies": [
+    "TASK-003"
+  ],
+  "context_from": [
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/sections.go",
+    "./internal/hestia/sections_test.go",
+    "./internal/hestia/testdata/pboc-2025-08-monthly.html",
+    "./internal/hestia/testdata/pboc-2020-04-monthly.html",
+    "./internal/hestia/testdata/pboc-2020-q1q3.html",
+    "./internal/hestia/parse.go",
+    "./internal/hestia/extract_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "抓三份快照进 `testdata/`（脚本见 description），原 `file` 名记进 discovery。",
+      "`detectExtractor` 签名增加 `periodType string` 参数。判据改为「核心板块齐全 × hasFX × hasTSF × periodType」四维，六条出口如 description 所列。",
+      "`coreSectionKeywords()` **从 `sectionRules` 派生**（非 `v2Only` 且非「国家外汇储备」），不手写第二份清单。\n\n⚠️ `sectionRules` 与 `v2Only` 定义在 **`extract.go`**（不是 sections.go）——同包可直接引用，**不需要**把 `extract.go` 加进 `writes`（只读不写）。"
+    ],
+    "boundary": [
+      "三份新快照各自判定正确：\n- `pboc-2020-q1q3.html`（5 节季报，periodType=`q1_q3`）→ **`rule@v1`**\n- `pboc-2025-08-monthly.html`（5 节月报，periodType=`monthly`）→ **`rule-monthly@v1`**\n- `pboc-2020-04-monthly.html`（4 节月报，periodType=`monthly`）→ **`rule-monthly@v1`**\n\n**既有的 6 节 v1 / 8 节 v2 用例全绿不变**（`pboc-2025-12-annual.html` 等仍走原路）。",
+      "🔴 **真截断仍被拒——新判据引入的缝必须堵上**。\n\n「无外汇节」原先是**未知布局**（响亮失败），新判据下变成 `rule-monthly@v1` 的**特征**。⇒ 一篇 v1 季报若外汇节恰好被截断，会被**静默降级**成 25 字段的月报 extractor，`completeness` 认为它本就不该有外汇字段，**没有任何闸门会响**。\n\n验收用例：从 `pboc-2020-q1q3.html` 的板块里**砍掉「国家外汇储备」那节**，以 `periodType=\"q1_q3\"` 调用 ⇒ **必须报错**。\n\n**消融**：把 `periodType` 那个条件去掉（或让它恒为 `\"monthly\"`），该用例必须转红。⚠️ 若去掉后仍绿，说明这条用例守的不是它自称的那个性质——请检查是不是别的断言先失败了（`require.X` 失败即中止，它后面的断言对触发它的消融不可见）。\n\n🔴 **同一处还有第二条缝：新判据去掉了节数上界**（独立 reviewer 指出）。\n\n原判据 `len(secs)==6` 同时是下界和**上界**；换成「核心板块齐全」后上界没了 ⇒ 一份 7 节、无社融、核心四节齐全、有外汇节的输入会被判成 `rule@v1`，而它可能是**别的报告模板**。\n\n验收：构造这样一份输入（在 5 节季报上加两个无关板块），断言它**不被静默判成 `rule@v1`**——要么报错，要么有明确理由接受。**显式决定并在注释里写明**，别让它落进 default 靠运气。\n\n⚠️ 顺带更正一条**需求文档的错误安全声明**：它说新判据「顺带收紧契约 #43 那条残余风险（社融在末尾被截断的 v2 恰好剩 6 节）」。**社融两节在 v2 版式里是第一、二节，不是末尾**（`一、社会融资规模存量同比增长7.4%` / `二、前七个月社会融资规模增量累计为…`，Leader 实测）⇒ 丢掉它们的 v2 其余板块序号从「三、」起，`checkSectionOrdinals` 早就拦下了。**新判据没有收紧任何东西，不要在注释或 CONTRACTS 里这样写。**",
+      "缺**核心**板块（如砍掉「人民币贷款」节）⇒ 报错，**不论 periodType 是什么**。这是与上一条不同的一格：上一条是「外汇节可缺但仅限月报」，这一条是「核心四节谁都不能缺」。"
+    ],
+    "error_handling": [
+      "错误信息**列出缺了哪几个核心板块**，而不是原来的「%d sections」——在新判据下节数已不再是充分的诊断信息。\n\n两类错误的措辞必须**可区分**：「缺核心板块 X, Y」与「累计期报告缺外汇节」是完全不同的排障方向。验收：把任一条的期望串换成另一条的，该用例必须变红。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n🔴 **签名变更的调用点与越界申报**（本条是义务，不是提示）：\n`detectExtractor` 加参数会让 `parse.go` 编译不过。允许你在本任务里把调用点改到**能编译**（传 `periodType`），但**不得顺手做 TASK-007 的其它事**（kind 分派、删 monthly 分支）。\n\n⚠️ `parse.go` **不在你的 `writes` 声明里**。若你确实动了它，**必须在 `transition dev_done` 之前**经写通道 `task TASK-004 update --json-field writes='[…]'` 把它补进声明，并在交付报告里申报。\n**Leader 的批准是事后确认**——`dev_done` 之后你和 Leader 都再也写不了该任务文件，那一刻没有任何角色能补这个字段。\n\n**为什么这是安全属性而非文档洁癖**：`writes` 同时驱动 scope 互斥与漂移判据，声明与实际写入不一致 = **范围外的真漂移不会告警**。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-004`，不要只写 `TASK-004` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-c",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "33f3ed7cb4afabec0c1dae5d1ca2416d9421955f",
+    "discovery_sha256": "a8a27740013c53e0e81c5c022d410418730cddd30792d7c51d87a34606208c84",
+    "at": "2026-08-26T01:01:02Z"
+  },
+  "verifier": "test-m1c3a-v2"
+}

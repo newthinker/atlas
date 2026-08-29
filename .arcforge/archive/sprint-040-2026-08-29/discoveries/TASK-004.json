@@ -1,0 +1,67 @@
+{
+  "key_findings": [
+    "🔴 **DoD 少列了一个受影响文件**。签名变更打破的是**两个** writes 之外的文件，不是一个：`parse.go:184`（DoD non_functional[0] 预告并授权了）与 **`extract_test.go:343` 的 TestExtractorConstantsMatchDetect（DoD 没提）**。Go 没有默认参数，绕不过去；改成 variadic 能让旧调用点继续编译，但那会让「忘了传 periodType」静默退化，正好破坏 boundary[1] 要堵的那条缝，故不走。两处各改一行，已在 dev_done 之前经写通道补进 writes。",
+    "🔴 **抓下来的三份快照是 CRLF，而仓库 core.autocrlf=input 会在提交时转成 LF** ⇒ 「我测的文件」与「提交进去的文件」本来不是同一份（既有快照 CRLF 行数为 0，新抓的每份 62 行）。已在**提交前**主动规范化并重跑全套，使工作树与提交内容逐字节一致。⚠️ 后续任务用 description 里那段 `shutil.copy` 脚本抓快照时会撞到同一件事——脚本按字节拷贝，不经 git 的行尾规范化。",
+    "🔴 **换判据会弄丢一道旧判据顺带提供的守卫**：旧的 `len(secs)==8 && !hasTSF` 会把「有社融增量节、没有存量节」的输入落进 default 报错；新判据不数节数，这种输入会因「核心齐 + 有外汇」被判成 `rule@v1`，而 `rule@v1` **完全跳过** v2Only 两节 ⇒ 增量数据被静默丢掉、completeness 认为本期本就没有社融字段。已显式补回（`hasAnyTSFSection(secs) && !hasTSF → error`，从 sectionRules 的 v2Only 标记派生，不新增字面量）。实践中它够不到（丢存量会让序号从「二、」起，checkSectionOrdinals 先拦），留着是防**新模板**。⚠️ 这是六条出口之外的**第七条**，DoD 未列，属我判断补入——boundary[1] 的「要么报错，要么有明确理由接受」明确容许这类决定，但请验证者复核。",
+    "🔴 **既有测试不能只换期望字串**。`TestDetectExtractorRejectsUnknownLayout` 的四个「N 板块但…」用例，其合成标题被缩写成「二、贷款」「三、C」——新判据下它们连核心板块都凑不齐，于是**因为另一个理由**变红。只改期望串的话测试仍绿，但守的不再是名字说的那件事（require 失败即中止，这类「换了理由的红」没有任何东西会提醒你）。已把每个用例的标题改成真实报告形态，各自只缺它名字说的那一样；`TestDetectExtractorJudgesTSFByTitleOnly` 同样处理，并加了 `require.Empty(missingCoreSections(secs))` 的前提断言。",
+    "**上界的显式决定：接受多出来的无关板块，不设节数上界**。理由三条：① 节数从来不是模板身份的代理（218 篇实测同族报告 4/5/6/7/8 节，5 节季报正是被那条上界误拒的）；② 真正的上界在别处且更强（序号连续性挡残缺 v2，extractFields 要求每条模板恰好命中一次）；③ 多出的板块结构性不可达（extractFields 按关键词 findSection，从不遍历所有板块）。理由 ③ 在测试里做成了可核查的观察，不是一句声称。",
+    "**订正需求文档的一条错误安全声明**（DoD boundary[1] 已点名）：新判据**没有**收紧契约 #43 那条残余风险。社融两节在 v2 版式里是第一、二节（本任务快照实测：`一、社会融资规模存量同比增长8.3%` / `二、全年社会融资规模增量累计为35.6万亿元`），不是末尾；丢掉它们会让序号从「三、」起，checkSectionOrdinals 早就拦下了。注释与 CONTRACTS 里都没有这样写。"
+  ],
+  "decisions": [
+    {
+      "decision": "detectExtractor 直接返回 extractorV1/V2/MonthlyV1/MonthlyV2 四个常量，不再像旧代码那样返回字面量",
+      "rationale": "那四个常量是 M1c-3a 的 TASK-003 为此定义的单一真相源，validExtractors 也引用它们。返回字面量等于为四个值各造第二份定义。⚠️ 副作用要说明：extract_test.go 的 TestExtractorConstantsMatchDetect 原本守的是「字面量与常量分叉」，那类缺陷现在**结构上不可能**发生，该测试不再是它的守卫（它仍守探测行为本身，那一半可杀）。已就地更正它那段现在说假话的注释。"
+    },
+    {
+      "decision": "coreSectionKeywords() 从 sectionRules 派生（非 v2Only 且非 fxSectionKeyword），并用**两条互补断言**钉住",
+      "rationale": "逐字面量的 ElementsMatch 防「派生规则写错」，哨兵防「手抄第二份清单」。消融实测证明它们不可互相替代：M2（改成手抄四个词）只被哨兵杀掉，ElementsMatch 全绿（手抄版给出一模一样的四个词）；M3（漏掉排除外汇）才由 ElementsMatch/NotContains 杀。别以「重复」为由合并。"
+    },
+    {
+      "decision": "删除 sectionsV1/sectionsV2 两个常量，并留墓碑注释",
+      "rationale": "它们是旧判据的魔数，随判据一起成为孤儿（本次改动造成的孤儿，属应清理范围）。留注释而不是无声删掉：注释明写「不要加回来当节数上界」并给出理由，否则下一个人会把同一个 bug 换个数字重新引入。本仓库既有先例（sections.go 里「关于曾经存在于此的 section.has」那段）。"
+    },
+    {
+      "decision": "periodTypeMonthly 定义成常量，并用前提断言与 validPeriodTypes 绑住",
+      "rationale": "它与 types.go 的白名单是同一个取值域的两处字面量。分叉时豁免要么永不触发（全部月报被拒）、要么永远触发（截断检测失效），两种都是静默的。TestMonthlyIsTheOnlyPeriodTypeExemptFromFX 遍历 validPeriodTypes 本身而不是手写五个值 ⇒ 将来加第六种 period_type 会自动进入该测试并被要求表态。"
+    },
+    {
+      "decision": "预判并补上「缺多节时逐个列出」的断言，然后用探针 P3 验证它确实是必需的",
+      "rationale": "错误信息的全部意义是「缺了哪几个」，而我原有用例每次只缺一节 ⇒ 「只报第一个缺失项」的实现会全绿。补断言后跑探针 P3（missingCoreSections 改成只返回第一个）：**只有这条新断言变红**。这是先想到缺口、补上、再用消融证明补对了，而不是事后解释。"
+    },
+    {
+      "decision": "不为 coreSectionKeywords 的返回**顺序**写断言",
+      "rationale": "探针 P6（倒序返回）SURVIVED。顺序只影响错误信息里缺失项的排列，不影响任何判定；与 TASK-003 的 M11 同形，是**等价变异而非漏网缺陷**。加断言会把一个偶然属性冻结成契约。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/sections.go — 判据重构 + coreSectionKeywords/missingCoreSections/hasAnyTSFSection 三个 helper + fxSectionKeyword/periodTypeMonthly 两个常量 + 删除 sectionsV1/V2（+146/−18）",
+    "internal/hestia/sections_test.go — 8 个新测试 + 修订 TestDetectExtractorRejectsUnknownLayout 与 TestDetectExtractorJudgesTSFByTitleOnly（+315/−33）",
+    "internal/hestia/parse.go — **writes 之外，已申报**：调用点一行，传入 parseTitle 已算出的 periodType（+1/−1）",
+    "internal/hestia/extract_test.go — **writes 之外，已申报**：调用点一行 + 更正因本次改动而过期的注释（+11/−7）",
+    "internal/hestia/testdata/pboc-2025-08-monthly.html — 新快照（原名 articles/5837479.html），507 行",
+    "internal/hestia/testdata/pboc-2020-04-monthly.html — 新快照（原名 articles/2025092212551389740.html），441 行",
+    "internal/hestia/testdata/pboc-2020-q1q3.html — 新快照（原名 articles/2025092212551025045.html），438 行"
+  ],
+  "interfaces_exposed": [
+    "func detectExtractor(secs []section, periodType string) (string, error) — **签名变更**。periodType 取自 parseTitle，必须是 validPeriodTypes 里的值。六条正常出口 + 三条错误出口（缺核心板块 / 累计期缺外汇节 / 有增量节没存量节）。",
+    "func coreSectionKeywords() []string（包内）— 核心四板块关键词，从 sectionRules 派生。TASK-006 若要按 extractor 决定板块适用性（AD-3），板块分类应复用本函数与 fxSectionKeyword，不要另抄。",
+    "func missingCoreSections(secs []section) []string（包内）— 缺失的核心板块清单，空切片表示齐全。测试里可当前提断言用（本任务多处用它排除「因为别的理由红」）。",
+    "func hasAnyTSFSection(secs []section) bool（包内）— 社融两节里出现了任意一节吗，从 v2Only 派生。与 findSection(secs, tsfSectionKeyword) 的窄判据配对使用。",
+    "const fxSectionKeyword = \"国家外汇储备\"、const periodTypeMonthly = \"monthly\"（sections.go）。",
+    "⚠️ **删除**：sectionsV1 / sectionsV2 两个常量已不存在。",
+    "⚠️ **本任务之后的中间态**：月报现在能通过 detectExtractor 了，但 extractFields 仍然只认 rule@v1/rule@v2（extract.go:75），所以 Parse 一篇月报会**改在抽取层报错**而不再是探测层。接上它是 TASK-006；快照分派是 TASK-007。"
+  ],
+  "verification": {
+    "sampling_head": "23aa880c7488e0374e85eb62baa89b77c9a6f6c1（分支 task/TASK-004-m1c3a，基点 master 20c05ea46af33ac95ed3a0f7d952cd0feb036dfe；以下**全部**数字均采于该 sha，工作树 git status --porcelain 为空）",
+    "suite": "go test ./internal/hestia/ -count=1 → ok，0 FAIL。1037 条 RUN = 顶层 512 + 子测试 525（两把独立的尺交叉校验：grep 总数 1037 == 525 + 512）",
+    "new_tests": "8 个新测试函数锚定单跑（-run '^(...)$' 防前缀匹配把兄弟测试算进来）全 PASS，25 条 PASS 行（含子测试）",
+    "coverage": "95.6204%（1703/1781 statements）@ 23aa880，DoD 门槛 95.5%。背对背对照：同一时刻并排跑干净基点 20c05ea 得 95.5581%（1678/1756）⇒ +0.062pp。⚠️ DoD 记的基线 95.5%/944 条 RUN 采于 4a12794，那棵树的分母是 1694；TASK-001/002/003 合入后分母已变，故此处给的是**同时刻测出的一对**，不与历史绝对值相比。",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/ 空",
+    "numstat": "git show --numstat 23aa880：sections.go +146/−18、sections_test.go +315/−33、parse.go +1/−1、extract_test.go +11/−7、三份 testdata 各 +507/+441/+438。此数采自提交本身，与交付物同源。",
+    "deliverable_sha256": "sections.go e0c71d17faa5b3502868050b2f27e86622916b9a865ca7c957b94a14521c42a7 / sections_test.go d557e1cc9f1effd0beccdf09c2e9eb47f7edcbc887699c31b094ee3e4b4f5af7 / parse.go 9aafa29393ab827531f709eeff3f736ddbdfa9c56561b059aaa024519d9e815d / extract_test.go 603f8a50805c7d3c24e16bb88a88fe38fe7db9e01cde5086ffe1c6bc4e3cff35 / pboc-2025-08-monthly.html f97fa9aaf8e2ae39778d2cd2a0571348554736ea664a91b5c464c162a749e6ac / pboc-2020-04-monthly.html 6425aea23ef9594d1cf497a16d817b4cef326f3055367d624132e53b33e56fc8 / pboc-2020-q1q3.html 420f38d98e291c7cd07056b30cae8ea7dbd8776a43986f2343a11ed2254ef7fd",
+    "layout_premises_verified": "DoD 对三份快照的版式描述是待验断言，已逐条实测：pboc-2020-q1q3.html 5 节 hasFX=true hasTSF=false；pboc-2025-08-monthly.html 5 节 hasFX=false hasTSF=false；pboc-2020-04-monthly.html 4 节 hasFX=false hasTSF=false；既有 pboc-2025-12-annual.html 8 节 both true、pboc-2020-06-h1.html 6 节 hasFX=true hasTSF=false。全部与 AD-2 的布局全景表一致。",
+    "mutation": "9 个变异，全部跑在**隔离 worktree** ../wt-mut4-m1c3a-c（detached @ 20c05ea + 本任务 diff）上，主工作区一个字节不碰。8 KILLED + 1 刻意的等价变异 SURVIVED。逐条记「哪一条断言红」：M1（DoD 点名：去掉 periodType 条件）→ sections_test.go:686 的 require.Error 红，**而它前面的前提断言 :682 `require.Empty(missingCoreSections)` 保持绿** ⇒ 该用例守的确实是它自称的那条性质，不是「因为别的理由红」；M2（coreSectionKeywords 手抄四个词）→ **只有** :628 哨兵红，:594 的 ElementsMatch 全绿；M3（漏掉排除外汇节）→ :610 NotContains + 三条月报布局红；M4（月报两条出口对调）→ :649/:661/:694/:814 红；M5（去掉「有增量节没存量节」守卫）→ **只有** :272 那一条用例红，精确命中；M6（两类错误措辞合并）→ :789 的 NotContains 红（只断言「各自含有什么」的话它会全绿）；P3（missingCoreSections 只报第一个）→ **只有**我预判补上的 :762 红；P4（去掉序号连续性检查）→ :372/:385 红，确认我的重写没把既有守卫接掉；P6（coreSectionKeywords 倒序）→ SURVIVED（等价变异，理由见 decisions）。",
+    "mutation_hygiene": "每个变异窗口内 + 收尾各校验一次主工作区指纹（7 个文件 sha256 + git status --porcelain），全程未变；收尾对照组 rc=0。变异体落盘后经 go build 语法闸，并打印变异体与原文的 diff 逐字核对。M5/P3/P4/P6 是**在设计完断言之后**才补的探针，刻意不与生成这些断言的那一批同源；其中 P3 抓到了一个真缺口（我已先补断言，探针验证了补对）。",
+    "provenance": "实现与测试由 dev-m1c3a-c 编写。commit 前按全局规范跑了 code-simplifier 子代理，它**回报「Done. No action.」但实际改了两个文件** —— 我用「与消融副本逐文件 diff」核实出来的（sections_test.go 与 extract_test.go 各一处：把我写的 inline `map[string]string{...}[sample]` 查表换成表驱动的结构体字段）。两处均语义等价且确为改进，予以保留；随后我**重跑了全部 9 个消融与全部自证数字**，本文件记的是重采值。⚠️ 子代理的完成回报不可采信这一条，本 sprint 我已撞到第二次（TASK-003 那次它如实回报了改动）。"
+  }
+}

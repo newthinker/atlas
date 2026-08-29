@@ -1,0 +1,72 @@
+{
+  "key_findings": [
+    "两处硬卡点已接上并**各自**被消融证明：M1（口径表 前八个月→false）与 M2（正则 cumulativeMonthAlt 去掉 前八个月）各自转红，且转红的断言与失败信息**不同**——M1 打在『正向：正则认得的必须在口径表里』（消息：在 cumulativeMonthAlt 里、却不在 cumulativePeriods 里…表现为整篇命中 0），M2 打在『反向：口径表里的必须被正则整段认出』（消息：登记在 cumulativePeriods 里、periodPat 却整段匹不上它…是与现状逐字相同的 no-op）。两个方向刻意分成两个子测试，就是为了让两处硬卡点各有自己的失败信息。",
+    "🔴 **对 DoD functional[0] 的一处实测更正：『十一|十 的顺序不能反』在穷举形态下不成立。** DoD 给的理由是『写成 十|十一 会让 前十一个月 先匹配到 前十个月 的前缀而后半截对不上』。实测四种排法（枚举×两序、提取公因式 前(…|十一|十)个月 ×两序）对五条样本句的捕获**逐字相同**。成因：Go 的 leftmost-first 是对**整体匹配**而言的，某个交替分支走到一半失败会被放弃并回退去试下一个分支，所以『前十个月』这一支在『前十一个月…』上匹到 前十 后卡在 个 vs 一 即被放弃。顺序真正有语义的前提是**两个分支都能走完整条正则**（`人民|人民币` 那类前缀对），这十项两两无前缀关系，不构成那个前提。⇒ **结论（十一排前）保留为零成本防御，但代码注释里没有写那个假 rationale。**",
+    "另一条实测：交替里**缺**某一项时结果是 NO MATCH（selectUnique 报 `not found among N candidate sentence(s)`、响亮失败），**不是**静默捕获成相邻的短词。即『漏词』这个失效模式是有声的；真正无声的是『正则认得而口径表不认』，那正是本任务两个方向的守卫要挡的。",
+    "术语订正（code-simplifier 指出、我核实后已改在本次提交内）：periodPat 的唯一消费者是 loanFlowRE/depositFlowRE → selectRMBCumulativeFlow → **selectUnique**（extract.go:161，文案含 candidate 计数），不是 mustMatch（extract.go:125，文案 `not found (pattern %s)` 不含 candidate）。原注释结论对、函数名错，属『结论对但理由错』，已在 df2df9d 内一并修正。",
+    "⚠️ 顺带发现、**未改**（不在本任务 writes 内，且属 TASK-004 的既有注释）：profiles.go 的季报注释与 profiles_test.go 内均引用了 `TestProfileAlternationsHaveNoSubstringPairs`，而本包实际存在的是 `TestProfileAlternationsHaveNoPrefixPairs`（该测试自己的注释明确记载判据**没有**扩成 substring）。是一处失效的交叉引用，留给后续任务处置。",
+    "🔴 **`git merge-base --is-ancestor <branch> master` 无法区分「工作已合入」与「压根没有工作」**——两种情况都返回 true。我在交付报告里据它断言 `task/TASK-002-m1c3a` / `task/TASK-003-m1c3a` 「已合入 master」，**这是错的**：那两个分支的 HEAD 还停在 4a12794（就是 master 基点），领先 master 的 commit 数为 0，一个 commit 都没提交。一个不领先 master 的分支当然是 master 的祖先。Leader 用内容判据当场拆穿（merge 前主仓库里 extractTSFStockArticle 出现 0 次、rule-monthly 0 次）。⚠️ **最值得记的是这个不对称：判断「我自己的改动进 master 了没」时我用了内容判据（grep cumulativeMonthAlt，正确），只在评论别人的任务时退回了裸 merge-base。** 对自己严谨、对别人用会误导的判据。⇒ 判「进去了没」一律配内容判据（grep 特征符号 / 比对文件 sha256）；ancestor 关系回答的是拓扑，不是「有没有内容」。本条对下游每一个要判断上游合入状态的任务都适用。",
+    "🔴 **返工（rework_count 1）与残余缺口 V6 —— 同一个根因：注释比断言宽。** 验证者判 REJECTED 的阻断项是一行注释里的裸 `TASK-007`（Global Constraint 要求带 milestone 前缀）；它同时标记了非阻断缺口 V6：**绕开 cumulativeMonthAlt 直接往 periodAlt 插一个累计分支时，我这一节 7 个新测试无一转红（SURVIVED）**。两者我都认。V6 的成因值得单记：我的子测试注释写「**periodAlt** 认得的每个累计前缀都必须在口径表里」，而断言实际遍历的是 **cumulativeMonthAlt** —— 断言忠实于 functional[2] 的字面（两个具名产物之间的对应），**但注释声称的范围比断言宽**，宽出来的那块就是缺口。⇒ **一条可机械执行的自查：把每条断言的注释当成待验命题，问「注释里的那个名词，就是断言遍历的那个对象吗？」** 这与「守卫在场≠守卫守的是你以为的那件事」是同一族，载体是**注释与断言之间的名词错位**。修法：`assert.Containsf(periodAlt, cumulativeMonthAlt)` → 对 periodAlt 的**等值**断言（本包既有惯用法，见 TestTemplatesReuseAmountFragments 对 dirPat/unitPat），实测 V6 随即 KILLED 且**只有那一条断言红**（因果干净，不是副作用）。"
+  ],
+  "decisions": [
+    {
+      "decision": "保留「前十一个月」排在「前十个月」之前，但**不在代码注释里写 DoD 给的那个理由**；改写成实测得到的机制说明。",
+      "rationale": "DoD functional[0] 断言「`十一|十` 的顺序不能反：写成 `十|十一` 会让「前十一个月」先匹配到「前十个月」的前缀而后半截对不上」。**实测证伪**：四种排法（枚举×两序、提取公因式 `前(?:十一|十)个月` ×两序）对五条样本句的捕获**逐字相同**。成因是 Go 的 `regexp` 在交替上**会回溯**——`十` 匹上后卡在 `个` vs `一`，退回来试 `十一`；leftmost-first 是对**整体匹配**而言的，不是「第一个分支匹上就定了」。顺序真正有语义的前提是**两个分支都能走完整条正则**（`人民|人民币` 那类前缀对，两者都能走完，于是先写的赢），而这十项两两无前缀关系，不构成那个前提。⇒ 结论（十一排前）作为零成本防御保留（将来若被改写成提取公因式形态也仍然安全），但**它不是这里的安全性来源**，真正的守卫是双向一一对应 + 逐字捕获。**Leader 收到后独立复验了同样的四种排法，结论一致并已据此更正 AD-6、派 TASK-008 记进 CONTRACTS**（该假 rationale 从需求文档三级传播到了 AD-6 与三个任务的 DoD）。这条属「结论对但理由错」：结论正确会让判断永不被复查，而理由是别人复现时的唯一入口。"
+    },
+    {
+      "decision": "cumulativeMonthAlt 穷举十项，periodAlt 由 `全年|上半年|一季度|前三季度|` + cumulativeMonthAlt + `|[0-9]{1,2}月份` 拼出，不另抄一份词表。",
+      "rationale": "穷举是为了让『正则能匹配的每一个累计前缀 ↔ cumulativePeriods 的键』这条对应关系可被**机械**核对（写成 `前[一二三四五六七八九十]+个月` 就没法逐项比对，会放进正则认得、口径表不认的句子，其表现是整篇静默命中 0）。由常量拼出而非抄写，是为了让 TestCumulativeMonthAltEnumeratesTenMonths 的 Contains 断言能挡住两处各自漂移。"
+    },
+    {
+      "decision": "三/六/九三项在真实语料里不出现（那三个月走 q1/h1/q1_q3 报告），仍然列上。",
+      "rationale": "多一个键无害（它只会在正文真出现该前缀时才生效，且两处同时登记），漏一个是静默失效。这是 DoD functional[0] 的明确要求，实测也支持：Leader 全量实读 55 篇月报，2 篇 3 月报（2024-03 / 2025-03）用的是『一季度』而非『前三个月』。"
+    },
+    {
+      "decision": "一一对应守卫做成**双向**两个子测试，而不是一条断言。",
+      "rationale": "两个方向恰好各自对应一个硬卡点，分开写才能让 M1/M2 两次单删产生**不同的**失败信息（DoD error_handling[0] 的硬要求）。合并成一条会让『到底哪一处没接上』这个信息在聚合信号里丢掉——聚合信号不携带因果。"
+    },
+    {
+      "decision": "boundary[0] 用『1..12 逐个月份』的循环，且同时断言两个性质：被 periodPat 整段认出 ∧ 只有 1月份 算累计。",
+      "rationale": "只断言『不在累计表里』是不够的：单月句若连正则都匹不上，就根本进不了候选，2020 那种孪生段（上半年… / 6月份，…）的口径判定也就无从生效。两个性质缺一都会出错，且失效方向相反。M3 消融（把 {1,2} 改成 {1}）实测同时打红了『10/11/12月份 必须仍被 periodAlt 认出』与『捕获组必须逐字等于 11月份，捕获到 1月份』两类断言，证明这对断言不是重复。"
+    },
+    {
+      "decision": "新增一条走 selectRMBCumulativeFlow 的消费点测试（含阴性对照：只有当月句时必须报错）。",
+      "rationale": "前面几条分别验正则与口径表，但『两处都接上了』这个性质只有在**消费点**（`cumulativePeriods[m[1]] && m[2] == currencyRMB`）才真正成立。阴性对照防的是否定式断言在空集上平凡为真：它额外断言错误文案里的候选数是 2（两句都进了候选、再被口径/币种两个维度筛光），而不只是『报了个错』。"
+    },
+    {
+      "decision": "本任务用**合成句**，不抓 html 快照。",
+      "rationale": "任务边界明确规定端到端验证在 TASK-007。合成句的形态取自 Leader 实读 55 篇月报的记述，测试注释里已写明这一点，故这些测试只断言正则与口径表的行为，**不宣称任何语料事实**。"
+    },
+    {
+      "decision": "在本任务内收口 V6，而不是按验证者/Leader 的建议转给 M1c-3a 的 TASK-007。",
+      "rationale": "两条理由。① **缺口是我引入的**：注释比断言宽这件事出自我写的那一节，转给下游等于让别人替我修一个我自己更清楚的问题，而修法只有一行断言。② **改动完全落在我已声明的 writes 内**（`internal/hestia/profiles_test.go`），纯测试改动，不产生新的 scope 互斥。已知代价并接受：后续扩 periodAlt（TASK-007 要做的事）必须同步改这一行等值断言——**那正是要的信号**，让「periodAlt 的组成变了」成为一次显式的、有人看见的改动，而不是静默扩面。⚠️ 与之相对，另两处我**没有**动，因为它们不在我的 writes 内：CONTRACTS.md:671 的累计前缀条款、以及既有注释里失效的 `TestProfileAlternationsHaveNoSubstringPairs` 交叉引用。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/profiles.go",
+    "internal/hestia/profiles_test.go（初版 + 返工）"
+  ],
+  "interfaces_exposed": [
+    "const cumulativeMonthAlt = `前两个月|前三个月|前四个月|前五个月|前六个月|前七个月|前八个月|前九个月|前十一个月|前十个月`（包内，profiles.go）",
+    "const periodAlt = `全年|上半年|一季度|前三季度|` + cumulativeMonthAlt + `|[0-9]{1,2}月份`（值变更，形态不变）",
+    "var cumulativePeriods：键集由 4 个变为 15 个（新增 10 个「前N个月」+「1月份」；既有全年/上半年/一季度/前三季度 原样保留）",
+    "下游（TASK-007 端到端）可依赖：periodPat 对「11月份」逐字捕获完整前缀、查表不命中；对「1月份」捕获并判为累计"
+  ],
+  "verification": {
+    "anchor": "🔴 **本 discovery 的自证数字分两批，各自锚点不同，不可混读。** 初版交付锚 df2df9d28695fd24b2e26e2c4efd36a861b3d7f5（基点 master 4a12794…）；**返工后的终值锚 f337f88bd140fc42ab8d0f201448604a70955cc1**（基点 master cea6b3c…，已含 TASK-002/003）。凡下面标「返工后」的数字均采于 f337f88 且 worktree clean；未标的为初版值，其分母属于当时那棵树。",
+    "suite": "go test ./internal/hestia/ -count=1 全绿。RUN 计数（-v 口径，按名字里 / 的个数做直方图自洽校验）：pre(4a12794) 483 顶层 + 420 一级子测试 + 37 二级 + 4 三级 = 944 条 RUN，与 DoD 记的基线 944 逐字相符；post(df2df9d) 489 + 445 + 37 + 4 = 975 条 RUN。增量 +31 = 6 个新顶层测试 + 25 个新子测试（2 + 12 + 7 + 4）。",
+    "coverage": "95.5136%（1618/1694 语句，go tool cover -func 口径，采于 df2df9d）。**pre 与 post 背对背同窗口各跑两轮，四次取值完全相同**：pre(4a12794)=1618/1694=95.5136%、post(df2df9d)=1618/1694=95.5136%。本次是纯数据改动（一个 const + 11 个 map 键），不产生新语句，故分子分母都不动。DoD 门槛 ≥95.5% ⇒ 通过。⚠️ 覆盖率的分母属于整棵树：本数字测自『master + 仅本任务一个 commit』的树；若验证者在合入了其它并行任务之后的树上重测，分母会变、数值会不同，那不是本任务的回归。",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/ 空（均在从 df2df9d 抽出的干净树上重跑）。",
+    "no_new_deps": "git show --name-only df2df9d 中不含 go.mod / go.sum ⇒ 无新增依赖（Global Constraint 满足）。",
+    "scope": "git show --numstat df2df9d = `52 1 internal/hestia/profiles.go` / `206 0 internal/hestia/profiles_test.go`。两个文件都在任务声明的 writes 内，**无越界**，故未动 packages/writes 声明。未碰 parse.go、未碰 tsfStockRE（TASK-005 的范围）、未抓 html 快照、未改 CONTRACTS.md。",
+    "ablation": "5 个变异全部 KILLED，harness = scratchpad/ablate-TASK-001-dev-m1c3a-a.sh，锚点做成可覆写变量 ABLATE_ANCHOR（禁写 HEAD/分支名），实际取值 df2df9d…；变异只作用在 `git archive <ANCHOR> | tar -x` 到 mktemp -d 的**隔离副本**上。每个变异窗口都过三道闸：语法闸 gofmt -e、构建闸 go build、语义闸打印变异体与原文的 diff 逐字核对（M3 首轮因模式在注释里也出现而 count==2，闸命中后**立即早退、未打印任何 KILLED**，修正模式后重跑）。对照组（未变异的隔离副本）先跑一轮全绿，否则后面的红没有意义。",
+    "ablation_detail": "M1(DoD 指定) cumulativePeriods[前八个月]→false ⇒ 红在 正向子测试 / TestCumulativePeriodsKeySet / 累计：前八个月（口径判定错了）/ 存款侧同构；反向子测试**保持绿**（键仍在、正则仍认得）。M2(DoD 指定) cumulativeMonthAlt 去掉 前八个月 ⇒ 红在 反向子测试 / TestCumulativeMonthAltEnumeratesTenMonths / 累计：前八个月（loanFlowRE 必须命中…缺词）/ 存款侧同构；正向子测试**保持绿**（该词已不在被遍历的集合里）。两次的红断言集合与文案均不同 ⇒ DoD error_handling[0] 的『失败信息必须不同』满足。M3(生成集之外) [0-9]{1,2}→{1} ⇒ 红在 11月份不得退化成1月份（实测捕获到 1月份）/ 前面带年份数字也不得退化 / 10、11、12月份 认不出 / 阴性对照（当月句被当成累计口径取走了）。M4(生成集之外) 多加一个 2月份 键 ⇒ 红在 键集 / 2月份 累计判定 / 当月：2月份。M5(生成集之外) 删掉 1月份 特例键 ⇒ 红在 键集 / 1月份 累计判定 / 累计特例：1月份 / 1月份累计特例走同一条路。M3–M5 是**生成集之外**的变异（不是我设计断言时依据的那两个），用来避免『拿生成该处方的变异去验证由它导出的规则』这种结构上不可能失败的循环验证。",
+    "isolation_fingerprint": "主工作区（/Users/…/atlas）在开始、5 个变异窗口内、收尾共 7 次校验，指纹逐次相同：internal/hestia/profiles.go sha256=9dca920ef0092d65e4705ef4aaf24d44b0380f64bc8d699ec0b062930d301ebb；internal/hestia/profiles_test.go sha256=3f65d37f3d677b6252bbb6109700646ac0833603ff240e46e075c03f4460502c；`git status --porcelain` 输出的 sha256=ebb23604022029669d37da176bb2fb6ce6fd78129cb95f75eeec4e6968199db0。⇒ 变异全程主工作区一个字节未被触碰。",
+    "code_simplifier": "已按全局规范在 commit 前跑 code-simplifier（两次因 API 连接中断被截断，第二次回报到达）。结论：**一行都没改**；其 numstat 与我交付前逐字相同（52/1、206/0，我用 git diff --numstat 自行核实，未采信自陈）。它唯一的实质指出（注释里 mustMatch 应为 selectUnique）我已核实源码后自行修正，并包含在 df2df9d 内。",
+    "pending_downstream": "CONTRACTS.md:671『正文侧的累计前缀』一节目前只提「一季度/前三季度」，尚未记入本次的「前N个月」与「1月份」特例。CONTRACTS.md **不在本任务的 writes 内**，故未改，留给拥有该文件的任务（TASK-007/008）补记。",
+    "coverage_after_rework": "返工后：95.5581%（1678/1756 语句，go tool cover -func 口径，采于 f337f88）。pre=当前 master cea6b3c 与 post=f337f88 背对背同窗口各两轮，**四次取值完全相同**——本次返工是纯测试改动（换一条断言 + 注释），不产生新语句。⚠️ 与初版报的 95.5136%（1618/1694）**分母不同**：那时树上只有本任务一个 commit，现在 master 已含 TASK-002/003。两个数字都对，但**只能各自与同树的 pre 比**，不能相减。DoD 门槛 ≥95.5% ⇒ 两批都过。",
+    "suite_after_rework": "返工后：整包 go test 全绿。RUN 计数 pre(cea6b3c)=1013、post(f337f88)=1013，**未变**（本次没有新增测试函数或子测试，只改了一条既有断言的形式）。直方图自洽：504+468+37+4=1013。初版那批（944→975，+31=6 顶层+25 子测试）测自更早的树，见 anchor 说明。",
+    "ablation_after_rework": "返工后重跑 3 个变异，harness = scratchpad/ablate2-TASK-001-dev-m1c3a-a.sh，ABLATE_ANCHOR=f337f88…，隔离副本（git archive | tar -x 到 mktemp -d）。① **V6 现已 KILLED**：把「前十二个月」绕开常量直接插进 periodAlt ⇒ **只有**新的等值断言转红（消息：periodAlt 的组成必须逐字等于「四个既有期次 + cumulativeMonthAlt + 数字月份」），因果干净、不是副作用。② M1/M2 回归复跑，仍分别红在**正向**与**反向**子测试，文案与初版逐字相同 ⇒ 收紧断言没有破坏原有的两处硬卡点区分。主工作区指纹（两文件 sha256 + git status 的 sha256）在开始/3 个窗口/收尾共 5 次校验全同。⚠️ harness 首轮因一行里混入了非 ASCII 字符导致 `rc` 变量名损坏而中止（unbound variable），**属早退未产出任何 KILLED**，改成纯 ASCII 后重跑。",
+    "rework": "REJECTED → 返工一轮（rework_count 1，reason_class=task_defect）。阻断项：profiles_test.go 一行注释里的裸 TASK-007 违反 non_functional[0] 的 Global Constraint。我复核了验证者的计数口径并确认它是对的：**本次新增块两文件合计 6 处任务号引用，5 处带 milestone 前缀、1 处裸**（我最初只在 profiles_test.go 里数得 4 处，把 profiles.go 的新增块算进来才对上 6 —— 口径是两个改动文件的新增块合计）。修复=一行，提交 f337f88 主题锚定 fix(TASK-001):。⚠️ 顺带观察、**未修**：同两个文件里另有 7 处**既有**裸任务号（TASK-004 ×5、TASK-005 ×1、TASK-006 ×1），全部来自更早 sprint 的注释、不在本次新增行内，故按 surgical 原则未动 —— 但这说明该约束在历史注释上是普遍未被执行的，是否统一整改请 Leader 判断。"
+  }
+}

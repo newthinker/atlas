@@ -1,0 +1,75 @@
+{
+  "key_findings": [
+    "🔴 **`余额为` 后的空格在语料里是两种字符，而 Go 的 `\\s` 只覆盖其中一种。** DoD 只说「3 篇带空格」。实测码位：2020-01 / 2020-02 是 `0x20`，**2019 那篇是 `0xa0`（NO-BREAK SPACE）**。Go 的 `\\s` = `[\\t\\n\\f\\r ]`，**不含 U+00A0** ⇒ 写 `余额为?\\s*` 会修好 2 篇、**静默漏掉第 3 篇**。但我接着读 `strip.go:30`：`spaceRE = [ \\t\\x{00a0}]+`，第 59 行统一替换成单个 `\" \"` ⇒ 到模板层两者已经合流、且连续空白已折叠成恰好一个。**⇒ 正则只需 ` ?`，且不能用 `\\s*` 去『保险』。** 因此我**没有改正则去迁就语料**，而是写了一条从 U+00A0 原文出发、经 `stripHTML` 再匹配的断言，把这个跨文件依赖钉住——否则「模板只认 0x20」的正确性依赖 `strip.go` 的折叠规则而没有任何测试连接两者，`strip.go` 改了这里会静默坏掉。",
+    "🔴 **DoD boundary[0] 指定的消融 A1 证不到它想证的东西**（我照做后锚定单跑才发现）。A1 =「把企业锚点改成也能匹配住户句」，跑完转红的**只有** `require.NoError`（`旧称呼认不出会让整个贷款板块抽不出来`），**五条明细断言一条都没执行**——`require` 失败即中止，它下游的断言对这个变异完全不可见。这正是 DoD 自己那句警告描述的情形。⇒ 我另设计 **A2**（把两个作用域的子项字段对调）：值互换、**不报错**，这才是「住户的短期贷款跑进企业字段」那个真实危害的形状，四条明细红且打出互换后的值（hh_short=15200 企业的、corp_short=19800 住户的）。**A2 只覆盖 4/5**——「票据融资」只存在于企业作用域，对调碰不到它，所以我又补 **A2b**（把票据融资映到一个本次调用不涉及的字段，不产生重复赋值因而不报错），`loan_bill_ytd 取到 0` 红。**五条现在全部证明是承重的，我没有把 4/5 报成 5/5。**",
+    "🔴 **对「红在 require.X 上就作废」这条判据本身的细化**（我按它跑完 11 格后发现它会误杀）。团队给的判据是「消融后锚定单跑 + `-v`，若红在 `require.X` 上则该格作废」。我照做，机械判据flag 了 3 格；逐格看 `Error Trace` 行号后，**只有 1 格是真作废**：\n\n- **A1**：红在 `require.NoError`，而本格声称要证的五条明细在它**下游、同一个子测试内** ⇒ 被遮蔽 ⇒ **真作废**。\n- **B1**（删 `parseRatio` 持平特判）：红在 `amount_test.go:567` 的 `require.NoError`，**但那条 require 本身就是「持平⇒0」这个性质**，且另外 3 个子测试仍 PASS（定点红，非连锁）⇒ **有效**。\n- **A6**（moneyRE 只认全角）：红在 `profiles_test.go:928`，证的就是「半角形态仍能抽出来」，全角子测试仍 PASS ⇒ **有效**。\n\n⇒ **正确的问法不是「红在不在 require 上」，而是「本格声称要证的性质，是否落在失败断言的下游」。** 可机械化的代理判据：① 同测试内其它子测试是否仍 PASS（定点 vs 连锁）；② 声称的断言是否位于失败行之后。**建议把这条细化转给正在推广该判据的其它任务**，否则会把 B1/A6 这类有效格误判作废。",
+    "**CRLF 转录（Leader 要求转录，因它写不了我的 DoD）**：description 里的 `shutil.copy` 按字节拷贝 ⇒ 抓下来的快照是 CRLF（两份各 62 个），而仓库 `core.autocrlf=input` 只在**提交时**转 LF ⇒ 本地测的和将来提交的不是同一份。dev-m1c3a-c 在 TASK-004 实撞。**我的处理**：先备份 CRLF 版，转 LF，然后**背对背同窗口两轮**跑本任务 6 个测试的 CRLF 版 vs LF 版——`RUN=22 / FAIL=0` 两组四次完全一致，整包也都绿 ⇒ **结论确实不受影响，这是实测不是采信**。提交后 `git show HEAD:<两份快照> | grep -c $'\\r'` 各为 **0**。⚠️ dev-c 声明的作用域我原样带上：三份快照同爬虫同批语料、`\\r` 全在页脚，**这不构成「CRLF 永远无害」**——`\\r` 确实活到匹配阶段（`spaceRE` 不含它），某天一份 `\\r` 落在数据行的快照就会真的改变结论，而那时没有任何东西会告警。故处方照旧：抓完先转 LF。",
+    "**既有守卫 `TestNoLiteralDirectionWordAtProductionCallSites`（amount_test.go:349）扫的是文件原始内容而非 AST**，因此我在**注释**里写 `newAmount(\"\",\"\",\"\")` 举例说明那个坑时被判红。守卫本身是对的、也响亮，但它的判据覆盖到注释是个假阳面。我改写注释绕开，**没有动那个守卫**。",
+    "**`持平` 原本在 `TestParseRatioRejects` 的拒绝清单里**（与「多增/回落/空串」并列）。本任务把它移出，是一次**有意的语义反转**，不是把守卫改松。理由已留在原地：当时它被拒是因为**不在方向词白名单里**（那时也确实没有模板会把它送进来），现在 `tsfStockRE` 会送它进来且语义明确；**而它仍然不在白名单里**——这条连续性才是关键，由新断言钉住。⚠️ 若不留这段说明，后人会把它「修回去」。",
+    "🔴 **返工轮补上 TASK-002 移交的另外 2 篇（社融**增量**），并给出改法的封闭性论证。** 第 1 轮 DoD 只覆盖 3 篇存量（`tsfStockRE` 的「余额为 」变体），而 TASK-002 移交的是 5 篇——另 2 篇是 2019年 / 2020年1月 **社融增量**报告，同一变体但落在 **`tsfFlowRE`** 上（「对实体经济发放的人民币贷款增加 16.88万亿元」）。**按 DoD 要求先数码位再决定改法**：这 2 处都是 `0x20` 普通空格，**与存量那 3 篇不同**（存量里 2019 年那份是 `0xa0` NBSP）；两者最终都被 `strip.go` 的 `spaceRE` 折叠成单个普通空格，故模板侧统一用「 ?」。⚠️ **只改 `tsfFlowRE` 一条**：全语料 218 篇扫「名称+方向词+空白+数字」这个形态，命中**恰好 2 处**、全在社融增量报告、全是 `0x20`、全是「对实体经济发放的人民币贷款增加」这一项；**金融统计数据报告类 0 处** ⇒ `sectorFlowRE`（存款分部门）与 `scopeTotalRE`（贷款作用域）不受此变体影响，不动它们。**这是范围的封闭性论证，不是「我只找到这些」。**",
+    "🔴 **我上一轮写进代码注释的那条理由是错的，本轮订正（结论不变、理由换掉）。** 裁决约束①原本的理由是「`持平` 一旦进 `directionAlt` ⇒ 落进全局 `dirPat` ⇒ 占比段那 45+ 处『同比持平』全部变成候选 ⇒ `mustMatch` 的『恰好命中一次』退化成多命中报错」。**验证者真跑了危害可达性那一半**（我的 B3 只证明了守卫会响，没证明危害真的存在）：把 `持平` 加进 `directionAlt` 后**全语料结果与未变异逐字相同**。成因：`tsfStockRE` 是「名称 + 余额为? ? + numPat + unitPat + ，同比 + dirPat」，占比句「余额**占**比2.6%」在 **numPat 处即刻失败**——**早于** dirPat，`持平` 在不在词表里对它够不着的那一段毫无影响。**约束本身仍然成立**，理由换成实测支持的三条：① `持平` 没有符号语义（`directionSign` 每项都是 ±1）；② 那两张表多族模板共用；③ 它们被 `TestDirectionSignCoversDirectionAlt` 钉成双射，只加一处必红——**那条既有测试才是真正守住它的东西**。⇒ 我在四处（`amount.go` 注释、`amount_test.go` 注释与断言文案、`profiles_test.go` 注释与断言文案）一并订正，并**保留被证伪原文的引述**（「原说法是…已被实测证伪」），免得后人再提同一个错理由。⚠️ 元教训：**我忠实引用了一条权威给的理由，却没有自己验危害那一半**——「守卫会响」与「危害真的可达」是成对的两半，我只做了前一半。",
+    "🔴 **我报 RUN 分层的方法一直是错的（本 Sprint 第三次，其中两次是我）。** 我用「名字里斜杠的个数」判层级，而**名字自带斜杠的测试**（如 `TestNewAmountRejectsBadNumber` 的子测试名里含 N/A）会被误记成更深一层。⚠️ **求和自洽校验挡不住它**：两种分法**总数完全相同**。本轮实测对照（同一份 -v 输出）：按**祖先存在性**判层级得 L0=554 L1=525 L2=12，按数斜杠得 s0=524 s1=525 s2=38 s3=4——**合计都是 1091**，而分层差了 30 条。⇒ 正确做法：一条 RUN 的层级 = 它的名字逐级去掉最后一段后，**有多少个前缀本身也是出现过的测试名**。本轮起我按这个方法报数。"
+  ],
+  "decisions": [
+    {
+      "decision": "企业作用域锚点用 `(?:企（事）业单位贷款|非金融企业及机关团体贷款)`；**住户侧一个字不改**。",
+      "rationale": "非捕获组是硬要求：`scopeTotalRE` 做的是字符串拼接（`sc.anchorRE.String() + dirPat + numPat + unitPat`），裸交替拼接后结合律错位成 `A|B(dir)(num)(unit)` ⇒ v2 报告里锚点单独命中、三个捕获组全空，取符号的入口收到三个空串后报 unknown direction word（独立 reviewer 照 DoD 原文实现时实撞过）。住户侧不动是复核了 Leader 的实测更正 C5：我在 2019 快照上数得 `住户部门贷款`×1、`住户贷款`×0，现有 `住户(?:部门)?贷款` 已命中，改它是空动作。"
+    },
+    {
+      "decision": "`moneyRE` 用字符类 `[(（]code[)）]` 认两种括号，而不是指望 stripHTML 抹平。",
+      "rationale": "先读 `strip.go` 确认 `punctNormalizer` 只归一半角逗号/分号/全角空格，**不碰括号** ⇒ 全角括号原样到达模板层，这个修法不是空动作。M1/M0 与 M2 共用 `moneyRE`，一处放宽三项同时生效，故三项都写了断言、且每项都断言**余额与同比两个值**——只断言「有值」挡不住把括号整段吞掉的正则（A3 实测：放松成 `.*余额` 后 m2 取到 14.82，那是 M0 的值）。"
+    },
+    {
+      "decision": "「同比持平」在 `parseRatio` **开头**特判，判据是 `dir == directionFlat`；`持平` 不进 `directionAlt`/`directionSign`。",
+      "rationale": "这是 team-lead 2026-08-26 的裁决（方案 1）与三条约束，**已由 Leader 落盘进 `done_criteria.functional[3]` 末尾**，我另把裁决原文逐字转录进 `questions[0].answer` 并标注「非 leader 亲笔」。约束①：进了表 ⇒ `持平` 落入全局 `dirPat` ⇒ 占比段那 45+ 处「同比持平」全部变成候选 ⇒ `mustMatch` 的「恰好命中一次」退化成多命中报错；挡在表外，「数值+单位」的结构要求才继续把它们排除（阴性对照实测：`委托贷款余额占比2.6%，同比持平` 仍不命中，因为「余额」后面是「占」不是数字）。约束③：判据必须是方向词位，**不能**写成「num 为空就返回 0」——那会把「正则没匹上、捕获组为空」这种真失败静默变成 0（B2 消融实测：改成 `num==\"\"` 后两条「仍须报错」的子测试立刻红）。"
+    },
+    {
+      "decision": "`tsfStockRE` 尾部把「数值+%」做成可选组，捕获组编号保持 1=数值 2=单位 3=方向词 4=同比值不变。",
+      "rationale": "`extract.go` 按位取 `m[1..4]`，而 `extract.go` **不在本任务 writes 内**，所以捕获组编号不能动。持平句走这条模板时第 4 组取空串，由 `parseRatio` 特判成 0。已知的轻微放宽：`，同比增长`（有方向词无数字）现在也能匹配，但它随后在 `parseRatio` 里因 `parseUnsignedNumber(\"\")` **响亮报错**，不会静默出 0。"
+    },
+    {
+      "decision": "把两份新快照从 CRLF 转成 LF 后再提交，并背对背实测一次而不是采信「结论不受影响」。",
+      "rationale": "Leader 与 dev-c 都判断危害面很窄（`\\r` 全在页脚），但那是**关于别的快照**的观察。我自己的两份需要自己的证据：CRLF 版与 LF 版在同一窗口各跑两轮，`RUN=22 / FAIL=0` 四次完全一致。这比接受结论多花两分钟，换来的是「测的和交的是同一份」这句话有据可查。"
+    },
+    {
+      "decision": "不动 `TestNoLiteralDirectionWordAtProductionCallSites`，改写自己的注释绕开它。",
+      "rationale": "那个守卫在 `amount_test.go`（本任务 writes 内，改得了），但它拦我拦对了方向——只是判据是文本扫描、覆盖到注释。为一处注释放宽一条真守卫是坏交易；改注释的措辞零成本。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/profiles.go",
+    "internal/hestia/profiles_test.go",
+    "internal/hestia/amount.go",
+    "internal/hestia/amount_test.go",
+    "internal/hestia/testdata/pboc-2019-annual.html",
+    "internal/hestia/testdata/pboc-2026-07-monthly.html"
+  ],
+  "interfaces_exposed": [
+    "const directionFlat = \"持平\"（amount.go，包内）——刻意**不在** directionAlt / directionSign 里；profiles.go 的 tsfStockRE 单独在尾部引用它，不经 dirPat",
+    "parseRatio(dir, num)：dir == directionFlat 时返回 (0, nil)；空方向词与表外方向词仍报错",
+    "loanScopes[企业].anchorRE 现为 `(?:企（事）业单位贷款|非金融企业及机关团体贷款)`（下游若拼接它，非捕获组是前提）",
+    "moneyRE 现认 `[(（]code[)）]` 两种括号；tsfStockRE 现认「余额为」后一个空格与「，同比持平」尾形",
+    "testdata/pboc-2019-annual.html（v1 旧称呼样本）、testdata/pboc-2026-07-monthly.html（全角括号样本），均已转 LF"
+  ],
+  "verification": {
+    "anchor": "🔴 **本 discovery 的自证数字分两批，锚点不同，不可混读。** **第 1 轮锚 `32c054b213eb9b76747beee030b89a6ac007d753`**；**返工轮（epoch 2）终值锚 `983da72eab4e3a165d09430c6c7361b664618daa`**（基点 master `b4d0c9df250ed15104e0fcb3d0b3b3a8ffedb7ee`，采样时 worktree clean）。凡标「返工后」的数字均采于 983da72。",
+    "coverage": "**95.6814%（1706/1783 语句，go tool cover -func 口径，采于 32c054b）**。pre=master `33f3ed7` 与 post 背对背同窗口各两轮，四次取值稳定：pre 1703/1781=95.6204%、post 1706/1783=95.6814% ⇒ **覆盖率不降反升**。DoD 门槛 ≥95.5% ⇒ 通过。⚠️ DoD 里记的基线「95.5%（采于 4a12794，944 条 RUN）」是**更早那棵树**的值，分母已随 TASK-001/002/003/004 合入而变化，不能与本数字相减。",
+    "suite": "整包 `go test ./internal/hestia/ -count=1` 全绿。RUN：pre(33f3ed7) 1037 → post(32c054b) **1064**，+27。直方图自洽：post 519+503+38+4=1064、pre 512+484+37+4=1037；增量 27 = 7 顶层（新增 7 个测试函数）+ 19 一级子测试 + 1 二级。",
+    "gofmt_vet": "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空（均在从 32c054b 抽出的干净树上重跑）。",
+    "no_new_deps": "`git show --name-only 32c054b` 不含 go.mod / go.sum ⇒ 无新增依赖。",
+    "scope": "提交实际改动 6 个文件，与任务声明的 `writes` **逐项一致、无越界**。⚠️ `amount.go` / `amount_test.go` 是经 Leader 裁决后**事前**补进声明的（补声明时我的 worktree 里这两个文件还是零改动，`git status` 可证），不是事后补救。",
+    "crlf": "两份新快照抓下来是 CRLF（各 62 处），已转 LF；提交后 `git show HEAD:<file> | grep -c $'\\r'` 各为 **0**。转 LF 前后做过背对背同窗口 A/B（见 key_findings）。",
+    "ablation": "**11 个变异，有效 KILLED 10、作废 1**。harness = `scratchpad/ablate-final-TASK-005-dev-m1c3a-a.sh`，全部在 `rsync` 出的隔离副本上变异（主工作区一个字节不碰），每格过四道闸：变异生效（模式命中数断言）、`gofmt -e`、`go build`、**RUN 计数 > 0**（防 `-run` 拼错导致 0 条 RUN 的假绿）。每格**锚定单跑** `-run '^Test…$'` 而非看套件红绿。主工作区指纹（profiles.go + amount.go 的 sha256 与 `git status --porcelain` 的 sha256）在开始/每格/收尾共 13 次校验，逐次相同。",
+    "ablation_detail": "A1（DoD 指定，企业锚点加 `|住户部门贷款`）⇒ **作废**：红在 `require.NoError`，五条明细在其下游未执行。A2（补，两作用域子项字段对调）⇒ 四条明细红且值互换、不报错。A2b（补，票据融资改映射）⇒ `loan_bill_ytd 取到 0`。A5（去非捕获组）⇒ 方向词/数值/单位**三个捕获组全空**。A3（moneyRE 放松成 `.*余额`）⇒ m2 取到 14.82（贪婪跨到了 M0 那句）。A6（moneyRE 只认全角）⇒ 半角快照红于 `profiles_test.go:928`，证「扩大而非替换」。A4（去掉 `余额为? ?` 的空格容忍）⇒ U+00A0 与普通空格两个子测试红。B1（删 parseRatio 特判）⇒ 「持平⇒0」子测试红（`amount_test.go:567`），另 3 子测试仍 PASS。B2（约束③，判据换成 `num==\"\"`）⇒ 「空方向词仍须报错」与「表外方向词仍须报错」两条红。B3（约束①，把 `持平` 加进两张表）⇒ 「它不是方向词」与「`持平` 没有泄漏进全局 dirPat」两条红。B4（tsfStockRE 尾部数值改回必选）⇒ 三条持平句红。",
+    "authorization": "scope 由 4 项扩到 6 项（+`amount.go` +`amount_test.go`）与 `持平` 的三条约束，均出自 **team-lead 2026-08-26 的裁决**，非我自行扩大：Leader 已把三条约束落盘进 `done_criteria.functional[3]` 末尾，我另把裁决全文逐字转录进 `questions[0].answer`（开头标注「由 dev-m1c3a-a 从 inbox 转录、非 leader 亲自书写」）。`writes` 的变更走 `update` 通道，`transitions.jsonl` 有审计行。",
+    "code_simplifier": "已按全局规范在 commit 前跑 code-simplifier。结论：**一行都没改**。我用 `git diff --numstat`（23/0、70/1、45/4、279/0）+ `grep` 复核了两条安全属性仍在（`directionAlt` 不含「持平」、特判判据仍是 `dir == directionFlat`），未采信其自陈措辞。",
+    "not_done": "无。四块 functional 全部完成，含经裁决的 functional[3](b)。",
+    "snapshots": "🔴 **两份快照的 manifest 原文件名（第 1 轮的唯一阻断项，本轮补上）**：\n\n  `internal/hestia/testdata/pboc-2019-annual.html`      ← 原 manifest file = `articles/2025092212551494470.html`（title=「2019年金融统计数据报告」）\n  `internal/hestia/testdata/pboc-2026-07-monthly.html`  ← 原 manifest file = `articles/2026081414193264304.html`（title=「2026年7月金融统计数据报告」）\n\n来源目录 `data/hestia-backfill-2026-08-14/`，取法即 description 那段脚本打印的 dst 与 file 对应关系。同 Sprint 先例：TASK-002 记作「(新增，原 manifest file = articles/5837468.html)」。用途是反查原文——验证者查 NBSP 与全角括号时正是靠它走的这一步。两份均已转 LF，提交后 CRLF 各 0。",
+    "coverage_after_rework": "返工后：**95.7007%（1714/1791 语句，采于 983da72）**。pre=master b4d0c9d 与 post 背对背同窗口各两轮，**四次取值完全相同**——本轮是纯正则字面量 + 注释 + 测试改动，不产生新语句。DoD 门槛 ≥95.5% ⇒ 通过。⚠️ 与第 1 轮报的 95.6814%（1706/1783）**分母不同**（其间 TASK-004/006 已合入），不可相减。",
+    "suite_after_rework": "返工后：整包全绿。RUN **1086 → 1091**（+5 = 1 个新测试函数 + 4 个子测试），**按祖先存在性分层**：pre L0=553 L1=521 L2=12、post L0=554 L1=525 L2=12。⚠️ 第 1 轮 discovery 里写的 519+503+38+4 是**数斜杠法**的结果，分层是错的（总数与顶层数不受影响）——正确分法见 key_findings。",
+    "corpus_after_rework": "返工后全量语料实跑（218 篇，经 `extractTSFFlowArticle` / `extractTSFStockArticle`，背对背同窗口各两轮、四次稳定）：**社融增量 40/69 → 42/69**（+2，正是 DoD 点名的 2019年 与 2020年1月 两篇）；**社融存量 69/69 → 69/69 不变**（第 1 轮已从 64/69 提到 69/69）。⚠️ 仪器选择走过一次弯路并已纠正：先用 `Parse(raw)` 得 0/69，那不是「没差异」而是**入口错**——Parse 对社融报告在标题层就拒了；换成 extractTSF*Article 才是验证者用的同一把尺。",
+    "rework": "REJECTED → 返工一轮（rework_count 1，reason_class=task_defect，epoch 1→2）。**唯一阻断项**：functional[0] 后半句要求把 manifest 原 file 名记进 discovery，第 1 轮漏了（验证者全域搜过，两个 id 与 articles/ 各 0 次）——已补，见 verification.snapshots。**其余 7 条 DoD 第 1 轮即 PASS**，全量语料存量 64/69 → 69/69、零回归。返工轮另做两件：① 补 boundary[1] 新增的 2 篇社融增量（Leader 自陈第 1 轮 DoD 覆盖不全，**不算第 1 轮违规**）；② 订正被验证者证伪的那条理由。",
+    "ablation_note_after_rework": "**A1 作废的判断被验证者独立证实**，且它查出了我没查到的真因：一道**既有生产守卫**在源头拦下（loan scope anchors are out of expected order …）。⚠️ 但 DoD 为 A1 预写的解释是错的——它说「若 loan_corp_total_ytd 先红而五条明细没红，说明这五条断言并没有在守护各归各位」；验证者用生成集外的 V1（只对调一对子项映射）证明了**相反**：值互换且无 error，loan_hh_short_ytd 取到 15200（企业的）、loan_corp_short_ytd 取到 19800（住户的）⇒ **五条断言确实在守**。与我补的 A2/A2b 同向。这是本 Sprint 第三次「DoD 指定的消融打不到它以为的那条路」。",
+    "known_gap": "🔴 **自证订正：我在 key_findings 里写的「四处一并订正」暗示了完整性，实际漏了第 5 处。**\n\n被证伪的那句理由在仓库共 **5 处**，返工轮我订正了 4 处，**遗漏 `internal/hestia/profiles.go:198`**：\n  「…理由见 amount.go 的 directionFlat：它一旦进全局词表，占比段那 45+ 处「同比持平」全部变成候选。」\n它**没有**「原说法是…已被实测证伪」的引述包裹，所以仍以**活的断言**形态在陈述那个已被证伪的机制。\n\n⚠️ **危害不止是漏一处**（code-simplifier 指出，我已直读核实）：`grep 全部变成候选` 会同时命中\namount.go:52 的**引述行**与 profiles.go:198 的**活断言行**，两者**形态相同、性质相反** ——\n后人搜到一堆命中，很容易当成「都已订正」而略过那一处真的。\n\n**为什么没有在本轮修掉**：发现时任务已转 `dev_done`，改代码即判定对象漂移；且它不在本轮 diff 的行内。\n**正确修法**（留给 QA 阶段或下个 Sprint）：把该句改成与另外四处一致的形态——保留被证伪原文的引述、\n再写订正后的三条实测理由（① `持平` 无符号语义 ② 两张表多族模板共用 ③ 双射测试才是真守卫）。\n\n**元教训**：我在 commit message 与 discovery 里都写了「四处一并订正」，那是**我数出来的**，但我数的是「我改了几处」，**没有数「一共有几处」** —— 这两个数只有在我先做过全量搜索时才相等，而我没做。⇒ 凡写「全部/一并/共 N 处」这类完整性断言，必须有一次**独立于我的改动**的全量搜索作为依据。"
+  }
+}

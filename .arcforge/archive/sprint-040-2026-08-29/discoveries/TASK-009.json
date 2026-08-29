@@ -1,0 +1,87 @@
+{
+ "task": "TASK-009",
+ "title": "M1c-3a 的 TASK-009：分部门口径守卫——拒绝把当月分部门值装进 *_ytd",
+ "provenance": "全部代码与测试由 dev-m1c3a-b 编写，基于 master b4d0c9df250ed15104e0fcb3d0b3b3a8ffedb7ee。交付 commit 81409c98fa47851185f602378edfe685e08ea7be（⚠️ amend 两次，作废 sha 链 2f57422 → 48ed719 → 81409c9，以最后一个为准）。缺陷现象由独立 reviewer 发现、Leader 全量实测分类（55 篇月报 A/B/C/C'/E 五类）；本任务只做守卫实现。",
+ "key_findings": [
+  "【混装现象逐字复现】在 master b4d0c9d 上、拿掉守卫时对 2023-08 实跑：`err=<nil> n=25`，`loan_flow_ytd=174400`（累计）/ `loan_hh_short_ytd=2320`（8 月当月）、`deposit_flow_ytd=202400`（累计）/ `deposit_household_ytd=7877`（当月）。**四个数与 DoD 声称的逐字相同**，本任务的前提成立。判据是**看到 2320 这个值**，不是「测试红了」。",
+  "【结构判据在全部 9 份快照上成立】锚点之前最近的期次前缀：4 篇季报/年报 = 全年/上半年/前三季度/一季度（全在 cumulativePeriods）、2026-07 与 2025-08 月报 = 前七个月/前八个月（在表）、2023-08 与 2022-08 = 8月份、2020-04 = 4月份（不在表）。两侧（贷款「分部门看」/ 存款「其中，住户存款」）**同一切换点、同一结论**，与 Leader 实测一致。",
+  "【🔴 守卫位置：刻意不前移】C/C' 类（2020-04 / 2022-08）在到达本守卫**之前**就已被既有的「期内合计」守卫拒绝（C 类根本没有累计合计句；C' 类那句「1-8月，人民币贷款累计增加」不被 flowRE 命中——`dirPat` 不含「累计」二字）。**没有把本守卫前移去抢先报错**：既有那条信息（`人民币贷款期内合计 not found among 1 candidate(s) [4月份/人民币]`）指出的成因更根本——这篇报告压根没有累计数据。让更具体的先说话。\n\n⚠️ 这直接影响测试设计：对 C/C' **不能**用「端到端报错了」来证明本守卫覆盖它们，那是**因为错误的理由绿**（把本守卫整个删掉照样红）。故 `TestSectorCaliberRejectsNonCumulativeSamples` 拆两半：① 端到端仍被拒且不产出数据（回归底线）② `checkSectorCaliber` 直调同一份正文，证明**本守卫**也判它非累计。",
+  "【🔴 D4 消融打出 SURVIVED，暴露我自己的一个无守卫决定】`checkSectorCaliber` 的第三种返回「锚点不存在 ⇒ 不表态（return nil）」只写在注释里。变异 D4 把它改成报错，**全套零条红**。这与 test-m1c3a-v2 在 TASK-006 用 N2 发现的形态**同族**：被写进 rationale 的设计价值本身没有守卫。⇒ 补 `TestSectorCaliberStaysSilentWhenNoSectorSegment`，两层断言（直调返回 nil + 端到端错误必须是更具体的那条），重跑 D4 转 KILLED（2 红 / 11 仍 PASS）。",
+  "【合成用例构成最小对时踩到的坑】`TestSectorCaliberIsStructuralNotNumeric` 要「数值一字不改、只翻转期次前缀」。第一版两格的 bridge 都写成「…人民币贷款增加1.36万亿元」，结果**累计那格**因为出现两条合计句而报 `matched 2 sentences`——两格不再是最小对。改用「新增贷款」（`flowRE` 要求币种限定词紧贴「贷款」，故这一句不被合计模板命中），head 里那句才是唯一合计句，两格这才只差前缀一个 token。",
+  "【1 月报不需要特例分支，已验证】`1月份` 在 `cumulativePeriods` 里（TASK-001 加），查表自然命中。测试里 `1月报当月即累计_通过` 与 `当月前缀_拒绝` **只差前缀里的月份数字而结论相反** ⇒ 若实现写成「N月份一律拒」这类形状匹配而不是查表，那一格会红。",
+  "【🟡 契约升级已落地并验证】把 TASK-006 只写在 decision 里的「两种 extractor 拒绝必须可区分」升级成交叉断言（含自己的标志串 ∧ 不含对方的）。**复现了验证者的 N2 变异**（把「合法但走错路」那条 case 改恒 false）：新断言下 KILLED，精确红在三个「合法但走错路」子测试（含 `llm-fallback@v1`），另两个仍 PASS。⇒ 缺口确已闭合。"
+ ],
+ "decisions": [
+  {
+   "decision": "判据用「锚点之前最近的期次前缀查 cumulativePeriods」，不用数值启发式、不用期次黑名单",
+   "rationale": "DoD 指定，且理由成立：数值阈值是拿测量值当判据，会随语料漂移而坏且阈值本身无人守护；黑名单在新增期次时静默失效，失效方向是**放行错数据**。`TestSectorCaliberIsStructuralNotNumeric` 用「数值全同、只翻前缀」的最小对钉住这一点——数值启发式在那两格会得到同一结论。"
+  },
+  {
+   "decision": "取**最近**的前缀，不是第一个",
+   "rationale": "2023-08 同一节里累计句与当月句都有，决定分部门口径的是紧挨着它的那一句。消融 D2（改取 prefixes[0]）KILLED 证明这个词在守。"
+  },
+  {
+   "decision": "锚点不存在时**不表态**（return nil），让 mustMatch / loanScopeSpans 报更具体的错",
+   "rationale": "没有分部门段时「口径」这个问题不适用；而分部门字段是必需的，紧随其后的错误会指名「缺哪个分部门 / 哪个作用域锚点」，比「读不出口径」更具体。⚠️ 这条最初**没有守卫**（D4 SURVIVED），已补测试。"
+  },
+  {
+   "decision": "守卫放在抽合计之后、抽分部门之前，不前移",
+   "rationale": "见 key_findings 第 3 条。前移会让 C/C' 类的错误从「这篇报告没有累计数据」变成「分部门口径不对」，后者是下游症状不是根因。"
+  },
+  {
+   "decision": "sectorPeriodRE 定义在 extract.go 而不是 profiles.go",
+   "rationale": "范围约束：profiles.go 不在本任务 writes 里（与 TASK-006 的 tsfFlowArticleTotalRE 同一情形）。⚠️ 但这次**没有引入分叉风险**：它由 profiles.go 的 `periodPat` 编译，期次词表本身仍只有一份。profiles.go 空出来后可挪回去。"
+  },
+  {
+   "decision": "顺手做了 non_functional 里那条 🟡 契约升级",
+   "rationale": "`extract_test.go` 在本任务 writes 内；且它守的正是我在 TASK-006 亲手写下、又亲手没守住的那条 decision。补法与消融证据见 verification.ablation.N2。"
+  }
+ ],
+ "files_modified": [
+  "internal/hestia/extract.go (+89/-0)",
+  "internal/hestia/extract_test.go (+344/-0)",
+  "internal/hestia/testdata/pboc-2023-08-monthly.html (新增，原 manifest file = articles/2025092212553479819.html)",
+  "internal/hestia/testdata/pboc-2022-08-monthly.html (新增，原 manifest file = articles/2025092212552776983.html)"
+ ],
+ "scope_note": "实际改动**恰好等于**声明的 4 个 writes，无越界。go.mod / go.sum 不在改动里。两份新快照抓取后立即按 core.autocrlf=input 的口径转 LF（CRLF 行数 62 → 0，与既有快照一致），**再**跑任何测试。numstat 取自提交本身 git show --numstat 81409c9。",
+ "interfaces_exposed": [
+  "func checkSectorCaliber(body, anchor, what string) error —— 分部门段口径守卫。三种返回：锚点不存在 → nil（不表态）；锚点前无期次前缀 → 报错；前缀非累计 → 报错。",
+  "const loanSectorAnchor = \"分部门看\" / depositSectorAnchor = \"其中，住户存款\" —— 两侧分部门段锚点。",
+  "var sectorPeriodRE —— 由 profiles.go 的 periodPat 编译，用来找最近的期次前缀。",
+  "⚠️ 对 TASK-010（真跑验收）：本任务后，**月报只有 A 类 28 篇会产出数据**，其余 27 篇响亮失败（人类裁决）。Goal 的「55 篇」在语料层面不可能达成——22 篇报告本身没有累计数据。"
+ ],
+ "handoff": [
+  "🔴 **`pboc-2025-01-monthly.html`（TASK-007 的 writes）交付时仍不在 master**。DoD boundary[0] 要用它测「1 月报 A 类正常产出」那格。我**没有**去抓别人 writes 里的文件（DoD 明确要求），改用合成输入 `TestSectorCaliberIsStructuralNotNumeric/1月报当月即累计_通过` 钉同一条性质。**TASK-007 合入后建议补一格真实快照**。",
+  "E 类真实快照（2022-04，无分部门段）同样不在 testdata 且不在本任务 writes 里，用合成输入覆盖（`TestSectorCaliberStaysSilentWhenNoSectorSegment`）。",
+  "`sectorPeriodRE` 与 TASK-006 的 `tsfFlowArticleTotalRE` 都因 scope 约束落在 extract.go，profiles.go 空出来后可一并挪回。"
+ ],
+ "verification": {
+  "sampled_at_head": "81409c98fa47851185f602378edfe685e08ea7be",
+  "sampling_note": "每个数字都采于**最后一次改动之后**、同一批次统一重采（上一版数字已作废）。覆盖率走背对背 × 同等负载：两棵树同批次交替各跑 2 轮，两轮逐字一致 ⇒ 无漂移。harness 锚点可覆写（ABLATE_REF/ABLATE_MAIN/RESAMPLE_MINE/RESAMPLE_BASE），实际锚点打进输出。",
+  "suite": "1122 条 RUN = 530 顶层 + 580 一级子测试 + 12 二级子测试；FAIL 0（自洽校验 530+580+12=1122）。⚠️ 分层用**缩进**口径（0/4/8/12 四级正则），不是「名字里几个 /」；三级桶实测为 0。",
+  "coverage": "95.8449% (1730/1805)，采于 81409c9",
+  "coverage_backtoback_baseline": "95.7007% (1714/1791)，采于 master b4d0c9df250ed15104e0fcb3d0b3b3a8ffedb7ee，与上一行同批次交替测得",
+  "coverage_delta": "+0.1441pp（语句 +14、覆盖 **+16** ⇒ 新增测试还覆盖到了既有的未覆盖路径）。go tool cover -func 口径 95.7% → 95.8% ⇒ DoD『不低于 95.5%』达标",
+  "coverage_anchor_warning": "🔴 **给验证者**：我的背对背基线锚是 b4d0c9d，而交付时 master 已前进到 b87de0c。**你在 merge 后的 master 上量会得到与 95.8449% 不同的值，那不是我报错了** —— 覆盖率的分母属于整棵树。merge 后我会在验证者的锚上复测一次并补报（TASK-006 那次我这么做了，两边逐字一致）。",
+  "gofmt": "gofmt -l internal/hestia/ 空",
+  "vet": "go vet ./internal/hestia/ 空",
+  "no_new_deps": "go.mod / go.sum 不在改动里（numstat 只有 4 个文件）",
+  "numstat": "extract.go 89/0、extract_test.go 344/0、testdata 2023-08 478/0、testdata 2022-08 438/0 —— **纯新增，0 删除**，取自提交本身",
+  "ablation": {
+   "纪律": "每个变异体一个临时 git worktree（隔离副本），主工作区一个字节不碰；每窗口内 + 收尾校验 sha256 与 git status --porcelain —— 全程未变。四道有效性闸（模式命中 / 内容确实变了 / gofmt -e / 逐字打印 diff）+ 核 RUN 行数。归因按**本 Sprint 已修正版判据**：『本格声称要证的性质，是否落在失败断言的下游』，同时打印 PASS / FAIL 子测试名与失败行号（⚠️ 表驱动下行号跨子测试复用，必须带子测试名）。",
+   "D1 拿掉两侧守卫": "KILLED（2 红 / 6 仍 PASS）。**并直接观察到 DoD 声称的四个错值**：`err=<nil> n=25 loan_flow_ytd=174400 loan_hh_short_ytd=2320 deposit_flow_ytd=202400 deposit_household_ytd=7877`。判据是看到 2320 / 7877，不是「测试红了」。",
+   "D2 取最早的前缀而非最近": "KILLED（2 红 / 2 仍 PASS）⇒ 「最近」这个词确实在守",
+   "D3 查表判据反转": "KILLED（12 红 / 0 PASS，含回归底线四篇季报年报）",
+   "D4 锚点不存在改成报错": "🔴 **第一轮 SURVIVED** ⇒ 补 TestSectorCaliberStaysSilentWhenNoSectorSegment（两层断言）后重跑 **KILLED（2 红 / 11 仍 PASS）**。见 key_findings 第 4 条。",
+   "D5 只守贷款侧": "KILLED（1 红 / 3 仍 PASS）—— 精确红在 B 类存款侧",
+   "D6 只守存款侧": "KILLED（1 红 / 3 仍 PASS）—— 精确红在 B 类贷款侧。D5+D6 合起来证明两侧各自独立被守，不是同一条断言在响。",
+   "N2 复现（TASK-006 的缺口）": "KILLED（3 红 / 2 仍 PASS）—— 精确红在三个「合法但走错路」子测试（含 llm-fallback@v1），『值本身认不出』两格仍 PASS ⇒ 🟡 契约升级确已闭合该缺口。",
+   "全部 7 格在最终 sha 81409c9 上复跑": "7/7 KILLED"
+  },
+  "not_verified_by_me": [
+   "1 月报与 E 类的**真实快照**行为 —— 两份快照不在我 writes 里，用合成输入覆盖（见 handoff）",
+   "月报端到端（Parse 分派）—— 那是 TASK-007，我只测到 extractFields / extract*Section 这一层",
+   "『55 篇月报分 A/B/C/C'/E 五类、28/4/18/4/1』这个分类本身 —— 采信 Leader 的全量实测，我只独立复核了手上 4 份月报快照与 4 份季报年报快照，共 8 篇，结论与分类一致"
+  ]
+ }
+}

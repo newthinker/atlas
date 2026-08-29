@@ -1,0 +1,66 @@
+{
+  "key_findings": [
+    "🔴 **C 类真值是 23，不是 DoD 预测的 22；差值是 `2023年5月金融统计数据报告`。** 我按 DoD 要求没照抄预测数，用 `Parse` 真跑全部 218 篇。那一篇确实无累计数据（`前五个月` / `1-5月` / `累计` 各 **0** 次，五条小标题全是当月），但它的**直接**失败原因是「板块序号不连续」而非「期内合计取不到」。⇒ 这正是为什么分类理由里**必须保留原始解析错误**：只写「该期报告只有当月数」会把那个结构问题盖掉。⚠️ 定位方法值得复用：两把尺（错误串含「期内合计」= 22 / 正文无累计合计句 = 23）放在**同一次运行**里算对称差，一次就指出是哪一篇，不必推理各占多少。",
+    "🔴 **我的第一版判据有真 bug，是被既有测试撞出来的：正向属性是必要不充分的。** 最初判据只有「正文没有累计合计句」⇒ 一个 index 页（`pboc-index-p1.html`，连合计句都没有、`Parse` 失败在 `missing <meta name=\"PubDate\">`）被判成「该期报告只有当月数」——**一句关于它的假话**，而且会把一条真失败从 M1c-4 的清单上抹掉。修正为 `any && !cumulative`：**先证明它确实是一篇有数据的报告**（至少有一条合计句），再说它的数据全是当月口径。⇒ 两个半边各有独家杀手（消融 M5 杀 `!cumulative`、M6 杀 `any`），且**只能在判别器这一层钉**——走 collectSamples 的用例杀不动 `!cumulative` 那半，因为 testdata 里没有 B 类快照（有累计句却仍失败的那种）。",
+    "🔴 **覆盖率下降 0.036pp 的成因逐行查实，而查的过程纠正了我一句假话。** 新增未覆盖只有 `calibrate.go:296` 一处。我最初以为它是「`classifyArticles` 末尾排序比较器的覆盖被我改没了」，于是补了一条排序测试，**并在注释里写「本条补的是那处覆盖」**。实测覆盖 profile 证伪：`sort.SliceStable(res.Unsupported, …)` 的**调用本身**已覆盖，未覆盖的是**闭包体**（`296.56,298.3`），而我那条测试**通过了**——比较器一次都没被调用。查清的机制：C 类条目是在**解析循环里**追加的，那次 sort 位于 `classifyArticles` 末尾、执行得更早；排序结果正确是因为解析循环遍历的 `items` **本身已按期次排好**。⇒ 我把注释订正成实测机制，并保留了原来那句错的说法。**那个比较器现在没有生产者**（社融已受支持、五种 period_type 全放行 ⇒ `classifyArticles` 内部不再往 Unsupported 塞东西），属「配置变了之后暂时不可达、必须留着等下次启用」，与 M1c-3a 的 TASK-007 里 `checkPeriodTypeSupported` 那条错误路径同类。另两条（`:286` / `:318`）**pre 就未覆盖**、非本次引入。",
+    "**`tsf_stock` 的样本来源不止社融报告** —— 年报与 7 节月报（`rule-monthly@v2`）本身就含社融两节。我最初断言 `Len(Samples[tsf_stock]) == 1`（以为只有社融存量报告产它），实跑得 **3**。⇒ 期望值一律实跑填。附带好处：`m2 = 2` 与 `tsf_stock = 3` 两个 n 不相等，这**正是** functional[1] 要的「独立统计」的直接证据，比我原来的写法更有力。",
+    "🔴 **裸任务号引用的真实数量是 9 处，不是转来的 2 处；而且我自己本轮又新增了几处。** Leader 转来的是「`calibrate_test.go:155` 与 `:211` 两处」，那是**只搜 TASK-007** 的结果。我按上个 sprint 的教训跑了**独立于我改动**的全量搜索：改动前 6 处、**改动后 9 处**（差额是我本轮写注释时新引入的）。⇒ **完整性断言必须在最后一次改动之后再搜一次**。已补 **7 处注释**；剩 **2 处在用户可见的输出字符串里**（`calibrate.go:350` / `:491` 的「出自 TASK-010 之前」），Global Constraint 说的是「注释里」，改字符串会变更报告文本与相关断言 ⇒ **未动，报 Leader 裁决**。",
+    "【fix 3后半：代码本来就对，补的是断言】TASK-012 把 `1-N月` 补进 periodAlt 与 cumulativePeriods 之后，`onlyCurrentMonthFlowSentences` 对 2022-07/08/10/11 翻成 false，四篇由 Unsupported 转入 Failures ——**构造上必然而不是碰巧**：该判据复用那两处唯一真相源，而 TASK-012 恰好两处都改了。⇒ 改一个地方（表），下游判据自动跟上，**没有人需要记得去改第二处**。这是当初「判据写成查表而不是匹配错误串」那个决定的一次可验证收益，而在此之前它没有断言守着。team-lead 批准的范围是「只补断言，不改 calibrate.go 逻辑」。",
+    "【🔴 已知缺口，本任务不修】真语料 2022-05 两侧的累计句写作「今年前5个月，人民币贷款累计增加10.87万亿元」，该前缀不在 periodAlt 里（TASK-012 补的是 `1-N月` 一族）⇒ 此刻仍被本判据判成「只有当月数」而归进 Unsupported ——**与 R3 是同一句假话，只是换了个前缀写法**。发现于 M1c-3a 的 TASK-011（诊断器实测）。修它要动 profiles.go，不在本任务 writes 内。测试**刻意不为它加断言**（加了会立刻红，而红的理由不在本任务能改的范围内），只在注释里记明，落点待 team-lead 裁决。"
+  ],
+  "decisions": [
+    {
+      "decision": "「报告本身没有累计数据」的月报归 `Unsupported`（本迭代不解析），不归 `Failures`。",
+      "rationale": "DoD 明确要求这是一个显式决策、不得默认。`Failures` 在报告里的标题是「解析失败（该支持却失败了，M1c-3 入库前要清零）」，`calibrate.go` 顶部注释写着「③ 解析失败 —— M1c-4 要兜的就是这批」。这类报告正文只有当月数、**数据根本不存在**，LLM 兜底也变不出来 ⇒ 归 Failures 等于给 M1c-4 加一批**永远清不了零**的工作量。真语料里这是 **23 篇**。⚠️ 保持四格结构（DoD boundary[0] 要求四格加总 = 总篇数），不新开第五格。"
+    },
+    {
+      "decision": "判别用**正向属性**（复用 `cumulativePeriods` 唯一真相源），不用错误串匹配；且必须是 `any && !cumulative` 两个条件。",
+      "rationale": "错误文本会随实现措辞改动而失配，「这篇有没有累计口径的合计句」是**报告本身的性质**。复用 `loanFlowRE`/`depositFlowRE` 捕获前缀 + `cumulativePeriods` 查表，与 `extract.go` 的 `selectRMBCumulativeFlow` 问的是同一个问题（「这个前缀算不算累计」），自己在 calibrate 里另列一份名单会在 `profiles.go` 加新前缀时静默分叉。`any` 那半是实撞出来的（见 key_findings：index 页被误判），**不是设想的边界**。"
+    },
+    {
+      "decision": "分类理由里**保留原始解析错误**（`err.Error()`）。",
+      "rationale": "分类用的属性（有没有累计句）与「这篇为什么解析失败」是两件事。真语料里 `2023年5月` 判为本类而直接错误是「板块序号不连续」——不带上原错误，那个结构问题会被分类标签盖掉，而它是一个独立的、值得有人看见的问题。消融 M4（去掉 `err.Error()`）精确红在对应断言上。"
+    },
+    {
+      "decision": "`TestCollectSamplesIgnoresNonFinanceKinds` **转正例并更名** `TestCollectSamplesParsesNonFinanceKinds`，三分类夹具的「类 1」换成真正的 C 类篇目、社融两篇改给真实文件。",
+      "rationale": "照仓库里连续两次的先例（TASK-004 对季报、M1c-3a 的 TASK-007 对月报）：这类测试**此前断言的行为如今恰好相反，最容易被后人当过时测试删掉**，而它守的东西没变——「社融两篇不得从表上消失」——只是从「不解析所以进另一格」变成「照常解析，文件缺失就是真失败」。来历留在原地。"
+    },
+    {
+      "decision": "渲染断言的锚从「社融种类名」换成分类理由里的「只有当月数」，并记下这是**同一手法第二次失去对象**。",
+      "rationale": "那条断言最初锚在 `\"monthly\"`（夹具文件名刻意不含该词以防平凡满足，消融验证过）；TASK-007 让月报受支持后我换成了社融两种；本任务让社融也受支持，对象**又一次消失**。防平凡满足的手法本身仍然成立，所以换锚而不是删断言——新锚「只有当月数」只可能由 `writeParseFailures` 渲染那条 Err 时产生，文件名/期次/别的错误文本里都不会出现。**换对象要留痕，别让第三个人以为它一直如此。**"
+    },
+    {
+      "decision": "2 处在**用户可见输出字符串**里的裸任务号不动，报 Leader 裁决。",
+      "rationale": "Global Constraint 的原文是「**注释里**引用任务编号带 milestone 前缀」。这 2 处是渲染进标定报告的正文（`⚠ manifest 没有 reconcile 对账摘要（出自 TASK-010 之前）`），改它会变更用户可见输出并可能撞既有断言 —— 那超出本任务的 DoD 所要求的范围。**报告而不擅自动**，与我把 `calibrate_test.go` 的耦合在派发前报给 Leader 是同一处理。"
+    },
+    {
+      "decision": "消融补 P4/P5「只动路由不动判据」两格，因为 P1/P2 红在前提行",
+      "rationale": "P1/P2（打坏判据本身）确实 KILLED，但红的是两条『用例前提』的 require —— 前提先中止，①② 根本没被执行 ⇒ 它们**没有**证明 ①② 有杀手。判据是「本格要证的性质是否落在失败断言的下游」，不是「红了就算数」。补 P4（C 类改塞进 Failures）与 P5（去掉判据这一半）后，前提保持绿、①② 各自定点红，才真正把两条钉住。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/calibrate.go",
+    "internal/hestia/calibrate_test.go"
+  ],
+  "interfaces_exposed": [
+    "onlyCurrentMonthFlowSentences(text string) bool（calibrate.go，包内）—— 判「有合计句但无一条累计口径」；两个条件缺一不可",
+    "classifyArticles 不再按 kind 过滤：社融存量/增量进入解析流程，字段计入 Samples/Records",
+    "CalibrateResult.Unsupported 的新住户：只有「报告本身没有累计数据」这一类（社融与 monthly 均已受支持）"
+  ],
+  "verification": {
+    "anchor": "全部自证数字采于**最后一次改动之后**的 commit `fc41da2e8560383c27b81cf49b5b95e12c189e80`（分支 task/TASK-010-m1c3a，基点 master `2ec9811b6c7339a4bfe295b815997ce7967de675`，采样时 worktree clean）。⚠️ 该 commit 是 `--amend` 后的最终 sha，此前的 `4c7b85f…` **已作废**、从未对外报出。",
+    "coverage": "**95.6570%（1740/1819，采于 fc41da2）**，pre=`2ec9811` 为 95.6930%（1733/1811），背对背同窗口各两轮、四次稳定。**DoD 判绝对值 ≥95.5% ⇒ 通过**。相对 pre 降 0.036pp，逐行成因见 key_findings（唯一新增未覆盖是那个没有生产者的排序闭包）。⚠️ DoD 原文记的「95.5%，采于 4a12794，944 条 RUN」是更早的树，分母早已变化，不可相减。",
+    "suite": "整包全绿。RUN **1144 → 1150**（+6 = 6 个新测试函数，均无子测试故 L1 不变），**按祖先存在性分层且对每个斜杠位置都试**：pre `L0=534 L1=598 L2=12`、post `L0=540 L1=598 L2=12`。⚠️ pre 的分层与 test-m1c3a-v2 用两把独立的尺算出的数**逐项一致**——这也是对我上轮那个分层 bug 已修好的交叉验证。",
+    "gofmt_vet": "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空（在从 fc41da2 抽出的干净树上重跑）。",
+    "no_new_deps": "`git show --name-only fc41da2` 不含 go.mod / go.sum。",
+    "scope": "改动 **2 个文件，与声明的 2 项 `writes` 逐项一致、无越界**。合入后用**本 sprint 时间窗**（`--since=2026-08-25 --grep=TASK-010 --all`）复核四个实作 commit `fc41da2`/`8bc2884`/`7084e55`/`e133e51` 的 `--numstat` 文件并集，恰为 `calibrate.go` + `calibrate_test.go`。⚠️ 首次复核我用的是不带时间窗的 `--grep=TASK-010`，它把**归档里旧 sprint 同名任务**的 commit 也算了进来（一次打出 27 个文件，含 `cmd/atlas/`、`internal/prism/` 等根本不属于本任务的路径）；同一次 grep 还命中了 `1d71ce3 feat(TASK-007)`，只因其 commit body 里提到 TASK-010。⇒ **按 commit message 找「某任务的改动」时，作用域默认是整个仓库史，不是本 sprint**；越界自查必须先把作用域钉住，否则得到的是一个虚高且看起来很像回事的文件列表。",
+    "corpus": "真跑全部 218 篇（锚 fc41da2）：社融存量 **69/69** 通过；社融增量 **42/69**；金融统计 **80 = 50 通过 + 23 C 类 + 7 仍算失败**。⚠️ 这三行是本任务「放行社融」的直接效果证据：此前社融 138 篇对报告的贡献恒为 0。",
+    "ablation": "**6 个变异全部有效 KILLED**（隔离副本 rsync 拷贝、主工作区一个字节不碰；每格过四道闸：变异生效断言 / `gofmt -e` / `go build` / **RUN>0**；每格**锚定单跑**；主工作区指纹每格校验）。M1 加回社融硬过滤、M2 去掉 `any` 半边、M3 取消 C 类分流、M4 去掉原始错误、M5 `cumulativePeriods` 查表恒 false、M6 去掉 `any` 半边（单元层）。⚠️ **M2 与 M5 初判被机械闸 flag，按修正判据逐格核实后均有效**：M2 红在 `require.Len(got.Unsupported, 1)` —— **那条 require 就是该格要证的性质**（去掉 `any` 后 index 页也进这一格 ⇒ 计数变 2）。M5 首轮**瞄错了测试**（夹具里没有「解析失败且含累计句」的篇目 ⇒ SURVIVED 是真信号），重瞄到判别器单元测试后精确转红。",
+    "ablation_extra": "另做一格**非消融**的验证：把 `items` 的排序去掉，`TestCollectSamplesSortsUnsupportedByPeriod` 精确转红 ⇒ 该测试确实在守「本迭代不解析按期次升序」这条性质，尽管它并非由那个未覆盖的比较器保证（见 key_findings 第 3 条）。",
+    "code_simplifier": "已按全局规范在 commit 前跑，其回复无信息量（自称第十一次、无新信息）。**我未采信自陈，直接看载体**：`git diff --numstat` 与我交付前一致，并 grep 复核四条硬约束仍成立（`any && !cumulative` 在、分类理由带 `err.Error()`、硬过滤未被加回、转正例的来历段落仍在）；主仓库 `internal/hestia` 未被触碰。",
+    "not_done": "2 处裸任务号在用户可见输出字符串里（`calibrate.go:350` / `:491`），未动，理由见 decisions —— 需 Leader 裁决是否属于「注释」这条约束的射程。",
+    "ablation_fix3": "隔离副本 5 格逐格预声明：P1 判据不查 cumulativePeriods / P2 判据恒 false → KILLED 但红在前提；P4 路由把 C 类塞进 Failures → 只红 ②（前提绿）；P5 去掉判据这一半 → 只红 ①（前提绿）；P3 失败时也塞记录 → 只红 ③。",
+    "fix3_head": "e133e519b1b13730a9a1f00dd9ab62cb6ec1da02（分支 task/TASK-010-m1c3a-fix2，基于 master 17c8dca）；gofmt 空 / vet 空 / 测试全绿 / 覆盖率 95.9%",
+    "merged": "已合入 master **30abe8aaf52142708ed907af1e32e66e6e204b9c**（merge commit `30abe8a`，2026-08-29 11:36，由 leader 执行）。**内容判据**（逐文件 blob，非 grep 符号）：`calibrate.go` master 与分支同为 `890fe7db68833dc91686b4d895d6dad64cd88bf5`（实现侧在 `2a33511` 就已合入），`calibrate_test.go` 两侧同为 `2bd43588b3264bb5e2515c5c0da5b6d9deb76dce` —— 该值是我在 merge **之前**就向 leader 预先声明的判据，事后逐字命中。⚠️ **在合入后的 master 上重采一次自证数字**，因为验证者用的锚是这里、不是 `fix3_head` 那个分支：整包全绿（exit 0）、`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空（exit 0，零行输出）、覆盖率 **95.8824%（1793/1870，从 profile 直接数，独立于 `go tool cover` 的四舍五入 95.9%）**。⚠️ **分母由 `fix3_head` 的 1819 涨到 1870**，成因是并行任务的代码进了同一个包 —— **覆盖率的分母属于整棵树，不属于本任务**，故本行与 `coverage`/`fix3_head` 两行**不可相减**，三者各自锚在自己的树上。采样时 `internal/hestia` 工作树干净（`git status --porcelain -- internal/hestia` 零行；仓库根的 10 行 `??` 全是 `.arcforge/` 未跟踪文件）。"
+  }
+}

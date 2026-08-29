@@ -1,0 +1,51 @@
+{
+  "id": "TASK-003",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "extractor 取值域与必填集：新增 4 个值",
+  "description": "**AD-1**。本任务是 TASK-004 / TASK-006 的前置——它们要返回/消费这些值。\n\n## 为什么不复用现有 extractor\n\n`requiredFields` 是 `completeness` 的唯一依据。\n\n- 月报复用 `rule@v1` ⇒ 每篇恒报「缺 2 个字段」（`fx_reserve` / `fx_rate`）\n- 社融独立报告复用 `rule@v1` ⇒ 每篇恒报「缺 27 个字段」\n\n而那些字段**在那种报告里根本不存在**，不是缺失，是 absent-by-design。\n把 by-design 的缺席记成 failed，`completeness` 这个指标就废了。\n\n## 六个 extractor 与字段数\n\n| extractor | 适用 | 篇数 | 字段数 |\n|---|---|---|---|\n| `rule@v1` | 季报/年报含外汇节（含 2 篇 3 月报） | 23 | 27（现有） |\n| `rule@v2` | 季报/年报 + 社融两节 | 4 | 54（现有） |\n| **`rule-monthly@v1`** | 4/5 节月报 | 46 | **25** = 27 − fx_reserve − fx_rate |\n| **`rule-monthly@v2`** | 7 节月报（含社融） | 7 | **52** = 54 − 同两个 |\n| **`tsf-stock@v1`** | 社融存量独立报告 | 69 | **18** |\n| **`tsf-flow@v1`** | 社融增量独立报告 | 69 | **9** |\n\n**字段数自校验（Leader 探针实测，非推算）**：\n货币 6 + 存款 7 + 贷款 10 + 利率 2 + 外汇 2 = **27**；27 + 社融 27 = **54**。\n\n## 本任务的边界（刻意的、已知的）\n\n⚠️ **本任务加完之后，没有任何生产代码会返回这四个新值** —— `detectExtractor` 认它们\n是 TASK-004，`extractFields` 消费它们是 TASK-006，`Parse` 分派是 TASK-007。\n\n这是刻意的分层，但它踩在一个已知盲区上：**断言写对了、全绿，但它测的函数没有生产\n调用方**。故本任务的 discovery 必须显式写明「新分支此刻无生产调用方，由 TASK-004/006\n接上」，别让后人从「测试全绿」推断它已在生产路径上。\n\n⚠️ **社融两种 Observation 不能直接 `Save`**：同一期的三篇共享 `(period, period_type)`\n业务键，会互相覆盖。合并成一个完整观测是 M1c-3b 的事，本迭代不入库。这条要写进注释。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/types.go",
+    "./internal/hestia/required.go",
+    "./internal/hestia/required_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`validExtractors` 增 4 个值：`rule-monthly@v1`、`rule-monthly@v2`、`tsf-stock@v1`、`tsf-flow@v1`。\n\n常量命名与定义位置与现有 `extractorV1` / `extractorV2`（`profiles.go:208-209`）保持一致的风格——⚠️ 但 `profiles.go` 本 wave 被 TASK-001 占用，**新常量请定义在 `types.go`**，并在 `profiles.go` 那两行附近**不做任何改动**。",
+      "`requiredFields` 增 4 个分支，字段数分别为 **25 / 52 / 18 / 9**。\n\n🔴 **全部从模板表派生，禁止手写字段清单**（沿用 `tsfSectionFields` 的做法）。`required.go` 头部注释已记明理由：模板表才是事实，手抄清单/前缀判断会先错。",
+      "`requiredFields` 返回的切片必须是 `Clone` 或新建，**不得交出底层数组**（`fieldOrder` 是 DDL、INSERT 列、白名单的共同真相源，现有 `extractorV2` 分支已按此处理）。"
+    ],
+    "boundary": [
+      "🔴 **月报必填集 = 对应季报必填集精确减去 `fx_reserve` 与 `fx_rate` 两个字段**。\n\n验收断言**差集恰好是这两个**，而不是只断「数量少 2」——少 2 个的实现有很多种，其中绝大多数是错的。\n\n```\nsetDiff(requiredFields(rule@v1), requiredFields(rule-monthly@v1)) == {fx_reserve, fx_rate}\nsetDiff(requiredFields(rule@v2), requiredFields(rule-monthly@v2)) == {fx_reserve, fx_rate}\n```\n且反向差集为空（月报必填集不得含季报没有的字段）。",
+      "`tsf-stock@v1` 与 `tsf-flow@v1` 的键集**并集 == `tsfSectionFields()` 的 27 个键**，且两者**交集为空**。双向包含断言，不是只断数量 18+9=27。\n\n（18 + 9 = 27 这个等式成立不代表键集对——两个错误的 18/9 划分同样满足它。）",
+      "未知 extractor 仍返回 `nil`：`llm-fallback@v1` 的既有行为**一字不变**，`TestRequiredFieldsRejectsAmbiguousExtractor` 保持绿。"
+    ],
+    "error_handling": [
+      "`checkEnum` 的错误信息由白名单**本身**拼出（既有机制，不要另抄一份）。新增 4 个值后错误信息自动含它们——加一条断言防回归：把一个非法 extractor 喂给校验，错误信息里应逐字出现全部 6 个合法值。\n\n理由（`types.go` 现有注释）：抄一遍的版本会在下次加抽取器时静默过期——白名单放行了新值，错误信息却还在说旧的三个，而那条信息正是调用方判断自己该填什么的唯一依据。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-003`，不要只写 `TASK-003` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-c",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "cea6b3cb4c172c17adea7cf8a3a224b605f75d93",
+    "discovery_sha256": "75b55b9ccd250fb8b54ed4fa7dcb085b969c6d4bbcc9cab13d62e007dfbe15ea",
+    "at": "2026-08-26T00:12:15Z"
+  },
+  "verifier": "test-m1c3a-v2"
+}

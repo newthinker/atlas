@@ -1,0 +1,68 @@
+{
+  "id": "TASK-007",
+  "status": "accepted",
+  "rework_count": 0,
+  "assignment_epoch": 1,
+  "title": "parseTitle 加 kind、Parse 三路分派、删 monthly 分支",
+  "description": "**AD-4 + AD-5**。前六个任务的**汇合点**：所有零件都已就位，本任务把它们接进 `Parse`。\n\n## 三处改动\n\n**1. `titleRE` 认三种报告，`parseTitle` 加 kind 返回值**\n\n```go\nconst (\n    kindFinance  = \"金融统计数据报告\"\n    kindTSFStock = \"社会融资规模存量统计数据报告\"\n    kindTSFFlow  = \"社会融资规模增量统计数据报告\"\n)\nfunc parseTitle(title string) (period, periodType, kind string, err error)\n```\n\n签名变更是编译错误，调用点由编译器逐个点出。\n\n⚠️ `backfill_reconcile.go` 的 `backfillPeriodOf` 早就认三种了，但它服务对账、返回\n`(period, kind)` 不返回 periodType。**本任务不强求两处合一**（那会扩大 scope），\n但请在注释里记一句「两份并行解析，期末月约定必须同源」。\n\n**2. `Parse` 按 kind 三路分派**\n\n```go\nswitch kind {\ncase kindFinance:\n    secs := splitSections(stripHTML(raw))\n    extractor, err = detectExtractor(secs, periodType)   // ← TASK-004 的新签名\n    values, err = extractFields(secs, extractor)\ncase kindTSFStock:\n    extractor = extractorTSFStock\n    values, err = extractTSFStockArticle(stripHTML(raw))  // ← TASK-002\ncase kindTSFFlow:\n    extractor = extractorTSFFlow\n    values, err = extractTSFFlowArticle(stripHTML(raw))\n}\n```\n\n⚠️ `extractor` 的探测（`detectExtractor`）只对 `kindFinance` 有意义——另两种直接赋值。\n\n**3. 删 `checkPeriodTypeSupported` 的 monthly 分支**\n\n🔴 **删分支而不是删函数**（`parse.go:219-224` 的原话）：穷举 switch 的价值是\n「新增第六种 period_type 会由 `TestEveryPeriodTypeHasAnExplicitSupportDecision`\n逼人明确表态」。函数删了这道防线就没了。\n\n同时更正 `parse.go:229` 那条把形态写成「1-5月」的注释——55 篇实测已推翻它\n（真实形态是「前八个月」这类中文数字前缀）。\n\n## 抓两份快照\n\n```bash\ncd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas\npython3 - <<'EOF'\nimport json, shutil, os\nD = 'data/hestia-backfill-2026-08-14'\nm = json.load(open(D + '/manifest.json'))\nfor title, dst in [('2025年1月金融统计数据报告','pboc-2025-01-monthly.html'),\n                   ('2025年3月金融统计数据报告','pboc-2025-03-monthly.html')]:\n    a = next(x for x in m['articles'] if x['title'] == title)\n    shutil.copy(os.path.join(D, a['file']), os.path.join('internal/hestia/testdata', dst))\n    print(dst, '<-', a['file'])\nEOF\n```\n\n## 可用的既有快照（前面任务已抓，你只读不写）\n\n`pboc-2025-08-monthly.html`（5 节）、`pboc-2020-04-monthly.html`（4 节）、\n`pboc-2026-07-monthly.html`（7 节）、`pboc-2020-q1q3.html`（5 节季报）、\n`pboc-2019-annual.html`、`pboc-2025-08-tsf-stock.html`、`pboc-2025-08-tsf-flow.html`。\n\n---\n\n## 🔴 抓快照后必须先转 LF 再跑测试（dev-m1c3a-c 在 TASK-004 实撞，Leader 复核确认）\n\ndescription 里那段 `shutil.copy` 是**按字节拷贝**，而产物原文含 CRLF（实测 `2025年8月金融统计数据报告` 有 **62 个 CRLF**）。\n仓库 `core.autocrlf=input` 只在**提交时**把 CRLF 转成 LF。\n\n⇒ **「你测的文件」和「提交进去的文件」不是同一份** —— 本地跑测试用的是 CRLF 版，合入后是 LF 版。\n既有快照全部是 LF（CRLF 行数 0），所以这个差异只出现在新抓的快照上。\n\n**抓完立刻规范化，再跑任何测试**：\n\n```bash\n# 抓完后，对每份新快照\nperl -i -pe 's/\r\n/\n/g' internal/hestia/testdata/<新快照>.html\n# 核实：应输出 0\ngrep -c $'\r' internal/hestia/testdata/<新快照>.html\n```\n\n⚠️ dev-m1c3a-c 在 TASK-004 提交前主动规范化并**重跑了全套**，所以那三份快照进 master 时 CRLF 行数是 0。\n你若不做这一步，本地全绿而合入后行为存疑，排查成本远高于这一条命令。\n\n---\n\n## 🔴 `parseTitle` 签名变更的调用点已枚举（Leader 在派发前跑，dev-m1c3a-c 建议）\n\n`parseTitle` 加第三个返回值是编译级破坏。**全部调用点（`grep -rn \"parseTitle(\" internal/ --include=\"*.go\"`）**：\n\n| 位置 | 归属 |\n|---|---|\n| `parse.go:49`（定义）/ `parse.go:171` | ✓ 你的 `writes` |\n| `parse_test.go:57 / :75 / :100 / :321 / :356`（5 处） | ✓ 你的 `writes` |\n| **`calibrate.go:282`** —— `_, periodType, err := parseTitle(title)` | 🔴 **已为此把 `calibrate.go` 加进你的 `writes`** |\n| **`calibrate_test.go:635`** —— `TestCollectSamplesDoesNotPrejudgeUnparseableTitles` | 🔴 **已一并加进 `writes`**，理由见下 |\n\n### 为什么 `calibrate_test.go` 也进来了（dev-m1c3a-a 派发前独立复核发现）\n\n`calibrate.go:278-282` 的 `unsupportedPeriodType` 守着一条**语义**，而 `calibrate_test.go:635` 的 `TestCollectSamplesDoesNotPrejudgeUnparseableTitles` **直接钉着它**：\n\n> 标题 `parseTitle` 认不出时**不预判**，照常读文件交给 `Parse`。\n> 「山西省2024年8月金融统计数据报告」这类分行报告若在这里照着 manifest 标题预判，\n> 就会被静默归进「本迭代不解析 monthly」那一格 —— **一篇本不该在语料里的文章从此不再有人看**。\n\n两种可能：① 你的改动在该点**行为等价** ⇒ 那条测试保持绿，你不必动 `calibrate_test.go`；\n② 「本迭代不解析 monthly」这一格的语义变了 ⇒ 那条测试要跟着改。\n\n⚠️ **加进声明是零成本的事前声明**；若等到 `in_progress` 才发现要改它，leader 已失去写权，只能走 `blocked_clarification` 绕一圈（TASK-005 实撞过，花了一个来回）。\n\n⚠️ `calibrate_test.go` 同时是 **TASK-010（wave 5）** 的 `writes`。你是 wave 4，在它之前；TASK-010 的 `dependencies` 含本任务，串行不冲突。**只改与 `parseTitle` 签名相关的部分。**\n\n### 枚举的完整性（dev-m1c3a-a 独立复核，Leader 确认）\n\n除 `grep \"parseTitle(\"` 之外它补了一路：**不带括号的引用**（防「把函数当值传」的写法漏检）。\n实测 5 处**全是注释**，无函数值 / 赋值 / 传参 ⇒ **上表的调用点就是全部。**\n\n⚠️ `calibrate.go` 同时是 **TASK-010（wave 5）** 的 `writes`。你是 wave 4，在它之前；\nTASK-010 的 `dependencies` 含本任务，串行不冲突。**你只改这一行调用点，别做 TASK-010 的事**\n（放行社融两种 kind、月报四类分流都归它）。\n\n### 为什么派发前做这一步\n\nTASK-004 就是因为 DoD 少列了一个受影响文件（`extract_test.go:343`），导致\n**TASK-006 从 wave 2 顺延到 wave 3、关键路径 5 层变 6 层**。\n那个代价的直接起因不是改动本身的固有需求，而是拆任务时没跑一条 `grep`。\n\n⇒ 本条即 dev-m1c3a-c 给出的通则在本任务上的应用：\n**凡 DoD 写了「签名变更」的任务，拆的时候把调用点枚举进 description。**\n\n---\n\n## 🔴 消融归因判据（**已修正版**，原版会误杀有效格）\n\nLeader 曾推广过一条：「消融后锚定单跑 `-v`，若红在 `require.X` 上则该格作废重设计」。\n**后半句是充分条件的误用**——dev-m1c3a-a 在 TASK-005 上把它做成机械闸跑完 11 格，\nflag 了 3 格，逐格看 `Error Trace` 行号后**只有 1 格是真作废**：\n\n| 格 | 红的位置 | 判定 |\n|---|---|---|\n| A1 | `require.NoError` | ❌ 真作废——五条明细在它**下游、同一子测试内**，被遮蔽 |\n| B1 | `amount_test.go:567` `require.NoError` | ✅ **有效**——那条 `require` **就是**「持平⇒0」这个性质本身；同测试其它 3 个子测试仍 PASS |\n| A6 | `profiles_test.go:928` `require.NoError` | ✅ **有效**——它证的就是「半角仍能抽出来」；全角子测试仍 PASS |\n\n### 正确的问法\n\n> **本格声称要证的性质，是否落在失败断言的下游？**\n\n**两个可机械化的代理**：\n① 同测试内其它子测试是否**仍 PASS**（定点失败=有效 vs 连锁失败=可疑）；\n② 你声称的断言是否**位于失败行之后**（在之后=被遮蔽；在之前或就是那条=有效）。\n\n⚠️ 误杀的代价是让你重新设计一个本来就对的消融。\n\n### 配套两条（本 Sprint 实测）\n\n- **核 RUN 行数防假绿**：锚定成 `^Top$/^Sub$` 并确认 `RUN > 0`。`-run` 拼错时 0 条 RUN 也是 `rc=0`，会被读成「单跑通过」。\n- **锚定单跑也要在隔离下做**：某条守卫单跑 PASS 而套件红，可能只因它**先跑并污染了后面的**——若它排在最后就会 SURVIVED（test-m1c3a-v2 在 TASK-003 实测）。\n\n### 元教训\n\n原判据从 **TASK-004 的 M1 一个场景**导出（那次确实是遮蔽），推广时变成了充分条件 ⇒ **处方比证据宽**。\n**你收到任何处方（包括本 DoD 里的）时，问一句「它从哪几个场景导出？我这个场景在里面吗？」**\n### 🔴 代理 ① 的边界（dev-m1c3a-b 照它跑才发现，Leader 采纳）\n\n代理 ①「同测试内其它子测试是否仍 PASS」**在「全部子测试共享同一个性质」时会误导**。\n\n实例：某变异让 4 个子测试**全红**，按代理 ① 的字面读法应判「连锁失败、可疑」。\n但那 4 个**不是 4 个不同性质，是同一个性质的 4 个输入**\n（`tsf-stock@v1` / `tsf-flow@v1` / `rule@v3` / 空串 都该报错）——\n变异让它们全部不报错，**全红正是预期结果**。\n\n真正的定点证据在别处：该测试末尾有一个**表外的反向对照循环**\n（四个白名单值 `assert.NoErrorf`，不是子测试、不出现在 `--- PASS:` 行里），\n它**仍然通过** ⇒ 失败精确落在「该报错的那 4 格」，没有外溢。\n\n⇒ **限定**：代理 ① 里的「其它子测试」必须是**其它性质**的子测试。\n当一组子测试是**同一性质的多个输入**时，代理 ① 不适用 —— 改看**代理 ②**（声称的断言是否在失败行之后）\n与**表外对照**（非子测试形式的断言是否仍通过）。\n\n⚠️ **元教训（第二次）**：代理 ① 是从 A1/B1/A6 三个场景导出的，\n**那三个的子测试恰好各测不同性质** ⇒ 又一次「处方比证据宽」。\n这次被它约束的人照它跑、发现了它的边界，并把边界报了回来。\n\n---\n\n## 🔴 报 RUN 层级分解时：按**祖先存在性**判层级，不要数名字里的 `/`\n\n本 Sprint 这个错**出现了三次**（验证者 1 次、同一个 dev 2 次）。\n\n名字**自带斜杠**的测试会被误记成更深层级：\n```\nTestNewAmountRejectsBadNumber/\"N/A\"\nTestScanBackfillPageDetectsTagCaseChange/第_0_行的_<a>/</a>_变大写_⇒_报错\n```\n\n🔴 **求和自洽校验挡不住它**：两种分解**都等于同一个总数**（错的是同一总数在各档之间的\n**再分配**）⇒ 校验恒过，**反而给了作者信心把错数写进报告**。\n\n**可操作判据**：问「**我这个仪器出错时，总数会跟着变吗？**」答「不会」⇒ 自洽校验对它零信息量。\n\n⚠️ **这条此前只写在 `wisdom/learnings-leader.md` 里——那是 dev 读不到的地方**，\n所以它在同一个 dev 身上重复了两次。验证者指出后放到这里。\n**教训要放在读它的人能读到的地方，不是记录的人方便的地方。**\n\n\n⚠️ **限定要两条，只写①收方会卡住**（test-m1c3a-v2 独立撞到同一处后补）：\n\n① 「其它子测试」必须是**其它性质**的子测试；\n② **表外对照要用「失败行清单」判，不能用 PASS 列表** —— 表外对照（非子测试形式的断言）\n   **压根不出现在 `--- PASS:` 行里**。只写①的话，收方会去 PASS 列表里找那个对照，\n   找不到，然后卡住。\n\n   实例：某变异的失败行清单是 `[1197]`，而反向对照循环在 `:1209-1213`\n   ⇒ **清单里没有它们 ⇒ 对照仍通过、无外溢**。这是读法，不是额外跑一次。\n",
+  "wave": 4,
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/parse.go",
+    "./internal/hestia/parse_test.go",
+    "./internal/hestia/testdata/pboc-2025-01-monthly.html",
+    "./internal/hestia/testdata/pboc-2025-03-monthly.html",
+    "./internal/hestia/calibrate.go",
+    "./internal/hestia/calibrate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "抓两份快照（1 月报特例、3 月报 6 节）。`parseTitle` 认三种报告并返回 kind；不认识的标题仍报错，错误信息**列出三种形态**。\n\n覆盖用例至少含：`2025年8月金融统计数据报告`→(2025-08, monthly, kindFinance)、`2025年8月社会融资规模存量统计数据报告`→(2025-08, monthly, kindTSFStock)、`2025年前三季度社会融资规模增量统计数据报告`→(2025-09, q1_q3, kindTSFFlow)、`2025年社会融资规模存量统计数据报告`→(2025-12, annual, kindTSFStock)。",
+      "`Parse` 按 kind 三路分派（见 description）。`detectExtractor` 调用点传 `periodType`。\n\n🔴 **扩 `periodAlt` 时必须同步改一条等值断言**（M1c-3a 的 TASK-001 返工时收紧的，dev-m1c3a-a 提醒）：\n\n`profiles_test.go` 里对 `periodAlt` 的组成现在是**等值**断言（不再是 `assert.Containsf`）。\n起因：验证者的 V6 变异——**绕开 `cumulativeMonthAlt` 直接往 `periodAlt` 插一条累计分支，原先 7 个新测试无一转红**（子测试注释写「periodAlt 认得的每个累计前缀…」，而断言遍历的是 `cumulativeMonthAlt`，宽出来的那块就是缺口）。改成等值断言后该变异即 KILLED。\n\n⇒ **你若改动 `periodAlt` 的组成，那条断言会红。这是设计意图，不是缺陷**——让「`periodAlt` 的组成变了」成为一次**有人看见**的改动。请同步更新该断言的期望值，**不要把它改回 `Contains` 来绕过**。\n\n⚠️ 同处还有一条正向子测试与它**互补**（前者管常量内的词、后者管常量之外插进来的分支），dev 已加三行注释说明，**别当重复删掉**。",
+      "删 `checkPeriodTypeSupported` 的 `case \"monthly\":` **整个分支**（连同其注释），**保留函数本体与穷举 switch 结构**。更正 `parse.go:229` 那条「1-5月」注释。\n\n验收：`TestEveryPeriodTypeHasAnExplicitSupportDecision` 保持绿——那道「新增第六种 period_type 逼人表态」的防线不能因本次删分支而失效。"
+    ],
+    "boundary": [
+      "🔴 **端到端六格，逐格断言 `extractor` 与字段数**（`Parse` 全流程，不是抽取函数直调）：\n\n| 快照 | extractor | 字段数 |\n|---|---|---|\n| `pboc-2025-08-monthly.html`（5 节） | `rule-monthly@v1` | 25 |\n| `pboc-2020-04-monthly.html`（4 节） | `rule-monthly@v1` | 25 |\n| `pboc-2026-07-monthly.html`（7 节） | `rule-monthly@v2` | 52 |\n| `pboc-2025-03-monthly.html`（6 节，3 月报） | `rule@v1` | 27 |\n| `pboc-2020-q1q3.html`（5 节季报） | `rule@v1` | 27 |\n| `pboc-2025-08-tsf-stock.html` | `tsf-stock@v1` | 18 |\n\n⚠️ **期望值按实跑填，别照抄需求文档**——它把两份月报的 extractor 写成 `rule@v2`/54，实测是 `rule-monthly@v1`/25。这一格写错会让测试绿着而断言的是错的期望。\n\n---\n\n🟡 **补两格真实快照**（TASK-009 的 dev 交付时申报，非阻断但请顺手做）：\n\nTASK-009 需要 `pboc-2025-01-monthly.html`（1 月报 A 类）测「1月份 即累计前缀 ⇒ 分部门通过」那格，而**那份快照归你的 `writes`、当时还不在 master**。它**没有去抓别人 writes 里的文件**（正确），改用合成输入钉同一条性质。\n\n⇒ **你抓到 `pboc-2025-01-monthly.html` 之后，顺手在端到端表里补一格**：1 月报走完 `Parse` 后**分部门字段正常产出**（`1月份` 在 `cumulativePeriods` 里 ⇒ TASK-009 的口径守卫放行）。\n这一格是 TASK-009 那条合成断言的**真实语料对照**。\n\n⚠️ **E 类（2022-04，无分部门段）同样不在 testdata**。若你判断本任务不该引入它，在 discovery 里写明即可——它不在你的 `writes` 里，抓它要先补声明。",
+      "🔴 **`*_ytd` 取累计句的值，不是当月句**。\n\n2025-08 月报原文同时含：\n```\n前八个月人民币贷款增加13.46万亿元   ← 要这个（134600）\n8月份人民币贷款增加…               ← 不是这个\n```\n断言 `loan_flow_ytd == 134600`（`InDelta` 1.0）。另断 `m2 == 331.98`。\n\n**为什么必须逐值断言**：当月值同样是合法量级，只是口径错——`magnitude_sanity` 是空表，拦不住。",
+      "**1 月报特例**（`pboc-2025-01-monthly.html`）：`loan_flow_ytd` **非零**。\n\n`1月份` 不在 `cumulativePeriods` 时这里会是 0（整篇命中 0）——这一格是 TASK-001 那条特例在端到端的唯一体现。\n\n⚠️ 别只断 `NotZero`：再断一个具体值（实读原文 `1月份人民币贷款增加5.13万亿元` → 51300），否则一个把当月句错当累计句的实现同样非零。"
+    ],
+    "error_handling": [
+      "不认识的标题（如 `2026年二季度金融机构贷款投向统计报告`）仍报错，错误信息列出三种报告形态。\n\n既有的 PubDate 三态 / ArticleTitle 缺失四条错误路径**措辞一字不变**，既有用例全绿——本任务只加分派，不动那些边界。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-007`，不要只写 `TASK-007` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-a",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "2ec9811b6c7339a4bfe295b815997ce7967de675",
+    "discovery_sha256": "4ce9ebda0539265c5c4befbc14b98150d2e0e7e0e8f5affded445b166b4fa9d7",
+    "at": "2026-08-26T12:04:24Z"
+  },
+  "verifier": "test-m1c3a-v2"
+}

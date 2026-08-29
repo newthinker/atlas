@@ -1,0 +1,52 @@
+{
+  "id": "TASK-001",
+  "status": "accepted",
+  "rework_count": 1,
+  "assignment_epoch": 2,
+  "title": "累计前缀：periodAlt 与 cumulativePeriods 两处硬卡点",
+  "description": "需求文档 T1 的前半（前缀部分）。**AD-7**。\n\n## 这是两个独立的硬卡点，不是一处\n\n`profiles.go` 现有注释（reviewer B5 四格实测）已记明：只加 `periodAlt` ⇒ 候选句涨了但\n口径判定全筛掉、命中 0；只加 `cumulativePeriods` ⇒ 正则不命中，**与现状逐字相同\n（完全 no-op）**。⇒ 必须两处都加，且必须用消融证明两处都真接上了。\n\n## 形态按 Leader 全量实读（55 篇月报），不是推断\n\n| 形态 | 含义 | 实测出现 |\n|---|---|---|\n| `前N个月`（中文数字） | **累计**（`*_ytd` 要的） | 前两/四/五/七/八/十/十一个月 |\n| `N月份`（阿拉伯数字） | 当月（要排除） | 1/2/4/5/7/8/10/11月份 |\n| `1月份` | **累计特例**（1 月的累计=当月） | 仅 1 月报 |\n| `一季度` | 累计（3 月报用） | **已在表内，不要动** |\n\n⚠️ `parse.go:229` 写着「1-5月」的注释是推测，55 篇里**一次都没出现**。\n\n⚠️ **Leader 实测更正 C4**：需求文档断言「3/6/9/12 月不存在月报」是**错的**——\n实存 2 篇 3 月报（2024-03 / 2025-03），其前缀是「一季度」，已在现有表内。\n**不要因为「3 月没有月报」这个错误前提去动 `一季度`。**\n\n## 本任务的边界\n\n只改 `profiles.go` 的两处表 + `profiles_test.go`。**不碰** `parse.go`（删 monthly 分支\n是 TASK-007）、**不碰** html 快照（端到端验证在 TASK-007）。\n加了前缀后存款/贷款能否真的抽出来，由 TASK-007 端到端确认。",
+  "wave": 1,
+  "dependencies": [],
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "新增 `cumulativeMonthAlt` 常量，**穷举**「前两/三/四/五/六/七/八/九/十/十一个月」十项；`periodAlt` 接上它。\n\n⚠️ **穷举而不写成 `前[一二三四五六七八九十]+个月`**：正则能匹配的必须与 `cumulativePeriods` 的键**一一对应**，否则会出现「正则认得、口径表不认」的组合——那种句子被静默筛掉，表现为整篇命中 0。\n\n⚠️ **`十一|十` 的顺序不能反**：Go 正则交替是**最左优先**，写成 `十|十一` 会让「前十一个月」先匹配到「前十个月」的前缀而后半截对不上。\n\n三/六/九在真实语料里不出现（那三个月走 q1/h1/q1_q3 报告），**仍然列上**：多一个无害，漏一个是静默失效。",
+      "`cumulativePeriods` 增 **11 个键**：10 个「前N个月」+ **`1月份`**。\n\n`1月份` 是特例：1 月的累计就是当月，报告直接写「1月份人民币贷款增加5.13万亿元」。它与当月句同形，而其余月份的当月句必须留在表外。\n\n安全性依赖一个实测前提：**非 1 月报里不出现「1月份+指标」的句子**。Leader 用**全部 218 篇**（比需求文档的 55 篇更宽）实测得 **0 条**。前提成立。",
+      "一条测试**机械地**守住 `cumulativeMonthAlt` 与 `cumulativePeriods` 的一一对应：正则能匹配的每一个累计前缀，都必须在表里。\n\n这条测试的作用是把「两处硬卡点」这个耦合变成可查的，而不是靠人记得两边都改。"
+    ],
+    "boundary": [
+      "当月句前缀仍被排除：`2月份` / `8月份` / `11月份` 都**不在** `cumulativePeriods` 里。这是该表存在的理由——落进累计表会让 `*_ytd` 装上当月数。",
+      "🔴 **「11月份」不能退化成「1月份」**：`periodPat` 对 `11月份人民币贷款增加1.09万亿元` 必须捕获**完整的 `11月份`**（不是子串 `1月份`），且查表不命中。\n\n机制：`[0-9]{1,2}月份` 的 `{1,2}` 贪婪 + Go 取最左匹配 ⇒ 在「11月份」处从第一个 1 开始匹配、捕获完整的 11月份。**Go 侧因此不需要 lookbehind**（而用 python 核对语料时必须带 `(?<![0-9])`，否则会得 12 条假阳性）。",
+      "**`一季度` / `全年` / `上半年` / `前三季度` 四个既有键原样保留**，既有用例全绿不变。3 月报（2 篇）靠 `一季度` 工作。"
+    ],
+    "error_handling": [
+      "🔴 **反向消融——证明两处硬卡点都真的接上了**（只看「加了之后测试绿」证明不了两处都加）。\n\n两次**单删**，各自必须转红，且**两次的失败信息必须不同**：\n1. 把 `cumulativePeriods[\"前八个月\"]` 改成 `false` ⇒ 相关测试红\n2. 把 `cumulativeMonthAlt` 里的 `八` 去掉 ⇒ 相关测试红\n\n⚠️ **消融必须在隔离副本上做**（`mktemp -d` 拷贝或 `git worktree add` 到临时目录），主工作区一个字节都不碰——就地变异会让并发 agent 读到变异态、拿到与自己改动无关的假红。\n\n⚠️ 每个变异窗口内 + 收尾各校验一次「被变异文件在主工作区的 sha256 与 `git status --porcelain` 输出均未变化」，并把指纹写进 discovery。\n\n⚠️ **先问「这个变异真的破坏了要守护的那个性质吗」再看红不红**：聚合信号不携带因果，KILLED 可能来自副作用、SURVIVED 可能来自等价变异。要看**哪一条**断言红，不是红不红。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率不低于 **95.5%**（基线采于 HEAD `4a12794a39ca75f849e1e0cdddb5a21405fce973`，`go tool cover -func` 口径，944 条 RUN）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-001`，不要只写 `TASK-001` —— 归档里已有多个 sprint 用过同样的编号，裸编号在半年后指向不唯一。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "20c05ea46af33ac95ed3a0f7d952cd0feb036dfe",
+    "discovery_sha256": "01fc57d06e363692cfb8c2bfef7f3b8f849851a5b5b499dbaf9994155267a92d",
+    "at": "2026-08-26T00:23:16Z"
+  },
+  "verifier": "test-m1c3a-v1",
+  "reason_class": "task_defect",
+  "reject_reason": "non_functional[0] 的 Global Constraint「注释里引用任务编号带 milestone 前缀」未满足：internal/hestia/profiles_test.go:708 有 1 处裸 TASK-007（本次新增行 6 处引用中 5 处带前缀、1 处裸；同文件 :673 对同一目标写的是「M1c-3a 的 TASK-007」正确形态）。归档实测 ≥10 个 sprint 各有自己的 TASK-007，约束理由成立。修复=一行注释：TASK-007 → M1c-3a 的 TASK-007。其余 7 条 done_criteria 全部 PASS 且证据强度高（M1/M2 由我重跑、红在不同断言；我另设计 5 个生成集之外的变异，4 KILLED；覆盖率 1618/1694=95.5136%、RUN 944→975 与 dev 报数逐项一致）。另有非阻断残余缺口 V6（绕开 cumulativeMonthAlt 直接往 periodAlt 插累计分支时 SURVIVED），建议转 TASK-007，不要求本次修。详见 .arcforge/docs/04-test/TASK-001-verification.md"
+}

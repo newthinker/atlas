@@ -1,0 +1,65 @@
+{
+  "key_findings": [
+    "🔴 **DoD boundary[0] 有一行被实测推翻，经 team-lead 裁决改写。** DoD 原写 `pboc-2020-04-monthly.html` →「`rule-monthly@v1` / 25 字段」，实测 `Parse` **报错**——而报错才是正确行为。机制（不是结论）：该期正文**没有任何累计句**，`前四个月` / `1-4月` / `累计` **各 0 次**，四条小标题全是当月（「三、4月份人民币存款增加1.27万亿元」）。于是 `selectRMBCumulativeFlow` 找到一条候选（`4月份/人民币`）却拒绝采用——把当月值装进 `*_ytd` 正是 M1c-3a 的 TASK-009 那道口径守卫要拦的事。⚠️ **不是个例**：用 `Parse` 真跑全部 55 篇月报，**通过 25 / 失败 30**，其中 **22 篇**正是这一条原因。裁决人 team-lead（依据是它在主仓库独立复核的词频统计）；「让这类月报也能解析（`*_ytd` 记缺失而非报错）」是真实设计变更、涉及 `extract.go`/`required.go`、**不在本任务 writes 内**，留给 TASK-010。",
+    "🔴 **我用错过一次仪器，换成直接测量才得到真值。** 第一次量「多少月报没有累计句」用的是「正文含不含 `前N个月`」，得 32/55；那把尺**把 1 月报（`1月份` 是累计特例）与 3 月报（用「一季度」）也算了进去** —— 它测的是「有没有某个字面前缀」，不是「能不能抽出 YTD」。换成**真跑 `Parse`** 得 25 通过 / 30 失败。⚠️ Leader 随后想交叉验证我这个数，用了两把代理尺（32 / 40），**两把互相不一致、9 个月份里 8 个不同**，它自己判定「都不能用来质疑你的数」。⇒ 这是同一条教训在一天内被两个人各踩一次：**拿高度相关的可观测量代替性质本身，近似失效时不报错，只给一个像样的数**。",
+    "🔴 **「有累计句却仍失败」的 5 篇里，4 篇共享同一个机制——同一篇报告内部混口径。** 2023 年 7/8/10/11 月报错误逐字相同：`人民币存款分部门段的期次前缀 \"7月份\" 不是累计口径`。它们**合计句是累计**（「前七个月…」）而**分部门段是当月**。⇒ **「这篇报告是不是累计口径」不是一篇一个答案，可能一篇之内分段不同** —— 按篇分类的方案在这 4 篇上会分错。第 5 篇（2020-02）是另一机制：`存款分部门 住户存款 matched 2 sentences`（该段同时有累计句与当月句）。此发现应对 TASK-010 的四类分流直接有用。全部 30 篇失败的分布：22 × 期内合计取不到、4 × 分部门段混口径、1 × 孪生句、1 × 板块序号不连续、1 × 社融增量总量、1 × 货币 M1。",
+    "**`calibrate_test.go` 的耦合在派发前被预判、并因此提前进了 `writes`，本轮真的发生了。** 我在 TASK-007 派发**之前**独立复核 Leader 的 `parseTitle` 调用点枚举（补了一路「不带括号的引用」防「把函数当值传」漏检，实测 5 处全是注释 ⇒ 2 个调用点就是全部），并指出 `calibrate_test.go` 守着 `calibrate.go:278-282` 的语义、可能需要跟着改。Leader 据此把它加进 `writes`。**本轮删掉 monthly 分支后，`TestCollectSamplesSeparatesThreeCategories` 与 `TestCollectSamplesRendersEveryCategoryToOut` 确实转红**——月报从「本迭代不解析」变成受支持期次。⇒ 事前声明省掉了一个 `blocked_clarification` 来回（TASK-005 实撞过，花了一个来回）。",
+    "**覆盖率下降 0.15pp 的成因已逐行查实，两处新增未覆盖点都是设计决定而非疏漏。** `parse.go` 语句数 43 → 49（+6），未覆盖从 2 条变 3 条。逐行比对 pre/post 的未覆盖集合：`:196`（`parseTitle` 在 `Parse` 里的错误路径）**pre 就未覆盖**、非本次引入；新增的两条是 **`:199`**（`checkPeriodTypeSupported` 的错误返回路径——删掉 monthly 分支后它**结构上不可达**，而保留函数与穷举 switch 是 DoD functional[2] 的明文要求，那条路径会在有人加回分支时重新可达）与 **`:234`**（我刻意加的防御性 `default` 分支）。⇒ 绝对门槛 95.6930% ≥ 95.5% 通过；**不是「测试少写了」，是两处刻意保留的不可达分支**。"
+  ],
+  "decisions": [
+    {
+      "decision": "`Parse` 对社融两种 kind **直接赋 extractor，不经 `detectExtractor`**。",
+      "rationale": "两者整篇一段、没有核心板块。对它们调 `detectExtractor` 会命中 `missingCoreSections` 而报「这是新版式、别的报告、或抓取被截断——三种都需要人看」，那是一句**方向完全错**的错误信息：它们本来就没有那四个板块。消融 M1 实测：把 `kindTSFStock` 改回走 `splitSections + detectExtractor`，`pboc-2025-08-tsf-stock.html` 那行立刻红，而 tsf-flow 那行仍 PASS（定点、无外溢）。"
+    },
+    {
+      "decision": "在 `Parse` 的 kind switch 里加一条当前**不可达**的 `default` 分支。",
+      "rationale": "kind 来自 `titleRE` 的捕获组，取值受正则约束，所以现在走不到。留着是为了让「将来往 `titleRE` 加第四种后缀却忘了在这里加分派」**响亮失败**，而不是用零值 extractor 静默造出一份 Observation。⚠️ 它是上面那 0.15pp 覆盖率下降的两个来源之一——**这是自觉付出的代价**，不是没写测试。"
+    },
+    {
+      "decision": "删 `checkPeriodTypeSupported` 的 `monthly` 分支，但**保留函数与空的穷举 switch**。",
+      "rationale": "DoD functional[2] 的明文要求，理由在 `parse.go` 原注释里：穷举 switch 的价值是「新增第六种 period_type 会由 `TestEveryPeriodTypeHasAnExplicitSupportDecision` 逼人明确表态」。空 switch 看起来像死代码，所以我在原地写明了「不要因此删掉这个函数」以及删它的代价——否则下一个人看到空 switch 会顺手清掉。同时把 decisions 表里的 monthly 从 `{false,…}` 改成 `{true, …}` 并写明解除依据（TASK-001/004/006 三处零件到位）。"
+    },
+    {
+      "decision": "`TestParseRejectsMonthlyUntilSampled` **转成正例并更名** `TestParseAcceptsMonthlyReports`，而不是删掉。",
+      "rationale": "照仓库里的既有先例：`TestParseRejectsQuarterlyUntilExtractorWired` 当年就是这么被 TASK-004 转换的，那条测试的注释还专门记着「**这类测试最容易被后人误删**：它此前断言的行为如今恰好相反，不知情的人会以为它已过时。而它守的东西没变，只是从『中间态说得清』变成『终态跑得通』」。⇒ 同一手法、同一理由，来历一并留在原地。"
+    },
+    {
+      "decision": "原拒绝理由里「cumulativePeriods 认不出 5 月报的『1-5月』这类前缀」一句**订正并保留原文引述**，两处（`parse.go` 与 `parse_test.go`）都记。",
+      "rationale": "那句写于零样本时期，是**推测**而非实测：Leader 全量实读 55 篇月报，「1-5月」这种带范围的形态**一次都没出现**，真实形态是「前八个月」这类中文数字前缀（累计）与「8月份」（当月，要排除）。保留被证伪的原文而不是直接抹掉，是为了让后人不会再照它推断一次——与我在 TASK-005 做的是同一件事。"
+    },
+    {
+      "decision": "`calibrate_test.go` 的三分类夹具里，月报那篇**改成给真实文件、走正常解析**，而不是只把「本迭代不解析」的期望值从 3 改成 2。",
+      "rationale": "月报现在是受支持期次，让夹具直接体现这一点，比把期望数字改小更能说明发生了什么。⚠️ 原夹具里那篇的文件名**刻意不含 \"monthly\"**（`articles/nope-m.html`），因为渲染断言 `Contains(s, \"monthly\")` 会被失败行里的文件名平凡满足——**那个防平凡满足的手法仍然成立，只是失去了对象**，所以我换成对社融两种的同形断言并把这段来历留在原地：判据不是「输出里有没有这个词」，而是「这个词只可能由**我要验的那一行**产生」。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/parse.go",
+    "internal/hestia/parse_test.go",
+    "internal/hestia/calibrate.go",
+    "internal/hestia/calibrate_test.go",
+    "internal/hestia/testdata/pboc-2025-01-monthly.html",
+    "internal/hestia/testdata/pboc-2025-03-monthly.html"
+  ],
+  "interfaces_exposed": [
+    "parseTitle(title string) (period, periodType, kind string, err error) —— **签名变更**，加第三个返回值 kind",
+    "const kindFinance / kindTSFStock / kindTSFFlow（parse.go，包内）—— Parse 的分派键",
+    "titleRE 现认三种报告后缀；不认识的标题错误信息列出三种形态",
+    "checkPeriodTypeSupported 现对全部五种 period_type 放行（函数与穷举 switch 保留）",
+    "Parse 现按 kind 三路分派：kindFinance 走 splitSections+detectExtractor+extractFields；社融两种直接赋 extractor 并调 extractTSF*Article"
+  ],
+  "verification": {
+    "anchor": "全部自证数字采于**最后一次改动之后**的 commit `1d71ce3331e1456d03356dbb41a963abcf7d259a`（分支 task/TASK-007-m1c3a，基点 master `80976e417392c725de3558948eb115d393d5462a`，采样时 worktree clean）。",
+    "coverage": "**95.6930%（1733/1811 语句，go tool cover -func 口径，采于 1d71ce3）**。pre=`80976e4` 为 95.8449%（1730/1805），背对背同窗口各两轮、四次取值稳定。⇒ **绝对值 ≥ DoD 门槛 95.5%，通过**；相对 pre 降 0.15pp，成因逐行查实见 key_findings（两处刻意保留的不可达分支）。⚠️ DoD 里记的基线「95.5%，采于 4a12794，944 条 RUN」是六棵树之前的值，分母早已变化，**不可与本数字相减**。",
+    "suite": "整包 `go test ./internal/hestia/ -count=1` 全绿。RUN **1127 → 1144**（+17），**按祖先存在性分层**（不是数斜杠）：pre `L0=577 L1=538 L2=12`、post `L0=580 L1=552 L2=12`。自洽：顶层 +3（三个新测试函数）+ 子测试 +14 = 17。",
+    "gofmt_vet": "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空（在从 1d71ce3 抽出的干净树上重跑）。",
+    "no_new_deps": "`git show --name-only 1d71ce3` 不含 go.mod / go.sum。",
+    "scope": "提交实际改动 **6 个文件，与任务声明的 `writes` 逐项一致、无越界**。其中 `calibrate.go` / `calibrate_test.go` 是**派发前**由 Leader 依我的复核加入声明的，不是我事后扩大。",
+    "snapshots": "两份快照的 manifest 原文件名：`pboc-2025-01-monthly.html` ← `articles/2025092212554572702.html`（title=「2025年1月金融统计数据报告」）；`pboc-2025-03-monthly.html` ← `articles/2025092212554667292.html`（title=「2025年3月金融统计数据报告」）。来源目录 `data/hestia-backfill-2026-08-14/`。抓下来各 **62 个 CRLF，已立刻转 LF**；提交后 `git show HEAD:<file> | grep -c $'\\r'` 各为 **0**。",
+    "corpus": "用 `Parse` 真跑全部 55 篇月报（这是直接测量目标性质的仪器，不是代理量）：**通过 25 / 失败 30**。按月份：1月 5/2、2月 3/4、3月 2/0、4月 3/4、5月 3/4、7月 3/4、8月 2/4、10月 2/4、11月 2/4。失败原因分布见 key_findings。",
+    "ablation": "**4 个变异，全部有效 KILLED**（隔离副本 `rsync` 拷贝，主工作区一个字节不碰；每格过四道闸：变异生效断言、`gofmt -e`、`go build`、**RUN>0**；每格**锚定单跑**而非看套件红绿；主工作区指纹每格校验）。⚠️ 机械闸初判 flag 了 3 格，**按修正判据逐格核实后全部站得住**——那正是我在 TASK-005 贡献、本 DoD 已收录的那条：「红在 `require.X` 上」不等于作废，要问的是**本格声称要证的性质是否落在失败断言的下游**。",
+    "ablation_detail": "**M1**（把 `kindTSFStock` 改回走 `splitSections+detectExtractor`）⇒ 红在 `parse_test.go:648` 的 `require.NoError`——**那条 require 就是「社融不经探测」这个性质本身**；`pboc-2025-08-tsf-stock.html` 单格红而 **tsf-flow 那行仍 PASS**（定点、无外溢）⇒ 有效。**M2**（`titleRE` 去掉社融增量后缀）⇒ 5 红，精确落在两条社融增量标题用例 + tsf-flow 端到端行，存量各行仍 PASS ⇒ 有效。⚠️ M2 首轮**变异未生效**（我在 shell 内嵌 Python 里把 `\\z` 转义写坏），闸命中后**早退、未打印任何 KILLED**，修正后重跑。**M3**（把 monthly 分支加回）⇒ 红在 `parse_test.go:351` 的 `require.NoError(\"月报解除支持后必须端到端跑通\")`，那条 require 就是性质本身 ⇒ 有效；**诚实附注**：同测试里后面那条 `checkPeriodTypeSupported` 放行断言被这条 require 遮蔽，**未被 M3 独立证明**——但两者是同一性质的两种表现，且「加回分支」必然同时破坏端到端路径，无法构造只触发后者的变异。**M4**（错误信息只列金融统计一种形态）⇒ 8 红且直接命中期望文案 `错误信息必须列出`；两条「月份越界」子测试仍 PASS ⇒ 定点。",
+    "code_simplifier": "已按全局规范在 commit 前跑。结论：**一行都没改**。我用 `git diff --numstat` + grep 复核了三处易被误删的结构仍在（空穷举 switch、不可达 `default` 分支、被证伪原文的引述），未采信其自陈措辞。",
+    "not_done": "boundary[0] 的 `pboc-2020-04-monthly.html` 一行按裁决改成断言「必须响亮报错」，**不是跳过**。「让只有当月数的月报也能解析」留给 TASK-010，理由见 key_findings。",
+    "known_gap": "🔴 **M3 消融里有一条断言未被独立证明——这是有条件的保护强度，不是瑕疵**（team-lead 要求原样记下）。\n\n`TestParseAcceptsMonthlyReports` 里有两条断言指向同一个性质「monthly 已解除支持」：\n  ① `require.NoError(Parse(...), \"月报解除支持后必须端到端跑通\")`（parse_test.go:351）\n  ② `require.NoError(checkPeriodTypeSupported(\"monthly\", ...), \"monthly 分支已删，这里必须放行\")`\n\n消融 M3（把 monthly 分支加回 checkPeriodTypeSupported）只让 **①** 转红——它在 ② 之前，`require` 失败即中止，**② 在这个变异下根本没有执行**。\n\n⚠️ **构造不出只触发 ② 的变异**：加回分支必然同时破坏端到端路径。两条是同一性质的两种表现，不是两个独立性质。⇒ **② 目前没有独家杀手。**\n\n**为什么要写下来**：本 sprint 记过一个形状——「断言在、但没有独家杀手」与「断言真的恒真」**在输出里长得一模一样**，区别只在有没有人写下为什么。② 不是恒真（删掉整个 `checkPeriodTypeSupported` 函数会让它编译失败、改成无条件报错会让它红），但它的保护强度**依赖 ① 先通过**。下一个改这块的人据此判断：若把 ① 删了或改成非 require，② 才会独立承重；在那之前不要以为 ② 已被消融验证过。\n\n（同族参考：本任务 M1 与 M2 的红也都落在 `require.NoError` 上，但那两处**那条 require 就是性质本身**、且同测试内其它子测试仍 PASS ⇒ 定点有效。判据是「本格声称要证的性质是否落在失败断言的**下游**」，M3 的 ② 恰好落在下游，故单独记此缺口。）"
+  }
+}

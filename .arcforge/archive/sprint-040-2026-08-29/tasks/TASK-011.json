@@ -1,0 +1,59 @@
+{
+  "id": "TASK-011",
+  "title": "extract.go 两条 HIGH：板块路径作用域切分 + 锚点缺席不得静默放行",
+  "status": "accepted",
+  "complexity": "中等",
+  "dependencies": [],
+  "wave": 7,
+  "context_from": [
+    "TASK-002",
+    "TASK-009"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/extract.go",
+    "./internal/hestia/extract_test.go",
+    "./internal/hestia/testdata/pboc-2022-04-monthly.html",
+    "./internal/hestia/testdata/pboc-2023-08-tsf-flow.html",
+    "./internal/hestia/testdata/README.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "description": "**来源：M1c-3a 的 QA 两轮 Code Review（qa-m1c3a-1）第二轮，R1 + R2 两条 HIGH。team-lead 已用真实语料独立复现 R1。**\n\n## 为什么单开任务而不是打回 TASK-002 / TASK-009\n\n两条缺陷**分别属于不同任务的产物**（R1 是 TASK-002 的作用域切分、R2 是 TASK-009 的守卫），但**都落在同一个文件 `extract.go`** ⇒ 若分别打回，两个任务会并发写同一文件，scope 互斥直接冲突。\n\n且 QA 明确指出：**打回任何单一任务都修不全，还会把跨任务的缺陷记成某个 dev 的返工。** 故单开本任务承接，`rework_count` 从 0 起算。\n\n## R1（HIGH）：作用域切分只落在整篇路径\n\nteam-lead 用**真实的 2023-08 社融增量报告正文**（`data/hestia-backfill-2026-08-14`）跑两条路径，结果相反：\n\n```\nextractTSFFlowArticle  → err = 社融增量分项 对实体经济发放的人民币贷款 not found   ← 正确\nextractTSFFlowSection  → err = <nil>\n     tsf_flow_ytd          = 252100   ← 1-8月累计\n     tsf_flow_rmb_loan_ytd =  13400   ← 8月单月\n     ⇒ 错位 18.8×\n```\n\n⚠️ **CONTRACTS C-1 写着「这 8 篇现在响亮失败而不再静默混装。失败是修好的表现。」——那句话对整篇路径成立，对板块路径不成立。**\n\n🔴 **而板块路径正是 v2 月报（央行 2025-10 起把社融并进月报的 going-forward 格式）走的那条** ⇒ 这不是历史遗留，是会持续产生错数据的路径。\n\n## R2（HIGH）：锚点缺席即放行，而抽取不依赖锚点\n\n`checkSectorCaliber`（`extract.go:388-391`）在锚点短语不在正文时 `return nil`（放行），而 `extractDepositSection` 用 `sectorFlowRE` 扫整节、**不依赖那个锚点** ⇒ 守卫不表态而抽取照做。\n\nQA 构造出：`deposit_flow_ytd=125500`（1-4月累计）配四个部门全是 4 月单月，`err=nil`。\n\n⚠️ **真实语料里 2022-04 就是「锚点缺席但分部门句仍在」**：QA 扫全部 80 篇得**锚点缺席但分部门模板仍命中的段 = 2**（2022-04 贷款侧、存款侧各 1，各命中 4 项）。**它今天不出事，只因 2022-04 恰好也没有累计合计句——安全性来自与守卫无关的巧合。**\n\n🔴 **`checkSectorCaliber` 的注释里自己记着：当初 D4 变异（锚点缺席⇒报错）SURVIVED。** 那条线索一直在文件里。\n\n## 参考\n\n- QA 报告 v2：`.arcforge/docs/05-review/m1c3a-code-review.md`（269 行）\n- 上游 discovery：`TASK-002`（作用域切分的设计与理由）、`TASK-009`（守卫的四道机制与 D4 消融记录）\n\n⚠️ **注释里引用任务编号带 milestone 前缀**（Global Constraint）：写 `M1c-3a 的 TASK-011`。\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在改动里。",
+  "done_criteria": {
+    "functional": [
+      "**R1**：`extractTSFFlowSection` 与 `extractTSFFlowArticle` 在**同一段正文**上给出**同一个结论**（都成功且值相同，或都失败）。\n\n⚠️ 两条修法都可接受，**但必须显式选一条并写明理由**：① 给板块路径补作用域切分，与整篇路径同构；② 显式声明该路径不支持双口径体例并**在该体例上报错**。\n\n**不接受**「板块路径继续 err=nil 并返回混装值」。",
+      "**R2**：`checkSectorCaliber` 在锚点缺席时**不得静默放行**。\n\n🔴 **判据必须与「抽取的覆盖面」同源**——例如「本节命中了任何分部门模板」，而不是「有没有那个锚点短语」。\n\n⚠️ 理由：现状的失效模式正是**判据的定义域与被守护动作的定义域不一致**（守卫看锚点、抽取看模板）。换一个更宽的锚点短语**不能**闭合它，因为那仍然是两个不同的定义域。"
+    ],
+    "boundary": [
+      "**R1 的阴性对照**：单口径体例（只有累计句、无当月句）在板块路径上**仍须正常抽取成功**。\n\n⚠️ 这条不可省：只加「双口径报错」而不验单口径仍通，会把一个正确的路径改成恒报错，而**测试全绿**（因为没人测单口径）。",
+      "**R2 的阴性对照**：锚点在场且口径正确的节**仍须放行**（不得因收紧判据而把正常报告判红）。\n\n⚠️ 本 sprint 有过一次教训：照抄 reviewer 的「判据从 prefix 扩到 substring」建议，实测下来**对目标缺陷全绿放行、同时把既有安全的用例判红**——既挡不住真问题又恒响的假红。**收紧判据前先跑一次「它会把现有什么判红」。**",
+      "**2022-04 必须有一格**（QA 实测的真实反例：锚点缺席但分部门模板仍命中，贷款侧与存款侧各 1 段）。\n\n⚠️ 断言那两段**现在会被守卫拦住**，而不是「Parse 报错了」——`Parse` 对 2022-04 本来就失败（它也没有累计合计句），**端到端报错证明不了本守卫覆盖它**。这与 M1c-3a 的 TASK-009 拆分测试是同一个理由。"
+    ],
+    "error_handling": [
+      "两条修复的错误信息都要**指向具体成因**（哪个锚点/哪一节/哪种体例），不得只报「口径不对」。\n\n⚠️ 交叉断言：R1 与 R2 的错误串**互不出现**在对方的测试里——本 sprint 实测过「两条分支可区分」这个关系性属性没有守卫时，`llm-fallback@v1` 被报成「认不出」。",
+      "【以下由 dev-m1c3a-a 从 team-lead 的 inbox 消息逐字转录落盘，非 leader 亲笔。\n 转录理由：TASK-011 已 in_progress，owner_table.in_progress = [\"dev-*\"]，leader 写不了本文件；\n 而该义务若只存在于 inbox 与 TASK-012 的 discovery，下一个验证者不会读到（test-m1c3a-v1 指出）。\n 若与 leader 本意有出入，以其原始 inbox 消息为准。】\n\n🔴 **从 M1c-3a 的 TASK-012 转入（team-lead 裁决）**：期次前缀**不被 `periodAlt` 认识**\n导致的失败，与**该节确实没有累计句**导致的失败，**错误信息必须可区分**——\n不能都收敛成 `not found among N candidate sentence(s)`。\n\n实测同形（dev-m1c3a-b 在 f74dc49 上复现，team-lead 与 test-m1c3a-v1 各自独立复跑确认）：\n  2020-04（正文真的没有累计句）        → not found among 1 candidate(s) [4月份/人民币]\n  2022-10（有「1-10月…累计增加18.7万亿元」，只是前缀不认识）\n                                      → not found among 2 candidate(s) [10月份/人民币 10月份/外币]\n结构完全相同，唯一差别是候选数，**而那个数不携带「为什么」**——认不出的前缀根本没进候选集。\n\n两者的后续动作相反：前者是解析器缺口（M1c-4 该修）、后者是报告本身没数据（正确的是标注）。\n\n⚠️ 交叉断言：两种错误串**互不出现**在对方的测试里——「两条分支可区分」是关系性属性，\n两边都满足共有属性时它没有守卫。\n⚠️ 消融：预先声明该只红哪一格再跑，看失败行号。\n\n【闭环背景（供验证者判断严重度）】TASK-012 因这条被判 REJECTED，dev-b 走「显式申报」，\n而 team-lead 批准那次申报的**唯一理由**是「义务转移到 TASK-011」。\n若本任务也未覆盖它，**那次申报就退化成一次静默放弃**——两个任务各自申报「不在我 scope 内」，\n缺口无人承接。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia/` 空、`go vet ./internal/hestia/` 空、整包 `go test ./internal/hestia/ -count=1` 全绿；覆盖率**绝对值**不低于 **95.5%**（`go tool cover -func` 口径）。\n\n🔴 **判绝对值，不判「相对 pre 有没有下降」**——本 sprint 十个任务报的覆盖率取值各不相同，因为分别测自不同的树。**取值不携带它测自哪棵树的信息**（M1c-3a 的 TASK-008 与 TASK-010 是两棵不同的树却给出同值 95.6570）。\n\n⚠️ 报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。",
+      "🔴 **消融要求：每条断言的每个半边都要有独家杀手。**\n\n本 sprint 实测：最自然想到的变异（删掉某分支/某段文案）只动得了**肯定**半边；`NotContains` 那半只有**往对方分支里塞入自己的标志串**才逼得动。⇒ **断言有几个半边就设计几个变异，逐个预先声明该只红哪一格再比对，并看失败行号。**\n\n⚠️ **只写「必须转红」，不要预写「若仍绿则说明…」的解释**——本 sprint 有过一次，DoD 预写的解释是错的，照它办的下一步是去改一个没坏的断言。",
+      "🔴 **证明「X 不是那个保证者」要用期望绿的变异**：去掉 X，期望**仍绿**。\n\n这是本 sprint 最后学到的一条：**预先声明「这一格应当绿」并且它真的绿，是积极证据**（分界不在 SURVIVED 本身，在于期望是否预先声明）。若你在修复中判定某个组件不承重，用这个方法证，别只从覆盖率 profile 推。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-08-29T08:36:59Z"
+  },
+  "assigned_to": "dev-m1c3a-a",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "verify_baseline": {
+    "head": "17c8dcad832847e4728aa7e3c387972bb2a5e281",
+    "discovery_sha256": "755ff691cbe22a65b847e06915321517507a4fc01e7856bab08b80a173435b53",
+    "at": "2026-08-28T23:02:41Z"
+  },
+  "verifier": "test-m1c3a-v1"
+}
