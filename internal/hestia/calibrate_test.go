@@ -258,6 +258,91 @@ func TestCollectSamplesSeparatesThreeCategories(t *testing.T) {
 	assert.Len(t, got.Samples[FieldTSFFlowYTD], 3, "社融增量同理，三个来源")
 }
 
+// TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists 钉住**分流的判据**：
+// 一篇报告归「本迭代不解析」还是「解析失败」，取决于**正文里到底有没有累计口径的合计句**。
+//
+// 🔴 **这条是 M1c-3a 的 TASK-012 合入后才成立的活行为，不是待做项**（见本任务
+// done_criteria 里那条转录）：2022-07/08/10/11 四篇此前被判成「只有当月数」进了
+// `Unsupported`，而「1-8月，人民币贷款累计增加15.61万亿元」就在正文里 ——
+// TASK-012 把 `1-N月` 一族补进 `periodAlt` 与 `cumulativePeriods` 之后，
+// `onlyCurrentMonthFlowSentences` 对它们翻成 false，四篇随之转入 `Failures`。
+//
+// **机制上是必然而不是碰巧**：这个判据**复用 `cumulativePeriods` 与 `loanFlowRE` 这两处
+// 唯一真相源**，而 TASK-012 恰好两处都改了。⇒ 改一个地方（表），下游判据自动跟上，
+// **没有人需要记得去改第二处**。这正是当初把判据写成「查表」而不是「匹配错误串」的收益。
+//
+// ⚠️ **两格对下游的意义相反**：`Unsupported` 那格 CONTRACTS G 写着「**不是** M1c-4 的兜底
+// 工作量」，`Failures` 那格写着「M1c-4 要兜的就是这批」。**归错格 = 真实可恢复的数据被
+// 永久写销** —— 那正是 R3 的原始损害。
+//
+// ⚠️ **钉性质不钉取值**：真语料上的 `195/199/23/19/34/38` 会随语料变，这里断言的是
+// 「哪一篇进哪一格」以及「移出 Unsupported ≠ 能抽出来」。
+//
+// ⚠️ 两篇都是**解析失败的金融统计月报**，差别**只有**「有没有累计合计句」这一个变量
+// —— 最小对。只断言其中一篇的话，一个把两格合并的实现照样绿。
+//
+// 🔴 **已知缺口，本任务不修（M1c-3a 的 TASK-011 实测发现，待 team-lead 裁决落点）**：
+// 真语料 **2022-05** 两侧的累计句写作「**今年前5个月**，人民币贷款累计增加10.87万亿元」，
+// 这个前缀**不在 `periodAlt` 里**（TASK-012 补的是 `1-N月` 一族）⇒ 它此刻仍被本判据判成
+// 「只有当月数」而归进 `Unsupported` —— **与 R3 是同一句假话，只是换了个前缀写法**。
+// 修它要动 `profiles.go`（不在本任务 writes 内）。⚠️ 本测试**没有**为它加断言：
+// 加了会立刻红，而红的理由不在本任务能改的范围内。
+func TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists(t *testing.T) {
+	periodsOf := func(fs []ParseFailure) []string {
+		out := make([]string, 0, len(fs))
+		for _, f := range fs {
+			out = append(out, f.Period)
+		}
+		return out
+	}
+
+	// —— 前提：直接对两篇正文求判据的值，证明它们确实构成最小对 ——
+	require.False(t, onlyCurrentMonthFlowSentences(stripHTML(readSample(t, "pboc-2022-08-monthly.html"))),
+		"用例前提：2022-08 正文里有累计合计句（「1-8月，人民币贷款累计增加…」）")
+	require.True(t, onlyCurrentMonthFlowSentences(stripHTML(readSample(t, "pboc-2020-04-monthly.html"))),
+		"用例前提：2020-04 正文里确实一句累计合计句都没有")
+
+	dir := writeCalibrateFixture(t, Manifest{
+		From: "2020-01", CompletedAt: "2026-08-29T00:00:00Z",
+		Articles: []Article{
+			// 一篇正常样本：collectSamples 对「可用样本为 0」有既有守卫，全是失败的会先在那里报错
+			{ID: "ok", Title: "2025年金融统计数据报告", File: "articles/ok.html",
+				SHA256: testdataSHA(t, "pboc-2025-12-annual.html")},
+			// 有累计句、但存款侧抽不出来 ⇒ 解析失败
+			{ID: "b", Title: "2022年8月金融统计数据报告", File: "articles/b.html",
+				SHA256: testdataSHA(t, "pboc-2022-08-monthly.html")},
+			// 一句累计合计句都没有 ⇒ 本迭代不解析
+			{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+		},
+	}, map[string]string{
+		"articles/ok.html": "pboc-2025-12-annual.html",
+		"articles/b.html":  "pboc-2022-08-monthly.html",
+		"articles/c.html":  "pboc-2020-04-monthly.html",
+	})
+
+	got, err := collectSamples(CalibrateDeps{Dir: dir})
+	require.NoError(t, err)
+
+	// ① 有累计句的那篇归「解析失败」——**不得**归「本迭代不解析」
+	assert.Contains(t, periodsOf(got.Failures), "2022-08",
+		"正文里有累计数据 ⇒ 是解析器抽不出来，属 M1c-4 的兜底工作量")
+	assert.NotContains(t, periodsOf(got.Unsupported), "2022-08",
+		"归到这一格等于说「该期报告没有这个数」——而数据就在正文里，那是 R3 的原始损害")
+
+	// ② 没有累计句的那篇归「本迭代不解析」——**不得**归「解析失败」
+	assert.Contains(t, periodsOf(got.Unsupported), "2020-04",
+		"正文真的没有累计数据 ⇒ LLM 兜底也变不出来，正确的是标注")
+	assert.NotContains(t, periodsOf(got.Failures), "2020-04",
+		"归到这一格会给 M1c-4 加一批**永远清不了零**的工作量")
+
+	// ③ **「移出 Unsupported」不等于「能抽出来」**：它仍然产不出样本（存款侧无源）。
+	//    少了这一条，一个「把所有失败都当成可恢复」的实现照样绿。
+	for _, r := range got.Records {
+		assert.NotEqual(t, "2022-08", r.Period, "2022-08 不该贡献样本：存款侧仍无源")
+	}
+}
+
 // 三类都要**渲染出来**：一个只把它们记在结构体里、不写给人看的实现，与「静默消失」
 // 在终端上没有区别（backfill_reconcile.go:196 对同一处写过这条理由）。
 func TestCollectSamplesRendersEveryCategoryToOut(t *testing.T) {
