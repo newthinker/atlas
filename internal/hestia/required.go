@@ -111,7 +111,41 @@ func requiredFields(extractor string) []string {
 		return tsfFlowFields()
 
 	default:
-		// llm-fallback@v1 落在这里，见 TestRequiredFieldsRejectsAmbiguousExtractor。
+		// llm-fallback@v1 与 merged@v1 都落在这里，见
+		// TestRequiredFieldsRejectsAmbiguousExtractor 与 TestRequiredFieldsRejectsBareMerged。
+		// 两者的成因**不同**：前者是「还没实现」（M1c-4 补上分支后它就有必填集了），
+		// 后者是「这一列结构上说不出必填集」（merged@v1 的必填集取决于由哪几篇合成，
+		// 而 extractor 只有一个字符串，见 mergedRequiredFields）——它**永远**不会有分支。
 		return nil
 	}
+}
+
+// mergedRequiredFields 返回由 parts 那几个 extractor 合成的观测应有的字段集
+// （M1c-3b 的 TASK-002）。
+//
+// 取并集而不是硬套 rule-monthly@v2 的 52 字段：实测 42 个合并组里并非每组都齐 3 篇
+// （2020-01|monthly 只有 2 篇，月报那篇落在解析失败格里）。硬套会让这类组恒报「缺 27
+// 个字段」，而那些字段在该组里是 absent-by-design —— 把 by-design 的缺席记成 failed，
+// completeness 这个指标就废了。这条是本函数存在的**全部**原因。
+//
+// 按 fieldOrder 排序输出，理由与 gateMagnitudeSanity 遍历 fieldOrder 相同：map 迭代
+// 顺序随机，同一份数据两次跑报出不同的缺失字段会让排查变成猜谜。
+//
+// parts 里出现未知/语义不足的 extractor（含 merged@v1 自身）时，requiredFields 对它
+// 返回 nil，本函数**静默略过**它 —— 那与「它没贡献任何字段」是同一件事。判「这一组
+// 到底该不该算 completeness」是调用方的事，不是本函数的。
+func mergedRequiredFields(parts []string) []string {
+	want := make(map[string]bool)
+	for _, p := range parts {
+		for _, f := range requiredFields(p) {
+			want[f] = true
+		}
+	}
+	out := make([]string, 0, len(want))
+	for _, f := range fieldOrder {
+		if want[f] {
+			out = append(out, f)
+		}
+	}
+	return out
 }

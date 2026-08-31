@@ -283,8 +283,11 @@ func TestFXSectionFieldsMatchExtractor(t *testing.T) {
 // 抄成字面量：白名单放行了新值、错误信息却还在说旧的三个，而那条信息正是调用方
 // 判断自己该填什么的唯一依据。
 //
-// 这里逐字写死七个值而不是遍历 validExtractors：遍历版本对「常量值写错」免疫，
+// 这里逐字写死八个值而不是遍历 validExtractors：遍历版本对「常量值写错」免疫，
 // 错的常量会被同样错的错误信息「印证」。
+//
+// ⚠️ 增删取值时**照着改这份清单**，不要图省事改成 range validExtractors —— 那正好
+// 把本测试唯一挡得住的那类缺陷放过去。
 func TestExtractorEnumErrorListsEveryValidValue(t *testing.T) {
 	m := validMeta()
 	m.Extractor = "rule@v9"
@@ -294,10 +297,11 @@ func TestExtractorEnumErrorListsEveryValidValue(t *testing.T) {
 	for _, want := range []string{
 		"rule@v1", "rule@v2", "llm-fallback@v1",
 		"rule-monthly@v1", "rule-monthly@v2", "tsf-stock@v1", "tsf-flow@v1",
+		"merged@v1", // M1c-3b 的 TASK-002
 	} {
 		assert.Containsf(t, err.Error(), want, "错误信息没提到合法值 %s", want)
 	}
-	assert.Len(t, validExtractors, 7, "白名单增删了取值——请同步本测试的逐字清单")
+	assert.Len(t, validExtractors, 8, "白名单增删了取值——请同步本测试的逐字清单")
 }
 
 // ── M1c-3a 的 TASK-012（QA fix 6）：validExtractors 的逐项表态 ──────────────
@@ -324,6 +328,15 @@ func TestEveryValidExtractorHasARequiredFieldsDecision(t *testing.T) {
 		"llm-fallback@v1": "Extractor 同时编码「抽取方式」与「模板版本」，这个值只带前者，" +
 			"无从知道它抽的是 v1 还是 v2 期次。返回 nil 是刻意的失败信号，见 " +
 			"TestRequiredFieldsRejectsAmbiguousExtractor。",
+
+		// M1c-3b 的 TASK-002。与上面那条的成因**不同**，别把两条读成同一类：
+		// llm-fallback@v1 是「还没实现」——M1c-4 补上分支后它就该从本表里删掉；
+		// merged@v1 是「这一列结构上说不出必填集」——它**永远**不会有分支。
+		"merged@v1": "这一列结构上说不出必填集：必填集取决于由哪几篇报告合成，而 Extractor " +
+			"只有一个字符串（实测 42 组里并非每组都齐 3 篇）。真正的必填集走 " +
+			"mergedRequiredFields(parts)，见 TestRequiredFieldsRejectsBareMerged 与 " +
+			"TestMergedRequiredFieldsIsUnionOfParts。与 llm-fallback@v1 的「还没实现」成因不同：" +
+			"那条将来会被删掉，这条不会。",
 	}
 
 	require.NotEmpty(t, validExtractors, "取值域为空，本测试的绿色是假的")
@@ -349,4 +362,95 @@ func TestEveryValidExtractorHasARequiredFieldsDecision(t *testing.T) {
 		assert.Containsf(t, validExtractors, ex,
 			"豁免表里的 %q 不在 validExtractors 里：这条豁免永远不会被求值", ex)
 	}
+}
+
+// ── M1c-3b 的 TASK-002：merged@v1 的取值域与必填集 ──────────────────────────
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3b 的 TASK-002)
+// functional[2]  三篇齐全 ⇒ without(fieldOrder, fxSectionFields())；只有社融两篇 ⇒ 只是这两篇的并集
+//                                                    → TestMergedRequiredFieldsIsUnionOfParts
+// functional[3]  requiredFields(extractorMerged) 返回 nil → TestRequiredFieldsRejectsBareMerged
+// boundary[1]    同一 extractor 传两次不得重复；按 fieldOrder 升序
+//                                                    → TestMergedRequiredFieldsIsOrderedAndDeduped
+
+// TestMergedRequiredFieldsIsUnionOfParts：合并观测的必填集 = 各部分必填集的并集。
+func TestMergedRequiredFieldsIsUnionOfParts(t *testing.T) {
+	// 三篇齐全 ⇒ fieldOrder 减去外汇两字段，即 54 − 2 = 52 个。
+	//
+	// ⚠️ 这 52 = rule-monthly@v1(25) + tsf-stock@v1(18) + tsf-flow@v1(9)，**不是** 54。
+	// 需求文档 Task 3 注释里的「27/18/9=54」用的是 rule@v1（季报，27 个，**含**
+	// fx 两字段），与这里的 rule-monthly@v1（月报无外汇板块，25 个）不是同一组
+	// extractor —— 两个数都对，别混起来。
+	three := mergedRequiredFields([]string{
+		extractorMonthlyV1, extractorTSFStock, extractorTSFFlow})
+	want := without(fieldOrder, fxSectionFields())
+	require.ElementsMatch(t, want, three,
+		"月报v1 + 社融存量 + 社融增量 应当覆盖除外汇两字段外的全部 52 个字段")
+
+	// 写成 without(fieldOrder, ...) 这个**派生**表达式而不是字面量 52：两份清单
+	// 会分叉，而先错的一定是手抄的那份（与 requiredFields 里「季报 − 外汇节」同一
+	// 理由）。数量单独钉一条，防的是派生表达式两边一起错。
+	require.Len(t, three, 52,
+		"25(月报v1) + 18(社融存量) + 9(社融增量) = 52 = 54 − 2；对不上说明三者不再互斥或字段表变了")
+
+	// 只有两篇（实测 2020-01|monthly 就是这样）⇒ 必填集只能是这两篇的并集。
+	two := mergedRequiredFields([]string{extractorTSFStock, extractorTSFFlow})
+	require.ElementsMatch(t, append(tsfStockFields(), tsfFlowFields()...), two,
+		"缺月报那篇时，25 个非社融字段是 absent-by-design，不得进必填集")
+	require.NotContains(t, two, FieldM2,
+		"硬套 rule-monthly@v2 的 52 字段会让这类组恒报缺字段，completeness 随之失效")
+}
+
+// TestMergedRequiredFieldsIsOrderedAndDeduped：并集必须按 fieldOrder 排序且无重复。
+//
+// 排序的理由与 gateMagnitudeSanity 遍历 fieldOrder 相同：map 迭代顺序随机，
+// 同一份数据两次跑报出不同的缺失字段，会让排查变成猜谜。
+func TestMergedRequiredFieldsIsOrderedAndDeduped(t *testing.T) {
+	idx := map[string]int{}
+	for i, f := range fieldOrder {
+		idx[f] = i
+	}
+	requireFieldOrderAscending := func(t *testing.T, got []string) {
+		t.Helper()
+		for i := 1; i < len(got); i++ {
+			require.Lessf(t, idx[got[i-1]], idx[got[i]],
+				"必须按 fieldOrder 升序：%s 排在了 %s 之前", got[i-1], got[i])
+		}
+	}
+
+	// 故意传入有重叠的两份（同一个 extractor 传两次）。
+	//
+	// ⚠️ 这里断的是 ElementsMatch 而不是 Equal：ElementsMatch 比的是**多重集**，
+	// 重复元素照样会让它红，所以「不得出现两次」被完整钉住；而 Equal 会连**顺序**
+	// 一起钉死到 tsfStockFields() 上，那是错的 —— tsfStockFields() 把两个总量字段
+	// append 在**末尾**，fieldOrder 里它们却排在**最前**。需求文档 Task 2 Step 1 给的
+	// require.Equal(tsfStockFields(), got) 与它自己 Step 3 的「按 fieldOrder 排序」
+	// 相互矛盾，任一实现都不可能同时满足；本任务 done_criteria 的 boundary[1] 说的是
+	// 「不得重复 + 按 fieldOrder 升序」两条**性质**，故按性质断言。
+	dup := mergedRequiredFields([]string{extractorTSFStock, extractorTSFStock})
+	require.ElementsMatch(t, tsfStockFields(), dup,
+		"重复的 extractor 不得让字段出现两次（ElementsMatch 比多重集，重复会红）")
+	requireFieldOrderAscending(t, dup)
+
+	all := mergedRequiredFields([]string{extractorMonthlyV1, extractorTSFStock})
+	requireFieldOrderAscending(t, all)
+
+	// 阴性：升序断言本身得能红。把并集倒过来喂给同一个判据必须失败，否则上面两条
+	// 绿色证明不了任何事（长度 <= 1 时循环体一次都不进，那种「绿」是假的）。
+	require.Greater(t, len(all), 1, "样本太短，升序断言的循环体不会执行")
+	reversed := slices.Clone(all)
+	slices.Reverse(reversed)
+	require.False(t, slices.IsSortedFunc(reversed, func(a, b string) int {
+		return idx[a] - idx[b]
+	}), "倒序的并集竟然仍算升序——说明 idx 建错了，上面的升序断言是空转")
+}
+
+// TestRequiredFieldsRejectsBareMerged：merged@v1 单独问必填集是问不出来的。
+//
+// 它的必填集取决于**由哪几篇合成**，而 extractor 这一列只有一个字符串。
+// 返回 nil ⇒ 调用方记 skipped 而不是 failed，与 llm-fallback@v1 同一条出路，
+// 但成因不同：那个是「还没实现」，这个是「这一列结构上说不出必填集」。
+func TestRequiredFieldsRejectsBareMerged(t *testing.T) {
+	require.Nil(t, requiredFields(extractorMerged),
+		"merged@v1 的必填集只能由 mergedRequiredFields(parts) 给出")
 }
