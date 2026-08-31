@@ -218,6 +218,46 @@ func (t Thresholds) validate() error {
 				i, ex.Period, checkCompleteness)
 		}
 	}
+	// —— magnitude_ranges 的校验（M1c-3b 的 TASK-004）——
+	//
+	// 空表合法：那是 magnitude_sanity 记 skipped{not_calibrated} 的正常状态（M1b-3）。
+	// 非空则逐项校验，因为 gateMagnitudeSanity 对未知键是 continue ——
+	// 打错一个字段名会**静默失效**，表看起来配上了而那道闸对该字段照样不设防。
+	// 与 caliber_exemptions 的 deposit_summ 同类，那个已被 checkEnum 堵住，这里此前没有。
+	//
+	// 遍历 fieldOrder 建集合而不是 slices.Contains 逐个扫：54 个字段 × 54 项配置
+	// 是 2916 次比较，虽然都不慢，但集合表达的是「fieldOrder 是唯一真相源」这件事。
+	if len(t.MagnitudeRanges) > 0 {
+		known := make(map[string]bool, len(fieldOrder))
+		for _, f := range fieldOrder {
+			known[f] = true
+		}
+		// 遍历 fieldOrder 而不是 map：map 迭代顺序随机，同一份坏配置两次跑
+		// 报出不同的那一项，会让排查变成猜谜（与 gateMagnitudeSanity 同理）。
+		for name := range t.MagnitudeRanges {
+			if !known[name] {
+				return fmt.Errorf("hestia: magnitude_ranges 含未知字段 %q: "+
+					"gateMagnitudeSanity 对未知键是跳过，配置会**静默失效**——"+
+					"字段名的唯一真相源是 fields.go 的 fieldOrder", name)
+			}
+		}
+		for _, f := range fieldOrder {
+			r, ok := t.MagnitudeRanges[f]
+			if !ok {
+				continue
+			}
+			if r.Min >= r.Max {
+				return fmt.Errorf("hestia: magnitude_ranges[%s] 的 min(%g) >= max(%g): "+
+					"倒置的区间会让该字段每一期都失败，而理由串读起来像数据错、不像配置错",
+					f, r.Min, r.Max)
+			}
+			if strings.TrimSpace(r.Unit) == "" {
+				return fmt.Errorf("hestia: magnitude_ranges[%s] 缺 unit: "+
+					"它只出现在失败理由串里、不影响判定，正因如此会被漏填，"+
+					"而漏填之后失败信息少了唯一能判断「是不是单位搞错了」的那一项", f)
+			}
+		}
+	}
 	return nil
 }
 

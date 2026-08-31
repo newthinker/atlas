@@ -377,3 +377,82 @@ func TestAllPeriodTypesIsNotAWidthBypass(t *testing.T) {
 		assert.Contains(t, err.Error(), "不得豁免 "+checkCompleteness)
 	})
 }
+
+// —— magnitude_ranges 的校验（M1c-3b 的 TASK-004）——
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[1] 「未知字段名 ⇒ error，错误串含该键名」  → TestMagnitudeRangesRejectUnknownField
+// functional[2] 「Min >= Max ⇒ error，错误串含字段名」  → TestMagnitudeRangesRejectInvertedRange
+// functional[3] 「Unit 为空 ⇒ error，错误串含 unit」    → TestMagnitudeRangesRequireUnit
+// boundary[0]   「空表仍然合法」                        → TestEmptyMagnitudeRangesStillValid
+
+// TestMagnitudeRangesRejectUnknownField：表里出现 fieldOrder 之外的键 ⇒ 拒。
+//
+// 不拒的代价是静默：gateMagnitudeSanity 对未知键 continue，
+// 配置的人以为那个字段被守着了，实际那道闸对它完全不设防。
+// 与 caliber_exemptions 的 deposit_summ 同类，那个已被 checkEnum 堵住。
+func TestMagnitudeRangesRejectUnknownField(t *testing.T) {
+	th := DefaultThresholds()
+	th.MagnitudeRanges = map[string]Range{
+		"m2_typoed": {Min: 0, Max: 1000, Unit: "万亿元"},
+	}
+	err := th.validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "m2_typoed")
+}
+
+// TestMagnitudeRangesRejectInvertedRange：Min >= Max ⇒ 拒。
+//
+// 倒置的区间会让该字段**每一期都失败**，而失败理由串
+// 「x=… outside [大,小]」读起来像数据错，不像配置错。
+func TestMagnitudeRangesRejectInvertedRange(t *testing.T) {
+	th := DefaultThresholds()
+	th.MagnitudeRanges = map[string]Range{
+		FieldM2: {Min: 1000, Max: 0, Unit: "万亿元"},
+	}
+	err := th.validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), FieldM2)
+}
+
+// TestMagnitudeRangesRequireUnit：Unit 为空 ⇒ 拒。
+//
+// Unit 只出现在失败理由串里，空着不影响判定 —— 正因如此它会被漏填，
+// 而漏填之后失败信息少了唯一能判断「是不是单位搞错了」的那一项。
+func TestMagnitudeRangesRequireUnit(t *testing.T) {
+	th := DefaultThresholds()
+	th.MagnitudeRanges = map[string]Range{
+		FieldM2: {Min: 0, Max: 1000},
+	}
+	err := th.validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unit")
+}
+
+// TestEmptyMagnitudeRangesStillValid：空表仍然合法。
+//
+// 空表 ⇒ magnitude_sanity 记 skipped{not_calibrated}，那是刻意设计的状态
+// （M1b-3），不能因为加了校验就把它判非法。
+func TestEmptyMagnitudeRangesStillValid(t *testing.T) {
+	th := DefaultThresholds()
+	require.NoError(t, th.validate())
+}
+
+// TestMagnitudeRangesAcceptValidTable：合法的非空表必须通过。
+//
+// ⚠️ 这条**不在 TASK-004 的 done_criteria 里**，是补的回归护栏，理由：上面三条
+// 全部在校验中途 return，空表那条整块跳过 —— 「非空且合法 ⇒ 走完两轮循环、
+// 落到 return nil」这条路径于是一条测试都没有。而它正是 M1c-3b 的 TASK-005
+// 要走的那条：那个任务要手填 54 项，校验一旦退化成「非空即拒」，54 项会全被
+// 挡在 LoadConfig 外面，且症状是配置的人怎么改都不对。
+//
+// 用三个不同板块的字段而不是一个：单字段过不了「循环只跑了一轮也算过」这关。
+func TestMagnitudeRangesAcceptValidTable(t *testing.T) {
+	th := DefaultThresholds()
+	th.MagnitudeRanges = map[string]Range{
+		FieldM2:        {Min: 200, Max: 400, Unit: "万亿元"},
+		FieldM2YoY:     {Min: -5, Max: 25, Unit: "百分数"},
+		FieldFXReserve: {Min: 3, Max: 4, Unit: "万亿美元"},
+	}
+	require.NoError(t, th.validate())
+}
