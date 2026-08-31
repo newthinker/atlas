@@ -153,6 +153,58 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 
 	items := classifyArticles(res, m.Articles)
 
+	shaUnverified := eachParsedArticle(d.Dir, res, items, func(p parsedArticle) {
+		// 连 Meta 一起留下。此前这里只取 obs.Values，period_type 在采集的这一刻
+		// 就在手边、却被丢掉了 —— 而下游报告恰恰需要它（见 CalibrateResult.Records）。
+		res.Records = append(res.Records, SampleRecord{
+			Period: p.obs.Meta.Period, PeriodType: p.obs.Meta.PeriodType, Values: p.obs.Values,
+		})
+	})
+
+	// Samples 由 Records 派生，不在上面的循环里另写一份：两份副本会各自演化。
+	// 顺序不变（items 按期次升序 ⇒ Records 升序 ⇒ 每个字段的切片也升序）。
+	res.Samples = samplesFromRecords(res.Records)
+
+	if shaUnverified > 0 {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"⚠ %d 篇的 manifest 没有 sha256，未做完整性校验：被截断的 HTML 仍可能 Parse 成功但少抽字段",
+			shaUnverified))
+	}
+
+	// 先渲染再判错：即使下面拒绝了，看终端的人也该知道那 N 篇都去哪了。
+	writeCollectSummary(d.Out, d.Dir, res)
+
+	// 「空」的判据是**可用样本数为 0**，不是 len(Articles)==0：一份 400 篇全是社融、
+	// 或标题形态全变了的目录，len(Articles) 不为 0 却一个样本都产不出 —— 那时报告会打印
+	// 54 行全 `—`，退出码 0。
+	if len(res.Samples) == 0 {
+		return nil, fmt.Errorf("这份产物可用样本为 0（尝试解析 %d 篇、解析失败 %d 篇、"+
+			"本迭代不解析 %d 篇、标题解析不出期次 %d 条）：没有样本标不出分布，"+
+			"放行只会产出一份每格都是 — 的报告",
+			res.Periods, len(res.Failures), len(res.Unsupported), len(res.Unclassified))
+	}
+	return res, nil
+}
+
+// parsedArticle 是共用管道交给两端的一条记录。
+//
+// 交出**整个 Observation** 而不只是 Values：calibrate 端只要 Values，而 M1c-3b 的
+// TASK-003 的 load 端要靠 Meta 装配业务键 —— 只传 Values 的话那边会表现为
+// 「合并组恒为 0」，看起来像语料问题、不像管道问题。
+type parsedArticle struct {
+	item calibrateItem
+	obs  Observation
+}
+
+// eachParsedArticle 走「分类 → 读文件 → sha256 校验 → Parse」，
+// 对每篇成功解析的调 fn；失败的记进 res.Failures/res.Unsupported。
+// 返回 sha256 未校验的篇数（调用方汇总成 warning）。
+//
+// ⚠️ res.Periods++ 在 fail() **之前**：它数的是「全部受支持种类里被真正尝试解析的
+// 篇数」，含解析失败的。挪到失败分流之后会让这个数静默变小，而单元测试全绿 ——
+// 只有拿真语料背对背比对 calibrate 输出才抓得住。
+func eachParsedArticle(dir string, res *CalibrateResult, items []calibrateItem,
+	fn func(parsedArticle)) int {
 	var shaUnverified int
 	for _, it := range items {
 		res.Periods++
@@ -162,7 +214,7 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 			})
 		}
 
-		raw, err := os.ReadFile(filepath.Join(d.Dir, filepath.FromSlash(it.a.File)))
+		raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(it.a.File)))
 		if err != nil {
 			fail(fmt.Sprintf("读文件: %v", err))
 			continue
@@ -223,36 +275,9 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 			continue
 		}
 
-		// 连 Meta 一起留下。此前这里只取 obs.Values，period_type 在采集的这一刻
-		// 就在手边、却被丢掉了 —— 而下游报告恰恰需要它（见 CalibrateResult.Records）。
-		res.Records = append(res.Records, SampleRecord{
-			Period: obs.Meta.Period, PeriodType: obs.Meta.PeriodType, Values: obs.Values,
-		})
+		fn(parsedArticle{item: it, obs: obs})
 	}
-
-	// Samples 由 Records 派生，不在上面的循环里另写一份：两份副本会各自演化。
-	// 顺序不变（items 按期次升序 ⇒ Records 升序 ⇒ 每个字段的切片也升序）。
-	res.Samples = samplesFromRecords(res.Records)
-
-	if shaUnverified > 0 {
-		res.Warnings = append(res.Warnings, fmt.Sprintf(
-			"⚠ %d 篇的 manifest 没有 sha256，未做完整性校验：被截断的 HTML 仍可能 Parse 成功但少抽字段",
-			shaUnverified))
-	}
-
-	// 先渲染再判错：即使下面拒绝了，看终端的人也该知道那 N 篇都去哪了。
-	writeCollectSummary(d.Out, d.Dir, res)
-
-	// 「空」的判据是**可用样本数为 0**，不是 len(Articles)==0：一份 400 篇全是社融、
-	// 或标题形态全变了的目录，len(Articles) 不为 0 却一个样本都产不出 —— 那时报告会打印
-	// 54 行全 `—`，退出码 0。
-	if len(res.Samples) == 0 {
-		return nil, fmt.Errorf("这份产物可用样本为 0（尝试解析 %d 篇、解析失败 %d 篇、"+
-			"本迭代不解析 %d 篇、标题解析不出期次 %d 条）：没有样本标不出分布，"+
-			"放行只会产出一份每格都是 — 的报告",
-			res.Periods, len(res.Failures), len(res.Unsupported), len(res.Unclassified))
-	}
-	return res, nil
+	return shaUnverified
 }
 
 // calibrateItem 是一篇**确定要解析**的文章：期次已定、种类已定。

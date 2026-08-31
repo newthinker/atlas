@@ -1155,3 +1155,46 @@ func TestCollectSamplesSortsUnsupportedByPeriod(t *testing.T) {
 		[]string{got.Unsupported[0].Period, got.Unsupported[1].Period},
 		"必须按期次升序 —— 输入是逆序放的，不排序就会原样吐出来")
 }
+
+// Context Checkpoint: done_criteria → test mapping（M1c-3b 的 TASK-001）
+//
+//	functional[2]  管道交出的是整个 Observation 而不只是 Values
+//	               → TestEachParsedArticleYieldsFullObservation
+//	functional[0]  eachParsedArticle 返回「sha256 未校验的篇数」，由调用方汇总成 warning
+//	               → TestCollectSamplesVerifiesArticleSHA256（既有，钉住那条 warning）
+//	functional[1]  collectSamples 改为调用管道，外部行为零变化
+//	boundary[0]    res.Periods++ 在 fail() 之前（含解析失败的篇数）
+//	               → TestCollectSamplesRecordsMissingFileAndContinues（既有，读文件失败仍计入 Periods）
+//	               ⚠️ 这两条的**真**判据是背对背基线比对（error_handling[0]，verify_by: manual）——
+//	                  单元测试全绿也可能 199 变 161，见 boundary[0] 原文。
+
+// TestEachParsedArticleYieldsFullObservation：共用管道必须交出**整个** Observation，
+// 而不只是 Values。
+//
+// 这条断言存在的理由：collectSamples 原先只取 Values，Meta 被就地丢弃。
+// 若重构时图省事仍只传 Values，M1c-3b 的 TASK-003 就无从装配业务键——
+// 而那时错误会表现为「合并组恒为 0」，看起来像语料问题，不像管道问题。
+//
+// ⚠️ 夹具沿用 completedFixture / writeCalibrateFixture，**不新写一份**：两份 fixture 会分叉。
+func TestEachParsedArticleYieldsFullObservation(t *testing.T) {
+	dir := completedFixture(t)
+
+	res := &CalibrateResult{Samples: map[string][]float64{}}
+	st, err := loadManifest(dir)
+	require.NoError(t, err)
+	items := classifyArticles(res, st.Manifest.Articles)
+	require.NotEmpty(t, items)
+
+	var got []parsedArticle
+	eachParsedArticle(dir, res, items, func(p parsedArticle) { got = append(got, p) })
+
+	require.NotEmpty(t, got)
+	for _, p := range got {
+		require.NotEmpty(t, p.obs.Meta.Period, "Meta.Period 不得为空")
+		require.NotEmpty(t, p.obs.Meta.PeriodType, "Meta.PeriodType 不得为空")
+		require.NotEmpty(t, p.obs.Meta.PublishedAt, "Meta.PublishedAt 不得为空")
+		require.NotEmpty(t, p.obs.Meta.Extractor, "Meta.Extractor 不得为空")
+		require.Equal(t, p.item.period, p.obs.Meta.Period,
+			"分类算出的期次与正文解析出的期次必须一致")
+	}
+}
