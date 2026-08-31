@@ -146,6 +146,13 @@ const (
 	extractorMonthlyV2 = "rule-monthly@v2" // 7 节月报（含社融两节），52 个字段
 	extractorTSFStock  = "tsf-stock@v1"    // 社融存量独立报告，18 个字段
 	extractorTSFFlow   = "tsf-flow@v1"     // 社融增量独立报告，9 个字段
+	// merged@v1 是**合成**标识：同一 (period, period_type, published_at) 的多篇报告
+	// 在入库前被合并成一个观测时用它（M1c-3b 的 TASK-002）。
+	//
+	// ⚠️ 它单独一个字符串**说不出必填集** —— 必填集取决于由哪几篇合成，而实测 42 组里
+	// 并非每组都齐 3 篇（2020-01|monthly 只有 2 篇）。故 requiredFields(extractorMerged)
+	// 返回 nil，真正的必填集走 mergedRequiredFields(parts)。
+	extractorMerged = "merged@v1"
 )
 
 // validExtractors 是已定义的抽取器标识。
@@ -161,9 +168,14 @@ const (
 // TASK-004、extractFields 消费是 TASK-006、Parse 分派是 TASK-007。取值域先行
 // 是刻意的——Meta 的取值域应当由数据模型定义，而不是由「当前实现到哪一步」
 // 定义（llm-fallback@v1 早就是这么处理的）。
+//
+// merged@v1 是 M1c-3b 的 TASK-002 加的，它与上面几个的区别在于：那几个迟早会有真实
+// HTML 样本，而它是**装配**出来的、不是解析出来的，**构造上不可能有** —— 故它在
+// parse_test.go 的 exempt 表里，且 requiredFields 对它返回 nil（见该常量的注释）。
 var validExtractors = []string{
 	"rule@v1", "rule@v2", "llm-fallback@v1",
 	extractorMonthlyV1, extractorMonthlyV2, extractorTSFStock, extractorTSFFlow,
+	extractorMerged,
 }
 
 // checkEnum 是取值域校验的共同形状：不在白名单里就报错，并把白名单**逐字**列进

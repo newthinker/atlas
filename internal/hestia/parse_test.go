@@ -812,6 +812,13 @@ func TestParseCoversAllKinds(t *testing.T) {
 	exempt := map[string]string{
 		"llm-fallback@v1": "M1c-4 才实现；取值域先行是刻意的（见 types.go 的 validExtractors 注释），" +
 			"实现之前不可能有真实样本",
+
+		// M1c-3b 的 TASK-002。注意与上面那条的区别：llm-fallback@v1 是**暂时**没有样本
+		// （M1c-4 实现后就该补一格并把这条删掉），merged@v1 是**永远**不会有。
+		"merged@v1": "构造上不可能有真实 HTML 样本：它不是从 HTML 解析出来的，是同一 " +
+			"(period, period_type, published_at) 的多篇观测在入库前**装配**出来的，" +
+			"Parse 永远不会返回它。它的端到端守卫在合并那一层（M1c-3b 的 TASK-011），" +
+			"不在本表",
 	}
 	for _, ex := range validExtractors {
 		if why, ok := exempt[ex]; ok {
