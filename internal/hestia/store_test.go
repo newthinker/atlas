@@ -434,13 +434,22 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
+	want := []string{"BackfillFetch", "BackfillLoad", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
 			"都会绕过 Save 的签名防线", len(want))
 }
 
+// —— 为什么名单里多了 BackfillLoad（M1c-3b 的 TASK-006 追加）——
+//
+// 同 Parse / DefaultThresholds，是**登记而不是放宽**。BackfillLoad 是回填入库的编排
+// 入口：它确实写库，但**只经 (*Store).Save**（本文件上面那条 reflect 守卫盯着 Save 的
+// 签名要求 ValidationReport），没有自己的 INSERT，故不构成绕过单一写入口的新写口。
+//
+// ⚠️ **不要为了让这条测试变绿而把它改成非导出** —— M1c-3b 的 TASK-007 的 cmd 层要调它。
+// 精确相等是有意为之：它顺带逼着每次扩大导出面都在这里留一行说明，而这就是那一行。
+//
 // —— 为什么名单里多了 Parse（M1b-2 / TASK-006 追加）——
 //
 // 本条守的是**写口**，而 Parse 是纯函数：输入 []byte、输出 Observation，不碰数据库。
