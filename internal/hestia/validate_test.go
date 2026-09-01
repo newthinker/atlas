@@ -776,8 +776,14 @@ func TestStockContinuitySkipReasons(t *testing.T) {
 // `<` 还是 `<=` 都成立，连同它下面那段关于 ULP 的精细论证一起失效。
 // **会有人去修红的那两格，绿的那格不会引起任何注意。**
 //
-// ⇒ 下面 monthly 四格是原样保留的边界论证（阈值仍是 0.02），annual 三格是新增的，
-// 用来钉住「分档真的生效」：第五格与第三格是同一个 5% 跳变，判定相反。
+// ⇒ 下面 monthly 四格是边界论证，annual 三格钉住「分档真的生效」：
+// 第五格与第三格是同一个 6% 跳变，判定相反。
+//
+// ⚠️ **M1c-3b 的 TASK-005 重标阈值后，本表的常量整体上移过一次**
+// （monthly 0.02→0.05、annual 0.15→0.20）。上移的不是「几个数字」而是**边界本身**：
+// 两个 atBoundary 格若不跟着改，会静默退化成普通的「阈值内」用例——0.02 <= 0.05
+// 无论边界写成 `<` 还是 `<=` 都成立，正是本注释开头记的那次事故的形状。
+// 挡住它的是循环体末尾那条 require（它动态取 DefaultThresholds），不是人的记性。
 func TestStockContinuityDetectsJump(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -798,24 +804,25 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 		// 而不是「比例是精确值」。
 		//
 		// 让它成立的是**参与运算的量精确**（cur−prev 与 prev 都是精确整数），
-		// **不是算路短**。实测同一道闸在非整数输入下同样失效：
-		//   400→408 / 300→306 / 250→255 / 350→357  ⇒ r == 0.02 为 true
-		//   123→125.46                             ⇒ false（低 15 ULP）
-		//   400.1→408.102                          ⇒ false
+		// **不是算路短**。M1c-3b 的 TASK-005 在新阈值下重测了同一组性质：
+		//   0.05: 400→420 / 300→315 / 200→210 / 500→525  ⇒ r == 0.05 为 true
+		//         123→129.15 / 400.1→420.105             ⇒ false
+		//   0.20: 400→480 / 300→360 / 200→240 / 500→600  ⇒ r == 0.20 为 true
+		//         123→147.6 / 400.1→480.12               ⇒ false
 		// ⇒ **改这几行常量时必须保持 cur−prev 与 prev 为精确整数**；换成「看起来
 		// 更真实」的小数会让这条边界测试**静默失效**，而不会有任何东西转红。
-		{"monthly 恰好在阈值上", "monthly", 400, 408, CheckPassed, 0.02, true},
+		{"monthly 恰好在阈值上", "monthly", 400, 420, CheckPassed, 0.05, true},
 		{"monthly 阈值内", "monthly", 400, 404, CheckPassed, 0.01, false},
-		{"monthly 超过阈值", "monthly", 400, 420, CheckFailed, 0.05, false},
-		{"monthly 存量下跌也算跳变", "monthly", 400, 380, CheckFailed, 0.05, false},
+		{"monthly 超过阈值", "monthly", 400, 424, CheckFailed, 0.06, false},
+		{"monthly 存量下跌也算跳变", "monthly", 400, 376, CheckFailed, 0.06, false},
 
-		// 同一个 5% 跳变在年度序列上必须**放行** —— annual 的相邻两期相隔 12 个月。
+		// 同一个 6% 跳变在年度序列上必须**放行** —— annual 的相邻两期相隔 12 个月。
 		// 这一格与上面第三格是对照：把五档写成同一个数，两格里必有一格红。
-		{"annual 同样的 5% 跳变放行", "annual", 400, 420, CheckPassed, 0.05, false},
-		// 60/400 与 64/400 同为精确整数相除，与上面 8/400 同理落在与字面量同一个
+		{"annual 同样的 6% 跳变放行", "annual", 400, 424, CheckPassed, 0.06, false},
+		// 80/400 与 84/400 同为精确整数相除，与上面 20/400 同理落在与字面量同一个
 		// double 上 —— 改这两行常量时同样必须保持 cur−prev 与 prev 为精确整数。
-		{"annual 恰好在阈值上", "annual", 400, 460, CheckPassed, 0.15, true},
-		{"annual 超过阈值", "annual", 400, 464, CheckFailed, 0.16, false},
+		{"annual 恰好在阈值上", "annual", 400, 480, CheckPassed, 0.20, true},
+		{"annual 超过阈值", "annual", 400, 484, CheckFailed, 0.21, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

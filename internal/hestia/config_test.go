@@ -3,8 +3,10 @@ package hestia
 import (
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -349,4 +351,43 @@ discover:
 	assert.False(t, filepath.IsAbs(cfg.Storage.DBPath), "装载不得把相对路径解析掉")
 	assert.NotContains(t, cfg.Storage.DBPath, filepath.Dir(p),
 		"更不得相对配置文件所在目录解析")
+}
+
+// Context Checkpoint: done_criteria → test mapping（M1c-3b 的 TASK-005）
+// functional[4] 读仓库真配置断言四件事 → TestShippedConfigLoadsAndIsCalibrated
+
+// 读**仓库里那份真配置**，不是临时夹具。
+//
+// # 为什么必须有这条（阻断级缺口 A-4）
+//
+// 实测 `grep -rn "configs/hestia.yaml" --include="*.go" .` **零命中** —— 那 54 项
+// 区间是**人手填的**，而 TASK-004 的三类校验（未知字段名 / 区间倒置 / 缺 unit）
+// 只在 `LoadConfig` 被调用时生效，**CI 里没有任何测试调用真配置**。
+//
+// 没有这条，打错一个字段名（如把 `m2` 写成 `m_2`）会让 `gateMagnitudeSanity`
+// 对该字段**完全不设防**（validate.go 对未知键 `continue`），而缺陷要等**运维
+// 真跑回填**才暴露——那时库已经建好了。
+//
+// ⚠️ 它替代的是原计划里「跑一次 hestia status」那个**手动动作**：手动步骤无产物、
+// 不可事后核，且没人能证明上一次跑过。
+func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
+	cfg, err := LoadConfig("../../configs/hestia.yaml")
+	require.NoError(t, err, "仓库自带的配置必须能被自己的 LoadConfig 接受")
+
+	require.Len(t, cfg.Thresholds.MagnitudeRanges, len(fieldOrder),
+		"区间表必须覆盖全部 %d 个字段：漏填的字段其幅度闸静默消失（未知键 continue）",
+		len(fieldOrder))
+	assert.Equal(t,
+		slices.Sorted(slices.Values(fieldOrder)),
+		slices.Sorted(maps.Keys(cfg.Thresholds.MagnitudeRanges)),
+		"键集合必须与 fieldOrder **逐项相等**：只比长度的话，打错一个字段名"+
+			"（多一个未知键、少一个真字段）两边都还是 54")
+
+	assert.Equal(t, "2026-08-31", cfg.ConfigVersion,
+		"填了区间表就改变了这份配置的行为，config_version 必须跟着走——"+
+			"否则「这期用的是哪版配置」在契约里查不出来")
+
+	assert.Equal(t, DefaultThresholds().StockContinuityMax, cfg.Thresholds.StockContinuityMax,
+		"真配置里的五档必须与代码默认值一致：两处分叉时，跑起来用的是 YAML 那份，"+
+			"而读代码的人看到的是默认值那份")
 }

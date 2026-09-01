@@ -9,7 +9,7 @@
 
 # 不参与任何逻辑，只让「这期用的是哪版配置」一眼可见（方案报告 5.3.2）。
 # 手工递增，用日期串。
-config_version: "2026-08-13"
+config_version: "2026-08-31"
 
 storage:
   # 相对路径，按进程 cwd 解析（约束 C8）。plist 的 WorkingDirectory 已指向 runtime；
@@ -65,21 +65,147 @@ thresholds:
   #    算不出环比。0.15 **不是** 0.02 × 12（线性外推会用「存量线性增长」去定义
   #    「什么叫不线性」，那是循环的），只是按「年度跳变幅度必然显著大于月度」这一
   #    定性事实取的量级。M1c 回填出连续序列后由 M1c-3 用标定结果替换。
+  # M1c-3b 的 TASK-005 用回填语料的实测分布标定，取代此前的占位值
+  # （0.02 / 0.15，M1b 起就在，代码里的原注释自陈「都未经真实数据验证」）。
+  #
+  #   档      n   p95       max       取值
+  #   monthly 68  0.02291   0.02613   0.05
+  #   annual   6  0.13338   0.13338   0.20
+  #
+  # ⚠️ monthly 0.02 → 0.05 不是「为了让数据通过而放宽」：实测 p95=0.02291 已经
+  #    越过旧值 0.02 ⇒ 按旧值回填，至少 5% 的 monthly 期次会被判进 pending，而
+  #    --force 对已入权威表的期次是数据层 no-op，**拦错了没有出路**。
+  #    0.05 仍拦得住它该拦的：单月环比 5% 按当前存量量级约等于一个月增加 20 万亿元。
+  # ⚠️ q1 / h1 / q1_q3 三档 **n=0，是继承 annual、不是标定过的**（语料里这三种
+  #    期次的 tsf_stock 相邻期样本数为零）。依据是「四档同为年初起累计口径、相邻
+  #    两期一律相隔 12 个月」这一同族论证，强于原来的拍脑袋值，但弱于它们自己的数据。
+  # 详见 internal/hestia/thresholds.go 的 defaultStockContinuityMax 注释（含复现命令）。
   stock_continuity_max:
-    monthly: 0.02   # 相邻两期相隔 1 个月
-    q1: 0.15        # 以下四档同为年初起累计口径，相邻两期相隔 12 个月
-    h1: 0.15
-    q1_q3: 0.15
-    annual: 0.15
+    monthly: 0.05   # 相邻两期相隔 1 个月；实测 n=68, max=0.02613
+    q1: 0.20        # 以下四档同为年初起累计口径，相邻两期相隔 12 个月
+    h1: 0.20        # ⚠️ 只有 annual 有实测（n=6, max=0.13338），其余三档 n=0
+    q1_q3: 0.20
+    annual: 0.20
 
   # 同比字段绝对值上限（百分数）。M0 实测最大 25%，50 留一倍余量。
   yoy_sanity_max: 50
 
-  # magnitude_ranges 与 caliber_exemptions **有意不写**：
+  # —— magnitude_ranges：幅度合理性闸门的区间表（M1c-3b 的 TASK-005 人工标定）——
   #
-  #   - magnitude_ranges：区间必须用 M1c 回填数据的实际分布标定，不得拍脑袋
-  #     （deposit_sum_tolerance 的 ±2% 就是拍脑袋的代价）。表为空时
-  #     magnitude_sanity 记 skipped{not_calibrated}，填表即生效、无需改代码。
+  # 🔴 **填了这张表，magnitude_sanity 就从 skipped{not_calibrated} 变成真正判定。**
+  # 在此之前它恒 skipped，所以判错的代价为零；从这一版起不是了。
+  #
+  # # 这些区间要抓的是**量级错误**，不是异常值
+  #
+  # 它防的是「把万亿元当亿元」「小数点错位」「符号反了」这类解析事故（差 3 个
+  # 数量级以上），**不是**「这个月增长得比往常快」。所以区间刻意宽于实测分布：
+  # 一次误拦的代价是人工介入一期，而闸门本身只是最后一道粗筛。
+  #
+  # # 为什么不直接用 calibrate 的「建议区间」列
+  #
+  # 那一列是 [min-(max-min), max+(max-min)]，**宽度正比于历史波动** ⇒ 历史上几乎
+  # 不动的字段会得到一个极窄的区间。tsf_stock_entrust 79 期实测只在 10.87–11.45
+  # 之间，建议区间是 [10.29, 12.03]——将来它真变化一次就误拦。且存量是**增长**的，
+  # 上界必须留出未来若干年的空间，而建议区间只覆盖到 max+(max-min)。
+  #
+  # # 逐组规则（同组分项共用一套，便于「总量与分项一起过闸」）
+  #
+  #   存量 / 余额（万亿元）  [实测 min × 0.25, 实测 max × 4]
+  #                          下界给 2020 之前更早期次留余地（语料起于 2020，那时
+  #                          社融存量远小于现在，收紧下界会批量误拦早期期次）；
+  #                          上界按年增约 8–10% 计，4 倍约覆盖 15 年。
+  #   增量 / 新增（亿元）    [min<0 ? min×4 : -max×0.5, max×4]
+  #                          ytd 可以是净减少，下界必须允许为负。
+  #   同比 / 占比（百分数）  [-100, 100]  —— 取**有语义**的边界而非机械扩展：
+  #                          -100% = 归零，+100% = 翻倍。社融各大类同比越过它即为错。
+  #   利率（百分数）         [0, 30]      —— 利率不为负；30 覆盖历史极端。
+  #   fx_reserve（万亿美元） [0.3, 15]    ⚠️ 余量给得最大：**只有 27 期样本**
+  #   fx_rate（元/美元）     [2, 30]         （月报无外汇板块，其余字段是 50/52/79）
+  #
+  # 「余量最大」的口径是**与同类组规则比**，不是「在 54 项里排第一」：这两项若
+  # 套用上面的存量组规则会得到 [0.76, 13.68] 与 [1.59, 28.9]，所以它们的区间必须
+  # 比那更宽才算「给了额外余量」。初稿写的 [1,10] / [3,15] 其实**比组规则还窄**，
+  # 是靠一次独立核对（区间宽度 vs 组规则宽度）发现并订正的。
+  # ⚠️ 别用「区间宽度 / 实测宽度」这个比值来判定谁的余量大：实测宽度极小的字段
+  #    会自动得到极大的比值（tsf_stock_entrust 79 期只在 10.87–11.45 之间，比值 82.8
+  #    全表最高），那是它自己波动小的**副产品**，不是有人给了它余量。
+  # 这两项的上界按历史真实范围留足：外汇储备历史上到过约 4 万亿美元、汇率到过
+  # 约 8.3 元；区间仍拦得住量级事故（小数点错一位就出界）。
+  #
+  # 圆整一律**向外**（下界向下、上界向上），只会更宽不会更窄，方向一致可核查。
+  #
+  # ⚠️ 单位：fields.go 的三类约定（余额存量=万亿元 / 增量新增=亿元 / 同比占比利率=
+  #    百分数）**不覆盖最后两个字段**。fx_reserve 原文是万亿美元、fx_rate 是元/美元
+  #    ——依据是 extract.go 的 extractFXSection 注释，不是本任务的新决定。
+  # ⚠️ 这些数随语料变。换语料后必须重跑标定再改这里：
+  #    go run ./cmd/atlas hestia backfill calibrate --dir <语料绝对路径> --allow-incomplete
+  # ⚠️ 漏填一个字段**不会报错**：gateMagnitudeSanity 对表里没有的字段 continue，
+  #    那个字段的幅度闸就此静默消失。TestShippedConfigLoadsAndIsCalibrated 钉住
+  #    「键集合与 fieldOrder 逐项相等」正是为此。
+  magnitude_ranges:
+    # A.1 社融 · 总量
+    tsf_stock:                 {min: 60,      max: 2000,    unit: "万亿元"}
+    tsf_stock_yoy:             {min: -100,    max: 100,     unit: "百分数"}
+    tsf_flow_ytd:              {min: -200000, max: 1500000, unit: "亿元"}
+    # A.1 社融 · 存量分项
+    tsf_stock_rmb_loan:        {min: 30,      max: 1200,    unit: "万亿元"}
+    tsf_stock_rmb_loan_yoy:    {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_fx_loan:         {min: 0.2,     max: 10,      unit: "万亿元"}
+    tsf_stock_fx_loan_yoy:     {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_entrust:         {min: 2,       max: 50,      unit: "万亿元"}
+    tsf_stock_entrust_yoy:     {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_trust:           {min: 0.9,     max: 30,      unit: "万亿元"}
+    tsf_stock_trust_yoy:       {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_bankaccept:      {min: 0.4,     max: 17,      unit: "万亿元"}
+    tsf_stock_bankaccept_yoy:  {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_corp_bond:       {min: 5,       max: 150,     unit: "万亿元"}
+    tsf_stock_corp_bond_yoy:   {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_govt_bond:       {min: 9,       max: 420,     unit: "万亿元"}
+    tsf_stock_govt_bond_yoy:   {min: -100,    max: 100,     unit: "百分数"}
+    tsf_stock_equity:          {min: 1.8,     max: 51,      unit: "万亿元"}
+    tsf_stock_equity_yoy:      {min: -100,    max: 100,     unit: "百分数"}
+    # A.1 社融 · 增量分项（年初至今累计，可为净减少）
+    tsf_flow_rmb_loan_ytd:     {min: -120000, max: 890000,  unit: "亿元"}
+    tsf_flow_govt_bond_ytd:    {min: -70000,  max: 560000,  unit: "亿元"}
+    tsf_flow_corp_bond_ytd:    {min: -23000,  max: 180000,  unit: "亿元"}
+    tsf_flow_fx_loan_ytd:      {min: -22000,  max: 14000,   unit: "亿元"}
+    tsf_flow_entrust_ytd:      {min: -38000,  max: 15000,   unit: "亿元"}
+    tsf_flow_trust_ytd:        {min: -81000,  max: 16000,   unit: "亿元"}
+    tsf_flow_bankaccept_ytd:   {min: -20000,  max: 24000,   unit: "亿元"}
+    tsf_flow_equity_ytd:       {min: -7000,   max: 50000,   unit: "亿元"}
+    # A.2 货币供应量
+    m2:                        {min: 49,      max: 1500,    unit: "万亿元"}
+    m2_yoy:                    {min: -100,    max: 100,     unit: "百分数"}
+    m1:                        {min: 14,      max: 480,     unit: "万亿元"}
+    m1_yoy:                    {min: -100,    max: 100,     unit: "百分数"}
+    m0:                        {min: 1.9,     max: 61,      unit: "万亿元"}
+    m0_yoy:                    {min: -100,    max: 100,     unit: "百分数"}
+    # A.3 存款
+    deposit_balance:           {min: 48,      max: 1400,    unit: "万亿元"}
+    deposit_balance_yoy:       {min: -100,    max: 100,     unit: "百分数"}
+    deposit_flow_ytd:          {min: -140000, max: 1100000, unit: "亿元"}
+    deposit_household_ytd:     {min: -90000,  max: 720000,  unit: "亿元"}
+    deposit_corp_ytd:          {min: -130000, max: 270000,  unit: "亿元"}
+    deposit_fiscal_ytd:        {min: -13000,  max: 89000,   unit: "亿元"}
+    deposit_nbfi_ytd:          {min: -45000,  max: 270000,  unit: "亿元"}
+    # A.4 贷款
+    loan_balance:              {min: 38,      max: 1200,    unit: "万亿元"}
+    loan_balance_yoy:          {min: -100,    max: 100,     unit: "百分数"}
+    loan_flow_ytd:             {min: -120000, max: 910000,  unit: "亿元"}
+    loan_hh_short_ytd:         {min: -38000,  max: 80000,   unit: "亿元"}
+    loan_hh_mlt_ytd:           {min: -31000,  max: 250000,  unit: "亿元"}
+    loan_corp_total_ytd:       {min: -90000,  max: 720000,  unit: "亿元"}
+    loan_corp_short_ytd:       {min: -25000,  max: 200000,  unit: "亿元"}
+    loan_corp_mlt_ytd:         {min: -68000,  max: 550000,  unit: "亿元"}
+    loan_bill_ytd:             {min: -60000,  max: 120000,  unit: "亿元"}
+    loan_nbfi_ytd:             {min: -19000,  max: 24000,   unit: "亿元"}
+    # A.5 利率与外部
+    rate_ibo:                  {min: 0,       max: 30,      unit: "百分数"}
+    rate_repo:                 {min: 0,       max: 30,      unit: "百分数"}
+    fx_reserve:                {min: 0.3,     max: 15,      unit: "万亿美元"}
+    fx_rate:                   {min: 2,       max: 30,      unit: "元/美元"}
+
+  # caliber_exemptions **有意不写**：
   #
   #   - caliber_exemptions：当前没有任何期次需要豁免。
   #     ⚠️ 将来要加时，**每条都必须写 period_types**（显式列出适用的 period_type）——
