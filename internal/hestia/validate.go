@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // 关于浮点：增量类字段由 万亿×10000 得出，个别值带 ≤1 ULP 的表示误差
@@ -126,8 +127,14 @@ func knownCheckIDs() []string {
 
 // gateInput 是每道闸门拿到的全部输入。
 type gateInput struct {
-	obs   Observation
-	prior []Observation // 按 period 降序，可能为空
+	obs Observation
+	// prior 按 period 降序，可能为空。
+	//
+	// ⚠️ **prior[0] 不是「上一期」**，是「最近一个**已被接受**的期次」——
+	// Preceding 既无相邻性约束、也看不见落 pending 的期次（见 store.go 的 Preceding
+	// 头注释）。凡是「相邻两期」才有意义的判定（如 gateStockContinuity 的环比），
+	// **必须自己核对期次跨度**，别沿用「[0] 就是上一期」那个假设。
+	prior []Observation
 	cfg   Thresholds
 }
 
@@ -374,7 +381,28 @@ func gateStockContinuity(in gateInput) Check {
 		return Check{Status: CheckSkipped, Reason: "no_prior_period"}
 	}
 
-	// prior 按 period 降序，[0] 就是上一期。
+	// 🔴 **prior[0] 是「最近一个【已被接受】的期次」，不是「上一期」**
+	// （M1c-3b 的 TASK-011 返工，缺陷 C-1）。
+	//
+	// Preceding 的 SQL 只有 `WHERE period < ? AND period_type = ?`，**没有相邻性约束**，
+	// 且它查的是 viewCurrent —— 落 pending 的期次它看不见。此处原先写着「prior[0] 就是
+	// 上一期」，那句话**只在从未拒过任何一期时成立，而这道闸的存在前提就是会拒**。
+	//
+	// 真跑实测：4 条 stock_continuity 拒绝，基线跨 10 / 11 / 13 个月、跨 3 年；且构成
+	// **正反馈**——拒绝 → 基线跨度变长 → 环比更大 → 更多拒绝。而 --force 对已入权威表的
+	// 期次是数据层 no-op ⇒ **拦错了没有出路**。报告还会把它呈现成数据异常，运维会去查央行。
+	//
+	// ⚠️ 排在字段/零分母检查**之前**：这条问的是「这个基线**够不够格**当基线」，比
+	// 「它有没有 tsf_stock」更根本。顺序反了会对一个 13 个月前的期次报
+	// prior_absent_field，把排查引向那一期的数据——与本函数开头那段「理由会把排查引向
+	// 错误方向」是同一个错误。
+	if gap, ok := periodGapMonths(in.prior[0].Meta.Period, in.obs.Meta.Period); !ok ||
+		gap != expectedPeriodGapMonths(in.obs.Meta.PeriodType) {
+		return Check{Status: CheckSkipped, Reason: fmt.Sprintf(
+			"non_adjacent_prior:%s(gap=%d,want=%d)", in.prior[0].Meta.Period,
+			gap, expectedPeriodGapMonths(in.obs.Meta.PeriodType))}
+	}
+
 	prev, ok := in.prior[0].Values[FieldTSFStock]
 	if !ok {
 		return Check{Status: CheckSkipped, Reason: "prior_absent_field:" + FieldTSFStock}
@@ -497,6 +525,35 @@ func firstN(s []string, n int) []string {
 		return s
 	}
 	return append(slices.Clone(s[:n]), "…")
+}
+
+// expectedPeriodGapMonths 返回某种 period_type 的相邻两期应当相隔几个月。
+//
+// 复用 thresholds.go 里 StockContinuityMax 分档时已经写下的事实：「四档同为年初起
+// 累计口径、相邻两期一律相隔 12 个月」，只有 monthly 是 1 个月。**不另立一张表**——
+// 两份清单会分叉，而先错的一定是后抄的那份。
+func expectedPeriodGapMonths(periodType string) int {
+	if periodType == periodTypeMonthly {
+		return 1
+	}
+	return 12
+}
+
+// periodGapMonths 返回 from 到 to 相隔几个月；period 不是 "YYYY-MM" 时返回 false。
+//
+// 解析失败按**不相邻**处理（调用点的 `!ok ||`）：拿一个解析不出来的期次当基线，
+// 与拿一个跨了三年的当基线一样没有依据。Meta.validate 已经挡住非法 period，
+// 这条是纵深防御，不是主要防线。
+func periodGapMonths(from, to string) (int, bool) {
+	a, err := time.Parse("2006-01", from)
+	if err != nil {
+		return 0, false
+	}
+	b, err := time.Parse("2006-01", to)
+	if err != nil {
+		return 0, false
+	}
+	return (b.Year()-a.Year())*12 + int(b.Month()) - int(a.Month()), true
 }
 
 // gateMagnitudeSanity 查各字段是否落在合理区间。
