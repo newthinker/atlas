@@ -252,6 +252,20 @@ func (m Meta) validate() error {
 type Observation struct {
 	Meta   Meta
 	Values map[string]float64
+
+	// Parts 是**进程内**的合并取证：这条观测由哪几个 extractor 合成（M1c-3b 的 TASK-003）。
+	//
+	// 🔴 它**不入库** —— metaColumns 是七列、insertSQL 显式列举，Parts 不在其中；
+	//    从 Preceding 读回来的 Observation 其 Parts 恒为 nil，这是刻意的：
+	//    合并只发生在 backfill load 那一刻，历史行不需要也无法回答这个问题。
+	//    这条由 TestMergedPartsDoNotRoundTrip 钉住——不持久化的导出字段最容易被
+	//    后人当成能往返的。
+	//
+	// 存在的唯一理由：merged@v1 这一个字符串**说不出必填集**（见 mergedRequiredFields），
+	// 而 gateCompleteness 只拿得到 obs —— 不给它 Parts，那道闸对全部 42 个合并观测恒 skipped，
+	// 而 skipped 不影响 Passed（validate.go 的 passed 只在 CheckFailed 时翻转），
+	// 于是 42 条残缺观测会带着「零告警」进权威表。
+	Parts []string
 }
 
 // CheckStatus 是单道闸门的结果。三态而非布尔：有些检查在某些期次上
