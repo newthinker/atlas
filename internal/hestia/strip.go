@@ -28,6 +28,9 @@ var (
 
 	// 标签删除后会留下空隙；nbsp 也在此一并折叠
 	spaceRE = regexp.MustCompile(`[ \t\x{00a0}]+`)
+	// lineLeadSpaceRE 匹配行首的普通空格（spaceRE 折叠后只可能剩这一种）。
+	// 用 (?m) 让 ^ 匹配每一行行首，而不只是整串开头。
+	lineLeadSpaceRE = regexp.MustCompile(`(?m)^ +`)
 	// 三个及以上连续换行压成两个，便于阅读调试输出
 	blankLineRE = regexp.MustCompile(`\n{3,}`)
 )
@@ -57,6 +60,24 @@ func stripHTML(raw []byte) string {
 	s = html.UnescapeString(s)
 	s = punctNormalizer.Replace(s)
 	s = spaceRE.ReplaceAllString(s, " ")
+	// M1c-4 的 TASK-001：折叠之后再删掉**行首**那一个。
+	//
+	// spaceRE 把连续空白折叠成一个普通空格，但折叠不等于删除 —— 行首仍剩一个，
+	// 而小节标题模板锚定行首。真语料 2023-05 因此整节丢失，报
+	// "section ordinals are not consecutive from 一"。
+	//
+	// ⚠️ 顺序不能反，理由是两条正则的**字符集不同**：lineLeadSpaceRE 是 `^ +`，
+	// 只认 ASCII 空格；NBSP 与制表符要经 spaceRE 才变成 ASCII 空格。若放到 spaceRE
+	// 之前，"\u00a0一、" / "\t一、" 先逃过删除、再被折叠成 " 一、"，行首照样剩一个
+	// 空格 —— 改了个寂寞。
+	//
+	// 别拿纯 ASCII 空格的例子推这个顺序（计划文档原文如此，实测证伪）：`^ +` 是
+	// 贪婪的，"  一、" 换序后一样删干净，结果**逐字相同** —— 那个例子是它自己的反例。
+	//
+	// 换序变异实测转红的是：TestStripHTMLRemovesLeadingWhitespace（其输入含真的
+	// NBSP 与制表符）与 TestStripRealSampleTitlesSurviveLeadingWhitespace/&nbsp;。
+	// 全角空格子例不红 —— punctNormalizer 在两条正则之前就把它换成 ASCII 空格了。
+	s = lineLeadSpaceRE.ReplaceAllString(s, "")
 	s = blankLineRE.ReplaceAllString(s, "\n\n")
 	return s
 }

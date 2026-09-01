@@ -17,8 +17,19 @@ package hestia
 // non_functional[0]  纯函数：同一输入连续两次结果相同      → TestStripAndMetaAreDeterministic
 // non_functional[1]  真实样本剥离后含锚点句且无残留标签    → TestStripRealSamples
 //                    块级边界在真实样本上支撑板块切分（6/8）→ TestStripRealSamplesKeepSectionAnchors
+//
+// M1c-4 的 TASK-001（行首空白）：
+// functional[0]      lineLeadSpaceRE 在折叠之后、blankLineRE 之前
+//                    换序变异实测只被 …SurviveLeadingWhitespace 的 &nbsp; 子例杀掉
+//                    （纯 ASCII 空格的输入换序后结果逐字相同，守不住这个顺序）
+// functional[1]      四条断言：\n一、开头 / \n二、次节 含于结果；
+//                    "正文 内部 空格"（行内折叠不得被波及）；不含 "\n "（无行以空格开头）
+//                                                          → TestStripHTMLRemovesLeadingWhitespace
+// boundary[1]        NBSP 与全角空格经 spaceRE/punctNormalizer 归一后同样删净（真样本）
+//                                                          → TestStripRealSampleTitlesSurviveLeadingWhitespace
 
 import (
+	"bytes"
 	"os"
 	"regexp"
 	"strings"
@@ -66,6 +77,57 @@ func TestStripKeepsBlockBoundaries(t *testing.T) {
 	require.Len(t, lines, 2, "两个 <p> 应产生两行，而不是粘成一行")
 	assert.Equal(t, "一、广义货币增长8.5%", lines[0])
 	assert.Equal(t, "二、全年人民币存款增加26.41万亿元", lines[1])
+}
+
+// TestStripHTMLRemovesLeadingWhitespace：行首空白必须被删掉，不是折叠成一个。
+//
+// 这条断言存在的理由：小节标题模板锚定行首（`(?m)^`），而 stripHTML 的 spaceRE
+// 只把连续空白**折叠**成一个普通空格、不删行首那一个。真语料 2023-05 因此丢掉
+// 「一、」这一节，报 "section ordinals are not consecutive from 一"。
+//
+// ⚠️ 修的是喂给锚定的文本，不是锚定本身——放宽锚定会让「rule@v2 少两个社融节」
+// 与「合法的 rule@v1」不可区分，那正是 extract.go 拒绝去猜的东西。
+func TestStripHTMLRemovesLeadingWhitespace(t *testing.T) {
+	// 🔴 一、前是真的 NBSP、三、前是真的制表符（写成转义以免被编辑器吃掉）。
+	// 故意的：这两个字符**不在** lineLeadSpaceRE 的字符类里，必须先经 spaceRE
+	// 折叠成 ASCII 空格才删得掉。纯 ASCII 输入测不出这一点（见 strip.go 的说明），
+	// 有了它们，「两步的顺序」这个不变式才由本测试自己守着，而不是靠 spaceRE 顺带。
+	got := stripHTML([]byte("<p>\u00a0一、开头</p><p> 二、次节</p><p>\t三、制表</p>" +
+		"<p>正文  内部  空格</p>"))
+
+	for _, want := range []string{"\n一、开头", "\n二、次节", "\n三、制表"} {
+		assert.Contains(t, got, want, "行首空格必须删净，否则行首锚定失效")
+	}
+	assert.Contains(t, got, "正文 内部 空格",
+		"行**内**的连续空白仍按 spaceRE 折叠成一个，本改动不得波及")
+	assert.NotContains(t, got, "\n ", "任何一行都不得以空格开头")
+}
+
+// TestStripRealSampleTitlesSurviveLeadingWhitespace 把上一条钉在真实样本上。
+//
+// 分开的理由与 TestStripRealSamplesKeepSectionAnchors 一致：上一条用合成输入测
+// 「行首空白被删」这个行为，这条测它在真语料上**确实救回了板块**——2025 年报的
+// 一、二 恰是社融两节，脱锚后 (板块数, 有无社融) = (6, false) 与合法 v1 不可分，
+// 正是 detectExtractor 点名要防的静默错路。
+//
+// 这条同时接管了一份被移走的证据：sections_test.go 的 QA 反例原本用 &nbsp; 变异
+// 构造脱锚，M1c-4 的 TASK-001 之后该手法不再退化，那条改插「·」。于是「&nbsp;
+// 前缀不再让标题丢失」这件事在那边不再有人看着 —— 由这条看着。
+func TestStripRealSampleTitlesSurviveLeadingWhitespace(t *testing.T) {
+	sectionRE := regexp.MustCompile(`(?m)^[一二三四五六七八九十]、`)
+	raw := readSample(t, "pboc-2025-12-annual.html")
+
+	// 两种前导空白：&nbsp; 走 spaceRE 的 \x{00a0}，全角空格走 punctNormalizer
+	for _, lead := range []string{"&nbsp;", "　"} {
+		t.Run(lead, func(t *testing.T) {
+			mut := bytes.Replace(raw, []byte("<strong>一、"), []byte("<strong>"+lead+"一、"), 1)
+			mut = bytes.Replace(mut, []byte("<strong>二、"), []byte("<strong>"+lead+"二、"), 1)
+			require.NotEqual(t, raw, mut, "变异须真的改到了输入")
+
+			assert.Len(t, sectionRE.FindAllString(stripHTML(mut), -1), 8,
+				"前导空白不得让标题脱锚——脱锚后残缺 v2 与合法 v1 不可分")
+		})
+	}
 }
 
 func TestStripNormalizesPunctuation(t *testing.T) {

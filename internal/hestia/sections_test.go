@@ -357,10 +357,18 @@ func TestDetectExtractorErrorNamesActualCount(t *testing.T) {
 // 标签嵌套变化、抓取截断），后果都是同一个：板块被静默丢掉。序号是报告**自带的
 // 冗余**，校验它等于让「丢了一节」这件事本身可检测，与丢失原因无关。
 func TestDetectExtractorRejectsNonConsecutiveOrdinals(t *testing.T) {
-	t.Run("QA 反例：2025 样本仅在一、二前各插一个 &nbsp;", func(t *testing.T) {
+	// 变异原为「一、二 前各插一个 &nbsp;」。M1c-4 的 TASK-001 给 stripHTML 补了
+	// lineLeadSpaceRE，前导空白（含 &nbsp;、全角空格）不再让标题脱锚 —— 实测该变异
+	// 现在得 8 段，构造不出本条要的形态。改插一个「·」：它不是空白、不被折叠，
+	// 标题行照样匹配不上 (?m)^[一-十]、，退化形态与原变异逐字相同（6 段、首个是三、）。
+	//
+	// 🔴 换的是**构造手法**，不是被测的守卫：序号连续性守的是「丢了一节」这件事本身，
+	// 与丢失原因无关（见上方「为什么修法是序号连续性」）。前导空白只是被关掉的
+	// **一种**成因，而这正是那段注释预先说明过的情形。
+	t.Run("QA 反例：2025 样本仅在一、二前各插一个 ·", func(t *testing.T) {
 		raw := readSample(t, "pboc-2025-12-annual.html")
-		mut := bytes.Replace(raw, []byte("<strong>一、"), []byte("<strong>&nbsp;一、"), 1)
-		mut = bytes.Replace(mut, []byte("<strong>二、"), []byte("<strong>&nbsp;二、"), 1)
+		mut := bytes.Replace(raw, []byte("<strong>一、"), []byte("<strong>·一、"), 1)
+		mut = bytes.Replace(mut, []byte("<strong>二、"), []byte("<strong>·二、"), 1)
 		require.NotEqual(t, raw, mut, "变异须真的改到了输入")
 
 		// 前提：这个输入确实退化成「6 段、无社融」——与合法 v1 在旧判据下不可分
