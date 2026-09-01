@@ -1,0 +1,125 @@
+{
+  "task_id": "TASK-001",
+  "title": "抽出 eachParsedArticle 共用管道（纯重构，calibrate 输出逐字节不变）",
+  "key_findings": [
+    "搬迁块与原文**机械 diff 只剩一处差异**：Records 装配的 5 行（含其两行注释）换成 `fn(parsedArticle{item: it, obs: obs})` 1 行。其余 74 行（含 `res.Periods++` 的位置、`fail` 闭包措辞、sha256 在 Parse 之前查、Unsupported 分类判据、期次交叉校验、全部注释）逐字节一致。核实手法：`git show HEAD:calibrate.go | sed -n '157,231p' | sed 's/d\\.Dir/dir/'` 与新函数体 diff —— 这是**观察**不是自述，任何一处注释被改都会显示出来。",
+    "**期次交叉校验（`obs.Meta.Period != it.period`）必须留在管道内**，不能留给调用方：`TestEachParsedArticleYieldsFullObservation` 断言 `p.item.period == p.obs.Meta.Period`，这条不变量正是由管道内的交叉校验保证的。若把它挪到 calibrate 端的闭包里，TASK-003 的 load 端就会拿到期次错配的 Observation 而无人拦截。",
+    "**`res.Periods--` 也一并搬进了管道**（Unsupported 分流那支）。它与 `res.Periods++` 是一对：`++` 在循环首、`--` 在「本迭代不解析」分流处。只搬 `++` 不搬 `--` 会让 199 变成 218（19 篇 Unsupported 不再被扣回），同样是单测抓不到的静默偏差。",
+    "真语料实测「待解析（受支持期次）: 199 篇」，与 DoD boundary[0] 的预期数一致 —— 若 `res.Periods++` 被误挪到 `fail()` 之后，此处会显示 161。这个数是**观察**，不是引用需求文档。",
+    "需求文档 Step 2 的 fixture 调用 `dir := t.TempDir(); writeCalibrateFixture(t, dir)` 确实编译不过（DoD boundary[1] 已订正）。实际沿用的是 `completedFixture(t)`（calibrate_test.go:88），它内部调 `writeCalibrateFixture(t, Manifest, files)` 并返回自建的 TempDir，含两篇真实报告（2025 年报 + 2020 上半年）。**未新写第二份 fixture。**",
+    "**`parsedArticle.item` 在生产代码里零消费者，但不是死字段**（`grep -rn 'p\\.item' internal/hestia/ | grep -v _test.go` ⇒ 0；全仓库唯一读取点是本任务的测试）。活命理由在 M1c-3b 的 TASK-006 的 DoD 第 (4) 条：`item.a.ID` 是 manifest 的 id，而 `Parse` 只看得到 HTML、看不到 URL（接缝①）⇒ 删掉它，TASK-006 会表现为「合并组的代表 id 恒为空」。已把这条**写进类型注释**而不只写在这里——载体强度：代码注释 > discovery，下一个想删它的人先看到的是注释。",
+    "**新测试里 `require.Equal(p.item.period, p.obs.Meta.Period)` 守的不是它原本 message 写的性质**（变异实测，隔离 worktree）：删掉管道内的期次交叉校验 guard ⇒ **本测试仍绿**，红的是既有的 `TestCollectSamplesCrossChecksPeriodAgainstTitle`；把 fn 调用改成 `parsedArticle{obs: obs}`（不传 item）⇒ **本测试红，且全包只红这一条**。⇒ 它钉住的是「item 与产出它的那次迭代的 obs 配对」。原 message 写「分类算出的期次与正文解析出的期次必须一致」会让下一个人拿着这条红去查分类逻辑，而真正坏掉的是 item 的传递——**断言红得对、给的理由却指错方向**。已按实际性质改写，并把三条变异的观察写进测试注释。"
+  ],
+  "decisions": [
+    {
+      "decision": "Records 装配连同其原有两行注释一起搬进 collectSamples 的闭包，而不是按需求文档 Step 4 的示例形态丢弃注释",
+      "rationale": "DoD functional[1] 要求「搬迁时逐字保留全部注释」。那段注释（「连 Meta 一起留下。此前这里只取 obs.Values，period_type 在采集的这一刻就在手边、却被丢掉了」）记的是一次订正的来历，丢掉等于让后人重犯。注释里的 `obs.Values` 保持原字面**不改成 `p.obs.Values`** —— 它指的是历史上那一版代码，改了就不再是那句话。"
+    },
+    {
+      "decision": "期次交叉校验留在 eachParsedArticle 内部（管道成功出口之前），不外提",
+      "rationale": "它是「这条记录可信」的前置条件，两端（calibrate 取 Values、TASK-003 取 Meta）都需要它。外提会让每个新调用方各自记得加一遍 —— 而漏加时的表现是「样本静默来自另一期」，不报错。见 calibrate.go 原注释「没有这条则样本**静默来自错误期次**」。"
+    },
+    {
+      "decision": "签名照需求文档 Interfaces 段逐字写成两行（`fn func(parsedArticle)) int` 单独一行），未合并成一行",
+      "rationale": "DoD functional[0] 要求「签名与需求文档 Task 1 的 Interfaces 段逐字一致」。gofmt 对两种写法都不改，故逐字照抄是安全且可机械核对的。"
+    },
+    {
+      "decision": "背对背比对在**提交之后**用干净工作区重跑了一遍，报告里的全部数字取自那一次",
+      "rationale": "自证数字必须在最后一次改动之后统一重采 —— 分批采的数字即使每个当时都对，合到一份报告里也不构成对最终产物的自证，而验证者无法从数字本身看出它测的是哪棵树。故 verification.measured_at_head 与每个数字同源。"
+    },
+    {
+      "decision": "第二轮改动（commit 06c8e98）采纳 A/B/D/F、部分采纳 E、**不采纳 C**",
+      "rationale": "来源是 code-simplifier 子代理的审查（经 Leader 转发）。按纪律逐条自己核实后才采纳，不照单全收：A 用 grep 验消费者数 + 读 TASK-006 的 DoD 原文；B 在隔离 worktree 上重跑它给的 M1/M2 并自补 M3。核实结果见 verification.mutation_evidence。"
+    },
+    {
+      "decision": "**不采纳 C（删掉测试里的 `Samples: map[string][]float64{}` 初始化）**",
+      "rationale": "「删掉仍绿」属实，但那证明的是**当下没被用到**，不是**不该在**。保留它的理由是：这一行与生产调用点 `collectSamples` 里的 `res := &CalibrateResult{Samples: map[string][]float64{}}` 逐字同形；删掉之后测试会跑在一个生产中不存在的 `res` 形态上（`Samples` 为 nil），而这个差异今天不显现、在 `eachParsedArticle` 将来往 `Samples` 写一笔时会变成 nil-map panic——那时红的是测试没覆盖到的路径。⇒ 让夹具与真实调用点同形本身就是一条价值。"
+    },
+    {
+      "decision": "E 只改类型注释、保留测试注释里那段重复的理由",
+      "rationale": "重复的那段（「只传 Values ⇒ TASK-003 无从装配业务键 ⇒ 表现为合并组恒为 0」）在 DoD functional[2] 里是**逐字要求写在测试注释里**的，动它等于动 DoD 指定的内容。类型注释不受 DoD 约束，故改它——改成逐字段说明 obs 与 item 各自的下游，正好承载 A。"
+    },
+    {
+      "decision": "D 把循环内的 `require` 改成 `assert` 并给每条断言带上 `p.item.a.File`",
+      "rationale": "`require` 在第一篇失败时就停，而「只有某一篇缺 Meta」与「全部都缺」是两种不同的故障——压成同一个现象会让排查从一开始就少一半信息。带文件名是因为不带就只知道有一篇不对、不知道是哪一篇。这是本轮唯一的**实质**代码改动（其余都是注释与 message），且只影响失败时的报告，不改判定。"
+    },
+    {
+      "decision": "F 把 `res.Periods` 的 `++`/`--` 成对关系与 199/161/218 三个数写进**函数头注释**，而不只写在 discovery 里",
+      "rationale": "载体强度：代码注释 > discovery。下一个改这段的人会先看到函数头，而 discovery 要主动去翻。这条本身也是本任务发现的 DoD 缺口（DoD 只点了 `++`），把它留在代码里比留在交付报告里有效。"
+    },
+    {
+      "decision": "改完注释后**用新代码把 M1/M2 又跑了一遍**，没有沿用改动前的实测结果",
+      "rationale": "我在测试注释里写了「措辞是变异实测定下来的」——那是一个断言，它的证据必须来自**它所描述的那一版代码**。这是「自证数字必须采于最后一次改动之后」的一般形式：不只数字，**声称本身也有采样时点**，而拿旧版实测去背书新注释时，那份注释读起来一模一样。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/calibrate.go（两次提交合计 +71 −37：5094fcd 的 +55/−30 抽出管道，06c8e98 的 +16/−7 注释）",
+    "internal/hestia/calibrate_test.go（两次提交合计 +63 −6：5094fcd 的 +43/−0 新测试，06c8e98 的 +20/−6 断言 message 与 assert）"
+  ],
+  "interfaces_exposed": [
+    "type parsedArticle struct { item calibrateItem; obs Observation } —— 共用管道交给两端的一条记录，**交出整个 Observation**（Meta.Period / Meta.PeriodType / Meta.PublishedAt / Meta.Extractor 均可用），供 M1c-3b 的 TASK-003 的 load 端装配业务键",
+    "func eachParsedArticle(dir string, res *CalibrateResult, items []calibrateItem, fn func(parsedArticle)) int —— 走「分类 → 读文件 → sha256 校验 → Parse」，对每篇成功解析的调 fn；失败的记进 res.Failures/res.Unsupported；返回 sha256 未校验的篇数（调用方汇总成 warning）",
+    "⚠️ 给 TASK-003 的三条使用约束：① 调用前须自行 `items := classifyArticles(res, articles)`，管道不做分类；② `res.Periods` 由管道维护（循环首 ++、Unsupported 分流处 --），调用方不要再动它；③ 返回的 shaUnverified 若 >0，调用方**必须**自己汇总成 warning —— 管道只计数不发声（这是 calibrate 端既有行为，见 calibrate.go 的 `if shaUnverified > 0`）"
+  ],
+  "verification": {
+    "measured_at_head": "5094fcdb9aa900226091168655b32e430c8ec4fb",
+    "measured_tree_state": "worktree /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-001-m1c3b，`git status --porcelain` 0 条未提交改动。全部自证数字采于此树、此 sha，最后一次改动之后统一重采。",
+    "branch": "task/TASK-001-m1c3b（尚未合入 master；合入后 master 上的 sha 会不同，届时以 Leader 的 merge commit 为准）",
+    "baseline_head": "32bc1e5f306386ee5c69a54b4bae3e0184aa30f2",
+    "baseline_cmd": "两份二进制**同一时刻背对背**跑：/tmp/atlas-baseline-t001（建自 32bc1e5f306386ee5c69a54b4bae3e0184aa30f2）与 /tmp/atlas-after-t001（建自 5094fcdb9aa900226091168655b32e430c8ec4fb）各跑一次 `hestia backfill calibrate --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete`（绝对路径，未建软链），输出 diff。",
+    "baseline_result": "diff 零输出（rc=0）；两份输出各 **186 行**；sha256 同为 7fdd927c60eacd63808949824fae31a66e99fecebea749bc53b3813abaa0e134。⇒ 逐字节一致。",
+    "baseline_sanity": "输出第 2 行「待解析（受支持期次）: 199 篇」、第 59 行「标定报告：尝试解析 199 期」—— 199 而非 161，`res.Periods++` 的位置未变。",
+    "suite": "go test ./internal/hestia/... -count=1 -cover ⇒ rc=0，ok，coverage: 95.9% of statements",
+    "coverage": "95.9% @ 5094fcdb9aa900226091168655b32e430c8ec4fb（go test -cover 口径，与 DoD 基线 95.9% 同口径、不低于）",
+    "vet": "go vet ./internal/hestia/... ./cmd/... ⇒ rc=0，输出 0 行",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas ⇒ 恰为 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go 两项（既有欠账，来自 f5d7b82，未动）。判据「这两个文件之外无新增项」已满足。",
+    "deps": "git show --name-only 5094fcdb9aa900226091168655b32e430c8ec4fb | grep -c 'go\\.\\(mod\\|sum\\)' ⇒ 0，无新增依赖",
+    "red_evidence": "Phase 1 实测 FAIL 原文：`internal/hestia/calibrate_test.go:1188:12: undefined: parsedArticle` / `:1189:2: undefined: eachParsedArticle` / `:1189:44: undefined: parsedArticle`，`FAIL [build failed]` —— 与需求文档 Step 3 的 Expected 完全一致。",
+    "move_fidelity": "机械核实：`git show HEAD~1:internal/hestia/calibrate.go | sed -n '157,231p' | sed 's/d\\.Dir/dir/'` 与新 eachParsedArticle 的循环体 diff ⇒ 仅 6 行差异（Records 5 行 → fn 1 行），其余逐字节一致。",
+    "dod_to_test": [
+      "functional[0] parsedArticle + eachParsedArticle 签名逐字一致、返回 sha256 未校验篇数 → 编译通过 + move_fidelity 核实 + 调用方 `if shaUnverified > 0` 汇总 warning（既有测试 TestCollectSamplesVerifiesArticleSHA256 钉住那条 warning，全绿）",
+      "functional[1] collectSamples 改为调用管道、逐字保留注释 → move_fidelity（仅 Records 一处差异）+ 背对背 diff 零输出",
+      "functional[2] TestEachParsedArticleYieldsFullObservation 存在且通过 → PASS（断言 Meta.Period/PeriodType/PublishedAt/Extractor 四项非空 + item.period == obs.Meta.Period）",
+      "boundary[0] res.Periods++ 在 fail() 之前 → 真语料输出 199 篇（非 161）+ move_fidelity 显示该行位置未变；附带发现 res.Periods-- 也须同搬，已搬",
+      "boundary[1] 沿用既有 fixture 不新写 → 用 completedFixture(t)（calibrate_test.go:88），未新增任何 fixture 构造器",
+      "error_handling[0] 背对背基线比对 → diff 零输出、186 行、sha256 相同",
+      "error_handling[1] 语料主仓库绝对路径 + --allow-incomplete → baseline_cmd 原文可见，未建软链",
+      "non_functional[0] gofmt/vet/test/覆盖率/无新增依赖 → 逐项见上",
+      "non_functional[1] worktree → 提交 → Leader merge → 回主仓库 → dev_done → 拆 worktree → 交付流程执行中，merge 前不转 dev_done"
+    ],
+    "post_merge_dryrun": {
+      "why": "我的主验证数字采于 5094fcd（底座 32bc1e5），而等待 merge 期间 master 已前进到 e020560（合入了 TASK-004 的 config 校验与 TASK-009 的文档订正）。交付物最终所在的树不是我测过的那棵，故提前在**预演合并树**上重跑一遍，确认结论在新底座上仍成立。",
+      "how": "git merge-tree --write-tree e02056079baaa0c33bf25254e7cfe18b971547a7 5094fcdb9aa900226091168655b32e430c8ec4fb ⇒ tree b512dd1a3498604fd53a0060174a242dcc6dab68（conflict 命中 0）；由该 tree 造一次性 commit 14557de65b9f95d215e159ccd62c7fd2aa6bd9ab（不挂任何分支，用完即拆 worktree）。**A/B 两端都在新底座上**：baseline 二进制建自 master e020560（不含我的改动），after 二进制建自 14557de（含），同一时刻背对背跑同一份语料。",
+      "result": "diff 零输出；两份输出各 186 行；sha256 同为 7fdd927c60eacd63808949824fae31a66e99fecebea749bc53b3813abaa0e134。",
+      "three_way_finding": "**该 sha256 与 32bc1e5 底座上采到的那份完全相同** ⇒ 两个独立结论：① 我的重构在新底座上仍逐字节不变；② TASK-004 / TASK-009 也没有改变 calibrate 输出（它们不在这条路径上）。",
+      "suite_on_dryrun": "在 14557de 上：go test ./internal/hestia/... -count=1 -cover ⇒ rc=0，coverage 95.9%；go test ./cmd/... -count=1 ⇒ rc=0；go vet ./internal/hestia/... ./cmd/... ⇒ rc=0 零输出；gofmt -l internal/hestia cmd/atlas ⇒ 仍恰为 backtest_test.go 与 crisis_test.go 两项既有欠账。",
+      "caveat": "14557de 是**预演**合并的 commit，不是 Leader 实际的 merge commit（届时 sha 会不同）。它证明的是「这份改动叠到 e020560 上时行为不变」，不是「Leader 合出来的那个 commit 已被验过」。实际 merge 落地后我会在真实 master 上再跑一次并刷新本节，然后才转 dev_done。"
+    },
+    "post_merge_actual": {
+      "merge_commit": "053d1a96240819f4ca3394512226c85ff74ebea9（merge(TASK-001)，父之一为我的 5094fcdb9aa900226091168655b32e430c8ec4fb）",
+      "content_check": "内容判据（不是拓扑判据）：master 上 internal/hestia/calibrate.go 的 sha256 = 272ebe1b8cdc187d20d6a6dff1e4c62139579579956b7b6bb75f19b49fc9b9cf、calibrate_test.go = 87d0558b34cbf17d809032be97d5c86d03539f213aed10c386f9f0e60e072c68，与我提交树上的完全相同；`git diff 5094fcd HEAD -- <两文件>` 零输出 ⇒ 合入的确实是我那一版，逐字节。",
+      "backtoback": "A/B 两端都在**合并后的真实主线**上：baseline 二进制建自 db19e803a08d63cdd42af8a4bac4dfddc1ff3bf5（我的 merge 之前的 master），after 二进制建自 053d1a96240819f4ca3394512226c85ff74ebea9，同一时刻背对背跑同一份主仓库绝对路径语料 + --allow-incomplete。结果：diff 零输出；两份各 186 行；sha256 同为 7fdd927c60eacd63808949824fae31a66e99fecebea749bc53b3813abaa0e134。",
+      "sanity": "输出「待解析（受支持期次）: 199 篇」/「标定报告：尝试解析 199 期」—— 199 而非 161，res.Periods++ 的位置在合并后仍未变。",
+      "suite": "在 053d1a96240819f4ca3394512226c85ff74ebea9 上：go test ./internal/hestia/... -count=1 -cover ⇒ rc=0，coverage 95.9%；go test ./cmd/... -count=1 ⇒ rc=0；go vet ./internal/hestia/... ./cmd/... ⇒ rc=0 零输出；gofmt -l internal/hestia cmd/atlas ⇒ 恰为 backtest_test.go 与 crisis_test.go 两项既有欠账；TestEachParsedArticleYieldsFullObservation 单独跑 ⇒ ok。",
+      "sha_stability": "同一个输出 sha256 7fdd927c… 在**四个**互不相同的树上重现：32bc1e5（原基线）、5094fcd（我的提交）、e020560/14557de（预演合并的 A/B 两端）、db19e80/053d1a9（真实合并的 A/B 两端）。⇒ 本轮 sprint 已合入的 TASK-002/004/009 都不在 calibrate 这条路径上，我的重构也确实零行为变化。"
+    },
+    "note_on_earlier_numbers": "本文件里 measured_at_head=5094fcd 的那批数字采于合并前的 worktree，post_merge_dryrun 采于预演树；**判定请以 post_merge_actual 为准**，它测的是实际交付到 master 上的那棵树。三批数字互相一致（同一个输出 sha256），保留前两批是为了留下推理链，不是让验证者去挑一个。",
+    "mutation_evidence": {
+      "isolation": "全部变异在**隔离 worktree** 上跑（`git worktree add --detach ../wt-t001-mut 053d1a9`，以及第二轮在我自己的 fix worktree 上跑完即 `git checkout --` 还原）。主工作区一个字节未碰：变异前后 `internal/hestia/calibrate.go`+`calibrate_test.go` 的 sha256 逐字节相同、`git status --porcelain | md5` 均为 ef2ba4aa824a9c32efb82d0229063af2；隔离 worktree 已拆，`git worktree list` 无 TASK-001 残留。每个变异体落盘后过语法闸（`gofmt -e`）并打印 diff 逐字核对。",
+      "M1": "删掉 eachParsedArticle 内的 `if obs.Meta.Period != it.period {…}` guard ⇒ TestEachParsedArticleYieldsFullObservation **仍绿**；红的是既有的 TestCollectSamplesCrossChecksPeriodAgainstTitle。⇒ 交叉校验这条性质由既有测试守着，不是新测试守的。",
+      "M2": "`fn(parsedArticle{obs: obs})`（不传 item）⇒ 新测试**红**，全包 FAIL 用例数 **1**（外溢度精准）；既有交叉校验测试仍绿。⇒ 新测试守的是 item↔obs 的配对。",
+      "M3": "`fn(parsedArticle{item: it, obs: Observation{Values: obs.Values}})`（等价「只传 Values」，Meta 丢弃）⇒ 新测试**红**，死因 `Meta.Period 不得为空`（calibrate_test.go:1193）。⇒ DoD functional[2]「交出整个 Observation」确实有牙，不是空断言。",
+      "rerun_after_edit": "改完注释与 message 之后，**在新代码（06c8e98）上把 M1/M2 又跑了一遍**，结论一致，且 M2 的失败 message 现在正确指向配对关系而非「期次一致」。理由见 decisions 里那条：注释里写的「措辞是变异实测定下来的」是一个断言，证据必须来自它所描述的那版代码。"
+    },
+    "final": {
+      "delivered_at_master": "2433e5577b38f1d0fc8ba77bff4bd2641dee7421（merge commit，第二父为 06c8e98f9efc68bd343a39116fe46528098c454d）",
+      "content_check": "master 上两个文件与我提交树 06c8e98 逐字节一致（`git diff 06c8e98 HEAD -- <两文件>` 零输出）；新版独有字串「两个字段各有一个下游」「item 与 obs 必须来自同一次迭代」「得 218」各命中 1。",
+      "backtoback": "A/B 两端跨越本任务的**全部**改动：baseline 二进制建自 db19e803a08d63cdd42af8a4bac4dfddc1ff3bf5（我任何改动之前的 master），after 建自 2433e5577b38f1d0fc8ba77bff4bd2641dee7421（最终交付），同一时刻背对背跑同一份主仓库绝对路径语料 + --allow-incomplete ⇒ **diff 零输出**；各 186 行；sha256 7fdd927c60eacd63808949824fae31a66e99fecebea749bc53b3813abaa0e134。",
+      "sanity": "「待解析（受支持期次）: 199 篇」—— 199 双向自证：少搬 res.Periods++ 得 161，漏搬 res.Periods-- 得 218，两个方向的错都破坏这个数。",
+      "suite": "在 2433e5577b38f1d0fc8ba77bff4bd2641dee7421 上：go test ./internal/hestia/... -count=1 -cover ⇒ rc=0，coverage 95.9%；go test ./cmd/... -count=1 ⇒ rc=0；go vet ./internal/hestia/... ./cmd/... ⇒ rc=0 零输出；gofmt -l internal/hestia cmd/atlas ⇒ 恰为 backtest_test.go 与 crisis_test.go 两项既有欠账；TestEachParsedArticleYieldsFullObservation 单独跑 ⇒ ok。",
+      "sha_stability": "同一个输出 sha256 7fdd927c… 在**六棵互不相同的树**上重现：32bc1e5（原基线）、5094fcd（第一版提交）、e020560/14557de（预演合并 A/B）、db19e80/053d1a9（第一次真实合并 A/B）、053d1a9/06c8e98（第二轮增量 A/B）、db19e80/2433e55（最终跨全部改动 A/B）。⇒ 结论不依赖于在哪棵树上测。"
+    },
+    "which_numbers_to_judge_by": "🔴 **判定请以 `verification.final` 为准** —— 它测的是实际交付到 master 的最终态 2433e5577b38f1d0fc8ba77bff4bd2641dee7421。`measured_at_head=5094fcd` / `post_merge_dryrun` / `post_merge_actual` 三批是第一版交付过程中的中间采样，保留只为留下推理链，**不是让验证者从中挑一个**。四批数字互相一致（同一个输出 sha256）。"
+  },
+  "provenance": "全部代码由 dev-m1c3b-a 编写。`eachParsedArticle` 的函数体系 `collectSamples` 原有循环的逐字搬迁（DoD 要求），非本人原创；函数头注释、`parsedArticle` 的文档注释、测试注释与断言 message 为本人所写。测试 `TestEachParsedArticleYieldsFullObservation` 的骨架取自需求文档 Task 1 Step 2，fixture 调用按 DoD boundary[1] 的订正改为 `completedFixture(t)`。\n\n**第二轮改动（06c8e98）的来源须说明**：A/B 两条问题由本任务 spawn 的 code-simplifier 子代理发现（它的分析投递给了 Leader 而非我，由 Leader 转发）。该子代理**未修改任何文件**（已用 git status + numstat + 搬迁块 diff 三重核实，文件 sha256 与调用前一致）。**采纳前我按纪律逐条自己核实**：A 用 grep 验消费者数并读 TASK-006 的 DoD 原文；B 在隔离 worktree 上重跑它给的 M1/M2 并自补 M3，改完后又在新代码上重跑一遍。C 经核实后**不采纳**（理由见 decisions）。⇒ 发现归子代理，核实、取舍与实现归 dev-m1c3b-a。\n\n另记一个与代码无关但影响解读的事实：该子代理被 teammate-idle hook 反复误认成我本体（hook 按 session 而非 agent 识别身份，解锁条件『把名下任务推进到 dev_done』子代理永远满足不了），被唤醒至少 17 次；我最初看到的『第十七次。不变：不写、不代转 dev_done』是它在拒绝那个误发的催促，不是对本任务的回复。我据此一度在 provenance 里记『本任务未获得简化建议』——**那个记载是错的，现已订正**：结论存在，只是投递到了 Leader 那里。"
+}

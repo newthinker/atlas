@@ -1,0 +1,58 @@
+{
+  "task_id": "TASK-007",
+  "title": "atlas hestia backfill load 子命令",
+  "key_findings": [
+    "`Use`/`Short`/`Long` 照抄需求文档 Task 7 Step 3，**`Long` 与文档第 1232-1241 行 diff 逐字节一致**（10 行）。`--db` 与 `--dir` 均 `MarkFlagRequired`，`--db` **不给默认值**（注册处传空串），由 `TestHestiaBackfillLoadIsRegistered` 断 `DefValue` 为空钉住——断 `DefValue` 而非读包级变量，因为测试间的重置逻辑会把变量抹掉，断变量的用例对「注册时给了默认值」这个真实缺陷免疫（沿用 M1c-1 TASK-010 FIX-A 的教训，见同文件 TestHestiaBackfillCalibrateIsRegistered）。",
+    "🔴 **cmd 层不碰路径**：`--db` 的存在性检查留在 `BackfillLoad` 里。这一层若自己 `os.Stat` 就要 import `path/filepath`，而 `TestHestiaCmdDoesNotResolveDBPath` 明令 `hestia.go` 不得 import 它（路径语义归 `internal/hestia`）。该守卫改动后仍 PASS。",
+    "TASK-006 的两条交接都照做了：`Out` 显式填 `cmd.OutOrStdout()`（nil 会被 BackfillLoad 直接拒）；判成功看 `err` 不看 `res`（失败时 res 也非 nil）。",
+    "⚠️ **`hestia.go` 是 `75/3` 不是纯新增**，那 3 处删除已逐行核实：两处是 gofmt 对 `hestiaBackfillExpect{Periods,Articles}` 的**重新对齐**（两个变量在提交后仍各声明 1 处、被引用 4 处），一处是 `hestiaBackfillCmd.AddCommand(...)` 那行被改写成含新子命令的两行。**没有任何东西被真删掉。**"
+  ],
+  "decisions": [
+    {
+      "decision": "🔴 `TestBackfillLoadRequiresDBFlag` 断 `\"db\"` + `\"required\"`，而不是 DoD 字面要求的 `\"--db\"`",
+      "rationale": "**这是与 DoD 字面的一处偏离，已向 Leader 显式申报。** cobra 的实际错误文案是 `required flag(s) \"db\" not set`，**不带 `--` 前缀**（实测，非推断）。DoD functional[2] 与需求文档 Task 7 Step 1 都写「错误串含 --db」，那是照抄需求文档时未经实测的措辞——与同文档把命令执行辅助写成示意名 `runCmd` 是同一类。同文件既有两条 required-flag 用例也都断裸名（fetch 的 \"out\" 在 :733、calibrate 的 \"dir\" 在 :895）。另加断 `\"required\"` 是因为只断 `\"db\"` 太弱：任何含 db 字样的别的错误（如 db_path 相关）都能让它变绿，而本条要钉的是「cobra 把它当必填拦下了」这条路径。要让错误字面含 `--db` 就得放弃 MarkFlagRequired 自己手写检查，那会偏离本文件既有做法。"
+    },
+    {
+      "decision": "只读配置里的 Thresholds，不碰 cfg.Storage.DBPath",
+      "rationale": "回填写的是 `--db` 指的那个新库，与生产库无关——`Long` 里那句「never touches the production database」就是这个意思。命令确实读 configs/hestia.yaml（取阈值），但只读不写，与「never edits configs/hestia.yaml」不冲突。"
+    },
+    {
+      "decision": "补 TestHestiaBackfillLoadIsRegistered（DoD 未逐条点名，但 functional[0] 要求「挂到 hestiaBackfillCmd」）",
+      "rationale": "判据用「从根命令按 hestia→backfill→load 找得到」而不是「那个变量非 nil」——后者对一个建了命令却忘了 AddCommand 的实现同样为真，而那种实现在 CLI 上根本调不出来。沿用同文件 TestHestiaBackfillFetchIsRegistered 的判据。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia.go (+75/-3；新增 hestiaBackfillLoadCmd + runHestiaBackfillLoad + 三个包级 flag + init 注册。3 处删除见 key_findings[3]，均非真删)",
+    "cmd/atlas/hestia_test.go (+85/-0，纯新增；3 个测试函数 + DoD↔测试映射注释)"
+  ],
+  "interfaces_exposed": [
+    "CLI：`atlas hestia backfill load --dir <语料目录> --db <新库路径> [--allow-incomplete]`。`--dir` 与 `--db` **均必填**，`--db` **无默认值**且**必须指向尚不存在的路径**（存在性由 BackfillLoad 检查并报错）。",
+    "核对报告写到命令的 stdout（`cmd.OutOrStdout()`），含「四道恒等式」与「合并组明细」等小节。⚠️ 报告是 `DroppedIDs` 的**唯一**载体。",
+    "⚠️ 给 M1c-3b 的 TASK-008（真跑验收）：本命令读 `configs/hestia.yaml` **只为取 Thresholds**，不写它、也不碰 `storage.db_path` 指的生产库。真跑时 `--db` 指向的文件必须先不存在（`rm -f` 后再跑），否则 BackfillLoad 直接报错——这是刻意的，回填是一次性动作。"
+  ],
+  "verification": {
+    "measured_at_head": "6ff4b456983a0b149e4922d517e3689c4123ff9d",
+    "measured_tree_state": "主仓库 master，merge 之后重采，工作区代码未提交改动 0 条。全部自证数字采于此树此 sha。",
+    "branch": "master（分支 task/TASK-007-m1c3b @ 3c34716ad1e0f93b6afc1e91ca9e88c693191556 已由 Leader 经 6ff4b45 合入）",
+    "baseline_head": "d4f1e7c835f6a1f98391a632d64e5320f640ae42",
+    "merge_confirmed_by": "内容判据：cmd/atlas/hestia.go 与 hestia_test.go 在 master 与 3c34716 上 sha256 各自逐字节一致（0ff21aac… / 53fa068a…），三个新测试函数在 master 上各命中 1 处，且 3c34716 是 merge commit 6ff4b45 的父提交。",
+    "suite": "在 6ff4b45 上：三条新测试 + TestHestiaCmdDoesNotResolveDBPath 全 PASS；`go test ./... -count=1` **FAIL 包数 0**",
+    "coverage": "**cmd/atlas: 75.7%**（`go test -cover` 口径）/ **75.9%**（`go tool cover -func` TOTAL 口径，即门禁用的那个）@ 6ff4b456983a0b149e4922d517e3689c4123ff9d。`coverage_floor: 75`，两个口径都达标。⚠️ **两个数不同不是误差，是两把不同的尺**：门禁跑 `go test -coverpkg=<packages> -coverprofile=…` 再取 `go tool cover -func` 的 total 行（task-completed.sh:385-394 我读过），与 `go test -cover` 直接打印的 per-package 数算法不同；我用门禁的口径复算得 75.9%，与门禁输出逐字相符。报数时给出两个并注明口径，避免验证者拿一把尺去对另一把尺的数。**internal/hestia: 96.2%** @ 同一 sha（用于确认本任务未波及 hestia 包）。⚠️ 两个包水位差很远，不可互相套用——DoD 原写「不低于 95.9%」是从模板结转的过期数字套到了另一个包上，按那个字面本任务永远不可能达标；该问题由我预读时发现、Leader 已改为 coverage_floor 75 并写入实测基线 75.6%。",
+    "vet": "go vet ./internal/hestia/... ./cmd/... ⇒ 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas ⇒ 恰为 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，来自 f5d7b82，未动）",
+    "deps": "go.mod / go.sum 命中 0 条",
+    "red_evidence": "三条用例在实现前全部 FAIL（`unknown command \"load\"` 一族）。⚠️ 其中两条的首次失败是**我自己的测试写错**、不是实现缺陷：TestBackfillLoadRequiresDBFlag 断了不存在的 `--db` 字面（见 decisions[0]）；TestHestiaBackfillLoadWritesReport 的临时配置 `index_url: \"\"` 非法致 LoadConfig 报错。两处都是测试侧修正，实现未因此改动。",
+    "guard_check_gotcha": "⚠️ 核实「hestia.go 没 import path/filepath」时我先用 `grep -c 'path/filepath'` 得到 **2**，与守卫 PASS 矛盾。查明那 2 处都在**注释**里（142 行与 249 行）——grep 数的是「文件里提到过这个字符串」，守卫数的是「import 声明里有没有它」，**两个不同的性质**。改用 import 块口径重数得 0。⇒ **权威判据始终是 TestHestiaCmdDoesNotResolveDBPath 本身**；这条记下来是因为反事实很危险：若那条 grep 恰好返回 0，我会拿一个口径错误的仪器当独立佐证，而它对「注释里写了但 import 里没有」这个真实情况恰好也给 0，看不出任何问题。",
+    "merge_check_race": "⚠️ 记一个方法上的观察：我的「拓扑 + 内容」两条判据**不是原子的**（两次独立的 git 调用）。本次首查得到「拓扑=未合入 / 内容=命中 4 条」这对矛盾结果，成因是 Leader 的 merge 恰好落在两条命令之间。同一时刻重跑两条即一致（均为已合入）。⇒ 两条判据打架时先原地重跑一次，不要立刻当成 rebase/squash 换了 sha。",
+    "dod_to_test": [
+      "functional[0] Use/Short/Long 照抄 + 挂到 hestiaBackfillCmd → TestHestiaBackfillLoadIsRegistered（PASS）；Long 与需求文档 1232-1241 行 diff 逐字节一致",
+      "functional[1] 三个包级 flag、--db required 且无默认值 → 同上（断 DefValue 为空）",
+      "functional[2] 缺 --db ⇒ 报错点名该 flag → TestBackfillLoadRequiresDBFlag（PASS，断 \"db\"+\"required\"，偏离见 decisions[0]）",
+      "functional[3] 报告真到 stdout（阻断级缺口 A-2）→ TestHestiaBackfillLoadWritesReport（PASS：calExec 取 stdout，断非空 + 含「四道恒等式」「合并组明细」）",
+      "boundary[0] hestia.go 不得 import path/filepath → TestHestiaCmdDoesNotResolveDBPath 仍 PASS；--db 存在性检查留在 BackfillLoad",
+      "error_handling[0] go test ./... 全绿 → FAIL 包数 0，且与 master 基线背对背对照完全相同"
+    ],
+    "reproduce": "git worktree add --detach /tmp/verify-TASK-007 6ff4b456983a0b149e4922d517e3689c4123ff9d && cd /tmp/verify-TASK-007 && go test ./cmd/atlas/ -run 'TestBackfillLoad|TestHestiaBackfillLoad|TestHestiaCmdDoesNotResolveDBPath' -count=1 -v && go test ./cmd/atlas/ -count=1 -cover && go test ./internal/hestia/ -count=1 -cover && go test ./... -count=1（锚钉全 sha，不写 HEAD/分支名）"
+  },
+  "provenance": "全部代码由 dev-m1c3b-c 编写。Use/Short/Long 系需求文档 Task 7 Step 3 的逐字节照抄（DoD 要求），非本人原创。覆盖率口径问题（DoD 原写 95.9% 是另一个包的过期数字）由我预读 TASK-007 时发现并上报，Leader 据此加了 coverage_floor: 75。merge 由 Leader 执行（commit 6ff4b45）。"
+}

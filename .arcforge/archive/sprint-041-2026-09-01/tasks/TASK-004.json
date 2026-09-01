@@ -1,0 +1,52 @@
+{
+  "id": "TASK-004",
+  "title": "magnitude_ranges 校验未知字段/倒置区间/缺 unit，堵住静默失效",
+  "description": "对应需求文档 Task 4。`Thresholds.validate` 此前**完全没有校验 `MagnitudeRanges`**，而 `gateMagnitudeSanity` 对表里的未知字段名是 `continue`（`validate.go:499`）⇒ TASK-005 手填 54 项时打错一个字段名会**静默失效**。本任务是 TASK-005 的前置。",
+  "status": "accepted",
+  "complexity": "simple",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/thresholds_test.go"
+  ],
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "done_criteria": {
+    "functional": [
+      "`Thresholds.validate` 增加 `MagnitudeRanges` 的逐项校验，实现见需求文档 Task 4 Step 3（整段照抄，含注释）。三类拒绝：**未知字段名**、**`Min >= Max`**、**`Unit` 为空**。",
+      "`TestMagnitudeRangesRejectUnknownField` 通过：表里出现 `fieldOrder` 之外的键（如 `\"m2_typoed\"`）⇒ `validate()` 返回 error，错误串含该键名。",
+      "`TestMagnitudeRangesRejectInvertedRange` 通过：`Min >= Max` ⇒ error，错误串含字段名。",
+      "`TestMagnitudeRangesRequireUnit` 通过：`Unit` 为空 ⇒ error，错误串含 `unit`。"
+    ],
+    "boundary": [
+      "🔴 `TestEmptyMagnitudeRangesStillValid` 通过：**空表仍然合法**。\n\n空表 ⇒ `magnitude_sanity` 记 `skipped{not_calibrated}`，那是**刻意设计的状态**（M1b-3），不能因为加了校验就把它判非法。校验只在 `len(t.MagnitudeRanges) > 0` 时进行。",
+      "遍历 `fieldOrder` 建集合、并按 `fieldOrder` 顺序逐项校验，**不要直接 range map**：map 迭代顺序随机，同一份坏配置两次跑报出不同的那一项，会让排查变成猜谜（与 `gateMagnitudeSanity` 同理）。\n\n⚠️ 「未知键」那一轮**只能** range map（要找的正是不在 fieldOrder 里的键）——那一轮的顺序不确定性是可接受的，因为它一旦命中就是配置错误、必须修，不存在「反复跑对比」的场景。"
+    ],
+    "error_handling": [
+      "三条错误信息**必须说清后果**，不只是「非法」。需求文档 Task 4 Step 3 给了原文，照抄：\n- 未知字段：「gateMagnitudeSanity 对未知键是跳过，配置会**静默失效**——字段名的唯一真相源是 fields.go 的 fieldOrder」\n- 倒置区间：「倒置的区间会让该字段每一期都失败，而理由串读起来像数据错、不像配置错」\n- 缺 unit：「它只出现在失败理由串里、不影响判定，正因如此会被漏填」\n\n理由：这三类错都会被**配置的人**看到，而配置的人此刻正在填 54 项——错误信息里省下的那句话，会变成他排查半小时的成本。",
+      "⚠️ 本任务**不改** `configs/hestia.yaml`（那是 TASK-005 的 writes）。若加了校验导致现有 `configs/hestia.yaml` 无法通过 `LoadConfig`，说明现表里已有违规项——**立刻停下来报 Leader**，不要顺手改配置（那会撞进 TASK-005 的 scope）。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`——归档里多个 sprint 用过同样编号，裸编号在半年后指向不唯一。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，「本任务已提交」与「未提交改动」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是：查 merge 状态、催 Leader，不是转状态。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里 `.arcforge/` 是按 checkout 铺开的独立副本，在那里调写通道会被 DENY（判别不出来时反而 fail-open 静默写坏副本）。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`（谁建谁拆，是交付动作的一部分）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-c",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "e02056079baaa0c33bf25254e7cfe18b971547a7",
+    "discovery_sha256": "4fa6c7bf53c6df3779348d5fdd95e3b10743a5a350be685f35bfeb2cf13788b7",
+    "at": "2026-08-31T23:52:22Z"
+  },
+  "verifier": "test-m1c3b-b"
+}

@@ -1,0 +1,233 @@
+{
+  "task_id": "TASK-006",
+  "title": "BackfillLoad 编排 Validate+Save，核对报告出四道恒等式",
+  "owner": "dev-m1c3b-b",
+  "delivered_at_sha": "89971982ed867f4e8978a430befbd12c1f83fcdb",
+  "branch": "task/TASK-006-m1c3b",
+  "baseline_sha": "962c3ac",
+  "key_findings": [
+    "🔴 【我在本任务里差点造成的最严重事故，已修复并留下机制】**我用 `cat >` 覆盖了 `backfill_load_test.go`，删掉了 TASK-003 的 7 个测试**（`TestMergeByBusinessKeyUnionsFields` / `TestMergeSingleArticleKeepsOriginalExtractor` / `TestMergePrefersMonthlyArticleID` / `TestMergeWithoutMonthlyFallsBackToSmallestID` / `TestMergeRecordsFieldConflict` / `TestMergeSameValueIsNotAConflict` / `TestMergeIsStableAndSorted`，`-121` 行）。我以为那是要新建的文件，实际它已存在（TASK-003 的 writes 也含它）。**最危险的一点是套件因此全绿** —— 绿不是因为它们通过，是因为它们不在了。抓到它的是 `git diff --numstat` 显示 `279/121`，而我跑那条命令的起因只是顺手核对改动量。已从 `master` 取回原文件并把我的测试**追加**上去，复核 `git show --numstat HEAD` 为 `499/0`（纯新增），7 个测试逐个 grep 确认回位，`TestMerge*` 现有 14 条 PASS。⇒ CLAUDE.md 那条「必须整文件重写时跑 numstat 自检，删除行数应与预期一致」是实撞出来的，我这次是撞的人。",
+    "【本任务的核心：A-1 接缝已实测闭合】消融 A2（把多篇路径的 `m.Obs.Parts = m.Parts` 删掉 = 缺口 A-1 原状）被 **`TestMergedObservationCompletenessIsEvaluatedEndToEnd` KILLED**。那正是本任务独有的跨接缝断言：它同时经过 TASK-003（产出 `MergedObservation`）与 TASK-011（`gateCompleteness` 消费 `Observation.Parts`）。两侧各自的测试都抓不到这个缺陷 —— TASK-003 断的是包装上的 Parts，TASK-011 直接构造 `Observation{Parts:…}` 喂闸门，**两边都对、都没跨过接缝**。",
+    "【一处我自己引入又自己发现的「恒等式恒真」】我最初把 `Attempted` 算成 `ParsedOK + ParseFailed`，这会让恒等式二 `Attempted = ParsedOK + ParseFailed` **恒真** —— 一个由两个加数派生出的和，再拿去和这两个加数比，检查不出任何东西。改用 `eachParsedArticle` 自己维护的计数器 `cal.Periods`（循环首 ++、Unsupported 分流处 --），那道恒等式才真的在交叉校验两条独立的计数路径。⚠️ **消融 A5（改回派生）SURVIVED**，如实记录：两个公式在一切**正确运行**的输入上取值相同，没有测试能区分它们 —— 这条改动的价值是「将来 `eachParsedArticle` 的计数逻辑变了会被恒等式抓住」，属于**防御性**而非行为性，与 M1c-3b 的 TASK-011 的消融 A4 同类（不由某行代码决定的性质，正向断言不了）。**不凑成 10/10。**",
+    "【`Unclassified` 让恒等式一必然失败，这是刻意的】`classifyArticles` 把标题解析不出期次的塞进 `res.Unclassified`，它既不在 `Attempted` 也不在 `Unsupported` ⇒ 非空时恒等式一 `Total = Attempted + Unsupported` **必然不成立**。我选择**不**把它并进任何一格，让整趟回填响亮失败，并在错误串里点名它是成因。理由：四道恒等式的用途就是把「账对不上」变成响亮失败，而「站点改了期次表述」正是最需要被人看见的一类变化；并进去等于让那批篇目从所有表上消失。真语料 218=199+19（Unclassified 为 0）故正常路径不受影响。由 `TestLoadReportSurfacesUnclassified` 与 `TestBackfillLoadFailsLoudlyOnUnclassified` 两条钉住。"
+  ],
+  "decisions": [
+    {
+      "decision": "`Out` 为 nil 时返回 error，不退化成 `io.Discard`（刻意背离需求文档 Task 6 的「nil 等价于 io.Discard」）",
+      "rationale": "DoD functional[5] 要求，且我核对过同包既有契约：`calibrate.go` 的 `Calibrate` 对同一件事有一条**写明论证的相反契约**（'本函数的产出就是那份报告；默认丢弃输出会把调用方的疏漏变成合法配置 —— cmd 层装配时漏填 Out ⇒ 命令静默打印零字节、退出码 0，而「子命令注册了吗」「flag 解析对吗」这类测试全部通过'）。`BackfillLoad` 的产出同样就是那份报告，**并且它还是 `DroppedIDs` 的唯一载体**（被丢弃的 article_id 除了报告没有第二个地方能看到），失效形态逐字相同。⇒ 沿用同包契约而不是照抄文档。注意同包的 `ingest.go` 是 `io.Discard` 语义，但那条路径的产出不是报告，不构成反例。"
+    },
+    {
+      "decision": "`os.Stat(DBPath)` 放在 `NewStore` 之前，并为它单独补一条**正向**测试",
+      "rationale": "`NewStore` 会 `MkdirAll` + `sql.Open` **把文件建出来**（store.go:49-66）。顺序反了不是「少一道防线」而是功能直接坏掉：第一次跑自己造出库、第二次被自己拒，且第一次那份库是半成品。⚠️ `TestBackfillLoadRefusesExistingDB` 用**已存在**的文件测，**抓不到顺序错**（两种实现都会拒）—— 故补 `TestBackfillLoadDoesNotCreateDBBeforeChecking`：用**不存在**的路径正向跑一次，断言库被建出来且能读到观测。消融 A3 KILLED。"
+    },
+    {
+      "decision": "`mergeGroup` 的**单篇**路径也赋 `m.Obs.Parts`，尽管今天不赋也「碰巧对」",
+      "rationale": "96 个观测里 54 个是单篇，它们的 `Parts` 是 `[原 extractor]`，`completeness` 走 `requiredFields(原 extractor)` 那条路，不赋也对。但「碰巧对」不是可依赖的性质：一旦将来单篇也改走合并路径就静默失效。消融 A1 单独 KILLED（`TestMergeGroupPropagatesPartsToObservation` 的单篇子测试），说明这条不是冗余。"
+    },
+    {
+      "decision": "`PartialCoverage` 只收「入了权威表」的组，落 pending 的不算",
+      "rationale": "那一节的定义是「入了权威表但不完整」——危险正来自「它进了权威表且 completeness 通过」。没进权威表的期次由「落 pending 的期次」那一节负责，两节混起来会对同一件事报两遍，而重复的告警会让人开始忽略告警。由 `TestBackfillLoadRecordsPendingReasons` 末尾那条 `assert.Empty(res.PartialCoverage)` 钉住。"
+    },
+    {
+      "decision": "报告分节顺序：标定输入 → [Incomplete 警告] → 统计数字 → [Unclassified] → 四道恒等式 → 合并组明细 → 部分覆盖的期次 → 字段冲突 → 落 pending 的期次",
+      "rationale": "需求文档给的顺序 + 两节新增（Unclassified、部分覆盖）。警告排在统计数字**之前**：它是读下面每一个数的前提，放末尾等于让人读完才知道（与 `Calibrate` 的 `incompleteNotice` 同一位置同一理由）。⚠️ 钉顺序的测试用**小节标题**作锚而不是关键词：「落 pending」在统计块里先出现过一次，拿它当锚会命中那一处，得到一个与分节顺序无关的位置（我第一版就是这么写的，被自己的测试抓到）。"
+    },
+    {
+      "decision": "`extractorFamilies` 手写三族归属，不从 `validExtractors` 派生",
+      "rationale": "`validExtractors` 是**取值域**，回答「合法吗」；这里问的是「属于哪一族」。两者会分叉：`llm-fallback@v1` 与 `merged@v1` 都在取值域里却不属于任何一族。从取值域派生会让新增一个取值自动被算进某一族或全都不算，两种都错。"
+    },
+    {
+      "decision": "`Attempted` 取 `cal.Periods` 而非 `ParsedOK + ParseFailed`（见 key_findings[2]）",
+      "rationale": "避免恒等式二恒真。消融 A5 SURVIVED，如实报告：这是防御性改动，当前无测试能区分两种写法。"
+    },
+    {
+      "decision": "把 `BackfillLoad` 登记进 `store_test.go` 的导出面白名单，并在那里留一段说明",
+      "rationale": "DoD error_handling[3] 要求，且**不能改成非导出**（TASK-007 的 cmd 层要调）。该守卫的注释写明「精确相等是有意为之，它顺带逼着每次扩大导出面都要在这里留一行说明」，故我写了那一行：BackfillLoad 确实写库，但**只经 `(*Store).Save`**，没有自己的 INSERT，不构成绕过单一写入口的新写口。⚠️ 该测试另一条教训「期望项数由 `len(want)` 生成、不手写」，我没有在别处又写一个手写的数。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_load.go (+275/-0)：mergeGroup 两条路径补 Obs.Parts；新增 BackfillLoadDeps / BackfillLoadResult / BackfillLoad / loadParsedArticles / pendingReason / extractorFamilies / missingFamilies",
+    "internal/hestia/backfill_load_report.go (+149/-0，新建)：writeLoadReport + checkLoadIdentities",
+    "internal/hestia/backfill_load_test.go (+499/-0，**纯追加**)：14 条新测试，TASK-003 原有 7 条完整保留",
+    "internal/hestia/backfill_load_report_test.go (+230/-0，新建)：7 条报告测试",
+    "internal/hestia/store_test.go (+10/-1)：BackfillLoad 登记进导出面 want + 说明"
+  ],
+  "scope_check": {
+    "declared_writes": [
+      "./internal/hestia/backfill_load.go",
+      "./internal/hestia/backfill_load_report.go",
+      "./internal/hestia/backfill_load_test.go",
+      "./internal/hestia/backfill_load_report_test.go",
+      "./internal/hestia/store_test.go"
+    ],
+    "actually_written": [
+      "internal/hestia/backfill_load.go",
+      "internal/hestia/backfill_load_report.go",
+      "internal/hestia/backfill_load_test.go",
+      "internal/hestia/backfill_load_report_test.go",
+      "internal/hestia/store_test.go"
+    ],
+    "outside_declaration": [],
+    "note": "五写五，无越界。go.mod / go.sum 未出现在改动里。"
+  },
+  "interfaces_exposed": [
+    "func BackfillLoad(ctx context.Context, d BackfillLoadDeps) (*BackfillLoadResult, error)（**导出**，已登记进导出面白名单）—— 消费方是 M1c-3b 的 TASK-007 的 cmd 层。⚠️ **失败时也会交出非 nil 的 res**（调用方要拿它看差在哪），故判成功要看 err 而不是 res。⚠️ `Out` 为 nil 直接报错，cmd 层必须显式填。",
+    "type BackfillLoadDeps struct{ Dir, DBPath string; Cfg Thresholds; Out io.Writer; AllowIncomplete bool }（导出）",
+    "type BackfillLoadResult struct{…; PartialCoverage []MergedObservation; Unclassified []string }（导出）—— 比需求文档多两个字段：`PartialCoverage`（缺口 A-3，人类裁决）与 `Unclassified`（恒等式一失败时的成因线索）",
+    "func writeLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error（非导出）—— **恒等式先校验后打印**：任一不成立直接返回 error 且一个字节都不写，报告不会在数字对不上时照样打印一份好看的表格",
+    "func missingFamilies(parts []string) []string（非导出）—— 返回 parts 里缺掉的报告族（月报族/社融存量/社融增量），按固定顺序"
+  ],
+  "verification": {
+    "resample_anchor": "全部数字统一重采于 HEAD 89971982ed867f4e8978a430befbd12c1f83fcdb，重采时 `git status --porcelain` 为 0 条改动",
+    "suite": "go test ./internal/hestia/... -count=1 → ok，顶层 FAIL 0 条",
+    "coverage": "96.1% of statements（于 8997198）。Leader 给的现行基线是 96.0%（master 962c3ac），DoD 文本里写的 95.9% 是旧值 —— 两个门槛都过。",
+    "gofmt": "只列出 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，未触碰）",
+    "vet": "`go vet ./internal/hestia/... ./cmd/...` 零输出，退出码 0",
+    "new_tests": "本任务新增 24 条 PASS（backfill_load_test.go 14 + backfill_load_report_test.go 7 + 子测试）；TASK-003 原有 TestMerge* 14 条 PASS，一条不少",
+    "numstat_check": "`git show --numstat HEAD`：backfill_load.go 275/0、backfill_load_report.go 149/0、backfill_load_report_test.go 230/0、backfill_load_test.go 499/0、store_test.go 10/1。**测试文件删除行数为 0** —— 这是 key_findings[0] 那次事故的收尾证据。",
+    "ablation": {
+      "method": "隔离 detached worktree（`git worktree add --detach <tmp> 8997198`）上做消融，主工作区一个字节不碰。闸：锚点唯一性 + sha256 必变 + `go build` 必过；打印 diff；作用域外红 > 8 条早退。对照组先验 GREEN。",
+      "result": "9/10 KILLED，1 SURVIVED（A5，如实记录，理由见 key_findings[2]）",
+      "cases": [
+        "A1 删掉**单篇**路径的 Obs.Parts → TestMergeGroupPropagatesPartsToObservation 红。KILLED",
+        "A2 删掉**多篇**路径的 Obs.Parts（= 缺口 A-1 原状）→ TestMergedObservationCompletenessIsEvaluatedEndToEnd + TestMergeGroupPropagatesPartsToObservation + TestBackfillLoadIdentitiesHold 红。**KILLED —— 这是本任务的核心证据**",
+        "A3 让 os.Stat 检查失效（等价于挪到 NewStore 之后）→ TestBackfillLoadRefusesExistingDB 红。KILLED",
+        "A4 Out==nil 改回 io.Discard → TestBackfillLoadRequiresOut 红。KILLED",
+        "A5 Attempted 改回 ParsedOK+ParseFailed → **SURVIVED**。两个公式在一切正确输入上同值，没有测试能区分；这条是防御性改动（将来 eachParsedArticle 计数逻辑变了才会分叉），与 TASK-011 的 A4 同类，不凑数",
+        "A6 去掉恒等式四 → TestWriteLoadReportRejectsBrokenIdentity 红。KILLED",
+        "A7 关掉 PartialCoverage 判定 → TestBackfillLoadFlagsPartialCoverage 红。KILLED",
+        "A8 关掉 published 交叉校验 → TestBackfillLoadCrossChecksPublishedAt 红。KILLED",
+        "A9 不显式赋 Meta.ArticleID → 6 条测试红（含 IdentitiesHold / FlagsPartialCoverage / RecordsPendingReasons）。KILLED",
+        "A10 单期失败改成首错即返回 → TestBackfillLoadCollectsPerPeriodErrors 红。KILLED"
+      ],
+      "restore_proof": "每个变异窗口结束即还原并断言 sha256 回到变异前值；消融 worktree 收尾 `git status --porcelain` 为空；**另比对主工作区 5 个文件的 sha256，变异前后逐字节一致**。消融 worktree 已 remove --force + prune。"
+    }
+  },
+  "notes_for_downstream": [
+    "M1c-3b 的 TASK-007（cmd 层）：`BackfillLoad` 的 `Out` **必须显式填**（nil 直接报错，不退化 io.Discard）—— 这是刻意的，理由见 decisions[0]。另：**失败时 res 也非 nil**，判成功要看 err。",
+    "M1c-3b 的 TASK-010（判据）：真跑时 `unknown_extractor:merged@v1` 应为 **0 条** —— 本任务把 `Obs.Parts` 接上了，跨接缝断言已验证。若仍非 0，看的是**上游有没有把 Parts 填进 MergedObservation**（TASK-003 的 mergeGroup），而不是这一层。",
+    "⚠️ 报告里「部分覆盖的期次」那一节的条数就是需求分析阶段说的那 44% —— 真语料上预计 42/96 左右。**它不是错误**，是人类裁决要让它出声的东西；判据是「入了权威表且 Parts 不含全部三族」。",
+    "⚠️ 恒等式一在 `Unclassified` 非空时**必然失败**，这是设计（见 key_findings[3]）。真跑若撞上，正确处置是去看那批标题为什么解析不出期次（站点改了表述），不是去调恒等式。"
+  ],
+  "rework_round_2": {
+    "by": "dev-m1c3b-a（第一轮由 dev-m1c3b-b 完成，本节之外的内容**全部是它的**，未改动）",
+    "trigger": "QA 两轮审查判 REJECT，8 条 fix_items（3 CRITICAL + 4 组 WARNING + 1 条我自己勘察时补的边界）",
+    "delivered_at_master": "d880485137f7ed239dcbe971c2f746687a499f5e（merge commit；我的两个 commit 为 b1afba73c1d783d025f2a4c4e44305c21fc9eda0 与 761b84177eeab692245903a7c7bdd76df96cc013）",
+    "content_check": "`git diff 761b8417 d880485 -- <五个文件>` **零输出** ⇒ 合入的确是我那一版，逐字节。新符号 `isFinanceFamily` 在 master 上命中 6。",
+    "key_findings": [
+      "🔴 **C-2 与 C-3 本身冲突，拆了一层才让两个同时成立**。C-3 要「账不对就提前失败、不产生副作用」，C-2 要「失败时也必须把报告印出来」——而早退路径上根本没有 `writeLoadReport` 可用。拆出 **`renderLoadReport`（纯渲染）**后：`writeLoadReport = 渲染 → 写出 → 校验`，早退路径先 `renderLoadReport` 再返回 `res + err`。⇒ **「先渲染」由此成为结构性质，不是调用顺序上的约定**；不拆的话，为满足 C-3 会把 C-2 重新弄坏，而那不会有任何东西变红。",
+      "🔴 **`入权威表 79 / 落 pending 17` 不是本次改动造成的，是 TASK-011 的 C-1**。背对背实测：基线 `188eb21`（不含我的改动）与我的树给出**相同**的 79/17。M1c-3b 的 TASK-010 那次真跑得到的 75/21 是 C-1 修复**之前**的值。⚠️ 验证者若拿 TASK-010 的报告对比，会把这个差异误记到本次返工头上。",
+      "🔴 **W-1 的假阳在我的树上是 7 个，不是 QA 报的 3 个 —— 两个数都对，属于不同的树**。真语料实测「部分覆盖」68 → 61；移出的 7 条**全部是 52/52 或 54/54 字段的完整观测**，且**全部在 2025-09 之后**（正是 QA 说的「对 2025-10 后数据是 100% 假阳」），零新增。差异来自 C-1 改变了哪些组进权威表（79 vs 75），而 PartialCoverage 只收入了权威表的组。",
+      "🔴 **改 W-1 时当场撞到一个方向相同的反向假阳**：参照集若取「全部 54 个字段」，会把**三族齐全**的 52 字段观测判成部分覆盖 —— 月报正文本就没有外汇储备板块，缺 `fx_reserve`/`fx_rate` 不是洞。子测试「三族齐全时不算部分覆盖」立刻转红。正确参照集是「完整三族覆盖会给出的字段」（月报那一族用这条观测自己带的 extractor，没有则退回 `rule-monthly@v2`）。⇒ **选错参照集造出的假阳，方向与 W-1 要修的那批完全相同。**",
+      "🔴 **W-6 实测出一个发现：「三族字段集设计上不相交」只对 v1 时代成立**。必填集相交矩阵（实测）：`rule@v1`=27、`rule@v2`=54、`rule-monthly@v1`=25、`rule-monthly@v2`=52、`tsf-stock@v1`=18、`tsf-flow@v1`=9；其中 `rule@v2` × `tsf-stock@v1` 相交 **18**、× `tsf-flow@v1` 相交 **9**，`rule-monthly@v2` 同样 —— **并篇后月报的必填集已吞下社融字段**。而真语料上合并组的实际组合 `[rule-monthly@v1, tsf-stock@v1, tsf-flow@v1]` 相交 **0**。⇒ `mergeGroup` 的注释把一个**有时代性**的前提写成了无条件的。今天不出事是因为 v2 月报不与社融篇同组；**过渡月双发会让它们相遇 —— 与 M1c-3b 的 TASK-008 的 R9 是同一个场景。**",
+      "**我自己在返工中造出两处假话，都已订正**：① `checkLoadIdentities` 的错误串仍写「报告不予输出」，而 C-2 已改成照常输出；② `TestWriteLoadReportRejectsBrokenIdentity` 的注释仍写「报告不能在数字对不上时照样打印一份好看的表格」，那正是被本轮推翻的行为。**两处逐字留着都会让下一个人把 C-2 的修复当成回归改回去。**"
+    ],
+    "decisions": [
+      {
+        "decision": "拆出 `renderLoadReport`，而不是在早退路径上复制一份渲染代码",
+        "rationale": "复制会让两份渲染各自演化，而它们的差异只在异常路径上显现 —— 那是最少被看的路径。拆函数让「先渲染」变成结构性质。"
+      },
+      {
+        "decision": "恒等式三改异源，恒等式四**原样不动**",
+        "rationale": "我在勘察时发现并上报、Leader 收进 fix_items 第 8 条：四号**不恒真** —— validate/save 失败会 `continue` 而两个计数器都不增，所以它是能红的真闸。fix_items 原文只说「恒等式三换成异源交叉校验」，照着顺手把四号一起收拾会弄坏一道有效的闸，**而弄坏之后不会有任何东西变红**（正是 C-4 本身的形状）。"
+      },
+      {
+        "decision": "异源 oracle 只在 `len(errs)==0` 时断言",
+        "rationale": "有组 Validate/Save 失败时它必然对不上（那些组没进库而 MergedGroups 已算进去）。⚠️ C-2/C-3 的修法恰恰把「有错误」的路径从**不可达**变成**常走**，不设这个前置条件就会在那里造出一片假红。"
+      },
+      {
+        "decision": "DB 计数**跨 `hestia_observations` + `hestia_pending` 两表**",
+        "rationale": "只查权威表会得 28 而非 42（落 pending 的组同样带 merged@v1，闸门不区分 extractor）。这是 M1c-3b 的 TASK-010 在验收时实撞、记于 CONTRACTS §A-2 的坑，也是 Leader 自陈的第 4 处 DoD 缺陷。"
+      },
+      {
+        "decision": "W-2 改在 `store_test.go` 新立 `TestInsertSQLDoesNotPersistParts`，**不动** `validate_test.go` 的 `TestMergedPartsDoNotRoundTrip`",
+        "rationale": "`validate_test.go` 不在本任务的 `writes` 内。两条并存不冗余：那条守「读回来是 nil」（下游表现），新的守「根本没写进去」（性质的定义所在）。QA 指出那条测试**靠别人替它红** —— 变异实测让写路径真持久化 Parts，它照样 PASS。"
+      },
+      {
+        "decision": "W-9 的公共函数改名 `isFinanceFamily`，不叫 `isMonthlyFamily`",
+        "rationale": "`extract.go:123` 已有 `isMonthlyFamily`，**同名不同义**：那个只含 `extractorMonthlyV1/V2` 两个、问「版式轴上是不是月报」；我的含四个、问「三族里属不属于金融统计报告这一族」。撞名时若图省事复用，会得到一个在 `rule@v1/v2` 上判错的族归属。区别已写进注释。"
+      },
+      {
+        "decision": "W-10 的 `groupKey` 补成完整业务键 `period/period_type@published_at`，并让 `PendingReasons` 与 `MissingFields` 共用",
+        "rationale": "合并键是三元组，而 map 键此前只用前两段 —— 同一期次同一 period_type 的第二次发布（修订）会**静默覆盖**前一条，报告上少一行而无人报警。与 TASK-008 的 R9 同形：「今天不撞」靠的是发布习惯不是代码。测试改为用 `groupKey` 取值而非硬编码字符串。"
+      },
+      {
+        "decision": "补 `TestLoadReportSurfacesAllSignals` 与 `TestWriteLoadReportPropagatesWriteError` 两条",
+        "rationale": "W-6/W-7/W-8 三条都是**只在异常时才走**的分支，加了却不测等于把「会出声」写成声称 —— 而它们存在的全部理由就是异常发生那一次能被看见。覆盖率也因此从 95.8% 回到 96.1%（与基线持平）。"
+      }
+    ],
+    "verification": {
+      "measured_at_head": "d880485137f7ed239dcbe971c2f746687a499f5e",
+      "measured_tree_state": "主仓库 master，`git status --porcelain -- internal/hestia cmd/atlas configs` 命中 **0** ⇒ 代码路径干净。全部数字采于此树、此 sha，最后一次改动之后统一重采。",
+      "mutation_proofs": "🔴 **每条新补的判据都实测过能红（QA 立的验收闸）**：\n· **M17**（`len(g.SourceIDs) > 1` 改 `>= 1`）⇒ `TestLoadIdentityThreeIsCrossSourced` 转红，理由**正确**：`三：MergedGroups(2) ≠ 库里 merged@v1 的行数(0，hestia_observations + hestia_pending 两表合计)`。全包外溢度 3（另两条是全量 load 用例，因生产侧的闸真的响了而红 —— 那是闸有效的证据）。\n· **W-2 变异**（让 `insertSQL` 真把 parts 写进列清单）⇒ `TestInsertSQLDoesNotPersistParts` 转红且 message 正确。全包外溢度 57（该变异同时破坏真实 insert）。\n· 两次变异均在我自己的 worktree 上做，跑完 `cp` 还原，`git diff --numstat -- <被变异文件>` 收尾为 **0 行**。",
+      "identity_four_untouched": "恒等式四（`Merged != ToObservations + ToPending`）代码未改。它不恒真：validate/save 失败会 `continue`，两个计数器都不增。",
+      "real_run": "真语料 `exit=0`：218 = 199 + 19；199 = 161 + 38；96 = 54 + 42；96 = 79 + 17。四道恒等式全部成立。部分覆盖 **61**、字段冲突 **0**、fetch 阶段未抓到 **0**（新增一节，明确不计入四道恒等式）。",
+      "w1_attribution": "背对背（同一时刻、两棵树）：基线 `188eb21` 部分覆盖 **68**、我的树 **61**，移出 7 条、新增 0 条。逐条查库：`2025-09/q1_q3`、`2025-12/annual`、`2026-03/q1`、`2026-06/h1` 各 54 字段（rule@v2），`2026-04/monthly`、`2026-05/monthly`、`2026-07/monthly` 各 52 字段（rule-monthly@v2）⇒ **全部是完整观测，确系假阳**。",
+      "gate_attribution": "同一次背对背中，基线与我的树的「入权威表 / 落 pending」**均为 79 / 17** ⇒ 该变化来自 TASK-011 的 C-1，不是本次返工。",
+      "suite": "`gofmt -l internal/hestia cmd/atlas` ⇒ 恰为 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go` 两项既有欠账；`go vet ./internal/hestia/... ./cmd/...` ⇒ rc=0 零输出；`go test ./... -count=1` ⇒ rc=0，无 FAIL 行。",
+      "coverage": "**96.1% @ d880485137f7ed239dcbe971c2f746687a499f5e**（`go test ./internal/hestia/... -cover` 口径），**与基线 `188eb21` 的 96.1% 持平**，高于 DoD 的 95.9%。\n⚠️ 中途曾掉到 **95.8%** —— 我新增的三条「出声」分支没有测试。补 `TestLoadReportSurfacesAllSignals` 与 `TestWriteLoadReportPropagatesWriteError` 后回到 96.1%。**如实记明这个中间值**：它说明「加了告警」与「告警被测过」是两件事。",
+      "deps": "两次提交的 `--name-only` 里 `go.mod`/`go.sum` 命中 **0**。",
+      "scope": "改动五个文件，**全部在 `writes` 声明内，无越界**：`backfill_load.go`(+247/−16)、`backfill_load_report.go`(+112/−8)、`backfill_load_test.go`(+160/−2)、`backfill_load_report_test.go`(+75/−2)、`store_test.go`(+31/−0)。",
+      "prod_db": "`shasum -a 256 /Users/zuowei/workspace/runtime/atlas/data/hestia.db` ⇒ `478d40c079c8b0eab7d089bb6f1926725b361a6dc6c850f4c4a651406f3ec28c`，与要求逐字符相等。",
+      "fix_items_to_change": [
+        "C-2 → 拆 renderLoadReport；writeLoadReport = 渲染→写出→校验；端到端断言走真实路径（TestBackfillLoadFailsLoudlyOnUnclassified 补 out 含标题原文）",
+        "C-3 → checkInputIdentities（恒等式一、二）在 NewStore 之前调；早退时先渲染再返回 res+err",
+        "C-4 → 恒等式三换 DB 异源（跨两表、len(errs)==0 才断言）；SingleArticle/MergedGroups 钉具体值；M17 实测转红",
+        "W-1 → missingFields 取代 missingFamilies；参照集是「完整三族覆盖会给出的字段」；68→61，移出 7 条全是完整观测",
+        "W-2 → store_test.go 新立 TestInsertSQLDoesNotPersistParts 查 insertSQL 列清单；变异转红",
+        "W-4+W-6 → conflictError 让冲突返回 error（报告仍先出）；overlappingRequiredFields 让「必填集相交」出声",
+        "W-7~W-10 → 接住 sha256 未校验数并出声；manifest.failed 入账且明确不计入恒等式；月报族清单去重（改名 isFinanceFamily）；groupKey 补 published_at",
+        "第 8 条（我勘察时补、Leader 收入）→ 恒等式四未动；DB 计数跨两表；交叉校验只在 len(errs)==0 时断言"
+      ]
+    }
+  },
+  "provenance": "🔴 **本 discovery 有两个作者，分节归属**：`rework_round_2` 之外的全部内容由 **dev-m1c3b-b** 在第一轮交付时写下，本次返工**一个字都没有改动它们** —— 那是它的工作记录，改了就不再是那一轮的记录。\n\n`rework_round_2` 一节由 **dev-m1c3b-a** 写于第二轮返工（QA 判 REJECT 之后）。该轮的全部代码、测试与变异实测均由 dev-m1c3b-a 完成；八条 fix_items 中第 8 条是我在接手前只读勘察时发现并上报、Leader 原样收入的。\n\n⚠️ **交接过程本身有一段值得记的空转**：本任务的 review_fix 曾派错收件人（消息发给我、而 `assigned_to` 仍是 dev-m1c3b-b），写通道 DENY 了我的领回。`review_fix` 只有一条出边 `→ in_progress`（写者 `dev-*`），**leader 在该状态没有任何可走的边**，改派所需的 `in_progress → assigned` 必须先由原 owner 把状态推到 `in_progress` 才存在 ⇒ 整条交接机械地阻塞在原 owner 身上，双方各自的「停手」判断都正确，合起来把它焊死了（约 2.5 小时）。Leader 已记进机制缺口清单，建议补 `review_fix → assigned`（leader），与 `rejected → assigned` 同构。",
+  "rework_round_3": {
+    "by": "dev-m1c3b-a",
+    "trigger": "第二轮判 VERIFIED，Leader 走 verified → review_fix 补两处缺口。**两处都是 Leader 自陈的 DoD 缺陷**（第 9 处：要求了行为、没要求守卫），`reason_class` 已按 plan.md 裁决 8 设为 dod_defect。",
+    "delivered_at_master": "70eedc4caf3502df9f25f125c7dcc546d06320d3（merge commit；我的 commit 为 040964a7f85b70656b20708fcc9981a03f196312）",
+    "scope": "只动两个文件：backfill_load_test.go(+48/−0)、backfill_load_report.go(+19/−2)。**backfill_load.go 一行未改**（`git diff --numstat d880485 70eedc4 -- internal/hestia/backfill_load.go` 零输出）⇒ 恒等式四未动，三条 CRITICAL 的实现、5 条新增测试、W-1 判据均未重开。",
+    "key_findings": [
+      "🔴 **缺口是真的，我先复现了才补**：把 `checkInputIdentities` 的早退块移回末尾（变异 V3），**全套测试无一转红，外溢度 0**。既有的 `TestBackfillLoadDoesNotCreateDBBeforeChecking` 在 V3 下照样绿 —— 它守的是 D-1（`os.Stat` 早于 `NewStore`），确实是另一件事。⇒ C-3 的**行为**在第二轮已修好，但**没有任何东西守着它**。",
+      "🔴 **判据必须是「库文件不存在」，写成「返回了 error」会补出一条新的空判据 —— 而且长得跟真守卫一模一样**。缺陷版本同样返回 error（只是晚在末尾才返回，且库已经建好了）。⇒ 与本轮 C-4 是同一个形状：**不会变的数不是验收数**。我把这句写在判据那一行旁边，免得下一个人「简化」掉那行 `os.Stat`。",
+      "**补完自跑 V3（裁决 7）：新守卫独家转红，外溢度 1，且死在正确的那一行** —— `os.IsNotExist` 断言而非 `require.Error`。若死在后者，说明补的仍是空判据。",
+      "🔴 **第三处假注释：`writeLoadReport` 的函数头写着与实现完全相反的话**。原文「恒等式先校验、后打印：报告不能在数字对不上时照样打印一份好看的表格」——**C-2 的整个修复就是把顺序反过来**。它在 C-2 之前完全正确，被推翻后没人回来改；dev（我）与 Leader 都漏了，验证者是第三个看的人。\n\n⚠️ **危害等级按验证者的订正记**：**不是静默回归**（`TestWriteLoadReportPropagatesWriteError` 的注释点名了 C-2 并解释了顺序为何不能反，会拦住误改），实际是**误导 + 一次无效往返** —— 那条注释带 🔴 强语气，会让下一个人真的去动手改回去。",
+      "**订正时写进了新的正确理由，不只是删掉旧的**：① 恒等式一失败的头号成因是 `Unclassified` 非空，而那批标题原文**只在报告里**，先校验就 return ⇒ stdout 0 字节；② **正面回应原注释的担忧** —— 「自洽的表格让人停止追问」不成立，因为报告带着 error 一起交出、退出码非 0。只删不写，下一个人还是不知道为什么。",
+      "**全文复查了同类假注释**：`grep '先校验\\|不予输出\\|不能在数字对不上时照样打印' internal/hestia/backfill_load*.go` 四处命中，**全部是「引用旧文并说明它为何是假的」**，无残留假断言。"
+    ],
+    "decisions": [
+      {
+        "decision": "先复现 V3 确认缺口，再补守卫",
+        "rationale": "验证者说「V3 SURVIVED」是它的观察，不是我的。补一条自己没见过它缺失时的样子的守卫，等于把它的结论当成前提 —— 而这一轮全部两条缺口都源自「要求了行为、没要求守卫」，重蹈同一形状的代价太具体。"
+      },
+      {
+        "decision": "复用既有夹具形状（第二篇标题推不出期次），不引入新 testdata",
+        "rationale": "与 `TestBackfillLoadFailsLoudlyOnUnclassified` 同一份构造，只换断言 —— 两条测的是同一条真实路径的两个不同性质（一条守「报告要出」、一条守「库不能建」）。新夹具会让两者可能各自演化。"
+      },
+      {
+        "decision": "把「判据必须是库文件不存在」写在判据那一行的紧邻注释里，而不只写在函数头",
+        "rationale": "会被「简化」掉的正是那一行 `os.Stat`（它看起来像是对 `require.Error` 的重复）。理由离得越远，越可能在删除时看不到。"
+      },
+      {
+        "decision": "订正假注释时保留对旧文的引用，写明「它在 C-2 之前是正确的」",
+        "rationale": "直接删掉会让下一个人无从知道这里发生过什么，而这段历史正是「修复会作废它自己的理由」这个形态的实例。⚠️ 但**只保留在解释里**，不保留任何仍以肯定语气写着的旧断言。"
+      }
+    ],
+    "verification": {
+      "measured_at_head": "70eedc4caf3502df9f25f125c7dcc546d06320d3",
+      "measured_tree_state": "主仓库 master，工作区代码路径 0 条未提交改动。全部数字采于此树、此 sha。",
+      "content_check": "`git diff 040964a7 70eedc4 -- <两个文件>` **零输出** ⇒ 合入的是我那一版，逐字节。新测试名在 master 上命中 2。",
+      "v3_before": "**补守卫之前**跑 V3（移除 `checkInputIdentities` 早退块，11 行）：`go test ./internal/hestia/...` ⇒ **ok，FAIL 用例数 0**（外溢度 0）。语法闸 `gofmt -e` 通过。还原后 `git diff --numstat` 为 0 行。",
+      "v3_after": "**补守卫之后**跑同一个 V3：`TestBackfillLoadDoesNotCreateDBWhenInputIdentitiesFail` **转红**，全包 FAIL 用例数 **1**（独家）。失败点是 `assert.True(os.IsNotExist(statErr))`，message 为「输入侧恒等式失败时不得建库…」⇒ **死在库文件那一行，不是 error 那一行**。还原后 `git diff --numstat` 为 0 行。",
+      "untouched": "`git diff --numstat d880485137f7ed239dcbe971c2f746687a499f5e 70eedc4caf3502df9f25f125c7dcc546d06320d3 -- internal/hestia/backfill_load.go` ⇒ **零输出**。恒等式四、三条 CRITICAL 的实现、W-1 判据一行未改。",
+      "suite": "`gofmt -l internal/hestia cmd/atlas` ⇒ 恰为 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go` 两项既有欠账；`go vet ./internal/hestia/... ./cmd/...` ⇒ rc=0 零输出；`go test ./... -count=1` ⇒ rc=0 无 FAIL 行。",
+      "coverage": "**96.1% @ 70eedc4caf3502df9f25f125c7dcc546d06320d3**（`go test ./internal/hestia/... -cover` 口径），与第二轮及基线持平，高于 DoD 的 95.9%。",
+      "deps": "`git show --name-only 040964a7 | grep -c 'go\\.\\(mod\\|sum\\)'` ⇒ 0。",
+      "prod_db": "`478d40c079c8b0eab7d089bb6f1926725b361a6dc6c850f4c4a651406f3ec28c`，与要求逐字符相等。"
+    },
+    "notes_for_downstream": [
+      "🔴 **一个值得进 CONTRACTS 的可移交形状（我建议记形状、不记人）**：**一道闸可以有第三态『未测量』，而第三态默认放行。** 本轮 C-4 的异源比对就有这个形状：`MergedRowsCounted == false` 时整道闸被跳过，而**跳过时它不会红**。⚠️ 我发现它不是靠洞察 —— 是改完 `okResult()` 后那条测试**没有红**，去查为什么才发现的。**同样是被测试逼出来的**，记成「有人识别出了它」会推出错误的下一步（依赖人，而不是依赖『让第三态也能红』）。",
+      "**「判据必须是 X 而不是 Y」这类约束要写在判据那一行旁边**，不要只写在函数头 —— 会被删掉的正是那一行，而理由离得越远越看不到。"
+    ]
+  }
+}

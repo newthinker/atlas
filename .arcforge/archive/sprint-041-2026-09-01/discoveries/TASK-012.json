@@ -1,0 +1,73 @@
+{
+  "task_id": "TASK-012",
+  "title": "补 magnitude_ranges 校验的 NaN/Inf 穿透 + 四条守卫缺口的用例",
+  "key_findings": [
+    "**只改了一处实现**：thresholds.go 的 validate() 里新增 NaN/Inf 拒绝（+22 行），位置在既有 `r.Min >= r.Max` 检查**之前**（顺序有意义：NaN 参与的比较恒假，放在后面会被那条先跳过）。F12/F17/Min==Max/Unit 空白四条**一个字都没改实现** —— 它们的实现本来就是对的，补的是守卫。",
+    "🔴 **`for _, f := range fieldOrder {` 在 validate.go 有 2 处**（`yoyFields` 与 `gateMagnitudeSanity`），全文件替换会把 F12 变异打到 `yoyFields` 上、得出「F12 测试无效」的错误结论。变异脚本按**函数体**定位（正则匹配 `^func gateMagnitudeSanity\\(.*?^\\}`），并在替换前断言函数体内锚点唯一。Leader 在派发消息里预警了这一点，实测确认。",
+    "🔴 **YAML 用例第一版有一格「为错误的理由变绿」**：`min: .inf, max: 1000` 时 `+Inf >= 1000` 为真 ⇒ 被**既有的倒置区间校验**拦下，与 NaN/Inf 守卫无关，而它在 RED 阶段显示 PASS。若只看「整体红了没」而不逐格看，会把它当成「这条已经守住了」。已重构为六格、每格都刻意避开 `Min >= Max`（NaN 比较恒假；`-Inf<1000`、`0<+Inf`），并把断言从「含字段名」加严为「含『有限』」——只断字段名会被缺 unit 那条错误冒名满足。",
+    "**TASK-005 已填的 54 项没有任何一项违反新守卫**：`TestShippedConfigLoadsAndIsCalibrated`（读真 configs/hestia.yaml）改动后仍 PASS ⇒ DoD boundary 里「若某项失败就停下来报 Leader」的前提**未触发**，未改 configs/hestia.yaml（不在 writes）。"
+  ],
+  "decisions": [
+    {
+      "decision": "NaN 与 ±Inf 一并拒绝，而不只拒 NaN",
+      "rationale": "Leader 在 DoD functional[0] 里定了「NaN 或 ±Inf」。理由写进了代码注释：[-Inf,+Inf] 在数据上与「忘了填」不可分，而一个永远不会失败的区间与没配这个字段等价——差别只在配置的人以为配了。这与本族缺陷（表看起来配上了而闸不设防）是同一失效模式。"
+    },
+    {
+      "decision": "NaN/Inf 检查放在 `r.Min >= r.Max` 之前",
+      "rationale": "顺序不是随意的：NaN 参与的比较除 != 外恒假，若放在后面，`{NaN,NaN}` 会先通过 `Min >= Max` 那条、再被拒——错误信息虽然仍对，但读的人会以为是倒置区间。放在前面让错误理由与真实成因一致。"
+    },
+    {
+      "decision": "四条守卫缺口用例的有效性靠变异证明，而不是靠 RED",
+      "rationale": "DoD error_handling 明确了这一点：Min==Max / Unit 纯空白 / F12 / F17 在当前实现上**本来就 PASS**，补的是守卫缺口而非行为缺口，常规 TDD 的 RED 判据对它们无效。六个变异全部 KILLED（M1~M5 各自只有目标用例转红），这才是它们有效的证据。"
+    },
+    {
+      "decision": "F12 用六个越界字段 × 十轮，而不是两个字段跑一次",
+      "rationale": "变异成 `range map` 后报出哪个字段是随机的，单次比较有 1/N 概率蒙对。六字段十轮把存活概率压到 (1/6)^10 ≈ 1.7e-8，变异必然被杀；十轮同时也是「反复跑结果相同」这条稳定性要求的直接证据。"
+    },
+    {
+      "decision": "F17 用 math.Nextafter 取「刚越界一档」",
+      "rationale": "DoD 要求「恰好落在边界上通过、刚越界一档失败」。用 Nextafter 而不是拍一个 2.9 / 4.1：后者离边界仍有距离，`<`→`<=` 之外的其它比较符错误也能蒙混过去；Nextafter 取的是浮点意义上真正相邻的那个数。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/thresholds.go (+22/-0，纯新增；validate() 内 NaN/Inf 守卫 + math import)",
+    "internal/hestia/thresholds_test.go (+147/-0，纯新增；4 个测试函数 + DoD↔测试映射注释)",
+    "internal/hestia/validate_test.go (+86/-0，纯新增；F12/F17 两个守卫测试)"
+  ],
+  "interfaces_exposed": [
+    "无新符号。`Thresholds.validate()` 的行为再次收紧：`MagnitudeRanges` 非空时，除既有三类拒绝（未知字段名 / Min >= Max / Unit 空）外，**新增拒绝 Min 或 Max 为 NaN 或 ±Inf**。空表行为不变（合法）。",
+    "🔴 **契约恢复**：M1c-3b 的 TASK-004 曾向 TASK-005 广告「`min == max` 也会被拒」，因无测试钉住而被 Leader 撤回。本任务的 `TestMagnitudeRangesRejectDegenerateRange` + 变异 M1（KILLED）已把它钉死，**该契约现在可以恢复对下游承诺**。",
+    "对填表的人：`magnitude_ranges` 每项的 min/max 必须是**有限实数**且 `min < max`，unit 必须非空白。YAML 里写 `.nan` / `.inf` / `-.inf` 会在 `LoadConfig` 阶段直接失败并指名字段（已由 `TestMagnitudeRangesRejectNaNFromYAML` 六格钉住）。"
+  ],
+  "verification": {
+    "measured_at_head": "f14fd2850bfb75dbca8d56dd7120bdb676692714",
+    "measured_tree_state": "主仓库 master，merge 之后重采，工作区代码未提交改动 0 条。全部自证数字采于此树此 sha（最后一次改动之后统一重采）。",
+    "branch": "master（分支 task/TASK-012-m1c3b @ 18eb49619cb791185d3638f44f42cbe944c607e6 已由 Leader 经 f14fd28 合入）",
+    "baseline_head": "962c3acb29705b58e21aaf4d4d64bcf8c77aca3a",
+    "merge_confirmed_by": "内容判据而非仅拓扑：thresholds.go / thresholds_test.go / validate_test.go 在 master 与 18eb496 上的 sha256 各自逐字节一致（71b4f0c6… / 70557f61… / 1b307711…），六个新测试函数在 master 上各命中 1 处。拓扑判据亦报已合入。",
+    "suite": "在 f14fd28 上：六条新测试 + TestEmptyMagnitudeRangesStillValid + TestShippedConfigLoadsAndIsCalibrated 全 PASS；go test ./internal/hestia/... -count=1 -cover ⇒ ok, 96.1%；go test ./cmd/... -count=1 ⇒ ok",
+    "coverage": "96.1% @ f14fd2850bfb75dbca8d56dd7120bdb676692714（go test -cover 口径）。基线 96.0% @ 962c3ac，我在起始锚上实测——**没有沿用 DoD non_functional 里那句「95.9% / 32bc1e5」**，那是从 TASK-004 模板结转的过期数字，Leader 在派发消息里也更正为 96.0%。改后 96.1%，高于基线。",
+    "vet": "go vet ./internal/hestia/... ./cmd/... ⇒ 零输出（采于 f14fd28）",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas ⇒ 恰为 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，来自 f5d7b82，未动）",
+    "deps": "go.mod / go.sum 命中 0 条；提交 numstat 仅三个文件，无新增依赖",
+    "red_evidence": "三把不同的尺：① NaN/Inf 六格 + YAML 六格在加守卫前**全红**（validate 返回 nil）；② Min==Max / Unit 空白 / F12 / F17 在当前实现上**直接 PASS**（补的是守卫缺口），其有效性由变异证明，见下。",
+    "mutation": {
+      "method": "隔离副本：git worktree add --detach 到 /tmp（基于 master 962c3ac）后把我的三个改动文件拷进去；变异脚本按**函数体**定位（F12 必须如此，见 key_findings[1]），落盘前断言锚点唯一、go vet 通过（语法闸）、打印 diff 供逐字核对（语义闸）。",
+      "results": "六个全部 KILLED：M1 `Min>=Max`→`>` ⇒ RejectDegenerateRange；M2 `TrimSpace(Unit)==\"\"`→`Unit==\"\"` ⇒ RejectBlankUnit；M3 gateMagnitudeSanity 遍历改 `range map` ⇒ ReportsEarliestFieldInFieldOrder；M4 `v<r.Min`→`<=` ⇒ BoundariesAreInclusive；M5 `v>r.Max`→`>=` ⇒ BoundariesAreInclusive；M6 NaN 判据整条置 false ⇒ RejectNaNOrInf。M1~M5 **各自只有目标用例转红**（无连带），M6 另连带 RejectNaNFromYAML（预期内，两者同守一条实现）。",
+      "workspace_fingerprint": "主工作区（wt-TASK-012-m1c3b）四个文件 thresholds.go / validate.go / thresholds_test.go / validate_test.go 的 sha256 在**每个变异窗口内 + 收尾**各校验一次，全部 OK；git status --porcelain 与变异前逐字一致；隔离副本收尾对照组重新全绿（还原成功）。变异 worktree 已拆除，零残留。"
+    },
+    "dod_to_test": [
+      "functional[0] 拒绝 NaN/±Inf + 注释写明机制与后果 → TestMagnitudeRangesRejectNaNOrInf（6 子格全 PASS）；注释已写进 thresholds.go 的守卫块",
+      "functional[1] YAML 可达性用例 → TestMagnitudeRangesRejectNaNFromYAML（6 子格全 PASS，每格都避开既有倒置校验）",
+      "functional[2] Min == Max 拒绝用例 → TestMagnitudeRangesRejectDegenerateRange（PASS；变异 M1 KILLED）",
+      "functional[2] Unit 纯空白拒绝用例 → TestMagnitudeRangesRejectBlankUnit（3 子格 PASS；变异 M2 KILLED）",
+      "functional[3] F12 遍历顺序守卫 → TestMagnitudeSanityReportsEarliestFieldInFieldOrder（PASS；变异 M3 KILLED）",
+      "functional[3] F17 #5/#6 比较符守卫 → TestMagnitudeSanityBoundariesAreInclusive（5 子格 PASS；变异 M4/M5 各自 KILLED）",
+      "boundary[0] 空表仍然合法 → TestEmptyMagnitudeRangesStillValid（仍 PASS）",
+      "boundary[1] 不得破坏 TASK-005 的 54 项 → TestShippedConfigLoadsAndIsCalibrated（仍 PASS）；未改 configs/hestia.yaml",
+      "error_handling 变异在隔离副本上做 + 指纹写进 discovery → 见 verification.mutation"
+    ],
+    "reproduce": "git worktree add --detach /tmp/verify-TASK-012 f14fd2850bfb75dbca8d56dd7120bdb676692714 && cd /tmp/verify-TASK-012 && go test ./internal/hestia/ -run 'TestMagnitudeRanges|TestMagnitudeSanity' -count=1 -v && go test ./internal/hestia/... -count=1 -cover && go vet ./internal/hestia/... ./cmd/...（锚钉全 sha，不写 HEAD/分支名）"
+  },
+  "provenance": "全部代码由 dev-m1c3b-c 编写。NaN/Inf 缺陷与两条存活变异（Min==Max / Unit 空白）是我自己在交付 M1c-3b 的 TASK-004 之后自查发现并上报的；F12 与 F17#5#6 两条由 M1c-3b 的 TASK-005 的 dev 在填表前查实并上报，我据其定位（符号锚，非行号）补测试。merge 由 Leader 执行（commit f14fd28）。"
+}

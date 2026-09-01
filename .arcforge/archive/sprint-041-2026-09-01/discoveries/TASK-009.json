@@ -1,0 +1,128 @@
+{
+  "task_id": "TASK-009",
+  "author": "dev-m1c3b-d",
+  "summary": "结转项 4（R10）：sections.go 的「共 74 篇」按旧判据逐字复刻不出来，重采实测 55，已订正并写明取证方式、随语料变须重采、以及与「55 篇月报」的集合歧义。结转项 5（R11）：核实为零改动——parse.go:284-296 的死代码防线注释逐字在位。",
+  "key_findings": [
+    {
+      "id": "R11-零改动",
+      "finding": "parse.go 的死代码防线注释已闭合，本条正确交付是 parse.go 一个字节都不改。",
+      "verification_command": "sed -n '284,296p' internal/hestia/parse.go",
+      "output_verbatim": "func checkPeriodTypeSupported(periodType, title string) error {\n\tswitch periodType {\n\t// 目前五种 period_type 全部受支持，故本 switch 暂时没有分支。\n\t//\n\t// 🔴 **不要因此删掉这个函数**（M1c-3a 的 TASK-007 删 monthly 分支时的决定）：\n\t// 空 switch 看起来像死代码，但它承载的是**「新增第六种 period_type 必须明确表态」**\n\t// 这条防线 —— TestEveryPeriodTypeHasAnExplicitSupportDecision 遍历 validPeriodTypes\n\t// 逐个来问，函数没了那道遍历就无处可问。删掉它的代价不是少一层校验，是让\n\t// 「加了新期次却没人想过抽取侧接不接」重新变成静默的。\n\t}\n\treturn nil\n}",
+      "checked_at_head": "32bc1e5f306386ee5c69a54b4bae3e0184aa30f2",
+      "three_required_phrases_present": [
+        "不要因此删掉这个函数",
+        "新增第六种 period_type 必须明确表态",
+        "TestEveryPeriodTypeHasAnExplicitSupportDecision 遍历 validPeriodTypes 逐个来问"
+      ],
+      "action_taken": "无。未创建重复注释（DoD 点名的最可能错误产出），parse.go / parse_test.go 未被打开编辑，二者亦不在本任务 writes 内。"
+    },
+    {
+      "id": "R10-重采",
+      "finding": "旧判据挡掉的篇数实测 = 55，与结转项记的 55 一致；此前注释里的「74 篇」按同一判据复刻不出来。",
+      "sampled_at_head": "32bc1e5f306386ee5c69a54b4bae3e0184aa30f2",
+      "corpus": "data/hestia-backfill-2026-08-14/manifest.json（未被 git 跟踪，.gitignore:64 排除 data/）",
+      "old_predicate_verbatim": "case hasTSF && len(secs) == sectionsV2(8): rule@v2 / case !hasTSF && len(secs) == sectionsV1(6): rule@v1 / default: error（取自归档 .arcforge/archive/sprint-040-2026-08-29/tasks/TASK-004.json 的 description 现状代码块）",
+      "method": "临时 Go 测试 internal/hestia/zz_repro_task009_m1c3b_test.go（package 内，因 splitSections/stripHTML/hasAnyTSFSection/parseTitle 均未导出），遍历 manifest 的 218 篇：metaContent 取 ArticleTitle → parseTitle 得 kind/periodType → 仅 kindFinance 参与 → splitSections(stripHTML(raw)) → 套旧判据。该文件跑完即删，未提交（git status 已核实工作区只剩 sections.go）。",
+      "denominator": "218 篇语料 = 80 篇金融统计数据报告（kindFinance）+ 69 篇社会融资规模存量 + 69 篇社会融资规模增量。后 138 篇整篇一段、不走 splitSections，不该进这个分母。parseTitle 失败 0 篇。",
+      "two_independent_rulers": {
+        "ruler_1_逐篇累加": "被拒 55 / 通过 25 / 合计 80",
+        "ruler_2_反向计数": "重新读盘、重新分节、重新判据，不复用尺1任何中间结果；总数 80 - 通过 25 = 被拒 55",
+        "note": "刻意用两把机制不同的尺（正向累加 vs 反向作差），而非同一计数器换个名字——归档教训『换了方法的名字、没换机制』。另有分层桶求和 = 80 作自洽校验，但该校验总数守恒、对再分配错误无鉴别力，故不单独作为证据。"
+      },
+      "result": "55"
+    },
+    {
+      "id": "R10-两个55的集合关系",
+      "finding": "实测确证两者不是包含关系，交集 53，各有 2 篇是对方没有的。",
+      "measured": {
+        "集合A_旧判据挡掉": 55,
+        "集合B_全部月报": 55,
+        "交集": 53,
+        "仅A": 2,
+        "仅B": 2
+      },
+      "仅A_篇目": [
+        "2020年前三季度金融统计数据报告（5 节, hasTSF=false, hasFX=true, period_type=q1_q3）",
+        "2022年前三季度金融统计数据报告（5 节, hasTSF=false, hasFX=true, period_type=q1_q3）"
+      ],
+      "仅B_篇目": [
+        "2024年3月金融统计数据报告（6 节, hasTSF=false, hasFX=true, monthly）",
+        "2025年3月金融统计数据报告（6 节, hasTSF=false, hasFX=true, monthly）"
+      ],
+      "为什么仅B漏过旧判据": "3 月报多一个外汇节，节数恰好凑成 6 且 hasTSF=false，正命中旧判据的 rule@v1 分支。",
+      "月报的hasFX划分": "monthly 55 篇中 hasFX=true 2 篇 / hasFX=false 53 篇——与 sections.go:134（fxSectionKeyword 注释）及 detectExtractor 处的「55 篇里 53 篇」逐字对上。"
+    },
+    {
+      "id": "与归档布局表的再分配差异（如实申报，不影响 55）",
+      "finding": "我实测的分层与归档 sprint-040/TASK-004 的布局全景表有一处再分配差异，总数守恒。",
+      "归档表": "5 节月报 43 篇 / 4 节月报 3 篇（合计 46）",
+      "本次实测": "5 节月报 42 篇 / 4 节月报 4 篇（合计 46）",
+      "影响": "对本任务要订正的数字无影响：被拒总数两边都是 55（42+4+7 月报=53，加 2 篇前三季度报）。",
+      "未处置的原因": "归档表是 M1c-3a 的产物，其采样代码与采样时点均不可考；本任务 DoD 只覆盖 74→55 的订正，不含归档订正。据此不改归档、不改 sections.go 里未被 DoD 点名的其它数字，只在此处留证。若 Leader 认为该差异需追查，可另开任务。",
+      "本次实测的完整分层": [
+        "4 节 hasTSF=false hasFX=false monthly 被拒 → 4 篇",
+        "5 节 hasTSF=false hasFX=false monthly 被拒 → 42 篇",
+        "5 节 hasTSF=false hasFX=true  q1_q3   被拒 → 2 篇",
+        "6 节 hasTSF=false hasFX=true  annual  通过 → 6 篇",
+        "6 节 hasTSF=false hasFX=true  h1      通过 → 6 篇",
+        "6 节 hasTSF=false hasFX=true  monthly 通过 → 2 篇",
+        "6 节 hasTSF=false hasFX=true  q1      通过 → 4 篇",
+        "6 节 hasTSF=false hasFX=true  q1_q3   通过 → 3 篇",
+        "7 节 hasTSF=true  hasFX=false monthly 被拒 → 7 篇",
+        "8 节 hasTSF=true  hasFX=true  annual  通过 → 1 篇",
+        "8 节 hasTSF=true  hasFX=true  h1      通过 → 1 篇",
+        "8 节 hasTSF=true  hasFX=true  q1      通过 → 1 篇",
+        "8 节 hasTSF=true  hasFX=true  q1_q3   通过 → 1 篇"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "sections.go:116 的「共 74 篇」订正为「共 55 篇」，并在同处补取证方式、重采告诫与两个 55 的歧义说明。",
+      "rationale": "DoD functional[0][1] 直接要求。取证方式必须连分母一起写死（218 篇里的 80 篇 kindFinance），否则「55」会以与「74」完全相同的方式再次变得不可复现——过期的数字不会让任何测试变红，这是它能活下来的唯一原因。"
+    },
+    {
+      "decision": "把原句「218 篇实测里」改为「218 篇语料实测里」，仅此一处措辞调整。",
+      "rationale": "原措辞让读者以为节数分布的分母是 218，而实际只有其中 80 篇走 splitSections——这正是数字不可复现的成因之一。改动限于加一个『语料』二字并保留原有事实（218 确实是语料篇数），紧随其后的取证段把 218 与 80 的关系写死。未删改该句的任何其它成分。"
+    },
+    {
+      "decision": "parse.go 零改动，未补写任何注释。",
+      "rationale": "DoD functional[2] 点名『不要为了有产出再写一条重复注释』；实测三条关键语句逐字在位。parse.go/parse_test.go 亦不在本任务 writes 内（归 TASK-002）。"
+    },
+    {
+      "decision": "不为本次改动新增测试。",
+      "rationale": "改动的 22 行全部是注释（diff 里非注释新增 0 行、非注释删除 0 行，已用 git diff -U0 逐行核过），不产生任何可断言的行为。DoD boundary 给的判据是『改动前后 PASS 集合逐条相同』——即本任务的正确形态就是测试集不变。为注释造一个断言注释文本的测试，会把注释文本变成需要同步维护的第二份真相。"
+    },
+    {
+      "decision": "未运行 code-simplifier（全局规范要求提交前运行）。",
+      "rationale": "本次 diff 里可执行代码 0 行，simplifier 的作用域为空集；而它对注释的『简化』会直接删除本任务 DoD 要求写明的取证细节（分母、两把尺、集合关系），即损坏交付物本身。此处主动申报，请 Leader 裁决是否需要补跑。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/sections.go（+22/-3，全部为注释行）"
+  ],
+  "files_verified_unchanged": [
+    "internal/hestia/parse.go（R11 的正确交付即零改动）",
+    "internal/hestia/sections_test.go（本任务 writes 内但无需改动：其中的 53/55 是月报口径，与被订正的那个 55 不是同一集合，本身正确）"
+  ],
+  "interfaces_exposed": [],
+  "scope_drift": "无。实际改动仅 internal/hestia/sections.go，在声明的 writes 内。go.mod/go.sum 未出现在本次提交（git show --name-only 核实 0 次）。",
+  "verification": {
+    "measured_at_head": "3ce09696a1fa4214aee6e2e1744e692af8914a97",
+    "measured_worktree": "/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-009-m1c3b（分支 task/TASK-009-m1c3b，工作区 0 项未提交改动）",
+    "note": "以下全部数字在最后一次改动（即该提交）之后统一重采，与交付物同源。",
+    "suite": "go test ./internal/hestia/... -count=1 → ok，全绿",
+    "pass_count": "556",
+    "pass_set_identical": "背对背比对：改动前后各跑一次并取 --- PASS 的测试名排序集合，diff 逐条相同（556 == 556）。计数另做四次交错运行 POST/PRE/PRE/POST 全部 556。",
+    "coverage": "95.9%（go test -cover，测量树 3ce09696a1fa4214aee6e2e1744e692af8914a97）——不低于基线 95.9%（基线采于 32bc1e5f306386ee5c69a54b4bae3e0184aa30f2）",
+    "vet": "go vet ./internal/hestia/... ./cmd/... → 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas → 仅 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，未新增项、未顺手修）",
+    "numstat": "git show --numstat HEAD -- internal/hestia/sections.go → 22 3（采自提交本身，与交付物同源）",
+    "commit": "3ce09696a1fa4214aee6e2e1744e692af8914a97 docs(TASK-009): 订正 sections.go 的「共 74 篇」为实测 55，并写明两个 55 的歧义"
+  },
+  "reproduce": {
+    "note": "锚一律钉全 sha，不写 HEAD/分支名——符号引用会静默过期并主动产出假红。",
+    "r11": "git -C <repo> show 32bc1e5f306386ee5c69a54b4bae3e0184aa30f2:internal/hestia/parse.go | sed -n '284,296p'",
+    "r10": "语料未被 git 跟踪（.gitignore 排除 data/），复刻需在 32bc1e5f306386ee5c69a54b4bae3e0184aa30f2 的 internal/hestia 下重建临时 package 内测试，遍历 data/hestia-backfill-2026-08-14/manifest.json 的 218 篇，取 kindFinance 的 80 篇跑 splitSections(stripHTML(raw)) 并套旧判据；方法与两把尺见上文 R10-重采。"
+  }
+}

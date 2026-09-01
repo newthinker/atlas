@@ -1,0 +1,67 @@
+{
+  "task_id": "TASK-003",
+  "title": "按 (period,period_type,published_at) 合并观测，字段取并集、冲突不静默",
+  "key_findings": [
+    "实现整段照抄需求文档 Task 3 Step 3（第 535-678 行，含全部注释），与其**逐字节一致**（diff 验过两次：落盘后、提交后）。新建 internal/hestia/backfill_load.go（+144/-0）与 internal/hestia/backfill_load_test.go（+154/-0），两个文件都是新建，无既有文件被修改。",
+    "**store_test.go 未改动**（writes 里是预留）。我自己读了判定逻辑核实、没有照搬 Leader 的结论：store_test.go:413 是 `d.(*ast.FuncDecl)` 类型断言 + `fn.Name.IsExported()`，**类型声明（*ast.GenDecl）根本不进那个循环**；而本任务新增的三个函数 mergeByBusinessKey / mergeGroup / pickArticleID **全是非导出**。实测 TestPackageExposesNoWriteFunctions PASS。⇒ 需求文档 Task 3 Step 4 那句 ⚠️ 的**结论对（不要改成非导出）、理由错**（它说是因为新增导出符号会触发守卫）。",
+    "Meta.CaliberVersion 取 g[0] 的值，形式上像另一处「静默取值」，**查证不是**：parse.go:251 是 `CaliberVersion: caliberFor(period)`，纯粹由 period 派生，而 period 是业务键的一部分 ⇒ 组内必然一致，不存在分歧。**由构造保证，不需要额外守卫。**"
+  ],
+  "decisions": [
+    {
+      "decision": "实现逐字节照抄需求文档 Step 3，不做任何改写或简化",
+      "rationale": "DoD functional[0] 要求「整段照抄，含全部注释——那些注释记的是各条设计的理由，不是装饰」。落盘后与提交后各用 diff 与需求文档 535-678 行比对一次，均逐字节一致（144 行）。"
+    },
+    {
+      "decision": "单篇不改写 extractor，且 DroppedIDs 为空",
+      "rationale": "DoD boundary[0]。96 个观测里 54 个是单篇，改写成 merged@v1 会让它们也走 mergedRequiredFields 那条路，而它们的必填集本来就由自己的 extractor 说得清——多绕一圈只多一个出错的机会。由 TestMergeSingleArticleKeepsOriginalExtractor 钉住。"
+    },
+    {
+      "decision": "冲突记进 Conflicts，不做静默取值；同值不算冲突",
+      "rationale": "DoD error_handling[0][1]。三个 extractor 的字段集设计上不相交（27/18/9=54），冲突理应恒为 0——**正因如此，一旦出现就说明字段归属表错了**，那是必须响亮失败的事，而「取第一个」会让一张错的归属表永远不被发现。"
+    },
+    {
+      "decision": "组内先按 article_id 升序，合并时遍历 fieldOrder 而不是 p.obs.Values",
+      "rationale": "DoD boundary[1]。map 迭代顺序随机，同一份数据两次跑会报出不同的冲突顺序，让排查变成猜谜；Parts/SourceIDs 的顺序与冲突记录里谁是 A 谁是 B 也不该随 manifest 排列而变。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_load.go (+144/-0，**新建**)",
+    "internal/hestia/backfill_load_test.go (+154/-0，**新建**)"
+  ],
+  "interfaces_exposed": [
+    "type MergeConflict struct { Period, PeriodType, Field string; A, B float64; FromA, FromB string } —— 导出类型。同一业务键上两篇对同一字段给出不同值的记录。",
+    "type MergedObservation struct { Obs Observation; Parts, SourceIDs, DroppedIDs []string; Conflicts []MergeConflict } —— 导出类型。Parts/SourceIDs/DroppedIDs 三样都是**取证**：必填集靠 Parts 算（见 mergedRequiredFields），DroppedIDs 是被丢弃的定位符。",
+    "func mergeByBusinessKey(ps []parsedArticle) []MergedObservation（非导出）—— 按 (period, period_type, published_at) 归组合并，返回按 period 升序、同期按 period_type 升序的序列。",
+    "⚠️ **给 M1c-3b 的 TASK-006（核对报告）的三条使用约束**：① **单篇不会被改写成 merged@v1**，Obs.Meta.Extractor 保持原 extractor，且 DroppedIDs 为空 —— 判断「这条是不是合并出来的」要看 len(SourceIDs)>1 或 Extractor==extractorMerged，不要假设所有输出都是 merged；② Conflicts 非空即表示**字段归属表有错**，不是数据问题，应当响亮报出而不是取值继续；③ 见下条排序注意事项。",
+    "🔴 **排序保证的确切射程（DoD 未覆盖，实测确认；Leader 2026-09-01 裁决：记 discovery、不单开任务）**\n\n**保证**：输出按 `period` 升序、同期按 `period_type` 升序。\n\n**不保证**：同 `(period, period_type)` 而 `published_at` 不同的两组之间的相对顺序 —— 分组键是**三元组**（含 `published_at`）、排序键只有**两项**，两组比较相等时 `SortStableFunc` 保持插入序 = manifest 序。上游 `classifyArticles` 只按 `period` 单键排（calibrate.go:33，无次级键），故同期内顺序就是 manifest 顺序。\n\n⇒ 实现里那句注释「稳定才能逐次 diff」**需要一个额外前提：manifest 同期内顺序不变**。当前语料下前提成立，但它是前提、不是保证。\n\n⇒ **给 TASK-006**：你拿到的顺序保证到上面「保证」那一行为止。若你需要对「同期同类型、不同 published_at」（= 修订/重发，双时态设计支持，真实可达）也稳定，**不能依赖本函数**，要自己按 `published_at` 再排一次。\n\n⚠️ 实现完全符合 DoD functional[3] 的字面要求，缺口在**理由比保证宽**，不是行为错。未自行修：那会破坏 functional[0] 要求的逐字节照抄。"
+  ],
+  "verification": {
+    "measured_at_head": "4a65aa37931d8633e1b928465229bc01e7899657",
+    "measured_tree_state": "主仓库 master，merge 之后重采，工作区代码未提交改动 0 条。全部自证数字采于此树此 sha（最后一次改动之后统一重采）。",
+    "branch": "master（分支 task/TASK-003-m1c3b @ d74d930e105e6843d8674d7ff148eda0411d751d 已由 Leader 经 4a65aa3 合入）",
+    "baseline_head": "2433e5577b38f1d0fc8ba77bff4bd2641dee7421",
+    "merge_confirmed_by": "内容判据而非仅拓扑：backfill_load.go 与 backfill_load_test.go 在 master 与 d74d930 上的 sha256 各自逐字节一致（e8f47b38… / 3a03714d…），七个测试函数在 master 上各命中 1 处。拓扑判据 merge-base --is-ancestor 亦报已合入，两者一致。",
+    "suite": "在 4a65aa3 上：go test ./internal/hestia/ -run TestMerge -count=1 ⇒ 七条全 PASS；go test ./internal/hestia/... -count=1 -cover ⇒ ok, coverage: 96.0%；go test ./cmd/... -count=1 ⇒ ok",
+    "coverage": "96.0% @ 4a65aa37931d8633e1b928465229bc01e7899657（go test -cover 口径）。基线 95.9% @ 2433e55（我在起始锚上实测，**不是**沿用 DoD 写的 32bc1e5——master 已前移，覆盖率分母属于整棵树；两处均测得 95.9%）。改后 96.0%，**高于基线**。",
+    "vet": "go vet ./internal/hestia/... ./cmd/... ⇒ 零输出（采于 4a65aa3）",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas ⇒ 恰为 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go 两项（既有欠账，来自 f5d7b82，未动）。判据「这两个文件之外无新增项」已满足。",
+    "deps": "git status --porcelain -- go.mod go.sum ⇒ 命中 0 条；提交 numstat 仅两个新建文件，无新增依赖",
+    "export_guard": "TestPackageExposesNoWriteFunctions ⇒ PASS（未修改 store_test.go）",
+    "red_evidence": "Phase 1 实测：go test ./internal/hestia/ -run TestMerge ⇒ 编译失败 `undefined: mergeByBusinessKey`（7 处），与需求文档 Step 2 的 Expected 完全一致",
+    "cross_branch_precheck": "交付等待期间实测：本分支与 task/TASK-005-m1c3b / TASK-008-m1c3b / TASK-011-m1c3b **两两无冲突**（先合任一再合本分支均干净），四条依次全合入后 go build ./... 无输出、go test ./internal/hestia/... ok。⚠️ 第一次预检方法有误（用 --no-ff --no-commit 连做两次，因 MERGE_HEAD 存在而全报「冲突」，但冲突文件列表为空——空列表暴露了方法错误），改为先 commit 再合后得到上述结果。",
+    "dod_to_test": [
+      "functional[0] 整段照抄 Step 3 含全部注释 → 与需求文档 535-678 行 diff 逐字节一致（144 行），落盘后与提交后各验一次",
+      "functional[1] 三篇同键合成一条、字段取并集、SourceIDs 三个都在、Conflicts 为空 → TestMergeByBusinessKeyUnionsFields（PASS）",
+      "functional[2] article_id 优先月报 → TestMergePrefersMonthlyArticleID（PASS，断言 DroppedIDs==[id-tsfstock]）",
+      "functional[2] 无月报取字典序最小 → TestMergeWithoutMonthlyFallsBackToSmallestID（PASS，断言 Parts 含两个 extractor）",
+      "functional[3] 输出按 period 升序、同期按 period_type 升序 → TestMergeIsStableAndSorted（PASS）",
+      "boundary[0] 单篇不得改写成 merged@v1，DroppedIDs 为空 → TestMergeSingleArticleKeepsOriginalExtractor（PASS）",
+      "boundary[1] 组内按 article_id 升序、遍历 fieldOrder 而非 Values → 实现照抄，形态与 gateMagnitudeSanity 同理",
+      "error_handling[0] 冲突记录不静默取值 → TestMergeRecordsFieldConflict（PASS，逐项断言 Field/A/B/FromA/FromB）",
+      "error_handling[1] 同值不算冲突 → TestMergeSameValueIsNotAConflict（PASS）",
+      "error_handling[2] store_test.go 未改动、导出类型不改成非导出 → 未改动，TestPackageExposesNoWriteFunctions PASS"
+    ],
+    "reproduce": "git worktree add --detach /tmp/verify-TASK-003 4a65aa37931d8633e1b928465229bc01e7899657 && cd /tmp/verify-TASK-003 && go test ./internal/hestia/ -run TestMerge -count=1 -v && go test ./internal/hestia/... -count=1 -cover && go vet ./internal/hestia/... ./cmd/...（锚钉全 sha，不写 HEAD/分支名）"
+  },
+  "provenance": "全部代码由 dev-m1c3b-c 编写。实现块与测试块均系需求文档 Task 3 Step 1/Step 3 的逐字节照抄（DoD 要求），非本人原创。merge 由 Leader 执行（commit 4a65aa3）。上游 context 取自 .arcforge/discoveries/TASK-001.json（parsedArticle 形状与三条使用约束）与 TASK-002.json（extractorMerged / mergedRequiredFields）。"
+}

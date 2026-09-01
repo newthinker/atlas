@@ -1,0 +1,55 @@
+{
+  "id": "TASK-007",
+  "title": "atlas hestia backfill load 子命令",
+  "description": "对应需求文档 Task 7。在 `cmd/atlas/hestia.go` 加 `backfill load` 子命令，挂到 `hestiaBackfillCmd`。",
+  "status": "accepted",
+  "complexity": "simple",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go"
+  ],
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-006"
+  ],
+  "done_criteria": {
+    "functional": [
+      "新增 `hestiaBackfillLoadCmd`（`Use: \"load\"`），`Use`/`Short`/`Long` 按需求文档 Task 7 Step 3 **逐字照抄**——那段 `Long` 写清了「`--db` 必须不存在」「回填是一次性的」「工具永不碰生产库、永不改 `configs/hestia.yaml`」三件事，是给运维看的。",
+      "flag 用**包级变量**（沿用 `hestiaCalibrateDir` 的做法），支持 `--dir` / `--db` / `--allow-incomplete`，`--db` 标记为 **required**。子命令挂到 `hestiaBackfillCmd`。",
+      "`TestBackfillLoadRequiresDBFlag` 通过：不给 `--db` ⇒ 报错，错误串含 `--db`。\n\n🔴 **不给 `--db` 默认值**：默认值会让人在没意识到的情况下写进 `configs/hestia.yaml` 指的那个**生产库**，而回填一旦进了权威表就没有出路（`--force` 对已入权威表的期次是数据层 no-op）。\n\n🔴 **需求文档里的 `runCmd` 是示意名**（Leader 已核实，2026-08-31 于 `32bc1e5`）。\n\n`cmd/atlas/hestia_test.go` 里实际的命令执行辅助有两个：\n\n```go\nfunc bfExec(t *testing.T, args ...string) error            // :631  backfill 系子命令用这个\nfunc calExec(t *testing.T, args ...string) (string, error) // :798  需要拿 stdout 时用这个\n```\n\n`backfill load` 属于 backfill 系 ⇒ **用 `bfExec`**；若断言要看报告正文则用 `calExec`。**沿用，不要新写。**",
+      "🔴 **断言报告真的到了 stdout（补阻断级缺口 A-2）。**\n\n用 `calExec`（`cmd/atlas/hestia_test.go:798`，它返回 stdout）跑一次 `hestia backfill load`，断言输出**非零字节**，且**含「四道恒等式」与「合并组明细」两个小节标题**。\n\n🔴 **为什么这条不可省**：`writeLoadReport` 是**非导出**的 ⇒ `cmd/atlas` 是另一个 package、**调不到它** ⇒ 报告只能由 `BackfillLoad` 写进 `Deps.Out`。**漏填 `Out` 是静默的**：命令可能把 96 条观测正确写进库、返回 exit 0、而 stdout 一片空白，运维以为一切正常。\n\n⚠️ 而本任务原有的唯一测试 `TestBackfillLoadRequiresDBFlag`（flag 解析类）**正是** `calibrate.go:514` 那段注释点名「会全部通过」的那类测试——它对这个失效完全免疫。"
+    ],
+    "boundary": [
+      "🔴 `cmd/atlas/hestia.go` 有一条守卫**明令它不得 import `path/filepath`**（在文件里搜「不该 import path/filepath」）——路径语义归 `internal/hestia`。\n\n⇒ **`--db` 的存在性检查放在 `BackfillLoad` 里**（TASK-006 已实现），不要放在 cmd 层。"
+    ],
+    "error_handling": [
+      "`go test ./... -count=1` 全绿（本任务改的是 `cmd/atlas`，要跑全量而不只是 `internal/hestia`）。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n🔴 **覆盖率口径：本任务的 `packages` 是 `./cmd/atlas`，不是 `./internal/hestia`** —— 两个包的水位差很远，**不能套用 96.1% 那个数**（那是 `internal/hestia` 的）。\n\nLeader 于 master `f14fd28` 实测：`go test ./cmd/atlas/ -count=1 -cover` = **75.6%**。\n\n⇒ 已给本任务加 `coverage_floor: 75`（门禁的任务级字段，覆盖全局 `dev_minimum: 80`）。门禁注释写明该字段的用途正是「历史包袱重的包按其既有水位设定」—— `cmd/atlas` 的 75.6% 不是本 sprint 造成的，而全局 80% 对它从来就不适用（前面所有任务的 `packages` 都是 `./internal/hestia`，96%+，所以从没撞到）。\n\n**判据：不低于 75%，且报数时同时给出 `./cmd/atlas` 与 `./internal/hestia` 两个数**（后者应仍 ≥96.1%，用于确认本任务没有波及 hestia 包）。\n\n⚠️ 本条是 dev-m1c3b-c 预读时发现的：DoD 原写「不低于 95.9%」是**从模板结转的过期数字套到了另一个包上** —— 按那个字面，本任务永远不可能达标（cmd/atlas 实测 75.6%）。\n⚠️ 覆盖率的**分母属于整棵树**：报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 不带 `--all` ⇒ 未合并分支的 commit 对门禁**结构性不可见** ⇒ **门禁报绿而根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 的解锁文案与本纪律**方向恰好相反**。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。收尾**自己拆 worktree**。"
+    ]
+  },
+  "coverage_floor": "75",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-c",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "6ff4b456983a0b149e4922d517e3689c4123ff9d",
+    "discovery_sha256": "62f3067741146501909e5aac0b47322c0afc135d857d02268a44a53e987480cf",
+    "at": "2026-09-01T03:13:33Z"
+  },
+  "verifier": "test-m1c3b-a"
+}

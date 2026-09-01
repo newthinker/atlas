@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-004",
+  "title": "magnitude_ranges 校验未知字段/倒置区间/缺 unit，堵住静默失效",
+  "key_findings": [
+    "现有 configs/hestia.yaml 的 magnitude_ranges 只有注释、无实际条目 ⇒ 空表 ⇒ 加校验不会让现有配置失败。DoD error_handling[1] 要求的「停下来报 Leader」条件未触发。cmd/atlas 的 TestRealHestiaConfigLoads（读 ../../configs/hestia.yaml）在改动后仍 PASS，这是「真实配置仍能装载」的自动证据，不是我目测的。",
+    "Thresholds.validate 的接收者是值接收者 func (t Thresholds) validate() error，需求文档 Step 3 的代码片段可原样落入，无需改签名；thresholds.go 已 import fmt/slices/strconv/strings，本次无新增 import、go.mod/go.sum 零改动。",
+    "「非空且合法 ⇒ 走完两轮循环落到 return nil」这条路径在 DoD 的 4 条测试下覆盖为零：三条拒绝用例都在校验中途 return，空表用例整块跳过 if。而它正是 TASK-005 手填 54 项要走的那条路径 —— 校验若退化成「非空即拒」，54 项会全被挡在 LoadConfig 外，且症状是配置的人怎么改都不对。故补了第 5 条测试（见 decisions[2]）。"
+  ],
+  "decisions": [
+    {
+      "decision": "实现整段照抄需求文档 Task 4 Step 3（含注释），不做任何改写或简化",
+      "rationale": "DoD functional[0] 明确要求「整段照抄，含注释」。落盘后用 diff 与需求文档第 780-819 行逐字节比对，确认一致（40 行）；提交后又比对一次仍一致。那些看起来冗长的中文错误信息是刻意的设计：它们的读者是正在手填 54 项的人，省下的那句话会变成他排查半小时的成本。"
+    },
+    {
+      "decision": "未知键那一轮 range map，区间/unit 那两轮遍历 fieldOrder",
+      "rationale": "DoD boundary[1] 的口径，与 gateMagnitudeSanity 同理：map 迭代顺序随机，同一份坏配置两次跑报出不同的那一项会让排查变成猜谜。而「找不在 fieldOrder 里的键」只能 range map，那一轮的顺序不确定性可接受——它一旦命中就是配置错误、必须修，不存在反复跑对比的场景。"
+    },
+    {
+      "decision": "在 DoD 的 4 条测试之外，补了第 5 条 TestMagnitudeRangesAcceptValidTable（合法非空表必须通过）",
+      "rationale": "这条**不在 done_criteria 里**，是我主动加的回归护栏，在此显式申报以便验证者区分。理由见 key_findings[2]：该路径覆盖为零，而它是 TASK-005 唯一要走的路径。用三个不同板块的字段（m2 / m2_yoy / fx_reserve）而不是一个，是为了让「循环只跑了一轮也算过」这种退化过不了关。先用一次性探针测得该行为当前正确（探针跑完即删，未落盘、未进提交），再落成正式测试。已向 Leader 明确申报，Leader 若判超出 scope 我可撤。"
+    },
+    {
+      "decision": "不碰 configs/hestia.yaml",
+      "rationale": "那是 TASK-005 的 writes，动它会撞进 TASK-005 的 scope。DoD error_handling[1] 的前提条件（现有配置无法通过 LoadConfig）经实测未触发，故无需报 Leader、也无需改配置。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/thresholds.go (+40/-0，纯新增；validate() 内、caliber_exemptions 循环之后)",
+    "internal/hestia/thresholds_test.go (+79/-0，纯新增；5 个测试函数 + DoD↔测试映射注释)"
+  ],
+  "interfaces_exposed": [
+    "无新符号。Thresholds.validate() 的行为收紧：MagnitudeRanges 非空时逐项校验，三类拒绝 = 未知字段名 / Min >= Max / Unit 为空（TrimSpace 后）。空表行为不变（合法）。",
+    "对 M1c-3b 的 TASK-005：填表时字段名必须取自 internal/hestia/fields.go 的 fieldOrder（54 个），每项必须写 unit 且 min < max，否则 LoadConfig 直接失败并指名是哪一项、以及不拒的后果。⚠️ 注意 min == max 也会被拒（判据是 Min >= Max）。"
+  ],
+  "verification": {
+    "measured_at_head": "e02056079baaa0c33bf25254e7cfe18b971547a7",
+    "measured_tree_state": "主仓库 master，merge 之后重采。全部自证数字采于此树此 sha（最后一次改动之后统一重采）。分支上交付时的那次测量为 8454167a35c8a43ebe68733027bf849498b7d920，两次数值相同。",
+    "branch": "master（分支 task/TASK-004-m1c3b @ 8454167a35c8a43ebe68733027bf849498b7d920 已由 Leader 经 e0205607 合入）",
+    "baseline_head": "32bc1e5f306386ee5c69a54b4bae3e0184aa30f2",
+    "merge_confirmed_by": "内容判据而非仅拓扑：thresholds.go 与 thresholds_test.go 在 master 与 8454167 上的 sha256 各自逐字节一致（476890b1… / c43869f8…），且五个测试函数在 master 上各命中 1 处。拓扑判据 merge-base --is-ancestor 亦报已合入，两者一致。",
+    "suite": "在 e0205607 上：go test ./internal/hestia/... -count=1 -cover ⇒ ok, coverage: 95.9% of statements；go test ./cmd/... -count=1 ⇒ ok（含 TestRealHestiaConfigLoads）；五条目标测试全 PASS",
+    "coverage": "95.9% @ e02056079baaa0c33bf25254e7cfe18b971547a7（go test -cover 口径，与 DoD 基线 95.9% @ 32bc1e5 同口径、不低于）。⚠️ 中间另合入了 TASK-009（3ce0969/7eda136，纯文档改动，不影响本包覆盖率分母）。",
+    "vet": "go vet ./internal/hestia/... ./cmd/... ⇒ 零输出（采于 e0205607）",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas ⇒ 恰为 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go 两项（既有欠账，来自 f5d7b82，未动）。判据是「这两个文件之外无新增项」，已满足。",
+    "deps": "git status --porcelain -- go.mod go.sum ⇒ 命中 0 条；提交 numstat 仅两个文件，无新增依赖",
+    "red_evidence": "Phase 1 实测：前三条 FAIL（validate 返回 nil）、TestEmptyMagnitudeRangesStillValid 动手前即 PASS，与需求文档 Step 2 的 Expected 完全一致",
+    "dod_to_test": [
+      "functional[0] 实现整段照抄 Step 3 → 与需求文档第 780-819 行 diff 逐字节一致（40 行），落盘后与提交后各验一次",
+      "functional[1] 未知字段名 → TestMagnitudeRangesRejectUnknownField（PASS，断言错误串含 m2_typoed）",
+      "functional[2] Min >= Max → TestMagnitudeRangesRejectInvertedRange（PASS，断言错误串含 FieldM2）",
+      "functional[3] Unit 为空 → TestMagnitudeRangesRequireUnit（PASS，断言错误串含 unit）",
+      "boundary[0] 空表仍然合法 → TestEmptyMagnitudeRangesStillValid（PASS，RED 阶段即 PASS，改后仍 PASS）",
+      "boundary[1] 未知键 range map、其余遍历 fieldOrder → 实现照抄，形态与 gateMagnitudeSanity 一致",
+      "error_handling[0] 三条错误信息说清后果 → 照抄需求文档原文，逐字节一致",
+      "error_handling[1] 不改 configs/hestia.yaml → 未改（git status 恰为两个文件）；且未触发「停下来报 Leader」的前提",
+      "DoD 之外的自加护栏 → TestMagnitudeRangesAcceptValidTable（PASS，合法非空表通过）"
+    ],
+    "reproduce": "git worktree add --detach /tmp/verify-TASK-004 e02056079baaa0c33bf25254e7cfe18b971547a7 && cd /tmp/verify-TASK-004 && go test ./internal/hestia/... -count=1 -cover && go test ./cmd/... -count=1 && go vet ./internal/hestia/... ./cmd/...（锚钉全 sha，不写 HEAD/分支名）"
+  },
+  "provenance": "全部代码由 dev-m1c3b-c 编写。实现块系需求文档 Task 4 Step 3 的逐字节照抄（DoD 要求），非本人原创。code-simplifier 子代理做过一次只读咨询，但**未返回任何实质结论**（只回了三个短句，追问后未再回复），故不作为通过证据；已核实它未修改任何文件（git status + 与需求文档 diff + 主仓库 .arcforge 改动仅为 Leader 登记 token）。merge 由 Leader 执行（commit e0205607）。"
+}

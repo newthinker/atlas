@@ -1,0 +1,79 @@
+{
+  "id": "TASK-010",
+  "title": "真跑验收（四道恒等式 + 42/107/96 的唯一验收点）+ CONTRACTS 登记 M1c-3b",
+  "description": "对应需求文档 Task 8 的 Step 1/2/2b/4/5 与结转项 6/7/8。⚠️ 本任务是文档 Task 8 的一部分，**commit message 用 `TASK-010`**（可照抄文档那条 `docs(...)` 的其余部分）。结转项 1a/2/4/5/9 与矛盾标签已由 TASK-008 / TASK-009 完成，**本任务不重做，只核实**。",
+  "status": "accepted",
+  "complexity": "complex",
+  "packages": [
+    "./internal/hestia",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007",
+    "TASK-008",
+    "TASK-009",
+    "TASK-011",
+    "TASK-012"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-003",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007",
+    "TASK-008",
+    "TASK-009",
+    "TASK-011",
+    "TASK-012"
+  ],
+  "done_criteria": {
+    "functional": [
+      "🔴 **真跑，并记下采样锚**（`verify_by: manual`）：\n\n```bash\ncd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas\ngit rev-parse HEAD            # ← 采样锚，全 sha，写进 discovery\ngo build -o /tmp/atlas-final ./cmd/atlas\nrm -f /tmp/hestia-backfill.db\n/tmp/atlas-final hestia backfill load \\\n  --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 \\\n  --db /tmp/hestia-backfill.db --allow-incomplete > /tmp/load-report.txt 2>&1\necho \"exit=$?\"\n```\n\n⚠️ 本任务**在主仓库跑**（语料不在 worktree 里），改动只有 `CONTRACTS.md` 一个文件。",
+      "🔴 **四道恒等式与期望值在真语料上核过**：\n\n```bash\ngrep -E '语料总篇数|待解析|本迭代不解析|解析成功|解析失败|合并后观测|入权威表|落 pending|恒等式' /tmp/load-report.txt\nsqlite3 /tmp/hestia-backfill.db \\\n  \"select count(*) from hestia_observations; select count(*) from hestia_pending;\n   select extractor, count(*) from hestia_observations group by extractor;\"\n```\n\n期望：`218 = 199 + 19`、`199 = 161 + 38`、`96 = 54 + 42`、`96 = 入权威表 + 落 pending`；`extractor` 分组里 **`merged@v1` = 42**；**字段冲突数 = 0**。\n\n🔴 **若合并后观测数不是 96，先怀疑代码，不要改期望值**——96 是设计阶段用仓库自己的 `classifyArticles` + `Parse` 实测出来的。\n\n🔴 **`42 / 107 / 96` 只能在真语料上核，不能写成单元测试**（语料不进 git）⇒ **本步是它们唯一的验收点，跳过这步等于这三个数从未被验证过。**",
+      "**Step 2b 交叉验证**（用真实数据验证合并逻辑，不是拿合成 fixture 自说自话）：`merged@v1`（2025-10 前由 v1 三篇合成）与 `rule-monthly@v2`（2025-10 后央行自己合并的）在**非空字段集合上同构**——两者都应覆盖除 `fx_reserve` / `fx_rate` 外的 52 个字段。\n\n⚠️ **不齐 3 篇的合并组是已知例外**（`2020-01|monthly` 只有 2 篇）：这类组字段数**必然少于 52，那是对的**，不是缺陷。把它们算进「同构」的分母会得出**一个假的失败**——核对时**先按 `Parts` 长度分组再比**。\n\n⚠️ 另核 `tsf_stock` 观测数应为 **79**。若不是，说明 spec §3.3「合并不影响阈值标定」这条论证被推翻了——**停下来查**，不要继续。",
+      "**写 CONTRACTS `## Sprint M1c-3b` 一节**，五小节 A–E 内容按需求文档 Task 8 Step 4 逐条写全（A 契约更正 / B 实测登记 / C 阈值出处 + 「合并不影响标定」的证伪判据 / D 明确不建 `hestia_caliber_changes` 及其**重建判据** / E 留给 M1c-4 的清单）。\n\n🔴 **D 必须写明这是「现在用不上」而不是「不需要」**——两者的区别在于：前者会让人删掉 `types.go:130` 的伏笔，后者要求伏笔留着。\n\n🔴 **E 的每条必须带「必须进某个任务的 `done_criteria`」的承接句**——只写进 CONTRACTS 的义务不会被执行（载体强度：`done_criteria` > `questions[].answer` > `discovery.decisions` > 散文）。",
+      "🔴 **两条真跑判据（补 A-1 / A-3 的验收点）**：\n\n1. **报告里 `completeness: skipped{unknown_extractor:merged@v1}` 的条数必须为 0**——这是 TASK-011 接线是否真的生效的判据。**四道恒等式抓不住它**（它们全由同一批计数器派生，内部自洽 ≠ 闸门真的执行了）。\n2. 报告的「**部分覆盖的期次**」一节非空，且与实测分布吻合：96 个观测里只有 **33** 个是完整的（52 或 54 字段），**42 个只带 18 字段**。\n\n**把这 17 个「同一 `(period, published_at)` 被 `period_type` 拆开」的发布事件逐条写进 CONTRACTS §B**，连同人类 2026-09-01 的裁决（**不合并是刻意的**：存量是时点数、累计流量是区间数，本就是两个观测；且 `period_type` 决定月均折算除数）与**证伪判据**：\n\n> 本论证依赖央行的标题措辞习惯（《社融存量报告》恒用「N月…」而同日另两篇在季末用「一季度/上半年/前三季度」）。**若将来标题措辞统一、或 2025-10 起并篇后这个拆分自然消失，本论证失效，届时须重新评估合并键。**\n\n⚠️ 需求文档 Task 3 的注释说三篇「period_type **完全相同**」，**那句话在真语料上是假的**——CONTRACTS 里要把这条更正记下来，否则下一个人会重新相信它。",
+      "🔴 **核对 TASK-006 新增的两样输出（DoD 此前未覆盖，Leader 补）**\n\n**① `PartialCoverage`「部分覆盖的期次」一节必须非空且与实测吻合。**\n\n这是人类在 dod-gate 裁决 A-3 时要求的「让 44% 残缺出声」。实测分布（Leader 于 `32bc1e5` 用真语料跑出）：\n\n```\n字段数  9 →  2 个    18 → 42 个 ★    27 →  2 个\n       36 → 15 个    45 →  2 个\n       52 → 23 个    54 → 10 个      合计 96\n```\n⇒ **只有 33/96 是完整的（52 或 54 字段）**，42 个只带 18 个社融存量字段。报告该节应逐条列出「入权威表但 `Parts` 不含全部三族」的期次及**缺哪一族**。\n\n⚠️ `PartialCoverage` **只收「入了权威表」的组**，落 pending 的不算（TASK-006 的 dev 的判断，我已认可）—— 那一节的危险性正来自「它进了权威表且 completeness 通过」。\n\n**② `Unclassified` 若非空 ⇒ 恒等式一必然失败，这是设计不是缺陷。**\n\nTASK-006 刻意不把「标题解析不出期次」的篇目并进任何一格，让整趟**响亮失败**并在错误串点名成因 —— 并进去等于让那批篇目从所有表上消失，而「站点改了期次表述」正是最该被看见的变化。\n\n⇒ **真语料上该值应为 0**（218 = 199 + 19）。**若真跑时非 0：去看站点是不是改了期次表述，不要去调恒等式。**（TASK-006 的 `notes_for_downstream[3]` 原话。）"
+    ],
+    "boundary": [
+      "**结转项 6 / 7 / 8 三条**（纯 CONTRACTS 登记）：\n- **6**：两处措辞遗留，见 CONTRACTS `## Sprint M1c-3a` 的 G-6\n- **7**：`git log --grep '<任务号>'` 在**复用编号的仓库里不是范围判据**——写进 CONTRACTS 的流程一节（见 G-7）\n- **8**：合成 fixture 的前缀选择依赖同一类假设（`extract_test.go` 里选「今年以来」的依据是「不会有人去加」）。**本迭代若未动 `periodAlt` 就原样保留**，只在 CONTRACTS 记明；若动了，换一个未被使用的前缀，**不要删掉那一格**。\n\n---\n\n🔴 **结转项 7 的实证（本 sprint 攒到的，请原样写进 CONTRACTS，不要只写那句判断）：**\n\n原结转项只是一句「`git log --grep '<任务号>'` 在复用编号的仓库里不是范围判据」。本 sprint **三个 dev 各自独立撞到**，把它从判断变成了数据：\n\n| 任务 | 门禁/写通道的告警 | 命中的历史 commit |\n|---|---|---|\n| TASK-009 | scope 检查列出一大段 | `git log --grep \"^[a-z]+\\(TASK-009\\):\"` 命中 **14 个**，横跨 2026-06-10 → 08-26 |\n| TASK-001 | `dev_done` 两条 WARN | 「8 条提到该 ID 但主题不符约定」+「16 条早于本轮开工」 |\n\n⚠️ **关键补充**（dev-m1c3b-a 查的）：那 16 条列出的越界文件跨了 `internal/broker/paper`、`internal/collector/edgar`、`internal/notifier/telegram` **三个与 hestia 完全无关的模块**，最早一条 2026-06-10。\n\n⇒ **这不是「hestia 内部编号撞车」，是全仓库范围的编号复用** ——`git log --grep` 作范围判据在这个仓库里**结构性不成立**，不是「偶尔会误报」。\n\n⚠️ 并写明**为什么没有修**：commit message 的锚点格式 `<type>(TASK-ID):` 是门禁强制的、**没有加 milestone 前缀的余地**；改它要动运行时资产（对全体 agent 只读），合法路径是「改 project-template → TDD → 人类确认 → 会话外同步」。\n\n🔴 **「矛盾标签」那条的登记方式（dev-m1c3b-a 的裁决建议，Leader 采纳）：**\n\n它指出这两个标签**严格讲不是逻辑矛盾**，而是**同一批篇目的两个不同维度**被当成两个归属并排印出来（`calibrate.go:17` 原文其实已把两者并列）。\n\n⇒ 「统一」修掉的是**读者会以为是两批东西**这个真问题，不是修掉一个假命题。\n\n⇒ **CONTRACTS 登记时把「谁来修（M1c-4 的兜底工作量）」与「何时必须修完（入库前清零或显式豁免）」分两栏写，不要二选一。** 统一标签之后，「入库前必须清零」这条**期限**信息在代码里没有正式的家了（dev 把它保留在 `calibrate.go` 顶部注释，但注释不是契约）。",
+      "🔴 **CONTRACTS.md 结构核对必须先锚 `## Sprint M1c-3b` 再切**：文件里已有**两个 `### F.`、两个 `### G.`**（M1c-1 的在 1060 行、M1c-3a 的在 1342/1513 行）。**M1c-3a 已因此数错三次。**",
+      "**明写移交 M1c-4（本 sprint 不做）**：结转项 **1b**（`2022-05` 的解析器缺口，修法已知——往 `periodAlt` 与 `cumulativePeriods` **同步**加「今年前N个月」前缀族，**只改一处会全绿而无效**）与 **3**（按节部分抽取，让 2023-07/08/10/11 那 4 篇产出 `loan_flow_ytd`）。",
+      "🔴 **CONTRACTS 追加一条：绊线失效（TASK-005 的 dev 实撞并上报，Leader 已核实）。**\n\n`thresholds_test.go` 的 `TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated` 带着一段精心设计的绊线注释，把 F12 / F17 / F19 三个守卫缺口挂在它上面，理由是：\n\n> 这条断言是**必然会响的绊线** —— 任何人填表都必须先撞红它、必须动手改它，于是必然读到这段。而 findings-carryover.md 是一份**需要被记起来**的文档。\n> **把提醒挂在绊线上，而不是挂在需要被记起来的文档里。**\n\n**这个设计思想是对的，但它的前提在 M1c-3b 上不成立**：绊线断言的是 `DefaultThresholds().MagnitudeRanges` 为空，其前提是「填表 = 改 `DefaultThresholds()`」。而 TASK-005 填的是 **`configs/hestia.yaml`**，代码默认值保持空表 ⇒ **绊线不会红，dev 不必改它，因此不会被迫读到那段注释。**\n\nTASK-005 的 dev 读到它，是因为它主动去看了 `thresholds_test.go` 的现状 —— **是运气，不是绊线起作用**。\n\n⇒ CONTRACTS 里要写明：**绊线的有效性取决于它挂在「真实路径」上，而真实路径会变**。本次真实路径从代码默认值挪到了 yaml，绊线**原地失效且没有任何信号** —— 它不会红，也不会报告自己已失效。\n\n⚠️ 并写明**这次是怎么补上的**：F12/F17 由 TASK-012 收编（`writes` 扩了 `validate_test.go`），F19（单位）由 TASK-005 按 `extract.go:744-745` 的代码内记载处理。**不是绊线救的，是 dev 主动查现状救的。**"
+    ],
+    "error_handling": [
+      "🔴 **一切自证数字必须采于最后一次代码改动之后**。判据（AD-6，按路径收窄）：\n\n```bash\ngit diff --numstat <Step 1 的采样锚> HEAD -- internal/hestia cmd/atlas configs \\\n  ':!internal/hestia/CONTRACTS.md'\n```\n\n**为空** ⇒ 数字仍有效；**非空** ⇒ 回去重采全部数字。\n\n⚠️ **为什么不能直接放宽成「我这轮只改了文档」**：那个推断对 `go test` 成立、**对自证数字不成立**——数字不来自被改动的文档，而可能来自**别人**在这期间改的代码（M1c-3a 实撞）。收窄的是**路径**，不是「谁改的」。",
+      "🔴 **生产库未被本迭代改动**：\n\n```bash\nshasum -a 256 /Users/zuowei/workspace/runtime/atlas/data/hestia.db\n```\n\n必须等于 `478d40c079c8b0eab7d089bb6f1926725b361a6dc6c850f4c4a651406f3ec28c`（采于 `32bc1e5`）。\n\n⚠️ 判据是 **sha256 相等**，不是「我没写过它」——后者是关于意图的声称，前者是关于载体的观察。"
+    ],
+    "non_functional": [
+      "全量验收：`gofmt -l internal/hestia cmd/atlas` 只有那两个既有欠账；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./... -count=1` 全绿；**两个包的覆盖率分别判，不能用同一个数**：\n- `go test ./internal/hestia/... -cover` **≥ 96.2%**\n- `go test ./cmd/atlas/ -cover` **≥ 75%**（已加 `coverage_floor: 75`）\n\n🔴 Leader 于 master `d4f1e7c` 实测：`internal/hestia` = **96.2%**、`cmd/atlas` = **75.6%**，两个包水位差 20 个百分点。DoD 原写的单一「≥95.9%」是**从模板结转的过期数字**，且只覆盖了两个 `packages` 中的一个 —— 与 TASK-007 撞的是同一个坑（`cmd/atlas` 是历史包袱重的包，全局 `dev_minimum: 80` 对它从来不适用）。\n\n⚠️ 报数时**两个包都给**，并各带你测量时的 HEAD 全 sha。\n\n把每个数字与**采样时的 HEAD 全 sha** 同行写进 discovery。",
+      "🔴 **交付流程**：本任务在**主仓库**直接干（不建 worktree——语料不在 worktree 里，且只改一个文档文件）。提交信息 `docs(TASK-010): ...`，提交后**通知 Leader**（若在主仓库 master 上直接提交则无需 merge，但仍须在提交**之后**才转 `dev_done`）。\n\n⚠️ 一切 `.arcforge/` 写入经写通道。"
+    ]
+  },
+  "coverage_floor": "75",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-a",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "verify_baseline": {
+    "head": "21815beda194398b1ee9b0777e969f4f102b8ac3",
+    "discovery_sha256": "72d21a6bdd01b0dfe5628125e832ad8c0a91e2ca3a98314dd63c70856613e3e7",
+    "at": "2026-09-01T03:39:16Z"
+  },
+  "verifier": "test-m1c3b-a"
+}

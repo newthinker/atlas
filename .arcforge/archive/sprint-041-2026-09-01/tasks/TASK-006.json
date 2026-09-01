@@ -1,0 +1,83 @@
+{
+  "id": "TASK-006",
+  "title": "BackfillLoad 编排 Validate+Save，核对报告出四道恒等式",
+  "description": "对应需求文档 Task 6。在 `backfill_load.go` 里实现 `BackfillLoad` 编排（走 `eachParsedArticle` → `mergeByBusinessKey` → `Validate` → `Save`），新建 `backfill_load_report.go` 出核对报告与四道恒等式。",
+  "status": "accepted",
+  "complexity": "complex",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_load.go",
+    "./internal/hestia/backfill_load_report.go",
+    "./internal/hestia/backfill_load_test.go",
+    "./internal/hestia/backfill_load_report_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-003",
+    "TASK-011"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-011"
+  ],
+  "done_criteria": {
+    "functional": [
+      "实现 `BackfillLoadDeps` / `BackfillLoadResult` / `BackfillLoad(ctx, d) (*BackfillLoadResult, error)`，字段与签名按需求文档 Task 6 的 Interfaces 段**逐字一致**。",
+      "🔴 **接上 `Observation.Parts` —— A-1 目前【没有】堵上，这是本任务的第一优先项。**\n\n**实测（Leader 于 master `962c3ac` 端到端探针证实，dev-m1c3b-b 首先发现）**：\n\n```\nMergedObservation.Parts     = [tsf-stock@v1 tsf-flow@v1]   (len=2)\nMergedObservation.Obs.Parts = []                (len=0)   <<< gateCompleteness 读的是这个\n⇒ completeness = skipped  reason=\"unknown_extractor:merged@v1\"\n```\n\n**成因是接缝**，两个任务各自的 DoD 都满足、谁都没错：\n- TASK-003 把 `Parts` 定义在**包装结构** `MergedObservation{Obs Observation; Parts []string; …}` 上，`mergeGroup` 里写的是 `m.Parts`（需求文档给的形状）\n- TASK-011 的 `gateCompleteness` 读的是 `in.obs.Parts`，它只拿得到 `Observation`，**看不见包装**\n- 全仓库 `grep 'obs\\.Parts'` 非测试代码**只有 `validate.go:464` 的读**，**无人赋值**\n\n⇒ **修法（一行）**：`mergeGroup` 返回前补 `m.Obs.Parts = m.Parts`，**单篇与多篇两条路径都要**（或统一在 return 前赋一次）。`backfill_load.go` 在本任务的 `writes` 里。\n\n⚠️ **单篇那条路径也必须赋** —— 96 个观测里 54 个是单篇，它们的 `Parts` 是 `[原 extractor]`；漏掉会让它们的 `completeness` 走 `requiredFields(原 extractor)` 那条路（碰巧也对），但一旦将来单篇也改走合并路径就静默失效。",
+      "🔴 **实现的 9 条要点逐条对照**（需求文档 Task 6 Step 3），其中三条最容易漏：\n\n**(4) 装配 `Meta.ArticleID`**：`eachParsedArticle` 每条 `parsedArticle` 里 `item.a.ID` 是 manifest 的 id，而 `Parse` 看不到 URL（接缝①）⇒ **必须显式赋值**，否则合并组的代表 id 恒为空。\n\n**(5) 交叉校验** manifest 的 `published` 与正文解析出的 `PublishedAt`（接缝②同思路）：不一致即该篇失败、不入库。\n\n**(6) 🔴 按期次升序处理**（`mergeByBusinessKey` 已保证，别再打乱）：顺着 manifest 的顺序跑会让 `stock_continuity` / `deposit_sum` 的漂移检测**一次都不真正执行**（每期都成了「首期」⇒ 恒 `no_prior_period`），而数据照进权威表、报告照样 `Passed=true`、**零告警**（`ingest.go` 原话）。",
+      "`Validate` 用 `Store` 作 `History`——库是新建的，前期数据来自本轮**已入库**的期次，所以处理顺序必须对（与上一条同因）。`Outcome.Table` 决定计入 `ToObservations` 还是 `ToPending`。",
+      "实现 `writeLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error`：分节**顺序固定**（稳定才能逐次 diff），版式见需求文档 Task 6 Step 4。含合并组明细、字段冲突节、落 pending 的期次及判因。",
+      "🔴 **`BackfillLoadDeps.Out` 为 nil 时返回 error，不退化成 `io.Discard`（补阻断级缺口 A-2）。**\n\n⚠️ 这一条**刻意背离需求文档**（它给 `Out` 的注释是「nil 等价于 io.Discard」）。理由是同包 `Calibrate` 对同一件事有一条**写明论证的相反契约**（`calibrate.go:514`，Leader 已逐字核实）：\n\n> 🔴 **`d.Out` 为 nil 时报错，不退化成 `io.Discard`。** 本函数的产出**就是那份报告**；默认丢弃输出会把调用方的疏漏变成合法配置 —— 具体的失效形态是：cmd 层装配时漏填 Out 字段 ⇒ 命令静默打印零字节、退出码 0，而「子命令注册了吗」「flag 解析对吗」这类测试**全部通过**。\n\n`BackfillLoad` 的产出同样**就是那份报告**（它还是 `DroppedIDs` 的唯一载体），失效形态逐字相同。\n\n⇒ 沿用同包契约。若你判断应当保留 `io.Discard` 语义，**必须在 discovery 的 `decisions` 里写明「为什么这里可以背离同包既有的、有论证的契约」**，不能默默照抄文档。",
+      "🔴 **`PartialCoverage`：把「部分覆盖的期次」暴露出来（人类 2026-09-01 在 dod-gate 裁决，补缺口 A-3）。**\n\n**背景**：需求文档 Task 3 的注释称三篇报告「period / period_type / published_at **完全相同**」，而 Leader 在真语料上实测**为假**——17 个发布事件的三篇被 `period_type` 拆开（《社融**存量**报告》标题恒为「N月…」⇒ `monthly`，而同日发的另两篇在季末写「一季度/上半年/前三季度」）。\n\n**实测字段数分布（96 个观测）**：`9→2 / 18→42 / 27→2 / 36→15 / 45→2 / 52→23 / 54→10`——**只有 33/96 是完整的**，42 个（44%）只带 18 个社融存量字段、其余 36 列全 NULL，而它们的 `completeness` **会通过**（`tsf-stock@v1` 的必填集就是那 18 个）。\n\n**人类裁决：合并键维持 `(period, period_type, published_at)` 不变**（存量是时点数、累计流量是区间数，本就是两个观测；且 `period_type` 决定月均折算除数，混合有量级风险）——**但必须让这 44% 出声**：\n\n1. `BackfillLoadResult` 增 `PartialCoverage []MergedObservation`\n2. 报告增一节「**部分覆盖的期次**」，逐条列出「入权威表但 `Parts` 不含全部三族报告（月报族 / 存量 / 增量）」的期次及其**缺哪一族**\n\n⚠️ **理由与 `IncompleteAccepted` 那条警告同类**：这批期次在库里与「央行本来就没发」**完全同形**。缺期与缺字段都是静默的洞。"
+    ],
+    "boundary": [
+      "🔴 `TestBackfillLoadRefusesExistingDB` 通过：`DBPath` 已存在 ⇒ 报错，错误串含「已存在」并说明重跑要删文件。\n\n理由：回填是**一次性动作**。追加写会让四道恒等式失去意义，且掩盖「上一趟跑到哪」。重跑的正确姿势是删文件重来——**那也是绕开「`--force` 对已入权威表的期次是数据层 no-op」这条死路的唯一办法**。\n\n🔴 **需求文档里的 fixture 调用直接抄会编译不过**（Leader 已核实，2026-08-31 于 `32bc1e5`）。\n\n文档写的是 `dir := t.TempDir(); writeCalibrateFixture(t, dir)`，而**实际签名**是：\n\n```go\n// internal/hestia/calibrate_test.go:60\nfunc writeCalibrateFixture(t *testing.T, m Manifest, files map[string]string) string\n```\n\n它**自己建 `t.TempDir()` 并返回该目录**，要传的是 `Manifest` 与文件内容表，不是目录。\n\n⇒ **沿用它，不要新写一份**（两份 fixture 会分叉）。先读 `calibrate_test.go:60` 附近的既有调用点，照着构造 `Manifest` 与 `files`。",
+      "`TestBackfillLoadIdentitiesHold` 通过：四道恒等式在 fixture 上成立——\n`Total = Attempted + Unsupported`、`Attempted = ParsedOK + ParseFailed`、`Merged = SingleArticle + MergedGroups`、`Merged = ToObservations + ToPending`。",
+      "**单期失败不中断整批**：逐期收集，末尾 `errors.Join` 包进去返回非零。\n`CompletedAt` 缺失且未传 `AllowIncomplete` ⇒ 报错（沿用 `collectSamples` 的那句文案）；传了则置 `res.IncompleteAccepted = true`。",
+      "🔴 **`os.Stat(DBPath)` 的存在性检查必须在 `NewStore` 之前（补阻断级缺口 D-1）。**\n\n`store.go:49-66` 的 `NewStore` 会 `MkdirAll` 并 `sql.Open` **创建 db 文件**。检查写在它后面的后果不是「少一道防线」而是**功能直接坏掉**：第一次跑自己造出库、第二次被自己拒，且第一次那份库是半成品。\n\n⚠️ `TestBackfillLoadRefusesExistingDB` 用**已存在的文件**测，抓不到顺序错（那条路径两种实现都会拒）。顺序要靠**读代码**核，或补一条「对不存在的 `DBPath` 跑一次、断言库被正确建立且内容完整」的正向用例。"
+    ],
+    "error_handling": [
+      "🔴 `TestWriteLoadReportRejectsBrokenIdentity` 通过：恒等式不成立 ⇒ `writeLoadReport` **返回 error**，错误串含「恒等式」三字。\n\n**报告本身就是验收物，它不能在数字对不上时照样打印一份好看的表格。**",
+      "`TestLoadReportWarnsOnIncomplete` 通过：`IncompleteAccepted` 时报告**顶部**出警告，含 `completed_at` 与「缺期」。\n\n它在 load 里的代价比在 calibrate 里重：calibrate 传它的代价是「区间可能偏窄」，**load 传它的代价是历史序列直接缺期，且缺的那些期在库里与「央行本来就没发」完全同形**。",
+      "`TestLoadReportListsDroppedArticleIDs` 通过：被丢弃的 `article_id` **逐条列出**（不是只报个数）。",
+      "🔴 **`BackfillLoad` 是新增的导出函数，会打红 `TestPackageExposesNoWriteFunctions`**（Leader 于 `32bc1e5` 核实：`store_test.go:399` 的 `want` 列表现有 **20** 项，无 `BackfillLoad`；该守卫遍历 `*ast.FuncDecl`，**只查函数/方法、不查类型**）。\n\n⇒ 去 `store_test.go` 把 `BackfillLoad` 补进 `want`，**不要把它改成非导出**——TASK-007 的 cmd 层要调它。\n\n⚠️ 该测试的注释里写着一段教训：期望项数**由 `len(want)` 生成、不手写**，因为「同一事实的两个副本，改一处不会让另一处变红」。补的时候别在别处又写一个手写的数。\n\n（这是本任务 `writes` 含 `store_test.go` 的原因。TASK-003 的 `MergeConflict`/`MergedObservation` 是**类型**，不触发它。）",
+      "🔴 **补一条跨接缝的端到端断言 —— 这是本任务独有的验收点。**\n\n**为什么两边的守卫都没抓到接缝缺陷**（dev-m1c3b-b 的诊断，Leader 证实）：\n- TASK-003 的测试断的是 `MergedObservation.Parts`（它自己的产物）—— 对\n- TASK-011 的测试**直接构造** `Observation{Parts: …}` 喂闸门（其 DoD `functional[2]` 就是这么要求的）—— 也对\n- **两边都没有跨过接缝的测试**\n\n⇒ 补：`mergeByBusinessKey(…)` 造出合并观测 → 原样喂给 `Validate` → 断言 `completeness` **不是** `skipped{unknown_extractor:merged@v1}`。\n\n⚠️ 断言要钉**具体的 reason**，不能只断「不是 skipped」—— 空 `Parts` 与「真的缺字段」都可能让它非 passed，两者必须可分。\n\n⚠️ 这条测试的形状就是 Leader 那个探针：**跨越两个任务的边界**。本 sprint 的教训是**每个任务的 DoD 都只覆盖自己那一侧，接缝天然无人认领** —— 凡是「A 产出、B 消费」的字段，都要有一条同时经过 A 和 B 的断言。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`）。\n⚠️ 覆盖率的**分母属于整棵树**：报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 不带 `--all` ⇒ 未合并分支的 commit 对门禁**结构性不可见** ⇒ **门禁报绿而根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 的解锁文案与本纪律**方向恰好相反**。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。收尾**自己拆 worktree**。",
+      "【验收闸·QA 立，Leader 于裁决 9 订正射程】**每一条 fix_item 修复的行为，都必须有一条能红的守卫；没有守卫的修复不算完成。** 验证者须对每条守卫跑对应变异确认转红，并确认它**死在判据行**而非某条在缺陷版本上同样成立的断言（如 `require.Error`）。转不红、或红在别处，即视为空判据，不予验收。\n\n⚠️ **原措辞（「每一条新补或修改的判据……转不红即说明补的**仍是**空判据」）射程不足**：它预设了 dev 补了判据，而 C-3 那次 dev **根本没被要求补判据**（`fix_items[1]` 只要求改行为）——用它去卡就是拿一条对方没被要求满足的规则。本条是 Leader 自认的第 10 处 DoD 缺陷，与第 9 处（要求了行为没要求守卫）**是同一个**。\n\n变异参考：C-4 用 M17（`len(g.SourceIDs) > 1` 改 `>= 1`）；C-3 用 V3（`checkInputIdentities` 早退分支恒不进入，实测新守卫独家转红、死在 `os.IsNotExist(statErr)` 那一行而非 `require.Error`）；其余见 `docs/05-review/adversarial-review-m1c3b.md`。\n\n理由：一条从没有人见它红过的判据，不是被验证了，是被声称了。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-m1c3b-a",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "70eedc4caf3502df9f25f125c7dcc546d06320d3",
+    "discovery_sha256": "e007036a4559e0b56cd10ef198cd7c8e399712c190d7ad6b3e606a9696f47bcf",
+    "at": "2026-09-01T09:35:18Z"
+  },
+  "verifier": "test-m1c3b-b",
+  "reason_class": "dod_defect",
+  "fix_items": [
+    "⚠️【这是两处补漏，不是推翻返工成果】TASK-006 的三条 CRITICAL 与 4 组 WARNING 已全部验收通过（test-m1c3b-b，报告 14214 字节）。本轮只补两处缺口，两处都是 Leader 的 DoD 缺陷：一条是 fix_items[1] 只要求改行为没要求守卫，一条是 Leader 要求 C-2 时留下的过期理由。",
+    "① 补 C-3 守卫。现状：checkInputIdentities 确实在 NewStore 之前调用（:330 早于 :342）、行为经真实场景实测正确，但把它改回缺陷原状（跳过早退）全套测试无一转红（变异 V3，外溢度 0）。既有的 TestBackfillLoadDoesNotCreateDBBeforeChecking 守的是 D-1（os.Stat 早于 NewStore），不是 C-3（恒等式检查早于 NewStore）。",
+    "🔴 ①的关键约束（验证者实测得出，不遵守等于没补）：判据必须是「库文件不存在」，不能是「返回了 error」——缺陷版本同样返回 error（只是晚在末尾），写成后者是一条新的空判据，且长得跟真守卫一模一样。",
+    "①的现成材料：验证者已写出守卫形状并实测（当前实现通过 / V3 变异下失败），不到 15 行、复用真语料改一篇标题、无需新夹具。见 docs/04-test/TASK-006-verification.md §2.3。补完必须自己再跑一次 V3 变异确认转红（裁决 7）。",
+    "② 订正 backfill_load_report.go 中 writeLoadReport 的函数头注释。它写着「恒等式先校验、后打印：报告本身就是验收物，它不能在数字对不上时照样打印一份好看的表格」，而实现是先渲染后校验——C-2 的整个修复就是把顺序反过来。这条注释在 C-2 之前完全正确，被 C-2 推翻后没人回来改它。",
+    "⚠️ ②的危害等级（验证者订正后）：不是「静默回归」。TestWriteLoadReportPropagatesWriteError 的注释点名了 C-2 并解释了顺序为何不能反，会拦住误改且自带解释。实际等级是「误导 + 一次无效往返」——注释带 🔴 强语气，会让下一个人去尝试改。订正时把新的正确理由写进去（为什么必须先渲染），不要只删旧的。",
+    "③ 不要动其它任何东西。恒等式四一行不许改（它不恒真，是能红的真闸）。三条 CRITICAL 的实现、5 条新增测试、W-1 的判据全部已验收通过，本轮不重开。"
+  ],
+  "rework_count": 2
+}

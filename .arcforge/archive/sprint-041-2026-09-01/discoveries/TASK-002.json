@@ -1,0 +1,105 @@
+{
+  "task_id": "TASK-002",
+  "title": "merged@v1 取值域 + 必填集按参与合并的 extractor 动态取并集",
+  "owner": "dev-m1c3b-b",
+  "delivered_at_sha": "87c42333f3378aed8efad63fba67379d1e1e4833",
+  "branch": "task/TASK-002-m1c3b",
+  "baseline_sha": "32bc1e5f306386ee5c69a54b4bae3e0184aa30f2",
+  "key_findings": [
+    "【需求文档缺陷，已在实现里绕过并留注释】需求文档 Task 2 Step 1 给的 `require.Equal(t, tsfStockFields(), got)` 与它自己 Step 3 的「按 fieldOrder 排序」**相互矛盾，任何实现都不可能同时满足**：tsfStockFields() 把 tsf_stock / tsf_stock_yoy 两个总量字段 append 在**末尾**，而 fieldOrder 里它们排在这 18 个字段的**最前**。照抄那条断言会让实现被迫违反 functional[1] 的排序要求。处置：按 done_criteria boundary[1] 陈述的两条**性质**断言——ElementsMatch（比多重集，重复元素照样红，故「不得出现两次」被完整钉住）+ fieldOrder 升序，并补一格阴性（把并集倒序喂给同一判据必须失败）确保升序断言不是空转。这不是 Leader 提到的那个数字错误，是第二处、独立的一处。\n\n**实测证据**（Leader 已独立复核，非单方转述）：`tsfStockFields` 定义在 **`internal/hestia/required.go:38`** —— **不在 `fields.go`**，按 `fields.go` 去找会落空（Leader 第一次核实就栽在这里，故特此写明）。逐下标实测：`tsfStockFields()` 的首元素 `tsf_stock_rmb_loan` 在 `fieldOrder` 下标 **3**、末元素 `tsf_stock_yoy` 下标 **1**；而 `mergedRequiredFields([tsf-stock@v1])` 输出 `[tsf_stock(0), tsf_stock_yoy(1), tsf_stock_rmb_loan(3), …]` 严格升序。⇒ 两个总量字段在两个序列里分别落在**两端、顺序恰好相反**，故 Step 1 的 `Equal` 与 Step 3 的「按 `fieldOrder` 排序」互斥。完整理由见 `decisions[0]`。",
+    "【DoD 的 52 已独立复现，需求文档的 54 也不是错的】我自己跑探针测得（于 32bc1e5）：fieldOrder=54、fxSectionFields=2、requiredFields(rule-monthly@v1)=25、rule-monthly@v2=52、tsfStock=18、tsfFlow=9、requiredFields(rule@v1)=27、rule@v2=54、without(fieldOrder,fx)=52。故 25+18+9=52=54−2 成立，DoD 的 52 正确；需求文档 Task 3 注释的「27/18/9=54」用的是 rule@v1(27，季报，**含** fx 两字段)那一组，两个数各自都对，只是不同组。测试里把 52 写成派生表达式 `without(fieldOrder, fxSectionFields())` 为主断言、`Len(...,52)` 为辅，防的是派生表达式两边一起错。",
+    "【「恰好红三条」已独立复现，非转述】只加 const + 进 validExtractors、不改任何测试，`go test ./internal/hestia/ -count=1` 顶层 FAIL **恰好 3 条**，逐字就是 DoD 点名的那三个守卫：TestEveryValidExtractorHasARequiredFieldsDecision / TestExtractorEnumErrorListsEveryValidValue / TestParseCoversAllKinds。探针随后 git checkout 还原，写测试前工作树 git status --porcelain 为空。",
+    "【A4 消融暴露一处 DoD 未点名的联动】把 extractorMerged 从 validExtractors 里删掉时，除 TestExtractorEnumErrorListsEveryValidValue 外，TestEveryValidExtractorHasARequiredFieldsDecision **也**会红——因为它有一条反向断言「豁免表里的键必须在 validExtractors 里，否则这条豁免永远不会被求值」。这是该守卫在正常工作，不是我的改动引入的耦合；记下来是为了让后来者看到两条同时红时不去找不存在的第二个原因。"
+  ],
+  "decisions": [
+    {
+      "decision": "需求文档 Task 2 Step 1 的 `require.Equal(t, tsfStockFields(), got)` **不予采用**；改为按 done_criteria boundary[1] 陈述的两条性质断言：`require.ElementsMatch(tsfStockFields(), dup)` + fieldOrder 升序判据 + 一格阴性",
+      "rationale": "**原文不可满足，任何实现都做不到** —— 不是风格分歧。实测证据（Leader 已独立复核，非单方转述）：`tsfStockFields()` 定义在 `internal/hestia/required.go:38`（**不在 fields.go**，按 fields.go 去找会落空），它 `return append(out, FieldTSFStock, FieldTSFStockYoY)`，把两个总量字段放在**末尾**；而 `fields.go` 的 `fieldOrder` 把同两个字段放在**最前**（A.1 社融·总量 一节，先于 A.1 社融·存量分项）。逐下标实测：`tsfStockFields()` 的首元素 `tsf_stock_rmb_loan` 在 fieldOrder 下标 **3**、末元素 `tsf_stock_yoy` 下标 **1**；而 `mergedRequiredFields([tsf-stock@v1])` 输出 `[tsf_stock(0), tsf_stock_yoy(1), tsf_stock_rmb_loan(3), ...]` 严格升序。⇒ 两个总量字段在两个序列里分别落在**两端，顺序恰好相反**，故 Step 1 的 `Equal` 与 Step 3 的「按 fieldOrder 排序」**互斥**。\n\n**为什么两条性质才是 DoD 要的**：`require.Equal(tsfStockFields(), got)` 实际钉的是 `tsfStockFields()` 的**实现顺序**，而那不是本任务要保证的性质——本任务要保证的是 boundary[1] 明写的两条：(1) 同一 extractor 传两次不得让字段出现两次；(2) 输出按 fieldOrder 升序。替代方案逐条对应且**守得更准**：`ElementsMatch` 比的是**多重集**，重复元素照样让它红，故性质(1)被完整钉住，且不误钉顺序；升序判据直接钉住性质(2)，而非借由某个 helper 的返回顺序间接钉；额外补一格**阴性**（把并集倒序喂给同一升序判据必须失败）——防的是 len<=1 时循环体一次都不进、断言空转却显示为绿。\n\n若照抄原文，实现将被迫违反 functional[1] 的「按 fieldOrder 排序」，两条 done_criteria 自相矛盾。这是需求文档 Task 2 的**第二处**缺陷（第一处是「54 字段」应为 52，已在 DoD 订正）；两处同型——**正确的局部陈述在转写时丢了限定条件**：54 那处是把 `rule@v1`(含 fx，27) 套到了 `rule-monthly@v1`(不含 fx，25) 上，本处是把 `tsfStockFields()` 的实现顺序当成了「必填集应有的顺序」。"
+    },
+    {
+      "decision": "requiredFields 的 switch **不加** extractorMerged 分支，让它落 default 返回 nil；只在 default 的注释里补成因区分",
+      "rationale": "DoD functional[3] 明确要求。default 注释写清两者成因不同：llm-fallback@v1 是「还没实现」（M1c-4 补上分支后就该从豁免表删掉），merged@v1 是「这一列结构上说不出必填集」（**永远**不会有分支）。两处豁免表的理由也各自写了这条区别——否则后人会把两条读成同一类，在实现 merged 合并逻辑时顺手给它加个分支。"
+    },
+    {
+      "decision": "三处白名单守卫只改**声明**（清单 7→8、两张 exempt 表各加一条带理由），一行断言逻辑都没改",
+      "rationale": "三处都是「默认要求覆盖」式守卫，红是它们在正常工作。特别地，TestExtractorEnumErrorListsEveryValidValue 的注释写明「逐字写死而不是遍历 validExtractors」是刻意的（遍历版本对『常量值写错』免疫，错的常量会被同样错的错误信息印证），故照着改清单并额外补了一句「不要图省事改成 range」的警告。"
+    },
+    {
+      "decision": "mergedRequiredFields 对 parts 里未知/语义不足的 extractor（含 merged@v1 自身）**静默略过**，不报错",
+      "rationale": "requiredFields 对它们返回 nil，略过与「它没贡献任何字段」是同一件事。判『这一组到底该不该算 completeness』是调用方（M1c-3b 的 TASK-011 的 gateCompleteness）的事，不是本函数的。这条已写进函数注释，免得 TASK-011 的实现者以为本函数会替它挡住脏 parts。"
+    },
+    {
+      "decision": "动态取并集的理由（2020-01|monthly 只有 2 篇；硬套 v2 会让这类组恒报缺字段，把 absent-by-design 记成 failed，completeness 就废了）原样落进 mergedRequiredFields 的函数注释",
+      "rationale": "DoD boundary[0] 要求原样落盘。它是这个函数存在的**全部**原因——没有它，后人会觉得「直接返回 requiredFields(extractorMonthlyV2) 更简单」而把它删掉。"
+    },
+    {
+      "decision": "不碰 validate.go，mergedRequiredFields 交付时只有测试调用点",
+      "rationale": "DoD functional[5] 明示这是刻意分工，生产接线在 M1c-3b 的 TASK-011（Observation.Parts + gateCompleteness 分支），validate.go 是那个任务的 writes。为了『让它有调用点』去改就是 scope 越界。"
+    },
+    {
+      "decision": "types_test.go 在 writes 声明里但未改动",
+      "rationale": "writes 是可写路径的上界不是必写清单。检查过 types_test.go:316 那处 extractor 相关断言遍历的是硬编码的三值字面量（rule@v1 / rule@v2 / llm-fallback@v1）而非 validExtractors，新增第八个取值不会触及它，无需改动。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/types.go (+12/-0)：extractorMerged 常量（含「说不出必填集」理由）+ 进 validExtractors + 白名单注释补一段说明它与前几个的区别（那几个迟早有 HTML 样本，它构造上不可能有）",
+    "internal/hestia/required.go (+35/-1)：mergedRequiredFields 函数 + default 分支注释补成因区分",
+    "internal/hestia/required_test.go (+106/-2)：3 个新测试 + 守卫 1 清单 7→8 + 守卫 2 豁免表加 merged@v1 及理由",
+    "internal/hestia/parse_test.go (+7/-0)：守卫 3 的 exempt 表加 merged@v1 及理由"
+  ],
+  "scope_check": {
+    "declared_writes": [
+      "./internal/hestia/types.go",
+      "./internal/hestia/required.go",
+      "./internal/hestia/required_test.go",
+      "./internal/hestia/types_test.go",
+      "./internal/hestia/parse_test.go"
+    ],
+    "actually_written": [
+      "internal/hestia/types.go",
+      "internal/hestia/required.go",
+      "internal/hestia/required_test.go",
+      "internal/hestia/parse_test.go"
+    ],
+    "outside_declaration": [],
+    "note": "无越界。go.mod / go.sum 均未出现在改动里（无新增依赖，Global Constraint 满足）。"
+  },
+  "interfaces_exposed": [
+    "const extractorMerged = \"merged@v1\"（非导出）—— 已在 validExtractors 里，Meta.Extractor 可合法取该值",
+    "func mergedRequiredFields(parts []string) []string（非导出）—— 返回 parts 各自 requiredFields 的并集，按 fieldOrder 升序、去重、永远是新切片。parts 里 requiredFields 返回 nil 的项被静默略过。**消费方是 M1c-3b 的 TASK-011**（Observation.Parts + gateCompleteness 分支）",
+    "requiredFields(extractorMerged) == nil —— 刻意的，调用方据此记 skipped 而不是 failed"
+  ],
+  "verification": {
+    "resample_anchor": "全部数字统一重采于 HEAD 87c42333f3378aed8efad63fba67379d1e1e4833，重采时 `git status --porcelain` 为 0 条改动（即被测树 == 交付物，不是跨时间点拼的）",
+    "suite": "go test ./internal/hestia/... -count=1 → ok，顶层 FAIL 0 条",
+    "coverage": "95.9% of statements（`go test -cover` 口径，于 87c4233）。基线**我自己在隔离 detached worktree 里重测**：32bc1e5 同样是 95.9%，且两次是同一时刻背对背跑的（DoD 门槛 >= 95.9%，满足）。未取用 DoD 转述的数字。",
+    "gofmt": "`gofmt -l internal/hestia cmd/atlas` 只列出 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，来自 f5d7b82，未触碰）——这两个文件之外零新增项",
+    "vet": "`go vet ./internal/hestia/... ./cmd/...` 零输出，退出码 0",
+    "new_tests": [
+      "TestMergedRequiredFieldsIsUnionOfParts PASS",
+      "TestMergedRequiredFieldsIsOrderedAndDeduped PASS",
+      "TestRequiredFieldsRejectsBareMerged PASS"
+    ],
+    "guards_after_statement": [
+      "TestExtractorEnumErrorListsEveryValidValue PASS",
+      "TestEveryValidExtractorHasARequiredFieldsDecision PASS",
+      "TestParseCoversAllKinds PASS"
+    ],
+    "ablation": {
+      "method": "5 个消融变异，**跑在隔离的 detached worktree**（`git worktree add --detach <tmp> 87c4233`）上，主工作区一个字节不碰。每个变异带三道有效性闸：锚点唯一性 + 变异后 sha256 必须改变 + `go build` 必须通过（崩溃型变异会让套件全红被误记 KILLED）；另打印逐行 diff 供语义核对，并在作用域外红 > 6 条时早退不判 KILLED。对照组（未变异）先跑一次确认 GREEN——否则后面的 KILLED 全部无意义。",
+      "result": "5/5 KILLED",
+      "cases": [
+        "A1 去掉去重（改为逐 part 追加）→ TestMergedRequiredFieldsIsOrderedAndDeduped 红",
+        "A2 按 fieldOrder **倒序**输出 → TestMergedRequiredFieldsIsOrderedAndDeduped 红（去重与并集断言仍绿，故这一条精确指向排序性质）",
+        "A3 给 requiredFields 加 `case extractorMerged: return slices.Clone(fieldOrder)` → TestRequiredFieldsRejectsBareMerged + TestEveryValidExtractorHasARequiredFieldsDecision 红",
+        "A4 把 extractorMerged 从 validExtractors 里删掉 → TestExtractorEnumErrorListsEveryValidValue + TestEveryValidExtractorHasARequiredFieldsDecision 红（后者是它的反向断言在工作，见 key_findings 第 4 条）",
+        "A5 并集少算最后一个 part → TestMergedRequiredFieldsIsUnionOfParts 红"
+      ],
+      "restore_proof": "每个变异窗口结束即还原并断言 sha256 回到变异前值；收尾变异 worktree `git status --porcelain` 为空；**另比对主 worktree 四个文件的 sha256，变异前后逐字节一致**，且主 worktree `git status --porcelain` 为空。两个消融 worktree 已 `worktree remove --force` + `prune`，`worktree list` 中残留 0 个。"
+    }
+  },
+  "notes_for_downstream": [
+    "M1c-3b 的 TASK-011（生产接线）：mergedRequiredFields **不会**替你校验 parts 的合法性——未知/语义不足的 extractor（含 merged@v1 自身）被静默略过。若某组的 parts 全部无效，本函数返回**空切片**（不是 nil），gateCompleteness 需自己决定这算 skipped 还是 failed。",
+    "M1c-4 实现 llm-fallback@v1 时：required_test.go 与 parse_test.go 两张 exempt 表里的 `llm-fallback@v1` 条目应当被**删掉**（它是「还没实现」），而 `merged@v1` 条目**留着**（它是「结构上说不出 / 构造上不可能有样本」）。两条的理由文本里都写明了这个区别。"
+  ]
+}

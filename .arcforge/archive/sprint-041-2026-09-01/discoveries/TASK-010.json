@@ -1,0 +1,93 @@
+{
+  "task_id": "TASK-010",
+  "title": "真跑验收（四道恒等式 + 42/107/96 的唯一验收点）+ CONTRACTS 登记 M1c-3b",
+  "key_findings": [
+    "**四道恒等式全部成立**（真跑，锚 `6ff4b456983a0b149e4922d517e3689c4123ff9d`）：218=199+19、199=161+38、96=54+42、96=75+21。`exit=0`。",
+    "🔴 **DoD 给的验收命令射程不足，会得到一个「看起来合理的错数」**。它写「`extractor` 分组里 `merged@v1` = 42」并给了只查 `hestia_observations` 的 SQL —— 实测该表里 `merged@v1` = **28**，另 **14** 条在 `hestia_pending`，**合计才是 42**。成因：96 个观测有 21 个被闸门拦下落 pending，而**闸门不区分 extractor**。⚠️ 危险在于 75 = 42+28+3+2 **自洽**，不会有任何东西提示你少看了一张表。⇒ 期望值 42 是对的，**是命令错不是代码错**，已写进 CONTRACTS §A-2。",
+    "🔴 **DoD 的证伪判据「若 2025-10 起并篇后这个拆分自然消失」——它的后半段在本轮语料上已经发生，不是「将来」**。17 个拆分事件最晚一个是 **2025-06**；2025-09 / 2025-12 / 2026-03 / 2026-06 四个季末期次**全部只有单一 `period_type`**（实测）。成因是央行 2025-10 起把社融并进月报、不再单发 ⇒ 每个发布事件只剩一篇，没有可拆的东西。⚠️ **正确读法不是「论证失效」**：对那 17 个历史事件仍成立（它们正是要回填的历史数据），对新数据是「问题不再出现」。**但 `period_type` 作合并键的必要性来自历史段** —— 谁因「新数据看不到拆分」而去掉它，会把 17 个历史事件重新揉在一起。",
+    "**字段数分布与 DoD 的预期表逐格一致**（自己算的，非引用）：9→2、18→42、27→2、36→15、45→2、52→23、54→10，求和自校验 = 96；完整（52/54）**33/96**，18 字段的 **42** 个。`PartialCoverage` 实测 **64** 条（只收入了权威表的组）。",
+    "**Step 2b 字段集合同构成立，且比 DoD 措辞更精确**：`merged@v1`(3 篇) 有**两种**集合 —— 52 字段的与 `rule-monthly@v2` 的 52 **逐字段相等**（缺的正是 `fx_rate`/`fx_reserve`）；54 字段的与 `rule@v2` 的 54 相等且等于全字段集。⇒ DoD 说「两者都应覆盖 52 个字段」只覆盖了前一种。不齐 3 篇的 19 个 2-篇组字段数为 27/36/45，是已知例外。",
+    "**`unknown_extractor:merged@v1` = 0，报告全文 `skipped` 亦为 0** ⇒ A-1 那条线闭合（`mergedRequiredFields` 确实被生产路径调用）。**`Unclassified` = 0**，站点未改期次表述。**字段冲突 = 0**。",
+    "**spec §3.3「合并不影响标定」成立**：标定阶段 `tsf_stock` 样本 79；入库合并后 `tsf_stock` 非空观测 **79**（权威表 60 + pending 19）。⚠️ **只查权威表会得 60** —— 与上面第 2 条同一个坑。",
+    "🔴 **结转项 6 的定位器已失效，本轮未能定位故未处理**。M1c-3a 记的 `profiles.go:198` 在 `32bc1e5` 上是一段模板注释，而 `profiles.go` 本 sprint **一行未改**（numstat 零输出）⇒ 行号在写下时就已漂了。**如实记明而不猜**，并在 CONTRACTS 写下「下次用内容定位而不是行号」—— 这是本文件反复记的「会过期的锚」在它自己身上发作了一次。",
+    "**用户可见输出里的裸任务编号，本 sprint 自己撞上了那个歧义**：`calibrate.go:412`/`:562` 写着「出自 TASK-010 之前」，指的是 **M1c-3a 的 TASK-010**，而写下本节的是 **M1c-3b 的 TASK-010**。⇒ 该编码约定在同一个文件里的现场实证。刻意保持引文原样（补前缀会让它不再是那句输出的真实内容）。"
+  ],
+  "decisions": [
+    {
+      "decision": "CONTRACTS 的 `## Sprint M1c-3b` 写成 A–G 七节，而不是 DoD 要求的 A–E 五节",
+      "rationale": "A–E 逐条按 DoD 写全；另加 F（结转项 7 的实证）与 G（绊线失效）两节，是因为它们都是**流程/方法学**层面的登记，塞进 A–E 任何一节都会让那节的主题失焦。与 M1c-1 / M1c-3a 的 A–G 结构一致。"
+    },
+    {
+      "decision": "17 个发布事件**逐条列表**写进 §B-1，而不是只写「17 个」",
+      "rationale": "DoD 明令逐条。且逐条才看得出规律（全部落在季末月、形态恒为 monthly + {q1|h1|q1_q3}），而那个规律正是人类裁决的依据。附两把独立的尺自洽校验：79 个发布事件 = 62 单 + 17 双 ⇒ 62×1+17×2 = 96 与观测数一致。"
+    },
+    {
+      "decision": "§D 明确写「现在用不上」而不是「不需要」，并给三条**重建判据**",
+      "rationale": "DoD 明令区分。具体代价是：读成「不需要」会让下一个人把 `types.go` 的 `validCaliberVersions` 白名单连同那段伏笔一起简化掉，而白名单是「口径断裂只能靠 caliber_version 标注」这道断裂的唯一防线。三条判据（出现第一个消费者 / 需要第四个版本号 / 需要按字段记录断裂）让「什么时候该建」可求值，而不是靠人判断。"
+    },
+    {
+      "decision": "§E 每条都带「必须进某个任务的 `done_criteria`」承接句",
+      "rationale": "DoD 明令，理由也写进了正文：CONTRACTS 不是验证者的验收依据，停在本节的义务下游读不到。载体强度 `done_criteria` > `questions[].answer` > `discovery.decisions` > 散文。"
+    },
+    {
+      "decision": "「矛盾标签」在 §E-3 用**两栏表**登记（谁来修 / 何时必须修完），不二选一",
+      "rationale": "我在 M1c-3b 的 TASK-008 提出、Leader 采纳并写进本任务 DoD。统一标签之后「入库前必须清零」这条**期限**信息在代码里没有正式的家了（dev 把它留在 calibrate.go 顶部注释，但注释不是契约）⇒ 本表就是它的家。"
+    },
+    {
+      "decision": "结转项 8 **原样保留**，不换前缀不删那一格",
+      "rationale": "DoD 的条件是「本迭代若未动 `periodAlt` 就原样保留」。实测本 sprint 未动：`git diff --numstat 32bc1e5..6ff4b45 -- internal/hestia/profiles.go internal/hestia/extract.go internal/hestia/extract_test.go` 零输出。"
+    },
+    {
+      "decision": "在节首写下**结构判据**（先锚 `## Sprint` 再切）并声明「具体次数不要当常量引用」",
+      "rationale": "DoD 提醒「已有两个 `### F.`、两个 `### G.`」，而我加完之后是**三个**（A–D 各 4 次、E–G 各 3 次）。若只把次数写进文档，它下个 sprint 就过期，而过期时不会报错。故记的是判据，次数只作本轮观察值。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/CONTRACTS.md（+291 −0，新增 `## Sprint M1c-3b` 一节 A–G；本次提交只动这一个文件）"
+  ],
+  "interfaces_exposed": [
+    "CONTRACTS `## Sprint M1c-3b` §B-1：17 个「同一 (period, published_at) 被 period_type 拆开」的发布事件逐条表，含人类 2026-09-01 裁决与证伪判据。**M1c-4 若要动合并键，先读这一节。**",
+    "CONTRACTS §C：spec §3.3 的证伪判据 —— 标定阶段与入库后的 `tsf_stock` 观测数必须相等（本轮均为 79）。不相等即停。",
+    "CONTRACTS §D：`hestia_caliber_changes` 的三条重建判据。**在满足任一条之前，`types.go` 的 `validCaliberVersions` 白名单与其上方伏笔都要原样留着。**",
+    "CONTRACTS §E：留给 M1c-4 的六条，每条带 `done_criteria` 承接句。**下一个 sprint 拆任务时逐条转录，不要只读不转。**",
+    "⚠️ 给一切后续验收的提醒（CONTRACTS §A-2）：**凡按 extractor 核观测数，必须同时查 `hestia_observations` 与 `hestia_pending`**，只查前者会得到自洽的错数。"
+  ],
+  "verification": {
+    "measured_at_head": "6ff4b456983a0b149e4922d517e3689c4123ff9d",
+    "measured_tree_state": "主仓库 master。工作区当时有 7 条未提交改动，**全部在 `.arcforge/` 下**；`git status --porcelain -- internal/hestia cmd/atlas configs` 命中 **0** ⇒ 代码路径干净，采样有效。",
+    "delivered_commit": "21815beda194398b1ee9b0777e969f4f102b8ac3（`docs(TASK-010): ...`，只动 internal/hestia/CONTRACTS.md）",
+    "numbers_still_valid": "AD-6 路径收窄判据：`git diff --numstat 6ff4b456983a0b149e4922d517e3689c4123ff9d HEAD -- internal/hestia cmd/atlas configs ':!internal/hestia/CONTRACTS.md'` ⇒ **零输出** ⇒ 全部自证数字仍有效。",
+    "real_run": "`/tmp/atlas-final hestia backfill load --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --db /tmp/hestia-backfill.db --allow-incomplete` ⇒ **exit=0**，报告 302 行（`/tmp/load-report.txt`）。语料用主仓库绝对路径，`--allow-incomplete` 必需。",
+    "identities": "报告第 16 行「四道恒等式: 全部成立 ✓」；逐项：218=199+19、199=161+38、96=54+42（单篇 54 + 合并组 42）、96=75+21（入权威表 75 + 落 pending 21）。",
+    "extractor_counts": "权威表 75 = tsf-stock@v1 42 + merged@v1 28 + rule@v2 3 + tsf-flow@v1 2；pending 21 = merged@v1 14 + rule-monthly@v2 6 + rule@v2 1。**合计 96** = tsf-stock@v1 42 + **merged@v1 42** + rule-monthly@v2 6 + rule@v2 4 + tsf-flow@v1 2（求和自校验 42+42+6+4+2=96）。",
+    "field_distribution": "自算（sqlite 权威表逐列非空计数 + pending 的 values_json）：9→2、18→42、27→2、36→15、45→2、52→23、54→10，**求和 96**。完整（52 或 54）**33/96**；18 字段 **42** 个。与 DoD 预期表**逐格一致**。",
+    "step2b": "按 (extractor, Parts 长度) 分组后比字段集合：`merged@v1`(3篇,52) 唯一集合 == `rule-monthly@v2` 的唯一集合（**相等为 True**），缺的两个字段实测为 `fx_rate` / `fx_reserve`；`merged@v1`(3篇,54) == `rule@v2` 的 54 == 全字段集（54 列）。2-篇组 19 个（27/36/45 字段）是已知例外，未计入同构分母。Parts 长度分布：3→23、2→19、1→54（合计 96）。",
+    "a1_closure": "`grep -c 'unknown_extractor' /tmp/load-report.txt` ⇒ **0**；`grep -c 'skipped'` ⇒ **0**。",
+    "partial_coverage": "报告第 212 行「部分覆盖的期次（**64**）」，非空；逐条列出缺哪一族（如「2025-03/q1  缺: 月报族、社融存量」）。",
+    "unclassified": "0（恒等式一 218=199+19 成立即蕴含；报告无该类条目）⇒ 站点未改期次表述。",
+    "conflicts": "报告第 278 行「字段冲突（预期 0，共 **0**）」。",
+    "tsf_stock_79": "权威表 `tsf_stock is not null` = 60，pending `json_extract(values_json,'$.tsf_stock') is not null` = 19，**合计 79**，与标定阶段的 79 相等 ⇒ spec §3.3 成立。",
+    "split_events_17": "同一 `(period, published_at)` 含多个 `period_type` 的发布事件 = **17**。两把独立的尺：① 直接计数 17；② 发布事件总数 79，period_type 数分布 {1: 62, 2: 17}，62×1+17×2 = **96** 与观测数一致。",
+    "prod_db": "`shasum -a 256 /Users/zuowei/workspace/runtime/atlas/data/hestia.db` ⇒ `478d40c079c8b0eab7d089bb6f1926725b361a6dc6c850f4c4a651406f3ec28c`，**与期望值逐字符相等** ⇒ 生产库未被本迭代改动。判据是 sha256 相等（关于载体的观察），不是「我没写过它」（关于意图的声称）。",
+    "coverage": "🔴 **两个包 × 两把尺，全部给出（口径不同，差值 0.1–0.2pp）**，均采于 `6ff4b456983a0b149e4922d517e3689c4123ff9d`：\n· `internal/hestia`：尺A `go test -cover` = **96.2%**；尺B `-coverpkg` + `go tool cover -func` total = **96.1%**\n· `cmd/atlas`：尺A = **75.7%**；尺B = **75.9%**（floor 75，两把尺都过）\n⚠️ **`internal/hestia` 恰好卡在 DoD 的 96.2% 上（尺A 相等、尺B 低 0.1pp）**。DoD `non_functional` 指定的是尺A（`go test ./internal/hestia/... -cover`）⇒ 按指定口径**满足**；但这是一个**恰好相等**的边界，若验证者改用门禁口径会得 96.1% < 96.2%。如实记明，不选对自己有利的那把尺。任务级 `coverage_floor: 75` 是门禁实际判据，两个包两把尺共四个数全部 ≥ 75。",
+    "suite": "`gofmt -l internal/hestia cmd/atlas` ⇒ 恰为 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go` 两项既有欠账；`go vet ./internal/hestia/... ./cmd/...` ⇒ rc=0 零输出；`go test ./... -count=1` ⇒ **rc=0，无 FAIL 行**（全仓库）。",
+    "contracts_structure": "先锚 `## Sprint` 再切（DoD 明令）：M1c-1 A–G、M1c-2 A–D、M1c-3a A–G、**M1c-3b A–G（新增，行 1690–1980）**。全局重名实测：`### A.`–`### D.` 各 **4** 次、`### E.`/`### F.`/`### G.` 各 **3** 次 ⇒ 按 `grep '^### F\\.'` 全局数必然错。\n⚠️ 我第一次跑重名核对时**过滤条件写错**（`len(line) < 12` 把长标题全滤掉），输出为空，差点得出「无重名」的相反结论；重做后才是上面的数。已在 CONTRACTS 节首写下**判据**（先锚 Sprint 再切）而非次数 —— 次数每加一个 sprint 就变，且变时不报错。",
+    "carryover_678": "6 = **未修**（两处都不在任何任务的 `writes` 内），且 `profiles.go` 那处**定位器已失效、未能定位**，如实记明；裸编号两处实测在 `calibrate.go:412`/`:562`（M1c-3a 记的 `:355`/`:505` 已漂）。7 = 登记为 §F，含三个 dev 的实证与「为什么没修」（commit 锚点格式是门禁强制的，改它要动运行时资产）。8 = **原样保留**（实测本 sprint 未动 `periodAlt`）。",
+    "dod_to_test": [
+      "functional[0] 真跑并记采样锚 → exit=0，锚 6ff4b456…，报告 302 行",
+      "functional[1] 四道恒等式 + merged@v1=42 + 冲突 0 → 全部成立；⚠️ 42 需查两张表，DoD 的 SQL 只查一张会得 28（已记 §A-2）",
+      "functional[2] Step 2b 同构 + tsf_stock=79 → 字段集合逐字段相等；79 == 79",
+      "functional[3] CONTRACTS A–E 五节写全 → 已写，另加 F/G 两节",
+      "functional[4] unknown_extractor=0 + PartialCoverage 非空且 33/96 → 0 条；64 条；分布逐格一致",
+      "boundary[0] 结转项 6/7/8 + 结转项 7 实证原样登记 + 矛盾标签两栏 → 逐条见 carryover_678 与 §E-3",
+      "boundary[1] 先锚 Sprint 再切 → 已核，见 contracts_structure",
+      "boundary[2] 明写移交 M1c-4 的 1b 与 3 → §E-1 / §E-2",
+      "boundary[3] 绊线失效 → §G",
+      "error_handling[0] 自证数字采于最后一次代码改动之后 → 路径收窄判据零输出",
+      "error_handling[1] 生产库 sha256 相等 → 逐字符相等",
+      "non_functional[0] gofmt/vet/go test ./... + 两个包覆盖率分别判 → 见 suite 与 coverage",
+      "non_functional[1] 主仓库直接干、docs(TASK-010) 提交、提交后才转 dev_done → 已按序"
+    ]
+  },
+  "provenance": "全部 CONTRACTS 文本由 dev-m1c3b-a 编写。真跑数字全部由本人在主仓库实测得出（Leader 明确未跑真语料，只核实了子命令存活）。17 个发布事件、字段数分布、字段集合同构、tsf_stock=79 均为本人用 sqlite + python 自算，非引用 DoD 或他人报告。人类 2026-09-01 关于合并键的裁决取自 `.arcforge/docs/03-progress/plan.md` 的「Leader 裁决记录」节。结转项 6/7/8 的背景取自 CONTRACTS `## Sprint M1c-3a` 的 `### G.`。本任务未调用子代理，未建 worktree（语料不在 worktree 里，且只改一个文档文件）。"
+}

@@ -1,0 +1,60 @@
+{
+  "id": "TASK-003",
+  "title": "按 (period,period_type,published_at) 合并观测，字段取并集、冲突不静默",
+  "description": "对应需求文档 Task 3。新建 `backfill_load.go`，实现 `mergeByBusinessKey`。**背景**：央行在 2025-10 之前把同一期数据分三篇发（月报/社融存量/社融增量），三篇业务键完全相同而字段互补（27/18/9）。不合并直接逐篇 Save ⇒ `107 − 42 = 65` 篇判 Duplicate ⇒ 走 `refreshArticleID` ⇒ **只刷 article_id、新抽的 Values 一个都不写，且退出码 0**。",
+  "status": "accepted",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_load.go",
+    "./internal/hestia/backfill_load_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "done_criteria": {
+    "functional": [
+      "新建 `internal/hestia/backfill_load.go`，导出 `MergeConflict` 与 `MergedObservation` 两个类型、实现非导出的 `mergeByBusinessKey(ps []parsedArticle) []MergedObservation` 与 `mergeGroup` / `pickArticleID`。实现见需求文档 Task 3 Step 3（整段照抄，**含全部注释**——那些注释记的是各条设计的理由，不是装饰）。",
+      "`TestMergeByBusinessKeyUnionsFields` 通过：三篇同键 ⇒ 合成一条，`Meta.Extractor == extractorMerged`，三个字段值都在，`SourceIDs` 三个都在，`Conflicts` 为空。",
+      "`TestMergePrefersMonthlyArticleID` 与 `TestMergeWithoutMonthlyFallsBackToSmallestID` 通过：合并组的 `article_id` **优先取月报那篇**（月报是这一期的主报告，运维按它拼回 URL 的概率最高）；无月报时取**字典序最小**。被丢弃的必须记进 `DroppedIDs`——**丢弃一个能拼回 URL 的定位符有代价，代价可以付，但不能不出声**。",
+      "`TestMergeIsStableAndSorted` 通过：输出按 `period` 升序、同期按 `period_type` 升序。**稳定才能逐次 diff**，与 `classifyArticles`「返回的 items 按期次升序」同一个理由。"
+    ],
+    "boundary": [
+      "🔴 `TestMergeSingleArticleKeepsOriginalExtractor` 通过：**只有一篇的键不得被改写成 `merged@v1`**。\n\n改写会让 96 个观测里那 **54 个单篇**也走 `mergedRequiredFields` 那条路，而它们的必填集本来就由自己的 extractor 说得清——**多绕一圈只多一个出错的机会**。单篇还必须 `DroppedIDs` 为空。",
+      "组内先按 `article_id` 升序再合并：`Parts` / `SourceIDs` 的顺序、以及冲突记录里谁是 A 谁是 B，都**不该随 manifest 的排列而变**。\n\n合并时遍历 `fieldOrder` 而不是 `p.obs.Values`：map 迭代顺序随机，同一份数据两次跑会报出不同的冲突顺序。"
+    ],
+    "error_handling": [
+      "🔴 `TestMergeRecordsFieldConflict` 通过：同字段两个**不同**值 ⇒ 记进 `Conflicts`，**不做静默取值**。\n\n三个 extractor 的字段集**设计上不相交**（27 / 18 / 9 = 54），冲突理应恒为 0。**正因如此，一旦出现就说明字段归属表错了**——那是必须响亮失败的事，而「取第一个」会让一张错的归属表永远不被发现。",
+      "`TestMergeSameValueIsNotAConflict` 通过：同字段**同值**不算冲突。",
+      "⚠️ **`TestPackageExposesNoWriteFunctions` 不会因本任务转红**（Leader 于 `32bc1e5` 核实：`store_test.go:399` 只遍历 `*ast.FuncDecl` 查导出的**函数与方法**，**不查类型**）。\n\n⇒ `MergeConflict` / `MergedObservation` 是 struct 类型，**不触发它**。需求文档 Task 3 Step 4 那句 ⚠️ 的**结论对、理由错**。\n\n**结论仍然成立**：**不要把它们改成非导出**——TASK-006 的核对报告要跨文件用。\n\n⇒ 本任务的 `writes` 含 `store_test.go` 是**预留**，若最终没动它，交付时如实说明「未改动」即可，不必为了用上它而去改。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里调写通道会被 DENY。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-c",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "962c3acb29705b58e21aaf4d4d64bcf8c77aca3a",
+    "discovery_sha256": "59238f855d57a06bba9b1c4b8a494c5187ead89a1f22591ef6ed3e92f0e461ad",
+    "at": "2026-09-01T01:42:56Z"
+  },
+  "verifier": "test-m1c3b-a"
+}

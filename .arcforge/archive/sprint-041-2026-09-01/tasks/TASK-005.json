@@ -1,0 +1,60 @@
+{
+  "id": "TASK-005",
+  "title": "stock_continuity_max 用实测重标（monthly 0.02→0.05）+ magnitude_ranges 填 54 项",
+  "description": "对应需求文档 Task 5。用 M1c-3b 设计阶段的实测分布重标 `defaultStockContinuityMax` 五档，同步 `configs/hestia.yaml`，并人工填 `magnitude_ranges` 54 项。**依赖 TASK-004 的校验兜底**：字段名打错、区间倒置、缺 unit 都会在 `LoadConfig` 当场报错。",
+  "status": "accepted",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/config_test.go",
+    "./internal/hestia/validate_test.go",
+    "./configs/hestia.yaml"
+  ],
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-004"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`defaultStockContinuityMax` 改为 `{monthly: 0.05, q1: 0.20, h1: 0.20, q1_q3: 0.20, annual: 0.20}`，**整段注释按需求文档 Task 5 Step 3 重写**（那段注释就是这四个数的出处，是本任务的主要交付物之一）。",
+      "`TestStockContinuityMaxIsCalibrated` 通过：**钉住具体数字**而不是「大于 0」——这四个数各自有出处，随手改动应当转红并去更新那段出处，而不是静默通过。",
+      "`TestMonthlyThresholdCoversObservedMaximum` 通过：`monthly` 阈值 > `0.02613`、`annual` 阈值 > `0.13338`（实测极值，n=68 / n=6）。\n\n**这条断言是那次修正的墓碑**：旧值 0.02 **低于实测 p95（0.02291）** ⇒ 至少 5% 的 monthly 期次会被判进 pending，而 `--force` 对已入权威表的期次是数据层 no-op ⇒ **拦错了没有出路**。",
+      "`configs/hestia.yaml` 的 `stock_continuity_max` 五个数与整段注释同步改写，`config_version` 递增为 `\"2026-08-31\"`。\n\n⚠️ **保留原有的两条 ⚠️ 警示**（「五档必须全写」「漏档不是关掉而是静默继承代码默认值」），它们仍然成立。",
+      "🔴 **`TestShippedConfigLoadsAndIsCalibrated`（补阻断级缺口 A-4）**，落在 `config_test.go`（已在 `writes`）：\n\n读**仓库真配置** `../../configs/hestia.yaml`，断言四件事：\n1. `LoadConfig` 无错\n2. `len(cfg.Thresholds.MagnitudeRanges) == 54` **且键集合与 `fieldOrder` 逐项相等**\n3. `config_version == \"2026-08-31\"`\n4. `StockContinuityMax` 五档与 `DefaultThresholds()` 相等\n\n🔴 **为什么必须有这条**：实测 `grep -rn \"configs/hestia.yaml\" --include=\"*.go\" .` **零命中**——这 54 项是**人手填的**，而 TASK-004 的三类校验只在 `LoadConfig` 被调用时生效，CI 里没人调用真配置。\n\n没有它，打错一个字段名（如 `m2_typo`）会让 `gateMagnitudeSanity` 对该字段**完全不设防**（`validate.go:497` 对未知键 `continue`），而缺陷要等**运维真跑回填**才暴露——**那时库已经建好了**。\n\n⚠️ 原 `error_handling` 里那句「跑一次 `hestia status`」是**手动动作、无产物、不可事后核**，本条是它的机械化替代，不是重复。"
+    ],
+    "boundary": [
+      "🔴 **`magnitude_ranges` 54 项是人工判断，不写脚本自动生成**（需求文档 §Step 5，沿用 M1c-2 的 1.1）。\n\n流程：先跑 calibrate 产出「建议区间」列作为**依据**，再按三条原则逐项调整：\n1. **下界照历史低点留余地**——2020 年的社融存量远小于 2026，下界收紧会让早期期次批量误拦\n2. **优先覆盖互为同组的分项**——契约点名要求；哪些算同组是人工判断\n3. **`fx_reserve` / `fx_rate` 余量给最大**——只有 27 期样本（月报无外汇板块），其余字段是 50 / 52 / 79\n\n单位按 `fields.go` 的约定：余额/存量 `万亿元`、增量/新增 `亿元`、同比/占比/利率 `百分数`。\n\n🔴 **每一项的取值理由必须写进 discovery 的 `decisions`**（Leader 在 `accepted` 前抽查）。这是「人工判断」在本流程里的落点：判断可以由你做，但**判断的依据必须留痕**。",
+      "🔴 **`monthly` 从 0.02 放宽到 0.05 是 2.5 倍，注释里必须写清这不是「为了让数据通过而放宽阈值」**：\n- 0.02 是 **M0 时代的占位值**，原注释自陈「两个数都仍是占位，未经真实数据验证」\n- 0.05 是这道闸门**第一个有依据的值**\n- 且 0.05 **仍拦得住它该拦的**：社融存量单月环比 5% 意味着一个月增加约 20 万亿元\n\n⚠️ **`q1` / `h1` / `q1_q3` 三档 n=0，是继承 annual，不是标定过的**——必须在注释里写明这一点。依据是「四档同为年初起累计口径、相邻两期一律相隔 12 个月」，annual 的实测分布对它们是**同族证据**，强于原来的 0.15 拍脑袋值，但**弱于它们自己的数据**。"
+    ],
+    "error_handling": [
+      "填完后跑一次 `LoadConfig`（或 `go run ./cmd/atlas hestia status`）确认新配置能被接受——TASK-004 的三类校验会在这里当场报错。**这是 004 排在 005 前面的全部原因，别跳过这步。**",
+      "🔴 **语料路径必须用主仓库绝对路径**（AD-3）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14\n```\n\n⚠️ **不要用 `$PWD/data/...`**：`.gitignore:64` 是 `data/`，`git ls-files data/` = **0 个文件** ⇒ **linked worktree 里根本没有 `data/` 目录**。\n⚠️ **不要建软链**——那些数靠语料自证，软链会让「我测的是哪份语料」多一层间接。\n⚠️ `--allow-incomplete` 是**必需**的：该语料的 manifest 没有 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里调写通道会被 DENY。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-d",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "962c3acb29705b58e21aaf4d4d64bcf8c77aca3a",
+    "discovery_sha256": "51a5558171809823a6dc162856767de20cf1b589aedb9825771e80e38abb5860",
+    "at": "2026-09-01T01:42:14Z"
+  },
+  "verifier": "test-m1c3b-b"
+}

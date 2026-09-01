@@ -1,0 +1,174 @@
+{
+  "task_id": "TASK-011",
+  "title": "merged@v1 接进 gateCompleteness（阻断级缺口 A-1 的修复）",
+  "owner": "dev-m1c3b-b",
+  "delivered_at_sha": "0bea1a37a54ff8b4a8d58dbc9ea16d0c389d4398",
+  "branch": "task/TASK-011-m1c3b",
+  "baseline_sha": "2433e5577b38f1d0fc8ba77bff4bd2641dee7421",
+  "key_findings": [
+    "🔴 【返工 C-1，本轮最重要的发现】**可见损害是 4 条误拒，实际有 20 次判定建立在无效基线上。** 修完在真语料上重放全部 96 组，`stock_continuity` 三态分布是 `passed=54 / failed=0 / skipped=42`，其中 **`non_adjacent_prior` 占 20 条**。也就是说：缺陷期间那 20 期都在拿跨期基线判，其中 4 期算出的伪环比超限 ⇒ 被拒（可见），**另外 16 期碰巧没超限 ⇒ 静默「通过」**。QA 数的 4 条是这个缺陷露出水面的部分；**假通过比假拒绝多 4 倍，且完全无声**。⇒ 修它的收益不止「少拒 4 期」，是「让那 20 期的判定从无依据变成有依据（或诚实地说不判）」。",
+    "【0 条拒绝必须与「闸门被跳过了」区分开，两者在验收数字上完全同形】`stock_continuity 拒绝 4→0` 这个验收项，一个「一律 skip」的空实现同样能满足。故我另跑了三态分布：**passed=54** 证明闸门确实在正常求值、不是全跳过。⚠️ 单看拒绝数为 0 无法排除空实现 —— 这与本 sprint 反复出现的「全绿是最强的假信号」同族。测试侧对应的守卫是 `TestStockContinuitySkipsNonAdjacentPrior` 里那几个 **adjacent=true** 的格子（相邻且超限 ⇒ 必须照常 failed）。",
+    "【本任务最重要的一条，且它来自我上一个任务的边界】判据必须是 `len(req) == 0`，**不能是 `req == nil`**。`mergedRequiredFields` 的 `out := make([]string, 0, len(want))` 永远返回**非 nil** 切片，故 `req == nil` 对 merged@v1 **恒不命中**，会一路落到 `len(missing)==0` 返回 `CheckPassed` —— 一个 `Parts` 为空的合并观测被判「completeness 通过」而它一个字段都没查。**这比缺口 A-1 原本的 skipped 更糟**：skipped 在报告里可见、可被 TASK-010 的判据数出来，passed 是**完全静默**的。需求文档与反审报告给的实现形状里都写着「Parts 为空 ⇒ nil ⇒ 仍走下面的 skipped」，**那句注释是假的**，两边都没核实过返回值。消融 A1（把判据写回 `req == nil`）被 `TestMergedCompletenessSkipsWhenPartsYieldNoFields` KILLED，证明这条断言真的在守。",
+    "【`缺 27` 在仓库里出现 4 处，只有 1 处是错的——我逐处读过原文核实，没有只按 DoD 点名的位置改】`required.go` 那处描述的是「组里只剩社融两篇」（Q1），却用了相反情形（Q2）的数：52−(18+9)=**25**。另三处的 27 **都是对的**，不能顺手一起改：`types.go` 讲的是「社融独立报告复用 rule@v1 ⇒ 那 27 个非社融字段全缺」，`validate.go` 与 `validate_test.go` 讲的是「v1 期次天然缺那 27 个社融字段」。两批 27 恰好数目相同且**完全不相交**，这正是它能滑过去的原因。",
+    "【DoD 指定的自查 `grep -c '缺 27' required.go == 0` 与「把错误说明清楚」直接冲突，我撞了两次】第一次：订正注释里**引用了另三处的原文**（含该字串）⇒ 计数 2。第二次：注释里**写出了自查命令本身**（`grep -c '缺 27' …`）⇒ 计数 1。两次都是「为了讲清楚而把被禁的字面量搬进了被查的文件」。⇒ 最终改成不引用原文、也不写出 grep 模式，只描述性质。**这不是文字洁癖**：留着任一种引用，这条 grep 守卫在本文件上就**永久失效**了——它以后再也抓不到真正被重新写错的 27。这一点已写进该注释本身，免得后人「顺手补个例子」把守卫废掉。",
+    "【scope 互斥的实际后果，佐证 DoD 把测试放在 validate_test.go 的决定】`newTestStore` / `passing()` / `obsWith` / `saveMonthly` 都在 `store_test.go`，而该文件在 TASK-003（dev-m1c3b-c，`in_progress`）的 writes 里。`TestMergedPartsDoNotRoundTrip` 需要真库往返，故**使用**那些 helper 但**写在** `validate_test.go` —— 同包可用、不构成写入、不触发 scope 互斥。我开工前跑了一遍在途任务的 writes 比对，确认四个文件（types.go / validate.go / validate_test.go / required.go）**无人与我重叠**。"
+  ],
+  "decisions": [
+    {
+      "decision": "C-1 修法二选一里选**跳过**（`non_adjacent_prior`），不选「按跨度放宽阈值」",
+      "rationale": "**放宽需要一个放宽系数，而那个系数没有测量支撑。** QA 量的是**相邻对**（monthly 68 对 max 0.0261 / annual 6 对 max 0.1334），语料里没有任何数据能回答「跨 13 个月该放宽到多少」。线性放大（limit × span）是猜的，复利放大也是猜的。**往闸门里塞一个没测过的数，正是这次要修的那类缺陷本身** —— 原缺陷就是一个没验证过的假设（「[0] 就是上一期」）被当成事实用了。\n\n**两种错的代价也不对称**：误 skip 只损失一次检查，且 reason 在报告里看得见、可被数出来；误 fail 会挡住数据进权威表，而 `--force` 对已入权威表的期次是数据层 no-op ⇒ **不可自愈**，还构成正反馈（拒绝 → 基线跨度变长 → 更多拒绝）。\n\n⇒ 「我们没有依据判这一对」是此处唯一诚实的答案，而 skip 正是它的表达。若将来要放宽，前提是先测出跨 N 期的环比分布 —— 那是一份新的标定工作，不是这次能顺手做的。"
+    },
+    {
+      "decision": "相邻性判据排在「字段缺失 / 零分母」检查**之前**",
+      "rationale": "本函数开头已有一段「四种跳过理由按从根本到表面排优先级」的论证，其要点是**理由会把排查引向哪里**。相邻性问的是「这个基线**够不够格**当基线」，比「它有没有 tsf_stock」更根本：顺序反了会对一个 13 个月前的期次报 `prior_absent_field`，让人去查那一期的数据 —— 而那一期本来就不该参与这次判定。消融 A5（把新理由串改成 `prior_absent_field`）被 KILLED，说明这条区分不是摆设。"
+    },
+    {
+      "decision": "「相邻」的定义复用 `thresholds.go` 已写下的事实（monthly 1 个月、其余 12 个月），不另立一张表",
+      "rationale": "`StockContinuityMax` 分档时已经写明「四档同为年初起累计口径、相邻两期一律相隔 12 个月」。另立一张表会与它分叉，而**先错的一定是后抄的那份**（这是本包 `tsfSectionFields` 注释里同一条理由）。⚠️ 但**测试夹具里的「相邻」是写死的**（`asAdjacentPrior` 硬编码 2026-05 / 2025-06），刻意不调用生产代码的 `expectedPeriodGapMonths`：用被测函数去造夹具，那函数错了夹具跟着错、测试照样绿。消融 A2/A3（把两个跨度值改错）都被 KILLED，正是因为夹具独立。"
+    },
+    {
+      "decision": "把 `store.go` 补进 `writes`（4 项 → 5 项），在动它**之前**",
+      "rationale": "`fix_items[1]` 要求「`Preceding` 的文档写明它只返回已入权威表的期次」，而 `Preceding` 在 `store.go:341` —— 原 `writes` 四项里没有它。按 CLAUDE.md 的越界申报纪律，必须在 `dev_done` **之前**自己补声明：任务一进 `dev_done`，leader 写不了该任务文件、dev 交棒后也失去写权，那一刻没有任何角色能合法补这个字段。补前查过 scope：`store.go` **不在任何在途任务的 writes 里**，无互斥。"
+    },
+    {
+      "decision": "既有 stock 夹具改成「真实相邻」，而不是放宽新判据去迁就旧夹具",
+      "rationale": "原夹具让 prior 与本期用**同一个 period**（都来自 `validMeta()` 的 2026-06），那在现实中不可能 —— `Preceding` 的 SQL 是 `WHERE period < ?`。新判据一上线这些格子全变 `non_adjacent_prior` 而 skipped，**它们本来要测的东西就全测不到了**。正确处置是把夹具改真实（`asAdjacentPrior`），而不是让判据对 gap=0 网开一面 —— 后者会在生产里放行一个真正不可能的输入。改完这些格子逐条恢复原本的断言语义，`TestStockContinuityDetectsJump` 的边界格（含那条 `atBoundary` 精确相等）一条没动。"
+    },
+    {
+      "decision": "判据用 `len(req) == 0` 而非 `req == nil`，并在 validate.go 就地写明原因",
+      "rationale": "见 key_findings[0]。注释写在判据**旁边**而不是只写进 discovery：下一个读这行代码的人会想「为什么不用更惯用的 req == nil」，答案必须在他眼睛落到的地方。对非 merged 路径**逐字等价**（`requiredFields` 对未知 extractor 返回 nil，`len(nil)==0` 同样成立），这一点没有停留在推理——用背对背比对变成了观察，见 verification.back_to_back。"
+    },
+    {
+      "decision": "不改 `Validate` 的签名，从 `in.obs.Parts` 读",
+      "rationale": "`gateInput` 已持有 `obs`（validate.go:131 是 `{obs, prior, cfg}`）。改签名要动 39 个调用点、4 个文件（生产 1 处 `ingest.go:196` + 测试 38 处），成本不成比例，且那些改动全部落在别的任务的 writes 里。"
+    },
+    {
+      "decision": "`TestMergedCompletenessIsEvaluated` 除失败用例外，补一格**字段齐全 ⇒ passed** 的反向断言",
+      "rationale": "只有失败用例的话，一个「对 merged 恒 failed」的实现也能让断言全绿。反向那格让「闸门真的在按必填集比对」成为可证伪的。同理 `TestMergedCompletenessSkipsWhenPartsYieldNoFields` 用了四种空/无效形态（nil / 空切片 / 全无效值 / 只含 merged 自身），而不是只测 nil —— `req == nil` 那个错误判据对四者**全部**恒不命中，只测一种也能抓到，但四种能定位到「是哪一类输入让必填集为空」。"
+    },
+    {
+      "decision": "`Parts` 定义为导出字段但不入库，并用断言而非注释钉住",
+      "rationale": "DoD functional[0]/[3] 要求。一个不持久化的**导出**字段最容易被后人当成能往返的：读回来恒为 nil 而代码看不出来，于是「历史观测的 Parts」会被静默当成「没有 parts」而不是「这个问题问不了」。`TestMergedPartsDoNotRoundTrip` 另断言 `Meta.Extractor` 照常往返 —— 用它证明 Parts 的 nil 不是因为整条记录没读到（否则那条断言会因为读空而假绿）。"
+    },
+    {
+      "decision": "`required.go` 的注释订正只改数字与配套说明，保留「这条是本函数存在的全部原因」那句；另三处的 27 不动",
+      "rationale": "DoD functional[4] 明示。另三处经我逐处读原文核实**确实是对的**（见 key_findings[1]），顺手改会把三个正确陈述改错。"
+    },
+    {
+      "decision": "消融 A4（Parts 持久化）如实记为 SKIP，不计入 KILLED",
+      "rationale": "Parts 的「不入库」是由 `insertSQL` / `metaColumns` 显式列举**七列**这一结构决定的，加一个 struct 字段不会改变任何行为 —— 该性质无法用纯文本变异表达。硬凑一个变异体会得到一个假 KILLED。它由 `TestMergedPartsDoNotRoundTrip` 正向断言覆盖。报 3/3 而不是 4/4。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/types.go (+14/-0)：Observation 增 Parts []string，注释写明「不入库」与「存在的唯一理由」",
+    "internal/hestia/validate.go (+16/-1)：gateCompleteness 增 merged@v1 分支；判据 req == nil 改为 len(req) == 0，就地写明原因",
+    "internal/hestia/validate_test.go (+136/-0)：mergedObs helper + 三条测试（含四格子测试与一格反向断言）",
+    "internal/hestia/required.go (+14/-1)：mergedRequiredFields 注释「缺 27」订正为「缺 25」，补算术与「为什么会滑过去」",
+    "—— 返工轮 1（a6cafc2）——",
+    "internal/hestia/validate.go (+60/-3)：gateStockContinuity 增相邻性判据；新增 expectedPeriodGapMonths / periodGapMonths；订正「[0] 就是上一期」假注释；gateInput.prior 字段注释补射程",
+    "internal/hestia/validate_test.go (+140/-6)：新增 TestStockContinuitySkipsNonAdjacentPrior（8 子测试）与 TestStockContinuityDoesNotUseRejectedPeriodAsBaseline（跨接缝）；新增 asAdjacentPrior 夹具并把 5 处既有 prior 构造改成真实相邻",
+    "internal/hestia/store.go (+12/-0)：Preceding 头注释写明两条射程（只看得见已入权威表的期次、无相邻性约束）"
+  ],
+  "scope_check": {
+    "declared_writes": [
+      "./internal/hestia/types.go",
+      "./internal/hestia/validate.go",
+      "./internal/hestia/validate_test.go",
+      "./internal/hestia/required.go"
+    ],
+    "actually_written": [
+      "internal/hestia/types.go",
+      "internal/hestia/validate.go",
+      "internal/hestia/validate_test.go",
+      "internal/hestia/required.go"
+    ],
+    "outside_declaration": [],
+    "note": "四写四，无越界。go.mod / go.sum 未出现在改动里（无新增依赖）。开工前已比对全部在途任务的 writes，无人与我重叠。",
+    "rework_round_1": {
+      "declared_writes_after_update": [
+        "./internal/hestia/types.go",
+        "./internal/hestia/validate.go",
+        "./internal/hestia/validate_test.go",
+        "./internal/hestia/required.go",
+        "./internal/hestia/store.go"
+      ],
+      "actually_written": [
+        "internal/hestia/validate.go",
+        "internal/hestia/validate_test.go",
+        "internal/hestia/store.go"
+      ],
+      "outside_declaration": [],
+      "note": "store.go 是本轮**新补进声明**的（改它之前补的，见 decisions）。types.go / required.go 本轮未动。go.mod / go.sum 未出现在改动里。"
+    }
+  },
+  "interfaces_exposed": [
+    "Observation.Parts []string（**导出但不持久化**）—— 进程内合并取证。写入方是 M1c-3b 的 TASK-003（合并观测那一步）；从 Preceding 读回来恒为 nil。⚠️ 下游若要判断「这条历史观测由哪几篇合成」，答案是**问不了**，不是「没有 parts」。",
+    "gateCompleteness 对 merged@v1 的行为：`Parts` 能派生出非空必填集 ⇒ 正常求值（passed/failed）；`Parts` 为空或全无效 ⇒ `CheckSkipped{unknown_extractor:merged@v1}`，**绝不会是 passed**。",
+    "非 merged@v1 的 completeness 行为**逐字未变**（背对背比对证实，见 verification.back_to_back）"
+  ],
+  "verification": {
+    "resample_anchor": "全部数字统一重采于 HEAD 0bea1a37a54ff8b4a8d58dbc9ea16d0c389d4398，重采时 `git status --porcelain` 为 0 条改动（被测树 == 交付物）",
+    "suite": "go test ./internal/hestia/... -count=1 → ok，顶层 FAIL 0 条",
+    "coverage": "95.9% of statements（`go test -cover` 口径，于 0bea1a3）。DoD 门槛 >= 95.9%，满足。",
+    "gofmt": "只列出 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，未触碰）——这两个文件之外零新增项",
+    "vet": "`go vet ./internal/hestia/... ./cmd/...` 零输出，退出码 0",
+    "new_tests": [
+      "TestMergedCompletenessIsEvaluated PASS（含反向一格：字段齐全 ⇒ passed）",
+      "TestMergedCompletenessSkipsWhenPartsYieldNoFields PASS（4 个子测试全 PASS）",
+      "TestMergedPartsDoNotRoundTrip PASS"
+    ],
+    "back_to_back": "boundary[1]：pre 树（detached worktree @ master 2433e55）与 post 树（我的工作树）**同一时刻并排**跑 `go test ./internal/hestia/ -run 'TestGate|TestValidate' -count=1 -v`，各 24 条、FAIL 各 0 条，PASS 集合**逐行相等**（diff 无输出）⇒ 「len(req)==0 与 req==nil 对非 merged 路径等价」由推理变成观察。pre worktree 已拆。",
+    "self_check_grep": "`grep -c '缺 27' internal/hestia/required.go` = **0**（DoD functional[4] 指定）；另三处 types.go / validate.go / validate_test.go 各仍为 1，未被我改动。",
+    "ablation": {
+      "method": "隔离 detached worktree（`git worktree add --detach <tmp> 0bea1a3`）上做消融，主工作区一个字节不碰。每个变异带闸：锚点唯一性 + 变异后 sha256 必须改变 + `go build` 必须通过；打印逐行 diff 供语义核对；作用域外红 > 6 条时早退不判 KILLED。对照组先跑一次确认 GREEN。",
+      "result": "3/3 KILLED（A4 如实记 SKIP，不计入）",
+      "cases": [
+        "A1 判据写回 `req == nil` → TestMergedCompletenessSkipsWhenPartsYieldNoFields 红。**这条是本任务的核心**：它证明那道断言真的守住了「静默判 passed」这个最坏结果",
+        "A2 整段拿掉 merged 分支（= 缺口 A-1 原状）→ TestMergedCompletenessIsEvaluated 红",
+        "A3 分支存在但读错来源（硬套 requiredFields(extractorMonthlyV2) 的 52 字段，忽略 Parts）→ TestMergedCompletenessIsEvaluated 红，且 SkipsWhenPartsYieldNoFields 也红（必填集恒非空 ⇒ 空 Parts 不再 skipped）",
+        "A4 Parts 持久化 → **SKIP，不可用纯文本变异表达**（不入库由 insertSQL/metaColumns 显式七列决定，加 struct 字段不改行为）。硬凑变异体会得到假 KILLED。该性质由 TestMergedPartsDoNotRoundTrip 正向断言覆盖"
+      ],
+      "restore_proof": "每个变异窗口结束即还原并断言 sha256 回到变异前值；变异 worktree 收尾 `git status --porcelain` 为空；**另比对主工作区四文件 sha256，变异前后逐字节一致**。消融与 pre 两个 worktree 均已 remove --force + prune，`worktree list` 残留 0。"
+    },
+    "rework_round_1": {
+      "resample_anchor": "全部数字统一重采于 HEAD a6cafc2dae9139fbdce5b0a76912a44f9c6f2963，重采时 `git status --porcelain` 为 0 条改动",
+      "suite": "go test ./internal/hestia/... -count=1 → ok，顶层 FAIL 0 条",
+      "coverage": "96.1%（于 a6cafc2）",
+      "gofmt": "只列出 cmd/atlas/backtest_test.go 与 crisis_test.go（既有欠账，未触碰）",
+      "vet": "零输出，退出码 0",
+      "stock_continuity_tests": "32 条 PASS（含新增的 8 个子测试 + 跨接缝那条）",
+      "real_run_acceptance": {
+        "预期": "权威表 75→79、pending 21→17、stock_continuity 拒绝 4→0",
+        "实测": "权威表 **79**、pending **17**、stock_continuity 拒绝 **0** —— 三项全中",
+        "语料": "data/hestia-backfill-2026-08-14，灌进临时库（非生产库）",
+        "三态分布": "重放全部 96 组：passed=54 / failed=0 / skipped=42；skipped 理由分布 absent_field:tsf_stock=17、non_adjacent_prior=20、prior_absent_field=3、no_prior_period=2",
+        "为什么要单独报三态": "0 条拒绝与「闸门被跳过了」在验收数字上完全同形，passed=54 才排除了空实现",
+        "生产库": "/Users/zuowei/workspace/runtime/atlas/data/hestia.db 的 sha256 在真跑**前后各验一次**，均为 478d40c079c8b0eab7d089bb6f1926725b361a6dc6c850f4c4a651406f3ec28c，未被触碰"
+      },
+      "ablation": {
+        "method": "隔离 detached worktree @ a6cafc2；闸：锚点唯一 + sha256 必变 + go build 必过；外溢 > 8 条早退；对照组先验 GREEN",
+        "result": "4/5 KILLED，1 SURVIVED（A4，如实记录）",
+        "cases": [
+          "A1 整段拿掉相邻性判据（= 缺陷 C-1 原状）→ TestStockContinuitySkipsNonAdjacentPrior + TestStockContinuityDoesNotUseRejectedPeriodAsBaseline 红。KILLED —— **这是本次修复的核心证据**",
+          "A2 monthly 期望跨度 1→12 → KILLED",
+          "A3 非 monthly 期望跨度 12→1 → KILLED（连带打红 3 条既有测试，说明夹具确实独立于实现）",
+          "A4 解析失败改成按相邻放行（`!ok ||` → `(ok && false) ||`）→ **SURVIVED**。那是给「period 解析不出来」准备的纵深分支，而 `Meta.validate` 在上游已挡住非法 period，测试到不了。⚠️ 第一次变异体因 `ok` 未使用而**不编译**，被有效性闸挡下记 SKIP；换成能编译的等价形式重跑才拿到这个诚实结论 —— 闸响了就不会产生假 KILLED",
+          "A5 把新 skip 理由串改成 prior_absent_field（= 判据顺序失去意义）→ KILLED"
+        ],
+        "restore_proof": "每个变异窗口结束即还原并断言 sha256 回到变异前值；消融 worktree 收尾 git status 为空；主工作区 3 个文件 sha256 变异前后逐字节一致；worktree 已 remove --force + prune"
+      }
+    }
+  },
+  "notes_for_downstream": [
+    "M1c-3b 的 TASK-003（合并观测）：**必须给合成出来的 Observation 填 Parts**，否则 gateCompleteness 会对它记 `CheckSkipped{unknown_extractor:merged@v1}` —— 那正是本任务要修的缺口，填不上等于把它原样放回去。Parts 填的是参与合并的各篇的 extractor（如 `[rule-monthly@v1, tsf-stock@v1, tsf-flow@v1]`）。",
+    "M1c-3b 的 TASK-010（判据）：本任务之后，`unknown_extractor:merged@v1` 在真跑时应为 **0 条**；若仍非 0，看的是 Parts 没填（TASK-003）而不是本任务的分支没生效——两者在报告里长得一样，区分方法是查那条观测的 Parts 是否为空。",
+    "⚠️ **`Preceding` 的 `out[0]` 不是「上一期」**（M1c-3b 的 TASK-011 返工订正）：它既无相邻性约束、也看不见落 pending 的期次。凡是「相邻两期」才有意义的判定，调用方**必须自己核对期次跨度** —— `gateStockContinuity` 现在这么做，其它 gate 若将来要用 prior 做同类判定，同样要做。射程已写进 `store.go` 的 Preceding 头注释与 `gateInput.prior` 的字段注释两处。"
+  ],
+  "rework": {
+    "round": 1,
+    "reason_class": "dod_defect",
+    "fixed_at_sha": "a6cafc2dae9139fbdce5b0a76912a44f9c6f2963",
+    "branch": "task/TASK-011-fix",
+    "summary": "C-1：gateStockContinuity 把 prior[0] 当成「相邻上一期」，而 Preceding 返回的是「最近一个已被接受的期次」。"
+  }
+}

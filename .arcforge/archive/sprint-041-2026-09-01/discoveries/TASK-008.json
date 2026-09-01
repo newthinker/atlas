@@ -1,0 +1,77 @@
+{
+  "task_id": "TASK-008",
+  "title": "结转项 · calibrate 族四条（R9 业务键唯一性断言 / 2022-05 假标签 / 过期数字 23→19 / 矛盾标签统一）",
+  "key_findings": [
+    "**矛盾标签实测 9 处，DoD 列的是 6 处。** 自己按措辞 grep（不按行号，行号会漂）得：`calibrate.go:17/95/252`、`calibrate_report.go:138/214`、`calibrate_test.go:690/971`、`calibrate_report_test.go:284/315`。DoD 漏的三处是 `calibrate_report.go:138` 与 `calibrate_report_test.go` 那两处，**都在本任务的 `writes` 里**。自查判据 `grep -rn 'M1c-3 入库前' internal/hestia/` 收尾为 **0 命中**。",
+    "🔴 **两处刻意没有照抄统一后的归属**：`calibrate.go` 的 `FetchFailed` 字段注释与它在 `calibrate_test.go:690` 的镜像。那两句讲的是 **fetch 阶段没抓到**的篇目，**它们不归 M1c-4 兜底** —— 那些文章连正文都没有，LLM 补不了，要补的是 fetch。机械替换会造出一句**新的假话**，而本任务修的正是这类毛病。改成「失败表的用途正是**让该修的东西可见**」，并补一句写明这一格归属不同。",
+    "🔴 **假标签的成因在判据上方那句注释里，只改标签不改它，下一个人会照它重新推出同样的假标签。** 原文写「『有没有累计句』是**报告本身的性质**」——不成立：`onlyCurrentMonthFlowSentences` 复用 `cumulativePeriods` 查表，它答的是「**表认得的**累计句有没有」，是「报告 × 词表」的性质。2022-05 正是分叉点：正文有「今年前5个月，人民币贷款累计增加10.87万亿元」两句，而前缀「今年前5个月」不在 `periodAlt`/`cumulativePeriods` ⇒ 判据返回 true。已连同标签一并订正（该注释在 `calibrate.go`，在 `writes` 内）。",
+    "**「本迭代不解析」重采得 19，三把独立的尺一致**：① 摘要行「本迭代不解析: 19 篇」；② 明细区表头「（19 篇）」；③ 我自己把摘要区的分组计数求和 `2+2+2+2+2+2+1+2+2+1+1 = 19`。第三把走的是另一条渲染路径（按错误串分组），不是前两把的复述。与结转项声称的 19 一致 ⇒ 无异常需上报。",
+    "**「2022-05」在报告里出现两次，是两篇不同的文章**：`articles/2025092212552660938.html`（社会融资规模增量统计数据报告）在 `Failures`、`articles/2025092212552655029.html`（金融统计数据报告）在 `Unsupported`。结转项 1a 说的是后者。⚠️ 用「行里含 2022-05」判归属是坏仪器（摘要区也含该串），必须按**段落归属**判。",
+    "**本任务会改变 calibrate 报告输出（62 行），与 M1c-3b 的 TASK-001「逐字节不变」相反** —— 统一标签与订正假标签本来就是在改印给人看的字。变化行**四类归尽、零杂项**：旧 Unsupported 标签 30（19 条明细 + 11 条摘要分组）、新标签 30、旧明细区标题 1、新标题 1。**各格计数前后完全一致**：199 / 19 / 38 / 0。"
+  ],
+  "decisions": [
+    {
+      "decision": "矛盾标签统一为「M1c-4 的兜底工作量」，但 FetchFailed 相关的两处改写成「让该修的东西可见」而不照抄归属",
+      "rationale": "裁决要统一的是**同一批 38 篇解析失败**的归属；FetchFailed 是另一格、另一种补救路径。照抄会让注释说一句假话。自查判据（grep 命中 0）在两种改法下都满足，所以判据本身分辨不出这个区别 —— 这是判据的射程问题，故在此写明。"
+    },
+    {
+      "decision": "1a 的新标签只说到「**按现有期次前缀表**在正文里找不到任何期内累计口径的合计句」，并显式声明不区分两种成因、指向原始解析错误作分辨",
+      "rationale": "这是判据**能够支持**的最强断言。旧标签「该期报告只有当月数」断言的是报告的性质，而判据只能证明词表没认出来。⚠️ 没有改分类逻辑：2022-05 前后都在 `Unsupported`。补词表是结转项 1b，已移交 M1c-4。"
+    },
+    {
+      "decision": "同时订正判据上方那句「『有没有累计句』是报告本身的性质」",
+      "rationale": "它是假标签的**成因**。只改结论不改理由，下一个改这段的人会照它重新推出同样的假标签 —— 而结论正确的时候没有人会去复查理由。该注释在 `calibrate.go`，在 writes 内，不构成越界。"
+    },
+    {
+      "decision": "R9 的断言写成「危害 + 阴性对照 + 可复用判据」三段，而不是只 assert 一句唯一性",
+      "rationale": "只断言唯一性的话，读者不知道为什么要在意。上半段实证「重复业务键会造出一档环比 0%，而它和一条真正平稳的样本在报告上长得一模一样」；下半段 `duplicateStockBusinessKeys` 供任何改 Records 来源的人自查。"
+    },
+    {
+      "decision": "`duplicateStockBusinessKeys` **只看带 `tsf_stock` 的记录**",
+      "rationale": "`stockContinuityRates` 的分组前置条件就是这个筛子。对全体 `Records` 求重复会得到 42 组 —— 那是真实存在且无害的（社融族与月报族时间互补），拿它当判据会让这条断言从第一天起就红，然后被人调松或删掉。"
+    },
+    {
+      "decision": "「结转项 9 的 19」自己重采而非引用",
+      "rationale": "DoD 明令。且用了三把尺，其中第三把（摘要分组求和）走的是与前两把不同的渲染路径 —— 前两把都源自同一个 `res.Unsupported` 切片，只用它们等于用同一个仪器量两次。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/calibrate.go（+32 −9）",
+    "internal/hestia/calibrate_report.go（+5 −2）",
+    "internal/hestia/calibrate_report_test.go（+67 −2）",
+    "internal/hestia/calibrate_test.go（+2 −2）"
+  ],
+  "interfaces_exposed": [
+    "func duplicateStockBusinessKeys(recs []SampleRecord) []string（**测试文件内**，`calibrate_report_test.go`）—— 返回带 `tsf_stock` 的记录里重复的业务键 `PeriodType/Period`，升序去重；空切片表示满足唯一性。改动 `Records` 来源的任务可直接复用它自查。",
+    "⚠️ 给下游的提醒：`stockContinuityRates` 的输入唯一性**仍然只是断言，不是代码保证**。今天重复恰为 0 来自央行发布习惯（2025-10 起社融并进月报、不再单发，两族时间互补）。过渡月双发、或 M1c-4 修好 2026-01 那类失败，都会让环比分布静默多一档 0%，而这份分布是填 `magnitude_ranges` 的输入。",
+    "⚠️ **calibrate 报告的两处措辞已改**（会影响任何对输出做字符串断言的下游）：明细区标题现为「解析失败（该支持却失败了，M1c-4 的兜底工作量）」；`Unsupported` 的理由串开头现为「本迭代不解析：**按现有期次前缀表**在正文里找不到任何期内累计口径的合计句」。"
+  ],
+  "verification": {
+    "measured_at_head": "962c3acb29705b58e21aaf4d4d64bcf8c77aca3a",
+    "measured_tree_state": "主仓库 master，merge commit `962c3ac`（第二父为我的 `5f68f58eb66e784b8e23307cceae9756b4b7eda7`）。全部数字采于此树、此 sha，最后一次改动之后统一重采。",
+    "branch": "task/TASK-008-m1c3b（已合入）",
+    "content_check": "内容判据：`git diff 5f68f58e HEAD -- <四个文件>` **零输出** ⇒ 合入的确是我那一版，逐字节。新符号 `duplicateStockBusinessKeys` 在 master 上命中 4。",
+    "self_check_grep": "`grep -rn 'M1c-3 入库前' internal/hestia/` ⇒ **0 命中**（DoD error_handling[1] 的可求值判据，不是「我改完了」）。",
+    "boundary_pass_delta": "背对背，A/B 两端都在合并后的主线上：对照树 `57a9cad153303a3dbf2c3a6a97c8ac3cfa8a665a`（我 merge 之前的 master，已含 TASK-005/011），实验树 `962c3ac`。`grep -c '^--- PASS'`：**578 → 579，差值 1**，恰等于本任务新增的顶层测试函数数。两边 `--- FAIL` 均为 **0**。\n⚠️ 第二把尺（测试名集合 diff）**第一次跑出了假差异**：`--- PASS` 行含耗时（`(0.01s)` vs `(0.00s)`），直接 diff 整行会把所有耗时抖动的用例都列出来。剥掉耗时只比名字后，只在 after 出现 `TestStockContinuityRatesAssumeUniqueBusinessKey` 一条、只在 base 出现的为空。",
+    "boundary_2022_05": "按**段落归属**判（不是「行里含 2022-05」）：改动前后，`金融统计数据报告` 那篇（`articles/2025092212552655029.html`）都在 `Unsupported`；另一篇同期的社融报告都在 `Failures`。⇒ 未改分类结果。",
+    "resample_19": "在最终交付树上重采：`/tmp/atlas-962c3ac hestia backfill calibrate --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete` ⇒ 摘要行「本迭代不解析: **19** 篇」、明细区表头「（19 篇）」、摘要分组求和 2+2+2+2+2+2+1+2+2+1+1 = **19**。各格：待解析 199 / 本迭代不解析 19 / 解析失败 38 / 标题解析不出期次 0。",
+    "report_titles": "明细区标题现为「解析失败（该支持却失败了，M1c-4 的兜底工作量）（38 篇）」，与摘要栏「解析失败（M1c-4 的兜底工作量）: 38 篇」归属一致。",
+    "suite": "go test ./internal/hestia/... -count=1 -cover ⇒ rc=0；go test ./cmd/... -count=1 ⇒ rc=0（报告输出变了，特意确认没有 cmd 测试断言旧串）；go vet ./internal/hestia/... ./cmd/... ⇒ rc=0 零输出；gofmt -l internal/hestia cmd/atlas ⇒ 恰为 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go 两项既有欠账。",
+    "coverage": "**96.0% @ 962c3acb29705b58e21aaf4d4d64bcf8c77aca3a**（`go test -cover` 口径）。⚠️ 高于 DoD 基线 95.9%（采于 `32bc1e5`），差异**不来自本任务**：同批合入的 TASK-005/011 改变了整棵树的分母/分子。DoD 已提示「覆盖率的分母属于整棵树」，故此处把 sha 与数字同行写下。",
+    "deps": "`git show --name-only 5f68f58e | grep -c 'go\\.\\(mod\\|sum\\)'` ⇒ 0，无新增依赖。",
+    "scope": "改动的四个文件全部在 `writes` 声明内，**无越界**。",
+    "dod_to_test": [
+      "functional[0] R9 业务键唯一性断言 → TestStockContinuityRatesAssumeUniqueBusinessKey（PASS）+ duplicateStockBusinessKeys 判据；注释写明「安全来自发布习惯不来自代码」",
+      "functional[1] 1a 让标签说真话 → 新标签只断言「按现有期次前缀表找不到」；2022-05 仍在 Unsupported；未碰解析器",
+      "functional[2] 23→19 且写明随语料变必须重采 → 注释已改，三把尺复采得 19",
+      "functional[3] 矛盾标签统一 → 9 处全改，grep 判据 0 命中",
+      "boundary[0] PASS 差值 = 新增断言数 → 背对背 578→579，差值 1，名字集合确认",
+      "boundary[1] 2022-05 不换格 → 按段落归属核实，前后同在 Unsupported",
+      "error_handling[0] 重采不是 19 就先怀疑自己 → 实测就是 19，无需上报异常；命令/得数/HEAD 已记于 resample_19",
+      "error_handling[1] grep 自查为 0 → 已求值，0 命中",
+      "non_functional[0] gofmt/vet/test/覆盖率/无新增依赖/注释带 milestone 前缀 → 逐项见上；注释一律写「M1c-3b 的 TASK-00X」",
+      "non_functional[1] worktree → 提交 → Leader merge → 回主仓库 → dev_done → 拆 worktree → 已按序执行"
+    ]
+  },
+  "provenance": "全部代码与注释由 dev-m1c3b-a 编写。矛盾标签的 9 处落点由我自己 grep 得出（team-lead 独立实测同为 9 处，与我一致）；DoD 列的 6 处不全，差额三处已在 key_findings 写明。结转项 1a / R9 的背景取自 internal/hestia/CONTRACTS.md 的对应两节（M1c-3a 遗留），判断与实现为本人。本任务未调用子代理。"
+}

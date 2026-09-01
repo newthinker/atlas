@@ -1,0 +1,59 @@
+{
+  "id": "TASK-012",
+  "title": "补 magnitude_ranges 校验的 NaN/Inf 穿透 + 两条存活变异的用例",
+  "description": "**本任务不在需求文档里**，是 TASK-004 的 dev（dev-m1c3b-c）在交付后自查发现并主动申报的。\n\n**缺陷**：`Thresholds.validate` 的 `r.Min >= r.Max` **拦不住 NaN**——IEEE 754 规定涉 NaN 的比较除 `!=` 外恒假。而下游 `gateMagnitudeSanity` 的判据 `v < r.Min || v > r.Max` **同样两侧恒假** ⇒ NaN 边界会让该字段的幅度闸**完全不设防**，且报 `passed`。\n\n**这正是 TASK-004 那段代码自己注释里写的失效模式**（「表看起来配上了，而那道闸对该字段照样不设防」）——同一模式的第二条入口没堵。\n\n**严重度如实校准**：触发需要有人字面写下 `.nan` / `.inf`，TASK-005 手填 54 个具体数值不会写出这两个字面量 ⇒ **真缺陷、低触发概率**。\n\ncommit 用 `feat(TASK-012): ...`。",
+  "status": "accepted",
+  "complexity": "simple",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/validate_test.go"
+  ],
+  "dependencies": [
+    "TASK-005",
+    "TASK-011"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-004",
+    "TASK-005",
+    "TASK-011"
+  ],
+  "done_criteria": {
+    "functional": [
+      "🔴 **堵 NaN / Inf 穿透**：`Thresholds.validate` 对 `MagnitudeRanges` 的每一项，除现有三类校验外，拒绝 `Min` 或 `Max` 为 **NaN 或 ±Inf** 的区间。\n\n注释里必须写明机制与后果：\n> IEEE 754 规定涉 NaN 的比较除 `!=` 外**恒假**，所以 `r.Min >= r.Max` 拦不住它；而下游 `gateMagnitudeSanity` 的判据 `v < r.Min || v > r.Max` **两侧同样恒假** ⇒ 该字段的幅度闸完全不设防，且报 `passed`。这与「打错字段名」是同一失效模式的第二条入口。\n\n实测证据（dev-m1c3b-c 于 `e0205607` 隔离 worktree）：`{Min:NaN,Max:NaN}` / `{Min:NaN,Max:1000}` / `{Min:0,Max:NaN}` / `{Min:-Inf,Max:+Inf}` **四种 `validate()` 全部返回 nil**；配 `fx_reserve=42`（越界两个数量级）⇒ `magnitude_sanity = passed`。",
+      "**可达性用例**：`.nan` / `.inf` 能从 YAML 字面量一路进到 `MagnitudeRanges`（实测：往真配置追加 `min: .nan` 后 `LoadConfig err = nil`，NaN 原样落进表里）。补一条从 YAML 出发的用例钉住这条路径已被堵上。",
+      "🔴 **补两条存活变异对应的用例**（dev-m1c3b-c 在隔离副本上实测，主工作区 sha 前后一致）：\n\n| 变异 | 现状 | 补什么 |\n|---|---|---|\n| `r.Min >= r.Max` → `r.Min > r.Max` | **存活**，5 条测试无一转红 | 加 `Min == Max` 的拒绝用例 |\n| `strings.TrimSpace(r.Unit) == \"\"` → `r.Unit == \"\"` | **存活** | 加 `Unit: \"   \"`（纯空白）的拒绝用例 |\n\n🔴 **第一条尤其重要**：TASK-004 的 discovery 在 `interfaces_exposed` 里向 TASK-005 广告了「**`min == max` 也会被拒**」这条契约，而**当前没有任何测试钉住它** —— 谁把 `>=` 顺手写成 `>`，这条已被下游依赖的契约就静默失效。\n\n⚠️ `TrimSpace` 该单独测**有本文件的先例**：`TestThresholdsRejectMalformedExemptions` 的表里就有 `Reason = \"   \"` 这一档。照既有惯例写。",
+      "🔴 **补 `gateMagnitudeSanity` 消费端的两个守卫缺口（F12 / F17#5#6）** —— 由 TASK-005 的 dev 在填表前查实并上报。\n\n上游在 `thresholds_test.go` 的绊线注释里写明：`magnitude_sanity` 至今恒 `skipped{not_calibrated}`，所以这些缺口**影响为零**；而 **TASK-005 填完 54 项的那一刻，这道闸开始真正判定，缺口同时变成真的**。\n\n| # | 缺口 | 位置 | 现状（Leader 于 master `2433e55` 核实） |\n|---|---|---|---|\n| **F12** | 遍历顺序：须遍历 `fieldOrder` 而非 map | `validate.go:497` | **实现是对的**（确实 `for _, f := range fieldOrder`），但**无测试守卫** —— 上游注明这是**已实证的存活变异**，改成遍历 map 后整套测试全绿 |\n| **F17 #5/#6** | `v < r.Min` 与 `v > r.Max` 两个比较符 | `validate.go:506` | **实现是对的**，但现有用例用 `42` 对区间 `[3,4]`，**离边界两个数量级** ⇒ 把 `<` 改成 `<=` 不会有任何测试转红 |\n\n⇒ 补两组断言（落在 `validate_test.go`，已在本任务 `writes`）：\n1. **顺序**：配一张含多个越界字段的表，断言报出的那一个是 `fieldOrder` 里**最靠前**的那个（跑两次结果相同）。变异验证：把实现改成 `range in.cfg.MagnitudeRanges` ⇒ 该断言必须转红。\n2. **边界**：用**恰好落在边界上**的值（`v == r.Min` 与 `v == r.Max`）断言 `CheckPassed`，再用**刚越界一档**的值断言 `CheckFailed`。变异验证：`<`→`<=` 与 `>`→`>=` 各自必须让对应断言转红。\n\n⚠️ **实现本身不要改**（两处都是对的）。本条补的是**守卫**，不是修 bug —— 与本任务另两条存活变异同一性质。"
+    ],
+    "boundary": [
+      "**空表仍然合法**（TASK-004 的 `boundary[0]`，不得被本任务破坏）：校验只在 `len(t.MagnitudeRanges) > 0` 时进行。改完重跑 `TestEmptyMagnitudeRangesStillValid` 必须仍 PASS。",
+      "🔴 **不得破坏 TASK-005 已填的 54 项**：改完后 `TestShippedConfigLoadsAndIsCalibrated`（TASK-005 交付的那条，读真 `configs/hestia.yaml`）必须仍 PASS。\n\n⚠️ 本任务**不改** `configs/hestia.yaml`（不在 `writes` 里）。若新校验让现有 54 项中的某项失败，**说明那一项本来就有问题** —— 停下来报 Leader，不要顺手改配置。"
+    ],
+    "error_handling": [
+      "**新增用例必须先 RED**：写完先跑一遍确认它们在**未加 NaN 校验时**是失败的（`validate()` 返回 nil），再实现。\n\n⚠️ 两条变异用例的 RED 判据不同：`Min == Max` 与 `Unit:\"   \"` 那两条**在当前代码上应当直接 PASS**（当前实现已经拒绝它们），它们补的是**守卫缺口**而非行为缺口。⇒ 这两条的正确验证方式是**变异**：把 `>=` 改成 `>`、把 `TrimSpace(...)==\"\"` 改成 `==\"\"`，确认新用例**转红**。\n\n🔴 **变异必须在隔离副本上做**（`mktemp -d` 拷贝或 `git worktree add` 到临时目录），主工作区一个字节都不碰；每个变异窗口内 + 收尾各校验一次「被变异文件在主工作区的 sha256 与 `git status --porcelain` 输出均未变化」，把指纹写进 discovery。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`——归档里多个 sprint 用过同样编号，裸编号在半年后指向不唯一。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，「本任务已提交」与「未提交改动」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是：查 merge 状态、催 Leader，不是转状态。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里 `.arcforge/` 是按 checkout 铺开的独立副本，在那里调写通道会被 DENY（判别不出来时反而 fail-open 静默写坏副本）。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`（谁建谁拆，是交付动作的一部分）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-c",
+  "discovery": ".arcforge/discoveries/TASK-012.json",
+  "verify_baseline": {
+    "head": "f14fd2850bfb75dbca8d56dd7120bdb676692714",
+    "discovery_sha256": "fad3482cf51775c59f2ff7dd35e07d1b2aede74e851dd036f0a7494a81be9122",
+    "at": "2026-09-01T02:31:17Z"
+  },
+  "verifier": "test-m1c3b-b"
+}

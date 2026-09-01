@@ -1,0 +1,67 @@
+{
+  "id": "TASK-011",
+  "title": "接线 mergedRequiredFields：Observation.Parts + gateCompleteness（补 A-1 阻断级缺口）",
+  "description": "**本任务不在需求文档里**，是独立反审发现的阻断级缺口 A-1 的修复（Leader 已独立核实四条链）。\n\n**缺口**：按需求文档的设计，`mergedRequiredFields` 交付后**没有生产调用点**——`gateCompleteness` 拿的是 `requiredFields(in.obs.Meta.Extractor)`，`merged@v1` 落 `default` 返回 nil ⇒ 记 `CheckSkipped{unknown_extractor:merged@v1}`；而 `validate.go` 的 `passed` **只在 `CheckFailed` 时翻转** ⇒ 42 个合并观测的 completeness **谁都不查**，带着「零告警」进权威表。\n\n**本任务是一个不可分的单元**：字段 + 闸门分支 + 两条断言。**不要只做其中一半**——半个改动会全绿而无效。\n\ncommit 用 `feat(TASK-011): ...`。",
+  "status": "accepted",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/types.go",
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/required.go",
+    "./internal/hestia/store.go"
+  ],
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`Observation` 增 `Parts []string` 字段，注释按下面这段写（它记的是这个字段存在的**全部理由**，不是装饰）：\n\n```go\n// Parts 是**进程内**的合并取证：这条观测由哪几个 extractor 合成（M1c-3b 的 TASK-003）。\n//\n// 🔴 它**不入库** —— metaColumns 是七列、insertSQL 显式列举，Parts 不在其中；\n//    从 Preceding 读回来的 Observation 其 Parts 恒为 nil，这是刻意的：\n//    合并只发生在 backfill load 那一刻，历史行不需要也无法回答这个问题。\n//\n// 存在的唯一理由：merged@v1 这一个字符串**说不出必填集**（见 mergedRequiredFields），\n// 而 gateCompleteness 只拿得到 obs —— 不给它 Parts，那道闸对全部 42 个合并观测恒 skipped，\n// 而 skipped 不影响 Passed（validate.go 的 passed 只在 CheckFailed 时翻转），\n// 于是 42 条残缺观测会带着「零告警」进权威表。\nParts []string\n```",
+      "`gateCompleteness` 增 `merged@v1` 分支：\n\n```go\nreq := requiredFields(in.obs.Meta.Extractor)\n// merged@v1 的必填集取决于由哪几篇合成，requiredFields 只拿得到一个字符串，\n// 结构上说不出来（见 TestRequiredFieldsRejectsBareMerged）。改问 Parts。\nif in.obs.Meta.Extractor == extractorMerged {\n    req = mergedRequiredFields(in.obs.Parts)\n}\n// 🔴 判据必须是 len(req) == 0，**不能是 req == nil**（见下面 boundary[0]）。\nif len(req) == 0 {\n    return Check{Status: CheckSkipped,\n        Reason: \"unknown_extractor:\" + in.obs.Meta.Extractor}\n}\n// …以下不变…\n```\n\n⚠️ **不改 `Validate` 的签名**：`gateInput` 已持有 `obs`（`validate.go:131` 是 `{obs, prior, cfg}`），从 `in.obs.Parts` 读即可。改签名要动 **39 个调用点、4 个文件**（生产 1 处 `ingest.go:196` + 测试 38 处），成本不成比例。\n\n⚠️ 改 `req == nil` 为 `len(req) == 0` **不影响既有行为**：`requiredFields` 对未知 extractor 返回 nil，而 `len(nil) == 0` 同样成立 ⇒ 非 merged 的路径逐字不变。这一点要用 boundary[0] 的背对背比对证实，不要只靠推理。",
+      "🔴 **`TestMergedCompletenessIsEvaluated`——这条是本任务的真正验收点**（落在 `validate_test.go`）：\n\n构造一个 `Meta.Extractor = extractorMerged`、`Parts = []string{extractorTSFStock, extractorTSFFlow}` 但 `Values` **少一个字段**的观测，断言 `completeness` 这道闸是 **`CheckFailed`**，**不是** `CheckSkipped`。\n\n⚠️ **四道恒等式抓不住这个缺陷**（它们全由同一批计数器派生，内部自洽 ≠ 闸门真的执行了），只有这条断言能。",
+      "**`TestMergedPartsDoNotRoundTrip`**（落在 `validate_test.go`）：`Save` 一条带 `Parts` 的 merged 观测，再用 `Preceding` 读回来，断言 `Parts == nil`。\n\n把「不入库」从**注释**变成**断言**——一个不持久化的导出字段，最容易被后人当成能往返的。\n\n⚠️ 放在 `validate_test.go` 而不是 `store_test.go`：后者在 TASK-003/006 的 `writes` 里，会造成 scope 互斥。",
+      "🔴 **订正 `required.go` 里 `mergedRequiredFields` 注释的「缺 27 个字段」为「缺 25 个字段」。**\n\n**这是需求文档的第四处缺陷，经 Leader 与 test-m1c3b-a 两条独立路径实测证实**（Leader 于 master `2433e55` 复算）：\n\n```\n|rule-monthly@v2| = 52   |tsfStock| = 18   |tsfFlow| = 9   |rule-monthly@v1| = 25\n\nQ1  组里只剩社融两篇（= 注释描述的 2020-01|monthly 情形）→ 硬套 v2 缺 **25** 个，\n    且缺的那批恰是 rule-monthly@v1 的 25 个非社融字段\nQ2  组里只剩月报一篇（= 相反情形）              → 硬套 v2 缺 **27** 个，\n    且缺的那批恰是 stock ∪ flow 的 27 个\n```\n\n算术：`52 − (18+9) = 25`。**注释描述的是 Q1，用的却是 Q2 的数。**\n\n🔴 **同一次交付里 dev 自己的测试断言用的就是 25**（`required_test.go:399`：「缺月报那篇时，**25** 个非社融字段是 absent-by-design」）⇒ **仓库当前内部自相矛盾，注释错、测试对。**\n\n**为什么会滑过去**（写进订正的注释里，让下一个人别再犯）：`stock ∪ flow` **恰好也是 27 个**且与 `rule@v1` 的 27 个**完全不相交**，于是 27 这个数在仓库里三处都正确地存在着（`types.go:141`、`validate.go:137`、以及 stock∪flow 本身），而搬到第四个情形时它对应的是**存在**的字段数、不是**缺失**的字段数。\n\n⇒ 这是「**正确的局部陈述在转写时丢了限定条件**」的第三例（前两例是需求文档 Task 2 的「54 应为 52」与 Task 3 的 `require.Equal` 矛盾）。\n\n⚠️ **只改这一个数字与配套说明，不要动这段注释的其余部分**（「这条是本函数存在的全部原因」那句要留着）。改完 `grep -c '缺 27' internal/hestia/required.go` 应为 0。"
+    ],
+    "boundary": [
+      "🔴 **`Parts` 为空/全无效时必须记 `CheckSkipped`，绝不能记 `CheckPassed`。这是本任务最容易引入的新缺陷。**\n\n**Leader 于 master `2433e55` 实测**（临时测试，已删）：\n\n| 输入 | `len()` | `== nil` |\n|---|---|---|\n| `mergedRequiredFields(nil)` | 0 | **false** |\n| `mergedRequiredFields([]string{})` | 0 | **false** |\n| `mergedRequiredFields([]string{\"bogus@v9\",\"llm-fallback@v1\"})` | 0 | **false** |\n| 对照 `requiredFields(extractorMerged)` | 0 | **true** |\n\n成因是 `required.go` 里 `out := make([]string, 0, len(want))` —— **它永远返回非 nil 的切片**（TASK-002 的 dev 在 `interfaces_exposed` 里写明了这条边界：「全无效 parts 返回空切片而非 nil」）。\n\n🔴 **所以 `if req == nil` 对 merged@v1 恒不命中**，会一路落到 `len(missing) == 0` 返回 **`CheckPassed`** ——\n一个 `Parts` 为空的合并观测会被判「completeness 通过」，而它**一个字段都没检查**。\n\n**这比 A-1 原来的 skipped 更糟**：`skipped{unknown_extractor:merged@v1}` 在报告里可见、可被 TASK-010 的判据数出来；而 `passed` 是**完全静默**的。修 A-1 时引入一个同类的静默失效，是本任务唯一不可接受的结果。\n\n⇒ 判据用 `len(req) == 0`。并补一条断言：`Parts` 为 nil 的 merged 观测 ⇒ `completeness` 是 **`CheckSkipped`**，不是 `CheckPassed`。\n\n⚠️ 需求文档与反审报告给的实现形状里都写着「`Parts` 为空 ⇒ nil ⇒ 仍走下面的 skipped」，**那句话是错的** —— 两边都没核实 `mergedRequiredFields` 的返回值。**以本条的实测为准。**",
+      "🔴 **非 `merged@v1` 的观测，其 `completeness` 结果在改动前后必须逐字相同。**\n\n判据：改动前后各跑一次 `go test ./internal/hestia/ -run 'TestGate|TestValidate' -count=1 -v`，PASS 集合相等（**背对背跑，不要跨时间点比**）。\n\n理由：本任务把 `req == nil` 换成了 `len(req) == 0`，两者对 `requiredFields` 的返回值等价（nil 的 len 也是 0），但那是**推理**——要用背对背比对把它变成**观察**。",
+      "⚠️ **加字段不会打红任何既有守卫**（Leader 于 `32bc1e5` 已核实，别因为「怕打红」就把字段藏起来）：\n- 三处 `NumField()` 断言（`types_test.go:56`、`schema_test.go:122`、`store_test.go:790`）**全部钉的是 `Meta`**，不是 `Observation`\n- `Observation{` 字面量**无一处位置初始化**（全是 `Meta:` / `Values:` 具名）\n- `insertSQL` 显式列举七项 + 遍历 `fieldOrder`，**不反射** ⇒ 新字段不进 DDL、不进 INSERT\n- `TestPackageExposesNoWriteFunctions` 只遍历 `*ast.FuncDecl`，**不查类型与字段**"
+    ],
+    "error_handling": [
+      "⚠️ **不要走这两条歧路**（都已被论证排除）：\n- **让 `requiredFields` 认 `merged@v1`** ⇒ 与 TASK-002 刚立的 `TestRequiredFieldsRejectsBareMerged` **直接矛盾**，等于把刚建的守卫拆掉\n- **在 `BackfillLoad` 里自己算 completeness** ⇒ completeness 会有两套实现并分叉，且 `validate.go` 里那条 `unknown_extractor:merged@v1` 仍然可达，下一个读代码的人看不出它已被绕过"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`——归档里多个 sprint 用过同样编号，裸编号在半年后指向不唯一。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，「本任务已提交」与「未提交改动」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是：查 merge 状态、催 Leader，不是转状态。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里 `.arcforge/` 是按 checkout 铺开的独立副本，在那里调写通道会被 DENY（判别不出来时反而 fail-open 静默写坏副本）。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`（谁建谁拆，是交付动作的一部分）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-b",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "verify_baseline": {
+    "head": "188eb212009a0bd7f210059ddd15a4c3b759e96f",
+    "discovery_sha256": "8f613166b783901ed46b3385c75e97b27b142f3c636ca6734cbd4ecdfbbb2e12",
+    "at": "2026-09-01T06:03:18Z"
+  },
+  "verifier": "test-m1c3b-b",
+  "reason_class": "dod_defect",
+  "fix_items": [
+    "C-1 CRITICAL（人类已裁决：修 gate + 删库重跑）: Preceding 的 SQL 返回「最近 N 个已被接受的期次」，无相邻性约束，而 gateStockContinuity 注释断言「prior[0] 就是上一期」——该注释只在从未拒过任何一期时成立，而这道闸的存在前提就是会拒。真跑 4 条拒绝，基线跨 10/11/13 个月、跨 3 年；构成正反馈（拒绝→基线跨度变长→更多拒绝）；--force 对已入权威表是 no-op ⇒ 不可自愈。",
+    "C-1 修法: prior[0] 与本期不相邻时不得按原阈值判（跳过该基线或按跨度放宽，二选一并在 discovery 写明理由）；订正「[0] 就是上一期」注释；Preceding 文档写明它只返回已入权威表的期次；补跨接缝测试（造「中间期被拒」场景，断言 gate 不拿跨期基线判）。",
+    "C-1 验收: 修完删掉新建的权威库重跑，预期 权威表 75→79、pending 21→17、stock_continuity 拒绝 4→0。阈值不要动——QA 已独立测量：按 period_type 分链算真正相邻两期环比，annual 6 对上限 0.20 最大 0.1334、monthly 68 对上限 0.05 最大 0.0261，超限总数 0。生产库 /Users/zuowei/workspace/runtime/atlas/data/hestia.db 不许碰（sha256 须保持 478d40c079c8b0eab7d089bb6f1926725b361a6dc6c850f4c4a651406f3ec28c）。"
+  ],
+  "rework_count": 1
+}

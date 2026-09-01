@@ -1,0 +1,51 @@
+{
+  "id": "TASK-001",
+  "title": "抽出 eachParsedArticle 共用管道（纯重构，calibrate 输出必须逐字节不变）",
+  "description": "对应需求文档 Task 1。从 `calibrate.go` 的 `collectSamples`（约 118–258 行）抽出「分类 → 读文件 → sha256 校验 → Parse」的共用管道，calibrate 端继续只取 `Values`，为 TASK-003 的 load 端准备好整个 `Observation`。**这一步是纯重构：外部行为必须零变化。**",
+  "status": "accepted",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/calibrate.go",
+    "./internal/hestia/calibrate_test.go"
+  ],
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "done_criteria": {
+    "functional": [
+      "新增 `parsedArticle` 结构体与 `eachParsedArticle(dir string, res *CalibrateResult, items []calibrateItem, fn func(parsedArticle)) int`，签名与需求文档 Task 1 的 Interfaces 段**逐字一致**。返回值是「sha256 未校验的篇数」，由调用方汇总成 warning。",
+      "`collectSamples` 改为调用 `eachParsedArticle`，形态见需求文档 Task 1 Step 4。搬迁时**逐字保留全部注释**——sha256 必须在 Parse 之前查、`fail` 闭包的措辞、Unsupported 的分类判据都不动。",
+      "`TestEachParsedArticleYieldsFullObservation` 存在且通过：断言管道交出的是**整个 Observation** 而不只是 `Values`——`Meta.Period` / `Meta.PeriodType` / `Meta.PublishedAt` / `Meta.Extractor` 均非空，且 `p.item.period == p.obs.Meta.Period`。\n\n这条断言存在的理由：`collectSamples` 原先只取 `Values`，`Meta` 被就地丢弃。若重构时图省事仍只传 `Values`，TASK-003 就无从装配业务键——而那时错误会表现为「合并组恒为 0」，**看起来像语料问题，不像管道问题**。"
+    ],
+    "boundary": [
+      "🔴 **`res.Periods++` 的位置不得改变**：它数的是「全部受支持种类里被真正尝试解析的篇数」，**含解析失败的**。搬进管道时必须在 `fail()` 之前自增。\n\n位置错了 **199 会变成 161**，而单元测试**全绿**——这个错只有 Step 6 的背对背基线比对抓得住。",
+      "🔴 **需求文档里的 fixture 调用直接抄会编译不过**（Leader 已核实，2026-08-31 于 `32bc1e5`）。\n\n文档写的是 `dir := t.TempDir(); writeCalibrateFixture(t, dir)`，而**实际签名**是：\n\n```go\n// internal/hestia/calibrate_test.go:60\nfunc writeCalibrateFixture(t *testing.T, m Manifest, files map[string]string) string\n```\n\n它**自己建 `t.TempDir()` 并返回该目录**，要传的是 `Manifest` 与文件内容表，不是目录。\n\n⇒ **沿用它，不要新写一份**（两份 fixture 会分叉）。先读 `calibrate_test.go:60` 附近的既有调用点，照着构造 `Manifest` 与 `files`。"
+    ],
+    "error_handling": [
+      "🔴 **背对背基线比对是本任务唯一的验收判据**（`verify_by: manual`）。\n\n```bash\n# 改动前，在你的 worktree 里（此时代码还是 master 的样子）\ngo build -o /tmp/atlas-baseline-t001 ./cmd/atlas\n# 改动后\ngo build -o /tmp/atlas-after-t001 ./cmd/atlas\n# 🔴 同一时刻背对背跑，不要跨时间点\nfor b in baseline after; do\n  /tmp/atlas-$b-t001 hestia backfill calibrate \\\n    --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete > /tmp/calib-$b-t001.txt 2>&1\ndone\ndiff /tmp/calib-baseline-t001.txt /tmp/calib-after-t001.txt && echo '逐字节一致 ✓'\n```\n\n**Expected: `diff` 零输出。有任何一行不同就是重构改变了行为，回去查，不要调基线。**\n\n⚠️ **背对背**（两份二进制同一时刻并排跑）是必需的，不是讲究：跨时间点采样会因并发 agent 期间的改动产生**假差异**（归档实测过一次跨 12 分钟采样得到 4 处全假的差异）。\n\n⚠️ 把 `wc -l /tmp/calib-baseline-t001.txt` 的值与**你采样时的 HEAD 全 sha** 一并写进 discovery。**不要引用需求文档或 spec 里的行数**——那是会漂的锚。",
+      "🔴 **语料路径必须用主仓库绝对路径**（AD-3）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14\n```\n\n⚠️ **不要用 `$PWD/data/...`**（需求文档全篇是这个写法）：`.gitignore:64` 是 `data/`，`git ls-files data/` 返回 **0 个文件** ⇒ **linked worktree 里根本没有 `data/` 目录**。\n⚠️ **不要建软链**——42/107/96 这三个数靠语料自证，软链会让「我测的是哪份语料」多一层间接。绝对路径是观察，软链是推理。\n⚠️ `--allow-incomplete` 是**必需**的，不是可选：该语料的 manifest 没有 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`——归档里多个 sprint 用过同样编号，裸编号在半年后指向不唯一。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，「本任务已提交」与「未提交改动」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是：查 merge 状态、催 Leader，不是转状态。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里 `.arcforge/` 是按 checkout 铺开的独立副本，在那里调写通道会被 DENY（判别不出来时反而 fail-open 静默写坏副本）。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`（谁建谁拆，是交付动作的一部分）。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "2433e5577b38f1d0fc8ba77bff4bd2641dee7421",
+    "discovery_sha256": "01fa0afb51f31d20026fe235927cd30755e95892555290193980c2bdf5bb6585",
+    "at": "2026-09-01T00:45:11Z"
+  },
+  "verifier": "test-m1c3b-b"
+}

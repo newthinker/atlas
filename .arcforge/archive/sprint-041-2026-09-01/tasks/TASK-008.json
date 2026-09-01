@@ -1,0 +1,58 @@
+{
+  "id": "TASK-008",
+  "title": "结转项 · calibrate 族四条（R9 业务键唯一性断言 / 2022-05 假标签 / 过期数字 23→19 / 矛盾标签统一）",
+  "description": "对应需求文档 Task 8 的结转项 2(R9)、1a、9 与「矛盾标签」四条。⚠️ 本任务是文档 Task 8 的一部分，**commit message 用 `TASK-008`**，但内容只含这四条，不含 CONTRACTS 登记（那是 TASK-010）。",
+  "status": "accepted",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/calibrate.go",
+    "./internal/hestia/calibrate_report.go",
+    "./internal/hestia/calibrate_test.go",
+    "./internal/hestia/calibrate_report_test.go"
+  ],
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "done_criteria": {
+    "functional": [
+      "**结转项 2（R9）**：为 `stockContinuityRates` 的输入加**业务键唯一性断言**（落在 `calibrate_report_test.go`）。\n\n⚠️ 现状「79 条 `tsf_stock` 里重复恰为 0」**来自央行的发布习惯，不来自代码**——断言就是把这个隐含前提变成**显式**的。写测试时把这句理由写进注释。",
+      "**结转项 1a**：`2022-05` 的理由串**前半段说假话**——分类标签写「正文无任何期内累计口径的合计句」，而同一串的后半段诊断写「期次前缀不被识别……这是解析器缺口」。改 `calibrate.go` 里 `onlyCurrentMonthFlowSentences` 的调用处，**让标签说真话**。\n\n🔴 **只改标签，不补解析器**——解析器缺口是结转项 1b，明确移交 M1c-4。",
+      "**结转项 9**：`calibrate.go:186` 的「真语料 **23** 篇」是过期数字，真值 **19**。订正它，并**顺手在该注释里写明「此数随语料变，改语料时必须重采」**。\n\n⚠️ 订正前**自己重采一次**（跑 calibrate 看「本迭代不解析」那一栏），把命令与得数写进 discovery。不要直接引用 19。",
+      "**矛盾标签统一**：`calibrate.go:389` 写「M1c-4 的兜底工作量」、`calibrate_report.go:214` 写「M1c-3 入库前要清零」——**同一批 38 篇两个归属**。裁决：**统一为「M1c-4 的兜底工作量」**。\n\n落点是**六处**：`calibrate.go:389` / `:17` / `:95` / `:191`、`calibrate_report.go:214`、`calibrate_test.go:690` / `:971` 的相同措辞。⚠️ 行号是写下时的锚，会漂——**按措辞 grep，不要按行号定位**。"
+    ],
+    "boundary": [
+      "本任务除 R9 新增的断言外**不改行为**。判据：改动前后 `go test ./internal/hestia/... -count=1 -v 2>&1 | grep -c '^--- PASS'` 的差值 **恰等于 R9 新增的断言数**，不多不少。⚠️ **背对背跑**，不要跨时间点比。",
+      "⚠️ **结转项 1a 改的是标签，不是分类结果**。改完后 `2022-05` 那篇仍应落在**同一个格子里**（仍是失败/不解析），只是理由串不再自相矛盾。若它换了格子，说明改到了分类逻辑本身——**回去查**。"
+    ],
+    "error_handling": [
+      "⚠️ 若重采出的「本迭代不解析」篇数**不是 19**：**先怀疑自己的判据，再怀疑结转项**。把命令、得数、你采样时的 HEAD 全 sha 一并写进 discovery 并报 Leader，**不要静默改成自己算出的数**。\n\n（归档教训三犯：拿高度相关的可观测量代替性质本身，近似失效时不报错，只给一个像样的数。）",
+      "⚠️ 六处措辞统一后**自查一遍**：`grep -rn 'M1c-3 入库前' internal/hestia/` 应当零命中。**这是可求值的判据，不要用「我改完了」代替它。**"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` 只列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**，也不要因它们判红——判据是「这两个文件之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率不低于 **95.9%**（基线采于 HEAD `32bc1e5f306386ee5c69a54b4bae3e0184aa30f2`，`go test -cover` 口径）。\n⚠️ 覆盖率的**分母属于整棵树**：并行任务的代码落进本包会让当前树测得不同值。报数时把**你测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n\n⚠️ **无新增依赖**（Global Constraint）：`go.mod` / `go.sum` 不得出现在本任务的实际改动里。\n\n⚠️ **注释里引用任务编号带 milestone 前缀**：写 `M1c-3b 的 TASK-00X`，不要只写 `TASK-00X`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 里干活：`git worktree add -b task/TASK-00X-m1c3b ../wt-TASK-00X-m1c3b master`（分支名必须带 `-m1c3b` 后缀，仓库里已有 19 个 `-m1c3a` 遗留分支会撞名）\n2. 提交时**显式 pathspec**，提交信息锚定 `<type>(TASK-00X):`\n3. **通知 Leader merge**，等 Leader 把分支合进 `master`\n4. **回主仓库**（`cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas`）再跑 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支上的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。该 hook 在 `in_progress` 状态的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**——linked worktree 里调写通道会被 DENY。\n\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-00X-m1c3b`。"
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-01T10:25:35Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c3b-a",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "962c3acb29705b58e21aaf4d4d64bcf8c77aca3a",
+    "discovery_sha256": "32a57cff79e51d7519b71438541860404b170abe5e4ae8fbf6880a6cce2aa818",
+    "at": "2026-09-01T01:42:56Z"
+  },
+  "verifier": "test-m1c3b-a"
+}
