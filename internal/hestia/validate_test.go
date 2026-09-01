@@ -1144,3 +1144,139 @@ func TestReportKeepsEveryGateUnderExemption(t *testing.T) {
 	assert.NotNil(t, findCheck(t, rep, "yoy_sanity").Value,
 		"豁免保留 Value：闸门算出的观测仍有用，只是不据此判定")
 }
+
+// ── M1c-3b 的 TASK-011：merged@v1 的 completeness 接线（阻断级缺口 A-1）──────
+//
+// Context Checkpoint: done_criteria → test mapping (M1c-3b 的 TASK-011)
+// functional[2]  merged 观测缺字段 ⇒ completeness 必须 CheckFailed 而非 CheckSkipped
+//                                              → TestMergedCompletenessIsEvaluated
+// functional[3]  Parts 不入库，Save→Preceding 往返后恒为 nil
+//                                              → TestMergedPartsDoNotRoundTrip
+// boundary[0]    Parts 为空/全无效 ⇒ CheckSkipped，**绝不能是 CheckPassed**
+//                                              → TestMergedCompletenessSkipsWhenPartsYieldNoFields
+
+// mergedObs 造一个 merged@v1 观测：Parts 指定由哪几篇合成，Values 覆盖 fields 里的每一个。
+//
+// 值本身无意义（completeness 只看键在不在），但必须是有限数——checkValues 会拒 NaN/Inf。
+func mergedObs(parts, fields []string) Observation {
+	m := validMeta()
+	m.Extractor = extractorMerged
+	vals := make(map[string]float64, len(fields))
+	for i, f := range fields {
+		vals[f] = float64(i + 1)
+	}
+	return Observation{Meta: m, Values: vals, Parts: parts}
+}
+
+// TestMergedCompletenessIsEvaluated 是本任务的**真正验收点**。
+//
+// 缺口 A-1：gateCompleteness 拿的是 requiredFields(Meta.Extractor)，而 merged@v1 落
+// default 返回 nil ⇒ 整道闸 skipped{unknown_extractor:merged@v1}；而 validate.go 的
+// passed 只在 CheckFailed 时翻转 ⇒ 42 个合并观测的 completeness **谁都不查**，
+// 带着「零告警」进权威表。
+//
+// ⚠️ 四道恒等式抓不住这个缺陷——它们全由同一批计数器派生，内部自洽 ≠ 闸门真的执行了。
+// 只有本条断言能：它要求那道闸对 merged@v1 **真的算出了缺失字段**。
+func TestMergedCompletenessIsEvaluated(t *testing.T) {
+	// 社融两篇合成：必填集 = stock ∪ flow，故意少给一个字段。
+	full := append(tsfStockFields(), tsfFlowFields()...)
+	require.Greater(t, len(full), 1, "样本太小，删一个字段后断言不成立")
+	dropped := full[0]
+	obs := mergedObs([]string{extractorTSFStock, extractorTSFFlow}, full[1:])
+
+	rep, err := Validate(context.Background(), obs, NoHistory, DefaultThresholds())
+	require.NoError(t, err, "闸门失败不该变成 Go error")
+
+	c := findCheck(t, rep, "completeness")
+	assert.Equal(t, CheckFailed, c.Status,
+		"merged@v1 的 completeness 必须真的被求值。若这里是 skipped，说明 gateCompleteness "+
+			"仍在拿 requiredFields(Meta.Extractor)——那正是缺口 A-1：42 个合并观测的 "+
+			"completeness 谁都不查，还带着零告警进权威表")
+	assert.NotContains(t, c.Reason, "unknown_extractor",
+		"reason 仍是 unknown_extractor ⇒ 分支根本没走到 mergedRequiredFields")
+	assert.Contains(t, c.Reason, "missing 1",
+		"少给一个字段就该报缺 1 个；数目不对说明必填集取错了组")
+	assert.Contains(t, c.Reason, dropped, "报出的缺失字段必须就是被删掉的那个")
+
+	// 反向一格：字段齐全时必须 passed —— 只有失败用例的话，一个「恒 failed」的
+	// 实现也能让上面全绿。
+	whole := mergedObs([]string{extractorTSFStock, extractorTSFFlow}, full)
+	repOK, err := Validate(context.Background(), whole, NoHistory, DefaultThresholds())
+	require.NoError(t, err)
+	assert.Equal(t, CheckPassed, findCheck(t, repOK, "completeness").Status,
+		"stock ∪ flow 全给齐时 completeness 该 passed")
+}
+
+// TestMergedCompletenessSkipsWhenPartsYieldNoFields 钉住本任务**最容易引入的新缺陷**。
+//
+// mergedRequiredFields 的 out := make([]string, 0, len(want)) **永远返回非 nil 切片**
+// （M1c-3b 的 TASK-002 在 interfaces_exposed 里写明了这条边界）⇒ 判据若写成
+// `req == nil`，对 merged@v1 **恒不命中**，会一路落到 len(missing)==0 返回 CheckPassed：
+// 一个 Parts 为空的合并观测被判「completeness 通过」，而它一个字段都没查。
+//
+// 🔴 这比缺口 A-1 原本的 skipped **更糟**：skipped 在报告里可见、可被 M1c-3b 的
+// TASK-010 的判据数出来；passed 是**完全静默**的。修 A-1 时引入一个同类的静默失效，
+// 是本任务唯一不可接受的结果。故判据必须是 len(req) == 0。
+func TestMergedCompletenessSkipsWhenPartsYieldNoFields(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		parts []string
+	}{
+		{"Parts 为 nil", nil},
+		{"Parts 为空切片", []string{}},
+		{"Parts 全是拿不到必填集的值", []string{"bogus@v9", "llm-fallback@v1"}},
+		{"Parts 只含 merged 自身（自指，同样说不出必填集）", []string{extractorMerged}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// 给足 Values：若判据写错成 req == nil，这里会 passed 而不是 skipped，
+			// 而 Values 非空正是让那个错误显形的条件。
+			obs := mergedObs(tt.parts, tsfStockFields())
+
+			rep, err := Validate(context.Background(), obs, NoHistory, DefaultThresholds())
+			require.NoError(t, err)
+
+			c := findCheck(t, rep, "completeness")
+			assert.NotEqual(t, CheckPassed, c.Status,
+				"必填集为空时判 passed = 一个字段都没查却说「通过」，这是静默失效，"+
+					"比 skipped 更糟；成因通常是判据写成了 req == nil（mergedRequiredFields "+
+					"永远返回非 nil 切片，那个判据恒不命中）")
+			assert.Equal(t, CheckSkipped, c.Status)
+			assert.Contains(t, c.Reason, "unknown_extractor:"+extractorMerged,
+				"skipped 必须说明原因，否则报告里看不出这一格为什么没查")
+		})
+	}
+}
+
+// TestMergedPartsDoNotRoundTrip 把「Parts 不入库」从**注释**变成**断言**。
+//
+// 一个不持久化的导出字段最容易被后人当成能往返的：读回来恒为 nil 而代码看不出来，
+// 于是「历史观测的 Parts」会被静默当成「没有 parts」而不是「这个问题问不了」。
+//
+// ⚠️ 放在 validate_test.go 而不是 store_test.go：后者在 M1c-3b 的 TASK-003/006 的
+// writes 里，写那里会造成 scope 互斥。
+func TestMergedPartsDoNotRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+
+	parts := []string{extractorTSFStock, extractorTSFFlow}
+	obs := mergedObs(parts, tsfStockFields())
+	obs.Meta.Period = "2025-12"
+	obs.Meta.PeriodType = "monthly"
+	obs.Meta.PublishedAt = "2025-12-15"
+	obs.Meta.ArticleID = "art-2025-12"
+
+	_, err := s.Save(context.Background(), obs, passing())
+	require.NoError(t, err)
+
+	got, err := s.Preceding(context.Background(), "2026-01", "monthly", 1)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "刚存的那期该读得回来")
+
+	assert.Nil(t, got[0].Parts,
+		"Parts 是进程内的合并取证，metaColumns 是七列、insertSQL 显式列举，它不在其中 ⇒ "+
+			"读回来必须是 nil。若这里非 nil，说明有人把它加进了持久化路径")
+	assert.Equal(t, extractorMerged, got[0].Meta.Extractor,
+		"extractor 该照常往返——用它证明上面那条 nil 不是因为整条记录没读到")
+
+	// 调用方手里的那份不受影响：Save 改的是值参数的副本。
+	assert.Equal(t, parts, obs.Parts, "Save 不得清空调用方的 Parts")
+}

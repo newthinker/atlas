@@ -457,7 +457,22 @@ func yoyFields() []string {
 // 按 absent 跳过，这道把「整期没有数据」判成不过闸。
 func gateCompleteness(in gateInput) Check {
 	req := requiredFields(in.obs.Meta.Extractor)
-	if req == nil {
+	// merged@v1 的必填集取决于由哪几篇合成，requiredFields 只拿得到一个字符串，
+	// 结构上说不出来（见 TestRequiredFieldsRejectsBareMerged）。改问 Parts。
+	// 不改 Validate 的签名：gateInput 已持有 obs，改签名要动 39 个调用点、4 个文件。
+	if in.obs.Meta.Extractor == extractorMerged {
+		req = mergedRequiredFields(in.obs.Parts)
+	}
+	// 🔴 判据是 len(req) == 0，**不能写成 req == nil**（M1c-3b 的 TASK-011）。
+	// mergedRequiredFields 的 out := make([]string, 0, len(want)) **永远返回非 nil 切片**，
+	// 故 req == nil 对 merged@v1 恒不命中 ⇒ 一路落到 len(missing)==0 返回 CheckPassed：
+	// 一个 Parts 为空的合并观测被判「completeness 通过」而它一个字段都没查。
+	// 那比本任务要修的 skipped 更糟——skipped 在报告里可见，passed 完全静默。
+	// 见 TestMergedCompletenessSkipsWhenPartsYieldNoFields。
+	//
+	// 对非 merged 路径**逐字等价**：requiredFields 对未知 extractor 返回 nil，
+	// 而 len(nil) == 0 同样成立。
+	if len(req) == 0 {
 		return Check{Status: CheckSkipped,
 			Reason: "unknown_extractor:" + in.obs.Meta.Extractor}
 	}
