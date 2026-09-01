@@ -135,7 +135,7 @@ const (
 //
 // 一篇文章走到 collectSamples 有四种去向（出样本 / 本迭代不解析 / 该支持却失败了 /
 // 标题解析不出期次），外加 fetch 阶段就没抓到的。**只渲染 Samples 会让「失败：无」
-// 这句话变成假话** —— 而失败表的用途正是「M1c-3 入库前要清零」。
+// 这句话变成假话** —— 而失败表的用途正是**让该修的东西可见**。
 //
 // 不碰文件系统：w 由调用方注入。
 func renderCalibrateReport(w io.Writer, res *CalibrateResult) error {
@@ -211,7 +211,10 @@ func writeFailureSection(w io.Writer, res *CalibrateResult) {
 		fmt.Fprintf(w, "%s\n", noFailureClaim)
 	}
 
-	writeParseFailures(w, "解析失败（该支持却失败了，M1c-3 入库前要清零）", res.Failures)
+	// ⚠️ 归属措辞与摘要栏那行（calibrate.go 的 writeCollectSummary）**必须一致**：
+	// 同一批篇目在一份报告里出现两个归属，读者会以为是两批不同的东西
+	// （M1c-3b 的 TASK-008 统一为「M1c-4 的兜底工作量」）。
+	writeParseFailures(w, "解析失败（该支持却失败了，M1c-4 的兜底工作量）", res.Failures)
 
 	if len(res.FetchFailed) > 0 {
 		fmt.Fprintf(w, "抓取失败（%d 篇，fetch 阶段就没抓到）\n", len(res.FetchFailed))

@@ -281,7 +281,8 @@ func countLines(out, want string) int {
 // # 这些不是「顺手也渲染一下」，每一条都是 calibrate.go 字段注释里写下的**待验断言**
 //
 //   - FetchFailed：「不带出来的话，报告会显示『失败：无』，而失败表的用途正是
-//     『M1c-3 入库前要清零』」
+//     **让该修的东西可见**」（原文照录 —— 源在 calibrate.go 的 FetchFailed 字段注释，
+//     措辞由 M1c-3b 的 TASK-008 统一，改源必须同时改这里，否则「照录」本身变成假话）
 //   - Unsupported：「**不是失败**，混进 Failures 会在真语料上产生 193 条假失败」
 //   - Unclassified：「非 0 意味着站点改了期次表述」——原文照录
 //   - Warnings：「说的是语料的性质」，真跑必然出现「无 reconcile 对账摘要」那条
@@ -312,7 +313,7 @@ func TestRenderCalibrateReportRendersEveryDisposition(t *testing.T) {
 //
 // 这条单独立一格，因为它是 FetchFailed 那段注释点名的失效形态 ——
 // 一个只看 Failures 的实现会在这份输入上宣布「解析失败：无」，而**同一份产物里
-// 确实有一篇没抓到**。M1c-3 入库前要清零的是两者之和。
+// 确实有一篇没抓到**。回填入库之前要清零的是两者之和。
 func TestRenderCalibrateReportCountsFetchFailuresWhenParseFailuresAreEmpty(t *testing.T) {
 	res := renderFixture()
 	res.Failures = nil // 只剩 fetch 阶段的失败
@@ -425,6 +426,70 @@ func TestStockContinuityRatesPairAdjacentSamplesAcrossGaps(t *testing.T) {
 	require.Equal(t, 2, got["annual"].N,
 		"跨洞的 2019→2021 也是一对相邻样本；按固定间隔配对会把它丢掉，而丢掉是静默的")
 	assert.InDelta(t, 0.10, got["annual"].Max, 1e-12, "2019→2021 那对（20/200）必须在里面")
+}
+
+// 🔴 **R9：`stockContinuityRates` 的输入必须业务键唯一，而这条前提此前只是隐含的**
+// （M1c-3b 的 TASK-008，结转项 2；CONTRACTS 的 R9 那一节）。
+//
+// 业务键 = `(PeriodType, Period)`。同一档里出现两条同期次的 `tsf_stock` 记录时，排序会
+// 把它们排到相邻，环比就成了 `|x-x|/|x| == 0` —— **报告上凭空多出一档「环比 0%」**，
+// 而 `stockContinuityRates` 上方那句注释正是为「不要凭空产生一个 0」写的：那里防住的是
+// 「只有一期」，防不住「同一期来了两条」。这份分布是 M1c-3b 填 `magnitude_ranges` 的输入，
+// 多出来的 0 会把 min 拉到 0、把 p5 拉低，**而它看起来完全像一条正常样本**。
+//
+// ⚠️ **今天不出事，靠的是发布习惯，不是代码。** `Records` 整体有 42 组重复业务键 /
+// 107 条记录，只是带 `tsf_stock` 的 79 条里重复**恰为 0** —— 因为央行 2025-10 起把社融
+// 并进月报、不再单发，两族在时间上互补。过渡月双发、或 M1c-4 修好 2026-01 那类失败，
+// 都会让这个 0 变成非 0。**没有任何代码保证它。**
+//
+// ⇒ 本条把那个前提变成显式的：上半段钉住「重复会造成什么」（否则读者不知道为什么要在意），
+// 下半段提供可复用的判据，谁改了 `Records` 的来源都能用它自查。
+func TestStockContinuityRatesAssumeUniqueBusinessKey(t *testing.T) {
+	// 先证明危害是真的：同一 (annual, 2022-12) 来两条，环比里就多一个 0。
+	dup := []SampleRecord{
+		{Period: "2021-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 200}},
+		{Period: "2022-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 220}},
+		{Period: "2022-12", PeriodType: "annual", Values: map[string]float64{FieldTSFStock: 220}},
+	}
+	got := stockContinuityRates(dup)
+	require.Contains(t, got, "annual")
+	assert.Equal(t, 2, got["annual"].N, "三条记录 ⇒ 两个相邻对，其中一对来自重复业务键")
+	assert.InDelta(t, 0, got["annual"].Min, 1e-12,
+		"重复业务键会造出一档环比 0% —— 它和一条真正平稳的样本在报告上长得一模一样")
+
+	// 阴性对照：去掉那条重复，0 就没了。**没有这一半，上面的 0 也可能来自别处。**
+	uniq := dup[:2]
+	got = stockContinuityRates(uniq)
+	assert.Equal(t, 1, got["annual"].N)
+	assert.InDelta(t, 0.10, got["annual"].Min, 1e-12, "唯一业务键下不该有 0 这一档")
+
+	// 判据本身：谁改了 Records 的来源，用它自查。
+	assert.Empty(t, duplicateStockBusinessKeys(uniq), "唯一输入不得报出重复")
+	assert.Equal(t, []string{"annual/2022-12"}, duplicateStockBusinessKeys(dup),
+		"重复输入必须被指名道姓地报出来，只报个数没法查")
+}
+
+// duplicateStockBusinessKeys 返回 recs 里**带 tsf_stock 的记录**中重复出现的业务键
+// `PeriodType/Period`，升序、去重。空切片表示满足唯一性。
+//
+// 只看带 `tsf_stock` 的那些：`stockContinuityRates` 的分组前置条件就是这个筛子，
+// 对全体 `Records` 求重复会得到 42 组 —— 那是真实存在且无害的（社融族与月报族互补），
+// 拿它当判据会让这条断言从第一天起就红，然后被人调松或删掉。
+func duplicateStockBusinessKeys(recs []SampleRecord) []string {
+	seen := map[string]int{}
+	for _, r := range recs {
+		if _, ok := r.Values[FieldTSFStock]; ok {
+			seen[r.PeriodType+"/"+r.Period]++
+		}
+	}
+	var dups []string
+	for k, n := range seen {
+		if n > 1 {
+			dups = append(dups, k)
+		}
+	}
+	slices.Sort(dups)
+	return dups
 }
 
 // 上一期为 0 时跳过该对，不产生 Inf。
