@@ -687,7 +687,7 @@ func TestCollectSamplesSurfacesSearchSkippedReason(t *testing.T) {
 }
 
 // Manifest.Failed 是 fetch 阶段没抓到的篇目：它们既不在 Articles 也不在解析失败表，
-// 不读就会让报告显示「失败：无」—— 而失败表的用途正是「M1c-3 入库前要清零」。
+// 不读就会让报告显示「失败：无」—— 而失败表的用途正是**让该修的东西可见**。
 func TestCollectSamplesSurfacesFetchFailed(t *testing.T) {
 	dir := writeCalibrateFixture(t, Manifest{
 		From:        "2020-01",
@@ -968,7 +968,7 @@ func TestCollectSamplesKeepsTSFAndFinanceFieldsIndependent(t *testing.T) {
 //
 // # 为什么不归 Failures
 //
-// `Failures` 在报告里的标题是「解析失败（该支持却失败了，M1c-3 入库前要清零）」，
+// `Failures` 在报告里的标题是「解析失败（该支持却失败了，M1c-4 的兜底工作量）」，
 // 而 calibrate.go 顶部注释写着「③ 解析失败 —— M1c-4 要兜的就是这批」。
 // 这类报告**正文里根本没有累计数据**（小标题全是当月），LLM 兜底也变不出不存在的数——
 // 归进去等于给 M1c-4 凭空加一批**永远清不了零**的工作量。
