@@ -2,6 +2,7 @@ package hestia
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -271,6 +272,27 @@ func (t Thresholds) validate() error {
 			r, ok := t.MagnitudeRanges[f]
 			if !ok {
 				continue
+			}
+			// NaN / Inf 必须先于下面的 min >= max 检查（M1c-3b 的 TASK-012）。
+			//
+			// IEEE 754 规定涉 NaN 的比较除 != 外**恒假**，所以 r.Min >= r.Max
+			// 拦不住它；而下游 gateMagnitudeSanity 的判据 v < r.Min || v > r.Max
+			// **两侧同样恒假** ⇒ 该字段的幅度闸完全不设防，且报 passed。
+			// 这与「打错字段名」是同一失效模式的第二条入口：表看起来配上了，
+			// 而那道闸对该字段照样不设防。
+			//
+			// 实测（M1c-3b 的 TASK-004 交付后自查）：{NaN,NaN} / {NaN,1000} /
+			// {0,NaN} / {-Inf,+Inf} 四种此前全部通过 validate；配 fx_reserve=42
+			// （越界两个数量级）⇒ magnitude_sanity = passed。
+			//
+			// ±Inf 一并拒绝：[-Inf,+Inf] 在数据上与「忘了填」不可分，而一个永远
+			// 不会失败的区间与没配这个字段等价 —— 差别只在配置的人以为配了。
+			if math.IsNaN(r.Min) || math.IsNaN(r.Max) ||
+				math.IsInf(r.Min, 0) || math.IsInf(r.Max, 0) {
+				return fmt.Errorf("hestia: magnitude_ranges[%s] 的 min/max 必须是有限实数, "+
+					"实得 min=%v max=%v: NaN 参与的比较恒假、Inf 区间永不越界，"+
+					"两者都会让这道闸对该字段完全不设防且报 passed——"+
+					"YAML 里写 .nan / .inf 也会走到这里", f, r.Min, r.Max)
 			}
 			if r.Min >= r.Max {
 				return fmt.Errorf("hestia: magnitude_ranges[%s] 的 min(%g) >= max(%g): "+
