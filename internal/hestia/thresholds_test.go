@@ -456,3 +456,46 @@ func TestMagnitudeRangesAcceptValidTable(t *testing.T) {
 	}
 	require.NoError(t, th.validate())
 }
+
+// Context Checkpoint: done_criteria → test mapping（M1c-3b 的 TASK-005）
+// functional[0] 五档改为 monthly 0.05 / 其余 0.20 → TestStockContinuityMaxIsCalibrated
+// functional[1] 钉住具体数字而非「大于 0」        → TestStockContinuityMaxIsCalibrated
+// functional[2] 阈值须越过实测极值                → TestMonthlyThresholdCoversObservedMaximum
+
+// 钉住的是**这四个数本身**，不是「大于 0」——它们各自有出处（见
+// defaultStockContinuityMax 的注释），随手改一个应当在这里转红，
+// 迫使改的人一并去更新那段出处。
+//
+// 与 TestDefaultStockContinuityIsTieredByPeriodType 不重复：那条钉的是**结构**
+// （键集齐全、monthly 严格小于 annual、四种累计口径同档），改数字不会让它红；
+// 这条钉的是**取值**。两条都在，结构与取值各有守卫。
+func TestStockContinuityMaxIsCalibrated(t *testing.T) {
+	assert.Equal(t, map[string]float64{
+		"monthly": 0.05,
+		"q1":      0.20,
+		"h1":      0.20,
+		"q1_q3":   0.20,
+		"annual":  0.20,
+	}, DefaultThresholds().StockContinuityMax,
+		"这四个数来自 M1c-3b 的实测分布；改动前先读 defaultStockContinuityMax 的注释，"+
+			"那段写明了每个数的出处与 n")
+}
+
+// 阈值必须**严格越过**实测极值，否则那个真实出现过的期次会被自己的闸门拦下。
+//
+// 这条是那次修正的墓碑：旧的 monthly=0.02 **低于实测 p95（0.02291）** ⇒ 至少 5%
+// 的 monthly 期次会被判进 pending，而 `--force` 对已入权威表的期次是数据层
+// no-op ⇒ **拦错了没有出路**。
+//
+// ⚠️ 断言写成「阈值 > 实测极值」而不是「阈值 == 0.05」：后者与上面那条重复，
+// 且它钉的是取值、不是**性质**。这条要守的性质是「容得下已经观测到的东西」，
+// 换一批语料重标之后它应当仍然成立。
+func TestMonthlyThresholdCoversObservedMaximum(t *testing.T) {
+	m := DefaultThresholds().StockContinuityMax
+
+	assert.Greater(t, m["monthly"], 0.02613,
+		"monthly 实测极值 0.026130169926258526（n=68，M1c-3b 标定）："+
+			"阈值不越过它，那一期就会被自己的闸门拦下")
+	assert.Greater(t, m["annual"], 0.13338,
+		"annual 实测极值 0.13338108312442792（n=6，M1c-3b 标定）")
+}
