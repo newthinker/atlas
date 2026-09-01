@@ -47,7 +47,7 @@ func TestTSFSectionFieldsDerivesFromTemplateTables(t *testing.T) {
 	tsfStockItems = append(slices.Clone(origStock),
 		tsfStockItem{"哨兵分项", "sentinel_balance", "sentinel_balance_yoy"})
 	tsfFlowItems = append(slices.Clone(origFlow),
-		nameField{"哨兵分项", "sentinel_flow_ytd"})
+		nameField{"哨兵分项", "sentinel_flow_ytd", "sentinel_flow_mom"})
 
 	got := tsfSectionFields()
 	assert.Len(t, got, base+3, "往模板表加了 3 个字段，派生结果却没跟着长——没在遍历模板表")
@@ -247,7 +247,7 @@ func TestTSFStandaloneFieldsDeriveFromTemplateTables(t *testing.T) {
 	tsfStockItems = append(slices.Clone(origStock),
 		tsfStockItem{"哨兵分项", "sentinel_balance", "sentinel_balance_yoy"})
 	tsfFlowItems = append(slices.Clone(origFlow),
-		nameField{"哨兵分项", "sentinel_flow_ytd"})
+		nameField{"哨兵分项", "sentinel_flow_ytd", "sentinel_flow_mom"})
 
 	stock, flow := requiredFields(extractorTSFStock), requiredFields(extractorTSFFlow)
 	assert.Len(t, stock, 20, "往存量模板表加了 2 个字段，存量必填集却没跟着长")
@@ -383,7 +383,10 @@ func TestMergedRequiredFieldsIsUnionOfParts(t *testing.T) {
 	// extractor —— 两个数都对，别混起来。
 	three := mergedRequiredFields([]string{
 		extractorMonthlyV1, extractorTSFStock, extractorTSFFlow})
-	want := without(fieldOrder, fxSectionFields())
+	// 再减 momFields()：M1c-4 的 TASK-004 加的 22 个 *_mom 列暂不进任何必填集
+	// （理由与退场点见 required.go 的 momFields 注释）。TASK-006 落地后这一层
+	// 应当与 momFields 本身一起去掉。
+	want := without(without(fieldOrder, fxSectionFields()), momFields())
 	require.ElementsMatch(t, want, three,
 		"月报v1 + 社融存量 + 社融增量 应当覆盖除外汇两字段外的全部 52 个字段")
 

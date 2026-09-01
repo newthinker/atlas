@@ -67,6 +67,29 @@ const (
 	FieldTSFFlowBankAcceptYTD = "tsf_flow_bankaccept_ytd"
 	FieldTSFFlowEquityYTD     = "tsf_flow_equity_ytd"
 
+	// —— A.1 社会融资规模 · 增量当月（9，M1c-4 的 TASK-004） ——
+	//
+	// 🔴 **为什么需要这一族**：央行在 2020–2023 的相当多期次里，社融增量报告
+	// **只发当月数**（实测 2020-04 全文只有「2020年4月社会融资规模增量为3.09万亿元」，
+	// 没有任何累计句）；另一些期次则是「累计合计句孤悬段末 + 当月句带整套分项」
+	// （实测 2022-07/08/10/11、2023-07/08/10/11）。
+	//
+	// 此前解析器对这两种形态都**拒绝整篇**，而拒绝是对的 —— 把当月值装进 *_ytd
+	// 会得到量级完全合理的错值，下游没有任何闸门拦得住。缺的不是抽取能力，
+	// 是这一族列（spec §1）。
+	//
+	// ⚠️ 本任务（M1c-4 的 TASK-004）只加列与声明，**抽取侧按口径选列是 M1c-4 的
+	// TASK-005**。在那之前这 22 列恒为空，不进任何字段分布表。
+	FieldTSFFlowMoM           = "tsf_flow_mom"
+	FieldTSFFlowRMBLoanMoM    = "tsf_flow_rmb_loan_mom"
+	FieldTSFFlowFXLoanMoM     = "tsf_flow_fx_loan_mom"
+	FieldTSFFlowEntrustMoM    = "tsf_flow_entrust_mom"
+	FieldTSFFlowTrustMoM      = "tsf_flow_trust_mom"
+	FieldTSFFlowBankAcceptMoM = "tsf_flow_bankaccept_mom"
+	FieldTSFFlowCorpBondMoM   = "tsf_flow_corp_bond_mom"
+	FieldTSFFlowGovtBondMoM   = "tsf_flow_govt_bond_mom"
+	FieldTSFFlowEquityMoM     = "tsf_flow_equity_mom"
+
 	// —— A.2 货币供应量（6） ——
 	// M1 口径在 2025-01 修订过（纳入个人活期存款），跨该点的同比无效。
 	// 这件事校验闸门拦不住，只能靠 caliber_version 标注。
@@ -88,6 +111,17 @@ const (
 	FieldDepositFiscalYTD    = "deposit_fiscal_ytd"
 	FieldDepositNBFIYTD      = "deposit_nbfi_ytd"
 
+	// —— A.3 存款 · 当月（5，M1c-4 的 TASK-004） ——
+	//
+	// 实测 2022-07 金融统计：存款节只有「7月份人民币存款增加447亿元」，
+	// 而同一篇的贷款节有「1-7月，人民币贷款累计增加14.35万亿元」
+	// ⇒ **同一份观测里不同字段族的口径不同**，这是本族存在的直接理由。
+	FieldDepositFlowMoM      = "deposit_flow_mom"
+	FieldDepositHouseholdMoM = "deposit_household_mom"
+	FieldDepositCorpMoM      = "deposit_corp_mom"
+	FieldDepositFiscalMoM    = "deposit_fiscal_mom"
+	FieldDepositNBFIMoM      = "deposit_nbfi_mom"
+
 	// —— A.4 贷款（10） ——
 	FieldLoanBalance      = "loan_balance"
 	FieldLoanBalanceYoY   = "loan_balance_yoy"
@@ -100,6 +134,22 @@ const (
 	FieldLoanBillYTD      = "loan_bill_ytd"
 	FieldLoanNBFIYTD      = "loan_nbfi_ytd"
 
+	// —— A.4 贷款 · 当月（8，M1c-4 的 TASK-004） ——
+	//
+	// ⚠️ **贷款族不是可选项。** extract.go 的分部门口径守卫也守着贷款分部门段，
+	// 只是存款那道先返回。实测 2023-07：「前七个月人民币贷款增加16.08万亿元……
+	// 7月份人民币贷款增加3459亿元。分部门看，住户贷款减少2007亿元……」
+	// ⇒ 合计有两种口径、分部门全是当月。不加这一族，那 4 篇修好存款后
+	// 会在贷款守卫上换个地方失败。
+	FieldLoanFlowMoM      = "loan_flow_mom"
+	FieldLoanHHShortMoM   = "loan_hh_short_mom"
+	FieldLoanHHMLTMoM     = "loan_hh_mlt_mom"
+	FieldLoanCorpTotalMoM = "loan_corp_total_mom"
+	FieldLoanCorpShortMoM = "loan_corp_short_mom"
+	FieldLoanCorpMLTMoM   = "loan_corp_mlt_mom"
+	FieldLoanBillMoM      = "loan_bill_mom"
+	FieldLoanNBFIMoM      = "loan_nbfi_mom"
+
 	// —— A.5 利率与外部（4） ——
 	FieldRateIBO   = "rate_ibo"
 	FieldRateRepo  = "rate_repo"
@@ -107,11 +157,14 @@ const (
 	FieldFXRate    = "fx_rate"
 )
 
-// fieldOrder 是全部 54 个业务字段，按附录 A 的分组顺序。
+// fieldOrder 是全部 76 个业务字段，按附录 A 的分组顺序。
 //
 // 顺序有意义：DDL 的列顺序、INSERT 的列顺序都跟随它。遍历字段时一律用
 // 这个切片而不是 map——map 迭代顺序随机，会让每次生成的 SQL 都不同，
 // 日志无法比对。
+//
+// M1c-4 的 TASK-004 起，三个流量族各自带一份当月口径列（*_mom），**紧跟在
+// 对应的 *_ytd 项之后**：报告按本切片的顺序打印，同族聚在一起读起来才成话。
 var fieldOrder = []string{
 	// A.1 社融 · 总量
 	FieldTSFStock, FieldTSFStockYoY, FieldTSFFlowYTD,
@@ -128,17 +181,35 @@ var fieldOrder = []string{
 	FieldTSFFlowRMBLoanYTD, FieldTSFFlowGovtBondYTD, FieldTSFFlowCorpBondYTD,
 	FieldTSFFlowFXLoanYTD, FieldTSFFlowEntrustYTD, FieldTSFFlowTrustYTD,
 	FieldTSFFlowBankAcceptYTD, FieldTSFFlowEquityYTD,
+	// A.1 社融 · 增量当月（M1c-4 的 TASK-004）
+	//
+	// FieldTSFFlowMoM 是总量，放在增量**分项之后**而不是跟着 FieldTSFFlowYTD
+	// （A.1 总量那一行）：同族相邻的判据是「报告里读起来成话」，而当月这一族
+	// 整体是一段，总量领着它自己的分项。
+	FieldTSFFlowMoM,
+	FieldTSFFlowRMBLoanMoM, FieldTSFFlowGovtBondMoM, FieldTSFFlowCorpBondMoM,
+	FieldTSFFlowFXLoanMoM, FieldTSFFlowEntrustMoM, FieldTSFFlowTrustMoM,
+	FieldTSFFlowBankAcceptMoM, FieldTSFFlowEquityMoM,
 	// A.2 货币供应量
 	FieldM2, FieldM2YoY, FieldM1, FieldM1YoY, FieldM0, FieldM0YoY,
 	// A.3 存款
 	FieldDepositBalance, FieldDepositBalanceYoY, FieldDepositFlowYTD,
 	FieldDepositHouseholdYTD, FieldDepositCorpYTD, FieldDepositFiscalYTD,
 	FieldDepositNBFIYTD,
+	// A.3 存款 · 当月（M1c-4 的 TASK-004）
+	FieldDepositFlowMoM,
+	FieldDepositHouseholdMoM, FieldDepositCorpMoM, FieldDepositFiscalMoM,
+	FieldDepositNBFIMoM,
 	// A.4 贷款
 	FieldLoanBalance, FieldLoanBalanceYoY, FieldLoanFlowYTD,
 	FieldLoanHHShortYTD, FieldLoanHHMLTYTD,
 	FieldLoanCorpTotalYTD, FieldLoanCorpShortYTD, FieldLoanCorpMLTYTD,
 	FieldLoanBillYTD, FieldLoanNBFIYTD,
+	// A.4 贷款 · 当月（M1c-4 的 TASK-004）
+	FieldLoanFlowMoM,
+	FieldLoanHHShortMoM, FieldLoanHHMLTMoM,
+	FieldLoanCorpTotalMoM, FieldLoanCorpShortMoM, FieldLoanCorpMLTMoM,
+	FieldLoanBillMoM, FieldLoanNBFIMoM,
 	// A.5 利率与外部
 	FieldRateIBO, FieldRateRepo, FieldFXReserve, FieldFXRate,
 }

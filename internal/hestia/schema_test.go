@@ -1,7 +1,7 @@
 package hestia
 
 // Context Checkpoint: done_criteria → test mapping (schema)
-// functional[0]      业务列逐列由 fieldOrder 派生并按其顺序排列，列数恰好 61
+// functional[0]      业务列逐列由 fieldOrder 派生并按其顺序排列，列数恰好 83
 //                                                        → TestObservationsColumnsDeriveFromFieldOrder
 // functional[1]      metaColumns 与 reflect 取到的 Meta 字段名(snake_case)逐一相等
 //                                                        → TestMetaColumnsMatchMetaStructByReflect
@@ -137,8 +137,11 @@ func TestObservationsColumnsDeriveFromFieldOrder(t *testing.T) {
 	for i, c := range cols {
 		names[i] = c.name
 	}
-	// 61 = 7 元数据 + 54 业务。PRIMARY KEY 是约束不是列，不计入。
-	require.Len(t, names, 61, "7 个 metaColumns + 54 个业务字段")
+	// 83 = 7 元数据 + 76 业务。PRIMARY KEY 是约束不是列，不计入。
+	//
+	// M1c-4 的 TASK-004 由 61 改成 83：observationsDDL 逐列从 fieldOrder 派生，
+	// 加那 22 个 *_mom 列**没有手写一行 DDL**，本条转红正是它在如实报告扩表。
+	require.Len(t, names, 83, "7 个 metaColumns + 76 个业务字段")
 	assert.Equal(t, metaColumns, names[:len(metaColumns)], "前七列是元数据列，按 metaColumns 顺序")
 	assert.Equal(t, fieldOrder, names[len(metaColumns):],
 		"业务列必须逐项、按 fieldOrder 的顺序排列——列序与 INSERT 列序同源")
@@ -230,7 +233,7 @@ func TestCurrentViewStructureFromLiveDB(t *testing.T) {
 	defer rows.Close()
 	names, err := rows.Columns()
 	require.NoError(t, err)
-	assert.Len(t, names, 61, "视图是 SELECT *，列数应与观测表一致")
+	assert.Len(t, names, 83, "视图是 SELECT *，列数应与观测表一致")
 }
 
 func TestCurrentViewDDLUsesBitemporal(t *testing.T) {

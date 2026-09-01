@@ -1,6 +1,6 @@
 package hestia
 
-import "slices"
+import "strings"
 
 // tsfSectionFields 返回社融两节（sectionRules 里标 v2Only 的那两条）产出的
 // 全部 27 个字段。
@@ -18,7 +18,7 @@ func tsfSectionFields() []string {
 		out = append(out, it.balanceField, it.yoyField)
 	}
 	for _, it := range tsfFlowItems {
-		out = append(out, it.field)
+		out = append(out, it.ytdField)
 	}
 	return append(out, FieldTSFStock, FieldTSFStockYoY, FieldTSFFlowYTD)
 }
@@ -46,7 +46,7 @@ func tsfStockFields() []string {
 func tsfFlowFields() []string {
 	out := make([]string, 0, len(tsfFlowItems)+1)
 	for _, it := range tsfFlowItems {
-		out = append(out, it.field)
+		out = append(out, it.ytdField)
 	}
 	return append(out, FieldTSFFlowYTD)
 }
@@ -79,16 +79,43 @@ func fxSectionFields() []string {
 	return []string{FieldFXReserve, FieldFXRate}
 }
 
+// momFields 是 fieldOrder 里全部当月口径列（M1c-4 的 TASK-004 加的那 22 个）。
+//
+// 🔴 **这是一段有明确退场条件的过渡代码，退场点是 M1c-4 的 TASK-006。**
+//
+// TASK-004 只加列与声明，抽取侧按口径选列是 TASK-005 的事 ⇒ 在 TASK-005 落地之前
+// 这 22 列**恒为空**。让它们直接进必填集，每一期的 completeness 都会立刻报「缺 22
+// 个字段」—— 那是把 absent-by-design 记成 failed，正是 types.go 与
+// mergedRequiredFields 都在防的同一件事。
+//
+// TASK-006 把 gateCompleteness 的缺失判定换成口径感知的 missingCaliberAware
+// （*_ytd 与 *_mom 任一在场即不算缺）。**那一步落地后本函数与下面两处 without
+// 调用应当一并删除**，requiredFields 的两个分支回到「整个 fieldOrder」与
+// 「fieldOrder − 社融节」。
+//
+// 从 fieldOrder 按后缀派生而不是手写第二份名单：手写的那份迟早与 fieldOrder 分叉，
+// 而先错的一定是手抄的那份（与 tsfSectionFields 的注释同一条理由）。
+func momFields() []string {
+	var out []string
+	for _, f := range fieldOrder {
+		if strings.HasSuffix(f, "_mom") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // requiredFields 返回某个 extractor 的期次应当出现的全部字段。
 // 未知或语义不足的 extractor 返回 nil，调用方据此记 skipped 而不是 failed。
 func requiredFields(extractor string) []string {
 	switch extractor {
 	case extractorV2:
-		// Clone 而不是直接返回：fieldOrder 是 DDL、INSERT 列、白名单的
+		// without 而不是 slices.Clone(fieldOrder)：*_mom 暂不进必填集，见 momFields。
+		// 它同时保住了「交出的是副本」——fieldOrder 是 DDL、INSERT 列、白名单的
 		// 共同真相源，交出底层数组等于把三者一起交出去。
-		return slices.Clone(fieldOrder)
+		return without(fieldOrder, momFields())
 	case extractorV1:
-		return without(fieldOrder, tsfSectionFields())
+		return without(without(fieldOrder, tsfSectionFields()), momFields())
 
 	// —— 月报：对应季报的必填集精确减去外汇板块那两个字段（M1c-3a 的 TASK-003）——
 	//

@@ -29,26 +29,33 @@ import (
 )
 
 // templateFields 汇总所有模板表声明的字段，供覆盖度与重复检查共用。
+//
+// nameField 的**两列都收**（M1c-4 的 TASK-004）：TestTemplateTablesCoverAllFields
+// 断言「模板覆盖的字段数 == len(fieldOrder)」，只收 ytdField 就是 54 vs 76。
+// loanScope 的 totalMoM 同理。
 func templateFields() []string {
 	var out []string
 	for _, it := range tsfStockItems {
 		out = append(out, it.balanceField, it.yoyField)
 	}
 	for _, it := range tsfFlowItems {
-		out = append(out, it.field)
+		out = append(out, it.ytdField, it.momField)
 	}
 	for _, it := range moneyItems {
 		out = append(out, it.balanceField, it.yoyField)
 	}
 	for _, it := range depositItems {
-		out = append(out, it.field)
+		out = append(out, it.ytdField, it.momField)
 	}
 	for _, sc := range loanScopes {
 		if sc.totalField != "" {
 			out = append(out, sc.totalField)
 		}
+		if sc.totalMoM != "" {
+			out = append(out, sc.totalMoM)
+		}
 		for _, it := range sc.items {
-			out = append(out, it.field)
+			out = append(out, it.ytdField, it.momField)
 		}
 	}
 	return append(out, singletonFields()...)

@@ -1,10 +1,10 @@
 package hestia
 
 // Context Checkpoint: done_criteria → test mapping (fields)
-// functional[0]      分组计数符合附录 A（tsf_ 27 / 货币 6 / deposit_ 7 / loan_ 10 / rate_+fx_ 4）
+// functional[0]      分组计数符合附录 A（tsf_ 36 / 货币 6 / deposit_ 12 / loan_ 18 / rate_+fx_ 4）
 //                                                        → TestFieldGroupCounts
 // functional[1]      allFields 与 fieldOrder 元素完全一致 → TestAllFieldsMatchesFieldOrder
-// functional[2]      golden list：逐字写出的 54 元素、顺序敏感 → TestFieldOrderGoldenList
+// functional[2]      golden list：逐字写出的 76 元素、顺序敏感 → TestFieldOrderGoldenList
 //                    + 常量名↔值的绑定（返工 P1，变异 M11）  → TestFieldConstantBindings
 // boundary[0]        fieldOrder 内无重复                  → TestFieldOrderHasNoDuplicates
 // error_handling[0]  每个字段名匹配 ^[a-z][a-z0-9_]*$     → TestFieldNamesAreValidIdentifiers
@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// goldenFields 是规格侧的 54 条 golden 记录：**左侧是常量、右侧是字面量**，
+// goldenFields 是规格侧的 76 条 golden 记录：**左侧是常量、右侧是字面量**，
 // 顺序与 fieldOrder 必须完全一致。它同时钉住两件独立的事：
 //
 //	want 之间的顺序 → fieldOrder 的值序列（TestFieldOrderGoldenList）
@@ -72,6 +72,15 @@ var goldenFields = []struct {
 	{FieldTSFFlowTrustYTD, "tsf_flow_trust_ytd"},
 	{FieldTSFFlowBankAcceptYTD, "tsf_flow_bankaccept_ytd"},
 	{FieldTSFFlowEquityYTD, "tsf_flow_equity_ytd"},
+	{FieldTSFFlowMoM, "tsf_flow_mom"},
+	{FieldTSFFlowRMBLoanMoM, "tsf_flow_rmb_loan_mom"},
+	{FieldTSFFlowGovtBondMoM, "tsf_flow_govt_bond_mom"},
+	{FieldTSFFlowCorpBondMoM, "tsf_flow_corp_bond_mom"},
+	{FieldTSFFlowFXLoanMoM, "tsf_flow_fx_loan_mom"},
+	{FieldTSFFlowEntrustMoM, "tsf_flow_entrust_mom"},
+	{FieldTSFFlowTrustMoM, "tsf_flow_trust_mom"},
+	{FieldTSFFlowBankAcceptMoM, "tsf_flow_bankaccept_mom"},
+	{FieldTSFFlowEquityMoM, "tsf_flow_equity_mom"},
 	{FieldM2, "m2"},
 	{FieldM2YoY, "m2_yoy"},
 	{FieldM1, "m1"},
@@ -85,6 +94,11 @@ var goldenFields = []struct {
 	{FieldDepositCorpYTD, "deposit_corp_ytd"},
 	{FieldDepositFiscalYTD, "deposit_fiscal_ytd"},
 	{FieldDepositNBFIYTD, "deposit_nbfi_ytd"},
+	{FieldDepositFlowMoM, "deposit_flow_mom"},
+	{FieldDepositHouseholdMoM, "deposit_household_mom"},
+	{FieldDepositCorpMoM, "deposit_corp_mom"},
+	{FieldDepositFiscalMoM, "deposit_fiscal_mom"},
+	{FieldDepositNBFIMoM, "deposit_nbfi_mom"},
 	{FieldLoanBalance, "loan_balance"},
 	{FieldLoanBalanceYoY, "loan_balance_yoy"},
 	{FieldLoanFlowYTD, "loan_flow_ytd"},
@@ -95,6 +109,14 @@ var goldenFields = []struct {
 	{FieldLoanCorpMLTYTD, "loan_corp_mlt_ytd"},
 	{FieldLoanBillYTD, "loan_bill_ytd"},
 	{FieldLoanNBFIYTD, "loan_nbfi_ytd"},
+	{FieldLoanFlowMoM, "loan_flow_mom"},
+	{FieldLoanHHShortMoM, "loan_hh_short_mom"},
+	{FieldLoanHHMLTMoM, "loan_hh_mlt_mom"},
+	{FieldLoanCorpTotalMoM, "loan_corp_total_mom"},
+	{FieldLoanCorpShortMoM, "loan_corp_short_mom"},
+	{FieldLoanCorpMLTMoM, "loan_corp_mlt_mom"},
+	{FieldLoanBillMoM, "loan_bill_mom"},
+	{FieldLoanNBFIMoM, "loan_nbfi_mom"},
 	{FieldRateIBO, "rate_ibo"},
 	{FieldRateRepo, "rate_repo"},
 	{FieldFXReserve, "fx_reserve"},
@@ -108,7 +130,7 @@ var goldenFields = []struct {
 // FieldDepositCorpYTD 已经等于 "deposit_fiscal_ytd"。下游拿它当 Values 的键，
 // 企业存款就静默写进财政存款列——无编译错、无运行错、无测试红。
 func TestFieldConstantBindings(t *testing.T) {
-	require.Len(t, goldenFields, 54, "绑定表自身必须是 54 条——它写错了后面的断言全无意义")
+	require.Len(t, goldenFields, 76, "绑定表自身必须是 76 条——它写错了后面的断言全无意义")
 	for i, g := range goldenFields {
 		assert.Equalf(t, g.want, g.got,
 			"goldenFields[%d]：常量与值的绑定错位，该位置的常量应当等于 %q", i, g.want)
@@ -135,20 +157,23 @@ func TestFieldGroupCounts(t *testing.T) {
 		}
 		return n
 	}
-	assert.Equal(t, 27, count(func(f string) bool { return strings.HasPrefix(f, "tsf_") }), "A.1 社融")
+	assert.Equal(t, 36, count(func(f string) bool { return strings.HasPrefix(f, "tsf_") }), "A.1 社融")
 	assert.Equal(t, 6, count(func(f string) bool {
 		return f == "m0" || f == "m1" || f == "m2" ||
 			f == "m0_yoy" || f == "m1_yoy" || f == "m2_yoy"
 	}), "A.2 货币供应量")
-	assert.Equal(t, 7, count(func(f string) bool { return strings.HasPrefix(f, "deposit_") }), "A.3 存款")
-	assert.Equal(t, 10, count(func(f string) bool { return strings.HasPrefix(f, "loan_") }), "A.4 贷款")
+	assert.Equal(t, 12, count(func(f string) bool { return strings.HasPrefix(f, "deposit_") }), "A.3 存款")
+	assert.Equal(t, 18, count(func(f string) bool { return strings.HasPrefix(f, "loan_") }), "A.4 贷款")
 	assert.Equal(t, 4, count(func(f string) bool {
 		return strings.HasPrefix(f, "rate_") || strings.HasPrefix(f, "fx_")
 	}), "A.5 利率与外部")
 
 	// 分组计数之和必须正好是全部字段，否则「某组多一个、另一组少一个」之外
 	// 还有第三种漏网：一个既不属于任何分组、也不影响上面五条断言的野字段。
-	require.Len(t, fieldOrder, 27+6+7+10+4)
+	//
+	// M1c-4 的 TASK-004：27+7+10 → 36+12+18，三族各自加上当月口径列（9/5/8）。
+	// **仍写成分族求和而不是裸 76**——上面那句才是这个写法的理由。
+	require.Len(t, fieldOrder, 36+6+12+18+4)
 }
 
 func TestAllFieldsMatchesFieldOrder(t *testing.T) {
@@ -251,4 +276,61 @@ func TestPackageDocDeclaresUnits(t *testing.T) {
 	for _, want := range []string{"万亿元", "亿元", "百分数", "breaking change"} {
 		assert.Contains(t, doc, want, "包注释缺少单位/变更约定：%s", want)
 	}
+}
+
+// —— M1c-4 的 TASK-004：当月口径（*_mom）列 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-004）
+// functional[0] 22 个常量在 fieldOrder 里、以 _mom 结尾、总数 76
+//                                                → TestMomFieldsExistForEveryFlowFamily
+// functional[0] 每个 _mom 都有 _ytd 孪生列，计数 22
+//                                                → TestEveryMomFieldHasAYTDTwin
+// boundary[0]   四条既有计数断言同步更新（36/6/12/18/4）
+//                                                → TestFieldGroupCounts（上方）
+
+// TestMomFieldsExistForEveryFlowFamily：三个流量族都必须有当月口径的对应列。
+//
+// 存在的理由：真语料 57 篇「处理不了」的报告里 54 篇是同一个缺口 —— 央行在
+// 2020–2023 的相当多期次里，合计给累计、分部门给当月，而 schema 只有 *_ytd。
+// 解析器为此**拒绝整篇**（拒绝是对的：混口径的值量级完全合理，下游拦不住）。
+func TestMomFieldsExistForEveryFlowFamily(t *testing.T) {
+	want := []string{
+		FieldTSFFlowMoM, FieldTSFFlowRMBLoanMoM, FieldTSFFlowFXLoanMoM,
+		FieldTSFFlowEntrustMoM, FieldTSFFlowTrustMoM, FieldTSFFlowBankAcceptMoM,
+		FieldTSFFlowCorpBondMoM, FieldTSFFlowGovtBondMoM, FieldTSFFlowEquityMoM,
+
+		FieldDepositFlowMoM, FieldDepositHouseholdMoM, FieldDepositCorpMoM,
+		FieldDepositFiscalMoM, FieldDepositNBFIMoM,
+
+		FieldLoanFlowMoM, FieldLoanHHShortMoM, FieldLoanHHMLTMoM,
+		FieldLoanCorpTotalMoM, FieldLoanCorpShortMoM, FieldLoanCorpMLTMoM,
+		FieldLoanBillMoM, FieldLoanNBFIMoM,
+	}
+	require.Len(t, want, 22)
+	for _, f := range want {
+		require.Contains(t, fieldOrder, f, "%s 必须在 fieldOrder 里（DDL 由它派生）", f)
+		require.True(t, strings.HasSuffix(f, "_mom"), "%s 必须以 _mom 结尾", f)
+	}
+	require.Len(t, fieldOrder, 76, "54 个既有字段 + 22 个当月口径字段")
+}
+
+// TestEveryMomFieldHasAYTDTwin：每个 _mom 字段都要有同名的 _ytd 孪生列。
+//
+// 这条守的是 spec §5.2 那条路由断言的前提：|ytd| >= |mom| 只有在两列成对时才算得
+// 出来。单方面加一个 _mom 而没有对应 _ytd，会让那条断言对它永远 skip 且无人察觉。
+func TestEveryMomFieldHasAYTDTwin(t *testing.T) {
+	have := make(map[string]bool, len(fieldOrder))
+	for _, f := range fieldOrder {
+		have[f] = true
+	}
+	var n int
+	for _, f := range fieldOrder {
+		if !strings.HasSuffix(f, "_mom") {
+			continue
+		}
+		n++
+		require.True(t, have[strings.TrimSuffix(f, "_mom")+"_ytd"],
+			"%s 缺少 _ytd 孪生列", f)
+	}
+	require.Equal(t, 22, n)
 }

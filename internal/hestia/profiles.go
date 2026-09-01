@@ -258,17 +258,24 @@ func tsfStockRE(name string) *regexp.Regexp {
 // 白名单内（见 amount.go），两道都挡着它。
 // nameField 是「名称 → 字段」的清单条目，社融增量、存款分部门与贷款作用域子项
 // 三张表同形，共用一个类型。
-type nameField struct{ name, field string }
+//
+// **两列而不是一列**（M1c-4 的 TASK-004）：同一句话在累计口径下写 ytdField、在
+// 当月口径下写 momField。把口径写进**列名**而不是加一个 caliber 列，理由见 spec
+// §2.1 —— 加列要动双时态主键与 v_hestia_current，与 M1c-3b 拒绝「业务键加 kind」同源。
+//
+// ⚠️ 本任务只把两列**声明**齐；按口径选列（`pick`）与抽取侧路由是 M1c-4 的
+// TASK-005。在那之前 momField 只被覆盖度检查读到，不参与任何抽取。
+type nameField struct{ name, ytdField, momField string }
 
 var tsfFlowItems = []nameField{
-	{"对实体经济发放的人民币贷款", FieldTSFFlowRMBLoanYTD},
-	{"对实体经济发放的外币贷款折合人民币", FieldTSFFlowFXLoanYTD},
-	{"委托贷款", FieldTSFFlowEntrustYTD},
-	{"信托贷款", FieldTSFFlowTrustYTD},
-	{"未贴现的银行承兑汇票", FieldTSFFlowBankAcceptYTD},
-	{"企业债券", FieldTSFFlowCorpBondYTD},
-	{"政府债券", FieldTSFFlowGovtBondYTD},
-	{"非金融企业境内股票", FieldTSFFlowEquityYTD},
+	{"对实体经济发放的人民币贷款", FieldTSFFlowRMBLoanYTD, FieldTSFFlowRMBLoanMoM},
+	{"对实体经济发放的外币贷款折合人民币", FieldTSFFlowFXLoanYTD, FieldTSFFlowFXLoanMoM},
+	{"委托贷款", FieldTSFFlowEntrustYTD, FieldTSFFlowEntrustMoM},
+	{"信托贷款", FieldTSFFlowTrustYTD, FieldTSFFlowTrustMoM},
+	{"未贴现的银行承兑汇票", FieldTSFFlowBankAcceptYTD, FieldTSFFlowBankAcceptMoM},
+	{"企业债券", FieldTSFFlowCorpBondYTD, FieldTSFFlowCorpBondMoM},
+	{"政府债券", FieldTSFFlowGovtBondYTD, FieldTSFFlowGovtBondMoM},
+	{"非金融企业境内股票", FieldTSFFlowEquityYTD, FieldTSFFlowEquityMoM},
 }
 
 // 方向词与数字之间可能有**一个空格**（M1c-3a 的 TASK-005 返工轮）：
@@ -321,10 +328,10 @@ func moneyRE(name, code string) *regexp.Regexp {
 //
 // 四个部门名互不重叠，不需要作用域。
 var depositItems = []nameField{
-	{"住户存款", FieldDepositHouseholdYTD},
-	{"非金融企业存款", FieldDepositCorpYTD},
-	{"财政性存款", FieldDepositFiscalYTD},
-	{"非银行业金融机构存款", FieldDepositNBFIYTD},
+	{"住户存款", FieldDepositHouseholdYTD, FieldDepositHouseholdMoM},
+	{"非金融企业存款", FieldDepositCorpYTD, FieldDepositCorpMoM},
+	{"财政性存款", FieldDepositFiscalYTD, FieldDepositFiscalMoM},
+	{"非银行业金融机构存款", FieldDepositNBFIYTD, FieldDepositNBFIMoM},
 }
 
 func sectorFlowRE(name string) *regexp.Regexp {
@@ -351,7 +358,8 @@ const (
 // 的地方，也是本任务存在的主要理由。
 type loanScope struct {
 	anchorRE   *regexp.Regexp // 作用域起点
-	totalField string         // 该部门的合计字段（"" 表示合计不在 54 字段内）
+	totalField string         // 该部门的合计字段（"" 表示合计不在字段表内）
+	totalMoM   string         // 同上的当月口径列（totalField 为 "" 时同为 ""，M1c-4 的 TASK-004）
 	items      []nameField
 }
 
@@ -359,10 +367,11 @@ var loanScopes = []loanScope{
 	{
 		// v1 写「住户部门贷款」，v2 写「住户贷款」——一条正则覆盖两版
 		anchorRE:   regexp.MustCompile(`住户(?:部门)?贷款`),
-		totalField: "", // 住户贷款合计不在 54 字段内（A.6 列为派生指标）
+		totalField: "", // 住户贷款合计不在字段表内（A.6 列为派生指标）
+		totalMoM:   "",
 		items: []nameField{
-			{"短期贷款", FieldLoanHHShortYTD},
-			{"中长期贷款", FieldLoanHHMLTYTD},
+			{"短期贷款", FieldLoanHHShortYTD, FieldLoanHHShortMoM},
+			{"中长期贷款", FieldLoanHHMLTYTD, FieldLoanHHMLTMoM},
 		},
 	},
 	{
@@ -376,15 +385,17 @@ var loanScopes = []loanScope{
 		// 实现时实撞过。TestScopeTotalREKeepsCaptureGroupsAfterAnchorAlternation 守着它。
 		anchorRE:   regexp.MustCompile(`(?:企（事）业单位贷款|非金融企业及机关团体贷款)`),
 		totalField: FieldLoanCorpTotalYTD,
+		totalMoM:   FieldLoanCorpTotalMoM,
 		items: []nameField{
-			{"短期贷款", FieldLoanCorpShortYTD},
-			{"中长期贷款", FieldLoanCorpMLTYTD},
-			{"票据融资", FieldLoanBillYTD},
+			{"短期贷款", FieldLoanCorpShortYTD, FieldLoanCorpShortMoM},
+			{"中长期贷款", FieldLoanCorpMLTYTD, FieldLoanCorpMLTMoM},
+			{"票据融资", FieldLoanBillYTD, FieldLoanBillMoM},
 		},
 	},
 	{
 		anchorRE:   regexp.MustCompile(`非银行业金融机构贷款`),
 		totalField: FieldLoanNBFIYTD,
+		totalMoM:   FieldLoanNBFIMoM,
 		items:      nil, // 无子项
 	},
 }
@@ -470,7 +481,23 @@ func scopeTotalRE(sc loanScope) *regexp.Regexp {
 // singletonFields 是不属于任何清单表、由单条模板各管一个的字段。
 //
 // 单列出来是为了让 profiles_test.go 的覆盖度检查能把它们算进去——否则
-// 「加了字段没加规则」的守卫会在这十三个字段上失效。
+// 「加了字段没加规则」的守卫会在这十六个字段上失效。
+//
+// 三个 *_mom 合计字段（M1c-4 的 TASK-004）与它们的 *_ytd 孪生一样落在这里：
+// 三个流量族的**合计**句都是单条模板各管一个（flowRE / tsfFlowTotalRE），
+// 不属于任何清单表。分项的当月列在 nameField.momField 里，不在本函数。
+//
+// 🔴 **其中两个当前没有任何写入方**（M1c-4 的 TASK-004 核实，锚 4670ccb）：
+// deposit_flow_mom 与 loan_flow_mom 的合计句走 selectRMBCumulativeFlow
+// （extract.go 的存款/贷款两节），它的 keep 条件是 `cumulativePeriods[m[1]] &&
+// m[2] == currencyRMB` —— **只保累计句**。把这两列加进本函数只是让
+// TestTemplateTablesCoverAllFields 覆盖得上，**不等于它们会被写**。
+// 改成按口径路由是 M1c-4 的 TASK-005 的事（第三个 tsf_flow_mom 不同：它走
+// extractTSFFlowSection，TASK-005 的实施步骤已明确覆盖）。
+//
+// 无声连锁：不补上的话，2022-07 那篇（需求文档正是拿它论证 deposit_flow_mom
+// 存在理由的）修完分部门后仍会整篇被拒，而 TASK-007 的 deposit_sum mom 族会恒
+// skip —— 那两个任务的单测手工构造 Values、绕过抽取，**照样全绿**。
 func singletonFields() []string {
 	return []string{
 		FieldDepositBalance, FieldDepositBalanceYoY,
@@ -478,6 +505,7 @@ func singletonFields() []string {
 		FieldDepositFlowYTD, FieldLoanFlowYTD,
 		FieldTSFStock, FieldTSFStockYoY, FieldTSFFlowYTD,
 		FieldRateIBO, FieldRateRepo, FieldFXReserve, FieldFXRate,
+		FieldTSFFlowMoM, FieldDepositFlowMoM, FieldLoanFlowMoM,
 	}
 }
 
