@@ -25,12 +25,24 @@ func okResult() *BackfillLoadResult {
 		ParsedOK: 3, ParseFailed: 0,
 		Merged: 1, SingleArticle: 0, MergedGroups: 1,
 		ToObservations: 1, ToPending: 0,
+		// 恒等式三现在是**异源**比对（M1c-3b 的 TASK-006，C-4）：一边是分组计数，
+		// 一边是库里数出来的 merged@v1 行数。夹具要同时给两边，否则那道闸被
+		// MergedRowsCounted==false 跳过，而**跳过时它不会红** —— 那正是它此前的毛病。
+		DBMergedRows: 1, MergedRowsCounted: true,
 	}
 }
 
 // TestWriteLoadReportRejectsBrokenIdentity：恒等式不成立 ⇒ 返回 error（error_handling[0]）。
 //
-// **报告本身就是验收物，它不能在数字对不上时照样打印一份好看的表格。**
+// ⚠️ **本条只断言「返回 error」，不再断言「不输出」**（M1c-3b 的 TASK-006，C-2 改）。
+// 此处原注释写的是「报告不能在数字对不上时照样打印一份好看的表格」—— 那句话描述的是
+// 被本轮推翻的行为，逐字留着会让下一个人把 C-2 的修复当成回归给改回去。
+//
+// 🔴 **现在的契约是「照样打印 + 返回 error」**：账对不上时人更需要看见那份报告
+// （恒等式一失败的头号成因是 Unclassified 非空，而那批标题原文只在报告里）。
+// 「不给看」并不能阻止错误发生，只是让排查的人少一份线索。
+// 打印出来的那份表格**带着 error 一起交出**，不会被误当成验收通过。
+// 端到端证据见 TestBackfillLoadFailsLoudlyOnUnclassified（走真实路径，非手工凑数）。
 func TestWriteLoadReportRejectsBrokenIdentity(t *testing.T) {
 	// 四道恒等式各坏一次——只测一道的话，另外三道可以完全没实现而测试全绿。
 	for _, tt := range []struct {
@@ -39,7 +51,12 @@ func TestWriteLoadReportRejectsBrokenIdentity(t *testing.T) {
 	}{
 		{"一：Total ≠ Attempted+Unsupported", func(r *BackfillLoadResult) { r.Total = 99 }},
 		{"二：Attempted ≠ ParsedOK+ParseFailed", func(r *BackfillLoadResult) { r.ParsedOK = 99 }},
-		{"三：Merged ≠ SingleArticle+MergedGroups", func(r *BackfillLoadResult) { r.MergedGroups = 99 }},
+		// 三号现在是异源比对：坏 MergedGroups 而不动 DBMergedRows，两边就对不上。
+		// ⚠️ 旧版坏它是**坏不掉**的（Merged/SingleArticle/MergedGroups 三者自洽求和，
+		// 单改一个照样满足 `Merged == SingleArticle + MergedGroups`？不 —— 旧版单改
+		// MergedGroups 确实会红，但那只证明「和对不上」；真正杀不掉的是**生产代码里
+		// 那两个计数器一起写错**的情形，见 TestLoadIdentityThreeIsCrossSourced）。
+		{"三：MergedGroups ≠ 库里 merged@v1 行数", func(r *BackfillLoadResult) { r.MergedGroups = 99 }},
 		{"四：Merged ≠ ToObservations+ToPending", func(r *BackfillLoadResult) { r.ToPending = 99 }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
