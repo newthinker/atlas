@@ -186,11 +186,17 @@ func collectSamples(d CalibrateDeps) (*CalibrateResult, error) {
 	return res, nil
 }
 
-// parsedArticle 是共用管道交给两端的一条记录。
+// parsedArticle 是共用管道交给两端的一条记录。**两个字段各有一个下游，缺一不可。**
 //
-// 交出**整个 Observation** 而不只是 Values：calibrate 端只要 Values，而 M1c-3b 的
-// TASK-003 的 load 端要靠 Meta 装配业务键 —— 只传 Values 的话那边会表现为
-// 「合并组恒为 0」，看起来像语料问题、不像管道问题。
+//   - obs 交出**整个 Observation** 而不只是 Values：calibrate 端只要 Values，
+//     而 M1c-3b 的 TASK-003 的 load 端要靠 Meta 装配业务键。
+//   - item 目前在**生产代码里没有消费者**（只有测试读它），但**不是死字段**：
+//     M1c-3b 的 TASK-006 要用 `item.a.ID`（manifest 的 id）装配 `Meta.ArticleID` ——
+//     `Parse` 只看得到 HTML、看不到 URL，那个 id 只有这里有。删掉它，TASK-006 那边
+//     会表现为「合并组的代表 id 恒为空」。
+//
+// ⚠️ **写下这段是因为「零消费者」看起来就像可以删**：两处失效都不在本文件里发作，
+// 而是在下游表现成一个空值，看起来像语料问题、不像管道问题。
 type parsedArticle struct {
 	item calibrateItem
 	obs  Observation
@@ -200,9 +206,12 @@ type parsedArticle struct {
 // 对每篇成功解析的调 fn；失败的记进 res.Failures/res.Unsupported。
 // 返回 sha256 未校验的篇数（调用方汇总成 warning）。
 //
-// ⚠️ res.Periods++ 在 fail() **之前**：它数的是「全部受支持种类里被真正尝试解析的
-// 篇数」，含解析失败的。挪到失败分流之后会让这个数静默变小，而单元测试全绿 ——
-// 只有拿真语料背对背比对 calibrate 输出才抓得住。
+// ⚠️ **res.Periods 的两处增减是一对，改动时要一起看**：`++` 在循环首、`fail()` 之前
+// （它数的是「全部受支持种类里被真正尝试解析的篇数」，**含解析失败的**）；`--` 在
+// 「本迭代不解析」那支的分流处（那些篇没被真正尝试解析成功过）。
+//
+// 两个方向的错都只有拿真语料背对背比对 calibrate 输出才抓得住，**单元测试全绿**：
+// 真语料上这个数是 199 —— 把 `++` 挪到失败分流之后得 161，漏掉 `--` 得 218。
 func eachParsedArticle(dir string, res *CalibrateResult, items []calibrateItem,
 	fn func(parsedArticle)) int {
 	var shaUnverified int
