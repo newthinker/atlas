@@ -674,6 +674,54 @@ func TestPartOverlapsAreEmptyOnRealFamilies(t *testing.T) {
 	}), "输出必须按 fieldOrder 升序——顺序会飘的清单让逐次 diff 失效")
 }
 
+// TestBackfillLoadDoesNotCreateDBWhenInputIdentitiesFail：输入侧恒等式失败时
+// **不得留下半成品库**（M1c-3b 的 TASK-006，C-3 的守卫）。
+//
+// # 🔴 判据必须是「库文件不存在」，不能是「返回了 error」
+//
+// 缺陷版本**同样返回 error** —— 只是晚在末尾才返回，而那时 NewStore 已经把库建出来、
+// 96 次 Save 已经写进去了。写成「断言返回 error」是**一条新的空判据，而且长得跟真守卫
+// 一模一样**：它在修复版与缺陷版上都绿。
+//
+// ⇒ 这与本轮 C-4 是同一个形状：**不会变的数不是验收数**。
+//
+// # 为什么必须补这一条
+//
+// C-3 的行为在上一轮已修好（`checkInputIdentities` 在 `NewStore` 之前调），但**把它改回
+// 缺陷原状，全套测试无一转红**（变异 V3，本轮实测外溢度 **0**）。既有的
+// `TestBackfillLoadDoesNotCreateDBBeforeChecking` 守的是**另一件事**（D-1：`os.Stat` 早于
+// `NewStore`），它在 V3 下照样绿。
+//
+// ⚠️ C-3 的症状**只在真跑时才暴露**：失败后留下的半成品库会被下一次跑自己的
+// 「--db 必须不存在」拒掉，而错误串里不会提到它刚建了库 —— 运维只看到「重跑也不行」。
+func TestBackfillLoadDoesNotCreateDBWhenInputIdentitiesFail(t *testing.T) {
+	// 复用既有夹具形状：第二篇标题推不出期次 ⇒ Unclassified 非空 ⇒ 恒等式一必不成立。
+	dir := writeCalibrateFixture(t, Manifest{
+		From:        "2025-08",
+		CompletedAt: "2026-08-24T10:00:00Z",
+		Articles: []Article{
+			{ID: "id-monthly", Title: "2025年8月金融统计数据报告", File: "articles/m.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
+			{ID: "id-qa", Title: "央行有关负责人就某事答记者问", File: "articles/q.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
+		},
+	}, map[string]string{
+		"articles/m.html": "pboc-2025-08-monthly.html",
+		"articles/q.html": "pboc-2025-08-monthly.html",
+	})
+
+	db := filepath.Join(t.TempDir(), "c3.db")
+	_, err := BackfillLoad(context.Background(), BackfillLoadDeps{
+		Dir: dir, DBPath: db, Cfg: DefaultThresholds(), Out: io.Discard, AllowIncomplete: true})
+	require.Error(t, err, "恒等式一不成立 ⇒ 必须失败")
+
+	// 🔴 这一行才是本条的判据。上面那个 require.Error 在缺陷版本上同样成立。
+	_, statErr := os.Stat(db)
+	assert.True(t, os.IsNotExist(statErr),
+		"输入侧恒等式失败时不得建库——留下的半成品库会被下次跑自己的「--db 必须不存在」拒掉，"+
+			"而错误串不会提到它刚建了库，运维只看到「重跑也不行」")
+}
+
 // TestLoadIdentityThreeIsCrossSourced：恒等式三必须**异源**，不能是自洽求和
 // （M1c-3b 的 TASK-006，C-4）。
 //
