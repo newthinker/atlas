@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -448,13 +449,28 @@ func TestBackfillLoadFlagsPartialCoverage(t *testing.T) {
 	assert.Equal(t, []string{"月报族", "社融增量"}, missingFamilies(res.PartialCoverage[0].Parts))
 	assert.Contains(t, out.String(), "部分覆盖的期次（1）")
 
+	// 🔴 **判据是「缺哪些字段」，不是「缺哪一族」**（M1c-3b 的 TASK-006，W-1）。
+	// 钉住缺字段本身，否则实现可以退回按族判而本条照样绿。
+	miss := res.MissingFields[groupKey(res.PartialCoverage[0])]
+	assert.NotEmpty(t, miss, "只有存量一篇 ⇒ 月报族与社融增量的字段全都缺")
+	assert.Contains(t, miss, FieldM2, "月报族字段必须在缺失清单里")
+	assert.Contains(t, out.String(), "缺 ", "报告要给出缺了多少个字段，不能只说缺哪一族")
+
+	// 🔴 阴性对照：三族齐全 ⇒ 不得被列入。
+	//
+	// ⚠️ **这一格是 W-1 的实际杀手**：把参照集从「完整三族覆盖会给出的字段」换成
+	// 「全部 54 个字段」，本格立刻红 —— 月报正文本就没有外汇储备板块，三族齐全的
+	// merged@v1 也只有 52 个字段（缺 fx_reserve / fx_rate），那不是洞。
+	// 改 W-1 时我当场撞到过这个：参照集选错会造出一批新的假阳，方向与 W-1 要修的那批相同。
 	t.Run("三族齐全时不算部分覆盖", func(t *testing.T) {
 		var out2 bytes.Buffer
 		res2, err := BackfillLoad(context.Background(), BackfillLoadDeps{
 			Dir: loadFixture(t), DBPath: filepath.Join(t.TempDir(), "q.db"),
 			Cfg: DefaultThresholds(), Out: &out2, AllowIncomplete: true})
 		require.NoError(t, err)
-		assert.Empty(t, res2.PartialCoverage)
+		assert.Empty(t, res2.PartialCoverage,
+			"三族齐全 ⇒ 字段没有洞。若此处红，多半是把参照集当成了全部 54 个字段")
+		assert.Empty(t, res2.MissingFields)
 	})
 }
 
@@ -483,7 +499,14 @@ func TestBackfillLoadRecordsPendingReasons(t *testing.T) {
 	assert.Equal(t, res.Merged, res.ToObservations+res.ToPending, "恒等式四在 pending 路径上同样要成立")
 
 	require.Len(t, res.PendingReasons, 1)
-	reason := res.PendingReasons["2025-08/monthly"]
+	// 🔴 用 groupKey 取而不是硬编码字符串（M1c-3b 的 TASK-006，W-10）：
+	// 键现在是**完整业务键** period/period_type@published_at —— 只用前两段时，
+	// 同一期次的第二次发布（修订）会静默覆盖前一条，报告上少一行而无人报警。
+	require.Len(t, res.Groups, 1)
+	key := groupKey(res.Groups[0])
+	assert.Contains(t, key, "@", "键必须含 published_at，否则修订发布会互相覆盖")
+	assert.Contains(t, key, res.Groups[0].Obs.Meta.PublishedAt)
+	reason := res.PendingReasons[key]
 	require.NotEmpty(t, reason, "判因不能为空——报告里那一列存在的全部意义就是「一眼看出为什么」")
 	assert.Contains(t, reason, "magnitude_sanity", "判因要指名是哪道闸")
 
@@ -566,6 +589,141 @@ func TestBackfillLoadFailsLoudlyOnUnclassified(t *testing.T) {
 	require.NotNil(t, res, "失败也要交出 res——调用方要拿它看差在哪，只给一句错误串不够")
 	assert.Equal(t, 2, res.Total)
 	assert.Len(t, res.Unclassified, 1)
+
+	// 🔴 **C-2 的端到端判据：报告必须真的写出去，且必须含那条标题的原文**
+	//（M1c-3b 的 TASK-006）。
+	//
+	// 为什么这条不能用「手工把 res 凑平再调 writeLoadReport」来测：`len(Unclassified) > 0`
+	// 与「恒等式一成立」由同一段代码保证**互斥**，那个组合在生产路径上根本不存在。
+	// 用手工凑出来的 res 去测，测的是一个不存在的世界 —— 断言会红、外溢度正常、
+	// 看起来什么都对，唯独证明不了生产路径上那段代码可达。
+	// ⇒ 本条**走真实路径**：夹具里那篇「答记者问」的标题真的推不出期次。
+	assert.NotEmpty(t, out.String(), "账对不上时更要出报告——此前这条路径上 stdout 是 0 字节")
+	assert.Contains(t, out.String(), "央行有关负责人就某事答记者问",
+		"必须逐条打印标题**原文**：运维要拿它回去对 manifest，只给「有 1 条」这个数字没法查")
+}
+
+// TestMergeConflictFailsTheRun：字段冲突必须让整趟失败（M1c-3b 的 TASK-006，W-4）。
+//
+// mergeGroup 里那段注释早就写着「不做静默取值 …… 一旦出现就说明字段归属表错了，
+// 那是必须响亮失败的事」——**而实现只是记进 Conflicts 然后退出码 0**。
+// 注释承诺的与代码做的不是一回事，而读注释的人会以为已经防住了。
+//
+// ⚠️ 本条同时钉住**报告仍要出**：冲突明细只在报告里，直接 return 等于让人看不见冲突在哪。
+func TestMergeConflictFailsTheRun(t *testing.T) {
+	res := &BackfillLoadResult{}
+	res.Conflicts = append(res.Conflicts, MergeConflict{
+		Period: "2025-08", PeriodType: "monthly", Field: FieldM2,
+		A: 1, B: 2, FromA: "id-a", FromB: "id-b"})
+
+	// ① 冲突必须变成一个 error。
+	err := conflictError(res)
+	require.Error(t, err, "冲突非空 ⇒ 必须失败。此前它只被记录，退出码 0")
+	assert.Contains(t, err.Error(), "1 处字段冲突")
+
+	// ② 阴性对照：没有冲突时不得凭空报错。缺这一半，实现可以恒返回 error 而本条照绿。
+	assert.NoError(t, conflictError(&BackfillLoadResult{}))
+
+	// ③ 报告仍要出（C-2 同一条原则）：冲突明细只在报告里，直接 return 等于让人看不见冲突在哪。
+	var b bytes.Buffer
+	require.NoError(t, writeLoadReport(&b, "/x", res),
+		"空 result 的四道恒等式本就成立（0 == 0+0），此处只验报告内容")
+	assert.Contains(t, b.String(), "字段冲突（预期 0，共 1）")
+	assert.Contains(t, b.String(), FieldM2, "冲突字段名必须逐条打印")
+}
+
+// TestPartOverlapsAreEmptyOnRealFamilies：三族必填集互不相交这个**前提**要被钉住
+// （M1c-3b 的 TASK-006，W-6）。
+//
+// 🔴 本条不改合并键（人类裁决过），只保证前提破掉时**有东西会响**。
+// 此前这个前提由语料守着、不由代码守着 —— 新增一个 extractor 让两族必填集相交时，
+// 症状会表现成「字段冲突突然出现」，而排查的人会去查语料，不会想到是归属表变了。
+func TestPartOverlapsAreEmptyOnRealFamilies(t *testing.T) {
+	// 🔴 **参照组合必须是真语料上真实出现的那一个**：merged@v1 的 42 个组，
+	// parts 恒为 [rule-monthly@v1, tsf-stock@v1, tsf-flow@v1] 这一族形态。
+	assert.Empty(t, overlappingRequiredFields(
+		[]string{extractorMonthlyV1, extractorTSFStock, extractorTSFFlow}),
+		"v1 时代的三族必填集必须互不相交——相交则字段冲突那一节的含义就变了")
+
+	// 🔴 **v2 系与社融两族是相交的**（M1c-3b 的 TASK-006 实测，本条是发现不是回归）：
+	// rule-monthly@v2 必填 52 个、rule@v2 必填 54 个，**都已包含社融字段** ——
+	// 央行 2025-10 起把社融并进月报，月报的必填集随之吞下了那 27 个字段。
+	//
+	// ⇒ 「三族字段集设计上不相交」这句话**只对 v1 时代成立**，而 mergeGroup 的注释
+	// 把它写成了无条件的。今天不出事，是因为并篇后每个发布事件只剩一篇 ⇒
+	// v2 月报不会与社融篇进同一个合并组。
+	// ⚠️ **过渡月双发会让它们相遇**（与 M1c-3b 的 TASK-008 的 R9 是同一个场景），
+	// 那时字段冲突会成片出现，而排查的人会去查语料 —— W-6 的告警就是为这一刻准备的。
+	assert.NotEmpty(t, overlappingRequiredFields(
+		[]string{extractorMonthlyV2, extractorTSFStock}),
+		"并篇后的月报必填集已含社融字段——这条钉住的是「前提有时代性」，不是回归")
+
+	// 阴性对照：同一个 extractor 出现两次 ⇒ 它的必填字段全部被要求两次。
+	// 没有这一半，上面那条在 overlappingRequiredFields 恒返回 nil 时照样绿。
+	dup := overlappingRequiredFields([]string{extractorTSFStock, extractorTSFStock})
+	assert.NotEmpty(t, dup, "同一族出现两次必然相交——本条证明判据不是恒空")
+	// ⚠️ 用 ElementsMatch 而不是 Equal：overlappingRequiredFields 按 **fieldOrder** 排序，
+	// 而 requiredFields 有自己的顺序（tsf_stock/tsf_stock_yoy 在它那里排末尾、在 fieldOrder
+	// 里排最前）。两者**元素相同、顺序不同**，Equal 必然红 —— 这与 M1c-3b 的 TASK-002
+	// 撞的是同一个坑（`require.Equal(tsfStockFields(), got)` 与「按 fieldOrder 排序」
+	// 不可能同时满足），记在这里免得下一个人再撞。
+	assert.ElementsMatch(t, requiredFields(extractorTSFStock), dup,
+		"相交集应恰好是它自己的必填集（只比元素，顺序另断）")
+	assert.True(t, slices.IsSortedFunc(dup, func(a, b string) int {
+		return slices.Index(fieldOrder, a) - slices.Index(fieldOrder, b)
+	}), "输出必须按 fieldOrder 升序——顺序会飘的清单让逐次 diff 失效")
+}
+
+// TestLoadIdentityThreeIsCrossSourced：恒等式三必须**异源**，不能是自洽求和
+// （M1c-3b 的 TASK-006，C-4）。
+//
+// # 这条断言存在的理由，以及它杀的是哪一个变异
+//
+// 旧判据 `Merged == SingleArticle + MergedGroups` **恒真**：`Merged = len(groups)`，
+// 而循环里每组必增且只增那两个计数器之一。它抓不到的正是**生产代码里分类写错**的情形：
+// 把 `len(g.SourceIDs) > 1` 改成 `>= 1`（QA 的 M17），全套测试 rc=0、真语料 exit=0，
+// 报告打印「单篇 0 + 合并组 96」这个假数，而「四道恒等式全部成立 ✓」照常打印。
+//
+// 🔴 **本条用真实入库路径产生两个数**：MergedGroups 来自内存里的分组结构，
+// DBMergedRows 来自库里 `select count(*) ... where extractor = 'merged@v1'`。
+// 两条路径独立 ⇒ M17 只改分类那一处时，两边必然对不上。
+//
+// ⚠️ **夹具必须至少含一个单篇组**：`>1` 与 `>=1` 只在 `SourceIDs == 1` 的组上取值不同，
+// 全是多篇组时两者同值、变异存活。本夹具两篇期次不同 ⇒ 两个单篇组，正好落在差异点上。
+//
+// ⚠️ 多篇组那一侧由真语料回填覆盖（42 个多篇组），写不成单元测试：合并需要同期三族快照，
+// 而 testdata 里没有配套的社融存量/增量样本。**此处如实记明覆盖边界，不假装测了。**
+func TestLoadIdentityThreeIsCrossSourced(t *testing.T) {
+	// 2025-08 月报单独一篇 ⇒ 单篇组；2025-09 月报 + 社融存量同期 ⇒ 多篇组。
+	dir := writeCalibrateFixture(t, Manifest{
+		From:        "2025-08",
+		CompletedAt: "2026-08-24T10:00:00Z",
+		Articles: []Article{
+			{ID: "a-08", Title: "2025年8月金融统计数据报告", File: "articles/a08.html",
+				SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
+			{ID: "a-09", Title: "2025年9月金融统计数据报告", File: "articles/a09.html",
+				SHA256: testdataSHA(t, "pboc-2025-09-q3.html")},
+		},
+	}, map[string]string{
+		"articles/a08.html": "pboc-2025-08-monthly.html",
+		"articles/a09.html": "pboc-2025-09-q3.html",
+	})
+
+	var out bytes.Buffer
+	res, err := BackfillLoad(context.Background(), BackfillLoadDeps{
+		Dir: dir, DBPath: filepath.Join(t.TempDir(), "x.db"),
+		Cfg: DefaultThresholds(), Out: &out, AllowIncomplete: true})
+	require.NoError(t, err)
+
+	require.True(t, res.MergedRowsCounted,
+		"全部入库成功时异源计数必须真的测过——没测过时那道闸被跳过，而**跳过不会红**")
+	assert.Equal(t, res.MergedGroups, res.DBMergedRows,
+		"分组计数与库里 merged@v1 行数必须相等；不等说明分类逻辑与入库结果分叉了")
+
+	// 钉具体值：只断言「两边相等」的话，两边同时为 0 也满足。
+	assert.Equal(t, 0, res.MergedGroups, "本夹具两篇期次不同 ⇒ 没有多篇组")
+	assert.Equal(t, 2, res.SingleArticle, "两个单篇组")
+	assert.Equal(t, 2, res.Merged)
 }
 
 // TestBackfillLoadRejectsBrokenManifest：manifest 坏了要原样报出，不要当成「零篇」。

@@ -2515,3 +2515,34 @@ func TestHasArticleInObservationsIgnoresPending(t *testing.T) {
 		assert.False(t, obs)
 	})
 }
+
+// TestInsertSQLDoesNotPersistParts：`Parts` 不得进入持久化路径 —— **查列清单本身**
+// （M1c-3b 的 TASK-006，W-2）。
+//
+// # 为什么另立一条，而不是加强 validate_test.go 的 TestMergedPartsDoNotRoundTrip
+//
+// 那条测试**不守它声称守的性质**。变异实测：让写路径真的持久化 `Parts`，它**照样 PASS**
+// —— 它断的是「`Preceding` 读回来是 nil」，而 `Preceding` 走自己的一套列，多写一列它
+// 读不回来也不会红。真正杀死那个变异的是 4 条本任务 DoD 从未点名的既有测试
+// （它们因列数对不上而崩）。⇒ 那条测试此前是**靠别人替它红**，而它的名字和注释都在
+// 声称是自己守的 —— 这正是「守卫分辨得出对错吗」那一类缺口。
+//
+// ⚠️ `validate_test.go` 不在 M1c-3b 的 TASK-006 的 `writes` 内，故**不动它**，
+// 在这里补一条同名性质的独立守卫。两条并存不冗余：那条守「读回来是 nil」（下游表现），
+// 本条守「根本没写进去」（性质的定义所在）。
+func TestInsertSQLDoesNotPersistParts(t *testing.T) {
+	obs := mergedObs([]string{extractorTSFStock, extractorTSFFlow}, tsfStockFields())
+	obs.Meta.Period = "2025-12"
+	obs.Meta.PeriodType = "monthly"
+	obs.Meta.PublishedAt = "2025-12-15"
+	obs.Meta.ArticleID = "art-2025-12"
+	require.NotEmpty(t, obs.Parts, "夹具必须真的带 Parts，否则本条恒真")
+
+	q, args := insertSQL(obs)
+	assert.NotContains(t, q, "parts",
+		"insertSQL 的列清单里不得出现 parts —— Parts 是进程内的合并取证，进了库就会变成"+
+			"一份没有 schema 约束、也没人维护的第二真相源")
+	assert.Equal(t, strings.Count(q, "?"), len(args),
+		"占位符数与实参数必须相等：这条顺带钉住「加列时两处一起改」，"+
+			"否则多写一列会在运行时才炸")
+}

@@ -2,6 +2,7 @@ package hestia
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -25,12 +26,24 @@ func okResult() *BackfillLoadResult {
 		ParsedOK: 3, ParseFailed: 0,
 		Merged: 1, SingleArticle: 0, MergedGroups: 1,
 		ToObservations: 1, ToPending: 0,
+		// 恒等式三现在是**异源**比对（M1c-3b 的 TASK-006，C-4）：一边是分组计数，
+		// 一边是库里数出来的 merged@v1 行数。夹具要同时给两边，否则那道闸被
+		// MergedRowsCounted==false 跳过，而**跳过时它不会红** —— 那正是它此前的毛病。
+		DBMergedRows: 1, MergedRowsCounted: true,
 	}
 }
 
 // TestWriteLoadReportRejectsBrokenIdentity：恒等式不成立 ⇒ 返回 error（error_handling[0]）。
 //
-// **报告本身就是验收物，它不能在数字对不上时照样打印一份好看的表格。**
+// ⚠️ **本条只断言「返回 error」，不再断言「不输出」**（M1c-3b 的 TASK-006，C-2 改）。
+// 此处原注释写的是「报告不能在数字对不上时照样打印一份好看的表格」—— 那句话描述的是
+// 被本轮推翻的行为，逐字留着会让下一个人把 C-2 的修复当成回归给改回去。
+//
+// 🔴 **现在的契约是「照样打印 + 返回 error」**：账对不上时人更需要看见那份报告
+// （恒等式一失败的头号成因是 Unclassified 非空，而那批标题原文只在报告里）。
+// 「不给看」并不能阻止错误发生，只是让排查的人少一份线索。
+// 打印出来的那份表格**带着 error 一起交出**，不会被误当成验收通过。
+// 端到端证据见 TestBackfillLoadFailsLoudlyOnUnclassified（走真实路径，非手工凑数）。
 func TestWriteLoadReportRejectsBrokenIdentity(t *testing.T) {
 	// 四道恒等式各坏一次——只测一道的话，另外三道可以完全没实现而测试全绿。
 	for _, tt := range []struct {
@@ -39,7 +52,12 @@ func TestWriteLoadReportRejectsBrokenIdentity(t *testing.T) {
 	}{
 		{"一：Total ≠ Attempted+Unsupported", func(r *BackfillLoadResult) { r.Total = 99 }},
 		{"二：Attempted ≠ ParsedOK+ParseFailed", func(r *BackfillLoadResult) { r.ParsedOK = 99 }},
-		{"三：Merged ≠ SingleArticle+MergedGroups", func(r *BackfillLoadResult) { r.MergedGroups = 99 }},
+		// 三号现在是异源比对：坏 MergedGroups 而不动 DBMergedRows，两边就对不上。
+		// ⚠️ 旧版坏它是**坏不掉**的（Merged/SingleArticle/MergedGroups 三者自洽求和，
+		// 单改一个照样满足 `Merged == SingleArticle + MergedGroups`？不 —— 旧版单改
+		// MergedGroups 确实会红，但那只证明「和对不上」；真正杀不掉的是**生产代码里
+		// 那两个计数器一起写错**的情形，见 TestLoadIdentityThreeIsCrossSourced）。
+		{"三：MergedGroups ≠ 库里 merged@v1 行数", func(r *BackfillLoadResult) { r.MergedGroups = 99 }},
 		{"四：Merged ≠ ToObservations+ToPending", func(r *BackfillLoadResult) { r.ToPending = 99 }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -228,3 +246,58 @@ func TestLoadReportListsFieldConflicts(t *testing.T) {
 	assert.Contains(t, out, "id-a")
 	assert.Contains(t, out, "id-b", "两边的来源都要有——只报一边就查不出是哪两篇打架")
 }
+
+// TestLoadReportSurfacesAllSignals：W-6 / W-7 / W-8 三条新增的「出声」路径都要真的印出来
+// （M1c-3b 的 TASK-006 返工）。
+//
+// 🔴 三条都是**只在异常时才走**的分支。加了却不测，等于把「会出声」写成了声称 ——
+// 而它们存在的全部理由就是异常发生那一次能被看见。
+func TestLoadReportSurfacesAllSignals(t *testing.T) {
+	res := okResult()
+	res.SHAUnverified = 3
+	res.FetchFailed = []Failed{{ID: "9001"}, {ID: "9002"}}
+	res.PartOverlaps = []string{FieldTSFStock, FieldTSFStockYoY}
+	res.PartialCoverage = []MergedObservation{{
+		Obs:   Observation{Meta: Meta{Period: "2025-08", PeriodType: "monthly", PublishedAt: "2025-09-12"}},
+		Parts: []string{extractorTSFStock},
+	}}
+	// 故意给 8 个缺失字段：超过 6 个时报告要截断并打「…等」，那条分支也要走到。
+	res.MissingFields = map[string][]string{
+		groupKey(res.PartialCoverage[0]): fieldOrder[:8],
+	}
+
+	var b bytes.Buffer
+	require.NoError(t, writeLoadReport(&b, "/x", res))
+	out := b.String()
+
+	assert.Contains(t, out, "3 篇的 manifest 没有 sha256", "W-7：未做完整性校验的篇数要出声")
+	assert.Contains(t, out, "fetch 阶段未抓到（2", "W-8：manifest.failed 要入账")
+	assert.Contains(t, out, "不计入上面四道恒等式",
+		"W-8：必须写明它不参与恒等式——混进去会造出假失败")
+	assert.Contains(t, out, "9001", "fetch 失败的 id 要逐条列出，只给个数没法查")
+	assert.Contains(t, out, "前提已破", "W-6：必填集相交要出声")
+	assert.Contains(t, out, FieldTSFStock)
+	assert.Contains(t, out, "缺  8 个字段", "W-1：报缺了多少个字段")
+	assert.Contains(t, out, "…等", "超过 6 个时截断，否则这一节会被几十个字段名淹掉")
+	assert.Contains(t, out, "（缺族: ", "族作为补充说明仍要打印")
+}
+
+// TestWriteLoadReportPropagatesWriteError：写不出去时要原样报出，**不要**被恒等式错误盖掉
+// （M1c-3b 的 TASK-006，C-2 的边界）。
+//
+// C-2 把顺序改成「先写再校验」之后，w 不可用是一条新的失败路径：此时若继续查恒等式，
+// 返回的会是一个恒等式错误，而真正的成因（写不出去）就消失了。
+func TestWriteLoadReportPropagatesWriteError(t *testing.T) {
+	res := okResult()
+	res.Total = 99 // 顺便让恒等式也不成立：证明返回的是写错误而不是恒等式错误
+
+	err := writeLoadReport(errWriter{}, "/x", res)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "写坏了")
+	assert.NotContains(t, err.Error(), "恒等式",
+		"写不出去时不得再查恒等式——那会把真正的成因盖掉")
+}
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, errors.New("写坏了") }
