@@ -594,10 +594,17 @@ func TestCumulativeMonthAltEnumeratesEveryCumulativePrefix(t *testing.T) {
 	// 将来出现 `1-9月` 会是**静默 0 命中**，正是 R3 要修的那个失效方式。
 	want = append(want, "1-10月", "1-11月", "1-12月", "1-2月", "1-3月",
 		"1-4月", "1-5月", "1-6月", "1-7月", "1-8月", "1-9月")
+	// 「今年前N个月」族十一项（M1c-4 的 TASK-002）——2022-05 的写法。
+	// 实测只出现「今年前5个月」一种（2 处），其余十种一并登记：只登记见过的，
+	// 将来出现「今年前8个月」会是**静默 0 命中**，正是本条要修的那个失效方式。
+	want = append(want, "今年前10个月", "今年前11个月", "今年前12个月", "今年前2个月",
+		"今年前3个月", "今年前4个月", "今年前5个月", "今年前6个月", "今年前7个月",
+		"今年前8个月", "今年前9个月")
 
 	assert.Equal(t, want, strings.Split(cumulativeMonthAlt, "|"),
-		"cumulativeMonthAlt 必须穷举这两族共 21 项：真实语料里不出现的（前三/前六/前九个月走 "+
-			"q1/h1/q1_q3 报告；N-M月 只见过四种）仍然列上——多一个无害，漏一个是静默失效")
+		"cumulativeMonthAlt 必须穷举这三族共 32 项：真实语料里不出现的（前三/前六/前九个月走 "+
+			"q1/h1/q1_q3 报告；N-M月 只见过四种；今年前N个月 只见过一种）仍然列上——"+
+			"多一个无害，漏一个是静默失效")
 
 	// 🔴 **等值**而不是 Contains —— 收口 M1c-3a 的 TASK-001 验证者发现的残余缺口 V6。
 	//
@@ -616,12 +623,13 @@ func TestCumulativeMonthAltEnumeratesEveryCumulativePrefix(t *testing.T) {
 			"累计前缀一律经 cumulativeMonthAlt 登记，绕开常量直接插分支会让它躲过下面的一一对应守卫")
 }
 
-// cumulativePeriods 的键集必须**逐字**等于这 26 个。
+// cumulativePeriods 的键集必须**逐字**等于这 37 个。
 //
 // 这条是整张表的**性质**断言（哪些前缀算累计），不是条数断言：
 //   - 既有四键「全年/上半年/一季度/前三季度」原样保留（3 月报靠「一季度」工作）；
 //   - 10 个「前N个月」+「1月份」（M1c-3a 的 TASK-001）；
 //   - 11 个「N-M月」（M1c-3a 的 TASK-012，QA R3：2022 年月报的写法）；
+//   - 11 个「今年前N个月」（M1c-4 的 TASK-002：2022-05 的写法，实测只出现「今年前5个月」）；
 //   - 除「1月份」外**没有**任何 `N月份` 键——当月数落进累计表会让 *_ytd 装上当月数。
 //
 // 「1月份」是特例：1 月的累计就是当月，报告直接写「1月份人民币贷款增加5.13万亿元」，
@@ -636,10 +644,15 @@ func TestCumulativePeriodsKeySet(t *testing.T) {
 		// M1c-3a 的 TASK-012（QA R3）：2022 年月报的「N-M月」族
 		"1-2月": true, "1-3月": true, "1-4月": true, "1-5月": true, "1-6月": true,
 		"1-7月": true, "1-8月": true, "1-9月": true, "1-10月": true, "1-11月": true, "1-12月": true,
+		// M1c-4 的 TASK-002：2022-05 的「今年前N个月」族
+		"今年前2个月": true, "今年前3个月": true, "今年前4个月": true, "今年前5个月": true,
+		"今年前6个月": true, "今年前7个月": true, "今年前8个月": true, "今年前9个月": true,
+		"今年前10个月": true, "今年前11个月": true, "今年前12个月": true,
 	}
 	assert.Equal(t, want, cumulativePeriods,
 		"cumulativePeriods 的键集不对：既有四键必须原样保留，`N月份` 只许有「1月份」一个，"+
-			"「N-M月」族必须与 cumulativeRangeAlt 一一对应")
+			"「N-M月」族必须与 cumulativeRangeAlt 一一对应，"+
+			"「今年前N个月」族必须与 cumulativeThisYearAlt 一一对应")
 }
 
 // 🔴 两处硬卡点的**机械**一一对应守卫 —— 把「记得两边都改」这件事变成可查的。
@@ -1227,4 +1240,115 @@ func TestRangePrefixDoesNotDisturbMonthlyVerdicts(t *testing.T) {
 	// （新旧前缀的判定都只由 cumulativePeriods 决定）。我试过用 stringLiteralsOf 扫
 	// profiles.go 断言「不出现月份字面量」，但 "1月份" 本来就是口径表里的合法键，
 	// 那条断言必然为假 ⇒ 写不出来。这里如实记下，而不是放一句看起来在断言的代码。
+}
+
+// —— M1c-4 的 TASK-002：月报累计前缀「今年前N个月」族（结转项 1b）——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-002）
+// functional[0]     cumulativeThisYearAlt 穷举 11 项并入 cumulativeMonthAlt，
+//                   cumulativePeriods 补对应 11 键
+//                                    → TestCumulativeThisYearAltAndCumulativePeriodsAgree
+//                                    （项数一一对应）、
+//                                      TestCumulativeMonthAltEnumeratesEveryCumulativePrefix
+//                                    （逐字等值，已存在，本任务扩 want）、
+//                                      TestCumulativePeriodsKeySet（同上）
+// functional[1]     n=2..12 逐个：正则命中 **且** 口径表为真（两条断言缺一不可）
+//                                    → TestThisYearPrefixFamilyIsRecognised
+// functional[1]     既有族不被新族遮蔽
+//                                    → TestThisYearPrefixDoesNotShadowExistingFamilies
+// boundary[0]       结转项 8 未触发：「今年以来」不被新族吃掉
+//                                    → TestThisYearPrefixDoesNotShadowExistingFamilies 的
+//                                      「今年以来」子测试 + extract_test.go 既有那一格原样保留
+//
+// 语料实测（锚 4670ccbe0abd703f86b1e0c53aef8d3c86cc512d）：该族在 218 篇里**只出现
+// 「今年前5个月」一种**（2 处，2022-05 的两篇）。其余十项一并登记，理由与
+// cumulativeRangeAlt 补齐未观测到的九种完全相同——只登记见过的那一种，将来出现
+// 「今年前8个月」会是**静默 0 命中**，正是本任务要修的那个失效方式。
+//
+// ⚠️ 交替顺序：把两位数排在一位数前是**零成本防御，不是这里的安全性来源**。
+// Go regexp 在交替上会回溯，leftmost-first 是对**整体匹配**而言的：「今年前1个月」
+// 这一支（本族并不含它）即便存在，在「今年前12个月…」上匹到「今年前1」后卡在
+// 「个」vs「2」也会被放弃。这十一项两两无前缀关系，不构成「顺序有语义」的前提。
+
+// n=2..12 逐个断言：periodPat 整段认得它，**且** cumulativePeriods 判它是累计。
+//
+// 🔴 **两条断言缺一不可**，它们守的是两个独立的硬卡点（profiles.go 里那段 B5 四格实测）：
+// 只有正则 ⇒ 候选句涨了但口径判定把它们全筛掉，命中 0；
+// 只有口径表 ⇒ 正则根本不命中，候选恒为 1，与现状逐字相同的 no-op。
+func TestThisYearPrefixFamilyIsRecognised(t *testing.T) {
+	anchored := regexp.MustCompile(`^` + periodPat + `$`)
+	for n := 2; n <= 12; n++ {
+		p := fmt.Sprintf("今年前%d个月", n)
+		t.Run(p, func(t *testing.T) {
+			m := anchored.FindStringSubmatch(p)
+			require.NotNilf(t, m, "periodPat 必须整段认得 %q——认不出的话这句连候选集都进不了，"+
+				"整篇落进 Unsupported（2022-05 此前正是如此）", p)
+			assert.Equalf(t, p, m[1], "periodPat 对 %q 必须逐字整段捕获", p)
+
+			assert.Truef(t, cumulativePeriods[p],
+				"%q 必须在 cumulativePeriods 里：正则认得而口径表不认的组合，"+
+					"会让这句被匹中后当成单月句静默筛掉，表现为整篇命中 0", p)
+		})
+	}
+}
+
+// 新族不得遮蔽既有族——各族的一个代表逐字过一遍。
+//
+// 立此条的原因不是「担心正则写错」，而是 periodAlt 是**全语料**共用的一张表：
+// 新增一个分支若改变了别的前缀的捕获结果，受影响的是所有报告，而不是 2022-05 那一篇。
+//
+// 「今年以来」那一格是 CONTRACTS §E-4 的结转项 8：它是 extract_test.go 里的**合成**前缀
+// （语料实测 0 篇），本族加的是「今年前N个月」⇒ 结转项 8 **未触发**，它必须仍然
+// **不被 periodAlt 认得**。若这条转红，说明新族把它吃掉了，按 §E-4 换一个未被使用的
+// 前缀，**不要删掉 extract_test.go 那一格**。
+func TestThisYearPrefixDoesNotShadowExistingFamilies(t *testing.T) {
+	anchored := regexp.MustCompile(`^` + periodPat + `$`)
+	for _, tc := range []struct {
+		prefix string
+		want   bool // periodPat 是否应当整段认得它
+		why    string
+	}{
+		{"前五个月", true, "「前N个月」族（M1c-3a 的 TASK-001），中文数字"},
+		{"1-7月", true, "「N-M月」族（M1c-3a 的 TASK-012），2022 年月报写法"},
+		{"全年", true, "既有四键之一"},
+		{"上半年", true, "既有四键之一"},
+		{"5月份", true, "单月句必须仍被认出（认不出则口径判定无从生效）"},
+		{"今年以来", false, "CONTRACTS §E-4 结转项 8：extract_test.go 的合成前缀，" +
+			"语料实测 0 篇。本族加的是「今年前N个月」，它必须仍不被认得"},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			m := anchored.FindStringSubmatch(tc.prefix)
+			if !tc.want {
+				assert.Nilf(t, m, "%q 不应被 periodAlt 认得：%s", tc.prefix, tc.why)
+				return
+			}
+			require.NotNilf(t, m, "%q 必须仍被 periodAlt 整段认得：%s", tc.prefix, tc.why)
+			assert.Equalf(t, tc.prefix, m[1], "对 %q 必须逐字整段捕获，不得被新族切短", tc.prefix)
+		})
+	}
+}
+
+// 新族的**机械**一一对应守卫：交替里的项数 == 口径表里「今年前」开头的键数。
+//
+// 与 TestCumulativeMonthAltAndCumulativePeriodsAgree 的关系：那条是全表双向遍历，
+// 本条只盯新族，且用**项数**这把独立的尺——两者都为真时，「漏登记一项」与
+// 「多登记一项」两个方向都被堵上。分开写的理由与既有那两条相同：消融时失败信息不同。
+func TestCumulativeThisYearAltAndCumulativePeriodsAgree(t *testing.T) {
+	alt := strings.Split(cumulativeThisYearAlt, "|")
+	require.Len(t, alt, 11, "cumulativeThisYearAlt 必须穷举 11 项（n=2..12）")
+
+	keys := 0
+	for k := range cumulativePeriods {
+		if strings.HasPrefix(k, "今年前") {
+			keys++
+		}
+	}
+	assert.Equal(t, len(alt), keys,
+		"cumulativeThisYearAlt 的项数与 cumulativePeriods 里「今年前」开头的键数必须相等："+
+			"少一个键 ⇒ 那句被当成单月句静默筛掉；多一个键 ⇒ 正则认不出、永远查不到")
+
+	// 正向逐项——项数相等挡不住「两边各有一项对不上」的情形。
+	for _, w := range alt {
+		assert.Truef(t, cumulativePeriods[w], "%q 在交替里、却不在口径表里", w)
+	}
 }
