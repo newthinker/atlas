@@ -1190,11 +1190,25 @@ func TestEachParsedArticleYieldsFullObservation(t *testing.T) {
 
 	require.NotEmpty(t, got)
 	for _, p := range got {
-		require.NotEmpty(t, p.obs.Meta.Period, "Meta.Period 不得为空")
-		require.NotEmpty(t, p.obs.Meta.PeriodType, "Meta.PeriodType 不得为空")
-		require.NotEmpty(t, p.obs.Meta.PublishedAt, "Meta.PublishedAt 不得为空")
-		require.NotEmpty(t, p.obs.Meta.Extractor, "Meta.Extractor 不得为空")
-		require.Equal(t, p.item.period, p.obs.Meta.Period,
-			"分类算出的期次与正文解析出的期次必须一致")
+		// 用 assert 而不是 require：多篇时第一篇失败也要看完其余篇 —— 「只有某一篇缺
+		// Meta」与「全部都缺」是两种不同的故障，require 会把它们压成同一个现象。
+		// 每条都带上文件名，否则只知道有一篇不对、不知道是哪一篇。
+		assert.NotEmpty(t, p.obs.Meta.Period, "Meta.Period 不得为空：%s", p.item.a.File)
+		assert.NotEmpty(t, p.obs.Meta.PeriodType, "Meta.PeriodType 不得为空：%s", p.item.a.File)
+		assert.NotEmpty(t, p.obs.Meta.PublishedAt, "Meta.PublishedAt 不得为空：%s", p.item.a.File)
+		assert.NotEmpty(t, p.obs.Meta.Extractor, "Meta.Extractor 不得为空：%s", p.item.a.File)
+
+		// 🔴 这条钉住的是「**item 与产出它的那次迭代的 obs 是配对的**」，**不是**
+		// 「分类算出的期次与正文自解的期次一致」—— 后者由 eachParsedArticle 内部那道
+		// 交叉校验保证、由 TestCollectSamplesCrossChecksPeriodAgainstTitle 守着。
+		//
+		// ⚠️ 措辞是变异实测定下来的，别改回去（M1c-3b 的 TASK-001，隔离副本上跑）：
+		//   · 删掉管道里那道交叉校验 guard ⇒ **本测试仍绿**，红的是上面那条既有测试；
+		//   · 把 fn 调用改成 `parsedArticle{obs: obs}`（不传 item）⇒ **本测试红**，
+		//     且全包只红这一条。
+		// ⇒ 它守的是配对关系。写成「期次必须一致」会让下一个人拿着这条红去查分类逻辑，
+		// 而真正坏掉的是 item 的传递 —— 断言红得对、给的理由却指错方向。
+		assert.Equal(t, p.item.period, p.obs.Meta.Period,
+			"item 与 obs 必须来自同一次迭代（item 未传或传错时这里会先炸）：%s", p.item.a.File)
 	}
 }
