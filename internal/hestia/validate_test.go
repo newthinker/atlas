@@ -710,6 +710,25 @@ func stockObsWithout() Observation {
 	return o
 }
 
+// asAdjacentPrior 把一个观测改造成「与 validMeta() 那一期（2026-06）**相邻的上一期**」
+// （M1c-3b 的 TASK-011 返工，缺陷 C-1）。
+//
+// 为什么需要它：gateStockContinuity 现在会检查 prior[0] 与本期是否相邻 —— 而本文件
+// 原先的夹具让 prior 与本期用**同一个 period**（都来自 validMeta()），那在现实中不可能
+// （Preceding 的 SQL 是 `WHERE period < ?`）。夹具不改的话，下面每一格都会变成
+// non_adjacent_prior 而 skipped，那些断言就全测不到自己本来要测的东西了。
+//
+// ⚠️ 期次**写死**，不调用生产代码的 expectedPeriodGapMonths：用被测函数去造夹具，
+// 那函数错了夹具跟着错，测试照样绿。这里独立陈述一次「相邻是什么意思」。
+func asAdjacentPrior(o Observation) Observation {
+	if o.Meta.PeriodType == "monthly" {
+		o.Meta.Period = "2026-05" // validMeta() 的 period 是 2026-06
+	} else {
+		o.Meta.Period = "2025-06" // 其余四档相邻两期相隔 12 个月
+	}
+	return o
+}
+
 // 三种跳过理由必须报对，按「从根本到表面」排优先级。
 // v1 期次同时满足前两条，报错了会把排查引向错误方向。
 //
@@ -734,7 +753,7 @@ func TestStockContinuitySkipReasons(t *testing.T) {
 	}{
 		{
 			"本期没有社融板块，但有历史",
-			stockObsWithout(), []Observation{stockObs(400)},
+			stockObsWithout(), []Observation{asAdjacentPrior(stockObs(400))},
 			"absent_field:" + FieldTSFStock,
 		},
 		{
@@ -749,7 +768,7 @@ func TestStockContinuitySkipReasons(t *testing.T) {
 		},
 		{
 			"上一期没有社融板块",
-			stockObs(400), []Observation{stockObsWithout()},
+			stockObs(400), []Observation{asAdjacentPrior(stockObsWithout())},
 			"prior_absent_field:" + FieldTSFStock,
 		},
 	}
@@ -827,7 +846,7 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rep, err := Validate(context.Background(), stockObsOf(tt.periodType, tt.cur),
-				fakeHistory{prior: []Observation{stockObsOf(tt.periodType, tt.prev)}},
+				fakeHistory{prior: []Observation{asAdjacentPrior(stockObsOf(tt.periodType, tt.prev))}},
 				DefaultThresholds())
 			require.NoError(t, err)
 
@@ -851,7 +870,7 @@ func TestStockContinuityDetectsJump(t *testing.T) {
 // 计划实现了这条分支却没有为它写测试，与 deposit_sum 那条同形。
 func TestStockContinuitySkipsOnZeroDenominator(t *testing.T) {
 	rep, err := Validate(context.Background(), stockObs(400),
-		fakeHistory{prior: []Observation{stockObs(0)}}, DefaultThresholds())
+		fakeHistory{prior: []Observation{asAdjacentPrior(stockObs(0))}}, DefaultThresholds())
 	require.NoError(t, err)
 
 	c := findCheck(t, rep, "stock_continuity")
@@ -881,7 +900,7 @@ func TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold(t *testing.T) {
 
 	t.Run("数据与历史都在，只是没给这条序列定上限", func(t *testing.T) {
 		rep, err := Validate(context.Background(), stockObsOf("monthly", 420),
-			fakeHistory{prior: []Observation{stockObsOf("monthly", 400)}}, cfg)
+			fakeHistory{prior: []Observation{asAdjacentPrior(stockObsOf("monthly", 400))}}, cfg)
 		require.NoError(t, err)
 
 		c := findCheck(t, rep, "stock_continuity")
@@ -901,7 +920,7 @@ func TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold(t *testing.T) {
 		delete(obs.Values, FieldTSFStock)
 
 		rep, err := Validate(context.Background(), obs,
-			fakeHistory{prior: []Observation{stockObsOf("monthly", 400)}}, cfg)
+			fakeHistory{prior: []Observation{asAdjacentPrior(stockObsOf("monthly", 400))}}, cfg)
 		require.NoError(t, err)
 
 		c := findCheck(t, rep, "stock_continuity")
@@ -1372,4 +1391,119 @@ func TestMagnitudeSanityBoundariesAreInclusive(t *testing.T) {
 				"fx_reserve=%v 对区间 [%v,%v]", tc.v, lo, hi)
 		})
 	}
+}
+
+// ── M1c-3b 的 TASK-011 返工（C-1）：prior[0] 不等于「上一期」 ──────────────
+//
+// Context Checkpoint: fix_items → test mapping
+// C-1 修法①（非相邻不得按原阈值判） → TestStockContinuitySkipsNonAdjacentPrior
+// C-1 修法④（跨接缝：中间期被拒）   → TestStockContinuityDoesNotUseRejectedPeriodAsBaseline
+
+// TestStockContinuitySkipsNonAdjacentPrior：prior[0] 与本期不相邻时必须 skipped。
+//
+// 🔴 `Preceding` 的 SQL 是 `WHERE period < ? AND period_type = ? ORDER BY period DESC`
+// —— 它返回**最近 N 个已被接受的期次**，**没有相邻性约束**。而本闸原先的注释断言
+// 「prior[0] 就是上一期」，那句话**只在从未拒过任何一期时成立**，而这道闸的存在前提
+// 就是会拒。真跑撞出 4 条拒绝，基线跨 10/11/13 个月、跨 3 年。
+func TestStockContinuitySkipsNonAdjacentPrior(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		periodType string
+		prev, cur  string // period
+		adjacent   bool
+	}{
+		{"monthly 相邻", "monthly", "2025-07", "2025-08", true},
+		{"monthly 跨一期", "monthly", "2025-06", "2025-08", false},
+		{"monthly 跨 13 个月（真跑撞到的形态）", "monthly", "2024-07", "2025-08", false},
+		{"monthly 跨年相邻", "monthly", "2024-12", "2025-01", true},
+		{"annual 相邻（相隔 12 个月）", "annual", "2024-12", "2025-12", true},
+		{"annual 跨 3 年（真跑撞到的形态）", "annual", "2022-12", "2025-12", false},
+		{"h1 相邻", "h1", "2024-06", "2025-06", true},
+		{"q1 跨两期", "q1", "2023-03", "2025-03", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// 值取一个**必定超限**的跳变：若相邻性判据失效，它会 failed；
+			// 判据生效时非相邻那几格该 skipped。两种结果截然不同，不会互相掩盖。
+			cur := stockObsOf(tt.periodType, 100)
+			cur.Meta.Period = tt.cur
+			prev := stockObsOf(tt.periodType, 10)
+			prev.Meta.Period = tt.prev
+
+			rep, err := Validate(context.Background(), cur,
+				fakeHistory{prior: []Observation{prev}}, DefaultThresholds())
+			require.NoError(t, err)
+			c := findCheck(t, rep, "stock_continuity")
+
+			if tt.adjacent {
+				require.Equal(t, CheckFailed, c.Status,
+					"相邻且跳变超限 ⇒ 必须照常判 failed；这一格是防「一律 skip」的空实现")
+				return
+			}
+			assert.Equal(t, CheckSkipped, c.Status,
+				"prior[0] 与本期不相邻，拿它当基线算出来的环比是伪影，不得据此判 failed")
+			assert.Contains(t, c.Reason, "non_adjacent_prior",
+				"跳过理由必须能与 no_prior_period / prior_absent_field 区分——"+
+					"三者的后续动作完全不同")
+			assert.Contains(t, c.Reason, tt.prev, "理由里要带上那个不相邻的基线期次，否则查不出跨了多久")
+		})
+	}
+}
+
+// TestStockContinuityDoesNotUseRejectedPeriodAsBaseline 是**跨接缝**的那条
+// （fix_items[1] 第 4 步）：它同时经过 `Preceding`（产出 prior）与 gate（消费 prior）。
+//
+// 🔴 为什么必须跨接缝：两端各自都对 —— `Preceding` 忠实返回「最近 N 个已接受的期次」，
+// gate 忠实按 prior[0] 算环比。缺陷在**两者之间的那个假设**上（「已接受的最近一期
+// 就是相邻上一期」），而它不属于任何一端，两端的测试都抓不到。
+// 与本 sprint 的 A-1（`MergedObservation.Parts` vs `Observation.Parts`）**同形**。
+//
+// 场景：A 入库 → B 被拒（落 pending，不在 viewCurrent 里）→ C 来了，
+// `Preceding(C)` 于是返回 A，而 A 与 C 相隔两个月。
+func TestStockContinuityDoesNotUseRejectedPeriodAsBaseline(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	save := func(t *testing.T, period string, v float64, rep ValidationReport) Outcome {
+		t.Helper()
+		o := stockObsOf("monthly", v)
+		o.Meta.Period = period
+		o.Meta.PublishedAt = period + "-15"
+		o.Meta.ArticleID = "art-" + period
+		out, err := s.Save(ctx, o, rep)
+		require.NoError(t, err)
+		return out
+	}
+
+	// A：正常入权威表
+	outA := save(t, "2025-01", 100, passing())
+	require.Equal(t, TableObservations, outA.Table)
+
+	// B：未过闸 ⇒ 落 pending ⇒ **不会出现在 viewCurrent 里**
+	outB := save(t, "2025-02", 101, ValidationReport{
+		Passed: false,
+		Checks: []Check{{ID: "completeness", Status: CheckFailed, Reason: "missing 3: a,b,c"}},
+	})
+	require.Equal(t, TablePending, outB.Table, "未过闸的期次必须落 pending")
+
+	// 接缝在这里：Preceding 看不见 B，于是把 A 当成 C 的「上一期」。
+	prior, err := s.Preceding(ctx, "2025-03", "monthly", 6)
+	require.NoError(t, err)
+	require.Len(t, prior, 1, "B 落了 pending，viewCurrent 里只剩 A")
+	require.Equal(t, "2025-01", prior[0].Meta.Period,
+		"这就是缺陷的根：Preceding 返回的「最近一期」与 C 相隔两个月")
+
+	// C：拿 A 当基线会算出 100→180 的伪跳变（80%，远超 monthly 上限）
+	c3 := stockObsOf("monthly", 180)
+	c3.Meta.Period = "2025-03"
+	rep, err := Validate(ctx, c3, s, DefaultThresholds())
+	require.NoError(t, err)
+
+	got := findCheck(t, rep, "stock_continuity")
+	assert.NotEqual(t, CheckFailed, got.Status,
+		"拿跨期基线算出的环比是伪影，不得据此拒绝本期。"+
+			"真跑里这个缺陷造成 4 条误拒，且构成正反馈：拒绝 → 基线跨度变长 → 更多拒绝，"+
+			"而 --force 对已入权威表的期次是 no-op ⇒ 拦错了没有出路")
+	assert.Equal(t, CheckSkipped, got.Status)
+	assert.Contains(t, got.Reason, "non_adjacent_prior")
+	assert.Contains(t, got.Reason, "2025-01", "要指出被跳过的那个基线是哪一期")
 }

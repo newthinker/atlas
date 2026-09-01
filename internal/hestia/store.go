@@ -336,6 +336,18 @@ func (s *Store) HasArticleInObservations(ctx context.Context, articleID string) 
 // 只在同一个 period_type 内比较：月度与半年度是两条独立序列，社融存量的环比
 // 在它们之间比较毫无意义。period 是 YYYY-MM 定宽格式，字典序即时间序。
 //
+// 🔴 **两条射程限制，调用方必须知道**（M1c-3b 的 TASK-011 返工，缺陷 C-1）：
+//
+//  1. 它只看得见**已入权威表**的期次 —— 查的是 viewCurrent，落 pending 的期次
+//     （未过闸的）在这里**不存在**。
+//  2. 它**没有相邻性约束** —— SQL 只有 `WHERE period < ? AND period_type = ?`，
+//     返回的是「最近 n 个**已被接受**的期次」，**不是**「上 n 期」。
+//
+// ⇒ **`out[0]` 不等于「上一期」**。两者只在「从未拒过任何一期」时重合，而闸门的
+// 存在前提就是会拒。gateStockContinuity 曾据此假设算环比，真跑撞出 4 条误拒，
+// 基线跨 10 / 11 / 13 个月、跨 3 年，且构成正反馈（拒绝 → 基线跨度变长 → 更多拒绝）。
+// 凡是「相邻两期」才有意义的判定，调用方**必须自己核对期次跨度**。
+//
 // 这是 Store 的第一个读方法。只读——DB() 在 M1b-1.5 已收窄成 Querier，
 // 「Save 是唯一写入口」不受影响。
 func (s *Store) Preceding(ctx context.Context, period, periodType string, n int) ([]Observation, error) {
