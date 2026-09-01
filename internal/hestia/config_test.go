@@ -360,7 +360,7 @@ discover:
 //
 // # 为什么必须有这条（阻断级缺口 A-4）
 //
-// 实测 `grep -rn "configs/hestia.yaml" --include="*.go" .` **零命中** —— 那 54 项
+// 实测 `grep -rn "configs/hestia.yaml" --include="*.go" .` **零命中** —— 那 76 项
 // 区间是**人手填的**，而 TASK-004 的三类校验（未知字段名 / 区间倒置 / 缺 unit）
 // 只在 `LoadConfig` 被调用时生效，**CI 里没有任何测试调用真配置**。
 //
@@ -381,9 +381,9 @@ func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
 		slices.Sorted(slices.Values(fieldOrder)),
 		slices.Sorted(maps.Keys(cfg.Thresholds.MagnitudeRanges)),
 		"键集合必须与 fieldOrder **逐项相等**：只比长度的话，打错一个字段名"+
-			"（多一个未知键、少一个真字段）两边都还是 54")
+			"（多一个未知键、少一个真字段）两边都还是 76")
 
-	assert.Equal(t, "2026-08-31", cfg.ConfigVersion,
+	assert.Equal(t, "2026-09-01", cfg.ConfigVersion,
 		"填了区间表就改变了这份配置的行为，config_version 必须跟着走——"+
 			"否则「这期用的是哪版配置」在契约里查不出来")
 

@@ -9,7 +9,10 @@
 
 # 不参与任何逻辑，只让「这期用的是哪版配置」一眼可见（方案报告 5.3.2）。
 # 手工递增，用日期串。
-config_version: "2026-08-31"
+#
+# 2026-09-01（M1c-4 的 TASK-004）：magnitude_ranges 由 54 项扩到 76 项，新增的
+# 22 项是当月口径列（*_mom）的**占位**区间，未经标定 —— 见该段的注释。
+config_version: "2026-09-01"
 
 storage:
   # 相对路径，按进程 cwd 解析（约束 C8）。plist 的 WorkingDirectory 已指向 runtime；
@@ -173,6 +176,31 @@ thresholds:
     tsf_flow_trust_ytd:        {min: -81000,  max: 16000,   unit: "亿元"}
     tsf_flow_bankaccept_ytd:   {min: -20000,  max: 24000,   unit: "亿元"}
     tsf_flow_equity_ytd:       {min: -7000,   max: 50000,   unit: "亿元"}
+    # A.1 社融 · 增量当月（M1c-4 的 TASK-004）
+    #
+    # 🔴 **本组区间未经标定，占位待 M1c-4 的 TASK-010 重标。**
+    #
+    # 为什么只能是占位：存在循环依赖 —— 填表要 *_mom 的实测分布 → 分布要 TASK-005
+    # 的抽取路由跑通 → 跑通要 go test 全绿 → 全绿要这张表填好（键集合必须与
+    # fieldOrder 逐项相等）。占位是唯一的破环点。
+    # 先例是 thresholds.go 的 stock_continuity_max 三档 n=0：值写下来，注释写明
+    # 它不是标定过的。
+    #
+    # 取法：**逐项照抄对应 *_ytd 字段的现有区间**。两者是同一批数据的两种口径，
+    # 量级上当月 ⊂ 累计的量程（累计是当月的逐月叠加），所以 ytd 的区间对 mom 一定
+    # 偏宽——偏宽的占位只会漏拦，不会误拦，而误拦会让整期数据卡在 pending。
+    #
+    # ⚠️ **不要把这组数当成标定结果引用。** 上一轮 deposit_sum_tolerance 的 0.12
+    # 就是这么走样的：出自 M0 三样本，被下游写成「实测残差**稳定在** 7.6–9.1%」。
+    tsf_flow_mom:              {min: -200000, max: 1500000, unit: "亿元"}
+    tsf_flow_rmb_loan_mom:     {min: -120000, max: 890000,  unit: "亿元"}
+    tsf_flow_govt_bond_mom:    {min: -70000,  max: 560000,  unit: "亿元"}
+    tsf_flow_corp_bond_mom:    {min: -23000,  max: 180000,  unit: "亿元"}
+    tsf_flow_fx_loan_mom:      {min: -22000,  max: 14000,   unit: "亿元"}
+    tsf_flow_entrust_mom:      {min: -38000,  max: 15000,   unit: "亿元"}
+    tsf_flow_trust_mom:        {min: -81000,  max: 16000,   unit: "亿元"}
+    tsf_flow_bankaccept_mom:   {min: -20000,  max: 24000,   unit: "亿元"}
+    tsf_flow_equity_mom:       {min: -7000,   max: 50000,   unit: "亿元"}
     # A.2 货币供应量
     m2:                        {min: 49,      max: 1500,    unit: "万亿元"}
     m2_yoy:                    {min: -100,    max: 100,     unit: "百分数"}
@@ -188,6 +216,13 @@ thresholds:
     deposit_corp_ytd:          {min: -130000, max: 270000,  unit: "亿元"}
     deposit_fiscal_ytd:        {min: -13000,  max: 89000,   unit: "亿元"}
     deposit_nbfi_ytd:          {min: -45000,  max: 270000,  unit: "亿元"}
+    # A.3 存款 · 当月（M1c-4 的 TASK-004）
+    # 🔴 未经标定，占位待 M1c-4 的 TASK-010 重标；取法同上（照抄对应 *_ytd 区间）。
+    deposit_flow_mom:          {min: -140000, max: 1100000, unit: "亿元"}
+    deposit_household_mom:     {min: -90000,  max: 720000,  unit: "亿元"}
+    deposit_corp_mom:          {min: -130000, max: 270000,  unit: "亿元"}
+    deposit_fiscal_mom:        {min: -13000,  max: 89000,   unit: "亿元"}
+    deposit_nbfi_mom:          {min: -45000,  max: 270000,  unit: "亿元"}
     # A.4 贷款
     loan_balance:              {min: 38,      max: 1200,    unit: "万亿元"}
     loan_balance_yoy:          {min: -100,    max: 100,     unit: "百分数"}
@@ -199,6 +234,16 @@ thresholds:
     loan_corp_mlt_ytd:         {min: -68000,  max: 550000,  unit: "亿元"}
     loan_bill_ytd:             {min: -60000,  max: 120000,  unit: "亿元"}
     loan_nbfi_ytd:             {min: -19000,  max: 24000,   unit: "亿元"}
+    # A.4 贷款 · 当月（M1c-4 的 TASK-004）
+    # 🔴 未经标定，占位待 M1c-4 的 TASK-010 重标；取法同上（照抄对应 *_ytd 区间）。
+    loan_flow_mom:             {min: -120000, max: 910000,  unit: "亿元"}
+    loan_hh_short_mom:         {min: -38000,  max: 80000,   unit: "亿元"}
+    loan_hh_mlt_mom:           {min: -31000,  max: 250000,  unit: "亿元"}
+    loan_corp_total_mom:       {min: -90000,  max: 720000,  unit: "亿元"}
+    loan_corp_short_mom:       {min: -25000,  max: 200000,  unit: "亿元"}
+    loan_corp_mlt_mom:         {min: -68000,  max: 550000,  unit: "亿元"}
+    loan_bill_mom:             {min: -60000,  max: 120000,  unit: "亿元"}
+    loan_nbfi_mom:             {min: -19000,  max: 24000,   unit: "亿元"}
     # A.5 利率与外部
     rate_ibo:                  {min: 0,       max: 30,      unit: "百分数"}
     rate_repo:                 {min: 0,       max: 30,      unit: "百分数"}

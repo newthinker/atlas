@@ -598,7 +598,7 @@ func extractDepositSection(sec section) (map[string]float64, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := setFlow(c, it.field, m[1], m[2], m[3]); err != nil {
+		if err := setFlow(c, it.ytdField, m[1], m[2], m[3]); err != nil {
 			return nil, err
 		}
 	}
@@ -660,7 +660,7 @@ func extractLoanSection(sec section) (map[string]float64, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := setFlow(c, it.field, m[1], m[2], m[3]); err != nil {
+			if err := setFlow(c, it.ytdField, m[1], m[2], m[3]); err != nil {
 				return nil, err
 			}
 		}
@@ -928,7 +928,7 @@ func extractTSFFlowArticle(text string) (map[string]float64, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := setFlow(c, it.field, m[1], m[2], m[3]); err != nil {
+		if err := setFlow(c, it.ytdField, m[1], m[2], m[3]); err != nil {
 			return nil, err
 		}
 	}

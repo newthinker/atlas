@@ -646,3 +646,39 @@ func TestMagnitudeRangesRejectBlankUnit(t *testing.T) {
 		})
 	}
 }
+
+// TestMagnitudeRangesCoverEveryFieldWhenCalibrated：表非空时必须覆盖全部字段
+// （M1c-4 的 TASK-004）。
+//
+// 🔴 这条比 M1c-3b 的「绊线」强，理由是 CONTRACTS §G 记下的那条：绊线会因
+// 「真实路径改变」而**静默失效且不报告自己已失效**（M1c-3b 的 TASK-005 把表填进
+// yaml 而不是 DefaultThresholds()，绊线原地失效）。本断言挂在 fieldOrder 上，
+// 而 fieldOrder 就是真实路径本身 —— 加字段必然改它，改它必然撞红这条。
+//
+// 空表是合法状态（magnitude_sanity 记 skipped{not_calibrated}），只在非空时要求
+// 全覆盖：半张表最危险 —— 表里没有的字段被 gateMagnitudeSanity 直接跳过，静默漏检。
+//
+// 🔴 **但要清楚它当前恒 skip，一次都不会跑**（M1c-4 的 TASK-004 核实，锚 4670ccb）：
+// 上面 TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated 钉死了
+// DefaultThresholds().MagnitudeRanges 必须为空，与本条的 skip 条件正好互补
+// ⇒ 二者合起来使本条**永不进入循环**。它现在守不住任何东西，留着是当文档。
+//
+// 别为了让它「真的跑一次」去填 DefaultThresholds()：默认表留空是有意设计
+// （TestEmptyMagnitudeRangesStillValid 钉着「空表合法」），要拒的是**半张表**。
+//
+// 当前真正在守全覆盖的只有一条：**TestShippedConfigLoadsAndIsCalibrated**
+// （config_test.go），它逐项比对仓库自带的 configs/hestia.yaml。
+// LoadConfig 侧**没有**全覆盖校验 —— thresholds.go 的 validate 对表里缺的字段
+// 是 `if !ok { continue }` ⇒ 运维换一份自己的半张表 yaml 时静默通过，
+// gateMagnitudeSanity 对缺项直接跳过、且报 passed。补上那道校验是 M1c-4 的
+// TASK-010 的义务（已写进它的 DoD）。
+func TestMagnitudeRangesCoverEveryFieldWhenCalibrated(t *testing.T) {
+	ranges := DefaultThresholds().MagnitudeRanges
+	if len(ranges) == 0 {
+		t.Skip("默认阈值有意留空，见 Thresholds.MagnitudeRanges 的注释")
+	}
+	for _, f := range fieldOrder {
+		require.Contains(t, ranges, f,
+			"%s 没有区间 ⇒ gateMagnitudeSanity 会静默跳过它", f)
+	}
+}

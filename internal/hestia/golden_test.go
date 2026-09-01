@@ -2,7 +2,7 @@ package hestia
 
 // Context Checkpoint: done_criteria → test mapping (golden)
 //
-// functional[0]     golden2025 恰好 54 项 / golden2020 恰好 27 项
+// functional[0]     golden2025 恰好 54 项（全部累计口径字段）/ golden2020 恰好 27 项
 //                                                 → TestGoldenTablesAreWellFormed
 // functional[0]     goldenMeta* 只填 5 项，ArticleID 与 IngestedAt 留空
 //                                                 → TestGoldenMetaIsValid
@@ -49,7 +49,11 @@ import (
 // 原文单位与之不同的条目，注释里标出原文值（如 `15.91 万亿`），换算只有 ×10000
 // 一种（万亿元→亿元）。
 
-// golden2025 是 pboc-2025-12-annual.html 的期望解析结果，54 项全满。
+// golden2025 是 pboc-2025-12-annual.html 的期望解析结果，54 项全满（累计口径）。
+//
+// M1c-4 的 TASK-004 之后 fieldOrder 是 76 项，多出的 22 个是当月口径列（*_mom）。
+// 这份年报正文只有累计句，那 22 列在它这里是 absent-by-design，本表不该有它们
+// —— 由 TestGoldenTablesAreWellFormed 的正反两条子测试钉住。
 var golden2025 = map[string]float64{
 	// —— A.1 社融总量（3）——
 	// L320「初步统计，2025年末社会融资规模存量为442.12万亿元，同比增长8.3%」
@@ -237,6 +241,24 @@ var goldenMeta2020 = Meta{
 	Extractor:      "rule@v1",    // 六板块无社融
 }
 
+// ytdCaliberFields 是 fieldOrder 中**累计口径**的字段（M1c-4 的 TASK-004）。
+//
+// 两份 golden 都抄自累计口径的报告（2025 年报 / 2020 上半年报），当月口径的
+// *_mom 列在它们的正文里根本不存在 —— 与 golden2020 不含社融字段完全同理，
+// 是「本期模板本就没有」，不是抄漏。
+//
+// 同样用**派生**而不是写死：*_mom 那一族是 TASK-004 一次加进来的，将来若有当月
+// 口径的 golden 表，它用的是本函数的补集，两边不会分叉。
+func ytdCaliberFields() []string {
+	var out []string
+	for _, f := range fieldOrder {
+		if !strings.HasSuffix(f, "_mom") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // nonTSFFieldCount 是 fieldOrder 中不属于社融板块的字段数。
 //
 // 它就是 golden2020 应有的项数：2020H1 报告只有六个板块、不含社会融资规模
@@ -245,7 +267,7 @@ var goldenMeta2020 = Meta{
 // 这个期望值自动跟随——写死的 27 会在下次加字段时变成一条说谎的断言。
 func nonTSFFields() []string {
 	var out []string
-	for _, f := range fieldOrder {
+	for _, f := range ytdCaliberFields() {
 		if !strings.HasPrefix(f, "tsf_") {
 			out = append(out, f)
 		}
@@ -258,8 +280,13 @@ func nonTSFFields() []string {
 // golden 表是后面每个任务的验收基准，它自己错了会让所有测试一起说谎——
 // 所以先钉住它的形状：项数、键的合法性、v1 不含社融。
 func TestGoldenTablesAreWellFormed(t *testing.T) {
-	require.Len(t, golden2025, 54, "rule@v2 期次应填满全部 54 个字段")
+	require.Len(t, golden2025, 54, "rule@v2 期次应填满全部 54 个累计口径字段")
 	require.Len(t, golden2020, 27, "rule@v1 期次只有六板块，恰好 27 个字段")
+
+	// 派生表达式与上面两个字面量互为对照：只写派生，两边一起错时全绿；只写
+	// 字面量，加一个 *_ytd 字段却忘了抄进 golden 时它照样绿（M1c-4 的 TASK-004）。
+	require.Len(t, ytdCaliberFields(), 54,
+		"累计口径字段数变了 ⇒ golden2025 要么该跟着抄，要么新字段该是当月口径")
 
 	for _, tc := range []struct {
 		name  string
@@ -277,9 +304,15 @@ func TestGoldenTablesAreWellFormed(t *testing.T) {
 
 	// 逐键断言而非只比数量：数量对而键写错（抄成另一个合法字段名）在上面的
 	// Len 与白名单检查里都不会红，要到 T5/T7 才暴露，且那时会被误读成抽取错误。
-	t.Run("2025/54 个字段一个不缺", func(t *testing.T) {
-		for _, f := range fieldOrder {
+	t.Run("2025/54 个累计口径字段一个不缺", func(t *testing.T) {
+		for _, f := range ytdCaliberFields() {
 			assert.Containsf(t, golden2025, f, "字段 %q 未抄录", f)
+		}
+		// 反向：当月口径列一个都不该在里面。2025 年报正文只有累计句，
+		// 抄进来的必然是把累计值装进了 *_mom —— 那正是本迭代最想防的那件事。
+		for k := range golden2025 {
+			assert.Falsef(t, strings.HasSuffix(k, "_mom"),
+				"2025 年报是累计口径，不该有当月口径字段，但出现了 %q", k)
 		}
 	})
 
