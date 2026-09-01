@@ -909,3 +909,88 @@ func TestHestiaBackfillCalibrateOnMissingDir(t *testing.T) {
 	assert.NotContains(t, err.Error(), "allow-incomplete",
 		"目录不存在时不该把人引去加这个 flag")
 }
+
+// —— atlas hestia backfill load 子命令（M1c-3b 的 TASK-007）——
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] Use/Short/Long 照抄 + 挂到 hestiaBackfillCmd → TestHestiaBackfillLoadIsRegistered
+// functional[1] 三个 flag、--db required 且无默认值        → TestHestiaBackfillLoadIsRegistered
+// functional[2] 不给 --db ⇒ 报错，错误串含 --db            → TestBackfillLoadRequiresDBFlag
+// functional[3] 报告真的到了 stdout（阻断级缺口 A-2）      → TestHestiaBackfillLoadWritesReport
+
+// TestBackfillLoadRequiresDBFlag：--db 不给 ⇒ 报错，不给默认值。
+//
+// 默认值会让人在没意识到的情况下写进 configs/hestia.yaml 指的那个**生产库**，
+// 而回填一旦进了权威表就没有出路（--force 对已入权威表的期次是数据层 no-op）。
+func TestBackfillLoadRequiresDBFlag(t *testing.T) {
+	err := bfExec(t, "hestia", "backfill", "load", "--dir", t.TempDir())
+	require.Error(t, err, "缺 --db 必须被 cobra 拦下")
+
+	// ⚠️ 断 `"db"` 而不是 `"--db"`：cobra 的实际文案是
+	// `required flag(s) "db" not set`，**不带 `--` 前缀**（实测）。
+	// 需求文档 Task 7 Step 1 与本任务 DoD 都写的是「错误串含 --db」，那是照抄
+	// 需求文档时未经实测的措辞 —— 同文件既有的两条 required-flag 用例
+	// （fetch 的 "out"、calibrate 的 "dir"）也都断裸名，本条沿用该惯例。
+	//
+	// 同时断 "required"：只断 "db" 太弱 —— 任何一条含 db 字样的别的错误
+	// （如 db_path 相关）都能让它变绿，而本条要钉的是「cobra 把它当必填拦下了」。
+	require.Contains(t, err.Error(), "db", "错误要点名是哪个 flag 缺了")
+	require.Contains(t, err.Error(), "required", "必须是「必填未给」这条路径拦下的")
+}
+
+// TestHestiaBackfillLoadIsRegistered：两层嵌套注册 + 三个 flag 经 cobra 真实解析。
+//
+// 判据是**从根命令按路径找得到**，而不是「那个变量非 nil」——后者对一个建了命令
+// 却忘了 AddCommand 的实现同样为真，而那种实现在 CLI 上根本调不出来
+// （沿用 TestHestiaBackfillFetchIsRegistered 的判据）。
+func TestHestiaBackfillLoadIsRegistered(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"hestia", "backfill", "load"})
+	require.NoError(t, err, "从根命令按 hestia→backfill→load 必须找得到")
+	require.Equal(t, "load", cmd.Name())
+	assert.NotNil(t, cmd.RunE, "叶子命令必须有 RunE，否则它只会打印 usage")
+	assert.True(t, cmd.SilenceUsage, "出错时不该把真正那行错误埋进 usage 里")
+
+	for _, name := range []string{"dir", "db", "allow-incomplete"} {
+		assert.NotNilf(t, cmd.Flags().Lookup(name), "--%s 必须注册", name)
+	}
+
+	// 🔴 --db **不得有默认值**：默认值会让人在没意识到的情况下写进生产库。
+	//
+	// 断 DefValue 而不是读包级变量：测试之间的重置逻辑会把变量抹掉，
+	// 断变量的用例对「注册时给了默认值」这个真实缺陷免疫
+	// （M1c-1 TASK-010 FIX-A 实测过，见 TestHestiaBackfillCalibrateIsRegistered）。
+	assert.Empty(t, cmd.Flags().Lookup("db").DefValue,
+		"--db 不得有默认值——猜一个只会让人把回填写进生产库")
+}
+
+// TestHestiaBackfillLoadWritesReport：报告必须真的到达 stdout（阻断级缺口 A-2）。
+//
+// 🔴 **为什么这条不可省**：writeLoadReport 是**非导出**的 ⇒ cmd/atlas 是另一个 package、
+// 调不到它 ⇒ 报告只能由 BackfillLoad 写进 Deps.Out。而**漏填 Out 是静默的**：
+// 命令可能把观测正确写进库、返回 exit 0、而 stdout 一片空白，运维以为一切正常。
+//
+// ⚠️ 上面那条 TestBackfillLoadRequiresDBFlag 属于 flag 解析类，对这个失效**完全免疫**——
+// 它正是 calibrate.go 那段注释点名「会全部通过」的那类测试。
+func TestHestiaBackfillLoadWritesReport(t *testing.T) {
+	dir := calibrateFixture(t, "2026-08-24T10:00:00Z")
+	// 配置只用来取 Thresholds；db_path 指向一个**永不被碰**的路径，
+	// 因为回填写的是 --db 那个新库（Long 里「never touches the production database」）。
+	withConfig(t, `
+config_version: "2026-08-12"
+storage:
+  db_path: /nonexistent/never-touched.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	// --db 指向一个**尚不存在**的路径：BackfillLoad 要求它不存在（回填是一次性动作）。
+	db := filepath.Join(t.TempDir(), "backfill.db")
+
+	out, err := calExec(t, "hestia", "backfill", "load", "--dir", dir, "--db", db)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, out, "命令必须真的打印报告——零字节 + 退出码 0 正是本条要防的形态")
+	assert.Contains(t, out, "四道恒等式", "恒等式小节标题")
+	assert.Contains(t, out, "合并组明细", "合并组明细小节标题")
+}
