@@ -1,0 +1,54 @@
+{
+  "id": "TASK-004",
+  "title": "22 个 _mom 字段原子扩容：常量 + fieldOrder + 模板表两列 + yaml 占位",
+  "description": "对应需求文档 Task 4，**但射程比文档更大**（见 `.arcforge/docs/01-design/architecture-decisions.md` 的 AD-M1c4-3）。\n\n🔴 **文档说「只加字段与断言，不接抽取」，那在机制上不成立。** Leader 核实（锚 `4670ccb`）发现 `fieldOrder` 被**三条全覆盖断言**绑住，任何加字段的动作必须**一次性**满足全部三条，否则 `go test` 转红——而每个任务的 `dev_done` 门禁都要跑它：\n\n1. `config_test.go:377` `TestShippedConfigLoadsAndIsCalibrated` 读**仓库真配置** `configs/hestia.yaml`，断言 `len(MagnitudeRanges) == len(fieldOrder)` 且**键集合逐项相等**，另断言 `config_version == \"2026-08-31\"`\n2. `fields_test.go:151` `require.Len(t, fieldOrder, 27+6+7+10+4)` **外加四条分族前缀计数**（社融 27 / `deposit_` 7 / `loan_` 10 / 利率外汇 4）——**需求文档漏了这一条**\n3. `profiles_test.go:73` `TestTemplateTablesCoverAllFields` 要求 `fieldOrder` 每一项都被模板表覆盖且**数量相等**\n\n⇒ 本任务是**原子扩容步**：加常量 + `fieldOrder` + 模板表加 `momField` 列 + `templateFields()` 收两列 + 三处计数断言更新 + yaml 占位 22 项。**只做数据结构与声明，不接抽取路由**（那是 TASK-005）。",
+  "status": "in_progress",
+  "complexity": "complex",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/fields.go",
+    "./internal/hestia/fields_test.go",
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go",
+    "./internal/hestia/golden_test.go",
+    "./internal/hestia/thresholds_test.go",
+    "./internal/hestia/config_test.go",
+    "./internal/hestia/schema_test.go",
+    "./internal/hestia/required.go",
+    "./internal/hestia/required_test.go",
+    "./internal/hestia/extract.go",
+    "./configs/hestia.yaml"
+  ],
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "done_criteria": {
+    "functional": [
+      "`fields.go` 新增 **22 个导出常量**（清单逐字见需求文档 Task 4 Step 3：社融 9 / 存款 5 / 贷款 8），全部以 `_mom` 结尾；`fieldOrder` 由 **54 → 76**，各族的 `_mom` 项**紧跟对应 `_ytd` 项之后**（同族相邻——报告按 `fieldOrder` 顺序打印，聚在一起读起来才成话）。\n\n⚠️ `FieldTSFFlowMoM` 放在增量**分项之后**而不是跟着 `FieldTSFFlowYTD`（A.1 总量），见需求文档 Task 4 Step 4 的说明。",
+      "`profiles.go`：`nameField` 由 `{name, field}` 改为 `{name, ytdField, momField}`；`loanScope` 的 `totalField` 增配 `totalMoM`；三张模板表（`tsfFlowItems` / `depositItems` / `loanScopes`）每项填齐两列（清单逐字见需求文档 Task 5 Step 3——**本任务只搬这部分数据结构，不做 `sectorCaliberOf` / `pick()`**）；`templateFields()` 改为**同时收 `ytdField` 与 `momField`**。\n\n🔴 最后一句是本任务能否绿的关键：`TestTemplateTablesCoverAllFields` 断言「模板覆盖的字段数 == `len(fieldOrder)`」，不收两列就是 54 vs 76。",
+      "三条新测试存在且通过：`TestMomFieldsExistForEveryFlowFamily`（22 个常量逐个在 `fieldOrder` 里、均以 `_mom` 结尾、`require.Len(t, fieldOrder, 76)`）；`TestEveryMomFieldHasAYTDTwin`（每个 `_mom` 都有 `_ytd` 孪生列，计数 22）；`TestMagnitudeRangesCoverEveryFieldWhenCalibrated`（`DefaultThresholds().MagnitudeRanges` 为空则 `t.Skip`，非空则必须全覆盖）。\n\n⚠️ 第三条**当前应走 `t.Skip`**（默认表有意为空），这是**正确状态**，不是漏测。"
+    ],
+    "boundary": [
+      "🔴 **四条既有计数断言必须同步更新，缺一条就红**（`fields_test.go` 内）：总数 `27+6+7+10+4` → 对应新的分族数；社融前缀计数 27 → 36；`deposit_` 7 → 12；`loan_` 10 → 18。\n\n⚠️ **不要把总数改成裸 `76`**——原式写成分族之和是有理由的（注释里写着）：分组计数之和必须正好是全部字段，否则「某组多一个、另一组少一个」之外还有第三种漏网。**保持分族求和的形态**。\n⚠️ 上面的 36/12/18 是 Leader 从「原值 + 本族新增数」推的，**你必须自己跑一次确认**——跑 `go test -run TestFieldOrder` 让它把实际值告诉你，别照抄本条。\n\n⚠️ **`golden_test.go` 的期望键集也会转红——那是它在正常工作**，去更新期望键集，**不要改断言**。\n⚠️ **`observationsDDL` 无需手写**：`schema.go` 逐列从 `fieldOrder` 派生，加字段自动扩表。跑 `go test -run 'TestSchema|TestObservationsDDL'` 确认。",
+      "🔴 **`configs/hestia.yaml` 必须同步补 22 项 `magnitude_ranges`，每项带 `min` / `max` / `unit: \"亿元\"`，且 `config_version` 递增**（`config_test.go` 的 `2026-08-31` 断言要一起改成新值）。\n\n🔴 **这 22 项填的是占位值，必须在 yaml 注释里显式写明「本组区间未经标定，占位待 M1c-4 的 TASK-010 重标」**。\n\n**为什么是占位而不是真值**：存在循环依赖——填表要 `_mom` 实测分布 → 分布要 TASK-005 抽取路由跑通 → 跑通要 `go test` 全绿 → 全绿要表填好。占位是唯一破环点。\n**先例**：`thresholds.go` 的 `stock_continuity_max` 三档 n=0 就是这个形状（值写下来、注释写明它不是标定过的）。\n🔴 **两半都要做**：只填值不标注，下一个人会把占位当标定结果引用——而那正是本迭代要订正的四条被证伪契约之一的成因（`deposit_sum_tolerance` 的 0.12 出自 M0 三样本，却被 `fields.go` 写成「实测残差**稳定在** 7.6–9.1%」）。\n\n占位区间**取对应 `_ytd` 字段的现有区间**（同一批数据的两种口径，量级上 mom ⊂ ytd 的量程），并在注释注明这个取法。"
+    ],
+    "error_handling": [
+      "🔴 **本任务不做全语料背对背行为比对**：它不改变任何抽取行为。但 `calibrate` 输出**不是**逐字节不变——见下方订正。\n\n**验收判据（`verify_by: manual`）**：背对背 diff **必须恰好是 22 行纯新增**，每行形如 `<字段>_mom  0  —  —  —  —  —  —`（n=0，其余列为占位符），**0 删除、0 修改**，既有 54 行逐字节不变。\n\n⚠️ **订正（原判据「背对背 diff 必须为空」结构上不可能，是 Leader 写错的，由 dev-m1c4-b 在 `dev_done` 前经写通道订正）**：\n`internal/hestia/calibrate_report.go:163` 是 `for _, f := range fieldOrder` —— 字段分布表**全序遍历 `fieldOrder` 且不跳过 n=0 行**（源码注释原话：「零样本字段会整行消失 —— 而『这个字段一个样本都没有』恰恰是读者最需要看见的一件事」），并由 `TestRenderCalibrateReportFollowsFieldOrder`（`calibrate_report_test.go:246`）钉着「一个不少」。`fieldOrder` 从 54 扩到 76 ⇒ 报表必然多出 22 行。\n**这个性质在基线上看不出来**：基线 54 个字段全部 n>0，n=0 的行数为 0，所以「n=0 也照样渲染」这一分支从未在基线输出里显形。\n\n🔴 **22 行 n=0 比空 diff 是更强的证据**：它同时证明那 22 列被识别、被渲染、且**样本数为 0** —— 即没有被任何抽取路径写入，正是「本任务只扩容、不接抽取（抽取路由归 TASK-005）」要证的东西。空 diff 反而只能证明报表没渲染它们。\n\n🔴 **有第 23 行差异、或任何删除/修改，就停下来查** —— 那才说明数据结构改造意外改变了抽取行为。\n\n🔴 **语料路径必须用主仓库绝对路径**（AD-3，本 sprint 命中率最高的一条）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n\n⚠️ **不要用 `$PWD/data/...`** —— 需求文档全篇是那个写法，但 `.gitignore` 含 `data/`，`git ls-files data/` 返回 0 ⇒ **linked worktree 里根本没有 `data/` 目录**，照抄必然失败。\n⚠️ `--allow-incomplete` 是**必需**的：该语料 manifest 无 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-004-m1c4 ../wt-TASK-004-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-004):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，「未提交改动」与「本任务已提交」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-004-m1c4`。"
+    ]
+  },
+  "last_transition": {
+    "from": "assigned",
+    "to": "in_progress",
+    "by": "dev-m1c4-b",
+    "at": "2026-09-01T14:56:19Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c4-b",
+  "discovery": ".arcforge/discoveries/TASK-004.json"
+}

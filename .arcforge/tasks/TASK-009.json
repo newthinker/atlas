@@ -1,0 +1,40 @@
+{
+  "id": "TASK-009",
+  "title": "calibrate 输出 deposit_sum 残差分布（按口径族与期次类型分档）",
+  "description": "对应需求文档 Task 9。`deposit_sum_tolerance` 的 0.12 是 **M0 三样本**拍出来的（`thresholds.go:23-28`：残差 7.65% / 8.57% / 9.06%），而 79 期真实数据实测最高 **0.1663**，7 期超过 0.12。`fields.go` A.3 那句「实测残差**稳定在** 7.6–9.1%」同样被证伪。\n\n⚠️ **前置缺口**：`calibrate` 现在只输出字段值分布，**没有残差分布** ⇒ 无标定依据。本任务补上它，**TASK-010 才有东西可填**。",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/calibrate.go",
+    "./internal/hestia/calibrate_report.go",
+    "./internal/hestia/calibrate_report_test.go"
+  ],
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-007"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`CalibrateResult` 新增 `DepositResiduals map[string][]float64` 字段（**构造处必须初始化**，否则往 nil map 写会 panic）；新增 `collectDepositResiduals(res *CalibrateResult)`，按复合键 `deposit_sum/<族>/<period_type>` 收集残差样本。\n\n🔴 **放在独立字段而不是塞进 `res.Samples`**：`Samples` 的每个 key 都是一个**字段名**，报告的字段值分布那一节按 `fieldOrder` 遍历它；混进一个不是字段名的 key，那节会多出一行无处归类的东西，**或被静默跳过**。",
+      "报告新增一节「deposit_sum 残差分布」，两族（ytd / mom）× 期次类型分档，列出 `n / min / p5 / median / p95 / max`。\n\n🔴 **只产出依据，不产出建议值**（沿 M1c-3b 的纪律）。既有的字段值分布那一节有「建议区间」列，那是 `magnitude_ranges` 的形态；**残差这一节不加建议列**——容差不是分位数直接换算得来的，留多少余量是人的判断。\n🔴 **`n` 必须出声**：样本数决定这个分布可不可信。",
+      "两条测试存在且通过：`TestCalibrateReportsDepositResidualDistribution`（报告含该节、两族分开报、`n` 出现在输出里）；`TestCalibrateResidualDistributionSeparatesPeriodTypes`。\n\n---\n\n## 🔴 独立反审发现：需求文档那两条测试的断言与它自己的报告样例**不相容**\n\nStep 1 写的是：\n\n```go\nrequire.Regexp(t, `ytd\\s+2\\s`, out, \"n 要出声…\")\n```\n\n而同一个 Task 三段之后给出的报告样例是：\n\n```\n族/期次类型          n      min       p5   median      p95      max\nytd/monthly         48   0.0026   0.0412   0.0784   0.1505   0.1663\n```\n\n⇒ `ytd` 之后紧跟的是 **`/monthly`**，不是空白。**那条正则永远不会命中。**\n\n🔴 **以报告样例的形态为准**（族与期次类型合成一列 `ytd/monthly`），把断言改成与实际输出一致的形态。\n\n⚠️ **不要为了让正则命中而改报告格式** —— 格式要服从「两族 × 期次类型分档」这个需求，不是服从一条写错的断言。\n⚠️ 断言 `n` 出声时，**用实际渲染出的那一行去写期望**，不要凭正则猜。先把报告渲染出来看一眼。"
+    ],
+    "boundary": [
+      "⚠️ **两族必须分开**：ytd 的分母是年初至今累计、mom 的分母是单月增量，量级差一个数量级以上，**混在一起的分位数没有意义**。⚠️ **`period_type` 也要分**：ytd 口径下 1 月与 12 月的分母同样差一个数量级。\n⚠️ 字段不全的期次 `continue` 掉，**不当成残差 0**。\n\n---\n\n## 🔴 独立反审发现：`CalibrateResult.DepositResiduals` 是**导出字段**，而导出面守卫**不覆盖字段**\n\n全局约束说「包的导出面精确相等」，由 `TestPackageExposesNoWriteFunctions` 守着。Leader 已核实（`store_test.go:399-440`）：**它只遍历 `*ast.FuncDecl`** —— 包级函数与「接收者类型导出」的方法。\n\n⇒ **导出的 type 与 struct 字段完全不在它的覆盖范围内。** 你新增的 `CalibrateResult.DepositResiduals` **不会撞红任何东西**。\n\n**这不是让你改成非导出**（`CalibrateResult` 本身就是导出类型，它的字段跟着导出是正常的）。这是提醒你：**别指望有东西替你把关**。你要自己确认：\n\n1. 这个字段是否真的需要导出？若只有包内的 `collectDepositResiduals` 与报告渲染用它，**用非导出名**（`depositResiduals`）更好——导出面越小越好，而这里没有任何外部消费者\n2. 若确实导出，在 discovery 的 `interfaces_exposed` 里**显式登记**它，别让它悄悄进入包的公开契约\n\n⚠️ 同理，`SampleRecord` 若需要新字段，也不在守卫覆盖内。",
+      "⚠️ `renderCalibrateReport` / `depositValuesYTD` / `depositValuesMoM`：**先读 `calibrate_report.go` 找报告渲染的真实入口名**（需求文档不假定它叫这个），两个 fixture 构造器在测试文件里补。\n\n---\n\n## 🔴 Leader 已核实：需求文档的测试代码**照抄会编译不过**（锚 `4670ccb`）\n\n```go\n// calibrate_report.go:141 —— 实际签名\nfunc renderCalibrateReport(w io.Writer, res *CalibrateResult) error\n```\n\n需求文档写的是 `out := renderCalibrateReport(res)`（单参数、返回 string）。**实际是两参数、写进 `io.Writer`、返回 `error`。**\n\n⇒ 测试要写成：\n\n```go\nvar buf bytes.Buffer\nrequire.NoError(t, renderCalibrateReport(&buf, res))\nout := buf.String()\n```\n\n**已核实存在的其它符号**（`calibrate.go:74-94`）：\n- `CalibrateResult.Samples map[string][]float64` ✓（注释明说它**由 `Records` 派生**，见 `samplesFromRecords` —— 🔴 **你新加的 `DepositResiduals` 也应当从 `Records` 派生，不要各写一份**：同一事实的两个副本，改一处不会让另一处变红）\n- `CalibrateResult.Records []SampleRecord` ✓\n- 分位数计算：`computeFieldStats(field string, samples []float64) FieldStats`（:61）、`nearestRank(sorted []float64, pct int) float64`（:108）\n- 报告写行：`writeFieldRow`（:192）、`writeFieldRowWithMix`（:199）、`periodTypeMix`（:270）\n- **可照着抄的现成一节**：`writeStockRateSection(w io.Writer, recs []SampleRecord)`（:339）+ `stockContinuityRates`（:307）——它就是「从 `Records` 派生一组统计量并单独渲染一节」，与本任务同形。**先读它。**"
+    ],
+    "error_handling": [
+      "🔴 **真语料上看一眼输出**（`verify_by: manual`）：\n\n```bash\ngo build -o /tmp/atlas-t9 ./cmd/atlas\n/tmp/atlas-t9 hestia backfill calibrate --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete > /tmp/calibrate-t9.txt\nsed -n '/deposit_sum 残差分布/,/^$/p' /tmp/calibrate-t9.txt\n```\n\n**Expected**：两族各若干行，`ytd/monthly` 的 `max` 应当在 **0.16 附近**（与真跑 pending 清单里 `2024-04` 的 `residual 0.1663` 对得上）。\n🔴 **若 max 明显低于 0.16，说明残差算错了或样本选错了族，停下来查。**\n\n⚠️ 把这一节的**完整输出**抄进 discovery——TASK-010 的填值直接以它为依据，**而 `/tmp` 文件会被清理**。同时记下你采样时的 HEAD 全 sha。\n\n🔴 **语料路径必须用主仓库绝对路径**（AD-3，本 sprint 命中率最高的一条）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n\n⚠️ **不要用 `$PWD/data/...`**——需求文档全篇是那个写法，但 `.gitignore` 含 `data/`，`git ls-files data/` 返回 0 ⇒ **linked worktree 里根本没有 `data/` 目录**，照抄必然失败。\n⚠️ `--allow-incomplete` 是**必需**的：该语料 manifest 无 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-009-m1c4 ../wt-TASK-009-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-009):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。⚠️ 收尾**自己拆 worktree**。"
+    ]
+  }
+}

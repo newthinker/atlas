@@ -1,0 +1,38 @@
+{
+  "id": "TASK-003",
+  "title": "moneyRE 容忍余额与同比之间的一个短从句（2020-01 的 M1 可抽）",
+  "description": "对应需求文档 Task 3。`2020-01` 报 `hestia: 货币 M1 not found`。原文：「狭义货币(M1)余额54.55万亿元，**与上年同期持平**，同比增长0%」——余额与「同比」之间多插了一个不含数值的短从句。\n\n⚠️ **不要放宽成 `.*?`**：那会跨句误配，而 M2/M1/M0 三句同形、紧挨着——配错的结果是**量级完全合理的错值**，下游没有任何闸门拦得住。",
+  "status": "pending",
+  "complexity": "simple",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go"
+  ],
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-002"
+  ],
+  "done_criteria": {
+    "functional": [
+      "新增 `const clausePat = `(?:[^0-9。；\\n，]*，)?`` 并插进 `moneyRE` 的 `，` 与 `同比` 之间。`moneyRE(name, code string) *regexp.Regexp` **签名不变**。\n\n三重约束必须在注释里写明：至多**一个**从句、从句内**不含数字**（数字意味着那是另一个指标）、从句内**不含句读**（`。；\\n` 意味着跨句）。",
+      "三条测试存在且通过：`TestMoneyREToleratesOneClauseBeforeYoY`（2020-01 真实句形，四个捕获组逐个断言）；`TestMoneyREStillMatchesTheCommonShape`（无从句的常见体例不得被破坏）；`TestMoneyRERefusesToCrossSentences`（**两条**：句号之后的同比不得命中；两个从句超出放宽范围，宁可响亮失败）。\n\n🔴 第三条是放宽的**边界**，是本任务里最不能省的一条——少了它，`.*?` 式的放宽会在「M1余额X。……M2同比增长Y%」上静默配错。"
+    ],
+    "boundary": [
+      "⚠️ 若 `allTemplateRegexps` 的形态检查（「不得含贪婪捕获」）转红——`clausePat` 是**非捕获组且非贪婪**，若仍转红说明写法有误。**去看那条测试的具体断言，不要改断言。**"
+    ],
+    "error_handling": [
+      "🔴 **背对背确认 `2020-01` 已恢复，且只救回这一篇**（`verify_by: manual`）：\n\n```bash\n# 同 TASK-001 的背对背形态，两份二进制同一时刻并排跑\ngrep -c '货币 M1 not found' /tmp/calib-after-t003.txt   # Expected: 0\ndiff /tmp/calib-base-t003.txt /tmp/calib-after-t003.txt\n```\n\n**Expected**：`货币 M1 not found` 零命中；diff 只在 `2020-01` 相关行。\n🔴 **若 M2/M0 的命中数有任何变化，停下来查**——放宽只该救回那一篇。\n\n⚠️ Leader 已核实（锚 `4670ccb`）：基线里 `货币 M1 not found` 的期次**只有 `2020-01` 一篇**（`grep -c` 报 2 是同一篇在汇总行与明细行各出现一次，**判据是行尾期次列表不是计数**）。",
+      "🔴 **语料路径必须用主仓库绝对路径**（AD-3，本 sprint 命中率最高的一条）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n\n⚠️ **不要用 `$PWD/data/...`**——需求文档全篇是那个写法，但 `.gitignore` 含 `data/`，`git ls-files data/` 返回 0 ⇒ **linked worktree 里根本没有 `data/` 目录**，照抄必然失败。\n⚠️ `--allow-incomplete` 是**必需**的：该语料 manifest 无 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-003-m1c4 ../wt-TASK-003-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `fix(TASK-003):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，「未提交改动」与「本任务已提交」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-003-m1c4`。"
+    ]
+  }
+}

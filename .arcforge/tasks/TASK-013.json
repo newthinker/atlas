@@ -1,0 +1,62 @@
+{
+  "id": "TASK-013",
+  "title": "人工核对与切换生产库（本迭代唯一不可逆动作）",
+  "description": "对应需求文档 Task 13。\n\n🔴 **本任务全部是人执行的命令，不是 agent 的 `writes`。** 切库是本迭代唯一不可逆的动作。\n\n**你的角色是记录员**：准备命令与核对清单 → 走澄清环等人类执行 → 核对结果 → 把切库记录写进 `CONTRACTS.md` 的「Sprint M1c-4 · H. 切库记录」一节。\n\n⚠️ **产物落在 `CONTRACTS.md` 而不是 `.arcforge/docs/07-deploy/`**：后者在 write-matrix 里**只有 `ops-*` 能写**，而 `ops-*` 不在执行迁移边的合法写者集合内（`assigned → in_progress` 只认 `dev-*`）⇒ 那条路走不通，会在你交付时才发现。",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "dependencies": [
+    "TASK-012"
+  ],
+  "wave": 10,
+  "context_from": [
+    "TASK-012"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "**分层抽样人工核对（控制在 10 期以内）**：按 `period_type` 各抽 2 期，回原文逐字核 **M2 / M1 / 社融存量 / 存款合计** 四个锚字段。命令形态见需求文档 Task 13 Step 1。\n\n核对结果（哪些期、哪些字段、原文值 vs 库中值）逐条记进 CONTRACTS 的 H 节。\n\n---\n\n# 🔴 独立反审发现：这次抽样**恰好避开了唯一没有自动防线的地方**\n\n需求文档 Step 1 抽的六期是 `2020-06 / 2021-03 / 2022-09 / 2023-12 / 2024-06 / 2025-03`，四个锚字段是 **M2 / M1 / 社融存量 / 存款合计**。\n\n两个问题：\n\n1. **六期里没有一期是本迭代新救回的 mom 口径期次**（那批是 `2020-04`、`2022-05/07/08/10/11`、`2023-05/07/08/10/11` 一带）⇒ 人工核对**完全不覆盖本迭代改动的产物**。\n2. **四个锚字段里没有任何一个贷款分部门列** —— 而 Leader 已核实（`profiles.go` 的 `loanScopes`），住户贷款那档 `totalField: \"\"`（「合计不在 54 字段内」）⇒ `loan_hh_short` / `loan_hh_mlt` **没有任何可勾稽的合计，是本迭代唯一的完全无闸区**：\n\n   | 防线 | 对住户贷款误判的反应 |\n   |---|---|\n   | TASK-011 的 `\\|ytd\\| ≥ \\|mom\\|` | 沉默（误判是单侧的） |\n   | `corp_loan_reconcile` | 通过（查的是**企业部门内部**自洽，四项同源同错） |\n   | `magnitude_sanity` | 通过（区间由本次实测标定，自证循环） |\n   | `completeness` | 通过（成对放松） |\n   | **人工抽样** | **本该是最后一道，而它抽不到** |\n\n⇒ **人工核对是这个区域唯一可能的防线，而按文档的抽样方案它一次也覆盖不到。**\n\n## 你要做的（改抽样方案，仍控制在 10 期以内）\n\n1. **六期里至少三期取自本迭代新救回的那批**（mom 口径期次）。具体是哪些期次，从 TASK-012 的真跑输出里取——**不要照抄本条列举的期次**，那是 Leader 从需求文档转录的，未经实测确认。\n2. **锚字段加两个贷款分部门列**：`loan_hh_short_*` 与 `loan_hh_mlt_*`（按该期实际口径取 `_ytd` 或 `_mom`）。核对方式是回原文找「住户贷款……其中，短期贷款增加X亿元，中长期贷款增加Y亿元」那一句，**逐字比对数值与口径**。\n3. 🔴 **口径本身就是核对项**：不只看数值对不对，要看**它落在哪一列**。一个当月值出现在 `_ytd` 列里，数值与原文一致但列是错的 —— 这正是本迭代的头号风险，而它在数值层面**完全正确**。\n\n⚠️ 把「哪几期、哪些字段、原文值、库中值、落在哪一列」做成一张表进 CONTRACTS 的 H 节。**「抽查通过」四个字不构成记录** —— 后人无法从它判断查了什么。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**交叉验证 `merged@v1` 与 `rule-monthly@v2` 同构**（沿 M1c-3b §5.2），并新增一条：**mom 族观测的字段数应与同族 ytd 观测对称**。\n\n⚠️ **不齐 3 篇的合并组是已知例外**（M1c-3b 实测 `2020-01|monthly` 只有 2 篇）。核对时**先按 `Parts` 长度分组再比**，否则会得出一个**假的失败**。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**备份生产库 → 切库 → 核对切库结果与临时库逐项相等**（`hestia_observations` 计数、`hestia_pending` 计数、`min(period) ~ max(period)` 三项都要相等）。\n\n⚠️ 生产库当前是空的（0 行，mtime 2026-08-13）——**备份的是「切库前状态」这个事实，不是内容**。\n把备份文件名（带时间戳）记进 CONTRACTS 的 H 节。\n\n🔴 **备份要连 `-wal` / `-shm` 一起考虑**：Leader 核实（2026-09-01）主仓库当前存在 `data/hestia.db-wal`（0 字节）与 `data/hestia.db-shm`（mtime 今日）⇒ **有进程今天打开过该库**。0 字节的 wal 意味着此刻没有未提交数据，但**那是一个时点观察，不是恒真性质**。\n⇒ 备份前先确认 `-wal` 为 0 字节（或先让持有进程退出），否则 `cp` 只拷主文件会**静默丢掉 wal 里的数据**——而恢复时它看起来是一个完整的库。\n\n**同一节里一并记回滚预案**：回滚 = **删库重跑**（回填从语料完全可重建）。\n⚠️ **前提是语料还在**——这条依赖已在 TASK-012 的 CONTRACTS §E 登记，H 节要**指向它**（不要复述一份会分叉的副本）。\n\n```\n# 回滚命令（记录备用，不执行）\n# rm -f data/hestia.db && cp data/hestia.db.bak-<时间戳> data/hestia.db\n```\n\n---\n\n## 🔴 独立反审发现：回滚命令**不处理 `-wal` / `-shm`**\n\n需求文档 Step 6 记的回滚命令是：\n\n```bash\n# rm -f data/hestia.db && cp data/hestia.db.bak-<时间戳> data/hestia.db\n```\n\nStep 2 对临时库**处理了** `-wal` / `-shm`（`rm -f /tmp/hestia-final.db /tmp/hestia-final.db-wal /tmp/hestia-final.db-shm`），而回滚段**漏了**。\n\n⇒ 残留的 WAL 会在恢复后被 sqlite 重放，把「已回滚」变成**部分未回滚**——而库能正常打开、查询有结果，**看起来是成功的**。\n\n🔴 **回滚命令必须写成**：\n\n```bash\n# rm -f data/hestia.db data/hestia.db-wal data/hestia.db-shm\n# cp data/hestia.db.bak-<时间戳> data/hestia.db\n```\n\n⚠️ 这与本条前面那条「备份要连 `-wal` 一起考虑」是**同一个失效模式的两端**：备份时漏了会丢数据，回滚时漏了会留脏数据。两端都要写进 CONTRACTS 的 H 节。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "🔴 **切库命令由人执行，你不得代跑。** 你的产出是：一份**可直接照抄**的命令清单（含语料绝对路径、`--allow-incomplete`、备份命令、核对命令），呈给人类。\n\n⚠️ **命令里的仓库锚一律写全 sha，不得写 `HEAD` 或分支名**：`HEAD` 是**会过期的锚**——写下时指向 A，别人照跑时已是 B，而命令原文一个字都没变。\nM1c-3a 实撞：交接文档把依赖钉在 `HEAD`，写下时隔离了在途任务，那任务提交后 HEAD 前移，**同一条命令静默从「隔离」变成「包含」**，套件由 `577/0` 变成 `571/6`。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "⚠️ **语料路径用主仓库绝对路径**（AD-3）：\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n`.gitignore` 含 `data/` ⇒ worktree 里没有该目录；`--allow-incomplete` 必需。\n\n⚠️ 本任务**建议不开 worktree**——它不改代码，只往 `CONTRACTS.md` 加一节，且要读主仓库的 `data/`。若开了 worktree，记得**回主仓库**跑一切语料相关命令。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "🔴 **等人类裁决的正确路径（状态机里唯一合法的那条）**：\n\n1. 采完依据后，把待决问题写进 `questions[]` 并 `transition blocked_clarification`（**dev 自己做**）\n2. Leader 把问题呈给人类\n3. 人类裁决 → Leader 把答复写进 `questions[].answer`\n4. 🔴 **由你自己**（不是 Leader）`transition in_progress` 领回继续（`assignment_epoch` **不变**）\n\n⚠️ **不要指望 `in_progress → blocked_human`**——那条边**不存在**（`blocked_human` 的入边只有 `rejected →` 与 `blocked_clarification →`，且都是 leader 专属）。写通道会 DENY。\n⚠️ **不要等 Leader 把你改回 `assigned`**——`blocked_clarification` 的合法出边只有 `→ in_progress`(dev) 与 `→ blocked_human`(leader)，**没有 `→ assigned`**。\n⚠️ 写 `questions[]` 用 `--json-field` 是**整数组替换、无 merge 语义**，且审计只记 len 不记内容 ⇒ **写之前紧挨着读一次**，否则会静默吃掉 Leader 刚写的 answer。\n\n🔴 **本任务会走两次澄清环**：一次等人类**执行切库**，一次（若核对不一致）等人类**裁决是否回滚**。第二次不要跳过——「两边计数不等」不是你能自行决定怎么处理的事。\n\n🔴 **切库后核对不一致时：立即停下，走澄清环，不要重跑切库。** 重跑会覆盖掉「不一致」这个现场，而那正是唯一能诊断成因的东西。回滚预案（删库 + 从备份恢复）由**人类**决定是否执行。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "本任务**无源码改动**，`go test` / `gofmt` / `vet` 不适用（done_criteria 全部 `verify_by: review|manual` ⇒ `task-completed.sh` 走 docs-only 分支跳过 Go 门禁）。\n\n⚠️ 但 `writes` 声明的 `CONTRACTS.md` **必须真有改动**——docs-only 分支仍会检查「声明范围内有变更」，空提交会被 DENY。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "🔴 **交付流程**：提交信息锚定 `docs(TASK-013):`，**通知 Leader merge 并等它进 master**，再**回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 跑 `transition dev_done`。\n\n⚠️ **merge 必须先于 `dev_done`**（`git log --grep` 不带 `--all`，未合并的 commit 门禁看不见）。\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**。\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。",
+        "verify_by": "manual"
+      }
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "id": "TASK-007",
+  "title": "deposit_sum 与 corp_loan_reconcile 按口径族分别校验",
+  "description": "对应需求文档 Task 7。两者都是「分项加总 vs 合计」的勾稽闸。观测现在可能整族走 `_mom`，若闸只认 `_ytd` 列，那些期次会 `skipped{absent}` 而**完全不被校验**——🔴 **那比拦错更糟：报告上看不出来「这一期没查过」。**\n\n⚠️ **两族的容差不能共用一个值**：ytd 的分母是年初至今累计、mom 的分母是单月增量，量级差一个数量级以上，残差占比的分布完全不同（真值由 TASK-010 分别标定）。",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/thresholds_test.go"
+  ],
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-006"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`validate.go` 新增 `depositPartFieldsMoM`（当月口径的四个分部门列，与 `depositPartFields` **逐项对应**）与 `depositResidualOf(values map[string]float64, total string, parts []string) (float64, bool)`（泛化既有的 `depositResidual`）。\n\n⚠️ 字段不全或合计为零时返回 `false`——**算不出来的期次不计入任何统计，而不是当成残差 0**（那会把均值拉向 0，让正常期次看起来在漂移）。",
+      "`gateDepositSum` 与 `gateCorpLoanReconcile` 改为**先选族**：两族都齐时取 **ytd**（主口径，且 tolerance 的标定样本以它为主）；ytd 算不出就试 mom；两族都不齐才 `skipped`，且 `Reason` 要**说清是哪一族缺**（否则运维会去查错的列）。\n\n🔴 判据一的比较必须换成选出的 `tol` 而不是写死 `in.cfg.DepositSumTolerance`；`Reason` 里**带上 `total` 列名**——两族容差不同，不写清是哪一族没法复核。",
+      "五条测试存在且通过：`TestDepositSumChecksMoMFamily`（当月族齐全 ⇒ **不得 `skipped{absent}`**）；`TestDepositSumPrefersYTDWhenBothPresent`（两族都齐时取 ytd 的残差——钉住裁决，**避免实现里靠 map 迭代顺序碰运气**）；`TestDepositSumSkipsWhenNeitherFamilyComplete`；`TestDepositPartFieldsAgreeAcrossCalibers`（两族清单逐项对应）；`corp_loan_reconcile` 的对应一条。\n\n---\n\n## 🔴 独立反审发现：两处缺口\n\n### 缺口一：`corp_loan_reconcile` 一条测试都没有\n\n需求文档的四条测试**全部**叫 `TestDepositSum*`，而 `corp_loan_reconcile` 只在正文里一句「同样处理」带过。⇒ 它的选族逻辑、它的 `corpLoanPartFieldsMoM` 一一对应断言，**都没有判据**。\n\n🔴 **本任务的 DoD 要求 `corp_loan_reconcile` 与 `deposit_sum` 判据对等**：至少补\n`TestCorpLoanReconcileChecksMoMFamily` 与 `TestCorpLoanPartFieldsAgreeAcrossCalibers` 两条。\n\n### 缺口二：`CorpLoanToleranceMoM` **没有任何标定依据**\n\nTASK-009 只产出 **`deposit_sum`** 的残差分布。⇒ corp_loan 的 mom 容差在 TASK-010 也无从标定，只能拍脑袋——**而那正是本迭代点名要清算的那笔账**（`thresholds.go` 的 0.12 出自 M0 三样本，被 79 期实测证伪）。\n\n⇒ **在 discovery 的 `decisions` 里明确记下这个开口**，并在交付报告里告诉 Leader：要么 TASK-009 扩出 corp_loan 残差分布，要么 TASK-010 明确把该值登记为**未标定占位**（沿 `stock_continuity_max` 三档 n=0 的形态）。**不要静默填一个数。**\n\n### 🔴 另：本任务的单测绕过抽取，证明不了端到端\n\n四条测试都**手工构造 `Values` map**。若上游（TASK-005）没有真的把 `deposit_flow_mom` 写进去，这些测试**照样全绿**而闸门在真实数据上恒 skip。\n\n⇒ 交付前**跑一次真语料**，确认 `deposit_sum` 在至少一篇 mom 族观测上**真的判了**（不是 `skipped{absent}`），并把那一篇的期次与判定结果写进 discovery。"
+    ],
+    "boundary": [
+      "`thresholds.go` 新增 `DepositSumToleranceMoM` 与 `CorpLoanToleranceMoM`，给一个**明确标注「未标定」的占位值**（沿 `stock_continuity_max` 三档 n=0 的既定做法：值写下来，注释写明它不是标定过的）。真值由 TASK-010 填。\n\n🔴 **「值写下来」与「注释写明未标定」两半都要做**：只填值不标注，下一个人会把占位当标定结果引用——那正是本迭代要订正的四条被证伪契约之一的成因。",
+      "⚠️ `testThresholds` / `checkByID` / `NoHistory` 若在 `validate_test.go` 里已有等价辅助，**沿用既有的，不要新写一份**（两份会分叉）。**先读该文件确认实际名字**，不要据需求文档的命名。"
+    ],
+    "error_handling": [
+      "本任务**不做全语料背对背**（只改校验判定，不改抽取）。\n\n⚠️ 但必须跑 `go test -run 'TestDepositSum|TestCorpLoan' -v` 并**逐条读输出**：若某条既有断言从 `failed` 变成 `skipped`（或反之），去查是不是选族逻辑把该走 ytd 的判成了 mom——🔴 **这类错不会让测试变红，它只是换了一个同样合理的结论。**"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-007-m1c4 ../wt-TASK-007-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-007):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。⚠️ 收尾**自己拆 worktree**。"
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "id": "TASK-001",
+  "title": "stripHTML 去行首空白（2023-05 的小节标题不再静默丢失）",
+  "description": "对应需求文档 Task 1。`spaceRE` 把连续空白**折叠**成一个普通空格，但折叠不等于删除——行首仍剩一个，而小节标题模板锚定行首 `(?m)^`。真语料 2023-05 因此整节丢失，报 `section ordinals are not consecutive from 一`。\n\n🔴 **排第一是有理由的**：它影响全部 218 篇的文本，后续所有任务的背对背基线都建立在它之上。放后面做等于让前面几个任务的比对全部失效一次——而那种失效是**静默的**，不产生编译错误也不产生冲突，只产生一份看起来正常的错误基线。",
+  "status": "in_progress",
+  "complexity": "simple",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/strip.go",
+    "./internal/hestia/strip_test.go",
+    "./internal/hestia/sections_test.go"
+  ],
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "done_criteria": {
+    "functional": [
+      "`strip.go` 新增 `lineLeadSpaceRE = regexp.MustCompile(`(?m)^ +`)`，并在 `spaceRE` 折叠**之后**、`blankLineRE` **之前**插入 `s = lineLeadSpaceRE.ReplaceAllString(s, \"\")`。\n\n🔴 **顺序不能反**：先删行首再折叠的话，`\"  一、\"` 删掉第一个空格后剩 `\" 一、\"`，而折叠对单个空格是恒等变换，行首那个原样留下——改了个寂寞。注释里必须写下这条，否则下一个人重排两行时不会知道。",
+      "`TestStripHTMLRemovesLeadingWhitespace` 存在且通过，四条断言齐全（形态见需求文档 Task 1 Step 2）：`\\n一、开头` / `\\n二、次节` 含于结果；`正文 内部 空格`（行**内**折叠行为**不得被波及**）；结果中不含 `\\n `（任何一行都不得以空格开头）。"
+    ],
+    "boundary": [
+      "🔴 **不要改成不锚定行首。** 修的是**喂给锚定的文本**，不是锚定本身。原错误信息自己解释了为什么必须锚定：放宽锚定会让「`rule@v2` 少两个社融节」与「合法的 `rule@v1`」变得不可区分——那正是 `extract.go` 拒绝去猜的东西。\n\n若你发现「改锚定更简单」，那是这条守卫在正常工作，不是它挡路。",
+      "NBSP（`\\x{00a0}`）已在 `spaceRE` 的字符类里，折叠后变成普通空格 ⇒ 新正则只需处理普通空格。**实现前先读一遍 `spaceRE` 的实际定义确认这一点**，不要据本条转述。"
+    ],
+    "error_handling": [
+      "🔴 **全语料背对背比对是本任务的核心验收判据**（`verify_by: manual`）。\n\n```bash\n# 在你的 worktree 里。改动前先建基线，改动后再建 after，**同一时刻并排跑**\ngo build -o /tmp/atlas-base-t001 ./cmd/atlas   # 改动前\n# …实现…\ngo build -o /tmp/atlas-after-t001 ./cmd/atlas  # 改动后\nfor b in base after; do\n  /tmp/atlas-$b-t001 hestia backfill calibrate \\\n    --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 \\\n    --allow-incomplete > /tmp/calib-$b-t001.txt 2>&1\ndone\ndiff /tmp/calib-base-t001.txt /tmp/calib-after-t001.txt\n```\n\n**Expected：差异只出现在 `2023-05` 相关的行**（它从「本迭代不解析」里消失；可能改为解析成功、也可能改报另一个错误——**两种都是进展**）。\n\n🔴 **除 `2023-05` 外有任何一行不同就停下来查**：那说明去行首空白波及了别的报告。\n\n⚠️ Leader 已核实（锚 `4670ccb`）：基线里 `section ordinals` 命中的期次**只有 `2023-05` 一篇**。`grep -c` 报 2 是同一篇在汇总行与明细行各出现一次——**判据是行尾的期次列表，不是计数**。",
+      "🔴 **语料路径必须用主仓库绝对路径**（AD-3，本 sprint 命中率最高的一条）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14\n```\n\n⚠️ **不要用 `$PWD/data/...`**——需求文档全篇是那个写法，但 `.gitignore` 含 `data/`，`git ls-files data/` 返回 0 ⇒ **linked worktree 里根本没有 `data/` 目录**，照抄必然失败。\n⚠️ 不要建软链：绝对路径是观察，软链是推理。\n⚠️ `--allow-incomplete` 是**必需**的，不是可选——该语料 manifest 无 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` 全绿。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`，`go test -cover` 口径）。⚠️ 覆盖率的分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-001`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 在**自己的 worktree** 干活：`git worktree add -b task/TASK-001-m1c4 ../wt-TASK-001-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；后缀 `-m1c4` 必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `fix(TASK-001):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须在 `dev_done` 之前**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里 `.arcforge/` 是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-001-m1c4`。"
+    ]
+  },
+  "last_transition": {
+    "from": "assigned",
+    "to": "in_progress",
+    "by": "dev-m1c4-c",
+    "at": "2026-09-01T14:57:05Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c4-c",
+  "discovery": ".arcforge/discoveries/TASK-001.json"
+}

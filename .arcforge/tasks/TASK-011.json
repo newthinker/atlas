@@ -1,0 +1,39 @@
+{
+  "id": "TASK-011",
+  "title": "load 报告加口径路由断言 |ytd| ≥ |mom|（异号跳过数出声）",
+  "description": "对应需求文档 Task 11。本迭代唯一的新风险是「当月值进了 `_ytd` 列」，而它**量级完全合理**——这正是原解析器宁可拒绝整篇也不猜的理由。\n\n可自动化的判据：**累计值不可能小于它自己的某一个月**。\n\n🔴 **把拒绝改成路由之后，这条断言就是那个「拦得住的闸门」。**",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/backfill_load_report.go",
+    "./internal/hestia/backfill_load_report_test.go"
+  ],
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-006"
+  ],
+  "done_criteria": {
+    "functional": [
+      "新增 `CaliberRouteViolation` 结构体与 `checkCaliberRouting(obs []MergedObservation) ([]CaliberRouteViolation, int)`（返回违反记录 **与因异号跳过的对数**），签名逐字见需求文档 Task 11 的 Interfaces 段。复用 TASK-006 的 `caliberFamilies()`，**不要手写第二份成对清单**。\n\n---\n\n## ⚠️ 补一条：`CaliberRouteViolation` 是**新增导出类型**\n\nGlobal Constraint 要求「包的导出面精确相等」。TASK-008 的 DoD 为 `PrecedingAll` 写了这条提醒，本任务原先**漏了**。\n\n但 Leader 已核实（`store_test.go:399-440`）：`TestPackageExposesNoWriteFunctions` **只遍历 `*ast.FuncDecl`**，**不覆盖导出的 type**。⇒ `CaliberRouteViolation` **不会**撞红任何东西。\n\n⇒ 两件事：\n1. **先问它需不需要导出**。若只有本包的 `checkCaliberRouting` 与报告渲染用它，**用非导出名**（`caliberRouteViolation`）。导出面越小越好，而这里没有外部消费者。\n2. 若确实要导出，在 discovery 的 `interfaces_exposed` 里**显式登记**——别让它悄悄进入包的公开契约。",
+      "`load` 报告新增一节，形如「口径路由核对（预期违反 0，共 N；异号跳过 M）」。\n\n🔴 **跳过数必须印进报告正文**：若取号逻辑写反，每一对都会被判成异号、断言恒 skip 而**报告一片绿**。跳过数是这条断言「**自己还活着吗**」的唯一信号。\n\n---\n\n# 🔴🔴 两位独立反审共同结论：这条防线**在最需要它的地方失明**\n\n## 问题\n\n`if !okY || !okM { continue }` —— 单侧存在时**不判、不计数、不出现在报告里**。\n\n而**路由错误最典型的产物恰恰是单侧**：一整族被误判成同一个口径，就会整族写进 `*_ytd`（或 `*_mom`），另一侧一个都没有 ⇒ 每一对都单侧 ⇒ 报告输出「共 0 对，违反 0，异号跳过 0」。\n\n🔴 **这与「一切正常」在报告上逐字相同。**\n\n## Leader 已核实的最坏情形：住户贷款是**完全无闸区**\n\n`profiles.go` 的 `loanScopes` 第一档：\n\n```go\nanchorRE:   regexp.MustCompile(`住户(?:部门)?贷款`),\ntotalField: \"\", // 住户贷款合计不在 54 字段内（A.6 列为派生指标）\n```\n\n⇒ `loan_hh_short` / `loan_hh_mlt` **没有任何可勾稽的合计**。若它们被误写进 `_ytd`：\n\n| 防线 | 结果 |\n|---|---|\n| 本断言（双侧才判） | **沉默**（单侧） |\n| TASK-005 的 golden test | **沉默**（只钉 2023-07 一篇，是正例快照不是不变式） |\n| `corp_loan_reconcile` | **通过** —— 它查的是**企业部门内部**自洽，四项同源同错，残差逐位不变 |\n| `deposit_sum` | 不适用（存款侧，不碰贷款） |\n| `magnitude_sanity` | **通过** —— 区间由 TASK-010 从本次实测标定，1 月的 ytd 本就是单月值，下沿必然覆盖 |\n| `completeness`（TASK-006） | **通过** —— 成对放松，一侧齐全就不算缺 |\n| 人工抽样（TASK-013） | **沉默** —— 六期锚字段里没有任何贷款分部门列 |\n\n⇒ **错值进生产库，全绿。**\n\n⚠️ 另一条必须知道的：**存款侧现在能响是巧合，而且 TASK-005 会把它拆掉**。今天存款误判会响，只因 `deposit_flow_ytd`（累计大数）与四个分部门（当月小数）跨口径相减、残差巨大。TASK-005 修好合计句路由后，两族各自内部自洽 ⇒ **残差恢复正常 ⇒ 不再响**。⇒ 修 bug 会移除一个意外哨兵，本任务是它的替代品。\n\n## 你要做的（三条，都不需要人判断）\n\n### ① 报告印**四个数**，判据加一条\n\n```\n口径路由核对：双侧 X / 单侧 Y / 异号跳过 M / 违反 V（预期 V=0）\n```\n\n判据从两条变三条：\n- `V == 0`\n- `M != X+M`（异号取号逻辑没写反 —— 文档已有）\n- 🔴 **`Y != X+Y`**（不是每一对都单侧 —— **文档漏了这一半，而单侧才是常态**）\n\n### ② 印出**实际被比较过的字段对清单 + 每对的观测数**\n\n交付判据从「违反 = 0」升级为「违反 = 0 **且** 22 对里未被比较过的对必须逐对写明原因」。\n\n🔴 理由：现有守卫（`异号跳过数 ≠ 总对数`）只能发现「取号写反」，**发现不了「比较对数接近零」** —— 而后者正是整族位移的表现。\n\n### ③ 补**跨语料的族内不等式**（唯一能抓住单侧盲区的自动判据）\n\n对每一对成对列，按 `period_type` 分档，断言 `median(|x_ytd|) > median(|x_mom|)`。\n\n🔴 **它不要求两列在同一观测里共存**，恰好绕开「单侧写入即失明」这个盲区 —— 这是它存在的全部理由。\n\n⚠️ 中位数比较需要两侧各有足够样本；样本数不足的对**报出来并说明「样本不足，未判」**，不要静默跳过（那会重演本条要修的毛病）。\n\n---\n\n## 另补一条边界：`ytd == mom` 相等是**合法**的\n\n1 月报的年初至今累计 **就等于**当月。`math.Abs(ytd) < math.Abs(mom)` 对相等取假 ⇒ 恰好不报 ✓ 行为正确，但**没有测试钉住它**。\n\n⇒ 补 `TestCaliberRoutingAcceptsEqualValues`（1 月形态，两列相等，`require.Empty(t, v)`），注释写明**为什么相等合法** —— 否则下一个人看到 `<` 会以为该写 `<=`，一改就把每篇 1 月报判成违反，**而改的人不会看到红**。",
+      "四条测试存在且通过：`TestCaliberRoutingCatchesMonthlyValueInYTDColumn`；`TestCaliberRoutingAcceptsCorrectRouting`；`TestCaliberRoutingSkipsOppositeSigns`（跳过数计 1）；`TestCaliberRoutingSkipCountIsNotSilent`（跳过数与「异号跳过」字样**都必须出现在渲染输出里**）。"
+    ],
+    "boundary": [
+      "⚠️ **异号时不施加断言**：累计为正而某月为负是常态（真语料 `2023-07` 存款当月 −1.12 万亿、累计 +18.98 万亿），绝对值不等式在语义上无意义。\n\n⚠️ 那一例上不等式**恰好成立**，但那是**巧合**——把异号纳入判定迟早会得到一个语义上无意义的失败。⇒ 只在同号时判。\n\n---\n\n## 🔴 独立反审发现：两处边界缺失（都会让这条断言少查东西而不出声）\n\n### 缺失一：**单侧存在时静默跳过，且不计入任何计数**\n\n实现里 `if !okY || !okM { continue }` —— 只有一列有值时整对跳过，**既不算违反、也不算异号跳过**。\n\n而本迭代最典型的产物**恰恰是单侧**（真语料 `2020-04` 全文只有当月句 ⇒ 只有 `_mom` 列）。⇒ 报告上的「共 N 对」会**远小于**实际观测数，而**没有任何东西说明差额去哪了**。\n\n🔴 「跳过数出声」这条纪律**只覆盖了异号，没覆盖单侧**——而单侧才是常态。\n\n⇒ **单侧也要计数并印进报告**，与异号**分开计**（两者成因完全不同：单侧是正常形态，异号是语义上不适用）。报告一节改为：\n\n```\n口径路由核对（预期违反 0；共 N 对可判；单侧跳过 S；异号跳过 M）\n```\n\n判据随之变成**三项**：违反 = 0、`M ≠ N+M`（异号取号逻辑没写反）、且 **`N + S + M` 等于成对列的理论总数 × 观测数**——最后一项是这条断言的**自洽校验**，少了它，「共 N 对」这个数字自己无法自证。\n\n### 缺失二：**`ytd == mom` 的边界没有断言**\n\n1 月报的累计口径**就等于**当月（年初至今 = 本月）。两列相等是**合法**的，而 `math.Abs(ytd) < math.Abs(mom)` 对相等取假 ⇒ 恰好不报。\n\n**但这是巧合，不是设计。** 请补一条测试钉住它：`TestCaliberRoutingAcceptsEqualValues`（1 月形态，两列相等，`require.Empty(t, v)`），并在注释里写明**为什么相等是合法的**——否则下一个人看到 `<` 会以为该写 `<=`，一改就把每篇 1 月报都判成违反。",
+      "⚠️ `mkMerged` / `renderLoadReport` / `loadReportWithRouting`：**先读 `backfill_load_report_test.go` 找既有辅助**，沿用而不新写。\n⚠️ 两列中任一为空就 `continue`（不成对的观测不参与判定，也不计入跳过数）。\n\n---\n\n## 🔴 Leader 已核实：需求文档的测试代码**照抄会编译不过**（锚 `4670ccb`）\n\n```go\n// backfill_load_report.go:51 —— 实际签名\nfunc renderLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error\n```\n\n需求文档写的是 `out := renderLoadReport(loadReportWithRouting(nil, 37))`（单参数、返回 string）。\n**实际是三参数（含 `dir string`）、写进 `io.Writer`、返回 `error`。**\n\n⇒ 测试要写成：\n\n```go\nvar buf bytes.Buffer\nrequire.NoError(t, renderLoadReport(&buf, \"some/dir\", res))\nout := buf.String()\n```\n\n**已核实存在的其它符号**：\n- `MergedObservation` ✓ `backfill_load.go:43`\n- `writeLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error` :37（对外入口，`renderLoadReport` 是它的实现）\n- `checkInputIdentities` :211 / `checkLoadIdentities` :240 / `appendInputIdentityFailures` :222\n  —— 🔴 **这三个就是「四道恒等式」的现成形态**，你的路由核对一节应当**沿它们的写法**（如何汇总失败、如何把计数印进报告），不要另起一套。**先读 `checkLoadIdentities`。**\n\n⚠️ `loadReportWithRouting` 是需求文档**虚构的**辅助函数，实际不存在——你需要自己构造 `BackfillLoadResult`。**先看 `backfill_load_report_test.go` 里既有测试怎么构造它。**"
+    ],
+    "error_handling": [
+      "本任务只立断言，**真跑核对在 TASK-012**。本任务的验收是单测 + 全量绿。\n\n⚠️ 但要在 discovery 里**显式写下**：本断言的两个消费判据是「违反 = 0」与「**异号跳过数 ≠ 总对数**」，两条都在 TASK-012 的交付清单里。🔴 **只写前一条是不够的**——那正是这条断言会静默失效的方式。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-011-m1c4 ../wt-TASK-011-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `test(TASK-011):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。⚠️ 收尾**自己拆 worktree**。"
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "id": "TASK-006",
+  "title": "completeness 的必填集改口径感知（ytd 或 mom 齐全即可）",
+  "description": "对应需求文档 Task 6。硬要 `_ytd` 会让那 54 篇恒报「缺一整族字段」，而它们在那些期次里是 **absent-by-design**——把 by-design 的缺席记成 failed，`completeness` 这个指标就废了（`types.go` 原话，`mergedRequiredFields` 因同一理由存在）。\n\n**为什么不新开 extractor**：那 4 篇月报是同一份观测里两种口径共存（贷款合计累计 + 存款/分部门当月）。给它新开 extractor 会得到 `rule@v1-deposit-mom` 这类名字，而**口径差异是按族的，不是按整篇的**。",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/required.go",
+    "./internal/hestia/required_test.go",
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go"
+  ],
+  "dependencies": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`required.go` 新增 `caliberFamilies() [][2]string`（**从 `fieldOrder` 派生，不手写第二份名单**——手写的那份迟早与 `fieldOrder` 分叉，而先错的一定是手抄的那份）与 `missingCaliberAware(want []string, values map[string]float64) []string`（返回真正缺失的字段，**按 `fieldOrder` 排序**）。签名逐字见需求文档 Task 6 的 Interfaces 段。",
+      "四条测试存在且通过：`TestCaliberFamiliesPairsEveryMomWithItsYTD`（22 对，配对由列名派生）；`TestMissingCaliberAwareAcceptsEitherSide`（全 mom 与全 ytd 两个方向都不算缺）；`TestMissingCaliberAwareStillReportsRealGaps`（两侧都空才算缺，且按 `fieldOrder` 排序）；`TestMissingCaliberAwareLeavesUnpairedFieldsAlone`。\n\n🔴 最后一条守的是放松的**边界**：存量、余额、同比、利率、外汇都没有当月口径的对应物，必须原样逐个要求——否则口径感知会**顺手放松掉一大批与本迭代无关的字段**。",
+      "`gateCompleteness` 里逐个查 `values` 的那段换成一次 `missingCaliberAware(want, in.obs.Values)` 调用。"
+    ],
+    "boundary": [
+      "⚠️ **`want` 的来源一行不动**：它现在是 `requiredFields(extractor)` 或 `mergedRequiredFields(parts)`，而 `requiredFields` 返回 nil 时记 `skipped{unknown_extractor:…}` 而**不是 failed**——**那段必须原样保留**（`merged@v1` 与 `llm-fallback@v1` 都靠它，且两者成因不同，见 `required.go` 的 default 分支注释）。\n\n---\n\n## 🔴 独立反审发现：需求文档那条测试的**期望数组顺序写反了**\n\n需求文档 Task 6 Step 1 的 `TestMissingCaliberAwareStillReportsRealGaps` 写的是：\n\n```go\nrequire.Equal(t, []string{FieldDepositHouseholdYTD, FieldM2}, got, \"…按 fieldOrder 排序\")\n```\n\n**照抄会红。** Leader 已核实（`git show HEAD:internal/hestia/fields.go`，锚 `4670ccb`）：在 `fieldOrder` 定义块内，`FieldM2` 位于第 18 行（A.2 货币供应量）、`FieldDepositHouseholdYTD` 位于第 21 行（A.3 存款）⇒ **M2 在前**。\n\n⇒ 正确期望是：\n\n```go\nrequire.Equal(t, []string{FieldM2, FieldDepositHouseholdYTD}, got, ...)\n```\n\n🔴 **这条的危险不在于它会红，而在于红的位置**：它会指向**排序逻辑**，而不是这行期望值。照着红的位置去「修排序」，就会把一个正确的实现改坏。⇒ 遇到这条红，**先核对 `fieldOrder` 里的实际顺序**再动手。\n\n---\n\n# 🔴 TASK-004 引入了一个**过渡性机制，退场点就是本任务**\n\nTASK-004 交付时发现一条 DoD 没预见的连锁（已在 master，commit `f56ec05`）：\n\n`fieldOrder` 一到 76，`requiredFields(rule@v2)` 跟着涨 ⇒ `completeness` 对**每一期**报「缺 22 个字段」⇒ **27 个测试转红**。\n\n它的处置是在 `required.go` 加了过渡性的 **`momFields()`**，并在 v1/v2 分支各 `without` 掉——这也是 TASK-004 背对背输出不变的前提。\n\n## 与本任务 DoD 的字面冲突\n\n本任务 `boundary[0]` 写着「**`want` 的来源一行不动**」。那句话的本意是护住 `requiredFields` 返回 nil 时记 `skipped{unknown_extractor}` 的那个分支（`merged@v1` 与 `llm-fallback@v1` 都靠它）。\n\n🔴 **它不是要你保留 `momFields()` 的 `without`。** 恰恰相反：\n\n**留着 `momFields()` 会让 `want` 恒为单侧** ⇒ `missingCaliberAware` 里 `twin` map 的 **mom→ytd 方向在真实路径上永不走到** ⇒ 你写的「成对放松」有一半是死代码，而单测（手工构造 `want`）**照样全绿**。\n\n## 你要做的\n\n1. **拆掉 `momFields()` 的过渡性 `without`**，让 `requiredFields` 回到从 `fieldOrder` 派生的自然形态；`completeness` 的口径感知由 `missingCaliberAware` 承担——**那正是本任务存在的理由**。\n2. **`want` 来源那条纪律仍然有效**：`requiredFields(extractor)` / `mergedRequiredFields(parts)` 的**选择逻辑**与 nil ⇒ `skipped{unknown_extractor}` 分支一行不动。变的只是「它返回的名单里不再人为剔除 22 个 mom 字段」。\n3. 🔴 **补一条测试钉住 mom→ytd 方向真的会走到**：构造一份 `want` 含 `x_mom`、`values` 只有 `x_ytd` ⇒ 断言不算缺。**没有这条，那半边逻辑的死活无人知道。**\n4. **确认 TASK-004 期间转红的那 27 个测试在本任务之后仍绿**（它们当时是被 `without` 压住的）。若有转红，**那是真信号**——说明口径感知没有完全接管过渡机制的职责，不要用 `without` 把它压回去。\n\n⚠️ 交付时在 discovery 里显式写明「`momFields()` 已退场」或「因 X 理由保留」，**不要让一个标着「过渡性」的机制静默留在代码里** —— 那是下一个人最难判断该不该删的东西。",
+      "🔴 **`Reason` 的格式按原代码为准**：需求文档写的 `missing_fields:%d:%s` 是**示意**。先 `grep -n \"completeness\" internal/hestia/validate.go` 读原文，**沿用它既有的措辞与分隔符**——报告解析与既有测试都依赖那个格式。\n\n---\n\n## 🔴 Leader 已核实的实际 `Reason` 格式（锚 `4670ccb`，`validate.go:503-519`）\n\n```go\nif len(req) == 0 {\n    return Check{Status: CheckSkipped, Reason: \"unknown_extractor:\" + in.obs.Meta.Extractor}\n}\nvar missing []string\nfor _, f := range req {\n    if _, ok := in.obs.Values[f]; !ok { missing = append(missing, f) }\n}\nif len(missing) == 0 { return Check{Status: CheckPassed} }\nn := float64(len(missing))\nreturn Check{Status: CheckFailed, Value: &n,\n    Reason: \"missing \" + strconv.Itoa(len(missing)) + \": \" +\n        strings.Join(firstN(missing, 3), \",\")}\n```\n\n**实际格式是 `\"missing N: f1,f2,f3\"`**（`missing` 后有空格、冒号后有空格），**不是**需求文档示意的 `missing_fields:%d:%s`。\n\n🔴 **三样东西必须原样保留，只换 `missing` 的算法**：\n1. **`Value: &n`**（缺失个数进 `Check.Value`）——报告与既有测试都读它\n2. **`firstN(missing, 3)`** 截断（`validate.go:522`，注释写着「免得错误信息列出五十个字段名」）\n3. **`len(req) == 0 → skipped{unknown_extractor}`** 那个分支——它上方的注释解释了为什么 `merged@v1` 要靠它\n\n⇒ 你要改的**只有中间那个 `for` 循环**：换成 `missing := missingCaliberAware(req, in.obs.Values)`。\n⚠️ 变量名是 **`req`** 不是需求文档写的 `want`。"
+    ],
+    "error_handling": [
+      "本任务**不做全语料背对背**（它只改校验判定，不改抽取）。验收靠单测 + `go test ./internal/hestia/...` 全绿。\n\n⚠️ 但要**跑一次 `-run TestComplete`** 确认既有的 completeness 测试没有被放松波及：若某条既有断言从 failed 变成 passed，去看它测的是不是**不成对**的字段——是的话说明 `caliberFamilies` 把不该配对的配上了，回去查。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-006-m1c4 ../wt-TASK-006-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-006):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，「未提交改动」与「本任务已提交」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-006-m1c4`。"
+    ]
+  }
+}

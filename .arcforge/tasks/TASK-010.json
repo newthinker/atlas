@@ -1,0 +1,68 @@
+{
+  "id": "TASK-010",
+  "title": "人工标定 configs/hestia.yaml（22 项 magnitude_ranges + 两族 deposit_sum 容差）",
+  "description": "对应需求文档 Task 10。\n\n🔴 **本任务的填值是人的判断，agent 不得自动填。** 工具只产出依据（TASK-009 的残差分布、TASK-004 之后 calibrate 的字段值分布），判断留给人——这是 M1c-3b 就定下的纪律，且 `MagnitudeRanges` 上方那段注释点名「拍脑袋阈值」的代价就是 `DepositSumTolerance` 的 ±2%。\n\n**你的角色是记录员**：采依据 → 整理成人类可裁决的表 → 走澄清环等裁决 → 落盘。\n\n⚠️ TASK-004 已在 yaml 里填了 22 项**占位值**并注明「未标定」。本任务是**用实测分布重标它们**，并把「未标定」的注释换成标定依据。",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./configs/hestia.yaml",
+    "./internal/hestia/thresholds.go",
+    "./internal/hestia/fields.go",
+    "./internal/hestia/config.go",
+    "./internal/hestia/config_test.go"
+  ],
+  "dependencies": [
+    "TASK-004",
+    "TASK-009"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-004",
+    "TASK-009"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "**采依据并整理成裁决表**：跑 `calibrate` 取 22 个 `_mom` 字段的值分布与 `deposit_sum 残差分布` 两节，整理成一张表（每项：字段名 / n / min / p5 / median / p95 / max / 对应 `_ytd` 项的现有区间），连同「建议留多少余量」的**依据**（不是结论）一并写进 discovery 与呈给 Leader 的消息。\n\n🔴 **只产出依据，不产出建议值。**",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**走澄清环等人类裁决**（路径见 error_handling），拿到裁决后填 `configs/hestia.yaml`：\n- 22 项 `magnitude_ranges`，每项 `{min, max, unit: \"亿元\"}`——**`unit` 必填**（`Range.Unit` 存在的全部理由就是逼填表的人写下单位）\n- 重标 `deposit_sum_tolerance`，新增 `deposit_sum_tolerance_mom`（及 corp_loan 两族对应项）\n- **在 yaml 注释里写下**：样本数、实测 max、留了多少余量、以及**这个值是标定过的**（与 `stock_continuity_max` 三档 n=0「不是标定过的」形成对照）\n- 递增 `config_version`，并同步改 `config_test.go` 里那条版本断言",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**订正两处被证伪的陈述**（79 期实测证伪，最高 0.1663）：`thresholds.go:23-28` 的「M0 三期实测 7.65/8.57/9.06」与 `fields.go` A.3 的「实测残差**稳定在** 7.6–9.1%」。\n\n把「稳定在」改成**实测区间**，并**写明它出自 79 期而非 3 期**。\n⚠️ 订正要保留「原先写的是什么、为什么错」——删掉旧说法而不留痕，下一个人无从判断这次订正的可信度。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "⚠️ **区间从实测分布留余量，不是照抄 min/max**：本批语料只有 2020–2026，未来期次会走出这个范围。**沿既有 54 项的留余量方式**——先读 yaml 里已有的项，看它们相对实测分布留了多少。\n\n**同时**：`TestShippedConfigLoadsAndIsCalibrated` 与 `TestMagnitudeRangesCoverEveryFieldWhenCalibrated` 均通过。⚠️ 后者**仍走 `t.Skip`**（它查 `DefaultThresholds()`，默认表**有意为空**）——这是正确状态，**不要为了让它「真的跑一次」去填 `DefaultThresholds()`**。yaml 的全覆盖由 `LoadConfig` 的校验负责；**若 `LoadConfig` 目前不校验全覆盖，在本任务加上**，并配一条「缺一项就拒绝启动」的测试。\n\n---\n\n## 🔴 独立反审发现：`LoadConfig` 的全覆盖校验是**无条件义务**，不是条件从句\n\n原 DoD 写的是「**若** `LoadConfig` 目前不校验全覆盖，在本任务加上」。Leader 已核实（锚 `4670ccb`）——**它确实不校验**，所以那个「若」已经求值为真，请当成无条件义务做。\n\n**三个守卫的实际效力**（都核实过，不是推理）：\n\n| 守卫 | 实际效力 |\n|---|---|\n| `TestMagnitudeRangesCoverEveryFieldWhenCalibrated`（TASK-004 新加） | 🔴 **恒 skip，一次都不会跑** —— `thresholds_test.go:98` 的 `TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated` 钉死了 `DefaultThresholds().MagnitudeRanges` **必须为空**，而新断言是「空就 `t.Skip`」。两条合起来使它永远短路 |\n| `LoadConfig`（`thresholds.go:272-275`） | 🔴 **无全覆盖校验**：`r, ok := t.MagnitudeRanges[f]; if !ok { continue }` —— 缺项直接跳过 |\n| `TestShippedConfigLoadsAndIsCalibrated`（`config_test.go:377`，既有） | ✅ **真守卫**，断言键集与 `fieldOrder` 逐项相等 —— **但它只读仓库自带的那一份 `configs/hestia.yaml`** |\n\n⇒ **真正的缺口是运维在生产环境换一份自己的 yaml 时**：半张表会**静默通过** `LoadConfig`，而 `gateMagnitudeSanity` 对表里没有的字段直接跳过 ⇒ 那些字段的幅度闸**完全不设防且报 passed**。\n\n这与 `thresholds.go:264-269` 已经拦下的「打错字段名」是**同一失效模式的第二条入口**（那段注释自己就是这么写的：「表看起来配上了，而那道闸对该字段照样不设防」）。\n\n🔴 **你要做的**：在 `LoadConfig` 的 `if len(t.MagnitudeRanges) > 0 {` 那个块里，把 `if !ok { continue }` 改成**返回 error**，措辞沿用它上面那条未知字段名错误的形态（要指出是哪个字段、说明后果是「幅度闸静默失效」）。\n\n⚠️ **保留 `len(t.MagnitudeRanges) > 0` 这个外层条件** —— 空表仍是合法状态（`TestEmptyMagnitudeRangesStillValid` 钉着，`magnitude_sanity` 记 `skipped{not_calibrated}`）。要拒的是**半张表**，不是空表。\n⚠️ 配一条「缺一项就拒绝启动」的测试，并**同时确认 `TestEmptyMagnitudeRangesStillValid` 仍绿**——两条方向相反，只跑一条会以为对了。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "🔴 **等人类裁决的正确路径（状态机里唯一合法的那条）**：\n\n1. 采完依据后，把待决问题写进 `questions[]` 并 `transition blocked_clarification`（**dev 自己做**）\n2. Leader 把问题呈给人类\n3. 人类裁决 → Leader 把答复写进 `questions[].answer`\n4. 🔴 **由你自己**（不是 Leader）`transition in_progress` 领回继续（`assignment_epoch` **不变**）\n\n⚠️ **不要指望 `in_progress → blocked_human`**——那条边**不存在**（`blocked_human` 的入边只有 `rejected →` 与 `blocked_clarification →`，且都是 leader 专属）。写通道会 DENY。\n⚠️ **不要等 Leader 把你改回 `assigned`**——`blocked_clarification` 的合法出边只有 `→ in_progress`(dev) 与 `→ blocked_human`(leader)，**没有 `→ assigned`**。\n⚠️ 写 `questions[]` 用 `--json-field` 是**整数组替换、无 merge 语义**，且审计只记 len 不记内容 ⇒ **写之前紧挨着读一次**，否则会静默吃掉 Leader 刚写的 answer。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "🔴 **依据必须采于 TASK-009 合入之后的树**。TASK-009 的残差分布是本任务的唯一填值依据，而它的 `/tmp` 输出会被清理 ⇒ **自己重跑一次**，不要引用 TASK-009 discovery 里的数字当作已核实。\n\n⚠️ 采样时记下 HEAD 全 sha 并与数字**同行**写进 discovery。\n\n🔴 **语料路径用主仓库绝对路径**（AD-3）：\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n⚠️ 不要用 `$PWD/data/...`（`.gitignore` 含 `data/`，worktree 里没有该目录）；`--allow-incomplete` 必需。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`gofmt` 判据同全局（只有那两个既有欠账文件）；`go vet` 零输出；`go test ./internal/hestia/... -count=1` 全绿；覆盖率 **≥96.1%**，报数时把**测量时的 HEAD 全 sha** 与数字同行写进 discovery。\n⚠️ **无新增依赖**。⚠️ 注释里任务编号带 milestone 前缀（`M1c-4 的 TASK-010`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "🔴 **交付流程（AD-4）**：worktree `git worktree add -b task/TASK-010-m1c4 ../wt-TASK-010-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需）→ 显式 pathspec 提交，信息锚定 `chore(TASK-010):` → **通知 Leader merge 并等它进 master** → **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`。\n\n⚠️ **merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 不带 `--all` ⇒ 未合并分支的 commit 对门禁**结构性不可见**，**门禁会报绿而根本没量到你的代码**。\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——它在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律相反**。\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。⚠️ 收尾**自己拆 worktree**。",
+        "verify_by": "manual"
+      }
+    ]
+  }
+}

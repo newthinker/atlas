@@ -1,0 +1,41 @@
+{
+  "id": "TASK-008",
+  "title": "PrecedingAll + deposit_sum drift 基线修复（断开正反馈）",
+  "description": "对应需求文档 Task 8。真跑实测的正反馈链：\n\n```\n2024-04…2024-08  五期被 tolerance 拒（残差 0.1460/0.1490/0.1505/0.1663/0.1211）\n                 → 不进权威表 → 基线看不见它们\n2024-10          drift_exceeded: residual 0.1092 drifted 0.0308 from 3-period mean 0.0784\n2024-11          drift_exceeded: residual 0.1135 drifted 0.0351 from 3-period mean 0.0784\n```\n\n这与 M1c-3b 的 TASK-011 修的 `stock_continuity` 是**同一族缺陷**。**M1c-3b 修了一个、漏了另一个。**\n\n⚠️ **「用未通过校验的数据做基线」的正当性**：基线用的是**残差这个统计量**，不是那些期次的字段值。drift 要回答「本期残差相对近期常态是否突变」，若常态只由「已通过这道闸的期次」组成，**定义本身就是循环的**。",
+  "status": "pending",
+  "complexity": "complex",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go",
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go"
+  ],
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-007"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`store.go` 新增 `PrecedingAll(ctx, period, periodType string, n int) ([]Observation, error)`，紧跟 `Preceding` 之后：与 `Preceding` 相同但**并上 `hestia_pending`**，**同期去重（权威表优先）**，合并后按 `period` 降序并截到 n。\n\n🔴 **为什么是两个方法而不是给 `Preceding` 加参数**：语义不同，不是同一查询的两种模式。`Preceding` 答「上一期**可信的**观测是什么」（逐期比较类判据用），`PrecedingAll` 答「近期**发生过**什么」（统计量类判据用）。这段理由必须写进注释。\n⚠️ **它只该喂给统计量**——拿它做逐期比较等于拿未通过校验的数据当基准值。\n\n**同时接线**：`History` 接口新增 `PrecedingAll`；`noHistory` 补返回 `nil, nil` 的实现；`Validate` 多取一次并填进 `gateInput.priorAll`。",
+      "`gateDepositSum` 的 drift 段：基线改用 `in.priorAll`（含 pending）；新增**相邻性约束**——`periodGapMonths(in.priorAll[0].Meta.Period, in.obs.Meta.Period)` 不等于 `expectedPeriodGapMonths(periodType)` 时 `CheckPassed` + `Reason` 含 `drift_skipped:non_adjacent_prior`。\n\n🔴 **不相邻就 skip，不按跨度放宽**（沿 M1c-3b TASK-011 对 `stock_continuity` 的裁决）：放宽需要一个放宽系数，而语料里没有数据能回答「跨 13 个月该放宽多少」。**往闸里塞一个没测过的数，正是这次要修的那类缺陷本身。**\n⚠️ 两种错的代价不对称：误 skip 只损失一次检查**且 reason 可见**，误 fail 不可自愈。",
+      "四条测试存在且通过：`TestPrecedingAllSeesPendingPeriods`（含 `Preceding` 语义**不变**的对照断言）；`TestPrecedingAllDeduplicatesRepublishedPeriods`；`TestDepositSumDriftBaselineIncludesPending`（复刻真跑那条正反馈链，修好后 `CheckPassed`）；`TestDepositSumSkipsOnNonAdjacentBaseline`（`Reason` 含 `drift_skipped:non_adjacent_prior`——**静默跳过会让人以为查过了**）。\n\n---\n\n# 🔴 独立反审发现：mom 族观测**取不到同族 drift 基线**（这是设计的必然后果，不是实现 bug）\n\n`hist` 只收**与本期同族**的历史残差：\n\n```go\nfor _, p := range in.priorAll {\n    if pr, ok := depositResidualOf(p.Values, total, parts); ok { hist = append(hist, pr) }\n}\n```\n\n而 `total, parts` 是 TASK-007 为本期选出的族。**约束本身是对的**（不能拿 ytd 的常态判 mom 的突变，量级差一个数量级）。\n\n**但它在真语料上的后果没人算过**：语料里绝大多数期次走 ytd，本迭代新救回的那批走 mom，两者在时间轴上**交错**。一个 mom 期次取基线时，前几期几乎全是 ytd ⇒ `depositResidualOf(p.Values, mom族...)` 逐个返回 `false` ⇒ **`hist` 往往凑不满**。\n\n⚠️ **Leader 已核实：处置分支本来就在**（不用你新加，但**别删**）：\n\n```go\n// validate.go:193-197\nconst minDriftHistory = 3   // 注释：1–2 期的均值不稳，噪声会盖过信号\n// validate.go:263\nif len(hist) < minDriftHistory { ... }\n```\n\n⇒ 结局是 **skip**，不是「拿 1–2 个样本算均值」（后者更糟，但代码已经防住了）。\n\n## 真正的问题与你要做的\n\n**本迭代新救回的那批观测，`deposit_sum` 的 drift 闸可能恒 skip ⇒ 完全没有保护**，而报告上只是一行 `drift_skipped`。\n\n1. **`Reason` 必须说清是「本族历史样本不足（n=X < 3）」**，不能笼统记成 `no_prior_period` —— 两者成因完全不同，混成一格会让人以为是新库冷启动。\n2. **补一条测试**：`priorAll` 全是 ytd 族、本期是 mom 族 ⇒ 断言 skip 且 `Reason` 指明**样本不足**并带上实际 n。\n3. 🔴 **在 discovery 里写下实测数字**：真语料上有多少个 mom 族期次、它们各自取到几个同族基线。\n\n   **这个数字决定 drift 闸对新救回那批报告到底有没有效。** 若普遍取不到基线，那是一个**需要 Leader 与人类知道的已知开口**，不是可以静默接受的实现细节 —— 请在交付报告里单独点出来，别只埋在 discovery 里。\n\n## 另补一条边界：`n` 截断分支从不执行\n\n需求文档三条测试都用 `n=5` 而库里只有 2–3 期 ⇒ **截断分支一次都没跑**。\n\n未覆盖的情形：accepted 已占满 n 个、而 pending 里有**更近**的期次 ⇒ 合并排序后 accepted 被挤掉、`out` 全是 pending。**这正是本迭代要的行为**（drift 基线应含 pending），但**没有用例证明它真的发生**。\n\n⇒ 补：accepted 3 期 + pending 3 期更近 + `n=3` ⇒ 期望返回**全部 3 个 pending**。"
+    ],
+    "boundary": [
+      "🔴 **`total, parts` 必须与 TASK-007 选出的那一族一致**——基线残差要与本期用**同一族**算，否则拿 ytd 的常态去判 mom 的突变，量级差一个数量级，**必然误判**。\n\n---\n\n## ✅ Leader 已核实：`PrecedingAll` **确实会**撞红导出面守卫（原 DoD 那句是对的，照做）\n\n`TestPackageExposesNoWriteFunctions`（`store_test.go:399`）遍历 `*ast.FuncDecl`，对**方法**的处理是：接收者类型导出时记 `Type.Method`。⇒ `Store.PrecedingAll` **会**进 `got`。\n\n现有 `want` 名单里有 `Store.Preceding`、**没有** `Store.PrecedingAll`（Leader 实测 `grep -c` = 0）⇒ 加了必红 ✓\n\n⚠️ 补进 `want` 时**保持字母序**（测试 `sort.Strings(got)` 后逐项比），并在文件下方那组「为什么名单里多了 X」的注释里**照格式加一段**说明 `PrecedingAll` 是只读的。\n⚠️ 期望项数由 `len(want)` 生成、**不手写** —— 那段注释记着一次实撞：文案手写「十七个」而列表 16 项，无人报警。**不要退回手写。**\n\n## 🔴 独立反审发现：「只该喂给统计量」没有任何断言防着\n\n`PrecedingAll` 的注释会写明「拿它做逐期比较等于拿未通过校验的数据当基准值」，但**没有机制阻止**下一个人把它接到 `stock_continuity` 上——而那正是本任务在修的 `Preceding` 误用的**同一形状**。\n\n⇒ 请在 `validate_test.go` 补一条**接线断言**：`gateStockContinuity`（或当前逐期比较类判据的实际名字）用的是 `in.prior` 而**不是** `in.priorAll`。\n\n实现方式二选一，取你觉得更不容易腐化的那个：\n- 用 `fakeHistory` 让 `PrecedingAll` 返回一组**会让逐期判据得出不同结论**的数据，断言结论仍按 `Preceding` 那组走\n- 或断言 `gateInput` 里 `priorAll` 只被 `gateDepositSum` 读到（若代码结构允许静态判定）\n\n⚠️ 若两种都做不到，**在 discovery 里明确写下「这条无机制守着，只有注释」** —— 这是本任务已知的一个开口，不要让它静默存在。",
+      "⚠️ `tablePending` 与 `scanPendingObservation`：**先看 `schema.go` 与 `store.go` 里写 pending 的那一段**，沿用既有的表名常量与 JSON 解码方式；没有现成解码函数就在本任务补一个（**只读，不违反「Save 是唯一写入口」**）。\n⚠️ pending 的业务列存在 `values_json` 里、不是逐列 ⇒ **与权威表不同构，不能用同一条 SELECT 拼 UNION**。\n⚠️ `newTestStore` / `saveAccepted` / `savePending` / `periodsOf` / `fakeHistory` 等辅助：**先读 `store_test.go` 与 `validate_test.go` 找既有等价物**，有就沿用。\n\n---\n\n## 🔴 Leader 已核实的实际符号（锚 `4670ccb`）\n\n| 需求文档写的 | 实际是 | 位置 |\n|---|---|---|\n| `tablePending`（未导出） | 🔴 **`TablePending`**（**导出**，值 `\"hestia_pending\"`） | `schema.go:13` |\n| `scanPendingObservation` | ⚠️ **不存在**，需要你新建。pending 行确实是 `values_json TEXT NOT NULL` 存的（`schema.go:76`），写入列序见 `store.go:860`：`(period, period_type, published_at, article_id, extractor, ingested_at, report, values_json)` — 🔴 **注意有 `report` 列，比需求文档的 SELECT 多一个** | — |\n| `Preceding` | ✓ `func (s *Store) Preceding(ctx, period, periodType string, n int) ([]Observation, error)` | `store.go:353` |\n| `periodGapMonths` | ✓ `func periodGapMonths(from, to string) (int, bool)` — ⚠️ 形参名是 `from, to` | `validate.go:547` |\n| `expectedPeriodGapMonths` | ✓ `func expectedPeriodGapMonths(periodType string) int` | `validate.go:535` |\n| `minDriftHistory` | ✓ 存在 | `validate.go:193` |\n| `TestPackageExposesNoWriteFunctions` | ✓ 存在 | `store_test.go:399` |\n\n⚠️ **需求文档 Step 3 的 SELECT 列清单漏了 `report` 列**。照抄会让 `scanPendingObservation` 的列数与实际表不符——`database/sql` 会在运行时报 `sql: expected N destination arguments`，**测试里才发现**。"
+    ],
+    "error_handling": [
+      "⚠️ **`TestPackageExposesNoWriteFunctions` 会因新增导出方法 `PrecedingAll` 转红——那是它在正常工作**。去补上该方法的表态（它是**只读**的），**不要改断言**。\n\n🔴 这条是「包的导出面精确相等」这条全局约束的执行点。新增导出符号**必须**同步更新该测试的期望清单。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-008-m1c4 ../wt-TASK-008-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `fix(TASK-008):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。⚠️ 收尾**自己拆 worktree**。"
+    ]
+  }
+}

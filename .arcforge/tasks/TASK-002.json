@@ -1,0 +1,42 @@
+{
+  "id": "TASK-002",
+  "title": "periodAlt 与 cumulativePeriods 同步加「今年前N个月」族（结转项 1b）",
+  "description": "对应需求文档 Task 2。真语料 `2022-05` 正文有「今年前5个月」，不在 `periodAlt` 里，整篇落进 `Unsupported`，且被 CONTRACTS §E-3 **误记为「报告本身没有累计数据」**——数据就在正文里，是前缀不被认识。\n\n🔴 **必须同步改两处**：`periodAlt`（正则认不认得）与 `cumulativePeriods`（认得之后判不判它是累计口径）。**只改一处会全绿而无效**——M1c-3a 的 TASK-012 补 `1-N月` 时实撞过。",
+  "status": "pending",
+  "complexity": "medium",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/profiles_test.go",
+    "./internal/hestia/extract_test.go"
+  ],
+  "dependencies": [
+    "TASK-001",
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-004"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`profiles.go` 新增常量 `cumulativeThisYearAlt`（11 项，**两位数排在一位数前**），并入 `cumulativeMonthAlt`；`cumulativePeriods` 补**对应的 11 个键**。形态见需求文档 Task 2 Step 3。\n\n⚠️ **穷举，不要用 `今年前[0-9]{1,2}个月`**——理由与既有的 `cumulativeRangeAlt` 完全相同（写在它上方）：正则能匹配的每个累计前缀都必须在 `cumulativePeriods` 里有对应键，字符类没法枚举成 map 键，那条一一对应关系就不再可被机械核对。",
+      "三条测试存在且通过：`TestThisYearPrefixFamilyIsRecognised`（n=2..12 逐个断言正则命中 **且** `cumulativePeriods[p]` 为真——两条断言缺一不可）；`TestThisYearPrefixDoesNotShadowExistingFamilies`（`前五个月`/`1-7月`/`全年`/`上半年`/`5月份` 必须原样命中）；`TestCumulativeThisYearAltAndCumulativePeriodsAgree`（正则族项数 == map 里 `今年前` 开头的键数）。"
+    ],
+    "boundary": [
+      "**结转项 8 的处置（按 CONTRACTS §E-4）**：本族加的是「今年前N个月」，`extract_test.go` 的合成前缀「今年以来」**未被纳入** ⇒ 结转项 8 **未触发**，那一格**原样保留**。\n\n⚠️ Leader 已核实（锚 `4670ccb`）：「今年以来」在**语料里 0 篇**，只出现在 `extract_test.go:1675` 一带，确为合成前缀。⇒ 预期 `go test -run TestExtract` 仍绿。\n🔴 **若它转红，说明「今年以来」被新族吃掉了**——按 §E-4 换一个未被使用的前缀，**不要删掉那一格**。",
+      "⚠️ **交替顺序的真实机制**（归档纠正过三次的误解，别再传一遍）：Go regexp 在交替上**会回溯**，leftmost-first 是对**整体匹配**而言。顺序有语义的前提是**两个分支都能走完整条正则**（`人民|人民币` 那类前缀对）。\n⇒ 「两位数排一位数前」在这里是**零成本防御**，不是必需的正确性条件。照做，但**别把「必须如此否则会错」写进注释**。"
+    ],
+    "error_handling": [
+      "🔴 **背对背确认 `2022-05` 已恢复**（`verify_by: manual`）：\n\n```bash\ngo build -o /tmp/atlas-base-t002 ./cmd/atlas   # 改动前\n# …实现…\ngo build -o /tmp/atlas-after-t002 ./cmd/atlas  # 改动后\nfor b in base after; do\n  /tmp/atlas-$b-t002 hestia backfill calibrate \\\n    --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete > /tmp/calib-$b-t002.txt 2>&1\ndone\ndiff /tmp/calib-base-t002.txt /tmp/calib-after-t002.txt\n```\n\n**Expected**：`2022-05` 不再出现在「本迭代不解析」清单里。它**可能改报别的错误**——那属于 TASK-005 的射程，**不在本任务判红**。\n\n⚠️ **两份二进制必须同一时刻并排跑**。跨时间点采样会因并发 agent 期间的改动产生**假差异**（归档实测过一次跨 12 分钟采样得到 4 处全假的差异）。\n\n---\n\n## 🔴 独立反审发现：本任务的背对背必须是**全量 diff**，不能只 `grep 2022-05`\n\n原步骤只 `grep -n \"2022-05\"`。但放宽 `periodAlt` 是**全迭代最容易波及其他报告**的改动，理由是两处扩散（Leader 已核实）：\n\n1. **`sectorPeriodRE` 直接由 `periodPat` 编译**（`extract.go:566` 一带）⇒ 新增一个前缀会改变**别的报告**的分部门段口径判定\n2. **`selectRMBCumulativeFlow` 的 `keep` 查 `cumulativePeriods`** ⇒ 新增一个键会改变**别的报告**的合计句候选集\n\n⇒ 一个前缀进了词表，影响面是**全语料**，不是那一篇。而原步骤恰好省掉了唯一能看见它的仪器。\n\n🔴 **改为全量 diff**（与 TASK-001 同形，两份二进制**同一时刻并排跑**）：\n\n```bash\ndiff /tmp/calib-base-t002.txt /tmp/calib-after-t002.txt\n```\n\n**Expected**：差异**只与 `2022-05` 相关**。\n🔴 **有任何其它期次的行发生变化就停下来查** —— 那说明新前缀改变了别的报告的口径判定或候选集。\n\n⚠️ 与 TASK-001 一样，`2022-05` 从「不解析」移进别处会让**汇总计数行**跟着变（如「本迭代不解析: 19 篇」→ 18）。**那属于预期差异**，不要因为它判红；要查的是**其它期次的明细行**。",
+      "🔴 **语料路径必须用主仓库绝对路径**（AD-3，本 sprint 命中率最高的一条）：\n\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n\n⚠️ **不要用 `$PWD/data/...`**——需求文档全篇是那个写法，但 `.gitignore` 含 `data/`，`git ls-files data/` 返回 0 ⇒ **linked worktree 里根本没有 `data/` 目录**，照抄必然失败。\n⚠️ `--allow-incomplete` 是**必需**的：该语料 manifest 无 `completed_at`，不传直接报错退出。"
+    ],
+    "non_functional": [
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-002-m1c4 ../wt-TASK-002-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-002):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，「未提交改动」与「本任务已提交」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-002-m1c4`。"
+    ]
+  }
+}

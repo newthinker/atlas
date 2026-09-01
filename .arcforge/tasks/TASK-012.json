@@ -1,0 +1,67 @@
+{
+  "id": "TASK-012",
+  "title": "全量真跑验收与 CONTRACTS 登记 M1c-4",
+  "description": "对应需求文档 Task 12。本任务是整个 sprint 的验收锚点：真跑全语料入库、核四道恒等式与三条断言、把本轮实测数字登记进 CONTRACTS、订正四条被证伪的契约、结账全部结转项。\n\n🔴 **自证数字采样锚必须前置**（M1c-3b 的教训，spec §0.1）：CONTRACTS §B 的数字登记在锚 `6ff4b45`，其后 TASK-011 与三轮 TASK-006 返工改变了过闸结果（`75/21` 实为 `79/17`），而清单末尾的「`git diff --numstat <锚> HEAD` 为空」**在返工之后没有人重跑**。\n\n⇒ **本任务的第一步就是采锚并核空，不是最后一条。**",
+  "status": "pending",
+  "complexity": "complex",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md",
+    "./internal/hestia/calibrate.go"
+  ],
+  "dependencies": [
+    "TASK-008",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "wave": 9,
+  "context_from": [
+    "TASK-008",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "🔴 **Step 1（第一步，不是最后一步）**：`ANCHOR=$(git rev-parse HEAD)`，`git status --short` 必须干净。\n\n**在本任务结束前，若有任何代码改动（含返工），必须回到这一步重采。**\n判据是 `git diff --numstat $ANCHOR HEAD -- internal/hestia cmd/atlas configs` **为空**，**不是「我这轮改了什么」**。\n\n🔴 交付前以**提交本身**的 `git show --numstat HEAD` 复核一次——那份数字才和交付物同源。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**真跑全语料入临时库**（`/tmp/hestia-final.db`，先删旧库与 `-wal`/`-shm`），然后核**四道恒等式与三条断言**，判据（**不是期望值**）：\n\n| 项 | 判据 |\n|---|---|\n| 四道恒等式 | 全部成立 |\n| 解析失败 + 本迭代不解析 | **理论残余 0**；非 0 时**每一篇都必须有解释**，不得存在未分类的失败 |\n| 口径路由违反 | **0** |\n| 口径路由**异号跳过数** | **不得等于总对数**（等于则取号逻辑写反、断言恒 skip、报告一片绿） |\n| 字段冲突 | **0** |\n| `deposit_sum` 落 pending | **0，或每条有明确裁决** |\n\n🔴 **凡按 extractor 核观测数，必须同时查 `hestia_observations` 与 `hestia_pending`**（CONTRACTS §A-2 的坑：只查权威表会得到一个**看起来合理的错数**，且自洽、不会有任何东西提示你少看了一张表）。\n\n**同一次真跑里一并核**：`tsf_stock` 样本数 = **79**（权威表 + pending 合计）。\n🔴 **不等于 79 就停下来查**：CONTRACTS §C 的证伪判据就是这个数——不相等意味着本迭代改变了 `stock_continuity_max` 的标定输入，而那五档正是从那批样本标出来的（**自证循环**）。\n\n并核**覆盖率提升**：`PartialCoverage` 条目数**显著下降**、完整观测占比**显著上升**（M1c-3b 实测 64 条 / 33÷96=34%）。**不写死目标数。**\n\n---\n\n## 🔴 独立反审发现：`grep -c \"缺\"` 是坏仪器，换掉\n\n需求文档 Step 4 用 `grep -c \"缺\" /tmp/load-final.txt` 当 `PartialCoverage` 计数器。**任何含「缺」字的行都会计入**——错误信息、字段名注释、说明文字。\n\n它在粗粒度下会给出一个「差不多对」的数，而这**正是最不会被追查的一类错**：数字看起来合理，没有任何东西会告诉你它数的不是你要的东西。\n\n🔴 **换成结构化仪器**：直接查库或按报告里 `PartialCoverage` 那一节的**实际结构**取数（先 `sed -n '/PartialCoverage/,/^$/p'` 看一眼它长什么样再写命令）。\n\n⚠️ 同一条纪律适用于本任务的**每一个自证数字**：报数之前问一句「**这个仪器出错时，总数会跟着变吗？**」——答「不会」就必须换一把独立的尺复算。\n\n## 🔴 另：Step 4 的「显著下降 / 显著上升」缺理由也缺判据\n\n文档在 TASK-005 Step 8 明确解释过为什么不写死数字（「TASK-012 才是采数的地方」）。**但本任务就是那个采数的地方**，这里再写「显著」就没有下家了，且现成有可比基线（M1c-3b 实测 64 条 / 33÷96=34%）。\n\n⇒ 照抄 Step 3 的形状把它变成可判决的：**报出实际数值 + 与基线对比 + 每一条残余必须有解释**。不写死目标数是对的，但要写死**裁决方法**。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**写 CONTRACTS `## Sprint M1c-4` 一节**，七个小节 A–G 齐全（内容逐条见需求文档 Task 12 Step 7）：\nA. 契约更正（四条）· B. 实测登记（**附采样锚与「锚之后无代码改动」的核对结果**）· C. 阈值出处（两族容差的标定依据 + 复核「合并不影响标定」的 79 证伪判据）· D. `hestia_caliber_changes` 重建判据复核（本迭代**未触发**，白名单与伏笔**原样留着**）· E. 依赖登记（语料**不进 git**，TASK-013 的回滚预案依赖它还在）· F. schema 迁移（`observationsDDL` 由 `fieldOrder` 生成，**只在建表时生效**；已存在的非空库不会自动加列，将来对非空库跑**必须显式迁移**）· G. 结转项结账。\n\n🔴 **结构核对必须先锚 `## Sprint M1c-4` 再切小节**——本文件里 `### A.` 至 `### G.` 各已出现多次，按 `grep '^### F\\.'` 全局数**必然数错**（M1c-3a 数错三次）。**次数是观察值，不要当常量引用。**",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**结转项逐条结账**（G 节）：\n- **结转项 3（按节部分抽取）已被 `_mom` 字段族吸收** ⇒ **销案，不是移交**。写明**吸收得更彻底**：部分抽取要丢掉当月的分部门值，字段族把两种口径**同时原样存下，一个都不丢**\n- **结转项 1b** 已修（TASK-002），`2022-05` 恢复\n- **结转项 6**：闭合或**正式销案**（见下条）\n- **结转项 8 未触发**：本轮加的是「今年前N个月」族，`extract_test.go` 的合成前缀「今年以来」未被纳入 ⇒ 按 §E-4 **原样保留那一格**。⚠️ Leader 已核实：「今年以来」在**语料里 0 篇**\n- **结转项 7 明确不做**（`git log --grep`，要动只读的 `.claude/hooks/`），理由原样结转\n\n**结转项 6 的闭合（用内容定位，不用行号）**：\n- **用户可见输出里的裸任务编号**：给 `calibrate.go` 那两处补 milestone 前缀（它们指的是 **M1c-3a 的 TASK-010**）。⚠️ CONTRACTS §F-5 刻意保留了引文原样，**改的是 `calibrate.go` 的输出，不是 CONTRACTS 里的那段引文**\n- **`profiles.go` 那处**：M1c-3b 未能定位。本轮再找一次；**找不到就正式销案并写明「已尽力查找，判定为定位器在写下时即已失效」**——🔴 **不猜、也不无限期挂着。**",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**补 ADR-0003 的 LLM 兜底建立判据**（`~/Obsidian/ClawdVault/Projects/Hestia/0003-llm-must-not-write-source-of-truth.md`，在「决策」一节后加一小节，正文见需求文档 Task 12 Step 8）。\n\n必须含**反面教训**：CONTRACTS §E-3 曾断言那 19 篇「报告本身没有累计数据，LLM 也变不出不存在的数」——**前半句是对的，结论是错的**：数据不存在于**那个口径**，但它以另一个口径就在同一句话里。**「LLM 也救不了」不等于「这些数据取不到」。**\n\n⚠️ ClawdVault 是**另一个 git 仓库**，单独 commit（`docs(hestia): ...`）。⚠️ 它**不在本任务的 `writes` 里**（跨仓库路径），在 discovery 里显式申报这次跨仓改动。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "🔴 **一切自证数字必须采于最后一次改动之后，统一重采**。\n\n分批采的数字即使每个在当时都对，合到一份报告里**也不构成对最终产物的自证**——而它在报告里**长得和同时刻采的一模一样**，验证者无法从数字本身看出它测的是哪棵树。\n\n⚠️ M1c-3b 同一份交付里这个形状犯了两次（numstat `236/1`、断言数 `576 vs 577`），两次都不是漏做检查，而是**采样时点早于最后一次改动**。\n\n🔴 **语料路径用主仓库绝对路径**（AD-3）：\n```\n--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete\n```\n⚠️ 不要用 `$PWD/data/...`；`--allow-incomplete` 必需。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**全量验收**：`gofmt` 只有那两个既有欠账文件；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./...` 全绿；覆盖率 **≥96.1%**；`git diff --numstat $ANCHOR HEAD -- internal/hestia cmd/atlas configs` **对代码文件为空**（docs 改动不影响真跑数字）。\n\n🔴 **代码文件非空就回 Step 1 重采锚。**\n⚠️ **无新增依赖**。⚠️ 注释与 CONTRACTS 里的任务编号**带 milestone 前缀**。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "🔴 **交付流程（AD-4）**：worktree `git worktree add -b task/TASK-012-m1c4 ../wt-TASK-012-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需）→ 显式 pathspec 提交，信息锚定 `docs(TASK-012):` → **通知 Leader merge 并等它进 master** → **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`。\n\n⚠️ **merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 不带 `--all` ⇒ 未合并分支的 commit 对门禁**结构性不可见**，**门禁会报绿而根本没量到你的代码**。\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——它在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律相反**。\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**。⚠️ 收尾**自己拆 worktree**。",
+        "verify_by": "manual"
+      }
+    ]
+  }
+}
