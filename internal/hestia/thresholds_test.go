@@ -1,7 +1,9 @@
 package hestia
 
 import (
+	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"testing"
 
@@ -498,4 +500,149 @@ func TestMonthlyThresholdCoversObservedMaximum(t *testing.T) {
 			"阈值不越过它，那一期就会被自己的闸门拦下")
 	assert.Greater(t, m["annual"], 0.13338,
 		"annual 实测极值 0.13338108312442792（n=6，M1c-3b 标定）")
+}
+
+// —— magnitude_ranges 的守卫补完（M1c-3b 的 TASK-012）——
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] NaN/Inf 穿透        → TestMagnitudeRangesRejectNaNOrInf
+// functional[1] YAML 可达性          → TestMagnitudeRangesRejectNaNFromYAML
+// functional[2] 存活变异 Min==Max    → TestMagnitudeRangesRejectDegenerateRange
+// functional[2] 存活变异 Unit 空白   → TestMagnitudeRangesRejectBlankUnit
+//
+// ⚠️ 这四条的 RED 判据**不同**，别用同一把尺：
+//   - 前两条在加 NaN 校验前**失败**（validate 返回 nil）⇒ 正常 TDD 的 RED
+//   - 后两条在当前实现上**直接 PASS**（实现本来就拒绝它们）⇒ 补的是**守卫缺口**
+//     而非行为缺口，其有效性只能靠**变异**证明（见各自注释里记录的实测结果）
+
+// TestMagnitudeRangesRejectNaNOrInf：Min/Max 为 NaN 或 ±Inf ⇒ 拒。
+//
+// IEEE 754 规定涉 NaN 的比较除 != 外**恒假**，所以上面那条 r.Min >= r.Max
+// 拦不住它；而下游 gateMagnitudeSanity 的判据 v < r.Min || v > r.Max
+// **两侧同样恒假** ⇒ 该字段的幅度闸完全不设防，且报 passed。
+// 这与「打错字段名」是同一失效模式的第二条入口。
+//
+// 实测（M1c-3b 的 TASK-004 交付后自查，隔离 worktree @ e0205607）：下面四种形态
+// validate() **全部返回 nil**；配 fx_reserve=42（越界两个数量级）⇒ magnitude_sanity = passed。
+func TestMagnitudeRangesRejectNaNOrInf(t *testing.T) {
+	tests := []struct {
+		name     string
+		min, max float64
+	}{
+		{"min 与 max 都是 NaN", math.NaN(), math.NaN()},
+		{"只有 min 是 NaN", math.NaN(), 1000},
+		{"只有 max 是 NaN", 0, math.NaN()},
+		{"负无穷到正无穷", math.Inf(-1), math.Inf(1)},
+		{"只有 min 是 -Inf", math.Inf(-1), 1000},
+		{"只有 max 是 +Inf", 0, math.Inf(1)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			th := DefaultThresholds()
+			th.MagnitudeRanges = map[string]Range{
+				FieldM2: {Min: tc.min, Max: tc.max, Unit: "万亿元"},
+			}
+			err := th.validate()
+			require.Error(t, err, "NaN/Inf 区间会让该字段的幅度闸完全不设防且报 passed")
+			// 断言字段名与成因都在，而不只是「有 error」：只断有 error 的话，
+			// 任何一条别的校验顺手报错都能让这条测试变绿。
+			require.Contains(t, err.Error(), FieldM2)
+			require.Contains(t, err.Error(), "有限")
+		})
+	}
+}
+
+// TestMagnitudeRangesRejectNaNFromYAML：.nan / .inf 能从 YAML 字面量一路进到
+// MagnitudeRanges，本条钉住这条路径已被堵上。
+//
+// 可达性不是理论构造：viper 走 yaml.v3，`min: .nan` 会被解析成真正的 NaN 而不报错。
+// 实测（M1c-3b 的 TASK-004 交付后自查，加校验前）：往真配置追加 min: .nan 后
+// LoadConfig err = nil，NaN 原样落进表里 —— 所以这条必须从 **YAML 出发**测，
+// 只测结构体覆盖不到「YAML 能不能表达出这个值」这一段。
+//
+// ⚠️ 每个用例都刻意**避开** r.Min >= r.Max 那条既有校验，否则会因它而被拒、
+// 从而证明不了 NaN/Inf 守卫的存在（实测踩过：min=.inf & max=1000 时
+// +Inf >= 1000 为真 ⇒ 被倒置区间那条拦下，用例**为错误的理由变绿**）。
+func TestMagnitudeRangesRejectNaNFromYAML(t *testing.T) {
+	tests := []struct {
+		name, min, max string
+	}{
+		// NaN 参与的比较恒假 ⇒ Min >= Max 为 false ⇒ 逃过既有校验
+		{"min 是 .nan", ".nan", "1000"},
+		{"max 是 .nan", "0", ".nan"},
+		{"min 与 max 都是 .nan", ".nan", ".nan"},
+		// -Inf < 1000、0 < +Inf ⇒ Min >= Max 均为 false ⇒ 同样逃过
+		{"min 是 -.inf", "-.inf", "1000"},
+		{"max 是 .inf", "0", ".inf"},
+		{"负无穷到正无穷", "-.inf", ".inf"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeConfig(t, `
+config_version: "2026-08-12"
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+thresholds:
+  magnitude_ranges:
+    m2:
+      min: `+tc.min+`
+      max: `+tc.max+`
+      unit: "万亿元"
+`)
+			_, err := LoadConfig(p)
+			require.Error(t, err, "YAML 字面量 min=%s max=%s 必须在装载时被拒，"+
+				"而不是静默变成一道不设防的闸", tc.min, tc.max)
+			require.Contains(t, err.Error(), FieldM2)
+			// 断「有限」而不只是断字段名：这几个用例都刻意避开了倒置区间那条校验，
+			// 但若将来有人放宽了它，只断字段名的用例会被那条错误冒名满足。
+			require.Contains(t, err.Error(), "有限")
+		})
+	}
+}
+
+// TestMagnitudeRangesRejectDegenerateRange：Min == Max ⇒ 拒。
+//
+// 🔴 这条补的是**守卫缺口**，不是行为缺口：当前实现（r.Min >= r.Max）本来就拒绝它，
+// 所以本测试在**未做任何实现改动时就是 PASS 的**。它的有效性只能靠变异证明 ——
+// 把 >= 改成 >，本条必须转红（M1c-3b 的 TASK-012 已实测，见 discovery 的 mutation 段）。
+//
+// 为什么值得补：M1c-3b 的 TASK-004 的 discovery 在 interfaces_exposed 里向 TASK-005
+// **广告了「min == max 也会被拒」这条契约**，而在本任务之前没有任何测试钉住它。
+// 谁把 >= 顺手写成 >，这条已被下游依赖的契约就静默失效。
+func TestMagnitudeRangesRejectDegenerateRange(t *testing.T) {
+	th := DefaultThresholds()
+	th.MagnitudeRanges = map[string]Range{
+		FieldM2: {Min: 100, Max: 100, Unit: "万亿元"},
+	}
+	err := th.validate()
+	require.Error(t, err, "min == max 的区间宽度为零，该字段每一期都会失败")
+	// 断 min(100) 而不只是断字段名：缺 unit 那条错误串里同样含 FieldM2，
+	// 只断字段名的话，判据与用例数据耦合，换个数据就分不清是哪条分支在响。
+	require.Contains(t, err.Error(), "min(100)")
+}
+
+// TestMagnitudeRangesRejectBlankUnit：Unit 为纯空白 ⇒ 拒。
+//
+// 🔴 同上，补的是**守卫缺口**：当前实现用 strings.TrimSpace 本来就拒绝它，本测试
+// 未改实现即 PASS。有效性靠变异证明 —— 把 TrimSpace(r.Unit) == "" 改成
+// r.Unit == ""，本条必须转红（已实测）。
+//
+// 单独测 TrimSpace **有本文件的先例**：TestThresholdsRejectMalformedExemptions
+// 的表里就有 Reason = "   " 那一档。照既有惯例写。
+func TestMagnitudeRangesRejectBlankUnit(t *testing.T) {
+	for _, unit := range []string{"   ", "\t", " \n "} {
+		t.Run(fmt.Sprintf("%q", unit), func(t *testing.T) {
+			th := DefaultThresholds()
+			th.MagnitudeRanges = map[string]Range{
+				FieldM2: {Min: 0, Max: 1000, Unit: unit},
+			}
+			err := th.validate()
+			require.Error(t, err, "纯空白的 unit 与漏填等价，失败理由串里会是一片空白")
+			require.Contains(t, err.Error(), "unit")
+		})
+	}
 }

@@ -1287,3 +1287,89 @@ func TestMergedPartsDoNotRoundTrip(t *testing.T) {
 	// 调用方手里的那份不受影响：Save 改的是值参数的副本。
 	assert.Equal(t, parts, obs.Parts, "Save 不得清空调用方的 Parts")
 }
+
+// —— gateMagnitudeSanity 消费端的两个守卫缺口（M1c-3b 的 TASK-012，F12 / F17#5#6）——
+//
+// 由 M1c-3b 的 TASK-005 的 dev 在填表前查实并上报。两处**实现都是对的**，缺的是守卫：
+// 在 TASK-005 填完 54 项之前，magnitude_sanity 恒 skipped{not_calibrated}，所以这两个
+// 缺口影响为零；**填完的那一刻这道闸开始真正判定，缺口同时变成真的**。
+//
+// ⚠️ 下面两条的 RED 判据与常规 TDD 不同：它们在**未做任何实现改动时就是 PASS 的**，
+// 有效性只能靠变异证明（实测结果见各自注释与 discovery 的 mutation 段）。
+// **实现本身一律不要改**——本节补的是守卫，不是修 bug。
+
+// TestMagnitudeSanityReportsEarliestFieldInFieldOrder（F12）：多个字段同时越界时，
+// 报出的必须是 fieldOrder 里**最靠前**的那个，且反复跑结果相同。
+//
+// 守的是 gateMagnitudeSanity 里的 `for _, f := range fieldOrder`（该文件有两处同形
+// 循环，这里指的是 gateMagnitudeSanity 函数内的那个）。改成 `range in.cfg.MagnitudeRanges`
+// 后，报出的字段随 map 迭代序随机 —— 同一份数据两次跑报出不同的越界字段，排查变成猜谜。
+//
+// ⚠️ 用**六个**越界字段而不是两个：单次比较在变异下仍有 1/N 概率蒙对，
+// 六个字段 × 十轮把存活概率压到 (1/6)^10 ≈ 1.7e-8，变异必然被杀。
+func TestMagnitudeSanityReportsEarliestFieldInFieldOrder(t *testing.T) {
+	// 六个字段都在 golden2025 里，且横跨 fieldOrder 的前中后段。
+	// tsf_stock 是 fieldOrder[0]，故它必须是被报出的那一个。
+	outOfRange := []string{
+		FieldTSFStock, FieldTSFStockRMBLoan, FieldTSFStockEntrust,
+		FieldM2, FieldM0, FieldFXReserve,
+	}
+	require.Equal(t, FieldTSFStock, fieldOrder[0],
+		"本用例依赖 tsf_stock 是 fieldOrder 的第一项；fieldOrder 改了这条要跟着改")
+
+	cfg := DefaultThresholds()
+	cfg.MagnitudeRanges = make(map[string]Range, len(outOfRange))
+	for _, f := range outOfRange {
+		// [0, 0.001] 对这六个字段的实测值（3.36 ~ 356000）全部越界
+		cfg.MagnitudeRanges[f] = Range{Min: 0, Max: 0.001, Unit: "测试用"}
+	}
+
+	// 跑十轮：map 迭代序每次随机，稳定性只有反复跑才证得出。
+	for i := range 10 {
+		obs := obsFrom(golden2025, extractorV2)
+		rep, err := Validate(context.Background(), obs, NoHistory, cfg)
+		require.NoError(t, err)
+		c := findCheck(t, rep, "magnitude_sanity")
+		require.Equal(t, CheckFailed, c.Status)
+		assert.Truef(t, strings.HasPrefix(c.Reason, FieldTSFStock+"="),
+			"第 %d 轮报出的是 %q；越界字段必须按 fieldOrder 报最靠前的那个（tsf_stock），"+
+				"否则同一份数据两次跑会指向不同字段", i, c.Reason)
+	}
+}
+
+// TestMagnitudeSanityBoundariesAreInclusive（F17 #5/#6）：区间是**闭区间**——
+// 恰好落在 min / max 上算通过，越过一档才算失败。
+//
+// 守的是 gateMagnitudeSanity 里的 `if v < r.Min || v > r.Max`（唯一一处）。
+// 现有的 TestMagnitudeSanityActivatesWhenCalibrated 用 42 对区间 [3,4]，
+// **离边界两个数量级** ⇒ 把 < 改成 <= 或 > 改成 >= 都不会有任何测试转红。
+// 本条用恰好落在边界上的值把这两个比较符各自钉死。
+func TestMagnitudeSanityBoundariesAreInclusive(t *testing.T) {
+	const lo, hi = 3.0, 4.0
+	tests := []struct {
+		name string
+		v    float64
+		want CheckStatus
+	}{
+		{"恰好等于 min：闭区间，通过", lo, CheckPassed},
+		{"恰好等于 max：闭区间，通过", hi, CheckPassed},
+		{"区间正中：通过", (lo + hi) / 2, CheckPassed},
+		{"刚低于 min 一档：失败", math.Nextafter(lo, math.Inf(-1)), CheckFailed},
+		{"刚高于 max 一档：失败", math.Nextafter(hi, math.Inf(1)), CheckFailed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultThresholds()
+			cfg.MagnitudeRanges = map[string]Range{
+				FieldFXReserve: {Min: lo, Max: hi, Unit: "万亿美元"},
+			}
+			obs := obsFrom(golden2025, extractorV2)
+			obs.Values[FieldFXReserve] = tc.v
+
+			rep, err := Validate(context.Background(), obs, NoHistory, cfg)
+			require.NoError(t, err)
+			assert.Equalf(t, tc.want, findCheck(t, rep, "magnitude_sanity").Status,
+				"fx_reserve=%v 对区间 [%v,%v]", tc.v, lo, hi)
+		})
+	}
+}
