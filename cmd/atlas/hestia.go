@@ -34,8 +34,16 @@ var (
 	// —— backfill calibrate 的两个 flag（M1c-2 的 TASK-004）——
 	hestiaCalibrateDir             string
 	hestiaCalibrateAllowIncomplete bool
-	hestiaBackfillExpectPeriods    int
-	hestiaBackfillExpectArticles   int
+	// —— backfill load 的三个 flag（M1c-3b 的 TASK-007）——
+	//
+	// ⚠️ `hestiaLoadDB` **刻意没有默认值**，注册处也不给：默认值会让人在没意识到的
+	// 情况下把回填写进 configs/hestia.yaml 指的那个**生产库**，而回填一旦进了权威表
+	// 就没有出路 —— `--force` 对已入权威表的期次是数据层 no-op。
+	hestiaLoadDir                string
+	hestiaLoadDB                 string
+	hestiaLoadAllowIncomplete    bool
+	hestiaBackfillExpectPeriods  int
+	hestiaBackfillExpectArticles int
 )
 
 var hestiaCmd = &cobra.Command{
@@ -105,6 +113,55 @@ artefact alone, so the report says so out loud.`,
 	SilenceUsage: true,
 }
 
+var hestiaBackfillLoadCmd = &cobra.Command{
+	Use:   "load",
+	Short: "Parse, merge and load a fetched artefact directory into a NEW database",
+	Long: `Parse every supported report under --dir, merge the articles that share a
+business key, run every gate, and write the result into the database at --db.
+
+--db must NOT already exist. Backfill is a one-off: appending would make the
+report's identities meaningless, and re-running is meant to be "delete the file
+and start over" -- which is also the only way around the fact that --force is a
+data-level no-op for periods already in the authoritative table.
+
+The tool never touches the production database and never edits configs/hestia.yaml:
+switching over is a human action, taken after reading the report.`,
+	RunE:         runHestiaBackfillLoad,
+	SilenceUsage: true,
+}
+
+// runHestiaBackfillLoad 装配 BackfillLoad 的依赖。
+//
+// 🔴 **Out 必须显式填**：BackfillLoad 对 nil 直接报错，不退化成 io.Discard
+// （M1c-3b 的 TASK-006 刻意背离需求文档，沿用同包 Calibrate 的相反契约）。
+// 理由正是本层最容易犯的错 —— 漏填 Out 会让命令把观测正确写进库、退出码 0、
+// 而 stdout 一片空白，且「子命令注册了吗」「flag 解析对吗」那类测试**全部通过**。
+// TestHestiaBackfillLoadWritesReport 钉住这一点。
+//
+// ⚠️ **--db 的存在性检查不在这一层**：它在 BackfillLoad 里，且必须先于 NewStore
+// （NewStore 会把文件建出来）。这一层若自己 os.Stat 就要 import path/filepath，
+// 而 TestHestiaCmdDoesNotResolveDBPath 明令 hestia.go 不得 import 它 —— 路径语义归
+// internal/hestia。
+//
+// ⚠️ 只读配置里的 Thresholds，**不碰 cfg.Storage.DBPath**：回填写的是 --db 指的那个
+// 新库，与生产库无关。Long 里那句「never touches the production database」就是这个意思。
+func runHestiaBackfillLoad(cmd *cobra.Command, _ []string) error {
+	cfg, err := hestia.LoadConfig(hestiaCfgPath)
+	if err != nil {
+		return err
+	}
+	// 失败时 res 也非 nil（调用方要拿它看差在哪），故判成功看 err 而不是 res
+	// —— M1c-3b 的 TASK-006 的 interfaces_exposed 明确了这条。
+	_, err = hestia.BackfillLoad(cmd.Context(), hestia.BackfillLoadDeps{
+		Dir:             hestiaLoadDir,
+		DBPath:          hestiaLoadDB,
+		Cfg:             cfg.Thresholds,
+		Out:             cmd.OutOrStdout(),
+		AllowIncomplete: hestiaLoadAllowIncomplete,
+	})
+	return err
+}
+
 // —— 为什么三个命令都显式设 SilenceUsage（reviewer D4）——
 //
 // 改动前实测：`atlas crisis status --crisis-config /nonexistent/nope.yaml` 输出 **13 行**，
@@ -161,7 +218,22 @@ func init() {
 		panic(err) // 只会在 flag 名写错时触发，属编程错误
 	}
 
-	hestiaBackfillCmd.AddCommand(hestiaBackfillFetchCmd, hestiaBackfillCalibrateCmd)
+	load := hestiaBackfillLoadCmd.Flags()
+	load.StringVar(&hestiaLoadDir, "dir", "",
+		"artefact directory produced by `backfill fetch` (the --out of that run)")
+	load.StringVar(&hestiaLoadDB, "db", "",
+		"path to the NEW database to create; must not already exist")
+	load.BoolVar(&hestiaLoadAllowIncomplete, "allow-incomplete", false,
+		"accept a manifest without completed_at; the report will say why it was accepted")
+	// --dir 与 --db 都必填。--db **不给默认值**：见 hestiaLoadDB 的声明处。
+	for _, name := range []string{"dir", "db"} {
+		if err := hestiaBackfillLoadCmd.MarkFlagRequired(name); err != nil {
+			panic(err) // 只会在 flag 名写错时触发，属编程错误
+		}
+	}
+
+	hestiaBackfillCmd.AddCommand(hestiaBackfillFetchCmd, hestiaBackfillCalibrateCmd,
+		hestiaBackfillLoadCmd)
 
 	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd)
 	rootCmd.AddCommand(hestiaCmd)
