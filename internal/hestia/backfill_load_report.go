@@ -4,11 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 )
 
 // —— 回填入库的核对报告（M1c-3b 的 TASK-006）——
+
+// caliberMedianMinSamples 是族内量级核对每侧所需的最少样本数（M1c-4 的 TASK-011）。
+//
+// 取 3 而不是更大：门槛越高，「样本不足未判」越多，而未判的对**不受任何自动判据保护**
+// —— 那正是本任务要消除的盲区。取 3 是「中位数还有意义」的下界。
+const caliberMedianMinSamples = 3
 
 // writeLoadReport 把核对报告写给人看，并校验四道恒等式。任一不成立返回 error。
 //
@@ -164,6 +171,68 @@ func renderLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error {
 			c.Period, c.PeriodType, c.Field, c.A, c.FromA, c.B, c.FromB)
 	}
 
+	// —— 口径路由核对（M1c-4 的 TASK-011）——
+	//
+	// 🔴 **四个数都要印。** 本迭代唯一的新风险是「当月值进了 _ytd 列」，而它量级完全
+	// 合理、下游没有别的闸门拦得住。这一节就是那个闸门，而**闸门自己也需要被看见**：
+	//   · 违反 V —— 判据本身（预期 0）
+	//   · 单侧跳过 S —— 整族被误判成同一口径时**每对都单侧**，若不印，报告会输出
+	//     「共 0 对，违反 0」，**与「一切正常」逐字相同**
+	//   · 无上期 P —— 恒等式要 ytd_{n-1}，取不到时**没查**，与「查过没问题」必须可区分
+	//   · 可判 N —— 与上面两个加上两侧皆空构成划分，是这些数字的自证
+	//
+	// TASK-012 的消费判据是两条，缺一不可：V == 0、**N ≠ 0 且逐对清单里 0 的那几对
+	// 已在 CONTRACTS 登记为已知开口**。只看 V == 0 是不够的——N 接近 0 时它恒真。
+	pairs := caliberFamilies()
+	viol, st := checkCaliberRouting(res.Groups)
+	fmt.Fprintf(&b, "\n口径路由核对（判据 ytd_n == ytd_n-1 + mom_n，容差 ±%g 亿元；预期违反 0，共 %d 违反）\n"+
+		"  可判 %d 对 / 单侧跳过 %d / 无上期 %d / 两侧皆空 %d（合计 %d = %d 对 × %d 观测）\n",
+		caliberIdentityTolerance, len(viol), st.Comparable, st.SingleSided, st.NoPrior, st.Absent,
+		st.Comparable+st.SingleSided+st.NoPrior+st.Absent,
+		len(pairs), len(res.Groups))
+	if len(viol) == 0 {
+		b.WriteString("  （无违反）\n")
+	}
+	for _, v := range viol {
+		// 差额同时给绝对值与相对值：路由错（两列写反）的偏差是 ~99%，而发布取整与
+		// 央行数据修订造成的噪声是千分之几 —— 两者相差三个数量级，印出来才标得出容差。
+		d := math.Abs(v.YTD - v.Expected)
+		var rel float64
+		if v.Expected != 0 {
+			rel = d / math.Abs(v.Expected) * 100
+		}
+		// %.0f 而非 %g：值由 万亿元×10000 得来，浮点尾巴（241700.00000000003）会原样
+		// 印进 TASK-012 的验收报告。单位是亿元，亚亿精度在本判据下没有意义。
+		fmt.Fprintf(&b, "  %s/%s  %s=%.0f ≠ 上期 %.0f + %s=%.0f = %.0f（差 %.0f，%.3f%%）\n",
+			v.Period, v.PeriodType, v.YTDField, v.YTD, v.PrevYTD, v.MoMField, v.MoM, v.Expected, d, rel)
+	}
+
+	// 逐对印被比较过的观测数。🔴 「异号跳过数 ≠ 总对数」只发现得了「取号写反」，
+	// 发现不了「比较对数接近零」—— 而后者正是整族位移的表现。某一对恒为 0，
+	// 只有逐对列出来才看得见。
+	b.WriteString("  逐对可判观测数（0 表示这一对从未被比较过）:\n")
+	for i, p := range pairs {
+		fmt.Fprintf(&b, "    %-28s %d\n", strings.TrimSuffix(p[0], "_ytd"), st.ByPair[i])
+	}
+
+	// 跨语料族内不等式：不要求两列在同一观测里共存，是单侧盲区的唯一自动判据。
+	famViol, famInsuf := checkCaliberFamilyMedians(res.Groups, caliberMedianMinSamples)
+	fmt.Fprintf(&b, "\n族内量级核对（按 period_type，预期违反 0，共 %d 违反；样本不足未判 %d）\n",
+		len(famViol), len(famInsuf))
+	if len(famViol) == 0 {
+		b.WriteString("  （无违反）\n")
+	}
+	for _, f := range famViol {
+		fmt.Fprintf(&b, "  %s %s: median|ytd|=%g (n=%d) < median|mom|=%g (n=%d)  ← 整族可能写错列\n",
+			f.PeriodType, strings.TrimSuffix(f.YTDField, "_ytd"),
+			f.YTDMedian, f.YTDCount, f.MoMMedian, f.MoMCount)
+	}
+	for _, f := range famInsuf {
+		fmt.Fprintf(&b, "  %s %s: 样本不足未判（ytd n=%d, mom n=%d，门槛 %d）\n",
+			f.PeriodType, strings.TrimSuffix(f.YTDField, "_ytd"),
+			f.YTDCount, f.MoMCount, caliberMedianMinSamples)
+	}
+
 	fmt.Fprintf(&b, "\n落 pending 的期次（%d）\n", len(res.PendingReasons))
 	if len(res.PendingReasons) == 0 {
 		b.WriteString("  （无）\n")
@@ -267,4 +336,229 @@ func checkLoadIdentities(res *BackfillLoadResult) error {
 	// 原文写的是「报告不予输出」——那句话在 C-2 之后就是假的，而错误串是运维唯一读到的东西。
 	return errors.New("核对报告的恒等式不成立，本次回填的账对不上（报告已输出在上方，请对照查）：\n  " +
 		strings.Join(bad, "\n  "))
+}
+
+// —— 口径路由核对（M1c-4 的 TASK-011）——
+
+// caliberRouteViolation 是一条「当月值可能被写进累计列」的疑点。
+//
+// ⚠️ **刻意用非导出名。** 需求文档写的是导出的 CaliberRouteViolation，但本类型的
+// 消费者只有同包的 checkCaliberRouting 与报告渲染，没有任何外部调用方；Global
+// Constraint 要求「包的导出面精确相等」，而 TestPackageExposesNoWriteFunctions
+// **只遍历 *ast.FuncDecl、不覆盖导出的 type**（store_test.go）⇒ 导出它会**静默**
+// 进入包的公开契约而不撞红任何东西。导出面越小越好，这里没有理由付那个代价。
+type caliberRouteViolation struct {
+	Period, PeriodType, YTDField, MoMField string
+	YTD, MoM, PrevYTD, Expected            float64
+}
+
+// caliberRouteStats 是路由核对的四类计数，外加逐对的可判观测数。
+//
+// 🔴 四类**构成一个划分**：每个 (观测, 成对列) 组合恰好落进一类，故
+// Comparable + SingleSided + NoPrior + Absent == len(caliberFamilies()) × len(obs)。
+// 这条恒等式是「共 N 对」这个数字的**自证** —— 少了它，N 变小既可能是语料形态变了、
+// 也可能是判定逻辑漏了一整类，而两者在报告上无法区分。
+// 由 TestCaliberRoutingCountsArePartition 钉住。
+type caliberRouteStats struct {
+	Comparable  int // 三个值齐备，恒等式真的算过
+	SingleSided int // 本期只有一侧在场（真语料常态，不是异常）
+	NoPrior     int // 本期双侧在场，但取不到上一期的 ytd
+	Absent      int // 两侧都不在场
+
+	// ByPair 与 caliberFamilies() **同序**，记每一对被判过的观测数。
+	// 🔴 它存在的理由：整族位移的表现是「某一对从未被判过」，而总数上看不出来 ——
+	// 逐对印出来，恒为 0 的那一对才看得见。
+	ByPair []int
+}
+
+// caliberIdentityTolerance 是累计恒等式的容差，单位亿元（M1c-4 的 TASK-011）。
+//
+// 取绝对值 ±1 而不是相对容差：真语料的值是**取整到亿元**的整数，误差来源是取整
+// 而非测量。实测 2020-02 未贴现票据 1403+(-3961)=-2558 与报告值**逐位相等**，
+// 信托 432+(-540)=-108 vs -109 差 1 —— 正是取整。相对容差会让大数上的真错漏网。
+const caliberIdentityTolerance = 1.0
+
+// prevPeriodKey 返回同年上一个月的 period（"2020-02" → "2020-01"）。
+// 1 月或格式不可解析时返回 false —— 跨年不接（上一年 12 月的 ytd 是**上一年**的累计，
+// 接上去会得到一个毫无意义的期望值）。
+func prevPeriodKey(period string) (string, bool) {
+	var y, m int
+	if _, err := fmt.Sscanf(period, "%d-%d", &y, &m); err != nil || m <= 1 || m > 12 {
+		return "", false
+	}
+	return fmt.Sprintf("%04d-%02d", y, m-1), true
+}
+
+// checkCaliberRouting 找「当月值被写进累计列」的疑点（M1c-4 的 TASK-011）。
+//
+// 判据是**精确恒等式** `ytd_n == ytd_{n-1} + mom_n`（容差 ±1 亿元，取整误差）。
+// 1 月退化成 `ytd_1 == mom_1` —— 年初至今只包含 1 月这一个月。
+//
+// 🔴 这是本迭代头号风险的可执行形式。TASK-005 之前，解析器宁可拒绝整篇也不猜口径，
+// 理由是「两者都在合法量级内、下游没有任何闸门拦得住」；把拒绝改成路由之后，
+// 这条断言就是那个「拦得住的闸门」。
+//
+// # ⚠️ 为什么**不用** |ytd| >= |mom|（DoD 原判据，实测证否）
+//
+// 「累计值不可能小于它自己的某一个月」这条前提**只在年内各月同号时成立**。真语料
+// 2020-02 实测两条假阳，两条都是合法数据：
+//
+//	信托:       432 + (-540)  = -108  vs 报告值 -109（取整差 1）
+//	未贴现票据: 1403 + (-3961) = -2558 vs 报告值 -2558（**逐位相等**）
+//
+// 社融分项年内正负交替是常态 ⇒ 累计穿越零点后 |累计| 合法地小于 |某月|。
+// **异号跳过挡不住它** —— 这两例 ytd 与 mom **同号**（都是负），是被跳过条件放行
+// 之后才判的。⇒ 那条判据在这类字段上不可用，而恒等式对它们逐位成立。
+//
+// ⚠️ 随之**取消了异号跳过**：恒等式与符号无关，异号的对现在能被精确验证。保留跳过
+// 只会让本可以判的对静默漏判 —— 那正是本任务要消除的失明。（真语料实测异号 = 0，
+// 故这一改动不影响当前数字，但它决定将来。）
+//
+// 🔴 **四类都要计数，单侧尤其**：路由错误最典型的产物恰恰是单侧（整族被误判成同一
+// 口径 ⇒ 整族只写进一侧）。若单侧静默跳过，报告会输出「共 0 对，违反 0」，
+// **与「一切正常」逐字相同** —— 这条防线就在最需要它的地方失明。
+func checkCaliberRouting(obs []MergedObservation) ([]caliberRouteViolation, caliberRouteStats) {
+	fams := caliberFamilies()
+	st := caliberRouteStats{ByPair: make([]int, len(fams))}
+	var out []caliberRouteViolation
+
+	// 批内索引：(period_type, period) → 该观测的值。恒等式要取**同族同档**的上一期，
+	// 故键必须含 period_type —— 2020-03/q1 与 2020-03/monthly 是两条不同的序列。
+	//
+	// ⚠️ 刻意**不查库**（不碰 TASK-008 的 PrecedingAll）：那是 validate 阶段回答
+	// 「近期发生过什么」的，定义域不同；在报告里调它会让 load 报告依赖 Store。
+	index := make(map[string]map[string]float64, len(obs))
+	for _, m := range obs {
+		pt := m.Obs.Meta.PeriodType
+		if index[pt] == nil {
+			index[pt] = map[string]float64{}
+		}
+		for f, v := range m.Obs.Values {
+			index[pt][m.Obs.Meta.Period+"|"+f] = v
+		}
+	}
+
+	for _, m := range obs {
+		pt := m.Obs.Meta.PeriodType
+		for i, p := range fams {
+			ytd, okY := m.Obs.Values[p[0]]
+			mom, okM := m.Obs.Values[p[1]]
+			switch {
+			case !okY && !okM:
+				st.Absent++
+				continue
+			case !okY || !okM:
+				st.SingleSided++
+				continue
+			}
+
+			// 1 月退化：年初至今 == 本月，不需要上一期
+			prev, expected := 0.0, mom
+			if pk, ok := prevPeriodKey(m.Obs.Meta.Period); ok {
+				pv, found := index[pt][pk+"|"+p[0]]
+				if !found {
+					st.NoPrior++
+					continue
+				}
+				prev, expected = pv, pv+mom
+			}
+
+			st.Comparable++
+			st.ByPair[i]++
+			if math.Abs(ytd-expected) > caliberIdentityTolerance {
+				out = append(out, caliberRouteViolation{
+					Period: m.Obs.Meta.Period, PeriodType: pt,
+					YTDField: p[0], MoMField: p[1],
+					YTD: ytd, MoM: mom, PrevYTD: prev, Expected: expected,
+				})
+			}
+		}
+	}
+	return out, st
+}
+
+// caliberFamilyShift 是一条「整族可能被写错列」的疑点（M1c-4 的 TASK-011）。
+//
+// 🔴 它与 caliberRouteViolation 的分工是本任务的核心：后者要求两列**在同一观测里
+// 共存**，而路由错误最典型的产物是**单侧**（整族被误判成同一口径 ⇒ 整族只写进一侧），
+// 那时逐观测判据一条都判不了。本判据**跨观测**取中位数，不要求共存 —— 这是
+// 它存在的全部理由，也是唯一能抓住整族位移的自动判据。
+type caliberFamilyShift struct {
+	PeriodType, YTDField, MoMField string
+	YTDMedian, MoMMedian           float64
+	YTDCount, MoMCount             int
+}
+
+// checkCaliberFamilyMedians 按 period_type 分档比较每一对成对列的绝对值中位数，
+// 返回「违反」与「样本不足未判」两组。
+//
+// 判据：median(|x_ytd|) >= median(|x_mom|)。累计口径覆盖的月份数不少于当月口径，
+// 故整体量级不应更小；显著更小说明整族写错了列。
+//
+// ⚠️ **相等不算违反**（判据是 >= 不是 >）。理由与逐观测判据同源：1 月的累计**就等于**
+// 当月，某个分档若恰好全由 1 月构成，两侧中位数会相等 —— 那是合法形态，判成违反
+// 会制造假阳。而整族位移的表现是**显著小于**，用 >= 检出力几乎不损失。
+// ⚠️ DoD 原文写的是 `median(|x_ytd|) > median(|x_mom|)`（严格大于），已订正进
+// done_criteria，理由同上。
+//
+// ⚠️ **样本不足的对必须报出来，不得静默跳过** —— 静默跳过正是本任务要修的那个毛病
+// （「没查」与「查过没问题」在报告上不可区分）。
+func checkCaliberFamilyMedians(obs []MergedObservation, minSamples int) (violations, insufficient []caliberFamilyShift) {
+	// 分档收集：periodType → 对序号 → 两侧的绝对值样本
+	type bucket struct{ ytd, mom []float64 }
+	fams := caliberFamilies()
+	byType := map[string][]bucket{}
+	var types []string
+
+	for _, m := range obs {
+		pt := m.Obs.Meta.PeriodType
+		if byType[pt] == nil {
+			byType[pt] = make([]bucket, len(fams))
+			types = append(types, pt)
+		}
+		for i, p := range fams {
+			if v, ok := m.Obs.Values[p[0]]; ok {
+				byType[pt][i].ytd = append(byType[pt][i].ytd, math.Abs(v))
+			}
+			if v, ok := m.Obs.Values[p[1]]; ok {
+				byType[pt][i].mom = append(byType[pt][i].mom, math.Abs(v))
+			}
+		}
+	}
+
+	// 排序输出：map 迭代顺序随机，两次跑报出不同顺序会让逐次 diff 失效
+	// —— 与本文件里 PendingReasons 的排序同一个理由。
+	sort.Strings(types)
+	for _, pt := range types {
+		for i, b := range byType[pt] {
+			s := caliberFamilyShift{
+				PeriodType: pt, YTDField: fams[i][0], MoMField: fams[i][1],
+				YTDCount: len(b.ytd), MoMCount: len(b.mom),
+			}
+			if len(b.ytd) < minSamples || len(b.mom) < minSamples {
+				// 两侧都是 0 样本的对不报——那是「这一档根本没有这一族」，
+				// 逐档报 22 条全空会把这一节淹掉，真正的信号反而看不见。
+				if len(b.ytd) > 0 || len(b.mom) > 0 {
+					insufficient = append(insufficient, s)
+				}
+				continue
+			}
+			s.YTDMedian, s.MoMMedian = medianOf(b.ytd), medianOf(b.mom)
+			if s.YTDMedian < s.MoMMedian {
+				violations = append(violations, s)
+			}
+		}
+	}
+	return violations, insufficient
+}
+
+// medianOf 返回中位数；就地排序副本，不动调用方的切片。
+func medianOf(xs []float64) float64 {
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
 }
