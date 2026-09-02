@@ -409,7 +409,7 @@ func manifestWarnings(m Manifest) []string {
 	case m.Reconcile == nil:
 		// 真跑用的那份产物出自 M1c-1 的 TASK-010 之前，**没有**这个字段。静默略过会让
 		// 「序列没有洞」与「压根没对过账」看起来一样。
-		out = append(out, "⚠ manifest 没有 reconcile 对账摘要（出自 TASK-010 之前）："+
+		out = append(out, "⚠ manifest 没有 reconcile 对账摘要（出自 M1c-1 的 TASK-010 之前）："+
 			"看不出这份分布是不是算在一条有洞的序列上")
 	case len(m.Reconcile.MissingPeriods) > 0:
 		out = append(out, fmt.Sprintf("⚠ 对账记了 %d 个缺篇期次，这份分布算在一条有洞的序列上 —— %s",
@@ -558,8 +558,15 @@ func samplesFromRecords(recs []SampleRecord) map[string][]float64 {
 // 早于 M1c-1 的 TASK-010 引入 completed_at）与「确实夭折」（进程中途被杀）——
 // CompletedAt 的注释写明闭合性检查在夭折产物上同样全绿。⇒ 只能把事实摆出来，
 // 让读报告的人自己判断，不能替他下结论。
+// 🔴 输出里的任务编号**带 milestone 前缀**（M1c-4 的 TASK-012 结转项 6-a）：
+// 裸编号在复用编号的仓库里指向不唯一——本仓库至少有 M1c-1 / M1c-3a / M1c-4 三个 TASK-010，
+// 而**读到这行输出的人手里没有上下文**去消歧。
+//
+// ⚠️ 这里指的是 **M1c-1 的 TASK-010**（引入 completed_at 与 reconcile 的那个），
+// 依据是同文件 collectSamples 处的注释与 backfill_manifest.go 的 ManifestReconcile 自述，
+// **不是** M1c-3a 的 TASK-010。
 const incompleteNotice = "⚠ 该 manifest 无完成标记（completed_at），已按 --allow-incomplete 放行；" +
-	"若它出自 TASK-010 之前的 fetch，属预期。**这不代表已确认完整** —— " +
+	"若它出自 M1c-1 的 TASK-010 之前的 fetch，属预期。**这不代表已确认完整** —— " +
 	"夭折的产物与正常完成的在结构上无法区分。"
 
 // Calibrate 是标定的导出入口：读产物目录、统计分布、把报告写给 d.Out。
