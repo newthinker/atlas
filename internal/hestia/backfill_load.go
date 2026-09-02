@@ -629,13 +629,17 @@ func missingFields(g MergedObservation) []string {
 			break
 		}
 	}
-	var missing []string
-	for _, f := range mergedRequiredFields([]string{monthly, extractorTSFStock, extractorTSFFlow}) {
-		if _, ok := g.Obs.Values[f]; !ok {
-			missing = append(missing, f)
-		}
-	}
-	return missing
+	// 🔴 口径感知（M1c-4 的 TASK-006）：*_ytd 与 *_mom 任一在场即不算缺。
+	//
+	// 与 gateCompleteness 用**同一个** missingCaliberAware，不另写一份判定 —— 两份判定
+	// 迟早分叉，而分叉的表现是「completeness 说齐了、部分覆盖清单说缺 22 个」。
+	//
+	// 不改这里的后果是具体的：TASK-004 之后必填集含 22 个 *_mom 列，而任何一篇报告
+	// 只产一侧 ⇒ 一份**三族齐全**的合并观测会被报成「缺 22 个字段」，
+	// 那正是把 absent-by-design 记成洞——本任务全篇要防的同一件事。
+	return missingCaliberAware(
+		mergedRequiredFields([]string{monthly, extractorTSFStock, extractorTSFFlow}),
+		g.Obs.Values)
 }
 
 // missingFamilies 返回 parts 里缺掉的报告族，按 extractorFamilies 的固定顺序。
