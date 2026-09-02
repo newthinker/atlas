@@ -166,6 +166,7 @@ func renderCalibrateReport(w io.Writer, res *CalibrateResult) error {
 	fmt.Fprintln(bw)
 
 	writeStockRateSection(bw, res.Records)
+	writeResidualSection(bw, res.Records)
 	writeFailureSection(bw, res)
 	return bw.Flush()
 }
@@ -347,6 +348,200 @@ func writeStockRateSection(w io.Writer, recs []SampleRecord) {
 		"period_type", "n", "min", "p5", "median", "p95", "max", "建议区间")
 	for _, pt := range slices.Sorted(maps.Keys(rates)) {
 		writeFieldRow(w, rates[pt]) // n<3 的规则照常适用，**不为「样本本来就少」破例**
+	}
+	fmt.Fprintln(w)
+}
+
+// —— M1c-4 的 TASK-009：两道勾稽闸的**残差分布** ——
+//
+// # 这一节存在的理由
+//
+// 报告此前只给字段**取值**的分布，而 deposit_sum_tolerance / corp_loan_tolerance
+// 管的是**加总残差占比**。没有这一节，这台专门产出标定依据的机器对那四个容差
+// 一言不发 —— 现值 0.12 出自 M0 的三个样本（thresholds.go 的注释里记着
+// 7.65% / 8.57% / 9.06%），而真语料 79 期里有 7 期超过它。
+//
+// 🔴 **只产依据，不产建议值。** 字段取值那一节有「建议区间」列（[min-span, max+span]），
+// 这一节**刻意没有**：容差不是分位数换算得来的，留多少余量是人的判断 —— 一个算出来的
+// 「建议容差」会被直接抄进 configs/hestia.yaml，而没有人会再去问它凭什么。
+// 由 TestCalibrateReportsDepositResidualDistribution 的「恰好 7 列」钉住。
+
+const (
+	// ⚠️ 标题**不以键或字段名开头**：报告按列解析，行首若等于某个数据键，
+	// 「该键恰好占一行」的断言会把标题行也算进去（stockRateSectionTitle 实撞过）。
+	residualSectionTitle = "勾稽残差分布：deposit_sum 与 corp_loan_reconcile（按口径族与 period_type 分档，不给建议值）"
+
+	// 跳过的期数**必须出声**：n 少掉几期、为什么少，是判断「这个分布可不可信」的
+	// 另一半。只报 n 不报少掉的，读者无从分辨「这一族本来就少」与「这一族大半算不出」。
+	residualSkipTitle = "算不出残差的期次（两族都不齐或零分母 ⇒ 不计入上表）"
+)
+
+// residualGate 是一道勾稽闸在标定路径上的两族口径。
+type residualGate struct {
+	name  string // 复合键的第一段："deposit_sum" / "corp_loan"
+	bands []caliberBand
+}
+
+// residualGates 列出要收残差的两道闸。
+//
+// 🔴 **tol 留零，标定不判定**：caliberBand 的 tol 是给闸门比大小用的，而本节的产出是
+// 「残差实际分布成什么样」—— 容差取多少正是下游要据此决定的事。在这里填一个容差，
+// 等于让待标定的量参与产生它自己的标定依据。
+//
+// ⚠️ **这是 validate.go 里那两份 band 字面量的第二份副本，不是复用。** 那两份内联在
+// gateDepositSum / gateCorpLoanReconcile 里，提成共享变量要改 validate.go —— 本任务的
+// writes 不含它。副本会分叉，而分叉时报告仍会打出一份**看起来完全正常的分布**，
+// 只是它对应的族与闸门实际会走的那一族不是同一个。
+// ⇒ 由 TestResidualGatesAgreeWithValidationGates 跑真闸、读它的 Reason 逐项比对钉住。
+//
+// ⚠️ 第二段用 "corp_loan" 而不是 check ID "corp_loan_reconcile"：键要短到能当列首，
+// 完整 ID 写在 residualSectionTitle 里，两者的对应关系不靠读者猜。
+func residualGates() []residualGate {
+	return []residualGate{
+		{"deposit_sum", []caliberBand{
+			{name: "ytd", total: FieldDepositFlowYTD, parts: depositPartFields},
+			{name: "mom", total: FieldDepositFlowMoM, parts: depositPartFieldsMoM},
+		}},
+		{"corp_loan", []caliberBand{
+			{name: "ytd", total: FieldLoanCorpTotalYTD, parts: corpLoanPartFields},
+			{name: "mom", total: FieldLoanCorpTotalMoM, parts: corpLoanPartFieldsMoM},
+		}},
+	}
+}
+
+// pickBandFor 是 pickCaliberBand 的**非 Check 变体**：返回选中的族，以及两族都算不出时
+// 「为什么」（空串表示选到了）。
+//
+// # 为什么不直接用 pickCaliberBand
+//
+// 它返回 *Check —— 那是**校验层**的概念（这一期该记 skipped 还是 failed）。标定路径要的
+// 是「这一期属于哪一族、残差多少」；拿到 *Check 之后最自然的写法是 `if c != nil { continue }`，
+// **跳过的理由当场丢失** —— 而那恰恰是标定最该记的东西（n 少掉几期、为什么少）。
+//
+// 选族规则与 pickCaliberBand **逐字一致**（两族都齐取 ytd；都算不出时把两族诊断用空格
+// 拼起来），由 TestPickBandForAgreesWithPickCaliberBand 钉住 —— 两份实现分叉时，
+// 报告给出的分布会对应另一套选族规则，而报告本身看不出任何异样。
+//
+// ⚠️ 前提是 bands 非空（residualGates 恒给两族）：空切片会返回零值 band + 空串，
+// 被读成「选到了」。
+func pickBandFor(values map[string]float64, bands []caliberBand) (caliberBand, string) {
+	var why []string
+	for _, b := range bands {
+		d := bandDiagnosis(values, b)
+		if d == "" {
+			return b, ""
+		}
+		why = append(why, b.name+":"+d)
+	}
+	return caliberBand{}, strings.Join(why, " ")
+}
+
+// residualCollection 是一趟收集的两半，**缺一不可**：samples 说「量到了什么」，
+// skips 说「没量到的那些去哪了」。
+type residualCollection struct {
+	// samples 的键是 <闸>/<族>/<period_type>，值是各期残差占比，未排序。
+	//
+	// 🔴 **不塞进 CalibrateResult.Samples**：那张表的每个键都是一个**字段名**，
+	// 报告的字段分布一节按 fieldOrder 遍历它 —— 混进一个不是字段名的键，那一行
+	// 要么无处归类，要么被静默跳过。
+	samples map[string][]float64
+
+	// skips 的键是闸名，值是 诊断串 → 期数。
+	skips map[string]map[string]int
+}
+
+// collectGateResiduals 从 Records 派生两道闸的残差分布。
+//
+// 🔴 **从 Records 派生，不另存一份**：同一事实的两个副本，改一处不会让另一处变红
+// （CalibrateResult.Samples 的注释里写着同一条理由）。本函数与 stockContinuityRates
+// 同形 —— 都是「拿 Records 算一组统计量、单独渲染一节」，两者都不在 CalibrateResult
+// 上占字段。
+//
+// 🔴 **选族镜像闸门的裁决**（两族都齐取 ytd，只有一族齐就取那一族）。理由是标定的
+// 对象是**闸门实际会用到的那个容差**：某一期两族都齐时闸门只会用 ytd 的容差，把它
+// 的 mom 残差也记进 mom 那一档，等于用一批永远走不到 mom 分支的期次去标定 mom 的容差。
+//
+// ⚠️ 字段不全 / 分母为零的期次**记进 skips 后 continue，不当成残差 0**：记成 0 会把
+// 分位数整体拉低，据它定出的容差偏紧，回填时批量误拦 —— 而那时人只会怀疑数据，
+// 不会怀疑容差。
+func collectGateResiduals(recs []SampleRecord) residualCollection {
+	out := residualCollection{
+		samples: map[string][]float64{},
+		skips:   map[string]map[string]int{},
+	}
+	note := func(gate, why string) {
+		if out.skips[gate] == nil {
+			out.skips[gate] = map[string]int{}
+		}
+		out.skips[gate][why]++
+	}
+
+	for _, g := range residualGates() {
+		for _, r := range recs {
+			b, why := pickBandFor(r.Values, g.bands)
+			if why != "" {
+				note(g.name, why)
+				continue
+			}
+			res, ok := depositResidualOf(r.Values, b.total, b.parts)
+			if !ok {
+				// 走不到：pickBandFor 已经保证这一族字段齐全且分母非零。真走到了
+				// 也要**出声**而不是静默 continue —— 静默会让 n 悄悄变小，
+				// 而变小的 n 与「这一族本来就少」在报告上不可分。
+				note(g.name, "unexpected:"+b.name+":residual_not_computable:"+b.total)
+				continue
+			}
+			k := g.name + "/" + b.name + "/" + r.PeriodType
+			out.samples[k] = append(out.samples[k], res)
+		}
+	}
+	return out
+}
+
+// writeResidualRow 渲染残差一节的一行：键 + n + 五个统计量，**恰好 7 列**。
+//
+// 🔴 刻意丢掉 fieldCells 的第六个返回值（建议区间）：见 residualSectionTitle 上方那段。
+// 不复用 writeFieldRow 也正是因为它会打那一列 —— 而 n<3 时它打的是 `n<3` 占位，
+// 那个占位在这一节里会被读成「样本太少所以没给容差建议」，坐实一个本不该存在的暗示。
+func writeResidualRow(w io.Writer, s FieldStats) {
+	min, p5, med, p95, max, _ := fieldCells(s)
+	fmt.Fprintf(w, "%-30s %4d %12s %12s %12s %12s %12s\n", s.Field, s.N, min, p5, med, p95, max)
+}
+
+// writeResidualSection 渲染残差一节：先分布，后「算不出的那些去哪了」。
+//
+// 闸按 residualGates 的声明序、档按键的字典序 —— map 迭代序随机，不定序的话同一份
+// 数据两次跑打出的行序不同，报告无法逐次 diff。
+func writeResidualSection(w io.Writer, recs []SampleRecord) {
+	col := collectGateResiduals(recs)
+
+	fmt.Fprintf(w, "%s\n", residualSectionTitle)
+	if len(col.samples) == 0 {
+		fmt.Fprintf(w, "  %s（没有任何一期两族齐全）\n\n", noValueMark)
+	} else {
+		// ⚠️ 表头首列**不含 '/'**：行首形如 a/b/c 的行是数据行，测试与人眼都按这个
+		// 认。表头若写成「闸/族/期次类型」，它自己就成了一条数据行。
+		fmt.Fprintf(w, "%-30s %4s %12s %12s %12s %12s %12s\n",
+			"闸门·族·period_type", "n", "min", "p5", "median", "p95", "max")
+		keys := slices.Sorted(maps.Keys(col.samples))
+		for _, g := range residualGates() {
+			for _, k := range keys {
+				if strings.HasPrefix(k, g.name+"/") {
+					writeResidualRow(w, computeFieldStats(k, col.samples[k]))
+				}
+			}
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(col.skips) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "%s\n", residualSkipTitle)
+	for _, g := range residualGates() {
+		for _, why := range slices.Sorted(maps.Keys(col.skips[g.name])) {
+			fmt.Fprintf(w, "  %-14s ×%-4d %s\n", g.name, col.skips[g.name][why], why)
+		}
 	}
 	fmt.Fprintln(w)
 }
