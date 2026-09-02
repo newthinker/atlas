@@ -185,9 +185,14 @@ func renderLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error {
 	// 已在 CONTRACTS 登记为已知开口**。只看 V == 0 是不够的——N 接近 0 时它恒真。
 	pairs := caliberFamilies()
 	viol, st := checkCaliberRouting(res.Groups)
-	fmt.Fprintf(&b, "\n口径路由核对（判据 ytd_n == ytd_n-1 + mom_n，容差 ±%g 亿元；预期违反 0，共 %d 违反）\n"+
+	// ⚠️ 抬头印的必须是**判定真正用的那条规则**，不能只印 K_abs（M1c-4 的 TASK-011 收尾）：
+	// 容差从纯绝对改成 max(K_abs, K_rel×|expected|) 之后，只印 "±5 亿元" 会让读者拿
+	// 5 去衡量一条 expected=30 万亿的记录（它的实际门限是 6138）—— 报告说的和闸门做的
+	// 不是一回事，而那正是「两处各算一遍」的静默形态，只不过这一次错在**描述**而非计算。
+	fmt.Fprintf(&b, "\n口径路由核对（判据 ytd_n == ytd_n-1 + mom_n，容差 max(%g 亿元, %g×|期望值|)；预期违反 0，共 %d 违反）\n"+
 		"  可判 %d 对 / 单侧跳过 %d / 无上期 %d / 两侧皆空 %d（合计 %d = %d 对 × %d 观测）\n",
-		caliberIdentityTolerance, len(viol), st.Comparable, st.SingleSided, st.NoPrior, st.Absent,
+		caliberIdentityTolerance, caliberIdentityRelTolerance,
+		len(viol), st.Comparable, st.SingleSided, st.NoPrior, st.Absent,
 		st.Comparable+st.SingleSided+st.NoPrior+st.Absent,
 		len(pairs), len(res.Groups))
 	if len(viol) == 0 {
@@ -203,8 +208,11 @@ func renderLoadReport(w io.Writer, dir string, res *BackfillLoadResult) error {
 		}
 		// %.0f 而非 %g：值由 万亿元×10000 得来，浮点尾巴（241700.00000000003）会原样
 		// 印进 TASK-012 的验收报告。单位是亿元，亚亿精度在本判据下没有意义。
-		fmt.Fprintf(&b, "  %s/%s  %s=%.0f ≠ 上期 %.0f + %s=%.0f = %.0f（差 %.0f，%.3f%%）\n",
-			v.Period, v.PeriodType, v.YTDField, v.YTD, v.PrevYTD, v.MoMField, v.MoM, v.Expected, d, rel)
+		// 逐条把**这一条的**门限也印出来：容差随 |expected| 变，只印抬头那条规则的话
+		// 读者还得自己乘一遍。印出来才能一眼判断「差这么多算不算多」。
+		fmt.Fprintf(&b, "  %s/%s  %s=%.0f ≠ 上期 %.0f + %s=%.0f = %.0f（差 %.0f，%.3f%%；门限 %.0f）\n",
+			v.Period, v.PeriodType, v.YTDField, v.YTD, v.PrevYTD, v.MoMField, v.MoM, v.Expected, d, rel,
+			caliberIdentityLimit(v.Expected))
 	}
 
 	// 逐对印被比较过的观测数。🔴 「异号跳过数 ≠ 总对数」只发现得了「取号写反」，
@@ -371,12 +379,51 @@ type caliberRouteStats struct {
 	ByPair []int
 }
 
-// caliberIdentityTolerance 是累计恒等式的容差，单位亿元（M1c-4 的 TASK-011）。
+// caliberIdentityTolerance / caliberIdentityRelTolerance 合成累计恒等式的容差
+// （M1c-4 的 TASK-011）：判据是 |diff| <= max(K_abs, K_rel × |expected|)。
 //
-// 取绝对值 ±1 而不是相对容差：真语料的值是**取整到亿元**的整数，误差来源是取整
-// 而非测量。实测 2020-02 未贴现票据 1403+(-3961)=-2558 与报告值**逐位相等**，
-// 信托 432+(-540)=-108 vs -109 差 1 —— 正是取整。相对容差会让大数上的真错漏网。
-const caliberIdentityTolerance = 1.0
+// # 为什么不是纯绝对容差（±1 亿元，本任务前任的第一版）
+//
+// ±1 在真语料上产生 **7 条假阳**。前任回原文逐句核对，查明成因**不是解析错**：
+// 央行每期累计按**最新修订基数**发布，前后两期的累计与当月本来就不严格相加；
+// 加上万亿元 2 位小数的发布粒度，差额随累计量级放大。
+//
+// ⇒ 纯绝对容差要盖住最大的那条噪声（2000 亿）就得取 ≥2000，而
+// `tsf_flow_corp_bond` 的累计才 7747 亿 ⇒ 2000 亿在它上面等于 **26%**，
+// **那一对直接失明**。噪声按量级放大，容差也必须按量级放大。
+//
+// # 取值依据（真语料实测，n=7）
+//
+//	绝对差额   2 / 22 / 54 / 100 / 100 / 300 / 2000 亿元
+//	相对差额   0.005% / 0.285% / 0.091% / 0.030% / 0.040% / 0.124% / 0.652%
+//	⇒ 相对噪声上限 0.652%
+//
+//	K_rel = 2%    ← 噪声上限 × 约 3 倍余量
+//	K_abs = 5亿   ← 兜 |expected| 极小时相对容差失效：
+//	              trust 那一对 expected=-108 ⇒ 2%×108=2.16 < 观测到的最小绝对差额 2 亿，
+//	              取 5 留约 2.5 倍
+//
+// 🔴 **n=7**。样本少是这个取值的已知弱点，写在这里是为了让引用它的人看见 ——
+// 七个点定出的上限，随语料增长很可能要重估。
+//
+// # 信噪比
+//
+// 7 条噪声全部落在门限内；`trust`（diff=1 vs 门限 5）与 `bankaccept`（diff=0）亦覆盖；
+// 而一次真的路由错（当月值写进累计列）实测 diff=314682 vs 门限 69.2，**必被抓到** ——
+// 约 1.4 万倍信噪比。
+const (
+	caliberIdentityTolerance    = 5.0  // K_abs，亿元
+	caliberIdentityRelTolerance = 0.02 // K_rel
+)
+
+// caliberIdentityLimit 是某一条恒等式判定的实际门限。
+//
+// 提成函数而不是在判定处内联：报告要印出门限（读者据此判断「差这么多算不算多」），
+// 而**印出来的门限与判定用的门限必须是同一个** —— 两处各算一遍迟早分叉，
+// 而分叉的表现是报告说「差 300、门限 5」却没有列为违反。
+func caliberIdentityLimit(expected float64) float64 {
+	return math.Max(caliberIdentityTolerance, caliberIdentityRelTolerance*math.Abs(expected))
+}
 
 // prevPeriodKey 返回同年上一个月的 period（"2020-02" → "2020-01"）。
 // 1 月或格式不可解析时返回 false —— 跨年不接（上一年 12 月的 ytd 是**上一年**的累计，
@@ -465,7 +512,7 @@ func checkCaliberRouting(obs []MergedObservation) ([]caliberRouteViolation, cali
 
 			st.Comparable++
 			st.ByPair[i]++
-			if math.Abs(ytd-expected) > caliberIdentityTolerance {
+			if math.Abs(ytd-expected) > caliberIdentityLimit(expected) {
 				out = append(out, caliberRouteViolation{
 					Period: m.Obs.Meta.Period, PeriodType: pt,
 					YTDField: p[0], MoMField: p[1],
