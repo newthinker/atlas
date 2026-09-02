@@ -82,6 +82,10 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 
 你（主 session）就是 Project Leader。收到 `/arcforge` 命令或读取到需求文档时，执行以下流程：
 
+- **开工前读 `PENDING-MECHANISMS.md`**（待决机制变更，≤40 行）——上一轮留下的、等人拍板的
+  机制问题都在那里。⚠️ 它刻意保持短：`wisdom/decisions-leader.md` 与 `wisdom/_digest.md`
+  已分别涨到 33KB / 91KB，**「处方写下了却没人读得到」是本框架实测过的失效模式**。
+
 ### 1. 需求分析阶段
 - 读取并理解需求文档（默认 `requirements.md`）。
 - 若 `everything-claude-code (ECC)` 可用，调用其 `/multi-plan` 做多模型协作规划生成初始计划；
