@@ -1,0 +1,101 @@
+{
+  "task": "TASK-004",
+  "title": "22 个 _mom 字段原子扩容：常量 + fieldOrder + 模板表两列 + yaml 占位",
+  "measured_at_head": "4670ccbe0abd703f86b1e0c53aef8d3c86cc512d + 本任务未提交改动（提交后见 feat(TASK-004): 那条 commit）",
+  "key_findings": [
+    "**射程比 DoD 声明的 8 个文件更宽：实际 12 个。** 根因是 nameField 的消费面——把 {name, field} 改成 {name, ytdField, momField} 后，所有读 it.field 的地方都必须跟着改，而它们分布在 extract.go(3 处 setFlow) / required.go(2 处 tsfSectionFields·tsfFlowFields) / required_test.go(2 处 positional 复合字面量，加一个字段就编译不过)。这三个文件分别是 TASK-005 / TASK-006 的声明范围。第四个越界文件是 schema_test.go（列数断言 61→83）。已在 dev_done 之前经写通道把 writes 由 8 补到 12 并向 Leader 申报。",
+    "🔴 **fieldOrder 一涨到 76，requiredFields() 就跟着涨，连锁让 27 个测试转红。** requiredFields(rule@v2) 原本是 slices.Clone(fieldOrder)，于是 gateCompleteness 对每一期报「missing 22: tsf_flow_mom,…」——把 absent-by-design 记成 failed，正是 types.go 与 mergedRequiredFields 都在防的那件事。DoD 完全没预见这条连锁。",
+    "**yaml 的 22 项占位不是可选步骤，是编译期之外的第二道硬卡点。** config_test.go:377 TestShippedConfigLoadsAndIsCalibrated 读仓库真配置 configs/hestia.yaml，断言键集合与 fieldOrder **逐项相等**；不补齐 22 项，该测试红，dev_done 门禁过不去。",
+    "**DDL 确实自动扩表，无需手写。** observationsDDL 逐列从 fieldOrder 派生，实测列数由 61（7 元数据 + 54 业务）变成 83（7 + 76），且业务列顺序与 fieldOrder 逐项相等（schema_test.go:143 的 assert.Equal 通过）。v_hestia_current 是 SELECT *，同步变 83。",
+    "**分族计数实测值 = 36 / 6 / 12 / 18 / 4，与 Leader 推算一致**（跑 TestFieldGroupCounts 确认，非照抄 DoD）。总数断言保持分族求和形态 36+6+12+18+4，未改成裸 76。",
+    "**fields_test.go 还有第五条计数断言，DoD 的「四条」漏了它**：goldenFields 绑定表自身的 require.Len(t, goldenFields, 54) → 76，且 76 条 {常量, 字面量} 记录要按新 fieldOrder 的顺序逐条插入（TestFieldOrderGoldenList 逐字逐序比对）。"
+  ],
+  "decisions": [
+    {
+      "decision": "requiredFields() 里新增 momFields() 并在 v1/v2 两个分支各 without 掉它——22 个 *_mom 暂不进任何必填集。",
+      "rationale": "TASK-004 只加列与声明，抽取路由是 TASK-005 ⇒ 在 TASK-005 之前这 22 列恒为空。不排除的话 completeness 对每一期报「缺 22 个字段」，27 个测试转红并跨 wave 2–6 一直红着——正是 AD-M1c4-3 立本任务为「原子扩容步」所要避免的那件事。同时这也是本任务 error_handling 判据（背对背输出不变）的前提：必填集变了，calibrate 的整张判定表就变了。momFields() 从 fieldOrder 按 _mom 后缀派生，不手写第二份名单。",
+      "exit_condition": "🔴 退场点是 TASK-006。它把 gateCompleteness 换成口径感知的 missingCaliberAware（*_ytd 与 *_mom 任一在场即不算缺）之后，momFields() 与 required.go / required_test.go 里那三处 without 调用应当**一并删除**，requiredFields 回到「整个 fieldOrder」与「fieldOrder − 社融节」。",
+      "conflict_with_TASK006_dod": "⚠️ TASK-006 的 DoD boundary 写着「`want` 的来源一行不动」。那句话写于本改动之前，字面上与本决策冲突。功能上两种形态都能工作（配对由 caliberFamilies() 从 fieldOrder 派生，不依赖 want 含不含 mom 侧），但**留着 momFields() 会让 want 恒为单侧**，caliberFamilies 的 mom→ytd 方向在真实调用路径上永不被走到。已报 Leader 请补进 TASK-006 的 done_criteria——写在本 discovery 里的载体强度不足以让 TASK-006 的 dev 一定执行。"
+    },
+    {
+      "decision": "singletonFields() 补 FieldTSFFlowMoM / FieldDepositFlowMoM / FieldLoanFlowMoM 三项。",
+      "rationale": "三个流量族的**合计**句都是单条模板各管一个（flowRE / tsfFlowTotalRE），不属于任何清单表；TestTemplateTablesCoverAllFields 要求 fieldOrder 每一项都被模板覆盖且数量相等，不补这三项就是 73 vs 76。"
+    },
+    {
+      "decision": "🔴 **deposit_flow_mom 与 loan_flow_mom 是孤儿列：截至本任务结束没有任何代码写它们。**",
+      "rationale": "这两个族的合计句走 selectRMBCumulativeFlow（extract.go:582 存款 / :624 贷款），其 keep 条件是 `cumulativePeriods[m[1]] && m[2] == currencyRMB`——**只保累计句**。把它们加进 singletonFields() 只是让覆盖度断言绿，**不等于它们会被写**。第三个 tsf_flow_mom **不是**孤儿：它走 extractTSFFlowSection，findTSFFlowTotals 不带口径过滤、当月句本就在 totals 里，需求文档 Task 5 Step 5 已明确写了它的双口径写入循环（我核对过原文，与 Leader 独立判断一致）。",
+      "owner": "🔴 **TASK-005 负责把这两条合计句也改成口径路由**，不只是分部门循环。",
+      "silent_chain": "不补的连锁是无声的：2022-07（需求文档正是拿它论证 FieldDepositFlowMoM 存在理由的那一篇）修完分部门后仍会整篇被拒；TASK-007 的 deposit_sum mom 族会恒 skip，而它的单测手工构造 Values map、绕过抽取，**照样全绿** ⇒ 三个任务的测试都绿而功能是断的。"
+    },
+    {
+      "decision": "🔴 **TestMagnitudeRangesCoverEveryFieldWhenCalibrated 恒 skip，一次都不会跑。**",
+      "rationale": "它的形态是「表空就 t.Skip」，而 thresholds_test.go:98 的既有测试 TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated 用 assert.Empty 钉死 DefaultThresholds().MagnitudeRanges 必须为空。两条的条件正好互补 ⇒ 本条永不进入循环。**它守不住任何东西**，留着是当文档（我逐条读过这两处代码核实，非转述）。DoD functional[2] 原话「这是**正确状态**」有误导性：它暗示该断言以后会生效，而它不会。",
+      "real_guard_today": "当前真正在守「magnitude_ranges 全覆盖」的只有 **TestShippedConfigLoadsAndIsCalibrated**（config_test.go:377），且它只覆盖仓库自带的那一份 configs/hestia.yaml。",
+      "gap": "🔴 **LoadConfig 侧没有全覆盖校验**：thresholds.go 的 validate 对 fieldOrder 逐项取 MagnitudeRanges，缺项是 `if !ok { continue }`（thresholds.go:271-273，我读过原文）⇒ 运维在生产环境换一份自己的**半张表** yaml 时静默通过，gateMagnitudeSanity 对表里没有的字段直接跳过，那些字段的幅度闸**完全不设防且报 passed**。",
+      "owner": "🔴 **TASK-010 的无条件义务：给 LoadConfig 加全覆盖校验。** ⚠️ 要拒的是**半张表**，不是空表——空表是有意设计（TestEmptyMagnitudeRangesStillValid 钉着「空表合法」，magnitude_sanity 记 skipped{not_calibrated}）。**不要**为了让上面那条断言「真的跑一次」去填 DefaultThresholds()。"
+    },
+    {
+      "decision": "yaml 的 22 项占位区间逐项照抄对应 *_ytd 字段的现有区间，config_version 由 2026-08-31 递增到 2026-09-01。",
+      "rationale": "AD-M1c4-4 的破环点。取法的依据：两者是同一批数据的两种口径，累计是当月的逐月叠加 ⇒ ytd 的量程对 mom 一定偏宽，而偏宽的占位只会漏拦、不会误拦（误拦会让整期数据卡在 pending）。yaml 里三段注释各自写明「本组区间未经标定，占位待 M1c-4 的 TASK-010 重标」，并显式警告不要把它当标定结果引用——上一轮 deposit_sum_tolerance 的 0.12 就是这么从「M0 三样本」走样成「实测残差**稳定在** 7.6–9.1%」的。"
+    },
+    {
+      "decision": "golden_test.go 新增 ytdCaliberFields()（fieldOrder 减去 _mom），golden2025 / golden2020 的期望键集改为从它派生。",
+      "rationale": "两份 golden 都抄自累计口径的报告（2025 年报 / 2020 上半年报），*_mom 列在它们的正文里根本不存在——与 golden2020 不含社融字段完全同理，是「本期模板本就没有」而非抄漏。**没有放松断言**：正向仍逐项要求（并补钉 require.Len(ytdCaliberFields(), 54)，防派生表达式与字面量一起错），另加了一条**反向**断言——golden2025 里不得出现任何 _mom 键，因为那只可能是把累计值装进了 *_mom，正是本迭代最想防的那件事。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/fields.go — 22 个导出常量（三块，各带族级理由注释）；fieldOrder 54→76，各族 _mom 块紧跟对应 _ytd 块之后；FieldTSFFlowMoM 放在增量分项之后而非跟着 FieldTSFFlowYTD",
+    "internal/hestia/fields_test.go — goldenFields 54→76 条（按新序插入）；分族计数 27/7/10→36/12/18，总数保持分族求和；新增 TestMomFieldsExistForEveryFlowFamily 与 TestEveryMomFieldHasAYTDTwin",
+    "internal/hestia/profiles.go — nameField{name,ytdField,momField}；loanScope 加 totalMoM；tsfFlowItems/depositItems/loanScopes 每项填齐两列；singletonFields() 补三个 _mom 合计（含孤儿警告注释）",
+    "internal/hestia/profiles_test.go — templateFields() 同时收 ytdField 与 momField 及 totalMoM",
+    "internal/hestia/thresholds_test.go — 新增 TestMagnitudeRangesCoverEveryFieldWhenCalibrated（注释写明它恒 skip、真守卫在别处）",
+    "internal/hestia/config_test.go — config_version 断言 2026-08-31→2026-09-01；两处 54→76 的文案",
+    "internal/hestia/golden_test.go — 新增 ytdCaliberFields()；nonTSFFields() 改从它派生；正反两条子测试",
+    "internal/hestia/schema_test.go — 列数断言 61→83（三处：头部映射注释、DDL、视图）",
+    "internal/hestia/required.go — 新增 momFields()（过渡代码，退场点 TASK-006）；requiredFields 的 v1/v2 分支各 without 掉它；tsfSectionFields/tsfFlowFields 的 it.field→it.ytdField；import slices→strings",
+    "internal/hestia/required_test.go — 两处 nameField positional 字面量补第三列；TestMergedRequiredFieldsIsUnionOfParts 的 want 再减 momFields()",
+    "internal/hestia/extract.go — 三处 setFlow(c, it.field, …) → it.ytdField（**纯机械改名，抽取逻辑一行未动**）",
+    "configs/hestia.yaml — magnitude_ranges 54→76 项（22 项占位，三段注释写明未标定）；config_version → 2026-09-01"
+  ],
+  "interfaces_exposed": {
+    "constants_22": {
+      "tsf_9": ["FieldTSFFlowMoM = \"tsf_flow_mom\"", "FieldTSFFlowRMBLoanMoM = \"tsf_flow_rmb_loan_mom\"", "FieldTSFFlowFXLoanMoM = \"tsf_flow_fx_loan_mom\"", "FieldTSFFlowEntrustMoM = \"tsf_flow_entrust_mom\"", "FieldTSFFlowTrustMoM = \"tsf_flow_trust_mom\"", "FieldTSFFlowBankAcceptMoM = \"tsf_flow_bankaccept_mom\"", "FieldTSFFlowCorpBondMoM = \"tsf_flow_corp_bond_mom\"", "FieldTSFFlowGovtBondMoM = \"tsf_flow_govt_bond_mom\"", "FieldTSFFlowEquityMoM = \"tsf_flow_equity_mom\""],
+      "deposit_5": ["FieldDepositFlowMoM = \"deposit_flow_mom\"", "FieldDepositHouseholdMoM = \"deposit_household_mom\"", "FieldDepositCorpMoM = \"deposit_corp_mom\"", "FieldDepositFiscalMoM = \"deposit_fiscal_mom\"", "FieldDepositNBFIMoM = \"deposit_nbfi_mom\""],
+      "loan_8": ["FieldLoanFlowMoM = \"loan_flow_mom\"", "FieldLoanHHShortMoM = \"loan_hh_short_mom\"", "FieldLoanHHMLTMoM = \"loan_hh_mlt_mom\"", "FieldLoanCorpTotalMoM = \"loan_corp_total_mom\"", "FieldLoanCorpShortMoM = \"loan_corp_short_mom\"", "FieldLoanCorpMLTMoM = \"loan_corp_mlt_mom\"", "FieldLoanBillMoM = \"loan_bill_mom\"", "FieldLoanNBFIMoM = \"loan_nbfi_mom\""]
+    },
+    "nameField": "type nameField struct{ name, ytdField, momField string } —— **原 field 已改名为 ytdField**，三张模板表（tsfFlowItems / depositItems / loanScopes[].items）每项两列齐全。⚠️ pick(sectorCaliber) **尚未实现**，那是 TASK-005 的事。",
+    "loanScope": "type loanScope struct { anchorRE *regexp.Regexp; totalField, totalMoM string; items []nameField } —— 住户作用域 totalField/totalMoM 均为 \"\"（合计不在字段表内）；企业 = FieldLoanCorpTotalYTD/MoM；非银 = FieldLoanNBFIYTD/MoM。",
+    "momFields": "func momFields() []string（required.go，包内）—— fieldOrder 里全部 _mom 列。**过渡代码，TASK-006 落地后连同三处 without 调用一并删除**。",
+    "ytdCaliberFields": "func ytdCaliberFields() []string（golden_test.go，测试内）—— fieldOrder 减去 _mom，当前 54 项。",
+    "for_TASK002_and_TASK003": "两者都写 profiles.go/profiles_test.go。**注意 nameField 的字段名已变**：新增或修改 tsfFlowItems / depositItems / loanScopes[].items 的条目时必须给三列（name, ytdField, momField），positional 字面量少一列编译不过；templateFields() 已收两列，往表里加一行会同时要求两个字段都在 fieldOrder 里。",
+    "for_TASK005": "🔴 三件事：① nameField.pick(sectorCaliber) 与 sectorCaliberOf 尚未实现，两列已就位；② **合计句也必须路由**——deposit_flow_mom / loan_flow_mom 当前无写入方（见 decisions）；③ extract.go 的三处 setFlow 现在写 it.ytdField，改成 it.pick(cal) 即可，捕获组下标一行未动。",
+    "for_TASK006": "🔴 requiredFields 当前**排除**了 22 个 _mom（momFields()）。TASK-006 的 DoD 写的「want 的来源一行不动」写于本改动之前——请与 Leader 确认是否要在加 missingCaliberAware 时同步删掉 momFields()。",
+    "for_TASK010": "🔴 两件事：① configs/hestia.yaml 的 22 项 _mom 区间是**占位**（照抄对应 _ytd），必须用实测分布重标；② **给 LoadConfig 加全覆盖校验**（当前缺项是 continue，半张表静默通过）——见 decisions 里的 gap。改 yaml 时记得同步递增 config_version 并改 config_test.go:377 那条断言。"
+  },
+  "verification": {
+    "sampling_discipline": "以下全部数字**采于最后一次代码改动之后、一次性重采**；背对背对照两组交替各跑两轮、同一时刻并排产生。",
+    "anchors": {
+      "baseline_tree": "4670ccbe0abd703f86b1e0c53aef8d3c86cc512d（临时 detached worktree wt-TASK-004-base，钉全 sha，**未用 HEAD / master 这类会漂的引用**）",
+      "post_tree": "wt-TASK-004-m1c4 @ 4670ccbe0abd703f86b1e0c53aef8d3c86cc512d + 本任务未提交改动",
+      "corpus": "/Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14（主仓库绝对路径，AD-3；--allow-incomplete 必需）"
+    },
+    "suite": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 → ok，全绿",
+    "coverage": "96.1% of statements（go test ./internal/hestia/ -count=1 -cover），达标线 ≥96.1%；测量树 = wt-TASK-004-m1c4 @ 4670ccbe0abd703f86b1e0c53aef8d3c86cc512d + 未提交改动",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 只列出 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，来自 f5d7b82，未动）——这两个之外**零新增项**",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "deps": "go.mod / go.sum 未出现在 git status --porcelain 中（0 行）",
+    "back_to_back_diff": {
+      "verdict": "🔴 **不是空 diff——DoD 的这条判据基于一个错误前提，实测证伪。**",
+      "measured": "22 行**纯新增**、0 行删除、0 处修改；每一行都形如 `<字段>_mom  0  —  —  —  —  —  —`（n=0，全部统计列为 em dash）。22/22 匹配该形态。既有 54 个字段的每一行**逐字节不变**。",
+      "why_not_empty": "DoD error_handling 原话是「22 个新字段全部 n=0，**不进字段分布表**」。**后半句为假**：calibrate_report.go:163 的字段分布表是 `for _, f := range fieldOrder` **全序遍历**，不跳过 n=0 的行（另有测试 calibrate_report_test.go:246 assert.Equal(fieldOrder, got, \"字段必须按 fieldOrder 全序渲染，且一个不少\") 钉着这件事）。对照佐证：基线报告里 n=0 的行数为 **0**——54 个字段全部 n>0，所以基线上看不出这个性质。⇒ fieldOrder 一涨 22 项，表就必然多 22 行，空 diff 在结构上不可能。",
+      "why_this_is_the_stronger_evidence": "语义上要证的是「本任务不改变任何抽取行为」。这份 diff 给出的是**更强**的观察：不仅既有 54 行一字不差，22 个新列还被**逐个显式打印为 n=0**——即「确实一次都没有被写入」。若报告真的略过 n=0 行，空 diff 反而分不清「字段没被抽到」与「字段没进报告」。",
+      "determinism_control": "两组各跑两轮，base 两轮逐字节一致、post 两轮逐字节一致 ⇒ 输出确定，A/B 差异不来自运行间抖动。",
+      "ddl_expansion": "观测表列数 61 → 83（7 元数据 + 76 业务），业务列顺序与 fieldOrder 逐项相等；v_hestia_current 同步 83 列。**未手写一行 DDL**。"
+    },
+    "known_limits": [
+      "本任务不接抽取路由，22 列在真语料上恒为 n=0——「它们能被正确抽出来」这件事本任务**没有也无法**验证，那是 TASK-005 的验收内容。",
+      "TestMagnitudeRangesCoverEveryFieldWhenCalibrated 恒 skip（见 decisions），本任务的三条新测试里只有两条真正在跑。",
+      "yaml 的 22 项区间是占位值，**没有任何实测分布支持**。"
+    ]
+  }
+}

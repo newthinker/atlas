@@ -1,0 +1,45 @@
+{
+  "task_id": "TASK-013",
+  "title": "切库准备与人工核对 + CONTRACTS §H 切库记录",
+  "anchors": {
+    "step1": "06f59bb8f33a330ca9582d713c58ee4fe46a7bdc",
+    "final": "c6f33b71d9d123a8110c668a75b451a8fd206a49",
+    "note": "最后一次改动是 cb5e4f2（§H-7 撤自指绝对值），本文件全部自证数字采于它 merge 进 master 之后，测于 final 锚 c6f33b7。"
+  },
+  "key_findings": [
+    "① 生产库 data/hestia.db 的 schema 落后 22 列，但表内 0 行 ⇒ 迁移方案取「删旧库、放临时库」而非 ALTER TABLE ×22。实测证实 observationsDDL 是 CREATE TABLE IF NOT EXISTS，对已存在的表一字不改——不删旧库则 22 列永远补不上。逐列清单见 CONTRACTS §H-1。",
+    "② 切库后四项核对全过：hestia_observations 76/76 行、hestia_pending 21/21 行、period 覆盖 2019-12 ~ 2026-07 两库相等、hestia_observations 列数 83 列（旧库 61 列）；外加切换前后文件 sha256 逐字节相同。见 §H-8。",
+    "③ 自指计数效应：报告一个数这个动作本身会改变那个数。本任务实撞两次——§G 一次、§H-7 扫描表残留一次（由 cb5e4f2 清掉）。同一效应两处出现 ⇒ 它不是特例。",
+    "④ 分层抽样 5 期 / 20 个字段级取值全部与原文逐字对上（0 处不符）。2023-08 期证实口径按段路由：同一篇里存款句给的是累计值 20.24 万亿元 → 落 _ytd 列，贷款句给的是当月值 → 落 _mom 列；全库 5 期抽样一致。见 §H-5、§H-6。"
+  ],
+  "decisions": [
+    {
+      "decision": "迁移方案采用「备份旧库 → 删除 → 放入临时库」，不做 ALTER TABLE 补列",
+      "rationale": "生产库 hestia_observations 0 行，无数据可丢；observationsDDL 为 CREATE TABLE IF NOT EXISTS，不删表则缺的 22 列不会被补上。方案由人类裁决，执行由 Leader 经人类授权代跑，dev 未跑过任何一条。🔴 该授权不可推广：它成立的全部理由是「这个库 0 行、备份在先、可从语料完全重建」，换一个非空库该授权不成立。"
+    },
+    {
+      "decision": "§G 的 B/C 两个口径不登记绝对值，只登记关系式 B − A == 本文件自身提及数",
+      "rationale": "绝对值是自指的——写下它的那次编辑就会使它过期，而过期不报错（见 key_findings ③）。关系式对文件自身的增长免疫，故可长期引用；A 口径不自指，仍可直接引用绝对值。"
+    },
+    {
+      "decision": "结转项 6-b 正式销案",
+      "rationale": "四次查找均未找到支撑证据。原始登记只给了行号、没有引用原文，行号在后续编辑中已失效，无法复原它当初指向什么。留着一条无法求值的结转项，比销案更有害。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "gates_at_final_anchor_c6f33b7": {
+      "test": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -cover → ok，coverage 96.3% of statements（门槛 96.1%）",
+      "vet": "GOTOOLCHAIN=local go vet ./internal/hestia/... ./cmd/... → 零行输出，退出码 0",
+      "gofmt": "gofmt -l internal/hestia cmd/atlas → 2 个文件：cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go，均为本任务之前既有欠账（本任务未碰任何 .go 文件）",
+      "diff_scope": "git diff --name-only 06f59bb..c6f33b7 → 唯一文件 internal/hestia/CONTRACTS.md；--numstat 为 525 增 / 4 删；go.mod 与 go.sum 零改动"
+    },
+    "db_cutover_checks": "四项核对 + sha256 逐字节比对，全部通过——清单与实测值见 CONTRACTS §H-8",
+    "sampling": "5 期 / 20 个字段级取值逐字核对，0 处不符——见 CONTRACTS §H-5、§H-6",
+    "h7_scan": "交付前统一通读的扫描清单见 CONTRACTS §H-7。⚠️ 此处刻意只给指针不复制清单：复制一份就又多出一处会静默过期的自指数字，而那正是本任务实撞两次的效应（key_findings ③）。"
+  },
+  "provenance": "🔴 TASK-013 的全部实质工作由 dev-m1c4-a 完成：切库准备、分层抽样人工核对、CONTRACTS §H 的八个小节（H-1 至 H-8）、三处转结补丁，以及六个 commit（aef5bbd / f57a6f7 / 91dfeed / 5e4776f / 06bbedd / cb5e4f2）。切库命令由 Leader 经人类授权执行，dev 未跑过任何一条。本 discovery 由 dev-m1c4-d 在 dev-m1c4-a 因 API 反复中断失联后接手撰写，属身份轮换而非返工（rework_count 未增，assignment_epoch 由 1 增至 2）。⚠️ transitions.jsonl 只记 by、不记「谁写的代码」——不写这条，后人会从 by=dev-m1c4-d 反推成本实例的功劳。"
+}

@@ -1,0 +1,106 @@
+{
+  "task": "TASK-003",
+  "title": "moneyRE 容忍余额与同比之间的一个短从句（2020-01 的 M1 可抽）",
+  "author": "dev-m1c4-b",
+  "anchors": {
+    "my_commit": "fcd71097e5b3abb44710ce4dc474eeab29da081f",
+    "my_commit_parent": "99415b9621d99d920ee0e18025db77f893096b1a",
+    "merged_master": "8f9101541d5b8032707069d4df086efa550c1037",
+    "说明": "门禁类数字测自 merged_master（交付态）；A/B 背对背测自隔离对 my_commit_parent / my_commit（只含我这一个改动）。两类数字来自不同的树，不要混读。"
+  },
+  "key_findings": [
+    "2020-01 原文「狭义货币(M1)余额54.55万亿元，与上年同期持平，同比增长0%」——余额与「同比」之间多插了一个不含数值的短从句，整节报 hestia: 货币 M1 not found。全语料 218 篇里只有这一篇是该形态（背对背实测：base 的 `货币 M1 not found` 只对应 2020-01 一个期次）。",
+    "M1 的同比值是 **0**。这是个合法值，不是「没取到」——测试必须逐个断言四个捕获组，只断言「匹配上了」或「有值」都挡不住把 0 误当成缺失、也挡不住取到隔壁指标的值。",
+    "🔴 **本任务的失效方式是「静默配错」而不是「不命中」**：M2/M1/M0 三句同形且在正文里紧挨着，放宽成 `.*?` 会跨句命中——四个捕获组照样有值、量级照样合理，只是同比取自另一个指标。下游没有任何闸门拦得住这种错。⇒ 边界测试（TestMoneyRERefusesToCrossSentences）比正向测试更重要。",
+    "🔴 **DoD 的「diff 只在 2020-01 相关行」按字面读会误判一次正确的交付**：实测全量 diff 56 行，字面提到 2020-01 的只有 2 行。其余 54 行是「2020-01 进入成功样本 ⇒ 它贡献的字段 n 全部 +1、分位数随之移动」的必然结果，而字段分布表的行**不含期次字符串**。已在 dev_done 之前把判据换成四条不依赖行文的机械核对，写进 done_criteria（见 verification）。"
+  ],
+  "decisions": [
+    {
+      "decision": "clausePat = `(?:[^0-9。；\\n，]*，)?`，三重约束写进注释",
+      "rationale": "三条约束各挡一种配错：① 整个组带 `?` 而非 `*` ⇒ 至多一个从句（两个从句宁可响亮失败，由人看一眼真实句形；容忍两个就离 `.*?` 只差一步）；② 字符类排除 `0-9` ⇒ 从句里出现数字意味着那是**另一个指标**，吃掉它就会把 M2 的同比装进 M1；③ 字符类排除 `。；\\n` ⇒ 出现句读意味着已经跨句。三条各由 TestMoneyRERefusesToCrossSentences 的一个子测试守，一一对应。"
+    },
+    {
+      "decision": "moneyRE 的签名与结构不变，只在既有的「，」与「同比」之间插一个片段",
+      "rationale": "M1/M0/M2 共用 moneyRE，一处放宽三项同时生效——这既是收益也是风险面。保持签名与其余片段（numPat/unitPat/dirPat）不动，把改动面收敛到一个新常量，使得「放宽了什么」在 diff 里一眼可见，也让 TestMoneyREStillMatchesTheCommonShape 的三项断言足以覆盖回归。"
+    },
+    {
+      "decision": "把「diff 只在 2020-01 相关行」这条判据在 dev_done 之前改成四条机械核对，而不是留给验证者解释",
+      "rationale": "验证者读的是 done_criteria，而 dev 一进 dev_done 就写不了它（到 accepted 为止没有任何角色能写）。上一任务（TASK-002）实测过：dev_done 到派验只隔 87 秒，leader 事后提出的「请补进 discovery」根本来不及。⇒ 凡是会让验证者按字面判错的判据，必须在交棒前自己订正，这是时机问题不是纪律问题。"
+    },
+    {
+      "decision": "第 4 条判据（字段 Δn 只能 +1 或 0）要求用两把独立的尺互验",
+      "rationale": "拿单一高度相关的可观测量代替性质本身，近似失效时不报错、只给一个像样的数。故：尺 1 = 逐字段 n(post)−n(base)；尺 2 = post 里含 `monthly×26` 的字段行数（base 对应 `monthly×25`）。两把尺都得 25，一致。另：join 出来最初 77 行，第 77 行是表头 `字段 n`，扣掉后正好 76 = len(fieldOrder)，这个数核过才报。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/profiles.go",
+    "internal/hestia/profiles_test.go"
+  ],
+  "scope_note": "声明的 writes 恰为这 2 个文件，实改也是这 2 个，无越界。numstat 取自提交本身（git show --numstat fcd7109）：profiles.go 17/1、profiles_test.go 90/0。",
+  "interfaces_exposed": {
+    "clausePat": "新增包级常量（internal/hestia/profiles.go），值 `(?:[^0-9。；\\n，]*，)?`。非捕获组，故不影响 moneyRE 的捕获组编号（仍是 4 个：余额/单位/方向/同比值），也不触发 TestNoGreedyCaptureInTemplates。目前只被 moneyRE 使用。",
+    "moneyRE": "签名不变 `moneyRE(name, code string) *regexp.Regexp`；模式由 …余额 numPat unitPat `，同比` … 变为 …余额 numPat unitPat `，` clausePat `同比` …。消费点 extract.go:416（extractMoneySection）与 profiles.go:564（allTemplateRegexps）均无需改动。",
+    "对下游的提示": "若将来还要放宽 moneyRE，请先读 TestMoneyRERefusesToCrossSentences 的三个子测试——它们是这次放宽的边界，不是可选的回归测试。删掉任何一个，`.*?` 式的放宽都会静默通过。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 8f9101541d5b8032707069d4df086efa550c1037）": {
+      "go test ./internal/hestia/... -count=1": "ok，全绿",
+      "coverage": "96.1% of statements（门槛 ≥96.1%，未跌破）",
+      "go vet ./internal/hestia/... ./cmd/...": "零输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，源自 f5d7b82）",
+      "go.mod / go.sum": "零改动"
+    },
+    "A/B 背对背（测自隔离对 99415b9621d99d920ee0e18025db77f893096b1a / fcd71097e5b3abb44710ce4dc474eeab29da081f）": {
+      "方法": "两棵 git worktree 各编一份二进制，同一时刻**交替**跑 base/post 各 2 轮（不是先跑完 base 再跑 post），同一语料同一 flag",
+      "确定性自检": "base 两轮逐字节一致 ✓；post 两轮逐字节一致 ✓（行数 208 → 206）",
+      "判据1｜货币 M1 not found 零命中": "base 2 行 → post **0** ✓。base 那 2 行的期次列表只有 2020-01（同一篇在汇总行与明细行各出现一次）——判据是期次列表不是计数",
+      "判据2｜失败期次集合对称差恰为 {2020-01}": "只在 base = 2020-01；**只在 post = 空**（无新引入失败）。30 篇 → 29 篇 ✓",
+      "判据3｜M2 / M0 not-found 不变": "货币 M2 not found base=0 post=0；货币 M0 not found base=0 post=0 ✓",
+      "判据4｜字段 Δn 只能 +1 或 0，无负值": "76 个字段：25 个 +1、51 个 0、**零负值** ✓。两把独立的尺互验：尺1（逐字段 n 差值）=25，尺2（post 里 monthly×26 的字段行数，base 对应 monthly×25）=25，一致",
+      "全量 diff": "56 行。其中字面提到 2020-01 的仅 2 行；其余为『解析失败 39→38』与 25 个字段行的 n/分位数变化——都是 2020-01 进入样本的必然结果，非行为改变",
+      "语料": "--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete（AD-3：必须主仓库绝对路径，worktree 里没有 data/）"
+    },
+    "新增测试": [
+      "TestMoneyREToleratesOneClauseBeforeYoY（2020-01 真实句形，四个捕获组逐个断言，含同比值 0 这个合法零值）",
+      "TestMoneyREStillMatchesTheCommonShape（M2/M1/M0 三个子测试，无从句常见体例不得被破坏）",
+      "TestMoneyRERefusesToCrossSentences（**三个**子测试，逐条对应三重约束：句号跨句 / 两个从句 / 从句内含数字）"
+    ],
+    "既有测试": "未修改任何既有断言。TestNoGreedyCaptureInTemplates（clausePat 非捕获非贪婪）与 TestMoneyREAcceptsBothParenWidths（全角/半角括号，两份真实快照）均仍绿。"
+  },
+  "rework": {
+    "轮次": "第 2 轮（第 1 轮被 REJECT，reason_class=task_defect，rework_count=1）",
+    "anchors_r2": {
+      "my_commit": "98cabf6cd5aed03022ee2ed1b4c4942ae61addf3",
+      "my_commit_parent": "8f9101541d5b8032707069d4df086efa550c1037",
+      "merged_master": "adc0fcafe3cd8cec9cd5eda12f6b4d904c7b7f38",
+      "说明": "本轮门禁类数字测自 adc0fca；A/B 测自隔离对 8f91015 / 98cabf6。第 1 轮的三个锚见 anchors 字段，两轮的数字不要混读。"
+    },
+    "被打回的是什么": "实现（clausePat 本体）没问题，四条机械判据验证者全部独立复算通过。问题在**测试**：TestMoneyRERefusesToCrossSentences 的跨句子子测试守不住它声称的约束——变异实测 M1（clausePat 字符类去掉 。）SURVIVED、全包仍绿。",
+    "机制成因": "moneyRE 的结构是 `…余额` numPat unitPat `，` clausePat `同比` …，unitPat 之后是**字面量「，」**。第 1 轮的用例「…万亿元。广义货币(M2)同比增长8.5%」含「。」的串在**那一步**就已不匹配，控制流根本走不到 clausePat ⇒ 该子测试对 clausePat 的任何写法都返回 nil、**恒绿**。而 profiles.go 与 profiles_test.go 两处注释都写着「三个子测试逐条对应三重约束」，那两句在第 1 轮是**假注释**。",
+    "🔴 成因按两条并记（Leader 要求，我认同这个划分）": [
+      "① **DoD 给了假论证**：DoD 的 functional[1] 原文写「`.*?` 式的放宽会在「M1余额X。……M2同比增长Y%」上静默配错」——这个例句经实测无区分力（原实现 nil / M1 变异体 nil）。我是照着它写的测试串。Leader 已在重派时把该例句订正进 DoD。",
+      "② **dev 未自行构造区分性输入**：这一条是我的。我把 DoD 的例句直接抄成了测试串，**没有问一句「这条测试真的在守它声称的东西吗」**。而我在上一个任务（TASK-002）刚做过 2×2 消融，方法就在手上——只是没想到要把同一个方法**对准测试自身**而不是实现。"
+    ],
+    "修复": "换成让「。」落在**第一个字面量「，」之后**的输入：`狭义货币(M1)余额54.55万亿元，持平。广义货币，同比增长8.5%`。原实现 nil；M1 变异体命中且同比取到 8.5（M2 的值）——余额 54.55 对、单位对、方向对、量级完全合理，只有同比取自隔壁指标，正是本任务全篇在防的静默配错。",
+    "🔴 3×3 变异实测（隔离副本 wt-t003-mut；主工作区 profiles.go / profiles_test.go 的 sha256 变异前后逐字节一致：2c8b474f… / 0ffdb0c8…）": {
+      "对照组（未变异）": "三个子测试全 PASS",
+      "M1｜字符类去掉 。": "『从句之后跨句』**FAIL**；另两条 PASS",
+      "M2｜字符类去掉 0-9": "『从句内含数字』**FAIL**；另两条 PASS",
+      "M3｜? 改成 *": "『两个从句』**FAIL**；另两条 PASS",
+      "结论": "**对角线成立**——每个变异只杀掉它对应的那一条，一条不多一条不少。⇒「三个子测试逐条对应三重约束」这句注释现在是实话。第 1 轮它是假的。"
+    },
+    "措辞订正（验证者的 INFO，非阻断）": "`[^…]*` 的 `*` **本身是贪婪量词**，第 1 轮写「非贪婪」不准确。成立的属性是**非捕获**与**有界**（否定字符类界住射程）。TestNoGreedyCaptureInTemplates 查的是 `(.+)`/`(.*)` 这类捕获形态，与本片段无关。profiles.go、profiles_test.go 两处措辞已一并改准。",
+    "本轮 verification": {
+      "门禁类（测自 merged_master adc0fcafe3cd8cec9cd5eda12f6b4d904c7b7f38）": {
+        "go test ./internal/hestia/... -count=1": "ok，全绿",
+        "coverage": "96.1% of statements（门槛 ≥96.1%，未跌破）",
+        "go vet": "零输出",
+        "gofmt -l internal/hestia cmd/atlas": "仅两处既有欠账",
+        "go.mod / go.sum": "零改动"
+      },
+      "A/B（测自隔离对 8f9101541d5b8032707069d4df086efa550c1037 / 98cabf6cd5aed03022ee2ed1b4c4942ae61addf3）": "🔴 **本轮是纯测试+注释改动，实现一个字节没动 ⇒ 语料输出必须逐字节不变**。实测：两端交替各跑 2 轮，base 两轮一致 ✓、post 两轮一致 ✓，**base 与 post 逐字节相同** ✓。这条比「diff 只在某某行」强：它把『实现未变』这个断言变成了可观测的。",
+      "numstat（取自提交本身 git show --numstat 98cabf6）": "profiles.go 10/0（纯注释）、profiles_test.go 24/5。2 文件，在声明 writes 内，无越界。"
+    },
+    "🔴 我给自己加的固定动作": "**凡 DoD 标着「最不能省」的测试，交付前自己变异一次。** 判据不是「测试存在且绿」，而是「把被守卫的那个字符/量词改掉，它会不会红」。这次的 3×3 就是照它做的。⇒ 这与 2×2 消融是同一族方法，只是对象从**实现**换成**测试自身**——第 1 轮我漏掉的正是这个换位。"
+  }
+}

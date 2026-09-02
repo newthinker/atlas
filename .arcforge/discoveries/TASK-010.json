@@ -1,0 +1,147 @@
+{
+  "task": "TASK-010",
+  "title": "人工标定 configs/hestia.yaml（22 项 magnitude_ranges + 四个容差）",
+  "author": "dev-m1c4-a",
+  "anchors": {
+    "my_commit": "482cdb9b71b120011ea5eff57b624df745385c03",
+    "my_commit_parent": "743c50730128be0a648d8d5d2c99cac321b1a9e0",
+    "merged_master": "bdc8252679b9740af8825b20eb80c485c557a745",
+    "sampling_anchor": "743c50730128be0a648d8d5d2c99cac321b1a9e0",
+    "说明": "🔴 三类数字钉不同的树，请分开读。① **门禁类**（go test / cover / vet / gofmt）测于 **merged_master bdc8252**。② **标定依据**（22 项字段分布 + 四族残差分布）采于 **sampling_anchor 743c507**，即本任务开工时的 master —— 本任务不改抽取，merge 后在 bdc8252 上复采过一次，残差一节**逐字节一致**。③ **merge 区间只有我自己的两个 commit**（git log 743c507..bdc8252 = 482cdb9 + merge 本身），无他人改动混入；7 个文件在 my_commit 与 merged_master 上 sha256 逐字节相同。⚠️ **不声称『已排除他人改动的影响』** —— 只能排除到 bdc8252 为止；该 sha 之后若有他人合入，需验证者在 verify_baseline.head 上复核。"
+  },
+  "key_findings": [
+    "🔴 **纯比值容差对 deposit 的当月族是错的仪器，而这不是「mom 口径特殊」**。逐期核对：deposit mom 分母 min=447、**可为负**（2021-07=−11300）、p50=12700；残差最大的 2022-07 分母仅 447、绝对差额 **1319**，而该族绝对差额中位数是 **2025** ⇒ **它不是异常期次，是分母最小的那一期**。对照组 corp_loan/mom 同为当月口径但分母 min=2335、恒为正 ⇒ 比值很规矩（max 0.0788）。**决定因素是分母能否远离零。**",
+    "🔴 **但上一条只解释了一半，这是我在提问阶段给人类的归因里的缺口**。把两族都限制在 |分母|≥10000 的子集重算：deposit **mom** n=14 p50=0.1672 p95=0.3931；deposit **ytd** n=52 p50=0.0885 p95=0.1518。⇒ **排除分母效应后 mom 的勾稽余量本身仍是 ytd 的约 2 倍**（「其中」未列举项在单月口径上正负波动大，累计口径会相互抵消一部分）。分母近零只解释尾部为什么从 0.39 冲到 2.95，不解释主体。**后果：K_rel 必须取自 mom 自己的分布（0.55），沿用 ytd 的 0.17 会让 14 期大分母期次里的大半 failed。** 已连同「人类的裁决是在我给的框架上做的」一并订正进 done_criteria。",
+    "🔴 **「调宽容差以消掉 failed」可以做成可判的量，不必只靠纪律**。判据：`候选容差 × 该族中位分母` vs `该族历史最大绝对差额`。deposit/ytd 取 0.26 ⇒ 中位分母下允许 38298 亿而历史最大仅 28000 ⇒ 闸门对中位期次实质失效；取 0.17 ⇒ 25041 < 28000，仍判得动。deposit/mom 纯比值取 0.85 ⇒ 10795 > 8681，同样失效。**这把 DoD 里那条禁令从「多宽算调宽」变成一个可核对的比较。**",
+    "🔴 **本任务的标定动作激活了一个此前测不出来的回归口（M2），实测确认**：两族占位容差恰好都是 0.12 时，「用 b.tol」与「写死 in.cfg.DepositSumTolerance」在数值上不可区分（TASK-007 验证者变异实测 SURVIVED）。标定把两族分开后该等价断裂 ⇒ 已补 TestDepositSumUsesSelectedBandTolerance，变异复测 **KILLED**。⚠️ 而 **DoD 说「M3 今天就是活的」不成立** —— 变异实测 M3 被 **TASK-008 加的 TestDepositSumSkipsWhenPriorsAreOtherCaliber** 杀掉，那段 DoD 写于 TASK-008 合入之前。",
+    "⚠️ **DoD 指的那个块不在 `LoadConfig` 里**，在 `func (t Thresholds) validate()`，而它有两个调用方：`config.go:57`（LoadConfig）**和 `validate.go:90`（每一次 Validate）**。照原文改实测让 **9 条无关测试变红**（测 NaN/倒置区间/单位缺失等性质，夹具用「只含待测字段的小表」是正当用法），其中 8 条在本任务 writes 之外的文件里。⇒ 落点改到 `config.go` 的 `checkMagnitudeRangesComplete`，形态照同文件已有的 `checkStockContinuityComplete`。"
+  ],
+  "decisions": [
+    {
+      "decision": "🔴 deposit 当月族换仪器 `max(K_abs, K_rel×|合计|)`；**ytd 族与 corp_loan 两族保持纯比值**",
+      "rationale": "人类在 Q1 裁决换仪器并批准扩射程到 validate.go，在 Q2 单独给 ytd 定了 0.17（**没有**选「随 Q1 换仪器」）。这个分法与实测一致：ytd 分母 min=28800、corp_loan mom 分母 min=2335 且恒正，都远离零 ⇒ 比值判据在那三族是有效仪器。实现上给 caliberBand 加 absTol 字段而不是按族名分支——差别是**数据**（band 的参数）而非控制流，与 tol 已经是 per-band 的设计一致；absTol 为 0 时公式退化，三族逐位不变。"
+    },
+    {
+      "decision": "🔴 在**比值域**而非绝对域比较：`r > max(K_rel, K_abs/|合计|)`",
+      "rationale": "两种写法数学等价、**浮点上不等价**。绝对域要算 `r×|合计|`，那次乘法引入舍入，会让 absTol==0 的族在**恰好等于容差**时判定可能翻转——而 TestDepositSumBoundaryIsInclusive 正是钉这个边界的（它挑的残差与容差字面量实测是同一个 float64）。比值域写法下 `max(0/|合计|, tol) ≡ tol`，是**逐位等价**不是「大致等价」。⚠️ 我第一版写的就是绝对域，是那条边界测试红了才发现。"
+    },
+    {
+      "decision": "K_rel = 0.55、K_abs = 3200，**都由分位数给出**",
+      "rationale": "DoD 的判别式是「给不出『这个数从哪个分位来』的取值就是拍的」。K_rel = p95(残差 : |分母|≥10000 子集) 0.3931 × 1.40；K_abs = max(|差额| : |分母|<10000 子集) 2272 × 1.40。**1.40 不是我选的**——它是 corp_loan/ytd 现行值相对其实测 max 的余量倍数（0.05/0.0357），而那是四族里唯一经真实数据检验（0 期 failed）的值，人类在 Q3 明确采纳「用同一把尺量两族，理由可逐字复用」。⚠️ **标定后 mom 族 0 期 failed 是换对仪器的结果不是调宽**：同一条 ×1.40 规则套在旧仪器上要 2.9508×1.40=4.13（no-op）；新仪器在中位分母下门限 6985 < 历史最大绝对差额 8681，仍判得动；真的量级事故（累计值写进当月列）绝对差额在 10^5 而门限 10^4，仍必被抓到。"
+    },
+    {
+      "decision": "22 项 magnitude_ranges **机械套用 yaml 已写明的组规则**，不另立标准",
+      "rationale": "yaml:117-118 对「增量/新增（亿元）」组已写明 `[min<0?min×4:−max×0.5, max×4]` 且圆整向外，这 22 项全属该组 ⇒ 填值是套用既有约定而非新判断，人类可逐项复核算式（Q4 一次确认通过）。⚠️ 这也是我在 Q5 提出的分界：**四个容差不替人选**（真判断），**22 项给算式与结果**（推导）。Leader 裁决「DoD 优先于派发消息」，并指出事实证明分法对——人类对四个容差做了四个不同选择，其中 Q1 选了标注「需批准扩射程」的那项。"
+    },
+    {
+      "decision": "全覆盖校验落在 `LoadConfig` 侧的 `checkMagnitudeRangesComplete`，**排在 `cfg.validate()` 之后**",
+      "rationale": "落点见 key_findings[4]。排序理由：一份既写错区间又没填全的配置，先报「少填 74 项」会把一处笔误盖成一场大工程，而那个写错的区间往往正是漏填的成因（复制粘贴删多了）。由 TestLoadConfigReportsStructuralErrorBeforeCompleteness 钉住。⚠️ 三条测试方向互补缺一不可：拒半张表 / 空表仍合法 / 结构性错误优先——只跑第一条会放过「非空即拒」甚至「一律拒」的实现，那会让未标定的部署无法启动。"
+    },
+    {
+      "decision": "2020-01 **显式登记为已知 failed 期次**，写进 yaml 与 thresholds.go 两处注释",
+      "rationale": "人类在 Q2 点名要求。写明成因（1 月的 ytd 分母就是当月一个月＝该族最小分母 28800，而它的**绝对**差额 7203 反而低于该族中位 13300）并声明**不是数据错误、不要去查** —— 否则下一个人看到这个 failed 会去查一个不存在的缺陷。⚠️ 同时写明「1 月不是系统性更高、是方差更大」（7 期里只有 2 期超旧值 0.12，min .0234 全族偏低），**不能简单排除 1 月**，也没有地方排除：本项是单值不分 period_type（对照 StockContinuityMax 是 map，那才是分档形态）。"
+    }
+  ],
+  "files_modified": [
+    "configs/hestia.yaml",
+    "internal/hestia/config.go",
+    "internal/hestia/config_test.go",
+    "internal/hestia/fields.go",
+    "internal/hestia/thresholds.go",
+    "internal/hestia/validate.go",
+    "internal/hestia/validate_test.go"
+  ],
+  "scope_note": "**扩射程 1 次（经批准）+ 中途扩后收窄 1 次，最终声明与实际逐项相等**。① `validate.go` / `validate_test.go` 由**人类在 Q1 明确批准**加入（换仪器必须改 gateDepositSum），经 `update` 子命令改而非 `transition --json-field`。② 中途我一度把 `thresholds_test.go` / `backfill_load_test.go` 也加进 writes（当时打算把全覆盖校验放在 Thresholds.validate 里，那会让这两个文件里 8 条测试变红）——**申报在先、修改在后**；换落点到 config.go 后确认没碰它们，又把 writes 收窄回 7 项。交付时 `jq .writes` 与 `git status --porcelain` **逐项相等**。numstat 取自提交本身（git show --numstat 482cdb9，即最后一次改动之后）：yaml 138/45、config.go 67/0、config_test.go 96/1、fields.go 15/2、thresholds.go 115/41、validate.go 72/8、validate_test.go 144/10。",
+  "interfaces_exposed": {
+    "导出面": "🔴 **新增 1 个导出字段**：`Thresholds.DepositSumToleranceMoMAbs float64`（mapstructure `deposit_sum_tolerance_mom_abs`，亿元）。⚠️ 导出面守卫 `TestPackageExposesNoWriteFunctions` 只遍历 `*ast.FuncDecl`，**不覆盖 struct 字段** ⇒ 它不会撞红任何东西，此处显式登记。无新增导出函数或类型。",
+    "caliberBand.absTol": "包内。K_abs：绝对容差下限（亿元），0 = 不设下限 ⇒ 判据退化为纯比值，与本字段引入前**逐位等价**。目前只有 deposit 的 mom band 设它。",
+    "bandLimitRatio": "func bandLimitRatio(b caliberBand, total float64) float64 —— 包内。返回**换算成残差占比**的实际判定门限 `max(b.tol, b.absTol/|total|)`。提成函数的理由照抄 backfill_load_report.go 的 caliberIdentityLimit：Reason 印出的门限必须与判定用的是同一个。⚠️ 调用方须保证 |total|≠0（bandDiagnosis 已把零分母挡在 skipped 那条路上）。",
+    "checkMagnitudeRangesComplete": "func checkMagnitudeRangesComplete(v *viper.Viper) error —— 包内，由 LoadConfig 调用。显式写了 `thresholds.magnitude_ranges` 就必须覆盖 fieldOrder 全部 76 项；未写（IsSet=false）放行。形态照 checkStockContinuityComplete。",
+    "gateDepositSum 的 Reason 格式变了": "🔴 新格式：`tolerance_exceeded[<族>]: residual <r> exceeds <门限> (=max(K_abs <a>/|<合计>|, K_rel <k>)，绝对门限 <x> 亿元, total=<列名>)`。**三个既有解析点仍可用**：`residual <数>`、`[ytd|mom]`、`total=<列名>` 都保留（TASK-009 的 TestResidualGatesAgreeWithValidationGates 按这三个模式解析，实测仍绿）；既有测试只做 `Contains(\"tolerance_exceeded\")` 子串断言，不受影响。",
+    "对 TASK-012（全量验收）的提示": "🔴 **本次标定会让 pending 数大幅下降，那是预期不是回归**。容差判据前后对照（79 期语料）：deposit_sum/ytd FAILED 8→1、deposit_sum/mom 17→0、corp_loan/mom 5→0、corp_loan/ytd 0→0，**合计 30→1**。剩下的 1 是 **2020-01**，人类刻意留作可见的 failed。⚠️ 验收时若看到 deposit_sum 只有 2020-01 一期 failed，**那是正确状态**。另：`config_version` 已递增到 `2026-09-02`，契约里应能查到。",
+    "对后续换语料的提示": "⚠️ 全部取值随语料变。`loan_flow_mom` 的 **n 只有 17**（其余多为 26），是 22 项里样本最少的一项，换语料后最该重采。`tsf_flow_mom` 的 n=42 且混 5 种 period_type（annual×5, h1×4, monthly×26, q1×3, q1_q3×4），其余 21 项纯 monthly —— 幅度闸只看量级不看期次语义，对本用途无害，但**别把它读成「当月样本 42 期」**。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master bdc8252679b9740af8825b20eb80c485c557a745）": {
+      "go test ./internal/hestia/... ./cmd/... -count=1": "全绿",
+      "coverage(internal/hestia)": "96.3%（门槛 ≥96.1%，未跌破；与 merge 前同值）",
+      "go vet ./internal/hestia/... ./cmd/...": "零行输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 backtest_test.go 与 crisis_test.go 两处既有欠账，无新增项",
+      "go.mod / go.sum": "零改动",
+      "7 个文件在 my_commit 与 merged_master 上的 sha256": "逐字节相同（merge 未改动我的交付）"
+    },
+    "🔴 标定依据（采于 sampling_anchor 743c507，merge 后在 bdc8252 复采、残差一节逐字节一致）": {
+      "四族残差汇池（容差是标量 ⇒ 这才是标定口径）": [
+        "deposit_sum/ytd  n=52  p50 .0885  p90 .1460  p95 .1518  max .2501  → 取 0.17",
+        "deposit_sum/mom  n=21  p50 .2576  p90 .7796  p95 .8194  max 2.9508 → 换仪器 max(3200, 0.55×|合计|)",
+        "corp_loan/ytd    n=52  p50 .0136  p90 .0247  p95 .0294  max .0357  → 保持 0.05（0 期 failed）",
+        "corp_loan/mom    n=26  p50 .0176  p90 .0614  p95 .0784  max .0788  → 取 0.11 = max×1.40"
+      ],
+      "分母与绝对差额（解释为什么 deposit 两族不能用纯比值）": [
+        "deposit ytd  |分母| min 28800 / p50 147300；|Σ分项−合计| p95 27353 / max 28000",
+        "deposit mom  |分母| min 447、可为负 / p50 12700；|Σ分项−合计| p95 7879 / max 8681",
+        "corp_loan ytd |分母| min 25500 / p50 98000；|差额| max 3432",
+        "corp_loan mom |分母| min 2335 恒为正 / p50 7552；|差额| max 635"
+      ],
+      "22 项 magnitude_ranges（组规则 [min<0?min×4:−max×0.5, max×4]，圆整向外）": [
+        "tsf_flow_mom            n=42  实测 5282..72200    → [-37000, 290000]",
+        "tsf_flow_rmb_loan_mom   n=26  实测  364..49000    → [-25000, 200000]",
+        "tsf_flow_govt_bond_mom  n=26  实测 1017..15600    → [-7800, 63000]",
+        "tsf_flow_corp_bond_mom  n=26  实测  596..9015     → [-4600, 37000]",
+        "tsf_flow_fx_loan_mom    n=26  实测 -1137..910     → [-4600, 3700]",
+        "tsf_flow_entrust_mom    n=26  实测 -579..1755     → [-2400, 7100]",
+        "tsf_flow_trust_mom      n=26  实测 -2190..393     → [-8800, 1600]",
+        "tsf_flow_bankaccept_mom n=26  实测 -4228..6293    → [-17000, 26000]",
+        "tsf_flow_equity_mom     n=26  实测  291..1478     → [-740, 6000]",
+        "deposit_flow_mom        n=21  实测 -11300..29500  → [-46000, 120000]",
+        "deposit_household_mom   n=26  实测 -15700..32600  → [-63000, 140000]",
+        "deposit_corp_mom        n=26  实测 -24200..12900  → [-97000, 52000]",
+        "deposit_fiscal_mom      n=26  实测 -8479..13700   → [-34000, 55000]",
+        "deposit_nbfi_mom        n=26  实测 -7322..18000   → [-30000, 72000]",
+        "loan_flow_mom           n=17  实测 6898..18100    → [-9100, 73000]",
+        "loan_hh_short_mom       n=26  实测 -2911..2844    → [-12000, 12000]",
+        "loan_hh_mlt_mom         n=26  实测 -1156..6067    → [-4700, 25000]",
+        "loan_corp_total_mom     n=26  实测 2335..16100    → [-8100, 65000]",
+        "loan_corp_short_mom     n=26  实测 -3785..5785    → [-16000, 24000]",
+        "loan_corp_mlt_mom       n=26  实测 2190..11100    → [-5600, 45000]",
+        "loan_bill_mom           n=26  实测 -1855..7129    → [-7500, 29000]",
+        "loan_nbfi_mom           n=26  实测 -1474..2170    → [-5900, 8700]"
+      ],
+      "yaml:196 那句被证否的话": "原文「取法：逐项照抄对应 *_ytd 字段的现有区间…ytd 的区间对 mom **一定偏宽**」。**不普遍成立**：deposit_fiscal_mom 的组规则下界 −34000 **宽于**占位 −13000；tsf_flow_bankaccept_mom 的组规则上界 26000 **宽于**占位 24000。⚠️ **今天没有实际误拦**（逐项核过 76 字段 × 213 期，**实测出界 0 处**），但 deposit_fiscal_mom 的下界余量只剩 **1.53 倍**（实测 −8479 / 占位 −13000），组规则要求 4 倍。已连同两处反例订正进 yaml 该行注释。"
+    },
+    "🔴 标定前后对照（容差判据，79 期语料）": {
+      "deposit_sum/ytd": "passed 44→51，FAILED 8→1（剩 2020-01，刻意可见）",
+      "deposit_sum/mom": "passed 4→21，FAILED 17→0（换仪器）",
+      "corp_loan/ytd": "passed 52→52，FAILED 0→0（不动）",
+      "corp_loan/mom": "passed 21→26，FAILED 5→0",
+      "合计 FAILED": "30 → 1",
+      "skipped": "deposit 140 / corp 135，前后不变（本次标定不影响选族与字段齐全性）",
+      "⚠️ 与 DoD 引用的数字口径不同": "DoD 提到验证者实测「36 期 pending 里 deposit_sum failed/mom 17 + failed/ytd 18 + skipped/mom 1」。我的对照是**全 213 条记录上只比容差判据**这一项（不含 drift、不含 absent），两者**总体不同、不可直接相减**；其中 failed/mom 17 两边一致。"
+    },
+    "新增测试（7 条）": [
+      "TestDepositSumUsesSelectedBandTolerance —— M2 闭合：mom 残差 0.30 落在两族容差之间（ytd 0.17 < 0.30 < mom 0.55），用对族 passed、写死 ytd failed，方向单一",
+      "TestDepositSumMoMAbsoluteFloorCoversSmallDenominator —— 两格方向相反：小分母+小差额 passed（K_abs 兜住）、小分母+大差额 failed（不是免检牌）",
+      "TestDepositSumYTDHasNoAbsoluteFloor —— 拿**同一组数**在 ytd 族跑，必须仍被比值拦下。⚠️ 刻意不写成 assert.Zero(某字段)：那种断言在「给 ytd 也接上 K_abs、只是默认 0」时照样绿",
+      "TestLoadConfigRejectsPartialMagnitudeRanges —— 半张表拒绝启动，且错误要说清缺几项/后果/真相源",
+      "TestLoadConfigAcceptsAbsentMagnitudeRanges —— 空表仍合法（与上条方向相反，缺一不可）",
+      "TestLoadConfigReportsStructuralErrorBeforeCompleteness —— 结构性错误优先于完整性",
+      "TestShippedConfigLoadsAndIsCalibrated 扩充 —— 五个容差断言**具体值**（非零那种写法对『有人把 0.17 改回 0.12』无感）+ config_version 2026-09-02"
+    ],
+    "🔴 变异测试（隔离 worktree /tmp/mut-t10，跑完已拆；主工作区 git status 全程为空）": {
+      "对照组": "未变异全绿",
+      "M2 门限写死成 in.cfg.DepositSumTolerance": "KILLED —— TestDepositSumUsesSelectedBandTolerance + MoMAbsoluteFloor。**这条正是被本次标定激活的**（标定前两族占位都是 0.12，TASK-007 验证者实测 SURVIVED）",
+      "M3 漂移历史写死 ytd 族": "KILLED —— TestDepositSumSkipsWhenPriorsAreOtherCaliber。⚠️ **杀它的是 TASK-008 加的既有测试**，故 DoD 说「M3 今天就是活的」不成立，本任务不为它补重复测试",
+      "M4 bandLimitRatio 忽略 absTol（退回纯比值）": "KILLED —— TestDepositSumMoMAbsoluteFloorCoversSmallDenominator",
+      "小结": "3/3 KILLED，零存活，无崩溃型失败"
+    },
+    "端到端（merge 后 master bdc8252）": {
+      "LoadConfig 实际读到": "config_version 2026-09-02；deposit_sum_tolerance 0.17；..._mom 0.55；..._mom_abs 3200；corp_loan_tolerance 0.05；..._mom 0.11；magnitude_ranges **76/76 全覆盖**；deposit_flow_mom [-46000,120000] 亿元",
+      "真语料 calibrate": "rc=0，残差一节与标定前逐字节一致（本任务不改抽取）"
+    },
+    "DoD 订正（3 处，全部写进 done_criteria 而非只写这里）": [
+      "boundary[0]：那个块在 Thresholds.validate() 不在 LoadConfig，照原文改会波及 Validate() 并让 9 条无关测试变红 ⇒ 落点改到 config.go 的 checkMagnitudeRangesComplete，判据方向全部照做",
+      "functional[1]①：M3 早已被 TASK-008 闭合（变异实测），「今天就是活的」不成立",
+      "functional[1]②：我在 Q1 给人类的归因只对了一半（排除分母效应后 mom 余量仍是 ytd 的 2 倍）⇒ K_rel 必须取自 mom 自己的分布。**人类的裁决是在我给的框架上做的，框架修正必须留在同一载体上**"
+    ]
+  }
+}

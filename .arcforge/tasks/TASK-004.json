@@ -2,7 +2,7 @@
   "id": "TASK-004",
   "title": "22 个 _mom 字段原子扩容：常量 + fieldOrder + 模板表两列 + yaml 占位",
   "description": "对应需求文档 Task 4，**但射程比文档更大**（见 `.arcforge/docs/01-design/architecture-decisions.md` 的 AD-M1c4-3）。\n\n🔴 **文档说「只加字段与断言，不接抽取」，那在机制上不成立。** Leader 核实（锚 `4670ccb`）发现 `fieldOrder` 被**三条全覆盖断言**绑住，任何加字段的动作必须**一次性**满足全部三条，否则 `go test` 转红——而每个任务的 `dev_done` 门禁都要跑它：\n\n1. `config_test.go:377` `TestShippedConfigLoadsAndIsCalibrated` 读**仓库真配置** `configs/hestia.yaml`，断言 `len(MagnitudeRanges) == len(fieldOrder)` 且**键集合逐项相等**，另断言 `config_version == \"2026-08-31\"`\n2. `fields_test.go:151` `require.Len(t, fieldOrder, 27+6+7+10+4)` **外加四条分族前缀计数**（社融 27 / `deposit_` 7 / `loan_` 10 / 利率外汇 4）——**需求文档漏了这一条**\n3. `profiles_test.go:73` `TestTemplateTablesCoverAllFields` 要求 `fieldOrder` 每一项都被模板表覆盖且**数量相等**\n\n⇒ 本任务是**原子扩容步**：加常量 + `fieldOrder` + 模板表加 `momField` 列 + `templateFields()` 收两列 + 三处计数断言更新 + yaml 占位 22 项。**只做数据结构与声明，不接抽取路由**（那是 TASK-005）。",
-  "status": "in_progress",
+  "status": "verified",
   "complexity": "complex",
   "packages": [
     "./internal/hestia"
@@ -43,12 +43,18 @@
     ]
   },
   "last_transition": {
-    "from": "assigned",
-    "to": "in_progress",
-    "by": "dev-m1c4-b",
-    "at": "2026-09-01T14:56:19Z"
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-m1c4-b",
+    "at": "2026-09-01T23:42:13Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-b",
-  "discovery": ".arcforge/discoveries/TASK-004.json"
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "8d02371ca2bc9513dac1a625bf3a8c73d70a68c2",
+    "discovery_sha256": "584a0609c8eda1937191e598c2ebad6850284ce0ed3b462fb11137f45427955e",
+    "at": "2026-09-01T23:30:52Z"
+  },
+  "verifier": "test-m1c4-b"
 }

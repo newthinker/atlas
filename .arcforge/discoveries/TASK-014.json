@@ -1,0 +1,116 @@
+{
+  "task_id": "TASK-014",
+  "anchors": {
+    "my_commit": "ae1ba2e",
+    "base": "c6f33b71d9d123a8110c668a75b451a8fd206a49",
+    "merged_master": "4735b817a441d61055c793a34dfca65b1309c521",
+    "说明": "每个自证数字下标了测量锚；git log -S 扫描在合并后的交付内容上重跑过一次，与交付物同源。"
+  },
+  "key_findings": [
+    "🔴 唯一的代码级改动零行为变化，而这是**观察不是论证**：真语料 A/B 背对背交替两轮，四份输出 sha256 全同（6f130e8e8ef90007…），base 与 mine 逐字节一致。等价性论证（absTol==0 ⇒ math.Max(tol, +0.0)==tol 精确成立）只是解释为什么会这样。",
+    "🔴 DoD 那条测试**按字面写不出来**：corp_loan 两族的 absTol 今天没有任何配置来源（Thresholds 只为 deposit 当月族提供 DepositSumToleranceMoMAbs），闸内两个 caliberBand 的 absTol 是字面量 0 ⇒ 测试无法从外部填成非零。拆成 band 层（改前后都绿，是前提）+ AST 接线层（改前红）两条；加 cfg 字段能做到端到端，但与「唯一代码改动一行」冲突，未自作主张。",
+    "🔴 悬空文档必须在**渲染层**验证：源码里它只表现为「上面有一段旧注释」。用 go doc -all -u 量，两处孤儿段 1→0，两份正确文档仍各 1；**改前那两个 1 是在 base 树现采的对照组** —— 没有它，「改后 0」也可能只是命令写错了。",
+    "🔴 DoD 之外另发现同类残留 4 处（extract.go :190/:309/:960 引用已删的 selectRMBCumulativeFlow、:516 引用已删的 checkSectorCaliber），**是 git log -S 扫出来的，不是通读发现的**。这印证 DoD 自己那句「通读是在错误的载体上找证据」：这些引用读起来毫无异常，它们唯一的问题是所指的东西已不在，而那件事不在注释里、在 diff 里。",
+    "⚠️ 原 writes 声明缺 validate_test.go，而同一份 DoD 要求必须配测试 —— 两句话互相矛盾。已在 dev_done 之前经写通道补入（过了那一刻没有任何角色补得了）。",
+    "M5/M6 与「monthly 0 次」均由本任务**独立复现**，未采信未落盘的 QA 报告（05-review/ 目录实为空）。"
+  ],
+  "decisions": [
+    {
+      "what": "五处失真注释保留原文 + 标注何时失真，不抹掉",
+      "rationale": "「留一句已变假的自证比没有自证更糟：它看起来像有据可查」。抹掉则后人无从知道那段设计曾经存在、为何被推翻。"
+    },
+    {
+      "what": "悬空文档一处删除、一处保留并标注为历史设计",
+      "rationale": "extract.go:331-335 的两句话在紧随其后的正确文档里**逐字重复**（删后复核两句各仍存在 1 次），信息损失为 0 ⇒ 删。而 checkSectorCaliber 那 24 行记着那条拒绝**当初为什么存在**，TASK-005 只是换了保留形式，抹掉理由会让后人以为那条拒绝可有可无 ⇒ 保留 + 插空行 + 标注「以下描述历史设计，不是当前行为」。"
+    },
+    {
+      "what": "接线测试用 go/ast 而不是整文件子串匹配",
+      "rationale": "子串会被注释里提到的 bandLimitRatio 满足，而 validate.go 的注释里恰好多处提到它 ⇒ 子串版**平凡为真**。另配一条对照断言（兄弟闸 gateDepositSum 也须命中），否则分辨不出「本条红」是接线掉了还是 AST 遍历写坏了。"
+    },
+    {
+      "what": "writes 之外的同类残留一处不碰，只报告",
+      "rationale": "改了会让 writes 声明与实际改动的归属对不上，而 writes 同时驱动 scope 互斥与漂移判据。与 Leader 对 backfill_load_report.go:276-279（上个 sprint 的悬空注释）的处置同一条纪律。"
+    },
+    {
+      "what": "medianOf 与 nearestRank 只登记文档、两个函数一行不动",
+      "rationale": "nearestRank 不插值有明确设计理由；medianOf 喂的是 checkCaliberFamilyMedians 的判据。为消一个 9 行函数去动一道刚验收的闸，收益不抵风险。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go",
+    "internal/hestia/validate_test.go",
+    "internal/hestia/backfill_load_report.go",
+    "internal/hestia/profiles.go",
+    "internal/hestia/fields.go",
+    "internal/hestia/extract.go",
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "interfaces_exposed": {
+    "（无）": "本任务不新增/不修改任何导出符号；唯一的代码改动是一条内部判定语句的调用路径。"
+  },
+  "verification": {
+    "门禁（两棵树都采，背对背交替两轮，同 ref 两轮一致）": {
+      "internal/hestia 覆盖率": {
+        "ae1ba2e": "96.3%",
+        "4735b817a441d61055c793a34dfca65b1309c521": "96.3%",
+        "门槛": "≥96.1%，未跌破"
+      },
+      "go test ./... 全量 FAIL 行数": {
+        "4735b817a441d61055c793a34dfca65b1309c521": "0"
+      },
+      "go vet ./internal/hestia/... ./cmd/...": "零输出（测自 4735b817a441d61055c793a34dfca65b1309c521）",
+      "gofmt -l internal/hestia cmd/atlas": "仅 backtest_test.go / crisis_test.go 两处既有欠账",
+      "go.mod / go.sum": "零改动"
+    },
+    "🔴 零行为变化（DoD 的特殊判据）": {
+      "非注释非测试的改动行": "仅 3 行 —— 一条空行（**它本身就是悬空文档的修复**）+ `if r <= b.tol` → `if r <= bandLimitRatio(b, math.Abs(total))`",
+      "真语料 A/B": "背对背交替两轮，四份输出 sha256 **全同** 6f130e8e8ef90007…；base(c6f33b71d9d123a8110c668a75b451a8fd206a49) 与 mine(ae1ba2e) 逐字节一致"
+    },
+    "悬空文档（渲染层双向对照，go doc -all -u）": {
+      "checkSectorCaliber 段出现在 godoc": "改前 1 → 改后 0",
+      "selectRMBCumulativeFlow 孤儿段": "改前 1 → 改后 0",
+      "sectorCaliber / selectRMBFlowByCaliber 的正确文档": "改前 1 → 改后 1（证明命令本身有效，不是全都数成 0）"
+    },
+    "🔴 git log -S 扫描（DoD 要求，**在合并后的交付内容 4735b817a441d61055c793a34dfca65b1309c521 上重跑**）": {
+      "扫了哪些字面量": [
+        "selectRMBCumulativeFlow",
+        "checkSectorCaliber",
+        "取整误差",
+        "当前没有任何写入方",
+        "恒为空，不进任何字段分布表",
+        "只被覆盖度检查读到",
+        "绝对域**比较",
+        "bandLimit 的注释"
+      ],
+      "各命中什么（交付后残留，按文件）": {
+        "selectRMBCumulativeFlow": "extract.go 1（我的订正块引述旧名，刻意保留）/ profiles.go 1（同）/ calibrate.go 1 **writes 外未碰** / extract_test.go 1 + profiles_test.go 2 + parse_test.go 1 **writes 外未碰**",
+        "checkSectorCaliber": "extract.go 3（历史设计块 2 + 我的订正注 1，刻意保留）/ extract_test.go 5 + testdata/README.md 1 **writes 外未碰**",
+        "取整误差": "backfill_load_report.go 3 —— **全部在我自己的订正块内**（引述原文 + 说明理由为何失效），无遗留活文本",
+        "当前没有任何写入方 / 恒为空，不进任何字段分布表 / 只被覆盖度检查读到 / 绝对域**比较 / bandLimit 的注释": "各 1–2 处，**全部在我自己的订正块内引述原文**（保留原文 + 标注何时失真是本 sprint 惯例）"
+      },
+      "结论": "我 writes 内的**活**失真文本已清零；残留全部是①刻意保留的原文引述 ②writes 之外未碰的 6 处（calibrate.go:522、extract_test.go:414、profiles_test.go:564/:749、parse_test.go:702、testdata/README.md），已向 Leader 逐条申报待裁决。"
+    },
+    "CONTRACTS 两条订正的实测证据（本任务独立复现，未采信未落盘的 QA 报告）": {
+      "① §F 老库开口": "verifyObservationsSchema(store.go:152) 由 store.go:78 在开库路径无条件调用；TestNewStoreRejectsSchemaDriftOnLegacyDB(store_test.go:195) 本任务复跑 PASS。⇒ 原描述把风险定位在**写入时**（INSERT 失败/静默丢字段），实际防线在**开库时**：运维含义从「跑起来之后某一期才炸」变成「根本起不来」。",
+      "② §G 开口 a（整族位移，隔离 worktree 真语料 218 篇）": {
+        "基线": "族内量级核对 0 违反 / 口径路由核对 0 违反 / 入权威表 76",
+        "M5 住户贷款族 ytd↔mom 互换": "族内量级核对 **2 违反**（monthly loan_hh_short / loan_hh_mlt，全中）；入权威表 76→**66**",
+        "M6 存款分部门四项互换": "族内量级核对 **4 违反**（四项全中，均 monthly 档）；口径路由核对 **0 违反**（证实结构性失明）；入权威表 76→**82**",
+        "🔴 76→82 必须一并记": "位移**反而让更多期过闸** ⇒ 只看「过闸数」会得到完全相反的信号。**过闸数不是数据正确性的代理量。**",
+        "「样本不足未判」分档": "84 = annual/h1/q1/q1_q3 **各 21**，**monthly 0 次**；monthly 的 mom 侧实测 n=27。两把独立的尺（awk / python）分桶一致，且与报告抬头声明的 84 自洽。",
+        "主工作区完整性": "变异全程在隔离 worktree，主工作区未被触碰（收尾复核 profiles.go 四项仍是 ytd 在前）"
+      }
+    },
+    "同名不同义（最小复现，自己跑过）": "样本 [1,2,3,4] ⇒ medianOf=2.5、nearestRank(·,50)=2；奇数样本 [1..5] 两者同为 3。⇒ 差异只在偶数样本，为两个中值间距的一半。",
+    "新增测试": [
+      "TestCorpLoanBandRespectsAbsTol（band 层：大分母仍取 K_rel / 小分母被 absTol 抬起 / absTol==0 时**逐位**等于 tol）",
+      "TestCorpLoanReconcileGoesThroughBandLimitRatio（go/ast 接线层，**改前红**；含 gateDepositSum 对照断言）"
+    ],
+    "scope": {
+      "writes（已于 dev_done 前补入 validate_test.go）": 7,
+      "实际改动": "与声明**逐条一致**，无越界",
+      "git show --numstat ae1ba2e": "CONTRACTS.md 57/4、backfill_load_report.go 15/1、extract.go 24/9、fields.go 7/2、profiles.go 22/9、validate.go 24/3、validate_test.go 101/0"
+    }
+  },
+  "notes_for_downstream": "① corp_loan 若将来要配 absTol，Thresholds 需新增字段并接进 gateCorpLoanReconcile 的两个 caliberBand；接线已就位（bandLimitRatio），TestCorpLoanReconcileGoesThroughBandLimitRatio 会挡住它再次退化。② writes 之外仍有 6 处引用已删符号的残留，清单见上，待 Leader 裁决是否另开任务。"
+}

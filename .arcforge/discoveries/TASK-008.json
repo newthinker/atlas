@@ -1,0 +1,131 @@
+{
+  "task_id": "TASK-008",
+  "anchors": {
+    "my_commit": "ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c",
+    "isolation_pair_base": "07d111309737de1aaa08bbe05dd22b31a1e07ffb",
+    "merged_master": "743c50730128be0a648d8d5d2c99cac321b1a9e0",
+    "说明": "每个自证数字下面都标了它测自哪个锚。全部在最后一次改动（ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c）之后统一重采，含变异全轮重跑。"
+  },
+  "key_findings": [
+    "正反馈链证实存在：2024-04…08 五期被 tolerance 拒（残差 0.1460/0.1490/0.1505/0.1663/0.1211）⇒ 落 pending ⇒ Preceding 看不见 ⇒ 2024-10/11 因偏离停在 2024-03 的旧均值 0.0784 被 drift 拒。闸门自己制造了它要检测的异常。",
+    "🔴 DoD 前提「mom 族取不到同族基线是设计的必然后果」**只在改动前成立**。真被判过漂移的期次（同族样本≥3 且首个基线相邻）：mom 族 0 → 15（共 21 期），ytd 族 21 → 28（共 52 期）。成因：mom 期次集中在 2020–2022 且大多落 pending ⇒ 它们彼此互相看不见；priorAll 纳入 pending 后互为同族基线。⇒ 本任务不只修了 ytd 的正反馈链，顺带把 mom 族的 drift 闸从「完全没有保护」接通了。",
+    "⚠️ 我的第一版语料实测是错的，按**单篇文章 213 篇**统计，而真实管线是**合并后 97 组观测**（=入权威表 64 + 落 pending 33）。单篇常缺分部门列 ⇒ 同族基线被系统性低估，错误结论是「mom n≥3 = 0 期」。🔴 **那个错误结论恰好与 DoD 的前提一致** —— 若不是 A/B 输出里出现 `from 4-period mean [mom]` 与它直接矛盾，它会去**印证**一个错误前提，而双方都不会再查（「实测支持了 DoD」看起来正是该有的样子）。第二版直接调 Store.PrecedingAll + 闸门的选族判据，走生产代码路径。",
+    "变异 M6 逼出一个测试分辨不出的真缺口：len(in.priorAll)==0 误写成 len(in.prior)==0 时 13 个变异体里唯一存活。TestDepositSumDriftBaselineIncludesPending 分辨不出它（那里权威表有三期、prior 非空，两种写法都往下走）。而这恰是正反馈链**最坏的形态**：近期每期都被拒 ⇒ 权威表这一段全空 ⇒ 误写会报 no_prior_period，报告上像「新库冷启动」，运维含义完全相反。已补 TestDepositSumDriftWorksWhenAllPriorsArePending。",
+    "自写的 TestPrecedingAllWrapsQueryError 曾**恒绿**（与本 sprint TASK-003 同形）：用已取消的 ctx 时内层 Preceding 先失败并提前返回，断言由**另一条路径**满足，pending 那条查询根本没执行。靠覆盖率 store.go:427 那一格是白的才发现。已补 TestPrecedingAllWrapsPendingQueryError（只 DROP pending 表，并先断言 Preceding 仍成功）。",
+    "M4（n<=0 → n<0）在**返回值**上等价（Preceding 自己也挡 n<=0、SQL LIMIT 0 取不到行），唯一可分辨的观测是「n=0 时还会不会去碰库」。用已取消的 ctx 把它变成可观测的，已钉住。"
+  ],
+  "decisions": [
+    {
+      "what": "漂移基线读 priorAll（含 pending）；stock_continuity 仍读 prior",
+      "rationale": "两道闸对未过闸期次要的东西相反：drift 问「近期常态是什么」，若常态只由已通过这道闸的期次构成，定义本身循环；stock_continuity 问「上一期存量是多少」，拿未过闸的存量当基准等于用可疑数据判可疑数据。已用**双向**断言钉死（只有 priorAll 有货⇒必须 skip；只有 prior 有货⇒必须真算），变异 M9 打红。Leader 已复核该口径并确认保持。"
+    },
+    {
+      "what": "基线不相邻时 skip，不按跨度放宽",
+      "rationale": "放宽需要一个放宽系数，而语料里没有数据能回答「跨 13 个月该放宽多少」；往闸里塞没测过的数正是本任务在修的那类缺陷本身（沿 M1c-3b TASK-011 对 stock_continuity 的裁决）。两种错的代价不对称：误 skip 只损失一次检查且 reason 可见，误 fail 不可自愈。"
+    },
+    {
+      "what": "Reason 区分「本族历史样本不足(n=X<3, prior=Y)」与「新库冷启动(no_prior_period)」",
+      "rationale": "两者成因完全不同：冷启动等几期就好，本族样本不足是结构性的。带上族名与两个数（本族 n 与总 prior），是为了让「有历史但都不是这一族」这件事在报告里可数、可查。"
+    },
+    {
+      "what": "PrecedingAll 是新的导出方法，而不是给 Preceding 加 bool 参数",
+      "rationale": "两者语义不同（「上一期可信的观测」vs「近期发生过什么」）。压成 bool 参数后，选错的后果是拿未过闸数据当基准，而调用点上只是一个字面量。多一个名字换一次编译期的表态。两处导出面测试（reflect 版 + AST 版）都已登记，并写明理由。"
+    },
+    {
+      "what": "合并后再截断到 n，而不是两张表各取 n",
+      "rationale": "pending 里若有比 accepted 更近的期次，应当把 accepted 挤出去 —— 那正是本迭代要的行为。各取 n 会让 accepted 占满前几格，正好是本任务要修的缺陷的镜像。变异 M3 专打这一点。"
+    },
+    {
+      "what": "pending 行的 values_json 坏掉时报错，不当成空 Values 静默放行",
+      "rationale": "空 Values 的后果不是「少一期历史」而是「多一期残差算不出来的历史」：depositResidualOf 对它返回 false，这一期从 hist 里消失，而 Reason 里的 n 会让人以为库里就只有那么多期。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/store.go",
+    "internal/hestia/store_test.go",
+    "internal/hestia/validate.go",
+    "internal/hestia/validate_test.go"
+  ],
+  "interfaces_exposed": {
+    "Store.PrecedingAll(ctx, period, periodType string, n int) ([]Observation, error)": "权威表 ∪ hestia_pending，period 降序，按 period 去重（权威表优先），**合并后**截断到 n；n<=0 在碰库之前返回 nil。只有 SELECT。",
+    "History 接口新增 PrecedingAll": "noHistory 返回 nil,nil；gateInput 多一个 priorAll 字段。gateStockContinuity **不**读它（见 decisions）。",
+    "scanPendingObservation(rows) (Observation, error)": "未导出；解 values_json，坏 JSON 报错并带期次。"
+  },
+  "verification": {
+    "门禁（**两棵树都采**，背对背交替两轮，同 ref 两轮结果一致）": {
+      "口径说明": "只采交付态会让并行任务的贡献算到我头上；master(743c507) 还含 TASK-009。两棵树同为 96.3% ⇒ 无掩盖。",
+      "go test ./... 全量 FAIL 行数": {
+        "ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c": "0",
+        "743c50730128be0a648d8d5d2c99cac321b1a9e0": "0"
+      },
+      "internal/hestia 覆盖率": {
+        "ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c": "96.3%",
+        "743c50730128be0a648d8d5d2c99cac321b1a9e0": "96.3%",
+        "门槛": "≥96.3%（本任务开工时基线），未跌破"
+      },
+      "go vet ./internal/hestia/ ./cmd/...": "零输出（测自 743c50730128be0a648d8d5d2c99cac321b1a9e0）",
+      "gofmt -l internal/hestia cmd/atlas": "仅 cmd/atlas/backtest_test.go 与 crisis_test.go 两处既有欠账（测自 743c50730128be0a648d8d5d2c99cac321b1a9e0）",
+      "go.mod / go.sum": "零改动"
+    },
+    "scope": {
+      "声明 writes": [
+        "./internal/hestia/store.go",
+        "./internal/hestia/store_test.go",
+        "./internal/hestia/validate.go",
+        "./internal/hestia/validate_test.go"
+      ],
+      "实际改动": "与声明**逐条一致**，无越界",
+      "git show --numstat ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c": "store.go 100/0、store_test.go 198/2、validate.go 67/6、validate_test.go 271/13",
+      "⚠️ 口径提醒": "`git diff --stat` 对同一区间显示 200 / 284，那是 stat 把 增+删 相加的渲染口径，不是别人动了我的文件；四个文件在 master 上与 ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c 逐字节一致（sha256 已逐个比对）。"
+    },
+    "变异测试（隔离 worktree，**在最终交付内容 743c50730128be0a648d8d5d2c99cac321b1a9e0 上整轮重跑**）": {
+      "结果": "13 变异体 13 KILLED，13 列互不相同",
+      "主工作区完整性": "被变异文件 sha256 与 git status --porcelain 前后逐字节一致（harness 每窗口 + 收尾各校验一次）",
+      "为什么重跑": "首轮扫描跑在补 M6/M4 两条测试**之前**。自证数字必须在最后一次改动之后统一重采，否则每个数字当时都对、合到一份报告里却不构成对最终产物的自证。",
+      "逐条": {
+        "M1 PrecedingAll 不合并 pending": "KILLED ×4（IncludesPending / RejectsCorrupt / SeesPending / Truncates）",
+        "M2 去掉去重（权威表不再优先）": "KILLED（Deduplicates）",
+        "M3 截断挪到合并排序之前": "KILLED（TruncatesAfterMerge）",
+        "M4 n<=0 → n<0": "KILLED（RejectsNonPositiveN，靠已取消 ctx 的那一格）",
+        "M5 pending 查询丢掉 period_type 隔离": "KILLED（IsolatesPeriodType）",
+        "M6 drift 判空退回 in.prior": "KILLED（DriftWorksWhenAllPriorsArePending）——本轮**唯一由新补测试独家打红**的",
+        "M6b drift 历史来源退回 in.prior": "KILLED ×2",
+        "M7 去掉相邻性约束": "KILLED（SkipsOnNonAdjacentBaseline）",
+        "M8 历史残差固定用 ytd 族": "KILLED（SkipsWhenPriorsAreOtherCaliber）",
+        "M9 stock_continuity 改读 priorAll": "KILLED（StockContinuityStillReadsAcceptedPriorsOnly）",
+        "M10 Validate 吞掉 PrecedingAll 的 error": "KILLED（ValidatePropagatesPrecedingAllError）",
+        "M11 scanPendingObservation 吞掉坏 JSON": "KILLED（RejectsCorruptPendingValues）",
+        "M12 pending 查询失败退化成只读权威表": "KILLED（WrapsPendingQueryError）"
+      }
+    },
+    "真语料 A/B（背对背同一时刻并排跑，交替两轮；同 ref 两轮输出**逐字节一致**）": {
+      "锚": "post=ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c vs pre=07d111309737de1aaa08bbe05dd22b31a1e07ffb；语料 data/hestia-backfill-2026-08-14 --allow-incomplete",
+      "入权威表": "61 → 64",
+      "落 pending": "36 → 33",
+      "deposit_sum drift_exceeded[ytd]": "9 条 → 3 条。消失的 6 条正是被冻结基线误拒的，例：2024-11 residual 0.1135 drifted 0.0351 from **3-period mean 0.0784**（那个 0.0784 是停在 2024-03 的旧均值）；改动后同期基线变成 4-period mean 0.1467，不再触发。",
+      "新增 deposit_sum drift_exceeded[mom]": "3 条（2020-11 / 2021-07 / 2022-11）。**新增的保护而非回归**：那三期以前压根没被判过（mom 0→15），残差相对同族常态确实是突变，如 2022-11 residual 0.0686 vs 3 期均值 1.3059。"
+    },
+    "同族基线可得性实测（生产代码路径：Store.PrecedingAll + 闸门选族判据；单位=合并后 97 组观测；两把独立的尺复算一致）": {
+      "锚": "post DB，建自 ddb325f8e3df978d3f8528b3a8bdbeb41efb8f2c",
+      "族分布": "ytd 52 / mom 21 / 两族都取不到 24（合计 97 = 入权威表 64 + 落 pending 33）",
+      "ytd 同族基线直方图": "{0:9,1:5,2:5,3:5,4:8,5:14,6:6}；n≥3 共 33 期",
+      "mom 同族基线直方图": "{0:1,1:2,2:3,3:5,4:10}；n≥3 共 15 期",
+      "🔴 真被判过漂移（n≥3 **且**首个基线相邻，联合计数不是从边际推的）": "ytd 21→28；**mom 0→15**",
+      "⚠️ 口径": "两列算自**同一份 post DB**，差别只在基线取 Preceding 还是 PrecedingAll。**不是**「pre 那次运行 vs post 那次运行」的对照。"
+    },
+    "新增测试": [
+      "TestPrecedingAllSeesPendingPeriods（含对照断言：同批数据下 Preceding 语义**一字不变**）",
+      "TestPrecedingAllDeduplicatesRepublishedPeriods（权威表优先）",
+      "TestPrecedingAllTruncatesAfterMerge（3 远 accepted + 3 近 pending，n=3 ⇒ 返回的三期全是 pending）",
+      "TestPrecedingAllIsolatesPeriodType / TestPrecedingAllRejectsNonPositiveN（含「碰库之前返回」那一格）",
+      "TestPrecedingAllWrapsQueryError + TestPrecedingAllWrapsPendingQueryError（后者专打前者测不到的那条查询）",
+      "TestPrecedingAllRejectsCorruptPendingValues",
+      "TestDepositSumDriftBaselineIncludesPending（真 Store 端到端；前置断言把「旧基线此刻必判 drift_exceeded」当场算出来，而不是模拟旧实现）",
+      "TestDepositSumDriftWorksWhenAllPriorsArePending（变异 M6 逼出）",
+      "TestDepositSumSkipsOnNonAdjacentBaseline / TestDepositSumSkipsWhenPriorsAreOtherCaliber（断言 Reason 带族名、n=0、prior=4）",
+      "TestStockContinuityStillReadsAcceptedPriorsOnly（双向接线断言）",
+      "TestValidatePropagatesPrecedingAllError（fakeHistory 新增 errAll，使「只有 PrecedingAll 失败」可构造——复用 err 会让 Preceding 先失败，该分支一次都跑不到而测试照样绿）"
+    ]
+  },
+  "notes_for_downstream": "TASK-010 标定 mom 容差时请注意：本任务之后 mom 族已有 15/21 期能取到 ≥3 个同族基线，drift 闸对 mom 族**不再恒 skip**，标定样本的可用性与 TASK-007 记录时（那时为 0）已不同。"
+}

@@ -2,7 +2,7 @@
   "id": "TASK-006",
   "title": "completeness 的必填集改口径感知（ytd 或 mom 齐全即可）",
   "description": "对应需求文档 Task 6。硬要 `_ytd` 会让那 54 篇恒报「缺一整族字段」，而它们在那些期次里是 **absent-by-design**——把 by-design 的缺席记成 failed，`completeness` 这个指标就废了（`types.go` 原话，`mergedRequiredFields` 因同一理由存在）。\n\n**为什么不新开 extractor**：那 4 篇月报是同一份观测里两种口径共存（贷款合计累计 + 存款/分部门当月）。给它新开 extractor 会得到 `rule@v1-deposit-mom` 这类名字，而**口径差异是按族的，不是按整篇的**。",
-  "status": "pending",
+  "status": "verified",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -11,7 +11,9 @@
     "./internal/hestia/required.go",
     "./internal/hestia/required_test.go",
     "./internal/hestia/validate.go",
-    "./internal/hestia/validate_test.go"
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/extract_test.go",
+    "./internal/hestia/backfill_load.go"
   ],
   "dependencies": [
     "TASK-004",
@@ -36,8 +38,23 @@
       "本任务**不做全语料背对背**（它只改校验判定，不改抽取）。验收靠单测 + `go test ./internal/hestia/...` 全绿。\n\n⚠️ 但要**跑一次 `-run TestComplete`** 确认既有的 completeness 测试没有被放松波及：若某条既有断言从 failed 变成 passed，去看它测的是不是**不成对**的字段——是的话说明 `caliberFamilies` 把不该配对的配上了，回去查。"
     ],
     "non_functional": [
-      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。",
-      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-006-m1c4 ../wt-TASK-006-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-006):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，「未提交改动」与「本任务已提交」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-006-m1c4`。"
+      "`gofmt -l internal/hestia cmd/atlas` **只列出** `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，来自 `f5d7b82`，与本迭代无关，**不要顺手修**、也不要因它们判红——判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`go test ./internal/hestia/... -count=1` **全绿**。\n\n覆盖率 **≥96.1%**（Leader 实测于锚 `4670ccbe0abd703f86b1e0c53aef8d3c86cc512d`）。⚠️ 覆盖率分母属于整棵树，报数时把**你测量时的 HEAD 全 sha** 与数字**同行**写进 discovery。\n\n⚠️ **无新增依赖**：`go.mod` / `go.sum` 不得出现在实际改动里。\n⚠️ 注释里的任务编号**带 milestone 前缀**：写 `M1c-4 的 TASK-0XX`。\n\n---\n\n# 🔴 自证数字必须在 **merge 之后的 master 上重采一次**（AD-4 的结构性后果）\n\n**这条是 TASK-001 的验证者实撞后提出的，Leader 核实成立。**\n\nAD-4 要求 **merge 先于 `dev_done`**（门禁的 `git log --grep` 不带 `--all`，未合并的 commit 对它结构性不可见）。但 **merge 必然把别的任务带进你的树**：\n\n实测（TASK-001）：dev 全部数字采于自己的 commit `4c9ca20`，而验证者的判定对象是 `8d02371` —— **两者之间隔着 4 个 commit，含 TASK-004 的完整合入**（`internal/hestia` 11 个文件、`fieldOrder` 54→76）。语料输出行数因此由 186 变成 208。\n\n⇒ **dev 在 merge 前采的数字，与验证者判定的那棵树天然不同源**，而它们在报告里**长得一模一样**。\n\n🔴 **具体危害**：覆盖率门槛是 **96.1%，而当前实测恰好 96.1% —— 零余量**。若合进来的他人改动把它压到 96.0%，**你报的 96.1% 会掩盖它，而没有任何东西会告诉任何人**。\n\n## 你要做的\n\n**merge 完成之后、`transition dev_done` 之前**，在**主仓库的 master 上**重采一次全部自证数字：\n\n```bash\ncd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas\ngit log --oneline -1                                   # 记下这个 sha，它才是你该报的锚\nGOTOOLCHAIN=local go test ./internal/hestia/... -cover -count=1\nGOTOOLCHAIN=local go vet ./internal/hestia/... ./cmd/...\ngofmt -l internal/hestia cmd/atlas\n```\n\n⚠️ **discovery 里报的锚必须是 merge 后 master 的 sha，不是你自己 commit 的 sha。** 两个都写上更好（「我的改动 `<sha>`，验证于 merge 后 `<sha>`」），但**不能只写前者**。\n\n⚠️ 若重采发现覆盖率跌破 96.1% 或有测试转红，**不要转 `dev_done`** —— 走澄清环报给 Leader。那说明你的改动与他人的合并产生了交互，需要判断责任归属，不是你一个人能决定的。",
+      "🔴 **交付流程（AD-4，机制决定，不是偏好）**：\n\n1. 自己的 worktree：`git worktree add -b task/TASK-006-m1c4 ../wt-TASK-006-m1c4 master`（⚠️ 主分支是 **master** 不是 `main`；`-m1c4` 后缀必需，仓库已有 34 个 `task/TASK-*` 分支会撞名）\n2. 提交用**显式 pathspec**，信息锚定 `feat(TASK-006):`\n3. **通知 Leader merge，等 merge 进 master**\n4. **回主仓库** `cd /Users/zuowei/workspace/go/src/github.com/newthinker/atlas` 再 `transition dev_done`\n\n⚠️ **为什么 merge 必须先于 `dev_done`**：`task-completed.sh` 的 `git log --grep` 全文件不带 `--all` ⇒ 只走 HEAD 祖先链 ⇒ 未合并分支的 commit 对门禁**结构性不可见**，「未提交改动」与「本任务已提交」两个集合双双为空 ⇒ **门禁报绿而它根本没量到你的代码**。\n\n⚠️ **绝不能因 idle hook 催促就转 `dev_done`**——该 hook 在 `in_progress` 的解锁文案恒为「推进 dev_done」，**方向与本纪律恰好相反**。等 merge 期间被唤醒的正确动作是查 merge 状态、催 Leader。\n\n⚠️ 一切 `.arcforge/` 读写**必须 cd 回主仓库**（worktree 里是独立副本，在那调写通道会被 DENY，判别不出时反而 fail-open 静默写坏副本）。\n⚠️ 收尾**自己拆 worktree**：`git worktree remove ../wt-TASK-006-m1c4`。\n\n---\n\n# ⚠️ 本 DoD 里「机制解释」那一半**未经实测**，以代码为准\n\n本 sprint 已有**四条** DoD 断言被 dev / 验证者实测证否：\n\n| 任务 | 判据（方向对） | 机制解释（**错的是这半**） |\n|---|---|---|\n| TASK-004 | 背对背 diff 应反映本任务的影响 | 「必须为空」——`calibrate_report.go` 全序遍历不跳过 n=0 行，空 diff **结构上不可能** |\n| TASK-003 | diff 应只反映 `2020-01` 的变化 | 「只在 `2020-01` 相关行」——该期进成功样本会让 25 个字段的 `n` 全 +1，**那些行不含期次字符串** |\n| TASK-003 | 跨句测试要有区分力 | 给的例句放在字面量 `，` 之前 ⇒ **控制流走不到 `clausePat`**，对任何写法都恒绿 |\n| TASK-005 | 诊断不该误报 | 「留在原位会误报」——实测纯当月报告返回 `[]`，**前提为假**；且下移会静默丢数据 |\n\n**共同结构**：`判据` + `一句解释它为什么成立的机制描述`。**四次错的都是后半**，而后半是 Leader 从需求文档**转录**的、未经实测的部分。\n\n## 你该怎么处理\n\n- **判据照做**（方向通常是对的）\n- 🔴 **机制解释当成「待验断言」**：实现时若发现它与代码不符，**以代码为准**\n- 🔴 **在 `dev_done` 之前把订正写进 `done_criteria`**（你是 `in_progress` 的 owner，有权改）——之后到 `accepted` 为止**没有任何角色写得了**，而验证者只对照 DoD 判\n- 订正时写清**三件事**：原文错在哪、你的实测证据、订正后的判据\n\n⚠️ **不要只在 discovery 或消息里说**——验证者读的是 `done_criteria`。TASK-005 的 dev 就是在交棒前订正进 DoD 的，做法正确。\n\n⚠️ 也不要因为「DoD 是 Leader 写的」就照着实现一个自己知道是错的东西。**四次证否里有三次是 dev 先发现的**，这条路径是常规的，不是例外。"
     ]
-  }
+  },
+  "last_transition": {
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-m1c4-a",
+    "at": "2026-09-02T03:13:23Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m1c4-b",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "3cbc0d9023abb81a2146d905ca6862cf72629d62",
+    "discovery_sha256": "d07d03ae838de372d098b7d3c6067e6536cbf4b3db6703d3cc17e4dc42bc1dbd",
+    "at": "2026-09-02T03:03:54Z"
+  },
+  "verifier": "test-m1c4-a"
 }

@@ -118,7 +118,17 @@
     "dev-m1c3b-d": "a39a8ff5ddabb5e4b8e7041bb6a4994c6c9ab03d99dee3463cad2f1bb8333160",
     "test-m1c3b-a": "b09c734a248f9fc426d49ec14d3eff44bcedaca074479cb02c2b184bed73d78d",
     "test-m1c3b-b": "09994d8cc3442a4c2414bebc49ddde8f1d28070b2e00d78b4a900a41cc158015",
-    "qa-m1c3b": "c1bf4ac6cca15e5f1876c0586d0fb8d40f320bdfec5c41e58337cf344586eddf"
+    "qa-m1c3b": "c1bf4ac6cca15e5f1876c0586d0fb8d40f320bdfec5c41e58337cf344586eddf",
+    "dev-m1c4-a": "ccbc4bef4a24d9ed662aee72a00b3d573e36f3aa1039c19e3b30b73e43fd3a66",
+    "dev-m1c4-b": "9149ba2ee59a7a5a0b529032925b26b98c9cc1b39b0f2a2fe01b9ab8b4cd77d3",
+    "dev-m1c4-c": "7520ad57111d4a0e17687ba6dbb0dab2600eb648dbcaeace8d584e481f9b9edf",
+    "test-m1c4-a": "37681aa1fc6ed3b11ed86b0a2f571652aa374e2a722a4962565467af325dfbcd",
+    "test-m1c4-b": "da8bfe16117cc1982fd9cb811e87860a783f87c9669d237f9f31f044a4111fbf",
+    "qa-m1c4": "60951188edf83c97b628d5c5449ec074609e5e2e9441f84d0248821e80913ede",
+    "dev-m1c4-d": "c75400fed6d7f80a363cf4b8f81470f8f1eb8e8bb238813dcf5773cfc22c44d3",
+    "qa-m1c4-r2": "26367a6b220b799a0205ab7a752e46c95185bfe1550e052946cc94a3c6dad88e",
+    "qa-m1c4-r3": "72445f75b66281dbd7fadf4e4a9f9eaa1c74c5499015a26dd23fcb4ac02b543e",
+    "qa-m1c4-r4": "3d1625160dccdb9e866630ba2468ecce476fad4f3e89092d1e89d942701fbe66"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [

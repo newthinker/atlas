@@ -1,0 +1,115 @@
+{
+  "task": "TASK-005",
+  "title": "分部门段按口径路由而不再拒绝整篇（sectorCaliberOf + pick）",
+  "author": "dev-m1c4-b",
+  "anchors": {
+    "my_commit": "189ca5e743d47ff33ca81f7edd549e82352b78a3",
+    "my_commit_parent": "adc0fcafe3cd8cec9cd5eda12f6b4d904c7b7f38",
+    "merged_master": "d50835b533cb57e146ee30be88a68994381b4ab6",
+    "说明": "门禁类数字测自 merged_master（交付态）；A/B 背对背与变异矩阵测自隔离对 my_commit_parent / my_commit（只含我这一个改动）。两类数字来自不同的树，不要混读。"
+  },
+  "key_findings": [
+    "🔴 本任务的全部风险在一句话里：把「拒绝」换成「路由」时，原拒绝理由背后的担忧必须换形式保留。旧形态靠「拒绝整篇」，新形态靠「_mom 与 _ytd 是两个不同的列」——**这道防线的全部实现就是 nameField.pick 的三行 switch**，而它的现场守卫是 golden test 的 NotContains。拆掉拒绝而不落实 pick，就是亲手做了本迭代最想防的那件事。",
+    "🔴 **合计句也必须路由，否则新列是孤儿**：selectRMBCumulativeFlow 原来只保累计句、0 命中即硬失败。不改它，deposit_flow_mom / loan_flow_mom 没有任何代码会写，而模板覆盖断言照样绿；且 2022-07（需求文档用来论证 FieldDepositFlowMoM 存在理由的那一篇）修完仍会被整篇拒绝。实测改后 2022-07 抽出 deposit_flow_mom=447。",
+    "🔴 **形态②不处理会整篇失败，而不是少一个字段**：tsfFlowScopeEnd 取「位置上紧随其后的总量句起点」⇒ 累计句孤悬段末时它的作用域里一个分项都没有 ⇒ ytd 分支 8 个 mustMatch 全 not found ⇒ return nil, err，而 ytd 分支先跑、mom 分支根本轮不到。",
+    "🔴 **贷存两侧的合计句口径可以不同**：2022-08 的贷款节有「1-8月…累计增加15.61万亿元」而存款节只有当月句。我最初把 golden test 的两侧写成同一个 flag，被这一篇当场证伪。⇒ 路由必须逐侧判，不能按篇判。",
+    "🔴 **DoD 要求的「诊断门下移」经实测证伪，我没有照做**（详见 decisions[0]）：下移会在「当月合计句 + 前缀不认识的累计句」上静默丢掉可恢复的累计数据，正是 M1c-3a 的 R3 的失效方式。"
+  ],
+  "decisions": [
+    {
+      "decision": "🔴 「前缀不认识」诊断**仍挂在「累计族为空」**，未按 DoD 下移到「两族都空」",
+      "rationale": "两条实测：① DoD 的误报前提为假——unrecognisedPeriodPrefixes 的谓词已足够精确（只在「句尾命中而完整 flowRE 在同一结束位置未命中」时有话说），纯当月报告 2020-04 实测返回 []，门留原位不会误报；② 下移会制造静默数据丢失——正文同时有当月合计句与一条前缀不认识的累计句时，下移后当月族有命中 ⇒ 诊断不触发 ⇒ 静默走当月路径、把 18.7 万亿累计数据丢掉且不告诉任何人，那正是 R3 的失效方式；③ 保留在原位同时保持了改动前的行为（原实现就是累计族为空即诊断），下移才是行为回归。已在 dev_done 之前把订正与判据写进 done_criteria.functional[1]；两条测试分别钉住「不误报」（A 格 require.Empty）与「不静默丢失」（B 格）。若 Leader 不认可，改回是 3 行。"
+    },
+    {
+      "decision": "形态②的处置：该族作用域内**一条分项都没有 ⇒ 只写总量、正常继续**；**抽到一部分又缺另一部分 ⇒ 仍然报错**",
+      "rationale": "DoD 要我选一个判据并写下理由，因为这是本任务最容易被后人改坏的一处。选这个划分的理由：整族缺席是**真实体例**（形态②的累计句孤悬段末，作用域内本就没有分项，另一族有整套），把它当错误会让那八篇继续整篇失败；而「抽到一部分」是**模板缺口**（某个分项名的模板不匹配了），退化成静默跳过会把这类真缺陷一起吞掉，表现为字段无声消失——本包反复禁止的失败方式。⇒ 全有或全无，中间状态响亮失败。实现用一个临时 collector 承接单趟结果，抽不全时整份丢弃（不能边抽边写进 c：第 5 项失败时前 4 项已经在里面了）。由 TestTSFFlowArticleCaliberEdgeCases 的「分项抽到一部分」与「整族缺席」两格构成最小对。"
+    },
+    {
+      "decision": "sectorCaliberOf 的错误不带 what，由调用方 fmt.Errorf(\"hestia: %s%w\", what, err) 包一层",
+      "rationale": "DoD 逐字给定的签名 (body, anchor string, coverage []*regexp.Regexp) (sectorCaliber, error) 不收 what。而错误必须点名是哪一侧（排障时「存款分部门段」与「贷款分部门段」的下一步不同）⇒ 由两个调用点各包一层。⚠️ **两侧各有一处 wrap，只测一侧的话另一侧漏了 what 也不会红** ——TestSectorCaliberOfStillRefusesWhenUnreadable 因此两侧都测。"
+    },
+    {
+      "decision": "`cal` 在分部门循环**之前**求一次；判据写成「性质」而不是「调用次数」",
+      "rationale": "DoD 强调这是 TASK-011 的分析基座：sectorCaliberOf 对一个段返回一个标量 ⇒ pick 对该段全部条目返回同一族 ⇒ 成对列在同一观测里必然单侧。改成逐项判会静默换掉 |ytd| ≥ |mom| 的前提。守卫写成 TestSectorCaliberIsComputedOncePerSection：断言「同一段内必然是一族全有、另一族全无」。**不用调用计数**——那要么靠桩要么靠读源码，重构时会假红；性质判据只在真的分叉时红。"
+    },
+    {
+      "decision": "移除四处「pick 返回空串就报错」的运行时防御分支，改由表层测试守",
+      "rationale": "那四处在结构上不可达：caliberAbsent 等价于「覆盖面模板一个都不命中」，而 pick 之前那行 mustMatch 用的正是同一批模板。不可达的运行时分支既是死代码又拉低覆盖率，而它想防的（写模板表时漏填一列）是**数据错误**，该由数据的测试抓 ⇒ 新增 TestTemplateTablesDeclareBothColumns 遍历三张表断言两列都非空、且 totalField 非空时 totalMoM 也非空。"
+    },
+    {
+      "decision": "既有测试**一条未删**，按「判据换形式不换内容」逐条迁移",
+      "rationale": "被打回的风险最高的是「把碍事的测试删掉」。做法：断言「必须报错」的一律改成断言「必须落进哪一列」，并保留原注释里的理由原文（「不能把当月值装进 *_ytd」逐字保留，只是从靠拒绝达成变成靠选列达成）。每条迁移都补一句 NotContains——**那半条才是原拒绝理由的直系继承者**，正向断言对「值进错列」完全不敏感（值本身是对的）。"
+    },
+    {
+      "decision": "calibrate/parse 侧的夹具改用从真语料**派生**的 -broken-ordinals.html（越界申报见 scope_note）",
+      "rationale": "那 8 条测试的住户（pboc-2020-04-monthly.html 等）现在解析成功了，「本迭代不解析」这一格在它们的夹具上 membership 变 0——那是本迭代的目标，不是缺陷。但该分类在代码里仍可达（Parse 失败 ∧ onlyCurrentMonthFlowSentences），故从同一篇真语料派生：只把首节序号「一」改成「五」，Parse 因板块序号不连续失败，而存贷款合计句一个字没动。⇒ 派生版比原来的最小对**更干净**：两篇都因同一理由失败，唯一变量是有没有累计合计句（原来那对差了两个变量）。⚠️ 同时在 TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists 里加了一段正面确认：两篇真语料现在都 Parse 成功——不写这一段的话「为什么换住户」会失传。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/extract.go",
+    "internal/hestia/extract_test.go",
+    "internal/hestia/profiles.go",
+    "internal/hestia/profiles_test.go",
+    "internal/hestia/calibrate_test.go",
+    "internal/hestia/parse_test.go",
+    "internal/hestia/testdata/pboc-2020-04-monthly-broken-ordinals.html",
+    "internal/hestia/testdata/pboc-2022-08-monthly-broken-ordinals.html"
+  ],
+  "scope_note": "🔴 **越界申报（已在 dev_done 之前经 update 补进 writes，5 → 7）**：新增 ./internal/hestia/calibrate_test.go 与 ./internal/hestia/parse_test.go。原因见 decisions[6]。numstat 取自提交本身（git show --numstat 189ca5e）：extract.go 240/65、extract_test.go 581/148、profiles.go 23/0、profiles_test.go 89/10、calibrate_test.go 44/17、parse_test.go 49/32、两个 testdata 各 441/0 与 438/0。",
+  "interfaces_exposed": {
+    "sectorCaliber": "新增枚举（internal/hestia/extract.go）：caliberAbsent / caliberCumulative / caliberCurrent。caliberAbsent 表示「本节没有分部门段」，本判定不表态。",
+    "sectorCaliberOf": "func sectorCaliberOf(body, anchor string, coverage []*regexp.Regexp) (sectorCaliber, error) —— 取代 checkSectorCaliber（已删）。唯一保留的拒绝是「段起点之前没有任何期次前缀」。错误不带 what，调用方包一层。",
+    "nameField.pick": "func (nf nameField) pick(c sectorCaliber) string（profiles.go）——caliberAbsent 返回空串。**这是本迭代整条防线的实现**，改它之前请先读 golden test 的两条 NotContains。",
+    "selectRMBFlowByCaliber": "func selectRMBFlowByCaliber(re *regexp.Regexp, body, what string) ([]string, bool, error) —— 取代 selectRMBCumulativeFlow（已删）。bool 报告是否累计口径。优先累计族；任一族多于一条仍硬失败。当月族谓词含 m[1] != \"\"（空前缀不许落进当月族）。",
+    "setTSFFlowItems": "func setTSFFlowItems(c *collector, scope string, cal sectorCaliber, what string) error —— 在一个口径族的作用域里抽分项，区分「整族缺席（放行）」与「部分缺失（报错）」。",
+    "对 TASK-007 的提示": "deposit_flow_mom / loan_flow_mom 现在真的有代码写了（selectRMBFlowByCaliber 的当月分支），depositResidualOf 的 mom 族不再恒 skip。",
+    "对 TASK-011 的提示": "「一段一个口径」这个前提由 TestSectorCaliberIsComputedOncePerSection 钉住（断言同一段内必然一族全有、另一族全无）。若将来有人把 cal 改成逐项求，那条测试会红。",
+    "对 TASK-012 的提示": "本任务的逐篇差集为空、救回 24 期；post 侧剩余 5 个未成功期次（2020-02 / 2021-05 / 2022-04 / 2022-05 / 2023-05）全部在 base 里就未成功。其中三篇（2021-05 / 2022-05 / 2023-05）现在报的是**新错误**「社融增量分项（当月口径）只抽到 7/8 项，缺 [企业债券]」——那是模板缺口，属兜底工作量。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master d50835b533cb57e146ee30be88a68994381b4ab6）": {
+      "go test ./internal/hestia/... ./cmd/... -count=1": "全绿",
+      "coverage(internal/hestia)": "96.1% of statements（门槛 ≥96.1%，未跌破）",
+      "go vet ./internal/hestia/... ./cmd/...": "零输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账）",
+      "go.mod / go.sum": "零改动"
+    },
+    "A/B 背对背（测自隔离对 adc0fcafe3cd8cec9cd5eda12f6b4d904c7b7f38 / 189ca5e743d47ff33ca81f7edd549e82352b78a3）": {
+      "方法": "两棵 git worktree 各编一份二进制，同一时刻**交替**跑 base/post 各 2 轮，同一语料同一 flag",
+      "确定性自检": "base 两轮逐字节一致 ✓；post 两轮逐字节一致 ✓（输出 206 行 → 112 行）",
+      "聚合数": "待解析 200 → 217；本迭代不解析 18 → 1；解析失败 39 → 4",
+      "🔴 硬判据｜逐篇差集": "**空**。base 未成功 29 期、post 未成功 5 期，post 的 5 期全部在 base 的 29 期里 ⇒ 改动前成功的期次一篇都没有变失败。反向救回 **24 期**（不必为空，那是本任务的产出）。",
+      "post 侧剩余 5 期": "2020-02（住户存款 matched 2 sentences）/ 2021-05、2022-05、2023-05（社融增量分项当月口径只抽到 7/8，缺 企业债券）/ 2022-04（作用域子项 短期贷款 not found）",
+      "🔴 2022-07 实际抽取结果（DoD 要求贴出来，不接受「测试通过」）": "Parse err = nil，25 个字段：deposit_flow_mom=447、deposit_household_mom=-3380、deposit_corp_mom=-10400、deposit_fiscal_mom=4863、deposit_nbfi_mom=8045、loan_flow_ytd=143500、loan_corp_total_mom=2877、loan_hh_short_mom=-269、loan_hh_mlt_mom=1486、loan_bill_mom=3136、loan_corp_short_mom=-3546、loan_corp_mlt_mom=3459、loan_nbfi_mom=1476、deposit_balance=251.1、loan_balance=207.03、m2=257.81、m1=66.18、m0=9.65 等。⚠️ **loan_flow_ytd 与 deposit_flow_mom 共存**——贷款节有「1-7月…累计」而存款节只有「7月份…447亿元」，两侧各判各的。",
+      "语料": "--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete（AD-3）"
+    },
+    "🔴 变异矩阵（隔离 worktree wt-t005-mut；主工作区 extract.go sha256=b3fcc0cefc6620eb9920fdc3055b20e5f9139742dd70718603742df1b254ba4d、profiles.go sha256=f8f66c4c0e725dd0790b80fe792c2575afc885333f686781ced716ebdbd7927c，变异前后逐字节一致）": {
+      "对照组": "隔离副本未变异 → 全绿（两次：开跑前与收尾各一次）",
+      "V1｜sectorCaliberOf 的「无前缀⇒报错」→ return caliberCurrent, nil": "KILLED。转红：TestSectorCaliberOfStillRefusesWhenUnreadable（指定守卫）、TestSectorCaliberErrorIsDistinguishable。共 2 条。",
+      "V2｜口径判定反向（命中 cumulativePeriods 返 caliberCurrent）": "KILLED。转红 30 条，含指定守卫 TestSectorCaliberOfReportsInsteadOfRefusing。",
+      "V3｜pick 的 caliberCurrent 分支 → 返回 nf.ytdField": "KILLED。转红 12 条，含 TestMixedCaliberReportRoutesEachSectionToItsOwnColumns（golden，头号风险现场）与 TestNameFieldPickSelectsColumnByCaliber（单元级）。",
+      "列唯一性（每条守卫只被自己那条杀）": "✅ TestSectorCaliberOfStillRefusesWhenUnreadable 只被 V1 杀；✅ TestSectorCaliberOfReportsInsteadOfRefusing 只被 V2 杀；✅ TestNameFieldPickSelectsColumnByCaliber 只被 V3 杀。",
+      "⚠️ 严格双向对角线做不到，如实报告": "golden test 被 V2 **和** V3 同时杀。那不是遮蔽——V2 把每一篇的口径判反，golden 的 NotContains 正该因此转红。V2/V3 是**语义面很大**的变异（改的是路由本身），与 TASK-003 那种字符级变异不同，行不可能只有一个 FAIL。⇒ 我报的是「列唯一性成立 + 行不唯一且有解释」，不是「完美对角线」。",
+      "变异纪律": "还原用 cp 自备份，**不用 git checkout** —— 隔离树 checkout 出来的是 base 版本，会把我的实现一起擦掉（第一次就撞到了，V1 之后发现并改正，V1 已在修好的 harness 里重跑）。每个变异体落盘后先 diff 逐字核对、再 gofmt -e 过语法闸。"
+    },
+    "新增测试": [
+      "TestSectorCaliberOfReportsInsteadOfRefusing（三种返回，各用真实语料）",
+      "TestSectorCaliberOfStillRefusesWhenUnreadable（V1 的守卫，贷存两侧都测）",
+      "TestSectorCaliberIsComputedOncePerSection（一段一个口径，性质判据）",
+      "TestNameFieldPickSelectsColumnByCaliber（V3 的单元级守卫，含全表两列互异）",
+      "TestTemplateTablesDeclareBothColumns（表层：两列都非空、totalField 非空则 totalMoM 非空）",
+      "TestMixedCaliberReportRoutesEachSectionToItsOwnColumns（golden，形态①②与阴性各一条，V3 的现场）",
+      "TestTSFFlowArticleCaliberEdgeCases（两族都没有 / 当月族两条 / 分项部分缺失 / 整族缺席，四格）",
+      "TestSectionFailsLoudlyWhenNoFlowSentenceAtAll（端到端：不得静默产出半份 Values）"
+    ],
+    "迁移的既有测试（一条未删）": [
+      "TestSectorCaliberRejectsNonCumulativeSamples → TestSectorCaliberRoutesNonCumulativeSamplesToMoM",
+      "TestSectorCaliberGuardsBothSides / IsStructuralNotNumeric / JudgesByExtractionCoverageNotAnchor / ErrorIsDistinguishable / StaysSilentWhenNoSectorSegment",
+      "TestTSFFlowArticleRefusesCaliberMix → ...RoutesCaliberMixToSeparateColumns；TestTSFFlowSectionRefusesCaliberMixOnRealArticle → ...RoutesCaliberMixOnRealArticle",
+      "TestTSFFlowArticleTotalSentenceForms 的类3/类4；TestTSFFlowArticleRefusesTwoCumulativeSentences 的文案",
+      "TestSelectRMBCumulativeFlowPicksMonthlyCumulative → TestSelectRMBFlowByCaliberRoutesMonthlySentences（+ TestFlowREExtractsRangePrefixSamples）",
+      "TestParseRefusesMonthlyWithoutPeriodToDateSentence；TestParseCoversAllKinds 的两个阴性格",
+      "calibrate_test.go 的 6 条（换派生夹具）"
+    ]
+  }
+}

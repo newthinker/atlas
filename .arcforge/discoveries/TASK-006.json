@@ -1,0 +1,94 @@
+{
+  "task": "TASK-006",
+  "title": "completeness 的必填集改口径感知（ytd 或 mom 齐全即可）",
+  "author": "dev-m1c4-b",
+  "anchors": {
+    "my_commit": "d38d7619654feb03c1e8b4100e08ebe56af809f7",
+    "my_commit_parent": "d50835b533cb57e146ee30be88a68994381b4ab6",
+    "merged_master": "3cbc0d9023abb81a2146d905ca6862cf72629d62",
+    "说明": "本任务只改校验判定、不改抽取，DoD 明确不做全语料背对背 ⇒ 只有一类数字，全部测自 merged_master。"
+  },
+  "key_findings": [
+    "🔴 **两处 DoD 未预见的连锁，都是实测发现的，见 decisions[1] 与 decisions[2]。** 共同形状：TASK-004/005 之后「哪些列属于哪个板块」这件事变了，而两个**独立于 gateCompleteness 的**地方还按旧形状算——一个是必填集的来源（tsfSectionFields），一个是另一份缺失判定（backfill_load.missingFields）。**改 completeness 的判定算法不会自动修好它们。**",
+    "🔴 **momFields() 退场是本任务的实质动作之一，不是收尾**：留着它 want 恒为单侧 ⇒ missingCaliberAware 的 mom→ytd 方向在真实路径上永不走到，而手工构造 want 的单测照样全绿。⇒ 补了 TestMissingCaliberAwareMomToYTDIsReachableOnRealWant，用 requiredFields() 的**真实返回值**先 require.NotEmpty(moms) 再断言不算缺——它在「without 还留着」时会因为前一条 require 而红，指向正确的位置。",
+    "DoD 指出的「需求文档期望数组顺序写反」属实：fieldOrder 里 FieldM2 在 FieldDepositHouseholdYTD 之前。我在测试里把顺序依据做成了 require（先断言 idx(M2) < idx(DepositHouseholdYTD) 再断言结果），而不是让读者相信注释——**照文档抄会红在排序逻辑上，而那里没有错**。",
+    "⚠️ **validate_test.go 一行未改且全绿**。gateCompleteness 只换了中间那个 for 循环，req 的来源、len(req)==0 ⇒ skipped{unknown_extractor}、Value: &n、firstN(missing,3) 全部原样 —— 既有断言不动而全绿，是「只换算法、不换契约」最直接的证据。"
+  ],
+  "decisions": [
+    {
+      "decision": "caliberFamilies() 从 fieldOrder 按**列名**派生：`x_mom` 的孪生是同词干的 `x_ytd`，两者都必须在 fieldOrder 里",
+      "rationale": "不手写第二份名单——手写的那份迟早与 fieldOrder 分叉，先错的一定是手抄的那份（与 tsfSectionFields 的注释同一条理由）。⚠️ **只配对真的成对的列**：存量/余额/同比/利率/外汇都没有当月口径的对应物，它们不进这张表 ⇒ missingCaliberAware 对它们原样逐个要求。少了这条约束，「口径感知」会顺手放松掉一大批与本迭代无关的字段而正向测试全绿 —— 由 TestMissingCaliberAwareLeavesUnpairedFieldsAlone 守（含一条交叉：别的字段在场不构成顶替）。"
+    },
+    {
+      "decision": "🔴 tsfSectionFields() 与 tsfFlowFields() 补上 `_mom` 列（27→36、9→18）",
+      "rationale": "**DoD 未预见的连锁，实测发现。** 这两个函数回答的是「这两节**会产出哪些列**」。TASK-005 之后社融增量节按口径路由、同一节两种口径都可能产出 ⇒ 少列那 9 个 `_mom`，`without(fieldOrder, tsfSectionFields())` 会把它们留在 **v1（根本没有社融节的报告）** 的必填集里。实测（改前）：requiredFields(rule@v1) 对标准 v1 样本报缺 9 个 tsf_flow_*_mom，requiredFields(rule-monthly@v1) 同样。⚠️ **口径感知救不了它**——两侧都不在场，那正是 missingCaliberAware 该报缺的情形。改后四个 section-path extractor 的口径感知缺失全为 0。⚠️ 社融**存量**没有当月口径（tsfStockItems 只有 balance/yoy），故存量那半不变。"
+    },
+    {
+      "decision": "🔴 backfill_load.go 的 missingFields() 改成复用同一个 missingCaliberAware",
+      "rationale": "**DoD 未预见的第二处连锁。** 它自己遍历 mergedRequiredFields 判缺失，**不走 gateCompleteness** ⇒ 不改它，一份**三族齐全**的合并观测会被报成「缺 22 个字段」（实测 TestBackfillLoadFlagsPartialCoverage 的阴性对照当场红）。那正是把 absent-by-design 记成洞——本任务全篇要防的同一件事，只是换了个地方发生。**复用同一个函数而不是照抄一份判定**：两份判定迟早分叉，而分叉的表现是「completeness 说齐了、部分覆盖清单说缺 22 个」，读的人无从判断信哪个。"
+    },
+    {
+      "decision": "missingCaliberAware 的 twin map **双向**建，结果按 fieldOrder 排序（不是按 want 的顺序）",
+      "rationale": "双向：只建 ytd→mom 的实现能让「want 要 ytd 而 values 只有 mom」那一格全绿，而反方向在真实路径上会把整族报成缺失——而 momFields 退场之后 requiredFields 里确实含 _mom 列，那个方向是活的。按 fieldOrder 排序而不是按 want：错误信息里的字段顺序要与 DDL/报表一致，否则同一份缺失在两处读起来像两回事；而 want 可能来自 mergedRequiredFields，它的顺序取决于由哪几篇合成。"
+    },
+    {
+      "decision": "既有的两条「必填集 ≡ 键集」断言按「判据换形式不换内容」迁移，不删",
+      "rationale": "TestRequiredFieldsMatchGoldenKeySets 与 TestExtractFieldsScopeMatchesRequiredFields 原来断言等式，理由是「抽取侧的板块归属与 completeness 侧的必填集不得分叉」。*_mom 进必填集后那个等式**结构上不成立**（golden/样本是累计口径的一篇，只产一侧）。⇒ 拆成两半：① 键集 ⊆ 必填集（抽出必填集不知道的字段仍是分叉）；② **口径感知之下一个都不缺**。②**比原断言更严**——漏配一对 caliberFamilies，那一对的 _mom 就会进 missing。另加一条交叉：把 golden 的 _ytd 全翻成 _mom，同样不该缺；少了它，只建单向 twin 的实现能让①②都绿。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/required.go",
+    "internal/hestia/required_test.go",
+    "internal/hestia/validate.go",
+    "internal/hestia/extract_test.go",
+    "internal/hestia/backfill_load.go"
+  ],
+  "scope_note": "🔴 **越界申报（已在 dev_done 之前经 update 补进 writes，4 → 6）**：新增 ./internal/hestia/extract_test.go（迁移 TestExtractFieldsScopeMatchesRequiredFields）与 ./internal/hestia/backfill_load.go（decisions[2]）。⚠️ 声明的 ./internal/hestia/validate_test.go **一行未改**——那本身是个结论，见 key_findings[3]。numstat 取自提交本身（git show --numstat d38d761）：required.go 95/29、required_test.go 217/20、validate.go 9/6、extract_test.go 18/4、backfill_load.go 11/7。",
+  "interfaces_exposed": {
+    "caliberFamilies": "func caliberFamilies() [][2]string —— 返回 22 对 {x_ytd, x_mom}，从 fieldOrder 按列名派生。",
+    "missingCaliberAware": "func missingCaliberAware(want []string, values map[string]float64) []string —— 同族两列任一在场即不算缺，结果按 fieldOrder 排序。**gateCompleteness 与 backfill_load.missingFields 共用它**，不要再写第三份判定。",
+    "momFields": "**已删除**（TASK-004 的过渡代码，退场点就是本任务）。requiredFields 的 v1/v2 分支回到 slices.Clone(fieldOrder) 与 without(fieldOrder, tsfSectionFields())。",
+    "tsfSectionFields / tsfFlowFields": "**语义未变、返回集变大**（27→36、9→18）：它们回答「这两节会产出哪些列」，TASK-005 之后两种口径都会产出。改动它们等于改动 v1 的必填集，动之前请先读 decisions[1]。",
+    "对 TASK-007 的提示": "depositResidualOf 的 mom 族现在真的能取到合计（TASK-005 让 deposit_flow_mom 有了写入方），且 completeness 不再因整族走当月口径而判 failed。",
+    "对 TASK-011 的提示": "「一段一个口径」的前提由 TASK-005 的 TestSectorCaliberIsComputedOncePerSection 守；本任务不改抽取，那个前提不受影响。missingCaliberAware 只影响「缺不缺」的判定，不影响值。",
+    "对 TASK-012 的提示": "completeness 与部分覆盖清单现在用**同一个** missingCaliberAware。若真跑验收里两者对同一期给出不同结论，那是它们各自的 want 不同（requiredFields vs mergedRequiredFields），不是判定算法分叉。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 3cbc0d9023abb81a2146d905ca6862cf72629d62）": {
+      "go test ./internal/hestia/... ./cmd/... -count=1": "全绿",
+      "coverage(internal/hestia)": "96.1% of statements（门槛 ≥96.1%，未跌破）",
+      "go vet ./internal/hestia/... ./cmd/...": "零输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 cmd/atlas/backtest_test.go、crisis_test.go（既有欠账）",
+      "go.mod / go.sum": "零改动"
+    },
+    "DoD error_handling 要求的 completeness 回归检查": "跑 `-run Completeness`：TestMergedObservationCompletenessIsEvaluatedEndToEnd（2 子测试）、TestCheckCompletenessIDMatchesGates、TestMergedCompletenessIsEvaluated、TestMergedCompletenessSkipsWhenPartsYieldNoFields（4 子测试）全部 PASS，**无一条从 failed 变成 passed**。validate_test.go 一行未改。",
+    "口径感知下四个 section-path extractor 的缺失（施工中实测，改 tsfSectionFields 前后对照）": {
+      "改前": "rule@v2 缺 0；**rule@v1 缺 9**（tsf_flow_mom 与 8 个 tsf_flow_*_mom）；rule-monthly@v2 缺 0；**rule-monthly@v1 缺 9**（同上）",
+      "改后": "四者**全部缺 0**"
+    },
+    "字段计数变化（全部由测试逐条钉住）": {
+      "tsfSectionFields()": "27 → 36",
+      "tsfFlowFields()（tsf-flow@v1 的必填集）": "9 → 18",
+      "requiredFields(rule@v2)": "54 → 76",
+      "requiredFields(rule@v1)": "27 → 40",
+      "requiredFields(rule-monthly@v1)": "25 → 38",
+      "requiredFields(rule-monthly@v2)": "52 → 74",
+      "mergedRequiredFields(月报v1+存量+增量)": "52 → 74（38 + 18 + 18）"
+    },
+    "新增测试": [
+      "TestCaliberFamiliesPairsEveryMomWithItsYTD（22 对，配对由列名派生，含反向闭合：fieldOrder 里每个 _mom 都必须出现一次）",
+      "TestMissingCaliberAwareAcceptsEitherSide（两个方向各一格）",
+      "TestMissingCaliberAwareStillReportsRealGaps（两侧都空才算缺 + 顺序依据做成 require）",
+      "TestMissingCaliberAwareLeavesUnpairedFieldsAlone（🔴 放松的边界 + 一条交叉）",
+      "TestMissingCaliberAwareMomToYTDIsReachableOnRealWant（🔴 用真实 want 钉住 mom→ytd 可达）"
+    ],
+    "迁移的既有测试": [
+      "TestRequiredFieldsMatchGoldenKeySets（等式 → 子集 + 口径感知不缺 + _ytd 翻 _mom 交叉）",
+      "TestExtractFieldsScopeMatchesRequiredFields（同上）",
+      "TestTSFSectionFieldsIsExactAndDistinct / DerivesFromTemplateTables（27→36、哨兵 +3→+4）",
+      "TestTSFStandaloneFieldsPartitionTSFSection / DeriveFromTemplateTables（9→18、哨兵 10→20）",
+      "TestRequiredFieldsMonthlyDropsOnlyFXSection（25/52 → 38/74）",
+      "TestMergedRequiredFieldsIsUnionOfParts（52 → 74，并去掉 momFields 那一层）"
+    ]
+  }
+}

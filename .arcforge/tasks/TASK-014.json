@@ -1,0 +1,89 @@
+{
+  "id": "TASK-014",
+  "title": "QA 返工：一个代码级静默失效面 + 五处描述已废弃实现的注释",
+  "description": "QA 两轮 + code-simplifier 的发现，经双源独立确认（simplifier 与 QA 的 Minimalist 视角各自得出，不是一个抄另一个）。无 CRITICAL、无代码级活缺陷。人类已批准在本 sprint 修掉而非结转。",
+  "status": "verified",
+  "complexity": "简单",
+  "dependencies": [
+    "TASK-010",
+    "TASK-011",
+    "TASK-012",
+    "TASK-013"
+  ],
+  "wave": 11,
+  "context_from": [
+    "TASK-010",
+    "TASK-011",
+    "TASK-013"
+  ],
+  "writes": [
+    "./internal/hestia/validate.go",
+    "./internal/hestia/validate_test.go",
+    "./internal/hestia/backfill_load_report.go",
+    "./internal/hestia/profiles.go",
+    "./internal/hestia/fields.go",
+    "./internal/hestia/extract.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "assigned_to": "dev-m1c4-b",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "🔴 **唯一的代码级改动**：`gateCorpLoanReconcile`（`validate.go:548-551`）绕开了 `bandLimitRatio`，直接用 `if r <= b.tol` ⇒ **`caliberBand.absTol` 对这道闸静默无效**。\n\n```go\n// 改前（validate.go:551）\nif r <= b.tol {\n// 改后\nif r <= bandLimitRatio(b, math.Abs(total)) {\n```\n\n**等价性论证（simplifier 给出，Leader 已核）**：corp_loan 两族 `absTol == 0` ⇒ `0.0/|total|` 对有限非零 `total` 恒为 `+0.0` ⇒ `math.Max(tol, +0.0) == tol` **精确成立**（`tol > 0`）；`pickCaliberBand` 已保证 `total != 0`。⇒ **浮点上逐位等价，零行为变化。**\n\n⚠️ **时态要写进注释**：`validate.go:531` 明说 corp_loan「absTol 刻意不设（保持 0 ⇒ 纯比值）」，理由是两族分母都远离零 ⇒ **今天不产出任何错数据，这是陷阱不是活缺陷**。改它是为了消除「将来谁填 `absTol` 会被静默忽略、编译通过、测试全绿」这个失效面。**请在改动处写明这一点**，否则后人会以为修的是个活 bug。\n\n⚠️ **必须配一条测试**：给 corp_loan 的 band 填一个非零 `absTol`，断言它**真的生效**（改前该测试会失败）。没有这条测试，这次修复本身就是下一个静默失效面。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**五处「注释描述了一个不再存在的实现」全部订正**。⚠️ 按本 sprint 惯例：**保留原文 + 标注它何时失真**，不是抹掉 —— 「留一句已变假的自证比没有自证更糟：它看起来像有据可查」。\n\n| # | 位置 | 问题 |\n|---|---|---|\n| 1 | `validate.go:399-401` | 注释说「在**绝对域**比较」，代码在**比值域**；且指代的标识符 `bandLimit` **根本不存在**（函数叫 `bandLimitRatio`）。⚠️ 它描述的正是那个**已实测证否并废弃**的第一版实现（会让 `TestDepositSumBoundaryIsInclusive` 变红的那版） |\n| 2 | `backfill_load_report.go:441` | 「容差 **±1 亿元，取整误差**」—— 实际是 `max(5, 2%×\\|expected\\|)`，**差 3 个数量级**（报告实印门限最大 6138）。⚠️ **理由本身也失效**：「取整误差」只支持得起 ±1，现行容差按量级缩放 ⇒ 照它理解会把 `caliberIdentityRelTolerance` 读成多余。🔴 **新理由已经写好了**（`:385-393`「为什么不是纯绝对容差（±1 亿元，本任务前任的第一版）」），**这次只需把函数文档接上去**，不必重新论证 |\n| 3 | `profiles.go:576-582` | 断言 `deposit_flow_mom` / `loan_flow_mom`「**当前没有任何写入方**」—— 现在有（`extract.go:678` 与 `:736`）；且引述的 `selectRMBCumulativeFlow` 已不存在、引述的 `keep` 条件已被 `keepCum`/`keepCur` 取代。🔴 **结论方向恰好相反**：它说「别以为它会被写」，而事实是它会被写 |\n| 4 | `fields.go:81-82` | 「在那之前这 22 列**恒为空，不进任何字段分布表**」—— 同批前瞻注释，已失真 |\n| 5 | `profiles.go:303-304` | 「在那之前 `momField` **只被覆盖度检查读到，不参与任何抽取**」—— 同上 |\n\n⚠️ **3/4/5 是同一批（TASK-004 期写下的前瞻性注释），simplifier 扫全包确认恰好三处，无遗漏。**",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**两处悬空的旧函数文档注释**（本轮造成的孤儿）：函数删了、doc comment 留在原地，**与下一个符号的 doc comment 之间没有空行** ⇒ **godoc 上它永远是下一个符号的文档**。\n\n| 位置 | 原属 | 现在挂在 |\n|---|---|---|\n| `extract.go:331-335` | `selectRMBCumulativeFlow`（已删） | `selectRMBFlowByCaliber` |\n| `extract.go:573-596`（**24 行**） | `checkSectorCaliber`（已删） | 🔴 **`type sectorCaliber int`** |\n\n🔴 **第二处尤其严重**：那 24 行描述的是**被本 sprint 推翻的设计**（「拒绝装进 `*_ytd`」正是 TASK-005 换掉的行为），而紧随其后的 `sectorCaliberOf`（`:619-638`）有一份**结论相反的正确文档** —— **两份并排、同屏、都在 godoc 上**。\n\n⚠️ **关键是插一个空行** —— 不插空行，godoc 上它永远是下一个符号的文档。**这是不看渲染结果就发现不了的坑**（源码里它看起来只是「上面有一段旧注释」）。\n\n⚠️ `extract.go:331-335` 的后半与 `:345-346` **逐字重复**，删这 5 行信息损失为 0。\n\n⚠️ **明确排除**：`backfill_load_report.go:276-279` 有完全同形的悬空注释，但 simplifier 回基线 commit 核过 —— **它是上一个 sprint（M1c-3b 的 TASK-006）留下的，不在本轮范围**。**不要顺手改它**（那会让本任务的 `writes` 声明与实际改动的归属对不上）。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "🔴 **CONTRACTS 两条被 QA 实测证否的描述必须更正**（证据在 `qa-m1c4` 的 round1/round2 报告里，若报告未落盘则以下述为准）：\n\n**① §F / 结转项 7-d 说 `observationsDDL` 老库开口「没有任何测试守着」—— 证否。**\n`NewStore` 里的 `verifyObservationsSchema`（`store.go:152`）会当场拒绝，`TestNewStoreRejectsSchemaDriftOnLegacyDB`（`store_test.go:195`）守着它。QA 拿**真的 61 列备份库** `data/hestia.db.bak-20260902-204417` 复制到 scratchpad 后用当前代码打开，得到：\n\n```\nError: hestia: hestia_observations is missing 22 column(s) (e.g. tsf_flow_mom, ...) ... migrate manually with ALTER TABLE\n```\n\n⇒ **§F 说的「INSERT 会因列不存在而失败，或静默丢字段」在观测表上不会发生 —— 它在开库那一刻就响亮失败了。**\n\n**② §G 开口 a 说 13 对整族位移「两条判据同时失明」「住户贷款完全无闸区、只能靠人工抽样发现」—— 对 monthly 档证否。**\n兜底的**族内量级核对**（跨观测比中位数，`backfill_load_report.go:228`）在 **monthly 档对全部 22 对都是「已判」**的（基线报告 84 条「样本不足未判」= 21×4，**monthly 出现 0 次**）。QA 做了两个整族位移变异跑真语料 218 篇：\n\n- **M5**（住户贷款族 ytd↔mom 互换）→ 该闸报 **2 违反**，`loan_hh_short` / `loan_hh_mlt` 全中，入权威表 76→66\n- **M6**（存款分部门四项互换）→ 报 **4 违反**，四项全中；而**口径路由核对仍是 0 违反**（证实它结构性失明），入权威表 76→**82**\n\n⇒ **风险等级从「无自动防线」下调为「monthly 档有一道实测有效的自动防线；annual/h1/q1/q1_q3 档确实无闸（mom 侧样本恒 0）」。**\n\n⚠️ **M6 那个「入权威表 76→82，位移反而让更多期过闸」要一并记** —— **这一格如果只看「过闸数」会得到相反的信号。**\n\n⚠️ 这两条**都是文档缺陷不是代码缺陷** —— 代码是对的，错的是 CONTRACTS 对代码的描述。**订正时要写明「原描述错在哪、实测证据是什么」**，不要只把结论换掉。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**CONTRACTS 记一笔「同名不同义」**（simplifier 建议，Leader 采纳）：\n\n包里有**两个都叫 median 的统计量**：\n- `medianOf`（`backfill_load_report.go:603-611`）：偶数样本取两中值**平均**\n- `nearestRank(sorted, 50)`（`calibrate_report.go:108`）：**nearest-rank 不插值**（`:51-56` 有明确设计理由）\n\n⇒ **谁拿它们互相印证会得到无法解释的小差异。**\n\n⚠️ 这与本 sprint 记的「**同值不同量**」（79/13/20/21/76/52 六组）是**姊妹形状**：那个是**同一个数字指两个量**，这个是**同一个名字指两个统计量**。🔴 **两者都不会让任何算式不平** —— 这正是它们难被发现的共同原因。\n\n⚠️ **不要动这两个函数**（simplifier 判定：换任一方向都会改数值，而 `medianOf` 喂的是 `checkCaliberFamilyMedians` 的判据，为消一个 9 行函数去动一道刚验收的闸，收益不抵风险）。**只记文档。**",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "🔴 **有一条我要你核实的理由 —— 我核出它是错的，别把它写进注释。**\n\nQA 的 Minimalist 视角报 `profiles.go:576-582` 时说「**在它被引入的同一个 commit 上这句话就是假的：同 diff 的 TASK-005 已接上写入方**」。\n\n**Leader 实测证否**：\n\n```\ngit log -S'当前没有任何写入方' -- internal/hestia/profiles.go\n  → f56ec05 feat(TASK-004): 22 个当月口径字段原子扩容（fieldOrder 54→76）\ngit log -S'FieldDepositFlowMoM' -- internal/hestia/extract.go\n  → 189ca5e feat(TASK-005): 分部门段与合计句按口径路由，不再拒绝整篇\n```\n\n⇒ **是两个不同的 commit，且 TASK-005 在 TASK-004 之后。注释写下时是对的，是 TASK-005 让它变假的。**\n\n**结论不变**（注释现在确实是假的、该改），**但理由错了**。⚠️ 订正那处注释时，**写「本注释写于 TASK-004，TASK-005 接上写入方后失真」，不要写「引入时就是假的」** —— 后者会让读者以为当时的作者写了句当场就假的话，从而误判这是粗心而非时序问题。\n\n🔴 **这是本 sprint 第 N 次「结论对但理由错」** —— 而理由是别人复现时唯一的入口。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**门禁**：`go test ./...` 全绿；`internal/hestia` 覆盖率 **≥96.1%**（当前 96.3%）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`gofmt -l internal/hestia cmd/atlas` 只有 `backtest_test.go`、`crisis_test.go` 两个既有欠账；`go.mod`/`go.sum` 零改动。\n\n🔴 **本任务的特殊判据：`git diff` 对「行为」必须为空。**\n除了 `absTol` 那一行（有等价性论证，零行为变化）与新增的那条测试，**其余五处 + 两处悬空注释全部只改注释**。⇒ 请给出证据：`git diff <base>..<head> -- internal/hestia/*.go | grep '^[+-]' | grep -v '^[+-][+-]' | grep -vE '^\\s*[+-]\\s*//'` 应**只剩 `absTol` 那一行改动与新测试**。\n\n⚠️ **自证数字在最后一次改动之后统一重采**，锚写全 sha。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "🔴 **收尾时用 `git log -S` 扫一遍本 sprint 被换掉的字面量**（simplifier 的方法，Leader 已验证有效）：\n\n```bash\ngit log -S'<旧字面量>' --format='%h %ad %s' --date=short 4670ccbe0abd703f86b1e0c53aef8d3c86cc512d..HEAD\n```\n\n**为什么不是通读注释**：这五处「读起来都很对劲」—— 一条描述旧实现的注释**在写下的那一刻是准确的**，措辞、语气、论证都对，**没有任何「不对劲」的特征**。它唯一的问题是它描述的那个东西已经不在了，而**那件事不在注释里，在 diff 里**。⇒ **通读是在错误的载体上找证据。**\n\n⚠️ **而且这不是「疏忽」问题**：`backfill_load_report.go:441` 那条，写下 ±1 的 commit 与换掉容差的 commit 是**同一个 sprint、同一条任务线**，新理由**就写在同一个文件里** —— 该知道的都知道、该写的都写了，函数文档还是没跟上。\n\n⇒ **请把这次扫描的结果（扫了哪些字面量、各命中什么）写进 discovery**，那是「这次修全了没有」的唯一可核查证据。\n\n**例行**：worktree `task/TASK-014-m1c4`（**master 不是 main**）→ 提交锚 `fix(TASK-014):` → **通知 Leader merge 并等它进 master**（AD-4）→ 回主仓库重采 → `dev_done --expect-epoch <N>` → 自己拆 worktree。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verifying",
+    "to": "verified",
+    "by": "test-m1c4-b",
+    "at": "2026-09-02T16:12:01Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-014.json",
+  "verify_baseline": {
+    "head": "4735b817a441d61055c793a34dfca65b1309c521",
+    "discovery_sha256": "c40e4376ae3144ab22f7b381bfc42be60ecad602a14c64abd037fbc6d74c583d",
+    "at": "2026-09-02T15:58:20Z"
+  },
+  "verifier": "test-m1c4-b"
+}

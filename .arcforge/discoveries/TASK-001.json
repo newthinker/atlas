@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-001",
+  "title": "stripHTML 去行首空白（2023-05 的小节标题不再静默丢失）",
+  "commit": "4c9ca20848139abcffb0638071227ab460575231",
+  "branch": "task/TASK-001-m1c4",
+  "key_findings": [
+    "【给 TASK-002 的基线交接】改动后 2023-05 **仍未解析成功，改报了另一个错误**——由 `hestia: section ordinals are not consecutive from 一: got 4 sections, section[0] is \"二、\"` 变为 `hestia: 人民币存款期内合计 not found among 2 candidate sentence(s) [5月份/人民币 5月份/外币]: refusing to fall back to a neighbouring one`。⇒ 板块切分缺陷已消除，它现在卡在**期次前缀/口径**这一层，与 2022-02/2023-02、2022-04/2023-04 同族，正是 TASK-002 与 _mom 字段族要处理的形态。分类标签仍是「本迭代不解析」，故**篇数计数一个都没变**（19 篇 → 19 篇）。",
+    "【NBSP 断言此前是空转的】计划文档给的测试输入 `\"<p>  一、开头</p>…\"` 全是 ASCII 空格，**一个 NBSP 都没有**，而断言消息却写着「含 NBSP」。它当时能过只是因为 spaceRE 的字符类里有 `\\x{00a0}`——那是**另一条正则的性质**。若有人把 `\\x{00a0}` 从 spaceRE 拿掉，该测试不会变红而行首 NBSP 会重新漏网。本任务已在合成输入里放进真的 NBSP 与制表符（写成 `\\u00a0` / `\\t` 转义），把这条从「靠 spaceRE 顺带保证」变成「本测试自己保证」。",
+    "【顺序不变式的守卫此前只有一条真语料样本】换序变异实测：加 NBSP/tab 之前只杀得动 TestStripRealSampleTitlesSurviveLeadingWhitespace/&nbsp; 一条；加了之后 TestStripHTMLRemovesLeadingWhitespace 也转红。全角空格子例**不红**——punctNormalizer 在两条正则之前就把全角空格换成了 ASCII 空格，故它对顺序不敏感。",
+    "【&nbsp; 不再是可用的脱锚构造手法】sections_test.go 的 QA 反例原用「一、二 前各插一个 &nbsp;」构造「6 段、无社融」的残缺 v2。本改动之后该变异实测得 **8 段**（形态前提消失）。改插「·」——非空白、不被折叠、标题行照样匹配不上 `(?m)^[一-十]、`，退化形态与原变异逐字相同（6 段、首个是「三、」）。换的是**构造手法**不是被测的守卫；该测试自己的注释即已声明「前导空白只是一种成因，序号连续性与丢失原因无关」。",
+    "【2025 年报的一、二 恰是社融两节】实测 splitSections 首段为「一、社会融资规模存量同比增长8.3%」，印证 detectExtractor 注释里 v2 = v1 + 社融两节、脱锚后与合法 v1 不可分的那条论证。"
+  ],
+  "decisions": [
+    {
+      "decision": "lineLeadSpaceRE 置于 spaceRE 之后、blankLineRE 之前（结论照办）",
+      "rationale": "结论成立，但**计划文档与 DoD 给的理由是错的，已实测证伪**。文档理由：「先删行首再折叠的话，\"  一、\" 删掉第一个空格后剩 \" 一、\"，折叠对单个空格是恒等变换」。证伪：`(?m)^ +` 的 `+` 是**贪婪**的，会删光行首**全部** ASCII 空格 ⇒ 纯 ASCII 输入换序后结果**逐字相同**（实测 in=\"  一、\" 现行=\"一、\" 换序=\"一、\" 相同=true）。那个例子是它自己的反例。真实理由是**两条正则的字符集不同**：lineLeadSpaceRE 只认 ASCII 空格，而 NBSP(\\u00a0) 与制表符必须先经 spaceRE 折叠成 ASCII 空格才被它认得。实测 in=\"\\u00a0一、\" 现行=\"一、\" 换序=\" 一、\"（漏网）；in=\"\\t一、\" 同。⇒ 换序会让以 NBSP 或制表符开头的行漏网。注释已按真实理由重写，并明写「不要用那个 ASCII 例子解释」——错的理由比没有理由更糟，它会让下一个人以为自己验证过了。tab 会泄漏这一条是本任务独立发现，Leader 的订正只提到 NBSP。"
+    },
+    {
+      "decision": "不放宽 (?m)^ 锚定，只修喂给锚定的文本",
+      "rationale": "DoD boundary[0] 与 extract.go 的错误信息本身：放宽锚定会让「rule@v2 少两个社融节」与「合法的 rule@v1」不可区分，而 (板块数,有无社融)=(6,false) 在两者上完全一致 ⇒ 27 个字段会被静默读成「本期模板本就没有」。这正是 M0 复盘列为最危险的那类无声错误。"
+    },
+    {
+      "decision": "sections_test.go 的 QA 反例变异手法由 &nbsp; 改为 ·（越界改动，已申报并补进 writes）",
+      "rationale": "本改动结构性地消除了该反例赖以构造脱锚的机制，实测该变异现在得 8 段、require.Len(secs,6) 必红。这不是「测试写错了」而是「构造手法被修好了」。备选方案是删掉该子测试——不取，因为它验的是 detectExtractor 对残缺 v2 的拒绝（与本任务正交），删了会丢掉一条真语料级守卫。改用「·」是最小改动：非空白字符、不被任何折叠触及，退化形态与原变异逐字相同。ablation 实测：把 lineLeadSpaceRE 那步去掉时该测试**保持绿**，证明它现在与空白机制真正独立。"
+    },
+    {
+      "decision": "新增 TestStripRealSampleTitlesSurviveLeadingWhitespace（超出 DoD 列举的两条测试）",
+      "rationale": "上一条决策把「&nbsp; 前缀会让标题脱锚」这份**真语料级证据**从 sections_test.go 移走了，若不补，该性质在真样本上不再有人看着。新测试在 2025 年报上断言 &nbsp;/全角空格前缀后仍得 8 个板块，接管这份证据。ablation 实测：去掉 lineLeadSpaceRE 那步时本测试两个子例全红，非重言式。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/strip.go",
+      "numstat": "21+/0-",
+      "what": "新增 lineLeadSpaceRE = `(?m)^ +`；stripHTML 在 spaceRE 之后、blankLineRE 之前插一步删除；注释写明真实的顺序理由并显式否掉文档那个错例子"
+    },
+    {
+      "path": "internal/hestia/strip_test.go",
+      "numstat": "62+/0-",
+      "what": "新增 TestStripHTMLRemovesLeadingWhitespace（输入含真 NBSP 与制表符）与 TestStripRealSampleTitlesSurviveLeadingWhitespace；补 DoD↔测试映射注释"
+    },
+    {
+      "path": "internal/hestia/sections_test.go",
+      "numstat": "11+/3-",
+      "what": "🔴 越界改动，已申报并补进 writes：QA 反例的变异手法 &nbsp; → ·，并注明换的是构造手法不是守卫"
+    }
+  ],
+  "interfaces_exposed": [
+    "无新增导出符号（lineLeadSpaceRE 是包级私有变量），包的导出面不变 ⇒ TestPackageExposesNoWriteFunctions 不受影响",
+    "stripHTML 行为改变：输出中任何一行都不再以空白开头（ASCII 空格 / NBSP / 制表符 / 全角空格四者皆已归一后删除）。下游凡依赖 `(?m)^` 锚定的模板都受益；凡依赖「行首有空格」的代码会受影响——全包测试全绿，未发现此类依赖。"
+  ],
+  "verification": {
+    "measured_at_head": "4c9ca20848139abcffb0638071227ab460575231",
+    "measured_after_last_change": "是，worktree `git status --porcelain` 为空（0 行）时统一重采",
+    "coverage": "96.1% of statements（go test ./internal/hestia/... -cover，锚 4c9ca20，DoD 门槛 ≥96.1%）",
+    "suite": "go test ./internal/hestia/... -count=1 全绿；go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 只列出 cmd/atlas/backtest_test.go 与 cmd/atlas/crisis_test.go（既有欠账，f5d7b82，未动）——判据是「这两个之外无新增项」，成立",
+    "go_mod_untouched": "go.mod / go.sum 未出现在改动里",
+    "corpus_back_to_back": {
+      "method": "两份二进制同一时刻背对背跑同一语料（--dir 用主仓库绝对路径 + --allow-incomplete）；另跑第三次 base 做确定性自检",
+      "determinism_selfcheck": "base 连跑两次输出**逐字节一致**（cmp -s 通过）⇒ 输出确定，base/after 的差异是真差异而非采样噪声",
+      "diff_scope": "全文件 186 行，diff 仅 4 行（2 个 hunk / 2 个逻辑条目）；变更行里出现的期次经机器提取去重后**只有 2023-05**，无任何其它期次",
+      "hunk_1": "分类聚合行：`- 1 × [金融统计数据报告] 本迭代不解析：…；原始解析错误：<E>: 2023-05`，其中 <E> 由 `section ordinals are not consecutive from 一…` 变为 `人民币存款期内合计 not found among 2 candidate sentence(s) [5月份/人民币 5月份/外币]…`。**计数 `1 ×` 未变**，仅错误文本变",
+      "hunk_2": "明细行：`2023-05  金融统计数据报告  articles/2025092212553223669.html  …` 同一处错误文本替换",
+      "aggregate_counts": "🔴 与 Leader 订正一的预期不同：`本迭代不解析` **base=19 篇、after=19 篇，未变**。原因是 2023-05 并未离开该分类——它换了失败原因但仍属同一标签。⇒ 实际 diff 比订正后的判据**更严格**：只出现了第 1 类（该篇自身的行），第 2 类（因它移动而 ±1 的计数行）**一次都没出现**",
+      "other_periods_unchanged": "其它期次的明细行零变化 ⇒ 未波及别的报告",
+      "section_ordinals_occurrences": "base=2（同一篇在汇总行与明细行各一次）、after=0 ⇒ 该错误已从全语料消失"
+    },
+    "ablation": [
+      "去掉 `s = lineLeadSpaceRE.ReplaceAllString(s, \"\")` 这一步：TestStripHTMLRemovesLeadingWhitespace 与 TestStripRealSampleTitlesSurviveLeadingWhitespace（两个子例）全红；TestDetectExtractorRejectsNonConsecutiveOrdinals **保持绿** ⇒ 改用「·」之后该守卫确与空白机制独立。还原后 strip.go 的 sha256 与变异前一致（YES）",
+      "两步换序：TestStripHTMLRemovesLeadingWhitespace 与 TestStripRealSampleTitlesSurviveLeadingWhitespace/&nbsp; 转红；全角空格子例不红（punctNormalizer 先于两条正则生效）。还原后 sha256 一致（YES）"
+    ]
+  },
+  "provenance": "实现、测试与全部实测由 dev-m1c4-c 完成。strip.go 的顺序理由注释由 code-simplifier 子代理先行改写为「字符集不同」这一正确版本（其最终回复未说明改了什么，故由 dev-m1c4-c 用换序变异独立复核确认，并补上 tab 也会泄漏、以及加 NBSP 后合成测试同样转红两点）。Leader 以消息形式给出两条 DoD 订正（diff 判据、NBSP 断言空转），均已落实。"
+}

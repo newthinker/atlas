@@ -1,0 +1,83 @@
+{
+  "task": "TASK-002",
+  "title": "periodAlt 与 cumulativePeriods 同步加「今年前N个月」族（结转项 1b）",
+  "author": "dev-m1c4-b",
+  "anchors": {
+    "my_commit": "d54df6d8cb6c899778ed0d7b60d8a9d6a60532ee",
+    "my_commit_parent": "8d02371ca2bc9513dac1a625bf3a8c73d70a68c2",
+    "merged_master": "99415b9621d99d920ee0e18025db77f893096b1a",
+    "说明": "门禁类数字测自 merged_master（交付态）；A/B 背对背测自隔离对 my_commit_parent / my_commit（只含我这一个改动）。两类数字来自不同的树，不要混读。"
+  },
+  "key_findings": [
+    "真语料 2022-05 正文写「今年前5个月人民币贷款增加…」，periodAlt 认不出这个前缀 ⇒ 整篇落进 Unsupported，且被 CONTRACTS §E-3 误记为「报告本身没有累计数据」。数据就在正文里，与 cumulativeRangeAlt 立项时的形态逐字同构。",
+    "全语料 218 篇实测（在主仓库 data/ 上跑）：`今年前[0-9一二三四五六七八九十]{1,3}个月` 只出现「今年前5个月」一种，共 2 处（2022-05 的两篇）。其余十项一并登记，理由与既有两族相同：只登记见过的那一种，将来出现「今年前8个月」会是静默 0 命中。",
+    "「今年以来」在语料里 0 篇，只出现在 extract_test.go:1675 一带（合成前缀）⇒ CONTRACTS §E-4 的结转项 8 未触发，那一格原样保留、未改一字。",
+    "🔴 半改比不改更难排查（本任务消融实测得出的新事实）：只加 periodAlt 而不加 cumulativePeriods 时，2022-05 的诊断从 base 那句明确的「失败的成因是**期次前缀不被识别**……该往 periodAlt 与 cumulativePeriods 同步加一项」退化成泛化的 `not found among 3 candidate sentence(s)`。⇒ 不改时报表会直接告诉你怎么修；只改一半时那句提示消失了。这正是 §E-3 那类误记的温床，建议进 CONTRACTS。"
+  ],
+  "decisions": [
+    {
+      "decision": "新常量 cumulativeThisYearAlt 并入 cumulativeMonthAlt，而不是直接拼进 periodAlt",
+      "rationale": "sections.go:448 的 quarterOrLongerPeriods() 是从 cumulativePeriods **减去** strings.Split(cumulativeMonthAlt,\"|\") 与 `N月份` 派生出来的。放进 cumulativeMonthAlt 才会被正确减掉；直接拼进 periodAlt 会让这 11 个月度累计前缀被误判成「季度及以上」。实测 sections_test.go:870 的 quarterOrLongerPeriods() 等值断言在本改动后无需修改，即为该选择正确的旁证。"
+    },
+    {
+      "decision": "穷举 n=2..12 共 11 项，不写成 `今年前[0-9]{1,2}个月`",
+      "rationale": "与既有 cumulativeMonthAlt / cumulativeRangeAlt 完全相同的理由：正则能匹配的每个累计前缀都必须在 cumulativePeriods 里有对应键，字符类没法枚举成 map 键，那条一一对应关系就不再可被机械核对。n 从 2 起——1 月的累计就是当月，走「1月份」那条既有特例，不属本族。"
+    },
+    {
+      "decision": "两位数排在一位数前，但注释里**不写**「必须如此否则会错」",
+      "rationale": "按 DoD boundary[1] 的要求照做，但如实标注这是零成本防御而非安全性来源。真实机制：Go regexp 在交替上会回溯，leftmost-first 是对**整体匹配**而言的；顺序有语义的前提是两个分支都能走完整条正则（`人民|人民币` 那类前缀对），本族十一项两两无前缀关系，不构成该前提。这个误解在归档里已被纠正三次，不再传第四次。"
+    },
+    {
+      "decision": "同步扩两条既有穷举断言，而不是放松它们",
+      "rationale": "TestCumulativeMonthAltEnumeratesEveryCumulativePrefix 用的是**等值**断言（21→32 项），TestCumulativePeriodsKeySet 同样等值（26→37 键）。这两条转红正是设计意图——让「periodAlt 的组成变了」成为一次显式的、有人看见的改动，而不是静默扩面。改 want 而不改断言形态。"
+    },
+    {
+      "decision": "自证的 2×2 消融在**隔离 worktree** 上做，主工作区一个字节不碰",
+      "rationale": "就地变异会让并发 agent 读到变异态、拿到与自己改动无关的假红，而假红最坏的后果是被误记成真缺陷。做法：git worktree add --detach 到临时目录，变异前后各校验一次被变异文件在主工作区的 sha256（a0908148e78f401e4529ae5673f398dd96be6af8ffb7ebb8660a2c2d90a30011，前后一致），收尾 worktree remove --force。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/profiles.go",
+    "internal/hestia/profiles_test.go"
+  ],
+  "scope_note": "声明的 writes 含 internal/hestia/extract_test.go，实际**未改**（结转项 8 未触发）。实改 2 个文件，在声明范围之内，无越界。numstat 取自提交本身（git show --numstat d54df6d）：profiles.go 38/1、profiles_test.go 128/4。",
+  "interfaces_exposed": {
+    "cumulativeThisYearAlt": "新增包级常量（internal/hestia/profiles.go），11 项交替：今年前10个月|今年前11个月|今年前12个月|今年前2个月|…|今年前9个月。已并入 cumulativeMonthAlt，故也在 periodAlt / periodPat 之内。",
+    "cumulativePeriods": "新增 11 键（今年前2个月 … 今年前12个月），键集由 26 → 37。",
+    "对 TASK-005 的提示": "2022-05 已离开「本迭代不解析」清单，但它**改报了另一个错误**：`人民币存款分部门段的期次前缀 \"5月份\" 不是累计口径，拒绝把当月分部门值装进 *_ytd 字段`。该错误由 extract.go:560 的 `if !cumulativePeriods[last]` 产生，属 TASK-005 的射程，本任务不处理。",
+    "对 TASK-005 的第二条提示": "2023-05 仍在失败清单，报 `人民币存款期内合计 not found among 2 candidate sentence(s) [5月份/人民币 5月份/外币]`，与 2022-02/2023-02、2022-04/2023-04 同族，卡在 selectRMBCumulativeFlow。本任务前后未变（两端各 4 次出现）。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 99415b9621d99d920ee0e18025db77f893096b1a）": {
+      "go test ./internal/hestia/... -count=1": "ok，全绿",
+      "coverage": "96.1% of statements（门槛 ≥96.1%，未跌破）",
+      "go vet ./internal/hestia/... ./cmd/...": "零输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，源自 f5d7b82，与本迭代无关）",
+      "go.mod / go.sum": "零改动"
+    },
+    "A/B 背对背（测自隔离对 8d02371ca2bc9513dac1a625bf3a8c73d70a68c2 / d54df6d8cb6c899778ed0d7b60d8a9d6a60532ee）": {
+      "方法": "两棵 git worktree 各编一份二进制，**同一时刻交替**跑 base/post 各 2 轮（不是先跑完 base 再跑 post），同一语料同一 flag。",
+      "确定性自检": "base 两轮逐字节一致 ✓；post 两轮逐字节一致 ✓",
+      "全量 diff": "18 行（**不是 grep 2022-05，是全量 diff**）：4 行提到 2022-05，14 行是汇总计数行，**其它期次的明细行 0 条**（机械核对：把提到 2022-05 的与汇总计数行滤掉后剩 0 行）",
+      "2022-05 是否离开「本迭代不解析」清单": "base 1 次 → post 0 次 ✓（本任务的目标）",
+      "汇总计数变化": "待解析 199→200；本迭代不解析 19→18；解析失败 38→39（2022-05 改报别的错误，属 TASK-005 射程）",
+      "2023-05": "两端各 4 次，未变（DoD 预期，不判红）",
+      "语料": "--dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --allow-incomplete（AD-3：必须主仓库绝对路径，worktree 里没有 data/）"
+    },
+    "2×2 消融（隔离 worktree，主工作区 sha256 前后一致）": {
+      "格 A｜只加口径表、不加正则": "TestThisYearPrefixFamilyIsRecognised 单红；语料输出**与 base 逐字节相同 = 完全 no-op**",
+      "格 B｜只加正则、不加口径表": "TestThisYearPrefixFamilyIsRecognised + TestCumulativeThisYearAltAndCumulativePeriodsAgree **双红**；语料「本迭代不解析」仍 19 篇、2022-05 仍在清单里；候选句由 1 涨到 3（[今年前5个月/人民币 5月份/人民币 5月份/外币]）但口径判定全筛掉 ⇒ 命中 0，**且诊断退化**（见 key_findings 第 4 条）",
+      "格 post｜两处都加": "全绿；本迭代不解析 18 篇，2022-05 离开清单",
+      "结论": "两处确是独立硬卡点；两次单删的失败信息不同（A 单红 / B 双红），两条断言非冗余"
+    },
+    "新增测试": [
+      "TestThisYearPrefixFamilyIsRecognised（11 个子测试，n=2..12，每个含正则+口径两条断言）",
+      "TestThisYearPrefixDoesNotShadowExistingFamilies（6 个子测试，含「今年以来」必须仍不被认得）",
+      "TestCumulativeThisYearAltAndCumulativePeriodsAgree（项数一一对应 + 正向逐项）"
+    ],
+    "修改的既有测试": [
+      "TestCumulativeMonthAltEnumeratesEveryCumulativePrefix：want 21 → 32 项",
+      "TestCumulativePeriodsKeySet：want 26 → 37 键"
+    ]
+  }
+}

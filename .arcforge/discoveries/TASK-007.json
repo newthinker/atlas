@@ -1,0 +1,87 @@
+{
+  "task": "TASK-007",
+  "title": "deposit_sum 与 corp_loan_reconcile 按口径族分别校验",
+  "author": "dev-m1c4-b",
+  "anchors": {
+    "my_commit": "0e36ff8a294281a0aeba8689c7915ab72ec74a5d",
+    "my_commit_parent": "3cbc0d9023abb81a2146d905ca6862cf72629d62",
+    "merged_master": "5045c65974f8907596c5e28ec16c4ac34185e069",
+    "说明": "本任务只改校验判定、不改抽取，DoD 明确不做全语料背对背 ⇒ 门禁类数字测自 merged_master；下面的『真语料端到端』与『指示性取样』测自我的 commit 那棵树（隔离对的 post 端），两者不混。"
+  },
+  "key_findings": [
+    "🔴 **真语料端到端确认闸门真的判了**（DoD 点名要求，单测手工构造 Values 证明不了这一条）：2022-07（rule-monthly@v1，deposit_flow_mom=447、无任何 ytd 分部门列）的 deposit_sum status=failed、value=2.950783、reason=\"tolerance_exceeded[mom]: residual 2.9508 exceeds 0.1200 (total=deposit_flow_mom)\"；corp_loan_reconcile status=failed、value=172、reason=\"residual 0.0598 exceeds 0.0500 [mom, total=loan_corp_total_mom]\"。**两道闸都不是 skipped{absent}** —— 那正是本任务存在的理由。",
+    "🔴🔴 **但那个 2.9508 说明照抄 ytd 的占位容差几乎必然是错的。** 指示性取样（见 verification）：deposit mom 的 p50=0.2576 是 ytd p50(0.0892) 的约 3 倍、max 2.9508；corpLoan mom 的 p95=0.0784 已超现值 0.05。⇒ 照抄之下 deposit 的 mom 族会**过半期次 failed**。**这是需要 Leader 裁决的取值问题，不是实现问题**，已在交付报告里列出两个选项并给了倾向（可见 > 静默）。",
+    "⚠️ 顺带佐证（不是新发现）：deposit **ytd** 的 p95=0.1505 已超现值 0.12 —— 与 Leader 所说「0.12 出自 M0 三样本、被 79 期实测证伪」一致。",
+    "🔴 **漂移历史必须用与本期同一族算**。原实现的 hist 循环写死 depositResidual(p.Values)（即 ytd）。若本期走 mom 而历史按 ytd 算，两个分母量级差一个数量级，`|r − mean|` 这个判据完全失去意义 —— 而它**不会让任何测试变红**，只是给出一个同样合理的错结论。",
+    "⚠️ **gateCorpLoanReconcile 对「整族位移」结构性免疫**（DoD 已核实，我实现时确认了）：sum 与 total 四项全部来自同一个分部门段，整族一起搬到错的列时 sum 与 total 同步位移、残差逐位不变。⇒ **不要把它当成口径路由的防线**。本迭代对整族位移的防线是 TASK-011 的 |ytd| ≥ |mom|，而那条只覆盖双侧；住户贷款（totalField 为空）连这道内部自洽闸都没有。"
+  ],
+  "decisions": [
+    {
+      "decision": "🔴 两个 MoM 容差**照抄同族 ytd 的值**并标注为未标定占位，**不就地拍一个更宽的数**",
+      "rationale": "DoD 明令「不要静默填一个数」。而且失效方向不同：**failed 会进 pending 被人看见，拍宽的容差会让所有 mom 期次静默通过** —— 前者是可修复的噪音，后者是不可见的失效，正是本迭代全篇在防的形态。照抄 ytd 是「不引入新臆断」的最小选择，但它不是「两族一样」这个结论 —— 我随后用指示性取样证明了两族差得很远，并把那张表写进 thresholds.go 的注释，让「它没标定」这句话变成一个**可核对的数**而不是一句免责声明。⚠️ 沿 stock_continuity_max 三档 n=0 的既定形态：**值写下来 + 注释写明它不是标定过的，两半都要做**。"
+    },
+    {
+      "decision": "🔴 CorpLoanToleranceMoM 的标定开口**显式记下**：TASK-009 不产 corp_loan 的残差分布",
+      "rationale": "DoD 的独立反审指出这一条。TASK-009 只产 deposit_sum 的分布 ⇒ TASK-010 对 corp_loan 的 mom 容差**无从标定**，只能拍脑袋 —— 而那正是本迭代要清算的那笔账（thresholds.go 的 0.12 出自 M0 三样本、被 79 期实测证伪）。⚠️ 我这次顺手量到了 corpLoan mom 的分布（n=26），**但那不能替代 TASK-009 的产出**：取样口径不同（逐篇 Parse vs 回填管线），且我只是为了回答「照抄行不行」，没做分布形态与异常值分析。⇒ 需要 Leader 或者让 TASK-009 扩产、或者把该值显式登记为长期未标定占位。"
+    },
+    {
+      "decision": "选族做成 caliberBand + pickCaliberBand，「两族都齐取 ytd」是**裁决**",
+      "rationale": "靠 map 迭代顺序碰运气的实现会在两族都齐时随机选一族，而两族的容差不同、残差也不同 ⇒ 同一份数据每次跑出的结论可能不一样。⚠️ **测试判据是「取到的残差等于 ytd 那一族的」而不是「Reason 里写着 ytd」** —— 后者一个把族名写死成 \"ytd\" 的实现照样绿。用例里刻意把 mom 分项全部减半，保证两族残差必然不等，选错族一定看得出来（并用 require 把这个前提本身也断言了）。"
+    },
+    {
+      "decision": "bandDiagnosis 沿用既有的 absent_field: / zero_denominator: 前缀，两族都不可用时 Reason 同时带上两族诊断",
+      "rationale": "沿用格式而不是另起一套：既有测试与下游报告都按那两个前缀读（validate_test.go 有 `\"zero_denominator:\"+FieldDepositFlowYTD` 的逐字比对）。同时带上两族：只报一族的话运维会去查错的列 —— 而两族的列名长得很像，查错了不容易察觉。⚠️ 零分母仍走 skipped 而不是 failed 这条纪律没有变，只是判定它的地方挪进了 bandDiagnosis；既有的 TestCorpLoanSkipsOnZeroDenominator 未被破坏。"
+    },
+    {
+      "decision": "把 corpLoan 的三个分项从 gate 里的内联字面量提成 corpLoanPartFields / corpLoanPartFieldsMoM",
+      "rationale": "两族的对应关系若只存在于两段并列的代码里，分叉时没有任何断言会红。提成变量之后 TestCorpLoanPartFieldsAgreeAcrossCalibers 才有东西可比 —— 判据是**逐项比词干**，不是「两边都有 3 个」：长度相等而顺序错位的两份清单会算出一个「加总正确但配对错误」的残差，而它看起来完全正常。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/validate.go",
+    "internal/hestia/validate_test.go",
+    "internal/hestia/thresholds.go"
+  ],
+  "scope_note": "**无越界**：3 个文件全在声明的 writes 内。声明的 ./internal/hestia/thresholds_test.go **未改** —— 容差那条测试（TestMoMTolerancesAreDeclaredAndNonZero）放在 validate_test.go 里与其余五条同处，方便一起读。numstat 取自提交本身（git show --numstat 0e36ff8）：thresholds.go 58/2、validate.go 122/32、validate_test.go 167/0。",
+  "interfaces_exposed": {
+    "depositResidualOf": "func depositResidualOf(values map[string]float64, total string, parts []string) (float64, bool) —— 由 depositResidual 泛化。字段不全或合计为零返回 false（算不出来的期次不计入任何统计，而不是当成残差 0 —— 那会把均值拉向 0，让正常期次看起来在漂移）。",
+    "caliberBand / pickCaliberBand / bandDiagnosis": "口径族选择机制。两道勾稽闸共用，**不要再写第三份选族逻辑**。band 里带 tol —— 两族的容差不能共用一个值。",
+    "depositPartFieldsMoM / corpLoanPartFields / corpLoanPartFieldsMoM": "两族清单，**逐项对应**（顺序即对应关系），由两条 AgreeAcrossCalibers 测试钉住。",
+    "Thresholds.DepositSumToleranceMoM / CorpLoanToleranceMoM": "🔴 **未标定占位**，取值照抄同族 ytd。TASK-010 标定前者；后者 TASK-009 不产分布，需 Leader 裁决。字段注释里有指示性分布表。",
+    "对 TASK-008 的提示": "我改了 validate.go 的 gateDepositSum / gateCorpLoanReconcile 两个函数与文件顶部的字段清单区；其余部分未动。TASK-008 依赖本任务，串行，不冲突。",
+    "对 TASK-010 的提示": "两个 MoM 容差是占位，thresholds.go 的字段注释里有我量的指示性分布（含 n、min、p50、p95、max 四族）。⚠️ 那是**指示性**的，取样口径与 TASK-009 不同，标定请用 TASK-009 的产出。",
+    "对 TASK-012 的提示": "真跑验收时 mom 族的 deposit_sum 预计会有过半期次 failed（p50 0.2576 > 占位值 0.12）。那不是回归，是占位容差的必然结果 —— 见 key_findings[1]，Leader 的裁决决定它会不会在验收时出现。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 5045c65974f8907596c5e28ec16c4ac34185e069）": {
+      "go test ./internal/hestia/... ./cmd/... -count=1": "全绿",
+      "coverage(internal/hestia)": "96.1%（门槛 ≥96.1%，未跌破）",
+      "go vet": "零输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅两处既有欠账",
+      "go.mod / go.sum": "零改动"
+    },
+    "DoD error_handling 要求的逐条读输出": "跑 `-run 'TestDepositSum|TestCorpLoan' -v`：14 个子测试全 PASS，**无一条从 failed 变 skipped 或反之**。既有的 TestCorpLoanSkipsOnZeroDenominator、TestDepositSumSkipsOnZeroDenominator、TestDepositSumBoundaryIsInclusive（4 子测试）、TestDepositSumCombinesTwoCriteria（6 子测试）全部原样通过。",
+    "🔴 真语料端到端（测自我的 commit 0e36ff8a294281a0aeba8689c7915ab72ec74a5d）": {
+      "样本": "2022-07，articles/2025092212552757258.html，rule-monthly@v1，25 字段",
+      "口径": "deposit_flow_ytd 不在 / deposit_flow_mom=447；loan_corp_total_ytd 不在 / loan_corp_total_mom=2877 ⇒ 整族走 mom",
+      "deposit_sum": "status=failed value=2.950783 reason=\"tolerance_exceeded[mom]: residual 2.9508 exceeds 0.1200 (total=deposit_flow_mom)\"",
+      "corp_loan_reconcile": "status=failed value=172 reason=\"residual 0.0598 exceeds 0.0500 [mom, total=loan_corp_total_mom]\"",
+      "结论": "两道闸**都真的判了**，不是 skipped{absent}。Reason 里带了族名与 total 列名，可复核是哪一族。"
+    },
+    "指示性取样（**不是标定**；测自同一棵树，逐篇 Parse，选族逻辑与闸门一致）": {
+      "deposit ytd": "n=52 min=0.0026 p50=0.0892 p95=0.1505 max=0.2501",
+      "deposit mom": "n=21 min=0.0082 p50=0.2576 p95=0.8194 max=2.9508",
+      "corpLoan ytd": "n=52 min=0.0023 p50=0.0137 p95=0.0286 max=0.0357",
+      "corpLoan mom": "n=26 min=0.0014 p50=0.0183 p95=0.0784 max=0.0788",
+      "⚠️ 局限": "取样口径（逐篇 Parse）与 TASK-009 的产出路径不同；没有做分布形态与异常值分析。它只回答一个问题——「照抄 ytd 的值行不行」，答案是不行。**不得当作标定依据引用。**"
+    },
+    "新增测试": [
+      "TestDepositPartFieldsAgreeAcrossCalibers / TestCorpLoanPartFieldsAgreeAcrossCalibers（两族逐项对应，比词干不比长度）",
+      "TestDepositSumChecksMoMFamily / TestCorpLoanReconcileChecksMoMFamily（当月族齐全 ⇒ 不得 skipped；且残差与同数据走 ytd 时逐字相同）",
+      "TestDepositSumPrefersYTDWhenBothPresent（两族都齐取 ytd，判据是残差值不是 Reason 文本）",
+      "TestDepositSumSkipsWhenNeitherFamilyComplete（Reason 同时带上两族诊断）",
+      "TestMoMTolerancesAreDeclaredAndNonZero（⚠️ 刻意**不**断言取值是多少——钉死取值等于把占位固化成契约）"
+    ],
+    "测试写法上的一处刻意选择": "TestDepositSumChecksMoMFamily 用 momOnly(golden2025) 把**真实 golden 整族翻转**，而不是手搓几个字段：手搓的 map 只含闸门要看的那几列，一个「凡是缺 ytd 就当成 mom」的实现照样绿；翻转过来的观测其余字段也都是 mom 口径，更接近真实的整族位移。"
+  }
+}

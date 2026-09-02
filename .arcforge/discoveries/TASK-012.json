@@ -1,0 +1,104 @@
+{
+  "task": "TASK-012",
+  "title": "全量真跑验收与 CONTRACTS 登记 M1c-4",
+  "author": "dev-m1c4-a",
+  "anchors": {
+    "step1_anchor": "bdc8252679b9740af8825b20eb80c485c557a745",
+    "my_commit": "920973fc621cc1352dd1431a07b446b971c5977a",
+    "merged_master": "06f59bb8f33a330ca9582d713c58ee4fe46a7bdc",
+    "ab_base": "4670ccbe0abd703f86b1e0c53aef8d3c86cc512d",
+    "clawdvault_commit": "669ab34",
+    "说明": "🔴 三类数字钉不同的树。① **门禁类**（go test ./... / cover / vet / gofmt）测于 **merged_master 06f59bb**。② **真跑验收数字**采于 step1_anchor `bdc8252` 起、经我的改动之后的最终态；merge 后在 06f59bb 上**再跑一次 load，与 worktree 那次逐字节一致**。③ **A/B 对照**钉在隔离对 `4670ccb`（M1c-3b 结束锚）vs `bdc8252`，两端各跑 2 轮、各自逐字节一致后才取值。④ **merge 区间只有我自己的两个 commit**（`bdc8252..06f59bb` = 920973f + merge），我那 2 个文件在 my_commit 与 merged_master 上 sha256 逐字节相同。⚠️ **不声称『已排除他人改动的影响』** —— 只能排除到 06f59bb 为止；该 sha 之后若有他人合入，需验证者在 verify_baseline.head 上复核。"
+  },
+  "key_findings": [
+    "🔴 **`tsf_stock` 实测 80 不是 79，DoD 的硬停判据触发，已查清。** 两把独立的尺同值（calibrate 字段表 80 / load 两表 60+20=80）⇒ 非测量误差。A/B 隔离对两端各 load 入临时库取期次集合做差：**post 多出且仅多出 `2026-01/monthly`，无样本丢失**；该期在 base 侧是解析失败之一，本 sprint 救回 ⇒ 79→80 是本轮修复的直接结果。**自证循环确实发生，但影响已量化**：`stock_continuity_max` 的真正标定输入是相邻期环比变化率 —— monthly n 68→69、p95 0.022912621359223333→0.02255310469419275（下降）、**max 0.026130169926258526 逐位不变**、annual 完全不变 ⇒ 现值 0.05 相对 max 仍有 1.9 倍余量，取值依据不受影响。",
+    "🔴 **DoD 的『口径路由异号跳过数』这一分类已不存在。** 报告里「异号」出现 0 次 —— TASK-011 已把判据从取号比较改成累计恒等式。原文**方向完全正确**（防「断言恒 skip 而报告全绿」），只是它描述的分类没了。换等价形式核：可判数 13 ≠ 0 且单侧跳过 1674 ≠ 总对数 2134。",
+    "🔴 **结转项 6-a：DoD 认定的『M1c-3a 的 TASK-010』经三条独立证据证否，正确答案是 M1c-1。** 证据：`calibrate.go:410`（就在待修输出**上一行**）写「出自 M1c-1 的 TASK-010 之前」；`calibrate.go:558` 写「早于 M1c-1 的 TASK-010 引入 completed_at」；`backfill_manifest.go:86` 自述「ManifestReconcile 是落盘的对账摘要（M1c-1 的 TASK-010 / QA R2-8）」。⚠️ **照原文写会把一个新的错误 milestone 写进用户可见输出**，而本条存在的全部理由正是「裸编号指向不唯一」——**用错的前缀比没有前缀更糟**：没前缀时读者知道自己得查，写了错前缀他不会再查。",
+    "🔴 **21 条 pending 全是 `deposit_sum`，逐条有账**：1 条 `tolerance_exceeded[ytd]`（2020-01，人类 Q2 刻意留可见）+ 20 条 drift（mom 12 / ytd 8）。集合差（base 17→post 21：新增 14 / 消失 10 / 不变 7）：**新增 14 期里 13 期在 base 的解析失败清单里** ⇒ 此前根本没被解析、更没被校验过，**是新增覆盖不是回归**；第 14 期 `2025-02/monthly` 是 TASK-008 的新增保护，实测 `residual 0.0458 drifted 0.0628 from 5-period mean 0.1086` **与其验证者报的逐字相同**；消失的 10 期已全部进权威表（逐期查过）。",
+    "⚠️ **附带发现（登记不处理）：`deposit_sum_drift_max = 0.03` 本轮未标定，却已成为 pending 的主要来源**（21 条里 20 条）。它与容差是同一形状的问题：0.03 是对着 ytd 残差（p50 0.0885、波动小）定的，而 mom 残差实测跨 0.008–2.95。不在任何任务的 `writes` 内、也无人类裁决 ⇒ **写进 CONTRACTS §C，免得下一个人把这 20 条读成回归**。",
+    "⚠️ **坏仪器实证**：需求文档 Step 4 用的 `grep -c \"缺\"` 得 **39**，而结构化取数（该节标题自带计数 + 逐条缩进行计数，两把尺同值）得 **37**。**它错得不多，所以最不会被追查。**"
+  ],
+  "decisions": [
+    {
+      "decision": "Step 1 采锚放在**第一步**并在最后一次改动后复核，不是最后一条",
+      "rationale": "DoD 明令，且理由可核：CONTRACTS §B 的数字曾登记在锚 `6ff4b45`，其后 TASK-011 与三轮 TASK-006 返工改变了过闸结果（75/21 实为 79/17），而清单末尾的『numstat 为空』**在返工之后没有人重跑**。本任务锚 `bdc8252` 取于开工第一步，改完 `calibrate.go` 与 CONTRACTS 后回到该步复核，并在 merge 后的 master 上再跑一次 load 与 worktree 那次比对（逐字节一致）。"
+    },
+    {
+      "decision": "🔴 每一处「为 0 / 无差异 / 全部通过」都同时给出被比较集合的大小",
+      "rationale": "TASK-010 验证者自陈的三次假绿是同一形态：**「没有不符」与「根本没量到」在输出上完全同形**（yaml 解析到 0 项 ⇒ 输出「不符：无 ✅」）。本轮的三条断言表逐条带集合大小；A/B 对照两端各跑 2 轮做确定性自检，**两端各自逐字节一致才取值**。"
+    },
+    {
+      "decision": "结转项 6-b（`profiles.go`）**正式销案**，不猜也不无限期挂着",
+      "rationale": "M1c-3a 的原始登记**全文只有一句、只给行号未引原文**。四次查找：① M1c-3a 自己的三个锚（30abe8a / 4a12794 / d3e6513）上看 `:198` —— 分别是 cumulativePeriods 表尾+模板注释 / 分部门字段表 / tsfStockRE 注释，无一是「被证伪的说法」；② `32bc1e5` 复核（M1c-3b 已做）同样不是；③ 当前文件按**内容**搜断言语气注释 15 处逐条读过，唯一明确记着「被证伪」的 `:83` 已由 M1c-3a 的 TASK-005 订正；④ 本 sprint 该文件已改 137/23 ⇒ 即使当年那句还在，行号也已再次漂移。**在没有原文的情况下任何『找到了』都只能是猜。** 🔴 这条遗留本身就是它自己那句教训（『用内容定位而不是行号』）的实证 —— **引一句原文的成本是一行，不引的代价是这条义务的全部内容。**"
+    },
+    {
+      "decision": "结转项 3 判定为**销案**而非移交",
+      "rationale": "`_mom` 字段族**吸收得比原方案更彻底**：按节部分抽取要**丢掉**当月的分部门值（只留累计口径那一份），而字段族把**两种口径同时原样存下、一个都不丢** ⇒ 原结转项要解决的问题不再存在。实测支持：本迭代不解析 19→1、解析失败 38→4、完整观测占比 36.5%→61.9%。"
+    },
+    {
+      "decision": "CONTRACTS 结构核对**先锚 `## Sprint M1c-4` 再切小节**",
+      "rationale": "DoD 点名：文件里 `### A.` 至 `### G.` 各已出现多次（本轮实测 A–D 各 4 次、E–G 各 3 次），全局 `grep '^### F\\.'` 必然数错（M1c-3a 数错三次）。⚠️ **这些次数是观察值，不要当常量引用** —— 加一节它们就变。核对方式：`awk '/^## Sprint M1c-4/,0' | grep -c '^### '` = 7。"
+    },
+    {
+      "decision": "ADR-0003 的补充在 **ClawdVault 单独提交**，并在此显式申报",
+      "rationale": "跨仓库路径（`~/Obsidian/ClawdVault`，独立 git toplevel），**不在本任务 `writes` 内**，无法经本仓库的 scope 声明覆盖。commit `669ab34`，信息锚 `docs(hestia):`。内容是「什么时候才算该上 LLM 兜底」的三条建立判据 + 反面教训（§E-3 那句『LLM 也变不出不存在的数』前半句对、结论错）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/CONTRACTS.md",
+    "internal/hestia/calibrate.go"
+  ],
+  "scope_note": "**本仓库无越界**：2 个文件都在声明的 `writes`（`./internal/hestia/CONTRACTS.md` + `./internal/hestia/calibrate.go`）内，未扩过 writes。numstat 取自提交本身（`git show --numstat 920973f`，即最后一次改动之后）：CONTRACTS.md **373/0**、calibrate.go **9/2**。🔴 **跨仓库改动 1 处已申报**：`~/Obsidian/ClawdVault/Projects/Hestia/0003-llm-must-not-write-source-of-truth.md`，独立仓库 commit `669ab34` —— 该路径在本仓库的 `writes` 体系之外，DoD boundary[1] 明令在 discovery 显式申报。",
+  "interfaces_exposed": {
+    "导出面": "🔴 **零新增导出**，也无签名变更。`calibrate.go` 只改了两处**用户可见输出字符串**的文案（补 milestone 前缀）与相应注释。",
+    "calibrate 输出文案变更": "两处：`⚠ manifest 没有 reconcile 对账摘要（出自 **M1c-1 的** TASK-010 之前）` 与 `incompleteNotice` 里的 `若它出自 **M1c-1 的** TASK-010 之前的 fetch`。⚠️ **若有下游在解析这两行文本，需同步**（本仓库内 grep 无解析方）。",
+    "CONTRACTS ## Sprint M1c-4": "A–G 七节。**下一个人读到的唯一版本** —— 本 sprint 里 `verified` 之后无人能写的那些结论（TASK-005 的 DoD 内部矛盾裁决、采样于更早树的 39/38、13 对从未被比较过的字段、TASK-011 discovery 里被证否的那句推理、TASK-010 discovery 的口径自述有误）全部落在这里。",
+    "对 TASK-013（生产库切换）的提示": "🔴 三条直接相关：① **`observationsDDL` 只在建表时生效**（`CREATE TABLE IF NOT EXISTS`），本迭代 `fieldOrder` 54→76，那 22 个 `_mom` 列**不会自动加到已存在的非空库上** ⇒ 对生产库必须**显式迁移**（`ALTER TABLE ... ADD COLUMN` × 22），这是切换的前置条件，见 §F。② **语料不进 git**（`.gitignore:64` 含 `data/`，`git ls-files data/` = 0，15M / 218 篇），**回滚预案依赖它还在** ⇒ 换机器或清盘前先确认，见 §E。③ **13 对贷款/存款分部门字段的整族位移目前无任何自动防线** ⇒ 分层抽样**必须覆盖贷款分部门列**，见 §G 开口 a。",
+    "对验证者的提示": "⚠️ 本节全部数字采于 `06f59bb`（门禁）与经我改动后的最终态（真跑）。**A/B 对照钉的是隔离对 `4670ccb` vs `bdc8252`，不是 merge 后的 master** —— 两类数字处方相反，discovery 的 `anchors.说明` 里逐条标了哪个数来自哪棵树。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 06f59bb8f33a330ca9582d713c58ee4fe46a7bdc）": {
+      "go test ./... -count=1": "全绿（含 cmd/ 与 internal/ 全部包）",
+      "coverage(internal/hestia)": "96.3%（门槛 ≥96.1）",
+      "go vet ./internal/hestia/... ./cmd/...": "零行输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 backtest_test.go 与 crisis_test.go 两处既有欠账",
+      "go.mod / go.sum": "零改动",
+      "2 个文件在 my_commit 与 merged_master 上的 sha256": "逐字节相同"
+    },
+    "Step 1 锚与终判": {
+      "ANCHOR": "bdc8252679b9740af8825b20eb80c485c557a745（开工第一步取，非最后一条）",
+      "git diff --numstat ANCHOR..06f59bb -- internal/hestia cmd/atlas configs": "CONTRACTS.md 373/0 + calibrate.go 9/2 —— 前者是 docs，后者是结转项 6-a 的输出文案改动，**无其它代码改动**",
+      "最后一次改动后复核": "改完 calibrate.go 与 CONTRACTS 后回到 Step 1 重采；merge 后在 06f59bb 上再跑一次 load，与 worktree 那次**逐字节一致**"
+    },
+    "🔴 真跑全量验收（锚 06f59bb，语料 218 篇，/tmp/hestia-final.db 先删旧库与 -wal/-shm）": {
+      "四道恒等式": "**全部成立** ✓  —— 218 = 217 + 1；217 = 213 + 4；97 = 单篇 28 + 合并组 69；97 = 入权威表 76 + 落 pending 21",
+      "字段冲突": "0 违反（该节自报「预期 0，共 0」）",
+      "口径路由": "0 违反。**集合大小：可判 13 对 / 单侧跳过 1674 / 无上期 20 / 两侧皆空 427 = 合计 2134 = 22 对 × 97 观测**（与 DoD 给的数逐字相同）",
+      "族内量级核对": "0 违反；**样本不足未判 84**",
+      "fetch 阶段未抓到": "0",
+      "解析失败 4 + 本迭代不解析 1": "理论残余非 0，但**逐篇有归属**：失败 2020-02 / 2021-05 / 2022-05 / 2023-05（留给 LLM 兜底）；不解析 2022-04（正文无累计口径合计句）。**无未分类失败。**",
+      "tsf_stock": "**80**（权威 60 + pending 20），两把独立的尺同值"
+    },
+    "🔴 A/B 对照（隔离对 4670ccb vs bdc8252，两端各跑 2 轮、各自逐字节一致后取值）": {
+      "待解析 / 本迭代不解析": "199 / 19  →  217 / 1",
+      "解析成功 / 解析失败": "161 / 38  →  213 / 4",
+      "合并后观测": "96（单篇 54 + 合并组 42） → 97（单篇 28 + 合并组 69）",
+      "入权威表 / 落 pending": "79 / 17  →  76 / 21",
+      "部分覆盖的期次": "61 → 37",
+      "完整观测占比": "35÷96 = 36.5%  →  60÷97 = 61.9%",
+      "tsf_stock": "79（monthly×69） → 80（monthly×70）",
+      "⚠️ 覆盖率基线有两个口径": "M1c-3b 的 §B 自记「64 条 / 33÷96=34%」（锚 6ff4b45），本轮在 4670ccb 上实测「61 条 / 35÷96=36.5%」。**两个锚不同，不构成矛盾**，CONTRACTS 两个都写了。"
+    },
+    "21 条 pending 的逐条分账": {
+      "tolerance_exceeded[ytd]": "1（2020-01）—— 人类 Q2 裁决刻意留可见，成因已在 yaml 与 thresholds.go 两处写明，**不是数据错误**",
+      "drift_exceeded[mom]": "12",
+      "drift_exceeded[ytd]": "8",
+      "集合差": "base 17 → post 21：新增 14 / 消失 10 / 不变 7",
+      "新增 14 期的来源": "**13 期在 base 的解析失败清单里**（此前根本没被解析、更没被校验过）⇒ 新增覆盖不是回归；第 14 期 2025-02/monthly 是 TASK-008 的新增保护",
+      "消失 10 期的去向": "逐期 `select count(*) from hestia_observations` 核过，**全部已进权威表**"
+    },
+    "CONTRACTS 结构核对": "`awk '/^## Sprint M1c-4/,0' | grep -n '^### '` ⇒ **A–G 七节齐全**（先锚再切，不是全局 grep）。⚠️ 全局计数为观察值：A–D 各 4 次、E–G 各 3 次，**加一节就变，不要当常量引用**。",
+    "坏仪器对照": "`grep -c \"缺\" /tmp/load-final.txt` = **39**；结构化取数 = **37**（该节标题自带计数与逐条缩进行计数两把尺同值）。**差 2，错得不多，所以最不会被追查。**",
+    "⚠️ 本人在本任务中犯的一次判据错误（如实记）": "查 merge 是否发生时，我第一次挑的内容判据字串 `M1c-1 的 TASK-010 之前` **在 master 上本来就存在**（calibrate.go:410 的注释，而我改的是输出字符串）⇒ 报 1，是**假阳**。结论未受影响（另一把尺 CONTRACTS 同时报 0，不一致时我去查了），但错法值得记：**我挑的是脑子里正装着的那个符号，而它恰是跨版本最稳定、区分力最差的那类字串；它只产假阳不产假阴，而假阳的下一步是停止追查并推进流程。** 正确处方是**先跑 `git diff`，从 diff 里挑字串**（diff 的定义就是只有一边有），改用 `M1c-4 的 TASK-012 结转项 6-a` 后判定正确。"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "task": "TASK-011",
+  "title": "load 报告加口径路由断言（累计恒等式）",
+  "author": "dev-m1c4-b",
+  "🔴 provenance": {
+    "主体工作": "**dev-m1c4-c 做的**，已在 master：commit ff49e7924dfbbf3bc0fa388c02424c893e54f484（merge 328aad01e577446f6dd7d5b059949b8c0f1c66cc），294+/0 与 406+/1 两文件。内容包括：checkCaliberRouting（四类计数 + 逐对观测数 ByPair）、checkCaliberFamilyMedians、报告两节、**把判据从 |ytd| ≥ |mom| 换成累计恒等式 ytd_n == ytd_{n-1} + mom_n**、13 条测试、三处 DoD 订正。",
+    "我做的": "dev-m1c4-b 在 dev-m1c4-c 会话结束后接手（epoch 2→，rework_count 未增 —— 这不是返工）。**只改容差取值与跟着它的两处印法 + 补一条守卫测试**，前任的其余代码一行未动。commit 28ea907d95a408a832daa19a127bc12fb9c7d14c，57+/10 与 48+/2。",
+    "为什么写这条": "transitions.jsonl 只记 `by`，不记「谁写的代码」。不写 provenance，后人从 by=dev-m1c4-b 会把整份工作算到我头上。"
+  },
+  "anchors": {
+    "predecessor_commit": "ff49e7924dfbbf3bc0fa388c02424c893e54f484",
+    "predecessor_merge": "328aad01e577446f6dd7d5b059949b8c0f1c66cc",
+    "my_commit": "28ea907d95a408a832daa19a127bc12fb9c7d14c",
+    "my_commit_parent": "328aad01e577446f6dd7d5b059949b8c0f1c66cc",
+    "merged_master": "07d111309737de1aaa08bbe05dd22b31a1e07ffb",
+    "说明": "门禁类数字测自 merged_master；真语料实测（7 条噪声、四类计数）测自我的 commit 那棵树。"
+  },
+  "key_findings": [
+    "🔴 **接手第一步是读产出、不是重写。** 逐条核完前任的工作后没有缺口，我的 files_modified 只有两处 —— 空 diff 外观像没干活，但重写是拿它已验证的工作换我自己的产出感。前任的 13 条测试、四类计数划分、恒等式判据全部保留。",
+    "🔴 **纯绝对容差在这个判据上结构性不可行。** ±1 亿元产生 7 条假阳；成因不是解析错，而是央行每期累计按**最新修订基数**发布 + 万亿元 2 位小数的发布粒度 ⇒ **差额随累计量级放大**。要盖住最大的那条噪声（2000 亿）就得取 ≥2000，而 tsf_flow_corp_bond 的累计才 7747 亿 ⇒ 2000 亿在它上面等于 26%，**那一对直接失明**。噪声按量级放大，容差也必须按量级放大。",
+    "🔴 **顺带修了一处静默不一致，它不在任何人的清单里**：报告抬头原印 `容差 ±%g 亿元` 且只传 K_abs。容差改成 max(K_abs, K_rel×|expected|) 之后，抬头会印「±5 亿元」而一条 expected=30 万亿的记录**实际门限是 6138** ⇒ **报告说的和闸门做的不是一回事**。这是「两处各算一遍」的变体，只不过错在**描述**而非计算 —— 而描述不会被任何测试抓到。⇒ 提了 caliberIdentityLimit 供两处共用，抬头改印完整规则，逐条违反行加印该行的实际门限。",
+    "🔴 **13 对恒 0，B 方案没有改善**（前任实测，Leader 自陈原判断有误）：恒等式仍需 ytd_n 与 mom_n 在**同一观测**共存。⇒ **deposit / loan 分部门段的整族位移，目前没有任何自动防线** —— gateCorpLoanReconcile 对它结构性免疫（sum 与 total 四项同源于一个分部门段，整族搬走时同步位移、残差逐位不变，那条是我在 TASK-007 指出的）。",
+    "**覆盖率跌破的根因**（前任的发现，原样带出）：未覆盖的恰是**违反行的渲染路径** —— 有单测证明找得到违反，却没有测试**渲染出一份含违反的报告**。「那几行正是闸门触发时人要读的东西，不补的话真出问题那天才第一次执行它。」前任补了两条渲染测试。"
+  ],
+  "decisions": [
+    {
+      "decision": "容差改成 |diff| <= max(K_abs=5亿, K_rel=2%×|expected|)，注释里写明 n=7",
+      "rationale": "取值依据是真语料实测的 7 条噪声（我自己复现过，与前任报的逐条吻合）：绝对 2/22/54/100/100/300/2000 亿元，相对 0.005%/0.285%/0.091%/0.030%/0.040%/0.124%/**0.652%**。K_rel=2% 是噪声上限 0.652% 的约 3 倍余量；K_abs=5亿 兜 |expected| 极小时相对容差失效（trust 那一对 expected=-108 ⇒ 2%×108=2.16 已小于观测到的最小绝对噪声 2 亿，取 5 留约 2.5 倍）。🔴 **注释里必须写 n=7** —— 七个点定出的上限，样本少是这个取值的已知弱点，随语料增长很可能要重估。信噪比：7 条噪声全在门限内，trust(diff=1 vs 门限 5) 与 bankaccept(diff=0) 亦覆盖，而一次真的路由错 diff=314682 vs 门限 69.2 必被抓到，约 1.4 万倍。"
+    },
+    {
+      "decision": "新测试的判据是**关系性**的，不是「K_abs == 5」",
+      "rationale": "只断言常量取值挡不住**把 K_rel 改成 0** —— 那会一夜退回纯绝对容差、7 条假阳原样回来，而**没有任何测试会红**。故 TestCaliberIdentityLimitScalesWithMagnitude 断言五条性质：① 大量级门限显著大于 K_abs（最大那条噪声 2000 必须在内）② 小量级回落到 K_abs（expected=-108 与 0）③ **路由错仍被抓到**（本迭代头号风险的可执行形式）④ 单调不减 ⑤ 对称。**变异自检**：把 K_rel 改成 0 后**只有这一条**转红（其余 12 条不动），说明它守的正是「随量级放大」这条性质而不是别的。"
+    },
+    {
+      "decision": "把门限提成 caliberIdentityLimit(expected) 函数，判定与报告共用",
+      "rationale": "报告要印出门限（读者据此判断「差这么多算不算多」），而**印出来的门限与判定用的门限必须是同一个**。两处各算一遍迟早分叉，而分叉的表现是报告说「差 300、门限 5」却没有把它列为违反 —— 读者会以为闸门坏了，实际是报告在说谎。"
+    },
+    {
+      "decision": "先在真语料上自己复现前任报的 7 条假阳，再动手改",
+      "rationale": "接手别人的在途工作时，转述可能失真（本 sprint 已有多次 DoD 断言被实测证否）。复现的结果与转述**逐条吻合**（7 条、绝对值序列、相对上限 0.652%），这才让「改成 2%」这个取值有据可依 —— 若我直接照抄取值而不复现，一旦前任的数是错的，错会被我固化进注释并流向 TASK-012。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/backfill_load_report.go",
+    "internal/hestia/backfill_load_report_test.go"
+  ],
+  "scope_note": "**无越界**：2 个文件全在声明的 writes 内，与 TASK-007 的 writes 交集为 ∅（我另建 worktree wt-TASK-011b、分支 task/TASK-011-m1c4-b；前任的两个 worktree 由 Leader 在它失联时收了）。numstat 取自我的提交本身（git show --numstat 28ea907）：backfill_load_report.go 57/10、backfill_load_report_test.go 48/2。",
+  "interfaces_exposed": {
+    "caliberIdentityTolerance / caliberIdentityRelTolerance": "K_abs=5.0（亿元）/ K_rel=0.02。🔴 **n=7 的实测依据写在常量注释里**，改它之前请先读那段。",
+    "caliberIdentityLimit(expected float64) float64": "某一条恒等式判定的实际门限 = max(K_abs, K_rel×|expected|)。**判定与报告共用它**，不要在任何第三处重算。",
+    "对 TASK-012 的提示": "口径路由核对的消费判据是**两条，缺一不可**：V == 0、**且 N ≠ 0 且逐对清单里为 0 的那几对已在 CONTRACTS 登记为已知开口**。只看 V == 0 不够 —— N 接近 0 时它恒真。🔴 目前 **22 对里 13 对恒 0**（deposit/loan 分部门全族），那是已知开口不是新问题。",
+    "⚠️ 一处数字请 Leader 核": "Leader 转述的四类计数是「可判 13 / 单侧 1674 / 无上期 20 / 两侧皆空 **427** = 2134」。我实测（逐篇 Parse，213 观测）得「13 / 1674 / 20 / **2979**」，合计 **4686 = 22 对 × 213 观测**，划分闭合。前三个数逐字相同而第四个差：若观测集不同（2134 = 22×97）则单侧数不可能同为 1674；若观测集相同则 427 与划分不闭合。⇒ 两者必有一处错，我倾向转述笔误，但**我这边定不了**（我走的是逐篇 Parse，前任可能跑的是 BackfillLoad 的合并观测）。**值得核，因为这个数会进 CONTRACTS，是「13 对恒 0」那条结论的量化背景。**"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 07d111309737de1aaa08bbe05dd22b31a1e07ffb）": {
+      "go test ./internal/hestia/... ./cmd/... -count=1": "全绿",
+      "coverage(internal/hestia)": "96.3%（与接手时持平；中途一度 96.4）",
+      "go vet": "零输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅两处既有欠账",
+      "go.mod / go.sum": "零改动"
+    },
+    "真语料实测（测自我的 commit 28ea907d95a408a832daa19a127bc12fb9c7d14c）": {
+      "方法": "逐篇 Parse 全语料 213 篇 → 直接调 checkCaliberRouting",
+      "改前": "违反 **7**；可判 13 / 单侧 1674 / 无上期 20 / 两侧皆空 2979（合计 4686 = 22×213）",
+      "改后": "违反 **0**；四类计数**逐字不变**",
+      "7 条噪声逐条": [
+        "2020-02 tsf_flow_rmb_loan_ytd  ytd=42100 exp=42102 (prev=34900 mom=7202)  |diff|=2     rel=0.00475%",
+        "2020-02 tsf_flow_corp_bond_ytd ytd=7747  exp=7725  (prev=3865  mom=3860)  |diff|=22    rel=0.28479%",
+        "2020-02 tsf_flow_ytd           ytd=59200 exp=59254 (prev=50700 mom=8554)  |diff|=54    rel=0.09113%",
+        "2023-11 tsf_flow_ytd           ytd=336500 exp=336400 (prev=311900 mom=24500) |diff|=100 rel=0.02973%",
+        "2023-08 tsf_flow_ytd           ytd=252100 exp=252000 (prev=220800 mom=31200) |diff|=100 rel=0.03968%",
+        "2022-08 tsf_flow_ytd           ytd=241700 exp=242000 (prev=217700 mom=24300) |diff|=300 rel=0.12397%",
+        "2022-11 tsf_flow_ytd           ytd=304900 exp=306900 (prev=287000 mom=19900) |diff|=2000 rel=0.65168%"
+      ],
+      "逐对恒 0": "22 对里 **13 对**（deposit_flow / deposit_household / deposit_corp / … 整个 deposit 与 loan 分部门族）"
+    },
+    "变异自检（隔离：cp 备份原文件，改完还原并复跑）": {
+      "M1｜K_rel 改成 0.0（退回纯绝对容差）": "**KILLED**，且**只有 TestCaliberIdentityLimitScalesWithMagnitude 一条转红**（前任的 12 条与其余全部不动）⇒ 这条守卫守的正是「随量级放大」，不是别的性质",
+      "还原后": "全包全绿，覆盖率 96.3%"
+    },
+    "新增测试": [
+      "TestCaliberIdentityLimitScalesWithMagnitude（五条关系性断言，见 decisions[1]）"
+    ],
+    "修改的既有测试": [
+      "TestCaliberRoutingAcceptsSignCrossingCumulative：只改注释（±1 取整容差 → max(5亿, 2%)），断言与用例一字未动 —— trust 那一对 expected=-108 门限取 K_abs 的 5，差 1 仍在内，**它正是 K_abs 存在的理由**"
+    ]
+  }
+}

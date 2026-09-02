@@ -1,0 +1,112 @@
+{
+  "task": "TASK-009",
+  "title": "calibrate 输出 deposit_sum 与 corp_loan_reconcile 的残差分布（按口径族与 period_type 分档）",
+  "author": "dev-m1c4-a",
+  "anchors": {
+    "my_commit": "3b47113e6e52d58f5a1dfc533fba591c4bbe172c",
+    "my_commit_parent": "07d111309737de1aaa08bbe05dd22b31a1e07ffb",
+    "merged_master": "02c116cac56ca7fcdc90eb2619b7900386808b0e",
+    "说明": "🔴 两类数字钉不同的树。**门禁类**（go test / cover / vet / gofmt）测自 merged_master 02c116c —— 那是交付态。**真语料残差分布**首采于 my_commit 那棵树，**merge 后在 02c116c 上复采过一次，两份输出逐字节一致**（diff -q 通过），故下面的分布对两棵树都成立。merge 区间只有我自己的两个 commit（git log 07d1113..02c116c 只有 3b47113 与 merge 本身），无他人改动混入；我那两个文件在 my_commit 与 merged_master 上的 sha256 逐字节相同。"
+  },
+  "key_findings": [
+    "🔴 **需求文档与本任务 description 的两个数都不准，已连证据订正进 done_criteria**。实测 `deposit_sum/ytd/monthly`：n=27、p95=0.16631147540983607、**max=0.2501041666666667**。⇒ 文档说的 `0.1663` 是 **p95 不是 max**；`deposit_sum/ytd` 全族超过 0.12 的是 **8 期不是 7 期**（2020-01 .2501 / 2024-04 .1663 / 2022-01 .1518 / 2024-05 .1505 / 2024-07 .1490 / 2024-06(h1) .1460 / 2023-09(q1_q3) .1232 / 2024-08 .1211）。",
+    "🔴 **成因查清：1 月是没被分开的第三维**。把 `ytd/monthly` 那 27 期按「是不是 1 月」拆开——1 月 n=7（2020-01=.2501 2022-01=.1518 2024-01=.0724 2025-01=.0501 2023-01=.0447 2026-01=.0433 2021-01=.0234），非 1 月 n=20 且 **max 恰好是 2024-04 的 .1663**，即文档那个数。理由：1 月的 ytd 分母就是当月一个月的增量（年初至今 = 当月），与 2–12 月的 2–11 个月累计**差一个量级**。这正是 DoD boundary[0] 讲的混池，只是深了一维——`period_type` 分不开它（都叫 monthly）。**本任务按 DoD 只分到「族 × period_type」，未擅自加第三维**；已把该事实与两个数（含 1 月 max .2501 / 不含 .1663）报给 Leader，请它决定是否写进 TASK-010 的 done_criteria。⚠️ 只写在本 discovery 里**不够**——TASK-010 的验证者只对照它自己的 DoD 判。",
+    "✅ **与 TASK-007 的独立取样逐位吻合**（不是循环论证：它走逐篇 Parse，我走回填管线 collectSamples→Records，两条不同路径）。四族 n/min/max 全部相同：deposit ytd 52(7+7+27+5+6)/0.0026/0.2501、deposit mom 21/0.0082/2.9508、corpLoan ytd 52/0.0023/0.0357、corpLoan mom 26/0.0014/0.0788。⇒ 本实现的 0.2501 不是算错。",
+    "📌 **给 TASK-010 的直接结论（超过各自现值的期数）**：`corp_loan/ytd` 超 0.05 的 **0 期**（现值够用）；`corp_loan/mom` 超 0.05 的 **5/26**（照抄 ytd 的占位太紧）；`deposit_sum/ytd` 超 0.12 的 **8/52**；`deposit_sum/mom` 超 0.12 的 **17/21** —— 与 TASK-007 预言的「过半 failed」一致。**这些是依据不是建议值**，容差留多少余量是人的判断。",
+    "⚠️ **`thresholds.go:84-85` 的注释现在是假话**：它写着「🔴 TASK-009 不产 corp_loan 的残差分布 ⇒ TASK-010 无从标定」。射程扩大后我产了（corp_loan 六档、ytd n=52 / mom n=26）。`thresholds.go` 不在我的 writes、在 TASK-010 的 writes 里 ⇒ 已报 Leader 让 TASK-010 顺手订正。"
+  ],
+  "decisions": [
+    {
+      "decision": "🔴 **纯派生，不在 `CalibrateResult` 上新增任何字段**（DoD functional[0] 原写「新增 `DepositResiduals map[string][]float64`」，已连证据订正进 done_criteria）",
+      "rationale": "三条证据：① 同一文件里已有**同形**的现成一节 `stockContinuityRates(recs []SampleRecord) map[string]FieldStats`（calibrate_report.go:307）+ `writeStockRateSection`，同样是「从 Records 派生统计量并单独渲染一节」，而它**不占任何字段**——DoD boundary[1] 正是让我照它抄；② DoD boundary[0] 自己给出的收敛方向是「没有外部消费者就别导出」，我核过唯一下游 TASK-010 的 writes 是 configs/hestia.yaml / thresholds.go / fields.go / config.go / config_test.go，它消费的是**报告文本**不是结构体 ⇒ 外部消费者数为 0；③ DoD 自己警告的「构造处忘了初始化就 panic」这个隐患**只由存字段这个设计产生**，纯派生里它构造上不存在。原判据的两个内核（不塞进 res.Samples、从 Records 派生不写第二份）**原样保留并已实现**——纯派生是后者的最强形式。"
+    },
+    {
+      "decision": "🔴 **按 Leader 指示不复用 `pickCaliberBand`，自写非 Check 变体 `pickBandFor`；但用两条测试把它开的洞堵上**",
+      "rationale": "`pickCaliberBand` 返回 `*Check`（校验层概念），标定路径拿到后最自然的写法是 `if c != nil { continue }`，**跳过的理由当场丢失**——而「n 少掉几期、为什么少」正是标定最该记的。代价是选族逻辑与 band 清单成了 validate.go 的**第二份副本**，而分叉时报告仍会打出一份看起来完全正常的分布。我不能改 validate.go 提共享变量（不在 writes 内，且 TASK-008 正在改它），所以补两颗钉子：`TestPickBandForAgreesWithPickCaliberBand`（7 个用例逐一比对两者选中的族、合计列与**逐字**诊断串）、`TestResidualGatesAgreeWithValidationGates`（把容差压成 0 逼**真闸**判 failed，从它自己的 Reason 里读出族名/合计列/残差三样逐项比对）。变异实测两颗钉子都有牙。"
+    },
+    {
+      "decision": "🔴 **选族镜像闸门的裁决**（两族都齐取 ytd，只有一族齐取那一族），不是「两族各记一份」",
+      "rationale": "标定的对象是**闸门实际会用到的那个容差**。某期两族都齐时闸门只走 ytd，把它的 mom 残差也记进 mom 档，等于用一批**永远走不到 mom 分支**的期次去标定 mom 的容差。判据是「取到的残差等于 ytd 那一族的值」而不是「键里写着 ytd」——后者一个把键写死却按 mom 算的实现照样绿；夹具里 2021-12 的两族残差刻意差 5 倍（0.08 vs 0.40）。"
+    },
+    {
+      "decision": "报告那一节**恰好 7 列**（键 + n + 五个统计量），不复用 `writeFieldRow`",
+      "rationale": "「只产依据不产建议值」的判据落到列数上：`writeFieldRow` 会多打一列建议区间，且 n<3 时打 `n<3` 占位——那个占位在残差这一节会被读成「样本太少所以没给容差建议」，坐实一个本不该存在的暗示。断言写成「这一行恰好 7 列」而不是 `NotContains(out,\"建议\")`：后者被一个打出 `[0.05,0.13]` 却不写「建议」二字的实现绕过。夹具里 h1 那档 n=1，专为撞这条。"
+    },
+    {
+      "decision": "`residualGates()` 的 `caliberBand.tol` 留零",
+      "rationale": "tol 是给闸门比大小用的；本节产出的是「残差实际分布成什么样」，而容差取多少正是下游要据此决定的事。在这里填一个容差，等于让待标定的量参与产生它自己的标定依据。"
+    },
+    {
+      "decision": "复合键第二段用 `corp_loan` 而非 check ID `corp_loan_reconcile`",
+      "rationale": "DoD 明确指定了 `corp_loan/<ytd|mom>/<period_type>` 这个形态，且键要短到能当列首。但 `deposit_sum` 恰好是 check ID 而 `corp_loan` 不是，混用会让读者对不上——所以把完整 ID 写进 `residualSectionTitle`（「deposit_sum 与 corp_loan_reconcile」），对应关系不靠猜。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/calibrate_report.go",
+    "internal/hestia/calibrate_report_test.go"
+  ],
+  "scope_note": "**无越界**：2 个文件都在声明的 writes 内。声明的 `./internal/hestia/calibrate.go` **一行未改** —— 残差分布做成了纯派生，collectSamples 那条路径不需要改动（`writes` 声明多于实际写入不构成漂移，故未改声明）。numstat 取自提交本身（`git show --numstat 3b47113`，即最后一次改动之后）：calibrate_report.go **195/0**、calibrate_report_test.go **378/0** —— **纯新增、零删除**。",
+  "interfaces_exposed": {
+    "导出面": "🔴 **零新增导出**。没有新的导出函数、类型或字段（`CalibrateResult` 未加字段）。⚠️ DoD boundary[0] 提醒过导出面守卫 `TestPackageExposesNoWriteFunctions` 只遍历 `*ast.FuncDecl`、不覆盖 type 与 struct 字段 —— 本任务通过「压根不加」规避，不依赖那道守卫。",
+    "collectGateResiduals": "func collectGateResiduals(recs []SampleRecord) residualCollection —— 包内。从 Records 纯派生两道闸的残差，不存字段。返回的 residualCollection 有两半且缺一不可：samples（键 `<闸>/<族>/<period_type>`，值为各期残差占比，未排序）与 skips（闸 → 诊断串 → 期数）。字段不全/零分母的期次记进 skips 后 continue，**不当成残差 0**。",
+    "pickBandFor": "func pickBandFor(values map[string]float64, bands []caliberBand) (caliberBand, string) —— `pickCaliberBand` 的非 Check 变体，空串表示选到了。⚠️ 前提是 bands 非空（residualGates 恒给两族）。选族规则与 pickCaliberBand **逐字一致**，由 TestPickBandForAgreesWithPickCaliberBand 钉住。",
+    "residualGate / residualGates": "标定路径的两道闸各带两族 band。⚠️ **这是 validate.go 里那两份内联 band 字面量的第二份副本**（提不成共享变量：validate.go 不在本任务 writes 内）。分叉由 TestResidualGatesAgreeWithValidationGates 跑真闸比对钉住 —— **下游若改动 gateDepositSum / gateCorpLoanReconcile 的族名、合计列或分项列，那条测试会当场变红，这是真信号不是误报**。",
+    "residualSectionTitle / residualSkipTitle": "报告两节的标题常量，供测试断言。标题刻意不以键或字段名开头（stockRateSectionTitle 实撞过：行首等于字段名会让「恰好 1 行」的断言把标题行也算进去）。",
+    "对 TASK-010 的提示": "🔴 标定依据见下面 verification 的完整输出。**只给依据不给建议值**是刻意的。三件请注意：① `deposit_sum/ytd/monthly` 的 max 0.2501 完全由 1 月撑着（非 1 月 max 0.1663）——含不含 1 月直接决定容差取 0.26 还是 0.17，见 key_findings[1]；② `corp_loan/ytd` 现值 0.05 下超标 0 期，`corp_loan/mom` 超标 5/26；③ 请顺手订正 `thresholds.go:84-85` 那句「TASK-009 不产 corp_loan 的残差分布」，它已成假话。",
+    "对 TASK-008 的提示": "本任务只写 calibrate_report.go / calibrate_report_test.go，与 TASK-008 的 store.go / validate.go 交集为空，merge 时零冲突。但 `TestResidualGatesAgreeWithValidationGates` **依赖两道 gate 的 Reason 文本格式**（`residual %.4f`、`[ytd|mom]`、`total=`）与 `pickCaliberBand` / `bandDiagnosis` 的行为 —— 改它们会让那条测试红，那是设计如此。"
+  },
+  "verification": {
+    "门禁类（测自 merged_master 02c116cac56ca7fcdc90eb2619b7900386808b0e）": {
+      "go test ./internal/hestia/... ./cmd/... -count=1": "全绿",
+      "coverage(internal/hestia)": "96.3%（门槛 ≥96.1%，未跌破；与 merge 前 master 同值）",
+      "go vet ./internal/hestia/... ./cmd/...": "零行输出",
+      "gofmt -l internal/hestia cmd/atlas": "仅 cmd/atlas/backtest_test.go 与 crisis_test.go 两处既有欠账，无新增项",
+      "go.mod / go.sum": "零改动（git show --name-only 3b47113 命中 0）"
+    },
+    "新增测试（6 条）": [
+      "TestCalibrateReportsDepositResidualDistribution —— DoD 点名。报告含该节；四档按列比对 n/min/max；**每行恰好 7 列**（这是「不给建议值」的判据）；行集合用 ElementsMatch 断言不多不少 5 档",
+      "TestCalibrateResidualDistributionSeparatesPeriodTypes —— DoD 点名。annual n=3 / h1 n=1 分别正确，且 `deposit_sum/ytd`、`corp_loan/ytd`、`ytd`、`mom` 四种混池键**都不成行**",
+      "TestResidualCollectionPrefersYTDWhenBothFamiliesPresent —— 两族都齐只进 ytd，判据是残差值不是键名",
+      "TestResidualCollectionRecordsWhySkipped —— 跳过计数正确、理由同时带上两族、样本里不含 0、不产生 q1 档，且报告把跳过节打出来",
+      "TestPickBandForAgreesWithPickCaliberBand —— 7 个用例比对两个 picker 的族/合计列/**逐字**诊断串",
+      "TestResidualGatesAgreeWithValidationGates —— 跑真闸（容差压 0）读 Reason，比对族名/合计列/残差三样"
+    ],
+    "🔴 变异测试（隔离 worktree /tmp/mut-t9，跑完已拆；主工作区被变异文件 sha256 前后逐字节一致、git status 无变化）": {
+      "对照组": "未变异时 -run 'Residual|PickBandFor|CalibrateReports' 全绿",
+      "M1 writeResidualRow 打出建议列（7→8 列）": "KILLED —— TestCalibrateReportsDepositResidualDistribution 四个子测试全红",
+      "M2 复合键丢掉 period_type（写死 annual）": "KILLED —— Reports + SeparatesPeriodTypes + GatesAgree",
+      "M3 residualGates 里 deposit 两族顺序对调（改成偏好 mom）": "KILLED —— Reports + SeparatesPeriodTypes + PrefersYTD",
+      "M4 算不出的期次记成残差 0（而非 continue）": "KILLED —— Reports + RecordsWhySkipped",
+      "M5 corpLoan mom 的分项列错写成 ytd 的": "KILLED —— Reports + RecordsWhySkipped + GatesAgree",
+      "M6 pickBandFor 的诊断串去掉族名前缀": "KILLED —— RecordsWhySkipped + PickBandForAgrees（两族都不齐/两族都零分母两个子测试）",
+      "小结": "6/6 KILLED，零存活，无崩溃型失败（已过滤 setup/build failed 与 undefined）。每个变异杀掉的都是**与其意图对应**的那条测试，不是全面变红。"
+    },
+    "🔴 真语料端到端（`--dir <主仓库>/data/hestia-backfill-2026-08-14 --allow-incomplete`；首采于 3b47113，**merge 后在 02c116c 上复采一次，两份逐字节一致**）": {
+      "语料规模": "尝试解析 217 期，成功产出 213 条 Records",
+      "残差一节（完整原文）": [
+        "勾稽残差分布：deposit_sum 与 corp_loan_reconcile（按口径族与 period_type 分档，不给建议值）",
+        "闸门·族·period_type                  n          min           p5       median          p95          max",
+        "deposit_sum/mom/monthly          21 0.008188976377952756 0.016283185840707808 0.25755000653680193 0.8194143167028209 2.9507829977628637",
+        "deposit_sum/ytd/annual            7 0.016636132315521628 0.016636132315521628 0.07746744791666667 0.0939238539238537 0.0939238539238537",
+        "deposit_sum/ytd/h1                7 0.07649211711711727 0.07649211711711727 0.08918617614269789 0.14602094240837707 0.14602094240837707",
+        "deposit_sum/ytd/monthly          27 0.0026457883369330453 0.023417366946778713 0.09539587852494577 0.16631147540983607 0.2501041666666667",
+        "deposit_sum/ytd/q1                5 0.048610778443113775 0.048610778443113775 0.06404952658412236 0.07887589343729695 0.07887589343729695",
+        "deposit_sum/ytd/q1_q3             6 0.08846831955922865 0.08846831955922865 0.09995596653456627 0.12323843416370107 0.12323843416370107",
+        "corp_loan/mom/monthly            26 0.001437908496732026 0.0016084222839596433 0.017567708877967166 0.07837259100642398 0.07881345413925779",
+        "corp_loan/ytd/annual              7 0.0023405500292568754 0.0023405500292568754 0.011635423400129283 0.02855241264559068 0.02855241264559068",
+        "corp_loan/ytd/h1                  7 0.007017543859649123 0.007017543859649123 0.01371721778791334 0.0357108721624849 0.0357108721624849",
+        "corp_loan/ytd/monthly            27 0.0036127167630057803 0.008999264164827079 0.013826530612244897 0.02465034965034965 0.029411764705882353",
+        "corp_loan/ytd/q1                  5 0.011506622516556292 0.011506622516556292 0.013742937853107345 0.029626168224299067 0.029626168224299067",
+        "corp_loan/ytd/q1_q3               6 0.003453038674033149 0.003453038674033149 0.010527488855869242 0.02816793893129771 0.02816793893129771",
+        "",
+        "算不出残差的期次（两族都不齐或零分母 ⇒ 不计入上表）",
+        "  deposit_sum    ×135  ytd:absent_field:deposit_flow_ytd mom:absent_field:deposit_flow_mom",
+        "  deposit_sum    ×5    ytd:absent_field:deposit_household_ytd mom:absent_field:deposit_flow_mom",
+        "  corp_loan      ×135  ytd:absent_field:loan_corp_total_ytd mom:absent_field:loan_corp_total_mom"
+      ],
+      "跳过节怎么读": "deposit 共 140 期算不出（135 期两族合计列都缺、5 期有 deposit_flow_ytd 但缺 deposit_household_ytd），corp 共 135 期。73+140=213、78+135=213，与 Records 数对得上 —— **没有期次被静默丢掉**。",
+      "DoD error_handling 的反向自检": "原文写「max 应在 0.16 附近，明显**低于** 0.16 就停下来查」。实测 max=0.2501 **高于** 0.16，且 0.1663 作为 p95 出现在同一行；两条独立路径（TASK-007 逐篇 Parse vs 本任务回填管线）给出相同的 max ⇒ 不是算错。订正后的自检写进了 done_criteria。"
+    },
+    "merge 预演（跑完即拆，主仓库 HEAD 当时未动；仅用于排风险，数字不作交付依据）": "临时 worktree 上 `git merge --no-ff --no-commit task/TASK-009-m1c4`：零冲突、改动仍是 195/0+378/0、全套绿、覆盖率 96.3%、vet 零行；预演树跑出的残差一节与 my_commit 那棵树逐字节一致（15 行）。"
+  }
+}
