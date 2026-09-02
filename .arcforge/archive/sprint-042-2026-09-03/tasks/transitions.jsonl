@@ -193,3 +193,17 @@
 {"task":"TASK-014","from":"in_progress","to":"dev_done","by":"dev-m1c4-b","at":"2026-09-02T15:54:17Z","reason_class":"","rework_count":0}
 {"task":"TASK-014","from":"dev_done","to":"verifying","by":"leader","at":"2026-09-02T15:58:20Z","reason_class":"","rework_count":0}
 {"task":"TASK-014","from":"verifying","to":"verified","by":"test-m1c4-b","at":"2026-09-02T16:12:01Z","reason_class":"","rework_count":0}
+{"task":"TASK-001","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:25Z","reason_class":"","rework_count":0}
+{"task":"TASK-002","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:25Z","reason_class":"","rework_count":0}
+{"task":"TASK-003","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:25Z","reason_class":"task_defect","rework_count":1}
+{"task":"TASK-004","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:25Z","reason_class":"","rework_count":0}
+{"task":"TASK-005","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-006","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-007","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-008","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-009","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-010","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-011","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-012","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-013","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}
+{"task":"TASK-014","from":"verified","to":"accepted","by":"leader","at":"2026-09-02T16:32:26Z","reason_class":"","rework_count":0}

@@ -2,7 +2,7 @@
   "id": "TASK-007",
   "title": "deposit_sum 与 corp_loan_reconcile 按口径族分别校验",
   "description": "对应需求文档 Task 7。两者都是「分项加总 vs 合计」的勾稽闸。观测现在可能整族走 `_mom`，若闸只认 `_ytd` 列，那些期次会 `skipped{absent}` 而**完全不被校验**——🔴 **那比拦错更糟：报告上看不出来「这一期没查过」。**\n\n⚠️ **两族的容差不能共用一个值**：ytd 的分母是年初至今累计、mom 的分母是单月增量，量级差一个数量级以上，残差占比的分布完全不同（真值由 TASK-010 分别标定）。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -39,10 +39,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-b",
-    "at": "2026-09-02T04:30:13Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-b",

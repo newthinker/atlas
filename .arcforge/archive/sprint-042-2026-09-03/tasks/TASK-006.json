@@ -2,7 +2,7 @@
   "id": "TASK-006",
   "title": "completeness 的必填集改口径感知（ytd 或 mom 齐全即可）",
   "description": "对应需求文档 Task 6。硬要 `_ytd` 会让那 54 篇恒报「缺一整族字段」，而它们在那些期次里是 **absent-by-design**——把 by-design 的缺席记成 failed，`completeness` 这个指标就废了（`types.go` 原话，`mergedRequiredFields` 因同一理由存在）。\n\n**为什么不新开 extractor**：那 4 篇月报是同一份观测里两种口径共存（贷款合计累计 + 存款/分部门当月）。给它新开 extractor 会得到 `rule@v1-deposit-mom` 这类名字，而**口径差异是按族的，不是按整篇的**。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -43,10 +43,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T03:13:23Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-b",

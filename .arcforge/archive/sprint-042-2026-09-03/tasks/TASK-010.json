@@ -2,7 +2,7 @@
   "id": "TASK-010",
   "title": "人工标定 configs/hestia.yaml（22 项 magnitude_ranges + 两族 deposit_sum 容差）",
   "description": "对应需求文档 Task 10。\n\n🔴 **本任务的填值是人的判断，agent 不得自动填。** 工具只产出依据（TASK-009 的残差分布、TASK-004 之后 calibrate 的字段值分布），判断留给人——这是 M1c-3b 就定下的纪律，且 `MagnitudeRanges` 上方那段注释点名「拍脑袋阈值」的代价就是 `DepositSumTolerance` 的 ±2%。\n\n**你的角色是记录员**：采依据 → 整理成人类可裁决的表 → 走澄清环等裁决 → 落盘。\n\n⚠️ TASK-004 已在 yaml 里填了 22 项**占位值**并注明「未标定」。本任务是**用实测分布重标它们**，并把「未标定」的注释换成标定依据。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -65,10 +65,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T09:46:14Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-a",

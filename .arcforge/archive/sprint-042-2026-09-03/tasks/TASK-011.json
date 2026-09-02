@@ -2,7 +2,7 @@
   "id": "TASK-011",
   "title": "load 报告加口径路由断言 |ytd| ≥ |mom|（异号跳过数出声）",
   "description": "对应需求文档 Task 11。本迭代唯一的新风险是「当月值进了 `_ytd` 列」，而它**量级完全合理**——这正是原解析器宁可拒绝整篇也不猜的理由。\n\n可自动化的判据：**累计值不可能小于它自己的某一个月**。\n\n🔴 **把拒绝改成路由之后，这条断言就是那个「拦得住的闸门」。**",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -40,10 +40,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T04:14:55Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 2,
   "assigned_to": "dev-m1c4-b",

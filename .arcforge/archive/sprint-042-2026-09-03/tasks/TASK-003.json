@@ -2,7 +2,7 @@
   "id": "TASK-003",
   "title": "moneyRE 容忍余额与同比之间的一个短从句（2020-01 的 M1 可抽）",
   "description": "对应需求文档 Task 3。`2020-01` 报 `hestia: 货币 M1 not found`。原文：「狭义货币(M1)余额54.55万亿元，**与上年同期持平**，同比增长0%」——余额与「同比」之间多插了一个不含数值的短从句。\n\n⚠️ **不要放宽成 `.*?`**：那会跨句误配，而 M2/M1/M0 三句同形、紧挨着——配错的结果是**量级完全合理的错值**，下游没有任何闸门拦得住。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "simple",
   "packages": [
     "./internal/hestia"
@@ -36,10 +36,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-b",
-    "at": "2026-09-02T01:39:33Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:25Z"
   },
   "assignment_epoch": 2,
   "assigned_to": "dev-m1c4-b",

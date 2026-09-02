@@ -2,7 +2,7 @@
   "id": "TASK-009",
   "title": "calibrate 输出 deposit_sum 残差分布（按口径族与期次类型分档）",
   "description": "对应需求文档 Task 9。`deposit_sum_tolerance` 的 0.12 是 **M0 三样本**拍出来的（`thresholds.go:23-28`：残差 7.65% / 8.57% / 9.06%），而 79 期真实数据实测最高 **0.1663**，7 期超过 0.12。`fields.go` A.3 那句「实测残差**稳定在** 7.6–9.1%」同样被证伪。\n\n⚠️ **前置缺口**：`calibrate` 现在只输出字段值分布，**没有残差分布** ⇒ 无标定依据。本任务补上它，**TASK-010 才有东西可填**。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -38,10 +38,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-b",
-    "at": "2026-09-02T08:31:34Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-a",

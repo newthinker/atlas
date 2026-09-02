@@ -2,7 +2,7 @@
   "id": "TASK-005",
   "title": "分部门段按口径路由而不再拒绝整篇（sectorCaliberOf + pick）",
   "description": "对应需求文档 Task 5（模板表部分已并入 TASK-004，本任务只做**路由逻辑**）。\n\n🔴 **本任务是整个迭代的核心，也是头号风险所在。** 把「拒绝」改成「路由」时，原拒绝理由背后的担忧**必须换一种形式保留**：\n\n> 同一份观测里合计字段取的是累计值，混进当月的分部门值会让内部口径不一致，而**两者都在合法量级内、下游没有任何闸门拦得住**\n\n新形态下这道防线是「`_mom` 与 `_ytd` 是两个不同的列」。**拆掉拒绝而不落实 `pick()` 的选列逻辑，就是亲手做了这个 sprint 最想防的那件事。**",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "complex",
   "packages": [
     "./internal/hestia"
@@ -44,10 +44,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T02:47:37Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-b",

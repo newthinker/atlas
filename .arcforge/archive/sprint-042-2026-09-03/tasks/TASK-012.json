@@ -2,7 +2,7 @@
   "id": "TASK-012",
   "title": "全量真跑验收与 CONTRACTS 登记 M1c-4",
   "description": "对应需求文档 Task 12。本任务是整个 sprint 的验收锚点：真跑全语料入库、核四道恒等式与三条断言、把本轮实测数字登记进 CONTRACTS、订正四条被证伪的契约、结账全部结转项。\n\n🔴 **自证数字采样锚必须前置**（M1c-3b 的教训，spec §0.1）：CONTRACTS §B 的数字登记在锚 `6ff4b45`，其后 TASK-011 与三轮 TASK-006 返工改变了过闸结果（`75/21` 实为 `79/17`），而清单末尾的「`git diff --numstat <锚> HEAD` 为空」**在返工之后没有人重跑**。\n\n⇒ **本任务的第一步就是采锚并核空，不是最后一条。**",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "complex",
   "packages": [
     "./internal/hestia"
@@ -65,10 +65,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-b",
-    "at": "2026-09-02T10:29:08Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-a",

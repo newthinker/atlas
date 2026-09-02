@@ -2,7 +2,7 @@
   "id": "TASK-008",
   "title": "PrecedingAll + deposit_sum drift 基线修复（断开正反馈）",
   "description": "对应需求文档 Task 8。真跑实测的正反馈链：\n\n```\n2024-04…2024-08  五期被 tolerance 拒（残差 0.1460/0.1490/0.1505/0.1663/0.1211）\n                 → 不进权威表 → 基线看不见它们\n2024-10          drift_exceeded: residual 0.1092 drifted 0.0308 from 3-period mean 0.0784\n2024-11          drift_exceeded: residual 0.1135 drifted 0.0351 from 3-period mean 0.0784\n```\n\n这与 M1c-3b 的 TASK-011 修的 `stock_continuity` 是**同一族缺陷**。**M1c-3b 修了一个、漏了另一个。**\n\n⚠️ **「用未通过校验的数据做基线」的正当性**：基线用的是**残差这个统计量**，不是那些期次的字段值。drift 要回答「本期残差相对近期常态是否突变」，若常态只由「已通过这道闸的期次」组成，**定义本身就是循环的**。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "complex",
   "packages": [
     "./internal/hestia"
@@ -39,10 +39,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T06:17:37Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-b",

@@ -2,7 +2,7 @@
   "id": "TASK-002",
   "title": "periodAlt 与 cumulativePeriods 同步加「今年前N个月」族（结转项 1b）",
   "description": "对应需求文档 Task 2。真语料 `2022-05` 正文有「今年前5个月」，不在 `periodAlt` 里，整篇落进 `Unsupported`，且被 CONTRACTS §E-3 **误记为「报告本身没有累计数据」**——数据就在正文里，是前缀不被认识。\n\n🔴 **必须同步改两处**：`periodAlt`（正则认不认得）与 `cumulativePeriods`（认得之后判不判它是累计口径）。**只改一处会全绿而无效**——M1c-3a 的 TASK-012 补 `1-N月` 时实撞过。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia"
@@ -40,10 +40,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T00:50:33Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:25Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-b",

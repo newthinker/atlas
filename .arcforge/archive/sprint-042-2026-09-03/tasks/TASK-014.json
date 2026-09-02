@@ -2,7 +2,7 @@
   "id": "TASK-014",
   "title": "QA 返工：一个代码级静默失效面 + 五处描述已废弃实现的注释",
   "description": "QA 两轮 + code-simplifier 的发现，经双源独立确认（simplifier 与 QA 的 Minimalist 视角各自得出，不是一个抄另一个）。无 CRITICAL、无代码级活缺陷。人类已批准在本 sprint 修掉而非结转。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "简单",
   "dependencies": [
     "TASK-010",
@@ -74,10 +74,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-b",
-    "at": "2026-09-02T16:12:01Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "discovery": ".arcforge/discoveries/TASK-014.json",
   "verify_baseline": {

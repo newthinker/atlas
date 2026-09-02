@@ -2,7 +2,7 @@
   "id": "TASK-013",
   "title": "人工核对与切换生产库（本迭代唯一不可逆动作）",
   "description": "对应需求文档 Task 13。\n\n🔴 **本任务全部是人执行的命令，不是 agent 的 `writes`。** 切库是本迭代唯一不可逆的动作。\n\n**你的角色是记录员**：准备命令与核对清单 → 走澄清环等人类执行 → 核对结果 → 把切库记录写进 `CONTRACTS.md` 的「Sprint M1c-4 · H. 切库记录」一节。\n\n⚠️ **产物落在 `CONTRACTS.md` 而不是 `.arcforge/docs/07-deploy/`**：后者在 write-matrix 里**只有 `ops-*` 能写**，而 `ops-*` 不在执行迁移边的合法写者集合内（`assigned → in_progress` 只认 `dev-*`）⇒ 那条路走不通，会在你交付时才发现。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "medium",
   "packages": [
     "./internal/hestia/CONTRACTS.md"
@@ -64,10 +64,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-02T14:01:11Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:26Z"
   },
   "assignment_epoch": 2,
   "assigned_to": "dev-m1c4-d",

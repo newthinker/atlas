@@ -2,7 +2,7 @@
   "id": "TASK-001",
   "title": "stripHTML 去行首空白（2023-05 的小节标题不再静默丢失）",
   "description": "对应需求文档 Task 1。`spaceRE` 把连续空白**折叠**成一个普通空格，但折叠不等于删除——行首仍剩一个，而小节标题模板锚定行首 `(?m)^`。真语料 2023-05 因此整节丢失，报 `section ordinals are not consecutive from 一`。\n\n🔴 **排第一是有理由的**：它影响全部 218 篇的文本，后续所有任务的背对背基线都建立在它之上。放后面做等于让前面几个任务的比对全部失效一次——而那种失效是**静默的**，不产生编译错误也不产生冲突，只产生一份看起来正常的错误基线。",
-  "status": "verified",
+  "status": "accepted",
   "complexity": "simple",
   "packages": [
     "./internal/hestia"
@@ -34,10 +34,10 @@
     ]
   },
   "last_transition": {
-    "from": "verifying",
-    "to": "verified",
-    "by": "test-m1c4-a",
-    "at": "2026-09-01T23:41:04Z"
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-02T16:32:25Z"
   },
   "assignment_epoch": 1,
   "assigned_to": "dev-m1c4-c",
