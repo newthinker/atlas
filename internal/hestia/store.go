@@ -382,6 +382,106 @@ func (s *Store) Preceding(ctx context.Context, period, periodType string, n int)
 	return out, nil
 }
 
+// PrecedingAll 与 Preceding 相同，但**并上 hestia_pending**：返回 period 之前最近 n 期
+// 里**发生过**的观测，按 period 降序（M1c-4 的 TASK-008）。
+//
+// 🔴 **为什么是两个方法，而不是给 Preceding 加一个参数**：它们语义不同，不是同一查询
+// 的两种模式。
+//
+//	Preceding     答「上一期**可信的**观测是什么」  —— 逐期比较类判据用（如环比）
+//	PrecedingAll  答「近期**发生过**什么」          —— 统计量类判据用（如残差漂移）
+//
+// 一个 bool 参数会把这条语义差别压成一个调用点上的字面量，而**选错的后果是不对称的**：
+// 逐期比较误用 PrecedingAll = 拿未通过校验的数据当基准值。
+//
+// 🔴 **它只该喂给统计量。** drift 要回答「本期残差相对近期常态是否突变」，若「常态」
+// 只由**已通过这道闸的期次**组成，定义本身就是循环的 —— 真跑实测的正反馈链：
+// 2024-04…08 五期被 tolerance 拒 ⇒ 不进权威表 ⇒ 基线看不见它们 ⇒ 2024-10/11
+// 因「偏离一个虚高的均值」被 drift 拒。与 M1c-3b 的 TASK-011 修的 stock_continuity 同族。
+//
+// ⚠️ 正当性在于**基线用的是残差这个统计量，不是那些期次的字段值** —— 没有把未过闸的
+// 数据当成可信取值，只是承认它们「发生过」。
+//
+// ⚠️ **没有任何机制防着下一个人把它接到逐期比较判据上**，只有这段注释与
+// validate_test.go 的接线断言。改动调用点前请先读那条测试。
+//
+// 同期同时出现在两张表时**权威表优先**：一期先落 pending、后被重新发布并通过校验时，
+// 两张表都会有它，取值应当以过闸的那份为准。
+func (s *Store) PrecedingAll(ctx context.Context, period, periodType string, n int) ([]Observation, error) {
+	// 与 Preceding 同一条纪律：LIMIT -1 在 SQLite 表示「不限制」，不挡住非正数会把
+	// 整个序列拉回来，而调用方以为自己什么都没要。
+	if n <= 0 {
+		return nil, nil
+	}
+
+	accepted, err := s.Preceding(ctx, period, periodType, n)
+	if err != nil {
+		return nil, err
+	}
+
+	// pending 的业务列存在 values_json 里、**与权威表不同构**，不能与上面那条拼 UNION。
+	q := `SELECT period, period_type, published_at, article_id, extractor, ingested_at, values_json
+	      FROM ` + TablePending + `
+	      WHERE period < ? AND period_type = ? ORDER BY period DESC LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, period, periodType, n)
+	if err != nil {
+		return nil, fmt.Errorf("hestia store preceding-all %s/%s: %w", period, periodType, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	seen := make(map[string]bool, len(accepted))
+	for _, o := range accepted {
+		seen[o.Meta.Period] = true
+	}
+	out := accepted
+	for rows.Next() {
+		obs, err := scanPendingObservation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("hestia store preceding-all %s/%s: %w", period, periodType, err)
+		}
+		if seen[obs.Meta.Period] {
+			continue // 权威表优先
+		}
+		seen[obs.Meta.Period] = true
+		out = append(out, obs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hestia store preceding-all %s/%s: %w", period, periodType, err)
+	}
+
+	// 合并后重排并截断：两张表各自已按 period 降序，但**交错之后不再有序**。
+	// 🔴 截到 n 是在**合并之后**做的，不是各取 n 就完事 —— pending 里若有比 accepted
+	// 更近的期次，它们应当把 accepted 挤出去（那正是本迭代要的行为：基线要看「发生过什么」）。
+	slices.SortFunc(out, func(a, b Observation) int {
+		return strings.Compare(b.Meta.Period, a.Meta.Period)
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
+}
+
+// scanPendingObservation 读一行 hestia_pending。**只读**，不违反「Save 是唯一写入口」。
+//
+// ⚠️ pending 的业务列是一整块 values_json，不像权威表逐列铺开 ⇒ 需要单独一个 scan。
+// ⚠️ 列清单**不含 report**：写入时有那一列（store.go 的 savePending），但本函数只取
+// 重建 Observation 所需的那几列。**改这条 SELECT 时列数要与下面的 Scan 参数逐一对应**
+// —— 不对应时 database/sql 在运行时才报 `expected N destination arguments`。
+func scanPendingObservation(rows *sql.Rows) (Observation, error) {
+	var m Meta
+	var valuesJSON string
+	if err := rows.Scan(&m.Period, &m.PeriodType, &m.PublishedAt,
+		&m.ArticleID, &m.Extractor, &m.IngestedAt, &valuesJSON); err != nil {
+		return Observation{}, fmt.Errorf("hestia: scanning pending row: %w", err)
+	}
+	values := map[string]float64{}
+	if err := json.Unmarshal([]byte(valuesJSON), &values); err != nil {
+		return Observation{}, fmt.Errorf("hestia: decoding pending values for %s/%s: %w",
+			m.Period, m.PeriodType, err)
+	}
+	return Observation{Meta: m, Values: values}, nil
+}
+
 // scanObservation 把一行还原成 Observation。列顺序与 insertSQL 对称：
 // metaColumns 在前，fieldOrder 在后。
 //

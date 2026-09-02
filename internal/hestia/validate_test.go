@@ -3,6 +3,7 @@ package hestia
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"math"
 	"slices"
@@ -17,6 +18,20 @@ import (
 type fakeHistory struct {
 	prior []Observation
 	err   error
+
+	// priorAll 是「含 pending」的那一份（M1c-4 的 TASK-008）。
+	//
+	// 🔴 **默认与 prior 不同**：为 nil 时 PrecedingAll 返回 prior，让既有用例语义不变；
+	// 显式赋值时两者可以给出**不同的结论**，接线断言就是靠这个分辨
+	// 「某道闸读的到底是 prior 还是 priorAll」。
+	priorAll []Observation
+
+	// errAll 只让 PrecedingAll 失败（Preceding 仍成功）。
+	//
+	// 复用 err 做不到这件事：那样 Preceding 会**先**失败并提前返回，
+	// PrecedingAll 的错误传播分支一次都跑不到，而测试照样绿 —— 断言会由
+	// 另一条路径满足。要的是**这一条**路径。
+	errAll error
 }
 
 func (f fakeHistory) Preceding(_ context.Context, _, _ string, n int) ([]Observation, error) {
@@ -29,8 +44,37 @@ func (f fakeHistory) Preceding(_ context.Context, _, _ string, n int) ([]Observa
 	return f.prior, nil
 }
 
+func (f fakeHistory) PrecedingAll(_ context.Context, _, _ string, n int) ([]Observation, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.errAll != nil {
+		return nil, f.errAll
+	}
+	src := f.priorAll
+	if src == nil {
+		src = f.prior // 未显式给出时与 prior 同 —— 既有用例的语义不变
+	}
+	if n < len(src) {
+		return src[:n], nil
+	}
+	return src, nil
+}
+
 // obsFrom 用 golden 数据造一个观测。复制 Values——测试会改动它，
 // 而 golden 是包级变量，改坏了会污染其他测试。
+// priorMeta 返回「往前第 i 期」的 Meta（i 从 0 起），期次按 validMeta 的 h1 口径
+// 逐期回退一年（M1c-4 的 TASK-008 加了 drift 相邻性约束之后必需）。
+//
+// ⚠️ 此前各处夹具都直接用 validMeta()，于是「上一期」与「本期」同期、跨度 0。
+// 那在没有相邻性约束时无害，加了之后每一格都会被判 non_adjacent_prior ——
+// **不是新约束错了，是夹具本来就不该让两者同期，只是此前没有断言看得见。**
+func priorMeta(i int) Meta {
+	m := validMeta()
+	m.Period = fmt.Sprintf("%04d-06", 2025-i) // 2025-06 / 2024-06 / 2023-06 …
+	return m
+}
+
 func obsFrom(values map[string]float64, extractor string) Observation {
 	m := validMeta()
 	m.Extractor = extractor
@@ -481,10 +525,15 @@ func depositWith(residualPct float64) map[string]float64 {
 
 // deposit_sum 的两个判据合成一个三态，逐行验证映射表（spec 7.1 + 历史不足一行）。
 func TestDepositSumCombinesTwoCriteria(t *testing.T) {
+	// ⚠️ **历史期次要真的往前排**（M1c-4 的 TASK-008 加了相邻性约束）：
+	// 原来所有 prior 都用 validMeta() 的 2026-06，与本期同期 ⇒ 跨度 0 ≠ 12，
+	// 新约束会把每一格都判成 non_adjacent_prior。那**不是**新约束错了 ——
+	// 夹具本来就不该让「上一期」与「本期」同期，只是此前没有任何断言看得见。
+	// periodType 是 h1 ⇒ expectedPeriodGapMonths 返回 12，故逐期回退一年。
 	priorWith := func(pcts ...float64) []Observation {
 		out := make([]Observation, 0, len(pcts))
-		for _, p := range pcts {
-			out = append(out, Observation{Meta: validMeta(), Values: depositWith(p)})
+		for i, p := range pcts {
+			out = append(out, Observation{Meta: priorMeta(i), Values: depositWith(p)})
 		}
 		return out
 	}
@@ -499,7 +548,11 @@ func TestDepositSumCombinesTwoCriteria(t *testing.T) {
 	}{
 		{"无历史，绝对值通过", 10, nil, CheckPassed, "drift_skipped:no_prior_period", 0.10},
 		{"无历史，绝对值超标", 20, nil, CheckFailed, "tolerance_exceeded", 0.20},
-		{"历史不足三期", 10, []float64{10, 10}, CheckPassed, "drift_skipped:insufficient_history", 0.10},
+		// ⚠️ 理由串在 M1c-4 的 TASK-008 收窄了：insufficient_history →
+		// insufficient_same_caliber_history，并带上实际 n 与族名。收窄的理由是
+		// mom 族的样本不足是**结构性**的（与 ytd 期次在时间轴上交错），
+		// 和「新库冷启动」混成一格会让人以为等几期就好。
+		{"历史不足三期", 10, []float64{10, 10}, CheckPassed, "drift_skipped:insufficient_same_caliber_history", 0.10},
 		{"三期历史，漂移在容许内", 10, []float64{10, 11, 9}, CheckPassed, "", 0.10},
 		{"三期历史，漂移超标", 5, []float64{10, 10, 10}, CheckFailed, "drift_exceeded", 0.05},
 		{"绝对值超标时不谈漂移", 20, []float64{10, 10, 10}, CheckFailed, "tolerance_exceeded", 0.20},
@@ -599,8 +652,8 @@ func TestDepositSumBoundaryIsInclusive(t *testing.T) {
 
 	priorAt := func(pct float64, n int) []Observation {
 		out := make([]Observation, 0, n)
-		for range n {
-			out = append(out, Observation{Meta: validMeta(), Values: depositWith(pct)})
+		for k := 0; k < n; k++ {
+			out = append(out, Observation{Meta: priorMeta(k), Values: depositWith(pct)})
 		}
 		return out
 	}
@@ -639,22 +692,25 @@ func TestDepositSumBoundaryIsInclusive(t *testing.T) {
 // 拉向 0——三期有效 10% 加两期「0」，均值变成 6%，本期 10% 就被判成漂移 4pct，
 // 一个正常期次凭空变成告警。
 func TestDepositSumIgnoresUncomputablePriors(t *testing.T) {
-	withResidual := func(pct float64) Observation {
-		return Observation{Meta: validMeta(), Values: depositWith(pct)}
+	// ⚠️ 历史逐期回退（M1c-4 的 TASK-008 的相邻性约束）：本期用 validMeta 的 2026-06，
+	// prior[0] 必须是 2025-06 才算相邻。本期本身仍用 validMeta()。
+	withResidualAt := func(i int, pct float64) Observation {
+		return Observation{Meta: priorMeta(i), Values: depositWith(pct)}
 	}
-	// 缺一个部门分项 ⇒ depositResidual 返回 false
-	incomplete := func() Observation {
-		o := withResidual(10)
+	// 缺一个部门分项 ⇒ depositResidualOf 返回 false
+	incompleteAt := func(i int) Observation {
+		o := withResidualAt(i, 10)
 		delete(o.Values, FieldDepositNBFIYTD)
 		return o
 	}
 
 	prior := []Observation{
-		withResidual(10), withResidual(10), withResidual(10),
-		incomplete(), incomplete(),
+		withResidualAt(0, 10), withResidualAt(1, 10), withResidualAt(2, 10),
+		incompleteAt(3), incompleteAt(4),
 	}
 
-	rep, err := Validate(context.Background(), withResidual(10),
+	rep, err := Validate(context.Background(),
+		Observation{Meta: validMeta(), Values: depositWith(10)},
 		fakeHistory{prior: prior}, DefaultThresholds())
 	require.NoError(t, err)
 
@@ -1673,4 +1729,206 @@ func TestMoMTolerancesAreDeclaredAndNonZero(t *testing.T) {
 	assert.Greater(t, cfg.DepositSumToleranceMoM, 0.0,
 		"为 0 会让每一期走 mom 族的观测都因残差超限而 failed")
 	assert.Greater(t, cfg.CorpLoanToleranceMoM, 0.0)
+}
+
+// —— M1c-4 的 TASK-008：漂移基线改用 priorAll（含 pending），并加相邻性约束 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-008）
+// functional[0] "基线含未过闸期次"     → TestDepositSumDriftBaselineIncludesPending
+// functional[1] "基线不相邻时 skip"     → TestDepositSumSkipsOnNonAdjacentBaseline
+// boundary[0]   "同族样本不足要说清"     → TestDepositSumSkipsWhenPriorsAreOtherCaliber
+// boundary[1]   "stock_continuity 不跟着改" → TestStockContinuityStillReadsAcceptedPriorsOnly
+
+// 🔴 正反馈链：闸门自己制造它要检测的异常。
+//
+// 真跑实测的链条（2024-04…08 被 tolerance 拒 ⇒ 落 pending ⇒ 基线看不见它们 ⇒
+// 2024-10/11 因偏离一个**虚高的旧均值**被 drift 拒）在这里按同一形状复现。
+//
+// 正当性见 gateDepositSum 注释：基线用的是「残差」这个统计量，若常态只由已通过
+// 这道闸的期次组成，drift 的定义本身就是循环的。
+func TestDepositSumDriftBaselineIncludesPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := DefaultThresholds()
+
+	depositObsAt := func(period string, pct float64) Observation {
+		return Observation{
+			Meta: Meta{
+				Period: period, PeriodType: "monthly", PublishedAt: period + "-15",
+				ArticleID: "art-" + period, CaliberVersion: "2025-01", Extractor: extractorV2,
+			},
+			Values: depositWith(pct),
+		}
+	}
+	save := func(period string, pct float64, rep ValidationReport, wantTable string) {
+		t.Helper()
+		out, err := s.Save(ctx, depositObsAt(period, pct), rep)
+		require.NoError(t, err)
+		require.Equalf(t, wantTable, out.Table, "前置条件：%s 该落 %s", period, wantTable)
+	}
+
+	// 三期正常历史（残差 7.84%）进权威表
+	for _, p := range []string{"2024-01", "2024-02", "2024-03"} {
+		save(p, 7.84, passing(), TableObservations)
+	}
+	// 随后五期残差 14.6% 超 tolerance(0.12) ⇒ 落 pending ⇒ 权威表从此停在 2024-03
+	for _, p := range []string{"2024-04", "2024-05", "2024-06", "2024-07", "2024-08"} {
+		save(p, 14.6, failing(), TablePending)
+	}
+
+	// —— 前置事实：旧实现（只看权威表）此刻必判 drift_exceeded ——
+	//
+	// 不去模拟旧实现，而是把「旧基线是什么、它离本期有多远」当场算出来：
+	// 模拟需要绕过新加的相邻性约束，绕的过程本身会变成一个没人复核的假设。
+	acc, err := s.Preceding(ctx, "2024-09", "monthly", historyDepth)
+	require.NoError(t, err)
+	require.Len(t, acc, 3, "前提：2024-04…08 全落 pending，权威表里只剩最早那三期")
+	var accSum float64
+	for _, o := range acc {
+		r, ok := depositResidualOf(o.Values, FieldDepositFlowYTD, depositPartFields)
+		require.True(t, ok)
+		accSum += r
+	}
+	staleMean := accSum / float64(len(acc))
+	require.Greater(t, math.Abs(0.119-staleMean), cfg.DepositSumDriftMax,
+		"前提：本期 11.9%% 相对那个**冻结的**旧均值 %.4f 已超漂移上限 —— "+
+			"这一格红了说明造型没复现出正反馈，下面的绿就没有意义", staleMean)
+
+	// —— 本期：残差 11.9% 未超 tolerance，且与「近五期真实发生过的 14.6%」很接近 ——
+	rep, err := Validate(ctx, depositObsAt("2024-09", 11.9), s, cfg)
+	require.NoError(t, err)
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equalf(t, CheckPassed, c.Status,
+		"基线必须看得见落 pending 的那五期，否则闸门在拿自己拒绝的结果当常态。Reason=%q", c.Reason)
+	assert.Empty(t, c.Reason,
+		"2024-08 与本期相邻、同族历史足够 ⇒ 漂移是**真算过**的，不该带 drift_skipped")
+}
+
+// 基线不相邻时 **skip 而不是按跨度放宽**。
+//
+// 放宽需要一个放宽系数，而语料里没有数据能回答「跨 24 个月该放宽多少」；
+// 往闸里塞一个没测过的数正是本任务在修的那类缺陷本身。
+func TestDepositSumSkipsOnNonAdjacentBaseline(t *testing.T) {
+	prior := []Observation{
+		{Meta: priorMeta(1), Values: depositWith(10)}, // 2024-06，距本期 2026-06 隔 24 个月
+		{Meta: priorMeta(2), Values: depositWith(10)},
+		{Meta: priorMeta(3), Values: depositWith(10)},
+	}
+	rep, err := Validate(context.Background(),
+		Observation{Meta: validMeta(), Values: depositWith(10)},
+		fakeHistory{prior: prior}, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equal(t, CheckPassed, c.Status, "绝对值确实查过并通过了，记 passed 而不是 skipped")
+	assert.Contains(t, c.Reason, "drift_skipped:non_adjacent_prior")
+	assert.Contains(t, c.Reason, "2024-06", "要指出被跳过的基线是哪一期")
+	assert.Contains(t, c.Reason, "2026-06", "以及它离本期有多远")
+}
+
+// 🔴 mom 族取不到同族基线是**设计的必然后果**，不是 bug —— 但必须在 Reason 里可数、可查。
+//
+// mom 与 ytd 期次在时间轴上交错，一个 mom 期次的前几期往往整批是 ytd，
+// depositResidualOf 对它们逐个返回 false。⇒ 那批新救回的观测，drift 闸可能恒 skip
+// 而**完全没有保护**。笼统记成 insufficient_history 会与「新库冷启动」混成一格，
+// 而两者成因完全不同：冷启动等几期就好，本族样本不足是结构性的。
+func TestDepositSumSkipsWhenPriorsAreOtherCaliber(t *testing.T) {
+	// 历史四期全是 ytd 族，本期整族翻成 mom
+	prior := []Observation{
+		{Meta: priorMeta(0), Values: depositWith(10)},
+		{Meta: priorMeta(1), Values: depositWith(10)},
+		{Meta: priorMeta(2), Values: depositWith(10)},
+		{Meta: priorMeta(3), Values: depositWith(10)},
+	}
+	obs := obsFrom(momOnly(golden2025), extractorV2)
+	obs.Values[FieldDepositFlowMoM] = 100
+	obs.Values[FieldDepositHouseholdMoM] = 90
+	obs.Values[FieldDepositCorpMoM] = 0
+	obs.Values[FieldDepositFiscalMoM] = 0
+	obs.Values[FieldDepositNBFIMoM] = 0
+	require.NotContains(t, obs.Values, FieldDepositFlowYTD, "用例前提：本期整族是 mom")
+
+	rep, err := Validate(context.Background(), obs, fakeHistory{prior: prior}, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equal(t, CheckPassed, c.Status)
+	assert.Contains(t, c.Reason, "drift_skipped:insufficient_same_caliber_history",
+		"不得与「新库冷启动」的 no_prior_period 混成一格")
+	assert.Contains(t, c.Reason, "mom", "要说清是哪一族的样本不足")
+	assert.Contains(t, c.Reason, "n=0", "要带上**本族**实际拿到几期")
+	assert.Contains(t, c.Reason, "prior=4",
+		"以及一共有几期历史 —— 两个数一起才看得出「有历史但都不是这一族」")
+}
+
+// 接线断言：stock_continuity 读的是 in.prior（只含已过闸），**不是** in.priorAll。
+//
+// 两个方向都断言，缺一不可：只测前者会放过「两个都读」的实现，
+// 只测后者会放过「压根没接线」的实现。
+//
+// 🔴 为什么这条必须钉住：两道闸对「未过闸的期次」要的东西相反。
+// drift 问「近期常态是什么」，pending 里的期次是常态的一部分；
+// stock_continuity 问「上一期的存量是多少」，拿一个**没通过校验的存量值**当基准，
+// 等于用可疑数据去判可疑数据。M1c-3b 的 TASK-011 刚把这道闸的基线收严过一次。
+func TestStockContinuityStillReadsAcceptedPriorsOnly(t *testing.T) {
+	cfg := DefaultThresholds()
+	obs := stockObsOf("monthly", 101)
+	obs.Meta.Period = "2025-02"
+	usable := stockObsOf("monthly", 100)
+	usable.Meta.Period = "2025-01"
+
+	// 方向一：只有 priorAll 有货 ⇒ 必须 skip（读了 priorAll 就会算出结果）
+	only := gateStockContinuity(gateInput{obs: obs, priorAll: []Observation{usable}, cfg: cfg})
+	assert.Equal(t, CheckSkipped, only.Status,
+		"🔴 stock_continuity 读到了 priorAll —— 那是含未过闸期次的读口，"+
+			"拿没通过校验的存量当基准，等于用可疑数据判可疑数据")
+	assert.Equal(t, "no_prior_period", only.Reason)
+
+	// 方向二：只有 prior 有货 ⇒ 必须真的算（否则上面那格是「压根没接线」也会绿）
+	wired := gateStockContinuity(gateInput{obs: obs, prior: []Observation{usable}, cfg: cfg})
+	assert.NotEqual(t, CheckSkipped, wired.Status,
+		"prior 有货时必须真算，否则上一格分辨不出「没读 priorAll」还是「什么都没读」")
+	require.NotNil(t, wired.Value)
+}
+
+// PrecedingAll 查库失败必须让整个 Validate 失败，**不能当成「没有历史」静默降级**。
+//
+// 降级的后果不是「少查一次漂移」而是「报告上写着 passed 而那道闸压根没查」——
+// 与 drift_skipped 不同，静默降级在报告里不留任何痕迹。
+func TestValidatePropagatesPrecedingAllError(t *testing.T) {
+	boom := errors.New("boom: pending 表读不了")
+	_, err := Validate(context.Background(),
+		Observation{Meta: validMeta(), Values: depositWith(10)},
+		fakeHistory{prior: []Observation{{Meta: priorMeta(0), Values: depositWith(10)}}, errAll: boom},
+		DefaultThresholds())
+	require.Error(t, err, "PrecedingAll 出错时 Validate 必须失败")
+	assert.ErrorIs(t, err, boom)
+}
+
+// 🔴 权威表**一期都没有**、而 pending 里有历史时，仍然必须真算漂移。
+//
+// 这一格是变异测试逼出来的（M6：把 len(in.priorAll)==0 写成 len(in.prior)==0，
+// 13 个变异体里它是唯一存活的真缺口）。上面那条 IncludesPending 分辨不出它——
+// 那里权威表有三期，prior 非空，两种写法都往下走。
+//
+// 而这恰恰是正反馈链**最坏的形态**：近期每一期都被拒 ⇒ 权威表在这一段完全是空的
+// ⇒ 误写成 in.prior 会报 no_prior_period，报告上看起来像「新库冷启动」，
+// 而真相是「这段时间每一期都被这道闸拒了」。两者的运维含义完全相反。
+func TestDepositSumDriftWorksWhenAllPriorsArePending(t *testing.T) {
+	pendingOnly := []Observation{
+		{Meta: priorMeta(0), Values: depositWith(10)}, // 2025-06，与本期 2026-06 相隔 12 个月（h1 相邻）
+		{Meta: priorMeta(1), Values: depositWith(10)},
+		{Meta: priorMeta(2), Values: depositWith(10)},
+	}
+	rep, err := Validate(context.Background(),
+		Observation{Meta: validMeta(), Values: depositWith(10)},
+		// prior 显式为空：权威表这一段一期都没有
+		fakeHistory{prior: nil, priorAll: pendingOnly}, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equal(t, CheckPassed, c.Status)
+	assert.Empty(t, c.Reason,
+		"🔴 priorAll 里有三期同族历史，漂移必须**真算**。"+
+			"报 no_prior_period 会把「这段每期都被拒」伪装成「新库冷启动」，运维含义相反")
 }

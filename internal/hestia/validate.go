@@ -37,6 +37,14 @@ type History interface {
 	//
 	// 库里没有历史时返回空切片而不是错误——首期入库是正常路径。
 	Preceding(ctx context.Context, period, periodType string, n int) ([]Observation, error)
+
+	// PrecedingAll 与 Preceding 相同，但**并上未过闸的 pending**：答「近期发生过什么」，
+	// 而不是「上一期可信的观测是什么」（M1c-4 的 TASK-008）。
+	//
+	// 🔴 **只该喂给统计量类判据**（残差漂移这种「本期相对近期常态」的问题）。
+	// 逐期比较类判据（如环比）用它 = 拿未通过校验的数据当基准值。
+	// 两者的语义差别与选错的后果，见 store.go 的 PrecedingAll 头注释。
+	PrecedingAll(ctx context.Context, period, periodType string, n int) ([]Observation, error)
 }
 
 // NoHistory 是恒空的 History，给还没有库的调用方用（例如只想跑无历史闸门的
@@ -50,6 +58,10 @@ var NoHistory History = noHistory{}
 type noHistory struct{}
 
 func (noHistory) Preceding(context.Context, string, string, int) ([]Observation, error) {
+	return nil, nil
+}
+
+func (noHistory) PrecedingAll(context.Context, string, string, int) ([]Observation, error) {
 	return nil, nil
 }
 
@@ -85,7 +97,15 @@ func Validate(ctx context.Context, obs Observation, h History, cfg Thresholds) (
 			obs.Meta.Period, obs.Meta.PeriodType, err)
 	}
 
-	in := gateInput{obs: obs, prior: prior, cfg: cfg}
+	// 🔴 多取一次「含 pending」的历史（M1c-4 的 TASK-008）：只给统计量类判据用。
+	// 两次查询而不是一次取全再过滤 —— 「哪些期次可信」这个判断属于 Store，
+	// 在这里过滤等于把它复制一份，而两份迟早分叉。
+	priorAll, err := h.PrecedingAll(ctx, obs.Meta.Period, obs.Meta.PeriodType, historyDepth)
+	if err != nil {
+		return ValidationReport{}, err
+	}
+
+	in := gateInput{obs: obs, prior: prior, priorAll: priorAll, cfg: cfg}
 	checks := make([]Check, 0, len(gates))
 	passed := true
 	for _, g := range gates {
@@ -135,7 +155,16 @@ type gateInput struct {
 	// 头注释）。凡是「相邻两期」才有意义的判定（如 gateStockContinuity 的环比），
 	// **必须自己核对期次跨度**，别沿用「[0] 就是上一期」那个假设。
 	prior []Observation
-	cfg   Thresholds
+
+	// priorAll 与 prior 相同但**并上 pending**，按 period 降序，可能为空
+	//（M1c-4 的 TASK-008）。
+	//
+	// 🔴 **只有统计量类判据可以读它。** 逐期比较类判据（gateStockContinuity 的环比）
+	// 必须继续用 prior —— 用 priorAll 等于拿未通过校验的数据当基准值。
+	// 由 validate_test.go 的接线断言守着；那条测试是这条纪律**唯一的机制**，别删。
+	priorAll []Observation
+
+	cfg Thresholds
 }
 
 // need 检查闸门所需字段是否都在，缺任一就返回带 absent_field 理由的 skip。
@@ -330,13 +359,37 @@ func gateDepositSum(in gateInput) Check {
 	//
 	// 两个理由刻意可分：no_prior_period 说「这是首期」，insufficient_history
 	// 说「再等几期就好」，对运维含义不同——一个该等，一个该查。
-	if len(in.prior) == 0 {
+	// 🔴 基线改用 priorAll（**含未过闸的 pending**），M1c-4 的 TASK-008。
+	//
+	// 真跑实测的正反馈链：2024-04…08 五期被 tolerance 拒（残差 0.1460/0.1490/0.1505/
+	// 0.1663/0.1211）⇒ 不进权威表 ⇒ 基线看不见它们 ⇒ 2024-10/11 因「偏离一个虚高的
+	// 3 期均值 0.0784」被 drift 拒。⇒ **闸门自己制造了它要检测的异常。**
+	//
+	// 正当性：基线用的是**残差这个统计量**，不是那些期次的字段值。drift 问的是
+	// 「本期残差相对近期常态是否突变」，若常态只由已通过这道闸的期次组成，
+	// **定义本身就是循环的**。与 M1c-3b 的 TASK-011 修的 stock_continuity 同族缺陷。
+	if len(in.priorAll) == 0 {
 		c.Status = CheckPassed
 		c.Reason = "drift_skipped:no_prior_period"
 		return c
 	}
-	hist := make([]float64, 0, len(in.prior))
-	for _, p := range in.prior {
+
+	// 🔴 相邻性约束（M1c-4 的 TASK-008）：priorAll[0] 是「最近发生过的一期」，
+	// **不保证是上一期**。跨度不对时 skip，**不按跨度放宽** —— 放宽需要一个放宽系数，
+	// 而语料里没有数据能回答「跨 13 个月该放宽多少」；往闸里塞一个没测过的数，
+	// 正是本任务在修的那类缺陷本身（沿 M1c-3b 的 TASK-011 对 stock_continuity 的裁决）。
+	//
+	// ⚠️ 两种错的代价不对称：误 skip 只损失一次检查**且 reason 可见**，误 fail 不可自愈。
+	if gap, ok := periodGapMonths(in.priorAll[0].Meta.Period, in.obs.Meta.Period); !ok ||
+		gap != expectedPeriodGapMonths(in.obs.Meta.PeriodType) {
+		c.Status = CheckPassed
+		c.Reason = fmt.Sprintf("drift_skipped:non_adjacent_prior (%s → %s)",
+			in.priorAll[0].Meta.Period, in.obs.Meta.Period)
+		return c
+	}
+
+	hist := make([]float64, 0, len(in.priorAll))
+	for _, p := range in.priorAll {
 		// 🔴 历史残差必须用**同一族**算：拿 ytd 的残差去和 mom 的均值比，
 		// 两个分母量级差一个数量级，漂移判定完全失去意义。
 		if pr, ok := depositResidualOf(p.Values, b.total, b.parts); ok {
@@ -345,7 +398,15 @@ func gateDepositSum(in gateInput) Check {
 	}
 	if len(hist) < minDriftHistory {
 		c.Status = CheckPassed
-		c.Reason = "drift_skipped:insufficient_history"
+		// 🔴 **说清是「本族」样本不足并带上实际 n**（M1c-4 的 TASK-008）。
+		//
+		// 笼统记成 insufficient_history 会与「新库冷启动」混成一格，而两者成因完全不同：
+		// 冷启动等几期就好；**本族样本不足是结构性的** —— mom 与 ytd 期次在时间轴上交错，
+		// 一个 mom 期次的前几期往往全是 ytd，depositResidualOf 对它们逐个返回 false。
+		// ⇒ 那批新救回的观测，drift 闸可能**恒 skip 而完全没有保护**，报告上只有这一行。
+		// 带上 n 与族名，是为了让「没保护」这件事在报告里可数、可查。
+		c.Reason = fmt.Sprintf("drift_skipped:insufficient_same_caliber_history (%s n=%d<%d, prior=%d)",
+			b.name, len(hist), minDriftHistory, len(in.priorAll))
 		return c
 	}
 
