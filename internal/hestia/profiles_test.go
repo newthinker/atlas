@@ -753,14 +753,15 @@ func TestFlowRECapturesMonthlyPeriodVerbatim(t *testing.T) {
 // 两个维度都要过：外币孪生句的期次前缀与本币句相同，只判期次会取到亿美元那句。
 //
 // ⚠️ 合成正文，形态取自 Leader 实读的记述；真实月报端到端由 M1c-3a 的 TASK-007 确认。
-func TestSelectRMBCumulativeFlowPicksMonthlyCumulative(t *testing.T) {
+func TestSelectRMBFlowByCaliberRoutesMonthlySentences(t *testing.T) {
 	t.Run("前十一个月：从三句里挑出人民币累计句", func(t *testing.T) {
 		const body = "前十一个月人民币贷款增加1.09万亿元，同比多增1474亿元。" +
 			"11月份，人民币贷款增加5000亿元。" +
 			"前十一个月外币贷款增加123亿美元。"
 
-		m, err := selectRMBCumulativeFlow(loanFlowRE, body, "贷款期内合计")
+		m, cum, err := selectRMBFlowByCaliber(loanFlowRE, body, "贷款期内合计")
 		require.NoError(t, err)
+		assert.True(t, cum, "取到的是累计句，口径必须报累计——路由靠这个布尔选列")
 		assert.Equal(t, []string{"前十一个月", "人民币", "增加", "1.09", "万亿元"}, m[1:],
 			"必须取到人民币累计句：期次维度筛掉 11月份，币种维度筛掉外币孪生句")
 	})
@@ -769,25 +770,33 @@ func TestSelectRMBCumulativeFlowPicksMonthlyCumulative(t *testing.T) {
 		const body = "1月份人民币贷款增加5.13万亿元，同比多增3800亿元。" +
 			"1月份外币贷款增加200亿美元。"
 
-		m, err := selectRMBCumulativeFlow(loanFlowRE, body, "贷款期内合计")
+		m, cum, err := selectRMBFlowByCaliber(loanFlowRE, body, "贷款期内合计")
 		require.NoError(t, err)
+		assert.True(t, cum, "1 月的累计就是当月，但它在 cumulativePeriods 里 ⇒ 走累计列")
 		assert.Equal(t, []string{"1月份", "人民币", "增加", "5.13", "万亿元"}, m[1:])
 	})
 
-	t.Run("阴性对照：只有当月句时必须报错、不得当成累计", func(t *testing.T) {
+	// 🔴 **判据换了形式，守的东西没变**（M1c-4 的 TASK-005 路由化）：原来断言「只有当月句
+	// 时必须报错」，理由是「当月句被当成累计口径取走会把当月值装进 _ytd」。路由化之后那个
+	// 担忧由「分列写」承担 ⇒ 判据变成「口径必须报**当月**」——错报累计仍然会把值送进 _ytd，
+	// 那正是 cumulativePeriods 要挡的东西，只是现在挡在选列而不是挡在报错。
+	t.Run("只有当月句时：不再报错，但口径必须报当月", func(t *testing.T) {
 		const body = "11月份，人民币贷款增加5000亿元。前十一个月外币贷款增加123亿美元。"
 
-		_, err := selectRMBCumulativeFlow(loanFlowRE, body, "贷款期内合计")
-		require.Errorf(t, err, "当月句被当成累计口径取走了 —— 那正是 cumulativePeriods 要挡的")
-		assert.Contains(t, err.Error(), "not found among 2 candidate sentence(s)",
-			"两句都该进候选（正则认得），再被口径/币种两个维度筛光")
+		m, cum, err := selectRMBFlowByCaliber(loanFlowRE, body, "贷款期内合计")
+		require.NoError(t, err, "只有当月合计句的报告不再被整篇拒绝——那是本迭代的目标")
+		assert.Falsef(t, cum,
+			"🔴 口径报成累计 ⇒ 5000 亿会被写进 loan_flow_ytd，量级合理而口径是错的")
+		assert.Equal(t, []string{"11月份", "人民币", "增加", "5000", "亿元"}, m[1:],
+			"币种维度仍然生效：外币孪生句不得被取走")
 	})
 
 	t.Run("存款侧同构", func(t *testing.T) {
 		const body = "前八个月人民币存款增加15.6万亿元。8月份，人民币存款增加2.1万亿元。"
 
-		m, err := selectRMBCumulativeFlow(depositFlowRE, body, "存款期内合计")
+		m, cum, err := selectRMBFlowByCaliber(depositFlowRE, body, "存款期内合计")
 		require.NoError(t, err)
+		assert.True(t, cum)
 		assert.Equal(t, []string{"前八个月", "人民币", "增加", "15.6", "万亿元"}, m[1:])
 	})
 }
@@ -1197,7 +1206,8 @@ func TestFlowREExtractsRangePrefixSamples(t *testing.T) {
 		{"1-11月", "1-11月，人民币贷款累计增加19.91万亿元，同比多增1.09万亿元", "19.91"},
 	} {
 		t.Run(tc.period, func(t *testing.T) {
-			m, err := selectRMBCumulativeFlow(flowRE("贷款"), tc.sentence, "贷款期内合计")
+			m, cum, err := selectRMBFlowByCaliber(flowRE("贷款"), tc.sentence, "贷款期内合计")
+			require.True(t, cum, "1-N月 是累计口径，路由必须报累计——报当月会把它送进 _mom 列")
 			require.NoError(t, err,
 				"这一句是该期唯一的累计合计句，抽不到它就等于判定「本期没有累计数据」——"+
 					"而数据就在正文里，那正是 QA R3 指出的假结论")
@@ -1460,4 +1470,73 @@ func TestMoneyRERefusesToCrossSentences(t *testing.T) {
 		assert.Nil(t, re.FindStringSubmatch(line),
 			"从句里出现数字意味着那是**另一个指标**——吃掉它就会把 M2 的同比装进 M1")
 	})
+}
+
+// —— M1c-4 的 TASK-005：nameField.pick 按口径选列 ——
+//
+// 🔴 **pick 是本迭代把「拒绝」换成「路由」之后那道防线本身。** 原来的拒绝理由是
+// 「同一份观测里合计取累计值、分部门混进当月值会让内部口径不一致，两者都在合法量级内、
+// 下游没有任何闸门拦得住」——新形态下它成立，靠的完全是 `_ytd` 与 `_mom` 是两个不同的列。
+//
+// ⚠️ **三格都要断言，且断言的是「等于哪一个」而不是「非空」**：一个恒返回 ytdField 的
+// 实现能让「非空」全绿，而那正是本迭代要防的那件事（变异 V3 就是这么改的）。
+func TestNameFieldPickSelectsColumnByCaliber(t *testing.T) {
+	nf := nameField{name: "住户存款", ytdField: FieldDepositHouseholdYTD, momField: FieldDepositHouseholdMoM}
+
+	assert.Equal(t, FieldDepositHouseholdYTD, nf.pick(caliberCumulative),
+		"累计口径必须选 _ytd 列")
+	assert.Equal(t, FieldDepositHouseholdMoM, nf.pick(caliberCurrent),
+		"🔴 当月口径必须选 _mom 列——返回 _ytd 就是把当月值装进累计列，"+
+			"量级完全合理而口径是错的，下游没有任何闸门拦得住")
+	assert.Empty(t, nf.pick(caliberAbsent),
+		"没有分部门段时不表态：返回空串让调用方报更具体的错，而不是随便选一列")
+
+	// 交叉：两个口径**不能**选到同一列。少了这一条，一个恒返回 ytdField 的实现
+	// 只会让上面第二条红，而「两列不同」这个关系性属性本身没有守卫。
+	assert.NotEqual(t, nf.pick(caliberCumulative), nf.pick(caliberCurrent),
+		"两种口径必须落在不同的列上——这就是本迭代的整条防线")
+
+	// 全表覆盖：任何一项的两列都不得相同（写模板时把 momField 抄成 ytdField 的守卫）
+	for _, group := range [][]nameField{tsfFlowItems, depositItems} {
+		for _, it := range group {
+			assert.NotEqualf(t, it.pick(caliberCumulative), it.pick(caliberCurrent),
+				"%s 的两列相同 ⇒ 路由对它失效", it.name)
+		}
+	}
+	for _, sc := range loanScopes {
+		for _, it := range sc.items {
+			assert.NotEqualf(t, it.pick(caliberCumulative), it.pick(caliberCurrent),
+				"%s 的两列相同 ⇒ 路由对它失效", it.name)
+		}
+	}
+}
+
+// 🔴 「每个模板条目都登记了两列」是**表层**性质，在这里守，不在抽取路径上写运行时死分支
+// （M1c-4 的 TASK-005）。
+//
+// 抽取路径里 `it.pick(cal)` 不可能拿到空串，理由是结构性的：`caliberAbsent` 等价于
+// 「覆盖面模板一个都不命中」，而 pick 之前那行 mustMatch 用的正是同一批模板。
+// 真正会出错的是**写模板表时漏填一列** —— 那是数据错误，该由数据的测试抓。
+func TestTemplateTablesDeclareBothColumns(t *testing.T) {
+	for name, group := range map[string][]nameField{
+		"tsfFlowItems": tsfFlowItems,
+		"depositItems": depositItems,
+	} {
+		for _, it := range group {
+			assert.NotEmptyf(t, it.ytdField, "%s 的 %s 缺 ytdField", name, it.name)
+			assert.NotEmptyf(t, it.momField, "%s 的 %s 缺 momField —— 当月口径下它会写进空字段名", name, it.name)
+		}
+	}
+	for _, sc := range loanScopes {
+		for _, it := range sc.items {
+			assert.NotEmptyf(t, it.ytdField, "loanScopes 的 %s 缺 ytdField", it.name)
+			assert.NotEmptyf(t, it.momField, "loanScopes 的 %s 缺 momField", it.name)
+		}
+		// 作用域合计：有累计列就必须有当月列，否则当月口径下会写进空字段名
+		if sc.totalField != "" {
+			assert.NotEmptyf(t, sc.totalMoM,
+				"作用域 %s 有 totalField 却没有 totalMoM —— 当月口径下合计值会写进空字段名",
+				sc.anchorRE.String())
+		}
+	}
 }

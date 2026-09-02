@@ -725,24 +725,27 @@ func TestParseRefusesMonthlyWithoutPeriodToDateSentence(t *testing.T) {
 	require.NoError(t, err, "版式探测本身不该失败")
 	assert.Equal(t, extractorMonthlyV1, ex, "4 节月报仍应被判成 rule-monthly@v1")
 
-	// ② 端到端必须报错，且**不产出半份结果**
+	// ② 🔴 判据换形式不换内容（M1c-4 的 TASK-005 路由化）：原来断言「必须响亮失败」，
+	//    理由是「静默产出会让 *_ytd 装上当月值」。本迭代给了当月值自己的列之后，
+	//    同一个理由要求的是「值落进 _mom，**_ytd 一个都没有**」——那句「不得装进 *_ytd」
+	//    逐字保留，只是从「靠拒绝达成」变成「靠选列达成」。
 	obs, err := Parse(raw)
-	require.Error(t, err, "没有累计数可抽时必须响亮失败——静默产出会让 *_ytd 装上当月值")
-	assert.Empty(t, obs.Values, "报错时不得同时返回半份 Values")
+	require.NoError(t, err, "只有当月数的报告不该再被整篇拒绝——那正是本迭代的目标")
+	require.NotEmpty(t, obs.Values, "能读出口径就该产出，不该是空 Values")
 
-	// ③ 正向：错误必须指向真实原因
-	assert.Contains(t, err.Error(), "期内合计", "错误要指出取不到的是「期内合计」这个口径")
-	assert.Contains(t, err.Error(), "4月份",
-		"要带上那条被拒的当月候选——排障的人据此才知道「不是没句子，是句子口径不对」")
+	// ③ 正向：当月口径的值落进 _mom 列
+	for _, f := range []string{FieldDepositFlowMoM, FieldLoanFlowMoM,
+		FieldDepositHouseholdMoM, FieldLoanHHShortMoM} {
+		assert.Containsf(t, obs.Values, f, "当月口径的值必须落进 %s", f)
+	}
 
-	// ④ 反向：不得是另外三类无关错误
-	for _, unrelated := range []string{
-		"unrecognized report title", // 标题层
-		"missing core section",      // 板块层
-		"unknown extractor",         // 版式层
-	} {
-		assert.NotContainsf(t, err.Error(), unrelated,
-			"换个理由失败也会让 ③ 之外的断言绿——本条钉住失败原因没有漂移到 %q", unrelated)
+	// ④ 🔴 反向：**这半条才是原断言的直系继承者**。少了它，一个把 pick 写成恒返回
+	//    ytdField 的实现会让 ③ 全绿，而 2020-04 的 4 月当月值就装进了 *_ytd 列——
+	//    量级完全合理、口径是错的，下游 calibrate 会拿它跨期比。
+	for _, f := range []string{FieldDepositFlowYTD, FieldLoanFlowYTD,
+		FieldDepositHouseholdYTD, FieldLoanHHShortYTD} {
+		assert.NotContainsf(t, obs.Values, f,
+			"🔴 4 月当月值出现在 %s —— 这份报告全篇没有任何累计数据", f)
 	}
 }
 
@@ -833,25 +836,39 @@ func TestParseCoversAllKinds(t *testing.T) {
 	// 🔴 至少一格**阴性**：全是阳性用例的表证明不了守卫在工作。
 	//
 	// 两格覆盖两种**不同**的拒绝理由——它们的后续动作完全不同，合并成一格就分不出来了。
-	t.Run("阴性/B类口径混装必须报错", func(t *testing.T) {
+	// 🔴 B / C 两类原来都是「必须报错」，路由化之后（M1c-4 的 TASK-005）都变成「必须分列」。
+	// 判据换形式不换内容：那句「不得把当月值装进 *_ytd」逐字保留，只是由列名承担。
+	// ⚠️ **两类仍然必须可区分**，只是区分点从「两条错误文案」换成了「产出的列组合」——
+	// B 类是混合（合计 _ytd + 分部门 _mom），C 类是全 _mom。合并成同一种会让
+	// calibrate 的分流失去依据，这一点没有变。
+	t.Run("阴性转正/B类同篇双口径必须分列", func(t *testing.T) {
 		// 2023-08：合计句是累计（前八个月）而分部门段是当月（8月份）——同一篇之内分段口径不同。
-		// 这是 M1c-3a 的 TASK-009 那道口径守卫，端到端仍必须生效。
 		obs, err := Parse(readTestdata(t, "pboc-2023-08-monthly.html"))
-		require.Error(t, err, "把当月分部门值装进 *_ytd 必须被拒")
-		assert.Empty(t, obs.Values, "报错时不得返回半份结果")
-		assert.Contains(t, err.Error(), "不是累计口径",
-			"失败原因必须是口径守卫本身；换个理由失败说明中间有东西变了")
+		require.NoError(t, err, "同篇双口径现在应当分列写出，不再整篇拒绝")
+
+		assert.Contains(t, obs.Values, FieldLoanFlowYTD, "合计句是累计 ⇒ 进 _ytd")
+		assert.Contains(t, obs.Values, FieldLoanHHShortMoM, "分部门段是当月 ⇒ 进 _mom")
+		assert.NotContains(t, obs.Values, FieldLoanHHShortYTD,
+			"🔴 当月分部门值落进 _ytd —— 与同篇的累计合计值口径不一致，"+
+				"两者都在合法量级内、下游没有任何闸门拦得住")
+		assert.NotContains(t, obs.Values, FieldLoanFlowMoM,
+			"合计句是累计口径，不该同时出现在 _mom")
 	})
 
-	t.Run("阴性/C类无累计数据必须报错", func(t *testing.T) {
-		// 2020-04：正文里**没有任何累计句**（小标题全是当月），*_ytd 无源可抽。
-		// 与 B 类的区别：B 类有累计数据只是分段口径不一致，C 类是数据根本不存在。
+	t.Run("阴性转正/C类全篇当月必须全落_mom", func(t *testing.T) {
+		// 2020-04：正文里**没有任何累计句**（小标题全是当月）。
+		// 与 B 类的区别：B 类是同篇双口径（两列都有），C 类是全当月（_ytd 一个都没有）。
 		obs, err := Parse(readTestdata(t, "pboc-2020-04-monthly.html"))
-		require.Error(t, err, "没有累计数据可抽时必须响亮失败")
-		assert.Empty(t, obs.Values)
-		assert.Contains(t, err.Error(), "期内合计",
-			"C 类的失败点在「取不到期内合计」，与 B 类的口径守卫不是同一条")
-		assert.NotContains(t, err.Error(), "不是累计口径",
-			"两类的错误必须可区分——合并成同一句会让 calibrate 的分流失去依据")
+		require.NoError(t, err, "全篇当月的报告现在应当照样产出，只是全在 _mom 列")
+
+		assert.Contains(t, obs.Values, FieldLoanFlowMoM)
+		assert.Contains(t, obs.Values, FieldLoanHHShortMoM)
+		for _, f := range []string{FieldLoanFlowYTD, FieldLoanHHShortYTD,
+			FieldDepositFlowYTD, FieldDepositHouseholdYTD} {
+			assert.NotContainsf(t, obs.Values, f,
+				"🔴 全篇没有累计数据，%s 却有值 ⇒ 装的是当月值", f)
+		}
+		// 与 B 类的可区分性：C 类**一个 _ytd 都没有**，B 类有合计的那一个。
+		assert.NotEqual(t, len(obs.Values), 0)
 	})
 }

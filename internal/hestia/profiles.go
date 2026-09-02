@@ -304,6 +304,29 @@ func tsfStockRE(name string) *regexp.Regexp {
 // TASK-005。在那之前 momField 只被覆盖度检查读到，不参与任何抽取。
 type nameField struct{ name, ytdField, momField string }
 
+// pick 按口径选列（M1c-4 的 TASK-005）。
+//
+// 🔴 **本迭代把「读不出口径就拒绝整篇」换成了「按口径分列写」，而这个方法就是那道
+// 防线本身。** 原来的拒绝理由是「同一份观测里合计取累计值、分部门混进当月值会让内部
+// 口径不一致，两者都在合法量级内、下游没有任何闸门拦得住」——新形态下它成立，靠的
+// 完全是 `_ytd` 与 `_mom` 是两个**不同的列**。
+//
+// ⇒ 若这里在 caliberCurrent 时返回 ytdField，本迭代就在亲手制造它要防的那件事，
+// 而测试若察觉不到，这个 sprint 的核心目标就落空了。golden test 的两条 NotContains
+// 是它的现场守卫，变异 V3 正是把这一支改成 ytdField 来验它们有没有区分力。
+//
+// caliberAbsent 返回空串：那时「口径」这个问题不适用，调用方应当让更具体的错误先说话
+// （分部门字段是必需的，mustMatch 会以「分部门 X not found」报错）。
+func (nf nameField) pick(c sectorCaliber) string {
+	switch c {
+	case caliberCumulative:
+		return nf.ytdField
+	case caliberCurrent:
+		return nf.momField
+	}
+	return ""
+}
+
 var tsfFlowItems = []nameField{
 	{"对实体经济发放的人民币贷款", FieldTSFFlowRMBLoanYTD, FieldTSFFlowRMBLoanMoM},
 	{"对实体经济发放的外币贷款折合人民币", FieldTSFFlowFXLoanYTD, FieldTSFFlowFXLoanMoM},
