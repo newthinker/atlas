@@ -78,8 +78,13 @@ const (
 	// 会得到量级完全合理的错值，下游没有任何闸门拦得住。缺的不是抽取能力，
 	// 是这一族列（spec §1）。
 	//
-	// ⚠️ 本任务（M1c-4 的 TASK-004）只加列与声明，**抽取侧按口径选列是 M1c-4 的
-	// TASK-005**。在那之前这 22 列恒为空，不进任何字段分布表。
+	// 这 22 列由 M1c-4 的 TASK-004 加入（只加列与声明），抽取侧按口径选列由 TASK-005 接上。
+	//
+	// ⚠️ 本注释原文的末句是「**在那之前这 22 列恒为空，不进任何字段分布表**」——
+	// 那是写于 TASK-004 的**前瞻性**说法，TASK-005 落地后即失真（M1c-4 的 TASK-014 订正）：
+	// 这些列现在会被真实写入，也会进字段分布表。**它写下时是对的**，让它变假的是后来
+	// 那次改动。同批前瞻注释另有两处（profiles.go 的 nameField.momField 与
+	// 「当前没有任何写入方」），一并订正。
 	FieldTSFFlowMoM           = "tsf_flow_mom"
 	FieldTSFFlowRMBLoanMoM    = "tsf_flow_rmb_loan_mom"
 	FieldTSFFlowFXLoanMoM     = "tsf_flow_fx_loan_mom"
