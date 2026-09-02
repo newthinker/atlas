@@ -3,6 +3,7 @@ package hestia
 import (
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,10 +18,17 @@ import (
 // error_handling[0]  "llm-fallback@v1 / rule@v3 / \"\" 均返回 nil"   → TestRequiredFieldsRejectsAmbiguousExtractor
 // non_functional[0]  "遍历模板表派生，不用 tsf_ 前缀"                → TestTSFSectionFieldsDerivesFromTemplateTables
 
-// 社融两节共 27 个字段：8 个存量分项 × 2（余额 + 同比）+ 8 个增量分项 + 3 个总量。
+// 社融两节共 36 个字段：8 个存量分项 × 2（余额 + 同比）+ 8 个增量分项 × 2（ytd + mom）
+// + 4 个总量（tsf_stock / tsf_stock_yoy / tsf_flow_ytd / tsf_flow_mom）。
+//
+// ⚠️ **27 → 36 是 M1c-4 的 TASK-006 的改动**：TASK-005 之后社融增量节按口径路由，
+// 同一节可能产出 *_ytd 也可能产出 *_mom ⇒ 本函数（回答「这两节会产出哪些列」）必须两侧都列。
+// 少列 _mom 那 9 个，`without(fieldOrder, 这里)` 会把它们留在 v1（根本没有社融节的报告）
+// 的必填集里 —— 实测那样 requiredFields(rule@v1) 会对标准 v1 样本报缺 9 个 tsf_flow_*_mom。
+// 社融**存量**没有当月口径，故存量那半不变。
 func TestTSFSectionFieldsIsExactAndDistinct(t *testing.T) {
 	got := tsfSectionFields()
-	assert.Len(t, got, 27)
+	assert.Len(t, got, 36)
 
 	// 长度对不代表内容对：遍历错一张表可能同时多算一个、漏算一个。
 	seen := make(map[string]bool, len(got))
@@ -50,8 +58,10 @@ func TestTSFSectionFieldsDerivesFromTemplateTables(t *testing.T) {
 		nameField{"哨兵分项", "sentinel_flow_ytd", "sentinel_flow_mom"})
 
 	got := tsfSectionFields()
-	assert.Len(t, got, base+3, "往模板表加了 3 个字段，派生结果却没跟着长——没在遍历模板表")
-	for _, f := range []string{"sentinel_balance", "sentinel_balance_yoy", "sentinel_flow_ytd"} {
+	// +4 而不是 +3（M1c-4 的 TASK-006）：增量哨兵是一个 nameField，它现在带出
+	// **两列**（ytd + mom），存量哨兵仍是 2 列 ⇒ 2 + 2 = 4。
+	assert.Len(t, got, base+4, "往模板表加了 4 个字段，派生结果却没跟着长——没在遍历模板表")
+	for _, f := range []string{"sentinel_balance", "sentinel_balance_yoy", "sentinel_flow_ytd", "sentinel_flow_mom"} {
 		assert.Contains(t, got, f, "模板表新增的 %s 没被派生带出来", f)
 	}
 }
@@ -66,8 +76,10 @@ func TestRequiredFieldsMatchGoldenKeySets(t *testing.T) {
 		golden    map[string]float64
 		want      int
 	}{
-		{extractorV2, golden2025, 54},
-		{extractorV1, golden2020, 27},
+		// M1c-4 的 TASK-006：*_mom 列进必填集（momFields 的过渡性 without 已退场），
+		// 口径感知由 gateCompleteness 的 missingCaliberAware 承担 ⇒ 54→76、27→40。
+		{extractorV2, golden2025, 76},
+		{extractorV1, golden2020, 40},
 	}
 	for _, tt := range tests {
 		t.Run(tt.extractor, func(t *testing.T) {
@@ -78,12 +90,38 @@ func TestRequiredFieldsMatchGoldenKeySets(t *testing.T) {
 			for _, f := range req {
 				inReq[f] = true
 			}
-			for _, f := range req {
-				assert.Contains(t, tt.golden, f, "必填集里的 %s 在 golden 里没有", f)
-			}
+			// 🔴 **判据换形式不换内容**（M1c-4 的 TASK-006）：原来断言「必填集 ≡ golden 键集」，
+			// 理由是「必填集不能要求一份完整观测拿不出的字段」。*_mom 列进必填集之后
+			// 那个等式**结构上不成立**——golden 是一篇累计口径的报告，它只产 *_ytd，
+			// 而必填集两侧都列。⇒ 同一个理由现在的形式是：
+			//
+			//	口径感知之下 golden 一个字段都不缺（每个必填项要么自己在场、要么孪生在场）
+			//
+			// ⚠️ 这比原断言**更严**：它同时要求 caliberFamilies 把该配的都配上了——
+			// 漏配一对，那一对的 _mom 就会出现在 missing 里。
+			assert.Emptyf(t, missingCaliberAware(req, tt.golden),
+				"口径感知之下 %s 的 golden 不该缺任何必填字段", tt.extractor)
+
+			// 反向仍是严格包含：golden 里的每个键都必须在必填集里（多抽出一个字段
+			// 而必填集不知道它，同样是分叉）。
 			for k := range tt.golden {
 				assert.True(t, inReq[k], "golden 里的 %s 不在必填集里", k)
 			}
+
+			// 🔴 交叉：把 golden 的 *_ytd 全部换成 *_mom，口径感知同样不该报缺。
+			// 少了这一条，一个只建了 ytd→mom 单向 twin 的实现能让上面那条全绿。
+			flipped := make(map[string]float64, len(tt.golden))
+			for k, v := range tt.golden {
+				if stem, ok := strings.CutSuffix(k, "_ytd"); ok {
+					if slices.Contains(fieldOrder, stem+"_mom") {
+						flipped[stem+"_mom"] = v
+						continue
+					}
+				}
+				flipped[k] = v
+			}
+			assert.Emptyf(t, missingCaliberAware(req, flipped),
+				"把 golden 的 _ytd 全换成 _mom 之后，%s 同样不该缺任何必填字段", tt.extractor)
 		})
 	}
 }
@@ -176,8 +214,10 @@ func TestRequiredFieldsMonthlyDropsOnlyFXSection(t *testing.T) {
 		quarterly, monthly string
 		want               int
 	}{
-		{extractorV1, extractorMonthlyV1, 25},
-		{extractorV2, extractorMonthlyV2, 52},
+		// M1c-4 的 TASK-006：*_mom 进必填集 ⇒ 25→38、52→74（各 +13：
+		// 存款 5 + 贷款 8；社融那 9 个 _mom 已随 tsfSectionFields 一并划归社融节）。
+		{extractorV1, extractorMonthlyV1, 38},
+		{extractorV2, extractorMonthlyV2, 74},
 	}
 	for _, tt := range tests {
 		t.Run(tt.monthly, func(t *testing.T) {
@@ -203,11 +243,12 @@ func TestRequiredFieldsMonthlyDropsOnlyFXSection(t *testing.T) {
 	}
 }
 
-// 社融存量 / 增量两个独立报告的必填集，是社融两节 27 个字段的一个**划分**。
+// 社融存量 / 增量两个独立报告的必填集，是社融两节 36 个字段的一个**划分**。
 func TestTSFStandaloneFieldsPartitionTSFSection(t *testing.T) {
 	stock, flow := requiredFields(extractorTSFStock), requiredFields(extractorTSFFlow)
 	require.Len(t, stock, 18)
-	require.Len(t, flow, 9)
+	// 9 → 18（M1c-4 的 TASK-006）：增量侧两种口径都列，理由同 tsfSectionFields。
+	require.Len(t, flow, 18)
 
 	// 并集双向包含 tsfSectionFields()。只断 18 + 9 == 27 不够：两个错误的划分
 	// 同样满足那个等式。
@@ -251,7 +292,7 @@ func TestTSFStandaloneFieldsDeriveFromTemplateTables(t *testing.T) {
 
 	stock, flow := requiredFields(extractorTSFStock), requiredFields(extractorTSFFlow)
 	assert.Len(t, stock, 20, "往存量模板表加了 2 个字段，存量必填集却没跟着长")
-	assert.Len(t, flow, 10, "往增量模板表加了 1 个字段，增量必填集却没跟着长")
+	assert.Len(t, flow, 20, "往增量模板表加了 2 个字段（ytd+mom），增量必填集却没跟着长")
 	assert.Contains(t, stock, "sentinel_balance")
 	assert.Contains(t, stock, "sentinel_balance_yoy")
 	assert.Contains(t, flow, "sentinel_flow_ytd")
@@ -383,18 +424,19 @@ func TestMergedRequiredFieldsIsUnionOfParts(t *testing.T) {
 	// extractor —— 两个数都对，别混起来。
 	three := mergedRequiredFields([]string{
 		extractorMonthlyV1, extractorTSFStock, extractorTSFFlow})
-	// 再减 momFields()：M1c-4 的 TASK-004 加的 22 个 *_mom 列暂不进任何必填集
-	// （理由与退场点见 required.go 的 momFields 注释）。TASK-006 落地后这一层
-	// 应当与 momFields 本身一起去掉。
-	want := without(without(fieldOrder, fxSectionFields()), momFields())
+	// M1c-4 的 TASK-006：TASK-004 加的那层 `without(..., momFields())` 已随
+	// momFields 一起退场 —— *_mom 列现在正常进必填集，口径感知由 gateCompleteness
+	// 的 missingCaliberAware 承担。
+	want := without(fieldOrder, fxSectionFields())
 	require.ElementsMatch(t, want, three,
 		"月报v1 + 社融存量 + 社融增量 应当覆盖除外汇两字段外的全部 52 个字段")
 
 	// 写成 without(fieldOrder, ...) 这个**派生**表达式而不是字面量 52：两份清单
 	// 会分叉，而先错的一定是手抄的那份（与 requiredFields 里「季报 − 外汇节」同一
 	// 理由）。数量单独钉一条，防的是派生表达式两边一起错。
-	require.Len(t, three, 52,
-		"25(月报v1) + 18(社融存量) + 9(社融增量) = 52 = 54 − 2；对不上说明三者不再互斥或字段表变了")
+	require.Len(t, three, 74,
+		"38(月报v1) + 18(社融存量) + 18(社融增量) = 74 = 76 − 2；对不上说明三者不再互斥或字段表变了。"+
+			"⚠️ M1c-4 的 TASK-006 起三个数都变了：*_mom 进必填集、社融增量两侧都列")
 
 	// 只有两篇（实测 2020-01|monthly 就是这样）⇒ 必填集只能是这两篇的并集。
 	two := mergedRequiredFields([]string{extractorTSFStock, extractorTSFFlow})
@@ -456,4 +498,159 @@ func TestMergedRequiredFieldsIsOrderedAndDeduped(t *testing.T) {
 func TestRequiredFieldsRejectsBareMerged(t *testing.T) {
 	require.Nil(t, requiredFields(extractorMerged),
 		"merged@v1 的必填集只能由 mergedRequiredFields(parts) 给出")
+}
+
+// —— M1c-4 的 TASK-006：completeness 的必填集改口径感知 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-006）
+// functional[0]  caliberFamilies 从 fieldOrder 派生     → TestCaliberFamiliesPairsEveryMomWithItsYTD
+// functional[1]  两个方向都不算缺                        → TestMissingCaliberAwareAcceptsEitherSide
+// functional[1]  两侧都空才算缺，按 fieldOrder 排序      → TestMissingCaliberAwareStillReportsRealGaps
+// functional[1]  🔴 放松的**边界**：不成对的字段原样要求 → TestMissingCaliberAwareLeavesUnpairedFieldsAlone
+// boundary[0]    🔴 mom→ytd 方向在**真实路径**上真的会走到
+//                                                        → TestMissingCaliberAwareMomToYTDIsReachableOnRealWant
+// functional[2]  gateCompleteness 换成一次调用           → validate_test.go 的既有 completeness 测试
+
+// caliberFamilies 必须**从 fieldOrder 派生**，不手写第二份名单。
+//
+// 判据是「22 对」而不是「非空」：一个只返回一对的实现能让「非空」全绿，而
+// 口径感知会对其余 21 对完全失效——那 21 族在真语料里恰恰是最常缺的。
+func TestCaliberFamiliesPairsEveryMomWithItsYTD(t *testing.T) {
+	fams := caliberFamilies()
+	require.Len(t, fams, 22, "TASK-004 加了 22 个 _mom 列，每个都该有 _ytd 孪生")
+
+	inOrder := make(map[string]bool, len(fieldOrder))
+	for _, f := range fieldOrder {
+		inOrder[f] = true
+	}
+	seenMoM := map[string]bool{}
+	for _, p := range fams {
+		ytd, mom := p[0], p[1]
+		assert.Truef(t, strings.HasSuffix(ytd, "_ytd"), "第一项必须是 _ytd 列，得到 %q", ytd)
+		assert.Truef(t, strings.HasSuffix(mom, "_mom"), "第二项必须是 _mom 列，得到 %q", mom)
+		assert.Equalf(t, strings.TrimSuffix(mom, "_mom"), strings.TrimSuffix(ytd, "_ytd"),
+			"配对必须由**列名**派生：%q 与 %q 的词干不同", ytd, mom)
+		assert.Truef(t, inOrder[ytd] && inOrder[mom], "%q/%q 必须都在 fieldOrder 里", ytd, mom)
+		assert.Falsef(t, seenMoM[mom], "%q 出现了两次", mom)
+		seenMoM[mom] = true
+	}
+
+	// 反向闭合：fieldOrder 里每个 _mom 列都必须在配对里出现一次，一个都不许漏。
+	// 只断「22 对」挡不住「配了 22 对但漏掉某一列、多算了另一列」。
+	for _, f := range fieldOrder {
+		if strings.HasSuffix(f, "_mom") {
+			assert.Truef(t, seenMoM[f], "fieldOrder 里的 %q 没有出现在 caliberFamilies 里", f)
+		}
+	}
+}
+
+// 两个方向都不算缺：want 要 _ytd 而 values 只有 _mom，以及反过来。
+//
+// ⚠️ **两个方向都要测**：只测一个方向的话，一个 twin map 只填了单向的实现照样全绿，
+// 而另一半在真实路径上会把整族报成缺失。
+func TestMissingCaliberAwareAcceptsEitherSide(t *testing.T) {
+	t.Run("want要ytd_values只有mom", func(t *testing.T) {
+		got := missingCaliberAware(
+			[]string{FieldDepositHouseholdYTD, FieldLoanHHShortYTD},
+			map[string]float64{FieldDepositHouseholdMoM: 1, FieldLoanHHShortMoM: 2})
+		assert.Empty(t, got, "同族另一侧在场 ⇒ 不算缺（那 54 篇是 absent-by-design）")
+	})
+	t.Run("want要mom_values只有ytd", func(t *testing.T) {
+		got := missingCaliberAware(
+			[]string{FieldDepositHouseholdMoM, FieldLoanHHShortMoM},
+			map[string]float64{FieldDepositHouseholdYTD: 1, FieldLoanHHShortYTD: 2})
+		assert.Empty(t, got, "🔴 mom→ytd 方向——单向 twin map 会让这一格红")
+	})
+}
+
+// 两侧都空才算真缺，且结果**按 fieldOrder 排序**。
+//
+// 🔴 期望数组的顺序是 {FieldM2, FieldDepositHouseholdYTD} —— **需求文档写反了**。
+// 实测 fieldOrder 里 FieldM2 在 FieldDepositHouseholdYTD **之前**（A.2 货币供应量在
+// A.3 存款之前）。⚠️ **照文档抄会红，而红的位置指向排序逻辑**——照着那个位置去「修排序」
+// 会把一个正确的实现改坏。遇到这条红先核对 fieldOrder 的实际顺序再动手。
+func TestMissingCaliberAwareStillReportsRealGaps(t *testing.T) {
+	// 前提：把顺序断言的依据摆出来，而不是让读者相信我
+	iM2, iDep := slices.Index(fieldOrder, FieldM2), slices.Index(fieldOrder, FieldDepositHouseholdYTD)
+	require.NotEqual(t, -1, iM2)
+	require.NotEqual(t, -1, iDep)
+	require.Lessf(t, iM2, iDep, "用例前提：fieldOrder 里 %s 必须在 %s 之前", FieldM2, FieldDepositHouseholdYTD)
+
+	got := missingCaliberAware(
+		// 刻意逆序传入：不排序的实现会原样吐出来
+		[]string{FieldDepositHouseholdYTD, FieldM2, FieldLoanHHShortYTD},
+		map[string]float64{FieldLoanHHShortMoM: 1})
+
+	assert.Equal(t, []string{FieldM2, FieldDepositHouseholdYTD}, got,
+		"两侧都空的才算缺，且必须按 fieldOrder 排序；loan_hh_short 有 _mom 在场故不算缺")
+}
+
+// 🔴 放松的**边界**，本任务最不能省的一条。
+//
+// 存量、余额、同比、利率、外汇都没有当月口径的对应物 ⇒ 必须原样逐个要求。
+// 少了这一条，一个「凡缺失就去掉 _ytd 后缀找孪生」的实现会顺手放松掉一大批与本迭代
+// 无关的字段，而正向测试全绿——那正是「口径感知」失控的形态。
+func TestMissingCaliberAwareLeavesUnpairedFieldsAlone(t *testing.T) {
+	unpaired := []string{
+		FieldTSFStock, FieldTSFStockYoY, // 存量：没有当月口径
+		FieldDepositBalance, FieldLoanBalanceYoY, // 余额与同比
+		FieldRateIBO, FieldM2, FieldM2YoY, // 利率、货币供应量
+		FieldFXReserve, FieldFXRate, // 外汇
+	}
+	for _, f := range unpaired {
+		require.Falsef(t, strings.HasSuffix(f, "_ytd") || strings.HasSuffix(f, "_mom"),
+			"用例前提：%q 不该是成对列", f)
+	}
+
+	got := missingCaliberAware(unpaired, map[string]float64{})
+	// 集合相等：一个都不许被放松。⚠️ 用 ElementsMatch 而不是 Equal —— 返回值按
+	// fieldOrder 排序，而 unpaired 是按「哪一类」列的，两者顺序本来就不同。
+	assert.ElementsMatch(t, unpaired, got,
+		"不成对的字段一个都不许被放松——它们本来就没有另一侧可以顶替")
+	// 顺序单独钉：结果必须按 fieldOrder 升序
+	idx := make([]int, len(got))
+	for i, f := range got {
+		idx[i] = slices.Index(fieldOrder, f)
+	}
+	assert.True(t, slices.IsSorted(idx), "结果必须按 fieldOrder 排序，实得 %v", got)
+
+	// 交叉：给一个「同名但后缀不同」的干扰值，仍不得顶替
+	got = missingCaliberAware([]string{FieldTSFStock},
+		map[string]float64{FieldTSFStockYoY: 1, FieldTSFFlowMoM: 2})
+	assert.Equal(t, []string{FieldTSFStock}, got,
+		"别的字段在场不构成顶替——顶替关系只在同族两列之间")
+}
+
+// 🔴 **mom→ytd 方向在真实路径上真的会走到**（DoD boundary[0] 第 3 点）。
+//
+// 上面 TestMissingCaliberAwareAcceptsEitherSide 用的是**手工构造**的 want，
+// 那条即使在真实 want 恒为单侧（例如 momFields() 的 without 还留着）时也全绿。
+// ⇒ 必须用 `requiredFields(...)` 的**真实返回值**再钉一次：
+// 它若不含任何 _mom 列，mom→ytd 那半边逻辑就是死代码，而没有任何测试会告诉你。
+func TestMissingCaliberAwareMomToYTDIsReachableOnRealWant(t *testing.T) {
+	for _, ex := range []string{extractorV2, extractorMonthlyV2} {
+		t.Run(ex, func(t *testing.T) {
+			req := requiredFields(ex)
+			require.NotEmpty(t, req)
+
+			var moms []string
+			for _, f := range req {
+				if strings.HasSuffix(f, "_mom") {
+					moms = append(moms, f)
+				}
+			}
+			require.NotEmptyf(t, moms,
+				"🔴 requiredFields(%s) 一个 _mom 列都没有 ⇒ missingCaliberAware 的 "+
+					"mom→ytd 分支在真实路径上永不走到，那半边逻辑的死活无人知道。"+
+					"（若 momFields() 的 without 还留着，就会是这个结果）", ex)
+
+			// 真实 want + 只有 ytd 的 values ⇒ 那些 _mom 列不得算缺
+			values := map[string]float64{}
+			for _, m := range moms {
+				values[strings.TrimSuffix(m, "_mom")+"_ytd"] = 1
+			}
+			got := missingCaliberAware(moms, values)
+			assert.Emptyf(t, got, "真实 want 里的 _mom 列有 _ytd 顶替时不得算缺，实得缺 %v", got)
+		})
+	}
 }

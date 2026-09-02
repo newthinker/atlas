@@ -1251,10 +1251,24 @@ func TestExtractFieldsScopeMatchesRequiredFields(t *testing.T) {
 					"%s 下 %s 必须**不存在**（键不存在，不是取零值）", tc.extractor, f)
 			}
 
-			// 双向相等：ElementsMatch 是互相包含，不是只比数量。
-			// 只比数量的话，「抽到 A 缺 B」与「抽到 B 缺 A」无法区分。
-			assert.ElementsMatch(t, requiredFields(tc.extractor), keys,
-				"抽取侧的板块归属与 completeness 侧的必填集分叉了")
+			// 🔴 **判据换形式不换内容**（M1c-4 的 TASK-006）：原来断言「抽取键集 ≡ 必填集」，
+			// 理由是「抽取侧的板块归属与 completeness 侧的必填集不得分叉」。*_mom 列进必填集
+			// 之后那个等式**结构上不成立**——本样本是累计口径，一篇只产一侧，而必填集两侧都列。
+			// ⇒ 同一个理由现在拆成两半：
+			//
+			//	① 抽取键集 ⊆ 必填集   —— 抽出必填集不知道的字段，仍是分叉
+			//	② 口径感知之下一个都不缺 —— 必填集要求的每一项要么自己在场、要么孪生在场
+			//
+			// ⚠️ ② 比原断言**更严**：漏配一对 caliberFamilies，那一对的 _mom 就会出现在 missing 里。
+			inReq := make(map[string]bool, len(requiredFields(tc.extractor)))
+			for _, f := range requiredFields(tc.extractor) {
+				inReq[f] = true
+			}
+			for _, k := range keys {
+				assert.Truef(t, inReq[k], "%s 抽出的 %s 不在必填集里 —— 板块归属与必填集分叉了", tc.extractor, k)
+			}
+			assert.Emptyf(t, missingCaliberAware(requiredFields(tc.extractor), got),
+				"%s：口径感知之下不该缺任何必填字段", tc.extractor)
 
 			// 数量单独断一次：它是给人读的锚（25/27/52/54 是 TASK-003 discovery
 			// 里写死的四个数），也让 ElementsMatch 的失败更好定位。

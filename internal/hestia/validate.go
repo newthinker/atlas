@@ -504,12 +504,15 @@ func gateCompleteness(in gateInput) Check {
 		return Check{Status: CheckSkipped,
 			Reason: "unknown_extractor:" + in.obs.Meta.Extractor}
 	}
-	var missing []string
-	for _, f := range req {
-		if _, ok := in.obs.Values[f]; !ok {
-			missing = append(missing, f)
-		}
-	}
+	// 🔴 口径感知（M1c-4 的 TASK-006）：*_ytd 与 *_mom 任一在场即不算缺。
+	//
+	// 真语料里 54 篇的分部门段走当月口径，硬要 *_ytd 会让它们恒报「缺一整族字段」——
+	// 那是把 **absent-by-design 记成 failed**，completeness 这个指标就废了
+	// （types.go 原话，mergedRequiredFields 因同一理由存在）。
+	//
+	// ⚠️ 变的**只有这一行**：req 的来源（requiredFields / mergedRequiredFields 的选择、
+	// len(req)==0 ⇒ skipped{unknown_extractor}）、Value: &n、firstN 截断都一行不动。
+	missing := missingCaliberAware(req, in.obs.Values)
 	if len(missing) == 0 {
 		return Check{Status: CheckPassed}
 	}
