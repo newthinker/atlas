@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1506,4 +1507,170 @@ func TestStockContinuityDoesNotUseRejectedPeriodAsBaseline(t *testing.T) {
 	assert.Equal(t, CheckSkipped, got.Status)
 	assert.Contains(t, got.Reason, "non_adjacent_prior")
 	assert.Contains(t, got.Reason, "2025-01", "要指出被跳过的那个基线是哪一期")
+}
+
+// —— M1c-4 的 TASK-007：deposit_sum 与 corp_loan_reconcile 按口径族分别校验 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-007）
+// functional[0]  depositPartFieldsMoM 与 depositPartFields 逐项对应
+//                                          → TestDepositPartFieldsAgreeAcrossCalibers
+// functional[0]  corpLoanPartFieldsMoM 同上 → TestCorpLoanPartFieldsAgreeAcrossCalibers
+// functional[1]  当月族齐全 ⇒ 不得 skipped{absent}
+//                                          → TestDepositSumChecksMoMFamily
+//                                            TestCorpLoanReconcileChecksMoMFamily
+// functional[1]  两族都齐时取 ytd（裁决，不靠迭代顺序）
+//                                          → TestDepositSumPrefersYTDWhenBothPresent
+// functional[1]  两族都不齐 ⇒ skipped，且 Reason 说清哪一族缺
+//                                          → TestDepositSumSkipsWhenNeitherFamilyComplete
+// boundary[0]    两个 MoM 容差是未标定占位，且已标注
+//                                          → TestMoMTolerancesAreDeclaredAndNonZero
+// ⚠️ 既有的 TestCorpLoanSkipsOnZeroDenominator 不得被破坏（零分母 ⇒ skipped 而非 Inf/NaN）。
+
+// momOnly 把一份 ytd 口径的 Values 整族翻成 mom 口径：凡是 `x_ytd` 且 fieldOrder 里
+// 有同词干的 `x_mom`，就换成 mom 列。
+//
+// ⚠️ 用**翻转真实 golden**而不是手搓几个字段：手搓的 map 只含闸门要看的那几列，
+// 一个「凡是缺 ytd 就当成 mom」的实现照样绿；翻转过来的观测其余字段也都是 mom 口径，
+// 更接近真实的整族位移。
+func momOnly(values map[string]float64) map[string]float64 {
+	out := make(map[string]float64, len(values))
+	for k, v := range values {
+		if stem, ok := strings.CutSuffix(k, "_ytd"); ok && slices.Contains(fieldOrder, stem+"_mom") {
+			out[stem+"_mom"] = v
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// 两族清单必须**逐项对应**：同一个部门在两族里位置相同。
+//
+// 判据是逐项比词干，不是「两边都有 4 个」——长度相等而顺序错位的两份清单会让
+// depositResidualOf 算出一个「加总正确但配对错误」的残差，而它看起来完全正常。
+func TestDepositPartFieldsAgreeAcrossCalibers(t *testing.T) {
+	require.Len(t, depositPartFieldsMoM, len(depositPartFields))
+	for i := range depositPartFields {
+		assert.Equal(t,
+			strings.TrimSuffix(depositPartFields[i], "_ytd"),
+			strings.TrimSuffix(depositPartFieldsMoM[i], "_mom"),
+			"第 %d 项两族不对应：%s vs %s", i, depositPartFields[i], depositPartFieldsMoM[i])
+		assert.Truef(t, strings.HasSuffix(depositPartFields[i], "_ytd"), "%s 不是 ytd 列", depositPartFields[i])
+		assert.Truef(t, strings.HasSuffix(depositPartFieldsMoM[i], "_mom"), "%s 不是 mom 列", depositPartFieldsMoM[i])
+	}
+}
+
+func TestCorpLoanPartFieldsAgreeAcrossCalibers(t *testing.T) {
+	require.Len(t, corpLoanPartFieldsMoM, len(corpLoanPartFields))
+	for i := range corpLoanPartFields {
+		assert.Equal(t,
+			strings.TrimSuffix(corpLoanPartFields[i], "_ytd"),
+			strings.TrimSuffix(corpLoanPartFieldsMoM[i], "_mom"),
+			"第 %d 项两族不对应：%s vs %s", i, corpLoanPartFields[i], corpLoanPartFieldsMoM[i])
+	}
+}
+
+// 🔴 当月族齐全时**必须真的判**，不得 skipped{absent}。
+//
+// 那正是本任务存在的理由：口径路由之后观测可能整族走 _mom，闸门只认 _ytd 会让
+// 那些期次完全不被校验 —— 而报告上看不出「这一期没查过」，比拦错更糟。
+func TestDepositSumChecksMoMFamily(t *testing.T) {
+	obs := obsFrom(momOnly(golden2025), extractorV2)
+
+	// 前提：这份观测确实一个 ytd 分部门列都没有，否则测的是隔壁那一族
+	require.NotContains(t, obs.Values, FieldDepositFlowYTD, "用例前提：整族已翻成 mom")
+	require.Contains(t, obs.Values, FieldDepositFlowMoM)
+
+	rep, err := Validate(context.Background(), obs, NoHistory, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.NotEqualf(t, CheckSkipped, c.Status,
+		"🔴 当月族齐全却 skipped —— 这一期完全没被校验，而报告上看不出来。Reason=%q", c.Reason)
+	assert.NotContains(t, c.Reason, "absent_field")
+	require.NotNil(t, c.Value, "判了就必须有残差值")
+
+	// 残差与同一份数据走 ytd 时逐字相同：整族平移不改变加总关系
+	ytdR, ok := depositResidualOf(golden2025, FieldDepositFlowYTD, depositPartFields)
+	require.True(t, ok)
+	assert.InDelta(t, ytdR, *c.Value, 1e-12,
+		"整族翻成 mom 之后残差应当逐字不变——变了说明选族选到了别的列")
+}
+
+func TestCorpLoanReconcileChecksMoMFamily(t *testing.T) {
+	obs := obsFrom(momOnly(golden2025), extractorV2)
+	require.NotContains(t, obs.Values, FieldLoanCorpTotalYTD, "用例前提：整族已翻成 mom")
+	require.Contains(t, obs.Values, FieldLoanCorpTotalMoM)
+
+	rep, err := Validate(context.Background(), obs, NoHistory, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "corp_loan_reconcile")
+	assert.NotEqualf(t, CheckSkipped, c.Status,
+		"🔴 当月族齐全却 skipped —— 这一期完全没被校验。Reason=%q", c.Reason)
+	assert.NotContains(t, c.Reason, "absent_field")
+	require.NotNil(t, c.Value)
+
+	// Value 仍是**亿元绝对量并保留符号**（与 deposit_sum 的比例刻意不同，见 gate 注释）
+	sum := golden2025[FieldLoanCorpShortYTD] + golden2025[FieldLoanCorpMLTYTD] + golden2025[FieldLoanBillYTD]
+	assert.InDelta(t, sum-golden2025[FieldLoanCorpTotalYTD], *c.Value, 1e-9,
+		"整族翻成 mom 之后 Value 应当逐字不变，且仍是亿元绝对量")
+}
+
+// 🔴 两族都齐时**取 ytd**。这是裁决，不是实现细节。
+//
+// 靠 map 迭代顺序碰运气的实现会在两族都齐时随机选一族，而两族的容差不同、残差也不同
+// ⇒ 同一份数据每次跑出的结论可能不一样。
+//
+// 判据是「取到的残差等于 ytd 那一族的」而不是「Reason 里写着 ytd」：后者一个把族名
+// 写死成 "ytd" 的实现照样绿。
+func TestDepositSumPrefersYTDWhenBothPresent(t *testing.T) {
+	values := maps.Clone(golden2025)
+	// 造一份两族都齐、但 mom 族残差**明显不同**的观测：mom 的分项全部减半，
+	// 于是两族的残差必然不等，选错族一定看得出来。
+	for i, f := range depositPartFields {
+		values[depositPartFieldsMoM[i]] = values[f] / 2
+	}
+	values[FieldDepositFlowMoM] = values[FieldDepositFlowYTD]
+
+	ytdR, ok := depositResidualOf(values, FieldDepositFlowYTD, depositPartFields)
+	require.True(t, ok)
+	momR, ok := depositResidualOf(values, FieldDepositFlowMoM, depositPartFieldsMoM)
+	require.True(t, ok)
+	require.Greater(t, math.Abs(ytdR-momR), 1e-6,
+		"用例前提：两族残差必须不同，否则这一格分辨不出选了谁")
+
+	rep, err := Validate(context.Background(), obsFrom(values, extractorV2), NoHistory, DefaultThresholds())
+	require.NoError(t, err)
+	c := findCheck(t, rep, "deposit_sum")
+	require.NotNil(t, c.Value)
+	assert.InDelta(t, ytdR, *c.Value, 1e-12,
+		"两族都齐时必须取 ytd（主口径，容差的标定样本以它为主）")
+}
+
+// 两族都不齐 ⇒ skipped，且 Reason 要**说清是哪一族缺什么**。
+//
+// 只报一族的话运维会去查错的列 —— 而两族的列名长得很像，查错了不容易察觉。
+func TestDepositSumSkipsWhenNeitherFamilyComplete(t *testing.T) {
+	values := maps.Clone(golden2025)
+	delete(values, FieldDepositHouseholdYTD) // ytd 族缺一项；mom 族本来就整族缺席
+
+	rep, err := Validate(context.Background(), obsFrom(values, extractorV2), NoHistory, DefaultThresholds())
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	require.Equal(t, CheckSkipped, c.Status)
+	assert.Contains(t, c.Reason, "ytd:absent_field:"+FieldDepositHouseholdYTD, "要说清 ytd 族缺哪一项")
+	assert.Contains(t, c.Reason, "mom:absent_field:", "两族的诊断都要带上")
+}
+
+// 两个 MoM 容差必须**写下来且非零**，否则走 mom 族的期次会因残差恒超而全部 failed。
+//
+// ⚠️ 本条**不**断言取值是多少 —— 它们是未标定占位，钉死取值等于把占位固化成契约。
+// 「它是占位」这件事由 thresholds.go 的注释承担（那半是给人读的，没有断言能替代）。
+func TestMoMTolerancesAreDeclaredAndNonZero(t *testing.T) {
+	cfg := DefaultThresholds()
+	assert.Greater(t, cfg.DepositSumToleranceMoM, 0.0,
+		"为 0 会让每一期走 mom 族的观测都因残差超限而 failed")
+	assert.Greater(t, cfg.CorpLoanToleranceMoM, 0.0)
 }
