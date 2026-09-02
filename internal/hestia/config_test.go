@@ -383,11 +383,106 @@ func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
 		"键集合必须与 fieldOrder **逐项相等**：只比长度的话，打错一个字段名"+
 			"（多一个未知键、少一个真字段）两边都还是 76")
 
-	assert.Equal(t, "2026-09-01", cfg.ConfigVersion,
+	assert.Equal(t, "2026-09-02", cfg.ConfigVersion,
 		"填了区间表就改变了这份配置的行为，config_version 必须跟着走——"+
 			"否则「这期用的是哪版配置」在契约里查不出来")
+
+	// 🔴 四个容差的标定值（M1c-4 的 TASK-010，人类裁决）。
+	//
+	// 钉在这里而不是只写进 yaml 注释：**这四个数改一次就改变每一期的判定结果**，
+	// 而 yaml 是可以被无声编辑的。取值公式与分位见 configs/hestia.yaml 的对应注释；
+	// 这条只回答「仓库自带的那份配置有没有被动过」。
+	//
+	// ⚠️ 断言的是**具体值**而不是「非零」：非零那种写法对「有人把 0.17 改回 0.12」
+	//    完全无感，而那恰恰是本次标定要防的回流。
+	th := cfg.Thresholds
+	assert.Equal(t, 0.17, th.DepositSumTolerance, "deposit_sum ytd 族：p95 0.1518 之上、max 0.2501 之下")
+	assert.Equal(t, 0.55, th.DepositSumToleranceMoM, "deposit_sum mom 族的 K_rel")
+	assert.Equal(t, 3200.0, th.DepositSumToleranceMoMAbs, "deposit_sum mom 族的 K_abs（亿元）")
+	assert.Equal(t, 0.05, th.CorpLoanTolerance, "corp_loan ytd 族：0 期 failed，保持不动")
+	assert.Equal(t, 0.11, th.CorpLoanToleranceMoM, "corp_loan mom 族：max 0.0788 × 1.40")
+
+	// ⚠️ 「**只有** deposit 的 mom 族有绝对下限」这件事**在这里断言不了** ——
+	// 另外三族的 K_abs 不是配置项，而是 caliberBand 字面量里不设该字段（零值）。
+	// 它由**行为**测试钉住：validate_test.go 的 TestDepositSumYTDHasNoAbsoluteFloor
+	// 拿同一组数在两族上跑，要求 ytd 仍被比值拦下。
+	// 写在这里是因为读到上面五行的人会问「那另外三族呢」——答案在那条测试里，
+	// 而不是「没人管」。
 
 	assert.Equal(t, DefaultThresholds().StockContinuityMax, cfg.Thresholds.StockContinuityMax,
 		"真配置里的五档必须与代码默认值一致：两处分叉时，跑起来用的是 YAML 那份，"+
 			"而读代码的人看到的是默认值那份")
+}
+
+// —— M1c-4 的 TASK-010：magnitude_ranges 的全覆盖校验 ——
+
+// minimalConfigBody 是一份能通过 LoadConfig 的最小配置，供下面几条拼接 thresholds。
+func minimalConfigBody(extraThresholds string) string {
+	return `
+config_version: "2026-08-12"
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+thresholds:
+` + extraThresholds
+}
+
+// 🔴 **显式写了 magnitude_ranges 就必须填全** —— 半张表要被拒绝启动。
+//
+// # 为什么这是真缺口
+//
+// gateMagnitudeSanity 对表里没有的字段直接 continue ⇒ 缺项不是「关掉那道闸」，
+// 而是**那个字段的幅度闸静默消失且报 passed**。这与 Thresholds.validate 已经拦下的
+// 「打错字段名」是同一失效模式的第二条入口。
+//
+// 仓库自带的那份 yaml 由 TestShippedConfigLoadsAndIsCalibrated 钉住键集与 fieldOrder
+// 逐项相等 —— 但那条**只看仓库里这一份**。运维在生产环境换一份自己的配置时，
+// 此前没有任何检查。
+func TestLoadConfigRejectsPartialMagnitudeRanges(t *testing.T) {
+	p := writeConfig(t, minimalConfigBody(`  magnitude_ranges:
+    m2: {min: 49, max: 1500, unit: "万亿元"}
+    m1: {min: 14, max: 480, unit: "万亿元"}
+`))
+	_, err := LoadConfig(p)
+	require.Error(t, err, "🔴 半张表必须拒绝启动：缺项会让那些字段的幅度闸静默失效且报 passed")
+
+	// 判据是**说清楚缺了什么、以及后果**，不是「报了个错就行」：
+	// 一条只说 "invalid config" 的错误会让运维去查 yaml 语法。
+	assert.Contains(t, err.Error(), "magnitude_ranges", "错误要指明是哪张表")
+	assert.Contains(t, err.Error(), "静默失效", "要写明后果，否则读的人以为漏填只是「少配一项」")
+	assert.Regexp(t, `缺 \d+/\d+ 个字段`, err.Error(), "要报出缺了几项、共几项")
+	assert.Contains(t, err.Error(), "fieldOrder", "要指向字段名的唯一真相源")
+}
+
+// 🔴 **空表仍然合法** —— 与上面那条方向相反，两条缺一不可。
+//
+// 只跑「半张表被拒」会放过一个「非空即拒」甚至「一律拒」的实现，而那会让
+// magnitude_sanity 的 skipped{not_calibrated} 这条正常路径整个走不通：未标定的
+// 部署将无法启动。thresholds_test.go 的 TestEmptyMagnitudeRangesStillValid 从
+// Thresholds 那一侧钉同一件事，这里从 LoadConfig 这一侧钉。
+func TestLoadConfigAcceptsAbsentMagnitudeRanges(t *testing.T) {
+	p := writeConfig(t, minimalConfigBody("  yoy_sanity_max: 60\n"))
+	cfg, err := LoadConfig(p)
+	require.NoError(t, err, "整张表不写是合法状态：magnitude_sanity 记 skipped{not_calibrated}")
+	assert.Empty(t, cfg.Thresholds.MagnitudeRanges,
+		"没写就该是空表——非空说明 DefaultThresholds 里被填了值，"+
+			"而 TestDefaultThresholdsLeaveMagnitudeRangesUncalibrated 钉着它必须为空")
+}
+
+// 🔴 全覆盖校验必须排在**结构性校验之后**。
+//
+// 一份既写错了区间、又没填全的配置，该先报哪个？先报「少填了 74 项」会把一处笔误
+// 盖成一场大工程，排查方向整个偏掉 —— 而那个写错的区间往往就是漏填的成因
+// （复制粘贴时删多了）。
+func TestLoadConfigReportsStructuralErrorBeforeCompleteness(t *testing.T) {
+	p := writeConfig(t, minimalConfigBody(`  magnitude_ranges:
+    m2: {min: 1500, max: 49, unit: "万亿元"}
+`))
+	_, err := LoadConfig(p)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "缺 ",
+		"🔴 倒置区间（结构性错误）必须先报；先报完整性会把一处笔误盖成「你少填了 74 项」")
 }
