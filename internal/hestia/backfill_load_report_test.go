@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -386,8 +387,11 @@ func TestCaliberRoutingAcceptsCorrectRouting(t *testing.T) {
 // 累计穿越零点后 |累计| 合法地小于 |某月|。⚠️ 异号跳过**挡不住**它 —— 这两例 ytd 与
 // mom 同号（都是负），是被跳过条件放行之后才判的。
 //
-// 恒等式对它们逐位成立（信托差 1 落在 ±1 取整容差内）。本测试用真值，改回不等式判据
-// 会让它立刻转红。
+// 恒等式对它们逐位成立（信托差 1，落在门限内）。本测试用真值，改回不等式判据会让它立刻转红。
+//
+// ⚠️ 容差在 M1c-4 的 TASK-011 收尾时从 ±1 亿元改成 max(5 亿, 2% × |期望值|)：
+// 信托那一对 expected=-108 ⇒ 门限取 K_abs 的 5，差 1 仍在内。**这一对正是 K_abs 存在的理由**
+// （2%×108=2.16 已小于真语料观测到的最小绝对噪声 2 亿），见 caliberIdentityLimit 的注释。
 func TestCaliberRoutingAcceptsSignCrossingCumulative(t *testing.T) {
 	obs := []MergedObservation{
 		mkMerged("2020-01", "monthly", map[string]float64{
@@ -705,4 +709,46 @@ func TestLoadReportRendersFamilyMedianViolation(t *testing.T) {
 	assert.Contains(t, out, "整族可能写错列")
 	assert.Contains(t, out, "median|ytd|=3200", "两侧中位数都要印，才看得出差多少")
 	assert.Contains(t, out, "median|mom|=160000")
+}
+
+// 🔴 容差必须**随量级放大**，纯绝对容差在这个判据上不可行（M1c-4 的 TASK-011 收尾）。
+//
+// 本任务前任的第一版取 ±1 亿元，真语料上产生 7 条假阳；成因不是解析错，而是央行每期
+// 累计按**最新修订基数**发布 + 万亿元 2 位小数的发布粒度 ⇒ 差额随累计量级放大。
+//
+// ⚠️ **判据是关系性的**：不是「门限等于某个数」，而是
+//
+//	① 大量级上门限必须显著大于 K_abs（否则噪声漏不掉）
+//	② 小量级上门限必须回落到 K_abs（否则 2%×108=2.16 会把 trust 那一对判成违反）
+//	③ 真正的路由错（当月值写进累计列，偏差 ~99%）必须仍被抓到
+//
+// 只断言「K_abs == 5」的测试挡不住把 K_rel 改成 0 —— 那会一夜退回纯绝对容差，
+// 而 7 条假阳会原样回来，且**没有任何测试会红**。
+func TestCaliberIdentityLimitScalesWithMagnitude(t *testing.T) {
+	// ① 大量级：真语料里最大的那条噪声 expected=306900、差 2000 —— 必须在门限内
+	assert.Greater(t, caliberIdentityLimit(306900), 2000.0,
+		"最大的那条已核实噪声（2022-11 tsf_flow_ytd 差 2000）必须落在门限内")
+
+	// ② 小量级：回落到 K_abs
+	assert.Equal(t, caliberIdentityTolerance, caliberIdentityLimit(-108),
+		"|expected| 小时门限必须回落到 K_abs —— 2%%×108=2.16 小于观测到的最小噪声 2 亿")
+	assert.Equal(t, caliberIdentityTolerance, caliberIdentityLimit(0),
+		"expected=0 时不得退化成 0 门限")
+
+	// ③ 真正的路由错仍被抓到：当月值写进累计列，偏差量级 ~99%
+	//    取真语料的一组：ytd 该是 42102，若被写成当月的 7202 ⇒ 差 34900
+	const expected, routedWrong = 42102.0, 7202.0
+	assert.Greater(t, math.Abs(routedWrong-expected), caliberIdentityLimit(expected),
+		"🔴 路由错必须超出门限——这是本迭代头号风险的可执行形式，放过它整条防线就没了")
+
+	// ④ 单调不减：|expected| 越大门限不该变小
+	prev := 0.0
+	for _, e := range []float64{0, 100, 1000, 10000, 100000, 1000000} {
+		got := caliberIdentityLimit(e)
+		assert.GreaterOrEqualf(t, got, prev, "门限在 |expected|=%g 处变小了", e)
+		prev = got
+	}
+
+	// ⑤ 对称：门限只看量级，不看符号
+	assert.Equal(t, caliberIdentityLimit(306900), caliberIdentityLimit(-306900))
 }
