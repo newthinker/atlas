@@ -447,3 +447,46 @@ dev 的自述（我核过审计行，属实）：
 它**没有硬闯、没自作主张换方案**，而是把机制事实（审计行 + owner_table + DENY 原文）和三个可选方案摆出来让 Leader 定，并指出方案 C（让验证者代写它要对照的验收条款）不妥。
 
 ⇒ **被机制挡住时，正确动作是把机制事实摆出来，而不是找一条绕过去的路。** 与 QA 那次「知道未登记名字免验 token 但不走」同一形状，本 sprint 第二例。
+
+## 2026-09-03 · 🔴 第三个写通道缺口：`>>` 重定向能直接写进 `.arcforge/`（含归档目录）
+
+### 实测（归档后，Leader 亲自跑的）
+
+```bash
+# 写通道够不到归档目录 —— 这是设计，正确
+$ echo probe | arcforge-write.sh --as leader doc ../archive/sprint-042-.../final-report.md
+DENY: 路径「../archive/...」含 ..(路径穿越)
+
+# 但直接重定向写进去了 —— write-guard 没拦
+$ printf 'x\n' >> .arcforge/archive/sprint-042-2026-09-03/docs/06-acceptance/final-report.md
+$ tail -1 <该文件>
+x                                    ← 🔴 写入成功
+```
+
+（已 `git checkout --` 撤销，归档与 tag 现为 0 行差异。）
+
+### 这不是新发现，是 CLAUDE.md 自己写着的局限被实测确认
+
+> write-guard 的 Bash 侧是「常见写动词启发式」，**非完备拦截**（python/perl/heredoc/变量拼接可逃逸）
+
+⇒ **`>>` 也在逃逸集里**，而它比 python/heredoc **更顺手** —— 一个 agent 想追加一行日志时最自然的写法就是它。
+
+### 与前两个缺口的关系
+
+| # | 缺口 | 谁能利用 | 本 sprint 实况 |
+|---|---|---|---|
+| ① | `writers` 通配 × token 只对已登记名字生效 | 任何 agent（换个没登记的名字） | 🔴 **QA 发现了、没用、报告给 Leader** |
+| ② | `update` 缺 `--expect-status` | 不是缺口，是竞态 | 五次实撞 |
+| ③ | **`>>` 绕过 write-guard** | **任何 agent** | 🔴 **Leader 自己实测触发** |
+
+⚠️ ①③ 是同一类：**深度防御的最外层（write-guard / token）都有已知的洞，真正起作用的是单写者矩阵 + validator 审计 + agent 的自觉。**
+
+⚠️ 而本 sprint 的两次实况都指向同一件事：**洞被知道了，但没有被利用** —— 一次是 QA 主动报告，一次是我实测后撤销。**这不是机制的功劳。**
+
+### 我不建议改 write-guard
+
+理由与 CLAUDE.md 已记的一致：**hook 无法可靠区分调用者身份，任何例外都会成为注入诱导的口子**。而堵 `>>` 要么做完备的语法分析（不现实），要么把 Bash 工具整个禁掉（代价过大）。
+
+⇒ **建议改为在 validator 加一条审计**：归档目录（`.arcforge/archive/*`）在 tag 打出之后**不应再有改动**，可用 `git diff <tag> HEAD -- .arcforge/archive/<同名目录>` 检查，非空即告警。
+
+**理由**：这条不依赖拦住写入，只依赖**事后能发现写入** —— 与本 sprint 反复验证的那条一致：**「不禁止变化，只保证变化不会被静默吞掉」**。
