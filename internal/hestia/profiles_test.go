@@ -1352,3 +1352,93 @@ func TestCumulativeThisYearAltAndCumulativePeriodsAgree(t *testing.T) {
 		assert.Truef(t, cumulativePeriods[w], "%q 在交替里、却不在口径表里", w)
 	}
 }
+
+// —— M1c-4 的 TASK-003：moneyRE 容忍余额与同比之间的一个短从句 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-003）
+// functional[0]  clausePat 插进 moneyRE 的「，」与「同比」之间，签名不变
+//                              → 下面三条共同守卫
+// functional[1]  2020-01 真实句形，四个捕获组逐个断言
+//                              → TestMoneyREToleratesOneClauseBeforeYoY
+// functional[1]  无从句的常见体例不得被破坏
+//                              → TestMoneyREStillMatchesTheCommonShape
+// functional[1]  🔴 放宽的**边界**（本任务最不能省的一条）
+//                              → TestMoneyRERefusesToCrossSentences
+// boundary[0]    clausePat 非捕获且非贪婪，不触发贪婪捕获检查
+//                              → TestNoGreedyCaptureInTemplates（既有，应当仍绿）
+
+// 2020-01 的 M1 句在余额与「同比」之间多插了一个不含数值的短从句。
+//
+// 原文：「狭义货币(M1)余额54.55万亿元，与上年同期持平，同比增长0%」
+//
+// ⚠️ **四个捕获组逐个断言，不能只断言「匹配上了」**：一个把从句连同数字整段吞掉的
+// 写法（如 `.*?同比`）照样能匹配，但余额或同比会取到隔壁句子的值——而 M2/M1/M0
+// 三句同形紧挨着，配错的结果是**量级完全合理的错值**，下游没有任何闸门拦得住。
+func TestMoneyREToleratesOneClauseBeforeYoY(t *testing.T) {
+	const line = "狭义货币(M1)余额54.55万亿元，与上年同期持平，同比增长0%"
+
+	m := moneyRE("狭义货币", "M1").FindStringSubmatch(line)
+	require.NotNil(t, m, "2020-01 的 M1 句必须命中——这一篇此前报 `hestia: 货币 M1 not found`")
+	require.Len(t, m, 5, "整体 + 四个捕获组")
+
+	assert.Equal(t, "54.55", m[1], "余额")
+	assert.Equal(t, "万亿元", m[2], "单位")
+	assert.Equal(t, "增长", m[3], "方向")
+	assert.Equal(t, "0", m[4], "同比数值——0 是合法值，不能因为它是零就被当成没取到")
+}
+
+// 无从句的常见体例（218 篇里的绝大多数）不得被放宽破坏。
+//
+// 这条与上一条是一对：放宽必须是**增量**的，老形态一个字都不能少认。
+func TestMoneyREStillMatchesTheCommonShape(t *testing.T) {
+	for _, tc := range []struct {
+		name, code, line        string
+		balance, unit, dir, yoy string
+	}{
+		{"广义货币", "M2", "广义货币(M2)余额340.29万亿元，同比增长8.5%", "340.29", "万亿元", "增长", "8.5"},
+		{"狭义货币", "M1", "狭义货币（M1）余额115.46万亿元，同比增长4.0%", "115.46", "万亿元", "增长", "4.0"},
+		{"流通中货币", "M0", "流通中货币(M0)余额14.13万亿元，同比增长10.2%", "14.13", "万亿元", "增长", "10.2"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			m := moneyRE(tc.name, tc.code).FindStringSubmatch(tc.line)
+			require.NotNilf(t, m, "无从句的常见体例必须仍命中：%s", tc.line)
+			assert.Equal(t, tc.balance, m[1])
+			assert.Equal(t, tc.unit, m[2])
+			assert.Equal(t, tc.dir, m[3])
+			assert.Equal(t, tc.yoy, m[4])
+		})
+	}
+}
+
+// 🔴 这条是放宽的**边界**，是本任务里最不能省的一条。
+//
+// 少了它，`.*?` 式的放宽会在「M1余额X。……M2同比增长Y%」上**静默配错**：正则照样
+// 命中、四个捕获组照样有值、量级照样合理，只是同比取自另一个指标。没有任何下游闸门
+// 拦得住这种错——它不是缺失，是**看起来正确的错值**。
+//
+// 三重约束各由一个子测试守：
+//   - 不含句读（`。；\n`）：句号之后的同比不得命中
+//   - 至多一个从句：两个从句超出放宽范围，宁可响亮失败
+//   - 不含数字：从句里出现数字意味着那是另一个指标，不得当成从句吃掉
+func TestMoneyRERefusesToCrossSentences(t *testing.T) {
+	re := moneyRE("狭义货币", "M1")
+
+	t.Run("句号之后的同比不得命中", func(t *testing.T) {
+		const line = "狭义货币(M1)余额54.55万亿元。广义货币(M2)同比增长8.5%"
+		assert.Nil(t, re.FindStringSubmatch(line),
+			"跨句命中会把 M2 的同比装进 M1 的字段——量级合理的错值，下游无闸门可拦")
+	})
+
+	t.Run("两个从句超出放宽范围，宁可响亮失败", func(t *testing.T) {
+		const line = "狭义货币(M1)余额54.55万亿元，与上年同期持平，增速回落，同比增长0%"
+		assert.Nil(t, re.FindStringSubmatch(line),
+			"放宽只容忍**一个**从句；容忍两个就离 `.*?` 只差一步，"+
+				"而本任务的全部风险正来自跨从句配错。宁可这里响亮失败，由人看一眼真实句形")
+	})
+
+	t.Run("从句内含数字不得当成从句吃掉", func(t *testing.T) {
+		const line = "狭义货币(M1)余额54.55万亿元，广义货币余额340.29万亿元，同比增长8.5%"
+		assert.Nil(t, re.FindStringSubmatch(line),
+			"从句里出现数字意味着那是**另一个指标**——吃掉它就会把 M2 的同比装进 M1")
+	})
+}
