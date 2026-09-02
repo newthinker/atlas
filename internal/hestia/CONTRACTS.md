@@ -2729,11 +2729,51 @@ loan_bill_mom            loan_nbfi_mom
 | `ALTER TABLE` × 22 | 生产库**有数据要保留** | ❌ 0 行，无数据可保 |
 | **删旧库 + 放入临时库** | 生产库为空或可重建 | ✅ **本次选它** |
 
-⚠️ **选后者不是图省事，是消除一整类风险**：`ALTER TABLE` 之后表里仍是**旧 schema 演化来的**表，
+⚠️ ~~**选后者不是图省事，是消除一整类风险**：`ALTER TABLE` 之后表里仍是**旧 schema 演化来的**表，
 列序与 `observationsDDL()` 由 `fieldOrder` 生成的顺序**不保证一致**，而 `INSERT` 是按列序拼的。
-整个替换文件则**不留任何旧 schema 痕迹**。
+整个替换文件则**不留任何旧 schema 痕迹**。~~
 
-⚠️ **若将来生产库非空**，`ALTER TABLE` 那条路才是必须的，且届时要额外验证列序 —— **那不是本次的情形，别把本次的做法当通例。**
+🔴 **上面这条理由已被实测证否（M1c-4 的 TASK-014 订正）。结论不变，变的是理由。**
+
+**`INSERT` 不按列序拼，按显式列名拼**：
+
+```go
+// store.go:902  insertSQL 逐列 append 的是**列名**
+cols = append(cols, f)
+// store.go:908
+"INSERT INTO %s (%s) VALUES (%s)"   ← strings.Join(cols, ", ")
+```
+
+而 `store.go:140` 的注释**自己就写着**这件事：「多出来的列……刻意放行：**INSERT 显式列名，
+多余列取 NULL，无害**」。⇒ **表的列序对 `INSERT` 不构成任何影响。**
+
+**溯源（写明是因为不写会指错人）**：这条理由不是本文件作者编的 ——
+`dev-m1c4-a` 在 M1c-4 的 TASK-013 的 `questions[0]` 里给出它 → Leader 采纳并写进裁决原文
+→ 由裁决写进本节。**是采纳时没有验，不是记录时写错。**
+
+**「不留旧 schema 痕迹」这半句也退化了**：在「INSERT 显式列名 + SELECT 显式列清单」之下，
+旧 schema 痕迹**没有已知危害**。⇒ 真正剩下的理由只有一条：**本次生产库 0 行 ⇒ 没有数据可丢
+⇒ 两条路都安全，删了更简单。**
+
+**本任务另行搜过有没有别的实质理由（不是「我们没找到」，是查过哪些）**：
+
+| 查了什么 | 结果 |
+|---|---|
+| `internal/hestia` 生产代码里的 `SELECT *` | **0 处**（3 处命中全在 `_test.go`） |
+| 全部生产 `SELECT` | 均为显式列清单；`Preceding` 的 `SELECT %s` 由 `slices.Concat(metaColumns, fieldOrder)` **从代码生成**，Scan 顺序跟的是它、不是表 |
+| 裸 `INSERT ... VALUES`（不带列清单） | **0 处** |
+| `rows.Scan` 调用点 | `store.go` 9 处均对应显式 SELECT；`backfill_load.go` 1 处是 `count(*)` 标量 |
+| 🔴 `v_hestia_current` 视图**确实是 `SELECT *`**（经 `bitemporal.CurrentQuery`，不在 `internal/hestia` 目录下，前几轮扫描漏掉） | **实测无碍**：同版 sqlite（`v1.38.2`）上 `CREATE VIEW v AS SELECT * FROM t` 之后 `ALTER TABLE t ADD COLUMN e` ⇒ `pragma_table_info('v')` = `[a b e]`，`SELECT e FROM v` **不报 no such column** ⇒ 视图会认新列 |
+
+⇒ **未发现其它实质理由。** 上表是搜索范围本身，供下一个人判断这句话有多强 ——
+**「未发现」的强度取决于查了什么，不取决于说的人。**
+
+⚠️ **若将来生产库非空**，`ALTER TABLE` 那条路才是必须的。**届时要验的不是列序**（上面已证否），
+而是 `NewStore` 的 `verifyObservationsSchema` 能否通过 —— 它比对库里实际的列与 `fieldOrder`，
+缺列即在**开库那一刻**响亮失败（见 §F）。**那不是本次的情形，别把本次的做法当通例。**
+
+🔴 **这条与 §H-3 那道恒真判据是同一族，但危害更具体**：前者让人读了困惑，这条让人
+**去做一件没必要的核对**，而且是在**唯一不可逆的那个操作**上。
 
 #### H-2. 🔴 `-wal` / `-shm`：备份与回滚**两端都要处理**
 
