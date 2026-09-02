@@ -191,9 +191,17 @@ func threeCategoryFixture(t *testing.T) string {
 				SHA256: testdataSHA(t, "pboc-2025-08-tsf-stock.html")},
 			{ID: "f", Title: "2025年8月社会融资规模增量统计数据报告", File: "articles/flow.html",
 				SHA256: testdataSHA(t, "pboc-2025-08-tsf-flow.html")},
-			// 类 1：本迭代不解析 —— 该期报告只有当月数、没有累计数（M1c-3a 的 TASK-010）
+			// 类 1：本迭代不解析 —— 按现有期次前缀表找不到任何累计口径合计句
+			//
+			// ⚠️ **住户换过第三轮**（M1c-4 的 TASK-005）：原来放的是真实
+			// pboc-2020-04-monthly.html，而路由化之后**它解析成功了**（只有当月数的报告
+			// 不再被拒，值全落 _mom 列）—— 那正是本迭代的目标，见
+			// TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists 里的正面确认。
+			// 本格测的是**三类可分**，需要仍然合格的住户，故改用从同一篇派生的
+			// -broken-ordinals：只把首节序号「一」改成「五」，Parse 因板块序号不连续失败，
+			// 而存贷款合计句一个字没动 ⇒ onlyCurrentMonthFlowSentences 仍为 true。
 			{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
-				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly-broken-ordinals.html")},
 			// 类 2：该支持却失败了 —— 正文给一个 index 页，Parse 必然失败
 			{ID: "bad", Title: "2024年金融统计数据报告", File: "articles/bad.html",
 				SHA256: testdataSHA(t, "pboc-index-p1.html")},
@@ -205,7 +213,7 @@ func threeCategoryFixture(t *testing.T) string {
 		"articles/m.html":     "pboc-2026-07-monthly.html",
 		"articles/stock.html": "pboc-2025-08-tsf-stock.html",
 		"articles/flow.html":  "pboc-2025-08-tsf-flow.html",
-		"articles/c.html":     "pboc-2020-04-monthly.html",
+		"articles/c.html":     "pboc-2020-04-monthly-broken-ordinals.html",
 		"articles/bad.html":   "pboc-index-p1.html",
 	})
 }
@@ -296,10 +304,21 @@ func TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists(t *testin
 		return out
 	}
 
-	// —— 前提：直接对两篇正文求判据的值，证明它们确实构成最小对 ——
-	require.False(t, onlyCurrentMonthFlowSentences(stripHTML(readSample(t, "pboc-2022-08-monthly.html"))),
+	// 🔴 **两篇真语料在 M1c-4 的 TASK-005 之后都解析成功了**，这是本迭代的正面成果，
+	// 先把它钉住——本格随后用的是它们的派生版，不写这一段的话「为什么换住户」会失传。
+	for _, f := range []string{"pboc-2020-04-monthly.html", "pboc-2022-08-monthly.html"} {
+		obs, perr := Parse(readTestdata(t, f))
+		require.NoErrorf(t, perr, "%s 路由化之后应当解析成功（当月值进 _mom 列）", f)
+		assert.NotEmptyf(t, obs.Values, "%s 应当产出字段", f)
+	}
+
+	// —— 前提：两篇**派生版**构成最小对 ——
+	// 两者都把首节序号「一」改成「五」⇒ Parse 因板块序号不连续失败（同一个理由），
+	// **唯一的变量**是正文里有没有累计合计句。原来那对（真实 2022-08 vs 2020-04）
+	// 差了两个变量（失败理由不同 + 有无累计句），这一版更干净。
+	require.False(t, onlyCurrentMonthFlowSentences(stripHTML(readSample(t, "pboc-2022-08-monthly-broken-ordinals.html"))),
 		"用例前提：2022-08 正文里有累计合计句（「1-8月，人民币贷款累计增加…」）")
-	require.True(t, onlyCurrentMonthFlowSentences(stripHTML(readSample(t, "pboc-2020-04-monthly.html"))),
+	require.True(t, onlyCurrentMonthFlowSentences(stripHTML(readSample(t, "pboc-2020-04-monthly-broken-ordinals.html"))),
 		"用例前提：2020-04 正文里确实一句累计合计句都没有")
 
 	dir := writeCalibrateFixture(t, Manifest{
@@ -308,17 +327,17 @@ func TestCollectSamplesSplitsUnsupportedFromFailureByWhetherDataExists(t *testin
 			// 一篇正常样本：collectSamples 对「可用样本为 0」有既有守卫，全是失败的会先在那里报错
 			{ID: "ok", Title: "2025年金融统计数据报告", File: "articles/ok.html",
 				SHA256: testdataSHA(t, "pboc-2025-12-annual.html")},
-			// 有累计句、但存款侧抽不出来 ⇒ 解析失败
+			// 有累计句、但解析失败 ⇒ 解析失败（M1c-4 的兜底工作量）
 			{ID: "b", Title: "2022年8月金融统计数据报告", File: "articles/b.html",
-				SHA256: testdataSHA(t, "pboc-2022-08-monthly.html")},
+				SHA256: testdataSHA(t, "pboc-2022-08-monthly-broken-ordinals.html")},
 			// 一句累计合计句都没有 ⇒ 本迭代不解析
 			{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
-				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly-broken-ordinals.html")},
 		},
 	}, map[string]string{
 		"articles/ok.html": "pboc-2025-12-annual.html",
-		"articles/b.html":  "pboc-2022-08-monthly.html",
-		"articles/c.html":  "pboc-2020-04-monthly.html",
+		"articles/b.html":  "pboc-2022-08-monthly-broken-ordinals.html",
+		"articles/c.html":  "pboc-2020-04-monthly-broken-ordinals.html",
 	})
 
 	got, err := collectSamples(CalibrateDeps{Dir: dir})
@@ -989,8 +1008,10 @@ func TestCollectSamplesSeparatesNoDataFromParseFailure(t *testing.T) {
 		From: "2020-04", CompletedAt: "2026-08-24T10:00:00Z",
 		Articles: []Article{
 			// C 类：只有当月数、没有累计数（正文零个累计前缀句）
+			// ⚠️ M1c-4 的 TASK-005 起改用派生版：真实 2020-04 现在解析成功（值全落 _mom），
+			// 不再进这一格；派生版只把首节序号「一」改成「五」，Parse 失败而合计句一字未动。
 			{ID: "c", Title: "2020年4月金融统计数据报告", File: "articles/c.html",
-				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly-broken-ordinals.html")},
 			// 该支持却失败了：正文给一个 index 页
 			{ID: "bad", Title: "2024年金融统计数据报告", File: "articles/bad.html",
 				SHA256: testdataSHA(t, "pboc-index-p1.html")},
@@ -999,7 +1020,7 @@ func TestCollectSamplesSeparatesNoDataFromParseFailure(t *testing.T) {
 				SHA256: testdataSHA(t, "pboc-2025-08-monthly.html")},
 		},
 	}, map[string]string{
-		"articles/c.html":   "pboc-2020-04-monthly.html",
+		"articles/c.html":   "pboc-2020-04-monthly-broken-ordinals.html",
 		"articles/bad.html": "pboc-index-p1.html",
 		"articles/ok.html":  "pboc-2025-08-monthly.html",
 	})
@@ -1132,18 +1153,24 @@ func TestCollectSamplesSortsUnsupportedByPeriod(t *testing.T) {
 		From: "2020-04", CompletedAt: "2026-08-24T10:00:00Z",
 		Articles: []Article{
 			// 刻意逆序放入，若实现不排序就会原样输出
+			// ⚠️ M1c-4 的 TASK-005 起，原来的 pboc-2020-04-monthly.html **解析成功**了
+			// （只有当月数的报告不再被拒，值全落 _mom 列）⇒ 它不再进这一格。
+			// 本格测的是**排序**，需要仍然合格的住户，故改用从同一篇真语料派生的
+			// pboc-2020-04-monthly-broken-ordinals.html：只把首节序号「一」改成「五」，
+			// Parse 因板块序号不连续失败，而存贷款合计句一个字没动 ⇒
+			// onlyCurrentMonthFlowSentences 仍为 true，分类结果不变。
 			{ID: "later", Title: "2020年5月金融统计数据报告", File: "articles/b.html",
-				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly-broken-ordinals.html")},
 			{ID: "earlier", Title: "2020年4月金融统计数据报告", File: "articles/a.html",
-				SHA256: testdataSHA(t, "pboc-2020-04-monthly.html")},
+				SHA256: testdataSHA(t, "pboc-2020-04-monthly-broken-ordinals.html")},
 			// 至少一篇正常样本：collectSamples 对「可用样本为 0」有既有守卫，
 			// 只放两篇不解析的会在那里就报错、走不到排序。
 			{ID: "ok", Title: "2025年金融统计数据报告", File: "articles/ok.html",
 				SHA256: testdataSHA(t, "pboc-2025-12-annual.html")},
 		},
 	}, map[string]string{
-		"articles/a.html":  "pboc-2020-04-monthly.html",
-		"articles/b.html":  "pboc-2020-04-monthly.html",
+		"articles/a.html":  "pboc-2020-04-monthly-broken-ordinals.html",
+		"articles/b.html":  "pboc-2020-04-monthly-broken-ordinals.html",
 		"articles/ok.html": "pboc-2025-12-annual.html",
 	})
 

@@ -333,30 +333,83 @@ func unrecognisedPeriodPrefixes(body string, re *regexp.Regexp) []string {
 //
 // 两个维度都要判：外币孪生句的期次前缀同样是「全年/上半年」，只判期次会取到
 // 「全年外币存款增加2135亿美元」。
-func selectRMBCumulativeFlow(re *regexp.Regexp, body, what string) ([]string, error) {
+// selectRMBFlowByCaliber 挑出人民币口径的合计句，并**报出它是哪一族**
+// （M1c-4 的 TASK-005 由原 selectRMBCumulativeFlow 改成路由）。
+//
+// 🔴 **为什么合计句也必须路由**：原实现只保累计句，0 命中即硬失败 ⇒ 一篇只有当月合计
+// 句的报告（真语料 2022-07 的存款节就是「7月份人民币存款增加447亿元」，没有累计句）
+// 会被整篇拒绝。而 2022-07 恰恰是需求文档用来论证 FieldDepositFlowMoM 存在理由的那一篇
+// ——不改这里，`deposit_flow_mom` / `loan_flow_mom` 会成为**没有任何代码写它们的孤儿列**，
+// 而模板覆盖断言照样绿。
+//
+// 两个维度都要判：外币孪生句的期次前缀同样是「全年/上半年」，只判期次会取到
+// 「全年外币存款增加2135亿美元」。捕获组：1=期次 2=口径 3=方向词 4=数值 5=单位。
+//
+// 🔴 **当月族的谓词是 `m[1] != "" && !cumulativePeriods[m[1]]`，不是 `!cumulativePeriods[m[1]]`**：
+// 期次捕获组可选，写成后者会让**空前缀**落进当月族——那就是在猜，正是本迭代唯一保留的
+// 那条拒绝要防的东西。
+//
+// 优先级：有累计族就用累计族（`_ytd` 是首选口径）；没有才退到当月族。
+// **任一族挑到多于一条仍然硬失败**（孪生句是另一类失败，不许就近取一条）——那条纪律没有变。
+func selectRMBFlowByCaliber(re *regexp.Regexp, body, what string) ([]string, bool, error) {
 	ms := re.FindAllStringSubmatch(body, -1)
-	keep := func(m []string) bool { return cumulativePeriods[m[1]] && m[2] == currencyRMB }
+	label := func(m []string) string { return m[1] + "/" + m[2] }
+	keepCum := func(m []string) bool { return m[2] == currencyRMB && cumulativePeriods[m[1]] }
+	keepCur := func(m []string) bool {
+		return m[2] == currencyRMB && m[1] != "" && !cumulativePeriods[m[1]]
+	}
 
-	// 🔴 **一条都没挑出来时，先问「是不是前缀不认识」**（M1c-3a 的 TASK-011，
-	// 从 TASK-012 转入的 error_handling[0]）。
+	hasCum := slices.ContainsFunc(ms, keepCum)
+	hasCur := slices.ContainsFunc(ms, keepCur)
+
+	// 🔴 **「是不是前缀不认识」这段诊断仍然挂在「累计族为空」上，没有下移到「两族都空」**
+	//（M1c-4 的 TASK-005，**与 DoD 原文不同，理由是实测**）。
 	//
-	// 只在 0 命中时问：「挑出了 2 条」是另一类失败（孪生句），前缀认不认识与它无关，
-	// 在那里插一句诊断只会把两类失败又混到一起 —— 而本条要做的恰恰是把它们分开。
-	if !slices.ContainsFunc(ms, keep) {
+	// DoD 要求把它下移，理由是「一篇只有当月合计句的报告一点问题都没有，此时喊『前缀不被
+	// 识别』是指错方向」。**那个担忧不会发生**——诊断器自己的谓词已经足够精确：它只在
+	// 「句尾模板命中、而完整 flowRE 在同一结束位置没命中」时才有话说。纯当月报告的
+	// 「4月份人民币贷款增加6454亿元」前缀 `4月份` 本来就在 periodAlt 里、flowRE 认得它
+	// ⇒ 被 flowEnds 跳过。实测 2020-04（纯当月）`unrecognisedPeriodPrefixes` 返回 **[]**，
+	// 由 TestCumulativeFlowDiagnosticDoesNotMisfireOnPureCurrentMonth 钉住。
+	//
+	// 🔴 **而下移会制造一个静默的数据丢失**，正是本诊断存在的全部理由（M1c-3a 的 R3）：
+	// 正文同时有「当月合计句」与「一条前缀不被认识的累计句」时，下移后当月族有命中
+	// ⇒ 诊断不触发 ⇒ 静默走当月路径、把可恢复的累计数据丢掉且**不告诉任何人**。
+	// 实测（合成体，句尾与真实 2022 年月报同形）：
+	//
+	//	正文：4月份人民币贷款增加6454亿元…今年以来，人民币贷款累计增加18.7万亿元。
+	//	下移后 → 命中「4月份」、accumulate=false，18.7 万亿静默丢失、无任何诊断
+	//
+	// 挂在「累计族为空」上则响亮报出「该往 periodAlt 加一项」，补完之后 _ytd 与 _mom
+	// **两列都能拿到**。⇒ 这也**保持了改动前的行为**（原实现同样在累计族为空时诊断），
+	// 下移才是行为回归。由 TestCumulativeFlowDistinguishesUnknownPrefixFromNoCumulativeSentence
+	// 的 B 格钉住。
+	if !hasCum {
 		if unknown := unrecognisedPeriodPrefixes(body, re); len(unknown) > 0 {
-			return nil, fmt.Errorf(
-				"hestia: %s 失败的成因是**期次前缀不被识别**，不是本节没有累计句: "+
+			return nil, false, fmt.Errorf(
+				"hestia: %s 失败的成因是**期次前缀不被识别**，不是本节没有合计句: "+
 					"正文里有 %d 句人民币合计句的句尾完全正确，但它们的前缀 %s 不在 periodAlt 里，"+
 					"于是整条模板不命中、根本没进候选集。这是**解析器缺口**——该往 periodAlt 与 "+
-					"cumulativePeriods 同步加一项；与「本节确实没有累计句」的后续动作相反："+
+					"cumulativePeriods 同步加一项；与「本节确实没有合计句」的后续动作相反："+
 					"后者修不了，正确的做法是标注。误判成后者会让真实可恢复的数据被永久写销"+
 					"（M1c-3a 的 TASK-012 的 R3 就是这么发生的）",
 				what, len(unknown), strings.Join(unknown, " / "))
 		}
 	}
 
-	return selectUnique(ms, what, keep,
-		func(m []string) string { return m[1] + "/" + m[2] })
+	// 两族都没有才是错误。措辞与原来同样具体：点名候选句数与它们各自的期次/口径，
+	// 否则「一篇什么都没抽到」会退化成一句 not found，排障时看不出该往哪走。
+	if !hasCum && !hasCur {
+		_, err := selectUnique(ms, what+"（累计与当月两族都没有）", keepCum, label)
+		return nil, false, err
+	}
+
+	if hasCum {
+		m, err := selectUnique(ms, what+"（累计口径）", keepCum, label)
+		return m, true, err
+	}
+	m, err := selectUnique(ms, what+"（当月口径）", keepCur, label)
+	return m, false, err
 }
 
 func extractTSFStockSection(sec section) (map[string]float64, error) {
@@ -541,30 +594,68 @@ func sectorSegmentStart(body, anchor string, coverage []*regexp.Regexp) int {
 // ⚠️ **修法不是换一个更宽的锚点短语**：失效模式是**判据的定义域与被守护动作的定义域
 // 不一致**，换个短语仍然是两个不同的定义域。故起点改由 sectorSegmentStart 从**抽取
 // 用的同一批模板**求出（depositSectorCoverage / loanSectorCoverage）。
-func checkSectorCaliber(body, anchor, what string, coverage []*regexp.Regexp) error {
+// sectorCaliber 是一个分部门段的口径（M1c-4 的 TASK-005）。
+//
+// 🔴 **它取代了原来的「读不出口径就拒绝整篇」**，而原拒绝理由背后的担忧一个字都没有放松，
+// 只是换了形式保留：
+//
+//	旧：同一份观测里合计取累计值、分部门混进当月值 ⇒ 内部口径不一致，
+//	    而两者都在合法量级内、下游没有任何闸门拦得住 ⇒ **拒绝整篇**
+//	新：当月口径的分部门值写进 `_mom` 列、累计口径写进 `_ytd` 列 ⇒ **两个不同的列**
+//
+// ⇒ **这道防线现在由 nameField.pick 承担。** 拆掉拒绝而不落实 pick 的选列逻辑，
+// 就是亲手做了本迭代最想防的那件事。由 golden test 的两条 NotContains 在现场守着。
+type sectorCaliber int
+
+const (
+	// caliberAbsent：本节没有分部门段。本判定**不表态**——分部门字段是必需的，
+	// 紧随其后的 mustMatch / loanScopeSpans 会以「分部门 X not found」或
+	// 「scope anchor not found」报错，那条信息比「读不出口径」更具体。让更具体的先说话。
+	caliberAbsent sectorCaliber = iota
+	caliberCumulative
+	caliberCurrent
+)
+
+// sectorCaliberOf 判定分部门段的口径：取**被守护那段的起点**之前最近的期次前缀，查
+// cumulativePeriods。
+//
+// 三种结果：
+//
+//	本节没有分部门段    → caliberAbsent, nil（不表态，见上）
+//	起点前无期次前缀    → **报错**（读不出口径，不猜）
+//	查表命中 / 未命中   → caliberCumulative / caliberCurrent
+//
+// 🔴 **中间那条是路由化之后唯一还保留的拒绝，是原设计「refusing to guess」的落点。**
+// 删掉它，路由就变成了掷硬币——把口径未知的值随便写进某一列，而两列都在合法量级内。
+// 由 TestSectorCaliberOfStillRefusesWhenUnreadable 守；变异判据见该测试的注释。
+//
+// ⚠️ 错误里不带 what：本函数的签名不收它（DoD 逐字给定），**由调用方包一层**
+// 把「人民币存款分部门段」这类上下文补上，见 extractDepositSection / extractLoanSection。
+//
+// 判据是**结构性**的：「分部门段之前最近的那个期次前缀，决定分部门的口径」。
+// Leader 对 54 篇有分部门段的月报逐篇比对该判据与数值分类，54/54 一致、0 例外。
+// ⚠️ **刻意不用数值启发式**（「分部门合计与累计句偏差 > X%」）：那是拿一个测量值当判据，
+// 会随语料漂移而坏。⚠️ **也不用期次黑名单**：新增期次时静默失效，失效方向是放行错数据。
+func sectorCaliberOf(body, anchor string, coverage []*regexp.Regexp) (sectorCaliber, error) {
 	i := sectorSegmentStart(body, anchor, coverage)
 	if i < 0 {
-		return nil
+		return caliberAbsent, nil
 	}
 	prefixes := sectorPeriodRE.FindAllString(body[:i], -1)
 	if len(prefixes) == 0 {
-		return fmt.Errorf(
-			"hestia: %s（起点在第 %d 字节）之前没有任何期次前缀，读不出它是累计还是当月口径: "+
-				"refusing to guess — 猜错会把当月值装进 *_ytd 字段，量级完全合理而口径是错的",
-			what, i)
+		return caliberAbsent, fmt.Errorf(
+			"分部门段（起点在第 %d 字节）之前没有任何期次前缀，读不出它是累计还是当月口径: "+
+				"refusing to guess — 猜错会把当月值装进错误的那一列，量级完全合理而口径是错的。"+
+				"路由化之后这是唯一保留的拒绝：能读出口径就分列写，读不出就不写",
+			i)
 	}
 
 	// 取**最近**的那个：累计句与当月句可能同时出现（2023-08 两句都有），
 	// 决定分部门口径的是紧挨着它的那一句，不是本节里的第一句。
-	last := prefixes[len(prefixes)-1]
-	if !cumulativePeriods[last] {
-		return fmt.Errorf(
-			"hestia: %s的期次前缀 %q 不是累计口径，拒绝把当月分部门值装进 *_ytd 字段: "+
-				"同一份观测里合计字段取的是累计值，混进当月的分部门值会让内部口径不一致，"+
-				"而两者都在合法量级内、下游没有任何闸门拦得住",
-			what, last)
+	if cumulativePeriods[prefixes[len(prefixes)-1]] {
+		return caliberCumulative, nil
 	}
-	return nil
+	return caliberCurrent, nil
 }
 
 func extractDepositSection(sec section) (map[string]float64, error) {
@@ -578,18 +669,30 @@ func extractDepositSection(sec section) (map[string]float64, error) {
 		return nil, err
 	}
 
-	m, err = selectRMBCumulativeFlow(depositFlowRE, sec.Body, currencyRMB+"存款期内合计")
+	m, flowCum, err := selectRMBFlowByCaliber(depositFlowRE, sec.Body, currencyRMB+"存款期内合计")
 	if err != nil {
 		return nil, err
 	}
-	if err := setFlow(c, FieldDepositFlowYTD, m[3], m[4], m[5]); err != nil {
+	flowField := FieldDepositFlowYTD
+	if !flowCum {
+		flowField = FieldDepositFlowMoM
+	}
+	if err := setFlow(c, flowField, m[3], m[4], m[5]); err != nil {
 		return nil, err
 	}
 
-	// 分部门段的口径守卫（M1c-3a 的 TASK-009）：必须在抽任何分部门字段**之前**。
-	// 放在循环里逐项判等于把同一个结论算四遍，且第一项抽完再报错时 collector 已脏。
-	if err := checkSectorCaliber(sec.Body, depositSectorAnchor, currencyRMB+"存款分部门段", depositSectorCoverage()); err != nil {
-		return nil, err
+	// 分部门段的口径判定（M1c-4 的 TASK-005 由 M1c-3a 的 TASK-009 的守卫改成路由）。
+	//
+	// 🔴 **必须在抽任何分部门字段之前求出，且每段只求一次。** 放在循环里逐项判有两个
+	// 后果：① 把同一个结论算四遍；② 第一项抽完再报错时 collector 已脏。
+	//
+	// 🔴 **更要紧的是第三个后果**：`sectorCaliberOf` 对一个段返回**一个**标量 ⇒ pick 对
+	// 该段全部条目返回同一族 ⇒ 另一族一个都不写 ⇒ 成对列在同一观测里必然单侧。
+	// TASK-011 的整条防线（`|ytd| ≥ |mom|`）建立在这个前提上。改成逐项判不是「实现得
+	// 更细」，是**换掉下游防线的分析基座**，而表现上看不出来。
+	cal, err := sectorCaliberOf(sec.Body, depositSectorAnchor, depositSectorCoverage())
+	if err != nil {
+		return nil, fmt.Errorf("hestia: %s%w", currencyRMB+"存款分部门段", err)
 	}
 
 	// 四个部门名互不重叠，不需要作用域
@@ -598,7 +701,11 @@ func extractDepositSection(sec section) (map[string]float64, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := setFlow(c, it.ytdField, m[1], m[2], m[3]); err != nil {
+		// pick 在这里不可能返回空串，理由是**结构性**的：caliberAbsent 等价于
+		// 「覆盖面模板一个都不命中」，而上一行的 mustMatch 用的正是同一批模板
+		// —— 它命中了，说明段存在，cal 不会是 absent。两列非空由
+		// TestTemplateTablesDeclareBothColumns 在表层守住，不在这里写运行时死分支。
+		if err := setFlow(c, it.pick(cal), m[1], m[2], m[3]); err != nil {
 			return nil, err
 		}
 	}
@@ -620,18 +727,23 @@ func extractLoanSection(sec section) (map[string]float64, error) {
 		return nil, err
 	}
 
-	m, err = selectRMBCumulativeFlow(loanFlowRE, sec.Body, currencyRMB+"贷款期内合计")
+	m, flowCum, err := selectRMBFlowByCaliber(loanFlowRE, sec.Body, currencyRMB+"贷款期内合计")
 	if err != nil {
 		return nil, err
 	}
-	if err := setFlow(c, FieldLoanFlowYTD, m[3], m[4], m[5]); err != nil {
+	flowField := FieldLoanFlowYTD
+	if !flowCum {
+		flowField = FieldLoanFlowMoM
+	}
+	if err := setFlow(c, flowField, m[3], m[4], m[5]); err != nil {
 		return nil, err
 	}
 
-	// 分部门段的口径守卫（M1c-3a 的 TASK-009），先于作用域切分：
-	// 口径不对时整段分部门都不该抽，没必要先算作用域边界。
-	if err := checkSectorCaliber(sec.Body, loanSectorAnchor, currencyRMB+"贷款分部门段", loanSectorCoverage()); err != nil {
-		return nil, err
+	// 分部门段的口径判定（M1c-4 的 TASK-005），先于作用域切分：口径读不出时整段分部门
+	// 都不该抽，没必要先算作用域边界。**每段求一次**，理由见 extractDepositSection。
+	cal, err := sectorCaliberOf(sec.Body, loanSectorAnchor, loanSectorCoverage())
+	if err != nil {
+		return nil, fmt.Errorf("hestia: %s%w", currencyRMB+"贷款分部门段", err)
 	}
 
 	spans, err := loanScopeSpans(sec.Body)
@@ -650,7 +762,13 @@ func extractLoanSection(sec section) (map[string]float64, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := setFlow(c, sp.scope.totalField, m[1], m[2], m[3]); err != nil {
+			// 「有 totalField 就必有 totalMoM」由 TestTemplateTablesDeclareBothColumns
+			// 在表层守住（那是模板表的性质，不该在抽取路径上写运行时死分支）。
+			tf := sp.scope.totalField
+			if cal == caliberCurrent {
+				tf = sp.scope.totalMoM
+			}
+			if err := setFlow(c, tf, m[1], m[2], m[3]); err != nil {
 				return nil, err
 			}
 		}
@@ -660,7 +778,7 @@ func extractLoanSection(sec section) (map[string]float64, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := setFlow(c, it.ytdField, m[1], m[2], m[3]); err != nil {
+			if err := setFlow(c, it.pick(cal), m[1], m[2], m[3]); err != nil {
 				return nil, err
 			}
 		}
@@ -889,50 +1007,107 @@ func extractTSFFlowArticle(text string) (map[string]float64, error) {
 	totals := findTSFFlowTotals(text)
 
 	labels := make([]string, 0, len(totals))
-	cumulative := make([]tsfFlowTotal, 0, 1)
+	var cumulative, current []tsfFlowTotal
 	for _, h := range totals {
 		labels = append(labels, h.label())
 		if h.isCumulative() {
 			cumulative = append(cumulative, h)
+		} else {
+			current = append(current, h)
 		}
 	}
 
-	switch len(cumulative) {
-	case 1:
-	case 0:
+	// 🔴 **两族都没有才是错误**（M1c-4 的 TASK-005 由「没有累计句就报错」改成路由）。
+	// 措辞保持与原来同样具体：点名候选句数与它们各自的期次/口径，否则「一篇什么都没抽到」
+	// 会静默产出一个空 Values。
+	if len(cumulative) == 0 && len(current) == 0 {
 		return nil, fmt.Errorf(
-			"hestia: 社融增量总量（年初至今累计口径）not found among %d candidate sentence(s) [%s]: "+
-				"refusing to fall back to a current-month sentence — it has the right magnitude "+
-				"and format but the wrong caliber, and the field is named *_ytd",
+			"hestia: 社融增量总量（累计与当月两族都没有）not found among %d candidate sentence(s) [%s]: "+
+				"refusing to guess — 没有任何一条总量句可用，本篇没有可抽的社融增量数据",
 			len(totals), strings.Join(labels, " "))
-	default:
-		return nil, fmt.Errorf(
-			"hestia: 社融增量总量 matched %d cumulative sentences [%s]: refusing to pick one, "+
-				"both values look plausible and leftmost-first would choose silently",
-			len(cumulative), strings.Join(labels, " "))
 	}
-	total := cumulative[0]
 
 	c := newCollector()
-	a, err := parsePlainAmount(total.groups[4], total.groups[5]) // 总量句无方向词
-	if err != nil {
-		return nil, err
-	}
-	if err := c.set(FieldTSFFlowYTD, a.toYi()); err != nil {
-		return nil, err
-	}
+	// **多于一条仍然硬失败，对两族各自都要保留**——孪生句是另一类失败，不许就近取一条。
+	for _, grp := range []struct {
+		hits       []tsfFlowTotal
+		cal        sectorCaliber
+		totalField string
+		what       string
+	}{
+		{cumulative, caliberCumulative, FieldTSFFlowYTD, "累计口径"},
+		{current, caliberCurrent, FieldTSFFlowMoM, "当月口径"},
+	} {
+		if len(grp.hits) == 0 {
+			continue
+		}
+		if len(grp.hits) > 1 {
+			return nil, fmt.Errorf(
+				"hestia: 社融增量总量（%s）matched %d sentences [%s]: refusing to pick one, "+
+					"both values look plausible and leftmost-first would choose silently",
+				grp.what, len(grp.hits), strings.Join(labels, " "))
+		}
+		total := grp.hits[0]
 
-	scope := text[total.start:tsfFlowScopeEnd(totals, total.start, len(text))]
-	for _, it := range tsfFlowItems {
-		m, err := mustMatch(tsfFlowRE(it.name), scope, "社融增量分项 "+it.name)
+		a, err := parsePlainAmount(total.groups[4], total.groups[5]) // 总量句无方向词
 		if err != nil {
 			return nil, err
 		}
-		if err := setFlow(c, it.ytdField, m[1], m[2], m[3]); err != nil {
+		if err := c.set(grp.totalField, a.toYi()); err != nil {
+			return nil, err
+		}
+
+		// 作用域切分逻辑一行不动：边界仍是**位置上**紧随其后的那条总量句起点。
+		scope := text[total.start:tsfFlowScopeEnd(totals, total.start, len(text))]
+		if err := setTSFFlowItems(c, scope, grp.cal, grp.what); err != nil {
 			return nil, err
 		}
 	}
 	return c.values, nil
+}
+
+// setTSFFlowItems 在一个口径族的作用域里抽分项，并区分两种「抽不全」。
+//
+// 🔴 **本函数存在的全部理由是形态②**（真语料 2022-07/08/10/11、2023-07/08/10/11 八篇）：
+// 「当月句带一整套当月分项……累计句孤悬段末」。此时累计句的作用域 = 它自己那一句到文末，
+// 里面**一个分项都没有** ⇒ 若照原来那样逐项 mustMatch 并在首个 not found 处 return，
+// **整篇失败**，而且累计族先跑、当月族根本轮不到。
+//
+// ⇒ 判据（本任务最容易被后人改坏的一处，理由写在这里而不只写在 discovery 里）：
+//
+//	作用域内**一条分项都没有** → 该族只有总量，正常，继续（另一族可能有整套分项）
+//	作用域内**抽到一部分、缺另一部分** → **仍然报错**（模板缺口，不是口径问题）
+//
+// ⚠️ **不能退化成「分项抽不到就静默跳过」**：那会把「模板不匹配」这类真缺陷一起吞掉，
+// 而它的表现是字段静默缺失——本包反复禁止的失败方式。全有或全无，中间状态响亮失败。
+func setTSFFlowItems(c *collector, scope string, cal sectorCaliber, what string) error {
+	// 先写进一个**临时** collector：抽不全时整份丢弃，不让半套值污染 c。
+	// （这也是为什么不能边抽边写进 c —— 第 5 项失败时前 4 项已经在里面了。）
+	tmp := newCollector()
+	var got, missing []string
+	for _, it := range tsfFlowItems {
+		m, err := mustMatch(tsfFlowRE(it.name), scope, "社融增量分项 "+it.name)
+		if err != nil {
+			missing = append(missing, it.name)
+			continue
+		}
+		if err := setFlow(tmp, it.pick(cal), m[1], m[2], m[3]); err != nil {
+			return err
+		}
+		got = append(got, it.name)
+	}
+
+	if len(got) == 0 {
+		return nil // 该族只有总量，没有分项：正常
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"hestia: 社融增量分项（%s）在其作用域内只抽到 %d/%d 项，缺 [%s]: "+
+				"整族缺席是正常的（该口径只有总量句），但**抽到一部分又缺另一部分**是模板缺口，"+
+				"静默跳过会让字段无声消失",
+			what, len(got), len(tsfFlowItems), strings.Join(missing, " "))
+	}
+	return c.merge(tmp.values)
 }
 
 // findTSFFlowTotals 找出全文所有总量句。用 FindAllStringSubmatchIndex 而不是

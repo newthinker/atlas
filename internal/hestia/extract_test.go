@@ -776,10 +776,12 @@ const tsfFlowBodyBothMonthlyFirst = "初步统计，2022年10月社会融资规�
 // mustMatch 直接报 matched 2 sentences——原本成功的 25 篇会被打坏。
 func TestTSFFlowArticleTotalSentenceForms(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		body    string
-		wantErr string // 非空则要求报错且错误信息含它
-		wantYTD float64
+		name     string
+		body     string
+		wantErr  string // 非空则要求报错且错误信息含它
+		wantMoM  bool   // 只有当月族：断言值落 _mom 且 _ytd 一个都没有
+		wantBoth bool   // 两族都完整：18 个字段，两套各就各位
+		wantYTD  float64
 		// wantRMBLoan 钉住**分项**与总量同口径——只断总量的话，累计总量配当月分项
 		// （2022 年 10 月体例）会照样绿。
 		wantRMBLoan float64
@@ -794,14 +796,17 @@ func TestTSFFlowArticleTotalSentenceForms(t *testing.T) {
 			wantYTD: 70600, wantRMBLoan: 52200,
 		},
 		{
-			// 报告本身不含累计数据 ⇒ 响亮失败，不拿 14200 冒充 ytd
-			name: "类3 仅为_非1月", body: tsfFlowBodyNonJanuaryBare,
-			wantErr: "2020年10月/单月",
+			// 🔴 判据换形式不换内容（M1c-4 的 TASK-005）：原来「响亮失败，不拿 14200 冒充 ytd」，
+			// 路由化之后 14200 有了自己的列 ⇒ 写进 _mom，而 **_ytd 一个都不许有**。
+			// 那句「量级看起来完全合理而口径是错的」现在由列名承担。
+			name: "类3 仅为_非1月_走当月列", body: tsfFlowBodyNonJanuaryBare,
+			wantMoM: true, wantYTD: 0, wantRMBLoan: 0,
 		},
 		{
-			// 分项有两套，必须取累计段那套（4.21万亿元=42100），不是当月的 7202
+			// 两族都完整 ⇒ 各写各的列，18 个字段。累计段那套（4.21万亿元=42100）进 _ytd，
+			// 当月那套（7202）进 _mom —— 原来「必须取累计段那套」现在成了「两套都要，别混」。
 			name: "类4 两者都有_累计段在前", body: tsfFlowBodyBothCumulativeFirst,
-			wantYTD: 59200, wantRMBLoan: 42100,
+			wantYTD: 59200, wantRMBLoan: 42100, wantBoth: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -814,9 +819,24 @@ func TestTSFFlowArticleTotalSentenceForms(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Len(t, got, 9)
-			assert.InDelta(t, tc.wantYTD, got[FieldTSFFlowYTD], 1e-9)
-			assert.InDelta(t, tc.wantRMBLoan, got[FieldTSFFlowRMBLoanYTD], 1e-9)
+			switch {
+			case tc.wantMoM:
+				require.Len(t, got, 9, "只有当月族 ⇒ 总量 + 8 分项，全在 _mom 列")
+				assert.NotContains(t, got, FieldTSFFlowYTD,
+					"🔴 当月总量落进 _ytd ⇒ 量级完全合理而口径是错的，下游 calibrate 会拿它跨期比")
+				assert.NotContains(t, got, FieldTSFFlowRMBLoanYTD)
+				assert.Greater(t, got[FieldTSFFlowMoM], 0.0, "当月总量必须落进 _mom")
+			case tc.wantBoth:
+				require.Len(t, got, 18, "两族都完整 ⇒ 各 9 个字段")
+				assert.InDelta(t, tc.wantYTD, got[FieldTSFFlowYTD], 1e-9)
+				assert.InDelta(t, tc.wantRMBLoan, got[FieldTSFFlowRMBLoanYTD], 1e-9)
+				assert.InDelta(t, 7202.0, got[FieldTSFFlowRMBLoanMoM], 1e-9,
+					"当月那套必须落进 _mom，不能覆盖累计那套")
+			default:
+				require.Len(t, got, 9)
+				assert.InDelta(t, tc.wantYTD, got[FieldTSFFlowYTD], 1e-9)
+				assert.InDelta(t, tc.wantRMBLoan, got[FieldTSFFlowRMBLoanYTD], 1e-9)
+			}
 		})
 	}
 }
@@ -833,22 +853,42 @@ func TestTSFFlowArticleTotalSentenceForms(t *testing.T) {
 // 总量是累计、分项是当月，量级差约 30 倍，没有任何闸门拦得住（AD-6 里「住户短期
 // 贷款跑进企业字段」的同族）。作用域切分把分项限定在被选中的总量句之后、下一条
 // 总量句之前，于是这一篇的累计作用域里零分项 ⇒ 响亮失败。
-func TestTSFFlowArticleRefusesCaliberMix(t *testing.T) {
+// 🔴 **判据换形式不换内容**（M1c-4 的 TASK-005 路由化）：原来断言「必须失败」，
+// 理由是「累计总量配当月分项 = 口径混装，量级差 ~30 倍且都在合法区间内」。本迭代把
+// 「失败」换成「分列」之后，同一个理由要求的是：
+//
+//	累计总量 → tsf_flow_ytd
+//	当月总量 → tsf_flow_mom，当月分项 → *_mom
+//	🔴 **tsf_flow_rmb_loan_ytd 一个都不许有** ← 这半条才是原断言的直系继承者
+//
+// 若哪天 pick 在 caliberCurrent 时返回 ytdField，混装立刻复现，而**只有那条 NotContains
+// 会红**——正向断言全部照绿（值都对，只是进错了列）。变异 V3 验的就是它。
+func TestTSFFlowArticleRoutesCaliberMixToSeparateColumns(t *testing.T) {
 	got, err := extractTSFFlowArticle(tsfFlowBodyBothMonthlyFirst)
-	require.Error(t, err, "累计总量配当月分项必须失败，而不是产出口径混装的 Values")
-	assert.Nil(t, got)
+	require.NoError(t, err, "两族各自完整时应当分列写出，不再整篇失败")
 
-	// 钉住**是哪条断言**在守卫：必须是分项在累计作用域内找不到，
-	// 而不是别的原因碰巧也让它红。
-	assert.Contains(t, err.Error(), "社融增量分项",
-		"失败必须来自分项抽取，说明作用域切分生效了")
-	assert.Contains(t, err.Error(), "对实体经济发放的人民币贷款")
+	// 这一篇的两个值都在原文里，只是分属不同口径（形态②：当月段在前、累计句孤悬段末）
+	require.Contains(t, tsfFlowBodyBothMonthlyFirst, "累计为28.7万亿元")
+	require.Contains(t, tsfFlowBodyBothMonthlyFirst, "人民币贷款增加4431亿元")
 
-	// 反向钉住：这一篇的两个值都在原文里，只是分属不同口径。若哪天实现退回
-	// 「总量全篇找、分项全篇找」，err 会变 nil 而上面的断言全部失效——所以
-	// 这里额外确认那对混装值确实是危险的（量级差 ~30 倍，都在合法区间内）。
-	assert.Contains(t, tsfFlowBodyBothMonthlyFirst, "累计为28.7万亿元")
-	assert.Contains(t, tsfFlowBodyBothMonthlyFirst, "人民币贷款增加4431亿元")
+	assert.InDelta(t, 287000.0, got[FieldTSFFlowYTD], 1e-9, "段末累计总量 → _ytd")
+	assert.InDelta(t, 9079.0, got[FieldTSFFlowMoM], 1e-9, "段首当月总量 → _mom")
+	assert.InDelta(t, 4431.0, got[FieldTSFFlowRMBLoanMoM], 1e-9, "当月分项 → _mom")
+
+	// 🔴 原「拒绝」的直系继承者：当月分项绝不许出现在累计列
+	assert.NotContains(t, got, FieldTSFFlowRMBLoanYTD,
+		"🔴 4431（10 月当月）出现在 tsf_flow_rmb_loan_ytd ⇒ 与 287000（1-10月累计）"+
+			"错位约 30 倍，两个值都在合法区间内，下游没有任何闸门拦得住")
+
+	// 累计族的作用域里一个分项都没有（形态②）⇒ 该族只写总量，这是**正常**的，
+	// 不是「抽不到就跳过」：由 setTSFFlowItems 的「0 项放行、部分缺失报错」区分。
+	for _, f := range []string{
+		FieldTSFFlowFXLoanYTD, FieldTSFFlowEntrustYTD, FieldTSFFlowTrustYTD,
+		FieldTSFFlowBankAcceptYTD, FieldTSFFlowCorpBondYTD, FieldTSFFlowGovtBondYTD,
+		FieldTSFFlowEquityYTD,
+	} {
+		assert.NotContainsf(t, got, f, "累计作用域内无分项，%s 不该有值", f)
+	}
 }
 
 // —— M1c-3a 的 TASK-011 · R1：两条路径必须在同一段正文上给出同一个结论 ——
@@ -902,6 +942,23 @@ func TestTSFFlowSectionAndArticleAgreeOnSameBody(t *testing.T) {
 		{"仅累计句", func(*testing.T) string { return tsfFlowBodyCumulativeOnly }},
 		{"仅为_1月报", func(*testing.T) string { return tsfFlowBodyJanuaryBare }},
 		{"仅为_非1月", func(*testing.T) string { return tsfFlowBodyNonJanuaryBare }},
+		// M1c-4 的 TASK-005 新增的三种失败/边界体例：**关系性属性对新路径同样成立**。
+		// 只在 extractTSFFlowArticle 上测它们，板块路径分叉时本条不会红——而分叉正是
+		// R1 那个缺陷的形状。
+		{"两族都没有", func(*testing.T) string {
+			return "初步统计，2022年10月末社会融资规模存量为341.42万亿元，同比增长9.5%。"
+		}},
+		{"当月族两条", func(*testing.T) string {
+			return "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。" +
+				"初步统计，2022年9月社会融资规模增量为3.53万亿元，比上年同期多6245亿元。"
+		}},
+		{"分项抽到一部分", func(*testing.T) string {
+			return "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。" +
+				"其中，对实体经济发放的人民币贷款增加4431亿元；委托贷款增加470亿元。"
+		}},
+		{"整族缺席_只有总量", func(*testing.T) string {
+			return "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。"
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := tc.body(t)
@@ -926,14 +983,14 @@ func TestTSFFlowSectionAndArticleAgreeOnSameBody(t *testing.T) {
 	}
 }
 
-// TestTSFFlowSectionRefusesCaliberMixOnRealArticle 把缺陷现场钉在**真实正文**上。
+// TestTSFFlowSectionRoutesCaliberMixOnRealArticle 把缺陷现场钉在**真实正文**上。
 //
 // ⚠️ 用真实正文而不是构造串是 team-lead 的实测教训：它第一次用自己构造的短语料
 // **没能复现**（两条路径都报错，只是错在不同分项上）——**构造语料不完整会掩盖真缺陷**。
 //
 // 与上面那条互补，别当重复删掉：上面钉的是「两条路径一致」这个**关系**，
 // 一个把两条路径都改坏成同样错法的实现会让它绿；这一条钉的是**板块路径本身的结论**。
-func TestTSFFlowSectionRefusesCaliberMixOnRealArticle(t *testing.T) {
+func TestTSFFlowSectionRoutesCaliberMixOnRealArticle(t *testing.T) {
 	body := stripHTML(readSample(t, "pboc-2023-08-tsf-flow.html"))
 
 	// 前提：这一篇确实是双口径体例，两个值都在原文里、分属不同口径。
@@ -941,17 +998,24 @@ func TestTSFFlowSectionRefusesCaliberMixOnRealArticle(t *testing.T) {
 	require.Contains(t, body, "社会融资规模增量累计为25.21万亿元", "累计总量句")
 	require.Contains(t, body, "对实体经济发放的人民币贷款增加1.34万亿元", "当月分项句")
 
+	// 🔴 判据换形式不换内容（M1c-4 的 TASK-005）：原来断言「必须失败」，理由是口径混装；
+	// 路由化之后由**分列**承担，判据变成「当月分项绝不许落进累计列」。
 	got, err := extractTSFFlowSection(section{Body: body})
-	require.Error(t, err, "累计总量配当月分项必须失败，而不是产出口径混装的 Values")
-	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "社融增量分项",
-		"失败必须来自分项在累计作用域内找不到 —— 说明作用域切分在板块路径上也生效了")
-	assert.Contains(t, err.Error(), "对实体经济发放的人民币贷款")
+	require.NoError(t, err, "两族各自完整时应当分列写出，不再整篇失败")
 
-	// 交叉断言（error_handling）：R1 的错误里不得出现 R2 的标志串，反之亦然。
-	// 「两条修复各自可辨认」是个**关系性**属性，两边都满足「有报错」时它照样可以被破坏。
-	assert.NotContains(t, err.Error(), "分部门段",
-		"这是社融增量的作用域问题，不是分部门口径问题——两者排障方向完全不同")
+	assert.InDelta(t, 252100.0, got[FieldTSFFlowYTD], 1e-9, "「前八个月…累计为25.21万亿元」→ _ytd")
+	assert.InDelta(t, 13400.0, got[FieldTSFFlowRMBLoanMoM], 1e-9, "「8月份…增加1.34万亿元」→ _mom")
+
+	// 🔴 原「拒绝」的直系继承者。缺陷现场的原始形态是
+	// tsf_flow_ytd=252100 配 tsf_flow_rmb_loan_ytd=13400，错位 18.8×、两值都在合法量级内。
+	assert.NotContains(t, got, FieldTSFFlowRMBLoanYTD,
+		"🔴 当月分项 13400 落进累计列 ⇒ 与 252100 错位 18.8×，下游没有任何闸门拦得住")
+
+	// 板块路径与整篇路径必须给出同一结论（R1 的关系性属性，由
+	// TestTSFFlowSectionAndArticleAgreeOnSameBody 全面钉住，这里只做同一篇的点对点确认）。
+	gotArticle, errArticle := extractTSFFlowArticle(body)
+	require.NoError(t, errArticle)
+	assert.Equal(t, gotArticle, got, "两条路径在同一段真实正文上必须逐字段相同")
 }
 
 // TestTSFFlowArticleKeepsDirectionSign 覆盖 boundary[1]：增量句的方向词比存量丰富
@@ -1067,7 +1131,7 @@ func TestTSFFlowArticleRefusesTwoCumulativeSentences(t *testing.T) {
 	got, err := extractTSFFlowArticle(twin)
 	require.Error(t, err)
 	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "matched 2 cumulative sentences",
+	assert.Contains(t, err.Error(), "（累计口径）matched 2 sentences",
 		"必须说清是「两条都算累计」，而不是笼统的抽取失败")
 	assert.Contains(t, err.Error(), "refusing to pick one")
 
@@ -1348,14 +1412,17 @@ func TestExtractFieldsRejectsNonSectionPathExtractors(t *testing.T) {
 // sectionRules 里存款节排在贷款节**之前**，所以端到端喂一份 B 类月报时**存款守卫先触发**，
 // 贷款侧那道守卫**一次都没执行**。只跑端到端的话，把贷款侧守卫整个删掉测试照样绿。
 func TestSectorCaliberGuardsBothSides(t *testing.T) {
+	// 🔴 判据换形式不换内容（M1c-4 的 TASK-005）：B 类原来断言「必须报错，不能把当月值
+	// 装进 *_ytd」。路由化之后同一个理由要求「当月值必须落进 _mom，且 _ytd 一个都没有」
+	// ——那句「不能装进 *_ytd」逐字保留，只是从「靠拒绝达成」变成「靠选列达成」。
 	for _, tc := range []struct {
-		sample  string
-		class   string
-		wantErr bool
-		prefix  string // 期望在错误信息里看到的实际前缀
+		sample string
+		class  string
+		mom    bool // true = B 类，值应落 _mom
+		prefix string
 	}{
-		{sample: "pboc-2025-08-monthly.html", class: "A 类：分部门跟在累计句后", wantErr: false, prefix: "前八个月"},
-		{sample: "pboc-2023-08-monthly.html", class: "B 类：分部门跟在当月句后", wantErr: true, prefix: "8月份"},
+		{sample: "pboc-2025-08-monthly.html", class: "A 类：分部门跟在累计句后", mom: false, prefix: "前八个月"},
+		{sample: "pboc-2023-08-monthly.html", class: "B 类：分部门跟在当月句后", mom: true, prefix: "8月份"},
 	} {
 		secs := splitSections(stripHTML(readSample(t, tc.sample)))
 
@@ -1363,27 +1430,27 @@ func TestSectorCaliberGuardsBothSides(t *testing.T) {
 			name string
 			kw   string
 			fn   func(section) (map[string]float64, error)
-			// 该侧分部门字段的一个代表，用来钉「产出/没产出」
-			field string
+			// 该侧分部门字段的一对代表，用来钉「进了哪一列」
+			ytdField, momField string
 		}{
-			{"贷款侧", "人民币贷款", extractLoanSection, FieldLoanHHShortYTD},
-			{"存款侧", "人民币存款", extractDepositSection, FieldDepositHouseholdYTD},
+			{"贷款侧", "人民币贷款", extractLoanSection, FieldLoanHHShortYTD, FieldLoanHHShortMoM},
+			{"存款侧", "人民币存款", extractDepositSection, FieldDepositHouseholdYTD, FieldDepositHouseholdMoM},
 		} {
 			t.Run(tc.sample+"/"+side.name, func(t *testing.T) {
 				sec, ok := findSection(secs, side.kw)
 				require.Truef(t, ok, "样本缺 %q 节，本用例测不到东西", side.kw)
 
 				got, err := side.fn(sec)
-				if tc.wantErr {
-					require.Errorf(t, err, "%s：%s 必须报错，不能把当月值装进 *_ytd", tc.class, side.name)
-					assert.Contains(t, err.Error(), tc.prefix,
-						"错误信息要写明**实际读到的**前缀，否则排障要回去翻原文")
-					assert.Contains(t, err.Error(), "累计口径")
-					assert.NotContains(t, got, side.field, "被拒时不得产出任何分部门字段")
-					return
+				require.NoErrorf(t, err, "%s：%s 应当正常抽取（路由化之后不再整篇拒绝）", tc.class, side.name)
+
+				want, notWant := side.ytdField, side.momField
+				if tc.mom {
+					want, notWant = side.momField, side.ytdField
 				}
-				require.NoErrorf(t, err, "%s：%s 应当正常抽取", tc.class, side.name)
-				assert.Contains(t, got, side.field, "累计口径下分部门字段应当产出")
+				assert.Containsf(t, got, want, "%s：%s 的值应当落进 %s", tc.class, side.name, want)
+				assert.NotContainsf(t, got, notWant,
+					"🔴 %s：%s 的值落进了 %s —— 前缀是 %q，装错列的两个值都在合法量级内，"+
+						"下游没有任何闸门拦得住", tc.class, side.name, notWant, tc.prefix)
 			})
 		}
 	}
@@ -1410,10 +1477,10 @@ func TestSectorCaliberIsStructuralNotNumeric(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		bridge  string // 分部门段之前的最后一句，**两格只有期次前缀这一个 token 不同**
-		wantErr bool
+		wantMoM bool   // true = 该前缀是当月口径，值应落 _mom
 	}{
-		{"当月前缀_拒绝", "8月份新增贷款1.36万亿元。分部门看", true},
-		{"累计前缀_通过", "前八个月新增贷款1.36万亿元。分部门看", false},
+		{"当月前缀_走当月列", "8月份新增贷款1.36万亿元。分部门看", true},
+		{"累计前缀_走累计列", "前八个月新增贷款1.36万亿元。分部门看", false},
 		// 1 月报：当月**就是**年初至今累计，`1月份` 已在 cumulativePeriods 里
 		// （M1c-3a 的 TASK-001 加），查表自然命中 ⇒ **不需要任何特例分支**。
 		// 这一格与上面「当月前缀_拒绝」只差前缀里的月份数字，却结论相反——
@@ -1422,68 +1489,75 @@ func TestSectorCaliberIsStructuralNotNumeric(t *testing.T) {
 		// ⚠️ DoD boundary[0] 本来要用真实快照 pboc-2025-01-monthly.html 测这一格，
 		// 但那份快照属于 TASK-007 的 writes，交付时尚未合入 master（我不去抓别人
 		// writes 里的文件）。故改用合成输入钉同一条性质，并在 discovery 里申报。
-		{"1月报当月即累计_通过", "1月份新增贷款1.36万亿元。分部门看", false},
+		{"1月报当月即累计_走累计列", "1月份新增贷款1.36万亿元。分部门看", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := extractLoanSection(section{Body: head + tc.bridge + tail})
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.NotContains(t, got, FieldLoanHHShortYTD)
+			require.NoError(t, err)
+			// 🔴 三格的数值逐字相同（2320），**翻转的只有前缀里那一个 token**，
+			// 而结论是「进哪一列」。判据仍是结构性的：查表，不是形状匹配、不是数值启发式。
+			if tc.wantMoM {
+				assert.InDelta(t, 2320.0, got[FieldLoanHHShortMoM], 1e-9)
+				assert.NotContains(t, got, FieldLoanHHShortYTD,
+					"🔴 当月值落进 _ytd —— 那正是本判据存在的全部理由")
 				return
 			}
-			require.NoError(t, err)
-			// 数值与上一格逐字相同——翻转结论的只有前缀
 			assert.InDelta(t, 2320.0, got[FieldLoanHHShortYTD], 1e-9)
+			assert.NotContains(t, got, FieldLoanHHShortMoM)
 		})
 	}
 }
 
-// TestSectorCaliberRejectsNonCumulativeSamples 覆盖 boundary[2]：C / C' 类同样被拒。
+// TestSectorCaliberRoutesNonCumulativeSamplesToMoM 是原
+// TestSectorCaliberRejectsNonCumulativeSamples 的**路由化版本**（M1c-4 的 TASK-005）。
 //
-// 🔴 **这两篇在到达本守卫之前就已经失败**（既有的「期内合计」守卫先触发：C 类根本
-// 没有累计合计句、C' 类那句「1-8月…累计增加」不被 flowRE 命中）。所以**不能**用
-// 「报错了」来证明本守卫覆盖它们——那是因为错误的理由绿，把本守卫整个删掉照样红。
+// 🔴 **判据换了形式，守的东西没变。** 原来断言「C / C' 类被拒」，理由是「当月的分部门值
+// 装进 *_ytd 会让内部口径不一致，两者都在合法量级内、下游没有闸门拦得住」。本迭代把拒绝
+// 换成路由之后，那个担忧由「`_mom` 与 `_ytd` 是两个不同的列」承担 ⇒ 判据相应变成：
 //
-// 故拆成两半，各自钉各自的事：
+//	sectorCaliberOf 判它是 caliberCurrent（**报出口径**，不再报错）
+//	分部门值落在 _mom 列，且 **_ytd 列一个都没有**（← 这半条才是原拒绝理由的继承者）
 //
-//	① 端到端仍被拒、不产出数据 —— 既有行为，本任务的回归底线
-//	② checkSectorCaliber 直调这两篇的正文 —— 证明**本守卫**也认定它们非累计
+// ⚠️ **不要把这条测试删掉换成新写的**：它盯的两篇是当初逼出这条守卫的真实样本，
+// 换掉样本等于换掉证据。
 //
-// ⚠️ 不把本守卫前移到抽取合计之前来「抢先报错」：既有那条信息（「期内合计 not found
-// among N candidate(s) [4月份/人民币]」）指出的是更根本的成因——这篇报告压根没有累计
-// 数据。让更具体的那条先说话，与 checkSectorCaliber 注释里「锚点不存在时不表态」同源。
-//
-// ⚠️ C' 类（2022-08）**刻意不救**：它有「1-8月，人民币贷款累计增加15.61万亿元」，
-// 看着像累计句，但它的分部门段同样跟在当月句之后。救了那句会把这一篇从「安全失败」
-// 变成「口径混杂」。
-func TestSectorCaliberRejectsNonCumulativeSamples(t *testing.T) {
+// C' 类（2022-08）现在是**期望中的混合体**：合计句「1-8月…累计增加」是累计口径 ⇒
+// loan_flow_ytd；而分部门段跟在当月句之后 ⇒ 分项走 _mom。旧注释说「救了那句会把这一篇
+// 从安全失败变成口径混杂」——那句话在**单列**的世界里成立，在**双列**的世界里正是设计目标。
+func TestSectorCaliberRoutesNonCumulativeSamplesToMoM(t *testing.T) {
 	for _, tc := range []struct{ sample, class, prefix string }{
-		{"pboc-2022-08-monthly.html", "C' 类：有 1-N月 累计句但分部门是当月", "8月份"},
-		{"pboc-2020-04-monthly.html", "C 类：无累计句", "4月份"},
+		{"pboc-2022-08-monthly.html", "C' 类：有 1-N月 累计合计句但分部门是当月", "8月份"},
+		{"pboc-2020-04-monthly.html", "C 类：全篇只有当月句", "4月份"},
 	} {
 		secs := splitSections(stripHTML(readSample(t, tc.sample)))
 		for _, side := range []struct {
-			name, kw, anchor string
-			fn               func(section) (map[string]float64, error)
-			coverage         func() []*regexp.Regexp
+			name, kw, anchor   string
+			fn                 func(section) (map[string]float64, error)
+			coverage           func() []*regexp.Regexp
+			momField, ytdField string
 		}{
-			{"贷款侧", "人民币贷款", loanSectorAnchor, extractLoanSection, loanSectorCoverage},
-			{"存款侧", "人民币存款", depositSectorAnchor, extractDepositSection, depositSectorCoverage},
+			{"贷款侧", "人民币贷款", loanSectorAnchor, extractLoanSection, loanSectorCoverage,
+				FieldLoanHHShortMoM, FieldLoanHHShortYTD},
+			{"存款侧", "人民币存款", depositSectorAnchor, extractDepositSection, depositSectorCoverage,
+				FieldDepositHouseholdMoM, FieldDepositHouseholdYTD},
 		} {
 			t.Run(tc.sample+"/"+side.name, func(t *testing.T) {
 				sec, ok := findSection(secs, side.kw)
 				require.True(t, ok)
 
-				// ① 回归底线：仍被拒、不产出数据（拒它的是既有的期内合计守卫）
-				got, err := side.fn(sec)
-				require.Errorf(t, err, "%s 必须被拒", tc.class)
-				assert.Empty(t, got)
+				// ① 口径判定：报出 caliberCurrent，不再报错
+				cal, cerr := sectorCaliberOf(sec.Body, side.anchor, side.coverage())
+				require.NoError(t, cerr, "%s：路由化之后不该再拒绝", tc.class)
+				assert.Equalf(t, caliberCurrent, cal,
+					"%s：分部门段前最近的前缀是 %q，应判当月口径", tc.class, tc.prefix)
 
-				// ② 本守卫对同一份正文的独立判定
-				cerr := checkSectorCaliber(sec.Body, side.anchor, "测试", side.coverage())
-				require.Errorf(t, cerr, "%s：本守卫也应判它非累计", tc.class)
-				assert.Containsf(t, cerr.Error(), tc.prefix, "要报出**实际读到的**前缀")
-				assert.Contains(t, cerr.Error(), "累计口径")
+				// ② 🔴 原拒绝理由的继承者：值落在 _mom，**_ytd 一个都没有**
+				got, err := side.fn(sec)
+				require.NoErrorf(t, err, "%s：能读出口径就该分列写出来，不该整篇失败", tc.class)
+				assert.Containsf(t, got, side.momField, "当月口径的分部门值必须落进 _mom 列")
+				assert.NotContainsf(t, got, side.ytdField,
+					"🔴 当月值出现在 %s 列 —— 这正是本迭代要防的那件事："+
+						"两个值都在合法量级内，下游没有任何闸门拦得住", side.ytdField)
 			})
 		}
 	}
@@ -1527,14 +1601,10 @@ func TestSectorCaliberKeepsCumulativeSamplesIntact(t *testing.T) {
 // 而是**交叉**：每条必须含自己的标志串**且不含**另外两条的。
 func TestSectorCaliberErrorIsDistinguishable(t *testing.T) {
 	const (
-		markCaliber = "累计口径"               // 本任务新增：分部门口径不对
+		markCaliber = "读不出它是累计还是当月口径"      // M1c-4 的 TASK-005：路由化后唯一保留的口径类拒绝
 		markSection = "requires a section" // 板块整节缺失
 		markAnchor  = "scope anchor"       // 贷款作用域锚点找不到
 	)
-	secs := splitSections(stripHTML(readSample(t, "pboc-2023-08-monthly.html")))
-	loanSec, ok := findSection(secs, "人民币贷款")
-	require.True(t, ok)
-
 	for _, tc := range []struct {
 		name    string
 		run     func() error
@@ -1542,8 +1612,21 @@ func TestSectorCaliberErrorIsDistinguishable(t *testing.T) {
 		notWant []string
 	}{
 		{
-			name: "口径不对",
-			run:  func() error { _, err := extractLoanSection(loanSec); return err },
+			// 🔴 M1c-4 的 TASK-005：「口径不对」不再是一种失败——能读出前缀就分列写。
+			// 路由化之后唯一保留的口径类拒绝是「**读不出**口径」，故这一格换成它：
+			// 有分部门段、但它之前一个期次前缀都没有。
+			name: "读不出口径",
+			run: func() error {
+				// 🔴 分部门句排在**全文最前**：sectorSegmentStart 取「抽取会碰到的最早
+				// 那一句」的位置，于是它之前的文本为空 ⇒ 一个期次前缀都读不到。
+				// 余额句与合计句排在其后（它们的匹配与位置无关），本节其余部分完好，
+				// 所以这一格失败的**唯一**理由就是读不出口径。
+				_, err := extractDepositSection(section{Body: "住户存款增加14.64万亿元，" +
+					"非金融企业存款增加2.31万亿元，财政性存款增加6579亿元，非银行业金融机构存款减少7446亿元。" +
+					"8月末，人民币存款余额301.6万亿元，同比增长10.5%。" +
+					"前八个月人民币存款增加15.6万亿元。"})
+				return err
+			},
 			want: markCaliber, notWant: []string{markSection, markAnchor},
 		},
 		{
@@ -1644,12 +1727,28 @@ func TestCumulativeFlowDistinguishesUnknownPrefixFromNoCumulativeSentence(t *tes
 		sec, ok := findSection(secs, "人民币贷款")
 		require.True(t, ok)
 
-		// 前提：本节没有任何「形状正确、只是前缀不认识」的合计句 —— 否则这一格测的是 B 类
+		// 🔴 **本格同时是「诊断门没有下移」的正当性证据**（M1c-4 的 TASK-005）。
+		//
+		// DoD 要求把「前缀不认识」诊断从「累计族为空」下移到「两族都空」，理由是
+		// 「一篇只有当月合计句的报告会被误报」。**实测该前提为假**：诊断器自己的谓词
+		// 已经足够精确——2020-04 是纯当月报告，它返回 **[]**，门留在原位也不会响。
 		require.Empty(t, unrecognisedPeriodPrefixes(sec.Body, loanFlowRE),
-			"用例前提：2020-04 必须是纯 A 类")
+			"用例前提兼 DoD 前提证伪：纯当月报告不会让诊断器有话说，故诊断门无需下移")
 
-		_, err := selectRMBCumulativeFlow(loanFlowRE, sec.Body, currencyRMB+"贷款期内合计")
-		require.Error(t, err)
+		// 路由化之后它不再报错，而是走当月列——那正是本迭代的目标。
+		m, cum, err := selectRMBFlowByCaliber(loanFlowRE, sec.Body, currencyRMB+"贷款期内合计")
+		require.NoError(t, err, "只有当月合计句的报告不该被整篇拒绝")
+		assert.False(t, cum, "口径必须报当月：报累计会把 4 月当月值写进 loan_flow_ytd")
+		assert.Equal(t, "4月份", m[1])
+	})
+
+	// 两族都没有时才是错误，且**不得**报成「前缀不认识」——A 类原本守的就是这条交叉。
+	t.Run("A2_两族都没有任何合计句_合成", func(t *testing.T) {
+		const body = "月末人民币贷款余额201.66万亿元，同比增长10.9%。前十一个月外币贷款增加123亿美元。"
+		require.Empty(t, unrecognisedPeriodPrefixes(body, loanFlowRE), "用例前提：纯 A 类")
+
+		_, _, err := selectRMBFlowByCaliber(loanFlowRE, body, currencyRMB+"贷款期内合计")
+		require.Error(t, err, "一条人民币合计句都没有 ⇒ 必须响亮失败，不能静默产出空 Values")
 		assert.Contains(t, err.Error(), markerNoSentence)
 		assert.NotContains(t, err.Error(), markerUnknown,
 			"交叉：A 类不得报成「前缀不认识」——那会把一篇没数据的报告送进 M1c-4 的兜底清单")
@@ -1681,8 +1780,13 @@ func TestCumulativeFlowDistinguishesUnknownPrefixFromNoCumulativeSentence(t *tes
 		require.Len(t, unrecognisedPeriodPrefixes(body, loanFlowRE), 1,
 			"用例前提：恰好一句「形状正确但前缀不认识」")
 
-		_, err := selectRMBCumulativeFlow(loanFlowRE, body, currencyRMB+"贷款期内合计")
-		require.Error(t, err)
+		// 🔴 **本格是「诊断门必须留在累计族为空」的承重证据**（M1c-4 的 TASK-005）：
+		// 这段正文**同时**有当月合计句（4月份…增加6454亿元）与一条前缀不认识的累计句。
+		// 若按 DoD 原文把门下移到「两族都空」，当月族有命中 ⇒ 诊断不触发 ⇒ 静默走当月
+		// 路径、把可恢复的 18.7 万亿累计数据丢掉且**不告诉任何人**（实测确认过这个行为）。
+		// 那正是 R3 的失效方式，也正是本诊断存在的全部理由。
+		_, _, err := selectRMBFlowByCaliber(loanFlowRE, body, currencyRMB+"贷款期内合计")
+		require.Error(t, err, "累计族为空且存在不被认识的前缀 ⇒ 必须响亮报解析器缺口")
 		assert.Contains(t, err.Error(), markerUnknown)
 		assert.Contains(t, err.Error(), "今年以来",
 			"要报出**实际读到的**那个前缀，否则下一个人还得自己去正文里找")
@@ -1704,8 +1808,9 @@ func TestCumulativeFlowDistinguishesUnknownPrefixFromNoCumulativeSentence(t *tes
 		require.NotEmpty(t, unrecognisedPeriodPrefixes(body, loanFlowRE),
 			"用例前提：必须存在前缀不被认识的句子，否则门开不开都一样")
 
-		m, err := selectRMBCumulativeFlow(loanFlowRE, body, currencyRMB+"贷款期内合计")
+		m, cum, err := selectRMBFlowByCaliber(loanFlowRE, body, currencyRMB+"贷款期内合计")
 		require.NoError(t, err, "有被认识的累计句时必须照常抽出，不得被诊断器抢先报错")
+		require.True(t, cum, "取的是累计句，口径必须报累计")
 		assert.Equal(t, "前两个月", m[1], "取的必须是那条累计句，不是隔壁的当月句")
 	})
 }
@@ -1756,9 +1861,13 @@ func TestSectorCaliberJudgesByExtractionCoverageNotAnchor(t *testing.T) {
 	for _, side := range []struct {
 		name, keyword, anchor, what string
 		coverage                    func() []*regexp.Regexp
+		extract                     func(section) (map[string]float64, error)
+		momField, ytdField          string
 	}{
-		{"存款侧", "人民币存款", depositSectorAnchor, currencyRMB + "存款分部门段", depositSectorCoverage},
-		{"贷款侧", "人民币贷款", loanSectorAnchor, currencyRMB + "贷款分部门段", loanSectorCoverage},
+		{"存款侧", "人民币存款", depositSectorAnchor, currencyRMB + "存款分部门段", depositSectorCoverage,
+			extractDepositSection, FieldDepositHouseholdMoM, FieldDepositHouseholdYTD},
+		{"贷款侧", "人民币贷款", loanSectorAnchor, currencyRMB + "贷款分部门段", loanSectorCoverage,
+			extractLoanSection, FieldLoanHHShortMoM, FieldLoanHHShortYTD},
 	} {
 		t.Run(side.name, func(t *testing.T) {
 			sec, ok := findSection(secs, side.keyword)
@@ -1780,20 +1889,27 @@ func TestSectorCaliberJudgesByExtractionCoverageNotAnchor(t *testing.T) {
 			// ③ 这一期确实是当月口径：否则守卫表态之后的结论应当是放行
 			require.Contains(t, sec.Body, "4月份", "用例前提：期次前缀是当月")
 
-			err := checkSectorCaliber(sec.Body, side.anchor, side.what, side.coverage())
+			// 路由化之后（M1c-4 的 TASK-005）判据从「必须报错」变成「必须表态为当月口径」。
+			// 守的东西没变：锚点缺席但抽取会照做时，本判定**不能沉默**——沉默的后果由
+			// 「报错」换成了「选错列」，而选错列同样是量级合理的错值。
+			cal, err := sectorCaliberOf(sec.Body, side.anchor, side.coverage())
+			require.NoError(t, err, "能读出前缀就不该报错，路由化只保留「读不出」那一条拒绝")
+			assert.Equal(t, caliberCurrent, cal,
+				"锚点缺席但抽取会照做 ⇒ 必须按覆盖面模板求起点并判出当月口径，不能沉默放行")
 
-			require.Error(t, err,
-				"锚点缺席但抽取会照做 ⇒ 守卫必须表态，不能沉默放行")
-			assert.Contains(t, err.Error(), "4月份",
-				"错误要指名是哪个期次前缀让它判成当月口径")
-			assert.Contains(t, err.Error(), "不是累计口径")
-			assert.Contains(t, err.Error(), side.what,
-				"错误要指名是哪一侧的分部门段")
-
-			// 交叉断言（error_handling）：不得出现 R1 的标志串。
-			// 「两条修复的错误各自可辨认」是关系性属性，两边都「有报错」时仍可被破坏。
-			assert.NotContains(t, err.Error(), "社融增量",
-				"这是分部门口径问题，不是社融增量的作用域问题")
+			// 端到端：值必须落进 _mom 列，_ytd 列一个都没有
+			got, ferr := side.extract(sec)
+			if ferr != nil {
+				// ⚠️ 2022-04 贷款侧另有**与本格无关**的模板缺口（作用域子项「短期贷款」
+				// 在该期正文里确实不存在）。本格的主体是口径判定，端到端只做一条弱断言：
+				// 失败理由不得是口径——否则说明路由把一篇能读出口径的报告又拒了。
+				assert.NotContains(t, ferr.Error(), "读不出它是累计还是当月口径",
+					"能读出前缀就不该以口径为由失败")
+				return
+			}
+			assert.Contains(t, got, side.momField)
+			assert.NotContainsf(t, got, side.ytdField,
+				"🔴 当月值出现在 %s 列 —— 本迭代要防的正是这件事", side.ytdField)
 		})
 	}
 }
@@ -1839,25 +1955,22 @@ func TestSectorCaliberPrefixIsReadFromTheEarliestSectorLocus(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		body    func(*testing.T) string
-		wantErr string // 空 = 必须放行
+		wantCal sectorCaliber
 	}{
-		{"锚点在场_累计_仍放行", anchoredCumulative, ""},
-		{"无锚点_首条分部门句之前是累计前缀_放行",
-			func(*testing.T) string { return cumulativeFirst }, ""},
-		{"无锚点_首条之前是当月而更靠后才有累计前缀_拒绝",
-			func(*testing.T) string { return monthlyFirstCumulativeLater }, "8月份"},
+		{"锚点在场_累计", anchoredCumulative, caliberCumulative},
+		{"无锚点_首条分部门句之前是累计前缀", func(*testing.T) string { return cumulativeFirst }, caliberCumulative},
+		// 🔴 判据换形式不换内容（M1c-4 的 TASK-005）：原来断言「拒绝」，理由是首条分部门句
+		// 之前是当月前缀。路由化之后同一个理由要求它判**当月口径**——判成累计就等于把当月
+		// 值送进 _ytd，正是原来那条拒绝要防的。取更靠后的累计前缀会得到 caliberCumulative，
+		// 本格即红。
+		{"无锚点_首条之前是当月而更靠后才有累计前缀_必须判当月",
+			func(*testing.T) string { return monthlyFirstCumulativeLater }, caliberCurrent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := tc.body(t)
-			err := checkSectorCaliber(body, depositSectorAnchor, "存款分部门段", depositSectorCoverage())
-			if tc.wantErr == "" {
-				assert.NoError(t, err, "收紧判据不得把口径正确的节判红")
-				return
-			}
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr,
-				"必须报出**首条分部门句之前**那个前缀；报成更靠后的累计前缀就等于放行了当月口径")
-			assert.Contains(t, err.Error(), "不是累计口径")
+			cal, err := sectorCaliberOf(tc.body(t), depositSectorAnchor, depositSectorCoverage())
+			require.NoError(t, err, "三格的正文都有期次前缀，不该触发「读不出口径」那条拒绝")
+			assert.Equal(t, tc.wantCal, cal,
+				"口径判定必须由**首条分部门句之前**那个前缀决定；取成更靠后的前缀会选错列")
 		})
 	}
 }
@@ -1916,9 +2029,12 @@ func TestSectorCaliberStaysSilentWhenNoSectorSegment(t *testing.T) {
 					"用例前提：本节不能命中任何分部门模板（%s），否则测的不是这一格", re)
 			}
 
-			// ① 本守卫对「无分部门段」不表态
-			assert.NoError(t, checkSectorCaliber(tc.body, tc.anchor, "测试", tc.coverage()),
-				"没有分部门段时本守卫必须放行，让更具体的那条错误先说话")
+			// ① 本判定对「无分部门段」不表态：返回 caliberAbsent 且不报错
+			cal, cerr := sectorCaliberOf(tc.body, tc.anchor, tc.coverage())
+			assert.NoError(t, cerr, "没有分部门段时必须放行，让更具体的那条错误先说话")
+			assert.Equal(t, caliberAbsent, cal,
+				"必须报 absent 而不是随便选一族——pick 对 absent 返回空串，"+
+					"任何一族都会让下游写进一个它没资格判断的列")
 
 			// ② 端到端仍然失败，但报的是**更具体**的那条
 			got, err := tc.fn(section{Body: tc.body})
@@ -1929,6 +2045,323 @@ func TestSectorCaliberStaysSilentWhenNoSectorSegment(t *testing.T) {
 			assert.NotContains(t, err.Error(), "累计口径",
 				"无分部门段不是口径问题，不该报成口径错误")
 			assert.Empty(t, got)
+		})
+	}
+}
+
+// —— M1c-4 的 TASK-005：sectorCaliberOf 报口径而不再拒绝 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-005）
+// functional[0]  sectorCaliber 三值 + sectorCaliberOf 取代 checkSectorCaliber
+//                          → TestSectorCaliberOfReportsInsteadOfRefusing
+// functional[0]  cal 每段求一次（不在循环内） → TestSectorCaliberIsComputedOncePerSection
+// functional[2]  路由化后唯一保留的拒绝       → TestSectorCaliberOfStillRefusesWhenUnreadable（V1）
+// functional[2]  pick 按口径选列              → TestNameFieldPickSelectsColumnByCaliber（profiles_test.go，V3 的一半）
+// boundary[1]    真实体例 golden，两条 NotContains
+//                          → TestMixedCaliberReportRoutesEachSectionToItsOwnColumns（V3 的现场）
+
+// sectorCaliberOf 的三种返回，各用一份真实语料钉住。
+//
+// ⚠️ **判据是「等于哪一个枚举值」而不是「没报错」**：一个恒返回 caliberCumulative 的实现
+// 能让「没报错」全绿，而那正是把当月值送进 _ytd 的那条路（变异 V2 就是这么改的）。
+func TestSectorCaliberOfReportsInsteadOfRefusing(t *testing.T) {
+	for _, tc := range []struct {
+		sample, keyword string
+		anchor          string
+		coverage        func() []*regexp.Regexp
+		want            sectorCaliber
+		why             string
+	}{
+		{"pboc-2025-08-monthly.html", "人民币贷款", loanSectorAnchor, loanSectorCoverage,
+			caliberCumulative, "分部门段跟在「前八个月」之后"},
+		{"pboc-2023-08-monthly.html", "人民币贷款", loanSectorAnchor, loanSectorCoverage,
+			caliberCurrent, "分部门段跟在「8月份」之后 —— 同一篇里合计句却是累计，正是双口径体例"},
+		{"pboc-2023-08-monthly.html", "人民币存款", depositSectorAnchor, depositSectorCoverage,
+			caliberCurrent, "存款侧同构"},
+	} {
+		t.Run(tc.sample+"/"+tc.keyword+"/"+tc.why, func(t *testing.T) {
+			secs := splitSections(stripHTML(readSample(t, tc.sample)))
+			sec, ok := findSection(secs, tc.keyword)
+			require.True(t, ok)
+
+			cal, err := sectorCaliberOf(sec.Body, tc.anchor, tc.coverage())
+			require.NoError(t, err, "能读出期次前缀就不该报错——路由化只保留「读不出」那一条")
+			assert.Equal(t, tc.want, cal, "%s", tc.why)
+		})
+	}
+
+	// 第三种返回：本节没有分部门段 ⇒ 不表态。用一段只有余额与合计句的正文。
+	cal, err := sectorCaliberOf("前八个月人民币存款增加15.6万亿元。", depositSectorAnchor, depositSectorCoverage())
+	require.NoError(t, err)
+	assert.Equal(t, caliberAbsent, cal,
+		"没有任何分部门句 ⇒ absent。判成某一族会让下游写进一个它没资格判断的列")
+}
+
+// 🔴 **路由化之后唯一还保留的拒绝**，是原设计「refusing to guess」的落点。
+//
+// 删掉它，路由就变成了掷硬币：口径未知时把值随便写进某一列，而两列都在合法量级内、
+// 下游没有任何闸门拦得住——本迭代整个是围绕这件事做的。
+//
+// # 变异判据（交付前实测，DoD functional[2] 的 V1）
+//
+// 把 sectorCaliberOf 里「段前无期次前缀 ⇒ 报错」那个分支改成 `return caliberCurrent, nil`
+// （读不出就当当月），**本测试必须转红**。实测：M1 变异下本测试 FAIL，另两条 PASS。
+//
+// ⚠️ **构造输入时先问：被测的那个分支会被执行到吗？** sectorCaliberOf 是多段判定
+// （sectorSegmentStart → FindAllString → 查表），任何一步都可能让后面的步骤根本不被求值。
+// 这里把分部门句排在**全文最前**，于是 `body[:i]` 为空串 ⇒ 确实走到「没有任何期次前缀」
+// 那一支。若把它放在合计句之后，前面就有前缀了，本测试会恒绿（TASK-003 的教训）。
+func TestSectorCaliberOfStillRefusesWhenUnreadable(t *testing.T) {
+	const body = "住户存款增加14.64万亿元，非金融企业存款增加2.31万亿元，" +
+		"财政性存款增加6579亿元，非银行业金融机构存款减少7446亿元。" +
+		"8月末，人民币存款余额301.6万亿元，同比增长10.5%。前八个月人民币存款增加15.6万亿元。"
+
+	// 前提①：分部门段的起点确实在全文最前 ⇒ 它之前没有任何文本可供找前缀
+	require.Equal(t, 0, sectorSegmentStart(body, depositSectorAnchor, depositSectorCoverage()),
+		"用例前提：分部门句必须排在最前，否则测不到「读不出口径」那一支")
+	// 前提②：正文里**确实有**期次前缀，只是不在分部门段之前 ——
+	// 少了这一条，本格可能因为「全文根本没有前缀」而绿，那测的是另一回事
+	require.NotEmpty(t, sectorPeriodRE.FindAllString(body, -1),
+		"用例前提：正文里有前缀，只是位置在分部门段之后")
+
+	cal, err := sectorCaliberOf(body, depositSectorAnchor, depositSectorCoverage())
+	require.Error(t, err, "🔴 读不出口径必须拒绝——猜一个就是掷硬币")
+	assert.Equal(t, caliberAbsent, cal, "报错时不得同时返回一个可用的口径")
+	assert.Contains(t, err.Error(), "读不出它是累计还是当月口径",
+		"错误必须点名是**口径读不出**，与「没有分部门段」「模板不命中」都不同")
+	assert.Contains(t, err.Error(), "refusing to guess")
+
+	// 端到端：整节必须失败，不产出任何分部门字段（两列都不许有）
+	got, ferr := extractDepositSection(section{Body: body})
+	require.Error(t, ferr)
+	assert.Contains(t, ferr.Error(), "存款分部门段", "调用方要把是哪一侧补进错误里")
+	assert.NotContains(t, got, FieldDepositHouseholdYTD)
+	assert.NotContains(t, got, FieldDepositHouseholdMoM)
+
+	// 贷款侧同构：**两侧各有一处 wrap，只测一侧的话另一侧漏了 what 也不会红**
+	const loanBody = "住户贷款增加3922亿元，其中，短期贷款增加2320亿元，中长期贷款增加1602亿元；" +
+		"企（事）业单位贷款增加9488亿元，其中，短期贷款减少401亿元，中长期贷款增加6444亿元，" +
+		"票据融资增加3472亿元；非银行业金融机构贷款减少358亿元。" +
+		"8月末，人民币贷款余额232.28万亿元，同比增长11.1%。前八个月人民币贷款增加17.44万亿元。"
+	require.Equal(t, 0, sectorSegmentStart(loanBody, loanSectorAnchor, loanSectorCoverage()),
+		"用例前提：贷款分部门句同样排在最前")
+
+	lcal, lerr := sectorCaliberOf(loanBody, loanSectorAnchor, loanSectorCoverage())
+	require.Error(t, lerr)
+	assert.Equal(t, caliberAbsent, lcal)
+
+	lgot, lferr := extractLoanSection(section{Body: loanBody})
+	require.Error(t, lferr)
+	assert.Contains(t, lferr.Error(), "贷款分部门段")
+	assert.Contains(t, lferr.Error(), "读不出它是累计还是当月口径")
+	assert.NotContains(t, lgot, FieldLoanHHShortYTD)
+	assert.NotContains(t, lgot, FieldLoanHHShortMoM)
+}
+
+// 🔴 `cal` 必须**每段求一次**，不得在分部门循环内部逐项判（DoD functional[0]）。
+//
+// 这不是「算四遍浪费」的问题。sectorCaliberOf 对一个段返回**一个**标量 ⇒ pick 对该段
+// 全部条目返回同一族 ⇒ 另一族一个都不写 ⇒ **成对列在同一观测里必然单侧**。
+// TASK-011 的整条防线（`|ytd| ≥ |mom|`）建立在这个前提上；改成逐项判不是「实现得更细」，
+// 是**换掉下游防线的分析基座**，而表现上看不出来。
+//
+// ⚠️ 判据是**性质**（同一段内所有分部门字段同族），不是「调用了几次」——后者要么靠计数
+// 桩、要么靠读源码，都会在重构时假红。性质判据只在真的分叉时红。
+func TestSectorCaliberIsComputedOncePerSection(t *testing.T) {
+	for _, tc := range []struct {
+		sample, keyword string
+		fn              func(section) (map[string]float64, error)
+		ytd, mom        []string
+	}{
+		{"pboc-2023-08-monthly.html", "人民币存款", extractDepositSection,
+			[]string{FieldDepositHouseholdYTD, FieldDepositCorpYTD, FieldDepositFiscalYTD, FieldDepositNBFIYTD},
+			[]string{FieldDepositHouseholdMoM, FieldDepositCorpMoM, FieldDepositFiscalMoM, FieldDepositNBFIMoM}},
+		{"pboc-2025-08-monthly.html", "人民币存款", extractDepositSection,
+			[]string{FieldDepositHouseholdYTD, FieldDepositCorpYTD, FieldDepositFiscalYTD, FieldDepositNBFIYTD},
+			[]string{FieldDepositHouseholdMoM, FieldDepositCorpMoM, FieldDepositFiscalMoM, FieldDepositNBFIMoM}},
+	} {
+		t.Run(tc.sample, func(t *testing.T) {
+			secs := splitSections(stripHTML(readSample(t, tc.sample)))
+			sec, ok := findSection(secs, tc.keyword)
+			require.True(t, ok)
+			got, err := tc.fn(sec)
+			require.NoError(t, err)
+
+			nYTD, nMoM := 0, 0
+			for _, f := range tc.ytd {
+				if _, ok := got[f]; ok {
+					nYTD++
+				}
+			}
+			for _, f := range tc.mom {
+				if _, ok := got[f]; ok {
+					nMoM++
+				}
+			}
+			// 一段一个口径 ⇒ 必然是「一族全有、另一族全无」
+			assert.Truef(t, (nYTD == len(tc.ytd) && nMoM == 0) || (nMoM == len(tc.mom) && nYTD == 0),
+				"同一分部门段内出现了两族共存（ytd %d/%d、mom %d/%d）⇒ 口径是逐项判的，"+
+					"而 TASK-011 的 |ytd| ≥ |mom| 建立在「一段一个口径」上",
+				nYTD, len(tc.ytd), nMoM, len(tc.mom))
+		})
+	}
+}
+
+// 🔴🔴 **本迭代头号风险的现场守卫**（DoD boundary[1]）。
+//
+// 把「拒绝」改成「路由」时，原拒绝理由背后的担忧必须换形式保留：
+//
+//	旧：合计取累计值、分部门混进当月值 ⇒ 内部口径不一致，两者都在合法量级内、
+//	    下游没有任何闸门拦得住 ⇒ **拒绝整篇**
+//	新：当月值写 `_mom`、累计值写 `_ytd` ⇒ **两个不同的列**
+//
+// ⇒ **那两条 NotContains 才是原拒绝的直系继承者，一条都不能省。** 正向断言（值对不对）
+// 对「当月值进了 _ytd」完全不敏感——值本身是对的，只是进错了列。
+//
+// # 变异判据（交付前实测，DoD functional[2] 的 V3）
+//
+// 把 `nameField.pick` 的 `caliberCurrent` 分支改成返回 `nf.ytdField`（当月值写进累计列，
+// 正是本迭代要防的那件事），**本测试的 NotContains 必须转红**。
+// 🔴 若 V3 杀不动，说明头号风险的现场守卫没有区分力，**不要交付**。
+//
+// # 形态覆盖，不是单篇快照
+//
+// 只钉一篇是**正例快照**而不是不变式。三种形态各一条，用的都是 testdata 里的现成 fixture
+// （不另外 cp：同一形态有两份样本迟早分叉）：
+//
+//	形态①  全篇只有当月句           pboc-2020-04-monthly.html
+//	形态②  合计累计 + 分部门当月     pboc-2023-08-monthly.html / pboc-2022-08-monthly.html
+//	阴性    全篇累计                 pboc-2025-08-monthly.html —— 不得被路由误伤
+func TestMixedCaliberReportRoutesEachSectionToItsOwnColumns(t *testing.T) {
+	for _, tc := range []struct {
+		sample, form string
+		// 合计句的口径**贷存两侧各判各的**：累计 ⇒ _ytd 有值且 _mom 无；当月 ⇒ 反之。
+		// ⚠️ 两侧不必相同——2022-08 的贷款节有「1-8月…累计增加15.61万亿元」而存款节
+		// 一句累计合计句都没有。最初我把两侧写成同一个 flag，被这一篇当场证伪。
+		loanFlowCumulative    bool
+		depositFlowCumulative bool
+		// 分部门段的口径（贷存两侧实测一致，见 sectorCaliberOf 的判据说明）
+		sectorCumulative bool
+	}{
+		{"pboc-2020-04-monthly.html", "形态①：全篇只有当月句", false, false, false},
+		{"pboc-2023-08-monthly.html", "形态②：合计累计 + 分部门当月", true, true, false},
+		{"pboc-2022-08-monthly.html", "形态②（另一期）：贷款合计累计、存款合计当月、分部门皆当月", true, false, false},
+		{"pboc-2025-08-monthly.html", "阴性：全篇累计，不得被路由误伤", true, true, true},
+	} {
+		t.Run(tc.sample+"/"+tc.form, func(t *testing.T) {
+			obs, err := Parse(readTestdata(t, tc.sample))
+			require.NoError(t, err, "能读出口径的报告都应当产出，不再整篇拒绝")
+
+			check := func(what string, cumulative bool, ytdField, momField string) {
+				t.Helper()
+				want, notWant := momField, ytdField
+				if cumulative {
+					want, notWant = ytdField, momField
+				}
+				assert.Containsf(t, obs.Values, want, "%s 的值应当落进 %s", what, want)
+				// 🔴 原「拒绝」的直系继承者
+				assert.NotContainsf(t, obs.Values, notWant,
+					"🔴 %s 的值落进了 %s —— 口径错配的两个值都在合法量级内，"+
+						"下游没有任何闸门拦得住。这正是本迭代要防的那件事", what, notWant)
+			}
+
+			// 合计句（走 selectRMBFlowByCaliber 这条路由）
+			check("贷款期内合计", tc.loanFlowCumulative, FieldLoanFlowYTD, FieldLoanFlowMoM)
+			check("存款期内合计", tc.depositFlowCumulative, FieldDepositFlowYTD, FieldDepositFlowMoM)
+
+			// 分部门（走 sectorCaliberOf + pick 这条路由）—— 与合计句**各判各的**，
+			// 形态②里两者恰好相反，正是「同一篇之内分段口径不同」这个体例本身。
+			check("住户短期贷款", tc.sectorCumulative, FieldLoanHHShortYTD, FieldLoanHHShortMoM)
+			check("住户存款", tc.sectorCumulative, FieldDepositHouseholdYTD, FieldDepositHouseholdMoM)
+		})
+	}
+}
+
+// 社融侧双口径的三条边界（M1c-4 的 TASK-005）。
+//
+// 这三格分别钉住 extractTSFFlowArticle / setTSFFlowItems 里三条**没有别的测试会走到**的
+// 分支，而每一条的失效方式都是静默的：
+//
+//	两族都没有        → 不报错就会静默产出一个空 Values
+//	当月族多于一条    → 就近取一条 = 孪生句里挑错那个（累计族的同名纪律，两族都要有）
+//	分项抽到一部分    → 静默跳过会把「模板缺口」这类真缺陷一起吞掉
+func TestTSFFlowArticleCaliberEdgeCases(t *testing.T) {
+	t.Run("两族都没有_必须响亮失败", func(t *testing.T) {
+		// 有形似总量的句子，但一条都不被 tsfFlowArticleTotalRE 认成总量句
+		const body = "初步统计，2022年10月末社会融资规模存量为341.42万亿元，同比增长9.5%。"
+		got, err := extractTSFFlowArticle(body)
+		require.Error(t, err, "一条总量句都没有 ⇒ 必须失败，不能静默产出空 Values")
+		assert.Nil(t, got)
+		assert.Contains(t, err.Error(), "累计与当月两族都没有",
+			"措辞要说清是「两族都没有」，与「只有当月」「只有累计」都不同")
+		assert.Contains(t, err.Error(), "candidate sentence(s)",
+			"要点名候选句数，否则排障看不出是「没句子」还是「句子口径不对」")
+	})
+
+	t.Run("当月族两条_仍然硬失败", func(t *testing.T) {
+		// 两条当月总量句（10 月与 9 月），一条累计句都没有 ⇒ 落进当月族且有两条
+		const body = "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。" +
+			"初步统计，2022年9月社会融资规模增量为3.53万亿元，比上年同期多6245亿元。"
+		got, err := extractTSFFlowArticle(body)
+		require.Error(t, err, "孪生句不许就近取一条——这条纪律对两族都成立，不是累计族专有")
+		assert.Nil(t, got)
+		assert.Contains(t, err.Error(), "（当月口径）matched 2 sentences")
+		assert.Contains(t, err.Error(), "refusing to pick one")
+	})
+
+	t.Run("分项抽到一部分_必须报模板缺口而不是静默跳过", func(t *testing.T) {
+		// 当月总量句 + **只有两个**分项（其余六个缺席）
+		const body = "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。" +
+			"其中，对实体经济发放的人民币贷款增加4431亿元；委托贷款增加470亿元。"
+		got, err := extractTSFFlowArticle(body)
+		require.Error(t, err,
+			"🔴 抽到一部分又缺另一部分是**模板缺口**，静默跳过会让字段无声消失")
+		assert.Nil(t, got)
+		assert.Contains(t, err.Error(), "只抽到 2/8 项")
+		assert.Contains(t, err.Error(), "整族缺席是正常的",
+			"错误要说清「整族缺席」与「部分缺失」是两回事，否则下一个人会把判据放松成静默跳过")
+	})
+
+	t.Run("整族缺席_正常放行只写总量", func(t *testing.T) {
+		// 与上一格的**最小对**：分项一个都没有 ⇒ 该族只有总量，正常
+		const body = "初步统计，2022年10月社会融资规模增量为9079亿元，比上年同期少7097亿元。"
+		got, err := extractTSFFlowArticle(body)
+		require.NoError(t, err, "整族缺席是正常体例（形态②的累计句就是这样孤悬段末）")
+		assert.InDelta(t, 9079.0, got[FieldTSFFlowMoM], 1e-9)
+		assert.Len(t, got, 1, "只有总量，一个分项都不该有")
+	})
+}
+
+// 🔴 **两族都没有时，整节必须失败，不得静默产出一份半空的 Values**（DoD functional[1]）。
+//
+// 路由化最容易滑向的形态是「取不到就跳过」：合计句两族都没有时如果只是不写那一列，
+// 一份只有余额、没有任何流量字段的 Values 会被当成成功结果送进下游标定——而
+// 「字段缺失」在 map 里与「这一期没有这个数」完全同形。
+//
+// ⚠️ 端到端测（而不是只测 selectRMBFlowByCaliber）：错误在函数里产生是一回事，
+// **调用方有没有把它传上去**是另一回事。少了这一条，一个把 `if err != nil` 写成
+// `_ = err` 的实现照样让单元测试全绿。
+func TestSectionFailsLoudlyWhenNoFlowSentenceAtAll(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		fn         func(section) (map[string]float64, error)
+		balance    string
+	}{
+		{"存款侧", "8月末，人民币存款余额301.6万亿元，同比增长10.5%。",
+			extractDepositSection, FieldDepositBalance},
+		{"贷款侧", "8月末，人民币贷款余额232.28万亿元，同比增长11.1%。",
+			extractLoanSection, FieldLoanBalance},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 前提：余额句本身是好的 —— 否则失败会来自更早一步，测不到本条
+			require.Contains(t, tc.body, "余额")
+
+			got, err := tc.fn(section{Body: tc.body})
+			require.Error(t, err, "一条合计句都没有 ⇒ 必须响亮失败")
+			assert.Contains(t, err.Error(), "累计与当月两族都没有",
+				"措辞要说清是「两族都没有」，与「只有当月」「前缀不认识」都不同")
+			assert.NotContains(t, got, tc.balance,
+				"报错时不得返回半份 Values —— 只有余额没有流量的观测会被下游当成完整结果")
 		})
 	}
 }
