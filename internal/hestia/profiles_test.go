@@ -1364,8 +1364,11 @@ func TestCumulativeThisYearAltAndCumulativePeriodsAgree(t *testing.T) {
 //                              → TestMoneyREStillMatchesTheCommonShape
 // functional[1]  🔴 放宽的**边界**（本任务最不能省的一条）
 //                              → TestMoneyRERefusesToCrossSentences
-// boundary[0]    clausePat 非捕获且非贪婪，不触发贪婪捕获检查
+// boundary[0]    clausePat 非捕获、且射程被否定字符类界住，不触发贪婪捕获检查
 //                              → TestNoGreedyCaptureInTemplates（既有，应当仍绿）
+//                 ⚠️ 措辞订正（返工轮）：`[^…]*` 的 `*` **本身是贪婪量词**，说它「非贪婪」
+//                 不准确。成立的属性是**非捕获**与**有界**（否定字符类排除了 0-9。；\n，），
+//                 而 TestNoGreedyCaptureInTemplates 查的是 `(.+)`/`(.*)` 这种捕获形态，两者无关。
 
 // 2020-01 的 M1 句在余额与「同比」之间多插了一个不含数值的短从句。
 //
@@ -1417,16 +1420,32 @@ func TestMoneyREStillMatchesTheCommonShape(t *testing.T) {
 // 拦得住这种错——它不是缺失，是**看起来正确的错值**。
 //
 // 三重约束各由一个子测试守：
-//   - 不含句读（`。；\n`）：句号之后的同比不得命中
+//   - 不含句读（`。；\n`）：从句之后跨句的同比不得命中
 //   - 至多一个从句：两个从句超出放宽范围，宁可响亮失败
 //   - 不含数字：从句里出现数字意味着那是另一个指标，不得当成从句吃掉
 func TestMoneyRERefusesToCrossSentences(t *testing.T) {
 	re := moneyRE("狭义货币", "M1")
 
-	t.Run("句号之后的同比不得命中", func(t *testing.T) {
-		const line = "狭义货币(M1)余额54.55万亿元。广义货币(M2)同比增长8.5%"
+	// 🔴 **这条子测试的输入必须让「。」落在第一个字面量「，」之后**，否则它恒绿、
+	// 守不住任何东西 —— 这是第一轮 REJECT 的成因（M1c-4 的 TASK-003 返工）。
+	//
+	// moneyRE 的结构是 `…余额` numPat unitPat `，` clausePat `同比` …：`unitPat` 之后
+	// 是**字面量「，」**。所以「…万亿元。广义货币…」这种串在**那一步**就已不匹配，
+	// 控制流根本走不到 clausePat ⇒ 对 clausePat 的任何写法都返回 nil、测试恒绿。
+	//
+	// 区分力实测（隔离副本上施加 M1 变异 = 字符类去掉「。」）：
+	//
+	//	…万亿元。广义货币余额202.31万亿元，同比增长8.4%   原实现 nil / 变异体 nil    ← 不能区分
+	//	…万亿元，持平。广义货币，同比增长8.5%             原实现 nil / 变异体 命中 8.5 ← 能区分 ✓
+	//
+	// 变异体命中时余额 54.55 对、单位对、方向对、量级完全合理，只有同比取自 M2 ——
+	// **正是本任务全篇在防的那种静默配错**。
+	t.Run("从句之后跨句的同比不得命中", func(t *testing.T) {
+		const line = "狭义货币(M1)余额54.55万亿元，持平。广义货币，同比增长8.5%"
 		assert.Nil(t, re.FindStringSubmatch(line),
-			"跨句命中会把 M2 的同比装进 M1 的字段——量级合理的错值，下游无闸门可拦")
+			"跨句命中会把 M2 的同比（8.5）装进 M1 的字段——量级合理的错值，下游无闸门可拦。"+
+				"本用例的「。」落在第一个字面量「，」之后，控制流确实进入 clausePat，"+
+				"故它对字符类里有没有「。」是敏感的（变异实测：去掉「。」本条即转红）")
 	})
 
 	t.Run("两个从句超出放宽范围，宁可响亮失败", func(t *testing.T) {
