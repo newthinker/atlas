@@ -1,8 +1,11 @@
 package hestia
 
 import (
+	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -647,4 +650,379 @@ func TestCalibrateOnMissingDirNamesThePath(t *testing.T) {
 		"错误必须指向真实成因（那个路径），而不是把人引去加 --allow-incomplete")
 	assert.NotContains(t, err.Error(), "allow-incomplete",
 		"目录不存在时不该提这个 flag——那是第二条误导性错误的入口")
+}
+
+// —— M1c-4 的 TASK-009：勾稽残差分布 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-009）
+// functional[1]/[2] 报告新增一节、两族分开、n 出声、**不给建议值**
+//                               → TestCalibrateReportsDepositResidualDistribution
+// functional[2]  period_type 分档，不得混池
+//                               → TestCalibrateResidualDistributionSeparatesPeriodTypes
+// boundary[0]    两族分开：两族都齐时只进 ytd
+//                               → TestResidualCollectionPrefersYTDWhenBothFamiliesPresent
+// boundary[0]    字段不全 continue、不当残差 0，且**记下为什么少**
+//                               → TestResidualCollectionRecordsWhySkipped
+// functional[1]  选族逻辑不得与校验层分叉（本任务自写了非 Check 变体）
+//                               → TestPickBandForAgreesWithPickCaliberBand
+// functional[1]  band 清单不得与两道真闸分叉（validate.go 里是内联字面量，本任务不能改它）
+//                               → TestResidualGatesAgreeWithValidationGates
+
+// depositYTDValues / depositMoMValues / corpYTDValues / corpMoMValues 造一族的合计与分项。
+//
+// ⚠️ **合计单独给，不由分项加出来**：残差的全部意义就是「分项之和 ≠ 合计」，
+// 让夹具自己算合计等于把被测的那个差恒定成 0。
+func depositYTDValues(total float64, parts ...float64) map[string]float64 {
+	return bandValues(FieldDepositFlowYTD, depositPartFields, total, parts)
+}
+
+func depositMoMValues(total float64, parts ...float64) map[string]float64 {
+	return bandValues(FieldDepositFlowMoM, depositPartFieldsMoM, total, parts)
+}
+
+func corpYTDValues(total float64, parts ...float64) map[string]float64 {
+	return bandValues(FieldLoanCorpTotalYTD, corpLoanPartFields, total, parts)
+}
+
+func corpMoMValues(total float64, parts ...float64) map[string]float64 {
+	return bandValues(FieldLoanCorpTotalMoM, corpLoanPartFieldsMoM, total, parts)
+}
+
+// bandValues 按**该族自己的分项清单**铺字段，不写死列名：两族的分项列由
+// depositPartFields / depositPartFieldsMoM 逐项对应（TASK-007 的两条 AgreeAcrossCalibers
+// 钉住），夹具跟着那份清单走，清单变了夹具不会悄悄测另一组列。
+func bandValues(totalField string, partFields []string, total float64, parts []float64) map[string]float64 {
+	if len(parts) != len(partFields) {
+		panic(fmt.Sprintf("夹具给了 %d 个分项，而 %s 那一族有 %d 列", len(parts), totalField, len(partFields)))
+	}
+	v := map[string]float64{totalField: total}
+	for i, f := range partFields {
+		v[f] = parts[i]
+	}
+	return v
+}
+
+func mergeValues(ms ...map[string]float64) map[string]float64 {
+	out := map[string]float64{}
+	for _, m := range ms {
+		maps.Copy(out, m)
+	}
+	return out
+}
+
+// residualFixture 造一份专供残差一节的 Records。
+//
+// 每一期的残差都**手算得出且互不相同** —— 相同的数会让「某一档被算进了另一档」
+// 这类错误在分位数上完全看不出来。
+//
+//	期次       类型      deposit                            corp_loan
+//	2021-12   annual    ytd 1000 vs 100+200+300+320 = 0.08  —（无 corp 列）
+//	                    同期还带一整族 mom（残差 0.40）—— 两族都齐时**只能进 ytd**
+//	2022-12   annual    ytd 1000 vs 100+200+300+310 = 0.09  ytd  500 vs 100+200+180 = 0.04
+//	2023-12   annual    ytd 2000 vs 200+400+600+700 = 0.05  ytd 1000 vs 200+400+380 = 0.02
+//	2023-06   h1        ytd  800 vs  80+160+240+240 = 0.10  —（无 corp 列）
+//	2023-05   monthly   mom  100 vs  10+ 20+ 30+ 15 = 0.25  mom   50 vs  10+ 20+ 15 = 0.10
+//	2023-07   monthly   mom  200 vs  20+ 40+ 60+ 20 = 0.30  mom  100 vs  20+ 40+ 45 = 0.05
+//	2024-03   q1        —（两族都不齐）                      —（两族都不齐）
+func residualFixture() []SampleRecord {
+	return []SampleRecord{
+		{Period: "2021-12", PeriodType: "annual", Values: mergeValues(
+			depositYTDValues(1000, 100, 200, 300, 320),
+			depositMoMValues(100, 10, 20, 20, 10), // r=0.40，**不该出现在任何一档里**
+		)},
+		{Period: "2022-12", PeriodType: "annual", Values: mergeValues(
+			depositYTDValues(1000, 100, 200, 300, 310),
+			corpYTDValues(500, 100, 200, 180),
+		)},
+		{Period: "2023-12", PeriodType: "annual", Values: mergeValues(
+			depositYTDValues(2000, 200, 400, 600, 700),
+			corpYTDValues(1000, 200, 400, 380),
+		)},
+		{Period: "2023-06", PeriodType: "h1", Values: depositYTDValues(800, 80, 160, 240, 240)},
+		{Period: "2023-05", PeriodType: "monthly", Values: mergeValues(
+			depositMoMValues(100, 10, 20, 30, 15),
+			corpMoMValues(50, 10, 20, 15),
+		)},
+		{Period: "2023-07", PeriodType: "monthly", Values: mergeValues(
+			depositMoMValues(200, 20, 40, 60, 20),
+			corpMoMValues(100, 20, 40, 45),
+		)},
+		{Period: "2024-03", PeriodType: "q1", Values: map[string]float64{FieldM2: 42}},
+	}
+}
+
+func residualReport(t *testing.T) string {
+	t.Helper()
+	recs := residualFixture()
+	return renderToString(t, &CalibrateResult{
+		Periods: len(recs), Records: recs, Samples: samplesFromRecords(recs),
+	})
+}
+
+// firstCols 取报告每一行的首列（空行除外）。用于「某个键**不该**成行」这类断言 ——
+// Contains(out, k) 会被别的列里的同名子串冒名满足。
+func firstCols(out string) []string {
+	var got []string
+	for _, ln := range strings.Split(out, "\n") {
+		if cols := strings.Fields(ln); len(cols) > 0 {
+			got = append(got, cols[0])
+		}
+	}
+	return got
+}
+
+// residualRows 取残差一节的数据行首列（形如 <闸>/<族>/<period_type>，恰好两个 '/'）。
+func residualRows(out string) []string {
+	var got []string
+	for _, c := range firstCols(out) {
+		if strings.Count(c, "/") == 2 {
+			got = append(got, c)
+		}
+	}
+	return got
+}
+
+// 报告必须有残差一节，两族分开报，n 出声，且**不给建议值**。
+//
+// 🔴 **「不给建议值」的判据是「这一行恰好 7 列」**，不是 NotContains(out, "建议")：
+// 后者被一个打出 `[0.05,0.13]` 却不写「建议」二字的实现绕过。7 = 键 + n + 五个统计量。
+// 这条同时挡住「照抄 writeFieldRow」—— 那个函数在 n<3 时会多打一列 `n<3`，
+// 而本节的 h1 那档恰好 n=1。
+//
+// ⚠️ 断言按列取（reportRow），不写 Contains(out, "0.09")：n 小的时候 min 与 p5
+// 是同一个数，一个只渲染两列的实现照样命中。
+func TestCalibrateReportsDepositResidualDistribution(t *testing.T) {
+	out := residualReport(t)
+	require.Contains(t, out, residualSectionTitle, "报告必须有残差一节")
+
+	for _, tt := range []struct {
+		key, n, min, max string
+	}{
+		{"deposit_sum/ytd/annual", "3", "0.05", "0.09"},
+		{"deposit_sum/mom/monthly", "2", "0.25", "0.3"},
+		{"corp_loan/ytd/annual", "2", "0.02", "0.04"},
+		{"corp_loan/mom/monthly", "2", "0.05", "0.1"},
+	} {
+		t.Run(tt.key, func(t *testing.T) {
+			cols := reportRow(t, out, tt.key)
+			require.Len(t, cols, 7, "残差行 = 键 + n + 五个统计量，**不带建议区间列**；实得 %v", cols)
+			assert.Equal(t, tt.n, cols[1], "n 必须出声：样本数决定这个分布可不可信")
+			assert.Equal(t, tt.min, cols[2], "min")
+			assert.Equal(t, tt.max, cols[6], "max")
+		})
+	}
+
+	// 补断言**行数**：只断「这几行都在」的话，一个额外再打一行混池汇总的实现照样绿，
+	// 而读者会照着那行混池数去填容差。
+	assert.ElementsMatch(t, []string{
+		"deposit_sum/ytd/annual", "deposit_sum/ytd/h1", "deposit_sum/mom/monthly",
+		"corp_loan/ytd/annual", "corp_loan/mom/monthly",
+	}, residualRows(out), "两闸 × 各自出现过的族 × period_type，不多不少")
+}
+
+// 同一族的不同 period_type 必须分档。
+//
+// # 为什么这条不能省
+//
+// ytd 的分母是年初至今累计：h1（6 个月）与 annual（12 个月）差一个数量级。混池后的
+// 分位数横跨两个量纲，据它定出的容差**对哪一档都不合适** —— 而报告上看不出混过。
+//
+// 🔴 判据是**混池键不成行** + **分档的 n 分别正确**。只断后者的话，一个既打分档行、
+// 又打一行混池汇总的实现照样绿。
+func TestCalibrateResidualDistributionSeparatesPeriodTypes(t *testing.T) {
+	out := residualReport(t)
+
+	annual := reportRow(t, out, "deposit_sum/ytd/annual")
+	h1 := reportRow(t, out, "deposit_sum/ytd/h1")
+	assert.Equal(t, "3", annual[1], "annual 三期（2021-12 / 2022-12 / 2023-12）")
+	assert.Equal(t, "1", h1[1], "h1 一期（2023-06）")
+	assert.Equal(t, "0.1", h1[2], "h1 只有一期 ⇒ min 就是那一期的残差 0.10")
+
+	cols := firstCols(out)
+	for _, pooled := range []string{"deposit_sum/ytd", "corp_loan/ytd", "ytd", "mom"} {
+		assert.NotContains(t, cols, pooled,
+			"不得出现混池行 %q —— 两个量纲混在一起的分位数没有意义", pooled)
+	}
+}
+
+// 两族都齐时只进 ytd，与 pickCaliberBand 的裁决一致。
+//
+// 🔴 判据是**取到的残差等于 ytd 那一族的值**，不是「键里写着 ytd」——
+// 后者一个把键写死成 ytd 却按 mom 算的实现照样绿。夹具里 2021-12 的两族残差
+// 刻意差 5 倍（0.08 vs 0.40），选错族一定看得出来。
+func TestResidualCollectionPrefersYTDWhenBothFamiliesPresent(t *testing.T) {
+	both := residualFixture()[0]
+	require.Equal(t, "2021-12", both.Period, "夹具前提：第一期就是两族都齐的那一期")
+
+	rYTD, ok := depositResidualOf(both.Values, FieldDepositFlowYTD, depositPartFields)
+	require.True(t, ok)
+	rMoM, ok := depositResidualOf(both.Values, FieldDepositFlowMoM, depositPartFieldsMoM)
+	require.True(t, ok)
+	require.Greater(t, math.Abs(rYTD-rMoM), 0.1, "夹具前提：两族残差必须明显不等，否则本例平凡通过")
+
+	got := collectGateResiduals([]SampleRecord{both})
+	require.Contains(t, got.samples, "deposit_sum/ytd/annual")
+	assert.InDelta(t, rYTD, got.samples["deposit_sum/ytd/annual"][0], 1e-12)
+	assert.NotContains(t, got.samples, "deposit_sum/mom/annual",
+		"两族都齐时 mom 不该另记一份 —— 闸门在那一期根本不会用到 mom 的容差")
+	assert.Empty(t, got.skips["deposit_sum"], "算得出来就不该记进跳过")
+}
+
+// 算不出残差的期次要跳过，**不当成残差 0**，且**记下为什么**。
+//
+// 🔴 「不当成 0」这一半必须单独断言：记成 0 不会让上面任何一条红，只会把分位数
+// 整体拉低 —— 而拉低之后定出的容差偏紧，会在回填时批量误拦，那时人只会怀疑数据。
+//
+// 🔴 「为什么少」这一半是本任务**不复用 pickCaliberBand** 的全部理由：那个函数返回
+// *Check（校验层概念），拿到之后最自然的写法是 `if c != nil { continue }`，
+// 跳过的理由当场丢失。而标定最该记的恰恰是「n 少掉几期、为什么少」。
+func TestResidualCollectionRecordsWhySkipped(t *testing.T) {
+	got := collectGateResiduals(residualFixture())
+
+	assert.Equal(t, 1, sumCounts(got.skips["deposit_sum"]), "deposit 只有 2024-03 算不出")
+	assert.Equal(t, 3, sumCounts(got.skips["corp_loan"]), "corp 有 2021-12 / 2023-06 / 2024-03 三期无 corp 列")
+
+	depositWhy := strings.Join(slices.Sorted(maps.Keys(got.skips["deposit_sum"])), " ")
+	for _, want := range []string{
+		"ytd:absent_field:" + FieldDepositFlowYTD,
+		"mom:absent_field:" + FieldDepositFlowMoM,
+	} {
+		assert.Contains(t, depositWhy, want,
+			"跳过理由要同时带上两族 —— 只报一族的话运维会去查错的列")
+	}
+
+	for k, vs := range got.samples {
+		assert.NotContains(t, vs, 0.0, "键 %q 里出现了 0 —— 算不出的期次被当成了残差 0", k)
+		assert.False(t, strings.HasSuffix(k, "/q1"), "2024-03 两族都不齐，不该产生任何 q1 档")
+	}
+
+	// 报告要把它写出来：跳过的期数只活在内存里等于没记。
+	out := residualReport(t)
+	assert.Contains(t, out, residualSkipTitle)
+	assert.Contains(t, out, "absent_field:"+FieldLoanCorpTotalYTD)
+}
+
+func sumCounts(m map[string]int) int {
+	var n int
+	for _, v := range m {
+		n += v
+	}
+	return n
+}
+
+// pickBandFor 是 pickCaliberBand 的非 Check 变体，两者的**选择与诊断必须逐字一致**。
+//
+// # 为什么需要这条测试
+//
+// DoD 明令标定路径不要用 pickCaliberBand（它返回 *Check —— 校验层概念，会把
+// 「为什么跳过」压成一个待丢弃的返回值）。代价是「先试 ytd 再试 mom、都不行就把
+// 两族诊断拼起来」这段逻辑存在了两份，而**分叉时没有任何东西会红**：校验层换了
+// 偏好、标定层照旧，于是报告给出的分布对应的是另一套选族规则，读者据它定出的容差
+// 对不上闸门实际会走的那一族。
+//
+// ⇒ 用这条测试当那颗钉子。它比「共用一个函数」多一份代码，但少一个静默分叉。
+func TestPickBandForAgreesWithPickCaliberBand(t *testing.T) {
+	bands := []caliberBand{
+		{name: "ytd", total: FieldDepositFlowYTD, parts: depositPartFields},
+		{name: "mom", total: FieldDepositFlowMoM, parts: depositPartFieldsMoM},
+	}
+	for _, tt := range []struct {
+		name   string
+		values map[string]float64
+	}{
+		{"两族都齐", mergeValues(depositYTDValues(100, 10, 20, 30, 35), depositMoMValues(10, 1, 2, 3, 3))},
+		{"只有 ytd", depositYTDValues(100, 10, 20, 30, 35)},
+		{"只有 mom", depositMoMValues(10, 1, 2, 3, 3)},
+		{"两族都不齐", map[string]float64{}},
+		{"ytd 零分母、mom 齐", mergeValues(depositYTDValues(0, 10, 20, 30, 35), depositMoMValues(10, 1, 2, 3, 3))},
+		{"两族都零分母", mergeValues(depositYTDValues(0, 10, 20, 30, 35), depositMoMValues(0, 1, 2, 3, 3))},
+		{"ytd 缺一个分项、mom 齐", mergeValues(depositMoMValues(10, 1, 2, 3, 3), map[string]float64{
+			FieldDepositFlowYTD: 100, FieldDepositHouseholdYTD: 10, FieldDepositCorpYTD: 20,
+		})},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wantBand, wantSkip := pickCaliberBand(tt.values, bands)
+			gotBand, gotWhy := pickBandFor(tt.values, bands)
+
+			assert.Equal(t, wantBand.name, gotBand.name, "选中的族必须一致")
+			assert.Equal(t, wantBand.total, gotBand.total, "选中的合计列必须一致")
+			if wantSkip == nil {
+				assert.Empty(t, gotWhy, "校验层算得出来时，标定层不该报跳过")
+				return
+			}
+			assert.Equal(t, wantSkip.Reason, gotWhy, "跳过理由必须**逐字**一致")
+		})
+	}
+}
+
+// 标定收的那两族，必须与两道真闸实际判定的那两族一致。
+//
+// # 为什么用「跑真闸、读它的 Reason」而不是比对两份 band 字面量
+//
+// 两道闸的 band 清单是**内联在 gateDepositSum / gateCorpLoanReconcile 里的字面量**
+// （validate.go），而本任务的 writes 不含那个文件（M1c-4 的 TASK-008 正在改它）
+// ⇒ 提不成共享变量。于是标定这边不可避免地有第二份清单，而它写错（族名、合计列、
+// 分项列任一）时，报告仍然会打出一份**看起来完全正常的分布**。
+//
+// ⇒ 判据取自闸门自己的输出：把容差压成 0 逼它 failed，Reason 里就带着「它用的是
+// 哪一族、哪个合计列、算出多少残差」，三样逐一比对。这样即使下游改动了那两个 gate，
+// 分叉当场变红。
+//
+// ⚠️ 三个片段**各用一条正则**取，不合成一条：两道闸的 Reason 里族名与残差的**前后
+// 顺序相反**（deposit 是 `tolerance_exceeded[ytd]: residual …`，corp 是
+// `residual … [ytd, total=…]`），一条带顺序的正则必然对其中一道失配。
+func TestResidualGatesAgreeWithValidationGates(t *testing.T) {
+	var (
+		residualPat = regexp.MustCompile(`residual ([0-9.]+)`)
+		bandPat     = regexp.MustCompile(`\[(ytd|mom)[\],]`)
+		totalPat    = regexp.MustCompile(`total=([a-z_]+)`)
+	)
+	one := func(t *testing.T, pat *regexp.Regexp, s, what string) string {
+		t.Helper()
+		m := pat.FindStringSubmatch(s)
+		require.Len(t, m, 2, "从闸门的 Reason 里读不出%s，Reason=%q", what, s)
+		return m[1]
+	}
+
+	for _, tt := range []struct {
+		gate string
+		run  func(gateInput) Check
+		rec  SampleRecord
+	}{
+		{"deposit_sum", gateDepositSum, SampleRecord{Period: "2023-12", PeriodType: "annual",
+			Values: depositYTDValues(1000, 100, 200, 300, 310)}},
+		{"deposit_sum", gateDepositSum, SampleRecord{Period: "2023-05", PeriodType: "monthly",
+			Values: depositMoMValues(100, 10, 20, 30, 15)}},
+		{"corp_loan", gateCorpLoanReconcile, SampleRecord{Period: "2023-12", PeriodType: "annual",
+			Values: corpYTDValues(500, 100, 200, 180)}},
+		{"corp_loan", gateCorpLoanReconcile, SampleRecord{Period: "2023-05", PeriodType: "monthly",
+			Values: corpMoMValues(50, 10, 20, 15)}},
+	} {
+		t.Run(tt.gate+"/"+tt.rec.Period, func(t *testing.T) {
+			// 容差压成 0 ⇒ 只要残差非零就 failed，Reason 才会带上族名与合计列。
+			c := tt.run(gateInput{obs: Observation{
+				Meta:   Meta{Period: tt.rec.Period, PeriodType: tt.rec.PeriodType},
+				Values: tt.rec.Values,
+			}, cfg: Thresholds{}})
+			require.Equal(t, CheckFailed, c.Status, "容差 0 ⇒ 闸门必须判 failed，Reason 才带族名")
+
+			wantResidual := one(t, residualPat, c.Reason, "残差")
+			band := one(t, bandPat, c.Reason, "族名")
+			wantTotal := one(t, totalPat, c.Reason, "合计列")
+
+			got := collectGateResiduals([]SampleRecord{tt.rec})
+			key := tt.gate + "/" + band + "/" + tt.rec.PeriodType
+			require.Contains(t, got.samples, key, "标定收的键必须与闸门实走的族一致；实得 %v",
+				slices.Sorted(maps.Keys(got.samples)))
+			assert.Equal(t, wantResidual, fmt.Sprintf("%.4f", got.samples[key][0]),
+				"标定算的残差必须与闸门算的逐位一致")
+
+			gates := residualGates()
+			gi := slices.IndexFunc(gates, func(g residualGate) bool { return g.name == tt.gate })
+			require.GreaterOrEqual(t, gi, 0, "residualGates 里没有 %s", tt.gate)
+			bi := slices.IndexFunc(gates[gi].bands, func(x caliberBand) bool { return x.name == band })
+			require.GreaterOrEqual(t, bi, 0, "%s 里没有 %s 族", tt.gate, band)
+			assert.Equal(t, wantTotal, gates[gi].bands[bi].total, "标定用的合计列必须与闸门一致")
+		})
+	}
 }
