@@ -37,6 +37,57 @@ type Thresholds struct {
 	// M0 三期实测 1.16% / 1.42% / 1.58%。
 	CorpLoanTolerance float64 `mapstructure:"corp_loan_tolerance"`
 
+	// DepositSumToleranceMoM / CorpLoanToleranceMoM 是**当月口径**那一族的残差上限
+	//（M1c-4 的 TASK-007）。
+	//
+	// 🔴🔴 **这两个值都是未标定的占位数，不是标定结果。** 写下来是为了让口径路由之后
+	// 走 _mom 族的期次**真的被校验**（否则闸门 skipped{absent}，报告上看不出「这一期
+	// 没查过」——那比拦错更糟）；取值本身没有任何实测依据。
+	//
+	// # 为什么必须是两个独立的字段，而不是与 ytd 共用一个
+	//
+	// ytd 的分母是**年初至今累计**、mom 的分母是**单月增量**，量级差一个数量级以上，
+	// 残差占比的分布完全不同。共用一个值等于用累计口径的经验去卡单月口径，
+	// 要么恒不拦、要么恒拦——两种都让这道闸失去意义。
+	//
+	// # 🔴 实测：两族的分布**确实差得很远**，占位值几乎必然是错的
+	//
+	// M1c-4 的 TASK-007 交付时在回填语料上跑了一次**指示性**取样（逐篇 Parse，
+	// 选族逻辑与闸门一致：ytd 算得出就用 ytd，否则用 mom）：
+	//
+	//	族              n    min      p50      p95      max
+	//	deposit  ytd    52   0.0026   0.0892   0.1505   0.2501
+	//	deposit  mom    21   0.0082   0.2576   0.8194   2.9508   ← p50 是 ytd 的约 3 倍
+	//	corpLoan ytd    52   0.0023   0.0137   0.0286   0.0357
+	//	corpLoan mom    26   0.0014   0.0183   0.0784   0.0788   ← p95 已超现值 0.05
+	//
+	// ⚠️ **这不是标定**：取样口径（逐篇 Parse）与 TASK-009 的产出路径不同，且没有做
+	// 分布形态与异常值的分析。它只回答一个问题——「照抄 ytd 的值行不行」，答案是**不行**。
+	// 照抄之下 deposit 的 mom 族会有过半期次 failed（p50 0.2576 > 0.12）。
+	//
+	// 🔴 保留照抄值而不是就地改一个更宽的数，是刻意的：改一个数需要依据，而**拍一个
+	// 更宽的数正是本迭代要清算的那笔账的成因**。让它响亮地失败，比让它悄悄通过好——
+	// failed 会进 pending 被人看见，而一个拍宽的容差会让所有 mom 期次静默通过。
+	//
+	// # 现在的取值：**照抄同族 ytd 的值**，且这件事本身要被看见
+	//
+	// 没有分布可依时，照抄 ytd 是「不引入新臆断」的最小选择，但它**不是**「两族一样」
+	// 这个结论 —— 我们对 mom 的分布一无所知。做法沿 stock_continuity_max 三档 n=0 的
+	// 既定形态：**值写下来，注释写明它不是标定过的**。
+	//
+	// 🔴 **两半都要做**：只填值不标注，下一个人会把占位当标定结果引用 —— 本迭代要
+	// 清算的四条被证伪契约里，`deposit_sum_tolerance` 的 0.12（M0 三样本、被 79 期
+	// 实测证伪）就是这么来的。
+	//
+	// # 标定的开口（M1c-4 的 TASK-007 交付时明确记下）
+	//
+	//	DepositSumToleranceMoM  TASK-009 产出 deposit_sum 的残差分布 ⇒ TASK-010 可标定
+	//	CorpLoanToleranceMoM    🔴 **TASK-009 不产 corp_loan 的残差分布** ⇒ TASK-010
+	//	                        **无从标定**，必须或者让 TASK-009 扩产、或者把它显式
+	//	                        登记为长期未标定占位。不要静默填一个数。
+	DepositSumToleranceMoM float64 `mapstructure:"deposit_sum_tolerance_mom"`
+	CorpLoanToleranceMoM   float64 `mapstructure:"corp_loan_tolerance_mom"`
+
 	// StockContinuityMax 是社融存量环比变化率的上限，**按 period_type 分档**
 	// （period_type → 上限）。
 	//
@@ -104,8 +155,13 @@ func DefaultThresholds() Thresholds {
 		DepositSumTolerance: 0.12,
 		DepositSumDriftMax:  0.03,
 		CorpLoanTolerance:   0.05,
-		StockContinuityMax:  defaultStockContinuityMax(),
-		YoYSanityMax:        50,
+
+		// 🔴 未标定占位（M1c-4 的 TASK-007）：照抄同族 ytd 的值，理由与开口见字段注释。
+		// TASK-010 标定 deposit 那个；corp_loan 那个 TASK-009 不产分布，需 Leader 裁决。
+		DepositSumToleranceMoM: 0.12,
+		CorpLoanToleranceMoM:   0.05,
+		StockContinuityMax:     defaultStockContinuityMax(),
+		YoYSanityMax:           50,
 	}
 }
 

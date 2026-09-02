@@ -205,6 +205,82 @@ var depositPartFields = []string{
 	FieldDepositFiscalYTD, FieldDepositNBFIYTD,
 }
 
+// depositPartFieldsMoM 是同四个部门的**当月口径**列，与 depositPartFields **逐项对应**
+// （M1c-4 的 TASK-007）。
+//
+// 顺序必须一致：两族清单的对应关系由 TestDepositPartFieldsAgreeAcrossCalibers 逐项钉住。
+// 手写两份而不是从 depositPartFields 派生，是因为字段名不是机械后缀替换就能得到的
+// （FieldDepositHouseholdYTD → FieldDepositHouseholdMoM 恰好是，但那是巧合不是约定）——
+// 手写就必须有人钉住，那条测试就是钉子。
+var depositPartFieldsMoM = []string{
+	FieldDepositHouseholdMoM, FieldDepositCorpMoM,
+	FieldDepositFiscalMoM, FieldDepositNBFIMoM,
+}
+
+// corpLoanPartFields / corpLoanPartFieldsMoM 是企业贷款勾稽的三个分项，两族逐项对应。
+//
+// ⚠️ 此前这三项是**内联**在 gateCorpLoanReconcile 里的字面量。提成变量是为了让
+// TestCorpLoanPartFieldsAgreeAcrossCalibers 有东西可比 —— 两族的对应关系若只存在于
+// 两段并列的代码里，分叉时没有任何断言会红。
+var (
+	corpLoanPartFields = []string{
+		FieldLoanCorpShortYTD, FieldLoanCorpMLTYTD, FieldLoanBillYTD,
+	}
+	corpLoanPartFieldsMoM = []string{
+		FieldLoanCorpShortMoM, FieldLoanCorpMLTMoM, FieldLoanBillMoM,
+	}
+)
+
+// caliberBand 是一道勾稽闸在某个口径下要看的合计列、分项列与容差
+// （M1c-4 的 TASK-007）。
+//
+// 🔴 **两族的容差不能共用一个值**：ytd 的分母是年初至今累计、mom 是单月增量，
+// 量级差一个数量级以上，残差占比的分布完全不同。故 tol 是 band 的一部分，
+// 而不是在闸里写死 in.cfg.XxxTolerance。
+type caliberBand struct {
+	name  string // "ytd" / "mom"，进 Reason 用
+	total string
+	parts []string
+	tol   float64
+}
+
+// bandDiagnosis 返回空串表示这一族**算得出来**；否则返回一条说清「为什么算不出」
+// 的理由，格式与既有的 absent_field: / zero_denominator: 逐字一致。
+//
+// ⚠️ 沿用既有格式而不是另起一套：既有测试与下游报告都按那两个前缀读
+// （validate_test.go 的 "zero_denominator:"+FieldDepositFlowYTD 就是逐字比对）。
+func bandDiagnosis(values map[string]float64, b caliberBand) string {
+	for _, f := range append([]string{b.total}, b.parts...) {
+		if _, ok := values[f]; !ok {
+			return "absent_field:" + f
+		}
+	}
+	if values[b.total] == 0 {
+		return "zero_denominator:" + b.total
+	}
+	return ""
+}
+
+// pickCaliberBand 在两族里选一族。
+//
+// 🔴 **两族都齐时取 ytd**（主口径，且容差的标定样本以它为主）；ytd 算不出就试 mom；
+// 两族都不齐才 skipped。**顺序是裁决，不是实现细节** —— 靠 map 迭代顺序碰运气的实现
+// 会在两族都齐时随机选一族，而两族的容差不同、残差也不同，那意味着同一份数据
+// 每次跑出的结论可能不一样。由 TestDepositSumPrefersYTDWhenBothPresent 钉住。
+//
+// 都算不出时 Reason **同时带上两族各自的诊断** —— 只报一族的话，运维会去查错的列。
+func pickCaliberBand(values map[string]float64, bands []caliberBand) (caliberBand, *Check) {
+	var why []string
+	for _, b := range bands {
+		d := bandDiagnosis(values, b)
+		if d == "" {
+			return b, nil
+		}
+		why = append(why, b.name+":"+d)
+	}
+	return caliberBand{}, &Check{Status: CheckSkipped, Reason: strings.Join(why, " ")}
+}
+
 // gateDepositSum 查存款加总，两个判据合成一个状态。
 //
 // 判据一（绝对残差）：|Σ四部门 − 总额| / 总额 ≤ DepositSumTolerance。
@@ -221,26 +297,31 @@ var depositPartFields = []string{
 // Value 恒为绝对残差**占比**（M0 契约样本记 0.0857），不因走了哪条判据而变。
 // 上面那道闸记的是亿元绝对量，两者刻意不同，见其注释。
 func gateDepositSum(in gateInput) Check {
-	if skip := in.need(FieldDepositFlowYTD); skip != nil {
+	// 🔴 先选族（M1c-4 的 TASK-007）：口径路由之后观测可能整族走 _mom，
+	// 闸门只认 _ytd 会让那些期次 skipped{absent} 而**完全不被校验** ——
+	// 那比拦错更糟：报告上看不出「这一期没查过」。
+	b, skip := pickCaliberBand(in.obs.Values, []caliberBand{
+		{"ytd", FieldDepositFlowYTD, depositPartFields, in.cfg.DepositSumTolerance},
+		{"mom", FieldDepositFlowMoM, depositPartFieldsMoM, in.cfg.DepositSumToleranceMoM},
+	})
+	if skip != nil {
 		return *skip
 	}
-	if skip := in.need(depositPartFields...); skip != nil {
-		return *skip
-	}
-	r, ok := depositResidual(in.obs.Values)
+	r, ok := depositResidualOf(in.obs.Values, b.total, b.parts)
 	if !ok {
-		// 走到这里只可能是零分母：上面两道 need 已经保证字段齐全。
-		return Check{Status: CheckSkipped,
-			Reason: "zero_denominator:" + FieldDepositFlowYTD}
+		// 走不到：pickCaliberBand 已经保证这一族字段齐全且分母非零。
+		return Check{Status: CheckSkipped, Reason: "zero_denominator:" + b.total}
 	}
 
 	c := Check{Value: &r} // Value 恒为绝对残差占比，与 M0 契约样本一致
 
 	// 判据一优先：绝对值都超了，再谈漂移没有意义。
-	if r > in.cfg.DepositSumTolerance {
+	// ⚠️ 比的是**选出的那一族的**容差，不是写死的 in.cfg.DepositSumTolerance；
+	// Reason 带上 total 列名 —— 两族容差不同，不写清是哪一族没法复核。
+	if r > b.tol {
 		c.Status = CheckFailed
-		c.Reason = fmt.Sprintf("tolerance_exceeded: residual %.4f exceeds %.4f",
-			r, in.cfg.DepositSumTolerance)
+		c.Reason = fmt.Sprintf("tolerance_exceeded[%s]: residual %.4f exceeds %.4f (total=%s)",
+			b.name, r, b.tol, b.total)
 		return c
 	}
 
@@ -256,7 +337,9 @@ func gateDepositSum(in gateInput) Check {
 	}
 	hist := make([]float64, 0, len(in.prior))
 	for _, p := range in.prior {
-		if pr, ok := depositResidual(p.Values); ok {
+		// 🔴 历史残差必须用**同一族**算：拿 ytd 的残差去和 mom 的均值比，
+		// 两个分母量级差一个数量级，漂移判定完全失去意义。
+		if pr, ok := depositResidualOf(p.Values, b.total, b.parts); ok {
 			hist = append(hist, pr)
 		}
 	}
@@ -273,33 +356,34 @@ func gateDepositSum(in gateInput) Check {
 	mean := sum / float64(len(hist))
 	if drift := math.Abs(r - mean); drift > in.cfg.DepositSumDriftMax {
 		c.Status = CheckFailed
-		c.Reason = fmt.Sprintf("drift_exceeded: residual %.4f drifted %.4f from %d-period mean %.4f",
-			r, drift, len(hist), mean)
+		c.Reason = fmt.Sprintf("drift_exceeded[%s]: residual %.4f drifted %.4f from %d-period mean %.4f (total=%s)",
+			b.name, r, drift, len(hist), mean, b.total)
 		return c
 	}
 	c.Status = CheckPassed
 	return c
 }
 
-// depositResidual 算一期的存款加总残差占比。字段不全或总额为零时返回 false。
+// depositResidualOf 算一期的加总残差占比（M1c-4 的 TASK-007 由 depositResidual 泛化
+// 成按口径族取列）。字段不全或总额为零时返回 false。
 //
 // 历史期次可能缺字段（早期报告的部门划分不同），所以不能假定齐全。算不出来的
 // 期次**直接不计入均值**，而不是当成残差 0——那会把均值拉向 0，让正常期次
 // 看起来在漂移。
-func depositResidual(values map[string]float64) (float64, bool) {
-	total, ok := values[FieldDepositFlowYTD]
-	if !ok || total == 0 {
+func depositResidualOf(values map[string]float64, total string, parts []string) (float64, bool) {
+	tot, ok := values[total]
+	if !ok || tot == 0 {
 		return 0, false
 	}
 	var sum float64
-	for _, f := range depositPartFields {
+	for _, f := range parts {
 		v, ok := values[f]
 		if !ok {
 			return 0, false
 		}
 		sum += v
 	}
-	return math.Abs(sum-total) / math.Abs(total), true
+	return math.Abs(sum-tot) / math.Abs(tot), true
 }
 
 // gateCorpLoanReconcile 查企业贷款分项加总：短期 + 中长期 + 票据 vs 企业合计。
@@ -317,29 +401,35 @@ func depositResidual(values map[string]float64) (float64, bool) {
 // -1203 亿元是量纲错读，所以此处写明。
 // 符号表示方向：负值即分项之和小于合计。
 func gateCorpLoanReconcile(in gateInput) Check {
-	if skip := in.need(FieldLoanCorpTotalYTD, FieldLoanCorpShortYTD,
-		FieldLoanCorpMLTYTD, FieldLoanBillYTD); skip != nil {
+	// 先选族，理由同 gateDepositSum（M1c-4 的 TASK-007）。
+	//
+	// ⚠️ **零分母仍然走 skipped 而不是 failed**：Inf/NaN 会被 Save 拒绝，那会让整期
+	// 既进不了观测表也进不了 pending（savePending 先 json.Marshal 报告）。一期企业贷款
+	// 增量恰好为零是可能的，不该因此让数据整个消失。这条纪律没有变，只是判定它的地方
+	// 挪进了 bandDiagnosis —— 两族都零分母时 Reason 会同时带上两族的 zero_denominator:。
+	b, skip := pickCaliberBand(in.obs.Values, []caliberBand{
+		{"ytd", FieldLoanCorpTotalYTD, corpLoanPartFields, in.cfg.CorpLoanTolerance},
+		{"mom", FieldLoanCorpTotalMoM, corpLoanPartFieldsMoM, in.cfg.CorpLoanToleranceMoM},
+	})
+	if skip != nil {
 		return *skip
 	}
-	total := in.v(FieldLoanCorpTotalYTD)
-	// 零分母会算出 Inf 或 NaN，而 Save 拒绝非有限的 Check.Value——那会让整期
-	// 既进不了观测表也进不了 pending（savePending 先 json.Marshal 报告）。
-	// 一期企业贷款增量恰好为零是可能的，不该因此让数据整个消失。
-	if total == 0 {
-		return Check{Status: CheckSkipped,
-			Reason: "zero_denominator:" + FieldLoanCorpTotalYTD}
+	total := in.v(b.total)
+	var sum float64
+	for _, f := range b.parts {
+		sum += in.v(f)
 	}
-	sum := in.v(FieldLoanCorpShortYTD) + in.v(FieldLoanCorpMLTYTD) + in.v(FieldLoanBillYTD)
 	residual := sum - total
 	r := math.Abs(residual) / math.Abs(total)
 
 	c := Check{Value: &residual}
-	if r <= in.cfg.CorpLoanTolerance {
+	if r <= b.tol {
 		c.Status = CheckPassed
 		return c
 	}
 	c.Status = CheckFailed
-	c.Reason = fmt.Sprintf("residual %.4f exceeds %.4f", r, in.cfg.CorpLoanTolerance)
+	// Reason 带上族名与 total 列名：两族容差不同，不写清是哪一族没法复核。
+	c.Reason = fmt.Sprintf("residual %.4f exceeds %.4f [%s, total=%s]", r, b.tol, b.name, b.total)
 	return c
 }
 
