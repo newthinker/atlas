@@ -601,35 +601,43 @@ func TestDepositSumDistinguishesNoHistoryFromShortHistory(t *testing.T) {
 		"历史不足不是首期——理由串不得互相包含，否则 Contains 断言会同时放过两行")
 }
 
-// 残差**恰好等于** ±12.0% 容差边界时的判定方向（spec boundary[2]）。
+// 残差**恰好等于**容差边界时的判定方向（spec boundary[2]）。
 //
-// 上游计划遗漏了这一条：它的六行用的是 5%/10%/20%，没有一个落在 12% 上，
+// 上游计划遗漏了这一条：它的六行用的是 5%/10%/20%，没有一个落在阈值上，
 // 而独立 reviewer 的消融证实把实现的 `r > Tolerance` 改成 `>=` 时，
 // 计划原有的测试**无一转红**。
 //
-// 选数：残差 12/100 与阈值字面量 0.12 实测是**同一个 float64**
-// （都是 8646911284551352p-56），故「恰好等于」是真的相等，不是舍入巧合。
-// 这里不必绕道 2 的幂——本构造的中间量（88、100、12）都是远小于 2^53 的整数，
-// IEEE 除法正确舍入到最近双精度，与 0.12 的字面量解析结果一致。
+// ⚠️ **边界值随容差走，不写死**（M1c-4 的 TASK-010 把默认容差 0.12 标定成 0.17）：
+// 下面用 `tolPct` 从 cfg 反推百分数，而不是把 17 硬编码第二遍 —— 硬编码的那份
+// 会在下次标定时与 cfg 分叉，而分叉的表现是**这条边界测试悄悄不再测边界**
+// （它会变成「残差 12% vs 容差 17%」的一条普通通过用例，永远绿）。
+//
+// 选数仍然精确：残差 pct/100 与容差字面量实测是**同一个 float64**（12 与 17 都验过），
+// 故「恰好等于」是真的相等，不是舍入巧合。本构造的中间量（100−pct、100、pct）
+// 都是远小于 2^53 的整数，IEEE 除法正确舍入到最近双精度，与字面量解析结果一致。
+// ⚠️ 换一个非精确的容差（如 0.13）会让本测试**失去边界语义**，见下面那条前提断言。
 func TestDepositSumBoundaryIsInclusive(t *testing.T) {
 	cfg := DefaultThresholds()
-	require.Equal(t, 0.12, cfg.DepositSumTolerance, "本测试挑的边界值锚在默认容差上")
+	tolPct := cfg.DepositSumTolerance * 100
+	require.Equal(t, cfg.DepositSumTolerance, tolPct/100,
+		"本测试要求容差能被 pct/100 精确复现，否则「恰好等于」测不到边界；"+
+			"换了一个非精确可表示的容差时，请改用 2 的幂（如 0.125）或另造夹具")
 
 	t.Run("残差恰好等于容差判 passed", func(t *testing.T) {
 		rep, err := Validate(context.Background(),
-			Observation{Meta: validMeta(), Values: depositWith(12)}, NoHistory, cfg)
+			Observation{Meta: validMeta(), Values: depositWith(tolPct)}, NoHistory, cfg)
 		require.NoError(t, err)
 
 		c := findCheck(t, rep, "deposit_sum")
 		assert.Equal(t, CheckPassed, c.Status,
-			"实现是 r > tolerance 判失败，恰好等于必须通过；这里变红说明比较符被改成了 >=")
+			"实现是 r > 门限 判失败，恰好等于必须通过；这里变红说明比较符被改成了 >=")
 		require.NotNil(t, c.Value)
 		assert.Equal(t, cfg.DepositSumTolerance, *c.Value, "残差必须恰好落在阈值上，否则测的不是边界")
 	})
 
 	t.Run("残差略超容差判 failed", func(t *testing.T) {
 		rep, err := Validate(context.Background(),
-			Observation{Meta: validMeta(), Values: depositWith(13)}, NoHistory, cfg)
+			Observation{Meta: validMeta(), Values: depositWith(tolPct + 1)}, NoHistory, cfg)
 		require.NoError(t, err)
 
 		c := findCheck(t, rep, "deposit_sum")
@@ -1931,4 +1939,130 @@ func TestDepositSumDriftWorksWhenAllPriorsArePending(t *testing.T) {
 	assert.Empty(t, c.Reason,
 		"🔴 priorAll 里有三期同族历史，漂移必须**真算**。"+
 			"报 no_prior_period 会把「这段每期都被拒」伪装成「新库冷启动」，运维含义相反")
+}
+
+// —— M1c-4 的 TASK-010：标定激活的回归口 + 新仪器 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-010）
+// functional[1] M2 闭合：容差必须取自**选中的那一族**，不得写死 ytd 的
+//                             → TestDepositSumUsesSelectedBandTolerance
+// functional[1] mom 族换仪器 max(K_abs, K_rel×|合计|)：小分母期次靠 K_abs 兜住
+//                             → TestDepositSumMoMAbsoluteFloorCoversSmallDenominator
+// functional[1] ytd 族**不得**有绝对下限（人类 Q2 裁决：保持纯比值）
+//                             → TestDepositSumYTDHasNoAbsoluteFloor
+// boundary[0]   显式写了 magnitude_ranges 就必须填全；空表仍合法
+//                             → TestLoadConfigRejectsPartialMagnitudeRanges
+
+// 🔴 容差必须取自**选中的那一族**，不得写死 ytd 的那个。
+//
+// # 这个回归口是被本任务的标定动作激活的
+//
+// 在此之前两族的占位容差**恰好相等**（都是 0.12）⇒「用 b.tol」与「写死
+// in.cfg.DepositSumTolerance」在数值上**无法区分**，TASK-007 的验证者做变异实测时
+// 这条变异是 SURVIVED（全包绿）。标定把两族分开之后（ytd 0.17 / mom K_rel 0.55），
+// 那个等价断了 —— 一个写死 ytd 容差的实现会**用错误的容差判 mom 族**。
+//
+// 构造：mom 族残差 0.30，落在两族容差之间（ytd 0.17 < 0.30 < mom 0.55）
+// ⇒ 用对了族判 passed，写死 ytd 判 failed。**方向单一，不会两边都绿。**
+func TestDepositSumUsesSelectedBandTolerance(t *testing.T) {
+	cfg := DefaultThresholds()
+	require.Less(t, cfg.DepositSumTolerance, 0.30,
+		"用例前提：残差 0.30 必须**超过** ytd 容差，否则写死 ytd 的实现也会 passed")
+	require.Greater(t, cfg.DepositSumToleranceMoM, 0.30,
+		"用例前提：残差 0.30 必须**低于** mom 的 K_rel，否则用对了族也会 failed")
+
+	// 分母取得足够大，让 K_abs 不参与（本例要测的是 K_rel 取自哪一族）
+	obs := obsFrom(momOnly(golden2025), extractorV2)
+	obs.Values[FieldDepositFlowMoM] = 100000
+	obs.Values[FieldDepositHouseholdMoM] = 70000
+	obs.Values[FieldDepositCorpMoM] = 0
+	obs.Values[FieldDepositFiscalMoM] = 0
+	obs.Values[FieldDepositNBFIMoM] = 0
+	require.NotContains(t, obs.Values, FieldDepositFlowYTD, "用例前提：本期整族是 mom")
+
+	rep, err := Validate(context.Background(), obs, NoHistory, cfg)
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	require.NotNil(t, c.Value)
+	assert.InDelta(t, 0.30, *c.Value, 1e-12, "用例前提：残差确实是 0.30")
+	assert.Equalf(t, CheckPassed, c.Status,
+		"🔴 mom 族残差 0.30 在本族容差 %.2f 之内却判 failed —— 容差被写死成 ytd 的 %.2f 了。Reason=%q",
+		cfg.DepositSumToleranceMoM, cfg.DepositSumTolerance, c.Reason)
+}
+
+// 🔴 mom 族的**绝对下限**要兜住分母趋零的期次。
+//
+// 判据是 `|Σ分项−合计| > max(K_abs, K_rel×|合计|)`。分母小到 K_rel×|合计| < K_abs 时，
+// 门限由 K_abs 接管 —— 没有它，2022-07 那种（分母 447、绝对差额 1319、比值 2.95）
+// 要通过就得把纯比值容差取到 2.95，而那个值在中位分母下允许 38100 亿元的差额
+// （历史最大仅 8681）⇒ 闸门实质不再判定。
+//
+// 两格方向相反，缺一不可：
+//   - 小分母 + **小**绝对差额 ⇒ passed（比值高达 2.95 也不该拦，那是分母的伪影）
+//   - 小分母 + **大**绝对差额 ⇒ failed（K_abs 之上仍然判得动，不是「小分母就免检」）
+func TestDepositSumMoMAbsoluteFloorCoversSmallDenominator(t *testing.T) {
+	cfg := DefaultThresholds()
+	require.Positive(t, cfg.DepositSumToleranceMoMAbs, "用例前提：mom 族配了 K_abs")
+
+	momWith := func(total, household float64) Observation {
+		o := obsFrom(momOnly(golden2025), extractorV2)
+		o.Values[FieldDepositFlowMoM] = total
+		o.Values[FieldDepositHouseholdMoM] = household
+		o.Values[FieldDepositCorpMoM] = 0
+		o.Values[FieldDepositFiscalMoM] = 0
+		o.Values[FieldDepositNBFIMoM] = 0
+		return o
+	}
+	kAbs := cfg.DepositSumToleranceMoMAbs
+
+	t.Run("小分母+小绝对差额：K_abs 兜住，判 passed", func(t *testing.T) {
+		// 分母 447、差额 1319 —— 真语料 2022-07 的实际数（比值 2.95）
+		rep, err := Validate(context.Background(), momWith(447, 447+1319), NoHistory, cfg)
+		require.NoError(t, err)
+		c := findCheck(t, rep, "deposit_sum")
+		require.NotNil(t, c.Value)
+		assert.Greater(t, *c.Value, 2.0, "用例前提：比值确实高得离谱（分母趋零的伪影）")
+		assert.Equalf(t, CheckPassed, c.Status,
+			"🔴 绝对差额 1319 远小于 K_abs %.0f，却因比值被拦 —— 绝对下限没生效。Reason=%q",
+			kAbs, c.Reason)
+	})
+
+	t.Run("小分母+大绝对差额：K_abs 之上仍判 failed", func(t *testing.T) {
+		// 同样的小分母，差额抬到 K_abs 之上 ⇒ 必须拦住，否则「小分母」变成免检牌
+		rep, err := Validate(context.Background(), momWith(447, 447+kAbs*2), NoHistory, cfg)
+		require.NoError(t, err)
+		c := findCheck(t, rep, "deposit_sum")
+		assert.Equalf(t, CheckFailed, c.Status,
+			"🔴 绝对差额 %.0f 是 K_abs 的两倍却放行 —— 绝对下限变成了免检牌。Reason=%q",
+			kAbs*2, c.Reason)
+		assert.Contains(t, c.Reason, "K_abs", "Reason 要印出实际用的门限及其算式")
+	})
+}
+
+// 🔴 ytd 族**不得**有绝对下限 —— 人类在 Q2 单独裁决它保持纯比值（0.17）。
+//
+// 判据是行为性的：给一个**小分母 + 小绝对差额**的 ytd 期次（放在 mom 族里会被
+// K_abs 放行的那种），ytd 必须仍按比值判 failed。
+//
+// ⚠️ 不要写成 `assert.Zero(cfg.SomeYTDAbsField)` —— 那种断言在「有人给 ytd 也接上
+// K_abs、只是默认值为 0」时照样绿，而那正是要防的走样。
+func TestDepositSumYTDHasNoAbsoluteFloor(t *testing.T) {
+	cfg := DefaultThresholds()
+	v := maps.Clone(golden2025)
+	v[FieldDepositFlowYTD] = 447
+	v[FieldDepositHouseholdYTD] = 447 + 1319 // 与上面 mom 那格**同一组数**
+	v[FieldDepositCorpYTD] = 0
+	v[FieldDepositFiscalYTD] = 0
+	v[FieldDepositNBFIYTD] = 0
+
+	rep, err := Validate(context.Background(),
+		Observation{Meta: validMeta(), Values: v}, NoHistory, cfg)
+	require.NoError(t, err)
+
+	c := findCheck(t, rep, "deposit_sum")
+	assert.Equalf(t, CheckFailed, c.Status,
+		"🔴 同一组数在 mom 族因 K_abs 放行是对的，在 ytd 族必须仍被比值拦下 —— "+
+			"这里变绿说明 ytd 也被接上了绝对下限，而人类裁决它保持纯比值。Reason=%q", c.Reason)
+	assert.Contains(t, c.Reason, "tolerance_exceeded[ytd]")
 }

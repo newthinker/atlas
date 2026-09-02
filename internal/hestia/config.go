@@ -57,7 +57,74 @@ func LoadConfig(path string) (Config, error) {
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("hestia: invalid config %s: %w", path, err)
 	}
+	// 🔴 **排在 cfg.validate() 之后**：结构性错误（NaN / 倒置区间 / 单位缺失 / 未知
+	// 字段名）比「少填了几项」更根本，也更可能是同一处笔误的**直接**症状。先报完整性
+	// 会把一个写错的区间盖成「你少填了 75 项」，排查方向整个偏掉。
+	// （实测：排在前面会让 TestMagnitudeRangesRejectNaNFromYAML 拿到缺项错误而不是
+	// NaN 错误——那条测试的夹具本就是一张只含待测字段的小表。）
+	if err := checkMagnitudeRangesComplete(v); err != nil {
+		return Config{}, fmt.Errorf("hestia: invalid config %s: %w", path, err)
+	}
 	return cfg, nil
+}
+
+// magnitudeRangesKey 是幅度区间表在配置文件里的完整键路径。
+const magnitudeRangesKey = "thresholds.magnitude_ranges"
+
+// checkMagnitudeRangesComplete 要求：**显式写了**幅度区间表，就必须每个字段都写
+// （M1c-4 的 TASK-010）。
+//
+// # 为什么非查不可
+//
+// gateMagnitudeSanity 对表里没有的字段直接 continue ⇒ 缺项不是「关掉那道闸」，
+// 而是**那个字段的幅度闸静默消失且报 passed**。这与 Thresholds.validate 已经拦下的
+// 「打错字段名」是**同一失效模式的第二条入口**：表看起来配上了，而那道闸对该字段
+// 照样不设防。
+//
+// 🔴 **真正的缺口是运维换一份自己的 yaml**：仓库自带的那份由
+// TestShippedConfigLoadsAndIsCalibrated 钉住「键集与 fieldOrder 逐项相等」，
+// 但那条**只看仓库里这一份**。任何别的配置文件此前都没有全覆盖检查。
+//
+// ⚠️ **空表仍然合法**：`v.IsSet` 为 false 时直接放行，那是 magnitude_sanity 记
+// skipped{not_calibrated} 的正常状态（由 TestEmptyMagnitudeRangesStillValid 钉住）。
+// 要拒的是**半张表**，不是空表。
+//
+// ⚠️ 查 v（用户显式写了什么）而不是 cfg（merge 之后的结果），理由同
+// checkStockContinuityComplete：LoadConfig 先预填 DefaultThresholds 再 Unmarshal，
+// 而 mapstructure 的 ZeroFields 默认 false ⇒ **merge 不是 replace**。
+//
+// 只报**前若干个**缺项而不是全部：缺一整张表时 76 项全列出来会淹没掉真正的信息
+// （「你少写了几项」比「少写了哪 76 项」有用），但**数量必须报全**。
+func checkMagnitudeRangesComplete(v *viper.Viper) error {
+	if !v.IsSet(magnitudeRangesKey) {
+		return nil
+	}
+	written := v.GetStringMap(magnitudeRangesKey)
+	// 遍历 fieldOrder 而不是 map：map 迭代序随机，同一份坏配置两次跑报出的缺项顺序
+	// 不同，排查变成猜谜（与 checkStockContinuityComplete 同理）。
+	var missing []string
+	for _, f := range fieldOrder {
+		// viper 把键统一小写化；fieldOrder 本就全小写，此处显式转换是为了不依赖那件事。
+		if _, ok := written[strings.ToLower(f)]; !ok {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	shown := missing
+	const maxShown = 8
+	suffix := ""
+	if len(shown) > maxShown {
+		shown = shown[:maxShown]
+		suffix = fmt.Sprintf(" …等共 %d 项", len(missing))
+	}
+	return fmt.Errorf("%s 缺 %d/%d 个字段: %s%s"+
+		"（显式写了这张表就必须填全：gateMagnitudeSanity 对表里没有的字段是跳过，"+
+		"缺项会让该字段的幅度闸**静默失效且报 passed**；"+
+		"字段名的唯一真相源是 fields.go 的 fieldOrder。"+
+		"若本就未标定，请把整张表留空——那时 magnitude_sanity 会记 skipped{not_calibrated}）",
+		magnitudeRangesKey, len(missing), len(fieldOrder), strings.Join(shown, ", "), suffix)
 }
 
 // stockContinuityKey 是分档表在配置文件里的完整键路径。

@@ -270,7 +270,51 @@ type caliberBand struct {
 	name  string // "ytd" / "mom"，进 Reason 用
 	total string
 	parts []string
-	tol   float64
+	tol   float64 // K_rel：相对容差（残差占比上限）
+
+	// absTol 是 K_abs：**绝对**容差下限（亿元）。0 表示不设下限 ⇒ 判据退化为纯比值
+	// `|Σ分项−合计| > tol×|合计|`，与本字段引入之前逐位等价。
+	//
+	// # 为什么需要它（M1c-4 的 TASK-010，人类裁决）
+	//
+	// 比值判据 `|Σ分项−合计| / |合计|` 只在**分母远离零**时有意义。实测（79 期语料，
+	// 锚 743c507）deposit 的当月族分母 min=447、**且可为负**（2021-07 = −11300），
+	// 而 ytd 族分母 min=28800。残差最大的 2022-07 分母仅 447、绝对差额 1319 ——
+	// 那个 1319 比该族绝对差额的中位数 2025 **还小**：它不是异常期次，是分母最小的
+	// 那一期。纯比值容差要覆盖它得取到 2.95，而那个值在中位分母下允许 38100 亿元的
+	// 差额（历史最大仅 8681）⇒ 闸门实质失效。
+	//
+	// ⚠️ **本 sprint 的 TASK-011 已对另一道闸做过同一件事**：backfill_load_report.go
+	// 的 caliberIdentityLimit = max(K_abs, K_rel×|expected|)，其注释写的
+	// 「兜 |expected| 极小时相对容差失效」与此处逐字同因。
+	//
+	// 🔴 **只有 deposit 的 mom 族用它**（人类在 Q1/Q2 分别裁决：mom 换仪器、ytd 保持
+	// 纯比值取 0.17）。corp_loan 两族的分母远离零（ytd min=25500 / mom min=2335 且
+	// 恒为正）⇒ 比值判据在那一族是有效的，absTol 保持 0。
+	absTol float64
+}
+
+// bandLimitRatio 是某一族在本期的**实际判定门限，换算成残差占比**。
+//
+// 提成函数而不是在判定处内联：Reason 要印出门限（读者据此判断「差这么多算不算多」），
+// 而**印出来的门限与判定用的门限必须是同一个** —— 两处各算一遍迟早分叉，而分叉的
+// 表现是报告说「残差 0.39、门限 0.28」却没有判 failed。这条理由照抄
+// backfill_load_report.go 的 caliberIdentityLimit，不另发明。
+//
+// # 🔴 为什么在**比值域**而不是绝对域比较
+//
+// 判据的语义是 `|Σ分项−合计| > max(K_abs, K_rel×|合计|)`，两边同除 |合计| 得
+// `r > max(K_abs/|合计|, K_rel)`。两种写法数学上等价，**浮点上不等价**：
+// 绝对域要算 `r×|合计|`，那一次乘法会引入舍入，使 absTol==0 的族在**恰好等于容差**
+// 时的判定可能翻转 —— 而 TestDepositSumBoundaryIsInclusive 正是钉这个边界的
+// （它挑的残差与容差字面量实测是同一个 float64，等号成立与否只取决于比较符本身）。
+//
+// 用比值域写，absTol == 0 时 max(0/|合计|, tol) **恒等于** tol，与引入 absTol 之前
+// 的 `r > b.tol` **逐位等价**，不是「大致等价」。
+//
+// ⚠️ 调用方必须保证 |total| != 0（bandDiagnosis 已经把零分母挡在 skipped 那条路上）。
+func bandLimitRatio(b caliberBand, total float64) float64 {
+	return math.Max(b.tol, b.absTol/math.Abs(total))
 }
 
 // bandDiagnosis 返回空串表示这一族**算得出来**；否则返回一条说清「为什么算不出」
@@ -329,9 +373,14 @@ func gateDepositSum(in gateInput) Check {
 	// 🔴 先选族（M1c-4 的 TASK-007）：口径路由之后观测可能整族走 _mom，
 	// 闸门只认 _ytd 会让那些期次 skipped{absent} 而**完全不被校验** ——
 	// 那比拦错更糟：报告上看不出「这一期没查过」。
+	// 🔴 具名字段而不是位置初始化（M1c-4 的 TASK-010 加 absTol 时改）：位置初始化在
+	// 结构体加字段时**编译不过**是好事，但改对之后没有任何东西保证「哪个数进了哪个字段」
+	// —— tol 与 absTol 都是 float64，写反了照样编译、照样跑，只是判据整个错位。
 	b, skip := pickCaliberBand(in.obs.Values, []caliberBand{
-		{"ytd", FieldDepositFlowYTD, depositPartFields, in.cfg.DepositSumTolerance},
-		{"mom", FieldDepositFlowMoM, depositPartFieldsMoM, in.cfg.DepositSumToleranceMoM},
+		{name: "ytd", total: FieldDepositFlowYTD, parts: depositPartFields,
+			tol: in.cfg.DepositSumTolerance},
+		{name: "mom", total: FieldDepositFlowMoM, parts: depositPartFieldsMoM,
+			tol: in.cfg.DepositSumToleranceMoM, absTol: in.cfg.DepositSumToleranceMoMAbs},
 	})
 	if skip != nil {
 		return *skip
@@ -347,10 +396,21 @@ func gateDepositSum(in gateInput) Check {
 	// 判据一优先：绝对值都超了，再谈漂移没有意义。
 	// ⚠️ 比的是**选出的那一族的**容差，不是写死的 in.cfg.DepositSumTolerance；
 	// Reason 带上 total 列名 —— 两族容差不同，不写清是哪一族没法复核。
-	if r > b.tol {
+	// 🔴 在**绝对域**比较（M1c-4 的 TASK-010）：`|Σ分项−合计| > max(K_abs, K_rel×|合计|)`。
+	// absTol==0 的族（ytd、以及 corp_loan 两族）逐位等价于原来的 `r > b.tol`。
+	// Reason 印出**实际用的那个门限**，理由见 bandLimit 的注释。
+	tot := math.Abs(in.v(b.total))
+	limit := bandLimitRatio(b, tot)
+	if r > limit {
 		c.Status = CheckFailed
-		c.Reason = fmt.Sprintf("tolerance_exceeded[%s]: residual %.4f exceeds %.4f (total=%s)",
-			b.name, r, b.tol, b.total)
+		// `exceeds %.4f` 印的就是**判定用的那个门限**（比值域），与 residual 同量纲。
+		// 括号里再给一次绝对量与算式，让「为什么这一期过/不过」不必自己换算：
+		// K_abs=0 的族（ytd、corp_loan 两族）括号里的 max 第一项恒为 0，读起来即
+		// 「门限就是 K_rel」。
+		c.Reason = fmt.Sprintf(
+			"tolerance_exceeded[%s]: residual %.4f exceeds %.4f "+
+				"(=max(K_abs %.0f/|%.0f|, K_rel %.4f)，绝对门限 %.0f 亿元, total=%s)",
+			b.name, r, limit, b.absTol, tot, b.tol, limit*tot, b.total)
 		return c
 	}
 
@@ -468,9 +528,13 @@ func gateCorpLoanReconcile(in gateInput) Check {
 	// 既进不了观测表也进不了 pending（savePending 先 json.Marshal 报告）。一期企业贷款
 	// 增量恰好为零是可能的，不该因此让数据整个消失。这条纪律没有变，只是判定它的地方
 	// 挪进了 bandDiagnosis —— 两族都零分母时 Reason 会同时带上两族的 zero_denominator:。
+	// absTol 刻意不设（保持 0 ⇒ 纯比值）：本闸两族的分母都远离零（ytd min=25500 /
+	// mom min=2335 且恒为正，实测 79 期语料）⇒ 比值判据在这里是有效的仪器。
 	b, skip := pickCaliberBand(in.obs.Values, []caliberBand{
-		{"ytd", FieldLoanCorpTotalYTD, corpLoanPartFields, in.cfg.CorpLoanTolerance},
-		{"mom", FieldLoanCorpTotalMoM, corpLoanPartFieldsMoM, in.cfg.CorpLoanToleranceMoM},
+		{name: "ytd", total: FieldLoanCorpTotalYTD, parts: corpLoanPartFields,
+			tol: in.cfg.CorpLoanTolerance},
+		{name: "mom", total: FieldLoanCorpTotalMoM, parts: corpLoanPartFieldsMoM,
+			tol: in.cfg.CorpLoanToleranceMoM},
 	})
 	if skip != nil {
 		return *skip
