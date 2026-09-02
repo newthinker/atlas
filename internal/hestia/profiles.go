@@ -300,8 +300,12 @@ func tsfStockRE(name string) *regexp.Regexp {
 // 当月口径下写 momField。把口径写进**列名**而不是加一个 caliber 列，理由见 spec
 // §2.1 —— 加列要动双时态主键与 v_hestia_current，与 M1c-3b 拒绝「业务键加 kind」同源。
 //
-// ⚠️ 本任务只把两列**声明**齐；按口径选列（`pick`）与抽取侧路由是 M1c-4 的
-// TASK-005。在那之前 momField 只被覆盖度检查读到，不参与任何抽取。
+// 两列的**声明**由 M1c-4 的 TASK-004 加齐；按口径选列（`pick`）与抽取侧路由由 TASK-005 接上。
+//
+// ⚠️ 本注释原文的末句是「**在那之前 momField 只被覆盖度检查读到，不参与任何抽取**」——
+// 写于 TASK-004 的前瞻性说法，TASK-005 落地后即失真（M1c-4 的 TASK-014 订正）：
+// momField 现在由紧随其后的 pick 在当月口径下选出，**直接参与抽取**。
+// **它写下时是对的**，让它变假的是后来那次改动。
 type nameField struct{ name, ytdField, momField string }
 
 // pick 按口径选列（M1c-4 的 TASK-005）。
@@ -573,13 +577,22 @@ func scopeTotalRE(sc loanScope) *regexp.Regexp {
 // 三个流量族的**合计**句都是单条模板各管一个（flowRE / tsfFlowTotalRE），
 // 不属于任何清单表。分项的当月列在 nameField.momField 里，不在本函数。
 //
-// 🔴 **其中两个当前没有任何写入方**（M1c-4 的 TASK-004 核实，锚 4670ccb）：
-// deposit_flow_mom 与 loan_flow_mom 的合计句走 selectRMBCumulativeFlow
-// （extract.go 的存款/贷款两节），它的 keep 条件是 `cumulativePeriods[m[1]] &&
-// m[2] == currencyRMB` —— **只保累计句**。把这两列加进本函数只是让
-// TestTemplateTablesCoverAllFields 覆盖得上，**不等于它们会被写**。
-// 改成按口径路由是 M1c-4 的 TASK-005 的事（第三个 tsf_flow_mom 不同：它走
-// extractTSFFlowSection，TASK-005 的实施步骤已明确覆盖）。
+// 🔴 **三个 *_mom 合计字段现在都有写入方**：deposit_flow_mom 与 loan_flow_mom 由
+// selectRMBFlowByCaliber 按口径路由后写入（extract.go 的存款节 :678 / 贷款节 :736），
+// tsf_flow_mom 走 extractTSFFlowSection。
+//
+// ⚠️ 本注释原文说这两个「**当前没有任何写入方**……**不等于它们会被写**」，
+// **结论方向恰好相反**（M1c-4 的 TASK-014 订正）。原文引述的两样东西也都已不存在：
+// 函数 `selectRMBCumulativeFlow` 已被 `selectRMBFlowByCaliber` 取代，
+// 其 `keep` 条件已被 `keepCum` / `keepCur` 两个谓词取代。
+//
+// 🔴 **它写下时是对的，不是「引入时就假」**（时序已实测，本任务复核过）：
+//
+//	f56ec05  feat(TASK-004): 22 个当月口径字段原子扩容   ← 本注释在此写下，当时确实无写入方
+//	189ca5e  feat(TASK-005): 分部门段与合计句按口径路由   ← 是它接上了写入方，使本注释失真
+//
+// 两个 commit，且 TASK-004 是 TASK-005 的祖先。⇒ 这是**时序问题不是粗心**：
+// 前瞻性注释在写下的那一刻准确，而让它变假的那次改动没有回头改它。
 //
 // 无声连锁：不补上的话，2022-07 那篇（需求文档正是拿它论证 deposit_flow_mom
 // 存在理由的）修完分部门后仍会整篇被拒，而 TASK-007 的 deposit_sum mom 族会恒

@@ -187,7 +187,7 @@ func extractFields(secs []section, extractor string) (map[string]float64, error)
 // 零命中报错是显然的；**多命中同样报错**，这一半是返工补上的（QA WARNING-1）。
 // 此前它用 FindStringSubmatch，多命中时**静默取最左那个**——于是本文件开头
 // 纪律 2 自述的「孪生句一律按捕获组挑并要求唯一」实际只落实在
-// selectRMBBalance / selectRMBCumulativeFlow 两族，约 30 条清单模板仍在最左优先，
+// selectRMBBalance / selectRMBFlowByCaliber 两族，约 30 条清单模板仍在最左优先，
 // 而那个选择零测试覆盖（变异「取最后一个匹配」因此存活）。
 //
 // 危害与那两族完全同类，只是位置更深：把单月分部门句排在累计句之前（合法排版，
@@ -306,7 +306,7 @@ func unrecognisedPeriodPrefixes(body string, re *regexp.Regexp) []string {
 		if flowEnds[loc[1]] {
 			continue // 这一句 flowRE 认得，前缀不是问题
 		}
-		// 🔴 **只看人民币句**，与 selectRMBCumulativeFlow 的谓词同一个定义域。
+		// 🔴 **只看人民币句**，与 selectRMBFlowByCaliber 的谓词同一个定义域。
 		//
 		// 少了这一句，2020-04 的「当月外币贷款增加207亿美元」会被报成「前缀不认识」——
 		// 机制上它确实是（`当月` 不在 periodAlt 里），但**即使前缀被认识，那一句也会被
@@ -328,11 +328,6 @@ func unrecognisedPeriodPrefixes(body string, re *regexp.Regexp) []string {
 	return out
 }
 
-// selectRMBCumulativeFlow 挑出人民币口径、期内累计（非单月）的合计句。
-// 捕获组：1=期次 2=口径 3=方向词 4=数值 5=单位。
-//
-// 两个维度都要判：外币孪生句的期次前缀同样是「全年/上半年」，只判期次会取到
-// 「全年外币存款增加2135亿美元」。
 // selectRMBFlowByCaliber 挑出人民币口径的合计句，并**报出它是哪一族**
 // （M1c-4 的 TASK-005 由原 selectRMBCumulativeFlow 改成路由）。
 //
@@ -518,7 +513,12 @@ var sectorPeriodRE = regexp.MustCompile(periodPat)
 
 // —— 分部门抽取的覆盖面（M1c-3a 的 TASK-011，QA R2）——
 //
-// 这两个函数列出**抽取真正会去命中的全部模板**，供 checkSectorCaliber 定位被守护的那一段。
+// 这两个函数列出**抽取真正会去命中的全部模板**，供 sectorSegmentStart 定位被守护的那一段
+// （再由 sectorCaliberOf 判口径）。
+//
+// ⚠️ 原文写的是「供 **checkSectorCaliber** 定位」——该函数已在 M1c-4 的 TASK-005（189ca5e）
+// 被删、由 sectorCaliberOf 取代，这句引用随之成为孤儿（M1c-4 的 TASK-014 订正）。
+// 与本轮另外几处同形：**写下时是对的，是后来那次改动让它失真**。
 // 它们与 extractDepositSection / extractLoanSection 从**同一批数据**（depositItems /
 // loanScopes）派生，不另写一份名单 —— 判据的定义域与被守护动作的定义域必须同源，
 // 而「两份名单迟早分叉」正是本文件开头那条纪律。
@@ -570,6 +570,20 @@ func sectorSegmentStart(body, anchor string, coverage []*regexp.Regexp) int {
 	return start
 }
 
+// —— 以下 24 行是**已删函数 checkSectorCaliber 的文档**，描述的是被 M1c-4 的 TASK-005
+// 推翻的那版设计（「当月口径 ⇒ 拒绝装进 *_ytd」）。函数在 189ca5e 被删，文档留在了原地
+// （M1c-4 的 TASK-014 订正）。
+//
+// 🔴 **它此前与下方 sectorCaliber 的文档之间没有空行 ⇒ godoc 上它是 `type sectorCaliber int`
+// 的文档的一部分**，与紧接其后那份**结论相反**的正确说明并排同屏。这是不看渲染结果就
+// 发现不了的坑：源码里它看起来只是「上面有一段旧注释」。下面那个空行就是修复本身。
+//
+// 保留而不删：它记着那条拒绝**当初为什么存在**，而 TASK-005 只是换了保留形式（见下方
+// 「它取代了原来的…」一节）—— 抹掉理由会让后人以为那条拒绝是可有可无的。
+//
+// ⚠️ 以下内容**描述的是历史设计，不是当前行为**。当前行为见下方 sectorCaliber 与
+// sectorCaliberOf 的文档。
+//
 // checkSectorCaliber 校验分部门段的口径：取**被守护那段的起点**之前最近的期次前缀，
 // 查 cumulativePeriods。不在表里就报错，一个分部门字段都不产出。
 //
@@ -594,6 +608,7 @@ func sectorSegmentStart(body, anchor string, coverage []*regexp.Regexp) int {
 // ⚠️ **修法不是换一个更宽的锚点短语**：失效模式是**判据的定义域与被守护动作的定义域
 // 不一致**，换个短语仍然是两个不同的定义域。故起点改由 sectorSegmentStart 从**抽取
 // 用的同一批模板**求出（depositSectorCoverage / loanSectorCoverage）。
+
 // sectorCaliber 是一个分部门段的口径（M1c-4 的 TASK-005）。
 //
 // 🔴 **它取代了原来的「读不出口径就拒绝整篇」**，而原拒绝理由背后的担忧一个字都没有放松，
@@ -942,7 +957,7 @@ func extractTSFStockArticle(text string) (map[string]float64, error) {
 //
 // 天真放宽会让最后那 25 篇同时命中两句，mustMatch 报 matched 2 sentences ——
 // **原本成功的 25 篇会被打坏**。所以这里不放宽模板，而是把两种措辞都收下来，
-// 再按口径挑唯一一条，与 selectRMBCumulativeFlow 对付孪生句的手法同构。
+// 再按口径挑唯一一条，与 selectRMBFlowByCaliber 对付孪生句的手法同构。
 var tsfFlowArticleTotalRE = regexp.MustCompile(
 	`(?:([0-9]{4})年([0-9]{1,2})月)?社会融资规模增量(累计)?为` + numPat + unitPat)
 

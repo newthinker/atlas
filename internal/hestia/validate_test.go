@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"maps"
 	"math"
 	"slices"
@@ -2065,4 +2068,102 @@ func TestDepositSumYTDHasNoAbsoluteFloor(t *testing.T) {
 		"🔴 同一组数在 mom 族因 K_abs 放行是对的，在 ytd 族必须仍被比值拦下 —— "+
 			"这里变绿说明 ytd 也被接上了绝对下限，而人类裁决它保持纯比值。Reason=%q", c.Reason)
 	assert.Contains(t, c.Reason, "tolerance_exceeded[ytd]")
+}
+
+// —— M1c-4 的 TASK-014：gateCorpLoanReconcile 绕开 bandLimitRatio ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1c-4 的 TASK-014）
+// functional[0] "absTol 对 corp_loan 这道闸不得静默无效"
+//   → TestCorpLoanBandRespectsAbsTol（band 层：填非零 absTol ⇒ 门限真的抬高）
+//   → TestCorpLoanReconcileGoesThroughBandLimitRatio（接线层：这道闸真的走那条路径）
+//
+// 🔴 **为什么要两条而不是一条端到端的**：corp_loan 两族的 absTol **今天没有任何
+// 配置来源**（Thresholds 只为 deposit 当月族提供了 DepositSumToleranceMoMAbs），
+// 闸内两个 caliberBand 的 absTol 都是字面量 0 ⇒ **测试无法从外部把它填成非零**，
+// 端到端的行为断言写不出来。
+//
+// 拆成两条各自可判的：
+//   - band 层证明「填了 absTol，bandLimitRatio 就会抬高门限」——它**改前改后都绿**，
+//     单独看没有守卫价值，是另一条的前提；
+//   - 接线层证明「这道闸的判定真的经过 bandLimitRatio」——它**改前红、改后绿**。
+//
+// 两条合起来才等于「absTol 对这道闸有效」。缺前者，接线测试不知道自己在守什么；
+// 缺后者，band 层的正确性到不了闸门。
+//
+// ⚠️ **今天它是陷阱不是活缺陷**：corp_loan 两族 absTol 均为 0（validate.go 里
+// 「absTol 刻意不设」有实测理由），`math.Max(tol, 0/|total|) == tol` 精确成立
+// ⇒ 改前改后的判定结果**逐位相同**，真语料上一个字节都不会变。守的是将来：
+// 谁给这两族填一个 absTol，改前会被**静默忽略**——编译通过、测试全绿、报告照出。
+
+// band 层：填了非零 absTol，门限必须真的抬高，且小分母上由 absTol 接管。
+func TestCorpLoanBandRespectsAbsTol(t *testing.T) {
+	// 形状照 gateCorpLoanReconcile 的 ytd 族，只把 absTol 填成非零
+	b := caliberBand{
+		name:   "ytd",
+		total:  FieldLoanCorpTotalYTD,
+		parts:  corpLoanPartFields,
+		tol:    DefaultThresholds().CorpLoanTolerance,
+		absTol: 500, // 亿元
+	}
+	require.Positive(t, b.tol, "用例前提：K_rel 非零")
+
+	// 大分母：K_rel 占优，门限就是 tol
+	big := bandLimitRatio(b, 1_000_000)
+	assert.InDelta(t, b.tol, big, 1e-12,
+		"大分母上 absTol/|total| 远小于 tol，门限应当仍是 K_rel")
+
+	// 小分母：absTol 接管，门限必须**高于** tol —— 这就是「填了它就该生效」
+	small := bandLimitRatio(b, 1000)
+	assert.InDelta(t, 0.5, small, 1e-12, "absTol 500 / |total| 1000 = 0.5")
+	assert.Greaterf(t, small, b.tol,
+		"🔴 小分母上门限没被 absTol 抬起来（tol=%.4f）—— 那 absTol 就白填了", b.tol)
+
+	// absTol==0（今天 corp_loan 的实际取值）⇒ 与纯比值逐位等价
+	zero := b
+	zero.absTol = 0
+	assert.Equal(t, zero.tol, bandLimitRatio(zero, 1000),
+		"absTol==0 时门限必须**逐位**等于 tol，这是本次改动零行为变化的依据")
+}
+
+// 接线层：gateCorpLoanReconcile 的判定必须经过 bandLimitRatio。
+//
+// 🔴 **改前这一条是红的** —— 那时闸内直接写 `if r <= b.tol`，caliberBand.absTol
+// 对它完全无效，而**没有任何测试会因此变红**（两族 absTol 都是 0 ⇒ 行为逐位相同）。
+// 这正是它要守的东西：一个只在「将来有人填 absTol」时才发作的静默失效面。
+//
+// 用 go/ast 而不是整文件子串匹配：子串会被注释里提到的 "bandLimitRatio" 满足
+// —— 而本文件的注释里**恰好**多处提到它，子串版会平凡为真。
+func TestCorpLoanReconcileGoesThroughBandLimitRatio(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "validate.go", nil, 0)
+	require.NoError(t, err)
+
+	calls := func(fnName string) []string {
+		var out []string
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Name.Name != fnName {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok {
+					if id, ok := c.Fun.(*ast.Ident); ok {
+						out = append(out, id.Name)
+					}
+				}
+				return true
+			})
+		}
+		return out
+	}
+
+	got := calls("gateCorpLoanReconcile")
+	require.NotEmpty(t, got, "前提：找得到 gateCorpLoanReconcile 的函数体")
+	assert.Containsf(t, got, "bandLimitRatio",
+		"🔴 gateCorpLoanReconcile 没走 bandLimitRatio ⇒ caliberBand.absTol 对这道闸"+
+			"**静默无效**：谁给它填一个 absTol，会被忽略而编译通过、测试全绿。实际调用=%v", got)
+
+	// 对照：兄弟闸一直是走的。两条一起断言，才分辨得出「本条红」是接线掉了，
+	// 而不是这个 AST 遍历本身写坏了。
+	assert.Contains(t, calls("gateDepositSum"), "bandLimitRatio",
+		"对照组：gateDepositSum 一直走 bandLimitRatio。它也红 ⇒ 是本测试的遍历写坏了")
 }

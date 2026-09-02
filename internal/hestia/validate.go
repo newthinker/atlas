@@ -396,9 +396,19 @@ func gateDepositSum(in gateInput) Check {
 	// 判据一优先：绝对值都超了，再谈漂移没有意义。
 	// ⚠️ 比的是**选出的那一族的**容差，不是写死的 in.cfg.DepositSumTolerance；
 	// Reason 带上 total 列名 —— 两族容差不同，不写清是哪一族没法复核。
-	// 🔴 在**绝对域**比较（M1c-4 的 TASK-010）：`|Σ分项−合计| > max(K_abs, K_rel×|合计|)`。
+	// 🔴 判据的**语义**是 `|Σ分项−合计| > max(K_abs, K_rel×|合计|)`（M1c-4 的 TASK-010），
+	// 但**实际在比值域比较**：两边同除 |合计| 得 `r > max(K_abs/|合计|, K_rel)`。
 	// absTol==0 的族（ytd、以及 corp_loan 两族）逐位等价于原来的 `r > b.tol`。
-	// Reason 印出**实际用的那个门限**，理由见 bandLimit 的注释。
+	// Reason 印出**实际用的那个门限**，理由见 bandLimitRatio 的注释。
+	//
+	// ⚠️ 本注释原文是「🔴 在**绝对域**比较……理由见 bandLimit 的注释」，**两处都已失真**
+	// （M1c-4 的 TASK-014 订正）：
+	//   - 「绝对域」描述的是 TASK-010 **已实测证否并废弃**的第一版实现 —— 绝对域要算
+	//     `r×|合计|`，那次乘法的舍入会让 absTol==0 的族在**恰好等于容差**时判定翻转，
+	//     `TestDepositSumBoundaryIsInclusive` 当场变红。换成比值域正是为了消掉它。
+	//   - `bandLimit` 这个标识符**从未存在**，函数叫 `bandLimitRatio`（名字里的 Ratio
+	//     恰恰就是「在比值域」的意思）。
+	// ⇒ 留着它比没有更糟：它读起来像一份有据可查的设计说明，而它描述的那个设计已被推翻。
 	tot := math.Abs(in.v(b.total))
 	limit := bandLimitRatio(b, tot)
 	if r > limit {
@@ -548,7 +558,18 @@ func gateCorpLoanReconcile(in gateInput) Check {
 	r := math.Abs(residual) / math.Abs(total)
 
 	c := Check{Value: &residual}
-	if r <= b.tol {
+	// 🔴 经 bandLimitRatio 而不是直接比 b.tol（M1c-4 的 TASK-014）。
+	//
+	// ⚠️ **今天这是陷阱不是活缺陷**：本闸两族的 absTol 都是 0（见上面「absTol 刻意不设」
+	// 那段的实测理由），而 `math.Max(tol, 0/|total|)` 对有限非零 total 恒等于 tol
+	// （0.0/|total| == +0.0，tol > 0）⇒ 改前改后的判定**逐位相同**，真语料上一个
+	// 字节都不会变。pickCaliberBand 已保证 total != 0。
+	//
+	// 改它是为了消除一个**只在将来发作**的静默失效面：改前谁给这两族填一个 absTol，
+	// 会被直接忽略 —— 编译通过、测试全绿、报告照出，没有任何东西会告诉他。
+	// 由 TestCorpLoanReconcileGoesThroughBandLimitRatio（接线）与
+	// TestCorpLoanBandRespectsAbsTol（band 层）合起来守着。
+	if r <= bandLimitRatio(b, math.Abs(total)) {
 		c.Status = CheckPassed
 		return c
 	}
