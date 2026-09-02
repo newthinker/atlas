@@ -381,7 +381,7 @@ func TestStoreExposesNoWriteMethods(t *testing.T) {
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	want := []string{"Close", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "RecentObservations", "RecentPending", "Save"}
+	want := []string{"Close", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "RecentObservations", "RecentPending", "Save"}
 	assert.Equalf(t, want, got,
 		"只应导出这 %d 个只读方法（%s）；出现 Insert/Upsert 等写口即违反单一写入口约束",
 		len(want), strings.Join(want, "、"))
@@ -434,7 +434,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
+	want := []string{"BackfillFetch", "BackfillLoad", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -478,6 +478,19 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // （reflect 版）；DefaultThresholds 是包级函数，只打红本条。两条都登记过才算数——
 // 这恰好也演示了那两条测试为什么互补而不能互替。
 //
+// —— 为什么名单里多了 Store.PrecedingAll（M1c-4 / TASK-008 追加）——
+//
+// 同样是**登记而不是放宽**。它与 Store.Preceding 同形：SELECT + 只读，同时打红
+// 本条（AST 版）与 TestStoreExposesNoWriteMethods（reflect 版），故两处都登记。
+//
+// 它比 Preceding 多读一张表（hestia_pending），仍然**只有 SELECT**——新增的
+// scanPendingObservation 是未导出的读函数，json.Unmarshal 进内存，不碰任何写口。
+//
+// 🔴 为什么不是给 Preceding 加参数而要多一个导出方法（那会多一个导出符号）：
+// 两者**语义不同**——Preceding 答「上一期可信的观测是什么」，PrecedingAll 答
+// 「近期发生过什么」。把它压成一个 bool 参数，选错的后果是「逐期比较拿未过闸的
+// 数据当基准值」，而调用点上只是一个字面量。**多一个名字换一次编译期的表态。**
+
 // —— 为什么名单里多了 Calibrate（M1c-2 / TASK-004 追加）——
 //
 // 同上三条，是**登记而不是放宽**。Calibrate 是标定的导出入口，`cmd/atlas` 的
@@ -1872,6 +1885,189 @@ func TestPrecedingWrapsQueryError(t *testing.T) {
 
 // Store 必须满足 History。签名一旦漂移，这行在编译期就红。
 var _ History = (*Store)(nil)
+
+// savePendingMonthly 存一期**未过闸**的月度观测（落 hestia_pending）。
+//
+// 用 failing() 而不是直接 INSERT：走的是与生产同一条 Save 分支，
+// 否则测试会在「pending 行长什么样」这件事上与实现各说各话。
+func savePendingMonthly(t *testing.T, s *Store, period string, values map[string]float64) {
+	t.Helper()
+	out, err := s.Save(context.Background(), Observation{
+		Meta: Meta{
+			Period:         period,
+			PeriodType:     "monthly",
+			PublishedAt:    period + "-15",
+			ArticleID:      "art-pending-" + period,
+			CaliberVersion: "2025-01",
+			Extractor:      extractorV2,
+		},
+		Values: values,
+	}, failing())
+	require.NoError(t, err)
+	require.Equal(t, TablePending, out.Table, "前置条件：%s 必须落在 pending", period)
+}
+
+// PrecedingAll 要看见 pending 里的期次 —— 这正是 TASK-008 的存在理由。
+//
+// ⚠️ 对照断言不可省：同一批数据下 Preceding 的语义必须**一字不变**。
+// 只断言「PrecedingAll 看见了」而不断言「Preceding 仍然看不见」，
+// 会放过「把 pending 混进权威读口」这个**远比原缺陷严重**的改法——
+// stock_continuity 等闸门拿 Preceding 当「上一期可信值」，混进去就是拿未过闸
+// 的数当基准。两条一起断言，才把「只放宽新读口」这件事钉住。
+func TestPrecedingAllSeesPendingPeriods(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-11", map[string]float64{FieldM2: 300})
+	savePendingMonthly(t, s, "2025-12", map[string]float64{FieldM2: 301})
+
+	all, err := s.PrecedingAll(ctx, "2026-01", "monthly", 6)
+	require.NoError(t, err)
+	require.Len(t, all, 2, "两张表的期次都要在")
+	assert.Equal(t, "2025-12", all[0].Meta.Period, "合并后仍按 period 降序，pending 的 12 月排最前")
+	assert.Equal(t, "2025-11", all[1].Meta.Period)
+	assert.Equal(t, 301.0, all[0].Values[FieldM2], "pending 行的 values_json 要真解出来")
+
+	// —— 对照组：Preceding 的语义没变 ——
+	only, err := s.Preceding(ctx, "2026-01", "monthly", 6)
+	require.NoError(t, err)
+	require.Len(t, only, 1, "Preceding 仍然只看权威表")
+	assert.Equal(t, "2025-11", only[0].Meta.Period, "pending 的 2025-12 不得出现在 Preceding 里")
+}
+
+// 同一期先落 pending、后被重发并过闸时，两张表都有这一期。
+// 合并必须去重，且**权威表优先** —— 否则闸门会拿被取代的旧值当历史。
+func TestPrecedingAllDeduplicatesRepublishedPeriods(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	savePendingMonthly(t, s, "2025-12", map[string]float64{FieldM2: 111})
+	saveMonthly(t, s, "2025-12", map[string]float64{FieldM2: 999})
+
+	all, err := s.PrecedingAll(ctx, "2026-01", "monthly", 6)
+	require.NoError(t, err)
+	require.Len(t, all, 1, "同一期不得出现两行")
+	assert.Equal(t, 999.0, all[0].Values[FieldM2],
+		"权威表优先：过闸后的值必须盖住那条 pending，反了就是拿废弃值当历史")
+}
+
+// 截断发生在**合并之后**，不是各取 n。
+//
+// 造型：3 期 accepted（远）+ 3 期 pending（近），n=3 ⇒ 返回的三期应当**全是 pending**。
+// 若实现写成「accepted 取 n、pending 取 n、拼起来截断」，accepted 会占满前三格，
+// 更近的三期反被挤掉 —— 那正好是本任务要修的缺陷的镜像（近期发生的事看不见）。
+func TestPrecedingAllTruncatesAfterMerge(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, p := range []string{"2025-07", "2025-08", "2025-09"} {
+		saveMonthly(t, s, p, map[string]float64{FieldM2: 300})
+	}
+	for _, p := range []string{"2025-10", "2025-11", "2025-12"} {
+		savePendingMonthly(t, s, p, map[string]float64{FieldM2: 301})
+	}
+
+	all, err := s.PrecedingAll(ctx, "2026-01", "monthly", 3)
+	require.NoError(t, err)
+	require.Len(t, all, 3)
+	got := []string{all[0].Meta.Period, all[1].Meta.Period, all[2].Meta.Period}
+	assert.Equal(t, []string{"2025-12", "2025-11", "2025-10"}, got,
+		"最近的三期全在 pending 里，截断必须在合并之后做")
+}
+
+func TestPrecedingAllIsolatesPeriodType(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	savePendingMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	all, err := s.PrecedingAll(ctx, "2026-01", "annual", 6)
+	require.NoError(t, err)
+	assert.Empty(t, all, "pending 侧同样要按 period_type 隔离，不能把月度混进年度序列")
+}
+
+// 与 Preceding 同一条纪律：LIMIT -1 在 SQLite 表示「不限制」。
+func TestPrecedingAllRejectsNonPositiveN(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	saveMonthly(t, s, "2025-11", map[string]float64{FieldM2: 300})
+	savePendingMonthly(t, s, "2025-12", map[string]float64{FieldM2: 301})
+
+	for _, n := range []int{0, -1} {
+		all, err := s.PrecedingAll(ctx, "2026-01", "monthly", n)
+		require.NoError(t, err)
+		assert.Nilf(t, all, "n=%d 必须返回空而不是整个序列", n)
+	}
+
+	// n<=0 必须**在碰库之前**就返回。
+	//
+	// 只断言返回值分辨不出 `n <= 0` 与 `n < 0`：n=0 时后者会往下走，而
+	// Preceding 自己也挡 n<=0、SQL 的 LIMIT 0 又取不到行 ⇒ 返回值逐字相同
+	// （变异测试里 M4 正是靠这个存活的）。用已取消的 ctx 把「有没有去查库」
+	// 这个差别变成可观测的：提前返回 ⇒ 无错；往下走 ⇒ Preceding 报 ctx 取消。
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	all, err := s.PrecedingAll(dead, "2026-01", "monthly", 0)
+	require.NoError(t, err, "n=0 应当在碰库之前返回，连已取消的 ctx 都不该看见")
+	assert.Nil(t, all)
+}
+
+func TestPrecedingAllWrapsQueryError(t *testing.T) {
+	s := newTestStore(t)
+	savePendingMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := s.PrecedingAll(ctx, "2026-01", "monthly", 6)
+	require.Error(t, err)
+	assert.Nil(t, got, "出错时不得返回半截结果")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.ErrorContains(t, err, "2026-01")
+	assert.ErrorContains(t, err, "monthly")
+	require.NotNil(t, errors.Unwrap(err), "必须包住底层错误")
+}
+
+// 🔴 上面那条**测不到 pending 这条查询**：ctx 一取消，内层的 Preceding 先失败并
+// 提前返回，断言由**另一条路径**满足 —— 覆盖率画出来那一格是白的。
+// （与 M1c-4 的 TASK-003 是同一形状：测试恒绿，因为它守的东西根本没被执行。）
+//
+// 这里让权威表那侧成功、只把 pending 表拆掉，把那条查询单独逼出来。
+func TestPrecedingAllWrapsPendingQueryError(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+	saveMonthly(t, s, "2025-11", map[string]float64{FieldM2: 300})
+
+	_, err := rawDB(t, path).Exec(`DROP TABLE ` + TablePending)
+	require.NoError(t, err)
+
+	// 前提：权威表那侧此刻仍然是好的 —— 否则又变成上面那条的重复
+	ok, err := s.Preceding(ctx, "2026-01", "monthly", 6)
+	require.NoError(t, err, "前提：Preceding 必须仍然成功，本条才测得到 pending 那条查询")
+	require.Len(t, ok, 1)
+
+	got, err := s.PrecedingAll(ctx, "2026-01", "monthly", 6)
+	require.Error(t, err, "pending 表读不了必须报错，不能悄悄退化成「只有权威表」")
+	assert.Nil(t, got, "出错时不得返回半截结果（那半截看起来完全正常）")
+	assert.ErrorContains(t, err, "2026-01")
+	assert.ErrorContains(t, err, "monthly")
+	require.NotNil(t, errors.Unwrap(err), "必须包住底层错误")
+}
+
+// values_json 存的不是合法 JSON 时必须报错，**不能当成空 Values 静默放行**。
+//
+// 空 Values 的后果不是「少一期历史」而是「多一期残差算不出来的历史」——
+// depositResidualOf 对它返回 false，于是这一期从 hist 里消失，
+// 而 Reason 里的 n 会让人以为库里就只有那么多期。
+func TestPrecedingAllRejectsCorruptPendingValues(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+	savePendingMonthly(t, s, "2025-12", map[string]float64{FieldM2: 300})
+	_, err := rawDB(t, path).Exec(
+		`UPDATE ` + TablePending + ` SET values_json = '{oops'`)
+	require.NoError(t, err)
+
+	got, err := s.PrecedingAll(ctx, "2026-01", "monthly", 6)
+	require.Error(t, err, "坏 JSON 必须报错")
+	assert.Nil(t, got)
+	assert.ErrorContains(t, err, "2025-12", "错误要带上是哪一期坏了")
+}
 
 func TestHasPeriod(t *testing.T) {
 	ctx := context.Background()
