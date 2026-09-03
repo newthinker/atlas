@@ -10,14 +10,25 @@ import (
 	"github.com/spf13/viper"
 )
 
-// StorageCfg 是库文件位置。
+// StorageCfg 是 storage 段。两个路径都是相对进程 cwd 的（约束 C8）。
 //
-// db_path 用相对路径，按进程 cwd 解析（约束 C8）——plist 的 WorkingDirectory
+// db_path 用相对路径，按进程 cwd 解析——plist 的 WorkingDirectory
 // 已指向 runtime，手工执行时需自行 cd。status 命令会打印解析后的绝对路径，
 // 免得在错误的 cwd 下静默指向一个不存在的库然后报告「0 期」。
 type StorageCfg struct {
 	DBPath string `mapstructure:"db_path"`
+	// SnapshotDir 是 ingest 抓到的原文落盘目录（M1d 的 TASK-001）。
+	//
+	// 文件名 <article_id>.html，与回填语料 articles/<id>.html 同一命名规则，
+	// 将来把增量快照并进 backfill load 不用换格式。
+	// 未写时预填 defaultSnapshotDir；显式空串在 validate 里被拒——快照是方案报告
+	// M1c 的 DoD 项，不提供「关掉」的配置形态。
+	SnapshotDir string `mapstructure:"snapshot_dir"`
 }
+
+// defaultSnapshotDir 与 configs/hestia.yaml 里显式写的那个值相同；yaml 显式写出
+// 是为了让运维一眼看到它，这里预填是为了让别的配置文件漏写时也不至于空串。
+const defaultSnapshotDir = "data/hestia-snapshots"
 
 // Config 是 configs/hestia.yaml 的内存形态。
 //
@@ -46,7 +57,10 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("hestia: reading config %s: %w", path, err)
 	}
 
-	cfg := Config{Thresholds: DefaultThresholds()}
+	cfg := Config{
+		Storage:    StorageCfg{SnapshotDir: defaultSnapshotDir},
+		Thresholds: DefaultThresholds(),
+	}
 	if err := v.Unmarshal(&cfg); err != nil {
 		return Config{}, fmt.Errorf("hestia: parsing config %s: %w", path, err)
 	}
@@ -180,6 +194,8 @@ func (c Config) validate() error {
 	switch {
 	case c.Storage.DBPath == "":
 		return errors.New("storage.db_path is required")
+	case c.Storage.SnapshotDir == "":
+		return errors.New("storage.snapshot_dir must not be empty")
 	case c.Discover.IndexURL == "":
 		return errors.New("discover.index_url is required")
 	case c.Discover.MaxPages < 1:

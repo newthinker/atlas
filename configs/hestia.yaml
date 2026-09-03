@@ -12,13 +12,19 @@
 #
 # 2026-09-01（M1c-4 的 TASK-004）：magnitude_ranges 由 54 项扩到 76 项，新增的
 # 22 项是当月口径列（*_mom）的**占位**区间，未经标定 —— 见该段的注释。
-config_version: "2026-09-02"
+# 2026-09-03（M1d 的 TASK-001）：storage 段加 snapshot_dir。
+config_version: "2026-09-03"
 
 storage:
   # 相对路径，按进程 cwd 解析（约束 C8）。plist 的 WorkingDirectory 已指向 runtime；
   # 手工执行时需自行 cd，否则会在错误的 cwd 下静默指向一个不存在的库然后报告「0 期」。
   # `atlas hestia status` 会打印解析后的绝对路径，就是为了让这种情况当场可见。
   db_path: data/hestia.db
+  # ingest 抓到的原文落盘目录（M1d 的 TASK-001）。文件名 <article_id>.html，与回填语料
+  # articles/<id>.html 同一命名规则。同 id 已存在且字节相同则跳过；字节不同**不覆盖**，
+  # 另存 <article_id>.<UTC 时间戳>.html——央行改稿是事实，两版都留。
+  # 相对路径，按进程 cwd 解析，与 db_path 同约定。
+  snapshot_dir: data/hestia-snapshots
 
 discover:
   # 央行「沟通交流 > 新闻发布」栏目。栏目 ID 不写死在代码里（分页模板从页面解析），
