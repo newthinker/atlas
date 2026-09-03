@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1009,6 +1010,7 @@ discover:
 //   functional[2] plist 在 --hestia-config 对之后传 --config                  → TestHestiaPlistPassesMainConfig
 //   boundary[0]   --help 里 only-period / force 两行都在，文案说 requires --force → TestHestiaOnlyPeriodHelp
 //   error_handling[0] 配置错误时不得先打 notify 行                            → TestHestiaIngestPrintsNotifyStatus（config error 子用例）
+//   functional[1] 返工：IngestDeps 的 Notify / OnlyPeriod 两行接线各有能转红的用例 → TestHestiaIngestWiresOnlyPeriod、TestHestiaIngestWiresNotify
 // ============================================================================
 
 // --only-period 的两条前置校验在开库之前就拦：参数写错的人第一秒就知道。
@@ -1187,4 +1189,102 @@ func TestHestiaPlistPassesMainConfig(t *testing.T) {
 	require.NotEqual(t, -1, j, "既有的 --hestia-config 不得被顺手删掉")
 	assert.Equal(t, "/Users/zuowei/workspace/runtime/atlas/configs/hestia.yaml", args[j+1])
 	assert.Less(t, j, i, "--config 对放在 --hestia-config 对之后")
+}
+
+// ── 返工（TASK-007 第 1 轮 REJECTED）：两行接线的端到端守卫 ─────────────────────
+//
+// 第一轮交付里 `IngestDeps{Notify: sender, OnlyPeriod: hestiaOnlyPeriod}` 这两行零测试：
+// 验证者变异实测删任一行全包仍绿——`notify: telegram` 照打而 Ingest 拿不到 sender，正是
+// M1d 立项要堵的「静默不发」。下面两条由验证者 test-m1d-a 在 a1f5bd4 上写好并实测
+// （原状绿、各自变异红、不碰外网），本轮原样收进来。
+//
+// 伪站点：索引页挂一篇 2025 年报（真实 article id，articleLinkRE 认这个形态），
+// 文章页喂 internal/hestia 的夹具，让 Ingest 真的走到入库。
+
+func wiringSite(t *testing.T) *httptest.Server {
+	t.Helper()
+	const id = "2026011509294440745"
+	article, err := os.ReadFile("../../internal/hestia/testdata/pboc-2025-12-annual.html")
+	require.NoError(t, err)
+	index := `<html><body>
+<a onclick="jumpTo(this,'1','1','/goutongjiaoliu/113456/113469/11040-%1.html')">尾页</a>
+<a href="/goutongjiaoliu/113456/113469/` + id + `/index.html" title="true">2025年金融统计数据报告</a>
+</body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/"+id+"/index.html") {
+			_, _ = w.Write(article)
+			return
+		}
+		_, _ = io.WriteString(w, index)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func wiringHestiaCfg(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	withConfig(t, `
+storage:
+  db_path: `+filepath.Join(t.TempDir(), "hestia.db")+`
+  snapshot_dir: `+filepath.Join(t.TempDir(), "snap")+`
+discover:
+  index_url: `+srv.URL+`/index.html
+  max_pages: 1
+  timeout: 5s
+`)
+}
+
+// --only-period 的值必须真传进 IngestDeps：给一个不存在的期次，Ingest 应在包级过滤处报
+// no candidate；若没接线，--force 会把那篇年报整个处理掉、返回 nil。
+func TestHestiaIngestWiresOnlyPeriod(t *testing.T) {
+	srv := wiringSite(t)
+	wiringHestiaCfg(t, srv)
+	prev := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() { cfgFile = prev; hestiaOnlyPeriod, hestiaForce = "", false })
+	hestiaOnlyPeriod, hestiaForce = "1999-01", true
+
+	cmd, out := newCapturingCmd()
+	err := runHestiaIngest(cmd, nil)
+	require.Error(t, err, "期次不存在必须响亮失败；out=%q", out.String())
+	assert.Contains(t, err.Error(), "no candidate for period 1999-01")
+	assert.Contains(t, out.String(), "only-period 1999-01: kept 0 of 1 candidate(s)")
+}
+
+// sender 必须真传进 IngestDeps：让 telegram 走一个本地 httptest 代理，入库后 Ingest 会发 P2，
+// 代理收到 CONNECT api.telegram.org 并拒绝 ⇒ Ingest 返回含 send P2 的错误。若没接线，
+// 代理一次都不会被碰、Ingest 返回 nil。全程不碰外网（telegram 端点写死 api.telegram.org，
+// WithProxy 是唯一注入点；假 token 到不了外网）。
+func TestHestiaIngestWiresNotify(t *testing.T) {
+	srv := wiringSite(t)
+	wiringHestiaCfg(t, srv)
+	var connects atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect && strings.HasPrefix(r.Host, "api.telegram.org") {
+			connects.Add(1)
+		}
+		http.Error(w, "test proxy refuses", http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(p, []byte(`notifiers:
+  telegram:
+    enabled: true
+    bot_token: fake-token
+    chat_id: "12345"
+    proxy: `+proxy.URL+`
+`), 0o600))
+	prev := cfgFile
+	cfgFile = p
+	t.Cleanup(func() { cfgFile = prev; hestiaForce = false })
+	hestiaForce = true
+
+	cmd, out := newCapturingCmd()
+	err := runHestiaIngest(cmd, nil)
+	require.Contains(t, out.String(), "notify: telegram", "前置：sender 已构造")
+	require.Contains(t, out.String(), "→ hestia_observations", "前置：那篇年报真的入库了；out=%q", out.String())
+	require.Error(t, err, "sender 接了线，P2 经代理必失败，Ingest 必须把它报出来")
+	assert.Contains(t, err.Error(), "send P2")
+	assert.GreaterOrEqual(t, connects.Load(), int32(1), "telegram 必须真的尝试经代理发送")
 }
