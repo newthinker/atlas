@@ -199,8 +199,10 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 		}
 	}
 	if len(errs) > 0 {
+		// 分子数的是**期**（failedPeriods），不是 errs 条数（QA A4）：P1 自身发送失败会往
+		// errs 里再追加一条，按 errs 计会打出「2/1 期失败」。
 		return fmt.Errorf("hestia ingest: %d/%d 期失败 (%s): %w",
-			len(errs), len(cands), strings.Join(failedPeriods, ", "), errors.Join(errs...))
+			len(failedPeriods), len(cands), strings.Join(failedPeriods, ", "), errors.Join(errs...))
 	}
 	return nil
 }

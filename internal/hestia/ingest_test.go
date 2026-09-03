@@ -867,8 +867,10 @@ func TestIngestFailsPeriodWhenSnapshotUnwritable(t *testing.T) {
 
 	err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "snapshot",
-		"错误链必须指名 snapshot 阶段，否则运维会去查 fetch 或 parse")
+	// QA A8-b：用 wrap 前缀形态钉阶段名。裸 Contains "snapshot" 会被 saveSnapshot 内层
+	// 文本（snapshot dir/read/write）替它过关，阶段名改成 fetch 照样绿。
+	assert.ErrorContains(t, err, "("+annualID+"): snapshot: ",
+		"错误链必须按 wrap 形态指名 snapshot 阶段，否则运维会去查 fetch 或 parse")
 	assert.Zero(t, countRows(t, s, TableObservations), "快照写不进去就不该入库：DoD 项不是可选副作用")
 	assert.Zero(t, countRows(t, s, TablePending))
 }
@@ -884,6 +886,9 @@ func TestIngestFailsPeriodWhenSnapshotUnwritable(t *testing.T) {
 // boundary[0]         Notify == nil ⇒ 不发不 panic、照常入库                    → TestIngestNilNotifyIsNoop
 // error_handling[0]   SendText 失败 ⇒ 不回滚、err 含 notify、Is errBoom、texts 恰 1 → TestIngestNotifyFailureIsLoudButNotCascading
 // error_handling[0]/R-005b P1 自身发送失败 ⇒ texts 恰 1、错误链含 parse 与 notify、Is errBoom → TestIngestP1SendFailureIsReported
+// QA A4  汇总行分子按失败期次计（P1 自身失败不算第二期）⇒ 含 1/1 期失败      → TestIngestP1SendFailureIsReported（末尾断言）
+// QA A8-a 落 pending + 发送失败 ⇒ (<id>): send P0: notify: 、pending 1、texts 恰 1   → TestIngestNotifyFailureOnPendingIsLoud
+// QA A8-b snapshot 阶段名用 wrap 前缀形态 (<id>): snapshot:                       → TestIngestFailsPeriodWhenSnapshotUnwritable
 
 // fakeSender 记录每条消息；err 非 nil 时每次 SendText 都失败。
 type fakeSender struct {
@@ -926,6 +931,26 @@ func TestIngestNotifiesP0OnPending(t *testing.T) {
 	assert.True(t, strings.HasPrefix(sender.texts[0], "[P0]"))
 	assert.Contains(t, sender.texts[0], "deposit_sum")
 	assert.Equal(t, 1, countRows(t, s, TablePending), "前置：确实落了 pending")
+}
+
+// 落 pending + 发送失败（QA A8-a）：P0 那条路径的 send 失败此前无用例，
+// 「send P0」这个阶段名没有任何断言守着。数据照样在 pending（不回滚），错误链按 wrap
+// 形态点名 send P0，且只尝试一次。
+func TestIngestNotifyFailureOnPendingIsLoud(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	cfg.Thresholds.DepositSumTolerance = 1e-9 // 必然超差 ⇒ 落 pending ⇒ 走 P0
+	sender := &fakeSender{err: errBoom}
+
+	err := Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Notify: sender,
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "("+annualID+"): send P0: notify: ", "落 pending 后发 P0 失败要按 wrap 形态点名阶段")
+	assert.ErrorIs(t, err, errBoom)
+	assert.Equal(t, 1, countRows(t, s, TablePending), "数据已落 pending，不因通知失败回滚")
+	assert.Len(t, sender.texts, 1, "只有那一条 P0 的尝试；不得再为「通知失败」发 P1")
 }
 
 // 解析失败 ⇒ 恰一条 P1，带 article_id 与阶段名。
@@ -1016,6 +1041,9 @@ func TestIngestP1SendFailureIsReported(t *testing.T) {
 	assert.ErrorContains(t, err, "("+annualID+"): parse: ", "根因要留在链里")
 	assert.ErrorContains(t, err, "("+annualID+"): notify: ", "没通知到也要留在链里")
 	assert.ErrorIs(t, err, errBoom)
+	// QA A4：汇总行数的是**期**，不是 errs 条数。P1 自身发不出去会让 errs 多一条，
+	// 分子若取 len(errs) 就会打出「2/1 期失败」——一期怎么会失败两次。
+	assert.ErrorContains(t, err, "1/1 期失败", "汇总行分子按失败期次计，不按错误条数计")
 }
 
 // —— M1d 的 TASK-006：OnlyPeriod（包级；cmd 层 flag 归 TASK-007）——
