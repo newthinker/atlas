@@ -39,6 +39,11 @@ type IngestDeps struct {
 	// 的期次在数据层面是 **no-op**；它真正能救回来的是**落在 pending 里**的那些。
 	// 该取舍登记在 `refreshArticleID` 自己的注释里（搜 `只更新 article_id 意味着`）。
 	Force bool
+	// OnlyPeriod 非空时只处理 Period 等于它的候选（M1d 的 TASK-006）。**只与 Force 同用**：
+	// Force 会翻满 MaxPages 并重新处理每个候选、每个都发一条 Duplicate 的 P2；
+	// 运行时切换清单里要的是「限定一期跑一次」来实测整条链路（spec §5 第 6 步）。
+	// 过滤发生在 Discover 之后、ingestOne 之前——Discover 不动。
+	OnlyPeriod string
 }
 
 // notifyError 标记「入库成功但通知没发出去」。循环遇到它**不再发 P1**——
@@ -80,6 +85,10 @@ func (neverSeen) HasArticleInObservations(context.Context, string) (bool, error)
 func Ingest(ctx context.Context, d IngestDeps) error {
 	if d.Out == nil {
 		d.Out = io.Discard
+	}
+	// 配置错误在任何网络请求之前拦下（M1d 的 TASK-006）。
+	if d.OnlyPeriod != "" && !d.Force {
+		return errors.New("hestia ingest: OnlyPeriod requires Force (--only-period 只与 --force 同用)")
 	}
 
 	// Force 必须同时穿透**两层**幂等（TASK-011 修回归）。
@@ -156,6 +165,19 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 	slices.SortStableFunc(cands, func(a, b Candidate) int {
 		return strings.Compare(a.Period, b.Period)
 	})
+
+	// 过滤放在 Discover 之后、循环之前（M1d 的 TASK-006）：Discover 照常翻页与判停，
+	// 计数行「kept k of n」让人一眼看到目标期在不在扫描窗口里。
+	if d.OnlyPeriod != "" {
+		total := len(cands)
+		cands = slices.DeleteFunc(cands, func(c Candidate) bool { return c.Period != d.OnlyPeriod })
+		fmt.Fprintf(d.Out, "only-period %s: kept %d of %d candidate(s)\n", d.OnlyPeriod, len(cands), total)
+		if len(cands) == 0 {
+			// 不走「no new reports」：期次写错与正常空跑必须分得开。
+			return fmt.Errorf("hestia ingest: no candidate for period %s within max_pages %d",
+				d.OnlyPeriod, d.Cfg.Discover.MaxPages)
+		}
+	}
 
 	var failedPeriods []string
 	var errs []error
