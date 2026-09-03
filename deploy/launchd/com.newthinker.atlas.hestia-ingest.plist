@@ -12,6 +12,11 @@
     <string>ingest</string>
     <string>--hestia-config</string>
     <string>/Users/zuowei/workspace/runtime/atlas/configs/hestia.yaml</string>
+    <!-- 主配置：Telegram 的 bot_token / chat_id / proxy 在 notifiers.telegram 里（M1d 的 TASK-007）。
+         不传则 loadConfigOrDefaults 退回 Defaults ⇒ 通知静默关闭，且没有任何东西会变红。
+         守卫：cmd/atlas/hestia_test.go 的 TestHestiaPlistPassesMainConfig。 -->
+    <string>--config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
   </array>
 
   <key>WorkingDirectory</key>

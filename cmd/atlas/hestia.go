@@ -9,14 +9,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/newthinker/atlas/internal/hestia"
+	"github.com/newthinker/atlas/internal/notifier/telegram"
 )
 
 // statusLimit 是 status 各列最多显示的行数。管线一个月一期，10 行覆盖近一年。
 const statusLimit = 10
 
 var (
-	hestiaCfgPath string
-	hestiaForce   bool
+	hestiaCfgPath    string
+	hestiaForce      bool
+	hestiaOnlyPeriod string // M1d 的 TASK-007：只处理这一期（YYYY-MM），须与 --force 同用
 )
 
 // —— backfill fetch 的四个 flag（M1c-1 的 TASK-007）——
@@ -195,6 +197,9 @@ func init() {
 		"bypass both idempotency layers (Discover stop-key and ingest's article_id); "+
 			"NOTE: re-extracted values are DISCARDED for periods already in the observations "+
 			"table -- same published_at means Duplicate, which only refreshes article_id")
+	hestiaIngestCmd.Flags().StringVar(&hestiaOnlyPeriod, "only-period", "",
+		"process only this period (YYYY-MM); requires --force. Used by the runtime "+
+			"cutover checklist to exercise the whole chain on one known period")
 	bf := hestiaBackfillFetchCmd.Flags()
 	bf.StringVar(&hestiaBackfillFrom, "from", "",
 		"earliest PUBLICATION month to fetch, YYYY-MM (not a period; see addendum A1)")
@@ -259,19 +264,58 @@ func openHestia() (hestia.Config, *hestia.Store, error) {
 	return cfg, st, nil
 }
 
+// buildHestiaSender 照 buildCrisisSender：从主配置的 notifiers.telegram 构造，
+// 任一项缺失就返回 nil（静默降级：不发、不报错、不阻塞入库——方案报告 4.8.1）。
+//
+// 返回接口而不是 *telegram.Telegram，且缺配置时返回**字面量 nil**：返回一个 nil 指针
+// 装进接口会得到非 nil 接口，Ingest 的 `d.Notify == nil` 判断就穿了（M1d 的 TASK-007）。
+func buildHestiaSender() hestia.Sender {
+	cfg, err := loadConfigOrDefaults()
+	if err != nil {
+		return nil
+	}
+	nc, ok := cfg.Notifiers["telegram"]
+	if !ok || !nc.Enabled || nc.BotToken == "" || nc.ChatID == "" {
+		return nil
+	}
+	return telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy))
+}
+
 func runHestiaIngest(cmd *cobra.Command, _ []string) error {
+	// --only-period 的两条校验放在 openHestia() 之前：参数写错的人要在第一秒知道，不等开库。
+	// 包级 Ingest 还有第二道同样的校验（M1d 的 TASK-006），这里拦的是「不该开库」。
+	if hestiaOnlyPeriod != "" {
+		if !hestiaForce {
+			return fmt.Errorf("--only-period requires --force")
+		}
+		if !hestiaBackfillFromRE.MatchString(hestiaOnlyPeriod) {
+			return fmt.Errorf("--only-period %q 格式非法：要 YYYY-MM，月份取 01–12", hestiaOnlyPeriod)
+		}
+	}
+
 	cfg, st, err := openHestia()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
 
+	sender := buildHestiaSender()
+	// 通道状态打出来：切换清单要看这一行确认 --config 真的传到了（spec §5 第 6 步）。
+	// 放在 openHestia 之后：配置错误时不该先说 notify: telegram 再报错。
+	if sender == nil {
+		fmt.Fprintln(cmd.OutOrStdout(), "notify: disabled (telegram not configured)")
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "notify: telegram")
+	}
+
 	return hestia.Ingest(cmd.Context(), hestia.IngestDeps{
-		Store: st,
-		Fetch: hestia.NewPBOCFetcher(cfg.Discover.Timeout),
-		Cfg:   cfg,
-		Out:   cmd.OutOrStdout(),
-		Force: hestiaForce,
+		Store:      st,
+		Fetch:      hestia.NewPBOCFetcher(cfg.Discover.Timeout),
+		Cfg:        cfg,
+		Out:        cmd.OutOrStdout(),
+		Notify:     sender,
+		Force:      hestiaForce,
+		OnlyPeriod: hestiaOnlyPeriod,
 	})
 }
 
