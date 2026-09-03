@@ -1334,7 +1334,7 @@ func TestIngestReportsStopReasonEvenWithCandidates(t *testing.T) {
 		articleURL(annualID): readTestdata(t, annualFile),
 	}}
 	var out bytes.Buffer
-	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg()}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg(t)}))
 
 	// 前置锚点：这一轮确实处理了候选（否则走的是 len(cands)==0 那条旧分支）。
 	require.NotEmpty(t, outPeriods(out.String()), "本用例要的是「有候选」那条路径")
@@ -1360,14 +1360,14 @@ func TestIngestReportsNothingNewOnSecondRun(t *testing.T) {
 	// 第 1 轮：正常入库
 	var first bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &first, Cfg: ingestCfg(),
+		Store: s, Fetch: annualFetcher(t), Out: &first, Cfg: ingestCfg(t),
 	}))
 	require.NotEmpty(t, outPeriods(first.String()), "前置锚点：第 1 轮应当真的处理了一期")
 
 	// 第 2 轮：同一篇已在权威表 ⇒ Discover 命中即停 ⇒ 零候选
 	var out bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(),
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t),
 	}))
 
 	assert.Empty(t, outPeriods(out.String()), "没有新东西可处理")
