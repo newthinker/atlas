@@ -981,7 +981,12 @@ func TestIngestNotifyFailureIsLoudButNotCascading(t *testing.T) {
 		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Notify: sender,
 	})
 	require.Error(t, err, "通知发不出去必须让退出码非零，err.log 才有痕")
-	assert.Contains(t, err.Error(), "notify")
+	// 钉的是 wrap 前缀形态 `(<article_id>): send P2: notify: `，不是裸 Contains "notify"：
+	// 裸词会被 notifyError 自带的前缀满足，把阶段名改成别的照样绿（TASK-003 验出的同款
+	// 问题：Contains "snapshot" 被 saveSnapshot 内层文本满足）。这里同时钉住了阶段名
+	// 与「双前缀二选一」的选择——阶段名是 send P2，notify 只出现一次。
+	assert.ErrorContains(t, err, "("+annualID+"): send P2: notify: ",
+		"错误链要按 wrap 形态点名阶段：入库后发 P2 失败")
 	assert.ErrorIs(t, err, errBoom, "底层错误要能 errors.Is 出来")
 	assert.Equal(t, 1, countRows(t, s, TableObservations), "数据已经 Save 了，不因通知失败回滚")
 	assert.Len(t, sender.texts, 1, "只有那一条 P2 的尝试；不得再为「通知失败」发 P1")
@@ -1002,7 +1007,8 @@ func TestIngestP1SendFailureIsReported(t *testing.T) {
 	err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: io.Discard, Cfg: ingestCfg(t), Notify: sender})
 	require.Error(t, err)
 	assert.Len(t, sender.texts, 1, "P1 只尝试一次，不为「P1 发不出去」再发一条")
-	assert.Contains(t, err.Error(), "parse", "根因要留在链里")
-	assert.Contains(t, err.Error(), "notify", "没通知到也要留在链里")
+	// 两条都按 wrap 前缀形态钉阶段名（理由见 TestIngestNotifyFailureIsLoudButNotCascading）。
+	assert.ErrorContains(t, err, "("+annualID+"): parse: ", "根因要留在链里")
+	assert.ErrorContains(t, err, "("+annualID+"): notify: ", "没通知到也要留在链里")
 	assert.ErrorIs(t, err, errBoom)
 }
