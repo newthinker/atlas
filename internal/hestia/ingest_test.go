@@ -1017,3 +1017,75 @@ func TestIngestP1SendFailureIsReported(t *testing.T) {
 	assert.ErrorContains(t, err, "("+annualID+"): notify: ", "没通知到也要留在链里")
 	assert.ErrorIs(t, err, errBoom)
 }
+
+// —— M1d 的 TASK-006：OnlyPeriod（包级；cmd 层 flag 归 TASK-007）——
+//
+// Context Checkpoint: done_criteria → test mapping（M1d 的 TASK-006）
+// functional[0]     Force+OnlyPeriod 两条候选只处理目标期：outPeriods==["2025-12"]、kept 1 of 2、
+//                   observations 1、h1 未入库、pending 0、texts 恰 1 含 2025-12/annual → TestIngestOnlyPeriodFiltersCandidates
+// functional[1]     过滤在 Discover 之后、ingestOne 之前（Discover 一行不动）      → 同上（kept 1 of 2 说明 Discover 看到了两条）
+// boundary[0]       OnlyPeriod 非空且 !Force ⇒ 错含 OnlyPeriod requires Force、不碰库；
+//                   R-006a：fakeFetcher.calls 为空（Discover 之前拦下）             → TestIngestOnlyPeriodRequiresForce
+// error_handling[0] 过滤后 0 条 ⇒ 错含 1999-01 与 no candidate，不走 no new reports → TestIngestOnlyPeriodNoMatchFailsLoudly
+
+// twoEntryFetcher：index 挂 2025 年报与 2020 上半年报两条，两篇都能被 Parse 接受。
+func twoEntryFetcher(t *testing.T) *fakeFetcher {
+	t.Helper()
+	return &fakeFetcher{pages: map[string][]byte{
+		testIndexURL: syntheticIndex(t,
+			indexEntry{annualID, annualTitle},
+			indexEntry{h1ID, h1Title}),
+		articleURL(annualID): readTestdata(t, annualFile),
+		articleURL(h1ID):     readTestdata(t, h1File),
+	}}
+}
+
+// OnlyPeriod 只与 Force 同用：单独给出是配置错误，必须响亮，且在任何网络请求之前拦下。
+func TestIngestOnlyPeriodRequiresForce(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	f := annualFetcher(t)
+	err := Ingest(ctx, IngestDeps{
+		Store: s, Fetch: f, Out: io.Discard, Cfg: ingestCfg(t), OnlyPeriod: "2025-12",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OnlyPeriod requires Force")
+	assert.Zero(t, countRows(t, s, TableObservations), "配置错误时不该碰库")
+	// reviewer R-006a：「Discover 之前拦下」要用可观测量钉住——一次 Get 都没发。
+	assert.Empty(t, f.calls, "配置错误必须在 Discover 之前拦下：不该发出任何请求")
+}
+
+// Force + OnlyPeriod：两条候选只处理目标那条；被跳过的那条不入库、不发消息。
+func TestIngestOnlyPeriodFiltersCandidates(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sender := &fakeSender{}
+	var out bytes.Buffer
+
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: twoEntryFetcher(t), Out: &out, Cfg: ingestCfg(t),
+		Notify: sender, Force: true, OnlyPeriod: "2025-12",
+	}))
+	assert.Equal(t, []string{"2025-12"}, outPeriods(out.String()), "只处理目标期次")
+	assert.Contains(t, out.String(), "only-period 2025-12: kept 1 of 2 candidate(s)")
+	assert.Equal(t, 1, countRows(t, s, TableObservations), "目标那期（2025 年报，主路径样本）入权威表")
+	has, err := s.HasPeriod(ctx, "2020-06", "h1")
+	require.NoError(t, err)
+	assert.False(t, has, "被过滤掉的那期不得入库")
+	assert.Zero(t, countRows(t, s, TablePending), "被过滤掉的那期也不得落 pending")
+	require.Len(t, sender.texts, 1, "被过滤掉的那期不发消息")
+	assert.Contains(t, sender.texts[0], "2025-12/annual")
+}
+
+// 过滤后 0 条 ⇒ 报错，而不是打 no new reports 退出码 0——那会让「期次写错」与「正常空跑」同形。
+func TestIngestOnlyPeriodNoMatchFailsLoudly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	err := Ingest(ctx, IngestDeps{
+		Store: s, Fetch: twoEntryFetcher(t), Out: io.Discard, Cfg: ingestCfg(t),
+		Force: true, OnlyPeriod: "1999-01",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1999-01")
+	assert.Contains(t, err.Error(), "no candidate")
+}
