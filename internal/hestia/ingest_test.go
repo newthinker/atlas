@@ -22,10 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,8 +92,12 @@ const (
 )
 
 // ingestCfg 是各用例的公共配置：合成 index 只有一页，MaxPages 取多少都只扫一页。
-func ingestCfg() Config {
+// SnapshotDir 每个用例独立一个临时目录（M1d 的 TASK-003）：ingestOne 在 Fetch 之后
+// 必落盘，空目录名会让 MkdirAll 报错、每条用例在第一篇上就失败。
+func ingestCfg(t *testing.T) Config {
+	t.Helper()
 	return Config{
+		Storage:    StorageCfg{SnapshotDir: t.TempDir()},
 		Discover:   DiscoverCfg{IndexURL: testIndexURL, MaxPages: 3},
 		Thresholds: DefaultThresholds(),
 	}
@@ -126,7 +133,7 @@ func TestIngestEndToEnd(t *testing.T) {
 	s := newTestStore(t)
 
 	var out bytes.Buffer
-	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg()}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t)}))
 
 	has, err := s.HasPeriod(ctx, "2025-12", "annual")
 	require.NoError(t, err)
@@ -146,7 +153,7 @@ func TestIngestFillsArticleID(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Cfg: ingestCfg()}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Cfg: ingestCfg(t)}))
 
 	// 用 Preceding 把入库的那行读回来（2025-12 < 2026-01，同 annual 序列）
 	prior, err := s.Preceding(ctx, "2026-01", "annual", 1)
@@ -176,6 +183,9 @@ func TestIngestRejectsPeriodMismatch(t *testing.T) {
 	err := Ingest(ctx, IngestDeps{
 		Store: s, Fetch: f, Out: &out,
 		Cfg: Config{
+			// 手写字面量不经 ingestCfg，SnapshotDir 得自己填（M1d 的 TASK-003）：
+			// 否则 Fetch 成功后 saveSnapshot("") 先报错，走不到「期次不一致」那一步。
+			Storage:    StorageCfg{SnapshotDir: t.TempDir()},
 			Discover:   DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2},
 			Thresholds: DefaultThresholds(),
 		},
@@ -218,7 +228,7 @@ func TestIngestContinuesAfterOneFailure(t *testing.T) {
 	}}
 
 	var out bytes.Buffer
-	err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg()})
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg(t)})
 
 	require.Error(t, err, "有期次失败时整批必须返回非零")
 	assert.Contains(t, err.Error(), "2020-06", "汇总错误要指名是哪一期失败")
@@ -267,7 +277,7 @@ func TestIngestProcessesOldestFirst(t *testing.T) {
 	}}
 
 	var out bytes.Buffer
-	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg()}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: ingestCfg(t)}))
 
 	got := outPeriods(out.String())
 	require.Len(t, got, 2, "两条候选都要打一行，否则下面的顺序断言会平凡为真")
@@ -308,7 +318,7 @@ func TestIngestReportsVerdictAndTable(t *testing.T) {
 		s := newTestStore(t)
 
 		var out bytes.Buffer
-		require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg()}))
+		require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t)}))
 		assert.Contains(t, out.String(), TableObservations)
 		assert.NotContains(t, out.String(), TablePending)
 	})
@@ -316,7 +326,7 @@ func TestIngestReportsVerdictAndTable(t *testing.T) {
 	t.Run("没过闸的落 pending 且说得出来", func(t *testing.T) {
 		s := newTestStore(t)
 
-		cfg := ingestCfg()
+		cfg := ingestCfg(t)
 		cfg.Thresholds.DepositSumTolerance = 1e-9 // >0（cfg.validate 要求），但必然超差
 
 		var out bytes.Buffer
@@ -357,7 +367,7 @@ func TestIngestSkipsSeenArticleUnlessForce(t *testing.T) {
 	t.Run("默认跳过已处理过的文章", func(t *testing.T) {
 		s := seed(t)
 		var out bytes.Buffer
-		require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg()}))
+		require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t)}))
 		assert.Contains(t, out.String(), "already ingested")
 
 		has, err := s.HasPeriod(ctx, "2025-12", "annual")
@@ -369,7 +379,7 @@ func TestIngestSkipsSeenArticleUnlessForce(t *testing.T) {
 		s := seed(t)
 		var out bytes.Buffer
 		require.NoError(t, Ingest(ctx, IngestDeps{
-			Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(), Force: true,
+			Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Force: true,
 		}))
 		assert.NotContains(t, out.String(), "already ingested")
 
@@ -449,7 +459,7 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 		s := newTestStore(t)
 		f := &fakeFetcher{err: errBoom}
 
-		err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Cfg: ingestCfg()})
+		err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Cfg: ingestCfg(t)})
 		require.Error(t, err)
 		assert.ErrorContains(t, err, testIndexURL, "此刻还没有期次，上下文只能是 index URL")
 		assert.ErrorIs(t, err, errBoom, "%w 断在任何一层，这条就找不到哨兵")
@@ -464,7 +474,7 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 			failOn: articleURL(annualID),
 		}
 
-		err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Cfg: ingestCfg()})
+		err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Cfg: ingestCfg(t)})
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "2025-12")
 		assert.ErrorContains(t, err, annualID)
@@ -473,7 +483,7 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 	})
 
 	t.Run("Parse 失败", func(t *testing.T) {
-		d := ingestOneDeps(newTestStore(t), ingestCfg(),
+		d := ingestOneDeps(newTestStore(t), ingestCfg(t),
 			[]byte(`<html><body>这不是一篇报告</body></html>`))
 
 		requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))
@@ -490,7 +500,7 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 		// TestStockContinuitySkipsWhenPeriodTypeHasNoThreshold 就是这么构造的）。
 		//
 		// PeriodTypes 留空是它明确拒绝的一种：留空不等于「全部」。
-		cfg := ingestCfg()
+		cfg := ingestCfg(t)
 		cfg.Thresholds.CaliberExemptions = []CaliberExemption{{
 			Version: "2025-01", Period: "2025-01", Reason: "test",
 			SkipChecks: []string{"m1_caliber_break"},
@@ -515,7 +525,7 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 			 BEGIN SELECT RAISE(ABORT, 'blocked by test trigger'); END;`)
 		require.NoError(t, err, "前置条件：触发器要建得上")
 
-		d := ingestOneDeps(s, ingestCfg(), readTestdata(t, annualFile))
+		d := ingestOneDeps(s, ingestCfg(t), readTestdata(t, annualFile))
 
 		requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))
 	})
@@ -621,7 +631,7 @@ func TestIngestLeavesNoRowOnFetchOrParseFailure(t *testing.T) {
 		articleURL(annualID): []byte(`<html><body>这不是一篇报告</body></html>`),
 	}}
 	var out bytes.Buffer
-	require.Error(t, Ingest(ctx, IngestDeps{Store: s, Fetch: broken, Out: &out, Cfg: ingestCfg()}),
+	require.Error(t, Ingest(ctx, IngestDeps{Store: s, Fetch: broken, Out: &out, Cfg: ingestCfg(t)}),
 		"解析失败必须让整批返回非零")
 
 	assert.Zero(t, countRows(t, s, TablePending),
@@ -632,7 +642,7 @@ func TestIngestLeavesNoRowOnFetchOrParseFailure(t *testing.T) {
 	// 「下一轮自然重试」—— 不加 --force，换成好的正文，应当直接入库。
 	var out2 bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out2, Cfg: ingestCfg(),
+		Store: s, Fetch: annualFetcher(t), Out: &out2, Cfg: ingestCfg(t),
 	}), "A：上一轮没留下任何行 ⇒ 一级键不命中 ⇒ 这一轮应当照常处理")
 
 	has, err := s.HasPeriod(ctx, "2025-12", "annual")
@@ -651,7 +661,7 @@ func TestIngestFetchesUnseenArticleEvenWhenStoreIsNotEmpty(t *testing.T) {
 	// 先让年报正常入库
 	var out bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(),
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t),
 	}))
 	require.Equal(t, 1, countRows(t, s, TableObservations), "前置：年报应已入库")
 
@@ -661,7 +671,7 @@ func TestIngestFetchesUnseenArticleEvenWhenStoreIsNotEmpty(t *testing.T) {
 		articleURL(h1ID): readTestdata(t, h1File),
 	}}
 	var out2 bytes.Buffer
-	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out2, Cfg: ingestCfg()}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out2, Cfg: ingestCfg(t)}))
 
 	assert.NotContains(t, out2.String(), "already ingested",
 		"B：这一篇的 article_id 没见过，不该被一级键挡住")
@@ -702,7 +712,7 @@ func TestForceOnPendingPeriodLandsInObservations(t *testing.T) {
 
 	var out bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(), Force: true,
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Force: true,
 	}))
 
 	assert.Contains(t, out.String(), bitemporal.New.String(),
@@ -727,7 +737,7 @@ func TestForceOnObservedPeriodIsDuplicate(t *testing.T) {
 	// 先正常入库一次
 	var first bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &first, Cfg: ingestCfg(),
+		Store: s, Fetch: annualFetcher(t), Out: &first, Cfg: ingestCfg(t),
 	}))
 	require.Equal(t, 1, countRows(t, s, TableObservations), "前置：先要有一行在权威表里")
 	require.Contains(t, first.String(), bitemporal.New.String(), "前置：第一次应当是 New")
@@ -735,7 +745,7 @@ func TestForceOnObservedPeriodIsDuplicate(t *testing.T) {
 	// --force 再跑一次同一篇
 	var out bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(), Force: true,
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Force: true,
 	}))
 
 	// 第一半：**走到了 Save**。没走到的话 Ingest 会打 no new reports 就返回。
@@ -751,4 +761,107 @@ func TestForceOnObservedPeriodIsDuplicate(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, s, TableObservations),
 		"②：Duplicate 只刷 article_id，不新增行")
 	assert.Zero(t, countRows(t, s, TablePending), "②：过闸的重跑不该落 pending")
+}
+
+// —— M1d 的 TASK-003：ingest 接快照（Parse 之前）——
+//
+// Context Checkpoint: done_criteria → test mapping（M1d 的 TASK-003）
+// functional[0]     ingestCfg(t) + 24 处调用点 + 第 25 处手写 Config 补 SnapshotDir → 既有全部 ingest/discover 测试仍绿（TestIngestRejectsPeriodMismatch 断言不改）
+// functional[1]     入库那篇的快照字节 == Fetch 返回的 raw                     → TestIngestSnapshotBytesMatchRaw
+// functional[2]     同字节 --force 不重写（mtime 不变）、Out 不含 diverged     → TestIngestSnapshotIdempotentOnForce
+// functional[2]/R-003 改稿 --force ⇒ Out 含 "snapshot diverged from <id>"、目录两个文件 → TestIngestSnapshotDivergedOnForce
+// boundary[0]       Parse 失败那篇仍有快照、observations 0 行                 → TestIngestSnapshotSurvivesParseFailure
+// error_handling[0] SnapshotDir 是普通文件 ⇒ 该期失败、err 含 snapshot、两表 0 行 → TestIngestFailsPeriodWhenSnapshotUnwritable
+
+// 快照必须在 Parse 之前落盘：字节与 Fetch 返回的完全一致。
+func TestIngestSnapshotBytesMatchRaw(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+
+	got, err := os.ReadFile(filepath.Join(cfg.Storage.SnapshotDir, annualID+".html"))
+	require.NoError(t, err, "入库成功的那篇必须有快照")
+	assert.Equal(t, readTestdata(t, annualFile), got)
+}
+
+// 解析失败的那篇**尤其**要有快照——它正是最需要回溯的那篇。
+func TestIngestSnapshotSurvivesParseFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	garbage := []byte("<html><body>not a report</body></html>")
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}),
+		articleURL(annualID): garbage,
+	}}
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: io.Discard, Cfg: cfg})
+	require.Error(t, err, "前置：正文是垃圾，Parse 必须失败")
+
+	got, rerr := os.ReadFile(filepath.Join(cfg.Storage.SnapshotDir, annualID+".html"))
+	require.NoError(t, rerr, "Parse 失败不能让快照消失——落盘在 Parse 之前")
+	assert.Equal(t, garbage, got)
+	assert.Zero(t, countRows(t, s, TableObservations), "解析失败不该入库")
+}
+
+// --force 重跑同一篇：字节相同 ⇒ 不重写，mtime 不变。
+func TestIngestSnapshotIdempotentOnForce(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	path := filepath.Join(cfg.Storage.SnapshotDir, annualID+".html")
+
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(path, old, old))
+
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: cfg, Force: true}))
+
+	st, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.True(t, st.ModTime().Equal(old), "同字节重跑不得重写快照")
+	assert.NotContains(t, out.String(), "snapshot diverged", "同字节不是改稿")
+}
+
+// 央行改稿后 --force 重跑：不覆盖、另存一份，且 Out 说出来（reviewer R-003 的正向用例：
+// 只有上面那条 NotContains 时，这行输出根本不存在也能全绿）。
+func TestIngestSnapshotDivergedOnForce(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+
+	// 同一 URL 换一版正文：尾部多一个换行，Parse 仍过，但字节已不同。
+	f := annualFetcher(t)
+	f.pages[articleURL(annualID)] = append(readTestdata(t, annualFile), '\n')
+
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: &out, Cfg: cfg, Force: true}))
+
+	assert.Contains(t, out.String(), "snapshot diverged from "+annualID,
+		"改稿必须说出来：两版都留了，运维要知道去看哪一份")
+	entries, err := os.ReadDir(cfg.Storage.SnapshotDir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 2, "改稿另存不覆盖：目录里应是原版 + 新版两个文件")
+}
+
+// 快照目录不可用 ⇒ 该期失败、不入库、错误链带 snapshot 阶段名。
+func TestIngestFailsPeriodWhenSnapshotUnwritable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	blocker := filepath.Join(t.TempDir(), "file-not-dir")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+	cfg.Storage.SnapshotDir = blocker
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshot",
+		"错误链必须指名 snapshot 阶段，否则运维会去查 fetch 或 parse")
+	assert.Zero(t, countRows(t, s, TableObservations), "快照写不进去就不该入库：DoD 项不是可选副作用")
+	assert.Zero(t, countRows(t, s, TablePending))
 }

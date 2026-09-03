@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // IngestDeps 是一次抓取所需的全部外部依赖。
@@ -169,6 +170,17 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
 	raw, err := d.Fetch.Get(ctx, c.URL)
 	if err != nil {
 		return wrap("fetch "+c.URL, err)
+	}
+	// 快照在 Parse **之前**落盘（M1d 的 TASK-003）：解析失败的那篇恰恰最需要回溯，
+	// 而此前 raw 只在内存里——方案报告 M1c 的 DoD「原始 HTML 快照已留存」在增量路径上
+	// 一直是空的。写盘失败让该期失败：快照是 DoD 项，不是可选副作用。
+	snap, err := saveSnapshot(d.Cfg.Storage.SnapshotDir, c.ArticleID, raw, time.Now())
+	if err != nil {
+		return wrap("snapshot", err)
+	}
+	if snap.Kind == snapshotDiverged {
+		// 央行改稿。不是错误，但必须说出来——两版都留了，运维要知道去看哪一份。
+		fmt.Fprintf(d.Out, "%s snapshot diverged from %s: saved as %s\n", c.Period, c.ArticleID, snap.Path)
 	}
 	obs, err := Parse(raw)
 	if err != nil {
