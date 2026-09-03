@@ -990,6 +990,11 @@ func TestIngestNotifyFailureIsLoudButNotCascading(t *testing.T) {
 	assert.ErrorIs(t, err, errBoom, "底层错误要能 errors.Is 出来")
 	assert.Equal(t, 1, countRows(t, s, TableObservations), "数据已经 Save 了，不因通知失败回滚")
 	assert.Len(t, sender.texts, 1, "只有那一条 P2 的尝试；不得再为「通知失败」发 P1")
+	// 守「通知在打印之后」（第一轮 REJECT 补的：把 send 挪到 Fprintf 之前，此前没有任何
+	// 断言会红）。send 失败时 ingestOne 直接 return，若它排在打印之前，Out 就少了本地
+	// 真相那一行——这正是「Out 是真相、Telegram 是投影」要防的。
+	assert.Contains(t, out.String(), "→ "+TableObservations,
+		"Out 是本地真相、通知是投影：通知失败不能让本地少那一行（发送必须在打印之后）")
 }
 
 // P1 **自身**发不出去（reviewer R-005b）：上一条走的是「P2 失败 ⇒ errors.As 命中 ⇒ continue」，
