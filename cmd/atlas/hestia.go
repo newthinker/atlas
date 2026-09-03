@@ -265,20 +265,27 @@ func openHestia() (hestia.Config, *hestia.Store, error) {
 }
 
 // buildHestiaSender 照 buildCrisisSender：从主配置的 notifiers.telegram 构造，
-// 任一项缺失就返回 nil（静默降级：不发、不报错、不阻塞入库——方案报告 4.8.1）。
+// 「未配置」（没传 --config、没有 telegram 段、未启用、缺 token/chat）返回 nil
+// （静默降级：不发、不报错、不阻塞入库——方案报告 4.8.1）。
 //
-// 返回接口而不是 *telegram.Telegram，且缺配置时返回**字面量 nil**：返回一个 nil 指针
-// 装进接口会得到非 nil 接口，Ingest 的 `d.Notify == nil` 判断就穿了（M1d 的 TASK-007）。
-func buildHestiaSender() hestia.Sender {
+// 与 buildCrisisSender 的一处刻意不同（QA 终审 A5，M1d 的 TASK-007 返工）：**主配置装不上
+// 是错误，不折成 nil**。--config 明确给了却读不到（plist 路径写错、文件被 deploy 覆盖掉），
+// 若也退化成「telegram not configured」，运维看到的是一行正常的 disabled，与真正没配置
+// 完全同形——这正是 M1d 立项要堵的「静默不发」。loadConfigOrDefaults 只在 cfgFile 非空时
+// 才可能出错，所以这里的 err 恒等于「主配置装不上」。
+//
+// 返回接口而不是 *telegram.Telegram，且未配置时返回**字面量 nil**：返回一个 nil 指针
+// 装进接口会得到非 nil 接口，Ingest 的 `d.Notify == nil` 判断就穿了。
+func buildHestiaSender() (hestia.Sender, error) {
 	cfg, err := loadConfigOrDefaults()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("hestia notify: main config %s: %w", cfgFile, err)
 	}
 	nc, ok := cfg.Notifiers["telegram"]
 	if !ok || !nc.Enabled || nc.BotToken == "" || nc.ChatID == "" {
-		return nil
+		return nil, nil
 	}
-	return telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy))
+	return telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy)), nil
 }
 
 func runHestiaIngest(cmd *cobra.Command, _ []string) error {
@@ -299,7 +306,10 @@ func runHestiaIngest(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = st.Close() }()
 
-	sender := buildHestiaSender()
+	sender, err := buildHestiaSender()
+	if err != nil {
+		return err // 主配置装不上：响亮失败，不进 Ingest（A5）
+	}
 	// 通道状态打出来：切换清单要看这一行确认 --config 真的传到了（spec §5 第 6 步）。
 	// 放在 openHestia 之后：配置错误时不该先说 notify: telegram 再报错。
 	if sender == nil {

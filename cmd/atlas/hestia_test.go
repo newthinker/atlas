@@ -1057,12 +1057,15 @@ func TestBuildHestiaSenderNoConfig(t *testing.T) {
 	cfgFile = "" // loadConfigOrDefaults → Defaults()，无 notifiers
 	t.Cleanup(func() { cfgFile = prev })
 
-	s := buildHestiaSender()
+	s, err := buildHestiaSender()
+	require.NoError(t, err, "cfgFile 为空是「未配置」，不是错误")
 	assert.Nil(t, s)
 	assert.True(t, s == nil, "必须是字面量 nil：nil 指针装进接口会让 Ingest 的 d.Notify == nil 判断穿掉")
 }
 
-// buildHestiaSender 从主配置 notifiers.telegram 构造；四个缺项各自都回落到 nil。
+// buildHestiaSender 从主配置 notifiers.telegram 构造；「未配置」的三种形态回落到 nil，
+// 「主配置装不上」是错误（A5：cfgFile 明确给了却读不到，折成 nil 会让 plist 传错路径
+// 时静默变成「telegram not configured」——与 M1d 立项要堵的形态同源）。
 func TestBuildHestiaSenderFromMainConfig(t *testing.T) {
 	prev := cfgFile
 	t.Cleanup(func() { cfgFile = prev })
@@ -1076,19 +1079,28 @@ func TestBuildHestiaSenderFromMainConfig(t *testing.T) {
 
 	t.Run("enabled with token and chat ⇒ non-nil", func(t *testing.T) {
 		write(t, "notifiers:\n  telegram:\n    enabled: true\n    bot_token: fake-token\n    chat_id: \"12345\"\n")
-		assert.NotNil(t, buildHestiaSender())
+		s, err := buildHestiaSender()
+		require.NoError(t, err)
+		assert.NotNil(t, s)
 	})
 	t.Run("disabled ⇒ nil", func(t *testing.T) {
 		write(t, "notifiers:\n  telegram:\n    enabled: false\n    bot_token: fake-token\n    chat_id: \"12345\"\n")
-		assert.True(t, buildHestiaSender() == nil)
+		s, err := buildHestiaSender()
+		require.NoError(t, err)
+		assert.True(t, s == nil)
 	})
 	t.Run("missing chat_id ⇒ nil", func(t *testing.T) {
 		write(t, "notifiers:\n  telegram:\n    enabled: true\n    bot_token: fake-token\n")
-		assert.True(t, buildHestiaSender() == nil)
+		s, err := buildHestiaSender()
+		require.NoError(t, err)
+		assert.True(t, s == nil)
 	})
-	t.Run("unloadable main config ⇒ nil", func(t *testing.T) {
+	t.Run("unloadable main config ⇒ error, not nil-and-silent", func(t *testing.T) {
 		cfgFile = filepath.Join(t.TempDir(), "does-not-exist.yaml")
-		assert.True(t, buildHestiaSender() == nil)
+		s, err := buildHestiaSender()
+		require.Error(t, err, "cfgFile 明确给了却读不到：这不是「未配置」")
+		assert.Contains(t, err.Error(), cfgFile, "错误要带出是哪份主配置")
+		assert.True(t, s == nil)
 	})
 }
 
@@ -1138,6 +1150,17 @@ discover:
 		require.NotEqual(t, -1, i, "通道状态行必须打出来：%q", s)
 		require.NotEqual(t, -1, j, "前置锚点：Ingest 真的跑到了 no new reports：%q", s)
 		assert.Less(t, i, j, "通道状态行要在 Ingest 输出之前")
+	})
+
+	t.Run("main config unreadable ⇒ ingest fails loudly, no notify line", func(t *testing.T) {
+		cfgFile = filepath.Join(t.TempDir(), "does-not-exist.yaml")
+		hestiaCfg(t)
+		cmd, out := newCapturingCmd()
+		err := runHestiaIngest(cmd, nil)
+		require.Error(t, err, "plist 把 --config 指错路径时必须响亮失败，不能退化成 telegram not configured")
+		assert.Contains(t, err.Error(), cfgFile)
+		assert.NotContains(t, out.String(), "notify:", "既没法说 telegram 也不该说 disabled")
+		assert.NotContains(t, out.String(), "no new reports", "主配置读不到就不该继续 Ingest")
 	})
 
 	t.Run("telegram configured ⇒ notify: telegram", func(t *testing.T) {
