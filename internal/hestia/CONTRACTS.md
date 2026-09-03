@@ -3172,6 +3172,72 @@ Go 1.24 的 `%g` 最短精度形态在指数 **≥ 6（即 ≥ 1e6）** 才切�
 **M2 前加固项（挂账）**：真钉法一行 `assert.Equal(t, "1776000", fmtNum(1776000))`。
 TASK-004 已 verified，本 Sprint 不改它的测试。与 M1c-4 记录的「结论对但理由错」同形。
 
+
+**A5｜TASK-003 的「错误链含 `snapshot`」判据被内层文本满足，钉不住阶段名**
+`TestIngestFailsPeriodWhenSnapshotUnwritable` 原用 `assert.Contains(err.Error(), "snapshot")`
+证明阶段名是 `snapshot`，但 `saveSnapshot` 内层错误本就含 `snapshot dir <path>`——
+把 `wrap` 的阶段名改成 `fetch`，测试仍绿（验证者变异 M3 SURVIVED，003 报告 §4）。
+⇒ **「错误链含 X」这类判据要写成「wrap 前缀恰为 `<期次> (<id>): <阶段>:`」**，否则内层文本
+会替它过关。TASK-005 起已改用前缀形态（`(<id>): send P2: notify: ` / `(<id>): snapshot: `），
+本 Sprint QA 返工时把 003 那条也改了过来。
+
+**A6｜TASK-007 DoD 原文「`loadConfigOrDefaults` 出错 ⇒ 返回字面量 nil」已被推翻**
+原 DoD（照需求原文）要求：主配置装载出错时 `buildHestiaSender` 与「未配置」一样返回 nil。
+QA 终审 A5 指出这会把**「主配置装不上」折成「telegram 未配置」**——静默降级掩盖真错误，
+与 M1d 立项要堵的形态同族。现行契约（QA fix_items，已实现并验证）：
+
+- `cfgFile != ""` 且 `loadConfigOrDefaults` 出错 ⇒ `buildHestiaSender() (hestia.Sender, error)`
+  返回错误，`runHestiaIngest` 在开库之后、打印通道状态之前 `return err`，**响亮失败**；
+- 未配置三形态（无 telegram 段 / `enabled: false` / token 或 chat 为空）⇒ `nil, nil`，
+  打印 `notify: disabled (telegram not configured)`，静默降级不变。
+
+⚠️ **副作用（QA 复审 SUGGESTION，运维需知）**：返工前「主配置装不上」⇒ 不发通知、**照常入库**；
+返工后 ⇒ `runHestiaIngest` 直接返回，**该次唤起不入库**（`cmd/atlas/hestia.go:309`）。
+这是刻意取舍（响亮优于静默），代价有界：数据**不会永久丢失**——没入库 ⇒ `HasArticle` 为假 ⇒
+下次唤起重新发现（launchd 每天 3 次），且失败是响亮的（err.log + 非零退出码）。
+
+⚠️ 任务文件里 DoD 的**原文本未改**（在途任务 Leader 无权改），本 Sprint 以 fix_items 为准；
+此处登记为契约更正，下游引用请以本条为准。
+
+**A7｜QA 终审 verdict 为 CONTESTED，两条阻断项在本 Sprint diff 之外**
+两轮 Code Review（`docs/05-review/`）判 **CONTESTED**：diff 内 0 CRITICAL、4 条 WARNING 已走
+一轮 `review_fix` 全部闭合并重验；**CONTESTED 的成因是两条 diff 外问题**，须在运行时切换的
+对应步骤之前处理（详见 `06-acceptance/final-report.md` §9.0）：
+
+1. 🔴 **`scripts/ops/deploy.sh` 的 `rsync --delete` 会清掉运行时里所有「源树没有的 gitignore 内容」。**
+   QA 复审做了背对背干跑（`rsync -n`，同一时刻两次、同一目标只换源，逐字抄 `deploy.sh:35-53` 的排除表，
+   运行时文件全程未动）：
+
+   | 源 | `deleting` 条数 |
+   |---|---|
+   | linked worktree | **30202** |
+   | 主仓库 | 8（全是过期 `aktools_log.log*`，无害） |
+
+   那 30202 条里 `configs/config.yaml` **只占 1 条**，`scripts/qlib_eval/.venv` 占 **30177** 条。
+   成因是同一条：**源树缺少 gitignore 的运行时内容 × `--delete`**；排除表里已有
+   `/scripts/akshare/.venv/`（该目录实际已不存在）与 `/scripts/baostock/.venv/`，
+   **唯独漏了 `/scripts/qlib_eval/.venv/`**（实测 39525 个文件；本机系统 python 损坏，
+   qlib_eval 的 pytest 依赖这个 venv）。
+   ⚠️ **本 Sprint 一度只登记「加 `--exclude='/configs/config.yaml'`」——那只闭合 1/30202**，
+   照着办的人会以为问题解决了然后丢掉整个 qlib_eval 虚拟环境。完整修法（按由浅到深）：
+
+   1. 排除表补**两条**：`--exclude='/configs/config.yaml'` 与 `--exclude='/scripts/qlib_eval/.venv/'`；
+   2. **堵成因**：`deploy.sh` 开头加 linked worktree 判别并**拒绝执行**（`git rev-parse --git-dir`
+      != `--git-common-dir` ⇒ 报错退出）。本仓库 `arcforge-write.sh` 已用同一判别式且有测试，可照抄。
+      第 1 条只堵两个**已知症状**，这条堵的是成因——下一个被 gitignore 的运行时目录出现时第 1 条不保护它；
+   3. 切换清单第 4 步注明「**必须在主仓库、`HEAD` == 合并锚下执行**，禁止在 worktree 执行」。
+
+   **须在切换清单第 4 步之前**。⚠️ 这条不阻断 M1d 验收（不在任何任务 `writes` 内，`review_fix` 路由不到），
+   但**阻断切换本身**。
+
+2. **Telegram 传输错误文本含 bot token**（`internal/notifier/telegram` 的错误串带完整 URL，
+   pre-existing，crisis 同暴露），而 M1d 经 `notifyError` 把它接进了 `out.log` / `err.log`。
+   两个 lens 评 CRITICAL、QA 评 WARNING（泄露面是本机日志）。**建议在切换清单第 6 步
+   （首次真实经代理发送）之前**做脱敏 + `NotContains` 测试。
+
+跨模型对抗审查**降级**：codex 第一次挂 stdin、第二次命中用量上限（至 2026-09-10），
+按核心原则 4 退回纯 Claude 三视角（Skeptic / Operator / Architect）。
+
 ### B. 实测登记（锚 `540e84a0eee6e37c5a85cb4743a189a1744aae64`）
 
 采样纪律（AD-7 订正口径）：采前采后 `git rev-parse HEAD` 同值；
@@ -3186,7 +3252,7 @@ TASK-004 已 verified，本 Sprint 不改它的测试。与 M1c-4 记录的「�
 | `go test ./cmd/atlas/... -count=1` | 绿 | — |
 | `gofmt -l internal/hestia cmd/atlas` | 仅 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，未修） | — |
 | `go vet ./internal/hestia/... ./cmd/...` | 零输出 | — |
-| 导出面（`TestPackageExposesNoWriteFunctions` 的 want） | **未改**，22 项（`store_test.go` 自 `$BASE` 无 diff；本迭代零新增导出函数） | 函数/方法 |
+| 导出**函数**面（`TestPackageExposesNoWriteFunctions` 的 want） | **未改**，22 项（新增导出**类型** 1：`Sender`；导出字段 3：`IngestDeps.Notify` / `OnlyPeriod`、`StorageCfg.SnapshotDir`）（`store_test.go` 自 `$BASE` 无 diff；本迭代零新增导出函数） | 函数/方法 |
 | `TestFieldNamesAppearOnlyInFieldsGo` / `TestShippedConfigLoadsAndIsCalibrated` | PASS | — |
 | 五个不动文件 `git diff --stat 4916106 HEAD -- store.go validate.go parse.go extract.go fields.go` | 空 | — |
 | `go.mod` / `go.sum` | 自 `$BASE` 无 diff（无新增依赖） | — |
@@ -3207,3 +3273,13 @@ TASK-004 已 verified，本 Sprint 不改它的测试。与 M1c-4 记录的「�
 | TASK-007 cmd | 3 | **8** | R-007a `buildHestiaSender` 两条 + IngestDeps 两行接线的端到端守卫（`fix(TASK-007)`）等 |
 
 按任务 commit 复核（`git show <c> -- '*_test.go' \| grep -c '^+func Test'`）：001=3、002=8、003=5、004=8、005=7、006=3、007=8，合计 42，与 `$BASE..锚` 总数相符。
+
+### C. 挂账（不阻断，M2 前跟踪）
+
+| # | 项 | 出处 | 建议 |
+|---|---|---|---|
+| C1 | `fmtNum` 的 `%g` 真钉法缺失 | §A4 | 加 `assert.Equal(t, "1776000", fmtNum(1776000))` |
+| C2 | 通知失败无重试 | QA A6（spec §4.3 接受） | M1.5 加退避重试，或 `hestia status` 显示最近 notify 失败 |
+| C3 | `buildHestiaSender` 错误串里 `cfgFile` 的 `%s` 无守卫 | 验证者变异 H-A5c 存活（等价变异：两条用例都用「文件不存在」造失败，内层 `os.PathError` 已带路径） | 加一条「文件存在但 YAML 非法」的子用例 |
+| C4 | 运行时根目录残留旧 `atlas` 二进制（2026-08-07） | QA 清单 | 切换清单第 4 步顺手删 |
+| C5 | `--only-period 2026-07` 约 10 月中旬后失效（掉出索引页前 3 页） | QA 清单 | 切换清单若延后执行，改用当期期次 |
