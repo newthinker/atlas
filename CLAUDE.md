@@ -87,6 +87,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
   已分别涨到 33KB / 91KB，**「处方写下了却没人读得到」是本框架实测过的失效模式**。
 
 ### 1. 需求分析阶段
+
 - 读取并理解需求文档（默认 `requirements.md`）。
 - 若 `everything-claude-code (ECC)` 可用，调用其 `/multi-plan` 做多模型协作规划生成初始计划；
   **不可用时**直接用 superpowers 的 `brainstorming` skill 精炼设计（优雅降级）。
@@ -94,6 +95,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 - 产出保存到 `.arcforge/docs/01-design/`。
 
 ### 2. 任务拆分 & 完成标准定义（Realistic Scope）
+
 - 在初始计划基础上细化为可独立开发的任务。
 - **Realistic Scope 约束**（用 agent 可自评的标度，而非人类时间）：
   每个任务 ≤ 1 个 package、`done_criteria` 总条数 ≤ 8、预计改动文件 ≤ 5。超出则继续拆分。
@@ -107,6 +109,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 - 写入 `.arcforge/tasks/TASK-xxx.json`。
 
 ### 3. DoD 验证 & 人类确认门（质量源头，杠杆最高）
+
 - 生成需求↔DoD 双向追溯矩阵，写入 `02-plan/requirement-dod-matrix.md`，
   机器检查暴露「孤儿需求」（无 DoD 覆盖）和「凭空 DoD」（不对应任何需求）。
 - spawn 一个独立 reviewer agent，**只读需求文档（不看 DoD 生成过程）**，独立判断验收标准
@@ -118,14 +121,24 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
   - `full-auto`：不暂停，靠追溯矩阵 + reviewer 自动兜底
 
 ### 4. 团队组建
+
 - 根据任务总量、依赖图、`wave` 决定 Dev Agent 数量（不超过 `team.max_dev_agents`）。
 - 为每个 Dev Agent 分配一组可并行的任务（同一 wave、package 不重叠）。
 - 用 Agent Teams 创建团队并 spawn teammates（dev × N、test × 1-2）。
 
 ### 5. 进度跟踪（文件级真相源）
+
 - **以 `tasks/*.json` 的 status 字段为准**轮询跟踪，inbox 仅作通知/催办。
 - 扫描到 `dev_done` → 指派 Test Agent 验证；扫描到 `rejected`/`review_fix` → 重派对应 Dev。
 - 状态变更先落盘（原子写）再发通知；`plan.md` 仅由 Leader 写。
+- 🔴 **派发/派验的通知里加一句「请回一句确认收到」。** 一句话，把「静默失败」变成
+  「有响应的失败」——通知丢了和「收到了正在做」在 Leader 侧**完全同形**（任务状态、
+  产物、实例是否 idle 都一样），这正是 `stale-dispatch` 需要 30 分钟阈值 + 双条件判据
+  的原因。有回执时「没收到」在几分钟内就由**沉默本身**报警，不必等阈值。
+  ⚠️ 它**不防止**通知丢失，只把发现丢失的时间从阈值级压到一句话。
+  **实测（atlas M1c-4）**：前两次派验不加，分别丢了 **48 分钟**与 **138 分钟**（后者
+  还因 Leader 用一个只在成功时出声的监视器顶替了周期扫描而放大）；加这一句之后
+  **四次派验全部当场回执**。
 
 #### 派发后活性确认（`stale-dispatch` 告警的处置流程）
 
@@ -159,7 +172,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 不是「看起来停了」；跳过第 1 步会把还活着的实例的活抢走，白干加双写）：
 
 | 步骤 | 触发条件 | 动作 | 不要做什么 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 第 1 步 | validator 首次报该任务 `stale-dispatch` | 向该实例**重发一次**消息，附 task id 与它该做的下一步 | 不要直接收回——「还活着但没写 checkpoint」的实例正是这个样子 |
 | 第 2 步 | 重发后再等**一个完整阈值周期**，仍无本轮产物 | 判定「联系不上且唤不回」，走逃生边收回改派（见下） | 不要跳过第 1 步；也不要在第 1 步就改 `assigned_to`/`verifier` |
 
@@ -172,6 +185,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
   **不要试图改回 `assigned`**——那条边不存在，写通道会 DENY。
 
 ### 6. 质量门禁
+
 - 全体任务 `verified` 后，spawn QA Agent 做 Code Review（两轮：常规 + 跨视角对抗）。
 - 根据 Review 结果决定是否需要修复迭代（最多 `code_review.max_iterations` 轮）。
 
@@ -182,7 +196,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 每个 `tasks/TASK-xxx.json` 的 `status` 字段在以下状态间流转（owner = 唯一可写者）：
 
 | 状态 | 含义 | owner |
-|---|---|---|
+| --- | --- | --- |
 | `pending` | 已拆分，未分配 | Leader |
 | `assigned` | 已派给某 Dev（`assigned_to`） | Leader |
 | `in_progress` | Dev 正在 TDD | Dev |
@@ -199,6 +213,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 **正常流转：** `pending → assigned → in_progress → dev_done → verifying → verified → accepted`
 
 **返工与澄清环：**
+
 - 验证不过：`verifying → rejected → assigned → ...`
 - QA 退回：`verified → review_fix → in_progress → ...`
 - 澄清环：`in_progress → blocked_clarification → in_progress → ...`（Leader 周期扫描答复；
@@ -223,12 +238,12 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 **状态机的完整出边表**（共 21 条，与 `write-matrix.json` 的 `transitions` **逐条一一对应**；
 下游实测过「正文写了某条边而边表没有」导致 Leader 与 Dev 一起做错动作，故此处两两可核对。
 `tests/hooks/test-arcforge-write.sh` 的 E3 组按「行首竖线 + 反引号包裹的 `源状态 → 目标状态`
-+ 竖线」这一格式解析本表，与矩阵做**双向集合相等**比对，「合法写者」列做**等值**比对
+- 竖线」这一格式解析本表，与矩阵做**双向集合相等**比对，「合法写者」列做**等值**比对
 ——**改矩阵必须同时改本表，且两份 CLAUDE.md 都要改**，否则测试直接红。散文里的箭头链、
 bullet 举例、上面那张状态表都不匹配该行首格式，不会被解析成边表条目）：
 
 | 出边 | 合法写者 | 用途 | 漂移约束 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `pending → assigned` | `leader` | 派发给某 Dev（写 `assigned_to`，`assignment_epoch += 1`） | — |
 | `pending → skipped` | `leader` | 依赖被永久放弃，未派发即跳过 | — |
 | `assigned → in_progress` | `dev-*` | Dev 认领（须 `assigned_to == 自己`），并记下 `assignment_epoch` | — |
@@ -365,7 +380,7 @@ dev_done/task-completed 门禁默认拒绝空 scope。纯文档/产物类任务�
 同一份范围声明要服务两件**目标相反**的事，故拆成两个字段：
 
 | 字段 | 口径 | 消费点 | 回答的问题 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `packages` | 覆盖率口径（**宽**） | `task-completed.sh` 的 `go test` / `-coverpkg` | 我的改动**应当被哪些包的测试覆盖** |
 | `writes` | 互斥口径（**窄**） | validator 的 `scope-empty`/`scope-mutex`；`task-completed.sh` 的 scope 漂移与无代码任务变更判定 | 我**会写哪些路径** |
 
@@ -442,7 +457,7 @@ description 而不在 DoD）、`scope-writes-outside-packages`（writes 越出�
 一起靠偶然，没有一起是机制挡下的**；而全 sprint 唯二没出问题的运行，都主动用了 worktree。
 
 | 做什么 | 在哪 |
-|---|---|
+| --- | --- |
 | 编辑代码、跑测试、跑变异 | 自己的 worktree |
 | 一切 `.arcforge/` 读写:**cd 回主仓库** | 主仓库（唯一真相源） |
 | 提交 | 自己的 worktree，分支 `task/<TASK-ID>` |
@@ -493,7 +508,7 @@ worktree）**都可以发生在一个已经存在的 worktree 里**，实测均�
 其一的是两次独立采样，不能当对照结论。这两条的**失效方式相反**，只记一条会漏掉另一半：
 
 | 纪律 | 防的是 | 产生的错误 | 实撞 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **背对背**：新旧两份二进制/脚本**同一时刻背对背**并排跑 | 基线漂移——时间轴上环境变了 | **假差异** | 跨 12 分钟采样得到 4 处假差异，全由并发 agent 期间新建文件造成；背对背重跑后逐字节一致 |
 | **同等负载**：两组承受逐轮相同的负载 | 负载不等——两批同时可跑但压力不同 | **假无差异** | 某版本 10 次全绿被读成「改动前没这个缺陷」，实为那一批没有并发负载；同轮 2×A+2×B 后立刻红 6/12 |
 
@@ -512,7 +527,7 @@ worktree）**都可以发生在一个已经存在的 worktree 里**，实测均�
 **这条与「checkpoint 产物指针必须带 commit sha」是同一条规则，但危害更大，所以单列**：
 
 | | 过期时会发生什么 |
-|---|---|
+| --- | --- |
 | checkpoint 指针过期 | **失效**——接手者比对 HEAD 就会发现不一致，然后去查 |
 | **验证命令过期** | **主动产出假红**，而且那份红会被当成判定依据 |
 
@@ -597,11 +612,11 @@ KILLED 数、外溢度、行数、sha）都必须在最后一次改动之后统�
 
 ⇒ 机制化：让 harness 把**实际锚点与工作树 HEAD 打进输出**，使「这批数字测自哪棵树」成为
 报告的一部分，而不是靠作者记得声明。
+
 - **外溢闸命中即早退**：变异 harness 的有效性闸（语法 / 可执行位 / 作用域外红过半）一旦命中，
   必须**立刻 return**，不得继续打印 `KILLED`。实撞：某 harness 的「作用域外红过半」闸不早退，
   输出里于是留着 `PASS: M6 KILLED(1/1,确定性)` 这行**假话**，只有 FAIL 行和退出码说真话——
   而这道闸的全部意义正是别让假 KILLED 立住。
-
 
 ## 知识累积
 
@@ -640,7 +655,6 @@ checkpoint 还把分支记成了 `master`（本仓库是 `main`）。**接手者
 **为什么这条只做纪律、不做机制**（人类选定，理由一并记明）：真要机制化（写通道校验
 checkpoint 里的 ref）成本远超收益——触发条件是「agent 失联 + 交接」，比其它几条罕见得多；
 而 checkpoint 本就是给人/agent 读的自述文档，加一行 sha 与一步比对即可闭合。
-
 
 ## Delegate Mode 注意
 

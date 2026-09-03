@@ -7,7 +7,7 @@
 #   arcforge-write.sh --as <me> task <TASK-ID> transition <new-status> [--expect-epoch N] [--field k=v ...] [--json-field k=json ...]
 #     · transition rejected/review_fix 必带 --field reason_class=<task_defect|dod_defect|env_infra|no_progress>(A-2)
 #     · rejected->assigned / review_fix->in_progress 时脚本自动 rework_count+1(env_infra 豁免);rework_count 由脚本管理,禁经 --field/--json-field 写
-#   arcforge-write.sh --as <me> task <TASK-ID> update [--field k=v ...] [--json-field k=json ...]
+#   arcforge-write.sh --as <me> task <TASK-ID> update [--expect-status S] [--field k=v ...] [--json-field k=json ...]
 #     · TASK-014:带字段的 update 也向 tasks/transitions.jsonl 追加一行审计
 #       {task,op:"update",by,at,keys,changes};changes 对字符串数组(packages/writes)记
 #       added/removed,其余只记 {type,len} 摘要 —— **绝不记字段值全文**
@@ -394,6 +394,7 @@ locked_task_write() { # <me> <task-file> <transition|update> <new-status|-> [arg
         fi
     fi
     EXPECT_EPOCH=""
+    EXPECT_STATUS=""
     ACK_HEAD=""
     ACK_DSHA=""
     REASON_CLASS=""
@@ -407,6 +408,12 @@ locked_task_write() { # <me> <task-file> <transition|update> <new-status|-> [arg
             --expect-epoch)
                 EXPECT_EPOCH="${2:?--expect-epoch 需要一个数字}"
                 echo "$EXPECT_EPOCH" | grep -qE '^[0-9]+$' || fail "--expect-epoch 必须是非负整数" ;;
+            --expect-status)
+                # M1c-4:epoch 挡「你还是不是 owner」,挡不住「状态在你手上变了」——二者正交,
+                # 而只有前者有锁。实撞:dev 读到 dev_done、拼装 done_criteria、写入时已是
+                # verifying(派验切在读与写之间,窗口 4 分钟),而 update 没有乐观锁可用。
+                EXPECT_STATUS="${2:?--expect-status 需要一个状态名}"
+                echo "$EXPECT_STATUS" | grep -qE '^[a-z_]+$' || fail "--expect-status 必须是小写状态名(如 in_progress)" ;;
             --ack-drift)
                 ACK_HEAD="${2:?--ack-drift 需要一个 commit sha}" ;;
             --ack-discovery-drift)
@@ -457,6 +464,19 @@ locked_task_write() { # <me> <task-file> <transition|update> <new-status|-> [arg
                     "合法值: task_defect|dod_defect|env_infra|no_progress" ;;
             esac ;;
         esac
+    fi
+
+    # M1c-4:status 断言与 epoch 断言同位(锁内、落盘前),但回答的是**另一个**问题:
+    # epoch 答「任务还是不是派给我的」,status 答「我读到的那个状态还在不在」。
+    # CUR 是本函数开头在锁内读出的当前状态,与调用方读到的值比对即可闭合读-校验-写。
+    # ⚠ transition 不需要它:非法迁移边本身就会被 transitions 表拒掉;update 没有那层保护。
+    if [ -n "$EXPECT_STATUS" ]; then
+        [ "$MODE" = "update" ] || deny \
+            "--expect-status 只用于 update(transition 的状态断言由迁移边本身完成)" \
+            "transition 请用 --expect-epoch;若你要断言起始状态,说明该边可能已被并发推进"
+        [ "$CUR" = "$EXPECT_STATUS" ] || deny \
+            "status 断言失败:文件 status=$CUR ≠ 你读到的 $EXPECT_STATUS(状态已在你读与写之间变化)" \
+            "放弃本次写入,重读任务文件确认当前 owner 后再决定——你可能已不是合法写者"
     fi
 
     # F5:epoch 断言在锁临界区内、重读 assignment_epoch 之后、jq 落盘之前——
