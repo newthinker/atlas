@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -390,8 +391,23 @@ func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
 	// 仓库 yaml 必须**显式**写出 snapshot_dir（M1d 的 TASK-001，reviewer R-001）：
 	// 上面的键集比对只看 magnitude_ranges，yaml 漏写这一行时 LoadConfig 会拿预填值
 	// 兜底、全绿——「运维一眼能看到它」这个目的就没有任何测试守着。
+	//
+	// 🔴 只断言 cfg 字段是**恒真**的（第一轮 REJECT，验证者变异实测）：预填默认值与
+	// yaml 值同为 data/hestia-snapshots，删掉 yaml 那行后 cfg.Storage.SnapshotDir 照样
+	// 等于它，分不出「显式写出」与「漏写靠预填」。所以守卫落在**原始 yaml 文本**上：
+	// 删掉那行，下面这条必红（返工时在隔离副本上实测过）。cfg 字段那条保留，它守的
+	// 是另一件事——yaml 里写的值与代码默认值没有分叉。
 	assert.Equal(t, "data/hestia-snapshots", cfg.Storage.SnapshotDir,
-		"configs/hestia.yaml 的 storage 段必须显式写出 snapshot_dir，不能靠预填兜底")
+		"configs/hestia.yaml 的 snapshot_dir 值必须与 defaultSnapshotDir 一致：两处分叉时"+
+			"跑起来用的是 YAML 那份，而读代码的人看到的是默认值那份")
+	rawYAML, err := os.ReadFile("../../configs/hestia.yaml")
+	require.NoError(t, err)
+	// 用 strings.Contains + assert.True 而不是 assert.Contains：后者失败时会把整份
+	// yaml（20KB）打进输出，把真正的信息淹掉。
+	wantLine := "  snapshot_dir: data/hestia-snapshots"
+	assert.True(t, strings.Contains(string(rawYAML), "\n"+wantLine+"\n"),
+		"configs/hestia.yaml 必须显式写出 `%s`：预填值与 yaml 值相同，"+
+			"只断言 cfg 字段分不出「显式写出」与「漏写靠预填」", wantLine)
 
 	// 🔴 四个容差的标定值（M1c-4 的 TASK-010，人类裁决）。
 	//
