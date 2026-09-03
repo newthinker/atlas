@@ -139,3 +139,20 @@ func TestRenderP2PrefersYtdWhenBothPresent(t *testing.T) {
 	assert.NotContains(t, got, "447")
 	assert.NotContains(t, got, "mom")
 }
+
+// A7（QA 终审，Leader 拍板）：Force 重跑已入库期次时 Save 判 Duplicate、只刷 article_id、
+// 本次新抽的 Values 一个都不写（ingest.go 的注释原话）。P2 把本次重抽的锚值写成「入库」
+// 会让运维以为这些数进了库——Duplicate 时措辞改为「已在库（本次抽取值未写入）」，
+// 其它 Verdict 不变。
+func TestRenderP2DuplicateSaysValuesNotWritten(t *testing.T) {
+	dup := renderP2(notifyObs(), Outcome{Verdict: bitemporal.Duplicate, Table: TableObservations})
+	assert.Contains(t, dup, "Duplicate", "Verdict 仍要原样可见")
+	assert.Contains(t, dup, "未写入")
+	assert.NotContains(t, dup, "入库 Duplicate", "Duplicate 不能再说「入库」")
+
+	for _, v := range []bitemporal.Verdict{bitemporal.New, bitemporal.Revision, bitemporal.OutOfOrder} {
+		got := renderP2(notifyObs(), Outcome{Verdict: v, Table: TableObservations})
+		assert.NotContains(t, got, "未写入", "%s 的措辞不变", v)
+		assert.Contains(t, got, "入库 "+v.String(), "%s 仍是「入库」", v)
+	}
+}

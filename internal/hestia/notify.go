@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
 // Sender 是通知通道的窄接口，与 crisis.Sender 同形（方案报告 4.8.1，M1d 的 TASK-004）。
@@ -52,13 +54,22 @@ func renderP1(c Candidate, err error) string {
 // renderP2：入权威表。Verdict 原样写进去——Duplicate / Revision / OutOfOrder 不吞，
 // 与 ingest.go 「不要为当前的局限写断言」那条理由同源。
 //
+// Duplicate 的措辞是「已在库（本次抽取值未写入）」而不是「入库」（QA 终审 A7，M1d 的
+// TASK-004 返工）：Force 重跑已入库期次时 Save 判 Duplicate、refreshArticleID 只刷
+// article_id、本次新抽的 Values 一个都不写（ingest.go 注释原话）。下面那行锚值是**本次
+// 重抽**的数，不是库里的；写成「入库」会让运维以为这些数进了库。其它 Verdict 不变。
+//
 // 四个冷热信号与综合温度尚未实现（等 M2），这里只带四个锚字段：
 // 存量三项单位万亿元、存款流量单位亿元并标口径（同族 _ytd / _mom 哪个非空取哪个，
 // 两者同在取 ytd）。
 func renderP2(obs Observation, out Outcome) string {
 	dep, caliber := anchorFlow(obs.Values, FieldDepositFlowYTD, FieldDepositFlowMoM)
-	return fmt.Sprintf("[P2] hestia %s/%s 入库 %s · extractor %s\nM2 %s 万亿 · M1 %s 万亿 · 社融存量 %s 万亿 · 人民币存款 %s 亿元 (%s)\narticle %s · 发布 %s",
-		obs.Meta.Period, obs.Meta.PeriodType, out.Verdict, obs.Meta.Extractor,
+	action := "入库"
+	if out.Verdict == bitemporal.Duplicate {
+		action = "已在库（本次抽取值未写入）"
+	}
+	return fmt.Sprintf("[P2] hestia %s/%s %s %s · extractor %s\nM2 %s 万亿 · M1 %s 万亿 · 社融存量 %s 万亿 · 人民币存款 %s 亿元 (%s)\narticle %s · 发布 %s",
+		obs.Meta.Period, obs.Meta.PeriodType, action, out.Verdict, obs.Meta.Extractor,
 		anchorValue(obs.Values, FieldM2), anchorValue(obs.Values, FieldM1),
 		anchorValue(obs.Values, FieldTSFStock), dep, caliber,
 		obs.Meta.ArticleID, obs.Meta.PublishedAt)
