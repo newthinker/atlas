@@ -383,9 +383,15 @@ func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
 		"键集合必须与 fieldOrder **逐项相等**：只比长度的话，打错一个字段名"+
 			"（多一个未知键、少一个真字段）两边都还是 76")
 
-	assert.Equal(t, "2026-09-02", cfg.ConfigVersion,
+	assert.Equal(t, "2026-09-03", cfg.ConfigVersion,
 		"填了区间表就改变了这份配置的行为，config_version 必须跟着走——"+
 			"否则「这期用的是哪版配置」在契约里查不出来")
+
+	// 仓库 yaml 必须**显式**写出 snapshot_dir（M1d 的 TASK-001，reviewer R-001）：
+	// 上面的键集比对只看 magnitude_ranges，yaml 漏写这一行时 LoadConfig 会拿预填值
+	// 兜底、全绿——「运维一眼能看到它」这个目的就没有任何测试守着。
+	assert.Equal(t, "data/hestia-snapshots", cfg.Storage.SnapshotDir,
+		"configs/hestia.yaml 的 storage 段必须显式写出 snapshot_dir，不能靠预填兜底")
 
 	// 🔴 四个容差的标定值（M1c-4 的 TASK-010，人类裁决）。
 	//
@@ -485,4 +491,61 @@ func TestLoadConfigReportsStructuralErrorBeforeCompleteness(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "缺 ",
 		"🔴 倒置区间（结构性错误）必须先报；先报完整性会把一处笔误盖成「你少填了 74 项」")
+}
+
+// —— M1d 的 TASK-001：storage.snapshot_dir ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1d 的 TASK-001）
+// functional[0] 未写 snapshot_dir ⇒ 预填 defaultSnapshotDir      → TestLoadConfigDefaultsSnapshotDir
+// functional[1] 显式写 var/snap ⇒ 原样保留、不解析路径             → TestLoadConfigReadsSnapshotDir
+// functional[2] 仓库 yaml 显式写出 data/hestia-snapshots（R-001）   → TestShippedConfigLoadsAndIsCalibrated（snapshot_dir 断言）
+// boundary[0]   显式空串 ⇒ 报错含 snapshot_dir 且包住底层 err       → TestLoadConfigRejectsEmptySnapshotDir
+
+// snapshot_dir 未写 ⇒ 预填默认值；与 db_path 一样是相对路径、按进程 cwd 解析（约束 C8）。
+func TestLoadConfigDefaultsSnapshotDir(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	cfg, err := LoadConfig(p)
+	require.NoError(t, err)
+	assert.Equal(t, "data/hestia-snapshots", cfg.Storage.SnapshotDir,
+		"未写 snapshot_dir 必须得到预填默认值，而不是空串——空串会让 ingest 在第一篇上就失败")
+}
+
+// 显式写了就原样保留，不做任何路径解析（同 TestLoadConfigKeepsDBPathRelative 的理由）。
+func TestLoadConfigReadsSnapshotDir(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+  snapshot_dir: var/snap
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	cfg, err := LoadConfig(p)
+	require.NoError(t, err)
+	assert.Equal(t, "var/snap", cfg.Storage.SnapshotDir)
+}
+
+// 显式空串必须被拒：快照是 DoD 项，不提供「关掉快照」的配置形态（spec §3.3）。
+func TestLoadConfigRejectsEmptySnapshotDir(t *testing.T) {
+	p := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+  snapshot_dir: ""
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	_, err := LoadConfig(p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshot_dir")
+	require.NotNil(t, errors.Unwrap(err), "校验失败的错误必须包住底层 err")
 }
