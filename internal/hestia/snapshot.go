@@ -32,6 +32,9 @@ type snapshotResult struct {
 //   - 不存在 ⇒ 写入
 //   - 已存在且字节相同 ⇒ 跳过，不改 mtime
 //   - 已存在且字节不同 ⇒ **不覆盖**，另存 <articleID>.<UTC 时间戳>.html
+//   - 与 <articleID>.html 不同、但与某份时间戳副本相同 ⇒ 也是跳过（QA review_fix A3）：
+//     改稿后每次重抓（--force、Parse 失败次日重抓）拿到的都是改稿版，不查副本就会
+//     每次再落一份相同字节的副本并打 diverged。
 //
 // 第三种是央行改稿，两版都要留；它不是错误，调用方只需把它说出来。
 //
@@ -55,12 +58,39 @@ func saveSnapshot(dir, articleID string, raw []byte, now time.Time) (snapshotRes
 	case bytes.Equal(existing, raw):
 		return snapshotResult{Path: path, Kind: snapshotUnchanged}, nil
 	default:
+		hit, err := findSnapshotCopy(dir, articleID, raw)
+		if err != nil {
+			return snapshotResult{}, err
+		}
+		if hit != "" {
+			return snapshotResult{Path: hit, Kind: snapshotUnchanged}, nil
+		}
 		alt := filepath.Join(dir, articleID+"."+now.UTC().Format("20060102T150405Z")+".html")
 		if err := writeAtomic(alt, raw); err != nil {
 			return snapshotResult{}, err
 		}
 		return snapshotResult{Path: alt, Kind: snapshotDiverged}, nil
 	}
+}
+
+// findSnapshotCopy 在 <dir>/<articleID>.*.html（时间戳副本）里找与 raw 逐字节相同的一份，
+// 找到返回其路径，没有返回空串。Glob 只在 articleID 含元字符时报 ErrBadPattern，同样响亮。
+func findSnapshotCopy(dir, articleID string, raw []byte) (string, error) {
+	pattern := filepath.Join(dir, articleID+".*.html")
+	copies, err := filepath.Glob(pattern)
+	if err != nil {
+		return "", fmt.Errorf("snapshot glob %s: %w", pattern, err)
+	}
+	for _, c := range copies {
+		data, err := os.ReadFile(c)
+		if err != nil {
+			return "", fmt.Errorf("snapshot read %s: %w", c, err)
+		}
+		if bytes.Equal(data, raw) {
+			return c, nil
+		}
+	}
+	return "", nil
 }
 
 // writeAtomic 先写 <path>.tmp 再 rename。同目录 rename 在 POSIX 上是原子的。

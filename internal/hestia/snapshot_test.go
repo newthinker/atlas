@@ -19,6 +19,9 @@ import (
 // error_handling[0] (R-002) writeAtomic 的 WriteFile 失败分支  → TestSaveSnapshotFailsWhenDirReadOnly
 // error_handling[0] 读既有文件出错且非 ErrNotExist ⇒ snapshot read → TestSaveSnapshotFailsWhenExistingPathIsDir
 // error_handling[0] rename 失败 ⇒ 清理 tmp 并返回 snapshot rename → TestWriteAtomicRenameFailureRemovesTmp
+// review_fix A3   改稿后重抓同字节 ⇒ 命中时间戳副本 ⇒ Unchanged，不再落第三份 → TestSaveSnapshotDivergedTwiceIsUnchanged
+// review_fix A3   副本查重的 glob / 读副本失败分支                    → TestSaveSnapshotFailsOnUnglobbableID / TestSaveSnapshotFailsWhenCopyIsDir
+// review_fix A8   now 传非 UTC 时区，文件名仍 …T083015Z（钉 now.UTC()） → TestSaveSnapshotDivergedKeepsBothVersions
 // non_functional[0] 不新增导出函数、不含业务字段名字面量      → 既有 TestPackageExposesNoWriteFunctions /
 //                                                                TestFieldNamesAppearOnlyInFieldsGo 保持绿
 
@@ -76,7 +79,9 @@ func TestSaveSnapshotDivergedKeepsBothVersions(t *testing.T) {
 	first, err := saveSnapshot(dir, "a1", v1, snapNow)
 	require.NoError(t, err)
 
-	res, err := saveSnapshot(dir, "a1", v2, snapNow)
+	// 传东八区的 now：文件名必须仍是 UTC 的 083015Z，而不是本地钟面的 163015（review_fix A8）。
+	cst := snapNow.In(time.FixedZone("CST", 8*3600))
+	res, err := saveSnapshot(dir, "a1", v2, cst)
 	require.NoError(t, err)
 	assert.Equal(t, snapshotDiverged, res.Kind)
 	assert.Equal(t, filepath.Join(dir, "a1.20260904T083015Z.html"), res.Path,
@@ -143,4 +148,52 @@ func TestWriteAtomicRenameFailureRemovesTmp(t *testing.T) {
 	assert.Contains(t, err.Error(), "snapshot rename")
 	_, statErr := os.Stat(target + ".tmp")
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "rename 失败后临时文件必须被清掉")
+}
+
+// 改稿后再重抓（--force 或次日重抓）拿到的仍是改稿版：必须命中时间戳副本 ⇒ Unchanged，
+// 不能每次都再落一份相同字节的副本并打 diverged（review_fix A3，QA 实测 v1/v2/v2/v2 ⇒ 4 文件）。
+func TestSaveSnapshotDivergedTwiceIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	v1, v2 := []byte("version one"), []byte("version two")
+
+	r1, err := saveSnapshot(dir, "a1", v1, snapNow)
+	require.NoError(t, err)
+	assert.Equal(t, snapshotWritten, r1.Kind)
+
+	r2, err := saveSnapshot(dir, "a1", v2, snapNow)
+	require.NoError(t, err)
+	assert.Equal(t, snapshotDiverged, r2.Kind)
+
+	r3, err := saveSnapshot(dir, "a1", v2, snapNow.Add(24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, snapshotUnchanged, r3.Kind, "同字节的改稿版已在副本里，不该再落一份")
+	assert.Equal(t, r2.Path, r3.Path, "Unchanged 的 Path 指向命中的那份副本")
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 2, "目录里恰 2 文件：<id>.html 与一份时间戳副本")
+}
+
+// articleID 含 glob 元字符且已有不同字节的 <id>.html ⇒ 副本查重的 Glob 报 ErrBadPattern，
+// 必须响亮返回，不能当成「没有副本」继续落盘。
+func TestSaveSnapshotFailsOnUnglobbableID(t *testing.T) {
+	dir := t.TempDir()
+	_, err := saveSnapshot(dir, "a[1", []byte("v1"), snapNow)
+	require.NoError(t, err, "首次落盘不经 Glob，正常写入")
+
+	_, err = saveSnapshot(dir, "a[1", []byte("v2"), snapNow)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshot glob")
+}
+
+// <id>.<x>.html 位置上是个目录 ⇒ 读副本报 EISDIR，必须走 snapshot read 分支报错。
+func TestSaveSnapshotFailsWhenCopyIsDir(t *testing.T) {
+	dir := t.TempDir()
+	_, err := saveSnapshot(dir, "a1", []byte("v1"), snapNow)
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "a1.bogus.html"), 0o755))
+
+	_, err = saveSnapshot(dir, "a1", []byte("v2"), snapNow)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshot read")
 }
