@@ -19,6 +19,8 @@ import (
 	"go/token"
 	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +62,8 @@ func TestHestiaFlags(t *testing.T) {
 	assert.NotNil(t, hestiaIngestCmd.Flags().Lookup("force"))
 	assert.Nil(t, hestiaStatusCmd.Flags().Lookup("force"),
 		"--force 是 ingest 的事，status 不该有")
+	assert.NotNil(t, hestiaIngestCmd.Flags().Lookup("only-period"))
+	assert.Nil(t, hestiaStatusCmd.Flags().Lookup("only-period"), "--only-period 是 ingest 的事")
 }
 
 // 🔴 失败时不得再灌一屏 usage（reviewer D4）。
@@ -993,4 +997,194 @@ discover:
 	require.NotEmpty(t, out, "命令必须真的打印报告——零字节 + 退出码 0 正是本条要防的形态")
 	assert.Contains(t, out, "四道恒等式", "恒等式小节标题")
 	assert.Contains(t, out, "合并组明细", "合并组明细小节标题")
+}
+
+// ============================================================================
+// M1d 的 TASK-007：--only-period flag 与开库前校验、buildHestiaSender、plist 传 --config
+//
+// Context Checkpoint: done_criteria → test mapping
+//   functional[0] --only-period 只注册在 ingest；两条校验在 openHestia 之前 → TestHestiaFlags（两条新断言）、TestHestiaOnlyPeriodValidation
+//   functional[1] buildHestiaSender 缺配置 ⇒ 字面量 nil；已配置 ⇒ 非 nil     → TestBuildHestiaSenderNoConfig、TestBuildHestiaSenderFromMainConfig
+//   functional[1] 通道状态行在 openHestia 成功之后、Ingest 之前打印           → TestHestiaIngestPrintsNotifyStatus
+//   functional[2] plist 在 --hestia-config 对之后传 --config                  → TestHestiaPlistPassesMainConfig
+//   boundary[0]   --help 里 only-period / force 两行都在，文案说 requires --force → TestHestiaOnlyPeriodHelp
+//   error_handling[0] 配置错误时不得先打 notify 行                            → TestHestiaIngestPrintsNotifyStatus（config error 子用例）
+// ============================================================================
+
+// --only-period 的两条前置校验在开库之前就拦：参数写错的人第一秒就知道。
+//
+// ⚠️ 两个用例都在 openHestia() 之前返回，所以不依赖配置文件存在；若实现把校验放到了
+// 开库之后，第二条会因找不到 configs/hestia.yaml 报另一种错误——那正是这条要抓的顺序错误。
+// 为让顺序错误**必然**露出来，这里把 hestiaCfgPath 指到一个不存在的文件：校验若在开库之后，
+// 错误文案就会变成配置路径而不是「格式非法」。
+func TestHestiaOnlyPeriodValidation(t *testing.T) {
+	oldCfg := hestiaCfgPath
+	hestiaCfgPath = filepath.Join(t.TempDir(), "nope.yaml")
+	t.Cleanup(func() { hestiaOnlyPeriod, hestiaForce, hestiaCfgPath = "", false, oldCfg })
+
+	hestiaOnlyPeriod, hestiaForce = "2026-07", false
+	err := runHestiaIngest(hestiaIngestCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--only-period requires --force")
+	assert.NotContains(t, err.Error(), hestiaCfgPath, "校验必须在开库之前：错误不该是配置路径")
+
+	hestiaOnlyPeriod, hestiaForce = "2026-13", true
+	err = runHestiaIngest(hestiaIngestCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "格式非法")
+	assert.NotContains(t, err.Error(), hestiaCfgPath, "校验必须在开库之前：错误不该是配置路径")
+}
+
+// --help 要把两个 flag 都列出来，且 --only-period 的文案说明它要和 --force 同用。
+func TestHestiaOnlyPeriodHelp(t *testing.T) {
+	var buf bytes.Buffer
+	hestiaIngestCmd.SetOut(&buf)
+	t.Cleanup(func() { hestiaIngestCmd.SetOut(nil) })
+	require.NoError(t, hestiaIngestCmd.Help())
+	help := buf.String()
+	assert.Contains(t, help, "--only-period")
+	assert.Contains(t, help, "--force")
+	assert.Contains(t, help, "requires --force")
+}
+
+// buildHestiaSender 在无 telegram 配置时返回**字面量 nil**（照 TestBuildCrisisSenderNoConfig）。
+// assert.Nil 对「nil 指针装进接口」也判 nil，故下面再用 == nil 钉一次——那才是 Ingest 里
+// `d.Notify == nil` 真正走的比较。
+func TestBuildHestiaSenderNoConfig(t *testing.T) {
+	prev := cfgFile
+	cfgFile = "" // loadConfigOrDefaults → Defaults()，无 notifiers
+	t.Cleanup(func() { cfgFile = prev })
+
+	s := buildHestiaSender()
+	assert.Nil(t, s)
+	assert.True(t, s == nil, "必须是字面量 nil：nil 指针装进接口会让 Ingest 的 d.Notify == nil 判断穿掉")
+}
+
+// buildHestiaSender 从主配置 notifiers.telegram 构造；四个缺项各自都回落到 nil。
+func TestBuildHestiaSenderFromMainConfig(t *testing.T) {
+	prev := cfgFile
+	t.Cleanup(func() { cfgFile = prev })
+
+	write := func(t *testing.T, body string) {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o600))
+		cfgFile = p
+	}
+
+	t.Run("enabled with token and chat ⇒ non-nil", func(t *testing.T) {
+		write(t, "notifiers:\n  telegram:\n    enabled: true\n    bot_token: fake-token\n    chat_id: \"12345\"\n")
+		assert.NotNil(t, buildHestiaSender())
+	})
+	t.Run("disabled ⇒ nil", func(t *testing.T) {
+		write(t, "notifiers:\n  telegram:\n    enabled: false\n    bot_token: fake-token\n    chat_id: \"12345\"\n")
+		assert.True(t, buildHestiaSender() == nil)
+	})
+	t.Run("missing chat_id ⇒ nil", func(t *testing.T) {
+		write(t, "notifiers:\n  telegram:\n    enabled: true\n    bot_token: fake-token\n")
+		assert.True(t, buildHestiaSender() == nil)
+	})
+	t.Run("unloadable main config ⇒ nil", func(t *testing.T) {
+		cfgFile = filepath.Join(t.TempDir(), "does-not-exist.yaml")
+		assert.True(t, buildHestiaSender() == nil)
+	})
+}
+
+// 通道状态行的**位置**：openHestia() 成功之后、Ingest 之前。
+//
+// 两个方向各一条能区分的断言：配置错误时**不得**出现 notify 行（否则是「先说 notify: telegram
+// 再报错」）；配置正确时它必须出现且在 Ingest 的输出之前。正向用例用本地 httptest 伪造
+// 一页「有分页控件、无文章链接」的索引页——Discover 拿到 0 候选、Ingest 打 no new reports
+// 正常返回，全程不碰外网、不发通知。
+func TestHestiaIngestPrintsNotifyStatus(t *testing.T) {
+	prevCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = prevCfgFile })
+
+	t.Run("config error ⇒ no notify line", func(t *testing.T) {
+		old := hestiaCfgPath
+		hestiaCfgPath = filepath.Join(t.TempDir(), "nope.yaml")
+		t.Cleanup(func() { hestiaCfgPath = old })
+		cmd, out := newCapturingCmd()
+		require.Error(t, runHestiaIngest(cmd, nil))
+		assert.NotContains(t, out.String(), "notify:", "配置错误时不该先打通道状态再报错")
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `<html><body>jumpTo(this,'1','1','/x/%1.html')</body></html>`)
+	}))
+	t.Cleanup(srv.Close)
+	hestiaCfg := func(t *testing.T) {
+		t.Helper()
+		withConfig(t, `
+storage:
+  db_path: `+filepath.Join(t.TempDir(), "hestia.db")+`
+discover:
+  index_url: `+srv.URL+`/index.html
+  max_pages: 1
+  timeout: 5s
+`)
+	}
+
+	t.Run("telegram not configured ⇒ disabled line before ingest output", func(t *testing.T) {
+		cfgFile = ""
+		hestiaCfg(t)
+		cmd, out := newCapturingCmd()
+		require.NoError(t, runHestiaIngest(cmd, nil))
+		s := out.String()
+		i := strings.Index(s, "notify: disabled (telegram not configured)")
+		j := strings.Index(s, "no new reports")
+		require.NotEqual(t, -1, i, "通道状态行必须打出来：%q", s)
+		require.NotEqual(t, -1, j, "前置锚点：Ingest 真的跑到了 no new reports：%q", s)
+		assert.Less(t, i, j, "通道状态行要在 Ingest 输出之前")
+	})
+
+	t.Run("telegram configured ⇒ notify: telegram", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(p, []byte(`notifiers:
+  telegram:
+    enabled: true
+    bot_token: fake-token
+    chat_id: "12345"
+`), 0o600))
+		cfgFile = p
+		hestiaCfg(t)
+		cmd, out := newCapturingCmd()
+		require.NoError(t, runHestiaIngest(cmd, nil))
+		assert.Contains(t, out.String(), "notify: telegram\n")
+		assert.NotContains(t, out.String(), "notify: disabled")
+	})
+}
+
+// plistProgramArgs 取 ProgramArguments 数组里的每个 <string>。
+// 用 regexp 而不是 encoding/plist：仓库没有那个依赖，而 plist 的形状固定。
+func plistProgramArgs(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	m := regexp.MustCompile(`(?s)<key>ProgramArguments</key>\s*<array>(.*?)</array>`).FindSubmatch(raw)
+	require.Len(t, m, 2, "前置锚点：没找到 ProgramArguments")
+	var args []string
+	for _, sm := range regexp.MustCompile(`<string>(.*?)</string>`).FindAllSubmatch(m[1], -1) {
+		args = append(args, string(sm[1]))
+	}
+	require.NotEmpty(t, args)
+	return args
+}
+
+// 🔴 plist 必须传 --config：Telegram 的 token 与代理在主配置里，而 loadConfigOrDefaults
+// 在 cfgFile 为空时返回 config.Defaults() ⇒ sender 恒 nil ⇒ **静默不发**，且没有任何
+// 东西会因此变红。这是 M1d 立项的直接原因（运行时任务失败三周无人发现）。
+func TestHestiaPlistPassesMainConfig(t *testing.T) {
+	args := plistProgramArgs(t, "../../deploy/launchd/com.newthinker.atlas.hestia-ingest.plist")
+
+	i := slices.Index(args, "--config")
+	require.NotEqual(t, -1, i, "ProgramArguments 里必须有 --config")
+	require.Less(t, i+1, len(args))
+	assert.Equal(t, "/Users/zuowei/workspace/runtime/atlas/configs/config.yaml", args[i+1],
+		"--config 必须指向运行时目录的主配置（与 crisis-daily 同形），不是源码仓库的")
+
+	j := slices.Index(args, "--hestia-config")
+	require.NotEqual(t, -1, j, "既有的 --hestia-config 不得被顺手删掉")
+	assert.Equal(t, "/Users/zuowei/workspace/runtime/atlas/configs/hestia.yaml", args[j+1])
+	assert.Less(t, j, i, "--config 对放在 --hestia-config 对之后")
 }
