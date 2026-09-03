@@ -742,10 +742,13 @@ func TestForceOnObservedPeriodIsDuplicate(t *testing.T) {
 	require.Equal(t, 1, countRows(t, s, TableObservations), "前置：先要有一行在权威表里")
 	require.Contains(t, first.String(), bitemporal.New.String(), "前置：第一次应当是 New")
 
-	// --force 再跑一次同一篇
+	// --force 再跑一次同一篇。挂上 sender：spec §4.2「Duplicate 也发 P2、不吞」要在
+	// ingest 层有断言（M1d 的 TASK-005，reviewer R-005a）——渲染器层的文本断言只证明
+	// renderP2 能渲染 Duplicate，不证明 send 被调用了。
+	sender := &fakeSender{}
 	var out bytes.Buffer
 	require.NoError(t, Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Force: true,
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Force: true, Notify: sender,
 	}))
 
 	// 第一半：**走到了 Save**。没走到的话 Ingest 会打 no new reports 就返回。
@@ -761,6 +764,10 @@ func TestForceOnObservedPeriodIsDuplicate(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, s, TableObservations),
 		"②：Duplicate 只刷 article_id，不新增行")
 	assert.Zero(t, countRows(t, s, TablePending), "②：过闸的重跑不该落 pending")
+
+	// 第三半：Duplicate **也发了 P2**，且只发一条（这正是 TASK-009 链路实测第 5 步要收到的那条）。
+	require.Len(t, sender.texts, 1, "R-005a：Duplicate 不吞通知，恰一条")
+	assert.Contains(t, sender.texts[0], bitemporal.Duplicate.String(), "R-005a：P2 要说清这次是 Duplicate")
 }
 
 // —— M1d 的 TASK-003：ingest 接快照（Parse 之前）——
@@ -864,4 +871,144 @@ func TestIngestFailsPeriodWhenSnapshotUnwritable(t *testing.T) {
 		"错误链必须指名 snapshot 阶段，否则运维会去查 fetch 或 parse")
 	assert.Zero(t, countRows(t, s, TableObservations), "快照写不进去就不该入库：DoD 项不是可选副作用")
 	assert.Zero(t, countRows(t, s, TablePending))
+}
+
+// —— M1d 的 TASK-005：ingest 接通知与错误语义 ——
+//
+// Context Checkpoint: done_criteria → test mapping（M1d 的 TASK-005）
+// functional[0]       入权威表 ⇒ 恰一条 P2，含 New 与 2025-12/annual            → TestIngestNotifiesP2OnObservation
+// functional[0]/R-005a Duplicate 也发 P2、恰一条（ingest 层断言 send 被调用）    → TestForceOnObservedPeriodIsDuplicate（第三半）
+// functional[1]       落 pending ⇒ 恰一条 P0、指名闸门、pending 1 行           → TestIngestNotifiesP0OnPending
+// functional[2]       任一阶段失败 ⇒ 循环里恰一条 P1，含 article_id 与 parse    → TestIngestNotifiesP1OnParseFailure
+// boundary[0]         空跑 ⇒ 0 条、Out 含 no new reports                       → TestIngestSendsNothingOnEmptyRun
+// boundary[0]         Notify == nil ⇒ 不发不 panic、照常入库                    → TestIngestNilNotifyIsNoop
+// error_handling[0]   SendText 失败 ⇒ 不回滚、err 含 notify、Is errBoom、texts 恰 1 → TestIngestNotifyFailureIsLoudButNotCascading
+// error_handling[0]/R-005b P1 自身发送失败 ⇒ texts 恰 1、错误链含 parse 与 notify、Is errBoom → TestIngestP1SendFailureIsReported
+
+// fakeSender 记录每条消息；err 非 nil 时每次 SendText 都失败。
+type fakeSender struct {
+	texts []string
+	err   error
+}
+
+func (f *fakeSender) SendText(text string) error {
+	f.texts = append(f.texts, text)
+	return f.err
+}
+
+// 入权威表 ⇒ 恰一条 P2，且带 New。
+func TestIngestNotifiesP2OnObservation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sender := &fakeSender{}
+
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t), Notify: sender,
+	}))
+	require.Len(t, sender.texts, 1, "一期一条，不多不少")
+	assert.True(t, strings.HasPrefix(sender.texts[0], "[P2]"))
+	assert.Contains(t, sender.texts[0], bitemporal.New.String())
+	assert.Contains(t, sender.texts[0], "2025-12/annual")
+}
+
+// 落 pending ⇒ 恰一条 P0，且指名闸门。
+func TestIngestNotifiesP0OnPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	cfg.Thresholds.DepositSumTolerance = 1e-9 // >0（validate 要求），但必然超差
+	sender := &fakeSender{}
+
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Notify: sender,
+	}))
+	require.Len(t, sender.texts, 1)
+	assert.True(t, strings.HasPrefix(sender.texts[0], "[P0]"))
+	assert.Contains(t, sender.texts[0], "deposit_sum")
+	assert.Equal(t, 1, countRows(t, s, TablePending), "前置：确实落了 pending")
+}
+
+// 解析失败 ⇒ 恰一条 P1，带 article_id 与阶段名。
+func TestIngestNotifiesP1OnParseFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}),
+		articleURL(annualID): []byte("<html><body>not a report</body></html>"),
+	}}
+	sender := &fakeSender{}
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: io.Discard, Cfg: ingestCfg(t), Notify: sender})
+	require.Error(t, err, "前置：Parse 必须失败")
+	require.Len(t, sender.texts, 1)
+	assert.True(t, strings.HasPrefix(sender.texts[0], "[P1]"))
+	assert.Contains(t, sender.texts[0], annualID)
+	assert.Contains(t, sender.texts[0], "parse")
+}
+
+// 空跑（判停命中已见过的文章、0 候选）⇒ 0 条。一天三次唤起里九成是空跑。
+func TestIngestSendsNothingOnEmptyRun(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t)}))
+
+	sender := &fakeSender{}
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Notify: sender,
+	}))
+	require.Contains(t, out.String(), "no new reports", "前置：确实是空跑")
+	assert.Empty(t, sender.texts, "空跑不发消息")
+}
+
+// Notify 为 nil ⇒ 不发也不 panic：没配置就是静默降级（方案报告 4.8.1）。
+func TestIngestNilNotifyIsNoop(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t), Notify: nil}))
+	assert.Equal(t, 1, countRows(t, s, TableObservations))
+}
+
+// SendText 失败 ⇒ 数据已在库（不回滚），Ingest 返回的错误链带 notify，且**只尝试发一次**
+// （不会因为「通知失败」再发一条 P1——那条也发不出去，只会无限套娃）。
+func TestIngestNotifyFailureIsLoudButNotCascading(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sender := &fakeSender{err: errBoom}
+
+	var out bytes.Buffer
+	err := Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Notify: sender,
+	})
+	require.Error(t, err, "通知发不出去必须让退出码非零，err.log 才有痕")
+	// 钉的是 wrap 前缀形态 `(<article_id>): send P2: notify: `，不是裸 Contains "notify"：
+	// 裸词会被 notifyError 自带的前缀满足，把阶段名改成别的照样绿（TASK-003 验出的同款
+	// 问题：Contains "snapshot" 被 saveSnapshot 内层文本满足）。这里同时钉住了阶段名
+	// 与「双前缀二选一」的选择——阶段名是 send P2，notify 只出现一次。
+	assert.ErrorContains(t, err, "("+annualID+"): send P2: notify: ",
+		"错误链要按 wrap 形态点名阶段：入库后发 P2 失败")
+	assert.ErrorIs(t, err, errBoom, "底层错误要能 errors.Is 出来")
+	assert.Equal(t, 1, countRows(t, s, TableObservations), "数据已经 Save 了，不因通知失败回滚")
+	assert.Len(t, sender.texts, 1, "只有那一条 P2 的尝试；不得再为「通知失败」发 P1")
+}
+
+// P1 **自身**发不出去（reviewer R-005b）：上一条走的是「P2 失败 ⇒ errors.As 命中 ⇒ continue」，
+// 进不到循环里 `d.send(renderP1(...))` 失败那一支。这里让 Parse 先失败、再让 P1 也失败：
+// 两个错误都要留在链里（parse 是根因，notify 是没通知到），且仍只尝试一次。
+func TestIngestP1SendFailureIsReported(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}),
+		articleURL(annualID): []byte("<html><body>not a report</body></html>"),
+	}}
+	sender := &fakeSender{err: errBoom}
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: io.Discard, Cfg: ingestCfg(t), Notify: sender})
+	require.Error(t, err)
+	assert.Len(t, sender.texts, 1, "P1 只尝试一次，不为「P1 发不出去」再发一条")
+	// 两条都按 wrap 前缀形态钉阶段名（理由见 TestIngestNotifyFailureIsLoudButNotCascading）。
+	assert.ErrorContains(t, err, "("+annualID+"): parse: ", "根因要留在链里")
+	assert.ErrorContains(t, err, "("+annualID+"): notify: ", "没通知到也要留在链里")
+	assert.ErrorIs(t, err, errBoom)
 }

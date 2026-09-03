@@ -22,6 +22,15 @@ type IngestDeps struct {
 	Fetch Fetcher
 	Cfg   Config
 	Out   io.Writer // nil 等价于 io.Discard
+	// Notify 是通知通道（M1d 的 TASK-005）。nil = 不发：没配置就是静默降级，
+	// 不报错、不阻塞入库（方案报告 4.8.1）。
+	//
+	// 发送时机：Save 落 pending ⇒ P0；入权威表 ⇒ P2（任何 Verdict，Duplicate 不吞）；
+	// ingestOne 任一阶段失败 ⇒ 循环里发 P1。空跑不发。
+	//
+	// 发送失败**不回滚入库**（数据已经 Save 了），但并进 errors.Join 让退出码非零、
+	// err.log 留痕。同一篇不会二次处理，所以不会每次唤起都重复报错。
+	Notify Sender
 	// Force 绕过**两层**幂等（Discover 的判停 + ingestOne 的 article_id）。
 	//
 	// ⚠️ **它穿不透第三层**：对已在权威表的期次，同一篇的 `published_at` 不变
@@ -30,6 +39,24 @@ type IngestDeps struct {
 	// 的期次在数据层面是 **no-op**；它真正能救回来的是**落在 pending 里**的那些。
 	// 该取舍登记在 `refreshArticleID` 自己的注释里（搜 `只更新 article_id 意味着`）。
 	Force bool
+}
+
+// notifyError 标记「入库成功但通知没发出去」。循环遇到它**不再发 P1**——
+// 那条同样发不出去，只会无限套娃；而错误链里保留底层 err，errors.Is 仍能穿透。
+type notifyError struct{ err error }
+
+func (e notifyError) Error() string { return "notify: " + e.err.Error() }
+func (e notifyError) Unwrap() error { return e.err }
+
+// send 是唯一的发送点。Notify 为 nil 时是 no-op。
+func (d IngestDeps) send(text string) error {
+	if d.Notify == nil {
+		return nil
+	}
+	if err := d.Notify.SendText(text); err != nil {
+		return notifyError{err: err}
+	}
+	return nil
 }
 
 // neverSeen 是 Force 用的 ArticleChecker：什么都没见过，于是 Discover 不会提前返回。
@@ -133,10 +160,20 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 	var failedPeriods []string
 	var errs []error
 	for _, c := range cands {
-		if err := d.ingestOne(ctx, c); err != nil {
-			fmt.Fprintf(d.Out, "%s FAILED: %v\n", c.Period, err)
-			failedPeriods = append(failedPeriods, c.Period)
-			errs = append(errs, err)
+		err := d.ingestOne(ctx, c)
+		if err == nil {
+			continue
+		}
+		fmt.Fprintf(d.Out, "%s FAILED: %v\n", c.Period, err)
+		failedPeriods = append(failedPeriods, c.Period)
+		errs = append(errs, err)
+		// 通知本身失败时不再发 P1：发不出去的通道上再发一条只是套娃。
+		var ne notifyError
+		if errors.As(err, &ne) {
+			continue
+		}
+		if nerr := d.send(renderP1(c, err)); nerr != nil {
+			errs = append(errs, fmt.Errorf("hestia ingest %s/%s (%s): %w", c.Period, c.PeriodType, c.ArticleID, nerr))
 		}
 	}
 	if len(errs) > 0 {
@@ -222,5 +259,17 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
 	// `TestForceOnObservedPeriodIsDuplicate`（`ingest_test.go`）：它现在是**绿**的，
 	// 而它**从未因为「那条局限被放开」而红过一次** —— 因为这里从一开始就没有假定它。
 	fmt.Fprintf(d.Out, "%s %s → %s\n", obs.Meta.Period, out.Verdict, out.Table)
+
+	// 通知放在打印之后：Out 是本地真相，Telegram 是它的投影；投影失败不该让本地少一行。
+	// 阶段名写成 "send P2"/"send P0" 而不是 "notify"：notifyError.Error() 自带 "notify: "
+	// 前缀，再用 notify 做阶段名会打成 "notify: notify: …"；阶段名说清没发出去的是哪一类
+	// 消息，比重复一遍 notify 有用。
+	msg, stage := renderP2(obs, out), "send P2"
+	if out.Table == TablePending {
+		msg, stage = renderP0(obs, rep), "send P0"
+	}
+	if err := d.send(msg); err != nil {
+		return wrap(stage, err)
+	}
 	return nil
 }
