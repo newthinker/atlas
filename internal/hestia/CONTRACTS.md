@@ -3139,3 +3139,71 @@ dev 从「`data/hestia.db.bak-*` 由 0 变 1」推断「**人类已执行切库*
 这与本 sprint 反复记的「正确性附着在载体上，不附着在推断上」是同一条：
 `git`、mtime、文件出现与否都是**关于事件的真信号**，但它们回答的是「发生了什么」，
 **不回答「谁做的」** —— 后者只能由执行者自述或审计行给出。
+
+## Sprint M1d · 运行时切换、通知与增量验收（M1 收口）
+
+### A. 契约更正 —— 既有陈述已被证伪或需收窄
+
+**A1｜M1c-4 §H-8「切库授权」的适用边界，实测有第二个库**
+§H-8 写的是「生产库 0 行 ⇒ 实质上完全可逆 ⇒ 授权成立」。它切的是**源码仓库**
+`data/hestia.db`。而 launchd 跑的是运行时目录 `/Users/zuowei/workspace/runtime/atlas`
+的 `data/hestia.db`（2026-09-03 实测：61 列、1 行、二进制 mtime 2026-08-13），
+`deploy.sh` 按 ADR-0007 约定**不同步 `data/`** ⇒ 两个「生产库」并存三周。
+⇒ §H-8 的结论不变，但「生产库」这个词此后**必须指运行时目录那份**；本 Sprint §C 记的
+是对它的切换，授权依据另给（集合差为空，见 §C-1）。
+
+**A2｜`ingest` 此前不留任何快照**
+方案报告 M1c DoD「原始 HTML 快照已留存」在 M1c 结束时只对回填语料成立；
+`ingest.go` 抓到的 `raw` 只在内存里。本 Sprint 起 `ingestOne` 在 Parse **之前**落盘
+`<snapshot_dir>/<article_id>.html`（M1d 的 TASK-003），写盘失败即该期失败。
+幂等规则（M1d 的 TASK-002）：同 id 同字节 ⇒ 跳过且不改 mtime；同 id 不同字节 ⇒ **不覆盖**，
+另存 `<article_id>.<UTC 时间戳>.html`；写盘经 `<path>.tmp` + rename。
+
+**A3｜方案报告 4.8.2 的四类消息本 Sprint 只实现三类**
+「本期由 LLM 兜底完成解析」一类随 LLM 兜底移出 M1c 而暂缓（ADR-0003 三条判据）。
+**不是删掉**：LLM 兜底建立时那条消息与它一起建。
+
+**A4｜需求原文与 DoD 里「`%g` 会把 177600 打成 `1.776e+05`」这句理由为假**
+（test-m1d-a 验 M1d 的 TASK-004 时实测，见 `04-test/TASK-004-verification.md` §4。）
+Go 1.24 的 `%g` 最短精度形态在指数 **≥ 6（即 ≥ 1e6）** 才切指数记法：
+`177600` 用 `%g` 也打 `177600`；`1776000` 才是 `1.776e+06`。
+结论（`strconv.FormatFloat(v, 'f', -1, 64)`）正确、理由错误，且 dev 据它写的
+`NotContains "1.776e+05"` 断言在**任何实现下都不可能失败**（验证者变异 N3 SURVIVED）。
+**M2 前加固项（挂账）**：真钉法一行 `assert.Equal(t, "1776000", fmtNum(1776000))`。
+TASK-004 已 verified，本 Sprint 不改它的测试。与 M1c-4 记录的「结论对但理由错」同形。
+
+### B. 实测登记（锚 `540e84a0eee6e37c5a85cb4743a189a1744aae64`）
+
+采样纪律（AD-7 订正口径）：采前采后 `git rev-parse HEAD` 同值；
+`git status --short -- internal/hestia cmd/atlas configs deploy go.mod go.sum` 为空
+（**不是**全仓库干净——`.arcforge/` 整个 sprint 都是脏的，那个判据在本仓库恒不成立）；
+写本节前 `git diff --numstat <锚> HEAD -- internal/hestia cmd/atlas configs deploy` 为空。
+`$BASE` = `ae088eb253b64b36e10558a02587e3fa657f5f3e`（本 Sprint 开工时的 master HEAD）。
+
+| 项 | 实测 | 单位 |
+|---|---|---|
+| `go test ./internal/hestia/... -cover` | **96.4**（2438/2528 语句 = 96.44%；门槛 ≥ 96.3，`$BASE` 上为 96.3 = 2358/2448） | % |
+| `go test ./cmd/atlas/... -count=1` | 绿 | — |
+| `gofmt -l internal/hestia cmd/atlas` | 仅 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，未修） | — |
+| `go vet ./internal/hestia/... ./cmd/...` | 零输出 | — |
+| 导出面（`TestPackageExposesNoWriteFunctions` 的 want） | **未改**，22 项（`store_test.go` 自 `$BASE` 无 diff；本迭代零新增导出函数） | 函数/方法 |
+| `TestFieldNamesAppearOnlyInFieldsGo` / `TestShippedConfigLoadsAndIsCalibrated` | PASS | — |
+| 五个不动文件 `git diff --stat 4916106 HEAD -- store.go validate.go parse.go extract.go fields.go` | 空 | — |
+| `go.mod` / `go.sum` | 自 `$BASE` 无 diff（无新增依赖） | — |
+| 真语料回归（`backfill load --allow-incomplete`，exit 0） | 218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21（单篇 28 + 合并组 69）· 字段冲突 0 · 口径路由违反 0 | 篇 / 篇 / 观测 |
+| 新增测试（`git diff $BASE <锚> -- '*_test.go' \| grep -c '^+func Test'`，删除 0） | **42**：snapshot 8 · notify 8 · ingest 快照 5 + 通知 7 + 过滤 3 · config 3 · cmd 8 | 条 |
+| code-simplifier 终检（11 个改动文件） | 无改动建议 | — |
+
+**新增测试 42 ≠ 需求预估 29，差在哪**（预估 `snapshot 5 · notify 5 · ingest 4+6+3 · config 3 · cmd 3`）：
+
+| 任务 | 预估 | 实际 | 差因 |
+|---|---|---|---|
+| TASK-002 snapshot | 5 | **8** | 只补原文 5 条时包覆盖率 2376/2470 = 96.19% **跌破门槛**；补 R-002 只读目录用例 + 两条 DoD 允许不测但实测可移植触发的错误分支（ReadFile 撞目录 ⇒ `snapshot read`；rename 到已存在目录 ⇒ `snapshot rename` 并清 tmp） |
+| TASK-004 notify | 5 | **8** | 按 `f8e3c8e` 实数（+3） |
+| TASK-003 ingest 快照 | 4 | **5** | 按 `4b829e1` 实数（+1；R-003 补的 diverged 正向测试） |
+| TASK-005 ingest 通知 | 6 | **7** | 按 `8fec932` 实数（+1，含 P1 自身发送失败分支 R-005b） |
+| TASK-006 ingest 过滤 | 3 | 3 | — |
+| TASK-001 config | 3 | 3 | R-001 守卫加在既有 `TestShippedConfigLoadsAndIsCalibrated` 内，不计新函数 |
+| TASK-007 cmd | 3 | **8** | R-007a `buildHestiaSender` 两条 + IngestDeps 两行接线的端到端守卫（`fix(TASK-007)`）等 |
+
+按任务 commit 复核（`git show <c> -- '*_test.go' \| grep -c '^+func Test'`）：001=3、002=8、003=5、004=8、005=7、006=3、007=8，合计 42，与 `$BASE..锚` 总数相符。
