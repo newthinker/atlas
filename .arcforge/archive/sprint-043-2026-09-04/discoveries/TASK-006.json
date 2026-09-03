@@ -1,0 +1,63 @@
+{
+  "task_id": "TASK-006",
+  "owner": "dev-m1d-a",
+  "title": "OnlyPeriod：只与 Force 同用、Discover 之后过滤、0 匹配响亮失败（包级）",
+  "key_findings": [
+    "需求原文 Step 1–3 可原样落地；Step 4（cmd 层 flag）按 AD-2 归 TASK-007，本任务未碰 cmd/atlas。",
+    "R-006a 可观测：fakeFetcher.calls 在 !Force+OnlyPeriod 时为空，证明校验在 Discover 之前；把校验挪到 Discover 之后（M1）该断言即红。",
+    "「过滤在 Discover 之后、循环之前」与「被过滤那期不发消息」两条性质各有能区分的断言：kept 1 of 2（Discover 看到两条）、outPeriods==[2025-12]、h1 未入库、texts 恰 1。变异 M2（过滤失效）、M3（过滤挪到循环之后）都让 TestIngestOnlyPeriodFiltersCandidates 红；M4（0 匹配改走 no new reports）让 NoMatch 红。这是本 sprint 前两次返工（DoD 陈述性质而测试无区分断言）的对症做法：写完先跑变异。",
+    "R-006b 备注属实：0 匹配时 Out 会先打 `only-period 1999-01: kept 0 of 2 candidate(s)` 再返回错误；验证者核对 Out 时别把该行当成功迹象。",
+    "覆盖率有余量：新增语句（校验 2 条、过滤块 5 条）全被三条新测试覆盖，worktree 内 96.4%（master 基线同值）。",
+    "交付流程实测（第二次）：a9cf331 提交后请求 merge，34 分钟四次催办无回执，07:59:17Z 转 blocked_clarification 让卡点显形；Leader 10:33Z 回执并合入，说明其会话被挂起约 3 小时。与 TASK-005 同形：in_progress 无 stale 阈值，「等 merge」在文件层与「还在写代码」同形，blocked_clarification 是 dev 侧唯一能让它显形的出边。"
+  ],
+  "decisions": [
+    {
+      "decision": "校验放在 d.Out 归一化之后、Discover 之前；过滤放在 SortStableFunc 之后、循环之前；三处文案逐字照原文",
+      "rationale": "DoD functional[1]/boundary[0] 明写位置；文案被三条测试逐字断言，TASK-007 cmd 层也按这些文案接线。"
+    },
+    {
+      "decision": "TestIngestOnlyPeriodRequiresForce 把 fetcher 提成变量以断言 f.calls 为空（R-006a）",
+      "rationale": "「Discover 之前拦下」要有可观测量；calls 为空是唯一不依赖实现细节的证据。"
+    },
+    {
+      "decision": "提交前自跑四个变异（M1–M4）并记进 discovery",
+      "rationale": "Leader 派发时点名本 sprint 两次返工的共同形态是「DoD 陈述性质而测试无区分断言」；先问「它在什么变异下会红」再交付。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/ingest.go",
+      "numstat": "22+/0-",
+      "what": "IngestDeps.OnlyPeriod（Force 之后）；Ingest 开头 requires-Force 校验；Sort 之后过滤块 + 计数行 + 0 匹配错误"
+    },
+    {
+      "path": "internal/hestia/ingest_test.go",
+      "numstat": "72+/0-",
+      "what": "twoEntryFetcher；三条 TestIngestOnlyPeriod*（含 R-006a calls 断言）；映射注释"
+    }
+  ],
+  "interfaces_exposed": [
+    "对 TASK-007（cmd 层）：`IngestDeps.OnlyPeriod string`。非空且 !Force ⇒ Ingest 返回 `hestia ingest: OnlyPeriod requires Force (--only-period 只与 --force 同用)`，不发任何请求、不碰库；cmd 层应在 openHestia() 之前先做 `--only-period requires --force` 与格式（hestiaBackfillFromRE）校验，包级校验是第二道防线。",
+    "Out 行：`only-period <p>: kept <k> of <n> candidate(s)`（0 匹配时也会先打出）；0 匹配错误：`hestia ingest: no candidate for period <p> within max_pages <n>`（不是 no new reports，退出码非零）。",
+    "过滤只按 Candidate.Period 比对（YYYY-MM），不看 PeriodType；同月的 annual 与 monthly 都会保留——与 spec「限定一期跑一次」的用法一致。",
+    "无新增导出符号；TestPackageExposesNoWriteFunctions 绿。"
+  ],
+  "verification": {
+    "tdd_red": "接线前（worktree @ 1b6ef24，只加了 twoEntryFetcher 与三条测试）`go test ./internal/hestia/ -run TestIngestOnlyPeriod`：internal/hestia/ingest_test.go:1049:59: unknown field OnlyPeriod in struct literal of type IngestDeps（同型 3 处：1049/1067/1086）",
+    "dod_to_test": {
+      "functional[0]": "TestIngestOnlyPeriodFiltersCandidates",
+      "functional[1]": "同上（kept 1 of 2 + outPeriods）；变异 M3 红",
+      "boundary[0]": "TestIngestOnlyPeriodRequiresForce（含 R-006a assert.Empty(f.calls)）；变异 M1 红",
+      "error_handling[0]": "TestIngestOnlyPeriodNoMatchFailsLoudly；变异 M4 红"
+    },
+    "mutations_self_check": "在我的 worktree 副本上逐个应用并还原（diff -q 与变异前快照一致）：M1 校验挪到 Discover 之后 ⇒ RequiresForce FAIL；M2 DeleteFunc 恒 false ⇒ FiltersCandidates 与 NoMatch FAIL；M3 过滤块挪到循环之后 ⇒ FiltersCandidates FAIL；M4 0 匹配改为打 no new reports 返回 nil ⇒ NoMatch FAIL。原状三条 PASS。",
+    "my_commit": "a9cf331655b07cc659f73c08233c1d06821945d2（分支 task/TASK-006-m1d，父 1b6ef242a1bda4ad889540f6b360c07aef7c8c9e）",
+    "worktree_gates_at_a9cf331": "gofmt -l internal/hestia cmd/atlas ⇒ 仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go；go vet ./internal/hestia/... ./cmd/... 零输出；go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 未动；TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo 绿",
+    "master_after_merge": "3c567609e7135035cabf375bdf207d1861e18d46（merge commit，第二父 a9cf331；父 1b6ef24）",
+    "master_gates_after_merge": "锚 3c567609e7135035cabf375bdf207d1861e18d46，采样前后 HEAD 同值，代码范围 git status 干净：gofmt -l internal/hestia cmd/atlas ⇒ 仅既有 backtest_test.go/crisis_test.go；go vet ./internal/hestia/... ./cmd/... 零输出；GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%（≥ 96.3%）；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 相对 ae088eb 未动；ingest.go/ingest_test.go sha256 与 a9cf331 逐字节一致；TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo 绿",
+    "code_simplifier": "提交前已跑；其回复仅「Complete」，git numstat（22/0、72/0）与 ingest.go 逐字节比对（与跑前快照一致）核实无改动",
+    "gitnexus": "gitnexus MCP 在本实例不可用（Leader 已裁定本 sprint 不要求 dev 跑），以全包测试绿替代",
+    "clarification": "07:59:17Z 转 blocked_clarification（等 merge 34 分钟四次催办无回执）；Leader 10:33Z 答复（Leader 侧第二次同形失联约 3 小时，催办与提问同时到达）并合入；10:33:47Z 由 dev 自己转回 in_progress（epoch 不变）"
+  },
+  "provenance": "全部代码由 dev-m1d-a 本体按需求原文落地；code-simplifier 子代理只读检查、无改动"
+}

@@ -1,0 +1,70 @@
+{
+  "task_id": "TASK-003",
+  "owner": "dev-m1d-a",
+  "title": "ingest 接快照（Parse 之前）",
+  "key_findings": [
+    "需求原文代码可原样落地；`sed 's/ingestCfg()/ingestCfg(t)/g'` 会连定义行一起改成 `func ingestCfg(t) Config`，定义行要单独重写为 `ingestCfg(t *testing.T)`——这是原文 Step 1 那条 sed 的一个小坑，vet 会以 `undefined: t` 报出来。",
+    "24 处调用点（ingest_test.go 21 + discover_test.go 3）替换后 `go vet` 直接干净：每一处 `t` 都在作用域，包括 `ingestOneDeps(newTestStore(t), ingestCfg(t), …)` 那两处子测试，不需要给任何 helper 加参数。",
+    "第 25 处（reviewer 发现、ingest_test.go 手写 Config 的 TestIngestRejectsPeriodMismatch）补 `Storage: StorageCfg{SnapshotDir: t.TempDir()}` 后断言原样通过；不补则接线后 Fetch 成功即 saveSnapshot(\"\") 报错。",
+    "R-003 正向用例可行：`annualFetcher(t)` 返回的 *fakeFetcher 的 pages 可改，同一 URL 换成尾部多一个 '\\n' 的正文后 Parse 仍过、saveSnapshot 判 diverged，Out 出现 `snapshot diverged from <annualID>: saved as <path>`，目录里两个文件。",
+    "覆盖率零余量在本任务上有余量：新增 12 条语句（saveSnapshot 调用、错误分支、diverged 分支）全部被五条新测试覆盖，worktree 内 96.4%（基线 master abebb76 也是 96.4%）。",
+    "cmd/atlas 未受影响：cmd/atlas/hestia.go 经 LoadConfig 取配置（预填 SnapshotDir），cmd/atlas/hestia_test.go:774 的 `hestia.Config{}` 不走 ingest 路径，cmd/atlas 测试全绿。"
+  ],
+  "decisions": [
+    {
+      "decision": "接线位置与文案完全照需求原文：Fetch 成功后、Parse 之前 saveSnapshot；写盘失败 wrap(\"snapshot\", err)；diverged 打 \"%s snapshot diverged from %s: saved as %s\\n\"",
+      "rationale": "DoD functional[1]/[2] 与 error_handling[0] 都是按这个文案与阶段名断言的；TASK-005 接通知时会消费 Out，文案不动。"
+    },
+    {
+      "decision": "R-003 正向测试单独一条 TestIngestSnapshotDivergedOnForce，不并进 TestIngestSnapshotIdempotentOnForce",
+      "rationale": "两条守的是相反分支（unchanged vs diverged），拆开后失败信息直接指出哪一支坏了；文件既有风格也是一测一事。"
+    },
+    {
+      "decision": "code-simplifier 把三条不断言 out 的新测试从 `var out bytes.Buffer` 改成 `Out: io.Discard`，并入同一提交",
+      "rationale": "AD-5 要求并入；断言不变，少三个只写不读的变量。与需求原文形态有偏离，但原文约束的是行为不是变量写法。"
+    },
+    {
+      "decision": "手写 Config 的第 25 处只补 Storage 字段并加两行注释，不改成 ingestCfg(t)",
+      "rationale": "DoD 明说「不改断言」且该用例刻意用 MaxPages: 2 与 ingestCfg 的 3 不同；改成 ingestCfg(t) 再覆盖 MaxPages 反而多一步。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/ingest.go",
+      "numstat": "12+/0-",
+      "what": "ingestOne 接 saveSnapshot（Fetch 后、Parse 前），import 补 time"
+    },
+    {
+      "path": "internal/hestia/ingest_test.go",
+      "numstat": "134+/21-",
+      "what": "ingestCfg(t *testing.T) 带 t.TempDir()；21 处调用点；第 25 处手写 Config 补 Storage；imports 补 os/path/filepath/time；五条新测试 + 映射注释"
+    },
+    {
+      "path": "internal/hestia/discover_test.go",
+      "numstat": "3+/3-",
+      "what": "3 处 ingestCfg() → ingestCfg(t)"
+    }
+  ],
+  "interfaces_exposed": [
+    "对 TASK-005（ingest 接通知）：ingestOne 的阶段顺序现在是 has article → fetch → **snapshot** → parse → 期次交叉校验 → validate → save。新错误阶段名 `snapshot`（wrap 后形如 `hestia ingest <period>/<type> (<id>): snapshot: snapshot dir|read|write|rename: …`）。Out 新增一种行：`<period> snapshot diverged from <articleID>: saved as <path>`，只在改稿时出现。",
+    "对 TASK-005/006 的测试：`ingestCfg(t)` 已带独立临时 SnapshotDir；任何**手工构造** Config{} 走 Ingest 的用例都必须自己填 `Storage: StorageCfg{SnapshotDir: t.TempDir()}`，否则第一篇就在 snapshot 阶段失败（本任务的第 25 处就是这个形态）。",
+    "无新增导出符号；TestPackageExposesNoWriteFunctions 不变。"
+  ],
+  "verification": {
+    "tdd_red": "接线前（worktree @ abebb76，已改 ingestCfg(t) 与五条测试，vet 干净）`go test ./internal/hestia/ -run 'TestIngestSnapshot|TestIngestFailsPeriodWhenSnapshotUnwritable'`：--- FAIL TestIngestSnapshotBytesMatchRaw（ingest_test.go:786 Received unexpected error：入库成功的那篇必须有快照）；--- FAIL TestIngestSnapshotSurvivesParseFailure（:806 Received unexpected error：Parse 失败不能让快照消失）；--- FAIL TestIngestSnapshotIdempotentOnForce（:820 Received unexpected error：os.Chtimes 找不到快照）；--- FAIL TestIngestSnapshotDivergedOnForce（:847 Out 不含 \"snapshot diverged from 2026011509294440745\"；:851 目录 0 个文件而非 2）；--- FAIL TestIngestFailsPeriodWhenSnapshotUnwritable（:865 An error is expected but got nil.）",
+    "dod_to_test": {
+      "functional[0]": "既有 ingest/discover 全部测试仍绿；TestIngestRejectsPeriodMismatch 断言未改",
+      "functional[1]": "TestIngestSnapshotBytesMatchRaw",
+      "functional[2]": "TestIngestSnapshotIdempotentOnForce；R-003 正向 TestIngestSnapshotDivergedOnForce",
+      "boundary[0]": "TestIngestSnapshotSurvivesParseFailure",
+      "error_handling[0]": "TestIngestFailsPeriodWhenSnapshotUnwritable"
+    },
+    "my_commit": "4b829e1d8f6476517093e21ef8aa3d2bc3ec7838（分支 task/TASK-003-m1d，父 abebb76057c6fb847ac11fd632fdd28b3b316d47）",
+    "worktree_gates_at_4b829e1": "gofmt -l internal/hestia cmd/atlas ⇒ 仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go；go vet ./internal/hestia/... ./cmd/... 零输出；go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 未动",
+    "master_after_merge": "656fe0577f2713010468223f27f0954d58a54ce9（merge commit，含 4b829e1；父 abebb76）",
+    "master_gates_after_merge": "锚 656fe0577f2713010468223f27f0954d58a54ce9，采样前后 HEAD 同值，代码范围 git status 干净：gofmt -l internal/hestia cmd/atlas ⇒ 仅既有 backtest_test.go/crisis_test.go；go vet ./internal/hestia/... ./cmd/... 零输出；GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%（≥ 96.3%）；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 相对 ae088eb 未动；ingest.go/ingest_test.go/discover_test.go 三文件 sha256 与 4b829e1 逐字节一致",
+    "code_simplifier": "提交前已跑；其回复仅「Complete」，git diff --numstat 核实 ingest_test.go 137→134 新增行：三条不断言 out 的测试改为 Out: io.Discard，语义不变，已并入提交",
+    "gitnexus": "gitnexus MCP 在本实例不可用（Leader 已裁定本 sprint 不要求 dev 跑），以全包测试绿替代"
+  },
+  "provenance": "全部代码由 dev-m1d-a 本体按需求原文落地；code-simplifier 子代理只做了上述 -3 行的变量精简"
+}

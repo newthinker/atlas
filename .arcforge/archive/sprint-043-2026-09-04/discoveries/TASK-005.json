@@ -1,0 +1,104 @@
+{
+  "task_id": "TASK-005",
+  "owner": "dev-m1d-a",
+  "title": "ingest 接通知与错误语义",
+  "key_findings": [
+    "需求原文代码可原样落地；ingest_test.go 的 strings/io/bitemporal 三个 import 都已存在（TASK-003 与既有用例带进来的），本任务测试文件不需要增补 import。",
+    "阈值前提成立：cfg.Thresholds.DepositSumTolerance = 1e-9 配 annualFetcher 确实落 pending（与既有 ingest_test.go 那条一致），TestIngestNotifiesP0OnPending 的 P0 含 deposit_sum。",
+    "R-005a 在 ingest 层可断言：TestForceOnObservedPeriodIsDuplicate 的第二次（Force）Ingest 挂 fakeSender 后 texts 恰 1 条且含 Duplicate——证明 Save 判 Duplicate 时 send 确实被调用，而不只是 renderP2 能渲染 Duplicate。",
+    "R-005b 路径可达：Parse 失败 + fakeSender{err} 时，循环先 errors.As 未命中（ingestOne 的错误是 parse 不是 notifyError），进入 d.send(renderP1) 失败分支，errs 里同时有 parse 根因与带 notify 的第二条；texts 恰 1（P1 只尝试一次）。",
+    "覆盖率有余量：新增语句（Notify 字段无语句、notifyError 两方法、send 四条、ingestOne 尾部五条、循环六条）全被八条目标测试覆盖，worktree 内 96.4%（与 master 656fe05 基线同值）。",
+    "既有不带 Notify 的用例走 nil 路径：全包测试绿且未改任何既有断言（只给 TestForceOnObservedPeriodIsDuplicate 追加了断言，没改原有的）。",
+    "Leader 在 merge 等待期补充（源自 test-m1d-a 验 003 的发现）：裸 Contains \"notify\" 会被 notifyError 自带前缀满足，改阶段名照样绿。补丁 75961fc 把两条通知失败用例改为 ErrorContains 按 wrap 前缀形态 `(<article_id>): send P2: notify: ` / `(<id>): parse: ` / `(<id>): notify: ` 钉阶段名；变异实测：send P2 改成 notify ⇒ 红，循环里 P1 失败不并进 errs ⇒ 红。",
+    "交付流程实测：8fec932 提交后请求 merge，46 分钟四次催办无回执（Leader 自 03:48Z 起无落盘活动），04:39:44Z 转 blocked_clarification 让卡点在文件层显形；随后 Leader 回执并要求上述补丁。in_progress 刻意无 stale 阈值，「等 merge」在文件层与「还在写代码」同形——blocked_clarification 是 dev 侧唯一能让它显形的出边。",
+    "返工第 1 轮（test-m1d-a REJECT，task_defect）：DoD functional[0]「通知在 Out 打印之后发」零断言——验证者把 P2/P0 的 send 挪到 Fprintf 之前（M1），两包仍绿。修法：TestIngestNotifyFailureIsLoudButNotCascading 末尾断言 out 含 \"→ \"+TableObservations（send 失败即 return，若排在打印之前 Out 就少那一行）。变异实测：交付态+M1 仍 ok（复现）；新断言+M1 ⇒ FAIL；原状 ⇒ ok。",
+    "成因两条并记：① DoD 那句「通知在 Out 打印之后发」是描述性子句，没有像其他条目那样给出断言形态，dev 照原文代码落地了顺序却没为顺序写守卫；② dev 首轮的变异只覆盖了阶段名与 P1 分支（leader 补充引出的），没有对「顺序」这一性质问「什么变异会让它红」——与 TASK-001 首轮同一类缺口：写完守卫没有逐条问它守的是什么。",
+    "QA 终审 review_fix（第 2 轮 rework）：A4 汇总行「%d/%d 期失败」分子原取 len(errs)，P1 自身发送失败会追加第二条 errs，实测打出「2/1 期失败」；改为 len(failedPeriods)。A8-a 落 pending + 发送失败此前无用例（send P0 阶段名无守卫）；A8-b TestIngestFailsPeriodWhenSnapshotUnwritable 的裸 Contains \"snapshot\" 被 saveSnapshot 内层文本替它过关，改为 wrap 前缀形态。"
+  ],
+  "decisions": [
+    {
+      "decision": "「notify: notify:」双前缀二选一：保留 notifyError.Error() 的 \"notify: \" 前缀，ingestOne 里 send 失败的 wrap 阶段名改为 \"send P2\" / \"send P0\"（按当时要发的消息类型）",
+      "rationale": "两个消费点：ingestOne 的 P2/P0 失败与 Ingest 循环里 P1 失败。后者的 wrap 只有 period/type/id 没有阶段名，全靠 notifyError 的前缀提供 notify 字样（R-005b 断言链含 notify）；若去掉前缀就得在循环里再补一次。保留前缀后 ingestOne 的阶段名改成 send P2/P0，错误文本变成 `…: send P2: notify: boom`，比 `notify: notify: boom` 多说了一件事（没发出去的是哪类消息）。DoD 的 Contains \"notify\" 两条都过。"
+    },
+    {
+      "decision": "R-005a 追加在既有 TestForceOnObservedPeriodIsDuplicate 末尾（第三半），不另起测试",
+      "rationale": "DoD 明说扩既有用例；该用例已把 Force 重跑 Duplicate 的前置搭好，另起一条会重复整段搭建。原有断言一字未改。"
+    },
+    {
+      "decision": "R-005b 独立用例 TestIngestP1SendFailureIsReported，复用 TestIngestNotifiesP1OnParseFailure 的 fakeFetcher 搭建",
+      "rationale": "与 TestIngestNotifyFailureIsLoudButNotCascading 守的是两条不同分支（P2 失败 ⇒ 不级联 continue；P1 失败 ⇒ 并进 errs），拆开后失败信息直接指向哪一支坏了。"
+    },
+    {
+      "decision": "Ingest 循环按需求原文改写为 err == nil ⇒ continue 的形态；ingestOne 尾部用 `msg, stage := …; if pending { msg, stage = … }` 一次赋值",
+      "rationale": "循环形态照原文；尾部把消息与阶段名并在一起赋值是为了让「发的是哪类消息」与「错误里报的阶段」不可能错位。"
+    },
+    {
+      "decision": "阶段名断言用 wrap 前缀形态 `(<article_id>): <stage>: `，不用裸 Contains",
+      "rationale": "裸词被 notifyError 前缀满足，阶段名改错测试不红（TASK-003 同款）。前缀形态同时把「双前缀二选一」的选择钉进测试：阶段名 send P2/send P0，notify 只出现一次。"
+    },
+    {
+      "decision": "顺序守卫放在 TestIngestNotifyFailureIsLoudButNotCascading 末尾（对已捕获的 out 断言），不另起用例",
+      "rationale": "只有 send 失败的路径才能区分「打印在前」与「打印在后」（成功路径两种顺序 Out 相同）；该用例已构造 send 失败且捕获了 out，补一行即成，DoD 与验证报告 §4 也指定此处。"
+    },
+    {
+      "decision": "A8-a/A8-b 首跑即绿，不伪装成 RED→GREEN；用变异（send P0→send P2、snapshot→fetch）证明断言有区分力",
+      "rationale": "两条是补守卫不是新行为；诚实记录 + 变异杀伤才是它们有效的证据。A4 是真 RED（2/1 期失败）→ GREEN。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/ingest.go",
+      "numstat": "53+/4-",
+      "what": "IngestDeps.Notify（Force 之前）；notifyError + send；ingestOne 尾部发 P2/P0；Ingest 循环发 P1 且 notifyError 不级联"
+    },
+    {
+      "path": "internal/hestia/ingest_test.go",
+      "numstat": "143+/2-",
+      "what": "fakeSender；原文六条测试；R-005b 用例；TestForceOnObservedPeriodIsDuplicate 加 R-005a 断言；映射注释"
+    }
+  ],
+  "interfaces_exposed": [
+    "对 TASK-006（--only-period）与 TASK-007（cmd 层 buildHestiaSender）：`IngestDeps.Notify Sender`，nil = 不发；cmd 层把构造好的 Sender 塞进 IngestDeps 即可，包内不做任何配置解析。",
+    "错误语义：入库成功但通知失败 ⇒ ingestOne 返回 `hestia ingest <p>/<t> (<id>): send P2|send P0: notify: <底层>`，errors.Is 可穿透到底层；Ingest 返回的 Join 里含它，且**不会**再为它发 P1。ingestOne 其他阶段失败 ⇒ 循环发一条 P1；P1 自身失败 ⇒ 第二条 `hestia ingest <p>/<t> (<id>): notify: <底层>` 并进 errs。",
+    "对 TASK-006 的测试：ingest_test.go 现有 `fakeSender{texts []string; err error}` 可直接复用；`errBoom` 是既有哨兵。手工构造 IngestDeps 不带 Notify 就走 nil 路径，无需改既有用例。",
+    "无新增导出符号（notifyError / send 非导出；Sender 是 TASK-004 的）；TestPackageExposesNoWriteFunctions 绿。"
+  ],
+  "verification": {
+    "tdd_red": "接线前（worktree @ 656fe05，只加了 fakeSender 与测试）`go test ./internal/hestia/ -run 'TestIngestNotif|TestIngestSendsNothing|TestIngestNilNotify|TestIngestP1Send|TestForceOnObservedPeriodIsDuplicate'`：internal/hestia/ingest_test.go:751:81: unknown field Notify in struct literal of type IngestDeps（同型共 7 处：751/906/923/941/958/968/981）",
+    "dod_to_test": {
+      "functional[0]": "TestIngestNotifiesP2OnObservation；R-005a → TestForceOnObservedPeriodIsDuplicate 第三半",
+      "functional[1]": "TestIngestNotifiesP0OnPending",
+      "functional[2]": "TestIngestNotifiesP1OnParseFailure",
+      "boundary[0]": "TestIngestSendsNothingOnEmptyRun、TestIngestNilNotifyIsNoop",
+      "error_handling[0]": "TestIngestNotifyFailureIsLoudButNotCascading；R-005b → TestIngestP1SendFailureIsReported"
+    },
+    "my_commit": "8fec9323e2df4d7c8336c0b2370b6a2d688a2571（主体）+ 75961fc14bef6f7f28ec6696a6200cd29cb84320（阶段名补丁，分支尖；分支 task/TASK-005-m1d，基于 656fe0577f2713010468223f27f0954d58a54ce9）",
+    "worktree_gates_at_8fec932": "gofmt -l internal/hestia cmd/atlas ⇒ 仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go；go vet ./internal/hestia/... ./cmd/... 零输出；go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 未动；TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo 绿",
+    "master_after_merge": "1efbcfec7cfad2d08fa49fea3fde13aa5ffb127a（merge commit，第二父 75961fc；8fec932 与 75961fc 均在祖先链；父 656fe05）",
+    "master_gates_after_merge": "锚 1efbcfec7cfad2d08fa49fea3fde13aa5ffb127a，采样前后 HEAD 同值，代码范围 git status 干净：gofmt -l internal/hestia cmd/atlas ⇒ 仅既有 backtest_test.go/crisis_test.go；go vet ./internal/hestia/... ./cmd/... 零输出；GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%（≥ 96.3%）；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 相对 ae088eb 未动；ingest.go/ingest_test.go sha256 与 75961fc 逐字节一致；TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo 绿",
+    "code_simplifier": "两次提交前各跑一次：8fec932 报无改动（numstat 53/4、143/2 一致）；75961fc 报无改动（numstat 9/3 一致）",
+    "gitnexus": "gitnexus MCP 在本实例不可用（Leader 已裁定本 sprint 不要求 dev 跑），以全包测试绿替代",
+    "worktree_gates_at_75961fc": "gofmt -l internal/hestia cmd/atlas ⇒ 仅既有两项；go vet 零输出；go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%；变异：send P2→notify ⇒ TestIngestNotifyFailureIsLoudButNotCascading FAIL；P1 失败不并进 errs ⇒ TestIngestP1SendFailureIsReported FAIL；均已还原（git status 只剩提交前的 ingest_test.go）",
+    "clarification": "04:39:44Z 转 blocked_clarification（等 merge 46 分钟无回执）；Leader 06:55Z 答复（Leader 侧失联约 3 小时，四次催办与提问同时到达）并合入；06:56:09Z 由 dev 自己转回 in_progress（epoch 不变）",
+    "rework_1": {
+      "reject_reason_ref": ".arcforge/docs/04-test/TASK-005-verification.md §4",
+      "my_commit": "f7fba511ada555fa079149be02f78e813c5d9ac6（分支 task/TASK-005-m1d，从 master 1efbcfec7cfad2d08fa49fea3fde13aa5ffb127a 重开；只改 internal/hestia/ingest_test.go 5/0）",
+      "merge": "1b6ef242a1bda4ad889540f6b360c07aef7c8c9e（merge commit，含 f7fba51；父 1efbcfe）",
+      "mutation": "M1 = 把 ingestOne 里 P2/P0 的 send 块挪到 Fprintf 之前（scratchpad 脚本 dev-m1d-a-mut-m1.py，只作用于我的 worktree 副本，主仓库未动）。交付态（1efbcfe）+M1 ⇒ 仍 ok（复现缺陷）；新断言+M1 ⇒ --- FAIL TestIngestNotifyFailureIsLoudButNotCascading；原状 ⇒ ok。merge 后在 detached 临时 worktree @ 1b6ef24 再复验一次：M1 ⇒ --- FAIL TestIngestNotifyFailureIsLoudButNotCascading；临时 worktree 已 remove，主仓库 ingest.go sha256 前缀 d38a35c606632211 不变。",
+      "worktree_gates_at_f7fba51": "gofmt -l internal/hestia cmd/atlas ⇒ 仅既有两项；go vet 零输出；go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%",
+      "master_gates": "锚 1b6ef242a1bda4ad889540f6b360c07aef7c8c9e，采样前后 HEAD 同值，代码范围 git status 干净：gofmt -l internal/hestia cmd/atlas ⇒ 仅既有两项；go vet ./internal/hestia/... ./cmd/... 零输出；GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%（≥ 96.3%）；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 未动；ingest_test.go sha256 与 f7fba51 逐字节一致",
+      "code_simplifier": "提交前已跑，报无改动；git numstat 5/0 核实一致"
+    },
+    "rework_2": {
+      "trigger": "QA 终审 CONTESTED → review_fix（reason_class task_defect；fix_items A4/A8-a/A8-b + 非功能）；报告 .arcforge/docs/05-review/verdict.md",
+      "my_commit": "ec93e13475a5a100e50fb93859820362abea2299（分支 task/TASK-005-m1d-fix，从 master f3d6eb282c83e0ca730b1713907f5220114ee86b 开；ingest.go 3/1、ingest_test.go 30/2）",
+      "tdd_red": "TestIngestP1SendFailureIsReported 补「1/1 期失败」断言后接线前：Error \"hestia ingest: 2/1 期失败 (2025-12): …\" does not contain \"1/1 期失败\"；A8-a/A8-b 首跑即绿",
+      "mutations": "worktree 副本上逐个应用并还原（diff -q 与快照一致）：分子改回 len(errs) ⇒ TestIngestP1SendFailureIsReported FAIL；send P0→send P2 ⇒ TestIngestNotifyFailureOnPendingIsLoud FAIL；snapshot→fetch ⇒ TestIngestFailsPeriodWhenSnapshotUnwritable FAIL",
+      "worktree_gates_at_ec93e13": "gofmt -l internal/hestia cmd/atlas ⇒ 仅既有两项；go vet 零输出；go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%；五个不动文件 diff 空",
+      "merge": "208a77c5e7da5038304e42b00c432300385d23f2（merge commit，含 ec93e13；父 f3d6eb2）",
+      "master_gates": "锚 208a77c5e7da5038304e42b00c432300385d23f2，采样前后 HEAD 同值，代码范围 git status 干净：gofmt -l internal/hestia cmd/atlas ⇒ 仅既有两项；go vet ./internal/hestia/... ./cmd/... 零输出；GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿；internal/hestia coverage 96.4%（≥ 96.3%）；五个不动文件 git diff --stat 4916106 HEAD 为空；go.mod/go.sum/types.go 未动；ingest.go/ingest_test.go sha256 与 ec93e13 逐字节一致。merge 后在 detached 临时 worktree @ 208a77c 复验三个变异：M-A4/M-A8a/M-A8b 各自 FAIL；临时 worktree 已 remove，主仓库 ingest.go sha256 前缀 b767d986e4a36c42 不变",
+      "code_simplifier": "提交前已跑，报无改动；numstat 3/1、30/2 与 ingest.go 逐字节比对核实"
+    }
+  },
+  "provenance": "全部代码由 dev-m1d-a 本体按需求原文落地；code-simplifier 子代理只读检查、无改动"
+}

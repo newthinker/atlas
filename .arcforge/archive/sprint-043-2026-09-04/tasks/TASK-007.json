@@ -1,0 +1,71 @@
+{
+  "id": "TASK-007",
+  "title": "cmd 层：--only-period flag 与开库前校验、buildHestiaSender、plist 传 --config",
+  "description": "对应需求文档 **TASK-007**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-007」节，Step 1–5，**加上需求 TASK-006 的 Step 4**（cmd 层 flag/校验/两条 `TestHestiaFlags` 断言/`TestHestiaOnlyPeriodValidation`），AD-2）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n改 `cmd/atlas/hestia.go`（`var hestiaOnlyPeriod string`；`init()` 在 `--force` 之后注册 `--only-period`；`runHestiaIngest` 在 `openHestia()` **之前**做两条校验；`buildHestiaSender() hestia.Sender` 照 `buildCrisisSender`（`crisis.go:425`）；打印通道状态；`IngestDeps` 加 `Notify: sender, OnlyPeriod: hestiaOnlyPeriod`）、`cmd/atlas/hestia_test.go`（`plistProgramArgs` helper、`TestHestiaPlistPassesMainConfig`、`TestHestiaOnlyPeriodValidation`、`TestHestiaFlags` 加两条）、`deploy/launchd/com.newthinker.atlas.hestia-ingest.plist`（`--hestia-config` 对之后加 `--config` 对 + 注释）。开工前读 TASK-004（`Sender`）与 TASK-006（`OnlyPeriod` 字段、错误文案）的 discovery。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/hestia.go",
+    "cmd/atlas/hestia_test.go",
+    "deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`--only-period` 只注册在 `hestiaIngestCmd`（`hestiaStatusCmd.Flags().Lookup(\"only-period\") == nil`），`TestHestiaFlags` 加这两条断言；`runHestiaIngest` 在 `openHestia()` **之前**：`hestiaOnlyPeriod != \"\" && !hestiaForce` ⇒ 错误含 `--only-period requires --force`；不匹配 `hestiaBackfillFromRE` ⇒ 错误含 `格式非法`。`TestHestiaOnlyPeriodValidation` 的两个用例（`\"2026-07\", false` 与 `\"2026-13\", true`）都在开库前返回，**不依赖配置文件存在**（若校验放到开库之后，第二条会因找不到 `configs/hestia.yaml` 报另一种错——那正是这条要抓的顺序错误）；`t.Cleanup` 复位两个包级变量。",
+      "`buildHestiaSender() hestia.Sender`：`loadConfigOrDefaults()` 出错或 `Notifiers[\"telegram\"]` 缺 / `!Enabled` / `BotToken==\"\"` / `ChatID==\"\"` ⇒ 返回**字面量 nil**（不是 nil 指针装进接口——那会让 `d.Notify == nil` 判断穿掉，理由写注释）；否则 `telegram.New(nc.BotToken, nc.ChatID, telegram.WithProxy(nc.Proxy))`。`runHestiaIngest` 在 `openHestia()` 之后、`hestia.Ingest` 之前打印 `notify: disabled (telegram not configured)` 或 `notify: telegram` 到 `cmd.OutOrStdout()`；`IngestDeps` 字面量加 `Notify: sender, OnlyPeriod: hestiaOnlyPeriod`。\n\n**reviewer 补（R-007a）**：`buildHestiaSender` 必须有测试：① `assert.Nil(t, buildHestiaSender())`（`cfgFile` 为空走 `Defaults()`；照 `crisis_test.go:711` 的 `TestBuildCrisisSenderNoConfig`）——这条守的正是「字面量 nil 而非 nil 指针装接口」；② 写一份临时主配置启用 `notifiers.telegram`（假 token/chat）、指到 `cfgFile`，断言返回非 nil，`t.Cleanup` 复位 `cfgFile`。\n\n---\n\n# 🔴 第一轮 REJECT（test-m1d-a，变异实测）：`IngestDeps` 字面量的两行接线 `Notify: sender,` 与 `OnlyPeriod: hestiaOnlyPeriod,` **零测试**——删 `Notify: sender` ⇒ `cmd/atlas` 全包仍绿（`notify: telegram` 照打、Ingest 没拿到 sender，**正是 M1d 立项要堵的静默不发**）；删 `OnlyPeriod:` ⇒ 全包仍绿（`--only-period X --force` 静默退化成 Force 重跑全部候选）。其余全部 PASS（5 组变异 KILLED、76.2% ≥ floor）。\n\n**本轮判据（比原句强）**：删任一接线行必须有用例转红。验证者已在隔离副本写好并实测两条端到端用例（原状绿、各自变异红、不碰外网）：`/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/fd5a25de-b6a8-4361-9a3a-cd4417c3296e/scratchpad/test-m1d-a-TASK-007-wiring-guard_test.go`——放进 `hestia_test.go`，helper 名可改。要点：httptest 伪站点（索引页含 `jumpTo` 分页控件 + 一条年报链接，文章页喂 `testdata/pboc-2025-12-annual.html`；hestia 配置 `index_url` 指到它、`snapshot_dir` 指临时目录）；`TestHestiaIngestWiresOnlyPeriod`（`--only-period 1999-01 --force` ⇒ 错含 `no candidate for period 1999-01`、out 含 `kept 0 of 1`）；`TestHestiaIngestWiresNotify`（主配置启用 telegram 且 `proxy` 指向记录 `CONNECT api.telegram.org` 并回 502 的 httptest 代理 ⇒ 错含 `send P2`、connects ≥ 1；前置 out 含 `notify: telegram` 与 `→ hestia_observations`）。只改 `hestia_test.go`；返工提交锚 `fix(TASK-007): M1d …`；`cmd/atlas` 覆盖率重采（预期 ≥ 76.2）；走完整交付流程，dev_done 带新 epoch。",
+      "plist `ProgramArguments` 在 `--hestia-config` 那对**之后**加 `<string>--config</string><string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>`（带需求给的三行 XML 注释）；`TestHestiaPlistPassesMainConfig`：`--config` 存在且下一项恰为该绝对路径，`--hestia-config` 仍在且值为 `/Users/zuowei/workspace/runtime/atlas/configs/hestia.yaml`（`plistProgramArgs` 用 regexp 取 `<array>` 内每个 `<string>`）。`plutil -lint` 输出 `OK`；既有 `TestHestiaPlistSetsNoProxyKeys`/`SchedulesThreeTimes`/`PassesPlutilLint`/`TestInstallServicesInstallsHestiaPlist` 保持绿。"
+    ],
+    "boundary": [
+      "`go run ./cmd/atlas hestia ingest --help | grep -E \"only-period|force\"` 两行都在；`--only-period` 的帮助文案说明 `requires --force`。"
+    ],
+    "error_handling": [
+      "`cmd/atlas/hestia.go` **不得 import `path/filepath`**（既有守卫 `TestHestiaCmdDoesNotResolveDBPath`，`hestia_test.go:112`）；新增 import 只有 `github.com/newthinker/atlas/internal/notifier/telegram`。通道状态那行必须在 **`openHestia()` 成功之后**打印（配置错误时不该先说 `notify: telegram` 再报错）。"
+    ],
+    "non_functional": [
+      "**门禁形态（AD-4）**：`cmd/atlas` 包覆盖率 Leader 实测 **75.7%**（锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`）低于全局 `dev_minimum` 80，本任务带 `coverage_floor: 75`；交付后 `go test ./cmd/atlas/ -cover` **不得低于 floor 75.0**，且**本任务新增的每个函数/分支都有测试**（`buildHestiaSender` 两分支、两条校验、plist）；把实测百分比与锚写进 discovery。⚠️ reviewer 指出：若按需求原文只加原文那几条测试，新增语句大多未覆盖，百分比会落在 75.0–75.6 之间——门禁放行而「不低于 75.7」判违反，dev 与验证者会扯皮，故判据改为 floor + 新增代码有测试。`gofmt -l internal/hestia cmd/atlas` 只允许两处既有欠账（**不要顺手修** `backtest_test.go`/`crisis_test.go`）；`go vet ./internal/hestia/... ./cmd/...` 零输出；两包测试全绿；`internal/hestia` 覆盖率不受影响（本任务不改它，但报数时仍核一次 ≥ 96.3%）。五个不动文件 diff 空；无新增依赖；注释写 `M1d 的 TASK-007`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-007-m1d ../wt-TASK-007-m1d master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec，信息锚定 **`feat(TASK-007): M1d …`**——🔴 需求文档写的 `feat(M1d TASK-007):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-007\\):`），照抄会被 BLOCKED（AD-3）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改五个不动文件、不得新增导出函数、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git log --oneline -1` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-007` 子命令）并 `task TASK-007 update --field discovery=.arcforge/discoveries/TASK-007.json`，再 `transition dev_done --expect-epoch <认领时的 epoch>`。\n7. 拆 worktree：`git worktree remove ../wt-TASK-007-m1d`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-006"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-004",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-d",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go",
+    "./deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-m1d-b",
+  "coverage_floor": 75,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "b47e440501d0f2dd415f9c1a39e8f66f3dd63b8b",
+    "discovery_sha256": "c83563d1bc496577468e81e998777058ac4b133c514cf87c0a81a0e3482c16d5",
+    "at": "2026-09-03T15:25:13Z"
+  },
+  "reject_reason": "DoD functional[0]/[1] 明写的两条接线「IngestDeps 字面量加 Notify: sender, OnlyPeriod: hestiaOnlyPeriod」零测试：变异删 Notify: sender ⇒ cmd/atlas 全包仍绿（notify: telegram 照打、Ingest 没拿到 sender，正是 M1d 立项要堵的静默不发形态）；删 OnlyPeriod: hestiaOnlyPeriod ⇒ 全包仍绿（--only-period X --force 静默变成 Force 重跑全部候选）。其余全部通过（dev 自报 5 组变异独立复验全 KILLED，cmd 覆盖率 76.2 ≥ floor 75，新增两函数 100%）。两条 cmd 层端到端守卫已在隔离副本实测（httptest 伪站点 + httptest 代理记录 CONNECT，原状绿、各自变异红、不碰外网），全文见 scratchpad/test-m1d-a-TASK-007-wiring-guard_test.go，要点见 docs/04-test/TASK-007-verification.md §4。本轮判据：删任一接线行必须有用例转红。",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "A5：buildHestiaSender 区分「主配置装不上」与「未配置」：cfgFile != \"\" 且 loadConfigOrDefaults 出错 ⇒ 不再折成 nil/「telegram not configured」，改为返回错误让 runHestiaIngest 响亮失败（推荐）或打三分文案 notify: disabled (main config unreadable: <err>)；把现有「unloadable ⇒ nil」用例改成新契约的断言（三个 lens 独立命中；今天不发生，是将来的漂移面）。",
+    "非功能：只改 cmd/atlas/hestia.go / hestia_test.go；cmd/atlas 覆盖率 ≥ 76.2%（floor 75）；hestia.go 不 import path/filepath；锚 fix(TASK-007): M1d …；完整交付流程。"
+  ]
+}

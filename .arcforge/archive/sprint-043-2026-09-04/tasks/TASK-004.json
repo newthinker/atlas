@@ -1,0 +1,68 @@
+{
+  "id": "TASK-004",
+  "title": "Sender 窄接口与 P0/P1/P2 三类消息渲染（纯函数）",
+  "description": "对应需求文档 **TASK-004**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-004」节，Step 1–5）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n新建 `internal/hestia/notify.go` 与 `notify_test.go`。`type Sender interface{ SendText(text string) error }`（与 `crisis.Sender` 同形，理由写注释：不走 `internal/notifier` 的 `Notifier` 接口，那个面向 `core.Signal`）；`renderP0(obs Observation, rep ValidationReport) string`、`renderP1(c Candidate, err error) string`、`renderP2(obs Observation, out Outcome) string` 及 helper `anchorValue`/`fmtNum`/`anchorFlow`，**全部非导出**。纯文本、不设 parse_mode、紧急度由前缀承载。",
+  "module": "hestia",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/hestia/notify.go",
+    "internal/hestia/notify_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "P0 以 `[P0]` 开头，含 `<period>/<period_type>`、`pending`、article_id、extractor；**只列 `Status == CheckFailed` 的闸**（每条 `- <ID>: 实测 <Value> · <Reason>`），passed / skipped 的闸名**不出现**：`TestRenderP0ListsOnlyFailedChecks`（`deposit_sum` 出现且带 `0.2501` 与 `tolerance_exceeded[ytd]`；`monetary_hierarchy`、`stock_continuity` 不出现）。",
+      "P1 以 `[P1]` 开头，含 `<period>/<period_type>`、article_id，**只取错误首行**（`strings.Cut(err.Error(), \"\\n\")`），多行错误的第二行不出现：`TestRenderP1KeepsFirstLineOnly`。",
+      "P2 以 `[P2]` 开头，含 Verdict 原样（`Duplicate` 不被吞）、extractor、`M2 … 万亿 · M1 … 万亿 · 社融存量 … 万亿 · 人民币存款 … 亿元 (<口径>)`、article、发布日：`TestRenderP2CarriesVerdictAndAnchors`（356.71 / 118.48 / 462.06 / 177600 / `ytd` / `万亿` / `亿元`）。"
+    ],
+    "boundary": [
+      "锚字段缺失写 `n/a`、**不写 0**（0 是合法的数）：`TestRenderP2MissingAnchorIsNA`（删 `FieldTSFStock` 后含 `n/a` 且不含 `462.06`）。数字用 `strconv.FormatFloat(v, 'f', -1, 64)`：177600 必须打成 `177600`，不得是 `1.776e+05`。\n\n存款只有当月口径时取 `FieldDepositFlowMoM` 并标 `mom`、不出现 `ytd`；两者都缺 ⇒ `n/a` 与口径 `-`：`TestRenderP2UsesMomWhenYtdAbsent`。\n\n**reviewer 补（R-004）**：ytd 与 mom **同时存在**时取 ytd 并标 `ytd`（一行断言，放进 `TestRenderP2CarriesVerdictAndAnchors` 或独立用例）。"
+    ],
+    "error_handling": [
+      "`Check.Value == nil` 时 P0 的实测值写 `n/a`，不得解引用 nil 指针 panic（测试里给一条 `Value: nil` 的 failed 闸并断言含 `n/a`——需求原文没这条，是本 DoD 补的边界）。"
+    ],
+    "non_functional": [
+      "`notify.go` 取锚字段**一律用 `FieldM2`/`FieldM1`/`FieldTSFStock`/`FieldDepositFlowYTD`/`FieldDepositFlowMoM` 常量**，不得出现业务字段名字符串字面量（`TestFieldNamesAppearOnlyInFieldsGo` 绿）；三个渲染器与 helper 非导出（`TestPackageExposesNoWriteFunctions` 绿，**不改断言**）；纯函数、无 I/O。测试 import `github.com/newthinker/atlas/internal/macro/bitemporal`。TDD 红阶段：`undefined: renderP0` 先出现，记进 discovery。",
+      "**门禁（每任务必过）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/... -cover` **≥ 96.3%**（Leader 实测 96.3% 于锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`；零余量，报数时把测量时的 HEAD 全 sha 与数字同行写进 discovery）。\n\n**五个不动文件 diff 必须为空**：`git diff --stat 4916106 HEAD -- internal/hestia/store.go internal/hestia/validate.go internal/hestia/parse.go internal/hestia/extract.go internal/hestia/fields.go`。`Meta` 七字段不动（不碰 `types.go`）。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。注释里引用任务编号带 milestone 前缀：写 `M1d 的 TASK-00N`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-004-m1d ../wt-TASK-004-m1d master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec，信息锚定 **`feat(TASK-004): M1d …`**——🔴 需求文档写的 `feat(M1d TASK-004):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-004\\):`），照抄会被 BLOCKED（AD-3）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改五个不动文件、不得新增导出函数、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git log --oneline -1` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-004` 子命令）并 `task TASK-004 update --field discovery=.arcforge/discoveries/TASK-004.json`，再 `transition dev_done --expect-epoch <认领时的 epoch>`。\n7. 拆 worktree：`git worktree remove ../wt-TASK-004-m1d`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-d",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/notify.go",
+    "./internal/hestia/notify_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "dev_done 门禁 DENY：主仓库工作树里有三个不属于 TASK-004 的未提交改动被判越界——./CLAUDE.md、./AGENTS.md、./.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md（同批还有另外 5 个 gitnexus SKILL.md 被删、.claude/skills/gitnexus-* 与 .agents/skills/* 新建；mtime 02:58:51Z，是我认领后 1 分钟由 gitnexus 索引再生产生的，形态与历史提交 fe086ba「同步索引再生的 SKILL/AGENTS/CLAUDE 块」完全一致；我全程在 worktree 里工作，主仓库这些文件我一字未动）。它们不在 TASK-001/002/004 任何 writes 之下，门禁按「未提交 − 他人在途 scope」全算成我的。我不能 git checkout 撤别人的改动，也不该把它们假申报进 writes。请裁决：A) 由你/人类把这批 gitnexus 再生改动提交（沿 fe086ba 形态）或 stash，然后我重试 dev_done；B) 你明确指示我把这三个路径临时补进 writes 以过门禁（我认为这是假申报，不建议）；C) 其它。代码侧交付已全部完成并 merge：我的 commit f8e3c8e68dc97e728d3a65adbc57966d1bf2c1e3，merge 后 master 69cb71d76dc16a1726d431cc328a74ac316bbcc4，master 重采 cover 96.4%/vet 0/gofmt 仅既有两项/全绿，discovery 已写并挂指针，worktree 已拆。",
+      "asked_at": "2026-09-03T03:10:00Z",
+      "answer": "已处置（Leader，2026-09-03 11:2x）：越界成因是主仓库工作树的两批非任务改动——① 我跑 npx gitnexus analyze 再生的 CLAUDE/AGENTS/skills；② 开工前就在工作树的上游 PR #6 运行时同步（arcforge-write.sh + CLAUDE.md Arcforge 段）。两批已分别提交为 688c24c（chore(arcforge)）与 2f5ad51（chore(gitnexus)），均不含 Go 代码；git status 除 .arcforge/ 外已空。不要把它们补进 writes。请自己转回 in_progress 后直接重试 transition dev_done --expect-epoch 1；master 现为 2f5ad513f7c0e7539c824e2e8f8a0f078baec316，你的自证数字在 6a126d9/69cb71d 上采的仍然有效（两个 chore 未动任何 .go/yaml/plist），discovery 里注明一句即可。"
+    }
+  ],
+  "verifier": "test-m1d-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "b47e440501d0f2dd415f9c1a39e8f66f3dd63b8b",
+    "discovery_sha256": "c438df56ec4c9acbc0b9b32571213af7e7c9b47e14f8c30317487cbf62696a5a",
+    "at": "2026-09-03T15:25:12Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    "A7（Leader 已拍板）：renderP2 在 out.Verdict == bitemporal.Duplicate 时，「入库」措辞改为「已在库（本次抽取值未写入）」——Force 重跑已入库期次时 Save 判 Duplicate、refreshArticleID 只刷 article_id、新抽的 Values 一个都不写（ingest.go 注释原话），而 P2 把本次重抽的锚值写成「入库」会误导运维；New/Revision/OutOfOrder 措辞不变。补断言：Duplicate ⇒ 含「未写入」且仍含 Duplicate；New ⇒ 不含「未写入」。",
+    "非功能：只改 notify.go / notify_test.go；Field* 常量守卫与导出面守卫保持绿；锚 fix(TASK-004): M1d …；完整交付流程。"
+  ]
+}

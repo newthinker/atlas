@@ -128,7 +128,18 @@
     "dev-m1c4-d": "c75400fed6d7f80a363cf4b8f81470f8f1eb8e8bb238813dcf5773cfc22c44d3",
     "qa-m1c4-r2": "26367a6b220b799a0205ab7a752e46c95185bfe1550e052946cc94a3c6dad88e",
     "qa-m1c4-r3": "72445f75b66281dbd7fadf4e4a9f9eaa1c74c5499015a26dd23fcb4ac02b543e",
-    "qa-m1c4-r4": "3d1625160dccdb9e866630ba2468ecce476fad4f3e89092d1e89d942701fbe66"
+    "qa-m1c4-r4": "3d1625160dccdb9e866630ba2468ecce476fad4f3e89092d1e89d942701fbe66",
+    "dev-m1d-a": "42824752f50f66b1fa70989b28e9326ed7dde3573a03c2b8a72d9932903ccd5a",
+    "dev-m1d-b": "e4b97f9cc6c54726b7dc557dc748d3a56793cc179abd5e37f2d7624fdd31d2a0",
+    "dev-m1d-c": "7f7a94634f352882a4162ea004c814c7c9c6585dbe1f873bce04262200575ef5",
+    "test-m1d-a": "7077441175101e2f5336eef7a7d42c1dc27ed1e21862a5502fcb8ab5d92798e1",
+    "qa-m1d": "41558a743bd49a6e84f8a0e9b4ae67b68f1925fbabfd10ce2f56e7566d0c838e",
+    "dev-m1d-d": "d8431d7249559a4827d9c1352d6db1285d85fdcd520b42f4284f7eaf23eb601f",
+    "dev-m1d-e": "94d4db77de1cc5d17c191d2ec48a9a5484edc0718ff3d1657fab1513f2307925",
+    "test-m1d-b": "6bec2187a4fad037ea53d092085c85316a281edd9e3f8c7910f2f9a55a3aee1d",
+    "dev-m1d-f": "6523a1c4eca1a5e6daedee94138cdaea99283d60cc89710c21c3fc0367dcdf5d",
+    "test-m1d-c": "da0e59c3d517482a24f5a536b7601824e161339d2a497a5373465ade81a0be5e",
+    "qa-m1d-b": "c353ebc33aaec6e4a09d5f17ecd8c5edd63635ed6d962a69aad1609ab6a47cf0"
   },
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [

@@ -1,0 +1,63 @@
+{
+  "task_id": "TASK-008",
+  "title": "docs-only 收口：采锚、全量核对、真语料回归、CONTRACTS §A/§B、code-simplifier 终检",
+  "commit": "ba8e69b48dd63e860f69e220f205bd86f7b18b2c",
+  "branch": "task/TASK-008-m1d",
+  "anchor": "540e84a0eee6e37c5a85cb4743a189a1744aae64",
+  "base": "ae088eb253b64b36e10558a02587e3fa657f5f3e",
+  "master_after_merge": "f3d6eb282c83e0ca730b1713907f5220114ee86b",
+  "key_findings": [
+    "真语料回归五个数逐字不变（锚 540e84a，主仓库，exit 0）：218 = 217 + 1；217 = 213 + 4；97 = 76 + 21（单篇 28 + 合并组 69）；字段冲突 0（共 0）；口径路由违反 0（共 0）。本 Sprint 不动解析与闸门，这是它没动的证据。",
+    "新增测试实数 42，需求预估 29：差 13 条全部有归属——TASK-002 +3（只补原文 5 条时覆盖率 2376/2470=96.19% 跌破门槛，补 R-002 与两条可移植触发的错误分支）、TASK-004 +3、TASK-003 +1（R-003 diverged 正向）、TASK-005 +1（R-005b）、TASK-007 +5（R-007a buildHestiaSender 两条 + IngestDeps 接线端到端守卫等）。两把尺互验：`git diff $BASE 锚 -- '*_test.go' | grep -c '^+func Test'` = 42；按任务 commit 逐个 `git show <c> -- '*_test.go' | grep -c '^+func Test'` 求和 3+8+5+8+7+3+8 = 42；删除 `^-func Test` 为 0。",
+    "覆盖率 2438/2528 = 96.44%（`go test` 打 96.4%），BASE 上为 2358/2448 = 96.32%；本 Sprint 净增 80 语句全部被覆盖之外还多覆盖了既有语句。导出面 want 22 项未改（store_test.go 自 BASE 无 diff）。",
+    "AD-7 订正口径在本任务实际生效：全仓库 `git status --short` 在采锚时非空（.arcforge/ 整 sprint 脏），代码范围 `-- internal/hestia cmd/atlas configs deploy go.mod go.sum` 为空。若按需求原文「必须空」判据，本任务无法开工。",
+    "code-simplifier 终检 11 个改动文件：回复「无改动建议」；按纪律用 `git status` + `git diff --numstat 锚 HEAD` 核实它确实没动任何文件。"
+  ],
+  "decisions": [
+    {
+      "decision": "§B「新增测试」行写实数 42 并附逐任务差因表，不写预估 29",
+      "rationale": "DoD functional[3] 明写预估不是判据；差因表让下一个读 CONTRACTS 的人不必再去翻七份 discovery。差因来源是各任务 commit 的 `+func Test` 计数（不是 discovery 自述——discovery 里只有 002/003 报了条数）。"
+    },
+    {
+      "decision": "§A4 按 TASK-004 验证报告 §4 写：理由更正（%g 阈值 ≥ 1e6）+ 真钉法 `assert.Equal(t, \"1776000\", fmtNum(1776000))` 挂账 M2 前加固，本 Sprint 不改 004 的测试",
+      "rationale": "004 已 verified；docs-only 任务不得改 .go。"
+    },
+    {
+      "decision": "§A2 在原文基础上补了一句 TASK-002 的幂等规则（同字节跳过不改 mtime / 不同字节另存不覆盖 / tmp+rename）",
+      "rationale": "A2 只说「Parse 之前落盘」，读者会问「重跑会不会覆盖」；规则已是代码事实（snapshot.go），一句话省下游一次追查。"
+    },
+    {
+      "decision": "在主仓库分支 task/TASK-008-m1d 上做，不建 worktree；提交后切回 master",
+      "rationale": "DoD non_functional 允许；回归必须在主仓库跑（data/ 不进 git）。切回 master 是为了 Leader 在同一工作树里合并时不受我 checkout 影响。"
+    },
+    {
+      "decision": "首个提交 4df0709 因 Claude-Session 尾注打错一个字符而 amend 为 ba8e69b（未推送、未合并）",
+      "rationale": "内容零改动，`git show --stat` 仍只含 CONTRACTS.md +68/-0。已在 merge 请求里注明旧 sha 作废。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/CONTRACTS.md",
+      "numstat": "68+/0-",
+      "what": "末尾新开 `## Sprint M1d · 运行时切换、通知与增量验收（M1 收口）`：§A1–A4 契约更正 + §B 实测登记表（锚 540e84a）+ 新增测试差因表"
+    }
+  ],
+  "interfaces_exposed": [
+    "无代码改动。CONTRACTS §B 的锚 540e84a0eee6e37c5a85cb4743a189a1744aae64 与 merge 后 master sha 是 TASK-009（运行时切换，人类执行）的 ANCHOR 候选；以 Leader 归档时记的 master sha 为准。"
+  ],
+  "verification": {
+    "anchor": "540e84a0eee6e37c5a85cb4743a189a1744aae64（采前采后 `git rev-parse HEAD` 同值；`git status --short -- internal/hestia cmd/atlas configs deploy go.mod go.sum` 空；写 CONTRACTS 前 `git diff --numstat 锚 HEAD -- internal/hestia cmd/atlas configs deploy` 空）",
+    "gofmt": "仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go @540e84a",
+    "vet": "go vet ./internal/hestia/... ./cmd/... rc=0 @540e84a",
+    "coverage": "2438/2528 = 96.44%（go test -cover 打 96.4%）@540e84a",
+    "cmd_tests": "go test ./cmd/atlas/... -count=1 ok @540e84a",
+    "frozen_files": "git diff --stat 4916106 540e84a -- store.go validate.go parse.go extract.go fields.go 空",
+    "guards": "TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo / TestShippedConfigLoadsAndIsCalibrated PASS @540e84a；want 22 项",
+    "regression": "scratchpad/m1d-reg-dev-m1d-b/load.txt（394 行，exit 0）@540e84a：218=217+1 / 217=213+4 / 97=76+21 / 冲突 0 / 路由违反 0",
+    "new_tests": "42 @ ae088eb..540e84a（两把尺互验，见 key_findings）",
+    "code_simplifier": "无改动建议；git status 核实未动文件",
+    "commit_scope": "git show --stat ba8e69b 只含 internal/hestia/CONTRACTS.md",
+    "measured_after_last_change": "是：全部数字采于锚 540e84a，本任务唯一改动是 CONTRACTS.md（非代码范围），锚后 numstat 为空"
+  },
+  "provenance": "全部采样、CONTRACTS 撰写由 dev-m1d-b 完成；code-simplifier 终检由子代理执行、只报告未修改；§A4 内容来源 test-m1d-a 的 TASK-004 验证报告 §4。"
+}

@@ -1,0 +1,91 @@
+{
+  "id": "TASK-008",
+  "title": "收口：采锚、全量核对、真语料回归、CONTRACTS 新开 Sprint M1d §A/§B、code-simplifier 终检（docs-only）",
+  "description": "对应需求文档 **TASK-008**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-008」节，Step 1–5；Step 6 的合并与归档由 Leader 走 Arcforge 流程）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n🔴 **本任务是 docs-only**：`writes` 只有 `internal/hestia/CONTRACTS.md`，**不得改任何 `.go`/yaml/plist**（AD-5）。全部 DoD 为 `verify_by: review|manual`，`dev_done` 门禁走无代码任务分支。开工前读 TASK-001～007 全部 discovery（§B 的新增测试计数要与它们报的对得上）。真语料回归必须在**主仓库**跑（`data/` 被 `.gitignore`，worktree 里没有），语料用绝对路径 `/Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14` 并加 `--allow-incomplete`，构建用 `GOTOOLCHAIN=local`。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "🔴 **采锚前置（AD-7）**：第一步先 `cd` 主仓库、`git status --short -- internal/hestia cmd/atlas configs deploy go.mod go.sum` **必须为空**（🔴 reviewer 阻断项，Leader 核实：主仓库整个 sprint 都有 `?? .arcforge/tasks/`、`?? .arcforge/docs/` 与两处会话外的 hook/CLAUDE.md 改动，需求原文与 AD-7 的「`git status --short` 必须干净」在本仓库**恒不成立**；判据收窄为代码范围，与后面 numstat 同口径，要保证的性质「代码范围内无未提交改动」不变）、`ANCHOR=$(git rev-parse HEAD)` 记全 sha；此后每一个数字都标注这个锚。写 CONTRACTS **之前**再跑 `git diff --numstat $ANCHOR HEAD -- internal/hestia cmd/atlas configs deploy`，非空就回到本步重采。§B 表头的 `<ANCHOR>` 填这个全 sha。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**全量核对**（全部在锚上）：`gofmt -l internal/hestia cmd/atlas` 只列两处既有欠账；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... -cover -count=1` ≥ **96.3%**；`go test ./cmd/atlas/... -count=1` 绿；`git diff --stat 4916106 HEAD -- internal/hestia/store.go internal/hestia/validate.go internal/hestia/parse.go internal/hestia/extract.go internal/hestia/fields.go` **为空**；`TestPackageExposesNoWriteFunctions`/`TestFieldNamesAppearOnlyInFieldsGo`/`TestShippedConfig*` PASS 且导出面 want **未改**（本迭代零新增导出函数）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**真语料回归——数字必须一个不变**：`S=/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/fd5a25de-b6a8-4361-9a3a-cd4417c3296e/scratchpad/m1d-reg-<你的实例名>`（scratchpad 全 teammate 共享，目录名带实例名防撞；`mkdir -p $S; rm -f $S/reg.db*`）；`GOTOOLCHAIN=local go build -o $S/atlas ./cmd/atlas` 后 `backfill load --dir <主仓库绝对路径>/data/hestia-backfill-2026-08-14 --db $S/reg.db --allow-incomplete`，退出码 0；`grep -E \"语料总篇数|待解析|本迭代不解析|解析成功|解析失败|合并后观测|入权威表|落 pending\"` 与 `grep -E \"字段冲突|口径路由核对\"` 的数字与 CONTRACTS `## Sprint M1c-4` §B **逐字相等**：`218 = 217 + 1`、`217 = 213 + 4`、`97 = 76 + 21`（单位：篇 / 篇 / 观测）、字段冲突 0、口径路由违反 0。**任何一个数变了就是回归**，不是「新覆盖」——立即 `blocked_clarification` 报 Leader，不自行解释。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "CONTRACTS.md 末尾新开 `## Sprint M1d · 运行时切换、通知与增量验收（M1 收口）`，含 §A 三条契约更正（A1 §H-8「生产库」此后必须指运行时目录那份；A2 `ingest` 此前不留快照、本 Sprint 起 Parse 之前落盘；A3 方案报告 4.8.2 四类消息只实现三类，LLM 兜底那类不是删掉）与 §B 实测登记表（覆盖率 / 导出面未改 22 项 / 五个不动文件 diff 空 / 真语料回归五个数 / 新增测试计数）。**§B 的「新增测试」行必须与实际相符**：用 `git diff $BASE $ANCHOR -- '*_test.go' | grep -c '^+func Test'`（`$BASE` = `ae088eb253b64b36e10558a02587e3fa657f5f3e`，本 Sprint 开工时的 master HEAD，Leader 全部实测的锚）核对，需求文档预估 `snapshot 5 · notify 5 · ingest 4+6+3 · config 3 · cmd 3 = 29` 是**预估**不是判据，实际数不同就写实际数并注明差在哪个任务。\n\n**§A 追加 A4（test-m1d-a 验 TASK-004 时实测，报告 §4）**：需求原文 `## TASK-004` 与本 sprint DoD 里「`%g` 会把 177600 打成 `1.776e+05`」这句理由**为假**——Go 1.24 `%g` 在指数 ≥ 6（≥ 1e6）才切指数记法，177600 用 `%g` 也打 `177600`；1776000 才是 `1.776e+06`。结论（`FormatFloat(v, 'f', -1, 64)`）正确、理由错误，且 dev 据它写的 `NotContains \"1.776e+05\"` 断言在任何实现下都不可能失败（验证者变异 N3 SURVIVED）。§A4 写：理由更正 + 真钉法 `assert.Equal(t, \"1776000\", fmtNum(1776000))` 作为 M2 前加固项挂账（004 已 verified，本 sprint 不改它的测试）。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**code-simplifier 终检**：对本 Sprint 全部改动文件（`internal/hestia/snapshot.go notify.go ingest.go config.go`、`cmd/atlas/hestia.go` 及对应 `_test.go`）跑一次 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，约束：不得改五个不动文件、不得新增导出函数、注释理由段保留）。**预期无改动建议**（每任务已自跑）。若它提出改动：**不自行改代码**（本任务 docs-only），把建议全文写进 discovery `decisions` 并转 `blocked_clarification` 由 Leader 裁决。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "**自证纪律**：一切数字采于最后一次改动之后、同一个锚；discovery 的 `verification` 里每个数字旁写锚。本任务提交只含 `CONTRACTS.md`（`git show --stat HEAD` 只有这一个文件）；提交信息锚 `docs(TASK-008): M1d …`（**不是** `docs(M1d TASK-008)`）。若 §B 里任何一格填不出实测值（例如回归数字对不上），**不写占位符**，走澄清环。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**交付流程（docs-only 变体）**：可在主仓库分支 `task/TASK-008-m1d` 上做（无代码、无 worktree 隔离必要；但若建了 worktree，回归与 `.arcforge/` 写入仍在主仓库）；提交后通知 Leader merge，merge 进 master 后 `transition dev_done --expect-epoch <认领 epoch>`；discovery 写 `files_modified: [internal/hestia/CONTRACTS.md]` 并 `update --field discovery=…` 挂指针。写通道调用一律 `ARCFORGE_TOKEN=<token> bash .claude/hooks/arcforge-write.sh --as <实例名> …`。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-b",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m1d-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "f3d6eb282c83e0ca730b1713907f5220114ee86b",
+    "discovery_sha256": "2a8736c2ca5ec2311306dc3f7869b95942f5b3405cd488880c6adbb58bc3b6b0",
+    "at": "2026-09-03T11:31:32Z"
+  }
+}

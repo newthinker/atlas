@@ -1,0 +1,77 @@
+{
+  "id": "TASK-005",
+  "title": "ingest 接通知：pending⇒P0、权威表⇒P2、失败⇒P1，发送失败响亮但不级联",
+  "description": "对应需求文档 **TASK-005**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-005」节，Step 1–5）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n改 `internal/hestia/ingest.go`（`IngestDeps.Notify Sender` 放在 `Force` 之前；`type notifyError struct{ err error }` 带 `Error()`=`\"notify: \"+…` 与 `Unwrap()`；`func (d IngestDeps) send(text string) error` 是唯一发送点，`Notify == nil` 时 no-op；`ingestOne` 末尾在 `fmt.Fprintf(d.Out, \"%s %s → %s\\n\", …)` **之后**发 P2 或（`out.Table == TablePending` 时）P0，失败 `return wrap(\"notify\", err)`；`Ingest` 循环里对失败候选发 P1，但 `var ne notifyError; errors.As(err, &ne)` 命中时**不发**）与 `ingest_test.go`（`fakeSender` + 六条测试）。开工前读 TASK-003（`ingestCfg(t)` 签名）与 TASK-004（渲染器）的 discovery。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/ingest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "入权威表 ⇒ **恰一条** P2，含 `bitemporal.New.String()` 与 `2025-12/annual`：`TestIngestNotifiesP2OnObservation`。通知在 `Out` 打印之后发（Out 是本地真相，Telegram 是投影；投影失败不该让本地少一行）。\n\n**reviewer 补（R-005a）**：spec §4.2「Duplicate/Revision/OutOfOrder 也发 P2、不吞」要在 **ingest 层**有断言（渲染器层的文本断言不证明 `send` 被调用）：给既有 `TestForceOnObservedPeriodIsDuplicate`（`ingest_test.go:723`）加一个 `fakeSender`，断言 `texts` 恰 1 条且含 `Duplicate`。这正是需求 TASK-009 链路实测第 5 步要收到的那条消息。\n\n---\n\n# 🔴 第一轮 REJECT（test-m1d-a，变异实测）：「通知在 `Out` 打印之后发」这一子句**零断言**——把 P2/P0 的 `send` 移到 `Fprintf` 之前，两包 `-count=1` 仍全绿（变异 M1 SURVIVED）。代码位置本身是对的（`ingest.go:262-273`），缺的是守卫。\n\n**本轮判据**：在 `TestIngestNotifyFailureIsLoudButNotCascading` 末尾补 `assert.Contains(t, out.String(), \"→ \"+TableObservations, \"Out 是本地真相、通知是投影：通知失败不能让本地少那一行\")`（验证者已在隔离副本实测：变异态红、原状绿）。**验收看变异**：把 `send` 移到 `Fprintf` 之前后该用例必须转红。只改 `ingest_test.go`；返工提交锚 `fix(TASK-005): M1d …`；走完整交付流程（worktree → 通知我 merge → merge 后重采 → dev_done 带新 epoch）。其余八条上一轮已 PASS（8/9 变异 KILLED），本轮只需确认未回退。",
+      "落 pending ⇒ **恰一条** P0 且指名闸门，`countRows(t, s, TablePending) == 1`：`TestIngestNotifiesP0OnPending`。阈值前提**已由既有测试证实**（reviewer 核实：`ingest_test.go:318-330` 用同样的 `DepositSumTolerance = 1e-9` + `annualFetcher` 断言落 `TablePending`，当前全绿）；AD-10 的备用出路保留但预计用不到。",
+      "`ingestOne` 任一阶段失败 ⇒ 循环里**恰一条** P1，含 article_id 与阶段名 `parse`：`TestIngestNotifiesP1OnParseFailure`（`Ingest` 仍返回错误）。"
+    ],
+    "boundary": [
+      "空跑（判停命中已见过的文章、0 候选）⇒ **0 条**消息，`Out` 含 `no new reports`：`TestIngestSendsNothingOnEmptyRun`。`Notify == nil` ⇒ 不发、不 panic、照常入库（observations = 1）：`TestIngestNilNotifyIsNoop`。"
+    ],
+    "error_handling": [
+      "`SendText` 返回 `errBoom` ⇒ 数据**不回滚**（observations = 1）、`Ingest` 返回错误且 `err.Error()` 含 `notify`、`errors.Is(err, errBoom)` 为真、**`sender.texts` 恰 1 条**（不得再为「通知失败」发 P1——那条同样发不出去，只会套娃）：`TestIngestNotifyFailureIsLoudButNotCascading`。\n\n**reviewer 补（R-005b）**：`Ingest` 循环里 `d.send(renderP1(...))` **自身失败**的分支（把 `nerr` 追加进 `errs`）要有测试——上一条用例走的是 P2 失败后 `errors.As` 命中 `notifyError` 直接 `continue`，进不到这一支。用例：Parse 失败 + `fakeSender{err: errBoom}`，断言 `texts` 恰 1 条、错误链同时含 `parse` 与 `notify`、`errors.Is(err, errBoom)` 为真。\n\n**文案备注**：`wrap(\"notify\", notifyError{…})` 会打成 `…: notify: notify: boom`（`notifyError.Error()` 自带前缀）。`Contains \"notify\"` 仍过；让 `notifyError.Error()` 不带前缀或 `wrap` 换 stage 名，二选一，把选择记进 discovery `decisions`。"
+    ],
+    "non_functional": [
+      "既有不带 `Notify` 的用例走 nil 路径、行为不变、不改断言。`fakeSender{texts []string; err error}` 放 `ingest_test.go`。TDD 红阶段：`unknown field Notify in struct literal` 先出现，记进 discovery。`import` 按需补 `strings`/`io`/`bitemporal`。**不新增导出函数**（`notifyError` 与 `send` 均非导出；`TestPackageExposesNoWriteFunctions` 绿）。",
+      "**门禁（每任务必过）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/... -cover` **≥ 96.3%**（Leader 实测 96.3% 于锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`；零余量，报数时把测量时的 HEAD 全 sha 与数字同行写进 discovery）。\n\n**五个不动文件 diff 必须为空**：`git diff --stat 4916106 HEAD -- internal/hestia/store.go internal/hestia/validate.go internal/hestia/parse.go internal/hestia/extract.go internal/hestia/fields.go`。`Meta` 七字段不动（不碰 `types.go`）。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。注释里引用任务编号带 milestone 前缀：写 `M1d 的 TASK-00N`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-005-m1d ../wt-TASK-005-m1d master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec，信息锚定 **`feat(TASK-005): M1d …`**——🔴 需求文档写的 `feat(M1d TASK-005):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-005\\):`），照抄会被 BLOCKED（AD-3）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改五个不动文件、不得新增导出函数、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git log --oneline -1` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-005` 子命令）并 `task TASK-005 update --field discovery=.arcforge/discoveries/TASK-005.json`，再 `transition dev_done --expect-epoch <认领时的 epoch>`。\n7. 拆 worktree：`git worktree remove ../wt-TASK-005-m1d`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-a",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/ingest_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 2,
+  "questions": [
+    {
+      "q": "TASK-005 交付已提交在 task/TASK-005-m1d @ 8fec9323e2df4d7c8336c0b2370b6a2d688a2571（基于 master 656fe05，无冲突，worktree 内门禁全过），自 03:53Z 起请求 Leader merge，四次催办无回执，master 仍 656fe05。按 AD-6 merge 只能由 Leader 串行执行、且 merge 先于 dev_done，dev 侧无法推进。请：① merge 后回一句，我重采并转 dev_done；或 ② 若 Leader 已换人/需人类介入，请告知新的 merge 执行者。",
+      "asked_at": "2026-09-03T04:39:44Z",
+      "answer": "已 merge（Leader 14:55 执行；你的四次催办与本提问在 Leader 侧直到 14:55 才一起到达，是 Leader 失联约 3 小时，不是你的问题）。master = 1efbcfec7cfad2d08fa49fea3fde13aa5ffb127a，merge commit 以分支尖 75961fc14bef6f7f28ec6696a6200cd29cb84320 为第二父，8fec932 与 75961fc 都在 master 祖先链，ingest.go/ingest_test.go blob 与分支一致。请 transition in_progress --expect-epoch 1 → 在 master 1efbcfe 重采 → discovery 挂指针 → dev_done --expect-epoch 1 → 拆 worktree。"
+    }
+  ],
+  "verifier": "test-m1d-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "b47e440501d0f2dd415f9c1a39e8f66f3dd63b8b",
+    "discovery_sha256": "282984013ff742e73b3c71659a9b4bd3fa1e0631e8149a70c70ed3a5fe0cdb00",
+    "at": "2026-09-03T14:33:28Z"
+  },
+  "reject_reason": "DoD functional[0] 子句「通知在 Out 打印之后发」零断言：变异把 P2/P0 的 send 移到 Fprintf 之前，internal/hestia 与 cmd/atlas 两包 -count=1 仍全绿。其余全部 DoD 通过（8/9 变异 KILLED，含 R-005a/R-005b、errors.As 不级联、nil 不 panic、空跑 0 条）。修法一行，见 docs/04-test/TASK-005-verification.md §4：TestIngestNotifyFailureIsLoudButNotCascading 里对已捕获的 out 断言含 \"→ \"+TableObservations（实测变异态红、原状绿）。本轮判据：send 移到 Fprintf 之前后该用例必须转红。",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "A4：Ingest 汇总行「%d/%d 期失败」的分子用 len(failedPeriods) 而非 len(errs)——P1 自身发送失败会让 errs 多一条，QA 实测打出「2/1 期失败」。补断言：Parse 失败 + sender 失败 ⇒ 错误文案含 1/1 期失败。",
+    "A8-a：补「落 pending + 发送失败」用例：DepositSumTolerance=1e-9 + fakeSender{err} ⇒ 错误链含 (<id>): send P0: notify: ，pending=1，texts 恰 1。",
+    "A8-b：把 TestIngestFailsPeriodWhenSnapshotUnwritable 的 Contains(\"snapshot\") 改成 wrap 前缀形态 (<id>): snapshot: （证否账本 #3：内层文本会替它过关；判据：wrap 阶段名改成 fetch 必须转红）。",
+    "非功能：只改 ingest.go / ingest_test.go；可选项（NOTIFY FAILED 打印、db: 旁加 snapshots:）不做；全包绿、覆盖率 ≥ 96.3%；锚 fix(TASK-005): M1d …；完整交付流程。"
+  ]
+}

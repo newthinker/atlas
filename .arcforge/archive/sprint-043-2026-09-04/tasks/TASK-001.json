@@ -1,0 +1,60 @@
+{
+  "id": "TASK-001",
+  "title": "配置 storage.snapshot_dir：预填默认、空串拒绝、仓库 yaml 显式写出",
+  "description": "对应需求文档 **TASK-001**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-001」节，Step 1–6）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n改 `internal/hestia/config.go`（`StorageCfg.SnapshotDir`、`LoadConfig` 预填、`validate()`）、`config_test.go`（三条测试）与 `configs/hestia.yaml`（`storage.snapshot_dir` 显式写出、`config_version` 递增）。下游 TASK-003 在测试里手工构造 `Config` 时必须自己填临时目录——`LoadConfig` 的预填不会替它填，这一点写进 discovery 的 `interfaces_exposed`。",
+  "module": "hestia",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/hestia/config.go",
+    "internal/hestia/config_test.go",
+    "configs/hestia.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`StorageCfg` 新增 `SnapshotDir string`（mapstructure `snapshot_dir`）；`const defaultSnapshotDir = \"data/hestia-snapshots\"`；`LoadConfig` 的初始 `cfg` 改为 `Config{Storage: StorageCfg{SnapshotDir: defaultSnapshotDir}, Thresholds: DefaultThresholds()}`。未写 `snapshot_dir` 时得到预填值：`TestLoadConfigDefaultsSnapshotDir` 通过（用既有 helper `writeConfig(t, yaml)`）。",
+      "显式写 `snapshot_dir: var/snap` ⇒ 原样保留、不做任何路径解析（与 `TestLoadConfigKeepsDBPathRelative` 同理由）：`TestLoadConfigReadsSnapshotDir` 通过。",
+      "`configs/hestia.yaml` 的 `storage:` 段在 `db_path` 之后显式写出 `snapshot_dir: data/hestia-snapshots`（带需求 Step 5 给的四行注释：命名规则、同字节跳过、不同字节另存不覆盖、相对路径按 cwd）；`config_version` 改为实际改动当日（如 `\"2026-09-03\"`），文件头部变更记录处加一行 `# <日期>（M1d 的 TASK-001）：storage 段加 snapshot_dir。`；`TestShippedConfigLoadsAndIsCalibrated` 仍绿（它只比对 `magnitude_ranges` 键集）。\n\n**reviewer 补（R-001）**：`TestShippedConfigLoadsAndIsCalibrated` 只比对 `magnitude_ranges` 键集，yaml 漏写那一行时全绿 ⇒ 在该测试（或新增一条加载 `../../configs/hestia.yaml` 的断言）里加 `assert.Equal(t, \"data/hestia-snapshots\", cfg.Storage.SnapshotDir)`，让仓库 yaml 的显式写出有测试守着。\n\n---\n\n# 🔴 第一轮 REJECT（test-m1d-a，变异实测）：R-001 那条 `assert.Equal(cfg.Storage.SnapshotDir)` **恒真**——预填默认值与 yaml 值同为 `data/hestia-snapshots`，删掉 yaml 那行（M3，numstat 0/1）测试仍 PASS，守不住「显式写出」。\n\n**责任归属**：这条断言形态是 DoD（Leader 采纳 reviewer R-001 时）写进去的，dev 按字面落地；`rework_count` 的 +1 由写通道自动记，成因按「DoD 给了恒真的断言形态 + dev 未自行变异核实」两条并记进 discovery。\n\n**本轮判据（比原句强）**：`TestShippedConfigLoadsAndIsCalibrated` 里补一条对**原始 yaml 文本**的断言（验证者已在隔离副本实测：变异态转红、原状绿，只改 `config_test.go`）：\n\n```go\nrawYAML, err := os.ReadFile(\"../../configs/hestia.yaml\")\nrequire.NoError(t, err)\nassert.Contains(t, string(rawYAML), \"\\n  snapshot_dir: data/hestia-snapshots\\n\",\n\t\"yaml 必须显式写出该行：预填值与 yaml 值相同，只断言 cfg 字段分不出「显式写出」与「漏写靠预填」\")\n```\n\n等价做法：viper 直读 yaml 后断言 `v.IsSet(\"storage.snapshot_dir\")`，二选一。**验收判据是变异**：删掉 yaml 该行后该测试必须转红（在隔离副本上做，主工作区 `configs/hestia.yaml` sha256 前后一致）。同时把断言上方那段「有测试守着」的注释改成与新断言一致。返工提交仍锚 `<type>(TASK-001):`（可用 `fix(TASK-001): M1d …`），走完整交付流程（worktree → 通知我 merge → merge 后重采 → dev_done）。"
+    ],
+    "boundary": [
+      "显式空串 `snapshot_dir: \"\"` ⇒ `LoadConfig` 返回错误，`err.Error()` 含 `snapshot_dir`，且 `errors.Unwrap(err) != nil`（校验失败的错误必须包住底层 err）：`TestLoadConfigRejectsEmptySnapshotDir` 通过。校验加在 `validate()` 的 `switch` 里 `db_path` 那条**之后**：`case c.Storage.SnapshotDir == \"\": return errors.New(\"storage.snapshot_dir must not be empty\")`。不提供「关掉快照」的配置形态（spec §3.3）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：三条新测试在加字段之前必须以编译错误 `cfg.Storage.SnapshotDir undefined` 失败，把 `go test ./internal/hestia/ -run 'TestLoadConfig.*SnapshotDir' 2>&1 | head` 的那一行输出记进 discovery 的 `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/... -cover` **≥ 96.3%**（Leader 实测 96.3% 于锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`；零余量，报数时把测量时的 HEAD 全 sha 与数字同行写进 discovery）。\n\n**五个不动文件 diff 必须为空**：`git diff --stat 4916106 HEAD -- internal/hestia/store.go internal/hestia/validate.go internal/hestia/parse.go internal/hestia/extract.go internal/hestia/fields.go`。`Meta` 七字段不动（不碰 `types.go`）。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。注释里引用任务编号带 milestone 前缀：写 `M1d 的 TASK-00N`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-001-m1d ../wt-TASK-001-m1d master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec，信息锚定 **`feat(TASK-001): M1d …`**——🔴 需求文档写的 `feat(M1d TASK-001):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-001\\):`），照抄会被 BLOCKED（AD-3）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改五个不动文件、不得新增导出函数、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git log --oneline -1` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-001` 子命令）并 `task TASK-001 update --field discovery=.arcforge/discoveries/TASK-001.json`，再 `transition dev_done --expect-epoch <认领时的 epoch>`。\n7. 拆 worktree：`git worktree remove ../wt-TASK-001-m1d`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/config.go",
+    "./internal/hestia/config_test.go",
+    "./configs/hestia.yaml"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m1d-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "abebb76057c6fb847ac11fd632fdd28b3b316d47",
+    "discovery_sha256": "50e6f7de271208a1403698a6e5eafcead983bf6751af7858d189e6a29af22d50",
+    "at": "2026-09-03T03:27:22Z"
+  },
+  "reject_reason": "R-001 守卫恒真：预填默认值与仓库 yaml 值同为 data/hestia-snapshots，assert.Equal(cfg.Storage.SnapshotDir) 分不出「显式写出」与「漏写靠预填」；变异实测删掉 configs/hestia.yaml 的 snapshot_dir 行后 TestShippedConfigLoadsAndIsCalibrated 仍 PASS。其余 DoD 全部通过。修法见 docs/04-test/TASK-001-verification.md §4（对原始 yaml 文本断言，已实测变异态转红）。注：DoD 原文给的正是这条断言形态，dev 按字面落地，是否计 rework 由 Leader 裁决。",
+  "reason_class": "task_defect"
+}

@@ -13942,3 +13942,51 @@ TASK-002 当时还是 `pending`、`assigned_to` 为空 ⇒ leader 有写权。**
 > 保留的理由不是「删不掉」，是**它是 QA 那次 token 事故的实物记录，且已被清楚标注为「不是产物」**。
 
 ⚠️ **这条本身就是本 sprint 主题的又一例**：我在 final-report 里写下一个**没有实测过的机制断言**，而它读起来完全正常。**归档产物里的断言不会因为它进了归档就变真。**
+
+## 2026-09-03 · Sprint M1d · 三条机制观察（Leader）
+
+1. **dev_done 门禁把「开工前就存在的非任务未提交改动」判给每一个 dev**。门禁漂移口径 = 未提交 + 未跟踪 − 他人 scope − 自己 writes，唯一豁免 `.arcforge/`。本 sprint 开工时工作树有人类会话外的上游同步（2 文件），我看见了并决定「不动它」，没推到「它会挡门禁」。**处方（Leader 开工检查加一条）**：`git status --short | grep -v .arcforge` 必须为空，否则先作为 chore 提交或请人类处置，**再** spawn。上一 sprint `fe086ba` 是同一形态的先例——先例存在而我没查到，因为我查的是「协议」不是「事故」。
+2. **`npx gitnexus analyze` 会改写已跟踪文件**（CLAUDE.md/AGENTS.md/skills 目录迁移），PostToolUse hook 每次 master 前进都催跑它。本 sprint 内 Leader 不再跑；它造成的改动已单独 chore 提交（2f5ad51）。**处方**：hook 提示 ≠ 该做；改写已跟踪文件的工具只在人类拍板后跑。
+3. **teammate 派出的子代理继承 teammate 实例身份触发 `teammate-idle.sh` 保活**：两个 dev 的 code-simplifier 子代理各自被催 3～5 次「转 dev_done」，它们既无权也无 epoch，都正确拒绝并直接向 Leader 报告。两例独立发生 ⇒ 频次证据成立。不改 hook（运行时资产只读）；候选机制改动：hook 判身份时区分「本体」与「子代理」（上游 ArcForge 议题）。另 dev-m1d-c 报告「等 merge」阶段 idle hook 每十几秒唤醒一次要求转 dev_done，方向与 AD-6 相反——与 M1c-4 记录的 80 次/33 次同形，本 sprint 再次确认。
+
+## 2026-09-03 · Sprint M1d · 续（Leader）
+
+4. **我在 merge 通知里要求 dev「discovery 加两条成因」，而那条通知到达时 dev 已把 discovery 写完并转了 dev_done → verifying**（TASK-007 返工）。dev 正确拒绝：verifying 期间改 discovery = 判定对象漂移。这与 M1c-4「dev_done 之后的补充请求连续四次落空」逐字同形——**发出时刻不由到达时刻决定**，merge 通知与 dev_done 之间没有窗口保证。处方（沿 M1c-4，本 sprint 再次实证）：要进 discovery 的内容写进 **DoD**（重派时 DoD 可写），不写进 merge 通知；merge 通知只给 sha 与下一步。
+5. **三次退回的共同形态**（001 R-001 / 005「打印后发」/ 007 两行接线）：DoD 陈述了一个**性质**，测试只有**存在性**断言（值相等、函数被调、行加了），没有能区分「性质成立」与「性质不成立」的输入。验证者每次都用**删一行/挪一行**的变异抓到。⇒ 拆 DoD 时对每条「加 X」「X 在 Y 之后」「X 显式写出」的条目追问一句「删掉/挪走 X 后哪条测试会红」，答不上就把那个变异写成判据。dev-m1d-c 记的漏因也很准：伪索引页不含文章链接 ⇒ Ingest 在 no new reports 就返回 ⇒ 接线行在测试路径上**根本不被读到**——覆盖率报告不会告诉你「这一行被读到了但没被检验」。
+
+## 2026-09-04 · Sprint M1d · 事故 5：我的 Bash 语法错误让一次 merge 静默消失 4h47m（Leader）
+
+6. **`Bash` 整条命令因 shell 解析错误未执行，而我把它当成已执行**。23:37 我发出「预演 + 合入 TASK-002」的复合命令，里面把 `python3 - <<'PY' … PY` 嵌进了 `( … && … )` 子 shell 链，zsh 报 `parse error near '&&'`、**exit 1、一个字节都没跑**。我在同一轮里已经先发了 SendMessage 回执（「预演通过即合入」），于是**我的下一条消息与我的记忆都建立在「已经合了」之上**；此后 4 小时 47 分我一直在等 dev 的 `dev_done`，而 dev-m1d-e 在等我的 merge，发了 **13 条**催办、每条都附「master 仍 b47e440、d241978 NOT-MERGED」的内容判据，最后因 Fable 额度耗尽停机。
+   - **为什么没被任何机制发现**：Monitor 的 `BRANCH-AHEAD: task/TASK-002-m1d-fix(+1)` 每 10 分钟报一次，共报了 **28 次**——但它是**状态行**不是**告警**，与「dev 刚提交、还没请求 merge」的正常中间态**完全同形**；validator 的 `stale-dispatch` 刻意不含 `in_progress`；idle hook 只会催 dev「推进 dev_done」，方向相反。**三道机制同时在场，没有一道能区分「Leader 该动手了」与「Leader 正在等」。**
+   - **判别式**：这与事故 2/3（会话挂起）在 dev 侧**完全同形**——都是「Leader 沉默 + master 不动」。区别只在我这边：挂起时我没有产出，这次我有产出、只是产出建立在假前提上。**「我以为我做了」比「我没做」更难自查，因为它不留空白。**
+   - **处方（我自己的固定动作）**：① 任何 `git merge` / `git commit` 之后**必须在同一条命令里** `echo "rc=$?"` 并 `git rev-parse HEAD`，把新 sha 打出来再据它发消息——**消息里的 sha 必须来自刚打印的那一行，不能来自我打算做的事**；② 复合命令不嵌 heredoc，长文本走文件（`-F msgfile`）；③ 收到 dev 的**第二次**催办就立刻直读 `git rev-list --count master..<branch>`，不要用记忆回答「我合过了」。
+   - **给上游的机制建议**：Monitor 的分支状态行无法承担告警职责。真正能报的是**「dev 请求过 merge」与「分支已合入」之间的差**——需要一个 Leader 侧的待办队列（收到 merge 请求即入队，合入即出队，超阈值告警），或让 validator 增加一条 `unmerged-after-request` 规则（需要 dev 请求 merge 这个事件落盘，目前它只在 inbox 里）。
+7. **`git diff master..B` 会把 master 领先的改动显示成反向删除**（本次 d241978 相对 master 显示 8 文件，其中 6 个是 004/005/007 返工的反向）。判分支自身改动一律用**三点** `git diff master...B`，与 `merge-base` 对齐。这也是 test-m1d-b 两次更正我「004 改了 ingest.go」的同一根因——那组数字是两点差分的产物。
+
+8. **AD-21 改派会让 `dev_done` 门禁的范围漂移判定看到空集**（dev-m1d-f 主动申报，Leader 核实成立）。
+   门禁的「本轮已提交改动」以**新 owner 认领的时刻**为下界（`--since="$WORK_SINCE"`），而改派场景下
+   **代码是在改派之前由前一位 dev 提交的**（本次：返工提交 15:37Z，新 owner 认领 20:34Z）⇒ 该提交被判为
+   「早于本轮开工」、不参与漂移判定 ⇒ **漂移检查这一轮看到的是空集**。
+   - **不是缺陷**：机制上归类正确（它防的是「拿上一轮的旧产物冒充本轮」）；覆盖率与包测试那部分证据仍然有效。
+   - **但要知道它的射程**：接手型任务（AD-21 改派、记录员代理模式）里，**越界检查实际上没有跑**。
+     补偿办法：新 owner 在 master 上独立重采并把「fix commit 的 numstat 恰等于 `writes` 声明」写进 discovery
+     （dev-m1d-f 这次做了：拓扑 `merge-base --is-ancestor` + 内容 `sha256` 两把尺，并申报了这条 WARN）。
+   - **给上游的建议**：`task-completed.sh` 的 `WORK_SINCE` 在任务存在 `rework`/改派历史时，
+     下界应取「本任务上一次 `verified` 之后」而非「当前 owner 认领之后」；或至少把「本轮漂移集为空」
+     从静默变成一条显式 WARN（现在只有 dev 自己去读门禁输出才会发现）。
+9. **本 sprint 的实例损耗账**：原班 4 个 teammate（dev-a/b/c、test-a）在 20:37 同时撞账号会话上限，
+   22:38–23:05 连续 529，23:21 改派 3 个新实例（Fable）；其中 2 个在 5 小时内又因 **Fable 额度耗尽**停机，
+   04:33 / 05:02 再改派 2 个（Opus）。**共 6 次改派、9 个实例、代码零重写**——每次改派都走 AD-21 逃生边，
+   provenance 逐层记进 discovery（「谁写的 / 谁核实的 / 谁只做推进」）。
+   ⇒ **多 agent 流程的真实瓶颈不是协议而是配额**：协议（epoch、writes、provenance、逃生边）全程守住了，
+   代价是 Leader 侧的调度开销与 6 次上下文重建。
+
+10. **我给验证者的「三点 diff」命令在分支已合入后恒返回空**（test-m1d-c 更正）。
+    `git diff master...<branch>` 的 `...` 取 `merge-base(master, branch)` 作左端——分支一旦被合入 master，
+    merge-base **就等于分支尖本身**，三点 diff 自然为空。
+    - 我的告诫本身没错（未合入时两点 `master..<branch>` 会把 master 领先的他人改动显示成反向删除，
+      本 sprint 因此误报过一次「某任务改了 ingest.go」，被验证者两次更正）；
+    - **但它有适用窗口**：`master...<branch>` 只在**分支未合入**时成立；**合入之后**判「该分支自身改了什么」
+      要用 `git show --numstat <fix-commit>` 或 `git diff --numstat <父> <fix-commit>`。
+    - ⇒ **给下游的命令要连同它的适用条件一起给**。我把一条「在 A 状态下正确」的命令发给了处在 B 状态的人，
+      而它在 B 状态下**不报错、只是恒返回空**——又一个「静默给出像样答案」的仪器。

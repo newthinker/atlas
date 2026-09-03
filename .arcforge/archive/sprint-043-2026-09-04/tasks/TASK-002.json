@@ -1,0 +1,69 @@
+{
+  "id": "TASK-002",
+  "title": "saveSnapshot：同字节跳过、改稿另存不覆盖、临时文件 rename",
+  "description": "对应需求文档 **TASK-002**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-002」节，Step 1–5）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n新建 `internal/hestia/snapshot.go` 与 `snapshot_test.go`。接口：`type snapshotKind string`（`snapshotWritten|snapshotUnchanged|snapshotDiverged`）、`type snapshotResult struct{ Path string; Kind snapshotKind }`、`func saveSnapshot(dir, articleID string, raw []byte, now time.Time) (snapshotResult, error)`、`func writeAtomic(path string, data []byte) error`。**全部非导出**。",
+  "module": "hestia",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/hestia/snapshot.go",
+    "internal/hestia/snapshot_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "首次落盘：路径固定 `filepath.Join(dir, articleID+\".html\")`，返回 `Kind == snapshotWritten`，文件内容与 `raw` 逐字节相同：`TestSaveSnapshotWritesNewFile`。",
+      "目录不存在时 `os.MkdirAll(dir, 0o755)` 自行创建（与 `NewStore` 同约定）：`TestSaveSnapshotCreatesDir`。",
+      "同 id 同字节 ⇒ `snapshotUnchanged`，返回原 path，**不重写、mtime 不变**（先 `os.Chtimes` 成 2020-01-01 再重跑，`ModTime().Equal(old)`）：`TestSaveSnapshotUnchangedKeepsMtime`。判等用 `bytes.Equal`（不用 sha256，理由写进注释：语义相同、少一处能算错的地方）。"
+    ],
+    "boundary": [
+      "同 id 不同字节 ⇒ `snapshotDiverged`，**不覆盖**，另存 `filepath.Join(dir, articleID+\".\"+now.UTC().Format(\"20060102T150405Z\")+\".html\")`；第一版原样、第二版在新文件。用固定 `snapNow = 2026-09-04T08:30:15Z` 断言文件名恰为 `a1.20260904T083015Z.html`：`TestSaveSnapshotDivergedKeepsBothVersions`。"
+    ],
+    "error_handling": [
+      "`dir` 路径上是普通文件 ⇒ 返回 error（`MkdirAll` 失败被 `fmt.Errorf(\"snapshot dir %s: %w\")` 包住），不静默跳过：`TestSaveSnapshotFailsLoudlyWhenDirUnusable`。读既有文件出错且非 `os.ErrNotExist` ⇒ 返回 `snapshot read %s: %w`。写盘经 `<path>.tmp` + `os.Rename`；rename 失败时 `os.Remove(tmp)` 后返回 `snapshot rename %s: %w`。\n\n**reviewer 补（R-002）**：`writeAtomic` 的 `WriteFile` 失败分支必须有测试触发——用已存在目录 `chmod 0o555` 后写（`os.Geteuid()==0` 时 `t.Skip`），断言返回 error 含 `snapshot write`。理由：`internal/hestia` 覆盖率 96.3% 与门槛零余量，未覆盖的错误分支足以把它压到 96.2%。`Rename` 失败与 `snapshot read` 默认分支难以可移植地触发，允许不测，但要在 discovery 里说明。"
+    ],
+    "non_functional": [
+      "`TestPackageExposesNoWriteFunctions`（只数导出函数/方法）与 `TestFieldNamesAppearOnlyInFieldsGo` **保持绿且不改断言**——本文件两个函数都非导出、不含业务字段名字面量。TDD 红阶段：五条测试先以 `undefined: saveSnapshot` 失败，输出记进 discovery。",
+      "**门禁（每任务必过）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/... -cover` **≥ 96.3%**（Leader 实测 96.3% 于锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`；零余量，报数时把测量时的 HEAD 全 sha 与数字同行写进 discovery）。\n\n**五个不动文件 diff 必须为空**：`git diff --stat 4916106 HEAD -- internal/hestia/store.go internal/hestia/validate.go internal/hestia/parse.go internal/hestia/extract.go internal/hestia/fields.go`。`Meta` 七字段不动（不碰 `types.go`）。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。注释里引用任务编号带 milestone 前缀：写 `M1d 的 TASK-00N`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-002-m1d ../wt-TASK-002-m1d master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec，信息锚定 **`feat(TASK-002): M1d …`**——🔴 需求文档写的 `feat(M1d TASK-002):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-002\\):`），照抄会被 BLOCKED（AD-3）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改五个不动文件、不得新增导出函数、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git log --oneline -1` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-002` 子命令）并 `task TASK-002 update --field discovery=.arcforge/discoveries/TASK-002.json`，再 `transition dev_done --expect-epoch <认领时的 epoch>`。\n7. 拆 worktree：`git worktree remove ../wt-TASK-002-m1d`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-f",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/snapshot.go",
+    "./internal/hestia/snapshot_test.go"
+  ],
+  "assignment_epoch": 3,
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "TASK-002 已 merge 进 master 6a126d9c82cfed5d1eebf8b0c7da8c9013141ce3，master 重采全绿（覆盖率 2405/2495=96.39%），discovery 已落盘并挂指针；但 transition dev_done 被门禁 BLOCKED：21 个越界文件全是会话外的未提交改动，不属于任何任务——(a) 02:58:51Z gitnexus 重生成：CLAUDE.md、AGENTS.md、.claude/skills/gitnexus/*（6 个删除）、.claude/skills/gitnexus-*/ 与 .agents/skills/gitnexus-*/（12 个 untracked）；(b) 01:47Z 运行时同步：.claude/hooks/arcforge-write.sh。门禁口径是「整个工作树未提交改动 − 他人在途 writes − 我的 writes」，这些文件无人认领，会阻断每个 dev 的 dev_done（TASK-001 同样会撞上）。我不能撤回（不是我的改动、.claude/ 对我只读）也不能补进 writes（谎报）。请 Leader/人类二选一：① 把这 21 个文件作为 chore 提交进 master（已提交且主题不含 TASK-002 的改动对门禁不可见）；② 在会话外还原它们。处置完请答复，我自己转回 in_progress 并重试 dev_done。",
+      "asked_at": "2026-09-03T03:12:00Z",
+      "answer": "已处置（Leader，2026-09-03 11:2x）：越界成因是主仓库工作树的两批非任务改动——① 我跑 npx gitnexus analyze 再生的 CLAUDE/AGENTS/skills；② 开工前就在工作树的上游 PR #6 运行时同步（arcforge-write.sh + CLAUDE.md Arcforge 段）。两批已分别提交为 688c24c（chore(arcforge)）与 2f5ad51（chore(gitnexus)），均不含 Go 代码；git status 除 .arcforge/ 外已空。不要把它们补进 writes。请自己转回 in_progress 后直接重试 transition dev_done --expect-epoch 1；master 现为 2f5ad513f7c0e7539c824e2e8f8a0f078baec316，你的自证数字在 6a126d9/69cb71d 上采的仍然有效（两个 chore 未动任何 .go/yaml/plist），discovery 里注明一句即可。"
+    }
+  ],
+  "verifier": "test-m1d-c",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "290370feaa7e69b1eb533ca3c0a0683000853de4",
+    "discovery_sha256": "1d2d8e3c8ce6197092c378814103173d8ef74745e9583308c424569a6891876a",
+    "at": "2026-09-03T20:38:47Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    "A3：saveSnapshot 在 <id>.html 字节不同后，再与已有的 <id>.*.html（时间戳副本）逐个 bytes.Equal，任一命中即返回 snapshotUnchanged（Path 指向命中的副本）——否则改稿后每次重抓（--force 或 Parse 失败次日重抓）都再落一份相同字节的时间戳副本并打 diverged（QA 实测 v1/v2/v2/v2 ⇒ written/diverged/diverged/diverged，4 文件）。补三次调用测试：v1/v2/v2 ⇒ written/diverged/unchanged 且目录恰 2 文件。",
+    "A8：TestSaveSnapshotDivergedKeepsBothVersions 改传非 UTC 时区的 now（如 time.FixedZone），断言文件名仍为 …T083015Z（钉住 now.UTC()）。",
+    "非功能：只改 snapshot.go / snapshot_test.go；全包 -count=1 绿；internal/hestia 覆盖率 ≥ 96.3%；提交锚 fix(TASK-002): M1d …；走完整交付流程（worktree → 通知 Leader merge → merge 后重采 → dev_done 带新 epoch）。"
+  ]
+}

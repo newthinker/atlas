@@ -1,0 +1,155 @@
+{
+  "task_id": "TASK-002",
+  "title": "saveSnapshot：同字节跳过、改稿另存不覆盖、临时文件 rename",
+  "commit": "84c056bcaa5ee8b0696666917dd3bf684ba603f3",
+  "branch": "task/TASK-002-m1d",
+  "base": "ae088eb253b64b36e10558a02587e3fa657f5f3e",
+  "master_after_merge": "6a126d9c82cfed5d1eebf8b0c7da8c9013141ce3",
+  "key_findings": [
+    "覆盖率零余量在本任务上**真的兑现了**：master 基线 2358/2448=96.32%（锚 ae088eb253b64b36e10558a02587e3fa657f5f3e）；只补需求原文 5 条 + R-002 只读目录用例时 2376/2470=96.19%（go test 打 96.2%，跌破门槛）——未覆盖的正是 DoD 允许不测的 `snapshot read` 默认分支（1 语句）、rename 失败（2 语句）与 diverged 路径的 writeAtomic 失败（1 语句）。R-002 的判断方向正确，但只补 WriteFile 一条不够。",
+    "DoD 说「`Rename` 失败与 `snapshot read` 默认分支难以可移植地触发」——**实测两者都能可移植触发，无需 root、无需平台特判**：(a) `os.ReadFile` 撞到目录返回 EISDIR，`errors.Is(err, os.ErrNotExist)` 为 false ⇒ 走 `snapshot read` 分支；(b) `os.Rename(文件, 已存在目录)` POSIX 规定 EISDIR（macOS/Linux 同），Go 在 Windows 上同样报错。故三条错误分支全部有测试，snapshot.go 两函数 100% 覆盖，「允许不测」的豁免没有用到。",
+    "diverged 路径的 writeAtomic 失败并入 R-002 的只读目录测试：先在可写目录落一版 a1.html，再 chmod 0o555，同一测试里分别断言「新 id 首次落盘」与「同 id 改稿另存」都返回含 `snapshot write` 的错误。这条不在 DoD 与 reviewer 清单里，是覆盖率详情（`go tool cover -func`）暴露的。",
+    "TDD 红阶段实际输出（worktree @ ae088eb，只有 snapshot_test.go 时）：\n# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/snapshot_test.go:30:14: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:32:18: undefined: snapshotWritten\ninternal/hestia/snapshot_test.go:43:12: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:53:16: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:59:14: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:61:18: undefined: snapshotUnchanged\ninternal/hestia/snapshot_test.go:74:16: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:77:14: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:79:18: undefined: snapshotDiverged\ninternal/hestia/snapshot_test.go:96:12: undefined: saveSnapshot\ninternal/hestia/snapshot_test.go:96:12: too many errors",
+    "首次 transition dev_done 被门禁 BLOCKED：21 个「越界」全是主仓库工作树的会话外未提交改动（gitnexus 索引再生的 CLAUDE.md/AGENTS.md/skill 目录搬迁，与 sprint 开工前的 arcforge-write.sh 运行时同步），门禁口径「工作树全部未提交改动 − 他人在途 writes − 我的 writes」下无人认领 ⇒ 每个 dev 都会被挡。走澄清环，Leader 分别提交为 688c24c（chore(arcforge)）与 2f5ad51（chore(gitnexus)），均不含 Go 代码；`git diff --stat 6a126d9 2f5ad51 -- '*.go' go.mod go.sum` 为空，故 6a126d9 上采的全部数字对 master 2f5ad513f7c0e7539c824e2e8f8a0f078baec316 仍然有效。"
+  ],
+  "decisions": [
+    {
+      "decision": "代码按需求原文实现，code-simplifier 把 saveSnapshot 的 switch 摊平为四个 case（ErrNotExist → 写入 / err!=nil → snapshot read / bytes.Equal → unchanged / default → diverged），已并入同一提交",
+      "rationale": "DoD 要求提交前跑 code-simplifier 并把改动并进提交（AD-5）。摊平后语义与原文逐分支等价（三条错误文本、文件命名、mtime 行为不变，8 条测试全绿），少一层嵌套、少 1 条语句（2470→2469）。与需求原文的**形态**有偏离，但需求「以原文为准」约束的是行为与接口，不是 switch 的写法。"
+    },
+    {
+      "decision": "补两条 DoD 允许不测的错误分支测试（TestSaveSnapshotFailsWhenExistingPathIsDir、TestWriteAtomicRenameFailureRemovesTmp），并把 diverged 写失败并入只读目录用例",
+      "rationale": "不补则覆盖率 96.19% 过不了 ≥96.3% 门禁；且两者均可移植触发（见 key_findings），豁免的前提「难以可移植地触发」不成立。rename 用例同时断言 `<path>.tmp` 已被清掉——那是 writeAtomic 里 `os.Remove(tmp)` 唯一能被守住的地方。"
+    },
+    {
+      "decision": "判等用 bytes.Equal 不用 sha256（照原文）",
+      "rationale": "语义相同、少一处能算错的地方；理由已写进 saveSnapshot 注释。"
+    },
+    {
+      "decision": "这三条补的测试在 GREEN 之后加入、首跑即绿（钉住既有错误分支行为，不是先红后绿）",
+      "rationale": "它们由覆盖率详情驱动而非新行为驱动；红阶段证据是原文 5 条的 `undefined: saveSnapshot`。如实记录，避免 discovery 把「首跑即绿」伪装成 TDD 红绿。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/snapshot.go",
+      "numstat": "77+/0-",
+      "what": "新建：snapshotKind 三态常量、snapshotResult、saveSnapshot、writeAtomic，全部非导出"
+    },
+    {
+      "path": "internal/hestia/snapshot_test.go",
+      "numstat": "146+/0-",
+      "what": "新建：8 条测试 + 头部 done_criteria→test 映射注释"
+    }
+  ],
+  "interfaces_exposed": [
+    "包内（非导出）：`saveSnapshot(dir, articleID string, raw []byte, now time.Time) (snapshotResult, error)`；`snapshotResult{Path string; Kind snapshotKind}`；`snapshotWritten|snapshotUnchanged|snapshotDiverged`；`writeAtomic(path string, data []byte) error`。给 TASK-003（ingest 接快照）直接调用。",
+    "无新增导出符号 ⇒ TestPackageExposesNoWriteFunctions 的 22 项清单不变；文件不含业务字段名字面量 ⇒ TestFieldNamesAppearOnlyInFieldsGo 不受影响。",
+    "错误文本前缀（调用方可据以分类）：`snapshot dir` / `snapshot read` / `snapshot write` / `snapshot rename`，均以 %w 包住底层 error。"
+  ],
+  "verification": {
+    "done_criteria_to_tests": {
+      "functional[0]": "TestSaveSnapshotWritesNewFile",
+      "functional[1]": "TestSaveSnapshotCreatesDir",
+      "functional[2]": "TestSaveSnapshotUnchangedKeepsMtime",
+      "boundary[0]": "TestSaveSnapshotDivergedKeepsBothVersions",
+      "error_handling[0] dir 是普通文件": "TestSaveSnapshotFailsLoudlyWhenDirUnusable",
+      "error_handling[0] R-002 WriteFile 失败": "TestSaveSnapshotFailsWhenDirReadOnly（首次落盘 + 改稿另存两路）",
+      "error_handling[0] snapshot read 默认分支": "TestSaveSnapshotFailsWhenExistingPathIsDir",
+      "error_handling[0] rename 失败": "TestWriteAtomicRenameFailureRemovesTmp",
+      "non_functional[0] 守卫不动": "TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo 保持绿，断言未改"
+    },
+    "worktree_at_commit": {
+      "head": "84c056bcaa5ee8b0696666917dd3bf684ba603f3",
+      "coverage": "2379/2469 statements = 96.35%（`go test -cover` 打 96.4%）",
+      "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿",
+      "gofmt": "gofmt -l internal/hestia cmd/atlas 只列 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go",
+      "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+      "frozen_files": "git diff --stat 4916106 HEAD -- store.go validate.go parse.go extract.go fields.go 为空",
+      "deps": "go.mod / go.sum 不在改动里（git show --stat 只有 2 个新文件）"
+    },
+    "master_after_merge": {
+      "head": "6a126d9c82cfed5d1eebf8b0c7da8c9013141ce3",
+      "coverage": "2405/2495 statements = 96.39%（`go test -cover` 打 96.4%）；含 TASK-001 与 TASK-004 先行合入的代码",
+      "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 全绿",
+      "gofmt": "gofmt -l internal/hestia cmd/atlas 只列 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go",
+      "vet": "go vet ./internal/hestia/... ./cmd/... 零输出（rc=0）",
+      "frozen_files": "git diff --stat 4916106 HEAD -- store.go validate.go parse.go extract.go fields.go 为空；go.mod/go.sum 相对 ae088eb 无 diff；snapshot.go / snapshot_test.go 的 sha256 与 84c056b 中逐字节相同"
+    },
+    "measured_after_last_change": "是：worktree 数字在 84c056b 提交之后重采；master 数字在 merge 之后、写本文件之前重采",
+    "master_at_dev_done": "2f5ad513f7c0e7539c824e2e8f8a0f078baec316（与 6a126d9 之间只有两个非 Go 的 chore 提交，数字沿用）"
+  },
+  "provenance": "实现、测试、全部实测由 dev-m1d-b 完成。snapshot.go 的 switch 摊平由 code-simplifier 子代理改写，dev-m1d-b 逐行核对并重跑全部门禁后并入。需求原文（hestia 仓库 2026-09-03-hestia-m1d-cutover.md ## TASK-002）提供了 5 条测试与实现的原始文本。",
+  "rework": [
+    {
+      "round": 1,
+      "trigger": "QA review_fix（fix_items 见下），rework_count=1",
+      "fix_commit": "d24197853f995538dfa8abe2a1433b4b6c5bc99e",
+      "fix_commit_subject": "fix(TASK-002): M1d QA 返工——时间戳副本查重 + 非 UTC 时区断言",
+      "fix_branch": "task/TASK-002-m1d-fix",
+      "merge_commit": "290370feaa7e69b1eb533ca3c0a0683000853de4",
+      "merge_parents": "b47e440（master）+ d241978（fix 分支）",
+      "assignment_epoch": 3,
+      "provenance": "代码（snapshot.go 的 findSnapshotCopy + 副本查重分支、snapshot_test.go 的三条新测试与 A8 时区改写）由 dev-m1d-b 编写，停机前未提交；dev-m1d-e 逐条核实 fix_items、跑 gofmt/vet/go test -count=1 -cover 与两条变异（去副本查重 / 去 .UTC() 各自致对应测试红）后原样提交为 d241978；Leader 合入 master（290370f）后两人先后因账号额度耗尽停机，按 AD-21 改派 dev-m1d-f（assignment_epoch 3）。dev-m1d-f 未写一行代码，只在 master 上重采、核实与推进状态机。",
+      "files_modified": [
+        {
+          "path": "internal/hestia/snapshot.go",
+          "numstat": "30+/0-",
+          "what": "saveSnapshot 的 default（字节不同）分支先调 findSnapshotCopy 查时间戳副本，命中即返回 snapshotUnchanged 且 Path 指向该副本；新增 findSnapshotCopy（Glob/ReadFile 失败响亮返回 snapshot glob / snapshot read）"
+        },
+        {
+          "path": "internal/hestia/snapshot_test.go",
+          "numstat": "54+/1-",
+          "what": "新增 TestSaveSnapshotDivergedTwiceIsUnchanged / TestSaveSnapshotFailsOnUnglobbableID / TestSaveSnapshotFailsWhenCopyIsDir；TestSaveSnapshotDivergedKeepsBothVersions 改传东八区 now；头部补三行 review_fix→test 映射注释"
+        }
+      ],
+      "fix_items_to_tests": {
+        "A3 改稿后重抓同字节 ⇒ 命中副本 ⇒ Unchanged，目录恰 2 文件": "TestSaveSnapshotDivergedTwiceIsUnchanged（v1/v2/v2 ⇒ written/diverged/unchanged，r3.Path==r2.Path，os.ReadDir 长度 2）",
+        "A3 副本查重的错误路径（Glob 元字符 / 副本是目录）": "TestSaveSnapshotFailsOnUnglobbableID（err 含 snapshot glob）/ TestSaveSnapshotFailsWhenCopyIsDir（err 含 snapshot read）",
+        "A8 now 传非 UTC 时区，文件名仍钉 now.UTC()": "TestSaveSnapshotDivergedKeepsBothVersions（now.In(time.FixedZone(\"CST\", 8*3600))，断言路径为 a1.20260904T083015Z.html）",
+        "非功能：只改 snapshot.go / snapshot_test.go": "git show --numstat d241978 恰为这两个文件，与 writes 声明一致，无越界",
+        "非功能：全包 -count=1 绿、覆盖率 ≥ 96.3%": "见 master_resample",
+        "非功能：提交锚 fix(TASK-002): M1d …": "d241978 的 subject 逐字符合约定"
+      },
+      "master_resample": {
+        "anchor_head": "290370feaa7e69b1eb533ca3c0a0683000853de4",
+        "branch": "master",
+        "sampled_by": "dev-m1d-f",
+        "sampled_at_utc": "2026-09-04",
+        "measured_after_last_change": "是：master HEAD 自 merge 后未再前进，全部数字在同一棵树（290370f）上采；本轮无代码改动",
+        "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 -cover ⇒ 两包均 ok，rc=0",
+        "coverage": "internal/hestia 96.5%、cmd/atlas 76.3%（96.5% ≥ 门槛 96.3%）",
+        "coverage_by_func": "go tool cover -func：snapshot.go 三函数 saveSnapshot / findSnapshotCopy / writeAtomic 均 100.0%",
+        "named_tests": "go test -run 'TestSaveSnapshot|TestWriteAtomic' -v ⇒ 11 条全 PASS（含返工新增 3 条）",
+        "gofmt": "gofmt -l internal/hestia cmd/atlas ⇒ 仅 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，非本任务引入）",
+        "vet": "go vet ./internal/hestia/... ./cmd/... ⇒ 零输出，rc=0",
+        "frozen_files": "git diff --numstat 4916106 HEAD -- internal/hestia/{store,validate,parse,extract,fields}.go ⇒ 0 行输出（五个不动文件未被触碰）",
+        "deps": "git diff --numstat ae088eb HEAD -- go.mod go.sum ⇒ 0 行输出",
+        "content_check": "grep -c 'func findSnapshotCopy' internal/hestia/snapshot.go ⇒ 1；且 d241978 与 HEAD 上 snapshot.go / snapshot_test.go 的 sha256 逐字节相同（1df97426f3cb… / a7d450cada7e…），拓扑上 merge-base --is-ancestor d241978 HEAD 亦为真——拓扑与内容两个判据一致，返工代码确在 master"
+      },
+      "decisions": [
+        {
+          "decision": "A3 的查重放在 default 分支内（先比 <id>.html，不同才 Glob 副本），不改前三个 case",
+          "rationale": "Glob+ReadFile 只在改稿路径付出代价；常见的「首次落盘」与「同字节跳过」两条路径一次多余 IO 都不做。语义上也只有字节不同时才存在「是不是某个旧副本」的问题。"
+        },
+        {
+          "decision": "命中副本时返回 snapshotUnchanged 且 Path 指向命中的那份副本，而不是 <id>.html",
+          "rationale": "Kind 回答「这次要不要落盘」，Path 回答「这份字节现在在哪」。指向 <id>.html 会撒谎——那份是旧版。测试用 r3.Path==r2.Path 钉住。"
+        },
+        {
+          "decision": "findSnapshotCopy 的 Glob 与 ReadFile 失败一律响亮返回，不降级为「没有副本」",
+          "rationale": "降级会让 articleID 含元字符或副本损坏时静默多落一份 diverged，正是本次返工要消除的形态。两条错误路径各有测试。"
+        },
+        {
+          "decision": "dev-m1d-f 接手后不重写代码，只重采与核实",
+          "rationale": "返工代码已由 dev-m1d-b 编写、dev-m1d-e 逐条核实并变异验证、Leader 合入 master；三条 fix_items 在 master 上逐条可验且全绿。重写会用自己的产出替换掉已被核实的工作，且丢失 dev-m1d-e 的变异证据。files_modified 记的是 d241978 的实际改动，本人改动为空。"
+        }
+      ],
+      "fix_items": [
+        "A3：saveSnapshot 在 <id>.html 字节不同后，再与已有的 <id>.*.html（时间戳副本）逐个 bytes.Equal，任一命中即返回 snapshotUnchanged（Path 指向命中的副本）——否则改稿后每次重抓（--force 或 Parse 失败次日重抓）都再落一份相同字节的时间戳副本并打 diverged（QA 实测 v1/v2/v2/v2 ⇒ written/diverged/diverged/diverged，4 文件）。补三次调用测试：v1/v2/v2 ⇒ written/diverged/unchanged 且目录恰 2 文件。",
+        "A8：TestSaveSnapshotDivergedKeepsBothVersions 改传非 UTC 时区的 now（如 time.FixedZone），断言文件名仍为 …T083015Z（钉住 now.UTC()）。",
+        "非功能：只改 snapshot.go / snapshot_test.go；全包 -count=1 绿；internal/hestia 覆盖率 ≥ 96.3%；提交锚 fix(TASK-002): M1d …；走完整交付流程（worktree → 通知 Leader merge → merge 后重采 → dev_done 带新 epoch）。"
+      ]
+    }
+  ]
+}

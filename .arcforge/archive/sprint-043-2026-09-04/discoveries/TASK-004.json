@@ -1,0 +1,113 @@
+{
+  "task_id": "TASK-004",
+  "title": "Sender 窄接口与 P0/P1/P2 三类消息渲染（纯函数）",
+  "owner": "dev-m1d-c",
+  "provenance": "代码由 dev-m1d-c 按需求文档「## TASK-004」原文实现；code-simplifier 已跑、无改动（按文件内容比对）。",
+  "key_findings": [
+    "需求原文的 renderP0 已处理 Check.Value == nil（val := \"n/a\"; if c.Value != nil），本 DoD 只补测试 TestRenderP0NilValueIsNA，实现行为不变。",
+    "anchorFlow 先查 ytd 再查 mom，天然满足 R-004「ytd 与 mom 同在取 ytd」；补 TestRenderP2PrefersYtdWhenBothPresent 钉住这个顺序（若有人把两条 if 调换，该用例转红）。",
+    "另补 TestRenderP2BothFlowsAbsent 钉「两者都缺 ⇒ `人民币存款 n/a 亿元 (-)`」——原文测试没有覆盖 caliber `-` 这条分支。",
+    "TDD RED 首条输出：`internal/hestia/notify_test.go:44:9: undefined: renderP0`（随后 renderP1/renderP2 各一条）。",
+    "两个守卫 TestFieldNamesAppearOnlyInFieldsGo / TestPackageExposesNoWriteFunctions 在新文件加入后仍绿且断言未改：notify.go 只用 Field* 常量取锚；Sender 是接口类型不在导出面守卫射程内，六个函数全部非导出。",
+    "gitnexus MCP 工具在本实例不可用（CLAUDE.md 要求的 gitnexus_impact / gitnexus_detect_changes 未执行）；本任务只新增文件、不改任何既有符号，影响面为空，风险由「五个不动文件 diff 空 + 导出面守卫绿」代替证明。"
+  ],
+  "decisions": [
+    {
+      "decision": "提交锚用 `feat(TASK-004): M1d …`，不用需求文档的 `feat(M1d TASK-004):`",
+      "rationale": "AD-3：task-completed.sh 的 grep 只认 `^[a-z]+\\(TASK-004\\):`，照抄原文会被 BLOCKED。"
+    },
+    {
+      "decision": "R-004 用独立用例 TestRenderP2PrefersYtdWhenBothPresent，不塞进 TestRenderP2CarriesVerdictAndAnchors",
+      "rationale": "notifyObs() 是五个用例共用的夹具；在共用夹具里加 mom 会改变其它用例的输入。独立用例只改自己那份副本。"
+    },
+    {
+      "decision": "TestRenderP2CarriesVerdictAndAnchors 额外断言 NotContains `1.776e+05`、Contains article 与发布日",
+      "rationale": "DoD boundary[0] 明写 177600 不得打成 1.776e+05，functional[2] 明写含 article 与发布日；原文测试只断言正向 Contains 177600，加一条反向断言把 %g 这个错误路径钉死。"
+    },
+    {
+      "decision": "实现与需求原文逐字一致，未做「改进」",
+      "rationale": "DoD 写明「以原文为准」；原文已满足全部 DoD（含两条补充边界），不为改而改。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/notify.go",
+    "internal/hestia/notify_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Sender interface{ SendText(text string) error }（导出，供 M1d 的 TASK-005 ingest 接通知、TASK-007 cmd 层 buildHestiaSender 构造；telegram.Telegram.SendText 直接满足）",
+    "renderP0(obs Observation, rep ValidationReport) string / renderP1(c Candidate, err error) string / renderP2(obs Observation, out Outcome) string（非导出，包内 TASK-005 调用）",
+    "消息格式：首行 `[P0] hestia <period>/<period_type> 校验未过，已落 pending_review`、`[P1] hestia <period>/<period_type> 处理失败 (article <id>)`、`[P2] hestia <period>/<period_type> 入库 <Verdict> · extractor <x>`；P2 第二行 `M2 %s 万亿 · M1 %s 万亿 · 社融存量 %s 万亿 · 人民币存款 %s 亿元 (<ytd|mom|->)`，第三行 `article <id> · 发布 <PublishedAt>`；P0 每条失败闸 `- <ID>: 实测 <Value|n/a> · <Reason>`，末行 `article <id> · extractor <x>`。"
+  ],
+  "verification": {
+    "my_commit": "f8e3c8e68dc97e728d3a65adbc57966d1bf2c1e3",
+    "master_after_merge": "69cb71d76dc16a1726d431cc328a74ac316bbcc4",
+    "tdd_red_first_line": "internal/hestia/notify_test.go:44:9: undefined: renderP0",
+    "worktree_sample": {
+      "anchor": "ae088eb253b64b36e10558a02587e3fa657f5f3e + f8e3c8e 内容",
+      "coverage_internal_hestia": "96.4%",
+      "gofmt_l": "cmd/atlas/backtest_test.go, cmd/atlas/crisis_test.go（既有两项，无新增）",
+      "go_vet": "零输出",
+      "go_test": "internal/hestia ok, cmd/atlas ok（-count=1）",
+      "frozen_five_diff": "空（git diff --stat 4916106 HEAD -- store.go validate.go parse.go extract.go fields.go）"
+    },
+    "master_sample": {
+      "anchor": "69cb71d76dc16a1726d431cc328a74ac316bbcc4（merge 后 master，主仓库；code dirs git status 干净）",
+      "content_check": "git show master:internal/hestia/notify.go sha256 e80787e0f064afee… / notify_test.go 732938b2c9953fb8… 与我的 commit 逐字一致",
+      "coverage_internal_hestia": "96.4%（门槛 96.3%）",
+      "gofmt_l": "cmd/atlas/backtest_test.go, cmd/atlas/crisis_test.go（既有两项，无新增）",
+      "go_vet": "零输出（./internal/hestia/... ./cmd/...）",
+      "go_test": "internal/hestia ok, cmd/atlas ok（-count=1）",
+      "frozen_five_diff": "空（git diff --stat 4916106 69cb71d -- store.go validate.go parse.go extract.go fields.go）",
+      "go_mod_sum_diff": "空（ae088eb..69cb71d）"
+    },
+    "dod_to_test": {
+      "functional[0]": "TestRenderP0ListsOnlyFailedChecks",
+      "functional[1]": "TestRenderP1KeepsFirstLineOnly",
+      "functional[2]": "TestRenderP2CarriesVerdictAndAnchors",
+      "boundary[0]": "TestRenderP2MissingAnchorIsNA, TestRenderP2UsesMomWhenYtdAbsent, TestRenderP2BothFlowsAbsent, TestRenderP2PrefersYtdWhenBothPresent(R-004)",
+      "error_handling[0]": "TestRenderP0NilValueIsNA",
+      "non_functional[0]": "TestFieldNamesAppearOnlyInFieldsGo, TestPackageExposesNoWriteFunctions（断言未改）"
+    },
+    "code_simplifier": "已跑，无改动（sha256 notify.go e80787e0f064…, notify_test.go 732938b2c995…）",
+    "out_of_scope_writes": "无（仅 writes 声明的两个文件）",
+    "merge_chain": "ae088eb → f8e3c8e（我的 commit）→ 69cb71d（team-lead merge commit）",
+    "dev_done_gate_note": "首次 transition dev_done（03:09Z）被门禁 DENY：主仓库工作树有两批非本任务的未提交改动（gitnexus 索引再生的 CLAUDE/AGENTS/skills；上游 PR #6 运行时同步）被判越界。走澄清环，Leader 选 A：分别提交为 688c24c（chore(arcforge)）与 2f5ad51（chore(gitnexus)），均不含 Go 代码。",
+    "master_resample_2f5ad51": {
+      "anchor": "2f5ad513f7c0e7539c824e2e8f8a0f078baec316（master，重试 dev_done 前；期间另合入 TASK-002 的 Go 代码）",
+      "coverage_internal_hestia": "96.4%",
+      "go_vet": "零输出",
+      "gofmt_l": "仅 backtest_test.go / crisis_test.go 既有两项",
+      "go_test": "internal/hestia ok, cmd/atlas ok（-count=1）",
+      "notify_go_sha256_prefix": "e80787e0f064afee（与我的 commit 一致）"
+    }
+  },
+  "rework": [
+    {
+      "round": 1,
+      "source": "QA review (A7, Leader 已拍板)",
+      "fix_items": [
+        "A7（Leader 已拍板）：renderP2 在 out.Verdict == bitemporal.Duplicate 时，「入库」措辞改为「已在库（本次抽取值未写入）」——Force 重跑已入库期次时 Save 判 Duplicate、refreshArticleID 只刷 article_id、新抽的 Values 一个都不写（ingest.go 注释原话），而 P2 把本次重抽的锚值写成「入库」会误导运维；New/Revision/OutOfOrder 措辞不变。补断言：Duplicate ⇒ 含「未写入」且仍含 Duplicate；New ⇒ 不含「未写入」。",
+        "非功能：只改 notify.go / notify_test.go；Field* 常量守卫与导出面守卫保持绿；锚 fix(TASK-004): M1d …；完整交付流程。"
+      ],
+      "fix": "renderP2 在 out.Verdict == bitemporal.Duplicate 时「入库」改为「已在库（本次抽取值未写入）」；New/Revision/OutOfOrder 措辞不变。新增 TestRenderP2DuplicateSaysValuesNotWritten：Duplicate ⇒ Contains 未写入 且仍含 Duplicate；New/Revision/OutOfOrder ⇒ NotContains 未写入。只改 notify.go(+13/-2) / notify_test.go(+17/-0)。",
+      "provenance": "代码由 dev-m1d-c 编写（commit bef5572）；dev-m1d-c 于 20:37 撞账号上限失联，Leader 按 AD-21 改派 dev-m1d-d（epoch 2）。dev-m1d-d 只做 master 重采、补本段 discovery 与状态推进，未改任何代码。",
+      "fix_commit": "bef5572b1edf1a919360be345750694f7d09ec4d",
+      "merge_commit": "687e43ac5265292734be7cf444e36452dc2e356d",
+      "merge_chain": "208a77c → bef5572（dev-m1d-c 返工 commit）→ 687e43a（team-lead merge commit）",
+      "master_sample": {
+        "anchor": "b47e440501d0f2dd415f9c1a39e8f66f3dd63b8b（master，dev-m1d-d 重采；含后续 TASK-007 返工 merge）",
+        "sampled_by": "dev-m1d-d",
+        "content_check": "git show master:internal/hestia/notify.go sha256 前缀 eabee8c1f601469e / notify_test.go 11857ce07501321a，与 bef5572 逐字节一致；master notify.go 含「未写入」2 处、notify_test.go 3 处",
+        "coverage_internal_hestia": "96.4%（门槛 96.3%）",
+        "coverage_cmd_atlas": "76.3%",
+        "go_vet": "零输出（./internal/hestia/... ./cmd/...）",
+        "gofmt_l": "cmd/atlas/backtest_test.go, cmd/atlas/crisis_test.go（既有两项，无新增）",
+        "go_test": "internal/hestia ok, cmd/atlas ok（-count=1，rc=0）",
+        "frozen_five_diff": "空（git diff --stat 4916106 b47e440 -- store.go validate.go parse.go extract.go fields.go）",
+        "go_mod_sum_diff": "空（ae088eb..b47e440）"
+      },
+      "guards": "TestFieldNamesAppearOnlyInFieldsGo / TestPackageExposesNoWriteFunctions 随包测试全绿；返工 numstat 仅触及 writes 声明的两个文件",
+      "worktree": "../wt-TASK-004-m1d-fix（dev-m1d-c 建，HEAD=bef5572，git status 干净）由 dev-m1d-d 于 dev_done 后拆除"
+    }
+  ]
+}

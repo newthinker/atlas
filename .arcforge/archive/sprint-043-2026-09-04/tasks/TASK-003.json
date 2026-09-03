@@ -1,0 +1,65 @@
+{
+  "id": "TASK-003",
+  "title": "ingest 在 Parse 之前落盘快照，写盘失败即该期失败",
+  "description": "对应需求文档 **TASK-003**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-03-hestia-m1d-cutover.md` 的「## TASK-003」节，Step 1–6）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决与原文没写的机制约束。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-03-hestia-m1d-cutover-design.md`。\n\n改 `internal/hestia/ingest.go` 的 `ingestOne`（Fetch 与 Parse 之间）、`ingest_test.go`（`ingestCfg()` → `ingestCfg(t)`；四条新测试）、`discover_test.go`（3 处 `ingestCfg()` 调用点）。开工前读 TASK-001 / TASK-002 的 discovery 拿接口。⚠️ 你是 003 → 005 → 006 这条串行链的承接者（三个任务都改 `ingest.go`），每个任务独立走完整交付流程。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/ingest_test.go",
+    "internal/hestia/discover_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`ingestCfg()` 改为 `ingestCfg(t *testing.T) Config`（`t.Helper()`；`Storage: StorageCfg{SnapshotDir: t.TempDir()}`，其余不变）。**24 处**调用点全部替换（Leader 实测：`ingest_test.go` 21 处 + `discover_test.go` 3 处，锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`）；若某处 `t` 不在作用域，给该 helper 加 `t *testing.T` 参数，不要退回无参版本。`go vet ./internal/hestia/` 干净。\n\n🔴 **reviewer 发现的第 25 处（已由 Leader 核实）**：`ingest_test.go:178` 的 `TestIngestRejectsPeriodMismatch` **手写** `Config{Discover…, Thresholds…}` 字面量、不经 `ingestCfg`，没有 `SnapshotDir` ⇒ 接线后 Fetch 成功即 `saveSnapshot(\"\", …)`，`MkdirAll(\"\")` 报错，`assert.Contains(out, \"期次不一致\")` 转红。修法：给该字面量补 `Storage: StorageCfg{SnapshotDir: t.TempDir()}`，**不改断言**。",
+      "`ingestOne` 在 `raw, err := d.Fetch.Get(...)` 成功后、`obs, err := Parse(raw)` 之前调用 `saveSnapshot(d.Cfg.Storage.SnapshotDir, c.ArticleID, raw, time.Now())`；入库成功那篇的快照 `<SnapshotDir>/<annualID>.html` 字节等于 `readTestdata(t, annualFile)`：`TestIngestSnapshotBytesMatchRaw`。",
+      "`snap.Kind == snapshotDiverged` 时 `Out` 打一行 `%s snapshot diverged from %s: saved as %s\\n`（period, articleID, path）；同字节 `--force` 重跑不重写（mtime 不变）且 `Out` 不含 `snapshot diverged`：`TestIngestSnapshotIdempotentOnForce`。\n\n**reviewer 补（R-003）**：`snapshot diverged` 那行要有**正向**测试，不能只有 `NotContains`：入库一次后 `Force` 重跑，fetcher 对同一 URL 返回尾部多一个换行的 `raw`（Parse 仍过），断言 `Out` 含 `snapshot diverged from <annualID>` 且快照目录里有两个文件。"
+    ],
+    "boundary": [
+      "Parse 失败的那篇**仍有快照**（落盘在 Parse 之前），且 observations 为 0 行：`TestIngestSnapshotSurvivesParseFailure`（fetcher 对文章 URL 返回 `<html><body>not a report</body></html>`）。"
+    ],
+    "error_handling": [
+      "`SnapshotDir` 指向一个普通文件 ⇒ 该期失败，`err.Error()` 含 `snapshot`（`wrap(\"snapshot\", err)`），`hestia_observations` 与 `hestia_pending` 均 0 行：`TestIngestFailsPeriodWhenSnapshotUnwritable`。"
+    ],
+    "non_functional": [
+      "既有 ingest / discover 测试**全绿且不改断言**；四条新测试在接线前必须先红（快照文件不存在 / 不可写目录时仍入库），红阶段输出记进 discovery。`import` 按需补 `time`（ingest.go）与 `os`/`path/filepath`/`io`/`time`（测试）。",
+      "**门禁（每任务必过）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go` 与 `cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/... -cover` **≥ 96.3%**（Leader 实测 96.3% 于锚 `ae088eb253b64b36e10558a02587e3fa657f5f3e`；零余量，报数时把测量时的 HEAD 全 sha 与数字同行写进 discovery）。\n\n**五个不动文件 diff 必须为空**：`git diff --stat 4916106 HEAD -- internal/hestia/store.go internal/hestia/validate.go internal/hestia/parse.go internal/hestia/extract.go internal/hestia/fields.go`。`Meta` 七字段不动（不碰 `types.go`）。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。注释里引用任务编号带 milestone 前缀：写 `M1d 的 TASK-00N`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-003-m1d ../wt-TASK-003-m1d master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec，信息锚定 **`feat(TASK-003): M1d …`**——🔴 需求文档写的 `feat(M1d TASK-003):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-003\\):`），照抄会被 BLOCKED（AD-3）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改五个不动文件、不得新增导出函数、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git log --oneline -1` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-003` 子命令）并 `task TASK-003 update --field discovery=.arcforge/discoveries/TASK-003.json`，再 `transition dev_done --expect-epoch <认领时的 epoch>`。\n7. 拆 worktree：`git worktree remove ../wt-TASK-003-m1d`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m1d-a",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/ingest_test.go",
+    "./internal/hestia/discover_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m1d-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-03T21:32:55Z"
+  },
+  "verify_baseline": {
+    "head": "656fe0577f2713010468223f27f0954d58a54ce9",
+    "discovery_sha256": "5ed7d51b03e8854fce6479f3e49a0e92815c895091969b573f329802794206ce",
+    "at": "2026-09-03T03:44:25Z"
+  }
+}
