@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
 // IngestDeps 是一次抓取所需的全部外部依赖。
@@ -74,6 +76,32 @@ func (neverSeen) HasArticleInObservations(context.Context, string) (bool, error)
 	return false, nil
 }
 
+// runResult 是 ingestOne 交给 Ingest 记 hestia_runs 用的事实（M1.5 的 TASK-002）。
+// processed=false 表示候选根本没被处理（HasArticle 跳过），不记行。
+type runResult struct {
+	processed    bool
+	outcome      RunOutcome
+	extractor    string
+	blockedCheck string
+	stage        string // 失败时的阶段名；成功为空
+	notified     bool
+	notifyErr    string
+}
+
+// firstLineOf 取错误的第一行：hestia_runs 的 error / notify_error 列只放一行。
+// 需求原文叫 firstLine，本仓库 status_test.go 已有同名（不同签名）的测试 helper，故改名。
+func firstLineOf(s string) string {
+	first, _, _ := strings.Cut(s, "\n")
+	return first
+}
+
+// isNotifyError 判断错误是不是「通知失败」而非「处理失败」。两处消费它、且必须同判：
+// 循环靠它决定发不发 P1，runRow 靠它决定 outcome 是不是 failed。
+func isNotifyError(err error) bool {
+	var ne notifyError
+	return errors.As(err, &ne)
+}
+
 // Ingest 跑一轮发现与入库。
 //
 // 单期失败**不中断整批** —— 一期解析失败不该阻止其它期入库。逐期收集，最后
@@ -86,6 +114,7 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 	if d.Out == nil {
 		d.Out = io.Discard
 	}
+	runAt := time.Now()
 	// 配置错误在任何网络请求之前拦下（M1d 的 TASK-006）。
 	if d.OnlyPeriod != "" && !d.Force {
 		return errors.New("hestia ingest: OnlyPeriod requires Force (--only-period 只与 --force 同用)")
@@ -149,7 +178,7 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 		// 「命中已见过的文章、正常停」与「翻满上限仍一无所获」在这一行上完全同形，
 		// 靠 stop 才分得开。
 		fmt.Fprintf(d.Out, "no new reports (stopped: %s)\n", stop)
-		return nil
+		return d.recordHeartbeat(ctx, runAt)
 	}
 	fmt.Fprintf(d.Out, "discover stopped: %s (%d candidate(s))\n", stop, len(cands))
 
@@ -181,21 +210,41 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 
 	var failedPeriods []string
 	var errs []error
+	processed := 0
 	for _, c := range cands {
-		err := d.ingestOne(ctx, c)
-		if err == nil {
+		started := time.Now()
+		res, err := d.ingestOne(ctx, c)
+		if err != nil {
+			fmt.Fprintf(d.Out, "%s FAILED: %v\n", c.Period, err)
+			failedPeriods = append(failedPeriods, c.Period)
+			errs = append(errs, err)
+			// 通知本身失败时不再发 P1：发不出去的通道上再发一条只是套娃。
+			if !isNotifyError(err) {
+				// 处理失败 ⇒ P1；P1 的送达结果也进这一行（M1.5 的 TASK-002）。
+				if nerr := d.send(renderP1(c, err)); nerr != nil {
+					errs = append(errs, fmt.Errorf("hestia ingest %s/%s (%s): %w", c.Period, c.PeriodType, c.ArticleID, nerr))
+					res.notifyErr = firstLineOf(nerr.Error())
+				} else {
+					res.notified = d.Notify != nil
+				}
+			}
+		}
+		if !res.processed {
 			continue
 		}
-		fmt.Fprintf(d.Out, "%s FAILED: %v\n", c.Period, err)
-		failedPeriods = append(failedPeriods, c.Period)
-		errs = append(errs, err)
-		// 通知本身失败时不再发 P1：发不出去的通道上再发一条只是套娃。
-		var ne notifyError
-		if errors.As(err, &ne) {
-			continue
+		processed++
+		// 记行在 Save 与 Verdict 行之后：记不进去只影响健康度，不影响已入库的期次。
+		if rerr := d.Store.RecordRun(ctx, d.runRow(runAt, started, c, res, err)); rerr != nil {
+			fmt.Fprintf(d.Out, "%s run record FAILED: %v\n", c.Period, rerr)
+			errs = append(errs, fmt.Errorf("hestia ingest %s/%s (%s): record run: %w", c.Period, c.PeriodType, c.ArticleID, rerr))
 		}
-		if nerr := d.send(renderP1(c, err)); nerr != nil {
-			errs = append(errs, fmt.Errorf("hestia ingest %s/%s (%s): %w", c.Period, c.PeriodType, c.ArticleID, nerr))
+	}
+	// 心跳按 processed 计而不是按「记成功的行数」计（reviewer S2）：候选处理过而 RecordRun
+	// 失败时，再补一行 no_new 会把「处理过一期」标成空跑；spec §2.1 的心跳定义是「无候选被处理」。
+	if processed == 0 {
+		// 全部候选都被跳过：本轮零行，仍要心跳。
+		if err := d.recordHeartbeat(ctx, runAt); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if len(errs) > 0 {
@@ -207,37 +256,71 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 	return nil
 }
 
+// runRow 把一次候选处理折成 hestia_runs 的一行（M1.5 的 TASK-002）。
+// err 非 nil 且不是通知失败 ⇒ failed。
+func (d IngestDeps) runRow(runAt, started time.Time, c Candidate, res runResult, err error) Run {
+	r := Run{
+		RunAt: runAt, FinishedAt: time.Now(), Duration: time.Since(started),
+		Period: c.Period, PeriodType: c.PeriodType, ArticleID: c.ArticleID,
+		Outcome: res.outcome, Extractor: res.extractor, BlockedCheck: res.blockedCheck, Stage: res.stage,
+		Notified: res.notified, NotifyError: res.notifyErr,
+	}
+	if err != nil && !isNotifyError(err) {
+		r.Outcome = RunFailed
+		r.Error = firstLineOf(err.Error())
+	}
+	return r
+}
+
+// recordHeartbeat 记一行 no_new：本轮没有处理任何候选，但管线跑了。
+func (d IngestDeps) recordHeartbeat(ctx context.Context, runAt time.Time) error {
+	beat := Run{RunAt: runAt, FinishedAt: time.Now(), Duration: time.Since(runAt), Outcome: RunNoNew}
+	if err := d.Store.RecordRun(ctx, beat); err != nil {
+		fmt.Fprintf(d.Out, "run record FAILED: %v\n", err)
+		return fmt.Errorf("hestia ingest: record heartbeat: %w", err)
+	}
+	return nil
+}
+
 // ingestOne 处理一条候选。返回的错误一律带「期次 (article_id)」前缀——汇总之后
 // 调用方看到的是一串错误，不指名是哪一期的话没法排障。
-func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
+//
+// 同时返回 runResult 供 Ingest 记 hestia_runs（M1.5 的 TASK-002）：stage 取的是
+// 传给 fail 的原字符串（fetch 阶段带 URL，AD-14），不改既有错误串。
+func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) (runResult, error) {
 	// 出错时统一加定位上下文。期次与 article_id 都给：期次是人认的，article_id
 	// 是能直接拼回 URL 的那个。
 	wrap := func(stage string, err error) error {
 		return fmt.Errorf("hestia ingest %s/%s (%s): %s: %w",
 			c.Period, c.PeriodType, c.ArticleID, stage, err)
 	}
+	res := runResult{processed: true}
+	fail := func(stage string, err error) (runResult, error) {
+		res.stage = stage
+		return res, wrap(stage, err)
+	}
 
 	if !d.Force {
 		seen, err := d.Store.HasArticle(ctx, c.ArticleID)
 		if err != nil {
-			return wrap("has article", err)
+			return fail("has article", err)
 		}
 		if seen {
 			fmt.Fprintf(d.Out, "%s already ingested (%s)\n", c.Period, c.ArticleID)
-			return nil
+			return runResult{processed: false}, nil
 		}
 	}
 
 	raw, err := d.Fetch.Get(ctx, c.URL)
 	if err != nil {
-		return wrap("fetch "+c.URL, err)
+		return fail("fetch "+c.URL, err)
 	}
 	// 快照在 Parse **之前**落盘（M1d 的 TASK-003）：解析失败的那篇恰恰最需要回溯，
 	// 而此前 raw 只在内存里——方案报告 M1c 的 DoD「原始 HTML 快照已留存」在增量路径上
 	// 一直是空的。写盘失败让该期失败：快照是 DoD 项，不是可选副作用。
 	snap, err := saveSnapshot(d.Cfg.Storage.SnapshotDir, c.ArticleID, raw, time.Now())
 	if err != nil {
-		return wrap("snapshot", err)
+		return fail("snapshot", err)
 	}
 	if snap.Kind == snapshotDiverged {
 		// 央行改稿。不是错误，但必须说出来——两版都留了，运维要知道去看哪一份。
@@ -245,7 +328,7 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
 	}
 	obs, err := Parse(raw)
 	if err != nil {
-		return wrap("parse", err)
+		return fail("parse", err)
 	}
 
 	// 接缝 ①：Parse 只拿到 raw bytes，看不到 URL —— 让它编造一个 ArticleID 才是
@@ -261,18 +344,34 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
 	// 不拦的代价不只是「一期数据错了」：按正文键入库、按候选键问判停，Discover
 	// 下次仍认为那期没入库 ⇒ **静默的永久循环**（Sprint 036 W6 实测）。
 	if obs.Meta.Period != c.Period || obs.Meta.PeriodType != c.PeriodType {
-		return fmt.Errorf("hestia ingest %s/%s (%s): 期次不一致：标题说 %s/%s，正文说 %s/%s（%s）",
+		res.stage = "mismatch"
+		return res, fmt.Errorf("hestia ingest %s/%s (%s): 期次不一致：标题说 %s/%s，正文说 %s/%s（%s）",
 			c.Period, c.PeriodType, c.ArticleID,
 			c.Period, c.PeriodType, obs.Meta.Period, obs.Meta.PeriodType, c.URL)
 	}
 
 	rep, err := Validate(ctx, obs, d.Store, d.Cfg.Thresholds)
 	if err != nil {
-		return wrap("validate", err)
+		return fail("validate", err)
 	}
 	out, err := d.Store.Save(ctx, obs, rep)
 	if err != nil {
-		return wrap("save", err)
+		return fail("save", err)
+	}
+	res.extractor = obs.Meta.Extractor
+	switch {
+	case out.Table == TablePending:
+		res.outcome = RunPending
+		for _, chk := range rep.Checks {
+			if chk.Status == CheckFailed {
+				res.blockedCheck = chk.ID
+				break
+			}
+		}
+	case out.Verdict == bitemporal.Duplicate:
+		res.outcome = RunDuplicate
+	default:
+		res.outcome = RunIngested
 	}
 
 	// Verdict 与 Table 都打出来。Table 是当下就必须区分的（入权威表 vs 落 pending
@@ -293,7 +392,10 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) error {
 		msg, stage = renderP0(obs, rep), "send P0"
 	}
 	if err := d.send(msg); err != nil {
-		return wrap(stage, err)
+		// 数据已在库：outcome 保持 ingested / pending，只记 notify_error（不走 fail，stage 留空）。
+		res.notifyErr = firstLineOf(err.Error())
+		return res, wrap(stage, err)
 	}
-	return nil
+	res.notified = d.Notify != nil
+	return res, nil
 }
