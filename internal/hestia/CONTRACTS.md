@@ -3227,13 +3227,13 @@ QA 终审 A5 指出这会把**「主配置装不上」折成「telegram 未配�
       第 1 条只堵两个**已知症状**，这条堵的是成因——下一个被 gitignore 的运行时目录出现时第 1 条不保护它；
    3. 切换清单第 4 步注明「**必须在主仓库、`HEAD` == 合并锚下执行**，禁止在 worktree 执行」。
 
-   **须在切换清单第 4 步之前**。⚠️ 这条不阻断 M1d 验收（不在任何任务 `writes` 内，`review_fix` 路由不到），
+   **须在切换清单第 4 步之前**。✅ **前两条已落地（`6a5791f`）**：排除表补齐两条，`deploy.sh` 开头加 linked worktree 判别并拒绝执行（fail-closed，无绕过开关）；实测 worktree 源的 deleting 由 30202 降到 24，主仓库源仍 8。第 3 条（清单文本）随 TASK-009 执行时落地。⚠️ 这条不阻断 M1d 验收（不在任何任务 `writes` 内，`review_fix` 路由不到），
    但**阻断切换本身**。
 
 2. **Telegram 传输错误文本含 bot token**（`internal/notifier/telegram` 的错误串带完整 URL，
    pre-existing，crisis 同暴露），而 M1d 经 `notifyError` 把它接进了 `out.log` / `err.log`。
    两个 lens 评 CRITICAL、QA 评 WARNING（泄露面是本机日志）。**建议在切换清单第 6 步
-   （首次真实经代理发送）之前**做脱敏 + `NotContains` 测试。
+   （首次真实经代理发送）之前**做脱敏 + `NotContains` 测试。✅ **已落地（`6c4ba4c`）**：`redactToken` + `redactedError`（`Error()` 脱敏、`Unwrap()` 保留错误链），`sendPayload` 与 `SendDocument` 的传输错误均经它包装；4 组变异全 KILLED。
 
 跨模型对抗审查**降级**：codex 第一次挂 stdin、第二次命中用量上限（至 2026-09-10），
 按核心原则 4 退回纯 Claude 三视角（Skeptic / Operator / Architect）。
@@ -3278,8 +3278,8 @@ QA 终审 A5 指出这会把**「主配置装不上」折成「telegram 未配�
 
 | # | 项 | 出处 | 建议 |
 |---|---|---|---|
-| C1 | `fmtNum` 的 `%g` 真钉法缺失 | §A4 | 加 `assert.Equal(t, "1776000", fmtNum(1776000))` |
+| ~~C1~~ | ~~`fmtNum` 的 `%g` 真钉法缺失~~ | §A4 | ✅ **已销（`9ccd593`）**：`TestFmtNumKeepsPlainDigitsAboveMillion` 断言 `fmtNum(1776000) == "1776000"` 并在 1e6 两侧各取一点；同时删掉恒过的 `NotContains("1.776e+05")`、订正 `fmtNum` 注释里那句假理由。变异实测：换 `%g` ⇒ 转红 |
 | C2 | 通知失败无重试 | QA A6（spec §4.3 接受） | M1.5 加退避重试，或 `hestia status` 显示最近 notify 失败 |
-| C3 | `buildHestiaSender` 错误串里 `cfgFile` 的 `%s` 无守卫 | 验证者变异 H-A5c 存活（等价变异：两条用例都用「文件不存在」造失败，内层 `os.PathError` 已带路径） | 加一条「文件存在但 YAML 非法」的子用例 |
+| ~~C3~~ | ~~`buildHestiaSender` 错误串里 `cfgFile` 的 `%s` 无守卫~~ ✅ **已销（`9ccd593`）**：补「YAML 非法」子用例——viper 解析错误不含路径，外层前缀成为唯一来源；变异去掉 `%s` ⇒ 转红，H-A5c 不再是等价变异。原挂账理由 | 验证者变异 H-A5c 存活（等价变异：两条用例都用「文件不存在」造失败，内层 `os.PathError` 已带路径） | 加一条「文件存在但 YAML 非法」的子用例 |
 | C4 | 运行时根目录残留旧 `atlas` 二进制（2026-08-07） | QA 清单 | 切换清单第 4 步顺手删 |
 | C5 | `--only-period 2026-07` 约 10 月中旬后失效（掉出索引页前 3 页） | QA 清单 | 切换清单若延后执行，改用当期期次 |
