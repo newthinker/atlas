@@ -3425,3 +3425,17 @@ spec §2.1 把 `stage` 写成 `fetch | snapshot | parse | mismatch | validate | 
 
 **本 Sprint 不做的**：需求 TASK-009（投递与验收、§C/§D、销 C2、vault 回写）结转为归档后人类清单（AD-1）；
 **未跑 `deploy.sh`**（`PENDING-ACCEPTANCE.md`：2026-08 月报首期验收登记后才投递）。合并后的 master sha 是 TASK-009 的 `ANCHOR`。
+
+### C. QA 挂账与口径订正（M1.5 QA `qa-m15`，2026-09-04；不阻断，009 验收与 M2 前跟踪）
+
+QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟零输出，跨模型降级为纯 Claude 三视角各两次）。W1（`health.go` 两段 GROUP BY 缺 `rows.Err()`）已经 TASK-003 `review_fix` 修复；其余落此处。
+
+| # | 挂账 | 形状 | 处置 |
+|---|---|---|---|
+| C1 | **「库读不到」零告警**：`HealthSummary` 出错 ⇒ 事实指标缺席 ⇒ evaluator 对缺席指标评估为 false 并清掉 `pending`，`for` 计时归零；样例无规则消费 `hestia_collect_errors_total` | 健康度自己不健康时不会响（QA W2） | 009 验收加一条「`hestia_collect_errors_total` 必须为 0」；M2 加规则 `hestia_collect_errors_total > 0`（需 evaluator 支持计数器增量或 serve 重启清零语义，先登记） |
+| C2 | **`hestia_no_ingest` 在首次真实增量入库前结构性不触发**：`LastIngest` 只看 `hestia_runs`，回填后 0 行 ⇒ 指标缺席 ⇒ 规则恒 false；「从未成功运行不告警」同族 | 首期之前的静默窗口（QA W3） | 009 验收加一条「首期入库后确认 `hestia_hours_since_last_ingest` 出现」；M2 前评估是否以 `hestia_observations` 最新 `ingested_at` 兜底 |
+| C3 | **投递步骤不在仓库任何文档**；现网 `configs/config.yaml` 无 `hestia:` 段与两条规则（`deploy.sh:95` 排除、不同步）；`docs/deployment.md:290-291` 既有文案与 `deploy.sh` 相反 | 文档漂移（QA W4） | 009 步骤已写进 Sprint 044 final-report §8；`deployment.md:290-291` 待 009 时一并订正 |
+| C5 | `metrics.enabled: false` 且设了 `hestia.config_path` ⇒ 只打一行 Info、两条 hestia 规则永不评估 | spec §4.2 明文定义的降级（QA I13） | 009 验收确认 runtime `metrics.enabled: true`；M2 可选把该日志升 Warn |
+| C4 | code-simplifier 终检（QA 逐文件）：`health.go` 抽 `groupCount`（随 W1 已做）、其余合计净减约 40 行、全部局部、无接口变更 | 无一条够 `review_fix` | M2 首批打包处理 |
+
+**§B 口径订正**：TASK-001 变异 M6「`RecentRuns` 去掉 `rowid DESC`」此前登记为「等价变异 / 测试强度边界」——QA 复判为**非等价**：索引 `hestia_runs_run_at` 在场时反向扫描恰好给出 rowid 逆序掩盖了它，`DROP INDEX` 即可杀。故 M6 应改记「被索引掩盖的存活」，同 `run_at` 多行的次序仍无测试守着（`status`/`RecentRuns` 消费者对同轮多行不依赖次序，暂不补）。
