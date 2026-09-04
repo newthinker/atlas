@@ -1102,6 +1102,23 @@ func TestBuildHestiaSenderFromMainConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), cfgFile, "错误要带出是哪份主配置")
 		assert.True(t, s == nil)
 	})
+	// CONTRACTS §C 的 C3：上面那条用「文件不存在」造失败，而 os.PathError 的内层文本
+	// **本就带完整路径**，于是 `Contains(err, cfgFile)` 即使外层 `%s` 被删掉也照样过
+	// （Sprint 043 验证者变异 H-A5c 存活，判为等价变异并给出了杀死它的输入）。
+	// 这条改用「文件存在但 YAML 非法」：viper 的解析错误不含路径，外层前缀成为唯一来源。
+	// 判据：把 hestia.go 里 `"hestia notify: main config %s: %w"` 的 `%s` 去掉后本条必须转红。
+	t.Run("malformed yaml ⇒ error names the config path", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "broken.yaml")
+		// 未闭合的引号：viper 报 YAML 语法错，错误文本里没有文件路径。
+		require.NoError(t, os.WriteFile(bad, []byte("notifiers:\n  telegram:\n    enabled: \"unterminated\n"), 0o644))
+		cfgFile = bad
+
+		s, err := buildHestiaSender()
+		require.Error(t, err, "YAML 非法同样是「装不上」，不是「未配置」")
+		assert.True(t, s == nil)
+		assert.Contains(t, err.Error(), bad,
+			"路径只能来自外层前缀——底层 YAML 解析错误不含它，这正是本用例与上一条的区别")
+	})
 }
 
 // 通道状态行的**位置**：openHestia() 成功之后、Ingest 之前。

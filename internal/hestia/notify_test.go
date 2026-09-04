@@ -4,7 +4,8 @@ package hestia
 // functional[0]     "P0 只列 failed 的闸，passed/skipped 不出现"     → TestRenderP0ListsOnlyFailedChecks
 // functional[1]     "P1 只取错误首行"                                → TestRenderP1KeepsFirstLineOnly
 // functional[2]     "P2 含 Verdict 原样、extractor、四锚带单位、发布日" → TestRenderP2CarriesVerdictAndAnchors
-// boundary[0]       "锚缺失写 n/a 不写 0；177600 不打成 1.776e+05"    → TestRenderP2MissingAnchorIsNA
+// boundary[0]       "锚缺失写 n/a 不写 0"                            → TestRenderP2MissingAnchorIsNA
+//                   "≥1e6 不走 %g 指数记法"（C1，原 1.776e+05 判据恒过） → TestFmtNumKeepsPlainDigitsAboveMillion
 // boundary[0]       "存款只有 mom 时取 mom；两者都缺 ⇒ n/a 与 -"      → TestRenderP2UsesMomWhenYtdAbsent / TestRenderP2BothFlowsAbsent
 // boundary[0] R-004 "ytd 与 mom 同在时取 ytd 并标 ytd"               → TestRenderP2PrefersYtdWhenBothPresent
 // error_handling[0] "Check.Value == nil 时写 n/a，不 panic"           → TestRenderP0NilValueIsNA
@@ -91,7 +92,6 @@ func TestRenderP2CarriesVerdictAndAnchors(t *testing.T) {
 	assert.Contains(t, got, "118.48")
 	assert.Contains(t, got, "462.06")
 	assert.Contains(t, got, "177600")
-	assert.NotContains(t, got, "1.776e+05", "177600 必须用最短精确表示，不得走 %g")
 	assert.Contains(t, got, "ytd", "存款流量要标口径")
 	assert.Contains(t, got, "万亿", "存量单位")
 	assert.Contains(t, got, "亿元", "流量单位")
@@ -155,4 +155,18 @@ func TestRenderP2DuplicateSaysValuesNotWritten(t *testing.T) {
 		assert.NotContains(t, got, "未写入", "%s 的措辞不变", v)
 		assert.Contains(t, got, "入库 "+v.String(), "%s 仍是「入库」", v)
 	}
+}
+
+// fmtNum 必须对 ≥1e6 的值仍给最短精确表示（CONTRACTS §C 的 C1）。
+//
+// 🔴 这条替代了原先那句 `NotContains(got, "1.776e+05")`——**那条断言恒过**：%g 对 177600
+// 本就打 "177600"，切指数记法的阈值在 1e6。原判据抄自需求文档的一句假理由（§A4 已订正），
+// 它在任何实现下都不可能失败，因此钉不住「不要换成 %g」这条约束。
+// 判据：把 fmtNum 改成 fmt.Sprintf("%g", v) 后本测试必须转红。
+func TestFmtNumKeepsPlainDigitsAboveMillion(t *testing.T) {
+	// 1776000 是社融存量那一族真实会出现的量级（单位亿元时）；%g 打 "1.776e+06"。
+	assert.Equal(t, "1776000", fmtNum(1776000), "≥1e6 仍须最短精确表示，不得走 %g 的指数记法")
+	// 边界两侧各一个，钉住「阈值在 1e6 而不是 1e5」这个事实本身。
+	assert.Equal(t, "177600", fmtNum(177600), "1e5 量级 %g 也不切指数——原判据正因此恒过")
+	assert.Equal(t, "356.71", fmtNum(356.71), "小数不受影响")
 }
