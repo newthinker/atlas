@@ -15,6 +15,12 @@ import (
 // statusLimit 是 status 各列最多显示的行数。管线一个月一期，10 行覆盖近一年。
 const statusLimit = 10
 
+// runsLimit 是 status 的 runs 段最多显示的行数（M1.5 的 TASK-007，spec §6「最近 5 行」）。
+//
+// 与 statusLimit 不同：观测/pending 一个月一行，10 行才够看一年；运行记录一天三次，
+// 5 行已覆盖近两天——够回答「最近一次跑了没、通知发出去没」，再多只是刷屏。
+const runsLimit = 5
+
 var (
 	hestiaCfgPath    string
 	hestiaForce      bool
@@ -345,7 +351,11 @@ func runHestiaStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return hestia.RenderStatus(cmd.OutOrStdout(), cfg.Storage.DBPath, obs, pending)
+	runs, err := st.RecentRuns(ctx, runsLimit)
+	if err != nil {
+		return err
+	}
+	return hestia.RenderStatus(cmd.OutOrStdout(), cfg.Storage.DBPath, obs, pending, runs)
 }
 
 // hestiaBackfillFromRE 校验 `--from` 的形态。

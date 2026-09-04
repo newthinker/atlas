@@ -8,10 +8,18 @@ package main
 // boundary[1]       status 在空库上跑通（newDiscardCmd）   → TestHestiaStatusOnEmptyStore
 // error_handling[0] 配置装载失败的错误信息含配置文件路径   → TestHestiaConfigErrorNamesThePath
 // error_handling[1] 🔴 必须设 SilenceUsage                 → TestHestiaCommandsSilenceUsage
+//
+// M1.5 的 TASK-007（runs 段接线）:
+// functional[2]     runHestiaStatus 读 RecentRuns(ctx, runsLimit) 并传给 RenderStatus；
+//                   空表 runs: 0；6 行 ⇒ runs: 5 且最旧行不出现
+//                                          → TestHestiaStatusOnEmptyStore、TestHestiaStatusShowsRecentFiveRuns
+// functional[2]     RecentRuns 的错误传播（不静默成「runs: 0」）
+//                                          → TestHestiaStatusPropagatesRunsError
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -239,6 +247,76 @@ discover:
 	// 它必须真的打出计数（两者都表现为「0 期」，而那正是要被区分开的东西）。
 	assert.Contains(t, out.String(), "observations: 0")
 	assert.Contains(t, out.String(), "pending: 0")
+	assert.Contains(t, out.String(), "runs: 0", "runs 段接线（M1.5 的 TASK-007）：空表也要打计数")
+}
+
+// status 的 runs 段只显示最近 runsLimit（5）行（M1.5 的 TASK-007，spec §6）。
+//
+// 写 6 行、Period 各不同、RunAt 递增：只断 `runs: 5` 分不出「LIMIT 5」与「全打」，
+// 再断最旧那行不出现才钉得住「最近」。次序只依赖 run_at，不依赖 rowid
+// （001 变异实测同 run_at 的 rowid 次序守不住，这里刻意不碰它）。
+func TestHestiaStatusShowsRecentFiveRuns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hestia.db")
+	withConfig(t, `
+storage:
+  db_path: `+dbPath+`
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+
+	st, err := hestia.NewStore(dbPath)
+	require.NoError(t, err)
+	at := time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		runAt := at.AddDate(0, i, 0)
+		require.NoError(t, st.RecordRun(context.Background(), hestia.Run{
+			RunAt:      runAt,
+			Outcome:    hestia.RunIngested,
+			Period:     runAt.Format("2006-01"),
+			PeriodType: "monthly",
+		}))
+	}
+	require.NoError(t, st.Close())
+
+	cmd, out := newCapturingCmd()
+	require.NoError(t, runHestiaStatus(cmd, nil))
+
+	assert.Contains(t, out.String(), "runs: 5")
+	assert.Contains(t, out.String(), "2026-06/monthly", "最新一行要在")
+	assert.NotContains(t, out.String(), "2026-01/monthly", "第 6 行（最旧）不该出现：LIMIT 5 按 run_at 倒序")
+}
+
+// RecentRuns 出错时 status 必须报错，不能把坏表渲染成「runs: 0」——那与「没跑过」同形，
+// 而 runs 段的全部意义就是把这两者区分开（M1.5 的 TASK-007）。
+//
+// 走 database/sql 直连（驱动由 serve.go 注册）往 hestia_runs 塞一行坏 run_at：
+// Store 的写口只有 RecordRun，它拒绝零值时间，造不出这一行。
+func TestHestiaStatusPropagatesRunsError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hestia.db")
+	withConfig(t, `
+storage:
+  db_path: `+dbPath+`
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	st, err := hestia.NewStore(dbPath) // 建表
+	require.NoError(t, err)
+	require.NoError(t, st.Close())
+
+	raw, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO ` + hestia.TableRuns +
+		` (run_at, finished_at, outcome, duration_ms) VALUES ('yesterday', 'yesterday', 'no_new', 0)`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	err = runHestiaStatus(newDiscardCmd(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad run_at")
 }
 
 // ── T7 / TASK-009：真实配置与 plist 的守卫 ──────────────────────────────────

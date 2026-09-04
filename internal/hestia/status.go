@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"time"
 )
 
 // StatusRow 是 status 命令展示的一行观测摘要。
@@ -28,7 +29,7 @@ type PendingRow struct {
 //
 // 解析发生在这里而不是 cmd 层（M1b-4b reviewer D7 裁定）：两处都做会解析两次，
 // 行为无害，但下一个人读到 cmd 层那句「这是唯一被解析的地方」会来把这里删掉。
-func RenderStatus(w io.Writer, dbPath string, obs []StatusRow, pending []PendingRow) error {
+func RenderStatus(w io.Writer, dbPath string, obs []StatusRow, pending []PendingRow, runs []Run) error {
 	abs, err := filepath.Abs(dbPath)
 	if err != nil {
 		abs = dbPath // 拿不到绝对路径不该让 status 整个失败
@@ -50,6 +51,30 @@ func RenderStatus(w io.Writer, dbPath string, obs []StatusRow, pending []Pending
 		for _, c := range p.Failed {
 			fmt.Fprintf(w, "    %-20s failed  %s\n", c.ID, c.Reason)
 		}
+	}
+
+	// runs 段（M1.5 的 TASK-007）：最近几次运行。销 M1d 挂账 C2 的第二半——通知失败
+	// 此前只在 err.log 里，这里让它在 status 里可见。
+	//
+	// RunAt 先 UTC() 再格式化：库里存的就是 UTC，但读回的 Location 可能是 +00:00
+	// 而非 UTC，不转会打成 `+00:00` 后缀而非 `Z`。`%-9s` 对齐到最长的 outcome
+	// `duplicate`（9 字符），恰好不截断。
+	fmt.Fprintf(w, "\nruns: %d\n", len(runs))
+	for _, r := range runs {
+		fmt.Fprintf(w, "  %s  %-9s", r.RunAt.UTC().Format(time.RFC3339), r.Outcome)
+		if r.Period != "" {
+			fmt.Fprintf(w, "  %s/%s", r.Period, r.PeriodType)
+		}
+		if r.Stage != "" {
+			fmt.Fprintf(w, "  stage=%s", r.Stage)
+		}
+		if r.Error != "" {
+			fmt.Fprintf(w, "  %s", r.Error)
+		}
+		if r.NotifyError != "" {
+			fmt.Fprintf(w, "  notify_error=%s", r.NotifyError)
+		}
+		fmt.Fprintln(w)
 	}
 	return nil
 }
