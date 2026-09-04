@@ -726,3 +726,50 @@ func TestLoad_TopicConfigPointerSemantics(t *testing.T) {
 		t.Errorf("未设置的 ttl 应为 nil, got %v", *eps.TTL)
 	}
 }
+
+// Context Checkpoint (M1.5 的 TASK-010): done_criteria → test mapping
+// functional[0] "AlertRule.Cooldown / HestiaConfig{ConfigPath} / Config.Hestia 经 mapstructure 解码" → TestLoad_HestiaConfigAndRuleCooldown_FromYAML
+// functional[2] "不写 hestia: 时 ConfigPath 为空，不预填默认路径"                                  → TestLoad_HestiaConfigAndRuleCooldown_FromYAML/absent
+
+// functional[0]/[2]: hestia.config_path 与 alerts.rules[].cooldown 从 yaml 解码；不写 hestia: 段时 ConfigPath 保持空。
+func TestLoad_HestiaConfigAndRuleCooldown_FromYAML(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+hestia:
+  config_path: configs/hestia.yaml
+alerts:
+  enabled: true
+  rules:
+    - name: hestia_stalled
+      expr: "hestia_hours_since_last_run > 30"
+      cooldown: 24h
+      severity: critical
+      message: "hestia 停跑"
+`)
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Hestia.ConfigPath != "configs/hestia.yaml" {
+		t.Errorf("Hestia.ConfigPath = %q, want configs/hestia.yaml", cfg.Hestia.ConfigPath)
+	}
+	if len(cfg.Alerts.Rules) != 1 {
+		t.Fatalf("rules len = %d, want 1", len(cfg.Alerts.Rules))
+	}
+	if cfg.Alerts.Rules[0].Cooldown != 24*time.Hour {
+		t.Errorf("Rules[0].Cooldown = %v, want 24h (string duration must decode)", cfg.Alerts.Rules[0].Cooldown)
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		cfgPath := writeTempConfig(t, `
+alerts:
+  enabled: false
+`)
+		cfg, err := Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.Hestia.ConfigPath != "" {
+			t.Errorf("Hestia.ConfigPath = %q, want empty (no default path)", cfg.Hestia.ConfigPath)
+		}
+	})
+}

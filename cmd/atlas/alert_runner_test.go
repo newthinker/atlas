@@ -171,7 +171,7 @@ func TestDerivedMetrics_HTTPErrorRate_ZeroTotalDeltaNoDivZero(t *testing.T) {
 
 func TestMapRules_FieldMapping(t *testing.T) {
 	in := []config.AlertRule{
-		{Name: "r1", Expr: "http_error_rate > 0.1", For: 5 * time.Minute, Severity: "warning", Message: "m1"},
+		{Name: "r1", Expr: "http_error_rate > 0.1", For: 5 * time.Minute, Severity: "warning", Message: "m1", Cooldown: 24 * time.Hour},
 		{Name: "r2", Expr: "signals_24h < 1", For: 0, Severity: "critical", Message: "m2"},
 	}
 	out := mapRules(in)
@@ -183,6 +183,13 @@ func TestMapRules_FieldMapping(t *testing.T) {
 			out[i].Severity != in[i].Severity || out[i].Message != in[i].Message {
 			t.Errorf("rule %d mismatch: got %+v want %+v", i, out[i], in[i])
 		}
+	}
+	// M1.5 的 TASK-010：cooldown 透传；未写的规则保持 0（评估器退回全局 5m）。
+	if out[0].Cooldown != 24*time.Hour {
+		t.Errorf("rule 0 Cooldown = %v, want 24h", out[0].Cooldown)
+	}
+	if out[1].Cooldown != 0 {
+		t.Errorf("rule 1 Cooldown = %v, want 0 (unset)", out[1].Cooldown)
 	}
 }
 

@@ -28,6 +28,14 @@ type Config struct {
 	Qlib       QlibConfig                 `mapstructure:"qlib"`
 	Valuation  ValuationConfig            `mapstructure:"valuation"`
 	Prism      PrismConfig                `mapstructure:"prism"`
+	Hestia     HestiaConfig               `mapstructure:"hestia"`
+}
+
+// HestiaConfig 只指向 hestia 自己的配置文件（M1.5 的 TASK-010）。
+// db_path 等仍只在 configs/hestia.yaml 里，不复制到这里：一个值一个出处。
+// ConfigPath 相对 serve 的 WorkingDirectory（runtime 目录）。空 = serve 不暴露 hestia 健康度。
+type HestiaConfig struct {
+	ConfigPath string `mapstructure:"config_path"`
 }
 
 // ValuationConfig configures the app-side PE-percentile lookback used for EPS
@@ -276,6 +284,9 @@ type AlertRule struct {
 	For      time.Duration `mapstructure:"for"`
 	Severity string        `mapstructure:"severity"`
 	Message  string        `mapstructure:"message"`
+	// Cooldown 是本规则两次触发之间的最小间隔（M1.5 的 TASK-010）。与 For 同形，
+	// viper 的字符串时长钩子解码 "24h"；0/未写 = 评估器全局值 5 分钟，负值不校验（沿 For）。
+	Cooldown time.Duration `mapstructure:"cooldown"`
 }
 
 // Load reads configuration from file

@@ -66,6 +66,7 @@ func mapRules(in []config.AlertRule) []alert.Rule {
 			For:      r.For,
 			Severity: r.Severity,
 			Message:  r.Message,
+			Cooldown: r.Cooldown,
 		}
 	}
 	return out
