@@ -38,37 +38,21 @@ func HealthSummary(ctx context.Context, q Querier) (Health, error) {
 		return Health{}, fmt.Errorf("hestia health: bad run_at: %w", err)
 	}
 
-	rows, err := q.QueryContext(ctx, `SELECT outcome, count(*) FROM `+TableRuns+` GROUP BY outcome`)
+	byOutcome, err := groupCount(ctx, q, "runs by outcome",
+		`SELECT outcome, count(*) FROM `+TableRuns+` GROUP BY outcome`)
 	if err != nil {
-		return Health{}, fmt.Errorf("hestia health: runs by outcome: %w", err)
+		return Health{}, err
 	}
-	for rows.Next() {
-		var o string
-		var n int
-		if err := rows.Scan(&o, &n); err != nil {
-			rows.Close()
-			return Health{}, fmt.Errorf("hestia health: runs by outcome: %w", err)
-		}
+	for o, n := range byOutcome {
 		h.RunsByOutcome[RunOutcome(o)] = n
 	}
-	rows.Close()
 
-	rows, err = q.QueryContext(ctx,
+	h.BlockedByCheck, err = groupCount(ctx, q, "blocked by check",
 		`SELECT blocked_check, count(*) FROM `+TableRuns+`
 		 WHERE outcome = ? AND blocked_check IS NOT NULL GROUP BY blocked_check`, string(RunPending))
 	if err != nil {
-		return Health{}, fmt.Errorf("hestia health: blocked by check: %w", err)
+		return Health{}, err
 	}
-	for rows.Next() {
-		var c string
-		var n int
-		if err := rows.Scan(&c, &n); err != nil {
-			rows.Close()
-			return Health{}, fmt.Errorf("hestia health: blocked by check: %w", err)
-		}
-		h.BlockedByCheck[c] = n
-	}
-	rows.Close()
 
 	if err := q.QueryRowContext(ctx,
 		`SELECT count(*) FROM `+TableRuns+` WHERE notify_error IS NOT NULL`).Scan(&h.NotifyFailures); err != nil {
@@ -78,6 +62,32 @@ func HealthSummary(ctx context.Context, q Querier) (Health, error) {
 		return Health{}, fmt.Errorf("hestia health: pending review: %w", err)
 	}
 	return h, nil
+}
+
+// groupCount 跑一条「键, count(*) … GROUP BY 键」查询并收成 map；错误一律带 hestia health: <step>: 前缀。
+//
+// 迭代结束后必须查 rows.Err()（review_fix W1）：ctx 中断或连接断掉时 Next() 只是返回 false，
+// 不查就会把**部分计数**当成完整结果交给 collector——collect_errors 不加一，健康度自己不健康时
+// 反而不响。返回的 map 永远非 nil，空结果也是空 map。
+func groupCount(ctx context.Context, q Querier, step, query string, args ...any) (map[string]int, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("hestia health: %s: %w", step, err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var k string
+		var n int
+		if err := rows.Scan(&k, &n); err != nil {
+			return nil, fmt.Errorf("hestia health: %s: %w", step, err)
+		}
+		out[k] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hestia health: %s: %w", step, err)
+	}
+	return out, nil
 }
 
 func parseNullTime(s sql.NullString) (time.Time, error) {
