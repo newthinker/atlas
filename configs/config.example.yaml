@@ -238,6 +238,26 @@ alerts:
       for: 5m
       severity: warning
       message: "API 5xx error rate above 10% over the last interval"
+    # Hestia 管线健康度（M1.5）。两个指标由 serve 读 data/hestia.db 现算，表为空时不输出
+    # ⇒ 规则找不到指标评估为 false，首次部署不会假红。
+    - name: hestia_stalled
+      expr: "hestia_hours_since_last_run > 30"   # 一天三次唤起，最长自然间隔 18h，留一倍余量
+      for: 10m
+      cooldown: 24h                              # 停跑会持续几天；不写则每 5 分钟一条
+      severity: critical
+      message: "Hestia 超过 30 小时没有任何一次运行记录：launchd 没跑，或跑了没落库"
+    - name: hestia_no_ingest
+      expr: "hestia_hours_since_last_ingest > 960"   # 40 天；79 个发布日的最大间隔是 35 天
+      for: 1h
+      cooldown: 24h
+      severity: warning
+      message: "Hestia 40 天没有新期次入库或落 pending"
+
+# Hestia 央行数据管线（docs 见 vault Projects/Hestia）。serve 只需要知道它的配置文件在哪；
+# db_path 等在 configs/hestia.yaml 里。留空 = serve 不暴露 hestia 健康度。
+# ⚠️ 设了但装不上 ⇒ serve 启动失败，不静默降级。
+hestia:
+  config_path: "configs/hestia.yaml"
 
 # Prism 估值面板 (docs/prism/atlas_prism_design.md)
 prism:

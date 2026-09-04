@@ -253,7 +253,7 @@ launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 
 | 服务 | 调度 | 职责 |
 |---|---|---|
-| serve | 常驻 | Web/API |
+| serve | 常驻 | Web/API；`hestia.config_path` 设了则暴露 `hestia_*` 健康度指标（读 `data/hestia.db`），装不上即启动失败 |
 | refresh-us / refresh-cnhk | 每日 08:00 / 20:00 | 行情刷新 + 仓库重建 |
 | analysis | 每 30 分钟 | 信号分析 → 通知 |
 | crisis-daily | 22:45 / 23:45 / 次日 07:30 | 危机监控每日评估（多时点覆盖 ET 发布，幂等空跑） |

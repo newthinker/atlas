@@ -183,6 +183,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 		log.Info("metrics enabled", zap.String("path", cfg.Metrics.Path))
 	}
 
+	// hestia 健康度 collector（M1.5 的 TASK-006）：读同一份 data/hestia.db，抓取时现查。
+	cleanupHestiaHealth, err := buildHestiaHealth(cfg, metricsReg, log)
+	if err != nil {
+		return err
+	}
+	defer cleanupHestiaHealth()
+
 	// Start the alert evaluation loop when enabled. It periodically snapshots
 	// metrics, derives http_error_rate / signals_24h, and evaluates the
 	// configured rules, delivering to the same notifiers via alert adapters.
