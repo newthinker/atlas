@@ -293,3 +293,41 @@ func TestEvaluator_PendingClearsWhenRuleNoLongerTriggers(t *testing.T) {
 		t.Errorf("expected no notification (pending cleared), got %d", len(notifier.sent))
 	}
 }
+
+// Context Checkpoint (M1.5 的 TASK-005): done_criteria → test mapping
+// functional[1] "规则自带 Cooldown 按规则算；未写退回全局 5m" → TestEvaluator_PerRuleCooldown
+// functional[2] "既有 TestEvaluator_Cooldown（全局 5m）不受影响"  → TestEvaluator_Cooldown（既有）
+// boundary[0]   变异 M1/M2 自证                                → 见 discovery verification
+
+// 规则自带 cooldown 时按规则算；未写时退回评估器的全局值（5 分钟）。
+func TestEvaluator_PerRuleCooldown(t *testing.T) {
+	notifier := &mockNotifier{}
+	eval := NewEvaluator([]Notifier{notifier})
+	eval.SetMetrics(map[string]float64{"hestia_hours_since_last_run": 40})
+
+	perRule := Rule{Name: "hestia_stalled", Expr: "hestia_hours_since_last_run > 30", Cooldown: time.Hour}
+	eval.Evaluate(perRule)
+	eval.advanceTime(30 * time.Minute)
+	eval.Evaluate(perRule)
+	if len(notifier.sent) != 1 {
+		t.Fatalf("30 分钟后仍在 1h 冷却内，应只发 1 条，got %d", len(notifier.sent))
+	}
+	eval.advanceTime(31 * time.Minute)
+	eval.Evaluate(perRule)
+	if len(notifier.sent) != 2 {
+		t.Fatalf("61 分钟后应重发，got %d", len(notifier.sent))
+	}
+
+	global := Rule{Name: "api_down", Expr: "hestia_hours_since_last_run > 30"} // Cooldown 未写
+	eval.Evaluate(global)
+	eval.advanceTime(4 * time.Minute)
+	eval.Evaluate(global)
+	if len(notifier.sent) != 3 {
+		t.Fatalf("未写 cooldown 的规则 4 分钟内不重发（全局 5m），got %d", len(notifier.sent))
+	}
+	eval.advanceTime(2 * time.Minute)
+	eval.Evaluate(global)
+	if len(notifier.sent) != 4 {
+		t.Fatalf("6 分钟后按全局 5m 重发，got %d", len(notifier.sent))
+	}
+}

@@ -103,9 +103,13 @@ func (e *Evaluator) Evaluate(rule Rule) {
 		}
 	}
 
-	// Check cooldown
+	// Check cooldown: per-rule when set, otherwise the evaluator-wide default.
+	cooldown := e.cooldown
+	if rule.Cooldown > 0 {
+		cooldown = rule.Cooldown
+	}
 	lastFired, hasFired := e.lastFired[rule.Name]
-	if hasFired && now.Sub(lastFired) < e.cooldown {
+	if hasFired && now.Sub(lastFired) < cooldown {
 		return // In cooldown
 	}
 

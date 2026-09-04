@@ -15,6 +15,10 @@ type Rule struct {
 	For      time.Duration `mapstructure:"for"`
 	Severity string        `mapstructure:"severity"`
 	Message  string        `mapstructure:"message"`
+	// Cooldown 是本规则两次触发之间的最小间隔（M1.5 的 TASK-005）。0 = 用评估器的
+	// 全局值（5 分钟）。持续几天的状态（如 hestia 停跑）设 24h，否则每 5 分钟一条。
+	// 负值按 `> 0` 判定视同未写，不加校验（与 For 同形，For 也不校验负值）。
+	Cooldown time.Duration `mapstructure:"cooldown"`
 }
 
 // Evaluate evaluates the rule expression against metrics.
