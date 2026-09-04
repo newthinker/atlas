@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +24,16 @@ import (
 //                                          → TestRenderStatusPrintsAbsoluteDBPath
 //
 // 查询侧（RecentObservations / RecentPending）的映射见 store_test.go 尾部那份。
+//
+// —— M1.5 的 TASK-007：runs 段 ——
+//
+// Context Checkpoint: done_criteria → test mapping (runs 段)
+// functional[0]     RenderStatus 第五参数 runs []Run，末尾 runs 段逐行渲染
+//                                          → TestRenderStatusRuns
+// functional[1]     runs: 3 三行 / runs: 0；既有 5 处调用点补 nil、断言不动
+//                                          → TestRenderStatusRuns、TestRenderStatusRunsEmpty、TestRenderStatusReportsWriteError
+// boundary[0]       nil 与空切片同形（runs: 0）；%-9s 对 duplicate 不截断；RunAt 打 Z 后缀
+//                                          → TestRenderStatusRunsEmpty、TestRenderStatusRuns
 
 func TestRenderStatus(t *testing.T) {
 	var b bytes.Buffer
@@ -36,7 +47,7 @@ func TestRenderStatus(t *testing.T) {
 				ID: "deposit_sum", Status: CheckFailed, Value: &v,
 				Reason: "tolerance_exceeded: residual 0.1543 exceeds 0.1200",
 			}},
-		}})
+		}}, nil)
 	require.NoError(t, err)
 
 	s := b.String()
@@ -61,7 +72,7 @@ func TestRenderStatus(t *testing.T) {
 // 两处都实现会解析两次，行为无害，但下一个人读到「唯一」会去找另一处并删掉它。
 func TestRenderStatusPrintsAbsoluteDBPath(t *testing.T) {
 	var b bytes.Buffer
-	require.NoError(t, RenderStatus(&b, "data/hestia.db", nil, nil))
+	require.NoError(t, RenderStatus(&b, "data/hestia.db", nil, nil, nil))
 
 	want, err := filepath.Abs("data/hestia.db")
 	require.NoError(t, err)
@@ -83,7 +94,7 @@ func TestRenderStatusPrintsAbsoluteDBPath(t *testing.T) {
 // 看到空白只会以为命令挂了。observations/pending 两个计数是它必须说出来的话。
 func TestRenderStatusEmpty(t *testing.T) {
 	var b bytes.Buffer
-	require.NoError(t, RenderStatus(&b, "data/hestia.db", nil, nil))
+	require.NoError(t, RenderStatus(&b, "data/hestia.db", nil, nil, nil))
 
 	s := b.String()
 	assert.Contains(t, s, "observations: 0")
@@ -107,7 +118,7 @@ func TestStatusOnEmptyStore(t *testing.T) {
 	require.NoError(t, err)
 
 	var b bytes.Buffer
-	require.NoError(t, RenderStatus(&b, path, obs, pending))
+	require.NoError(t, RenderStatus(&b, path, obs, pending, nil))
 
 	out := b.String()
 	assert.Contains(t, out, "observations: 0")
@@ -127,7 +138,7 @@ func TestStatusOnEmptyStore(t *testing.T) {
 // 改动，已在 discovery 里登记，留给需要它的那个任务。
 func TestRenderStatusReportsWriteError(t *testing.T) {
 	err := RenderStatus(&failingWriter{failAt: 1}, "data/hestia.db",
-		[]StatusRow{{"2025-12", "annual", "2026-01-15", "rule@v2"}}, nil)
+		[]StatusRow{{"2025-12", "annual", "2026-01-15", "rule@v2"}}, nil, nil)
 	require.Error(t, err, "写失败必须上报，不得静默成功")
 	assert.ErrorContains(t, err, "disk full", "要把底层写错误带出来，而不是换成一个自造的")
 }
@@ -152,4 +163,35 @@ func firstLine(t *testing.T, s string) string {
 	line, _, ok := strings.Cut(s, "\n")
 	require.True(t, ok, "输出应当至少有一行")
 	return line
+}
+
+// runs 段：最近几行，outcome / 期次 / 阶段 / notify_error 都在一行里能看见。
+//
+// 断言里 `failed` 后 5 个空格、`ingested` 后 3 个空格是 `%-9s`（对齐到最长的
+// `duplicate`）+ 两个分隔空格的结果，不是手工凑的；宽度改了这两条会一起红。
+func TestRenderStatusRuns(t *testing.T) {
+	at := time.Date(2026, 9, 20, 15, 30, 0, 0, time.UTC)
+	runs := []Run{
+		{RunAt: at, Outcome: RunFailed, Period: "2026-08", PeriodType: "monthly", Stage: "parse", Error: "boom"},
+		{RunAt: at.Add(-2 * time.Hour), Outcome: RunIngested, Period: "2026-08", PeriodType: "monthly", NotifyError: "telegram down"},
+		{RunAt: at.Add(-24 * time.Hour), Outcome: RunNoNew},
+	}
+	var b bytes.Buffer
+	require.NoError(t, RenderStatus(&b, "data/hestia.db", nil, nil, runs))
+	out := b.String()
+	assert.Contains(t, out, "runs: 3")
+	assert.Contains(t, out, "2026-09-20T15:30:00Z  failed     2026-08/monthly  stage=parse  boom")
+	assert.Contains(t, out, "ingested   2026-08/monthly  notify_error=telegram down")
+	assert.Contains(t, out, "no_new")
+}
+
+// nil 与空切片同形：RecentRuns 对空表返回 nil，status 要打 `runs: 0` 而不是漏掉整段。
+func TestRenderStatusRunsEmpty(t *testing.T) {
+	for name, runs := range map[string][]Run{"nil": nil, "empty": {}} {
+		t.Run(name, func(t *testing.T) {
+			var b bytes.Buffer
+			require.NoError(t, RenderStatus(&b, "data/hestia.db", nil, nil, runs))
+			assert.Contains(t, b.String(), "runs: 0")
+		})
+	}
 }
