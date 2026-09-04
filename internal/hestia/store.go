@@ -69,7 +69,8 @@ func NewStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("connecting hestia db: %w", err)
 	}
-	for _, ddl := range []string{observationsDDL(), pendingDDL(), currentViewDDL(spec)} {
+	ddls := append([]string{observationsDDL(), pendingDDL(), currentViewDDL(spec)}, runsDDL()...)
+	for _, ddl := range ddls {
 		if _, err := db.Exec(ddl); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("creating hestia schema: %w", err)
@@ -599,6 +600,95 @@ func (s *Store) RecentPending(ctx context.Context, n int) ([]PendingRow, error) 
 		return nil, fmt.Errorf("hestia store recent pending: %w", err)
 	}
 	return out, nil
+}
+
+// RecordRun 往 hestia_runs 写一行（M1.5 的 TASK-001）。
+//
+// 这是 Store 的第二个写方法，登记在两条写口守卫里。它不经 ValidationReport，因为它
+// 记录的就是那份报告的结论；它也不碰 hestia_observations / hestia_pending
+// （TestRecordRunTouchesOnlyRunsTable 钉住）。
+func (s *Store) RecordRun(ctx context.Context, r Run) error {
+	if !validRunOutcomes[r.Outcome] {
+		return fmt.Errorf("hestia store record run: unknown outcome %q", r.Outcome)
+	}
+	if r.RunAt.IsZero() {
+		return errors.New("hestia store record run: RunAt is zero")
+	}
+	finished := r.FinishedAt
+	if finished.IsZero() {
+		finished = r.RunAt
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO `+TableRuns+`
+		 (run_at, finished_at, outcome, period, period_type, article_id, extractor,
+		  blocked_check, stage, error, notified, notify_error, duration_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.RunAt.UTC().Format(time.RFC3339), finished.UTC().Format(time.RFC3339), string(r.Outcome),
+		nullIfEmpty(r.Period), nullIfEmpty(r.PeriodType), nullIfEmpty(r.ArticleID), nullIfEmpty(r.Extractor),
+		nullIfEmpty(r.BlockedCheck), nullIfEmpty(r.Stage), nullIfEmpty(r.Error),
+		boolToInt(r.Notified), nullIfEmpty(r.NotifyError), r.Duration.Milliseconds())
+	if err != nil {
+		return fmt.Errorf("hestia store record run %s: %w", r.Outcome, err)
+	}
+	return nil
+}
+
+// RecentRuns 取最近 n 行运行记录，最新在前；同一 run_at 内按写入逆序。
+func (s *Store) RecentRuns(ctx context.Context, n int) ([]Run, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	// 可空列在这里 COALESCE 成空串：Run 用空串表示「没有」，这是写侧 nullIfEmpty 的逆。
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT run_at, finished_at, outcome,
+		        COALESCE(period, ''), COALESCE(period_type, ''), COALESCE(article_id, ''),
+		        COALESCE(extractor, ''), COALESCE(blocked_check, ''), COALESCE(stage, ''),
+		        COALESCE(error, ''), notified, COALESCE(notify_error, ''), duration_ms
+		 FROM `+TableRuns+` ORDER BY run_at DESC, rowid DESC LIMIT ?`, n)
+	if err != nil {
+		return nil, fmt.Errorf("hestia store recent runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Run
+	for rows.Next() {
+		var (
+			r                          Run
+			runAt, finishedAt, outcome string
+			notified                   int
+			durationMS                 int64
+		)
+		if err := rows.Scan(&runAt, &finishedAt, &outcome,
+			&r.Period, &r.PeriodType, &r.ArticleID, &r.Extractor,
+			&r.BlockedCheck, &r.Stage, &r.Error, &notified, &r.NotifyError, &durationMS); err != nil {
+			return nil, fmt.Errorf("hestia store recent runs: %w", err)
+		}
+		if r.RunAt, err = time.Parse(time.RFC3339, runAt); err != nil {
+			return nil, fmt.Errorf("hestia store recent runs: bad run_at %q: %w", runAt, err)
+		}
+		if r.FinishedAt, err = time.Parse(time.RFC3339, finishedAt); err != nil {
+			return nil, fmt.Errorf("hestia store recent runs: bad finished_at %q: %w", finishedAt, err)
+		}
+		r.Outcome = RunOutcome(outcome)
+		r.Notified = notified != 0
+		r.Duration = time.Duration(durationMS) * time.Millisecond
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Save 是唯一的写入口。

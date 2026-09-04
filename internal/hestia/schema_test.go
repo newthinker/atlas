@@ -16,6 +16,13 @@ package hestia
 // non_functional[2]  从真实库读结构逐项断言(PK/REAL 亲和性/NOT NULL/pending PK/视图定义)
 //                                                        → TestObservationsStructureFromLiveDB、TestPendingStructureFromLiveDB、
 //                                                          TestCurrentViewStructureFromLiveDB
+//
+// M1.5 的 TASK-001（hestia_runs）：
+// functional[0]      runsDDL 建表 + 索引均 IF NOT EXISTS；列集精确 13 列且不含 fieldOrder 名字；
+//                    run_at/finished_at/outcome/notified/duration_ms 五列 NOT NULL
+//                                                        → TestRunsStructureFromLiveDB
+//                    openWithSchema / TestDDLIsIdempotent 的 DDL 列表加 runsDDL()，幂等测试对 runs 表前后比对
+//                                                        → TestDDLIsIdempotent
 
 import (
 	"database/sql"
@@ -52,7 +59,7 @@ func openWithSchema(t *testing.T) *sql.DB {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	for _, s := range []string{observationsDDL(), pendingDDL(), currentViewDDL(testSpec(t))} {
+	for _, s := range append([]string{observationsDDL(), pendingDDL(), currentViewDDL(testSpec(t))}, runsDDL()...) {
 		_, err := db.Exec(s)
 		require.NoErrorf(t, err, "DDL 执行失败：%s", s)
 	}
@@ -249,11 +256,14 @@ func TestDDLIsIdempotent(t *testing.T) {
 	db := openWithSchema(t) // 第一轮已在 helper 里执行
 
 	before := tableInfo(t, db, TableObservations)
-	for _, s := range []string{observationsDDL(), pendingDDL(), currentViewDDL(testSpec(t))} {
+	// runs 表也要前后比对：列表里没有 runsDDL 时这条测试对它恒真（M1.5 的 TASK-001，reviewer B1）
+	beforeRuns := tableInfo(t, db, TableRuns)
+	for _, s := range append([]string{observationsDDL(), pendingDDL(), currentViewDDL(testSpec(t))}, runsDDL()...) {
 		_, err := db.Exec(s)
 		require.NoErrorf(t, err, "第二轮执行失败：%s", s)
 	}
 	assert.Equal(t, before, tableInfo(t, db, TableObservations), "重复执行不得改变结构")
+	assert.Equal(t, beforeRuns, tableInfo(t, db, TableRuns), "重复执行不得改变 runs 表结构")
 }
 
 // TestDDLHasNoDerivableStateColumns 否定断言：is_current 与 absent_fields 都是
@@ -271,5 +281,30 @@ func TestDDLHasNoDerivableStateColumns(t *testing.T) {
 			assert.NotEqual(t, "is_current", c.name)
 			assert.NotEqual(t, "absent_fields", c.name)
 		}
+	}
+}
+
+// hestia_runs 的列集精确相等；它与 pending 一样不该长得像观测表（M1.5 的 TASK-001）。
+func TestRunsStructureFromLiveDB(t *testing.T) {
+	cols := tableInfo(t, openWithSchema(t), TableRuns)
+	var names []string
+	notNull := map[string]int{}
+	for _, c := range cols {
+		names = append(names, c.name)
+		notNull[c.name] = c.notNull
+	}
+	assert.ElementsMatch(t, []string{
+		"run_at", "finished_at", "outcome", "period", "period_type", "article_id", "extractor",
+		"blocked_check", "stage", "error", "notified", "notify_error", "duration_ms",
+	}, names, "列集必须精确等于 spec §2.1；多一列少一列都是 schema 漂移")
+	for _, f := range fieldOrder {
+		assert.NotContainsf(t, names, f, "runs 表不应有业务列 %s——它记的是闸门的结论，不是数据", f)
+	}
+	// 只比列名钉不住 spec §2.1 的约束：NOT NULL 丢了 Scan 照样成功，只在读回时炸
+	for _, c := range []string{"run_at", "finished_at", "outcome", "notified", "duration_ms"} {
+		assert.Equalf(t, 1, notNull[c], "%s 必须 NOT NULL", c)
+	}
+	for _, c := range []string{"period", "period_type", "article_id", "extractor", "blocked_check", "stage", "error", "notify_error"} {
+		assert.Equalf(t, 0, notNull[c], "%s 是可空列，空串要能存 NULL", c)
 	}
 }

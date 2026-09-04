@@ -11,6 +11,10 @@ const (
 	TableObservations = "hestia_observations"
 	// TablePending 收未过闸的数据。它的消费者只有人。
 	TablePending = "hestia_pending"
+	// TableRuns 是运行记录表（M1.5 的 TASK-001）：ingest 每处理一个候选记一行，
+	// 本轮零行时记一行 no_new 作心跳。它记的是闸门的结论，不是数据；消费者是
+	// serve 的健康度 collector 与 hestia status。
+	TableRuns = "hestia_runs"
 
 	viewCurrent = "v_hestia_current"
 )
@@ -85,4 +89,30 @@ func pendingDDL() string {
 // 不会报错，只会给出错误的数据。
 func currentViewDDL(spec bitemporal.Spec) string {
 	return "CREATE VIEW IF NOT EXISTS " + viewCurrent + " AS " + bitemporal.CurrentQuery(spec)
+}
+
+// runsDDL 建运行记录表与它的时间索引（M1.5 的 TASK-001）。
+//
+// 手写列清单（同 pendingDDL），不从 fieldOrder 派生：它没有业务列，结构上就不该
+// 像观测表。不设主键：同一次唤起的多行 run_at 相同是设计，反复失败留多条是诊断信息。
+// 可空列存 NULL 而不是空串：HealthSummary 用 IS NOT NULL 数通知失败，空串会被数进去。
+func runsDDL() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS ` + TableRuns + ` (
+  run_at        TEXT NOT NULL,
+  finished_at   TEXT NOT NULL,
+  outcome       TEXT NOT NULL,
+  period        TEXT,
+  period_type   TEXT,
+  article_id    TEXT,
+  extractor     TEXT,
+  blocked_check TEXT,
+  stage         TEXT,
+  error         TEXT,
+  notified      INTEGER NOT NULL DEFAULT 0,
+  notify_error  TEXT,
+  duration_ms   INTEGER NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS hestia_runs_run_at ON ` + TableRuns + ` (run_at)`,
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
@@ -299,4 +300,31 @@ type ValidationReport struct {
 type Outcome struct {
 	Verdict bitemporal.Verdict // New | Duplicate | Revision | OutOfOrder
 	Table   string             // TableObservations | TablePending
+}
+
+// RunOutcome 是一次候选处理的结论（M1.5 的 TASK-001）。取值域与 Ingest 的实际分支一一对应。
+type RunOutcome string
+
+const (
+	RunNoNew     RunOutcome = "no_new"    // 本轮零行：0 候选，或全部因 HasArticle 跳过；这是心跳
+	RunIngested  RunOutcome = "ingested"  // Save 入权威表，Verdict 为 New / Revision / OutOfOrder
+	RunPending   RunOutcome = "pending"   // Save 落 hestia_pending
+	RunDuplicate RunOutcome = "duplicate" // Verdict 为 Duplicate——单列，不推进「最近入库」
+	RunFailed    RunOutcome = "failed"    // ingestOne 任一阶段返回错误
+)
+
+var validRunOutcomes = map[RunOutcome]bool{
+	RunNoNew: true, RunIngested: true, RunPending: true, RunDuplicate: true, RunFailed: true,
+}
+
+// Run 是 hestia_runs 的一行。可空文本列以空串表示「没有」，存库时转 NULL。
+type Run struct {
+	RunAt, FinishedAt    time.Time
+	Outcome              RunOutcome
+	Period, PeriodType   string
+	ArticleID, Extractor string
+	BlockedCheck, Stage  string // pending 时的第一道 failed 闸门；failed 时的阶段名
+	Error, NotifyError   string // 错误首行
+	Notified             bool   // SendText 成功
+	Duration             time.Duration
 }
