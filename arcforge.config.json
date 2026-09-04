@@ -13,7 +13,13 @@
   "team": {
     "max_dev_agents": 4,
     "max_test_agents": 2,
-    "max_qa_agents": 1
+    "max_qa_agents": 1,
+    "models": {
+      "dev": "inherit",
+      "test": "inherit",
+      "qa": "inherit",
+      "ops": "inherit"
+    }
   },
   "tdd": {
     "strict": true,

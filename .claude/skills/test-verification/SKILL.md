@@ -41,7 +41,7 @@ plan.md 转述补全标准——A1 误判事件根因）。报告模板增加「
 如可用，调用 ECC `e2e-runner` 做集成测试。
 
 ## 产出
-- `.arcforge/docs/04-test/TASK-{id}-test-report.md`：含覆盖矩阵 + 证据 + 结论。
+- `.arcforge/docs/04-test/TASK-{id}-verification.md`：含覆盖矩阵 + 证据 + 结论。
 - 不通过：原子写 task status=`rejected` + `reject_reason`。
 - 通过：原子写 task status=`verified`，并确保 `discovery` 文件已由 Dev 写好。
 - 全部任务验证后汇总 `.arcforge/docs/04-test/coverage-report.md` 与 `dod-coverage-matrix.md`。

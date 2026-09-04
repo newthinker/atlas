@@ -186,6 +186,22 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
   `blocked_human`，所以你只能重发答复通知；确认唤不回就转 `blocked_human` 交人类，
   **不要试图改回 `assigned`**——那条边不存在，写通道会 DENY。
 
+**周期性校验的固定动作**（2026-09-03 在 Claude Code 2.1.259 核实可用；官方未给最低版本）：「出路只在 Leader
+侧的周期性校验」这句话在此之前仍靠 Leader 记得做。现在每次派发（`→ assigned` / `→ verifying`）
+之后固定做三件事：
+
+1. **登记周期任务**：用 `CronCreate` 登记一条会话内周期任务，周期取 `arcforge-validate --rules`
+   打出的对应状态阈值的**一半**（保证一个阈值周期内至少校验两次），prompt 固定为：
+   「跑 `bash .claude/scripts/validator-run.sh validate .arcforge/tasks`，只报 `⚠` 段里的
+   `stale-dispatch` 条目及其 task id；没有就回一个字：无」。全部在途任务离开 `assigned` /
+   `verifying` / `blocked_clarification` 后用 `CronDelete` 撤掉，别让它陪跑到 sprint 结束。
+   `CronCreate` / `CronDelete` 不可用（Claude Code 版本过旧或 Cron 工具未启用）时退回原做法：
+   Leader 每轮进度扫描手动跑一次 validator，读 `⚠` 段。
+2. **先读数再推断**：首次命中 `stale-dispatch` 时，先 `ListAgents` 看该实例是否仍在列表、忙/闲。
+   不在列表 ⇒ 已停机，直接进上表第 2 步改派；在列表且 idle ⇒ 走第 1 步重发。`ListAgents` 需要
+   跨会话消息可用（v2.1.224+）；不可用时退回原判据「本轮派发无产物」。
+3. **重发用 `SendMessage`**，消息里附 task id 与它该做的下一步。改派动作与上表一致，不变。
+
 ### 6. 质量门禁
 
 - 全体任务 `verified` 后，spawn QA Agent 做 Code Review（两轮：常规 + 跨视角对抗）。
@@ -640,7 +656,7 @@ KILLED 数、外溢度、行数、sha）都必须在最后一次改动之后统�
 
 你无法可靠判断自己的 context 是否被压缩，因此**不要主动压缩**，而是养成「持续落盘」习惯：
 在每个自然节点把当前状态写入 `.arcforge/checkpoints/{your-agent-name}-checkpoint.md`。
-被动压缩发生后，按各角色定义中的「被动压缩恢复协议」从 checkpoint + `.arcforge/docs/` 重建上下文。
+被动压缩发生后，按本文件「Teammate 通用纪律」的「Context 持久化（CLM）：落盘路径与被动压缩恢复」小节从 checkpoint + `.arcforge/docs/` 重建上下文。
 checkpoint 摘要必须带原始产物指针；恢复时指针优先于摘要（有损摘要 + 无损指针）。
 
 **指针必须带 commit sha（人类 2026-07-27 选定）**：写入时在「原始产物指针」一节记下
@@ -658,10 +674,87 @@ checkpoint 还把分支记成了 `master`（本仓库是 `main`）。**接手者
 checkpoint 里的 ref）成本远超收益——触发条件是「agent 失联 + 交接」，比其它几条罕见得多；
 而 checkpoint 本就是给人/agent 读的自述文档，加一行 sha 与一步比对即可闭合。
 
-## Delegate Mode 注意
+## Teammate 通用纪律
 
-截至 2026 年，Delegate Mode 存在已知 bug（teammates 继承受限权限导致无法读写文件）。
-在修复前**不使用 Delegate Mode**，而是通过本文件指令约束 Leader 行为（"你只做协调，不写实现代码"）。
+本节是 `dev-*` / `test-*` / `qa-*` / `ops-*` 全体具名 teammate 的共同约束。teammate 自动加载本文件
+（in-process 模式下角色定义正文**追加**到默认 system prompt 之后，split-pane 模式下**替换**默认
+system prompt，两种模式都加载 CLAUDE.md；出处见下节「Teammate 权限与形态（现行规则）」），所以
+角色定义（`~/.claude/agents/*.md`）**不再复制**
+下面三段，只留一行指向此处。**改这里就是改全部角色**；三处各存一份的代价本文件「知识累积」节
+记过一例（`-test-report.md` 重复文件）。
+
+### 权限边界（单写者模型，机制强制）
+
+- 你的实例名在 spawn prompt 第一行给出。一切 `.arcforge/` 状态写入**必须**经
+  `bash .claude/hooks/arcforge-write.sh --as {你的实例名} ...`（用法见脚本头注释；锁、epoch 与
+  矩阵校验的机制见「认领协议」节）；直接 Write/Edit/重定向会被 PreToolUse hook 拒绝。写通道调用
+  一律带 spawn 时下发的 `ARCFORGE_TOKEN` 环境变量（校验机制见「运行时资产只读」节），且**在主仓库
+  里调用**——linked worktree 内会被 DENY（见「每 dev 独立 worktree（隔离协议）」节）。
+- `plan.md`、他人的 task/checkpoint/wisdom 文件对你**只读**。Leader 专属动作（派发、转 accepted、
+  写 plan.md）如你认为需要发生，发 inbox 通知 Leader，不要代办。
+- 你 spawn 的任何子代理**一律禁止写 `.arcforge/`**：子代理只做读/分析/写业务代码，结论写进其
+  最终回复带回，由你（具名 teammate 本体）落盘。`ARCFORGE_TOKEN` **禁止写入任何文件、禁止传给
+  子代理**。
+- `.claude/`（hooks / scripts / `settings.json` / `settings.local.json`）运行时资产**一律只读**，
+  包括你认为「显然该修」的场景；规则与变更路径见「运行时资产只读」节。
+
+### 终端回显不可信（落盘后核实纪律）
+
+一切 `.arcforge/` 落盘操作（状态迁移、写 discovery / report / verdict / checkpoint）后，**必须**用
+`jq` / `cat` / `ls` 直读目标文件核实生效；PASS/FAIL、任务完成等判定只依据文件内容，**禁止以单次
+终端回显作为依据**。写通道 DENY（exit 2）时任务文件不会变，别把 DENY 文案当成「已迁移」。
+立项事故见「核心原则」第 5 条。
+
+### Context 持久化（CLM）：落盘路径与被动压缩恢复
+
+- 你的 checkpoint 路径固定为 `.arcforge/checkpoints/{你的实例名}-checkpoint.md`（与上一节
+  「Context 持久化纪律（CLM）」的 `{your-agent-name}` 同指，只有这一条路径）。**严禁写其他实例的
+  checkpoint；恢复时也只读自己的。** 不确定实例名时先从任务文件反查（dev 查 `assigned_to`、test 查
+  `verifier`），qa/ops 直接问 Leader；**不要猜一个名字写入**。
+- 不要主动压缩、在每个自然节点写 checkpoint、「原始产物指针」记 `git rev-parse HEAD` 的**全 sha**
+  与分支名——这三条的理由与格式见上一节「Context 持久化纪律（CLM）」，此处不复述。
+- **被动压缩恢复协议**——每当轮到你行动、且对当前任务关键细节感到不确定时立即从文件重建
+  （这也是每轮开始的默认自检）：
+  1. 读自己的 checkpoint（存在则按它恢复）。
+  2. **先比对当前 HEAD 与 checkpoint 记的全 sha**（比对步骤与立项依据见上一节「Context 持久化
+     纪律（CLM）」，此处不复述）；不一致时先弄清中间发生了什么，再决定哪些指针仍然有效。
+  3. 按「原始产物指针」回捞原文；摘要仅作导航，不依赖其完整性。
+  4. **无 checkpoint 时的应急扫描**——先 `cd` 回主仓库再跑：worktree 里的 `.arcforge/` 是按 checkout
+     commit 铺开的陈旧副本，读侧没有任何告警，扫出「我没有在途任务」这个假结论看起来完全正常
+     （见「每 dev 独立 worktree（隔离协议）」节）。该扫描不依赖原生 `TaskList` 工具——新模型会话中
+     该工具默认不存在；Leader 2026-09-03 在 Fable 5.1 会话实测工具列表无 `TaskList`：
+     ```bash
+     find .arcforge/tasks -name '*.json' -exec jq -r --arg me "{你的实例名}" \
+       'select(.assigned_to == $me or .verifier == $me) | "\(.id) \(.status)"' {} \;
+     ```
+     再读命中任务的 `done_criteria`，用 `git diff` / `git log` 与测试运行确认当前进度。
+  5. 自检：我是哪个角色 / 当前任务是 X / 阶段是 Y / 下一步是 Z。任一不确定 → 向 Leader 求助。
+
+## Teammate 权限与形态（现行规则）
+
+以下按 Claude Code 2.1.259 的官方 `agent-teams.md` 核实（2026-09-03）：
+
+- teammate 在 spawn 时**继承 lead 的 permission mode**，spawn 时不能单独设置；spawn 后可对单个
+  teammate 单独修改。lead 用 `--dangerously-skip-permissions` 则全体 teammate 同样跳过。
+- teammate 的权限提示出现在 **lead session**，由人类在 lead 侧批准；agent 之间经 `SendMessage`
+  收到的消息被视为「来自另一个 Claude session」，不能代人类批准任何动作，被拒的动作也不能转手
+  让别的 teammate 去做。
+- Agent Teams 启用时，**lead 给子代理命名即成为 teammate**（in-process）。`/arcforge` Step 3 的
+  独立 DoD reviewer 若命名，会以 teammate 而非 subagent 形态运行——无害，但它会出现在
+  `ListAgents` 与 `TeammateIdle` 里，且不会像 subagent 那样把结果作为返回值交回。
+- teammate **不能嵌套 spawn teammate**；in-process teammate 的子代理**只能前台运行**
+  （定义里 `background: true` 或调用时 `run_in_background: true` 都会报错或退化为前台）。
+  这也是「子代理运行窗口内父实例不可能同时发出写调用」这一推论的依据。
+- `/resume` / `/rewind` **不恢复** in-process teammate；恢复后 lead 可能向已不存在的 teammate 发
+  消息，此时重新 spawn，不要等。
+- teammate 自动加载 CLAUDE.md、MCP、skills（项目与用户级）；角色定义的 `skills` 字段对 teammate
+  **不生效**；in-process teammate 的定义正文是**追加**到默认 system prompt 之后（split-pane 模式
+  则替换默认 system prompt）。因此**全体角色共用的纪律只在本文件写一份**，角色定义只写角色特有内容。
+
+**历史说明**：本节原为「Delegate Mode 注意」，描述一个 2026 年中的「teammates 继承受限权限导致
+无法读写文件」bug 并禁用 Delegate Mode。现行文档已无 Delegate Mode 概念，上面第一条就是现行的
+权限继承规则；Leader「只做协调、不写实现代码」的约束由本文件「角色：Project Leader」与
+「记录员代理模式」两节承担，不再依赖这个已不存在的开关。
 
 # CLAUDE.md
 
