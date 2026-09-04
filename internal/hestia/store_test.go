@@ -20,6 +20,22 @@ package hestia
 // 「NewStore 实际部署的那个视图从未被验过」——T3 验的是测试自建库（openWithSchema）的结构，
 // 用的是测试自己造的 spec。故本文件一律用 NewStore 建库，**不用 openWithSchema / testSpec 代劳**。
 //                                                        → TestNewStoreDeploysViewFromItsOwnSpec
+//
+// M1.5 的 TASK-001（hestia_runs / Run / RecordRun / RecentRuns）：
+// functional[0]      NewStore 的 DDL 列表含 runsDDL()，sqlite_master 里有 hestia_runs
+//                                                        → TestNewStoreCreatesSchemaIdempotently
+// functional[1]      RecordRun 逐字段往返；FinishedAt 零值回落 RunAt  → TestRecordRunRoundTrip
+//                    八个可空文本列空串存 NULL、notified 存 0/1        → TestRecordRunEmptyStringsAreNull
+//                    Outcome 不在域内 / RunAt 零值 ⇒ 错误且不落库     → TestRecordRunRejectsBadInput
+// functional[2]      RecentRuns 最新在前（run_at DESC, rowid DESC）；n<=0 ⇒ nil
+//                                                        → TestRecentRunsNewestFirst
+//                    run_at/finished_at 解析失败 ⇒ 错误带 bad run_at / bad finished_at；
+//                    表不在时 RecordRun / RecentRuns 都把库错误传播出来
+//                                                        → TestRecentRunsRejectsCorruptTimestamps、
+//                                                          TestRunMethodsPropagateDBErrors
+// functional[3]      两条写口守卫精确集合 12 / 24 项       → TestStoreExposesNoWriteMethods、
+//                                                          TestPackageExposesNoWriteFunctions
+//                    RecordRun 函数体只碰 TableRuns          → TestRecordRunTouchesOnlyRunsTable
 
 import (
 	"context"
@@ -117,7 +133,7 @@ func TestNewStoreCreatesSchemaIdempotently(t *testing.T) {
 	require.NoError(t, err, "对同一路径重复调用 NewStore 必须成功")
 	defer s2.Close()
 
-	for _, name := range []string{TableObservations, TablePending, viewCurrent} {
+	for _, name := range []string{TableObservations, TablePending, viewCurrent, TableRuns} {
 		var got string
 		require.NoErrorf(t,
 			queryRow(s2, `SELECT name FROM sqlite_master WHERE name = ?`, name).Scan(&got),
@@ -381,7 +397,7 @@ func TestStoreExposesNoWriteMethods(t *testing.T) {
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	want := []string{"Close", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "RecentObservations", "RecentPending", "Save"}
+	want := []string{"Close", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "RecentObservations", "RecentPending", "RecentRuns", "RecordRun", "Save"}
 	assert.Equalf(t, want, got,
 		"只应导出这 %d 个只读方法（%s）；出现 Insert/Upsert 等写口即违反单一写入口约束",
 		len(want), strings.Join(want, "、"))
@@ -434,12 +450,23 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.RecentObservations", "Store.RecentPending", "Store.Save", "Validate"}
+	want := []string{"BackfillFetch", "BackfillLoad", "Calibrate", "DefaultThresholds", "Discover", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
 			"都会绕过 Save 的签名防线", len(want))
 }
+
+// —— 为什么名单里多了 Store.RecordRun（M1.5 的 TASK-001 追加）——
+//
+// 它是 Store 的**第二个写方法**，是**登记而不是放宽**。写口守卫防的是「绕过
+// ValidationReport 写事实来源」；RecordRun 写的是 hestia_runs——它记的是闸门的
+// **结论**（哪一期、过没过、被哪道拦），不是事实来源。不经 ValidationReport 恰恰因为
+// 它记录的就是那份报告的结论。ADR-0003 的射程是 hestia_observations 与 hestia_pending。
+// RecordRun 的函数体里没有任何 INSERT INTO hestia_observations / hestia_pending；
+// 若将来有人往里加，TestRecordRunTouchesOnlyRunsTable 会红。
+//
+// Store.RecentRuns 是与之配对的读方法（一条 SELECT，只查 hestia_runs），同批登记。
 
 // —— 为什么名单里多了 BackfillLoad（M1c-3b 的 TASK-006 追加）——
 //
@@ -2741,4 +2768,165 @@ func TestInsertSQLDoesNotPersistParts(t *testing.T) {
 	assert.Equal(t, strings.Count(q, "?"), len(args),
 		"占位符数与实参数必须相等：这条顺带钉住「加列时两处一起改」，"+
 			"否则多写一列会在运行时才炸")
+}
+
+// ---------------------------------------------------------------------------
+// M1.5 的 TASK-001：hestia_runs / Run / RecordRun / RecentRuns
+// ---------------------------------------------------------------------------
+
+func sampleRun(outcome RunOutcome) Run {
+	at := time.Date(2026, 9, 20, 7, 30, 0, 0, time.UTC)
+	return Run{
+		RunAt: at, FinishedAt: at.Add(3 * time.Second), Outcome: outcome,
+		Period: "2026-08", PeriodType: "monthly", ArticleID: "2026091412345678901",
+		Extractor: "rule-monthly@v2", BlockedCheck: "deposit_sum", Stage: "",
+		Error: "", NotifyError: "boom", Notified: false, Duration: 3 * time.Second,
+	}
+}
+
+// 写一行、读回逐字段相等。时间按 RFC3339 存，秒级；夹具已取整秒。
+func TestRecordRunRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	want := sampleRun(RunPending)
+	require.NoError(t, s.RecordRun(ctx, want))
+
+	got, err := s.RecentRuns(ctx, 5)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.True(t, got[0].RunAt.Equal(want.RunAt))
+	assert.True(t, got[0].FinishedAt.Equal(want.FinishedAt))
+	got[0].RunAt, got[0].FinishedAt = want.RunAt, want.FinishedAt // 时区表示可能不同，值已单独断言
+	assert.Equal(t, want, got[0])
+
+	// FinishedAt 零值回落 RunAt（reviewer S5：原四条测试没有一条覆盖这条回落）
+	t.Run("FinishedAt 零值回落 RunAt", func(t *testing.T) {
+		s := newTestStore(t)
+		r := sampleRun(RunNoNew)
+		r.FinishedAt = time.Time{}
+		require.NoError(t, s.RecordRun(ctx, r))
+		got, err := s.RecentRuns(ctx, 1)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.True(t, got[0].FinishedAt.Equal(r.RunAt), "FinishedAt 零值必须回落到 RunAt，而不是 0001-01-01")
+	})
+}
+
+// 空串列存 NULL，读回仍是空串；notified 是 0/1。
+func TestRecordRunEmptyStringsAreNull(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+	r := sampleRun(RunNoNew)
+	r.Period, r.PeriodType, r.ArticleID, r.Extractor, r.BlockedCheck, r.NotifyError = "", "", "", "", "", ""
+	r.Notified = true
+	require.NoError(t, s.RecordRun(ctx, r))
+
+	var nulls, notified int
+	require.NoError(t, rawDB(t, path).QueryRow(`SELECT
+		(period IS NULL) + (period_type IS NULL) + (article_id IS NULL) + (extractor IS NULL)
+		+ (blocked_check IS NULL) + (stage IS NULL) + (error IS NULL) + (notify_error IS NULL), notified
+		FROM `+TableRuns).Scan(&nulls, &notified))
+	assert.Equal(t, 8, nulls, "空串必须存 NULL——HealthSummary 用 IS NOT NULL 数通知失败")
+	assert.Equal(t, 1, notified)
+
+	got, err := s.RecentRuns(ctx, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "", got[0].NotifyError)
+	assert.True(t, got[0].Notified)
+}
+
+func TestRecordRunRejectsBadInput(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	bad := sampleRun("exploded")
+	err := s.RecordRun(ctx, bad)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exploded")
+
+	zero := sampleRun(RunIngested)
+	zero.RunAt = time.Time{}
+	require.Error(t, s.RecordRun(ctx, zero))
+
+	assert.Zero(t, countRows(t, s, TableRuns), "被拒的行不得落库")
+}
+
+// 最新在前；同一 run_at 的多行按写入逆序（rowid DESC）。
+func TestRecentRunsNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	older := sampleRun(RunNoNew)
+	older.RunAt = older.RunAt.Add(-24 * time.Hour)
+	require.NoError(t, s.RecordRun(ctx, older))
+	require.NoError(t, s.RecordRun(ctx, sampleRun(RunIngested)))
+	second := sampleRun(RunDuplicate)
+	require.NoError(t, s.RecordRun(ctx, second)) // 与上一行同 run_at
+
+	got, err := s.RecentRuns(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, []RunOutcome{RunDuplicate, RunIngested, RunNoNew},
+		[]RunOutcome{got[0].Outcome, got[1].Outcome, got[2].Outcome})
+
+	none, err := s.RecentRuns(ctx, 0)
+	require.NoError(t, err)
+	assert.Nil(t, none)
+}
+
+// RecordRun 只许写 hestia_runs：它是登记进写口守卫的第二个写方法，登记理由的全部
+// 依据是「不碰事实来源」。这里钉住那句话。
+func TestRecordRunTouchesOnlyRunsTable(t *testing.T) {
+	raw, err := os.ReadFile("store.go")
+	require.NoError(t, err)
+	src := string(raw)
+	start := strings.Index(src, "func (s *Store) RecordRun(")
+	require.NotEqual(t, -1, start)
+	end := strings.Index(src[start:], "\n}\n")
+	require.NotEqual(t, -1, end)
+	body := src[start : start+end]
+	assert.NotContains(t, body, "TableObservations")
+	assert.NotContains(t, body, "TablePending")
+	assert.Contains(t, body, "TableRuns")
+}
+
+// 库里的时间列不是 RFC3339 时读侧要报错，而不是把 0001-01-01 当成有效值交给 HealthSummary。
+// 行经裸连接写入：RecordRun 自己永远写不出这种行。
+func TestRecentRunsRejectsCorruptTimestamps(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, runAt, finishedAt, wantErr string
+	}{
+		{"run_at 坏", "yesterday", "2026-09-20T07:30:00Z", "bad run_at"},
+		{"finished_at 坏", "2026-09-20T07:30:00Z", "later", "bad finished_at"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, path := newTestStoreAt(t)
+			_, err := rawDB(t, path).Exec(`INSERT INTO `+TableRuns+
+				` (run_at, finished_at, outcome, duration_ms) VALUES (?, ?, ?, 0)`,
+				tc.runAt, tc.finishedAt, string(RunNoNew))
+			require.NoError(t, err)
+
+			got, err := s.RecentRuns(ctx, 1)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Nil(t, got)
+		})
+	}
+}
+
+// 表不在时两个方法都把库错误传播出来，不吞、不返回空结果。
+func TestRunMethodsPropagateDBErrors(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+	_, err := rawDB(t, path).Exec(`DROP TABLE ` + TableRuns)
+	require.NoError(t, err)
+
+	err = s.RecordRun(ctx, sampleRun(RunNoNew))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "record run")
+
+	got, err := s.RecentRuns(ctx, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recent runs")
+	assert.Nil(t, got)
 }
