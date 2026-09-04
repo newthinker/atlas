@@ -1,0 +1,83 @@
+{
+  "task_id": "TASK-001",
+  "title": "hestia_runs 表、Run 类型、Store.RecordRun / RecentRuns、两条写口守卫登记（M1.5）",
+  "owner": "dev-m15-a",
+  "key_findings": [
+    "hestia_runs 13 列手写、不设主键、两条 DDL 均 IF NOT EXISTS；run_at/finished_at/outcome/notified/duration_ms 五列 NOT NULL，其余八列可空（TestRunsStructureFromLiveDB 逐列钉住 notNull 标志）。",
+    "既有 openWithSchema 与 TestDDLIsIdempotent 的 DDL 列表只有三段（reviewer B1 成立）：不加 runsDDL() 时 TestRunsStructureFromLiveDB 必红、幂等测试对 runs 表恒真。两处都改为 append([]string{observationsDDL(), pendingDDL(), currentViewDDL(testSpec(t))}, runsDDL()...)，幂等测试对 TableRuns 增加前后 tableInfo 相等断言；TestNewStoreCreatesSchemaIdempotently 的 sqlite_master 名单加 TableRuns。",
+    "store.go 既无 nullIfEmpty / boolToInt 同名或同功能 helper（grep 0 命中），按需求新写；errors 包已在 import 里，无需补。",
+    "按需求原文实现后 internal/hestia 覆盖率为 96.3%（RecordRun 90.9% / RecentRuns 82.6%，未覆盖的是 DB 错误与 bad run_at / bad finished_at 分支），低于基线 96.5%。补两条测试（TestRecentRunsRejectsCorruptTimestamps 表驱动两例、TestRunMethodsPropagateDBErrors）后回到 96.5%，与基线持平。这两条覆盖的正是 DoD functional[2] 明写的行为，不是凑数。",
+    "gitnexus：impact(NewStore, internal/hestia, upstream) = LOW / 5 impacted；detect-changes 报 risk high 但索引落后 45 commit 且把未改动的 Save 标为 changed（git diff 证明 Save 出现 0 次），是陈旧索引按行号漂移的误判，graph 分析在 worktree 上只能算 partial。"
+  ],
+  "decisions": [
+    {
+      "decision": "保留 code-simplifier 对 RecentRuns 的改动：SQL 里 COALESCE(<可空列>, '') 直接 Scan 进 Run 的 string 字段，去掉八个 sql.NullString 中间变量。",
+      "rationale": "行为与需求原文等价（NULL 读回空串），少 8 个局部变量与两行赋值；TestRecordRunEmptyStringsAreNull 直连 sqlite 断言库里仍是 NULL（8 个）——COALESCE 只在读侧，写侧 nullIfEmpty 不变。DoD functional[2] 钉的是行为不是实现形态。"
+    },
+    {
+      "decision": "回退 code-simplifier 抽出的 schemaDDL(spec) 共享 helper，NewStore / openWithSchema / TestDDLIsIdempotent 三处保持 DoD functional[0] 给出的 append([]string{...}, runsDDL()...) 字面形态。",
+      "rationale": "DoD functional[0] 对三处调用点写了明确代码形态，且 helper 是需求之外的新符号；验证者逐条对照 DoD 时字面形态可直接核对。设计上该 helper 有价值（三处列表同源），留给后续任务或 TASK-008 收口时再议，本任务不扩范围。"
+    },
+    {
+      "decision": "RecordRun 插在 Save 之前（紧接 RecentPending 之后），RecentRuns / nullIfEmpty / boolToInt 依次跟在后面。",
+      "rationale": "DoD 要求放在 RecentPending 之后；同时保证 git diff 里 Save 函数体零触碰、store.go 只有 NewStore DDL 列表一行 `-`。"
+    },
+    {
+      "decision": "提交信息锚 feat(TASK-001): M1.5 …（AD-3），不用需求原文的 feat(M1.5 TASK-001):。",
+      "rationale": "task-completed.sh 的 git log --grep 只认 ^[a-z]+\\(TASK-001\\):，照抄原文改动对门禁不可见。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/schema.go",
+    "internal/hestia/types.go",
+    "internal/hestia/store.go",
+    "internal/hestia/schema_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "const TableRuns = \"hestia_runs\"",
+      "consumers": "TASK-002（Ingest 写行）、TASK-003（HealthSummary 查询）、TASK-007（status runs 段）"
+    },
+    {
+      "symbol": "type RunOutcome string；RunNoNew=\"no_new\" / RunIngested=\"ingested\" / RunPending=\"pending\" / RunDuplicate=\"duplicate\" / RunFailed=\"failed\"；非导出 validRunOutcomes map 是 RecordRun 的域校验依据",
+      "consumers": "TASK-002 按 Ingest 分支取值；TASK-003 RunsByOutcome 键"
+    },
+    {
+      "symbol": "type Run struct { RunAt, FinishedAt time.Time; Outcome RunOutcome; Period, PeriodType, ArticleID, Extractor, BlockedCheck, Stage, Error, NotifyError string; Notified bool; Duration time.Duration }",
+      "semantics": "八个可空文本列（Period/PeriodType/ArticleID/Extractor/BlockedCheck/Stage/Error/NotifyError）空串 ⇒ 存 NULL，读回空串；FinishedAt 零值 ⇒ 存库时回落 RunAt（读回 FinishedAt.Equal(RunAt)）；RunAt/FinishedAt 以 UTC RFC3339 秒级存储，亚秒部分丢失，读回的 Location 是 UTC（比较用 Equal 不要用 ==）；Notified 存 0/1；Duration 存 Milliseconds()，读回精度毫秒。"
+    },
+    {
+      "symbol": "func (s *Store) RecordRun(ctx context.Context, r Run) error",
+      "semantics": "Outcome 不在域内 ⇒ error 串含 `unknown outcome \"<值>\"`；RunAt 零值 ⇒ error 串 `RunAt is zero`；两种拒绝都不落库。只写 hestia_runs（TestRecordRunTouchesOnlyRunsTable 源码级守卫）。DB 错误包装为 `hestia store record run <outcome>: …`。"
+    },
+    {
+      "symbol": "func (s *Store) RecentRuns(ctx context.Context, n int) ([]Run, error)",
+      "semantics": "n <= 0 ⇒ (nil, nil)；ORDER BY run_at DESC, rowid DESC LIMIT n（同 run_at 按写入逆序）；空表 ⇒ (nil, nil)（out 未 append 保持 nil）；run_at / finished_at 非 RFC3339 ⇒ error 含 `bad run_at` / `bad finished_at`；rows.Err() 传播；DB 错误包装为 `hestia store recent runs: …`。"
+    },
+    {
+      "symbol": "写口守卫名单：TestStoreExposesNoWriteMethods 12 项、TestPackageExposesNoWriteFunctions 24 项（精确集合）",
+      "consumers": "TASK-003 加 HealthSummary 时须把它登记进 AST 守卫（变 25 项）并留一段理由注释；本任务未加。"
+    }
+  ],
+  "verification": {
+    "red_phase": "go test ./internal/hestia/ -run 'TestRunsStructure|TestRecordRun|TestRecentRuns' 2>&1 | head -5 →\n# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/store_test.go:132:78: undefined: TableRuns\ninternal/hestia/store_test.go:2773:24: undefined: RunOutcome\ninternal/hestia/store_test.go:2773:36: undefined: Run\ninternal/hestia/store_test.go:2775:9: undefined: Run",
+    "my_commit_sha": "5b9859b0042fd41996882fb37cee818b365d1aa1",
+    "branch": "task/TASK-001-m15",
+    "merged_master_sha": "511ee4264d1df3129b986e4f8857e3284c06d754",
+    "resampled_on_master": {
+      "anchor": "511ee4264d1df3129b986e4f8857e3284c06d754（merge commit，含 5b9859b 与 TASK-005 的 2db8519）",
+      "content_identity": "master 上五个文件 sha256 与 5b9859b 树内逐一相同（schema.go 6f44f852…/types.go 062c971f…/store.go 685e11a7…/schema_test.go f6efcbf8…/store_test.go 186b98b7…）",
+      "gate_visibility": "git log -E --grep='^[a-z]+\\(TASK-001\\):' 037d1eb..HEAD → 511ee42 merge(TASK-001) + 5b9859b feat(TASK-001)",
+      "gofmt": "gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas → 仅 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（三处既有欠账，无新增）",
+      "vet": "go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/... → 零输出，rc=0",
+      "tests": "GOTOOLCHAIN=local go test 五包 -count=1 → hestia / metrics / alert / config / cmd/atlas 全 ok",
+      "coverage": "go test ./internal/hestia -cover -count=1 → 96.5%（基线 037d1eb 实测 96.5%，持平；硬门槛 ≥ 96.3%）",
+      "guards": "go test ./internal/hestia/ -run 'ExposesNoWrite|TestDDLIsIdempotent|TestRecordRunTouchesOnlyRunsTable' -v → TestDDLIsIdempotent / TestStoreExposesNoWriteMethods / TestPackageExposesNoWriteFunctions / TestRecordRunTouchesOnlyRunsTable 四个 --- PASS",
+      "new_tests": "-run 'TestRunsStructure|TestRecordRun|TestRecentRuns|TestRunMethods' -v → 11 个 --- PASS（8 顶层 + 3 子测试：RoundTrip 的 FinishedAt 回落子例、CorruptTimestamps 的 run_at/finished_at 两例）",
+      "boundary": "git diff 037d1eb HEAD -- internal/hestia/store.go 中 'func (s *Store) Save' 出现 0 次；store.go 唯一 '-' 行是 NewStore 的 `for _, ddl := range []string{observationsDDL(), pendingDDL(), currentViewDDL(spec)} {`",
+      "untouched": "git diff --stat 037d1eb HEAD -- parse.go extract.go validate.go fields.go go.mod go.sum → 空；git status --short -- internal cmd/atlas configs docs go.mod go.sum → 空",
+      "numstat": "git show --stat 5b9859b → 5 files changed, 377 insertions(+), 6 deletions(-)"
+    }
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "task_id": "TASK-002",
+  "title": "Ingest 逐候选写 hestia_runs，零行时记 no_new 心跳（M1.5）",
+  "owner": "dev-m15-a",
+  "key_findings": [
+    "需求的 `firstLine` 与本仓库 `status_test.go:150` 既有测试 helper `firstLine(t, s)` 同名不同签名，同包编译冲突（`firstLine redeclared in this block`）；`status_test.go` 不在本任务 writes 内，故实现侧命名 `firstLineOf(s string) string`，语义不变（`strings.Cut` 取首行）。",
+    "reviewer B2 成立：`hestia_runs` 上的表级 `BEFORE INSERT` 触发器能把故障精确落在 `RecordRun`——HasArticle / Validate / Save 照常，期次仍入库、Verdict 行仍打印、runs 表 0 行、错误链含 `record run`；零候选变体（同一触发器库第二轮）错误链含 `record heartbeat`。spec §8「RecordRun 失败不影响已入库行」已由 TestIngestRunRecordFailureKeepsIngestedRow **行为级测过**，不再是「靠顺序」。",
+    "心跳判据取 `processed == 0` 而非需求原文的 `recorded == 0`（reviewer S2）：候选被处理而 RecordRun 失败时 `recorded` 仍 0，原文会再补一行 no_new 把「处理过一期」标成空跑。测试用触发器库断言错误链**不含** `record heartbeat`（触发器下 no_new 也写不进去，错误链是唯一可观测的差别）。",
+    "`TestIngestRecordsFailedWithStage` 的夹具 `<html><body>not a report</body></html>` 经 fetch（fakeFetcher）与 snapshot（t.TempDir）后在 Parse 失败，stage 恰为 `parse`，无需换 raw；与既有 TestIngestContinuesAfterOneFailure 同形。",
+    "`--only-period` 用既有 `twoEntryFetcher`（2025-12/annual + 2020-06/h1 两个可解析候选）+ `Force: true, OnlyPeriod: \"2025-12\"`：runs 恰 1 行、Period=2025-12、outcome=ingested；被过滤的那期不记行也不补心跳（过滤在循环之前，processed=1）。",
+    "顺序守卫：`RecordRun` 在 `Ingest` 循环里、`ingestOne` **返回之后**（ingest.go:237），而 `Save` 与 Verdict 行打印在 `ingestOne` 内——控制流上必然在后；单看行号（237 < 352）会误读，故 TestIngestRunRecordFailureKeepsIngestedRow 另用 `strings.Index` 断言 Out 里 `→ hestia_observations` 先于 `run record FAILED`。",
+    "gitnexus detect-changes（npx gitnexus@latest，索引落后）：2 文件 4 符号，risk medium，受影响流程 RunHestiaIngest → Sleep/QueryRowContext/Get；未跑 analyze（M1d 事故 1）。"
+  ],
+  "decisions": [
+    {
+      "decision": "Discover 失败 / OnlyPeriod 无候选 ⇒ 不记行（AD-13），不加测试。",
+      "rationale": "两处都在主循环之前 `return err`，已让退出码非零、err.log 留痕；`hestia_stalled` 的文案「launchd 没跑，或跑了没落库」正是为「跑了但没到记行那一步」写的。代价（供 TASK-008 §A A7 旁注）：Discover 失败在 `hestia status` 的 runs 段与 `runs_total` 都不可见，只在 err.log；若要可见需扩 spec §2.1 心跳定义，本任务不扩。"
+    },
+    {
+      "decision": "心跳按 `processed == 0` 计（reviewer S2），不用需求原文 `recorded == 0`。",
+      "rationale": "spec §2.1 心跳定义是「无候选被处理」；按 recorded 计会在 RecordRun 失败时补一行 no_new，把处理过的一轮标成空跑，且那行 no_new 在同一故障下大概率也写不进去、只多一条误导性错误。"
+    },
+    {
+      "decision": "stage 取传给 fail 的原字符串（`has article` / `fetch <URL>` / `snapshot` / `parse` / `validate` / `save`），期次不一致 `mismatch`，通知失败不走 fail、stage 留空（AD-14）。",
+      "rationale": "不改既有错误串（TestIngestWrapsStageErrors 守着形态）；HealthSummary / collector 不消费 stage，带 URL 只多信息不破坏枚举消费者。"
+    },
+    {
+      "decision": "`firstLine` 改名 `firstLineOf`。",
+      "rationale": "与 status_test.go 既有 helper 同包冲突；改测试 helper 越出 writes 且要动别的任务的文件，改实现侧零成本。"
+    },
+    {
+      "decision": "code-simplifier：保留其抽出的 `isNotifyError(err error) bool`（替换循环与 runRow 两处 `var ne notifyError; errors.As` 样板）；回退其把 `runRow` 去掉接收者的改动。",
+      "rationale": "两处判「是不是通知失败」必须同判，一个 helper 比两份样板更不易漂；`runRow` DoD 字面写的是 `d.runRow(...)`，验证者逐条对照时字面可核，接收者未用只是形态代价。"
+    },
+    {
+      "decision": "既有三处 `d.ingestOne` 直调只改成 `_, err := / _, err = d.ingestOne(...)` + `requireWrappedStageError(t, err)` 两行形态，断言零改动。",
+      "rationale": "boundary[1] 要求 `-` 行 ≤ 3 且只在这三处；`Save 失败` 子测试作用域已有 `err`，故第三处用 `=`。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/ingest_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "hestia_runs 行语义（Ingest 写入，供 TASK-003 HealthSummary / TASK-007 status 消费）",
+      "semantics": "每个**被处理**的候选恰一行（HasArticle 跳过的不记）；同一次唤起的所有行 `RunAt` 相同（循环外取一次 `time.Now()`），`FinishedAt` 各自取记行时刻，`Duration` 是该候选从开始到记行的耗时；本轮零候选被处理 ⇒ 恰一行 `no_new`（Period/PeriodType/ArticleID 全空，Duration=since(runAt)）。outcome：`ingested`（Save 入权威表，Verdict New/Revision/OutOfOrder）/ `pending`（+`BlockedCheck`=第一道 CheckFailed 的 ID）/ `duplicate`（Force 重跑已入库期）/ `failed`（`Stage`=`has article`|`fetch <URL>`|`snapshot`|`parse`|`mismatch`|`validate`|`save`，`Error`=错误首行）。通知：成功 `Notified=true`（仅 Notify 非 nil）；失败 `NotifyError`=首行、outcome **不变**（ingested/pending/failed），失败候选的 P1 送达结果也进同一行。"
+    },
+    {
+      "symbol": "RecordRun 失败的可观测形态",
+      "semantics": "Out 打 `<period> run record FAILED: …`（Verdict 行之后）；错误链含 `hestia ingest <p>/<pt> (<id>): record run: …`；退出码非零；**不**补 no_new。心跳失败：Out `run record FAILED: …`，错误链含 `hestia ingest: record heartbeat: …`。"
+    },
+    {
+      "symbol": "AD-13 射程（供 TASK-008 A7 旁注）",
+      "semantics": "Discover 失败、OnlyPeriod 过滤后零候选：主循环之前 return err，**不记行**；只在退出码与 err.log 可见。"
+    }
+  ],
+  "verification": {
+    "red_phase": "go test ./internal/hestia/ -run 'TestIngestRecords|TestIngestSkippedCandidate' 2>&1 | tail -12 → 八条 FAIL：TestIngestRecordsIngestedRun / NoNewHeartbeat / PendingWithBlockedCheck / SkippedCandidateFallsBackToHeartbeat / DuplicateOnForce / FailedWithStage / NotifyError / Notified，均 `\"[]\" should have 1 item(s), but has 0 … 至少要有一行运行记录`；另 TestIngestOnlyPeriodRecordsOnlyKept 同因 FAIL、TestIngestRunRecordFailureKeepsIngestedRow FAIL 于 `An error is expected but got nil`",
+    "my_commit_sha": "cbac195314b306eddaea944aa39ab87057edb45d",
+    "branch": "task/TASK-002-m15",
+    "merged_master_sha": "c1defc00695d22f1b08aeed5e5d78f29c6f4ac61",
+    "resampled_on_master": {
+      "anchor": "c1defc00695d22f1b08aeed5e5d78f29c6f4ac61（merge commit，含 cbac195；master 此前已含 TASK-005 2db8519、TASK-010 5c1f8e8）",
+      "content_identity": "master 上 ingest.go sha256 c98b81a29829…、ingest_test.go a058dba46277… 与 cbac195 树内相同",
+      "gate_visibility": "git log -E --grep='^[a-z]+\\(TASK-002\\):' 511ee42..HEAD → c1defc0 merge(TASK-002) + cbac195 feat(TASK-002)",
+      "gofmt": "gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas → 仅 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（三处既有欠账，无新增）",
+      "vet": "go vet 五包 → 零输出，rc=0",
+      "tests": "GOTOOLCHAIN=local go test 五包 -count=1 → hestia / metrics / alert / config / cmd/atlas 全 ok",
+      "coverage": "go test ./internal/hestia -cover -count=1 → 96.5%（基线 037d1eb 实测 96.5%，持平；硬门槛 ≥ 96.3%）",
+      "new_tests": "-run 'TestIngestRecords|TestIngestSkippedCandidate|TestIngestOnlyPeriodRecordsOnlyKept|TestIngestRunRecordFailureKeepsIngestedRow' -v → 11 个 --- PASS（10 顶层 + 1 子测试「零候选时心跳失败同样响亮」）",
+      "boundary_1": "git diff 037d1eb HEAD -- internal/hestia/ingest_test.go | grep -c '^-[^-]' → 3，三行均为 `requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))`（:489/510/530 三处，改为两行形态，断言未动）",
+      "order_guard": "ingest.go:237 RecordRun（Ingest 循环，ingestOne 返回之后）；:357 Save、:384 Verdict 打印（ingestOne 内）——控制流上 RecordRun 必在 Save 与打印之后；TestIngestRunRecordFailureKeepsIngestedRow 另以 strings.Index 断言 Out 顺序",
+      "untouched": "git diff --stat 037d1eb HEAD -- parse.go extract.go validate.go fields.go go.mod go.sum → 空；git status --short -- internal cmd/atlas configs docs go.mod go.sum → 空",
+      "numstat": "git show --stat cbac195 → 2 files changed, 333 insertions(+), 26 deletions(-)"
+    }
+  }
+}

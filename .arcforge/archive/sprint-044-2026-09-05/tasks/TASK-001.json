@@ -1,0 +1,63 @@
+{
+  "id": "TASK-001",
+  "title": "`hestia_runs` 表、`Run` 类型、`Store.RecordRun` / `RecentRuns`、两条写口守卫登记",
+  "description": "对应需求文档 **TASK-001**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-001」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n改 `internal/hestia/schema.go`（`TableRuns`、`runsDDL()`）、`types.go`（`RunOutcome` 五常量、`validRunOutcomes`、`Run`）、`store.go`（`NewStore` DDL 列表、`RecordRun`、`RecentRuns`、`nullIfEmpty`、`boolToInt`），测试 `schema_test.go`（1 条）与 `store_test.go`（5 条 + 两条守卫 want + 登记理由注释）。这是本 Sprint 唯一改 `store.go` 的任务。下游 002/003/007 都消费 `Run` 字段语义（空串 ⇒ NULL；`FinishedAt` 零值回落 `RunAt`；时间 UTC RFC3339 秒级），写进 discovery `interfaces_exposed`。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/schema.go",
+    "internal/hestia/types.go",
+    "internal/hestia/store.go",
+    "internal/hestia/schema_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`schema.go`：常量 `TableRuns = \"hestia_runs\"`（带需求给的注释）；`runsDDL() []string` 返回建表 + 索引 `hestia_runs_run_at` 两条，均 `IF NOT EXISTS`，13 列手写（不从 `fieldOrder` 派生，不设主键）。`store.go` 的 `NewStore` DDL 循环改为 `ddls := append([]string{observationsDDL(), pendingDDL(), currentViewDDL(spec)}, runsDDL()...)`。🔴 **reviewer B1（核实成立）**：既有 `openWithSchema`（`schema_test.go:47-62`）与 `TestDDLIsIdempotent`（`:248-257`）的 DDL 列表都只有三段（observations / pending / view），`hestia_runs` 根本不建——两处都改为 `append([]string{observationsDDL(), pendingDDL(), currentViewDDL(testSpec(t))}, runsDDL()...)`；`TestDDLIsIdempotent` 加 `tableInfo(t, db, TableRuns)` 前后相等断言（否则它对 runs 表恒真）；`store_test.go:120` `TestNewStoreCreatesSchemaIdempotently` 的 `sqlite_master` 名单加 `TableRuns`。`TestRunsStructureFromLiveDB`（用改后的 `openWithSchema`）：列集 `ElementsMatch` 精确等于 13 列，且不含任何 `fieldOrder` 里的名字；另用 `columnInfo` 的 `notNull` 断言 `run_at`/`finished_at`/`outcome`/`notified`/`duration_ms` 五列 `NOT NULL`（reviewer S5：只比列名钉不住 spec §2.1 的约束）。",
+      "`types.go`：`type RunOutcome string` + `RunNoNew/RunIngested/RunPending/RunDuplicate/RunFailed` 五常量（值 `no_new/ingested/pending/duplicate/failed`，注释按需求）+ `validRunOutcomes` map + `Run` 结构（13 个字段按需求）。`store.go` 的 `RecordRun(ctx, r Run) error`（放在 `RecentPending` 之后）：`Outcome` 不在域内 ⇒ 错误串含该值（`unknown outcome %q`）；`RunAt` 零值 ⇒ 错误；`FinishedAt` 零值回落 `RunAt`；两个时间 `UTC().Format(time.RFC3339)`；八个可空文本列空串存 **NULL**（`nullIfEmpty`）；`notified` 存 0/1（`boolToInt`）；`duration_ms` 存 `Milliseconds()`。`TestRecordRunRoundTrip`（逐字段相等；**加一个子例** `FinishedAt` 零值 ⇒ 读回 `FinishedAt.Equal(RunAt)`，reviewer S5：这条回落行为原四条测试没有一条覆盖）、`TestRecordRunEmptyStringsAreNull`（直连 sqlite 数 NULL = **8**、`notified` = 1，读回 `NotifyError == \"\"`）、`TestRecordRunRejectsBadInput`（两种拒绝，且 `countRows(TableRuns) == 0`——被拒的行不落库）通过。",
+      "`RecentRuns(ctx, n int) ([]Run, error)`：`n <= 0` ⇒ `nil, nil`；`ORDER BY run_at DESC, rowid DESC LIMIT n`；NULL 列读回空串、`notified != 0`、`duration_ms` 转 `time.Duration`；`run_at`/`finished_at` 解析失败 ⇒ 错误带 `bad run_at`/`bad finished_at`；`rows.Err()` 传播。`TestRecentRunsNewestFirst`（三行顺序 `[Duplicate, Ingested, NoNew]`，`RecentRuns(ctx, 0)` 为 nil）通过。",
+      "两条写口守卫按「登记而不是放宽」更新为**精确集合**（按字母序插入）：`TestStoreExposesNoWriteMethods`（`store_test.go:384`，reflect）want = 既有 10 项 + `RecentRuns` + `RecordRun` = **12 项**；`TestPackageExposesNoWriteFunctions`（`:437`，AST）want = 既有 22 项 + `Store.RecentRuns` + `Store.RecordRun` = **24 项**（`HealthSummary` 由 003 登记，本任务**不**加）。在 `TestPackageExposesNoWriteFunctions` 下方追加需求给的「为什么名单里多了 Store.RecordRun」注释段（原文照抄，含 ADR-0003 射程那句）。新增源码级守卫 `TestRecordRunTouchesOnlyRunsTable`：读 `store.go`，取 `func (s *Store) RecordRun(` 到下一个 `\\n}\\n` 的函数体，`NotContains TableObservations`、`NotContains TablePending`、`Contains TableRuns`。三条守卫 + `TestDDLIsIdempotent` 用 `-run 'ExposesNoWrite|TestDDLIsIdempotent|TestRecordRunTouchesOnlyRunsTable' -v` 跑出四个 `--- PASS`。"
+    ],
+    "boundary": [
+      "`store.go` **只新增**：`git diff 037d1eb HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\*Store) Save'` 必须为 **0**（`Save` 函数体一行不动）；`-` 行只允许出现在 `NewStore` 的 DDL 列表那一处（`for _, ddl := range …` 上一行）。`nullIfEmpty`/`boolToInt` 是非导出 helper，不进守卫名单；若 `store.go` 已有同名或同功能 helper，复用它而不是新写（写进 discovery）。`import` 按需补 `errors`（`RunAt is zero` 用 `errors.New`）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：三组新测试在实现之前必须以编译错误 `undefined: TableRuns`（或 `undefined: RunOutcome` 等）失败，把 `go test ./internal/hestia/ -run 'TestRunsStructure|TestRecordRun|TestRecentRuns' 2>&1 | head -5` 的输出记进 discovery 的 `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/hestia` 96.5%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-001`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-001-m15 ../wt-TASK-001-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（五个文件），信息锚定 **`feat(TASK-001): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-001):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-001\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-001` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-001 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-001.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-001-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m15-a",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/schema.go",
+    "./internal/hestia/types.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/schema_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:43Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "511ee4264d1df3129b986e4f8857e3284c06d754",
+    "discovery_sha256": "c6dae8c7beccb65727c6620025dc2a23787c9f349f5ad1e141e5303fa16e4967",
+    "at": "2026-09-04T10:36:35Z"
+  },
+  "verifier": "test-m15-a"
+}

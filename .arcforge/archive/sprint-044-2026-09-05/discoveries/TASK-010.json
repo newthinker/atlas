@@ -1,0 +1,76 @@
+{
+  "task_id": "TASK-010",
+  "title": "主配置两个新键：AlertRule.Cooldown 与 HestiaConfig{ConfigPath}；mapRules 透传",
+  "author": "dev-m15-b",
+  "written_at": "2026-09-04T10:45:00Z",
+  "key_findings": [
+    "config.AlertRule 加 Cooldown time.Duration `mapstructure:\"cooldown\"`，与 For 同形；viper 既有字符串时长钩子直接解码 \"24h\"，无需改 Load。",
+    "config.HestiaConfig{ConfigPath string `mapstructure:\"config_path\"`} + Config.Hestia（Prism 之后）。ConfigPath 不解析、不 Abs、不校验存在、不进 Validate；config.go 新增 import 0 行（git diff 核实）。",
+    "cmd/atlas mapRules 加 Cooldown: r.Cooldown 一行；TestMapRules_FieldMapping 断言 out[0].Cooldown==24h、out[1].Cooldown==0，既有五字段比对不动。",
+    "TestLoad_HestiaConfigAndRuleCooldown_FromYAML（internal/config，沿 writeTempConfig → Load 手法）：hestia.config_path 与 rules[0].cooldown: 24h 解码；absent 子测试证明不写 hestia: 段时 ConfigPath 为空、不预填默认路径。",
+    "gitnexus impact：mapRules LOW(2)、config.Config LOW(13)、AlertRule UNKNOWN → grep 核实唯一消费点是 mapRules（alert_runner.go:60/163）。detect-changes（master 5c1f8e8，--base-ref 511ee42 隔离本任务）5 文件 7 符号、10 流程、risk **high**——全部是 Config/Load 的固有扇出（每条 Run* 流程都经 Load→Config）；config.go 改动纯新增 11 行，Load 函数体未动（被列为 changed 是行号位移），五包测试全绿。以 2db8519 为基线会连带 TASK-001 的 hestia 改动而报 critical，那不是本任务的。",
+    "merge 后 master 上 cmd/atlas 覆盖率 76.3% 与基线持平（mapRules 一行透传在既有测试覆盖内）；config 83.3% 持平。"
+  ],
+  "decisions": [
+    {
+      "decision": "HestiaConfig 类型注释保留需求 TASK-006 原文三行，任务号按 DoD 改写为 M1.5 的 TASK-010。",
+      "rationale": "AD-2 把 HestiaConfig/Config.Hestia 从需求 006 移入 010；DoD functional[0] 明示注释里任务号写本任务。"
+    },
+    {
+      "decision": "config_test.go 的新测试用一个测试 + absent 子测试，而不是两个顶层测试。",
+      "rationale": "DoD functional[2] 要求「另一段不写 hestia: 的 yaml」，子测试与主测试同一映射注释块，验证者对照更直接；不新增夹具。"
+    },
+    {
+      "decision": "Cooldown 与 ConfigPath 都不加任何校验（负值 / 路径存在性）。",
+      "rationale": "DoD boundary[0]：装不上的响亮失败是 006 buildHestiaHealth 的事；For 也不校验负值。"
+    },
+    {
+      "decision": "提交信息锚 feat(TASK-010): M1.5 …。",
+      "rationale": "AD-3：门禁只认 ^[a-z]+\\(TASK-010\\):。"
+    }
+  ],
+  "files_modified": [
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "cmd/atlas/alert_runner.go",
+    "cmd/atlas/alert_runner_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "config.HestiaConfig{ConfigPath string `mapstructure:\"config_path\"`}；config.Config.Hestia HestiaConfig `mapstructure:\"hestia\"`",
+      "for": "TASK-006 buildHestiaHealth(cfg *config.Config, …)：读 cfg.Hestia.ConfigPath；空 = 不注册 collector；非空 ⇒ hestia.LoadConfig(cfg.Hestia.ConfigPath)。yaml 键 hestia.config_path，相对 serve 的 WorkingDirectory，config 包不做任何解析或存在性校验。",
+      "semantics": "未写 hestia: 段 ⇒ ConfigPath == \"\"（不预填默认路径）"
+    },
+    {
+      "symbol": "config.AlertRule.Cooldown time.Duration `mapstructure:\"cooldown\"` → mapRules → alert.Rule.Cooldown",
+      "for": "TASK-006 configs/config.example.yaml 的 alerts.rules[].cooldown: 24h 会经此链路生效（TASK-005 语义：0/负 = 全局 5m）",
+      "semantics": "viper 字符串时长解码，与 for 同形"
+    }
+  ],
+  "verification": {
+    "my_commit": "2658e5dcbfd02b9d8a1b606ec8b0aad46d0a0e75",
+    "branch": "task/TASK-010-m15",
+    "master_after_merge": "5c1f8e878768c03a5dbeb0375d41c644439f8004",
+    "baseline_worktree": "2db85192f420a90ad5d79f912b66f11e2462836b",
+    "coverage_baseline_anchor": "037d1eb1e4f827c415319519e40f4e2208968920",
+    "red_phase": "worktree @2db8519 加字段前：go test ./cmd/atlas/ -run TestMapRules_FieldMapping ⇒ cmd/atlas/alert_runner_test.go:174:105: unknown field Cooldown in struct literal of type config.AlertRule [build failed]；go test ./internal/config/ -run TestLoad_HestiaConfigAndRuleCooldown_FromYAML ⇒ internal/config/config_test.go:752:9: cfg.Hestia undefined (type *Config has no field or method Hestia)，:758:25 cfg.Alerts.Rules[0].Cooldown undefined",
+    "tests_master": "master 5c1f8e878768c03a5dbeb0375d41c644439f8004：GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1 ⇒ 五包全 ok",
+    "coverage_master": "master 5c1f8e878768c03a5dbeb0375d41c644439f8004：./internal/config 83.3%（基线 037d1eb 83.3%）；./cmd/atlas 76.3%（基线 76.3%，任务级 coverage_floor 75）；./internal/hestia 96.5%（硬门槛 96.3%）",
+    "gofmt_master": "master 5c1f8e878768c03a5dbeb0375d41c644439f8004：gofmt -l 五包只列 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（三既有欠账，无新增）",
+    "vet_master": "master 5c1f8e878768c03a5dbeb0375d41c644439f8004：go vet 五包 rc=0 零输出",
+    "no_new_deps_and_frozen_files": "git diff --stat 037d1eb 5c1f8e8 -- go.mod go.sum internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go ⇒ 空",
+    "no_new_import": "git diff internal/config/config.go 中以引号开头的新增行 = 0（config.go 不新增 import）",
+    "numstat_master": "git diff --numstat 2db8519 5c1f8e8 -- internal/config cmd/atlas ⇒ alert_runner.go 1/0、alert_runner_test.go 8/1、config.go 11/0、config_test.go 47/0",
+    "code_simplifier": "跑过（subagent code-simplifier:code-simplifier），回复无改动；git status/diff --stat 核实前后均 4 files +67/-1",
+    "graph_analysis": "impact mapRules LOW(2) / config.Config LOW(13) / AlertRule UNKNOWN(grep 核实)；detect-changes --scope compare --base-ref 511ee42 --repo atlas（master 5c1f8e8）⇒ 5 files 7 symbols 10 processes risk high（Config/Load 固有扇出，改动纯新增；见 key_findings[4]）"
+  },
+  "dod_to_test": {
+    "functional[0]": "config.go diff（AlertRule.Cooldown / HestiaConfig / Config.Hestia）+ TestLoad_HestiaConfigAndRuleCooldown_FromYAML",
+    "functional[1]": "alert_runner.go diff（Cooldown: r.Cooldown）+ TestMapRules_FieldMapping（24h / 0 断言）",
+    "functional[2]": "TestLoad_HestiaConfigAndRuleCooldown_FromYAML 主体 + /absent 子测试",
+    "boundary[0]": "verification.no_new_import；config.go diff 无 Validate/Load 改动",
+    "error_handling[0]": "verification.red_phase（两段）",
+    "non_functional[0]": "verification.gofmt_master / vet_master / tests_master / coverage_master / no_new_deps_and_frozen_files",
+    "non_functional[1]": "AD-6：worktree → 提交 2658e5d → leader merge 5c1f8e8 → master 重采 → 本 discovery"
+  }
+}

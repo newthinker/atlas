@@ -1,0 +1,60 @@
+{
+  "id": "TASK-004",
+  "title": "`metrics.HestiaCollector`——九个指标，空表不输出时间戳，出错只计 `collect_errors`",
+  "description": "对应需求文档 **TASK-004**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-004」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n新建 `internal/metrics/hestia_collector.go`（`HealthFunc`、`HestiaCollector`、`allOutcomes`、`NewHestiaCollector(fetch, now)`、`Describe`/`Collect`）与 `hestia_collector_test.go`（4 条，沿本包风格用标准 `testing`、不用 testify；import `dto \"github.com/prometheus/client_model/go\"`——已在 go.sum，`go.mod` 不变）。上游 003 discovery 给 `Health` 的零值约定。`metrics.Registry` 嵌入 `*prometheus.Registry`（`Gather`/`MustRegister` 可用），`Snapshot()` 对 gauge/counter 按名字**跨标签求和**（实测 `snapshot.go`），所以 `hestia_runs_total` 在快照里是 13。",
+  "module": "metrics",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/metrics/hestia_collector.go",
+    "internal/metrics/hestia_collector_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`type HealthFunc func(ctx) (hestia.Health, error)`；`NewHestiaCollector(fetch HealthFunc, now func() time.Time) *HestiaCollector` 实现 `prometheus.Collector`；`timeout` 5s 的 `context.WithTimeout` 包住 `fetch`。九个指标名/类型/标签固定：gauge `hestia_last_run_timestamp`、`hestia_last_ingest_timestamp`、`hestia_hours_since_last_run`、`hestia_hours_since_last_ingest`、`hestia_pending_review`；counter `hestia_runs_total{outcome}`（**五个 outcome 恒输出**，没出现过的为 0）、`hestia_validation_blocked_total{check_id}`、`hestia_notify_failures_total`、`hestia_collect_errors_total`（实例内 `prometheus.Counter`，进程内累加）。Help 文案按需求。`TestHestiaCollector_FullOutput` 通过（九族齐全；`last_run_timestamp` = `Unix()`；`hours_since_last_run` 2、`hours_since_last_ingest` 48；`pending_review` 3；`notify_failures_total` 1；`runs_total` 五序列 `{no_new:10, ingested:2, pending:1, duplicate:0, failed:0}`；`validation_blocked_total{check_id=\"deposit_sum\"}` 1；`collect_errors_total` 0）。",
+      "空表：`LastRun`/`LastIngest` 零值时**四个时间戳类指标不输出**（0 是 1970 年，`hours_since` 立刻超阈值假红），`pending_review` 仍输出 0、`runs_total` 仍五序列——`TestHestiaCollector_EmptyOmitsTimestamps` 通过。`fetch` 出错：**不输出任何事实指标**（不能用陈旧值冒充），只 `collect_errors.Inc()` 后输出它——测试除断言 `hestia_pending_review` 缺席外**还要断言 `fam[\"hestia_runs_total\"]` 为 nil**（reviewer S7：否则「出错仍输出五个恒序列」的实现能过）；同一实例第二次抓取 = 2——`TestHestiaCollector_ErrorEmitsOnlyCollectErrors` 通过（同一 collector 被两个 `NewRegistry()` 注册是刻意的，不是 bug）。",
+      "告警循环可见性：`TestHestiaCollector_VisibleInSnapshot`——`reg.Snapshot()[\"hestia_hours_since_last_run\"] == 2`、`[\"hestia_runs_total\"] == 13`（五序列求和）通过。"
+    ],
+    "boundary": [
+      "`BlockedByCheck` 为空 map 时 `hestia_validation_blocked_total` 族**没有序列**（`fam[名]` 为 nil）——测试取值前不得对 nil 族解引用 panic；`Collect` 里 `for check, n := range h.BlockedByCheck` 顺序随机，测试只按标签值取、不按下标。`now` 只从注入的函数取，`Collect` 里不得出现 `time.Now()`（变异自证：把注入的 `now` 换成 `time.Now` ⇒ `hours_since` 断言必红，隔离副本上做一次并记 discovery）。**不新增导出符号**除 `HealthFunc`、`HestiaCollector`、`NewHestiaCollector`（及其两个方法）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/metrics/ -run TestHestiaCollector 2>&1 | head -5` 在实现前报 `undefined: NewHestiaCollector`，记进 discovery `verification`。`MustNewConstMetric` 只在 Desc 与标签数不符时 panic——标签数由本文件固定，不为它写 recover。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/metrics` 98.9%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-004`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-004-m15 ../wt-TASK-004-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`internal/metrics/hestia_collector.go internal/metrics/hestia_collector_test.go`），信息锚定 **`feat(TASK-004): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-004):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-004\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-004` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-004 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-004.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-004-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-c",
+  "packages": [
+    "./internal/metrics"
+  ],
+  "writes": [
+    "./internal/metrics/hestia_collector.go",
+    "./internal/metrics/hestia_collector_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:43Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "4c14d7903cbd01258ddeab9e5f3aab5641871c47",
+    "discovery_sha256": "e306d816cc8c6df1442d386b86cdcbb950702227f0d433de4ad6bbe94d16484a",
+    "at": "2026-09-04T13:01:08Z"
+  },
+  "verifier": "test-m15-a"
+}

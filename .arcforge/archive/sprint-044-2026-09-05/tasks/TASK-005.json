@@ -1,0 +1,58 @@
+{
+  "id": "TASK-005",
+  "title": "告警规则按规则冷却期（`alert.Rule.Cooldown`），未写退回全局 5 分钟",
+  "description": "对应需求文档 **TASK-005**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-005」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n**AD-2 拆分**：本任务只做 `internal/alert`——`rules.go` 的 `Rule.Cooldown time.Duration \\`mapstructure:\"cooldown\"\\``（带需求注释）、`evaluator.go` 的 `Evaluate` 冷却判断按规则取值、`evaluator_test.go` 的 `TestEvaluator_PerRuleCooldown`。需求 TASK-005 的另一半（`config.AlertRule.Cooldown` + `cmd/atlas` `mapRules` 透传 + `TestMapRules_FieldMapping` 断言）归 **TASK-010**。既有夹具：`mockNotifier`（`evaluator_test.go:13`）、`eval.advanceTime`（`evaluator.go:145`，非导出）、`e.cooldown` 默认 5m（`:42`）、`e.lastFired[rule.Name]`（`:107`）。",
+  "module": "alert",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/alert/rules.go",
+    "internal/alert/evaluator.go",
+    "internal/alert/evaluator_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`Rule` 加 `Cooldown time.Duration \\`mapstructure:\"cooldown\"\\``（注释：0 = 用评估器全局值 5 分钟；持续几天的状态设 24h，否则每 5 分钟一条；带 `M1.5 的 TASK-005`）。`Evaluate` 的冷却判断改为 `cooldown := e.cooldown; if rule.Cooldown > 0 { cooldown = rule.Cooldown }; if hasFired && now.Sub(lastFired) < cooldown { return }`——其余逻辑（pending/for、fire、`anySucceeded` 才进冷却）一行不动。",
+      "`TestEvaluator_PerRuleCooldown` 通过：`hestia_hours_since_last_run = 40`，规则 `Cooldown: time.Hour` 首发 1 条，`advanceTime(30m)` 再评估仍 1 条，`advanceTime(31m)` 后 2 条；未写 `Cooldown` 的规则 `api_down`（同 expr）首发第 3 条，`advanceTime(4m)` 仍 3 条，`advanceTime(2m)` 后 4 条。",
+      "既有 `TestEvaluator_Cooldown`（全局 5m）与 `internal/alert` 全包测试不受影响；`SetCooldown` 语义不变（它仍只改全局值）；`Rule.Evaluate`/`FormatMessage` 不动。"
+    ],
+    "boundary": [
+      "**变异自证**（隔离副本 `mktemp -d` 拷贝，主工作区文件 sha256 前后一致）：M1 把 `if rule.Cooldown > 0` 改成 `if false` ⇒ `TestEvaluator_PerRuleCooldown` 必红（1h 规则 30m 后会重发）；M2 把回落值 `e.cooldown` 改成 `rule.Cooldown` ⇒ 必红（未写规则 4m 后会重发，因为 0 冷却）。两个变异各跑一次，「原状绿 / 变异红」的输出记 discovery `verification`。负 `Cooldown`（如 yaml 写 `-1h`）按 `> 0` 判定视同未写——注释里说明一句，不加校验（`For` 也没校验负值，沿既有形态）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/alert/ -run TestEvaluator_PerRuleCooldown 2>&1 | head -5` 在加字段前报 `unknown field Cooldown in struct literal`，记进 discovery `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/alert` 92.3%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-005`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-005-m15 ../wt-TASK-005-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`internal/alert/rules.go internal/alert/evaluator.go internal/alert/evaluator_test.go`），信息锚定 **`feat(TASK-005): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-005):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-005\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-005` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-005 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-005.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-005-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m15-b",
+  "packages": [
+    "./internal/alert"
+  ],
+  "writes": [
+    "./internal/alert/rules.go",
+    "./internal/alert/evaluator.go",
+    "./internal/alert/evaluator_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:44Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "2db85192f420a90ad5d79f912b66f11e2462836b",
+    "discovery_sha256": "107531f019af23cb3da77615c839f809bd6474305e9585fd58cb9d59001da112",
+    "at": "2026-09-04T10:31:06Z"
+  },
+  "verifier": "test-m15-a"
+}

@@ -1,0 +1,66 @@
+{
+  "id": "TASK-007",
+  "title": "`hestia status` 显示最近 5 次运行（`runs` 段）——销 M1d 挂账 C2 第二半",
+  "description": "对应需求文档 **TASK-007**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-007」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n改 `internal/hestia/status.go`（`RenderStatus` 加第五参数 `runs []Run`；末尾 `runs:` 段；import `time`）、`status_test.go`（2 条新测试 + 既有 **5 处**调用点补 `nil`：`:30 :64 :86 :110 :129`）、`cmd/atlas/hestia.go`（`runHestiaStatus` 在 `pending` 之后读 `st.RecentRuns(ctx, 5)`，`:346-348`）。需求说「既有四处」，实测是 5 处测试 + 1 处 cmd。既有 `RenderStatus` 只对第一行 `Fprintf` 检查写错误、其余裸调用（`status.go:38-56`），runs 段**同形**。上游 001 discovery 给 `RecentRuns` 与 `Run` 字段。",
+  "module": "hestia",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/hestia/status.go",
+    "internal/hestia/status_test.go",
+    "cmd/atlas/hestia.go",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`RenderStatus(w io.Writer, dbPath string, obs []StatusRow, pending []PendingRow, runs []Run) error`；函数末尾 `return nil` 之前加 `runs` 段（注释按需求，带「销 M1d 挂账 C2 的第二半」）：`\\nruns: %d\\n`，每行 `  <RFC3339 UTC>  %-9s<outcome>`，随后按条件追加 `  <period>/<period_type>`（`Period != \"\"`）、`  stage=<stage>`、`  <error>`、`  notify_error=<notify_error>`，`Fprintln` 收尾。`import` 加 `time`。",
+      "`TestRenderStatusRuns`（三行：`runs: 3`；`2026-09-20T15:30:00Z  failed     2026-08/monthly  stage=parse  boom`；`ingested   2026-08/monthly  notify_error=telegram down`；`no_new`）与 `TestRenderStatusRunsEmpty`（`runs: 0`）通过。既有 5 处调用点补第五参数 `nil`，既有断言不动；`TestRenderStatusReportsWriteError`（`failingWriter{failAt: 1}`）仍绿。",
+      "`cmd/atlas/hestia.go` 的 `runHestiaStatus`：`pending` 之后 `runs, err := st.RecentRuns(ctx, runsLimit)`——在 `statusLimit`（`hestia.go:16`，=10）旁加 `const runsLimit = 5`，注释指 spec §6 并说明为何与 `statusLimit` 不同（dev-m15-c 派发前提议，Leader 采纳：需求原文的字面量 5 不是判据，数值 5 才是），错误传播，`RenderStatus(cmd.OutOrStdout(), cfg.Storage.DBPath, obs, pending, runs)`。🔴 **reviewer B3（核实成立）**：需求 Files 明写 `Test: cmd/atlas/hestia_test.go`，初版 `writes` 漏了它——既有 `TestHestiaStatusOnEmptyStore`（`hestia_test.go:224-242`）只断言两行计数，dev 传 `nil` 也全绿。故：`TestHestiaStatusOnEmptyStore` 补 `assert.Contains(out, \"runs: 0\")`；新增 `TestHestiaStatusShowsRecentFiveRuns`——用 `hestia.NewStore(同一 db_path)` 写 **6** 行 `RecordRun`（Period 各不同如 `2026-01`…`2026-06`，`RunAt` 递增）后 `runHestiaStatus` 输出含 `runs: 5`，**且最旧那行 `2026-01/monthly` 不出现**（dev-m15-c 提议，Leader 采纳：只断 `runs: 5` 分不出「LIMIT 5」与「打了哪 5 条」；钉 spec §6「最近 5 行」与接线）。`TestHestiaCmdDoesNotResolveDBPath`（`hestia.go` 不 import `path/filepath`）仍绿；AST 守卫 want 不变（`RenderStatus` 已在名单，签名变化不影响名单）。"
+    ],
+    "boundary": [
+      "`runs` 为 nil 与空切片同形（`runs: 0`）；`Outcome` 的 `%-9s` 对最长的 `duplicate`（9 字符）恰好不截断——测试断言里 `failed` 后跟 5 个空格、`ingested` 后 3 个空格是 `%-9s` + 两个分隔空格的结果，dev **不得**调格式宽度来凑断言。`RunAt` 用 `UTC()` 再格式化（库里存的就是 UTC，但 `RecentRuns` 解析出的 Location 可能是 `+00:00` 而非 `UTC`，不 `UTC()` 会打成 `+00:00` 后缀而非 `Z`）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/hestia/ -run TestRenderStatus 2>&1 | head -5` 在改签名前报 `too many arguments in call to RenderStatus`，记进 discovery `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/hestia` 96.5% / `./cmd/atlas` 76.3%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-007`。 **门禁形态（AD-4）**：`coverage_floor: 75`（两包 `-coverpkg` 合并，`cmd/atlas` 基线 76.3% 拉低 total）；判据仍是两包各自不低于基线。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-007-m15 ../wt-TASK-007-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`internal/hestia/status.go internal/hestia/status_test.go cmd/atlas/hestia.go cmd/atlas/hestia_test.go`），信息锚定 **`feat(TASK-007): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-007):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-007\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-007` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-007 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-007.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-007-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-c",
+  "packages": [
+    "./internal/hestia",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/hestia/status.go",
+    "./internal/hestia/status_test.go",
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "coverage_floor": 75,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:44Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "e2d1f2be25e6c7f13a6761e6290a654c95dfd529",
+    "discovery_sha256": "0aa410bfebf582525a4ece99e496f7caa0101bc024f302374c8a7ca72168332f",
+    "at": "2026-09-04T10:57:38Z"
+  },
+  "verifier": "test-m15-a"
+}

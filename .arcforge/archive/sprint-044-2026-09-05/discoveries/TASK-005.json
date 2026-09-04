@@ -1,0 +1,69 @@
+{
+  "task_id": "TASK-005",
+  "title": "告警规则按规则冷却期（alert.Rule.Cooldown），未写退回全局 5 分钟",
+  "author": "dev-m15-b",
+  "written_at": "2026-09-04T10:30:00Z",
+  "key_findings": [
+    "需求 TASK-005 的 internal/alert 半边按原文落地：Rule 加 Cooldown time.Duration `mapstructure:\"cooldown\"`；Evaluate 冷却判断改为局部 cooldown := e.cooldown; if rule.Cooldown > 0 { cooldown = rule.Cooldown }；pending/for、fire、anySucceeded 才进冷却的逻辑一行未动。",
+    "既有 TestEvaluator_Cooldown（全局 5m）与 SetCooldown 语义不变：SetCooldown 仍只改 e.cooldown，规则未写 Cooldown 时照旧生效。",
+    "调用方核实：alert.Rule 的唯一非测试构造点是 cmd/atlas/alert_runner.go:63 的键名字面量，新增字段零值不影响；config.AlertRule.Cooldown 与 mapRules 透传归 TASK-010（AD-2）。",
+    "gitnexus impact（Evaluator.Evaluate 上游）3 处 LOW；detect-changes（master 上 --scope compare --base-ref 037d1eb）4 文件 3 符号 low、0 受影响流程。索引落后 45 提交，故同时用 grep 文本核实过调用方。",
+    "门禁 task-completed.sh 的 git log --grep 带 --since=$WORK_SINCE（:164）——往期 sprint 同名 TASK-005 的 19 个历史提交不会被算进本任务改动（我最初担心会报漂移，读脚本后排除）。"
+  ],
+  "decisions": [
+    {
+      "decision": "负 Cooldown（yaml 写 -1h）按 > 0 判定视同未写，不加校验，只在字段注释里说明一句。",
+      "rationale": "DoD boundary[0] 明示；与 For 同形（For 也不校验负值），加校验会引入需求之外的错误路径与导出行为。"
+    },
+    {
+      "decision": "冷却值用局部变量 cooldown 而不是改 e.cooldown 或加 helper 方法。",
+      "rationale": "需求原文形态；不新增导出符号；SetCooldown 语义不变（functional[2]）。code-simplifier 复核后无改动。"
+    },
+    {
+      "decision": "提交信息锚 feat(TASK-005): M1.5 …，不用需求写的 feat(M1.5 TASK-005):。",
+      "rationale": "AD-3：task-completed.sh 只认 ^[a-z]+\\(TASK-005\\):，照抄需求会让改动对门禁不可见。"
+    }
+  ],
+  "files_modified": [
+    "internal/alert/rules.go",
+    "internal/alert/evaluator.go",
+    "internal/alert/evaluator_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "alert.Rule.Cooldown time.Duration `mapstructure:\"cooldown\"`",
+      "for": "TASK-010（config.AlertRule.Cooldown 解码 + cmd/atlas mapRules 透传 Cooldown: r.Cooldown + TestMapRules_FieldMapping 断言 out[0].Cooldown==24h / out[1].Cooldown==0）",
+      "semantics": "0 或负值 = 用评估器全局 5 分钟；>0 = 本规则两次触发的最小间隔"
+    }
+  ],
+  "verification": {
+    "my_commit": "d55b66ef64d291a7a0b9b5802c2089bfdddef0e4",
+    "branch": "task/TASK-005-m15",
+    "master_after_merge": "2db85192f420a90ad5d79f912b66f11e2462836b",
+    "baseline": "037d1eb1e4f827c415319519e40f4e2208968920",
+    "red_phase": "worktree @037d1eb 加字段前：go test ./internal/alert/ -run TestEvaluator_PerRuleCooldown ⇒ internal/alert/evaluator_test.go:308:84: unknown field Cooldown in struct literal of type Rule；FAIL [build failed]",
+    "tests_master": "master 2db85192f420a90ad5d79f912b66f11e2462836b：GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1 ⇒ 五包全 ok",
+    "coverage_master": "master 2db85192f420a90ad5d79f912b66f11e2462836b：./internal/alert 92.6%（基线 037d1eb 92.3%）；./internal/hestia 96.5%（硬门槛 96.3%）",
+    "gofmt_master": "master 2db85192f420a90ad5d79f912b66f11e2462836b：gofmt -l 五包只列 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（三既有欠账，无新增）",
+    "vet_master": "master 2db85192f420a90ad5d79f912b66f11e2462836b：go vet 五包 rc=0 零输出",
+    "no_new_deps_and_frozen_files": "git diff --stat 037d1eb 2db8519 -- go.mod go.sum internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go ⇒ 空",
+    "numstat_master": "git diff --numstat 037d1eb 2db8519 -- internal/alert ⇒ evaluator.go 6/2、evaluator_test.go 38/0、rules.go 4/0",
+    "mutation": {
+      "method": "隔离副本（mktemp -d + rsync --exclude .git），变异只改副本 evaluator.go，diff 打印核对，gofmt+vet 有效性闸；主工作区三文件 sha256 前后一致（harness 自检 PASS）；harness: scratchpad/dev-m15-b-mutate-TASK-005.sh，被测树 = worktree task/TASK-005-m15 @ d55b66e 提交前工作树（内容与 d55b66e 相同）",
+      "control": "原状：go test -run 'TestEvaluator_PerRuleCooldown|TestEvaluator_Cooldown' ⇒ ok",
+      "M1": "if rule.Cooldown > 0 { → if false { ⇒ FAIL evaluator_test.go:313: 30 分钟后仍在 1h 冷却内，应只发 1 条，got 2 ⇒ KILLED",
+      "M2": "cooldown := e.cooldown → cooldown := rule.Cooldown ⇒ FAIL evaluator_test.go:326: 未写 cooldown 的规则 4 分钟内不重发（全局 5m），got 4；既有 TestEvaluator_Cooldown 同红（:93 got 3）⇒ KILLED"
+    },
+    "code_simplifier": "跑过（subagent code-simplifier:code-simplifier），回复无改动；git diff --stat 核实前后均 3 files +48/-2",
+    "graph_analysis": "impact Evaluator.Evaluate upstream 3 LOW；detect-changes --scope compare --base-ref 037d1eb --repo atlas（master 2db8519）⇒ 4 files 3 symbols risk low、0 affected processes"
+  },
+  "dod_to_test": {
+    "functional[0]": "rules.go/evaluator.go diff（+Cooldown 字段、cooldown 局部变量）；TestEvaluator_PerRuleCooldown",
+    "functional[1]": "TestEvaluator_PerRuleCooldown",
+    "functional[2]": "TestEvaluator_Cooldown（既有）+ internal/alert 全包",
+    "boundary[0]": "verification.mutation M1/M2 + 注释负值说明",
+    "error_handling[0]": "verification.red_phase",
+    "non_functional[0]": "verification.gofmt_master / vet_master / tests_master / coverage_master / no_new_deps_and_frozen_files",
+    "non_functional[1]": "AD-6 流程：worktree → 提交 d55b66e → leader merge 2db8519 → master 重采 → 本 discovery"
+  }
+}

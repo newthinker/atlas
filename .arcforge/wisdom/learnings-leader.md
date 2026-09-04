@@ -13990,3 +13990,9 @@ TASK-002 当时还是 `pending`、`assigned_to` 为空 ⇒ leader 有写权。**
       要用 `git show --numstat <fix-commit>` 或 `git diff --numstat <父> <fix-commit>`。
     - ⇒ **给下游的命令要连同它的适用条件一起给**。我把一条「在 A 状态下正确」的命令发给了处在 B 状态的人，
       而它在 B 状态下**不报错、只是恒返回空**——又一个「静默给出像样答案」的仪器。
+
+## M1.5（Sprint 044）2026-09-04 · 子代理被 TeammateIdle hook 卡死 + 我又提了一次「晚于 dev_done 的补充要求」
+
+- **事件**：dev-m15-b 前台委派 code-simplifier 子代理，子代理完成后每次返回都被 TeammateIdle hook 拦下要求「推进 TASK-010 到 dev_done」——子代理无权写 `.arcforge/`，条件恒不可满足，循环 5 次后子代理主动给 Leader 发消息。**上游 PENDING-MECHANISMS #3 的第二个实例**（第一个在上游 sprint-010），频次证据成立：hook 按实例名过滤没把子代理排除。
+- **在 Leader 侧完全不可见**：`in_progress` 刻意无 stale-dispatch 阈值；dev 本体 `running`（等子代理）与「正在写代码」同形。本次靠子代理自报，不是靠机制。处置：回子代理「直接返回」，把结论转给 dev 本体让它不等子代理继续。
+- **我自己的错**：merge 回信里要求 dev「discovery decisions 记一句子代理卡死」，而那时它已在走 dev_done；它转 verifying 后我的要求才到，它正确拒绝（改 discovery = 判定对象漂移）。这是 M1d 记过三次的「补充要求晚于 dev_done」，出自 Leader 之手。**处方**：要进 discovery 的内容必须在派发消息或 merge 回信**之前**想好；机制事件的载体是 Leader 的 wisdom / PENDING-MECHANISMS，不是 dev 的 discovery。

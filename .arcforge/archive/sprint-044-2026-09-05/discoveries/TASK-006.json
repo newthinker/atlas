@@ -1,0 +1,90 @@
+{
+  "task_id": "TASK-006",
+  "title": "serve 按 hestia.config_path 注册健康度 collector——未设跳过、装不上即启动失败；样例配置与部署文档",
+  "author": "dev-m15-b",
+  "written_at": "2026-09-04T13:20:00Z",
+  "key_findings": [
+    "buildHestiaHealth 按需求原文落地（cmd/atlas/hestia_health.go，50 行）：reg nil ⇒ log.Info(\"hestia health disabled (metrics disabled)\")；config_path 空 ⇒ log.Info(\"hestia health disabled (hestia.config_path not set)\")；LoadConfig 失败 ⇒ hestia health: loading <path>: …；NewStore 失败 ⇒ hestia health: opening <db>: …；成功 ⇒ reg.MustRegister(metrics.NewHestiaCollector(fetch, time.Now)) + hestia health enabled 日志，cleanup 关 Store。不 import path/filepath（TestHestiaCmdDoesNotResolveDBPath 仍绿）。",
+    "serve.go 接线在 metricsReg 段之后、appCtx 之前（serve.go:186-191）：cleanupHestiaHealth, err := buildHestiaHealth(cfg, metricsReg, log); if err != nil { return err }; defer cleanupHestiaHealth()。err 变量在该作用域已由更早的 := 声明，此处 := 因引入新变量 cleanupHestiaHealth 合法。",
+    "S4（reviewer）预检结果：改动前 config.Load(\"../../configs/config.example.yaml\") 已能整份装载（隔离副本临时测试：rules=1、hestia.config_path 空）⇒ 不需要澄清环、未改 hestia:/alerts: 之外任何段。改动后 TestExampleConfigDeclaresHestiaRules 断言 ConfigPath==configs/hestia.yaml、hestia_stalled(critical)/hestia_no_ingest(warning) 两条 Cooldown==24h。",
+    "writeHestiaYAML 夹具未补键：需求原样四键（storage.db_path/snapshot_dir、discover.index_url/max_pages/timeout）即过 hestia.LoadConfig（thresholds 由 DefaultThresholds 预填，SnapshotDir 也有默认）。AD-10(a) 备用出路未触发。",
+    "DisabledWhenUnset 用 zaptest/observer 断言：FilterMessageSnippet(\"hestia health disabled\") 恰 1 条且 logs.Len()==1（跳过路径只打这一行，spec §8）；RegistersCollector 的 reg nil 子段同样断言恰一条含 metrics disabled。",
+    "空库可见/不可见集合与 TASK-004 discovery 一致：hestia_pending_review、hestia_runs_total 可见，hestia_last_run_timestamp 不可见。",
+    "补了一条需求之外的测试 TestBuildHestiaHealth_FailsLoudlyWhenStoreUnopenable（db_path 父路径是普通文件 ⇒ NewStore MkdirAll 失败 ⇒ hestia health: opening …）：需求三条只覆盖 loading 分支，buildHestiaHealth 94.4% → 100%；cmd/atlas 76.3% → 76.4%。",
+    "gitnexus：impact runServe/NewHestiaCollector 均 UNKNOWN（索引落后）→ grep 核实 runServe 只有 cobra RunE 一处、NewHestiaCollector 无既有调用；detect-changes（master e5ada52，--base-ref 4c14d79）7 文件 3 符号 10 流程 risk high——全部是 runServe 入口的固有扇出，新增 7 行在 reg nil / config_path 空时 no-op，既有流程行为不变。",
+    "运维语义提醒（按 spec 设计，非缺陷）：样例配置现在声明 hestia.config_path: configs/hestia.yaml ⇒ 照抄样例部署而没有 configs/hestia.yaml 的环境，serve 会以 hestia health: loading … 启动失败，这正是「装不上即响亮失败」；不想暴露健康度就把该键留空。deployment.md serve 行已写明。"
+  ],
+  "decisions": [
+    {
+      "decision": "writeHestiaYAML 夹具保持需求原样，不补键。",
+      "rationale": "实测四键即过 hestia.LoadConfig（validate 只查那五项 + 预填的 thresholds）；AD-10 的「补缺的键、不放宽 validate」出路留作备用未触发。"
+    },
+    {
+      "decision": "示例 yaml 装载结果：整份可装载，未改 hestia:/alerts: 之外的段。",
+      "rationale": "S4 预检在改动前已通过，改动后由 TestExampleConfigDeclaresHestiaRules 持续守卫；隔离副本删掉 cooldown: 24h 一行即红，证明守卫真在看这两条规则。"
+    },
+    {
+      "decision": "补 FailsLoudlyWhenStoreUnopenable 覆盖 opening 分支。",
+      "rationale": "DoD non_functional 要求 buildHestiaHealth 三条分支都有测试覆盖；需求三条测试只打到 loading，opening 分支 0 覆盖。夹具不新增导出符号，一条测试 15 行。"
+    },
+    {
+      "decision": "code-simplifier 处置：跑过（subagent），回复『完成，无待办』；核实 tracked diff 仍 28/1、五个测试函数与 hestia_health.go 50 行/无 path/filepath 均在，按无改动处理。",
+      "rationale": "AD-11；子代理自陈经内容核实，不采信回显。"
+    },
+    {
+      "decision": "提交信息锚 feat(TASK-006): M1.5 …。",
+      "rationale": "AD-3 门禁正则。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia_health.go",
+    "cmd/atlas/hestia_health_test.go",
+    "cmd/atlas/serve.go",
+    "configs/config.example.yaml",
+    "docs/deployment.md"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "func buildHestiaHealth(cfg *config.Config, reg *metrics.Registry, log *zap.Logger) (func(), error)（cmd/atlas 非导出）",
+      "for": "TASK-008 §A/§B 收口：三种启动语义各自的测试名——reg nil / config_path 未设 ⇒ TestBuildHestiaHealth_DisabledWhenUnset（+ RegistersCollector 的 reg nil 子段）；装不上 ⇒ TestBuildHestiaHealth_FailsLoudlyWhenUnloadable（loading）与 TestBuildHestiaHealth_FailsLoudlyWhenStoreUnopenable（opening）；成功 ⇒ TestBuildHestiaHealth_RegistersCollector。样例配置守卫 TestExampleConfigDeclaresHestiaRules。",
+      "semantics": "错误串一律以 hestia health: 开头（运维 grep err.log 约定，需求 TASK-009 Step 2 依赖）；跳过路径恰一条 Info 日志；cleanup 幂等 no-op 或关 Store。cmd/atlas 覆盖率实测：master e5ada52396fc088434a5def263fb7c23c5347607 76.4%（基线 037d1eb 76.3%），buildHestiaHealth 100%。"
+    },
+    {
+      "symbol": "configs/config.example.yaml：alerts.rules[hestia_stalled, hestia_no_ingest]（cooldown 24h）+ hestia.config_path: \"configs/hestia.yaml\"；docs/deployment.md 服务清单 serve 行",
+      "for": "TASK-008 CONTRACTS §A/§B、TASK-009 人工验收",
+      "semantics": "两条规则的 expr 指向 hestia_hours_since_last_run / hestia_hours_since_last_ingest，空表时指标缺席 ⇒ 评估 false 不假红；config_path 设了但装不上 ⇒ serve 启动失败。"
+    }
+  ],
+  "verification": {
+    "my_commit": "6007f72fca87dd1bcaf97b1c219b9d677a8e769c",
+    "branch": "task/TASK-006-m15",
+    "master_after_merge": "e5ada52396fc088434a5def263fb7c23c5347607",
+    "baseline_worktree": "4c14d7903cbd01258ddeab9e5f3aab5641871c47",
+    "coverage_baseline_anchor": "037d1eb1e4f827c415319519e40f4e2208968920",
+    "red_phase": "worktree @4c14d79 实现前：go test ./cmd/atlas/ -run TestBuildHestiaHealth ⇒ cmd/atlas/hestia_health_test.go:64:18: undefined: buildHestiaHealth（:80/:90/:99 同）",
+    "s4_precheck": "改动前隔离副本临时测试 config.Load(../../configs/config.example.yaml) ⇒ 无错，rules=1，hestia.config_path=\"\"",
+    "tests_master": "master e5ada52396fc088434a5def263fb7c23c5347607：GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1 ⇒ 五包全 ok；TestBuildHestiaHealth_* 四条 + TestExampleConfigDeclaresHestiaRules + TestHestiaCmdDoesNotResolveDBPath PASS（worktree -v 采）",
+    "coverage_master": "master e5ada52396fc088434a5def263fb7c23c5347607：./cmd/atlas 76.4%（基线 037d1eb 76.3%，coverage_floor 75）；buildHestiaHealth 100.0%（go tool cover -func）；./internal/hestia 96.6%（门槛 96.3%）",
+    "gofmt_master": "master e5ada52396fc088434a5def263fb7c23c5347607：gofmt -l 五包只列 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go",
+    "vet_master": "master e5ada52396fc088434a5def263fb7c23c5347607：go vet 五包 rc=0 零输出",
+    "no_new_deps_and_frozen_files": "git diff --stat 037d1eb e5ada52 -- go.mod go.sum internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go ⇒ 空",
+    "no_filepath_import": "grep -c '\"path/filepath\"' cmd/atlas/hestia_health.go ⇒ 0",
+    "numstat_master": "git diff --numstat 4c14d79 e5ada52 ⇒ hestia_health.go 50/0、hestia_health_test.go 150/0、serve.go 7/0、config.example.yaml 20/0、deployment.md 1/1",
+    "mutation": {
+      "method": "隔离副本（mktemp -d + rsync --exclude .git 自 worktree），只改副本 configs/config.example.yaml，diff 打印核对；主 worktree 四文件 sha256 前后一致；harness scratchpad/dev-m15-b-mutate-TASK-006.sh；被测树 = worktree @4c14d79 + 未提交改动（内容与 6007f72 相同，补 opening 测试之前）",
+      "control": "原状 -run TestExampleConfigDeclaresHestiaRules ⇒ ok",
+      "M-yaml": "删掉 hestia_stalled 的 cooldown: 24h 一行 ⇒ --- FAIL: TestExampleConfigDeclaresHestiaRules (hestia_health_test.go:123 Not equal 24h) ⇒ KILLED"
+    },
+    "code_simplifier": "跑过（subagent code-simplifier:code-simplifier），回复无待办；核实 git diff --stat 28/1 不变、测试函数 5 个、hestia_health.go 50 行、无 path/filepath",
+    "graph_analysis": "impact runServe UNKNOWN（grep：仅 serve.go:52 RunE）/ NewHestiaCollector UNKNOWN（grep：无既有调用）；detect-changes --scope compare --base-ref 4c14d79 --repo atlas（master e5ada52）⇒ 7 files 3 symbols 10 processes risk high（runServe 固有扇出；见 key_findings[7]）"
+  },
+  "dod_to_test": {
+    "functional[0]": "hestia_health.go 与需求原文逐字对照；serve.go:186-191 接线；TestBuildHestiaHealth_* 四条",
+    "functional[1]": "TestBuildHestiaHealth_DisabledWhenUnset（observer 恰一条）/ _FailsLoudlyWhenUnloadable / _RegistersCollector",
+    "functional[2]": "config.example.yaml diff + TestExampleConfigDeclaresHestiaRules；deployment.md diff",
+    "boundary[0]": "verification.s4_precheck + TestExampleConfigDeclaresHestiaRules + verification.mutation.M-yaml + verification.no_filepath_import",
+    "error_handling[0]": "verification.red_phase；FailsLoudlyWhenUnloadable/StoreUnopenable 的 HasPrefix 断言",
+    "non_functional[0]": "verification.gofmt_master / vet_master / tests_master / coverage_master（含 buildHestiaHealth 100%）/ no_new_deps_and_frozen_files",
+    "non_functional[1]": "AD-6：worktree → 提交 6007f72 → leader merge e5ada52 → master 重采 → 本 discovery"
+  }
+}

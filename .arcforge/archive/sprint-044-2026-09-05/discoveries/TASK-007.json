@@ -1,0 +1,65 @@
+{
+  "task": "TASK-007",
+  "author": "dev-m15-c",
+  "key_findings": [
+    "既有 RenderStatus 调用点实测 5 处测试（status_test.go :30 :64 :86 :110 :129）+ 1 处 cmd（hestia.go:348），与 DoD 描述一致、需求原文「四处」为误计。",
+    "按需求原文实现后 cmd/atlas 覆盖率 76.2% < 基线 76.3%（背对背在 master 5c1f8e8 采得基线 76.3%）：runHestiaStatus 新增的 `runs, err := st.RecentRuns` 错误分支无测试覆盖。补 TestHestiaStatusPropagatesRunsError（database/sql 直连塞一行坏 run_at ⇒ status 报 `bad run_at`）后回到 76.3%。它覆盖的是 functional[2]「错误传播」这条行为；写口 RecordRun 拒绝零值时间，坏行只能绕过 Store 直连造。",
+    "Store.DB() 返回的 Querier 只有 QueryContext/QueryRowContext，cmd 层没有 Exec 通道；modernc.org/sqlite 驱动已由 serve.go 在 package main 注册，测试里 sql.Open(\"sqlite\", \"file:\"+dbPath) 可直接用，不新增依赖。",
+    "TestRenderStatusRunsEmpty 用 nil 与 []Run{} 两个子例：RecentRuns 对空表返回 nil（001 discovery），但 DoD boundary[0] 要求两者同形，一条测试只喂 nil 钉不住空切片。",
+    "TestHestiaStatusShowsRecentFiveRuns 的 6 行 RunAt 按月递增、Period 各不同（2026-01…06），断言 runs: 5 + 2026-06 在 + 2026-01 不在；刻意不依赖 rowid 次序（001 变异 M6「去掉 rowid DESC」SURVIVED，同 run_at 的次序守不住）。",
+    "gitnexus：impact(RenderStatus, upstream) = 1 直接调用者 runHestiaStatus（LOW），文本搜索确认非测试调用者仅此 1 处；detect-changes risk low 但索引落后 49 commit，列出的 hestiaCfgPath/hestiaForce/plistEnvKeys 等符号是行号漂移误判（本次 diff 未触碰它们）。"
+  ],
+  "decisions": [
+    {
+      "decision": "cmd/atlas 加 `const runsLimit = 5` 放 statusLimit 旁，runHestiaStatus 用它而非字面量 5。",
+      "rationale": "DoD functional[2]（dev-m15-c 派发前提议、Leader 采纳）：数值 5 来自 spec §6，是判据；相邻两行用 statusLimit=10，裸字面量会让读者以为漏了常量。注释写明两者为何不同（观测一月一行 vs 运行一天三次）。"
+    },
+    {
+      "decision": "新增 DoD 之外的 TestHestiaStatusPropagatesRunsError 以守住 cmd/atlas 76.3% 基线。",
+      "rationale": "non_functional[0] 要求各包不低于基线；不加则 76.2%。它测的是 RecentRuns 错误必须传播、不能渲染成与「没跑过」同形的 runs: 0——正是 runs 段要区分的两种状态。文件在 writes 声明内，已在 merge 请求里向 Leader 申报。"
+    },
+    {
+      "decision": "RenderStatus 的 runs 段沿既有形态：只有首行 Fprintf 检查写错误，runs 段裸调用。",
+      "rationale": "DoD description 明写「runs 段同形」；TestRenderStatusReportsWriteError（failAt:1）的已知缺口由该测试注释登记，本任务不扩范围。"
+    },
+    {
+      "decision": "code-simplifier 跑过、无改动，直接提交。",
+      "rationale": "子代理报告「无变化」经 git diff --numstat 前后比对核实（11/1、78/0、26/1、47/5 逐项相同），不以回显为据。"
+    },
+    {
+      "decision": "提交信息锚 feat(TASK-007): M1.5 …（AD-3），不用需求原文的 feat(M1.5 TASK-007):。",
+      "rationale": "task-completed.sh 的 git log --grep 只认 ^[a-z]+\\(TASK-007\\):。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/status.go",
+    "internal/hestia/status_test.go",
+    "cmd/atlas/hestia.go",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "func RenderStatus(w io.Writer, dbPath string, obs []StatusRow, pending []PendingRow, runs []Run) error",
+      "semantics": "末尾 runs 段：`\\nruns: %d\\n`，每行 `  <RFC3339 UTC>  %-9s<outcome>` 后按条件追加 `  <period>/<period_type>`（Period 非空）、`  stage=<stage>`、`  <error>`、`  notify_error=<notify_error>`。nil 与空切片同打 runs: 0。RunAt 先 UTC() 再格式化，恒为 Z 后缀。",
+      "consumers": "cmd/atlas runHestiaStatus；TASK-008 收口核对"
+    },
+    {
+      "symbol": "const runsLimit = 5（cmd/atlas，非导出）",
+      "semantics": "status 的 runs 段行数上限，spec §6「最近 5 行」；与 statusLimit=10 独立。"
+    }
+  ],
+  "verification": {
+    "my_commit": "f9410c026e28300523091ccc007607f214f0c422 (task/TASK-007-m15, 基于 511ee42)",
+    "master_after_merge": "e2d1f2be25e6c7f13a6761e6290a654c95dfd529",
+    "content_merged_check": "git diff --stat f9410c0 master -- 四文件 为空（逐字节一致）；grep runsLimit cmd/atlas/hestia.go 在 master 命中 3 处",
+    "red_phase": "== RED internal/hestia ==\n# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/status_test.go:50:7: too many arguments in call to RenderStatus\n\thave (*bytes.Buffer, string, []StatusRow, []PendingRow, nil)\n\twant (io.Writer, string, []StatusRow, []PendingRow)\ninternal/hestia/status_test.go:75:66: too many arguments in call to RenderStatus\n== RED cmd/atlas ==\n--- FAIL: TestHestiaStatusOnEmptyStore (0.00s)\n--- FAIL: TestHestiaStatusShowsRecentFiveRuns (0.00s)\nFAIL\nFAIL\tgithub.com/newthinker/atlas/cmd/atlas\t0.351s\nFAIL",
+    "tests_on_master@e2d1f2b": "GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1 ⇒ 5 包全 ok；新测试 -v：TestRenderStatusRuns、TestRenderStatusRunsEmpty{nil,empty}、TestHestiaStatusOnEmptyStore、TestHestiaStatusShowsRecentFiveRuns、TestHestiaStatusPropagatesRunsError 全 PASS；TestRenderStatusReportsWriteError 仍绿",
+    "coverage_on_master@e2d1f2b": "./internal/hestia 96.5%（基线 037d1eb 96.5%，硬门槛 96.3%）；./cmd/atlas 76.3%（基线 76.3%）",
+    "gofmt_on_master@e2d1f2b": "gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas ⇒ 恰好 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go 三处既有欠账，无新增",
+    "vet_on_master@e2d1f2b": "go vet 五包 零输出",
+    "untouched_files": "git diff --stat 037d1eb e2d1f2b -- parse.go extract.go validate.go fields.go go.mod go.sum 为空",
+    "merge_rehearsal": "临时 worktree 上 merge --no-ff --no-commit 到 master 5c1f8e8 rc=0 无冲突、两包绿；之后 master 前移的 c1defc0（TASK-002）未碰本任务四文件",
+    "code_simplifier": "已跑，无改动（numstat 前后一致核实）",
+    "gitnexus": "impact RenderStatus upstream = 1 caller (LOW)；detect-changes risk low，索引 stale 49 commits"
+  }
+}

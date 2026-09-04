@@ -1,0 +1,126 @@
+{
+  "task_id": "TASK-003",
+  "title": "HealthSummary 只读汇总——duplicate 不推进最近入库",
+  "author": "dev-m15-b",
+  "written_at": "2026-09-04T15:00:00Z",
+  "provenance": {
+    "implementation_by": "dev-m15-a",
+    "source": "dev-m15-a 的 worktree ../wt-TASK-003-m15（分支 task/TASK-003-m15，HEAD e2d1f2b，三文件未提交）；11:03Z 后 45 分钟无提交/无 checkpoint/不回消息，Leader 收回改派 dev-m15-b（epoch 2）",
+    "handover_method": "接手验证而非重写：三文件 cp 进 dev-m15-b 的 r2 worktree，cmp 逐字节一致；逐条对照 done_criteria 核验，无缺口",
+    "my_code_changes": "零——提交 266fe40 的内容与 dev-m15-a 副本 sha256 完全相同（health.go 1416ca25fb8354a0334e7129392933f5771efabe327405ee7d8b44e2d43cb56e / health_test.go 60205921536ba466628488b4e5628ce66c7dc09d8a3467866c6e9c62f43e02ea / store_test.go bda407689bddc9ae23e3cedb54ef6303957df242af59a7ba9840cb88921e7fd3）",
+    "what_i_verified_or_added": "核验：需求原文逐字对照、四条测试、S6 gofmt、守卫 25 项、FieldNames 守卫、隔离副本 RED 复现、隔离副本变异 M1/M2、五包门禁、覆盖率、code-simplifier、提交与 merge 后 master 重采。补：无（未改一行代码）",
+    "rework_w1": "review_fix W1（QA warning）由 dev-m15-b 自己实现：commit 53f1412e6a207dbf7dc82c5c57ec3112a16a6cba（分支 task/TASK-003-m15-fix），health.go 32/22、health_test.go 55/0；不再是零改动——首轮交付的『代码改动为零』只对 266fe40 那次成立。"
+  },
+  "key_findings": [
+    "health.go 与需求原文逐字一致：Health 六字段（时间戳零值 = 表里没有，不接收 now）、HealthSummary 五条 SQL（LastRun=MAX(run_at)、LastIngest=MAX(CASE WHEN outcome IN (ingested,pending))，参数化传 outcome；GROUP BY outcome；BlockedByCheck WHERE outcome=pending AND blocked_check IS NOT NULL；notify_error IS NOT NULL；count(*) FROM hestia_pending），每条带 hestia health: <步骤>: 前缀，rows.Scan 出错先 rows.Close()。",
+    "reviewer S6 已处理：TestHealthSummaryCounts 的 `p1 := runAt(1, RunPending); p1.BlockedCheck = …` 一行两语句已拆成两行，gofmt -l 五包只列三个既有欠账。",
+    "boundary[0] 的『允许存活』变异 dev-m15-a 选了推荐路径：failed 夹具补 f.BlockedCheck = \"x\"（health_test.go 带注释说明），于是去掉 outcome 过滤的 M2 转红，不必在 decisions 里记『守卫只钉 IS NOT NULL』。",
+    "dev-m15-a 在需求四条之外多加两条：TestHealthSummaryRejectsCorruptRunAt（裸连接写非 RFC3339 run_at，两个子例分别打在 LastRun/LastIngest 解析）与 TestHealthSummaryPropagatesQueryErrors（failingQuerier 把第 N 次查询换成坏 SQL，五条查询错误前缀 + 两条 GROUP BY 的 Scan 错误各带前缀）。超出原文但正对 boundary[0] 的 parseNullTime 与错误前缀要求，保留；hestia 覆盖率因此 96.6%（基线 96.5）。",
+    "store_test.go AST 守卫 want 25 项（001 的 24 + HealthSummary，位置在 DefaultThresholds 与 Discover 之间）并补一段『为什么名单里多了 HealthSummary』注释；reflect 守卫不动。TestFieldNamesAppearOnlyInFieldsGo 绿：health.go 只出现列名 blocked_check/notify_error/outcome/run_at，无 fieldOrder 业务字段名。",
+    "上游一致性：TASK-001 discovery 记空串存 NULL（nullIfEmpty），所以 IS NOT NULL 计数准确；TASK-002 discovery 的 hestia_runs 行语义（Ingest 落 pending 时同时写 hestia_pending 一行）使 TestHealthSummaryPendingReview 的 PendingReview==1 且 RunsByOutcome[pending]==1 成立——AD-5 让 003 依赖 002 的理由实测成立。",
+    "gitnexus：索引落后 45 提交，detect-changes（--base-ref e2d1f2b）报 No changes detected——新文件不在图里，是『未见』不是『无影响』；用 git grep 核实 master 上引用 HealthSummary 的 go 文件共 4 个：本任务三文件 + schema.go:98 一条注释（TASK-001 写的『可空列存 NULL……HealthSummary 用 IS NOT NULL 数』，非调用）；下游 004/006 尚未接线。⚠️ 我第一稿写『3 个文件』，与同一命令打出的 4 不符，本稿订正。",
+    "review_fix W1：首版两段 GROUP BY 循环在 rows.Close() 后不查 rows.Err()。实测 RED 形态：ctx 在『runs by outcome』那步中断时，HealthSummary 不在该步报错，而是带着空的 RunsByOutcome 继续走，错误直到下一条查询才浮出且前缀是『blocked by check』——即部分计数被当成完整结果放行了一步；若中断的是连接而非 ctx，后续查询也可能成功，就会返回部分计数 + nil，collector 的 collect_errors 不加一。修后错误在当步以正确前缀返回。"
+  ],
+  "decisions": [
+    {
+      "decision": "接手后不重写、不『顺手改进』，代码改动为零，原样提交并在提交信息与本 discovery 写明出处。",
+      "rationale": "inherited-work-verify-dont-rewrite：逐条核完 DoD 无缺口时，空 diff 就是正确答案；重写只是拿别人已验证的工作换自己的产出感。transitions.jsonl 只记 by=dev-m15-b，不写 provenance 后人会把功劳记错。"
+    },
+    {
+      "decision": "保留 dev-m15-a 超出需求的两条错误路径测试。",
+      "rationale": "它们覆盖 DoD boundary[0] 明写的 parseNullTime 非法串与 hestia health: 前缀行为，删掉会让覆盖率回落且失去对错误前缀的守卫；不新增导出符号、不改实现。"
+    },
+    {
+      "decision": "S6：需求测试代码先 gofmt 再提交（已由 dev-m15-a 完成，我核实）。",
+      "rationale": "DoD functional[1] 与 AD-8 gofmt 判据。"
+    },
+    {
+      "decision": "变异 M2 走 DoD 推荐的『failed 夹具补 BlockedCheck=\"x\"』路径，使其 KILLED，而不是记『允许存活』。",
+      "rationale": "一行夹具就把 outcome 过滤钉住；允许存活的守卫等于没守。"
+    },
+    {
+      "decision": "提交信息锚 feat(TASK-003): M1.5 …；分支用 task/TASK-003-m15-r2，不动 dev-m15-a 的 task/TASK-003-m15。",
+      "rationale": "AD-3 门禁正则；dev-a 若醒来会继续编辑自己的 worktree，共用分支会互相覆盖。"
+    },
+    {
+      "decision": "W1 修法：抽非导出 groupCount(ctx, q, step, query, args...) helper（defer rows.Close() + 迭代后 rows.Err()，错误统一 hestia health: <step>: 前缀），RunsByOutcome / BlockedByCheck 两段循环改走它；五条 SQL 与语义不变。",
+      "rationale": "QA 终检推荐形态；两处重复的 Next/Scan/Close 收成一处，rows.Err() 只需守一个地方；helper 非导出，AST 守卫 25 项不变。health.go 88 → 98 行是因为 helper 带了『为什么必须查 rows.Err()』的理由注释，不是逻辑变多。"
+    },
+    {
+      "decision": "W1 守卫测试用 cancelingQuerier：在第 N 次 QueryContext 返回 rows 之后 cancel ctx，并轮询到 rows.Err() 非 nil（2s 兜底）才把 rows 交回。",
+      "rationale": "database/sql 的 awaitDone 是异步 goroutine，裸 cancel 后立刻 Next() 可能仍读到行 ⇒ 测试会赌调度；轮询 rows.Err() 把『context 错误已写进 rows』变成可观测的确定性前置条件。变异『删掉 rows.Err() 检查』⇒ 该测试必红（隔离副本实测 KILLED）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/health.go",
+    "internal/hestia/health_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "type Health struct { LastRun, LastIngest time.Time; RunsByOutcome map[RunOutcome]int; BlockedByCheck map[string]int; PendingReview, NotifyFailures int }",
+      "for": "TASK-004 metrics.HestiaCollector / TASK-006 buildHestiaHealth",
+      "semantics": "零值约定：LastRun/LastIngest 零值（IsZero）= 表里没有对应行，不是『很久以前』；『距今多久』由 collector 用自己的 now 算，HealthSummary 不接收 now。两个 map 保证非 nil（空库也是空 map，可直接索引/range）。LastIngest 只看 ingested/pending，duplicate（--force 重跑）与 no_new（心跳）不推进。BlockedByCheck 只数 outcome=pending 且 blocked_check 非 NULL 的行。PendingReview 是 hestia_pending 表行数，不是 runs 里 pending 的条数。"
+    },
+    {
+      "symbol": "func HealthSummary(ctx context.Context, q Querier) (Health, error)",
+      "for": "TASK-004（collector 的 fetch 回调 func(ctx) (hestia.Health, error)）/ TASK-006（传 st.DB()）",
+      "semantics": "只读，接收 Querier 而非 *Store；五条 SQL 任一失败返回 Health{} 与带 hestia health: <last runs|runs by outcome|blocked by check|notify failures|pending review>: 前缀的错误；run_at 非 RFC3339 ⇒ hestia health: bad run_at: …。错误时返回的 Health{} 两个 map 为 nil——调用方只在 err==nil 时读字段。"
+    }
+  ],
+  "verification": {
+    "my_commit": "266fe40647aa13f9075b0850bbea80bbb9c70429",
+    "branch": "task/TASK-003-m15-r2",
+    "master_after_merge": "321dfb6bba5f412ad7a300a27e7b6c3a6e20efcd",
+    "baseline_worktree": "e2d1f2be25e6c7f13a6761e6290a654c95dfd529",
+    "coverage_baseline_anchor": "037d1eb1e4f827c415319519e40f4e2208968920",
+    "content_check_master": "master 321dfb6 的 internal/hestia/health.go sha256 前 16 位 1416ca25fb8354a0 = 继承文件指纹",
+    "red_phase": "隔离副本（r2 @ e2d1f2b + 三文件）移走 health.go：go test ./internal/hestia/ -run TestHealthSummary ⇒ internal/hestia/health_test.go:37:12: undefined: HealthSummary（:56/:83/:98 同）",
+    "tests_master": "master 321dfb6bba5f412ad7a300a27e7b6c3a6e20efcd：GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1 ⇒ 五包全 ok；目标测试 -v：TestHealthSummaryEmpty/Timestamps/Counts/PendingReview/RejectsCorruptRunAt/PropagatesQueryErrors、TestPackageExposesNoWriteFunctions、TestFieldNamesAppearOnlyInFieldsGo 全 PASS（r2 上 -v 采，master 上全包重跑）",
+    "coverage_master": "master 321dfb6bba5f412ad7a300a27e7b6c3a6e20efcd：./internal/hestia 96.6%（基线 037d1eb 96.5%，硬门槛 96.3%）",
+    "gofmt_master": "master 321dfb6bba5f412ad7a300a27e7b6c3a6e20efcd：gofmt -l 五包只列 internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go",
+    "vet_master": "master 321dfb6bba5f412ad7a300a27e7b6c3a6e20efcd：go vet 五包 rc=0 零输出",
+    "guard_count": "store_test.go want 列表 25 项，含 \"HealthSummary\" 1 处",
+    "no_new_deps_and_frozen_files": "git diff --stat 037d1eb 321dfb6 -- go.mod go.sum internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go ⇒ 空",
+    "numstat_master": "git diff --numstat e2d1f2b 321dfb6 ⇒ health.go 88/0、health_test.go 175/0、store_test.go 7/1",
+    "mutation": {
+      "method": "隔离副本（mktemp -d + rsync --exclude .git 自 r2 worktree），只改副本 health.go，diff 打印核对，gofmt+vet 有效性闸；r2 三文件 sha256 前后一致；harness scratchpad/dev-m15-b-mutate-TASK-003.sh；被测树 = r2 @ e2d1f2b + 三文件（内容与 266fe40 相同）",
+      "control": "原状 -run 'TestHealthSummaryTimestamps|TestHealthSummaryCounts' ⇒ ok",
+      "M1": "LastIngest 的 CASE WHEN outcome IN (?, ?) → … OR 1=1（看任意 outcome）⇒ --- FAIL: TestHealthSummaryTimestamps (health_test.go:59) ⇒ KILLED",
+      "M2": "BlockedByCheck 的 WHERE outcome = ? → WHERE (? IS NOT NULL)（去掉 outcome 过滤）⇒ --- FAIL: TestHealthSummaryCounts (health_test.go:86) ⇒ KILLED（靠 failed 夹具的 BlockedCheck=\"x\"）"
+    },
+    "code_simplifier": "跑过（subagent code-simplifier:code-simplifier），回复无改动；三文件 shasum -c 指纹比对 OK 核实",
+    "graph_analysis": "detect-changes --scope compare --base-ref e2d1f2b --repo atlas ⇒ No changes detected（索引落后 45 提交，新文件未入图）；git grep -l HealthSummary HEAD -- '*.go' ⇒ 4 个文件（本任务三文件 + schema.go 注释 :98，无代码调用）",
+    "rework_w1": {
+      "fix_commit": "53f1412e6a207dbf7dc82c5c57ec3112a16a6cba",
+      "branch": "task/TASK-003-m15-fix",
+      "baseline_worktree": "a03293d8c74a78e013368aee92a5b8ed7cd177c5",
+      "master_after_merge": "5dafbf0cf947204255470d659b563829d30f2c3d",
+      "red_phase": "worktree @a03293d 修前：go test -run TestHealthSummaryReportsRowsErr ⇒ FAIL：\"hestia health: blocked by check: context canceled\" does not contain \"hestia health: runs by outcome:\"（错误晚一步浮出、前缀错）；blocked by check 子例同形（浮到 notify failures）",
+      "tests_master": "master 5dafbf0cf947204255470d659b563829d30f2c3d：五包 -count=1 全 ok；TestHealthSummaryReportsRowsErr / TestPackageExposesNoWriteFunctions / TestFieldNamesAppearOnlyInFieldsGo PASS",
+      "coverage_master": "master 5dafbf0cf947204255470d659b563829d30f2c3d：./internal/hestia 96.6%（fix_items 要求不低于 96.6）",
+      "gofmt_vet_master": "master 5dafbf0：gofmt -l 五包只列三既有欠账；go vet 五包 rc=0",
+      "no_new_deps_and_frozen_files": "git diff --stat 037d1eb 5dafbf0 -- go.mod go.sum 与四不动文件 ⇒ 空",
+      "numstat_master": "git diff --numstat a03293d 5dafbf0 -- internal/hestia ⇒ health.go 32/22、health_test.go 55/0",
+      "guard_count": "want 列表仍 25 项；groupCount 非导出未进名单",
+      "mutation": {
+        "method": "隔离副本（mktemp -d + rsync 自 fix worktree），只改副本 health.go；harness scratchpad/dev-m15-b-mutate-TASK-003-fix.sh；主 worktree 两文件 sha256 前后一致；simplifier 改动后重跑一遍结果相同",
+        "W1": "把 `if err := rows.Err(); err != nil { return … }` 换成 `_ = rows.Err()` ⇒ --- FAIL: TestHealthSummaryReportsRowsErr ⇒ KILLED",
+        "M1": "CASE WHEN … OR 1=1 ⇒ TestHealthSummaryTimestamps 红 ⇒ KILLED（回归复跑）",
+        "M2": "去掉 outcome 过滤 ⇒ TestHealthSummaryCounts 红 ⇒ KILLED（回归复跑）"
+      },
+      "code_simplifier": "跑过；改了一处（BlockedByCheck 的 `if h.BlockedByCheck, err = …; err != nil` 拆成赋值 + 判断），指纹比对核实 health_test.go 未动；改后门禁与变异重跑全过",
+      "graph_analysis": "detect-changes --scope compare --base-ref a03293d --repo atlas（master 5dafbf0）⇒ No changes detected（索引落后、health.go 未入图）；groupCount 为非导出新符号，git grep 只在 health.go"
+    }
+  },
+  "dod_to_test": {
+    "functional[0]": "health.go 与需求原文逐字对照；TestHealthSummaryEmpty（map 非 nil）/ Timestamps / Counts / PendingReview；TestHealthSummaryPropagatesQueryErrors（五条前缀 + Scan 出错）",
+    "functional[1]": "四条测试 PASS + gofmt_master",
+    "functional[2]": "TestPackageExposesNoWriteFunctions（25 项）+ TestFieldNamesAppearOnlyInFieldsGo",
+    "boundary[0]": "TestHealthSummaryRejectsCorruptRunAt + verification.mutation M1/M2",
+    "error_handling[0]": "verification.red_phase",
+    "non_functional[0]": "verification.gofmt_master / vet_master / tests_master / coverage_master / no_new_deps_and_frozen_files",
+    "non_functional[1]": "AD-6：r2 worktree → 提交 266fe40 → leader merge 321dfb6 → master 重采 → 本 discovery",
+    "review_fix W1": "TestHealthSummaryReportsRowsErr（两子例 runs by outcome / blocked by check）+ verification.rework_w1.mutation"
+  }
+}

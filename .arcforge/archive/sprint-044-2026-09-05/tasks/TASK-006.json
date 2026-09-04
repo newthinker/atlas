@@ -1,0 +1,69 @@
+{
+  "id": "TASK-006",
+  "title": "`serve` 按 `hestia.config_path` 注册健康度 collector——未设跳过、装不上即启动失败；样例配置与部署文档",
+  "description": "对应需求文档 **TASK-006**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-006」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n**AD-2**：`HestiaConfig`/`Config.Hestia` 已由 TASK-010 交付，本任务不改 `internal/config`。新建 `cmd/atlas/hestia_health.go`（`buildHestiaHealth`）与 `hestia_health_test.go`（3 条 + 夹具 `writeHestiaYAML`/`gatheredNames` + 1 条样例配置装载断言）；改 `cmd/atlas/serve.go`（`serve.go:180-184` 的 `metricsReg` 段之后、`maybeStartAlertRunner` 之前接线）、`configs/config.example.yaml`（`alerts.rules` 末尾两条；`prism:` 之前 `hestia:` 段，`:235`/`:243`）、`docs/deployment.md`（`:256` 服务清单 serve 行末尾）。上游 004 discovery 给 `NewHestiaCollector` 签名，010 给 `cfg.Hestia.ConfigPath`。`hestia.LoadConfig` 的 `validate()` 要 `storage.db_path`、`storage.snapshot_dir`、`discover.index_url`、`discover.max_pages ≥ 1`、`discover.timeout > 0`（thresholds 由 `DefaultThresholds()` 预填，实测 `config.go:193-238`）。",
+  "module": "cmd",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/hestia_health.go",
+    "cmd/atlas/hestia_health_test.go",
+    "cmd/atlas/serve.go",
+    "configs/config.example.yaml",
+    "docs/deployment.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`buildHestiaHealth(cfg *config.Config, reg *metrics.Registry, log *zap.Logger) (func(), error)` 三种启动语义（注释按需求，带「沿 M1d 挂账 C3」那句与 WAL 多读者说明）：`reg == nil` ⇒ `log.Info(\"hestia health disabled (metrics disabled)\")`、no-op cleanup、nil；`ConfigPath == \"\"` ⇒ `log.Info(\"hestia health disabled (hestia.config_path not set)\")`、no-op、nil；`hestia.LoadConfig` 失败 ⇒ `fmt.Errorf(\"hestia health: loading %s: %w\", path, err)`；`hestia.NewStore(hcfg.Storage.DBPath)` 失败 ⇒ `\"hestia health: opening %s: %w\"`；成功 ⇒ `reg.MustRegister(metrics.NewHestiaCollector(func(ctx) { return hestia.HealthSummary(ctx, st.DB()) }, time.Now))`、`log.Info(\"hestia health enabled\", zap.String(\"config\", …), zap.String(\"db\", …))`、cleanup 关 Store。`serve.go`：`cleanupHestiaHealth, err := buildHestiaHealth(cfg, metricsReg, log); if err != nil { return err }; defer cleanupHestiaHealth()`，位置在 `metricsReg` 段之后、`appCtx` 之前。",
+      "三条测试通过：`TestBuildHestiaHealth_DisabledWhenUnset`（空 `Config` ⇒ 无错、`hestia_pending_review` 不在 `Gather` 里；logger 用 `zaptest/observer`（本包 `serve_test.go:19` 已在用）断言**恰一条** `hestia health disabled` 日志——spec §8 要求「不注册**且日志一行**」，`zap.NewNop()` 断不到）、`TestBuildHestiaHealth_FailsLoudlyWhenUnloadable`（不存在的 `nope.yaml` ⇒ 错误且串含 `nope.yaml`）、`TestBuildHestiaHealth_RegistersCollector`（临时 hestia.yaml ⇒ `hestia_pending_review`、`hestia_runs_total` 可见、`hestia_last_run_timestamp` **不可见**（空库）；同 cfg 且 `reg == nil` ⇒ nil 错误）。`writeHestiaYAML` 夹具若过不了 `hestia.LoadConfig`（如 `t.validate()` 对豁免另有要求），**补缺的键、不放宽 `validate`**（AD-10），补了什么记 discovery。",
+      "`configs/config.example.yaml`：`alerts.rules` 末尾追加 `hestia_stalled`（expr `hestia_hours_since_last_run > 30`、for 10m、cooldown 24h、severity critical）与 `hestia_no_ingest`（`hestia_hours_since_last_ingest > 960`、for 1h、cooldown 24h、warning），message 与四行注释按需求原样；`prism:` 之前加 `hestia:\\n  config_path: \"configs/hestia.yaml\"` + 需求给的三行注释。`docs/deployment.md` 服务清单 serve 行末尾补：「；`hestia.config_path` 设了则暴露 `hestia_*` 健康度指标（读 `data/hestia.db`），装不上即启动失败」。"
+    ],
+    "boundary": [
+      "**样例配置必须真能装载**（实测本仓库没有任何测试加载 `config.example.yaml`）：`hestia_health_test.go` 加一条 `TestExampleConfigDeclaresHestiaRules`——`config.Load(\"../../configs/config.example.yaml\")` 无错，`cfg.Hestia.ConfigPath == \"configs/hestia.yaml\"`，`cfg.Alerts.Rules` 里能找到 `hestia_stalled` 与 `hestia_no_ingest` 且两者 `Cooldown == 24*time.Hour`、`Severity` 分别 `critical`/`warning`。变异判据：把 yaml 里 `cooldown: 24h` 删掉一行 ⇒ 该测试必红（隔离副本上做，主工作区 yaml sha256 前后一致，记 discovery）。⚠️ reviewer S4：`config.Load` 能否装载整份示例 yaml **未核验**——若因 `hestia:`/`alerts:` 之外的段落失败，**不改其他段**（不在 `writes`），转 `blocked_clarification` 报 Leader。`hestia_health.go` **不 import `path/filepath`**；`hestia_health_test.go` 可以（`TestHestiaCmdDoesNotResolveDBPath` 只解析 `hestia.go`）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./cmd/atlas/ -run TestBuildHestiaHealth 2>&1 | head -5` 在实现前报 `undefined: buildHestiaHealth`，记进 discovery `verification`。启动失败的错误串**必须以 `hestia health:` 开头**（运维 grep err.log 的约定，需求 TASK-009 Step 2 依赖它）——`assert.True(strings.HasPrefix(err.Error(), \"hestia health:\"))` 加进 `FailsLoudly` 那条测试。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./cmd/atlas` 76.3%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-006`。 **门禁形态（AD-4）**：`coverage_floor: 75`（`cmd/atlas` 基线 76.3%）；判据仍是交付后 `cmd/atlas` 不低于 76.3% 且 `buildHestiaHealth` 三条分支都有测试覆盖。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-006-m15 ../wt-TASK-006-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`cmd/atlas/hestia_health.go cmd/atlas/hestia_health_test.go cmd/atlas/serve.go configs/config.example.yaml docs/deployment.md`），信息锚定 **`feat(TASK-006): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-006):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-006\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-006` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-006 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-006.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-006-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-010"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-004",
+    "TASK-010"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-b",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia_health.go",
+    "./cmd/atlas/hestia_health_test.go",
+    "./cmd/atlas/serve.go",
+    "./configs/config.example.yaml",
+    "./docs/deployment.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "coverage_floor": 75,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:44Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "e5ada52396fc088434a5def263fb7c23c5347607",
+    "discovery_sha256": "b590f3dbb48e947cb394dec2dbc0fcaa093a46a7ad8048845467fff20708b5c2",
+    "at": "2026-09-04T13:18:47Z"
+  },
+  "verifier": "test-m15-a"
+}

@@ -1,0 +1,61 @@
+{
+  "id": "TASK-002",
+  "title": "`Ingest` 逐候选写 `hestia_runs`，零行时记 `no_new` 心跳",
+  "description": "对应需求文档 **TASK-002**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-002」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n改 `internal/hestia/ingest.go`（`runResult`、`firstLine`、`ingestOne` 改签名为 `(runResult, error)`、主循环 `RecordRun`、`runRow`、`recordHeartbeat`；补 import `github.com/newthinker/atlas/internal/macro/bitemporal`——实测**尚未导入**）与 `ingest_test.go`（8 条新测试 + `newestRun` helper + 1 条 `--only-period` 测试）。⚠️ `ingestOne` 里的 `wrap` 是**函数内闭包**（`ingest.go:215`），`fail` 须定义在同一作用域并复用它。⚠️ 既有测试有 **3 处**直接调 `d.ingestOne(ctx, …)`（`ingest_test.go:489/510/530`，包在 `requireWrappedStageError(t, …)` 里），签名改后只改成 `_, err := d.ingestOne(…)` 的调用形态，断言不动。上游 001 的 discovery 给出 `Run` 字段语义。",
+  "module": "hestia",
+  "complexity": "complex",
+  "estimated_files": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/ingest_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`runResult{processed, outcome, extractor, blockedCheck, stage, notified, notifyErr}` + `firstLine`（`strings.Cut` 取首行）。`ingestOne` 签名 `func (d IngestDeps) ingestOne(ctx, c Candidate) (runResult, error)`：`HasArticle` 命中跳过 ⇒ `runResult{processed: false}, nil`；每个 `return wrap(X, err)` 改为 `return fail(X, err)`（`fail` 设 `res.stage = X` 再 `wrap`），**stage 取传给 `fail` 的原字符串**（`has article` / `fetch <URL>` / `snapshot` / `parse` / `validate` / `save`；期次不一致那条 `res.stage = \"mismatch\"`，AD-14：不改既有错误串）；`Save` 之后 `res.extractor = obs.Meta.Extractor`，`out.Table == TablePending` ⇒ `RunPending` + 第一道 `Status == CheckFailed` 的 `chk.ID` 进 `blockedCheck`；`out.Verdict == bitemporal.Duplicate` ⇒ `RunDuplicate`；否则 `RunIngested`。通知失败**不走 `fail`**（stage 留空）：`res.notifyErr = firstLine(err.Error())` 后 `return res, wrap(stage, err)`；成功 `res.notified = d.Notify != nil`。",
+      "`Ingest`：`d.Out` 判空之后 `runAt := time.Now()`；0 候选分支打印后 `return d.recordHeartbeat(ctx, runAt)`；主循环按需求形态（每候选 `started := time.Now()`；失败时打 `FAILED`、发 P1，**P1 的送达结果也进同一行**：`nerr != nil` ⇒ `res.notifyErr`，否则 `res.notified = d.Notify != nil`；`!res.processed` ⇒ `continue` 不记行；`RecordRun(d.runRow(runAt, started, c, res, err))` 失败 ⇒ `Out` 打 `<period> run record FAILED: …`、追加进 `errs`（带 `record run:` 前缀）、`continue`；成功 `recorded++`）；循环后 **`processed == 0`** ⇒ `recordHeartbeat`（🔴 reviewer S2：需求原文用 `recorded == 0`，但候选被处理而 `RecordRun` 失败时 `recorded` 仍 0，会再补一行 `no_new` 把「处理过一期」标成空跑；spec §2.1 心跳定义是「无候选被处理」，故计 `processed`），其错误并入 `errs`；汇总返回形态不变（分子仍是 `failedPeriods`）。`runRow`：`err != nil && !errors.As(err, &notifyError{})` ⇒ `Outcome = RunFailed`、`Error = firstLine(err.Error())`。`recordHeartbeat`：`Run{RunAt: runAt, FinishedAt: now, Outcome: RunNoNew, Duration: since(runAt)}`，失败打 `run record FAILED` 并返回带 `record heartbeat:` 前缀的错误。🔴 **代码顺序守卫**：`RecordRun` 调用必须在 `Save` 与 Verdict 行打印**之后**（验证者用行号核）——记不进去只影响健康度，不影响已入库的期次。",
+      "需求给的八条测试全部通过：`TestIngestRecordsIngestedRun`（一候选恰一行、`2025-12/annual`、`Extractor` 非空、`FinishedAt` 不早于 `RunAt`）、`TestIngestRecordsNoNewHeartbeat`（第二轮恰一行 `no_new`、`Period` 空、共 2 行）、`TestIngestRecordsPendingWithBlockedCheck`（`deposit_sum`）、`TestIngestSkippedCandidateFallsBackToHeartbeat`（前置 `already ingested`；两行 `[no_new, pending]`）、`TestIngestRecordsDuplicateOnForce`、`TestIngestRecordsFailedWithStage`（`stage == \"parse\"`、`Error` 含 `parse` 且无换行、`ArticleID` 填）、`TestIngestRecordsNotifyError`（outcome 仍 `ingested`、`Notified` false、`NotifyError` 含 `boom`、`Error` 空）、`TestIngestRecordsNotified`（`Notified` true）。既有 `TestIngestSkipsSeenArticleUnlessForce` / `TestIngestNotifyFailureIsLoudButNotCascading` 等对 `Out` 与错误链的断言不受影响。"
+    ],
+    "boundary": [
+      "**`--only-period` 过滤掉的候选不记行**（spec §8 明写、需求测试未覆盖）：新增 `TestIngestOnlyPeriodRecordsOnlyKept`——用能产出 ≥ 2 个候选的夹具（既有 `syntheticIndex` 多条 `indexEntry`，或 `discover_test.go` 的现成多期夹具）跑 `Force: true, OnlyPeriod: <其中一期>`，断言 `countRows(TableRuns) == 1` 且那一行 `Period == OnlyPeriod`。若夹具无法造出两个可解析的候选，退而断言「`kept 1 of N` 行出现且 runs 恰 1 行」，换法记 discovery。**Discover 失败 / OnlyPeriod 无候选 ⇒ 不记行**（AD-13，主循环之前的 `return err`）：不加测试，写进 discovery `decisions`（含理由：`hestia_stalled` 文案「跑了没落库」正是为它；代价：Discover 失败在 `status`/`runs_total` 不可见、只在 err.log——一并写明，供 008 A7 旁注）。",
+      "既有测试**零断言改动**：`git diff 037d1eb HEAD -- internal/hestia/ingest_test.go | grep -c '^-[^-]'` 必须 **≤ 3**，且这 ≤ 3 行只能是 `ingest_test.go:489/510/530` 的 `d.ingestOne(` 调用形态（`_, err := …`）。`TestIngestRecordsFailedWithStage` 的夹具 `<html><body>not a report</body></html>` 若被 `Parse` 之前的阶段拦下（如 `snapshot`），把断言改成实际首个失败阶段**不算**通过——必须让它在 `parse` 失败（可换一个通过 `fetch`/`snapshot` 但解析失败的 raw），换法记 discovery。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/hestia/ -run 'TestIngestRecords|TestIngestSkippedCandidate' 2>&1 | tail -12` 在实现前八条 FAIL 于 `至少要有一行运行记录`（或 `undefined: Run`——若 001 尚未合入则先等），记进 discovery `verification`。🔴 **reviewer B2（核实成立）——需求原文「`RecordRun` 失败不影响已入库行无法在不破坏 `Save` 的前提下构造」为假**：同文件 `ingest_test.go:521-530` 的 `t.Run(\"Save 失败\")` 已用 `rawDB` 建**表级** `BEFORE INSERT` 触发器只挡一张表，SELECT 与其他表不受影响；同法打在 `hestia_runs` 上，`HasArticle`/`Validate`/`Save` 照常、故障精确落在 `RecordRun`。**必写** `TestIngestRunRecordFailureKeepsIngestedRow`：`s, path := newTestStoreAt(t)`，`rawDB(t, path)` 执行 `CREATE TRIGGER block_runs BEFORE INSERT ON hestia_runs BEGIN SELECT RAISE(ABORT, 'blocked by test trigger'); END;`，`Ingest(annualFetcher, Out: &buf)` ⇒ `err` 含 `record run`；`s.HasPeriod(ctx, \"2025-12\", \"annual\")` 为 true（期次仍在库）；`buf` 同时含 `→ hestia_observations`（Verdict 行仍打印）与 `run record FAILED`；`countRows(TableRuns) == 0`；**且不得再有** `no_new` 心跳（配合 S2）。再加零候选变体（第二轮跑同一触发器库）断言 `err` 含 `record heartbeat`。这条是 spec §8 明列项、§9 最后一行防线的唯一行为级证据；discovery 与 TASK-008 §B 该行写「**已测**」，不再写「靠顺序」。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/hestia` 96.5%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-002`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-002-m15 ../wt-TASK-002-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`internal/hestia/ingest.go internal/hestia/ingest_test.go`），信息锚定 **`feat(TASK-002): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-002):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-002\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-002` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-002 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-002.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-002-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-a",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/ingest_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:43Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "e2d1f2be25e6c7f13a6761e6290a654c95dfd529",
+    "discovery_sha256": "b88545c29fdb9e655690ec00459dccec314dbfe1db9bd561815412e0d38bf0a1",
+    "at": "2026-09-04T10:55:45Z"
+  },
+  "verifier": "test-m15-a"
+}

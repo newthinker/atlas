@@ -1,0 +1,66 @@
+{
+  "id": "TASK-010",
+  "title": "主配置两个新键：`AlertRule.Cooldown` 与 `HestiaConfig{ConfigPath}`；`mapRules` 透传",
+  "description": "对应需求文档 **TASK-010**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-010」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n**AD-2 新增任务**（需求里没有 TASK-010；009 空出是因为需求 009 是人执行的）：承接需求 TASK-005 的 config/cmd 部分与需求 TASK-006 Step 3 的 `HestiaConfig`/`Config.Hestia`。改 `internal/config/config.go`（`AlertRule.Cooldown`；`HestiaConfig` 类型 + 注释；`Config.Hestia`，放 `Prism` 之后 `config.go:30`）、`internal/config/config_test.go`（1 条解码测试）、`cmd/atlas/alert_runner.go`（`mapRules` 加 `Cooldown: r.Cooldown`）、`cmd/atlas/alert_runner_test.go`（`TestMapRules_FieldMapping` 加断言）。依赖 005（`alert.Rule.Cooldown` 字段）。下游 006 消费 `config.HestiaConfig.ConfigPath` 与 `cfg.Hestia`，写进 `interfaces_exposed`。",
+  "module": "config",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "cmd/atlas/alert_runner.go",
+    "cmd/atlas/alert_runner_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`config.AlertRule` 加 `Cooldown time.Duration \\`mapstructure:\"cooldown\"\\``（与 `For` 同形，viper 的字符串时长解码钩子处理 `24h`）。`HestiaConfig{ConfigPath string \\`mapstructure:\"config_path\"\\`}` + 需求给的三行注释（只指向 hestia 自己的配置文件；`db_path` 不复制；相对 serve 的 WorkingDirectory；空 = 不暴露；带 `M1.5 的 TASK-010`——注意注释里任务号写本任务）；`Config` 在 `Prism` 字段之后加 `Hestia HestiaConfig \\`mapstructure:\"hestia\"\\``。",
+      "`cmd/atlas/alert_runner.go` 的 `mapRules` 加 `Cooldown: r.Cooldown,`。`TestMapRules_FieldMapping`：输入 r1 加 `Cooldown: 24 * time.Hour`，断言 `out[0].Cooldown == 24*time.Hour`；r2 不写，断言 `out[1].Cooldown == 0`（既有五字段比对不动）。",
+      "`internal/config/config_test.go` 新增一条（沿 `cmd/atlas/alert_runner_test.go` 的 `TestMapRules_DurationStringDecode` 手法：写临时 yaml → `config.Load`）：yaml 含 `hestia:\\n  config_path: configs/hestia.yaml` 与 `alerts.rules[0]` 带 `cooldown: 24h`，断言 `cfg.Hestia.ConfigPath == \"configs/hestia.yaml\"` 且 `cfg.Alerts.Rules[0].Cooldown == 24*time.Hour`；另一段不写 `hestia:` 的 yaml ⇒ `cfg.Hestia.ConfigPath == \"\"`（不预填任何默认路径）。"
+    ],
+    "boundary": [
+      "`ConfigPath` **不做路径解析**、不 `filepath.Abs`、不校验文件存在、不在 `config.Load`/`Validate` 里加任何 hestia 相关校验——装不上的响亮失败是 006 `buildHestiaHealth` 的事，`config.go` 不新增 import。`Cooldown` 同样不校验负值（沿 `For`）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./cmd/atlas/ -run TestMapRules_FieldMapping 2>&1 | head -5` 在加字段前报 `unknown field Cooldown in struct literal`；`go test ./internal/config/ -run <新测试名>` 报 `cfg.Hestia undefined`，两段都记进 discovery `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/config` 83.3% / `./cmd/atlas` 76.3%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-010`。 **门禁形态（AD-4）**：本任务 `coverage_floor: 75`——`cmd/atlas` 基线 76.3% < 80，`-coverpkg` 两包合并后 total 会被它拉低；floor 是门禁适配不是放宽，判据仍是两包各自不低于基线。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-010-m15 ../wt-TASK-010-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`internal/config/config.go internal/config/config_test.go cmd/atlas/alert_runner.go cmd/atlas/alert_runner_test.go`），信息锚定 **`feat(TASK-010): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-010):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-010\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-010` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-010 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-010.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-010-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-b",
+  "packages": [
+    "./internal/config",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/config/config.go",
+    "./internal/config/config_test.go",
+    "./cmd/atlas/alert_runner.go",
+    "./cmd/atlas/alert_runner_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "coverage_floor": 75,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:44Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "verify_baseline": {
+    "head": "5c1f8e878768c03a5dbeb0375d41c644439f8004",
+    "discovery_sha256": "5cea3067f8970f5a082e8a59945a8cb3f75db846c2f9de45f5e3efc854777302",
+    "at": "2026-09-04T10:44:47Z"
+  },
+  "verifier": "test-m15-a"
+}

@@ -1,0 +1,70 @@
+{
+  "id": "TASK-003",
+  "title": "`HealthSummary` 只读汇总——`duplicate` 不推进最近入库",
+  "description": "对应需求文档 **TASK-003**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-003」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n新建 `internal/hestia/health.go`（`Health`、`HealthSummary(ctx, Querier)`、`parseNullTime`）与 `health_test.go`（4 条）；改 `store_test.go` 的 AST 守卫 want 插入 `HealthSummary`。🔴 **依赖 002**（AD-5）：需求说「002 与 003 可并行」，但 `TestHealthSummaryPendingReview` 末行断言 `RunsByOutcome[RunPending] == 1` 要 `Ingest` 已写 runs——那是 002 的交付。上游 001 discovery 给列语义（空串存 NULL，所以 `IS NOT NULL` 数得准），002 discovery 给 `ingested`/`pending` 的判定分支。",
+  "module": "hestia",
+  "complexity": "simple",
+  "estimated_files": [
+    "internal/hestia/health.go",
+    "internal/hestia/health_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`health.go`：`Health{LastRun, LastIngest time.Time; RunsByOutcome map[RunOutcome]int; BlockedByCheck map[string]int; PendingReview, NotifyFailures int}`（注释：零值 = 表里没有；不接收 now）；`HealthSummary(ctx context.Context, q Querier) (Health, error)`：两个 map **非 nil**；`LastRun = MAX(run_at)`、`LastIngest = MAX(CASE WHEN outcome IN (ingested, pending) THEN run_at END)`（一条 SQL，参数化传 outcome）；`RunsByOutcome` 用 `GROUP BY outcome`；`BlockedByCheck` 只数 `outcome = pending AND blocked_check IS NOT NULL`；`NotifyFailures = count(*) WHERE notify_error IS NOT NULL`；`PendingReview = count(*) FROM hestia_pending`。每条 SQL 错误带 `hestia health: <步骤>:` 前缀；`rows.Scan` 出错先 `rows.Close()` 再返回。",
+      "四条测试通过（⚠️ reviewer S6：需求给的 `TestHealthSummaryCounts` 一行两语句 `p1 := runAt(1, RunPending); p1.BlockedCheck = …` **不过 gofmt**，先 gofmt 再提交）：`TestHealthSummaryEmpty`（两个时间戳零值、map 非 nil、计数 0）、`TestHealthSummaryTimestamps`（`LastRun` = 16 日心跳；`LastIngest` = 12 日 pending——**duplicate 与 no_new 都不推进**）、`TestHealthSummaryCounts`（`{pending:3, failed:1, ingested:1, no_new:2}`、`{deposit_sum:2, stock_continuity:1}`、`NotifyFailures == 2`）、`TestHealthSummaryPendingReview`（经真实 `Ingest` 落 pending 后 `PendingReview == 1` 且 `RunsByOutcome[RunPending] == 1`）。",
+      "`TestPackageExposesNoWriteFunctions` 的 want 在 `\"DefaultThresholds\"` 与 `\"Discover\"` 之间插入 `\"HealthSummary\"`，精确集合 **25 项**（001 的 24 + 1）；reflect 守卫不涉及包级函数、不改。`TestFieldNamesAppearOnlyInFieldsGo` 仍绿——`health.go` 不得出现任何 `fieldOrder` 里的业务字段名字面量（`hestia_runs` 的列名 `blocked_check`/`notify_error`/`outcome`/`run_at` 不是业务字段，可以出现）。"
+    ],
+    "boundary": [
+      "`parseNullTime`：`Valid == false` ⇒ 零值与 nil 错误；非法串 ⇒ 错误（`HealthSummary` 包成 `hestia health: bad run_at: …`）。**变异自证**（隔离副本）：把 `LastIngest` 的 `CASE WHEN` 改成看任意 outcome ⇒ `TestHealthSummaryTimestamps` 必红；把 `BlockedByCheck` 的 `WHERE outcome = ?` 去掉 ⇒ `TestHealthSummaryCounts` 仍绿（夹具里非 pending 行 `BlockedCheck` 都为空）——这一条**允许存活**但要在 discovery `decisions` 记明「守卫只钉 IS NOT NULL，不钉 outcome 过滤」，或补一行 `f.BlockedCheck = \"x\"` 到 failed 夹具让它转红（推荐后者，一行）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/hestia/ -run TestHealthSummary 2>&1 | head -5` 在实现前报 `undefined: HealthSummary`，记进 discovery `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` **只允许**列出 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这三个之外没有新增项」，AD-8；需求原文只写了两个，是对 `cmd/atlas` 说的）；`go vet ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -count=1` 全绿；本任务 packages 的 `go test <pkg> -cover` **不低于基线**（锚 `037d1eb`：`./internal/hestia` 96.5%；`internal/hestia` 另有硬门槛 **≥ 96.3%**），报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`。注释里引用任务编号带 milestone 前缀：写 `M1.5 的 TASK-003`。",
+      "**交付流程（AD-6，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-003-m15 ../wt-TASK-003-m15 master`（主分支是 **master** 不是 `main`）。\n2. 提交用显式 pathspec（`internal/hestia/health.go internal/hestia/health_test.go internal/hestia/store_test.go`），信息锚定 **`feat(TASK-003): M1.5 …`**——🔴 需求文档写的 `feat(M1.5 TASK-003):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-003\\):`，AD-3），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改四个不动文件与 `Save` 函数体、不得新增需求之外的导出符号、注释里的理由段保留）；有改动就并进同一提交。\n4. 通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环。\n6. `cd` 回主仓库写 discovery（`discovery TASK-003` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification）并 `task TASK-003 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-003.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-003-m15`。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。开工前先读 `context_from` 里各上游任务的 discovery。"
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-b",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/health.go",
+    "./internal/hestia/health_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:43Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "5dafbf0cf947204255470d659b563829d30f2c3d",
+    "discovery_sha256": "8a40c4dd96a84d7473d7876140c47de957550430cc8715682f7c68ef2c94e468",
+    "at": "2026-09-04T15:00:21Z"
+  },
+  "verifier": "test-m15-b",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "W1（qa-verdict.md §warning）：internal/hestia/health.go 两段 GROUP BY 循环（RunsByOutcome、BlockedByCheck）在 rows.Close() 后未检查 rows.Err()——ctx 中断/连接错误时返回部分计数且 err=nil，collect_errors 不加一。修法：两处补 rows.Err() 检查并以 hestia health: <步骤>: 前缀返回；推荐按 QA 终检抽 groupCount(ctx, q, prefix, query, args...) helper（内 defer Close + rows.Err()），≈−10 行。",
+    "补一条测试钉住：用返回 rows.Err() 非 nil 的 Querier 夹具（或迭代中 cancel ctx），断言 HealthSummary 返回错误且串含对应步骤前缀；变异「删掉 rows.Err() 检查」必红。",
+    "约束不变：health.go 不得出现 fieldOrder 字面量（TestFieldNamesAppearOnlyInFieldsGo 仍绿）；不新增导出符号；AST 守卫 25 项不变；hestia 覆盖率 ≥ 96.3 且不低于 96.6；提交锚 fix(TASK-003): M1.5 …；merge 后重采、更新 discovery（decisions 记 W1 与修法）、transition dev_done --expect-epoch 2。"
+  ]
+}

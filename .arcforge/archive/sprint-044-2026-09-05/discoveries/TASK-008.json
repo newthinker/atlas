@@ -1,0 +1,60 @@
+{
+  "task_id": "TASK-008",
+  "title": "代码收口（docs-only）：采锚、全量核对、真语料回归、CONTRACTS ## Sprint M1.5 §A/§B（M1.5）",
+  "owner": "dev-m15-a",
+  "key_findings": [
+    "采锚 e5ada52396fc088434a5def263fb7c23c5347607（8 个代码任务全部 verified 后的 master HEAD）：AD-7 口径 `git status --short -- internal cmd/atlas configs docs go.mod go.sum` 为空，采前采后 HEAD 同值，写 CONTRACTS 前 `git diff --numstat e5ada52 HEAD -- internal cmd/atlas configs docs` 为空。",
+    "全量核对全部通过：gofmt 五包仅三处既有欠账（AD-8）；go vet ./internal/... ./cmd/... 零输出；覆盖率 hestia 96.6 / metrics 99.2 / alert 92.6 / config 83.3 / cmd/atlas 76.4，基线（临时 worktree @037d1eb 背对背实测）96.5 / 98.9 / 92.3 / 83.3 / 76.3，无一低于；四不动文件 diff 空；store.go Save 触碰 0；四守卫 PASS；want reflect 12 / AST 25；go.mod/go.sum 无 diff。",
+    "真语料回归（$S/atlas @e5ada52，`backfill load --allow-incomplete` exit 0）六个数与 M1c-4 §B / M1d §B 逐字相等：218=217+1、217=213+4、97=76+21（单篇 28 + 合并组 69）、字段冲突 0、口径路由违反 0；`hestia_runs` 表已建且 0 行（回填不走 Ingest，不记心跳）。无回归。",
+    "新增测试实数 39（`git diff 037d1eb e5ada52 -- '*_test.go' | grep -c '^+func Test'`，删除 0）≠ 需求预估 29；差因：001 +2（覆盖率跌破基线补 bad run_at / DB 错误路径）、002 +2（DoD 加的 only-period 与 reviewer B2 触发器测试）、003 +2（覆盖率跌破门槛补坏 run_at / 五条 SQL 错误路径）、006/007/010 config+cmd 8 vs 预估 4（006 样例配置守卫、007 reviewer B3 的 cmd 接线测试、010 config 解码测试）。",
+    "验证者登记的变异存活（均非 DoD 缺口）已收进 §B：001 M6（rowid DESC）、002 M3（通知失败改走 fail，测试未断 Stage 空）/ M7（跳过候选记 no_new，测试未断心跳 Period 空）、007 M1（RunAt.UTC()）。",
+    "code-simplifier 终检子代理（只审查、禁改）最终回复只有「Finished. Not actionable」，追问一次未得文字结论；以载体为准：git status 空、HEAD 不变、tracked diff 零改动 ⇒ 记「无改动」（同 TASK-006 先例）。"
+  ],
+  "decisions": [
+    {
+      "decision": "A7 按 AD-14 写成「stage = 传给 fail 的原字符串」并列全七个取值 + 通知失败留空 + AD-13 旁注，不按 spec §2.1 的枚举写。",
+      "rationale": "出处 TASK-002 discovery decisions；枚举里的 notify 不会出现在 stage 列，has article 在枚举外，fetch 带 URL——照抄 spec 会把当前为真的实测写成假的（CONTRACTS §A 的定位）。"
+    },
+    {
+      "decision": "§B 的「未测、靠顺序保证」行改为「已测：TestIngestRunRecordFailureKeepsIngestedRow」。",
+      "rationale": "reviewer B2 证伪了需求原文「无法在不破坏 Save 的前提下构造」；TASK-002 已用 hestia_runs 表级触发器测过，并断言 Verdict 行先于 run record FAILED。"
+    },
+    {
+      "decision": "新增测试写实数 39 并按任务列差因表，不写预估 29。",
+      "rationale": "DoD 明写预估不是判据；按文件复核 1+7+10+6+2+4+1+1+5+2+0 = 39 与总数相符。"
+    },
+    {
+      "decision": "code-simplifier 终检子代理约束为「只审查、绝不改文件」；其回复无结论时按 tracked diff 零改动记「无改动」，不转澄清环。",
+      "rationale": "本任务 docs-only，任何代码改动都须 Leader 裁决；子代理没有提出任何改动（载体为证），DoD 的澄清环条件「它提出改动」未触发。已在交付报告向 Leader 申报。"
+    },
+    {
+      "decision": "分支在主仓库直接建（task/TASK-008-m15），提交后切回 master；不建 worktree、不跑 deploy.sh。",
+      "rationale": "docs-only 变体（DoD non_functional[0]）；PENDING-ACCEPTANCE.md 要求首期验收后才投递（AD-1）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "CONTRACTS.md `## Sprint M1.5 · 健康度可观测` §A（A1–A7）/ §B（锚 e5ada52）",
+      "consumers": "TASK-009（人执行的投递与验收）：合并后的 master sha 是其 ANCHOR；§B 的六个回归数与覆盖率是验收时的对照基线。"
+    }
+  ],
+  "verification": {
+    "anchor": "e5ada52396fc088434a5def263fb7c23c5347607",
+    "my_commit_sha": "729b4fe504a0e05fa68ab1bc2b57749f4108dcc5",
+    "branch": "task/TASK-008-m15",
+    "commit_stat": "git show --stat 729b4fe → internal/hestia/CONTRACTS.md | 83 +（唯一文件）",
+    "gofmt@e5ada52": "gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas → internal/metrics/snapshot_test.go、cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go",
+    "vet@e5ada52": "go vet ./internal/... ./cmd/... → 零输出 rc=0",
+    "coverage@e5ada52": "hestia 96.6 / metrics 99.2 / alert 92.6 / config 83.3 / cmd/atlas 76.4；基线@037d1eb（临时 worktree 背对背）96.5 / 98.9 / 92.3 / 83.3 / 76.3",
+    "untouched@e5ada52": "git diff --stat 037d1eb HEAD -- parse.go extract.go validate.go fields.go → 空；go.mod/go.sum 无 diff；Save 触碰 grep -c = 0",
+    "guards@e5ada52": "TestFieldNamesAppearOnlyInFieldsGo / TestStoreExposesNoWriteMethods / TestPackageExposesNoWriteFunctions / TestRecordRunTouchesOnlyRunsTable 四条 --- PASS；want 12 / 25 项",
+    "regression@e5ada52": "$S=scratchpad/m15-reg-dev-m15-a：build rc=0，load exit=0；218 / 217 / 1 / 213 / 4 / 97（28+69）/ 76 / 21 / 字段冲突 0 / 口径路由违反 0；hestia_runs count(*) = 0；sqlite_master 表 = [hestia_observations, hestia_pending, hestia_runs]",
+    "new_tests@e5ada52": "git diff 037d1eb e5ada52 -- '*_test.go' | grep -c '^+func Test' = 39；'^-func Test' = 0",
+    "simplifier": "子代理 a74d09867ce735620，18 次工具调用；结论未回文字；git status --short -- internal cmd/atlas configs docs go.mod go.sum 为空，HEAD 仍 e5ada52",
+    "merged_master_sha": "a03293d8c74a78e013368aee92a5b8ed7cd177c5",
+    "content_identity@master": "master a03293d8c74a78e013368aee92a5b8ed7cd177c5 上 internal/hestia/CONTRACTS.md sha256 与 729b4fe 树内相同；grep \"^## Sprint M1.5\" 命中 1；git log --grep TASK-008 e5ada52..HEAD 命中 merge + 729b4fe"
+  }
+}

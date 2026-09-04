@@ -1,0 +1,93 @@
+{
+  "id": "TASK-008",
+  "title": "代码收口（docs-only）：code-simplifier 终检、采锚、全量核对、真语料回归、CONTRACTS `## Sprint M1.5` §A/§B",
+  "description": "对应需求文档 **TASK-008**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-04-hestia-m1.5-health.md` 的「## TASK-008」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-04-hestia-m1.5-health-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n**docs-only 任务**（AD-11：code-simplifier 由各任务自跑，本任务只终检、不改 `.go`）。唯一改动文件 `internal/hestia/CONTRACTS.md`：新开 `## Sprint M1.5 · 健康度可观测`，§A 六条契约更正（A1–A6 原文）+ A7（stage 列文案，AD-14）、§B 实测登记表。需求 TASK-008 Step 6 的「合并、归档」是 Leader 动作；🔴 **不跑 `deploy.sh`**（`PENDING-ACCEPTANCE.md` 要求首期验收后才投递）。需求 TASK-009（投递与验收、§C/§D、销 C2、vault 回写）**结转**（AD-1），不在本任务。上游 8 个任务的 discovery 给各自的自证数字与 002 的「未测、靠顺序」条目。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "🔴 **采锚前置（AD-7）**：第一步先 `cd` 主仓库、`git status --short -- internal cmd/atlas configs docs go.mod go.sum` **必须为空**（需求原文「`git status --short` 必须干净」在本仓库 sprint 进行中恒不成立：`?? .arcforge/tasks/` 等；收窄为代码范围，与后面 numstat 同口径）、`ANCHOR=$(git rev-parse HEAD)` 记全 sha；此后每一个数字都标注这个锚。写 CONTRACTS **之前**再跑 `git diff --numstat $ANCHOR HEAD -- internal cmd/atlas configs docs`，非空就回到本步重采。§B 表头的 `<ANCHOR>` 填这个全 sha。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**全量核对**（全部在锚上）：`gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` 只列三处既有欠账（AD-8）；`go vet ./internal/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... -cover -count=1` ≥ **96.3%**（基线 96.5%）；`go test ./internal/metrics/... ./internal/alert/... ./internal/config/... ./cmd/atlas/... -cover -count=1` 全绿且各包不低于基线（98.9 / 92.3 / 83.3 / 76.3）；`git diff --stat 037d1eb HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go` **为空**；`git diff 037d1eb HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\*Store) Save'` 为 **0**；`go test ./internal/hestia/ -run 'ExposesNoWrite|TestRecordRunTouchesOnlyRunsTable|TestFieldNamesAppearOnlyInFieldsGo' -v | grep '^--- '` 四条 PASS；导出面 want = reflect **12** 项 / AST **25** 项（+`HealthSummary`/`Store.RecordRun`/`Store.RecentRuns`）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**真语料回归——数字必须一个不变**：`S=/private/tmp/claude-501/-Users-zuowei-workspace-go-src-github-com-newthinker-atlas/4e9d43bd-0ccf-49eb-bd64-975dcac2f4e7/scratchpad/m15-reg-<你的实例名>`（scratchpad 全 teammate 共享，目录名带实例名防撞；`mkdir -p $S; rm -f $S/reg.db*`）；`GOTOOLCHAIN=local go build -o $S/atlas ./cmd/atlas` 后 `$S/atlas hestia backfill load --dir /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia-backfill-2026-08-14 --db $S/reg.db --allow-incomplete > $S/load.txt 2>&1`，退出码 0；`grep -E \"语料总篇数|待解析|本迭代不解析|解析成功|解析失败|合并后观测|入权威表|落 pending|字段冲突|口径路由核对\" $S/load.txt` 的数字与 CONTRACTS `## Sprint M1c-4` §B / `## Sprint M1d` §B **逐字相等**：`218 = 217 + 1`、`217 = 213 + 4`、`97 = 76 + 21`（篇 / 篇 / 观测）、字段冲突 0、口径路由违反 0；`sqlite3 $S/reg.db \"select count(*) from hestia_runs\"` 必须 **0**（backfill load 不走 Ingest，回填不是运行、不记心跳）。**任何一个数变了就是回归**——立即 `blocked_clarification` 报 Leader，不自行解释。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "CONTRACTS.md 末尾新开 `## Sprint M1.5 · 健康度可观测`，含 **§A 契约更正**：A1（4.5.1 二十日告警每月误报 ⇒ 拆心跳 30h / 最近入库 960h）、A2（告警承载是 serve 自己的循环，不是 Prometheus）、A3（五项指标改八项 + 一项自检；M2/M3 三项不注册）、A4（`Store` 第二个写方法 `RecordRun`，登记不放宽，`TestRecordRunTouchesOnlyRunsTable` 钉住）、A5（冷却期此前写死 5 分钟 ⇒ `Rule.Cooldown`，既有规则不变）、A6（`duplicate` 不推进最近入库）——六条按需求原文；**追加 A7**（AD-14 + reviewer S1）：spec §2.1 的 stage 枚举 `fetch | … | notify` 实际落地为「传给 `fail` 的原字符串」——条目**列全**：`has article`（枚举外）、`fetch <URL>`（带 URL）、`snapshot`、`parse`、`mismatch`、`validate`、`save`；通知失败 stage 留空只记 `notify_error`；旁注 AD-13：Discover 失败 / `--only-period` 无候选不记行（只在 err.log 可见）。出处 TASK-002 discovery `decisions`。**§B 实测登记表**（锚 `<ANCHOR>`）：`internal/hestia` 覆盖率实测；其余四包覆盖率；导出面 25 项；四个不动文件 `git diff 037d1eb..HEAD` 空；真语料回归六个数（含 `hestia_runs` 0）；**新增测试**行用 `git diff 037d1eb $ANCHOR -- '*_test.go' | grep -c '^+func Test'` 核对——需求预估 `schema 1 · store 5 · ingest 8 · health 4 · metrics 4 · alert 1 · config/cmd 4 · status 2 = 29` 是**预估**不是判据，实际数不同就写实际数并注明差在哪个任务（本 Sprint DoD 另加了 002 的 only-period、006 的样例配置、010 的 config 解码三条）；需求 §B 模板的「未测、靠顺序保证」行改写为「**已测**：`TestIngestRunRecordFailureKeepsIngestedRow`（reviewer B2 证伪了『无法构造』）」。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**code-simplifier 终检**：对本 Sprint 全部改动文件（`internal/hestia/{schema,types,store,ingest,health,status}.go`、`internal/metrics/hestia_collector.go`、`internal/alert/{rules,evaluator}.go`、`internal/config/config.go`、`cmd/atlas/{hestia_health,serve,alert_runner,hestia}.go` 及对应 `_test.go`）跑一次 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，约束：不得改四个不动文件、不得改 `Save` 函数体、不得新增导出符号、注释理由段保留）。**预期无改动建议**（每任务已自跑）。若它提出改动：**不自行改代码**（本任务 docs-only），把建议全文写进 discovery `decisions` 并转 `blocked_clarification` 由 Leader 裁决。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "**自证纪律**：一切数字采于最后一次改动之后、同一个锚；discovery 的 `verification` 里每个数字旁写锚。本任务提交只含 `CONTRACTS.md`（`git show --stat HEAD` 只有这一个文件）；提交信息锚 `docs(TASK-008): M1.5 …`（**不是** `docs(M1.5 TASK-008)`）。若 §B 里任何一格填不出实测值，**不写占位符**，走澄清环。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**交付流程（docs-only 变体）**：可在主仓库分支 `task/TASK-008-m15` 上做（无代码、无 worktree 隔离必要；若建了 worktree，回归与 `.arcforge/` 写入仍在主仓库）；提交后通知 Leader（`team-lead`）merge，merge 进 master 后 `transition dev_done --expect-epoch <认领 epoch>`；discovery 写 `files_modified: [internal/hestia/CONTRACTS.md]` 并 `update --expect-status in_progress --field discovery=…` 挂指针，落盘后 `jq` 直读核实。写通道调用一律 `ARCFORGE_TOKEN=<token> bash .claude/hooks/arcforge-write.sh --as <实例名> …`。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007",
+    "TASK-010"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007",
+    "TASK-010"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m15-a",
+  "packages": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-04T15:59:44Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "a03293d8c74a78e013368aee92a5b8ed7cd177c5",
+    "discovery_sha256": "2a61f2a36a409fd3c0a486fe055570c82619d7f341332830d6510a5c9ee1957c",
+    "at": "2026-09-04T13:34:44Z"
+  },
+  "verifier": "test-m15-a"
+}
