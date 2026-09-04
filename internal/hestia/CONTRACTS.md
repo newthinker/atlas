@@ -3274,7 +3274,37 @@ QA 终审 A5 指出这会把**「主配置装不上」折成「telegram 未配�
 
 按任务 commit 复核（`git show <c> -- '*_test.go' \| grep -c '^+func Test'`）：001=3、002=8、003=5、004=8、005=7、006=3、007=8，合计 42，与 `$BASE..锚` 总数相符。
 
-### C. 挂账（不阻断，M2 前跟踪）
+### C. 运行时切换记录（M1d 的 TASK-009）
+
+执行人 / 授权：**Leader 经人类明确授权代跑**（人类指示「先进行运行时切换」）。
+唯一不可逆的一步（Step 4 替换库）在执行前把证据摆出并单独确认；Telegram 送达由人类目视确认。
+
+授权依据：**运行时库唯一一行与回填库同期行按 60 列（61 列减 `ingested_at`）双向 EXCEPT 为 0 行**，
+pending 0 条 ⇒ 替换不丢任何数据。⚠️ 这条依据与 M1c-4 §H-8 的「0 行」不同，**且同样不可推广**：
+换一个 EXCEPT 非 0 的库，本记录不构成先例。
+
+| 项 | 值 |
+|---|---|
+| 执行锚 | `290d9e166226af80154aedd05868bf8176358575` |
+| 执行时刻 | 2026-09-04 08:51 ~ 09:02 |
+| 备份时刻 / 三件套 | `20260904-085131`，`.db` 20480 字节 / `-wal` 0 / `-shm` 32768；`cmp` 与原库逐字节一致，备份可独立打开（1 行 61 列） |
+| 集合差 | runtime−src **0** · src−runtime **0** · runtime pending **0**（单位：行；60 列比对） |
+| 投递判据 | `hestia.yaml` diff 空（`config_version` 2026-08-13 → **2026-09-03**，含 `snapshot_dir`）；`--help` 列出 `--only-period`（旧二进制没有，这是「确实换了」的直接证据）；`bin/atlas` mtime 2026-08-13 → **2026-09-04 08:51** |
+| 四项核对 | 76 观测 / 21 条 pending / `2019-12 ~ 2026-07` / **83 列**；两库 `cmp` 逐字节一致 |
+| 链路实测 | `notify: telegram` · `only-period 2026-07: kept 1 of 2 candidate(s)` · `2026-07 Duplicate → hestia_observations` · 退出码 **0** · 快照 sha256 `305f395510d16ae2d1ee39c07d71c3e9…` **== 语料同名文件**（央行未改稿，无 `snapshot diverged`） · Telegram `[P2]` 约 09:02 送达（人类目视确认，正文含 Duplicate 与 2026-07/monthly） |
+| 首次快照落盘 | `data/hestia-snapshots/2026081414193264304.html`（41459 字节）——该目录此前**不存在**，方案报告 M1c DoD「原始 HTML 快照已留存」自此在增量路径上成立 |
+| launchd | `com.newthinker.atlas.hestia-ingest` 在册，退出码 **0**（切换前为 1，即每天三次失败）；err.log **62 行未增长**；下次唤起 15:30 |
+
+**deploy.sh 的两条前置在本次切换中经实战验证**（§A7）：投递后运行时 `scripts/qlib_eval/.venv` 仍
+**39525 文件**、`configs/config.yaml` 完好（权限 600）——修复前从 worktree 执行会删掉它们
+（实测 30202 项）。本次从主仓库执行，worktree 判别放行。
+
+**Step 6 的日历唤起验收留待 15:30 之后**：期望 `out.log` 出现 `db: … / notify: telegram /
+no new reports (stopped: seen_article)`，且 `err.log` 不再增长。
+
+回滚：还原三件套备份（M1c-4 §H-4 方式 A），或从语料重跑（方式 B）。两者都依赖语料还在（§E，218 篇完好）。
+
+### D. 挂账（不阻断，M2 前跟踪）
 
 | # | 项 | 出处 | 建议 |
 |---|---|---|---|

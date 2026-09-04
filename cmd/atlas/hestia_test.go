@@ -1102,7 +1102,7 @@ func TestBuildHestiaSenderFromMainConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), cfgFile, "错误要带出是哪份主配置")
 		assert.True(t, s == nil)
 	})
-	// CONTRACTS §C 的 C3：上面那条用「文件不存在」造失败，而 os.PathError 的内层文本
+	// CONTRACTS §D 的 C3：上面那条用「文件不存在」造失败，而 os.PathError 的内层文本
 	// **本就带完整路径**，于是 `Contains(err, cfgFile)` 即使外层 `%s` 被删掉也照样过
 	// （Sprint 043 验证者变异 H-A5c 存活，判为等价变异并给出了杀死它的输入）。
 	// 这条改用「文件存在但 YAML 非法」：viper 的解析错误不含路径，外层前缀成为唯一来源。

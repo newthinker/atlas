@@ -712,7 +712,7 @@ func TestSendDocument_TransportErrorRedactsToken(t *testing.T) {
 	}
 }
 
-// 脱敏不得切断错误链：将来加退避重试（CONTRACTS §C 的 C2）要靠 errors.As 判超时/网络错。
+// 脱敏不得切断错误链：将来加退避重试（CONTRACTS §D 的 C2）要靠 errors.As 判超时/网络错。
 func TestSendPayload_RedactedErrorStillUnwraps(t *testing.T) {
 	tg := New("111:AAAsecret", "chat-1", WithProxy("http://127.0.0.1:1"))
 

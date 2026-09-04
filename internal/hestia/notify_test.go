@@ -157,7 +157,7 @@ func TestRenderP2DuplicateSaysValuesNotWritten(t *testing.T) {
 	}
 }
 
-// fmtNum 必须对 ≥1e6 的值仍给最短精确表示（CONTRACTS §C 的 C1）。
+// fmtNum 必须对 ≥1e6 的值仍给最短精确表示（CONTRACTS §D 的 C1）。
 //
 // 🔴 这条替代了原先那句 `NotContains(got, "1.776e+05")`——**那条断言恒过**：%g 对 177600
 // 本就打 "177600"，切指数记法的阈值在 1e6。原判据抄自需求文档的一句假理由（§A4 已订正），

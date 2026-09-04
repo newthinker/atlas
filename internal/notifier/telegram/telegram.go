@@ -315,7 +315,7 @@ func redactToken(msg, token string) string {
 // redactedError 让错误**文本**脱敏，同时保留错误链。
 //
 // 只脱敏 Error() 而保留 Unwrap()：调用方打日志走 Error()（脱敏），而将来加退避重试
-// （CONTRACTS §C 的 C2）要用 errors.As 取 *url.Error / net.Error 判超时——那条能力
+// （CONTRACTS §D 的 C2）要用 errors.As 取 *url.Error / net.Error 判超时——那条能力
 // 不该为脱敏而丢掉。⚠️ 代价是显式 errors.Unwrap(err).Error() 仍会看到 token，
 // 那是刻意行为，不是本类型要防的路径。
 type redactedError struct {
