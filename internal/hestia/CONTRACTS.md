@@ -3293,7 +3293,8 @@ pending 0 条 ⇒ 替换不丢任何数据。⚠️ 这条依据与 M1c-4 §H-8 
 | 四项核对 | 76 观测 / 21 条 pending / `2019-12 ~ 2026-07` / **83 列**；两库 `cmp` 逐字节一致 |
 | 链路实测 | `notify: telegram` · `only-period 2026-07: kept 1 of 2 candidate(s)` · `2026-07 Duplicate → hestia_observations` · 退出码 **0** · 快照 sha256 `305f395510d16ae2d1ee39c07d71c3e9…` **== 语料同名文件**（央行未改稿，无 `snapshot diverged`） · Telegram `[P2]` 约 09:02 送达（人类目视确认，正文含 Duplicate 与 2026-07/monthly） |
 | 首次快照落盘 | `data/hestia-snapshots/2026081414193264304.html`（41459 字节）——该目录此前**不存在**，方案报告 M1c DoD「原始 HTML 快照已留存」自此在增量路径上成立 |
-| launchd | `com.newthinker.atlas.hestia-ingest` 在册，退出码 **0**（切换前为 1，即每天三次失败）；err.log **62 行未增长**；下次唤起 15:30 |
+| launchd | `com.newthinker.atlas.hestia-ingest` 在册，退出码 **0**（切换前为 1，即每天三次失败）|
+| **Step 6 日历唤起验收**（2026-09-04 15:30 实测） | out.log 由 192 → **195 行**，新增恰三行且逐字为 `notify: telegram` / `db: <路径>` / `no new reports (stopped: seen_article)`，**零 FAILED**；err.log 仍 **62 行**且 mtime 停在 2026-09-03 21:30（切换后一次未写）；快照仍 1 个、库仍 76/21/83（空跑不改数据）；退出码 **0**。<br>🔴 **对照第 190–192 行**（切换前最后一次唤起）：**同一期次 `2026-07`、同一判停 `seen_article`**，旧二进制打的是 `2026-07 FAILED: … period_type monthly is not supported yet`。同一输入两种结果，这是切换生效最直接的证据 |
 
 **deploy.sh 的两条前置在本次切换中经实战验证**（§A7）：投递后运行时 `scripts/qlib_eval/.venv` 仍
 **39525 文件**、`configs/config.yaml` 完好（权限 600）——修复前从 worktree 执行会删掉它们
@@ -3339,6 +3340,5 @@ M1c-4 §E 登记了「语料不进 git，回滚预案依赖它还在」。本 Sp
   两种通过形态（入权威表 + `[P2]` / 落 pending + `[P0]`）之一，**都要有 Telegram 消息为证**；
   err.log 有失败而 Telegram 无消息 ⇒ 判不通过（本迭代最想抓的失效模式）
 - **「连续 3 期」判据**：2026-08 为第 1 期，2026-09（10 月中）、2026-10（11 月中）补齐后销账，M2 开工前
-- §C 的 Step 6 日历唤起验收：切换当日 15:30 之后核 `out.log` 出现 `stopped: seen_article`
-  且 `err.log` 不增长
+- ~~§C 的 Step 6 日历唤起验收~~ ✅ **已完成（2026-09-04 15:30）**：三行形态出现、err.log 未增长、退出码 0，详见 §C
 - §D 剩余挂账 C2 / C4 / C5（C1、C3 已于 `9ccd593` 销）
