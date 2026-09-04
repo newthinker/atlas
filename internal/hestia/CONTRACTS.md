@@ -3342,3 +3342,86 @@ M1c-4 §E 登记了「语料不进 git，回滚预案依赖它还在」。本 Sp
 - **「连续 3 期」判据**：2026-08 为第 1 期，2026-09（10 月中）、2026-10（11 月中）补齐后销账，M2 开工前
 - ~~§C 的 Step 6 日历唤起验收~~ ✅ **已完成（2026-09-04 15:30）**：三行形态出现、err.log 未增长、退出码 0，详见 §C
 - §D 剩余挂账 C2 / C4 / C5（C1、C3 已于 `9ccd593` 销）
+
+## Sprint M1.5 · 健康度可观测
+
+### A. 契约更正 —— 既有陈述已被证伪或需收窄
+
+**A1｜方案报告 4.5.1「`hestia_last_success_timestamp` 超 20 日告警」会每月误报**
+回填库 79 个发布日相邻间隔最大 **35 天**（p90 33 天）。「成功」一个月一次，20 天必然每月红。
+⇒ 拆成心跳（`hestia_hours_since_last_run > 30`）与最近入库（`hestia_hours_since_last_ingest > 960`）。
+
+**A2｜告警承载不是 Prometheus，是 `serve` 自己的告警循环**
+本机无 Prometheus / Grafana。`serve` 每 `check_interval` 快照 `/metrics`（按名字求和成无标签单值）、
+按 `alerts.rules` 评估、经 Telegram 发送。方案报告 4.5.2 的 Grafana 留待搭好后接同一个 `/metrics`。
+
+**A3｜五项指标改为八项 + 一项自检**
+`hestia_queue_depth` / `hestia_sheets_write_total`（M2）、`hestia_inbox_pending`（M3）本 Sprint 不注册。
+新增 `hestia_last_run_timestamp` / `hestia_hours_since_last_run` / `hestia_hours_since_last_ingest` /
+`hestia_pending_review` / `hestia_notify_failures_total` / `hestia_collect_errors_total`。
+
+**A4｜`Store` 有了第二个写方法 `RecordRun`**
+登记而不是放宽（同 `BackfillLoad` 先例）。它写 `hestia_runs`——闸门的结论，不是事实来源；
+`TestRecordRunTouchesOnlyRunsTable` 钉住它不碰 observations / pending。
+
+**A5｜告警冷却期此前写死 5 分钟**
+`Rule.Cooldown` 可配置，未写保持 5 分钟；hestia 两条设 24h。既有 `high_error_rate` / `api_down` 行为不变。
+
+**A6｜`duplicate` 不推进「最近入库」**
+`--force` 重跑是 Duplicate；若计入 `LastIngest`，重跑会掩盖真实停摆。
+
+**A7｜`hestia_runs.stage` 不是 spec §2.1 写的那个枚举**（AD-14，reviewer S1；出处 TASK-002 discovery `decisions`）
+spec §2.1 把 `stage` 写成 `fetch | snapshot | parse | mismatch | validate | save | notify`。实际落地是
+**「传给 `ingestOne` 里 `fail` 的原字符串」**，与既有错误串同源（`TestIngestWrapsStageErrors` 守着那个形态，
+改裸枚举等于改需求）。条目**列全**：
+
+| `stage` 实际取值 | 何时 | 与 spec 枚举的差别 |
+|---|---|---|
+| `has article` | `HasArticle` 查库出错 | 枚举外 |
+| `fetch <URL>` | 取正文失败（沿既有 `wrap("fetch "+c.URL, err)`） | 带 URL，不是裸 `fetch` |
+| `snapshot` / `parse` / `validate` / `save` | 对应阶段失败 | 同枚举 |
+| `mismatch` | 标题与正文期次不一致 | 同枚举 |
+| （空） | 通知失败（`send P0` / `send P2` / P1）——**不走 `fail`**，outcome 保持 ingested / pending / failed，只记 `notify_error` | 枚举里的 `notify` **不会出现在 `stage` 列** |
+
+`HealthSummary` / collector 不消费 `stage`，带 URL 只多信息不破坏消费者；`hestia status` 的 runs 段原样打印。
+**旁注 AD-13**：`Discover` 失败与 `--only-period` 过滤后零候选都在主循环之前 `return err`，**不记行**——
+它们只在退出码与 err.log 可见，`hestia status` 的 runs 段与 `hestia_runs_total` 看不到；`hestia_stalled`
+的文案「launchd 没跑，或跑了没落库」正是为这一段写的。
+
+### B. 实测登记（锚 `e5ada52396fc088434a5def263fb7c23c5347607`）
+
+采样纪律（AD-7 口径）：采前采后 `git rev-parse HEAD` 同值；`git status --short -- internal cmd/atlas configs docs go.mod go.sum`
+为空；写本节前 `git diff --numstat e5ada52 HEAD -- internal cmd/atlas configs docs` 为空。基线锚 `037d1eb1e4f827c415319519e40f4e2208968920`
+（本 Sprint 开工时的 master HEAD）；基线覆盖率在临时 worktree `@037d1eb` 上与锚**背对背**实测，不引历史值。
+
+| 项 | 实测 | 单位 |
+|---|---|---|
+| `go test ./internal/hestia/... -cover` | **96.6**（基线 96.5；硬门槛 ≥ 96.3） | % |
+| `internal/metrics` / `internal/alert` / `internal/config` / `cmd/atlas` 覆盖率 | **99.2** / **92.6** / **83.3** / **76.4**（基线 98.9 / 92.3 / 83.3 / 76.3，均不低于） | % |
+| `gofmt -l internal/hestia internal/metrics internal/alert internal/config cmd/atlas` | 仅 `internal/metrics/snapshot_test.go`、`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（三处既有欠账，未修；AD-8） | — |
+| `go vet ./internal/... ./cmd/...` | 零输出 | — |
+| 导出面（`TestPackageExposesNoWriteFunctions` 的 want） | **25 项**（+`HealthSummary` / `Store.RecordRun` / `Store.RecentRuns`）；reflect 守卫 **12 项**（+`RecentRuns` / `RecordRun`） | 函数/方法 |
+| 三守卫 + 字段名守卫 | `TestStoreExposesNoWriteMethods` / `TestPackageExposesNoWriteFunctions` / `TestRecordRunTouchesOnlyRunsTable` / `TestFieldNamesAppearOnlyInFieldsGo` 四条 PASS | — |
+| 四个不动文件 `git diff --stat 037d1eb HEAD -- parse.go extract.go validate.go fields.go` | 空 | — |
+| `store.go` 的 `Save` 函数体 | `git diff 037d1eb HEAD -- store.go` 的 `±` 行含 `func (s *Store) Save` **0** 次 | — |
+| `go.mod` / `go.sum` | 自 `037d1eb` 无 diff（无新增依赖） | — |
+| 真语料回归（`backfill load --allow-incomplete`，exit 0） | 218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21（单篇 28 + 合并组 69）· 字段冲突 0 · 口径路由违反 0 · **`hestia_runs` 0 行**（表已建；回填不走 `Ingest`，不是运行、不记心跳） | 篇 / 篇 / 观测 / 行 |
+| 新增测试（`git diff 037d1eb e5ada52 -- '*_test.go' \| grep -c '^+func Test'`，删除 0） | **39**：schema 1 · store 7 · ingest 10 · health 6 · status 2 · metrics 4 · alert 1 · config 1 · cmd 7（hestia_health 5 + hestia 2）；预估 29 = 1+5+8+4+4+1+4+2，实际 39 = 1+7+10+6+4+1+8+2 | 条 |
+| 「`RecordRun` 失败不影响已入库行」 | **已测**：`TestIngestRunRecordFailureKeepsIngestedRow`（`hestia_runs` 表级 `BEFORE INSERT` 触发器；期次仍在库、Verdict 行先于 `run record FAILED`、`runs` 0 行、不补 `no_new`；子例：零候选时心跳失败错误链含 `record heartbeat`）。reviewer B2 证伪了需求原文「无法在不破坏 `Save` 的前提下构造」 | — |
+| 验证者变异存活登记（非 DoD 缺口，供后续加固） | 001 **M6** `ORDER BY … rowid DESC` 去掉仍绿（索引反向扫描碰巧同序）；002 **M3** 通知失败改走 `fail`（测试未断 `Stage == ""`）、**M7** 跳过的候选记成 `no_new` 行（测试未断心跳 `Period` 为空）；007 **M1** 去掉 `RunAt.UTC()`（夹具本就 UTC，无可观测差别）。出处各 `04-test/TASK-00N-verification.md` | — |
+| code-simplifier 终检（本 Sprint 全部改动文件） | 跑过（只审查、不改文件；子代理审查 `git diff 037d1eb e5ada52` 的全部改动文件，18 次工具调用）。回复未附逐条建议（「Finished. Not actionable」），按 M1.5 TASK-006 同一处置：以载体为准——`git status --short -- internal cmd/atlas configs docs go.mod go.sum` 为空、HEAD 仍是 `e5ada52`，**tracked diff 零改动**，记「无改动」 | — |
+
+**新增测试 39 ≠ 需求预估 29，差在哪**（预估 `schema 1 · store 5 · ingest 8 · health 4 · metrics 4 · alert 1 · config/cmd 4 · status 2`）：
+
+| 任务 | 预估 | 实际 | 差因 |
+|---|---|---|---|
+| TASK-001 store | 5 | **7** | 按原文 5 条实现后覆盖率 96.3 < 基线 96.5，补 `TestRecentRunsRejectsCorruptTimestamps`、`TestRunMethodsPropagateDBErrors`（DoD functional[2] 明写的 `bad run_at` / `rows.Err` 行为） |
+| TASK-002 ingest | 8 | **10** | DoD 另加 `TestIngestOnlyPeriodRecordsOnlyKept`（spec §8）与 `TestIngestRunRecordFailureKeepsIngestedRow`（reviewer B2） |
+| TASK-003 health | 4 | **6** | 按原文 4 条实现后覆盖率 96.2 跌破门槛 96.3，补 `TestHealthSummaryRejectsCorruptRunAt`、`TestHealthSummaryPropagatesQueryErrors`（五条 SQL 各自的错误前缀 + 两条 `rows.Scan` 分支） |
+| TASK-006 / 007 / 010 config+cmd | 4 | **8** | 006 `cmd/atlas/hestia_health_test.go` 5（`TestBuildHestiaHealth_*` 四条 + `TestExampleConfigDeclaresHestiaRules`，后者是 DoD 加的样例配置守卫）；007 `cmd/atlas/hestia_test.go` 2（reviewer B3 补的 cmd 接线测试）；010 `config_test.go` 1（`TestLoad_HestiaConfigAndRuleCooldown_FromYAML`，DoD 加的）；`mapRules` 透传进既有 `TestMapRules_FieldMapping` 断言，不计新函数 |
+| schema / metrics / alert / status（`RenderStatus` 两条） | 1 / 4 / 1 / 2 | 同 | — |
+
+按文件复核（`git diff 037d1eb e5ada52 -- <file> \| grep -c '^+func Test'`）：schema_test 1、store_test 7、ingest_test 10、health_test 6、status_test 2、hestia_collector_test 4、evaluator_test 1、config_test 1、hestia_health_test 5、hestia_test 2、alert_runner_test 0，合计 39。
+
+**本 Sprint 不做的**：需求 TASK-009（投递与验收、§C/§D、销 C2、vault 回写）结转为归档后人类清单（AD-1）；
+**未跑 `deploy.sh`**（`PENDING-ACCEPTANCE.md`：2026-08 月报首期验收登记后才投递）。合并后的 master sha 是 TASK-009 的 `ANCHOR`。
