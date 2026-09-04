@@ -15,6 +15,20 @@ package hestia
 //
 // leader 追加要求（不在 DoD 里，但要进实现）：Out 必须能区分「入了权威表」与「落了 pending」
 //                                                   → TestIngestReportsVerdictAndTable
+//
+// M1.5 的 TASK-002（Ingest 写 hestia_runs）：
+// functional[0]     ingestOne 返回 (runResult, error)；stage 取传给 fail 的原字符串；
+//                   Save 之后按 Table / Verdict 定 outcome；通知失败不走 fail
+//                                                   → TestIngestRecordsFailedWithStage、TestIngestRecordsNotifyError
+// functional[1]     八条需求测试：ingested / no_new 心跳 / pending+blocked_check / 跳过⇒心跳 /
+//                   duplicate / failed+stage / notify_error / notified
+//                                                   → TestIngestRecords*、TestIngestSkippedCandidateFallsBackToHeartbeat
+// boundary[0]       --only-period 过滤掉的候选不记行  → TestIngestOnlyPeriodRecordsOnlyKept
+// boundary[1]       既有测试零断言改动（三处 ingestOne 调用只改形态）
+//                                                   → TestIngestWrapsStageErrors 三个子测试不动断言
+// error_handling[0] RecordRun 失败不影响已入库行、Verdict 行仍打印、不补 no_new 心跳；
+//                   零候选变体 err 含 record heartbeat
+//                                                   → TestIngestRunRecordFailureKeepsIngestedRow
 
 import (
 	"bytes"
@@ -486,7 +500,8 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 		d := ingestOneDeps(newTestStore(t), ingestCfg(t),
 			[]byte(`<html><body>这不是一篇报告</body></html>`))
 
-		requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))
+		_, err := d.ingestOne(ctx, annualCandidate())
+		requireWrappedStageError(t, err)
 	})
 
 	t.Run("Validate 失败", func(t *testing.T) {
@@ -507,7 +522,8 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 		}}
 		d := ingestOneDeps(newTestStore(t), cfg, readTestdata(t, annualFile))
 
-		requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))
+		_, err := d.ingestOne(ctx, annualCandidate())
+		requireWrappedStageError(t, err)
 	})
 
 	// Save 失败在 ingest 链路上**不是随手能构造的**：任何 DB 级故障都会先撞上
@@ -527,7 +543,8 @@ func TestIngestWrapsStageErrors(t *testing.T) {
 
 		d := ingestOneDeps(s, ingestCfg(t), readTestdata(t, annualFile))
 
-		requireWrappedStageError(t, d.ingestOne(ctx, annualCandidate()))
+		_, err = d.ingestOne(ctx, annualCandidate())
+		requireWrappedStageError(t, err)
 	})
 }
 
@@ -1116,4 +1133,192 @@ func TestIngestOnlyPeriodNoMatchFailsLoudly(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "1999-01")
 	assert.Contains(t, err.Error(), "no candidate")
+}
+
+// ---------------------------------------------------------------------------
+// M1.5 的 TASK-002：Ingest 逐候选写 hestia_runs，零行时记 no_new 心跳
+// ---------------------------------------------------------------------------
+
+// newestRun 取最新一行运行记录。
+func newestRun(t *testing.T, s *Store) Run {
+	t.Helper()
+	runs, err := s.RecentRuns(context.Background(), 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1, "至少要有一行运行记录")
+	return runs[0]
+}
+
+// 入库 ⇒ 一行 ingested，带期次与 extractor；没配 Notify ⇒ notified=0、无 notify_error。
+func TestIngestRecordsIngestedRun(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t)}))
+
+	r := newestRun(t, s)
+	assert.Equal(t, RunIngested, r.Outcome)
+	assert.Equal(t, "2025-12", r.Period)
+	assert.Equal(t, "annual", r.PeriodType)
+	assert.Equal(t, annualID, r.ArticleID)
+	assert.NotEmpty(t, r.Extractor)
+	assert.False(t, r.Notified)
+	assert.Empty(t, r.NotifyError)
+	assert.False(t, r.RunAt.IsZero())
+	assert.False(t, r.FinishedAt.Before(r.RunAt))
+	assert.Equal(t, 1, countRows(t, s, TableRuns), "一个候选恰一行")
+}
+
+// 空跑 ⇒ 恰一行 no_new，期次为空。这是心跳。
+func TestIngestRecordsNoNewHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t)}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t)}))
+
+	r := newestRun(t, s)
+	assert.Equal(t, RunNoNew, r.Outcome)
+	assert.Empty(t, r.Period)
+	assert.Equal(t, 2, countRows(t, s, TableRuns))
+}
+
+// 落 pending ⇒ outcome=pending，blocked_check 是第一道 failed 的闸。
+func TestIngestRecordsPendingWithBlockedCheck(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	cfg.Thresholds.DepositSumTolerance = 1e-9
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+
+	r := newestRun(t, s)
+	assert.Equal(t, RunPending, r.Outcome)
+	assert.Equal(t, "deposit_sum", r.BlockedCheck)
+}
+
+// 候选因 HasArticle 跳过（上次落了 pending、本次不 Force）⇒ 本轮零行 ⇒ 记 no_new。
+func TestIngestSkippedCandidateFallsBackToHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	cfg.Thresholds.DepositSumTolerance = 1e-9
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: cfg}))
+	require.Contains(t, out.String(), "already ingested", "前置：第二轮确实是跳过")
+
+	runs, err := s.RecentRuns(ctx, 5)
+	require.NoError(t, err)
+	require.Len(t, runs, 2)
+	assert.Equal(t, RunNoNew, runs[0].Outcome, "跳过的候选不记行，本轮零行 ⇒ 心跳")
+	assert.Equal(t, RunPending, runs[1].Outcome)
+}
+
+// --force 重跑已入库期 ⇒ duplicate，单列，不并进 ingested。
+func TestIngestRecordsDuplicateOnForce(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t)}))
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t), Force: true}))
+
+	assert.Equal(t, RunDuplicate, newestRun(t, s).Outcome)
+}
+
+// 解析失败 ⇒ failed，stage=parse，error 是首行。
+func TestIngestRecordsFailedWithStage(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	f := &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}),
+		articleURL(annualID): []byte("<html><body>not a report</body></html>"),
+	}}
+	require.Error(t, Ingest(ctx, IngestDeps{Store: s, Fetch: f, Out: io.Discard, Cfg: ingestCfg(t)}))
+
+	r := newestRun(t, s)
+	assert.Equal(t, RunFailed, r.Outcome)
+	assert.Equal(t, "parse", r.Stage)
+	assert.Contains(t, r.Error, "parse")
+	assert.NotContains(t, r.Error, "\n")
+	assert.Equal(t, annualID, r.ArticleID)
+}
+
+// 入库成功但通知失败 ⇒ outcome 仍是 ingested（数据在库），notified=0，notify_error 有值。
+func TestIngestRecordsNotifyError(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	err := Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t), Notify: &fakeSender{err: errBoom},
+	})
+	require.Error(t, err, "前置：通知失败让退出码非零")
+
+	r := newestRun(t, s)
+	assert.Equal(t, RunIngested, r.Outcome, "通知失败不是入库失败")
+	assert.False(t, r.Notified)
+	assert.Contains(t, r.NotifyError, "boom")
+	assert.Empty(t, r.Error, "error 列留给处理失败；通知失败有自己的列")
+}
+
+// 通知成功 ⇒ notified=1。
+func TestIngestRecordsNotified(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t), Notify: &fakeSender{},
+	}))
+	assert.True(t, newestRun(t, s).Notified)
+}
+
+// --only-period 过滤掉的候选不记行（spec §8）：过滤发生在循环之前，被滤掉的那条
+// 根本没进 ingestOne，runs 里只该有留下的那一期。
+func TestIngestOnlyPeriodRecordsOnlyKept(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{
+		Store: s, Fetch: twoEntryFetcher(t), Out: &out, Cfg: ingestCfg(t),
+		Force: true, OnlyPeriod: "2025-12",
+	}))
+	require.Contains(t, out.String(), "kept 1 of 2 candidate(s)", "前置：确实滤掉了一条")
+
+	assert.Equal(t, 1, countRows(t, s, TableRuns), "被过滤掉的候选不记行，也不补心跳")
+	r := newestRun(t, s)
+	assert.Equal(t, "2025-12", r.Period)
+	assert.Equal(t, RunIngested, r.Outcome)
+}
+
+// RecordRun 失败不影响已入库行（spec §8、§9 最后一行防线）。
+//
+// 需求原文说这条「无法在不破坏 Save 的前提下构造」——为假（reviewer B2）：同文件
+// TestIngestWrapsStageErrors 的「Save 失败」用例已用表级 BEFORE INSERT 触发器只挡一张表，
+// 同法打在 hestia_runs 上，HasArticle / Validate / Save 照常，故障精确落在 RecordRun。
+func TestIngestRunRecordFailureKeepsIngestedRow(t *testing.T) {
+	ctx := context.Background()
+	s, path := newTestStoreAt(t)
+	_, err := rawDB(t, path).ExecContext(ctx,
+		`CREATE TRIGGER block_runs BEFORE INSERT ON `+TableRuns+`
+		 BEGIN SELECT RAISE(ABORT, 'blocked by test trigger'); END;`)
+	require.NoError(t, err, "前置条件：触发器要建得上")
+
+	var buf bytes.Buffer
+	err = Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &buf, Cfg: ingestCfg(t)})
+	require.Error(t, err, "记行失败要让退出码非零")
+	assert.Contains(t, err.Error(), "record run")
+
+	has, herr := s.HasPeriod(ctx, "2025-12", "annual")
+	require.NoError(t, herr)
+	assert.True(t, has, "记行失败不得影响已入库的期次")
+	assert.Contains(t, buf.String(), "→ "+TableObservations, "Verdict 行在 RecordRun 之前打印，不受影响")
+	assert.Contains(t, buf.String(), "run record FAILED")
+	// 顺序本身也钉住：Verdict 行先于 run record FAILED——RecordRun 在 Save 与打印之后。
+	assert.Less(t, strings.Index(buf.String(), "→ "+TableObservations), strings.Index(buf.String(), "run record FAILED"),
+		"RecordRun 必须在 Verdict 行打印之后")
+	assert.Zero(t, countRows(t, s, TableRuns), "触发器把 runs 表挡死了，不该有任何行")
+	assert.NotContains(t, buf.String(), "no new reports", "候选被处理过，不是空跑")
+	// 心跳按 processed 计（reviewer S2）：候选处理过、只是记不进去 ⇒ 不再补一行 no_new。
+	// 触发器下 no_new 同样写不进去，能观测到的差别是错误链里有没有 record heartbeat。
+	assert.NotContains(t, err.Error(), "record heartbeat", "处理过候选就不该再补心跳")
+
+	// 零候选变体：同一触发器库上再跑一轮，候选被 Discover 判停 ⇒ 心跳 ⇒ 记不进去要响。
+	t.Run("零候选时心跳失败同样响亮", func(t *testing.T) {
+		err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: ingestCfg(t)})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "record heartbeat")
+	})
 }
