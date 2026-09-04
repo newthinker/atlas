@@ -14,6 +14,8 @@ package hestia
 //                   BlockedByCheck 只数 pending 行：failed 夹具带 BlockedCheck="x"，去掉 outcome 过滤即红
 //                                                   → TestHealthSummaryCounts
 // error_handling[0] 红阶段 undefined: HealthSummary → discovery verification
+// review_fix W1     两段 GROUP BY 循环在 rows.Close() 后必须查 rows.Err()：ctx 中断 ⇒ 带步骤前缀的错误，
+//                   不得返回部分计数 + nil          → TestHealthSummaryReportsRowsErr
 
 import (
 	"context"
@@ -170,6 +172,59 @@ func TestHealthSummaryPropagatesQueryErrors(t *testing.T) {
 			_, err := HealthSummary(ctx, &failingQuerier{Querier: s.DB(), failAt: i + 2, replace: `SELECT 'only-one-column'`})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "hestia health: "+step+":")
+		})
+	}
+}
+
+// cancelingQuerier 在第 failAt 次查询返回 rows 之后立刻 cancel ctx，并等到 database/sql 的
+// awaitDone 把 context 错误写进 rows（rows.Err() 非 nil）才把 rows 交回——于是被测函数拿到的是
+// 「Next() 立刻返回 false、Err() 报 context.Canceled」的 rows，与连接中途断掉同形。
+// 等待是确定性的（轮询 rows.Err()，2s 兜底），不是 sleep 赌调度。
+type cancelingQuerier struct {
+	Querier
+	calls, failAt int
+	cancel        context.CancelFunc
+}
+
+func (c *cancelingQuerier) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	c.calls++
+	rows, err := c.Querier.QueryContext(ctx, query, args...)
+	if err != nil || c.calls != c.failAt {
+		return rows, err
+	}
+	c.cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for rows.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	return rows, nil
+}
+
+func (c *cancelingQuerier) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	c.calls++
+	return c.Querier.QueryRowContext(ctx, query, args...)
+}
+
+// W1（QA review_fix）：GROUP BY 循环结束后 rows.Err() 非 nil 时必须报错，而不是把部分计数
+// 当成完整结果交给 collector（那会让 collect_errors 不加一——健康度自己不健康时不会响）。
+func TestHealthSummaryReportsRowsErr(t *testing.T) {
+	s := newTestStore(t)
+	require.NoError(t, s.RecordRun(context.Background(), runAt(1, RunPending)))
+	for _, tc := range []struct {
+		step   string
+		failAt int
+	}{
+		{"runs by outcome", 2},
+		{"blocked by check", 3},
+	} {
+		t.Run(tc.step, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			q := &cancelingQuerier{Querier: s.DB(), failAt: tc.failAt, cancel: cancel}
+			_, err := HealthSummary(ctx, q)
+			require.Error(t, err, "rows.Err() 非 nil 时不得返回部分计数 + nil")
+			assert.Contains(t, err.Error(), "hestia health: "+tc.step+":")
+			assert.ErrorIs(t, err, context.Canceled)
 		})
 	}
 }
