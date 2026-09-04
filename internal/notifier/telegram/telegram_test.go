@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -666,5 +667,73 @@ func TestTelegram_SendDocumentErrors(t *testing.T) {
 	err := tg.SendDocument(file, "c")
 	if err == nil || !strings.Contains(err.Error(), "telegram: API error (status 400)") {
 		t.Errorf("want API error, got %v", err)
+	}
+}
+
+// —— bot token 脱敏（Sprint 043 QA 终审 A2）——
+//
+// Telegram 的端点把 token 放在 URL 路径里，而 net/http 的 *url.Error 会把完整 URL
+// 写进 Error()。传输层一失败（代理没起、断网、超时），错误文本就带着凭据流进调用方的
+// 日志——M1d 起 hestia 把通知错误接进了 out.log / err.log，每天三次无人值守。
+
+// 传输失败（拨不通的代理）时，错误文本不得含 bot token。
+func TestSendPayload_TransportErrorRedactsToken(t *testing.T) {
+	const token = "123456789:AAHsecretTOKENvalue_do_not_leak"
+	tg := New(token, "chat-1", WithProxy("http://127.0.0.1:1"))
+
+	err := tg.SendText("hi")
+	if err == nil {
+		t.Fatal("前置：拨不通的代理必须让发送失败")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("错误文本泄露了 bot token:\n%s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "telegram:") {
+		t.Errorf("脱敏不该丢掉阶段前缀，got: %s", err.Error())
+	}
+}
+
+// SendDocument 走另一个端点，同样构造 URL，同样必须脱敏。
+func TestSendDocument_TransportErrorRedactsToken(t *testing.T) {
+	const token = "987654321:BBHanotherSECRETtoken"
+	dir := t.TempDir()
+	file := filepath.Join(dir, "r.html")
+	if err := os.WriteFile(file, []byte("<html/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tg := New(token, "chat-1", WithProxy("http://127.0.0.1:1"))
+
+	err := tg.SendDocument(file, "cap")
+	if err == nil {
+		t.Fatal("前置：拨不通的代理必须让发送失败")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("错误文本泄露了 bot token:\n%s", err.Error())
+	}
+}
+
+// 脱敏不得切断错误链：将来加退避重试（CONTRACTS §C 的 C2）要靠 errors.As 判超时/网络错。
+func TestSendPayload_RedactedErrorStillUnwraps(t *testing.T) {
+	tg := New("111:AAAsecret", "chat-1", WithProxy("http://127.0.0.1:1"))
+
+	err := tg.SendText("hi")
+	if err == nil {
+		t.Fatal("前置：必须失败")
+	}
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		t.Errorf("errors.As 应能取出底层 *url.Error，got %T: %v", err, err)
+	}
+}
+
+// redactToken 是纯函数：空 token 不改动原文（避免把整串替换成占位符）。
+func TestRedactToken(t *testing.T) {
+	const tok = "SECRET"
+	got := redactToken("url=https://x/bot"+tok+"/send", tok)
+	if want := "url=https://x/bot<redacted>/send"; got != want {
+		t.Errorf("脱敏结果不对:\n got %q\nwant %q", got, want)
+	}
+	if got := redactToken("no token here", ""); got != "no token here" {
+		t.Errorf("空 token 应原样返回，got %q", got)
 	}
 }

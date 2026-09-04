@@ -297,6 +297,45 @@ func (t *Telegram) sendRaw(text string) error {
 	return t.sendPayload(text, "Markdown")
 }
 
+// redactToken 把文本里出现的 bot token 换成占位符。
+//
+// Bot API 的端点把 token 放在 URL 路径里（.../bot<TOKEN>/sendMessage），而 net/http
+// 的 *url.Error 会把完整 URL 写进 Error()。传输层一失败（代理没起、断网、超时），
+// 错误文本就带着凭据流进调用方的日志——Sprint 043 的 M1d 起 hestia 把通知错误接进了
+// out.log / err.log，每天三次无人值守，这条路径因此从「理论泄露」变成「必然发生」。
+//
+// 空 token 原样返回：否则 strings.ReplaceAll 会在每个字符间插入占位符。
+func redactToken(msg, token string) string {
+	if token == "" {
+		return msg
+	}
+	return strings.ReplaceAll(msg, token, "<redacted>")
+}
+
+// redactedError 让错误**文本**脱敏，同时保留错误链。
+//
+// 只脱敏 Error() 而保留 Unwrap()：调用方打日志走 Error()（脱敏），而将来加退避重试
+// （CONTRACTS §C 的 C2）要用 errors.As 取 *url.Error / net.Error 判超时——那条能力
+// 不该为脱敏而丢掉。⚠️ 代价是显式 errors.Unwrap(err).Error() 仍会看到 token，
+// 那是刻意行为，不是本类型要防的路径。
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
+// wrapRedacted 把 "<stage>: <cause>" 整体脱敏后作为错误文本，并把 cause 挂进错误链。
+// 刻意不收 format/args：调用方只需给出阶段前缀，cause 由本函数自己展开，既不用把同一个
+// err 传两遍，也杜绝了在 format 里误写 %w（那会被 Sprintf 渲染成 %!w(...) 而非包装）。
+func (t *Telegram) wrapRedacted(cause error, stage string) error {
+	return &redactedError{
+		msg: redactToken(stage+": "+cause.Error(), t.botToken),
+		err: cause,
+	}
+}
+
 // sendPayload posts text to the Telegram sendMessage API. A non-empty parseMode
 // is forwarded as-is (e.g. "Markdown"); an empty parseMode omits the field so
 // the message is delivered as plain text (no metacharacter interpretation).
@@ -318,7 +357,8 @@ func (t *Telegram) sendPayload(text, parseMode string) error {
 
 	resp, err := t.client.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("telegram: failed to send message: %w", err)
+		// 脱敏：err 是 *url.Error，其 Error() 含完整 URL 即含 bot token。
+		return t.wrapRedacted(err, "telegram: failed to send message")
 	}
 	defer resp.Body.Close()
 
@@ -373,7 +413,8 @@ func (t *Telegram) SendDocument(path, caption string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", t.botToken)
 	resp, err := t.client.Post(apiURL, w.FormDataContentType(), &buf)
 	if err != nil {
-		return fmt.Errorf("telegram: failed to send document: %w", err)
+		// 脱敏，理由同 sendPayload。
+		return t.wrapRedacted(err, "telegram: failed to send document")
 	}
 	defer resp.Body.Close()
 
