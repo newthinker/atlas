@@ -1224,9 +1224,14 @@ func TestHestiaIngestPrintsNotifyStatus(t *testing.T) {
 	t.Cleanup(srv.Close)
 	hestiaCfg := func(t *testing.T) {
 		t.Helper()
+		// queue.dir 指向临时目录（M2a 的 TASK-001，AD-5）：TASK-005 起 Ingest 会在 queue.dir 下建
+		// 四个目录，而预填值 queue/hestia 相对进程 cwd、go test 的 cwd 是包目录 ⇒ 不写这段，
+		// 真入库的用例会把 cmd/atlas/queue/hestia/pending/2025-12-annual.json 留在源码树里。
 		withConfig(t, `
 storage:
   db_path: `+filepath.Join(t.TempDir(), "hestia.db")+`
+queue:
+  dir: `+filepath.Join(t.TempDir(), "queue")+`
 discover:
   index_url: `+srv.URL+`/index.html
   max_pages: 1
@@ -1341,10 +1346,14 @@ func wiringSite(t *testing.T) *httptest.Server {
 
 func wiringHestiaCfg(t *testing.T, srv *httptest.Server) {
 	t.Helper()
+	// queue.dir 指向临时目录（M2a 的 TASK-001，AD-5）：理由同上面 hestiaCfg 闭包——预填值
+	// queue/hestia 相对 cwd，真入库用例会在 cmd/atlas/ 下留目录。
 	withConfig(t, `
 storage:
   db_path: `+filepath.Join(t.TempDir(), "hestia.db")+`
   snapshot_dir: `+filepath.Join(t.TempDir(), "snap")+`
+queue:
+  dir: `+filepath.Join(t.TempDir(), "queue")+`
 discover:
   index_url: `+srv.URL+`/index.html
   max_pages: 1

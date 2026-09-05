@@ -1,6 +1,7 @@
 package hestia
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"maps"
@@ -384,7 +385,7 @@ func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
 		"键集合必须与 fieldOrder **逐项相等**：只比长度的话，打错一个字段名"+
 			"（多一个未知键、少一个真字段）两边都还是 76")
 
-	assert.Equal(t, "2026-09-03", cfg.ConfigVersion,
+	assert.Equal(t, "2026-09-05", cfg.ConfigVersion,
 		"填了区间表就改变了这份配置的行为，config_version 必须跟着走——"+
 			"否则「这期用的是哪版配置」在契约里查不出来")
 
@@ -434,6 +435,14 @@ func TestShippedConfigLoadsAndIsCalibrated(t *testing.T) {
 	assert.Equal(t, DefaultThresholds().StockContinuityMax, cfg.Thresholds.StockContinuityMax,
 		"真配置里的五档必须与代码默认值一致：两处分叉时，跑起来用的是 YAML 那份，"+
 			"而读代码的人看到的是默认值那份")
+
+	// queue 与 signals 段（M2a 的 TASK-001）：yaml 与代码预填各写一份，不一致就是漂移。
+	// signals 会原样快照进每份契约的 thresholds.signals，Loom 从契约里读——yaml 被无声
+	// 改动时，这条是唯一会变红的地方。
+	assert.Equal(t, "queue/hestia", cfg.Queue.Dir,
+		"configs/hestia.yaml 的 queue.dir 必须与 defaultQueueDir 一致")
+	assert.Equal(t, DefaultSignals(), cfg.Signals,
+		"configs/hestia.yaml 的 signals 段必须与 DefaultSignals() 逐字段一致")
 }
 
 // —— M1c-4 的 TASK-010：magnitude_ranges 的全覆盖校验 ——
@@ -564,4 +573,83 @@ discover:
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "snapshot_dir")
 	require.NotNil(t, errors.Unwrap(err), "校验失败的错误必须包住底层 err")
+}
+
+// —— M2a 的 TASK-001：queue 与 signals 段 ——
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "预填 queue.dir / Signals 默认值"           → TestLoadConfigDefaultsQueueAndSignals
+// functional[0] "yaml 显式写的键覆盖、没写的保持预填"       → TestLoadConfigReadsQueueAndSignals
+// functional[0] "validate 四条：空串 / temp_scale / 两处倒置" → TestLoadConfigRejectsBadQueueAndSignals
+// functional[0] "DefaultSignals 登记进 AST 守卫"           → store_test.go TestPackageExposesNoWriteFunctions
+// functional[1] "仓库 yaml 载入 queue/signals 与代码预填一致" → TestShippedConfigLoadsAndIsCalibrated（追加两条断言）
+// boundary[0]   "Signals 的 JSON 键集恰七个、无 temp_scale"  → TestSignalsJSONKeys
+
+// minimalYAML 拼一份能过校验的最小配置，extra 追加在末尾（本文件多条用例共用）。
+func minimalYAML(extra string) string {
+	return `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+` + extra
+}
+
+// queue.dir 与 signals 未写 ⇒ 预填默认；契约是 M3 的唯一输入，不提供关掉的形态。
+func TestLoadConfigDefaultsQueueAndSignals(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, minimalYAML("")))
+	require.NoError(t, err)
+	assert.Equal(t, "queue/hestia", cfg.Queue.Dir)
+	assert.Equal(t, DefaultSignals(), cfg.Signals)
+	assert.Equal(t, "0-4", cfg.Signals.TempScale)
+	assert.Equal(t, -2.0, cfg.Signals.ScissorsSink)
+	assert.Equal(t, 2000.0, cfg.Signals.HHMltMonthlyWarm)
+}
+
+func TestLoadConfigReadsQueueAndSignals(t *testing.T) {
+	cfg, err := LoadConfig(writeConfig(t, minimalYAML(`
+queue:
+  dir: var/q
+signals:
+  scissors_active: 1
+  bill_ratio_healthy: 8
+`)))
+	require.NoError(t, err)
+	assert.Equal(t, "var/q", cfg.Queue.Dir)
+	assert.Equal(t, 1.0, cfg.Signals.ScissorsActive)
+	assert.Equal(t, 8.0, cfg.Signals.BillRatioHealthy)
+	assert.Equal(t, -2.0, cfg.Signals.ScissorsSink, "没写的键保持预填")
+}
+
+func TestLoadConfigRejectsBadQueueAndSignals(t *testing.T) {
+	cases := map[string]struct{ yaml, want string }{
+		"queue.dir 空串":      {"queue:\n  dir: \"\"\n", "queue.dir"},
+		"剪刀差两线倒置":           {"signals:\n  scissors_active: -3\n", "scissors_sink"},
+		"票据两线倒置":            {"signals:\n  bill_ratio_severe: 5\n", "bill_ratio_healthy"},
+		"temp_scale 不是 0-4": {"signals:\n  temp_scale: \"0-5\"\n", "temp_scale"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfig(writeConfig(t, minimalYAML(c.yaml)))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.want)
+		})
+	}
+}
+
+// Signals 的 JSON 形态守卫（M2a 的 TASK-001，AD-6）：TASK-003 的契约 thresholds.signals
+// 直接 json.Marshal 它，Loom 按这七个键读。temp_scale 顶层已有一份（thresholds.temp_scale），
+// 此处 `json:"-"`；漏了 json tag 的字段会以 Go 字段名（如 ScissorsActive）出现，Loom 读不到。
+func TestSignalsJSONKeys(t *testing.T) {
+	raw, err := json.Marshal(DefaultSignals())
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.ElementsMatch(t,
+		[]string{"scissors_active", "scissors_sink", "hh_mlt_monthly_warm", "hh_short_monthly_warm",
+			"bill_ratio_healthy", "bill_ratio_severe", "corp_mlt_short_expand"},
+		slices.Collect(maps.Keys(got)),
+		"契约 thresholds.signals 的键集：七个 snake_case 键，无 temp_scale、无 Go 字段名")
 }
