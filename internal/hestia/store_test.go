@@ -397,7 +397,7 @@ func TestStoreExposesNoWriteMethods(t *testing.T) {
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	want := []string{"Close", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "RecentObservations", "RecentPending", "RecentRuns", "RecordRun", "Save"}
+	want := []string{"Close", "Current", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "PriorPublishedAt", "RecentObservations", "RecentPending", "RecentRuns", "RecordRun", "Save"}
 	assert.Equalf(t, want, got,
 		"只应导出这 %d 个只读方法（%s）；出现 Insert/Upsert 等写口即违反单一写入口约束",
 		len(want), strings.Join(want, "、"))
@@ -450,7 +450,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "Calibrate", "DefaultSignals", "DefaultThresholds", "Discover", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate"}
+	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "Calibrate", "Contract.FileName", "Contract.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -2935,4 +2935,101 @@ func TestRunMethodsPropagateDBErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "recent runs")
 	assert.Nil(t, got)
+}
+
+// —— M2a 的 TASK-003：Store.Current / Store.PriorPublishedAt ——
+//
+// 夹具用既有 passing()（一条 monetary_hierarchy check）而不是需求写的 ValidationReport{Passed: true}：
+// Save 拒绝「Passed 且零 checks」的报告（空报告与「没有闸门跑过」不可区分），需求自己也说
+// 夹具写法以 TestSaveRevisionKeepsBothRows 为准，那条用的正是 passing()。
+
+// Current 读 v_hestia_current 的一行；不存在 ⇒ ok=false 且无错误。
+func TestStoreCurrent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	obs := contractObs()
+	_, err := s.Save(ctx, obs, passing())
+	require.NoError(t, err)
+
+	got, ok, err := s.Current(ctx, "2026-08", "monthly")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, obs.Meta.ArticleID, got.Meta.ArticleID)
+	assert.Equal(t, 447.0, got.Values[FieldDepositFlowMoM])
+
+	_, ok, err = s.Current(ctx, "1999-01", "monthly")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+// PriorPublishedAt：同业务键下小于 before 的最大 published_at；没有 ⇒ ""。
+func TestStorePriorPublishedAt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	first := contractObs()
+	_, err := s.Save(ctx, first, passing())
+	require.NoError(t, err)
+	second := contractObs()
+	second.Meta.PublishedAt = "2026-09-20"
+	second.Meta.ArticleID = "2026092012345678902"
+	out, err := s.Save(ctx, second, passing())
+	require.NoError(t, err)
+	require.Equal(t, bitemporal.Revision, out.Verdict, "前置：第二次是修订")
+
+	prior, err := s.PriorPublishedAt(ctx, "2026-08", "monthly", "2026-09-20")
+	require.NoError(t, err)
+	assert.Equal(t, "2026-09-12", prior)
+
+	none, err := s.PriorPublishedAt(ctx, "2026-08", "monthly", "2026-09-12")
+	require.NoError(t, err)
+	assert.Equal(t, "", none)
+
+	// 边界（M2a 的 TASK-003 boundary[1]）：不跨 period_type 串。12 月的月报与年报 period 都是
+	// YYYY-12，业务键含 period_type——年报那行不能成为月报的 prior，Current 也各取各的行。
+	t.Run("period_type 不串", func(t *testing.T) {
+		s := newTestStore(t)
+		annual := contractObs()
+		annual.Meta.Period, annual.Meta.PeriodType = "2026-12", "annual"
+		annual.Meta.PublishedAt, annual.Meta.ArticleID = "2027-01-10", "2027011012345678903"
+		annual.Values = map[string]float64{FieldM2: 400}
+		_, err := s.Save(ctx, annual, passing())
+		require.NoError(t, err)
+		monthly := contractObs()
+		monthly.Meta.Period, monthly.Meta.PeriodType = "2026-12", "monthly"
+		monthly.Meta.PublishedAt, monthly.Meta.ArticleID = "2027-01-15", "2027011512345678904"
+		monthly.Values = map[string]float64{FieldM2: 401}
+		_, err = s.Save(ctx, monthly, passing())
+		require.NoError(t, err)
+
+		prior, err := s.PriorPublishedAt(ctx, "2026-12", "monthly", "2027-01-15")
+		require.NoError(t, err)
+		assert.Equal(t, "", prior, "年报那行 published_at 更早，但 period_type 不同，不算月报的 prior")
+
+		a, ok, err := s.Current(ctx, "2026-12", "annual")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "2027011012345678903", a.Meta.ArticleID)
+		assert.Equal(t, 400.0, a.Values[FieldM2])
+		m, ok, err := s.Current(ctx, "2026-12", "monthly")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "2027011512345678904", m.Meta.ArticleID)
+		assert.Equal(t, 401.0, m.Values[FieldM2])
+	})
+}
+
+// 错误传播（M2a 的 TASK-003 error_handling[0]）：关库后查询必须报错，且带各自的前缀——
+// 调用方（contract emit）靠前缀分辨是哪一步断的。
+func TestStoreCurrentAndPriorErrorsCarryPrefix(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	require.NoError(t, s.Close())
+
+	_, _, err := s.Current(ctx, "2026-08", "monthly")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hestia store current")
+
+	_, err = s.PriorPublishedAt(ctx, "2026-08", "monthly", "2026-09-20")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hestia store prior published_at")
 }

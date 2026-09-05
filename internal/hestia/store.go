@@ -462,6 +462,40 @@ func (s *Store) PrecedingAll(ctx context.Context, period, periodType string, n i
 	return out, nil
 }
 
+// Current 读某期在 v_hestia_current 里的当前行（M2a 的 TASK-003）。不存在 ⇒ ok=false。
+// 供契约回放（contract emit）用；ingest 路径手里有 Observation，不走这里。
+func (s *Store) Current(ctx context.Context, period, periodType string) (Observation, bool, error) {
+	cols := slices.Concat(metaColumns, fieldOrder)
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf("SELECT %s FROM %s WHERE period = ? AND period_type = ?", strings.Join(cols, ", "), viewCurrent),
+		period, periodType)
+	if err != nil {
+		return Observation{}, false, fmt.Errorf("hestia store current %s/%s: %w", period, periodType, err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return Observation{}, false, rows.Err()
+	}
+	obs, err := scanObservation(rows)
+	if err != nil {
+		return Observation{}, false, fmt.Errorf("hestia store current %s/%s: %w", period, periodType, err)
+	}
+	return obs, true, nil
+}
+
+// PriorPublishedAt 取同业务键下 published_at < before 的最大值：修订契约的
+// supersedes_published_at。没有 ⇒ ""。只读，不改 Save。
+func (s *Store) PriorPublishedAt(ctx context.Context, period, periodType, before string) (string, error) {
+	var prior sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MAX(published_at) FROM `+TableObservations+`
+		 WHERE period = ? AND period_type = ? AND published_at < ?`, period, periodType, before).Scan(&prior)
+	if err != nil {
+		return "", fmt.Errorf("hestia store prior published_at %s/%s: %w", period, periodType, err)
+	}
+	return prior.String, nil
+}
+
 // scanPendingObservation 读一行 hestia_pending。**只读**，不违反「Save 是唯一写入口」。
 //
 // ⚠️ pending 的业务列是一整块 values_json，不像权威表逐列铺开 ⇒ 需要单独一个 scan。
