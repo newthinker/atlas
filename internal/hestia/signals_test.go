@@ -19,6 +19,7 @@ import (
 // boundary[0]   evalCredit total==0 ⇒ unknown        → TestEvaluateCreditZeroTotalIsUnknown
 // boundary[0]   空 Values ⇒ 四个 unknown、0/0        → TestEvaluateEmptyValuesAllUnknown
 // boundary[0]   001 变异残留：两线相等被拒           → config_test.go TestLoadConfigRejectsBadQueueAndSignals（两子例）
+// （M2a 的 TASK-004 boundary[2]）002 变异残留：五个阈值的相等边 + 混口径反向 → TestEvaluateThresholdEdges（六子例）
 
 // obsAt 与 store_test.go 的 obsWith（固定 validMeta）不同：本文件的用例要指定期次与
 // period_type，因为月均要按它们除月数。需求原文把它叫 obsWith，与既有 helper 重名，改名。
@@ -165,4 +166,37 @@ func TestEvaluateCreditZeroTotalIsUnknown(t *testing.T) {
 func TestEvaluateEmptyValuesAllUnknown(t *testing.T) {
 	got := Evaluate(obsAt("2025-12", "annual", map[string]float64{}), DefaultSignals())
 	assert.Equal(t, Temperature{SignalUnknown, SignalUnknown, SignalUnknown, SignalUnknown, 0, 0}, got)
+}
+
+// 002 变异残留（M2a 的 TASK-004 boundary[2]；验证者 test-m2a-b 报告 M1–M5、M13）：五个阈值的
+// 相等边与混口径的反向组合此前没有用例，把 `>=` 变异成 `>`、`<` 变异成 `<=` 整包仍绿。
+// 相等边逐个钉住：剪刀差 d == active(0) 绿、d == sink(-2) 红；楼市月均 v == warm(2000) 绿；
+// 票据比 r == healthy(10%) 黄、r == severe(20%) 红；混口径 (bill_mom, corp_total_ytd) unknown。
+// 票据比用 10/100、20/100：bill/total*100 在 float64 下恰等于 10、20（实测），不落在舍入误差里。
+func TestEvaluateThresholdEdges(t *testing.T) {
+	cfg := DefaultSignals()
+	cases := []struct {
+		name string
+		vals map[string]float64
+		pick func(Temperature) Signal
+		want Signal
+	}{
+		{"剪刀差 d == ScissorsActive ⇒ green", map[string]float64{FieldM1YoY: 8.0, FieldM2YoY: 8.0},
+			func(x Temperature) Signal { return x.Activation }, SignalGreen},
+		{"剪刀差 d == ScissorsSink ⇒ red", map[string]float64{FieldM1YoY: 6.0, FieldM2YoY: 8.0},
+			func(x Temperature) Signal { return x.Activation }, SignalRed},
+		{"楼市月均 v == HHMltMonthlyWarm（_mom）⇒ green", map[string]float64{FieldLoanHHMLTMoM: 2000},
+			func(x Temperature) Signal { return x.Housing }, SignalGreen},
+		{"票据比 r == BillRatioHealthy ⇒ yellow", map[string]float64{FieldLoanBillMoM: 10, FieldLoanCorpTotalMoM: 100},
+			func(x Temperature) Signal { return x.Credit }, SignalYellow},
+		{"票据比 r == BillRatioSevere ⇒ red", map[string]float64{FieldLoanBillMoM: 20, FieldLoanCorpTotalMoM: 100},
+			func(x Temperature) Signal { return x.Credit }, SignalRed},
+		{"混口径反向 (bill_mom, corp_total_ytd) ⇒ unknown", map[string]float64{FieldLoanBillMoM: 3472, FieldLoanCorpTotalYTD: 30000},
+			func(x Temperature) Signal { return x.Credit }, SignalUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, c.pick(Evaluate(obsAt("2023-08", "monthly", c.vals), cfg)))
+		})
+	}
 }
