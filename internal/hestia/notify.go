@@ -59,20 +59,36 @@ func renderP1(c Candidate, err error) string {
 // article_id、本次新抽的 Values 一个都不写（ingest.go 注释原话）。下面那行锚值是**本次
 // 重抽**的数，不是库里的；写成「入库」会让运维以为这些数进了库。其它 Verdict 不变。
 //
-// 四个冷热信号与综合温度尚未实现（等 M2），这里只带四个锚字段：
-// 存量三项单位万亿元、存款流量单位亿元并标口径（同族 _ytd / _mom 哪个非空取哪个，
+// 四个锚字段之后是信号行（M2a 的 TASK-005）：四个冷热信号画成圆点 + 综合温度 Score/Known，
+// unknown 是 ⚪ 不是 🔴——「没数据」和「数据不好」是两回事。Duplicate / OutOfOrder 走 P2 但
+// 没有契约与温度（AD-11 / AD-14），temp 零值四个 unknown，打 `温度 0/0`。
+// 锚字段：存量三项单位万亿元、存款流量单位亿元并标口径（同族 _ytd / _mom 哪个非空取哪个，
 // 两者同在取 ytd）。
-func renderP2(obs Observation, out Outcome) string {
+func renderP2(obs Observation, out Outcome, temp Temperature) string {
 	dep, caliber := anchorFlow(obs.Values, FieldDepositFlowYTD, FieldDepositFlowMoM)
 	action := "入库"
 	if out.Verdict == bitemporal.Duplicate {
 		action = "已在库（本次抽取值未写入）"
 	}
-	return fmt.Sprintf("[P2] hestia %s/%s %s %s · extractor %s\nM2 %s 万亿 · M1 %s 万亿 · 社融存量 %s 万亿 · 人民币存款 %s 亿元 (%s)\narticle %s · 发布 %s",
+	return fmt.Sprintf("[P2] hestia %s/%s %s %s · extractor %s\nM2 %s 万亿 · M1 %s 万亿 · 社融存量 %s 万亿 · 人民币存款 %s 亿元 (%s)\n信号 活化%s 楼市%s 消费%s 信贷%s · 温度 %d/%d\narticle %s · 发布 %s",
 		obs.Meta.Period, obs.Meta.PeriodType, action, out.Verdict, obs.Meta.Extractor,
 		anchorValue(obs.Values, FieldM2), anchorValue(obs.Values, FieldM1),
 		anchorValue(obs.Values, FieldTSFStock), dep, caliber,
+		dot(temp.Activation), dot(temp.Housing), dot(temp.Consumption), dot(temp.Credit), temp.Score, temp.Known,
 		obs.Meta.ArticleID, obs.Meta.PublishedAt)
+}
+
+// dot 把信号画成圆点：unknown 是灰的，不是红的——「没数据」和「数据不好」是两回事。
+func dot(s Signal) string {
+	switch s {
+	case SignalGreen:
+		return "🟢"
+	case SignalYellow:
+		return "🟡"
+	case SignalRed:
+		return "🔴"
+	}
+	return "⚪"
 }
 
 // anchorValue 取一个字段的显示值；缺失写 n/a，不写 0——0 是一个合法的数。

@@ -83,7 +83,7 @@ func TestRenderP1KeepsFirstLineOnly(t *testing.T) {
 
 // P2：Verdict 原样写进去（Duplicate 不被吞）、extractor、四个锚字段带单位。
 func TestRenderP2CarriesVerdictAndAnchors(t *testing.T) {
-	got := renderP2(notifyObs(), Outcome{Verdict: bitemporal.Duplicate, Table: TableObservations})
+	got := renderP2(notifyObs(), Outcome{Verdict: bitemporal.Duplicate, Table: TableObservations}, Temperature{})
 
 	assert.True(t, strings.HasPrefix(got, "[P2]"))
 	assert.Contains(t, got, "Duplicate", "Verdict 必须可见——Duplicate 与 New 对运维的含义不同")
@@ -103,7 +103,7 @@ func TestRenderP2CarriesVerdictAndAnchors(t *testing.T) {
 func TestRenderP2MissingAnchorIsNA(t *testing.T) {
 	obs := notifyObs()
 	delete(obs.Values, FieldTSFStock)
-	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations})
+	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations}, Temperature{})
 	assert.Contains(t, got, "n/a")
 	assert.NotContains(t, got, "462.06")
 }
@@ -113,7 +113,7 @@ func TestRenderP2UsesMomWhenYtdAbsent(t *testing.T) {
 	obs := notifyObs()
 	delete(obs.Values, FieldDepositFlowYTD)
 	obs.Values[FieldDepositFlowMoM] = 447
-	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations})
+	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations}, Temperature{})
 	assert.Contains(t, got, "447")
 	assert.Contains(t, got, "mom")
 	require.NotContains(t, got, "ytd")
@@ -123,7 +123,7 @@ func TestRenderP2UsesMomWhenYtdAbsent(t *testing.T) {
 func TestRenderP2BothFlowsAbsent(t *testing.T) {
 	obs := notifyObs()
 	delete(obs.Values, FieldDepositFlowYTD)
-	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations})
+	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations}, Temperature{})
 	assert.Contains(t, got, "人民币存款 n/a 亿元 (-)")
 	assert.NotContains(t, got, "ytd")
 	assert.NotContains(t, got, "mom")
@@ -133,7 +133,7 @@ func TestRenderP2BothFlowsAbsent(t *testing.T) {
 func TestRenderP2PrefersYtdWhenBothPresent(t *testing.T) {
 	obs := notifyObs()
 	obs.Values[FieldDepositFlowMoM] = 447
-	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations})
+	got := renderP2(obs, Outcome{Verdict: bitemporal.New, Table: TableObservations}, Temperature{})
 	assert.Contains(t, got, "177600")
 	assert.Contains(t, got, "(ytd)")
 	assert.NotContains(t, got, "447")
@@ -145,13 +145,14 @@ func TestRenderP2PrefersYtdWhenBothPresent(t *testing.T) {
 // 会让运维以为这些数进了库——Duplicate 时措辞改为「已在库（本次抽取值未写入）」，
 // 其它 Verdict 不变。
 func TestRenderP2DuplicateSaysValuesNotWritten(t *testing.T) {
-	dup := renderP2(notifyObs(), Outcome{Verdict: bitemporal.Duplicate, Table: TableObservations})
+	dup := renderP2(notifyObs(), Outcome{Verdict: bitemporal.Duplicate, Table: TableObservations}, Temperature{})
 	assert.Contains(t, dup, "Duplicate", "Verdict 仍要原样可见")
 	assert.Contains(t, dup, "未写入")
+	assert.Contains(t, dup, "温度 0/0", "Duplicate 走 P2 但无契约无温度（M2a 的 TASK-005，需求既定）")
 	assert.NotContains(t, dup, "入库 Duplicate", "Duplicate 不能再说「入库」")
 
 	for _, v := range []bitemporal.Verdict{bitemporal.New, bitemporal.Revision, bitemporal.OutOfOrder} {
-		got := renderP2(notifyObs(), Outcome{Verdict: v, Table: TableObservations})
+		got := renderP2(notifyObs(), Outcome{Verdict: v, Table: TableObservations}, Temperature{})
 		assert.NotContains(t, got, "未写入", "%s 的措辞不变", v)
 		assert.Contains(t, got, "入库 "+v.String(), "%s 仍是「入库」", v)
 	}
@@ -169,4 +170,12 @@ func TestFmtNumKeepsPlainDigitsAboveMillion(t *testing.T) {
 	// 边界两侧各一个，钉住「阈值在 1e6 而不是 1e5」这个事实本身。
 	assert.Equal(t, "177600", fmtNum(177600), "1e5 量级 %g 也不切指数——原判据正因此恒过")
 	assert.Equal(t, "356.71", fmtNum(356.71), "小数不受影响")
+}
+
+// P2 加一行信号：四个圆点 + 温度 n/Known；unknown 用 ⚪（M2a 的 TASK-005）。
+func TestRenderP2CarriesSignals(t *testing.T) {
+	temp := Temperature{Activation: SignalRed, Housing: SignalGreen, Consumption: SignalUnknown, Credit: SignalYellow, Score: 1, Known: 3}
+	got := renderP2(notifyObs(), Outcome{Verdict: bitemporal.New, Table: TableObservations}, temp)
+	assert.Contains(t, got, "信号 活化🔴 楼市🟢 消费⚪ 信贷🟡 · 温度 1/3")
+	assert.Contains(t, got, "356.71", "M1d 的锚字段行不动")
 }
