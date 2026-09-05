@@ -54,6 +54,13 @@ var (
 	hestiaBackfillExpectArticles int
 )
 
+// —— contract emit 的三个 flag（M2a 的 TASK-006）——
+var (
+	hestiaEmitPeriod     string
+	hestiaEmitPeriodType string
+	hestiaEmitStdout     bool
+)
+
 var hestiaCmd = &cobra.Command{
 	Use:   "hestia",
 	Short: "PBOC financial statistics pipeline",
@@ -246,7 +253,16 @@ func init() {
 	hestiaBackfillCmd.AddCommand(hestiaBackfillFetchCmd, hestiaBackfillCalibrateCmd,
 		hestiaBackfillLoadCmd)
 
-	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd)
+	ef := hestiaContractEmitCmd.Flags()
+	ef.StringVar(&hestiaEmitPeriod, "period", "", "period to emit, YYYY-MM (required)")
+	ef.StringVar(&hestiaEmitPeriodType, "period-type", "monthly", "monthly | q1 | h1 | q1_q3 | annual")
+	ef.BoolVar(&hestiaEmitStdout, "stdout", false, "print the contract instead of writing pending/")
+	if err := hestiaContractEmitCmd.MarkFlagRequired("period"); err != nil {
+		panic(err) // 只会在 flag 名写错时触发，属编程错误
+	}
+	hestiaContractCmd.AddCommand(hestiaContractEmitCmd)
+
+	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd, hestiaContractCmd)
 	rootCmd.AddCommand(hestiaCmd)
 }
 
@@ -363,6 +379,85 @@ func runHestiaStatus(cmd *cobra.Command, _ []string) error {
 // ⚠️ 月份两位且必须落在 01–12：宽松的 `\d{4}-\d{2}` **认得 `2020-13` 与 `2020-00`**，
 // 放过去会变成一个语义非法的日期，而回填按**发布日期**判停 —— 错一个月就少抓或多抓一整批。
 var hestiaBackfillFromRE = regexp.MustCompile(`^\d{4}-(0[1-9]|1[0-2])$`)
+
+// hestiaPeriodTypeRE 校验 `--period-type` 的五个取值（M2a 的 TASK-006 boundary）。与
+// hestiaBackfillFromRE 同形，在开库前校验；这五个是 period_type 的枚举，不是业务字段名，
+// 不受 TestFieldNamesAppearOnlyInFieldsGo 约束（validPeriodTypes 在 types.go 已有同样字面量）。
+var hestiaPeriodTypeRE = regexp.MustCompile(`^(monthly|q1|h1|q1_q3|annual)$`)
+
+var hestiaContractCmd = &cobra.Command{
+	Use:          "contract",
+	Short:        "契约队列（方案报告 5.1）",
+	SilenceUsage: true,
+}
+
+var hestiaContractEmitCmd = &cobra.Command{
+	Use:   "emit",
+	Short: "为已入库的某一期重新生成契约（回放形态），写进 queue/<dir>/pending/ 或打到 stdout",
+	Long: `按需生成契约（M2a 的 TASK-006）。ingest 只为新入库的期次写契约；历史期次、
+契约写失败后的补发、M3 调 prompt 时拿样本，都走这里。
+
+回放契约与实时契约的差别：validation.checks 为空（库里拿不到原报告），
+generated_by 是 contract@v1/replay。期次不在权威表（含只在 pending 表）⇒ 报错不生成。`,
+	SilenceUsage: true,
+	RunE:         runHestiaContractEmit,
+}
+
+// runHestiaContractEmit：参数校验 → 开库 → Current → PriorPublishedAt → BuildContract → 落盘或 stdout。
+//
+// 回放契约的 IsRevision 取「库里有更早的 published_at」，与实时路径的 Verdict 判定语义一致：
+// 修订过的期次回放时仍标 is_revision: true，消费者据此知道它取代过一版。
+func runHestiaContractEmit(cmd *cobra.Command, _ []string) error {
+	// 参数校验在开库之前：参数写错的人第一秒就知道，不等开库。
+	if !hestiaBackfillFromRE.MatchString(hestiaEmitPeriod) {
+		return fmt.Errorf("--period %q 格式非法：要 YYYY-MM，月份取 01–12", hestiaEmitPeriod)
+	}
+	if !hestiaPeriodTypeRE.MatchString(hestiaEmitPeriodType) {
+		return fmt.Errorf("--period-type %q 非法：要 monthly|q1|h1|q1_q3|annual", hestiaEmitPeriodType)
+	}
+	cfg, st, err := openHestia()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	ctx := cmd.Context()
+	obs, ok, err := st.Current(ctx, hestiaEmitPeriod, hestiaEmitPeriodType)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("hestia contract emit: %s/%s not in observations（契约只承载过闸数据；落 pending 的期次先裁决）",
+			hestiaEmitPeriod, hestiaEmitPeriodType)
+	}
+	prior, err := st.PriorPublishedAt(ctx, obs.Meta.Period, obs.Meta.PeriodType, obs.Meta.PublishedAt)
+	if err != nil {
+		return err
+	}
+	c := hestia.BuildContract(hestia.ContractInput{
+		Obs: obs,
+		// Passed 恒 true 而 Checks 留空：能出现在 observations 表里就是过闸的（没过闸的落
+		// pending），但逐条 check 库里没存 —— 回放只声明「过了」，不伪造 checks。
+		Report:     hestia.ValidationReport{Passed: true},
+		IsRevision: prior != "",
+		Supersedes: prior,
+		Replay:     true,
+	}, cfg)
+	if hestiaEmitStdout {
+		b, err := c.JSON()
+		if err != nil {
+			return err
+		}
+		_, err = cmd.OutOrStdout().Write(b) // JSON() 已带末尾换行，不再 Println
+		return err
+	}
+	path, err := hestia.WriteContract(cfg.Queue.Dir, c)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s/%s contract → %s\n", obs.Meta.Period, obs.Meta.PeriodType, path)
+	return nil
+}
 
 // parseHestiaBackfillFrom 把 `YYYY-MM` 解析成该月**第一天**。
 //
