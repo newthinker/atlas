@@ -629,6 +629,10 @@ func TestLoadConfigRejectsBadQueueAndSignals(t *testing.T) {
 		"剪刀差两线倒置":           {"signals:\n  scissors_active: -3\n", "scissors_sink"},
 		"票据两线倒置":            {"signals:\n  bill_ratio_severe: 5\n", "bill_ratio_healthy"},
 		"temp_scale 不是 0-4": {"signals:\n  temp_scale: \"0-5\"\n", "temp_scale"},
+		// 两线相等也拒（M2a 的 TASK-002 补 001 的变异残留：校验是 >=，需求子例只覆盖严格倒置，
+		// >= 改 > 无测试变红）。相等意味着「介于两线之间」的黄灯区间为空，阈值形同虚设。
+		"剪刀差两线相等": {"signals:\n  scissors_active: -2\n", "scissors_sink"},
+		"票据两线相等":  {"signals:\n  bill_ratio_severe: 10\n", "bill_ratio_healthy"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
