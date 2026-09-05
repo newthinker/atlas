@@ -55,6 +55,17 @@ type notifyError struct{ err error }
 func (e notifyError) Error() string { return "notify: " + e.err.Error() }
 func (e notifyError) Unwrap() error { return e.err }
 
+// contractError 标记「入库成功但契约没写出去」（M2a 的 TASK-005，AD-4b）。与 notifyError
+// 同形态，但 Error() 不带前缀：阶段前缀由 ingestOne 的 wrap 给（stage=contract），带了会
+// 打成 "contract: contract: …"。runRow 靠它把 outcome 保持为 ingested——数据确实在库，
+// HealthSummary 的「最近入库」应当推进；哪里断的由 stage+error 说。循环不认它 ⇒ P1 照发：
+// P1 是失败通知，不会造成「Telegram 说入库了、队列里却没有」，反而是运维知道要
+// `contract emit` 补发的唯一即时信号。
+type contractError struct{ err error }
+
+func (e contractError) Error() string { return e.err.Error() }
+func (e contractError) Unwrap() error { return e.err }
+
 // send 是唯一的发送点。Notify 为 nil 时是 no-op。
 func (d IngestDeps) send(text string) error {
 	if d.Notify == nil {
@@ -102,6 +113,12 @@ func isNotifyError(err error) bool {
 	return errors.As(err, &ne)
 }
 
+// isContractError 判断错误是不是「契约写失败」：runRow 靠它决定 outcome 保持 ingested。
+func isContractError(err error) bool {
+	var ce contractError
+	return errors.As(err, &ce)
+}
+
 // Ingest 跑一轮发现与入库。
 //
 // 单期失败**不中断整批** —— 一期解析失败不该阻止其它期入库。逐期收集，最后
@@ -118,6 +135,15 @@ func Ingest(ctx context.Context, d IngestDeps) error {
 	// 配置错误在任何网络请求之前拦下（M1d 的 TASK-006）。
 	if d.OnlyPeriod != "" && !d.Force {
 		return errors.New("hestia ingest: OnlyPeriod requires Force (--only-period 只与 --force 同用)")
+	}
+	// 空 queue.dir 在任何 I/O 之前拦下（M2a 的 TASK-005，AD-5）：EnsureQueueDirs("") 等于
+	// MkdirAll("pending") 等四个**相对进程 cwd** 的目录，测试跑起来会在包目录里留垃圾。
+	if d.Cfg.Queue.Dir == "" {
+		return errors.New("hestia ingest: queue.dir must not be empty")
+	}
+	// 建齐队列状态机（M2a 的 TASK-005）：消费者第一次来就看到 pending/ processing/ done/ failed/。
+	if err := EnsureQueueDirs(d.Cfg.Queue.Dir); err != nil {
+		return fmt.Errorf("hestia ingest: %w", err)
 	}
 
 	// Force 必须同时穿透**两层**幂等（TASK-011 修回归）。
@@ -265,7 +291,14 @@ func (d IngestDeps) runRow(runAt, started time.Time, c Candidate, res runResult,
 		Outcome: res.outcome, Extractor: res.extractor, BlockedCheck: res.blockedCheck, Stage: res.stage,
 		Notified: res.notified, NotifyError: res.notifyErr,
 	}
-	if err != nil && !isNotifyError(err) {
+	switch {
+	case err == nil, isNotifyError(err):
+		// 通知失败不算处理失败：notify_error 列已由 res 带过来。
+	case isContractError(err):
+		// 契约写失败（M2a 的 TASK-005，AD-4b）：数据在库，outcome 保持 ingested；
+		// Stage 已由 fail("contract") 填好，Error 列记首行让 status 能看到哪里断的。
+		r.Error = firstLineOf(err.Error())
+	default:
 		r.Outcome = RunFailed
 		r.Error = firstLineOf(err.Error())
 	}
@@ -383,11 +416,36 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) (runResult, erro
 	// 而它**从未因为「那条局限被放开」而红过一次** —— 因为这里从一开始就没有假定它。
 	fmt.Fprintf(d.Out, "%s %s → %s\n", obs.Meta.Period, out.Verdict, out.Table)
 
+	// 契约在通知之前（M2a 的 TASK-005）：契约是 M3 的输入，通知是投影。写失败该期
+	// stage=contract、P2 不发——避免「Telegram 说入库了、队列里却没有」；数据已在库，
+	// 运维用 `hestia contract emit --period` 补发（错误类型 contractError，见其注释）。
+	//
+	// 只在 New / Revision 时写（AD-14）：OutOfOrder 同样入权威表但不是 current 行，
+	// 若也写契约会用旧数据同名覆盖 pending/ 里可能尚未消费的更新契约，违背「最新的赢」；
+	// 它与 Duplicate 同待遇——P2 照发、温度 0/0。
+	var temp Temperature
+	if out.Table == TableObservations && (out.Verdict == bitemporal.New || out.Verdict == bitemporal.Revision) {
+		in := ContractInput{Obs: obs, Report: rep, SourceURL: c.URL, IsRevision: out.Verdict == bitemporal.Revision}
+		if in.IsRevision {
+			prior, err := d.Store.PriorPublishedAt(ctx, obs.Meta.Period, obs.Meta.PeriodType, obs.Meta.PublishedAt)
+			if err != nil {
+				return fail("contract", contractError{err: err})
+			}
+			in.Supersedes = prior
+		}
+		path, err := WriteContract(d.Cfg.Queue.Dir, BuildContract(in, d.Cfg))
+		if err != nil {
+			return fail("contract", contractError{err: err})
+		}
+		fmt.Fprintf(d.Out, "%s contract → %s\n", obs.Meta.Period, path)
+		temp = Evaluate(obs, d.Cfg.Signals)
+	}
+
 	// 通知放在打印之后：Out 是本地真相，Telegram 是它的投影；投影失败不该让本地少一行。
 	// 阶段名写成 "send P2"/"send P0" 而不是 "notify"：notifyError.Error() 自带 "notify: "
 	// 前缀，再用 notify 做阶段名会打成 "notify: notify: …"；阶段名说清没发出去的是哪一类
 	// 消息，比重复一遍 notify 有用。
-	msg, stage := renderP2(obs, out), "send P2"
+	msg, stage := renderP2(obs, out, temp), "send P2"
 	if out.Table == TablePending {
 		msg, stage = renderP0(obs, rep), "send P0"
 	}

@@ -33,6 +33,7 @@ package hestia
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -111,9 +112,12 @@ const (
 func ingestCfg(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		Storage:    StorageCfg{SnapshotDir: t.TempDir()},
-		Discover:   DiscoverCfg{IndexURL: testIndexURL, MaxPages: 3},
-		Thresholds: DefaultThresholds(),
+		ConfigVersion: "test",
+		Storage:       StorageCfg{SnapshotDir: t.TempDir()},
+		Queue:         QueueCfg{Dir: t.TempDir()},
+		Discover:      DiscoverCfg{IndexURL: testIndexURL, MaxPages: 3},
+		Thresholds:    DefaultThresholds(),
+		Signals:       DefaultSignals(),
 	}
 }
 
@@ -130,12 +134,18 @@ func annualFetcher(t *testing.T) *fakeFetcher {
 
 // outPeriodRE 认出 Out 里以期次开头的行。每条候选无论成败都会打一行，
 // 且都以 period 开头 —— "no new reports" 这类行不匹配，自然被排除。
-var outPeriodRE = regexp.MustCompile(`(?m)^(\d{4}-\d{2})\b`)
+var outPeriodRE = regexp.MustCompile(`(?m)^(\d{4}-\d{2})\b(.*)$`)
 
 // outPeriods 按打印顺序取出 Out 里的期次序列。
+//
+// M2a 的 TASK-005 起，入权威表的候选会多打一行 `<period> contract → <path>`（需求规定的
+// 格式，同样以 period 开头）。它不是候选的结论行，这里跳过，否则每条入库候选会被数两次。
 func outPeriods(out string) []string {
 	var got []string
 	for _, m := range outPeriodRE.FindAllStringSubmatch(out, -1) {
+		if strings.Contains(m[2], " contract → ") {
+			continue
+		}
 		got = append(got, m[1])
 	}
 	return got
@@ -200,6 +210,7 @@ func TestIngestRejectsPeriodMismatch(t *testing.T) {
 			// 手写字面量不经 ingestCfg，SnapshotDir 得自己填（M1d 的 TASK-003）：
 			// 否则 Fetch 成功后 saveSnapshot("") 先报错，走不到「期次不一致」那一步。
 			Storage:    StorageCfg{SnapshotDir: t.TempDir()},
+			Queue:      QueueCfg{Dir: t.TempDir()}, // 同理：Ingest 入口拒绝空 queue.dir（M2a 的 TASK-005）
 			Discover:   DiscoverCfg{IndexURL: testIndexURL, MaxPages: 2},
 			Thresholds: DefaultThresholds(),
 		},
@@ -1017,10 +1028,11 @@ func TestIngestNotifyFailureIsLoudButNotCascading(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	sender := &fakeSender{err: errBoom}
+	cfg := ingestCfg(t)
 
 	var out bytes.Buffer
 	err := Ingest(ctx, IngestDeps{
-		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Notify: sender,
+		Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: cfg, Notify: sender,
 	})
 	require.Error(t, err, "通知发不出去必须让退出码非零，err.log 才有痕")
 	// 钉的是 wrap 前缀形态 `(<article_id>): send P2: notify: `，不是裸 Contains "notify"：
@@ -1037,6 +1049,13 @@ func TestIngestNotifyFailureIsLoudButNotCascading(t *testing.T) {
 	// 真相那一行——这正是「Out 是真相、Telegram 是投影」要防的。
 	assert.Contains(t, out.String(), "→ "+TableObservations,
 		"Out 是本地真相、通知是投影：通知失败不能让本地少那一行（发送必须在打印之后）")
+	// 顺序守卫的另一半（M2a 的 TASK-005 boundary）：契约在通知之前。P2 发送失败时契约
+	// 仍在 pending/ 且可解析——通知是投影，投影失败不撤契约。
+	raw, rerr := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"))
+	require.NoError(t, rerr, "P2 失败不能撤掉已写的契约")
+	var contract map[string]any
+	require.NoError(t, json.Unmarshal(raw, &contract))
+	assert.Equal(t, "2025-12", contract["period"])
 }
 
 // P1 **自身**发不出去（reviewer R-005b）：上一条走的是「P2 失败 ⇒ errors.As 命中 ⇒ continue」，
@@ -1321,4 +1340,180 @@ func TestIngestRunRecordFailureKeepsIngestedRow(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "record heartbeat")
 	})
+}
+
+// —— M2a 的 TASK-005：ingest 接线（契约在通知之前）——
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] 入口空 queue.dir 报错、任何 I/O 之前；四子目录建齐 → TestIngestRejectsEmptyQueueDir、TestIngestWritesContractOnObservation
+// functional[1] New/Revision 写契约；Pending/Duplicate/OutOfOrder 不写 → TestIngestWritesContractOnObservation、TestIngestNoContractOnPending、
+//               TestIngestNoContractOnDuplicate、TestIngestNoContractOnOutOfOrder
+// functional[2] 写失败：outcome 保持 ingested、stage=contract、P1 照发、P2 不发 → TestIngestContractWriteFailureKeepsRowAndSkipsP2
+// functional[3] P2 信号行 → notify_test.go TestRenderP2CarriesSignals
+// boundary[0]   P2 失败契约仍在 → TestIngestNotifyFailureIsLoudButNotCascading（追加断言）
+
+func pendingContracts(t *testing.T, cfg Config) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(cfg.Queue.Dir, "pending"))
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// 入权威表 ⇒ pending/ 恰一份契约，内容可解析、期次对、generated_by 是实时形态。
+func TestIngestWritesContractOnObservation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+
+	names := pendingContracts(t, cfg)
+	require.Equal(t, []string{"2025-12-annual.json"}, names)
+	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", names[0]))
+	require.NoError(t, err)
+	var c map[string]any
+	require.NoError(t, json.Unmarshal(raw, &c))
+	assert.Equal(t, "2025-12", c["period"])
+	assert.Equal(t, "contract@v1", c["generated_by"])
+	assert.Equal(t, false, c["is_revision"])
+	assert.Equal(t, "test", c["thresholds"].(map[string]any)["config_version"])
+	for _, sub := range []string{"processing", "done", "failed"} {
+		_, err := os.Stat(filepath.Join(cfg.Queue.Dir, sub))
+		assert.NoError(t, err, "四个子目录在 Ingest 入口建齐")
+	}
+}
+
+// 落 pending 不生成契约：契约只承载过闸的数据。
+func TestIngestNoContractOnPending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	cfg.Thresholds.DepositSumTolerance = 1e-9
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	assert.Empty(t, pendingContracts(t, cfg))
+}
+
+// Duplicate 不生成：--force 重跑没有新值。
+func TestIngestNoContractOnDuplicate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	first := pendingContracts(t, cfg)
+	require.Len(t, first, 1)
+	require.NoError(t, os.Remove(filepath.Join(cfg.Queue.Dir, "pending", first[0]))) // 模拟被消费
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Force: true}))
+	assert.Empty(t, pendingContracts(t, cfg), "Duplicate 不该再写一份")
+}
+
+// OutOfOrder 不生成（AD-14）：同期更旧 published_at 迟到，Save 同样入权威表但不是 current 行；
+// 若也写契约，会用旧数据同名覆盖 pending/ 里可能尚未消费的更新契约——违背「最新的赢」。
+// P2 照旧，温度 0/0。
+func TestIngestNoContractOnOutOfOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	newer := contractObs()
+	newer.Meta.Period, newer.Meta.PeriodType = "2025-12", "annual"
+	newer.Meta.PublishedAt = "2026-02-01" // 晚于夹具的 2026-01-15
+	newer.Meta.ArticleID = "2026020112345678905"
+	_, err := s.Save(ctx, newer, passing())
+	require.NoError(t, err)
+	sender := &fakeSender{}
+
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: cfg, Notify: sender}))
+	assert.Contains(t, out.String(), bitemporal.OutOfOrder.String())
+	assert.Equal(t, 2, countRows(t, s, TableObservations), "OutOfOrder 仍入权威表（两行并存）")
+	assert.Empty(t, pendingContracts(t, cfg), "OutOfOrder 不写契约：不能用旧数据覆盖更新的契约")
+	require.Len(t, sender.texts, 1)
+	assert.Contains(t, sender.texts[0], "温度 0/0", "不算温度，P2 照旧打 0/0")
+}
+
+// 契约写失败（AD-4a/4b）：数据已在库 ⇒ outcome 保持 ingested、stage=contract、Error 记首行；
+// P1 照发（运维要知道去 contract emit 补发）、P2 不发（避免「Telegram 说入库了、队列里却没有」）。
+// 夹具把目标文件名预建为目录，让 writeAtomic 的 os.Rename 返回 EISDIR——不依赖权限位，root 下也不假绿。
+func TestIngestContractWriteFailureKeepsRowAndSkipsP2(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	require.NoError(t, EnsureQueueDirs(cfg.Queue.Dir))
+	require.NoError(t, os.MkdirAll(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"), 0o755))
+	sender := &fakeSender{}
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Notify: sender})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contract")
+	assert.Equal(t, 1, countRows(t, s, TableObservations), "数据已在库，不因契约写失败回滚")
+	require.Len(t, sender.texts, 1, "P1 照发、P2 不发")
+	assert.True(t, strings.HasPrefix(sender.texts[0], "[P1]"), "唯一那条是 P1：%s", sender.texts[0])
+	assert.Contains(t, sender.texts[0], "contract")
+	assert.NotContains(t, sender.texts[0], "信号 活化", "P2 没发出去")
+	r := newestRun(t, s)
+	assert.Equal(t, RunIngested, r.Outcome, "数据确实在库，不记 failed")
+	assert.Equal(t, "contract", r.Stage)
+	assert.Contains(t, r.Error, "contract")
+	assert.True(t, r.Notified, "P1 发成功了")
+}
+
+// fatalFetcher：被调用即 t.Fatal——用来证明某个检查发生在任何 I/O 之前。
+type fatalFetcher struct{ t *testing.T }
+
+func (f fatalFetcher) Get(context.Context, string) ([]byte, error) {
+	f.t.Fatal("Fetch 不该被调用：配置错误必须在任何 I/O 之前拦下")
+	return nil, nil
+}
+
+// 空 queue.dir 在入口拒绝（AD-5）：EnsureQueueDirs("") 会在进程 cwd 建四个目录。
+func TestIngestRejectsEmptyQueueDir(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	cfg.Queue.Dir = ""
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: fatalFetcher{t}, Out: io.Discard, Cfg: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "queue.dir")
+}
+
+// Revision 写契约并带 supersedes（M2a 的 TASK-005）：同期更旧的 published_at 先在库，夹具
+// （2026-01-15）后到 ⇒ Save 判 Revision ⇒ PriorPublishedAt 取到被取代的那份日期。
+func TestIngestRevisionContractCarriesSupersedes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	older := contractObs()
+	older.Meta.Period, older.Meta.PeriodType = "2025-12", "annual"
+	older.Meta.PublishedAt = "2026-01-01" // 早于夹具的 2026-01-15
+	older.Meta.ArticleID = "2026010112345678906"
+	_, err := s.Save(ctx, older, passing())
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: cfg}))
+	assert.Contains(t, out.String(), bitemporal.Revision.String())
+	names := pendingContracts(t, cfg)
+	require.Equal(t, []string{"2025-12-annual.json"}, names)
+	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", names[0]))
+	require.NoError(t, err)
+	var c map[string]any
+	require.NoError(t, json.Unmarshal(raw, &c))
+	assert.Equal(t, true, c["is_revision"])
+	assert.Equal(t, "2026-01-01", c["supersedes_published_at"], "被取代的是库里更旧那份的 published_at")
+}
+
+// queue.dir 建不出来（路径落在一个普通文件之下）⇒ 入口报错、任何 I/O 之前。
+func TestIngestRejectsUnusableQueueDir(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	blocker := filepath.Join(t.TempDir(), "file-not-dir")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+	cfg.Queue.Dir = filepath.Join(blocker, "queue")
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: fatalFetcher{t}, Out: io.Discard, Cfg: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hestia ingest: ")
+	assert.Contains(t, err.Error(), "contract queue dir")
 }
