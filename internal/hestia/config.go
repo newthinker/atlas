@@ -30,6 +30,44 @@ type StorageCfg struct {
 // 是为了让运维一眼看到它，这里预填是为了让别的配置文件漏写时也不至于空串。
 const defaultSnapshotDir = "data/hestia-snapshots"
 
+// QueueCfg 是契约队列（方案报告 5.1；M2a 的 TASK-001）。Dir 相对进程 cwd，与 db_path 同约定；
+// Atlas 只写 <Dir>/pending/，processing/ done/ failed/ 归消费者（M3 的 warp-hestia）。
+type QueueCfg struct {
+	Dir string `mapstructure:"dir"`
+}
+
+const defaultQueueDir = "queue/hestia"
+
+// Signals 是四信号与综合温度的阈值（方案报告 4.7 / 5.2；M2a 的 TASK-001）。它同时是契约
+// thresholds.signals 段的来源：Atlas 用它算 P2 里的冷热，Loom 从契约快照里拿同一份。
+//
+// json tag 与 mapstructure 同名（AD-6）：契约把这段直接 json.Marshal，Loom 按 snake_case 键读。
+// TempScale 是 `json:"-"`——契约顶层 thresholds.temp_scale 已有一份，不重复。
+type Signals struct {
+	TempScale          string  `mapstructure:"temp_scale" json:"-"`
+	ScissorsActive     float64 `mapstructure:"scissors_active" json:"scissors_active"`
+	ScissorsSink       float64 `mapstructure:"scissors_sink" json:"scissors_sink"`
+	HHMltMonthlyWarm   float64 `mapstructure:"hh_mlt_monthly_warm" json:"hh_mlt_monthly_warm"`
+	HHShortMonthlyWarm float64 `mapstructure:"hh_short_monthly_warm" json:"hh_short_monthly_warm"`
+	BillRatioHealthy   float64 `mapstructure:"bill_ratio_healthy" json:"bill_ratio_healthy"`
+	BillRatioSevere    float64 `mapstructure:"bill_ratio_severe" json:"bill_ratio_severe"`
+	CorpMltShortExpand float64 `mapstructure:"corp_mlt_short_expand" json:"corp_mlt_short_expand"` // 本迭代只快照，不参与四信号
+}
+
+// DefaultSignals 是方案报告 5.2 的原值。
+func DefaultSignals() Signals {
+	return Signals{
+		TempScale:          "0-4",
+		ScissorsActive:     0,
+		ScissorsSink:       -2,
+		HHMltMonthlyWarm:   2000,
+		HHShortMonthlyWarm: 0,
+		BillRatioHealthy:   10,
+		BillRatioSevere:    20,
+		CorpMltShortExpand: 1.5,
+	}
+}
+
 // Config 是 configs/hestia.yaml 的内存形态。
 //
 // 独立文件、独立装载器，照 internal/crisis/config.go 的先例，不并进
@@ -42,6 +80,8 @@ type Config struct {
 	Storage       StorageCfg  `mapstructure:"storage"`
 	Discover      DiscoverCfg `mapstructure:"discover"`
 	Thresholds    Thresholds  `mapstructure:"thresholds"`
+	Queue         QueueCfg    `mapstructure:"queue"`
+	Signals       Signals     `mapstructure:"signals"`
 }
 
 // LoadConfig 读配置文件并立即校验。
@@ -59,7 +99,9 @@ func LoadConfig(path string) (Config, error) {
 
 	cfg := Config{
 		Storage:    StorageCfg{SnapshotDir: defaultSnapshotDir},
+		Queue:      QueueCfg{Dir: defaultQueueDir},
 		Thresholds: DefaultThresholds(),
+		Signals:    DefaultSignals(),
 	}
 	if err := v.Unmarshal(&cfg); err != nil {
 		return Config{}, fmt.Errorf("hestia: parsing config %s: %w", path, err)
@@ -202,6 +244,14 @@ func (c Config) validate() error {
 		return errors.New("discover.max_pages must be >= 1")
 	case c.Discover.Timeout <= 0:
 		return errors.New("discover.timeout must be > 0")
+	case c.Queue.Dir == "":
+		return errors.New("queue.dir must not be empty")
+	case c.Signals.TempScale != "0-4":
+		return fmt.Errorf("signals.temp_scale must be \"0-4\" (got %q); 换刻度要先改算法与契约", c.Signals.TempScale)
+	case c.Signals.ScissorsSink >= c.Signals.ScissorsActive:
+		return fmt.Errorf("signals.scissors_sink (%v) must be < scissors_active (%v)", c.Signals.ScissorsSink, c.Signals.ScissorsActive)
+	case c.Signals.BillRatioHealthy >= c.Signals.BillRatioSevere:
+		return fmt.Errorf("signals.bill_ratio_healthy (%v) must be < bill_ratio_severe (%v)", c.Signals.BillRatioHealthy, c.Signals.BillRatioSevere)
 	}
 
 	// 第二道防线：预填只挡住「没写」，**挡不住「写了 0」**。有人显式写

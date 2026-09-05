@@ -13,7 +13,8 @@
 # 2026-09-01（M1c-4 的 TASK-004）：magnitude_ranges 由 54 项扩到 76 项，新增的
 # 22 项是当月口径列（*_mom）的**占位**区间，未经标定 —— 见该段的注释。
 # 2026-09-03（M1d 的 TASK-001）：storage 段加 snapshot_dir。
-config_version: "2026-09-03"
+# 2026-09-05（M2a 的 TASK-001）：加 queue 与 signals 段。
+config_version: "2026-09-05"
 
 storage:
   # 相对路径，按进程 cwd 解析（约束 C8）。plist 的 WorkingDirectory 已指向 runtime；
@@ -25,6 +26,12 @@ storage:
   # 另存 <article_id>.<UTC 时间戳>.html——央行改稿是事实，两版都留。
   # 相对路径，按进程 cwd 解析，与 db_path 同约定。
   snapshot_dir: data/hestia-snapshots
+
+queue:
+  # 契约队列根目录（方案报告 5.1；M2a 的 TASK-001）。相对进程 cwd，与 db_path 同约定。
+  # Atlas 每次 ingest 建齐 pending/ processing/ done/ failed/ 四个子目录，但**只写 pending/**；
+  # 其余三个归消费者（M3 的 warp-hestia）。文件名 <period>-<period_type>.json，同名覆盖。
+  dir: queue/hestia
 
 discover:
   # 央行「沟通交流 > 新闻发布」栏目。栏目 ID 不写死在代码里（分页模板从页面解析），
@@ -356,3 +363,16 @@ thresholds:
   #     留空不等于「全部」，Thresholds.validate 会直接拒；同月的 annual 与 monthly
   #     是两条独立序列。同时 version 必须在 validCaliberVersions 内、reason 必须写清
   #     为什么、skip_checks 不得覆盖全部闸门、且不得含 completeness。
+
+# 四信号与综合温度的阈值（方案报告 4.7；M2a 的 TASK-001）。
+# 这一段会原样快照进每份契约的 thresholds.signals——Loom 从契约里读，不读本文件（5.3）。
+# 改这里之前过一遍 5.3.3 的跨项目清单：方法论文档里若写死了数值，不会自动跟随。
+signals:
+  temp_scale: "0-4"           # 综合温度刻度；4.7 待决按 0–4 实现，改刻度要先改算法
+  scissors_active: 0          # M1−M2 剪刀差活化线 (pct)
+  scissors_sink: -2           # 沉淀线 (pct)；必须 < scissors_active
+  hh_mlt_monthly_warm: 2000   # 住户中长期月均回暖线 (亿元)
+  hh_short_monthly_warm: 0    # 住户短期月均回暖线 (亿元)
+  bill_ratio_healthy: 10      # 票据占企业新增健康上限 (%)；必须 < bill_ratio_severe
+  bill_ratio_severe: 20       # 严重冲量下限 (%)
+  corp_mlt_short_expand: 1.5  # 企业中长期÷短期扩张线 (x)；只快照进契约，不参与四信号
