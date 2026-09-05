@@ -15,6 +15,20 @@ package main
 //                                          → TestHestiaStatusOnEmptyStore、TestHestiaStatusShowsRecentFiveRuns
 // functional[2]     RecentRuns 的错误传播（不静默成「runs: 0」）
 //                                          → TestHestiaStatusPropagatesRunsError
+//
+// M2a 的 TASK-006（hestia contract emit）:
+// functional[0]     三变量 / contract / emit 子命令 / runHestiaContractEmit / init 挂载
+//                                          → TestHestiaContractEmitFlags、TestHestiaCommandIsRegistered（contract）
+// functional[1]     五条原文用例 + emitFixture（显式 queue.dir）
+//                                          → TestHestiaContractEmitRejectsBadPeriodBeforeOpeningDB、
+//                                            TestHestiaContractEmitWritesPending、TestHestiaContractEmitStdoutDoesNotWrite、
+//                                            TestHestiaContractEmitUnknownPeriodFails
+// boundary[0]       --period-type 五值之外开库前报错；--stdout 末尾恰一个 \n
+//                                          → TestHestiaContractEmitRejectsBadPeriodTypeBeforeOpeningDB、
+//                                            TestHestiaContractEmitStdoutDoesNotWrite（末字节断言）
+// boundary[1]       hestia.go 不 import path/filepath；SilenceUsage / IsRegistered 守卫加 contract
+//                                          → TestHestiaCmdDoesNotResolveDBPath、TestHestiaCommandsSilenceUsage、TestHestiaCommandIsRegistered
+// error_handling[0] 红阶段留痕 → discovery verification.red_phase；Current 查询错误原样返回（UnknownPeriod 走 ok=false 分支）
 
 import (
 	"bytes"
@@ -60,6 +74,7 @@ func TestHestiaCommandIsRegistered(t *testing.T) {
 			}
 			assert.Contains(t, subs, "ingest")
 			assert.Contains(t, subs, "status")
+			assert.Contains(t, subs, "contract") // M2a 的 TASK-006（reviewer S3）
 		}
 	}
 	assert.True(t, found, "hestia 命令没有注册到 rootCmd")
@@ -92,7 +107,7 @@ func TestHestiaFlags(t *testing.T) {
 // `hestia status --hestia-config /nonexistent/nope.yaml` 仍打出完整 13 行 usage。
 // ⇒ 循环里逐个断言不是啰嗦，**少任何一个叶子都会真的漏**。
 func TestHestiaCommandsSilenceUsage(t *testing.T) {
-	for _, c := range []*cobra.Command{hestiaCmd, hestiaIngestCmd, hestiaStatusCmd} {
+	for _, c := range []*cobra.Command{hestiaCmd, hestiaIngestCmd, hestiaStatusCmd, hestiaContractCmd, hestiaContractEmitCmd} {
 		assert.Truef(t, c.SilenceUsage, "%s 必须设 SilenceUsage，否则每次失败灌一屏 usage 把错误埋掉", c.Name())
 	}
 
@@ -1414,4 +1429,134 @@ func TestHestiaIngestWiresNotify(t *testing.T) {
 	require.Error(t, err, "sender 接了线，P2 经代理必失败，Ingest 必须把它报出来")
 	assert.Contains(t, err.Error(), "send P2")
 	assert.GreaterOrEqual(t, connects.Load(), int32(1), "telegram 必须真的尝试经代理发送")
+}
+
+// —— M2a 的 TASK-006：hestia contract emit ——
+
+// restoreEmitGlobals 先存后还原四个包级变量（AD-8：沿既有 withConfig 的 old := …; t.Cleanup 模式，
+// 不硬编码 "configs/hestia.yaml"）。每个改了它们的用例都要调；漏一个就会把临时路径泄漏给
+// 同包后续用例。
+func restoreEmitGlobals(t *testing.T) {
+	t.Helper()
+	oldCfg, oldPeriod, oldType, oldStdout := hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout
+	t.Cleanup(func() {
+		hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = oldCfg, oldPeriod, oldType, oldStdout
+	})
+}
+
+// emitFixture：临时 hestia.yaml（db 与 queue 都在临时目录）+ 库里一条 2025-12/annual。
+//
+// yaml 必须显式写 queue.dir：LoadConfig 预填的 queue/hestia 相对进程 cwd，不写就会在
+// cmd/atlas/ 下建目录。报告带一条 check：Save 拒绝「Passed 且零 checks」的报告
+// （空报告与「没有闸门跑过」不可区分，store.go checkReportConsistency），需求原文的
+// ValidationReport{Passed: true} 会被拒——与 TASK-003 store 侧用例的处置一致。
+func emitFixture(t *testing.T) (cfgPath, queueDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	queueDir = filepath.Join(dir, "q")
+	cfgPath = filepath.Join(dir, "hestia.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`
+storage:
+  db_path: `+filepath.Join(dir, "hestia.db")+`
+  snapshot_dir: `+filepath.Join(dir, "snap")+`
+queue:
+  dir: `+queueDir+`
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`), 0o644))
+	cfg, err := hestia.LoadConfig(cfgPath)
+	require.NoError(t, err)
+	st, err := hestia.NewStore(cfg.Storage.DBPath)
+	require.NoError(t, err)
+	defer st.Close()
+	obs := hestia.Observation{
+		Meta: hestia.Meta{Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-15",
+			ArticleID: "2026011509294440745", CaliberVersion: "2025-01", Extractor: "rule@v2"},
+		Values: map[string]float64{hestia.FieldM2: 331.7, hestia.FieldM1: 112.3},
+	}
+	rep := hestia.ValidationReport{Passed: true, Checks: []hestia.Check{{ID: "monetary_hierarchy", Status: hestia.CheckPassed}}}
+	_, err = st.Save(context.Background(), obs, rep)
+	require.NoError(t, err)
+	return cfgPath, queueDir
+}
+
+func TestHestiaContractEmitFlags(t *testing.T) {
+	assert.NotNil(t, hestiaContractEmitCmd.Flags().Lookup("period"))
+	assert.NotNil(t, hestiaContractEmitCmd.Flags().Lookup("period-type"))
+	assert.NotNil(t, hestiaContractEmitCmd.Flags().Lookup("stdout"))
+}
+
+// --period 格式在开库前校验：参数写错的人第一秒就知道。配置路径指向不存在的文件，
+// 若先开库会先撞到配置错误——错误串里出现「格式非法」即证明校验在开库之前。
+func TestHestiaContractEmitRejectsBadPeriodBeforeOpeningDB(t *testing.T) {
+	restoreEmitGlobals(t)
+	hestiaCfgPath = "/nonexistent/hestia.yaml"
+	hestiaEmitPeriod, hestiaEmitPeriodType = "2026-13", "monthly"
+	cmd, _ := newCapturingCmd()
+	err := runHestiaContractEmit(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "格式非法")
+	assert.NotContains(t, err.Error(), "/nonexistent/hestia.yaml", "开库前就该报错")
+}
+
+// 边界（M2a 的 TASK-006 boundary[0]）：--period-type 五值之外与 --period 同位置、开库前报错。
+func TestHestiaContractEmitRejectsBadPeriodTypeBeforeOpeningDB(t *testing.T) {
+	restoreEmitGlobals(t)
+	hestiaCfgPath = "/nonexistent/hestia.yaml"
+	hestiaEmitPeriod, hestiaEmitPeriodType = "2026-06", "montly"
+	cmd, _ := newCapturingCmd()
+	err := runHestiaContractEmit(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `--period-type "montly" 非法：要 monthly|q1|h1|q1_q3|annual`)
+	assert.NotContains(t, err.Error(), "/nonexistent/hestia.yaml", "开库前就该报错")
+}
+
+func TestHestiaContractEmitWritesPending(t *testing.T) {
+	cfgPath, queueDir := emitFixture(t)
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "2025-12", "annual", false
+
+	cmd, out := newCapturingCmd()
+	require.NoError(t, runHestiaContractEmit(cmd, nil))
+	path := filepath.Join(queueDir, "pending", "2025-12-annual.json")
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"generated_by": "contract@v1/replay"`)
+	assert.Contains(t, string(raw), `"checks": []`)
+	assert.Contains(t, string(raw), `"is_revision": false`, "库里只有一版，回放不是修订")
+	assert.Contains(t, out.String(), path)
+	assert.Contains(t, out.String(), "2025-12/annual contract → ")
+}
+
+func TestHestiaContractEmitStdoutDoesNotWrite(t *testing.T) {
+	cfgPath, queueDir := emitFixture(t)
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "2025-12", "annual", true
+
+	cmd, out := newCapturingCmd()
+	require.NoError(t, runHestiaContractEmit(cmd, nil))
+	assert.Contains(t, out.String(), `"period": "2025-12"`)
+	_, err := os.Stat(filepath.Join(queueDir, "pending", "2025-12-annual.json"))
+	assert.True(t, os.IsNotExist(err), "--stdout 不落盘")
+
+	// 边界（M2a 的 TASK-006 boundary[0]）：末尾恰一个 \n——JSON() 已带，命令不得再 Println。
+	b := out.Bytes()
+	require.NotEmpty(t, b)
+	assert.Equal(t, byte('\n'), b[len(b)-1], "stdout 末字节必须是换行")
+	assert.NotEqual(t, byte('\n'), b[len(b)-2], "恰一个换行，不是两个")
+}
+
+func TestHestiaContractEmitUnknownPeriodFails(t *testing.T) {
+	cfgPath, queueDir := emitFixture(t)
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "1999-01", "monthly", false
+	cmd, _ := newCapturingCmd()
+	err := runHestiaContractEmit(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1999-01/monthly")
+	assert.Contains(t, err.Error(), "not in observations")
+	_, statErr := os.Stat(filepath.Join(queueDir, "pending"))
+	assert.True(t, os.IsNotExist(statErr), "期次不存在 ⇒ 不生成、不建 pending/")
 }
