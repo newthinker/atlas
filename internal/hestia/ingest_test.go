@@ -1368,7 +1368,14 @@ func TestIngestWritesContractOnObservation(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	cfg := ingestCfg(t)
-	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	sender := &fakeSender{}
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Notify: sender}))
+
+	// 主路径接线断言（review_fix M8，验证者变异「ingestOne 丢弃 Evaluate 结果」曾存活）：
+	// 2025 年报按 002 的 golden 是 红/红/红/黄 ⇒ 温度 0/4；temp 若被丢成零值会打 ⚪⚪⚪⚪ · 0/0。
+	require.Len(t, sender.texts, 1)
+	assert.Contains(t, sender.texts[0], "信号 活化🔴 楼市🔴 消费🔴 信贷🟡 · 温度 0/4",
+		"P2 必须带 Evaluate 的真实结果，不是零值 Temperature")
 
 	names := pendingContracts(t, cfg)
 	require.Equal(t, []string{"2025-12-annual.json"}, names)
@@ -1447,6 +1454,8 @@ func TestIngestContractWriteFailureKeepsRowAndSkipsP2(t *testing.T) {
 	err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Notify: sender})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contract")
+	assert.NotContains(t, err.Error(), "contract: contract:",
+		"阶段前缀由 wrap 给，contractError.Error() 不得再带一份（review_fix M4）")
 	assert.Equal(t, 1, countRows(t, s, TableObservations), "数据已在库，不因契约写失败回滚")
 	require.Len(t, sender.texts, 1, "P1 照发、P2 不发")
 	assert.True(t, strings.HasPrefix(sender.texts[0], "[P1]"), "唯一那条是 P1：%s", sender.texts[0])
