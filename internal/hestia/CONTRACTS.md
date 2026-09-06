@@ -3471,6 +3471,9 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 **A9｜OutOfOrder 不写契约、不算温度（需求与 spec 未覆盖）**
 `Save` 对 OutOfOrder（更旧 `published_at` 迟到）同样入权威表但不是 current 行；需求 005 的条件 `Verdict != Duplicate` 会用旧数据**同名覆盖** `pending/` 里尚未消费的更新契约，违背「最新的赢」。契约与 `Evaluate` 只在 `Verdict ∈ {New, Revision}` 时做（AD-14；`TestIngestNoContractOnOutOfOrder`）。
 
+**A10｜实时契约的 `extracted_at` 曾恒为空串（QA C1，CRITICAL；TASK-005 返工 2 修复）**
+成因：`Save` 按值收 `obs`（`store.go:739`）、只给自己那份副本填 `IngestedAt`（`:769`），且 `Outcome` 不回传；`ingestOne` 用调用前的 `obs` 建 `ContractInput`（`ingest.go:428`），`contract.go:113` 于是取到 `""`。回放路径经 `Store.Current` 读库有值 ⇒ 实时契约与回放契约形状不一致，M3 照 §B 回放样本写消费者会与生产形状不符。修法：不动 `Save`（冻结），`ingestOne` 在 `Save` 之后、`BuildContract` 之前经 `d.Store.Current` 取回当前行，把其 `Meta.IngestedAt` 填进 `obs` 再建契约；取不到与写失败同待遇（`contractError`，数据已在库、P1 照发）。守卫：`TestIngestWritesContractOnObservation` 断言 `extracted_at == s.Current(...).Meta.IngestedAt` 且**实时契约与 `Current + BuildContract{Replay}` 的回放契约除 `generated_by` / `validation.checks` 外逐键相同**；变异「不填」由它独家转红。为什么漏到 QA：需求原文 `:1396` 的接线片段自带「`obs` 在 `Save` 后已带 `IngestedAt`」这个隐含前提，dev 照抄、验证者按 DoD 逐条核、007 终检只审改动文件——三道都没核实时路径的这个字段，此前零测试守卫。
+
 ### B. 实测登记（锚 `7022d01d9229314f8a43c126d9b9763bbabefe5c`）
 
 采样纪律：采前采后 `git rev-parse HEAD` 同值；`git status --short -- internal cmd/atlas configs docs go.mod go.sum` 为空；写本节前 `git diff --numstat 7022d01d HEAD -- internal cmd/atlas configs docs` 为空。基线锚 `d27791c695e8ebd0fd5d54c9161782f52d9b12cb`（本 Sprint 开工时的 master HEAD）；基线覆盖率由 Leader 在该锚背对背实测（AD-7），不引历史值。
@@ -3493,6 +3496,7 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 | 回放样本 ②（AD-16） | `2023-08/monthly`：**3167** 字节，`data` **53** 键 / `absent_fields` **23** 项（53 + 23 = 76），`_mom` 键 **20** 个与 `_ytd` 族并存，其余同上；字节数同样非判据（Leader 3167 / 验证者 3166，成因同上） | — |
 | 新增测试（`git diff d27791c 7022d01d -- '*_test.go' \| grep -c '^+func Test'`，删除 0） | **48**：config 4 · signals 9 · contract 6 · store 3 · queue 10 · ingest 8 · notify 1 · cmd 7；预估 31 = 3+6+5+2+5+4+1+5 | 条 |
 | 返工 | 005 一轮（dod_defect：验证者变异 M8「丢弃 `Evaluate` 结果」存活 ⇒ 补 Ingest 级 P2 温度断言 + 双前缀 NotContains）；006 一轮（dod_defect：回放修订期次无守卫 ⇒ `TestHestiaContractEmitRevisionPeriod`）；两轮均只加断言不改实现，复验变异 KILLED | 轮 |
+| 实时 vs 回放契约（TASK-005 返工 2，QA C1） | 同一观测（2025 年报夹具）实时契约与 `Current + BuildContract{Replay}` 回放契约的 JSON **diff 仅 `generated_by`（`contract@v1` vs `/replay`）与 `validation.checks`（实测 checks vs `[]`）**；`extracted_at` 等于库里 `ingested_at`（此前实时路径为空串）。断言在 `TestIngestWritesContractOnObservation`；修复后 `internal/hestia` 覆盖率 96.6 不变 | — |
 | code-simplifier 终检（本 Sprint 全部改动文件） | 各代码任务提交前各跑一次（改动均已申报进各自 discovery）；收口终检由 dev **本体只读审查**、未 spawn 子代理——本 Sprint 两个 code-simplifier 子代理（001、007 首任）都被 idle hook / 会话挂起卡死，见 PENDING-MECHANISMS #3 | — |
 
 **新增测试 48 ≠ 需求预估 31，差在哪**：

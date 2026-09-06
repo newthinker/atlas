@@ -1391,6 +1391,33 @@ func TestIngestWritesContractOnObservation(t *testing.T) {
 		_, err := os.Stat(filepath.Join(cfg.Queue.Dir, sub))
 		assert.NoError(t, err, "四个子目录在 Ingest 入口建齐")
 	}
+
+	// review_fix round 2（QA C1）：实时契约的 extracted_at 必须是库里那一行的 ingested_at。
+	// Save 按值收 obs、只给自己副本填 IngestedAt 且 Outcome 不回传，ingestOne 若拿调用前的 obs
+	// 建契约，这里就是空串——回放路径经 Current 读库有值，两条路径形状不一致，M3 照样本写会撞。
+	cur, ok, err := s.Current(ctx, "2025-12", "annual")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, cur.Meta.IngestedAt, "前置：Save 已给库里那行填了 ingested_at")
+	assert.Equal(t, cur.Meta.IngestedAt, c["extracted_at"],
+		"实时契约 extracted_at 必须等于库里的 ingested_at（RFC3339Nano），不能是空串")
+
+	// 同一观测：实时契约与回放契约（Current + BuildContract{Replay}）除 generated_by 与
+	// validation.checks 外逐键相同——这是 M3 拿 §B 回放样本写消费者的前提。
+	prior, err := s.PriorPublishedAt(ctx, cur.Meta.Period, cur.Meta.PeriodType, cur.Meta.PublishedAt)
+	require.NoError(t, err)
+	replayJSON, err := BuildContract(ContractInput{
+		Obs: cur, Report: ValidationReport{Passed: true}, IsRevision: prior != "", Supersedes: prior, Replay: true,
+	}, cfg).JSON()
+	require.NoError(t, err)
+	var replay map[string]any
+	require.NoError(t, json.Unmarshal(replayJSON, &replay))
+	assert.Equal(t, "contract@v1/replay", replay["generated_by"])
+	delete(c, "generated_by")
+	delete(replay, "generated_by")
+	delete(c["validation"].(map[string]any), "checks")
+	delete(replay["validation"].(map[string]any), "checks")
+	assert.Equal(t, replay, c, "实时与回放契约除 generated_by / validation.checks 外必须逐键相同")
 }
 
 // 落 pending 不生成契约：契约只承载过闸的数据。
