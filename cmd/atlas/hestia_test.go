@@ -29,6 +29,8 @@ package main
 // boundary[1]       hestia.go 不 import path/filepath；SilenceUsage / IsRegistered 守卫加 contract
 //                                          → TestHestiaCmdDoesNotResolveDBPath、TestHestiaCommandsSilenceUsage、TestHestiaCommandIsRegistered
 // error_handling[0] 红阶段留痕 → discovery verification.red_phase；Current 查询错误原样返回（UnknownPeriod 走 ok=false 分支）
+// review_fix R1     修订过的期次回放 ⇒ is_revision true + supersedes_published_at + passed true
+//                                          → TestHestiaContractEmitRevisionPeriod（杀 test-m2a-a 的 M11/M12）
 
 import (
 	"bytes"
@@ -1559,4 +1561,35 @@ func TestHestiaContractEmitUnknownPeriodFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "not in observations")
 	_, statErr := os.Stat(filepath.Join(queueDir, "pending"))
 	assert.True(t, os.IsNotExist(statErr), "期次不存在 ⇒ 不生成、不建 pending/")
+}
+
+// review_fix R1（M2a 的 TASK-006；test-m2a-a 变异 M11「Supersedes 置空」/ M12「Report.Passed=false」存活）：
+// 修订过的期次回放仍标 is_revision: true 并带 supersedes_published_at——消费者据此知道它取代过一版。
+// 夹具在 emitFixture 之外再 Save 一条同期 2025-12/annual、PublishedAt 更晚、不同 ArticleID 的观测
+// （Save 判 Revision，两行都留），Current 取最新一版，PriorPublishedAt 取被取代版的 2026-01-15。
+func TestHestiaContractEmitRevisionPeriod(t *testing.T) {
+	cfgPath, _ := emitFixture(t)
+	cfg, err := hestia.LoadConfig(cfgPath)
+	require.NoError(t, err)
+	st, err := hestia.NewStore(cfg.Storage.DBPath)
+	require.NoError(t, err)
+	revised := hestia.Observation{
+		Meta: hestia.Meta{Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-02-20",
+			ArticleID: "2026022009294440746", CaliberVersion: "2025-01", Extractor: "rule@v2"},
+		Values: map[string]float64{hestia.FieldM2: 332.0, hestia.FieldM1: 112.9},
+	}
+	rep := hestia.ValidationReport{Passed: true, Checks: []hestia.Check{{ID: "monetary_hierarchy", Status: hestia.CheckPassed}}}
+	_, err = st.Save(context.Background(), revised, rep)
+	require.NoError(t, err)
+	require.NoError(t, st.Close())
+
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "2025-12", "annual", true
+	cmd, out := newCapturingCmd()
+	require.NoError(t, runHestiaContractEmit(cmd, nil))
+	got := out.String()
+	assert.Contains(t, got, `"published_at": "2026-02-20"`, "回放的是最新一版")
+	assert.Contains(t, got, `"is_revision": true`)
+	assert.Contains(t, got, `"supersedes_published_at": "2026-01-15"`, "被取代版的 published_at")
+	assert.Contains(t, got, `"passed": true`, "回放契约声明过闸")
 }
