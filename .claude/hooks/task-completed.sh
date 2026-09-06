@@ -122,6 +122,34 @@ fi
 #     初版的错不在「忘了下界」,而在**取不到下界时退错了方向**(退到了最大包含)。
 #     同一个文件里「无提交历史」那条降级是对的(放行 + WARN),「无下界」这条却做成了
 #     阻断且无法解除 ⇒「放行可以,静默不行」只用了一半。**每个降级点都要单独问往哪边退。**
+# sprint-011 P2:任务分支上 HEAD 走不到的提交同样属于本任务的变更来源。
+# 门禁跑在**主仓库**(写通道必须 cd 回来调用),而 dev 的提交在未合并的 task/<ID> 分支上,
+# 下面两行 git log 不带 ref、走的是 HEAD => 看不见它们。只修 P1(存在性过滤)不够:
+# 范围保住了,但无代码任务分支查「范围内确有变更」仍查不到,门禁换个理由继续 BLOCKED。
+# 主题判据与下面两行**完全一致**(同一条 -E --grep 正则):走分支不放宽认领,否则别人的
+# 提交只要落在同名分支上就能替本任务交差。
+# 范围 HEAD..<ref> 而非整个分支:已合并的部分下面两行本来就看得见,重复并入只是多余。
+#
+# ⚠ task_branch_ref 的定义**必须留在这里**(T3 原本落在下面 path_in_task_branch 之前)。
+#   bash 要求函数在**被调用**时已定义,而下面 COMMITTED_MINE/COMMITTED_BOUNDED 的并入
+#   就在几行之后。定义留在后面时:`ref=$(task_branch_ref) || return 0` 会把
+#   `command not found`(127)吞掉 ⇒ 并入静默变成空操作(BR-1/BR-3 永远红而代码看着全对),
+#   且那行 command not found 走 **stderr**、不被 $( ) 捕获 ⇒ 漏进门禁输出。两者都实测过。
+task_branch_ref() { # 成功时打印 refs/heads/task/$TASK_ID 并返回 0;否则返回 1 且无输出
+    [ -n "${TASK_ID:-}" ] || return 1
+    git rev-parse --verify -q "refs/heads/task/$TASK_ID" >/dev/null 2>&1 || return 1
+    printf 'refs/heads/task/%s' "$TASK_ID"
+}
+task_branch_log() { # [--since <ts>]
+    local ref; ref=$(task_branch_ref) || return 0
+    if [ "${1:-}" = "--since" ] && [ -n "${2:-}" ]; then
+        git log -E --grep="^[a-z]+\(${TASK_ID}\):" --since="$2" --name-only --pretty=format: \
+            "HEAD..$ref" 2>/dev/null || true
+    else
+        git log -E --grep="^[a-z]+\(${TASK_ID}\):" --name-only --pretty=format: \
+            "HEAD..$ref" 2>/dev/null || true
+    fi
+}
 COMMITTED_MINE=""
 COMMITTED_BOUNDED=""
 WORK_SINCE=""
@@ -131,6 +159,12 @@ if [ -n "$TASK_ID" ]; then
     # 定位,续行式会让两行共用同一个尾部子串而使锚点不再唯一——实撞过一次
     # (mutation-task-005 的 M5 因此从唯一命中变成命中 2 行而报「锚点失配」)。
     COMMITTED_MINE=$(git log -E --grep="^[a-z]+\(${TASK_ID}\):" --name-only --pretty=format: 2>/dev/null || true)
+    # P2 并入任务分支上的提交。**先取到变量、非空才拼**:直接 A="$A\n$(f)" 在两者皆空时
+    # 得到长度为 1 的裸换行(实测 ${#A}=1),会让下面「取不到本轮开工时刻」那条 WARN 凭空
+    # 成立 —— 本文件自己立过规矩:告警一旦会说假话就没人再信它。空并入必须是严格 no-op。
+    BRANCH_MINE=$(task_branch_log)
+    [ -n "$BRANCH_MINE" ] && COMMITTED_MINE="$COMMITTED_MINE
+$BRANCH_MINE"
     # C5 专用的**有下界**集合;下界缺失时置空,**绝不回落到 COMMITTED_MINE**(那就是 C-1)。
     if [ -f "$TASK_DIR/$TASK_ID.json" ]; then
         WORK_SINCE=$(jq -r '.last_transition
@@ -162,6 +196,11 @@ if [ -n "$TASK_ID" ]; then
     fi
     if [ -n "$WORK_SINCE" ]; then
         COMMITTED_BOUNDED=$(git log -E --grep="^[a-z]+\(${TASK_ID}\):" --since="$WORK_SINCE" --name-only --pretty=format: 2>/dev/null || true)
+        # 同上并入,且**必须把下界传下去**:这个集合是 C5 漂移判定的输入,丢了下界就等于
+        # 把「本轮开工之前」的分支提交也算进漂移,那正是 C-1 刻意避开的方向。
+        BRANCH_BOUNDED=$(task_branch_log --since "$WORK_SINCE")
+        [ -n "$BRANCH_BOUNDED" ] && COMMITTED_BOUNDED="$COMMITTED_BOUNDED
+$BRANCH_BOUNDED"
     fi
     # 旧的宽判据不丢弃,降级成**告警探针**:它命中而锚定判据未命中 ⇒ 有提交提到了本任务
     # 却不符约定,那些提交里的改动对下面的漂移检查不可见。放行可以,静默不行。
@@ -312,8 +351,53 @@ else
     [ "$HAS_WRITES" = "true" ] || WRITES="$PKGS"
 fi
 
-# 过滤不存在的路径(无代码任务可声明文件或目录,故用 -e;被删文件的 dirname 亦被排除)
-PKGS=$(echo "$PKGS" | while read -r p; do [ -n "$p" ] && [ -e "$p" ] && echo "$p"; done)
+# 过滤不存在的路径(无代码任务可声明文件或目录,故用 -e;被删文件的 dirname 亦被排除)。
+# sprint-011 P1:加一层**任务分支回落**。写通道必须 cd 回主仓库调用,而 dev 在 worktree 的
+# task/<ID> 分支上新建的文件此刻不在主仓库树上 => 原过滤会把声明范围清空 => BLOCKED,
+# 逼出「先合并后 dev_done」的绕法——那等于**未经门禁的代码先进主干**,把「合并前把关」
+# 这个语义整个反转。回落只**加一条通路**,不动原过滤:「声明了根本不存在的路径」在两处
+# 都查不到时仍然阻断。
+# 分支名按仓库约定 task/<TASK-ID>;分支不存在、非 git 仓库、git 不可用时一律静默退回原
+# 判定,不因「没按约定建分支」而改变判定方向。
+# 用 awk 做全等/前缀比较而非 grep -E:声明路径可能含正则元字符(如 a.b/c),必须按字面匹配。
+# 归一化必须与 path_under_scope 同口径:剥前导 ./、剥**全部**尾斜杠。git ls-tree 的输出
+# 不带 ./,而本仓库 Go 包声明的既有写法就是 ./validator(归档任务实测有 ./validator、
+# ./validator/progress、./validator/cmd/arcforge-validate)⇒ 不归一化则对这类声明**恒不
+# 命中且完全静默**。path_under_scope 的头注释明写「全仓库只此一处口径……三方统一,
+# 不造第四种」——这里不造第四种。
+# ⚠ 归一化的局部变量刻意**不**叫 q。mutation-c5w1w7-drift-gate.sh 的 M8 把 path_under_scope
+# 里「剥尾斜杠」那个单行 while 的**字面子串**当锚点(变量名就是 q),而它的 sub_line 要求锚点在
+# 被测源里**恰好命中一行**。这里若也用 q,本行会与那行同形,M8 当场以「变异命令执行失败(锚点
+# 没匹配到唯一一行?)」报废 —— 实撞:该 harness 退出码由 0 变 2,而被测代码本身完全正确。
+# 同理本注释也不能原样引用那个子串(注释行同样会被 sub_line 命中)。口径相同不要求文本相同。
+path_in_task_branch() { # <路径>;0 = 该路径存在于任务分支的树里
+    local ref n="${1#./}"
+    while [ -n "$n" ] && [ "$n" != "${n%/}" ]; do n="${n%/}"; done
+    [ -n "$n" ] || return 1
+    ref=$(task_branch_ref) || return 1
+    # 两处 non-ASCII 修正,缺任何一处中文声明路径都判不对(sprint-011 T5 实测):
+    # ① `-c core.quotePath=false`:git 默认把非 ASCII 路径**转义**输出
+    #    (`"docs-work/\350\256\276\350\256\241..."`),于是中文声明路径与它**永不**全等
+    #    ⇒ 回落对中文路径完全失效**且静默**。方向是误阻断(比误放行安全),但功能是坏的。
+    # ② `LC_ALL=C`:BWK awk 20200816(macOS /usr/bin/awk)在默认 locale 下,含多字节字符的
+    #    整行 `$0 == p` 会**假匹配** —— 实测 p='docs-work/需求文档.md' 命中
+    #    'docs-work/设计文档.md' ⇒ 分支上不存在的路径被判成存在,方向是**误放行**,
+    #    与本函数的全部意义相反。CLAUDE.md「含中文比对一律 LC_ALL=C」是既有纪律。
+    # ⚠ 两者有先后依赖:只修 ① 会让原始多字节串第一次真正流进 awk,把 ② 从「不可达」
+    #   变成「必然发生」—— 只修 ①,负例用例会当场由绿翻红。故两处必须一起改。
+    git -c core.quotePath=false ls-tree -r --name-only "$ref" 2>/dev/null \
+      | LC_ALL=C awk -v p="$n" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }'
+}
+# 回落**只对无代码任务生效**。代码任务的 PKGS 会被原样喂给 `go test $PKGS -coverpkg=…`
+# (见下方 §3),放进一个主仓库树上不存在的包,阻断理由会从可读的「声明范围为空」退化成
+# 「BLOCKED: Tests failed in task scope」加一堆 go 的目录不存在噪声——那是把一个清楚的
+# 判定换成了噪声。DOCS_ONLY 在 §2a 已算出,早于此处,可直接用。
+PKGS=$(echo "$PKGS" | while read -r p; do
+    [ -n "$p" ] || continue
+    if [ -e "$p" ]; then echo "$p"
+    elif [ "$DOCS_ONLY" = "true" ] && path_in_task_branch "$p"; then echo "$p"
+    fi
+done)
 
 if [ -z "$PKGS" ]; then
     if [ -z "$TASK_ID" ]; then

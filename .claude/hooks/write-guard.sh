@@ -38,6 +38,48 @@ DENY_MSG="DENY: 直接写 .arcforge/ 受保护文件被禁止(单写者模型,IS
 RUNTIME_DENY_MSG="DENY: .claude/ 运行时资产(hooks/scripts/settings)对所有 agent 只读(含 Leader)。
   → 需要变更? 修改 project-template/ 对应文件并走 TDD;运行时同步由人类确认后在会话外执行。"
 
+SUBAGENT_DENY_MSG="DENY: 子代理禁止调用 .arcforge/ 写通道(单写者模型,sprint-011)。
+  → 子代理只做读/分析/写业务代码;结论写进最终回复带回父实例,由具名 teammate 本体落盘。
+  → 若你就是具名 teammate 本体而被误拦:说明本实例未登记 token、且实例名与 agent_id 不匹配。
+    请让 Leader 跑 arcforge-write.sh --as leader matrix set-token <你的实例名> 登记。"
+
+# 子代理冒名写通道判别(sprint-011 第 3a 条;取证 spike-s1-probe.jsonl)。
+# hook stdin 的 agent_id/agent_type 由 harness 填写,是**唯一不可自称**的身份信号——
+# --as 与 ARCFORGE_TOKEN 都来自被冒名者自己声明的身份。Sprint E 实撞过一次子代理冒名
+# --as 抢跑 dev_done,当时令牌机制是启用的。
+# 四层判别(命中即停):
+#   L1 无 agent_id                     ⇒ lead 本体,放行
+#   L2 agent_type ∈ .tokens            ⇒ 已登记 teammate 本体,放行(权威判据)
+#   L3 agent_id 以 a{agent_type}- 开头 ⇒ 未登记 teammate 本体,放行(结构兜底)
+#   L4 其余                            ⇒ 子代理,DENY
+# 取证形态:本体 aprobe-mate-07cdb8dffc154301/probe-mate、adev-agent-65-269af323…/dev-agent-65;
+# 子代理 a83bba4eb58de545f/Explore(不含类型名);lead 两键皆无。
+# L3 依赖的标识格式官方无文档、只观测过一种 teammate 名,但**失败方向是放行**(等于旧行为),
+# 不会误拦合法实例;若格式将来变化,已登记实例仍由 L2 兜住。
+# .tokens 为空 ⇒ 整个机制关闭(全新目标项目就是这个形态,贴合「未登记保持旧行为」)。
+deny_subagent_write_channel() {
+    # 只对写通道脚本生效;只读的 arcforge-validate / validator-run.sh 不在内。
+    echo "$CMD" | grep -qE '(arcforge-write\.sh|arcforge-archive\.sh|with-task-lock\.sh)' || return 0
+    AID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null) || return 0
+    [ -n "$AID" ] || return 0                                   # L1
+    [ "$MATRIX_ACTIVE" = "true" ] || return 0                   # 无矩阵:bootstrap 期,放行
+    # 先判类型再取 length。写成 `(.tokens // {}) | length` 时,.tokens 被写成数组/字符串
+    # 会返回 >0(实测 ["x"]⇒1、"abc"⇒3)⇒ 机制被**打开**,而随后的 `jq -e … has($t)` 在
+    # 非对象上报错(退出码 5)⇒ L2 权威判据恒失败,只剩 L3 兜底。净效果是把设计要的
+    # fail-open 翻成 fail-closed:一个被写坏的矩阵会开始拒绝合法实例。
+    NTOK=$(jq -r 'if (.tokens | type) == "object" then (.tokens | length) else 0 end' \
+           .arcforge/write-matrix.json 2>/dev/null || echo 0)
+    [ "${NTOK:-0}" -gt 0 ] || return 0                          # 未登记/矩阵损坏:保持旧行为
+    ATYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null) || return 0
+    if [ -n "$ATYPE" ]; then
+        jq -e --arg t "$ATYPE" '(.tokens // {}) | has($t)' \
+            .arcforge/write-matrix.json >/dev/null 2>&1 && return 0        # L2
+        case "$AID" in "a${ATYPE}-"*) return 0 ;; esac                     # L3
+    fi
+    echo "$SUBAGENT_DENY_MSG" >&2                                          # L4
+    exit 2
+}
+
 # C4:纯字符串路径规范化——折叠 //、/./、/../,不依赖目标存在(不能用
 # `cd $(dirname) && pwd -P`:对尚不存在的目录会失败,而「写一个尚不存在的目录下的
 # 新文件」正是要堵的形态,失败即 fail-open)。不解析符号链接——那需要目标存在,
@@ -164,6 +206,10 @@ case "$TOOL" in
   Bash)
     CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
     [ -n "$CMD" ] || exit 0
+    # 子代理冒名写通道 DENY(sprint-011 第 3a 条)。位置刻意在**两条白名单之前**:
+    # 严格模式的 classify_segment 与宽松模式的行内 grep 是两个**各自独立**的白名单,
+    # 判别插在任一之后,另一条就是现成的绕过口。
+    deny_subagent_write_channel
     # .claude/ 运行时写检测(先于白名单——白名单脚本也不允许写运行时)。
     # 只保护本项目的 .claude/:家目录(~、$HOME)及其他项目外绝对路径下的
     # .claude/ 是用户级配置,不在本 hook 职责内,不得误拦——先把项目绝对

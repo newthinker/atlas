@@ -327,6 +327,9 @@
     ],
     "verifying->verifying": [
       "leader"
+    ],
+    "review_fix->assigned": [
+      "leader"
     ]
   },
   "bindings": {

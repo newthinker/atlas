@@ -102,6 +102,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
     done
     echo "[dry-run] 保留原地: $ARC/wisdom"
     echo "[dry-run] 重置: tasks discoveries checkpoints coverage docs/{01..07}"
+    if [ -f "$ARC/write-matrix.json" ]; then
+        DRY_N=$(jq -r '.tokens // {} | length' "$ARC/write-matrix.json" 2>/dev/null || echo 0)
+        [ "${DRY_N:-0}" -gt 0 ] && echo "[dry-run] 清空 write-matrix.json 的 $DRY_N 个实例 token"
+    fi
     exit 0
 fi
 
@@ -127,12 +131,37 @@ mkdir -p "$ARC/tasks" "$ARC/discoveries" "$ARC/checkpoints" "$ARC/coverage" \
          "$ARC/docs/04-test" "$ARC/docs/05-review" "$ARC/docs/06-acceptance" \
          "$ARC/docs/07-deploy"
 
+# ---- 5b. 清空实例 token(Sprint 边界)----
+# token 明文只存在于签发它的那个 session 的 spawn prompt 里 —— 矩阵只留 sha256,
+# 而 matrix 子命令没有轮换也没有注销。于是一个实例名一旦登记过就**永久不可复用**:
+# 下一个 Sprint 想按 re-spawn 协议「优先用原名」重建 dev-1,会被 token 校验挡死,
+# Leader 只能改名。下游实测一个 Sprint 里因此烧掉 dev-p3a-2..-5 与 test-p3v-2..-6。
+#
+# 归档是唯一安全的清理点:Sprint 已收尾、无 agent 在跑,清掉不会让谁半路失去写权。
+# 只动 tokens 一段;其余段(rules/owner_table/transitions/bindings/instances)是授权依据,
+# 归档无权改。数量要打印出来 —— 静默清掉一批凭证,等于没告诉人凭证没了。
+if [ -f "$ARC/write-matrix.json" ]; then
+    TOKN=$(jq -r '.tokens // {} | length' "$ARC/write-matrix.json" 2>/dev/null || echo 0)
+    if [ "${TOKN:-0}" -gt 0 ]; then
+        MTMP=$(mktemp "$ARC/.wm.XXXXXX") || { echo "ERROR: mktemp 失败,未清 token。" >&2; exit 1; }
+        if jq '.tokens = {}' "$ARC/write-matrix.json" > "$MTMP" && [ -s "$MTMP" ]; then
+            mv "$MTMP" "$ARC/write-matrix.json" || { rm -f "$MTMP"; echo "ERROR: 写回矩阵失败,token 未清。" >&2; exit 1; }
+            TOKENS_CLEARED="$TOKN"
+        else
+            rm -f "$MTMP"
+            echo "ERROR: jq 改写矩阵失败,token 未清(矩阵原样保留)。" >&2
+            exit 1
+        fi
+    fi
+fi
+
 echo "=== Sprint 归档完成 ==="
 echo "归档位置: $DEST"
 echo "已迁移:${MOVED:-(无)}"
 [ -n "$SKIPPED" ] && echo "跳过(不存在):$SKIPPED"
 echo "保留原地: $ARC/wisdom"
 echo "运行时目录已重置,可开始下一 Sprint。"
+[ -n "${TOKENS_CLEARED:-}" ] && echo "已清空 write-matrix.json 的 $TOKENS_CLEARED 个实例 token(实例名可重新使用)。"
 
 # ---- 6. 收口 tag 提示:只给命令,不代打 ----
 #         被 tag 的对象是「把归档产物入库的那个 commit」,而它在此刻尚不存在(产物刚落盘、

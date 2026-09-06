@@ -100,8 +100,36 @@ case "$ME" in
     MINE=$(query_tasks 'select((.verifier // "") == $me and .status == "verifying") | .id' --arg me "$ME")
     # dev_done 待领验证的任务对 Test Agent 也算相关
     PENDING_VERIFY=$(query_tasks 'select(.status == "dev_done") | .id')
+    # F6 防空转出口(sprint-011 第 1 条,与下面 qa-* 分支同构)。
+    # dev_done->verifying 是 leader 专属边,test 实例对**任何** dev_done 都无合法动作
+    # ——包括 verifier 为空的那些,别按「真待领」处理(wisdom/learnings-test-agent-56.md
+    # 判据①的这个前提不成立)。保活的唯一价值是**催办 Leader 一次**;而 TeammateIdle
+    # 只有 exit 2 能把提示送到实例、exit 0 送不了 ⇒「要提示就必须保活」是本 hook 的固有
+    # 张力,只能靠「催办过就放行」化解。
+    # 判据两条同时成立才剔除:①本实例 checkpoint 提及该 task id ②该任务文件不比 checkpoint 新。
+    # 与 CLAUDE.md stale-dispatch 的「内容 + 时间」判据同形:只看内容会被上一轮的旧 checkpoint
+    # 消音,只看时间会退化成实例的全局活动痕迹。用 find -newer 比 mtime 而非解析 ISO 时间戳
+    # ——bash 3.2 无日期运算,且 qa-* 现有出口正是这个手法。
+    # 已知弱点(与 qa-* 一致,刻意不另造机制):Leader 在 dev_done 之后 update 任务文件会推进
+    # 其 mtime,导致再唤醒一次。那是「任务文件真的变了」的合理响应。
+    MY_CP=".arcforge/checkpoints/${ME}-checkpoint.md"
+    if [ -n "$(echo "$PENDING_VERIFY" | tr -d '[:space:]')" ] && [ -f "$MY_CP" ]; then
+        REMAIN=""
+        for T in $PENDING_VERIFY; do
+            # 〔更正 MINOR-11〕锚定 id 边界:裸 grep -q "$T" 会让 checkpoint 里的
+            # TASK-T10 把 TASK-T1 判成「已催办」,进而放行 idle(不可逆停机)。
+            # 同仓库 task-completed.sh 的 NONCONFORMING 探针对同类问题已有先例写法。
+            if grep -qE "${T}([^0-9A-Za-z]|$)" "$MY_CP" 2>/dev/null \
+               && [ -z "$(find "$TASK_DIR" -name "$T.json" -newer "$MY_CP" 2>/dev/null)" ]; then
+                continue    # 已就该任务催办过且此后任务无变化 ⇒ 不再为它唤醒
+            fi
+            REMAIN="$REMAIN$T
+"
+        done
+        PENDING_VERIFY="$REMAIN"
+    fi
     MINE=$(printf '%s\n%s' "$MINE" "$PENDING_VERIFY")
-    UNLOCK="把 verifier 指向你的 verifying 任务判成 verified 或 rejected;dev_done 任务需等 Leader 派验(dev_done->verifying 是 leader 专属边,你无法自领)" ;;
+    UNLOCK="把 verifier 指向你的 verifying 任务判成 verified 或 rejected;dev_done 任务需等 Leader 派验(dev_done->verifying 是 leader 专属边,你无法自领)——催办 Leader 一次并把该 task id 写进你自己的 checkpoint,此后本 hook 不再为它唤醒你" ;;
   qa-*)
     MINE=$(query_tasks 'select(.status == "verified") | .id')
     UNLOCK="在 .arcforge/docs/05-review/ 下落一份裁决产物(*.md,须晚于全部 verified 任务文件的 mtime);若你是只读 lens 子代理则产不出它,把结论交回父实例由其落盘"

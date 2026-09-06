@@ -135,8 +135,9 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 - 状态变更先落盘（原子写）再发通知；`plan.md` 仅由 Leader 写。
 - 🔴 **派发/派验的通知里加一句「请回一句确认收到」。** 一句话，把「静默失败」变成
   「有响应的失败」——通知丢了和「收到了正在做」在 Leader 侧**完全同形**（任务状态、
-  产物、实例是否 idle 都一样），这正是 `stale-dispatch` 需要 30 分钟阈值 + 双条件判据
-  的原因。有回执时「没收到」在几分钟内就由**沉默本身**报警，不必等阈值。
+  产物、实例是否 idle 都一样），这正是 `stale-dispatch` 需要一个驻留阈值（**具体数值以
+  `arcforge-validate --rules` 的输出为准**，本文件不复述）+ 双条件判据的原因。有回执时
+  「没收到」在几分钟内就由**沉默本身**报警，不必等阈值。
   ⚠️ 它**不防止**通知丢失，只把发现丢失的时间从阈值级压到一句话。
   **实测（atlas M1c-4）**：前两次派验不加，分别丢了 **48 分钟**与 **138 分钟**（后者
   还因 Leader 用一个只在成功时出声的监视器顶替了周期扫描而放大）；加这一句之后
@@ -202,6 +203,19 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
    跨会话消息可用（v2.1.224+）；不可用时退回原判据「本轮派发无产物」。
 3. **重发用 `SendMessage`**，消息里附 task id 与它该做的下一步。改派动作与上表一致，不变。
 
+**实例中断与模型绑定**（sprint-010 实测）：**teammate 绑定 spawn 时的模型，不随 lead 切换。**
+额度耗尽的实例以 `idleReason: failed / out of usage credits` 中断，**唤醒它只会再次失败**
+——反复催办纯属浪费。这类实例在 `ListAgents` 里**当场可证**，AD-21 的「联系不上且唤不回」
+判据即时满足，**不必等一个完整阈值周期**（这也是「先读数再推断」那一步的价值所在）。
+
+降级路径（sprint-010 已验证）：
+
+1. `TaskStop` 停掉该实例，别再唤醒它。
+2. 用**新实例**走对应的逃生边改派——具体走哪条边**见上面的逃生边表**，不要在这里
+   另记一份；注意 `blocked_clarification` **没有**重派逃生边。
+3. 该次重派标 `reason_class=env_infra`，**不计入 `rework_count`**——那是环境问题不是
+   任务问题，与「返工上限」一节的既有规则一致。
+
 ### 6. 质量门禁
 
 - 全体任务 `verified` 后，spawn QA Agent 做 Code Review（两轮：常规 + 跨视角对抗）。
@@ -240,6 +254,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
 - **Leader 调度边（均 leader 专属，置于 `rejected → assigned` 之后）**：
   `assigned → assigned`（`assigned` 超时**重派**，`assignment_epoch += 1`）、
   `in_progress → assigned`（**收回**卡住任务重新分配，`assignment_epoch += 1`）、
+  `review_fix → assigned`（**收回**返工中 owner 已不可恢复的任务改派新 Dev，`assignment_epoch += 1`）、
   `rejected → blocked_human`（**熔断**，不改 epoch）。
 - **Leader 逃生边（`verifying → verifying`，leader 专属，AD-21）**：verifier 失联且**不可恢复**时，
   Leader 经 `task <ID> transition verifying --field verifier=<新实例>` **一步**收回并改派验证者。
@@ -253,7 +268,7 @@ Arcforge 是基于 Claude Code Agent Teams 的研发流程自动化框架：
   `dod_defect`（done_criteria 自身矛盾）累计第 2 次直接转 `blocked_human`——继续机器循环
   只会烧 token；`no_progress`（doom-loop）重派时**必须**更换提示词或换 Dev 实例。
 
-**状态机的完整出边表**（共 21 条，与 `write-matrix.json` 的 `transitions` **逐条一一对应**；
+**状态机的完整出边表**（共 22 条，与 `write-matrix.json` 的 `transitions` **逐条一一对应**；
 下游实测过「正文写了某条边而边表没有」导致 Leader 与 Dev 一起做错动作，故此处两两可核对。
 `tests/hooks/test-arcforge-write.sh` 的 E3 组按「行首竖线 + 反引号包裹的 `源状态 → 目标状态`
 - 竖线」这一格式解析本表，与矩阵做**双向集合相等**比对，「合法写者」列做**等值**比对
@@ -281,6 +296,7 @@ bullet 举例、上面那张状态表都不匹配该行首格式，不会被解�
 | `verified → review_fix` | `leader` | QA Review 发现问题需返工，带 `fix_items` + `reason_class` | — |
 | `verified → accepted` | `leader` | 最终验收通过（终态） | — |
 | `review_fix → in_progress` | `dev-*` | Dev 领回返工 | — |
+| `review_fix → assigned` | `leader` | **收回**：owner 已不可恢复时改派给新 Dev（写 `assigned_to`，`assignment_epoch += 1`）。与 `in_progress → assigned` 同构 —— 二者覆盖 owner 失能的两个状态 | — |
 | `blocked_human → assigned` | `leader` | 人类介入后恢复，重新派发 | — |
 | `blocked_human → skipped` | `leader` | 人类判定放弃该任务 | — |
 
