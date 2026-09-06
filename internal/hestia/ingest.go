@@ -1,6 +1,7 @@
 package hestia
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -425,6 +426,17 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) (runResult, erro
 	// 它与 Duplicate 同待遇——P2 照发、温度 0/0。
 	var temp Temperature
 	if out.Table == TableObservations && (out.Verdict == bitemporal.New || out.Verdict == bitemporal.Revision) {
+		// extracted_at 要从库里回读（QA C1，M2a 的 TASK-005 返工 2）：Save 按值收 obs，只给
+		// 自己那份副本填 IngestedAt 且 Outcome 不回传，这里手上的 obs 仍是入库前的、
+		// IngestedAt 为空——直接建契约会写出 `"extracted_at": ""`，与回放路径（Current 读库）
+		// 形状不一致。不动 Save 的签名与函数体（冻结），Save 之后经 Current 取回当前行即可；
+		// 取不到（查询出错，或刚 Save 却不是 current 行）与写失败同待遇：contractError，
+		// 数据已在库、P1 照发。
+		cur, ok, err := d.Store.Current(ctx, obs.Meta.Period, obs.Meta.PeriodType)
+		if err != nil || !ok {
+			return fail("contract", contractError{err: cmp.Or(err, errors.New("just saved but not current"))})
+		}
+		obs.Meta.IngestedAt = cur.Meta.IngestedAt
 		in := ContractInput{Obs: obs, Report: rep, SourceURL: c.URL, IsRevision: out.Verdict == bitemporal.Revision}
 		if in.IsRevision {
 			prior, err := d.Store.PriorPublishedAt(ctx, obs.Meta.Period, obs.Meta.PeriodType, obs.Meta.PublishedAt)
