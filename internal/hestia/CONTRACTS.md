@@ -3439,3 +3439,77 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 | C4 | code-simplifier 终检（QA 逐文件）：`health.go` 抽 `groupCount`（随 W1 已做）、其余合计净减约 40 行、全部局部、无接口变更 | 无一条够 `review_fix` | M2 首批打包处理 |
 
 **§B 口径订正**：TASK-001 变异 M6「`RecentRuns` 去掉 `rowid DESC`」此前登记为「等价变异 / 测试强度边界」——QA 复判为**非等价**：索引 `hestia_runs_run_at` 在场时反向扫描恰好给出 rowid 逆序掩盖了它，`DROP INDEX` 即可杀。故 M6 应改记「被索引掩盖的存活」，同 `run_at` 多行的次序仍无测试守着（`status`/`RecentRuns` 消费者对同轮多行不依赖次序，暂不补）。
+
+## Sprint M2a · 契约队列与信号快照
+
+### A. 契约更正 —— 既有陈述已被证伪或需收窄
+
+**A1｜方案报告 5.2 的契约文件名 `2026-06.json` 会撞名**
+12 月的月报与年报 `period` 都是 `YYYY-12`。文件名改 `<period>-<period_type>.json`（`Contract.FileName`，`TestContractFileName`）。
+
+**A2｜附录 A.6 与 4.8.2 打架，裁决：Atlas 算四信号只进 P2，契约只带 `thresholds.signals` 快照**
+守住 A.6 与 ADR-0001 的域边界；两侧用同一份快照算，算差了是 bug 不是漂移。`Evaluate` 是纯函数（`signals.go`），Loom 需要时可复用同一份算法。
+
+**A3｜4.7 的月均「monthly=1」在 M1c-4 之后是错的**
+月报的贷款分部门是 `_mom`（当月）时月数 1 成立；2020–2023 的月报只有 `1-N月` 累计（`_ytd`），必须 ÷ 月份序号。取法：`_mom` 优先 → monthly 只有 `_ytd` ÷ MM → q1/h1/q1_q3/annual ÷ 3/6/9/12（`monthlyAverage` / `monthsInPeriod`）。三期 golden（2020H1=2 / 2025=0 / 2026H1=1）用回填库真实值钉住（`TestEvaluateGoldenThreePeriods`；dev 与验证者各自 `sqlite3 -readonly data/hestia.db` 复核六列逐值相等）。
+
+**A4｜温度的分母不恒为 4**
+输入缺失的信号记 `unknown`，P2 打 `Score/Known`（`TestEvaluateUnknownShrinksDenominator`）。4.7 的「0–4」是上限不是分母。
+
+**A5｜4.8.2 的 P2 形态**
+在 M1d 的四锚字段行之后加一行 `信号 活化🔴 楼市🟢 消费⚪ 信贷🟡 · 温度 n/Known`（unknown 画 ⚪，`dot`）。Duplicate 与 **OutOfOrder** 的 P2 没有契约与温度（打 `0/0`）——前者本就写「已在库（本次抽取值未写入）」，后者见 A9。
+
+**A6｜契约在通知之前；写失败 ⇒ `stage=contract`、P2 不发、**P1 照发**、`hestia_runs` 记 `ingested`**
+写契约失败时数据已在库，`outcome` 保持 `ingested`、`error` 列记首行、`stage=contract`（`contractError`，与 `notifyError` 同形；`runRow` 对它不改 outcome）。P2 不发（避免「Telegram 说入库了、队列里却没有」）；P1（处理失败通知）**照发**——它是失败通知不是入库通知，且是运维知道要 `hestia contract emit --period` 补发的唯一即时信号。需求原文用例断言「一条通知都不发」与「记 ingested」在既有循环下不能同时成立，人类在 dod-gate 拍板取本形态（AD-4b；`TestIngestContractWriteFailureKeepsRowAndSkipsP2`）。契约错误串带 `writeAtomic` 的 `snapshot write/rename` 文案，接受不改（`snapshot.go` 不在冻结名单但不必动）。
+
+**A7｜需求 TASK-005 的写失败用例照抄必红（三处与既有代码冲突）**
+① 夹具把 `queue.dir` 指向普通文件，而 `Ingest` 入口先 `EnsureQueueDirs` ⇒ 在 Discover 前就返回，`countRows==1` 不成立——改为把 `pending/<name>.json` **预建为目录**让 `os.Rename` EISDIR（AD-4a）；② 既有循环对非 `notifyError` 一律发 P1；③ `runRow` 对非 `notifyError` 一律记 `failed`。②③ 由 A6 的 `contractError` 收口。
+
+**A8｜`Ingest` 对空 `queue.dir` 报错（需求未提）**
+`EnsureQueueDirs("")` = 在**进程 cwd** 建 `pending/processing/done/failed`；`go test` 的 cwd 是包目录，直建 `Config{}` 的用例会污染 `internal/hestia/`，`cmd/atlas` 真入库用例会污染 `cmd/atlas/queue/hestia/`。入口在任何 I/O 之前 `errors.New("hestia ingest: queue.dir must not be empty")`（AD-5；`TestIngestRejectsEmptyQueueDir` 用 fatal fetcher 证 Fetch 未被调用；验证者删掉守卫的变异在包目录留下四个目录，判据 `find … -type d \( -name pending -o -name queue \)` 为空——`git status` 对空目录恒空，不能用）。`cmd/atlas/hestia_test.go` 两处内联 yaml 补 `queue.dir`。
+
+**A9｜OutOfOrder 不写契约、不算温度（需求与 spec 未覆盖）**
+`Save` 对 OutOfOrder（更旧 `published_at` 迟到）同样入权威表但不是 current 行；需求 005 的条件 `Verdict != Duplicate` 会用旧数据**同名覆盖** `pending/` 里尚未消费的更新契约，违背「最新的赢」。契约与 `Evaluate` 只在 `Verdict ∈ {New, Revision}` 时做（AD-14；`TestIngestNoContractOnOutOfOrder`）。
+
+### B. 实测登记（锚 `7022d01d9229314f8a43c126d9b9763bbabefe5c`）
+
+采样纪律：采前采后 `git rev-parse HEAD` 同值；`git status --short -- internal cmd/atlas configs docs go.mod go.sum` 为空；写本节前 `git diff --numstat 7022d01d HEAD -- internal cmd/atlas configs docs` 为空。基线锚 `d27791c695e8ebd0fd5d54c9161782f52d9b12cb`（本 Sprint 开工时的 master HEAD）；基线覆盖率由 Leader 在该锚背对背实测（AD-7），不引历史值。
+
+| 项 | 实测 | 单位 |
+|---|---|---|
+| `go test ./internal/hestia/... -cover` | **96.6**（基线 96.6；需求硬门槛 ≥ 96.6） | % |
+| `go test ./cmd/atlas/ -cover` | **76.6**（基线 76.4） | % |
+| `gofmt -l internal/hestia cmd/atlas` | 仅 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，未修） | — |
+| `go vet ./internal/hestia/... ./cmd/...` | 零输出 | — |
+| 导出面（`TestPackageExposesNoWriteFunctions` 的 want） | **34 项**（+`BuildContract` / `Contract.FileName` / `Contract.JSON` / `DefaultSignals` / `EnsureQueueDirs` / `Evaluate` / `WriteContract` / `Store.Current` / `Store.PriorPublishedAt`，共 9——需求头写「+5」漏数 3 个，AD-10）；reflect 守卫 **14 项**（+`Current` / `PriorPublishedAt`）；**无新增写方法** | 函数/方法 |
+| 四个不动文件 `git diff --stat d27791c 7022d01d -- parse.go extract.go validate.go fields.go` | 空 | — |
+| `store.go` 的 `Save` 函数体 | `git diff d27791c 7022d01d -- store.go` 的 `±` 行含 `func (s *Store) Save` **0** 次；`store.go` 删除行 **0** | — |
+| `go.mod` / `go.sum` | 自 `d27791c` 无 diff（无新增依赖） | — |
+| 改动规模 `git diff --stat d27791c 7022d01d -- internal cmd/atlas configs` | 17 文件，+1804 / −24 | — |
+| 真语料回归（`backfill load --allow-incomplete`，exit 0，3 秒） | 218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21（单篇 28 + 合并组 69）· 字段冲突 0 · 口径路由违反 0 · 仓库根 `queue/` 不存在 · `find internal/hestia cmd/atlas -type d \( -name pending -o -name queue \)` 为空 | 篇 / 篇 / 观测 |
+| 三期 golden | 2020H1 🔴🟢🟢🟡 2/4 · 2025 🔴🔴🔴🟡 0/4 · 2026H1 🔴🔴🔴🟢 1/4（`-run TestEvaluateGolden -v` 三子例 PASS） | — |
+| 键序确定性 | `-run 'TestBuildContract\|TestContract' -count=3` 全绿；顶层 17 键序由 `TestContractJSONTopLevelKeyOrder` 钉住 | — |
+| 回放样本 ①（AD-16） | `2026-06/h1`：**3194** 字节，`data` **54** 键 / `absent_fields` **22** 项（54 + 22 = 76），`_mom` 键 **0** 个（h1 累计口径，22 个 `_mom` 全进 `absent_fields`），`generated_by contract@v1/replay`，`checks: []`，`is_revision false`，`scissors_sink -2` | — |
+| 回放样本 ②（AD-16） | `2023-08/monthly`：**3167** 字节，`data` **53** 键 / `absent_fields` **23** 项（53 + 23 = 76），`_mom` 键 **20** 个与 `_ytd` 族并存，其余同上 | — |
+| 新增测试（`git diff d27791c 7022d01d -- '*_test.go' \| grep -c '^+func Test'`，删除 0） | **48**：config 4 · signals 9 · contract 6 · store 3 · queue 10 · ingest 8 · notify 1 · cmd 7；预估 31 = 3+6+5+2+5+4+1+5 | 条 |
+| 返工 | 005 一轮（dod_defect：验证者变异 M8「丢弃 `Evaluate` 结果」存活 ⇒ 补 Ingest 级 P2 温度断言 + 双前缀 NotContains）；006 一轮（dod_defect：回放修订期次无守卫 ⇒ `TestHestiaContractEmitRevisionPeriod`）；两轮均只加断言不改实现，复验变异 KILLED | 轮 |
+| code-simplifier 终检（本 Sprint 全部改动文件） | 各代码任务提交前各跑一次（改动均已申报进各自 discovery）；收口终检由 dev **本体只读审查**、未 spawn 子代理——本 Sprint 两个 code-simplifier 子代理（001、007 首任）都被 idle hook / 会话挂起卡死，见 PENDING-MECHANISMS #3 | — |
+
+**新增测试 48 ≠ 需求预估 31，差在哪**：
+
+| 任务 | 预估 | 实际 | 差因 |
+|---|---|---|---|
+| 001 config | 3 | 4 | +`TestSignalsJSONKeys`（DoD：契约 `thresholds.signals` 的 JSON 键集） |
+| 002 signals + 004 顺带 | 6 | 9 | +`CreditZeroTotalIsUnknown`、`EmptyValuesAllUnknown`（DoD 边界）、+`ThresholdEdges`（004 承接 002 的 6 个相等边/混口径反向存活变异） |
+| 003 contract / store | 5 / 2 | 6 / 3 | +`TopLevelKeyOrder`（DoD 键序守卫）、+`CurrentAndPriorErrorsCarryPrefix`（DoD 错误前缀） |
+| 004 queue | 5 | 10 | +`FailsWhenTargetIsDir`（AD-4a 夹具前置）、`RejectsFile`、`CreatesPendingWithoutEnsure`（DoD 边界）、+`EndsWithNewline`、`AbsentFieldsEmptyArray`（承接 003 存活变异） |
+| 005 ingest / notify | 4 / 1 | 8 / 1 | +`RejectsEmptyQueueDir`、`RejectsUnusableQueueDir`（AD-5）、`NoContractOnOutOfOrder`（AD-14）、`RevisionContractCarriesSupersedes`（覆盖率回到 96.6） |
+| 006 cmd | 5 | 7 | +`RejectsBadPeriodTypeBeforeOpeningDB`（DoD 边界）、+`RevisionPeriod`（review_fix R1） |
+
+### C. 结转
+
+- **M2b Sheets 投影**：前置 spike——用 Service Account 读一次表头（M0 未记列布局）；契约与 Sheets 无依赖。
+- **M3 消费者契约**：只读 `pending/`，流转 `processing/ done/ failed/` 归它；文件名 `<period>-<period_type>.json`；`generated_by` 后缀 `/replay` 表示回放；两份回放样本全文在 `.arcforge` 归档的 TASK-007 discovery 与验证报告里。
+- 投递与 M1.5 一起，等 2026-08 首期验收登记之后；投递后 `contract emit --period 2026-07 --stdout` 核形状。**本 Sprint 未跑 `deploy.sh`**。
+- `corp_mlt_short_expand` 只快照不参与四信号；若 4.7 补第五个信号，`temp_scale` 随之改并先改 `validate` 的 `"0-4"` 判据。
+- 挂账（非阻断）：`Store.PriorPublishedAt` 的查询错误分支在 ingest 路径不可达（唯一未覆盖语句）；004 变异 Q4（`writeAtomic` 换 `os.WriteFile`）/ Q8（目录权限位）单进程测试不可观测；005 变异 M11（`source_url` 回落值与显式值同形）/ M12（契约打印行无断言）低优先未补。
