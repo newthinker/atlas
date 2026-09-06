@@ -9,15 +9,16 @@
 
 ---
 
-## 当前待决（上游 sprint-010 实测 + atlas M1.5/Sprint 044 实测，2026-09-05 记）
+## 当前待决（上游 sprint-010 实测 + atlas M1.5/Sprint 044 + **M2a/Sprint 045**，2026-09-06 记）
 
 | # | 变更 | 落点 |
 |---|---|---|
 | 1 | `teammate-idle.sh` 的 `test-*` 分支补 F6 防空转出口：现在任意 `dev_done` 无条件并入 `MINE`，而 `dev_done→verifying` 是 leader 专属边 ⇒ 等派验期间无限唤醒（实测一分钟四次）。相邻 `qa-*` 分支有现成同构写法 | `project-template/hooks/teammate-idle.sh` |
 | 2 | 逃生边把判定依据写进审计行：现在只记时间，文件层面无从区分「有证据的快」与「没证据的急」（上游十条逃生边有两条事后证明误判） | `project-template/hooks/arcforge-write.sh` |
-| 3 | `stale-dispatch` 处置补一条判据：委托子代理致卡死时无 failure 通知（卡 running 不转 idle），只能靠「零文件产物 + worktree 未被触碰」识别。**atlas M1.5 第二实例**（dev-m15-b 的 code-simplifier 子代理被 idle hook 循环 5 次，靠子代理自报） | `global/agents/*.md`、`teammate-idle.sh` |
-| 4 | **会话/消息挂起无告警**：M1.5 一个 sprint 内 Leader 27m + dev 45m + dev 23m + verifier 57m，M1d Leader 两次；形态一致（工具调用之间被挂起、被挂起方无间隙感知），`in_progress` 无阈值 ⇒ 只能靠催办。候选：merge 请求超阈值无回执 ⇒ 自动 `blocked_clarification` | 上游议题 |
-| 5 | 任务 ID 跨 sprint 复用致门禁 `git log --grep` 全集含旧提交（只 WARN，无害）；`capabilities.codex_cli: true` 与实际不符（QA `codex exec` 30 分钟零输出）——探测缺「可运行」验证 | `task-completed.sh`、`arcforge-init` |
+| 3 | `stale-dispatch` 处置补一条判据：委托子代理致卡死时无 failure 通知（卡 running 不转 idle），只能靠「零文件产物 + worktree 未被触碰」识别。atlas M1.5 第二实例；**M2a +2**：code-simplifier 子代理被 idle hook 以父实例名循环（自报后靠 Leader 直发消息令其返回）、另一个**挂 2.9h 后带产物返回**（期间父实例收不到消息、不被唤醒；Leader 直发消息「排队待下一工具轮次」永不送达）⇒ 处方：先写正文提交再派终检；只审不改的终检由本体做 | `global/agents/*.md`、`teammate-idle.sh` |
+| 4 | **会话/消息挂起无告警**：M1.5 Leader 27m + dev 45m/23m + verifier 57m；**M2a：Leader 88m / 7h16m / 55m（累计 ≈ 9.6h）、dev 54m / 65m、verifier ~3h，且新形态「**工具批次本身被挂起**」（6 个并行 Bash 里部分 2h13m 后才执行，agent 侧无间隙）；三任 dev 连续在同一任务上挂起 ⇒ Leader 改走**记录员模式**（Leader 采数起草、记录员只落盘/提交/迁移）一次通过。已实证有效的处方：dev 20 分钟无回执 ⇒ 自己转 `blocked_clarification` 写文件级信号（两次生效）；Leader 见分支有形状正确的提交 + 预演无冲突 ⇒ **不等请求直接 merge** | 上游议题 |
+| 5 | 任务 ID 跨 sprint 复用致门禁 `git log --grep` 全集含旧提交（只 WARN，无害）；`capabilities.codex_cli: true` 与实际不符（M1.5：`codex exec` 30 分钟零输出；**M2a：`--version` 秒回但 `codex exec` 秒回 usage limit 至 9/10**）——探测缺「可运行且有配额」验证 | `task-completed.sh`、`arcforge-init` |
+| 6 | **teammate→leader 消息延迟 20–25 分钟 ×2（cron tick 正常到达 ⇒ 通道延迟非挂起）**；派发/派验通知丢失 ×2 靠 idle hook 重扫兜住。文件真相源全部兜住，但 Leader 侧回执协议因此退化为「以文件为准、消息只作催办」 | 上游议题 |
 ## 已落地（M1c-4 提出，2026-09-03 由 PR #6 合入上游 `main` @ `496bbf0`）
 
 `update --expect-status`、validator 规则 `archive-mutated` 与 `unregistered-writer`、
