@@ -3489,8 +3489,8 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 | 真语料回归（`backfill load --allow-incomplete`，exit 0，3 秒） | 218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21（单篇 28 + 合并组 69）· 字段冲突 0 · 口径路由违反 0 · 仓库根 `queue/` 不存在 · `find internal/hestia cmd/atlas -type d \( -name pending -o -name queue \)` 为空 | 篇 / 篇 / 观测 |
 | 三期 golden | 2020H1 🔴🟢🟢🟡 2/4 · 2025 🔴🔴🔴🟡 0/4 · 2026H1 🔴🔴🔴🟢 1/4（`-run TestEvaluateGolden -v` 三子例 PASS） | — |
 | 键序确定性 | `-run 'TestBuildContract\|TestContract' -count=3` 全绿；顶层 17 键序由 `TestContractJSONTopLevelKeyOrder` 钉住 | — |
-| 回放样本 ①（AD-16） | `2026-06/h1`：**3194** 字节，`data` **54** 键 / `absent_fields` **22** 项（54 + 22 = 76），`_mom` 键 **0** 个（h1 累计口径，22 个 `_mom` 全进 `absent_fields`），`generated_by contract@v1/replay`，`checks: []`，`is_revision false`，`scissors_sink -2` | — |
-| 回放样本 ②（AD-16） | `2023-08/monthly`：**3167** 字节，`data` **53** 键 / `absent_fields` **23** 项（53 + 23 = 76），`_mom` 键 **20** 个与 `_ytd` 族并存，其余同上 | — |
+| 回放样本 ①（AD-16） | `2026-06/h1`：**3194** 字节，`data` **54** 键 / `absent_fields` **22** 项（54 + 22 = 76），`_mom` 键 **0** 个（h1 累计口径，22 个 `_mom` 全进 `absent_fields`），`generated_by contract@v1/replay`，`checks: []`，`is_revision false`，`scissors_sink -2`。**字节数跨运行 ±1–2、非判据**：`extracted_at` 取回填 load 那一刻的时间，RFC3339Nano 截尾零 ⇒ 小数位数逐次不同（dev-b 3193 / dev-c 3192 / Leader 3194 / 验证者 3194；去掉 `extracted_at` 行后各次 `cmp` 逐字节相同）；判据是 n + m = 76 与键族计数 | — |
+| 回放样本 ②（AD-16） | `2023-08/monthly`：**3167** 字节，`data` **53** 键 / `absent_fields` **23** 项（53 + 23 = 76），`_mom` 键 **20** 个与 `_ytd` 族并存，其余同上；字节数同样非判据（Leader 3167 / 验证者 3166，成因同上） | — |
 | 新增测试（`git diff d27791c 7022d01d -- '*_test.go' \| grep -c '^+func Test'`，删除 0） | **48**：config 4 · signals 9 · contract 6 · store 3 · queue 10 · ingest 8 · notify 1 · cmd 7；预估 31 = 3+6+5+2+5+4+1+5 | 条 |
 | 返工 | 005 一轮（dod_defect：验证者变异 M8「丢弃 `Evaluate` 结果」存活 ⇒ 补 Ingest 级 P2 温度断言 + 双前缀 NotContains）；006 一轮（dod_defect：回放修订期次无守卫 ⇒ `TestHestiaContractEmitRevisionPeriod`）；两轮均只加断言不改实现，复验变异 KILLED | 轮 |
 | code-simplifier 终检（本 Sprint 全部改动文件） | 各代码任务提交前各跑一次（改动均已申报进各自 discovery）；收口终检由 dev **本体只读审查**、未 spawn 子代理——本 Sprint 两个 code-simplifier 子代理（001、007 首任）都被 idle hook / 会话挂起卡死，见 PENDING-MECHANISMS #3 | — |
