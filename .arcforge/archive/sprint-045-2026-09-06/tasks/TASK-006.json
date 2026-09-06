@@ -1,0 +1,72 @@
+{
+  "id": "TASK-006",
+  "title": "`atlas hestia contract emit --period [--period-type] [--stdout]`：回放契约（`Replay`、`checks: []`、修订按库判）",
+  "description": "对应需求文档 **TASK-006**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-006」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n改 `cmd/atlas/hestia.go`（`hestiaContractCmd`/`hestiaContractEmitCmd`/三个 flag 变量/`runHestiaContractEmit`/`init()`）与 `cmd/atlas/hestia_test.go`（5 条 + `emitFixture`）。消费 003（`Store.Current`/`PriorPublishedAt`/`BuildContract`）、004（`WriteContract`）、既有 `openHestia`（`hestia.go:261`）与 `hestiaBackfillFromRE`（`:365`）。与 005 并行（`writes` 不相交）。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/hestia.go",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`hestia.go` 按需求原文：`hestiaEmitPeriod`/`hestiaEmitPeriodType`/`hestiaEmitStdout` 三变量、`hestiaContractCmd`（`Use: \"contract\"`）、`hestiaContractEmitCmd`（`Use: \"emit\"`，`Long` 按原文）、`runHestiaContractEmit`（`--period` 先过 `hestiaBackfillFromRE` 再 `openHestia`；`Current` 无行 ⇒ 错误含 `<period>/<type> not in observations`；`PriorPublishedAt` ⇒ `IsRevision: prior != \"\"`、`Supersedes: prior`；`Report{Passed: true}`、`Replay: true`；`--stdout` 只把 `JSON()` 写到 `cmd.OutOrStdout()`；否则 `WriteContract(cfg.Queue.Dir, c)` 并打印 `%s/%s contract → %s`）、`init()` 三个 flag + `MarkFlagRequired(\"period\")` + `hestiaContractCmd.AddCommand(hestiaContractEmitCmd)` + `hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd, hestiaContractCmd)`（替换原 `:249` 那行）。`go run ./cmd/atlas hestia contract emit --help` 列出 `--period`、`--period-type`、`--stdout`。",
+      "五条测试按原文（`TestHestiaContractEmitFlags`、`TestHestiaContractEmitRejectsBadPeriodBeforeOpeningDB`、`TestHestiaContractEmitWritesPending`、`TestHestiaContractEmitStdoutDoesNotWrite`、`TestHestiaContractEmitUnknownPeriodFails`）+ `emitFixture`（yaml 显式写 `queue.dir` 到临时目录）全 PASS；🔴 **三条真跑 `runHestiaContractEmit` 的用例改用 `cmd, out := newCapturingCmd()`**（`hestia_test.go:131-139`，它 `SetContext`；需求写的直接传 `hestiaContractEmitCmd` 未经 `Execute`，cobra v1.10.2 的 `cmd.Context()` 为 nil ⇒ `database/sql` 里 `<-ctx.Done()` **panic**，reviewer B6；`TestHestiaContractEmitFlags` 仍查 `hestiaContractEmitCmd.Flags()`）；**全局变量还原沿 AD-8**：每个改了 `hestiaCfgPath`/三个 emit 变量的用例都先 `old := …` 再 `t.Cleanup` 还原（不硬编码 `\"configs/hestia.yaml\"`；`RejectsBadPeriod` 用例同样还原 `hestiaCfgPath`）。`import` 按需补 `bytes`/`context`/`hestia`。"
+    ],
+    "boundary": [
+      "`--period-type` 不在 `monthly|q1|h1|q1_q3|annual` 五值内（如 `montly`）⇒ 与 `--period` 同位置、**开库前**报错，错误串 `--period-type %q 非法：要 monthly|q1|h1|q1_q3|annual`（cmd 层用一条 `regexp.MustCompile(`^(monthly|q1|h1|q1_q3|annual)$`)`，与 `hestiaBackfillFromRE` 同形；这五个不是业务字段名，不受字段名守卫约束）；补一条测试。`--stdout` 输出末尾恰一个 `\\n`（`JSON()` 已带，不要再 `Println`）。",
+      "既有守卫 `hestia.go` 不 import `path/filepath`（`hestia_test.go:116-124`）仍 PASS——`emitFixture` 用 `filepath` 在 `_test.go` 里，不受限。既有 `TestHestiaCommandsSilenceUsage`（`:94-96`）列表加 `hestiaContractCmd`、`hestiaContractEmitCmd`（两者 `SilenceUsage: true`）；`TestHestiaCommandIsRegistered`（`:50-64`）加 `assert.Contains(t, subs, \"contract\")`（reviewer S3）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./cmd/atlas/ -run 'TestHestiaContractEmit' 2>&1 | head -5` 在实现前输出 `undefined: hestiaContractEmitCmd`，记进 discovery `verification`。`openHestia` 失败（配置不存在）的错误带路径（既有），`Current` 查询错误原样返回。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」；锚 `d27791c` 实测恰这两处）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（需求硬门槛 = 基线 96.6，背对背实测于锚 `d27791c`，AD-7）且 `go test ./cmd/atlas/ -cover` 不低于 **76.4**；报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat d27791c HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`；`store.go` 的 `Save` 函数体：`git diff d27791c HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\\\*Store) Save'` 必须为 **0**。`cmd/atlas/hestia.go` 不 import `path/filepath`（既有守卫 `hestia_test.go:116-124`）。注释里引用任务编号带 milestone 前缀：写 `M2a 的 TASK-006`。 本任务 `packages` 只有 `./cmd/atlas`（`coverage_floor: 75` 是门禁形态适配，AD-7）；交付后 `go test ./cmd/atlas/ -cover` **不低于 76.4**。",
+      "**交付流程（AD-9，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-006-m2a ../wt-TASK-006-m2a master`（主分支是 **master** 不是 `main`）。\n2. 开工前先读 `context_from` 里各上游任务的 discovery（`.arcforge/discoveries/TASK-xxx.json`，在主仓库读）。提交用显式 pathspec（本任务 2 个文件），信息锚定 **`feat(TASK-006): M2a …`**——🔴 需求文档写的 `feat(M2a TASK-006):` **不匹配门禁**（`task-completed.sh:133/174` 只认 `^[a-z]+\\\\(TASK-006\\\\):`，AD-2），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `parse.go`/`extract.go`/`validate.go`/`fields.go` 与 `Save` 函数体、不得新增需求之外的导出符号、契约 JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。子代理回复不可采信，以 `git diff` 为准。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-006 master && git -C ../pre-TASK-006 merge --no-ff --no-commit task/TASK-006-m2a`；无冲突后拆掉预演树，通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动文件），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环（`transition blocked_clarification --json-field questions=...`）。\n6. `cd` 回主仓库写 discovery（`discovery TASK-006` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔就写 `provenance`）并 `task TASK-006 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-006.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-006-m2a`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-b",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m2a-a",
+  "coverage_floor": 75,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "7022d01d9229314f8a43c126d9b9763bbabefe5c",
+    "discovery_sha256": "f730e08d14514d751c97ef14afa1e51d56496cb1b1726d78d6e08d1cf7eb7cae",
+    "at": "2026-09-06T00:13:37Z"
+  },
+  "reason_class": "dod_defect",
+  "fix_items": [
+    {
+      "id": "R1",
+      "severity": "medium",
+      "desc": "新增 TestHestiaContractEmitRevisionPeriod：emitFixture 之外再 Save 一条同期（2025-12/annual）、PublishedAt 更晚、不同 ArticleID 的观测（沿 TestSaveRevisionKeepsBothRows/passing() 写法），跑 emit --stdout，断言输出含 \"is_revision\": true、\"supersedes_published_at\": \"2026-01-15\"（被取代版的 published_at）与 \"passed\": true；验证者报告 §4 给了夹具写法。变异「Supersedes 置空」「Report.Passed=false」必须由它转红。",
+      "from": "test-m2a-a 变异存活 2 项（verification.md §4）"
+    }
+  ]
+}

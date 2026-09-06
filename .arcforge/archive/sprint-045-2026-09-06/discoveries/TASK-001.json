@@ -1,0 +1,82 @@
+{
+  "task_id": "TASK-001",
+  "author": "dev-m2a-a",
+  "written_at": "2026-09-05T13:05:00Z",
+  "commit_sha": "913f0c04b02634621174702a068272b4ce653ba1",
+  "merged_master_sha": "70bbc4730b2bae3250562002a19dd1ee6c9a35c8",
+  "branch": "task/TASK-001-m2a",
+  "key_findings": [
+    "需求原文的代码与测试可原样落地；本任务对原文的全部偏离都来自 DoD 裁决（AD-5/AD-6/AD-10/reviewer B5），无自行发明。",
+    "gofmt 对需求给的 TestLoadConfigRejectsBadQueueAndSignals map 字面量要求键值对齐（中文键宽度不等），原文直接粘贴 gofmt -l 会列出 config_test.go；已 gofmt -w，语义不变。",
+    "TestShippedConfigLoadsAndIsCalibrated 的 config_version 断言不改必红（reviewer B5 属实）：yaml 递增到 2026-09-05 后该断言是唯一变红处。",
+    "cmd/atlas 的 hestiaCfg 闭包与 wiringHestiaCfg 两处 yaml 补 queue.dir 后，本任务阶段 Ingest 尚不读 Queue.Dir（TASK-005 才建目录），所以 find pending/queue 为空在本任务是恒真；这条判据的真正生效点是 TASK-005 之后。",
+    "GitNexus detect-changes 未能执行：索引落后 69 个 commit 且 LadybugDB 版本不匹配（file 43 vs build 40），CLI 报错退出；本任务只新增符号与一个 struct 字段，未改既有函数签名，影响面限于 Config 消费者（LoadConfig 调用点行为不变）。"
+  ],
+  "decisions": [
+    {
+      "decision": "Signals 的 json tag 在本任务加，TempScale 为 json:\"-\"",
+      "rationale": "AD-6：tag 属于结构定义，003 再改 config.go 会让 001/003 的 writes 重叠；契约顶层 thresholds.temp_scale 已有一份。TestSignalsJSONKeys 钉住七键集合。"
+    },
+    {
+      "decision": "提交锚用 feat(TASK-001): M2a …，不用需求写的 feat(M2a TASK-001):",
+      "rationale": "AD-2：task-completed.sh 的 git log --grep 只认 ^[a-z]+\\(TASK-001\\):，需求写法对门禁不可见。"
+    },
+    {
+      "decision": "hestia_test.go 两处内联 yaml 的 queue.dir 指向 filepath.Join(t.TempDir(), \"queue\")，各带一行理由注释",
+      "rationale": "AD-5（reviewer B7 订正）：writeHestiaYAML* 在该文件零处使用，真走到 hestia.Ingest 的是这两处；预填值 queue/hestia 相对 cwd，TASK-005 起会在 cmd/atlas/ 下留目录。"
+    },
+    {
+      "decision": "code-simplifier 的唯一改动（DefaultSignals() 字面量由三行压缩形态展开为每字段一行）予以保留",
+      "rationale": "语义逐字段相同，gofmt 干净，可读性更好；以 git diff 核实其改动仅此一处，其余四个文件 md5 前后一致。"
+    },
+    {
+      "decision": "TestShippedConfigLoadsAndIsCalibrated 追加的两条断言用 cfg 字段比对（Queue.Dir 与 DefaultSignals()），不加 yaml 原文文本守卫",
+      "rationale": "DoD functional[1] 只要求钉住「yaml 与代码预填一致」；signals 段有八个键，逐行文本守卫会重复 DefaultSignals 的值一遍，两处漂移时反而多一处要改。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/config.go",
+    "internal/hestia/config_test.go",
+    "internal/hestia/store_test.go",
+    "configs/hestia.yaml",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "hestia.QueueCfg{Dir string `mapstructure:\"dir\"`}",
+      "consumers": "TASK-005/006 读 cfg.Queue.Dir；LoadConfig 预填 \"queue/hestia\"（const defaultQueueDir），空串在 validate 被拒（错误串含 queue.dir）"
+    },
+    {
+      "symbol": "hestia.Signals（8 字段，mapstructure + 同名 json tag；TempScale json:\"-\"）",
+      "consumers": "TASK-002 Evaluate 读阈值；TASK-003 契约 thresholds.signals 直接 json.Marshal 它，键集恰为 scissors_active/scissors_sink/hh_mlt_monthly_warm/hh_short_monthly_warm/bill_ratio_healthy/bill_ratio_severe/corp_mlt_short_expand"
+    },
+    {
+      "symbol": "func hestia.DefaultSignals() Signals",
+      "consumers": "值 0-4 / 0 / -2 / 2000 / 0 / 10 / 20 / 1.5；已登记进 store_test.go 的 TestPackageExposesNoWriteFunctions want（26 项，Calibrate 之后、DefaultThresholds 之前）"
+    },
+    {
+      "symbol": "hestia.Config.Queue / hestia.Config.Signals（置于 Thresholds 之后）",
+      "consumers": "TASK-003 读 Config/ConfigVersion（现为 \"2026-09-05\"）；validate 追加四条：queue.dir 空 / temp_scale≠\"0-4\" / scissors_sink>=scissors_active / bill_ratio_healthy>=bill_ratio_severe"
+    }
+  ],
+  "verification": {
+    "sampled_on": "master 70bbc4730b2bae3250562002a19dd1ee6c9a35c8（merge 后主仓库，最后一次改动之后统一重采）",
+    "red_phase": "实现前 `go test ./internal/hestia/ -run 'TestLoadConfig.*(Queue|Signals)' 2>&1 | head -5` 输出：`internal/hestia/config_test.go:442:38: cfg.Queue undefined (type Config has no field or method Queue)`；`:444:18: undefined: DefaultSignals`；`:444:40: cfg.Signals undefined`；`:604:38: cfg.Queue undefined`",
+    "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；新增 TestLoadConfigDefaultsQueueAndSignals / TestLoadConfigReadsQueueAndSignals / TestLoadConfigRejectsBadQueueAndSignals（4 子例）/ TestSignalsJSONKeys 与改动的 TestShippedConfigLoadsAndIsCalibrated 均 PASS；-run ExposesNoWrite 两条 PASS，want 26 项",
+    "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.4%（门槛 76.4）@ 70bbc4730b2bae3250562002a19dd1ee6c9a35c8",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 恰 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，无新增）",
+    "frozen_files": "git diff --stat d27791c 70bbc473 -- parse.go extract.go validate.go fields.go go.mod go.sum 为空；store.go Save 函数体 grep 计数 0；cmd/atlas/hestia.go 不 import path/filepath",
+    "stray_dirs": "find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\) 输出为空",
+    "numstat": "git show --numstat 913f0c04：hestia_test.go 9/0、hestia.yaml 21/1、config.go 50/0、config_test.go 89/1、store_test.go 1/1",
+    "done_criteria_to_tests": {
+      "functional[0]": "TestLoadConfigDefaultsQueueAndSignals / Reads / RejectsBad + store_test.go TestPackageExposesNoWriteFunctions",
+      "functional[1]": "TestShippedConfigLoadsAndIsCalibrated（config_version 2026-09-05 + Queue.Dir + Signals 两条断言）",
+      "functional[2]": "go test ./cmd/atlas/... 全绿 + find pending/queue 为空",
+      "boundary[0]": "TestSignalsJSONKeys",
+      "error_handling[0]": "本 verification.red_phase",
+      "non_functional": "本 verification 各项 + 交付流程按 AD-9 走完（worktree/预演 merge/Leader merge/master 重采）"
+    },
+    "not_run": "GitNexus detect-changes（索引陈旧 + DB 版本不匹配，CLI 报错）"
+  }
+}

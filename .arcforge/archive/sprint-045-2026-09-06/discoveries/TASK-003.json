@@ -1,0 +1,95 @@
+{
+  "task_id": "TASK-003",
+  "author": "dev-m2a-a",
+  "written_at": "2026-09-05T16:01:00Z",
+  "commit_sha": "789989bbfeb0d61d29a269727efb5c7a8a78c606",
+  "merged_master_sha": "61403387b4e7a8ed33dd0b136fe0f7a87af4c346",
+  "branch": "task/TASK-003-m2a",
+  "key_findings": [
+    "需求原文的 contract.go 与五条测试可原样落地，唯一改名是 articleURL → pbocArticleURL（reviewer B2 属实：ingest_test.go:82 既有同名同签名 helper，同包 redeclared）。",
+    "需求给 store 测试的夹具 `ValidationReport{Passed: true}` 会被 Save 拒绝（既有守卫：Passed 且零 checks 的报告与「没有闸门跑过」不可区分），错误串 `report claims Passed with zero checks`。需求自己指向的 TestSaveRevisionKeepsBothRows 用的是 passing() helper，故本任务 store 侧测试改用 passing()；contract_test.go 的五条不经 Save，原样保留。",
+    "Contract 顶层键序由结构体字段顺序决定；TestContractJSONTopLevelKeyOrder 扫 JSON() 输出里两空格缩进的 `\"key\":` 行钉住 17 键顺序——嵌套段（units/validation/thresholds/data）的键在四空格及以上，不会混入。",
+    "PriorPublishedAt 与 Current 的业务键都含 period_type：同 period=2026-12 的 annual 行不会成为 monthly 的 prior，Current 各取各的行（boundary[1] 子例实测）。",
+    "Store.Current 关库后经 QueryContext 报错、PriorPublishedAt 经 QueryRowContext(...).Scan 报错，前缀分别为 `hestia store current` / `hestia store prior published_at`（TestStoreCurrentAndPriorErrorsCarryPrefix）。",
+    "交付流程实撞：merge 请求两封 inbox 84 分钟无回执（Leader 侧挂起约 88 分钟，team-lead 已确认），我把请求写成 blocked_clarification 的 questions[0] 作为文件级信号；Leader 恢复后即 merge。不影响交付物。",
+    "GitNexus detect-changes 仍不可用（索引陈旧 + DB 版本不匹配，同 001/002）。"
+  ],
+  "decisions": [
+    {
+      "decision": "articleURL 改名 pbocArticleURL",
+      "rationale": "DoD functional[0] 裁决（reviewer B2）：与 ingest_test.go:82 既有测试 helper 同名同签名会整包编译失败；TestBuildContractMapsFields 的 URL 断言不变。"
+    },
+    {
+      "decision": "store_test.go 三条新测试的夹具用既有 passing()，不用需求写的 ValidationReport{Passed: true}",
+      "rationale": "Save 拒绝「Passed 且零 checks」的报告（既有守卫，M1.5 前引入）；需求指向的参照用例 TestSaveRevisionKeepsBothRows 本就用 passing()。改夹具不改被测行为。"
+    },
+    {
+      "decision": "code-simplifier 四处改动：保留三处，回退一处",
+      "rationale": "保留：contract.go 单 import 改裸形式（对齐包内三个单 import 文件）；contractCfg 去掉中转变量；TestContractJSONTopLevelKeyOrder 去掉恒假条件 `|| strings.HasPrefix(line, \"   \")`（前一条件成立时 line[2]=='\"'，不可能同时是空格）。回退：它把 Store.Current 里 rows.Next() 为假时的 `return Observation{}, false, rows.Err()` 展开成带前缀的 if 分支——多出一条无测试可达的错误分支（rows.Err() 在关库路径上不会走到这里，QueryContext 已先报错），internal/hestia 覆盖率从 96.6 跌到 96.5，低于需求硬门槛 96.6。回退为需求原文的单行返回后恢复 96.6。以 git diff 核实四处改动，测试与其余文件未动。"
+    },
+    {
+      "decision": "边界测试并入既有用例：period_type 不串做 TestStorePriorPublishedAt 的子例；顶层键序与关库前缀各开独立测试",
+      "rationale": "DoD boundary[1] 允许并入子例，且它与父用例共享 Save 夹具形态；键序守卫与错误前缀各守一件独立的事，独立命名让失败时一眼定位。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/contract.go",
+    "internal/hestia/contract_test.go",
+    "internal/hestia/store.go",
+    "internal/hestia/store_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "type hestia.Contract（17 顶层字段，顺序 = spec §2.2 键序）；ContractValidation / ContractCheck / ContractThresholds；非导出 orderedValues / keyValue",
+      "consumers": "TASK-004 WriteContract 写 c.JSON() 到 <queue.dir>/pending/<c.FileName()>；TASK-005 在 ingest 入库后 BuildContract；Loom（M3）按键读"
+    },
+    {
+      "symbol": "type hestia.ContractInput{Obs Observation; Report ValidationReport; IsRevision bool; Supersedes string; SourceURL string; Replay bool}",
+      "consumers": "TASK-005：IsRevision 取自 Save 的 Verdict==Revision，Supersedes 取自 Store.PriorPublishedAt；TASK-006 contract emit：Replay=true、Report={Passed:true}"
+    },
+    {
+      "symbol": "func hestia.BuildContract(in ContractInput, cfg Config) Contract",
+      "consumers": "纯函数；SourceURL 空 ⇒ pbocArticleURL(ArticleID)；Supersedes 空 ⇒ supersedes_published_at 为 null；absent_fields/data 按 fieldOrder 序；Checks 空 ⇒ `\"checks\": []` 不是 null"
+    },
+    {
+      "symbol": "func (c Contract) JSON() ([]byte, error)；func (c Contract) FileName() string",
+      "consumers": "JSON：MarshalIndent 两空格 + 末尾换行，同输入两次逐字节相同；FileName：<period>-<period_type>.json"
+    },
+    {
+      "symbol": "func (s *Store) Current(ctx, period, periodType string) (Observation, bool, error)",
+      "consumers": "TASK-006 contract emit 回放；读 v_hestia_current；不存在 ⇒ (zero, false, nil)；错误前缀 `hestia store current <period>/<pt>`"
+    },
+    {
+      "symbol": "func (s *Store) PriorPublishedAt(ctx, period, periodType, before string) (string, error)",
+      "consumers": "TASK-005 修订契约的 supersedes_published_at：MAX(published_at) WHERE period=? AND period_type=? AND published_at < before；无 ⇒ \"\"；错误前缀 `hestia store prior published_at <period>/<pt>`"
+    },
+    {
+      "symbol": "守卫：TestStoreExposesNoWriteMethods want 14 项（+Current、+PriorPublishedAt）；TestPackageExposesNoWriteFunctions want 32 项（+BuildContract、+Contract.FileName、+Contract.JSON、+Store.Current、+Store.PriorPublishedAt）",
+      "consumers": "TASK-004 登记 EnsureQueueDirs/WriteContract 时从 32 → 34（AD-10）"
+    },
+    {
+      "symbol": "contract_test.go helper：contractObs() / contractCfg() / f(float64) *float64 / orderedSubset(order, want []string)",
+      "consumers": "包内测试；contractObs 的 Meta 是 2026-08/monthly、ArticleID 2026091412345678901"
+    }
+  ],
+  "verification": {
+    "sampled_on": "master 61403387b4e7a8ed33dd0b136fe0f7a87af4c346（merge 后主仓库，最后一次改动之后统一重采）",
+    "red_phase": "实现前 `go test ./internal/hestia/ -run 'TestBuildContract|TestContract|TestStoreCurrent|TestStorePriorPublishedAt' 2>&1 | head -5` 输出：`internal/hestia/contract_test.go:51:7: undefined: BuildContract`；`:51:21: undefined: ContractInput`；`:110:7: undefined: BuildContract`；`:110:21: undefined: ContractInput`",
+    "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；-run 'TestBuildContract|TestContract|TestStoreCurrent|TestStorePriorPublishedAt' 共 10 条 --- PASS（含 period_type 不串子例）；-run 'ExposesNoWrite|TestFieldNamesAppearOnlyInFieldsGo' 三条 PASS，reflect want 14 / AST want 32",
+    "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.4%（门槛 76.4）@ 61403387b4e7a8ed33dd0b136fe0f7a87af4c346",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 恰 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，无新增）",
+    "frozen_files": "git diff --stat d27791c 61403387 -- parse.go extract.go validate.go fields.go go.mod go.sum 为空；store.go 自 d27791c 删除行 0（`grep -c '^-[^-]'`）；Save 函数体 grep 计数 0；cmd/atlas/hestia.go 不 import path/filepath",
+    "numstat": "git show --numstat 789989bb：contract.go 161/0、contract_test.go 177/0、store.go 34/0、store_test.go 99/2",
+    "done_criteria_to_tests": {
+      "functional[0]": "TestBuildContractMapsFields / TestBuildContractRevisionAndExplicitURL / TestBuildContractReplay / TestContractJSONIsDeterministic / TestContractFileName；contract_test.go 不 import context；contract.go 字段名字面量 0（TestFieldNamesAppearOnlyInFieldsGo PASS）",
+      "functional[1]": "TestStoreCurrent / TestStorePriorPublishedAt；store.go 删除行 0",
+      "functional[2]": "reflect 14 / AST 32，两条守卫 PASS",
+      "boundary[0]": "TestContractJSONTopLevelKeyOrder（17 键按序）；data 键序由 TestBuildContractMapsFields 的 orderedSubset 断言",
+      "boundary[1]": "TestStorePriorPublishedAt/period_type 不串",
+      "error_handling[0]": "本 verification.red_phase；TestStoreCurrentAndPriorErrorsCarryPrefix（关库后两前缀）",
+      "non_functional": "本 verification 各项 + 交付流程按 AD-9（worktree / 预演 merge / Leader merge / master 重采）"
+    },
+    "not_run": "GitNexus detect-changes（索引陈旧 + DB 版本不匹配，同 001/002）"
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "id": "TASK-001",
+  "title": "配置：`Queue{Dir}` 与 `Signals` 段、预填与倒置校验、仓库 yaml；`cmd/atlas` 测试 yaml helper 补 `queue.dir`",
+  "description": "对应需求文档 **TASK-001**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-001」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n改 `internal/hestia/config.go`（`QueueCfg`、`Signals`、`DefaultSignals`、`Config` 两字段、`LoadConfig` 预填、`validate()` 四条）、`config_test.go`（3 条 + `minimalYAML` helper + 2 条本 DoD 加的）、`configs/hestia.yaml`（两段 + `config_version`）；另按 AD-5（reviewer B7 订正）给 `cmd/atlas/hestia_test.go` 里两处真走到 `hestia.Ingest` 的内联 yaml 补 `queue.dir`；`DefaultSignals` 是新增导出函数，须在 `store_test.go` 的 AST 守卫登记（reviewer B1）。这是本 Sprint 唯一改 `config.go` 与 `configs/hestia.yaml` 的任务；`Signals` 的 `json` tag 在本任务加（AD-6，需求放在 003）。下游 002（`Signals`）、003（`Config`/`ConfigVersion`）、005/006（`cfg.Queue.Dir`）都消费本任务的结构，写进 discovery `interfaces_exposed`。",
+  "module": "hestia",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/hestia/config.go",
+    "internal/hestia/config_test.go",
+    "configs/hestia.yaml",
+    "internal/hestia/store_test.go",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`config.go` 按需求原文：`QueueCfg{Dir}`（`mapstructure:\"dir\"`）、`const defaultQueueDir = \"queue/hestia\"`、`Signals` 8 字段（每个字段 `mapstructure` tag **加同名 `json` tag**，如 `` `mapstructure:\"scissors_active\" json:\"scissors_active\"` ``；`TempScale` 的 json tag 为 `json:\"-\"`，AD-6）、`DefaultSignals()` 原值（`0-4` / 0 / -2 / 2000 / 0 / 10 / 20 / 1.5）、`Config` 在 `Thresholds` 之后加 `Queue`/`Signals`、`LoadConfig` 预填加 `Queue: QueueCfg{Dir: defaultQueueDir}` 与 `Signals: DefaultSignals()`、`validate()` 的 switch 追加四条（`queue.dir` 空串 / `temp_scale` ≠ `\"0-4\"` / `scissors_sink >= scissors_active` / `bill_ratio_healthy >= bill_ratio_severe`），错误串含需求给的键名。测试 `TestLoadConfigDefaultsQueueAndSignals`、`TestLoadConfigReadsQueueAndSignals`、`TestLoadConfigRejectsBadQueueAndSignals`（4 子例）与 `minimalYAML` helper 按原文追加到 `config_test.go`，全 PASS。**守卫登记（reviewer B1）**：`DefaultSignals` 是导出包级函数，AST 守卫 `TestPackageExposesNoWriteFunctions`（`store_test.go:453`，精确集合）want 插入 `\"DefaultSignals\"`（`\"Calibrate\"` 之后、`\"DefaultThresholds\"` 之前）⇒ **26 项**，`-run ExposesNoWrite` 两条 PASS。",
+      "`configs/hestia.yaml`：`storage` 段之后加 `queue` 段、文件末尾加 `signals` 段，注释按需求原文；`config_version` 由 `\"2026-09-03\"` 递增为 `\"2026-09-05\"`，头部变更记录加一行 `# 2026-09-05（M2a 的 TASK-001）：加 queue 与 signals 段。`。既有 `TestShippedConfigLoadsAndIsCalibrated`（`config_test.go:374`）的 `:387` 那行 `assert.Equal(t, \"2026-09-03\", cfg.ConfigVersion, …)` 改为 `\"2026-09-05\"`（reviewer B5：不改必红），其余仍绿，并**追加两条断言**：仓库 yaml 载入后 `cfg.Queue.Dir == \"queue/hestia\"`、`cfg.Signals == DefaultSignals()`（yaml 与代码预填各写一份，不一致就是漂移，这条把它钉住）。",
+      "AD-5（reviewer B7 订正：`writeHestiaYAML*` 在 `hestia_test.go` 零处使用，真走到 `hestia.Ingest` 的用例用 `withConfig` 内联 yaml）：`cmd/atlas/hestia_test.go` 的 `hestiaCfg` 闭包（`:1225-1235`）与 `wiringHestiaCfg`（`:1342-1352`）两处 yaml 在 `storage` 段后加 `queue:\\n  dir: `+filepath.Join(t.TempDir(), \"queue\")`，各加一行理由注释（M2a 的 TASK-005 起 `Ingest` 会在 `queue.dir` 下建四个目录；预填值 `queue/hestia` 相对进程 cwd，`go test` 的 cwd 是包目录 ⇒ `TestHestiaIngestWiresNotify` 真入库会写 `cmd/atlas/queue/hestia/pending/2025-12-annual.json`）。`go test ./cmd/atlas/... -count=1` 仍全绿；判据（reviewer B8，git 不跟踪空目录，`git status` 对空目录恒空）：本任务之后 `find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\)` 输出为空。"
+    ],
+    "boundary": [
+      "`Signals` 的 JSON 形态守卫（003 的契约 `thresholds.signals` 直接 `json.Marshal` 它）：新增 `TestSignalsJSONKeys`——`json.Marshal(DefaultSignals())` 解析成 `map[string]any` 后键集合 `ElementsMatch` 恰为 `scissors_active`、`scissors_sink`、`hh_mlt_monthly_warm`、`hh_short_monthly_warm`、`bill_ratio_healthy`、`bill_ratio_severe`、`corp_mlt_short_expand` 七个（无 `temp_scale`、无 Go 字段名）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：三条新测试在实现之前必须以编译错误失败，把 `go test ./internal/hestia/ -run 'TestLoadConfig.*(Queue|Signals)' 2>&1 | head -5` 的输出（含 `cfg.Queue undefined`）记进 discovery 的 `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」；锚 `d27791c` 实测恰这两处）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（需求硬门槛 = 基线 96.6，背对背实测于锚 `d27791c`，AD-7）且 `go test ./cmd/atlas/ -cover` 不低于 **76.4**；报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat d27791c HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`；`store.go` 的 `Save` 函数体：`git diff d27791c HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\\\*Store) Save'` 必须为 **0**。`cmd/atlas/hestia.go` 不 import `path/filepath`（既有守卫 `hestia_test.go:116-124`）。注释里引用任务编号带 milestone 前缀：写 `M2a 的 TASK-001`。",
+      "**交付流程（AD-9，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-001-m2a ../wt-TASK-001-m2a master`（主分支是 **master** 不是 `main`）。\n2. 开工前先读 `context_from` 里各上游任务的 discovery（`.arcforge/discoveries/TASK-xxx.json`，在主仓库读）。提交用显式 pathspec（本任务 4 个文件），信息锚定 **`feat(TASK-001): M2a …`**——🔴 需求文档写的 `feat(M2a TASK-001):` **不匹配门禁**（`task-completed.sh:133/174` 只认 `^[a-z]+\\\\(TASK-001\\\\):`，AD-2），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `parse.go`/`extract.go`/`validate.go`/`fields.go` 与 `Save` 函数体、不得新增需求之外的导出符号、契约 JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。子代理回复不可采信，以 `git diff` 为准。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-001 master && git -C ../pre-TASK-001 merge --no-ff --no-commit task/TASK-001-m2a`；无冲突后拆掉预演树，通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动文件），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环（`transition blocked_clarification --json-field questions=...`）。\n6. `cd` 回主仓库写 discovery（`discovery TASK-001` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔就写 `provenance`）并 `task TASK-001 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-001.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-001-m2a`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-a",
+  "packages": [
+    "./internal/hestia",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/hestia/config.go",
+    "./internal/hestia/config_test.go",
+    "./configs/hestia.yaml",
+    "./internal/hestia/store_test.go",
+    "./cmd/atlas/hestia_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m2a-b",
+  "coverage_floor": 75,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "70bbc4730b2bae3250562002a19dd1ee6c9a35c8",
+    "discovery_sha256": "9747b7b46e40bd109e27eb9bfc98bce43b989f64f40046cd821cabb8c2fe8213",
+    "at": "2026-09-05T12:40:33Z"
+  }
+}

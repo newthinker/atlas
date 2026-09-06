@@ -1,0 +1,91 @@
+{
+  "task_id": "TASK-004",
+  "author": "dev-m2a-b",
+  "written_at": "2026-09-05T23:34:00Z",
+  "commit_sha": "418f23eab28c18f4f2452c4fca7e0376f6c0f87d",
+  "merged_master_sha": "057a91c5123c8440a2c0bcc49943b1c381805df0",
+  "branch": "task/TASK-004-m2a",
+  "key_findings": [
+    "需求原文的 queue.go 与五条测试可原样落地；WriteContract 复用 snapshot.go 的 writeAtomic（tmp 写 + rename，rename 失败会 os.Remove(tmp)），所以两种写失败形态（mkdir 层 / rename 层）都不留 .tmp 残留。",
+    "rename 层失败夹具（AD-4a）：把 <dir>/pending/<c.FileName()> 预建为目录，os.Rename(文件→目录) 在 macOS 返回 EISDIR，错误串为 `contract 2026-08-monthly.json: snapshot rename <path>: ...`；pending/ 里只剩那个预建目录。TASK-005 的「契约写失败」用例可直接照抄 TestWriteContractFailsWhenTargetIsDir 的夹具。",
+    "WriteContract 不依赖 EnsureQueueDirs：dir 不存在时自建 pending/ 即可写入，processing/done/failed 不归它建（TestWriteContractCreatesPendingWithoutEnsure）。",
+    "002 变异残留的六条子例（五个阈值相等边 + 混口径反向）全部并入一个表驱动用例 TestEvaluateThresholdEdges；票据比相等边用 10/100 与 20/100，bill/total*100 在 float64 下恰等于 10、20（实测 6 组备选值全部精确，无舍入落差）。",
+    "变异核验（在我私有 worktree 上逐个变异、跑完按 sha256 还原，主工作区未碰）：signals.go 五个比较符各变异一次（>=→>、<=→<、>=→>、<→<=、>=→>）与 contract.go 两处（AbsentFields 初始化 []string{}→nil、JSON() 去掉末尾 '\\n'）共 7 个变异体，7/7 KILLED，各由对应的单条子例/用例独家转红。",
+    "code-simplifier 子代理回复「同前。无动作」，但磁盘实改两处（以 git diff 为准）：queue.go 提取 sub/pending 两个局部变量；queue_test.go 提取 passingContract() 夹具（8 处调用）并去掉 strings import（assert.Contains 直接收字符串）。均为等价重构，用例名/子例名未变，两包测试与覆盖率不变，保留并并入同一 commit。",
+    "交付流程实撞：merge 请求 inbox 20 分钟无回执，按约定转 blocked_clarification 并把请求写进 questions[0]（16:38:14Z）；Leader 23:32Z 恢复后立即 merge（Leader 侧挂起约 7 小时）。我自己转回 in_progress，epoch 1 不变。",
+    "GitNexus 索引陈旧（last indexed ae088eb），impact/detect-changes 未跑，同 001–003。"
+  ],
+  "decisions": [
+    {
+      "decision": "boundary[2] 的 6 条 002 残留子例并入一个新用例 TestEvaluateThresholdEdges（表驱动），不散进既有用例",
+      "rationale": "DoD 允许「可并入既有用例」；六条子例守的是同一件事（阈值相等边），集中在一处让 -run 能一次跑齐，变异核验时每条子例独家转红也更易读。既有用例一行未改。"
+    },
+    {
+      "decision": "003 残留 (a)(b) 放 queue_test.go 并经 WriteContract 落盘后读文件断言，而不是只断言 c.JSON()",
+      "rationale": "DoD 明写「WriteContract 写出的文件末字节」；从落盘文件读回既覆盖 JSON() 的性质也覆盖 writeAtomic 没吞字节。变异 M6/M7 各被独家杀死证明断言真在守卫。"
+    },
+    {
+      "decision": "code-simplifier 两处等价重构全部保留",
+      "rationale": "以 git diff 核实：只动了本任务 4 个文件中的 2 个，用例名/子例名/断言未变，两包全绿、覆盖率 96.6/76.4 不变，gofmt/vet 干净。"
+    },
+    {
+      "decision": "TestWriteContractEndsWithNewline 额外断言倒数第二字节不是 '\\n'",
+      "rationale": "DoD 只要求末字节是换行；多加一条防「两个换行」——JSON() 已带一个，WriteContract 若再 append 会破坏 done/ 与回放的逐字节 cmp，而只查末字节挡不住它。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/queue.go",
+    "internal/hestia/queue_test.go",
+    "internal/hestia/signals_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "func hestia.EnsureQueueDirs(dir string) error",
+      "consumers": "TASK-005 Ingest 入口建齐 pending/processing/done/failed（MkdirAll 0o755，幂等）；错误前缀 `contract queue dir <dir>/<sub>`"
+    },
+    {
+      "symbol": "func hestia.WriteContract(dir string, c Contract) (path string, err error)",
+      "consumers": "TASK-005 Save 后写契约；TASK-006 contract emit 非 --stdout 路径。先 c.JSON()、MkdirAll(<dir>/pending)、writeAtomic(<dir>/pending/<c.FileName()>)；同名覆盖、done/ 不动；错误串含 `contract <FileName>`（rename/写失败）或 `contract queue dir <dir>`（mkdir 失败）；失败不留 .tmp"
+    },
+    {
+      "symbol": "写失败夹具（供 TASK-005 复用）：EnsureQueueDirs(dir) 后 os.MkdirAll(filepath.Join(dir, \"pending\", c.FileName()), 0o755)，再调用者即得 rename 层错误（EISDIR）",
+      "consumers": "TASK-005 TestIngest…ContractWriteFails（AD-4a）"
+    },
+    {
+      "symbol": "非导出 queueStates = [pending processing done failed]",
+      "consumers": "包内；顺序即状态机顺序"
+    },
+    {
+      "symbol": "守卫：TestPackageExposesNoWriteFunctions want 34 项（+EnsureQueueDirs 在 Discover 之后、+WriteContract 在 Validate 之后）；TestStoreExposesNoWriteMethods want 14 项不变",
+      "consumers": "本 Sprint 终值（AD-10）；005/006 不再新增导出符号"
+    },
+    {
+      "symbol": "queue_test.go helper：passingContract() Contract（contractObs + Passed:true + contractCfg）",
+      "consumers": "包内测试"
+    }
+  ],
+  "provenance": "code-simplifier 子代理的两处等价重构（queue.go 局部变量提取、queue_test.go passingContract 夹具）已并入 418f23ea；其余全部由 dev-m2a-b 手写。",
+  "verification": {
+    "sampled_on": "master 057a91c5123c8440a2c0bcc49943b1c381805df0（merge 后主仓库，最后一次改动之后统一重采，2026-09-05T23:33Z）",
+    "red_phase": "实现前 `go test ./internal/hestia/ -run 'TestEnsureQueueDirs|TestWriteContract' 2>&1 | head -5` 输出：`internal/hestia/queue_test.go:30:21: undefined: EnsureQueueDirs`；`:36:21: undefined: EnsureQueueDirs`；`:41:21: undefined: EnsureQueueDirs`；`:44:15: undefined: WriteContract`",
+    "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；-run 'TestEnsureQueueDirs|TestWriteContract|ExposesNoWrite|TestEvaluateThresholdEdges|TestFieldNamesAppearOnlyInFieldsGo' 顶层 14 条 --- PASS、0 FAIL（TestEvaluateThresholdEdges 六子例全 PASS）",
+    "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.4%（门槛 76.4）@ 057a91c5123c8440a2c0bcc49943b1c381805df0",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 恰 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，无新增）",
+    "frozen_files": "git diff --stat d27791c 057a91c5 -- parse.go extract.go validate.go fields.go go.mod go.sum 为空；Save 函数体 grep 计数 0；cmd/atlas/hestia.go 不 import path/filepath；find internal/hestia cmd/atlas -type d -name pending/queue 为空",
+    "guards": "AST want 34 / reflect want 14（grep 计数）；两条 ExposesNoWrite PASS",
+    "numstat": "git show --numstat 418f23ea：queue.go 44/0、queue_test.go 181/0、signals_test.go 34/0、store_test.go 1/1；自 d27791c 新增 Test 函数 queue_test.go 10、signals_test.go 9（其中 8 条来自 TASK-002，本任务 +1 TestEvaluateThresholdEdges）",
+    "mutation": "7/7 KILLED（M1 active >=→>、M2 sink <=→<、M3 warm >=→>、M4 healthy <→<=、M5 severe >=→>、M6 AbsentFields→nil、M7 去末尾换行），各由对应子例/用例独家转红；被变异文件按 sha256 还原（signals.go 645ac15837f9fe3c…、contract.go ce9347f5cbbcc118…）",
+    "done_criteria_to_tests": {
+      "functional[0]": "TestEnsureQueueDirsCreatesStateMachine / TestWriteContractLandsInPending / TestWriteContractOverwritesPending / TestWriteContractLeavesDoneAlone / TestWriteContractFailsLoudly",
+      "functional[1]": "store_test.go TestPackageExposesNoWriteFunctions want 34（EnsureQueueDirs 在 Discover 后 Evaluate 前；WriteContract 在 Validate 后）；两条 ExposesNoWrite PASS",
+      "boundary[0]": "TestWriteContractFailsWhenTargetIsDir（错误含 contract；pending/ 只剩预建目录，无 .tmp）",
+      "boundary[1]": "TestEnsureQueueDirsRejectsFile（含 contract queue dir）/ TestWriteContractCreatesPendingWithoutEnsure",
+      "boundary[2]": "signals_test.go TestEvaluateThresholdEdges 六子例（M1–M5 KILLED）；queue_test.go TestWriteContractEndsWithNewline / TestWriteContractAbsentFieldsEmptyArray（M6/M7 KILLED）",
+      "error_handling[0]": "本 verification.red_phase",
+      "non_functional": "本 verification 各项 + 交付流程按 AD-9（worktree / code-simplifier / 预演 merge / Leader merge / master 重采）"
+    },
+    "not_run": "GitNexus impact / detect-changes（索引陈旧，同 001–003）"
+  }
+}

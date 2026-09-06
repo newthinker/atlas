@@ -1,0 +1,177 @@
+{
+  "task_id": "TASK-005",
+  "author": "dev-m2a-a",
+  "written_at": "2026-09-05T23:53:00Z",
+  "commit_sha": "dca854d92fd49236c1a246d085eafd57b5184616",
+  "merged_master_sha": "f2079584e0df8799bc37f1b7406aa86decb7a23a",
+  "branch": "task/TASK-005-m2a",
+  "key_findings": [
+    "需求规定的成功打印行 `<period> contract → <path>` 以 period 开头，而 ingest_test.go 既有 helper outPeriods 的不变量是「每条候选恰打一行且以 period 开头」：接线后每条入库候选被数两次，TestIngestContinuesAfterOneFailure / TestIngestProcessesOldestFirst / TestIngestOnlyPeriodFiltersCandidates 三条既有测试转红。打印格式按需求不改，改 outPeriods 跳过含 ` contract → ` 的行（正则捕获行尾，Contains 判断）。",
+    "首轮实现覆盖率 96.4（低于门槛 96.6）：Revision 路径（PriorPublishedAt 调用与 Supersedes 赋值）与 Ingest 入口 EnsureQueueDirs 失败分支没有测试。补 TestIngestRevisionContractCarriesSupersedes（先 Save 一条同期更旧 published_at 的观测，再 Ingest 夹具 ⇒ Revision，契约 is_revision=true、supersedes_published_at=2026-01-01）与 TestIngestRejectsUnusableQueueDir（queue.dir 落在普通文件之下，fatalFetcher 证明在 I/O 之前）后回到 96.6。PriorPublishedAt 的错误分支仍无测试可达（Save 成功后无法让同一 *Store 的下一条查询失败），是覆盖率里剩下的 1 条语句。",
+    "go vet 拒绝 `string(bitemporal.OutOfOrder)`（Verdict 是 int，会转成单 rune）；Out 打印用的是 %s ⇒ Verdict 有 String()，断言改用 `.String()`。",
+    "写失败夹具按 AD-4a：EnsureQueueDirs 后把 pending/2025-12-annual.json 预建为目录，writeAtomic 的 os.Rename 返回 EISDIR；错误串形如 `hestia ingest 2025-12/annual (…): contract: contract 2025-12-annual.json: snapshot rename …`——`snapshot rename` 文案来自 writeAtomic（reviewer S4，接受不改，007 §A 记一句）。",
+    "P1 照发的机制不需要改循环：循环只认 isNotifyError，contractError 是普通错误 ⇒ 走既有 P1 分支；runRow 加一个 case 让 outcome 保持 RunIngested 并记 Error 首行（Stage 已由 fail(\"contract\") 填好）。实测该用例 sender.texts 恰 1 条、以 [P1] 开头、含 contract、不含 信号 活化；newestRun 的 Outcome=ingested、Stage=contract、Notified=true。",
+    "GitNexus detect-changes 仍不可用（索引陈旧 + DB 版本不匹配，同 001–004）。"
+  ],
+  "decisions": [
+    {
+      "decision": "outPeriods 跳过含 ` contract → ` 的行；需求规定的打印格式 `%s contract → %s` 原样保留",
+      "rationale": "DoD functional[1] 把打印格式写死；outPeriods 是测试内部 helper，它的「每候选一行」不变量在需求加第二行后已不成立。改 helper 比改需求规定的输出面更小；三条既有测试的断言与顺序语义一个字没动。"
+    },
+    {
+      "decision": "补两条覆盖率测试（Revision supersedes、不可用 queue.dir），不动实现",
+      "rationale": "需求硬门槛 96.6；两个未覆盖分支都是本任务新增的真实路径（Revision 是 M2a 契约的核心场景之一），值得钉住而不是删代码凑数。"
+    },
+    {
+      "decision": "TestIngestNotifyFailureIsLoudButNotCascading 改用 `cfg := ingestCfg(t)` 变量并追加契约存在性断言",
+      "rationale": "DoD boundary[0]：要读 cfg.Queue.Dir 下的文件必须持有同一份 cfg；既有断言与错误链形态未动。"
+    },
+    {
+      "decision": "OutOfOrder 用例预置更晚 published_at（2026-02-01）的同期观测，Revision 用例预置更早（2026-01-01）的，都经 contractObs()+passing() 直接 Save",
+      "rationale": "夹具 PubDate 是 2026-01-15；两侧各放一个日期即可分别触发 OutOfOrder 与 Revision，且复用 003 交付的 helper 不再造夹具。"
+    },
+    {
+      "decision": "code-simplifier 报「无改动」，git diff 核实前后 diff --stat 一致，未并入任何改动",
+      "rationale": "子代理回复不可采信，以 diff 为准；本次两者一致。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/notify.go",
+    "internal/hestia/ingest_test.go",
+    "internal/hestia/notify_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "Ingest 入口守卫：d.Cfg.Queue.Dir == \"\" ⇒ `hestia ingest: queue.dir must not be empty`；EnsureQueueDirs 失败 ⇒ `hestia ingest: contract queue dir …`；两者都在 Discover/Fetch 之前",
+      "consumers": "TASK-006 cmd 侧：配置形态错误在任何 I/O 之前返回；cmd/atlas 真走到 Ingest 的用例已由 001 补 queue.dir"
+    },
+    {
+      "symbol": "非导出 contractError{err} / isContractError(err)",
+      "consumers": "包内；runRow 对它 outcome 保持 RunIngested、Error 记首行、Stage=contract；hestia_runs 因此能区分「入库但契约没写出去」（TASK-006 status/emit 可据 stage 提示补发）"
+    },
+    {
+      "symbol": "ingestOne 契约段：仅 Table==observations && Verdict ∈ {New, Revision}；Revision 取 Store.PriorPublishedAt 填 Supersedes；SourceURL = 候选 URL；成功打印 `<period> contract → <path>`",
+      "consumers": "TASK-006 contract emit 走 Store.Current + BuildContract{Replay:true}，不经此段；007 §A 记 A9（OutOfOrder 不写契约）"
+    },
+    {
+      "symbol": "renderP2(obs Observation, out Outcome, temp Temperature) string；非导出 dot(Signal) string",
+      "consumers": "包内唯一调用点在 ingestOne；信号行位于锚字段行之后、article 行之前，格式 `信号 活化%s 楼市%s 消费%s 信贷%s · 温度 %d/%d`；Duplicate/OutOfOrder 打 温度 0/0"
+    },
+    {
+      "symbol": "ingest_test.go helper：pendingContracts(t, cfg) []string；fatalFetcher{t}（Get 即 t.Fatal）；ingestCfg 现含 ConfigVersion=\"test\"、Queue.Dir=t.TempDir()、Signals=DefaultSignals()",
+      "consumers": "包内测试；TASK-006 若在 internal/hestia 内写用例可复用"
+    }
+  ],
+  "verification": {
+    "sampled_on": "master f2079584e0df8799bc37f1b7406aa86decb7a23a（merge 后主仓库，最后一次改动之后统一重采）",
+    "red_phase": "实现前 `go test ./internal/hestia/ -run 'TestIngestWritesContract|TestIngestNoContract|TestIngestContractWrite|TestRenderP2CarriesSignals|TestIngestRejectsEmptyQueueDir' 2>&1 | tail -8` 输出：`internal/hestia/notify_test.go:155:79: too many arguments in call to renderP2 / have (Observation, Outcome, Temperature) / want (Observation, Outcome)`；`:178:91` 同；`FAIL … [build failed]`",
+    "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；本任务相关 11 条 --- PASS（WritesContractOnObservation / NoContractOnPending / NoContractOnDuplicate / NoContractOnOutOfOrder / ContractWriteFailureKeepsRowAndSkipsP2 / RejectsEmptyQueueDir / RejectsUnusableQueueDir / RevisionContractCarriesSupersedes / NotifyFailureIsLoudButNotCascading / RenderP2CarriesSignals / RenderP2DuplicateSaysValuesNotWritten）；既有 TestIngestRecordsIngestedRun 等不受影响；三守卫 PASS，AST want 34 不变",
+    "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.4%（门槛 76.4）@ f2079584e0df8799bc37f1b7406aa86decb7a23a",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 恰 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，无新增）",
+    "stray_dirs": "find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\) 输出为空",
+    "frozen_files": "git diff --stat d27791c f2079584 -- parse.go extract.go validate.go fields.go go.mod go.sum 为空；Save 函数体 grep 计数 0；cmd/atlas/hestia.go 不 import path/filepath",
+    "numstat": "git show --numstat dca854d9：ingest.go 60/2、ingest_test.go 200/5、notify.go 20/4、notify_test.go 16/7",
+    "done_criteria_to_tests": {
+      "functional[0]": "TestIngestRejectsEmptyQueueDir（fatalFetcher 证明 Fetch 未被调用）、TestIngestRejectsUnusableQueueDir、TestIngestWritesContractOnObservation（四子目录）；ingestCfg 三字段；:199 直建 Config 补 Queue；find 为空",
+      "functional[1]": "WritesContractOnObservation / NoContractOnPending / NoContractOnDuplicate / NoContractOnOutOfOrder（Verdict 行含 OutOfOrder、countRows==2、pending 空、P2 含 温度 0/0）/ RevisionContractCarriesSupersedes；encoding/json import 已补",
+      "functional[2]": "TestIngestContractWriteFailureKeepsRowAndSkipsP2（AD-4a 夹具；err 含 contract；countRows==1；sender.texts 恰 1 条 [P1] 含 contract 不含 信号 活化；newestRun Outcome=ingested、Stage=contract、Error 含 contract、Notified=true）",
+      "functional[3]": "TestRenderP2CarriesSignals；7 处调用补 Temperature{}；TestRenderP2DuplicateSaysValuesNotWritten 追加 温度 0/0；notify.go 头注释已改",
+      "boundary[0]": "TestIngestNotifyFailureIsLoudButNotCascading 追加：pending/2025-12-annual.json 仍在且 json.Unmarshal 成功、period=2025-12",
+      "error_handling[0]": "本 verification.red_phase；实现后全包绿",
+      "non_functional": "本 verification 各项 + 交付流程按 AD-9"
+    },
+    "not_run": "GitNexus detect-changes（索引陈旧 + DB 版本不匹配，同 001–004）"
+  },
+  "review_fix": {
+    "round": 1,
+    "reason_class": "dod_defect",
+    "from": "test-m2a-b 变异 M8（高）/ M4（低）",
+    "fix_commit_sha": "f743d2f04a400095a695833b43ecca3804e93fca",
+    "fix_branch": "task/TASK-005-m2a-fix",
+    "merged_master_sha": "fe6a80993930da8d830fcfa45185b586d43f2983",
+    "files_modified": [
+      "internal/hestia/ingest_test.go"
+    ],
+    "implementation_changed": false,
+    "fix_items": {
+      "M8": "TestIngestWritesContractOnObservation 注入 fakeSender 跑真实 Ingest（annualFetcher，2025 年报），断言 P2 含「信号 活化🔴 楼市🔴 消费🔴 信贷🟡 · 温度 0/4」（与 002 golden 2025 年报 红/红/红/黄 一致）。此前主路径接线没有 Ingest 级断言，变异「ingestOne 丢弃 Evaluate 结果」套件仍全绿。",
+      "M4": "TestIngestContractWriteFailureKeepsRowAndSkipsP2 加 assert.NotContains(err.Error(), \"contract: contract:\")，钉住 contractError.Error() 不带前缀（阶段前缀由 wrap 给，DoD functional[2]）。"
+    },
+    "mutation_check": {
+      "method": "在隔离 worktree ../wt-TASK-005-m2a-fix 内对 ingest.go 各变异一次，跑对应用例，然后 git checkout 还原并比对 sha256 与原文一致；主工作区未碰",
+      "M8": "`temp = Evaluate(obs, d.Cfg.Signals)` → `_ = Evaluate(...)` ⇒ TestIngestWritesContractOnObservation FAIL：实际 P2 打「信号 活化⚪ 楼市⚪ 消费⚪ 信贷⚪ · 温度 0/0」，不含期望行。KILLED",
+      "M4": "`func (e contractError) Error() string { return e.err.Error() }` → 加 \"contract: \" 前缀 ⇒ TestIngestContractWriteFailureKeepsRowAndSkipsP2 FAIL：错误串出现 `contract: contract: contract 2025-12-annual.json: …`。KILLED",
+      "result": "2/2 KILLED；正确实现上两条用例 PASS"
+    },
+    "verification": {
+      "sampled_on": "master fe6a80993930da8d830fcfa45185b586d43f2983（返工 merge 后主仓库重采）",
+      "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；TestIngestWritesContractOnObservation / TestIngestContractWriteFailureKeepsRowAndSkipsP2 PASS；三守卫 PASS",
+      "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.6%（门槛 76.4；006 合入后由 76.4 升到 76.6）@ fe6a80993930da8d830fcfa45185b586d43f2983",
+      "vet": "零输出",
+      "gofmt": "仅既有 cmd/atlas/backtest_test.go、crisis_test.go",
+      "frozen_files": "四个不动文件 + go.mod/go.sum 自 d27791c 无 diff；Save grep 0；hestia.go 不 import path/filepath；find pending/queue 为空",
+      "numstat": "git show --numstat f743d2f0：ingest_test.go 10/1"
+    },
+    "decisions": [
+      {
+        "decision": "M8 的断言放进既有 TestIngestWritesContractOnObservation（注入 fakeSender），不另开用例",
+        "rationale": "fix_items 明写「或新增用例」二选一；该用例已跑真实 Ingest 与年报夹具，只差一个 sender，加两行断言即得 Ingest 级主路径接线守卫，且失败时与契约内容断言同处一屏。"
+      },
+      {
+        "decision": "只加断言，不改实现；code-simplifier 报无改动，diff 核实一致",
+        "rationale": "reason_class=dod_defect：缺的是断言不是行为；实现已被两处变异实测证明正确。"
+      }
+    ]
+  },
+  "review_fix_round2": {
+    "round": 2,
+    "reason_class": "task_defect",
+    "from": "QA C1（CRITICAL）：实时路径契约 extracted_at 恒为空串",
+    "fix_commit_sha": "b9d351b198a40775369dae42170010a1b817af04",
+    "fix_branch": "task/TASK-005-m2a-fix2",
+    "merged_master_sha": "589835aa2f7373c5c650072411228ddb02d012b6",
+    "files_modified": [
+      "internal/hestia/ingest.go",
+      "internal/hestia/ingest_test.go",
+      "internal/hestia/CONTRACTS.md"
+    ],
+    "implementation_changed": true,
+    "cause": "Save 按值收 obs（store.go:739）、只给自己副本填 IngestedAt（:769）且 Outcome 不回传；ingestOne 用调用前的 obs 建 ContractInput ⇒ contract.go:113 的 ExtractedAt 取到 \"\"。回放路径经 Store.Current 读库有值，实时与回放契约形状不一致。需求原文 :1396 的接线片段自带「Save 后 obs 已带 IngestedAt」这个隐含前提；dev 照抄、验证者按 DoD 逐条核、007 终检只审改动文件，三道都没核实时路径该字段，此前零测试守卫。",
+    "fix_items": {
+      "C1": "ingestOne 的 New/Revision 分支在 Save 之后、BuildContract 之前经 d.Store.Current(ctx, period, periodType) 取回当前行，obs.Meta.IngestedAt = cur.Meta.IngestedAt；err 或 !ok 合并为一个分支 fail(\"contract\", contractError{cmp.Or(err, errors.New(\"just saved but not current\"))})。不动 Save 函数体、不改 Store。",
+      "C1-test": "TestIngestWritesContractOnObservation 加两条：extracted_at == s.Current(...).Meta.IngestedAt；实时契约与 Current + BuildContract{Replay:true, Report{Passed:true}, IsRevision: prior!=\"\", Supersedes: prior} 的回放契约除 generated_by 与 validation.checks 外 assert.Equal 逐键相同（可选项，已做）。",
+      "A10": "CONTRACTS.md §A 追加 A10（成因 / 修法 / 需求 :1396 隐含前提 / 三道未核 / 零守卫）；§B 在「返工」行后加「实时 vs 回放契约 diff 仅 generated_by/checks」一行。"
+    },
+    "red_phase": "修复前在返工 worktree 跑 `go test ./internal/hestia/ -run TestIngestWritesContractOnObservation`：FAIL，`expected: \"2026-09-06T03:37:37.976284Z\" actual: \"\"`（Messages: 实时契约 extracted_at 必须等于库里的 ingested_at（RFC3339Nano），不能是空串）；第二条逐键比对同样 FAIL 于 extracted_at。留痕 scratchpad dev-m2a-a-TASK-005-fix2-red.txt",
+    "mutation_check": {
+      "method": "隔离 worktree ../wt-TASK-005-m2a-fix2 内把 `obs.Meta.IngestedAt = cur.Meta.IngestedAt` 改为 `_ = cur`，跑用例，然后用副本还原并比对 sha256 与原文一致（第一次误用 git checkout 把修复一起退掉，重新应用后再核一次）；主工作区未碰",
+      "result": "FAIL（extracted_at 断言）⇒ KILLED 1/1；正确实现上 PASS"
+    },
+    "decisions": [
+      {
+        "decision": "Current 的两种失败（err / !ok）合并为一个分支，用 cmp.Or 取错误",
+        "rationale": "两个独立分支时 internal/hestia 覆盖率 96.5（低于硬门槛 96.6），一个分支 96.6。IngestDeps.Store 是 *Store 不可注入，Save 成功后无法让同一 Store 的下一条 Current 失败，该分支在测试里不可达——与 PriorPublishedAt 的错误分支是同一类。合并不改变行为：两种失败都走 contractError（数据在库、P1 照发、P2 不发）。"
+      },
+      {
+        "decision": "实时 vs 回放逐键相同的可选断言一并做",
+        "rationale": "它是 A10「M3 照 §B 回放样本写消费者」这个前提的直接守卫；SourceURL 两侧同值（实时传候选 URL，回放由 pbocArticleURL(ArticleID) 拼出，字面相同）所以能整体 assert.Equal。"
+      },
+      {
+        "decision": "未 spawn code-simplifier 子代理，本体审查",
+        "rationale": "Leader 派发时明令（本 sprint 子代理多次被挂起卡死）；改动 12 行实现 + 27 行测试 + 4 行文档，diff 逐行自审。"
+      }
+    ],
+    "verification": {
+      "sampled_on": "master 589835aa2f7373c5c650072411228ddb02d012b6（返工 2 merge 后主仓库重采）",
+      "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；TestIngestWritesContractOnObservation PASS；三守卫 PASS，AST want 34",
+      "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.6% @ 589835aa2f7373c5c650072411228ddb02d012b6",
+      "vet": "零输出",
+      "gofmt": "仅既有 cmd/atlas/backtest_test.go、crisis_test.go",
+      "frozen_files": "四个不动文件 + go.mod/go.sum 自 d27791c 无 diff；store.go 删除行 0、Save grep 0；hestia.go 不 import path/filepath；find pending/queue 为空",
+      "numstat": "git show --numstat b9d351b1：ingest.go 12/0、ingest_test.go 27/0、CONTRACTS.md 4/0"
+    },
+    "process_note": "merge 请求 03:39:28Z 发出 20 分钟无回执，03:59:35Z 按 Leader 指示转 blocked_clarification 写文件级信号；Leader 04:34Z 恢复（自述挂起约 55 分钟）后即 merge；04:35:09Z 我转回 in_progress。"
+  }
+}

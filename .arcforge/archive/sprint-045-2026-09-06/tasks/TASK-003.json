@@ -1,0 +1,72 @@
+{
+  "id": "TASK-003",
+  "title": "契约结构与 `BuildContract`（固定键序）；`Store.Current` / `Store.PriorPublishedAt` 只读；两条守卫登记",
+  "description": "对应需求文档 **TASK-003**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-003」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n新建 `internal/hestia/contract.go` / `contract_test.go`；`store.go` 在 `PrecedingAll` 之后**只新增**两个只读方法；`store_test.go` 加两条方法测试 + 三处守卫登记 + 一条键序守卫。`Signals` 的 json tag 已由 001 加好（AD-6），本任务**不改 `config.go`**。下游 004 消费 `Contract`（`JSON()`/`FileName()`）；005 消费 `BuildContract`/`ContractInput`/`PriorPublishedAt`；006 消费 `Current`/`PriorPublishedAt`/`BuildContract`。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/contract.go",
+    "internal/hestia/contract_test.go",
+    "internal/hestia/store.go",
+    "internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`contract.go` 按需求原文：`Contract`（17 个顶层字段、顺序照原文）、`ContractValidation`、`ContractCheck`（`Reason` `omitempty`）、`ContractThresholds`、`orderedValues`/`keyValue` + `MarshalJSON`、`ContractInput`、三常量、`pbocArticleURL`（🔴 需求叫 `articleURL`，与既有测试 helper `ingest_test.go:82` **同名同签名**会 `redeclared` 整包编译失败，reviewer B2 ⇒ 改名，`TestBuildContractMapsFields` 的 URL 断言不变）、`BuildContract`（纯函数）、`(Contract).JSON()`（`MarshalIndent` 两空格 + 末尾 `\\n`）、`(Contract).FileName()`。五条测试按原文（`TestBuildContractMapsFields`、`TestBuildContractRevisionAndExplicitURL`、`TestBuildContractReplay`、`TestContractJSONIsDeterministic`、`TestContractFileName`）+ `contractObs`/`contractCfg`/`f`/`orderedSubset` helper 全 PASS（`contract_test.go` **不 import `context`**——需求 import 块多写了它、五条用例无一使用，reviewer B3；import 按需增删）；`contract.go` 里业务字段名字面量 0 个（`TestFieldNamesAppearOnlyInFieldsGo` PASS）。",
+      "`store.go` 在 `PrecedingAll` 之后追加 `Current(ctx, period, periodType) (Observation, bool, error)`（读 `viewCurrent`，复用 `scanObservation` 与 `slices.Concat(metaColumns, fieldOrder)`，不存在 ⇒ `false, nil`）与 `PriorPublishedAt(ctx, period, periodType, before) (string, error)`（`MAX(published_at) … < before`，无 ⇒ `\"\"`）；`store.go` **只新增**：`git diff d27791c HEAD -- internal/hestia/store.go | grep -c '^-[^-]'` 必须为 **0**（`import` 若需增补也只许是 `+` 行）。`TestStoreCurrent`、`TestStorePriorPublishedAt` 按原文 PASS（夹具第二次 `Save` 改 `ArticleID`，沿 `TestSaveRevisionKeepsBothRows`）。",
+      "守卫按「登记而不是放宽」更新为精确集合（字母序插入）：reflect `TestStoreExposesNoWriteMethods`（`store_test.go:400`）want 加 `\"Current\"`（`\"Close\"` 后）、`\"PriorPublishedAt\"`（`\"PrecedingAll\"` 后）⇒ **14 项**；AST `TestPackageExposesNoWriteFunctions`（`:453`）want 加 `\"BuildContract\"`（`\"BackfillLoad\"` 后）、`\"Store.Current\"`（`\"Store.Close\"` 后）、`\"Store.PriorPublishedAt\"`（`\"Store.PrecedingAll\"` 后）、以及 **`\"Contract.FileName\"`、`\"Contract.JSON\"`**（导出类型上的导出方法同样被 `store_test.go:437-441` 收进导出面，reviewer B4；放 `\"Calibrate\"` 之后）⇒ **32 项**（001/002 已登记 `DefaultSignals`/`Evaluate`）。两条守卫 PASS。"
+    ],
+    "boundary": [
+      "顶层键序守卫（spec §2.2；`Contract` 是结构体，字段顺序一旦被重排 `MarshalIndent` 会静默跟着变）：新增 `TestContractJSONTopLevelKeyOrder`——对 `JSON()` 输出逐行扫描缩进恰为两空格的 `\"<key>\":` 行，收集到的顶层键顺序**恰等于** `schema_version, period, period_type, published_at, source_url, article_id, caliber_version, is_revision, supersedes_published_at, extracted_at, extractor, generated_by, absent_fields, units, validation, thresholds, data`（17 个）。`data` 段键序沿原文 `orderedSubset` 断言。",
+      "`PriorPublishedAt` 不跨 `period_type` 串：同 `period=2026-12` 先 `Save` 一条 `annual`（`published_at` 更早、不同 `ArticleID`）再查 `monthly` 的 prior ⇒ `\"\"`；`Current` 对 12 月月报与年报各取各的行。补一条测试（可并入 `TestStorePriorPublishedAt` 子例）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/hestia/ -run 'TestBuildContract|TestContract|TestStoreCurrent|TestStorePriorPublishedAt' 2>&1 | head -5` 在实现前输出 `undefined: BuildContract`，记进 discovery `verification`。`Current`/`PriorPublishedAt` 的查询错误带 `hestia store current`/`hestia store prior published_at` 前缀（原文），用关库后调用（`s.Close()` 再查）证一次错误传播并断言前缀。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」；锚 `d27791c` 实测恰这两处）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（需求硬门槛 = 基线 96.6，背对背实测于锚 `d27791c`，AD-7）且 `go test ./cmd/atlas/ -cover` 不低于 **76.4**；报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat d27791c HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`；`store.go` 的 `Save` 函数体：`git diff d27791c HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\\\*Store) Save'` 必须为 **0**。`cmd/atlas/hestia.go` 不 import `path/filepath`（既有守卫 `hestia_test.go:116-124`）。注释里引用任务编号带 milestone 前缀：写 `M2a 的 TASK-003`。",
+      "**交付流程（AD-9，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-003-m2a ../wt-TASK-003-m2a master`（主分支是 **master** 不是 `main`）。\n2. 开工前先读 `context_from` 里各上游任务的 discovery（`.arcforge/discoveries/TASK-xxx.json`，在主仓库读）。提交用显式 pathspec（本任务 4 个文件），信息锚定 **`feat(TASK-003): M2a …`**——🔴 需求文档写的 `feat(M2a TASK-003):` **不匹配门禁**（`task-completed.sh:133/174` 只认 `^[a-z]+\\\\(TASK-003\\\\):`，AD-2），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `parse.go`/`extract.go`/`validate.go`/`fields.go` 与 `Save` 函数体、不得新增需求之外的导出符号、契约 JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。子代理回复不可采信，以 `git diff` 为准。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-003 master && git -C ../pre-TASK-003 merge --no-ff --no-commit task/TASK-003-m2a`；无冲突后拆掉预演树，通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动文件），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环（`transition blocked_clarification --json-field questions=...`）。\n6. `cd` 回主仓库写 discovery（`discovery TASK-003` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔就写 `provenance`）并 `task TASK-003 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-003.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-003-m2a`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-a",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/contract.go",
+    "./internal/hestia/contract_test.go",
+    "./internal/hestia/store.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "merge 请求两次无回执（14:32Z、14:56Z，inbox 疑似丢失，写此文件级信号）：请把 task/TASK-003-m2a 的 commit 789989bbfeb0d61d29a269727efb5c7a8a78c606（父 = master 9e9140dd989adde515b73910af264aa6981c323e，预演 merge rc=0 无冲突）merge 进 master，并在 answer 里给我 merge 后的 master 全 sha。我随即在 master 重采、写 discovery、转 dev_done。这不是 DoD 疑问，是交付流程步骤 4「等 merge 进 master」被卡住。",
+      "asked_at": "2026-09-05T15:56:55Z",
+      "answer": null
+    }
+  ],
+  "verifier": "test-m2a-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "61403387b4e7a8ed33dd0b136fe0f7a87af4c346",
+    "discovery_sha256": "999c2cf8356a9576f5e32a496a270d3b4fd3962e08367a8edc56fcb413b1fc44",
+    "at": "2026-09-05T16:01:57Z"
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "id": "TASK-005",
+  "title": "ingest 接线：入口建齐队列 + 空 `queue.dir` 守卫；`Save` 后写契约再发 P2，写失败 `stage=contract`（`contractError`）；P2 加信号行",
+  "description": "对应需求文档 **TASK-005**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-005」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n改 `internal/hestia/ingest.go`、`notify.go`，测试 `ingest_test.go`、`notify_test.go`。三处与需求原文的偏离都有裁决：写失败夹具改「目标名预建为目录」（AD-4a）、写失败的 outcome/P1 判定（AD-4b，🔴 人类在 dod-gate 已看过）、空 `Queue.Dir` 入口报错（AD-5）。消费 002（`Evaluate`）、003（`BuildContract`/`ContractInput`/`PriorPublishedAt`）、004（`EnsureQueueDirs`/`WriteContract`）；下游 007 的 §A5/§A6 措辞以本任务实测为准。",
+  "module": "hestia",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/notify.go",
+    "internal/hestia/ingest_test.go",
+    "internal/hestia/notify_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`Ingest` 入口（`d.Out` 判空之后、`OnlyPeriod` 校验旁，任何 I/O 之前）：`d.Cfg.Queue.Dir == \"\"` ⇒ `errors.New(\"hestia ingest: queue.dir must not be empty\")`（AD-5：`EnsureQueueDirs(\"\")` 会在进程 cwd 建目录）；然后 `EnsureQueueDirs(d.Cfg.Queue.Dir)`，失败 ⇒ `fmt.Errorf(\"hestia ingest: %w\", err)`。`ingestCfg` 按原文加 `ConfigVersion: \"test\"`、`Queue: QueueCfg{Dir: t.TempDir()}`、`Signals: DefaultSignals()`；`ingest_test.go:199` 直建 `Config{}` 的用例补 `Queue: QueueCfg{Dir: t.TempDir()}`。新增 `TestIngestRejectsEmptyQueueDir`：错误含 `queue.dir`，且 `Fetch` 未被调用（用一个被调用即 `t.Fatal` 的 fetcher）。本任务之后 `find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\)` 输出为空（git 不跟踪空目录，`git status` 对此恒空，reviewer B8）。",
+      "`ingestOne` 在 Verdict 打印行之后、P2 之前按原文插入契约段：**`out.Table == TableObservations && (out.Verdict == bitemporal.New || out.Verdict == bitemporal.Revision)`**（AD-14，reviewer S2：需求写的 `!= Duplicate` 会让 **OutOfOrder**——更旧 `published_at` 迟到、`Save` 同样入权威表但不是 current 行——用旧数据覆盖 `pending/` 里更新的契约，违背「最新的赢」；OutOfOrder 不写契约、不算温度，P2 照旧打 `温度 0/0`）⇒ `ContractInput{Obs: obs, Report: rep, SourceURL: c.URL, IsRevision: out.Verdict == bitemporal.Revision}`；Revision ⇒ `d.Store.PriorPublishedAt(ctx, period, periodType, obs.Meta.PublishedAt)` 填 `Supersedes`；`WriteContract(d.Cfg.Queue.Dir, BuildContract(in, d.Cfg))` 成功打印 `%s contract → %s`；然后 `temp = Evaluate(obs, d.Cfg.Signals)`。三条测试按原文 PASS：`TestIngestWritesContractOnObservation`（含四子目录已建）、`TestIngestNoContractOnPending`、`TestIngestNoContractOnDuplicate`；**新增 `TestIngestNoContractOnOutOfOrder`**：先 `s.Save` 一条同期（`2025-12/annual`）、`PublishedAt` 晚于夹具、不同 `ArticleID` 的观测，再 `Ingest` ⇒ Verdict 行打 `OutOfOrder`、`countRows == 2`、`pending/` 为空、P2 含 `温度 0/0`。`ingest_test.go` 补 `encoding/json` import（reviewer S1）。",
+      "写失败判定（AD-4b）：新增 `contractError{err}`（与 `notifyError` 同形态：`Error()` 直接返回 `e.err.Error()`——阶段前缀由 `wrap` 给，不要打成 `contract: contract:`；`Unwrap`）与 `isContractError`；`PriorPublishedAt`/`WriteContract` 失败一律 `fail(\"contract\", contractError{err})`。`runRow`：`isContractError(err)` ⇒ `Outcome` **保持 `RunIngested`**、`Error = firstLineOf(err.Error())`、`Stage` 已是 `contract`；其它非 notify 错误仍记 `failed`（既有）。循环不改 ⇒ **P1 照发**。`TestIngestContractWriteFailureKeepsRowAndSkipsP2` 改写为：夹具 = `EnsureQueueDirs(cfg.Queue.Dir)` 后 `os.MkdirAll(filepath.Join(cfg.Queue.Dir, \"pending\", \"2025-12-annual.json\"), 0o755)`（AD-4a，让 `os.Rename` EISDIR）；断言 `require.Error` 且含 `contract`、`countRows(TableObservations) == 1`、`sender.texts` **恰 1 条**且 `strings.HasPrefix(texts[0], \"[P1]\")`、含 `contract`、**不含** `信号 活化`；`r := newestRun` 的 `Outcome == RunIngested`、`Stage == \"contract\"`、`Error` 含 `contract`、`Notified == true`（夹具 `fakeSender{}` 不返回错误；P1 自身失败走既有 `notify_error` 路径，不在本用例内）。`writeAtomic` 的 `snapshot write/rename` 文案会原样进错误串——接受不改（reviewer S4），007 §A 记一句。",
+      "`renderP2(obs Observation, out Outcome, temp Temperature) string`：锚字段行之后、`article` 行之前加一行 `信号 活化%s 楼市%s 消费%s 信贷%s · 温度 %d/%d`（`dot()`：🟢/🟡/🔴，其余 ⚪）；`notify.go:62-64` 头注释「四个冷热信号与综合温度尚未实现（等 M2）」改为描述信号行（AD-11）；既有 7 处 `renderP2(...)` 调用补第三参 `Temperature{}`；`TestRenderP2CarriesSignals` 按原文 PASS；既有 Duplicate 用例（`notify_test.go:86` 或 `:148`）追加断言含 `温度 0/0`（Duplicate 走 P2 但无契约无温度，需求既定）；`ingest.go` 的 P2 调用改为 `renderP2(obs, out, temp)`。"
+    ],
+    "boundary": [
+      "顺序守卫「契约在通知之前」的另一半：在既有 `TestIngestNotifyFailureIsLoudButNotCascading`（`ingest_test.go:1016`）追加断言——P2 发送失败时 `pending/2025-12-annual.json` **仍在**且可 `json.Unmarshal`（通知是投影，投影失败不撤契约）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：实现前 `go test ./internal/hestia/ -run 'TestIngestWritesContract|TestIngestNoContract|TestIngestContractWrite|TestRenderP2CarriesSignals|TestIngestRejectsEmptyQueueDir' 2>&1 | tail -8` 的输出（编译错误：`renderP2` 参数数 / `cfg.Queue` 在 `ingestCfg` 里的用法）记进 discovery `verification`；实现后 `go test ./internal/hestia/... -count=1` 全绿，既有 `TestIngestRecordsIngestedRun` 等不受影响。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」；锚 `d27791c` 实测恰这两处）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（需求硬门槛 = 基线 96.6，背对背实测于锚 `d27791c`，AD-7）且 `go test ./cmd/atlas/ -cover` 不低于 **76.4**；报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat d27791c HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`；`store.go` 的 `Save` 函数体：`git diff d27791c HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\\\*Store) Save'` 必须为 **0**。`cmd/atlas/hestia.go` 不 import `path/filepath`（既有守卫 `hestia_test.go:116-124`）。注释里引用任务编号带 milestone 前缀：写 `M2a 的 TASK-005`。",
+      "**交付流程（AD-9，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-005-m2a ../wt-TASK-005-m2a master`（主分支是 **master** 不是 `main`）。\n2. 开工前先读 `context_from` 里各上游任务的 discovery（`.arcforge/discoveries/TASK-xxx.json`，在主仓库读）。提交用显式 pathspec（本任务 4 个文件），信息锚定 **`feat(TASK-005): M2a …`**——🔴 需求文档写的 `feat(M2a TASK-005):` **不匹配门禁**（`task-completed.sh:133/174` 只认 `^[a-z]+\\\\(TASK-005\\\\):`，AD-2），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `parse.go`/`extract.go`/`validate.go`/`fields.go` 与 `Save` 函数体、不得新增需求之外的导出符号、契约 JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。子代理回复不可采信，以 `git diff` 为准。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-005 master && git -C ../pre-TASK-005 merge --no-ff --no-commit task/TASK-005-m2a`；无冲突后拆掉预演树，通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动文件），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环（`transition blocked_clarification --json-field questions=...`）。\n6. `cd` 回主仓库写 discovery（`discovery TASK-005` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔就写 `provenance`）并 `task TASK-005 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-005.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-005-m2a`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-a",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/notify.go",
+    "./internal/hestia/ingest_test.go",
+    "./internal/hestia/notify_test.go",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 2,
+  "questions": [
+    {
+      "q": "返工 2（QA C1）merge 请求 03:39:28Z 发出、20 分钟无回执，按约定写文件级信号：请把 task/TASK-005-m2a-fix2 的 commit b9d351b198a40775369dae42170010a1b817af04（父 = master 4d81143487187faf6fc324f7fdc32ad80a0f6ffd，预演 merge rc=0 无冲突，仅 ingest.go +12 / ingest_test.go +27 / CONTRACTS.md +4）merge 进 master，并在 answer 里给我 merge 后的 master 全 sha。我随即转回 in_progress、在 master 重采、追加 discovery review_fix_round2、转 dev_done。这不是 DoD 疑问，是交付流程「等 merge 进 master」被卡住。",
+      "asked_at": "2026-09-06T03:59:35Z",
+      "answer": null
+    }
+  ],
+  "verifier": "test-m2a-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "589835aa2f7373c5c650072411228ddb02d012b6",
+    "discovery_sha256": "ffd295ca38af9be4a122cb77604f75b2f0e052d17d14abe1c7ae7e3019f00cea",
+    "at": "2026-09-06T04:38:00Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    {
+      "id": "C1",
+      "severity": "critical",
+      "desc": "实时路径契约 extracted_at 恒为空串：Save 按值收 obs（store.go:739）、只给自己副本填 IngestedAt（:769）且 Outcome 不回传；ingestOne（ingest.go:428）用调用前的 obs 建 ContractInput ⇒ contract.go:113 取到 \"\"。修法（不动 Save 函数体）：ingestOne 的 New/Revision 分支在 Save 之后、BuildContract 之前经 d.Store.Current(ctx, obs.Meta.Period, obs.Meta.PeriodType) 取回当前行，把其 Meta.IngestedAt 填进 in.Obs.Meta.IngestedAt（Current 出错或 ok=false ⇒ fail(\"contract\", contractError{…})，与写失败同待遇）。",
+      "from": "qa-m2a verdict §1 C1"
+    },
+    {
+      "id": "C1-test",
+      "severity": "critical",
+      "desc": "TestIngestWritesContractOnObservation 加断言：契约 JSON 的 extracted_at 非空且 == s.Current(...) 返回的 Meta.IngestedAt（RFC3339Nano）；变异「不填 IngestedAt」必须由它独家转红。同一观测实时契约与 `contract emit` 回放契约除 generated_by/checks 外逐行相同可作第二断言（可选）。",
+      "from": "qa-m2a verdict §4"
+    },
+    {
+      "id": "A10",
+      "severity": "medium",
+      "desc": "CONTRACTS.md `## Sprint M2a` §A 追加 A10：实时契约 extracted_at 为空的成因（Save 按值、IngestedAt 不回传）与修法（Save 后经 Current 回读），并注明需求原文 :1396 接线片段自带该隐含前提、dev/verifier/007 三道未核实时路径该字段、零测试守卫（QA C1）。§B 表加一行「实时 vs 回放契约 diff 仅 generated_by/checks」。",
+      "from": "qa-m2a verdict §4"
+    }
+  ]
+}

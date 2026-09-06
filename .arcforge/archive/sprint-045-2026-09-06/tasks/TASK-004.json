@@ -1,0 +1,71 @@
+{
+  "id": "TASK-004",
+  "title": "队列写盘：`EnsureQueueDirs`（四目录幂等）、`WriteContract`（只写 `pending/`、同名覆盖、原子）+ AST 守卫登记",
+  "description": "对应需求文档 **TASK-004**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-004」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n新建 `internal/hestia/queue.go` / `queue_test.go`；`store_test.go` 只为 AST 守卫 want 加两项。复用 `snapshot.go` 的 `writeAtomic`（`:97-108`：先写 `.tmp` 再 `os.Rename`，rename 失败会删 tmp）。下游 005/006 消费 `EnsureQueueDirs`/`WriteContract`；005 的写失败夹具复用本任务 boundary 里的「目标名预建为目录」手法（AD-4a）。",
+  "module": "hestia",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/hestia/queue.go",
+    "internal/hestia/queue_test.go",
+    "internal/hestia/store_test.go",
+    "internal/hestia/signals_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`queue.go` 按需求原文：`queueStates`（`pending`/`processing`/`done`/`failed`）、`EnsureQueueDirs(dir) error`（`MkdirAll` 0o755，错误含 `contract queue dir`）、`WriteContract(dir, c Contract) (string, error)`（先 `c.JSON()`、`MkdirAll(<dir>/pending)`、`writeAtomic`，错误含 `contract <FileName>`）。五条测试按原文（`TestEnsureQueueDirsCreatesStateMachine`、`TestWriteContractLandsInPending`、`TestWriteContractOverwritesPending`、`TestWriteContractLeavesDoneAlone`、`TestWriteContractFailsLoudly`）全 PASS。",
+      "AST 守卫 want 加 `\"EnsureQueueDirs\"`（`\"Discover\"` 之后、`\"Evaluate\"` 之前）与 `\"WriteContract\"`（`\"Validate\"` 之后）⇒ **34 项**（本 Sprint 终值：+`BuildContract`/`Contract.FileName`/`Contract.JSON`/`DefaultSignals`/`EnsureQueueDirs`/`Evaluate`/`WriteContract`/`Store.Current`/`Store.PriorPublishedAt`，AD-10 订正后）；`ExposesNoWrite` 两条 PASS。"
+    ],
+    "boundary": [
+      "写失败无残留的第二种形态（AD-4a，005 直接复用）：新增 `TestWriteContractFailsWhenTargetIsDir`——`EnsureQueueDirs(dir)` 后把 `<dir>/pending/<c.FileName()>` **预建为目录**，`WriteContract` 返回错误（含 `contract`）、`pending/` 里没有 `.tmp` 残留（`os.ReadDir` 只剩那个目录）。这是 rename 层的失败，与 `FailsLoudly` 的 mkdir 层失败分开各证一次。",
+      "`EnsureQueueDirs` 对 `dir` 本身是普通文件 ⇒ 错误含 `contract queue dir`；`WriteContract` 对 `dir` 不存在但可建 ⇒ 自己 `MkdirAll(pending)` 成功写入（不要求先调 `EnsureQueueDirs`）。补进测试。",
+      "**顺带补 002 的变异残留（验证者 test-m2a-b 报告 M1–M5、M13：五个阈值的相等边与混口径反向无用例，实现本身正确）**：`signals_test.go` 加 6 条子例（可并入既有用例）——剪刀差 `d == ScissorsActive`（0）⇒ green、`d == ScissorsSink`（-2）⇒ red；月均 `v == HHMltMonthlyWarm`（2000，用 `_mom`）⇒ green；票据比 `r == BillRatioHealthy`（10%）⇒ yellow、`r == BillRatioSevere`（20%）⇒ red；混口径反向 `(FieldLoanBillMoM, FieldLoanCorpTotalYTD)` ⇒ `Credit == unknown`。守卫 want 不变；这是本任务 `writes` 含 `signals_test.go` 的唯一原因，除此之外不改它。**再补 003 的变异残留（test-m2a-b 报告 M3/M6）**，放 `queue_test.go`：(a) `WriteContract` 写出的文件**末字节是 `\\n`**（`JSON()` 末尾换行是 DoD 明写项，done/ 与回放 cmp 依赖它）；(b) `Values` 覆盖全部 `fieldOrder` 时写出的 JSON 里 `absent_fields` 是 `[]` 而不是 `null`（用 `for _, f := range fieldOrder { vals[f] = 1 }` 造夹具，`strings.Contains(raw, \"\\\"absent_fields\\\": []\")`）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/hestia/ -run 'TestEnsureQueueDirs|TestWriteContract' 2>&1 | head -5` 在实现前输出 `undefined: EnsureQueueDirs`，记进 discovery `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」；锚 `d27791c` 实测恰这两处）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（需求硬门槛 = 基线 96.6，背对背实测于锚 `d27791c`，AD-7）且 `go test ./cmd/atlas/ -cover` 不低于 **76.4**；报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat d27791c HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`；`store.go` 的 `Save` 函数体：`git diff d27791c HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\\\*Store) Save'` 必须为 **0**。`cmd/atlas/hestia.go` 不 import `path/filepath`（既有守卫 `hestia_test.go:116-124`）。注释里引用任务编号带 milestone 前缀：写 `M2a 的 TASK-004`。",
+      "**交付流程（AD-9，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-004-m2a ../wt-TASK-004-m2a master`（主分支是 **master** 不是 `main`）。\n2. 开工前先读 `context_from` 里各上游任务的 discovery（`.arcforge/discoveries/TASK-xxx.json`，在主仓库读）。提交用显式 pathspec（本任务 4 个文件），信息锚定 **`feat(TASK-004): M2a …`**——🔴 需求文档写的 `feat(M2a TASK-004):` **不匹配门禁**（`task-completed.sh:133/174` 只认 `^[a-z]+\\\\(TASK-004\\\\):`，AD-2），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `parse.go`/`extract.go`/`validate.go`/`fields.go` 与 `Save` 函数体、不得新增需求之外的导出符号、契约 JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。子代理回复不可采信，以 `git diff` 为准。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-004 master && git -C ../pre-TASK-004 merge --no-ff --no-commit task/TASK-004-m2a`；无冲突后拆掉预演树，通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动文件），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环（`transition blocked_clarification --json-field questions=...`）。\n6. `cd` 回主仓库写 discovery（`discovery TASK-004` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔就写 `provenance`）并 `task TASK-004 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-004.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-004-m2a`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-b",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/queue.go",
+    "./internal/hestia/queue_test.go",
+    "./internal/hestia/store_test.go",
+    "./internal/hestia/signals_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "【merge 请求·文件级信号】TASK-004 交付物已就绪，请 Leader 把 task/TASK-004-m2a @ 418f23eab28c18f4f2452c4fca7e0376f6c0f87d（基于 master 61403387b4e7a8ed33dd0b136fe0f7a87af4c346，单 commit，预演 --no-ff 无冲突）merge 进 master。inbox 请求 msg 59ab2df2 发于 2026-09-05T16:18:14Z，20 分钟无回执。merge 后我在 master 重采数字并转 dev_done（epoch 1）。",
+      "asked_at": "2026-09-05T16:38:14Z",
+      "answer": null
+    }
+  ],
+  "verifier": "test-m2a-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "057a91c5123c8440a2c0bcc49943b1c381805df0",
+    "discovery_sha256": "39c6be51f6d7cbdea617d734a1cec42dab6226997f516eb2a0de3eb8297b12ce",
+    "at": "2026-09-05T23:35:05Z"
+  }
+}

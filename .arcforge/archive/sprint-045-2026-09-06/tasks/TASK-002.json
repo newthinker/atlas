@@ -1,0 +1,67 @@
+{
+  "id": "TASK-002",
+  "title": "信号与温度 `Evaluate`（纯函数，三期 golden 钉住）+ AST 守卫登记 `Evaluate`",
+  "description": "对应需求文档 **TASK-002**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-002」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n新建 `internal/hestia/signals.go` / `signals_test.go`；改 `store_test.go` 只为 AST 守卫 want 插入 `\"Evaluate\"`（AD-3：与 003/004 串行的原因就在这个文件）。消费 001 的 `Signals` 与 `fields.go` 的 `Field*` 常量；下游 005 消费 `Evaluate`/`Temperature`/`Signal` 常量。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/signals.go",
+    "internal/hestia/signals_test.go",
+    "internal/hestia/store_test.go",
+    "internal/hestia/config_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`signals.go` 按需求原文：`Signal` 四常量（`green`/`yellow`/`red`/`unknown`）、`Temperature{Activation,Housing,Consumption,Credit Signal; Score,Known int}`、`Evaluate(obs Observation, cfg Signals) Temperature`、非导出 `evalActivation`/`evalThreshold`/`evalCredit`/`sameCaliberPair`/`monthlyAverage`/`monthsInPeriod`；只用 `Field*` 常量，无业务字段名字面量。六条测试按原文（`TestEvaluateGoldenThreePeriods` 三子例、`TestMonthlyAverageSources`、`TestMonthsInPeriod`、`TestEvaluateUnknownShrinksDenominator`、`TestEvaluateCreditRefusesMixedCaliber`、`TestEvaluateScissorsYellowScoresZero`）全 PASS。",
+      "AST 守卫 `TestPackageExposesNoWriteFunctions`（`store_test.go:453`）want 插入 `\"Evaluate\"`（`\"Discover\"` 之后、`\"HealthSummary\"` 之前，字母序）⇒ **27 项**（001 已登记 `DefaultSignals`）；`go test ./internal/hestia/ -run 'ExposesNoWrite|TestFieldNamesAppearOnlyInFieldsGo' -v` 三条 `--- PASS`。"
+    ],
+    "boundary": [
+      "边界补齐（需求测试只覆盖 `\"2022-xx\"`）：`monthsInPeriod` 对 `\"2022-13\"`、`\"2022-00\"`、`\"2022-7\"`（长度 ≠ 7）、未知 periodType（如 `\"weekly\"`）都返回 0；`monthlyAverage` 对「`_ytd` 在场但月数 0」返回 `ok=false`；`evalCredit` 对 `total == 0`（`_mom` 对或 `_ytd` 对）返回 `unknown`；`Evaluate` 对空 `Values` 返回四个 `unknown`、`Score==0`、`Known==0`。补进 `signals_test.go`（可并入既有用例做子例）。**顺带补 001 的变异残留（验证者 test-m2a-b 报告 M3/M8：两条倒置校验 `>=` 改 `>` 无测试变红，因需求子例只覆盖严格倒置）**：`config_test.go` 的 `TestLoadConfigRejectsBadQueueAndSignals` 加两条子例「剪刀差两线相等」（`signals:\n  scissors_active: -2\n` ⇒ 错误含 `scissors_sink`）与「票据两线相等」（`signals:\n  bill_ratio_severe: 10\n` ⇒ 错误含 `bill_ratio_healthy`），守卫 want 不变；这是本任务 `writes` 含 `config_test.go` 的唯一原因，除此之外不改它。",
+      {
+        "desc": "三期 golden 的数值来源核实：需求夹具注释「取自回填库 v_hestia_current（2026-09-05）」。dev 用 `sqlite3 -readonly data/hestia.db`（主仓库绝对路径，只读；reviewer S6 已核过一次逐值相等、三行 `_mom` 列全空）直查 `v_hestia_current` 里 `2020-06/h1`、`2025-12/annual`、`2026-06/h1` 三行的 `m1_yoy`/`m2_yoy`/`loan_hh_mlt_ytd`/`loan_hh_short_ytd`/`loan_bill_ytd`/`loan_corp_total_ytd`（列名以 `fields.go` 的常量值为准），把三行实测值与夹具数值逐一对照写进 discovery `verification`；不相等的一律以库为准改夹具并在 `decisions` 记明。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：`go test ./internal/hestia/ -run 'TestEvaluate|TestMonthlyAverage|TestMonthsInPeriod' 2>&1 | head -5` 在实现前输出 `undefined: Evaluate`，记进 discovery `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（每任务必过，全部在 merge 后的 master 上重采并带锚）**：`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**，判据是「这两个之外没有新增项」；锚 `d27791c` 实测恰这两处）；`go vet ./internal/hestia/... ./cmd/...` 零输出；`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（需求硬门槛 = 基线 96.6，背对背实测于锚 `d27791c`，AD-7）且 `go test ./cmd/atlas/ -cover` 不低于 **76.4**；报数时把测量时的 master 全 sha 与数字同行写进 discovery `verification`。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**四个不动文件 diff 为空**：`git diff --stat d27791c HEAD -- internal/hestia/parse.go internal/hestia/extract.go internal/hestia/validate.go internal/hestia/fields.go`；`store.go` 的 `Save` 函数体：`git diff d27791c HEAD -- internal/hestia/store.go | grep -E '^[-+]' | grep -v '^[-+]{3}' | grep -c 'func (s \\\\*Store) Save'` 必须为 **0**。`cmd/atlas/hestia.go` 不 import `path/filepath`（既有守卫 `hestia_test.go:116-124`）。注释里引用任务编号带 milestone 前缀：写 `M2a 的 TASK-002`。",
+      "**交付流程（AD-9，机制决定不是偏好）**：\n1. 在主仓库建 worktree：`git worktree add -b task/TASK-002-m2a ../wt-TASK-002-m2a master`（主分支是 **master** 不是 `main`）。\n2. 开工前先读 `context_from` 里各上游任务的 discovery（`.arcforge/discoveries/TASK-xxx.json`，在主仓库读）。提交用显式 pathspec（本任务 4 个文件），信息锚定 **`feat(TASK-002): M2a …`**——🔴 需求文档写的 `feat(M2a TASK-002):` **不匹配门禁**（`task-completed.sh:133/174` 只认 `^[a-z]+\\\\(TASK-002\\\\):`，AD-2），照抄会被判「不符约定、改动不可见」。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `parse.go`/`extract.go`/`validate.go`/`fields.go` 与 `Save` 函数体、不得新增需求之外的导出符号、契约 JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。子代理回复不可采信，以 `git diff` 为准。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-002 master && git -C ../pre-TASK-002 merge --no-ff --no-commit task/TASK-002-m2a`；无冲突后拆掉预演树，通知 Leader（`team-lead`）merge 并**等 merge 进 master**（门禁的 `git log --grep` 不带 `--all`，未合并分支对它结构性不可见；**绝不能因 idle hook 催促就转 `dev_done`**）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上重采全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动文件），discovery 里同时写「我的 commit sha」与「merge 后 master sha」；若重采跌破门槛或测试转红，**不转 `dev_done`**，走澄清环（`transition blocked_clarification --json-field questions=...`）。\n6. `cd` 回主仓库写 discovery（`discovery TASK-002` 子命令，含 key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔就写 `provenance`）并 `task TASK-002 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-002.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-002-m2a`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在主仓库执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-a",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/signals.go",
+    "./internal/hestia/signals_test.go",
+    "./internal/hestia/store_test.go",
+    "./internal/hestia/config_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m2a-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "9e9140dd989adde515b73910af264aa6981c323e",
+    "discovery_sha256": "73a4c2ca32dad0af696cd1b2fb3908ef69c55a3af8465c6bdd3aec8a4b43eb99",
+    "at": "2026-09-05T14:18:43Z"
+  }
+}

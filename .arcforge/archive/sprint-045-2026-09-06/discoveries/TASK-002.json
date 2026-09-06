@@ -1,0 +1,92 @@
+{
+  "task_id": "TASK-002",
+  "author": "dev-m2a-a",
+  "written_at": "2026-09-05T14:18:00Z",
+  "commit_sha": "78ee806d532caa8817fe80324a74d903da92bd00",
+  "merged_master_sha": "9e9140dd989adde515b73910af264aa6981c323e",
+  "branch": "task/TASK-002-m2a",
+  "key_findings": [
+    "需求原文的 signals.go 与六条测试可原样落地；Evaluate 是纯函数，只读 obs.Values / obs.Meta 与 cfg，无 I/O。",
+    "需求 helper `obsWith(period, periodType, vals)` 与 store_test.go:731 既有 `obsWith(values)`（固定 validMeta）重名且签名不同；本任务对 store_test.go 只许改守卫 want ⇒ 在 signals_test.go 改名 `obsAt`。下游写 signals 相关测试时请用 obsAt，别再造第三个。",
+    "RED 留痕分两段：Go 编译器最多报 10 条错后截断，types（Temperature/Signal*）的未定义错误排在 Evaluate 之前，需求预期的 `undefined: Evaluate` 在一次性捕获里到不了 head -5。先落 types-only 再捕获一次才得到它，两段都记在 verification.red_phase。",
+    "三期 golden 数值与回填库逐值相等（见 verification.golden_check）；三行的四个 _mom 列全空，所以 golden 用例走的是 _ytd ÷ 月数 分支，_mom 优先分支由 TestMonthlyAverageSources 与 TestEvaluateCreditRefusesMixedCaliber 覆盖。",
+    "001 的两条倒置校验（scissors_sink >= scissors_active、bill_ratio_healthy >= bill_ratio_severe）现由「两线相等」两子例钉住 >=；001 实现未改，两子例直接绿（相等确实被拒）。",
+    "GitNexus detect-changes 仍不可用（索引落后 + LadybugDB 版本不匹配，同 001）；本任务只新增文件与守卫登记，不改既有函数签名。"
+  ],
+  "decisions": [
+    {
+      "decision": "signals_test.go 的观测构造 helper 命名 obsAt，不用需求写的 obsWith",
+      "rationale": "与 store_test.go 既有 obsWith(values) 重名、签名不同；本任务 writes 对 store_test.go 的改动被 DoD 限定为「只为守卫 want 插入 Evaluate」，不能改它的 helper。"
+    },
+    {
+      "decision": "边界用例并入既有用例做子例（TestMonthsInPeriod/boundary、TestMonthlyAverageSources 末段），total==0 与空 Values 各开一条独立测试",
+      "rationale": "DoD boundary[0] 允许「可并入既有用例做子例」；前两类与既有用例同函数同形态，并入省一份夹具；后两类走 Evaluate 整体，独立命名让失败时一眼定位。"
+    },
+    {
+      "decision": "code-simplifier 的唯一改动（sameCaliberPair 的命名返回值 (a, b float64, ok bool) 改为无名 (float64, float64, bool)）予以保留",
+      "rationale": "函数体内 `a, okA :=` 本就遮蔽了命名返回值，命名只是装饰；去掉后语义逐字节相同（三处 return 都显式给值），vet/gofmt 干净。以 sed 直读文件核实其改动仅此一处，测试与其余三文件未动。"
+    },
+    {
+      "decision": "RED 留痕采两段而不是只记一次",
+      "rationale": "DoD error_handling[0] 要求输出含 `undefined: Evaluate`；一次性捕获只含 `undefined: Temperature`（编译器截断）。伪造一份含 Evaluate 的输出不可接受，故先落 types-only 再捕获，两段原样记录。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/signals.go",
+    "internal/hestia/signals_test.go",
+    "internal/hestia/store_test.go",
+    "internal/hestia/config_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "type hestia.Signal string；常量 SignalGreen=\"green\" / SignalYellow=\"yellow\" / SignalRed=\"red\" / SignalUnknown=\"unknown\"",
+      "consumers": "TASK-005 渲染 P2 信号行；unknown 表示输入缺失，不是红"
+    },
+    {
+      "symbol": "type hestia.Temperature struct{ Activation, Housing, Consumption, Credit Signal; Score, Known int }",
+      "consumers": "TASK-005 打 `温度 Score/Known`；Known 是非 unknown 信号数，Score 是其中绿灯数；空 Values ⇒ 0/0"
+    },
+    {
+      "symbol": "func hestia.Evaluate(obs Observation, cfg Signals) Temperature",
+      "consumers": "TASK-005 在 ingest 入库后调用；纯函数，不读历史；已登记进 TestPackageExposesNoWriteFunctions want（27 项，Discover 之后、HealthSummary 之前）"
+    },
+    {
+      "symbol": "非导出 monthlyAverage / monthsInPeriod / evalActivation / evalThreshold / evalCredit / sameCaliberPair",
+      "consumers": "包内；monthsInPeriod 对 monthly 越界月份、长度≠7、未知 periodType 一律 0；monthlyAverage 月数 0 ⇒ ok=false"
+    },
+    {
+      "symbol": "signals_test.go 的 helper obsAt(period, periodType string, vals map[string]float64) Observation",
+      "consumers": "包内测试；与 store_test.go 的 obsWith(values) 并存，后者固定 validMeta"
+    }
+  ],
+  "verification": {
+    "sampled_on": "master 9e9140dd989adde515b73910af264aa6981c323e（merge 后主仓库，最后一次改动之后统一重采）",
+    "red_phase": {
+      "capture_1_nothing_implemented": "`go test ./internal/hestia/ -run 'TestEvaluate|TestMonthlyAverage|TestMonthsInPeriod' 2>&1 | head -5` → `signals_test.go:39:8: undefined: Temperature`；`:45:7: undefined: Temperature`；`:45:19: undefined: SignalRed`；`:45:30: undefined: SignalGreen`（编译器 10 条截断，未到 Evaluate）",
+      "capture_2_types_only": "同一命令，signals.go 只含 Signal/常量/Temperature → `signals_test.go:59:28: undefined: Evaluate`；`:67:11: undefined: monthlyAverage`；`:72:10: undefined: monthlyAverage`；`:77:11: undefined: monthlyAverage`"
+    },
+    "golden_check": {
+      "method": "sqlite3 -readonly /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/data/hestia.db，查 v_hestia_current 三行；列名取 fields.go 常量值",
+      "2020-06/h1": "m1_yoy 6.5 / m2_yoy 11.1 / loan_hh_mlt_ytd 28000.0 / loan_hh_short_ytd 7552.0 / loan_bill_ytd 9697.0 / loan_corp_total_ytd 87700.0 → 与夹具 6.5/11.1/28000/7552/9697/87700 逐值相等",
+      "2025-12/annual": "3.8 / 8.5 / 12800.0 / -8351.0 / 16600.0 / 154700.0 → 与夹具逐值相等",
+      "2026-06/h1": "4.0 / 8.0 / 2212.0 / -5881.0 / 8143.0 / 111300.0 → 与夹具逐值相等",
+      "mom_columns": "三行 loan_hh_mlt_mom / loan_hh_short_mom / loan_bill_mom / loan_corp_total_mom 全空（与 reviewer S6 结论一致）",
+      "fixture_changed": false
+    },
+    "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；-run 'TestEvaluate|TestMonthlyAverage|TestMonthsInPeriod|TestLoadConfigRejectsBadQueueAndSignals' 共 21 条 --- PASS（含子例）；-run 'ExposesNoWrite|TestFieldNamesAppearOnlyInFieldsGo' 三条 PASS，want 27 项",
+    "coverage": "internal/hestia 96.6%（门槛 96.6）；cmd/atlas 76.4%（门槛 76.4）@ 9e9140dd989adde515b73910af264aa6981c323e",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 恰 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，无新增）",
+    "frozen_files": "git diff --stat d27791c 9e9140dd -- parse.go extract.go validate.go fields.go go.mod go.sum 为空；store.go Save 函数体 grep 计数 0；cmd/atlas/hestia.go 不 import path/filepath",
+    "numstat": "git show --numstat 78ee806d：config_test.go 4/0、signals.go 153/0、signals_test.go 168/0、store_test.go 1/1",
+    "done_criteria_to_tests": {
+      "functional[0]": "TestEvaluateGoldenThreePeriods(3) / TestMonthlyAverageSources / TestMonthsInPeriod / TestEvaluateUnknownShrinksDenominator / TestEvaluateCreditRefusesMixedCaliber / TestEvaluateScissorsYellowScoresZero",
+      "functional[1]": "store_test.go want +Evaluate（27）；ExposesNoWrite 两条 + TestFieldNamesAppearOnlyInFieldsGo PASS",
+      "boundary[0]": "TestMonthsInPeriod/boundary（2022-13、2022-00、2022-7、weekly）；TestMonthlyAverageSources 末段（_ytd 在场月数 0 ⇒ ok=false）；TestEvaluateCreditZeroTotalIsUnknown（_mom/_ytd 各一）；TestEvaluateEmptyValuesAllUnknown；config_test.go RejectsBad +「剪刀差两线相等」「票据两线相等」",
+      "boundary[1]": "本 verification.golden_check（verify_by review）",
+      "error_handling[0]": "本 verification.red_phase",
+      "non_functional": "本 verification 各项 + 交付流程按 AD-9（worktree / 预演 merge / Leader merge / master 重采）"
+    },
+    "not_run": "GitNexus detect-changes（索引陈旧 + DB 版本不匹配，同 001）"
+  }
+}

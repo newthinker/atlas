@@ -1,0 +1,132 @@
+{
+  "task_id": "TASK-007",
+  "provenance": "记录员模式（dev-m2a-d）：前三任 dev（分支 task/TASK-007-m2a, -r2, -r3 各 0 commit）均会话挂起、无产物；全部实测数字由 Leader（team-lead）在锚 7022d01d9229314f8a43c126d9b9763bbabefe5c 采齐并起草 CONTRACTS 段（scratchpad m2a-reg-leader/contracts-m2a-draft.md）；记录员抽查三项相等后原样追加落盘。",
+  "key_findings": [
+    "§A 九条契约更正：A1 文件名 <period>-<period_type>.json；A2 四信号只进 P2、契约只带 thresholds.signals 快照；A3 月均分母按口径取 _mom 优先→_ytd÷MM→期次÷3/6/9/12；A4 温度分母为 Known 不恒为 4；A5 P2 加信号行，Duplicate/OutOfOrder 打 0/0；A6 写契约失败 ⇒ stage=contract、hestia_runs 记 ingested、P2 不发 P1 照发（AD-4b）；A7 需求 005 写失败夹具三处与既有入口/循环冲突（AD-4a/4b）；A8 Ingest 对空 queue.dir 报错（AD-5）；A9 OutOfOrder 不写契约不算温度（AD-14）。",
+    "§B 实测（锚 7022d01d）：internal/hestia 96.6%（基线 96.6）、cmd/atlas 76.6%（基线 76.4）；导出面 AST 34 / reflect 14（需求头「+5」漏数 3 个，AD-10）；四个不动文件与 go.mod/go.sum 无 diff、Save 函数体 0 改动；gofmt 仅两处既有欠账；vet 零输出；三期 golden PASS；键序 -count=3 全绿；新增测试 48（预估 31，差因逐任务列表）。",
+    "真语料回归六数与 M1.5 §B 逐字相等：218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21 · 字段冲突 0 · 口径路由违反 0；仓库根 queue/ 不存在，包目录无 pending/queue 目录。",
+    "回放样本两份（AD-16）：2026-06/h1 3194 字节 data 54 / absent_fields 22（_mom 0 个，22 个全进 absent_fields）；2023-08/monthly 3167 字节 data 53 / absent_fields 23（_mom 20 个与 _ytd 并存）；两份 n+m=76。",
+    "§C 结转：M2b Sheets 前置 spike；M3 消费者契约（只读 pending/、流转归它、文件名 <period>-<period_type>.json、/replay 后缀）；投递与 M1.5 一起、首期验收后 contract emit --period 2026-07 --stdout 核形状；corp_mlt_short_expand 只快照；本 Sprint 未跑 deploy.sh。"
+  ],
+  "decisions": [
+    {
+      "decision": "采用记录员模式：数字由 Leader 在 7022d01d 采齐，记录员只抽查三项（覆盖率 96.6/76.6、新增测试 48、回放① 54/22）并原样落盘，不 spawn 子代理、不读需求原文与 CONTRACTS.md 全文。",
+      "rationale": "前三任 dev 在本任务上均会话挂起（疑似读大文档/长流程触发），Leader 刻意把记录员工作压到最小以规避同一失效。"
+    },
+    {
+      "decision": "抽查三项与草稿全部相等，故未触发 error_handling 条款（不改数字、不查成因）。顺带核了回放② 53/23、_mom 20，同样相等。",
+      "rationale": "DoD 要求不等时先查成因；相等则无成因可查。"
+    },
+    {
+      "decision": "Leader 下发的抽查命令 `jq '.data|length, .absent_fields|length'` 因 jq 优先级实际打出 [54, 0]（第二个数是 .data.absent_fields 的长度）；改为 `(.data|length), (.absent_fields|length)` 后得 22。记录在此供验证者复跑时避免假不等。",
+      "rationale": "同一条命令照抄会得到与草稿不等的数字，而草稿是对的；不记下来会让验证者误判。"
+    },
+    {
+      "decision": "DoD §C 的「合并后 master sha」记在本 discovery 的 verification.merged_master_sha，不写进 CONTRACTS.md。",
+      "rationale": "被 merge 的文件无法包含 merge 之后才产生的 sha。"
+    },
+    {
+      "decision": "DoD boundary 的 code-simplifier 终检未 spawn 子代理，按 Leader 指示由 §B 的对应行登记「dev 本体只读审查、未 spawn」；本任务未改任何 .go 文件（git status -- internal cmd/atlas configs 为空、HEAD 仍为锚）。",
+      "rationale": "本 Sprint 两个 code-simplifier 子代理均卡死（PENDING-MECHANISMS #3），Leader 明令本任务不 spawn。"
+    },
+    {
+      "decision": "返工第 1 轮：§B 回放样本字节数标为非判据并记成因，不改其它数字。",
+      "rationale": "验证者复跑得 3166 vs §B 3167，是 extracted_at RFC3339Nano 截尾零导致的 ±1–2 字节，与契约内容无关；error_handling[0] 要求不等时写成因而非改数迁就。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "anchor": "7022d01d9229314f8a43c126d9b9763bbabefe5c",
+    "baseline_anchor": "d27791c695e8ebd0fd5d54c9161782f52d9b12cb",
+    "commit": "de2ce7e619e30bf91fe8bf282fbedaaf77ae9974",
+    "branch": "task/TASK-007-m2a-r4",
+    "merged_master_sha": "4d81143487187faf6fc324f7fdc32ad80a0f6ffd",
+    "numstat": "74 0 internal/hestia/CONTRACTS.md（git show --numstat 恰一行，删除 0）",
+    "recorder_spot_checks": {
+      "coverage_internal_hestia": 96.6,
+      "coverage_cmd_atlas": 76.6,
+      "new_tests": 48,
+      "replay_2026_06_h1_data_keys": 54,
+      "replay_2026_06_h1_absent_fields": 22,
+      "all_equal_to_draft": true
+    },
+    "regression_six_numbers": {
+      "total": 218,
+      "to_parse": 217,
+      "skipped_this_iter": 1,
+      "parsed_ok": 213,
+      "parse_failed": 4,
+      "merged_observations": 97,
+      "into_authority": 76,
+      "to_pending": 21,
+      "field_conflicts": 0,
+      "caliber_routing_violations": 0,
+      "identity": "218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21",
+      "equals_m1_5_sectionB": true
+    },
+    "section_b": {
+      "export_surface_ast": 34,
+      "export_surface_reflect": 14,
+      "gofmt_pre_existing": [
+        "cmd/atlas/backtest_test.go",
+        "cmd/atlas/crisis_test.go"
+      ],
+      "vet_output": "",
+      "golden_three_periods": "PASS",
+      "changed_files_stat": "17 files changed, 1804 insertions(+), 24 deletions(-)",
+      "new_tests_per_file": {
+        "cmd/atlas/hestia_test.go": 7,
+        "internal/hestia/config_test.go": 4,
+        "internal/hestia/contract_test.go": 6,
+        "internal/hestia/ingest_test.go": 8,
+        "internal/hestia/notify_test.go": 1,
+        "internal/hestia/queue_test.go": 10,
+        "internal/hestia/signals_test.go": 9,
+        "internal/hestia/store_test.go": 3
+      }
+    },
+    "replay_2026_06_h1": {
+      "bytes": 3194,
+      "data_keys": 54,
+      "absent_fields": 22,
+      "n_plus_m": 76,
+      "mom_keys_in_data": 0,
+      "generated_by": "contract@v1/replay",
+      "is_revision": false,
+      "scissors_sink": -2
+    },
+    "replay_2026_06_h1_stdout": "{\n  \"schema_version\": \"1.0\",\n  \"period\": \"2026-06\",\n  \"period_type\": \"h1\",\n  \"published_at\": \"2026-07-15\",\n  \"source_url\": \"https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/2026071512340454869/index.html\",\n  \"article_id\": \"2026071512340454869\",\n  \"caliber_version\": \"2025-01\",\n  \"is_revision\": false,\n  \"supersedes_published_at\": null,\n  \"extracted_at\": \"2026-09-06T02:10:39.949859Z\",\n  \"extractor\": \"rule@v2\",\n  \"generated_by\": \"contract@v1/replay\",\n  \"absent_fields\": [\n    \"tsf_flow_mom\",\n    \"tsf_flow_rmb_loan_mom\",\n    \"tsf_flow_govt_bond_mom\",\n    \"tsf_flow_corp_bond_mom\",\n    \"tsf_flow_fx_loan_mom\",\n    \"tsf_flow_entrust_mom\",\n    \"tsf_flow_trust_mom\",\n    \"tsf_flow_bankaccept_mom\",\n    \"tsf_flow_equity_mom\",\n    \"deposit_flow_mom\",\n    \"deposit_household_mom\",\n    \"deposit_corp_mom\",\n    \"deposit_fiscal_mom\",\n    \"deposit_nbfi_mom\",\n    \"loan_flow_mom\",\n    \"loan_hh_short_mom\",\n    \"loan_hh_mlt_mom\",\n    \"loan_corp_total_mom\",\n    \"loan_corp_short_mom\",\n    \"loan_corp_mlt_mom\",\n    \"loan_bill_mom\",\n    \"loan_nbfi_mom\"\n  ],\n  \"units\": {\n    \"balance\": \"万亿元\",\n    \"flow\": \"亿元\",\n    \"ratio\": \"百分数\"\n  },\n  \"validation\": {\n    \"passed\": true,\n    \"checks\": []\n  },\n  \"thresholds\": {\n    \"config_version\": \"\",\n    \"temp_scale\": \"0-4\",\n    \"signals\": {\n      \"scissors_active\": 0,\n      \"scissors_sink\": -2,\n      \"hh_mlt_monthly_warm\": 2000,\n      \"hh_short_monthly_warm\": 0,\n      \"bill_ratio_healthy\": 10,\n      \"bill_ratio_severe\": 20,\n      \"corp_mlt_short_expand\": 1.5\n    }\n  },\n  \"data\": {\n    \"tsf_stock\": 462.06,\n    \"tsf_stock_yoy\": 7.4,\n    \"tsf_flow_ytd\": 208400,\n    \"tsf_stock_rmb_loan\": 279.16,\n    \"tsf_stock_rmb_loan_yoy\": 5.3,\n    \"tsf_stock_fx_loan\": 1.18,\n    \"tsf_stock_fx_loan_yoy\": -2.9,\n    \"tsf_stock_entrust\": 11.24,\n    \"tsf_stock_entrust_yoy\": 0.5,\n    \"tsf_stock_trust\": 4.62,\n    \"tsf_stock_trust_yoy\": 4,\n    \"tsf_stock_bankaccept\": 2.02,\n    \"tsf_stock_bankaccept_yoy\": -2.8,\n    \"tsf_stock_corp_bond\": 36.08,\n    \"tsf_stock_corp_bond_yoy\": 8.9,\n    \"tsf_stock_govt_bond\": 101.36,\n    \"tsf_stock_govt_bond_yoy\": 14.2,\n    \"tsf_stock_equity\": 12.49,\n    \"tsf_stock_equity_yoy\": 5,\n    \"tsf_flow_rmb_loan_ytd\": 107600,\n    \"tsf_flow_govt_bond_ytd\": 64400.00000000001,\n    \"tsf_flow_corp_bond_ytd\": 20700,\n    \"tsf_flow_fx_loan_ytd\": 1609,\n    \"tsf_flow_entrust_ytd\": -788,\n    \"tsf_flow_trust_ytd\": -446,\n    \"tsf_flow_bankaccept_ytd\": -1256,\n    \"tsf_flow_equity_ytd\": 2933,\n    \"m2\": 356.71,\n    \"m2_yoy\": 8,\n    \"m1\": 118.48,\n    \"m1_yoy\": 4,\n    \"m0\": 14.74,\n    \"m0_yoy\": 11.8,\n    \"deposit_balance\": 346.44,\n    \"deposit_balance_yoy\": 8.2,\n    \"deposit_flow_ytd\": 177600.00000000003,\n    \"deposit_household_ytd\": 75800,\n    \"deposit_corp_ytd\": 32000,\n    \"deposit_fiscal_ytd\": 9715,\n    \"deposit_nbfi_ytd\": 46500,\n    \"loan_balance\": 282.63,\n    \"loan_balance_yoy\": 5.2,\n    \"loan_flow_ytd\": 107200,\n    \"loan_hh_short_ytd\": -5881,\n    \"loan_hh_mlt_ytd\": 2212,\n    \"loan_corp_total_ytd\": 111300.00000000001,\n    \"loan_corp_short_ytd\": 45900,\n    \"loan_corp_mlt_ytd\": 55500,\n    \"loan_bill_ytd\": 8143,\n    \"loan_nbfi_ytd\": -4223,\n    \"rate_ibo\": 1.41,\n    \"rate_repo\": 1.43,\n    \"fx_reserve\": 3.42,\n    \"fx_rate\": 6.8109\n  }\n}\n",
+    "replay_2023_08_monthly": {
+      "bytes": 3167,
+      "data_keys": 53,
+      "absent_fields": 23,
+      "n_plus_m": 76,
+      "mom_keys_in_data": 20,
+      "generated_by": "contract@v1/replay",
+      "is_revision": false,
+      "scissors_sink": -2
+    },
+    "replay_2023_08_monthly_stdout": "{\n  \"schema_version\": \"1.0\",\n  \"period\": \"2023-08\",\n  \"period_type\": \"monthly\",\n  \"published_at\": \"2023-09-11\",\n  \"source_url\": \"https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/2025092212553479819/index.html\",\n  \"article_id\": \"2025092212553479819\",\n  \"caliber_version\": \"2023-01\",\n  \"is_revision\": false,\n  \"supersedes_published_at\": null,\n  \"extracted_at\": \"2026-09-06T02:10:39.927341Z\",\n  \"extractor\": \"merged@v1\",\n  \"generated_by\": \"contract@v1/replay\",\n  \"absent_fields\": [\n    \"tsf_flow_rmb_loan_ytd\",\n    \"tsf_flow_govt_bond_ytd\",\n    \"tsf_flow_corp_bond_ytd\",\n    \"tsf_flow_fx_loan_ytd\",\n    \"tsf_flow_entrust_ytd\",\n    \"tsf_flow_trust_ytd\",\n    \"tsf_flow_bankaccept_ytd\",\n    \"tsf_flow_equity_ytd\",\n    \"deposit_household_ytd\",\n    \"deposit_corp_ytd\",\n    \"deposit_fiscal_ytd\",\n    \"deposit_nbfi_ytd\",\n    \"deposit_flow_mom\",\n    \"loan_hh_short_ytd\",\n    \"loan_hh_mlt_ytd\",\n    \"loan_corp_total_ytd\",\n    \"loan_corp_short_ytd\",\n    \"loan_corp_mlt_ytd\",\n    \"loan_bill_ytd\",\n    \"loan_nbfi_ytd\",\n    \"loan_flow_mom\",\n    \"fx_reserve\",\n    \"fx_rate\"\n  ],\n  \"units\": {\n    \"balance\": \"万亿元\",\n    \"flow\": \"亿元\",\n    \"ratio\": \"百分数\"\n  },\n  \"validation\": {\n    \"passed\": true,\n    \"checks\": []\n  },\n  \"thresholds\": {\n    \"config_version\": \"\",\n    \"temp_scale\": \"0-4\",\n    \"signals\": {\n      \"scissors_active\": 0,\n      \"scissors_sink\": -2,\n      \"hh_mlt_monthly_warm\": 2000,\n      \"hh_short_monthly_warm\": 0,\n      \"bill_ratio_healthy\": 10,\n      \"bill_ratio_severe\": 20,\n      \"corp_mlt_short_expand\": 1.5\n    }\n  },\n  \"data\": {\n    \"tsf_stock\": 368.61,\n    \"tsf_stock_yoy\": 9,\n    \"tsf_flow_ytd\": 252100,\n    \"tsf_stock_rmb_loan\": 230.24,\n    \"tsf_stock_rmb_loan_yoy\": 10.9,\n    \"tsf_stock_fx_loan\": 1.82,\n    \"tsf_stock_fx_loan_yoy\": -16.8,\n    \"tsf_stock_entrust\": 11.33,\n    \"tsf_stock_entrust_yoy\": 2.4,\n    \"tsf_stock_trust\": 3.77,\n    \"tsf_stock_trust_yoy\": -2.9,\n    \"tsf_stock_bankaccept\": 2.67,\n    \"tsf_stock_bankaccept_yoy\": -8.2,\n    \"tsf_stock_corp_bond\": 31.46,\n    \"tsf_stock_corp_bond_yoy\": -0.2,\n    \"tsf_stock_govt_bond\": 65.15,\n    \"tsf_stock_govt_bond_yoy\": 11.5,\n    \"tsf_stock_equity\": 11.28,\n    \"tsf_stock_equity_yoy\": 10.2,\n    \"tsf_flow_mom\": 31200,\n    \"tsf_flow_rmb_loan_mom\": 13400,\n    \"tsf_flow_govt_bond_mom\": 11800,\n    \"tsf_flow_corp_bond_mom\": 2698,\n    \"tsf_flow_fx_loan_mom\": -201,\n    \"tsf_flow_entrust_mom\": 97,\n    \"tsf_flow_trust_mom\": -221,\n    \"tsf_flow_bankaccept_mom\": 1129,\n    \"tsf_flow_equity_mom\": 1036,\n    \"m2\": 286.93,\n    \"m2_yoy\": 10.6,\n    \"m1\": 67.96,\n    \"m1_yoy\": 2.2,\n    \"m0\": 10.65,\n    \"m0_yoy\": 9.5,\n    \"deposit_balance\": 278.76,\n    \"deposit_balance_yoy\": 10.5,\n    \"deposit_flow_ytd\": 202399.99999999997,\n    \"deposit_household_mom\": 7877,\n    \"deposit_corp_mom\": 8890,\n    \"deposit_fiscal_mom\": -88,\n    \"deposit_nbfi_mom\": -7322,\n    \"loan_balance\": 232.28,\n    \"loan_balance_yoy\": 11.1,\n    \"loan_flow_ytd\": 174400,\n    \"loan_hh_short_mom\": 2320,\n    \"loan_hh_mlt_mom\": 1602,\n    \"loan_corp_total_mom\": 9488,\n    \"loan_corp_short_mom\": -401,\n    \"loan_corp_mlt_mom\": 6444,\n    \"loan_bill_mom\": 3472,\n    \"loan_nbfi_mom\": -358,\n    \"rate_ibo\": 1.71,\n    \"rate_repo\": 1.76\n  }\n}\n",
+    "code_simplifier": "未 spawn 子代理（Leader 指示）；本任务 0 个 .go 文件改动",
+    "deploy_sh": "本 Sprint 未跑",
+    "merged_master_sha_round1": "f8e9a14d320a2de7ad5f832c4d64c95bbddd0793",
+    "replay_bytes_note": "回放样本字节数跨运行 ±1–2、非判据（extracted_at 纳秒尾零）；本 discovery 内嵌的 stdout 全文是 Leader 在 7022d01d 那一次的产物，其字节数 3194 / 3167 仅对该次成立。"
+  },
+  "review": [
+    {
+      "round": 1,
+      "verdict": "rejected",
+      "reason_class": "task_defect",
+      "verifier": "test-m2a-b",
+      "reject_reason": "DoD error_handling[0] 未满足：§B 两份回放样本的字节数跨运行不可复现（extracted_at 取回填 load 时刻、RFC3339Nano 截尾零 ⇒ ±1–2 字节；dev-b 3193 / dev-c 3192 / Leader 3194 / 验证者 3194，样本② Leader 3167 / 验证者 3166），写 §B 前已知却未按条款写成因。其余 7 条 PASS。",
+      "fix": "只改 §B 样本①②两行：字节数标「跨运行 ±1–2、非判据」并记成因（去掉 extracted_at 行后各次 cmp 逐字节相同）；判据是 n + m = 76 与键族计数。其它数字与文本一字不动。补丁由 Leader 起草（fix-007-bytes.py），记录员应用；numstat 2/2。",
+      "rework_commit": "89888ad274ac71323a9fdc02213fe2e9430002da",
+      "rework_branch": "task/TASK-007-m2a-r5",
+      "rework_merged_master_sha": "4d81143487187faf6fc324f7fdc32ad80a0f6ffd",
+      "verification_report": ".arcforge/docs/04-test/TASK-007-verification.md §3-§4"
+    }
+  ]
+}

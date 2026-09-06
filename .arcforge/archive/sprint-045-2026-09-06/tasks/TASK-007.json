@@ -1,0 +1,95 @@
+{
+  "id": "TASK-007",
+  "title": "收口（docs-only）：采锚、全量核对、真语料回归、回放样本、code-simplifier 终检、CONTRACTS `## Sprint M2a` §A/§B/§C",
+  "description": "对应需求文档 **TASK-007**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-05-hestia-m2a-contract-queue.md` 的「## TASK-007」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。spec：`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/specs/2026-09-05-hestia-m2a-contract-queue-design.md`。裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`。\n\n唯一交付物 `internal/hestia/CONTRACTS.md` 新开 `## Sprint M2a`（AD-1）。需求 007 Step 1 的 code-simplifier 每个代码任务提交前各跑过一次，本任务只做**终检审查、不改代码**；Step 6 的合并/归档由 Leader 执行；**不跑 `deploy.sh`**。全部 DoD 为对象形态 `verify_by: review|manual`（无代码任务声明）。消费 001–006 全部 discovery。",
+  "module": "hestia",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "🔴 **采锚前置**：第一步先 `cd` 主仓库、`git status --short -- internal cmd/atlas configs docs go.mod go.sum` **必须为空**（需求原文「`git status --short` 必须干净」在 sprint 进行中恒不成立：`.arcforge/` 有在途改动；收窄为代码范围，与后面 numstat 同口径）、`ANCHOR=$(git rev-parse HEAD)` 记全 sha；此后每个数字都标注这个锚。写 CONTRACTS **之前**再跑 `git diff --numstat $ANCHOR HEAD -- internal cmd/atlas configs docs`，非空就回到本步重采。§B 表头的 `<ANCHOR>` 填这个全 sha；基线锚 `d27791c695e8ebd0fd5d54c9161782f52d9b12cb`（开工时 master HEAD），基线 96.6 / 76.4 是 Leader 在该锚背对背实测的（AD-7），§B 注明。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "§A 契约更正：A1–A6 按需求原文措辞，其中 **A5/A6 按实测订正**——写契约失败 ⇒ 该期 `stage=contract`、`hestia_runs` 记 `ingested` 且 `error` 列记首行、**P2 不发、P1 照发**、数据仍在库、补发走 `hestia contract emit`（AD-4b；若 dod-gate 上人类改选「P1 也不发」则按 005 实测写）；另加 **A7**「需求 005 的写失败夹具与既有入口/循环冲突」（AD-4a/4b 三点：入口 `EnsureQueueDirs` 先炸、非 notify 错误一律 P1、`runRow` 一律 failed）、**A8**「`Ingest` 对空 `queue.dir` 报错」（AD-5：预填值相对 cwd，测试进程会在包目录建目录）、**A9**「OutOfOrder 不写契约不算温度」（AD-14）与一句「契约错误串带 `writeAtomic` 的 `snapshot write/rename` 文案，接受」。每条带证据（文件:行 或测试名）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "§B 实测登记表按需求原文各行填实数（锚 = `ANCHOR`）：`internal/hestia` 覆盖率（≥ 96.6）与 `cmd/atlas`（≥ 76.4）；导出面 AST **34** / reflect **14**（AD-10 订正：需求头「+5」漏数 `DefaultSignals`、`Contract.FileName`、`Contract.JSON` 三个——在表里说明）；四个不动文件 `git diff --stat d27791c $ANCHOR` 空、`Save` 函数体 0、无新增写方法、`go.mod`/`go.sum` 无 diff；gofmt 仅两处既有欠账；vet 零输出；三期 golden（`-run TestEvaluateGolden -v` 三个 PASS）；`-run 'TestBuildContract|TestContract' -count=3` 全绿；新增测试数按文件 `git diff d27791c $ANCHOR -- '*_test.go' | grep -c '^+func Test'` 逐文件列出并与需求预估（config 3 · signals 6 · contract 5 + store 2 · queue 5 · ingest 4 + notify 1 · cmd 5 = 31）对照，差异逐任务说明原因（沿 M1.5 §B 的表格形态）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "真语料回归与回放样本（需求 Step 4，在临时目录 `S`，语料用主仓库绝对路径 `data/hestia-backfill-2026-08-14`）：`backfill load --allow-incomplete` exit 0 且六数与 M1.5 §B **逐字相等**（218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21 · 字段冲突 0 · 口径路由违反 0）；仓库根 `queue/` **不存在**（回填不走 `Ingest`）且 `find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\)` 为空（reviewer S5）；回放样本**两份**（AD-16，dev-m2a-b 试跑发现需求 Step 4 的 Expected 写错对象：2026-06/h1 是累计口径，回填库里该行 22 个 `_mom` 列全空，Leader 只读查库核实）：① `contract emit --hestia-config $S/hestia.yaml --period 2026-06 --period-type h1 --stdout`：`period 2026-06`、`period_type h1`、`generated_by contract@v1/replay`、`checks: []`、`data` 含 `_ytd` 族键且 **`_mom` 族键 0 个**（22 个 `_mom` 全进 `absent_fields`）、`thresholds.signals.scissors_sink: -2`、`is_revision` 按库实况；② `--period 2023-08 --period-type monthly --stdout`：`data` 含 **20 个 `_mom` 键**（库里 2023-08/monthly 非空 `_mom` 列数，Leader 实测）与 `_ytd` 族并存——这份才核到「`_mom` 原样进 data」。两份都记字节数与 `data` 键数 n / `absent_fields` 项数 m 且 **n + m = 76**；**两份完整 stdout 原样存进 discovery `verification`**（M3 写消费者时的对照样本；验证者复跑后再存进验证报告）。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "§C 结转按需求原文四条（M2b Sheets 前置 spike；M3 消费者契约：只读 `pending/`、流转归它、文件名 `<period>-<period_type>.json`、`/replay` 后缀；投递与 M1.5 一起、等首期验收后 `contract emit --period 2026-07 --stdout` 核形状；`corp_mlt_short_expand` 只快照）；另记「本 Sprint 未跑 `deploy.sh`」与合并后 master sha。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "code-simplifier 终检：Task tool（`subagent_type: \"code-simplifier:code-simplifier\"`）审查 `git diff d27791c $ANCHOR --name-only -- internal cmd/atlas` 的全部改动文件，prompt 附需求 Step 1 的约束并**明令只审查不改文件**；结论以载体为准——终检后 `git status --short -- internal cmd/atlas configs` 为空且 HEAD 仍是 `ANCHOR` ⇒ §B 记「无改动」；子代理若给出可采纳建议 ⇒ 逐条写进 discovery `decisions` 并通知 Leader 裁决（Leader 视情开 `review_fix`），**本任务不改任何 `.go` 文件**。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "任一实测数字与需求/M1.5 §B 不相等（回归六数、n+m、覆盖率、导出面项数）⇒ **不要改数字迁就**，先 `git log --oneline d27791c..$ANCHOR` 与对应任务 discovery 找成因，成因查实写进 §B 对应行；查不实的写「成因未定」并走澄清环问 Leader，不猜一个理由。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "交付流程（沿 AD-9，docs-only）：主仓库 `git worktree add -b task/TASK-007-m2a ../wt-TASK-007-m2a master`；提交只含 `internal/hestia/CONTRACTS.md`（`git show --numstat HEAD` 恰一行），信息锚定 **`docs(TASK-007): M2a …`**（🔴 不是 `docs(M2a TASK-007):`，AD-2）；预演 merge 后通知 Leader（`team-lead`）merge 并等进 master；merge 后 `cd` 主仓库写 discovery（`verification` 含 §B 全部数字、回放样本全文、终检结论）、`update --expect-status in_progress --field discovery=…`、`transition dev_done --expect-epoch <N>`（docs-only 门禁：`packages` 指向文档路径 + 全部 `verify_by` 为 review/manual，已满足）；落盘后 `jq '{status,discovery}'` 直读核实；拆 worktree。一切 `.arcforge/` 写入在主仓库、经 `ARCFORGE_TOKEN=<token> bash .claude/hooks/arcforge-write.sh --as <实例名>`。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m2a-d",
+  "packages": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "assignment_epoch": 5,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m2a-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-06T04:44:29Z"
+  },
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "4d81143487187faf6fc324f7fdc32ad80a0f6ffd",
+    "discovery_sha256": "a4aa05397cb0ff104325636cb3fece6318edd31508d4b76e663e8007ddfb103a",
+    "at": "2026-09-06T03:17:37Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "DoD error_handling[0] 未满足：§B 两份回放样本的字节数是跨运行不可复现的数字（extracted_at 取回填时刻、RFC3339Nano 截尾零 ⇒ ±1 字节；dev-b 3193 vs Leader 3194 在写 §B 前已知，验证者复跑样本② 3166 vs §B 3167），§B 未按条款写成因。其余 7 条 PASS；修复只需在 §B 样本①②两行加成因一句（见 docs/04-test/TASK-007-verification.md §3-§4），不改其它数字。"
+}

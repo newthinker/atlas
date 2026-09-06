@@ -1,0 +1,119 @@
+{
+  "task_id": "TASK-006",
+  "author": "dev-m2a-b",
+  "written_at": "2026-09-05T23:54:00Z",
+  "commit_sha": "2427b6d052280bc433c3f2d8d725c71f5dc9d0cb",
+  "merged_master_sha": "189a9eab5f46d760fd4e4665d2d6e2b0981c5522",
+  "branch": "task/TASK-006-m2a",
+  "key_findings": [
+    "需求原文的 hestia.go 片段可原样落地（三变量、contract/emit 两命令、runHestiaContractEmit、init 挂载），只加了一条 hestiaPeriodTypeRE（DoD boundary[0] 明写）与 MarkFlagRequired 的 panic 分支（与同文件三处既有写法一致，不吞错误）。",
+    "需求原文的 emitFixture 用 ValidationReport{Passed: true} 调 Save 会被拒：store.go checkReportConsistency 拒绝「Passed 且零 checks」（错误串 report claims Passed with zero checks），与 TASK-003 discovery 记的同一守卫。夹具改为带一条 Check{ID: monetary_hierarchy, Status: CheckPassed}，其余按原文。",
+    "reviewer B6 属实：runHestiaContractEmit 用 cmd.Context() 传给 Store.Current；直传未 Execute 的 hestiaContractEmitCmd 时 Context() 为 nil。四条真跑用例（含 RejectsBadPeriod/RejectsBadPeriodType 这两条开库前就返回的）统一用 newCapturingCmd()，形态一致、也顺带断言了输出。",
+    "「开库前校验」的判据用 NotContains(err, \"/nonexistent/hestia.yaml\")：配置路径指向不存在的文件，若先开库会先撞到 LoadConfig 的路径错误；错误串里出现「格式非法」/「非法：要 monthly|…」且不含该路径 ⇒ 校验确实在 openHestia 之前。",
+    "回放契约 is_revision 取 PriorPublishedAt != \"\"：单版期次回放为 false（TestHestiaContractEmitWritesPending 断言 \"is_revision\": false）；修订过的期次回放仍标 true，与实时路径 Verdict 语义一致。",
+    "期次不在库 ⇒ 报错且不建 pending/（UnknownPeriodFails 断言 pending/ 不存在）：WriteContract 只在 Current 命中后才调，MkdirAll 不会提前发生。",
+    "变异核验（私有 worktree 上逐个变异、按 sha256 还原）：去掉 --period-type 校验、--stdout 多写一个换行、Replay=false、--stdout 也落盘，4/4 KILLED，各由对应用例独家转红。",
+    "code-simplifier 子代理回复「完成,无新增改动」，但 hestia.go sha 变了（以 git diff 为准）：ContractInput 字面量由两行改为逐字段一行，并加了一段说明 Report{Passed:true} 而 Checks 留空的注释。等价、注释准确，保留。测试文件未动（restoreEmitGlobals 5 处、emitFixture 3 处、6 条用例数目不变）。",
+    "并行实撞：预演 merge 时 master=057a91c5，Leader merge 时 master 已含 TASK-005（f2079584）；两边文件不相交（005 只改 internal/hestia），Leader 以新 master 合入，master 重采两包绿。",
+    "GitNexus 索引陈旧（last indexed ae088eb），impact/detect-changes 未跑，同 001–005。"
+  ],
+  "decisions": [
+    {
+      "decision": "emitFixture 的报告带一条 CheckPassed 检查，不用需求原文的 ValidationReport{Passed: true}",
+      "rationale": "Save 的 checkReportConsistency 拒绝零 checks 的 Passed 报告（空报告与「没有闸门跑过」不可区分）；改夹具不改被测行为，与 TASK-003 store 侧用例的处置一致。"
+    },
+    {
+      "decision": "四个包级变量的先存后还原收进 restoreEmitGlobals(t) helper，每个改变量的用例调一次",
+      "rationale": "AD-8 要求沿 old := …; t.Cleanup 模式且不硬编码 configs/hestia.yaml；五处逐字重复容易漏一个变量（需求原文的 RejectsBadPeriod 就漏了 hestiaCfgPath）。helper 一处写对，五处都对。"
+    },
+    {
+      "decision": "RejectsBadPeriod / RejectsBadPeriodType 两条开库前返回的用例也用 newCapturingCmd()",
+      "rationale": "DoD 只要求三条真开库的用例改；这两条虽不触 Context()，统一形态后将来若有人把校验挪到开库之后，用例仍不会因 nil ctx panic 而是干净地红。"
+    },
+    {
+      "decision": "--period-type 用 regexp（hestiaPeriodTypeRE）而不是 slices.Contains 五值切片",
+      "rationale": "DoD boundary[0] 明写「与 hestiaBackfillFromRE 同形」；regexp 已 import，五值字面量只出现在 cmd 层的一条正则里，不受字段名守卫约束。"
+    },
+    {
+      "decision": "code-simplifier 的一处改动保留",
+      "rationale": "git diff 核实：只动了 ContractInput 字面量的排版并加了一段准确注释，错误串/用例/守卫未变，两包绿、覆盖率不变。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia.go",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "CLI：atlas hestia contract emit --period YYYY-MM [--period-type monthly|q1|h1|q1_q3|annual] [--stdout] [--hestia-config <path>]",
+      "consumers": "TASK-007 §B 回放样本（--period 2026-06 --period-type h1 --stdout）；运维补发写失败的契约（AD-4b A6）；M3 拿样本"
+    },
+    {
+      "symbol": "行为：--period / --period-type 在开库前校验（错误串 `--period %q 格式非法：要 YYYY-MM，月份取 01–12` / `--period-type %q 非法：要 monthly|q1|h1|q1_q3|annual`）；期次不在 observations ⇒ `hestia contract emit: <period>/<type> not in observations（…）` 且不建 pending/；--stdout 只把 JSON() 写到 cmd.OutOrStdout()（末尾恰一个换行）；否则 WriteContract(cfg.Queue.Dir, c) 并打印 `<period>/<type> contract → <path>`",
+      "consumers": "TASK-007 验收；验证者"
+    },
+    {
+      "symbol": "契约形态：generated_by contract@v1/replay、checks: []、validation.passed true、is_revision = 库里有更早 published_at、supersedes_published_at = 该值或 null",
+      "consumers": "M3 消费者；TASK-007 §B 记 n+m=76"
+    },
+    {
+      "symbol": "非导出：hestiaPeriodTypeRE、hestiaContractCmd、hestiaContractEmitCmd、runHestiaContractEmit、hestiaEmitPeriod/hestiaEmitPeriodType/hestiaEmitStdout",
+      "consumers": "包内；SilenceUsage 守卫列表与 IsRegistered 守卫已登记 contract"
+    },
+    {
+      "symbol": "hestia_test.go helper：restoreEmitGlobals(t)、emitFixture(t) (cfgPath, queueDir)（临时 yaml 显式 queue.dir + 库里一条 2025-12/annual，报告带一条 check）",
+      "consumers": "包内测试"
+    }
+  ],
+  "provenance": "code-simplifier 子代理的一处等价改动（hestia.go ContractInput 字面量排版 + 注释）已并入 2427b6d0；其余全部由 dev-m2a-b 手写。",
+  "verification": {
+    "sampled_on": "master 189a9eab5f46d760fd4e4665d2d6e2b0981c5522（merge 后主仓库，含 TASK-005 f2079584；最后一次改动之后统一重采，2026-09-05T23:52Z）",
+    "red_phase": "实现前 `go test ./cmd/atlas/ -run 'TestHestiaContractEmit' 2>&1 | head -5` 输出：`cmd/atlas/hestia_test.go:110:82: undefined: hestiaContractCmd`；`:110:101: undefined: hestiaContractEmitCmd`；`:1441:58: undefined: hestiaEmitPeriod`；`:1441:76: undefined: hestiaEmitPeriodType`",
+    "tests": "GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1 → 两包 ok；-run 'TestHestiaContractEmit|TestHestiaCommandIsRegistered|TestHestiaCommandsSilenceUsage|TestHestiaCmdDoesNotResolveDBPath' 9 条 --- PASS、0 FAIL（六条 emit + 三条守卫）",
+    "coverage": "cmd/atlas 76.6%（门槛 76.4）；internal/hestia 96.6%（门槛 96.6）@ 189a9eab5f46d760fd4e4665d2d6e2b0981c5522",
+    "help": "`go run ./cmd/atlas hestia contract emit --help` 列出 --period（required）、--period-type（default monthly）、--stdout 三行",
+    "vet": "go vet ./internal/hestia/... ./cmd/... 零输出",
+    "gofmt": "gofmt -l internal/hestia cmd/atlas 恰 cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（既有欠账，无新增）",
+    "frozen_files": "git diff --stat d27791c 189a9eab -- parse.go extract.go validate.go fields.go go.mod go.sum 为空；Save 函数体 grep 计数 0；cmd/atlas/hestia.go 不 import path/filepath；find internal/hestia cmd/atlas -type d -name pending/queue 为空，仓库根无 queue/",
+    "numstat": "git show --numstat 2427b6d0：cmd/atlas/hestia.go 96/1、cmd/atlas/hestia_test.go 146/1；hestia_test.go 自 d27791c 新增 Test 函数 6（需求预估 cmd 5，+1 为 boundary[0] 的 RejectsBadPeriodType）",
+    "mutation": "4/4 KILLED（M1 去 period-type 校验 → RejectsBadPeriodType 红；M2 stdout 多一个换行 → StdoutDoesNotWrite 红；M3 Replay=false → WritesPending 红；M4 --stdout 也落盘 → StdoutDoesNotWrite 红）；hestia.go 按 sha256 还原",
+    "done_criteria_to_tests": {
+      "functional[0]": "TestHestiaContractEmitFlags（三 flag）+ TestHestiaCommandIsRegistered（contract 已挂）+ --help 三行；hestia.go 按原文 + hestiaPeriodTypeRE",
+      "functional[1]": "TestHestiaContractEmitRejectsBadPeriodBeforeOpeningDB / WritesPending / StdoutDoesNotWrite / UnknownPeriodFails + emitFixture（显式 queue.dir）；真跑用例走 newCapturingCmd；restoreEmitGlobals 先存后还原",
+      "boundary[0]": "TestHestiaContractEmitRejectsBadPeriodTypeBeforeOpeningDB（错误串逐字 + 开库前）；StdoutDoesNotWrite 末字节恰一个换行断言",
+      "boundary[1]": "TestHestiaCmdDoesNotResolveDBPath PASS；TestHestiaCommandsSilenceUsage 列表加 hestiaContractCmd/hestiaContractEmitCmd；TestHestiaCommandIsRegistered 加 contract",
+      "error_handling[0]": "本 verification.red_phase；openHestia 失败错误带路径（既有 TestHestiaConfigErrorNamesThePath）；Current 错误 `return err` 原样返回（代码路径，UnknownPeriod 走 ok=false 分支）",
+      "non_functional": "本 verification 各项 + 交付流程按 AD-9（worktree / code-simplifier / 预演 merge / Leader merge / master 重采）"
+    },
+    "not_run": "GitNexus impact / detect-changes（索引陈旧，同 001–005）"
+  },
+  "review_fix": {
+    "round": 1,
+    "reason_class": "dod_defect",
+    "fix_items": [
+      "R1 TestHestiaContractEmitRevisionPeriod（test-m2a-a 变异 M11 Supersedes 置空 / M12 Report.Passed=false 存活）"
+    ],
+    "commit_sha": "bb488d4a9cdc52150f89ba783d93e69dc4080fab",
+    "merged_master_sha": "7022d01d9229314f8a43c126d9b9763bbabefe5c",
+    "branch": "task/TASK-006-m2a-fix",
+    "files_modified": [
+      "cmd/atlas/hestia_test.go"
+    ],
+    "implementation_changed": false,
+    "key_findings": [
+      "夹具：emitFixture 之外再 Save 一条同期 2025-12/annual、PublishedAt 2026-02-20、ArticleID 2026022009294440746 的观测（报告带一条 CheckPassed，与 emitFixture 同理），Save 判 Revision 两行都留；Current 取最新一版，PriorPublishedAt 取被取代版 2026-01-15。",
+      "断言四条：\"published_at\": \"2026-02-20\"（回放的是最新版）、\"is_revision\": true、\"supersedes_published_at\": \"2026-01-15\"、\"passed\": true。",
+      "变异核验（私有 worktree，按 sha256 还原）：M11 Supersedes 置空、M12 Report.Passed=false、附加 IsRevision=false，3/3 由该用例独家转红。",
+      "code-simplifier 只动了文件头映射注释的对齐空格（git diff 核实），实现未动。"
+    ],
+    "verification": {
+      "sampled_on": "master 7022d01d9229314f8a43c126d9b9763bbabefe5c（merge 后主仓库，2026-09-06T00:12Z）",
+      "tests": "两包 ok；-run TestHestiaContractEmit 7 条 --- PASS（原 6 + R1）",
+      "coverage": "cmd/atlas 76.6%（门槛 76.4）；internal/hestia 96.6% @ 7022d01d",
+      "vet_gofmt": "vet 零输出；gofmt 仅 backtest_test.go / crisis_test.go",
+      "frozen_files": "四个不动文件 + go.mod/go.sum 自 d27791c diff 空；Save 函数体 grep 0；hestia.go 不 import path/filepath；无 pending/queue 空目录",
+      "numstat": "git show --numstat bb488d4a：cmd/atlas/hestia_test.go 33/0",
+      "mutation": "M11/M12/IsRevision=false 3/3 KILLED"
+    }
+  }
+}
