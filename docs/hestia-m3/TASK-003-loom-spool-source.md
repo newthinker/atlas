@@ -384,7 +384,34 @@ atlas commit subject 写 `docs(TASK-003):`（Arcforge 编号，门禁按它认�
 「`M3 TASK-002`」（无「的」）出自需求原文给的代码样例，照抄保持原样；新写的注释用「`M3 的 TASK-002`」。
 Leader 已裁决两种写法都接受，验证者**不得**因这个「的」字判不符。
 
-### 4.6 交付过程中踩到的一个坑（记给后来人）
+### 4.6 ⚠️ loom 自己也有一套 `TASK-00X` 编号，会与需求编号撞名
+
+验证者若在 loom 里 `grep -rn 'TASK-'`，会拿到 **9 条**，其中只有 **5 条是本任务新写的**
+（全部带 `M3` 前缀）。另外 4 条是 loom **既有**注释，用的是 loom 自己 Plan 1/2 的编号，
+**与 hestia M3 的任务编号毫无关系**：
+
+| 位置 | 原文 | 归属 |
+|---|---|---|
+| `archive_test.go:336` | `// [TASK-002] R1.2: archived file's frontmatter carries…` | loom 既有，非本次 |
+| `archive_test.go:358` | `// [TASK-002] R1.2: an attacker-supplied reviewed: true…` | loom 既有，非本次 |
+| `commit_test.go:3` | `// Context Checkpoint: … (TASK-008, vault git wiring)` | loom 既有，非本次 |
+| `configs/config.yaml:118` | `# 各渠道 cli_path 必须为 pin 的绝对路径。加载期硬校验(TASK-004/模块C、F-7):` | loom 既有，非本次 |
+
+本次新写的 5 条（DoD non_functional[0] 的「注释里引用任务编号必须带 milestone 前缀」义务）：
+
+```
+internal/executors/spool/taint.go:8        // caller from allowedSources (M3 TASK-002) — it is provenance, not trust.
+internal/executors/spool/archive.go:28     // M3 的 TASK-002: source names the producing pipeline. It is optional
+internal/executors/spool/archive_test.go:424  // M3 TASK-002: source 参数——缺省 web-research；hestia 允许；其他 DENIED 且不落盘。
+internal/executors/spool/archive_test.go:438  // M3 的 TASK-002 边界：缺省有三种到达形态——键缺席（上方）、空串、非字符串
+internal/executors/spool/taint_test.go:268 // M3 的 TASK-002: injectTaint 的 source 由调用方从闭集里选，reviewed 仍无条件覆写。
+```
+
+判别式：`grep -rhoE 'M3 (的 )?TASK-[0-9]+' internal/executors/spool/ configs/ | wc -l` → **5**；
+`grep -rho 'TASK-[0-9]*' internal/executors/spool/ configs/ | wc -l` → **9**。差值 4 即上表的既有注释。
+「`M3 TASK-002`」（无「的」）出自需求原文给的代码样例，照抄保持原样，Leader 已裁决两种写法都接受。
+
+### 4.7 交付过程中踩到的一个坑（记给后来人）
 
 在 loom worktree 里 `cd` 着调用 `bash .claude/hooks/arcforge-write.sh`，
 相对路径会解析到 **loom 自己的那份**写通道脚本，checkpoint 因此落进了
