@@ -450,7 +450,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "Calibrate", "Contract.FileName", "Contract.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract"}
+	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+

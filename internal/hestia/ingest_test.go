@@ -1377,9 +1377,12 @@ func TestIngestWritesContractOnObservation(t *testing.T) {
 	assert.Contains(t, sender.texts[0], "信号 活化🔴 楼市🔴 消费🔴 信贷🟡 · 温度 0/4",
 		"P2 必须带 Evaluate 的真实结果，不是零值 Temperature")
 
+	// M3 的 TASK-001 起 pending/ 里契约旁多一份同名前缀的侧车（.history.json）。
+	// 这里断言的是「契约恰一份」，不是「目录恰一个文件」——用 ElementsMatch 钉住
+	// 完整清单而不是放宽成 Contains，多写出第三个文件照样会红。
 	names := pendingContracts(t, cfg)
-	require.Equal(t, []string{"2025-12-annual.json"}, names)
-	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", names[0]))
+	require.ElementsMatch(t, []string{"2025-12-annual.json", "2025-12-annual.history.json"}, names)
+	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"))
 	require.NoError(t, err)
 	var c map[string]any
 	require.NoError(t, json.Unmarshal(raw, &c))
@@ -1436,11 +1439,53 @@ func TestIngestNoContractOnDuplicate(t *testing.T) {
 	s := newTestStore(t)
 	cfg := ingestCfg(t)
 	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	// 模拟被消费：M3 的 TASK-001 起一期产出契约 + 侧车两份，逐个删。
+	// 不改成「清空目录」——那样会把「本来就不该有的第三份」一并抹掉，断言随之失效。
 	first := pendingContracts(t, cfg)
-	require.Len(t, first, 1)
-	require.NoError(t, os.Remove(filepath.Join(cfg.Queue.Dir, "pending", first[0]))) // 模拟被消费
+	require.Len(t, first, 2, "契约 + 侧车")
+	for _, name := range first {
+		require.NoError(t, os.Remove(filepath.Join(cfg.Queue.Dir, "pending", name)))
+	}
 	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg, Force: true}))
-	assert.Empty(t, pendingContracts(t, cfg), "Duplicate 不该再写一份")
+	assert.Empty(t, pendingContracts(t, cfg), "Duplicate 不该再写一份契约，也不该再写侧车")
+}
+
+// 入库 ⇒ pending/ 同时有契约与侧车，且侧车先于契约写（写契约失败时侧车仍在）。
+func TestIngestWritesHistoryBesideContract(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg}))
+	names := pendingContracts(t, cfg)
+	assert.ElementsMatch(t, []string{"2025-12-annual.json", "2025-12-annual.history.json"}, names)
+
+	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.history.json"))
+	require.NoError(t, err)
+	var h map[string]any
+	require.NoError(t, json.Unmarshal(raw, &h))
+	assert.Equal(t, "2025-12-annual", h["for"])
+	assert.Equal(t, "contract@v1", h["generated_by"])
+	assert.Contains(t, h, "monthly_recent", "annual 带 monthly_recent（可为空数组）")
+}
+
+// 先侧车后契约（AD-M3-1）：契约写失败时侧车**已经**在 pending/ 里。
+//
+// 这条钉的是顺序，不只是「两个都写了」。把 WriteHistory 挪到 WriteContract 之后，
+// 上面那条 TestIngestWritesHistoryBesideContract 照样绿（成功路径两者都在），只有
+// 失败路径能把顺序照出来——消费者看到契约时侧车一定已落盘，这正是先侧车的理由。
+func TestIngestHistoryLandsBeforeContractOnWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	require.NoError(t, EnsureQueueDirs(cfg.Queue.Dir))
+	// 只堵契约那个文件名，侧车的名字不同 ⇒ 侧车写得进、契约 rename 撞 EISDIR。
+	require.NoError(t, os.MkdirAll(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"), 0o755))
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contract", "侧车失败也归 contract 阶段：对运维是同一件事")
+	_, serr := os.Stat(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.history.json"))
+	require.NoError(t, serr, "侧车在契约之前写：契约写失败时它必须已经在")
 }
 
 // OutOfOrder 不生成（AD-14）：同期更旧 published_at 迟到，Save 同样入权威表但不是 current 行；
@@ -1531,8 +1576,8 @@ func TestIngestRevisionContractCarriesSupersedes(t *testing.T) {
 	require.NoError(t, Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: &out, Cfg: cfg}))
 	assert.Contains(t, out.String(), bitemporal.Revision.String())
 	names := pendingContracts(t, cfg)
-	require.Equal(t, []string{"2025-12-annual.json"}, names)
-	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", names[0]))
+	require.ElementsMatch(t, []string{"2025-12-annual.json", "2025-12-annual.history.json"}, names)
+	raw, err := os.ReadFile(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"))
 	require.NoError(t, err)
 	var c map[string]any
 	require.NoError(t, json.Unmarshal(raw, &c))
