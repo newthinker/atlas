@@ -445,6 +445,17 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) (runResult, erro
 			}
 			in.Supersedes = prior
 		}
+		// 侧车在契约之前（M3 的 TASK-001）：消费者是看到契约才去读侧车的，反过来会有
+		// 一个窗口——契约已在 pending/、侧车还没落盘，消费者读到半份输入。失败与契约
+		// 写失败同待遇（contractError）：数据已在库，P1 照发、P2 不发，运维用
+		// `hestia contract emit --period` 连侧车一起补发。
+		hist, err := BuildHistory(ctx, d.Store, obs, contractGenerator)
+		if err != nil {
+			return fail("contract", contractError{err: err})
+		}
+		if _, err := WriteHistory(d.Cfg.Queue.Dir, hist); err != nil {
+			return fail("contract", contractError{err: err})
+		}
 		path, err := WriteContract(d.Cfg.Queue.Dir, BuildContract(in, d.Cfg))
 		if err != nil {
 			return fail("contract", contractError{err: err})
