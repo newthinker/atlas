@@ -1488,6 +1488,76 @@ func TestIngestHistoryLandsBeforeContractOnWriteFailure(t *testing.T) {
 	require.NoError(t, serr, "侧车在契约之前写：契约写失败时它必须已经在")
 }
 
+// 侧车**写盘**失败 ⇒ 契约不被写出（M3 的 TASK-001 review_fix；QA 指出反方向零断言）。
+//
+// 与上面那条是**一对镜像**，缺一不可：
+//
+//	上面（正方向）：契约写失败 ⇒ 侧车**已在**   —— 守「侧车先写」
+//	这条（反方向）：侧车写失败 ⇒ 契约**不在**   —— 守「侧车失败就别往下走」
+//
+// 只有正方向时，把 `return fail(...)` 改成「记日志继续」整个套件仍全绿，而消费者会拿到
+// **没有侧车的契约**。M3 的消费者契约建立在「侧车与契约成对出现」上（SKILL.md Step 2：
+// 侧车缺失即对移 failed/），那半个性质此前没有闸。
+//
+// 手法与镜像对象相同，只是把预建的同名目录换成侧车的文件名：writeAtomic 的 os.Rename
+// 撞 EISDIR。不依赖权限位 —— root 下跑也不会假绿。
+func TestIngestHistoryWriteFailureSkipsContract(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cfg := ingestCfg(t)
+	require.NoError(t, EnsureQueueDirs(cfg.Queue.Dir))
+	require.NoError(t, os.MkdirAll(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.history.json"), 0o755))
+
+	err := Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contract", "侧车失败也归 contract 阶段")
+	assert.Contains(t, err.Error(), "history", "错误链要点名失败的是侧车")
+
+	// 核心断言：契约**没有**被写出去。
+	// 断言「契约文件不存在」而不是「pending/ 里只有侧车」—— 侧车那次也失败了，
+	// 它留在盘上的只有那个预建的目录。
+	_, cerr := os.Stat(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"))
+	assert.True(t, os.IsNotExist(cerr),
+		"侧车写失败时契约不得被写出：消费者拿到没有侧车的契约会按 SKILL.md Step 2 对移 failed/")
+	assert.Equal(t, 1, countRows(t, s, TableObservations), "数据已在库，不因侧车失败回滚")
+}
+
+// 侧车**构建**失败 ⇒ 契约同样不被写出（同上，另一个 return 分支）。
+//
+// 🔴 造法必须污染 **monthly** 行，不能污染同类型（annual）行 —— 这是实撞出来的：
+// `Validate` 自己也经 History 窄接口调 `Preceding(period, periodType, n)`（闸门层），
+// 污染同类型行会让**校验阶段**先失败（`validate: … store preceding 2025-12/annual: Scan error`），
+// 流程在契约段之前就 fail 掉，`BuildHistory` 那两行根本走不到。
+// 而 annual 的侧车要额外查「最近 12 个 monthly」（BuildHistory 的第二次 Preceding），
+// 那次查询 Validate 不做 ⇒ 污染 monthly 行能让校验照常通过、只有侧车构建失败。
+func TestIngestHistoryBuildFailureSkipsContract(t *testing.T) {
+	ctx := context.Background()
+	s, dbPath := newTestStoreAt(t)
+	cfg := ingestCfg(t)
+	monthly := contractObs()
+	monthly.Meta.Period, monthly.Meta.PeriodType = "2025-01", "monthly"
+	monthly.Meta.PublishedAt, monthly.Meta.ArticleID = "2025-02-15", "2025021509294440744"
+	_, err := s.Save(ctx, monthly, passing())
+	require.NoError(t, err)
+
+	raw := rawDB(t, dbPath)
+	_, err = raw.ExecContext(ctx,
+		"UPDATE "+TableObservations+" SET "+FieldM2+" = 'not-a-number' WHERE period_type = 'monthly'")
+	require.NoError(t, err)
+
+	err = Ingest(ctx, IngestDeps{Store: s, Fetch: annualFetcher(t), Out: io.Discard, Cfg: cfg})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contract", "侧车失败也归 contract 阶段")
+	assert.Contains(t, err.Error(), "history 2025-12-annual", "错误要点名是哪份侧车建不出来")
+	assert.Contains(t, err.Error(), "preceding 2025-12/monthly",
+		"失败的是 monthly_recent 那次查询 —— 证明校验已通过、确实走到了 BuildHistory")
+
+	_, cerr := os.Stat(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.json"))
+	assert.True(t, os.IsNotExist(cerr), "侧车建不出来时契约同样不得被写出")
+	_, herr := os.Stat(filepath.Join(cfg.Queue.Dir, "pending", "2025-12-annual.history.json"))
+	assert.True(t, os.IsNotExist(herr), "侧车自己也没落盘")
+}
+
 // OutOfOrder 不生成（AD-14）：同期更旧 published_at 迟到，Save 同样入权威表但不是 current 行；
 // 若也写契约，会用旧数据同名覆盖 pending/ 里可能尚未消费的更新契约——违背「最新的赢」。
 // P2 照旧，温度 0/0。
