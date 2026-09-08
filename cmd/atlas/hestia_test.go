@@ -31,6 +31,18 @@ package main
 // error_handling[0] 红阶段留痕 → discovery verification.red_phase；Current 查询错误原样返回（UnknownPeriod 走 ok=false 分支）
 // review_fix R1     修订过的期次回放 ⇒ is_revision true + supersedes_published_at + passed true
 //                                          → TestHestiaContractEmitRevisionPeriod（杀 test-m2a-a 的 M11/M12）
+//
+// M3 的 TASK-001（本仓库 Arcforge TASK-002）：contract emit 同产侧车
+// functional[0]     !--stdout 时 BuildHistory→WriteHistory，generated_by 随契约走 contract@v1/replay
+//                                          → TestHestiaContractEmitWritesHistory
+// functional[1]     --stdout 时 stdout 不含 "same_type"（只打契约不打侧车）
+//                                          → TestHestiaContractEmitWritesHistory（后半段）
+// boundary[0]       --stdout 单独跑不写任何文件（含侧车）；queue 目录不存在时靠 WriteHistory 的 MkdirAll 建
+//                                          → TestHestiaContractEmitStdoutDoesNotWrite（追加断言）、
+//                                            TestHestiaContractEmitWritesHistory（fixture 的 queueDir 本就不存在）
+// error_handling[0] BuildHistory / WriteHistory 任一失败 ⇒ 返回非 nil error 且**不写契约**
+//                                          → TestHestiaContractEmitHistoryBuildFailureSkipsContract、
+//                                            TestHestiaContractEmitHistoryWriteFailureSkipsContract
 
 import (
 	"bytes"
@@ -1543,11 +1555,130 @@ func TestHestiaContractEmitStdoutDoesNotWrite(t *testing.T) {
 	_, err := os.Stat(filepath.Join(queueDir, "pending", "2025-12-annual.json"))
 	assert.True(t, os.IsNotExist(err), "--stdout 不落盘")
 
+	// M3 的 TASK-001：--stdout **单独跑**时侧车同样不落盘。
+	// 单列一条断言而不是只看契约：侧车走的是另一个分支（!hestiaEmitStdout），
+	// 契约那条断言对它一个字都管不着——把 WriteHistory 漏写在 stdout 分支外面，
+	// 上面那行照样绿。
+	_, herr := os.Stat(filepath.Join(queueDir, "pending", "2025-12-annual.history.json"))
+	assert.True(t, os.IsNotExist(herr), "--stdout 不写侧车")
+	// pending/ 整个目录都不该被建出来。写成对目录本身的无条件断言，而不是「ReadDir 成功了
+	// 再看它空不空」——后者在目录不存在时（本用例的实际情形）会整条跳过，是个永不执行、
+	// 因而永不报错的断言。
+	_, derr := os.Stat(filepath.Join(queueDir, "pending"))
+	assert.True(t, os.IsNotExist(derr), "--stdout 单独跑 ⇒ pending/ 一个文件都不该有，目录本身也不该建")
+
 	// 边界（M2a 的 TASK-006 boundary[0]）：末尾恰一个 \n——JSON() 已带，命令不得再 Println。
 	b := out.Bytes()
 	require.NotEmpty(t, b)
 	assert.Equal(t, byte('\n'), b[len(b)-1], "stdout 末字节必须是换行")
 	assert.NotEqual(t, byte('\n'), b[len(b)-2], "恰一个换行，不是两个")
+}
+
+// 回放路径同产侧车（M3 的 TASK-001）：消费者不分实时与回放，两条路径都得给出同形的一对
+// <period>-<type>.json + <period>-<type>.history.json。
+//
+// 用既有的 restoreEmitGlobals + newCapturingCmd，而不是需求原文的内联 t.Cleanup + 全局
+// hestiaContractEmitCmd.SetOut：原文那种写法会把 out 挂到**包级** cmd 上并留在那里，
+// 后续用例读到的是上一条的缓冲区。本文件其余用例一律走 newCapturingCmd，跟随既有形状。
+func TestHestiaContractEmitWritesHistory(t *testing.T) {
+	cfgPath, queueDir := emitFixture(t)
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "2025-12", "annual", false
+
+	cmd, _ := newCapturingCmd()
+	require.NoError(t, runHestiaContractEmit(cmd, nil))
+
+	// emitFixture 的 queueDir 从未被创建过，也没人调 EnsureQueueDirs ⇒ 这条同时证明
+	// pending/ 是 WriteHistory 自己的 MkdirAll 建出来的（DoD boundary[0] 后半句）。
+	raw, err := os.ReadFile(filepath.Join(queueDir, "pending", "2025-12-annual.history.json"))
+	require.NoError(t, err, "回放也要产出侧车，消费者不分实时与回放")
+
+	var h map[string]any
+	require.NoError(t, json.Unmarshal(raw, &h))
+	assert.Equal(t, "2025-12-annual", h["for"])
+	// 侧车的 generated_by 跟着契约走：回放是 contract@v1/replay，不是实时的 contract@v1。
+	// 钉死具体值而不是「非空」——传错成 contractGenerator 时「非空」照样绿。
+	assert.Equal(t, "contract@v1/replay", h["generated_by"],
+		"侧车 generated_by 必须取自 c.GeneratedBy，回放形态是 contract@v1/replay")
+	assert.Contains(t, h, "monthly_recent", "annual 带 monthly_recent（可为空数组）")
+	assert.Contains(t, h, "same_type")
+
+	// 契约与侧车成对出现，且 pending/ 里恰这两个。
+	names, err := os.ReadDir(filepath.Join(queueDir, "pending"))
+	require.NoError(t, err)
+	var got []string
+	for _, e := range names {
+		got = append(got, e.Name())
+	}
+	assert.ElementsMatch(t, []string{"2025-12-annual.json", "2025-12-annual.history.json"}, got)
+
+	// --stdout 只打契约、不打侧车（同一 fixture 再跑一次；上面已落盘的侧车不影响 stdout 断言）。
+	hestiaEmitStdout = true
+	cmd2, out := newCapturingCmd()
+	require.NoError(t, runHestiaContractEmit(cmd2, nil))
+	assert.NotContains(t, out.String(), `"same_type"`, "--stdout 只打契约，不打侧车")
+	assert.Contains(t, out.String(), `"generated_by": "contract@v1/replay"`, "前置：打出来的确实是契约")
+}
+
+// 侧车**构建**失败 ⇒ 返回非 nil error 且**不写契约**（侧车在契约之前，DoD error_handling[0]）。
+//
+// 造法：库里另存一条更早的同类型（annual）观测，再用裸连接把它的一个数值列改成文本，
+// 使 BuildHistory 内部 Preceding 的 scanObservation 扫 sql.NullFloat64 时失败。
+// 目标期 2025-12 那行不动 ⇒ 前面的 st.Current 照常成功，走得到 BuildHistory。
+func TestHestiaContractEmitHistoryBuildFailureSkipsContract(t *testing.T) {
+	cfgPath, queueDir := emitFixture(t)
+	cfg, err := hestia.LoadConfig(cfgPath)
+	require.NoError(t, err)
+	st, err := hestia.NewStore(cfg.Storage.DBPath)
+	require.NoError(t, err)
+	older := hestia.Observation{
+		Meta: hestia.Meta{Period: "2024-12", PeriodType: "annual", PublishedAt: "2025-01-15",
+			ArticleID: "2025011509294440744", CaliberVersion: "2025-01", Extractor: "rule@v2"},
+		Values: map[string]float64{hestia.FieldM2: 300.1},
+	}
+	rep := hestia.ValidationReport{Passed: true, Checks: []hestia.Check{{ID: "monetary_hierarchy", Status: hestia.CheckPassed}}}
+	_, err = st.Save(context.Background(), older, rep)
+	require.NoError(t, err)
+	require.NoError(t, st.Close())
+
+	raw, err := sql.Open("sqlite", "file:"+cfg.Storage.DBPath)
+	require.NoError(t, err)
+	_, err = raw.Exec(`UPDATE ` + hestia.TableObservations + ` SET ` + hestia.FieldM2 +
+		` = 'not-a-number' WHERE period = '2024-12'`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "2025-12", "annual", false
+	cmd, _ := newCapturingCmd()
+	err = runHestiaContractEmit(cmd, nil)
+	require.Error(t, err, "侧车构建失败必须传播，不能静默少一份侧车")
+	assert.Contains(t, err.Error(), "history 2025-12-annual", "错误要点名是哪份侧车")
+
+	_, statErr := os.Stat(filepath.Join(queueDir, "pending", "2025-12-annual.json"))
+	assert.True(t, os.IsNotExist(statErr),
+		"侧车在契约之前：侧车失败时契约不该被写出去，否则消费者拿到没有侧车的契约")
+}
+
+// 侧车**写盘**失败 ⇒ 同样返回非 nil error 且不写契约。
+// 造法：把 <queueDir>/pending 预先建成一个普通文件，让 WriteHistory 的 MkdirAll 撞 ENOTDIR。
+// 不依赖权限位——root 下跑也不会假绿。
+func TestHestiaContractEmitHistoryWriteFailureSkipsContract(t *testing.T) {
+	cfgPath, queueDir := emitFixture(t)
+	require.NoError(t, os.MkdirAll(queueDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(queueDir, "pending"), []byte("x"), 0o644))
+
+	restoreEmitGlobals(t)
+	hestiaCfgPath, hestiaEmitPeriod, hestiaEmitPeriodType, hestiaEmitStdout = cfgPath, "2025-12", "annual", false
+	cmd, _ := newCapturingCmd()
+	err := runHestiaContractEmit(cmd, nil)
+	require.Error(t, err, "侧车写盘失败必须传播")
+	assert.Contains(t, err.Error(), "history", "错误链里点名 history")
+
+	// pending 仍是那个普通文件，没有被谁改成目录、也没有契约落在别处。
+	fi, statErr := os.Stat(filepath.Join(queueDir, "pending"))
+	require.NoError(t, statErr)
+	assert.False(t, fi.IsDir(), "pending 仍是普通文件")
 }
 
 func TestHestiaContractEmitUnknownPeriodFails(t *testing.T) {

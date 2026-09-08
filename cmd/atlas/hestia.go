@@ -443,6 +443,21 @@ func runHestiaContractEmit(cmd *cobra.Command, _ []string) error {
 		Supersedes: prior,
 		Replay:     true,
 	}, cfg)
+	// 侧车在契约之前（M3 的 TASK-001，与 ingest 路径同序）：消费者是看到契约才去读侧车的，
+	// 反过来会有一个窗口——契约已在 pending/、侧车还没落盘，消费者读到半份输入。
+	//
+	// 只在非 --stdout 时产出：--stdout 是「把契约打给我看」，不是入队，写文件会让一条只读
+	// 命令产生副作用。generated_by 取 c.GeneratedBy（回放是 contract@v1/replay）而不是硬写
+	// 常量——消费者不分实时与回放，但要能从侧车本身看出它是哪条路径产的。
+	if !hestiaEmitStdout {
+		hist, err := hestia.BuildHistory(ctx, st, obs, c.GeneratedBy)
+		if err != nil {
+			return err
+		}
+		if _, err := hestia.WriteHistory(cfg.Queue.Dir, hist); err != nil {
+			return err
+		}
+	}
 	if hestiaEmitStdout {
 		b, err := c.JSON()
 		if err != nil {
