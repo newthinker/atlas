@@ -7,8 +7,8 @@
 > atlas commit subject 用 Arcforge 编号（`docs(TASK-005):`），文档内注释里的里程碑编号用需求编号（`M3 的 TASK-004`）。
 > 两处编号不同是**预期的，不是笔误**。
 >
-> **采样纪律**：本文件所有字节数、行数、计数、sha 均在**最后一次改动（nanoclaw commit `aff2521433eef8567addcedc988fecad3ed08c6f`）之后统一重采**，
-> 与 ③节锚点同一时刻。
+> **采样纪律**：本文件所有字节数、行数、计数、sha 均在**最后一次改动（nanoclaw commit `7ca6b57e64a561351d7108a937b8607a5e87f0a6`，即 ④节 G 的两处订正）之后统一重采**，与 ③节锚点同一时刻。
+> ⚠️ **唯一的例外是 2.7 的 code-simplifier 那张表**——它记的是**第一轮**（`aff2521…`）当时的字节，用途是证明子代理没改动过那一版，性质上必须是那个时点的值；表内已标明。
 
 ---
 
@@ -17,23 +17,39 @@
 四个**新建**文件，全部在 nanoclaw 的 `container/skills/warp-hestia/` 下，**被 git 跟踪、进 PR**
 （与 TASK-004 的 `groups/*` 不同，那两个是未跟踪的本机运行时数据）。
 
+本任务在 nanoclaw 上有**两个 commit**（第二个是交付后按 Leader 裁决做的两处订正，见 ④节 G）：
+
 ```
 $ git -C /Users/zuowei/workspace/ai/wt-warp-hestia show --numstat --format='' aff2521433eef8567addcedc988fecad3ed08c6f
 112	0	container/skills/warp-hestia/SKILL.md
 110	0	container/skills/warp-hestia/references/glossary.md
 161	0	container/skills/warp-hestia/references/methodology.md
 125	0	container/skills/warp-hestia/references/note-format.md
+
+$ git -C /Users/zuowei/workspace/ai/wt-warp-hestia show --numstat --format='' 7ca6b57e64a561351d7108a937b8607a5e87f0a6
+3	1	container/skills/warp-hestia/SKILL.md
+4	0	container/skills/warp-hestia/references/note-format.md
 ```
 
-合计 **508 行新增、0 删除**（纯新建）。字节数：
+**累计**（相对分支起点 `d791101e1defcfd3d3d3fcf7ae32a85ec420547b`，即 TASK-004 交出时的 HEAD）：
+
+```
+$ git -C /Users/zuowei/workspace/ai/wt-warp-hestia diff --numstat d791101e1defcfd3d3d3fcf7ae32a85ec420547b 7ca6b57e64a561351d7108a937b8607a5e87f0a6
+114	0	container/skills/warp-hestia/SKILL.md
+110	0	container/skills/warp-hestia/references/glossary.md
+161	0	container/skills/warp-hestia/references/methodology.md
+129	0	container/skills/warp-hestia/references/note-format.md
+```
+
+合计 **514 行新增、0 删除**（纯新建；第二个 commit 的那 1 行删除是 Step 3 的整行替换，被累计 diff 吸收）。字节数：
 
 ```
 $ wc -c container/skills/warp-hestia/SKILL.md container/skills/warp-hestia/references/*.md
-    5259 container/skills/warp-hestia/SKILL.md
+    5667 container/skills/warp-hestia/SKILL.md
     5965 container/skills/warp-hestia/references/glossary.md
    12331 container/skills/warp-hestia/references/methodology.md
-    6219 container/skills/warp-hestia/references/note-format.md
-   29774 total
+    6727 container/skills/warp-hestia/references/note-format.md
+   30690 total
 ```
 
 ### 逐文件要点
@@ -53,15 +69,15 @@ $ wc -c container/skills/warp-hestia/SKILL.md container/skills/warp-hestia/refer
 
 ```
 $ cd /Users/zuowei/workspace/ai/wt-warp-hestia
-$ git show --numstat --format='' aff2521433eef8567addcedc988fecad3ed08c6f -- container/skills/warp-research | grep -c .
-0                       (须 0 —— 该 commit 在 warp-research 下改动 0 个文件)
+$ git diff --numstat d791101e1defcfd3d3d3fcf7ae32a85ec420547b 7ca6b57e64a561351d7108a937b8607a5e87f0a6 -- container/skills/warp-research | grep -c .
+0                       (须 0 —— 两个 commit 累计在 warp-research 下改动 0 个文件)
 ```
 
 ---
 
 ## ② 实测输出
 
-以下全部采于 nanoclaw commit `aff2521433eef8567addcedc988fecad3ed08c6f` 之后，与 ③节锚点同一时刻。
+以下全部采于 nanoclaw commit `7ca6b57e64a561351d7108a937b8607a5e87f0a6`（④节 G 的订正）之后，与 ③节锚点同一时刻。
 **每条判据都给命令 + 原样输出 + 计数**；`(须 N)` 是 DoD 写死的期望值。
 
 ### 2.1 SKILL.md 结构（functional[0]）
@@ -185,6 +201,68 @@ methodology 的 ## 标题 (5):
 ⚠️ 八问与五链在本文件里是 `### `（八问）与 `- `（五链），**不参与本判据**——
 DoD 明写只比 `## `，因为把八问写成 `## ` 是最自然的选择，比 `### ` 会误伤合格文档。
 
+🔴 **求值工具必须是 `grep -Fxf`，不能是 `comm -12`——后者在 CJK 上给假阳，且假值会变**
+
+DoD 的判据②在本轮被 Leader 追加了工具钉死条款。**这里给可复现的证据**，
+因为验证者按「求集合交集」的直觉最可能选 `comm`，用它会 **reject 一份合格交付**。
+
+两边的 `## ` 标题原样清单（先落成两个文件，三把仪器读同一对输入）：
+
+```
+$ grep '^## ' '/Users/zuowei/Obsidian/ClawdVault/Projects/Hestia/PBOC2026年上半年金融数据解读-完整版.md' > /tmp/src-h2.txt
+$ grep '^## ' container/skills/warp-hestia/references/methodology.md > /tmp/md-h2.txt
+
+$ cat /tmp/src-h2.txt          # 源文件 12 个
+## 一、这节课讲什么，目标是什么？
+## 二、中国人民银行金融数据发布的时间及类目
+## 三、开讲之前，先把 8 个概念用人话说清楚
+## 四、2026 年上半年数据全景
+## 五、用数据回答八个社会现实问题
+## 六、指标之间的关联性：五条传导链
+## 七、怎么用在自己的生活、工作和投资上
+## 八、你自己的"每月 15 分钟"检查表
+## 九、常见误读与陷阱
+## 附录 A：2026 年上半年数据速查卡
+## 附录 B：一句话结论
+## 附录 C：数据来源与免责声明
+
+$ cat /tmp/md-h2.txt           # methodology.md 5 个
+## 八个概念（判读用得上的那一层）
+## 八问框架（叙述骨架，逐问写）
+## 五条传导链（跨字段关联的提示）
+## 误读陷阱
+## 写作纪律
+```
+
+**三把仪器读同一对输入**：
+
+```
+$ comm -12 <(sort /tmp/src-h2.txt) <(sort /tmp/md-h2.txt)
+## 九、常见误读与陷阱
+## 一、这节课讲什么，目标是什么？
+## 五、用数据回答八个社会现实问题
+## 六、指标之间的关联性：五条传导链
+## 七、怎么用在自己的生活、工作和投资上
+$ comm -12 … | wc -l
+5                       ← ❌ 假阳
+
+$ grep -Fxf /tmp/src-h2.txt /tmp/md-h2.txt | grep -c .
+0                       ← ✅ 真值
+
+$ python3 -c "…集合交集…"
+python set 交集条数 = 0 []      ← ✅ 真值（独立复算）
+```
+
+🔴 **`comm` 输出的那 5 行，一行都不在 `methodology.md` 里**——把两份清单并排看就一目了然
+（它报的全是源文件独有的章节名）。但**只看计数 `5` 是完全合理的**：源文件 12 个、本文件 5 个，
+「5 个全重合」在数值上说得通。这就是这类失效最危险的地方。
+
+成因：`comm` 要求两侧按**同一 collation** 排序，CJK 标题不满足该假设 ⇒ 它**不报错、只给垃圾**。
+更麻烦的是**同一个坏仪器会给出不同的假值**——Leader 实测 5，另一次子代理跑出 3。
+「重跑数变了」容易被读成「有别的东西在变」，而不是「仪器坏了」。
+
+⇒ 判据仍是「交集 ≤ 1」，**求值方式钉死为 `grep -Fxf`**（整行定长匹配、与顺序无关）。
+
 **判据③：13 个名称逐条可 grep**
 
 ```
@@ -256,7 +334,8 @@ grep 退出码=1
 ### 2.6 提交与工作区状态
 
 ```
-$ git -C /Users/zuowei/workspace/ai/wt-warp-hestia log --oneline -1
+$ git -C /Users/zuowei/workspace/ai/wt-warp-hestia log --oneline -2
+7ca6b57 fix(warp-hestia): Step 3 的 $N 改由 prepare.py --print-name 打印；note-format 点明 ## 计数的两个口径
 aff2521 feat(warp-hestia): SKILL.md 六步流程 + methodology / note-format / glossary（Hestia M3）
 
 $ git -C /Users/zuowei/workspace/ai/wt-warp-hestia status --short
@@ -315,7 +394,7 @@ commit subject 给 atlas 的门禁 `task-completed.sh`。
 
 **结果：未做任何改动。** 核实方式不是采信它的报告（它只回了一句「Complete」），而是看载体：
 
-| 文件 | 我写入时字节 | 子代理运行后字节 |
+| 文件 | 我写入时字节（**第一轮 `aff2521…`**） | 子代理运行后字节 |
 |---|---|---|
 | `SKILL.md` | 5259 | **5259** |
 | `references/glossary.md` | 5965 | **5965** |
@@ -323,6 +402,7 @@ commit subject 给 atlas 的门禁 `task-completed.sh`。
 | `references/note-format.md` | 6219 | **6219** |
 
 且四个文件 mtime 仍是我的写入时刻（11:51 / 11:52 / 11:53 / 11:55）。
+⚠️ **上表是第一轮（`aff2521…`）的时点值，不是当前值**——它要回答的是「子代理有没有改动我写的那一版」，只有那个时点的字节才能回答。当前字节（④节 G 的订正之后）见 ①节，`SKILL.md` 5667、`note-format.md` 6727，另两份未变。
 **更强的一层**：2.1–2.4 的全部 11 条判据是在子代理运行**之后**复跑一遍的，全部仍然通过——
 即便发生了等长度的改写也会被这轮复跑逮住。
 
@@ -334,16 +414,23 @@ commit subject 给 atlas 的门禁 `task-completed.sh`。
 | --- | --- |
 | nanoclaw worktree **绝对路径** | `/Users/zuowei/workspace/ai/wt-warp-hestia`（**TASK-004 建的，本任务复用，未新建**） |
 | nanoclaw 分支 | `feat/warp-hestia` |
-| nanoclaw 本任务 commit **全 sha** | **`aff2521433eef8567addcedc988fecad3ed08c6f`** |
+| nanoclaw 本任务 commit ① **全 sha** | **`aff2521433eef8567addcedc988fecad3ed08c6f`**（四份文档新建） |
+| nanoclaw 本任务 commit ② **全 sha** | **`7ca6b57e64a561351d7108a937b8607a5e87f0a6`**（交付后两处订正，见 ④节 G）= 分支当前 HEAD |
 | nanoclaw 本任务的父 commit（= TASK-004 交出时的 HEAD） | `d791101e1defcfd3d3d3fcf7ae32a85ec420547b` |
 | nanoclaw 主 checkout 分支 / HEAD 全 sha | `feat/vendor-agent-reach-skill` / `aefea6ce5439cfcf15b3dc54ea9bd507c5846c95` |
 | nanoclaw PR 链接 | **无——本任务不开 PR**（见 ④节 A） |
 | methodology.md 的源文件 | `/Users/zuowei/Obsidian/ClawdVault/Projects/Hestia/PBOC2026年上半年金融数据解读-完整版.md`（41113 字节） |
-| atlas 基线 HEAD 全 sha（本文件写于其上） | `7e24b116faff2174771d4551b54aa582a874d209` |
-| atlas worktree / 分支 | `/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-005-m3` / `task/TASK-005-m3` |
+| atlas 第一轮 merge commit 全 sha | `1991c49ec5541fd4d4c0d0cd23117b389e7d00d1` |
+| atlas 基线 HEAD 全 sha（**本轮**修订写于其上） | `1991c49ec5541fd4d4c0d0cd23117b389e7d00d1` |
+| atlas worktree / 分支（第一轮，已拆） | `wt-TASK-005-m3` / `task/TASK-005-m3` @ `c73dbe3b7aabf85df0f31e503d2ca50aa83a8d36` |
+| atlas worktree / 分支（**本轮**） | `/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-005-m3b` / `task/TASK-005-m3-fix` |
 
 > 🔴 **worktree 交给下游时是干净的**（`git status --short` 无输出）。
-> TASK-006 继续在同一个 worktree 的同一分支上加 `scripts/`；**TASK-007 负责拆**。
+> TASK-006 继续在同一个 worktree 的同一分支上加 `scripts/`，**接着 `7ca6b57e64a561351d7108a937b8607a5e87f0a6` 往下走**；**TASK-007 负责拆**。
+>
+> ⚠️ **本文件里每个 `file:line` 引用都注明了锚在哪棵树**（nanoclaw worktree / nanoclaw 主 checkout / atlas）。
+> 立此规矩的原因是 TASK-004 的验证报告点出过一处漏网：那份文档的表头写「主 checkout `aefea6c…`；worktree `d791101…` **同**」，
+> 而两树该文件实际差 9 行——表内两行各自锚在不同的树上，却被一句「同」并成了一个断言。
 
 ---
 
@@ -354,7 +441,7 @@ commit subject 给 atlas 的门禁 `task-completed.sh`。
 需求 TASK-004 的 Step 5 只有 `git add` + `git commit`，没有 `gh pr create`。
 DoD 进一步写明「本任务**先不开 PR**（TASK-006 的脚本要进同一个 PR）」。
 ⇒ ③节的 PR 链接为「无」，这是**预期结果**，不得据此判 rejected。
-`feat/warp-hestia` 分支上现在有 1 个 commit（`aff2521433eef8567addcedc988fecad3ed08c6f`），TASK-006 会在其上再加脚本与测试，届时一并开 PR。
+`feat/warp-hestia` 分支上现在有 **2** 个 commit（`aff2521433eef8567addcedc988fecad3ed08c6f` + `7ca6b57e64a561351d7108a937b8607a5e87f0a6`，后者见 ④节 G），TASK-006 会在其上再加脚本与测试，届时一并开 PR。
 
 ### B. `scripts/prepare.py` / `verify.py` **不实现**，且不因它们不存在而阻塞
 
@@ -413,3 +500,48 @@ spec §5.1 的目录树里有 `examples/2026-06-h1.md`，但它注明是「冒�
    数据段被改是模型这一轮的问题，契约本身没毛病，移 `failed/` 会让一份好契约需要人工捞回；
    留 `processing/` 则下次会话按 Step 2 的「同名已在 processing ⇒ 直接用那对」自然重试。
    这条已按 DoD 要求写进 SKILL.md（Step 5 与失败分支表各一处）。
+
+### G. 交付后按 Leader 裁决做的两处订正（nanoclaw commit `7ca6b57e64a561351d7108a937b8607a5e87f0a6`）
+
+第一轮交付（`aff2521…` + atlas `c73dbe3b…`，已 merge 进 master `1991c49e…`）之后，
+Leader 裁决了两件事，都在**本任务内**改完，不留给 TASK-006。
+
+**① `SKILL.md` Step 3 与 `note-format.md` 自相矛盾 —— 改 `SKILL.md`（`3/1` 行）**
+
+原文 Step 3 是 `N=<按 references/note-format.md 的命名规则算出的笔记文件名>`，
+而 `note-format.md` 明写「**不要自己拼文件名**，用 `prepare.py --print-name`」。
+⇒ 同一份交付里留下了一处**自相矛盾的可执行指令**（不是表述问题）。
+
+改为：
+
+```bash
+N=$(python3 /app/skills/warp-hestia/scripts/prepare.py --print-name $Q/processing/$F)
+```
+
+并补一句为什么：命名规则有五种 `period_type` 分支、只有 `monthly` 带月份，
+拼错会让 Step 5 的 `mode` 跟着判错（`update` 判成 `create`，Spool 拒绝覆盖已存在的笔记）。
+
+**为什么改 `SKILL.md` 而不是 `note-format.md`**：`note-format.md` 那句是 DoD `functional[1]`
+明确要求的（「`prepare.py --print-name` 打印同一规则，SKILL 用它取 `$N`」），没错；
+是 `SKILL.md` 没接上。**为什么不留给 TASK-006**：`--print-name` 这个接口已经写死在
+TASK-006 的 DoD 里，不是本任务替它预设；而留到那时意味着 TASK-005 的验证会先于修复发生，
+验证者要对着一份自相矛盾的可执行指令做判断。
+
+⚠️ `prepare.py` 此刻**仍不存在**（TASK-006 才实现）——这与 ④节 B 是同一件事，
+Step 3、Step 5 本来就引用了它。本次改动只是让 `$N` 的取法与 `note-format.md` 一致。
+
+**② `note-format.md` 点明 `## ` 计数的两个口径（`4/0` 行）**
+
+Leader 与我在「骨架里有几个 `## `」上报了不同的数（3 与 4），核下来**两个口径都对**：
+
+| 口径 | 值 | 范围 |
+|---|---|---|
+| 机器区内 | **3** | `<!-- machine-generated: begin -->` → `end` 之间（`## 本期数据` / `## 前 12 期` / `## 信号`）|
+| 整份骨架 | **4** | 再加机器区外的 `## 我的批注` |
+| **check 行** | **恒 2** | —— |
+
+⇒ 按机器区口径推得 3、按全文口径推得 4，**两个都错，后者错得更远**。
+这正是「条数写死为 2」而不是「从文档结构推」的理由，已补进 `note-format.md`
+——否则后来者按任一口径去推都会得到错的期望值。
+
+**改动后全部硬性判据复跑，仍全部通过**（见 ②节各小节，那些数字都是订正之后重采的）。
