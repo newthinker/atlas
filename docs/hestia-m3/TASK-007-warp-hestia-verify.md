@@ -369,3 +369,127 @@ $ git -C /Users/zuowei/workspace/ai/nanoclaw rev-parse feat/warp-hestia
 `__pycache__` 每跑一次测试就重新生成，本仓库 `.gitignore` 没有对应规则。本任务**在最后一次跑测试
 之后手工排掉**，两次提交里 `.pyc` 均为 0。**没有改 `.gitignore`**——那是仓库级配置，超出本任务
 `writes` 声明，沿用 TASK-006 的处置。⇒ 若将来还有人在这个目录下加 Python 文件，这一步仍需手工做。
+
+---
+
+# 返工记录（QA REJECT 后的 review_fix，2026-09-09）
+
+> 🔴 `reason_class = **dod_defect**` —— **这是规格的洞，不是我的缺陷**：
+> DoD 逐字规定了封条作用域「从 `begin` 的下一行起、到 seal 行**之前**，扣除 narrative」，
+> 我精确实现了它，三任验证者也按此判过 PASS。Leader 已明确记此归属。
+>
+> ⚠️ 但我要补一句自己的部分：我在 discovery 里把作用域**原样复述**了一遍——
+> **复述规格不等于检验规格**。我把「seal 到 end 之间」这段没覆盖当成了规格的**选择**而不是规格的**洞**，
+> 从没问过「这一段谁管」。判据记下了：**逐字实现一条规格时，顺手问一句「这条规格划出的边界之外还剩什么」**。
+>
+> 本次改动与 TASK-005 / TASK-006 的返工同在 nanoclaw commit
+> **`2a6d39388e4648eb3be0f15b42ee28b52428c5d8`**。全部数字采于该 commit 之后。
+
+## F3 · seal 行与 end 之间的无覆盖段【HIGH】
+
+### 缺陷与复现
+
+`<!-- seal: … -->` 与 `<!-- machine-generated: end -->` 之间的文本
+**既不被任何分段 check 覆盖，也不被封条覆盖**——封条作用域到 seal 行**之前**为止。
+⇒ 可以在**机器区内部**插入伪造数据表而 verify 放行：
+
+```
+$ <把 "## 本期数据（口径修订后）| M1 同比 | 8.80 |" 整段插在 seal 行与 end 之间>
+$ python3 verify.py /tmp/f3.md
+$ echo "EXIT=$?"
+EXIT=0          ← 缺陷：应为 1
+```
+
+伪造内容确实落在机器区内部（`begin`…`end` 之间）：
+
+```
+44:<!-- seal: b89b9681e65bf556e40489ccfbcdd9ced1ec7a31f0859b1433ca791ce5a65093 -->
+46:## 本期数据（口径修订后）
+52:<!-- machine-generated: end -->
+```
+
+它比已登记的 frontmatter 盲区**更危险**：读者看到的是一张**位于机器区里**的表，
+比 frontmatter 更像「机器产的」。
+
+### 修法：形状断言，**不动摘要算法**
+
+```python
+if seal_i + 1 != end_i:
+    return fail("seal 行之后仍有内容：seal 在第 %d 行，而 `%s` 在第 %d 行，中间夹着 %d 行 …")
+```
+
+⚠️ 这是**形状**判定，不触碰封条作用域定义 ⇒ **两份 golden 不受影响**（下面有独立复算）。
+
+### 规格同步（fix_items 的 `spec`）
+
+**三处逐字一致是本 skill 的既有纪律，改实现不改规格会让下一个验证者判红。**
+`references/note-format.md` 的封条小节已加：
+
+- 「**位置**」条目下写明这是**会被校验的形状要求，不只是排版约定**，并说明理由（那段文本不受任何校验保护）
+- 篡改手法表补一行：`在 seal 与 end 之间插入伪造表` → 分段 check ❌ / 封条 ❌ / **靠形状断言拦下**
+
+三处一致性核对：`note-format.md` 写了「紧邻」1 处、`verify.py` 有 `seal_i + 1 != end_i` 断言 1 处、
+`prepare.py` 生成时 `out.append("<!-- seal: …")` 紧跟 `out.append(END)`。
+
+### 实测（返工后）
+
+```
+$ python3 verify.py /tmp/f3.md
+seal 行之后仍有内容：seal 在第 76 行，而 `<!-- machine-generated: end -->` 在第 84 行，
+中间夹着 7 行 —— 判为被篡改。
+封条的作用域到 seal 行**之前**为止，这中间的文本不受任何校验保护，故要求 seal 行必须紧邻机器区结束标记之上。
+$ echo "EXIT=$?"
+EXIT=1
+```
+
+⚠️ **退出码单独取，不跨管道**：同一条命令 `| head -2` 之后取到的是 `0`（`head` 几乎总 exit 0），
+**那个 0 是假的**。这是本 sprint 记过的坑，此处两种都跑了以示区别。
+
+合规笔记不受影响：
+
+```
+2023-08-monthly.md  EXIT=0
+2026-06-h1.md       EXIT=0
+```
+
+### 新增测试
+
+`Boundary` 三条：seal 与 end 之间插伪造表 ⇒ exit 1 且输出含 `seal`；
+**任何**内容都不行（空行 / 一句文字 / 一条无害注释，三个子例）；反方向——合规笔记仍 exit 0。
+
+### 变异（本轮针对本条的两个）
+
+| 变异 | 内容 | 结果 |
+|---|---|---|
+| R3a | seal 形状断言删掉 | ✅ KILLED 红 4 |
+| R3b | 形状断言放宽成「允许夹空行」 | ✅ KILLED 红 1 |
+
+**R3b 值得单说**：它只放宽到「允许夹纯空白」，看似无害——被 `test_any_line_between_seal_and_end_rejected`
+的「空行」子例杀死。若那条测试只测了伪造表，这个变异会存活。
+
+## 🔴 明确**不修**的一条
+
+Skeptic 另报「把 narrative 扣除窗口整体搬到机器区顶端 ⇒ 完整绕过」。
+**Leader 两次构造均未能复现**：两次都成功保住了封条摘要（**证明封条确实是位置盲的**），
+但**都被分段 check 挡下**。⇒ 已作为「未复现的疑点」记入结转，
+**本次不为它改动 narrative 标记的校验逻辑**——那会扩大改动面而收益未经证实。
+
+## 本任务返工的改动清单
+
+```
+$ git show --numstat --format='' 2a6d39388e4648eb3be0f15b42ee28b52428c5d8 \
+    -- container/skills/warp-hestia/scripts/verify.py \
+       container/skills/warp-hestia/references/note-format.md
+7	0	container/skills/warp-hestia/references/note-format.md
+13	0	container/skills/warp-hestia/scripts/verify.py
+```
+
+## 锚点（返工后）
+
+| 项 | 值 |
+|---|---|
+| nanoclaw 返工 commit **全 sha** | **`2a6d39388e4648eb3be0f15b42ee28b52428c5d8`** = 分支 HEAD |
+| 上一版（QA 判定的对象） | `2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8` |
+| PR | https://github.com/newthinker/nanoclaw/pull/5 — OPEN，6 commits，23 files |
+| 全套测试 | `Ran 95 tests` / `OK` / EXIT=0 |
+| 两份 golden | 逐字节未变（独立复算 `13d6e47b…` / `638cb1a5…`）——形状断言不触碰摘要算法 |
