@@ -3517,3 +3517,139 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 - 投递与 M1.5 一起，等 2026-08 首期验收登记之后；投递后 `contract emit --period 2026-07 --stdout` 核形状。**本 Sprint 未跑 `deploy.sh`**。
 - `corp_mlt_short_expand` 只快照不参与四信号；若 4.7 补第五个信号，`temp_scale` 随之改并先改 `validate` 的 `"0-4"` 判据。
 - 挂账（非阻断）：`Store.PriorPublishedAt` 的查询错误分支在 ingest 路径不可达（唯一未覆盖语句）；004 变异 Q4（`writeAtomic` 换 `os.WriteFile`）/ Q8（目录权限位）单进程测试不可观测；005 变异 M11（`source_url` 回落值与显式值同形）/ M12（契约打印行无断言）低优先未补。
+
+---
+
+## Sprint M3 · warp-hestia 解读 skill
+
+### A. 契约更正 —— 既有陈述已被证伪或需收窄
+
+**A1｜落点与审核门载体**
+笔记落 `Wiki/Macro/PBOC/`，审核门由 Spool 强制 `reviewed: false` 承载（方案报告 6.4 / 6.5 已批注）。Spool 对 `reviewed` **无条件覆写**——不是「缺省填 false」，是不论上游写什么都覆写成 `false`，审核门因此不可被生成方绕过。
+
+**A2｜前 12 期序列改 history 侧车，不进契约本体**
+`<period>-<period_type>.history.json`，与契约同源、同时生成、同名前缀（6.2 已批注）。契约是「这一期是什么」的事实，历史是查询结果；混在一起会让 `done/` 里的契约随后续入库而过时。
+
+**先侧车后契约**（`ingest.go` 与 `cmd/atlas` 回放路径同序）：消费者是看到契约才去读侧车的，反过来会有一个窗口——契约已在 `pending/`、侧车还没落盘，消费者读到半份输入。两处失败均走 `contractError`：数据已在库、P1 照发、P2 不发。该顺序**两个方向都有闸**：正方向 `TestIngestHistoryLandsBeforeContractOnWriteFailure`（契约写失败 ⇒ 侧车已在），反方向 `TestIngestHistoryWriteFailureSkipsContract` / `TestIngestHistoryBuildFailureSkipsContract`（侧车失败 ⇒ 契约不被写出）。反方向是 QA 在 TASK-001 复审时发现缺失后补的：只有正方向时，把那两个 `return fail` 改成「记日志继续」整个套件仍全绿，而消费者会拿到**没有侧车的契约**（SKILL.md Step 2 明写侧车缺失即对移 `failed/`）。
+
+⚠️ **类型名是 `ContractHistory` 不是 `History`**：`internal/hestia/validate.go` 已有导出接口 `type History interface`（`Validate` 的公开签名参数类型、`NoHistory` 的类型），同名编译期直接红。函数名 `BuildHistory` / `WriteHistory`、JSON 键、`FileName()` 返回值一律不变——类型名不进 JSON，消费者无感。
+
+**A3｜Spool `source` 参数**
+`spool.archive` 新增可选 `source`，缺省 `web-research`，白名单 `{web-research, hestia}`，其他值 ⇒ `DENIED "source not allowed"`。`reviewed: false` 仍**无条件覆写**，不因 `source` 而变。
+
+**A4｜月均与四信号在容器侧的实现与 Atlas `Evaluate` 同源**
+四信号的权威实现是 `internal/hestia/signals.go` 的 `Evaluate`，容器侧 `prepare.py` 与 `glossary.md` 与它同源。三期 golden **2 / 0 / 1** 两侧都钉住（详见 §B⑤）。两条易错点已在 `glossary.md` 标注：**楼市与消费两个信号没有黄灯**；`corp_mlt_short_expand`（默认 1.5）在 `Signals` 结构里但**不参与四信号**（`config.go` 注释「本迭代只快照」），不得算进温度。
+
+### B. 实测登记（atlas 锚 `fd933f493d15bfe7dea6bdbd5c4c740d34084e9c`；loom PR #13；nanoclaw PR #5）
+
+采样纪律：写本节前 `git rev-parse HEAD` 取全 sha 作锚并**核空**——`git status --porcelain internal/hestia cmd/atlas` 为 **0 行**（否则采到的数字测的不是 master 上那棵树）。锚一律全 sha，不写 `HEAD` 或分支名。
+
+| 项 | 实测 | 单位 |
+|---|---|---|
+| `internal/hestia` 覆盖率 | **2785 / 2880 = 96.7014**（未覆盖块 89） | % |
+| 导出面 | **+4**：`BuildHistory` / `ContractHistory.FileName` / `ContractHistory.JSON` / `WriteHistory`（AST 守卫 `want` 34 → **38**） | 函数/方法 |
+| 真语料回归 | `218 = 217 + 1` · `217 = 213 + 4` · `97 = 76 + 21`（单篇 28 + 合并组 69）· 字段冲突 **0** · 口径路由违反 **0** | 篇 / 篇 / 观测 |
+| loom spool 测试 | 既有 **35** + 新增 **4** = **39** | 条 |
+| `python3 -m unittest` | **84** 条全过（`test_prepare.py` **55** + `test_verify.py` **29**）；三期 golden **2 / 0 / 1** | 条 |
+| 变异测试（warp-hestia） | prepare.py **23/23 KILLED**；verify.py **13/13 KILLED** —— 后者**verifier 未独立复核**，见下 | 个 |
+
+**逐行来源**
+
+- **覆盖率**：来源 TASK-001 discovery `verification.rework_round_1`（按**语句数**比对，非四舍五入显示值）。取的是 QA 返工**之后**的值：首轮锚 `7e24b116faff2174771d4551b54aa582a874d209` 为 2783/2880 = 96.6319%、未覆盖块 91；返工锚 `1c7af81846a4fba3fbb76a84e42eb232b8178f81` 为 2785/2880、未覆盖块 89。本节锚上**独立实测复现，逐位一致**；`1c7af81` → 本节锚之间 `internal/hestia` + `cmd/atlas` 变动 **0 个文件**。`cmd/atlas` 同锚实测 **76.7%**（来源 TASK-002 discovery `verification.coverage_cmd_atlas`，背对背基线 76.6%）。
+  ⚠️ **显示值会让小幅上升和小幅下跌长得一模一样**：首轮与基线显示同为「96.6%」，精确值其实从 96.5505%（2743/2841）升到 96.6319%。**分层与增量一律比语句数。**
+- **导出面**：来源 TASK-001 discovery `verification.ast_guard`（`want` 38 项，两把独立的尺同值：正则计数与逗号分割计数）。位置 `Contract.JSON`=6 → `ContractHistory.FileName`=7 → `ContractHistory.JSON`=8 → `DefaultSignals`=9。
+  📌 **需求文档 line 44 与 line 1034 写「守卫 +2」是其自身笔误**——line 426 Step 5 显式列了 4 个名字、需求自己的 §B 骨架也写 `+4`，取 **4**。
+  📌 **需求 §B 骨架里的 `History.FileName` / `History.JSON` 是改名裁决之前的写法**，实际导出符号为 `ContractHistory.*`（见 A2 末）；`+4` 与 38 项不受影响。
+- **真语料回归**：来源 TASK-001 discovery `verification.real_corpus_regression`，与本文件既有基线**逐字相同**，输出含 `四道恒等式: 全部成立 ✓`。⚠️ `data/` 是 gitignored、只存在于主仓库工作区，linked worktree 里没有 ⇒ 复现须在主仓库跑或用绝对路径喂语料。
+- **loom spool 测试**：来源 TASK-003 discovery `verification.test_count_two_rulers`（尺1 静态 `grep -c '^func Test'` = 21+6+12 = 39；尺2 动态 `go test -v` 顶层 `--- PASS` = 39，两把尺同值；基线 35 = 18/6/11）。loom 锚 `6d6c38f96901dc60f516ef2154283a213782ad5e`。
+- **`python3 -m unittest`**：条数来源 TASK-007 discovery `verification.tests`（`Ran 84 tests` 与 `grep -c 'def test_'` 两个口径一致）。
+  🔴 **`55 + 29` 是真值；nanoclaw commit `3690015a` 的 message 写「57 + 27」是错的。** 该错**总数守恒**（两组都等于 84）⇒ **求和自洽校验恒过、永远不会被「加起来对不对」发现**。这类「再分配型」错误只能靠**两把独立的尺各算一遍分层**抓到，验总数无效。判别式：**仪器出错时总数会跟着变吗？** 答「不会」就必须换独立仪器复算。
+  📌 交付文档 §2.2 与 discovery **都写对了**，错只在 commit message；commit message 不是 DoD 指定的证据载体 ⇒ 判**非缺陷**成立。但「非缺陷」与「数字是对的」是两句话，不可合并。
+  **三期 golden 2 / 0 / 1** 来源：**TASK-006 验证报告 §2.5**（`.arcforge/docs/04-test/TASK-006-verification.md`，verifier test-m3-a 独立实测原样粘贴；覆盖矩阵 `functional[4]` 亦记「三期温度 2/0/1」）——`2020-06-h1` `temp_score: 2`、`2025-12-annual` `temp_score: 0`、`2026-06-h1` `temp_score: 1`，三期分母 `temp_known` 均为 **4**。
+  🔴 **此行来源是验证报告而非 discovery，是升级不是降级**：discovery 是 **dev 自陈**，验证报告是 **verifier 独立实测**；同一数字两处都有时优先取后者。
+- **变异测试**：prepare.py 来源 TASK-006 discovery `verification.mutation`（23/23 KILLED，隔离副本、`ast.parse` 语法闸、每轮校验主工作区 sha256 与 `git status` 指纹未变）。verify.py 来源 TASK-007 discovery `verification.mutation`（13/13 KILLED，V1–V12 + P1，harness 对锚点命中数 ≠1 直接 `sys.exit(3)` 不静默跳过，其中 3 个先存活后补断言杀死）。
+  🔴 **verify.py 这一格：dev 自证 13/13 KILLED，`verifier 未独立复核`。** 成因：前三任验证者在此阶段连续卡死（87 / 94 / 62 分钟），人类决定缩小第四任范围；test-m3-d 已在验证报告 §0 独立成节留痕（4 处）。**证据强度低的是复核环节，不是 dev 的工作**——dev 侧的 harness 记录本身是充分的。**这是本 sprint 唯一一处证据强度低于其他任务的登记，不要把它当作与其他数字同等硬。**
+
+**另记三条已知文档瑕疵（结论已独立复核为真，判「不返工」——DoD 无对应条目、代价远超收益）**
+
+- **O1｜跨树引用**（test-m3-a，TASK-004 验证报告 §3）：`TASK-004-nanoclaw-branch-mount.md` ④节 B 表头写「主 checkout @ `aefea6c…`；worktree `d791101…` **同**」，而两树该文件实际差 9 行 ⇒ 表内 `:129`（`materializeContainerJson` 调用点）只在**主树**对、`:353-356`（`additionalMounts` 消费点）只在 **worktree** 对，**两行各自锚在不同的树上**。
+  ⚠️ **更值得记的是它怎么漏的**：discovery 的 `line_refs_reverified` 声称「每个 `file:line` 都在成稿后重新求值并订正过（6 处）」，**而表头那一行是漏网的**——它在某一棵树上求过值，但断言的是两棵树都对。⇒ **引用 `file:line` 必须同时说清锚在哪棵树**，「我重新求值过」这句自证覆盖不到跨树断言。
+- **O2｜措辞不准**（同上）：「`src/cli/resources/groups.ts` 没有任何 `additional_mounts` 子命令」——该文件确有一处 `additional_mounts` 的**只读序列化**（DB 行转展示对象），没有的是**写入**子命令。结论成立，措辞需更准。
+- **O3｜rationale 偏强**（test-m3-a，TASK-001 返工复验）：`ingest_test.go` 那条防回归断言的理由写「将来有人把夹具改回污染 annual 行 ⇒ 缺口悄悄回来」，**偏强**——A′/B′ 两臂实测：删掉该断言后另两条 `Contains` **仍会红**，缺口会被**大声报红**、藏不住。该断言**有效但不是唯一的闸**（与 TASK-002 里那个永不执行的 `if derr == nil` 形状不同）。准确措辞：「另两条会红但指向模糊，这条把失败定位到 `monthly_recent` 那次查询」。**不构成缺陷，仅留痕。**
+
+### C. 集成冒烟记录 —— ⏸ 本 sprint 不做（AD-M3-2），结转下个 sprint
+
+**为什么不是留空**：需求文档 TASK-006（集成冒烟）自述前置是「M1.5 + M2a + M3 一次投递之后」，而那次投递又排在 **2026-08 月报首期验收（09-09 ~ 09-15）之后**；本 sprint 于 **2026-09-08** 定稿，**结构上不可能完成**。下个 sprint 直接用下面的判据原文。
+
+**冒烟五条判据（需求原文，可直接照跑）**
+
+```bash
+V=/Users/zuowei/Obsidian/ClawdVault
+N="$V/Wiki/Macro/PBOC/2026 上半年金融数据解读.md"
+test -f "$N" && head -40 "$N" | grep -E "^(reviewed|source|temp_score|signal_credit|generated_by|contract_generated_by):"
+#   reviewed: false · source: hestia · temp_score: 1 · signal_credit: green · generated_by: warp-hestia@v1 · contract_generated_by: contract@v1/replay
+ls $RT/queue/hestia/done/           # 两个文件
+ls $RT/queue/hestia/processing/     # 空
+git -C $V log --oneline -1 -- "Wiki/Macro/PBOC/"    # 一条 Spool 提交，message 含 req-id
+python3 /Users/zuowei/workspace/ai/nanoclaw/container/skills/warp-hestia/scripts/verify.py "$N"; echo "verify exit=$?"   # 0
+```
+
+再一条：Warp 会话再发一次「处理 hestia 队列」⇒ 回复含「队列为空」；在 `$N` 的 `## 我的批注` 下手写一行后重放，**批注保留**。
+
+🔴 **需求原文的诊断关键字是错的，冒烟第一步要 grep 的不是它给的那两个**（dev-m3-c 查实，Leader 已复核代码；⚠️ **仅代码阅读，运行时未验证**）：
+需求 line 644 / 961 让在日志里找 `Mount forced to read-only` / `not under any allowed root` 来诊断挂载问题，但在「**队列根不存在**」这个实际场景下**这两个都不会出现**。`mount-security/index.ts` 的三条路径是 `Host path does not exist`（队列根不存在走这条）、`not under any allowed root`、`Mount forced to read-only`，而队列根不存在最终落到 `log.warn('Additional mount REJECTED')`：**整条挂载被丢弃、容器照常起**。
+⇒ **要 grep 的关键字是 `Additional mount REJECTED`。** 照需求原文找那两个会一无所获，然后误判为「挂载正常」。
+
+### D. 结转
+
+1. **`hestia_inbox_pending` collector**：数 `Wiki/Macro/PBOC/` 里 `reviewed: false` 的文件数，加进 M1.5 collector（M2b 或之后）。
+2. **「连续 3 期事实性零错误、改动量 < 20%」**：第一期以 **2026-08 月报**为准。
+3. **launchd 自动触发**（5.1.1 A）：等真觉得烦了再加。
+4. **M2b Sheets**：前置 spike 仍待 Service Account。
+
+**5｜本 sprint 结转的「人执行前置」——七项，漏一条就会在冒烟时卡住**
+
+⚠️ 每条都注明**为什么 agent 不能做**，否则下个 sprint 的 agent 会以为是漏做的而擅自补上。
+
+| # | 动作 | 为什么必须人做 |
+|---|---|---|
+| ① | **loom PR #13 合并** | 共享分支，需人审 |
+| ② | `launchctl kickstart -k gui/$(id -u)/com.loom.selvage` 重启 selvage | 本机运行时 |
+| ③ | `~/.config/nanoclaw/mount-allowlist.json` 粘贴队列根片段（`allowReadWrite: true`）**并重启 nanoclaw 主进程** | 本机运行时配置 |
+| ④ | **nanoclaw PR #5 合并到 `main`** + 本机 checkout **切回 `main`** | 共享分支 + 本机工作树 |
+| ⑤ | **nanoclaw 中央 DB 的 `additional_mounts`**（与 ③ 必须**一起做**才生效） | 直接改 `data/v2.db`，需人确认 |
+| ⑥ | vault `README.md` 与 `Hestia-方案报告.md` 回写 | 需人审产物 |
+| ⑦ | `examples/2026-06-h1.md` 样例回填 | 需人审产物 |
+
+**③ 为什么不只是重启 selvage**（需求只提了 selvage）：`src/modules/mount-security/index.ts` 的 `loadMountAllowlist()` 注释原文「Result is cached in memory for the lifetime of the process」，实现 `if (cachedAllowlist !== null) return cachedAllowlist;` ⇒ **进程生命周期内不重载**，只粘贴不重启等于没改。
+
+**④ 理由是硬的，不是整洁问题**：`container-runner.ts` 的 `projectRoot = process.cwd()`，skills 从 `<projectRoot>/container/skills` bind mount 到 `/app/skills` ⇒ **容器只看得见主 checkout 工作树里的 skill**，worktree 或未合并分支上的 `warp-hestia` 对它**不存在**。现成反证：`warp-research` 在 `fork/main` 有、主 checkout（`feat/vendor-agent-reach-skill`）没有，于是 Warp 组的 `.claude-shared/skills/` 里 9 个链接**没有它**。⇒ 不合并且不切回 `main`，冒烟必然失败，且现象是「skill 不存在」而非配置错。
+
+**⑤ 为什么 `container.json` 改了没用**：`container-config.ts` 的「Source of truth is the `container_configs` table」那段头注释（**用内容 grep 定位，别用行号**）明写真相源是中央 DB；`materializeContainerJson()` 每次 spawn **无条件覆盖**该文件、`buildMounts` 用它的返回值（DB）从不读文件，且 `backfillContainerConfigs()` 只对**没有 config 行**的组回读（Warp 组已有行 ⇒ 永不回读）⇒ **手改 `container.json` 零运行时效果**。`ncl groups` 也没有 `additional_mounts` 写入子命令 ⇒ 唯一路径是直接改 DB。
+
+🔴 **用这条追加式 SQL，不要照抄 TASK-004 交付文档 ④节 B 的那条**（已在 `mktemp` 临时副本上验过输出与目标数组逐字节相同、原库只读未动）。文档里那条是**整列字面替换**：当前 DB 只有 vault 一项时结果正确，但**若冒烟前有人给 Warp 组加了别的挂载，它会静默把那一项抹掉**——与 O1 是同一类「看起来做对了」的问题，只是换了位置。
+
+```sql
+UPDATE container_configs
+SET additional_mounts = json_insert(
+      additional_mounts, '$[#]',
+      json('{"hostPath":"/Users/zuowei/workspace/runtime/atlas/queue/hestia","containerPath":"hestia-queue","readonly":false}')),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%S.000Z','now')
+WHERE agent_group_id = 'ag-1782440732275-pqkuxs';
+```
+
+（sqlite 3.51 实测 `json_insert` + `$[#]` 可用；`updated_at` 格式与 `new Date().toISOString()` 一致。）
+
+🔴 **执行顺序固定为六步**（allowlist 靠重启刷进程内缓存，而 DB 要**下次 spawn** 才被读到 ⇒ 把两次重启并成最后一次，三件事一趟做完）：
+
+**① 停 nanoclaw 主进程 → ② 备份 `data/v2.db` → ③ 跑上面的 `json_insert` SQL → ④ 粘 `mount-allowlist.json` 片段 → ⑤ 起 nanoclaw 主进程 → ⑥ 起 selvage**
+
+**6｜笔记 frontmatter 不在任何校验作用域内 —— 规格取舍，交人拍板，本 sprint 不改**
+
+（test-m3-d 在 TASK-007 验证中实测发现，2026-09-09，Leader 已复核报告）
+
+**实测行为**：改第 17 行 `tsf_stock_yoy: 7.40` 这类**派生数据字段**后，`verify.py` 仍 exit **0**。
+
+**为何不判红**：`note-format.md` 规格明定封条作用域自 `<!-- machine-generated: begin -->` 的**下一行**起，DoD 逐字要求如此实现，`verify.py` 忠实实现，TASK-005 / 006 / 007 三任验证者均按此判过 PASS。**这不是缺陷。**
+
+**待决问题**：它确实是一个**不被这道闸覆盖的数据面**。本 skill 存在的理由是「模型只改 narrative」，而 frontmatter 里恰有 14 个基础字段 + 9 个派生指标 + 4 个信号，**改这些不会被 `verify.py` 发现**。是否把封条作用域上移到 frontmatter 起始，是**规格层取舍**（收紧会让人工修 frontmatter 也判红），不是实现缺陷，**必须由人决定**。
