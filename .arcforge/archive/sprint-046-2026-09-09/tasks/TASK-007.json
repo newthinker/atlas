@@ -1,0 +1,100 @@
+{
+  "id": "TASK-007",
+  "title": "nanoclaw：`verify.py`（校验行四态，含**删校验行**）+ `test_verify.py` + 统一开 PR + worktree 收尾",
+  "description": "对应需求文档 **TASK-005** 的**后半**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` 的「## TASK-005」节）。**以原文为准**。\n\n🔴 **本任务是 reviewer 反审后拆出来的**，理由见 TASK-006 description。本任务承接 `verify.py`——它是「模型只能改 `<!-- narrative -->` 段」这条**核心防线**的唯一执行者（需求 Global Constraint line 23：「`verify.py` 校验行不一致即拒绝写回」）。\n\n🔴 **reviewer B5：初稿三态有一个致命洞**。初稿只定义了「全对 / 表被改 / 只改叙述」三态，**没有定义「校验行被整段删掉」**——而模型删掉 `<!-- check: … -->` 按初稿的 DoD 完全可能 exit 0，⇒ **直接击穿模型边界这条核心防线**。本任务把它补成第四态。\n\n🔴 **跨仓库任务**（AD-M3-1）：产出在 nanoclaw `container/skills/warp-hestia/scripts/`，atlas 的 `packages`/`writes` 是交付记录文档 `docs/hestia-m3/TASK-007-warp-hestia-verify.md`。在 **TASK-004 建的 worktree** 里干活，**本任务负责拆掉它**，并**统一开 PR**（含 TASK-005 的文档提交 + TASK-006 的 prepare 提交 + 本任务的 verify 提交）。\n\n🔴 **任务编号映射**：代码/文档注释用**需求编号**（本任务对应需求 TASK-005，注释写 `M3 的 TASK-005`），atlas commit subject（`docs(TASK-007):`）与 `.arcforge/` 用 **Arcforge 编号**。需求自身两种前缀写法（`M3 的 TASK-005` / `M3 TASK-002`）**都接受**，验证者不得因「的」字判不符。",
+  "module": "nanoclaw-warp",
+  "complexity": "medium",
+  "estimated_files": [
+    "docs/hestia-m3/TASK-007-warp-hestia-verify.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`verify.py <note.md>` **只用标准库**，作用域定义**必须与 `note-format.md`（TASK-005）逐字一致**：每个 `<!-- check: <hex> -->` 校验的是「从**上一个 `## ` 标题行**起到**本校验行之前**」的文本的 sha256。另有一条**封条** `<!-- seal: <hex> -->` 在 `<!-- machine-generated: end -->` 紧邻其上（作用域见 fn②(iii)）。逐条反算比对；全部匹配 exit **0**，否则 exit **1** 并打印差异（指出是哪一段/是否封条、期望与实得的 hex）。🔴 `<!-- narrative -->` 与 `<!-- /narrative -->` 之间的文本**不在任何校验范围内**。自查 `grep -n '^import\\|^from ' scripts/verify.py` 只出现标准库，输出贴文档 ②节。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "🔴 **四态**——`test_verify.py` 逐条断言：\n①**未改动**的 `prepare.py` 输出 ⇒ exit **0**\n②**表内数字被改**（`462.06` → `999.99`）⇒ exit **1** 且输出含 `check`\n③**只改 `<!-- narrative -->` 段**（插入几段叙述，**包括在其中写 `## ` 小标题**——methodology 的八问框架天然诱导这么写）⇒ exit **0**\n④🔴 **删除类篡改一律 exit 1**：删一条 `<!-- check: -->` 行 / 删整段（`## ` 标题 + 表 + 它的 check 行）/ 改 `## 信号` 段（该段依 spec §6.2 **没有** check 行保护）/ 删封条 `<!-- seal: -->` 行——四种各一条测试。\n🔴 **判据不得从文档结构推 N**（结构本身就是被篡改对象）。初稿写的「按 `## ` 切分出应有段数 N，断言 check 行数 == N」**装反了**（reviewer B5 复审）：spec §6.2 骨架机器区有 **3 个 `## `** 却只有 **2 条 check**⇒ 照 spec 正确实现的笔记当场 `2 != 3` **判红**；且连标题一起删时 N 与 count 同减、恒等 ⇒ **真绕过**；narrative 里写 `## ` 会让 N 虚增 ⇒ 又一次误判合格笔记。\n**正确判据（三条，条数写死，与 TASK-005 `note-format.md` / TASK-006 `prepare.py` 逐字一致）**：\n(i) 分段 check **恰好 2 条**、封条 seal **恰好 1 条**——数量不符即 exit 1 并报缺哪一类；\n(ii) 逐条验分段 check（作用域：从上一个 `## ` 标题行起到该 check 行之前）；\n(iii) 验封条 seal（作用域：从 `<!-- machine-generated: begin -->` 的**下一行**起、到 seal 行之前，**扣除** `<!-- narrative -->` 与 `<!-- /narrative -->` 之间含这两行的全部文本）。\n封条是删除类篡改的唯一防线：删 check 行、删整段、改无 check 保护的 `## 信号` 段，都会改变封条覆盖的文本 ⇒ 红；而 narrative 被扣除 ⇒ 模型正常写叙述不受影响。**这是本任务存在的首要理由，不得降级为告警。**",
+        "verify_by": "manual"
+      },
+      {
+        "verify_by": "manual",
+        "desc": "🔴 **`verify.py` 必须 `import prepare` 复用 `seal_digest` 与 `with_check`，不得另写一份**（dev-m3-c 在 TASK-006 已备好并测过，2026-09-08）。理由：封条与分段 check 的**作用域定义**一旦存在两份实现，**两份必然漂移**；而漂移的两个方向都致命——对正确的笔记判红（人不再信它）、对被篡改的笔记判绿（本任务存在的理由当场失效）。自查两条并把输出贴文档 ②节：①`grep -n 'seal_digest\\|with_check' scripts/verify.py` 显示的是**来自 `prepare` 的调用**；②`grep -c 'def seal_digest\\|def with_check' scripts/verify.py` == **0**（本文件里没有第二份定义）。\n\n🔴 **同时修掉 `prepare.py --now` 缺省为空**（test-m3-a 在 TASK-006 验证中发现，Leader 已实跑复现并裁决）：现 `ap.add_argument(\"--now\", default=\"\")`，而 `SKILL.md` Step 3 的调用行**不传 `--now`** ⇒ 实产笔记的 `created:` / `updated:` **两个都是空值**，而 `note-format.md:40` 把它们列在「vault `CLAUDE.md` 要求的六个字段」里。⚠️ **这不是 TASK-006 的 DoD 违反**（我那条只要求断言键**存在**，14 个键确实都在——这是我 DoD 的缺口，不是 dev 的缺陷），所以不走返工，在本任务顺手修掉。\n**裁决：改 `prepare.py` 的缺省取当天**（`--now` 不传时用 `date +%F` 等价值），**不**改 SKILL.md。理由是两种失败模式不对称：改缺省后，若将来某个测试忘传 `--now`，golden 逐字节比对**当场变红（响的失败）**；而靠 SKILL.md 传参，若将来某个调用方忘传，产出的是**必需字段为空的笔记（静默的失败）**。⚠️ 现有测试全部经第 41 行 helper 显式传 `--now 2026-09-12`，**两份 golden 不受影响**，改完须复核它们仍逐字节相同。\n自查并贴文档 ②节：①不传 `--now` 跑一次，`created`/`updated` **均非空且等于当天**；②新增一条测试断言这一点（现第 243 行只断言键存在、不断言非空，**零覆盖**）；③两份 golden sha256 未变。"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "三条边界：①**校验行格式损坏**（`<!-- check: zzz -->`、hex 长度不对、缺 `-->`）⇒ exit 1 并明确报格式错，**不得**当成「没有校验行」而放行 ②**同一段出现多个 check 行**、或**出现第二条 seal** ⇒ exit 1（判为被篡改），不取第一个也不取最后一个 ③**批注区（`## 我的批注` 之后）不参与校验**——它是人写的，每次都会变；断言在批注区加一行后 verify 仍 exit 0。",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "①文件不存在 ⇒ exit 非零 + stderr 有路径信息（**不是** traceback）②文件存在但**完全没有 frontmatter / 不是笔记格式** ⇒ exit 非零且报清楚原因，不 panic ③空文件 ⇒ exit 非零。TDD 红阶段留痕：实现前跑 `python3 -m unittest test_verify -v 2>&1 | tail -5` 的失败输出贴文档 ②节。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "🔴 **统一开 PR**：`git add container/skills/warp-hestia && gh pr create --repo newthinker/nanoclaw --base main --fill`，PR **包含 TASK-005（文档）+ TASK-006（prepare + 夹具）+ TASK-007（verify）三个任务的提交**。PR 号与链接写进文档 ③节。\n🔴 **你只开 PR，不合并**（Leader 2026-09-08 补，与 TASK-003 的 `config.local.yaml` 同族问题：边界写在别的任务里等于没写）。需求交付清单 line 1036「nanoclaw：PR 合并到 `main`；本机 checkout 在 `main`」是**人执行**的前置（属需求 TASK-006 Step 0，本 sprint 结转）⇒ **不要 `gh pr merge`**（`fork/main` 是共享分支），也**不要因为 PR 未合并就卡住等**——开完 PR、把号写进文档，本任务的交付就完整了。⚠️ 同理**不要**把本机 checkout 切回 `main`（那也是人执行的一步，且会动到别人未提交的改动）。合并前跑一次全量 `python3 -m unittest -v 2>&1 | tail -3` 并贴输出（含总条数）。提交前对 Python 脚本跑 code-simplifier；**子代理回复不可采信，以 `git diff` 为准**。⚠️ **不动** `warp-research` 的任何文件。\n🔴 **worktree 收尾（谁建谁拆的移交）**：TASK-004 建的 worktree 由**本任务**拆——`git -C /Users/zuowei/workspace/ai/nanoclaw worktree remove <路径> && git -C /Users/zuowei/workspace/ai/nanoclaw worktree prune`，并在文档 ④节贴 `git -C /Users/zuowei/workspace/ai/nanoclaw worktree list` 的收尾输出证明已拆。⚠️ 拆之前确认 PR 已建、提交已推送（worktree 一拆，未推送的提交就只剩在本地分支上）。\n**另**（reviewer N4/O7(a)）：需求 line 25 的「注释里引用任务编号带 milestone 前缀」是**义务**，不能只写在 description（验证者逐条对照的是 `done_criteria`）⇒ 本任务新写的代码/脚本注释里凡引用任务编号处必须带前缀（`M3 的 TASK-00X`，用**需求编号**）；照抄需求原文给的代码时保持原样。⚠️ **validator 报 `⚠` 0 条不构成「无孤儿义务」的证据**——`orphan-obligation` 没有命中这一处。\n🔴 **你的产物在冒烟时的可见性依赖两步人执行动作**（dev-m3-c 2026-09-08 实证，Leader 已复核代码）：`container-runner.ts` 的 `projectRoot = process.cwd()`，skills 从 `<projectRoot>/container/skills` bind mount 到 `/app/skills` ⇒ **容器只看得见主 checkout 工作树里的 skill**，你在 worktree 里造的 `warp-hestia` 对它**不存在**。⇒ 冒烟前必须 ①nanoclaw PR 合并到 `main` ②本机 checkout 切回 `main`——**两步都是人执行的**（结转，见 TASK-008 §D）。⚠️ 这**不影响你本任务的交付**：开发与 `python3 -m unittest` 都在 worktree 里跑，不经容器。**不要**为了让容器看见而去切主 checkout 的分支或把文件拷进主 checkout——那会动到别人未提交的改动。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**交付流程（AD-M3-1/3）**：\n1. **复用 TASK-004 建的 worktree**（路径见 TASK-004 discovery），完成后拆。\n2. **atlas 侧写交付记录文档** `docs/hestia-m3/TASK-007-warp-hestia-verify.md`，固定四节：①改动清单（逐文件 `git show --numstat <全 sha> -- <file>`）②实测输出（命令 + 原样粘贴 + 退出码 + 计数）③锚点（nanoclaw `git rev-parse HEAD` **全 sha** + 分支名 + PR 链接）④未做与理由。🔴 **锚一律写全 sha**。\n3. atlas 提交该文档，信息锚定 **`docs(TASK-007): M3 …`**。atlas 侧走 worktree → 预演 merge → 请 Leader merge → **等 merge 进 master** 才转 `dev_done`（🔴 `git log --grep` 不带 `--all`；**绝不能因 idle hook 催就转**）。\n4. discovery 与指针在 `dev_done` **之前**落定；落盘后 `jq` 直读核实。\n5. **自证数字统一重采**，与锚点同行写出。\n⚠️ 一切 `.arcforge/` 读写在 **atlas 主仓库**执行，写通道调用一律带 `ARCFORGE_TOKEN`。\n🔴 **跨仓库写通道陷阱（dev-m3-b 2026-09-08 实撞，Leader 已复核）——你在射程内**：在**另一个也装了 arcforge 的仓库**（loom / nanoclaw）的目录里 `cd` 着调用 `bash .claude/hooks/arcforge-write.sh`，相对路径会解析到**那个仓库自己的**写通道脚本，写入落进**那边**的 `.arcforge/`，而**退出码是 0、零告警**（dev-m3-b 的 checkpoint 就这么落进了 loom worktree）。CLAUDE.md 的 linked-worktree DENY 判别式比较 `--git-dir` 与 `--git-common-dir`，只覆盖「**同仓库**的 linked worktree」，覆盖不到「cd 去了另一个 arcforge 仓库」——那边的写通道从它自己的角度看一切正常 ⇒ **fail-open 且静默**，「文件系统是唯一真相源」这条根基被架空而无人知晓。\n⇒ **一切写通道调用一律用 atlas 绝对路径**：\n`ARCFORGE_TOKEN=<你的 token> bash /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/.claude/hooks/arcforge-write.sh --as <你的实例名> …`\n并且**每次落盘后回 atlas 主仓库 `jq` 直读核实**——退出码 0 不构成「写进了正确的那份」的证据。\n🔴 **跨仓库任务的漂移检测有缺口——本任务的 verifier 必须自己补上**（test-m3-a 在 TASK-005 验证报告 §4 实测发现，Leader 已复核）：`verify_baseline` **只锚 atlas 的 `head` + `discovery_sha256`，不锚 nanoclaw 的 commit**。TASK-005 实测：nanoclaw 在派验后 **66 秒**就多了一个 commit，它之所以被发现，**是因为 dev 同时也改了 atlas 侧的交付文档**才触发 `--ack-drift`。🔴 **若 dev 只改 nanoclaw、不动 atlas 文档，基线会完全一致、零告警，而验证者会静默地判另一棵树**——且 **worktree 的工作树默认就是新版**，照交付文档的命令裸跑只会量到新版。\n⇒ **本任务的 verifier 必须在判定前后各记一次 `git -C <nanoclaw worktree> rev-parse HEAD` 全 sha**，与交付文档 ③节锚点比对；不一致就当漂移处理（报 Leader，别自行决定验哪一版）。**这一条不能靠 `verify_baseline`，它够不到目标仓库。**\n🔴 **nanoclaw worktree 的正确锚（TASK-005 的 discovery 里那个是过期的）**：worktree `/Users/zuowei/workspace/ai/wt-warp-hestia`，分支 `feat/warp-hestia` @ **`7ca6b57e64a561351d7108a937b8607a5e87f0a6`**。⚠️ TASK-005 的 `discovery.interfaces_exposed[0]` 仍写着 `aff2521433eef8567addcedc988fecad3ed08c6f`——那是**第一轮**的 sha，第二轮（Step 3 改 `--print-name` + note-format 补口径差）之后已过期。test-m3-a 在 TASK-005 验证报告 F2 指出：**交付文档 ③节写对了，但下游经 `context_from` 读的是 discovery 那个，错的那个才是会被读的载体**。⇒ **以本 DoD 的 sha 为准**，开工前 `git -C <worktree> rev-parse HEAD` 现读核对。\n🔴 **`sort -u` 与 `comm` 同源同坏——两个都禁**（test-m3-a 在 TASK-005 验证中**自己踩到**并爬出来，Leader 已复核）：DoD 先前只钉死了「不许用 `comm -12`」，但**建 `grep -Fxf` 模式文件最自然的写法正是 `grep '^## ' | sort -u`**——而 `sort -u` 在 `LANG=en_US.UTF-8` 下**同样按 collation 去重**，实测把 methodology 的 5 个 `## ` 折叠成 **3**、源文件的 12 个折叠成 **11**。\n⚠️ **方向是假阴（交集偏小），比 `comm` 的假阳更隐蔽——它会让真该判红的看起来合格。** test-m3-a 因此一度以为一份正确的自证是错的，**差一步就把合格交付报成缺陷**。\n⇒ 凡涉及**非 ASCII 文本集合**的判据：**禁 `comm`、禁 `sort -u` 预处理、慎用 `join`/`uniq`**（同一 collation 根因）；`grep -Fxf` **不需要排序也不需要去重，直接喂原始 `grep` 输出**。（顺带：test-m3-a 复现出 `comm` 在三种 locale 管线下给 **5 / 2 / 0** 三个不同的值，比「5 与 3」更说明它不可用。）",
+        "verify_by": "manual"
+      },
+      {
+        "verify_by": "manual",
+        "desc": "🔴 **提交前必须排掉 `__pycache__` / `*.pyc`**（dev-m3-c 2026-09-08 实撞，已在 TASK-006 手工排过一次）：nanoclaw 的 `.gitignore` **没有** `__pycache__`/`*.pyc` 规则（grep 零命中），而 `git add container/skills/warp-hestia` 会把它们带进暂存区。⚠️ **每跑一次测试就重新生成** ⇒ 本任务跑测试次数多，必须在**最后一次跑测试之后**再排一次（这与「自证数字统一重采」是同一个时点纪律）。自查：`git show --numstat <你的 commit> | grep -c '__pycache__\\|\\.pyc'` == **0**，输出贴文档 ①节。⚠️ **不要改 `.gitignore`**——那是仓库级配置，超出本任务 `writes` 声明；dev-m3-c 已就此正确克制，沿用该处置。\n\n**顺带修一处编号前缀（test-m3-a 报 F3【低】）**：`test_prepare.py:130` 的 docstring 写「TASK-005 的 G6b 裁决」，缺 `M3 的` 前缀（同文件另 3 处都带，4 处中 3 处合规）。需求 line 25 要求注释引用任务编号带 milestone 前缀。**为 4 个字符单独走一轮 review_fix 不划算**，故并入本任务（同目录、边际成本零）。"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004",
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    "./docs/hestia-m3/TASK-007-warp-hestia-verify.md"
+  ],
+  "writes": [
+    "./docs/hestia-m3/TASK-007-warp-hestia-verify.md"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m3-c",
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m3-d",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-09T09:39:34Z"
+  },
+  "verify_baseline": {
+    "head": "dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc",
+    "discovery_sha256": "7d5181006f0f75797983c95b115783597e44b398147ccbf3f1bcc0783cd407bb",
+    "at": "2026-09-09T09:02:08Z"
+  },
+  "reason_class": "dod_defect",
+  "fix_items": [
+    {
+      "id": "F3",
+      "severity": "HIGH",
+      "file": "nanoclaw container/skills/warp-hestia/scripts/verify.py（作用域判定）+ references/note-format.md（规格）",
+      "problem": "`<!-- seal: … -->` 行与 `<!-- machine-generated: end -->` 之间的文本**既不被任何分段 check 覆盖，也不被封条覆盖**——封条的作用域到 seal 行**之前**为止。⇒ 可以在**机器区内部**插入一张伪造数据表而 verify 放行。它比已登记的 frontmatter 盲区更危险：读者看到的是一张**位于机器区里**的表，比 frontmatter 更像「机器产的」。",
+      "evidence": "Leader 实测（atk_a）：把 `## 本期数据（口径修订后）| M1 同比 | 8.80 |` 整段插在 seal 行与 end 标记之间 ⇒ **verify.py exit 0**。文件内位置：seal 在第 82 行、伪造表 84 行、end 在 90 行。来源 Skeptic #2。",
+      "fix": "加**形状断言**（不改摘要算法）：`seal` 行必须是机器区的**最后一行**，即 seal 行的下一行就是 `<!-- machine-generated: end -->`；不满足即 exit 1 并说明是「seal 行之后仍有内容」。这是最小改动，不触碰封条作用域定义、不影响两份 golden。",
+      "spec": "`references/note-format.md` 的作用域说明同步加一句「seal 行必须紧邻 end 标记之上」——**三处逐字一致**是本 skill 的既有规格纪律，改实现不改规格会让下一个验证者判红。",
+      "leader_note": "🔴 **这是规格的洞，不是你的缺陷**——DoD 逐字规定了封条作用域「从 begin 的下一行起、到 seal 行之前，扣除 narrative」，你精确实现了它，三任验证者也按此判过 PASS。`reason_class=dod_defect` 记的就是这个。",
+      "not_in_scope": "⚠️ Skeptic 另报一条 #3「把 narrative 扣除窗口整体搬到机器区顶端 ⇒ 完整绕过」，**Leader 两次构造均未能复现**：两次都成功保住了封条摘要（证明**封条确实是位置盲的**），但**都被分段 check 挡下**（一次报「段『本期数据』check 不匹配」，一次报「check 行之前没有 `## ` 标题」）。⇒ **本次不修 #3**，它已作为「未复现的疑点」记入结转；你也**不要**为它改动 narrative 标记的校验逻辑。",
+      "verify": "补一条测试：seal 行与 end 之间插入任意内容 ⇒ exit 1。现有 84 条不得变红，两份 golden 逐字节不变。"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "id": "TASK-003",
+  "title": "loom：`spool.archive` 加 `source` 白名单参数 + `spool_write_allow` 加 `Wiki/Macro/PBOC`（跨仓库，证据落 atlas）",
+  "description": "对应需求文档 **TASK-002**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` 的「## TASK-002」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M3-1…4）、`design-spec.md`。\n\n🔴 **跨仓库任务**（AD-M3-1）：真实代码在 **loom**（`/Users/zuowei/workspace/go/src/github.com/newthinker/loom`），atlas 的 git 看不见它 ⇒ 本任务在 atlas 的 `packages`/`writes` 是交付记录文档 `docs/hestia-m3/TASK-003-loom-spool-source.md`，`done_criteria` 全部 `verify_by: manual`。**门禁验的是那份文档，不是 loom 的测试**——真正的质量闸是验证者按文档锚点去 loom 实跑（这是本设计里唯一没有机制兜底的环节）。\n\nloom 侧改：`internal/executors/spool/taint.go`（`injectTaint(content, source string)`、`allowedSources` 闭集、`defaultSource`、`taintReviewed` 常量）、`archive.go`（读 `params[\"source\"]` → 缺省 `web-research` → 非白名单 `return \"DENIED\", \"source not allowed: \"+source`，在 `hasFrontmatter` 检查**之后**）、`archive_test.go` +3 条、`taint_test.go` +1 条、`configs/config.yaml` + `configs/config.local.yaml`（**两处都改**）、`configs/README.md`。\n\n**本仓库实测（2026-09-08 核实，与需求原文一致）**：loom spool 现有测试 **35 条**（archive 18 / commit 6 / taint 11）；`injectTaint(` 调用点 **12 处**（改签名要全改）；`spool_write_allow` 在 `config.yaml:17` 与 `config.local.yaml:6`，**两处都只有** `Wiki/Loom-Research`。⚠️ `config.local.yaml` 是 gitignored 的本机文件 ⇒ 它的改动**不进 PR**，属需求 TASK-006 Step 0 的人执行前置，本任务只需**确认改到位**并在文档 ④ 节记明。\n\n🔴 **任务编号映射（必读，否则验证者会判不一致）**：本 sprint 的 Arcforge 编号与需求文档的编号**不同**（需求 TASK-001 拆成本 sprint 的 TASK-001+TASK-002，其余顺延）。两套编号各有其读者，用法固定为：\n| 写在哪 | 用哪套编号 | 理由 |\n|---|---|---|\n| **代码/文档注释**（`// M3 的 TASK-00X`） | **需求文档的编号** | 读者是三仓库的开发者，他们读的是需求文档与 spec，不是 atlas 的 `.arcforge/` 归档 |\n| **atlas commit subject**（`feat(TASK-00X):`） | **Arcforge 编号** | 门禁 `task-completed.sh` 按它认领改动，写错则改动不可见 |\n| **`.arcforge/` 内一切文件** | **Arcforge 编号** | 流程真相源 |\n映射表：需求 001 → 本 sprint 001(internal/hestia) + 002(cmd/atlas)；需求 002 → 003；需求 003 → 004；需求 004 → 005；需求 005 → 006；需求 006 → **本 sprint 不做（结转，AD-M3-2）**。\n⚠️ 故本任务的 commit subject 与代码注释里的编号**本就不同**，这是预期的，不是笔误——在 discovery `decisions` 里记一句。\n（本任务对应需求文档的 **TASK-002**；注释里写 `M3 的 TASK-002`。）\n\n**milestone 前缀写法（reviewer O7：需求自身不一致，Leader 裁决）**：需求 line 25 规定 `M3 的 TASK-001`，而它自己给的代码样例里 line 453/537 写的是 `M3 TASK-002`（无「的」）。**裁决：两种写法都接受**——照抄需求原文给的代码时保持原样，新写的注释用 `M3 的 TASK-00X`；验证者**不得**因这个「的」字判不符。理由：需求自身不一致，纠结它没有价值，而把它写成硬判据会制造假红。",
+  "module": "loom-spool",
+  "complexity": "medium",
+  "estimated_files": [
+    "docs/hestia-m3/TASK-003-loom-spool-source.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "loom 四条新测试全 PASS 且输出原样贴进文档 ②节：`TestArchiveSourceDefaultsToWebResearch`（不传 source ⇒ 落盘含 `source: web-research`）、`TestArchiveSourceHestiaAllowed`（传 `hestia` ⇒ 落盘含 `source: hestia` **且** `reviewed: false`，**不含** `reviewed: true` 与 `web-research`——即使 payload 声明 `reviewed: true` 也被改回）、`TestArchiveSourceUnknownDenied`（未知 source ⇒ `DENIED` 且 msg 含 `source`，**且不落盘**）、`TestTaintSourceParameterized`（`injectTaint(in, \"hestia\")` ⇒ frontmatter 顶层 `source: hestia` + `reviewed: false`，入站的 `source: evil` 被丢弃）。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`injectTaint` 签名改为 `(content, source string)`，**11 个既有调用点全部改为** `injectTaint(in, \"web-research\")`；`allowedSources = map[string]bool{\"web-research\": true, \"hestia\": true}` 是**闭集**；`defaultSource = \"web-research\"`。🔴 **`reviewed: false` 的无条件覆写不得放松**——`source` 是产物溯源，不是信任标记。\n📐 **计数口径订正（Leader 2026-09-08 复核，dev-m3-b 提出）**：初稿写的「12 处」是 `grep -rn 'injectTaint(' internal/executors/spool/` 的 **12 个命中**，其中 `taint.go:57` 是**函数定义行** ⇒ 真正的既有调用点是 **11 个**（`taint_test.go` 10 个 → `injectTaint(in, \"web-research\")`；`archive.go` 1 个 → `injectTaint(content, source)`）。交付后锚点树上共 **13 处**（新增 1 处测试调用）。🔴 **验证者注意**：RED 输出里 `too many arguments in call to injectTaint` 只有 **10 行**，那是 Go 编译器每包 `too many errors` 的**截断上限**，**不是调用点计数**——拿它反推数量会得到错的数。调用点数量一律以 `grep` 清单为准（交付文档 ①节有逐行清单）。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`spool_write_allow` **最终两处**都要有 `- Wiki/Macro/PBOC`，但**本任务只改一处**（Leader 2026-09-08 裁决，dev-m3-b 提出）：①`configs/config.yaml` —— **dev 改**，进 PR ②`configs/config.local.yaml` —— **gitignored 的本机运行时配置，由人改，dev 不改**，属需求 TASK-006 Step 0 的人执行前置（需求原文 line 569 原话：「本机 `configs/config.local.yaml` 同样加（gitignored，**由人改**，记入 TASK-006 Step 0）」）。本任务对它的义务是**在文档 ④节原样贴出它当前的 `spool_write_allow` 内容并标为待人执行**。🔴 **验证者注意**：`grep -c 'Wiki/Macro/PBOC' configs/config.local.yaml` 为 **0** 是**预期结果**，不得据此判 rejected；需求 line 21「两处都改」与 line 935 的「两行」判据说的是**冒烟前置最终状态**，不是本任务的交付范围。理由：改了 `config.local.yaml` 而不重启 selvage 并不生效，而重启是人执行的 ⇒ dev 改它只会造出「看起来做完了」的假象；`configs/README.md` 字段表那一行改为「`Wiki/Loom-Research`（Plan 2）与 `Wiki/Macro/PBOC`（Hestia M3）」，并在 Reed 段之前加 `source` 参数说明段（明写「它是产物溯源，不是信任标记——`reviewed: false` 对任何 source 都无条件覆写」）。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`source` 为空串 ⇒ 走缺省 `web-research`（不是 DENIED）；`source` 非字符串类型（`params[\"source\"].(string)` 断言失败）⇒ 同样走缺省，不 panic。DENIED 路径**不落盘**（文档 ②节要贴 `os.Stat` + `os.IsNotExist` 的断言输出）。",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "TDD 红阶段留痕：`go test ./internal/executors/spool/ -run 'TestArchiveSource|TestTaintSourceParameterized' 2>&1 | head -5` 在实现前的失败输出（预期 `too many arguments in call to injectTaint`）原样贴进文档 ②节。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**loom 侧门禁**：`go test ./... 2>&1 | tail -5` 全绿；既有 `TestArchive*` / `TestTaint*` **全部仍绿**（35 条基线 + 4 条新增 = **39 条**，用 `grep -c '^func Test' internal/executors/spool/*_test.go` 复核并贴输出）；`gofmt -l internal/executors/spool` 与 `go vet ./internal/executors/spool/...` 零输出；**无新增 Go 依赖**。🔴 **提交前跑 code-simplifier**（需求 line 27 全局规范「提交前按全局规范跑 code-simplifier（Go 代码…）」，本任务是纯 Go 改动，初稿漏了这条——reviewer O6）：Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 附约束「不得放松 `reviewed: false` 的无条件覆写、不得改动 `allowedSources` 闭集、不得改既有测试的断言」；有改动并进同一提交并在 discovery `decisions` 申报。**子代理回复不可采信，以 `git diff` 为准**。\n分支 `feat/spool-source-param`，提交信息按 loom 自己的规范（**不是** `feat(TASK-003):`——那是 atlas 门禁的要求），`gh pr create --fill` 并把 PR 号写进文档 ③节。⚠️ selvage 重启（`launchctl kickstart`）是**人执行**的，属结转（需求 TASK-006 Step 0），agent **不执行**，在文档 ④节记明。\n**另**（reviewer N4/O7(a)）：需求 line 25 的「注释里引用任务编号带 milestone 前缀」是**义务**，不能只写在 description（验证者逐条对照的是 `done_criteria`）⇒ 本任务新写的代码/脚本注释里凡引用任务编号处必须带前缀（`M3 的 TASK-00X`，用**需求编号**）；照抄需求原文给的代码时保持原样。⚠️ **validator 报 `⚠` 0 条不构成「无孤儿义务」的证据**——`orphan-obligation` 没有命中这一处。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**交付流程（AD-M3-1/3：代码在 loom，证据在 atlas）**：\n1. **目标仓库用独立 worktree**（人类 2026-09-08 裁决 AD-M3-3，**不碰本机工作区**——它当前是脏的）：\n   `git -C /Users/zuowei/workspace/go/src/github.com/newthinker/loom worktree add -b feat/spool-source-param <临时目录> main`\n   ⚠️ loom 本机工作区有未提交改动（`.claude/hooks/arcforge-write.sh` 被改 + 一个未跟踪脚本），与 spool 无重叠，但仍不碰它。\n   在该 worktree 里编辑、跑测试、提交（显式 pathspec）。\n2. **atlas 侧写交付记录文档** `docs/hestia-m3/TASK-003-loom-spool-source.md`，固定四节（design-spec §3）：①改动清单（逐文件 `git show --numstat <全 sha> -- <file>` 输出）②实测输出（命令 + 原样粘贴 + 退出码 + 计数）③锚点（目标仓库 `git rev-parse HEAD` **全 sha** + 分支名 + PR 链接）④未做与理由——**必须含**（reviewer B8）：`Wiki/Macro/PBOC/` 这个 vault 目录**当前不存在**（已核实），而 `spool_write_allow` 只管授权、不一定 `mkdir` ⇒ 「Spool 是否自动建目录」**未验证**。⚠️ 上游 spec §2 总体形态表声称「`Wiki/Macro/PBOC/` 由 Spool 首次写入时自动建」——**那是设计意图不是实测**（spec §0.3 同时说「vault 里的目标目录都不存在」），照抄它等于把断言当证据。在此记明「spec 如此声称、本 sprint 未实证」，属结转的冒烟项，不要留空也不要写成已验证。\n   🔴 **锚一律写全 sha，不得写 `HEAD` 或分支名**——符号引用会过期，验证者照跑时会拿到假红（TASK-015 实撞）。\n3. atlas 提交该文档，信息锚定 **`docs(TASK-003): M3 …`**（门禁只认 `^[a-z]+\\(TASK-003\\):`）。atlas 侧同样走 worktree → 预演 merge → 请 Leader merge → **等 merge 进 master** 才转 `dev_done`。\n4. discovery 与指针在 `dev_done` **之前**落定；`interfaces_exposed` 写下游任务要消费的东西（分支名、worktree 绝对路径、脚本接口）。\n5. **自证数字统一重采**：文档里每个数字（测试条数、numstat、覆盖率）都必须采于**最后一次改动之后**并与锚点同行写出；交付前以提交本身的 `git show --numstat <sha>` 为准复核一次。\n⚠️ 一切 `.arcforge/` 读写在 **atlas 主仓库**执行。写通道调用一律带 `ARCFORGE_TOKEN`。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./docs/hestia-m3/TASK-003-loom-spool-source.md"
+  ],
+  "writes": [
+    "./docs/hestia-m3/TASK-003-loom-spool-source.md"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m3-b",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m3-b",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-09T09:39:33Z"
+  },
+  "verify_baseline": {
+    "head": "755016eba82daaebee01721d1b86311f9d50a373",
+    "discovery_sha256": "a177ed04f9a4b858bae2ae49a405c5f24b466719c682f4764e7038cf739e36fe",
+    "at": "2026-09-08T03:40:06Z"
+  }
+}

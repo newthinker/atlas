@@ -1,0 +1,66 @@
+{
+  "id": "TASK-002",
+  "title": "atlas `contract emit` 同产侧车（回放路径）+ CONTRACTS.md `## Sprint M3` 骨架（§A 契约更正 · §D 结转）",
+  "description": "对应需求文档 **TASK-001**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` 的「## TASK-001」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M3-1…4）、`design-spec.md`。\n\n本任务是需求 TASK-001 的**下半**（`cmd/atlas`，拆分理由见 design-spec §2）。改 `cmd/atlas/hestia.go` 的 `runHestiaContractEmit`（`if hestiaEmitStdout {` 之前插入 `!hestiaEmitStdout` 分支：`hestia.BuildHistory(ctx, st, obs, c.GeneratedBy)` → `hestia.WriteHistory(cfg.Queue.Dir, hist)`）与 `cmd/atlas/hestia_test.go`（`TestHestiaContractEmitWritesHistory`，helper `emitFixture` 已核实存在）。\n\n🔴 **CONTRACTS.md 不在本任务**（reviewer O9 反审后的改派）：初稿让本任务写 `## Sprint M3` 的 §A/§D 骨架、由 Leader 在 Step 7 补 §B 数值——那会造出一份**有义务、无 owner、无验收条目**的产物（本仓库归档里有同形前科：`docs/06-acceptance/` 的验收数字过期四轮无人发现，根因正是「依赖变化后谁重采」这个角色不存在）。现整份 `## Sprint M3` §A–§D 归 **TASK-008**（记录员代理模式，wave 5，依赖全部任务），本任务**不碰** `internal/hestia/CONTRACTS.md`。",
+  "module": "hestia",
+  "complexity": "low",
+  "estimated_files": [
+    "cmd/atlas/hestia.go",
+    "cmd/atlas/hestia_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`runHestiaContractEmit` 在 `!hestiaEmitStdout` 时同产侧车：`hestia.BuildHistory(ctx, st, obs, c.GeneratedBy)` → `hestia.WriteHistory(cfg.Queue.Dir, hist)`，两处 err 直接 `return err`。`Contract.GeneratedBy` 是导出字段，回放时值为 `contract@v1/replay`，侧车 `generated_by` 随之（**消费者不分实时与回放**）。",
+      "`TestHestiaContractEmitWritesHistory` 按原文 PASS：非 `--stdout` 时 `<queueDir>/pending/2025-12-annual.history.json` 存在；`--stdout` 时 stdout **不含** `\"same_type\"`（只打契约不打侧车）。`t.Cleanup` 复位四个包级变量。"
+    ],
+    "boundary": [
+      "`--stdout` 路径**不写任何文件**：测试断言 `queueDir/pending/` 在 `--stdout` 单独跑时不新增 `.history.json`。队列目录不存在时 `WriteHistory` 的 `MkdirAll` 负责创建（不依赖 `EnsureQueueDirs` 先跑）。"
+    ],
+    "error_handling": [
+      "TDD 红阶段留痕：实现前 `go test ./cmd/atlas/ -run TestHestiaContractEmitWritesHistory 2>&1 | head -5` 的失败输出记进 discovery `verification`。`BuildHistory`/`WriteHistory` 任一失败时 `runHestiaContractEmit` 返回非 nil error 且**不写契约**。"
+    ],
+    "non_functional": [
+      "**门禁（merge 后 master 上统一重采并带全 sha 锚）**：`GOTOOLCHAIN=local go test ./cmd/atlas/... -count=1` 全绿；`go test ./cmd/atlas/ -cover` **≥ 76.6**（基线实测于锚 `fe95ac707ea46f9939bb6554261830a95f1b93e1`，⚠️ 归档里记的 76.4 已过期，以现采为准）；`go test ./internal/hestia/ -cover` **≥ 96.6** 不因本任务回退；`gofmt -l internal/hestia cmd/atlas` 只允许 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go` 两项；`go vet ./cmd/...` 零输出；**无新增依赖**；`cmd/atlas/hestia.go` **不 import `path/filepath`**（既有守卫 **`TestHestiaCmdDoesNotResolveDBPath`**，`cmd/atlas/hestia_test.go:135-145`，断言在 141-142；⚠️ 初稿写的 `116-124` 是**错锚**，那里是 `TestHestiaCommandsSilenceUsage`）。",
+      "**交付流程（AD-9 同款，机制决定不是偏好）**：\n1. 主仓库建 worktree：`git worktree add -b task/TASK-002-m3 ../wt-TASK-002-m3 master`（主分支是 **master** 不是 `main`）。\n2. 开工前读 `context_from` 里各上游任务的 discovery（在**主仓库**读）。提交用显式 pathspec（本任务 3 个文件），信息锚定 **`feat(TASK-002): M3 …`**——🔴 需求文档写的 `feat(M3 TASK-002):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-002\\):`，AD-2），照抄会被判「不符约定、改动不可见」。milestone 前缀只写在**注释**里（`M3 的 TASK-002`）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，附约束：不得改 `Parse`/`Validate`/`Save`、不得给 `store.go` 新增方法、不得新增需求之外的导出符号、JSON 键序不得改、注释理由段保留）；有改动并进同一提交并在 discovery `decisions` 申报。**子代理回复不可采信，以 `git diff` 为准**。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-002 master && git -C ../pre-TASK-002 merge --no-ff --no-commit task/TASK-002-m3`；无冲突后拆预演树，通知 Leader merge 并**等 merge 进 master**（🔴 门禁的 `git log --grep` **不带 `--all`**，未合并分支上的 commit 对它结构性不可见 ⇒ 两个集合双双为空所以「报绿」；**绝不能因 teammate-idle hook 催「推进 dev_done」就转**——该文案在此状态方向相反）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上**统一重采**全部自证数字（`git rev-parse HEAD` 记锚；两包覆盖率、vet、gofmt、`hestia.go` 的 filepath 守卫）；🔴 分批采的数字即使每个当时都对，合到一份报告里也不构成对最终产物的自证。跌破门槛或转红 ⇒ **不转 `dev_done`**，走 `transition blocked_clarification --json-field questions=…`。\n6. `cd` 回主仓库写 discovery 并 `task TASK-002 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-002.json`（⚠️ `update` 不收 `--expect-epoch`），再 `transition dev_done --expect-epoch <认领时的 epoch>`。🔴 **discovery 与指针必须在 `dev_done` 之前落定**——之后写会让 `discovery_sha256` 漂移，`verified` 之后时机守卫无条件 DENY，dev 侧无出路。落盘后 `jq '{status,discovery,writes,packages}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-002-m3`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在**主仓库**执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go"
+  ],
+  "coverage_floor": 76,
+  "status": "accepted",
+  "assigned_to": "dev-m3-a",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "**不是对 DoD 的疑问，是活性信号：TASK-002 已交付 20 分钟，等 Leader merge 未果。**\n\n转 `blocked_clarification` 是为了把「等 merge」从**消息**换成**文件**——本 sprint 已有三次消息时序造成的误判（我催 merge 两次时 TASK-001 其实早已合入），inbox 不可靠而文件是真相源。\n\n**我需要的动作只有一个：把 `task/TASK-002-m3` merge 进 master。**\n- 交付 commit 全 sha：`7b38ef91b48ed3afebfc29671d70792be416ca4f`（1 个 commit，起点 `1991c49`）\n- subject：`feat(TASK-002): M3 contract emit 同产侧车——回放路径与实时同形`（匹配 `^[a-z]+\\(TASK-002\\):`）\n- 预演 merge 已跑：`Automatic merge went well`，冲突 0；**在合并后的预演树上**两包 `go test` ok、`cmd/atlas` cover 76.7%。预演树已拆。\n- 按你上轮的要求，**报 sha 之后我没有再往分支追加任何提交**。\n\n**为什么我不能自己往下走**：门禁 `task-completed.sh` 的 `git log --grep` **不带 `--all`**，未合并分支上的 commit 对它结构性不可见 ⇒ 此刻转 `dev_done` 会「报绿」而根本没量到我的交付。teammate-idle hook 在这个状态的解锁文案恒为「推进 dev_done」，**方向相反**，我没有照做（本轮被它唤醒约 60 次，每次只跑一条两判据检查，未做多余动作、未催办）。\n\n**核实现状（现采，两个判据一致）**：`git merge-base --is-ancestor 7b38ef91… master` → NOT-MERGED；`git show master:cmd/atlas/hestia.go | grep -c 'hestia.BuildHistory'` → **0**（合入后应为 1）。\n\n**答复方式**：merge 完成后回一句即可，我会自己走 `blocked_clarification → in_progress`（epoch 1 不变），然后在 master 上整批重采 → 写 discovery → 转 `dev_done`。\n⚠️ 若 merge 遇到障碍（分支/sha 对不上、冲突、或你在等我做别的事），把障碍写进本条 `answer` 即可——**写进文件比发消息可靠**。",
+      "asked_at": "2026-09-08T04:59:55Z",
+      "answer": "**已 merge。** `task/TASK-002-m3` 于 2026-09-08 由 Leader 合入 master，你据此自行走了 `blocked_clarification → in_progress`，随后 dev_done / verifying / verified 全部走通，本任务已 accepted。\n\n🔴 **但这个 `answer` 字段当时我没有填** —— 我只在 inbox 回了一句，而你在提问里明确写了「⚠️ 若 merge 遇到障碍……把障碍写进本条 `answer` 即可——**写进文件比发消息可靠**」。你把载体选对了，我却答在了你指出不可靠的那个载体上。\n\n补记于 2026-09-09（任务转 accepted 后，因 `verified` 态 leader 无写权，写通道 DENY「合法写者: [\"test-*\"]」，而本任务的 verifier test-m3-b 已被 TaskStop）。\n\n**你这次提问本身是对的，值得单独记一句**：你不是对 DoD 有疑问，而是把「等 merge」这个**在文件层无法与『还在写代码』区分**的状态，主动换成了一个有 owner、有阈值、会被巡检看见的状态。`in_progress` 刻意不设 stale 阈值（dev 正常干活 p90 就 65 分钟），所以「dev 交付完等 Leader merge」是流水线上唯一没有活性保障的环节 —— 你用 `blocked_clarification` 给它造了一个。同一 sprint 里另一条返工分支叫 `task/M3-fix`，没走这条路，而 Leader 巡检的分支 glob 是 `task/TASK-*`，于是它等了 155 分钟没被任何机制看见。"
+    }
+  ],
+  "verifier": "test-m3-b",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-09T09:39:33Z"
+  },
+  "verify_baseline": {
+    "head": "5ba7c3ceca25f5c2495faf32e4ce1c38e92f90ca",
+    "discovery_sha256": "f8bed34d2991128637c9a6ecd0a56e7662347d73fae88b5ca97d12ddafade399",
+    "at": "2026-09-08T05:35:38Z"
+  }
+}

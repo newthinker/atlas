@@ -1,0 +1,150 @@
+{
+  "task_id": "TASK-006",
+  "author": "dev-m3-c",
+  "written_at": "2026-09-08",
+  "branch": "task/TASK-006-m3",
+  "commit_sha": "331fe42a46d4e3cb188bac771d2efa117f00beac",
+  "merged_master_sha": "b5873ad840019bbccf7c4d5a41f643db8408d4b3",
+  "nanoclaw_commit_sha": "e8d0decaab2a9bcfd29c952ebff11356f63dd3ba",
+  "atlas_build_sha": "1c7af81846a4fba3fbb76a84e42eb232b8178f81",
+  "key_findings": [
+    "🔴 **回填语料里没有任何修订期次——DoD 说「无人验证过，别假定」，现在验证了**：`SELECT period, period_type, COUNT(DISTINCT published_at) n FROM hestia_observations GROUP BY period, period_type HAVING n > 1` **零命中**；库里 **76 观测 / 76 期次 / 76 个 article_id**。⇒ 修订夹具的路径 (a)（在语料里实测找一个）**不可行**，只能走 (b)：照 `TestHestiaContractEmitRevisionPeriod`（符号名；实测在 atlas 主仓库 `cmd/atlas/hestia_test.go:1701`，**DoD 里写的 1570 已漂**）的配方，写一次性 Go 程序 `Save` 一条同 period/period_type、`published_at` 更晚、`article_id` 不同的观测再 emit。产出 `is_revision: true` + `supersedes_published_at: 2026-01-15`，与原契约 sha256 不同（`9084c2fd…` vs `3af69ad7…`）。一次性程序用完即删。",
+    "🔴 **前 12 期表必须取侧车的 `same_type`，写成 `monthly_recent` 会静默给出 0 行表**（我实现时先写错、被自己的输出撞见）。根因：**`monthly_recent` 在 `period_type == monthly` 时被 Atlas 侧刻意省略**（`omitzero`，见 atlas 主仓库 `internal/hestia/history.go:20` 与其后注释）——对 monthly 契约，`same_type` 本身就是月度序列；`monthly_recent` 只是非 monthly 期次的近月补充。实测各夹具：`2023-08-monthly` same_type=12/monthly_recent=**0**、`2022-07-monthly` 12/**0**、`2026-06-h1` 5/12、`2020-06-h1` **0**/4、`2025-12-annual` 5/12。⚠️ **这个缺陷不报错，只静默给空表**——已由 `test_history_table_uses_same_type_even_for_monthly` 钉住。",
+    "🔴 **DoD 建议的构建树核对命令零信息量**：`git log --oneline master | grep -E 'TASK-001|TASK-002'` 命中 **32 / 28** 条——任务号跨 sprint 复用（M1d / M1.5 / M2a / M3 都有 TASK-001），所以「两个都在」这个判据**恒真**，即便 M3 的那两个不在也一样过。⇒ 改用两层：①M3 限定 `grep -cE '\\(TASK-001\\): M3'` = 4、`\\(TASK-002\\): M3` = 2 ②**内容判据**（不看提交信息）`internal/hestia/history.go` 存在 + `func BuildHistory` 1 处 + `func WriteHistory` 1 处 + `cmd/atlas/hestia.go` 的 emit 路径调它们 2 处（`:453` / `:457`）。**通则：用「名字里含某串」做存在性判据时，先问这个名字空间有没有复用。**",
+    "🔴 **变异测试逼出 4 个真实缺口，它们的共同形状是「语义在夹具上行使不到」**：①`_mom` 优先（M17/M18/M19）——夹具里**每个字段只有 `_mom` 或 `_ytd` 之一**，把优先级反过来的变异输出完全不变 ②`bill_ratio` 跨口径配对（M4）——唯一用到它的断言走 `2026-06-h1`，而它两个字段**都是 `_ytd`** ③四信号阈值边界（M21）——`>=` 改 `>` 只在**恰好等于阈值**时有别，没有夹具落在边界上 ④口径标注（M14）——专职断言只查「出现了口径字样」，而表头恒含「本期 …（口径 X）」，只有 golden 逐字节比对杀死了它。⇒ **判据：一条语义若在所有夹具上取值都一样，它就没有被测到，无论有多少测试引用了它。** 补断言后 23 个变异全部 KILLED、0 存活。",
+    "**`test_deterministic`（自比）确实不能替代 golden 逐字节比对**——reviewer O2 的判断被实测证实：变异 M13（前 12 期表截断到 3 行）与 M22（数值格式全改两位小数）**自比都通过**，是 golden 把它们杀死的。自比只证明确定性，不证明正确性。",
+    "**`prepare.py` 已为 TASK-007 备好两个可复用函数**：`seal_digest(md)`（封条重算，已由 `test_seal_excludes_narrative` / `test_seal_catches_deleted_check_line` 覆盖）与 `with_check(section)`（分段摘要，由 `test_check_covers_from_previous_heading` 覆盖）。🔴 **TASK-007 应 `import prepare` 复用，不要另写一份**——两份实现必然漂，而校验行是「三处逐字一致」的规格。",
+    "**子代理的任务报告未送达我的线程——我收到的是另一个 artifact，而我把它当成了它的答复**（成因由 Leader 补齐，它手上有那份真报告；我据以两次订正措辞）。我在 code-simplifier 线程里收到的全部内容是 `No action. Twelfth identical fire — unchanged.`，当时判为「报告与事实相反」（因 `diff` 显示它**确实改了** `prepare.py` 与 `test_prepare.py`）。🔴 **真相**：它的**任务报告走了另一条路径到 Leader**（逐项列了 prepare.py 21 出/23 入、`EMOJI` 提模块级、`values.get()` 化简、`dual` 命名、test 里提 `import prepare as P` 去掉 17 处重复、三个辅助函数、一处等价改形的 `assertNotIn`，以及它**刻意不动**的 `main()` 三处 try/except 与 `seal_of` 位置）；落到我线程里的那句是它对 **idle hook 第 12 次投递**的回应（它原话：twelve fires 内未采取任何动作，升级给 `main` 是唯一非写入选项）。**两个 artifact 被混在了一起。**⇒ **准确说法是「它的报告没送到我手上」，不是「它谎报」、也不是「它答错了问题」**——后两种都把一个它没做过的动作安在它头上，而三者**在我这一侧的文本上完全同形**（都表现为一句与提问对不上的话）。⚠️ 我最初的归因属于**拿已确认的过错去解释未确认的现象**：我确认的是「diff 与它的话对不上」，未确认的是「它为什么这么说」，而我用前者补了后者。**实质处置不变且正确**：按 DoD **以 `git diff` 为准而非以自陈为准**核实，改动都在约束内（golden 未变、53 个 `def test_` 未减、仅标准库、函数名与签名未变），逐条看过后接受。🔴 **另有一条与它可不可信、报告送没送到**完全无关、独立成立，不因本次订正而削弱**：它改了 `monthly_average` 与 `_pick` 的**代码形状** ⇒ 我原来的变异锚点全部失效（`old` 串 `count == 0`，harness 只会打「跳过」）⇒ **把 23 个变异按新形状逐条重写锚点并全部重跑**（仍 KILLED 23 / SURVIVED 0）。**「简化后测试仍全绿」不足以说明断言仍在守卫。**",
+    "**`__pycache__` 会被 `git add container/skills/warp-hestia` 带进暂存区**——nanoclaw 仓库的 `.gitignore` **没有** `__pycache__`/`*.pyc` 规则（`grep` 零命中）。首次暂存混进 2 个 `.pyc`，`git reset` + 删目录后重新暂存才得到干净的 17 个文件。⚠️ 每跑一次测试就会重新生成 ⇒ **这是会复发的坑**，TASK-007 提交前必须再排一次。本任务没改 `.gitignore`（那是仓库级配置，超出 `writes` 声明范围）。"
+  ],
+  "decisions": [
+    {
+      "decision": "golden 期望文件 `fixtures/golden/{2026-06-h1,2023-08-monthly}.md` 由 `prepare.py` 的输出生成后入库，**而非手写**。",
+      "rationale": "DoD 要求「更新期望文件必须在 discovery `decisions` 申报理由」。生成顺序是有意的：**先跑通全部非 golden 断言**（三期温度、派生分支、frontmatter 全表、两级校验条数与作用域、两张表结构、边界与错误路径），**再人工逐行读两份输出**（表结构、口径标注是否在该标的地方标了、校验行位置、批注区），**最后才入库为期望**。⇒ golden 钉住的是一份已被其它 53 条断言与人工阅读双重确认过的输出，不是「把当前行为固化下来」。**本次是首次生成，不是更新。**"
+    },
+    {
+      "decision": "修订夹具走路径 (b)（一次性 Go 程序造观测），并把 (a) 的实测结果写进文档与本 discovery。",
+      "rationale": "(a) 需要语料里存在同 period/period_type 的两个 `published_at`，实测**零命中**（76/76/76）。DoD 特意写了「无人验证过，不要假定」——所以不只是选了 (b)，而是**把「(a) 为什么不可行」也变成了可复现的证据**（三条 SQL 都贴进文档 2.2）。下一个人不必再验一遍。"
+    },
+    {
+      "decision": "四条新增断言（跨口径配对、`_mom` 优先 ×3、阈值边界、口径标注正反两向）是**变异测试反推出来的**，不是照 DoD 逐条写出来的。",
+      "rationale": "DoD 列的义务我都覆盖了，测试也全绿——**但变异存活证明其中四条语义根本没被行使**。这正是「把『我担心将来会怎样』直接做成变异」比论证更强的地方（Leader 从 TASK-001 复验里带来的手法）。⚠️ 值得记的是**存活的那四个都不是我漏写了断言，而是我写的断言在现有夹具上取值恒定** —— 光看「覆盖了哪些义务」发现不了。"
+    },
+    {
+      "decision": "变异一律在 `mktemp -d` 隔离副本上跑，每轮校验主工作区 `prepare.py` 的 sha256 与 `git status --porcelain` 指纹。",
+      "rationale": "CLAUDE.md 变异纪律：就地变异会让并发 agent 读到变异态、拿到与自己改动无关的假红，且「就地+还原」只是缩小窗口不是消除。每个变异体落盘后过 `ast.parse` 语法闸——M3 第一次尝试就被语法闸拦下（补 `with_check(` 少了右括号），**未记 KILLED**，改用完整多行替换后才真正杀死。"
+    },
+    {
+      "decision": "`verify.py` 不实现，需求原文 `test_prepare.py` 里的 `class Verify` 三条也不写。",
+      "rationale": "Arcforge 侧把需求 TASK-005 拆成了 TASK-006（`prepare.py`）+ TASK-007（`verify.py`）——reviewer 反审发现初稿一个任务装不下（5 条实质业务义务零覆盖 + 5 条边界缺口，8 条 DoD 放不下）。⇒ `ls scripts/verify.py` 不存在**不是缺陷**。但两个它要用的函数已在 `prepare.py` 里备好并测过（见 key_findings 第 6 条）。"
+    },
+    {
+      "decision": "commit subject 两套编号并存：nanoclaw 用 `feat(warp-hestia): …`，atlas 用 `docs(TASK-006): …`；脚本注释里用**需求编号** `M3 的 TASK-005`。",
+      "rationale": "编号映射表：脚本注释的读者是三仓库开发者（读需求文档），atlas commit subject 的读者是门禁 `task-completed.sh`（按 Arcforge 编号 `git log --grep` 认领改动）。**同一次交付里编号不同是预期的。**"
+    },
+    {
+      "decision": "接受 code-simplifier 的改动，但先逐条读 diff、再把 23 个变异按简化后的新形状重跑一遍。",
+      "rationale": "它的**任务报告未送达我的线程**（我收到的是它对 idle hook 第 12 次投递的回应，真报告走了另一条路径到 Leader）⇒ **自陈不能作为「改了什么」的依据，须以 `git diff` 为准**。更重要的是：简化改了 `monthly_average` / `_pick` 的代码形状，**我原来的变异锚点随之失效** —— 若只跑「简化后 53 个测试仍全绿」，等于没有验证断言在新形状下是否仍在守卫。重跑后 KILLED 23 / SURVIVED 0。"
+    }
+  ],
+  "files_modified": [
+    "nanoclaw commit e8d0decaab2a9bcfd29c952ebff11356f63dd3ba —— 17 个文件、+6364 行、0 删除（纯新建）",
+    "  scripts/prepare.py 433 行；scripts/test_prepare.py 560 行（53 个 def test_）",
+    "  scripts/fixtures/ 13 个条目（5 契约 + 5 侧车 + 修订契约与其侧车 + existing-2026-06-h1.md 27 行）",
+    "  scripts/fixtures/golden/ 2 份期望：2026-06-h1.md 80 行 sha256 13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7；2023-08-monthly.md 86 行 sha256 638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586",
+    "atlas commit 331fe42a46d4e3cb188bac771d2efa117f00beac —— docs/hestia-m3/TASK-006-warp-hestia-prepare.md 442 行（纯新增，与 writes 声明逐字一致）",
+    "未改（有意）: container/skills/warp-research/**（两 commit 累计 0 行）、scripts/verify.py（未建，TASK-007）、examples/（未建）、nanoclaw .gitignore（仓库级配置，范围外）"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "nanoclaw worktree /Users/zuowei/workspace/ai/wt-warp-hestia，分支 feat/warp-hestia，本任务 HEAD = e8d0decaab2a9bcfd29c952ebff11356f63dd3ba",
+      "consumers": "🔴 **TASK-007 在此 worktree 的此分支上继续写 `verify.py`，不新建 worktree、不另开分支**；交给你时工作区干净（`git status --short` 行数 0）。分支现有 3 个 commit（`aff2521…` 文档 → `7ca6b57e…` 订正 → `e8d0deca…` 本任务）。**TASK-007 负责拆 worktree 并统一开 PR**（含 005/006/007 三批提交）。⚠️ 本条是**本任务交付时的现读值**，不是从上游 discovery 抄的——TASK-005 的 `interfaces_exposed[0]` 那个 `aff2521…` 已过期。"
+    },
+    {
+      "symbol": "prepare.seal_digest(md) -> str —— 封条重算，verify.py 直接复用",
+      "consumers": "🔴 **TASK-007 `import prepare` 复用，不要另写一份**。语义：覆盖 `<!-- machine-generated: begin -->` 的**下一行**起、到 `<!-- seal: ` 行**之前**，**扣除** `<!-- narrative -->` 与 `<!-- /narrative -->` 之间（**含这两行本身**）的全部文本。已由 `test_seal_excludes_narrative`（在 narrative 里插入带 `## ` 的文本，封条不变）与 `test_seal_catches_deleted_check_line`（删一条 check 行，封条必变）双向覆盖。"
+    },
+    {
+      "symbol": "prepare.with_check(section_md) -> str —— 分段摘要，verify.py 反算时用同一口径",
+      "consumers": "TASK-007 反算分段 check 时的作用域必须是「从**上一个 `## ` 标题行**（含该行）起，到该 check 行之前」。已由 `test_check_covers_from_previous_heading` 用 `hashlib.sha256` 独立复算钉住。🔴 **条数写死：分段 check 恰 2 条（`## 信号` 段不发）、封条 seal 恰 1 条。不要从 `## ` 标题数推**——实测机器区 3 个 `## `、整份骨架 4 个，两个口径推出来都错（`test_heading_count_differs_from_check_count` 钉住这个差）。"
+    },
+    {
+      "symbol": "prepare.py 的其余模块级接口：months_in_period / monthly_average / same_caliber_pair / evaluate / note_name / build_frontmatter / render_table_current / render_table_history / extract_annotations / main；私有助手 _pick / _series / _year_ago",
+      "consumers": "TASK-007 若需函数级调用可直接用。⚠️ `_pick` / `_series` / `_year_ago` 虽以下划线开头，但**被测试直接调用**，改名会红。`monthly_average` 返回 `(value, ok)`，`same_caliber_pair` 返回 `(a, b, ok)` —— **月数为 0 时返回 ok=False 而不是除以 0**（÷0 得 ±Inf 会被阈值判定当成很大的月均而误判绿灯）。"
+    },
+    {
+      "symbol": "夹具 scripts/fixtures/：5 期契约 + 5 侧车 + 2025-12-annual-rev（is_revision）+ existing-2026-06-h1.md + golden/ 两份期望",
+      "consumers": "TASK-007 的 `verify.py` 测试可直接复用：`golden/2026-06-h1.md` 与 `golden/2023-08-monthly.md` 是**未被篡改的合规笔记**，天然是 `test_accepts_untouched` 的输入；篡改用例可在其副本上改数据表（应红）或改 narrative（应绿）。⚠️ **不要修改 golden 文件**——它们同时是本任务逐字节比对的期望。"
+    },
+    {
+      "symbol": "构建夹具时的 atlas 全 sha = 1c7af81846a4fba3fbb76a84e42eb232b8178f81",
+      "consumers": "夹具是用这棵树上的 `go build ./cmd/atlas` 产出的（含 M3 的 TASK-001 侧车 + TASK-002 的 emit 同产侧车）。验证者若要重建夹具，必须钉这个全 sha，**不要写 `HEAD` 或 `master`**——符号引用会过期。"
+    },
+    {
+      "symbol": "🔴 跨仓库漂移检测缺口：verify_baseline 只锚 atlas，够不到 nanoclaw",
+      "consumers": "**TASK-006 的验证者必须自己补**：判定前后各记一次 `git -C /Users/zuowei/workspace/ai/wt-warp-hestia rev-parse HEAD`，与 `e8d0decaab2a9bcfd29c952ebff11356f63dd3ba` 比对，不一致就当漂移处理（报 Leader，别自行决定验哪一版）。⚠️ **worktree 的工作树默认就是最新版**，照交付文档的命令裸跑只会量到当前版，量不出「判的是不是同一棵树」。"
+    }
+  ],
+  "verification": {
+    "sampled_on": "全部数字采于最后一次改动之后：nanoclaw commit e8d0decaab2a9bcfd29c952ebff11356f63dd3ba、atlas commit 331fe42a46d4e3cb188bac771d2efa117f00beac；atlas 基线 master 9ce20f3120ffbfcb679a0d5c30fe1a80c71893d6；构建夹具时 atlas 1c7af81846a4fba3fbb76a84e42eb232b8178f81",
+    "red_phase": "实现前 `python3 -m unittest -v 2>&1 | tail -5` → `Ran 44 tests` / `FAILED (failures=3, errors=40)` / EXIT=1。⚠️ 另 5 个通过的是 FixturesShape 那组（只验夹具本身、不依赖 prepare.py）—— **如实记下，不粉饰成「全红」**",
+    "tests": "`python3 -m unittest -v 2>&1 | tail -3` → `Ran 53 tests in 1.397s` / `OK` / EXIT=0；`grep -c 'def test_' test_prepare.py` = **53**，与 `Ran 53` 两个口径一致",
+    "stdlib_only": "`grep -n '^import \\|^from ' prepare.py` → 5 行：argparse / hashlib / json / re / sys，全标准库",
+    "check_seal_counts": "对 2026-06-h1 的实际输出：机器区 `## ` 标题 **3** 个、分段 check **2** 条、封条 seal **1** 条 —— 3≠2 即「不能按标题数推 check 数」的实证",
+    "golden": "fixtures/golden/2026-06-h1.md 80 行 sha256 13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7；2023-08-monthly.md 86 行 sha256 638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586。逐字节比对（test_golden_files_byte_exact），自比（test_deterministic）保留但不替代",
+    "mutation": "**23 个变异全部 KILLED、0 存活**（M1/M3/M4/M5/M6/M7/M9/M10/M11/M12/M13/M14/M15/M16/M17/M18/M19/M20/M21/M22/M23/M24/M25/M26/M27 中在最终形状上可锚定的 23 个）。隔离副本执行，`ast.parse` 语法闸（M3 首次被拦、未记 KILLED），每轮校验主工作区 prepare.py sha256 与 git status 指纹**均未变**。🔴 表格与逐条成因见交付文档 2.10",
+    "error_paths": "`prepare.py <contract> /nonexistent.json` → stderr `history 侧车读取或解析失败: [Errno 2] …`、EXIT=**2**；契约 JSON 非法同样非零",
+    "boundary": "B1 months_in_period 解析失败返回 0 且不做除数（monthly_average 返 ok=False）；B2 ok=False ⇒ 信号 unknown 且 temp_known **1** < 4；B6 旧笔记无 `## 我的批注` ⇒ 视为空不报错；O3 修订路径 supersedes_published_at + 「本文取代 2026-01-15 版本」；批注两行原样保留 + **七个标记**齐全",
+    "numstat": "nanoclaw `git show --numstat e8d0deca…` = 17 个文件 +6364 / -0；atlas `git show --numstat 331fe42a…` = `442  0  docs/hestia-m3/TASK-006-warp-hestia-prepare.md`（唯一文件，与 writes 声明逐字一致，无 scope 越界）",
+    "warp_research_untouched": "`git diff --numstat d791101e… e8d0deca… -- container/skills/warp-research | grep -c .` → **0**",
+    "worktree_clean": "`git -C /Users/zuowei/workspace/ai/wt-warp-hestia status --short | grep -c .` → **0**（__pycache__ 已剔除；提交里 0 个 .pyc）",
+    "main_checkout_untouched": "nanoclaw 主 checkout 仍在 feat/vendor-agent-reach-skill @ aefea6ce…，未 checkout / 未 stash / 未提交",
+    "commit_convention": "atlas `git log -1 --format='%s' | grep -cE '^[a-z]+\\(TASK-006\\): '` → 1；nanoclaw 用 nanoclaw 规范 `feat(warp-hestia): …`",
+    "merge_rehearsal": "临时 detached worktree 上 `git merge --no-ff --no-commit task/TASK-006-m3` → `Automatic merge went well`，EXIT=0，status 仅 `A docs/hestia-m3/TASK-006-warp-hestia-prepare.md`；已 abort + remove + prune（清理挂 trap，不放在 `&&` 链尾）",
+    "code_simplifier": "跑过。**它的任务报告未送达我的线程**（我线程里只有 `No action. Twelfth identical fire — unchanged.`，那是它对 idle hook 第 12 次投递的回应；真报告走了另一条路径到 Leader）——**不是谎报，是两个 artifact 混了**；⇒ 按 DoD 以 diff 为准逐条核实：golden 两份 sha256 未变、`def test_` 53→53、import 5 行全标准库、函数名与签名未变、`Ran 53 / OK / EXIT=0`。**更强的一层**：简化改了 monthly_average 与 _pick 的代码形状 ⇒ 变异锚点失效，**23 个变异按新形状全部重跑**，仍 KILLED 23 / SURVIVED 0",
+    "done_criteria_to_evidence": {
+      "functional[0] 夹具 + 构建树核对": "文档 2.1（M3 限定 grep 4/2 + 内容判据 + 构建 sha + 侧车 jq 抽查）+ 2.2（修订夹具路径 (a) 实测零命中、走 (b) 的全过程）；测试 FixturesShape 4 条",
+      "functional[1] 模块结构 / 标准库 / --print-name": "文档 2.5；测试 ModuleInterface（十一个函数 callable + import 扫描）、PrintName（五种 period_type）",
+      "functional[2] frontmatter 全表 + 判读提示": "测试 Frontmatter：14 基础 + 9 派生 + 4 信号逐键断言、不含 reviewed/source、generated_by 取值、bill_ratio 同口径（含跨口径拒绝与 total==0 ⇒ unknown）、narrative 含「八问」",
+      "functional[3] 两张表 + 两级校验": "文档 2.6 / 2.7；测试 Tables（五列 + 口径标注正反两向 + 前 12 期取 same_type 含 monthly 方向）、CheckLines（check 恰 2 / seal 恰 1 / 信号段不发 / 标题数≠check 数 / 作用域独立复算 / 封条扣除 narrative / 封条抓删除）",
+      "functional[4] golden + 确定性 + 派生分支 + scissors/信号": "文档 2.8 / 2.9；测试 Golden 3 条 + Derived 9 条（含 ÷3/÷6/÷9/÷12/_ytd÷MM/_mom 优先 ×3/scissors）",
+      "boundary B1/B2/B6/O3/批注+七标记": "文档 2.11；测试 Boundary 8 条（含阈值边界那条覆盖四信号临界值）",
+      "error_handling 退出码 + 红阶段留痕": "文档 2.3（红阶段原样输出）+ 2.11；测试 BadInput 2 条",
+      "non_functional 提交规范 / warp-research 不动 / 编号前缀 / 不开 PR / 交付流程": "文档 ①节（numstat + warp-research 0 行）+ ③节锚点 + ④节 A/B/C/D/E；code-simplifier 见 2.12"
+    },
+    "not_run": [
+      "`verify.py` 的任何执行 —— 本任务不实现（TASK-007）",
+      "运行时冒烟（skill 是否被容器加载、六步是否跑得通）—— 属需求 TASK-006（人执行），且需两步人执行前置（文档 ④节 D）",
+      "GitNexus detect-changes（索引陈旧，hook 提示 last indexed ae088eb）"
+    ],
+    "merged": "双判据核实已合入 master：拓扑 `git merge-base --is-ancestor 331fe42a46d4e3cb188bac771d2efa117f00beac master` → IS-ANCESTOR，且 `master^2` == 该 sha；内容 `git show master:docs/hestia-m3/TASK-006-warp-hestia-prepare.md | shasum -a 256` = `b8c6a6e54b1ba1a3e790e402772ae9530c295287b4162d9ec8b8c119d82da5b7`，与分支上同文件逐字节相同。merge commit `b5873ad840019bbccf7c4d5a41f643db8408d4b3`（subject `merge(TASK-006): M3 prepare.py + 夹具 + 53 测试交付记录`）。合入后复核 `git show --numstat 331fe42a…` 仍为 `442  0` 单文件。"
+  },
+  "provenance": "本任务的实现、夹具、53 个测试、23 个变异与两份交付文档均由 dev-m3-c 本人完成。**两处他人输入需注明**：①`code-simplifier` 子代理对 `prepare.py` / `test_prepare.py` 做了低风险简化（提 `EMOJI` 常量、`values.get()` 化简、`dual` 命名、测试提 `import prepare as P` 与三个辅助函数），我逐条读 `git diff` 后接受，并**按新代码形状重写锚点重跑了全部 23 个变异**；②该子代理**任务报告的去向**（走另一条路径到 Leader，我线程里那句是它对 idle hook 第 12 次投递的回应）由 Leader 补齐并提供了报告原文，我据以**两次订正** key_findings 的措辞——初稿写「报告与事实相反」、一稿写「答的不是我问的问题」，两者都把它没做过的动作安在了它头上；特此留痕，免得后人从中推出「子代理会谎报」这个过宽的结论。",
+  "rework": {
+    "at": "2026-09-09",
+    "trigger": "QA 两轮判 REJECT；人类拍板只修三条 Leader 亲手复现过的，其余转结转与 PENDING",
+    "nanoclaw_commit": "2a6d39388e4648eb3be0f15b42ee28b52428c5d8（三条 fix 一个 commit；三个任务各走各的状态机）",
+    "nanoclaw_prev": "2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8（QA 判定的对象）",
+    "pull_request": "https://github.com/newthinker/nanoclaw/pull/5（OPEN，6 commits，23 files）",
+    "tests": "Ran 95 tests / OK / EXIT=0（原 84 + 新增 11；test_prepare 63 + test_verify 32，与 Ran 95 双口径一致）",
+    "mutation": "10 个变异全部 KILLED、0 存活，含五条针对本轮修复的守卫（R2a/R2b/R2c/R3a/R3b）；隔离副本执行，harness 对锚点命中数 ≠1 直接 sys.exit(3)，每轮校验主工作区指纹均未变",
+    "golden": "两份 golden 逐字节未变，独立复算（重新生成后比 sha256）：13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7 / 638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586",
+    "hygiene": "提交里 __pycache__/*.pyc = 0（在最后一次跑测试之后排）；编号前缀 14/14 全带 `M3 的 `；未改 .gitignore",
+    "code_simplifier": "跑过，报「无需简化」，**核实确实未改动任何文件**（八个文件逐一 diff + 全套复跑 + golden sha256）——这次报告与事实一致",
+    "not_fixed": "🔴 Skeptic #3「narrative 扣除窗口整体搬到机器区顶端」**本次不修**：Leader 两次构造均未复现（两次都保住了封条摘要——证明封条确实是位置盲的——但都被分段 check 挡下），已作为「未复现的疑点」记入结转。不为它改动 narrative 标记的校验逻辑，那会扩大改动面而收益未经证实。",
+    "fix_id": "F2",
+    "severity": "HIGH",
+    "reason_class": "dod_defect（DoD 从未要求配对校验，我实现的是被要求的东西——Leader 明确记此归属）",
+    "atlas_commit": "75de0c7871531d6936d3e7f4fcb260b088f8cd67（114/0）",
+    "defect": "prepare.py 从 history 上**只读 same_type 一个键**，侧车顶层的 `for` 字段（atlas history.go 写出，值形如 `2026-06-h1`）**被读 0 次**（`grep -c` 实测为 0）⇒ 错配的一对喂进去，**prepare 与 verify 双双 exit 0**（3161 字节），frontmatter/标题/四信号/温度全对（都来自契约）而**两张表全错**（都来自侧车）——**笔记自洽地看起来完全正常**。",
+    "🔴 scope_wider_than_reported": "**污染面不止「前 12 期」表**（Leader 提醒，我实测确认）：`render_table_current` 的上期/去年同期两列同样取自 same_type（`series[0]` 就是上期）⇒ **本期数据表的对比列也错**，而那是解读的起点。实测错配时表头变成「上期 **2024-12** ⚠️口径 2023-01」。已加 `test_current_table_comparison_columns_come_from_same_type` 钉住对比列的来源。",
+    "fix": "新增 `pair_key()` 与 `assert_pair()`，main 读完两份 JSON 后立刻校验 `history[\"for\"] == period + \"-\" + period_type`，不成立 exit 2 并打印两边的值。这是这条链路上**唯一能机器判定「这两个文件是一对」的事实**。",
+    "🔴 criterion_is_period_not_filename": "**判据是期次，不是文件名**：修订夹具叫 `2025-12-annual-rev.*` 而它的 `for` 是 `2025-12-annual`——拿文件名做判据会**误拒**这一对。已由 `test_revision_fixture_pairs_by_period_not_filename` 钉住，且变异 R2b（换成文件名判据）被杀死。",
+    "evidence": "修后错配 ⇒ **exit 2 / stdout 0 字节**，stderr 同时打印契约侧期望值与侧车实际的 for；正配**六份全 0**（五期 + 修订夹具）。两份 golden 逐字节未变——配对校验只在错配时触发，正配路径一个字节没动。",
+    "tests_added": "PairingGuard 四条 + Tables 对比列一条。",
+    "mutations": "R2a 配对校验整个不做 ✅KILLED / R2b 判据换成文件名 ✅KILLED / R2c 不匹配只警告不退出 ✅KILLED。",
+    "lesson": "**「一个字段被写出来但从没被读过」是可机器检出的**：`grep -c` 侧车顶层字段在消费方的命中数，为 0 即可疑。本例中 `for` 是唯一的配对事实，写出方（atlas）一直在写，消费方从未读——**跨仓库契约的字段，两侧的读写要各查一次**。",
+    "merged_master_sha": "dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc",
+    "merged": "双判据核实已合入 master：拓扑 `git merge-base --is-ancestor 75de0c7871531d6936d3e7f4fcb260b088f8cd67 master` → IS-ANCESTOR；内容 `git show master:docs/hestia-m3/TASK-006-*.md | shasum -a 256` = `e052f671d818209686b8b5b7c2428c576322f4c56f457b2d7dd32cb2097d2692`，与分支上同文件逐字节相同。merge commit `dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc`（subject `merge(M3-fix): M3 三条 review_fix 返工——F1 --existing 守卫 / F2 契约×侧车配对 / F3 seal 形状断言`）。合入后复核 numstat 未变。"
+  }
+}

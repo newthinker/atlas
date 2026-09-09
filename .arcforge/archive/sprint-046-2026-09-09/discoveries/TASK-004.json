@@ -1,0 +1,103 @@
+{
+  "task_id": "TASK-004",
+  "author": "dev-m3-c",
+  "written_at": "2026-09-08",
+  "branch": "task/TASK-004-m3",
+  "commit_sha": "134f6351868725b7f1669f0932eb86655c35faf3",
+  "merged_master_sha": "0c3fbdc9ac7b12fcb65d6d2695541f55820cd03c",
+  "key_findings": [
+    "🔴 `groups/<folder>/container.json` 不是真相源，手改零效果且会被覆盖。`src/container-config.ts:4` 注释即「Source of truth is the container_configs table in the central DB」；`materializeContainerJson()`（`:74-89`）每次 spawn 从 DB 构造 config、`fs.writeFileSync` 无条件覆盖该文件、并把 config **返回**给调用方；`src/container-runner.ts:129` 是调用点，`:353-356` 的 buildMounts 用的是**返回值（DB）**、从不读文件。⇒ 手改有两重失效：在被覆盖之前就已不参与决策；下次 spawn 被覆写。`backfillContainerConfigs()`（`src/backfill-container-configs.ts:29-35`）头两行 `if (getContainerConfig(group.id)) continue;` ⇒ 只对没有 config 行的组从文件回读，Warp 组已有行、永不回读。`ncl groups` CLI 也无 additional_mounts 子命令（`src/cli/resources/groups.ts` 只有 config update 标量 / mcp / packages）⇒ 唯一有效路径是直接改 `data/v2.db`。",
+    "🔴 skill **不随镜像打包**，不需要重建镜像：`src/container-runner.ts:346-349` 把 `<projectRoot>/container/skills` 只读 bind mount 到 `/app/skills`；Dockerfile 全部 COPY/ADD 只有 `:85`/`:113`/`:152` 三条、无一涉及 skills；头注释 `:9-11` 原文「Source is never baked in … Source-only changes never require an image rebuild」。⇒ spec §9 风险表「重建镜像（若 skills 随镜像打包）」这条尾巴可划掉。",
+    "🔴 但 `projectRoot = process.cwd()`（`src/container-runner.ts:273`）= nanoclaw 主进程工作目录 = **主 checkout**，不是 worktree ⇒ **TASK-005/006 写在 worktree 里的 `container/skills/warp-hestia/` 容器看不见**，冒烟前必须让主 checkout 工作树里存在它。先例已现成演示：`warp-research` 只在 `fork/main`，主 checkout 停在 `feat/vendor-agent-reach-skill`（不含它）⇒ 主 checkout `container/skills/` 恰 9 项、Warp 组 `.claude-shared/skills/` 恰 9 个符号链接、`grep -c warp` = 0。即 M3 先例 skill 目前在容器里同样不可见。",
+    "`\"skills\": \"all\"`（container.json 与 DB 行都是）⇒ `selectedSkillNames()`（`src/container-runner.ts:414-426`）从 `container/skills/` 目录**重算**，新 skill 自动纳入；`syncSkillSymlinks()`（`:371-408`）在 spawn 时建 `<name> -> /app/skills/<name>` 符号链接。⇒ 加 warp-hestia **不需要改 skills 字段**，也不需要重启 nanoclaw 进程（readdirSync 是实时的），起个新容器即可。",
+    "mount-security 对**不存在的 hostPath** 走的是需求文档没猜到的第三条路径：`getRealPath()`（`src/modules/mount-security/index.ts:137-143`）`fs.realpathSync` 抛异常返 null → `validateMount()`（`:256-260`）在 blockedPatterns / allowedRoots 检查**之前**就返回 `Host path does not exist: \"…\"` → `validateAdditionalMounts()`（`:346`）走 `log.warn('Additional mount REJECTED')`，该挂载**整条丢弃**、容器照常启动。需求猜的 `Mount forced to read-only` 与 `not under any allowed root` **都不会出现**；冒烟第一步该找的日志关键字是 `Additional mount REJECTED`。另 `findAllowedRoot()`（`:171-179`）对不存在的 allowedRoot 直接 `continue` ⇒ 即使 allowlist 粘好，队列根不存在时那条 root 等于不生效。**仅代码阅读，运行时未验证。**",
+    "🔴 粘贴 allowlist 之后**必须重启 nanoclaw 主进程**（需求只提了重启 selvage）：`loadMountAllowlist()`（`src/modules/mount-security/index.ts:62-67`）把 allowlist 缓存在进程内存里，源码注释原文「Result is cached in memory for the lifetime of the process.」⇒ TASK-006 Step 0 的人执行前置应为**两个重启**：selvage + nanoclaw。",
+    "现有 `~/.config/nanoclaw/mount-allowlist.json` 里的 `\"nonMainReadOnly\": true` 是**死键**：`grep -rn 'nonMainReadOnly' src/ --include='*.ts'` 在 `d791101…` 上命中 0 条，`MountAllowlist` 接口（`src/modules/mount-security/index.ts:21-24`）只有 `allowedRoots` / `blockedPatterns`。旧版残留，不影响本任务。",
+    "`groups/cli-with-warp/` 的两个改动文件被 `.gitignore` **双重命中**：`:15 groups/*` 命中两者，`:19 **/CLAUDE.local.md` 再命中一次；`git ls-files groups/cli-with-warp` 返回空（0 条）。⇒ 需求 Step 5 的 `git add … # 若被跟踪` 条件为假，**本任务在 nanoclaw git 上零提交、无 PR**。"
+  ],
+  "decisions": [
+    {
+      "decision": "按 DoD 字面完成 container.json 的编辑，但**不改 `data/v2.db`**；把生效所需的 SQL 写进交付文档 ④节 B 供人执行，与 mount-allowlist.json 同待遇。",
+      "rationale": "`data/v2.db` 是本机运行时 sqlite 库、不在本任务 `writes` 声明内，Leader 下发的硬约束也只覆盖 container.json。改一个正被进程持有的库属范围外的不可逆动作。已于交付前经 inbox 报 Leader 并请其裁决是否补做。DoD functional② 的字面要求 100% 完成（保留 vault + 追加一项 + JSON 合法 + sha256 前后与 diff）——④节 B 记的是「做完之后发现它在运行时不生效」，是额外发现而非未完成项。"
+    },
+    {
+      "decision": "container.json 用**行级 splice**（python 断言锚点唯一 `count == 1`）修改，不用 JSON round-trip 整文件重写。",
+      "rationale": "CLAUDE.md「变异测试纪律」的整文件重写隐患：整读整写会把写回那一刻的文件状态固化，且会重排/重转义非改动部分。行级 splice 让 diff 恰为 +5/−0，vault 项与其余七个字段字节不变，可核。"
+    },
+    {
+      "decision": "CLAUDE.local.md 的新段落**逐字照抄需求原文**，保留其全角标点，不与本组既有段落（半角逗号/冒号风格）归一化。",
+      "rationale": "需求文档给了完整代码块，design-spec 与任务 description 都规定「以原文为准」；标点归一化属于范围外的『顺手改进』，且会让验证者逐字比对时产生假红。"
+    },
+    {
+      "decision": "偏离需求 Step 1 的 `git checkout main && git pull fork main`，改为 `git fetch fork` + `git worktree add -b feat/warp-hestia … fork/main`；不 stash 主 checkout。",
+      "rationale": "人类 2026-09-08 裁决 AD-M3-3 / design-spec §5：主 checkout 停在 `feat/vendor-agent-reach-skill` 且工作区脏（2 改 2 删），切分支会动到别人在途改动。效果等价（同样拿到 fork/main 的 d791101…）而主工作区前后 `git status --short` 逐字相同。需求 Step 1 的『status 必须干净，不干净先 stash』因此不适用。"
+    },
+    {
+      "decision": "commit subject 用 Arcforge 编号 `docs(TASK-004):`，而文档正文与注释里的里程碑编号用需求文档编号 `M3 的 TASK-003`。",
+      "rationale": "任务 description 的编号映射表：commit subject 的读者是门禁 `task-completed.sh`（按 Arcforge 编号 `git log --grep` 认领改动，写错则改动不可见），文档/注释的读者是三仓库开发者（他们读需求文档与 spec）。**两处编号不同是预期的，不是笔误。**"
+    },
+    {
+      "decision": "CLAUDE.local.md 也做了备份（`CLAUDE.local.md.bak-2026-09-08`），尽管 DoD 只要求备份 container.json。",
+      "rationale": "同为未跟踪文件、git 无法回滚，成本为零而失手不可逆。两个 .bak 文件都保留在原地未删（同样被 .gitignore 忽略，不进 PR）。"
+    }
+  ],
+  "files_modified": [
+    "atlas: docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md（新增 507 行，纯新增；`git show --numstat 134f6351868725b7f1669f0932eb86655c35faf3` = `507  0`）",
+    "nanoclaw（未跟踪、不进 git）: groups/cli-with-warp/container.json —— sha256 8cd094770a23ce8b60a9c7d291ccd46a63aaae79e1903db8ba83745bccb21e97 → 23f602a810854fc6152cdf7e9864196362fe92e348561c199d35fdc749c22add",
+    "nanoclaw（未跟踪、不进 git）: groups/cli-with-warp/CLAUDE.local.md —— sha256 2ef704db62e776337e558a8797b3058d27fef990cb96f4d4591be66a4293f39e → 3ec592e68932d34a54d91b78686fa2cc8f51cbf415a6e6d39258071b182444a3",
+    "nanoclaw 备份（未跟踪）: groups/cli-with-warp/container.json.bak-2026-09-08、groups/cli-with-warp/CLAUDE.local.md.bak-2026-09-08",
+    "未改（有意）: ~/.config/nanoclaw/mount-allowlist.json、/Users/zuowei/workspace/ai/nanoclaw/data/v2.db"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "nanoclaw worktree 绝对路径 = /Users/zuowei/workspace/ai/wt-warp-hestia",
+      "consumers": "🔴 TASK-005 / TASK-006 **直接在此 worktree 里开工，不要新建**；TASK-007 负责拆（`git -C /Users/zuowei/workspace/ai/nanoclaw worktree remove /Users/zuowei/workspace/ai/wt-warp-hestia`）。三者串行复用同一个 worktree。"
+    },
+    {
+      "symbol": "nanoclaw 分支 = feat/warp-hestia，HEAD 全 sha = d791101e1defcfd3d3d3fcf7ae32a85ec420547b（= fork/main，tracking fork/main）",
+      "consumers": "TASK-005/006 在此分支上提交（本任务零提交，交出去时工作区干净）。该分支即 M3 的 PR 分支。"
+    },
+    {
+      "symbol": "skill 产物落点 = <worktree>/container/skills/warp-hestia/（SKILL.md + references/ + scripts/）",
+      "consumers": "🔴 TASK-005/006 必读：容器看到的是**主 checkout** `/Users/zuowei/workspace/ai/nanoclaw/container/skills`（`process.cwd()`），**不是这个 worktree** ⇒ 冒烟前必须把 feat/warp-hestia 合进主 checkout 的工作树。SKILL.md 里写 `/app/skills/warp-hestia/scripts/…` 是对的（bind mount 的容器侧路径），不需要重建镜像。"
+    },
+    {
+      "symbol": "队列挂载 = hostPath /Users/zuowei/workspace/runtime/atlas/queue/hestia → 容器内 /workspace/extra/hestia-queue（readonly:false）",
+      "consumers": "TASK-005/006 的 SKILL.md 与 scripts 按 `/workspace/extra/hestia-queue/{pending,processing,done,failed}` 写。容器侧前缀 `/workspace/extra/` 由 `validateAdditionalMounts`（mount-security `:334`）拼出，containerPath 只给相对名。🔴 生效还差两步（都属 TASK-006 Step 0 人执行）：粘 allowlist + 重启 nanoclaw；**以及改 data/v2.db**（见 key_findings 第 1 条，SQL 在交付文档 ④节 B）。"
+    },
+    {
+      "symbol": "Warp 组标识：groupFolder = cli-with-warp，agentGroupId = ag-1782440732275-pqkuxs，imageTag = nanoclaw-agent:agentreach-h3，skills = \"all\"",
+      "consumers": "TASK-006 冒烟时定位 DB 行 / 会话目录 `data/v2-sessions/ag-1782440732275-pqkuxs/.claude-shared/skills/`（符号链接同步结果在此可核）。"
+    },
+    {
+      "symbol": "CLAUDE.local.md 触发段已就位：段名「## 金融数据解读（Hestia）」，触发词「处理 hestia 队列」「生成金融数据解读」「解读这期央行数据」",
+      "consumers": "TASK-006 冒烟按这三个触发词发话；skill 名必须恰为 `warp-hestia`（触发段与 SKILL.md 的 frontmatter name 要一致）。"
+    }
+  ],
+  "verification": {
+    "sampled_on": "全部数字采于最后一次改动之后、与交付文档 ③节锚点同一时刻；atlas commit 134f6351868725b7f1669f0932eb86655c35faf3，nanoclaw worktree d791101e1defcfd3d3d3fcf7ae32a85ec420547b，nanoclaw 主 checkout aefea6ce5439cfcf15b3dc54ea9bd507c5846c95",
+    "tests": "无代码任务（done_criteria 全部 verify_by manual/review），无测试套件。核实靠交付文档 ②节的原样命令 + sha256 比对。",
+    "json_validity": "python3 -c 'import json;json.load(open(\"/Users/zuowei/workspace/ai/nanoclaw/groups/cli-with-warp/container.json\"))' → JSON OK，EXIT=0（未触发回滚+blocked_clarification 分支）",
+    "numstat": "git show --numstat 134f6351868725b7f1669f0932eb86655c35faf3 → `507  0  docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md`（唯一文件、纯新增，与 writes 声明一致，无 scope 越界）",
+    "commit_convention": "git log -1 --format='%s' | grep -cE '^[a-z]+\\(TASK-004\\): ' → 1（合门禁约定）",
+    "merge_rehearsal": "临时 detached worktree 上 `git merge --no-ff --no-commit task/TASK-004-m3` → `Automatic merge went well; stopped before committing as requested`，EXIT=0，status 仅 `A docs/hestia-m3/TASK-004-...md`；已 abort + `worktree remove --force`",
+    "main_checkout_untouched": "开工前与全部改动之后 `git -C /Users/zuowei/workspace/ai/nanoclaw status --short` 逐字相同（` M CLAUDE.md` / ` M container/agent-runner/src/mcp-tools/index.ts` / ` D groups/global/CLAUDE.md` / ` D groups/main/CLAUDE.md` / `?? .claude/skills/gitnexus/`），分支仍为 feat/vendor-agent-reach-skill @ aefea6ce…；未 checkout、未 stash、未提交",
+    "worktree_clean": "git -C /Users/zuowei/workspace/ai/wt-warp-hestia status --short 无输出，EXIT=0（交给下游时干净）",
+    "untracked_proof": "git ls-files groups/cli-with-warp 返回空（0 条）；git check-ignore -v 对两文件均输出 `.gitignore:15:groups/*`",
+    "line_refs_reverified": "文档与本 discovery 引用的每个 file:line 都在成稿后用 grep -n 重新求值并逐条订正过（订正了 6 处：validateMount 254→256、log.warn 345→346、buildMounts 351→353、backfill 34→35、syncSkillSymlinks 367→371、selectedSkillNames 412→414；Dockerfile 头注释 8→9）",
+    "done_criteria_to_evidence": {
+      "functional[0] worktree": "交付文档 ②节 2.1（fetch/worktree add/ls SKILL.md 原样输出）+ 2.2（主 checkout 未动）+ ③节锚点；本 discovery interfaces_exposed 前两条",
+      "functional[1] container.json": "交付文档 ①节 1.1（sha256 前后 + additionalMounts 前后全文 + diff）+ ②节 2.3（JSON OK）+ 2.4（sha256 汇总）",
+      "functional[2] CLAUDE.local.md": "交付文档 ①节 1.2（sha256 前后 + diff，hunk 头 @@ -15,3 +15,10 @@ 证明追加在「## 调研」段之后）",
+      "boundary[0] allowlist/队列根/结转/skill 分发": "交付文档 ④节 A（片段 + 队列根不存在 + mount-security 行为 + 重启 nanoclaw + 结转声明）+ ④节 C（skill 分发三句结论 + warp-research 反证 + 明写不需重建镜像）",
+      "error_handling[0] 备份+验 JSON": "交付文档 ①节 1.1 备份路径 container.json.bak-2026-09-08（sha256 = 改动前值，逐字节相同）+ ②节 2.3",
+      "non_functional[0] 零提交": "交付文档 ④节 D（含 ls-files 空 + check-ignore 双证），③节 PR 链接标「无」",
+      "non_functional[1] 交付流程": "worktree → 提交（subject 合约定）→ 预演 merge → 请 Leader merge → merge 落地后才转 dev_done；discovery 在 dev_done 之前写完并挂指针"
+    },
+    "not_run": [
+      "运行时冒烟（挂载是否真的读写、日志里出现哪条 warn）—— 属需求 TASK-006 范围",
+      "GitNexus detect-changes（索引陈旧，hook 提示 last indexed ae088eb）"
+    ],
+    "merged": "双判据核实已合入 master：拓扑 `git merge-base --is-ancestor 134f6351868725b7f1669f0932eb86655c35faf3 master` → IS-ANCESTOR；内容 `git show master:docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md | shasum -a 256` = `667df3338d52117dd614486f74bacb296d7f5853286f0ff693cf10a404933f42`，与分支上同文件逐字节相同。merge commit `0c3fbdc9ac7b12fcb65d6d2695541f55820cd03c`（subject `merge(TASK-004): M3 nanoclaw 分支/队列挂载/触发段交付记录`）。合入后复核 `git show --numstat 134f6351…` 仍为 `507  0`。"
+  }
+}

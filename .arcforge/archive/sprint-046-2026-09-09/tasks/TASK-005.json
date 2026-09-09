@@ -1,0 +1,97 @@
+{
+  "id": "TASK-005",
+  "title": "nanoclaw：`warp-hestia` skill 文档（SKILL.md 六步 + methodology / note-format / glossary 三份 references）",
+  "description": "对应需求文档 **TASK-004**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` 的「## TASK-004」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M3-1…4）、`design-spec.md`。\n\n🔴 **跨仓库任务**（AD-M3-1）：产出在 nanoclaw 的 `container/skills/warp-hestia/`（**被 git 跟踪，进 PR**），atlas 的 `packages`/`writes` 是交付记录文档 `docs/hestia-m3/TASK-005-warp-hestia-docs.md`。\n\n在 **TASK-004 建的 worktree** 里干活（路径见 TASK-004 discovery 的 `interfaces_exposed`），**不新建 worktree**。\n\n新建 4 个文件：`SKILL.md`（frontmatter + §1 I/O 约定 + §2 六步 + §3 不做）、`references/note-format.md`（命名规则 / frontmatter 字段表 / 正文骨架 / `mode` 规则 / 修订）、`references/glossary.md`（三个 `caliber_version` / `_ytd` 与 `_mom` / 月均三条 / 四信号判定表 / 单位）、`references/methodology.md`（从 vault `Projects/Hestia/PBOC2026年上半年金融数据解读-完整版.md` **提炼，不整篇复制**）。\n\n⚠️ SKILL.md 的六步里引用了 `scripts/prepare.py` / `verify.py`（TASK-006 才实现）——**这是预期的**，文档先行、脚本后到；本任务**不实现脚本**，也**不因脚本不存在而阻塞**。\n\n🔴 **任务编号映射（必读，否则验证者会判不一致）**：本 sprint 的 Arcforge 编号与需求文档的编号**不同**（需求 TASK-001 拆成本 sprint 的 TASK-001+TASK-002，其余顺延）。两套编号各有其读者，用法固定为：\n| 写在哪 | 用哪套编号 | 理由 |\n|---|---|---|\n| **代码/文档注释**（`// M3 的 TASK-00X`） | **需求文档的编号** | 读者是三仓库的开发者，他们读的是需求文档与 spec，不是 atlas 的 `.arcforge/` 归档 |\n| **atlas commit subject**（`feat(TASK-00X):`） | **Arcforge 编号** | 门禁 `task-completed.sh` 按它认领改动，写错则改动不可见 |\n| **`.arcforge/` 内一切文件** | **Arcforge 编号** | 流程真相源 |\n映射表：需求 001 → 本 sprint 001(internal/hestia) + 002(cmd/atlas)；需求 002 → 003；需求 003 → 004；需求 004 → 005；需求 005 → 006；需求 006 → **本 sprint 不做（结转，AD-M3-2）**。\n⚠️ 故本任务的 commit subject 与代码注释里的编号**本就不同**，这是预期的，不是笔误——在 discovery `decisions` 里记一句。\n（本任务对应需求文档的 **TASK-004**；注释里写 `M3 的 TASK-004`。）\n\n**milestone 前缀写法（reviewer O7：需求自身不一致，Leader 裁决）**：需求 line 25 规定 `M3 的 TASK-001`，而它自己给的代码样例里 line 453/537 写的是 `M3 TASK-002`（无「的」）。**裁决：两种写法都接受**——照抄需求原文给的代码时保持原样，新写的注释用 `M3 的 TASK-00X`；验证者**不得**因这个「的」字判不符。",
+  "module": "nanoclaw-warp",
+  "complexity": "medium",
+  "estimated_files": [
+    "docs/hestia-m3/TASK-005-warp-hestia-docs.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`SKILL.md` 按需求原文：YAML frontmatter（`name: warp-hestia` + `description` 含三个触发语「处理 hestia 队列」「生成金融数据解读」「解读这期央行数据」且明写「一次只处理一份」「不用于回答一般宏观问题」）；§1 三条 I/O 约定（队列可写四子目录、契约与侧车**成对移动**；vault 只读**绝不直接写**；写回唯一出口 `selvage_call` 且 `DENIED`/`ERROR` **原文回复不重试**）；§2 六步齐全且**不跳步不并行**（扫队列 / 占位含 history 侧车缺失时对移 `failed/` / 组装 / 写叙述 / 校验并写回 / 收尾）；§3 **四条**不做（⚠️ 初稿写「五条」是**错的**，实测需求 `## §3 不做` 恰 **4** 个 bullet，`grep -c '^- '` = 4；照「五条」验会让 dev 硬造第五条）：①不处理第二份（用户再说一句才继续）②不改数据表、不改 frontmatter、不自己算指标 ③不写 `reviewed` / `source`（Spool 会覆写）④不上网查资料——本 skill 只解读契约与侧车里的数据。🔴 **模型边界必须明写**：只改 `<!-- narrative -->` 与 `<!-- /narrative -->` 之间的文本，不改数据表、不改 frontmatter、不自己算指标、不写 `reviewed`/`source`、不上网。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`references/note-format.md`：五种 period_type 的命名规则（monthly `<YYYY-MM> 金融数据解读.md` / q1 `<YYYY> 一季度…` / h1 `<YYYY> 上半年…` / q1_q3 `<YYYY> 前三季度…` / annual `<YYYY> 全年…`，并注明 `prepare.py --print-name` 打印同一规则）；frontmatter 字段表（spec §6.1 原样，注明 `reviewed`/`source` 由 Spool 写）；正文骨架（spec §6.2 原样）；`<!-- check: sha256 -->` 的定义（**紧邻其上那张表**：从上一个 `## ` 标题到校验行之间的文本）；`mode` 规则（同名存在 ⇒ `update`，否则 `create`）；修订（`is_revision: true` ⇒ 标题下加「本文取代 <旧发布日> 版本」）。\n🔴 **文件名规则冲突裁决（reviewer G6b）**：需求 line 853/967/1012 三处一致用 **`2026 上半年金融数据解读.md`（无月份）**，而上游 spec §6 路径示例与 §8.2 判据 3 写的是 `2026-06 上半年金融数据解读.md`（**带**月份）。**取无月份版**（需求文档内部三处自洽，且 `test_print_name` 的断言就是它）。把这条冲突与裁决**显式写进 `note-format.md`**，否则它会在结转的冒烟验收里再咬一次。\n🔴 **校验行规格（TASK-005 / 006 / 007 三处必须逐字一致，条数写死、不从文档结构推）**——reviewer B5 复审后的重新设计。初稿的「按 `## ` 切分出 N，断言 check 行数 == N」**装反了**：spec §6.2 骨架的机器区有 **3 个 `## `**（`## 本期数据` / `## 前 12 期` / `## 信号`）却只有 **2 条 check 行**（`## 信号` 段不发），照 spec 正确实现的笔记会当场 `2 != 3` 判红；且它有两个真绕过（连标题一起删 ⇒ N 与 count 同减、恒等；模型在 narrative 里写 `## ` ⇒ N 虚增判红合格笔记，而 methodology 的八问框架天然诱导这么写）。**改为两级**：\n① **分段 check** `<!-- check: <sha256> -->`：紧跟一张数据表之后，覆盖「从**上一个 `## ` 标题行**起到本行之前」的文本。机器区内**恰好 2 条**（`## 本期数据`、`## 前 12 期`）；`## 信号` 段**不发**（依 spec §6.2 骨架）。\n② **封条 seal** `<!-- seal: <sha256> -->`：位于 `<!-- machine-generated: end -->` **紧邻其上**，**恰好 1 条**，覆盖「从 `<!-- machine-generated: begin -->` 的下一行起、到本 seal 行之前，**扣除** `<!-- narrative -->` 与 `<!-- /narrative -->` 之间（含这两行）的全部文本」。\n封条是「删除类篡改」的唯一防线：删一条 check 行 / 删整段（标题+表+check）/ 改无 check 保护的 `## 信号` 段，都会让封条覆盖的文本变化而变红；而 narrative 段被扣除 ⇒ 模型在叙述里写 `## ` 不影响。\n`note-format.md` 必须把①②两级的**作用域定义与条数**都写清楚——它是 TASK-006/007 两侧的唯一契约来源。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`references/glossary.md` 五块齐全：三个 `caliber_version`（`2015-01`/`2023-01`/`2025-01`，含义**与跨口径对比禁忌**）；`_ytd` 年初累计 vs `_mom` 当月，**同一观测里存款与贷款分部门可能口径不同**（引 M1c-4 §H-5 的 `2023-08` 例）；月均取法三条；四信号判定表（spec §5.3）；单位（存量万亿 / 流量亿元 / 比率百分数）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`references/methodology.md` 是**提炼不是复制**（🔴 初稿的判据「字数显著少于源文件」「结构是重组的」**无阈值、不可执行**——reviewer U6。改为三条可跑的判据：①`wc -c references/methodology.md` **≤ 源文件 40%**（源文件 `PBOC2026年上半年金融数据解读-完整版.md` 实测 **41113** 字节 ⇒ 上限 **16445** 字节）②`methodology.md` 的 `## ` 标题集合与源文件的 **`## ` 集合**（**只比 `## `，不比 `### `**）交集 ≤ 1。🔴 初稿写「与 `## `/`### ` 集合比」是**装反的闸**（reviewer N3）：实测源文件的八问在 `###`（line 344-499）、五链也在 `###`（line 522-570），而需求要求「第五章八个社会现实问题作为**叙述骨架**」⇒ dev 把八问写成 `## ` 标题是最自然的选择，此时交集直接 = 8，**判红一份完全合格的文档**。只与源文件的 12 个 `## `（「一、二、三…附录」式章节名，没人会照抄）比，约束几乎白送而不误伤③下列名称必须可 grep 到：八问的八个名称、五条传导链的五个名称——逐条列进文档 ②节并贴 grep 输出）：第三章 8 个概念各一段人话定义；第五章八个社会现实问题作为叙述骨架（每问写「看哪几个字段、比什么、结论怎么落」并标注对应四信号）；第六章五条传导链；一节「误读陷阱」（口径变更处不做同比 / `_ytd` 与 `_mom` 不混比 / 票据占比高 ≠ 信贷强 / M1 口径 2025-01 后不可与旧口径直接比）；一节「写作纪律」（每个判断句后括注引用的字段与数值 / 不做预测）。\n\n⚠️ **实现工具必须用 `grep -Fxf`，不得用 `comm -12`**（Leader 2026-09-08 实测订正）：`comm` 要求两侧按**同一 collation** 排序，**CJK 标题不满足该假设**，它**不报错、只给貌似合理的垃圾**——同一对输入上 `comm -12` 给出 **5**（另一次给出 **3**），而真值是 **0**。`grep -Fxf`（整行定长匹配、与顺序无关）给真值。**判据仍是「交集 ≤ 1」，只是求值方式钉死。**🔴 **验证者注意**：按字面判据的直觉选法正是 `comm`，用它会 **reject 一份合格交付**；同一个坏仪器还会在重跑时给出**不同的假值**（5 与 3），那种「重跑数变了」容易被读成「有别的东西在变」而不是「仪器坏了」。复现命令见交付文档 ②节。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "SKILL.md 的 Step 2 必须处理两个边界：①history 侧车缺失 ⇒ 契约**单独**移 `failed/` 并提示用 `atlas hestia contract emit --period …` 补发 ②同名已在 `processing/` ⇒ 视为上次中断，直接用 `processing/` 里那对，**不重新占位**。Step 6 的 `DENIED`/`ERROR` 分支对移 `failed/`。\n🔴 **另两条失败分支（reviewer O8，初稿漏了）**：③Step 3 `prepare.py` 退出码非零 ⇒ 把 stderr **原文**回复、契约与侧车**对移 `failed/`**、结束（需求 line 703）④Step 5 `verify.py` 非零 ⇒ 拒绝写回（需求 line 711）。⚠️ **④的队列处置需求与 spec 都没写清**（spec §7 只说「拒绝写回，回复差异」）⇒ **Leader 裁决：留在 `processing/`，不移 `failed/`**——数据段被改是**模型这一轮**的问题，契约本身没毛病，移 `failed/` 会让一份好契约需要人工捞回；留 `processing/` 则下一次会话按 Step 2 的「同名已在 processing ⇒ 直接用那对」自然重试。SKILL.md 必须把这条写明。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "四份文档全部**只用容器内可用的东西**：`python3` 标准库、`ls`/`grep`/`mv`/`cat`/`rg`、`selvage_call`。🔴 不得出现任何需要联网、需要第三方 pip 包、或需要写 vault 的指令（写 vault 只经 Spool）。文档 ②节贴出自查命令与输出：`grep -rn 'pip install\\|import requests\\|import yaml\\|curl \\|wget ' container/skills/warp-hestia/` 为空。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "nanoclaw 侧提交在 `feat/warp-hestia` 分支，显式 pathspec `git add container/skills/warp-hestia`，提交信息按 nanoclaw 规范（**不是** `docs(TASK-005):`——那是 atlas 门禁的要求）。本任务**先不开 PR**（TASK-006 的脚本要进同一个 PR），在文档 ③节记下 commit 全 sha 与分支名。⚠️ **不动** `warp-research` skill 的任何文件（它是先例，只读参考）：`git show --numstat <sha> -- container/skills/warp-research` 为空。\n**另**（reviewer N4/O7(a)）：需求 line 25 的「注释里引用任务编号带 milestone 前缀」是**义务**，不能只写在 description（验证者逐条对照的是 `done_criteria`）⇒ 本任务新写的代码/脚本注释里凡引用任务编号处必须带前缀（`M3 的 TASK-00X`，用**需求编号**）；照抄需求原文给的代码时保持原样。⚠️ **validator 报 `⚠` 0 条不构成「无孤儿义务」的证据**——`orphan-obligation` 没有命中这一处。\n🔴 **你的产物在冒烟时的可见性依赖两步人执行动作**（dev-m3-c 2026-09-08 实证，Leader 已复核代码）：`container-runner.ts` 的 `projectRoot = process.cwd()`，skills 从 `<projectRoot>/container/skills` bind mount 到 `/app/skills` ⇒ **容器只看得见主 checkout 工作树里的 skill**，你在 worktree 里造的 `warp-hestia` 对它**不存在**。⇒ 冒烟前必须 ①nanoclaw PR 合并到 `main` ②本机 checkout 切回 `main`——**两步都是人执行的**（结转，见 TASK-008 §D）。⚠️ 这**不影响你本任务的交付**：开发与 `python3 -m unittest` 都在 worktree 里跑，不经容器。**不要**为了让容器看见而去切主 checkout 的分支或把文件拷进主 checkout——那会动到别人未提交的改动。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**交付流程（AD-M3-1/3：代码在 nanoclaw，证据在 atlas）**：\n1. **复用 TASK-004 建的 worktree**（绝对路径见 TASK-004 discovery 的 `interfaces_exposed`），**不新建、不拆**。\n2. **atlas 侧写交付记录文档** `docs/hestia-m3/TASK-005-warp-hestia-docs.md`，固定四节（design-spec §3）：①改动清单（逐文件 `git show --numstat <全 sha> -- <file>` 输出；未跟踪文件用 `sha256sum` + 改动前后 diff）②实测输出（命令 + 原样粘贴 + 退出码 + 计数）③锚点（nanoclaw `git rev-parse HEAD` **全 sha** + 分支名 + PR 链接）④未做与理由。\n   🔴 **锚一律写全 sha，不得写 `HEAD` 或分支名**——符号引用会过期，验证者照跑时会拿到假红。\n3. 本任务不开 PR（与 TASK-006 合并进同一个 PR）。 atlas 提交该文档，信息锚定 **`docs(TASK-005): M3 …`**（门禁只认 `^[a-z]+\\(TASK-005\\):`）。atlas 侧走 worktree → 预演 merge → 请 Leader merge → **等 merge 进 master** 才转 `dev_done`（🔴 `git log --grep` 不带 `--all`，未合并分支对门禁结构性不可见；**绝不能因 idle hook 催「推进 dev_done」就转**）。\n4. discovery 与指针在 `dev_done` **之前**落定（之后写会让 `discovery_sha256` 漂移，`verified` 之后守卫无条件 DENY）；`interfaces_exposed` 写下游要消费的东西。落盘后 `jq '{status,discovery,writes,packages}'` 直读核实。\n5. **自证数字统一重采**：文档里每个数字都必须采于**最后一次改动之后**并与锚点同行写出。\n⚠️ 一切 `.arcforge/` 读写在 **atlas 主仓库**执行，写通道调用一律带 `ARCFORGE_TOKEN`。\n🔴 **跨仓库写通道陷阱（dev-m3-b 2026-09-08 实撞，Leader 已复核）——你在射程内**：在**另一个也装了 arcforge 的仓库**（loom / nanoclaw）的目录里 `cd` 着调用 `bash .claude/hooks/arcforge-write.sh`，相对路径会解析到**那个仓库自己的**写通道脚本，写入落进**那边**的 `.arcforge/`，而**退出码是 0、零告警**（dev-m3-b 的 checkpoint 就这么落进了 loom worktree）。CLAUDE.md 的 linked-worktree DENY 判别式比较 `--git-dir` 与 `--git-common-dir`，只覆盖「**同仓库**的 linked worktree」，覆盖不到「cd 去了另一个 arcforge 仓库」——那边的写通道从它自己的角度看一切正常 ⇒ **fail-open 且静默**，「文件系统是唯一真相源」这条根基被架空而无人知晓。\n⇒ **一切写通道调用一律用 atlas 绝对路径**：\n`ARCFORGE_TOKEN=<你的 token> bash /Users/zuowei/workspace/go/src/github.com/newthinker/atlas/.claude/hooks/arcforge-write.sh --as <你的实例名> …`\n并且**每次落盘后回 atlas 主仓库 `jq` 直读核实**——退出码 0 不构成「写进了正确的那份」的证据。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-004"
+  ],
+  "packages": [
+    "./docs/hestia-m3/TASK-005-warp-hestia-docs.md"
+  ],
+  "writes": [
+    "./docs/hestia-m3/TASK-005-warp-hestia-docs.md"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m3-c",
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m3-d",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-09T09:39:34Z"
+  },
+  "verify_baseline": {
+    "head": "dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc",
+    "discovery_sha256": "22cc2cdbc372577f6343f779a75bd36c194241b3cd25745da97011cd9355b422",
+    "at": "2026-09-09T09:02:06Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    {
+      "id": "F1",
+      "severity": "CRITICAL",
+      "file": "nanoclaw container/skills/warp-hestia/SKILL.md:61-62",
+      "problem": "Step 3 的 `EXISTING=/workspace/extra/vault/Wiki/Macro/PBOC/$N` 是**无条件赋值**，恒非空 ⇒ `${EXISTING:+--existing \"$EXISTING\"}` 恒展开 ⇒ create 场景（笔记尚不存在，即每期首次生成）把不存在的路径传给 --existing，prepare.py 返回 2、产出 0 字节。按 Step 3 自己的失败分支，每期首次都被移进 failed/。",
+      "evidence": "Leader 实测：不传条件 ⇒ `--existing 读取失败: [Errno 2] ... '/tmp/vault/2025 全年金融数据解读.md'`，退出码 2、0 字节。四个独立来源命中同一处（qa-m3 C1 / Skeptic #6 / Minimalist M-01 / Architect #1）。",
+      "fix": "把守卫从「变量非空」改成「文件存在」，例如 `ARGS=(); [ -f \"$EXISTING\" ] && ARGS=(--existing \"$EXISTING\"); python3 ... \"${ARGS[@]}\"`。第 88 行的 mode 判定（`$EXISTING` 存在 ⇒ update 否则 create）同源，一并改成对**文件**求值。",
+      "do_not": "🔴 **不要动引号**。qa-m3 报告里「引号不防词分割」那半是错的，Leader 已用区分性实验证伪：让目标文件存在以屏蔽本缺陷后，同一条命令在 **bash 与 sh 下都 exit 0 / 3338 字节** ⇒ `${var:+... \"$var\"}` 的引号是生效的、词分割不发生。Architect lens 独立确认了这一点。改引号是无谓改动，且会让你在验证时得到「改前改后一样」的困惑结果。",
+      "also": "update 场景本来就是好的（Leader 实测 exit 0 / 3338 字节）。所以严重性描述是「**新笔记一份也产不出，已有笔记的更新正常**」，不是「一份笔记也产不出」。",
+      "verify": "补一条测试覆盖「--existing 指向不存在的文件」（现有三处 --existing 用例全部指向存在的夹具，所以这个洞没被挡下）；并在交付文档 ②节贴 create 与 update 两场景各跑一次的实际输出与退出码。"
+    }
+  ]
+}

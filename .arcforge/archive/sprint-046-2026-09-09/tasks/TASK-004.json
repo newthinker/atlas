@@ -1,0 +1,75 @@
+{
+  "id": "TASK-004",
+  "title": "nanoclaw：从 `fork/main` 建 `feat/warp-hestia` worktree + Warp 组队列读写挂载 + `warp-hestia` 触发段",
+  "description": "对应需求文档 **TASK-003**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` 的「## TASK-003」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M3-1…4）、`design-spec.md`。\n\n🔴 **跨仓库任务**（AD-M3-1）：产出在 **nanoclaw**（`/Users/zuowei/workspace/ai/nanoclaw`），atlas 的 `packages`/`writes` 是交付记录文档 `docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md`，`done_criteria` 全部 `verify_by: manual`。\n\n**本仓库实测（2026-09-08 核实，需求文档只是猜测「若不跟踪」，这里是确认）**：\n- `groups/*` **被 `.gitignore:15` 忽略**（`git ls-files groups/cli-with-warp` 返回空）⇒ `container.json` 与 `CLAUDE.local.md` 的改动是**本机运行时数据的直接修改，不进 PR**；🔴 **它们也不在 worktree 里**（worktree 只 checkout 被跟踪文件）⇒ 必须改**主 checkout** 的 `/Users/zuowei/workspace/ai/nanoclaw/groups/cli-with-warp/`。这与「不碰本机工作区」不冲突——那条针对的是**被跟踪文件的未提交改动**（`CLAUDE.md`、`mcp-tools/index.ts` 等）。\n- 本机 `groups/cli-with-warp/` 存在（`CLAUDE.local.md` / `CLAUDE.md` / `container.json` / `conversations`）；`additionalMounts` 现**只有一项** vault（`readonly: true`）。\n- `~/.config/nanoclaw/mount-allowlist.json` 的 `allowedRoots` 现**只有** `/Users/zuowei/Obsidian/ClawdVault`。\n- 队列根 `/Users/zuowei/workspace/runtime/atlas/queue/hestia` **不存在**（冒烟前由 `contract emit` 创建）。\n- `fork/main` 已含 `container/skills/warp-research`（M3 的先例）；本地 `main` == `fork/main` @ `d791101`。\n\n本任务为 TASK-005/006 建 worktree 并把路径写进 discovery `interfaces_exposed`（三者**串行复用同一个 worktree**，故不并行）。worktree 由 **TASK-006 完成后拆**。\n\n🔴 **任务编号映射（必读，否则验证者会判不一致）**：本 sprint 的 Arcforge 编号与需求文档的编号**不同**（需求 TASK-001 拆成本 sprint 的 TASK-001+TASK-002，其余顺延）。两套编号各有其读者，用法固定为：\n| 写在哪 | 用哪套编号 | 理由 |\n|---|---|---|\n| **代码/文档注释**（`// M3 的 TASK-00X`） | **需求文档的编号** | 读者是三仓库的开发者，他们读的是需求文档与 spec，不是 atlas 的 `.arcforge/` 归档 |\n| **atlas commit subject**（`feat(TASK-00X):`） | **Arcforge 编号** | 门禁 `task-completed.sh` 按它认领改动，写错则改动不可见 |\n| **`.arcforge/` 内一切文件** | **Arcforge 编号** | 流程真相源 |\n映射表：需求 001 → 本 sprint 001(internal/hestia) + 002(cmd/atlas)；需求 002 → 003；需求 003 → 004；需求 004 → 005；需求 005 → 006；需求 006 → **本 sprint 不做（结转，AD-M3-2）**。\n⚠️ 故本任务的 commit subject 与代码注释里的编号**本就不同**，这是预期的，不是笔误——在 discovery `decisions` 里记一句。\n（本任务对应需求文档的 **TASK-003**；注释里写 `M3 的 TASK-003`。）\n\n**milestone 前缀写法（reviewer O7：需求自身不一致，Leader 裁决）**：需求 line 25 规定 `M3 的 TASK-001`，而它自己给的代码样例里 line 453/537 写的是 `M3 TASK-002`（无「的」）。**裁决：两种写法都接受**——照抄需求原文给的代码时保持原样，新写的注释用 `M3 的 TASK-00X`；验证者**不得**因这个「的」字判不符。理由：需求自身不一致，纠结它没有价值，而把它写成硬判据会制造假红。",
+  "module": "nanoclaw-warp",
+  "complexity": "low",
+  "estimated_files": [
+    "docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "nanoclaw worktree 建成：`git -C /Users/zuowei/workspace/ai/nanoclaw fetch fork && git -C /Users/zuowei/workspace/ai/nanoclaw worktree add -b feat/warp-hestia <临时目录> fork/main`；worktree 内 `ls container/skills/warp-research/SKILL.md` 命中（先例在）。worktree **绝对路径**与分支名写进文档 ③节与 discovery `interfaces_exposed`（TASK-005/006 靠它开工）。🔴 **不 checkout、不 stash、不碰** 主 checkout 当前的 `feat/vendor-agent-reach-skill` 与其未提交改动。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`/Users/zuowei/workspace/ai/nanoclaw/groups/cli-with-warp/container.json` 的 `additionalMounts` **保留既有 vault 项**并追加一项：`{\"hostPath\": \"/Users/zuowei/workspace/runtime/atlas/queue/hestia\", \"containerPath\": \"hestia-queue\", \"readonly\": false}`（⇒ 容器内 `/workspace/extra/hestia-queue/`）。改后用 `python3 -c 'import json;json.load(open(...))'` 验 JSON 合法，并把改动前后的 `additionalMounts` 全文贴进文档 ①节（未跟踪文件无 numstat，用 `sha256sum` 前后值 + diff 代替）。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "`/Users/zuowei/workspace/ai/nanoclaw/groups/cli-with-warp/CLAUDE.local.md` 在「## 调研」段**之后**追加「## 金融数据解读（Hestia）」段，内容按需求原文五条（触发词与加载 `warp-hestia` skill / 队列路径且**本组唯一可写挂载** / 写回经 `selvage_call(\"spool.archive\", …)` 多传 `source: \"hestia\"` 且路径在 `Wiki/Macro/PBOC/` 下 / **一次只处理一份**并回复剩余份数 / frontmatter 与数据表由 `prepare.py` 生成、模型只写 `<!-- narrative -->`、写回前必跑 `verify.py`）。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`mount-allowlist.json` 片段**只写进文档供人粘贴，agent 绝不修改该文件**（需求全局约束 + CLAUDE.md 运行时资产纪律）。文档 ④节须写明：①该片段原文（`path` / `allowReadWrite: true` / `description`）②队列根**当前不存在**，mount-security 对不存在 hostPath 的行为（`Mount forced to read-only` / `not under any allowed root`）**未验证**，留待冒烟第一步看日志 ③selvage 重启与 allowlist 粘贴均属需求 TASK-006 Step 0 的**人执行**前置，本 sprint 结转。\n🔴 **④（reviewer G7）：skill 如何进容器 —— 必须核实并写明**。SKILL.md 六步里的脚本路径是 `/app/skills/warp-hestia/scripts/…`，而交付物落在仓库的 `container/skills/warp-hestia/`；spec §9 风险表还留着「重建镜像（**若 skills 随镜像打包**）」这个尾巴 ⇒ 「skill 如何被容器看到」本身未定，而它决定 TASK-005/006 的产物**能不能被调到**。照 `warp-research` 先例核实分发方式（读 `container/` 下的 Dockerfile / 构建脚本 / 挂载配置），把结论与证据写进文档 ④节，并写明**是否需要重建镜像**。这条只要求「查清并写明」，不要求你去改分发机制。",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "改 `container.json` 前先备份（`cp container.json container.json.bak-<日期>`）并在文档 ①节记下备份路径——它是**未跟踪的本机运行时数据，git 无法回滚**，改坏了容器起不来。JSON 解析失败即回滚备份并报 `blocked_clarification`。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**本任务在 nanoclaw git 上可能零提交**（两个改动文件都不被跟踪）——这是**预期结果**，不是漏做。文档 ④节必须显式写明「本任务无 nanoclaw 提交，PR 内容为空；产出是 worktree + 两个本机未跟踪文件的改动」，否则验证者会按「PR 链接缺失」判 rejected。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "**交付流程（AD-M3-1/3：代码在 nanoclaw，证据在 atlas）**：\n1. **nanoclaw 用独立 worktree**（人类 2026-09-08 裁决 AD-M3-3）：`git -C /Users/zuowei/workspace/ai/nanoclaw worktree add -b feat/warp-hestia <临时目录> fork/main`。⚠️ 本机 checkout 在 `feat/vendor-agent-reach-skill` 且工作区脏（2 改 2 删），**不碰它**。但 `groups/` 是未跟踪运行时数据、不在 worktree 里 ⇒ 那两个文件改**主 checkout**。\n2. **atlas 侧写交付记录文档** `docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md`，固定四节（design-spec §3）：①改动清单（逐文件 `git show --numstat <全 sha> -- <file>` 输出；未跟踪文件用 `sha256sum` + 改动前后 diff）②实测输出（命令 + 原样粘贴 + 退出码 + 计数）③锚点（nanoclaw `git rev-parse HEAD` **全 sha** + 分支名 + PR 链接）④未做与理由。\n   🔴 **锚一律写全 sha，不得写 `HEAD` 或分支名**——符号引用会过期，验证者照跑时会拿到假红。\n3. nanoclaw 侧本任务可能无提交（见 non_functional 第一条）。 atlas 提交该文档，信息锚定 **`docs(TASK-004): M3 …`**（门禁只认 `^[a-z]+\\(TASK-004\\):`）。atlas 侧走 worktree → 预演 merge → 请 Leader merge → **等 merge 进 master** 才转 `dev_done`（🔴 `git log --grep` 不带 `--all`，未合并分支对门禁结构性不可见；**绝不能因 idle hook 催「推进 dev_done」就转**）。\n4. discovery 与指针在 `dev_done` **之前**落定（之后写会让 `discovery_sha256` 漂移，`verified` 之后守卫无条件 DENY）；`interfaces_exposed` 写下游要消费的东西。落盘后 `jq '{status,discovery,writes,packages}'` 直读核实。\n5. **自证数字统一重采**：文档里每个数字都必须采于**最后一次改动之后**并与锚点同行写出。\n⚠️ 一切 `.arcforge/` 读写在 **atlas 主仓库**执行，写通道调用一律带 `ARCFORGE_TOKEN`。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md"
+  ],
+  "writes": [
+    "./docs/hestia-m3/TASK-004-nanoclaw-branch-mount.md"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m3-c",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m3-a",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-09T09:39:33Z"
+  },
+  "verify_baseline": {
+    "head": "0c3fbdc9ac7b12fcb65d6d2695541f55820cd03c",
+    "discovery_sha256": "0db59c898ee0f8bf2e30cfbedcaa87cca1492b136588f381235aa5f6df475665",
+    "at": "2026-09-08T03:32:06Z"
+  }
+}

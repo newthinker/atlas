@@ -1,0 +1,80 @@
+{
+  "id": "TASK-008",
+  "title": "CONTRACTS.md `## Sprint M3` §A–§D 全四节 + 全 sprint 自证数字对账（记录员代理模式）",
+  "description": "对应需求文档 **TASK-006 Step 6** 的 CONTRACTS 部分（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` line 995-1024）。\n\n🔴 **本任务是 reviewer O9 反审后新建的**。初稿把 §A/§D 骨架挂在 TASK-002、把 §B 数值留给「Leader 在 Step 7 补」，造出一份**有义务、无 owner、无验收条目**的产物——`internal/hestia/CONTRACTS.md` 只出现在 TASK-002 的 writes 里，而六个任务的 done_criteria 中**没有任何一条**覆盖「§B 填值」，也没有验证者被指派核对那些数字。**本仓库归档里有同形前科**：`docs/06-acceptance/` 的验收报告数字过期四轮无人发现，根因正是「依赖变化后谁重采」这个角色不存在。⇒ 现在给它一个 owner 和一组可验条目。\n\n🔴 **记录员代理模式**（CLAUDE.md「记录员代理模式」节）：本任务由 **Leader 编排、`dev-*` 记录员执行**。Leader **不在**执行迁移边（`assigned→in_progress→dev_done`）的合法写者集合内，亲自走状态机会在 `assigned→in_progress` 处被 DENY 而死锁（A6 教训）。故 `assigned_to` 始终是记录员实例，认领/`in_progress`/`dev_done` 全由记录员经写通道完成；Leader 只做派发、答疑、聚合、转 `accepted`。记录员可 spawn 子代理做读/分析（子代理一律禁写 `.arcforge/`），结论带回由记录员落盘。\n\n**排在最后（wave 5，依赖全部任务）的理由**：§B 要汇总 wave 1–4 的实测数字，而「一切自证数字必须在最后一次改动之后统一重采」——分批采的数字即使每个当时都对，合到一份报告里也不构成对最终产物的自证。\n\n🔴 **任务编号映射**：本任务是 Arcforge 新增的（需求文档无对应编号）。§A/§B 里引用任务时**用需求文档的编号**（读者是三仓库开发者），commit subject 用 `docs(TASK-008):`（门禁按它认领）。",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/CONTRACTS.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`internal/hestia/CONTRACTS.md` 新增 `## Sprint M3 · warp-hestia 解读 skill`，**§A 契约更正四条写实**（按需求 line 997-1001）：**A1** 落点与审核门载体（`Wiki/Macro/PBOC/` + Spool 强制 `reviewed: false`；方案报告 6.4 / 6.5 已批注）**A2** 前 12 期序列改 history 侧车（`<period>-<type>.history.json`，**先侧车后契约**；6.2 已批注）**A3** Spool `source` 参数（`web-research` / `hestia` 白名单；`reviewed` 仍**无条件覆写**）**A4** 月均与四信号在容器侧的实现与 Atlas `Evaluate` 同源（三期 golden 2 / 0 / 1 两侧都钉住）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "🔴 **§B 实测登记六行逐格填实**（需求 line 999-1006），**每个数字都必须有来源**——取自对应任务 discovery 的 `verification` 字段，并在表下逐行注明「来源：TASK-00X discovery」：\n①`internal/hestia` 覆盖率（%）②导出面 **+4**：`BuildHistory` / `History.FileName` / `History.JSON` / `WriteHistory`（⚠️ 需求 line 44 与 line 1034 写「守卫 **+2**」而 line 426 Step 5 显式列了 **4** 个名字、需求自己的 §B 骨架也写 `+4` ⇒ **取 4**，并在表下记一句「需求文档 line 44/1034 的『+2』是其自身笔误」）③真语料回归 `218 = 217 + 1 · 217 = 213 + 4 · 97 = 76 + 21`④loom spool 测试（既有 35 + 新增 4 = 39）⑤`python3 -m unittest` 条数 + 三期 golden 2 / 0 / 1⑥atlas 锚（全 sha）· loom PR # · nanoclaw PR #。\n🔴 **锚一律写全 sha**，不得写 `HEAD` 或分支名。\n**§B 末尾另记两条已知文档瑕疵**（test-m3-a 在 TASK-004 验证报告 §3 提出，Leader 采纳其「不返工」判断——DoD 无对应条目、结论已独立复核为真、代价远超收益）：\n**O1** `TASK-004-nanoclaw-branch-mount.md` ④节 B 表头写「主 checkout @ `aefea6c…`；worktree `d791101…` **同**」，而两树该文件实际差 9 行 ⇒ 表内 `:129`（materializeContainerJson 调用点）只在**主树**对、`:353-356`（additionalMounts 消费点）只在 **worktree** 对，**两行各自锚在不同的树上**。⚠️ 更值得记的是它怎么漏的：discovery 的 `line_refs_reverified` 声称「每个 `file:line` 都在成稿后重新求值并订正过（6 处）」，**而表头那一行是漏网的**——它在某一棵树上求过值，但断言的是两棵树都对。⇒ **引用 `file:line` 必须同时说清锚在哪棵树**，「我重新求值过」这句自证覆盖不到跨树断言。\n**O2** 同文档「`src/cli/resources/groups.ts` 没有任何 `additional_mounts` 子命令」措辞不准：该文件 `:29` 有一处 `additional_mounts` 的**只读序列化**（DB 行转展示对象），没有的是**写入**子命令。结论成立，措辞需更准。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**§C 集成冒烟记录**：本 sprint **不做**（AD-M3-2），但**必须写明白而不是留空**——写「⏸ 结转：需求文档 TASK-006（集成冒烟）自述前置是『M1.5 + M2a + M3 一次投递之后』，而那次投递又排在 2026-08 月报首期验收（09-09 ~ 09-15）之后；本 sprint 于 2026-09-08 定稿，结构上不可能完成」，并列出**冒烟五条判据**的原文（需求 line 966-976）供下个 sprint 直接用。\n**§D 结转四条写实**（需求 line 1019-1023）：`hestia_inbox_pending` collector（M2b 或之后）/ 「连续 3 期事实性零错误、改动量 < 20%」第一期以 2026-08 月报为准 / launchd 自动触发（等真觉得烦了再加）/ M2b Sheets 前置 spike 待 Service Account。**另加第五条**：本 sprint 结转的**人执行前置**，逐条列全（漏一条就会在冒烟时卡住）：①**loom PR 合并**（需求 TASK-006 Step 0 ①，本 sprint 只开 PR 不合并）②`launchctl kickstart -k gui/$(id -u)/com.loom.selvage` 重启 selvage ③`~/.config/nanoclaw/mount-allowlist.json` 粘贴队列根片段（`allowReadWrite: true`）**并重启 nanoclaw 主进程**——🔴 不只是 selvage（dev-m3-c 2026-09-08 查实，Leader 已复核）：`src/modules/mount-security/index.ts` 的 `loadMountAllowlist()` 注释原文「Result is cached in memory for the lifetime of the process」，实现 `if (cachedAllowlist !== null) return cachedAllowlist;` ⇒ **进程生命周期内不重载**，只粘贴不重启等于没改④**nanoclaw PR 合并到 `main`** 与本机 checkout 切回 `main` —— 🔴 **理由必须写硬，不是整洁问题**（dev-m3-c 2026-09-08 实证，Leader 已复核代码）：`container-runner.ts` 的 `projectRoot = process.cwd()`，skills 从 `<projectRoot>/container/skills` bind mount 到 `/app/skills` ⇒ **容器只看得见主 checkout 工作树里的 skill**，worktree 或未合并分支上的 `warp-hestia` 对它**不存在**。现成反证：`warp-research` 在 `fork/main` 有、主 checkout（`feat/vendor-agent-reach-skill`）没有，于是 Warp 组的 `.claude-shared/skills/` 里 9 个链接**没有它**。⇒ 冒烟前若不合并且切回 `main`，skill 加载不到，冒烟必然失败且现象是「skill 不存在」而非配置错。⑤**nanoclaw 中央 DB 的 `additional_mounts`**（本 sprint 新发现，与 ③ 的 allowlist **必须一起做才生效**）：`groups/<folder>/container.json` **不是真相源** —— `container-config.ts:4` 明写「Source of truth is the `container_configs` table in the central DB」，`materializeContainerJson()` 每次 spawn **无条件覆盖**该文件、`buildMounts` 用的是它的返回值（DB）从不读文件，且 `backfillContainerConfigs()` 只对**没有 config 行**的组回读（Warp 组已有行 ⇒ 永不回读）⇒ **手改 container.json 零运行时效果**。`ncl groups` 也没有 additional_mounts 子命令 ⇒ 唯一路径是直接改 `data/v2.db`。可粘贴 🔴 **用下面这条追加式 SQL，不要照抄 TASK-004 交付文档 ④节 B 的那条**（dev-m3-c 2026-09-08 提出，已在 `mktemp` 临时副本上验过输出与目标数组逐字节相同、原库只读未动；它改不了自己的文档——那是 `verify_baseline` 锚住的判定对象）：文档里那条是**整列字面替换**，当前 DB 只有 vault 一项时结果正确，但**若冒烟前有人给 Warp 组加了别的挂载，它会静默把那一项抹掉**——与 ④节 B 指出的是同一类「看起来做对了」的问题，只是换了位置。\n```sql\nUPDATE container_configs\nSET additional_mounts = json_insert(\n      additional_mounts, '$[#]',\n      json('{\"hostPath\":\"/Users/zuowei/workspace/runtime/atlas/queue/hestia\",\"containerPath\":\"hestia-queue\",\"readonly\":false}')),\n    updated_at = strftime('%Y-%m-%dT%H:%M:%S.000Z','now')\nWHERE agent_group_id = 'ag-1782440732275-pqkuxs';\n```\n（sqlite 3.51 实测 `json_insert` + `$[#]` 可用；`updated_at` 格式与 `new Date().toISOString()` 一致。）\n🔴 **执行顺序固定为六步**（dev-m3-c 给的；理由：allowlist 靠重启刷进程内缓存，而 DB 要**下次 spawn** 才被读到⇒ 把两次重启并成最后一次，三件事一趟做完）：\n**① 停 nanoclaw 主进程 → ② 备份 `data/v2.db` → ③ 跑上面的 `json_insert` SQL → ④ 粘 `mount-allowlist.json` 片段 → ⑤ 起 nanoclaw 主进程 → ⑥ 起 selvage**。⑥vault `README.md` 与 `Hestia-方案报告.md` 回写⑦`examples/2026-06-h1.md` 样例回填。⚠️ 每条都要注明**为什么 agent 不能做**（共享分支 / 本机运行时配置 / 需要人审产物），否则下个 sprint 的 agent 会以为是漏做的而擅自补上。\n🔴 **§C 里还要写一条需求原文的关键字订正**（dev-m3-c 查实，Leader 已复核代码；⚠️ **仅代码阅读，运行时未验证**，照此原样标注）：需求 line 644/961 让冒烟时在日志里找 `Mount forced to read-only` / `not under any allowed root` 来诊断挂载问题，但在「**队列根不存在**」这个实际场景下这两个都**不会**出现——`mount-security/index.ts` 的三条路径是 `:259` `Host path does not exist`（队列根不存在走这条）、`:277` `not under any allowed root`、`:291` `Mount forced to read-only`，而队列根不存在最终落到 `:346` 的 `log.warn('Additional mount REJECTED')`：**整条挂载被丢弃、容器照常起**。⇒ 冒烟第一步该 grep 的关键字是 **`Additional mount REJECTED`**，不是需求原文写的那两个。不写进 §C 的话，下个 sprint 的人会照需求原文找关键字、一无所获，然后误判为「挂载正常」。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "🔴 **采锚并核空**（需求 line 33 前置纪律「往 CONTRACTS 写数字之前先『采锚并核空』」）：写 §B 之前先 `git rev-parse HEAD` 取全 sha 作为采样锚，并确认工作区对 `internal/hestia` / `cmd/atlas` **无未提交改动**（`git status --porcelain internal/hestia cmd/atlas` 为空）——否则采到的数字测的不是 master 上那棵树。锚与核空结果写进 discovery `verification`。",
+        "verify_by": "manual"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "🔴 **对账不一致的处置**：§B 每个数字都要与来源 discovery 的 `verification` **逐个对照**。出现任一不一致（数字对不上、来源 discovery 缺该字段、或来源任务的锚早于本次采样锚且范围内文件有变动）⇒ **不要自行取一个看起来对的值**，转 `blocked_clarification` 写进 `questions[]` 交 Leader 裁决。⚠️ 这条是本任务存在的核心理由：一个能自己「圆」数字的记录员，与没有 owner 是等价的。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**只改 `internal/hestia/CONTRACTS.md` 一个文件**，不碰任何 `.go`：`git show --numstat <sha>` 只有这一行。既有内容一律不动（本 sprint 只**追加** `## Sprint M3` 一节）：`git diff <本任务起点 sha> HEAD -- internal/hestia/CONTRACTS.md | grep -c '^-[^-]'` 为 **0**（纯追加，零删除行）。⚠️ 该判据必须在**最后一次改动之后**跑（时点早于最后一次改动的自检等于没跑），并以提交本身的 `git show --numstat HEAD` 为准复核一次。\n另：`GOTOOLCHAIN=local go test ./internal/hestia/... ./cmd/atlas/... -count=1` 仍全绿（改 `.md` 不该影响，但要证明而不是假定）。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**交付流程（记录员执行）**：\n1. 主仓库建 worktree：`git worktree add -b task/TASK-008-m3 ../wt-TASK-008-m3 master`。\n2. 开工前读 `context_from` 里**全部七个**上游任务的 discovery（在主仓库读）——§B 的数字全部来自它们。\n3. 提交信息锚定 **`docs(TASK-008): M3 …`**（门禁只认 `^[a-z]+\\(TASK-008\\):`）。\n4. 预演 merge → 请 Leader merge → **等 merge 进 master** 才转 `dev_done`（🔴 `git log --grep` 不带 `--all`；**绝不能因 idle hook 催「推进 dev_done」就转**）。\n5. merge 后在 master 上**统一重采**全部自证数字并记锚。\n6. discovery 与指针在 `dev_done` **之前**落定；落盘后 `jq '{status,discovery}'` 直读核实。\n7. 拆 worktree（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写在**主仓库**执行；写通道调用一律带 `ARCFORGE_TOKEN`。你 spawn 的子代理**一律禁止写 `.arcforge/`**，结论带回由你本体落盘。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "packages": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "writes": [
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "status": "pending",
+  "assigned_to": null,
+  "assignment_epoch": 0,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": null,
+  "discovery": null
+}

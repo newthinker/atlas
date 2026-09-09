@@ -1,0 +1,160 @@
+{
+ "task_id": "TASK-001",
+ "title": "atlas history 侧车：BuildHistory/WriteHistory/ContractHistory.JSON/.FileName + ingest 先侧车后契约 + AST 守卫登记",
+ "owner": "dev-m3-a",
+ "requirement_task_id": "需求文档 TASK-001（本 sprint 的 001 是其上半：internal/hestia 包内；下半 cmd/atlas contract emit 是本 sprint 的 TASK-002）",
+ "key_findings": [
+  "🔴 **需求原文给的 `type History struct` 在本仓库编译不过**：internal/hestia/validate.go:35 已有导出接口 `type History interface`（Preceding + PrecedingAll），它是 `Validate(ctx, obs, h History, cfg Thresholds)` 的公开签名参数类型与 `NoHistory` 变量的类型。同名报 `History redeclared in this block` 并连带 8 处类型错误（validate.go / store_test.go / backfill_load.go / ingest.go / validate_test.go）。而 DoD non_functional 同时明令 validate.go 的 diff 为空 ⇒ DoD 内部矛盾，经 Leader 裁决改名 ContractHistory（见 decisions[0]）。",
+  "🔴 **需求原文的 `omitempty` 与原文自己的接线断言互斥**：omitempty 省略的是 len==0 的 slice，nil 与 []T{} 一视同仁。annual 入库而库里还没有任何 monthly 时（首次跑就是这个形态），侧车会干脆没有 monthly_recent 键，使原文自己写的 `assert.Contains(t, h, \"monthly_recent\")` 必红。改用 omitzero 后两半同时成立（见 decisions[1]）。",
+  "**AST 守卫 want 原为 34 项**（程序化数的，两把独立的尺：正则计数与逗号分割同值，首 BackfillFetch、末 WriteContract、已排序）⇒ +4 = 38。DoD description 里那条「实测 34」的订正属实；其初稿的「33 ⇒ +4 = 37」是错的，照 37 去凑会删掉一个已登记符号（这是精确相等断言）。",
+  "**因 pending/ 从 1 个文件变 2 个而必须调整的 M2a 既有测试是 3 条，不是 DoD functional[2] 点名的 1 条**：TestIngestWritesContractOnObservation、TestIngestNoContractOnDuplicate、TestIngestRevisionContractCarriesSupersedes。前后两条各有一处 `require.Equal(t, []string{\"2025-12-annual.json\"}, names)`。",
+  "**`Save` 拒绝「Passed 但零 checks」的报告**（store.go:937：report claims Passed with zero checks），需求原文测试 helper 里的 `ValidationReport{Passed: true}` 会让 seed 失败。既有 helper `passing()` 在 store_test.go:725。",
+  "**回填路径不受本任务影响**：backfill load 不走 Ingest，故侧车接线不改变真语料回归的任何数字（已实测，见 verification）。",
+  "**`data/` 是 gitignored、只存在于主仓库工作区**，linked worktree 里没有 ⇒ 真语料回归必须在主仓库跑，或用绝对路径把语料喂给 worktree 里的二进制。",
+  "🔴 **`BuildHistory` 失败在 ingest 路径上必须污染 `monthly` 行，污染同类型（annual）行不行**（review_fix 期间实撞）：`Validate` 自己也经 `History` 窄接口调 `Preceding(period, periodType, n)`（闸门层，stock_continuity n=1 / deposit_sum 漂移 n=6），污染同类型行会让**校验阶段先失败**（`validate: … store preceding 2025-12/annual: Scan error`），流程在契约段之前就 fail，`BuildHistory` 那两行根本走不到。而 annual 侧车要额外查「最近 12 个 monthly」（BuildHistory 的**第二次** Preceding），那次查询 Validate 不做 ⇒ 污染 monthly 能让校验通过、只有侧车构建失败。⚠️ 对比：`cmd/atlas` 的 `contract emit` 路径污染 annual **可行**（回放不跑 Validate）——同一手法在两条路径上适用条件不同。"
+ ],
+ "decisions": [
+  {
+   "decision": "侧车结构体命名 `ContractHistory`，而非需求原文与 DoD 初稿的 `History`",
+   "deviates_from_requirement": true,
+   "rationale": "validate.go:35 的导出接口 `History` 已占用该名字且语义正确（它抽象的就是「历史来源」这一能力）。为新代码让路去改既有公开 API 的名字方向是反的，且会越界改 backfill_load.go / validate_test.go 两个不在本任务 writes 里的文件，并违反 DoD non_functional 的 validate.go 不动面。ContractHistory 与既有 Contract/BuildContract/WriteContract 对仗。**函数名 BuildHistory/WriteHistory/toEntries、JSON 键、FileName() 返回值一律不变**——类型名不进 JSON，故下游 TASK-002/006 零影响（TASK-002 按需求原文写的是 `hist, err := hestia.BuildHistory(...)`，`:=` 不写类型名；且 hestia.History/hestia.NoHistory 在 internal/hestia 包外零引用，grep 实证空输出）。HistoryEntry / historyMeta 无冲突，不改名。",
+   "ruled_by": "leader 2026-09-08，见 tasks/TASK-001.json 的 questions[0].answer（我经 blocked_clarification 提问，未自行改导出符号）"
+  },
+  {
+   "decision": "`monthly_recent` 的 JSON 标签用 `omitzero` 而非需求原文的 `omitempty`",
+   "deviates_from_requirement": true,
+   "rationale": "该字段要同时满足两件事：monthly 时该键不出现（同类型序列就是 monthly 序列，重复没有信息）、非 monthly 时该键恒出现且为 `[]` 而非 null（「查不到」与「这个字段不适用」对消费者是两回事）。omitempty 做不到后一半——它省略 len==0 的 slice，nil 与 []T{} 一视同仁。omitzero 只省略零值（nil），空 slice 照常序列化成 `[]`，于是「不适用」由 nil 表达、「查不到」由 `[]` 表达。实测（Go 1.24.4）：`{X []int \"omitempty\"; Y []int \"omitzero\"}` 两字段同为 nil → `{}`；同为 []int{} → `{\"y\":[]}`。这也是 DoD boundary[0] 的明文要求。go.mod 是 1.24.4，支持 omitzero。",
+   "ruled_by": "dev-m3-a 自裁，leader 2026-09-08 复核批准"
+  },
+  {
+   "decision": "测试 helper `seedMonths` 用既有的 `passing()` 而非需求原文的 `ValidationReport{Passed: true}`",
+   "deviates_from_requirement": true,
+   "rationale": "Save 有「Passed 但零 checks」的守卫（store.go:937，理由是空报告与「没有任何闸门跑过」不可区分），原文写法会让 seed 直接失败。passing() 在 store_test.go:725，返回带一条 monetary_hierarchy CheckPassed 的报告。",
+   "ruled_by": "dev-m3-a 自裁，leader 2026-09-08 复核批准"
+  },
+  {
+   "decision": "3 条受影响的 M2a 既有测试一律改用 `ElementsMatch` 钉完整清单，不放宽成 `Contains`；Duplicate 那条改为逐个删两份而不是清空目录",
+   "deviates_from_requirement": false,
+   "rationale": "pending/ 从 1 个文件变 2 个后，`require.Equal(t, []string{\"2025-12-annual.json\"}, names)` 必红。放宽成 Contains 会让「多写出第三个文件」不再变红，等于把断言的守卫力一并丢掉；ElementsMatch 保持完整集合语义。Duplicate 那条若改成清空目录，会把「本来就不该有的第三份」一并抹掉，随后的 assert.Empty 就不再证明任何事，故改为对 first 里的两份逐个 os.Remove。DoD functional[2] 只点名了其中 1 条，另 2 条是我发现的（Leader 已确认是其漏计）。",
+   "ruled_by": "dev-m3-a，leader 2026-09-08 确认「正确且比我想的好」"
+  },
+  {
+   "decision": "新增一条需求原文没有的顺序守卫测试 `TestIngestHistoryLandsBeforeContractOnWriteFailure`",
+   "deviates_from_requirement": false,
+   "rationale": "DoD functional[2] 要求「先侧车后契约」，但原文给的 TestIngestWritesHistoryBesideContract 只看成功路径——把 WriteHistory 挪到 WriteContract 之后它照样绿（两者都在），断言照不出顺序。只有失败路径能把顺序照出来：堵住契约那个文件名（侧车名字不同，写得进），断言契约写失败时侧车已在 pending/。这正是「先侧车」的理由——消费者看到契约时侧车一定已落盘。",
+   "ruled_by": "dev-m3-a"
+  },
+  {
+   "decision": "commit subject 用 Arcforge 编号 `feat(TASK-001):`，代码注释用需求文档编号 `M3 的 TASK-001`",
+   "deviates_from_requirement": true,
+   "rationale": "两套编号各有其读者（任务 JSON description 的映射表）：门禁 task-completed.sh 只认 `^[a-z]+\\(TASK-001\\):` 按它认领改动，需求原文写的 `feat(M3 TASK-001):` 不匹配、照抄会被判「不符约定、改动不可见」；而代码注释的读者是三仓库的开发者，他们读的是需求文档。故二者本就不同，不是笔误。",
+   "ruled_by": "任务 JSON description 明文规定"
+  },
+  {
+   "decision": "code-simplifier 未产生任何改动",
+   "deviates_from_requirement": false,
+   "rationale": "按 DoD 交付流程第 3 步跑了 code-simplifier 子代理并附七条硬约束。其最终回复无实质内容，**未采信**；改以 git diff + 内容判据自行核实：工作树恰 5 文件改动、不动面 0 行、`json:\"monthly_recent,omitzero\"` 标签 1 处而 `omitempty` 标签 0 处、三段理由注释与测试映射注释块俱在、导出面仍是那 7 个符号、AST 守卫单跑 PASS。结论是无改动，故无内容需并进提交，也无保留/回退项可申报。",
+   "ruled_by": "dev-m3-a"
+  },
+  {
+   "decision": "review_fix 返工：补两条镜像测试守「侧车失败 ⇒ 契约不被写出」（反方向），只改 `ingest_test.go`、不动 `ingest.go`",
+   "deviates_from_requirement": false,
+   "rationale": "QA/test-m3-b 从 coverprofile 精确定位缺口：`ingest.go:453`/`:456` 两个 `return fail(\"contract\", …)` 零覆盖。原套件只有 `TestIngestHistoryLandsBeforeContractOnWriteFailure` 守**正方向**（契约写失败 ⇒ 侧车已在），**反方向零断言** ⇒ 将来有人把那两个 return 改成「记日志继续」，消费者会拿到没有侧车的契约而整个套件仍全绿。M3 的消费者契约建立在「侧车与契约成对出现」上（SKILL.md Step 2：侧车缺失即对移 failed/），那半个性质此前没有闸。fix_items 允许「BuildHistory 那条若难以自然触发就只补一条 + 说明理由」——**不需要，两条都补上了**（未覆盖块 91→89 而非 90）。`TestIngestHistoryBuildFailureSkipsContract` 里加了一条`assert.Contains(err, \"preceding 2025-12/monthly\")`，作用是防止将来有人把夹具改回污染 annual 行——那样测试会「仍然报错」但错在校验阶段，缺口悄悄回来。",
+   "ruled_by": "QA/leader 经 fix_items 提出（`reason_class: dod_defect`），dev-m3-a 实施"
+  }
+ ],
+ "files_modified": [
+  "internal/hestia/history.go（新建，133 行）",
+  "internal/hestia/history_test.go（新建，318 行）",
+  "internal/hestia/ingest.go（+11/-0：WriteContract 之前插入 BuildHistory + WriteHistory）",
+  "internal/hestia/ingest_test.go（+52/-7：3 条既有调整 + 2 条新增）",
+  "internal/hestia/store_test.go（+1/-1：AST 守卫 want 34 → 38）",
+  "internal/hestia/ingest_test.go（review_fix 追加 +70/-0：TestIngestHistoryWriteFailureSkipsContract、TestIngestHistoryBuildFailureSkipsContract。**未动 ingest.go**）"
+ ],
+ "interfaces_exposed": {
+  "note": "下游 TASK-002（cmd/atlas contract emit 同产侧车）与 TASK-006（夹具靠含侧车的二进制）消费这些。类型名 ContractHistory 不进 JSON，对读 JSON 的消费者不可见。",
+  "go": [
+   "func BuildHistory(ctx context.Context, s *Store, obs Observation, generatedBy string) (ContractHistory, error)",
+   "func WriteHistory(dir string, h ContractHistory) (string, error)  // 写 <dir>/pending/<for>.history.json，原子、同名覆盖，返回路径",
+   "func (h ContractHistory) JSON() ([]byte, error)   // MarshalIndent 两空格 + 末尾换行",
+   "func (h ContractHistory) FileName() string        // \"<period>-<period_type>.history.json\"",
+   "type ContractHistory struct{ SchemaVersion, For, GeneratedBy string; SameType, MonthlyRecent []HistoryEntry }",
+   "type HistoryEntry struct{ Meta historyMeta; Data orderedValues }"
+  ],
+  "json_shape": {
+   "path": "<queue.dir>/pending/<period>-<period_type>.history.json",
+   "keys_in_order": [
+    "schema_version",
+    "for",
+    "generated_by",
+    "same_type",
+    "monthly_recent"
+   ],
+   "schema_version": "1.0",
+   "for": "<period>-<period_type>",
+   "generated_by": "与契约一致（实时 contract@v1、回放 contract@v1/replay）",
+   "same_type": "同 period_type 的前 12 期，按 period 降序，最近在前；不足 12 期按实有条数、不补空；恒为数组（无 omit 标签）",
+   "monthly_recent": "period_type == monthly 时**该键不出现**；非 monthly 时**恒出现**，最近 12 个 monthly，一条都查不到时是空数组 [] 而非 null",
+   "entry": "{meta:{period,period_type,published_at,article_id,caliber_version,extractor,ingested_at}, data:{按 fieldOrder 序的非空业务字段}}",
+   "data_note": "data 段只含该观测 Values 里存在的键、按 fieldOrder 序（不是字典序）、**缺失字段不写 null**"
+  },
+  "consumer_caveat": "BuildHistory 底层是 Store.Preceding，它只看得见**已入权威表**的期次（落 pending 的不在内），且**没有相邻性约束**——same_type[0] 不等于「上一期」。凡是「相邻两期」才有意义的推断（如环比），消费者必须自己核对期次跨度。"
+ },
+ "verification": {
+  "anchor": "7e24b116faff2174771d4551b54aa582a874d209",
+  "anchor_note": "master 上的 `docs(pending): 收录 M3 实撞两条…`（`7e24b11`）。**以下每一个数字都采于这一个锚、这一棵树、最后一次改动之后**——分批采的数字即使各自当时都对，合到一份报告里也不构成对最终产物的自证。采样开始与结束时 `git rev-parse HEAD` 均 == 该锚，`git status --porcelain -- internal/ cmd/ go.mod go.sum` 为空。",
+  "delivery_commit": "ac1acc5e77b9ac34b65d683461cded3b4d0240ad",
+  "baseline_anchor": "fe95ac707ea46f9939bb6554261830a95f1b93e1",
+  "merge_verified": "拓扑 `git merge-base --is-ancestor ac1acc5e… master` → MERGED；**并补了内容判据**（拓扑报命中时单独不可信——rebase/cherry-pick/squash/三方 merge 都会换 sha）：5 个文件在交付 commit 与 master 上的 sha256 **逐字节一致**（history.go / history_test.go / ingest.go / ingest_test.go / store_test.go）。",
+  "suite": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 → ok，退出码 0",
+  "coverage": "go test ./internal/hestia/ -cover → **96.6%**（DoD 下限 96.6，零余量，与基线锚 fe95ac7 的实测值持平未跌）。history.go **逐函数 100%**（BuildHistory / toEntries / JSON / FileName / WriteHistory 各 100.0%），未覆盖语句块 **0** 个。",
+  "vet": "go vet ./internal/hestia/... → 输出 0 行",
+  "gofmt": "gofmt -l internal/hestia cmd/atlas → 恰 2 项：cmd/atlas/backtest_test.go、cmd/atlas/crisis_test.go（均为基线锚上就存在的既有欠账，未顺手修）。判据是「这两个之外无新增项」，成立。",
+  "untouched_surface": "git diff --numstat fe95ac7…4c9e7fd -- parse.go validate.go → 0 行；-- store.go → 0 行（store.go 未新增任何方法）；-- go.mod go.sum → 0 行（无新增依赖）。",
+  "scope": "git show --numstat ac1acc5e → 恰 5 个文件：history.go 133/0 · history_test.go 318/0 · ingest.go 11/0 · ingest_test.go 52/7 · store_test.go 1/1。与 writes 声明一致，**无越界**，故无需补声明。",
+  "field_literal_guard": "grep -cE '\"(m0|m1|m2|afre|loan_|deposit_|bill_)' internal/hestia/history.go → **0**（业务字段名字面量只允许出现在 fields.go 与 _test.go；history.go 一律经 fieldOrder 遍历取字段）。另有测试 TestHistorySourceHasNoFieldLiterals 对 fieldOrder 全 76 项逐条断言，把这条守卫钉进套件而不只靠一次 grep。",
+  "ast_guard": "want **38 项**，两把独立的尺同值（尺1 正则 `\"([^\"]+)\"` 计数；尺2 逗号分割计数），已排序。位置：BuildContract=2 → **BuildHistory=3**；Contract.JSON=6 → **ContractHistory.FileName=7** → **ContractHistory.JSON=8** → DefaultSignals=9；WriteContract=36 → **WriteHistory=37**。与 Leader 2026-09-08 的位置订正逐项吻合（DoD 初稿写的「HealthSummary 之后」是按旧类型名 History 算的字典序，改名后左移）。TestPackageExposesNoWriteFunctions PASS。",
+  "test_count_two_rulers": "history_test.go：尺1 静态 `grep -c '^func Test'` = **10**；尺2 动态 `go test -v` 顶层 `--- PASS` = **10**。两把尺同值。（另有 4 个 helper：seedMonths / pad2 / fieldOrderOf / dataKeyOrder，不计入。）",
+  "changed_ingest_tests": "本任务新增/调整的 6 条全 PASS：TestIngestWritesHistoryBesideContract、TestIngestHistoryLandsBeforeContractOnWriteFailure（新增）；TestIngestWritesContractOnObservation、TestIngestNoContractOnDuplicate、TestIngestRevisionContractCarriesSupersedes（调整）；TestPackageExposesNoWriteFunctions（守卫）。",
+  "real_corpus_regression": "`GOTOOLCHAIN=local go run ./cmd/atlas hestia backfill load --dir data/hestia-backfill-2026-08-14 --db <临时> --allow-incomplete` → **exit 0**。四组数字与 CONTRACTS.md 基线**逐字相同**：语料总篇数 218 / 待解析 217 / 本迭代不解析 1（`218 = 217 + 1`）· 解析成功 213 / 解析失败 4（`217 = 213 + 4`）· 合并后观测 97（单篇 28 + 合并组 69）/ 入权威表 76 / 落 pending 21（`97 = 76 + 21`）· **字段冲突 0** · **口径路由违反 0**。输出含 `四道恒等式: 全部成立 ✓`。⇒ 本任务改了 ingest.go 但**回填路径未受影响**（backfill load 不走 Ingest）。⚠️ `data/` 是 gitignored、只存在于主仓库工作区，linked worktree 里没有 ⇒ 复现时须在主仓库跑，或用绝对路径喂语料。",
+  "dir_pollution": "`find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\)` → **0 个**（回归跑完后复查同样 0）。必须用 find 而不是 git status——git 不跟踪空目录，git status 对它恒空。",
+  "red_phase_evidence": "TDD 红阶段痕迹（写实现之前，`go test ./internal/hestia/ -run 'TestBuildHistory|TestHistory|TestWriteHistory' 2>&1 | head -5`）：\n```\n# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\ninternal/hestia/history_test.go:66:12: undefined: BuildHistory\ninternal/hestia/history_test.go:94:12: undefined: BuildHistory\ninternal/hestia/history_test.go:115:12: undefined: BuildHistory\ninternal/hestia/history_test.go:138:13: undefined: BuildHistory\n```",
+  "dod_coverage_matrix": [
+   "functional[0] 类型/常量/函数形态 → 编译期 + 全部行为测试共同覆盖；ContractHistory 五字段、HistoryEntry、historyMeta 七字段、historyWindow=12、BuildHistory/toEntries/JSON/FileName/WriteHistory 俱在",
+   "functional[1] 四条原文测试 → TestBuildHistoryMonthlyOmitsRecent、TestBuildHistoryH1CarriesBothSeries、TestHistoryEntryShapeAndDeterminism、TestWriteHistoryLandsInPending（全 PASS）",
+   "functional[1] 补充的「同名覆盖」→ TestWriteHistoryLandsInPending 追加段：内容不同的两份写同一 dir，断言路径相同、读回内容等于第二份、旧内容不残留、pending/ 恰 1 个文件（不留 .tmp）",
+   "functional[2] ingest 先侧车后契约 → TestIngestWritesHistoryBesideContract（成功路径）+ TestIngestHistoryLandsBeforeContractOnWriteFailure（**顺序**：只有失败路径照得出顺序）；3 条 M2a 既有测试调整后仍绿",
+   "functional[3] AST 守卫 38 项 → TestPackageExposesNoWriteFunctions PASS，项数与位置见 ast_guard",
+   "boundary[0] monthly 省略 → TestBuildHistoryMonthlyOmitsRecent（h.MonthlyRecent 为 nil + JSON 不含该键）",
+   "boundary[0] 非 monthly 为 [] 不是 null → TestBuildHistoryNonMonthlyKeepsEmptyMonthlyRecent（解析后 parsed[\"monthly_recent\"] == []any{}）",
+   "boundary[0] 不足 12 期按实有、不补空 → TestBuildHistoryH1CarriesBothSeries（same_type 1 条、monthly_recent 5 条）",
+   "boundary[0] Data 按 fieldOrder 序、缺失不写 null → TestHistoryEntryShapeAndDeterminism（流式 Decoder 取原始键序比对 fieldOrder，不经 map——map 会被排成字典序；另断言含 FieldM2、不含 FieldM0）",
+   "boundary[0] history.go 无业务字段名字面量 → TestHistorySourceHasNoFieldLiterals + grep 判据，均 0 命中",
+   "error_handling[0] Preceding 第一处失败 → TestBuildHistoryPropagatesSameTypeQueryError（关库）",
+   "error_handling[0] Preceding 第二处失败 → TestBuildHistoryPropagatesMonthlyQueryError（裸连接把 monthly 行的数值列改成文本使 scanObservation 失败，h1 那行不动 ⇒ 第一次查询成功、第二次失败，断言错误里含 `preceding 2025-06/monthly`，钉住失败的是**哪一次**）",
+   "error_handling[0] JSON 失败 → TestWriteHistoryJSONFailure（orderedValues 含 NaN）",
+   "error_handling[0] MkdirAll 失败 → TestWriteHistoryLandsInPending 的 blocker 段（把 dir 建成普通文件）",
+   "error_handling[0] writeAtomic 失败 → TestWriteHistoryAtomicRenameFailure（目标文件名预建为目录使 rename 撞 EISDIR，不依赖权限位、root 下也不假绿）"
+  ],
+  "anchor_history": "🔴 **整批重采过一次，锚从 `4c9e7fdc35a3d4d6a6ac4dbbb0099ff998de626f` 换到 `7e24b116faff2174771d4551b54aa582a874d209`**。原因：首次重采完成后 Leader 提交了 `PENDING-MECHANISMS.md`（`7e24b11`，`2/0`，**0 个 .go 文件**），HEAD 前进。虽然本任务 5 个文件在两棵树上 sha256 **逐字节一致**（已验），但数字的锚必须是它们实际采自的那棵树，故**整批重跑**而非沿用旧值改个锚号——「代码没变所以数字还有效」是推理，重采给的是观察。两批数字逐项相同。",
+  "blocked_once": "首次 `transition dev_done` 被 DENY（退出码 2，不落盘）：门禁把 Leader 当时**未提交**的 `PENDING-MECHANISMS.md` 判成本任务的 scope 漂移。根因：`task-completed.sh` 的 `OTHERS`（他人在途 scope 减除）只从**在途任务 JSON 的 writes/packages** 里取，Leader 在主仓库工作区的编辑不属于任何任务，减不掉。**未补进本任务 writes**（错误归属会让范围外的真漂移不再告警），**也未 `git checkout --` 撤回**（那会抹掉他人在途工作），而是报请 Leader 自行处置；Leader 提交后重试通过。该结构性问题已由 Leader 收录进 PENDING-MECHANISMS.md。",
+  "known_harmless_warns": "门禁另有两条 WARN，均因**跨 sprint 同号 TASK-001 复用**（历史上有 `feat(TASK-001): PaperBroker`、`feat(TASK-001): PE% 列` 等 8 条主题不符 + 30 条早于本轮开工的提交）。门禁自己标注「不参与本次范围漂移判定」，已知无害——**不要据那两段文件列表去改声明**。",
+  "rework_round_1": {
+   "anchor": "1c7af81846a4fba3fbb76a84e42eb232b8178f81",
+   "anchor_note": "master 上 merge 返工之后的 commit。**本段每个数字都采于这一个锚、最后一次改动之后**；采样开始与结束时 `git rev-parse HEAD` 均 == 该锚，非 `.arcforge/` 的工作区改动为空。⚠️ 上面 `verification.anchor`（7e24b116faff2174771d4551b54aa582a874d209）那批是**首轮交付**时那棵树的真实读数，**未改动**——数字的锚必须是它们实际来源。",
+   "delivery_commit": "71a985d0e2617686fe4c29bca9458047f4b805ba",
+   "rework_baseline": "5ba7c3ceca25f5c2495faf32e4ce1c38e92f90ca",
+   "merge_verified": "拓扑 `--is-ancestor` → MERGED，**并补内容判据**：`internal/hestia/ingest_test.go` 在交付 commit 与 master 上 sha256 **逐字节一致**。",
+   "gap_closed": "**两个目标分支都补上了**：`ingest.go:453`（BuildHistory 失败）执行次数 **0 → 1**；`ingest.go:456`（WriteHistory 失败）**0 → 1**。",
+   "coverage_by_statements": "按**语句数**比对（fix_items 要求的口径，不看四舍五入显示值——它会让小幅上升和小幅下跌长得一模一样）：**2783/2880 = 96.6319% → 2785/2880 = 96.7014%**，语句 +2，**未覆盖块 91 → 89**（fix_items 期望「降到 89 或 90」，达成较好的 89）。两把尺此处同值：`go test -cover` 与 `go tool cover -func` 都报 96.7%。",
+   "suite": "`go test ./internal/hestia/... ./cmd/atlas/... -count=1` → 两包 ok，退出码 0",
+   "sidecar_order_tests": "三条侧车顺序测试全 PASS：LandsBeforeContractOnWriteFailure（正方向，既有）、WriteFailureSkipsContract（反方向，新增）、BuildFailureSkipsContract（反方向，新增）。",
+   "guards": "`TestPackageExposesNoWriteFunctions`（38 项）与 `TestStoreExposesNoWriteMethods` 均 PASS，未因返工变动（本次不新增任何导出符号）。",
+   "vet": "`go vet ./internal/hestia/...` → 0 行",
+   "gofmt": "`gofmt -l internal/hestia cmd/atlas` → 恰 2 项既有欠账。⚠️ 中途我的文件**曾出现在列表里**（gofmt 要把缩进注释块规范化成 tab 缩进 + 前后空行），已 `gofmt -w` 修掉并复查为 0。",
+   "untouched_surface": "`git diff --numstat 5ba7c3c…1c7af81 -- ingest.go parse.go validate.go store.go` → **0 行**（fix_items 明令不动 `ingest.go` 的实现）；`go.mod`/`go.sum` **0 行**。",
+   "scope": "`git diff --numstat 5ba7c3c…1c7af81 -- internal/ cmd/` → 仅 `internal/hestia/ingest_test.go 70/0`。恰 1 个文件，已在 `writes` 声明内，**无越界、无需补声明**。",
+   "code_simplifier": "跑了，**零改动**。其回复这次明确说了「无需简化」，但仍按纪律用 `git diff` + 内容判据自行核实（ingest.go 0 行、两条测试在、污染的是 monthly、成因注释与「一对镜像」段都在、目标分支仍 453→1/456→1、gofmt/vet/测试全绿）。numstat 从 68 变 70 是**我自己 `gofmt -w`** 加的两个空行，不是它改的。"
+  }
+ }
+}

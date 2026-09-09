@@ -1,0 +1,65 @@
+{
+  "id": "TASK-001",
+  "title": "atlas history 侧车：`BuildHistory`/`WriteHistory`/`History.JSON`/`History.FileName` + ingest 先侧车后契约 + AST 守卫登记",
+  "description": "对应需求文档 **TASK-001**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-06-hestia-m3-warp-hestia.md` 的「## TASK-001」节）。需求原文给了完整代码与测试，**以原文为准**；本 DoD 只写偏离原文的裁决、原文没写的机制约束与本仓库实测订正。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M3-1…4）、`design-spec.md`。\n\n本任务是需求 TASK-001 的**上半**（`internal/hestia` 包内，5 文件）；`cmd/atlas` 的 `contract emit` 同产侧车拆为本 sprint 的 TASK-002（拆分理由见 design-spec §2：原任务横跨 2 package / 7 文件，超 Realistic Scope）。\n\n改 `internal/hestia/history.go`（新建：`History`/`HistoryEntry`/`historyMeta`/`historyWindow`/`BuildHistory`/`toEntries`/`History.JSON`/`History.FileName`/`WriteHistory`）、`history_test.go`（新建，4 条）、`ingest.go`（`WriteContract` **之前**插入 BuildHistory+WriteHistory）、`ingest_test.go`（新增 1 条 + 调整 M2a 的 `TestIngestNoContractOnDuplicate`）、`store_test.go`（AST 守卫 want 登记 4 项）。\n\n🔴 **守卫登记必须与导出同任务**：`BuildHistory` 等一旦导出而 `want`（`store_test.go:453`，**实测 34 项**——程序化数过：`re.findall(r'\"([^\"]+)\"', line453)` 返回 34，首 `BackfillFetch` 末 `WriteContract`。⚠️ 本 DoD 初稿写「33 项 ⇒ +4 = 37」是**错的**，错因是只 grep 到了行、从未数过项数——而这是条**精确相等**断言，照 37 去凑会删掉一个已登记符号）未更新，守卫测试当场变红。\n已核实存在的依赖：`Store.Preceding(ctx, period, periodType string, n int) ([]Observation, error)`（`store.go:354`）、`fieldOrder`（`fields.go`）、`orderedValues`+`keyValue`（`contract.go`）、`writeAtomic`（**定义在 `snapshot.go:97`**，`queue.go` 只是调用方）、helper `newTestStore`/`contractObs`/`pendingContracts`（`ingest_test.go`、`store_test.go`）。\n下游 TASK-002（消费 `BuildHistory`/`WriteHistory` 导出面）、TASK-006（夹具靠含侧车的二进制）都消费本任务产出，写进 discovery `interfaces_exposed`。\n\n🔴 **任务编号映射（必读，否则验证者会判不一致）**：本 sprint 的 Arcforge 编号与需求文档的编号**不同**（需求 TASK-001 拆成本 sprint 的 TASK-001+TASK-002，其余顺延）。两套编号各有其读者，用法固定为：\n| 写在哪 | 用哪套编号 | 理由 |\n|---|---|---|\n| **代码/文档注释**（`// M3 的 TASK-00X`） | **需求文档的编号** | 读者是三仓库的开发者，他们读的是需求文档与 spec，不是 atlas 的 `.arcforge/` 归档 |\n| **atlas commit subject**（`feat(TASK-00X):`） | **Arcforge 编号** | 门禁 `task-completed.sh` 按它认领改动，写错则改动不可见 |\n| **`.arcforge/` 内一切文件** | **Arcforge 编号** | 流程真相源 |\n映射表：需求 001 → 本 sprint 001(internal/hestia) + 002(cmd/atlas)；需求 002 → 003；需求 003 → 004；需求 004 → 005；需求 005 → 006；需求 006 → **本 sprint 不做（结转，AD-M3-2）**。\n⚠️ 故本任务的 commit subject 与代码注释里的编号**本就不同**，这是预期的，不是笔误——在 discovery `decisions` 里记一句。\n（本任务对应需求文档的 **TASK-001**；注释里写 `M3 的 TASK-001`。）",
+  "module": "hestia",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/history.go",
+    "internal/hestia/history_test.go",
+    "internal/hestia/ingest.go",
+    "internal/hestia/ingest_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      "`history.go` 按需求原文实现：`History` 五字段（`schema_version`/`for`/`generated_by`/`same_type`/`monthly_recent,omitempty`）、`HistoryEntry{Meta historyMeta, Data orderedValues}`、`historyMeta` 七个 snake_case 字段、`const historyWindow = 12`、`BuildHistory(ctx, *Store, Observation, generatedBy string) (History, error)`、`toEntries`、`(History) JSON() ([]byte, error)`（`MarshalIndent` 两空格 + 末尾换行）、`(History) FileName() string`、`WriteHistory(dir string, h History) (string, error)`（写 `<dir>/pending/<for>.history.json`，`MkdirAll` + `writeAtomic`，同名覆盖）。`\"monthly\"` 字面量是 period_type 不是业务字段名，不受字段名守卫约束（`signals.go` 已有先例）。",
+      "`history_test.go` 四条按原文全 PASS：`TestBuildHistoryMonthlyOmitsRecent`（12 期截断 + 降序 + `monthly_recent` 键不出现 + FileName）、`TestBuildHistoryH1CarriesBothSeries`（h1 的 same_type 1 条 + monthly_recent 5 条）、`TestHistoryEntryShapeAndDeterminism`（两次生成逐字节相同 + meta 七键齐 + data 含 `FieldM2` 不含 `FieldM0`）、`TestWriteHistoryLandsInPending`（落点 + 写失败 err 含 `history`）。含 `seedMonths`/`pad2` helper。\n**另补**（需求 line 97/382 与 spec §7 的「同名覆盖」语义，初稿四条测试无一验它）：`TestWriteHistoryLandsInPending` 追加一段——对同一 `dir` 用**内容不同**的两个 `History` 先后调 `WriteHistory`，断言返回路径相同、第二次的内容完整覆盖第一次（读回比对），且不残留 `.tmp` 中间文件。",
+      "`ingest.go` 接线**先侧车后契约**（`WriteContract` 之前 BuildHistory→WriteHistory，失败均走 `fail(\"contract\", contractError{err})`）；新测试 `TestIngestWritesHistoryBesideContract` PASS（pending/ 恰两文件、`for`/`generated_by` 正确、annual 带 `monthly_recent` 键）；M2a 既有 `TestIngestNoContractOnDuplicate` 因 pending/ 多一个文件需相应调整且**仍绿**（调整方式写进 discovery `decisions` 并说明理由）。",
+      "AST 守卫 `store_test.go:453` 的 `want` 精确集合插入 4 项并保持字典序位置：`\"BuildHistory\"`（`\"BuildContract\"` 之后）、`\"History.FileName\"`/`\"History.JSON\"`（`\"HealthSummary\"` 之后）、`\"WriteHistory\"`（`\"WriteContract\"` 之后）⇒ **38 项**（34 + 4；34 是实测值，见 description 的订正）；`go test ./internal/hestia/ -run ExposesNoWrite -count=1` PASS。"
+    ],
+    "boundary": [
+      "`monthly` 时 `MonthlyRecent` 为 nil 且序列化后 **不出现** `\"monthly_recent\"` 键；非 monthly 时该键存在（可为空数组 `[]`，不是 null）。同类型历史不足 12 期时按实有条数返回、不补空。`Data` 只含 `o.Values` 里存在的键、按 `fieldOrder` 序、**缺失字段不写 null**。\n🔴 **另**（需求 Global Constraints 的 Atlas 段末条，本 DoD 初稿漏了）：**业务字段名字面量只允许出现在 `fields.go` 与 `_test.go`** ⇒ `history.go` 里不得出现任何业务字段名字面量（如 `\"m2\"` / `\"loan_hh_mlt_ytd\"`），字段一律经 `fieldOrder` 遍历取得。判据：`grep -nE '\"(m0|m1|m2|afre|loan_|deposit_|bill_)' internal/hestia/history.go` 输出为空。⚠️ `\"monthly\"`（period_type）、`\"1.0\"`（schema 版本）、`\"pending\"`（目录名）**都不是业务字段名**，不受此约束（`signals.go` 已有先例）。"
+    ],
+    "error_handling": [
+      "🔴 **覆盖率贴地，错误分支必须有测试**（AD-M3-4：`internal/hestia` 现实测 96.6%，DoD 下限也是 96.6% ⇒ 零余量）：`BuildHistory` 的两处 `Preceding` 失败、`WriteHistory` 的 `JSON` 失败/`MkdirAll` 失败/`writeAtomic` 失败，每条都要有测试走到（`TestWriteHistoryLandsInPending` 的 blocker 已覆盖 MkdirAll 一条，其余自行补）。另留 TDD 红阶段痕迹：把 `go test ./internal/hestia/ -run 'TestBuildHistory|TestHistory|TestWriteHistory' 2>&1 | head -5` 的输出（含 `undefined: BuildHistory`）记进 discovery 的 `verification`。"
+    ],
+    "non_functional": [
+      "**门禁（全部在 merge 后的 master 上统一重采并带全 sha 锚）**：`GOTOOLCHAIN=local go test ./internal/hestia/... -count=1` 全绿；`go test ./internal/hestia/ -cover` **≥ 96.6**（基线背对背实测于锚 `fe95ac707ea46f9939bb6554261830a95f1b93e1`）；`gofmt -l internal/hestia cmd/atlas` **只允许**列出 `cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（既有欠账，**不要顺手修**；判据是「这两个之外没有新增项」，锚 `fe95ac707ea46f9939bb6554261830a95f1b93e1` 实测恰这两处）；`go vet ./internal/hestia/...` 零输出。**无新增依赖**：`go.mod`/`go.sum` 不得出现在改动里。**不动面**：`git diff --stat fe95ac707ea46f9939bb6554261830a95f1b93e1 HEAD -- internal/hestia/parse.go internal/hestia/validate.go` 为空；`store.go` **不新增方法**（`git diff fe95ac707ea46f9939bb6554261830a95f1b93e1 HEAD -- internal/hestia/store.go` 为空）；`Save` 不动。\n🔴 **真语料回归数字一个不变**（需求「交付前检查清单」第一条，本 DoD 初稿漏了）：本任务改了 `ingest.go`，须证明回填路径未受影响。跑 `GOTOOLCHAIN=local go run ./cmd/atlas hestia backfill load --dir data/hestia-backfill-2026-08-14 --db <临时 db> --allow-incomplete`（exit 0），输出的四组数字必须与 CONTRACTS.md 既有基线**逐字相同**：`218 = 217 + 1` · `217 = 213 + 4` · `97 = 76 + 21`（单篇 28 + 合并组 69）· 字段冲突 **0** · 口径路由违反 **0**。另 `find internal/hestia cmd/atlas -type d \\( -name pending -o -name queue \\)` 输出为空（git 不跟踪空目录，`git status` 对它恒空 ⇒ 必须用 `find` 查，M2a 的 reviewer B8 判据）。⚠️ 这组数字与覆盖率一样，**必须在 merge 后的 master 上与其它自证数字统一重采**。",
+      "**交付流程（AD-9 同款，机制决定不是偏好）**：\n1. 主仓库建 worktree：`git worktree add -b task/TASK-001-m3 ../wt-TASK-001-m3 master`（本仓库主分支是 **master** 不是 `main`）。\n2. 开工前读 `context_from` 里各上游任务的 discovery（在**主仓库**读）。提交用显式 pathspec（本任务 5 个文件），信息锚定 **`feat(TASK-001): M3 …`**——🔴 需求文档写的 `feat(M3 TASK-001):` **不匹配门禁**（`task-completed.sh` 只认 `^[a-z]+\\(TASK-001\\):`，AD-2），照抄会被判「不符约定、改动不可见」。milestone 前缀只写在**注释**里（`M3 的 TASK-001`）。\n3. 提交前跑 code-simplifier（Task tool，`subagent_type: \"code-simplifier:code-simplifier\"`，prompt 列出本任务改动文件并附约束：不得改 `Parse`/`Validate`/`Save`、不得给 `store.go` 新增方法、不得新增需求之外的导出符号、JSON 键序不得改、注释里的理由段保留）；有改动就并进同一提交并在 discovery `decisions` 申报保留/回退了哪些。**子代理回复不可采信，以 `git diff` 为准**。\n4. 预演 merge：`git worktree add --detach ../pre-TASK-001 master && git -C ../pre-TASK-001 merge --no-ff --no-commit task/TASK-001-m3`；无冲突后拆预演树，通知 Leader merge 并**等 merge 进 master**（🔴 门禁的 `git log --grep` **不带 `--all`**，未合并分支上的 commit 对它结构性不可见 ⇒ 两个集合双双为空所以「报绿」；**绝不能因 teammate-idle hook 催「推进 dev_done」就转**——那个文案在此状态方向相反）。通知里附「我的 commit 全 sha」。\n5. merge 后在**主仓库 master** 上**统一重采**全部自证数字（`git rev-parse HEAD` 记锚；覆盖率、vet、gofmt、不动面 diff）；🔴 分批采的数字即使每个当时都对，合到一份报告里也不构成对最终产物的自证。跌破门槛或转红 ⇒ **不转 `dev_done`**，走 `transition blocked_clarification --json-field questions=…`。\n6. `cd` 回主仓库写 discovery（`discovery TASK-001` 子命令：key_findings / decisions[带 rationale] / files_modified / interfaces_exposed / verification；有他人手笔写 `provenance`）并 `task TASK-001 update --expect-status in_progress --field discovery=.arcforge/discoveries/TASK-001.json`（⚠️ `update` 不收 `--expect-epoch`，只有 `transition` 收），再 `transition dev_done --expect-epoch <认领时的 epoch>`。🔴 **discovery 与指针都必须在 `dev_done` 之前落定**——之后写会让 `discovery_sha256` 漂移，`verified` 之后时机守卫无条件 DENY，dev 侧无出路。落盘后 `jq '{status,discovery,writes,packages}'` 直读核实。\n7. 拆 worktree：`git worktree remove ../wt-TASK-001-m3`（谁建谁拆）。\n⚠️ 一切 `.arcforge/` 读写必须在**主仓库**执行（linked worktree 内调写通道会被 DENY）。写通道调用一律 `ARCFORGE_TOKEN=<你的 token> bash .claude/hooks/arcforge-write.sh --as <你的实例名> …`。"
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/history.go",
+    "./internal/hestia/history_test.go",
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/ingest_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "coverage_floor": 96,
+  "status": "blocked_clarification",
+  "assigned_to": "dev-m3-a",
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "DoD functional[0]/[3] 要求侧车结构体命名为 `History`（守卫项 `History.JSON`/`History.FileName`），但 `internal/hestia/validate.go:35` 已有**导出接口** `type History interface`——它是 `Validate(ctx, obs, h History, cfg Thresholds)` 的公开签名参数类型，也是 `NoHistory` 变量的类型。同名不可共存，编译期直接红（`History redeclared in this block`，连带 8 处类型错误）。而 DoD non_functional 又明令 `validate.go` 的 diff 必须为空。⇒ DoD 内部矛盾，请裁决。\n\n已实测的两个方案：\n**A（推荐）**：侧车结构体改名 `ContractHistory`（与既有 `Contract`/`BuildContract`/`WriteContract` 对仗）。函数名 `BuildHistory`/`WriteHistory`/`toEntries`、JSON 形态、文件名规则**一个字节不变**（类型名不进 JSON）；AST 守卫项相应为 `ContractHistory.FileName`/`ContractHistory.JSON`，**仍是 38 项**。实测（worktree task/TASK-001-m3，起点 fe95ac707ea46f9939bb6554261830a95f1b93e1）：全包测试绿、`go test ./internal/hestia/ -cover` = 96.6%（history.go 逐函数 100%）、`go vet` 零输出、`gofmt -l internal/hestia cmd/atlas` 只列既有那两处。**对下游零影响**：`hestia.History`/`hestia.NoHistory` 在 `internal/hestia` 包外**零引用**（`grep -rn 'hestia\\.History\\|hestia\\.NoHistory' --include='*.go'` 空输出），且 TASK-002 按需求原文写的是 `hist, err := hestia.BuildHistory(...)`（`:=`，不写类型名）。\n**B**：把 validate.go 的接口改名（如 `HistorySource`）。要动 `validate.go`（DoD 不动面明令禁止）、`validate_test.go`、`backfill_load.go`——后两者**不在**本任务 writes 里，越界面大。\n\n请回：选 A 还是 B；若选 A，确认类型名用 `ContractHistory` 还是你指定的别的名。",
+      "asked_at": "2026-09-08T03:24:31Z",
+      "answer": null
+    }
+  ],
+  "verifier": null,
+  "discovery": null,
+  "last_transition": {
+    "from": "in_progress",
+    "to": "blocked_clarification",
+    "by": "dev-m3-a",
+    "at": "2026-09-08T03:24:31Z"
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "task_id": "TASK-003",
+  "title": "loom spool.archive 加 source 白名单参数 + spool_write_allow 加 Wiki/Macro/PBOC（跨仓库，证据落 atlas）",
+  "owner": "dev-m3-b",
+  "requirement_task_id": "TASK-002",
+  "key_findings": [
+    "跨仓库任务的实际形态：真实代码全部在 loom（commit 6d6c38f96901dc60f516ef2154283a213782ad5e，分支 feat/spool-source-param，PR https://github.com/newthinker/loom/pull/13），atlas 的 git 完全看不见它；atlas 侧唯一产物是交付记录文档 docs/hestia-m3/TASK-003-loom-spool-source.md。dev_done 门禁验的是那份文档，真正的质量闸是验证者按文档 ③ 节的全 sha 锚点去 loom 实跑。",
+    "DoD 措辞的『injectTaint 12 处调用点』实为 grep 'injectTaint(' 的 12 个命中，其中 1 个是函数定义行 ⇒ 真正的既有调用点是 11 个（taint_test.go 10 个改为 injectTaint(in, \"web-research\")，archive.go 1 个改为 injectTaint(content, source)）。锚点树上共 13 处（新增 1 处测试调用）。数字本身不影响交付，但验证者若拿 12 去核对调用点会对不上，故在文档 ① 节写明分解。",
+    "RED 输出里 'too many arguments in call to injectTaint' 只有 10 行，不是 11 行——Go 编译器每包最多报 10 个错就以 'too many errors' 截断。10 是编译器上限，不是调用点计数，不能拿它核对调用点数量。",
+    "spool 测试条数 35 → 39，用两把独立的尺互验：静态 grep -c '^func Test' 合计 39，动态 go test -v 顶层 --- PASS 计数 39。⚠️ 动态输出的 '=== RUN' 是 48 条（含 t.Run 子测试），与静态口径不同，不可相减。",
+    "configs/config.local.yaml 是 loom 的 gitignored 本机文件，不存在于 worktree 里 ⇒ 改它必须动 loom 本机工作区。DoD functional[2] 字面写『两处都加』，而同一 DoD 的 description、需求原文 Step 4、Leader 的『不碰本机工作区』三处都说由人改。已向 Leader 提问并按『不改』执行，实读现状（仍只有 Wiki/Loom-Research）写进文档 ④ 节。后果是本机 selvage 在补上这一行之前写 Wiki/Macro/PBOC 仍会 DENIED。",
+    "Wiki/Macro/PBOC/ 是否被 Spool 自动创建：未实证。已核实 vault 根下 Wiki/ 存在而 Wiki/Macro/ 与 Wiki/Macro/PBOC/ 都不存在。上游 spec 声称『首次写入时自动建』是设计意图不是实测；archive.go 里确有一句无条件 os.MkdirAll(parent, 0o755)（代码阅读，非运行结果），但真实 vault 的权限/同步/符号链接/selvage 是否已加载新 config 一个都没验过。属结转冒烟项。",
+    "🔴 跨仓库任务的新失效模式（本任务实撞）：在 loom worktree 里 cd 着调用 `bash .claude/hooks/arcforge-write.sh`，相对路径解析到 **loom 自己的那份**写通道脚本，checkpoint 落进了 loom worktree 的 .arcforge/checkpoints/，**退出码 0、零告警**——loom 那份脚本没有 linked-worktree DENY。CLAUDE.md 的 worktree 防线只覆盖『同仓库的 linked worktree』，覆盖不到『cd 去了另一个也装了 arcforge 的仓库』。处方：跨仓库任务里写通道一律用 atlas 绝对路径调用，且先 cd 回 atlas。",
+    "🔴 派发/交接侧的锚点漂移（Leader 自述，记此备考）：Leader 先 `git rev-parse task/TASK-003-m3` 核实得 537b0ef17842eb7bbc366b6657e6718464bf4cb8，随后 `git merge task/TASK-003-m3` **用的是分支名**；我在这两条命令之间提交了 09e9573fb733833db99fa6946ec721dc6daec1c5 ⇒ **核实的对象与 merge 的对象不是同一个**。本次无害（09e9573fb733833db99fa6946ec721dc6daec1c5 是 537b0ef17842eb7bbc366b6657e6718464bf4cb8 的线性追加、单文件、无越界，Leader 事后逐项复核过），但换成越界 commit 该核实就完全失效。处方与 CLAUDE.md 的「验证/隔离命令里的锚必须钉全 sha」同源：**merge 一律用显式全 sha，不用分支名**——分支名是会在两条命令之间前移的符号引用。"
+  ],
+  "decisions": [
+    {
+      "decision": "boundary[0]（空串 / 非字符串 source 走缺省）用 t.Run 子测试实现，而不是新开一个顶层 func Test",
+      "rationale": "DoD non_functional[0] 把『35 + 4 = 39 条，用 grep -c \\'^func Test\\' 复核』写成硬判据。新开顶层测试会变成 40，硬判据当场为假。子测试不进 grep -c '^func Test' 的口径，既覆盖了 boundary 又保住 39。子测试附加在我自己新写的 TestArchiveSourceDefaultsToWebResearch 上，需求原文那段代码的断言一字未动（只是在其后追加）。"
+    },
+    {
+      "decision": "code-simplifier 的两处改动：taint.go 常量合并采纳；archive_test.go 表从切片改 map 驳回并还原为切片",
+      "rationale": "常量合并语义等价，需求原文写成独立 const 只是行文不是约束。map 迭代序在 Go 里是随机的 ⇒ 子测试执行顺序不确定、失败输出不可复现；切片是 Go 表驱动测试的惯用形态。已在代码里留注释说明为什么是切片，防止下一次被『简化』回去。子代理回复不可采信，两处均以 git diff 核实。"
+    },
+    {
+      "decision": "RED 阶段证据改用『在锚点上确定性重放』而不是贴原始 RED 输出",
+      "rationale": "原始 RED 跑在实现落盘之前，那棵树已经不存在，验证者无法复现，只能选择相信我贴的文本。重放配方（在锚点 commit 上把 taint.go/archive.go 单独 checkout 回父提交）是可执行的，验证者能拿到逐字节相同的输出。锚全部钉全 sha，不含 HEAD/分支名。"
+    },
+    {
+      "decision": "两套任务编号并存，不是笔误",
+      "rationale": "Arcforge 编号 TASK-003 与需求文档编号 TASK-002 各有读者：代码/文档注释写 M3 TASK-002 / M3 的 TASK-002（读者是三仓库开发者），atlas commit subject 写 docs(TASK-003):（门禁 task-completed.sh 按它认领改动，写错则改动不可见）。照抄需求原文给的代码时保持原样的 'M3 TASK-002'（无『的』），新写的注释用 'M3 的 TASK-002'——Leader 已裁决两种写法都接受。"
+    },
+    {
+      "decision": "loom PR 只开不合（PR #13 未合并）",
+      "rationale": "合并 loom PR 是人的决定，不在本任务授权范围内。atlas 侧交付文档的 merge 由 Leader 串行执行。"
+    },
+    {
+      "decision": "selvage 未重启、config.local.yaml 未改",
+      "rationale": "launchctl kickstart 是人执行的（需求 TASK-006 Step 0），agent 明令不执行。两者都写进文档 ④ 节并标为集成冒烟的硬前置。"
+    },
+    {
+      "decision": "发现并上报 DoD 内部不一致：functional[2] 字面「两处都加」与同一 DoD 的 description、需求原文 line 569、Leader 的「不碰本机工作区」三者冲突；Leader 裁决 B（dev 不改 config.local.yaml），裁决由我写进 done_criteria",
+      "rationale": "载体强度有序：done_criteria（验证者逐条对照）> questions[].answer > discovery.decisions > inbox 通知。这条裁决若只活在 inbox 与 discovery 里，验证者按 functional[2] 的字面去 grep config.local.yaml 拿到 0 就会判 rejected。而 Leader 写不了这个字段——任务一进 in_progress，done_criteria 的合法写者只剩 dev-*（Leader 实测被 DENY）⇒ 必须由我动手。实质理由：改了 config.local.yaml 而不重启 selvage 并不生效，而重启是人执行的，dev 改它只会造出「看起来做完了」的假象。本 sprint 第一个由 dev 发现的 DoD 内部不一致。"
+    },
+    {
+      "decision": "把「12 处调用点」订正为「11 个」并写进 done_criteria functional[1]，同时把「RED 输出 10 行是编译器截断上限不是调用点计数」也写进去",
+      "rationale": "两个数都是**高度相关但不是被测性质本身**的可观测量：12 是 grep 命中数（含函数定义行），10 是 Go 编译器每包 too many errors 的截断上限。近似失效时它们不报错，只给出像样的数，验证者拿去反推调用点数量会对不上并据此判不符。订正必须落在 done_criteria 而不只是交付文档——验证者逐条对照的是前者。Leader 已复核确认 12 是初稿计数错误。"
+    },
+    {
+      "decision": "loom PR #13 只开不合，且不因 PR 未合并而停下等待",
+      "rationale": "Leader 明确边界：loom main 是共享分支，PR 合并属需求 TASK-006 Step 0 的人执行前置，与 selvage 重启同批结转。需区分两个 merge——loom PR 的合并（人执行，不归 dev）与 atlas 交付文档 merge 进 master（Leader 执行，且必须在 dev_done 之前发生，因为门禁的 git log --grep 不带 --all，未合并分支上的 commit 对它结构性不可见，会「报绿」而其实什么都没量到）。"
+    }
+  ],
+  "files_modified": [
+    "docs/hestia-m3/TASK-003-loom-spool-source.md（atlas，本任务在 atlas 的唯一产物；分支 task/TASK-003-m3 @ 09e9573fb733833db99fa6946ec721dc6daec1c5（合入 master 的就是它；初写时记的 537b0ef17842eb7bbc366b6657e6718464bf4cb8 是它的父提交））",
+    "loom internal/executors/spool/taint.go（+12/-8）",
+    "loom internal/executors/spool/archive.go（+16/-3）",
+    "loom internal/executors/spool/archive_test.go（+76/-0）",
+    "loom internal/executors/spool/taint_test.go（+22/-10）",
+    "loom configs/config.yaml（+1/-0）",
+    "loom configs/README.md（+6/-1）"
+  ],
+  "interfaces_exposed": [
+    "spool.archive params 新增可选 \"source\"：缺省 \"web-research\"；\"hestia\" 允许；其他值返回 (\"DENIED\", \"source not allowed: \"+source) 且在任何写盘之前返回（不落盘）。空串与非字符串类型都走缺省，不 panic。",
+    "reviewed: false 对任何 source 仍然无条件覆写；入站 frontmatter 自带的顶层 source/reviewed（含引号变体）一律先丢弃再打标。source 是产物溯源，不是信任标记。",
+    "spool_write_allow 模板（configs/config.yaml）新增 Wiki/Macro/PBOC。⚠️ 本机 configs/config.local.yaml 尚未同步（gitignored，由人改）——在补上并重启 selvage 之前，写 Wiki/Macro/PBOC 仍会 DENIED \"path outside write allowlist\"。",
+    "loom 分支 feat/spool-source-param @ 6d6c38f96901dc60f516ef2154283a213782ad5e；PR https://github.com/newthinker/loom/pull/13；父提交 0466116cc8c15c14ab8632d30d9be542fca5068c。下游（需求 TASK-003/004/005 的 nanoclaw skill）调用 spool.archive 时传 source: \"hestia\"。",
+    "开发用 worktree（交付后由我拆除，不要依赖其存在）：loom /Users/zuowei/workspace/go/src/github.com/newthinker/wt-loom-TASK-003；atlas /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-003-m3。"
+  ],
+  "verification": {
+    "anchor_loom": "6d6c38f96901dc60f516ef2154283a213782ad5e",
+    "anchor_loom_parent": "0466116cc8c15c14ab8632d30d9be542fca5068c",
+    "anchor_atlas_branch_commit": "09e9573fb733833db99fa6946ec721dc6daec1c5",
+    "note": "以下数字全部采于最后一次改动之后（锚点 commit 本身），与该 commit 同源。",
+    "suite": "loom: go test ./internal/executors/spool/ -v → 退出码 0，顶层 --- PASS 39 条，任意层 --- FAIL 0 条；go test -count=1 ./internal/executors/spool/ → ok 0.439s，退出码 0；go test ./... → 退出码 0，^FAIL 行数 0",
+    "test_count_two_rulers": "尺1 静态 grep -c '^func Test'：archive_test.go 21 / commit_test.go 6 / taint_test.go 12，合计 39；尺2 动态 go test -v 顶层 --- PASS：39。两把尺同值。基线 35（18/6/11）+ 新增 4。",
+    "gofmt": "gofmt -l internal/executors/spool → 零输出，退出码 0",
+    "vet": "go vet ./internal/executors/spool/... → 零输出，退出码 0",
+    "deps": "git diff --numstat 0466116cc8c15c14ab8632d30d9be542fca5068c 6d6c38f96901dc60f516ef2154283a213782ad5e -- go.mod go.sum → 零输出，0 行；无新增 Go 依赖",
+    "numstat": "git show --numstat --format='' 6d6c38f96901dc60f516ef2154283a213782ad5e → 6 文件 133 增 22 删（README 6/1、config.yaml 1/0、archive.go 16/3、archive_test.go 76/0、taint.go 12/8、taint_test.go 22/10）",
+    "red_phase": "在锚点上确定性重放：worktree add --detach <锚点> 后 git checkout <父提交> -- taint.go archive.go，再跑 go test -run 'TestArchiveSource|TestTaintSourceParameterized' → 退出码 1，报 too many arguments in call to injectTaint（10 行 + 1 行 too many errors 截断）",
+    "merge_rehearsal": "atlas：在 master(0c3fbdc9ac7b12fcb65d6d2695541f55820cd03c) 的临时 worktree 上 git merge --no-ff --no-commit task/TASK-003-m3 → 退出码 0，'Automatic merge went well'，仅新增 docs/hestia-m3/TASK-003-loom-spool-source.md",
+    "not_verified": "Wiki/Macro/PBOC/ 是否被 Spool 自动创建：未实证（已核实该目录当前不存在；archive.go 有无条件 os.MkdirAll 是代码阅读不是运行结果）。loom PR #13 未合并。configs/config.local.yaml 未改。selvage 未重启。三者均属需求 TASK-006 的人执行结转项。",
+    "anchor_atlas_branch_commit_note": "⚠️ 锚点订正：初写时记的是 537b0ef17842eb7bbc366b6657e6718464bf4cb8（394 行）。此后我又追加了一个提交 09e9573fb733833db99fa6946ec721dc6daec1c5（421 行，补文档 ④节 4.6「loom 既有 TASK-00X 注释与需求编号撞名」）。**实际合入 master 的是 09e9573fb733833db99fa6946ec721dc6daec1c5**。已用内容判据核实：master 上 docs/hestia-m3/TASK-003-loom-spool-source.md 的 sha256 == 39542d6e3f7dbf13c52957217ed7210987344d1403dbb52a176f5d56a0f11bf8 == 09e9573fb733833db99fa6946ec721dc6daec1c5 版的 sha256。",
+    "atlas_merge_commit": "755016eba82daaebee01721d1b86311f9d50a373（Leader 执行，merge(TASK-003): M3 loom spool.archive source 参数交付记录）"
+  }
+}

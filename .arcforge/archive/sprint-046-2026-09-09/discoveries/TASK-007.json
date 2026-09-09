@@ -1,0 +1,151 @@
+{
+  "task_id": "TASK-007",
+  "author": "dev-m3-c",
+  "written_at": "2026-09-08",
+  "branch": "task/TASK-007-m3",
+  "commit_sha": "74216415d6c97db37c8c56f38d74506849520774",
+  "merged_master_sha": "cf7758bafa2f7f37f608497d9f1027537c100ddf",
+  "nanoclaw_commit_sha": [
+    "3690015a496d1fae2d219269572b1e507586467c（verify.py + --now 修复）",
+    "2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8（编号前缀订正）= 分支 HEAD"
+  ],
+  "pull_request": "https://github.com/newthinker/nanoclaw/pull/5（OPEN，base=main，head=2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8，5 commits，23 files）",
+  "key_findings": [
+    "🔴 **变异存活的第二种形状：一条判据被更早的判据遮蔽，因而从未被行使**（与 TASK-006 那次的「夹具取值恒定」不同源）。13 个变异里有 3 个先存活：**V4** 同段多条 check——原测试只是**复制**一条 check ⇒ 总数变 3，被「恰好 2 条」那条**更早**的判据挡下；**V7** 机器区外的校验行——没有任何测试构造过「总数仍 2/1 但有一条在区外」；**V9** 空文件分支——空文件也不含 `begin`/`end`，被「不是笔记格式」分支接住，**两条给出相同退出码**而断言只查退出码。⇒ 补法固定：**构造一个能让被遮蔽的那条判据独占触发的输入**（总数仍为 2 但两条同段 / 把 check 移出机器区 / 断言消息而不只是退出码）。",
+    "🔴 **V9 那条尤其值得记：覆盖率、断言数、DoD 义务清单三样都看不见它**。空文件分支**确实被执行了**（`not md.strip()` 为真、走了那个 return），所以覆盖率显示它已覆盖；断言也确实存在并通过。缺口在于**两条不同分支产出相同的可观测量（退出码）**，而断言只看那一个量。⇒ **只有变异看得见**。通则：**当两条代码路径的可观测输出相同时，断言必须去查能区分它们的那个量**（这里是错误消息）。",
+    "**`test_deterministic` 之外，红阶段也可能有「在被测对象缺席时仍绿」的断言**：`ReusesPrepare.test_no_second_definition` 断言「`verify.py` 里没有第二份 `seal_digest`/`with_check` 定义」——**文件不存在时该断言恰好成立**，所以 26 条红阶段里它是唯一绿的那条。⚠️ 如实记下而不是粉饰成「全红」。它在 GREEN 阶段由 `test_imports_prepare` 与 `test_uses_prepare_functions` 补齐（后两条文件不存在时必红）。**「否定式断言」天然有这个性质，写它的时候要配一条肯定式的。**",
+    "**`assertIs` 比 `grep` 硬**：DoD 只要求 `grep -c 'def seal_digest\\|def with_check' verify.py == 0`，但那挡不住「写了个同名包装转发过去」。补了 `test_uses_prepare_functions`：`assertIs(verify.prepare.seal_digest, prepare.seal_digest)`——**在对象同一性层面**钉住，包装转发会红。⇒ 通则：**查「有没有另写一份」时，文本判据（grep）挡不住等价重写，对象判据（`is`）才挡得住。**",
+    "🔴 **需求原文 `test_rejects_edited_table` 用的 `462.06` 在实际输出里不存在**（`grep -c` 命中 0，是需求作者臆想的值）⇒ 改用表内真实值 `2212`，**并把这个前提本身也断言掉**（`assertIn(\"| 2212 |\", self.md)`）。若不加那条前提断言，将来表格一变，这条测试会**静默退化**成「替换一个不存在的字串、然后验一个没被改过的文件」——它会一直绿。**凡「先替换再验红」的测试，都要断言被替换的东西真的在。**",
+    "**不用固定的 `/tmp/m3-*.md` 路径**（需求原文写死了 `/tmp/m3-ok.md` 等三个）。改用 `tempfile.mkstemp` + `finally: os.unlink`。理由：固定路径会让**上一轮的残留或并发进程的文件**冒充本轮输入 —— 本 sprint 记过一例同源事故（`tests/hooks` 固定写 `/tmp/…` 致假 PASS）。",
+    "**`code-simplifier` 的报告与事实不符，第二次同形**（上轮是 TASK-006）：这次回「完成，无新动作」而 `diff` 显示它改了 `verify.py` 与 `test_verify.py`。⚠️ 但与上轮一样，**改动本身是对的**（预算 `bare` 列表复用、三元改 `if/else`、比对从整行改为 hex、测试抽两个 helper），逐条读过后接受。🔴 **关键仍是那条独立成立的**：它改了 `verify.py` 的**代码形状** ⇒ 变异锚点 V8 失效 ⇒ **按新形状重写锚点、13 个变异全部重跑**（仍 KILLED 13 / SURVIVED 0），并顺势补了 **V12**（针对简化引入的新风险面：scope 若改用去尾换行的 `bare` 拼会怎样——红 8，被杀死）。**「简化后测试仍全绿」不足以说明断言仍在守卫。**",
+    "**harness 对锚点命中数 ≠1 直接 `sys.exit(3)`，不静默跳过**——照抄 test-m3-a 在 TASK-006 验证里的写法。TASK-006 我那版是 `print(\"锚点不唯一，跳过\")` 然后 `continue`，**打印了但不影响任何判定**，与我自己记过的「硬编码的 echo 永远不会错也永远不告诉我任何事」同族。这次简化后 V8 锚点失效时，harness **当场 FATAL 非零退出**，我因此立刻知道要重写锚点——**这就是「制造一个会响的东西」与「记得去检查」的差别**。",
+    "**编号前缀自查必须数两个口径**：`grep -o 'TASK-\\d{3}' | wc -l` = 9 与 `grep -o 'M3 的 TASK-\\d{3}' | wc -l` = 8，**差值 1 才是信号**。⚠️ 若只数后者得 8 并觉得「都带了」，那处会溜过去。抓到的那处（`test_prepare.py:271`，我本轮新写的 docstring）还有**第二个**问题：它引的是 **Arcforge 编号 `TASK-006`** 而非需求编号——注释的读者是三仓库开发者，读的是需求文档不是 `.arcforge/` 归档。"
+  ],
+  "decisions": [
+    {
+      "decision": "`verify.py` **不实现任何作用域计算**，`seal_digest` 与 `with_check` 一律 `import prepare` 调用；并用 `assertIs` 而不只是 `grep` 来钉住这一点。",
+      "rationale": "DoD functional[2] 的要求，理由是「两份实现必然漂移，而两个漂移方向都致命」——对合规笔记判红（人不再信这道闸）、对被篡改笔记判绿（这道闸存在的理由当场失效）。我加强的部分是**判据的硬度**：`grep` 是文本判据，挡不住「写个同名包装转发过去」；`assertIs(verify.prepare.seal_digest, prepare.seal_digest)` 是对象判据，包装转发会红。"
+    },
+    {
+      "decision": "偏离需求原文三处：`462.06` → `2212`（并断言该前提）、固定 `/tmp` 路径 → `tempfile`、`test_narrative_edit_ok` 拆成两条（另一条在 narrative 里写 `## ` 小标题）。",
+      "rationale": "①那个值在实际输出里不存在，照抄会得到一条**恒绿**的测试；②固定路径会被残留或并发文件冒充，是本 sprint 记过的假 PASS 来源；③**methodology 的八问框架天然诱导模型在叙述里写 `## ` 小标题**——这正是封条必须扣除 narrative 的理由，只插一句普通叙述测不到它。三处都是**加强**不是放松，且都在文档 ④节 B 申报。"
+    },
+    {
+      "decision": "`--now` 缺省改取当天（`datetime.date.today().isoformat()`），**不**改 `SKILL.md`。",
+      "rationale": "Leader 的裁决，判据是**失败模式不对称**：改缺省后若某个测试忘传 `--now`，golden 逐字节比对**当场变红（响的失败）**；靠 `SKILL.md` 传参则若某个调用方忘传，产出**必需字段为空的笔记（静默的失败）**。⚠️ 顺带记一笔：这个缺陷本身正是 TASK-006 discovery 里那条判据的又一实例——**「断言键存在」在「键存在但值为空」上恒真** ⇒ 它没有被测到。我当时把这个形状写进了 discovery，**却没拿它回头扫自己的 frontmatter 断言**（`test_base_keys` 只 `assertIn(k, f)`）。**判据写下了，没在自己身上再跑一遍。**"
+    },
+    {
+      "decision": "**只开 PR（#5），不合并**；也不把本机 checkout 切回 `main`。",
+      "rationale": "DoD non_functional[0] 明写：需求交付清单 line 1036 的「PR 合并到 main / 本机 checkout 在 main」是**人执行**的前置（属需求 TASK-006 Step 0，本 sprint 结转）。`fork/main` 是共享分支；切主 checkout 的分支会动到别人未提交的改动（现有 2 改 2 删 1 未跟踪）。⇒ **PR 未合并不构成本任务未完成。**"
+    },
+    {
+      "decision": "拆 worktree **在 PR 已建、提交已推送之后**才做，并在文档 ④节 E 贴收尾证明。",
+      "rationale": "DoD 的顺序要求。worktree 一拆，未推送的提交就只剩在本地分支上——虽然分支本身不会消失（已验证 `rev-parse feat/warp-hestia` 仍得 `2d2fbe80…`），但推送前拆会让「远端有没有」变成一件需要额外确认的事。拆前实测三条：远端 HEAD == 本地 HEAD == `2d2fbe80…`、脏文件数 0、PR OPEN。"
+    },
+    {
+      "decision": "**没有改 nanoclaw 的 `.gitignore`**，`__pycache__` 靠每次提交前手工排。",
+      "rationale": "`.gitignore` 是仓库级配置，超出本任务 `writes` 声明，沿用 TASK-006 的克制（Leader 已认可该处置）。⚠️ 代价是这一步**每次都得手工做**且**必须在最后一次跑测试之后**——本任务两个 commit 各排了一次，`git show --numstat | grep -c '__pycache__\\|\\.pyc'` 均为 0。若将来还有人往这个目录加 Python 文件，这个坑会原样复发。"
+    },
+    {
+      "decision": "atlas 侧的自证锚在 merge **之后**重采，不沿用中断前采的值。",
+      "rationale": "我在预演 merge 那一步以 `ECONNRESET` 中断，Leader 代为 merge。中断前采的 atlas 锚是 merge 之前的（`b5873ad…` 基线），现在 master 是 `cf7758bafa2f7f37f608497d9f1027537c100ddf`。**「代码没变所以数字还有效」是推理，重采给的是观察**——本 discovery 里的 atlas 锚、内容 sha256、numstat 全部现读。nanoclaw 侧的数字不受影响（那边最后一次改动是 `2d2fbe80…`，早于中断），但也一并现读复核过。"
+    }
+  ],
+  "files_modified": [
+    "nanoclaw commit 3690015a496d1fae2d219269572b1e507586467c —— verify.py 新建 147 行；test_verify.py 新建 303 行；prepare.py +6/−1（--now 缺省）；test_prepare.py +17/−1（2 条新断言）",
+    "nanoclaw commit 2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8 —— test_prepare.py +1/−1（编号前缀订正）",
+    "本任务累计（相对 e8d0decaab2a9bcfd29c952ebff11356f63dd3ba）: prepare.py 6/1、test_prepare.py 17/1、test_verify.py 303/0、verify.py 147/0",
+    "PR #5 整体（相对分支起点 d791101e1defcfd3d3d3fcf7ae32a85ec420547b）: 23 个文件 +7349 / −0",
+    "atlas commit 74216415d6c97db37c8c56f38d74506849520774 —— docs/hestia-m3/TASK-007-warp-hestia-verify.md 371/0（唯一文件，与 writes 声明逐字一致，无越界）",
+    "未改（有意）: container/skills/warp-research/**（分支累计 0 行）、examples/（未建）、nanoclaw .gitignore、nanoclaw 主 checkout"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "PR https://github.com/newthinker/nanoclaw/pull/5 —— feat/warp-hestia → main，OPEN，5 commits，23 files",
+      "consumers": "🔴 **需求 TASK-006（人执行）的前置**：①把本 PR 合并到 `main` ②本机 checkout 切回 `main`。**两步都不是 agent 做的**（`fork/main` 是共享分支；切主 checkout 会动到别人未提交的改动）。PR 含 M3 的 TASK-003/004/005 三个需求任务、Arcforge 的 TASK-005/006/007 三个任务的全部产出。"
+    },
+    {
+      "symbol": "nanoclaw feat/warp-hestia @ 2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8（本地 == 远端 fork，现读复核）",
+      "consumers": "🔴 **worktree 已拆**（本任务收尾，TASK-004 建 / 本任务拆）⇒ 验证者**不要**去 `/Users/zuowei/workspace/ai/wt-warp-hestia`（已不存在）。取 sha 用 `git -C /Users/zuowei/workspace/ai/nanoclaw rev-parse feat/warp-hestia` 或 `gh pr view 5 --json headRefOid`。要复现测试则 `git -C /Users/zuowei/workspace/ai/nanoclaw worktree add <新临时目录> 2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8`。"
+    },
+    {
+      "symbol": "verify.py 的接口与退出码：`python3 verify.py <note.md>` → 0 全部匹配 / 1 被篡改或格式损坏 / 2 输入不可用（不存在、空、非笔记）",
+      "consumers": "SKILL.md Step 5 已按「非零即拒绝写回」调用它。🔴 **Step 5 的队列处置是「留 `processing/`，不移 `failed/`」**（TASK-005 的 Leader 裁决）——数据段被改是模型这一轮的问题，契约本身没毛病。冒烟排障时：exit 1 看 stdout/stderr 里指出的**段名与期望/实得 hex**；exit 2 是输入问题不是篡改。"
+    },
+    {
+      "symbol": "两级校验的三条判据（verify.py 与 prepare.py 共用一份实现）",
+      "consumers": "(i) 分段 check **恰好 2 条**、封条 seal **恰好 1 条**——**条数写死，不从 `## ` 标题数推**（机器区 3 个 `## ` 而 check 恒 2；按标题数推会把合规笔记判红，且「连标题一起删」时两数同减、恒等 ⇒ 真绕过反而放行）(ii) 分段 check 作用域 = 上一个 `## ` 标题行（含）→ 该 check 行之前 (iii) 封条作用域 = `begin` 下一行 → seal 行之前，**扣除** narrative 块含两行标记。🔴 **改动这三条中任何一条，`references/note-format.md`（TASK-005）、`prepare.py`（TASK-006）、`verify.py`（本任务）三处必须同时改**——它们是同一份规格的三个副本，只有 note-format.md 是真相源。"
+    },
+    {
+      "symbol": "测试资产：test_prepare.py 55 条 + test_verify.py 29 条 = 84 条；fixtures/golden/*.md 两份是**未被篡改的合规笔记**",
+      "consumers": "两份 golden 天然是 `test_accepts_untouched` 的输入；将来若要加篡改用例，**在副本上改**（`tempfile`），🔴 **不要改 golden 本身**——它们同时是 TASK-006 逐字节比对的期望文件，sha256 `13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7` / `638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586`。"
+    },
+    {
+      "symbol": "🔴 跨仓库漂移检测缺口：verify_baseline 只锚 atlas，够不到 nanoclaw",
+      "consumers": "**本任务的验证者必须自己补**：判定前后各记一次 `git -C /Users/zuowei/workspace/ai/nanoclaw rev-parse feat/warp-hestia`，与 `2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8` 比对，不一致就当漂移处理（报 Leader，别自行决定验哪一版）。⚠️ 本任务 worktree 已拆，**没有一个「默认就是最新版的工作树」可供裸跑**，这一点反而降低了误判风险——但取 sha 仍须现读。"
+    }
+  ],
+  "verification": {
+    "sampled_on": "nanoclaw 侧采于最后一次改动 2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8 之后；atlas 侧**在 Leader 代为 merge 之后现读重采**（master cf7758bafa2f7f37f608497d9f1027537c100ddf），不沿用中断前采的 b5873ad 基线值",
+    "red_phase": "`python3 -m unittest test_verify -v 2>&1 | tail -5` → `Ran 26 tests` / `FAILED (failures=21, errors=4)` / EXIT=1。⚠️ 26 条里 **1 条通过**：`ReusesPrepare.test_no_second_definition`（否定式断言，在 `verify.py` 缺席时恰好成立）——如实记，不粉饰成「全红」",
+    "tests": "`python3 -m unittest -v 2>&1 | tail -3` → `Ran 84 tests in 2.233s` / `OK`；退出码**单独取不跨管道** → EXIT=0。`grep -c 'def test_'`：test_prepare.py **55** + test_verify.py **29** = **84**，与 `Ran 84` 两个口径一致",
+    "stdlib_only": "`grep -n '^import \\|^from ' verify.py` → argparse / os / re / sys + 同目录 prepare（第 29 行，带 `# noqa: E402` 说明须在 sys.path 插入之后）",
+    "reuse_prepare": "自查① `grep -n 'seal_digest\\|with_check' verify.py` → 四处命中，其中两处是调用 `prepare.with_check(...)` 与 `prepare.seal_digest(md)`，两处是注释；自查② `grep -cE '^def (seal_digest|with_check)\\b' verify.py` → **0**；另有 `test_uses_prepare_functions` 用 `assertIs` 在对象同一性层面钉住",
+    "four_states": "①未改动 golden → EXIT=0 ②表内 2212→9999 → EXIT=1 且输出「段「本期数据」的 check 不匹配（第 50 行）：期望 d6d95512… 实得 3b43497f…」③只改 narrative（含写 `## ` 小标题）→ EXIT=0 ④删封条 → EXIT=1 且输出「封条 seal 行应为 1 条，实得 0 条」。④的四种删除类篡改各有一条测试（删 check 行 / 删整段 / 改 `## 信号` 段 / 删封条），**前三种分段 check 各自仍自洽，只有封条抓得住**",
+    "now_default": "不传 `--now` → `created: 2026-09-08` / `updated: 2026-09-08`（当天，非空）。两条新断言：不传时等于当天、显式传时仍以它为准",
+    "golden_unchanged": "**独立复算**（重新生成后比 sha256，不是「文件没被碰过所以没变」）：2026-06-h1 → `13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7`、2023-08-monthly → `638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586`，与 TASK-006 记录值逐字相同",
+    "mutation": "**13 个变异全部 KILLED、0 存活**（V1–V12 + P1）。隔离副本执行，`ast.parse` 语法闸，每轮校验主工作区 verify.py+prepare.py 的 sha256 与 git status 指纹**均未变**。🔴 harness 对锚点命中数 ≠1 **直接 `sys.exit(3)`**，不静默跳过——简化后 V8 锚点失效时当场 FATAL。其中 3 个先存活后补断言杀死（V4/V7/V9，成因见 key_findings 第 1、2 条）",
+    "task_id_prefix": "`grep -rho 'TASK-[0-9]{3}' --include='*.py'` = **9**，`grep -rho 'M3 的 TASK-[0-9]{3}'` = **9**（订正后）。⚠️ 订正前是 9 vs 8，**差值才是信号**；抓到的那处还引错了编号体系（Arcforge 编号 → 需求编号）",
+    "pycache": "`git show --numstat 3690015a… 2d2fbe80… | grep -c '__pycache__\\|\\.pyc'` → **0**；`gh pr view 5 --json files` 里 pycache/pyc 文件 **0** 个。两次提交前都在**最后一次跑测试之后**排",
+    "warp_research_untouched": "`git diff --numstat d791101e… 2d2fbe80… -- container/skills/warp-research | grep -c .` → **0**",
+    "pr": "`gh pr view 5` 现读：**OPEN**，base=main，head=`2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8`，**5 commits，23 files**，pycache 0、warp-research 0。远端分支 HEAD 与本地一致",
+    "worktree_removed": "`git -C /Users/zuowei/workspace/ai/nanoclaw worktree remove …` EXIT=0、`prune` EXIT=0；`worktree list` 只剩主仓库一行，`wt-warp-hestia` 残留 **0**、目录**已删**；**分支与提交都还在**（`rev-parse feat/warp-hestia` → `2d2fbe80…`）；主 checkout 仍在 `feat/vendor-agent-reach-skill` @ `aefea6ce…`，工作区与开工前逐字相同",
+    "numstat": "atlas `git show --numstat 74216415d6c97db37c8c56f38d74506849520774` → `371  0  docs/hestia-m3/TASK-007-warp-hestia-verify.md`（唯一文件，与 writes 逐字一致，无 scope 越界）",
+    "commit_convention": "atlas `git log -1 --format='%s' | grep -cE '^[a-z]+\\(TASK-007\\): '` → 1；nanoclaw 用 nanoclaw 规范 `feat(warp-hestia):` / `fix(warp-hestia):`",
+    "merged": "双判据核实：拓扑 `merge-base --is-ancestor 74216415d6c97db37c8c56f38d74506849520774 master` → IS-ANCESTOR，且 `master^2` == 该 sha；内容 `git show master:docs/hestia-m3/TASK-007-warp-hestia-verify.md | shasum -a 256` = `20cd0b872cad4620f561b4af714bdc8cfae7030202c61471a4d2981e9709a67b`，与分支上同文件逐字节相同。merge commit **`cf7758bafa2f7f37f608497d9f1027537c100ddf`**。合入后复核 numstat 仍 `371 0`",
+    "code_simplifier": "跑了**两次**。①第一次以 `ECONNRESET` 中断（只读完文件、4 次工具调用）——核实四个源文件 + 两份 golden 与基线**逐字节相同**、84 测试全绿 ⇒ 未造成任何改动。②第二次报「完成，无新动作」而 **`diff` 显示改了 verify.py 与 test_verify.py**，按 DoD 以 diff 为准逐条核实后接受（golden sha256 未变、`def test_` 84→84、`def seal_digest|with_check` 仍 0、import 仍只有标准库+prepare、Ran 84/OK/EXIT=0）。🔴 **它改了代码形状 ⇒ 变异锚点 V8 失效，13 个变异按新形状全部重跑**，并补了 V12 针对简化引入的新风险面",
+    "interruption": "本任务在「提交 atlas 文档并预演 merge」一步以 `ECONNRESET` 中断（环境故障，Leader 按 `env_infra` 处理，**不计 rework_count**，epoch 仍 1）。中断前所有交付动作已落地；Leader 代为 merge。⇒ **atlas 侧全部自证锚在 merge 后现读重采**（见 sampled_on），nanoclaw 侧数字不受影响但也一并现读复核",
+    "done_criteria_to_evidence": {
+      "functional[0] verify.py 只用标准库 + 作用域与 note-format.md 一致": "文档 ②节 2.3（import 清单）+ 2.5（四态实跑）；测试 StdlibOnly 1 条、ScopeMatchesSpec 2 条（用 prepare 的函数独立复算两级作用域）",
+      "functional[1] 四态": "文档 ②节 2.5（四条原样输出）；测试 FourStates 11 条——①3 条（golden ×2 + 现场生成）②2 条（两张表各一）③2 条（普通叙述 + 写 `## ` 小标题）④4 条（删 check 行/删整段/改信号段/删封条）+ 1 条报错内容",
+      "functional[2] 复用 prepare 不另写 + 修 --now": "文档 ②节 2.4（两条自查 + assertIs）与 2.6（不传 --now 的输出 + golden 独立复算）；测试 ReusesPrepare 3 条、Frontmatter 新增 2 条",
+      "boundary 格式损坏/多条 check 或第二条 seal/批注区不参与": "测试 Boundary 7 条，含 test_two_checks_both_in_one_section 与 test_check_line_outside_machine_zone（这两条是变异逼出来的）",
+      "error_handling 文件不存在/非笔记/空文件 + 红阶段留痕": "文档 ②节 2.1（红阶段原样输出 + 那 1 条绿的成因）；测试 BadInput 4 条，含 test_empty_and_not_a_note_give_different_messages",
+      "non_functional[0] 统一开 PR 不合并 + 拆 worktree + 编号前缀 + 不动 warp-research": "文档 ③节（PR 链接与整体口径）+ ④节 A/E + ②节 2.8；`gh pr view` 与 `worktree list` 现读输出",
+      "non_functional[1] 交付流程": "worktree 复用（未新建）→ nanoclaw 两次提交 → 推送 → 开 PR → 拆 worktree → atlas 提交（`docs(TASK-007):`）→ 预演 merge（中断，Leader 代为 merge）→ merge 落地后才 dev_done；discovery 与指针在 dev_done 之前落定",
+      "non_functional[2] 排 __pycache__ 不改 .gitignore": "文档 ①节自查（两 commit 均 0）+ ④节 F"
+    },
+    "not_run": [
+      "`gh pr merge` —— **有意不跑**，PR 合并是人执行的前置（需求 TASK-006 Step 0，本 sprint 结转）",
+      "把本机 checkout 切回 `main` —— 同上，且会动到别人未提交的改动",
+      "运行时冒烟（skill 是否被容器加载、六步是否跑得通）—— 属需求 TASK-006（人执行）",
+      "GitNexus detect-changes（索引陈旧，hook 提示 last indexed ae088eb）"
+    ]
+  },
+  "rework": {
+    "at": "2026-09-09",
+    "trigger": "QA 两轮判 REJECT；人类拍板只修三条 Leader 亲手复现过的，其余转结转与 PENDING",
+    "nanoclaw_commit": "2a6d39388e4648eb3be0f15b42ee28b52428c5d8（三条 fix 一个 commit；三个任务各走各的状态机）",
+    "nanoclaw_prev": "2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8（QA 判定的对象）",
+    "pull_request": "https://github.com/newthinker/nanoclaw/pull/5（OPEN，6 commits，23 files）",
+    "tests": "Ran 95 tests / OK / EXIT=0（原 84 + 新增 11；test_prepare 63 + test_verify 32，与 Ran 95 双口径一致）",
+    "mutation": "10 个变异全部 KILLED、0 存活，含五条针对本轮修复的守卫（R2a/R2b/R2c/R3a/R3b）；隔离副本执行，harness 对锚点命中数 ≠1 直接 sys.exit(3)，每轮校验主工作区指纹均未变",
+    "golden": "两份 golden 逐字节未变，独立复算（重新生成后比 sha256）：13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7 / 638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586",
+    "hygiene": "提交里 __pycache__/*.pyc = 0（在最后一次跑测试之后排）；编号前缀 14/14 全带 `M3 的 `；未改 .gitignore",
+    "code_simplifier": "跑过，报「无需简化」，**核实确实未改动任何文件**（八个文件逐一 diff + 全套复跑 + golden sha256）——这次报告与事实一致",
+    "not_fixed": "🔴 Skeptic #3「narrative 扣除窗口整体搬到机器区顶端」**本次不修**：Leader 两次构造均未复现（两次都保住了封条摘要——证明封条确实是位置盲的——但都被分段 check 挡下），已作为「未复现的疑点」记入结转。不为它改动 narrative 标记的校验逻辑，那会扩大改动面而收益未经证实。",
+    "fix_id": "F3",
+    "severity": "HIGH",
+    "reason_class": "dod_defect（DoD 逐字规定了封条作用域，我精确实现了它，三任验证者也按此判过 PASS——Leader 明确记此归属）",
+    "atlas_commit": "4f7776c5a4da62fd7a5abad3ddd6aabcfb9084da（124/0）",
+    "defect": "`<!-- seal: … -->` 与 `<!-- machine-generated: end -->` 之间的文本**既不被任何分段 check 覆盖，也不被封条覆盖**——封条作用域到 seal 行**之前**为止 ⇒ 可以在**机器区内部**插入伪造数据表而 verify 放行（实测 exit 0）。它比已登记的 frontmatter 盲区**更危险**：读者看到的是一张**位于机器区里**的表，比 frontmatter 更像「机器产的」。",
+    "fix": "加**形状断言**：`seal_i + 1 != end_i` 即 exit 1 并报出 seal 行号、end 行号、中间夹了几行。**不触碰摘要算法** ⇒ 两份 golden 逐字节不受影响。",
+    "spec_synced": "🔴 `references/note-format.md` 同步（三处逐字一致是既有规格纪律，改实现不改规格会让下一个验证者判红）：封条「位置」条目写明这是**会被校验的形状要求、不只是排版约定**并给出理由；篡改手法表补一行「在 seal 与 end 之间插入伪造表 → 分段 check ❌ / 封条 ❌ / 靠形状断言拦下」。三处一致性核对：note-format 写「紧邻」1 处、verify.py 断言 1 处、prepare.py 生成时 seal 后紧跟 END。",
+    "evidence": "修后篡改 ⇒ **exit 1**，报「seal 在第 76 行，而 end 在第 84 行，中间夹着 7 行」；两份合规 golden 仍 exit 0。⚠️ **退出码单独取、不跨管道**：同一条命令 `| head -2` 之后取到的是 0（head 几乎总 exit 0），**那个 0 是假的**——两种都跑了以示区别。",
+    "tests_added": "Boundary 三条：插伪造表 ⇒ exit 1 且输出含 seal；**任何**内容都不行（空行 / 一句文字 / 一条无害注释，三个子例）；反方向合规笔记仍 exit 0。",
+    "mutations": "R3a 形状断言删掉 ✅KILLED 红 4 / R3b **放宽成「允许夹空行」** ✅KILLED 红 1。**R3b 值得单说**：它只放宽到允许夹纯空白、看似无害，是被那条「任何内容都不行」的**空行子例**杀死的——若只测了伪造表，这个变异会存活。",
+    "🔴 my_part_not_the_dod_s": "Leader 判 dod_defect 我接受，但**我有自己的一份**：我在上一版 discovery 里把封条作用域**原样复述**了一遍——**复述规格不等于检验规格**。我把「seal 到 end 之间」这段没覆盖当成了规格的**选择**而不是规格的**洞**，从没问过「这一段谁管」。⇒ 判据：**逐字实现一条规格时，顺手问一句「这条规格划出的边界之外还剩什么」**。",
+    "merged_master_sha": "dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc",
+    "merged": "双判据核实已合入 master：拓扑 `git merge-base --is-ancestor 4f7776c5a4da62fd7a5abad3ddd6aabcfb9084da master` → IS-ANCESTOR；内容 `git show master:docs/hestia-m3/TASK-007-*.md | shasum -a 256` = `41b214677cb96d01efdc4bfec122402c0b42cea566ed77c6a47dbe0758d20666`，与分支上同文件逐字节相同。merge commit `dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc`（subject `merge(M3-fix): M3 三条 review_fix 返工——F1 --existing 守卫 / F2 契约×侧车配对 / F3 seal 形状断言`）。合入后复核 numstat 未变。"
+  }
+}

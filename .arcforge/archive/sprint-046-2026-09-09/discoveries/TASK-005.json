@@ -1,0 +1,173 @@
+{
+  "task_id": "TASK-005",
+  "author": "dev-m3-c",
+  "written_at": "2026-09-08",
+  "branch": "task/TASK-005-m3",
+  "commit_sha": [
+    "c73dbe3b7aabf85df0f31e503d2ca50aa83a8d36（第一轮，已 merge 进 1991c49e…）",
+    "41ae450ff460a54cadd1097871595ad60ce19cbf（本轮修订，分支 task/TASK-005-m3-fix）"
+  ],
+  "merged_master_sha": [
+    "1991c49ec5541fd4d4c0d0cd23117b389e7d00d1（第一轮）",
+    null
+  ],
+  "nanoclaw_commit_sha": [
+    "aff2521433eef8567addcedc988fecad3ed08c6f（四份文档新建）",
+    "7ca6b57e64a561351d7108a937b8607a5e87f0a6（交付后两处订正，= 分支 HEAD）"
+  ],
+  "key_findings": [
+    "🔴 **spec §6.2 的骨架里，机器区有 3 个 `## ` 而只有 2 条 check 行**（`## 信号` 段不发）——实测骨架内 `## ` 恰 4 个（机器区 3 + 批注区 1）、check 恰 2 条。这是 DoD 判据「按 `## ` 切分出 N，断言 check 行数 == N」装反的直接实证：照 spec 正确实现的笔记会当场 `2 != 3` 判红。⇒ `note-format.md` 把两级校验的**条数写死**（check 恰 2、seal 恰 1），并显式写了「不要按 `## ` 标题数去推 check 行数」。TASK-006 的 `verify.py` 必须照写死的条数实现，不要从文档结构推。",
+    "**封条 seal 是「删除类篡改」的唯一防线，分段 check 挡不住三种手法**：①删掉一条 check 行（没了就不比对了）②删掉一整段（标题+表+check，剩下的段各自仍自洽）③改 `## 信号` 段（它不在任何 check 的作用域内）。三者都会让 seal 覆盖的文本变化。而 seal **扣除** narrative 段（含 `<!-- narrative -->` / `<!-- /narrative -->` 两行本身），所以模型在叙述里写 `## ` 标题不会误伤——这正是 methodology 的八问框架允许用小标题的前提。",
+    "🔴 **笔记文件名规则：需求文档与上游 spec 冲突，取无月份版**。实施计划 line 853（`test_print_name` 断言）/ 967（冒烟命令的 `$N`）/ 1012（冒烟判据）三处自洽用 `2026 上半年金融数据解读.md`；spec §6 line 197 与 §8.2 line 273 写的是带月份的 `2026-06 上半年金融数据解读.md`（实测该行「上半年」只出现 1 次，我起初引错为 2 次，已订正）。裁决取无月份版并**显式写进 `note-format.md`**——不写在文档里，结转的冒烟里会有人照 spec 改回去，`prepare.py --print-name` 与冒烟判据就对不上。",
+    "🔴 **`verify.py` 失败时的队列处置：需求 line 711 与 spec §7 都只说「拒绝写回」，没写队列怎么办**。Leader 裁决：**留在 `processing/`，不移 `failed/`**——数据段被改是模型这一轮的问题，契约本身没毛病；移 `failed/` 会让一份好契约需要人工捞回，留 `processing/` 则下次会话按 Step 2 的「同名已在 processing ⇒ 直接用那对」自然重试。已写进 SKILL.md 的 Step 5 与失败分支表两处。",
+    "**四信号的权威实现是 atlas `internal/hestia/signals.go` 的 `Evaluate`**，`glossary.md` 与它同源。三条最易写错的：①**楼市与消费两个信号没有黄灯**（`evalThreshold` 只有绿/红）②**信贷信号的分子分母必须同口径**（`sameCaliberPair`：都 `_mom` 或都 `_ytd`，`_mom` 优先；企业贷款合计为 0 ⇒ `unknown` 不是红）③**温度分母是 `temp_known` 不是 4**——有 `unknown` 时分母减一，`temp_score/temp_known` 打成「1/3」是合法的。另：`monthlyAverage` 在月数解析为 0 时**视为缺失不除**，否则 ÷0 得 ±Inf 会被阈值判定当成很大的月均而误判绿灯。",
+    "**`corp_mlt_short_expand`（默认 1.5）在 `Signals` 里但不参与四信号**（config.go 注释「本迭代只快照」）——`glossary.md` 的阈值清单里标了这一句，免得 TASK-006 把它算进温度。",
+    "**口径是「按段」的，不是「按观测」的**（M1c-4 §H-5，CONTRACTS.md:3040-3047）：`2023-08` 这一期存款段走 `_ytd` 而贷款段走 `_mom`，全库 5 期这种形态。⇒ 给一期观测贴**行级**「口径」标签会把这 5 期指去查错的列，而表格看起来完全正常。判断某个值是哪种口径**看字段名后缀**，不看同期其他字段。已写进 `glossary.md`。",
+    "**methodology 的「提炼非复制」判据是可跑的，且两条闸都装对了方向**：①字节 12331 = 源 41113 的 **30.0%**（上限 16445）②`## ` 集合与源文件的 12 个 `## `（「一、二、三…九 + 附录 ABC」式章节名）交集 **0**。⚠️ DoD 特意只比 `## ` 不比 `### `：源文件的八问与五链都在 `###`，而需求要求八问作叙述骨架 ⇒ 把八问写成 `## ` 是最自然的选择，若连 `###` 一起比交集直接 = 8，会判红一份完全合格的文档。本交付把八问写成 `###`、五链写成 `- `，两种写法在现行判据下都通过。",
+    "🔴 **CJK 标题上 `comm -12` 给假阳，且假值不稳定**（子代理发现 → Leader 复算 → 我复现）。同一对输入（源文件 12 个 `## ` / methodology.md 5 个 `## `）：`comm -12` 报交集 **5**、`grep -Fxf` 与 python 集合交集都报 **0**。**`comm` 输出的那 5 行一行都不在 methodology.md 里**，全是源文件独有的章节名——但只看计数 5 完全合理（源 12、本文件 5，「全重合」说得通）。成因：`comm` 要求两侧按**同一 collation** 排序，CJK 不满足该假设，它**不报错只给垃圾**。更险的是**同一个坏仪器给出不同假值**（Leader 5 / 子代理 3）——「重跑数变了」易被读成「有别的东西在变」而非「仪器坏了」。⇒ 已把工具钉死写进 `functional[3]` 的 DoD 与交付文档 ②节。**通则：判据 = 比较对象 × 求值方式，两者都要钉死**；只钉对象不钉工具，判据仍会坏。",
+    "**`## ` 计数有两个口径，都对，而两个都不能用来推 check 行数**：机器区内（`begin`→`end`）3 个（本期数据/前 12 期/信号），整份骨架 4 个（再加区外的 `## 我的批注`），而 check 恒为 **2**。⇒ 按机器区推得 3、按全文推得 4，**后者错得更远**。这正是「写死条数」而非「从结构推」的理由，已补进 `note-format.md`（commit `7ca6b57e…`）。"
+  ],
+  "decisions": [
+    {
+      "decision": "SKILL.md 相对需求原文有两处**增补**：把「模型边界」提成 §1 下的独立小节；把四条失败分支汇成一张表。**§3 的四条一字未改**。",
+      "rationale": "DoD 要求「🔴 模型边界必须明写」，而需求原文只把它散在 Step 4 的一句话里；reviewer O8 又补了两条初稿漏掉的失败分支（Step 3 的 prepare.py 非零、Step 5 的 verify.py 非零）。散在各步里读者要跳着找，汇成表才能一眼看全四条的**队列处置各不相同**（单独移/对移/不移/对移）。§3 是需求逐字给定的判据（恰 4 条），一个字都不动。"
+    },
+    {
+      "decision": "文件名取**无月份**版，且把与 spec 的冲突连同裁决依据一起写进 `note-format.md`，而不是只在交付文档里记一笔。",
+      "rationale": "DoD 明写「否则它会在结转的冒烟验收里再咬一次」。交付文档的读者是验证者，一次性；`note-format.md` 的读者是 TASK-006 的实现者与冒烟执行人，长期。**决定的载体决定它会不会被执行**——只写在交付文档里，冒烟时没人会翻回来看。"
+    },
+    {
+      "decision": "两级校验的**条数写死**（check 恰 2、seal 恰 1），并在文档里明写「不要从 `## ` 标题数推」。",
+      "rationale": "DoD 的 reviewer B5 复审已指出初稿判据装反。更根本的理由是那个推导有**两个真绕过**：连标题一起删则 N 与 count 同减、恒等；模型在 narrative 里写 `## ` 则 N 虚增判红合格笔记（而 methodology 的八问框架天然诱导写小标题）。写死条数 + seal 扣除 narrative 段同时堵住这两个。"
+    },
+    {
+      "decision": "commit subject 两套编号并存：nanoclaw 用 `feat(warp-hestia): …`（nanoclaw 规范），atlas 用 `docs(TASK-005): …`（Arcforge 编号，门禁认它）；四份文档的注释里用**需求编号** `M3 的 TASK-004` / `M3 的 TASK-005`。",
+      "rationale": "任务 description 的编号映射表：文档注释的读者是三仓库开发者（读需求文档与 spec），commit subject 的读者是 atlas 的 `task-completed.sh`（按 Arcforge 编号 `git log --grep` 认领改动）。**同一次交付里编号不同是预期的，不是笔误。** 实测 5 处编号引用全部带 `M3 的 ` 前缀（需求 line 25 的全局义务）。"
+    },
+    {
+      "decision": "不实现 `scripts/`，也不建 `examples/`。",
+      "rationale": "`scripts/prepare.py` / `verify.py` 是需求 TASK-005（= Arcforge TASK-006）的产物，DoD 原文「文档先行、脚本后到；本任务不实现脚本，也不因脚本不存在而阻塞」。`examples/2026-06-h1.md` 在 spec §5.1 的目录树里但注明是「冒烟产物经人审后回填」，属需求 TASK-006（人执行）。⇒ `ls container/skills/warp-hestia/scripts/` 为空不是缺陷。"
+    },
+    {
+      "decision": "跑了 `code-simplifier`（全局 CLAUDE.md 要求），结果零改动；**核实方式不是采信它的报告**。",
+      "rationale": "它只回了一句「Complete. Nothing further.」，无内容。按「子代理报告须核实载体」的纪律：比对四个文件的字节（5259/5965/12331/6219，与写入时逐字相同）与 mtime（仍是我的写入时刻）；更强的一层是**全部 11 条判据在它运行之后复跑了一遍**，等长度改写也会被逮住。"
+    },
+    {
+      "decision": "methodology 里**不出现任何具体期次的数字**（源文件里 2026H1 的实测值一个都没搬）。",
+      "rationale": "源文件是「一期数据的完整讲解」，本文件是「任意一期都能照着写」的操作手册。搬了具体数字会让模型在写别的期次时把它们当成常量引用——这比冗长更危险。八问因此从「本期结论是 X」改写成「看哪几个字段、比什么、结论怎么落」，全部锚到契约字段名。"
+    },
+    {
+      "decision": "`SKILL.md` Step 3 的 `$N` 改由 `prepare.py --print-name` 打印（nanoclaw commit `7ca6b57e64a561351d7108a937b8607a5e87f0a6`），在**本任务内**改完，不留给 TASK-006。",
+      "rationale": "原文 `N=<按 note-format.md 的命名规则算出的文件名>` 与 `note-format.md` 的「**不要自己拼文件名**」自相矛盾——这是**可执行指令**层的冲突，不是表述问题。改 `SKILL.md` 而非 `note-format.md`：后者那句是 DoD `functional[1]` 明确要求的，没错，是 `SKILL.md` 没接上。不留给 TASK-006：`--print-name` 已写死在 TASK-006 的 DoD 里（不是本任务替它预设），而留到那时意味着 TASK-005 的验证会先于修复发生，验证者要对着一份自相矛盾的可执行指令做判断。**发现者是 Leader 派来的子代理**（见 `provenance`），它没擅自改是对的。"
+    },
+    {
+      "decision": "nanoclaw 侧用**新 commit** 承载订正，不 `amend` 第一个。",
+      "rationale": "`aff2521433eef8567addcedc988fecad3ed08c6f` 已经报给 Leader 并被它核过；`amend` 会造出兄弟 sha、作废别人已完成的核实（我记过一次实撞：amend 造出的兄弟 sha 让 merge 取到了旧版，而两版都含同一个主功能符号，内容判据挑错字串就会假阳）。新 commit 让两次交付各有独立可核的锚。"
+    }
+  ],
+  "files_modified": [
+    "nanoclaw（被跟踪，进 PR）: container/skills/warp-hestia/SKILL.md — 112/0 行，5259 字节",
+    "nanoclaw（被跟踪，进 PR）: container/skills/warp-hestia/references/glossary.md — 110/0 行，5965 字节",
+    "nanoclaw（被跟踪，进 PR）: container/skills/warp-hestia/references/methodology.md — 161/0 行，12331 字节",
+    "nanoclaw（被跟踪，进 PR）: container/skills/warp-hestia/references/note-format.md — 125/0 行，6219 字节",
+    "nanoclaw 合计: 508 行新增、0 删除、4 个新文件（`git show --numstat aff2521433eef8567addcedc988fecad3ed08c6f`）",
+    "atlas: docs/hestia-m3/TASK-005-warp-hestia-docs.md — 415/0 行（`git show --numstat c73dbe3b7aabf85df0f31e503d2ca50aa83a8d36`）",
+    "未改（有意）: container/skills/warp-research/**（命中 0 行）、container/skills/warp-hestia/scripts/（未建）、examples/（未建）"
+  ],
+  "interfaces_exposed": [
+    {
+      "symbol": "nanoclaw worktree = /Users/zuowei/workspace/ai/wt-warp-hestia，分支 feat/warp-hestia，本任务 HEAD = aff2521433eef8567addcedc988fecad3ed08c6f",
+      "consumers": "🔴 TASK-006 **在此 worktree 的此分支上继续加 `scripts/`，不要新建 worktree、不要另开分支**；交给你时工作区干净（`git status --short` 行数 0）。TASK-007 负责拆。本分支现有 1 个 commit，TASK-006 的脚本与测试进来后**一并开 PR**（本任务按 DoD 不开）。"
+    },
+    {
+      "symbol": "两级校验规格（`references/note-format.md` 的「🔴 两级校验」小节）—— verify.py 的实现契约",
+      "consumers": "🔴 TASK-006 的 `verify.py` 必须照它实现，**条数写死**：①分段 `<!-- check: <sha256> -->` **恰 2 条**，作用域 = 从上一个 `## ` 标题行（含）到该 check 行之前（不含）；`## 信号` 段**不发** check。②封条 `<!-- seal: <sha256> -->` **恰 1 条**，位于 `<!-- machine-generated: end -->` 紧邻其上，作用域 = `<!-- machine-generated: begin -->` 的下一行起到 seal 行之前，**扣除** `<!-- narrative -->` 与 `<!-- /narrative -->` 之间（含这两行）的全部文本。⚠️ **不要从 `## ` 标题数推 check 条数**——骨架内 `## ` 实测 4 个（机器区 3 + 批注区 1）而 check 只有 2 条。"
+    },
+    {
+      "symbol": "笔记命名规则（`note-format.md` 的「命名规则」表）—— prepare.py --print-name 的实现契约",
+      "consumers": "TASK-006 的 `prepare.py --print-name` 照它实现：monthly `<YYYY-MM> 金融数据解读.md`；q1/h1/q1_q3/annual 分别 `<YYYY> 一季度…` / `<YYYY> 上半年…` / `<YYYY> 前三季度…` / `<YYYY> 全年…`。🔴 **只有 monthly 带月份，其余四种只取 period 前四位年份**（与 spec §6 的带月份写法冲突，裁决取无月份版，理由写在 note-format.md 内）。`test_print_name` 的断言 `2026 上半年金融数据解读.md` 与此一致。"
+    },
+    {
+      "symbol": "frontmatter 字段表（`note-format.md`）—— prepare.py 的填充清单",
+      "consumers": "TASK-006 的 `prepare.py` 照它填。🔴 **`reviewed` / `source` 两个字段脚本不填**（Spool 强制写入）；`generated_by: warp-hestia@v1` 与 `contract_generated_by`（取契约的 `generated_by`）两者都要有，实时与回放靠后者分辨。"
+    },
+    {
+      "symbol": "四信号判定表与月均取法（`references/glossary.md` 第四、三块）—— prepare.py 派生指标的算法说明",
+      "consumers": "TASK-006 的 `prepare.py` 与 atlas `internal/hestia/signals.go` 的 `Evaluate` **同源**；实现时以 signals.go 为准，glossary 是它的人话版。三个易错点：楼市/消费**无黄灯**；信贷分子分母**必须同口径**（`_mom` 优先，合计 0 ⇒ unknown）；温度分母是 `temp_known`，**有 unknown 时减一不假装 4**。月数解析为 0 时**视为缺失不除**。`corp_mlt_short_expand` **不参与**四信号。"
+    },
+    {
+      "symbol": "四条失败分支的队列处置（`SKILL.md` 的「失败分支一览」表）",
+      "consumers": "TASK-006 的脚本退出码语义要与它对齐：`prepare.py` 非零 ⇒ SKILL 把 stderr 原文回复 + 契约与侧车**对移 `failed/`**；`verify.py` 非零 ⇒ SKILL **拒绝写回且契约留 `processing/` 不移**（Leader 裁决）。⇒ 两个脚本失败时都应**把有用信息写 stderr**，`verify.py` 尤其要打出**差异**（SKILL 要把它回复给用户）。"
+    },
+    {
+      "symbol": "methodology 的判据（供 TASK-006/007 若要改动该文件时自查）",
+      "consumers": "字节 ≤ 源文件 `PBOC2026年上半年金融数据解读-完整版.md`（41113 字节）的 40% = 16445（现 12331，余量 4114）；`## ` 标题与源文件 12 个 `## ` 交集 ≤ 1（现 0）；八问 8 个名称 + 五链 5 个名称必须逐字可 grep（现 13/13）。"
+    }
+  ],
+  "verification": {
+    "sampled_on": "全部数字采于最后一次改动之后：nanoclaw commit aff2521433eef8567addcedc988fecad3ed08c6f、atlas commit c73dbe3b7aabf85df0f31e503d2ca50aa83a8d36；atlas 基线 master 7e24b116faff2174771d4551b54aa582a874d209；nanoclaw 主 checkout aefea6ce5439cfcf15b3dc54ea9bd507c5846c95",
+    "tests": "无代码任务（done_criteria 全部 verify_by review/manual），无测试套件。核实靠交付文档 ②节的原样命令。",
+    "skill_md_structure": "§3 bullet = 4（awk 段内计数与 sed 切段后 grep **两把独立的尺**各算一遍，均为 4）；§2 Step 小节 = 6；§1 编号条 = 3；frontmatter 六个必含字串 6/6（`name: warp-hestia` / 三个触发语 / 一次只处理一份 / 不用于回答一般宏观问题）",
+    "failure_branches": "「失败分支一览」表体行 = 4；关键字命中：`history 侧车缺失` 3、`contract emit --period` 2、`同名已在 processing/` 1、`不重新占位` 1、`退出码非零` 4、`对移 failed/` 3、`留在 processing/，不移 failed/` 1、`不重试` 3",
+    "note_format_seal_spec": "骨架代码块内 check 行 = 2（须 2）、seal 行 = 1（须 1）、`## ` 标题 = 4（机器区 3 + 批注区 1）。对照尺 awk 全文件计数 = check 3 / seal 2（含散文里的行内引用，故 ≥ 骨架内计数，方向自洽）",
+    "methodology_criteria": "字节 12331 / 上限 16445（源 41113 的 30.0%）；`## ` 与源文件 `## ` 交集 = 0（上限 1）；13 个名称（八问 8 + 五链 5）逐条 `grep -cF` 均命中 1 次，未命中 0 条",
+    "glossary_blocks": "`## ` 小节 = 5（caliber_version / _ytd 与 _mom / 月均取法 / 四信号判定表 / 单位）；关键内容命中：2015-01 ×1、2023-01 ×2、2025-01 ×2、跨口径对比禁忌 ×1、年初累计 ×1、当月 ×4、口径是「按段」的 ×1、四个 signal_* 各 ×1、unknown ×6、万亿元 ×1、亿元 ×2、百分数 ×2",
+    "forbidden_deps": "grep -rn 'pip install|import requests|import yaml|curl |wget ' container/skills/warp-hestia/ → 无输出，**退出码 1**（无命中 = 通过）",
+    "task_id_prefix": "四份文档共 5 处引用任务编号，**5/5 带 `M3 的 ` 前缀**（`grep -rho 'TASK-[0-9]{3}'` 与 `grep -rho 'M3 的 TASK-[0-9]{3}'` 计数相等，均为 5）；分布 4×TASK-004 + 1×TASK-005，用**需求编号**",
+    "warp_research_untouched": "git show --numstat aff2521433eef8567addcedc988fecad3ed08c6f -- container/skills/warp-research | grep -c . → 0",
+    "worktree_clean": "git -C /Users/zuowei/workspace/ai/wt-warp-hestia status --short | grep -c . → 0（交给 TASK-006 时干净）",
+    "main_checkout_untouched": "nanoclaw 主 checkout 仍在 feat/vendor-agent-reach-skill @ aefea6ce…，status --short 仍是 2 改 2 删 1 未跟踪，与 TASK-004 交付时逐字相同",
+    "numstat": "nanoclaw: 112/0 + 110/0 + 161/0 + 125/0 = 508 行新增 0 删除；atlas: 415/0 单文件（与 writes 声明逐字一致，无 scope 越界）",
+    "commit_convention": "atlas: git log -1 --format='%s' | grep -cE '^[a-z]+\\(TASK-005\\): ' → 1；nanoclaw 用 nanoclaw 规范 `feat(warp-hestia): …`（**不是** docs(TASK-005):）",
+    "merge_rehearsal": "临时 detached worktree 上 `git merge --no-ff --no-commit task/TASK-005-m3` → `Automatic merge went well`，EXIT=0，status 仅 `A docs/hestia-m3/TASK-005-warp-hestia-docs.md`；已 abort + worktree remove + prune（清理挂 trap，不放在 `&&` 链尾）",
+    "code_simplifier": "跑过（全局 CLAUDE.md 要求），**零改动**。核实不采信其报告（它只回「Complete. Nothing further.」）：四文件字节 5259/5965/12331/6219 与写入时逐字相同、mtime 仍是写入时刻；且上列全部判据在其运行**之后**复跑一遍仍通过",
+    "self_correction": "交付文档 ④节 C 初稿把 spec line 273 的「上半年」引成了两次，并附了一句「重复字样来自原文」的解释——**那句是编的**。实测该行「上半年」`grep -oF | wc -l` = 1，表格已订正、解释句已删。同轮还把三处不可照抄的 `…` 省略号命令换成了实跑形式、把两处缩略 sha 展开成全 sha。",
+    "done_criteria_to_evidence": {
+      "functional[0] SKILL.md": "交付文档 ②节 2.1（§3=4 两把尺 / 6 步 / §1=3 条 / frontmatter 6/6）+ 2.1b（模型边界与失败分支）",
+      "functional[1] note-format.md": "②节 2.2（骨架 check=2 / seal=1 / `## `=4 的实证）+ ④节 C（文件名冲突裁决）",
+      "functional[2] glossary.md": "②节 2.4（`## `=5 + 15 个关键内容命中 + 判定表三条易错点）",
+      "functional[3] methodology.md": "②节 2.3（三条可跑判据：30.0% / 交集 0 / 13-13）",
+      "boundary[0] 四条失败分支": "②节 2.1b（表体 4 行 + 8 个关键字计数）；Step 5 的裁决另见 ④节 F",
+      "error_handling[0] 禁用依赖": "②节 2.5（grep 退出码 1）",
+      "non_functional[0] 提交规范 / warp-research 不动 / 编号前缀 / 可见性结转": "②节 2.6（提交与工作区）+ 2.6b（编号 5/5）+ ①节（warp-research 0 行）+ ④节 E（两步人执行动作）",
+      "non_functional[1] 交付流程": "worktree 复用（未新建）→ nanoclaw 提交（nanoclaw 规范、不开 PR）→ atlas 提交（`docs(TASK-005):`）→ 预演 merge → 请 Leader merge → merge 落地后才 dev_done；discovery 与指针在 dev_done 之前落定"
+    },
+    "not_run": [
+      "运行时冒烟（skill 是否真的被容器加载、六步是否跑得通）—— 属需求 TASK-006 范围，且需要两步人执行前置（见交付文档 ④节 E）",
+      "`prepare.py` / `verify.py` 的任何执行 —— 它们本任务不实现",
+      "GitNexus detect-changes（索引陈旧，hook 提示 last indexed ae088eb）"
+    ],
+    "merged": "双判据核实已合入 master：拓扑 `git merge-base --is-ancestor c73dbe3b7aabf85df0f31e503d2ca50aa83a8d36 master` → IS-ANCESTOR；内容 `git show master:docs/hestia-m3/TASK-005-warp-hestia-docs.md | shasum -a 256` = `4b278b4cc48b056c62900168d28b0630e5c3a8732598f84e0a75db5382453bba`，与分支上同文件逐字节相同。merge commit `1991c49ec5541fd4d4c0d0cd23117b389e7d00d1`（subject `merge(TASK-005): M3 warp-hestia skill 文档交付记录`）。合入后复核 `git show --numstat c73dbe3b…` 仍为 `415  0`。",
+    "resampled_after_fix": "④节 G 的订正之后统一重采：两 commit 累计 `git diff --numstat d791101e… 7ca6b57e…` = SKILL 114/0、glossary 110/0、methodology 161/0、note-format 129/0 ⇒ **514 行新增 0 删除**；字节 5667/5965/12331/6727（total 30690）；`warp-research` 累计改动 **0** 行；worktree `status --short` 行数 **0**；分支 HEAD = `7ca6b57e64a561351d7108a937b8607a5e87f0a6`。**全部 14 条硬性判据在订正之后复跑仍全部通过**：§3 bullet 4/4（两把尺）、Step 6、§1 3、frontmatter 6/6、失败分支表体 4、骨架 check 2 / seal 1、methodology 12331 ≤ 16445、`## ` 交集 0（`grep -Fxf` 与 python set 双仪器）、13 个名称 13/13、glossary `## ` 5、禁用依赖 grep 退出码 1、任务编号 5/5 带前缀。",
+    "cjk_instrument": "`comm -12 <(sort src-h2) <(sort md-h2)` → **5**（假阳，输出的 5 行全是源文件独有章节名）；`grep -Fxf src-h2 md-h2 | grep -c .` → **0**；`python3` 集合交集 → **0**。两边 `## ` 标题的原样清单与三把仪器的实跑输出都贴进了交付文档 ②节，可直接复现。"
+  },
+  "provenance": "本任务的四份文档、全部判据实测与两次交付文档均由 dev-m3-c 本人完成。**两处来自他人的输入需注明**：①**CJK 下 `comm -12` 假阳**由 Leader 派来的一个子代理最先发现（它报假值 3），Leader 复算得 5，我用三把仪器在本仓库实际输入上复现（`comm -12`=5 / `grep -Fxf`=0 / python set=0），并把可复现证据写进交付文档 ②节、把工具钉死条款写进 `functional[3]` 的 DoD。②**`SKILL.md:60` 与 `note-format.md` 的自相矛盾**同样由该子代理发现（它没擅自改，是对的），Leader 裁决在本任务内改完，我执行（nanoclaw commit `7ca6b57e…`）。两处均非我独立发现，特此标明，免得后人从 `transitions.jsonl` 的 `by=dev-m3-c` 反推成我的功劳。",
+  "rework": {
+    "at": "2026-09-09",
+    "trigger": "QA 两轮判 REJECT；人类拍板只修三条 Leader 亲手复现过的，其余转结转与 PENDING",
+    "nanoclaw_commit": "2a6d39388e4648eb3be0f15b42ee28b52428c5d8（三条 fix 一个 commit；三个任务各走各的状态机）",
+    "nanoclaw_prev": "2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8（QA 判定的对象）",
+    "pull_request": "https://github.com/newthinker/nanoclaw/pull/5（OPEN，6 commits，23 files）",
+    "tests": "Ran 95 tests / OK / EXIT=0（原 84 + 新增 11；test_prepare 63 + test_verify 32，与 Ran 95 双口径一致）",
+    "mutation": "10 个变异全部 KILLED、0 存活，含五条针对本轮修复的守卫（R2a/R2b/R2c/R3a/R3b）；隔离副本执行，harness 对锚点命中数 ≠1 直接 sys.exit(3)，每轮校验主工作区指纹均未变",
+    "golden": "两份 golden 逐字节未变，独立复算（重新生成后比 sha256）：13d6e47bd775bd3d3b4bfcd60ffc40975d648b8e33dcebb5598ef80ac6f6bfc7 / 638cb1a52f585d99d101c741af92a0a9324ef5ca04ceba2d9ab687a9811d1586",
+    "hygiene": "提交里 __pycache__/*.pyc = 0（在最后一次跑测试之后排）；编号前缀 14/14 全带 `M3 的 `；未改 .gitignore",
+    "code_simplifier": "跑过，报「无需简化」，**核实确实未改动任何文件**（八个文件逐一 diff + 全套复跑 + golden sha256）——这次报告与事实一致",
+    "not_fixed": "🔴 Skeptic #3「narrative 扣除窗口整体搬到机器区顶端」**本次不修**：Leader 两次构造均未复现（两次都保住了封条摘要——证明封条确实是位置盲的——但都被分段 check 挡下），已作为「未复现的疑点」记入结转。不为它改动 narrative 标记的校验逻辑，那会扩大改动面而收益未经证实。",
+    "fix_id": "F1",
+    "severity": "CRITICAL",
+    "reason_class": "task_defect（我的缺陷：命令本身写错了）",
+    "atlas_commit": "bd24f77a8fbb120ea61105a44bfe23162548bea7（119/0）",
+    "defect": "SKILL.md Step 3 的 `EXISTING=…` 是**无条件赋值**、恒非空，而 `${EXISTING:+--existing \"$EXISTING\"}` 的 `:+` 判的是「变量非空」不是「文件存在」 ⇒ **create 场景（每期首次生成，笔记尚不存在）把不存在的路径传进去**，prepare.py exit 2、产出 0 字节，按 Step 3 自己的失败分支**每期首次都被移进 failed/**。",
+    "severity_correction": "⚠️ 不是「一份笔记也产不出」，是「**新笔记一份也产不出，已有笔记的更新正常**」——update 场景（$EXISTING 真的存在）本来就是好的，2×3 矩阵可证。",
+    "fix": "改用**显式 if/else**；Step 5 的 mode 判定同源同判据，一并改成对文件求值。",
+    "🔴 rejected_suggestion": "**fix_items 建议的 `ARGS=(); [ -f \"$EXISTING\" ] && ARGS=(--existing \"$EXISTING\")` 有 bug，未采用**：空数组的 `\"${ARGS[@]}\"` 在 **bash 3.2（macOS 自带）配 `set -u`** 时报 unbound variable（bash < 4.4 的已知行为），而 **create 场景下 ARGS 恰恰是空的**——正是这条修复要救的那个场景。实测：`create ARGS版 bash → ARGS[@]: unbound variable`，sh 同。⚠️ **我第一次是在 zsh 里试的，通过了**，zsh 不报这个错 ⇒ **按 shell 分别验才看见**。已在 SKILL.md 里写注释说明为什么不用数组。",
+    "do_not_honored": "**没有动 `${…:+… \"$var\"}` 的引号**（fix_items 的 do_not）：引号本来就生效，Leader 用区分性实验证伪了「引号不防词分割」那个说法。改它会在验证时产生「改前改后一样」的困惑结果。",
+    "evidence": "{bash, sh, zsh} × {create, update} 六格全部带 `set -u`：**六格全绿**，create 3247 字节走占位批注区、update 3263 字节保留手写批注——**两场景行为可区分**（若输出相同，矩阵只证明了「没崩」而非「守卫在起作用」）。对照组旧命令：create 在 bash 与 sh 下均 exit 2 / 0 字节，update 均 exit 0 / 3263 字节。",
+    "tests_added": "ExistingGuard 三条（--existing 指向不存在 ⇒ exit 2 且 stdout 空；create 不传 ⇒ 正常产出且批注区是占位文本；update 传 ⇒ 批注保留）。⚠️ **unittest 够不到 SKILL.md 里的 shell**——这三条钉的是 prepare.py 的**契约**（从而让 `[ -f ]` 守卫成为必需），shell 本身的证据是六格矩阵。",
+    "why_hole_survived": "现有三处 `--existing` 用例**全部指向存在的文件** ⇒ 这条路径从未被行使。与我在 TASK-007 记的「判据被更早的判据遮蔽」同族：**测试用例的取值分布让某条路径永不发生**。",
+    "lesson": "🔴 **shell 相关的修法必须按 shell 分别验**：一个 shell 通过不代表另一个通过，而 zsh 与 bash 3.2 在空数组展开上行为相反。**「我试过了」要问「在哪个 shell 里试的」。**",
+    "merged_master_sha": "dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc",
+    "merged": "双判据核实已合入 master：拓扑 `git merge-base --is-ancestor bd24f77a8fbb120ea61105a44bfe23162548bea7 master` → IS-ANCESTOR；内容 `git show master:docs/hestia-m3/TASK-005-*.md | shasum -a 256` = `1d9c2721de451b464d8d9bf2a2b76fa05ce5ba97b5fa6d7183d09fdcc0c1c902`，与分支上同文件逐字节相同。merge commit `dc2fcefd2264d8391de1425e0e8f21ef0f0b30fc`（subject `merge(M3-fix): M3 三条 review_fix 返工——F1 --existing 守卫 / F2 契约×侧车配对 / F3 seal 形状断言`）。合入后复核 numstat 未变。"
+  }
+}

@@ -1,0 +1,85 @@
+{
+ "task_id": "TASK-002",
+ "owner": "dev-m3-a",
+ "title": "atlas `contract emit` 同产侧车（回放路径与实时同形）",
+ "requirement_task_id": "需求文档 TASK-001 的**下半**（cmd/atlas 部分）；上半是本 sprint 的 TASK-001（internal/hestia），已 VERIFIED",
+ "key_findings": [
+  "**回放路径与实时路径产出同形的一对文件**：`<queue.dir>/pending/<period>-<type>.json` + `.history.json`。侧车 `generated_by` 取 `c.GeneratedBy`，回放是 `contract@v1/replay`、实时是 `contract@v1` ⇒ 消费者不分实时与回放，但能从侧车本身看出它是哪条路径产的。",
+  "**分支插在 `if hestiaEmitStdout {` 之前**，与 ingest 路径同序（先侧车后契约）。`--stdout` 是「把契约打给我看」不是入队 ⇒ 不产侧车、不建 `pending/`。",
+  "🔴 **需求原文的测试写法会污染包级 cmd**：原文用 `hestiaContractEmitCmd.SetOut(&out)`，out 挂到**包级** cmd 上并留在那里，后续用例读到的是上一条的缓冲区。本文件其余用例一律走 `newCapturingCmd()`（每次新建 cmd + 独立 buffer），故跟随既有形状。",
+  "**`cmd/atlas` 覆盖率是贴地的**：基线恰 76.6（门槛也是 76.6）⇒ 新增的两个 error 分支若不覆盖会直接跌破。这决定了必须写那两条原文没有的错误路径测试。",
+  "**BuildHistory 失败可在 cmd 层构造**：另存一条更早的同类型观测，再用裸 `sql.Open` 把它的数值列改成文本，使 `Preceding` 的 `scanObservation` 扫 `sql.NullFloat64` 失败；目标期那行不动 ⇒ 前面的 `st.Current` 照常成功，走得到 BuildHistory。（本文件已有裸 sql 先例：`TestHestiaStatusPropagatesRunsError`。）",
+  "**`TestHestiaContractEmitUnknownPeriodFails` 不受影响**：`!ok` 的 return 在侧车分支之前，期次不存在时根本走不到 ⇒ 它断言的「不建 pending/」仍成立。",
+  "**DoD non_functional[1] 第 2 步写「本任务 3 个文件」，而 `writes`/`estimated_files` 都是 2 个**——从 TASK-001 模板带过来的笔误，按 2 个提交，不影响实质。"
+ ],
+ "decisions": [
+  {
+   "decision": "用既有 `restoreEmitGlobals` + `newCapturingCmd`，不用需求原文的内联 `t.Cleanup` + 全局 `hestiaContractEmitCmd.SetOut`",
+   "deviates_from_requirement": true,
+   "rationale": "原文写法把 out 挂到包级 cmd 上并留在那里，后续用例读到上一条的缓冲区；本文件其余 emit 用例一律走 newCapturingCmd（每次新建 cmd + 独立 buffer）。跟随既有形状既避免污染，也让这条测试与邻居可比。",
+   "ruled_by": "dev-m3-a"
+  },
+  {
+   "decision": "新增两条需求原文没有的错误路径测试：`TestHestiaContractEmitHistoryBuildFailureSkipsContract` / `…WriteFailureSkipsContract`",
+   "deviates_from_requirement": true,
+   "rationale": "DoD error_handling[0] 要求「BuildHistory/WriteHistory 任一失败 ⇒ 返回非 nil error 且**不写契约**」，原文没给测试。且 cmd/atlas 覆盖率贴地（基线恰 76.6 = 门槛），新增的两个 return 分支不覆盖会跌破。两条同时守住「错误传播」与「侧车在契约之前」——侧车失败时契约不该被写出去，否则消费者拿到没有侧车的契约。",
+   "ruled_by": "dev-m3-a"
+  },
+  {
+   "decision": "`--stdout` 那条断言写成对 `pending/` 目录本身的**无条件**断言，而非「ReadDir 成功了再看它空不空」",
+   "deviates_from_requirement": false,
+   "rationale": "🔴 **这是 code-simplifier 改的，我保留了，因为它是对的**（申报）。我原写 `entries, derr := os.ReadDir(...)` 外套 `if derr == nil { assert.Empty(entries) }`——而 `--stdout` 时 pending/ 根本不会被创建 ⇒ `derr != nil` ⇒ **那个 if 块整条跳过，是个永不执行因而永不报错的断言**。改成 `assert.True(t, os.IsNotExist(derr))` 后与既有 `TestHestiaContractEmitUnknownPeriodFails`（`os.IsNotExist(statErr)`, 「不生成、不建 pending/」）同口径。**子代理的回复照例无实质内容，是我用 `git diff` 逐行核出来的**（hestia_test.go 的 numstat 从我写入时的 130 变成 131，我追查了那 1 行）。",
+   "ruled_by": "code-simplifier 提出，dev-m3-a 核实后保留"
+  },
+  {
+   "decision": "提交 subject 用 Arcforge 编号 `feat(TASK-002):`，代码注释用需求文档编号 `M3 的 TASK-001`",
+   "deviates_from_requirement": true,
+   "rationale": "两套编号各有其读者：门禁 `task-completed.sh` 只认 `^[a-z]+\\(TASK-002\\):`，需求原文的 `feat(M3 TASK-002):` 不匹配、照抄会被判「改动不可见」；而代码注释的读者是三仓库的开发者，他们读需求文档。",
+   "ruled_by": "任务 JSON description 明文规定"
+  }
+ ],
+ "files_modified": [
+  "cmd/atlas/hestia.go（+15/-0：`if hestiaEmitStdout {` 之前插入 `!hestiaEmitStdout` 分支，两处 err 直接 return）",
+  "cmd/atlas/hestia_test.go（+131/-0：3 条新测试 + 既有 TestHestiaContractEmitStdoutDoesNotWrite 追加侧车断言 + 映射注释块追加 M3 段）"
+ ],
+ "interfaces_exposed": {
+  "note": "本任务**不新增任何导出符号**，只消费 TASK-001 的 `hestia.BuildHistory` / `hestia.WriteHistory`。对下游的意义是：回放路径（`hestia contract emit --period`）现在与实时路径产出同形的一对文件，TASK-006 的夹具可以用它生成侧车样本。",
+  "behavior": {
+   "cmd": "atlas hestia contract emit --period <YYYY-MM> --period-type <monthly|q1|h1|q1_q3|annual>",
+   "非 --stdout": "产出 `<queue.dir>/pending/<period>-<type>.json` **与** `<period>-<type>.history.json` 两个文件；侧车的 `generated_by` 为 `contract@v1/replay`；pending/ 目录由 WriteHistory 的 MkdirAll 建（不依赖 EnsureQueueDirs 先跑）",
+   "--stdout": "只把契约打到 stdout，**不写任何文件、不建 pending/**；stdout 不含 `\"same_type\"`",
+   "错误语义": "BuildHistory / WriteHistory 任一失败 ⇒ `runHestiaContractEmit` 返回非 nil error，且**契约不被写出**（侧车在契约之前）"
+  }
+ },
+ "verification": {
+  "anchor": "d62ff27b53e01d40fca1431ebbba7a9d03a0f7a0",
+  "anchor_note": "master 上 merge 之后的 commit（`merge(TASK-002): …`）。**以下每一个数字都采于这一个锚、这一棵树、最后一次改动之后**——分批采的数字合到一份报告里不构成对最终产物的自证。采样开始与结束时 `git rev-parse HEAD` 均 == 该锚；`git status --porcelain` 里非 `.arcforge/` 的改动为空。",
+  "delivery_commit": "7b38ef91b48ed3afebfc29671d70792be416ca4f",
+  "baseline_anchor": "1991c49ec5541fd4d4c0d0cd23117b389e7d00d1",
+  "merge_verified": "拓扑 `--is-ancestor` → MERGED，**并补了内容判据**（拓扑报命中时单独不可信——rebase/cherry-pick/squash/三方 merge 都会换 sha）：`cmd/atlas/hestia.go` 与 `hestia_test.go` 在交付 commit 与 master 上 sha256 **逐字节一致**。",
+  "suite": "`go test ./cmd/atlas/... ./internal/hestia/... -count=1` → 两包 ok，退出码 0",
+  "coverage_cmd_atlas": "**76.7%**（门槛 76.6）。**背对背基线对照**：同一时刻在同一棵树上 `git stash` 掉改动实测 **76.6%**，恢复后 76.7% ⇒ 未跌反升 0.1。",
+  "coverage_internal_hestia": "**96.6%**，未因本任务回退（TASK-001 的水位）。",
+  "new_branches_covered": "我新增的 **4 个语句块全部被覆盖**（python 正确解析 coverprofile 逐块确认，未覆盖块数 0）；`runHestiaContractEmit` 函数覆盖率 83.3% → **86.1%**。",
+  "vet": "`go vet ./cmd/...` → 输出 0 行",
+  "gofmt": "`gofmt -l internal/hestia cmd/atlas` → 恰 2 项：`cmd/atlas/backtest_test.go`、`cmd/atlas/crisis_test.go`（基线锚上就存在的既有欠账，未顺手修）。判据「这两个之外无新增项」成立。",
+  "filepath_guard": "`cmd/atlas/hestia.go` 含 `\"path/filepath\"` **0** 处；`TestHestiaCmdDoesNotResolveDBPath` PASS。⚠️ 该守卫的实际位置是 `cmd/atlas/hestia_test.go:135-145`（断言 141-142），**我现读文件核对过**——DoD 初稿写的 `116-124` 是错锚（那里是 `TestHestiaCommandsSilenceUsage`），Leader 的订正正确。",
+  "ast_guard": "`internal/hestia` 的 38 项 AST 守卫 PASS，未因本任务变动（本任务不新增任何导出符号）。",
+  "scope": "`git diff --numstat 1991c49…d62ff27 -- cmd/ internal/` → `cmd/atlas/hestia.go 15/0`、`cmd/atlas/hestia_test.go 131/0`。恰 2 文件、与 `writes` 一致、**无越界**；`internal/` 改动 **0** 行；`go.mod`/`go.sum` 改动 **0** 行（无新增依赖）。",
+  "test_count_two_rulers": "emit 相关用例：尺1 静态 `grep -c '^func TestHestiaContractEmit'` = **10**；尺2 动态 `go test -run '^TestHestiaContractEmit' -v` 的 `--- PASS` = **10**。两把尺同值（基线 7 条 + 新增 3 条）。",
+  "changed_tests_pass": "本任务新增/调整相关的 7 条全 PASS：WritesHistory、HistoryBuildFailureSkipsContract、HistoryWriteFailureSkipsContract（新增）；StdoutDoesNotWrite（追加断言）；WritesPending、UnknownPeriodFails、RevisionPeriod（既有，确认未被波及）。",
+  "red_phase_evidence": "TDD 红阶段痕迹（写实现之前跑 `go test ./cmd/atlas/ -run TestHestiaContractEmitWritesHistory`）：\n```\n--- FAIL: TestHestiaContractEmitWritesHistory (0.01s)\n    hestia_test.go:1593: Received unexpected error:\n        open …/q/pending/2025-12-annual.history.json: no such file or directory\n        Messages: 回放也要产出侧车，消费者不分实时与回放\n```\n失败原因正是「侧车不存在」，不是编译错或夹具问题。",
+  "blocked_once": "交付后等 merge 期间转过一次 `blocked_clarification`（20 分钟无回执，按 PENDING-MECHANISMS.md 第 4 条的已实证处方把「等 merge」从消息换成文件级信号），Leader merge 后由我自己转回 `in_progress`，`assignment_epoch` 全程为 1。**未因 idle hook 催「推进 dev_done」而提前转**——门禁的 `git log --grep` 不带 `--all`，未合并分支上的 commit 对它结构性不可见，那时转会「报绿」而没量到交付。",
+  "dod_coverage_matrix": [
+   "functional[0] `!hestiaEmitStdout` 时 BuildHistory→WriteHistory、两处 err 直接 return、generated_by 取 c.GeneratedBy → 代码 + TestHestiaContractEmitWritesHistory（断言 `generated_by == \"contract@v1/replay\"`，钉死具体值而非「非空」——传错成 contractGenerator 时「非空」照样绿）",
+   "functional[1] 非 --stdout 时侧车存在；--stdout 时 stdout 不含 `\"same_type\"` → TestHestiaContractEmitWritesHistory（两段）",
+   "functional[1] 复位包级变量 → 用既有 `restoreEmitGlobals(t)`（内部就是 t.Cleanup 复位那四个变量）",
+   "boundary[0] --stdout 单独跑不写任何文件 → TestHestiaContractEmitStdoutDoesNotWrite 追加的两条断言（契约不存在 + **侧车不存在** + pending/ 目录本身不存在）",
+   "boundary[0] 队列目录不存在时靠 WriteHistory 的 MkdirAll 建 → TestHestiaContractEmitWritesHistory（emitFixture 的 queueDir 从未被创建、也没人调 EnsureQueueDirs，能读到侧车即证明）",
+   "error_handling[0] TDD 红阶段留痕 → 见 red_phase_evidence",
+   "error_handling[0] BuildHistory 失败 ⇒ 非 nil error 且不写契约 → TestHestiaContractEmitHistoryBuildFailureSkipsContract",
+   "error_handling[0] WriteHistory 失败 ⇒ 非 nil error 且不写契约 → TestHestiaContractEmitHistoryWriteFailureSkipsContract",
+   "non_functional[0] 两包测试/两个覆盖率门槛/gofmt/vet/无新增依赖/filepath 守卫 → 见上各字段"
+  ]
+ }
+}
