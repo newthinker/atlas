@@ -545,3 +545,122 @@ Leader 与我在「骨架里有几个 `## `」上报了不同的数（3 与 4）
 ——否则后来者按任一口径去推都会得到错的期望值。
 
 **改动后全部硬性判据复跑，仍全部通过**（见 ②节各小节，那些数字都是订正之后重采的）。
+
+---
+
+# 返工记录（QA REJECT 后的 review_fix，2026-09-09）
+
+> `reason_class = task_defect` —— **这条是我的缺陷**：命令本身写错了。
+> 本次改动与 TASK-006 / TASK-007 的返工同在 nanoclaw commit
+> **`2a6d39388e4648eb3be0f15b42ee28b52428c5d8`**（三条 fix 一个 commit，但三个任务各走各的状态机）。
+> 全部数字采于该 commit 之后。
+
+## F1 · `SKILL.md` Step 3 的 `--existing` 无条件传入【CRITICAL】
+
+### 缺陷与复现
+
+`EXISTING=/workspace/extra/vault/Wiki/Macro/PBOC/$N` 是**无条件赋值**、恒非空，
+而 `${EXISTING:+--existing "$EXISTING"}` 的 `:+` 判的是「**变量非空**」不是「**文件存在**」
+⇒ **create 场景（每期首次生成，笔记尚不存在）把不存在的路径传进去**：
+
+```
+$ python3 prepare.py fixtures/2026-06-h1.json fixtures/2026-06-h1.history.json \
+    --existing /nonexistent/note.md
+$ echo "EXIT=$?"
+--existing 读取失败: [Errno 2] No such file or directory: '/nonexistent/note.md'
+EXIT=2          ← stdout 0 字节
+```
+
+按 Step 3 自己的失败分支，**每期首次生成都会被移进 `failed/`**。
+
+⚠️ **严重性描述订正**：不是「一份笔记也产不出」，而是「**新笔记一份也产不出，已有笔记的更新正常**」
+——update 场景（`$EXISTING` 真的存在）本来就是好的，下面的 2×3 矩阵可证。
+
+### 🔴 修法：显式 `if/else`，**没有**采用 fix_items 建议的 `ARGS=()` 数组
+
+fix_items 建议 `ARGS=(); [ -f "$EXISTING" ] && ARGS=(--existing "$EXISTING")`。
+**我实测发现它在 bash 3.2（macOS 自带）配 `set -u` 时会崩**——空数组的 `"${ARGS[@]}"`
+被当成 unbound variable（bash < 4.4 的已知行为），而 **create 场景下 `ARGS` 恰恰是空的**：
+
+```
+create  new(数组)  bash → new.sh: line 6: ARGS[@]: unbound variable
+create  new(数组)  sh   → new.sh: line 6: ARGS[@]: unbound variable
+```
+
+⚠️ **我先前只在 zsh 里试过，zsh 不报这个错**——是按 shell 分别验才看见的。
+⇒ 改用显式 `if/else`（POSIX，sh / bash 3.2 / zsh 都对）：
+
+```bash
+N=$(python3 /app/skills/warp-hestia/scripts/prepare.py --print-name $Q/processing/$F)
+EXISTING=/workspace/extra/vault/Wiki/Macro/PBOC/$N
+# 🔴 守卫判的是「文件**存在**」，不是「变量非空」——$EXISTING 是无条件赋值、恒非空。
+# ⚠️ 刻意用显式 if/else 而不是数组：空数组的 "${ARR[@]}" 在 bash 3.2（macOS 自带）配 set -u
+# 时会报 unbound variable，而 create 场景下它恰恰是空的。if/else 在 sh / bash 3.2 / zsh 都对。
+if [ -f "$EXISTING" ]; then
+  python3 .../prepare.py $Q/processing/$F $Q/processing/$H --existing "$EXISTING" > /tmp/note.md
+else
+  python3 .../prepare.py $Q/processing/$F $Q/processing/$H > /tmp/note.md
+fi
+```
+
+Step 5 的 `mode` 判定**同源同判据**，一并改成对文件求值：
+`[ -f "$EXISTING" ] && mode=update || mode=create`。
+
+### 🔴 **没有动引号**（fix_items 的 `do_not`）
+
+`${var:+… "$var"}` 的引号本来就是生效的——Leader 用区分性实验证伪了「引号不防词分割」那个说法
+（让目标文件存在以屏蔽本缺陷后，bash 与 sh 下都 exit 0 / 3338 字节）。改它是无谓改动，
+且会在验证时产生「改前改后一样」的困惑结果。
+
+### 实测：{bash, sh, zsh} × {create, update} 六格，全部带 `set -u`
+
+```
+create  bash  → EXIT=0  3247 字节  批注:（手写区，永不被覆盖）
+create  sh    → EXIT=0  3247 字节  批注:（手写区，永不被覆盖）
+create  zsh   → EXIT=0  3247 字节  批注:（手写区，永不被覆盖）
+update  bash  → EXIT=0  3263 字节  批注:这是我手写的第一行批注
+update  sh    → EXIT=0  3263 字节  批注:这是我手写的第一行批注
+update  zsh   → EXIT=0  3263 字节  批注:这是我手写的第一行批注
+```
+
+**六格全绿**，且两场景**行为可区分**（create 走占位批注区、update 保留手写批注）——
+若两者输出相同，这个矩阵就只证明了「没崩」而非「守卫在起作用」。
+
+对照组（旧命令，create 场景）：
+
+```
+create  old  bash → EXIT=2  0 字节  --existing 读取失败: [Errno 2] ...
+create  old  sh   → EXIT=2  0 字节  --existing 读取失败: [Errno 2] ...
+update  old  bash → EXIT=0  3263 字节        ← update 场景本来就好
+update  old  sh   → EXIT=0  3263 字节
+```
+
+### 新增测试（fix_items 的 `verify`）
+
+现有三处 `--existing` 用例**全部指向存在的文件**，所以这个洞从未被行使
+——与「一条判据被更早的判据遮蔽」同族：**测试用例的取值分布让某条路径永不发生**。
+
+`test_prepare.py` 新增 `ExistingGuard` 三条：`--existing` 指向不存在的文件 ⇒ exit 2 且 stdout 为空；
+create 场景不传 ⇒ 正常产出且批注区是占位文本；update 场景传 ⇒ 批注保留。
+
+⚠️ **unittest 够不到 `SKILL.md` 里的 shell 命令**——那三条钉的是 `prepare.py` 的**契约**
+（从而让 `SKILL.md` 那侧的 `[ -f ]` 守卫成为必需）；shell 本身的证据是上面那个六格矩阵。
+
+## 本任务返工的改动清单
+
+```
+$ git show --numstat --format='' 2a6d39388e4648eb3be0f15b42ee28b52428c5d8 \
+    -- container/skills/warp-hestia/SKILL.md
+16	2	container/skills/warp-hestia/SKILL.md
+```
+
+## 锚点（返工后）
+
+| 项 | 值 |
+|---|---|
+| nanoclaw 返工 commit **全 sha** | **`2a6d39388e4648eb3be0f15b42ee28b52428c5d8`** = 分支 HEAD |
+| 上一版（QA 判定的对象） | `2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8` |
+| nanoclaw 分支 | `feat/warp-hestia`（本地 == 远端 fork） |
+| PR | https://github.com/newthinker/nanoclaw/pull/5 — **OPEN**，6 commits，23 files |
+| 全套测试 | `Ran 95 tests` / `OK` / EXIT=0（原 84 + 新增 11） |
+| 两份 golden | 逐字节未变（独立复算：`13d6e47b…` / `638cb1a5…`） |

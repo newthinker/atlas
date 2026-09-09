@@ -440,3 +440,117 @@ skills 从 `<projectRoot>/container/skills` bind mount 到 `/app/skills` ⇒ **�
 需求原文明写「与 Atlas `fmtNum` 的『最短精确』不强求一致——脚本输出的是给人看的表」。
 本实现：整数打整数（`2212`、`1602`、`-4`），非整数保留两位（`368.67`、`7.32`）。
 golden 逐字节比对已把这套格式钉死；变异 M22（一律两位小数）被 5 条断言杀死。
+
+---
+
+# 返工记录（QA REJECT 后的 review_fix，2026-09-09）
+
+> 🔴 `reason_class = **dod_defect**` —— **这是 DoD 的缺口，不是我的缺陷**：
+> TASK-006 的 `done_criteria` 从未要求配对校验，我实现的是被要求的东西。Leader 已明确记此归属。
+> 本次改动与 TASK-005 / TASK-007 的返工同在 nanoclaw commit
+> **`2a6d39388e4648eb3be0f15b42ee28b52428c5d8`**。全部数字采于该 commit 之后。
+
+## F2 · 契约与侧车的配对无校验【HIGH】
+
+### 缺陷与复现
+
+`prepare.py` 从 history 对象上**只读 `same_type` 一个键**；侧车顶层的 `for` 字段
+（atlas `history.go` 写出，值形如 `2026-06-h1`）**被读 0 次**：
+
+```
+$ grep -c '\["for"\]\|\.get("for")' prepare.py
+0
+$ jq -r '.for' fixtures/2025-12-annual.history.json
+2025-12-annual
+```
+
+⇒ 错配的一对喂进去，**prepare 与 verify 双双 exit 0**：
+
+```
+$ python3 prepare.py fixtures/2026-06-h1.json fixtures/2025-12-annual.history.json --now 2026-09-12
+$ echo "EXIT=$?"                              → EXIT=0，3161 字节
+$ python3 verify.py <那份笔记>
+$ echo "EXIT=$?"                              → EXIT=0
+```
+
+**笔记自洽地看起来完全正常**——frontmatter / 标题 / 四信号 / 温度全对（都来自契约），
+而**两张表全错**（都来自侧车）：
+
+```
+period: 2026-06        period_type: h1        ← 契约说这是 2026 上半年
+前 12 期表的期次：2024-12 / 2022-12 / 2021-12 / 2020-12 / 2019-12   ← 全是 annual
+```
+
+🔴 **污染面不止「前 12 期」表**（fix_items 的 `note_scope`，我实测确认）：
+`render_table_current` 的上期/去年同期两列同样取自 `same_type`（`series[0]` 就是上期）
+⇒ **本期数据表的对比列也错**，而那是解读的起点：
+
+```
+| 指标 | 单位 | 本期 2026-06（口径 2025-01） | 上期 2024-12 ⚠️口径 2023-01 | 去年同期（无） |
+                                              ↑ 错配后「上期」变成了 annual 期次
+```
+
+### 修法
+
+新增 `pair_key()` 与 `assert_pair()`，在 `main()` 读完两份 JSON 之后立刻校验：
+
+```python
+history["for"] == contract["period"] + "-" + contract["period_type"]
+```
+
+不成立 ⇒ **exit 2** 并打印两边的值。这是这条链路上**唯一能机器判定「这两个文件是一对」的事实**。
+
+🔴 **判据是期次，不是文件名**：修订夹具叫 `2025-12-annual-rev.*` 而它的 `for` 是 `2025-12-annual`
+——拿文件名做判据会**误拒**这一对。已由 `test_revision_fixture_pairs_by_period_not_filename` 钉住。
+
+### 实测（返工后）
+
+```
+$ python3 prepare.py fixtures/2026-06-h1.json fixtures/2025-12-annual.history.json --now 2026-09-12
+契约与侧车不是一对：契约是 2026-06-h1，而侧车的 for 是 '2025-12-annual'。
+两张表全部取自侧车，错配会产出「自洽但表全错」的笔记（frontmatter 与信号来自契约、两张表来自侧车），故拒绝。
+EXIT=2          ← stdout 0 字节，不产出半份笔记
+```
+
+**正配一条不红**（五期 + 修订夹具）：
+
+```
+2020-06-h1         EXIT=0
+2025-12-annual     EXIT=0
+2026-06-h1         EXIT=0
+2023-08-monthly    EXIT=0
+2022-07-monthly    EXIT=0
+2025-12-annual-rev EXIT=0   ← for=2025-12-annual，文件名带 -rev，判据是期次不是文件名
+```
+
+### 新增测试
+
+`PairingGuard` 四条（错配 exit 2 且报错含两边的值、正配五期不受影响、修订夹具按期次配对、
+`assert_pair` 存在）+ `Tables.test_current_table_comparison_columns_come_from_same_type`
+一条——**后者钉的正是「污染面不止那张表」**：断言本期数据表的「上期」列必须取自 `same_type` 的最新一期。
+
+### 变异（本轮针对本条的三个）
+
+| 变异 | 内容 | 结果 |
+|---|---|---|
+| R2a | 配对校验整个不做 | ✅ KILLED 红 1 |
+| R2b | 配对判据换成文件名（修订夹具会被误拒） | ✅ KILLED 红 1 |
+| R2c | 配对不匹配时只警告不退出 | ✅ KILLED 红 1 |
+
+## 本任务返工的改动清单
+
+```
+$ git show --numstat --format='' 2a6d39388e4648eb3be0f15b42ee28b52428c5d8 \
+    -- container/skills/warp-hestia/scripts/prepare.py
+38	0	container/skills/warp-hestia/scripts/prepare.py
+```
+
+## 锚点（返工后）
+
+| 项 | 值 |
+|---|---|
+| nanoclaw 返工 commit **全 sha** | **`2a6d39388e4648eb3be0f15b42ee28b52428c5d8`** = 分支 HEAD |
+| 上一版（QA 判定的对象） | `2d2fbe80947970c117b49fdabf0d3f2a3e8eefc8` |
+| PR | https://github.com/newthinker/nanoclaw/pull/5 — OPEN，6 commits，23 files |
+| 全套测试 | `Ran 95 tests` / `OK` / EXIT=0 |
+| 两份 golden | 逐字节未变（独立复算 `13d6e47b…` / `638cb1a5…`）——配对校验只在错配时触发，正配路径一个字节没动 |
