@@ -4,6 +4,11 @@
 #
 # 幂等、可重复执行。只覆盖二进制/脚本/配置；**绝不动 runtime 本地数据**
 # （data/ logs/ qlib_csv*/ fundamentals_csv*/ signals*.csv reports/、含明文密钥的
+# 🔴 /queue/ 与 /data/ 同理由（2026-09-15 实测补）：契约队列是 runtime 本地持有的状态，
+#    仓库里**没有**这个目录 ⇒ 不排除的话 `--delete` 会把整棵 queue/ 删掉。实测：M1.5+M2a+M3
+#    投递那次，pending/ 里两份契约被静默删除，现象是「队列空了」而不是报错。契约可用
+#    `hestia contract emit --period` 重建，但 done/ 的历史与正在 processing/ 里的会一起没。
+#
 # configs/config.yaml，以及 runtime 侧独立安装的 scripts/akshare/.venv/、
 # scripts/baostock/.venv/、scripts/qlib_eval/.venv/ 均被排除并受 --delete 保护）。
 #
@@ -91,7 +96,7 @@ rsync -a -m --delete \
   --exclude='/scripts/qlib_eval/.pytest_cache/' \
   --exclude='/scripts/qlib_warehouse/tests/' --exclude='/scripts/qlib_warehouse/.pytest_cache/' \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='.DS_Store' \
-  --exclude='/data/' --exclude='/logs/' \
+  --exclude='/data/' --exclude='/logs/' --exclude='/queue/' \
   --exclude='/configs/config.yaml' \
   --exclude='/scripts/akshare/.venv/' \
   --exclude='/scripts/baostock/.venv/' \
