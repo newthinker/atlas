@@ -419,7 +419,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "BuildSheetRows", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory", "sheets.ColumnLetter", "sheets.Diff", "sheets.ResolveHeader"}
+	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "BuildSheetRows", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory", "sheets.Client.ReadEntryArea", "sheets.Client.ReadHeader", "sheets.Client.Tabs", "sheets.Client.WriteCells", "sheets.ColumnLetter", "sheets.Diff", "sheets.NewClient", "sheets.ResolveHeader", "sheets.WithEndpoint"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -671,6 +671,18 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // TASK-005 追加 sheets.Diff：纯函数，(表名, Columns, [][]any 表中现值, []Row) → []Change，
 // 只做比对、不碰网络不碰库；push 层拿它的输出决定写哪些格，写动作不在这里。
 // 排在 ColumnLetter 与 ResolveHeader 之间是字节序（"D" 在 "C" 后 "R" 前）。
+//
+// TASK-006 追加 API 薄壳的 6 个符号，逐个说明为什么不是本包意义上的「写口」——它们写的是
+// Google Sheets，不是 hestia_observations / hestia_pending；ADR-0003 守的是库的写入口：
+//   - sheets.NewClient：建客户端，凭据留空返回 (nil,nil)；不碰库。
+//   - sheets.WithEndpoint：测试用 Option，把 API 根地址指向 httptest；不碰库。
+//   - sheets.Client.Tabs：GET 工作表标题列表；只读。
+//   - sheets.Client.ReadHeader：GET 第 3 行；只读。
+//   - sheets.Client.ReadEntryArea：GET 行 4–15、列 A–AI；只读（C6 读侧）。
+//   - sheets.Client.WriteCells：POST values:batchUpdate 写**表**里的格；它收的是 []Change 纯值，
+//     没有 *Store / *sql.DB 可写（C2），对库的写入口没有任何路径。
+// 顺序按字节序：Client.* 在 ColumnLetter 之前（"Cl" < "Co"），NewClient 在 Diff 之后、
+// ResolveHeader 之前，WithEndpoint 最后。
 
 // —— 为什么名单里多了 BuildSheetRows（M2b 的 TASK-004 追加）——
 //
