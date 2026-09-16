@@ -43,13 +43,10 @@ import (
 	"encoding/json"
 	"errors"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -413,36 +410,8 @@ func TestStoreExposesNoWriteMethods(t *testing.T) {
 // 两条测试互补，不是替代：reflect 那条能看见**嵌入类型提升上来**的方法（AST 里看不到
 // 那些，它们没有对应的 FuncDecl）；本条能看见包级函数。删掉任一条都会重新开一个缺口。
 func TestPackageExposesNoWriteFunctions(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	got, err := exportedFuncs(".")
 	require.NoError(t, err)
-
-	fset := token.NewFileSet()
-	var got []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		require.NoErrorf(t, err, "解析 %s", name)
-
-		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || !fn.Name.IsExported() {
-				continue
-			}
-			if fn.Recv == nil {
-				got = append(got, fn.Name.Name)
-				continue
-			}
-			// 方法：接收者类型不导出时，包外根本拿不到它，不构成导出面
-			recv := recvTypeName(fn.Recv.List[0].Type)
-			if ast.IsExported(recv) {
-				got = append(got, recv+"."+fn.Name.Name)
-			}
-		}
-	}
-	sort.Strings(got)
 
 	// 期望项数由 len(want) 生成，**不手写**（TASK-011 闭合的守卫缺口）。
 	//
