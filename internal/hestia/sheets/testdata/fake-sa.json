@@ -1,0 +1,11 @@
+{
+ "type": "service_account",
+ "project_id": "hestia-fake",
+ "private_key_id": "fake-key-id-not-a-real-credential",
+ "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDI1qYnGn+wd3LH\neUwde2QmNJUA99WBAbZUEiqoRwTkG9u12JOM6TtCDM6++2jTXqzolYsuJKTsIBtE\n34z4Q59Q21m08CviFbuCenii62QmRLEcVgG/17R0joZ2+2umVOvw0FHoC3LVkxKh\nW1pc3bHiQXM5SyCjB6SfGX9ZgliueM4Fod7FfVrKcIDSM0mAzty2fUZtUS19xdwK\nEklBRhi+LIEfHZBDesRG/6S1Kt1wbe0xMmRdgIC4sH+5Rzg/7t4gsmQzsAk2CcwB\nQMuDf5Suffo164EQT+BfUnsdMvCh6lD7LqipTDsLwbnIWoXhy1E6W4u/H785JUyU\nM5ito/oxAgMBAAECggEAANum3xFhcaK5AQHbEEjgpumOoGBqzGDDyFPz9wjGhHfA\nPjIcK/3lVXHEp3BfbzLE6G4iRp3XjUJktChlIBm7buOPUM8qaNQ0ukAconajzMlj\nGTnwDPnAKokwjgZVGmNP+ZUNaCoPYx++IyIQhXI6K8MV+LyF5kcSR0qybYnoKAXO\nUDg7k3/2n7pCyHa2sgi/41pvf5hSlZ5cSEcUBfFgWU4U6lDE2NzqyxfwDnQ7ZaK+\nn7W2uujnwZ1ytrPnbQ+p17EPvCe8IJIxjgtIKJdZLp56KMQ44p5qBFbcXVUhefGf\nbz9HWz+/vQHJCBMC0X2GmjRZydZe5aFx/dScciLn5wKBgQDqjcw065S42vmIKE4O\nkQVQclm10LmkVZeVJfHRhtr9ko6DmYLgrkTZG0q5UZ1FHq5fEcQYDx7kEdCsU62H\n648SMPwuZCrR8QeKqAbDAOr13p065YdoxSQxsb1t97A/jbtEpZzd2ONmhQGfEUYO\n+UW1arhpozv5p923E1zkJzCuYwKBgQDbM6ytaB72wJ7N8RP6n5yRM3RJY+oXYEFD\nhelcNaePP/LLWutROvZeM3KI3UUcXiRy5o7ae67t3t0WRMVHbzzSP1/YS37q4Nvn\nf6rPV3ZAuH/2E3XpD1AP9il43H4dW/4+EBCqV/smNV3qqS/+JUKKuhUZYByQmqZ6\n40V5lmgfWwKBgQCGQPOJtu5BgNUjYi6Ll+Z6zXkb4ITh0zwYWse3LoFacvCv0sZe\n5GD0A/MZb+WdEpqsP/cF7mG4GZpfiOXizqntt6wgwaTg1h2C9/om0/epE+rbM1X2\nWiEFcL8Emql/Nxjhignn0aUXoTn0WmbHW1bTKGq1zIEfvT3i9GpPDT+IEQKBgQCP\nUutN+q18Q5fSKhYZIfG6Uv1u2yB9plcl8lISE5b6qCJ1an5Af6AFGfiCmsMMeFW2\ntx+ipYpMSBMg81hWi9ol0oA1qa9TnjDK3gPuTE6qpLguSq0m9PcxaI/XUbw4MCU9\nqT1sU9iINA6zV2pk7zHiCSewjtI+jo/Z++46QOjVzwKBgG3XMaAtSSEEtFmfpa0I\n2YBjufF3nGHI32LvV6El+nt9vimA4XJ+ZDa5DGx7KPmq9XZIpnR0oG7YyrCPu4d7\nvlIEPf4HkmHzndcdUIy5An+dYlVmJv2qnE/mW9jFcuDPFYTSjElXTnuRutPr8dBp\nwWtDOeDxU3GQR9g67mWOqdYU\n-----END PRIVATE KEY-----\n",
+ "client_email": "fake-sa@hestia-fake.iam.gserviceaccount.com",
+ "client_id": "000000000000000000000",
+ "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+ "token_uri": "http://127.0.0.1:1/token",
+ "_comment": "自造的假服务账号：私钥由 openssl genrsa 现场生成、不对应任何 Google 项目，只为让 NewClient 能解析；测试把 token_uri 改指向 httptest 服务器，请求不出网。"
+}
