@@ -483,6 +483,39 @@ func (s *Store) Current(ctx context.Context, period, periodType string) (Observa
 	return obs, true, nil
 }
 
+// AllPeriods 列出权威表里全部 (period, period_type)，按 period、period_type 升序。
+//
+// 只读：一条 SELECT，不碰任何写路径。登记而非放宽——ADR-0003 的射程是
+// hestia_observations 与 hestia_pending 的**写**入口。
+//
+// 存在的理由：Sheets 投影要枚举全部期次，而现有读方法都是「取最近 N 条」
+// （RecentObservations）或「取某一期」（Current），都答不了「一共有哪些期」。
+//
+// ⚠️ **不在这一层去重**。同月的 monthly 与 h1 都要返回——哪条赢是投影侧的
+// 选行规则（spec §4），把它下沉到 SQL 会让那条规则失去测试面。
+func (s *Store) AllPeriods(ctx context.Context) ([]PeriodKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT period, period_type, published_at FROM `+viewCurrent+`
+		 ORDER BY period, period_type`)
+	if err != nil {
+		return nil, fmt.Errorf("hestia store all periods: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []PeriodKey
+	for rows.Next() {
+		var k PeriodKey
+		if err := rows.Scan(&k.Period, &k.PeriodType, &k.PublishedAt); err != nil {
+			return nil, fmt.Errorf("hestia store all periods scan: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hestia store all periods: %w", err)
+	}
+	return out, nil
+}
+
 // PriorPublishedAt 取同业务键下 published_at < before 的最大值：修订契约的
 // supersedes_published_at。没有 ⇒ ""。只读，不改 Save。
 func (s *Store) PriorPublishedAt(ctx context.Context, period, periodType, before string) (string, error) {
