@@ -3,6 +3,10 @@ package sheets
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -18,6 +22,13 @@ import (
 // （补）            缺表 + CreateSheets + dry-run ⇒ 不报错、MissingTabs 列全、全 GET → TestPushDryRunReportsMissingTabsWithCreateFlag
 // （补）            缺表 + CreateSheets + Apply ⇒ 建表挂点在写之前、本任务未实现 ⇒ error 提 TASK-008、零写 → TestPushCreateSheetsHookRunsBeforeWrite
 // non_functional[0] 守卫登记 sheets.Push（review）                        → ../store_test.go TestPackageExposesNoWriteFunctions
+//
+// Context Checkpoint: done_criteria → test mapping (TASK-008，追加在同一文件)
+// functional[0]     CreateYearTab 四步：duplicateSheet / 2021年 / 2021 年 · / "index":3 → TestCreateYearTabDoesAllFourSteps / TestCreateYearTabSendsIndexZero
+// functional[1]     push 接线：duplicateSheet 先于首个写数据请求；模板 2024年；index 按年序 → TestPushCreatesMissingTabsBeforeWriting / TestPushPlacesNewYearTabInOrder
+// boundary[0]       CreateSheets 但不缺表 ⇒ 零 duplicateSheet；dry-run 缺表不建表 → TestPushCreateSheetsWithoutMissingTabsDuplicatesNothing / TestPushDryRunReportsMissingTabsWithCreateFlag（007 既有）
+// error_handling[0] 模板不存在 ⇒ error 含模板名；duplicateSheet 4xx ⇒ 后续不做 → TestCreateYearTabErrorsWhenTemplateMissing / TestCreateYearTabStopsWhenBatchUpdateFails
+// non_functional[0] 守卫登记 sheets.Client.CreateYearTab（review）；006/007 既有测试仍绿 → ../store_test.go
 
 const (
 	pathTabs     = "/v4/spreadsheets/sheet-id"
@@ -164,20 +175,6 @@ func TestPushDryRunReportsMissingTabsWithCreateFlag(t *testing.T) {
 	requireOnlyGETs(t, rec)
 }
 
-// TestPushCreateSheetsHookRunsBeforeWrite：Apply + CreateSheets + 缺表 ⇒ 走到建表挂点。
-// 建表是 TASK-008 的活，本任务的挂点默认报错提示 TASK-008；报错时已有表的格也不写——
-// 建表失败还写一半，比什么都不写更难收拾。
-func TestPushCreateSheetsHookRunsBeforeWrite(t *testing.T) {
-	c, rec := newTestClient(t, tabsAndHeaderResponses(), 0)
-	rows := append(rowsSpanning(2025, 2025), sampleRows()...)
-
-	_, err := Push(context.Background(), c, rows, sampleLabels(), Options{Apply: true, CreateSheets: true})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "2025年")
-	require.Contains(t, err.Error(), "TASK-008")
-	require.Empty(t, writeBodies(rec), "建表挂点报错后不许再写")
-}
-
 // TestPushRejectsUnknownLabel：任一表头标签缺失 ⇒ 整批拒绝，不是跳过那一列。
 func TestPushRejectsUnknownLabel(t *testing.T) {
 	c, rec := newTestClient(t, headerMissingOneLabel(), 0)
@@ -195,4 +192,193 @@ func TestPushNilClient(t *testing.T) {
 	require.NotPanics(t, func() { res, err = Push(context.Background(), nil, sampleRows(), sampleLabels(), Options{}) })
 	require.Error(t, err)
 	require.Empty(t, res.Changes)
+}
+
+// —— TASK-008：缺失年度表的创建 ——
+
+const (
+	pathBatchUpdate = "/v4/spreadsheets/sheet-id:batchUpdate"
+	pathTitle24     = "/v4/spreadsheets/sheet-id/values/'2024年'!A1"
+	templateSheetID = 12345
+)
+
+// tabsWithIDs 造 spreadsheets.get 的响应：Tabs 与 CreateYearTab 都从这里拿标题与 sheetId。
+func tabsWithIDs(titles ...string) string {
+	parts := make([]string, len(titles))
+	for i, t := range titles {
+		id := 100 + i
+		if t == "2024年" {
+			id = templateSheetID
+		}
+		parts[i] = fmt.Sprintf(`{"properties":{"sheetId":%d,"title":"%s","index":%d}}`, id, t, i)
+	}
+	return `{"sheets":[` + strings.Join(parts, ",") + `]}`
+}
+
+// withHeaders 给每张表配一份齐全的表头。录入区不配 ⇒ 服务端回 {} ⇒ 读出来是空的，
+// 正好是新建表的样子（录入区全空 ⇒ 它的行全是 WillWrite）。
+func withHeaders(m map[string]string, tabs ...string) map[string]string {
+	for _, tab := range tabs {
+		m["/v4/spreadsheets/sheet-id/values/'"+tab+"'!A3:AI3"] = `{"values":[["月份","发布日期","社融存量","M2余额"]]}`
+	}
+	return m
+}
+
+// tabsResponses：spreadsheets.get 列出 titles（2024年 固定拿 id 12345），模板 A1 是带年份的
+// 标题，每张列出的表都配好表头。
+func tabsResponses(titles ...string) map[string]string {
+	return withHeaders(map[string]string{
+		pathTabs:    tabsWithIDs(titles...),
+		pathTitle24: `{"values":[["2024 年 · 金融数据追踪"]]}`,
+	}, titles...)
+}
+
+// templateResponses：表里有 说明 / 2024年（模板）/ 2026年。
+func templateResponses() map[string]string {
+	return tabsResponses("说明", "2024年", "2026年")
+}
+
+func indexOfBodyContaining(rec *recorder, needle string) int {
+	for i, b := range rec.bodies {
+		if strings.Contains(b, needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+func countBodiesContaining(rec *recorder, needle string) int {
+	n := 0
+	for _, b := range rec.bodies {
+		if strings.Contains(b, needle) {
+			n++
+		}
+	}
+	return n
+}
+
+// newTestClientFailingPOST：GET 照常按 resp 查表，任何 POST 都回 status——只让写动作失败，
+// 用来证明 duplicateSheet 一失败就停，不会再发第二个写请求。
+func newTestClientFailingPOST(t *testing.T, resp map[string]string, status int) (*Client, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/token" {
+			_, _ = io.WriteString(w, `{"access_token":"fake-token","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		rec.methods = append(rec.methods, r.Method+" "+r.URL.Path)
+		rec.bodies = append(rec.bodies, string(b))
+		if r.Method != http.MethodGet {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, `{"error":{"message":"fake failure"}}`)
+			return
+		}
+		if body, ok := resp[r.URL.Path]; ok {
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(context.Background(), fakeCredentials(t, srv.URL), "sheet-id", WithEndpoint(srv.URL))
+	require.NoError(t, err)
+	return c, rec
+}
+
+// TestCreateYearTabDoesAllFourSteps 钉住四个子步骤都发生了。
+//
+// 漏掉改名 ⇒ 表叫「2024年 的副本」；漏掉改标题行 ⇒ 表内第 1 行还写着
+// 「2024 年 · ……」。**两处都漏的话，表格看起来就像重复了五张 2024**，
+// 而每一张的数据都是对的——最难察觉的那种错。
+func TestCreateYearTabDoesAllFourSteps(t *testing.T) {
+	c, rec := newTestClient(t, templateResponses(), 0)
+
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 3))
+
+	joined := strings.Join(rec.bodies, "\n")
+	require.Contains(t, joined, "duplicateSheet", "① 复制模板")
+	require.Contains(t, joined, "2021年", "② 新表名")
+	require.Contains(t, joined, "2021 年 ·", "③ 表内第 1 行标题的年份")
+	require.Contains(t, joined, `"index":3`, "④ 按年序排位，别堆在末尾")
+	// 四步在**一次** spreadsheets:batchUpdate 里，原子生效；复制的是模板的 sheetId
+	require.Len(t, writeBodies(rec), 1)
+	require.Equal(t, "POST "+pathBatchUpdate, rec.methods[len(rec.methods)-1])
+	require.Contains(t, writeBodies(rec)[0], fmt.Sprintf(`"sourceSheetId":%d`, templateSheetID))
+	require.NotContains(t, joined, "2024 年 ·", "标题里的模板年份必须被替换掉")
+}
+
+// TestCreateYearTabSendsIndexZero：index 0 是「排最前」，不能被 omitempty 吞掉。
+func TestCreateYearTabSendsIndexZero(t *testing.T) {
+	c, rec := newTestClient(t, templateResponses(), 0)
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2019年", 2019, 0))
+	require.Contains(t, writeBodies(rec)[0], `"index":0`)
+}
+
+// TestCreateYearTabErrorsWhenTemplateMissing：模板不在 ⇒ 报错带模板名，一个写请求都不发。
+func TestCreateYearTabErrorsWhenTemplateMissing(t *testing.T) {
+	c, rec := newTestClient(t, map[string]string{pathTabs: tabsWithIDs("说明", "2026年")}, 0)
+	err := c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "2024年")
+	require.Empty(t, writeBodies(rec))
+}
+
+// TestCreateYearTabStopsWhenBatchUpdateFails：batchUpdate 4xx ⇒ 报错含状态码，且只发过这一次写请求。
+func TestCreateYearTabStopsWhenBatchUpdateFails(t *testing.T) {
+	c, rec := newTestClientFailingPOST(t, templateResponses(), http.StatusForbidden)
+	err := c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Forbidden")
+	require.Len(t, writeBodies(rec), 1, "duplicateSheet 失败后不许再发任何写请求")
+}
+
+// TestPushCreatesMissingTabsBeforeWriting：建表必须在写数据之前，
+// 否则 range 指向不存在的表，整批写入失败。建完的表要接着 diff 并写它的行。
+func TestPushCreatesMissingTabsBeforeWriting(t *testing.T) {
+	c, rec := newTestClient(t, withHeaders(templateResponses(), "2023年", "2025年"), 0)
+	rows := rowsSpanning(2023, 2026) // 缺 2023年、2025年；2024年/2026年 已有
+
+	res, err := Push(context.Background(), c, rows, sampleLabels(), Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+
+	iDup := indexOfBodyContaining(rec, "duplicateSheet")
+	iWrite := indexOfBodyContaining(rec, "valueInputOption")
+	require.NotEqual(t, -1, iDup)
+	require.NotEqual(t, -1, iWrite)
+	require.Less(t, iDup, iWrite, "建表必须先于写数据")
+	require.Equal(t, 2, countBodiesContaining(rec, "duplicateSheet"), "缺几张建几张")
+	require.Equal(t, []string{"2023年", "2025年"}, res.MissingTabs)
+
+	// 新表的行也进了 diff 与写请求：4 行 × 4 列，每行 月份 WillWrite + 3 列 AbsentInDB
+	requireInvariant(t, res, rows, sampleLabels())
+	require.Equal(t, 4, res.WillWrite)
+	var got batchBody
+	require.NoError(t, json.Unmarshal([]byte(lastWriteBody(t, rec)), &got))
+	require.Len(t, got.Data, res.WillWrite)
+	require.Contains(t, strings.Join(rec.bodies, "\n"), "'2023年'!A15")
+}
+
+// TestPushPlacesNewYearTabInOrder：index = 现有年份表升序中第一个 > year 的位置。
+// {2023年,2024年,2026年} + 新 2025 ⇒ index 2。
+func TestPushPlacesNewYearTabInOrder(t *testing.T) {
+	m := withHeaders(tabsResponses("2023年", "2024年", "2026年"), "2025年") // 2025年 是待建的那张
+	c, rec := newTestClient(t, m, 0)
+
+	_, err := Push(context.Background(), c, rowsSpanning(2025, 2025), sampleLabels(), Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+	require.Equal(t, 1, countBodiesContaining(rec, "duplicateSheet"))
+	require.Contains(t, rec.bodies[indexOfBodyContaining(rec, "duplicateSheet")], `"index":2`)
+}
+
+// TestPushCreateSheetsWithoutMissingTabsDuplicatesNothing：给了 --create-sheets 但表都在 ⇒ 不碰表结构。
+func TestPushCreateSheetsWithoutMissingTabsDuplicatesNothing(t *testing.T) {
+	c, rec := newTestClient(t, tabsAndHeaderResponses(), 0)
+	res, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+	require.Empty(t, res.MissingTabs)
+	require.Equal(t, 0, countBodiesContaining(rec, "duplicateSheet"))
+	require.Len(t, writeBodies(rec), 1)
 }
