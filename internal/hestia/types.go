@@ -244,6 +244,14 @@ func (m Meta) validate() error {
 	return nil
 }
 
+// PeriodKey 是权威表里一期观测的身份三元组，供 Sheets 投影枚举全部期次（M2b TASK-002）。
+// 只是纯数据：不带 *Store、不带 *sql.DB（spec §3.1 C2——子包不许拿到句柄）。
+type PeriodKey struct {
+	Period      string // YYYY-MM
+	PeriodType  string // monthly | q1 | h1 | q1_q3 | annual
+	PublishedAt string // YYYY-MM-DD；选行规则第 2 条要用
+}
+
 // Observation 是一期报告解析出的全部数据。
 //
 // Values 只含实际存在的字段——键不存在即该字段缺失。这个表示是刻意的：

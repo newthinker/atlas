@@ -394,7 +394,7 @@ func TestStoreExposesNoWriteMethods(t *testing.T) {
 	for i := range got {
 		got[i] = typ.Method(i).Name
 	}
-	want := []string{"Close", "Current", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "PriorPublishedAt", "RecentObservations", "RecentPending", "RecentRuns", "RecordRun", "Save"}
+	want := []string{"AllPeriods", "Close", "Current", "DB", "HasArticle", "HasArticleInObservations", "HasPeriod", "Preceding", "PrecedingAll", "PriorPublishedAt", "RecentObservations", "RecentPending", "RecentRuns", "RecordRun", "Save"}
 	assert.Equalf(t, want, got,
 		"只应导出这 %d 个只读方法（%s）；出现 Insert/Upsert 等写口即违反单一写入口约束",
 		len(want), strings.Join(want, "、"))
@@ -419,7 +419,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory"}
+	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -639,6 +639,20 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 // 扫全部非 _test.go 文件），所以任一方的新导出物一落盘，另一方的包测试立刻红 —— 双向、
 // 必然、与代码对错无关。⇒ 同 wave 内有多人新增导出物时，**登记必须串行**，且后到的那个
 // 只能**追加**、不能把先到者的条目覆盖掉（这里 TASK-006 先落，TASK-005 追加 "Ingest"）。
+
+// —— 为什么名单里多了 Store.AllPeriods（M2b 的 TASK-002 追加）——
+//
+// 同 HasPeriod / RecentRuns，是**登记而不是放宽**。它是 Store 的又一个读方法：
+// 一条 SELECT ... ORDER BY，只查 v_hestia_current，不碰任何写路径。
+//
+// 为什么非要新加一个：Sheets 投影要枚举全部期次，而 RecentObservations 是「最近 N 条」、
+// Current 是「某一期」，都答不了「一共有哪些期」。另一条路是把 Store.DB() 拿出来直接
+// 发 SQL——那会把 *sql.DB 递进投影侧，正是 spec §3.1 C2 明令禁止的（子包一旦拿到
+// 句柄，「没有写口」就只剩君子协定）。
+//
+// *Store 的方法 ⇒ reflect 版与 AST 版**同时打红**（实测两条各多出一项 "AllPeriods" /
+// "Store.AllPeriods"），两处各登记一项转绿；项数由 len(want) 生成，不手写。
+// 排在 Close 之前是字节序结果（"A" < "C"），不是优先级。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
@@ -3001,4 +3015,79 @@ func TestStoreCurrentAndPriorErrorsCarryPrefix(t *testing.T) {
 	_, err = s.PriorPublishedAt(ctx, "2026-08", "monthly", "2026-09-20")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hestia store prior published_at")
+}
+
+// —— TASK-002（M2b）：Store.AllPeriods ——
+//
+// Context Checkpoint: done_criteria → test mapping (TASK-002)
+// functional[0]     AllPeriods 只读 v_hestia_current，返回全部 (period, period_type, published_at)，
+//                   同月 monthly/h1 都返回、不去重，顺序按 SQL ORDER BY
+//                                                        → TestAllPeriodsReturnsEveryObservationKey
+// functional[1]     两条写口守卫先红后登记转绿              → TestStoreExposesNoWriteMethods / TestPackageExposesNoWriteFunctions
+// boundary[0]       空视图 ⇒ 空切片且 err == nil；顺序由 ORDER BY 决定不依赖插入序
+//                                                        → TestAllPeriodsEmptyStore、TestAllPeriodsReturnsEveryObservationKey（乱序插入）
+// error_handling[0] ctx 已取消 ⇒ 返回包住 ctx.Err() 的错误、不返回半截结果
+//                                                        → TestAllPeriodsPropagatesContextCancellation
+
+// saveObs 存一期已过闸的观测，期次类型与发布日由调用方指定——AllPeriods 的夹具要造
+// 「同月 monthly 与 h1 并存」这种形状，saveMonthly 固定 monthly / 期末+15 日造不出来。
+// 与 saveMonthly 同走 Store.Save，不另建建库辅助。
+func saveObs(t *testing.T, s *Store, period, periodType, publishedAt string) {
+	t.Helper()
+	_, err := s.Save(context.Background(), Observation{
+		Meta: Meta{
+			Period:         period,
+			PeriodType:     periodType,
+			PublishedAt:    publishedAt,
+			ArticleID:      "art-" + period + "-" + periodType,
+			CaliberVersion: "2025-01",
+			Extractor:      extractorV2,
+		},
+		Values: map[string]float64{FieldM2: 300},
+	}, passing())
+	require.NoError(t, err)
+}
+
+// TestAllPeriodsReturnsEveryObservationKey：投影要枚举全部期次，而现有读方法
+// 都是「取最近 N 条」或「取某一期」，都答不了「一共有哪些期」。
+func TestAllPeriodsReturnsEveryObservationKey(t *testing.T) {
+	st := newTestStore(t)
+
+	// 同月两条：monthly 与 h1。选行规则要靠这种形状做判定，所以 AllPeriods
+	// 必须把它们**都**返回，不能在这一层去重。
+	// 刻意乱序插入（annual 在前）：顺序必须来自 SQL 的 ORDER BY，不是插入序。
+	saveObs(t, st, "2025-12", "annual", "2026-01-13")
+	saveObs(t, st, "2025-06", "monthly", "2025-07-14")
+	saveObs(t, st, "2025-06", "h1", "2025-07-15")
+
+	got, err := st.AllPeriods(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []PeriodKey{
+		{Period: "2025-06", PeriodType: "h1", PublishedAt: "2025-07-15"},
+		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
+		{Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-13"},
+	}, got)
+}
+
+// TestAllPeriodsEmptyStore：空视图不是错误，是「一期都没有」。
+func TestAllPeriodsEmptyStore(t *testing.T) {
+	st := newTestStore(t)
+
+	got, err := st.AllPeriods(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+// TestAllPeriodsPropagatesContextCancellation：ctx 已取消 ⇒ 报错且不返回半截结果。
+func TestAllPeriodsPropagatesContextCancellation(t *testing.T) {
+	st := newTestStore(t)
+	saveObs(t, st, "2025-06", "monthly", "2025-07-14")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := st.AllPeriods(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, got)
 }
