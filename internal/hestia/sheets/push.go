@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -26,10 +29,81 @@ type Result struct {
 // tabName 是年度表的命名约定。
 func tabName(year int) string { return fmt.Sprintf("%d年", year) }
 
-// createTabs 是 TASK-008 的建表挂点：Push 在 dry-run 短路之后、WriteCells 之前调用它。
-// 本任务不实现建表，默认报错——建表失败时已有表的格也不写，写一半比不写更难收拾。
-var createTabs = func(ctx context.Context, c *Client, names []string) error {
-	return fmt.Errorf("hestia sheets: 建缺失年度表（%s）尚未实现，见 TASK-008", strings.Join(names, "、"))
+// templateYearTab 是建新年度表时复制的模板：结构完整、录入区全空的那一张。
+// 名字不叫 templateTab，是为了不和 Client.CreateYearTab 的同名形参混淆。
+const templateYearTab = "2024年"
+
+// yearTabPattern 匹配年度表名「2021年」并取出年份。
+var yearTabPattern = regexp.MustCompile(`^(\d{4})年$`)
+
+// tabYear 从年度表名「2021年」取出年份；不是年度表名 ⇒ ok=false。
+func tabYear(name string) (int, bool) {
+	m := yearTabPattern.FindStringSubmatch(name)
+	if m == nil {
+		return 0, false
+	}
+	year, _ := strconv.Atoi(m[1]) // 正则已保证是 4 位数字
+	return year, true
+}
+
+// createYearTabs 按年份升序逐张建缺失的年度表。index 取「现有年份表升序中第一个 > year 的
+// 表序位置，无则末尾」；每建一张就插进本地表序，下一张的 index 才算得对。
+func createYearTabs(ctx context.Context, c *Client, existing []string, missing []string) error {
+	order := slices.Clone(existing)
+	for _, name := range missing {
+		year, ok := tabYear(name)
+		if !ok {
+			return fmt.Errorf("hestia sheets: %q 不是年度表名，不知道该怎么建", name)
+		}
+		idx := len(order)
+		for i, t := range order {
+			if y, ok := tabYear(t); ok && y > year {
+				idx = i
+				break
+			}
+		}
+		if err := c.CreateYearTab(ctx, templateYearTab, name, year, idx); err != nil {
+			return err
+		}
+		order = slices.Insert(order, idx, name)
+	}
+	return nil
+}
+
+// diffTab 对一张已存在的年度表走第 3、4 步：读表头 → ResolveHeader → 读录入区 → Diff。
+func diffTab(ctx context.Context, c *Client, name string, wantLabels []string, rows []Row) ([]Change, error) {
+	header, err := c.ReadHeader(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	cols, err := ResolveHeader(header, wantLabels)
+	if err != nil {
+		return nil, fmt.Errorf("hestia sheets: %s: %w", name, err)
+	}
+	current, err := c.ReadEntryArea(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return Diff(name, cols, current, rows), nil
+}
+
+// tally 按三类计数并挑出要写的格。每次调用都从 res.Changes 全量重算，
+// 所以第 6 步把新表的变更追加进去之后可以原样再调一次。
+func tally(res *Result) []Change {
+	res.WillWrite, res.Same, res.AbsentInDB = 0, 0, 0
+	var toWrite []Change
+	for _, ch := range res.Changes {
+		switch ch.Kind {
+		case WillWrite:
+			res.WillWrite++
+			toWrite = append(toWrite, ch)
+		case Same:
+			res.Same++
+		case AbsentInDB:
+			res.AbsentInDB++
+		}
+	}
+	return toWrite
 }
 
 // Push 编排一次投影。Apply=false 时**一个写请求都不发**。
@@ -40,7 +114,7 @@ var createTabs = func(ctx context.Context, c *Client, names []string) error {
 //  3. 逐张年度表 ReadHeader → ResolveHeader（任一标签缺失 ⇒ 报错返回；C3 在这里兑现）
 //  4. 逐张 ReadEntryArea → Diff
 //  5. !Apply ⇒ 组装 Result 返回（**到此为止只发过 GET**）
-//  6. CreateSheets 且有缺表 ⇒ 建表（TASK-008）
+//  6. CreateSheets 且有缺表 ⇒ 建表（TASK-008），再对新表补做 3、4
 //  7. WriteCells（只含 WillWrite）
 //
 // 🔴 第 5 步必须在第 6、7 步之前：dry-run 判断若放进 WriteCells 内部，第 6 步的建表会照样
@@ -83,45 +157,34 @@ func Push(ctx context.Context, c *Client, rows []Row, wantLabels []string, opts 
 			strings.Join(missing, "、"))
 	}
 
-	// 3. 表头；4. diff——只对已有的表
+	// 3. 表头；4. diff——先只对已有的表
 	for _, name := range present {
-		header, err := c.ReadHeader(ctx, name)
+		changes, err := diffTab(ctx, c, name, wantLabels, byTab[name])
 		if err != nil {
 			return res, err
 		}
-		cols, err := ResolveHeader(header, wantLabels)
-		if err != nil {
-			return res, fmt.Errorf("hestia sheets: %s: %w", name, err)
-		}
-		current, err := c.ReadEntryArea(ctx, name)
-		if err != nil {
-			return res, err
-		}
-		res.Changes = append(res.Changes, Diff(name, cols, current, byTab[name])...)
+		res.Changes = append(res.Changes, changes...)
 	}
-	var toWrite []Change
-	for _, ch := range res.Changes {
-		switch ch.Kind {
-		case WillWrite:
-			res.WillWrite++
-			toWrite = append(toWrite, ch)
-		case Same:
-			res.Same++
-		case AbsentInDB:
-			res.AbsentInDB++
-		}
-	}
+	toWrite := tally(&res)
 
 	// 5. dry-run 到此为止：上面只发过 GET
 	if !opts.Apply {
 		return res, nil
 	}
 
-	// 6. 建表（TASK-008）
+	// 6. 建缺失的年度表（TASK-008），然后对新表补做第 3、4 步：录入区全空 ⇒ 它们的行全是 WillWrite
 	if len(missing) > 0 {
-		if err := createTabs(ctx, c, missing); err != nil {
+		if err := createYearTabs(ctx, c, tabs, missing); err != nil {
 			return res, err
 		}
+		for _, name := range missing {
+			changes, err := diffTab(ctx, c, name, wantLabels, byTab[name])
+			if err != nil {
+				return res, err
+			}
+			res.Changes = append(res.Changes, changes...)
+		}
+		toWrite = tally(&res)
 	}
 
 	// 7. 只写 WillWrite

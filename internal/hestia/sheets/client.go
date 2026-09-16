@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
@@ -19,8 +20,8 @@ const (
 	entryLastRow  = 15
 	entryLastCol  = 34 // AI
 	valueInputRAW = "RAW"
-	rangeFormat   = "'%s'!%s%d"               // 表名**无条件**单引号：不包的话中文表名的 A1 记法解析不了
-	titleField    = "sheets.properties.title" // Tabs 只要标题，不拉整张表的格
+	rangeFormat   = "'%s'!%s%d"                        // 表名**无条件**单引号：不包的话中文表名的 A1 记法解析不了
+	propsField    = "sheets.properties(sheetId,title)" // Tabs / CreateYearTab 只要标题与 id，不拉整张表的格
 )
 
 // Client 是 Google Sheets 的薄壳：只会读表头、读录入区、列工作表、批量写格。
@@ -62,16 +63,29 @@ func NewClient(ctx context.Context, credentialsFile, spreadsheetID string, opts 
 	return &Client{svc: svc, spreadsheetID: spreadsheetID}, nil
 }
 
-// Tabs 列出全部工作表名。TASK-008 判缺表用。
+// Tabs 列出全部工作表名（按表序）。TASK-008 判缺表用。
 func (c *Client) Tabs(ctx context.Context) ([]string, error) {
-	ss, err := c.svc.Spreadsheets.Get(c.spreadsheetID).Fields(titleField).Context(ctx).Do()
+	props, err := c.sheetProps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(props))
+	for _, p := range props {
+		out = append(out, p.Title)
+	}
+	return out, nil
+}
+
+// sheetProps 取全部工作表的 (sheetId, title)，按表序。
+func (c *Client) sheetProps(ctx context.Context) ([]*sheets.SheetProperties, error) {
+	ss, err := c.svc.Spreadsheets.Get(c.spreadsheetID).Fields(propsField).Context(ctx).Do()
 	if err != nil {
 		return nil, wrapErr("列工作表", err)
 	}
-	out := make([]string, 0, len(ss.Sheets))
+	out := make([]*sheets.SheetProperties, 0, len(ss.Sheets))
 	for _, s := range ss.Sheets {
 		if s.Properties != nil {
-			out = append(out, s.Properties.Title)
+			out = append(out, s.Properties)
 		}
 	}
 	return out, nil
@@ -136,4 +150,96 @@ func wrapErr(action string, err error) error {
 		return fmt.Errorf("hestia sheets: %s: HTTP %d %s: %w", action, ge.Code, http.StatusText(ge.Code), err)
 	}
 	return fmt.Errorf("hestia sheets: %s: %w", action, err)
+}
+
+// titleYear 匹配年度表第 1 行标题开头的年份，如「2024 年 · 金融数据追踪」里的「2024 年」。
+var titleYear = regexp.MustCompile(`^\s*\d{4}\s*年`)
+
+// CreateYearTab 建一张新的年度表：复制模板 → 改名 → 改标题行 → 按年序排位。
+//
+// **复制模板而不是按表头程序生成**（M2b-1 的 D3）：模板表结构完整且录入区全空，
+// 复制自带 54 列表头、单位行、AJ–BB 的 19 个公式与格式，且公式的相对引用会自动
+// 落到新表自己的行上。按表头生成做不到这一点——那 19 个公式是人维护的分析逻辑，
+// 重写代价高且易错。
+//
+// 四步缺一不可：
+//
+//	① DuplicateSheet —— API 默认给新表起名「<模板> 的副本」
+//	② 改名 —— 不改的话选表逻辑按「2021年」找不到它
+//	③ 改表内第 1 行标题 —— 复制来的还写着模板的年份
+//	④ index 排位 —— 不给的话新表堆在末尾，2019 排在 2026 后面
+//
+// ②③ 两处都漏的话，表格看起来就像重复了五张 2024，而每张的数据都是对的——
+// 最难察觉的那种错。
+//
+// 四步放在**一次** spreadsheets:batchUpdate 里，API 保证原子：任一步失败整批不生效，
+// 不会留下一张「2024年 的副本」。新表的 sheetId 由本方指定（现有最大 id + 1），
+// 这样 ②③④ 在同一批里就能引用它。
+func (c *Client) CreateYearTab(ctx context.Context, templateTab, newTab string, year int, index int) error {
+	props, err := c.sheetProps(ctx)
+	if err != nil {
+		return err
+	}
+	var tplID, maxID int64 = -1, -1
+	for _, p := range props {
+		if p.Title == templateTab {
+			tplID = p.SheetId
+		}
+		maxID = max(maxID, p.SheetId)
+	}
+	if tplID < 0 {
+		return fmt.Errorf("hestia sheets: 模板表 %q 不存在，无法建 %q", templateTab, newTab)
+	}
+	newID := maxID + 1
+
+	title, err := c.readTitle(ctx, templateTab)
+	if err != nil {
+		return err
+	}
+	// 模板标题带年份（「2024 年 · 金融数据追踪」）⇒ 只换年份，保留后半句；
+	// 不带年份（含空标题）⇒ 拼一个「<year> 年 · <原标题>」。
+	var newTitle string
+	if titleYear.MatchString(title) {
+		newTitle = titleYear.ReplaceAllString(title, fmt.Sprintf("%d 年", year))
+	} else {
+		newTitle = fmt.Sprintf("%d 年 · %s", year, title)
+	}
+
+	req := &sheets.BatchUpdateSpreadsheetRequest{Requests: []*sheets.Request{
+		// ① 复制模板
+		{DuplicateSheet: &sheets.DuplicateSheetRequest{SourceSheetId: tplID, NewSheetId: newID}},
+		// ② 改名
+		{UpdateSheetProperties: &sheets.UpdateSheetPropertiesRequest{
+			Properties: &sheets.SheetProperties{SheetId: newID, Title: newTab},
+			Fields:     "title",
+		}},
+		// ③ 改表内第 1 行标题
+		{UpdateCells: &sheets.UpdateCellsRequest{
+			Range:  &sheets.GridRange{SheetId: newID, StartRowIndex: 0, EndRowIndex: 1, StartColumnIndex: 0, EndColumnIndex: 1},
+			Rows:   []*sheets.RowData{{Values: []*sheets.CellData{{UserEnteredValue: &sheets.ExtendedValue{StringValue: &newTitle}}}}},
+			Fields: "userEnteredValue",
+		}},
+		// ④ 按年序排位。index 0 是「排最前」，omitempty 会把它吞掉，必须 ForceSendFields
+		{UpdateSheetProperties: &sheets.UpdateSheetPropertiesRequest{
+			Properties: &sheets.SheetProperties{SheetId: newID, Index: int64(index), ForceSendFields: []string{"Index"}},
+			Fields:     "index",
+		}},
+	}}
+	if _, err := c.svc.Spreadsheets.BatchUpdate(c.spreadsheetID, req).Context(ctx).Do(); err != nil {
+		return wrapErr(fmt.Sprintf("建年度表 %s（复制 %s）", newTab, templateTab), err)
+	}
+	return nil
+}
+
+// readTitle 读某张表第 1 行第 1 格（表内标题）。空 ⇒ ""。
+func (c *Client) readTitle(ctx context.Context, tab string) (string, error) {
+	rng := fmt.Sprintf("'%s'!A1", tab)
+	vr, err := c.svc.Spreadsheets.Values.Get(c.spreadsheetID, rng).Context(ctx).Do()
+	if err != nil {
+		return "", wrapErr("读 "+rng, err)
+	}
+	if len(vr.Values) == 0 || len(vr.Values[0]) == 0 {
+		return "", nil
+	}
+	return fmt.Sprint(vr.Values[0][0]), nil
 }
