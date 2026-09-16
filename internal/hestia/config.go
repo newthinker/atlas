@@ -76,12 +76,22 @@ func DefaultSignals() Signals {
 type Config struct {
 	// ConfigVersion 不参与逻辑，只是让「这期用的是哪版配置」在契约里一眼可见
 	// （方案报告 5.3.2）。改配置时手工递增，用日期串。
-	ConfigVersion string      `mapstructure:"config_version"`
-	Storage       StorageCfg  `mapstructure:"storage"`
-	Discover      DiscoverCfg `mapstructure:"discover"`
-	Thresholds    Thresholds  `mapstructure:"thresholds"`
-	Queue         QueueCfg    `mapstructure:"queue"`
-	Signals       Signals     `mapstructure:"signals"`
+	ConfigVersion string       `mapstructure:"config_version"`
+	Storage       StorageCfg   `mapstructure:"storage"`
+	Discover      DiscoverCfg  `mapstructure:"discover"`
+	Thresholds    Thresholds   `mapstructure:"thresholds"`
+	Queue         QueueCfg     `mapstructure:"queue"`
+	Signals       Signals      `mapstructure:"signals"`
+	HestiaSheets  HestiaSheets `mapstructure:"hestia_sheets"`
+}
+
+// HestiaSheets 是 Google Sheets 投影的接入配置（M2b 的 TASK-010）。
+// CredentialsFile 留空 = 能力禁用：ingest 不尝试投影、不报错（spec §8.3 C9），装配方不填
+// IngestDeps.ProjectSheets。密钥文件放 runtime 树外面——deploy.sh 的 rsync --delete 会删掉
+// 源码仓库没有、排除列表也没列的文件。
+type HestiaSheets struct {
+	CredentialsFile string `mapstructure:"credentials_file"`
+	SpreadsheetID   string `mapstructure:"spreadsheet_id"`
 }
 
 // LoadConfig 读配置文件并立即校验。

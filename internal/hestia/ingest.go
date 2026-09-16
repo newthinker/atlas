@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/newthinker/atlas/internal/hestia/sheets"
 	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
@@ -47,7 +48,22 @@ type IngestDeps struct {
 	// 运行时切换清单里要的是「限定一期跑一次」来实测整条链路（spec §5 第 6 步）。
 	// 过滤发生在 Discover 之后、ingestOne 之前——Discover 不动。
 	OnlyPeriod string
+	// ProjectSheets 把本期投影到 Google Sheets（M2b）。nil = 不投影：
+	// 没配 credentials_file 就是静默降级，与 Notify 同形。
+	//
+	// 🔴 失败**不阻断、不改 outcome、不进错误链、不发通知**（spec §6.2）。
+	// 比契约写失败还弱一档——契约失败仍进 errors.Join，因为 M3 在等它；
+	// 投影没有下游，且按 ADR-0004 可再生，下次 ingest 或 sheets push 会补上。
+	//
+	// 发现漏推靠 `atlas hestia sheets push --all`（默认 dry-run）巡检，
+	// 不攒「上次投影到哪」的状态文件——那份状态自己会过期。
+	ProjectSheets func(context.Context, []sheets.Row) error
 }
+
+// buildSheetRows 是投影组装的注入点（同 sheets.createTabs 的手法）。正常库上 BuildSheetRows
+// 构造不出失败——视图按 (period, period_type) 唯一、累计期次期末月互异——C8 的「组装失败」
+// 分支只能经这里注入来测。
+var buildSheetRows = BuildSheetRows
 
 // notifyError 标记「入库成功但通知没发出去」。循环遇到它**不再发 P1**——
 // 那条同样发不出去，只会无限套娃；而错误链里保留底层 err，errors.Is 仍能穿透。
@@ -461,6 +477,16 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) (runResult, erro
 			return fail("contract", contractError{err: err})
 		}
 		fmt.Fprintf(d.Out, "%s contract → %s\n", obs.Meta.Period, path)
+		// 投影在契约之后（M2b 的 TASK-010）：契约有下游在等，投影没有。
+		// ⚠️ 两个分支都**只打印不返回**：写成 return err 或并进 errors.Join 都违反 C8。
+		if d.ProjectSheets != nil {
+			rows, berr := buildSheetRows(ctx, d.Store)
+			if berr != nil {
+				fmt.Fprintf(d.Out, "sheets: 组装失败（不影响入库）: %v\n", berr)
+			} else if perr := d.ProjectSheets(ctx, rows); perr != nil {
+				fmt.Fprintf(d.Out, "sheets: 投影失败（不影响入库）: %v\n", perr)
+			}
+		}
 		temp = Evaluate(obs, d.Cfg.Signals)
 	}
 

@@ -48,6 +48,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/newthinker/atlas/internal/hestia/sheets"
 	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
@@ -1667,4 +1668,122 @@ func TestIngestRejectsUnusableQueueDir(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hestia ingest: ")
 	assert.Contains(t, err.Error(), "contract queue dir")
+}
+
+// —— TASK-010（M2b）：ingest 后自动投影 Sheets ——
+//
+// Context Checkpoint: done_criteria → test mapping (TASK-010)
+// functional[0]     IngestDeps.ProjectSheets 字段（nil=不投影）；config.go HestiaSheets 段
+//                                                        → TestIngestSheetsRunsAfterContract（收到 BuildSheetRows 的行）、TestConfigHestiaSheetsSection
+// functional[1]     顺序 contract → sheets                  → TestIngestSheetsRunsAfterContract
+// boundary[0]       C9：ProjectSheets==nil ⇒ 不投影、不报错   → TestIngestSheetsDisabledWhenNil
+// error_handling[0] C8：投影失败 / 组装失败 只打印固定文案、Ingest nil、outcome ingested、不发 P1
+//                                                        → TestIngestSheetsFailureDoesNotChangeOutcome、TestIngestSheetsBuildFailureDoesNotChangeOutcome
+
+// sheetsIngestDeps 造主路径 deps（一条 2025 年报候选）并挂 fakeSender，供投影用例复用。
+func sheetsIngestDeps(t *testing.T) (IngestDeps, *bytes.Buffer, *fakeSender) {
+	t.Helper()
+	var out bytes.Buffer
+	snd := &fakeSender{}
+	return IngestDeps{Store: newTestStore(t), Fetch: annualFetcher(t), Out: &out, Cfg: ingestCfg(t), Notify: snd}, &out, snd
+}
+
+// requireIngestedNoP1：C8 的三个不变量——数据在库（outcome ingested）、不发 P1。
+func requireIngestedNoP1(t *testing.T, s *Store, snd *fakeSender) {
+	t.Helper()
+	require.Equal(t, RunIngested, newestRun(t, s).Outcome, "run outcome 不受投影影响")
+	for _, txt := range snd.texts {
+		require.NotContains(t, txt, "[P1]", "投影失败不发告警")
+	}
+}
+
+// TestIngestSheetsFailureDoesNotChangeOutcome 是 C8 的核心。
+//
+// 投影按 ADR-0004 可再生，而本机 clash 不常驻、代理没开推不上去是常态。
+// 让它影响 outcome 会让 M1.5 的健康度因为一个投影问题报警；让它发 Telegram
+// 会把人训练成忽略告警。
+func TestIngestSheetsFailureDoesNotChangeOutcome(t *testing.T) {
+	deps, out, snd := sheetsIngestDeps(t)
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error {
+		return errors.New(`post "https://sheets.googleapis.com": proxy refused`)
+	}
+
+	err := Ingest(context.Background(), deps)
+	require.NoError(t, err, "投影失败不该让 ingest 返回错误")
+	requireIngestedNoP1(t, deps.Store, snd)
+	// 判据七拿这一行判：文案一字不能改（全角括号、冒号后一个空格）。
+	require.Contains(t, out.String(), "sheets: 投影失败（不影响入库）: post \"https://sheets.googleapis.com\": proxy refused\n")
+}
+
+// TestIngestSheetsBuildFailureDoesNotChangeOutcome：组装失败是 C8 的另一支，同样只打印。
+// 正常库上 BuildSheetRows 构造不出失败（视图按 (period, period_type) 唯一、累计期次期末月互异），
+// 所以经包内 seam 注入。
+func TestIngestSheetsBuildFailureDoesNotChangeOutcome(t *testing.T) {
+	orig := buildSheetRows
+	t.Cleanup(func() { buildSheetRows = orig })
+	buildSheetRows = func(context.Context, *Store) ([]sheets.Row, error) {
+		return nil, errors.New("hestia sheets: 2025-12 tie")
+	}
+	projected := false
+	deps, out, snd := sheetsIngestDeps(t)
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { projected = true; return nil }
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	requireIngestedNoP1(t, deps.Store, snd)
+	require.False(t, projected, "组装失败就没有行可投影")
+	require.Contains(t, out.String(), "sheets: 组装失败（不影响入库）: hestia sheets: 2025-12 tie\n")
+}
+
+// TestIngestSheetsDisabledWhenNil：C9 —— 没配凭据就静默跳过。
+func TestIngestSheetsDisabledWhenNil(t *testing.T) {
+	deps, out, snd := sheetsIngestDeps(t)
+	deps.ProjectSheets = nil
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	requireIngestedNoP1(t, deps.Store, snd)
+	require.NotContains(t, out.String(), "sheets:", "能力禁用时不该有任何投影相关输出")
+}
+
+// TestIngestSheetsRunsAfterContract：投影排在契约队列之后。
+//
+// 契约是 M3 解读的输入、有下游在等；投影没有下游。先做有下游的那个。
+// 没有现成的时序钩子，就用内容判据：ProjectSheets 被调用那一刻 queue/pending 里契约已落盘。
+func TestIngestSheetsRunsAfterContract(t *testing.T) {
+	deps, _, _ := sheetsIngestDeps(t)
+	var order []string
+	var got []sheets.Row
+	deps.ProjectSheets = func(_ context.Context, rows []sheets.Row) error {
+		if m, _ := filepath.Glob(filepath.Join(deps.Cfg.Queue.Dir, "pending", "*.json")); len(m) > 0 {
+			order = append(order, "contract")
+		}
+		order = append(order, "sheets")
+		got = rows
+		return nil
+	}
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	require.Equal(t, []string{"contract", "sheets"}, order)
+	// 收到的是 BuildSheetRows 组装的本库全部行：只入了 2025 年报一期。
+	require.Len(t, got, 1)
+	require.Equal(t, 2025, got[0].Year)
+	require.Equal(t, 12, got[0].Month)
+}
+
+// TestConfigHestiaSheetsSection：hestia_sheets 段两个键都能读到；留空是合法配置（C9）。
+func TestConfigHestiaSheetsSection(t *testing.T) {
+	// 其余必填键照 config_test.go 的 writeConfig 用例抄最小合法集。
+	path := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+hestia_sheets:
+  credentials_file: /tmp/sa.json
+  spreadsheet_id: sheet-id
+`)
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.Equal(t, HestiaSheets{CredentialsFile: "/tmp/sa.json", SpreadsheetID: "sheet-id"}, cfg.HestiaSheets)
 }
