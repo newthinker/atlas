@@ -3677,11 +3677,70 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 - **O2｜措辞不准**（同上）：「`src/cli/resources/groups.ts` 没有任何 `additional_mounts` 子命令」——该文件确有一处 `additional_mounts` 的**只读序列化**（DB 行转展示对象），没有的是**写入**子命令。结论成立，措辞需更准。
 - **O3｜rationale 偏强**（test-m3-a，TASK-001 返工复验）：`ingest_test.go` 那条防回归断言的理由写「将来有人把夹具改回污染 annual 行 ⇒ 缺口悄悄回来」，**偏强**——A′/B′ 两臂实测：删掉该断言后另两条 `Contains` **仍会红**，缺口会被**大声报红**、藏不住。该断言**有效但不是唯一的闸**（与 TASK-002 里那个永不执行的 `if derr == nil` 形状不同）。准确措辞：「另两条会红但指向模糊，这条把失败定位到 `monthly_recent` 那次查询」。**不构成缺陷，仅留痕。**
 
-### C. 集成冒烟记录 —— ⏸ 本 sprint 不做（AD-M3-2），结转下个 sprint
+### C. 集成冒烟记录 —— ✅ 已完成（2026-09-16）
 
-> 🟢 **前置已于 2026-09-16 全部齐备，冒烟现在可跑。** 首期验收通过（`## Sprint M1d` §G）⇒ 三迭代已一次投递（`## Sprint M1.5` §D），运行时二进制含侧车（`hestia contract emit --help` 有 `--period-type`）。
-> 另三条人执行前置也已完成：loom PR #13 合并且 selvage 用新二进制重启、nanoclaw 本机 checkout 切回 `main`（skill 在工作树）、挂载白名单与中央 DB 的 `additional_mounts` 均已配。
-> ⚠️ **队列现为空**（投递时被 `deploy.sh` 清掉、缺陷已修，见 `## Sprint M1.5` §D）⇒ 冒烟第一步 `contract emit` 造的那一份就是队列里唯一的一份，「队列为空」那条判据可直接验。
+**五条判据全过，另加两轮回归（队列为空 / 重放保留批注）。** M3 至此闭环：从 Atlas 写契约到 vault 里出现一篇带 `reviewed: false` 的解读笔记，全链路跑通。
+
+| 判据 | 实测 |
+|---|---|
+| 笔记落 vault | `Wiki/Macro/PBOC/2026 上半年金融数据解读.md`，**8168** 字节 |
+| 契约与侧车进 `done/` | `2026-06-h1.json` + `2026-06-h1.history.json` |
+| `processing/` 清空 | 是 |
+| vault git 的 Spool 提交 | `7c6a88e`，作者 `loom-vaultgit`，message 带 `[req:c-1789520268476-zfrhej]`；selvage 审计 `spool: archive … OK; committed` |
+| `verify.py` | 退出码 **0**（两轮写入后各跑一次，均 0） |
+
+**frontmatter 逐项**（`prepare.py` 生成，模型未碰）
+
+```
+type: summary · domain: macro · created/updated: 2026-09-16 · tags: [macro/pboc]
+sources: [2026071512340454869] · period: 2026-06 · period_type: h1
+published_at: 2026-07-15 · caliber_version: 2025-01 · extractor: rule@v2
+m2_yoy: 8 · m1_yoy: 4 · scissors: -4 · tsf_stock_yoy: 7.40
+hh_mlt_monthly: 368.67 · hh_short_monthly: -980.17 · bill_ratio: 7.32
+temp_score: 1 · temp_known: 4
+signal_activation/housing/consumption: red · signal_credit: green
+generated_by: warp-hestia@v1 · contract_generated_by: contract@v1/replay
+source: hestia · reviewed: false        ← 这两项由 Spool 强制写入，脚本不填
+```
+
+四信号与 `## Sprint M2a` 的三期 golden 里 2026H1 那一行**逐项一致**（🔴🔴🔴🟢 / 1）；`hh_mlt_monthly` 368.67 = 2212 ÷ 6，**容器侧月均算法与 `Evaluate` 同源**这条由此实证，不再只是设计声明。
+
+**时序**：08:53:55 容器 spawn → 08:54:09 agent 回「收到」并把两个文件移进 `processing/` → 08:57:49 Spool 写盘并提交 → 08:58:05 agent 回执。**端到端约 4 分钟**。
+
+#### 🟢 history 侧车确实被消费了（D3 的实证）
+
+叙述段里出现了**契约本身没有的数**：住户存款去年同期 107700 亿元、住户贷款去年同期净增约 11697 亿元、企业中长期÷短期去年 1.67、票据去年 −464 亿元（净偿还）、`rate_ibo` 去年 1.46%。这些全部来自 `2026-06-h1.history.json` 的 `same_type` 段。
+⇒ **「前 12 期序列是叙述质量的决定因素」（方案报告 6.2）不是空话**：没有侧车，这篇只能就单期数据说套话，写不出「从存↑贷↑转为存↓贷↓」「比值从 1.67 降至 1.21 退出扩张区间」这类判断。
+⚠️ 模型还自己标了「侧车中 2023-06 及更早期次口径不同，以下同比仅引用同口径的 2025-06 H1」——`glossary.md` 的口径纪律被遵守了。
+
+#### 🔴 重放时叙述被原样保留，但**这不是 skill 规定的**
+
+第三轮（同一份契约重新 emit 后再处理）实测：vault git 两次提交的 diff 是 **+2 行 / −0 行**，新增的恰是人手写的那行批注 ⇒ **机器区与叙述段逐字节相同**。
+
+agent 的回执自陈：「本次是同一份契约的重新处理，叙述内容与首次相同，批注区已正确保留」。
+
+⚠️ **`prepare.py --existing` 只搬批注区**（`extract_annotations` 按 `## 我的批注` 切，取其后原文），**叙述段是空骨架 + 判读提示**，规格上该由模型重写。所以这次的逐字节相同是**模型自主选择复用**，不是脚本保证。
+
+⇒ **结论两面都要记**：
+- **好的一面**：重放在实践中是幂等的，不会因为重跑而产生一篇判断不同的历史文档（这正是 ADR-0004 关心的）。
+- **不能依赖**：换一次运行、换一个模型版本，叙述可能被重写，届时同一份数据会产出两篇措辞不同的解读，而 `verify.py` **不会报错**（它只校验机器区的 `check` 行，叙述段刻意不在校验范围内）。
+- 若要把「重放不改叙述」变成保证，得让 `prepare.py --existing` 连同 `<!-- narrative -->` 段一起搬过来，并在 SKILL.md 里写明「重放时不重写叙述，除非数据变了」。**本次不改**，先登记。
+
+#### 📌 两轮回归
+
+- **队列为空**：第二次触发回「队列为空，无待处理契约」⇒ 一次只处理一份的设计成立。
+- **批注保留**：人在 `## 我的批注` 下手写一行后重新 emit 并处理，该行原样在，`update` 路径的 Spool 提交为 `04ed3a6`。
+
+#### 📌 触发方式与环境实测
+
+- **触发走的是 NanoClaw 的本地 CLI 渠道**（`data/cli.sock`，`pnpm run chat <msg>`），即人平时跟 Warp 说话的同一条路。客户端有 120 秒硬超时且静默 2 秒即退出，而本次 agent 跑了约 4 分钟 ⇒ **客户端会先退出，agent 在容器里继续跑完**。判定必须看队列与 vault，不能看客户端输出。
+- 容器挂载实测：`vault`（只读）/ `/app/skills`（只读，`warp-hestia` 在）/ `hestia-queue`（**rw=true**）。`Mount allowlist loaded successfully … allowedRoots=2`。
+- 容器内 `python3` 为 **3.11.2**；`prepare.py --print-name` 直接跑通并输出 `2026 上半年金融数据解读.md`。
+
+---
+
+**以下为本记录写成之前（Sprint 定稿时）的说明，保留备查。**
+
 
 **为什么不是留空**：需求文档 TASK-006（集成冒烟）自述前置是「M1.5 + M2a + M3 一次投递之后」，而那次投递又排在 **2026-08 月报首期验收（09-09 ~ 09-15）之后**；本 sprint 于 **2026-09-08** 定稿，**结构上不可能完成**。下个 sprint 直接用下面的判据原文。
 
@@ -3704,8 +3763,10 @@ python3 /Users/zuowei/workspace/ai/nanoclaw/container/skills/warp-hestia/scripts
 需求 line 644 / 961 让在日志里找 `Mount forced to read-only` / `not under any allowed root` 来诊断挂载问题，但在「**队列根不存在**」这个实际场景下**这两个都不会出现**。`mount-security/index.ts` 的三条路径是 `Host path does not exist`（队列根不存在走这条）、`not under any allowed root`、`Mount forced to read-only`，而队列根不存在最终落到 `log.warn('Additional mount REJECTED')`：**整条挂载被丢弃、容器照常起**。
 ⇒ **要 grep 的关键字是 `Additional mount REJECTED`。** 照需求原文找那两个会一无所获，然后误判为「挂载正常」。
 
+
 ### D. 结转
 
+0. ✅ ~~集成冒烟~~ **已完成（2026-09-16）**，见 §C。剩余人执行前置只有 `examples/2026-06-h1.md` 回填（需人审产物）。
 1. **`hestia_inbox_pending` collector**：数 `Wiki/Macro/PBOC/` 里 `reviewed: false` 的文件数，加进 M1.5 collector（M2b 或之后）。
 2. **「连续 3 期事实性零错误、改动量 < 20%」**：第一期以 **2026-08 月报**为准。
 3. **launchd 自动触发**（5.1.1 A）：等真觉得烦了再加。
