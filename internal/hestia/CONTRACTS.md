@@ -3310,7 +3310,7 @@ no new reports (stopped: seen_article)`，且 `err.log` 不再增长。
 | # | 项 | 出处 | 建议 |
 |---|---|---|---|
 | ~~C1~~ | ~~`fmtNum` 的 `%g` 真钉法缺失~~ | §A4 | ✅ **已销（`9ccd593`）**：`TestFmtNumKeepsPlainDigitsAboveMillion` 断言 `fmtNum(1776000) == "1776000"` 并在 1e6 两侧各取一点；同时删掉恒过的 `NotContains("1.776e+05")`、订正 `fmtNum` 注释里那句假理由。变异实测：换 `%g` ⇒ 转红 |
-| C2 | 通知失败无重试 | QA A6（spec §4.3 接受） | M1.5 加退避重试，或 `hestia status` 显示最近 notify 失败 |
+| ~~C2~~ | ~~通知失败无重试~~ **第二半已销（M1.5 TASK-007，2026-09-16 投递后实测）**：`hestia status` 的 `runs` 段已上线，`notify_error` 逐行可见（该段随 M1.5 投递生效，`runs: 1` 实测）。**第一半（退避重试）仍挂着**，转 `## Sprint M1.5` §C 的 M2 前跟踪 | QA A6（spec §4.3 接受） | 退避重试待有真实失败样本再评估 |
 | ~~C3~~ | ~~`buildHestiaSender` 错误串里 `cfgFile` 的 `%s` 无守卫~~ ✅ **已销（`9ccd593`）**：补「YAML 非法」子用例——viper 解析错误不含路径，外层前缀成为唯一来源；变异去掉 `%s` ⇒ 转红，H-A5c 不再是等价变异。原挂账理由 | 验证者变异 H-A5c 存活（等价变异：两条用例都用「文件不存在」造失败，内层 `os.PathError` 已带路径） | 加一条「文件存在但 YAML 非法」的子用例 |
 | C4 | 运行时根目录残留旧 `atlas` 二进制（2026-08-07） | QA 清单 | 切换清单第 4 步顺手删 |
 | C5 | `--only-period 2026-07` 约 10 月中旬后失效（掉出索引页前 3 页） | QA 清单 | 切换清单若延后执行，改用当期期次 |
@@ -3490,6 +3490,56 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 
 **§B 口径订正**：TASK-001 变异 M6「`RecentRuns` 去掉 `rowid DESC`」此前登记为「等价变异 / 测试强度边界」——QA 复判为**非等价**：索引 `hestia_runs_run_at` 在场时反向扫描恰好给出 rowid 逆序掩盖了它，`DROP INDEX` 即可杀。故 M6 应改记「被索引掩盖的存活」，同 `run_at` 多行的次序仍无测试守着（`status`/`RecentRuns` 消费者对同轮多行不依赖次序，暂不补）。
 
+
+### D. 投递与验收（2026-09-15 投递 · 2026-09-16 验收通过）
+
+🔴 **一次投递三个迭代**：M1.5 + M2a + M3 同时上线（代码分别合并于 Sprint 044 / 045 / 046，此前**均未 deploy**）。
+前置「2026-08 月报首期增量验收」已于 2026-09-15 通过，见 `## Sprint M1d` **§G**。
+
+| 步骤 | 实测 |
+|---|---|
+| 备份 | 运行时库三件套 `hestia.db{,-wal,-shm}.bak-20260915-221803`（`-wal` 0 字节、`lsof` 无输出后才备） |
+| `deploy.sh` | 2026-09-15 22:18；二进制重建投递；`configs/hestia.yaml` 同步到 `config_version 2026-09-05`（含 `queue` 与 `signals` 两段） |
+| `install-services.sh` | **刻意跳过**：`deploy/launchd/` 自 2026-09-04 未改，已安装的 `hestia-ingest` / `serve` 两份与仓库 `diff` 为空且均已装载 ⇒ 跑它只会连带 bootout/bootstrap 其余八个服务 |
+| 主配置（`deploy.sh` 排除，须手改） | 加 `hestia.config_path: "configs/hestia.yaml"`；`alerts.rules` 追加 `hestia_stalled`（30h / for 10m / cooldown 24h）与 `hestia_no_ingest`（960h / for 1h / cooldown 24h）；权限仍 `600` |
+| `serve` 重启 | `atlas.err.log` 出现 `hestia health enabled config=configs/hestia.yaml db=data/hestia.db`；告警循环由 `rules:2` 变 **`rules:4`** |
+
+**三条验收（M1.5 spec §7.2）全过**
+
+| # | 判据 | 实测 |
+|---|---|---|
+| 一 | `/metrics` 指标可见且与库一致 | `hestia_pending_review 21` == `select count(*) from hestia_pending`；五个 `outcome` 序列恒输出且全 0；**四个时间戳类指标不输出**（运行表当时为空，按设计）；`hestia_collect_errors_total 0` |
+| 二 | 告警能到人 | 临时把 `hestia_stalled` 改为 `> 0` / `for 1m` 并重启，3 分钟后**人类目视确认收到** critical 消息；随即改回 30h / 10m 并重启，与测试前备份**逐字节相同** |
+| 三 | `hestia status` 的 `runs` 段 | 手工跑一次 ingest ⇒ 写入一行 `no_new` 心跳（`duration_ms 199`）；`runs: 1` 显示该行；`hestia_hours_since_last_run` 与 `hestia_last_run_timestamp` 随之出现，`runs_total{outcome="no_new"}` 变 1 |
+
+**M2a / M3 的投递侧核对**：`hestia contract emit --period 2026-08 --period-type monthly --stdout` 用**部署版**二进制回放，
+`data` 52 + `absent_fields` 24 = **76**，`generated_by contract@v1/replay`，`thresholds.config_version 2026-09-05`、
+`signals.scissors_sink -2`、`temp_scale 0-4`；`--stdout` 未落盘。队列四目录由 `EnsureQueueDirs` 建齐。
+
+#### 🔴 投递中发现并修复的缺陷：`deploy.sh` 会整棵删掉契约队列
+
+`rsync --delete` 的排除列表有 `/data/`、`/logs/`、`/configs/config.yaml`，**唯独没有 `/queue/`**，
+而仓库里根本没有这个目录 ⇒ 运行时 `queue/` 被整棵删除。本次实测：投递前 `pending/` 里有两份
+（2026-09-10 手工 `contract emit` 造的 `2026-07-monthly` 契约与侧车），投递后消失。
+
+⚠️ **它为什么难被发现**：四个子目录随后由任意一次 `ingest` 的 `EnsureQueueDirs` 重建，
+**事后看只是「队列空了」，没有任何错误**。本次是因为投递前刚数过「pending: 2 个文件」才对得上。
+
+⇒ **危害在 M3 上线之后**：`pending/` 里可能躺着等消费的契约、`processing/` 里可能有在途的，
+一次部署全没。契约可用 `contract emit --period` 重建，但 `done/` 的历史与在途状态一起消失。
+
+**已修**（`0e9a12e`）：排除列表加 `--exclude='/queue/'`，头部注释记成因。
+**验证方式是实证而非推理**：在 `pending/` 放标记文件后重跑 `deploy.sh`，标记幸存、四目录完好。
+
+#### 📌 两条顺带登记
+
+- **`hestia_runs` 表无需迁移**：2026-09-10 一次手工 `contract emit`（用当时的 master 二进制指着运行时配置）
+  已让 `NewStore` 把表建好 ⇒ 本次投递时 schema 已就位。`CREATE TABLE IF NOT EXISTS` 对已存在的表无操作，
+  这与 M1c-4 §F「`observationsDDL` 只在建表时生效」是同一条机制的两面：**加表是幂等的，加列不是。**
+- **QA C2「首次真实入库前 `hestia_no_ingest` 结构性不触发」仍然成立**：投递后运行表只有心跳行，
+  `hestia_hours_since_last_ingest` 与 `hestia_last_ingest_timestamp` **至今不输出**，该规则恒 false。
+  下一期真实月报（2026-09，10 月中发布）入库后自然闭合，届时确认这两个指标出现。
+
 ## Sprint M2a · 契约队列与信号快照
 
 ### A. 契约更正 —— 既有陈述已被证伪或需收窄
@@ -3564,7 +3614,7 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 
 - **M2b Sheets 投影**：前置 spike——用 Service Account 读一次表头（M0 未记列布局）；契约与 Sheets 无依赖。
 - **M3 消费者契约**：只读 `pending/`，流转 `processing/ done/ failed/` 归它；文件名 `<period>-<period_type>.json`；`generated_by` 后缀 `/replay` 表示回放；两份回放样本全文在 `.arcforge` 归档的 TASK-007 discovery 与验证报告里。
-- 投递与 M1.5 一起，等 2026-08 首期验收登记之后；投递后 `contract emit --period 2026-07 --stdout` 核形状。**本 Sprint 未跑 `deploy.sh`**。
+- ~~投递与 M1.5 一起，等 2026-08 首期验收登记之后~~ ✅ **已投递（2026-09-15）**：与 M1.5 + M3 一次上线，投递与验收记录统一在 `## Sprint M1.5` **§D**。投递侧核对用的是 `2026-08`（首期验收那一期）而非需求写的 `2026-07`：`data` 52 + `absent_fields` 24 = 76、`generated_by contract@v1/replay`、阈值快照正确。
 - `corp_mlt_short_expand` 只快照不参与四信号；若 4.7 补第五个信号，`temp_scale` 随之改并先改 `validate` 的 `"0-4"` 判据。
 - 挂账（非阻断）：`Store.PriorPublishedAt` 的查询错误分支在 ingest 路径不可达（唯一未覆盖语句）；004 变异 Q4（`writeAtomic` 换 `os.WriteFile`）/ Q8（目录权限位）单进程测试不可观测；005 变异 M11（`source_url` 回落值与显式值同形）/ M12（契约打印行无断言）低优先未补。
 
@@ -3628,6 +3678,10 @@ QA 两轮结论 PASS（0 critical · 4 warning · 13 info；codex CLI 30 分钟�
 - **O3｜rationale 偏强**（test-m3-a，TASK-001 返工复验）：`ingest_test.go` 那条防回归断言的理由写「将来有人把夹具改回污染 annual 行 ⇒ 缺口悄悄回来」，**偏强**——A′/B′ 两臂实测：删掉该断言后另两条 `Contains` **仍会红**，缺口会被**大声报红**、藏不住。该断言**有效但不是唯一的闸**（与 TASK-002 里那个永不执行的 `if derr == nil` 形状不同）。准确措辞：「另两条会红但指向模糊，这条把失败定位到 `monthly_recent` 那次查询」。**不构成缺陷，仅留痕。**
 
 ### C. 集成冒烟记录 —— ⏸ 本 sprint 不做（AD-M3-2），结转下个 sprint
+
+> 🟢 **前置已于 2026-09-16 全部齐备，冒烟现在可跑。** 首期验收通过（`## Sprint M1d` §G）⇒ 三迭代已一次投递（`## Sprint M1.5` §D），运行时二进制含侧车（`hestia contract emit --help` 有 `--period-type`）。
+> 另三条人执行前置也已完成：loom PR #13 合并且 selvage 用新二进制重启、nanoclaw 本机 checkout 切回 `main`（skill 在工作树）、挂载白名单与中央 DB 的 `additional_mounts` 均已配。
+> ⚠️ **队列现为空**（投递时被 `deploy.sh` 清掉、缺陷已修，见 `## Sprint M1.5` §D）⇒ 冒烟第一步 `contract emit` 造的那一份就是队列里唯一的一份，「队列为空」那条判据可直接验。
 
 **为什么不是留空**：需求文档 TASK-006（集成冒烟）自述前置是「M1.5 + M2a + M3 一次投递之后」，而那次投递又排在 **2026-08 月报首期验收（09-09 ~ 09-15）之后**；本 sprint 于 **2026-09-08** 定稿，**结构上不可能完成**。下个 sprint 直接用下面的判据原文。
 
