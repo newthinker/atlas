@@ -1,0 +1,387 @@
+[
+ {
+  "Period": "2019-12",
+  "PeriodType": "annual",
+  "PublishedAt": "2020-01-16"
+ },
+ {
+  "Period": "2020-02",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-03-11"
+ },
+ {
+  "Period": "2020-03",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-04-10"
+ },
+ {
+  "Period": "2020-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2020-04-10"
+ },
+ {
+  "Period": "2020-04",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-05-11"
+ },
+ {
+  "Period": "2020-05",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-06-10"
+ },
+ {
+  "Period": "2020-06",
+  "PeriodType": "h1",
+  "PublishedAt": "2020-07-10"
+ },
+ {
+  "Period": "2020-06",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-07-10"
+ },
+ {
+  "Period": "2020-07",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-08-11"
+ },
+ {
+  "Period": "2020-09",
+  "PeriodType": "monthly",
+  "PublishedAt": "2020-10-14"
+ },
+ {
+  "Period": "2020-09",
+  "PeriodType": "q1_q3",
+  "PublishedAt": "2020-10-14"
+ },
+ {
+  "Period": "2020-12",
+  "PeriodType": "annual",
+  "PublishedAt": "2021-01-12"
+ },
+ {
+  "Period": "2021-01",
+  "PeriodType": "monthly",
+  "PublishedAt": "2021-02-09"
+ },
+ {
+  "Period": "2021-02",
+  "PeriodType": "monthly",
+  "PublishedAt": "2021-03-10"
+ },
+ {
+  "Period": "2021-03",
+  "PeriodType": "monthly",
+  "PublishedAt": "2021-04-12"
+ },
+ {
+  "Period": "2021-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2021-04-12"
+ },
+ {
+  "Period": "2021-06",
+  "PeriodType": "h1",
+  "PublishedAt": "2021-07-09"
+ },
+ {
+  "Period": "2021-06",
+  "PeriodType": "monthly",
+  "PublishedAt": "2021-07-09"
+ },
+ {
+  "Period": "2021-09",
+  "PeriodType": "monthly",
+  "PublishedAt": "2021-10-13"
+ },
+ {
+  "Period": "2021-09",
+  "PeriodType": "q1_q3",
+  "PublishedAt": "2021-10-13"
+ },
+ {
+  "Period": "2021-11",
+  "PeriodType": "monthly",
+  "PublishedAt": "2021-12-09"
+ },
+ {
+  "Period": "2021-12",
+  "PeriodType": "annual",
+  "PublishedAt": "2022-01-12"
+ },
+ {
+  "Period": "2022-01",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-02-10"
+ },
+ {
+  "Period": "2022-03",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-04-11"
+ },
+ {
+  "Period": "2022-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2022-04-11"
+ },
+ {
+  "Period": "2022-04",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-05-13"
+ },
+ {
+  "Period": "2022-05",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-06-10"
+ },
+ {
+  "Period": "2022-06",
+  "PeriodType": "h1",
+  "PublishedAt": "2022-07-11"
+ },
+ {
+  "Period": "2022-06",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-07-11"
+ },
+ {
+  "Period": "2022-07",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-08-12"
+ },
+ {
+  "Period": "2022-08",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-09-09"
+ },
+ {
+  "Period": "2022-09",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-10-11"
+ },
+ {
+  "Period": "2022-09",
+  "PeriodType": "q1_q3",
+  "PublishedAt": "2022-10-11"
+ },
+ {
+  "Period": "2022-10",
+  "PeriodType": "monthly",
+  "PublishedAt": "2022-11-10"
+ },
+ {
+  "Period": "2022-12",
+  "PeriodType": "annual",
+  "PublishedAt": "2023-01-10"
+ },
+ {
+  "Period": "2023-01",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-02-10"
+ },
+ {
+  "Period": "2023-03",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-04-11"
+ },
+ {
+  "Period": "2023-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2023-04-11"
+ },
+ {
+  "Period": "2023-05",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-06-13"
+ },
+ {
+  "Period": "2023-06",
+  "PeriodType": "h1",
+  "PublishedAt": "2023-07-11"
+ },
+ {
+  "Period": "2023-06",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-07-11"
+ },
+ {
+  "Period": "2023-07",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-08-11"
+ },
+ {
+  "Period": "2023-08",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-09-11"
+ },
+ {
+  "Period": "2023-09",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-10-13"
+ },
+ {
+  "Period": "2023-09",
+  "PeriodType": "q1_q3",
+  "PublishedAt": "2023-10-13"
+ },
+ {
+  "Period": "2023-10",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-11-13"
+ },
+ {
+  "Period": "2023-11",
+  "PeriodType": "monthly",
+  "PublishedAt": "2023-12-13"
+ },
+ {
+  "Period": "2024-01",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-02-09"
+ },
+ {
+  "Period": "2024-02",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-03-15"
+ },
+ {
+  "Period": "2024-03",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-04-12"
+ },
+ {
+  "Period": "2024-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2024-04-12"
+ },
+ {
+  "Period": "2024-06",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-07-12"
+ },
+ {
+  "Period": "2024-08",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-09-13"
+ },
+ {
+  "Period": "2024-09",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-10-14"
+ },
+ {
+  "Period": "2024-09",
+  "PeriodType": "q1_q3",
+  "PublishedAt": "2024-10-14"
+ },
+ {
+  "Period": "2024-11",
+  "PeriodType": "monthly",
+  "PublishedAt": "2024-12-13"
+ },
+ {
+  "Period": "2024-12",
+  "PeriodType": "annual",
+  "PublishedAt": "2025-01-14"
+ },
+ {
+  "Period": "2025-01",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-02-14"
+ },
+ {
+  "Period": "2025-03",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-04-13"
+ },
+ {
+  "Period": "2025-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2025-04-13"
+ },
+ {
+  "Period": "2025-04",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-05-14"
+ },
+ {
+  "Period": "2025-05",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-06-13"
+ },
+ {
+  "Period": "2025-06",
+  "PeriodType": "h1",
+  "PublishedAt": "2025-07-14"
+ },
+ {
+  "Period": "2025-06",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-07-14"
+ },
+ {
+  "Period": "2025-07",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-08-13"
+ },
+ {
+  "Period": "2025-08",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-09-12"
+ },
+ {
+  "Period": "2025-09",
+  "PeriodType": "q1_q3",
+  "PublishedAt": "2025-10-15"
+ },
+ {
+  "Period": "2025-10",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-11-13"
+ },
+ {
+  "Period": "2025-11",
+  "PeriodType": "monthly",
+  "PublishedAt": "2025-12-12"
+ },
+ {
+  "Period": "2025-12",
+  "PeriodType": "annual",
+  "PublishedAt": "2026-01-15"
+ },
+ {
+  "Period": "2026-01",
+  "PeriodType": "monthly",
+  "PublishedAt": "2026-02-13"
+ },
+ {
+  "Period": "2026-03",
+  "PeriodType": "q1",
+  "PublishedAt": "2026-04-13"
+ },
+ {
+  "Period": "2026-04",
+  "PeriodType": "monthly",
+  "PublishedAt": "2026-05-14"
+ },
+ {
+  "Period": "2026-05",
+  "PeriodType": "monthly",
+  "PublishedAt": "2026-06-12"
+ },
+ {
+  "Period": "2026-06",
+  "PeriodType": "h1",
+  "PublishedAt": "2026-07-15"
+ },
+ {
+  "Period": "2026-07",
+  "PeriodType": "monthly",
+  "PublishedAt": "2026-08-14"
+ },
+ {
+  "Period": "2026-08",
+  "PeriodType": "monthly",
+  "PublishedAt": "2026-09-14"
+ }
+]

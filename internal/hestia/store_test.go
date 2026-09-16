@@ -419,7 +419,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory", "sheets.ColumnLetter", "sheets.ResolveHeader"}
+	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "BuildSheetRows", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory", "sheets.ColumnLetter", "sheets.ResolveHeader"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -667,6 +667,17 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 //
 // 它们排在 WriteHistory 之后是字节序结果（小写 "s" > 大写 "W"），子包符号带
 // "sheets." 前缀所以整体落在名单末尾；TASK-001 的 exportedFuncs 就是这么排的。
+
+// —— 为什么名单里多了 BuildSheetRows（M2b 的 TASK-004 追加）——
+//
+// 同 Store.AllPeriods，是**登记而不是放宽**。它是父包里的编排函数：AllPeriods + Current
+// 两个读方法，选行、组装成 []sheets.Row 纯数据交出去，不碰任何写路径。
+//
+// 为什么放在父包而不是子包：它要拿 *Store 读库，而子包按 C2 不许见 *Store / *sql.DB
+// （理由在 sheets.go 包注释）。所以「读库 → 纯值」这一步只能在这一侧做，子包收到的
+// 已经是没有句柄的 Row。SheetColumns 是变量不是函数，exportedFuncs 不收，不必登记。
+//
+// 排在 BuildHistory 与 Calibrate 之间是字节序结果（"BuildS" > "BuildH"）。
 
 // recvTypeName 取接收者的类型名，剥掉指针与泛型实参。
 func recvTypeName(e ast.Expr) string {
