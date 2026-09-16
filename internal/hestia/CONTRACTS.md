@@ -3818,3 +3818,109 @@ WHERE agent_group_id = 'ag-1782440732275-pqkuxs';
 **为何不判红**：`note-format.md` 规格明定封条作用域自 `<!-- machine-generated: begin -->` 的**下一行**起，DoD 逐字要求如此实现，`verify.py` 忠实实现，TASK-005 / 006 / 007 三任验证者均按此判过 PASS。**这不是缺陷。**
 
 **待决问题**：它确实是一个**不被这道闸覆盖的数据面**。本 skill 存在的理由是「模型只改 narrative」，而 frontmatter 里恰有 14 个基础字段 + 9 个派生指标 + 4 个信号，**改这些不会被 `verify.py` 发现**。是否把封条作用域上移到 frontmatter 起始，是**规格层取舍**（收紧会让人工修 frontmatter 也判红），不是实现缺陷，**必须由人决定**。
+
+---
+
+## Sprint M3-fix · content_path 根因修复（2026-09-16）
+
+**背景**：M3 闭环后给笔记加图表，加完首次跑真实管线，vault 成品机器区出现 **8 处形近字替换**。
+加图之前的两版重跑 `verify.py` 均 exit 0，这一版 exit 1。
+
+**A｜损坏取证（修复前实测）**
+
+| 项 | 实测 |
+|---|---|
+| `verify.py` 退出码 | **1** |
+| 含损坏字的行数 | **4** 行（共 8 处） |
+| 替换样式 | 绿灯→绳灯、沉淀线→沉淠线、未贴现承兑汇票→未贴现承兼汇票 |
+| 数字受损 | **0 处**——全部基础字段与派生指标逐项核对无误 |
+
+⚠️ **全是形近字，数字一个没错**。这正是危险之处：数值校验、口径校验、七道闸**一道都不会响**，
+只有封条这种全文指纹才拦得住。若当初把封条作用域定窄一点，这批损坏就会悄悄进 vault。
+
+**B｜根因：校验与归档之间有一段无保护**
+
+旧 SKILL.md 的 Step 4 对**磁盘上的成稿**跑 `verify.py`，Step 5 再把**文件全文誊写**进
+`selvage_call` 的 `content` 参数。于是：
+
+```
+prepare.py 产出 ──► 落盘 ──► verify.py 校验这份字节  ✅
+                              │
+                              └──► 模型誊写 ──► content ──► Spool 写 vault  ⚠️ 这段没有任何校验
+```
+
+**图表不是原因**，只是把机器区从约 40 行加到 95 行、多出一千余汉字，
+让一个一直存在的缺口从偶发变必现。🔴 **不要把这条记成「图表引入的 bug」**——
+记错了，下次删掉图表就会以为问题解决了。
+
+**C｜两道闸（都做了，缺一不可）**
+
+| 闸 | 位置 | 防什么 |
+|---|---|---|
+| `content_path` | loom Spool | 防**誊写**：Spool 自己从磁盘读那份被校验过的字节，模型不再经手全文 |
+| 事后闸 | nanoclaw SKILL.md Step 6 | 防**未知**：对 vault 成品再跑一次 `verify.py`，查的是最终落盘那份 |
+
+`content_path` 只收**相对 `spool_content_root`** 的路径；绝对路径、`..`、symlink 逃逸一律 DENIED。
+`spool_content_root` 留空 = 能力禁用，非空必须绝对路径。
+
+事后闸把两种「不过」分开处置：`[ -f ]` 不成立是**看不见**（Docker Desktop 宿主→容器可见性延迟），
+最多等 5 秒；`verify.py` 非零是**字节不对**，多等不会变对，直接移 `failed/`。
+判「新稿已可见」用**内容指纹**不用 mtime——容器是 Linux `stat -c %Y`、宿主是 macOS `stat -f %m`，
+口径不同且 VM 时钟可能有偏差。
+
+**D｜走查后补的三个攻击面**（计划未写，实施时发现）
+
+| 攻击 | 修法 |
+|---|---|
+| 容器 `mkfifo` 在队列里种命名管道，Spool 打开即永久阻塞 | `O_NONBLOCK` + `fstat` 判普通文件 |
+| 走查通过后路径组件被换成 symlink（TOCTOU） | 叶子 `Lstat` 与 open 后 `fstat` 做 `os.SameFile` 比对 |
+| 用 open 失败的 errno 差异探测宿主文件是否存在 | 竞态窗口内失败一律折叠为同一结果，不按 errno 分流 |
+
+**E｜代码实测**
+
+| 项 | 实测 |
+|---|---|
+| loom `go test ./...` | 非缓存全量**全绿** |
+| spool 包测试条数 | **39 → 68**（新增 29） |
+| 既有测试被删条数 | **0** |
+| nanoclaw `test_prepare` + `test_verify` | **119** 条全绿（本次未改这两个脚本） |
+| loom PR | newthinker/loom **#14**（`feat/spool-content-path`） |
+| nanoclaw PR | newthinker/nanoclaw **#6**（`feat/warp-hestia-charts`） |
+
+**F｜部署**
+
+`configs/config.local.yaml` 加 `spool_content_root: /Users/zuowei/workspace/runtime/atlas/queue/hestia`。
+selvage 于 **14:05:36** 重建重启，启动行实测：
+
+```
+[selvage] spool_content_root=/Users/zuowei/workspace/runtime/atlas/queue/hestia (content_path enabled)
+```
+
+**G｜重跑四条判据（2026-09-16 实测，全过）**
+
+时间线：14:06 emit → 14:07 成稿落 `processing/2026-06-h1.note.md` → **14:09:13** Spool 归档 OK → 14:09:24 队列清空。
+
+| # | 判据 | 实测 |
+|---|---|---|
+| 一 | `verify.py` 真实退出码 | **0** |
+| 二 | 封条作用域逐行 diff | **95 行全等，diff 为空** |
+| 三 | `processing/` 残留 `.note.md` | **0**；契约与侧车在 `done/` |
+| 四 | vault git 新提交 + 审核门 | 提交 `30d2cb5`；`source: hestia` / `reviewed: false` / `generated_by: warp-hestia@v1` |
+
+附：**损坏字残留 0 处**——重跑走 `update` 路径整体重写机器区，8 处损坏随之被覆盖修复。
+批注区那行手写文字**保留**。图表实测 3 张 mermaid `xychart-beta` + 12 行条形。
+
+🔴 **判据二的比法有个坑**：不能拿 vault 成品与 `prepare.py --existing` 的输出整文件 diff。
+`prepare.py` 不产出叙述段（那是模型写的），Spool 又会覆写 frontmatter 的 `source` / `reviewed`，
+整文件比会得到 50 行假差异。**必须只比封条作用域**（机器区减叙述段），那才是这道闸管的范围。
+
+**H｜顺带发现的既有行为，未修，待决**
+
+selvage 每次重启都会重扫 `req/*.json` 里的**历史请求文件**。持久去重表保留 7 天，
+超过保留期的旧请求会被**当作新请求重新执行**。实测 `c-1782464412809-e6lp1p` 这一条
+自 2026-06-26 起被重复归档多次，最近三次在 2026-08-31、2026-09-08、2026-09-16 各一次，
+每次都往 vault 写了 `Wiki/Loom-Research/selvage-container-host-ipc.md`。
+
+**不是本次改动引入的**（9/8 那次早于本次改动），也不影响 Hestia。
+但它意味着：**重启 selvage 是一个会写 vault 的动作**。请求文件从不清理，去重表却会过期，
+两者错配就会重放。要不要清理 `req/` 或让去重表与请求文件同生命周期，是 loom 侧的待决项。
