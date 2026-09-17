@@ -17,7 +17,7 @@ import (
 // functional[0]     选行三条：monthly 优先 / 累计取最新发布 / Year,Month 取自 Period
 //                     → TestSelectRowsPrefersMonthly / TestSelectRowsFallsBackToCumulative /
 //                       TestSelectRowsTakesLatestPublishedAmongCumulative / TestBuildRowYearMonthComeFromPeriod
-// functional[1]     testdata 77 条 → 恰 61 行                       → TestSelectRowsCollapsesSeventySevenToSixtyOne
+// functional[1]     testdata 77 条 → 恰 61 行                       → TestGroupRowsCollapsesSeventySevenToSixtyOne
 // functional[2]     35 列锚点 + 月份/发布日期 string、其余 float64   → TestSheetColumnsCoverEntryArea /
 //                       TestSheetColumnFieldsAllExist / TestBuildRowSendsNumbersAsNumbers
 // boundary[0]       C4 两向：NULL 不产生 Cell（缺 3 ⇒ 32 格）；0 仍要写 → TestBuildRowOmitsAbsentFields /
@@ -28,63 +28,124 @@ import (
 // non_functional[0] C2 BuildSheetRows 在父包；守卫登记（review）  → TestBuildSheetRowsReadsStore（真 Store 端到端）+
 //                       ../store_test.go TestPackageExposesNoWriteFunctions
 
-// TestSelectRowsPrefersMonthly：D1 决定——同月撞行时 monthly 赢。
-func TestSelectRowsPrefersMonthly(t *testing.T) {
-	got, err := selectRows([]PeriodKey{
-		{Period: "2025-06", PeriodType: "h1", PublishedAt: "2025-07-15"},
+// —— 选行策略从「二选一」改为「同期合并」（2026-09-17）——
+//
+// 原规则「有 monthly 就用 monthly」建立在一个假设上：monthly 那条是完整记录。
+// 对季末月**这个假设是假的**——央行季末发的是季度报告，抽取器为同一篇文章产出两条
+// 记录（monthly + q1/h1/q1_q3），累计类字段全在季度那条里。实测 16 个多行期中有 14 个
+// monthly 只占 33 个数据列中的 2 列，而季度行占 31 列；旧规则每期丢 29 格，共 442 格。
+//
+// **反转方向也不对**：2024-03 与 2025-03 恰好相反（monthly=29、q1=4）。所以换一个
+// 优先级只是把错误挪个地方。实测 16/16 期两条记录**交集为 0、并集恰好铺满 33 列、
+// 零取值冲突、同一 article_id 同一发布日**——它们是同一篇文章的互补切片，合并才是正解。
+
+// TestGroupRowsKeepsEveryRecordOfAPeriod：同期多条一条都不丢，全部进同一组待合并。
+func TestGroupRowsKeepsEveryRecordOfAPeriod(t *testing.T) {
+	got, err := groupRows([]PeriodKey{
+		{Period: "2025-06", PeriodType: "h1", PublishedAt: "2025-07-14"},
 		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []PeriodKey{
-		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
-	}, got)
+	require.Len(t, got, 1, "同一 period 收敛成一组")
+	require.Len(t, got[0], 2, "组内两条都在，一条都不丢")
 }
 
-// TestSelectRowsFallsBackToCumulative 不是可选分支。
+// TestGroupRowsSortsDeterministically：组序按 period 升序、组内按 period_type 升序。
+// 不依赖 map 遍历顺序——否则同一份库两次投影可能产出不同的行序。
+func TestGroupRowsSortsDeterministically(t *testing.T) {
+	got, err := groupRows([]PeriodKey{
+		{Period: "2025-09", PeriodType: "q1_q3", PublishedAt: "2025-10-13"},
+		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
+		{Period: "2025-09", PeriodType: "monthly", PublishedAt: "2025-10-13"},
+		{Period: "2025-06", PeriodType: "h1", PublishedAt: "2025-07-14"},
+	})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "2025-06", got[0][0].Period)
+	require.Equal(t, []string{"h1", "monthly"}, []string{got[0][0].PeriodType, got[0][1].PeriodType})
+	require.Equal(t, "2025-09", got[1][0].Period)
+	require.Equal(t, []string{"monthly", "q1_q3"}, []string{got[1][0].PeriodType, got[1][1].PeriodType})
+}
+
+// TestGroupRowsKeepsSoleCumulativeRecord：没有 monthly 的月份照常成组。
 //
 // 实测库里 9 个月份没有 monthly，其中**六个是 12 月**——央行 12 月数据随年报发，
-// 没有单独的 12 月月报。只认 monthly 会让每年的 12月 行都空着。
-func TestSelectRowsFallsBackToCumulative(t *testing.T) {
-	got, err := selectRows([]PeriodKey{
+// 没有单独的 12 月月报。丢掉它们会让每年的 12 月行都空着。
+func TestGroupRowsKeepsSoleCumulativeRecord(t *testing.T) {
+	got, err := groupRows([]PeriodKey{
 		{Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-13"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "annual", got[0].PeriodType)
+	require.Len(t, got, 1)
+	require.Equal(t, "annual", got[0][0].PeriodType)
 }
 
-// TestSelectRowsTakesLatestPublishedAmongCumulative：多条累计时取最新发布的。
-func TestSelectRowsTakesLatestPublishedAmongCumulative(t *testing.T) {
-	got, err := selectRows([]PeriodKey{
-		{Period: "2025-09", PeriodType: "q1_q3", PublishedAt: "2025-10-13"},
-		{Period: "2025-09", PeriodType: "annual", PublishedAt: "2025-10-20"},
-	})
-	require.NoError(t, err)
-	require.Equal(t, "annual", got[0].PeriodType)
-}
-
-// TestSelectRowsErrorsOnUndecidableTie 是本规则唯一允许失败的地方。
-//
-// 实测 77 期里一个月最多一条累计记录，所以它**不该触发**。真触发了说明库的
-// 形状变了，那时候需要人知道——而不是得到一个静默的、依赖 map 遍历顺序的选择。
-func TestSelectRowsErrorsOnUndecidableTie(t *testing.T) {
-	_, err := selectRows([]PeriodKey{
-		{Period: "2025-09", PeriodType: "q1_q3", PublishedAt: "2025-10-13"},
-		{Period: "2025-09", PeriodType: "annual", PublishedAt: "2025-10-13"},
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "2025-09")
-}
-
-// TestSelectRowsErrorsOnDuplicateMonthly：同一 Period 两条 monthly 是权威表不该有的形状
+// TestGroupRowsErrorsOnDuplicateMonthly：同一 Period 两条 monthly 是权威表不该有的形状
 // （DoD error_handling[0]，需求 line 871）。报错要带上是哪个月。
-func TestSelectRowsErrorsOnDuplicateMonthly(t *testing.T) {
-	got, err := selectRows([]PeriodKey{
+//
+// 这条在改为合并之后**仍然保留**：它查的不是「选哪条」，而是「库的形状对不对」。
+// 两条 monthly 意味着同一期被重复入库，合并会把它们悄悄揉成一条、掩盖掉这个事实。
+func TestGroupRowsErrorsOnDuplicateMonthly(t *testing.T) {
+	got, err := groupRows([]PeriodKey{
 		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
 		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-15"},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "2025-06")
 	require.Nil(t, got)
+}
+
+// TestMergeObservationsUnionsComplementaryFields 是本次改动的核心断言。
+func TestMergeObservationsUnionsComplementaryFields(t *testing.T) {
+	got, err := mergeObservations([]Observation{
+		{Meta: Meta{Period: "2023-06", PeriodType: "monthly", PublishedAt: "2023-07-11"},
+			Values: map[string]float64{FieldTSFStock: 365.0, FieldTSFStockYoY: 9.0}},
+		{Meta: Meta{Period: "2023-06", PeriodType: "h1", PublishedAt: "2023-07-11"},
+			Values: map[string]float64{FieldM2: 287.3, FieldDepositFlowYTD: 189900}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, map[string]float64{
+		FieldTSFStock: 365.0, FieldTSFStockYoY: 9.0,
+		FieldM2: 287.3, FieldDepositFlowYTD: 189900,
+	}, got.Values)
+	require.Equal(t, "2023-06", got.Meta.Period)
+}
+
+// TestMergeObservationsErrorsOnConflict：同名字段取值不同就报错，不猜。
+//
+// 实测 16/16 期零冲突，所以这条**不该触发**；真触发了说明抽取器对同一期给出了两个
+// 互相矛盾的数，那是要人知道的事——静默取其一会让一个错数进表而无人察觉。
+func TestMergeObservationsErrorsOnConflict(t *testing.T) {
+	_, err := mergeObservations([]Observation{
+		{Meta: Meta{Period: "2023-06", PeriodType: "monthly"}, Values: map[string]float64{FieldM2: 287.3}},
+		{Meta: Meta{Period: "2023-06", PeriodType: "h1"}, Values: map[string]float64{FieldM2: 287.4}},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "2023-06")
+	require.Contains(t, err.Error(), FieldM2)
+}
+
+// TestMergeObservationsSameValueIsNotAConflict：同名同值不算冲突（合并幂等）。
+func TestMergeObservationsSameValueIsNotAConflict(t *testing.T) {
+	got, err := mergeObservations([]Observation{
+		{Meta: Meta{Period: "2023-06", PeriodType: "monthly"}, Values: map[string]float64{FieldM2: 287.3}},
+		{Meta: Meta{Period: "2023-06", PeriodType: "h1"}, Values: map[string]float64{FieldM2: 287.3}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 287.3, got.Values[FieldM2])
+}
+
+// TestMergeObservationsTakesLatestPublishedAt：发布日列取组内最新。
+//
+// 实测同期各条同日发布，所以这条也不该有分歧；定死取最新是为了让输出不依赖组内顺序
+// ——「恰好相同」不是可以省掉规则的理由，那正是它将来变了却没人发现的形态。
+func TestMergeObservationsTakesLatestPublishedAt(t *testing.T) {
+	got, err := mergeObservations([]Observation{
+		{Meta: Meta{Period: "2025-09", PeriodType: "q1_q3", PublishedAt: "2025-10-13"}, Values: map[string]float64{}},
+		{Meta: Meta{Period: "2025-09", PeriodType: "annual", PublishedAt: "2025-10-20"}, Values: map[string]float64{}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "2025-10-20", got.Meta.PublishedAt)
 }
 
 // loadRealPeriodKeys 从 testdata 的期次快照读，不连真库——单元测试不该依赖一个会变的本机文件。
@@ -108,17 +169,23 @@ func cellsByLabel(row sheets.Row) map[string]any {
 	return byLabel
 }
 
-// TestSelectRowsCollapsesSeventySevenToSixtyOne 把 spec §4 的交叉验算钉成测试。
+// TestGroupRowsCollapsesSeventySevenToSixtyOne 把 spec §4 的交叉验算钉成测试。
 //
 // 77 条记录 → 61 行，差的 16 条是与同月 monthly 撞行的累计记录。
 // 25 条累计记录中 9 条是所在月份唯一记录得以保留，25 − 9 = 16 = 77 − 61。
 // 这条用真实库的快照跑，数字随库增长会变——变了要同步改，别直接删。
-func TestSelectRowsCollapsesSeventySevenToSixtyOne(t *testing.T) {
+func TestGroupRowsCollapsesSeventySevenToSixtyOne(t *testing.T) {
 	keys := loadRealPeriodKeys(t)
-	got, err := selectRows(keys)
+	got, err := groupRows(keys)
 	require.NoError(t, err)
 	require.Len(t, keys, 77)
-	require.Len(t, got, 61)
+	require.Len(t, got, 61, "61 组（= 61 个 period），而不是 61 条记录")
+
+	var total int
+	for _, g := range got {
+		total += len(g)
+	}
+	require.Equal(t, 77, total, "77 条记录一条都没丢——改为合并之后这才是不变量")
 }
 
 // TestSheetColumnsCoverEntryArea：录入区恰 35 列，顺序即 A…AI。
@@ -258,7 +325,7 @@ func TestBuildRowSendsNumbersAsNumbers(t *testing.T) {
 }
 
 // TestBuildSheetRowsReadsStore：BuildSheetRows 端到端——走真 Store 的 AllPeriods + Current，
-// 同月 monthly/h1 收敛成一行，返回的是纯数据（C2：子包拿不到 *Store）。
+// 同月 monthly/h1 **合并**成一行，返回的是纯数据（C2：子包拿不到 *Store）。
 func TestBuildSheetRowsReadsStore(t *testing.T) {
 	st := newTestStore(t)
 	saveObs(t, st, "2025-06", "h1", "2025-07-15")
@@ -270,9 +337,12 @@ func TestBuildSheetRowsReadsStore(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, 2025, rows[0].Year)
 	require.Equal(t, 6, rows[0].Month)
-	require.Equal(t, "2025-07-14", rows[0].Cells[1].Value) // monthly 赢 ⇒ 发布日期是 monthly 的
+	// 发布日期取组内**最新**（改为合并后的新契约，见 mergeObservations）：
+	// 合并行的数据来自两条记录，最晚那条才是这一行变完整的时刻。
+	require.Equal(t, "2025-07-15", rows[0].Cells[1].Value)
 	require.Equal(t, 12, rows[1].Month)
-	// saveObs 只写 m2=300 ⇒ 月份 + 发布日期 + M2余额
+	// saveObs 只写 m2=300 ⇒ 月份 + 发布日期 + M2余额。两条记录的 m2 同值，
+	// 合并不算冲突（TestMergeObservationsSameValueIsNotAConflict 单独钉住）。
 	require.Len(t, rows[0].Cells, 3)
 	require.Equal(t, float64(300), rows[0].Cells[2].Value)
 }

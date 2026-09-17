@@ -60,52 +60,79 @@ var SheetColumns = []ColumnSpec{
 	{Label: "汇率 USD/CNY", Field: FieldFXRate},             // AI
 }
 
-// selectRows 把每个月份的多条记录收敛成一条（spec §4，M2b-1 的 D1）。
+// groupRows 把每个月份的多条记录收敛成**一组**（spec §4 的 D1 于 2026-09-17 修订）。
 //
-// 1. 有 monthly ⇒ 用它（多于一条 ⇒ 报错，权威表不该有这种形状）
-// 2. 否则取 published_at 最新的累计期次
-// 3. 仍打平 ⇒ 报错，不猜
-func selectRows(keys []PeriodKey) ([]PeriodKey, error) {
+// 🔴 **原规则是「有 monthly 就用它，否则取最新的累计期次」，那是错的。** 它建立在
+// 「monthly 那条是完整记录」这个假设上，而对季末月该假设为假：央行季末发的是季度
+// 报告，抽取器为**同一篇文章**产出两条记录（monthly + q1/h1/q1_q3），累计类字段全在
+// 季度那条里。实测 16 个多行期中 14 个的 monthly 只占 33 个数据列里的 2 列，季度行占
+// 31 列——旧规则每期丢 29 格，线上表格共 442 格因此常年空着。
+//
+// **不能靠反转优先级修**：2024-03 与 2025-03 恰好相反（monthly=29、q1=4），换个优先级
+// 只是把错误挪到另外两期。实测 16/16 期两条记录**交集为 0、并集恰好铺满全部 33 个数据列、
+// 零取值冲突、同一 article_id、同一发布日** ⇒ 它们是同一篇文章的互补切片，合并才是正解。
+//
+// 本函数只分组不合并，取数与合并在 assembleRows / mergeObservations——分开是因为分组
+// 只需要 PeriodKey，而合并需要真去读 Observation。
+//
+// 保留的唯一硬失败是「同期多条 monthly」：那查的不是「选哪条」而是「库的形状对不对」，
+// 合并反而会把重复入库悄悄揉成一条、掩盖掉它。原先那条「同日发布的累计期次无法判定」
+// 的报错**随本次改动作废**——不再二选一，就不存在无法判定。
+func groupRows(keys []PeriodKey) ([][]PeriodKey, error) {
 	byPeriod := make(map[string][]PeriodKey)
 	for _, k := range keys {
 		byPeriod[k.Period] = append(byPeriod[k.Period], k)
 	}
-	out := make([]PeriodKey, 0, len(byPeriod))
+	out := make([][]PeriodKey, 0, len(byPeriod))
 	// 按 period 升序输出，与 map 遍历顺序无关
 	for _, p := range slices.Sorted(maps.Keys(byPeriod)) {
 		cand := byPeriod[p]
-		var monthly []PeriodKey
+		var monthly int
 		for _, k := range cand {
 			if k.PeriodType == "monthly" {
-				monthly = append(monthly, k)
+				monthly++
 			}
 		}
-		if len(monthly) > 1 {
-			return nil, fmt.Errorf("hestia sheets: %s 有 %d 条 monthly，权威表不该出现这种形状", p, len(monthly))
+		if monthly > 1 {
+			return nil, fmt.Errorf("hestia sheets: %s 有 %d 条 monthly，权威表不该出现这种形状", p, monthly)
 		}
-		if len(monthly) == 1 {
-			out = append(out, monthly[0])
-			continue
-		}
-
-		best := cand[0]
-		tie := false
-		for _, k := range cand[1:] {
-			switch {
-			case k.PublishedAt > best.PublishedAt:
-				best, tie = k, false
-			case k.PublishedAt == best.PublishedAt:
-				tie = true
-			}
-		}
-		if tie {
-			return nil, fmt.Errorf(
-				"hestia sheets: %s 有多条同日发布的累计期次（%s），无法判定用哪条；"+
-					"实测 2026-09 前不该出现，请核对权威表", p, typesOf(cand))
-		}
-		out = append(out, best)
+		// 组内按 period_type 排序：行序与合并结果都不该依赖 AllPeriods 的返回顺序
+		slices.SortFunc(cand, func(a, b PeriodKey) int { return strings.Compare(a.PeriodType, b.PeriodType) })
+		out = append(out, cand)
 	}
 	return out, nil
+}
+
+// mergeObservations 把同一期的多条观测按字段并成一条。
+//
+// **冲突报错，不猜**：同名字段取值不同意味着抽取器对同一期给出了两个互相矛盾的数。
+// 实测 16/16 期零冲突，所以这条不该触发；真触发了是要人知道的事——静默取其一会让一个
+// 错数进表而无人察觉，而表里的数没有任何下游校验会发现它。
+//
+// Meta 取组内**发布日最新**的那条整体使用（不是逐字段挑）：发布日要进表格的 B 列，
+// 而 ArticleID / Extractor 等若拆开取会拼出一个不对应任何真实记录的 Meta。实测同期各条
+// 同日发布，定死规则是为了让输出不依赖组内顺序——「恰好相同」不是省掉规则的理由，
+// 那正是它将来变了却没人发现的形态。
+func mergeObservations(obs []Observation) (Observation, error) {
+	if len(obs) == 0 {
+		return Observation{}, fmt.Errorf("hestia sheets: mergeObservations 收到空组，调用方应保证每组至少一条")
+	}
+	best := obs[0]
+	values := make(map[string]float64, len(SheetColumns))
+	for _, o := range obs {
+		if o.Meta.PublishedAt > best.Meta.PublishedAt {
+			best = o
+		}
+		for f, v := range o.Values {
+			if prev, ok := values[f]; ok && prev != v {
+				return Observation{}, fmt.Errorf(
+					"hestia sheets: %s 的字段 %s 在多条记录间取值冲突（%v vs %v），拒绝猜测；请核对权威表",
+					o.Meta.Period, f, prev, v)
+			}
+			values[f] = v
+		}
+	}
+	return Observation{Meta: best.Meta, Values: values}, nil
 }
 
 // typesOf 把候选的 period_type 拼成「q1_q3、annual」，只给错误文案用。
@@ -170,23 +197,31 @@ func buildRow(obs Observation) (sheets.Row, error) {
 // currentFunc 是 Store.Current 的形状，assembleRows 经它读每一期，测试用它注入「读不到」。
 type currentFunc func(ctx context.Context, period, periodType string) (Observation, bool, error)
 
-// assembleRows 对 keys 选行后逐期读取并组装。AllPeriods 说有而 current 说没有 ⇒ 报错，
+// assembleRows 对 keys 分组后逐期读取**组内全部记录**、合并、再组装。AllPeriods 说有而 current 说没有 ⇒ 报错，
 // 不静默跳过：两者读同一视图，分叉只可能来自并发写或视图不一致，那是要人知道的事。
 func assembleRows(ctx context.Context, keys []PeriodKey, current currentFunc) ([]sheets.Row, error) {
-	chosen, err := selectRows(keys)
+	groups, err := groupRows(keys)
 	if err != nil {
 		return nil, err
 	}
-	rows := make([]sheets.Row, 0, len(chosen))
-	for _, k := range chosen {
-		obs, ok, err := current(ctx, k.Period, k.PeriodType)
+	rows := make([]sheets.Row, 0, len(groups))
+	for _, g := range groups {
+		obs := make([]Observation, 0, len(g))
+		for _, k := range g {
+			o, ok, err := current(ctx, k.Period, k.PeriodType)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, fmt.Errorf("hestia sheets: %s/%s 在 AllPeriods 里但 Current 读不到", k.Period, k.PeriodType)
+			}
+			obs = append(obs, o)
+		}
+		merged, err := mergeObservations(obs)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			return nil, fmt.Errorf("hestia sheets: %s/%s 在 AllPeriods 里但 Current 读不到", k.Period, k.PeriodType)
-		}
-		row, err := buildRow(obs)
+		row, err := buildRow(merged)
 		if err != nil {
 			return nil, err
 		}
