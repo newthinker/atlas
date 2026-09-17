@@ -144,7 +144,33 @@ func parsePlainAmount(num, unit string) (amount, error) {
 }
 
 // toYi 归一到「亿元」——增量/新增类字段用它。
-func (a amount) toYi() float64 { return a.value * scaleOf(a.unit) }
+func (a amount) toYi() float64 { return scaleDecimal(a.value, scaleOf(a.unit)) }
+
+// scaleDecimal 做量纲换算，并消去浮点乘法在十进制值上留下的残差。
+//
+// 裸的 `v * scale` 会让「18.99 万亿元」变成 189899.99999999997。这个值**已经真的
+// 入过库、也已经投影进线上表格的 Q 列**，是本函数的立项依据。
+//
+// **判据是「目标值在 float64 里可精确表示，而我们没得到它」**。189900 是小于 2^53
+// 的整数、可精确表示，所以这里的残差是可消的；而报表里的 8.7（同比增速那族）本身
+// 就不可精确表示，它的末位抖动是 float64 的固有性质，**不是缺陷、也不在这里修**。
+// 混淆这两者会让人去「修」一个修不了的东西。
+//
+// 1e-6 的量化步长在亿元单位下等于 100 元，比任何报表精度都细四个数量级以上；而要
+// 消的残差量级是 1e-11，两者相差五个数量级，不存在误伤。源数据自带的真小数不会被
+// 抹平（TestToYiPreservesGenuineFractions 看着）。
+//
+// ⚠️ 契约是**「1e-6 步长内恒等」，不是「原样穿过」**——倍率为 1 的「亿元」路径同样
+// 走 Round，只是对小数位 ≤6 的值恰好落回原值。实测 0.1234567 会变成 0.123457。
+// 报表里不存在这种精度，所以不影响；但把它写成「穿过」会让人以为有一条旁路，
+// 将来据此推断就会推错。
+//
+// 不为 |r| 极大的情形设闸：那时 r*q 已越过 2^53、本身就是整数，Round 退化为恒等，
+// 除回来至多差 1 ulp——与乘法自身的误差同阶，加闸不会让它更对，只会多一行。
+func scaleDecimal(v, scale float64) float64 {
+	const q = 1e6
+	return math.Round(v*scale*q) / q
+}
 
 // toWanYi 归一到「万亿元」——余额/存量类字段用它。
 func (a amount) toWanYi() float64 { return a.toYi() / 10000 }

@@ -126,14 +126,29 @@ func cellAt(current [][]any, row, col int) any {
 // 会让某些格永远报不一致，于是幂等永远达不成，每次 apply 都在写同一个值。
 // 1e-9 的相对容差远小于本业务任何一个字段的有效精度（金额到亿元、同比到 0.1%），
 // 不会盖住真实差异。
-func sameValue(a, b any) bool {
-	fa, aok := toFloat(a)
-	fb, bok := toFloat(b)
-	if aok && bok {
-		scale := max(1, math.Abs(fa), math.Abs(fb))
-		return math.Abs(fa-fb) <= 1e-9*scale
+//
+// 🔴 **容差有一个例外，方向单开**：库值是可精确表示的整数、而表中值不是时判不一致。
+//
+// 上面那句 64400.00000000001 不是举例，是真发生过的事——它来自 amount.toYi 早期的
+// 裸浮点乘法，脏值入了库又经本包投影进了线上表格。库侧修好之后，表里那 44 格却
+// **不会**跟着恢复：容差恰好把它们判成「一致」，push 永远跳过。容差于是从「防幂等
+// 失效」变成了「冻住我们自己写进去的陈旧噪声」，而这是它最不该做的事。
+//
+// 例外只朝一个方向开口，因为两个方向的含义不同：库值整数而表中带尾巴 ⇒ 尾巴是
+// 历史噪声，该纠正；库值自身带尾巴（同比 8.7 那族 float64 固有不可表示的值）⇒ 那是
+// float64 的性质、纠不了也不该纠，仍走容差。**幂等不受影响**：纠正写入后两边都是
+// 整数、精确相等，下一轮即判 Same。
+func sameValue(current, want any) bool {
+	curF, curOK := toFloat(current)
+	wantF, wantOK := toFloat(want)
+	if curOK && wantOK {
+		if wantF == math.Trunc(wantF) && curF != math.Trunc(curF) {
+			return false
+		}
+		scale := max(1, math.Abs(curF), math.Abs(wantF))
+		return math.Abs(curF-wantF) <= 1e-9*scale
 	}
-	return fmt.Sprint(a) == fmt.Sprint(b)
+	return fmt.Sprint(current) == fmt.Sprint(want)
 }
 
 // toFloat 把表里可能出现的各种数值表示统一成 float64；非数值返回 false。

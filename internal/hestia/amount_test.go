@@ -113,8 +113,66 @@ func TestAmountConversionKeepsPrecision(t *testing.T) {
 		// 15.91 万亿 → 159100，浮点乘法不应引入可见误差
 		a, err := newAmount("增加", "15.91", "万亿元")
 		require.NoError(t, err)
-		assert.InDelta(t, 159100.0, a.toYi(), 1e-6)
+		assert.Equal(t, 159100.0, a.toYi())
 	})
+}
+
+// TestToYiIsExactForTwoDecimalInputs 钉住「万亿元 → 亿元」换算不留浮点残差。
+//
+// 立项依据是一个真入库的脏值：2026 年某期「新增存款·累计 18.99 万亿元」经 toYi
+// 存成了 189899.99999999997，并且已经投影进了线上表格的 Q 列。
+//
+// **判据是「目标值在 float64 里可精确表示，而我们没得到它」**，不是「小数难算」。
+// 189900 是小于 2^53 的整数、可精确表示；8.7 不可精确表示，那类值的末位抖动是
+// float64 的固有性质、不在本测试范围内，也无从修起。分清这两者是这条测试存在的
+// 全部理由——否则下一个人会试图去「修」8.7。
+//
+// ⚠️ 上面那条 TestAmountConversionKeepsPrecision 的注释写的正是「浮点乘法不应引入
+// 可见误差」，却有**两个独立原因**抓不到这个缺陷：它用 InDelta(1e-6) 容差放过了
+// 1e-11 的残差，而且 15.91 恰好是这一族里唯一乘完干净的值。守卫按名字在、按行为
+// 不在。所以这里用 Equal 而非 InDelta，样本也覆盖进位与退位两个方向。
+func TestToYiIsExactForTwoDecimalInputs(t *testing.T) {
+	// 这些两位小数值 × 10000 在朴素浮点乘法下全部产生残差（15.91 除外，
+	// 它是对照组：既有测试选中的正是它，所以那条测试不可能变红）。
+	cases := []struct {
+		num  string
+		want float64
+	}{
+		{"18.99", 189900}, // 189899.99999999997 —— 线上脏值的原始来源
+		{"9.54", 95400},   // 95399.99999999999
+		{"6.31", 63100},   // 63099.99999999999
+		{"8.37", 83700},   // 83699.99999999999
+		{"9.71", 97100},   // 97100.00000000001 —— 另一个方向
+		{"2.53", 25300},   // 25299.999999999996
+		{"1.12", 11200},   // 11200.000000000002
+		{"15.91", 159100}, // 对照组：朴素乘法本就精确
+	}
+	for _, tc := range cases {
+		t.Run(tc.num, func(t *testing.T) {
+			a, err := newAmount("增加", tc.num, "万亿元")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, a.toYi(), "万亿元→亿元 必须精确")
+
+			// 负方向走同一条乘法，不能只在正数上成立
+			n, err := newAmount("减少", tc.num, "万亿元")
+			require.NoError(t, err)
+			assert.Equal(t, -tc.want, n.toYi(), "负值同样精确")
+		})
+	}
+}
+
+// TestToYiPreservesGenuineFractions 守住修复的**反方向**：消残差不等于取整。
+//
+// 亿元单位的源数据完全可以带小数（倍率为 1，原样返回），修复若写成 math.Round
+// 就会把它们悄悄抹平——那是用一个更大的错误换掉一个小错误。
+func TestToYiPreservesGenuineFractions(t *testing.T) {
+	for _, num := range []string{"1780.5", "0.25", "3286400.125"} {
+		a, err := newAmount("增加", num, "亿元")
+		require.NoError(t, err)
+		want, err := strconv.ParseFloat(num, 64)
+		require.NoError(t, err)
+		assert.Equal(t, want, a.toYi(), "亿元原样返回，小数不得被抹平")
+	}
 }
 
 // TestNewAmountCombinesSignAndScale 是符号×量纲的合成断言。

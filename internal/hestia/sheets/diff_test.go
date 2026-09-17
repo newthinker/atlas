@@ -253,6 +253,50 @@ func TestSameValueParsesStringNumbers(t *testing.T) {
 	}
 }
 
+// TestSameValueRewritesStaleResidueOverCleanInteger 守住容差的一个例外。
+//
+// 背景：amount.toYi 早期用裸的 `v * scale`，把「18.99 万亿元」算成
+// 189899.99999999997 并写进了库，再经本包投影进了线上表格。库侧已在
+// internal/hestia/amount.go 的 scaleDecimal 修好，但**表里那 44 格不会因此恢复**
+// ——1e-9 的相对容差恰好把它们判成「一致」，push 永远跳过。
+//
+// 于是容差从「防幂等失效」变成了「冻住陈旧残差」。这条例外只在一个方向开口：
+// **库值是可精确表示的整数，而表中值不是**。此时表里那个带尾巴的数就是我们
+// 自己以前写进去的噪声，应当被纠正。
+//
+// **幂等不受影响**：写一次之后表中即为 189900，两边都是整数、精确相等，下一轮
+// 判 Same。而反方向（库值本身带尾巴，如同比 8.7 那族 float64 固有的不可表示值）
+// 不触发本例外，仍走容差——那正是容差当初要防的场景。
+func TestSameValueRewritesStaleResidueOverCleanInteger(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current any // 表中值
+		want    any // 库值
+		same    bool
+	}{
+		// 真实脏格，逐个取自线上表格
+		{"表中退位残差/库整数", 189899.99999999997, 189900.0, false},
+		{"表中进位残差/库整数", 64400.00000000001, 64400.0, false},
+		{"表中负值残差/库整数", -11100.000000000002, -11100.0, false},
+		{"文本形态的残差", "255799.99999999997", 255800.0, false},
+
+		// 反方向：库值自身不可精确表示 ⇒ 例外不开口，容差照旧
+		{"库值带尾巴/表中相近", 8.699999999999999, 8.7, true},
+		{"两边都非整数且相近", 328.64000000000004, 328.64, true},
+
+		// 例外不得波及正常判定
+		{"两边同为整数", 189900.0, 189900.0, true},
+		{"库整数/表中同整数的文本", "189900", 189900.0, true},
+		{"库整数/表中真不同", 189900.0, 190000.0, false},
+		{"表中为空", nil, 189900.0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.same, sameValue(tc.current, tc.want),
+				"current=%#v want=%#v", tc.current, tc.want)
+		})
+	}
+}
+
 // toFloat 的 string 分支：这是 sameValue 之外的第二个消费点，单独钉住。
 func TestToFloatAcceptsStrings(t *testing.T) {
 	for _, tc := range []struct {
