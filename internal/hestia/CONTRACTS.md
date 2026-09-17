@@ -4037,3 +4037,177 @@ A 月份与 B 发布日期对上 `period` / `published_at`，**C–AI 的 33 个
 本次配置先只写进源码仓库那份，运行时读不到；两份都补后才生效。与 M1c-4 切错库同类。
 `configs/hestia.yaml` **进 git**，密钥路径不能写那里。
 密钥文件放 `~/.config/atlas/`，**不能放 runtime 树内**——`rsync --delete` 会静默删掉。
+
+---
+
+## Sprint M2b-2 · Sheets 投影落地（2026-09-17）
+
+M2b-1 是凭据与表结构的 spike，本节记的是**投影真正接上之后**的契约。全部数字由
+dev-m2b-c 在 master `477664a5651449490ddc602c090501bfd2ab9ead` 上实跑，非转抄。
+
+### ① 导出面增量与两条守卫的新 `want`
+
+两条守卫都在 `internal/hestia/store_test.go`，都是**精确集合相等**（不是包含）：
+
+| 守卫 | 位置 | 手法 | M2b 前 | 现在 |
+|---|---|---|---|---|
+| `TestStoreExposesNoWriteMethods` | `store_test.go:391`，`want` 在 `:397` | reflect 枚举 `*Store` 的方法 | 14 | **15** |
+| `TestPackageExposesNoWriteFunctions` | `store_test.go:412`，`want` 在 `:422` | AST 解析源码（递归子目录） | 38 | **51** |
+
+AST 那条净增 **13 项，零移除**，逐项列全：
+
+```
+BuildSheetRows                 Store.AllPeriods
+sheets.Client.CreateYearTab    sheets.Client.ReadEntryArea
+sheets.Client.ReadHeader       sheets.Client.Tabs
+sheets.Client.WriteCells       sheets.ColumnLetter
+sheets.Diff                    sheets.NewClient
+sheets.Push                    sheets.ResolveHeader
+sheets.WithEndpoint
+```
+
+即 `sheets.*` **11 项** + 本包新增 **2 项**（`BuildSheetRows`、`Store.AllPeriods`）。
+reflect 那条只 +1（`AllPeriods`）——`sheets` 是另一个包，不在 `*Store` 的方法集里。
+
+⚠️ **数「有几项」要解析源码或数逗号，不要逐行 grep**：这两个 `want` 各是**一行**，
+逐行 grep 恒得 1。本节的 15 / 51 用「字符串字面量计数」与「逗号数 + 1」两把独立的尺
+各算一遍，两把尺都给同一个数，且都验过 `items == sorted(items)`。
+
+断言文案里的项数用 `len(want)` 生成、**不手写**——手写的那份曾与列表不一致而无人报警
+（TASK-006 是「列表 16 vs 文案十七」），后来加 `Ingest` 使列表变 17、**文案碰巧变对了**。
+「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
+
+### ② AST 守卫改递归（M2b TASK-001，commit `5a2c1a2`）
+
+`exportedFuncs` 在 `internal/hestia/exported_funcs_test.go:38`（**不在 `store_test.go`**，
+找的人注意）。原实现 `os.ReadDir(root)` 遇目录直接 `continue`，**子包完全在视野之外**；
+现改为 `filepath.WalkDir`，跳过 `testdata` 与 `_` / `.` 前缀目录（Go 工具链自己也忽略它们）。
+命名规则：根目录裸名（`Parse`、`Store.Save`），子包按相对目录限定（`sheets.Push`）。
+
+🔴 **这次改造当场一个数字都没动（38 → 38）**，因为改它的时候 `internal/hestia/sheets/`
+还不存在——盲区要等 TASK-003 建出子包才会显形。⇒ **守卫的盲区在触发它的代码出现之前
+不可观测**，所以「改完守卫数字没变」不是白做，反而正是先做的理由。若等子包写完再改，
+那段窗口里新增的导出面一项都不会被守卫看见。
+
+### ③ 选行 77 → 61（实测）
+
+`TestSelectRowsCollapsesSeventySevenToSixtyOne`（`internal/hestia/sheets_project_test.go:113-121`）。
+77 条记录收敛成 61 行，差的 16 条是与同月 `monthly` 撞行的累计记录：25 条累计记录里
+9 条是所在月份的唯一记录得以保留，`25 − 9 = 16 = 77 − 61`。
+
+🔴 **testdata 的来源要写清楚，否则下次有人复算会困惑**：
+`internal/hestia/testdata/period-keys-2026-09-16.json`（77 条）取自
+**`/Users/zuowei/workspace/runtime/atlas/data/hestia.db`**（运行时库），
+**不是**主仓库的 `data/hestia.db`。两者当场实测：
+
+| 库 | `hestia_observations` 行数 | mtime |
+|---|---|---|
+| `runtime/atlas/data/hestia.db` | **77** | 2026-09-16 07:55 |
+| `<repo>/data/hestia.db` | **76** | 2026-09-02 20:44 |
+
+拿主仓库那份复算会得到 76 而不是 77，然后以为选行规则错了。两个库都是真的，**只是
+运行时那份新 14 天**——这与 M1c-4「切错库」同源，只是这次的后果是复算对不上而非写错数据。
+
+### ④ diff 容差取 1e-9 的理由
+
+`sameValue` 在 `internal/hestia/sheets/diff.go:100-108`，数值用**相对**容差而非 `==`：
+
+```go
+scale := max(1, math.Abs(fa), math.Abs(fb))
+return math.Abs(fa-fb) <= 1e-9*scale
+```
+
+浮点表示噪声（**实测契约里出现过 `64400.00000000001`**）会让某些格永远报不一致，
+于是**幂等永远达不成，每次 `--apply` 都在写同一个值**。1e-9 的相对容差远小于本业务
+任何一个字段的有效精度（金额到亿元、同比到 0.1%），不会盖住真实差异。
+
+取**相对**而非绝对：本表的量级跨度很大（社融存量到百万亿、利率到个位数小数），
+一个绝对阈值不可能同时对两端都合适。
+
+### ⑤ dry-run 零写请求的证明方式
+
+不是「断言 mock 没被调用」（C11 禁止），而是 `httptest` 起真服务、**记下服务端实际收到
+的每一个请求**，再逐条断言方法都是 `GET`。三处，全部实测存在：
+
+| 测试 | 位置 | 覆盖 |
+|---|---|---|
+| `TestPushDryRunSendsNoWriteRequest` | `internal/hestia/sheets/push_test.go:117` | 编排层 dry-run 主路径（007） |
+| `TestPushDryRunReportsMissingTabsWithCreateFlag` | `internal/hestia/sheets/push_test.go:167` | dry-run + 缺表 + `--create-sheets`（007） |
+| `TestSheetsPushDefaultsToDryRun` | `cmd/atlas/hestia_sheets_test.go:240` | CLI 侧 `push --all`（009） |
+
+前两条末尾都是 `requireOnlyGETs`（`push_test.go:92`），第三条在 CLI 侧逐条断言
+`strings.HasPrefix(m, "GET ")`。
+
+结构上的保证在 `Push`：dry-run 短路是**第 5 步**，而建表是第 6 步、写格是第 7 步
+（`push.go:169-172`）。dry-run 判断若放进 `WriteCells` 内部，第 6 步的建表会照样执行
+——**dry-run 却改了表结构，是这个设计里最坏的失败**。
+
+⚠️ 验证者在 008 验证期间提到过一条 `TestW_PushDryRunNeverCreates`，**它不在仓库里**
+（全仓 `TestW_` 前缀命中 0），多半是它在自己 worktree 里的临时测试。本表只列实测存在的。
+
+### ⑥ spec §10 七条判据的实测值
+
+判据一～三本 sprint 内可机器验证，已填；**判据四～七要对真表、真网、真 ingest 跑，
+留空供人回填**——把它们编出来会让整张表看着像已验收。
+
+| # | 判据 | 实测值 | 何时/由谁填 |
+|---|---|---|---|
+| 一 | `go test ./...` 非缓存全绿；两条写口守卫都更新且仍是精确集合相等；AST 守卫已改递归 | **65 个包 ok / 0 FAIL**（`-count=1`）；`len(want)` = **15** 与 **51**，两条都是 `assert.Equal` 精确相等；AST 守卫已用 `filepath.WalkDir` 递归 | ✅ 2026-09-17 dev-m2b-c |
+| 二 | 子包不 import `database/sql`，且 `sheets.Push` 签名里没有 `*Store` / `*sql.DB` | `go list -deps ./internal/hestia/sheets` 里 `database/sql` **0** 次、父包 `github.com/newthinker/atlas/internal/hestia` **0** 次；签名为 `Push(ctx, c *Client, rows []Row, wantLabels []string, opts Options) (Result, error)` | ✅ 2026-09-17 dev-m2b-c |
+| 三 | dry-run 的 httptest 测试证明零写请求 | 三条，见上面 ⑤ | ✅ 2026-09-17 dev-m2b-c |
+| 四 | `sheets push --all`（dry-run）对真表跑通，三类计数（2026-09-16 基线 将写 1282 / 一致 34 / 库缺 819；库增长后数字会变，但**三类之和恒等于 行数 × 35**） | _（待人回填）_ | 人执行，TASK-012 |
+| 五 | `--all --apply --create-sheets` 后：5 张新表建好且标题年份正确、61 行落位、2026年/6月 那 34 格值不变 | _（待人回填）_ | 人执行，TASK-012 |
+| 六 | 再跑一次 dry-run ⇒ 将写 **0** 格（幂等实证） | _（待人回填）_ | 人执行，TASK-012 |
+| 七 | 一次真实 ingest 后该期自动出现在表里；**断网**重试一次，ingest 退出码仍为 0、run outcome 不变 | _（待人回填）_ | 人执行，TASK-012 |
+
+🔴 判据六是幂等的唯一诚实证明。判据七的后半段是失败语义的证明——**必须真的断一次网，
+读代码不算**。按 AD-M2b-8，判据四的基线数字不进任何任务的 DoD：它随真表与库状态漂移，
+写进 DoD 会让一个正常的库增长把交付判红。
+
+### C1–C11 落地对照表
+
+| # | 约束 | 落在哪 | 本 sprint 实测 |
+|---|---|---|---|
+| C1 | `google.golang.org/api` 锁 v0.250.0 | `go.mod` | `google.golang.org/api v0.250.0` ✅ |
+| C2 | 子包不接收 `*Store` / `*sql.DB` | `sheets` 包全体签名 | `go list -deps` 两项均 0；`Push` 签名无二者 ✅ |
+| C3 | 运行时按表头解析，禁固定列偏移 | `sheets/header.go` `ResolveHeader` | 缺标签整批拒绝，由 `TestPushRejectsUnknownLabel` 钉住 ✅ |
+| C4 | 逐格写，库缺的格跳过不写空 | `sheets/row.go` 的 `Row.Cells` + `diff.go` 的 `AbsentInDB` | 规则长在类型上：库里缺的字段**不出现在 `Cells` 里** ✅ |
+| C5 | 写入用 `RAW` | `sheets/client.go:22` `valueInputRAW = "RAW"` | ✅ |
+| C6 | 只写录入区 A–AI，不碰 AJ–BB 的 19 个公式 | `sheets/client.go:21` `entryLastCol = 34 // AI` | ✅ |
+| C7 | Sheets 用默认 transport（`ProxyFromEnvironment`） | `sheets/client.go:44-48` | 全文件未出现 `Transport{}`，仅注释说明别照抄 `fetch.go` ✅ |
+| C8 | ingest 投影失败：记日志、outcome 不变、退出码不变、不发 Telegram | `internal/hestia/ingest.go:482-489` | 两支都只 `Fprintf` 不 `return`；009 又加了 `defer recover()` 把 panic 也转成 error 走这条路 ✅ |
+| C9 | `credentials_file` 留空 ⇒ 能力禁用 | `cmd/atlas/hestia_sheets.go` `sheetsProjector` | 留空返回**字面量 nil**（返回装了 nil 的函数值会让 `!= nil` 判断穿过去）；CLI 侧打印固定一句并**退出 0** ✅ |
+| C10 | 两份 `config.yaml` 永不同步 | `configs/config.example.yaml` 的 `hestia_sheets` 段 | `deploy.sh:100` 确有 `--exclude='/configs/config.yaml'`；两个绝对路径见下 ✅ |
+| C11 | 禁「断言 mock 被调用」，用 `httptest` + `WithEndpoint` 断言真实请求体 | `sheets/client_test.go`、`push_test.go`、`cmd/atlas/hestia_sheets_test.go` | 全部断言服务端实际收到的请求体/方法 ✅ |
+
+**C10 的两个绝对路径**（改配置要两份都改，它们**永不同步**）：
+
+```
+<repo>/configs/config.yaml
+/Users/zuowei/workspace/runtime/atlas/configs/config.yaml
+```
+
+`deploy.sh` 用 `rsync -a -m --delete`（`scripts/ops/deploy.sh:87`），排除表里有
+`/configs/config.yaml`（`:100`）。**runtime 里源码仓库没有、排除表也没列的文件会被静默删掉**
+——所以密钥文件放 runtime 树**外面**（如 `~/.config/atlas/`）。
+
+### 🔴 未决项：`hestia_sheets` 的凭据落位还没有答案
+
+本节登记一个**尚未解决**的问题，不要当成已落地：
+
+1. `hestia_sheets` 全仓**只被** `internal/hestia/config.go:85` 的
+   `mapstructure:"hestia_sheets"` 读，而那是 `hestia.LoadConfig` 的结构体，装载的是
+   `hestia.config_path` 指向的文件（默认 `configs/hestia.yaml`）。
+2. 主配置 `internal/config/config.go` 的 `hestia:` 段**只有** `HestiaConfig{ConfigPath}`，
+   **没有 `HestiaSheets` 字段**（grep 命中 0）。⇒ 照 `config.example.yaml` 把凭据填进
+   `configs/config.yaml` 顶层，**不会有任何代码读它**，能力静默保持禁用。
+   `config.Load` 对未知顶层键不报错（`TestExampleConfigDeclaresHestiaRules` 仍绿即证）
+   ——**这正是它危险的地方：填错位置没有任何反馈**。
+3. 而 `configs/hestia.yaml` 进 git，且**不在** `deploy.sh` 的 rsync 排除表里
+   ⇒ 运行时那份**每次部署都被源树覆盖**。M2b-1 已记「密钥路径不能写 hestia.yaml」，
+   但没给替代方案。
+
+⇒ 三种出路（**未选定**，需人裁决）：给主配置加 `HestiaSheets` 字段并透传；把
+`/configs/hestia.yaml` 加进 rsync 排除表；或引入一个 gitignored 的 `configs/hestia.local.yaml`。
+TASK-011 的 writes 不含 `configs/hestia.yaml`，故本 sprint 只登记不动手；
+`config.example.yaml` 的那段已加「生效位置不是本文件」的显式警告，避免它变成静默陷阱。
