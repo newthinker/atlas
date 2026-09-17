@@ -1,3 +1,10 @@
+# 🔴 runtime 那份已与本文件分岔，且**本文件的改动不会到达生产**（2026-09-17，人类决定）。
+#    成因：runtime 的 configs/hestia.yaml 里有 hestia_sheets 凭据段（M2b），而本文件是
+#    git 跟踪的、不能放凭据 ⇒ deploy.sh 的 rsync 排除表已加 /configs/hestia.yaml。
+#    ⚠️ 你在这里改 storage/queue/discover/thresholds/signals 任何一项，部署都不会生效，
+#    需要手工 diff 到 /Users/zuowei/workspace/runtime/atlas/configs/hestia.yaml。
+#    背景见归档 sprint-047-2026-09-17 的 final-report §8/§9。
+
 # hestia — 央行《金融统计数据报告》抓取与校验
 #
 # 独立文件、独立装载器（internal/hestia/config.go），不并进 internal/config 的大

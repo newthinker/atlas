@@ -10,6 +10,11 @@
 #    `hestia contract emit --period` 重建，但 done/ 的历史与正在 processing/ 里的会一起没。
 #
 # configs/config.yaml，以及 runtime 侧独立安装的 scripts/akshare/.venv/、
+#
+# 🔴 configs/hestia.yaml 也被排除（2026-09-17，人类决定）：runtime 那份含 hestia_sheets
+#    凭据段，而本文件是 git 跟踪的，不排除则每次部署都会被源树覆盖回去（M2b 实测）。
+#    ⚠️ **代价**：该文件另外 376 行运维配置（storage/queue/discover/thresholds/signals）
+#    也一并冻结——源树改了不会到生产。要同步非机密改动只能手工 diff 后合并。
 # scripts/baostock/.venv/、scripts/qlib_eval/.venv/ 均被排除并受 --delete 保护）。
 #
 # 🔴 **只能在主仓库执行，不能在 linked worktree 里执行**（脚本开头有判别，会拒绝）。
@@ -98,6 +103,7 @@ rsync -a -m --delete \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='.DS_Store' \
   --exclude='/data/' --exclude='/logs/' --exclude='/queue/' \
   --exclude='/configs/config.yaml' \
+  --exclude='/configs/hestia.yaml' \
   --exclude='/scripts/akshare/.venv/' \
   --exclude='/scripts/baostock/.venv/' \
   --exclude='/scripts/qlib_eval/.venv/' \
