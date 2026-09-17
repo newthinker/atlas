@@ -544,7 +544,7 @@ func TestPushStopsWhenTabsFails(t *testing.T) {
 // 读表头失败 ⇒ 整批返回。表头是 C3 的入口，读不到就无从定位列。
 func TestPushStopsWhenReadHeaderFails(t *testing.T) {
 	c, rec := newTestClientFailPath(t, tabsAndHeaderResponses(), map[string]int{
-		"/v4/spreadsheets/sheet-id/values/'2026年'!A3:AI3": http.StatusBadRequest,
+		pathHeader26: http.StatusBadRequest,
 	})
 
 	_, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true})
@@ -555,7 +555,7 @@ func TestPushStopsWhenReadHeaderFails(t *testing.T) {
 // 读录入区失败 ⇒ 整批返回（diffTab 的第二条错误路径，与读表头是两行）。
 func TestPushStopsWhenReadEntryAreaFails(t *testing.T) {
 	c, rec := newTestClientFailPath(t, tabsAndHeaderResponses(), map[string]int{
-		"/v4/spreadsheets/sheet-id/values/'2026年'!A4:AI15": http.StatusForbidden,
+		pathEntry26: http.StatusForbidden,
 	})
 
 	_, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true})
