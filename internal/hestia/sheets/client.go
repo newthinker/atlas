@@ -145,8 +145,22 @@ func (c *Client) WriteCells(ctx context.Context, changes []Change) error {
 		})
 	}
 	req := &sheets.BatchUpdateValuesRequest{ValueInputOption: valueInputRAW, Data: data}
-	if _, err := c.svc.Spreadsheets.Values.BatchUpdate(c.spreadsheetID, req).Context(ctx).Do(); err != nil {
+	resp, err := c.svc.Spreadsheets.Values.BatchUpdate(c.spreadsheetID, req).Context(ctx).Do()
+	if err != nil {
 		return wrapErr(fmt.Sprintf("批量写 %d 格", len(changes)), err)
+	}
+	// 🔴 核对 API 自报的更新格数（QA round2 [8]）。
+	//
+	// 原先这个响应被 `_` 丢弃 ⇒ **「API 返回 200 但一格都没写」在结构上不可能被
+	// 任何测试或运行时检查发现**。这不是漏一条断言，是一条反馈回路整个不存在：
+	// 调用方会拿到 nil error，然后以为写成功了。
+	//
+	// 判据取**相等**而不是「大于 0」：少写一格与一格没写同样是错的，而且少写那格
+	// 的调用方同样什么都不会察觉。
+	if resp != nil && resp.TotalUpdatedCells != int64(len(changes)) {
+		return fmt.Errorf(
+			"hestia sheets: 批量写提交 %d 格，API 回报只更新了 %d 格（HTTP 成功但结果不符，别当成写成功了）",
+			len(changes), resp.TotalUpdatedCells)
 	}
 	return nil
 }
