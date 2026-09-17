@@ -269,8 +269,9 @@ func TestCreateYearTabClearsNewTabEntryArea(t *testing.T) {
 	c, rec := newTestClient(t, templateResponses(), 0)
 	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 3))
 
-	require.Len(t, writeBodies(rec), 1, "四步 + 清空仍在同一次 batchUpdate 里")
-	body := writeBodies(rec)[0]
+	bodies := writeBodies(rec)
+	require.Len(t, bodies, 1, "四步 + 清空仍在同一次 batchUpdate 里")
+	body := bodies[0]
 	require.Contains(t, body, "updateCells", "清空录入区用 updateCells + 空 rows")
 
 	// 新表 sheetId = 现有最大 + 1；templateResponses 里 2024年 是 12345 且为最大值
@@ -279,11 +280,15 @@ func TestCreateYearTabClearsNewTabEntryArea(t *testing.T) {
 	newID := int64(templateSheetID + 1)
 
 	var clear *gridRange
-	for _, r := range got.Requests {
+	iDup, iClear := -1, -1
+	for i, r := range got.Requests {
+		switch {
+		case r.DuplicateSheet != nil:
+			iDup = i
 		// 清空请求的特征：范围覆盖录入区整块（12 行 × 35 列）且不带 rows
-		if r.UpdateCells != nil && r.UpdateCells.Range != nil &&
-			r.UpdateCells.Range.EndRowIndex == 15 && len(r.UpdateCells.Rows) == 0 {
-			clear = r.UpdateCells.Range
+		case r.UpdateCells != nil && r.UpdateCells.Range != nil &&
+			r.UpdateCells.Range.EndRowIndex == 15 && len(r.UpdateCells.Rows) == 0:
+			clear, iClear = r.UpdateCells.Range, i
 		}
 	}
 	require.NotNil(t, clear, "必须有一条清空新表录入区的请求；请求体：%s", body)
@@ -294,16 +299,6 @@ func TestCreateYearTabClearsNewTabEntryArea(t *testing.T) {
 	require.Equal(t, int64(35), clear.EndColumnIndex, "到 AI 列止（0 基 34，半开区间 35）")
 
 	// 清空必须排在 duplicate **之后**：顺序反了就是清模板的录入区——那才是真的删人工数据。
-	iDup, iClear := -1, -1
-	for i, r := range got.Requests {
-		switch {
-		case r.DuplicateSheet != nil:
-			iDup = i
-		case r.UpdateCells != nil && r.UpdateCells.Range != nil &&
-			r.UpdateCells.Range.EndRowIndex == 15 && len(r.UpdateCells.Rows) == 0:
-			iClear = i
-		}
-	}
 	require.NotEqual(t, -1, iDup)
 	require.Less(t, iDup, iClear, "清空必须在复制之后，否则清的是模板")
 }
