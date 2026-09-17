@@ -11,6 +11,15 @@ package main
 // functional[2]/boundary[0] 样例配置整份可装载，两条 hestia 规则与 hestia.config_path 就位
 //                                            → TestExampleConfigDeclaresHestiaRules
 // error_handling[0] 红阶段 undefined: buildHestiaHealth → discovery verification
+//
+// Context Checkpoint: done_criteria → test mapping (M4 的 TASK-004，队列接线)
+// functional[0]     queue.dir 绝对路径 ⇒ nil error、queue_up==1、hestia_queue_items 键在
+//                                            → TestBuildHestiaHealth_WiresQueueDir
+// functional[1]     queue.dir 相对路径 ⇒ 按进程 cwd 解析            → TestBuildHestiaHealth_QueueDirRelativeToCwd
+// boundary[0]       既有启动语义不变、既有测试函数体零改动            → TestBuildHestiaHealth_SkippedPathsEmitNoHestiaMetrics + 既有测试
+// boundary[1]       不存在「queue.dir 为空」分支                    → review（config.go:257 拒绝空值）
+// error_handling[0] queue.dir 不存在 ⇒ nil error、queue_up==0、db_up==1 → TestBuildHestiaHealth_MissingQueueDirDoesNotFailStartup
+// error_handling[1] 每轮现读：删 pending ⇒ 0，建回 ⇒ 1               → TestBuildHestiaHealth_QueueReadEveryScrape
 
 import (
 	"os"
@@ -26,6 +35,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/newthinker/atlas/internal/config"
+	"github.com/newthinker/atlas/internal/hestia"
 	"github.com/newthinker/atlas/internal/metrics"
 )
 
@@ -147,4 +157,87 @@ func TestExampleConfigDeclaresHestiaRules(t *testing.T) {
 	for name := range want {
 		assert.True(t, found[name], "样例配置缺少规则 %s", name)
 	}
+}
+
+// writeHestiaYAMLWithQueue 同 writeHestiaYAML，但追加显式的 queue.dir（绝对或相对均可）。
+func writeHestiaYAMLWithQueue(t *testing.T, queueDir string) string {
+	t.Helper()
+	p := writeHestiaYAML(t)
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("queue:\n  dir: " + queueDir + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	return p
+}
+
+func buildWithQueue(t *testing.T, queueDir string) *metrics.Registry {
+	t.Helper()
+	reg := metrics.NewRegistry()
+	cfg := &config.Config{Hestia: config.HestiaConfig{ConfigPath: writeHestiaYAMLWithQueue(t, queueDir)}}
+	cleanup, err := buildHestiaHealth(cfg, reg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	return reg
+}
+
+func TestBuildHestiaHealth_WiresQueueDir(t *testing.T) {
+	q := t.TempDir()
+	require.NoError(t, hestia.EnsureQueueDirs(q))
+
+	snap := buildWithQueue(t, q).Snapshot()
+	assert.Equal(t, 1.0, snap["hestia_queue_up"])
+	_, ok := snap["hestia_queue_items"]
+	assert.True(t, ok, "hestia_queue_items 键应存在")
+}
+
+// 配置默认值 queue/hestia 是相对路径，相对**进程 cwd** 解析（与 hestia-ingest 同约定）。
+func TestBuildHestiaHealth_QueueDirRelativeToCwd(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, hestia.EnsureQueueDirs(filepath.Join(root, "queue", "hestia")))
+	t.Chdir(root)
+
+	assert.Equal(t, 1.0, buildWithQueue(t, "queue/hestia").Snapshot()["hestia_queue_up"])
+}
+
+// 跳过路径不输出任何 hestia_ 指标（reg nil 时根本没有注册表可看，只断 nil error）。
+func TestBuildHestiaHealth_SkippedPathsEmitNoHestiaMetrics(t *testing.T) {
+	reg := metrics.NewRegistry()
+	cleanup, err := buildHestiaHealth(&config.Config{}, reg, zap.NewNop())
+	require.NoError(t, err)
+	cleanup()
+	for k := range reg.Snapshot() {
+		assert.False(t, strings.HasPrefix(k, "hestia_"), "未设 config_path 却输出了 %s", k)
+	}
+
+	cfg := &config.Config{Hestia: config.HestiaConfig{ConfigPath: writeHestiaYAML(t)}}
+	cleanup, err = buildHestiaHealth(cfg, nil, zap.NewNop())
+	require.NoError(t, err)
+	cleanup()
+}
+
+// 队列目录缺失是运行期可告警事实（C3），不是启动失败——与「库打不开 ⇒ 启动失败」刻意不同。
+func TestBuildHestiaHealth_MissingQueueDirDoesNotFailStartup(t *testing.T) {
+	snap := buildWithQueue(t, filepath.Join(t.TempDir(), "no-such-queue")).Snapshot()
+	_, ok := snap["hestia_queue_up"]
+	assert.True(t, ok, "queue_up 必须输出 0，而不是缺席")
+	assert.Equal(t, 0.0, snap["hestia_queue_up"])
+	assert.Equal(t, 1.0, snap["hestia_db_up"], "队列读不到不得牵连 DB 指标")
+}
+
+// 每轮现读、不在启动时快照：删掉 pending/ 下一轮就是 0，建回下一轮就是 1。
+func TestBuildHestiaHealth_QueueReadEveryScrape(t *testing.T) {
+	q := t.TempDir()
+	require.NoError(t, hestia.EnsureQueueDirs(q))
+	reg := buildWithQueue(t, q)
+	require.Equal(t, 1.0, reg.Snapshot()["hestia_queue_up"])
+
+	require.NoError(t, os.RemoveAll(filepath.Join(q, "pending")))
+	snap := reg.Snapshot()
+	_, ok := snap["hestia_queue_up"]
+	require.True(t, ok)
+	assert.Equal(t, 0.0, snap["hestia_queue_up"])
+
+	require.NoError(t, hestia.EnsureQueueDirs(q))
+	assert.Equal(t, 1.0, reg.Snapshot()["hestia_queue_up"])
 }
