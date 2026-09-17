@@ -262,7 +262,20 @@ func init() {
 	}
 	hestiaContractCmd.AddCommand(hestiaContractEmitCmd)
 
-	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd, hestiaContractCmd)
+	// —— sheets push 的五个 flag（M2b 的 TASK-009）——
+	//
+	// --period-type 不给默认值也**不 MarkFlagRequired**：它只在给了 --period 时才必填，
+	// 而 cobra 的 required 是无条件的——标上会让 `push --all` 也被拦下。
+	sf := hestiaSheetsPushCmd.Flags()
+	sf.BoolVar(&hestiaSheetsAll, "all", false, "push every period in the database")
+	sf.StringVar(&hestiaSheetsPeriod, "period", "", "push only this period, YYYY-MM (requires --period-type)")
+	sf.StringVar(&hestiaSheetsPeriodType, "period-type", "", "monthly | q1 | h1 | q1_q3 | annual")
+	sf.BoolVar(&hestiaSheetsApply, "apply", false, "actually write; without it the run is a dry-run")
+	sf.BoolVar(&hestiaSheetsCreate, "create-sheets", false, "create missing annual tabs by copying the template")
+	hestiaSheetsCmd.AddCommand(hestiaSheetsPushCmd)
+
+	hestiaCmd.AddCommand(hestiaIngestCmd, hestiaStatusCmd, hestiaBackfillCmd, hestiaContractCmd,
+		hestiaSheetsCmd)
 	rootCmd.AddCommand(hestiaCmd)
 }
 
@@ -340,15 +353,25 @@ func runHestiaIngest(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "notify: telegram")
 	}
 
-	return hestia.Ingest(cmd.Context(), hestia.IngestDeps{
-		Store:      st,
-		Fetch:      hestia.NewPBOCFetcher(cfg.Discover.Timeout),
-		Cfg:        cfg,
-		Out:        cmd.OutOrStdout(),
-		Notify:     sender,
-		Force:      hestiaForce,
-		OnlyPeriod: hestiaOnlyPeriod,
-	})
+	return hestia.Ingest(cmd.Context(), hestiaIngestDeps(cfg, st, sender, cmd.OutOrStdout()))
+}
+
+// hestiaIngestDeps 装配一轮 ingest 的依赖。单列出来是为了能直接断言「装对了没」——
+// 从 RunE 走的话，验证装配就得先让 Ingest 真去抓一遍网。
+//
+// ProjectSheets 由 sheetsProjector 决定：没配 hestia_sheets.credentials_file 就是 nil，
+// ingest 静默不投影（C9），与 Notify 未配置时同形。
+func hestiaIngestDeps(cfg hestia.Config, st *hestia.Store, sender hestia.Sender, out io.Writer) hestia.IngestDeps {
+	return hestia.IngestDeps{
+		Store:         st,
+		Fetch:         hestia.NewPBOCFetcher(cfg.Discover.Timeout),
+		Cfg:           cfg,
+		Out:           out,
+		Notify:        sender,
+		Force:         hestiaForce,
+		OnlyPeriod:    hestiaOnlyPeriod,
+		ProjectSheets: sheetsProjector(cfg),
+	}
 }
 
 func runHestiaStatus(cmd *cobra.Command, _ []string) error {
