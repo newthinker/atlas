@@ -149,10 +149,6 @@ func TestSheetColumnFieldsAllExist(t *testing.T) {
 	}
 }
 
-// TestBuildRowOmitsAbsentFields 是 C4 的核心测试。
-//
-// 「缺失就写空」是最自然的写法，也正是会抹掉人工值的那一种：库说「这期报告
-// 里没这个数」，不等于「这格该是空的」。实测库缺占数值格的 41%（819/2013）。
 // mustBuildRow：buildRow 在返工后返回 (Row, error)，既有用例只关心成功路径。
 // 用 helper 而不是逐处 `row, err := …; require.NoError` —— 那会让每条用例多两行噪声，
 // 而它们要验的性质与「会不会报错」无关。
@@ -163,6 +159,10 @@ func mustBuildRow(t *testing.T, obs Observation) sheets.Row {
 	return row
 }
 
+// TestBuildRowOmitsAbsentFields 是 C4 的核心测试。
+//
+// 「缺失就写空」是最自然的写法，也正是会抹掉人工值的那一种：库说「这期报告
+// 里没这个数」，不等于「这格该是空的」。实测库缺占数值格的 41%（819/2013）。
 func TestBuildRowOmitsAbsentFields(t *testing.T) {
 	obs := Observation{
 		Meta:   Meta{Period: "2026-06", PeriodType: "h1", PublishedAt: "2026-07-15"},
