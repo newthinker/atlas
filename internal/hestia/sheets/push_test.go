@@ -270,6 +270,7 @@ func newTestClientFailingPOST(t *testing.T, resp map[string]string, status int) 
 		}
 		b, _ := io.ReadAll(r.Body)
 		rec.methods = append(rec.methods, r.Method+" "+r.URL.Path)
+		rec.queries = append(rec.queries, r.URL.RawQuery)
 		rec.bodies = append(rec.bodies, string(b))
 		if r.Method != http.MethodGet {
 			w.WriteHeader(status)
@@ -332,7 +333,14 @@ func TestCreateYearTabStopsWhenBatchUpdateFails(t *testing.T) {
 	err := c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 1)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Forbidden")
-	require.Len(t, writeBodies(rec), 1, "duplicateSheet 失败后不许再发任何写请求")
+	// fix_items[7]：原来这里写的是 `require.Len(writeBodies(rec), 1, "duplicateSheet
+	// 失败后不许再发任何写请求")`——**那是恒真的**：四步在同一个 batchUpdate 里，写请求
+	// 恒为 1，任何实现都满足它，包括「失败后继续写数据」的实现。
+	//
+	// 「失败后不再写」这条性质由**四步同批**的结构保证（API 对 batchUpdate 原子），
+	// 不需要也无法由请求条数来证。这里改成能区分的断言：失败时不许出现写数据请求。
+	require.Equal(t, 0, countBodiesContaining(rec, "valueInputOption"),
+		"CreateYearTab 报错后不许再发写数据请求")
 }
 
 // TestPushCreatesMissingTabsBeforeWriting：建表必须在写数据之前，
@@ -381,4 +389,126 @@ func TestPushCreateSheetsWithoutMissingTabsDuplicatesNothing(t *testing.T) {
 	require.Empty(t, res.MissingTabs)
 	require.Equal(t, 0, countBodiesContaining(rec, "duplicateSheet"))
 	require.Len(t, writeBodies(rec), 1)
+}
+
+// —— TASK-006 返工（QA round2 fix_items[6][7][8]）——
+
+// newTestClientFailPath：按**路径**注入状态码，比既有两种粒度细一档。
+//
+// 既有只有「全路径失败」（newTestClient 的 status）与「全 POST 失败」
+// （newTestClientFailingPOST）两种，**读路径的 4xx 从未被走过** ⇒ push.go 里
+// 「建表之后、写数据之前那次 diff 失败要立刻返回」这条分支零覆盖。
+func newTestClientFailPath(t *testing.T, resp map[string]string, failPath map[string]int) (*Client, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/token" {
+			_, _ = io.WriteString(w, `{"access_token":"fake-token","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		rec.methods = append(rec.methods, r.Method+" "+r.URL.Path)
+		rec.queries = append(rec.queries, r.URL.RawQuery)
+		rec.bodies = append(rec.bodies, string(b))
+		if code, ok := failPath[r.URL.Path]; ok {
+			w.WriteHeader(code)
+			_, _ = io.WriteString(w, `{"error":{"message":"fake failure"}}`)
+			return
+		}
+		if body, ok := resp[r.URL.Path]; ok {
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(context.Background(), fakeCredentials(t, srv.URL), "sheet-id", WithEndpoint(srv.URL))
+	require.NoError(t, err)
+	return c, rec
+}
+
+// fix_items[6] N7：新表 id 必须由**现有最大 id** 推，不是由模板 id 推。
+//
+// ⚠️ 这条我没有照抄验证者的夹具——它把模板设成 777，而它造的其余表是 10/12，
+// **模板仍然是最大值**，于是「用 tplID+1 代替 maxID+1」这个变异在它那儿同样不红。
+// 这里直接把性质本身钉死：让模板**不是**最大 id，两个算法就分叉了。
+func TestCreateYearTabDerivesNewIDFromMaxNotTemplate(t *testing.T) {
+	resp := withHeaders(map[string]string{
+		pathTabs: `{"sheets":[` +
+			`{"properties":{"sheetId":10,"title":"说明","index":0}},` +
+			`{"properties":{"sheetId":777,"title":"2024年","index":1}},` +
+			`{"properties":{"sheetId":9000,"title":"2026年","index":2}}]}`,
+		pathTitle24: `{"values":[["2024 年 · 金融数据追踪"]]}`,
+	}, "说明", "2024年", "2026年")
+	c, rec := newTestClient(t, resp, 0)
+
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 2))
+
+	body := writeBodies(rec)[0]
+	require.Contains(t, body, `"newSheetId":9001`,
+		"新表 id 必须是现有最大(9000)+1；出现 778 说明它是从模板 id(777) 推的")
+	require.NotContains(t, body, `"newSheetId":778`)
+	require.Contains(t, body, `"sourceSheetId":777`, "复制的仍然是模板")
+}
+
+// fix_items[6] N10：连建两张时，后一张的 index 必须把前一张已插入的位置算进去。
+//
+// 现有 {说明, 2024年, 2026年}，缺 {2023年, 2025年}：
+//
+//	2023 ⇒ 第一个 >2023 的是 2024年（位置 1）⇒ index 1，插入后表序 [说明,2023年,2024年,2026年]
+//	2025 ⇒ 第一个 >2025 的是 2026年（**此时**在位置 3）⇒ index 3
+//
+// 实现若忘了把前一张插进本地表序，第二张会算成 2——dev 首轮只测了单张，漏了这条。
+func TestPushPlacesTwoNewTabsCumulatively(t *testing.T) {
+	c, rec := newTestClient(t, withHeaders(templateResponses(), "2023年", "2025年"), 0)
+
+	_, err := Push(context.Background(), c, rowsSpanning(2023, 2026), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+
+	var indexes []int64
+	for _, b := range rec.bodies {
+		if !strings.Contains(b, "duplicateSheet") {
+			continue
+		}
+		var got batchIndexBody
+		require.NoError(t, json.Unmarshal([]byte(b), &got))
+		for _, r := range got.Requests {
+			if r.UpdateSheetProperties != nil && r.UpdateSheetProperties.Fields == "index" {
+				indexes = append(indexes, r.UpdateSheetProperties.Properties.Index)
+			}
+		}
+	}
+	require.Equal(t, []int64{1, 3}, indexes,
+		"第二张的 index 必须把第一张已插入的位置算进去（忘了就会是 2）")
+}
+
+type batchIndexBody struct {
+	Requests []struct {
+		UpdateSheetProperties *struct {
+			Fields     string `json:"fields"`
+			Properties struct {
+				Index int64 `json:"index"`
+			} `json:"properties"`
+		} `json:"updateSheetProperties"`
+	} `json:"requests"`
+}
+
+// fix_items[8]：建表失败必须在 WriteCells 之前返回，否则往不存在的表写。
+//
+// 这正是 fix_items[7] 那条恒真断言自称在守、实际没守的性质。用按路径注入的 4xx
+// 让**建表之后那次读表头**失败——它落在 push.go 第 6 步与第 7 步之间。
+func TestPushStopsWhenNewTabDiffFails(t *testing.T) {
+	resp := withHeaders(templateResponses(), "2025年")
+	c, rec := newTestClientFailPath(t, resp, map[string]int{
+		"/v4/spreadsheets/sheet-id/values/'2025年'!A3:AI3": http.StatusForbidden,
+	})
+
+	_, err := Push(context.Background(), c, rowsSpanning(2025, 2025), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.Error(t, err, "新表 diff 失败必须整批返回，不能往下写")
+	require.Equal(t, 1, countBodiesContaining(rec, "duplicateSheet"), "建表本身发生过")
+	require.Equal(t, 0, countBodiesContaining(rec, "valueInputOption"),
+		"一个写数据请求都不许发——否则就是往刚建好但还没验过表头的表里写")
 }

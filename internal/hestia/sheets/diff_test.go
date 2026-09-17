@@ -210,3 +210,110 @@ func TestDiffCoversEveryRowAndColumn(t *testing.T) {
 		require.Equal(t, wantCols[i], c.Col, "第 %d 条", i)
 	}
 }
+
+// —— TASK-006 返工（QA round2 CRITICAL-1）——
+//
+// Context Checkpoint: fix_items → test mapping (TASK-006 review_fix 第 1 轮)
+// [0][1] values.get 用 UNFORMATTED_VALUE；替身回字符串形态时 Diff 仍判 Same
+//                                  → TestDiffTreatsStringNumbersAsSame（本文件）
+//                                    TestReadUsesUnformattedValue（client_test.go）
+// [2]    sameValue / toFloat 的 string 直接单测；文本格应判 WillWrite 去纠正
+//                                  → TestSameValueParsesStringNumbers、TestToFloatAcceptsStrings、
+//                                    TestDiffRewritesTextCellIntoNumber
+// [3]    把「current 的类型取决于 valueRenderOption」写成文 → diff.go sameValue 注释
+
+// TestSameValueParsesStringNumbers 是 CRITICAL-1 的最小复现。
+//
+// 🔴 pinned 模块 sheets-gen.go:11695 明写 values.get 默认 FORMATTED_VALUE ⇒ 返回的是
+// **格式化文本**。toFloat 原先没有 string 分支 ⇒ sameValue 退化成 fmt.Sprint 比较 ⇒
+// 带格式的列全判 WillWrite ⇒ 幂等失效、每次 apply 全量重写、dry-run 的「一致跳过」恒为 0。
+//
+// 这里逐个钉住真 API 会吐出来的六种形态。
+func TestSameValueParsesStringNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current any
+		want    any
+		same    bool
+	}{
+		{"纯小数文本", "412.50", 412.5, true},
+		{"整数文本", "1282", 1282.0, true},
+		{"千分位", "255,800", 255800.0, true},
+		{"百分比", "10.70%", 10.7, true},
+		{"会计负数", "(933)", -933.0, true},
+		{"带空格", " 462.06 ", 462.06, true},
+		{"真不相等", "412.50", 999.0, false},
+		{"不是数字的文本", "暂无", 412.5, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.same, sameValue(tc.current, tc.want),
+				"current=%#v want=%#v", tc.current, tc.want)
+		})
+	}
+}
+
+// toFloat 的 string 分支：这是 sameValue 之外的第二个消费点，单独钉住。
+func TestToFloatAcceptsStrings(t *testing.T) {
+	for _, tc := range []struct {
+		in   any
+		want float64
+		ok   bool
+	}{
+		{"412.50", 412.5, true},
+		{"255,800", 255800.0, true},
+		{"10.70%", 10.7, true},
+		{"(933)", -933.0, true},
+		{"", 0, false},
+		{"暂无", 0, false},
+		{412.5, 412.5, true},
+	} {
+		got, ok := toFloat(tc.in)
+		require.Equal(t, tc.ok, ok, "toFloat(%#v)", tc.in)
+		if tc.ok {
+			require.InDelta(t, tc.want, got, 1e-9, "toFloat(%#v)", tc.in)
+		}
+	}
+}
+
+// TestDiffTreatsStringNumbersAsSame：整条 Diff 路径上的同一性质。
+//
+// 单测 sameValue 还不够——CRITICAL-1 的后果发生在 Diff 的判定里，而「表里的值是字符串」
+// 这个形态在本包既有夹具里**一次都没出现过**（全部返回 JSON 数字），所以该性质此前
+// 结构上不可观测。这条用例把那个盲区补上。
+func TestDiffTreatsStringNumbersAsSame(t *testing.T) {
+	cols := Columns{"月份": 0, "发布日期": 1, "社融存量": 2}
+	// 表里读回来的是格式化文本——真 API 的默认形态。
+	//
+	// ⚠️ 社融存量刻意用**带千分位**的 "255,800"：若写 "462.06" 对 462.06，
+	// 即使 toFloat 没有 string 分支，fmt.Sprint(462.06) 也恰好是 "462.06" ⇒ 用例
+	// 会**因为巧合而绿**，测不到被测性质。消融实测：用 462.06 时删掉 string 分支
+	// 这条不红，换成千分位后立刻红。
+	current := [][]any{{"6月", "2026-07-15", "255,800"}}
+	rows := []Row{{Year: 2026, Month: 1, Cells: []Cell{
+		{Label: "月份", Value: "6月"},
+		{Label: "发布日期", Value: "2026-07-15"},
+		{Label: "社融存量", Value: 255800.0},
+	}}}
+
+	changes := Diff("2026年", cols, current, rows)
+	require.Len(t, changes, 3)
+	for _, ch := range changes {
+		require.Equal(t, Same, ch.Kind,
+			"格 %s 判成了 %v —— 表里是格式化文本不代表值不一样，这样会让幂等永远达不成", ch.Label, ch.Kind)
+	}
+}
+
+// TestDiffRewritesTextCellIntoNumber：与上一条**方向相反**，别把两者混成一条。
+//
+// 上一条说「文本形态的同值不该重写」；这一条说「表里真是文本格且值不同时，仍要写回数字」。
+// 理由不是洁癖：文本格会让 AJ–BB 的 19 个公式失效，而那 19 个是人维护的分析逻辑。
+func TestDiffRewritesTextCellIntoNumber(t *testing.T) {
+	cols := Columns{"社融存量": 0}
+	current := [][]any{{"400.00"}}
+	rows := []Row{{Year: 2026, Month: 1, Cells: []Cell{{Label: "社融存量", Value: 462.06}}}}
+
+	changes := Diff("2026年", cols, current, rows)
+	require.Len(t, changes, 1)
+	require.Equal(t, WillWrite, changes[0].Kind)
+	require.Equal(t, 462.06, changes[0].Want, "写回去的必须是 float64，不能是字符串")
+}
