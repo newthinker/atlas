@@ -512,3 +512,95 @@ func TestPushStopsWhenNewTabDiffFails(t *testing.T) {
 	require.Equal(t, 0, countBodiesContaining(rec, "valueInputOption"),
 		"一个写数据请求都不许发——否则就是往刚建好但还没验过表头的表里写")
 }
+
+// —— TASK-008 返工（QA round2 fix_items[3]：push.go 其余零覆盖的 error 传播分支）——
+//
+// Context Checkpoint: fix_items → test mapping (TASK-008 review_fix 第 1 轮)
+// [0] CRITICAL-2 模板自污染 —— 已在 TASK-006 的 5af1701 做掉，本任务不重做
+// [1] 恒真断言 + push.go:177-179 —— 已在 5af1701 做掉（TestPushStopsWhenNewTabDiffFails）
+// [2] N7 / N10 夹具         —— 已在 5af1701 做掉（TestCreateYearTabDerivesNewIDFromMaxNotTemplate /
+//                              TestPushPlacesTwoNewTabsCumulatively）
+// [3] 其余 error 传播分支   —— 本文件以下各条
+//
+// 🔴 这些分支**不是形式主义的覆盖率填空**：真实世界里最高频的失败恰是读
+// （403 权限没给对、400 Unable to parse range、404 表被改名），而它们全都落在这几行上。
+// 一条都没走过，意味着「读失败时会不会往下写」这件事此前从未被验证过。
+
+// pathWriteCells 是 WriteCells 用的 values:batchUpdate（与建表的 :batchUpdate 不同路径）。
+const pathWriteCells = "/v4/spreadsheets/sheet-id/values:batchUpdate"
+
+// Tabs 失败 ⇒ 第 1 步就返回，后面什么都不做。
+func TestPushStopsWhenTabsFails(t *testing.T) {
+	c, rec := newTestClientFailPath(t, tabsAndHeaderResponses(), map[string]int{
+		pathTabs: http.StatusForbidden,
+	})
+
+	res, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true})
+	require.ErrorContains(t, err, "列工作表")
+	require.Empty(t, res.Changes, "第 1 步就失败，不该有任何比对结果")
+	require.Empty(t, writeBodies(rec), "一个写请求都不许发")
+}
+
+// 读表头失败 ⇒ 整批返回。表头是 C3 的入口，读不到就无从定位列。
+func TestPushStopsWhenReadHeaderFails(t *testing.T) {
+	c, rec := newTestClientFailPath(t, tabsAndHeaderResponses(), map[string]int{
+		"/v4/spreadsheets/sheet-id/values/'2026年'!A3:AI3": http.StatusBadRequest,
+	})
+
+	_, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true})
+	require.Error(t, err)
+	require.Empty(t, writeBodies(rec), "读失败时不许往下写")
+}
+
+// 读录入区失败 ⇒ 整批返回（diffTab 的第二条错误路径，与读表头是两行）。
+func TestPushStopsWhenReadEntryAreaFails(t *testing.T) {
+	c, rec := newTestClientFailPath(t, tabsAndHeaderResponses(), map[string]int{
+		"/v4/spreadsheets/sheet-id/values/'2026年'!A4:AI15": http.StatusForbidden,
+	})
+
+	_, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true})
+	require.Error(t, err)
+	require.Empty(t, writeBodies(rec), "读不到现值就写，等于拿空比对结果覆盖真表")
+}
+
+// 建表失败 ⇒ 第 6 步返回，且不进第 7 步。
+//
+// 与 TestPushStopsWhenNewTabDiffFails 是**相邻但不同**的两行：那条是建表**成功之后**
+// 补做 diff 时失败（push.go:182-184），这条是建表本身失败（:177-179）。
+func TestPushStopsWhenCreateYearTabFails(t *testing.T) {
+	c, rec := newTestClientFailPath(t, withHeaders(templateResponses(), "2025年"), map[string]int{
+		pathBatchUpdate: http.StatusForbidden,
+	})
+
+	_, err := Push(context.Background(), c, rowsSpanning(2025, 2025), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.Error(t, err)
+	require.Equal(t, 0, countBodiesContaining(rec, "valueInputOption"),
+		"建表失败后一个写数据请求都不许发——否则就是往不存在的表里写")
+}
+
+// 写格失败 ⇒ 错误原样带出去。写失败必须响亮，不能像投影失败那样只记日志：
+// 这一层不知道调用方是 ingest（C8 允许降级）还是 CLI（人在等结果）。
+func TestPushPropagatesWriteCellsFailure(t *testing.T) {
+	c, rec := newTestClientFailPath(t, tabsAndHeaderResponses(), map[string]int{
+		pathWriteCells: http.StatusForbidden,
+	})
+
+	res, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{Apply: true})
+	require.Error(t, err)
+	require.Positive(t, res.WillWrite, "前置锚点：真的有格要写，否则 WriteCells 根本不会被调到")
+	require.Equal(t, 1, countBodiesContaining(rec, "valueInputOption"), "写请求发过一次并失败了")
+}
+
+// createYearTabs 收到不是年度表名的条目 ⇒ 报错且**一个建表请求都不发**。
+//
+// 经 Push 到不了这里（missing 由 tabName(r.Year) 生成，恒为 "NNNN年"），所以直接调
+// 包内函数。这条守的是「将来有人换了 missing 的来源」——那时这行是唯一的拦截点。
+func TestCreateYearTabsRejectsNonYearTabName(t *testing.T) {
+	c, rec := newTestClient(t, templateResponses(), 0)
+
+	err := createYearTabs(context.Background(), c, []string{"说明", "2024年"}, []string{"说明表"})
+	require.ErrorContains(t, err, "不是年度表名")
+	require.ErrorContains(t, err, "说明表", "错误里要点名是哪一个，否则缺表一多就没法查")
+	require.Empty(t, writeBodies(rec), "名字都不认识，不许动表结构")
+}
