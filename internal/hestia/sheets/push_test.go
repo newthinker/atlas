@@ -411,6 +411,20 @@ func newTestClientFailPath(t *testing.T, resp map[string]string, failPath map[st
 		rec.methods = append(rec.methods, r.Method+" "+r.URL.Path)
 		rec.queries = append(rec.queries, r.URL.RawQuery)
 		rec.bodies = append(rec.bodies, string(b))
+		if r.URL.Path == pathWriteValues {
+			if code, ok := failPath[r.URL.Path]; ok {
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, `{"error":{"message":"fake failure"}}`)
+				return
+			}
+			// 与 newTestClient 同口径：回真实形状的 totalUpdatedCells
+			var req struct {
+				Data []json.RawMessage `json:"data"`
+			}
+			_ = json.Unmarshal(b, &req)
+			fmt.Fprintf(w, `{"totalUpdatedCells":%d}`, len(req.Data))
+			return
+		}
 		if code, ok := failPath[r.URL.Path]; ok {
 			w.WriteHeader(code)
 			_, _ = io.WriteString(w, `{"error":{"message":"fake failure"}}`)

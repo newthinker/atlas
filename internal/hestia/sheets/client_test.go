@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -77,6 +78,19 @@ func newTestClient(t *testing.T, resp map[string]string, status int) (*Client, *
 		}
 		if body, ok := resp[r.URL.Path]; ok {
 			_, _ = io.WriteString(w, body)
+			return
+		}
+		// 🔴 values:batchUpdate 默认回**真实形状**的响应（QA round2 [8]/[11]）：
+		// 真 API 会回 totalUpdatedCells，而 WriteCells 现在拿它对账。
+		// 从请求体里数 data 的长度算出来，而不是写死——写死就等于让替身永远说
+		// 「我全写成功了」，那正是「替身比真实系统仁慈」的又一例。
+		// 要测「200 但没写」这种形状，在 resp 里显式给一个 totalUpdatedCells 覆盖它。
+		if r.URL.Path == pathWriteValues {
+			var req struct {
+				Data []json.RawMessage `json:"data"`
+			}
+			_ = json.Unmarshal([]byte(b), &req)
+			fmt.Fprintf(w, `{"totalUpdatedCells":%d}`, len(req.Data))
 			return
 		}
 		_, _ = io.WriteString(w, `{}`)
@@ -355,3 +369,87 @@ type gridRange struct {
 	StartColumnIndex int64 `json:"startColumnIndex"`
 	EndColumnIndex   int64 `json:"endColumnIndex"`
 }
+
+// —— TASK-006 返工第 2 轮 ——
+
+// TestWriteCellsChecksTotalUpdatedCells 是 [8] 的核心。
+//
+// 🔴 原先 `values:batchUpdate` 的响应被 `_` 丢弃，全仓 `TotalUpdatedCells` 命中 0
+// ⇒ **「API 返回 200 但一格都没写」在结构上不可能被任何测试或运行时检查发现**。
+// 这不是漏一条用例，是一条反馈回路整个不存在。
+func TestWriteCellsChecksTotalUpdatedCells(t *testing.T) {
+	changes := []Change{
+		{Sheet: "2026年", Row: 9, Col: 2, Want: 462.06, Kind: WillWrite},
+		{Sheet: "2026年", Row: 9, Col: 3, Want: 300.0, Kind: WillWrite},
+	}
+
+	t.Run("回报格数与提交数一致 ⇒ 放行", func(t *testing.T) {
+		c, _ := newTestClient(t, map[string]string{
+			pathWriteValues: `{"totalUpdatedCells":2}`,
+		}, 0)
+		require.NoError(t, c.WriteCells(context.Background(), changes))
+	})
+
+	t.Run("回报 0 格 ⇒ 报错（200 但什么都没写）", func(t *testing.T) {
+		c, _ := newTestClient(t, map[string]string{
+			pathWriteValues: `{"totalUpdatedCells":0}`,
+		}, 0)
+		err := c.WriteCells(context.Background(), changes)
+		require.Error(t, err, "200 而零格更新是最坏的一种失败：调用方会以为写成功了")
+		require.Contains(t, err.Error(), "2", "错误要给出提交了几格")
+		require.Contains(t, err.Error(), "0", "以及实际更新了几格")
+	})
+
+	t.Run("回报格数少于提交数 ⇒ 报错", func(t *testing.T) {
+		c, _ := newTestClient(t, map[string]string{
+			pathWriteValues: `{"totalUpdatedCells":1}`,
+		}, 0)
+		require.Error(t, c.WriteCells(context.Background(), changes))
+	})
+}
+
+// TestWriteCellsWithNoChangesSendsNothing 是 [10]：幂等达成时的形态。
+//
+// 🔴 这条正是修好 CRITICAL-1（UNFORMATTED_VALUE）之后用来证明「幂等真的达成了」的那条：
+// 第二次 --apply 时所有格都判 Same ⇒ toWrite 为空 ⇒ 一个写请求都不该发。
+// `push_test.go` 有 6 个 Apply:true 用例，没有一个是 WillWrite==0 的；
+// 唯一相关的断言是 `require.Greater(res.WillWrite, 0)`——**方向相反**。
+func TestWriteCellsWithNoChangesSendsNothing(t *testing.T) {
+	c, rec := newTestClient(t, map[string]string{}, 0)
+	require.NoError(t, c.WriteCells(context.Background(), nil))
+	require.NoError(t, c.WriteCells(context.Background(), []Change{}))
+	require.Empty(t, rec.methods, "没有格要写时，一个请求都不许发（含鉴权之外的任何 API 调用）")
+}
+
+// TestWrapErrHandlesNonGoogleAPIError 是 [9]：网络层失败分支。
+//
+// 🔴 QA 原话：「我们测过的是不会发生的分支，没测过的是会发生的分支」。
+// wrapErr 的 googleapi.Error 分支有覆盖，而**网络层失败**（连不上、超时、DNS 失败）
+// 那条零覆盖——而 round2 的 CRITICAL-3（launchd 缺代理键）的生产形态走的**恰恰是**
+// 零覆盖那条：代理没起时根本连不上 Google，拿不到任何 HTTP 状态码。
+func TestWrapErrHandlesNonGoogleAPIError(t *testing.T) {
+	// 指向一个不可达地址：连接层就失败，永远拿不到 googleapi.Error
+	c, err := NewClient(context.Background(), fakeCredentials(t, unreachableEndpoint),
+		"sheet-id", WithEndpoint(unreachableEndpoint))
+	if err != nil {
+		// 鉴权在建客户端时就失败也算走到了同一条路径
+		require.Contains(t, err.Error(), "hestia sheets: ")
+		return
+	}
+	// 给 2 秒上限：不加的话 TCP 连不可路由地址要等到系统默认超时，实测让整个包从
+	// 0.6 秒变成 30.8 秒。ctx 超时同样走 wrapErr 的网络层分支（拿不到 HTTP 状态码），
+	// 被测性质不变。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, rerr := c.Tabs(ctx)
+	require.Error(t, rerr, "连不上时必须报错")
+	require.Contains(t, rerr.Error(), "hestia sheets: 列工作表: ", "仍要带上本包的前缀与动作名")
+	require.NotContains(t, rerr.Error(), "HTTP ", "网络层失败没有 HTTP 状态码，不该硬凑一个")
+}
+
+// pathWriteValues 是 WriteCells 用的 values:batchUpdate。
+const pathWriteValues = "/v4/spreadsheets/sheet-id/values:batchUpdate"
+
+// unreachableEndpoint 指向保留给文档用的 TEST-NET-1（RFC 5737），本机不会有人监听；
+// 端口 1 进一步保证连不上。用它而不是 localhost 随机端口：后者偶尔会被别的进程占用。
+const unreachableEndpoint = "http://192.0.2.1:1"

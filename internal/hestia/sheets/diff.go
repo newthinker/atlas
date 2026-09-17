@@ -52,6 +52,17 @@ func Diff(sheetName string, cols Columns, current [][]any, rows []Row) []Change 
 
 	out := make([]Change, 0, len(rows)*len(cols))
 	for _, r := range rows {
+		// 🔴 行号钳制（QA round2 [7]）：`Row = Month + entryRowOffset` 而
+		// `entryRowOffset = 3` **恰好等于 client.go 的 headerRow** ⇒ Month=0 会把
+		// 「0月」的格写进**表头行**，破坏 C3 依赖的表头本身，此后所有投影都会因
+		// 表头解析失败而永久停摆；Month=13 写到第 16 行，落在录入区 4–15 之外。
+		//
+		// 越界就**不产出任何 Change**——产出了就有机会被 WriteCells 写出去。
+		// 这是最后一道防线：正常路径上 buildRow 的 periodYearMonth 已经拦过一次
+		// （TASK-010），但 Diff 是导出函数、也被别的调用方用，不该假设入参已校验。
+		if r.Month < 1 || r.Month > 12 {
+			continue
+		}
 		want := make(map[string]any, len(r.Cells))
 		for _, c := range r.Cells {
 			want[c.Label] = c.Value

@@ -1,6 +1,7 @@
 package sheets
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -316,4 +317,52 @@ func TestDiffRewritesTextCellIntoNumber(t *testing.T) {
 	require.Len(t, changes, 1)
 	require.Equal(t, WillWrite, changes[0].Kind)
 	require.Equal(t, 462.06, changes[0].Want, "写回去的必须是 float64，不能是字符串")
+}
+
+// —— TASK-006 返工第 2 轮（QA [7] 行号钳制 / [8] TotalUpdatedCells / [10] 幂等零写）——
+
+// TestDiffSkipsRowsWithMonthOutOfRange 是 [7] 的核心。
+//
+// 🔴 `Row: r.Month + entryRowOffset` 原先没有任何范围校验，而 `entryRowOffset = 3`
+// 恰好等于 `headerRow`（client.go:18）⇒ **Month=0 会把「0月」的格写进表头行**，
+// 破坏 C3 依赖的表头本身，此后所有投影都会因表头解析失败而永久停摆。
+// Month=13 则写到第 16 行，落在录入区 4–15 之外。
+//
+// 判据不是「Row 值对不对」，而是**根本不产出这一行的任何 Change**：
+// 产出了就有机会被 WriteCells 写出去。
+func TestDiffSkipsRowsWithMonthOutOfRange(t *testing.T) {
+	cols := Columns{"社融存量": 0}
+	current := [][]any{{100.0}}
+
+	for _, bad := range []int{0, -1, 13, 99} {
+		t.Run(fmt.Sprintf("Month=%d", bad), func(t *testing.T) {
+			got := Diff("2026年", cols, current,
+				[]Row{{Year: 2026, Month: bad, Cells: []Cell{{Label: "社融存量", Value: 1.0}}}})
+			require.Empty(t, got, "越界月份不许产出任何 Change —— 产出了就有机会被写出去")
+		})
+	}
+
+	// 边界内仍照常产出，防止上面被一个「永远返回空」的实现满足。
+	for _, ok := range []int{1, 12} {
+		t.Run(fmt.Sprintf("Month=%d 仍产出", ok), func(t *testing.T) {
+			got := Diff("2026年", cols, current,
+				[]Row{{Year: 2026, Month: ok, Cells: []Cell{{Label: "社融存量", Value: 1.0}}}})
+			require.Len(t, got, 1)
+			require.Equal(t, ok+entryRowOffset, got[0].Row)
+		})
+	}
+}
+
+// 产出的每个 Change 的 Row 都必须落在录入区（4–15）内——这是上一条的性质化表述，
+// 一条断言覆盖全部合法输入，而不是逐个月份列举。
+func TestDiffNeverTargetsRowsOutsideEntryArea(t *testing.T) {
+	cols := Columns{"月份": 0, "社融存量": 1}
+	rows := make([]Row, 0, 12)
+	for m := 1; m <= 12; m++ {
+		rows = append(rows, Row{Year: 2026, Month: m, Cells: []Cell{{Label: "社融存量", Value: float64(m)}}})
+	}
+	for _, ch := range Diff("2026年", cols, nil, rows) {
+		require.GreaterOrEqual(t, ch.Row, 4, "不许碰表头（第 3 行）与其上")
+		require.LessOrEqual(t, ch.Row, 15, "不许越过录入区末行")
+	}
 }
