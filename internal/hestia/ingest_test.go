@@ -1757,17 +1757,19 @@ func TestIngestSheetsRunsAfterContract(t *testing.T) {
 	deps, _, _ := sheetsIngestDeps(t)
 	var order []string
 	var got []sheets.Row
-	var atCall []string
+	var sidecars, contractsAtCall int
 	deps.ProjectSheets = func(_ context.Context, rows []sheets.Row) error {
 		m, _ := filepath.Glob(filepath.Join(deps.Cfg.Queue.Dir, "pending", "*.json"))
-		atCall = append(atCall, m...)
-		var contracts []string
+		sawContract := false
 		for _, p := range m {
-			if !strings.HasSuffix(p, ".history.json") {
-				contracts = append(contracts, p)
+			if strings.HasSuffix(p, ".history.json") {
+				sidecars++
+			} else {
+				contractsAtCall++
+				sawContract = true
 			}
 		}
-		if len(contracts) > 0 {
+		if sawContract {
 			order = append(order, "contract")
 		}
 		order = append(order, "sheets")
@@ -1780,14 +1782,6 @@ func TestIngestSheetsRunsAfterContract(t *testing.T) {
 	// 🔴 证明上面那条排除**不是恒真的摆设**：投影被调用那一刻，pending/ 里确实同时躺着
 	// 侧车与契约。若哪天夹具不再产出侧车，排除就变成空操作而这条用例照样绿——那时
 	// 「投影挪到契约之前」的变异会重新逃掉。这两条断言让夹具的变化当场变红。
-	var sidecars, contractsAtCall int
-	for _, p := range atCall {
-		if strings.HasSuffix(p, ".history.json") {
-			sidecars++
-		} else {
-			contractsAtCall++
-		}
-	}
 	require.Positive(t, sidecars, "夹具必须产出侧车，否则排除 .history.json 这件事测不到")
 	require.Positive(t, contractsAtCall, "契约本身也必须在场，否则 order 里的 contract 无从谈起")
 	// 收到的是 BuildSheetRows 组装的本库全部行：只入了 2025 年报一期。
