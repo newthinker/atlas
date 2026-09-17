@@ -557,7 +557,12 @@ func TestDepositSumCombinesTwoCriteria(t *testing.T) {
 		// 和「新库冷启动」混成一格会让人以为等几期就好。
 		{"历史不足三期", 10, []float64{10, 10}, CheckPassed, "drift_skipped:insufficient_same_caliber_history", 0.10},
 		{"三期历史，漂移在容许内", 10, []float64{10, 11, 9}, CheckPassed, "", 0.10},
-		{"三期历史，漂移超标", 5, []float64{10, 10, 10}, CheckFailed, "drift_exceeded", 0.05},
+		// 🔴 **漂移判据改为单侧**（2026-09-17）：只有残差**上升**超阈值才失败。
+		// 残差是「Σ分项与合计的偏离」，越小越好；下降意味着分项与合计更吻合了，
+		// 把它判成失败是拿一个坏消息的判据去拦一个好消息。立项依据与代价见
+		// gateDepositSum 的注释与下面 TestDepositSumDriftIsOneSided。
+		{"三期历史，残差上升超标", 15, []float64{10, 10, 10}, CheckFailed, "drift_exceeded", 0.15},
+		{"三期历史，残差下降超标 ⇒ 放行", 5, []float64{10, 10, 10}, CheckPassed, "", 0.05},
 		{"绝对值超标时不谈漂移", 20, []float64{10, 10, 10}, CheckFailed, "tolerance_exceeded", 0.20},
 	}
 	for _, tt := range tests {
@@ -578,6 +583,61 @@ func TestDepositSumCombinesTwoCriteria(t *testing.T) {
 			assert.InDelta(t, tt.wantValue, *c.Value, 1e-9)
 		})
 	}
+}
+
+// TestDepositSumDriftIsOneSided 把「只拦上升」这条单独钉住。
+//
+// 立项依据是线上实测：21 条卡在 hestia_pending 的记录**全部只失败 deposit_sum**，
+// 其中 20 条是 drift，而好几条的残差近乎为零——2026-02 残差 0.0026（分项加总与合计
+// 几乎完全吻合）、2021-07 残差 0.0163、2022-11 残差 0.0686，全都因为「比历史均值好
+// 太多」被拒。后果是 20 个整月从未进权威表，也就从未出现在投影表格里。
+//
+// **残差是一个「坏度」量，只有上侧有意义**。双侧带把「口径突变导致残差跳档」
+// 这个真信号，和「这期抽得特别准」这个好消息，判成同一件事。
+//
+// ⚠️ **放宽的代价要写明白**：若某期因抽取器漏掉一个分项而让残差异常变小，本闸
+// 不再拦它。那种情况由 completeness 闸负责（它查必填集），而 drift 本来也拦不住
+// ——漏一个分项既可能让残差变大也可能变小，方向不确定的信号不该由一个方向性
+// 判据来守。
+func TestDepositSumDriftIsOneSided(t *testing.T) {
+	priorWith := func(pcts ...float64) []Observation {
+		out := make([]Observation, 0, len(pcts))
+		for i, p := range pcts {
+			out = append(out, Observation{Meta: priorMeta(i), Values: depositWith(p)})
+		}
+		return out
+	}
+	statusOf := func(residual float64, prior []float64) (CheckStatus, string) {
+		obs := Observation{Meta: validMeta(), Values: depositWith(residual)}
+		rep, err := Validate(context.Background(), obs,
+			fakeHistory{prior: priorWith(prior...)}, DefaultThresholds())
+		require.NoError(t, err)
+		c := findCheck(t, rep, "deposit_sum")
+		return c.Status, c.Reason
+	}
+
+	// 阈值 0.03 ⇒ 残差以百分点计时，偏离 3 个百分点为界
+	t.Run("上升恰好超阈值 ⇒ 失败", func(t *testing.T) {
+		st, reason := statusOf(13.5, []float64{10, 10, 10})
+		require.Equal(t, CheckFailed, st)
+		require.Contains(t, reason, "drift_exceeded")
+	})
+	t.Run("下降同样幅度 ⇒ 放行", func(t *testing.T) {
+		st, reason := statusOf(6.5, []float64{10, 10, 10})
+		require.Equal(t, CheckPassed, st)
+		require.Empty(t, reason, "放行时不留 Reason，与其它通过分支一致")
+	})
+	t.Run("线上真实值：残差近乎为零不该被拦", func(t *testing.T) {
+		// 2026-02 的形态：残差 0.26%、5 期均值 9.37%
+		st, _ := statusOf(0.26, []float64{9.37, 9.37, 9.37, 9.37, 9.37})
+		require.Equal(t, CheckPassed, st, "分项与合计几乎完全吻合，这是最好的结果")
+	})
+	t.Run("上升方向的保护没被削弱", func(t *testing.T) {
+		// 同样的距离、反方向：口径跳档仍要拦
+		st, reason := statusOf(9.37+5, []float64{9.37, 9.37, 9.37, 9.37, 9.37})
+		require.Equal(t, CheckFailed, st)
+		require.Contains(t, reason, "drift_exceeded")
+	})
 }
 
 // 前两行的 Reason 必须**可分**：no_prior_period 说「这是首期」，

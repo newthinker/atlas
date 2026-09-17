@@ -485,7 +485,22 @@ func gateDepositSum(in gateInput) Check {
 		sum += h
 	}
 	mean := sum / float64(len(hist))
-	if drift := math.Abs(r - mean); drift > in.cfg.DepositSumDriftMax {
+	// 🔴 **单侧**：只有残差**上升**超阈值才失败（2026-09-17，人类裁决）。
+	//
+	// 原实现是 `math.Abs(r - mean)`。残差是「Σ分项与合计的偏离」，是个**坏度**量
+	// ——越小越好。双侧带把「口径突变让残差跳档」这个真信号，和「这期抽得特别准」
+	// 这个好消息，判成了同一件事。
+	//
+	// 线上实测代价：21 条卡在 hestia_pending 的记录**全部只失败本闸**，其中 20 条走
+	// drift，而好几条残差近乎为零——2026-02 残差 0.0026（分项加总与合计几乎完全吻合）、
+	// 2021-07 残差 0.0163、2022-11 残差 0.0686，全因「比历史均值好太多」被拒。后果是
+	// **20 个整月从未进权威表**，也就从未出现在投影表格里，而没有任何机制会报这件事。
+	//
+	// ⚠️ **放宽的代价写在这里，别让它只活在提交信息里**：若某期因抽取器漏掉一个分项
+	// 而让残差异常变小，本闸不再拦它。那种情况归 completeness 闸（它查必填集）——
+	// 而 drift 本来也拦不住：漏一个分项既可能让残差变大也可能变小，**方向不确定的
+	// 信号不该由一个方向性判据来守**。
+	if drift := r - mean; drift > in.cfg.DepositSumDriftMax {
 		c.Status = CheckFailed
 		c.Reason = fmt.Sprintf("drift_exceeded[%s]: residual %.4f drifted %.4f from %d-period mean %.4f (total=%s)",
 			b.name, r, drift, len(hist), mean, b.total)
