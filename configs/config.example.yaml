@@ -252,6 +252,48 @@ alerts:
       cooldown: 24h
       severity: warning
       message: "Hestia 40 天没有新期次入库或落 pending"
+    # Hestia 契约队列（2026-09-17）。前三条盯队列，后两条盯健康度自己读不读得到数据源。
+    # 年龄指标在目录为空时不输出 ⇒ 规则找不到指标评估为 false，空队列不会假红。
+    - name: hestia_queue_stuck
+      expr: "hestia_queue_pending_age_hours > 24"
+      for: 10m
+      cooldown: 24h
+      severity: warning
+      message: "Hestia 契约在 pending/ 堆了超过 24 小时：Warp 触发器没跑，或容器起不来"
+    # 求值器不支持 label 选择器（`hestia_queue_items{state="failed"}` 永远不匹配），而 Snapshot
+    # 把带 label 的序列求和成一个键；hestia_queue_items_failed 来自 Snapshot 对 state label 的
+    # 展开（M4 的 TASK-002），不是 /metrics 上的原始指标名。
+    - name: hestia_queue_failed
+      expr: "hestia_queue_items_failed > 0"
+      for: 10m
+      cooldown: 24h
+      severity: warning
+      message: "Hestia 队列有 failed/ 项：agent 处理失败，去看 failed/ 里的 .note.md 取证"
+    # agent 中途卡死的形态：契约停在 processing/ 不动，而触发器按设计会静默跳过
+    # （互斥判据就是 processing/ 非空）⇒ 没有这条就是「卡死后永远不再处理且无人知晓」。
+    - name: hestia_queue_processing_stuck
+      expr: "hestia_queue_processing_age_hours > 0.5"
+      for: 10m
+      cooldown: 6h
+      severity: warning
+      message: "Hestia 契约卡在 processing/ 超过 30 分钟：agent 中途死了，手工移回 pending/"
+    # 健康度自己瞎了：库或队列目录读不到。拆成两条而不是一条 `a or b`——求值器不支持 or，
+    # 写了会被静默求值为 false。两条**不得同名**：evaluator 的 for 计时（pending）与 cooldown
+    # （lastFired）都按规则名存，同名会共享状态，一条的计时被另一条清掉。
+    # 用 *_up == 0 而非 *_errors_total > 0：后者是累计计数，一次瞬时失败后 serve 重启前恒 > 0，
+    # 恢复了也不熄；up 是「本轮读成功 1 / 失败 0」，恢复后下一轮就熄（2026-09-17 人类裁决）。
+    - name: hestia_db_blind
+      expr: "hestia_db_up == 0"
+      for: 10m
+      cooldown: 6h
+      severity: critical
+      message: "Hestia 健康度读不到库：serve 活着但 hestia 指标在瞎报"
+    - name: hestia_queue_blind
+      expr: "hestia_queue_up == 0"
+      for: 10m
+      cooldown: 6h
+      severity: critical
+      message: "Hestia 健康度读不到契约队列目录：目录被删或 serve 的工作目录不对，队列告警全部失明"
 
 # Hestia 央行数据管线（docs 见 vault Projects/Hestia）。serve 只需要知道它的配置文件在哪；
 # db_path 等在 configs/hestia.yaml 里。留空 = serve 不暴露 hestia 健康度。
