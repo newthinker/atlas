@@ -262,6 +262,17 @@ func (c Config) validate() error {
 		return fmt.Errorf("signals.scissors_sink (%v) must be < scissors_active (%v)", c.Signals.ScissorsSink, c.Signals.ScissorsActive)
 	case c.Signals.BillRatioHealthy >= c.Signals.BillRatioSevere:
 		return fmt.Errorf("signals.bill_ratio_healthy (%v) must be < bill_ratio_severe (%v)", c.Signals.BillRatioHealthy, c.Signals.BillRatioSevere)
+	// 🔴 配了一半必须在**装载期**就红（QA round2 CRITICAL-4）。
+	//
+	// 两个都留空 = 能力禁用（C9），是合法配置；两个都给 = 正常。只有「给了凭据、
+	// 没给表 id」这一种是错的，而它的后果**恰恰最不容易发现**：能力看起来是开的，
+	// 每次投影都会在 sheets.Push 里因 spreadsheetID 为空而失败，而按 C8 那是静默的
+	// ——只打印一行、不改 run outcome、不改退出码、不发 Telegram。
+	// 装载期拦不住，就没有第二个地方会出声。
+	case c.HestiaSheets.CredentialsFile != "" && c.HestiaSheets.SpreadsheetID == "":
+		return errors.New(
+			"hestia_sheets.spreadsheet_id is required when hestia_sheets.credentials_file is set" +
+				"（配了凭据却没给表 id：能力看起来是开的，而每次投影都会静默失败）")
 	}
 
 	// 第二道防线：预填只挡住「没写」，**挡不住「写了 0」**。有人显式写

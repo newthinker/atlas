@@ -773,3 +773,50 @@ alerts:
 		}
 	})
 }
+
+// —— TASK-010 返工第 2 轮（QA round2 CRITICAL-4 修法 b）——
+//
+// 🔴 这条守的是本 sprint **已经真实发生**的一次配置事故：
+// configs/config.yaml 里填了 hestia_sheets（真实凭据路径与表 id），而那个键
+// **只被 internal/hestia 的 Config 读**，来源是 hestia.config_path 指向的
+// configs/hestia.yaml。主配置这边没有 HestiaSheets 字段，viper 对未知顶层键
+// 也不报错 ⇒ 填了等于没填，能力静默禁用，而配置文件看起来已经配好了。
+//
+// TASK-011 在 config.example.yaml 里写过「⚠️ 生效位置不是本文件」的警告——
+// **警告没能拦住**。所以把它从注释升级成装载期的硬错误。
+func TestLoadRejectsHestiaSheetsInMainConfig(t *testing.T) {
+	const base = "storage:\n  type: sqlite\n  path: /tmp/atlas.db\n"
+
+	t.Run("主配置出现 hestia_sheets ⇒ 装载期报错并指路", func(t *testing.T) {
+		path := writeTempConfig(t, base+`
+hestia_sheets:
+  credentials_file: /Users/someone/.config/atlas/sa.json
+  spreadsheet_id: abc123
+`)
+		_, err := Load(path)
+		if err == nil {
+			t.Fatal("主配置里的 hestia_sheets 不会被任何代码读取，必须在装载期就报错")
+		}
+		for _, want := range []string{"hestia_sheets", "configs/hestia.yaml", "hestia.config_path"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("错误文案要含 %q，否则运维不知道该把它挪到哪里；实际：%s", want, err.Error())
+			}
+		}
+	})
+
+	t.Run("没有这个键 ⇒ 照常装载", func(t *testing.T) {
+		if _, err := Load(writeTempConfig(t, base)); err != nil {
+			t.Fatalf("不该影响无关配置：%v", err)
+		}
+	})
+
+	t.Run("hestia 段本身照常 ⇒ 不误伤", func(t *testing.T) {
+		cfg, err := Load(writeTempConfig(t, base+"hestia:\n  config_path: configs/hestia.yaml\n"))
+		if err != nil {
+			t.Fatalf("hestia.config_path 是合法的主配置键，不能被误伤：%v", err)
+		}
+		if cfg.Hestia.ConfigPath != "configs/hestia.yaml" {
+			t.Errorf("config_path 没解出来：%q", cfg.Hestia.ConfigPath)
+		}
+	})
+}
