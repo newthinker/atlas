@@ -109,16 +109,32 @@ func stubSheetsServer(t *testing.T) (*httptest.Server, *[]string) {
 	return srv, &seen
 }
 
+// stubNewSheetsClient / stubSheetsPush 换掉两个包级测试缝，测试结束复原。
+//
+// 单列出来是因为「存旧值 → 注册复原 → 赋新值」这三行在本文件出现了八次；漏掉复原那行
+// 不会让当前用例变红，而是让后面的用例拿到上一条留下的替身。
+func stubNewSheetsClient(t *testing.T, fn func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error)) {
+	t.Helper()
+	old := newSheetsClient
+	t.Cleanup(func() { newSheetsClient = old })
+	newSheetsClient = fn
+}
+
+func stubSheetsPush(t *testing.T, fn func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error)) {
+	t.Helper()
+	old := sheetsPush
+	t.Cleanup(func() { sheetsPush = old })
+	sheetsPush = fn
+}
+
 // withStubSheetsClient 把 newSheetsClient 换成指向本地服务的真 Client，测试结束复原。
 func withStubSheetsClient(t *testing.T) (string, *[]string) {
 	t.Helper()
 	srv, seen := stubSheetsServer(t)
 	creds := fakeSheetsCredentials(t, srv.URL)
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(ctx context.Context, credentialsFile, spreadsheetID string, opts ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(ctx context.Context, credentialsFile, spreadsheetID string, opts ...sheets.Option) (*sheets.Client, error) {
 		return sheets.NewClient(ctx, credentialsFile, spreadsheetID, append(opts, sheets.WithEndpoint(srv.URL))...)
-	}
+	})
 	return creds, seen
 }
 
@@ -127,12 +143,10 @@ func withCapturedPush(t *testing.T) (*[]sheets.Row, *sheets.Options) {
 	t.Helper()
 	var gotRows []sheets.Row
 	var gotOpts sheets.Options
-	old := sheetsPush
-	t.Cleanup(func() { sheetsPush = old })
-	sheetsPush = func(_ context.Context, _ *sheets.Client, rows []sheets.Row, _ []string, opts sheets.Options) (sheets.Result, error) {
+	stubSheetsPush(t, func(_ context.Context, _ *sheets.Client, rows []sheets.Row, _ []string, opts sheets.Options) (sheets.Result, error) {
 		gotRows, gotOpts = rows, opts
 		return sheets.Result{}, nil
-	}
+	})
 	return &gotRows, &gotOpts
 }
 
@@ -321,12 +335,10 @@ func TestPushSheetsWithoutPeriodSendsEverything(t *testing.T) {
 // 同语义。退非零会让巡检脚本把「没配」报成故障。
 func TestSheetsPushPrintsDisabledAndExitsZero(t *testing.T) {
 	sheetsCfg(t, "")
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
 		t.Fatal("凭据留空时不该建客户端")
 		return nil, nil
-	}
+	})
 
 	out, err := sheetsExec(t, "hestia", "sheets", "push", "--all")
 	require.NoError(t, err, "能力禁用不是错误")
@@ -369,11 +381,9 @@ func TestHestiaIngestDepsCarryProjector(t *testing.T) {
 // 闭包最外层的 recover 也兜得住建客户端那一步的 panic：真实第三方 client 的 panic
 // 可能发生在任一步，只兜 Push 那一段等于赌它只在那里炸。
 func TestSheetsProjectorRecoversClientPanic(t *testing.T) {
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
 		panic("boom in client")
-	}
+	})
 
 	err := sheetsProjector(hestia.Config{
 		HestiaSheets: hestia.HestiaSheets{CredentialsFile: "/nonexistent/sa.json"},
@@ -389,11 +399,9 @@ func TestSheetsProjectorRecoversClientPanic(t *testing.T) {
 // 不返回」那条路径，所以断言落在 Ingest 的返回值、run 的 outcome 与那行固定文案上。
 func TestProjectSheetsPanicDoesNotBreakIngest(t *testing.T) {
 	creds, _ := withStubSheetsClient(t)
-	old := sheetsPush
-	t.Cleanup(func() { sheetsPush = old })
-	sheetsPush = func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
+	stubSheetsPush(t, func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
 		panic("boom in push")
-	}
+	})
 
 	cfg := hestia.Config{
 		ConfigVersion: "test",
@@ -486,11 +494,9 @@ func TestSheetsPushPropagatesConfigError(t *testing.T) {
 // 建客户端失败要原样带出去：凭据文件读不到是运维最常撞的一种，吞掉它会让
 // 「推了但没生效」看起来和「推成功了」一样。
 func TestPushSheetsPropagatesClientError(t *testing.T) {
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
 		return nil, fmt.Errorf("read sa.json: permission denied")
-	}
+	})
 
 	err := pushSheets(context.Background(), io.Discard, hestia.Config{}, nil, "", sheets.Options{})
 	require.ErrorContains(t, err, "permission denied")
@@ -499,11 +505,9 @@ func TestPushSheetsPropagatesClientError(t *testing.T) {
 // Push 报错时不排版：印一份「将写 0 格」的汇总会让人以为这次跑完了。
 func TestPushSheetsPropagatesPushError(t *testing.T) {
 	creds, _ := withStubSheetsClient(t)
-	old := sheetsPush
-	t.Cleanup(func() { sheetsPush = old })
-	sheetsPush = func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
+	stubSheetsPush(t, func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
 		return sheets.Result{}, fmt.Errorf("hestia sheets: 缺年度表 2019年；加 --create-sheets 允许建表")
-	}
+	})
 
 	var out bytes.Buffer
 	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
@@ -514,11 +518,9 @@ func TestPushSheetsPropagatesPushError(t *testing.T) {
 
 // 闭包里建客户端失败 ⇒ 返回 error（走 C8 的只打印路径），而不是 panic 也不是吞掉。
 func TestSheetsProjectorPropagatesClientError(t *testing.T) {
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
 		return nil, fmt.Errorf("read sa.json: no such file")
-	}
+	})
 
 	err := sheetsProjector(hestia.Config{
 		HestiaSheets: hestia.HestiaSheets{CredentialsFile: "/nonexistent/sa.json"},
