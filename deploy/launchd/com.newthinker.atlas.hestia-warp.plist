@@ -5,9 +5,12 @@
      队列里有活才唤起 Warp 解读 agent（先判后唤起的理由见该脚本头注释）。
      真相源在本仓库 deploy/launchd/，由 scripts/ops/install-services.sh 复制到 ~/Library/LaunchAgents/。
 
-     ⚠️ **代理键在这里是必须的**，与 hestia-ingest.plist 的处境相反。
-     那份刻意一个代理键都不设，因为它直连央行（fetch.go 的空 Transport{}）。
-     本任务调的是 nanoclaw，容器里的 agent 要出网访问 Anthropic —— 不设就恒连不上。
+     ⚠️ **代理键在这里是必须的**：本任务调的是 nanoclaw，容器里的 agent 要出网访问
+     Anthropic，而 launchd 不继承登录 shell 的环境 —— 不设就恒连不上。
+     hestia-ingest.plist 同样设了这三个键（给 Sheets 投影出网，5447d05 起；守卫
+     cmd/atlas/hestia_test.go 的 TestHestiaPlistSetsProxyKeysForSheets），两份需要代理的
+     理由各自独立。⚠️ 那份文件头注释里「一个代理键都没有」是过期说法，以其
+     EnvironmentVariables 里的注释为准。
 
      🔴 **别照抄 crisis / refresh-cnhk / prism-daily 的 plist**：三份里 no_proxy 的
      位置各不相同，「照抄再改」在前者会漏、在后者会过头（成因见 hestia-ingest.plist
