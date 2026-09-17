@@ -652,3 +652,38 @@ func TestCreateYearTabsRejectsNonYearTabName(t *testing.T) {
 	require.ErrorContains(t, err, "说明表", "错误里要点名是哪一个，否则缺表一多就没法查")
 	require.Empty(t, writeBodies(rec), "名字都不认识，不许动表结构")
 }
+
+// —— TASK-006 返工第 3 轮（QA [1]：钳制不能静默）——
+//
+// 🔴 上一轮的钳制本身对（位置、反空洞对照、三个变异全 KILLED），**未达标的是它静默**：
+// `Diff` 只返回 `[]Change`，越界行被整行跳过之后，**结构上没有任何通道能把「我丢了一行」
+// 告诉调用方**；而 `Diff` 的文档注释还在宣称「每行 × 每列恰产出一条…少一条就有一格
+// 无声消失」——那句话逐字描述了新代码的行为，且它挂在一个导出函数上。
+//
+// 本轮给跳过加可观测出口：`Result.DroppedCells`。判据不是「月份越界」这个**成因**，
+// 而是「期望格数 ≠ 实得格数」这个**性质**——将来若出现第二种让 Diff 少产出的成因，
+// 这条同样会亮，不需要再加一个字段。
+func TestPushReportsDroppedCellsWhenMonthOutOfRange(t *testing.T) {
+	c, _ := newTestClient(t, tabsAndHeaderResponses(), 0)
+	rows := append(sampleRows(),
+		Row{Year: 2026, Month: 0, Cells: []Cell{{Label: "社融存量", Value: 1.0}}},
+		Row{Year: 2026, Month: 13, Cells: []Cell{{Label: "社融存量", Value: 2.0}}},
+	)
+
+	res, err := Push(context.Background(), c, rows, sampleLabels(), Options{})
+	require.NoError(t, err, "越界行不该让整批失败——它只是没被比对")
+
+	// 2 行越界 × 4 列 = 8 格未被比对
+	require.Equal(t, 8, res.DroppedCells,
+		"越界行被跳过这件事必须能从 Result 看出来，否则调用方无从知道有数据没比对")
+
+	// 🔴 反空洞：合法输入下必须恒为 0，否则上面那条会被一个「永远报非零」的实现满足
+	res2, err := Push(context.Background(), c, sampleRows(), sampleLabels(), Options{})
+	require.NoError(t, err)
+	require.Zero(t, res2.DroppedCells, "全部行合法时不许报丢格")
+
+	// 🔴 那条不变量现在的正确形式：三类计数之和 + 丢掉的格数 = 期望格数
+	require.Equal(t, len(rows)*len(sampleLabels()),
+		res.WillWrite+res.Same+res.AbsentInDB+res.DroppedCells,
+		"三类之和不再等于格数——它现在等于「格数 − DroppedCells」，这正是要让人看见的")
+}
