@@ -166,3 +166,129 @@ func TestSnapshot_GatherError_NoPanic(t *testing.T) {
 		t.Errorf("partial_counter = %v, want 3 (partial data kept)", snap["partial_counter"])
 	}
 }
+
+// Context Checkpoint: done_criteria → test mapping (TASK-002)
+// functional[0]     "gauge state=failed/done 展开为 x_failed/x_done，原求和不变；status 与 state 同在两键都产生" → TestSnapshot_StateGaugeExpands / TestSnapshot_StateAndStatusBothExpand
+// functional[1]     "counter 同样展开 y_failed"                                   → TestSnapshot_StateCounterExpands
+// functional[2]     "既有 status 分类行为不变（既有测试函数体零改动）"              → review（本块之上的既有测试未改）
+// boundary[0]       "无 state label ⇒ 键集合精确等于 {z}"                         → TestSnapshot_NoStateLabel_NoExtraKeys
+// boundary[1]       "同 state 多序列（shard 区分）⇒ <name>_<state> 求和"           → TestSnapshot_StateSameValueSums
+// boundary[2]       "state 为空串或不匹配 ^\w+$ ⇒ 不产生 <name>_ 键"               → TestSnapshot_StateInvalidValue_NoKey
+// error_handling[0] "histogram 带 state ⇒ 只有 _count/_sum"                        → TestSnapshot_HistogramWithState_NoStateKey
+
+// assertKeys fails unless snap's key set is exactly want.
+func assertKeys(t *testing.T, snap map[string]float64, want ...string) {
+	t.Helper()
+	if len(snap) != len(want) {
+		t.Errorf("keys = %v, want exactly %v", snap, want)
+		return
+	}
+	for _, k := range want {
+		if _, ok := snap[k]; !ok {
+			t.Errorf("missing key %q in %v", k, snap)
+		}
+	}
+}
+
+func TestSnapshot_StateGaugeExpands(t *testing.T) {
+	gv := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "x"}, []string{"state"})
+	gv.WithLabelValues("failed").Set(2)
+	gv.WithLabelValues("done").Set(5)
+
+	snap := snapshotRegistry(t, gv).Snapshot()
+
+	if snap["x"] != 7 {
+		t.Errorf("x = %v, want 7 (base sum unchanged)", snap["x"])
+	}
+	if snap["x_failed"] != 2 {
+		t.Errorf("x_failed = %v, want 2", snap["x_failed"])
+	}
+	if snap["x_done"] != 5 {
+		t.Errorf("x_done = %v, want 5", snap["x_done"])
+	}
+	assertKeys(t, snap, "x", "x_failed", "x_done")
+}
+
+// addStatusClass returns as soon as it sees a status label, so the state
+// expansion must not live inside that loop — both keys have to appear.
+func TestSnapshot_StateAndStatusBothExpand(t *testing.T) {
+	gv := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "x"}, []string{"status", "state"})
+	gv.WithLabelValues("500", "failed").Set(4)
+
+	snap := snapshotRegistry(t, gv).Snapshot()
+
+	if snap["x_5xx"] != 4 {
+		t.Errorf("x_5xx = %v, want 4", snap["x_5xx"])
+	}
+	if snap["x_failed"] != 4 {
+		t.Errorf("x_failed = %v, want 4", snap["x_failed"])
+	}
+}
+
+func TestSnapshot_StateCounterExpands(t *testing.T) {
+	cv := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "y"}, []string{"state"})
+	cv.WithLabelValues("failed").Add(3)
+
+	snap := snapshotRegistry(t, cv).Snapshot()
+
+	if snap["y"] != 3 {
+		t.Errorf("y = %v, want 3", snap["y"])
+	}
+	if snap["y_failed"] != 3 {
+		t.Errorf("y_failed = %v, want 3", snap["y_failed"])
+	}
+}
+
+func TestSnapshot_NoStateLabel_NoExtraKeys(t *testing.T) {
+	g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "z"})
+	g.Set(1)
+
+	snap := snapshotRegistry(t, g).Snapshot()
+
+	assertKeys(t, snap, "z")
+}
+
+func TestSnapshot_StateSameValueSums(t *testing.T) {
+	gv := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "x"}, []string{"state", "shard"})
+	gv.WithLabelValues("failed", "a").Set(2)
+	gv.WithLabelValues("failed", "b").Set(6)
+
+	snap := snapshotRegistry(t, gv).Snapshot()
+
+	if snap["x_failed"] != 8 {
+		t.Errorf("x_failed = %v, want 8 (2+6)", snap["x_failed"])
+	}
+}
+
+func TestSnapshot_StateInvalidValue_NoKey(t *testing.T) {
+	tests := []struct {
+		name  string
+		state string
+	}{
+		{"empty", ""},
+		{"hyphen", "in-flight"},
+		{"space", "in flight"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gv := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "x"}, []string{"state"})
+			gv.WithLabelValues(tt.state).Set(1)
+
+			snap := snapshotRegistry(t, gv).Snapshot()
+
+			assertKeys(t, snap, "x")
+		})
+	}
+}
+
+func TestSnapshot_HistogramWithState_NoStateKey(t *testing.T) {
+	hv := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "h",
+		Buckets: []float64{1},
+	}, []string{"state"})
+	hv.WithLabelValues("failed").Observe(0.5)
+
+	snap := snapshotRegistry(t, hv).Snapshot()
+
+	assertKeys(t, snap, "h_count", "h_sum")
+}
