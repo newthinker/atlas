@@ -1,11 +1,11 @@
 package main
 
 // Context Checkpoint: done_criteria → test mapping (M4 的 TASK-005，五条告警规则)
-// functional[0]     样例配置经 config.Load + mapRules 读出五条，name/expr/for/cooldown/severity 逐项相等
+// functional[0]     样例配置经 config.Load + mapRules 读出五条，name/expr/for/cooldown/severity/message 六项逐项相等
 //                                            → TestHestiaAlertRules_DeclaredInExampleConfig
 // functional[1]     五条 expr 经 alert.Rule.Evaluate 应触发 true / 不应触发 false，阈值取等号各一例
 //                                            → TestHestiaAlertRules_ExprEvaluable
-// functional[2]     端到端：failed/ 放 1 份 ⇒ hestia_queue_failed true，删掉 ⇒ false
+// functional[2]     端到端：failed/、done/ 各放 1 份 ⇒ hestia_queue_failed true，删掉 failed 那份 ⇒ false
 //                                            → TestHestiaAlertRules_E2EFailedItem
 // boundary[0]       四目录都空 ⇒ stuck / processing_stuck / failed 均 false → TestHestiaAlertRules_E2EEmptyQueueDoesNotFire
 // boundary[1]       删 pending/ ⇒ queue_blind true，建回 ⇒ false       → TestHestiaAlertRules_E2EQueueBlindRecovers
@@ -56,15 +56,26 @@ func evalRule(t *testing.T, rules map[string]alert.Rule, name string, m map[stri
 
 func TestHestiaAlertRules_DeclaredInExampleConfig(t *testing.T) {
 	rules := loadExampleRules(t)
+	// message 逐字比对：critical 规则的文案被换成另一条的文案时要变红，NotEmpty 抓不到。
 	tests := []struct {
-		name, expr, severity string
-		forDur, cooldown     time.Duration
+		name, expr, severity, message string
+		forDur, cooldown              time.Duration
 	}{
-		{"hestia_queue_stuck", "hestia_queue_pending_age_hours > 24", "warning", 10 * time.Minute, 24 * time.Hour},
-		{"hestia_queue_failed", "hestia_queue_items_failed > 0", "warning", 10 * time.Minute, 24 * time.Hour},
-		{"hestia_queue_processing_stuck", "hestia_queue_processing_age_hours > 0.5", "warning", 10 * time.Minute, 6 * time.Hour},
-		{"hestia_db_blind", "hestia_db_up == 0", "critical", 10 * time.Minute, 6 * time.Hour},
-		{"hestia_queue_blind", "hestia_queue_up == 0", "critical", 10 * time.Minute, 6 * time.Hour},
+		{"hestia_queue_stuck", "hestia_queue_pending_age_hours > 24", "warning",
+			"Hestia 契约在 pending/ 堆了超过 24 小时：Warp 触发器没跑，或容器起不来",
+			10 * time.Minute, 24 * time.Hour},
+		{"hestia_queue_failed", "hestia_queue_items_failed > 0", "warning",
+			"Hestia 队列有 failed/ 项：agent 处理失败，去看 failed/ 里的 .note.md 取证",
+			10 * time.Minute, 24 * time.Hour},
+		{"hestia_queue_processing_stuck", "hestia_queue_processing_age_hours > 0.5", "warning",
+			"Hestia 契约卡在 processing/ 超过 30 分钟：agent 中途死了，手工移回 pending/",
+			10 * time.Minute, 6 * time.Hour},
+		{"hestia_db_blind", "hestia_db_up == 0", "critical",
+			"Hestia 健康度读不到库：serve 活着但 hestia 指标在瞎报",
+			10 * time.Minute, 6 * time.Hour},
+		{"hestia_queue_blind", "hestia_queue_up == 0", "critical",
+			"Hestia 健康度读不到契约队列目录：目录被删或 serve 的工作目录不对，队列告警全部失明",
+			10 * time.Minute, 6 * time.Hour},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,7 +85,7 @@ func TestHestiaAlertRules_DeclaredInExampleConfig(t *testing.T) {
 			assert.Equal(t, tt.forDur, r.For)
 			assert.Equal(t, tt.cooldown, r.Cooldown)
 			assert.Equal(t, tt.severity, r.Severity)
-			assert.NotEmpty(t, r.Message)
+			assert.Equal(t, tt.message, r.Message)
 		})
 	}
 }
@@ -135,6 +146,9 @@ func TestHestiaAlertRules_E2EFailedItem(t *testing.T) {
 	q := newQueueDir(t)
 	failed := filepath.Join(q, "failed", "contract.json")
 	require.NoError(t, os.WriteFile(failed, []byte("{}"), 0o644))
+	// done/ 也放 1 份：删掉 failed 那份后求和基键 hestia_queue_items 仍为 1，
+	// 误用它代替 hestia_queue_failed 的展开键时「应熄灭」那条断言会红。
+	require.NoError(t, os.WriteFile(filepath.Join(q, "done", "contract.json"), []byte("{}"), 0o644))
 	reg := queueRegistry(t, okHealth, q)
 
 	assert.True(t, evalRule(t, rules, "hestia_queue_failed", reg.Snapshot()), "failed/ 有 1 件应触发")
