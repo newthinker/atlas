@@ -3,6 +3,7 @@ package sheets
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,9 @@ import (
 type recorder struct {
 	methods []string
 	bodies  []string
+	// queries 记下每个请求的原始查询串。methods 只留方法与路径，而 valueRenderOption
+	// 走的是查询参数——不记就断言不了「读用的是 UNFORMATTED_VALUE」（QA round2 CRITICAL-1）。
+	queries []string
 }
 
 // fakeCredentials 把 testdata/fake-sa.json 复制到临时目录，并把 token_uri 指向 srv：
@@ -64,6 +68,7 @@ func newTestClient(t *testing.T, resp map[string]string, status int) (*Client, *
 		}
 		b, _ := io.ReadAll(r.Body)
 		rec.methods = append(rec.methods, r.Method+" "+r.URL.Path)
+		rec.queries = append(rec.queries, r.URL.RawQuery)
 		rec.bodies = append(rec.bodies, string(b))
 		if status != 0 {
 			w.WriteHeader(status)
@@ -206,4 +211,152 @@ func TestClientDoesNotUseBareTransport(t *testing.T) {
 	src, err := os.ReadFile("client.go")
 	require.NoError(t, err)
 	require.NotContains(t, string(src), "http.Transport{")
+}
+
+// —— TASK-006 返工（QA round2 CRITICAL-1 / CRITICAL-2）——
+
+// TestReadUsesUnformattedValue 是 CRITICAL-1 的**根因守卫**。
+//
+// 🔴 pinned 模块 sheets-gen.go:11695 明写 values.get 默认 FORMATTED_VALUE ⇒ 返回格式化
+// 文本（千分位、百分号、会计负数括号）。不显式要 UNFORMATTED_VALUE 的话，读回来的
+// 「462.06」是字符串而库里是 float64，diff 每次都判不一致 ⇒ 幂等失效、每次 apply 全量重写。
+//
+// 判据落在**真实请求的查询串**上（C11：断言真实请求，不是断言 mock 被调用）。
+func TestReadUsesUnformattedValue(t *testing.T) {
+	c, rec := newTestClient(t, map[string]string{
+		"/v4/spreadsheets/sheet-id/values/'2025年'!A4:AI15": `{"values":[["1月","2025-02-14",412.5]]}`,
+		"/v4/spreadsheets/sheet-id/values/'2025年'!A3:AI3":  `{"values":[["月份","发布日期","社融存量"]]}`,
+	}, 0)
+
+	_, err := c.ReadEntryArea(context.Background(), "2025年")
+	require.NoError(t, err)
+	_, err = c.ReadHeader(context.Background(), "2025年")
+	require.NoError(t, err)
+
+	require.Len(t, rec.queries, 2)
+	for i, q := range rec.queries {
+		require.Contains(t, q, "valueRenderOption=UNFORMATTED_VALUE",
+			"第 %d 个读请求没要 UNFORMATTED_VALUE（实际查询串 %q）—— 默认 FORMATTED_VALUE 会回文本", i, q)
+	}
+}
+
+// readTitle 走的是同一条坑：模板标题要拿原值做年份替换，格式化过的标题会让替换错位。
+func TestCreateYearTabReadsTitleUnformatted(t *testing.T) {
+	c, rec := newTestClient(t, templateResponses(), 0)
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 3))
+
+	var titleQueries []string
+	for i, m := range rec.methods {
+		if strings.Contains(m, "/values/") {
+			titleQueries = append(titleQueries, rec.queries[i])
+		}
+	}
+	require.NotEmpty(t, titleQueries, "读模板标题这一步必须发生")
+	for _, q := range titleQueries {
+		require.Contains(t, q, "valueRenderOption=UNFORMATTED_VALUE")
+	}
+}
+
+// TestCreateYearTabClearsNewTabEntryArea 是 CRITICAL-2 的核心。
+//
+// 🔴 模板表与数据表是**同一张**：templateYearTab 是 "2024年"，而 tabName(2024) 也是
+// "2024年"。真库 2024 年有 10 期数据 ⇒ 首次 apply 会把「模板」填满；明年 1 月跨年建表时
+// 复制的就是一张带数据的表，新年度表 2–12 月带着 2024 年的数字，而库里没有对应月份的行
+// **不会被 Diff 触碰**（Diff 只遍历 rows）。ingest 固定 Apply+CreateSheets ⇒ 自动触发、无告警。
+//
+// ⚠️ 清的是**刚复制出来的新表**（sheetId = 新表的 id），不动模板、不删任何人工数据。
+func TestCreateYearTabClearsNewTabEntryArea(t *testing.T) {
+	c, rec := newTestClient(t, templateResponses(), 0)
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 3))
+
+	require.Len(t, writeBodies(rec), 1, "四步 + 清空仍在同一次 batchUpdate 里")
+	body := writeBodies(rec)[0]
+	require.Contains(t, body, "updateCells", "清空录入区用 updateCells + 空 rows")
+
+	// 新表 sheetId = 现有最大 + 1；templateResponses 里 2024年 是 12345 且为最大值
+	var got batchUpdateBody
+	require.NoError(t, json.Unmarshal([]byte(body), &got))
+	newID := int64(templateSheetID + 1)
+
+	var clear *gridRange
+	for _, r := range got.Requests {
+		// 清空请求的特征：范围覆盖录入区整块（12 行 × 35 列）且不带 rows
+		if r.UpdateCells != nil && r.UpdateCells.Range != nil &&
+			r.UpdateCells.Range.EndRowIndex == 15 && len(r.UpdateCells.Rows) == 0 {
+			clear = r.UpdateCells.Range
+		}
+	}
+	require.NotNil(t, clear, "必须有一条清空新表录入区的请求；请求体：%s", body)
+	require.Equal(t, newID, clear.SheetID, "清的必须是新表，不是模板（模板 id=%d）", templateSheetID)
+	require.Equal(t, int64(3), clear.StartRowIndex, "录入区首行是第 4 行（0 基 3）")
+	require.Equal(t, int64(15), clear.EndRowIndex, "录入区末行是第 15 行")
+	require.Equal(t, int64(0), clear.StartColumnIndex, "从 A 列起")
+	require.Equal(t, int64(35), clear.EndColumnIndex, "到 AI 列止（0 基 34，半开区间 35）")
+
+	// 清空必须排在 duplicate **之后**：顺序反了就是清模板的录入区——那才是真的删人工数据。
+	iDup, iClear := -1, -1
+	for i, r := range got.Requests {
+		switch {
+		case r.DuplicateSheet != nil:
+			iDup = i
+		case r.UpdateCells != nil && r.UpdateCells.Range != nil &&
+			r.UpdateCells.Range.EndRowIndex == 15 && len(r.UpdateCells.Rows) == 0:
+			iClear = i
+		}
+	}
+	require.NotEqual(t, -1, iDup)
+	require.Less(t, iDup, iClear, "清空必须在复制之后，否则清的是模板")
+}
+
+// fix_items[5] 的端到端形态：**模板表里本来就有数据**时，新表的录入区仍被清空。
+//
+// 这正是 CRITICAL-2 的真实场景——首次 --apply 把「2024年」填满之后，它既是数据表
+// 又是模板。⚠️ 受限于 httptest 替身不建模服务端状态，这里能证的是「清空请求被发出
+// 且覆盖整块录入区」，证不了「服务端执行后真的空了」；后者属 spec §10 判据五，
+// 要对真表跑（留给 TASK-012 的人执行项）。
+func TestCreateYearTabClearsEvenWhenTemplateHasData(t *testing.T) {
+	resp := templateResponses()
+	// 模板的录入区塞满 12 个月的数据——首次 apply 之后 2024年 就是这个样子
+	rows := make([]string, 0, 12)
+	for m := 1; m <= 12; m++ {
+		rows = append(rows, fmt.Sprintf(`["%d月","2024-%02d-15",%d.5]`, m, m, 400+m))
+	}
+	resp["/v4/spreadsheets/sheet-id/values/'2024年'!A4:AI15"] = `{"values":[` + strings.Join(rows, ",") + `]}`
+	c, rec := newTestClient(t, resp, 0)
+
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 3))
+
+	var got batchUpdateBody
+	require.NoError(t, json.Unmarshal([]byte(writeBodies(rec)[0]), &got))
+	cleared := false
+	for _, r := range got.Requests {
+		if r.UpdateCells != nil && r.UpdateCells.Range != nil &&
+			r.UpdateCells.Range.EndRowIndex == 15 && len(r.UpdateCells.Rows) == 0 &&
+			r.UpdateCells.Range.SheetID == int64(templateSheetID+1) {
+			cleared = true
+		}
+	}
+	require.True(t, cleared, "模板带数据时更要清空新表，否则新年度表 2–12 月会带着上一年的数字")
+}
+
+// batchUpdateBody / gridRange 只解析本轮断言要的那几个字段，不复刻整个 API schema。
+type batchUpdateBody struct {
+	Requests []struct {
+		DuplicateSheet *struct {
+			SourceSheetID int64 `json:"sourceSheetId"`
+			NewSheetID    int64 `json:"newSheetId"`
+		} `json:"duplicateSheet"`
+		UpdateCells *struct {
+			Range *gridRange        `json:"range"`
+			Rows  []json.RawMessage `json:"rows"`
+		} `json:"updateCells"`
+	} `json:"requests"`
+}
+
+type gridRange struct {
+	SheetID          int64 `json:"sheetId"`
+	StartRowIndex    int64 `json:"startRowIndex"`
+	EndRowIndex      int64 `json:"endRowIndex"`
+	StartColumnIndex int64 `json:"startColumnIndex"`
+	EndColumnIndex   int64 `json:"endColumnIndex"`
 }

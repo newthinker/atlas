@@ -20,8 +20,15 @@ const (
 	entryLastRow  = 15
 	entryLastCol  = 34 // AI
 	valueInputRAW = "RAW"
-	rangeFormat   = "'%s'!%s%d"                        // 表名**无条件**单引号：不包的话中文表名的 A1 记法解析不了
-	propsField    = "sheets.properties(sheetId,title)" // Tabs / CreateYearTab 只要标题与 id，不拉整张表的格
+	// valueRenderRaw 让 values.get 回**原始值**而不是格式化文本。
+	//
+	// 🔴 不显式要它就是 FORMATTED_VALUE（pinned 模块 sheets-gen.go:11695 的默认值）：
+	// 「462.06」会变成字符串、「255800」会变成 "255,800"、同比会带 % 号、负数会变
+	// "(933)"。而库里是 float64 ⇒ diff 每次都判不一致 ⇒ 幂等永远达不成、每次 --apply
+	// 全量重写、dry-run 的「一致跳过」恒为 0。写入侧的 RAW 是另一回事，不要混。
+	valueRenderRaw = "UNFORMATTED_VALUE"
+	rangeFormat    = "'%s'!%s%d"                        // 表名**无条件**单引号：不包的话中文表名的 A1 记法解析不了
+	propsField     = "sheets.properties(sheetId,title)" // Tabs / CreateYearTab 只要标题与 id，不拉整张表的格
 )
 
 // Client 是 Google Sheets 的薄壳：只会读表头、读录入区、列工作表、批量写格。
@@ -115,7 +122,8 @@ func (c *Client) ReadEntryArea(ctx context.Context, tab string) ([][]any, error)
 
 func (c *Client) read(ctx context.Context, tab string, fromRow, toRow int) ([][]any, error) {
 	rng := fmt.Sprintf("'%s'!A%d:%s%d", tab, fromRow, ColumnLetter(entryLastCol), toRow)
-	vr, err := c.svc.Spreadsheets.Values.Get(c.spreadsheetID, rng).Context(ctx).Do()
+	vr, err := c.svc.Spreadsheets.Values.Get(c.spreadsheetID, rng).
+		ValueRenderOption(valueRenderRaw).Context(ctx).Do()
 	if err != nil {
 		return nil, wrapErr("读 "+rng, err)
 	}
@@ -224,6 +232,28 @@ func (c *Client) CreateYearTab(ctx context.Context, templateTab, newTab string, 
 			Properties: &sheets.SheetProperties{SheetId: newID, Index: int64(index), ForceSendFields: []string{"Index"}},
 			Fields:     "index",
 		}},
+		// ⑤ 清空**新表**的录入区（行 4–15 × 列 A–AI）。
+		//
+		// 🔴 模板表与数据表是同一张：templateYearTab 是 "2024年"，而 tabName(2024) 也是
+		// "2024年"。首次 --apply 会把「模板」填满，于是明年 1 月跨年建表时复制到的是一张
+		// **带数据**的表——新年度表 2–12 月带着上一年的数字，而库里没有对应月份的行
+		// **不会被 Diff 触碰**（Diff 只遍历 rows），所以那些假数字会一直留在表里。
+		// ingest 固定 Apply+CreateSheets ⇒ 这件事会自动发生且没有任何告警。
+		//
+		// ⚠️ 清的是**刚 duplicate 出来的新表**（SheetId 是 newID，不是 tplID），
+		// 而且只清录入区、不碰表头（行 1–3）与计算区 AJ–BB 的 19 个公式。
+		// 新表此刻还没有任何人工数据可言——它这一秒才被复制出来。
+		{UpdateCells: &sheets.UpdateCellsRequest{
+			Range: &sheets.GridRange{
+				SheetId:          newID,
+				StartRowIndex:    int64(entryFirstRow - 1),
+				EndRowIndex:      int64(entryLastRow),
+				StartColumnIndex: 0,
+				EndColumnIndex:   int64(entryLastCol + 1),
+				ForceSendFields:  []string{"StartRowIndex", "StartColumnIndex"},
+			},
+			Fields: "userEnteredValue",
+		}},
 	}}
 	if _, err := c.svc.Spreadsheets.BatchUpdate(c.spreadsheetID, req).Context(ctx).Do(); err != nil {
 		return wrapErr(fmt.Sprintf("建年度表 %s（复制 %s）", newTab, templateTab), err)
@@ -234,7 +264,8 @@ func (c *Client) CreateYearTab(ctx context.Context, templateTab, newTab string, 
 // readTitle 读某张表第 1 行第 1 格（表内标题）。空 ⇒ ""。
 func (c *Client) readTitle(ctx context.Context, tab string) (string, error) {
 	rng := fmt.Sprintf("'%s'!A1", tab)
-	vr, err := c.svc.Spreadsheets.Values.Get(c.spreadsheetID, rng).Context(ctx).Do()
+	vr, err := c.svc.Spreadsheets.Values.Get(c.spreadsheetID, rng).
+		ValueRenderOption(valueRenderRaw).Context(ctx).Do()
 	if err != nil {
 		return "", wrapErr("读 "+rng, err)
 	}
