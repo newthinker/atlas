@@ -533,14 +533,10 @@ func TestHestiaPlistSetsProxyKeysForSheets(t *testing.T) {
 // 而「代理指向哪」是本轮要钉的——指到一个不存在的端口同样是静默失败。
 func plistEnvValues(t *testing.T, path string) map[string]string {
 	t.Helper()
-	raw, err := os.ReadFile(path)
-	require.NoError(t, err)
-
 	out := map[string]string{}
 	// 用 plutil 转 JSON 再解析：不自己写 XML 解析器，也不引新依赖。
-	cmd := exec.Command("plutil", "-convert", "json", "-o", "-", path)
-	cmd.Stdin = bytes.NewReader(raw)
-	b, err := cmd.Output()
+	// plutil 直接读 path，不需要再把文件内容喂给它的 stdin。
+	b, err := exec.Command("plutil", "-convert", "json", "-o", "-", path).Output()
 	require.NoError(t, err, "plutil 转 JSON 失败")
 
 	var parsed map[string]any
