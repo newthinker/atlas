@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -44,6 +46,14 @@ const sheetsDisabledLine = "hestia_sheets 未配置（credentials_file 留空）
 // sheetsDryRunLine 是 dry-run 的末尾固定一句。开头的 `dry-run` 不是修辞：
 // 判据同时要认「明说没写」与「说清怎么才写」，两者缺一，人看完这行仍不知道下一步。
 const sheetsDryRunLine = "dry-run：未写入任何内容；确认后加 --apply"
+
+// sheetsCallTimeout 给每次 Sheets 调用一个上限。
+//
+// 🔴 不设就没有上限：Google API 走代理出网，代理没起时连接会一直挂着，而 ingest 是
+// launchd 唤起的批处理——挂住就是这一轮永远不结束、下一个时点的唤起叠上来。
+// 取 2 分钟：一次全量 push 对 6 张年度表是 1+2T 次 read 加一次 batchUpdate，
+// 实测远小于此；真超了说明网络确实不通，按 C8 打印一行即可，不阻断入库。
+const sheetsCallTimeout = 2 * time.Minute
 
 // sheetsEntryFirstRow 是录入区首行（1 月）在表里的 1 基行号。
 //
@@ -128,11 +138,16 @@ func pushSheets(ctx context.Context, out io.Writer, cfg hestia.Config, rows []sh
 	if period != "" {
 		rows = filterRowsByPeriod(rows, period)
 	}
-	c, err := newSheetsClient(ctx, cfg.HestiaSheets.CredentialsFile, cfg.HestiaSheets.SpreadsheetID)
+	// CLI 路径同样给超时：人手动跑时挂住只是难受，但 `sheets push` 也可能进 cron。
+	cctx, ccancel := context.WithTimeout(ctx, sheetsCallTimeout)
+	defer ccancel()
+	c, err := newSheetsClient(cctx, cfg.HestiaSheets.CredentialsFile, cfg.HestiaSheets.SpreadsheetID)
 	if err != nil {
 		return err
 	}
-	res, err := sheetsPush(ctx, c, rows, sheetLabels(), opts)
+	pctx, pcancel := context.WithTimeout(ctx, sheetsCallTimeout)
+	defer pcancel()
+	res, err := sheetsPush(pctx, c, rows, sheetLabels(), opts)
 	if err != nil {
 		return err
 	}
@@ -157,17 +172,36 @@ func sheetsProjector(cfg hestia.Config) func(context.Context, []sheets.Row) erro
 	if cfg.HestiaSheets.CredentialsFile == "" {
 		return nil
 	}
+	// 🔴 客户端**建一次复用**（QA round2 CRITICAL-5）：ingestOne 每期调一次投影，
+	// 每次重建都要读凭据文件并做一次 JWT 交换。`--force` 会翻满 max_pages、逐期
+	// 重跑，那时重建次数与候选数成正比，白白撞配额。
+	//
+	// 懒建而不是提前建：凭据非空不代表这一轮真会入库（多数唤起是幂等空跑），
+	// 空跑时不该读凭据、更不该出网做 JWT 交换。
+	var (
+		client *sheets.Client
+		build  error
+		once   sync.Once
+	)
 	return func(ctx context.Context, rows []sheets.Row) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("hestia sheets: 投影 panic: %v", r)
 			}
 		}()
-		c, cerr := newSheetsClient(ctx, cfg.HestiaSheets.CredentialsFile, cfg.HestiaSheets.SpreadsheetID)
-		if cerr != nil {
-			return cerr
+		once.Do(func() {
+			// 建客户端也给超时：JWT 交换要出网，代理没起时它会一直挂着，
+			// 而 ingest 是 launchd 唤起的，挂住就是这一轮永远不结束。
+			cctx, cancel := context.WithTimeout(ctx, sheetsCallTimeout)
+			defer cancel()
+			client, build = newSheetsClient(cctx, cfg.HestiaSheets.CredentialsFile, cfg.HestiaSheets.SpreadsheetID)
+		})
+		if build != nil {
+			return build
 		}
-		_, perr := sheetsPush(ctx, c, rows, sheetLabels(), sheets.Options{Apply: true, CreateSheets: true})
+		pctx, cancel := context.WithTimeout(ctx, sheetsCallTimeout)
+		defer cancel()
+		_, perr := sheetsPush(pctx, client, rows, sheetLabels(), sheets.Options{Apply: true, CreateSheets: true})
 		return perr
 	}
 }
