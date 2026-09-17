@@ -65,6 +65,20 @@ type IngestDeps struct {
 // 分支只能经这里注入来测。
 var buildSheetRows = BuildSheetRows
 
+// recoverPanic 跑 f 并把它的 panic 转成 error 返回。
+//
+// **不是吞掉**：原始 panic 值经 %v 留在错误里，否则线上只看得到「失败」而查不出炸的是什么。
+// 只给投影这条路径用——投影按 ADR-0004 可再生、失败按 C8 不阻断，所以把 panic 降级成
+// 一行日志是正确的；其余路径的 panic 仍该炸出来，那才是真 bug。
+func recoverPanic(f func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return f()
+}
+
 // notifyError 标记「入库成功但通知没发出去」。循环遇到它**不再发 P1**——
 // 那条同样发不出去，只会无限套娃；而错误链里保留底层 err，errors.Is 仍能穿透。
 type notifyError struct{ err error }
@@ -479,11 +493,20 @@ func (d IngestDeps) ingestOne(ctx context.Context, c Candidate) (runResult, erro
 		fmt.Fprintf(d.Out, "%s contract → %s\n", obs.Meta.Period, path)
 		// 投影在契约之后（M2b 的 TASK-010）：契约有下游在等，投影没有。
 		// ⚠️ 两个分支都**只打印不返回**：写成 return err 或并进 errors.Join 都违反 C8。
+		//
+		// 🔴 组装与投影**两步都经 recoverPanic**（QA round2 WARNING-1）：装配方在
+		// cmd/atlas 那层也有一层 recover，但它够不到本行上面的 buildSheetRows，
+		// 而 panic 穿透 ingestOne 就会打断整轮入库——正是 C8 要防的那件事。
+		// 责任归本层：ingest 不该依赖调用方交来的闭包保证不 panic。
 		if d.ProjectSheets != nil {
-			rows, berr := buildSheetRows(ctx, d.Store)
+			var rows []sheets.Row
+			berr := recoverPanic(func() (err error) {
+				rows, err = buildSheetRows(ctx, d.Store)
+				return err
+			})
 			if berr != nil {
 				fmt.Fprintf(d.Out, "sheets: 组装失败（不影响入库）: %v\n", berr)
-			} else if perr := d.ProjectSheets(ctx, rows); perr != nil {
+			} else if perr := recoverPanic(func() error { return d.ProjectSheets(ctx, rows) }); perr != nil {
 				fmt.Fprintf(d.Out, "sheets: 投影失败（不影响入库）: %v\n", perr)
 			}
 		}

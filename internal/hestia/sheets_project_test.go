@@ -153,12 +153,22 @@ func TestSheetColumnFieldsAllExist(t *testing.T) {
 //
 // 「缺失就写空」是最自然的写法，也正是会抹掉人工值的那一种：库说「这期报告
 // 里没这个数」，不等于「这格该是空的」。实测库缺占数值格的 41%（819/2013）。
+// mustBuildRow：buildRow 在返工后返回 (Row, error)，既有用例只关心成功路径。
+// 用 helper 而不是逐处 `row, err := …; require.NoError` —— 那会让每条用例多两行噪声，
+// 而它们要验的性质与「会不会报错」无关。
+func mustBuildRow(t *testing.T, obs Observation) sheets.Row {
+	t.Helper()
+	row, err := buildRow(obs)
+	require.NoError(t, err)
+	return row
+}
+
 func TestBuildRowOmitsAbsentFields(t *testing.T) {
 	obs := Observation{
 		Meta:   Meta{Period: "2026-06", PeriodType: "h1", PublishedAt: "2026-07-15"},
 		Values: map[string]float64{"tsf_stock": 462.06}, // 只有一个字段有值
 	}
-	row := buildRow(obs)
+	row := mustBuildRow(t, obs)
 
 	require.Equal(t, 2026, row.Year)
 	require.Equal(t, 6, row.Month)
@@ -183,7 +193,7 @@ func TestBuildRowOmitsOnlyAbsentFields(t *testing.T) {
 	delete(vals, FieldLoanBillYTD)
 	delete(vals, FieldFXRate)
 
-	row := buildRow(Observation{
+	row := mustBuildRow(t, Observation{
 		Meta:   Meta{Period: "2025-03", PeriodType: "monthly", PublishedAt: "2025-04-13"},
 		Values: vals,
 	})
@@ -201,7 +211,7 @@ func TestBuildRowOmitsOnlyAbsentFields(t *testing.T) {
 // NullFloat64.Valid 时才放进 Values）。库里 loan_hh_short_ytd = -5881、deposit_* 都可能真 0，
 // 用零值表缺失会把它们抹掉。
 func TestBuildRowWritesZeroValues(t *testing.T) {
-	row := buildRow(Observation{
+	row := mustBuildRow(t, Observation{
 		Meta:   Meta{Period: "2026-06", PeriodType: "h1", PublishedAt: "2026-07-15"},
 		Values: map[string]float64{FieldM2YoY: 0, FieldLoanHHShortYTD: -5881},
 	})
@@ -215,7 +225,7 @@ func TestBuildRowWritesZeroValues(t *testing.T) {
 // TestBuildRowYearMonthComeFromPeriod：规则③——Year/Month 取自 Period，不由 PublishedAt 决定。
 // 12 月的年报次年 1 月才发，按 PublishedAt 会落到下一张年度表。
 func TestBuildRowYearMonthComeFromPeriod(t *testing.T) {
-	row := buildRow(Observation{
+	row := mustBuildRow(t, Observation{
 		Meta:   Meta{Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-13"},
 		Values: map[string]float64{},
 	})
@@ -234,7 +244,7 @@ func TestBuildRowSendsNumbersAsNumbers(t *testing.T) {
 		Meta:   Meta{Period: "2026-06", PeriodType: "h1", PublishedAt: "2026-07-15"},
 		Values: map[string]float64{"m2_yoy": 8},
 	}
-	cells := buildRow(obs).Cells
+	cells := mustBuildRow(t, obs).Cells
 	require.Len(t, cells, 3)
 	for _, c := range cells {
 		switch c.Label {
@@ -286,4 +296,39 @@ func TestBuildSheetRowsPropagatesCurrentError(t *testing.T) {
 	_, err := assembleRows(context.Background(), keys,
 		func(context.Context, string, string) (Observation, bool, error) { return Observation{}, false, boom })
 	require.ErrorIs(t, err, boom)
+}
+
+// —— TASK-010 返工（QA round2 SUGGESTION-5）——
+//
+// fix_items[2]：buildRow 的 Period[:4] / [5:7] 是定长切片，读路径不重校
+// Meta.validate() 的正则（那是 Save 时的闸）⇒ 迁移脚本、手工 SQL、旧版本写入的短
+// Period 到得了这里。
+//
+// 🔴 修法不是「取不出来就当 0」：Year=0 会让 tabName 得到 "0年"，那张表必然缺，
+// 而 ingest 固定 Apply+CreateSheets ⇒ **它会去建一张叫「0年」的工作表**。
+// 所以正确行为是整批报错返回，与同文件「AllPeriods 里但 Current 读不到 ⇒ 报错，不跳过」
+// 同一条原则：宁可整批停下，不要静默产出一行垃圾。
+func TestBuildRowRejectsMalformedPeriod(t *testing.T) {
+	for _, tc := range []struct{ name, period string }{
+		{"短于 YYYY-MM", "2025"},
+		{"只有年", "2025-"},
+		{"空串", ""},
+		{"月份不是数字", "2025-XX"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, err := buildRow(Observation{Meta: Meta{Period: tc.period, PublishedAt: "2026-01-15"}})
+				require.Error(t, err, "形如 %q 的 Period 必须报错，而不是产出一行 Year=0 的垃圾", tc.period)
+				require.Contains(t, err.Error(), "hestia sheets: ")
+			})
+		})
+	}
+}
+
+// 合法 Period 仍照常取出年月——防止上一条被一个「永远报错」的实现满足。
+func TestBuildRowAcceptsWellFormedPeriod(t *testing.T) {
+	row, err := buildRow(Observation{Meta: Meta{Period: "2025-06", PublishedAt: "2025-07-15"}})
+	require.NoError(t, err)
+	require.Equal(t, 2025, row.Year)
+	require.Equal(t, 6, row.Month)
 }
