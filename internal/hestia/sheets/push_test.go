@@ -20,7 +20,10 @@ import (
 // error_handling[0] 表头缺标签 ⇒ error 且 writeBodies 空                → TestPushRejectsUnknownLabel
 // error_handling[1] 缺年度表且 !CreateSheets ⇒ error 含表名与 --create-sheets、MissingTabs 列全、零写 → TestPushRefusesMissingTabs
 // （补）            缺表 + CreateSheets + dry-run ⇒ 不报错、MissingTabs 列全、全 GET → TestPushDryRunReportsMissingTabsWithCreateFlag
-// （补）            缺表 + CreateSheets + Apply ⇒ 建表挂点在写之前、本任务未实现 ⇒ error 提 TASK-008、零写 → TestPushCreateSheetsHookRunsBeforeWrite
+// （补）            缺表 + CreateSheets + Apply ⇒ 建表挂点在写之前 → ⚠️ 原测试
+//                   TestPushCreateSheetsHookRunsBeforeWrite **已在 TASK-008 的 b119a5a 删除**
+//                   （它断言 error 含 "TASK-008"，真接线做完后按设计必然失效），
+//                   由 TestPushCreatesMissingTabsBeforeWriting 接替。全仓已无此函数。
 // non_functional[0] 守卫登记 sheets.Push（review）                        → ../store_test.go TestPackageExposesNoWriteFunctions
 //
 // Context Checkpoint: done_criteria → test mapping (TASK-008，追加在同一文件)
@@ -29,6 +32,31 @@ import (
 // boundary[0]       CreateSheets 但不缺表 ⇒ 零 duplicateSheet；dry-run 缺表不建表 → TestPushCreateSheetsWithoutMissingTabsDuplicatesNothing / TestPushDryRunReportsMissingTabsWithCreateFlag（007 既有）
 // error_handling[0] 模板不存在 ⇒ error 含模板名；duplicateSheet 4xx ⇒ 后续不做 → TestCreateYearTabErrorsWhenTemplateMissing / TestCreateYearTabStopsWhenBatchUpdateFails
 // non_functional[0] 守卫登记 sheets.Client.CreateYearTab（review）；006/007 既有测试仍绿 → ../store_test.go
+
+// —— 🔴 本文件的替身与真实系统的形状差异（QA round2 [11]）——
+//
+// 共同形状只有一句：**替身比真实系统仁慈——它从不失败，也从不返回意外形状。**
+// 每条都真实咬过人或差点咬人，列在这里是为了让下一个加测试的人知道自己站在什么地基上。
+//
+//  1. **渲染形态**：替身回 JSON 数字，真 API 默认回 FORMATTED_VALUE 的**格式化文本**
+//     （千分位、百分号、会计负数括号）。CRITICAL-1 就是这么漏过去的——该性质在原有
+//     替身下**结构上不可观测**。现由 TestReadUsesUnformattedValue 与
+//     TestDiffTreatsStringNumbersAsSame 钉住。
+//  2. **写入结果**：替身曾对 values:batchUpdate 回 `{}`，真 API 回 totalUpdatedCells。
+//     「200 但一格都没写」因此不可能被发现（CRITICAL-2 之后的 [8]）。现在替身从请求体
+//     数 data 长度算出该字段——**不写死**，写死就等于让它永远说「我全写成功了」。
+//  3. **失败层次**：替身的失败永远是 HTTP 状态码（googleapi.Error），而生产最常见的是
+//     **网络层**失败（代理没起、DNS、超时），那条路径拿不到任何状态码。round2 的
+//     CRITICAL-3 的生产形态走的正是后者。现由 TestWrapErrHandlesNonGoogleAPIError 覆盖。
+//  4. **表结构**：替身的年度表是空的；真表的「模板」2024年 有 10 期数据，且模板与数据表
+//     **是同一张**。CRITICAL-2 的自污染由此而来。
+//  5. **并发与配额**：替身无速率限制、无 429、无部分成功；真 API 三者都有。目前**没有**
+//     任何测试覆盖 429 与部分成功——这是已知缺口，不是已解决问题。
+//  6. **服务端状态**：替身**不建模状态**——建表之后再读同一张表，读到的仍是夹具里写死的
+//     那份。所以「清空录入区之后它真的空了」这类性质在本文件里**证不了**，只能证明
+//     请求发出去了。真正的验证属 spec §10 判据五，要对真表跑。
+//
+// ⇒ 加新测试时先问：我要验的性质，会不会正好落在上面某一条的盲区里？
 
 const (
 	pathTabs     = "/v4/spreadsheets/sheet-id"
@@ -531,7 +559,13 @@ func TestPushStopsWhenNewTabDiffFails(t *testing.T) {
 //
 // Context Checkpoint: fix_items → test mapping (TASK-008 review_fix 第 1 轮)
 // [0] CRITICAL-2 模板自污染 —— 已在 TASK-006 的 5af1701 做掉，本任务不重做
-// [1] 恒真断言 + push.go:177-179 —— 已在 5af1701 做掉（TestPushStopsWhenNewTabDiffFails）
+// [1] 恒真断言替换 + push.go 第 6 步「补做 diff 失败」那条 —— 已在 5af1701 做掉
+//     （TestPushStopsWhenNewTabDiffFails）；而「建表本身失败」那条由**本任务 ba6c589** 的
+//     TestPushStopsWhenCreateYearTabFails 兑现。⚠️ 此处原先写成「push.go:177-179 已在
+//     5af1701 做掉（TestPushStopsWhenNewTabDiffFails）」，**两处都错**，且与下方
+//     TestPushStopsWhenCreateYearTabFails 上方的注释直接矛盾。变异实测（006 返工第 2 轮）：
+//     让 createYearTabs 的 err 不返回 ⇒ 只红 TestPushStopsWhenCreateYearTabFails；
+//     让补做 diff 的 err 不返回 ⇒ 只红 TestPushStopsWhenNewTabDiffFails。
 // [2] N7 / N10 夹具         —— 已在 5af1701 做掉（TestCreateYearTabDerivesNewIDFromMaxNotTemplate /
 //                              TestPushPlacesTwoNewTabsCumulatively）
 // [3] 其余 error 传播分支   —— 本文件以下各条
