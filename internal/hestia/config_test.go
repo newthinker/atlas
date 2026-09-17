@@ -657,3 +657,56 @@ func TestSignalsJSONKeys(t *testing.T) {
 		slices.Collect(maps.Keys(got)),
 		"契约 thresholds.signals 的键集：七个 snake_case 键，无 temp_scale、无 Go 字段名")
 }
+
+// —— TASK-010 返工第 2 轮（QA round2 CRITICAL-4 修法 a）——
+//
+// fix_items[2]：cfg.validate() 此前对 HestiaSheets 一条校验都没有。
+// 凭据配了一半（有 credentials_file、没 spreadsheet_id）时，能力看起来是开的，
+// 实际每次投影都会在 sheets.Push 里因 spreadsheetID 为空而失败——而按 C8 那是
+// **静默**的：只打印一行、不改 outcome、不发通知。装载期就该拦住。
+
+func TestConfigRejectsHalfConfiguredSheets(t *testing.T) {
+	const base = `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`
+	t.Run("两个都给 ⇒ 放行", func(t *testing.T) {
+		cfg, err := LoadConfig(writeConfig(t, base+`
+hestia_sheets:
+  credentials_file: /tmp/sa.json
+  spreadsheet_id: sheet-id
+`))
+		require.NoError(t, err)
+		require.Equal(t, "sheet-id", cfg.HestiaSheets.SpreadsheetID)
+	})
+
+	t.Run("两个都留空 ⇒ 放行（C9 能力禁用是合法配置）", func(t *testing.T) {
+		_, err := LoadConfig(writeConfig(t, base+`
+hestia_sheets:
+  credentials_file: ""
+  spreadsheet_id: ""
+`))
+		require.NoError(t, err, "没配 = 能力禁用，不是错误")
+	})
+
+	t.Run("整段不写 ⇒ 放行", func(t *testing.T) {
+		_, err := LoadConfig(writeConfig(t, base))
+		require.NoError(t, err)
+	})
+
+	t.Run("配了一半 ⇒ 装载期报错并点名缺哪个键", func(t *testing.T) {
+		_, err := LoadConfig(writeConfig(t, base+`
+hestia_sheets:
+  credentials_file: /tmp/sa.json
+`))
+		require.Error(t, err, "配了一半必须在装载期就红——投影失败按 C8 是静默的，拦不住就没人知道")
+		require.Contains(t, err.Error(), "hestia_sheets.spreadsheet_id",
+			"错误要点名缺的是哪个键，否则运维得自己猜")
+		require.Contains(t, err.Error(), "credentials_file",
+			"也要说清是因为哪个键非空才要求它")
+	})
+}

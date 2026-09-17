@@ -259,26 +259,21 @@ alerts:
 hestia:
   config_path: "configs/hestia.yaml"
 
-# Sheets 投影（M2b）。credentials_file 留空 = 能力禁用，ingest 不尝试也不报错。
+# Sheets 投影（M2b）的配置**不在本文件**，请勿往这里加 hestia_sheets 段。
 #
-# 🔴 密钥文件放 runtime 树**外面**。deploy.sh 用 rsync -a -m --delete，
-#    runtime 里源码仓库没有、排除列表也没列的文件会被静默删掉。
-# 🔴 configs/config.yaml 有两份（源码仓库 / 运行时）且**永不同步**——
-#    deploy.sh 的排除列表里有 /configs/config.yaml。改配置要两份都改。
-#    两份的绝对路径：<repo>/configs/config.yaml
-#                    /Users/zuowei/workspace/runtime/atlas/configs/config.yaml
+# 🔴 它属于 hestia 自己的配置文件——上面 hestia.config_path 指向的那个
+#    （默认 configs/hestia.yaml）。只有 internal/hestia 的 Config 有
+#    HestiaSheets 字段（mapstructure:"hestia_sheets"）；本文件对应的
+#    internal/config 里**没有**这个字段。
 #
-# ⚠️ **生效位置不是本文件。** 本段是给人看的样例；真正读它的是
-#    internal/hestia/config.go 的 Config.HestiaSheets（mapstructure:"hestia_sheets"），
-#    而那个结构体由 hestia.LoadConfig 从**上面 hestia.config_path 指向的那个文件**
-#    （默认 configs/hestia.yaml）装载。主配置 internal/config 里没有 HestiaSheets 字段，
-#    照抄到 configs/config.yaml 顶层**不会有任何代码读它**，能力会静默保持禁用。
-#    ⚠️ 而 configs/hestia.yaml 进 git 且**不在** deploy.sh 的 rsync 排除表里 ⇒
-#    运行时那份每次部署都被源树覆盖。凭据落位到此仍是**未决项**，见
-#    internal/hestia/CONTRACTS.md 的 `## Sprint M2b-2`「未决项」一条。
-hestia_sheets:
-  credentials_file: ""    # 如 /Users/<you>/.config/atlas/hestia-sheets-sa.json
-  spreadsheet_id: ""
+# ⚠️ 写在这里曾经是**静默无效**的：viper 对未知顶层键不报错，于是
+#    「填了等于没填、能力静默禁用，而配置文件看起来已经配好了」。
+#    本 sprint 真的发生过一次。现在 config.Load 会在检测到这个键时**直接报错并指路**
+#    （internal/config/config.go 的 InConfig("hestia_sheets") 那段），
+#    所以本文件不再给出可复制的样例——给了就等于教人踩坑。
+#
+# 该段的键与注释（含密钥放 runtime 树外、两份 config.yaml 永不同步等）见
+# internal/hestia/CONTRACTS.md 的 `## Sprint M2b-2`；凭据落位仍是未决项，同节记着三种出路。
 
 # Prism 估值面板 (docs/prism/atlas_prism_design.md)
 prism:

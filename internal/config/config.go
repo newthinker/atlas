@@ -318,6 +318,25 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
+	// 🔴 `hestia_sheets` 放在**主配置里是无效的**，而且无效得没有任何反馈——
+	// 这个键只被 internal/hestia 的 Config 读（mapstructure:"hestia_sheets"），
+	// 来源是 hestia.config_path 指向的那个文件；本结构体没有对应字段，viper 对
+	// 未知顶层键也不报错 ⇒ **填了等于没填，能力静默禁用，而配置文件看起来已经配好了**。
+	//
+	// 这不是假设：本 sprint 真的发生过一次，configs/config.yaml 里填了真实凭据路径
+	// 与表 id，而 configs/hestia.yaml 里一个字都没有。config.example.yaml 里写过
+	// 「⚠️ 生效位置不是本文件」的警告，**警告没能拦住**，所以升级成装载期硬错误。
+	//
+	// ⚠️ 只针对这一个键做显式探测，**不改成全局严格解析**：那会让一批历史配置
+	// 因为无关的陈旧键装不上，代价远大于收益。InConfig 只看配置文件本身，
+	// 不受 AutomaticEnv 影响。
+	if v.InConfig("hestia_sheets") {
+		return nil, fmt.Errorf(
+			"%s 里出现了 hestia_sheets —— 这个键在主配置里不会被任何代码读取。"+
+				"它属于 hestia 自己的配置文件（由 hestia.config_path 指定，默认 configs/hestia.yaml），"+
+				"请整段挪过去；留在这里的话 Sheets 投影会静默保持禁用", path)
+	}
+
 	// Expand environment variables in string values
 	for _, key := range v.AllKeys() {
 		val := v.GetString(key)
