@@ -717,3 +717,16 @@ func TestPushSheetsSetsDeadline(t *testing.T) {
 	require.NoError(t, pushSheets(context.Background(), io.Discard, cfg, sampleSheetRows(), "", sheets.Options{}))
 	require.True(t, hasDeadline, "CLI 的 Push 调用也要有上限")
 }
+
+// —— TASK-006 返工第 3 轮：丢格必须打印出来 ——
+//
+// Result 里有字段还不够——**dry-run 不打印它，人就永远看不到**。
+// 「有数据没被比对」这件事若只存在于一个结构体字段里，等于没有出口。
+func TestFormatResultAnnouncesDroppedCells(t *testing.T) {
+	got := formatResult(sheets.Result{WillWrite: 10, Same: 2, AbsentInDB: 3, DroppedCells: 8})
+	require.Contains(t, got, "8", "丢了几格要给出数字")
+	require.Contains(t, got, "未比对", "并说清这不是「一致」也不是「库缺」，是根本没比")
+
+	// 反空洞：没丢格时不许出现这一行，否则它会变成人人忽略的固定噪声
+	require.NotContains(t, formatResult(sheets.Result{WillWrite: 10}), "未比对")
+}

@@ -254,6 +254,15 @@ func formatResult(res sheets.Result) string {
 	}
 	fmt.Fprintf(&b, "\n%d 行\n将写 %d 格\n一致跳过 %d 格\n库缺跳过 %d 格\n",
 		len(seen), res.WillWrite, res.Same, res.AbsentInDB)
+	// 🔴 丢格必须打印（006 返工第 3 轮）：`Result` 里有字段还不够——dry-run 不打印它，
+	// 人就永远看不到。「有数据**根本没被比对**」与「比对完发现一致」是完全不同的两件事，
+	// 而前者此前在输出里没有任何痕迹。
+	//
+	// 只在非零时打印：恒在的那一行会变成人人忽略的固定噪声，等于没打。
+	if res.DroppedCells > 0 {
+		fmt.Fprintf(&b, "⚠️ %d 格**未比对**（有行的月份越界，整行被跳过；上面三类之和因此不等于格数）\n",
+			res.DroppedCells)
+	}
 	return b.String()
 }
 

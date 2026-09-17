@@ -24,6 +24,16 @@ type Result struct {
 	WillWrite   int
 	Same        int
 	AbsentInDB  int
+	// DroppedCells 是 Diff **少产出**的格数：期望 len(rows)×len(cols)，实得 len(changes)，两者之差。
+	//
+	// 🔴 它存在的唯一理由是「跳过必须可观测」。Diff 只返回 []Change，越界行被整行跳过之后
+	// 没有任何通道能把「我丢了一行」告诉调用方——而「有数据没被比对」与「比对完发现一致」
+	// 在 Result 里此前长得一模一样。
+	//
+	// 判据取**性质**不取成因：算的是「期望 − 实得」，不是「数一数几行越界」。目前唯一的成因
+	// 是 Month ∉ [1,12]，但将来若出现第二种让 Diff 少产出的情形，这个字段同样会亮，
+	// 不需要再加一个。非零 ⇒ 三类计数之和不再等于格数，而是等于「格数 − DroppedCells」。
+	DroppedCells int
 }
 
 // tabName 是年度表的命名约定。
@@ -71,24 +81,30 @@ func createYearTabs(ctx context.Context, c *Client, existing []string, missing [
 }
 
 // diffTab 对一张已存在的年度表走第 3、4 步：读表头 → ResolveHeader → 读录入区 → Diff。
-func diffTab(ctx context.Context, c *Client, name string, wantLabels []string, rows []Row) ([]Change, error) {
+func diffTab(ctx context.Context, c *Client, name string, wantLabels []string, rows []Row) ([]Change, int, error) {
 	header, err := c.ReadHeader(ctx, name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	cols, err := ResolveHeader(header, wantLabels)
 	if err != nil {
-		return nil, fmt.Errorf("hestia sheets: %s: %w", name, err)
+		return nil, 0, fmt.Errorf("hestia sheets: %s: %w", name, err)
 	}
 	current, err := c.ReadEntryArea(ctx, name)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return Diff(name, cols, current, rows), nil
+	changes := Diff(name, cols, current, rows)
+	// 期望与实得的差就是被 Diff 跳过的格数。在这里算而不是在 Diff 里数：
+	// Diff 的签名不动（它被别的调用方用），而这一层本来就同时握着 rows、cols 与结果。
+	return changes, len(rows)*len(cols) - len(changes), nil
 }
 
 // tally 按三类计数并挑出要写的格。每次调用都从 res.Changes 全量重算，
 // 所以第 6 步把新表的变更追加进去之后可以原样再调一次。
+// ⚠️ tally **不碰 DroppedCells**：那个字段由 diffTab 逐张累加，不是从 res.Changes 重算的
+// （被丢掉的格根本不在 Changes 里，重算不出来）。第 6 步之后 tally 会被再调一次，
+// 若在这里清零，新表那一轮就会把前面累计的丢格数抹掉。
 func tally(res *Result) []Change {
 	res.WillWrite, res.Same, res.AbsentInDB = 0, 0, 0
 	var toWrite []Change
@@ -159,11 +175,12 @@ func Push(ctx context.Context, c *Client, rows []Row, wantLabels []string, opts 
 
 	// 3. 表头；4. diff——先只对已有的表
 	for _, name := range present {
-		changes, err := diffTab(ctx, c, name, wantLabels, byTab[name])
+		changes, dropped, err := diffTab(ctx, c, name, wantLabels, byTab[name])
 		if err != nil {
 			return res, err
 		}
 		res.Changes = append(res.Changes, changes...)
+		res.DroppedCells += dropped
 	}
 	toWrite := tally(&res)
 
@@ -178,11 +195,12 @@ func Push(ctx context.Context, c *Client, rows []Row, wantLabels []string, opts 
 			return res, err
 		}
 		for _, name := range missing {
-			changes, err := diffTab(ctx, c, name, wantLabels, byTab[name])
+			changes, dropped, err := diffTab(ctx, c, name, wantLabels, byTab[name])
 			if err != nil {
 				return res, err
 			}
 			res.Changes = append(res.Changes, changes...)
+			res.DroppedCells += dropped
 		}
 		toWrite = tally(&res)
 	}
