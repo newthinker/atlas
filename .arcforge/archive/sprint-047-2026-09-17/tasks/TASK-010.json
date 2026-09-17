@@ -1,0 +1,90 @@
+{
+  "id": "TASK-010",
+  "title": "ingest 接线：入库成功后调用投影，`IngestDeps` 加可选投影字段（nil = 不投影），失败按 C8 只记日志",
+  "description": "对应需求文档 **TASK-010**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-010」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-010} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n🔴 需求原文：「两个分支都**只打印不返回**。写成 `return err` 或 `errors.Join` 都会违反 C8」。\n\n**Leader 裁决（reviewer 🔴 scope 冲突）**：需求 Step 3「`runHestiaIngest` 里建 client 并填 `ProjectSheets`」改 `cmd/atlas/hestia.go`，与 009 撞文件——**该接线挪给 009**（009 本就拥有 `cmd/atlas/hestia.go`），本任务只做 `IngestDeps` 字段 + `config.go` + 测试，**不碰 `cmd/atlas/`**。ingest 自动投影时 `CreateSheets=true`（新年份第一期必缺表）。",
+  "module": "hestia-ingest",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/ingest.go",
+    "internal/hestia/ingest_test.go",
+    "internal/hestia/config.go"
+  ],
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-004",
+    "TASK-007"
+  ],
+  "packages": [
+    "./internal/hestia",
+    "./internal/config"
+  ],
+  "writes": [
+    "./internal/hestia/ingest.go",
+    "./internal/hestia/ingest_test.go",
+    "./internal/hestia/config.go",
+    "./internal/hestia/config_test.go",
+    "./internal/hestia/sheets_project.go",
+    "./internal/hestia/sheets_project_test.go",
+    "./internal/config/config.go",
+    "./internal/config/config_test.go",
+    "./configs/config.example.yaml"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`IngestDeps` 新增 `ProjectSheets func(context.Context, []sheets.Row) error`（形状照 `Notify`，nil = 不投影）；`config.go` 新增 `HestiaSheets` 段（字段以需求原文为准，含 `credentials_file`、`spreadsheet_id`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "调用顺序 `order == []string{\"contract\", \"sheets\"}`；投影用 `Options{Apply: true, CreateSheets: true}`。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**C9**：`ProjectSheets==nil`（凭据留空时装配方不填）⇒ 不尝试投影、不报错、不打 WARN 以上日志，`Ingest` 返回 `nil`。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "**C8 两个分支都只打印不返回**：`BuildSheetRows` 失败 ⇒ stdout 恰为 `sheets: 组装失败（不影响入库）: %v`；`ProjectSheets` 失败 ⇒ stdout 恰为 `sheets: 投影失败（不影响入库）: %v`（🔴 判据七拿这一行判，一字不能改）。两支都：`Ingest` 返回 `nil`、`runs[0].Outcome==\"ingested\"`、`require.NotContains(sent, \"P1\")`。写成 `return err`/`errors.Join` 即违反 C8。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test ./internal/hestia/ -count=1` 全绿（既有 ingest 测试仍绿）、`gofmt`/`go vet` 零输出；`ProjectSheets` 是结构体字段非 FuncDecl，**不触发守卫**，本任务不改 `store_test.go`。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:32Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-m2b-c",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "verify_baseline": {
+    "head": "96272b98990dae6f931c564d814a6fdd6cabfe60",
+    "discovery_sha256": "3ea05e8983b22e318d35f7cf2358694d674f2f2e21390bb7683e54605fd56c09",
+    "at": "2026-09-17T06:02:24Z"
+  },
+  "verifier": "test-m2b-b",
+  "fix_items": [
+    "ℹ️ 上一轮的 5 条（WARNING-1 recover 上移 / 注入 panic 替身 / SUGGESTION-5 读侧防御 / M11 守卫 / glob 排除侧车）已在 148e7ff+f3524df 做完并由 test-m2b-b 判 VERIFIED（03:30:16Z），本轮不重做。本轮只有下面这一条。",
+    "🔴 CRITICAL-4（QA round2 第三节）：凭据填错位置的风险已经兑现，且没有任何反馈。事实三条我已独立核过：① configs/config.yaml:332 有 hestia_sheets 段（gitignored，已填真实 credentials_file 与 spreadsheet_id）；② configs/hestia.yaml 里 hestia_sheets 命中 0；③ internal/config/config.go 全文无 HestiaSheets 字段，且 config.Load 对未知顶层键不报错。⇒ openHestia 走 hestia.LoadConfig(configs/hestia.yaml) 读到 CredentialsFile==\"\"，能力静默禁用，而配置文件看起来已经配好了。TASK-011 的 dev 已在 config.example.yaml:272-278 写了「⚠️ 生效位置不是本文件」的警告——警告没能拦住，填错这件事已经发生。",
+    "CRITICAL-4 修法 a（在你的 writes 内）：internal/hestia/config.go 的 cfg.validate() 目前对 HestiaSheets 一条校验都没有（Sheets 在 validate 里命中 0）。加：credentials_file 非空 ⇒ spreadsheet_id 必须非空，否则 LoadConfig 报错。配套测试两条：非空+非空放行、非空+空报错且错误文案指出缺的是哪个键。",
+    "CRITICAL-4 修法 b（🔴 越界，必须先申报）：让装载在检测到主配置 configs/config.yaml 存在 hestia_sheets 顶层键时报错并指明正确位置是 configs/hestia.yaml。把「零反馈」变成「装载期就红」——这是这个缺陷的全部危害所在。这条要改 internal/config/config.go，它不在 TASK-010 的 writes 里。⚠️ 按 CLAUDE.md「越界申报」节：你必须在 transition dev_done 之前自己经 update --json-field writes 把它补进声明，不能等我批准——一进 dev_done 就再没有任何角色写得了这个字段。做法上注意 config.Load 现在对未知顶层键不报错，改成全局严格解析会波及无关配置，请只针对 hestia_sheets 这一个键做显式探测。",
+    "不在本任务范围内的两条，写在这里只是让你不必再判一次：① sheets.NewClient 不检查 spreadsheetID 非空 —— client.go 在 006/008 的 writes 里，不归 010；② 凭据落位三条出路的选择归人拍板，我不会在本 sprint 内替人做决定，你也不要动 configs/config.yaml 或 configs/hestia.yaml 的实际内容。"
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 2
+}

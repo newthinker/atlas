@@ -1,0 +1,80 @@
+{
+  "id": "TASK-004",
+  "title": "选行规则与 35 列字段映射：`BuildSheetRows` 把 77 条观测选成 61 行 `[]sheets.Row`",
+  "description": "对应需求文档 **TASK-004**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-004」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-004} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n`packages` 含两个包是覆盖率口径：`sheets/row.go` 是本任务新建的、要被 `-coverpkg` 算进去；但 `writes` 里 `sheets/` 下**只有 `row.go`**，其余 sheets 文件只读消费（AD 文档 §4）。\n\n**Leader 订正（reviewer 🔴）**：初稿把选行规则写反、把 `PublishedAt` 的作用写错，已按需求 line 771–816 / 851–872 / 993–999 重写。`sheets/row.go` 已归 003，本任务**只消费** `sheets.Cell`/`sheets.Row`。",
+  "module": "hestia-project",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/hestia/sheets_project.go",
+    "internal/hestia/sheets_project_test.go",
+    "internal/hestia/testdata/period-keys-2026-09-16.json",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-002",
+    "TASK-003"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/sheets_project.go",
+    "./internal/hestia/sheets_project_test.go",
+    "./internal/hestia/testdata/period-keys-2026-09-16.json",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "**选行三条规则（需求 line 851 顺序）**：① 同一 `Period` **有 `monthly` ⇒ 用它**（`TestSelectRowsPrefersMonthly`）；② 无 monthly 时用累计期次（q1/h1/q1_q3/annual），**多条累计期次取 `PublishedAt` 最新的**（`got[0].PeriodType==\"annual\"` 那组是无 monthly 的兜底）；③ `Year/Month` 取自 `Period[:4]/[5:7]`，**不由 `PublishedAt` 决定**。四组夹具期望值以需求原文 `require.*` 为准。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "从 **`testdata/period-keys-2026-09-16.json`**（本任务新建，77 条 `PeriodKey` 快照，**不连真库**）选行得**恰好 61 行**。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "35 列映射锚点：`len(SheetColumns)==35`、`[0].Label==\"月份\"`、`[1].Label==\"发布日期\"`、`[34].Label==\"汇率 USD/CNY\"`、前两列 `Field==\"\"`、其余每列 `Field` 都在 `fieldOrder` 里。`月份` 值是 string `\"6月\"`、`发布日期` 值是 string `\"2026-07-15\"`；其余数值列 `Value` 动态类型 **`float64`**（`reflect.TypeOf(v).Kind()==reflect.Float64`）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**C4 两个方向**：库里 NULL 的字段**不产生 `Cell`**（缺 3 字段 ⇒ `len(Cells)==32`）；🔴 **值为 0 的字段仍要写**（`Values{\"m2_yoy\": 0}` ⇒ `Cell{Value: float64(0)}`；`loan_hh_short_ytd=-5881`、`deposit_*` 可能真 0，不得用零值表缺失）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "同一 `Period` 出现 **>1 条 monthly** ⇒ 返回 error 含该 `Period`（需求 line 871）；不同 `PeriodType` **同日发布**的 tie ⇒ 按需求 line 809–816 处理；`AllPeriods` 有而 `Current` 读不到 ⇒ **报错不静默跳过**（line 1039–1042）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**C2**：`BuildSheetRows(ctx, *Store) ([]sheets.Row, error)` 在父包，子包不见 `*Store`。**写口守卫登记**：本任务新增的导出函数/方法让 `TestPackageExposesNoWriteFunctions` 先红，在 `store_test.go` 的 `want` 里登记后转绿；并按需求原文在守卫文件追加「为什么名单里多了 <符号>」注释段（每个新符号一句它为什么不是写口）。红的原始输出贴 discovery `verification.red_phase`。 新符号：`BuildSheetRows`（及其导出的 `SheetColumns` 若为导出变量则不在 FuncDecl 范围）。`go test ./internal/hestia/... -count=1` 全绿、`gofmt`/`go vet` 零输出。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:31Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m2b-b",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "bacfd461e1d8e193083355f94a2022da3e731618",
+    "discovery_sha256": "9bcd0bc3c15958e21991ff4994b179676bd94be6b9b7927fa81f530c7756e979",
+    "at": "2026-09-16T13:13:47Z"
+  },
+  "verifier": "test-m2b-a"
+}

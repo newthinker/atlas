@@ -1,0 +1,82 @@
+{
+  "task_id": "TASK-007",
+  "written_by": "dev-m2b-a",
+  "written_at": "2026-09-16T15:37:33Z",
+  "provenance": "代码（push.go / push_test.go / store_test.go 登记与注释段）由 dev-m2b-b 编写并跑过 code-simplifier；dev-m2b-b 在 simplifier 批次挂起后 Leader 按 AD-21 改派（epoch 1→2）；dev-m2b-a 接手：按 SHA256SUMS 核副本、逐条核 DoD、重跑测试、做一次变异、提交。接手期间未改一行代码。",
+  "branch": "task/TASK-007",
+  "commit": "5b18b1b8d83fe6e38ef061e8cab56d56511a6a83",
+  "base": "e923173d9cbbe72e36ffb9fd1bcd0502d91f0c89",
+  "key_findings": [
+    "dry-run 短路点（第 5 步）在建表挂点（第 6 步）与 WriteCells（第 7 步）之前，且 1–4 步只调用 Tabs/ReadHeader/ReadEntryArea（全 GET）；变异「把短路挪到 WriteCells 之后」被 TestPushDryRunSendsNoWriteRequest 与 TestPushDryRunReportsMissingTabsWithCreateFlag 双红击杀。",
+    "建表挂点 createTabs 是包级变量（TASK-008 覆写），本任务默认报错并提示 TASK-008；报错后不写已有表的格——TestPushCreateSheetsHookRunsBeforeWrite 钉住「建表失败不写一半」。",
+    "C3 在编排层兑现：ResolveHeader 任一标签缺失 ⇒ 整批拒绝、writeBodies 空（TestPushRejectsUnknownLabel）；缺表且 !CreateSheets 在第 2 步拒绝，MissingTabs 按表名排序列全（TestPushRefusesMissingTabs 断 2019–2025 七张）。",
+    "不变量 WillWrite+Same+AbsentInDB == len(rows)×len(wantLabels) 且 len(Changes) 同值——requireInvariant 在 dry-run 与 apply 两条路径都断言；缺表的行不进 Changes（TestPushDryRunReportsMissingTabsWithCreateFlag：2025 年行不计）。",
+    "Push 对 nil *Client（C9 能力禁用时 NewClient 返回 nil）明确报错不 panic（TestPushNilClient）。",
+    "交接副本：store_test.go 与 dev-m2b-b 的 pre-simplifier sha 一致；push.go/push_test.go 不一致 ⇒ code-simplifier 改过，但前版内容未保存（只有 sha），无法给出 diff；以整文件逐行读 + 7 条测试 + 变异作核。"
+  ],
+  "decisions": [
+    {
+      "decision": "接手不重写：三文件按 SHA256SUMS 原样提交，未改一行",
+      "rationale": "逐条对照 6 条 DoD 都有对应测试且绿；空 diff 配可核查证据（副本 sha、测试输出、变异 KILLED）。"
+    },
+    {
+      "decision": "未再跑 code-simplifier",
+      "rationale": "Leader 指示：simplifier 子代理是 dev-m2b-b 挂起的源；dev-m2b-b 已跑过一次（pre-simplifier sha 可证 push.go/push_test.go 被其改过）。"
+    },
+    {
+      "decision": "做一次变异（dry-run 短路后移）作为接手核验",
+      "rationale": "DoD 判据三是「唯一不可妥协」的一条，需求点名的最坏写法正是这个变异；KILLED 证明断言真的在守，而不只是全绿。变异在我独占的 worktree 上做、事后 sha 比对还原。"
+    },
+    {
+      "decision": "commit subject 用 feat(TASK-007): 而非需求原文 feat(hestia/sheets):",
+      "rationale": "门禁按 <type>(TASK-0NN): 认领改动。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/sheets/push.go",
+      "change": "新建：Options/Result/tabName/createTabs 挂点/Push",
+      "numstat": "132/0"
+    },
+    {
+      "path": "internal/hestia/sheets/push_test.go",
+      "change": "新建：7 条 TestPush* + 夹具/断言辅助",
+      "numstat": "198/0"
+    },
+    {
+      "path": "internal/hestia/store_test.go",
+      "change": "AST 守卫 want 登记 sheets.Push（49→50）+ 注释段",
+      "numstat": "6/1"
+    }
+  ],
+  "interfaces_exposed": [
+    {
+      "name": "type Options struct{ Apply, CreateSheets bool }"
+    },
+    {
+      "name": "type Result struct{ Changes []Change; MissingTabs []string; WillWrite, Same, AbsentInDB int }"
+    },
+    {
+      "name": "func Push(ctx, c *Client, rows []Row, wantLabels []string, opts Options) (Result, error)",
+      "semantics": "顺序固定 1–7；Apply=false 只发 GET；缺表且 !CreateSheets 第 2 步报错（文案含表名与 --create-sheets）；表头缺标签整批拒绝零写；Apply=true 一次 batchUpdate 只含 WillWrite。"
+    },
+    {
+      "name": "var createTabs func(ctx, c *Client, names []string) error（包内）",
+      "semantics": "TASK-008 覆写的建表挂点，在第 5 步之后、第 7 步之前调用；默认报错提示 TASK-008。"
+    }
+  ],
+  "verification": {
+    "red_phase": {
+      "step2_undefined（dev-m2b-b 留痕 scratchpad/dev-m2b-b-TASK-007-red1.txt）": "# github.com/newthinker/atlas/internal/hestia/sheets [github.com/newthinker/atlas/internal/hestia/sheets.test]\ninternal/hestia/sheets/push_test.go:86:41: undefined: Result\ninternal/hestia/sheets/push_test.go:100:14: undefined: Push\ninternal/hestia/sheets/push_test.go:100:74: undefined: Options\ninternal/hestia/sheets/push_test.go:121:14: undefined: Push\ninternal/hestia/sheets/push_test.go:121:74: undefined: Options\ninternal/hestia/sheets/push_test.go:144:14: undefined: Push\ninternal/hestia/sheets/push_test.go:145:3: undefined: Options\ninternal/hestia/sheets/push_test.go:159:14: undefined: Push\ninternal/hestia/sheets/push_test.go:159:66: undefined: Options\ninternal/hestia/sheets/push_test.go:175:12: undefined: Push\ninternal/hestia/sheets/push_test.go:175:12: too many errors\nFAIL\tgithub.com/newthinker/atlas/internal/hestia/sheets [build failed]\nFAIL\n",
+      "guard_red（dev-m2b-b 留痕 scratchpad/dev-m2b-b-TASK-007-red2-guard.txt，摘要）": "=== RUN   TestStoreExposesNoWriteMethods\n--- PASS: TestStoreExposesNoWriteMethods (0.00s)\n=== RUN   TestPackageExposesNoWriteFunctions\n        \t            \t+ (string) (len=11) \"sheets.Push\",\n--- FAIL: TestPackageExposesNoWriteFunctions (0.01s)\nFAIL\nFAIL\tgithub.com/newthinker/atlas/internal/hestia\t0.892s\nFAIL"
+    },
+    "handover_check": "scratchpad/handover-TASK-007/SHA256SUMS：push.go / push_test.go / store_test.go 三项 OK",
+    "green": "go test ./internal/hestia/... -count=1 -v ⇒ sheets 7/7 TestPush* PASS、hestia 两条守卫 PASS、--- FAIL 0（scratchpad/dev-m2b-a-TASK-007-verify.txt）",
+    "regression": "go test ./... ⇒ 65 ok / 0 FAIL（scratchpad/dev-m2b-a-TASK-007-full.txt）；gofmt -l internal/hestia/ 空；go vet ./internal/hestia/... 空",
+    "mutation": "M1 dry-run 短路挪到 WriteCells 之后 ⇒ TestPushDryRunSendsNoWriteRequest、TestPushDryRunReportsMissingTabsWithCreateFlag FAIL（KILLED）；还原后 push.go sha 与提交一致",
+    "reproduce": "git worktree add --detach /tmp/x 5b18b1b8d83fe6e38ef061e8cab56d56511a6a83 && cd /tmp/x && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1"
+  },
+  "degradations": [
+    "gitnexus impact/detect-changes 索引版本不匹配不可用（同 001/002）；本任务为新增包级函数，文本回退：仓库内 Push/Options/Result 在 sheets 包内无同名符号冲突（编译通过即证）。"
+  ]
+}

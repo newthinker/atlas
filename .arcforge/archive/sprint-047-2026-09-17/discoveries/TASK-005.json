@@ -1,0 +1,69 @@
+{
+  "task_id": "TASK-005",
+  "written_by": "dev-m2b-b",
+  "written_at": "2026-09-16T14:02:41Z",
+  "branch": "task/TASK-005",
+  "commit": "91889cc52d04a77b731dc55bb28545f74ee38f46",
+  "base": "bacfd461e1d8e193083355f94a2022da3e731618",
+  "key_findings": [
+    "🔴 DoD 内部矛盾已经 Leader 裁决（questions[0]，answer 于 2026-09-16T13:23Z）：functional[1] 的不变量 len(changes)==len(rows)×len(cols) 与 functional[0] 引用的需求原文断言 require.Len(got,1)/got[0].Col==2 冲突（原文夹具 cols 3 列、Cells 1 格）。裁决 A：按不变量，每行×每列恰一条；原文 5 条测试改为按 Label 查找那条 Change 再断言；TestDiffMarksAbsentInDB 的 absent 为 2 条。DoD functional[0] 括号里的 got[0].Row==9/Col==2 以「社融存量那条」解读。验证者请按此对照，不要拿需求原文的 Len 1 判红。",
+    "输出顺序（裁决 ①）：rows 按输入顺序，行内按 cols 列号升序；行号只由 Row.Month 决定（Month+3），不依赖 004 的 Period 排序。TestDiffCoversEveryRowAndColumn 钉住了顺序与不变量（刻意把 12 月放在 6 月、1 月之前）。",
+    "「表中无值」的判定：cellAt 对行越界、列越界、nil、空串 \"\" 都返回 nil。空串也算无值是因为 Sheets API 读回的空格可能是 \"\" 而不是缺位；否则 Same 判定会拿 \"\" 与 float64 比 Sprint 而永远 WillWrite。",
+    "Same 只在 Current != nil 时成立：表中无值 ⇒ 一律 WillWrite，即使 Want 也是 nil 的形状（Cells 里不会出现 nil Value，buildRow 只放存在的字段）。",
+    "toFloat 收 float64/float32/int/int64：Sheets API 以 RAW 读回的数字是 float64，JSON 解码也是 float64；int 分支只为测试与未来调用方写字面量方便，不改变生产路径。",
+    "gitnexus impact/detect-changes 仍不可用（索引版本不匹配）。文本回退：Diff 是新符号，仓库内尚无调用者（007 push 消费）；子包只依赖 fmt/math/sort。"
+  ],
+  "decisions": [
+    {
+      "decision": "按 Leader 裁决 A（questions[0].answer，2026-09-16T13:23Z）实现：cols 有而 Cells 没有的标签一律 AbsentInDB（无论表中有无值，Current 保留现值）；需求原文 3 条与不变量冲突的测试（MarksEmptyCellAsWillWrite / MarksIdenticalAsSame / MarksAbsentInDB）改为按 Label 查找 + 补 Len 3 / absent 2 的断言",
+      "rationale": "不变量是 dry-run 计数（判据四 1282+34+819=61×35）的根据；原文夹具用了生产上不会出现的 Cells（buildRow 恒带月份/发布日期）。B 案（豁免月份/发布日期）会把父包 SheetColumns 的知识硬编码进通用子包，Leader 否决。"
+    },
+    {
+      "decision": "在需求 5 条测试之外补 4 条：TestDiffTreatsShortRowsAsEmpty（1 行 1 列的 current，12 月越界）、TestDiffEmptySheetIsAllWillWrite（current=nil）、TestDiffIgnoresLabelsOutsideColumns（NotPanics + 不产出）、TestDiffCoversEveryRowAndColumn（不变量 + 三类计数之和 + 输出顺序）",
+      "rationale": "DoD boundary[1]、error_handling[0]、functional[1] 的不变量都 verify_by: test 而需求原文没有直接测试。"
+    },
+    {
+      "decision": "测试用 find(t, got, label) 助手按标签取 Change，不用 got[0]",
+      "rationale": "输出形状（每行几条、什么顺序）由不变量测试单独钉住；其余测试只关心某一格的判定，用 got[0] 会把顺序偶然性混进断言。写在裁决之前就选了这个形态，A/B 两案下断言相同，所以阻塞期间就能先 RED。"
+    },
+    {
+      "decision": "接受 code-simplifier 的三处改动：diff.go 的 Change 字面量拆多行、sameValue 用内建 max(1, |a|, |b|) 替代嵌套 math.Max；diff_test.go 把两处重复 find 提成局部变量、absent 切片改计数器；store_test.go 注释段签名描述补「表名」",
+      "rationale": "子代理回复「Unchanged」但 sha256 三文件全变——回复不可采信再次实证。逐行核过：语义不变，断言零删减，want 未动，9/9 PASS、gofmt/vet 空。⚠️ 流程自报：我把 sha 比对与 commit 链在同一条命令里，比对报 FAILED 时没有停下，提交后才逐行核。结果无害，但顺序是错的；下次 sha 不一致即中断。"
+    },
+    {
+      "decision": "commit subject 用 feat(TASK-005): 而非需求原文的 feat(hestia/sheets):",
+      "rationale": "与 001–004 同。"
+    }
+  ],
+  "files_modified": [
+    { "path": "internal/hestia/sheets/diff.go", "change": "新建：ChangeKind{WillWrite,Same,AbsentInDB}、Change、entryRowOffset、Diff、cellAt、sameValue、toFloat", "numstat": "123/0" },
+    { "path": "internal/hestia/sheets/diff_test.go", "change": "新建：9 条测试 + cols()/find() 助手 + DoD 映射注释", "numstat": "212/0" },
+    { "path": "internal/hestia/store_test.go", "change": "want 插入 \"sheets.Diff\"（42→43，在 sheets.ColumnLetter 与 sheets.ResolveHeader 之间）；「为什么名单里多了 sheets.*」段追加 Diff 一节", "numstat": "5/1" }
+  ],
+  "interfaces_exposed": [
+    { "name": "type ChangeKind int；const WillWrite=0, Same=1, AbsentInDB=2", "scope": "package sheets 导出", "semantics": "一格的去向。iota 顺序与需求原文一致。" },
+    { "name": "type Change struct{ Sheet string; Row, Col int; Label string; Current, Want any; Kind ChangeKind }", "scope": "package sheets 导出", "semantics": "Row 1 基（Month+3）、Col 0 基（取自 cols）。Current 表中现值（越界/空串/nil ⇒ nil）；Want 将写值，AbsentInDB 时 nil。" },
+    { "name": "func Diff(sheetName string, cols Columns, current [][]any, rows []Row) []Change", "scope": "package sheets 导出（007 push 消费：只提交 Kind==WillWrite）", "semantics": "每行×cols 每列恰一条，len==len(rows)×len(cols)；顺序 rows 输入序 × 列号升序。Cells 有：Current 非 nil 且 sameValue（数值相对 1e-9 容差，其余 Sprint 相等）⇒ Same，否则 WillWrite；Cells 没有 ⇒ AbsentInDB。Cell.Label 不在 cols ⇒ 忽略不产出、不 panic。无 error 返回。" }
+  ],
+  "verification": {
+    "sampled_at": "task/TASK-005 @ 91889cc52d04a77b731dc55bb28545f74ee38f46（提交后重采，含 simplifier 改动）",
+    "red_phase": {
+      "step2_undefined": "internal/hestia/sheets/diff_test.go:22:31: undefined: Change\n…:34:9: undefined: Diff\n…:38:19: undefined: WillWrite\n…:53:19: undefined: Same\nFAIL [build failed]（完整输出 scratchpad/dev-m2b-b-TASK-005-red1.txt）",
+      "invariant_test_first_run": "TestDiffCoversEveryRowAndColumn 首跑 FAIL：expected 2 / actual 1（我把 Same/AbsentInDB 数成 2/5，真值 1/6；实现没错，是期望值数错，断言当场抓住）",
+      "guard_red": "TestPackageExposesNoWriteFunctions: -([]string) (len=42) / +([]string) (len=43)，+ (string) (len=11) \"sheets.Diff\" 在 sheets.ColumnLetter 之后 sheets.ResolveHeader 之前；--- FAIL。TestStoreExposesNoWriteMethods PASS（完整输出 scratchpad/dev-m2b-b-TASK-005-red2-guard.txt）"
+    },
+    "green": "go test ./internal/hestia/sheets/ -run TestDiff -v ⇒ 9/9 PASS；go test ./internal/hestia/ -run ExposesNoWrite ⇒ 2/2 PASS",
+    "package_tree": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 ⇒ hestia ok、hestia/sheets ok",
+    "regression": "GOTOOLCHAIN=local go test ./... ⇒ 65 ok / 0 FAIL（scratchpad/dev-m2b-b-TASK-005-step4.txt，simplifier 前采样；simplifier 后 ./internal/hestia/... 两包重跑 ok）",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/... 空；go.mod/go.sum 无 diff",
+    "deps": "go list -deps ./internal/hestia/sheets | grep -c database/sql ⇒ 0；父包 ⇒ 0",
+    "want_counts": "reflect 版 15 项不变；AST 版 42→43，源码解析确认",
+    "simplifier_sha_compare": "pre-simplifier.sha 3 文件 shasum -c 全部 FAILED（子代理回复「Unchanged」为假）；逐行核过，见 decisions[3]",
+    "merge_preview": "临时 worktree（master@bacfd46）merge --no-ff --no-commit task/TASK-005：Automatic merge went well，冲突文件 0；已 abort 并拆除",
+    "reproduce": "git worktree add --detach <tmp> 91889cc52d04a77b731dc55bb28545f74ee38f46 && cd <tmp> && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -v -run 'TestDiff|ExposesNoWrite'"
+  },
+  "degradations": [
+    "gitnexus impact / detect-changes 不可用，文本回退见 key_findings[5]。",
+    "全量 go test ./... 的 65 ok 采样于 simplifier 之前；simplifier 之后只重跑了 ./internal/hestia/...（simplifier 未触碰其他包）。"
+  ]
+}

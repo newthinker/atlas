@@ -1,0 +1,82 @@
+{
+  "id": "TASK-011",
+  "title": "配置与文档：`config.example.yaml` 的 `hestia_sheets` 段、CONTRACTS `## Sprint M2b-2`、vault 回写内容（仓库内交付，人粘贴）",
+  "description": "对应需求文档 **TASK-011**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-011」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-011} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n**AD-M2b-2**：需求原文 Step 3「vault 回写」（`Projects/Hestia/README.md`、`M2b-Sheets-接入手册.md`）**不由 dev 直接写 vault**——vault 是 Spool 的白名单写入面，agent 直写会绕过守卫。dev 把两段可直接粘贴的正文写进仓库内 `docs/hestia-m2b/TASK-011-vault-content.md`，实际写入 vault 是人执行、与 TASK-012 同批。\n\n**无代码任务**：`packages` 显式指向文档路径，全部 `verify_by: review`。\n\n**Leader 订正（reviewer 🔴）**：CONTRACTS 节按需求 line 1878–1880 的六项逐条列；C1–C11 对照表是 Leader 追加。",
+  "module": "hestia-docs",
+  "complexity": "low",
+  "estimated_files": [
+    "configs/config.example.yaml",
+    "internal/hestia/CONTRACTS.md",
+    "docs/hestia-m2b/TASK-011-vault-content.md"
+  ],
+  "dependencies": [
+    "TASK-008",
+    "TASK-009"
+  ],
+  "wave": 10,
+  "context_from": [
+    "TASK-006",
+    "TASK-009",
+    "TASK-010"
+  ],
+  "packages": [
+    "./configs/config.example.yaml",
+    "./internal/hestia/CONTRACTS.md",
+    "./docs/hestia-m2b/TASK-011-vault-content.md"
+  ],
+  "writes": [
+    "./configs/config.example.yaml",
+    "./internal/hestia/CONTRACTS.md",
+    "./docs/hestia-m2b/TASK-011-vault-content.md"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`configs/config.example.yaml` 新增 `hestia_sheets` 段，含需求给的三条 🔴 注释原文（留空=禁用；密钥放 runtime 树外因 `rsync --delete`；两份 config.yaml 永不同步，给两个绝对路径）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`CONTRACTS.md` 新开 `## Sprint M2b-2`，**六项逐条**：① 导出面增量与两条守卫的新 `want`（列全）；② AST 守卫改递归；③ 选行 77→61 实测；④ diff 容差 1e-9 的理由；⑤ dry-run 零写请求的证明方式（测试名）；⑥ §10 七条判据表——判据一填「`go test ./...` 测试数 / 两条守卫 `len(want)` / AST 已递归」三格、判据二填 `go list -deps` 结果、判据三填测试名，**判据四～七留空**供人回填。追加：C1–C11 落地对照表（Leader 追加）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`docs/hestia-m2b/TASK-011-vault-content.md` 两段可直接粘贴：`## → Projects/Hestia/README.md`（落地状态表 M2b 行改 ✅ 并写实测）、`## → M2b-Sheets-接入手册.md`（加「投影已上线」节；D1/D2/D3 从「已结案」改「已实现」并指向 CONTRACTS `## Sprint M2b-2`）。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**C10** 两个绝对路径：`<repo>/configs/config.yaml` 与 `/Users/zuowei/workspace/runtime/atlas/configs/config.yaml`，文档明写「永不同步」。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "CONTRACTS 纯追加（`git diff --numstat` 删除行 0），不改既有节。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "commit subject `docs(TASK-011):`；三文件都在 `writes` 内；`docs/hestia-m2b/` 本 sprint 新建。不跑 code-simplifier。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:32Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m2b-c",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "verify_baseline": {
+    "head": "d42435241b3c7a24c10d2b016db17c364b325631",
+    "discovery_sha256": "e711bb4e75394b5472e14ace0f797b0a8fa60083b65a6df67e789215df1034da",
+    "at": "2026-09-17T01:34:20Z"
+  },
+  "verifier": "test-m2b-b"
+}

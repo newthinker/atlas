@@ -1,0 +1,389 @@
+package sheets
+
+// 验证者 test-m2b-b 自构夹具（TASK-008；不进交付，只在 worktree wt-m2b-v008 存在）。
+//
+// 与 dev 夹具的差别：
+//   - 四步不用 `strings.Contains(joined, …)`，而是把 batchUpdate 请求体**解析成结构**
+//     逐个 request 核字段：Contains 只证明「某处出现过这串字」，证不了它出现在
+//     正确的 request、正确的字段上，也证不了请求恰好是四个
+//   - 标题替换三支（带年份 / 不带年份 / 空标题）分别验，dev 只验了带年份那支
+//   - index 排位除 DoD 指定的 {2023,2024,2026}+2025⇒2 外，补最前 / 最末 / 连建两张
+//     （连建那条钉住「后一张要把前一张算进本地表序」，dev 未覆盖）
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// —— 验证者自己的响应构造（不复用 dev 的 tabsWithIDs/tabsResponses，免得共享同一个缺陷）——
+
+const vTplID = 777 // 模板 2024年 的 sheetId，刻意与 dev 夹具的 12345 不同
+
+// vTabs 造 spreadsheets.get 响应：按传入顺序给 id 10,11,12…，「2024年」固定 vTplID。
+func vTabs(titles ...string) string {
+	parts := make([]string, len(titles))
+	for i, t := range titles {
+		id := 10 + i
+		if t == "2024年" {
+			id = vTplID
+		}
+		parts[i] = fmt.Sprintf(`{"properties":{"sheetId":%d,"title":%q,"index":%d}}`, id, t, i)
+	}
+	return `{"sheets":[` + strings.Join(parts, ",") + `]}`
+}
+
+// vHeaders 给若干表配齐表头（录入区不配 ⇒ 服务端回 {} ⇒ 空，正是新建表的样子）。
+func vHeaders(m map[string]string, tabs ...string) map[string]string {
+	for _, tab := range tabs {
+		m["/v4/spreadsheets/sheet-id/values/'"+tab+"'!A3:AI3"] = `{"values":[["月份","发布日期","社融存量","M2余额"]]}`
+	}
+	return m
+}
+
+// vResp：列出 titles、模板 A1 给 tplTitle、为 headerTabs 配表头。
+func vResp(tplTitle string, titles []string, headerTabs ...string) map[string]string {
+	m := map[string]string{
+		pathTabs: vTabs(titles...),
+		"/v4/spreadsheets/sheet-id/values/'2024年'!A1": fmt.Sprintf(`{"values":[[%q]]}`, tplTitle),
+	}
+	if tplTitle == "" {
+		m["/v4/spreadsheets/sheet-id/values/'2024年'!A1"] = `{}`
+	}
+	return vHeaders(m, append(append([]string{}, titles...), headerTabs...)...)
+}
+
+// —— batchUpdate 请求体的结构化解析 ——
+
+type vReq struct {
+	DuplicateSheet *struct {
+		SourceSheetID int64 `json:"sourceSheetId"`
+		NewSheetID    int64 `json:"newSheetId"`
+	} `json:"duplicateSheet"`
+	UpdateSheetProperties *struct {
+		Fields     string `json:"fields"`
+		Properties struct {
+			SheetID int64  `json:"sheetId"`
+			Title   string `json:"title"`
+			Index   int64  `json:"index"`
+		} `json:"properties"`
+	} `json:"updateSheetProperties"`
+	UpdateCells *struct {
+		Fields string `json:"fields"`
+		Range  struct {
+			SheetID       int64 `json:"sheetId"`
+			StartRowIndex int64 `json:"startRowIndex"`
+			EndRowIndex   int64 `json:"endRowIndex"`
+		} `json:"range"`
+		Rows []struct {
+			Values []struct {
+				UserEnteredValue struct {
+					StringValue string `json:"stringValue"`
+				} `json:"userEnteredValue"`
+			} `json:"values"`
+		} `json:"rows"`
+	} `json:"updateCells"`
+}
+
+// vBatchUpdates 解析出全部 spreadsheets:batchUpdate 的请求列表（按发出顺序）。
+func vBatchUpdates(t *testing.T, rec *recorder) [][]vReq {
+	t.Helper()
+	var out [][]vReq
+	// 🔴 判据必须是**精确路径**：建表打 `<ss>:batchUpdate`，写数据打 `<ss>/values:batchUpdate`，
+	// 用 HasSuffix(":batchUpdate") 会把数据写请求也算进来（验证者首版就栽在这里）。
+	for i, m := range rec.methods {
+		if m != "POST "+pathBatchUpdate {
+			continue
+		}
+		var body struct {
+			Requests []vReq `json:"requests"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(rec.bodies[i]), &body), "batchUpdate 请求体应是合法 JSON")
+		out = append(out, body.Requests)
+	}
+	return out
+}
+
+// vNewTabIndexes 取每次建表 batchUpdate 里「④ 改 index」那一步的 index 值，按发出顺序。
+func vNewTabIndexes(t *testing.T, rec *recorder) []int64 {
+	t.Helper()
+	var got []int64
+	for _, reqs := range vBatchUpdates(t, rec) {
+		for _, r := range reqs {
+			if r.UpdateSheetProperties != nil && r.UpdateSheetProperties.Fields == "index" {
+				got = append(got, r.UpdateSheetProperties.Properties.Index)
+			}
+		}
+	}
+	return got
+}
+
+// W1 —— 四步：结构化逐字段核，而不是「拼接串里出现过这几个字」。
+func TestW_CreateYearTabFourStepsStructurally(t *testing.T) {
+	c, rec := newTestClient(t, vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}), 0)
+
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 3))
+
+	batches := vBatchUpdates(t, rec)
+	require.Len(t, batches, 1, "四步必须在**一次** batchUpdate 里（API 原子）")
+	require.Len(t, writeBodies(rec), 1, "整个过程只发一个写请求")
+	reqs := batches[0]
+	require.Len(t, reqs, 4, "恰四步，不多不少")
+
+	// 新表 id = 现有最大 id + 1。现有 {说明:10, 2024年:777, 2026年:12} ⇒ max=777 ⇒ new=778
+	const wantNewID int64 = vTplID + 1
+
+	// ① 复制模板
+	require.NotNil(t, reqs[0].DuplicateSheet, "第 1 步必须是 duplicateSheet")
+	require.Equal(t, int64(vTplID), reqs[0].DuplicateSheet.SourceSheetID, "复制的是模板表的 id")
+	require.Equal(t, wantNewID, reqs[0].DuplicateSheet.NewSheetID, "新表 id = 现有最大 + 1")
+
+	// ② 改名
+	require.NotNil(t, reqs[1].UpdateSheetProperties, "第 2 步必须是改属性")
+	require.Equal(t, "title", reqs[1].UpdateSheetProperties.Fields, "fields 必须限定为 title")
+	require.Equal(t, "2021年", reqs[1].UpdateSheetProperties.Properties.Title)
+	require.Equal(t, wantNewID, reqs[1].UpdateSheetProperties.Properties.SheetID, "改的是新表不是模板")
+
+	// ③ 改表内第 1 行标题：值逐字相等，且写的确实是 A1 那一格
+	require.NotNil(t, reqs[2].UpdateCells, "第 3 步必须是 updateCells")
+	require.Equal(t, wantNewID, reqs[2].UpdateCells.Range.SheetID)
+	require.Equal(t, int64(0), reqs[2].UpdateCells.Range.StartRowIndex)
+	require.Equal(t, int64(1), reqs[2].UpdateCells.Range.EndRowIndex)
+	require.Equal(t, "userEnteredValue", reqs[2].UpdateCells.Fields)
+	require.Len(t, reqs[2].UpdateCells.Rows, 1)
+	require.Len(t, reqs[2].UpdateCells.Rows[0].Values, 1)
+	require.Equal(t, "2021 年 · 金融数据追踪",
+		reqs[2].UpdateCells.Rows[0].Values[0].UserEnteredValue.StringValue,
+		"只换年份、保留后半句（逐字相等，不是 Contains）")
+
+	// ④ 排位
+	require.NotNil(t, reqs[3].UpdateSheetProperties, "第 4 步必须是改属性")
+	require.Equal(t, "index", reqs[3].UpdateSheetProperties.Fields)
+	require.Equal(t, int64(3), reqs[3].UpdateSheetProperties.Properties.Index)
+	require.Equal(t, wantNewID, reqs[3].UpdateSheetProperties.Properties.SheetID)
+}
+
+// W2 —— index 0 必须真的发出去（omitempty 会吞掉零值）。结构化取值，不靠字符串。
+func TestW_CreateYearTabIndexZeroIsSent(t *testing.T) {
+	c, rec := newTestClient(t, vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}), 0)
+	require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2019年", 2019, 0))
+	require.Equal(t, []int64{0}, vNewTabIndexes(t, rec), "index 0 必须出现在请求里")
+	// 双保险：原始 JSON 里确实有 "index":0 这个键值，而不是整个字段被省略
+	require.Contains(t, writeBodies(rec)[0], `"index":0`)
+}
+
+// W3 —— 标题替换的另两支：模板标题不带年份 / 模板标题为空。dev 只验了带年份那支。
+func TestW_CreateYearTabTitleVariants(t *testing.T) {
+	for _, tc := range []struct{ name, tplTitle, want string }{
+		{"不带年份则拼前缀", "金融数据追踪", "2021 年 · 金融数据追踪"},
+		{"空标题也拼前缀", "", "2021 年 · "},
+		{"带年份且无后半句则只剩年份", "2024 年", "2021 年"},
+		{"年份前有空格照样命中", "  2024年 · 追踪", "2021 年 · 追踪"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := newTestClient(t, vResp(tc.tplTitle, []string{"说明", "2024年", "2026年"}), 0)
+			require.NoError(t, c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 1))
+			reqs := vBatchUpdates(t, rec)[0]
+			require.NotNil(t, reqs[2].UpdateCells)
+			require.Equal(t, tc.want, reqs[2].UpdateCells.Rows[0].Values[0].UserEnteredValue.StringValue)
+		})
+	}
+}
+
+// W4 —— DoD functional[1] 点名要验证者做的那条：
+// 现有 {2023年,2024年,2026年} + 新 2025 ⇒ index == 2。
+func TestW_PushPlacesNewTabByYearOrder(t *testing.T) {
+	c, rec := newTestClient(t,
+		vResp("2024 年 · 金融数据追踪", []string{"2023年", "2024年", "2026年"}, "2025年"), 0)
+
+	_, err := Push(context.Background(), c, rowsSpanning(2025, 2025), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+	require.Equal(t, []int64{2}, vNewTabIndexes(t, rec),
+		"{2023,2024,2026} 里第一个 > 2025 的是 2026年，它在表序第 2 位")
+}
+
+// W5 —— index 边界：最前（新年份比谁都小）与最末（比谁都大）。
+// 注意非年度表「说明」占着表序 0，所以「排最前」的正确答案是 1 而不是 0。
+func TestW_PushPlacesNewTabAtEdges(t *testing.T) {
+	t.Run("比现有都小则排在第一张年度表之前", func(t *testing.T) {
+		c, rec := newTestClient(t,
+			vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}, "2019年"), 0)
+		_, err := Push(context.Background(), c, rowsSpanning(2019, 2019), sampleLabels(),
+			Options{Apply: true, CreateSheets: true})
+		require.NoError(t, err)
+		require.Equal(t, []int64{1}, vNewTabIndexes(t, rec), "第一个 > 2019 的是 2024年，在表序第 1 位")
+	})
+	t.Run("比现有都大则排末尾", func(t *testing.T) {
+		c, rec := newTestClient(t,
+			vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}, "2030年"), 0)
+		_, err := Push(context.Background(), c, rowsSpanning(2030, 2030), sampleLabels(),
+			Options{Apply: true, CreateSheets: true})
+		require.NoError(t, err)
+		require.Equal(t, []int64{3}, vNewTabIndexes(t, rec), "没有 > 2030 的，排末尾 = len(order) = 3")
+	})
+}
+
+// W6 —— 连建两张：后一张的 index 必须把前一张已插入的位置算进去。
+// 现有 {说明,2024年,2026年} 缺 {2023年,2025年}：
+//
+//	2023 ⇒ 第一个 >2023 的是 2024年（位置 1）⇒ index 1，插入后表序 [说明,2023年,2024年,2026年]
+//	2025 ⇒ 第一个 >2025 的是 2026年（**现在**在位置 3）⇒ index 3
+//
+// 若实现忘了把前一张插进本地表序，第二张会算成 2 —— 这正是本条要钉住的。
+func TestW_PushPlacesTwoNewTabsCumulatively(t *testing.T) {
+	c, rec := newTestClient(t,
+		vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}, "2023年", "2025年"), 0)
+
+	_, err := Push(context.Background(), c, rowsSpanning(2023, 2026), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 3}, vNewTabIndexes(t, rec),
+		"第二张的 index 必须把第一张已插入的位置算进去")
+}
+
+// W7 —— 建表必须先于写数据，且新建表的行进了写请求。
+func TestW_PushCreatesBeforeWritingAndWritesNewTab(t *testing.T) {
+	c, rec := newTestClient(t,
+		vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}, "2023年", "2025年"), 0)
+	rows := rowsSpanning(2023, 2026)
+
+	res, err := Push(context.Background(), c, rows, sampleLabels(), Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+	require.Equal(t, []string{"2023年", "2025年"}, res.MissingTabs)
+
+	// 顺序：两个建表 batchUpdate 都要早于唯一的数据写请求。
+	var iDup []int
+	iWrite := -1
+	for i, m := range rec.methods {
+		if strings.HasPrefix(m, "GET ") {
+			continue
+		}
+		if m == "POST "+pathBatchUpdate {
+			iDup = append(iDup, i)
+		} else if strings.Contains(rec.bodies[i], "valueInputOption") {
+			iWrite = i
+		}
+	}
+	require.Len(t, iDup, 2, "缺两张建两张")
+	require.NotEqual(t, -1, iWrite, "必须有一个写数据请求")
+	for _, i := range iDup {
+		require.Less(t, i, iWrite, "建表必须先于写数据，否则 range 指向不存在的表")
+	}
+
+	// 新表录入区全空 ⇒ 它们的行全是 WillWrite；写体里必须出现新表的 range。
+	requireInvariant(t, res, rows, sampleLabels())
+	var got batchBody
+	require.NoError(t, json.Unmarshal([]byte(lastWriteBody(t, rec)), &got))
+	require.Len(t, got.Data, res.WillWrite, "写的格数必须等于 WillWrite")
+	var ranges []string
+	for _, d := range got.Data {
+		ranges = append(ranges, d.Range)
+	}
+	require.Contains(t, ranges, "'2023年'!A15", "新建表的行也要写进去")
+	require.Contains(t, ranges, "'2025年'!A15")
+}
+
+// W8 —— 模板不存在 ⇒ 报错带模板名与目标表名，且**一个写请求都不发**。
+func TestW_CreateYearTabMissingTemplate(t *testing.T) {
+	c, rec := newTestClient(t, map[string]string{pathTabs: vTabs("说明", "2026年")}, 0)
+	err := c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "2024年", "错误要说清是哪张模板")
+	require.Contains(t, err.Error(), "2021年", "以及本来要建哪张")
+	require.Empty(t, writeBodies(rec), "模板都找不到就不该动表结构")
+	// 而且连模板标题都不该去读（省一次 GET）：只发过列表请求
+	require.Equal(t, []string{"GET " + pathTabs}, rec.methods)
+}
+
+// W9 —— batchUpdate 4xx ⇒ 报错含状态，且**只发过这一个写请求**。
+// 这就是「后续三步不做」的可观测形式：四步在一次请求里，整批不生效。
+func TestW_CreateYearTabStopsOnBatchFailure(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusBadRequest} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			c, rec := newTestClientFailingPOST(t,
+				vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}), status)
+			err := c.CreateYearTab(context.Background(), "2024年", "2021年", 2021, 1)
+			require.Error(t, err)
+			require.Len(t, writeBodies(rec), 1, "失败后不许再发任何写请求")
+			require.Len(t, vBatchUpdates(t, rec), 1, "而且那一个就是四步合一的 batchUpdate")
+		})
+	}
+}
+
+// W10 —— push 侧：建表失败 ⇒ 已有表的格也不写（写一半比不写更难收拾）。
+func TestW_PushWritesNothingWhenCreateFails(t *testing.T) {
+	c, rec := newTestClientFailingPOST(t,
+		vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}, "2025年"),
+		http.StatusForbidden)
+
+	_, err := Push(context.Background(), c, rowsSpanning(2025, 2026), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.Error(t, err)
+	require.Len(t, writeBodies(rec), 1, "只发过那一个失败的建表请求，2026年 的格一个都没写")
+	for _, b := range writeBodies(rec) {
+		require.NotContains(t, b, "valueInputOption", "不许有数据写请求")
+	}
+}
+
+// W11 —— boundary：CreateSheets=true 但一张都不缺 ⇒ 零 duplicateSheet、不碰表结构。
+func TestW_PushCreateSheetsNoMissingDoesNothing(t *testing.T) {
+	c, rec := newTestClient(t, vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}), 0)
+
+	_, err := Push(context.Background(), c, rowsSpanning(2026, 2026), sampleLabels(),
+		Options{Apply: true, CreateSheets: true})
+	require.NoError(t, err)
+	require.Empty(t, vBatchUpdates(t, rec), "不缺表就一个 batchUpdate 都不该发")
+	require.Equal(t, 0, countBodiesContaining(rec, "duplicateSheet"))
+}
+
+// W12 —— boundary：Apply=false 时即使缺表也不建表（007 的 GET-only 性质在建表接线后仍成立）。
+func TestW_PushDryRunNeverCreates(t *testing.T) {
+	c, rec := newTestClient(t,
+		vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年", "2026年"}, "2023年", "2025年"), 0)
+
+	res, err := Push(context.Background(), c, rowsSpanning(2023, 2026), sampleLabels(),
+		Options{Apply: false, CreateSheets: true})
+	require.NoError(t, err)
+	require.Equal(t, []string{"2023年", "2025年"}, res.MissingTabs, "缺表要报出来")
+	requireOnlyGETs(t, rec) // 逐条断言，不是看总数
+	require.Empty(t, writeBodies(rec))
+	require.Empty(t, vBatchUpdates(t, rec))
+}
+
+// W13 —— createYearTabs 对非年度表名的防御分支（Push 路径不可达，包内直接调）。
+func TestW_CreateYearTabsRejectsNonYearName(t *testing.T) {
+	c, rec := newTestClient(t, vResp("2024 年 · 金融数据追踪", []string{"说明", "2024年"}), 0)
+	err := createYearTabs(context.Background(), c, []string{"说明", "2024年"}, []string{"汇总"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "汇总")
+	require.Empty(t, writeBodies(rec))
+}
+
+// W14 —— tabYear 纯函数的边界（表序算法依赖它）。
+func TestW_TabYearBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		year int
+		ok   bool
+	}{
+		{"2021年", 2021, true},
+		{"1999年", 1999, true},
+		{"说明", 0, false},
+		{"2021", 0, false},
+		{"2021年 ", 0, false},
+		{" 2021年", 0, false},
+		{"202年", 0, false},
+		{"20211年", 0, false},
+		{"2021年度", 0, false},
+	} {
+		y, ok := tabYear(tc.in)
+		require.Equalf(t, tc.ok, ok, "tabYear(%q) 的 ok", tc.in)
+		require.Equalf(t, tc.year, y, "tabYear(%q) 的 year", tc.in)
+	}
+}

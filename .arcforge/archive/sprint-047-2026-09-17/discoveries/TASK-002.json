@@ -1,0 +1,97 @@
+{
+  "task_id": "TASK-002",
+  "written_by": "dev-m2b-b",
+  "written_at": "2026-09-16T11:22:10Z",
+  "branch": "master",
+  "commit": "e13ce10455f1d41506a6f0b4673667631b3d329a",
+  "merged_as": "79878c79339f8ea2849948152bd6d082c2c3c63a",
+  "base": "28fca4c67ce4e303a983ddd13c4de4921849a428",
+  "provenance": {
+    "code_by": "dev-m2b-a",
+    "commit": "e13ce10455f1d41506a6f0b4673667631b3d329a",
+    "merged_as": "79878c79339f8ea2849948152bd6d082c2c3c63a",
+    "discovery_by": "dev-m2b-b",
+    "reason": "前任 dev-m2b-a 提交并被 Leader 合入后失联（48 分钟零产物），Leader 按 AD-21 改派（epoch 1→2，reason_class=env_infra）。dev-m2b-b 只做核验与记账，未改一行代码；transitions.jsonl 里 by=dev-m2b-b 不代表代码作者。",
+    "red_phase_source": "scratchpad/dev-m2b-a-TASK-002-red1.txt 与 -red2-guards.txt，由 dev-m2b-a 在 worktree wt-m2b-002 上留痕（10:21Z 前后）"
+  },
+  "key_findings": [
+    "5 条 DoD 在 master 79878c7 上逐条核验全部满足，无需新 commit。核验方法：go test -v 跑 5 条相关测试、grep SQL 与 import、用 python 从源码解析 want 列表数项、比对需求原文的期望切片。",
+    "验证者 grep SQL 注意：AllPeriods 的 SQL 不含字面量 v_hestia_current，用的是常量 viewCurrent（schema.go:19 `viewCurrent = \"v_hestia_current\"`），与 HasPeriod / Current / RecentObservations 同口径（store.go 内 viewCurrent 共 10 处引用）。grep 字面量会假阴。",
+    "两条守卫的 want 项数是 14→15（reflect 版）与 38→39（AST 版），以 RED 留痕 red2-guards.txt 里 assert 打出的 len=14/15、len=38/39 与源码解析为准。Leader 派发消息里写的「40→41」与此不符，属转述误差，不影响结论。",
+    "code-simplifier 确实跑过并改了东西：前任留的 pre-simplifier.sha 与提交版比对，store.go 与 store_test.go 的 sha256 不同、types.go 相同；前任 checkpoint 记 store_test.go +94/-2、提交版 numstat 91/2 ⇒ 少了 3 行。具体改了哪几行前任未留 diff，本人无法还原，只能确认提交版 5/5 PASS、gofmt/vet 空。",
+    "C2：internal/hestia 下 `hestia/sheets` 只在 exported_funcs_test.go 两处注释里提及，import 语句 0 处；sheets 子目录尚不存在（TASK-003 起建）。"
+  ],
+  "decisions": [
+    {
+      "decision": "接手判定：files_modified 按 git show --numstat e13ce104 填，不重写、不「顺手改进」",
+      "rationale": "DoD 无缺口时空 diff 就是正确答案；重写是拿他人已验证的工作换自己的产出感，还会让 verify 对象漂移。"
+    },
+    {
+      "decision": "（承前任）新增测试辅助 saveObs(t, s, period, periodType, publishedAt) 而不是复用 saveMonthly",
+      "rationale": "需求原文调用的 saveObs 在 store_test.go 里本不存在；既有 saveMonthly 固定 monthly / 期末+15 日，造不出「同月 monthly 与 h1 并存」。saveObs 同走 Store.Save，未另建建库辅助，符合 DoD functional[0] 的约束。"
+    },
+    {
+      "decision": "（承前任）错误前缀用 \"hestia store all periods\" 而非需求原文的 \"hestia all periods\"；rows.Err() 也包成同前缀",
+      "rationale": "store.go 里 31 处 fmt.Errorf 全部是 \"hestia store …\" 前缀（TestStoreCurrentAndPriorErrorsCarryPrefix 守着这个惯例）；rows.Err() 包裹让迭代中途出错与 Query 出错拿到同一前缀，且 ctx 取消时 ErrorIs(context.Canceled) 仍成立。"
+    },
+    {
+      "decision": "（承前任）主测试刻意乱序插入（annual 先于两条 2025-06），测试里不写 defer st.Close()",
+      "rationale": "乱序插入直接覆盖 boundary[0]「顺序由 ORDER BY 不依赖插入序」；newTestStore 已 t.Cleanup(Close)，再写 defer 是双重关闭，需求原文也说照文件既有写法调整。"
+    },
+    {
+      "decision": "commit subject 用 feat(TASK-002): 而非需求原文的 feat(hestia):",
+      "rationale": "与 TASK-001 同：门禁按 <type>(TASK-0NN): 认领改动。"
+    }
+  ],
+  "files_modified": [
+    {
+      "path": "internal/hestia/store.go",
+      "change": "新增 (*Store).AllPeriods，插在 PriorPublishedAt 上方；只查 viewCurrent，ORDER BY period, period_type",
+      "numstat": "33/0"
+    },
+    {
+      "path": "internal/hestia/store_test.go",
+      "change": "两处 want 各 +1（AllPeriods / Store.AllPeriods）；追加「为什么名单里多了 Store.AllPeriods」注释段；saveObs 辅助 + 3 条 AllPeriods 测试 + DoD 映射注释",
+      "numstat": "91/2"
+    },
+    {
+      "path": "internal/hestia/types.go",
+      "change": "新增 PeriodKey{Period, PeriodType, PublishedAt string}，插在 Observation 上方",
+      "numstat": "8/0"
+    }
+  ],
+  "interfaces_exposed": [
+    {
+      "name": "type PeriodKey struct{ Period, PeriodType, PublishedAt string }",
+      "scope": "package hestia 导出（纯数据，不带 *Store / *sql.DB）",
+      "semantics": "权威表里一期观测的身份三元组。Period=YYYY-MM，PeriodType∈{monthly,q1,h1,q1_q3,annual}，PublishedAt=YYYY-MM-DD（选行规则第 2 条要用）。"
+    },
+    {
+      "name": "func (s *Store) AllPeriods(ctx context.Context) ([]PeriodKey, error)",
+      "scope": "package hestia 导出（TASK-004 选行规则消费）",
+      "semantics": "只读 v_hestia_current，返回全部 (period, period_type, published_at)，按 period、period_type 升序；同月 monthly 与 h1 都返回、不在此层去重（去重是投影侧选行规则的职责）。空视图 ⇒ nil 切片、err==nil。ctx 取消 ⇒ 返回包住 ctx.Err() 的错误且切片为 nil。已登记进两条写口守卫的 want。"
+    }
+  ],
+  "verification": {
+    "sampled_at": "master 79878c79339f8ea2849948152bd6d082c2c3c63a，本人（dev-m2b-b）于 2026-09-16 11:18–11:22Z 重采；下面 red_phase 来自前任留痕",
+    "red_phase": {
+      "source": "dev-m2b-a 留痕，scratchpad/dev-m2b-a-TASK-002-red1.txt / -red2-guards.txt",
+      "step2_undefined": "./store_test.go:3050:17: st.AllPeriods undefined (type *Store has no field or method AllPeriods)\n./store_test.go:3052:21: undefined: PeriodKey\n./store_test.go:3064:17: st.AllPeriods undefined ...\n./store_test.go:3078:17: st.AllPeriods undefined ...\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]",
+      "step5_guards_both_red": "TestStoreExposesNoWriteMethods: -([]string) (len=14) / +([]string) (len=15) + \"AllPeriods\"；TestPackageExposesNoWriteFunctions: -([]string) (len=38) / +([]string) (len=39) + \"Store.AllPeriods\"；两条 --- FAIL"
+    },
+    "green": "go test ./internal/hestia/ -count=1 -v -run 'AllPeriods|ExposesNoWrite' ⇒ 5/5 PASS（TestStoreExposesNoWriteMethods、TestPackageExposesNoWriteFunctions、TestAllPeriodsReturnsEveryObservationKey、TestAllPeriodsEmptyStore、TestAllPeriodsPropagatesContextCancellation）",
+    "package": "go test ./internal/hestia/ -count=1 -cover ⇒ ok，coverage 96.6% of statements",
+    "regression": "GOTOOLCHAIN=local go test ./... ⇒ 64 ok / 0 FAIL，rc=0（输出留痕 scratchpad/dev-m2b-b-TASK-002-regression.txt）",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/ 空",
+    "sql_reads_view": "store.go:498 `SELECT period, period_type, published_at FROM `+viewCurrent+` ORDER BY period, period_type`；viewCurrent 定义在 schema.go:19",
+    "want_counts": "源码解析：reflect 版 15 项含 AllPeriods、AST 版 39 项含 Store.AllPeriods；变更前（e13ce104^）14 / 38",
+    "expected_slice_matches_spec": "测试里 require.Equal 的三元素期望切片与需求文档 Step 1 逐字相同（h1 → monthly → annual）",
+    "c2_no_sheets_import": "grep 'hestia/sheets' internal/hestia/*.go ⇒ 仅 exported_funcs_test.go 两处注释，import 0 处",
+    "simplifier_sha_compare": "pre-simplifier.sha vs master：store.go 03ec11fb…→56565d51…（变）、store_test.go 64ba63f7…→8d082c33…（变）、types.go cc86cc16…（同）",
+    "reproduce": "git worktree add --detach <tmp> 79878c79339f8ea2849948152bd6d082c2c3c63a && cd <tmp> && GOTOOLCHAIN=local go test ./internal/hestia/ -count=1 -v -run 'AllPeriods|ExposesNoWrite'"
+  },
+  "degradations": [
+    "gitnexus impact 分析未做：本人未改代码，无编辑动作需要做影响分析（TASK-001 discovery 已记录索引版本不匹配不可用）。",
+    "code-simplifier 的具体改动无法还原（前任只留 sha 未留 diff），只能证明提交版通过全部门禁。"
+  ]
+}

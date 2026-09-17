@@ -1,0 +1,125 @@
+{
+  "task_id": "TASK-010",
+  "base": "e0f4f8b4fdca4575d7b1bd1010126e85c69d8697",
+  "branch": "task/TASK-010",
+  "commit": "ec24cbbf5b63f6b197fc915f470a09bcb5a27967",
+  "written_by": "dev-m2b-c",
+  "written_at": "2026-09-17T06:30:00Z",
+  "provenance": "代码由 dev-m2b-a 编写并提交 3bf5372c59416e96bbe612310de56b3d3dcf17af（含它自己跑过的 code-simplifier）；该实例因账号 Fable 5.1 额度耗尽在 simplifier 子代理批次中中断，Leader 按 AD-21 改派（assignment_epoch 1→2）；dev-m2b-c 接手：逐条核 DoD、重跑测试与全仓回归、未改一行代码、未再跑 code-simplifier。本 discovery 的全部测试数字由 dev-m2b-c 在 master@3770e9482129981cd7a0608e55fadd2c090203ed 上实跑，红阶段留痕引用原作者文件。 ｜ **第 2 轮（QA review_fix，2026-09-17）**：本轮 5 条 fix_items 全部由 dev-m2b-c 自己实现（不再是接手），越界申报在动手之前落盘（sheets_project.go / sheets_project_test.go 进 writes，epoch 2，rework_count 自动 1）。两条 panic 用例先写到红再改实现，红的形态是测试进程真的崩（panic: boom in BuildSheetRows [recovered]），留痕 scratchpad/dev-m2b-c-TASK-010fix-red{1,2}.txt。code-simplifier 在**提交之后**跑，其改动单独作 f3524df 提交；⚠️ 子代理回复只有一个词「No.」而 sha 比对显示它改了两个测试文件——以 git diff 为准，本 sprint 第 4 例。本轮全部自证数字在最后一次改动之后、于合入后的 master@c4bbb39e0818227e9cd7bf2e9f1705cf56b5472a 上统一重采。 ｜ **QA review_fix 第 2 轮（CRITICAL-4）**：本轮只有一条实质 fix_item（上一轮 5 条已由 test-m2b-b 判 VERIFIED）。两处越界都在动手之前经写通道申报：先补 internal/config/{config.go,config_test.go} 与 packages ./internal/config，发现连带影响后再补 configs/config.example.yaml。两条修法都先写到红再改实现，留痕 scratchpad/dev-m2b-c-TASK-010fix2-red1.txt。全部自证数字在合入后的 master@96272b9 上重采。",
+  "key_findings": [
+    "投影挂在 ingest.go 的 ingestOne 里、紧跟 `%s contract → %s` 打印之后（if 块在 ingest.go:482-489，紧跟 479 行的 contract 打印、在 490 行 Evaluate 之前），只在 New / Revision 写完契约的分支执行——契约有下游（M3 在等）、投影没有，所以排在后面。",
+    "C8 两个失败分支都是 fmt.Fprintf(d.Out, ...) 后继续往下走，没有 return / errors.Join：组装失败在 ingest.go:485、投影失败在 ingest.go:487，两行经逐字节比对与判据七文案完全一致（含全角括号与冒号后单空格）。",
+    "C9 的实现是一个 `if d.ProjectSheets != nil` 包住整段：nil 时连 buildSheetRows 都不调用，所以既不会报错也不会有任何 stdout 输出；ingest.go 该段没有任何 slog/log 调用，日志面为零。",
+    "包内未导出 seam `var buildSheetRows = BuildSheetRows`（ingest.go:66）是「组装失败」分支唯一可测路径——正常库上 BuildSheetRows 构造不出失败（视图按 (period, period_type) 唯一、累计期次期末月互异）。它是 var 不是 FuncDecl 且未导出，TestPackageExposesNoWriteFunctions 守卫不受影响，本任务确实没改 store_test.go（numstat 恰为 writes 三文件）。",
+    "config.go 的改动除新增 HestiaSheets 段外，只有 Config 结构体字段的 gofmt 对齐（tag 列因新字段变宽而整体右移 1 列），无语义变更。",
+    "作者留痕 dev-m2b-a-TASK-010-pre-simplifier.sha 与合入版比对：ingest.go(20a8db13…) 与 config.go(722efd5d…) 两项 sha256 逐字节一致，ingest_test.go 由 6dc90bcc… 变为 a44df783…——即 simplifier 那一轮的改动只落在测试文件上，实现文件一个字节未动。",
+    "🔴 **返工根因是任务边界，不是任何一方写错**：生产路径唯一的 recover 在 cmd/atlas 的 sheetsProjector 闭包里，而 buildSheetRows 在那个闭包**之外**被调用（ingest.go 的投影块）⇒ 组装 panic 穿透 ingestOne → Ingest，打断整轮入库，正是 C8 要防的事。010 的验证者发现 panic 会穿透、Leader 把义务转给 009、009 在自己的 writes（cmd/atlas）里加了 recover——它够不到 ingest.go。两个任务各自都做对了，合起来仍有半边没兜住。⇒ **义务被转移时要连同「它的作用域边界在哪」一起转**，否则接收方只能覆盖自己 writes 够得到的那一半。",
+    "recoverPanic 只给投影这条路径用：投影按 ADR-0004 可再生、失败按 C8 不阻断，把 panic 降级成一行日志是正确的；其余路径的 panic 仍该炸出来，那才是真 bug。原始 panic 值经 %v 留在错误里（**不是吞掉**），否则线上只看得到「失败」而查不出炸的是什么。",
+    "🔴 **`Period[:4]` 的读侧防御不能折成 0**：Year=0 会让 tabName 得到 \"0年\"，那张表必然缺，而 ingest 固定 Apply+CreateSheets ⇒ **它会真的去建一张叫「0年」的工作表**。所以 periodYearMonth 取不出来就报错返回，整批停下——与同文件「AllPeriods 里但 Current 读不到 ⇒ 报错，不跳过」同一条原则。fix_items 原话是「加读侧防御」，最自然的读法（当 0）反而更坏。",
+    "🔴 **M7 的 glob 漏洞经实测证实，不是推断**：插探针打印投影被调用那一刻 pending/ 的内容，实测为 `[2025-12-annual.history.json, 2025-12-annual.json]`——M3 的侧车确实在场、且写在契约之前，所以裸 `*.json` 判据会被侧车满足，「投影挪到写契约之前」的变异在原用例下不红。排除 .history.json 后，探针换成两条常驻断言（侧车数 > 0、契约数 > 0），**证明这条排除不是恒真摆设**：哪天夹具不再产侧车，排除会变成空操作而用例照样绿，那时变异会重新逃掉。",
+    "M11 的原守卫不够：TestIngestSheetsDisabledWhenNil 只断言「没有 sheets: 开头的输出」，一个「先组装再丢弃」的实现同样满足它。而 BuildSheetRows 要读全库 AllPeriods + 逐期 Current，白跑一趟的代价随库线性增长 ⇒ 补计数替身断言调用次数为 0。",
+    "🔴 **CRITICAL-4 的危害全在「没有反馈」这四个字上**：`hestia_sheets` 只被 internal/hestia 的 Config 读（来源是 hestia.config_path 指向的文件），主配置结构体没有这个字段，而 viper 对未知顶层键**不报错** ⇒ 填在主配置里等于没填，能力静默禁用，**而配置文件看起来已经配好了**。本 sprint 真的发生过一次。",
+    "🔴 **TASK-011 写在注释里的警告没能拦住**：`config.example.yaml:272-278` 当时就写了「⚠️ 生效位置不是本文件」，而事故照样发生。⇒ **警告是给读的人看的，机制是给不读的人用的**；这条缺陷的正确修法只能是装载期硬错误，不是更醒目的注释。",
+    "🔴 **修法 b 生效后，样例配置自己装不上了**：`config.example.yaml` 里那个可复制的 `hestia_sheets` 段会让 `TestExampleConfigDeclaresHestiaRules` 直接红。这**反过来证明了我在 TASK-011 时提的疑虑是对的**——把该键写进样例配置本身就是错的，当时只是没有任何机制能让它变红。改法是只留指路注释、不给可复制的键：给了就等于教人踩坑。",
+    "⚠️ **本次改动有部署级后果，实测非推断**：用临时探针（写在已申报的包内、跑完即删）对真实 `configs/config.yaml` 跑 `config.Load`，确实报错并指路。⇒ 合入后**必须有人真的把那一段挪到 configs/hestia.yaml**，源码仓库与运行时两份都要挪（它们永不同步），否则 `atlas serve` 起不来。",
+    "只针对 `hestia_sheets` 这一个键做显式探测，**不改全局严格解析**——那会让一批历史配置因无关的陈旧键装不上，代价远大于收益。用 `InConfig` 而非 `IsSet`/`Get`：只看配置文件本身，不受 `AutomaticEnv` 影响。"
+  ],
+  "decisions": [
+    {
+      "decision": "接手不重写：逐条核 DoD 通过即写 discovery 转 dev_done，files_modified 记原作者的三文件而非空",
+      "rationale": "原作者的代码已合入 master 且五条 DoD 逐条可证，重写是拿已验证的工作换自己的产出感。接手者的正确交付是可核查的核验证据（内容判据三方 sha256 一致、逐字文案比对、五测全绿、全仓 65 ok/0 FAIL），不是新 diff。"
+    },
+    {
+      "decision": "code-simplifier 由原作者跑过，本次接手不再跑",
+      "rationale": "Leader 指示：dev-m2b-a / dev-m2b-b 两个实例都是挂在 simplifier 的子代理批次里，重跑即重复那次中断。前版仅留 sha256 无原文（git 里只有 3bf5372 一个 commit 触碰 ingest_test.go，6dc90bcc… 的内容不可回捞），故以合入版逐行审读代替 diff 审查——已逐行读过 config.go / ingest.go / ingest_test.go 的全部 161 行新增，无冗余抽象、无未使用符号。"
+    },
+    {
+      "decision": "DoD functional[1] 后半句「投影用 Options{Apply: true, CreateSheets: true}」不在本任务代码里，判为义务已转移、非缺口",
+      "rationale": "TASK-010 的 description 记有 Leader 裁决：需求 Step 3 的 runHestiaIngest 接线（建 client 并填 ProjectSheets）与 TASK-009 撞 cmd/atlas/hestia.go，该接线挪给 009。核实接收方载体确实存在：TASK-009 的 done_criteria.functional[2] 逐字写着「建 client 并填 deps.ProjectSheets（内部调 BuildSheetRows+sheets.Push{Apply:true,CreateSheets:true}）」——义务落在接收方的 done_criteria（强载体，验证者逐条对照），不是只写在 discovery 里。全仓 grep CreateSheets 确认目前只有 sheets/push.go 定义处与 push_test.go 使用，cmd/atlas 尚未接线，与 009 仍是 pending 一致。"
+    },
+    {
+      "decision": "C8 的断言用 require.Contains 带结尾换行的完整格式化结果，而非只匹配前缀",
+      "rationale": "判据七拿这一行判、一字不能改。带 `\\n` 的整行匹配能同时钉住文案、参数拼接位置与换行；只匹配「sheets: 投影失败」前缀会放过冒号后空格、全角括号、%v 位置这三类改动。"
+    },
+    {
+      "decision": "[0][1] recover 上移到 internal/hestia，且额外补一条「裸闭包」用例",
+      "rationale": "fix_items 只要求组装那一步不穿透。我额外加了 TestIngestSheetsProjectPanicDoesNotBreakIngest，注入的是**没有 cmd 那层 recover 的裸闭包**，红绿只取决于 ingest 自己——ingest 不该依赖调用方交来的闭包保证不 panic。cmd 侧那层 recover **没有删**：它在 TASK-009 的 writes 里，本任务动不了；双层无害（内层先接）。要不要收敛成一层留给 009 那轮或后续裁决。"
+    },
+    {
+      "decision": "[2] 做得比字面更重：periodYearMonth 报错返回而非折成 0，buildRow 因此改签名为 (sheets.Row, error)",
+      "rationale": "见 key_findings 的「0年」那条。代价是 buildRow 改签名，既有五处调用点用测试 helper mustBuildRow 适配——**原有断言一条没动**（本轮 require/assert 调用数前后都是 420、Test 函数数都是 77，两把独立的尺互验）。用 helper 而不是逐处 `row, err := …; require.NoError` 是因为那会给每条用例加两行与其待验性质无关的噪声。"
+    },
+    {
+      "decision": "[4] 先用探针实测再改判据，并把探针换成常驻的非恒真断言",
+      "rationale": "QA 说侧车会满足裸 glob，我没有直接照改——先插 t.Logf 探针打印调用那一刻 pending/ 的实际内容，确认侧车真的在场（实测两个文件都在）。改完把探针换成两条 require.Positive，让「排除是否仍然有意义」这件事本身受测。只改 glob 不加这两条的话，将来夹具一变，排除就静默失效。"
+    },
+    {
+      "decision": "code-simplifier 的改动单独作 refactor 提交；它修了我引入的一处缺陷",
+      "rationale": "我把 mustBuildRow 插在了 TestBuildRowOmitsAbsentFields 的文档注释与函数之间，那段注释（C4 的理由：「缺失就写空」会抹掉人工值、库缺占数值格 41%）因此挂到了 helper 头上；simplifier 把它挪回原位。另一处是把侧车/契约计数改成遍历时就地累加。断言强度未变：git diff 里删除的断言行 0、新增的断言行 0。"
+    },
+    {
+      "decision": "修法 a 的判据取「配了一半才报错」，两个都留空仍然放行",
+      "rationale": "两个都留空 = 能力禁用（C9），是**合法配置**；两个都给 = 正常。只有「给了凭据、没给表 id」是错的，而它的后果最不容易发现：能力看起来是开的，每次投影都会在 sheets.Push 里因 spreadsheetID 为空而失败，而按 C8 那是静默的。四个子用例（都给/都空/整段不写/配一半）里只有最后一个红，**证明新校验没有误伤合法配置**。"
+    },
+    {
+      "decision": "连带修改 TASK-011 的交付物 config.example.yaml，先申报后动手",
+      "rationale": "修法 b 让它装不上（见 key_findings）。先经写通道把该文件补进 writes 再改文件——CLAUDE.md 的越界申报节要求如此，且一进 dev_done 就再没有任何角色写得了这个字段。键与注释原文完整保存在 CONTRACTS 的 `## Sprint M2b-2` 里，没有丢失。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/config.go（+11/-0：validate() 加「credentials_file 非空 ⇒ spreadsheet_id 必须非空」）",
+    "internal/hestia/config_test.go（+53/-0：四个子用例，只有「配一半」该红）",
+    "internal/config/config.go（+19/-0：Load 在 InConfig(\"hestia_sheets\") 时报错并指路）",
+    "internal/config/config_test.go（+47/-0：三个子用例，含「hestia 段本身不误伤」）",
+    "configs/config.example.yaml（+13/-18：可复制的 hestia_sheets 段改成只留指路注释）"
+  ],
+  "interfaces_exposed": [
+    "hestia.IngestDeps.ProjectSheets func(context.Context, []sheets.Row) error —— 结构体字段，nil = 能力禁用（C9）。失败不阻断、不改 outcome、不进错误链、不发通知。**TASK-009 的消费点**：runHestiaIngest 在 credentials_file 非空时填这个字段，内部调 BuildSheetRows + sheets.Push(ctx, client, rows, labels, sheets.Options{Apply: true, CreateSheets: true})；留空则保持 nil。",
+    "hestia.HestiaSheets{CredentialsFile string `mapstructure:\"credentials_file\"`; SpreadsheetID string `mapstructure:\"spreadsheet_id\"`} —— 经 Config.HestiaSheets（mapstructure `hestia_sheets`）读入；两键留空是合法配置，不触发 LoadConfig 校验错误（TestConfigHestiaSheetsSection 正向验，C9 依赖这一点）。",
+    "包内未导出 seam `var buildSheetRows = BuildSheetRows`（仅 internal/hestia 包内可替换，测试用 t.Cleanup 还原）。"
+  ],
+  "verification": {
+    "red_phase": {
+      "来源": "原作者 dev-m2b-a 留痕 scratchpad/dev-m2b-a-TASK-010-red1.txt（接手者未重跑红阶段——实现已在 master，重跑红需要回退代码）",
+      "内容": "# github.com/newthinker/atlas/internal/hestia [github.com/newthinker/atlas/internal/hestia.test]\n./ingest_test.go:1710:7: deps.ProjectSheets undefined (type IngestDeps has no field or method ProjectSheets)\n./ingest_test.go:1725:10: undefined: buildSheetRows\n./ingest_test.go:1789:19: undefined: HestiaSheets\n./ingest_test.go:1789:97: cfg.HestiaSheets undefined (type Config has no field or method HestiaSheets)\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]\nFAIL\n（原文 9 行编译错误，此处摘 4 行；测试先于实现写下）"
+    },
+    "content_check": "内容判据而非拓扑推断：ingest.go / ingest_test.go / config.go 三文件在 commit 3bf5372、HEAD 3770e948、当前工作树三处 sha256 逐字节一致（20a8db13… / a44df783… / 722efd5d…）；git merge-base --is-ancestor 3bf5372 HEAD 亦为真。",
+    "dod_line_evidence": "C8 两行文案用 python 做整行逐字比对（含前导 tab 与 \\n），唯一命中 ingest.go:485（组装失败）与 ingest.go:487（投影失败）；`[P1]` 经 grep 确认是 hestia/notify.go:50 与 crisis/notify_render.go 的真实告警前缀，故 require.NotContains(txt, \"[P1]\") 是有效判据。",
+    "green": "dev-m2b-c 实跑 go test ./internal/hestia/ -count=1 -v -run 'TestIngestSheets|TestConfigHestiaSheets' ⇒ 5/5 PASS：TestIngestSheetsFailureDoesNotChangeOutcome、TestIngestSheetsBuildFailureDoesNotChangeOutcome、TestIngestSheetsDisabledWhenNil、TestIngestSheetsRunsAfterContract、TestConfigHestiaSheetsSection。",
+    "suite": "dev-m2b-c 实跑 go test ./internal/hestia/... -count=1 -cover ⇒ internal/hestia ok 96.6%、internal/hestia/sheets ok 89.1%；gofmt -l internal/hestia/ 空输出；go vet ./internal/hestia/... 退出码 0 且无输出。",
+    "regression": "dev-m2b-c 实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 个 ok、0 个 FAIL（留痕 scratchpad/dev-m2b-c-master-full.txt）。与原作者 dev-m2b-a-TASK-010-full.txt 的 65 ok 一致。",
+    "scope": "git show --numstat 3bf5372 恰为 writes 三文件（config.go 16/6、ingest.go 26/0、ingest_test.go 119/0，三行即全部输出），无越界文件、go.mod 无变化、store_test.go 未被触碰。",
+    "reproduce": "git worktree add --detach /tmp/x-task010 3770e9482129981cd7a0608e55fadd2c090203ed && cd /tmp/x-task010 && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -cover",
+    "rework_red_phase": {
+      "留痕": "scratchpad/dev-m2b-c-TASK-010fix-red1.txt（编译红：buildRow 签名未改）、-red2.txt（行为红：panic 真的崩）",
+      "内容": "--- FAIL: TestIngestSheetsBuildPanicDoesNotBreakIngest (0.01s)\npanic: boom in BuildSheetRows [recovered]\n\tpanic: boom in BuildSheetRows\nFAIL\tgithub.com/newthinker/atlas/internal/hestia\t0.771s\nFAIL\n（不是断言不等，是测试进程当场崩——正是 WARNING-1 描述的那种穿透）"
+    },
+    "rework_content_check": "四文件在合入后的 master@c4bbb39 与交付 worktree 两处 sha256 逐字节一致；148e7ff 与 f3524df 对 HEAD 均为祖先；master 上 grep 到 `func recoverPanic` 与 `func periodYearMonth` 各 1 处。",
+    "rework_suite": "master@c4bbb39 上实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ **退出码 0**、65 ok、0 FAIL；internal/hestia 覆盖率 96.6%（与返工前持平）；gofmt -l internal/hestia/ 0 行；go vet ./internal/hestia/... 0 行。⚠️ 退出码要单独取，别接在命令替换之后——第一次我把 `$?` 写在 printf 的替换后面，它报的是那个替换的码（1）而不是 go test 的（0）。",
+    "rework_scope": "git diff --numstat d424352..c4bbb39 -- internal/hestia 恰为声明范围内四文件（ingest.go 25/2、ingest_test.go 94/1、sheets_project.go 34/5、sheets_project_test.go 50/5）；config.go 本轮未动（writes 是「可写」不是「必写」）。",
+    "assertion_delta": "两把独立的尺互验 simplifier 未弱化断言：require/assert 调用数 420 → 420、Test 函数数 77 → 77、git diff 中删除的断言行 0、新增的断言行 0。",
+    "r2_red_phase": {
+      "留痕": "scratchpad/dev-m2b-c-TASK-010fix2-red1.txt",
+      "形态": "七个子用例里恰好两个红——「配了一半 ⇒ 装载期报错并点名缺哪个键」与「主配置出现 hestia_sheets ⇒ 装载期报错并指路」；其余五个（两个都给/两个都留空/整段不写/没有这个键/hestia 段本身）全绿。⇒ 红的位置就是被测性质本身，不是环境。"
+    },
+    "r2_deployment_probe": "用临时测试（写在已申报的 internal/config 包内，跑完立刻删除，提交里没有它）对真实 configs/config.yaml 跑 Load，实测输出：「… 里出现了 hestia_sheets —— 这个键在主配置里不会被任何代码读取。它属于 hestia 自己的配置文件（由 hestia.config_path 指定，默认 configs/hestia.yaml），请整段挪过去；留在这里的话 Sheets 投影会静默保持禁用」。⇒ 部署级后果已由观察确认，非推断。",
+    "r2_content_check": "五文件在合入后的 master@96272b9 与交付 worktree 两处 sha256 逐字节一致；task/TASK-010-fix2 的 `git rev-list --count master..` = 0；master 上 grep `InConfig(\"hestia_sheets\")` 命中 1。",
+    "r2_suite": "master@96272b9 上实跑 go test ./... -count=1 ⇒ 退出码 0、65 ok、0 FAIL；internal/hestia 96.6%、internal/config 83.6%；gofmt 与 vet 零输出。"
+  },
+  "degradations": [
+    "未做变异测试：接手者不建 worktree、不改代码（Leader 指示），而变异必须作用在隔离副本上。代偿是断言的结构性核查——C8 两支用带 \\n 的整行 Contains（改文案任一字即红）、C9 用 NotContains(out, \"sheets:\")（一旦 nil 时误调即红）、顺序用 order 切片相等（投影跑在契约之前则 order 只有 [\"sheets\"] 而红）。",
+    "未复跑 code-simplifier（Leader 指示，见 decisions 第 2 条）；前版仅存 sha256、原文不可回捞，以合入版逐行审读代替 diff 审查。",
+    "gitnexus impact/detect-changes 索引版本不匹配不可用（同 001/002/007）；文本回退：grep 确认 ProjectSheets / HestiaSheets / buildSheetRows 三个新符号在仓库内无同名冲突，编译通过即证。",
+    "cmd/atlas 的 sheetsProjector 仍保留自己那层 recover（双层）。它在 TASK-009 的 writes 里，本任务动不了；无害但冗余，收敛与否待后续裁决。",
+    "本轮未做变异测试（接手轮的理由不再适用——这轮我有自己的 worktree），代偿是对最关键的那条判据做了**实测探针**：先打印投影调用时刻 pending/ 的真实内容确认侧车在场，再把探针换成两条非恒真断言。这比一次变异更直接地证明了「排除侧车」是载荷而非摆设。",
+    "🔴🔴 **合入后必须有人挪配置**：真实 configs/config.yaml 现在装不上（实测），源码仓库与运行时两份都要把 hestia_sheets 段挪到 configs/hestia.yaml。这是本条 fix_item 要的「装载期就红」的必然代价，但它是**人执行项**，本任务无法代劳。建议列为 sprint 收尾清单最高优先级——不做的话 atlas serve 起不来。",
+    "凭据落位的三条出路仍未选定（CONTRACTS `## Sprint M2b-2` 未决项）。本轮只让「填错位置」变响，没有回答「正确位置在部署流程里怎么活下来」——configs/hestia.yaml 进 git 且不在 rsync 排除表里，运行时那份每次部署仍会被源树覆盖。"
+  ],
+  "merged_into": "96272b9",
+  "commits": [
+    "3bf5372c59416e96bbe612310de56b3d3dcf17af feat(TASK-010): 首轮实现（作者 dev-m2b-a，dev-m2b-c 接手核验）",
+    "148e7ff206272f6666993810fe0b659d24d12764 fix(TASK-010): QA 返工第 1 轮——recover 上移、period 读侧报错、M11 守卫、glob 排除侧车",
+    "f3524dfe472f7e873372dc624af7489b26c8abdd refactor(TASK-010): code-simplifier —— 计数就地累加、C4 注释归位",
+    "ec24cbbf5b63f6b197fc915f470a09bcb5a27967 fix(TASK-010): CRITICAL-4——凭据填错位置从「零反馈」变成装载期就红"
+  ]
+}

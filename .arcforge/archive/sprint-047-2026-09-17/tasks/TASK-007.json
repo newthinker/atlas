@@ -1,0 +1,77 @@
+{
+  "id": "TASK-007",
+  "title": "push 编排与 dry-run：读表头 → diff → 提交；`Options.Apply=false` 时**零写请求**由 httptest 他证",
+  "description": "对应需求文档 **TASK-007**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-007」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-007} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n🔴 需求原文：「第 5 步（dry-run 判断）必须在第 6、7 步之前，且中间不能有任何写调用」。这是判据三的实现点。\n\n**Leader 订正（reviewer 🔴）**：签名补 `wantLabels []string`；补 `TestPushRejectsUnknownLabel`；删掉凭空的「AJ 拒绝或过滤」（C6 由 35 列结构性达成）。",
+  "module": "hestia-sheets",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/hestia/sheets/push.go",
+    "internal/hestia/sheets/push_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-005",
+    "TASK-006"
+  ],
+  "packages": [
+    "./internal/hestia/sheets"
+  ],
+  "writes": [
+    "./internal/hestia/sheets/push.go",
+    "./internal/hestia/sheets/push_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`Options{Apply, CreateSheets bool}`、`Result{Changes []Change; MissingTabs []string; WillWrite, Same, AbsentInDB int}`；`func Push(ctx, c *Client, rows []Row, wantLabels []string, opts Options) (Result, error)`——签名**无 `*Store`/`*sql.DB`**（判据二）。年度表名约定 `fmt.Sprintf(\"%d年\", Year)`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**判据三**：`Apply=false` ⇒ httptest 记录的**全部**请求方法为 `GET`（逐条 `require.Truef(strings.HasPrefix(m, \"GET \"))`），且 `res.WillWrite > 0`（夹具必须造出待写格）。第 5 步 dry-run 判断在第 6/7 步之前、中间无任何写调用。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`Apply=true` ⇒ 写请求里 `len(Data)` **恰好等于** `res.WillWrite`；不变量 `WillWrite+Same+AbsentInDB == len(rows)×len(wantLabels)`。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [
+      {
+        "desc": "🔴 `TestPushRejectsUnknownLabel`：表头缺任一 `wantLabels` 标签 ⇒ `Push` 返回 error **且 `writeBodies(rec)` 为空**（C3 在编排层兑现，第 3 步）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "缺年度表且 `CreateSheets=false` ⇒ error 文案**同时含**缺的表名（`2019年`）与 `--create-sheets`，`MissingTabs` 列全，**且一个写请求都没发**。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**写口守卫登记**：本任务新增的导出函数/方法让 `TestPackageExposesNoWriteFunctions` 先红，在 `store_test.go` 的 `want` 里登记后转绿；并按需求原文在守卫文件追加「为什么名单里多了 <符号>」注释段（每个新符号一句它为什么不是写口）。红的原始输出贴 discovery `verification.red_phase`。 新符号：`sheets.Push`。`go test ./internal/hestia/... -count=1` 全绿、`gofmt`/`go vet` 零输出。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。 **不得放松 GET-only 断言**。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:32Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-m2b-a",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "e0f4f8b4fdca4575d7b1bd1010126e85c69d8697",
+    "discovery_sha256": "39f6417935a2206d6509a86cca5aad8cc824552385a22c2d74603a93c712beb0",
+    "at": "2026-09-16T15:43:23Z"
+  },
+  "verifier": "test-m2b-a"
+}

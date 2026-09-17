@@ -1,0 +1,104 @@
+{
+  "task_id": "TASK-008",
+  "base": "e0f4f8b4fdca4575d7b1bd1010126e85c69d8697",
+  "branch": "task/TASK-008",
+  "commit": "891a95f98a3953efffcdcda8ea2d04d5e69e6016",
+  "written_by": "dev-m2b-c",
+  "written_at": "2026-09-17T05:30:00Z",
+  "provenance": "代码由 dev-m2b-b 编写并提交 b119a5a51c6ddac5a7c86128e797aada80e5691b；该实例因账号 Fable 5.1 额度耗尽在 code-simplifier 子代理批次中中断，Leader 按 AD-21 改派（assignment_epoch 1→2）；dev-m2b-c 接手：逐条核 DoD、重跑测试与全仓回归、未改一行代码、未再跑 code-simplifier。⚠️ 时间线有一处值得验证者知道：dev-m2b-b 的 pre-simplifier 快照落于本地 00:02，而该 commit 的 author/committer 时间均为本地 07:47（晚 7h45m），四文件中 store_test.go 与快照 sha256 一致、client.go / push.go / push_test.go 三项不一致——即快照之后这三个文件还被改过（simplifier 那一轮的改动，或提交前的收尾）。前版原文不可回捞（git 里只有 b119a5a 一个 commit 触碰这四个文件），故以合入版逐行审读代替 diff 审查。本 discovery 的全部测试数字由 dev-m2b-c 在 master@3770e9482129981cd7a0608e55fadd2c090203ed 上实跑。 ｜ **QA review_fix 第 1 轮（2026-09-17）**：本任务原 owner 是 dev-m2b-b（已停机），Leader 改派给 dev-m2b-c（epoch 2）。🔴 **四条 fix_items 里只有 [3] 需要做**——[0][1][2] 在 **TASK-006 的返工提交 5af1701** 里已经做掉了（两个任务的 writes 都含 push_test.go，而我做 006 时读到的 fix_items 覆盖了同一批问题）。这不是推断，是内容判据在 master 上逐条查的，见 verification.already_done_in_006。本轮只做 [3]。code-simplifier 在提交之后跑，改动单独作 891a95f。全部自证数字在最后一次改动之后、于合入后的 master@042c739 上统一重采。",
+  "key_findings": [
+    "CreateYearTab 把四步放进**一次** spreadsheets:batchUpdate（CreateYearTab 定义在 client.go:178，四步请求字面量在 client.go:208-227）：① DuplicateSheet ② UpdateSheetProperties 改 title ③ UpdateCells 改 A1 标题 ④ UpdateSheetProperties 改 index。API 对 batchUpdate 原子生效，所以「任一步失败整批不生效」不靠调用方补偿。",
+    "新表 sheetId 由本方指定为「现有最大 id + 1」，②③④ 才能在同一批里引用它——否则要等 ① 的响应回来拿到 API 分配的 id，四步就拆不进一次请求了。",
+    "index 0 必须走 ForceSendFields：SheetProperties.Index 带 omitempty，0 会被吞掉，「排最前」就变成「不改 index」。TestCreateYearTabSendsIndexZero 专钉这一点。",
+    "Tabs 被重构为 sheetProps 之上的薄封装，Fields 由 `sheets.properties.title` 换成 `sheets.properties(sheetId,title)`——CreateYearTab 要 sheetId，而 Tabs 与它共用同一次 GET，不多发一次请求。",
+    "标题替换是「有年份就换年份、没年份就拼前缀」：titleYear 正则 `^\\s*\\d{4}\\s*年` 命中则 ReplaceAll，不命中（含空标题）则拼成 `<year> 年 · <原标题>`。TestCreateYearTabDoesAllFourSteps 用 NotContains(\"2024 年 ·\") 反向钉住模板年份确实被替换掉了。",
+    "push 侧 index 算法在 createYearTabs（push.go:51-71）：order 从现有表序克隆，每建一张就 slices.Insert 进本地表序——多张缺表连建时，后一张的 index 才把前一张算进去。模板常量 templateYearTab = \"2024年\"，刻意不叫 templateTab 以免与 CreateYearTab 的同名形参混淆。",
+    "第 6 步建完表后**补做第 3、4 步再 tally 一次**：新表录入区全空 ⇒ 它的行全是 WillWrite。tally 每次从 res.Changes 全量重算三类计数，所以可以原样再调一次而不会重复计数。",
+    "007 的挂点占位测试 TestPushCreateSheetsHookRunsBeforeWrite（断言 error 含 \"TASK-008\"）被本任务删除，由真实接线测试 TestPushCreatesMissingTabsBeforeWriting 替换——占位挂点 createTabs 已被真实的 createYearTabs 取代，那条断言按设计必然失效。TASK-007 的 discovery 提到过该测试名 1 次；007 已是 verified，其 verification.md 未引用该测试名。",
+    "🔴 **fix_items 的重叠是任务边界造成的，不是谁做错了**：TASK-006 与 TASK-008 的 writes 都含 `internal/hestia/sheets/push_test.go`。QA 把同一批问题分别写进了两个任务的 fix_items，而我先做 006、顺手把它们一并做在 006 分支上。⇒ **同一文件被两个任务共同声明时，fix_items 会出现跨任务重复**；处理办法是做第二个任务前先用内容判据查一遍 master，而不是照单重做。",
+    "本轮补的六个分支**不是覆盖率填空**：真实世界最高频的失败恰是读（403 权限没给对、400 Unable to parse range、404 表被改名），而它们全落在这几行上。一条都没走过，意味着「读失败时会不会往下写」此前从未被验证过——所以每条用例都同时断言「一个写请求都不许发」，那才是这些分支要守的性质。",
+    "`createYearTabs` 的「非年度表名」分支经 `Push` 到不了（`missing` 由 `tabName(r.Year)` 生成，恒为 `NNNN年`），只能直接调包内函数测。它守的是「将来有人换了 missing 的来源」——那时这行是唯一拦截点。",
+    "🔴 **simplifier 逮到我一处会静默失效的重复**：我在新测试里手写了两个路径字面量，而文件顶部 const 块（push_test.go:35-36）早有同值的 `pathHeader26` / `pathEntry26`。手写那份若与夹具表名脱钩，`failPath` 注入会**注不进去** ⇒ 请求不再 4xx ⇒ `Push` 不再报错 ⇒ **用例仍然绿，只是绿的理由变了**。这类重复的危害不是难看，是它坏掉时不出声。"
+  ],
+  "decisions": [
+    {
+      "decision": "接手不重写：逐条核 DoD 通过即写 discovery 转 dev_done，files_modified 记原作者的四文件",
+      "rationale": "原作者代码已合入 master 且 DoD 五条逐条可证。接手者的正确交付是可核查的核验证据（四文件三方 sha256 一致、守卫名单两把尺互验 51/51、9 个相关测试实跑全绿、全仓 65 ok/0 FAIL），不是新 diff。"
+    },
+    {
+      "decision": "code-simplifier 由原作者跑过，本次接手不再跑",
+      "rationale": "Leader 指示：dev-m2b-a / dev-m2b-b 都是挂在 simplifier 的子代理批次里，重跑即重复那次中断。前版仅存 sha256 无原文，故以合入版逐行审读代替 diff 审查——已逐行读过四文件的全部 411 行新增，无冗余抽象、无未使用符号；gofmt/vet 零输出佐证格式层无残留。"
+    },
+    {
+      "decision": "DoD error_handling「duplicateSheet 4xx ⇒ 后续三步不做」判为满足，且实现比字面更强",
+      "rationale": "字面读法预设四步是四个请求、失败后要靠调用方跳过后三个。实现把四步放进一次 batchUpdate，4xx 时整批不生效——后三步不是「被跳过」而是「不可能单独生效」。TestCreateYearTabStopsWhenBatchUpdateFails 用 require.Len(writeBodies(rec), 1) 钉住只发过这一个写请求，正是这个更强性质的可观测形式。验证者按字面找「三个被跳过的请求」会找不到，这不是缺口。"
+    },
+    {
+      "decision": "boundary 的「Apply=false 即使缺表也不建表」沿用 007 既有测试 TestPushDryRunReportsMissingTabsWithCreateFlag 复跑，不新增用例",
+      "rationale": "该测试末尾就是 requireOnlyGETs（push_test.go:175），断言服务端收到的每个请求都是 GET——建表是 POST，一旦第 6 步跑到 dry-run 之前它必红。requireOnlyGETs 在本文件有 2 处调用点（125、175；grep 命中 4 行含注释行 90 与定义行 92——数调用点要按调用点数，不是 grep 行数）。"
+    },
+    {
+      "decision": "[0][1][2] 不重做，改为用内容判据证明它们已在 master 上",
+      "rationale": "照单重做会产生与 5af1701 冲突的第二份实现，或者更糟——写出看似新增实则重复的测试。证据是可复核的：恒真断言 `duplicateSheet 失败后不许再发任何写请求` 的 grep 计数为 **0**（已替换）；`TestPushStopsWhenNewTabDiffFails`、`TestCreateYearTabDerivesNewIDFromMaxNotTemplate`、`TestPushPlacesTwoNewTabsCumulatively`、`newTestClientFailPath` 在 master 上全部在场。"
+    },
+    {
+      "decision": "关于 [2] 的 N7：QA 描述的变异与我在 006 轮防的不是同一个，但同一条断言两个都杀得掉",
+      "rationale": "fix_items[2] 说的是「新表 sheetId 用 maxID 而非 maxID+1」，我 006 轮防的是「用 tplID+1 而非 maxID+1」。我的夹具（模板 777、其余 10 / 9000）**既让模板不是最大值、又断言精确值 `\"newSheetId\":9001`**：用 maxID 得 9000、用 tplID+1 得 778，两者都不等于 9001。⚠️ **第一种在 006 轮做过消融实测（KILLED，只红这一条）；第二种是同一条断言的推论，未单独跑消融**——这个区别如实记下，别把推论当实测。"
+    },
+    {
+      "decision": "`TestPushPropagatesWriteCellsFailure` 带前置锚点 `require.Positive(res.WillWrite)`",
+      "rationale": "没有它，一个「一格都不写」的实现会让这条用例平凡为真——`WriteCells` 根本不会被调到，于是「它失败了」这件事无从发生而用例照样绿。"
+    },
+    {
+      "decision": "code-simplifier 的改动单独作 891a95f 提交",
+      "rationale": "见 key_findings 的最后一条。⚠️ 子代理回复只有「No action.」而 sha 比对显示它改了文件（a09118f2→375028d8）——以 git diff 为准，本 sprint 第 5 例回复与实际不符（只有 TASK-006 那轮相符）。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/sheets/push_test.go（返工 +92/-0：7 个新测试 + pathWriteCells 常量；simplifier 轮另有 2/2 的常量复用）",
+    "（[0][1][2] 所需的 client.go / client_test.go / push_test.go 改动在 TASK-006 的 5af1701 里，本任务未重复改动；client.go / push.go / store_test.go 本轮一行未动）"
+  ],
+  "interfaces_exposed": [
+    "sheets.Client.CreateYearTab(ctx context.Context, templateTab, newTab string, year int, index int) error —— 一次 batchUpdate 完成复制模板/改名/改表内标题/按年序排位。模板不存在 ⇒ 返回 `hestia sheets: 模板表 %q 不存在，无法建 %q`，一个写请求都不发。已登记进写口守卫名单（第 51 项）。",
+    "包内未导出：templateYearTab = \"2024年\"（建新年度表复制的模板）、tabYear(name string) (int, bool)（从「2021年」取年份）、createYearTabs(ctx, c, existing, missing)（按年序逐张建）、diffTab / tally（Push 内部抽取，新表补做 3/4 步复用）。",
+    "行为变更（对 TASK-009 的 CLI 与 TASK-010 的 ingest 投影同时生效）：Push 在 Apply=true && CreateSheets=true 且有缺表时，不再返回「尚未实现」错误，而是真建表并把新表的行一并写入。Result.WillWrite 会包含新表的行。"
+  ],
+  "verification": {
+    "red_phase": {
+      "step_undefined（原作者 dev-m2b-b 留痕 scratchpad/dev-m2b-b-TASK-008-red1.txt）": "# github.com/newthinker/atlas/internal/hestia/sheets [github.com/newthinker/atlas/internal/hestia/sheets.test]\ninternal/hestia/sheets/push_test.go:292:23: c.CreateYearTab undefined (type *Client has no field or method CreateYearTab)\ninternal/hestia/sheets/push_test.go:309:23: c.CreateYearTab undefined (type *Client has no field or method CreateYearTab)\ninternal/hestia/sheets/push_test.go:316:11: c.CreateYearTab undefined (type *Client has no field or method CreateYearTab)\ninternal/hestia/sheets/push_test.go:325:11: c.CreateYearTab undefined (type *Client has no field or method CreateYearTab)\nFAIL\tgithub.com/newthinker/atlas/internal/hestia/sheets [build failed]\nFAIL",
+      "guard_red（原作者留痕 scratchpad/dev-m2b-b-TASK-008-red2-guard.txt，摘要）": "--- PASS: TestStoreExposesNoWriteMethods (0.00s)\n\t+ (string) (len=27) \"sheets.Client.CreateYearTab\",\n--- FAIL: TestPackageExposesNoWriteFunctions (0.01s)\nFAIL\tgithub.com/newthinker/atlas/internal/hestia\t0.608s\nFAIL\n（守卫先红、登记后转绿，符合 non_functional[0] 的要求）"
+    },
+    "content_check": "内容判据而非拓扑推断：client.go / push.go / push_test.go / store_test.go 四文件在 commit b119a5a、HEAD 3770e948、当前工作树三处 sha256 逐字节一致（f0005847… / d15fbc37… / e7ab1aae… / f489c86b…）；git merge-base --is-ancestor b119a5a HEAD 亦为真。工作树中已修改或未跟踪的 .go 文件数为 0。",
+    "guard_check": "store_test.go:422 的 want 名单用两把独立的尺各算一遍：字符串字面量计数 = 51、逗号数+1 = 51，两者一致；items == sorted(items) 为真；\"sheets.Client.CreateYearTab\" 在第 40 位（0-based），前后邻居是 \"WriteHistory\" 与 \"sheets.Client.ReadEntryArea\"，符合字节序。断言文案用 len(want) 取数，不会与名单长度脱钩。",
+    "green": "dev-m2b-c 实跑 go test ./internal/hestia/sheets/ -count=1 -v -run 'TestCreateYearTab|TestPushCreate|TestPushPlaces|TestPushDryRun' ⇒ 9/9 PASS：TestPushDryRunSendsNoWriteRequest、TestPushDryRunReportsMissingTabsWithCreateFlag（007 既有，复跑仍绿）、TestCreateYearTabDoesAllFourSteps、TestCreateYearTabSendsIndexZero、TestCreateYearTabErrorsWhenTemplateMissing、TestCreateYearTabStopsWhenBatchUpdateFails、TestPushCreatesMissingTabsBeforeWriting、TestPushPlacesNewYearTabInOrder、TestPushCreateSheetsWithoutMissingTabsDuplicatesNothing。守卫 go test ./internal/hestia/ -run 'TestPackageExposesNoWriteFunctions|TestStoreExposesNoWriteMethods' ⇒ 2/2 PASS。",
+    "suite": "dev-m2b-c 实跑 go test ./internal/hestia/... -count=1 -cover ⇒ internal/hestia ok 96.6%、internal/hestia/sheets ok 89.1%；gofmt -l internal/hestia/ 空输出；go vet ./internal/hestia/... 退出码 0 且无输出。",
+    "regression": "dev-m2b-c 实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 个 ok、0 个 FAIL（留痕 scratchpad/dev-m2b-c-master-full.txt）。",
+    "scope": "git show --numstat b119a5a 恰为 writes 四文件（client.go 112/6、push.go 93/30、push_test.go 200/14、store_test.go 6/1，四行即全部输出），无越界文件、go.mod 未被触碰。",
+    "reproduce": "git worktree add --detach /tmp/x-task008 3770e9482129981cd7a0608e55fadd2c090203ed && cd /tmp/x-task008 && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -cover",
+    "already_done_in_006": {
+      "查法": "在合入后的 master 上直接 grep，不是读 006 的交付报告",
+      "恒真断言 `duplicateSheet 失败后不许再发任何写请求`": "grep 计数 **0**（已被可区分的断言替换）",
+      "push.go:177-179 的守卫": "TestPushStopsWhenNewTabDiffFails 在场",
+      "N7": "TestCreateYearTabDerivesNewIDFromMaxNotTemplate 在场",
+      "N10": "TestPushPlacesTwoNewTabsCumulatively 在场",
+      "按路径注入 4xx 的能力": "newTestClientFailPath 在场"
+    },
+    "rework_coverage": "**push.go 六个函数全部 100.0%**（tabName / tabYear / createYearTabs / diffTab / tally / Push），覆盖率 profile 里 push.go 的**未覆盖块数 = 0**；internal/hestia/sheets 包覆盖率 91.0% → **94.3%**。",
+    "rework_content_check": "push_test.go 在合入后的 master@042c739 与交付 worktree 两处 sha256 逐字节一致（375028d8…）；task/TASK-008-fix 的 `git rev-list --count master..` = 0；891a95f 对 HEAD 为祖先。",
+    "rework_suite": "master@042c739 上实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 ok、0 FAIL；gofmt -l internal/hestia/sheets/ 0 行；go vet ./internal/hestia/... 0 行。",
+    "rework_scope": "git diff --numstat b53708f..042c739 -- internal/hestia 恰为 **92/0 一个文件**（push_test.go），一行即全部输出；client.go / push.go / store_test.go 虽在 writes 内但本轮未动（writes 是「可写」不是「必写」）。",
+    "assertion_delta": "simplifier 轮：require/assert 调用数 95 → 95、Test 函数数 22、删除的注释行 0、push.go 覆盖率未动。"
+  },
+  "degradations": [
+    "未做变异测试：接手者不建 worktree、不改代码（Leader 指示），而变异必须作用在隔离副本上。代偿是断言的结构性核查——四步断言各带独立 needle（duplicateSheet / 2021年 / 2021 年 · / \"index\":3，漏任一步即红）、顺序用 require.Less(iDup, iWrite) 而非「两者都存在」、不缺表用 Equal(0, count) 而非 NotContains、4xx 用 require.Len(writeBodies, 1) 钉住请求条数。",
+    "未复跑 code-simplifier（Leader 指示，见 decisions 第 2 条）；且前版原文不可回捞，见 provenance 记的时间线差异。",
+    "gitnexus impact/detect-changes 索引版本不匹配不可用（同 001/002/007/010）；文本回退：grep 确认 CreateYearTab / createYearTabs / tabYear / diffTab / tally / templateYearTab / titleYear / yearTabPattern 在仓库内无同名冲突，编译通过即证。",
+    "本轮未做变异测试：新增的七条都是 error 传播分支，其反面（删掉 `return err`）会让编译器直接报「变量未使用」或让后续步骤在 nil 上崩，消融信号与正常红难以区分，收益低于 TASK-006 轮那种结构性改动。代偿是每条都配了「一个写请求都不许发」的正向断言，而不是只断言「返回了错误」。",
+    "[2] 的第二种变异（maxID 而非 maxID+1）只做了推论、未单独跑消融，见 decisions。"
+  ],
+  "commits": [
+    "ba6c589509bc26704a51c77e0b6daba8a5febfe2 test(TASK-008): 补齐 push.go 全部 error 传播分支",
+    "891a95f98a3953efffcdcda8ea2d04d5e69e6016 refactor(TASK-008): code-simplifier —— 两处路径改用已有常量"
+  ],
+  "merged_into": "042c739"
+}

@@ -1,0 +1,73 @@
+{
+  "id": "TASK-002",
+  "title": "`Store.AllPeriods`：只读列全部权威期次 + `PeriodKey` 类型 + 两条写口白名单登记",
+  "description": "对应需求文档 **TASK-002**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-002」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-002} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。",
+  "module": "hestia-store",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/hestia/store.go",
+    "internal/hestia/types.go",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/store.go",
+    "./internal/hestia/types.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`type PeriodKey struct{ Period, PeriodType, PublishedAt string }`（`PublishedAt` 为 `YYYY-MM-DD`）；`func (s *Store) AllPeriods(ctx) ([]PeriodKey, error)` 只读 **`v_hestia_current` 视图**（验证者 grep SQL），按需求原文夹具返回的切片与 `require.Equal` 期望**逐项相等含顺序**。不另建一套建库辅助，复用既有测试夹具。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "两条守卫（reflect 版 `TestStoreExposesNoWriteMethods` 与 AST 版）实现后**都红**、登记 `AllPeriods` 后**都绿**，`want` 项数由 `len(want)` 生成不手写；并在守卫文件追加「为什么名单里多了 `Store.AllPeriods`」注释段（需求 Step 5）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "空视图 ⇒ 返回空切片且 `err == nil`；顺序由 SQL `ORDER BY` 明确，不依赖插入序。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "（补充，需求未要求）`ctx` 已取消 ⇒ 返回 `ctx.Err()` 包裹的错误，不返回半截结果。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**C2**：`AllPeriods` 只暴露纯数据；不引入对 `sheets` 子包的 import。`go test ./internal/hestia/ -count=1` 全绿、`gofmt`/`go vet` 零输出。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:31Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-m2b-b",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "79878c79339f8ea2849948152bd6d082c2c3c63a",
+    "discovery_sha256": "3abc3f196d7f8e7a79e685cf57591a287fdedaadde18e9b42d798921c6b5bef9",
+    "at": "2026-09-16T11:23:57Z"
+  },
+  "verifier": "test-m2b-a"
+}

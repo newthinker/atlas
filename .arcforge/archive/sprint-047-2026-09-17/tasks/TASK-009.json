@@ -1,0 +1,108 @@
+{
+  "id": "TASK-009",
+  "title": "CLI 子命令 `atlas hestia sheets push`：flag 互斥校验、默认 dry-run、三类计数分开排版",
+  "description": "对应需求文档 **TASK-009**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-009」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-009} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n**AD-M2b-8**：spec §10 判据四的基线数字（1282/34/819）**不进本 DoD**——它随真表与库状态漂移。本任务只验三类计数分开显示；具体数值留给 TASK-012 人执行时核。\n\n**Leader 裁决（reviewer 🔴）**：① 删掉初稿凭空的「凭据留空退出非零」——与需求 `TestSheetsPushDefaultsToDryRun` 冲突；② **测试缝**：包级变量 `var newSheetsClient = sheets.NewClient`，测试覆盖为指向 httptest 的 client；排版抽成纯函数 `formatResult(sheets.Result) string`；③ 承接 010 挪来的接线：`runHestiaIngest` 里凭据非空时建 client 并填 `deps.ProjectSheets`；④ `--period/--period-type` 给定时**只推那一期**（过滤 `BuildSheetRows` 结果），需求未定、Leader 定。",
+  "module": "atlas-cli",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/hestia_sheets.go",
+    "cmd/atlas/hestia_sheets_test.go",
+    "cmd/atlas/hestia.go"
+  ],
+  "dependencies": [
+    "TASK-010"
+  ],
+  "wave": 9,
+  "context_from": [
+    "TASK-004",
+    "TASK-007",
+    "TASK-010"
+  ],
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/hestia_sheets.go",
+    "./cmd/atlas/hestia_sheets_test.go",
+    "./cmd/atlas/hestia.go",
+    "./cmd/atlas/hestia_test.go",
+    "./deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`sheets push` 挂在 `hestia` 下；flag `--all`/`--period`/`--period-type`/`--apply`/`--create-sheets`；**默认 dry-run**，末尾固定一句 `未写入任何内容；确认后加 --apply`；缺表时提示「将新建工作表」。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`formatResult` 三类计数**分开三行**各带数字（验证者直接对纯函数断言 `require.Contains` 三行）；`TestSheetsPushDefaultsToDryRun` 经 `newSheetsClient` 测试缝跑通 `push --all`，`NoError` 且输出含 `dry-run`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`runHestiaIngest`：`hestia_sheets.credentials_file` 非空 ⇒ 建 client 并填 `deps.ProjectSheets`（内部调 `BuildSheetRows`+`sheets.Push{Apply:true,CreateSheets:true}`）；留空 ⇒ `ProjectSheets` 保持 nil（C9）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "flag 校验在**开库与建客户端之前**：只给 `--period` ⇒ 错误含 `--period-type`；`--all` 与 `--period` 同给 ⇒ 含 `互斥`；都不给 ⇒ 含 `--period`（这些测试在无库环境也能跑）。`--period/--period-type` 给定 ⇒ 只推该期。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "CLI 里 `credentials_file` 留空 ⇒ 打印 `hestia_sheets 未配置（credentials_file 留空）` 并退出 **0**（能力禁用不是错误，与 ingest 侧 C9 语义一致；Leader 裁决）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "🔴 **投影 panic 不得打断整轮 ingest**（010 验证者实测：`ProjectSheets` 的 panic 会穿透 `Ingest`，与 C8「投影失败不阻断入库」的意图冲突；装配方是本任务，用的是真实第三方 client）。`runHestiaIngest` 填入 `deps.ProjectSheets` 时，闭包内必须 `defer recover()` 把 panic 转成 error 返回（**不是吞掉**），使其走 C8 既有的「只打印不返回」路径。测试：注入一个必 panic 的 `sheets.Push` 替身（经 `newSheetsClient` 测试缝），断言 `Ingest` 返回 nil、`runs[0].Outcome==\"ingested\"`、stdout 含 `sheets: 投影失败（不影响入库）:` 那一行、且进程未崩。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test ./cmd/atlas/ -count=1` 全绿、`gofmt`/`go vet` 零输出；`cmd/atlas` 覆盖率不低于门禁门槛（PENDING #10 记过 `-func` 对 cobra 匿名函数偏高，以门禁实际输出为准）。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:32Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m2b-c",
+  "questions": [
+    {
+      "q": "请 merge 第二个 commit 121764cdae8a4e543b60e22a947fb502c6ebbe53（refactor(TASK-009)，code-simplifier 产物，只动 cmd/atlas/hestia_sheets_test.go，34/32）。第一个 a2d0267 已由你 merge 成 fbbe01b。",
+      "asked_at": "2026-09-17T01:05:00Z",
+      "answer": "已 merge：master 477664a5651449490ddc602c090501bfd2ab9ead；拓扑与内容两个判据均确认（merge-base --is-ancestor 为真，且 cmd/atlas/hestia_sheets_test.go 在 master 与 worktree 的 sha256 同为 388ed02a…）。由 dev-m2b-c 于 2026-09-17T01:1xZ 核实后代 Leader 记录。"
+    },
+    {
+      "q": "请给 TASK-009 定 coverage_floor。门禁口径 cmd/atlas 覆盖率 master 基线 76.8%、我的分支 78.0%，dev_minimum=80 会 BLOCKED；缺口在本任务够不着的历史代码里。先例：sprint-041 的 TASK-007/TASK-010 同为 ./cmd/atlas，均设 \"75\"。我建议 77。数值须由 Leader 定——被门禁拦住的人自己调门槛，闸就不成立。",
+      "asked_at": "2026-09-17T01:05:00Z",
+      "answer": "Leader 裁决 @00:4xZ：coverage_floor=77。理由两条边界——下界须严格高于 master 现状 76.8%（否则这道闸对拉低覆盖率的交付不设防，故 75 不取），上界不贴着本次的 78.0%（留 1 个百分点余量，免得 simplifier 动一行就卡死）。Leader 自跑复核得 master 76.8%、交付树 78.0%，与 dev 所报一致。"
+    }
+  ],
+  "coverage_floor": 77,
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "verify_baseline": {
+    "head": "b53708ff99d50db033ab44b2458ce75ba7e91e22",
+    "discovery_sha256": "2143eb1242322e31627681532826eb63d4a090525dc25c4aae33e38a60e856c6",
+    "at": "2026-09-17T03:53:48Z"
+  },
+  "verifier": "test-m2b-b",
+  "fix_items": [
+    "🔴 CRITICAL-3：deploy/launchd/com.newthinker.atlas.hestia-ingest.plist 的 EnvironmentVariables 需补代理键（参照同仓 crisis-daily.plist 的 http_proxy/https_proxy/no_proxy=127.0.0.1:7897 形态）。根因：sheets 走默认 transport（ProxyFromEnvironment），而该 plist 只有 PATH ⇒ launchd 下访问 Google API 大概率恒失败，且按 C8 只打印一行「投影失败（不影响入库）」，静默。已核实生产已安装的 plist 同样只有 PATH。",
+    "🔴 CRITICAL-3 配套：修改 cmd/atlas/hestia_test.go:477 的 TestHestiaPlistSetsNoProxyKeys。该守卫的理由已经过期——它的失败文案写「hestia 直连央行（NewPBOCFetcher 用空 Transport 绕开代理）」，而 fetch.go:33-34 自述「这一层必须在 client 里做，不能只靠 plist 的 no_proxy，那会把 Telegram 和 Sheets 一起放行」⇒ PBOC 直连由空 Transport{} 保证、与 plist 无关。补代理键不会破坏它想保护的东西，只会打红它自己。改为：断言 PBOC fetcher 仍用空 Transport（性质的真正载体），并允许 plist 设代理键。保留原有的肯定式锚点（NotEmpty + PATH 在场）与阳性对照。",
+    "CRITICAL-5 的 cmd 侧：sheetsProjector 每次调用都新建 Sheets client（读凭据 + JWT 交换）。把 client 提到闭包外只建一次（lazily-built 并复用），或在 IngestDeps 里存。",
+    "给 Sheets 调用加超时：sheets 包非测试文件里 WithTimeout|http.Client{ 命中 0。建议在 newSheetsClient 或调用点加 context.WithTimeout。",
+    "SUGGESTION（QA round1 第四节）：hestia_sheets_test.go:240-251 的 TestSheetsPushDefaultsToDryRun 用 t.TempDir() 空库 ⇒ WillWrite==0 ⇒ 空跑，循环只跑 1 次 GET。补 Greater(WillWrite,0) 护栏（同作者在 push_test.go:122 写过）。",
+    "SUGGESTION：hestia_sheets_test.go:289-293 全文件无一条明细行被整行 Equal，Contains(got,\"AF\") 是 2 字符子串。建议钉死整行。"
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 1
+}

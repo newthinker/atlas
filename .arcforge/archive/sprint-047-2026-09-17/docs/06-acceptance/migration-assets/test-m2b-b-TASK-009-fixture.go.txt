@@ -1,0 +1,388 @@
+package main
+
+// 验证者 test-m2b-b 自构夹具（TASK-009；不进交付，只在 worktree wt-m2b-v009 存在）。
+//
+// 重点打两处 Leader 点名要独立复核的地方：
+//   - X1/X2：闭包**不得重复调 BuildSheetRows**（DoD functional[2] 字面有误，Leader 已裁决）
+//   - X9/X10：filterRowsByPeriod 的行为边界（那两条 Atoi 分支从未进过 git，无原版可比对，
+//     所以复核方式是「当前实现在可达域内正确」+「假设的原分支不可达」两条，而不是 diff 对比）
+// 其余各条的判据一律比 dev 更严一档：三行计数用**逐行相等**而非 Contains、
+// 退出 0 用 `err == nil` 且断言 stdout 恰为那一句、panic 兜底补 runtime panic 与 panic(nil)。
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/hestia"
+	"github.com/newthinker/atlas/internal/hestia/sheets"
+)
+
+// vSentinelRows 是一批**库里不可能存在**的行（1999 年）：闭包若自己重算 BuildSheetRows，
+// 拿到的就不是这批，断言立刻红。
+func vSentinelRows() []sheets.Row {
+	return []sheets.Row{
+		{Year: 1999, Month: 3, Cells: []sheets.Cell{{Label: "哨兵", Value: 42.0}}},
+		{Year: 1999, Month: 4, Cells: []sheets.Cell{{Label: "哨兵", Value: 43.0}}},
+	}
+}
+
+// X1 —— DoD functional[2] 的正确读法（Leader 裁决 1/5）：闭包只做「建 client + Push」，
+// 入参 rows **原样**传给 Push，不得重算。
+//
+// 结构性佐证：闭包签名是 func(context.Context, []sheets.Row) error，**手上根本没有 *Store**，
+// 而 hestia.BuildSheetRows(ctx, st) 必须要一个 Store ⇒ 它在这里调不动。行为判据见断言。
+func TestX_ProjectorPassesRowsThroughUnchanged(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	gotRows, gotOpts := withCapturedPush(t)
+
+	proj := sheetsProjector(hestia.Config{
+		HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"},
+	})
+	require.NotNil(t, proj)
+
+	mine := vSentinelRows()
+	require.NoError(t, proj(context.Background(), mine))
+	require.Equal(t, mine, *gotRows, "闭包必须把入参原样交给 Push，不得自己重算 BuildSheetRows")
+	require.Equal(t, sheets.Options{Apply: true, CreateSheets: true}, *gotOpts,
+		"ingest 自动投影固定 Apply + CreateSheets（整结构体相等，不是逐字段 Contains）")
+}
+
+// X2 —— 同一判据走完整装配路径：hestiaIngestDeps 挂上的那个闭包也必须原样透传。
+// 只测 sheetsProjector 证明不了「它被接上了」。
+func TestX_IngestDepsProjectorIsTheWiredOne(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	gotRows, gotOpts := withCapturedPush(t)
+
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+	deps := hestiaIngestDeps(cfg, nil, nil, os.Stdout)
+	require.NotNil(t, deps.ProjectSheets, "凭据非空就必须挂上投影")
+
+	mine := vSentinelRows()
+	require.NoError(t, deps.ProjectSheets(context.Background(), mine))
+	require.Equal(t, mine, *gotRows)
+	require.Equal(t, sheets.Options{Apply: true, CreateSheets: true}, *gotOpts)
+}
+
+// X3 —— C9：凭据留空 ⇒ ProjectSheets 必须是**字面量 nil**，而不是「装了 nil 的函数值」。
+// ingest 侧唯一的判据就是 `d.ProjectSheets != nil`，一个非 nil 的空闭包会穿过去。
+func TestX_ProjectorNilIsLiteralNil(t *testing.T) {
+	require.Nil(t, sheetsProjector(hestia.Config{}))
+	require.Nil(t, sheetsProjector(hestia.Config{
+		HestiaSheets: hestia.HestiaSheets{CredentialsFile: "", SpreadsheetID: "sheet-id"},
+	}), "只填了 spreadsheet_id 仍是能力禁用")
+
+	deps := hestiaIngestDeps(hestia.Config{}, nil, nil, os.Stdout)
+	require.Nil(t, deps.ProjectSheets)
+	// ingest 侧的真实判据形式：这个比较必须为 false
+	require.False(t, deps.ProjectSheets != nil, "C9 靠的就是这个比较")
+}
+
+// X4 —— panic 兜底补三种 dev 未覆盖的形态：runtime panic、panic(nil)、非字符串 panic 值。
+func TestX_ProjectorRecoversAllPanicShapes(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+
+	t.Run("runtime panic（空指针解引用）", func(t *testing.T) {
+		stubSheetsPush(t, func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
+			var p *sheets.Result
+			return *p, nil // nil 解引用
+		})
+		err := sheetsProjector(cfg)(context.Background(), nil)
+		require.Error(t, err, "runtime panic 也必须转成 error")
+		require.Contains(t, err.Error(), "投影 panic")
+	})
+	t.Run("panic(nil)", func(t *testing.T) {
+		stubSheetsPush(t, func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
+			panic(nil)
+		})
+		err := sheetsProjector(cfg)(context.Background(), nil)
+		require.Error(t, err, "Go 1.21+ 的 panic(nil) 会被 recover 成 *runtime.PanicNilError，不得漏兜")
+	})
+	t.Run("panic 值是 error", func(t *testing.T) {
+		stubSheetsPush(t, func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
+			panic(fmt.Errorf("底层 client 崩了"))
+		})
+		err := sheetsProjector(cfg)(context.Background(), nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "底层 client 崩了", "原始 panic 值要留在错误里")
+	})
+}
+
+// X5 —— error_handling[1] 的端到端：Push panic ⇒ Ingest 返回 nil、outcome ingested、
+// 打的是 C8 那一行、进程未崩。验证者独立构造（不复用 dev 的用例体）。
+func TestX_PushPanicKeepsIngestGreen(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	stubSheetsPush(t, func(context.Context, *sheets.Client, []sheets.Row, []string, sheets.Options) (sheets.Result, error) {
+		panic("验证者注入：Push 炸了")
+	})
+
+	cfg := hestia.Config{
+		ConfigVersion: "test",
+		Storage:       hestia.StorageCfg{SnapshotDir: t.TempDir()},
+		Queue:         hestia.QueueCfg{Dir: t.TempDir()},
+		Discover:      hestia.DiscoverCfg{IndexURL: sheetsIndexURL, MaxPages: 3},
+		Thresholds:    hestia.DefaultThresholds(),
+		Signals:       hestia.DefaultSignals(),
+		HestiaSheets:  hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"},
+	}
+	st, err := hestia.NewStore(filepath.Join(t.TempDir(), "hestia.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	var out strings.Builder
+	deps := hestiaIngestDeps(cfg, st, nil, &out)
+	deps.Fetch = newSheetsFakeFetcher(t)
+
+	require.NoError(t, hestia.Ingest(context.Background(), deps), "投影 panic 不得让 ingest 返回错误")
+
+	runs, err := st.RecentRuns(context.Background(), 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.Equal(t, hestia.RunIngested, runs[0].Outcome)
+
+	// 比 dev 的 Contains 严一档：取出以 "sheets: " 开头的整行，断言它走的是 C8 投影失败支，
+	// 且原始 panic 值确实被带进了那一行（不是被吞成空错误）。
+	var hit []string
+	for _, ln := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(ln, "sheets: ") {
+			hit = append(hit, ln)
+		}
+	}
+	require.Len(t, hit, 1, "恰一行投影失败，不多不少")
+	require.True(t, strings.HasPrefix(hit[0], "sheets: 投影失败（不影响入库）: "), "走 C8 既有路径，文案一字不改")
+	require.Contains(t, hit[0], "投影 panic")
+	require.Contains(t, hit[0], "验证者注入：Push 炸了")
+}
+
+// X6 —— boundary[0]：flag 校验必须早于开库。用**指向不存在目录的配置**他证：
+// 校验若在开库之后，报的会是配置/开库错误而不是 flag 错误。
+func TestX_FlagValidationPrecedesStore(t *testing.T) {
+	withConfig(t, `
+storage:
+  db_path: /nonexistent-dir-xyz/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		needle string
+	}{
+		{"都不给", []string{"hestia", "sheets", "push"}, "--period"},
+		{"只给 period", []string{"hestia", "sheets", "push", "--period", "2025-12"}, "--period-type"},
+		{"all 与 period 同给", []string{"hestia", "sheets", "push", "--all", "--period", "2025-12"}, "互斥"},
+		{"period 格式非法", []string{"hestia", "sheets", "push", "--period", "2025-13", "--period-type", "monthly"}, "格式非法"},
+		{"period-type 非法", []string{"hestia", "sheets", "push", "--period", "2025-12", "--period-type", "weekly"}, "非法"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sheetsExec(t, tc.args...)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.needle)
+			// 关键：报的不能是开库错误——那说明校验跑晚了
+			require.NotContains(t, err.Error(), "nonexistent-dir-xyz",
+				"flag 校验必须早于开库，否则这里会是开库失败")
+		})
+	}
+}
+
+// X7 —— 成对的反向断言：flag 都合法时，配置/开库错误必须真的被带出来。
+// 少了这一条，一个「永远不开库」的实现也能让 X6 全绿。
+func TestX_ValidFlagsStillReachStore(t *testing.T) {
+	withConfig(t, `
+storage:
+  db_path: /nonexistent-dir-xyz/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	_, err := sheetsExec(t, "hestia", "sheets", "push", "--all")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "--period", "flag 都对，不该再报 flag 错")
+}
+
+// X8 —— error_handling[0]：凭据留空 ⇒ 打印固定一句、**退出 0**，且 stdout 只有那一句。
+func TestX_DisabledPrintsOneLineAndExitsZero(t *testing.T) {
+	sheetsCfg(t, "") // credentials_file 留空
+	out, err := sheetsExec(t, "hestia", "sheets", "push", "--all")
+	require.NoError(t, err, "能力禁用不是错误，退出码必须是 0")
+	require.Equal(t, "hestia_sheets 未配置（credentials_file 留空）\n", out,
+		"stdout 恰为那一句（逐字节），不多打别的")
+}
+
+// X9 —— Leader 第 9 条的独立复核（上）：filterRowsByPeriod 的行为边界表驱动。
+//
+// 那两条 strconv.Atoi 错误分支**从未进入 git**（`git log -S filterRowsByPeriod` 只有一个
+// commit，其中 Atoi 出现 0 次），所以没有原版可 diff。复核改成两问：
+//
+//	① 当前实现在**可达输入域**内是否正确 —— 下表前四行；
+//	② 假设的原分支是否真的不可达 —— 见 X10。
+func TestX_FilterRowsByPeriodBoundaries(t *testing.T) {
+	rows := sampleSheetRows() // 2025-06 / 2025-12 / 2026-06
+	for _, tc := range []struct {
+		period string
+		want   int
+		why    string
+	}{
+		{"2025-06", 1, "规范形态，命中一条"},
+		{"2025-12", 1, "同上"},
+		{"2026-06", 1, "同年月不同年要分得开"},
+		{"2025-07", 0, "库里没有这一期"},
+		{"2025-6", 0, "非补零形态不得放行——原实现的 Atoi 会把它当 6 月而命中，这里刻意不"},
+		{"2025-006", 0, "多一位不得放行"},
+		{"", 0, "空串匹配不上任何行（CLI 上不会走到这里，period=='' 时根本不调）"},
+		{"abcd-ef", 0, "乱码得空集，不 panic"},
+		{"20", 0, "短于 5 字节——原实现的 period[5:] 会 panic，当前实现只是得空集"},
+		{"2025-13", 0, "越界月份得空集"},
+	} {
+		t.Run(tc.period, func(t *testing.T) {
+			require.Lenf(t, filterRowsByPeriod(rows, tc.period), tc.want, tc.why)
+		})
+	}
+}
+
+// X10 —— Leader 第 9 条的独立复核（下）：被删掉的那两条 Atoi 错误分支确实不可达。
+//
+// 判据不是读代码，而是**对校验正则求值**：凡能通过 validateSheetsPushFlags 的 period，
+// 前 4 位与第 6-7 位都必是十进制数字 ⇒ strconv.Atoi 在两处都不可能失败 ⇒ 那两条
+// `if err != nil` 是死代码。下表左列是「若不设校验会出问题的输入」，逐个确认它们
+// 全部在校验阶段就被拒，根本到不了 filterRowsByPeriod。
+func TestX_DeletedAtoiBranchesAreUnreachable(t *testing.T) {
+	withConfig(t, `
+storage:
+  db_path: /nonexistent-dir-xyz/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	// 这些 period 一旦走到 Atoi 版实现，会分别触发「Atoi 失败」或「越界 panic」。
+	for _, bad := range []string{"abcd-ef", "20", "2025-6", "2025-13", "2025-00", "yyyy-mm", "2025_12"} {
+		t.Run(bad, func(t *testing.T) {
+			_, err := sheetsExec(t, "hestia", "sheets", "push", "--period", bad, "--period-type", "monthly")
+			require.Error(t, err, "%q 必须在 flag 校验阶段就被拒", bad)
+			require.Contains(t, err.Error(), "格式非法")
+			require.NotContains(t, err.Error(), "nonexistent-dir-xyz", "而且是在开库之前就被拒")
+		})
+	}
+	// 反向：合法形态必须放行到校验之后（否则上面那组是「全拒」而非「拒非法」）
+	_, err := sheetsExec(t, "hestia", "sheets", "push", "--period", "2025-12", "--period-type", "monthly")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "格式非法", "合法 period 不得被格式校验拦下")
+}
+
+// X11 —— functional[1]：formatResult 的三类计数**逐行相等**（DoD 点名让验证者对纯函数断言）。
+func TestX_FormatResultThreeCountLines(t *testing.T) {
+	res := sheets.Result{
+		WillWrite: 7, Same: 3, AbsentInDB: 5,
+		Changes: []sheets.Change{
+			{Sheet: "2025年", Row: 9, Col: 2, Label: "社融存量", Kind: sheets.WillWrite, Current: nil, Want: 462.06},
+			{Sheet: "2025年", Row: 9, Col: 3, Label: "M2余额", Kind: sheets.Same, Current: 340.29},
+			{Sheet: "2026年", Row: 4, Col: 2, Label: "社融存量", Kind: sheets.AbsentInDB},
+		},
+	}
+	got := formatResult(res)
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+
+	// 三类计数各自独占一行、各带数字；行数也单独一行。用「整行相等」而不是 Contains。
+	require.Contains(t, lines, "将写 7 格")
+	require.Contains(t, lines, "一致跳过 3 格")
+	require.Contains(t, lines, "库缺跳过 5 格")
+	require.Contains(t, lines, "2 行", "行数按 sheet/row 去重后是 2")
+	// 三类必须是**三行**，不得合并
+	var countLines int
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "将写 ") || strings.HasPrefix(ln, "一致跳过 ") || strings.HasPrefix(ln, "库缺跳过 ") {
+			countLines++
+		}
+	}
+	require.Equal(t, 3, countLines, "三类计数必须分开三行")
+
+	// 纯函数：同一输入连调两次结果逐字节相同
+	require.Equal(t, got, formatResult(res), "formatResult 必须是纯函数")
+
+	// 三种 Kind 各自的明细行都要报出类别
+	require.Contains(t, got, "将写")
+	require.Contains(t, got, "一致，跳过")
+	require.Contains(t, got, "库缺，保留表中现值")
+	require.Contains(t, got, "(空)", "表里没值要显示成 (空)，不是 <nil>")
+	require.NotContains(t, got, "<nil>")
+}
+
+// X12 —— 缺表提示只在 MissingTabs 非空时出现。
+func TestX_FormatResultMissingTabsLine(t *testing.T) {
+	withTabs := formatResult(sheets.Result{MissingTabs: []string{"2023年", "2025年"}})
+	require.Contains(t, withTabs, "将新建工作表: 2023年 2025年")
+	require.Contains(t, withTabs, "--create-sheets")
+
+	without := formatResult(sheets.Result{WillWrite: 1})
+	require.NotContains(t, without, "将新建工作表", "不缺表就不该有这句")
+}
+
+// X13 —— dry-run 末尾固定一句；--apply 时它必须消失（真写了还说「未写入任何内容」是最坏的假话）。
+func TestX_DryRunLinePresentThenAbsent(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	withCapturedPush(t)
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+
+	var dry strings.Builder
+	require.NoError(t, pushSheets(context.Background(), &dry, cfg, sampleSheetRows(), "", sheets.Options{Apply: false}))
+	require.Contains(t, dry.String(), "未写入任何内容；确认后加 --apply", "DoD 那句必须逐字出现")
+	last := strings.TrimRight(dry.String(), "\n")
+	require.True(t, strings.HasSuffix(last, "未写入任何内容；确认后加 --apply"), "而且在末尾")
+
+	var applied strings.Builder
+	require.NoError(t, pushSheets(context.Background(), &applied, cfg, sampleSheetRows(), "", sheets.Options{Apply: true}))
+	require.NotContains(t, applied.String(), "未写入任何内容", "--apply 时不得再说没写")
+}
+
+// X14 —— boundary[0] 后半句：--period 给定 ⇒ 只推该期（他证到 Push 收到的 rows）。
+func TestX_PeriodFilterReachesPush(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	gotRows, _ := withCapturedPush(t)
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+
+	var out strings.Builder
+	require.NoError(t, pushSheets(context.Background(), &out, cfg, sampleSheetRows(), "2025-12", sheets.Options{}))
+	require.Len(t, *gotRows, 1, "只推该期")
+	require.Equal(t, 2025, (*gotRows)[0].Year)
+	require.Equal(t, 12, (*gotRows)[0].Month)
+
+	// period 为空 ⇒ 全推
+	gotRows2, _ := withCapturedPush(t)
+	var out2 strings.Builder
+	require.NoError(t, pushSheets(context.Background(), &out2, cfg, sampleSheetRows(), "", sheets.Options{}))
+	require.Len(t, *gotRows2, 3, "不给 period 就是全推")
+}
+
+// X15 —— 命令树：从**根命令**按 hestia → sheets → push 找得到，且五个 flag 都在 push 上。
+func TestX_CommandTreeReachableFromRoot(t *testing.T) {
+	cur := rootCmd
+	for _, name := range []string{"hestia", "sheets", "push"} {
+		var next *cobra.Command
+		for _, c := range cur.Commands() {
+			if c.Name() == name {
+				next = c
+				break
+			}
+		}
+		require.NotNilf(t, next, "从根命令找不到子命令 %q——建了命令却忘了 AddCommand 时正是这样", name)
+		cur = next
+	}
+	require.NotNil(t, cur.RunE, "push 必须真的可执行")
+	for _, f := range []string{"all", "period", "period-type", "apply", "create-sheets"} {
+		require.NotNilf(t, cur.Flags().Lookup(f), "push 缺 flag --%s", f)
+	}
+	// --period-type 不得有默认值，也不得被标成无条件 required
+	require.Equal(t, "", cur.Flags().Lookup("period-type").DefValue,
+		"给了默认值，「只给 --period」就不再是错误，而那正是要拦的输入")
+}

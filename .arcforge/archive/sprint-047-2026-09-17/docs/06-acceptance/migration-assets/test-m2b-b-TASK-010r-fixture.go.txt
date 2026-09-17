@@ -1,0 +1,106 @@
+package hestia
+
+// 验证者 test-m2b-b 返工复验夹具（TASK-010 review_fix 第 1 轮；不进交付，只在 worktree wt-m2b-r010 存在）。
+//
+// 目的是把两个**存活的变异**钉死，以区分「实现有缺陷」与「实现正确但无守卫」：
+//   R6  periodYearMonth 去掉月份 1–12 范围检查 ⇒ 现有测试无一变红
+//   R7  assembleRows 忽略 buildRow 的 error   ⇒ 现有测试无一变红
+// 下面两组断言若能在原实现上全绿、在变异体上变红，就证明**实现是对的、缺的只是守卫**。
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// Y1 —— R6 的守卫：月份必须落在 1–12。
+//
+// 为什么要紧：`sheets.Row` 的行号是 `Month + entryRowOffset(3)`，录入区只有第 4–15 行
+// （`client.go` 的 entryFirstRow=4 / entryLastRow=15）。Month=13 ⇒ 第 16 行，**写到录入区之外**；
+// Month=0 ⇒ 第 3 行，那是表头。dev 的四个子例（"2025" / "2025-" / "" / "2025-XX"）
+// 没有一个是月份越界，所以这条检查目前无人守。
+func TestY_BuildRowRejectsOutOfRangeMonth(t *testing.T) {
+	for _, period := range []string{"2025-13", "2025-00", "2025-99"} {
+		t.Run(period, func(t *testing.T) {
+			_, err := buildRow(Observation{Meta: Meta{Period: period, PublishedAt: "2026-01-15"}})
+			require.Errorf(t, err, "%q 的月份越界，必须报错——否则行号 = Month+3 会落到录入区之外", period)
+			require.Contains(t, err.Error(), "hestia sheets: ")
+		})
+	}
+	// 反向：边界内的两端仍须通过，防止上一条被一个「永远报错」的实现满足。
+	for _, tc := range []struct {
+		period string
+		month  int
+	}{{"2025-01", 1}, {"2025-12", 12}} {
+		row, err := buildRow(Observation{Meta: Meta{Period: tc.period, PublishedAt: "2026-01-15"}})
+		require.NoError(t, err, "%q 是合法月份", tc.period)
+		require.Equal(t, tc.month, row.Month)
+	}
+}
+
+// Y2 —— R7 的守卫：buildRow 报错必须让**整批**停下。
+//
+// fix_items[2] 的原话是「宁可整批停下，也不要静默产出一行垃圾」。dev 的两条新测试
+// 只直接调 buildRow，验到「它返回 error」为止；而「整批停下」这个性质发生在
+// assembleRows 里那三行错误传播上——把它改成 `row, _ := buildRow(obs)` 之后
+// 现有测试无一变红。这条从 assembleRows 入口打，与同文件既有的
+// TestBuildSheetRowsErrorsWhenCurrentMissing 同形。
+func TestY_AssembleRowsStopsOnMalformedPeriod(t *testing.T) {
+	keys := []PeriodKey{
+		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
+		{Period: "2025-6", PeriodType: "monthly", PublishedAt: "2025-07-14"}, // 畸形：月份未补零
+	}
+	rows, err := assembleRows(context.Background(), keys,
+		func(_ context.Context, period, ptype string) (Observation, bool, error) {
+			return Observation{Meta: Meta{Period: period, PeriodType: ptype, PublishedAt: "2025-07-14"}}, true, nil
+		})
+	require.Error(t, err, "有一期 period 畸形 ⇒ 整批报错，不能静默产出前面那些行")
+	require.Contains(t, err.Error(), "hestia sheets: ")
+	require.Contains(t, err.Error(), "2025-6", "错误要说清是哪一期")
+	require.Nil(t, rows, "整批停下 ⇒ 不返回任何半成品行")
+}
+
+// Y3 —— 反向：全部 period 合法时 assembleRows 照常返回全部行。
+// 少了这一条，Y2 会被一个「永远报错」的实现满足。
+func TestY_AssembleRowsReturnsAllWhenWellFormed(t *testing.T) {
+	keys := []PeriodKey{
+		{Period: "2025-06", PeriodType: "monthly", PublishedAt: "2025-07-14"},
+		{Period: "2025-12", PeriodType: "annual", PublishedAt: "2026-01-15"},
+	}
+	rows, err := assembleRows(context.Background(), keys,
+		func(_ context.Context, period, ptype string) (Observation, bool, error) {
+			return Observation{Meta: Meta{Period: period, PeriodType: ptype, PublishedAt: "2025-07-14"}}, true, nil
+		})
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, 2025, rows[0].Year)
+	require.Equal(t, 6, rows[0].Month)
+	require.Equal(t, 12, rows[1].Month)
+}
+
+// Y4 —— periodYearMonth 的其余边界（记录实际行为，不判红）。
+// Atoi 接受符号前缀，所以 "2025-+1" 这种 2 字节月份会通过并得 Month=1。
+// 它在真实库里不可能出现（Meta.validate 的正则是 Save 时的闸），记在这里是为了
+// 让下一个改这段代码的人知道边界在哪。
+func TestY_PeriodYearMonthEdgeRecord(t *testing.T) {
+	for _, tc := range []struct {
+		period  string
+		wantErr bool
+		note    string
+	}{
+		{"2025-12", false, "规范形态"},
+		{"2025-1", true, "月份 1 位 ⇒ len!=2 拦住"},
+		{"202-12", true, "年份 3 位 ⇒ len!=4 拦住"},
+		{"2025-12-31", true, "Cut 后 m=\"12-31\" ⇒ len!=2 拦住"},
+		{"-025-12", true, "Cut 后 y=\"\" ⇒ len!=4 拦住"},
+		{"2025-+1", false, "⚠️ Atoi 接受符号前缀 ⇒ 通过，得 Month=1（库里不可达）"},
+	} {
+		_, _, err := periodYearMonth(tc.period)
+		if tc.wantErr {
+			require.Errorf(t, err, "%q（%s）应报错", tc.period, tc.note)
+		} else {
+			require.NoErrorf(t, err, "%q（%s）应通过", tc.period, tc.note)
+		}
+	}
+}

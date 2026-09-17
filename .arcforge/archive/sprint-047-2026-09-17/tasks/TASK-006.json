@@ -1,0 +1,107 @@
+{
+  "id": "TASK-006",
+  "title": "API 薄壳 + httptest：`NewClient` / `WithEndpoint` / 读表头 / 读现值 / batch 写，锁 `google.golang.org/api v0.250.0`",
+  "description": "对应需求文档 **TASK-006**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-006」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-006} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n🔴 **C1 是环境耦合约束（AD-M2b-5）**：`go get google.golang.org/api@v0.250.0` **必须带版本**。不带版本会拉 v0.251.0+，它要求 go ≥ 1.25，而 `go.mod` 是 1.24.4，本机 `GOSUMDB=off` 会让工具链自动下载失败。验证者独立 `grep` 核 `go.mod`，不信 dev 报的版本号。\n\n**Leader 订正（reviewer 🔴）**：依赖加 005（`WriteCells` 收 `[]Change`，需求自查 line 1957 承认）；`writes` 补 `sheets/testdata/fake-sa.json`（自造假密钥）与 `store_test.go`。⚠️ 需求 line 1335 的夹具 `Change{…, Value(462.06)}` 不是合法 Go 且 005 无 `Value` 字段——**按 005 定稿的 `Want` 写**。",
+  "module": "hestia-sheets",
+  "complexity": "high",
+  "estimated_files": [
+    "go.mod",
+    "internal/hestia/sheets/client.go",
+    "internal/hestia/sheets/client_test.go",
+    "internal/hestia/sheets/testdata/fake-sa.json",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-005"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-003",
+    "TASK-005"
+  ],
+  "packages": [
+    "./internal/hestia/sheets",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./go.mod",
+    "./go.sum",
+    "./internal/hestia/sheets/client.go",
+    "./internal/hestia/sheets/client_test.go",
+    "./internal/hestia/sheets/testdata/fake-sa.json",
+    "./internal/hestia/store_test.go",
+    "./internal/hestia/sheets/diff.go",
+    "./internal/hestia/sheets/diff_test.go",
+    "./internal/hestia/sheets/push.go",
+    "./internal/hestia/sheets/push_test.go",
+    "./cmd/atlas/hestia_sheets.go",
+    "./cmd/atlas/hestia_sheets_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`NewClient(ctx, credentialsFile, spreadsheetID string, opts ...Option) (*Client, error)`；`WithEndpoint(url) Option`；`Tabs(ctx)`；`ReadHeader` 读**第 3 行**；`ReadEntryArea` 读 **行 4–15、列 A–AI**（C6 读侧），返回 `[][]any`；`WriteCells(ctx, []Change)`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**C5 + C11**：对 httptest 记录的请求体 `json.Unmarshal`：`ValueInputOption==\"RAW\"`、`len(Data)==2`、`Data[0].Range==\"'2025年'!C9\"`、`Data[1].Range==\"'2025年'!T9\"`、🔴 `require.Len(rec.bodies, 1)`（**一次请求不是两次**）、`require.IsType(float64(0), Data[0].Values[0][0])`（值是 JSON 数字）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**C9**：`credentialsFile==\"\"` ⇒ `(nil, nil)`。range 的工作表名**无条件**用单引号包裹（`\"'%s'!%s%d\"`），列字母用 003 的 `ColumnLetter`。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "（补充，需求未要求）httptest 返 4xx/5xx ⇒ error 含状态码；凭据文件不存在 ⇒ error（与 C9 的 `(nil,nil)` 区分）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**C1**：`go.mod` 含字面行 `google.golang.org/api v0.250.0`（验证者 `grep` 核，不信 dev 报数），`go` 指令仍 `1.24.4`，`GOTOOLCHAIN=local go build ./...` 不触发下载。**C7**：`client.go` 不得出现空 `&http.Transport{}`。**写口守卫登记**：本任务新增的导出函数/方法让 `TestPackageExposesNoWriteFunctions` 先红，在 `store_test.go` 的 `want` 里登记后转绿；并按需求原文在守卫文件追加「为什么名单里多了 <符号>」注释段（每个新符号一句它为什么不是写口）。红的原始输出贴 discovery `verification.red_phase`。 新符号：`NewClient`、`WithEndpoint`、`Client.*`。`go test ./internal/hestia/... -count=1` 全绿、`gofmt`/`go vet` 零输出。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:32Z"
+  },
+  "assignment_epoch": 3,
+  "assigned_to": "dev-m2b-c",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "questions": [
+    {
+      "q": "等 merge 5f5136fc515ea4b3a12f07897c4b022fc2e031ca（task/TASK-006，基线 639c53e，预演 0 冲突）。代码、discovery、指针均已就绪；未合入前门禁量不到我的代码，不能转 dev_done。提前于 20 分钟阈值转此状态的原因：TeammateIdle hook 在 in_progress 下每十几秒唤醒我一次、解锁条件恒为「推进 dev_done」，等 merge 期间会空转烧 token；blocked_clarification 不在 hook 的保活集合里。合入后我自己转回 in_progress 再转 dev_done，不需要你答复 questions。",
+      "asked_at": "2026-09-16T14:35:02Z",
+      "answer": "已闭合（补记）：该 question 是 2026-09-16T14:35Z 的**等 merge 等待态信号**，非待裁决问题——dev-m2b-b 原文即写「不需要你答复」。`5f5136f` 当时已 merge 为 `e923173d`，dev-m2b-b 自转回 in_progress 并完成 dev_done，006 随后 verified（14:48Z）。2026-09-17 02:47Z 因 QA 两轮 REJECT 重回 review_fix，这条旧 question 被巡检 ② 重新捞出，故在此补 answer 关闭它。留痕：本 sprint 用 `blocked_clarification` + questions 作「等 merge」等待态是 dev 侧的有效做法（hook 保活集合不含该状态），但**它留下的 question 会在任务重回 in-flight 状态时复活报警** ⇒ PENDING 候选：这类信号型 question 应在合入后由 dev 自行补 answer 关闭。",
+      "answered_at": "2026-09-17T02:50:29Z"
+    }
+  ],
+  "verify_baseline": {
+    "head": "6ed3984cf89733aa457e4405060675d3394e46bf",
+    "discovery_sha256": "816557836e3e5fb9180e8c6b8178c19ca0d0cac5cc85cf7f1fa73495c709bea1",
+    "at": "2026-09-17T06:32:22Z"
+  },
+  "verifier": "test-m2b-c",
+  "fix_items": [
+    "ℹ️ 本轮**只做 [1] 这一条**。test-m2b-c 判 REJECTED 时明写「`[1]` 之外的一切都已达标，**不要动**」——6 条活项里 5 条 PASS，12 个变异全 KILLED。**不要重做已经对的部分。**",
+    "🔴 [1] 钳制本身是对的（位置正确、带反空洞对照、三个变异全 KILLED：删钳制 / 钳制恒真 / 上界 12→13 差一）。**未达标的是它静默。** 三条事实，leader 已独立复现第 2 条：① `fix_items` 原文要求「越界返回 error **或跳过并计数**」，交付跳过了但**没有任何计数**——`Result` 无相关字段、`diff.go` 非注释处无计数代码、`Diff` 只返回 `[]Change`，**结构上没有任何通道能把「我丢了一行」告诉调用方**；② `Diff` 的**文档注释仍宣称一条已被自己的钳制打破的不变量**（「每行 × cols 每列恰产出一条（`len == len(rows)×len(cols)`）…**少一条就有一格无声消失**」），leader 探针实测 3 行 × 2 列、2 行越界 ⇒ `len(got)=2` 而非 6，**静默丢 4 格，而那句话逐字描述了新代码的行为，且它挂在一个导出函数上**；③ 本轮 7 条 `degradations` 写得很诚实（429/部分成功、替身不建模状态、`parseSheetNumber` 形态限制、集合差局限都申报了），**偏偏漏了自己这次新代码造成的这一条**。",
+    "✅ 整改走**路线 A**（验证者推荐的最小改动），三步：① **修订 `Diff` 的文档注释**，把不变量改成有条件的（如「**Month ∈ [1,12] 的行**每行 × 每列恰产出一条；越界行不产出任何 Change」）——**这步必须做，因为现在那句话是假的**；② **给跳过加一个可观测出口**：在 `Push` 层的 `Result` 加一个字段（如 `SkippedRows int` 或 `OutOfRangeMonths []int`），由 `Push` 比对「期望格数 `len(rows)×len(cols)`」与实际产出得出，**dry-run 一并打印**，这样 `Diff` 的签名不用动；③ 补一条测试：越界行进入 `Push` ⇒ `Result` 里能看到它被跳过了。",
+    "🔴 **越界申报（我现在就授权，但你仍须自己落盘）**：路线 A 第 ② 步要改 `./internal/hestia/sheets/push.go`，**它不在 006 的 `writes` 里**。请在 `transition dev_done` **之前**自己经 `update --json-field writes=` 把它补进声明——不是申报给我等批准，一进 `dev_done` 就再没有任何角色写得了那个字段。⚠️ **同时注意 `tally`**：若你给 `Kind` 加新值，`tally` 的分支要同步，否则「三类之和等于格数」那条不变量会在另一处再断一次。",
+    "⚠️ 路线 B 我**不推荐但不禁止**：`Diff` 遇越界直接返回 error，与上游 `periodYearMonth` 的「宁可整批停下，也不要静默产出一行垃圾」对齐，语义更一致；代价是改导出函数签名、波及现有调用方与 `TestDiffSkipsRowsWithMonthOutOfRange` 的断言形态。**若你选 B，把理由写进 `decisions`。**",
+    "🔴 **无论走哪条，必须在 `degradations` 或 `decisions` 里申报这次的选择与理由。** 验证者原话：本轮 7 条 degradations 里独独漏了自己新代码造成的这一条，**那正是最该写的一条**。",
+    "ℹ️ 验证者记的一条同仓库内不一致，供你判断用（不是要求）：上游 `sheets_project.go` 的 `periodYearMonth` 注释写着「宁可整批停下，也不要静默产出一行垃圾」；对同一类坏输入，**上游选大声失败、新钳制选静默跳过，两处相距不到一个调用层**。",
+    "ℹ️ 缓解因素也记下（验证者查的）：生产路径到不了——`sheets_project.go:130` 的 `periodYearMonth` 已校验 `month<1||month>12` 并报错，`buildRow` 原样传播。**但这是要修的理由不是不修的理由**：你给钳制写的理由原文就是「`Diff` 是导出函数、也被别的调用方用，不该假设入参已校验」——**它专为上游校验不到的调用方而写，而对那些调用方，跳过是静默的、契约是假的。**"
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 2,
+  "reject_reason": "fix_items[1]（行号钳制）未达标：要求「越界返回 error 或跳过并计数」，交付选了跳过但无任何计数（Result 无字段、Diff 只返回 []Change、非测试文件中无计数代码）；且 Diff 的文档注释仍宣称「每行×每列恰产出一条（len==len(rows)×len(cols)）…少一条就有一格无声消失」——该不变量已被自己的钳制打破且未修订，探针实测 3 行×2 列产出 2 条而非 6 条、静默丢失 4 格；这一条也未进 degradations（另 7 条都申报了）。钳制本身正确且守得住（MA/MB/MC 三变异 KILLED，含反空洞与差一）。其余 5 条活项全部 PASS：12 个变异全 KILLED、指名块逐块计数 0→1、两处假溯源事实经独立复核。整改建议见报告第 6 节（路线 A：修订注释 + 在 Push 的 Result 加跳过计数 + 一条测试）。"
+}

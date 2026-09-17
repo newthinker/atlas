@@ -1,0 +1,77 @@
+package main
+
+// 验证者 test-m2b-b 返工复验夹具（TASK-009 review_fix 第 1 轮；不进交付，只在 worktree wt-m2b-r009 存在）。
+//
+// 唯一目的：钉死存活变异 S9 —— CLI 路径上「建 client 那一步的 deadline」无人守。
+// dev 的 TestPushSheetsSetsDeadline 只 stub 了 sheetsPush，检查的是 Push 那步的 ctx；
+// 而 pushSheets 里 newSheetsClient 也包了一层 WithTimeout，把它去掉之后现有测试无一变红。
+// 对照：投影侧的 TestSheetsProjectorSetsDeadline 是**两步都查**的，CLI 侧只查了一步。
+
+import (
+	"context"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/hestia"
+	"github.com/newthinker/atlas/internal/hestia/sheets"
+)
+
+// Z1 —— CLI 路径的**两步**都必须带 deadline（与投影侧同强度）。
+func TestZ_PushSheetsSetsDeadlineOnBothSteps(t *testing.T) {
+	srv, _ := stubSheetsServer(t)
+	creds := fakeSheetsCredentials(t, srv.URL)
+
+	var clientHasDeadline, pushHasDeadline bool
+	stubNewSheetsClient(t, func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+		_, clientHasDeadline = ctx.Deadline()
+		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
+	})
+	stubSheetsPush(t, func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+		_, pushHasDeadline = ctx.Deadline()
+		return sheets.Result{}, nil
+	})
+
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+	require.NoError(t, pushSheets(context.Background(), io.Discard, cfg, sampleSheetRows(), "", sheets.Options{}))
+
+	require.True(t, clientHasDeadline,
+		"CLI 侧建客户端那一步没有 deadline —— JWT 交换要出网，代理没起时会一直挂着；"+
+			"投影侧同一步是有守卫的（TestSheetsProjectorSetsDeadline），CLI 侧漏了")
+	require.True(t, pushHasDeadline, "CLI 侧 Push 那一步没有 deadline")
+}
+
+// Z2 —— 记录：两条路径的 deadline 应当同源（同一个常量），否则改一处漏一处。
+// 判据不查常量字面量（那零鉴别力），而是查两条路径给出的剩余时间落在同一量级。
+func TestZ_BothPathsUseSameTimeoutOrder(t *testing.T) {
+	srv, _ := stubSheetsServer(t)
+	creds := fakeSheetsCredentials(t, srv.URL)
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+
+	var cliRemain, projRemain float64
+	stubNewSheetsClient(t, func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
+	})
+	stubSheetsPush(t, func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+		if d, ok := ctx.Deadline(); ok {
+			cliRemain = d.Sub(time.Now()).Minutes()
+		}
+		return sheets.Result{}, nil
+	})
+	require.NoError(t, pushSheets(context.Background(), io.Discard, cfg, sampleSheetRows(), "", sheets.Options{}))
+
+	stubSheetsPush(t, func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+		if d, ok := ctx.Deadline(); ok {
+			projRemain = d.Sub(time.Now()).Minutes()
+		}
+		return sheets.Result{}, nil
+	})
+	project := sheetsProjector(cfg)
+	require.NotNil(t, project)
+	require.NoError(t, project(context.Background(), sampleSheetRows()))
+
+	require.InDelta(t, cliRemain, projRemain, 0.2, "两条路径的超时应同源（同一个常量）")
+	require.Greater(t, cliRemain, 0.5, "超时不该短到没有意义")
+}

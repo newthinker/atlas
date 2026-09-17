@@ -1,0 +1,289 @@
+package hestia
+
+// 验证者 test-m2b-b 自构夹具（TASK-010；不进交付，只在 worktree wt-m2b-v010 存在）。
+//
+// 与 dev 夹具的差别：
+//   - 两条候选（2025 年报 + 2020 上半年报）⇒ 投影被调用两次，能验「每期一次」与「行随库增长」
+//   - C8 文案用**行级精确相等**（split 后整行 ==），而非 dev 的 Contains：
+//     Contains 放过「这一行前面还粘着别的字」这一类改动
+//   - 统计以 "sheets" 开头的行数，钉住「只打一条」与「一条都不打」
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/newthinker/atlas/internal/hestia/sheets"
+	"github.com/newthinker/atlas/internal/macro/bitemporal"
+)
+
+// vTwoFetcher：两条候选，都能被 Parse 接受（2025 年报 + 2020 上半年报）。
+func vTwoFetcher(t *testing.T) *fakeFetcher {
+	t.Helper()
+	return &fakeFetcher{pages: map[string][]byte{
+		testIndexURL:         syntheticIndex(t, indexEntry{annualID, annualTitle}, indexEntry{h1ID, h1Title}),
+		articleURL(annualID): readTestdata(t, annualFile),
+		articleURL(h1ID):     readTestdata(t, h1File),
+	}}
+}
+
+// vDeps：验证者自己的主路径 deps（两期候选）。
+func vDeps(t *testing.T) (IngestDeps, *bytes.Buffer, *fakeSender) {
+	t.Helper()
+	var out bytes.Buffer
+	snd := &fakeSender{}
+	return IngestDeps{Store: newTestStore(t), Fetch: vTwoFetcher(t), Out: &out, Cfg: ingestCfg(t), Notify: snd}, &out, snd
+}
+
+// vSheetLines 取出 stdout 里**以 "sheets" 开头**的整行（已去掉尾部换行）。
+// 用行首而非 Contains：能同时钉住文案与「这一行前面不许有别的字」。
+func vSheetLines(out string) []string {
+	var got []string
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(ln, "sheets") {
+			got = append(got, ln)
+		}
+	}
+	return got
+}
+
+// vContracts 取 pending/ 里的**契约**文件（排除 M3 的 .history.json 侧车——
+// 每期落两个文件，验证者首版把总数当成契约数，是自己的夹具算错，已订正）。
+func vContracts(t *testing.T, dir string) []string {
+	t.Helper()
+	all, err := filepath.Glob(filepath.Join(dir, "pending", "*.json"))
+	require.NoError(t, err)
+	var got []string
+	for _, f := range all {
+		if !strings.Contains(filepath.Base(f), ".history.") {
+			got = append(got, f)
+		}
+	}
+	return got
+}
+
+// vRequireC8Invariants：C8 规定的三个不变量——Ingest 返回 nil、run 都是 ingested、不发 P1。
+// DoD 写的是 runs[0]，这里对**全部** run 断言（两期候选 ⇒ 2 行），严格度只增不减。
+func vRequireC8Invariants(t *testing.T, s *Store, snd *fakeSender, wantRuns int) {
+	t.Helper()
+	runs, err := s.RecentRuns(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, runs, wantRuns, "每条候选一行 run")
+	for i, r := range runs {
+		require.Equalf(t, RunIngested, r.Outcome, "runs[%d] 的 outcome 不该受投影影响", i)
+	}
+	for _, txt := range snd.texts {
+		require.NotContains(t, txt, "[P1]", "投影失败不发 P1 告警")
+	}
+}
+
+// V1 —— C8 支一：ProjectSheets 失败。独立注入、行级精确相等、两期各一行。
+func TestV_C8ProjectFailureOnlyPrints(t *testing.T) {
+	deps, out, snd := vDeps(t)
+	perr := errors.New(`Post "https://sheets.googleapis.com/v4": dial tcp 127.0.0.1:7890: connect: connection refused`)
+	calls := 0
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { calls++; return perr }
+
+	require.NoError(t, Ingest(context.Background(), deps), "C8：投影失败不得让 Ingest 返回错误")
+	vRequireC8Invariants(t, deps.Store, snd, 2)
+	require.Equal(t, 2, calls, "两期入库 ⇒ 每期投影一次")
+
+	// 判据七：这一行一字不能改（全角括号、冒号后一个空格、%v 在行尾）。
+	want := fmt.Sprintf("sheets: 投影失败（不影响入库）: %v", perr)
+	lines := vSheetLines(out.String())
+	require.Len(t, lines, 2, "两期各打一行，不多不少")
+	for _, ln := range lines {
+		require.Equal(t, want, ln, "整行逐字节相等（不是 Contains）")
+	}
+	// 契约仍然落盘：投影失败不影响它前面的任何一步。
+	require.Len(t, vContracts(t, deps.Cfg.Queue.Dir), 2, "两期契约照常落盘")
+}
+
+// V2 —— C8 支二：BuildSheetRows 失败。经包内 seam 注入；ProjectSheets 不得被调用。
+func TestV_C8BuildFailureOnlyPrints(t *testing.T) {
+	orig := buildSheetRows
+	t.Cleanup(func() { buildSheetRows = orig })
+	berr := errors.New("hestia sheets: 2025-12 tie between annual and h1")
+	buildSheetRows = func(context.Context, *Store) ([]sheets.Row, error) { return nil, berr }
+
+	deps, out, snd := vDeps(t)
+	projected := 0
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { projected++; return nil }
+
+	require.NoError(t, Ingest(context.Background(), deps), "C8：组装失败不得让 Ingest 返回错误")
+	vRequireC8Invariants(t, deps.Store, snd, 2)
+	require.Zero(t, projected, "组装失败就没有行可投影")
+
+	want := fmt.Sprintf("sheets: 组装失败（不影响入库）: %v", berr)
+	lines := vSheetLines(out.String())
+	require.Len(t, lines, 2)
+	for _, ln := range lines {
+		require.Equal(t, want, ln)
+	}
+}
+
+// V3 —— 两支都会失败时只打第一条（组装失败短路掉投影，else if 的语义）。
+func TestV_C8BuildFailureShortCircuitsProject(t *testing.T) {
+	orig := buildSheetRows
+	t.Cleanup(func() { buildSheetRows = orig })
+	buildSheetRows = func(context.Context, *Store) ([]sheets.Row, error) {
+		return nil, errors.New("build boom")
+	}
+	deps, out, snd := vDeps(t)
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { return errors.New("project boom") }
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	vRequireC8Invariants(t, deps.Store, snd, 2)
+	s := out.String()
+	require.NotContains(t, s, "project boom", "组装失败后不该再尝试投影")
+	require.Len(t, vSheetLines(s), 2, "每期只打一条 sheets 行")
+}
+
+// V4 —— C9：ProjectSheets == nil ⇒ 零投影输出、零错误、outcome 不变，而契约照常。
+func TestV_C9NilIsSilent(t *testing.T) {
+	deps, out, snd := vDeps(t)
+	deps.ProjectSheets = nil
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	vRequireC8Invariants(t, deps.Store, snd, 2)
+	s := out.String()
+	require.Empty(t, vSheetLines(s), "C9：能力禁用时一行投影输出都不许有")
+	require.NotContains(t, s, "sheets", "全文不得出现 sheets 字样")
+	require.Len(t, vContracts(t, deps.Cfg.Queue.Dir), 2, "跳过的只是投影，契约照常")
+}
+
+// V5 —— 顺序：contract → sheets。双重内容判据（契约文件已落盘 ∧ stdout 已打出 contract 行）。
+func TestV_OrderContractThenSheets(t *testing.T) {
+	deps, out, _ := vDeps(t)
+	var order []string
+	var rowsPerCall [][]sheets.Row
+	deps.ProjectSheets = func(_ context.Context, rows []sheets.Row) error {
+		m, _ := filepath.Glob(filepath.Join(deps.Cfg.Queue.Dir, "pending", "*.json"))
+		if len(m) > 0 && strings.Contains(out.String(), " contract → ") {
+			order = append(order, "contract")
+		}
+		order = append(order, "sheets")
+		rowsPerCall = append(rowsPerCall, rows)
+		return nil
+	}
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	// 两期 ⇒ 每期都是 contract 先于 sheets。
+	require.Equal(t, []string{"contract", "sheets", "contract", "sheets"}, order)
+	// 投影成功路径不打任何 sheets 行。
+	require.Empty(t, vSheetLines(out.String()))
+	// 收到的是 BuildSheetRows 的产物：随库增长 1 → 2 行。
+	require.Len(t, rowsPerCall, 2)
+	require.Len(t, rowsPerCall[0], 1, "第一期投影时库里只有一期")
+	require.Len(t, rowsPerCall[1], 2, "第二期投影时库里有两期")
+	t.Logf("第二次投影收到的行：%+v", rowsPerCall[1])
+	years := map[int]int{}
+	for _, r := range rowsPerCall[1] {
+		years[r.Year] = r.Month
+	}
+	require.Equal(t, map[int]int{2020: 6, 2025: 12}, years, "Year/Month 与两期候选一致")
+}
+
+// V6 —— 错误信息里含格式化元字符时不被二次展开（%v 用法正确，不是 Fprintf(fmt.Sprintf(...))）。
+func TestV_C8ErrorTextNotReformatted(t *testing.T) {
+	deps, out, _ := vDeps(t)
+	weird := errors.New("quota 100%% used: %s %d 未展开")
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { return weird }
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	lines := vSheetLines(out.String())
+	require.Len(t, lines, 2)
+	require.Equal(t, "sheets: 投影失败（不影响入库）: quota 100%% used: %s %d 未展开", lines[0],
+		"错误文本必须原样进 %v，不得被再格式化")
+}
+
+// V7 —— Duplicate 分支不投影（key_findings[0]：投影只在 New/Revision 写完契约后）。
+// DoD 未直接规定，作为「验证者记录的实际行为」；若将来把投影挪出 New/Revision 块，这条会红。
+//
+// 🔴 验证者首版把「第二次裸跑同一批候选」当成 Duplicate 路径，**那是错的**：
+// 裸跑会被 ingestOne 的 article_id 幂等挡在 Save 之前，calls 不增长与投影在不在
+// New/Revision 块里无关 —— 变异 M10（把投影块挪出该块）当时存活，暴露了这条断言
+// 是空的。改用 Force 穿透两层幂等，并先断言真的走到了 Save（输出里出现 Duplicate）。
+func TestV_DuplicateDoesNotProject(t *testing.T) {
+	deps, out, _ := vDeps(t)
+	calls := 0
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { calls++; return nil }
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	require.Equal(t, 2, calls, "两期 New ⇒ 投影两次")
+
+	// Force 绕过 Discover 判停 + ingestOne 的 article_id 幂等 ⇒ 两期都真正走到 Save 判 Duplicate。
+	out.Reset()
+	dup := deps
+	dup.Force = true
+	require.NoError(t, Ingest(context.Background(), dup))
+	require.Contains(t, out.String(), bitemporal.Duplicate.String(),
+		"前置：必须真走到 Save 才谈得上 Duplicate 分支（否则这条断言是空的）")
+	require.NotContains(t, out.String(), " contract → ", "Duplicate 不写契约")
+	require.Equal(t, 2, calls, "Duplicate 不写契约，也不投影")
+	require.Empty(t, vSheetLines(out.String()))
+}
+
+// V8 —— ProjectSheets panic 是否被吞（DoD 未要求，记录实际行为）。
+func TestV_ProjectPanicPropagates(t *testing.T) {
+	deps, _, _ := vDeps(t)
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { panic("sheets client exploded") }
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = Ingest(context.Background(), deps)
+	}()
+	t.Logf("panic 行为：recovered=%v（nil 表示被吞）", recovered)
+	require.NotNil(t, recovered, "记录：当前实现不 recover，panic 穿透 Ingest")
+}
+
+// V9 —— hestia_sheets 段整段缺失 / 两键留空都是合法配置（C9 的配置侧前提；dev 只验了填值那一支）。
+func TestV_ConfigHestiaSheetsAbsentIsZero(t *testing.T) {
+	path := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+`)
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err, "整段缺失是合法配置")
+	require.Equal(t, HestiaSheets{}, cfg.HestiaSheets)
+
+	path2 := writeConfig(t, `
+storage:
+  db_path: data/hestia.db
+discover:
+  index_url: https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html
+  max_pages: 3
+  timeout: 30s
+hestia_sheets:
+  credentials_file: ""
+  spreadsheet_id: ""
+`)
+	cfg2, err := LoadConfig(path2)
+	require.NoError(t, err, "两键留空是合法配置（C9 依赖这一点）")
+	require.Equal(t, HestiaSheets{}, cfg2.HestiaSheets)
+}
+
+// V10 —— ProjectSheets 的形状与 Notify 同族：零值即禁用、可赋闭包（形状错了本文件编译不过）。
+func TestV_ProjectSheetsFieldShape(t *testing.T) {
+	var f func(context.Context, []sheets.Row) error = func(_ context.Context, rows []sheets.Row) error {
+		return fmt.Errorf("%d rows", len(rows))
+	}
+	d := IngestDeps{ProjectSheets: f}
+	require.NotNil(t, d.ProjectSheets)
+	err := d.ProjectSheets(context.Background(), []sheets.Row{{Year: 2026, Month: 1}})
+	require.EqualError(t, err, "1 rows")
+
+	var zero IngestDeps
+	require.Nil(t, zero.ProjectSheets, "零值即能力禁用")
+}

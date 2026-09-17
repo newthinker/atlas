@@ -1,0 +1,86 @@
+{
+  "id": "TASK-005",
+  "title": "diff 计算：表中现值 + 将写值 → `WillWrite` / `Same` / `AbsentInDB` 三类变更集",
+  "description": "对应需求文档 **TASK-005**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-005」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-005} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n**Leader 订正（reviewer 🔴）**：初稿的 `Change` 字段名、`current` 类型、凭空的 `error` 返回、`AbsentInDB` 的「表有值」条件均与需求不符，已按 line 1089–1100 / 1147–1216 重写。",
+  "module": "hestia-sheets",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/sheets/diff.go",
+    "internal/hestia/sheets/diff_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "packages": [
+    "./internal/hestia/sheets"
+  ],
+  "writes": [
+    "./internal/hestia/sheets/diff.go",
+    "./internal/hestia/sheets/diff_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "接口**逐字按需求**：`type ChangeKind int`（`WillWrite`/`Same`/`AbsentInDB`）；`Change{Sheet string; Row, Col int; Label string; Current, Want any; Kind ChangeKind}`；`func Diff(sheetName string, cols Columns, current [][]any, rows []Row) []Change`——**无 error 返回**。6 月格落第 9 行（`Month+3`）、列取 `cols`（`require.Equal(9, got[0].Row)` / `(2, got[0].Col)`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "三类判定：表中无值或不同 ⇒ `WillWrite`；一致 ⇒ `Same`；**`cols` 里有而 `Cells` 里没有的标签 ⇒ `AbsentInDB`（无论表中有无值）**，`Current` 保留表中现值。🔴 不变量：三类之和 == `len(rows) × len(cols)`（判据四的 1282+34+819=61×35）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "容差**相对 1e-9**：`64400.0` vs `64400.00000000001` ⇒ `Same`（浮点噪声不算差异，否则判据六幂等达不成）；🔴 `64400.0` vs `64400.01` ⇒ **`WillWrite`**（`TestDiffReportsRealDifference`，容差不能盖住真实差异）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`current` 短行/越界（Sheets API 截断尾部空格）按无值处理，不 panic；新年度表全空 ⇒ 全部 `WillWrite`。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`Cell.Label` 不在 `cols` 里：**前置条件由 push 第 3 步的 `ResolveHeader(wantLabels)` 保证**（C3 在编排层兑现），`Diff` 不重复校验、不 panic——验证者构造该情形断言不 panic 即可。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "纯函数，不碰网络不碰库，子包不 import `database/sql`。**写口守卫登记**：本任务新增的导出函数/方法让 `TestPackageExposesNoWriteFunctions` 先红，在 `store_test.go` 的 `want` 里登记后转绿；并按需求原文在守卫文件追加「为什么名单里多了 <符号>」注释段（每个新符号一句它为什么不是写口）。红的原始输出贴 discovery `verification.red_phase`。 新符号：`sheets.Diff`。`go test ./internal/hestia/... -count=1` 全绿、`gofmt`/`go vet` 零输出。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:31Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m2b-b",
+  "questions": [
+    {
+      "q": "DoD 内部矛盾，需裁决 Diff 的输出形状。DoD functional[1] 要求不变量 len(changes)==len(rows)×len(cols)（cols 有而 Cells 没有的标签一律 AbsentInDB，无论表中有无值），但 functional[0] 引用需求原文断言 require.Len(got,1) / got[0].Col==2（cols 有 3 列、Cells 只有「社融存量」1 格）——按不变量 got 应有 3 条且 got[0] 是 Col 0「月份」。需求原文 5 条测试里 TestDiffMarksEmptyCellAsWillWrite / MarksIdenticalAsSame（Len 1）与 TestDiffMarksAbsentInDB（absent Len 1，而缺的其实是「发布日期」「社融存量」2 列）都与不变量冲突。两种都能自洽的方案：(A) 按不变量：每行×每列恰一条，输出按 cols 列号升序；需求原文断言改为按 Label 查找（找「社融存量」那条断 Row==9/Col==2/Kind），TestDiffMarksAbsentInDB 的 absent 为 2 条（发布日期 nil 现值、社融存量 999 现值）。生产上 buildRow 恒产出月份/发布日期，61×35=2135 与 spec 1282+34+819 仍成立。(B) 按需求原文：「月份」「发布日期」两列豁免 AbsentInDB（它们由 Meta 生成，库里不可能缺），其余列按不变量——5 条原文测试逐字可过，但 len(changes) 不再恒等于 rows×cols，DoD 的显式不变量断言要改写为「rows×(cols−豁免列数)」。我建议 (A)：不变量是 dry-run 计数（判据四）的根据，比测试夹具的 got[0] 更承重；夹具用了不真实的 Cells（生产 Row 永远带月份/发布日期）。请裁决 A 或 B。",
+      "asked_at": "2026-09-16T13:22:06Z",
+      "answer": "裁决 (A)：按不变量，每行×每列恰一条 Change，len(changes)==len(rows)×len(cols)。依据：需求原文 line 1212「cols 里有而 Cells 里没有的标签产出 AbsentInDB」是无条件的，spec 判据四 1282+34+819=61×35 同样按全格计数；那 3 条原文测试的夹具用了不真实的 Cells（生产 buildRow 恒带月份/发布日期），是夹具写松了，不是语义。(B) 会让 sheets 子包按标签名「月份」「发布日期」做豁免——把父包 SheetColumns 的知识硬编码进通用子包，违反子包边界（C2 精神），且不变量退化成 rows×(cols−豁免数) 失去判据四的直接对应。具体做法：① 输出顺序确定：rows 按输入顺序，每行内按 cols 列号升序（不依赖 004 的 Period 排序）。② 原文 5 条测试改为按 Label 查找那条 Change 再断言：TestDiffMarksEmptyCellAsWillWrite 找「社融存量」断 Kind==WillWrite/Row==9/Col==2，另断 len(got)==3 且「月份」「发布日期」两条 Kind==AbsentInDB、Current==nil；TestDiffMarksIdenticalAsSame 找「社融存量」断 Same，「月份」「发布日期」为 AbsentInDB 且 Current 分别为 \"6月\"/\"2026-07-15\"（保留现值）；TestDiffToleratesFloatNoise/ReportsRealDifference 同样按 Label 取；TestDiffMarksAbsentInDB 的 absent 为 2 条（「发布日期」Current=nil、「社融存量」Current=999.0），原断言改为找「社融存量」那条断 Current==999.0。③ 加一条显式不变量测试：任意 rows/cols 组合下 len(got)==len(rows)*len(cols) 且三类计数之和相等。④ 在 discovery decisions 记「原文 3 条测试夹具与不变量冲突，按 Leader 裁决 A 改断言为按 Label 查找」，附本 answer 时间戳，供验证者对照——DoD functional[0] 括号里的 got[0].Row==9/Col==2 以「社融存量那条」解读。",
+      "answered_at": "2026-09-16T13:23:55Z"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "639c53ef6970ddc5eb140547d9779ce774e06c8c",
+    "discovery_sha256": "f7f4c75b35036f0cf0e5566db3e7398a2800472d7f6f9b9032b288410851e115",
+    "at": "2026-09-16T14:03:54Z"
+  },
+  "verifier": "test-m2b-a"
+}

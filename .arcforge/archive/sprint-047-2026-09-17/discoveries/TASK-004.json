@@ -1,0 +1,74 @@
+{
+  "task_id": "TASK-004",
+  "written_by": "dev-m2b-b",
+  "written_at": "2026-09-16T13:12:19Z",
+  "branch": "task/TASK-004",
+  "commit": "c2484e84dc3dce04d4fcc2ec2324208308ae7e0c",
+  "base": "4a10d7cbed2129902fc4bca701599f9a23a92168",
+  "key_findings": [
+    "🔴 77 条快照的来源：主仓库 data/hestia.db（mtime 2026-09-02）只有 76 条（缺 2026-08/monthly），77 条在 /Users/zuowei/workspace/runtime/atlas/data/hestia.db（mtime 2026-09-15，末条 2026-08/monthly 发布 2026-09-14）。testdata/period-keys-2026-09-16.json 由后者以与 AllPeriods 同一条 SQL（order by period, period_type）导出，sha256 36c3f11108889f9e3650ba35baa6379fd137e638c6f25a9669745624d2f66e67。导出前对该库自查：monthly 52 + 累计 25（annual 6 / h1 6 / q1 7 / q1_q3 6）、无 monthly 的月份 9、distinct period 61、同 period 多条 monthly 0、同 period 同日累计 0——与 spec §4 的 77/61/9/25 全部对上。",
+    "需求 Step 6 的 ⚠️「先确认 Current 对缺失字段是键不存在而不是存零值」已确认：scanObservation 只在 sql.NullFloat64.Valid 时才写 obs.Values[f]（store.go:577），NULL ⇒ 键不存在、0 ⇒ 键存在且为 0。buildRow 用 map 的 ok 判定即正确，无需改用 absent_fields；DoD boundary[0] 的「0 仍要写」由 TestBuildRowWritesZeroValues 钉住。",
+    "「AllPeriods 有而 Current 读不到」两条读的是同一个视图 v_hestia_current，单元测试造不出这种分叉。故把编排拆成 assembleRows(ctx, keys, current currentFunc)，BuildSheetRows 只做 st.AllPeriods + assembleRows(…, st.Current)；测试注入一个恒返回 ok=false 的 current 钉住报错路径。",
+    "守卫如期红：TestPackageExposesNoWriteFunctions len=41→42，多出 \"BuildSheetRows\"，落在 BuildHistory 与 Calibrate 之间（字节序）。reflect 版不红（不是 *Store 方法）。SheetColumns 是变量、ColumnSpec 无方法、currentFunc/assembleRows 未导出，都不进 exportedFuncs。",
+    "SheetColumns 35 项逐行抄自 spec §5.5（design.md line 150–191），用 Field* 常量而不是字面量字段名，TestSheetColumnFieldsAllExist 对 fieldOrder 校验全部存在。",
+    "gitnexus impact/detect-changes 不可用（索引版本不匹配，TASK-001 已记）。文本回退：新增符号除 BuildSheetRows 外均未导出；BuildSheetRows 是新符号，仓库内尚无调用者（005/007 消费）。"
+  ],
+  "decisions": [
+    {
+      "decision": "在需求 9 条测试之外补 7 条：TestSelectRowsErrorsOnDuplicateMonthly、TestBuildRowOmitsOnlyAbsentFields（缺 3 ⇒ 32 格）、TestBuildRowWritesZeroValues、TestBuildRowYearMonthComeFromPeriod、TestBuildSheetRowsReadsStore（真 Store 端到端）、TestBuildSheetRowsErrorsWhenCurrentMissing、TestBuildSheetRowsPropagatesCurrentError",
+      "rationale": "DoD 的 error_handling[0]（>1 monthly、Current 读不到）、boundary[0]（32 格、0 仍写）、functional[0] 规则③（Year/Month 取自 Period）在需求原文里都没有直接测试，且都 verify_by: test。"
+    },
+    {
+      "decision": "加内部 seam：type currentFunc + assembleRows(ctx, keys, current)，BuildSheetRows 变成两行编排",
+      "rationale": "见 key_findings[2]。导出面不变（仍只有 BuildSheetRows、SheetColumns、ColumnSpec），子包仍不见 *Store。"
+    },
+    {
+      "decision": "TestBuildSheetRowsReadsStore 复用 store_test.go 的 saveObs / newTestStore，不另建夹具",
+      "rationale": "与 002 同：不另建一套建库辅助。saveObs 只写 FieldM2=300，所以断言 Cells 恰 3 格且第三格是 float64(300)。"
+    },
+    {
+      "decision": "接受 code-simplifier 的两处改动：(a) selectRows 里 sort.Strings(手工收集的 keys) → slices.Sorted(maps.Keys(byPeriod))，switch 改两个 if；(b) 测试抽 cellsByLabel(row) 助手（三处共用）、require.Falsef(labels[x]) → require.NotContainsf(byLabel, x)。SheetColumns、want、testdata 未动",
+      "rationale": "子代理回复不可采信，以 pre-simplifier.sha 比对定位：4 文件里 sheets_project.go 与 sheets_project_test.go 变、testdata 与 store_test.go 同；两文件逐行读过，语义不变；16/16 PASS、gofmt/vet 空。maps.Keys 迭代器需 Go 1.23，仓库 go.mod 已满足（编译通过）。"
+    },
+    {
+      "decision": "testdata 从 runtime 库导出而不是主仓库 data/hestia.db",
+      "rationale": "DoD functional[1] 要求恰 77 条 → 61 行；主仓库那份是 09-02 的旧快照只有 76 条（缺一条 monthly，会得 76 → 60）。runtime 库 mtime 09-15 与 spec 的「2026-09-16 按真实库算出」同一时段，自查五项统计全部吻合。"
+    },
+    {
+      "decision": "commit subject 用 feat(TASK-004): 而非需求原文的 feat(hestia):",
+      "rationale": "与 001–003 同：门禁按 <type>(TASK-0NN): 认领改动。"
+    }
+  ],
+  "files_modified": [
+    { "path": "internal/hestia/sheets_project.go", "change": "新建：ColumnSpec、SheetColumns（35 列）、selectRows、typesOf、buildRow、currentFunc、assembleRows、BuildSheetRows", "numstat": "179/0" },
+    { "path": "internal/hestia/sheets_project_test.go", "change": "新建：16 条测试 + loadRealPeriodKeys / cellsByLabel 助手 + DoD 映射注释", "numstat": "289/0" },
+    { "path": "internal/hestia/testdata/period-keys-2026-09-16.json", "change": "新建：77 条 PeriodKey 快照（runtime 库 v_hestia_current 导出）", "numstat": "387/0" },
+    { "path": "internal/hestia/store_test.go", "change": "want 插入 \"BuildSheetRows\"（41→42）；追加「为什么名单里多了 BuildSheetRows」注释段", "numstat": "12/1" }
+  ],
+  "interfaces_exposed": [
+    { "name": "func BuildSheetRows(ctx context.Context, st *Store) ([]sheets.Row, error)", "scope": "package hestia 导出（005 diff、007 push 消费）", "semantics": "AllPeriods → selectRows → 逐期 Current → buildRow。返回按 Period 升序的纯数据行；AllPeriods/Current 出错原样带出；Current 返回 ok=false ⇒ 报错 \"hestia sheets: <period>/<type> 在 AllPeriods 里但 Current 读不到\"，不跳过。" },
+    { "name": "var SheetColumns []ColumnSpec；type ColumnSpec struct{ Label, Field string }", "scope": "package hestia 导出", "semantics": "录入区 35 列，下标即列序（0=A … 34=AI）。[0]/[1] Field 为空（由 Meta 生成），其余 33 列 Field 为 fieldOrder 中的库字段名。" },
+    { "name": "selectRows(keys []PeriodKey) ([]PeriodKey, error)（未导出）", "scope": "package hestia 内部", "semantics": "每 Period 收敛一条：恰一条 monthly ⇒ 它；>1 monthly ⇒ error 含 Period；无 monthly ⇒ PublishedAt 最新的累计期次；同日 tie ⇒ error 含 Period 与各 period_type。输出按 Period 升序。" },
+    { "name": "buildRow(obs Observation) sheets.Row（未导出）", "scope": "package hestia 内部", "semantics": "Year/Month 取自 Period[:4]/[5:7]；Cells 前两格固定「月份」=\"<M>月\"、「发布日期」=PublishedAt（string），其后按 SheetColumns 顺序只放 Values 里存在的字段（float64，含 0）。" },
+    { "name": "assembleRows(ctx, keys, current currentFunc) ([]sheets.Row, error)（未导出）", "scope": "package hestia 内部（测试 seam）", "semantics": "见 BuildSheetRows；current 的形状与 Store.Current 相同。" }
+  ],
+  "verification": {
+    "sampled_at": "task/TASK-004 @ c2484e84dc3dce04d4fcc2ec2324208308ae7e0c（提交后重采，含 simplifier 改动）",
+    "red_phase": {
+      "step2_undefined": "internal/hestia/sheets_project_test.go:32:14: undefined: selectRows\n…:115:17: undefined: SheetColumns\n…too many errors\nFAIL\tgithub.com/newthinker/atlas/internal/hestia [build failed]（完整输出 scratchpad/dev-m2b-b-TASK-004-red1.txt）",
+      "step7_guard_red": "TestPackageExposesNoWriteFunctions: -([]string) (len=41) / +([]string) (len=42)，+ (string) (len=14) \"BuildSheetRows\" 在 \"BuildHistory\" 之后 \"Calibrate\" 之前；--- FAIL。TestStoreExposesNoWriteMethods PASS（完整输出 scratchpad/dev-m2b-b-TASK-004-red2-guard.txt）"
+    },
+    "green": "go test ./internal/hestia/ -run 'TestSelectRows|TestSheetColumn|TestBuildRow|TestBuildSheetRows' -v ⇒ 16/16 PASS；-run ExposesNoWrite ⇒ 2/2 PASS",
+    "package_tree": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 ⇒ hestia ok、hestia/sheets ok",
+    "regression": "GOTOOLCHAIN=local go test ./... ⇒ 65 ok / 0 FAIL（scratchpad/dev-m2b-b-TASK-004-step8.txt）",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/... 空；go.mod/go.sum 无 diff",
+    "want_counts": "reflect 版 15 项不变；AST 版 41→42，源码解析确认",
+    "testdata_self_check": "sqlite3 runtime 库：count 77；period_type 分布 annual 6/h1 6/monthly 52/q1 7/q1_q3 6；无 monthly 月份 9；distinct period 61；重复 monthly 0；同日累计 tie 0",
+    "simplifier_sha_compare": "pre-simplifier.sha 4 文件 shasum -c：sheets_project.go FAILED、sheets_project_test.go FAILED、testdata OK、store_test.go OK",
+    "merge_preview": "临时 worktree（master@4a10d7c）merge --no-ff --no-commit task/TASK-004：Automatic merge went well，冲突文件 0；已 abort 并拆除",
+    "reproduce": "git worktree add --detach <tmp> c2484e84dc3dce04d4fcc2ec2324208308ae7e0c && cd <tmp> && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -v -run 'TestSelectRows|TestSheetColumn|TestBuildRow|TestBuildSheetRows|ExposesNoWrite'"
+  },
+  "degradations": [
+    "gitnexus impact / detect-changes 不可用，文本回退见 key_findings[5]。"
+  ]
+}

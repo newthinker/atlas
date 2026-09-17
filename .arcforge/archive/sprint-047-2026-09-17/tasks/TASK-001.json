@@ -1,0 +1,82 @@
+{
+  "id": "TASK-001",
+  "title": "AST 写口守卫改为递归子目录：`exportedFuncs(root)` 下钻子包、跳过 testdata/_ 前缀、名字按包限定",
+  "description": "对应需求文档 **TASK-001**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-001」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-001} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n**为什么排第一（AD-M2b-7）**：先改守卫意味着加子包那一刻守卫立刻要求登记——登记被机制强制，不靠实施者记得。003 的 DoD 里「守卫会红、登记后转绿」只有在本任务先完成时才可能成立。",
+  "module": "hestia-guard",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/exported_funcs_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "packages": [
+    "./internal/hestia"
+  ],
+  "writes": [
+    "./internal/hestia/exported_funcs_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`exportedFuncs(root)` 对夹具 `top.go`（`package hestia`：`Parse`+`unexported`）与 `sub/deep.go`（`package sub`：`InsertRow`）返回**恰好** `[]string{\"Parse\", \"sub.InsertRow\"}`——子包按相对目录限定，未导出的不出现，结果已排序。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`store_test.go` 的 `TestPackageExposesNoWriteFunctions` 收集循环换成一次 `exportedFuncs(\".\")` 调用；改后守卫**仍绿且 `want` 清单零改动**；🔴 import 块**只删不增**（`go/parser`、`go/token` 因无使用者而删除；不得新增任何 import，新逻辑全在 `exported_funcs_test.go`）——验证者看 `git diff` 的 import 块只有 `-` 行没有 `+` 行。（Leader 裁决，见 `questions[0].answer`）",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`testdata/` 被跳过：`root/testdata/broken.go` 放非法 Go 源码，`exportedFuncs(root)` 返回 `err == nil` 且结果为空。`_` 与 `.` 前缀目录同样跳过（与 go 工具链约定一致）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**接收者类型未导出的方法不算导出面**：夹具 `type hidden struct{}; func (h hidden) Exported() {}` ⇒ `Exported` **不出现**在结果里（沿用既有 `ast.IsExported(recv)` 判定）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "TDD 两次 RED 留痕：Step 2 `undefined: exportedFuncs`；Step 4 非递归版看不见 `sub.InsertRow`——**两次原始输出都贴进 discovery `verification.red_phase`**。第二次 RED 证明测试守着递归本身。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "非 testdata 目录下 `.go` 解析失败 ⇒ 返回 `fmt.Errorf(\"解析 %s: %w\", name, perr)` 形态（含文件名、可 `errors.Is`），不 panic、不静默跳过。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test ./internal/hestia/ -count=1` 全绿；`gofmt -l` 与 `go vet` 零输出；无新增依赖。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:31Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m2b-a",
+  "questions": [
+    {
+      "q": "DoD functional[1] 要求 store_test.go 的 import 块「一行不动」，但把收集循环换成 exportedFuncs(\".\") 之后，go/parser 与 go/token 在 store_test.go 其余部分 0 处使用（awk 排除 415-445 行后 grep 计数为 0；os/filepath/sort/ast 仍有 3/9/4/8 处），Go 编译器会拒绝未使用的 import ⇒ 「一行不动」与「go test 全绿」不能同时成立。建议裁决：import 块允许**只删不增**——删去 go/parser、go/token 两行，不新增任何 import（fmt/io/fs 等全在新文件）；验证者按「diff 里 import 块只有 - 行、无 + 行」判。备选（不推荐）：用 var _ = token.NewFileSet 之类占位保住 import，那是为了满足字面要求而写的死代码。Step 1–6 不触碰 store_test.go，我先继续做；Step 7 等答复。",
+      "asked_at": "2026-09-16T09:53:39Z",
+      "answer": "**裁决：import 块「只删不增」。** 删 `go/parser`、`go/token` 两行（它们在 store_test.go 其余部分 0 处使用，编译器不允许保留），**不新增**任何 import（`fmt`/`io/fs` 等全在 `exported_funcs_test.go`）。不要用 `var _ = token.NewFileSet` 占位——那是为满足字面写死代码。\n\n验证者判据改为：`git diff master..task/TASK-001 -- internal/hestia/store_test.go` 的 import 块**只有 `-` 行、没有 `+` 行**。DoD functional[1] 已同步改写。\n\n背景：需求「import 一行不动」的意图是「新逻辑放新文件、别把 store_test.go 变成第二个实现点」，它没预见到删循环会让两个 import 失去使用者——需求自身不一致，裁决取意图不取字面。"
+    }
+  ],
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "28fca4c67ce4e303a983ddd13c4de4921849a428",
+    "discovery_sha256": "a110144ca91896f2ce064f16ce9dafcdd4a570f93e4d41cdfa081ffc5bd22953",
+    "at": "2026-09-16T10:13:07Z"
+  },
+  "verifier": "test-m2b-a"
+}

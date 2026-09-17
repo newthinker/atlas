@@ -1,0 +1,76 @@
+{
+  "task_id": "TASK-011",
+  "base": "477664a5651449490ddc602c090501bfd2ab9ead",
+  "branch": "task/TASK-011",
+  "commit": "d3d1f5794e95f8dcacba9eec73125d59cdc2beaf",
+  "merged_into": "d42435241b3c7a24c10d2b016db17c364b325631",
+  "written_by": "dev-m2b-c",
+  "written_at": "2026-09-17T02:10:00Z",
+  "provenance": "本任务（docs-only，6 条 DoD 全 verify_by: review）由 dev-m2b-c 自己完成，不是接手。按 DoD 明写**未跑 code-simplifier**。Leader 在派发消息里给了一批实测数供填写，并要求「自己复核一遍再写，别直接抄」——已逐项独立复核，结论见 decisions 第 1 条（多数正确，两处有问题）。全部自证数字在最后一次改动之后、于合入后的 master@d42435241b3c7a24c10d2b016db17c364b325631 上统一重采。",
+  "key_findings": [
+    "两条写口守卫的 `want` 各是**一行**，所以数「有几项」必须解析源码或数逗号，逐行 grep 恒得 1。本任务报的 15 / 51 用「字符串字面量计数」与「逗号数 + 1」两把独立的尺各算一遍，两把尺同值，且都验过 items == sorted(items)。",
+    "导出面增量是用**集合差**算的（基线 ac1acc5 与终态 477664a 的两个 want 做差），不是目测：AST 守卫 38 → 51，净 +13、**零移除**，构成 = sheets.* 11 项 + BuildSheetRows + Store.AllPeriods；reflect 守卫 14 → 15，只加 AllPeriods（sheets 是另一个包，不在 *Store 的方法集里）。",
+    "🔴 **TASK-001 把 AST 守卫改成递归那一次，两个数字一个都没动（38 → 38）**——因为改它的时候 internal/hestia/sheets/ 还不存在。⇒ 守卫的盲区在触发它的代码出现之前**不可观测**，所以「改完守卫数字没变」不是白做，反而正是先做的理由；等子包写完再改，那段窗口里新增的导出面一项都不会被守卫看见。这条已写进 CONTRACTS ②。",
+    "`exportedFuncs` 在 `internal/hestia/exported_funcs_test.go:38`，**不在 store_test.go**（守卫的断言在 store_test.go，实现在另一个文件；找的人容易只翻前者）。它用 filepath.WalkDir 递归，跳过 testdata 与 _ / . 前缀目录。",
+    "选行 77 → 61 的 testdata 来源必须写清楚，否则复算对不上：`internal/hestia/testdata/period-keys-2026-09-16.json` 取自**运行时库** `/Users/zuowei/workspace/runtime/atlas/data/hestia.db`。当场用 sqlite3 实测两个库：运行时库 `hestia_observations` **77** 行（mtime 2026-09-16 07:55），主仓库 `data/hestia.db` **76** 行（mtime 2026-09-02 20:44）。拿主仓库那份复算会得到 76，然后以为选行规则错了。",
+    "diff 的 1e-9 是**相对**容差（`sameValue`，diff.go:100-108），取相对而非绝对是因为本表量级跨度很大（社融存量到百万亿、利率到个位数小数），一个绝对阈值不可能同时对两端合适。不修的后果不是「差一点」而是**幂等永远达不成**——实测契约里出现过 64400.00000000001。",
+    "dry-run 零写请求的证明不是「断言 mock 没被调用」（C11 禁止），而是 httptest 起真服务、记下服务端实际收到的每个请求再断言方法都是 GET。结构上的保证在 Push：dry-run 短路是第 5 步，建表第 6 步、写格第 7 步（push.go:169-172）——dry-run 判断若放进 WriteCells 内部，建表会照样执行，那是这个设计里最坏的失败。",
+    "`config.example.yaml` 有测试真的会装载它（`cmd/atlas/hestia_health_test.go:132` 的 `config.Load(\"../../configs/config.example.yaml\")`），所以改坏 YAML 会让套件红——本任务的「65 ok」不是走过场。"
+  ],
+  "decisions": [
+    {
+      "decision": "逐项独立复核 Leader 给的实测数：多数正确，两处有问题（一处给错、一处给缺）",
+      "rationale": "Leader 要求「自己复核一遍再写，别直接抄」。复核结果：全仓 65 包 ok ✅、两条守卫 want 15/51 ✅、`go list -deps ./internal/hestia/sheets` 中 database/sql 与父包均 0 ✅、AST 守卫确为递归 ✅、选行 77→61 ✅、testdata 来源为运行时库 ✅（但 Leader 说的是「09-15」，实测 mtime 是 2026-09-16 07:55，已按实测写）、1e-9 ✅。两处问题见下面两条 decisions。"
+    },
+    {
+      "decision": "CONTRACTS ⑤ 只列实测存在的三条 dry-run 测试，不写 Leader 转来的第四个名字",
+      "rationale": "Leader 给的 `TestW_PushDryRunNeverCreates` **在仓库里不存在**：该名字命中 0，`TestW_` 这个前缀在全仓也是 0 次。多半是验证者在自己 worktree 里的临时测试，没提交。CONTRACTS 是长寿文档，写一个不存在的测试名进去，下次有人照着跑会得到空结果并怀疑是自己搞错了。实测存在的三条是 `TestPushDryRunSendsNoWriteRequest`（push_test.go:117）、`TestPushDryRunReportsMissingTabsWithCreateFlag`（push_test.go:167）、`TestSheetsPushDefaultsToDryRun`（cmd/atlas/hestia_sheets_test.go:240）。已在表下注明验证者提过那个名字但全仓命中 0，免得后人以为漏记。"
+    },
+    {
+      "decision": "按 DoD 把 hestia_sheets 块写进 config.example.yaml，但同块加「生效位置不是本文件」警告，并在 CONTRACTS 立一条未决项",
+      "rationale": "🔴 查实：`hestia_sheets` 全仓**只被** `internal/hestia/config.go:85` 的 `mapstructure:\"hestia_sheets\"` 读，而那是 `hestia.LoadConfig` 的结构体，装载的是 `hestia.config_path` 指向的文件（默认 configs/hestia.yaml）；主配置 `internal/config/config.go` 的 hestia 段**只有** HestiaConfig{ConfigPath}，没有 HestiaSheets 字段（grep 命中 0）。⇒ 运维照样例把凭据填进 configs/config.yaml 顶层，**不会有任何代码读它**，能力静默保持禁用，而 `config.Load` 对未知顶层键不报错（改完 `TestExampleConfigDeclaresHestiaRules` 仍绿即证）——**填错位置零反馈**，正是 C9 静默降级最容易咬人的形状。第二层：configs/hestia.yaml 进 git（git ls-files 可证）且**不在** deploy.sh 的 rsync 排除表里（排除表只有 /configs/config.yaml，见 scripts/ops/deploy.sh:100），运行时那份每次部署被源树覆盖。M2b-1 已记「密钥路径不能写 hestia.yaml」但没给替代方案。本任务 writes 不含 configs/hestia.yaml，故只登记不动手；CONTRACTS 的未决项列了三种出路（主配置加字段透传 / 把 /configs/hestia.yaml 加进 rsync 排除表 / 引入 gitignored 的 configs/hestia.local.yaml），**未选定**，需人裁决。"
+    },
+    {
+      "decision": "spec §10 的判据四～七**留空**，不替人填",
+      "rationale": "DoD functional[1] 明写判据一～三填实测、四～七留空供人回填。四～七要对真表、真网、真 ingest 跑：判据六是幂等的唯一诚实证明，判据七的后半段必须**真的断一次网**（读代码不算）。把它们编出来会让整张表看着像已验收，而那正是这份文档要防的。CONTRACTS 里「待人回填」恰 4 处、「✅ 2026-09-17 dev-m2b-c」恰 3 处，两个计数可机器复核。另按 AD-M2b-8，判据四的基线数字（1282/34/819）不进任何任务的 DoD——它随真表与库状态漂移，写进 DoD 会让一个正常的库增长把交付判红。"
+    },
+    {
+      "decision": "CONTRACTS 纯追加，新开 `## Sprint M2b-2` 接在文件末尾，不改既有节",
+      "rationale": "DoD error_handling 要求删除行为 0。`git diff --numstat 477664a d4243524 -- internal/hestia/CONTRACTS.md` = **174 0**，删除列为 0，合入后仍成立。既有的 `## Sprint M2b-1` 记的是凭据与表结构 spike，本节记的是投影真正接上之后的契约，两者互不覆盖。"
+    },
+    {
+      "decision": "vault 内容做成「找哪一行 / 换成什么」的四个动作 + 五条粘贴后自查，而不是一段散文",
+      "rationale": "AD-M2b-2 规定 dev 不直接写 vault，由人粘贴。人粘贴时最容易出的错是贴错位置或贴重（留下两行 M2b）。做成可机械执行的 find/replace 并附自查清单，把「粘贴」从判断题变成操作题。vault 两个文件的实际结构已核对过：README 的「落地状态」表在 L280 起、M2b 行是当前全表唯一写着「未开始」的那条；接入手册 §七 在 L225、D1/D2/D3 三个小标题在 L227/249/259。"
+    },
+    {
+      "decision": "未跑 code-simplifier",
+      "rationale": "DoD non_functional 明写「不跑 code-simplifier」，Leader 派发消息里也重申。本任务无 Go 代码改动，三个文件全是 yaml/markdown。"
+    }
+  ],
+  "files_modified": [
+    "configs/config.example.yaml（+21/-0：hestia_sheets 段，含需求原文三条 🔴 注释逐字、C10 两个绝对路径、以及一条需求没有的「生效位置不是本文件」警告）",
+    "internal/hestia/CONTRACTS.md（+174/-0，**纯追加**：## Sprint M2b-2 六项 + §10 七条判据表 + C1–C11 落地对照表 + 未决项）",
+    "docs/hestia-m2b/TASK-011-vault-content.md（新增 +145：两段可直接粘贴的 vault 正文，分四个动作，末尾五条自查。docs/hestia-m2b/ 本 sprint 新建）"
+  ],
+  "interfaces_exposed": [
+    "文档契约：`internal/hestia/CONTRACTS.md` 的 `## Sprint M2b-2` 是 M2b 投影落地的登记点。下游（TASK-012 的人执行验收）从它的 ⑥ 表取判据一～三的实测值，并把判据四～七回填进同一张表。",
+    "`configs/config.example.yaml` 的 `hestia_sheets` 段是给人看的样例；**真正生效的位置**是 `hestia.config_path` 指向的文件。该段自带警告说明这件事。",
+    "`docs/hestia-m2b/TASK-011-vault-content.md` 是给人粘贴用的一次性产物，贴完即完成使命，不需要与 vault 保持同步。"
+  ],
+  "verification": {
+    "content_check": "内容判据而非拓扑推断：三个文件在合入后的 master@d4243524 与交付 worktree（HEAD=d3d1f57）两处 sha256 逐字节一致（config.example.yaml 7aa517c2…、CONTRACTS.md 9d0d4222…、vault-content.md 3db7ef0d…）；`git rev-list --count master..task/TASK-011` = 0；`merge-base --is-ancestor d3d1f57 HEAD` 为真。合入区间只有两个 commit（d3d1f57 + merge d424352），没有夹带别的改动。主仓库工作树中非 .arcforge 的改动数为 0。",
+    "pure_append": "`git diff --numstat 477664a d4243524 -- internal/hestia/CONTRACTS.md` = **174\\t0**，删除列为 0 ⇒ 纯追加，既有节未被触碰。",
+    "verbatim_check": "config.example.yaml 的三条 🔴 注释用逐字比对确认：七行文本（含两行续行与两个值行）在需求原文 plans/2026-09-16-hestia-m2b-sheets.md 里与在交付文件里**同时**为真，逐行 True。",
+    "criteria_table": "可机器复核的两个计数：CONTRACTS 里「待人回填」出现 **4** 次（判据四～七）、「✅ 2026-09-17 dev-m2b-c」出现 **3** 次（判据一～三），与 DoD functional[1] 的要求一一对应。",
+    "numbers_recheck": "Leader 给的数逐项独立复核：全仓 `go test ./... -count=1` = 65 ok / 0 FAIL；两条守卫 len(want) = 15 / 51（两把独立的尺互验，且均有序）；`go list -deps ./internal/hestia/sheets` 中 `database/sql` 0 次、父包 `github.com/newthinker/atlas/internal/hestia` 0 次；`Push` 签名 `(ctx, c *Client, rows []Row, wantLabels []string, opts Options) (Result, error)` 无 *Store / *sql.DB；两个库的 hestia_observations 行数 77（runtime，mtime 09-16 07:55）vs 76（主仓库，mtime 09-02 20:44）。",
+    "suite": "合入后的 master@d4243524 上实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 个 ok、0 个 FAIL（留痕 scratchpad/dev-m2b-c-TASK-011-master-full.txt）。`cmd/atlas/hestia_health_test.go:132` 真的会 `config.Load` 本任务改过的 config.example.yaml，所以这条对本任务不是空跑。",
+    "scope": "`git show --numstat d3d1f57` 恰为 writes 三文件（config.example.yaml 21/0、vault-content.md 145/0、CONTRACTS.md 174/0，三行即全部输出），全部纯新增、零删除，无越界文件。",
+    "reproduce": "git worktree add --detach /tmp/x-task011 d42435241b3c7a24c10d2b016db17c364b325631 && cd /tmp/x-task011 && grep -c '待人回填' internal/hestia/CONTRACTS.md && git diff --numstat 477664a5651449490ddc602c090501bfd2ab9ead HEAD -- internal/hestia/CONTRACTS.md"
+  },
+  "degradations": [
+    "DoD 6 条全部 verify_by: review，本任务无可执行断言可加——代偿是把能机器复核的判据尽量做出来：纯追加用 numstat 的删除列自证、三条 🔴 注释用逐字比对自证、判据表的填/空用两个计数自证、三文件合入用 sha256 自证。验证者不必只读散文。",
+    "vault 两个笔记本身**未被修改**（AD-M2b-2：dev 不直接写 vault）。交付的是可粘贴内容与自查清单；「是否真的贴进去了」不在本任务的可验证范围内，需人确认后才算闭环。",
+    "`configs/hestia.yaml` 不在 writes 里，所以凭据落位那条未决项本 sprint 只登记不动手；在人裁决并落地之前，`hestia_sheets` 在运行时的正确配置方式仍是开放问题。",
+    "未跑 code-simplifier（DoD 明写不跑）；本任务无 Go 代码改动。"
+  ]
+}

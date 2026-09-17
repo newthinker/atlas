@@ -1,0 +1,125 @@
+{
+  "task_id": "TASK-009",
+  "base": "3770e9482129981cd7a0608e55fadd2c090203ed",
+  "branch": "task/TASK-009",
+  "commit": "b99ec04a0d14ecb43b36ec9f2b88a19ff34a1b27",
+  "commits": [
+    "a2d0267cdce18586ab908dd818ab06d11fa59028 feat(TASK-009): hestia sheets push 子命令与 ingest 侧投影装配",
+    "121764cdae8a4e543b60e22a947fb502c6ebbe53 refactor(TASK-009): code-simplifier —— 测试缝的存/复原/赋值样板抽成两个 helper",
+    "5447d05aaf9cd1a34067143c221930112c1ee8e3 fix(TASK-009): QA 返工——plist 补代理键、client 建一次复用、调用加超时",
+    "b99ec04a0d14ecb43b36ec9f2b88a19ff34a1b27 refactor(TASK-009): code-simplifier —— 新测试改用既有测试缝 helper，去掉冗余读文件"
+  ],
+  "merged_into": "b53708ff99d50db033ab44b2458ce75ba7e91e22",
+  "written_by": "dev-m2b-c",
+  "written_at": "2026-09-17T04:30:00Z",
+  "provenance": "本任务由 dev-m2b-c 自己完成（RED→GREEN→REFACTOR），**不是接手**——与同一实例交付的 TASK-010 / TASK-008 性质不同，那两个是接手 dev-m2b-a / dev-m2b-b 的在途代码。code-simplifier 由 dev-m2b-c 在**提交之后**跑（Leader 定的顺序：本 sprint 四次 dev 中断全部发生在 simplifier 子代理批次里，最长一次 7h45m，先提交可保证即使再挂交付也在分支上），其改动单独作 121764c 提交。⚠️ 子代理最终回复称「（无新增。任务已完成，等待 dev-m2b-c 接管。）」，而 sha256 比对显示它改了 cmd/atlas/hestia_sheets_test.go（5244826…→388ed02…），另两个文件逐字节未动——以 git diff 为准，回复未采信。本 discovery 的全部自证数字在最后一次改动之后、于合入后的 master@477664a5651449490ddc602c090501bfd2ab9ead 上统一重采。 ｜ **QA review_fix 第 1 轮（2026-09-17）**：6 条 fix_items 全部由 dev-m2b-c 实现；越界申报（cmd/atlas/hestia_test.go 与 deploy/launchd/com.newthinker.atlas.hestia-ingest.plist 进 writes）在动手之前落盘。code-simplifier 在提交之后跑，改动单独作 b99ec04。本轮全部自证数字在最后一次改动之后、于合入后的 master@b53708ff99d50db033ab44b2458ce75ba7e91e22 上统一重采。",
+  "key_findings": [
+    "命令树是两层：hestiaSheetsCmd（中间层，自己不做事）挂 hestiaSheetsPushCmd，再挂到 hestiaCmd 下。判据取「从根命令按 hestia→sheets→push 找得到」而不是「变量非 nil」——后者对一个建了命令却忘了 AddCommand 的实现同样为真，而那种实现在 CLI 上根本调不出来（bfExec 那组立的先例）。",
+    "--period-type 刻意**不给默认值**也**不 MarkFlagRequired**：给默认值会让「只给 --period」不再是错误，而那正是要拦的输入；MarkFlagRequired 是无条件的，标上会连 `push --all` 一起拦下。所以它的必填性由 validateSheetsPushFlags 按条件实现（cmd/atlas/hestia_sheets.go:77-95）。",
+    "flag 校验整体不碰库也不碰网络，所以无库环境也跑得动——这正是 DoD boundary[0] 那句「这些测试在无库环境也能跑」的实现依据。TestSheetsPushValidatesFlagsBeforeOpeningStore 用「配置指向不存在的文件、仍该报 flag 错」他证顺序；与之成对的 TestSheetsPushPropagatesConfigError 证明 flag 都对时配置错误确实被带出来——少了后一条，一个「永远不开库」的实现也能让前一条绿。",
+    "runHestiaIngest 的装配抽成 hestiaIngestDeps(cfg, st, sender, out)（cmd/atlas/hestia.go）：不抽的话，要验证「投影挂上了没」就得让 Ingest 真去抓一遍网。抽完 runHestiaIngest 与 hestiaIngestDeps 的语句覆盖率都是 100%。",
+    "投影 panic 的防护是 defer recover() 转**命名返回值** err（cmd/atlas/hestia_sheets.go:161-165），不是吞掉：原始 panic 值经 %v 留在错误里，否则线上只会看到「投影失败」而查不出是什么炸了。recover 包住建 client 与 Push 两步，只兜 Push 等于赌第三方 client 只在那里炸。",
+    "dry-run 那句写成 `dry-run：未写入任何内容；确认后加 --apply`：需求原文的 TestSheetsPushDefaultsToDryRun 同时断言输出含 `dry-run` 与 `--apply`，而 DoD 要的固定一句本身不含 `dry-run`。加前缀让两个判据同时成立且 DoD 那句逐字完整。",
+    "formatResult 不做列宽对齐：CJK 在等宽终端占两格而 Go 的字符串长度按字节/rune 算，补空格只会把中文列排得更歪。分隔用两个空格，让终端自己断。",
+    "明细行把 Change.Row 还原成月份用了本地常量 sheetsEntryFirstRow=4，它与 sheets 包未导出的 entryRowOffset 是**同一事实的两个副本**。代码注释已标明：漏改这里只会让排版的月份错位，不影响写入（写哪一格由 Change.Row 决定，不经过这里）。",
+    "🔴 **CRITICAL-3 是部署层与代码层各自正确、合起来失效**：sheets 按约束 C7 用默认 transport（ProxyFromEnvironment），这是对的；hestia-ingest.plist 只设 PATH，在 M2b 之前也是对的（那时这条链路只抓央行，而央行直连）。M2b 把 Sheets 接进同一个进程之后，两个「对的」决定合起来就是「launchd 下 Google API 恒直连、恒失败」，而按 C8 它只打印一行、不改 outcome、不发 Telegram —— 静默。**能力的作用域变了，而部署配置没有跟着变。**",
+    "🔴 **那条守卫的理由早就过期，只是没人去核**：`TestHestiaPlistSetsNoProxyKeys` 的失败文案写「hestia 直连央行（NewPBOCFetcher 用空 Transport 绕开代理）」，而 fetch.go:33-34 自述「这一层必须在 client 里做，不能只靠 plist 的 no_proxy，那会把 Telegram 和 Sheets 一起放行」——**直连由空 `Transport{}` 保证，与 plist 无关**。守卫守的性质与它给的理由不是同一件事，于是它拦住的是正确的修复。真正的载体是 internal/hestia 的 TestPBOCFetcherDoesNotProxyPBOC。",
+    "只查代理键在不在不够，还要查**指向哪**：指到一个不存在的端口同样是静默失败。为此新增 plistEnvValues 取键值对并断言 `http://127.0.0.1:7897`。",
+    "客户端**懒建**而不是提前建：凭据非空不代表这一轮真会入库（多数 launchd 唤起是幂等空跑），空跑时不该读凭据、更不该出网做 JWT 交换。用 sync.Once 同时满足「只建一次」与「用到才建」。",
+    "🔴 **空库的 dry-run 用例几乎是平凡为真的**：库是 t.TempDir() ⇒ 0 行 ⇒ Push 的 diff 循环一次都不进，「只发 GET」这条在任何实现上都成立。补的有负载用例要先配齐 **35 列**表头（`sheetLabels()` 生成，不手抄）才过得了 ResolveHeader——这本身也说明 C3 的整批拒绝是真在拦。"
+  ],
+  "decisions": [
+    {
+      "decision": "Leader 裁决 @00:3xZ（1/5）：ingest 侧投影闭包只做「建 client + Push」，**不调 BuildSheetRows**",
+      "rationale": "DoD functional[2] 的字面「内部调 BuildSheetRows+sheets.Push」与 TASK-010 的实际接口冲突：internal/hestia/ingest.go:483-487 是 ingest 自己先 `rows, berr := buildSheetRows(ctx, d.Store)`，再把 rows 传进 `d.ProjectSheets(ctx, rows)`；闭包里再调一次就是重算并忽略入参。Leader 核过代码后裁决 DoD 那半句是它写 DoD 时的错，正确读法为「内部调 sheets.Push；BuildSheetRows 已由 010 在 ingest 侧调用」。009 处于 in_progress、owner 是 dev，Leader 改不动 DoD 文本，故该裁决只能由本条 decisions 与 Leader 的 plan.md 验证者注承载。`sheets push` CLI 那条路径上的 BuildSheetRows 归本任务调，在 cmd/atlas/hestia_sheets.go:114。"
+    },
+    {
+      "decision": "Leader 裁决 @00:3xZ（2/5）：--period-type 必填 + 格式校验，但**不改变推哪一行**",
+      "rationale": "sheets.Row 只有 Year/Month/Cells，整个 sheets 包 PeriodType 出现 0 次；BuildSheetRows 内的 selectRows 已把每个 period 收敛成一条（有 monthly 用 monthly，否则取 published_at 最新的累计期次）。⇒ 「过滤 BuildSheetRows 结果」在实现上只能按年月。需求原文给的理由（同月可能 monthly 与 h1 并存）在 M2b 取数路径上已不成立——那个选择上游做过了。该 flag 兑现的是「不许猜」，不是「选哪条」。要真按类型选得让 TASK-004 的 Row 带 period_type，Leader 裁定**本 sprint 不做**。DoD boundary[0] 要的「只推该期」按 period 过滤即满足。"
+    },
+    {
+      "decision": "Leader 裁决 @00:3xZ（3/5）：加第二个包级测试缝 `var sheetsPush = sheets.Push`，defer recover() 放闭包最外层",
+      "rationale": "DoD error_handling[1] 写的是「注入一个必 panic 的 sheets.Push 替身（经 newSheetsClient 测试缝）」，而 newSheetsClient 那个缝造的是 client、造不出会 panic 的 Push。Leader 确认是它 description 定得不够，采纳两个缝的方案并认定「比 DoD 要求更严」（建 client 与 Push 两条路径都兜住，各有一条断言：TestSheetsProjectorRecoversClientPanic 与 TestProjectSheetsPanicDoesNotBreakIngest）。DoD 那句「经 newSheetsClient 测试缝」按「经测试缝注入」理解。cmd/atlas 不在写口守卫的扫描范围（守卫只扫 internal/hestia），新增包级变量无碍，本任务不改 store_test.go。"
+    },
+    {
+      "decision": "Leader 裁决 @00:3xZ（4/5）：`未写入任何内容；确认后加 --apply` 由 RunE 在 formatResult 输出之后打印",
+      "rationale": "formatResult(sheets.Result) string 的单参签名由任务 description 定死（验证者会直接对这个纯函数断言），而那句依赖 --apply 的值，塞进去就得改签名。功能上仍是「dry-run 末尾固定一句」，判据不变。实现为常量 sheetsDryRunLine，由 pushSheets 在 !opts.Apply 时打印；TestPushSheetsApplyDropsDryRunLine 反向钉住 --apply 时它不出现——真写了还说「未写入任何内容」是最坏的一种假话。"
+    },
+    {
+      "decision": "Leader 裁决 @00:3xZ（5/5）：三类计数按 DoD 出**三行**，行数单独一行（spec §7.2 是一行，DoD 优先）",
+      "rationale": "DoD functional[1] 要求三类计数分开三行各带数字，spec §7.2 的示例是单行汇总。DoD 是验收唯一依据，冲突时 DoD 优先。⚠️ 出处更正：Leader 在**需求计划文档**（plans/2026-09-16-hestia-m2b-sheets.md）里 grep 不到那行单行示例，是因为它在**设计规格文档**里——specs/2026-09-16-hestia-m2b-sheets-design.md **第 261 行**：`61 行 · 将写 1282 格 · 一致 34 格 · 库缺跳过 819 格`。不影响结论，按 Leader 要求标明出处。另：该示例里的计数是 2026-09-16 按真实库算的真值，但按 AD-M2b-8 不进 DoD（随真表与库状态漂移），本任务只验三类计数分开显示。"
+    },
+    {
+      "decision": "Leader 裁决 @00:4xZ：coverage_floor = 77（值与理由均由 Leader 定，dev 只负责落盘）",
+      "rationale": "cmd/atlas 在本任务开工前就已不达标：门禁口径（task-completed.sh 的 go test -coverpkg + go tool cover -func total）在 master 3770e94 上是 76.8%，dev_minimum 是 80。缺口在本任务够不着的历史代码里（buildHestiaSender 0%、backtest/crisis/prism 等），而本任务 writes 只有三个文件。Leader 自跑复核得 master 76.8%、交付树 78.0%，与 dev 所报一致；取 77 的两条边界：下界须**严格高于** master 现状 76.8%（否则这道闸对「拉低覆盖率的交付」不设防，故 75 不取），上界不贴着本次的 78.0%（留 1 个百分点余量，免得 simplifier 动一行就卡死）。归档先例：sprint-028 的 TASK-011/012/013 用过 70/60/58，sprint-031 的 TASK-006/011（都含 ./cmd/atlas）用过 74，sprint-041 的 TASK-007/010 用过 75。🔴 该字段当时只有 dev（in_progress 的 owner）写得动，但数值由 Leader 裁决——被门禁拦住的人自己调门槛，这道闸就不成立。"
+    },
+    {
+      "decision": "删掉 filterRowsByPeriod 里两条 strconv.Atoi 的错误分支，改为把行拼成 period 再比（Leader 要求单独申报）",
+      "rationale": "🔴 **删的是结构性不可达的分支，不是为覆盖率删代码**——两者在 diff 上长得一样，故给出可独立复核的判据。原实现是 `strconv.Atoi(period[:4])` 与 `strconv.Atoi(period[5:])`，各带一条 `if err != nil { return nil }`。filterRowsByPeriod 只在 pushSheets 里、且只在 period != \"\" 时被调用，而 CLI 路径上 period 必先过 validateSheetsPushFlags（cmd/atlas/hestia_sheets.go:77-95）的 `hestiaBackfillFromRE.MatchString`（第 **84** 行，正则 `^\\d{4}-(0[1-9]|1[0-2])$`，定义在 cmd/atlas/hestia.go:404）——匹配即保证前 4 位与后 2 位都是十进制数字，Atoi 不可能失败。现实现改为 `fmt.Sprintf(\"%04d-%02d\", r.Year, r.Month) == period`（第 **195** 行），既无分支也不依赖那条前置校验仍然成立：格式不对的 period 匹配不上任何行，自然得空集，行为与原来的 `return nil` 等价。TestFilterRowsByPeriodMatchesExactMonth 用 \"2025-6\"（补零形态）钉住这一点。CLAUDE.md 的「不为不可能的场景写错误处理」是删它的直接依据。"
+    },
+    {
+      "decision": "code-simplifier 的改动单独作 refactor 提交，且不采信子代理回复",
+      "rationale": "Leader 定的顺序是先提交再跑 simplifier（本 sprint 四次 dev 中断全部发生在 simplifier 子代理批次里，最长 7h45m）。子代理回复「无新增」，sha256 比对却显示 cmd/atlas/hestia_sheets_test.go 被改（5244826…→388ed02…）。改动本身经审读判为合理：测试缝的「存旧值 → 注册复原 → 赋新值」三行在文件里出现八次，抽成 stubNewSheetsClient / stubSheetsPush 两个 helper；未删任何注释、未改行为、未重命名被测试引用的符号，改后 25 测全绿、gofmt/vet 空、覆盖率未动（78.0%）。"
+    },
+    {
+      "decision": "gofmt 判据口径限于本任务的三个 writes 文件（Leader 兜底裁决）",
+      "rationale": "cmd/atlas/backtest_test.go 与 crisis_test.go 在 **master 3770e94 上就不过 gofmt -l**（各一处行尾注释对齐差一个空格，gofmt -d 可见），与本任务无关且不在 writes 里，按「Surgical Changes」不动。Leader 核实后裁定 DoD non_functional 那句「gofmt 零输出」对本任务的口径是只看三个 writes 文件，并会在派验消息里写给验证者，免得它在整个包上跑 gofmt -l 看到那两个文件判红。"
+    },
+    {
+      "decision": "fix_items[1] 我把守卫**改名**为 TestHestiaPlistSetsProxyKeysForSheets，不只是改判据",
+      "rationale": "判据反转之后，原名 `…SetsNoProxyKeys` 就是一句谎话——留着它，下一个人按名字找「为什么禁代理」会找到一段说要代理的代码。改名同时在函数注释里写清「本条判据在 M2b 被推翻重写过」以及推翻的理由，免得后人又翻回去。按 fix_items 保留了肯定式锚点（NotEmpty + PATH 在场）与阳性对照（拿 crisis-daily 跑同一个解析器）。"
+    },
+    {
+      "decision": "fix_items[4] **没有按字面加 `Greater(WillWrite,0)`**，改为补一条有负载的用例",
+      "rationale": "那条 CLI 用例的库是空的，直接加断言只会让它红，而它本身是有价值的**接线测试**（证明命令树、flag、配置、客户端装配这条链走得通）。正确做法是各司其职：原用例保留并加注释说明它不是 dry-run 的主守卫，另补 TestPushSheetsDryRunWithRowsSendsOnlyGETs 喂真行、配齐 35 列表头，在 WillWrite>0 的前提下要求仍然零写请求。"
+    },
+    {
+      "decision": "超时常量取 2 分钟，断言方式是查 ctx.Deadline() 在不在而不是查常量值",
+      "rationale": "查常量等于把测试和实现的同一个字面量对一遍，改一处两处一起变，零鉴别力。查 `ctx.Deadline()` 才证明「调用点真的把 deadline 传下去了」——四个调用点（投影的建 client 与 Push、CLI 的同两步）漏任何一处都会红。2 分钟的依据：一次全量 push 对 6 张年度表是 1+2T 次 read 加一次 batchUpdate，实测远小于此；真超了说明网络确实不通，按 C8 打印一行即可。"
+    },
+    {
+      "decision": "code-simplifier 的改动单独作 b99ec04 提交",
+      "rationale": "它把本轮新写的 5 个测试改用文件里既有的 stubNewSheetsClient / stubSheetsPush（上一轮 simplifier 抽的 helper），并去掉 plistEnvValues 里一次多余的 os.ReadFile。断言计数 379→378，少的那条正是那次冗余读文件的 require.NoError——文件读不到时 plutil 自己会失败、仍由「plutil 转 JSON 失败」兜住，判据未变弱；Test 函数数前后都是 78，删除的注释行 0。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia_sheets.go（返工 +40/-6：sheetsCallTimeout 常量；sheetsProjector 改 sync.Once 懒建复用；投影与 CLI 四处调用加 context.WithTimeout）",
+    "cmd/atlas/hestia_sheets_test.go（返工 +156/-0：6 个新测试，含 client 复用、懒建、两处 deadline、有负载 dry-run；原 dry-run 用例加注释与一条断言；明细行三类各加整行 Equal）",
+    "cmd/atlas/hestia_test.go（返工 +51/-14：守卫判据反转并改名为 TestHestiaPlistSetsProxyKeysForSheets；新增 plistEnvValues）",
+    "deploy/launchd/com.newthinker.atlas.hestia-ingest.plist（返工 +16/-0：EnvironmentVariables 补 http_proxy / https_proxy / no_proxy，并写明为何这不会让抓央行也走代理）"
+  ],
+  "interfaces_exposed": [
+    "CLI：`atlas hestia sheets push (--period YYYY-MM --period-type TYPE | --all) [--apply] [--create-sheets]`。默认 dry-run；--period 与 --all 互斥且必须给其一；--period 必须配 --period-type。credentials_file 留空 ⇒ 打印 `hestia_sheets 未配置（credentials_file 留空）` 并**退出 0**。",
+    "包内（cmd/atlas，全部未导出）：formatResult(sheets.Result) string（纯函数，验证者直接断言）、pushSheets(ctx, out, cfg, rows, period, opts) error、sheetsProjector(cfg) func(context.Context, []sheets.Row) error（凭据留空返回字面量 nil）、filterRowsByPeriod(rows, period) []sheets.Row、sheetLabels() []string、hestiaIngestDeps(cfg, st, sender, out) hestia.IngestDeps。",
+    "两个包级测试缝：var newSheetsClient = sheets.NewClient、var sheetsPush = sheets.Push。后续任务要注入假 Sheets 行为从这两个缝进，不要另起一套。",
+    "行为闭合：TASK-010 转移给本任务的接线已落地——runHestiaIngest 在 hestia_sheets.credentials_file 非空时填 deps.ProjectSheets，内部用 sheets.Options{Apply: true, CreateSheets: true}（新年份第一期必缺表，不许建就整批失败）；留空则保持 nil（C9）。",
+    "部署契约变更：`deploy/launchd/com.newthinker.atlas.hestia-ingest.plist` 现在**要求**设代理键。⚠️ 本仓库改的是源树那份；**生产上已安装的 plist 不会自动更新**，要重跑 install-services.sh 才生效——这一条属人执行项，不在本任务可验证范围内。",
+    "包内新增：`sheetsCallTimeout`（2 分钟）、`plistEnvValues(t, path) map[string]string`（测试辅助）。"
+  ],
+  "verification": {
+    "red_phase": {
+      "留痕": "scratchpad/dev-m2b-c-TASK-009-red1.txt（测试先于实现写下，编译失败）",
+      "内容": "# github.com/newthinker/atlas/cmd/atlas [github.com/newthinker/atlas/cmd/atlas.test]\ncmd/atlas/hestia_sheets_test.go:60:3: undefined: hestiaSheetsAll\ncmd/atlas/hestia_sheets_test.go:60:20: undefined: hestiaSheetsPeriod\ncmd/atlas/hestia_sheets_test.go:60:40: undefined: hestiaSheetsPeriodType\ncmd/atlas/hestia_sheets_test.go:61:3: undefined: hestiaSheetsApply\ncmd/atlas/hestia_sheets_test.go:61:22: undefined: hestiaSheetsCreate\ncmd/atlas/hestia_sheets_test.go:62:3: undefined: hestiaSheetsPushCmd\ncmd/atlas/hestia_sheets_test.go:117:9: undefined: newSheetsClient\ncmd/atlas/hestia_sheets_test.go:130:9: undefined: sheetsPush\ncmd/atlas/hestia_sheets_test.go:130:9: too many errors\nFAIL\tgithub.com/newthinker/atlas/cmd/atlas [build failed]\nFAIL"
+    },
+    "content_check": "内容判据而非拓扑推断：三个文件在合入后的 master@477664a 与交付 worktree（HEAD=121764c）两处 sha256 逐字节一致（hestia_sheets.go 0efac794…、hestia_sheets_test.go 388ed02a…、hestia.go 3f23241d…）；git merge-base --is-ancestor 对 a2d0267 与 121764c 均为真。主仓库工作树中已修改或未跟踪的 .go 文件数为 0。",
+    "green": "go test ./cmd/atlas/ -count=1 -v ⇒ 本任务 25 个 Test 全 PASS。两把独立的尺互验测试数：grep -c '^func Test' cmd/atlas/hestia_sheets_test.go = 25，`--- PASS` 计数 = 25（⚠️ dev 曾口头报过 26，那是未测先说，已当场更正）。",
+    "suite": "master@477664a 上实跑：GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 个 ok、0 个 FAIL（留痕 scratchpad/dev-m2b-c-TASK-009-master-full.txt）；gofmt -l 对三个 writes 文件命中 0 行；go vet ./... 输出 0 行。",
+    "coverage": "门禁口径（go test ./cmd/atlas -coverpkg=./cmd/atlas + go tool cover -func total）：master 基线 3770e94 = 76.8%，本交付 477664a = **78.0%**（+1.2pp），门槛取任务级 coverage_floor=77 而非全局 dev_minimum=80，理由见 decisions。本任务新增的 hestia_sheets.go 九个函数里八个 100%，runHestiaSheetsPush 93.3%（差的是 BuildSheetRows 报错分支，触发它要往库里塞两条同期 monthly）；hestiaIngestDeps 与 runHestiaIngest 均 100%。",
+    "scope": "git diff --numstat 3770e94..477664a -- cmd/atlas internal 恰为 writes 三文件（hestia.go 33/10、hestia_sheets.go 244/0、hestia_sheets_test.go 563/0，三行即全部输出）。两个 commit 各自的 numstat 也只含这三个文件；go.mod / store_test.go / internal 下任何文件均未被触碰。",
+    "dod_line_evidence": "functional[2] 的两支：TestSheetsProjectorPushesWithApplyAndCreate 断言 Options{Apply:true, CreateSheets:true} 原样传到 Push，TestSheetsProjectorNilWhenCredentialsEmpty 断言留空得字面量 nil；TestHestiaIngestDepsCarryProjector 另证它真挂到了 IngestDeps 上——只测 sheetsProjector 证明不了「被接上了」，而漏接那一行的实现在只测前者时完全为绿。error_handling[1] 的端到端形态 TestProjectSheetsPanicDoesNotBreakIngest 用真 hestia.Ingest（fake Fetcher + 跨包读 internal/hestia/testdata/pboc-2025-12-annual.html）断言四件事：Ingest 返回 nil、runs[0].Outcome == hestia.RunIngested、stdout 含 `sheets: 投影失败（不影响入库）:`、进程未崩。",
+    "reproduce": "git worktree add --detach /tmp/x-task009 477664a5651449490ddc602c090501bfd2ab9ead && cd /tmp/x-task009 && GOTOOLCHAIN=local go test ./cmd/atlas/ -count=1 -coverpkg=./cmd/atlas -coverprofile=/tmp/x.out && go tool cover -func=/tmp/x.out | grep total:",
+    "rework_content_check": "四文件在合入后的 master@b53708f 与交付 worktree 两处 sha256 逐字节一致；task/TASK-009-fix 的 `git rev-list --count master..` = 0。",
+    "rework_suite": "master@b53708f 上实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 ok、0 FAIL；门禁口径 cmd/atlas 覆盖率 **78.1%**（返工前 78.0%，coverage_floor 77）；我的四个文件 gofmt 0 行；go vet ./... 0 行；plutil -lint 报 OK。",
+    "rework_scope": "git diff --numstat 15eee52..b53708f -- cmd/atlas deploy 恰为声明范围内四文件（hestia_sheets.go 40/6、hestia_sheets_test.go 156/0、hestia_test.go 51/14、plist 16/0）。⚠️ 中途我跑过一次 `gofmt -w cmd/atlas/`（整目录），它重排了 backtest_test.go 与 crisis_test.go 这两个**不在 writes 里、且本来就不合 gofmt** 的既有文件；提交前的范围核对逮到，已 `git checkout --` 撤回，最终提交与 master 上都没有它们（上面 numstat 四行即全部输出可证）。",
+    "rework_plist_check": "plutil -lint OK；plistlib 解析确认 EnvironmentVariables 含 no_proxy/PATH/http_proxy/https_proxy 四键，且 StartCalendarInterval 的三个时点原样还在（那正是同文件注释记着「删了 lint 照样报 OK」的坑）。"
+  },
+  "degradations": [
+    "未做变异测试：本任务的断言强度靠结构性设计代偿——顺序类用「成对的反向断言」（flag 错不开库 × flag 对时配置错要传出来）、Options 用整结构体 Equal 而非逐字段、dry-run 用 requireOnlyGETs 式的「每个请求都得是 GET」、--apply 用 NotContains 反钉那句不出现、panic 用真 Ingest 端到端而非只看闭包返回值。",
+    "runHestiaSheetsPush 的 BuildSheetRows 报错分支未覆盖（该函数 93.3%）：触发它要往库里塞两条同期 monthly 以让 selectRows 报错，而 Store.Save 要先过 ValidationReport 的四道一致性检查，代价远超收益。",
+    "gitnexus impact/detect-changes 索引版本不匹配不可用（同 001/002/007/008/010）；文本回退：grep 确认 newSheetsClient / sheetsPush / pushSheets / sheetsProjector / formatResult / filterRowsByPeriod / sheetLabels / hestiaIngestDeps / changeVerdict / cellDisplay 与五个 hestiaSheets* flag 变量在 cmd/atlas 包内无同名冲突，编译通过即证。",
+    "sheetsEntryFirstRow=4 与 sheets 包未导出的 entryRowOffset 是同一事实的两个副本（只影响排版的月份显示，不影响写入位置），已在代码注释里标明。消不掉：导出 entryRowOffset 会给写口守卫的名单加一项，代价更大。",
+    "🔴 **源树的 plist 改了不等于生产生效**：已安装的 LaunchAgent 是另一份拷贝，要重跑 install-services.sh 才更新。本任务无法验证这一步，属人执行项——建议进 sprint 收尾清单，否则 CRITICAL-3 在生产上仍然成立。",
+    "`sheetsCallTimeout` 是单次调用的上限，不是整轮投影的预算。一轮 push 会发 1+2T 次 read，每次各自计时；极端慢网下总耗时仍可能很长。真要限总时长得在调用方给整个闭包一个 deadline——本轮没做，因为 ingest 本身没有轮级预算的概念。",
+    "本轮未做变异测试：新增断言多为「查 deadline 在不在」「查 client 建了几次」这类计数型判据，其反面（不传 deadline、每次重建）在实现上是单行差异，消融收益低于 TASK-006 那种结构性改动。"
+  ]
+}

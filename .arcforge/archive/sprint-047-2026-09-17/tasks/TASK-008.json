@@ -1,0 +1,84 @@
+{
+  "id": "TASK-008",
+  "title": "缺失年度表的创建：`CreateYearTab` 复制 2024年 → 改名 → 改标题行 → 按年序插入，接进 push 第 6 步",
+  "description": "对应需求文档 **TASK-008**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-008」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-008} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n单列而不并进 007 的理由（需求原文）：它是全流程里**唯一改动表格结构**的动作，值得一道独立的审查门。🔴 `writes` 与 006/007 重叠，**必须等 007 verified 后才派**（AD-M2b-6）。\n\n**Leader 裁决（reviewer 🟡，需求未定）**：模板表固定 `\"2024年\"`；`index` = 现有 `NNNN年` 工作表按年份升序排列时第一个 `> year` 的位置（无则追加末尾）。这两条写进 functional 供验证者构造第二组输入。",
+  "module": "hestia-sheets",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/sheets/client.go",
+    "internal/hestia/sheets/push.go",
+    "internal/hestia/sheets/push_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-006",
+    "TASK-007"
+  ],
+  "packages": [
+    "./internal/hestia/sheets"
+  ],
+  "writes": [
+    "./internal/hestia/sheets/client.go",
+    "./internal/hestia/sheets/push.go",
+    "./internal/hestia/sheets/push_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`func (c *Client) CreateYearTab(ctx, templateTab, newTab string, year int, index int) error`；对 httptest 请求体拼接串断言四步齐全：含 `duplicateSheet`（复制模板）、`2021年`（新表名）、`2021 年 ·`（第 1 行标题年份）、`\"index\":3`（按年序排位）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "push 接线：`Apply=true && CreateSheets=true` 且缺 `2021年` ⇒ `duplicateSheet` 请求**先于**首个写数据请求（`require.Less(iDup, iWrite)`）。模板固定 `\"2024年\"`；`index` 按「现有年份表升序中第一个 > year 的位置，无则末尾」——验证者用现有 `{2023年,2024年,2026年}` + 新 2025 断言 `index==2`。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`CreateSheets=true` 但不缺表 ⇒ 零 `duplicateSheet`；`Apply=false` 时即使缺表也**不建表**（复跑 007 的 GET-only 断言仍绿）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "（补充，需求未要求）模板表不存在 ⇒ error 含模板名；`duplicateSheet` 4xx ⇒ 后续三步不做。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "**写口守卫登记**：本任务新增的导出函数/方法让 `TestPackageExposesNoWriteFunctions` 先红，在 `store_test.go` 的 `want` 里登记后转绿；并按需求原文在守卫文件追加「为什么名单里多了 <符号>」注释段（每个新符号一句它为什么不是写口）。红的原始输出贴 discovery `verification.red_phase`。 新符号：`Client.CreateYearTab`。006/007 既有测试**仍绿**；`go test ./internal/hestia/... -count=1` 全绿、`gofmt`/`go vet` 零输出。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:32Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-m2b-c",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "042c739d93c2c875f246487d63454f7886d651ac",
+    "discovery_sha256": "b4c96e345c6b577780280d00d467629d1063e8408778167a0f4923173ac259ea",
+    "at": "2026-09-17T04:08:18Z"
+  },
+  "verifier": "test-m2b-b",
+  "fix_items": [
+    "ℹ️ **CRITICAL-2（模板表自污染）已在 TASK-006 的返工提交 `5af1701` 中做掉，本任务不必重做**。原因：dev 当时读到的是 006 的旧 fix_items（含 CRITICAL-2），而修法所需的两个文件（`client.go` 的 `CreateYearTab` 清空第 5 步、`client_test.go` 的 N7 夹具）都在 006 的 writes 内，所以做在 006 分支上、已随 `15eee52` 合入。Leader 已核实：清空作用在 `newID` 不是 `tplID`、排在 duplicate 之后、只清录入区不碰表头与 AJ–BB 公式区，注释写明「新表此刻还没有任何人工数据可言」。**本任务只需做下面剩余各条。**",
+    "🔴 合并修复项（QA 建议，一条测试同时消掉两个问题）：**在 `Push` 层让建表失败，断言 `WriteCells` 未被调用**。这同时覆盖：① `push_test.go:335` 的 `require.Len(writeBodies(rec),1,\"duplicateSheet 失败后不许再发任何写请求\")` 是**恒真断言**（`CreateYearTab` 四步在同一个 batchUpdate 里、写请求恒为 1，任何实现都满足；该用例直接调 `CreateYearTab` 不经 `Push`，所以 `WriteCells` 那次根本不在计数内）；② `push.go:177-179` 零覆盖（建表失败必须在 `WriteCells` 之前返回，否则往不存在的表写）——**正是那条恒真断言自称在守、实际没守的性质**。原恒真断言可保留但需改注释说明它守的是「四步同批」的结构，或直接删除。",
+    "移植验证者夹具 N7 与 N10（原文在 scratchpad 的 `test-m2b-b-TASK-008-fixture.go.txt`）：**N7 的关键是让模板表持有最大 sheetId**——dev 夹具用 12345 不是最大值，所以「新表 sheetId 用 maxID 而非 maxID+1」这个变异不红；验证者用 777。N10 是「连建两张表时本地表序更新，第二张 index 算对」，正是 008 discovery `key_findings[5]` 明确声称却无守卫的行为。具体断言与行号见 `code-review-round1.md` 第五节①。",
+    "补 `push.go` 其余零覆盖的 error 传播分支（8 个块中除 177-179 外还有 55-57 / 65-67 / 76-78 / 84-86 / 130-132 / 182-184 / 191-193）。建议给 `newTestClient` 加 `failPath map[string]int`，使 **GET 路径的 4xx 可单独注入**——当前只有「全路径失败」与「全 POST 失败」两种粒度，**读路径 4xx 从未被走过**，而真实最高频失败恰是读（403 / 400 Unable to parse range / 404）。"
+  ],
+  "reason_class": "task_defect",
+  "rework_count": 1
+}

@@ -1,0 +1,67 @@
+{
+  "task_id": "TASK-003",
+  "written_by": "dev-m2b-b",
+  "written_at": "2026-09-16T11:55:00Z",
+  "branch": "task/TASK-003",
+  "commit": "91b251f4d23fcf542de3b2401e14ec810e0fcb64",
+  "base": "79878c79339f8ea2849948152bd6d082c2c3c63a",
+  "key_findings": [
+    "TASK-001 的递归守卫如期兑现：子包落地后 TestPackageExposesNoWriteFunctions 立刻红（len=39→41，多出 sheets.ColumnLetter / sheets.ResolveHeader），reflect 版不红（它只看 *Store 的方法）。",
+    "子包符号在 want 里排在名单**末尾**而不是「按字母序插在中间」：exportedFuncs 用 sort.Strings，字节序里小写 \"s\" > 大写 \"W\"，所以带 \"sheets.\" 前缀的项整体落在 WriteHistory 之后。需求 Step 6 说「按字母序」指的就是这个结果；注释段已写明，免得后续任务登记时插错位置又红一次。",
+    "Row/Cell 是纯类型，exportedFuncs 只收函数/方法，所以本任务两个导出类型不需要登记；DoD boundary[1] 只列了两个函数，与此一致。",
+    "需求 line 531 包注释把 transport 那条写成 C6，Global Constraints 表里 C6 是「只写录入区 A–AI」、C7 才是「默认 transport」；按 DoD functional[3] 改成 C7。",
+    "go list -deps ./internal/hestia/sheets：database/sql 0 条、父包 internal/hestia 0 条（子包只依赖 fmt/sort/strings 与 testify）。",
+    "gitnexus detect-changes 不可用：本机 run.cjs 与索引版本不匹配（TASK-001 discovery 已记），且 macOS 无 timeout 命令；改用文本回退——新增符号全部在新建子包，父包只改 store_test.go 的 want 与注释，无生产代码调用者。"
+  ],
+  "decisions": [
+    {
+      "decision": "在需求 5 条测试之外补 TestResolveHeaderSkipsEmptyHeaderCell（表头 {\"月份\",\"\",\"社融存量\"}），并在 TestResolveHeaderRejectsMissingLabel 里加 require.Nil(t, got)",
+      "rationale": "DoD functional[0] 的第一组夹具是带空格子的表头，需求原文测试用的是「发布日期」占位，两者不同；DoD error_handling[0] 明写「不返回部分结果」，需求原文只断言 err 文案，补 Nil 断言让这半句有测试面。"
+    },
+    {
+      "decision": "Row/Cell 按需求 004 节 Interfaces 原文照抄，Row 无 PeriodType；注释保留「float64 / RAW 模式 string 变文本、AJ–BB 公式失效」原句",
+      "rationale": "Leader 裁决挪到本任务（DoD functional[2]），类型定义是 005 的消费接口，不得在此擅自加字段。"
+    },
+    {
+      "decision": "接受 code-simplifier 的唯一改动：ResolveHeader 签名 `headerRow []string, want []string` 合并为 `headerRow, want []string`",
+      "rationale": "子代理最终回复为空（「不响应」），以 sha256 比对定位：5 个文件只有 header.go 变，逐行读过全文，仅签名合并、语义不变；6/6 PASS、gofmt/vet 空。"
+    },
+    {
+      "decision": "commit subject 用 feat(TASK-003): 而非需求原文的 feat(hestia/sheets):",
+      "rationale": "与 001/002 同：门禁按 <type>(TASK-0NN): 认领改动。"
+    }
+  ],
+  "files_modified": [
+    { "path": "internal/hestia/sheets/sheets.go", "change": "新建：包注释（C2 不收 *Store/*sql.DB；C7 默认 transport、不抄 fetch.go 空 Transport{}）", "numstat": "16/0" },
+    { "path": "internal/hestia/sheets/header.go", "change": "新建：Columns、ResolveHeader（TrimSpace、重复取最左、缺标签全报整批拒绝）、ColumnLetter", "numstat": "57/0" },
+    { "path": "internal/hestia/sheets/header_test.go", "change": "新建：6 条测试 + DoD 映射注释", "numstat": "67/0" },
+    { "path": "internal/hestia/sheets/row.go", "change": "新建：Cell{Label, Value any}、Row{Year, Month, Cells}", "numstat": "21/0" },
+    { "path": "internal/hestia/store_test.go", "change": "TestPackageExposesNoWriteFunctions 的 want 末尾 +2 项；追加「为什么名单里多了 sheets.*」注释段", "numstat": "15/1" }
+  ],
+  "interfaces_exposed": [
+    { "name": "type Columns map[string]int", "scope": "package sheets 导出", "semantics": "表头标签 → 0 基列号。键是 want 里传入的原标签（未 TrimSpace 的那个）。" },
+    { "name": "func ResolveHeader(headerRow, want []string) (Columns, error)", "scope": "package sheets 导出（005 diff、007 push 消费）", "semantics": "两侧标签都 TrimSpace 后匹配；表头空格子跳过但占列号；重复标签取最左；want 任一缺失 ⇒ 返回 (nil, err)，err 文案含全部缺失标签（排序后「、」连接）与表头列数。" },
+    { "name": "func ColumnLetter(i int) string", "scope": "package sheets 导出（006 拼 range 消费）", "semantics": "0 基列号 → A1 列字母：0→A、25→Z、26→AA、34→AI、53→BB。负数输入返回空串（未定义行为，调用方不应传）。" },
+    { "name": "type Cell struct{ Label string; Value any }", "scope": "package sheets 导出（004 产、005/007 消费）", "semantics": "一个要写的格。数值列 Value 必须 float64；string 只用于月份、发布日期。" },
+    { "name": "type Row struct{ Year, Month int; Cells []Cell }", "scope": "package sheets 导出", "semantics": "一张年度表里的一行；Month 1–12 决定行号（Month+3）；库里缺的字段不出现在 Cells（C4 长在类型上）。无 PeriodType 字段。" }
+  ],
+  "verification": {
+    "sampled_at": "task/TASK-003 @ 91b251f4d23fcf542de3b2401e14ec810e0fcb64（提交后重采，含 simplifier 改动）",
+    "red_phase": {
+      "step3_undefined": "internal/hestia/sheets/header_test.go:21:14: undefined: ResolveHeader\n...:23:19: undefined: Columns\n...:65:27: undefined: ColumnLetter\nFAIL\tgithub.com/newthinker/atlas/internal/hestia/sheets [build failed]（完整输出 scratchpad/dev-m2b-b-TASK-003-red1.txt）",
+      "step6_guard_red": "TestPackageExposesNoWriteFunctions: -([]string) (len=39) / +([]string) (len=41)，+ \"sheets.ColumnLetter\" + \"sheets.ResolveHeader\" 排在 WriteHistory 之后；--- FAIL。TestStoreExposesNoWriteMethods PASS（完整输出 scratchpad/dev-m2b-b-TASK-003-red2-guard.txt）"
+    },
+    "green": "go test ./internal/hestia/sheets/ -count=1 -v ⇒ 6/6 PASS；go test ./internal/hestia/ -run ExposesNoWrite ⇒ 2/2 PASS",
+    "package_tree": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 ⇒ hestia ok、hestia/sheets ok",
+    "regression": "GOTOOLCHAIN=local go test ./... ⇒ 65 ok / 0 FAIL（64 + 新子包；scratchpad/dev-m2b-b-TASK-003-step7.txt）",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/... 空",
+    "deps": "go list -deps ./internal/hestia/sheets | grep -c database/sql ⇒ 0；grep -c '^github.com/newthinker/atlas/internal/hestia$' ⇒ 0；go.mod/go.sum 无 diff",
+    "want_counts": "reflect 版 15 项不变；AST 版 39→41，源码解析确认",
+    "simplifier_sha_compare": "pre-simplifier.sha 5 文件 shasum -c：仅 header.go FAILED（签名合并），其余 4 个 OK",
+    "merge_preview": "临时 worktree（master@79878c7）merge --no-ff --no-commit task/TASK-003：Automatic merge went well，冲突文件 0，待合入 numstat 57/0 + 67/0 + 21/0 + 16/0 + 15/1；已 abort 并拆除",
+    "reproduce": "git worktree add --detach <tmp> 91b251f4d23fcf542de3b2401e14ec810e0fcb64 && cd <tmp> && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -v && go list -deps ./internal/hestia/sheets | grep -c database/sql"
+  },
+  "degradations": [
+    "gitnexus impact / detect-changes 不可用（索引版本不匹配 + macOS 无 timeout），文本回退见 key_findings[5]。"
+  ]
+}

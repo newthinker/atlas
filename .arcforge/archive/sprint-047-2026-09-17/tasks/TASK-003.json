@@ -1,0 +1,90 @@
+{
+  "id": "TASK-003",
+  "title": "子包 `internal/hestia/sheets` 骨架 + 表头解析：`Columns` / `ResolveHeader` / `ColumnLetter`",
+  "description": "对应需求文档 **TASK-003**（`/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-16-hestia-m2b-sheets.md` 的「## TASK-003」节）。需求原文给了完整的分步 TDD 流程、代码与预期输出，**以原文为准**；本 DoD 只写验证者逐条对照的判据、原文没写的机制约束与 Arcforge 承载裁决。承载层裁决出处：`.arcforge/docs/01-design/architecture-decisions.md`（AD-M2b-1…8）。\n\n🔴 **本 sprint Arcforge 编号 == 需求文档编号**（001–011 一一对应，012 不建任务），commit subject 用 `<type>(TASK-0NN):`。\n\n🔴 **过程性落盘（AD-M2b-4）**：需求文档每个 `- [ ] Step N` 完成后，往你的 checkpoint 追加一行 `- [x] {TASK-003} Step N <一句话> @<HH:MMZ>`。这不是可选项。\n\n全局约束 C1–C11 见需求文档「Global Constraints」，每个任务隐含全部约束；本 DoD 的 `non_functional` 只列本任务直接触碰的条目。\n\n⚠️ `writes` 含 `internal/hestia/store_test.go` 只为**登记**子包新导出面（`sheets.ResolveHeader`、`sheets.ColumnLetter`）——那是 001 的守卫强制的。不得改该文件的其他内容。",
+  "module": "hestia-sheets",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/hestia/sheets/sheets.go",
+    "internal/hestia/sheets/header.go",
+    "internal/hestia/sheets/header_test.go",
+    "internal/hestia/sheets/row.go",
+    "internal/hestia/store_test.go"
+  ],
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "packages": [
+    "./internal/hestia/sheets"
+  ],
+  "writes": [
+    "./internal/hestia/sheets/sheets.go",
+    "./internal/hestia/sheets/header.go",
+    "./internal/hestia/sheets/header_test.go",
+    "./internal/hestia/sheets/row.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "status": "accepted",
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`ResolveHeader([]string{\"月份\",\"\",\"社融存量\"}, []string{\"社融存量\",\"月份\"})` 返回 `Columns{\"社融存量\": 2, \"月份\": 0}`；🔴 **标签两端空白被 `TrimSpace`**：`ResolveHeader([]string{\" 月份\", \"社融存量 \"}, …)` 得 `{\"月份\":0,\"社融存量\":1}`（需求 `TestResolveHeaderTrimsSpace`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`ColumnLetter`：`0→A`、`25→Z`、`26→AA`、`34→AI`（录入区上界）、`53→BB`（计算区上界）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`sheets/row.go`（**Leader 裁决从需求 004 挪来**，理由：需求依赖表 005←003 与 Interfaces「005 消费 004 的 Row/Cell」矛盾，Row/Cell 是纯类型归骨架）：`Cell{Label string; Value any}`、`Row{Year, Month int; Cells []Cell}`——**按需求原文，Row 无 `PeriodType` 字段**；🔴 类型注释明写「数值列 `Value` 必须是 `float64`，RAW 模式下 string 会让格变文本、AJ–BB 公式失效而表面数字还在」。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`sheets.go` 包注释写明 **C2**（不收 `*Store`/`*sql.DB`）与 **C7**（默认 transport、不照抄 `fetch.go` 的空 `Transport{}`）。⚠️ 需求原文 line 531 把 transport 那条误写成 C6，**照抄时改成 C7**，验证者不因此判红。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "**C3**：需求两组「`月份` 在 0/1 列互换」夹具都通过（列号按运行时表头，不按固定位置）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "🔴 **写口守卫登记**：本任务新增的导出函数/方法让 `TestPackageExposesNoWriteFunctions` 先红，在 `store_test.go` 的 `want` 里登记后转绿；并按需求原文在守卫文件追加「为什么名单里多了 <符号>」注释段（每个新符号一句它为什么不是写口）。红的原始输出贴 discovery `verification.red_phase`。 新符号：`sheets.ResolveHeader`、`sheets.ColumnLetter`。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "任一标签缺失 ⇒ `err != nil` 且 `err.Error()` **同时含全部缺失标签**（如 `社融存量` 与 `M2余额`），整批拒绝不返回部分结果。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "子包**不 import `database/sql`**、不 import 父包（`go list -deps ./internal/hestia/sheets | grep -c database/sql` == 0）。`go test ./internal/hestia/... -count=1` 全绿、`gofmt`/`go vet` 零输出、无新增依赖。提交前跑 code-simplifier（Task tool `code-simplifier:code-simplifier`），子代理回复不可采信、以 `git diff` 为准，有改动一并进提交并在 discovery `decisions` 申报。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-17T06:57:31Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-m2b-b",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "4a10d7cbed2129902fc4bca701599f9a23a92168",
+    "discovery_sha256": "c4a67973af561a6d20df40a6c83a674b644ad3ec544db8b7a4d46a0decaf7c64",
+    "at": "2026-09-16T12:34:22Z"
+  },
+  "verifier": "test-m2b-a"
+}

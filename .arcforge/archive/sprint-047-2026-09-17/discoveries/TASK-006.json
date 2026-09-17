@@ -1,0 +1,220 @@
+{
+  "task_id": "TASK-006",
+  "written_by": "dev-m2b-c",
+  "written_at": "2026-09-17T08:00:00Z",
+  "branch": "task/TASK-006",
+  "commit": "8f386a47499a60b092cba09717a98d11cac06d14",
+  "base": "639c53ef6970ddc5eb140547d9779ce774e06c8c",
+  "key_findings": [
+    "🔴 C1 依赖锁定的坑：基线 go.mod 里 google.golang.org/api 是 v0.189.0 // indirect。`GOTOOLCHAIN=local go get google.golang.org/api@v0.250.0` 后跑 `go mod tidy`，tidy 把这行**整个删掉**（此时无人 import）。写完 client.go（import sheets/v4、option、googleapi）后必须**再 go get @v0.250.0 一次**再 tidy，才落成直接依赖 `go.mod:20 google.golang.org/api v0.250.0`。若跳过第二次 go get 直接 tidy，会按 latest 解析到 v0.251+（要 go≥1.25）——正是需求 Step 1 警告的那条路。验证者复算时请注意顺序。",
+    "go get 连带升级：golang.org/x/sync 0.16.0→0.17.0（直接依赖）、x/sys 0.35→0.36 / x/text 0.28→0.29 / protobuf 1.36.8→1.36.9（间接）；tidy 顺手把 github.com/spf13/pflag 从 // indirect 改为直接（陈旧标注，非本任务引入）。go.sum +67/-14 全是这些模块的哈希行。`go` 指令仍 1.24.4，无 toolchain 行；GOTOOLCHAIN=local go build ./... 通过。",
+    "服务账号鉴权不出网的做法：testdata/fake-sa.json 的 token_uri 是占位；测试 fakeCredentials() 把它复制到 t.TempDir() 并改成 httptest 的 /token，fake 服务对 /token 回一枚假 access token 且**不记录**（它不是 Sheets API 调用，否则 rec.bodies 会多 1 条）。私钥由 openssl genrsa 2048 现场生成、生成后即删 pem，不对应任何 Google 项目。",
+    "Sheets API 的 URL：values.get 的 range 直接进路径，httptest 侧 r.URL.Path 解码后就是 `/v4/spreadsheets/sheet-id/values/'2025年'!A3:AI3`，用 map 按解码路径查表即可；batchUpdate 是 `POST /v4/spreadsheets/sheet-id/values:batchUpdate`。",
+    "googleapi.Error 带 Code；wrapErr 用 errors.As 取出后拼成 `HTTP 403 Forbidden`，测试按 http.StatusText 断言。非 googleapi 错误（网络/ctx）原样 %w。",
+    "WriteCells 不按 Kind 过滤：只提交 WillWrite 是 push（007）的决定，薄壳给什么写什么。空切片直接返回 nil 不发请求。",
+    "gitnexus impact/detect-changes 仍不可用。文本回退：6 个新导出符号在仓库内尚无调用者（007/008 消费）。",
+    "🔴 **CRITICAL-1 的根因有直接证据，不是推断**：RED 阶段打出来的实际查询串是 `alt=json&prettyPrint=false`——**里面根本没有 valueRenderOption**。pinned 模块 sheets-gen.go:11695 明写默认 FORMATTED_VALUE ⇒ 数值以格式化文本回来，而 toFloat 当时没有 string 分支 ⇒ sameValue 退化成 fmt.Sprint 比较 ⇒ 带格式的列全判 WillWrite，幂等失效、每次 --apply 全量重写、dry-run 的「一致跳过」恒为 0。",
+    "🔴 **CRITICAL-2 的根因是两个常量指向同一张表**：templateYearTab 是 \"2024年\"，而 tabName(2024) 也是 \"2024年\"。首次 --apply 会把「模板」填满；明年 1 月跨年建表复制到的就是一张带数据的表，新年度表 2–12 月带着上一年的数字，而**库里没有对应月份的行不会被 Diff 触碰**（Diff 只遍历 rows），那些假数字会一直留着。ingest 固定 Apply+CreateSheets ⇒ 自动发生、无告警。",
+    "清空必须排在 duplicate **之后**——顺序反了就是清模板的录入区，那才是真的删人工数据。这条单独加了 `require.Less(iDup, iClear)` 断言，不是靠注释约束。",
+    "`toFloat` 的 string 分支不是「以防万一」，它服务两个**方向相反**的场景：同值的文本形态不该重写（幂等），而表里真是文本格且值不同时**要**写回数字（文本格会让 AJ–BB 的 19 个公式失效）。两条各有断言。百分号只去符号**不除以 100**——本表的同比/占比/利率列存的就是不带符号的百分数。",
+    "🔴 **消融当场逮到我自己写的一个假绿**：`TestDiffTreatsStringNumbersAsSame` 原本用 `\"462.06\"` 对 `462.06`，而 `fmt.Sprint(462.06)` 恰好也是 `\"462.06\"` ⇒ 即使删掉 string 分支它也绿，**因为巧合而不是因为被测性质**。换成带千分位的 `\"255,800\"` 对 `255800.0` 后立刻红。⇒ 消融的价值不只是证明守卫有效，还会暴露「因巧合而绿」的用例。",
+    "🔴 **`entryRowOffset` 恰好等于 `headerRow`（都是 3）**，所以 `Row = Month + entryRowOffset` 在 Month=0 时会把格写进**表头行**——破坏 C3 依赖的表头本身，此后所有投影都会因表头解析失败而永久停摆。这不是「写错一行」，是让整条能力不可恢复地停摆。越界现在不产出任何 Change：产出了就有机会被 WriteCells 写出去。",
+    "🔴 **`TotalUpdatedCells` 此前是一条整个不存在的反馈回路**：响应被 `_` 丢弃、全仓命中 0 ⇒「API 返回 200 但一格都没写」在结构上不可能被任何测试或运行时检查发现，调用方会拿到 nil error 然后以为写成功了。判据取**相等**而非「大于 0」：少写一格与一格没写同样是错的，且同样无人察觉。",
+    "🔴 **替身比真实系统仁慈，这是本包全部盲区的共同形状**：它从不失败，也从不返回意外形状。六条差异已列进 push_test.go 顶部——渲染形态（CRITICAL-1 由此漏过）、写入结果（[8] 由此漏过）、失败层次（CRITICAL-3 的生产形态走的正是零覆盖那条）、表结构（CRITICAL-2 的自污染由此而来）、并发与配额（**仍无覆盖**）、服务端状态（**本文件证不了「清空后真的空了」**）。",
+    "🔴 **结构化核对逮到了读两轮都没发现的第二处假溯源**：把「注释里点名的测试函数」与「实际定义的函数」做集合差，发现 `TestPushCreateSheetsHookRunsBeforeWrite` **全仓已无定义**（TASK-008 的 b119a5a 删的，因为它断言 error 含 \"TASK-008\"，真接线做完后按设计必然失效），而 007 段的映射注释一直还在点它。⇒ 「靠结构不靠判断」在本轮拿到第二个实例。",
+    "⚠️ 该结构化核对的**已知局限**：修正后重跑仍会命中那个名字——因为新注释正是在说明它已被删除。这个检查分不出「声称它存在」与「记录它不存在」，那一步仍需人看一眼。",
+    "网络层失败夹具用 TEST-NET-1（RFC 5737 的 192.0.2.1:1）而不是 localhost 随机端口：后者偶尔会被别的进程占用。⚠️ 必须配 `context.WithTimeout`——不加的话 TCP 连不可路由地址要等系统默认超时，实测让整个包从 **0.6 秒变 30.8 秒**。",
+    "🔴 **上一轮的钳制本身是对的，未达标的是它静默**——这个区分要紧：位置、反空洞对照、三个变异全 KILLED 都没问题，问题是 `Diff` 只返回 `[]Change`，越界行被整行跳过之后**结构上没有任何通道**能把「我丢了一行」告诉调用方。⇒ 「修好了缺陷」与「修好之后调用方看得见」是两件事。",
+    "🔴 **文档注释被自己的修复打成了假话，而且它挂在导出函数上**：`Diff` 原注释宣称「每行 × 每列恰产出一条…**少一条就有一格无声消失**」，而上一轮的钳制恰好让「少一条」成了常态——那句话于是**逐字描述了新代码的行为**。⇒ **收窄一条不变量时，宣称它的那段文字与依赖它的那段代码必须一起改**，否则文档本身会变成下一条假溯源。这和本任务第 2 轮改掉的两处假溯源是同一族，只是载体从「测试映射注释」换成了「函数契约注释」。",
+    "判据取**性质**不取成因：`DroppedCells` 算的是「期望 `len(rows)×len(cols)` − 实得 `len(changes)`」，不是「数一数几行越界」。将来若出现第二种让 `Diff` 少产出的情形，这个字段同样会亮，不需要再加一个。",
+    "🔴 **`tally` 的正确处置与直觉相反**：Leader 提醒「若给 `Kind` 加新值，`tally` 的分支要同步」，而实际需要的是**让 `tally` 刻意不碰 `DroppedCells`**——被丢的格根本不在 `res.Changes` 里、重算不出来；而第 6 步建完新表后 `tally` 会被**再调一次**，若在那里清零就会把前面累计的抹掉。已单独做变异（N3）确认这条会红。",
+    "**字段加了不打印等于没有出口**：`Result.DroppedCells` 若只存在于结构体里，dry-run 的人永远看不到。所以必须连带改 `cmd/atlas`（越界，已申报）。且**只在非零时打印**——恒在的那一行会变成人人忽略的固定噪声，等于没打。"
+  ],
+  "decisions": [
+    {
+      "decision": "在需求 2 条测试之外补 7 条：QuotesSheetNameAndUsesColumnLetter（ASCII 表名也加引号、AI15 两字母列）、ReportsHTTPStatus（403/500）、ErrorsWhenCredentialsFileMissing、TabsListsSheetTitles、ReadHeaderReadsRowThree（A3:AI3）、ReadEntryAreaReadsRows4To15（A4:AI15，短行原样）、ClientDoesNotUseBareTransport（源码断言）",
+      "rationale": "DoD functional[0] 的四个方法、boundary[0] 的无条件引号与 ColumnLetter、error_handling[0] 的两条、non_functional[0] 的 C7 都 verify_by test/manual 而需求原文只给了 WriteCells 与 C9 两条。C7 用源码断言是因为「用了哪个 transport」在行为上只有到境外才看得出来。"
+    },
+    {
+      "decision": "需求原文测试里 `{Sheet: \"2025年\", Row: 9, Col: 2, Value(462.06)}` 改为 `Want: 462.06`",
+      "rationale": "原文混用键值与位置字面量不能编译，且 Change（005）没有 Value 字段，将写值是 Want。"
+    },
+    {
+      "decision": "Option 类型定义为 func(*[]option.ClientOption)，NewClient 内部固定先放 WithCredentialsFile 再应用 opts",
+      "rationale": "只为测试开 endpoint 一个口子（需求原文），不暴露 google 的 option 包给调用方；顺序固定让 WithEndpoint 覆盖默认 endpoint。"
+    },
+    {
+      "decision": "ReadHeader 用 fmt.Sprint 把第 3 行每格转 string；空表头（values 为空）返回 nil,nil",
+      "rationale": "Sheets 以 RAW/UNFORMATTED 读回的表头可能不是 string（数字标签）；ResolveHeader 收 []string。"
+    },
+    {
+      "decision": "接受 code-simplifier 的唯一改动：client_test.go 把 newFakeSheets(t, rec, resp, status) + testClient(t, url) 合并为 newTestClient(t, resp, status) (*Client, *recorder)；client.go / store_test.go / go.mod / go.sum / testdata 未动",
+      "rationale": "子代理回复「同前,无变化」为假：pre-simplifier.sha 6 文件比对（**单独一条命令，未与 commit 链**）只有 client_test.go FAILED；逐行读过，9 条测试体与 43 条 require 断言零删减、语义不变；9/9 PASS、gofmt/vet 空。"
+    },
+    {
+      "decision": "commit subject 用 feat(TASK-006): 而非需求原文的 feat(hestia/sheets):",
+      "rationale": "与 001–005 同。"
+    },
+    {
+      "decision": "fix_items[6] 的 N7 **没有照抄验证者夹具**，改为直接钉性质",
+      "rationale": "验证者的夹具把模板设成 777，而它造的其余表是 10/12 ⇒ **模板仍然是最大值**，所以「用 tplID+1 代替 maxID+1」这个变异在它那儿**同样不红**——照抄等于把一个不生效的守卫搬过来。我改成让模板不是最大 id（10 / 777 / 9000），两个算法就分叉了；消融实测该变异只被这一条杀掉。N10 连建两张的累计 index 照移（那条是真缺口，首轮只测了单张）。"
+    },
+    {
+      "decision": "fix_items[5] 的「端到端」只能做到请求层，已标为人执行项",
+      "rationale": "httptest 替身不建模服务端状态，所以能证的是「模板带数据时清空请求仍被发出且覆盖整块录入区」，证不了「服务端执行后真的空了」。后者属 spec §10 判据五，要对真表跑——留给 TASK-012 的人执行清单。写进 degradations 而不是假装做到了。"
+    },
+    {
+      "decision": "做了四次消融验证新守卫确实在守",
+      "rationale": "新增的两条守卫（N7 的 id 推导、N10 的累计 index）是**已经成立的性质**的回归守卫，不是修复——这类守卫最容易写成恒真。四次变异全部 KILLED 且杀掉的正是对应的那条；收尾用指纹比对确认工作区还原（还原后 git status 0 改动）。"
+    },
+    {
+      "decision": "另修两处我自己写错的夹具",
+      "rationale": "diff_test 里 Month 写成 4 而 current[0] 对应 1 月（行号 = Month+3），用例其实在测「表中无值」而不是被测性质；client_test 里 newID 是 int 而实际是 int64，testify 的 Equal 比类型会假红。两处都不是 fix_items 要求的，但不改就会让本轮新断言失去意义。"
+    },
+    {
+      "decision": "[9] 收尾判据：做了一张两列并排表，对照 5 条、改了 1 条",
+      "rationale": "左列是变异实测（观察），右列是注释自称（声称）。结果：createYearTabs 的 err 不返回 ⇒ 只红 TestPushStopsWhenCreateYearTabFails（本轮之前由 TASK-008 的 ba6c589 写的）；补做 diff 的 err 不返回 ⇒ 只红 TestPushStopsWhenNewTabDiffFails（5af1701）。顶部那句「push.go:177-179 已在 5af1701 做掉（TestPushStopsWhenNewTabDiffFails）」**两处都错**，且与 49 行外的另一条注释直接矛盾。⇒ QA 立项时说的「『我做了某个检查』这件事本身，在检查用对和用错时取相同值」，本轮由变异结果独立复现。"
+    },
+    {
+      "decision": "[8] 连带把两个替身改成从请求体算 totalUpdatedCells，而不是写死",
+      "rationale": "写死等于让替身永远说「我全写成功了」——那正是 [11] 说的「替身比真实系统仁慈」的又一例，等于用一个新盲区去补旧盲区。从 data 长度算出来则让替身的行为随被测代码的输入变化，要测「200 但没写」这种形状时在 resp 里显式覆盖即可。"
+    },
+    {
+      "decision": "逐块给出 profile 计数，不拿包级百分比作证（[8] 的方法论要求）",
+      "rationale": "QA 指出上一轮之所以能静默滑过，是因为「相邻分支已被覆盖」在总数上看不出来——sheets 从 89.1% 涨到 91.0%，**数字在涨，而指名的那一行仍是 0**。本轮逐块给：WriteCells 的 len==0 早退 0→1、wrapErr 的网络层分支 0→1（wrapErr 现 100%）、wrapErr 的 googleapi 分支 1→1、client.go 未覆盖块数 9→7。⚠️ 坐标随我的改动漂移，改后按**函数**重新定位而非套用旧行号。"
+    },
+    {
+      "decision": "接受 Leader 的 [10] 更正：我给 891a95f 写的「静默失效」理由被实验证伪",
+      "rationale": "那六个用例每条都带 require.Error，failPath 键与夹具脱钩后注入落在不会被请求的路径上，Push 顺利跑完 ⇒ **error 断言当场红**。换常量仍然值得做，但理由是「消除重复、上游改表名时一处改全处跟」。⇒ 与本任务第 1 轮撞的 `\"462.06\"` 假绿**方向相反、病根相同：两次都是没实测就写下了机制描述**。本轮起的做法：写「若 X 则静默失效」之前先造一个 X 跑一次，成本是一条 sed 加一次 go test。"
+    },
+    {
+      "decision": "走路线 A（`Diff` 签名不动，出口加在 `Push` 的 `Result` 上）",
+      "rationale": "`Diff` 是导出函数、被别的调用方用，改签名会波及它们；而 `diffTab` 这一层本来就同时握着 rows、cols 与结果，算「期望 − 实得」是一行的事。路线 B（`Diff` 直接返回 error）的代价是把一个**不该中断整批**的情况升级成错误——越界行不该让其余年度表也推不了。"
+    },
+    {
+      "decision": "越界申报把 `cmd/atlas/hestia_sheets.go` 与其测试纳入 writes（它们属已 verified 的 TASK-009）",
+      "rationale": "fix_items[2] 第 ③ 步明写「dry-run 一并打印」，而打印发生在 `formatResult`，它在 009 的 writes 里。Leader 已授权越界但要求 dev 自己落盘（一进 `dev_done` 就再没有任何角色写得了该字段）。009 已 verified、不在途，不触发 scope-mutex。已在交付报告里请 Leader 若不同意就撤。"
+    },
+    {
+      "decision": "五个变异逐条给出，其中 N5 是对上一轮守卫的回归",
+      "rationale": "N1 `diffTab` 恒报 0 / N2 `Push` 不累加 / N3 `tally` 清零 / N4 `formatResult` 不打印 —— 各自只红对应那条；N5 去掉月份钳制 ⇒ 红上一轮的四个子例**加**本轮这条，证明新旧守卫叠加而非互相顶替。收尾工作树 0 改动、HEAD 未变。"
+    },
+    {
+      "decision": "把「变异前必须先提交」从 checkpoint 提醒改写成 harness 里的拒绝执行守卫",
+      "rationale": "🔴 **本轮我把自己的未提交工作冲掉了一次**：变异 helper 里的 `git checkout -- .` 在未提交状态下跑，第一个变异还原时把三处实现连同测试一起冲回 master 状态（已按对话记录重新落地，内容一致、无丢失）。**这是同一个坑的第二次**——第 1 轮踩过并已写进 checkpoint。⇒ 记住规则不产生遵守规则的能力。改法不是「下次记得」，而是把前置条件变成**会拒绝执行的守卫**：`scratchpad/dev-m2b-c-mutate.sh` 的 `require_clean_tree` 在工作树非干净时 REFUSE 并列出会被冲掉的文件。**两个方向都自测过**（脏树被拒、干净树放行）——只测拒绝那一半的话，一个「永远拒绝」的实现同样能通过。harness 里还固化了两条：编译闸命中打印「变异无效（**不是 KILLED**）」、无测试变红打印「**SURVIVED，不是 KILLED**」。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/sheets/diff.go（第 3 轮 +13/-2：`Diff` 文档注释的不变量改成有条件形式，并记明它被收窄过一次而注释没跟着改）",
+    "internal/hestia/sheets/push.go（+25/-7：`Result.DroppedCells`；`diffTab` 多返回一个 dropped；`Push` 两处累加；`tally` 加「不碰该字段」的说明）",
+    "internal/hestia/sheets/push_test.go（+35/-0：`TestPushReportsDroppedCellsWhenMonthOutOfRange`，含反空洞对照与新形式的不变量断言）",
+    "cmd/atlas/hestia_sheets.go（+9/-0：`formatResult` 在 DroppedCells 非零时打印「⚠️ N 格未比对」）",
+    "cmd/atlas/hestia_sheets_test.go（+13/-0：`TestFormatResultAnnouncesDroppedCells`，含「零时不打印」的反空洞对照）"
+  ],
+  "interfaces_exposed": [
+    {
+      "name": "func NewClient(ctx context.Context, credentialsFile, spreadsheetID string, opts ...Option) (*Client, error)",
+      "scope": "package sheets 导出（008 编排消费）",
+      "semantics": "credentialsFile==\"\" ⇒ (nil, nil) 能力禁用；文件不存在 ⇒ error 含路径；否则 option.WithCredentialsFile + opts 建 sheets.Service。默认 transport（C7）。"
+    },
+    {
+      "name": "type Option；func WithEndpoint(url string) Option",
+      "scope": "package sheets 导出",
+      "semantics": "把 API 根地址指向 url；测试用 httptest.Server。"
+    },
+    {
+      "name": "func (c *Client) Tabs(ctx) ([]string, error)",
+      "scope": "package sheets 导出（008 判缺表）",
+      "semantics": "GET spreadsheets/{id}?fields=sheets.properties.title，返回标题按 API 顺序。"
+    },
+    {
+      "name": "func (c *Client) ReadHeader(ctx, tab string) ([]string, error)",
+      "scope": "package sheets 导出（007 push 第 3 步）",
+      "semantics": "GET values/'tab'!A3:AI3，每格 fmt.Sprint；空 ⇒ nil。"
+    },
+    {
+      "name": "func (c *Client) ReadEntryArea(ctx, tab string) ([][]any, error)",
+      "scope": "package sheets 导出（007 diff 的 current）",
+      "semantics": "GET values/'tab'!A4:AI15，原样返回 [][]any（索引 0=1 月，短行/短表原样）。"
+    },
+    {
+      "name": "func (c *Client) WriteCells(ctx, changes []Change) error",
+      "scope": "package sheets 导出（007 push）",
+      "semantics": "一次 values:batchUpdate，ValueInputOption=RAW，每格一个 range `'Sheet'!<ColumnLetter(Col)><Row>`，值 [[Want]] 原样；不按 Kind 过滤；空切片不发请求；4xx/5xx ⇒ error 含 `HTTP <code> <text>`。"
+    }
+  ],
+  "verification": {
+    "sampled_at": "task/TASK-006 @ 5f5136fc515ea4b3a12f07897c4b022fc2e031ca（提交后重采，含 simplifier 改动）",
+    "red_phase": {
+      "step2_undefined": "internal/hestia/sheets/client_test.go:80:47: undefined: Client\n…:82:12: undefined: NewClient\n…:82:84: undefined: WithEndpoint\nFAIL [build failed]（完整输出 scratchpad/dev-m2b-b-TASK-006-red1.txt）",
+      "guard_red": "TestPackageExposesNoWriteFunctions: -([]string) (len=43) / +([]string) (len=49)，+ sheets.Client.ReadEntryArea / sheets.Client.ReadHeader / sheets.Client.Tabs / sheets.Client.WriteCells（在 sheets.ColumnLetter 之前）、+ sheets.NewClient（Diff 之后）、+ sheets.WithEndpoint（末尾）；--- FAIL。TestStoreExposesNoWriteMethods PASS（完整输出 scratchpad/dev-m2b-b-TASK-006-red2-guard.txt）"
+    },
+    "green": "go test ./internal/hestia/sheets/ -run 'TestWriteCells|TestNewClient|TestTabs|TestRead|TestClient' -v ⇒ 9/9 PASS；-run ExposesNoWrite ⇒ 2/2 PASS",
+    "package_tree": "GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 ⇒ hestia ok、hestia/sheets ok",
+    "regression": "GOTOOLCHAIN=local go test ./... ⇒ 65 ok / 0 FAIL（scratchpad/dev-m2b-b-TASK-006-step4.txt，simplifier 前采样；simplifier 后 ./internal/hestia/... 两包重跑 ok）",
+    "c1_three_checks": "grep -n 'google.golang.org/api v0.250.0' go.mod ⇒ 20:\\tgoogle.golang.org/api v0.250.0；grep '^go ' ⇒ go 1.24.4（无 toolchain 行）；GOTOOLCHAIN=local go build ./... ⇒ ok",
+    "c7": "grep -c 'http.Transport{' internal/hestia/sheets/client.go ⇒ 0（TestClientDoesNotUseBareTransport 同断言）",
+    "gofmt_vet": "gofmt -l internal/hestia/ 空；go vet ./internal/hestia/... 空",
+    "want_counts": "reflect 版 15 项不变；AST 版 43→49，源码解析确认",
+    "simplifier_sha_compare": "pre-simplifier.sha 6 文件 shasum -c（独立命令）：仅 client_test.go FAILED，其余 5 个 OK",
+    "merge_preview": "临时 worktree（master@639c53e）merge --no-ff --no-commit task/TASK-006：Automatic merge went well，冲突文件 0；已 abort 并拆除",
+    "reproduce": "git worktree add --detach <tmp> 5f5136fc515ea4b3a12f07897c4b022fc2e031ca && cd <tmp> && GOTOOLCHAIN=local go build ./... && GOTOOLCHAIN=local go test ./internal/hestia/... -count=1 -v -run 'TestWriteCells|TestNewClient|TestTabs|TestRead|TestClient|ExposesNoWrite' && grep -n 'google.golang.org/api v0.250.0' go.mod",
+    "rework_red_phase": {
+      "留痕": "scratchpad/dev-m2b-c-TASK-006fix-red1.txt（CRITICAL-1，8 条 --- FAIL）、-red2.txt（CRITICAL-2 与渲染选项，3 条）",
+      "根因直证": "\"alt=json&prettyPrint=false\" does not contain \"valueRenderOption=UNFORMATTED_VALUE\"\n第 0 个读请求没要 UNFORMATTED_VALUE（实际查询串 \"alt=json&prettyPrint=false\"）—— 默认 FORMATTED_VALUE 会回文本\n必须有一条清空新表录入区的请求；请求体：{\"requests\":[{\"duplicateSheet\":…},{\"updateSheetProperties\":…},{\"updateCells\":…},{\"updateSheetProperties\":…}]}（只有四步，没有清空）"
+    },
+    "rework_ablation": {
+      "方法": "在本任务专属 worktree 内逐个变异 + `git checkout --` 还原；收尾比对指纹一致、git status 0 改动。",
+      "M1 新表 id 改用 tplID+1": "KILLED —— 只红 TestCreateYearTabDerivesNewIDFromMaxNotTemplate（1 条）",
+      "M2 去掉第 5 步清空": "KILLED —— 红 TestCreateYearTabClearsNewTabEntryArea、TestCreateYearTabClearsEvenWhenTemplateHasData（2 条）",
+      "M3 去掉 ValueRenderOption": "KILLED —— 红 TestReadUsesUnformattedValue（1 条）",
+      "M4 toFloat 去掉 string 分支": "KILLED —— 红 6 条，且**加强后**才连 TestDiffTreatsStringNumbersAsSame 一起红（见 key_findings 的假绿那条）"
+    },
+    "rework_content_check": "五文件在合入后的 master@4a3d3a3 与交付 worktree 两处 sha256 逐字节一致；task/TASK-006-fix 的 `git rev-list --count master..` = 0。",
+    "rework_suite": "master@4a3d3a3 上实跑 GOTOOLCHAIN=local go test ./... -count=1 ⇒ 退出码 0、65 ok、0 FAIL；internal/hestia/sheets 覆盖率 **91.0%**（返工前 89.1%）；gofmt -l internal/hestia/sheets/ 0 行；go vet ./internal/hestia/... 0 行。",
+    "rework_scope": "git diff --numstat c4bbb39..4a3d3a3 -- internal/hestia/sheets 恰为声明范围内五文件（client.go 35/4、client_test.go 148/0、diff.go 45/0、diff_test.go 107/0、push_test.go 131/1）；go.mod / go.sum / store_test.go / testdata 本轮未动。",
+    "r2_prework": "按 fix_items 要求，先在**当前 HEAD 042c739**（而非验证者用的基线树 b53708f）上复测两个指名块：client.go 的 wrapErr 网络层分支 = 0、WriteCells 的 len==0 早退 = 0，googleapi 分支 = 1。确认仍为 0 才动手。另 `git log --oneline -5 -- internal/hestia/sheets/` 确认无第三方提交。",
+    "r2_mutation_table": {
+      "方法": "左列 = 变异实测（观察：哪条测试红了），右列 = 注释自称（声称）。逐行比，靠结构不靠判断。",
+      "M-A createYearTabs 的 err 不返回": "红 TestPushStopsWhenCreateYearTabFails —— 与顶部注释自称的 TestPushStopsWhenNewTabDiffFails **不符**，已改",
+      "M-B 补做 diff 的 err 不返回": "红 TestPushStopsWhenNewTabDiffFails —— 与函数上方注释相符",
+      "M-C 去掉月份钳制": "红 TestDiffSkipsRowsWithMonthOutOfRange —— 相符",
+      "M-D 去掉 TotalUpdatedCells 对账": "红 TestWriteCellsChecksTotalUpdatedCells —— 相符（⚠️ 第一版补丁留下未使用变量，被**编译闸**判为变异无效，重做一版才拿到结果）",
+      "M-E 去掉 WriteCells 的 len==0 早退": "红 TestWriteCellsWithNoChangesSendsNothing —— 相符",
+      "结论": "对照 5 条、改了 1 条；另有 1 条由结构化集合差发现（见 key_findings）。收尾 git status 0 改动。"
+    },
+    "r2_content_check": "五文件在合入后的 master@96272b9 与交付 worktree 两处 sha256 逐字节一致；task/TASK-006-fix2 的 `git rev-list --count master..` = 0；master 上 grep 月份钳制命中 1、TotalUpdatedCells 命中 2。",
+    "r2_suite": "master@96272b9 上实跑 go test ./... -count=1 ⇒ 退出码 0、65 ok、0 FAIL；internal/hestia/sheets 覆盖率 95.2%（本轮前 91.0%）；gofmt 与 vet 零输出。",
+    "r3_mutations": {
+      "方法": "在本任务 worktree 内，**先提交再变异**，每次 `git checkout --` 还原；收尾比对工作树 0 改动、HEAD 未变。",
+      "N1 diffTab 恒报 0 丢格": "KILLED — TestPushReportsDroppedCellsWhenMonthOutOfRange",
+      "N2 Push 不累加 dropped": "KILLED — 同上",
+      "N3 tally 清零 DroppedCells": "KILLED — 同上（这条专为验证「tally 必须不碰该字段」而做）",
+      "N4 formatResult 不打印": "KILLED — TestFormatResultAnnouncesDroppedCells",
+      "N5 去掉月份钳制（上一轮守卫的回归）": "KILLED — TestDiffSkipsRowsWithMonthOutOfRange 四个子例 + TestPushReportsDroppedCellsWhenMonthOutOfRange，证明新旧守卫叠加而非互相顶替"
+    },
+    "r3_content_check": "五文件在合入后的 master@6ed3984 与交付 worktree 两处 sha256 逐字节一致；`git rev-list --count master..task/TASK-006-fix3` = 0；master 上 `DroppedCells` 在 push.go 命中 6、hestia_sheets.go 命中 2。",
+    "r3_suite": "master@6ed3984 上实跑 `go test ./... -count=1` ⇒ 退出码 0、65 ok、0 FAIL；`internal/hestia/sheets` 覆盖率 **95.3%**（第 2 轮 95.2%）、`cmd/atlas` 78.0%；**我声明范围内**的文件 gofmt 零输出、`go vet ./...` 零输出。⚠️ 全树跑 `gofmt -l internal/ cmd/` 会列出仓库既有漂移的文件，那与本任务无关（Leader 已核过 29 个都不是本 sprint 碰的）。",
+    "r3_scope": "`git diff --numstat 96272b9..6ed3984` 恰为声明范围内五文件（hestia_sheets.go 9/0、其测试 13/0、diff.go 13/2、push.go 25/7、push_test.go 35/0）。"
+  },
+  "degradations": [
+    "gitnexus impact / detect-changes 不可用，文本回退见 key_findings[6]。",
+    "全量 go test ./... 的 65 ok 采样于 simplifier 之前；simplifier 只改了 client_test.go，之后重跑了 ./internal/hestia/... 两包。",
+    "fix_items[5] 的「端到端」止步于请求层：httptest 替身不建模服务端状态，证不了「服务端执行清空后真的空了」。该性质属 spec §10 判据五，要对真表跑，已列入 TASK-012 的人执行清单。",
+    "parseSheetNumber 只认千分位、百分号、会计负数括号、前后空格这四种形态。真 API 在 FORMATTED_VALUE 下还可能回带货币符号或科学计数法的串——但本包已显式要 UNFORMATTED_VALUE，那些形态只在「表里真是文本格」时出现，解析不出来会退回字符串比较判 WillWrite，方向安全（写回数字）。",
+    "**429 与部分成功仍无任何覆盖**：替身无速率限制、无 429、无部分成功，而真 API 三者都有。已写进 push_test.go 顶部的形状差异第 5 条，标明是**已知缺口而非已解决问题**。",
+    "**替身不建模服务端状态**：建表之后再读同一张表，读到的仍是夹具里写死的那份 ⇒「清空录入区之后它真的空了」这类性质在本文件**证不了**，只能证明请求发出去了。真正的验证属 spec §10 判据五，要对真表跑。",
+    "结构化核对（注释点名的测试 vs 实际定义的测试）分不出「声称存在」与「记录不存在」，修正后仍会命中已被删除的那个名字，需人看一眼。",
+    "`DroppedCells` 只统计**格数**，不给出是哪些行/月份越界。取舍理由：给出月份需要在 `Push` 层复刻 `Diff` 的钳制规则，那会造出同一条规则的第二个副本——本任务第 2 轮刚因「同一事实两个副本」吃过亏（两处假溯源）。人拿到「N 格未比对」后可回看输入行，成本可接受。",
+    "🔴 **本轮我把自己的未提交工作冲掉了一次**（变异还原），已重新落地且内容一致，但这是同一个坑的第二次；改法见 decisions 最后一条。**该守卫写在 scratchpad 的 harness 里，不在仓库内**——它保护的是我的工作流程，不是产品代码，但也意味着**它不会被任何人继承**。若后续有人做变异测试，值得把这条前置守卫提进 project-template。"
+  ],
+  "commits": [
+    "5af17010e11edfe0e671da27b702175cd0672997 fix(TASK-006): QA 返工——读用 UNFORMATTED_VALUE、toFloat 加 string 分支、建表后清空新表录入区",
+    "61bd2ecb8fe057e44d3437afd682dcc1a5439c5a refactor(TASK-006): code-simplifier —— 清空用例的两次遍历合成一次",
+    "1a7b0f842f0cc02cc1428b75c1b94447abda41c9 fix(TASK-006): 行号钳制、写入格数对账、两个零覆盖分支",
+    "22027a3e5605c824f2e7fbe1f58f54a377074cbd docs(TASK-006): 改掉两处假溯源，补「替身与真实系统的形状差异」",
+    "8f386a47499a60b092cba09717a98d11cac06d14 fix(TASK-006): 越界行的跳过不再静默——Result.DroppedCells + 文档订正 + dry-run 打印"
+  ],
+  "merged_into": "6ed3984",
+  "provenance": "｜ **QA review_fix 第 1 轮（2026-09-17）**：本任务原 owner 是 dev-m2b-b（额度耗尽已停机），Leader 走 `review_fix → assigned` 逃生边改派给 dev-m2b-c（epoch 1→2）——在此之前写通道对我 DENY，**连越界申报都做不了**。9 条 fix_items 全部由 dev-m2b-c 实现；越界申报（diff.go / diff_test.go / push_test.go 进 writes）在动手之前落盘。两条 CRITICAL 的配套测试先写到红，留痕 scratchpad/dev-m2b-c-TASK-006fix-red{1,2}.txt。code-simplifier 在提交之后跑，改动单独作 61bd2ec；这是本 sprint **第一例**子代理回复（「Done.」）与 sha 比对相符的。⚠️ 交付 sha 是 amend 过的：作废的 7248de4 不要取——作废原因是我在消融还原时用 `git checkout --` 把一处尚未提交的测试加强一并冲掉，补回后 amend。本轮全部自证数字在最后一次改动之后、于合入后的 master@4a3d3a3 上统一重采。 ｜ **QA review_fix 第 2 轮（6 条）**：上一轮 7 条已由 test-m2b-c 判 VERIFIED，本轮不重做。开工第一步按要求先在**当前 HEAD 042c739** 上复测两个指名的零覆盖块（验证者是在基线树 b53708f 上测的，且在报告里注明「不要引用本表」），确认仍为 0 才动手。变异在本 worktree 内做、每次 git checkout -- 还原，收尾工作树 0 改动。全部自证数字在合入后的 master@96272b9 上重采。 ｜ **QA review_fix 第 3 轮（epoch 3，rework_count 2/3）**：验证者判 `[1]` 之外五条全 PASS 且「不要动」，本轮**只改 [1]**。走路线 A。越界申报（cmd/atlas/hestia_sheets.go 与其测试进 writes、packages 加 ./cmd/atlas）在动手之前落盘。五个变异全 KILLED，收尾工作树 0 改动。自证数字在合入后的 master@6ed3984 上重采。"
+}
