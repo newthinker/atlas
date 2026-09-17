@@ -10,6 +10,7 @@
 #   - com.newthinker.atlas.crisis-intraday-jpy 每 30 分钟盘中 JPY 检查（非 BREWING/CRISIS 空跑近零）
 #   - com.newthinker.atlas.prism-daily   每天 08:30 Prism 估值刷新（排在 refresh-us 之后）
 #   - com.newthinker.atlas.hestia-ingest 每天 15:30/17:30/21:30 抓央行《金融统计数据报告》（一月只有 1-2 天真有新报告，其余空跑）
+#   - com.newthinker.atlas.hestia-warp   每 30 分钟判一次 hestia 队列，有活才唤起 Warp 解读 agent（队列空时零 agent 调用）
 #   - com.newthinker.atlas.aktools       常驻 AKShare HTTP 侧车（127.0.0.1:8180，需先跑 scripts/akshare/setup.sh）
 #   - com.newthinker.atlas.baostock      常驻 Baostock HTTP 桥（127.0.0.1:8181，需先跑 scripts/baostock/setup.sh）
 #
@@ -29,7 +30,7 @@ rm -f "$LA/com.newthinker.atlas.warehouse-dump.plist"
 mkdir -p "$LA"
 for L in com.newthinker.atlas.serve com.newthinker.atlas.refresh-us com.newthinker.atlas.refresh-cnhk com.newthinker.atlas.analysis \
          com.newthinker.atlas.crisis-daily com.newthinker.atlas.crisis-nfci com.newthinker.atlas.crisis-intraday-jpy \
-         com.newthinker.atlas.prism-daily com.newthinker.atlas.hestia-ingest \
+         com.newthinker.atlas.prism-daily com.newthinker.atlas.hestia-ingest com.newthinker.atlas.hestia-warp \
          com.newthinker.atlas.aktools com.newthinker.atlas.baostock; do
   src="$DEV_ROOT/deploy/launchd/$L.plist"
   [ -f "$src" ] || { echo "[install] 缺少 plist: $src" >&2; exit 1; }
