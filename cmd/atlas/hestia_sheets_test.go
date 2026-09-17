@@ -283,11 +283,9 @@ func TestPushSheetsDryRunWithRowsSendsOnlyGETs(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	creds := fakeSheetsCredentials(t, srv.URL)
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
 		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
-	}
+	})
 
 	var out bytes.Buffer
 	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
@@ -649,12 +647,10 @@ func TestSheetsProjectorBuildsClientOnce(t *testing.T) {
 	srv, _ := stubSheetsServer(t)
 	creds := fakeSheetsCredentials(t, srv.URL)
 	built := 0
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
 		built++
 		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
-	}
+	})
 	_, _ = withCapturedPush(t)
 
 	project := sheetsProjector(hestia.Config{
@@ -670,13 +666,11 @@ func TestSheetsProjectorBuildsClientOnce(t *testing.T) {
 // 懒建：凭据非空不代表这一轮真会入库（多数唤起是幂等空跑）。空跑时不该读凭据、
 // 更不该出网做 JWT 交换——所以造出闭包的那一刻不许建客户端。
 func TestSheetsProjectorBuildsLazily(t *testing.T) {
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
 	built := 0
-	newSheetsClient = func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
 		built++
 		return nil, fmt.Errorf("不该在这里被调用")
-	}
+	})
 
 	project := sheetsProjector(hestia.Config{
 		HestiaSheets: hestia.HestiaSheets{CredentialsFile: "/nonexistent/sa.json"},
@@ -693,18 +687,14 @@ func TestSheetsProjectorSetsDeadline(t *testing.T) {
 	srv, _ := stubSheetsServer(t)
 	creds := fakeSheetsCredentials(t, srv.URL)
 	var clientHasDeadline, pushHasDeadline bool
-	old := newSheetsClient
-	t.Cleanup(func() { newSheetsClient = old })
-	newSheetsClient = func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+	stubNewSheetsClient(t, func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
 		_, clientHasDeadline = ctx.Deadline()
 		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
-	}
-	oldPush := sheetsPush
-	t.Cleanup(func() { sheetsPush = oldPush })
-	sheetsPush = func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+	})
+	stubSheetsPush(t, func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
 		_, pushHasDeadline = ctx.Deadline()
 		return sheets.Result{}, nil
-	}
+	})
 
 	project := sheetsProjector(hestia.Config{
 		HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"},
@@ -718,12 +708,10 @@ func TestSheetsProjectorSetsDeadline(t *testing.T) {
 func TestPushSheetsSetsDeadline(t *testing.T) {
 	creds, _ := withStubSheetsClient(t)
 	var hasDeadline bool
-	old := sheetsPush
-	t.Cleanup(func() { sheetsPush = old })
-	sheetsPush = func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+	stubSheetsPush(t, func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
 		_, hasDeadline = ctx.Deadline()
 		return sheets.Result{}, nil
-	}
+	})
 
 	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
 	require.NoError(t, pushSheets(context.Background(), io.Discard, cfg, sampleSheetRows(), "", sheets.Options{}))
