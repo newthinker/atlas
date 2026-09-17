@@ -43,7 +43,7 @@ func buildHestiaHealth(cfg *config.Config, reg *metrics.Registry, log *zap.Logge
 	}
 	reg.MustRegister(metrics.NewHestiaCollector(func(ctx context.Context) (hestia.Health, error) {
 		return hestia.HealthSummary(ctx, st.DB())
-	}, time.Now))
+	}, nil, time.Now))
 	log.Info("hestia health enabled",
 		zap.String("config", cfg.Hestia.ConfigPath), zap.String("db", hcfg.Storage.DBPath))
 	return func() { _ = st.Close() }, nil

@@ -12,7 +12,10 @@ import (
 // HealthFunc 是 collector 每次抓取时调用的汇总函数；serve 侧包一层 hestia.HealthSummary。
 type HealthFunc func(ctx context.Context) (hestia.Health, error)
 
-// HestiaCollector 把 hestia.Health 映射成九个指标（M1.5 的 TASK-004）。
+// QueueFunc 读契约队列健康度（serve 侧包一层 hestia.QueueHealthOf）。nil = 不采队列指标。
+type QueueFunc func() (hestia.QueueHealth, error)
+
+// HestiaCollector 把 hestia.Health 映射成九个指标（M1.5 的 TASK-004），另加 db_up 与队列指标（TASK-003）。
 //
 // 抓取时现查，不缓存：hestia_runs 一天只有几行，一次三条查询是毫秒级；
 // 缓存会让「serve 活着但读不到库」用陈旧值冒充健康。
@@ -21,17 +24,25 @@ type HealthFunc func(ctx context.Context) (hestia.Health, error)
 // 告警规则找不到指标时评估为 false（internal/alert/rules.go），正是要的行为。
 // HealthSummary 出错时同样不输出事实指标，只让 collect_errors 加一。
 //
+// 队列指标（TASK-003）与 DB 指标各自独立采集：Collect 拆成 collectDB 与 collectQueue
+// 两个方法（C2），任一侧读失败都只熄灭自己那一组，不带走另一组。每侧另输出一个 up gauge
+// （本轮读成功 1 / 失败 0）：*_errors_total 是累计计数，一次瞬时失败后 serve 重启前恒 > 0、
+// 恢复也不熄，告警规则因此改用 *_up == 0（2026-09-17 人类裁决）。
+//
 // now 只从注入的函数取，Collect 里不出现 time.Now()：hours_since 的测试值才可复现，
 // 换成 time.Now 会让 hours_since 断言必红（boundary[0] 的变异判据）。
 type HestiaCollector struct {
 	fetch HealthFunc
+	queue QueueFunc
 	now   func() time.Time
 
-	collectErrors prometheus.Counter
+	collectErrors, queueErrors prometheus.Counter
 
 	lastRun, lastIngest, hoursSinceRun, hoursSinceIngest *prometheus.Desc
 	runsTotal, blockedTotal                              *prometheus.Desc
 	pendingReview, notifyFailures                        *prometheus.Desc
+	dbUp, queueUp                                        *prometheus.Desc
+	queueItems, queuePendingAge, queueProcessingAge      *prometheus.Desc
 }
 
 // hestiaScrapeTimeout 是单次抓取里那三条查询的上限：抓取路径不该拖住 /metrics。
@@ -42,16 +53,21 @@ var allOutcomes = []hestia.RunOutcome{
 	hestia.RunNoNew, hestia.RunIngested, hestia.RunPending, hestia.RunDuplicate, hestia.RunFailed,
 }
 
-// NewHestiaCollector 组装九个指标的描述符；fetch 出错只计 collect_errors，不输出事实指标。
-func NewHestiaCollector(fetch HealthFunc, now func() time.Time) *HestiaCollector {
+// NewHestiaCollector 组装全部指标的描述符；fetch 出错只计 collect_errors 并输出 db_up=0，
+// 不输出事实指标。queue 为 nil 时不输出任何 hestia_queue_ 指标。
+func NewHestiaCollector(fetch HealthFunc, queue QueueFunc, now func() time.Time) *HestiaCollector {
 	d := func(name, help string, labels ...string) *prometheus.Desc {
 		return prometheus.NewDesc(name, help, labels, nil)
 	}
 	return &HestiaCollector{
-		fetch: fetch, now: now,
+		fetch: fetch, queue: queue, now: now,
 		collectErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "hestia_collect_errors_total",
 			Help: "Times HealthSummary failed during a scrape (serve alive but hestia db unreadable)",
+		}),
+		queueErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "hestia_queue_errors_total",
+			Help: "Times reading the hestia contract queue failed during a scrape",
 		}),
 		lastRun:          d("hestia_last_run_timestamp", "Unix time of the latest hestia ingest run of any outcome (heartbeat)"),
 		lastIngest:       d("hestia_last_ingest_timestamp", "Unix time of the latest run that ingested or pended a period"),
@@ -61,22 +77,39 @@ func NewHestiaCollector(fetch HealthFunc, now func() time.Time) *HestiaCollector
 		blockedTotal:     d("hestia_validation_blocked_total", "Pending rows by the first failed check", "check_id"),
 		pendingReview:    d("hestia_pending_review", "Rows currently in hestia_pending awaiting a human decision"),
 		notifyFailures:   d("hestia_notify_failures_total", "Runs whose Telegram notification failed"),
+
+		// TASK-003：up gauge 与队列指标。
+		dbUp:               d("hestia_db_up", "1 if this scrape read the hestia db, 0 if it failed; alert rule input"),
+		queueUp:            d("hestia_queue_up", "1 if this scrape read the contract queue, 0 if it failed; alert rule input"),
+		queueItems:         d("hestia_queue_items", "Contract queue items by state directory", "state"),
+		queuePendingAge:    d("hestia_queue_pending_age_hours", "Hours the oldest pending contract has waited"),
+		queueProcessingAge: d("hestia_queue_processing_age_hours", "Hours the oldest processing contract has been stuck"),
 	}
 }
 
-// Describe 实现 prometheus.Collector：九个指标族一处列全。
+// Describe 实现 prometheus.Collector：全部指标族一处列全（queue 为 nil 时声明而不输出，合法）。
 func (c *HestiaCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
 		c.collectErrors.Desc(),
 		c.lastRun, c.lastIngest, c.hoursSinceRun, c.hoursSinceIngest,
-		c.runsTotal, c.blockedTotal, c.pendingReview, c.notifyFailures,
+		c.runsTotal, c.blockedTotal, c.pendingReview, c.notifyFailures, c.dbUp,
+		c.queueErrors.Desc(), c.queueUp, c.queueItems, c.queuePendingAge, c.queueProcessingAge,
 	} {
 		ch <- d
 	}
 }
 
-// Collect 实现 prometheus.Collector：抓取时现查一次 Health。
+// Collect 实现 prometheus.Collector：DB 与队列两侧各采一次。
+//
+// 两侧写成两个方法而不是一个函数里的两段：让「一段失败不影响另一段」是结构上的事实，
+// 不靠后人记得别在中间加 return。
 func (c *HestiaCollector) Collect(ch chan<- prometheus.Metric) {
+	c.collectDB(ch)
+	c.collectQueue(ch)
+}
+
+// collectDB 抓取时现查一次 Health；失败时只输出 collect_errors 与 db_up=0。
+func (c *HestiaCollector) collectDB(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), hestiaScrapeTimeout)
 	defer cancel()
 
@@ -84,9 +117,11 @@ func (c *HestiaCollector) Collect(ch chan<- prometheus.Metric) {
 	if err != nil {
 		c.collectErrors.Inc()
 		c.collectErrors.Collect(ch)
+		ch <- prometheus.MustNewConstMetric(c.dbUp, prometheus.GaugeValue, 0)
 		return
 	}
 	c.collectErrors.Collect(ch)
+	ch <- prometheus.MustNewConstMetric(c.dbUp, prometheus.GaugeValue, 1)
 
 	now := c.now()
 	if !h.LastRun.IsZero() {
@@ -105,4 +140,35 @@ func (c *HestiaCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- prometheus.MustNewConstMetric(c.pendingReview, prometheus.GaugeValue, float64(h.PendingReview))
 	ch <- prometheus.MustNewConstMetric(c.notifyFailures, prometheus.CounterValue, float64(h.NotifyFailures))
+}
+
+// collectQueue 读一次队列。nil ⇒ 什么都不输出；失败 ⇒ 只输出 queue_errors 与 queue_up=0
+// （不输出件数：读不到时报 0 件就是用假值冒充「队列空」）；成功 ⇒ 四个 state 件数恒输出，
+// 年龄仅在该目录非空时输出（0 小时会让「没有积压」与「刚放进去」同形）。
+func (c *HestiaCollector) collectQueue(ch chan<- prometheus.Metric) {
+	if c.queue == nil {
+		return
+	}
+	q, err := c.queue()
+	if err != nil {
+		c.queueErrors.Inc()
+		c.queueErrors.Collect(ch)
+		ch <- prometheus.MustNewConstMetric(c.queueUp, prometheus.GaugeValue, 0)
+		return
+	}
+	c.queueErrors.Collect(ch)
+	ch <- prometheus.MustNewConstMetric(c.queueUp, prometheus.GaugeValue, 1)
+
+	for state, n := range map[string]int{
+		"pending": q.PendingCount, "processing": q.ProcessingCount, "done": q.DoneCount, "failed": q.FailedCount,
+	} {
+		ch <- prometheus.MustNewConstMetric(c.queueItems, prometheus.GaugeValue, float64(n), state)
+	}
+	now := c.now()
+	if !q.OldestPending.IsZero() {
+		ch <- prometheus.MustNewConstMetric(c.queuePendingAge, prometheus.GaugeValue, now.Sub(q.OldestPending).Hours())
+	}
+	if !q.OldestProcessing.IsZero() {
+		ch <- prometheus.MustNewConstMetric(c.queueProcessingAge, prometheus.GaugeValue, now.Sub(q.OldestProcessing).Hours())
+	}
 }
