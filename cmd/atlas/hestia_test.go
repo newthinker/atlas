@@ -1761,3 +1761,34 @@ func TestHestiaContractEmitRevisionPeriod(t *testing.T) {
 	assert.Contains(t, got, `"supersedes_published_at": "2026-01-15"`, "被取代版的 published_at")
 	assert.Contains(t, got, `"passed": true`, "回放契约声明过闸")
 }
+
+// TestHestiaWarpPlistSetsNoProxyKeys 守人类 2026-09-17 的裁决：hestia-warp 这个 job
+// **不设任何代理键**。它自己不出网（只 find 队列目录并唤起 warp），设了反而把代理带进
+// 被唤起的进程。
+//
+// 🔴 **这条裁决此前只由 plist 里的散文注释守着**（QA W-5：`grep -rn hestia-warp --include=*.go .`
+// 零输出），而同一决策的反面（hestia-ingest 必须设代理）在 TestHestiaPlistSetsProxyKeysForSheets
+// 有 Go 守卫。同仓已有先例：hestia-ingest.plist 的注释引用过一个叫 TestHestiaPlistSetsNoProxyKeys
+// 的守卫，而那个测试早已不存在——散文过期不会让任何东西变红。
+//
+// 判据按**后缀**而不是枚举三个键名：照抄别的 plist 再删，漏进来的可能是 ftp_proxy、
+// ALL_PROXY 这类没被枚举的键，枚举式断言对它们视而不见。
+//
+// ⚠️ 否定式断言在空集上平凡为真：plistEnvKeys 解析不出东西时「不含代理键」照样通过。
+// 故先立肯定式锚点（键非空 + PATH 在场且首段是 nvm node bin），与否定式那条互补。
+func TestHestiaWarpPlistSetsNoProxyKeys(t *testing.T) {
+	const plistPath = "../../deploy/launchd/com.newthinker.atlas.hestia-warp.plist"
+	keys := plistEnvKeys(t, plistPath)
+
+	// 肯定式锚点：确实解析到了 EnvironmentVariables 那个 dict。
+	require.NotEmpty(t, keys, "前置锚点：解析不出任何环境变量键时，下面的否定式断言平凡为真")
+	require.Contains(t, keys, "PATH", "PATH 必须在 —— 它证明解析到的就是那个 dict")
+	first, _, _ := strings.Cut(plistEnvValues(t, plistPath)["PATH"], ":")
+	assert.Truef(t, strings.HasSuffix(first, "/bin") && strings.Contains(first, "/.nvm/versions/node/"),
+		"PATH 首段必须是 nvm 的 node bin（warp 由 node 启动），实际 %q", first)
+
+	for _, k := range keys {
+		assert.Falsef(t, strings.HasSuffix(strings.ToLower(k), "_proxy"),
+			"hestia-warp 不得设任何代理键（按后缀判，不枚举键名），实际出现 %q", k)
+	}
+}
