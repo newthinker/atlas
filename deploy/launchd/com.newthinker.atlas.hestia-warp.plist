@@ -5,21 +5,23 @@
      队列里有活才唤起 Warp 解读 agent（先判后唤起的理由见该脚本头注释）。
      真相源在本仓库 deploy/launchd/，由 scripts/ops/install-services.sh 复制到 ~/Library/LaunchAgents/。
 
-     ⚠️ **代理键在这里是必须的**：本任务调的是 nanoclaw，容器里的 agent 要出网访问
-     Anthropic，而 launchd 不继承登录 shell 的环境 —— 不设就恒连不上。
-     hestia-ingest.plist 同样设了这三个键（给 Sheets 投影出网，5447d05 起；守卫
-     cmd/atlas/hestia_test.go 的 TestHestiaPlistSetsProxyKeysForSheets），两份需要代理的
-     理由各自独立。⚠️ 那份文件头注释里「一个代理键都没有」是过期说法，以其
-     EnvironmentVariables 里的注释为准。
+     ⚠️ **代理键在这里是必须的**：脚本经 `pnpm run chat` 唤起 nanoclaw，容器里的 agent
+     要出网访问 Anthropic，而 launchd 不继承登录 shell 的环境 —— 不设就恒连不上。
+     这一点与 hestia-ingest.plist 相同：那份也设了 http_proxy / https_proxy / no_proxy
+     （给 M2b 的 Sheets 投影出网，5447d05 起；守卫 cmd/atlas/hestia_test.go 的
+     TestHestiaPlistSetsProxyKeysForSheets）。hestia 抓央行仍是直连，那由
+     internal/hestia/fetch.go 的空 Transport{}（Proxy 留零值）保证，与 plist 无关。
 
-     🔴 **别照抄 crisis / refresh-cnhk / prism-daily 的 plist**：三份里 no_proxy 的
-     位置各不相同，「照抄再改」在前者会漏、在后者会过头（成因见 hestia-ingest.plist
-     的头注释）。本文件的键是照计划原文写的，不是抄来的。
+     🔴 **别照抄 crisis / refresh-cnhk / prism-daily 的 plist**：三份的 EnvironmentVariables
+     彼此都不一样（crisis-daily 里 no_proxy 与两个代理键之间隔着 PATH；
+     prism-daily 根本没有 PATH），「照抄再改」容易漏改或多带。本文件的键照计划原文写，
+     不是抄来的。
 
-     PATH 要含 nvm 的 node：pnpm 走 node v22，而 launchd 不继承登录 shell 的 PATH。
-     ⚠️ 写死版本号是有代价的——nvm 升级后这里会悄悄失效（脚本报 command not found、
-     退出码非零、而 launchd 默认不会告诉你）。所以上线验收要真的等一次自动唤起
-     （计划验收判据五），而不是只手工跑一遍脚本。 -->
+     PATH 首段是 nvm 的 node v22 bin 目录（pnpm 在那里），因为 launchd 不继承登录 shell 的 PATH。
+     ⚠️ 写死版本号是有代价的——nvm 升级、该目录消失后会**静默失效**：stderr 出现
+     `pnpm: command not found`，但触发脚本对唤起用了 `|| true`，**退出码仍是 0**，
+     launchd 也不会告诉你。所以上线验收要真的等一次自动唤起并看到笔记产出
+     （计划验收判据五），而不是只看退出码或手工跑一遍脚本。 -->
 <dict>
   <key>Label</key>
   <string>com.newthinker.atlas.hestia-warp</string>
@@ -45,10 +47,9 @@
     <string>localhost,127.0.0.1</string>
   </dict>
 
-  <!-- 每 30 分钟，从加载时刻起算。用 StartInterval 而非 StartCalendarInterval：
-       它不对齐日历格，因此与既有八个日历时刻都不冲突（同 analysis / crisis-intraday-jpy）。
-       30 分钟的依据：ingest 在 15:30 / 17:30 / 21:30，半小时内必然跟上；而队列空时
-       本脚本的成本是一次 find，密一点也无妨。 -->
+  <!-- 每 30 分钟，从加载时刻起算，不对齐日历格（同 analysis / crisis-intraday-jpy 的做法）。
+       processing/ 空闲时，入队的契约最多等一轮（30 分钟）就会被唤起处理；
+       队列空时一轮的成本是对 pending/ 与 processing/ 各一次 find，密一点也无妨。 -->
   <key>StartInterval</key>
   <integer>1800</integer>
 
