@@ -117,15 +117,40 @@ func typesOf(keys []PeriodKey) string {
 	return strings.Join(ts, "、")
 }
 
+// periodYearMonth 从 "YYYY-MM" 取出年与月。
+//
+// 🔴 **读路径不能用定长切片**（QA round2 SUGGESTION-5）：`Meta.validate()` 的格式正则是
+// **Save 时**的闸，而本函数走的是读路径、不重校——迁移脚本、手工 SQL、旧版本写入的短
+// Period 到得了这里，`Period[:4]` / `[5:7]` 会当场 panic。
+//
+// 取不出来时**报错返回，不折成 0**：Year=0 会让 `tabName` 得到 "0年"，那张表必然缺，
+// 而 ingest 固定 `Apply+CreateSheets` ⇒ **它会真的去建一张叫「0年」的工作表**。
+// 与本文件「AllPeriods 里但 Current 读不到 ⇒ 报错，不跳过」同一条原则：
+// 宁可整批停下，也不要静默产出一行垃圾。
+func periodYearMonth(period string) (int, int, error) {
+	y, m, ok := strings.Cut(period, "-")
+	if !ok || len(y) != 4 || len(m) != 2 {
+		return 0, 0, fmt.Errorf("hestia sheets: period %q 不是 YYYY-MM 形态，无法定位年度表与行号", period)
+	}
+	year, yerr := strconv.Atoi(y)
+	month, merr := strconv.Atoi(m)
+	if yerr != nil || merr != nil || month < 1 || month > 12 {
+		return 0, 0, fmt.Errorf("hestia sheets: period %q 的年或月不是合法数字（月份须 01–12）", period)
+	}
+	return year, month, nil
+}
+
 // buildRow 把一条观测变成一行待写的格。库里缺的字段**不产生 Cell**（C4）。
 //
 // Year/Month 取自 Period 而不是 PublishedAt：12 月的年报次年 1 月才发，按发布日会落到
 // 下一张年度表。缺失判定用 map 的 ok：scanObservation 只在 NULL 之外的值才放进 Values，
 // 所以「键不存在」= 库缺、「键存在且为 0」= 真 0，后者仍要写（loan_hh_short_ytd 可为负、
 // deposit_* 可为 0）。
-func buildRow(obs Observation) sheets.Row {
-	year, _ := strconv.Atoi(obs.Meta.Period[:4])
-	month, _ := strconv.Atoi(obs.Meta.Period[5:7])
+func buildRow(obs Observation) (sheets.Row, error) {
+	year, month, err := periodYearMonth(obs.Meta.Period)
+	if err != nil {
+		return sheets.Row{}, err
+	}
 
 	cells := make([]sheets.Cell, 0, len(SheetColumns))
 	cells = append(cells,
@@ -139,7 +164,7 @@ func buildRow(obs Observation) sheets.Row {
 		}
 		cells = append(cells, sheets.Cell{Label: c.Label, Value: v})
 	}
-	return sheets.Row{Year: year, Month: month, Cells: cells}
+	return sheets.Row{Year: year, Month: month, Cells: cells}, nil
 }
 
 // currentFunc 是 Store.Current 的形状，assembleRows 经它读每一期，测试用它注入「读不到」。
@@ -161,7 +186,11 @@ func assembleRows(ctx context.Context, keys []PeriodKey, current currentFunc) ([
 		if !ok {
 			return nil, fmt.Errorf("hestia sheets: %s/%s 在 AllPeriods 里但 Current 读不到", k.Period, k.PeriodType)
 		}
-		rows = append(rows, buildRow(obs))
+		row, err := buildRow(obs)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }

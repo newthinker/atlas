@@ -1748,12 +1748,26 @@ func TestIngestSheetsDisabledWhenNil(t *testing.T) {
 //
 // 契约是 M3 解读的输入、有下游在等；投影没有下游。先做有下游的那个。
 // 没有现成的时序钩子，就用内容判据：ProjectSheets 被调用那一刻 queue/pending 里契约已落盘。
+//
+// 🔴 判据必须**排除侧车**（QA round2，fix_items[4]）：M3 的 `<for>.history.json` 与契约
+// 同落在 pending/ 且同为 .json，而侧车写在契约**之前**。裸 `*.json` 会被侧车满足，于是
+// 「投影挪到写契约之前」这个变异在本用例下不红——判据在测一件比它自称的更弱的事。
+// 排除 .history.json 之后，只有真契约能让 order 里出现 "contract"。
 func TestIngestSheetsRunsAfterContract(t *testing.T) {
 	deps, _, _ := sheetsIngestDeps(t)
 	var order []string
 	var got []sheets.Row
+	var atCall []string
 	deps.ProjectSheets = func(_ context.Context, rows []sheets.Row) error {
-		if m, _ := filepath.Glob(filepath.Join(deps.Cfg.Queue.Dir, "pending", "*.json")); len(m) > 0 {
+		m, _ := filepath.Glob(filepath.Join(deps.Cfg.Queue.Dir, "pending", "*.json"))
+		atCall = append(atCall, m...)
+		var contracts []string
+		for _, p := range m {
+			if !strings.HasSuffix(p, ".history.json") {
+				contracts = append(contracts, p)
+			}
+		}
+		if len(contracts) > 0 {
 			order = append(order, "contract")
 		}
 		order = append(order, "sheets")
@@ -1763,6 +1777,19 @@ func TestIngestSheetsRunsAfterContract(t *testing.T) {
 
 	require.NoError(t, Ingest(context.Background(), deps))
 	require.Equal(t, []string{"contract", "sheets"}, order)
+	// 🔴 证明上面那条排除**不是恒真的摆设**：投影被调用那一刻，pending/ 里确实同时躺着
+	// 侧车与契约。若哪天夹具不再产出侧车，排除就变成空操作而这条用例照样绿——那时
+	// 「投影挪到契约之前」的变异会重新逃掉。这两条断言让夹具的变化当场变红。
+	var sidecars, contractsAtCall int
+	for _, p := range atCall {
+		if strings.HasSuffix(p, ".history.json") {
+			sidecars++
+		} else {
+			contractsAtCall++
+		}
+	}
+	require.Positive(t, sidecars, "夹具必须产出侧车，否则排除 .history.json 这件事测不到")
+	require.Positive(t, contractsAtCall, "契约本身也必须在场，否则 order 里的 contract 无从谈起")
 	// 收到的是 BuildSheetRows 组装的本库全部行：只入了 2025 年报一期。
 	require.Len(t, got, 1)
 	require.Equal(t, 2025, got[0].Year)
@@ -1786,4 +1813,76 @@ hestia_sheets:
 	cfg, err := LoadConfig(path)
 	require.NoError(t, err)
 	require.Equal(t, HestiaSheets{CredentialsFile: "/tmp/sa.json", SpreadsheetID: "sheet-id"}, cfg.HestiaSheets)
+}
+
+// —— TASK-010 返工（QA round2 WARNING-1 / M11 / M7）——
+//
+// Context Checkpoint: fix_items → test mapping (TASK-010 review_fix 第 1 轮)
+// [0][1] recover 上移到 ingest 侧，组装 panic 不得打断入库
+//                          → TestIngestSheetsBuildPanicDoesNotBreakIngest
+//        投影 panic 同样由 ingest 侧兜住（不依赖 cmd 装配方那层）
+//                          → TestIngestSheetsProjectPanicDoesNotBreakIngest
+// [3]    M11：ProjectSheets==nil ⇒ 不调 buildSheetRows
+//                          → TestIngestSheetsDisabledDoesNotBuildRows
+// [4]    顺序判据排除侧车 .history.json，M7（投影挪到写契约之前）要能红
+//                          → TestIngestSheetsRunsAfterContract（改判据）
+
+// TestIngestSheetsBuildPanicDoesNotBreakIngest 是 WARNING-1 的核心。
+//
+// 生产路径上唯一的 recover 曾在 cmd 侧 sheetsProjector 返回的闭包里，而 buildSheetRows
+// 在那个闭包**之外**调用 ⇒ 它的 panic 穿透 ingestOne → Ingest，打断整轮入库。
+// 两个任务各自都做对了，合起来仍有半边没兜住——所以这条断言必须落在 internal/hestia 这层。
+func TestIngestSheetsBuildPanicDoesNotBreakIngest(t *testing.T) {
+	orig := buildSheetRows
+	t.Cleanup(func() { buildSheetRows = orig })
+	buildSheetRows = func(context.Context, *Store) ([]sheets.Row, error) {
+		panic("boom in BuildSheetRows")
+	}
+	projected := false
+	deps, out, snd := sheetsIngestDeps(t)
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { projected = true; return nil }
+
+	require.NoError(t, Ingest(context.Background(), deps), "组装 panic 不该让 ingest 返回错误")
+	requireIngestedNoP1(t, deps.Store, snd)
+	require.False(t, projected, "组装都炸了，没有行可投影")
+	require.Contains(t, out.String(), "sheets: 组装失败（不影响入库）: ",
+		"panic 要走 C8 既有的「只打印不返回」那条路")
+	require.Contains(t, out.String(), "boom in BuildSheetRows",
+		"原始 panic 值要留在错误里，否则线上查不出是什么炸了")
+}
+
+// TestIngestSheetsProjectPanicDoesNotBreakIngest：投影 panic 同样由**本层**兜住。
+//
+// cmd 侧的 sheetsProjector 也有一层 recover，但那是装配方的选择；ingest 不该依赖
+// 调用方给的闭包不会 panic——真实第三方 client 的 panic 可能发生在任一步。
+// 这里注入的是一条**裸闭包**（没有 cmd 那层 recover），红/绿只取决于 ingest 自己。
+func TestIngestSheetsProjectPanicDoesNotBreakIngest(t *testing.T) {
+	deps, out, snd := sheetsIngestDeps(t)
+	deps.ProjectSheets = func(context.Context, []sheets.Row) error { panic("boom in ProjectSheets") }
+
+	require.NoError(t, Ingest(context.Background(), deps), "投影 panic 不该让 ingest 返回错误")
+	requireIngestedNoP1(t, deps.Store, snd)
+	require.Contains(t, out.String(), "sheets: 投影失败（不影响入库）: ")
+	require.Contains(t, out.String(), "boom in ProjectSheets")
+}
+
+// TestIngestSheetsDisabledDoesNotBuildRows 是 M11 的守卫。
+//
+// 能力禁用时不只是「不投影」，连组装都不该发生——BuildSheetRows 要读全库 AllPeriods +
+// 逐期 Current，白跑一趟的代价随库线性增长。TestIngestSheetsDisabledWhenNil 只断言了
+// 「没有 sheets: 开头的输出」，而一个先组装再丢弃的实现同样满足它。
+func TestIngestSheetsDisabledDoesNotBuildRows(t *testing.T) {
+	orig := buildSheetRows
+	t.Cleanup(func() { buildSheetRows = orig })
+	built := 0
+	buildSheetRows = func(ctx context.Context, s *Store) ([]sheets.Row, error) {
+		built++
+		return orig(ctx, s)
+	}
+	deps, _, snd := sheetsIngestDeps(t)
+	deps.ProjectSheets = nil
+
+	require.NoError(t, Ingest(context.Background(), deps))
+	requireIngestedNoP1(t, deps.Store, snd)
+	require.Equal(t, 0, built, "能力禁用时连组装都不该发生")
 }
