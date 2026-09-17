@@ -248,6 +248,60 @@ func TestSheetsPushDefaultsToDryRun(t *testing.T) {
 	for _, m := range *seen {
 		require.True(t, strings.HasPrefix(m, "GET "), "dry-run 一个写请求都不许发，收到 %s", m)
 	}
+	// ⚠️ 本条是**接线测试**：库是空的（t.TempDir()）⇒ 0 行 ⇒ Push 里那圈 diff 一次都不跑，
+	// 「零写请求」在这里几乎是平凡为真的（QA round2 SUGGESTION）。真正有负载的 dry-run
+	// 断言在下面的 TestPushSheetsDryRunWithRowsSendsOnlyGETs——那条才证明「有东西要写时
+	// 也确实没写」。这行注释是为了让后人别把这条当成 dry-run 的主守卫。
+	require.Contains(t, out, "将写 0 格", "空库的预期就是 0；有数字才说明排版跑到了")
+}
+
+// TestPushSheetsDryRunWithRowsSendsOnlyGETs 是 dry-run 的**有负载**守卫。
+//
+// 上面那条走 CLI、库是空的，WillWrite 恒 0，Push 的 diff 循环一次都不进 ⇒ 「只发 GET」
+// 平凡为真。这条直接喂真行、配好表头，让 WillWrite > 0，再要求仍然零写请求。
+func TestPushSheetsDryRunWithRowsSendsOnlyGETs(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/token" {
+			_, _ = io.WriteString(w, `{"access_token":"fake-token","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		switch {
+		case r.URL.Path == "/v4/spreadsheets/sheet-id":
+			_, _ = io.WriteString(w, `{"sheets":[{"properties":{"sheetId":1,"title":"2025年"}},{"properties":{"sheetId":2,"title":"2026年"}}]}`)
+		case strings.Contains(r.URL.Path, "!A3:AI3"):
+			// 表头必须**齐全 35 列**：pushSheets 用 sheetLabels()（即 hestia.SheetColumns
+			// 的全部标签）去 ResolveHeader，少一个就整批拒绝（C3）。从同一个源生成，
+			// 免得这里手抄一份、上游加列时静默不同步。
+			labels, _ := json.Marshal(sheetLabels())
+			_, _ = io.WriteString(w, `{"values":[`+string(labels)+`]}`)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	creds := fakeSheetsCredentials(t, srv.URL)
+	old := newSheetsClient
+	t.Cleanup(func() { newSheetsClient = old })
+	newSheetsClient = func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
+	}
+
+	var out bytes.Buffer
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+	rows := []sheets.Row{
+		{Year: 2025, Month: 6, Cells: []sheets.Cell{{Label: "月份", Value: "6月"}, {Label: "社融存量", Value: 462.06}}},
+		{Year: 2026, Month: 6, Cells: []sheets.Cell{{Label: "月份", Value: "6月"}, {Label: "社融存量", Value: 480.0}}},
+	}
+	require.NoError(t, pushSheets(context.Background(), &out, cfg, rows, "", sheets.Options{}))
+
+	require.NotContains(t, out.String(), "将写 0 格", "这条必须**有东西要写**，否则又是一次空跑")
+	for _, m := range seen {
+		require.True(t, strings.HasPrefix(m, "GET "), "dry-run 一个写请求都不许发，收到 %s", m)
+	}
+	require.Contains(t, out.String(), "未写入任何内容；确认后加 --apply")
 }
 
 // TestFormatResultSeparatesThreeCounts：三类计数分开三行、各带自己的数字。
@@ -291,6 +345,22 @@ func TestFormatResultLabelsEachChangeKind(t *testing.T) {
 	require.Contains(t, got, "库缺，保留表中现值")
 	require.Contains(t, got, "6月", "行号要还原成月份（录入区首行是 1 月）")
 	require.Contains(t, got, "AF", "列号要还原成表格列字母")
+
+	// 🔴 整行逐字相等（QA round2 SUGGESTION）：Contains(got,"AF") 只是两个字符的子串，
+	// 它在列错位、标签串行、分隔符变了的实现上照样绿。明细行是人肉眼核对的唯一依据，
+	// 排版一乱就没人看得懂，所以这里钉死整行。
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	byPrefix := func(p string) string {
+		for _, l := range lines {
+			if strings.HasPrefix(l, p) {
+				return l
+			}
+		}
+		return ""
+	}
+	require.Equal(t, "2025年  6月  C 社融存量  表中 (空)  将写 462.06", byPrefix("2025年"))
+	require.Equal(t, "2026年  6月  B 发布日期  表中 2026-07-15  == 一致，跳过", byPrefix("2026年"))
+	require.Equal(t, "2020年  3月  AF 同业拆借月加权利率  库缺，保留表中现值", byPrefix("2020年"))
 }
 
 // 缺表时提示「将新建工作表」并点名要哪个 flag。
@@ -560,4 +630,102 @@ func TestFilterRowsByPeriodMatchesExactMonth(t *testing.T) {
 	require.Len(t, filterRowsByPeriod(sampleSheetRows(), "2025-12"), 1)
 	require.Empty(t, filterRowsByPeriod(sampleSheetRows(), "2025-07"), "库里没有这一期就该是空")
 	require.Empty(t, filterRowsByPeriod(sampleSheetRows(), "2025-6"), "补零形态不匹配，别猜")
+}
+
+// —— TASK-009 返工（QA round2 CRITICAL-5 / SUGGESTION）——
+//
+// Context Checkpoint: fix_items → test mapping (TASK-009 review_fix 第 1 轮)
+// [0][1] plist 补代理键 + 守卫判据反转 → hestia_test.go TestHestiaPlistSetsProxyKeysForSheets
+// [2]    client 建一次复用             → TestSheetsProjectorBuildsClientOnce
+// [3]    调用加超时                     → TestSheetsProjectorSetsDeadline、TestPushSheetsSetsDeadline
+// [4]    dry-run 用例的空跑护栏         → TestSheetsPushDefaultsToDryRun 补 Greater(WillWrite,0)
+// [5]    明细行整行 Equal               → TestFormatResultLabelsEachChangeKind 补整行断言
+
+// TestSheetsProjectorBuildsClientOnce 是 CRITICAL-5 的守卫。
+//
+// ingestOne 每期调一次投影；每次重建客户端都要读凭据文件并做一次 JWT 交换。
+// --force 会翻满 max_pages 逐期重跑，重建次数与候选数成正比，白撞配额。
+func TestSheetsProjectorBuildsClientOnce(t *testing.T) {
+	srv, _ := stubSheetsServer(t)
+	creds := fakeSheetsCredentials(t, srv.URL)
+	built := 0
+	old := newSheetsClient
+	t.Cleanup(func() { newSheetsClient = old })
+	newSheetsClient = func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+		built++
+		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
+	}
+	_, _ = withCapturedPush(t)
+
+	project := sheetsProjector(hestia.Config{
+		HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"},
+	})
+	require.NotNil(t, project)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, project(context.Background(), sampleSheetRows()))
+	}
+	require.Equal(t, 1, built, "投影调用 3 次，客户端只该建 1 次")
+}
+
+// 懒建：凭据非空不代表这一轮真会入库（多数唤起是幂等空跑）。空跑时不该读凭据、
+// 更不该出网做 JWT 交换——所以造出闭包的那一刻不许建客户端。
+func TestSheetsProjectorBuildsLazily(t *testing.T) {
+	old := newSheetsClient
+	t.Cleanup(func() { newSheetsClient = old })
+	built := 0
+	newSheetsClient = func(context.Context, string, string, ...sheets.Option) (*sheets.Client, error) {
+		built++
+		return nil, fmt.Errorf("不该在这里被调用")
+	}
+
+	project := sheetsProjector(hestia.Config{
+		HestiaSheets: hestia.HestiaSheets{CredentialsFile: "/nonexistent/sa.json"},
+	})
+	require.NotNil(t, project)
+	require.Equal(t, 0, built, "只造闭包、还没投影时不许建客户端")
+}
+
+// TestSheetsProjectorSetsDeadline：两步都必须带 deadline。
+//
+// 不设就没有上限——代理没起时连接会一直挂着，而 ingest 是 launchd 唤起的批处理，
+// 挂住就是这一轮永远不结束、下一个时点的唤起叠上来。
+func TestSheetsProjectorSetsDeadline(t *testing.T) {
+	srv, _ := stubSheetsServer(t)
+	creds := fakeSheetsCredentials(t, srv.URL)
+	var clientHasDeadline, pushHasDeadline bool
+	old := newSheetsClient
+	t.Cleanup(func() { newSheetsClient = old })
+	newSheetsClient = func(ctx context.Context, cf, sid string, opts ...sheets.Option) (*sheets.Client, error) {
+		_, clientHasDeadline = ctx.Deadline()
+		return sheets.NewClient(ctx, cf, sid, append(opts, sheets.WithEndpoint(srv.URL))...)
+	}
+	oldPush := sheetsPush
+	t.Cleanup(func() { sheetsPush = oldPush })
+	sheetsPush = func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+		_, pushHasDeadline = ctx.Deadline()
+		return sheets.Result{}, nil
+	}
+
+	project := sheetsProjector(hestia.Config{
+		HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"},
+	})
+	require.NoError(t, project(context.Background(), sampleSheetRows()))
+	require.True(t, clientHasDeadline, "建客户端那一步没有 deadline —— JWT 交换要出网")
+	require.True(t, pushHasDeadline, "Push 那一步没有 deadline")
+}
+
+// CLI 路径同样要有 deadline：`sheets push` 也可能进 cron。
+func TestPushSheetsSetsDeadline(t *testing.T) {
+	creds, _ := withStubSheetsClient(t)
+	var hasDeadline bool
+	old := sheetsPush
+	t.Cleanup(func() { sheetsPush = old })
+	sheetsPush = func(ctx context.Context, _ *sheets.Client, _ []sheets.Row, _ []string, _ sheets.Options) (sheets.Result, error) {
+		_, hasDeadline = ctx.Deadline()
+		return sheets.Result{}, nil
+	}
+
+	cfg := hestia.Config{HestiaSheets: hestia.HestiaSheets{CredentialsFile: creds, SpreadsheetID: "sheet-id"}}
+	require.NoError(t, pushSheets(context.Background(), io.Discard, cfg, sampleSheetRows(), "", sheets.Options{}))
+	require.True(t, hasDeadline, "CLI 的 Push 调用也要有上限")
 }

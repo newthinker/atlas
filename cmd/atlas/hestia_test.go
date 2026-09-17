@@ -474,30 +474,45 @@ func plistEnvKeys(t *testing.T, path string) []string {
 // ⚠️ **否定式断言在空集上平凡为真**（Sprint 036 G9）：解析失败返回空切片时，
 // 「不含代理键」照样通过。下面 require.NotEmpty + 断言 PATH 在场，就是那条**肯定式
 // 锚点**，与否定式那条**互补，不是重复** —— 删掉任一条都会开一个缺口。
-func TestHestiaPlistSetsNoProxyKeys(t *testing.T) {
+func TestHestiaPlistSetsProxyKeysForSheets(t *testing.T) {
 	const plistPath = "../../deploy/launchd/com.newthinker.atlas.hestia-ingest.plist"
 	keys := plistEnvKeys(t, plistPath)
 
 	// 肯定式锚点：解析真的产出了东西，且是我们要的那个 dict。
-	require.NotEmpty(t, keys, "前置锚点：解析不出任何环境变量键时，下面的否定式断言平凡为真")
+	require.NotEmpty(t, keys, "前置锚点：解析不出任何环境变量键时，下面的断言平凡为真")
 	assert.Contains(t, keys, "PATH", "PATH 必须在 —— 它也证明我们解析的确实是那个 dict")
 
-	// 否定式：按后缀判，不枚举名字。
-	for _, k := range keys {
-		lower := strings.ToLower(k)
-		assert.NotContainsf(t, lower, "proxy",
-			"plist 不得设任何代理键，实测到 %q；hestia 直连央行（NewPBOCFetcher 用空 Transport 绕开代理）", k)
+	// 🔴 **本条的判据在 M2b 被推翻重写过，理由记在这里免得后人又翻回去。**
+	//
+	// 原判据是「plist 不得设任何代理键」，失败文案写着「hestia 直连央行
+	// （NewPBOCFetcher 用空 Transport 绕开代理）」。**那个理由是错的**：
+	// 直连由 fetch.go:38 的空 `Transport{}`（Proxy 留零值）保证，与 plist 无关；
+	// fetch.go:33-34 自己就写着「这一层必须在 client 里做，不能只靠 plist 的
+	// no_proxy，那会把 Telegram 和 Sheets 一起放行」。
+	//
+	// 而 M2b 的 Sheets 投影**需要**代理：Google API 在境外，sheets 包按约束 C7 用
+	// 默认 transport（ProxyFromEnvironment）。launchd 不继承登录 shell 的环境，
+	// 不设就等于恒直连 ⇒ 投影每次失败，而按 C8 它只打印一行、不改 outcome、
+	// 不发 Telegram —— 静默失败，这正是 QA round2 CRITICAL-3。
+	//
+	// ⇒ 判据反转：现在**要求**代理键在场。PBOC 直连那条性质的真正载体是
+	// internal/hestia 的 TestPBOCFetcherDoesNotProxyPBOC，不在本文件。
+	for _, want := range []string{"http_proxy", "https_proxy", "no_proxy"} {
+		assert.Containsf(t, keys, want,
+			"plist 必须设 %s —— 没有它 launchd 下的 Sheets 投影恒失败，且按 C8 是静默的", want)
 	}
 
-	// 🔴 **阳性对照：证明这个解析器真的看得见代理键。**
-	//
-	// 上面那圈断言在一个「恒返回 []string{"PATH"} 的坏解析器」上**同样全绿** ——
-	// 前置锚点挡得住空集，挡不住「解析出了东西但漏掉了代理键」。所以这里拿一份
-	// **真的设了代理键**的 plist 跑同一个解析器：它必须报出来。
+	env := plistEnvValues(t, plistPath)
+	assert.Equal(t, "http://127.0.0.1:7897", env["http_proxy"], "与 crisis-daily 同一个本地代理")
+	assert.Equal(t, "http://127.0.0.1:7897", env["https_proxy"])
+
+	// 🔴 **阳性对照保留**（原设计是对的，只是被测性质换了）：证明这个解析器真的
+	// 看得见代理键。上面那圈断言在一个「恒返回全部键名」的坏解析器上会平凡为真，
+	// 而下面这条要求它在**另一份真实文件**上也给出一致结果。
 	//
 	// 用 crisis-daily 而不是合成 XML：合成的只证明解析器能处理我写的那种形状，
 	// 真实文件才证明它能处理**仓库里实际存在**的那种（含注释、含 PATH 夹在中间）。
-	t.Run("阳性对照：解析器在真的有代理键时必须报出来", func(t *testing.T) {
+	t.Run("阳性对照：同一个解析器在 crisis-daily 上给出同样的键", func(t *testing.T) {
 		crisis := plistEnvKeys(t, "../../deploy/launchd/com.newthinker.atlas.crisis-daily.plist")
 		require.NotEmpty(t, crisis)
 
@@ -508,10 +523,36 @@ func TestHestiaPlistSetsNoProxyKeys(t *testing.T) {
 			}
 		}
 		assert.NotEmpty(t, proxies,
-			"crisis-daily 确实设了代理键；这里报不出来说明上面那圈否定式断言是瞎的")
+			"crisis-daily 确实设了代理键；这里报不出来说明上面那圈断言是瞎的")
 		assert.Contains(t, proxies, "no_proxy",
 			"尤其是 no_proxy —— 它被 PATH 和一段注释与另两对隔开，最容易被漏掉")
 	})
+}
+
+// plistEnvValues 取 EnvironmentVariables 的**键值对**。plistEnvKeys 只给键名，
+// 而「代理指向哪」是本轮要钉的——指到一个不存在的端口同样是静默失败。
+func plistEnvValues(t *testing.T, path string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	out := map[string]string{}
+	// 用 plutil 转 JSON 再解析：不自己写 XML 解析器，也不引新依赖。
+	cmd := exec.Command("plutil", "-convert", "json", "-o", "-", path)
+	cmd.Stdin = bytes.NewReader(raw)
+	b, err := cmd.Output()
+	require.NoError(t, err, "plutil 转 JSON 失败")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(b, &parsed))
+	env, ok := parsed["EnvironmentVariables"].(map[string]any)
+	require.True(t, ok, "EnvironmentVariables 不是 dict")
+	for k, v := range env {
+		if sv, ok := v.(string); ok {
+			out[k] = sv
+		}
+	}
+	return out
 }
 
 // 🔴 plist 必须**真的排了班**：三个时点，且与 spec 定的一致。

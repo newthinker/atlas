@@ -40,8 +40,24 @@
        守卫：cmd/atlas/hestia_test.go 的 TestHestiaPlistSetsNoProxyKeys。 -->
   <key>EnvironmentVariables</key>
   <dict>
+    <key>no_proxy</key>
+    <string>localhost,127.0.0.1</string>
     <key>PATH</key>
     <string>/usr/local/go/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- M2b 的 Sheets 投影必须经代理：Google API 在境外，而 sheets 包刻意用
+         **默认 transport**（走 ProxyFromEnvironment，约束 C7）。launchd 不继承
+         登录 shell 的环境，这里不设就等于恒直连 ⇒ 投影每次失败，而按 C8 它只打印
+         一行「投影失败（不影响入库）」、不改 outcome、不发 Telegram —— **静默**。
+
+         ⚠️ 这不会让 hestia 抓央行也走代理：`NewPBOCFetcher` 用的是**空 Transport{}**
+         （fetch.go:38，Proxy 留零值），直连由那一行保证，与本 plist 无关。
+         fetch.go:33-34 自述「这一层必须在 client 里做，不能只靠 plist 的 no_proxy，
+         那会把 Telegram 和 Sheets 一起放行」——所以在这里补代理键是安全的。
+         该性质由 internal/hestia 的 TestPBOCFetcherDoesNotProxyPBOC 守着。 -->
+    <key>http_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>https_proxy</key>
+    <string>http://127.0.0.1:7897</string>
   </dict>
 
   <!-- 三时点唤起（本地 +0800）：**15:30 / 17:30 / 21:30**。
