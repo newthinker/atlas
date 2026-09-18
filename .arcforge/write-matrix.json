@@ -1,13 +1,6 @@
 {
   "version": 1,
-  "tokens": {
-    "dev-m4-a": "dba9044517555f6eb064cacb4fbaa268dc7f877141ca7b34509b133f48db262b",
-    "dev-m4-b": "72bde9dc8434edcf4a28785f6497a9030defbee499a85019604438634498e9dd",
-    "dev-m4-c": "621d8791a921349ae34a64eb847e4ac8874e63503a7fa861c9fc3a6982370de8",
-    "test-m4-a": "cc632aa31627b916a85672ed83c0f4fc87c33edf030139b3fe96fdd933ccded3",
-    "test-m4-b": "df5d0d9cfdfd4a2697fc3a3e3be541398b4c260d4f350f11b656246b61acdeef",
-    "qa-m4-a": "d363375d14f946146ef898a1a7d09c5c9c6e4d3e65b01358fd025b616c549b64"
-  },
+  "tokens": {},
   "instances": "^(leader|dev-[a-z0-9-]+|test-[a-z0-9-]+|qa-[a-z0-9-]+|ops-[a-z0-9-]+)$",
   "rules": [
     {
