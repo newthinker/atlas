@@ -143,8 +143,9 @@ func (c *HestiaCollector) collectDB(ch chan<- prometheus.Metric) {
 }
 
 // collectQueue 读一次队列。nil ⇒ 什么都不输出；失败 ⇒ 只输出 queue_errors 与 queue_up=0
-// （不输出件数：读不到时报 0 件就是用假值冒充「队列空」）；成功 ⇒ 四个 state 件数恒输出，
-// 年龄仅在该目录非空时输出（0 小时会让「没有积压」与「刚放进去」同形）。
+// （不输出件数：读不到时报 0 件就是用假值冒充「队列空」）；成功 ⇒ 按 ByState() 的口径逐 state
+// 输出件数（缺键不补零，理由见函数内）；年龄仅在该目录非空时输出
+// （0 小时会让「没有积压」与「刚放进去」同形）。
 func (c *HestiaCollector) collectQueue(ch chan<- prometheus.Metric) {
 	if c.queue == nil {
 		return
@@ -159,9 +160,15 @@ func (c *HestiaCollector) collectQueue(ch chan<- prometheus.Metric) {
 	c.queueErrors.Collect(ch)
 	ch <- prometheus.MustNewConstMetric(c.queueUp, prometheus.GaugeValue, 1)
 
-	for state, n := range map[string]int{
-		"pending": q.PendingCount, "processing": q.ProcessingCount, "done": q.DoneCount, "failed": q.FailedCount,
-	} {
+	// 状态名单只有 hestia.QueueHealth.ByState() 一份（QA W-2）：这里再列一遍字面量的话，
+	// hestia 侧加了状态而这里漏跟时 go test ./... 会全绿，新状态的件数静默消失——实测过。
+	//
+	// ByState() 对**未接线**的状态不给键（不是给 0），本 collector 照单输出，不补零：
+	// 缺键 ⇒ Snapshot 没有该 <name>_<state> 键 ⇒ 告警规则找不到指标、求值为 false，不会假红；
+	// 若补成 0，一个 hestia 侧尚未接线的状态会变成「确认为 0 件」的事实指标，把「不知道」
+	// 说成「没有」。接线缺口应由 hestia 侧的 TestQueueHealthByStateCoversAllStates 报红，
+	// 不该在这里被一个 0 掩盖。
+	for state, n := range q.ByState() {
 		ch <- prometheus.MustNewConstMetric(c.queueItems, prometheus.GaugeValue, float64(n), state)
 	}
 	now := c.now()

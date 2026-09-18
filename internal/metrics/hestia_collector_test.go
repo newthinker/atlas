@@ -27,10 +27,13 @@ package metrics
 //                                          → TestHestiaCollector_QueueUpRecovers / TestHestiaCollector_DBUpRecovers
 // non_functional[0] PedanticRegistry 三形态 Gather 无 error → TestHestiaCollector_PedanticRegistry；
 //                   go build ./... 与 go test ./internal/metrics ./cmd/atlas 由交付前实跑证明
+// functional[0]+    state 标签集合 == q.ByState() 键集合（QA W-2，单一口径）
+//                                            → TestHestiaCollector_QueueItemsFollowByState
 
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -452,5 +455,28 @@ func TestHestiaCollector_PedanticRegistry(t *testing.T) {
 				t.Errorf("pedantic gather: %v", err)
 			}
 		})
+	}
+}
+
+// TestHestiaCollector_QueueItemsFollowByState 堵 QA W-2 实证的形态：hestia 侧加了第五个
+// 状态、collector 不动 ⇒ 此前 go test ./... 全绿而新状态的件数静默消失。
+//
+// 🔴 断言的是**集合相等**而不是「包含这四个」：后者在 ByState 多出一个键时恒绿，正是要堵的那种绿。
+// 期望值取自 q.ByState()（hestia 侧的单一口径），测试里不列第二份状态名字面量——列了就等于
+// 把同一个失效搬进测试。
+func TestHestiaCollector_QueueItemsFollowByState(t *testing.T) {
+	q, err := fullQueue()
+	if err != nil {
+		t.Fatalf("fullQueue: %v", err)
+	}
+	fam := gatherFamilies(t, NewHestiaCollector(fetchFullHealth, fullQueue, fixedClock))
+
+	got := queueItems(fam)
+	want := map[string]float64{}
+	for state, n := range q.ByState() {
+		want[state] = float64(n)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hestia_queue_items 的 state 集合与值 = %v, want %v（须与 ByState() 逐项相等）", got, want)
 	}
 }
