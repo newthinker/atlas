@@ -11,29 +11,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS macro_observations (
-	ts          TEXT NOT NULL,
-	indicator   TEXT NOT NULL,
-	value       REAL,
-	source      TEXT,
-	fetched_at  TEXT,
-	PRIMARY KEY (ts, indicator)
-);
-CREATE TABLE IF NOT EXISTS crisis_evaluations (
-	ts            TEXT NOT NULL,
-	eval_at       TEXT NOT NULL,
-	indicator     TEXT NOT NULL DEFAULT '',
-	status        TEXT NOT NULL DEFAULT '',
-	tag           TEXT NOT NULL DEFAULT '',
-	value         REAL NOT NULL DEFAULT 0,
-	pct_5y        REAL NOT NULL DEFAULT 0,
-	system_state  TEXT NOT NULL DEFAULT '',
-	detail        TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_macro_obs_ind_ts   ON macro_observations(indicator, ts);
-CREATE INDEX IF NOT EXISTS idx_crisis_eval_ind_ts ON crisis_evaluations(indicator, ts);`
-
 // Store is the sqlite-backed source of truth for observations and
 // evaluations (WAL + busy_timeout, same conventions as storage/signal).
 type Store struct {
@@ -55,7 +32,7 @@ func NewStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("connecting crisis db: %w", err)
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schemaDDL()); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating crisis schema: %w", err)
 	}
@@ -64,9 +41,11 @@ func NewStore(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// UpsertObservations writes obs in one transaction; the (ts, indicator)
-// primary key makes rewrites overwrite, so backfill and repeated daily
-// wakeups are idempotent by construction.
+// UpsertObservations writes obs in one transaction; the (ts, indicator,
+// fetched_at) primary key makes a rewrite of the *same* revision overwrite, so
+// backfill and repeated daily wakeups are idempotent by construction. A new
+// fetched_at is a new revision and lands as an extra row — v_macro_current is
+// what picks the latest one.
 func (s *Store) UpsertObservations(ctx context.Context, obs []Observation) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
