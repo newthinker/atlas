@@ -489,6 +489,15 @@ func runHestiaContractEmit(cmd *cobra.Command, _ []string) error {
 		_, err = cmd.OutOrStdout().Write(b) // JSON() 已带末尾换行，不再 Println
 		return err
 	}
+	// 建齐队列形状再落盘（2026-09-18 追加）。
+	//
+	// 🔴 `WriteContract` 刻意只建 `pending/`（职责分离，见 queue_test.go 里
+	// TestWriteContractCreatesPendingWithoutEnsure），而 `EnsureQueueDirs` 只在 `Ingest`
+	// 里调 ⇒ 用 `contract emit` 回放时，消费者的工作区 `drafts/` 不会被建出来，
+	// 它第一步写成稿就失败。emit 是喂给消费者的入口，形状该由它保证。
+	if err := hestia.EnsureQueueDirs(cfg.Queue.Dir); err != nil {
+		return err
+	}
 	path, err := hestia.WriteContract(cfg.Queue.Dir, c)
 	if err != nil {
 		return err

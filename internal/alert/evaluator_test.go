@@ -331,3 +331,59 @@ func TestEvaluator_PerRuleCooldown(t *testing.T) {
 		t.Fatalf("6 分钟后按全局 5m 重发，got %d", len(notifier.sent))
 	}
 }
+
+// TestEvaluator_NotifySuccess_LogsDelivery 补上告警链路里唯一一段静默。
+//
+// 🔴 **成因（2026-09-18 实撞）**：失败留一行 warn、成功什么都不留 ⇒ 日志里只有否定证据。
+// 那天 `hestia_queue_processing_stuck` 先失败一次（EOF）、重试成功，而「是否送达」
+// **无法从日志判定**，只能靠人回报。⇒「送达」与「静默丢失」在日志里完全同形。
+//
+// M4 存在的全部理由是「别再有静默失败」，而告警链路自己就有一段是静默的。
+func TestEvaluator_NotifySuccess_LogsDelivery(t *testing.T) {
+	ok := &mockNotifier{} // Name() 恒为 "mock"，本测试不关心名字本身
+	eval := NewEvaluator([]Notifier{ok})
+	obs, logs := observer.New(zapcore.InfoLevel)
+	eval.logger = zap.New(obs)
+
+	rule := Rule{Name: "down", Expr: "up == 0", For: 0, Severity: "critical", Message: "Service is down"}
+	eval.SetMetrics(map[string]float64{"up": 0})
+	eval.Evaluate(rule)
+
+	infos := logs.FilterMessage("alert delivered")
+	if infos.Len() != 1 {
+		t.Fatalf("送达必须留一行 info，否则「送达」与「静默丢失」同形；got %d", infos.Len())
+	}
+	f := infos.All()[0].ContextMap()
+	if f["rule"] != "down" {
+		t.Errorf("要能按规则名查：got %v", f)
+	}
+	if f["notifiers"] == nil {
+		t.Errorf("要记下**是哪个通道**送达的——多通道时「有一个成功」不等于「你那个成功」：got %v", f)
+	}
+}
+
+// TestEvaluator_PartialFailure_LogsBothSides：一个通道失败、另一个成功时，两条都要留。
+//
+// 只留成功那条会让「telegram 挂了但 email 通了」看起来一切正常。
+func TestEvaluator_PartialFailure_LogsBothSides(t *testing.T) {
+	bad := &errNotifier{name: "telegram", err: errors.New("EOF")}
+	good := &mockNotifier{} // Name() 恒为 "mock"
+	eval := NewEvaluator([]Notifier{bad, good})
+	obs, logs := observer.New(zapcore.InfoLevel) // InfoLevel 及以上，含 Warn
+	eval.logger = zap.New(obs)
+
+	eval.SetMetrics(map[string]float64{"up": 0})
+	eval.Evaluate(Rule{Name: "down", Expr: "up == 0", Severity: "critical", Message: "down"})
+
+	if n := logs.FilterMessage("alert notify failed").Len(); n != 1 {
+		t.Errorf("失败那条仍要留 warn，got %d", n)
+	}
+	delivered := logs.FilterMessage("alert delivered")
+	if delivered.Len() != 1 {
+		t.Errorf("成功那条要留 info，got %d", delivered.Len())
+	}
+	f := delivered.All()[0].ContextMap()
+	if f["notifiers"] == nil || f["failed"] == nil {
+		t.Errorf("送达那行要同时说清**成了哪些、败了几个**：got %v", f)
+	}
+}

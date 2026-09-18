@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // queueStates 是文件队列的状态机（方案报告 5.1）。Atlas 建齐四个目录但只写 pending/；
@@ -11,9 +12,20 @@ import (
 // 来就看到完整形状，不必自己建。
 var queueStates = []string{"pending", "processing", "done", "failed"}
 
-// EnsureQueueDirs 建齐四个子目录，幂等（M2a 的 TASK-004）。
+// queueWorkDirs 是消费者的工作区，**不是生命周期状态**（2026-09-18 追加）。
+//
+// 🔴 **drafts/ 为什么存在**：消费者原先把成稿 `.note.md` 写在 `processing/`，收尾时
+// `mv $Q/processing/* $Q/done/` 的通配符会把它一起带进 `done/`。SKILL.md 明写 `rm -f`、
+// 又加了显式警告，**下一轮照样发生**（2026-09-18 两轮实撞）⇒ **注释拦不住，改结构**：
+// 成稿写 drafts/，任何对 processing/ 的通配符都碰不到它。
+//
+// ⚠️ **刻意不进 queueStates**：它不是状态，混进去会出现在 `hestia_queue_items` 里，
+// 而「草稿数」不是队列健康度的一部分。QueueHealthOf 也因此不扫它。
+var queueWorkDirs = []string{"drafts"}
+
+// EnsureQueueDirs 建齐四个状态目录与消费者工作区，幂等（M2a 的 TASK-004）。
 func EnsureQueueDirs(dir string) error {
-	for _, s := range queueStates {
+	for _, s := range slices.Concat(queueStates, queueWorkDirs) {
 		sub := filepath.Join(dir, s)
 		if err := os.MkdirAll(sub, 0o755); err != nil {
 			return fmt.Errorf("contract queue dir %s: %w", sub, err)

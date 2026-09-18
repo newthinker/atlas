@@ -179,3 +179,24 @@ func TestWriteContractAbsentFieldsEmptyArray(t *testing.T) {
 	assert.Contains(t, string(raw), `"absent_fields": []`, "全字段在场时 absent_fields 必须是空数组")
 	assert.NotContains(t, string(raw), `"absent_fields": null`)
 }
+
+// TestEnsureQueueDirsCreatesDrafts 钉住 drafts/ 的存在与它**不是队列状态**这件事。
+//
+// 🔴 **成因（2026-09-18 两轮实撞）**：消费者把成稿写在 `processing/`，收尾时
+// `mv $Q/processing/* $Q/done/` 的通配符会把 `.note.md` 一起带进 `done/`。
+// SKILL.md 明写 `rm -f`、加了显式警告，**下一轮照样发生** ⇒ 注释拦不住，要改结构。
+// 成稿改写 `drafts/` 后，任何对 `processing/` 的通配符都碰不到它。
+//
+// ⚠️ **drafts 不进 queueStates**：它是消费者的工作区，不是生命周期状态。
+// 混进去会让它出现在 hestia_queue_items 里，而「草稿数」不是队列健康度的一部分。
+func TestEnsureQueueDirsCreatesDrafts(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, EnsureQueueDirs(dir))
+
+	st, err := os.Stat(filepath.Join(dir, "drafts"))
+	require.NoError(t, err, "drafts/ 必须建齐——消费者第一次来就该看到完整形状")
+	require.True(t, st.IsDir())
+
+	require.NotContains(t, queueStates, "drafts",
+		"drafts 是工作区不是状态；进 queueStates 会让它混进 hestia_queue_items")
+}

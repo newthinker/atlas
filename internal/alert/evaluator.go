@@ -116,9 +116,11 @@ func (e *Evaluator) Evaluate(rule Rule) {
 	// Fire alert. A notifier that returns an error is logged and skipped
 	// without aborting the others.
 	msg := rule.FormatMessage(e.metrics)
-	anySucceeded := false
+	var delivered []string
+	failed := 0
 	for _, n := range e.notifiers {
 		if err := n.Notify(msg); err != nil {
+			failed++
 			e.logger.Warn("alert notify failed",
 				zap.String("rule", rule.Name),
 				zap.String("notifier", n.Name()),
@@ -126,13 +128,30 @@ func (e *Evaluator) Evaluate(rule Rule) {
 			)
 			continue
 		}
-		anySucceeded = true
+		delivered = append(delivered, n.Name())
+	}
+	// 送达也留一行（2026-09-18 追加）。
+	//
+	// 🔴 **补的是告警链路里唯一一段静默。** 此前失败留 warn、成功什么都不留 ⇒ 日志里
+	// 只有否定证据，「告警是否送达」无法判定、只能靠人回报。实撞：那天
+	// hestia_queue_processing_stuck 先失败一次（EOF）、重试成功，而「送达」与
+	// 「静默丢失」在日志里**完全同形**。
+	//
+	// 记 notifiers 而不只是「成功了」：多通道时「有一个成功」不等于「你那个成功」。
+	// 同时记 failed 数——只留成功那条会让「telegram 挂了但 email 通了」看起来一切正常。
+	if len(delivered) > 0 {
+		e.logger.Info("alert delivered",
+			zap.String("rule", rule.Name),
+			zap.Strings("notifiers", delivered),
+			zap.Int("failed", failed),
+			zap.String("message", msg),
+		)
 	}
 
 	// Only enter cooldown once at least one notifier delivered. On total
 	// failure, leave lastFired and pending untouched so the next evaluation
 	// retries immediately instead of silently swallowing the alert.
-	if anySucceeded {
+	if len(delivered) > 0 {
 		e.lastFired[rule.Name] = now
 		delete(e.pending, rule.Name)
 	}
