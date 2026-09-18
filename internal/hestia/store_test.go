@@ -419,7 +419,7 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 	// 同一事实的两个副本，改一处不会让另一处变红。它一度真的不一致：TASK-006 交付时
 	// 是「列表 16 项 vs 文案十七」，无人报警；后来加 "Ingest" 使列表变 17，**文案碰巧
 	// 变对了**。⇒ 「现在是对的」与「它被修好了」是两回事，而前者会让人停止追问。
-	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "BuildSheetRows", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "QueueHealthOf", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory", "sheets.Client.CreateYearTab", "sheets.Client.ReadEntryArea", "sheets.Client.ReadHeader", "sheets.Client.Tabs", "sheets.Client.WriteCells", "sheets.ColumnLetter", "sheets.Diff", "sheets.NewClient", "sheets.Push", "sheets.ResolveHeader", "sheets.WithEndpoint"}
+	want := []string{"BackfillFetch", "BackfillLoad", "BuildContract", "BuildHistory", "BuildSheetRows", "Calibrate", "Contract.FileName", "Contract.JSON", "ContractHistory.FileName", "ContractHistory.JSON", "DefaultSignals", "DefaultThresholds", "Discover", "EnsureQueueDirs", "Evaluate", "HealthSummary", "Ingest", "LoadConfig", "NewPBOCFetcher", "NewStore", "Parse", "QueueHealth.ByState", "QueueHealthOf", "RenderStatus", "Store.AllPeriods", "Store.Close", "Store.Current", "Store.DB", "Store.HasArticle", "Store.HasArticleInObservations", "Store.HasPeriod", "Store.Preceding", "Store.PrecedingAll", "Store.PriorPublishedAt", "Store.RecentObservations", "Store.RecentPending", "Store.RecentRuns", "Store.RecordRun", "Store.Save", "Validate", "WriteContract", "WriteHistory", "sheets.Client.CreateYearTab", "sheets.Client.ReadEntryArea", "sheets.Client.ReadHeader", "sheets.Client.Tabs", "sheets.Client.WriteCells", "sheets.ColumnLetter", "sheets.Diff", "sheets.NewClient", "sheets.Push", "sheets.ResolveHeader", "sheets.WithEndpoint"}
 	// 用 Equalf 而不是 Equal + fmt.Sprintf：本文件不必为一句文案引入 fmt。
 	assert.Equalf(t, want, got,
 		"包的导出函数/方法必须恰好是这 %d 个——任何新增的包级写口（如 InsertRow）"+
@@ -451,6 +451,13 @@ func TestPackageExposesNoWriteFunctions(t *testing.T) {
 //
 // 为什么不放进 HealthSummary：那个查的是 DB，本函数查的是目录，**两者必须能各自失败**。
 // 合成一个的话，一个目录权限问题会让整组 DB 指标跟着消失（collector 的 fetch 失败即 return）。
+
+// —— 为什么名单里多了 QueueHealth.ByState（M4 的 TASK-001 QA 返工追加，2026-09-17）——
+//
+// 同上，是**登记而不是放宽**。它是 QueueHealth（一个纯值类型）的方法，只把已经读好的
+// 四个计数换成 map，不碰库、不碰文件系统。导出是因为 collector 需要**单一口径**：
+// 消费侧自己维护一份状态名单时，hestia 侧加状态而它漏跟会让新状态件数静默消失（QA W-2）。
+// QueueHealth 不是 *Store，故 reflect 那条守卫的 want 同样零改动。
 
 // —— 为什么名单里多了 BackfillLoad（M1c-3b 的 TASK-006 追加）——
 //
