@@ -4255,3 +4255,74 @@ vault git 三条 Spool 提交各带 req-id。两轮端到端各约 3.5 分钟。
 `signal_credit` **有黄灯档**（2026-07 实测 `bill_ratio` 10.82% 略过 10% 健康线 ⇒ yellow）。
 没有黄灯的只是**楼市与消费**两个——`prepare.py` 与 `glossary.md` 标注的那条易错点指的是这两个，
 别扩大成「Hestia 的信号都没有黄灯」。
+
+## Sprint M4 · 队列可观测与自动触发（2026-09-18 实测）
+
+M4 交付：`QueueHealthOf` + collector 队列指标 + 五条告警规则 + `hestia-warp` 触发器与 launchd。
+交付 HEAD `bd31159ba70b9d664fed5b66b787b26a0a26cfb8`，归档 tag `sprint-048-2026-09-18`。
+下面五条是**生产实测**，读代码不算——判据二与判据四分别是 C2、C4 的唯一诚实证明。
+
+**A｜判据二：队列读失败不带走 DB 指标（C2）**
+
+把 runtime 的 `queue/hestia/pending` 改名后抓一次 `/metrics`：
+
+| 指标 | 改名前 | 改名后 | 改回后 |
+|---|---|---|---|
+| `hestia_queue_items{state=*}` | 四个序列 | **全部消失** | 四个序列 |
+| `hestia_queue_up` | 1 | **0** | 1 |
+| `hestia_queue_errors_total` | 0 | **1** | **1**（累计，不回落） |
+| `hestia_db_up` / `hestia_last_run_timestamp` / `hestia_pending_review` | 1 / 有值 / 21 | **照常输出** | 同左 |
+
+🔴 最后一列顺带实证了**为什么告警规则用 `*_up == 0` 而不是 `*_errors_total > 0`**（2026-09-17 人类裁决）：
+恢复后 `queue_up` 回到 1，而计数器仍停在 1 ——用计数器做判据的话，故障早已消失而告警还在响，
+且 serve 不重启就不会熄。
+
+**B｜判据三：告警真能送达（10:09:54 造件 → 10:22:07 触发）**
+
+`failed/probe-judge3.json` 造件后 12 分钟触发（规则 `for: 10m` + 评估间隔 60s，符合预期），
+Telegram 实收：`[WARNING] hestia_queue_failed: Hestia 队列有 failed/ 项…`。删掉探针后 `state="failed"` 回到 0。
+
+⚠️ **首次发送失败过一次**：`context deadline exceeded`（经 `127.0.0.1:7897` 代理）。随后重试成功。
+这依赖 `evaluator.go` 的一条性质——**所有通知器都失败时不进冷却、不清 pending，下一轮立刻重试**；
+若当初写成「发了就进冷却」，这次瞬时超时会让告警**整整 24 小时不再出现**（该规则 cooldown 24h）。
+🔴 **成功发送不写日志**，所以「告警是否送达」在日志里只有否定证据（`alert notify failed` 的有无），
+判定必须靠人确认收到——本次由人类确认。
+
+**C｜判据四 / 六：触发器的两条拒绝路径（C4、C5）**
+
+| 场景 | 输出 | 退出码 | nanoclaw 会话 |
+|---|---|---|---|
+| 四个目录都空 | `queue empty, nothing to do` | 0 | mtime 列表与目录数（3）**均未变** |
+| `pending` 1 件 + `processing` 1 件 | `busy (1 in processing/), skipping this round` | 0 | 同样未变 |
+
+🔴 **判据四不能只比会话 mtime**：队列目录缺失时脚本 `exit 1`、同样不唤起，只看 mtime 会把
+「坏了」读成「按设计跳过」。故判据是三者合取：`rc=0` ∧ 输出含 `queue empty` ∧ 会话未变。
+
+**D｜判据五：端到端自动（唯一能验 plist 的那条路径）**
+
+`contract emit --period 2026-08` 投递（10:15）→ **不做任何手工动作** → launchd 自动唤起（10:34）：
+
+- 队列流转：`pending=2 → processing=3 → 全空`（采样间隔 60s）
+- `logs/hestia-warp.out.log`：`triggering (2 pending …)` → `nanoclaw@2.1.21 chat` → `收到，处理中。`
+- vault `2026-08 金融数据解读.md`：mtime `10:34:58`，sha256 `029f65e7…` → `2dcc2f76…`
+- `hestia-warp.err.log` 为空
+
+🔴 **必须等自动唤起、不能手工跑脚本代替**：手工跑证明不了 plist 的 `PATH`（写死 nvm node v22.22.0）
+与代理键裁决是对的。本次日志里出现 `pnpm` 正常执行，才说明那段 PATH 真的有效。
+⚠️ **写死版本号仍是已知脆弱点**：nvm 升级后该目录消失，脚本报 `pnpm: command not found`，
+而触发脚本对唤起用了 `|| true` ⇒ **退出码仍是 0**，launchd 也不会告诉你。
+⇒ 这条路径的失效**只能靠「笔记没出来」发现**，或靠 `hestia_queue_stuck`（24h）兜底。
+
+**E｜`processing_stuck` 阈值仍未校准（QA W-3 转人类，本次数据不足）**
+
+本次契约在 `processing/` 停留 **< 1 分钟**（10:34 进、10:35 出），远低于阈值 30 分钟 + `for 10m`。
+🔴 **但这是回放**（`emit` 重放已入库期次，validation.checks 为空），只重新生成笔记；
+真实新契约的处理时间可能长得多。⇒ **不要据此认为阈值安全**，等一期真实契约再定。
+若常态超过 40 分钟，这条规则会被训练成噪声，而它是唯一兜底「agent 卡死」的规则（D4 的代价）。
+
+**F｜仍然悬着的一条：重复唤起窗口（QA W-4）**
+
+互斥判据是 `processing/` 非空，而把契约从 `pending/` 搬到 `processing/` 的是消费者（nanoclaw warp skill）。
+若 agent 从被唤起到真正 rename 超过 30 分钟，下一轮 launchd 会**重复唤起同一份契约**。
+atlas 侧改不了——建议要求 skill 第一件事就是 rename 进 `processing/`。本次因处理只花 1 分钟未触及该窗口。
+
