@@ -1,0 +1,89 @@
+{
+  "id": "TASK-001",
+  "title": "QueueHealthOf：契约队列件数与最旧年龄（纯文件系统读）",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-17-hestia-queue-observability-and-trigger.md 的 TASK-001 段（含测试与实现草稿，可直接用）。在 internal/hestia 新增 `type QueueHealth struct{PendingCount, ProcessingCount, DoneCount, FailedCount int; OldestPending, OldestProcessing time.Time}` 与 `func QueueHealthOf(dir string) (QueueHealth, error)`。遍历**复用 queue.go:12 的 queueStates**。目录读不到必须报错、不得退化成零件数（C3：「正常空」与「被删空」件数同形）。导出面登记进 store_test.go 的 AST 守卫。",
+  "module": "hestia",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/hestia/queue_health.go",
+    "internal/hestia/queue_health_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "件数与最旧年龄：pending/ 放 a.json（mtime=now-3h）与 b.json（now-1h），failed/ 放 c.json ⇒ PendingCount=2、FailedCount=1、ProcessingCount=0、DoneCount=0，OldestPending 与 now-3h 相差 ≤1 分钟（取**最旧**不是最新）；processing/ 放两份（now-2h、now-30m）⇒ OldestProcessing ≈ now-2h。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "子目录遍历复用 `queueStates`（queue.go:12），queue_health.go 里不得出现第二份子目录名单切片/数组字面量；按状态分派字段的 `switch` 必须带 `default` 分支并对未知状态返回 error。**另新增导出方法 `QueueHealth.ByState() map[string]int`（或等价形态），键恰为 `queueStates` 全部状态**，供 collector 单一口径消费（QA W-2）；其键集合须由测试对 `queueStates` 断言相等，加第五个状态时该测试必须变红。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`store_test.go` 的 AST 守卫 `want` 登记 `QueueHealthOf` 并附「为什么是登记不是放宽」注释；AST 守卫与 reflect 守卫（`TestStoreExposesNoWriteMethods` 一族）均保持**精确集合相等**且绿；reflect 那条的 want 清单零改动（它不是 *Store 方法）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "四个子目录都存在且都空 ⇒ `err == nil`，四个件数均为 0，`OldestPending.IsZero()` 与 `OldestProcessing.IsZero()` 均为 true。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "不计件、也不参与最旧年龄的条目：子目录、以 `.` 开头的文件（.DS_Store）、以 `.tmp` 结尾的文件，**以及一切非常规文件（符号链接、FIFO、socket、设备）**——判据与 scripts/ops/hestia-warp-trigger.sh 的 `find -type f` 一致（QA W-1：原实现把指向文件的 symlink 计 1 件而脚本计 0，两处注释都自称一致，实则不成立）。测试须含：指向普通文件的 symlink、悬空 symlink、指向目录的 symlink 三例，PendingCount 均为 0；同一夹具下跑 `HESTIA_QUEUE_DIR=<夹具> bash scripts/ops/hestia-warp-trigger.sh` 输出 `queue empty`（两侧同值即口径一致）。两处注释同步写全判据。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "四个状态**各测一次**（table-driven）：删掉该子目录 ⇒ 返回非 nil error、`err.Error()` 含该子目录名，且返回值为零值 `QueueHealth{}`（不返回部分结果）。**但条目在 ReadDir 与 e.Info() 之间消失（正常流转 pending→processing 的 rename）不是错误**：`os.IsNotExist(err)` ⇒ `continue`，其它 Info 错误仍响亮失败（QA W-6：原实现把它升级为致命错误 ⇒ 该轮 queue_up=0、队列指标整组缺失，并清零 stuck/failed 的 for 计时）。须有一条测试证明这一形态不致错（可注入/模拟条目消失）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "子目录权限 000（`os.Chmod`）⇒ 返回 error；以 root 运行时 `t.Skip`（root 无视权限位）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "纯文件系统读（C1）：queue_health.go 的 import 不含 `database/sql`、不引用 `*Store`、无任何 SQL 字符串。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m4-c",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/hestia"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4-a",
+  "writes": [
+    "./internal/hestia/queue_health.go",
+    "./internal/hestia/queue_health_test.go",
+    "./internal/hestia/store_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "verify_baseline": {
+    "head": "e6f4e9d493fb9e3bcebb0adef9a9edc3fbae8101",
+    "discovery_sha256": "c8ee89e5d52a3447efc3c1318986409bac9cea771c493cd1dcef562e2975cfca",
+    "at": "2026-09-18T00:47:59Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    "W-1 计件口径分歧（QA 实证）：QueueHealthOf 把符号链接计为队列项（os.ReadDir 的 DirEntry.Type() 来自 lstat，symlink 的 IsDir() 恒 false），而 scripts/ops/hestia-warp-trigger.sh 的 find -type f 不计 ⇒ 指标说有 N 件、触发器说 queue empty，24h 后 hestia_queue_stuck 亮起而文案指向「触发器没跑」，把值班人引偏。两处注释都自称「判据与另一侧一致」，该情形下不成立。修法：queue_health.go 跳过非常规文件（如 !e.Type().IsRegular()），并同步两处注释把判据写全。不得只改注释。",
+    "W-2 之一（状态名副本，QA 变异实证）：hestia 侧改齐而 internal/metrics 的 collectQueue map 漏跟时，go test ./... 全绿且新状态件数静默消失。本任务先在 hestia 侧提供唯一口径：新增导出方法（如 QueueHealth.ByState() map[string]int 或等价形态），覆盖 queueStates 全部状态，并登记进 store_test.go 的 AST 守卫。collector 改用它由 TASK-003 的 review_fix 承接。",
+    "W-6（QA 探针实测）：os.ReadDir 先返回条目、e.Info() 才 lstat；契约从 pending/ rename 到 processing/ 若发生在两步之间，Info() 返 ErrNotExist 而当前实现（queue_health.go:41-44）升级为致命错误 ⇒ 该轮 queue_up=0、队列指标整组缺失、stuck/failed 的 for 计时清零（不会发页，但真告警最多晚 10 分钟）。修法：os.IsNotExist(err) ⇒ continue，其它错误仍响亮失败；可顺带只对 pending/processing 调 Info()（done/failed 不用最旧年龄，每轮白做两次 lstat）。"
+  ]
+}

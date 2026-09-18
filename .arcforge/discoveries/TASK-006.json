@@ -1,0 +1,47 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "计划草稿的自测只有 4 例，未覆盖 DoD 的：pending 空而 processing 非空、子目录/点文件/.tmp、processing 缺失、默认 HESTIA_QUEUE_DIR、默认唤起路径；已补到 9 例。",
+    "count_of 里的 exit 1 发生在 $(...) 子 shell 中，靠 set -e 下赋值失败把退出码传出主脚本——自测的两例目录缺失覆盖了这条传递。",
+    "计件判据按 TASK-001 同口径同时作用于 pending/ 与 processing/（只数普通文件，排除 '.*' 与 '*.tmp'）；processing/ 只有 .DS_Store 时同样视为空。"
+  ],
+  "decisions": [
+    {
+      "decision": "所有 stdout 决策行附带 QUEUE_DIR 路径",
+      "rationale": "让「默认 HESTIA_QUEUE_DIR」可以运行时断言（不设该变量时输出须含默认路径），而不是只靠 grep 源码；也方便人类做判据四时一眼看出脚本读的是哪个队列。"
+    },
+    {
+      "decision": "默认唤起写成 `cd \"$NANOCLAW_DIR\" && pnpm run chat 处理 hestia 队列 || true`（单行 && ||）",
+      "rationale": "DoD 指定形态；且 set -e 对 && || 列表不生效，cd 失败或 pnpm 非零都不会让脚本失败——客户端 120s 硬超时下退出码不代表处理结果。自测用 PATH 里的假 pnpm（exit 7）断言 exit 0 且工作目录为 NANOCLAW_DIR。"
+    },
+    {
+      "decision": "默认队列目录那例只读访问真实运行时队列，TRIGGER_CMD 仍为桩，断言桩调用次数 ≤1",
+      "rationale": "判定只做 find 计数，不写队列；真实队列可能有待处理件，此时桩被调用一次无副作用，不唤起真 agent。"
+    }
+  ],
+  "files_modified": [
+    "scripts/ops/hestia-warp-trigger.sh",
+    "scripts/ops/hestia-warp-trigger-test.sh"
+  ],
+  "interfaces_exposed": [
+    "scripts/ops/hestia-warp-trigger.sh：env HESTIA_QUEUE_DIR（默认 /Users/zuowei/workspace/runtime/atlas/queue/hestia）、NANOCLAW_DIR（默认 /Users/zuowei/workspace/ai/nanoclaw）、TRIGGER_CMD（测试桩，生产不设）；stdout 决策关键字 `queue empty` / `busy` / `triggering`；pending/ 或 processing/ 缺失 ⇒ exit 1 且 stderr 含缺失路径。供 launchd 装载任务使用；交人类清单：判据四除比对会话 mtime 外，还要看脚本 exit 0 且输出含 `queue empty`。"
+  ],
+  "verification": {
+    "commit": "b1276a60b12cd34c25133ea4a575fceee59fc079（分支 task/TASK-006），经 Leader merge 为 master d44e3891c29adcf53009c80af7bd6a9c6ea5f6ba",
+    "content_check": "merge 后 master 上 sha256：trigger a2db3533694fda1d68d229b2d451d97575404a0f64086419ef3cd1b840298f05、test 77932f9d09765631604a9ffdca291324d5596605e19b402dbc8f076dde8ff30f，与提交时一致",
+    "suite": "在主仓库 master d44e389 上跑 `bash scripts/ops/hestia-warp-trigger-test.sh` ⇒ `9 passed, 0 failed`，exit 0",
+    "static": "两文件 -rwxr-xr-x；bash -n 通过；shellcheck（/opt/homebrew/bin/shellcheck，默认级别）零告警；`grep -nE '\\b(mv|rm)\\b' scripts/ops/hestia-warp-trigger.sh` 零命中；无锁文件",
+    "done_criteria_map": {
+      "functional[0]": "9 例全绿",
+      "functional[1]": "空队列",
+      "functional[2]": "有活（桩记录恰 1 行）",
+      "boundary[0]": "agent 在跑；只有 processing",
+      "boundary[1]": "非计件条目（pending/tmp 子目录 + .DS_Store + a.json.tmp）",
+      "error_handling[0]": "pending 缺失；processing 缺失",
+      "non_functional[0]": "red_phase 见下；静态检查见 static",
+      "non_functional[1]": "默认队列目录；默认唤起路径；头注释 + grep"
+    },
+    "mutation": "在 scratchpad 隔离副本上 9 个变异全部 KILLED：去 `! -name '.*'`、去 `! -name '*.tmp'`、去 `-type f`（均杀于「非计件条目」）；默认目录截掉 /hestia（「默认队列目录」）；去 `|| true`（「默认唤起路径」rc=7）；eval 两次（「有活」calls=2）；busy 判定 -ne 99（「有活」「默认唤起路径」）；缺目录 exit 0（两例缺失）；stderr 改 stdout（两例缺失）。每个变异体先 bash -n 并打印 diff 核对。主工作区未触碰。",
+    "red_phase": "== 四目录全空 ⇒ 不唤起（C4）==\n  FAIL 空队列：rc=127（期望 0） calls=0（期望 0）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== pending 1 个普通文件、processing 空 ⇒ 恰唤起一次 ==\n  FAIL 有活：rc=127（期望 0） calls=0（期望 1）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== pending 与 processing 均非空 ⇒ busy、不唤起（C5）==\n  FAIL agent 在跑：rc=127（期望 0） calls=0（期望 0）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== pending 空而 processing 非空 ⇒ 不唤起 ==\n  FAIL 只有 processing：rc=127（期望 0） calls=0（期望 0）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== pending 只有子目录 / 点文件 / .tmp ⇒ 视为空、不唤起 ==\n  FAIL 非计件条目：rc=127（期望 0） calls=0（期望 0）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== pending 缺失 ⇒ 非零退出、stderr 含路径、不唤起 ==\n  FAIL pending 缺失：rc=127（期望 nonzero） calls=0（期望 0）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== processing 缺失 ⇒ 非零退出、stderr 含路径、不唤起 ==\n  FAIL processing 缺失：rc=127（期望 nonzero） calls=0（期望 0）\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== 不设 HESTIA_QUEUE_DIR ⇒ 用默认队列目录（只读判定；桩兜底不唤起真 agent）==\n  FAIL 默认队列目录：输出未含 /Users/zuowei/workspace/runtime/atlas/queue/hestia\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n== 不设 TRIGGER_CMD ⇒ 在 NANOCLAW_DIR 下跑 pnpm run chat，失败也 exit 0 ==\n  FAIL 默认唤起路径：rc=127 calls=0 记录=\n       stdout: \n       stderr: scripts/ops/hestia-warp-trigger-test.sh: line 23: /Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-006/scripts/ops/hestia-warp-trigger.sh: No such file or directory\n\n0 passed, 9 failed\n"
+  }
+}

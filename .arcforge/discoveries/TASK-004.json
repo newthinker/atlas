@@ -1,0 +1,87 @@
+{
+  "task_id": "TASK-004",
+  "author": "dev-m4-b",
+  "provenance": {
+    "implementation_by": "dev-m4-a",
+    "implementation_commit": "be8aa67f71857408a56b83e8b3dca757b4963aac（经 merge 415c53e 进 master）",
+    "handover": "2026-09-17T14:51:35Z Leader 以 in_progress→assigned 收回改派给 dev-m4-b（epoch 2）：dev-m4-a 消息通道单向失效（发得出、收不到），经人类批准停掉；环境问题，不计返工",
+    "handover_by_dev_m4_b": "代码与测试全部出自 dev-m4-a，dev-m4-b 未改动任何代码（files_modified_by_dev_m4_b 为空）。dev-m4-b 做的是：逐条对照 DoD 读实现与测试、在最终树重跑测试与构建、背对背重采覆盖率基线、独立重做 5 个变异、写入 coverage_floor、重写本 discovery",
+    "carried_over": "key_findings 与 decisions[0..4] 沿用 dev-m4-a 原文（其结论均经 dev-m4-b 复核：decisions[0] 对照 config.go:257、[1]/[2]/[3] 由独立变异 B/C/D 复核）；verification 中的数字全部由 dev-m4-b 在最终树重采，dev-m4-a 原 verification 保留在 verification.original_by_dev_m4_a 以供对照"
+  },
+  "commit": "be8aa67f71857408a56b83e8b3dca757b4963aac",
+  "merged_as": "415c53e",
+  "key_findings": [
+    "cmd/atlas 包覆盖率在 master c4d651c 基线即 78.0%，本任务后仍为 78.0%（go test -count=1 -cover ./cmd/atlas），低于 dev_minimum 80——为包的既有欠账，已报 Leader 裁决。",
+    "既有测试 TestBuildHestiaHealth_RegistersCollector 用的 yaml 未写 queue.dir ⇒ 取默认相对路径 queue/hestia，测试 cwd 下不存在 ⇒ queue_up=0 但 buildHestiaHealth 仍 nil error；变异「队列缺失即启动失败」时它也变红，成为该语义的第二个守卫。",
+    "（dev-m4-b 复核）cmd/atlas 覆盖率缺口不在本任务 writes 内：门禁口径（-coverpkg=./cmd/atlas）下 buildHestiaHealth 为 100.0%，包总计 78.2%；TASK-004 合入前基线 c4d651c 背对背同口径同为 78.2%（go test -cover 口径两边均 78.0%）⇒ 本任务未拉低覆盖率，欠账是包的既有状态。"
+  ],
+  "decisions": [
+    {
+      "decision": "不写「queue.dir 为空」分支，恒传非 nil QueueFunc",
+      "rationale": "internal/hestia/config.go:257 的 validate 已拒绝空 queue.dir（LoadConfig 返回错误），该分支不可达；计划里那条空值测试同样不可达，未写。"
+    },
+    {
+      "decision": "QueueFunc 每次调用现读 hestia.QueueHealthOf(queueDir)，不在启动时读",
+      "rationale": "DoD error_handling[1]：目录被删/建回须在下一轮 Snapshot 反映；变异「启动时快照」被 TestBuildHestiaHealth_QueueReadEveryScrape 杀死。"
+    },
+    {
+      "decision": "队列目录缺失不让 buildHestiaHealth 返回错误",
+      "rationale": "C3：队列缺失是运行期可告警事实（hestia_queue_up=0），与「库打不开即启动失败」刻意不同；启动时拒绝会让整组健康度消失。"
+    },
+    {
+      "decision": "相对路径不做解析，交给进程 cwd；注释记下依赖 launchd WorkingDirectory 与 hestia-ingest 一致",
+      "rationale": "与 hestia 配置 db_path/queue.dir「相对进程 cwd」约定一致；变异「相对配置文件目录解析」被 TestBuildHestiaHealth_QueueDirRelativeToCwd 杀死。"
+    },
+    {
+      "decision": "新测试 helper writeHestiaYAMLWithQueue 复用 writeHestiaYAML 并追加 queue 段",
+      "rationale": "code-simplifier 的改动（已核 diff）；既有测试函数体零改动，测试文件 deletions=0。"
+    },
+    {
+      "decision": "coverage_floor=78（任务级，数字类型），经写通道 update 写入（transitions.jsonl 2026-09-17T14:54:32Z op=update by dev-m4-b）",
+      "rationale": "Leader 裁决（2026-09-17，接手派发消息）：task-completed.sh:483-488 既有机制以任务级 coverage_floor 覆盖 dev_minimum=80；cmd/atlas 往期 floor 75/77；拆任务时漏设。基线：c4d651c（TASK-004 前）与 6d5230e（最终树）门禁口径均 78.2%，门禁比较取整数部分 78 ≥ 78 通过。缺口全在 writes 外，本任务范围内无法也不应补齐"
+    },
+    {
+      "decision": "接手后不重写、不补代码",
+      "rationale": "对照 6 条 DoD 逐条核实无缺口（映射见 verification.done_criteria_map），独立变异 5/5 KILLED；重写只会用自己的产出替换已验证的工作"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/hestia_health.go",
+    "cmd/atlas/hestia_health_test.go"
+  ],
+  "files_modified_by_dev_m4_b": [],
+  "interfaces_exposed": [
+    "serve 启用 hestia health 时额外输出 TASK-003 的队列指标（hestia_queue_up / hestia_queue_items_<state> / 两个 age / hestia_queue_errors_total），队列目录 = hestia.yaml 的 queue.dir（相对进程 cwd）",
+    "启动日志 'hestia health enabled' 增加字段 queue=<dir>"
+  ],
+  "verification": {
+    "tree": "master 6d5230e893a329870a943261858cbbc5a8bdeeae（主仓库工作区，cmd/atlas 与 internal 无未提交改动）；hestia_health.go / hestia_health_test.go 与 be8aa67 git diff 为空，be8aa67 是 master 祖先",
+    "red": "go test ./cmd/atlas/ -run 'TestBuildHestiaHealth|TestExampleConfig' ⇒ 4 FAIL：WiresQueueDir（queue_up 0≠1、hestia_queue_items 缺席）、QueueDirRelativeToCwd（0≠1）、MissingQueueDirDoesNotFailStartup（queue_up 缺席）、QueueReadEveryScrape（0≠1）；SkippedPathsEmitNoHestiaMetrics 守既有语义，RED 时即绿（dev-m4-a 所采，dev-m4-b 未复现 RED——代码已在 master）",
+    "suite": "go build ./... 通过；go test -count=1 -cover ./cmd/atlas ⇒ ok 78.0%；-run 'TestBuildHestiaHealth|TestExampleConfig' -v ⇒ 10 个 PASS、0 FAIL（dev-m4-b 于最终树 6d5230e 重采）",
+    "coverage": "门禁口径 go test -coverpkg=./cmd/atlas ./cmd/atlas：total 78.2%，buildHestiaHealth 100.0%；基线 c4d651c8abb0463fd9be070df93b44be3fcd5373 与 6d5230e 在两个独立 worktree 中同时跑，均 78.2%；coverage_floor=78",
+    "mutation": "dev-m4-b 独立重做 5/5 KILLED（私有 worktree，sha256 还原为真）：A 传 nil QueueFunc→WiresQueueDir/QueueDirRelativeToCwd/MissingQueueDirDoesNotFailStartup/QueueReadEveryScrape；B 启动时快照→QueueReadEveryScrape；C 队列缺失即启动失败→RegistersCollector/MissingQueueDirDoesNotFailStartup；D 相对路径按配置文件目录解析→QueueDirRelativeToCwd；E 读错目录（snapshot_dir）→WiresQueueDir/QueueDirRelativeToCwd/QueueReadEveryScrape",
+    "review_checks": "boundary[0]：be8aa67 对测试文件 numstat 93/0，三个 hunk 分别是文件头映射注释、import、文件末尾追加，均不在既有函数体内；boundary[1]：hestia_health.go 与测试中 `Queue.Dir == \"\"` / `queueDir == \"\"` 命中 0 处，config.go:257 validate 拒绝空 queue.dir",
+    "done_criteria_map": {
+      "functional[0]": "TestBuildHestiaHealth_WiresQueueDir",
+      "functional[1]": "TestBuildHestiaHealth_QueueDirRelativeToCwd（t.Chdir）+ hestia_health.go 注释",
+      "boundary[0]": "TestBuildHestiaHealth_SkippedPathsEmitNoHestiaMetrics + 既有 5 个测试（函数体零改动，git diff deletions=0）",
+      "boundary[1]": "review：hestia_health.go 无 queue.dir 判空，理由见 decisions[0]",
+      "error_handling[0]": "TestBuildHestiaHealth_MissingQueueDirDoesNotFailStartup",
+      "error_handling[1]": "TestBuildHestiaHealth_QueueReadEveryScrape"
+    },
+    "original_by_dev_m4_a": {
+      "red": "go test ./cmd/atlas/ -run 'TestBuildHestiaHealth|TestExampleConfig' ⇒ 4 FAIL：WiresQueueDir（queue_up 0≠1、hestia_queue_items 缺席）、QueueDirRelativeToCwd（0≠1）、MissingQueueDirDoesNotFailStartup（queue_up 缺席）、QueueReadEveryScrape（0≠1）；SkippedPathsEmitNoHestiaMetrics 守既有语义，RED 时即绿",
+      "green": "GOTOOLCHAIN=local go test -count=1 ./cmd/atlas/ ⇒ ok；go build ./... ok；master 6d5230e 上两文件与 be8aa67 diff 为 0",
+      "coverage": "go test -cover ./cmd/atlas: 78.0%（基线 c4d651c 同为 78.0%）；dev_done 门禁口径（-coverpkg=./cmd/atlas）: 78.2%，2026-09-17T14:0xZ 试转 dev_done 被 BLOCKED（< dev_minimum 80），任务留在 in_progress，待 Leader 裁决",
+      "mutation": "5/5 有效 KILLED：传 nil、启动时快照、读错目录、队列缺失即启动失败、相对配置文件目录解析；另一搭桥中间态编译失败，不计",
+      "done_criteria_map": {
+        "functional[0]": "TestBuildHestiaHealth_WiresQueueDir",
+        "functional[1]": "TestBuildHestiaHealth_QueueDirRelativeToCwd（t.Chdir）+ hestia_health.go 注释",
+        "boundary[0]": "TestBuildHestiaHealth_SkippedPathsEmitNoHestiaMetrics + 既有 5 个测试（函数体零改动，git diff deletions=0）",
+        "boundary[1]": "review：hestia_health.go 无 queue.dir 判空，理由见 decisions[0]",
+        "error_handling[0]": "TestBuildHestiaHealth_MissingQueueDirDoesNotFailStartup",
+        "error_handling[1]": "TestBuildHestiaHealth_QueueReadEveryScrape"
+      }
+    }
+  }
+}

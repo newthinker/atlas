@@ -1,0 +1,81 @@
+{
+  "id": "TASK-002",
+  "title": "Snapshot 展开 state label 为 <name>_<state> 键",
+  "description": "人类裁决（2026-09-17，Leader 核实后提问）：告警求值器 `internal/alert/rules.go:28` 只认 `^(\\w+)\\s*op\\s*数字$`，不支持 `{state=\"failed\"}` 选择器；而 `Snapshot()`（internal/metrics/snapshot.go）把带 label 的 gauge/counter **跨 label 求和**成一个键 ⇒ 计划里 `hestia_queue_items{state=\"failed\"} > 0` 恒 false，写成 `hestia_queue_items > 0` 又会因 done/ 的历史件恒 true。处方：仿 `addStatusClass` 先例，对带 `state` label 的 gauge/counter 序列**额外**累加到 `<name>_<state>` 键（原求和键保留）。规则引擎不动。已核实仓库内现有指标无 `state` label（无既有键冲突）。",
+  "module": "metrics",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/metrics/snapshot.go",
+    "internal/metrics/snapshot_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "gauge `x` 两个序列 state=failed 值 2、state=done 值 5 ⇒ `out[\"x\"]==7`（原求和不变）、`out[\"x_failed\"]==2`、`out[\"x_done\"]==5`。；同一序列同时带 `status=\"500\"` 与 `state=\"failed\"` ⇒ `x_5xx` 与 `x_failed` **两个键都产生**（`addStatusClass` 遇 status 即 return，state 展开不得寄生在它的循环里）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "counter 同样展开：counter `y` 序列 state=failed 值 3 ⇒ `out[\"y\"]==3` 且 `out[\"y_failed\"]==3`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "既有 status 分类行为不变：snapshot_test.go 既有测试函数体零改动且全绿（验证者看 git diff 只有新增）。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "不带 state label 的序列不产生任何额外键：只注册无 label gauge `z` ⇒ Snapshot 键集合**精确等于** `{\"z\"}`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "同名多序列同 state 值（另有一个区分 label 如 `shard`）⇒ `<name>_<state>` 为两者之和。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "state 值为空串或不匹配 `^\\w+$`（如 `in-flight`、含空格）⇒ 不产生 `<name>_` 键（求值器正则只认 `\\w+` 名字，产生了也无法被规则引用）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "histogram 带 state label ⇒ 仍只产生 `_count`/`_sum`，不产生 `<name>_<state>` 键（展开只作用于 gauge/counter）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "snapshot.go 注释写明展开的立项理由（求值器不支持 label 选择器、Snapshot 跨 label 求和；2026-09-17 人类裁决），并在 Snapshot 的函数注释里补上 state 展开的说明。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m4-b",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/metrics"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4-a",
+  "writes": [
+    "./internal/metrics/snapshot.go",
+    "./internal/metrics/snapshot_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "verify_baseline": {
+    "head": "717c627d09f35251c247ad0fc5f2d0f79322745c",
+    "discovery_sha256": "40c65f47cb14ee076f507f15de1e3187a37520e444cd5bf2b417b05822fed12a",
+    "at": "2026-09-17T13:28:01Z"
+  }
+}

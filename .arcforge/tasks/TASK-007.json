@@ -1,0 +1,85 @@
+{
+  "id": "TASK-007",
+  "title": "launchd plist 入库并登记安装清单",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-17-hestia-queue-observability-and-trigger.md 的 TASK-006 段。人类 2026-09-17 裁决：plist 真相源放 `deploy/launchd/com.newthinker.atlas.hestia-warp.plist`（仓库约定，见 scripts/ops/install-services.sh:16），并登记进 install-services.sh 的循环清单；**不执行** launchctl bootstrap / install-services.sh（生产动作归人类）。代理键按计划原文写，不照抄 crisis/refresh-cnhk/prism-daily（C8）。无 Go 代码任务：全部 DoD 为 review。",
+  "module": "ops",
+  "complexity": "low",
+  "estimated_files": [
+    "deploy/launchd/com.newthinker.atlas.hestia-warp.plist",
+    "scripts/ops/install-services.sh"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`plutil -lint` 通过；Label=`com.newthinker.atlas.hestia-warp`；ProgramArguments=[`/bin/bash`, `/Users/zuowei/workspace/runtime/atlas/scripts/ops/hestia-warp-trigger.sh`]；WorkingDirectory=`/Users/zuowei/workspace/runtime/atlas`（`plutil -extract` 逐项取证）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "StartInterval=1800、RunAtLoad=false、StandardOutPath/StandardErrorPath 分别为 runtime `logs/hestia-warp.out.log` / `logs/hestia-warp.err.log`。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "install-services.sh 循环清单含 `com.newthinker.atlas.hestia-warp`；`bash -n` 通过；git diff 仅限：循环清单新增该标签 + 头注释（4-14 行惯例）新增一行说明，无其它行为改动。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "EnvironmentVariables **只含 PATH**：不得出现任何以 `_proxy` / `_PROXY` 结尾的键（按后缀判，大小写都查；`plutil -convert json` 后取键集合为证）；PATH 首段 nvm node bin 目录在本机真实存在（验证者 `ls -d` 取证），且该目录下**必须有 `pnpm`**。（2026-09-17 人类裁决：删掉代理键——`pnpm run chat` 只连本地 cli.sock，容器出网由 nanoclaw daemon + OneCLI gateway 负责，launchd 这层的代理变量到不了容器）",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "plist 头注释写明：①为何**不设**代理键（`pnpm run chat` = `tsx scripts/chat.ts`，只经本地 Unix socket cli.sock 发文本、不读环境变量；容器 agent 出网由 nanoclaw 常驻 daemon 起容器、OneCLI gateway 注入 HTTPS_PROXY，见 nanoclaw `src/container-runner.ts` 的 OneCLI gateway 段——launchd 这层的代理变量到不了容器）；②为何不照抄 crisis/refresh-cnhk/prism-daily 的 plist；③PATH 写死 node 版本的脆弱点（nvm 升级后 `pnpm: command not found`，而触发脚本 `|| true` 使退出码仍为 0，launchd 不报）。🔴 注释里每一句事实陈述都须可核实且为真；若提及 hestia-ingest.plist，须与事实一致（它**设了**代理键，5447d05，给 Sheets 出网）。引用 nanoclaw 代码时写明取证 commit。（2026-09-17 人类裁决后第二次订正，见 docs/04-test/TASK-007-verification.md 第 2 轮）",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "本任务未执行任何 launchctl 操作：验证者 `launchctl list | grep hestia-warp` 无输出（或与派发前一致），`~/Library/LaunchAgents/` 下无本任务新建文件。 **另加 Go 守卫（QA W-5）**：cmd/atlas 新增测试，断言本 plist 的 EnvironmentVariables 不含任何 `_proxy`/`_PROXY` 后缀的键（按后缀判，不枚举键名），并含肯定式锚点（PATH 在场、首段为 nvm node bin 目录），避免解析失败时否定式断言平凡为真——人类裁决不能只由散文守着。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4-b",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./deploy/launchd/com.newthinker.atlas.hestia-warp.plist",
+    "./scripts/ops/install-services.sh",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 4,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m4-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "verify_baseline": {
+    "head": "e6f4e9d493fb9e3bcebb0adef9a9edc3fbae8101",
+    "discovery_sha256": "e29cab47d7233082c37d993063c68708f4529d8c57fd5fb838fa95a3fe700578",
+    "at": "2026-09-18T00:45:39Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "error_handling[0] 第2轮不满足（第1轮缺陷已修复）：plist 头注释第8-9行『代理键必须：容器里的 agent 要出网访问 Anthropic——不设就恒连不上』与代码事实不符。nanoclaw scripts/chat.ts 是 Unix socket 客户端，只发 {text}、0 处读 env；容器由独立 daemon com.nanoclaw-v2-5657aeae（其 plist env 无代理键）起，容器代理由 OneCLI gateway 注入（src/container-runner.ts:483）⇒ 本 plist 的代理键到达不了容器 agent。该理由是订正后 DoD 原文规定的，dev 照写并标注未核实，根因在 DoD。需人类/Leader 先定：本 plist 代理键是否需要、真实理由是什么（牵动 boundary[0]）。其余 5 条 PASS，注释其余陈述逐句核实为真。详见 docs/04-test/TASK-007-verification.md 第2轮",
+  "fix_items": [
+    "W-5（QA 实证：`grep -rn hestia-warp --include=*.go .` 零输出）：人类裁决「hestia-warp.plist 不设代理键」目前只有散文守着，而同一决策的反面在 cmd/atlas/hestia_test.go:477 TestHestiaPlistSetsProxyKeysForSheets 有 Go 守卫。同仓已有一次「散文声明过期而无人察觉」的先例（hestia-ingest.plist 注释引用的守卫名 TestHestiaPlistSetsNoProxyKeys 已不存在）。修法：在 cmd/atlas 加对称 Go 守卫，断言 deploy/launchd/com.newthinker.atlas.hestia-warp.plist 的 EnvironmentVariables **不含任何以 _proxy/_PROXY 结尾的键**（按后缀判，不枚举三个键名），并配一条肯定式锚点（如断言 PATH 在场且首段为 nvm node bin）避免解析失败时否定式断言在空集上平凡为真。约 10 行测试，plist 不改。"
+  ],
+  "writes": [
+    "./deploy/launchd/com.newthinker.atlas.hestia-warp.plist",
+    "./scripts/ops/install-services.sh",
+    "./cmd/atlas/hestia_test.go"
+  ]
+}

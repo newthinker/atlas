@@ -1,0 +1,94 @@
+{
+  "id": "TASK-003",
+  "title": "HestiaCollector 加队列指标与可恢复 up gauge，与 DB 侧失败隔离",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-17-hestia-queue-observability-and-trigger.md 的 TASK-002 段（测试草稿可参考，但**以本 DoD 为准**）。`NewHestiaCollector(fetch HealthFunc, queue QueueFunc, now func() time.Time)`，`type QueueFunc func() (hestia.QueueHealth, error)`，nil=不采队列。新增：`hestia_queue_items`（gauge，label state=pending/processing/done/failed）、`hestia_queue_pending_age_hours`、`hestia_queue_processing_age_hours`、`hestia_queue_errors_total`（counter）、**`hestia_queue_up` 与 `hestia_db_up`（gauge，本轮读成功 1 / 失败 0）**——后两个是人类 2026-09-17 裁决：`*_errors_total > 0` 是累计计数，一次瞬时失败后 serve 重启前恒真、恢复不熄，告警规则改用 `*_up == 0`。Collect 拆成 collectDB 与 collectQueue 两个方法（C2：现有实现 fetch 失败即 return，照抄会让队列失败带走 DB 指标）。既有测试 `TestHestiaCollector_ErrorEmitsOnlyCollectErrors` 的语义随之变化（DB 失败现在也输出 hestia_db_up=0），按新语义改名/改断言并在 discovery 说明。复用既有测试辅助（gatherFamilies/gaugeValue/counterValue/labelValue），不另建同形辅助。唯一调用方 cmd/atlas/hestia_health.go **只做保持编译的最小改动**：新参数位传 `nil`（一行，不接线、不加测试；接线归 TASK-004）——保证合入 master 后 `go build ./...` 与 `go test ./...` 不断（已进 DoD non_functional[0]）。",
+  "module": "metrics",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/metrics/hestia_collector.go",
+    "internal/metrics/hestia_collector_test.go",
+    "cmd/atlas/hestia_health.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "DB 成功 + queue 返回 {Pending:2, Processing:1, Done:3, Failed:1, OldestPending: now-3h, OldestProcessing: now-1h}（now 注入）⇒ `hestia_queue_items` 恰四个序列，state=pending/processing/done/failed 值 2/1/3/1；`hestia_queue_pending_age_hours==3`、`hestia_queue_processing_age_hours==1`；`hestia_queue_up==1`、`hestia_db_up==1`；`hestia_queue_errors_total` 输出且为 0；既有 DB 指标照常。 **另（QA W-2）**：四个 `hestia_queue_items` 序列须由 `q.ByState()` 驱动，collectQueue 内不得出现第二份状态名字面量；须有一条测试断言输出的 state 标签集合与 `ByState()` 键集合相等——「hestia 侧加第五状态、collector 不动」时该测试必须变红（QA 实证该形态此前 go test ./... 全绿且新状态件数静默消失）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "端到端到快照：collector 注册进 `metrics.Registry`（或 metrics 包内等价 Gatherer）后 `Snapshot()` 含 `hestia_queue_items_failed==1` 与 `hestia_queue_up==1`（证明 TASK-002 的展开在真实指标上生效）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Collect 由 `collectDB(ch)` 与 `collectQueue(ch)` 两个方法组成，Collect 本体只顺序调用二者；任一方法内的 return 不可能跳过另一方法。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "四个目录都空（queue 返回零值 QueueHealth、err nil）⇒ 四个 items 序列都输出且值为 0；两个 age gauge **都不输出**；`hestia_queue_up==1`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`queue == nil` ⇒ 不输出任何 `hestia_queue_` 前缀指标（含 up 与 errors_total）；DB 指标与 `hestia_db_up` 照常。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "C2 双向隔离：①queue 失败 + DB 成功 ⇒ `hestia_last_run_timestamp` 等 DB 指标照常、`hestia_queue_up==0`、`hestia_queue_errors_total==1`、**无** `hestia_queue_items` 与两个 age；②DB 失败 + queue 成功 ⇒ `hestia_queue_items` 照常、`hestia_db_up==0`、`hestia_collect_errors_total==1`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "可恢复性：同一 collector 连续 Collect 两次，第一次 queue 失败、第二次成功 ⇒ 第二次 `hestia_queue_up==1` 且 `hestia_queue_errors_total` 仍为 1（up 恢复、计数器累计）；DB 侧同构一例。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "注册到 `prometheus.NewPedanticRegistry()` 后 Gather 无 error（Describe 声明与 Collect 实际输出一致），覆盖成功、queue 失败、DB 失败三种形态。；且 **`go build ./...` 通过、`go test -count=1 ./internal/metrics ./cmd/atlas` 全绿**（本任务改签名并改 cmd/atlas 调用方，而门禁只跑 packages，cmd/atlas 断了门禁也报绿——验证者亲跑）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4-b",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/metrics"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4-a",
+  "writes": [
+    "./internal/metrics/hestia_collector.go",
+    "./internal/metrics/hestia_collector_test.go",
+    "./cmd/atlas/hestia_health.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "verify_baseline": {
+    "head": "bd31159ba70b9d664fed5b66b787b26a0a26cfb8",
+    "discovery_sha256": "30688a336301661ff4ecd36dc2cdbf30dd618f13aecb2891634039d731ef26c2",
+    "at": "2026-09-18T01:15:20Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    "W-2 的 collector 侧（QA 变异实证 + test-m4-a 复核）：internal/metrics/hestia_collector.go 的 collectQueue 用字面量 map 重列四个状态名。实测形态二——hestia 侧加第五状态并改齐、collector 不动——在 4cd6ccc 上 go test ./... 全绿且新状态件数静默消失；TASK-001 已在 e6f4e9d 提供单一口径 QueueHealth.ByState()（键由 queueStates 生成，未接线状态故意不给键，配 ByStateCoversAllStates 守卫）。修法：collectQueue 改为遍历 q.ByState() 输出 hestia_queue_items，删掉本地状态名字面量；测试须证明「hestia 侧加第五状态而 collector 不动」这一形态不再可能（例如断言输出的 state 序列集合与 ByState 键集合相等）。",
+    "test-m4-a 的接线提醒：ByState() 对未接线状态**不给键**（而非给 0）。接线时确认下游（Snapshot 展开键、告警规则）对「缺键」与「值为 0」的处理：缺键 ⇒ 规则求值 false（不假红），值 0 ⇒ 规则可求值。若两者语义需要区分，在 collector 注释里写明选择与理由。"
+  ]
+}

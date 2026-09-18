@@ -1,0 +1,64 @@
+{
+  "task_id": "TASK-001",
+  "provenance": "QA 返工轮（epoch=2，rework_count=0；QA 的 W-1/W-2/W-6 三条 fix_items，人类已批准）。**首轮实现与测试出自 dev-m4-a**（commit 083f44e，其 discovery 的 author 字段即 dev-m4-a）；本轮的修改、测试与变异实测出自 dev-m4-c。本文件整体覆盖首轮 discovery，数字全部在最终树 master e6f4e9d 上重采；首轮的覆盖率数字未沿用（本轮未重测覆盖率）。",
+  "key_findings": [
+    "W-1 根因：os.ReadDir 的 DirEntry.Type() 来自 lstat，指向目录的 symlink 其 IsDir() 也是 false ⇒ 原判据 `e.IsDir() || 点文件 || .tmp` 会把三种 symlink 全计成队列项，而触发脚本的 find -type f 一个都不计。改判 `!e.Type().IsRegular()` 后两侧同判。",
+    "W-2 的键集合守卫实测：把 queueStates 加到五个状态（archived）后，TestQueueHealthByStateCoversAllStates 变红；即使把 ByState 改成 default 也填 0，该用例仍红——因为 QueueHealthOf 的 switch default 先返回 error。故「加第五个状态必变红」这条性质由两道机制共同保证。",
+    "W-6 的竞态在真实文件系统上不可稳定复现，故在包内加一个接缝 `var queueReadDir = os.ReadDir`，测试注入一个 Type() 为普通文件、Info() 返 fs.ErrNotExist 的伪条目。生产路径恒为 os.ReadDir。",
+    "顺带按 W-6 建议只对 pending/processing 调 Info()：done/failed 不用最旧年龄，每轮省两次 lstat。变异实测（把 needOldest 收窄成只剩 pending）会让 TestQueueHealthCountsAndAges 变红，说明 processing 的最旧年龄有断言守着。"
+  ],
+  "decisions": [
+    {
+      "decision": "计件判据改为 `!e.Type().IsRegular() || 点文件 || .tmp`",
+      "rationale": "与 scripts/ops/hestia-warp-trigger.sh 的 find -type f 同口径（QA W-1）。注释同步写全判据并写明 IsDir() 挡不住 symlink 的理由与后果（指标与触发器分叉 ⇒ stuck 告警文案把值班人引偏）。"
+    },
+    {
+      "decision": "新增 QueueHealth.ByState() map[string]int，未接线的状态**故意不出现在返回值里**",
+      "rationale": "若 default 也填 0，加第五个状态时键集合断言恒绿，这个方法就白设了（QA W-2 要的正是让漏跟变红）。"
+    },
+    {
+      "decision": "ByState 登记进 store_test.go 的 AST 守卫 want（第 422 行清单），并写「为什么是登记不是放宽」",
+      "rationale": "它是纯值类型 QueueHealth 的方法，不碰库不碰文件系统；不是 *Store 方法，故 reflect 守卫 want 零改动（实测两条守卫均绿）。"
+    },
+    {
+      "decision": "Info() 错误分流：os.IsNotExist ⇒ continue（不计数），其它错误仍返回零值 + error",
+      "rationale": "QA W-6：rename 落在 ReadDir 与 Info 之间是正常流转；当成致命错误会让 queue_up=0、队列指标整组缺失、stuck/failed 的 for 计时清零。"
+    },
+    {
+      "decision": "加包内接缝 var queueReadDir = os.ReadDir 供测试注入",
+      "rationale": "该竞态无法在真实 FS 上稳定复现；接缝只在包内可见，生产路径不变。测的是 QueueHealthOf 对 ErrNotExist 的处置，不是 os.ReadDir 本身。"
+    },
+    {
+      "decision": "未改 scripts/ops/hestia-warp-trigger.sh 的注释（W-1 所说的「第二处」）",
+      "rationale": "该文件不在本任务 writes 内、属 TASK-007（当时在复验中），改它会让复验对象漂移；且其现注释「只数普通文件，子目录/点文件/.tmp 不算」与 find -type f 一致、并无错误陈述。已在交付报告里提请 Leader 定夺。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/queue_health.go",
+    "internal/hestia/queue_health_test.go",
+    "internal/hestia/store_test.go"
+  ],
+  "interfaces_exposed": [
+    "QueueHealth.ByState() map[string]int —— 键由 queueStates 生成，供 collector 单一口径消费（TASK-003 的 review_fix 承接）。未接线状态不出现在 map 中，消费侧若按 queueStates 遍历取值需自行处理缺键（当前四状态全部接线）。",
+    "QueueHealthOf 行为变更两处：非常规文件不再计件；条目在 ReadDir 与 Info 之间消失不再报错（其它 Info 错误仍报）。"
+  ],
+  "verification": {
+    "commit": "a680de1bed0bb372b75aa2a08f0f8be1c6c40b21（task/TASK-001，基于 4cd6ccc），经 Leader merge 为 master e6f4e9d493fb9e3bcebb0adef9a9edc3fbae8101",
+    "content_check": "master e6f4e9d 上 sha256：queue_health.go 31cb41ceca28b481053aaaf5162b5ac4e8725d0325c34bbc0a000f458880923d、queue_health_test.go d9e8110f4b1a436971ae2d22b1e2e9cc981e42fe0d774ef0e211140c672c073b、store_test.go 9decbff84f9064222f5e0dd64b2d690d8e683367c94214a7b28e4731c23fa7c2",
+    "numstat": "git diff --numstat 4cd6ccc e6f4e9d -- internal/hestia/ ⇒ queue_health.go 55/5、queue_health_test.go 130/0、store_test.go 8/1（无其它文件）",
+    "suite": "master e6f4e9d 上 `GOTOOLCHAIN=local go test -count=1 ./...` ⇒ 65 个包 ok、0 个 FAIL；`./internal/hestia/...` ok；`-run 'QueueHealth|ExposesNoWrite' -v` ⇒ 11 条 PASS、0 FAIL；go vet 干净；gofmt -l 无输出",
+    "red_phase": "--- FAIL: TestQueueHealthIgnoresIrregularFiles (0.00s)\n    queue_health_test.go:154: \n        \tError Trace:\t/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-001/internal/hestia/queue_health_test.go:154\n        \tError:      \tShould be zero, but was 3\n        \tTest:       \tTestQueueHealthIgnoresIrregularFiles\n--- FAIL: TestQueueHealthByStateCoversAllStates (0.00s)\n    queue_health_test.go:191: \n        \tError Trace:\t/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-001/internal/hestia/queue_health_test.go:191\n        \tError:      \telements differ\n        \t            \t\n        \t            \textra elements in list A:\n        \t            \t([]interface {}) (len=4) {\n        \t            \t (string) (len=7) \"pending\",\n        \t            \t (string) (len=10) \"processing\",\n        \t            \t (string) (len=4) \"done\",\n        \t            \t (string) (len=6) \"failed\"\n        \t            \t}\n        \t            \t\n        \t            \t\n        \t            \tlistA:\n        \t            \t([]string) (len=4) {\n        \t            \t (string) (len=7) \"pending\",\n        \t            \t (string) (len=10) \"processing\",\n        \t            \t (string) (len=4) \"done\",\n        \t            \t (string) (len=6) \"failed\"\n        \t            \t}\n        \t            \t\n        \t            \t\n        \t            \tlistB:\n        \t            \t([]string) {\n        \t            \t}\n        \tTest:       \tTestQueueHealthByStateCoversAllStates\n        \tMessages:   \tByState 的键必须恰为 queueStates —— 多一个少一个都是口径分叉\n--- FAIL: TestQueueHealthEntryVanishingIsNotAnError (0.00s)\n    queue_health_test.go:218: \n        \tError Trace:\t/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-001/internal/hestia/queue_health_test.go:218\n        \tError:      \tReceived unexpected error:\n        \t            \thestia queue health: pending/renamed-away.json: file does not exist\n        \tTest:       \tTestQueueHealthEntryVanishingIsNotAnError\n        \tMessages:   \t正常流转的 rename 不是故障\nFAIL\nFAIL\tgithub.com/newthinker/atlas/internal/hestia\t0.823s\nFAIL",
+    "mutation": "隔离快照还原法（cp 快照，不用 git checkout —— 未提交时它会连实现一起抹掉，本轮踩过一次并按原文重写、sha256 与抹掉前逐字节相同）。5 个变异：去掉 IsRegular 过滤 ⇒ IgnoresIrregularFiles 红；ErrNotExist 不 continue ⇒ EntryVanishing 红；ByState 漏 done ⇒ ByStateCoversAllStates 红；needOldest 只留 pending ⇒ CountsAndAges 红；ByState 补 default 填 0 ⇒ 四状态下存活（符合预期，见 key_findings[1] 的第五状态实验）。另在 queue.go 临时加第五状态 archived 实测键集合守卫确实变红，随后按快照还原，两文件 sha256 复核一致。",
+    "done_criteria_map": {
+      "functional[0] 件数与最旧年龄": "TestQueueHealthCountsAndAges",
+      "functional[1] 复用 queueStates + switch default + ByState 键集合": "TestQueueHealthByStateCoversAllStates（+ 第五状态实测）",
+      "functional[2] AST 守卫登记 / reflect 零改动": "TestPackageExposesNoWriteFunctions、TestStoreExposesNoWriteMethods",
+      "boundary[0] 四目录全空": "TestQueueHealthEmptyIsNotAnError",
+      "boundary[1] 非计件条目（含 symlink 三例 + 触发脚本同判）": "TestQueueHealthIgnoresNonItems、TestQueueHealthIgnoresIrregularFiles",
+      "error_handling[0] 四目录各缺一次 + 条目消失不算错": "TestQueueHealthMissingDirIsAnError、TestQueueHealthEntryVanishingIsNotAnError、TestQueueHealthOtherInfoErrorsAreFatal",
+      "error_handling[1] 权限 000": "TestQueueHealthUnreadableDirIsAnError",
+      "non_functional[0] 纯文件系统读": "queue_health.go 无 database/sql、无 *Store、无 SQL 字符串（验证者 review）"
+    }
+  },
+  "author": "dev-m4-c"
+}

@@ -1,0 +1,107 @@
+{
+  "task_id": "TASK-007",
+  "provenance": {
+    "round": "第 4 轮（QA 返工 W-5，epoch=4，rework_count=1）",
+    "rounds_1_to_3_by_dev_m4_c": "第 3 轮（epoch=3，rework_count=1）。第 1 轮 rejected(dod_defect：DoD 括号「与 hestia-ingest 相反」为假)；第 2 轮 rejected(dod_defect：DoD 规定的理由「容器 agent 要出网访问 Anthropic ⇒ 代理键必须」与代码事实不符) → blocked_human → 人类 2026-09-17 裁决删掉 plist 代理键 → 重派。本文件整体覆盖前两轮 discovery，数字全部在最终树 master 6d5230e 上重采。作者均为 dev-m4-c；第 2 轮缺陷的代码取证来自 test-m4-b 的验证报告，本轮由我在 nanoclaw 同一 commit 上独立复核。",
+    "round4_by_dev_m4_b": "QA code review 的 W-5：人类裁决「hestia-warp 不设代理键」只由 plist 散文注释守着（QA 实证 grep -rn hestia-warp --include=*.go . 零输出）。本轮只加 Go 守卫，plist 与 install-services.sh 一个字节未改（commit a4a34bbdcaff20c92fa6a2108802d12c074b4389 的 numstat 仅 cmd/atlas/hestia_test.go 31/0）。前三轮的 key_findings / decisions / files_modified 及 verification 均为 dev-m4-c 所写，本文件原样保留（其 verification 移入 verification.rounds_1_to_3），dev-m4-b 未复核其内容，只追加本轮产物。",
+    "scope_declaration_by_dev_m4_b": "本轮写 cmd/atlas/hestia_test.go，超出原声明（writes 为 null、回落 packages 的两项）。已在 dev_done 之前经写通道 update 补：writes 三项（加 ./cmd/atlas/hestia_test.go），packages 加 ./cmd/atlas（审计行 transitions.jsonl op=update by dev-m4-b）。本任务 done_criteria 六条全为 verify_by: review ⇒ 门禁走无代码任务分支，不跑 go test，故加 ./cmd/atlas 不触发覆盖率门禁（该包 78.2%，本任务无 coverage_floor）。请 Leader 事后确认。",
+    "subagent_anomaly": "code-simplifier 子代理回复「完成，无动作」，实际改了文件（assert.True→assert.Truef、内联局部变量）：指纹 56c3355→18329b4、新增行数 32→31。dev-m4-b 核 diff 判据未变、行为等价，已一并提交，并在简化后的最终版本上重采全部数字。"
+  },
+  "key_findings": [
+    "DoD 两次订正的前提均为假：(1) hestia-ingest.plist 设了代理键（第 43/57/59 行；5447d05；守卫 cmd/atlas/hestia_test.go:477 TestHestiaPlistSetsProxyKeysForSheets）；(2) 本 plist 的代理键对容器 agent 出网无作用——见 key_findings[1]。",
+    "nanoclaw @ e7c6278354b13f4e57c9ceb3dece6165d6d8bc6b（工作树干净）独立复核：package.json:23 `\"chat\": \"tsx scripts/chat.ts\"`；scripts/chat.ts 第 22/33/59 行 `path.join(DATA_DIR,'cli.sock')` / `net.connect` / `socket.write(JSON.stringify({ text }))`，import 仅 net、path、../src/config.js，`process.env|PROXY|proxy` 0 命中、`spawn|exec|child_process|fetch|http` 0 命中；src/config.ts、env.ts、log.ts、install-slug.ts、timezone.ts 中 `proxy|child_process|execSync|spawn|fetch(|http(s).get/request` 仅 config.ts:30 一行注释命中；src/container-runner.ts:483 `// OneCLI gateway — injects HTTPS_PROXY + certs so container API calls`；本机 ~/Library/LaunchAgents/com.nanoclaw-v2-5657aeae.plist ProgramArguments=[node v22.22.0, nanoclaw/dist/index.js]、EnvironmentVariables={PATH, HOME}；packageManager=pnpm@10.33.0，~/.cache/node/corepack/v1/pnpm/10.33.0 存在。",
+    "取证踩坑：zsh 下 `git show $C:scripts/chat.ts` 的 `:s` 被当作历史修饰符，命令静默输出了提交信息，随后 grep 的 0 命中是**无效**的；改用 `\"${C}:path\"` 重跑后结论成立。",
+    "未做「去掉代理键实跑一次」的对照——那需要唤起真实 agent，属生产动作；结论依赖代码与配置直读。",
+    "hestia-ingest.plist 自身头注释过期（第 25/39/40 行），不在 writes 内，Leader 已记为范围外待办。",
+    "第 4 轮（W-5）：gatherFamilies 之外，hestia-warp plist 的『不设代理键』此前无任何 Go 守卫，而反面（hestia-ingest 必须设代理）早有 TestHestiaPlistSetsProxyKeysForSheets。同仓先例：hestia-ingest.plist 注释引用的守卫名 TestHestiaPlistSetsNoProxyKeys 已不存在——散文过期不会让任何东西变红。",
+    "第 4 轮判据取『_proxy 后缀』而非枚举 http_proxy/https_proxy/no_proxy：变异实测 ALL_PROXY 与 ftp_proxy 两个未枚举键均被后缀判据抓到，枚举式断言对它们视而不见。",
+    "第 4 轮：plutil -lint 对含非法双连字符注释的 plist 返回 0（判为合法），而 Go 的 encoding/xml 拒绝它。plistEnvKeys 对解析错误 require.NoError ⇒ 守卫响亮失败，不会在空集上平凡通过；此变异实测被杀。"
+  ],
+  "decisions": [
+    {
+      "decision": "删除 EnvironmentVariables 中 http_proxy / https_proxy / no_proxy，只留 PATH",
+      "rationale": "人类 2026-09-17 裁决（订正后 DoD boundary[0]）。其余键值不变：c4d651c 的 plist 转 JSON 去掉三键后与本轮 JSON 完全相等。"
+    },
+    {
+      "decision": "头注释「为何不设代理键」逐项写 nanoclaw 证据并锚 commit e7c6278354b13f4e57c9ceb3dece6165d6d8bc6b",
+      "rationale": "订正后 DoD error_handling[0] 要求引用 nanoclaw 代码时写明取证 commit；前两轮都栽在未核实的前提上，本轮每句事实都有 key_findings[1] 的命令结果对应。"
+    },
+    {
+      "decision": "chat.ts 的陈述收窄为「它本身不读 process.env；它和 config.ts 依赖链里没有代理变量、子进程或 HTTP 调用」",
+      "rationale": "config.ts 本身读 process.env（非代理变量），若写「整条链不读环境变量」为假；按实际 grep 结果措辞。"
+    },
+    {
+      "decision": "保留与 hestia-ingest.plist 的对照句（它设了代理键，5447d05，给 Sheets 出网）",
+      "rationale": "DoD 允许提及但须与事实一致；保留可防下一个人拿 ingest 当模板把代理键加回来。"
+    },
+    {
+      "decision": "「别照抄」段改为「三份都设了代理键、本文件一个都不该有，照抄再删易漏删（crisis-daily 里 no_proxy 与两代理键之间隔着 PATH）」",
+      "rationale": "删键后原段论点失去针对性；三份均设三键已由 plutil 解析确认。"
+    },
+    {
+      "decision": "不执行 launchctl / install-services.sh",
+      "rationale": "人类裁决，生产装载归人类。"
+    },
+    {
+      "decision": "第 4 轮：新增 TestHestiaWarpPlistSetsNoProxyKeys，复用既有 plistEnvKeys / plistEnvValues，不另建同形辅助",
+      "rationale": "fix_items 指定；同形辅助会让两条 plist 守卫的解析口径分叉"
+    },
+    {
+      "decision": "第 4 轮：否定式断言前先立肯定式锚点（keys 非空 + PATH 在场 + PATH 首段含 /.nvm/versions/node/ 且以 /bin 结尾）",
+      "rationale": "否定式断言在空集上平凡为真（Sprint 036 G9）；变异『删掉整个 EnvironmentVariables』与『PATH 首段换成 /usr/local/bin』分别被这两条锚点杀死"
+    }
+  ],
+  "files_modified": [
+    "deploy/launchd/com.newthinker.atlas.hestia-warp.plist",
+    "scripts/ops/install-services.sh",
+    "cmd/atlas/hestia_test.go（第 4 轮，仅新增守卫测试）"
+  ],
+  "interfaces_exposed": [
+    "launchd 标签 com.newthinker.atlas.hestia-warp：每 1800s 以 /bin/bash 跑 runtime 下 scripts/ops/hestia-warp-trigger.sh，RunAtLoad=false，EnvironmentVariables 仅 PATH，日志 runtime logs/hestia-warp.{out,err}.log；由人类执行 bash scripts/ops/install-services.sh 装载。排障提示：warp 连不上 Anthropic 查 nanoclaw daemon / OneCLI gateway，不查本 plist。"
+  ],
+  "verification": {
+    "tree": "master 3d94a522a566806fc27f64c73b5550d690444fbb（主仓库工作区，cmd/ 与 deploy/ 无未提交改动）；cmd/atlas/hestia_test.go 与 task/TASK-007(a4a34bb) sha256 一致",
+    "round4_commit": "a4a34bbdcaff20c92fa6a2108802d12c074b4389，numstat cmd/atlas/hestia_test.go 31/0（plist 与 install-services.sh 未出现在 numstat 中）",
+    "round4_red": "本轮为纯新增守卫，plist 本身已符合裁决 ⇒ 新测试对现状即绿。有效性以变异证明（见 round4_mutation），不以 RED 证明",
+    "round4_suite": "最终树 3d94a52 重采：go build ./... 通过；go test -count=1 ./... 退出码 0、65 个包 ok、FAIL 行 0；TestHestiaWarpPlistSetsNoProxyKeys PASS",
+    "round4_mutation": "对 hestia-warp.plist 6/6 KILLED（dev 私有 worktree，逐轮 sha256 还原为真，数字采自 code-simplifier 改动之后的最终测试文件）：P1 加 http_proxy；P2 加 ALL_PROXY（大写、未枚举）；P3 加 ftp_proxy（未枚举）；P4 PATH 首段换成 /usr/local/bin；P5 删掉整个 EnvironmentVariables dict；P6 插入含非法双连字符的 XML 注释（plutil -lint 退出码 0 而守卫仍红，证明不是空集平凡通过）",
+    "round4_no_launchctl": "launchctl list | grep -c hestia-warp = 0；~/Library/LaunchAgents/ 下 hestia-warp 相关文件 0 个（本任务未执行任何 launchctl 操作）",
+    "round4_done_criteria_map": {
+      "non_functional[0] 的 QA 追加要求": "TestHestiaWarpPlistSetsNoProxyKeys（后缀判据 + 肯定式锚点），有效性见 round4_mutation；『未执行 launchctl』见 round4_no_launchctl"
+    },
+    "rounds_1_to_3": {
+      "commits": "task/TASK-007：907791de0368ee345b08766af741b2e7c37d5246（R1）→ 6d5e8c18d491ab1f28fd198e28ac111e60a3dee2、199f94c1536312482a9184840405144a7a83c664（R2，已并入 c4d651c8abb0463fd9be070df93b44be3fcd5373）→ 40ad5eb8732150b13ed5d3071ce9b16707dc0ce9（R3）；最终树 master 6d5230e893a329870a943261858cbbc5a8bdeeae",
+      "content_check": "master 6d5230e 上 sha256：plist fc270aed9cfca343c22117d96ff4d8bdb85f2f8f099f2247fbe232a48a3a05f6（= 40ad5eb）、install-services.sh 84881b5336ad2570375014736c2d3f150c777419b94d9fe5b38c6bda54f787a4（R1 以来未变）",
+      "numstat": "git diff --numstat 717c627d09f35251c247ad0fc5f2d0f79322745c 6d5230e893a329870a943261858cbbc5a8bdeeae -- 两文件 ⇒ plist 65/0、install-services.sh 2/1；R3 增量 c4d651c..6d5230e ⇒ plist 16/16",
+      "plutil_extract": {
+        "Label": "com.newthinker.atlas.hestia-warp",
+        "ProgramArguments": [
+          "/bin/bash",
+          "/Users/zuowei/workspace/runtime/atlas/scripts/ops/hestia-warp-trigger.sh"
+        ],
+        "WorkingDirectory": "/Users/zuowei/workspace/runtime/atlas",
+        "StartInterval": "1800",
+        "RunAtLoad": "false",
+        "StandardOutPath": "/Users/zuowei/workspace/runtime/atlas/logs/hestia-warp.out.log",
+        "StandardErrorPath": "/Users/zuowei/workspace/runtime/atlas/logs/hestia-warp.err.log",
+        "EnvironmentVariables": {
+          "PATH": "/Users/zuowei/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+      },
+      "proxy_suffix_keys": "plutil -convert json 后 EnvironmentVariables 键集合 = ['PATH']，大小写不敏感后缀 _proxy 的键 0 个",
+      "pnpm": "/Users/zuowei/.nvm/versions/node/v22.22.0/bin/pnpm -> ../lib/node_modules/corepack/dist/pnpm.js（目标 -rwxr-xr-x）",
+      "static": "master 6d5230e 上 plutil -lint OK；bash -n scripts/ops/install-services.sh 通过",
+      "stale_phrases": "grep -c -E '相反|一个代理键都|非零|恒连不上' plist ⇒ 0",
+      "regression": "master 6d5230e 上 `GOTOOLCHAIN=local go test -count=1 -run 'Plist|InstallServices' ./cmd/atlas/` ⇒ ok；cmd/atlas 下 *.go 无任何 hestia-warp 引用",
+      "no_launchctl": "master 6d5230e 合入后：launchctl list | grep -c hestia-warp = 0；ls ~/Library/LaunchAgents | grep -c hestia-warp = 0",
+      "done_criteria_map": {
+        "functional[0]": "plutil_extract Label/ProgramArguments/WorkingDirectory + static",
+        "functional[1]": "plutil_extract StartInterval/RunAtLoad/StandardOutPath/StandardErrorPath",
+        "functional[2]": "numstat install-services.sh 2/1 + static",
+        "boundary[0]": "proxy_suffix_keys + pnpm",
+        "error_handling[0]": "头注释三段（decisions[1]–[4]），事实证据 key_findings[1]，锚 nanoclaw e7c6278354b13f4e57c9ceb3dece6165d6d8bc6b",
+        "non_functional[0]": "no_launchctl"
+      }
+    }
+  }
+}

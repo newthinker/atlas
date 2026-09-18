@@ -1,0 +1,101 @@
+{
+  "task": "TASK-003",
+  "author": "dev-m4-b",
+  "key_findings": [
+    "原 Collect 在 fetch 失败时直接 return；Collect 现拆成 collectDB 与 collectQueue 两个方法，Collect 本体只顺序调用二者，任一方法内的 return 结构上跳不过另一方（变异 M02/M03 把一侧挪进另一侧成功分支，分别被 C2 双向隔离用例杀死）。",
+    "既有测试 TestHestiaCollector_ErrorEmitsOnlyCollectErrors 语义变化：DB 失败现在除 collect_errors 外还输出 hestia_db_up=0。已改名为 TestHestiaCollector_DBErrorEmitsOnlyCollectErrorsAndDBUp 并加 db_up==0 断言，其余断言（pending_review、runs_total 缺席，collect_errors 1→2）保留；其他既有测试只在新参数位加 nil。",
+    "gatherFamilies 用的 NewRegistry 不是 pedantic 的：Describe 漏声明 queueUp/dbUp 时，只有 TestHestiaCollector_PedanticRegistry 会变红（M12/M16），其余用例全绿 ⇒ Pedantic 用例是 Describe↔Collect 一致性的唯一守卫。",
+    "Snapshot 端到端：hestia_queue_items 的 state label 经 TASK-002 展开为 hestia_queue_items_failed 等键，TestHestiaCollector_QueueVisibleInSnapshot 断言 =1，state label 对调变异（M15）使其变红。",
+    "第 2 轮：状态名单收口到 hestia.QueueHealth.ByState() 一份后，collectQueue 内状态名字面量为 0 处（sed 取函数体 + grep 实测）。新测试 TestHestiaCollector_QueueItemsFollowByState 断言输出 state 集合与 ByState() 键值**逐项相等**（非 Contains），测试内同样不列状态名字面量。",
+    "第 2 轮情景实测澄清（与 fix_items 措辞的差别，验证者请注意）：『hestia 侧加第五状态并接线、collector 不动』在新实现下**不再静默**——collector 自动输出该状态；此时变红的是 DoD 钉死「恰四个序列」的三条断言（QueueFullOutput / QueueEmptyOmitsAges / DBFailureKeepsQueueMetrics）。即：加状态后仍有红，但红的是需要人更新的夹具期望，而非件数丢失。撤销本修复后（M1）才是 TestHestiaCollector_QueueItemsFollowByState 变红。"
+  ],
+  "decisions": [
+    {
+      "decision": "queue 失败时只输出 hestia_queue_errors_total 与 hestia_queue_up=0，不输出 items 与两个 age",
+      "rationale": "DoD error_handling[0]①；读不到时报 0 件就是用假值冒充「队列空」"
+    },
+    {
+      "decision": "queue == nil 时 collectQueue 立即 return，连 errors_total 与 up 都不输出；Describe 仍声明全部队列 desc",
+      "rationale": "DoD boundary[1]；声明而不输出对 prometheus 注册表合法，PedanticRegistry 用例覆盖三种形态"
+    },
+    {
+      "decision": "age gauge 仅在 OldestPending/OldestProcessing 非零值时输出，用注入的 now 计算",
+      "rationale": "DoD boundary[0]；0 小时会让「没有积压」与「刚放进去」同形；注入 now 使年龄可复现（M13 换 time.Now 被杀）"
+    },
+    {
+      "decision": "up gauge 用 ConstMetric 每轮按本轮结果输出 1/0，不维护跨轮状态",
+      "rationale": "DoD error_handling[1] 与 2026-09-17 人类裁决：errors_total 累计不熄，up 必须随恢复熄灭（M10/M11 粘滞变异被杀）"
+    },
+    {
+      "decision": "cmd/atlas/hestia_health.go 只在新参数位传 nil",
+      "rationale": "任务描述：保持编译的最小改动，接线归 TASK-004"
+    },
+    {
+      "decision": "新增描述符前插一行空行+注释，隔开 gofmt 对齐组",
+      "rationale": "否则 gofmt 会重新对齐既有 8 行描述符，制造与本任务无关的 diff"
+    },
+    {
+      "decision": "collectQueue 遍历 q.ByState()，删除本地状态名字面量",
+      "rationale": "QA W-2：第二份状态名单会让 hestia 侧加状态、消费侧漏跟时 go test ./... 全绿而件数静默消失"
+    },
+    {
+      "decision": "对 ByState() 未给出的（未接线）状态**不补零**",
+      "rationale": "缺键 ⇒ Snapshot 无该 <name>_<state> 键 ⇒ 告警规则找不到指标、求值 false，不假红；补零会把「不知道」说成「确认为 0 件」，并掩盖 hestia 侧接线缺口（那里由 TestQueueHealthByStateCoversAllStates 报红）。理由已写进 collectQueue 注释（fix_items 第 2 条要求）"
+    },
+    {
+      "decision": "新测试的期望值取自 q.ByState()，不在测试里列第二份状态名字面量",
+      "rationale": "列了等于把同一个失效搬进测试；集合相等而非 Contains，才能在 ByState 多出键时变红"
+    }
+  ],
+  "files_modified": [
+    "internal/metrics/hestia_collector.go（第 1、2 轮）",
+    "internal/metrics/hestia_collector_test.go（第 1、2 轮）",
+    "cmd/atlas/hestia_health.go（第 1 轮，仅传 nil）"
+  ],
+  "interfaces_exposed": [
+    "type QueueFunc func() (hestia.QueueHealth, error) —— nil = 不采队列指标",
+    "func NewHestiaCollector(fetch HealthFunc, queue QueueFunc, now func() time.Time) *HestiaCollector（签名变更：queue 插在第二位）",
+    "新指标：hestia_queue_items{state=pending|processing|done|failed}（gauge）、hestia_queue_pending_age_hours、hestia_queue_processing_age_hours（gauge，目录空时不输出）、hestia_queue_errors_total（counter）、hestia_queue_up、hestia_db_up（gauge，本轮读成功 1 / 失败 0）",
+    "经 Snapshot 可引用的键（供 TASK-004/告警规则）：hestia_queue_items_failed 等 <state> 展开键、hestia_queue_up、hestia_db_up、两个 age"
+  ],
+  "verification": {
+    "tree": "master bd31159ba70b9d664fed5b66b787b26a0a26cfb8（主仓库工作区，internal/ 与 cmd/ 无未提交改动）；两文件与 c3678bf sha256 一致",
+    "round2_commit": "c3678bf32a197dfcb41018825948914f41163dc4，numstat hestia_collector.go 12/5、hestia_collector_test.go 26/0",
+    "round2_red": "在旧实现（字面量 map）上把 hestia 的 queueStates 加第五状态 archived 并接进 ByState ⇒ 新测试 TestHestiaCollector_QueueItemsFollowByState 变红（got 四键 vs want 五键）。改用 ByState() 后转绿。",
+    "round2_suite": "最终树 bd31159 重采：go build ./... 通过；go test -count=1 ./... 退出码 0、65 包 ok、FAIL 行 0；go test -cover：internal/metrics 99.3%，cmd/atlas 78.0%",
+    "round2_scenarios": "数字均采自 code-simplifier 改动之后的最终文件，变异作用于 dev 私有 worktree、逐轮 sha256 还原为真：M1 撤销本修复 + 第五状态（已接线）→ KILLED（TestHestiaCollector_QueueItemsFollowByState）；M2 改为按固定名单取 by[state] 补零 → KILLED（QueueFullOutput / QueueEmptyOmitsAges / DBFailureKeepsQueueMetrics / QueueItemsFollowByState 四条）；S2 第五状态未接线（ByState 不给键）→ collector 侧 rc=0 不假红、hestia 侧 TestQueueHealthByStateCoversAllStates 红（分工正确）；S1 第五状态已接线、collector 不动 → collector 自动输出该状态，红的是三条「恰四个序列」夹具断言（见 key_findings 末条）",
+    "round2_static": "sed 取 collectQueue 函数体后 grep：状态名字面量 0 处",
+    "round2_done_criteria_map": {
+      "functional[0] 的 QA 追加要求": "TestHestiaCollector_QueueItemsFollowByState（集合相等，期望值取自 ByState()）+ round2_static；有效性见 round2_scenarios 的 M1",
+      "fix_items[1]（缺键 vs 补零）": "collectQueue 注释 + decisions；M2 证明补零会被测试抓到"
+    },
+    "round1": {
+      "commit": "b5aacd4c08b69dec692579b4220e25d587922fe1",
+      "merged_into_master": "8b1b99968eda42c8579b8433e0cb2f0d7b2ff2f0（三个文件 sha256 与分支逐字节一致）",
+      "red": "先写测试时编译失败（too many arguments in call to NewHestiaCollector）；只改签名（参数不使用）后断言级 RED 9 个用例红：DBErrorEmitsOnlyCollectErrorsAndDBUp(db_up 缺席)、QueueFullOutput(items map[])、QueueVisibleInSnapshot(items_failed=0, queue_up=0)、QueueEmptyOmitsAges、QueueNilSkipsQueue(db_up 缺席)、QueueFailureKeepsDBMetrics、DBFailureKeepsQueueMetrics、QueueUpRecovers、DBUpRecovers；PedanticRegistry 未实现时恒绿，由 M12/M16 证明有效",
+      "suite": "master@8b1b999 主仓库：go build ./... 通过；go test -count=1 -cover ./internal/metrics ./cmd/atlas ⇒ metrics ok 99.3%，cmd/atlas ok 78.0%",
+      "mutation": "16/16 KILLED：M01 DB 失败不出 db_up；M02 collectQueue 挪进 collectDB 成功分支→DBFailureKeepsQueueMetrics；M03 collectDB 挪进 collectQueue 成功分支→QueueFailureKeepsDBMetrics 等；M04 nil 时输出 errors→QueueNilSkipsQueue；M05 失败时输出 0 件→QueueFailureKeepsDBMetrics；M06/M07 年龄恒输出→QueueEmptyOmitsAges；M08 成功 up=0；M09 失败不 Inc→QueueFailure/QueueUpRecovers；M10/M11 up 粘滞→QueueUpRecovers/DBUpRecovers（首版引入 testutil 致 go.mod 需更新、vet 无效，改为结构体字段实现重跑）；M12/M16 Describe 漏 queueUp/dbUp→PedanticRegistry；M13 time.Now→QueueFullOutput；M14 pending 年龄取错字段；M15 state label 对调→QueueFullOutput/QueueVisibleInSnapshot。变异在 dev 私有 worktree，逐轮 sha256 还原为真",
+      "merge_check": "merge 前在临时 worktree 把 task/TASK-003 合入当时 master 1a89e27（含 TASK-007）无冲突，go build ./... 与 go test ./internal/metrics ./cmd/atlas 绿",
+      "dod_mapping": {
+        "functional[0]": "TestHestiaCollector_QueueFullOutput",
+        "functional[1]": "TestHestiaCollector_QueueVisibleInSnapshot",
+        "functional[2]": "review：Collect 本体仅 c.collectDB(ch); c.collectQueue(ch)",
+        "boundary[0]": "TestHestiaCollector_QueueEmptyOmitsAges",
+        "boundary[1]": "TestHestiaCollector_QueueNilSkipsQueue",
+        "error_handling[0]": "TestHestiaCollector_QueueFailureKeepsDBMetrics / TestHestiaCollector_DBFailureKeepsQueueMetrics",
+        "error_handling[1]": "TestHestiaCollector_QueueUpRecovers / TestHestiaCollector_DBUpRecovers",
+        "non_functional[0]": "TestHestiaCollector_PedanticRegistry（success/queue failure/db failure）+ 上述 suite 实跑"
+      },
+      "caveats": "gitnexus impact/detect_changes 因索引存储版本不兼容无法运行；文本搜索确认 NewHestiaCollector 调用方仅 cmd/atlas/hestia_health.go 与本包测试。code-simplifier 运行后文件 sha256 不变（无改动）。"
+    }
+  },
+  "provenance": {
+    "round": "第 2 轮（QA 返工 W-2，epoch=2，rework_count=0）",
+    "round1": "dev-m4-b，commit b5aacd4c08b69dec692579b4220e25d587922fe1，merge 8b1b99968eda42c8579b8433e0cb2f0d7b2ff2f0，verified",
+    "reason": "QA code review W-2：collectQueue 用字面量 map 重列四个状态名，是 ByState() 之外的第二份口径。QA 变异实证：hestia 侧加第五状态并改齐、collector 不动 ⇒ 在 4cd6ccc 上 go test ./... 全绿且新状态件数静默消失。TASK-001 返工（merge e6f4e9d）已提供单一口径 QueueHealth.ByState()。",
+    "round2": "dev-m4-b，commit c3678bf32a197dfcb41018825948914f41163dc4，merge bd31159ba70b9d664fed5b66b787b26a0a26cfb8。只改 ./internal/metrics 两个文件；第 1 轮的 key_findings / decisions / interfaces_exposed 保留，verification 移入 verification.round1。",
+    "subagent_anomaly": "code-simplifier 回复「No action.」却同时写 CHANGED: yes，实际改了 hestia_collector.go 的过期函数注释（「四个 state 件数恒输出」→ 按 ByState 口径），指纹 5fc7d49→1ba3f90、numstat 9/3→12/5。改动本身正确、判据未变；dev-m4-b 核 diff 后保留，并在其之后重采全部数字。本 sprint 第 4 次子代理自报与实际不符。"
+  },
+  "commit": "c3678bf32a197dfcb41018825948914f41163dc4",
+  "merged_as": "bd31159ba70b9d664fed5b66b787b26a0a26cfb8"
+}

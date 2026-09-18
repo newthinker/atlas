@@ -1,0 +1,48 @@
+{
+  "task": "TASK-002",
+  "author": "dev-m4-b",
+  "key_findings": [
+    "Snapshot 对 gauge/counter 跨 label 求和成一个键，告警求值器 internal/alert/rules.go 只认 ^(\\w+)\\s*op\\s*数字$，故 label 选择器无法表达；按裁决在 Snapshot 侧展开 state label。",
+    "addStatusClass 遇到 status label 即 return，state 展开若寄生在它的循环里，同时带 status 与 state 的序列会丢 <name>_<state> 键（变异 M4 证实）。",
+    "master 上 snapshot_test.go 既有 TestSnapshot_StatusClassKeys 注释对齐不满足 gofmt，属既有问题；DoD 要求既有测试零改动，未修。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增独立函数 addState，与 addStatusClass 并列调用于 gauge/counter 分支",
+      "rationale": "DoD functional[0] 要求 status 与 state 同在时两键都产生；独立函数不受 addStatusClass 的提前 return 影响"
+    },
+    {
+      "decision": "state 值须匹配 ^\\w+$ 才产生键（Go regexp \\w 为 ASCII [0-9A-Za-z_]），与求值器正则的 \\w+ 同口径",
+      "rationale": "不匹配的后缀产生的键无法被任何规则引用；DoD boundary[2]"
+    },
+    {
+      "decision": "histogram 分支不调用 addState",
+      "rationale": "DoD error_handling[0]：展开只作用于 gauge/counter"
+    }
+  ],
+  "files_modified": [
+    "internal/metrics/snapshot.go",
+    "internal/metrics/snapshot_test.go"
+  ],
+  "interfaces_exposed": [
+    "Registry.Snapshot() 新增键：带 state label（值匹配 ^\\w+$）的 gauge/counter 序列额外累加到 <name>_<state>，例如 hestia_queue_items_failed；原 <name> 求和键不变。规则可写 `hestia_queue_items_failed > 0`。"
+  ],
+  "verification": {
+    "commit": "8d13abb16d9272db5a34f09d138e2e9dfde37eab",
+    "merged_into_master": "8cd430602e937b98435d187b61a08412f4c9cbbf（snapshot.go / snapshot_test.go 的 sha256 与分支逐字节一致）",
+    "red": "实现前 go test -run TestSnapshot_：FAIL TestSnapshot_StateGaugeExpands(x_failed=0,x_done=0)、TestSnapshot_StateAndStatusBothExpand(x_failed=0)、TestSnapshot_StateCounterExpands(y_failed=0)、TestSnapshot_StateSameValueSums(x_failed=0)；3 个否定边界用例未实现时即绿，由变异证明有效",
+    "suite": "在 master@8cd4306 上 go test ./internal/metrics/... -count=1 -cover：ok，coverage 99.2%",
+    "mutation": "6/6 KILLED：M1 去掉 state 正则校验→StateInvalidValue_NoKey(empty/hyphen/space)；M2 gauge 漏调→StateGaugeExpands 等；M3 counter 漏调→StateCounterExpands；M4 寄生到 addStatusClass 末尾→StateAndStatusBothExpand；M5 histogram 也展开→HistogramWithState_NoStateKey（首版用 GetLabel()[0] 在无 label 直方图上越界 panic、以错误理由致红，已改写为 addState 调用后重跑）；M6 += 改 =→StateSameValueSums。每轮后文件 sha256 还原核对为真",
+    "dod_mapping": {
+      "functional[0]": "TestSnapshot_StateGaugeExpands / TestSnapshot_StateAndStatusBothExpand",
+      "functional[1]": "TestSnapshot_StateCounterExpands",
+      "functional[2]": "review：snapshot_test.go numstat +126/-0，纯追加",
+      "boundary[0]": "TestSnapshot_NoStateLabel_NoExtraKeys",
+      "boundary[1]": "TestSnapshot_StateSameValueSums",
+      "boundary[2]": "TestSnapshot_StateInvalidValue_NoKey（empty/hyphen/space）",
+      "error_handling[0]": "TestSnapshot_HistogramWithState_NoStateKey",
+      "non_functional[0]": "review：stateValueRe 注释、addState 函数注释（立项理由 + 2026-09-17 人类裁决）、Snapshot 函数注释补 state 展开说明"
+    },
+    "caveats": "gitnexus impact/detect_changes 因索引存储版本不兼容无法运行，改用文本搜索：Snapshot() 生产调用方仅 cmd/atlas/alert_runner.go:170"
+  }
+}

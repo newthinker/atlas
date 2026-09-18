@@ -1,0 +1,78 @@
+{
+  "id": "TASK-004",
+  "title": "serve 接线：队列目录从 hestia 配置传入 collector",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-17-hestia-queue-observability-and-trigger.md 的 TASK-003 段。`cmd/atlas/hestia_health.go` 的 `buildHestiaHealth` 把 `hcfg.Queue.Dir` 包成 `metrics.QueueFunc`（每次 Collect 现读 `hestia.QueueHealthOf(dir)`）传给 `NewHestiaCollector`。🔴 与计划的偏差（Leader 核实）：`LoadConfig` 在 internal/hestia/config.go:257 拒绝空 `queue.dir` ⇒ 计划里「queue.dir 为空 ⇒ 不采队列」那条测试**不可达**，不写该测试、不写对应 nil 分支死代码。队列目录缺失**不得**让 serve 启动失败（与「库打不开 ⇒ 启动失败」刻意不同：队列缺失是运行期可告警事实，C3）。",
+  "module": "cmd",
+  "complexity": "low",
+  "estimated_files": [
+    "cmd/atlas/hestia_health.go",
+    "cmd/atlas/hestia_health_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "hestia.yaml 的 `queue.dir` 指向含四个子目录的临时目录（绝对路径）⇒ `buildHestiaHealth` 返回 nil error，其后 `reg.Snapshot()` 含 `hestia_queue_up==1` 且含 `hestia_queue_items` 键。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`queue.dir` 为相对路径 `queue/hestia` ⇒ 相对**进程 cwd** 解析（测试用 `t.Chdir` 到临时根并在其下建好四目录）⇒ `hestia_queue_up==1`；hestia_health.go 注释记下「依赖 launchd WorkingDirectory 与 hestia-ingest 一致」。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "既有启动语义不变：reg==nil / `hestia.config_path` 未设 ⇒ no-op cleanup、nil error、不输出任何 `hestia_` 指标；hestia_health_test.go 既有测试函数体零改动且全绿。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "不存在「queue.dir 为空」分支：接线恒传非 nil QueueFunc，代码与测试中都没有针对空 queue.dir 的处理（理由引 config.go:257，写进 discovery decisions）。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`queue.dir` 指向不存在的目录 ⇒ `buildHestiaHealth` 返回 **nil error**（serve 照常启动），`Snapshot()` 中 `hestia_queue_up==0` 且 `hestia_db_up==1`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "每轮现读、不在启动时快照：启动成功后删掉 `<queue.dir>/pending` ⇒ 下一次 `Snapshot()` 的 `hestia_queue_up==0`；再建回 ⇒ 下一次为 1（验收判据二的进程内版本）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": []
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4-b",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4-a",
+  "writes": [
+    "./cmd/atlas/hestia_health.go",
+    "./cmd/atlas/hestia_health_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "coverage_floor": 78,
+  "verify_baseline": {
+    "head": "6d5230e893a329870a943261858cbbc5a8bdeeae",
+    "discovery_sha256": "bea728f98d339ba2b2400175d49402772dba6f6c3dffd3c575fcd444c89290e0",
+    "at": "2026-09-17T14:56:03Z"
+  }
+}

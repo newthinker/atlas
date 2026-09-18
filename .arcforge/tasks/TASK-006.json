@@ -1,0 +1,78 @@
+{
+  "id": "TASK-006",
+  "title": "Warp 触发脚本：先判队列再唤起 agent",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-17-hestia-queue-observability-and-trigger.md 的 D3/D4 与 TASK-005 段（自测与实现草稿可直接用，但**自测须补齐本 DoD 列出的形态**）。无 Go 代码任务：全部 DoD 为 review，验证者亲自运行自测脚本。唤起动作经 `TRIGGER_CMD` 桩替换，测试不碰真 nanoclaw、不烧 token。刻意不做超时自动清理、不引锁文件（C5 与计划理由）。macOS bash 3.2：中文紧邻处变量一律写 `${var}`。 交人类清单须注明：判据四除比对会话 mtime 外，还要看脚本 exit 0 且输出含 `queue empty`。",
+  "module": "ops",
+  "complexity": "low",
+  "estimated_files": [
+    "scripts/ops/hestia-warp-trigger.sh",
+    "scripts/ops/hestia-warp-trigger-test.sh"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`bash scripts/ops/hestia-warp-trigger-test.sh` 输出 `N passed, 0 failed` 且 exit 0，N ≥ 7（覆盖下列全部形态）；验证者亲自运行，不采信 discovery 的回显。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "四目录存在且全空 ⇒ exit 0、stdout 含 `queue empty`、TRIGGER_CMD 桩**未被调用**（C4）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "pending/ 有 1 个普通文件且 processing/ 空 ⇒ stdout 含 `triggering`、桩**恰被调用一次**（桩记录文件恰 1 行）。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "pending/ 与 processing/ 均非空 ⇒ exit 0、stdout 含 `busy`、桩未调用（C5）；pending/ 空而 processing/ 非空 ⇒ 桩未调用。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "pending/ 下只有子目录、以 `.` 开头的文件（如 `.DS_Store`）与以 `.tmp` 结尾的文件（`writeAtomic` 在 pending/ 的中间态，internal/hestia/snapshot.go:98） ⇒ 视为空、桩未调用（与 TASK-001 `QueueHealthOf` 同一判据；否则 `.DS_Store` 会让触发器每 30 分钟空唤起一次，违背 C4）。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "pending/ 缺失、processing/ 缺失各一例 ⇒ 非零退出、stderr 含缺失目录路径、桩未调用。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "RED 留痕：实现前运行自测的原始输出（全部 FAIL）贴进 discovery `verification.red_phase`；两个脚本有可执行位，`bash -n` 通过，shellcheck 可用时无 error 级告警。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "脚本内无锁文件、无对队列目录的 mv/rm（`grep -nE '\\b(mv|rm)\\b'` 不命中队列路径）；头注释写明「先判后唤起」与「不做超时清理」的理由。 默认 `HESTIA_QUEUE_DIR` **必须等于** `/Users/zuowei/workspace/runtime/atlas/queue/hestia`（= serve plist WorkingDirectory + configs/hestia.yaml:41 的 `queue.dir`；不一致时脚本走「目录缺失 exit 1」，人类做判据四时只比会话 mtime 会假通过）；不设 `TRIGGER_CMD` 时走 `cd \"$NANOCLAW_DIR\" && pnpm run chat … || true`。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m4-c",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./scripts/ops/hestia-warp-trigger.sh",
+    "./scripts/ops/hestia-warp-trigger-test.sh"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "verify_baseline": {
+    "head": "717c627d09f35251c247ad0fc5f2d0f79322745c",
+    "discovery_sha256": "2892fb145bd5be6c0172b8f2ee8d7b78a0f206a79ffee7fe5756d4a82cd77b06",
+    "at": "2026-09-17T13:25:46Z"
+  }
+}

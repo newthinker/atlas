@@ -1,0 +1,90 @@
+{
+  "id": "TASK-005",
+  "title": "五条告警规则 + 表达式可求值的机制化证明",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-17-hestia-queue-observability-and-trigger.md 的 D5 与 TASK-004 段，按人类 2026-09-17 裁决修订为**五条**：①`hestia_queue_stuck` expr `hestia_queue_pending_age_hours > 24` for 10m cooldown 24h warning；②`hestia_queue_failed` expr `hestia_queue_items_failed > 0` for 10m cooldown 24h warning；③`hestia_queue_processing_stuck` expr `hestia_queue_processing_age_hours > 0.5` for 10m cooldown 6h warning；④`hestia_db_blind` expr `hestia_db_up == 0` for 10m cooldown 6h critical；⑤`hestia_queue_blind` expr `hestia_queue_up == 0` for 10m cooldown 6h critical。message 沿用计划原意。④⑤ 取代计划的 `hestia_health_blind`：求值器不支持 `or`（rules.go:28），累计计数器不可恢复。④⑤ **不得同名**——evaluator 的 pending/lastFired 按 rule.Name 存（pending 见 evaluator.go:86-96，lastFired 见 evaluator.go:111/136），同名会共享 for/cooldown 状态。只改仓库内**被 git 跟踪的** `configs/config.example.yaml`；`configs/config.yaml` 在仓库内未被跟踪、runtime 那份属生产动作，均归人类，不在本任务。",
+  "module": "cmd",
+  "complexity": "medium",
+  "estimated_files": [
+    "configs/config.example.yaml",
+    "cmd/atlas/hestia_alert_rules_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "从 `configs/config.example.yaml` 经项目既有配置加载路径（`internal/config.Load` → `mapRules`，与 serve 同路径）读出 alerts.rules ⇒ 含上述五条，**name / expr / for / cooldown / severity / message 六项**与期望值逐项 `assert.Equal`（table-driven；message 的期望值取本任务交付时 yaml 里的文案，逐字相等——不得只断言 NotEmpty）；规则名不重复。（2026-09-17 Leader 订正：原文「与 description 逐项相等」有歧义，本意是与任务 description 列的值相等且未含 message；验证者指出 critical 规则 message 被换成另一条的文案时全部测试仍绿，采纳为明确要求）",
+        "verify_by": "test"
+      },
+      {
+        "desc": "表达式可求值（把计划里「先确认引擎表达式能力再写」机制化）：五条规则各自经 `alert.Rule.Evaluate` 在「应触发」指标 map 上返回 true、在「不应触发」map 上返回 false；任何一条 expr 不符合求值器语法都会让本测试红（验证者可把某条 expr 改成 `a > 0 or b > 0` 在隔离副本上确认转红）。 阈值取等号处须各有一例（如 `hestia_queue_pending_age_hours == 24` ⇒ stuck 为 false；`hestia_queue_up == 1` ⇒ blind 为 false）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "端到端：真实 `HestiaCollector` + `hestia.QueueHealthOf`（临时队列目录，failed/ 放 1 份、**done/ 放 1 份**、pending/ 空）注册进 `metrics.Registry` ⇒ `Snapshot()` 喂给从 yaml 读出的 `hestia_queue_failed` 规则 ⇒ Evaluate==true；删掉该 failed 文件后再次 Snapshot ⇒ false（done/ 仍有 1 份，使「误用求和基键 hestia_queue_items」在端到端层面也会被抓到）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "四目录都空 ⇒ 端到端 Snapshot 下 `hestia_queue_stuck`、`hestia_queue_processing_stuck`、`hestia_queue_failed` 均 false（age 指标缺席 ⇒ 求值器找不到键 ⇒ false）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`hestia_queue_blind` 可恢复：端到端下删除 pending/ ⇒ true；建回 ⇒ 下一次 Snapshot 为 false（区别于累计计数器）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "规则层 C2：队列目录缺失 + DB 正常 ⇒ `hestia_queue_blind` true 而 `hestia_db_blind` false；DB fetch 失败 + 队列正常 ⇒ 反之。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "config.example.yaml 规则段注释写明：④⑤拆两条且不同名的理由、用 up gauge 而非 `_errors_total` 的理由、`hestia_queue_items_failed` 键来自 Snapshot 的 state 展开（TASK-002）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "discovery 列出人类需同步的生产侧改动：runtime `configs/config.yaml` 需追加的五条规则原文（可直接粘贴）。 本任务是最后一个 Go 任务：验证者亲跑 **`go test -count=1 ./...` 全绿**（验收判据一）并贴出尾部输出。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4-b",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-m4-b",
+  "writes": [
+    "./configs/config.example.yaml",
+    "./cmd/atlas/hestia_alert_rules_test.go"
+  ],
+  "coverage_floor": 78,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-18T01:35:25Z"
+  },
+  "verify_baseline": {
+    "head": "4cd6cccf2b060ccc718d841a6b17d5eb41f3b045",
+    "discovery_sha256": "8db78320378ba6c006b398c9439d3b3c81ccaa52f37ab0fb4441e12742f540b8",
+    "at": "2026-09-17T15:50:52Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "functional[0] 未覆盖：DoD 要求 name/expr/for/cooldown/severity 与 description 逐项相等，description 即 message（AlertRule 唯一剩余描述字段；任务描述写『message 沿用计划原意』，计划 505/512/521 行给出原文），测试表只有五列、message 仅 assert.NotEmpty；discovery done_criteria_map 静默省略 description 未申报。实证变异 Z12：把 critical 规则 hestia_db_blind 的 message 换成 hestia_queue_blind 的文案，全部测试仍绿（Z11 改任意文案同样存活）。修复：hestia_alert_rules_test.go 表加 message 列并 assert.Equal，yaml 不需改。其余 7 条 PASS；go test -count=1 ./... exit=0 ok=65 FAIL=0；paste 与 yaml 新增逐字节一致；Y6 不构成 functional[2] 缺口。详见 docs/04-test/TASK-005-verification.md"
+}

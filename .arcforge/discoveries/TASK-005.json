@@ -1,0 +1,103 @@
+{
+  "task_id": "TASK-005",
+  "author": "dev-m4-b",
+  "commit": "f3c2186412b2191a716c83b3a6913a49b3708661",
+  "merged_as": "4cd6cccf2b060ccc718d841a6b17d5eb41f3b045",
+  "key_findings": [
+    "求值器 internal/alert/rules.go 的正则 ^(\\w+)\\s*(>|<|>=|<=|==|!=)\\s*([\\d.]+)$ 不认 label 选择器与 or：不认的 expr 不报错、恒返回 false。测试以「应触发」用例机制化暴露这一点：把 queue_blind 改成 `hestia_db_up == 0 or hestia_queue_up == 0`、把 failed 改成 `hestia_queue_items{state=\"failed\"} > 0`，都会让 ExprEvaluable 的应触发子测试变红（变异 Y1/Y2）。",
+    "evaluator.go:93/96 的 pending 与 :111/136 的 lastFired 都以 rule.Name 为键（已读代码核实），两条 blind 规则同名会共享 for 计时与冷却；测试的 loadExampleRules 断言规则名不重复，同名变异 Y3 使所有加载规则的用例变红。",
+    "hestia_queue_items_failed 不是 /metrics 上的原始名，是 Snapshot 对 state label 的展开键（TASK-002）；端到端测试经真实 HestiaCollector + QueueHealthOf + Registry.Snapshot 证明该键在真实数据上可被规则引用。",
+    "第 1 轮：改用求和基键 `hestia_queue_items > 0`（变异 Y6）时端到端 E2EFailedItem 不红（夹具只有 failed/ 放件，求和值与展开键同值）。第 2 轮按订正 DoD 在 done/ 也放 1 份：删掉 failed 那份后求和基键仍为 1，Y6 下 E2EFailedItem「应熄灭」断言转红（新旧测试对照实测）。",
+    "第 2 轮：message 断言由 NotEmpty 改为逐字 assert.Equal。同一配置变异在新旧测试上对照：Z11（db_blind 文案改为任意串）、Z12（db_blind 换成 queue_blind 文案）——旧测试(2ea63df)均绿，新测试(f3c2186)均红于 DeclaredInExampleConfig/hestia_db_blind。"
+  ],
+  "decisions": [
+    {
+      "decision": "规则经 config.Load + mapRules 读出后再 Evaluate",
+      "rationale": "DoD functional[0]：与 serve 的 alert_runner（alert_runner.go:163 rules: mapRules(cfg.Alerts.Rules)）同一路径，yaml→AlertRule→alert.Rule 的字段映射缺陷也会被测到"
+    },
+    {
+      "decision": "端到端的 DB 侧 fetch 用桩函数（成功返回 hestia.Health{} / 失败返回 error），队列侧用真实 QueueHealthOf",
+      "rationale": "DoD 要求真实 HestiaCollector + QueueHealthOf；DB 侧只需驱动 db_up 的 1/0，真实库只会引入与规则无关的 sqlite 依赖"
+    },
+    {
+      "decision": "空队列用例先 require hestia_queue_up==1 再断言三条规则 false",
+      "rationale": "否则「队列根本没读到」也会让三条规则 false，boundary[0] 的断言会空真"
+    },
+    {
+      "decision": "新规则插在既有 hestia_no_ingest 之后、alerts 段内，不改既有两条",
+      "rationale": "TestExampleConfigDeclaresHestiaRules 继续守既有规则；本任务 writes 只含样例配置与新测试文件"
+    },
+    {
+      "decision": "blind 拆 hestia_db_blind / hestia_queue_blind 两条且不同名，用 *_up == 0",
+      "rationale": "求值器不支持 or；evaluator 状态按名存；*_errors_total 累计不可恢复（2026-09-17 人类裁决）。理由已写进 config.example.yaml 注释（non_functional[0]）"
+    },
+    {
+      "decision": "message 期望值写成测试内字符串字面量（取 yaml 现有文案），不从 yaml 回读",
+      "rationale": "订正 DoD functional[0]：从 yaml 回读等于自比，文案被换也恒等；字面量才能让「文案被改成另一条规则的」变红"
+    },
+    {
+      "decision": "E2EFailedItem 夹具在 done/ 放 1 份",
+      "rationale": "订正 DoD functional[2]：让「误用求和基键 hestia_queue_items」在端到端层面也被抓到，而不只靠求值用例"
+    }
+  ],
+  "files_modified": [
+    "configs/config.example.yaml（第 1 轮）",
+    "cmd/atlas/hestia_alert_rules_test.go（第 1、2 轮）"
+  ],
+  "interfaces_exposed": [
+    "样例配置新增告警规则：hestia_queue_stuck、hestia_queue_failed、hestia_queue_processing_stuck、hestia_db_blind、hestia_queue_blind"
+  ],
+  "human_sync_required": {
+    "what": "runtime 的 configs/config.yaml（生产，不在本仓库跟踪范围内）需把以下规则块原样追加到 alerts.rules 列表末尾（缩进按该文件 rules 列表项 4 空格对齐，与 config.example.yaml 相同）。另：仓库内未被跟踪的 configs/config.yaml 同理，两份 config.yaml 永不同步。",
+    "source": "逐字取自提交 2ea63dfba2bda24c3cd30a38232241f77bc64ea9 对 configs/config.example.yaml 的 42 行新增；第 2 轮未改 yaml，已在最终 master 4cd6ccc 上复核该块作为连续块恰好出现 1 次",
+    "paste": "    # Hestia 契约队列（2026-09-17）。前三条盯队列，后两条盯健康度自己读不读得到数据源。\n    # 年龄指标在目录为空时不输出 ⇒ 规则找不到指标评估为 false，空队列不会假红。\n    - name: hestia_queue_stuck\n      expr: \"hestia_queue_pending_age_hours > 24\"\n      for: 10m\n      cooldown: 24h\n      severity: warning\n      message: \"Hestia 契约在 pending/ 堆了超过 24 小时：Warp 触发器没跑，或容器起不来\"\n    # 求值器不支持 label 选择器（`hestia_queue_items{state=\"failed\"}` 永远不匹配），而 Snapshot\n    # 把带 label 的序列求和成一个键；hestia_queue_items_failed 来自 Snapshot 对 state label 的\n    # 展开（M4 的 TASK-002），不是 /metrics 上的原始指标名。\n    - name: hestia_queue_failed\n      expr: \"hestia_queue_items_failed > 0\"\n      for: 10m\n      cooldown: 24h\n      severity: warning\n      message: \"Hestia 队列有 failed/ 项：agent 处理失败，去看 failed/ 里的 .note.md 取证\"\n    # agent 中途卡死的形态：契约停在 processing/ 不动，而触发器按设计会静默跳过\n    # （互斥判据就是 processing/ 非空）⇒ 没有这条就是「卡死后永远不再处理且无人知晓」。\n    - name: hestia_queue_processing_stuck\n      expr: \"hestia_queue_processing_age_hours > 0.5\"\n      for: 10m\n      cooldown: 6h\n      severity: warning\n      message: \"Hestia 契约卡在 processing/ 超过 30 分钟：agent 中途死了，手工移回 pending/\"\n    # 健康度自己瞎了：库或队列目录读不到。拆成两条而不是一条 `a or b`——求值器不支持 or，\n    # 写了会被静默求值为 false。两条**不得同名**：evaluator 的 for 计时（pending）与 cooldown\n    # （lastFired）都按规则名存，同名会共享状态，一条的计时被另一条清掉。\n    # 用 *_up == 0 而非 *_errors_total > 0：后者是累计计数，一次瞬时失败后 serve 重启前恒 > 0，\n    # 恢复了也不熄；up 是「本轮读成功 1 / 失败 0」，恢复后下一轮就熄（2026-09-17 人类裁决）。\n    - name: hestia_db_blind\n      expr: \"hestia_db_up == 0\"\n      for: 10m\n      cooldown: 6h\n      severity: critical\n      message: \"Hestia 健康度读不到库：serve 活着但 hestia 指标在瞎报\"\n    - name: hestia_queue_blind\n      expr: \"hestia_queue_up == 0\"\n      for: 10m\n      cooldown: 6h\n      severity: critical\n      message: \"Hestia 健康度读不到契约队列目录：目录被删或 serve 的工作目录不对，队列告警全部失明\"\n",
+    "prerequisite": "生产 serve 需已部署含 TASK-002（state 展开）、TASK-003（queue/up 指标）、TASK-004（queue.dir 接线）的版本，否则 hestia_queue_* 与 hestia_db_up 键不存在，规则恒 false；追加后需重启 serve 使配置生效"
+  },
+  "verification": {
+    "tree": "master 4cd6cccf2b060ccc718d841a6b17d5eb41f3b045（主仓库工作区，cmd/configs/internal 无未提交改动）；两文件与 task/TASK-005(f3c2186) sha256 一致",
+    "red": "第 2 轮 RED 以对照形式给出（yaml 本身正确，新断言对现有 yaml 即绿）：Z11/Z12 下旧测试绿、新测试红；Y6 下旧测试 E2EFailedItem 绿、新测试 E2EFailedItem 红。第 1 轮 RED 见 round1_verification.red",
+    "suite": "最终树重采：go build ./... 通过；go test -count=1 ./... 退出码 0，65 个包 ok、FAIL 行 0，尾部三行 `ok internal/strategy/price_percentile` / `ok internal/text` / `ok internal/valuation`；TestHestiaAlertRules_ 21 个 PASS",
+    "coverage": "门禁口径 go test -coverpkg=./cmd/atlas ./cmd/atlas：total 78.2%；coverage_floor=78",
+    "mutation": "在最终测试文件上对 config.example.yaml 13/13 KILLED（dev 私有 worktree，sha256 还原为真）：Y1 label 选择器→Declared/E2EFailedItem/ExprEvaluable；Y2 `a or b`→Declared/E2EBlindRulesIsolated/E2EQueueBlindRecovers/ExprEvaluable；Y3 blind 同名→全部加载规则的用例；Y4 stuck `>=`→Declared/ExprEvaluable；Y5 errors_total→Declared/E2EQueueBlindRecovers/ExprEvaluable；Y6 求和基键→Declared/E2EFailedItem/ExprEvaluable；Y7 db_blind cooldown→Declared；Y8 processing `>=`→Declared/ExprEvaluable；M1–M5 五条 message 各追加一个「。」→各自 Declared 子测试",
+    "done_criteria_map": {
+      "functional[0]": "TestHestiaAlertRules_DeclaredInExampleConfig（5 子测试，六项 name/expr/for/cooldown/severity/message 逐项 assert.Equal；loadExampleRules 断言规则名不重复）",
+      "functional[1]": "TestHestiaAlertRules_ExprEvaluable（10 子测试，含 ==24 / ==0 / ==0.5 / up==1 等号例）",
+      "functional[2]": "TestHestiaAlertRules_E2EFailedItem（failed/ 与 done/ 各 1 份，pending/ 空）",
+      "boundary[0]": "TestHestiaAlertRules_E2EEmptyQueueDoesNotFire",
+      "boundary[1]": "TestHestiaAlertRules_E2EQueueBlindRecovers",
+      "error_handling[0]": "TestHestiaAlertRules_E2EBlindRulesIsolated",
+      "non_functional[0]": "review：config.example.yaml 规则段注释（blind 拆两条不同名、up 而非 errors_total、items_failed 来自 TASK-002 展开）",
+      "non_functional[1]": "review：本文件 human_sync_required.paste；go test -count=1 ./... 见 suite"
+    },
+    "round1_verification": {
+      "tree": "master 0af7c8d191e9dac81de823e2b6b07543dd98cc04（主仓库工作区，cmd/configs/internal 无未提交改动）；两文件与 2ea63df sha256 一致",
+      "red": "写配置前 go test ./cmd/atlas -run TestHestiaAlertRules_：6 个顶层用例全 FAIL（DeclaredInExampleConfig、ExprEvaluable、E2EFailedItem、E2EEmptyQueueDoesNotFire、E2EQueueBlindRecovers、E2EBlindRulesIsolated），连同 15 个子测试共 21 条 FAIL，成因均为 require「样例配置缺少规则」",
+      "suite": "最终树重采：go build ./... 通过；go test -count=1 ./... 退出码 0，65 个包 ok、FAIL 行 0，尾部三行 `ok internal/strategy/price_percentile` / `ok internal/text` / `ok internal/valuation`；TestHestiaAlertRules_ 21 个 PASS",
+      "coverage": "门禁口径 go test -coverpkg=./cmd/atlas ./cmd/atlas：total 78.2%（本任务只加测试文件与 yaml，不改 cmd/atlas 语句），coverage_floor=78（Leader 预设）",
+      "mutation": "对 config.example.yaml 8/8 KILLED（dev 私有 worktree，sha256 还原为真）：Y1 failed 改 label 选择器→Declared/ExprEvaluable/E2EFailedItem；Y2 queue_blind 改 `a or b`→Declared/ExprEvaluable/E2EQueueBlindRecovers/E2EBlindRulesIsolated；Y3 db_blind 改名为 queue_blind（同名）→全部加载规则的用例；Y4 stuck `>=`→ExprEvaluable 等号子测试；Y5 queue_blind 改 errors_total→ExprEvaluable/E2EQueueBlindRecovers；Y6 failed 改求和基键→Declared/ExprEvaluable（E2E 未红，见 key_findings[3]）；Y7 db_blind cooldown 24h→仅 Declared；Y8 processing `>=`→ExprEvaluable 等号子测试",
+      "done_criteria_map": {
+        "functional[0]": "TestHestiaAlertRules_DeclaredInExampleConfig（5 子测试 table-driven）",
+        "functional[1]": "TestHestiaAlertRules_ExprEvaluable（10 子测试，含 ==24 / ==0 / ==0.5 / up==1 等号例）",
+        "functional[2]": "TestHestiaAlertRules_E2EFailedItem",
+        "boundary[0]": "TestHestiaAlertRules_E2EEmptyQueueDoesNotFire",
+        "boundary[1]": "TestHestiaAlertRules_E2EQueueBlindRecovers",
+        "error_handling[0]": "TestHestiaAlertRules_E2EBlindRulesIsolated",
+        "non_functional[0]": "review：config.example.yaml 规则段注释（blind 拆两条不同名、up 而非 errors_total、items_failed 来自 TASK-002 展开）",
+        "non_functional[1]": "review：本文件 human_sync_required.paste；go test -count=1 ./... 见 suite"
+      },
+      "caveats": "gitnexus 索引存储版本不兼容，未跑 detect_changes；本任务不改 Go 生产代码。code-simplifier 运行前后文件 sha256 不变。"
+    }
+  },
+  "provenance": {
+    "round": 2,
+    "round1": "dev-m4-b，commit 2ea63dfba2bda24c3cd30a38232241f77bc64ea9，merge 0af7c8d191e9dac81de823e2b6b07543dd98cc04；被 test-m4-b 退回（reason_class=task_defect，rework_count=1）",
+    "reject_reason_summary": "functional[0] 的 message 只断言 NotEmpty，critical 规则 hestia_db_blind 的文案换成 hestia_queue_blind 的全部测试仍绿（变异 Z11/Z12）；原 discovery 的 done_criteria_map 未申报这一取舍",
+    "dod_revision": "Leader 2026-09-17 订正 DoD：functional[0] 改为六项（含 message）逐项 assert.Equal；functional[2] 端到端夹具 done/ 放 1 份。Leader 说明原文「与 description 逐项相等」有歧义",
+    "own_miss": "dev-m4-b 第 1 轮按字段名读 description、未把 message 纳入断言，也未在 discovery 申报该解读——歧义本应在 RED 前提问（blocked_clarification），或至少在映射里写明",
+    "round2": "dev-m4-b，commit f3c2186412b2191a716c83b3a6913a49b3708661，merge 4cd6cccf2b060ccc718d841a6b17d5eb41f3b045；只改测试文件（+24/-10），yaml 未动"
+  },
+  "commits": [
+    "2ea63dfba2bda24c3cd30a38232241f77bc64ea9",
+    "f3c2186412b2191a716c83b3a6913a49b3708661"
+  ]
+}
