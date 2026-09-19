@@ -1212,7 +1212,11 @@ func TestBuildNotifyContextStoreErrors(t *testing.T) {
 // functional[0] 【实现】非法格式报错含 --as-of，且校验**早于开库**          → TestReplayAsOfValidatedBeforeOpeningDB
 // functional[1] 【守住】不带 flag 行为与改动前相同                          → TestRunCrisisReplay（既有，零改动）+ TestReplayAsOfEmptyKeepsCurrentBehaviour
 // functional[2] 【实现】带合法 --as-of 走 store.AsOf(v)，输出旧值           → TestReplayAsOfSeesHistoricalRevision
-// boundary[0]   【守住】早于所有 fetched_at ⇒ 空序列且 rc=0                 → TestReplayAsOfBeforeAllRevisions
+// boundary[0]   【实现】早于所有 fetched_at ⇒ 空序列且 rc=0                 → TestReplayAsOfBeforeAllRevisions
+//   ⚠️ DoD 原标【守住】，**是错的**（Leader 2026-09-19 自行更正）：CLI 层「空结果
+//   rc=0 而非报错」是本任务新写的三行（executeCrisisReplay 里的 if asOf != ""），
+//   本测试是它们的**唯一覆盖者**。判归属的正确问法不是「这个性质属于哪一层」，
+//   而是「本任务新增了哪些代码、这条断言覆盖其中哪些」。
 // boundary[1]   【实现】帮助文案含 visible at、不含 published at（AD-10）   → TestReplayAsOfHelpWording
 // boundary[2]   【实现】O5：RFC3339 与 YYYY-MM-DD 各一例，其余拒绝          → TestParseAsOfAcceptsBothFormats
 // error_handling[0]【守住】既有 --from/--to 校验与文案不变                   → TestRunCrisisReplay（既有，零改动）
@@ -1220,10 +1224,39 @@ func TestBuildNotifyContextStoreErrors(t *testing.T) {
 // ⚠️ 【守住】类在 RED 阶段不会因本任务而红（多半只是编译错），其证据靠变异——
 //    见 discovery 的 mutation_evidence。
 
+// seedReplayFixture 铺 replay 的共享夹具：80 日全绿 + 末 3 日 NFCI 转红，
+// 返回 config 路径。revise 为 true 时再把**那三天**修订回绿区（更晚的 fetched_at）。
+//
+// ⚠️ revise 必须改**三天**，只改一天不够：状态机看的是连续 3 日，改一天后前两天
+// 仍红 ⇒ 最终状态不变，带 --as-of 与不带的输出会**逐字相同**，而那会让
+// TestReplayAsOfSeesHistoricalRevision 测不出 --as-of 有没有接上（我第一版正是
+// 这么写的，跑出来 current == past）。
+//
+// 只抽 setup，不抽 run/assert —— 三个用例的断言各不相同，合并它们会把「这条在验
+// 什么」藏进参数里。
+func seedReplayFixture(t *testing.T, revise bool) string {
+	t.Helper()
+	cfgPath, dbPath := writeTempCrisisConfigDB(t)
+	st, err := crisis.NewStore(dbPath)
+	require.NoError(t, err)
+	seedReplayWatch(t, st)
+	if revise {
+		var revised []crisis.Observation
+		for _, d := range []string{"2026-07-08", "2026-07-09", "2026-07-10"} {
+			revised = append(revised, crisis.Observation{Date: d, Indicator: crisis.IndNFCI, Value: -0.5,
+				Source: "test", FetchedAt: "2026-07-20T00:00:00.000000000Z"})
+		}
+		require.NoError(t, st.UpsertObservations(context.Background(), revised))
+	}
+	require.NoError(t, st.Close())
+	return cfgPath
+}
+
 // badDBConfig 写一个 storage.path 必定开库失败的 config：父路径是一个**已存在的普通文件**。
 //
-// ⚠️ 不能用「不存在的路径」—— NewStore 会 os.MkdirAll 然后把库建出来（store.go:22），
-// 那样「开库失败」根本不发生，用它做证明恒真、什么也证不出来。
+// ⚠️ 不能用「不存在的路径」—— NewStore 里的 os.MkdirAll 会把目录建出来、库随之
+// 建成功，那样「开库失败」根本不发生，用它做证明恒真、什么也证不出来。
+// （此处刻意不写行号：本文件已证明行号在同一个 sprint 内就会漂。）
 func badDBConfig(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile("../../configs/crisis-monitor.yaml")
@@ -1269,7 +1302,14 @@ func TestParseAsOfAcceptsBothFormats(t *testing.T) {
 		assert.Equal(t, tc.want, got, "输入 %q", tc.in)
 	}
 
-	for _, bad := range []string{"去年", "2026/07/13", "2026-7-13", "20260713", "2026-13-45", "tomorrow"} {
+	// 🔴 带时区偏移的 RFC3339 必须拒：这个值进的是 `fetched_at <= ?`，而 fetched_at
+	// 是 TEXT ⇒ 字典序比较。实测反例：库内 2026-07-12T20:00:00.000000000Z 对
+	// as-of 2026-07-13T00:00:00+08:00（UTC 16:00Z），字典序判 true 而时刻序应为
+	// false ⇒ 一个 as-of **之后**的修订被静默包含。
+	for _, bad := range []string{
+		"去年", "2026/07/13", "2026-7-13", "20260713", "2026-13-45", "tomorrow",
+		"2026-07-13T00:00:00+08:00", "2026-07-13T00:00:00-05:00",
+	} {
 		_, err := parseAsOf(bad)
 		require.Error(t, err, "应拒绝 %q", bad)
 		assert.Contains(t, err.Error(), "--as-of", "拒绝 %q 时文案要含 flag 名", bad)
@@ -1283,23 +1323,7 @@ func TestParseAsOfAcceptsBothFormats(t *testing.T) {
 // 关键，否则一个把 --as-of 直接丢掉的实现也能通过。
 func TestReplayAsOfSeesHistoricalRevision(t *testing.T) {
 	snapshotCrisisFlags(t)
-	cfgPath, dbPath := writeTempCrisisConfigDB(t)
-	st, err := crisis.NewStore(dbPath)
-	require.NoError(t, err)
-	seedReplayWatch(t, st)
-	// 把 seedReplayWatch 改红的**那三天**全部修订回绿区，用更晚的 fetched_at。
-	// ⚠️ 只改一天不够：状态机看的是连续 3 日，改一天后前两天仍红 ⇒ 最终状态不变，
-	//    current 与 past 的输出会逐字相同，而那会让这条断言测不出 --as-of 有没有接上
-	//    （我第一版正是这么写的，跑出来 current == past）。
-	var revised []crisis.Observation
-	for _, d := range []string{"2026-07-08", "2026-07-09", "2026-07-10"} {
-		revised = append(revised, crisis.Observation{Date: d, Indicator: crisis.IndNFCI, Value: -0.5,
-			Source: "test", FetchedAt: "2026-07-20T00:00:00.000000000Z"})
-	}
-	require.NoError(t, st.UpsertObservations(context.Background(), revised))
-	require.NoError(t, st.Close())
-
-	crisisCfgPath = cfgPath
+	crisisCfgPath = seedReplayFixture(t, true)
 	replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
 
 	run := func(asOf string) string {
@@ -1320,33 +1344,20 @@ func TestReplayAsOfSeesHistoricalRevision(t *testing.T) {
 // TestReplayAsOfBeforeAllRevisions 覆盖 boundary[0]（判据四的单测版，【守住】）。
 func TestReplayAsOfBeforeAllRevisions(t *testing.T) {
 	snapshotCrisisFlags(t)
-	cfgPath, dbPath := writeTempCrisisConfigDB(t)
-	st, err := crisis.NewStore(dbPath)
-	require.NoError(t, err)
-	seedReplayWatch(t, st)
-	require.NoError(t, st.Close())
-
-	crisisCfgPath = cfgPath
+	crisisCfgPath = seedReplayFixture(t, false)
 	replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
 	replayAsOf = "2020-01-01T00:00:00Z" // 早于全部 fetched_at
 
 	c := newDiscardCmd()
 	var buf bytes.Buffer
 	c.SetOut(&buf)
-	err = runCrisisReplay(c, nil)
-	require.NoError(t, err, "空结果不是错误 —— 退出码必须是 0")
+	require.NoError(t, runCrisisReplay(c, nil), "空结果不是错误 —— 退出码必须是 0")
 }
 
 // TestReplayAsOfEmptyKeepsCurrentBehaviour 覆盖 functional[1] 的一半（【守住】）。
 func TestReplayAsOfEmptyKeepsCurrentBehaviour(t *testing.T) {
 	snapshotCrisisFlags(t)
-	cfgPath, dbPath := writeTempCrisisConfigDB(t)
-	st, err := crisis.NewStore(dbPath)
-	require.NoError(t, err)
-	seedReplayWatch(t, st)
-	require.NoError(t, st.Close())
-
-	crisisCfgPath = cfgPath
+	crisisCfgPath = seedReplayFixture(t, false)
 	replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
 	replayAsOf = ""
 
@@ -1367,5 +1378,6 @@ func TestReplayAsOfHelpWording(t *testing.T) {
 	require.NotNil(t, f, "--as-of 必须注册在 replay 上")
 	assert.Contains(t, f.Usage, "visible at")
 	assert.NotContains(t, f.Usage, "published at", "AD-10：不得暗示这是数据源发布时刻")
+	assert.Contains(t, f.Usage, "RFC3339", "两种格式都要写明 —— 此前只验了纯日期那半边")
 	assert.Contains(t, f.Usage, "YYYY-MM-DD", "帮助文案须写明两种格式都收")
 }
