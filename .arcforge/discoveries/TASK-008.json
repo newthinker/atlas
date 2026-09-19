@@ -1,0 +1,169 @@
+{
+  "task_id": "TASK-008",
+  "title": "crisis 双时态生产迁移（备份→迁移→部署→判据一~四）",
+  "author": "dev-m4c-a",
+  "completed_at": "2026-09-19T06:15:31Z",
+  "git_ref": "master @ 29337e8fb11c6b895f799b60937b520c7d0b3284",
+  "provenance": {
+    "note": "本任务的代码改动为零——TASK-001~007 的实现已全部 verified 并在 master。本任务是在生产库上执行迁移与部署，并把过程沉淀为文档。",
+    "not_written_by_me": [
+      {
+        "files": [
+          "scripts/ops/deploy.sh",
+          "docs/deployment.md"
+        ],
+        "fact": "这两个文件在本会话期间被改动（deploy.sh 头注释 +18/-0，docs/deployment.md +56/-0），内容是把我报告的 SIGKILL 事故与备份位置风险写进运维文档。我没有写这两个文件，作者未经我确认故不在此断言。",
+        "why_recorded": "transitions.jsonl 只记 by 不记「谁写的代码」。若不写下这一条，后人会从 by=dev-m4c-a 反推成我的产出。"
+      }
+    ],
+    "written_by_me": [
+      "internal/hestia/CONTRACTS.md 的 ## Sprint M4-crisis 节（A~I 九节）",
+      ".arcforge/docs/07-deploy/m4c-migration-log.md 的正文（由 ops-m4c-a 落盘，dev-* 无权写该目录）"
+    ]
+  },
+  "key_findings": [
+    {
+      "id": "F1",
+      "finding": "AD-11 的论证前提为假：旧二进制撞上新形状库不会失败，而是静默污染。",
+      "evidence": "旧二进制的写语句 INSERT OR REPLACE INTO macro_observations (ts, indicator, value, source, fetched_at) 本来就带 fetched_at ⇒ NOT NULL 不触发；三段主键下 fetched_at 不同即不冲突 ⇒ OR REPLACE 从「替换」变成「追加」。副本实测 rc=0，同 (ts,indicator) 静默变两行。旧二进制读裸表（无 fetched_at 维度）后：Observation 得 15.44（过期值，视图得 99.99）、Window(ind,end,5) 覆盖 4 个交易日（期望 5，视图得 5）。负对照：未迁移的生产库上 Observation=15.44、Window 覆盖 5 ⇒ 差异确由「迁移后+旧二进制写一次」造成。",
+      "why_it_matters": "Window 是算分位数的输入 ⇒ 分位数错 ⇒ 状态判定错 ⇒ 落进 crisis_evaluations 并可能发告警，全程不报错。⇒ 反序的危害不是「任务会失败」（那还是好事，会被发现），是「任务会成功但算错」。结论（先迁移后部署）不变，理由要换。"
+    },
+    {
+      "id": "F2",
+      "finding": "executeCrisisIntraday 结构上不写观测，所以 F1 的污染场景在真实窗口里不会发生。",
+      "evidence": "它碰 store 只有 LatestSystemEval / HasIndicatorEvalForDate / SeriesWindow（读）+ AppendEvaluations（写评估表），且 cmd/atlas/crisis.go 的 case \"intraday\": 的 deps 构造里没有 ingest* 字段（对比 case \"nfci\": 有 ingestNFCI）。另：它第一件事是 LatestSystemEval，系统态非 BREWING/CRISIS 即 return nil——实测最新系统态 NORMAL（ts 2026-09-17, eval_at 2026-09-18T14:45:19Z）。",
+      "production_proof": "迁移 04:26:09Z → 部署 06:13:06Z 的 1h47m 窗口内 intraday 应唤起 3~4 次，实测库 sha256 完全未变（4ef6a7819ec…）、31098 行、多修订键数 0、crisis_evaluations 仍 352。⇒ 从代码推断升级为生产实证。",
+      "correction": "我据 F1 建议迁移前 launchctl bootout 三个 crisis 任务，那个建议的理由不成立（Leader 指出，我核实后确认）。真正的截止线是 daily 22:45 本地（它有 ingest、会写观测），不是 intraday 的 30 分钟。"
+    },
+    {
+      "id": "F3",
+      "finding": "🔴 cp 原地覆盖二进制会导致 macOS 内核 SIGKILL，且所有常规静态核实项都通不过它。",
+      "evidence": "cp -p atlas-new bin/atlas 后，bin/atlas 任何子命令 rc=137（128+9=SIGKILL）、stdout 与 stderr 全空。隔离变量：m4c-migration/atlas-new（原位置）rc=0 vs bin/atlas rc=137，而两者 sha256 完全相同、codesign -dv 逐字段相同（adhoc/linker-signed，CodeDirectory size 336606、hashes 10516+0）。成因：内核对该 inode 缓存了旧二进制的代码签名，原地覆盖保持 inode 只换内容 ⇒ 新内容对不上缓存 ⇒ kill。",
+      "fix": "rm -f <目标> 再 cp -p（换 inode，实测 216433589 → 220870847），随后 crisis --help rc=0、crisis status rc=0 并正常输出。",
+      "why_it_matters": "部署后 sha256 ✓ / codesign ✓ / 可执行位 ✓ 三项全过而它跑不了 ⇒ 静态检查证明「文件是对的」，证明不了「它能运行」。若只做静态核实就宣布部署完成，第一个撞上的会是 daily 22:45 的无人值守唤起，而排查者看到的是「一切正确、一跑就死、没有任何日志」。本次是因为要验 verifyBitemporalShape 守卫才实际跑了一次，结果验出了一个与守卫完全无关的问题。"
+    },
+    {
+      "id": "F4",
+      "finding": "判据三在本次数据上是恒等式，绿了不能读成 as-of 的验收证据。",
+      "evidence": "迁移后实测：键总数（distinct ts,indicator）= 31098，其中 count(distinct fetched_at) > 1 的键 = 0（每键恒一个修订），distinct fetched_at 取值数 = 43。老表两段主键结构上不可能让同一键有两个 fetched_at，迁移是 1:1 复制 ⇒ AsOf(任意未来时刻) 与当前形态必然逐值相同，即使 as-of 逻辑完全写错（只要它没把行过滤掉）。",
+      "positive_control": "在一个注入过一条修订的探针库上，多修订键数 = 1 ⇒ 这把尺本身有区分力，只是本次数据里没有可测的东西。",
+      "consequence": "判据三是【守住】不是【实现】：它能拦住「迁移弄坏了当前读」，不能证明 as-of 正确。as-of 的正确性证据在 TASK-006 的单测（含变异 Y1 参数顺序、Y2 <= → <）。该恒等状态会在第一次迁移后采集时结束。"
+    },
+    {
+      "id": "F5",
+      "finding": "迁移产物目录 runtime/atlas/m4c-migration/ 会被 deploy.sh 的 rsync --delete 清掉。",
+      "evidence": "scripts/ops/deploy.sh 用 rsync -a -m --delete，--exclude 列表保护 /data/ /logs/ /queue/ 等，没有 /m4c-migration/。仓库里不存在的目录会被 --delete 清掉。",
+      "why_it_matters": "两份库备份、迁移前 replay 基线、以及旧二进制都在里面。🔴 旧二进制 atlas-old-f86a46dc（7 月构建）无法重建——新二进制可从 master 的 commit 重新 go build，旧的不行。它是回滚路径的一半。",
+      "action_taken": "复制（不是移动）关键项到 data/m4c-migration-safe/（受 --exclude='/data/' 保护）。移动会让 checkpoint、已落盘的迁移日志、其他 agent 记下的路径全部失效，而多占几十 MB 没有代价。两处 sha256 逐项比对一致。"
+    },
+    {
+      "id": "F6",
+      "finding": "转 dev_done 会被 scope 漂移检查 BLOCKED，成因是结构性的而非本次特例。",
+      "evidence": "漂移集含 ./docs/deployment.md 与 ./scripts/ops/deploy.sh，二者不在 TASK-008 的 writes 内。而 OTHERS（用于减掉他人在途改动）只取 status ∈ {assigned,in_progress,dev_done,verifying,blocked_clarification} 的任务 writes：TASK-001~007 全是 verified 不在列，而 Leader 没有 task ⇒ 它的改动永远进不了 OTHERS。",
+      "generalization": "Leader 在共享工作区改任何 git 跟踪的文件，都会让下一个转 dev_done 的 dev 被 BLOCKED，而那个 dev 既不知道文件是谁改的、也无权声明它。本该由 worktree 隔离解决，但本任务必须在主仓库做（要写 .arcforge/、要碰生产库）。",
+      "status": "已报 Leader 三个选项并说明我拒绝「把没改的文件加进自己 writes」的理由（writes 驱动漂移判据，声明失真会让以后真正的越界不再告警）。待裁决。"
+    },
+    {
+      "id": "F7",
+      "finding": "验证守卫时，「rc=0 且有输出」不构成证据；判据必须是输出的**性质**（首行为 system state:）。",
+      "evidence": "NewStore 对 storage.path 先 os.MkdirAll 再让 sqlite 建库，而 verifyBitemporalShape 对全新空库刻意放行（表不存在 ⇒ return nil）。⇒ 在错误目录下跑 crisis status 会当场新建空库、rc=0、有输出、守卫「通过」。Leader 实测三场景：正确目录 rc=0 首行 system state:；错目录+绝对配置路径 rc=0 首行 no evaluations yet 且新建 24576 字节空库；错目录+相对配置路径 rc=1（LoadConfig 先失败，根本走不到 storage.path）。⇒ 换成绝对配置路径就只剩那条假成功路径。",
+      "my_case": "我的验证输出首行确实是 system state: NORMAL (as of 2026-09-17, 44 eval days) ⇒ 在强判据下仍然有效。但我原先声称的判据是 rc=0，那个判据不足以区分「守卫在生产库上通过」与「守卫在空库上空转」。⇒ 结论对、证据够、理由弱——这与本 sprint 记过的「结论对但理由错」同族：结论正确会让判断永不被复查，而理由是别人复现时唯一的入口。",
+      "generalization": "守卫对「空/新建」状态放行是合理设计（否则无法初始化），但它使得「守卫没报错」同时兼容「守卫真的检查过」和「守卫面对空对象直接返回」。⇒ 验证任何带「空则放行」分支的守卫，判据都必须能区分这两种情形。"
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "备份做两份：cp 一份 + sqlite3 .backup（backup API）一份，以后者为权威副本。",
+      "rationale": "生产库是 WAL 模式。当时 -wal 是 0 字节（已 checkpoint），所以单 cp 完整；但不该让备份的正确性依赖「那一刻恰好 checkpoint 过」这个偶然条件。走 backup API 的那份不依赖这个前提。两份 sha256 不同是正常的（backup API 重排页布局，语义相同、字节不同）。"
+    },
+    {
+      "decision": "判据一的三个计数用 sqlite3 独立复算，不读命令输出。",
+      "rationale": "DoD 给的理由（TestExecuteCrisisMigratePrintsCounts 的断言是 assert.Contains(t, s, \"3\")，而 t.TempDir() 路径几乎必然含数字 3 ⇒ 该断言近乎恒真，三个计数全打成 0 也不会有测试变红）成立。⚠️ 我第一遍预演时只看了命令输出就算判据一通过——读到了这条理由、认同了，然后做了恰好那件事。补做后四数一致（均 31098）。"
+    },
+    {
+      "decision": "给双向 EXCEPT 加一个正对照（左侧 value+1 后再 EXCEPT），DoD 未要求。",
+      "rationale": "「0 行」和「这把尺根本量不出东西」在输出上长得一样。生产库上实测正对照得 31098（非 0）⇒ 干净库上的 0/0 不是恒真。"
+    },
+    {
+      "decision": "判据二做两个方向，并在日志里说明它们回答的不是同一个问题。",
+      "rationale": "方向一（旧二进制+老形状 vs 旧二进制+新形状）证明「迁移没改数据」；方向二（旧二进制+老形状 vs 新二进制+新形状）证明「新代码在新形状上给出旧结果」。只有方向二时两个变量同时变、一致无法归因；只有方向一时证明不了新代码的行为。两者均逐字节一致（sha256 d0ee798b…）。⚠️ 不存在「新二进制+老形状」这一格（守卫会拒绝打开老形状库）——构造上不可避免，不是疏漏。"
+    },
+    {
+      "decision": "不停 launchd（未 bootout 三个 crisis 任务）。",
+      "rationale": "人类裁决，理由见 F2：intraday 结构上不写观测。另 Leader 指出 bootout 自带一个更糟的失效模式——忘了 bootstrap 回去会让监控静默关闭，比要防的东西更隐蔽。窗口期实测证实了这个裁决（库 sha256 未变）。"
+    },
+    {
+      "decision": "部署只覆盖 bin/atlas，不跑 deploy.sh。",
+      "rationale": "人类裁决。deploy.sh 是全量 rsync 整个 runtime，远超本次需要；且其 --delete 会清掉迁移产物目录（F5）。最小改动、可逆、不牵连其他组件。"
+    },
+    {
+      "decision": "回滚方案里同时给出二进制回滚，且二进制回滚同样用 rm + cp。",
+      "rationale": "新二进制的守卫会拒绝打开回滚后的老形状库 ⇒ 只回滚库会让线上完全不可用。而二进制回滚若用原地 cp 覆盖会重演 F3 的 SIGKILL。"
+    },
+    {
+      "decision": "回滚 SQL 的验证锚在产出比对，不在 DDL 或计数比对。",
+      "rationale": "四项计数一致（count / max(ts) / crisis_evaluations / 长度校验和）只是必要条件。决定性证据是：用旧二进制在回滚后的库上跑同区间 replay，与迁移前基线逐字节一致。DDL 比对只能证明形状像，产出比对才证明行为同。⚠️ 另记：ALTER RENAME 会给 DDL 加引号（CREATE TABLE \"macro_observations\"），功能等价但与原始 DDL 不逐字节相同。"
+    },
+    {
+      "decision": "迁移日志写 v2 新文件而不是覆盖 v1。",
+      "rationale": "v1（sha256 8fde834c…）与 ops-m4c-a 已落盘的那份逐字节一致，这个关系是「ops 原样落盘、未改内容」的唯一证据。覆盖 v1 会让该证据消失，之后没人能确认 ops 当初落的是什么。"
+    },
+    {
+      "decision": "拒绝把 docs/deployment.md 与 scripts/ops/deploy.sh 加进自己的 writes 来解除 BLOCKED。",
+      "rationale": "writes 是「我会写哪些路径」的声明，同时驱动 scope 互斥与漂移判据。把我没改的文件写进去是让声明失真——以后真有人越界改这两个文件也不会告警了。这是用一个永久的安全属性换一次交付的便利。"
+    }
+  ],
+  "files_modified": [
+    "internal/hestia/CONTRACTS.md（新增 ## Sprint M4-crisis 节，A~I 九节，累计 +219/-0 纯追加，git diff --numstat 自检）"
+  ],
+  "artifacts_outside_repo": [
+    "/Users/zuowei/workspace/runtime/atlas/data/crisis.db —— 已迁移，sha256 4ef6a7819ec40b46f3f5c55451ab8ed5ceacf924cbafef883b10cabd90339b8d",
+    "/Users/zuowei/workspace/runtime/atlas/bin/atlas —— 已部署，sha256 a8142360e072f79376d97f5b7b5b930f816c7ba79ab6422969571badf83eeaea，inode 220870847",
+    "/Users/zuowei/workspace/runtime/atlas/m4c-migration/ —— 备份两份、前后基线、新旧二进制（⚠️ 会被 deploy.sh --delete 清掉，见 F5）",
+    "/Users/zuowei/workspace/runtime/atlas/data/m4c-migration-safe/ —— 关键项第二份，受 --exclude='/data/' 保护"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "timeline_utc": {
+      "preflight": "2026-09-19T03:51:41Z",
+      "backup": "2026-09-19T03:51:55Z",
+      "baseline_pre": "2026-09-19T03:55:43Z",
+      "last_check_before_migrate": "2026-09-19T04:25:57Z",
+      "migrate": "2026-09-19T04:26:09Z",
+      "deploy": "2026-09-19T06:13:06Z",
+      "sigkill_fixed_and_criteria_rerun": "2026-09-19T06:15:31Z"
+    },
+    "preflight": "NULL fetched_at = 0；空串 fetched_at = 0；count(*) = 31098；形状仍两段主键；view 0；两索引在位。首次（03:51:41Z）与迁移前最后一次（04:25:57Z）两次结果相同。",
+    "count_correction": "实测 31098，不是任务描述写的 31092（那个数取自 2026-09-18，而 crisis 采集每天都在写）。判据一的正确形态是「三数相等 ∧ 等于迁移前当场实测值」，不得把会变的数写死进判据。",
+    "baseline_integrity": "迁移那一刻库 sha256 与备份逐字节相同（413f4ea4…）⇒ 从 03:55 采基线到 04:26 迁移库一字未变，所以判据二比的是同一份数据，不是「大概没变」。",
+    "criterion_1": {
+      "command_output": "RowsBefore 31098 / RowsAfter 31098 / ViewRows 31098",
+      "independent_recount": "macro_observations_v1 = 31098；macro_observations = 31098；v_macro_current = 31098；迁移前当场实测 count(*) = 31098（四数一致）",
+      "except_both_ways": "v_macro_current EXCEPT macro_observations_v1 = 0；macro_observations_v1 EXCEPT v_macro_current = 0（全量不抽样，全列 ts,indicator,value,source,fetched_at）",
+      "positive_control": "同一对 EXCEPT，左侧 value+1 ⇒ 31098（非 0，证明尺子有牙）",
+      "integrity": "两索引都在（idx_macro_obs_ind_ts 已重建到新表、idx_crisis_eval_ind_ts 未受影响）；crisis_evaluations 仍 352 行。⚠️ 核实索引时若用 where name like '%macro%' 过滤，idx_crisis_eval_ind_ts 会被滤掉、看起来像丢了索引——「没看见」不等于「不存在」，要用无过滤的全量查询。"
+    },
+    "criterion_2": {
+      "direction_1": "旧二进制 + 老形状（基线 d0ee798b9045a4c9f96e276da9c805644b1a67e6a6b15016ada668ffe36828f9）vs 旧二进制 + 新形状 ⇒ 同一 sha256，逐字节一致。同时验证了 F2 的「无重复行时旧二进制读裸表无害」。",
+      "direction_2": "旧二进制 + 老形状 vs 新二进制（线上那个）+ 新形状 ⇒ 同一 sha256，逐字节一致。",
+      "known_limitation": "迁移前那一侧只能用旧二进制采（新二进制的守卫会拒绝打开老形状库）⇒ 不存在「新二进制 + 老形状」这一格。构造上不可避免，不是疏漏。结论要按这个强度读。"
+    },
+    "criterion_3": "线上二进制跑 --as-of 2026-09-19T06:15:31Z 与不带 --as-of 同一 sha256。⚠️ 【守住】不是【实现】，见 F4：本次数据上是恒等式。",
+    "criterion_4": "线上二进制跑 --as-of 2026-07-13T00:00:00Z ⇒ rc=0、stdout 0 行、stderr 空。生产库 fetched_at 最早 2026-07-14T05:42:08.150777000Z、最晚 2026-09-18T14:45:05.472055000Z、43 个取值 ⇒ 2026-07-13 早于全部取值。负对照：同样 0 行但不带 --as-of ⇒ rc=1 且报 no observations between … run backfill first。⇒ 带 --as-of 时「空」是正确答案（exit 0），不带时是错误（exit 1），靠退出码区分而非提示语。",
+    "guard_verified": "部署后实际跑 atlas crisis status（完整 --config/--crisis-config，走 openCrisisStore → NewStore → verifyBitemporalShape）。🔴 判据是**首行为 system state:**，不是 rc=0 —— 实测首行 `system state: NORMAL (as of 2026-09-17, 44 eval days)` 后接七项指标。为什么 rc=0 不够：NewStore 对 storage.path 先 os.MkdirAll 再让 sqlite 建库，而 verifyBitemporalShape 对全新空库刻意放行（表不存在 ⇒ return nil，否则谁都建不了新库）⇒ 在错误目录下会当场新建一个空 crisis.db，rc=0、有输出、守卫「通过」，而验的是那个空库不是生产库。空库恒为 `no evaluations yet — …`，所以 `system state:` 这一行在空库上构造上不可能出现，它才是唯一可用的判据。**判性质，不判退出码。**（该更强判据由 Leader 于 2026-09-19 实测三场景后指出；我原先的表述把 rc=0 放在判据位置，结论与证据都成立但判据偏弱，故在此更正。并已排除我误建空库：源码目录 data/crisis.db mtime 仍为 2026-07-14 19:51:56，runtime 下今日被改的 crisis.db 只有生产库一个。）",
+    "utc_gate_on_real_binary": "crisis replay --as-of '2026-07-13T00:00:00+00:00' 被拒，文案含 including +00:00；纯日期 --as-of 2026-07-13 被接受（rc=0，与 RFC3339 形式同结果）。判据是 strings.HasSuffix(v, \"Z\") 而非 off != 0——后者问「语义上是不是 UTC」，而比较的是文本，+00:00 语义上就是 UTC，off == 0 会放行它然后静默错位。",
+    "rollback_verified": "在含 1 条注入修订、共 31099 行的探针上实跑回滚 SQL：rc=0，回滚后 31098 行、_v1 消失、view 0、两索引在位，与 walsafe 备份四项一致。决定性证据是产出比对：旧二进制在回滚后的库上跑同区间 replay 与基线逐字节一致。",
+    "out_of_scope": "判据五（人造修订）、六（backfill 撞同键异值）、七（等真实采集，🔴 重复键计数 > 0 才算完成，恒为 0 不能销账）按 AD-12 留给人类，不在本任务。下一个自然检查点是 daily 22:45 本地——迁移后第一次会写观测的采集，判据七的观察窗口从那时开始。不得以判据一~四通过为由声称七条判据全部完成。"
+  },
+  "instrument_errors_this_task": {
+    "why_recorded": "四次都是我的核实工具坏了，而工具故障与被测对象故障在输出上不可区分——其中两次差点被我报成生产事故。记下来是因为处方是可复用的。",
+    "cases": [
+      "zsh 不对未加引号的变量分词：把 config 参数塞进 $CFGS 展开 ⇒ 整串被当成一个 flag 名，命令根本没跑起来（rc=1，输出为空，sha256 e3b0c442… 即空文件），而我的 diff 报「判据二失败，29 行全部消失」。救我的是 rc=1、stderr 的 unknown flag、以及空文件 sha256 是可识别常量，不是判断力。",
+      "用了那一行尚未定义的变量 ⇒ 静默空结果。与上一条同族：都是「为了少打几个字把参数塞进变量」。",
+      "zsh 的 echo 展开反斜杠序列：jq -c 输出的 JSON 含 \\n（Leader 的 answer[0] 含 10 个换行、answer[1] 含 6 个），一过 echo 就变成真换行 ⇒ JSON 损坏 ⇒ 核实命令炸，看起来像任务文件损坏。已用已知答案的输入验实（echo 报同样的 parse error，printf '%s' 正常）。",
+      "用 where name like '%macro%' 列 schema ⇒ idx_crisis_eval_ind_ts 被过滤掉，看起来像索引丢了。「没看见」不等于「不存在」。"
+    ],
+    "prescription": "JSON 一律 printf '%s' 不用 echo；参数写全不塞变量；核实用无过滤的全量查询；核实命令报异常时先用已知答案的输入验仪器，再怀疑数据。",
+    "near_miss_on_reading_code": "读 task-completed.sh 时，CHANGED_FILES 定义后紧跟的注释说「.arcforge/ 整棵树排除」，我据此一度判断 packages 里的 .arcforge/docs/07-deploy/… 对门禁结构性不可见、本任务永远转不了 dev_done，差点报给 Leader。实际 grep -vE '^\\.arcforge/' 作用在 ACTUAL_FILES（漂移检查）上，docs-only 分支用的是未排除的 CHANGED_FILES。⇒ 注释的位置不等于它的作用域。"
+  }
+}
