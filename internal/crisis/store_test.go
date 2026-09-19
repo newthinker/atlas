@@ -505,8 +505,17 @@ func TestNoBareTableReadsOutsideMigration(t *testing.T) {
 		src, err := os.ReadFile(f)
 		require.NoError(t, err)
 		for i, line := range strings.Split(string(src), "\n") {
+			trimmed := strings.TrimSpace(line)
+			// 行注释里提到表名不是读取。不跳过的话，任何人在注释里解释视图
+			// 是怎么回事都会触发假阳，守卫很快会被当成噪音整文件豁免掉 ——
+			// 而那正是本判据要防的。
+			// ⚠️ 已知边界：只跳行注释，块注释 /* */ 不处理（本包没有，且把
+			// SQL 藏在块注释里也不构成读取）。
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
 			if bare.MatchString(line) {
-				found = append(found, fmt.Sprintf("%s:%d: %s", f, i+1, strings.TrimSpace(line)))
+				found = append(found, fmt.Sprintf("%s:%d: %s", f, i+1, trimmed))
 			}
 		}
 	}
