@@ -46,11 +46,13 @@ func snapshotCrisisFlags(t *testing.T) {
 	pCfg, pFrom, pTo := crisisCfgPath, backfillFrom, backfillTo
 	pCSV, pInd, pScale, pFile := backfillCSV, backfillIndicator, backfillScale, cfgFile
 	pRFrom, pRTo, pRJSON := replayFrom, replayTo, replayJSON
+	pRAsOf := replayAsOf
 	pRepFrom, pRepTo, pRepForm, pRepSend := reportFrom, reportTo, reportForm, reportSend
 	t.Cleanup(func() {
 		crisisCfgPath, backfillFrom, backfillTo = pCfg, pFrom, pTo
 		backfillCSV, backfillIndicator, backfillScale, cfgFile = pCSV, pInd, pScale, pFile
 		replayFrom, replayTo, replayJSON = pRFrom, pRTo, pRJSON
+		replayAsOf = pRAsOf
 		reportFrom, reportTo, reportForm, reportSend = pRepFrom, pRepTo, pRepForm, pRepSend
 	})
 }
@@ -605,7 +607,7 @@ func TestExecuteCrisisReplayTransitions(t *testing.T) {
 	seedReplayWatch(t, st)
 
 	var buf bytes.Buffer
-	require.NoError(t, executeCrisisReplay(ctx, crisisTestConfig(), st, "2026-06-25", "2026-07-10", false, &buf))
+	require.NoError(t, executeCrisisReplay(ctx, crisisTestConfig(), st, "2026-06-25", "2026-07-10", "", false, &buf))
 	out := buf.String()
 	assert.Contains(t, out, "NORMAL → WATCH")
 	assert.Contains(t, out, "final state: WATCH")
@@ -624,7 +626,7 @@ func TestExecuteCrisisReplayJSON(t *testing.T) {
 	seedReplayWatch(t, st)
 
 	var buf bytes.Buffer
-	require.NoError(t, executeCrisisReplay(ctx, crisisTestConfig(), st, "2026-06-25", "2026-07-10", true, &buf))
+	require.NoError(t, executeCrisisReplay(ctx, crisisTestConfig(), st, "2026-06-25", "2026-07-10", "", true, &buf))
 
 	var parsed int
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
@@ -644,7 +646,7 @@ func TestExecuteCrisisReplayJSON(t *testing.T) {
 func TestExecuteCrisisReplayNoData(t *testing.T) {
 	st := newCrisisTestStore(t)
 	var buf bytes.Buffer
-	err := executeCrisisReplay(context.Background(), crisisTestConfig(), st, "2008-01-01", "2008-12-31", false, &buf)
+	err := executeCrisisReplay(context.Background(), crisisTestConfig(), st, "2008-01-01", "2008-12-31", "", false, &buf)
 	require.ErrorContains(t, err, "run backfill first")
 }
 
@@ -1044,7 +1046,7 @@ func TestBuildNotifyContext(t *testing.T) {
 	assert.Equal(t, crisis.StatusGreen, nc.PrevDay[crisis.IndVIX].Status) // 昨日行而非当日
 	assert.Equal(t, []string{crisis.IndVIX}, nc.NewStale)                 // move 昨日已 STALE → 不重复（要点 5）
 	assert.Equal(t, 2, nc.StateDays)                                      // 昨日 1 行 WATCH + 今日
-	assert.Equal(t, crisis.SummaryWeekly, nc.Summary)                    // 周一 + WATCH
+	assert.Equal(t, crisis.SummaryWeekly, nc.Summary)                     // 周一 + WATCH
 	assert.Equal(t, 2, nc.ClearStreak)                                    // 昨日 any_trigger=false + 今日
 	assert.Nil(t, nc.Trends)                                              // 非 NORMAL 月报 → 不组装
 
@@ -1201,4 +1203,169 @@ func TestBuildNotifyContextStoreErrors(t *testing.T) {
 		_, err := buildNotifyContext(ctx, d, res)
 		require.Error(t, err)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TASK-007 crisis replay --as-of
+//
+// Context Checkpoint: done_criteria → test mapping (--as-of)
+// functional[0] 【实现】非法格式报错含 --as-of，且校验**早于开库**          → TestReplayAsOfValidatedBeforeOpeningDB
+// functional[1] 【守住】不带 flag 行为与改动前相同                          → TestRunCrisisReplay（既有，零改动）+ TestReplayAsOfEmptyKeepsCurrentBehaviour
+// functional[2] 【实现】带合法 --as-of 走 store.AsOf(v)，输出旧值           → TestReplayAsOfSeesHistoricalRevision
+// boundary[0]   【守住】早于所有 fetched_at ⇒ 空序列且 rc=0                 → TestReplayAsOfBeforeAllRevisions
+// boundary[1]   【实现】帮助文案含 visible at、不含 published at（AD-10）   → TestReplayAsOfHelpWording
+// boundary[2]   【实现】O5：RFC3339 与 YYYY-MM-DD 各一例，其余拒绝          → TestParseAsOfAcceptsBothFormats
+// error_handling[0]【守住】既有 --from/--to 校验与文案不变                   → TestRunCrisisReplay（既有，零改动）
+//
+// ⚠️ 【守住】类在 RED 阶段不会因本任务而红（多半只是编译错），其证据靠变异——
+//    见 discovery 的 mutation_evidence。
+
+// badDBConfig 写一个 storage.path 必定开库失败的 config：父路径是一个**已存在的普通文件**。
+//
+// ⚠️ 不能用「不存在的路径」—— NewStore 会 os.MkdirAll 然后把库建出来（store.go:22），
+// 那样「开库失败」根本不发生，用它做证明恒真、什么也证不出来。
+func badDBConfig(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../../configs/crisis-monitor.yaml")
+	require.NoError(t, err)
+	notADir := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+	out := strings.Replace(string(raw), "data/crisis.db", filepath.Join(notADir, "crisis.db"), 1)
+	cfgPath := filepath.Join(t.TempDir(), "crisis-monitor.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(out), 0o644))
+	return cfgPath
+}
+
+// TestReplayAsOfValidatedBeforeOpeningDB 覆盖 functional[0]（【实现】）。
+//
+// 证明手法：把 --db 指到一个**必定开库失败**的路径。若校验在开库之后，拿到的会是
+// 开库错误；只有校验在前，错误才仍是格式错。这比「读代码确认顺序」强——顺序是
+// 可以被后人无意改掉的，而这条断言会红。
+func TestReplayAsOfValidatedBeforeOpeningDB(t *testing.T) {
+	snapshotCrisisFlags(t)
+	crisisCfgPath = badDBConfig(t)
+	replayFrom, replayTo = "2026-06-25", "2026-07-10"
+	replayAsOf = "去年"
+
+	err := runCrisisReplay(newDiscardCmd(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as-of", "错误要指名是哪个 flag")
+	assert.NotContains(t, err.Error(), "crisis db", "拿到开库错误就说明校验跑晚了")
+}
+
+// TestParseAsOfAcceptsBothFormats 覆盖 boundary[2]（O5 裁定，【实现】）。
+//
+// 两种形态都收：spec §5 判据四原文写的是 `--as-of 2026-07-13`，而 plan Step 4 写
+// RFC3339 —— 只收其一会让照另一份文档敲命令的人撞「格式非法」。
+func TestParseAsOfAcceptsBothFormats(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ""},
+		{"2026-07-13T00:00:00Z", "2026-07-13T00:00:00Z"},
+		{"2026-07-13T05:42:08.150777000Z", "2026-07-13T05:42:08.150777000Z"},
+		{"2026-07-13", "2026-07-13T00:00:00Z"}, // 纯日期 = 当日 00:00:00Z 起点
+	} {
+		got, err := parseAsOf(tc.in)
+		require.NoError(t, err, "应接受 %q", tc.in)
+		assert.Equal(t, tc.want, got, "输入 %q", tc.in)
+	}
+
+	for _, bad := range []string{"去年", "2026/07/13", "2026-7-13", "20260713", "2026-13-45", "tomorrow"} {
+		_, err := parseAsOf(bad)
+		require.Error(t, err, "应拒绝 %q", bad)
+		assert.Contains(t, err.Error(), "--as-of", "拒绝 %q 时文案要含 flag 名", bad)
+	}
+}
+
+// TestReplayAsOfSeesHistoricalRevision 覆盖 functional[2]（【实现】）。
+//
+// 构造含修订的库：同一 (ts, indicator) 先写旧值、再写新值（不同 fetched_at）。
+// 取旧时点应当看到旧值，与不带 flag 的输出不同 —— 「与不带 flag 不同」这半边是
+// 关键，否则一个把 --as-of 直接丢掉的实现也能通过。
+func TestReplayAsOfSeesHistoricalRevision(t *testing.T) {
+	snapshotCrisisFlags(t)
+	cfgPath, dbPath := writeTempCrisisConfigDB(t)
+	st, err := crisis.NewStore(dbPath)
+	require.NoError(t, err)
+	seedReplayWatch(t, st)
+	// 把 seedReplayWatch 改红的**那三天**全部修订回绿区，用更晚的 fetched_at。
+	// ⚠️ 只改一天不够：状态机看的是连续 3 日，改一天后前两天仍红 ⇒ 最终状态不变，
+	//    current 与 past 的输出会逐字相同，而那会让这条断言测不出 --as-of 有没有接上
+	//    （我第一版正是这么写的，跑出来 current == past）。
+	var revised []crisis.Observation
+	for _, d := range []string{"2026-07-08", "2026-07-09", "2026-07-10"} {
+		revised = append(revised, crisis.Observation{Date: d, Indicator: crisis.IndNFCI, Value: -0.5,
+			Source: "test", FetchedAt: "2026-07-20T00:00:00.000000000Z"})
+	}
+	require.NoError(t, st.UpsertObservations(context.Background(), revised))
+	require.NoError(t, st.Close())
+
+	crisisCfgPath = cfgPath
+	replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
+
+	run := func(asOf string) string {
+		replayAsOf = asOf
+		c := newDiscardCmd()
+		var buf bytes.Buffer
+		c.SetOut(&buf)
+		require.NoError(t, runCrisisReplay(c, nil))
+		return buf.String()
+	}
+
+	current := run("")                  // 看到 07-20 那次修订（NFCI 回绿）
+	past := run("2026-07-15T00:00:00Z") // 07-20 尚未发生 ⇒ 看到 0.2（红）
+	assert.NotEqual(t, current, past,
+		"as-of 取旧时点必须与当前不同 —— 相同说明 --as-of 根本没接上")
+}
+
+// TestReplayAsOfBeforeAllRevisions 覆盖 boundary[0]（判据四的单测版，【守住】）。
+func TestReplayAsOfBeforeAllRevisions(t *testing.T) {
+	snapshotCrisisFlags(t)
+	cfgPath, dbPath := writeTempCrisisConfigDB(t)
+	st, err := crisis.NewStore(dbPath)
+	require.NoError(t, err)
+	seedReplayWatch(t, st)
+	require.NoError(t, st.Close())
+
+	crisisCfgPath = cfgPath
+	replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
+	replayAsOf = "2020-01-01T00:00:00Z" // 早于全部 fetched_at
+
+	c := newDiscardCmd()
+	var buf bytes.Buffer
+	c.SetOut(&buf)
+	err = runCrisisReplay(c, nil)
+	require.NoError(t, err, "空结果不是错误 —— 退出码必须是 0")
+}
+
+// TestReplayAsOfEmptyKeepsCurrentBehaviour 覆盖 functional[1] 的一半（【守住】）。
+func TestReplayAsOfEmptyKeepsCurrentBehaviour(t *testing.T) {
+	snapshotCrisisFlags(t)
+	cfgPath, dbPath := writeTempCrisisConfigDB(t)
+	st, err := crisis.NewStore(dbPath)
+	require.NoError(t, err)
+	seedReplayWatch(t, st)
+	require.NoError(t, st.Close())
+
+	crisisCfgPath = cfgPath
+	replayFrom, replayTo, replayJSON = "2026-06-25", "2026-07-10", false
+	replayAsOf = ""
+
+	c := newDiscardCmd()
+	var buf bytes.Buffer
+	c.SetOut(&buf)
+	require.NoError(t, runCrisisReplay(c, nil))
+	assert.Contains(t, buf.String(), "WATCH", "不带 --as-of 时行为与改动前一致")
+}
+
+// TestReplayAsOfHelpWording 覆盖 boundary[1]（AD-10，【实现】）。
+//
+// 「visible at」而非「published at」：这条时间轴是**我们抓到的时刻**，不是数据源
+// 发布的时刻。一字之差会让人以为它能回答 vintage 问题（「当时官方公布的是多少」），
+// 而库里根本没有那个信息。
+func TestReplayAsOfHelpWording(t *testing.T) {
+	f := crisisReplayCmd.Flags().Lookup("as-of")
+	require.NotNil(t, f, "--as-of 必须注册在 replay 上")
+	assert.Contains(t, f.Usage, "visible at")
+	assert.NotContains(t, f.Usage, "published at", "AD-10：不得暗示这是数据源发布时刻")
+	assert.Contains(t, f.Usage, "YYYY-MM-DD", "帮助文案须写明两种格式都收")
 }
