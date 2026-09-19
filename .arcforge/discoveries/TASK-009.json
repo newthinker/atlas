@@ -1,0 +1,70 @@
+{
+  "task_id": "TASK-009",
+  "title": "收掉三条无 owner 的运维认知缺口（V-4 / V-6 / V-8）",
+  "author": "dev-m4c-a",
+  "completed_at": "2026-09-19T10:40:00Z",
+  "commit": "abada6f58cfcca63569dcad68e4c317f5999063b",
+  "files_modified": [
+    "docs/deployment.md（+63/-0，新增两节）",
+    "scripts/ops/deploy.sh（+8/-0，全部注释行，删除 0，bash -n rc=0）"
+  ],
+
+  "key_findings": [
+    {
+      "id": "F1",
+      "finding": "这三条的共同点不是「内容重要」，而是**它们不在任何任务的 writes 里，所以没有角色负责同步**。",
+      "evidence": "V-4 就是这么发生的：部署判据（首行 system state: 而非 rc=0）订正后只落进 3 份副本的 1 份 —— deployment.md 3 处、deploy.sh 0 处、CONTRACTS.md 0 处。",
+      "why_it_matters": "同一事实存在于 N 份载体时，**修改的传播范围由『谁的 writes 覆盖了哪几份』决定，而不是由内容的重要性决定**。⇒ 拆任务时若某个事实要写进多份文档，那几份必须落在同一个任务的 writes 里，否则它必然只被修到一部分。"
+    },
+    {
+      "id": "F2",
+      "finding": "V-6 的危害形态是**给出方向相反的结论**，不是「少验一项」。",
+      "evidence": "bin/atlas 在 .gitignore 里、不随 git checkout 变化。实撞一次：用 9/18 的旧构建复核「源码目录误跑 crisis replay 会读到旧库、输出正常、不报错」，拿到 rc=0 + `no evaluations yet` —— 一个看起来毫无问题的输出，于是那条说法被判成成立。而当前分支的二进制含 verifyBitemporalShape 守卫，同一条命令 rc=1 响亮拦住并指路 migrate-bitemporal。",
+      "why_worse_than_silence": "「不告诉你」会让人继续找；「告诉你一个正常的假答案」会让人停止找。若没人去查二进制版本，那个假结果会作为证据进报告。"
+    },
+    {
+      "id": "F3",
+      "finding": "🔴 我给 V-6 写的自检命令，第一版把正对照写成了固定数字，那本身会随分支漂。",
+      "evidence": "我实测三份二进制：线上 bin/atlas = 1/2/**355**；当日更晚的新构建 = 1/2/**360**；9/18 旧构建 = 0/0/318。⇒ 正对照 `crisis` 的计数随分支上的字符串增减而变，两个都是「含守卫的新构建」却给出不同的数。",
+      "fix": "改成写明「判据是**性质**（守卫符号 ≥1 且正对照 ≫0），不是任何一个具体值」，并把两个新构建的不同值都列出来当作反例。",
+      "shape": "这与本 sprint 反复出现的「判性质，不判数量」是同一条；而我差点在**写这条规则的那一节里**违反它。"
+    },
+    {
+      "id": "F4",
+      "finding": "V-8：CLI 与应用驱动对 ALTER TABLE RENAME 之后的视图定义处置**相反**，而两者都不报错。",
+      "evidence": "我自己跑了同一串 DDL（建表 t → 建视图 v AS SELECT * FROM t → RENAME t TO t_v1）：/usr/bin/sqlite3 3.51.0 的 legacy_alter_table=1，视图仍是 `CREATE VIEW v AS SELECT * FROM t`（不改写）；modernc.org/sqlite 的 legacy_alter_table=0，视图变成 `CREATE VIEW v AS SELECT * FROM \"t_v1\"`（被静默改写）。",
+      "consequence": "判别写进文档：验视图**存在性**、表/行数、主键形状、约束触发 ⇒ 两边一致，CLI 可用；验视图**指向哪张表** ⇒ 两边结论相反，必须走 Go 驱动。",
+      "near_miss_it_caused": "这条实撞过：复核 migrate.go 里「RENAME 会静默改写视图定义」那条注释时先用 CLI 测，得到「视图未被改写」，已准备报该注释为假；换驱动重测结论相反 ⇒ 注释是对的，migrate.go 里那步 DROP VIEW 是**承重的**不是防御性的。⇒ 通则：**跑出与既有注释/文档相反的结论时，先怀疑仪器，再怀疑对象**，具体动作是换一个独立实现重测一次。"
+    }
+  ],
+
+  "decisions": [
+    {
+      "decision": "V-4 写进 deploy.sh 的头注释，而不是只写进 deployment.md。",
+      "rationale": "执行部署的人一定会打开脚本，而手册要主动去翻。载体决定它会不会被读到 —— 这条本身就是 V-4 的成因（订正只落进 1 份副本）的反面处方。"
+    },
+    {
+      "decision": "V-6 的自检命令保留「正对照」那一行，并写明它不可省。",
+      "rationale": "只看守卫符号命中 0，无法区分「二进制是旧的」与「strings/grep 根本没在工作」——路径写错、文件不可读、grep 模式打错都会给 0。正对照非 0 才说明那个 0 是真的 0。"
+    },
+    {
+      "decision": "V-6 建议自己构建到别处而不是覆盖 bin/atlas。",
+      "rationale": "覆盖虽不影响 git status（它在 .gitignore 里），但它是线上正在用的那一个；而且覆盖前后它都「看起来正常」。"
+    },
+    {
+      "decision": "三条都写实测数据和可复现命令，不只写结论。",
+      "rationale": "DoD error_handling[0] 要求，理由也写在那里：本 sprint 反复出现「结论对但理由错」，而理由是下一个人复现时的唯一入口。本任务的三条实测我都是自己跑的（符号计数三份二进制、CLI/驱动同一串 DDL），没有照抄审查报告的数字。"
+    }
+  ],
+
+  "verification": {
+    "functional_0_V4": "grep -c 'system state:' scripts/ops/deploy.sh 从 **0 变为 3**（DoD 判据是 ≥1）。",
+    "functional_1_V6": "新节含：标题「可能是陈旧构建，不含当前分支的代码」、危害形态「把你推向相反的结论」、带正对照的自检命令、以及不要拿具体数字当判据的警告。三份二进制实测数字见 F3。",
+    "functional_2_V8": "新节含实测表（CLI legacy_alter_table=1 不改写 / 驱动=0 静默改写）与三行判别表（存在性可用 CLI / 指向哪张表必须走驱动）。",
+    "boundary_0": "deploy.sh 新增 **8** 行，其中非注释行 **0**，删除 **0**，`bash -n` rc=**0**。",
+    "error_handling_0": "三条各自指向具体实测：V-4 → 三场景实测（deployment.md 同名小节）；V-6 → 2026-09-19 实测三份二进制的符号计数；V-8 → 2026-09-19 同一串 DDL 在两个引擎上的输出。",
+    "non_functional_0": "deployment.md 的 'system state:' 命中 3 处，与新增内容口径一致（都说判据是首行）；全文检索「判据是/为 rc=0」命中 **0**，无矛盾表述。"
+  },
+
+  "interfaces_exposed": []
+}
