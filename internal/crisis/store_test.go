@@ -362,8 +362,21 @@ func schemaSnapshot(t *testing.T, db *sql.DB) []string {
 // 走公开 API 造不出同一 (ts, indicator) 的两行——夹具会静默退化成单版本，而单版本
 // 下有缺陷的实现照样通过。
 //
-// 夹具即 DoD 给定的那组：2026-01-02/vix 有 10@07-14 与 11@08-14（修订），
-// 另有 2026-01-03/vix=20（单版本）。
+// 夹具在 DoD 给定的那组之上加了一行，**两处细节都是语义的一部分，别随手改**：
+//
+//  1. 最新那天（01-03）也有修订。DoD 原夹具把修订只放在较旧的 01-02，于是
+//     SeriesWindow(end=01-03, n=2) 的 LIMIT 2 正好跨到两个不同日期，**改动前
+//     就返回 [11 20]**、与期望一字不差 —— 那条断言测不出任何东西。加上这行后，
+//     裸表上 LIMIT 2 全落在 01-03（dates=[01-03 01-03]），确定性变红。
+//
+//  2. 01-03 那天**先插新修订(21)、后插旧修订(20)**。裸表上 LatestObservation 的
+//     `ORDER BY ts DESC LIMIT 1` 在同一天的多行里取的是**扫描顺序**的某一行，
+//     不是语义上的当前行 —— 实测（改动前的树）：旧在前得 21（碰巧对），新在前
+//     得 20（错）。顺序写反，这条断言就悄悄失去牙而看不出来。
+//
+// 走视图后两种顺序都得 21：视图按 MAX(fetched_at) 选，与插入顺序无关（这正是
+// TASK-001 boundary[0]「乱序写入」钉住的性质），所以这个夹具不依赖未定义行为
+// 来产生**正确**结果，只用它来产生一个**能区分正确与错误实现**的输入。
 func revisedStore(t *testing.T) *Store {
 	t.Helper()
 	s := newTestStore(t)
@@ -374,7 +387,8 @@ func revisedStore(t *testing.T) *Store {
 	}{
 		{"2026-01-02", 10, "2026-07-14T00:00:00Z"},
 		{"2026-01-02", 11, "2026-08-14T00:00:00Z"},
-		{"2026-01-03", 20, "2026-07-14T00:00:00Z"},
+		{"2026-01-03", 21, "2026-08-14T00:00:00Z"}, // 新修订先落库
+		{"2026-01-03", 20, "2026-07-14T00:00:00Z"}, // 旧修订后落库（回填乱序是真实场景）
 	} {
 		_, err := s.db.Exec(`INSERT INTO macro_observations VALUES (?,?,?,?,?)`,
 			r.ts, IndVIX, r.value, "test", r.fetchedAt)
@@ -397,18 +411,24 @@ func TestReadsSeeOnlyLatestRevision(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, latest)
 	assert.Equal(t, "2026-01-03", latest.Date)
+	// 断 value 而不只断 ts：最大 ts 与「那天有没有修订」无关，只断 ts 的话裸表
+	// 实现也照样通过。裸表在本夹具的插入顺序下返回 20（旧修订），视图返回 21。
+	assert.Equal(t, 21.0, latest.Value, "最新那天有修订时，要取当前行不是任取一行")
 
-	// LIMIT 不被重复行吃掉：裸表上 DESC LIMIT 2 会取到 01-03 与 01-02 的**某个**修订，
-	// 行数看着也是 2，但值可能是旧的；走视图后每个业务键只剩一行。
+	// LIMIT 不被重复行吃掉：裸表上 DESC LIMIT 2 全落在 01-03 的两个修订上
+	// （实测 dates=[01-03 01-03]）—— 要最近 2 个交易日，去重后只拿到 1 个。
+	// 走视图后每个业务键只剩一行，LIMIT 2 才真的是 2 天。
 	win, err := s.SeriesWindow(ctx, IndVIX, "2026-01-03", 2)
 	require.NoError(t, err)
 	require.Len(t, win, 2)
-	assert.Equal(t, []float64{11, 20}, []float64{win[0].Value, win[1].Value})
+	assert.Equal(t, []string{"2026-01-02", "2026-01-03"},
+		[]string{win[0].Date, win[1].Date}, "LIMIT 2 必须是 2 个不同交易日")
+	assert.Equal(t, []float64{11, 21}, []float64{win[0].Value, win[1].Value})
 
 	since, err := s.SeriesSince(ctx, IndVIX, "2026-01-02", "2026-01-03")
 	require.NoError(t, err)
 	require.Len(t, since, 2, "不得混进旧修订")
-	assert.Equal(t, []float64{11, 20}, []float64{since[0].Value, since[1].Value})
+	assert.Equal(t, []float64{11, 21}, []float64{since[0].Value, since[1].Value})
 }
 
 // TestEvalDatesDeduplicatesRevisions 覆盖 functional[1]（裁决 R1）。
