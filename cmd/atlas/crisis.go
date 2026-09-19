@@ -636,11 +636,30 @@ func parseAsOf(v string) (string, error) {
 	if v == "" {
 		return "", nil
 	}
-	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-		if _, off := t.Zone(); off != 0 {
+	if _, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		// 🔴 判据是「**原文**以 Z 结尾」，不是「解析后的偏移量为零」。
+		//
+		// 前一版写的是 `if _, off := t.Zone(); off != 0`，它漏掉 `+00:00` 与
+		// `-00:00` —— 那两种形态解析后 off 确实是 0，于是被放行、原样透传进
+		// `fetched_at <= ?`。而那里做的是**文本**比较：
+		//
+		//	row   = 2026-07-13T00:00:00.000000000Z      （与 as-of 同一时刻）
+		//	row <= 2026-07-13T00:00:00Z        → true   包含
+		//	row <= 2026-07-13T00:00:00+00:00   → false  **排除**
+		//
+		// 同一时刻的两种合法 RFC3339 写法给出相反结果，无错误、输出形状正常。
+		// 危害是欠包含，漏掉的恰是「as-of 那一瞬间的那个修订」—— 与 AsOfQuery
+		// 里 `<=` 写成 `<` 是同一类错误，只是换了一条路径进来。
+		//
+		// ⇒ `off != 0` 问的是**语义**，而被比较的是**文本**；判据必须与被比较的
+		// 东西同口径。这也是为什么前一版的错误文案（"need a trailing Z … an
+		// offset form silently misaligns"）**没有覆盖它自己描述的集合**：
+		// `+00:00` 既是偏移形式、又没有 trailing Z，却过了那道闸。
+		if !strings.HasSuffix(v, "Z") {
 			return "", fmt.Errorf(
-				"--as-of %q: need UTC (a trailing Z) — fetched_at is compared as text, "+
-					"so an offset form silently misaligns; write e.g. 2026-07-13T00:00:00Z", v)
+				"--as-of %q: need UTC with a trailing Z — fetched_at is compared as text, "+
+					"so any offset form (including +00:00) silently misaligns; "+
+					"write e.g. 2026-07-13T00:00:00Z", v)
 		}
 		return v, nil
 	}
