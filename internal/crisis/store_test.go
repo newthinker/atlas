@@ -370,9 +370,22 @@ func schemaSnapshot(t *testing.T, db *sql.DB) []string {
 
 // revisedStore 建一个**新形状**的库并用裸 INSERT 造出重复修订。
 //
-// ⚠️ 必须裸 INSERT：此刻 UpsertObservations 仍是 INSERT OR REPLACE（TASK-005 才改），
-// 走公开 API 造不出同一 (ts, indicator) 的两行——夹具会静默退化成单版本，而单版本
-// 下有缺陷的实现照样通过。
+// 📌 这里用裸 INSERT 的理由是**解耦**，不是「别的方式造不出来」：本函数服务的是
+// **读路径**测试，不该依赖 UpsertObservations 的当时行为——那个方法正在被逐个
+// sprint 改（TASK-005 把它从 INSERT OR REPLACE 改成了追加），夹具若走它，读路径
+// 测试的输入会随写路径的改动而静默变形。
+//
+// ⚠️ 本段此前写的是「必须裸 INSERT——走公开 API 造不出同一 (ts, indicator) 的
+// 两行」，**该句为假**，已于 TASK-006 订正（test-m4c-a 在 46c401c 实测证伪）：
+// 三段主键下不同 fetched_at 即不同主键，走公开 API 先写 10@07-14 再写 11@08-14
+// 就得到裸表 2 行。
+//
+// 订正时容易换上的另一个半真说法也记在这里，免得再绕回去：同 (ts, indicator) 的
+// 多行**从 TASK-001 三段主键落地起一直造得出**；TASK-005 之后造不出的只是
+// 「**同三段主键、异值**」——那会响亮失败（C6）。两者不是一回事。
+//
+// 对照：下方 asOfStore 刻意**走公开 API**，因为 as-of 测试验的正是「经正常写入
+// 路径落库的东西能被正确读出」，那里耦合是要测的性质本身。
 //
 // 夹具在 DoD 给定的那组之上加了一行，**两处细节都是语义的一部分，别随手改**：
 //
@@ -735,4 +748,212 @@ func TestWritePathHasNoReplaceOrIgnore(t *testing.T) {
 
 	assert.NotContains(t, body, "INSERT OR REPLACE INTO MACRO_OBSERVATIONS")
 	assert.NotContains(t, body, "INSERT OR IGNORE INTO MACRO_OBSERVATIONS")
+}
+
+// ---------------------------------------------------------------------------
+// TASK-006 as-of 只读副本：obsFrom() 按 asOf 选形态（C4/AD-8/AD-9）
+//
+// Context Checkpoint: done_criteria → test mapping (as-of)
+// functional[0]     as-of 看历史版本；AsOf(远未来) 与不带 as-of 逐值相同（O7）      → TestAsOfSeesHistoricalRevision / TestAsOfFarFutureMatchesCurrent
+// functional[1]     边界含端点（<= 而非 <）；生产 Nano 形态下整秒 as-of 含同秒小数行 → TestAsOfIncludesEndpoint / TestAsOfNanoPrecisionBoundary
+// functional[2]     五个读方法在 as-of 形态下参数顺序正确，逐值断言                  → TestAsOfAllReadersParameterOrder
+// boundary[0]       C8：t 之前无任何行 ⇒ (nil, nil)，不回退到最早那行                → TestAsOfExcludesKeysWithNoRowsBefore
+// boundary[1]       AsOf 不改原 Store；副本与原 Store 共用同一个 *sql.DB             → TestAsOfIsReadOnlyCopySharingDB
+// boundary[2]       写路径裸读的**行为层**守卫（R3 覆盖缺口）                        → TestUpsertOlderRevisionAfterNewerIsSwallowed
+// error_handling[0] AsOf("") 等价于当前形态                                          → TestAsOfEmptyEqualsCurrent
+// non_functional[1] C5 在本任务的尺是「WHERE/ORDER/LIMIT 文本逐字不变」              → verify_by: review（git diff）
+
+// asOfStore 造 DoD 指定的 as-of 夹具：同键两个修订 + 另一个单版本键。
+//
+// 走公开 API：三段主键下不同 fetched_at 即不同主键，UpsertObservations 会追加
+// 而非覆盖（TASK-005 起「同三段异值」才报错）。
+func asOfStore(t *testing.T) *Store {
+	t.Helper()
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, o := range []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 11, Source: "fred", FetchedAt: "2026-08-14T00:00:00Z"},
+		{Date: "2026-01-03", Indicator: IndVIX, Value: 20, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	} {
+		require.NoError(t, s.UpsertObservations(ctx, []Observation{o}))
+	}
+	return s
+}
+
+func TestAsOfSeesHistoricalRevision(t *testing.T) {
+	s := asOfStore(t)
+	ctx := context.Background()
+
+	now, err := s.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, now)
+	assert.Equal(t, 11.0, now.Value, "不带 as-of 看当前行")
+
+	// 07-20 时点上，08-14 那次修订还没发生
+	past, err := s.AsOf("2026-07-20T00:00:00Z").Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, past)
+	assert.Equal(t, 10.0, past.Value, "as-of 要看到当时那个值，而不是后来修订的")
+}
+
+// TestAsOfFarFutureMatchesCurrent 是 TASK-008 判据三唯一的事前保险（O7）。
+func TestAsOfFarFutureMatchesCurrent(t *testing.T) {
+	s := asOfStore(t)
+	ctx := context.Background()
+	future := s.AsOf("2099-01-01T00:00:00Z")
+
+	cur, err := s.SeriesSince(ctx, IndVIX, "2026-01-01", "2026-01-31")
+	require.NoError(t, err)
+	fut, err := future.SeriesSince(ctx, IndVIX, "2026-01-01", "2026-01-31")
+	require.NoError(t, err)
+	assert.Equal(t, cur, fut, "远未来 as-of 必须与不带 as-of 逐值相同")
+
+	curEval, err := s.EvalDates(ctx, "2026-01-01", "2026-01-31")
+	require.NoError(t, err)
+	futEval, err := future.EvalDates(ctx, "2026-01-01", "2026-01-31")
+	require.NoError(t, err)
+	assert.Equal(t, curEval, futEval)
+}
+
+// TestAsOfIncludesEndpoint：<= 而非 <。差这一位会让每个历史视图静默偏移一个修订。
+func TestAsOfIncludesEndpoint(t *testing.T) {
+	s := asOfStore(t)
+	got, err := s.AsOf("2026-08-14T00:00:00Z").Observation(context.Background(), IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 11.0, got.Value, "as-of 恰好等于某个 fetched_at 时，那个修订应当被看见")
+}
+
+// TestAsOfNanoPrecisionBoundary 钉住生产形态下的实际行为。
+//
+// 生产 fetched_at 形如 2026-07-14T05:42:08.150777000Z，而比较是**字符串字典序**：
+// '.'(0x2E) < 'Z'(0x5A)，所以 --as-of 2026-07-14T05:42:08Z 会**包含**同秒带小数
+// 的那行。方向无害，但整秒夹具把这点完全掩盖，必须显式钉住而不是留给人去推。
+func TestAsOfNanoPrecisionBoundary(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, o := range []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-13T00:00:00.000000000Z"},
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 11, Source: "fred", FetchedAt: "2026-07-14T05:42:08.150777000Z"},
+	} {
+		require.NoError(t, s.UpsertObservations(ctx, []Observation{o}))
+	}
+
+	got, err := s.AsOf("2026-07-14T05:42:08Z").Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 11.0, got.Value,
+		"'.'(0x2E) < 'Z'(0x5A) ⇒ 整秒 as-of 字典序上大于同秒带小数的 fetched_at，故包含它")
+}
+
+// TestAsOfAllReadersParameterOrder 覆盖 functional[2]：五个读方法各一例。
+//
+// 🔴 逐值断言而非「非空」：as-of 的 ? 在子查询里、位置先于外层 WHERE 的参数，
+// 弄反**不报错**——SeriesWindow 有 indicator/end/LIMIT 三个外层参数，插错位置
+// 可能返回**非空但错**的结果，只断非空等于没断。
+func TestAsOfAllReadersParameterOrder(t *testing.T) {
+	s := asOfStore(t)
+	ctx := context.Background()
+	past := s.AsOf("2026-07-20T00:00:00Z") // 08-14 那次修订尚未发生
+
+	obs, err := past.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, obs)
+	assert.Equal(t, 10.0, obs.Value)
+
+	latest, err := past.LatestObservation(ctx, IndVIX)
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	assert.Equal(t, "2026-01-03", latest.Date)
+	assert.Equal(t, 20.0, latest.Value)
+
+	win, err := past.SeriesWindow(ctx, IndVIX, "2026-01-03", 2)
+	require.NoError(t, err)
+	require.Len(t, win, 2)
+	assert.Equal(t, []float64{10, 20}, []float64{win[0].Value, win[1].Value})
+
+	// n=1 恰 1 行：证明 LIMIT 的参数没被前置的 as-of 挤走
+	win1, err := past.SeriesWindow(ctx, IndVIX, "2026-01-03", 1)
+	require.NoError(t, err)
+	require.Len(t, win1, 1, "LIMIT 参数插错位置时这里会返回别的行数")
+	assert.Equal(t, 20.0, win1[0].Value)
+
+	since, err := past.SeriesSince(ctx, IndVIX, "2026-01-02", "2026-01-03")
+	require.NoError(t, err)
+	require.Len(t, since, 2)
+	assert.Equal(t, []float64{10, 20}, []float64{since[0].Value, since[1].Value})
+
+	dates, err := past.EvalDates(ctx, "2026-01-01", "2026-01-31")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2026-01-02", "2026-01-03"}, dates)
+}
+
+// TestAsOfExcludesKeysWithNoRowsBefore 覆盖 C8。
+func TestAsOfExcludesKeysWithNoRowsBefore(t *testing.T) {
+	s := asOfStore(t)
+	// 全部 fetched_at 都在 07-14 之后 ⇒ 07-01 时点上这个键还不存在
+	got, err := s.AsOf("2026-07-01T00:00:00Z").Observation(context.Background(), IndVIX, "2026-01-02")
+	require.NoError(t, err, "空结果不是错误")
+	assert.Nil(t, got, "t 之前没有任何行的键要被排除，不是回退到最早那行")
+}
+
+// TestAsOfIsReadOnlyCopySharingDB 覆盖 boundary[1]（AD-8）。
+func TestAsOfIsReadOnlyCopySharingDB(t *testing.T) {
+	s := asOfStore(t)
+	ctx := context.Background()
+	past := s.AsOf("2026-07-20T00:00:00Z")
+
+	require.Same(t, s.db, past.db, "副本必须共用同一个 *sql.DB —— Close() 一次即可")
+
+	// 取过副本之后，原 Store 仍看当前值
+	now, err := s.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, now)
+	assert.Equal(t, 11.0, now.Value, "AsOf 不得改动原 Store")
+}
+
+// TestAsOfEmptyEqualsCurrent 覆盖 error_handling[0]：不留未定义语义。
+func TestAsOfEmptyEqualsCurrent(t *testing.T) {
+	s := asOfStore(t)
+	ctx := context.Background()
+
+	got, err := s.AsOf("").Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 11.0, got.Value, `AsOf("") 等价于当前形态`)
+}
+
+// TestUpsertOlderRevisionAfterNewerIsSwallowed 覆盖 boundary[2]。
+//
+// 🔴 这是「写路径的冲突检测必须裸读基表」的**行为层**守卫。源码守卫（豁免清单）
+// 只报「清单对不上」这个记账理由，读到的人未必明白为什么不能改；把检测改走
+// v_macro_current 时**只有它红、零行为测试红**（test-m4c-a 在 TASK-005 的变异 R3）。
+//
+// 机制：视图只有当前行。更新的修订存在时，视图里看不到更旧那行 ⇒ 冲突检测判
+// 「不存在」⇒ 直接 INSERT ⇒ UNIQUE constraint failed (1555)。
+//
+// ⚠️ 这是真实场景不是构造的：补跑历史（manual_backfill 路径）就是这个形状 ——
+// 先有当前值，再回填更早的抓取。
+func TestUpsertOlderRevisionAfterNewerIsSwallowed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	older := []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	}
+	newer := []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 11, Source: "fred", FetchedAt: "2026-08-14T00:00:00Z"},
+	}
+
+	require.NoError(t, s.UpsertObservations(ctx, older))
+	require.NoError(t, s.UpsertObservations(ctx, newer))
+
+	// 关键一步：更新的修订已在库里，此时重写**更旧**的那个修订
+	require.NoError(t, s.UpsertObservations(ctx, older),
+		"重写已存在的旧修订必须被静默吞掉；冲突检测若走视图会看不到它而撞主键")
+
+	assert.Equal(t, 2, baseRowCount(t, s, "2026-01-02", IndVIX), "不得插出第三行")
+	got, err := s.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	assert.Equal(t, 11.0, got.Value, "当前行仍是更新的那个修订")
 }
