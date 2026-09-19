@@ -316,6 +316,69 @@ cd "$ATLAS_RUNTIME"          # ⚠️ 必须在此目录：configs/*.yaml 的 st
   （「rc 必须为 0 且有实际输出」）恰恰无法区分「真通过」与「在空库上空转」——
   **它是它自己要防的那个失效的同形版本**。这一处由 code-simplifier 的受控实验查出并订正。
 
+### 🔴 仓库里的 `bin/atlas` 可能是陈旧构建，不含当前分支的代码
+
+`bin/atlas` 在 `.gitignore` 里，**它不随 `git checkout` 变化**。你切到一个新分支、甚至刚提交完新代码，那个文件仍然是上一次 `go build` 或 `deploy.sh` 留下的产物。
+
+⚠️ **它的危害形态不是「不告诉你」，是「把你推向相反的结论」。**
+
+2026-09-19 实撞一次：用 9/18 构建的 `bin/atlas` 复核一条「在源码目录误跑 `crisis replay` 会读到旧库、输出完全正常、不报错」的说法，拿到 `rc=0` + `no evaluations yet` —— 一个看起来毫无问题的输出，**于是那条说法被判成「成立」**。而真相相反：当前分支的二进制含 `verifyBitemporalShape` 守卫，同一条命令会 **`rc=1` 响亮拦住**并指路 `migrate-bitemporal`。
+
+⇒ 差别不是「少验了一项」，是**结论的方向反了**。如果没人去查二进制版本，那个假结果会作为证据进报告。
+
+**验二进制身份的自检命令**（正对照 + 负对照一起看）：
+
+```bash
+# 挑一个只存在于当前分支的符号，再挑一个任何版本都有的做正对照
+for s in verifyBitemporalShape migrate-bitemporal crisis; do
+  printf '%-26s %s\n' "$s" "$(strings "$ATLAS_RUNTIME/bin/atlas" | grep -c -- "$s")"
+done
+# 2026-09-19 实测三份二进制：
+#   含守卫的新构建        1 / 2 / 355（线上那个）、1 / 2 / 360（当日更晚的构建）
+#   9/18 的旧构建         0 / 0 / 318
+```
+
+⚠️ **正对照那一列不要拿具体数字当判据** —— 上面两个新构建的 `crisis` 计数就不同（355 vs 360），它随分支上的字符串增减而变。**判据是「守卫符号 ≥1 且正对照 ≫0」这个性质**，不是任何一个具体值。
+
+🔴 **正对照那一行不可省**：只看守卫符号命中 0，无法区分「二进制是旧的」与「`strings`/`grep` 根本没在工作」（路径写错、文件不可读、`grep` 模式打错都会给 0）。`crisis` 那个数非 0，才说明工具链在工作、那个 0 是真的 0。
+
+**要验当前分支的行为，就自己构建到别处，不要覆盖 `bin/atlas`**：
+
+```bash
+GOTOOLCHAIN=local go build -o /tmp/atlas-check ./cmd/atlas
+```
+
+（覆盖 `bin/atlas` 虽然不影响 `git status`，但它是线上正在用的那一个；而且覆盖前后它都"看起来正常"。）
+
+### 🔴 运维手册的 `sqlite3` CLI 与应用的驱动是**语义不同的两个引擎**
+
+手册里所有 `sqlite3 …` 命令跑的是系统 CLI；应用跑的是 `modernc.org/sqlite`。两者对
+`ALTER TABLE … RENAME` 之后的**视图定义**处置相反：
+
+| | `legacy_alter_table` | `RENAME` 之后视图定义 |
+| --- | --- | --- |
+| `/usr/bin/sqlite3` 3.51.0（手册 / 你手边） | **1** | **不改写**，仍指向旧名 |
+| `modernc.org/sqlite`（应用） | **0** | **被静默改写**成新名 |
+
+2026-09-19 实测（同一串 DDL：建表 `t` → 建视图 `v AS SELECT * FROM t` → `RENAME t TO t_v1`）：
+
+```
+CLI    ⇒ CREATE VIEW v AS SELECT * FROM t
+驱动   ⇒ CREATE VIEW v AS SELECT * FROM "t_v1"     ← 视图跟着改了
+```
+
+**这直接决定哪些结论能用 CLI 验**：
+
+| 要验的 | CLI 可信？ |
+| --- | --- |
+| 视图**存在性**（`COUNT(*) FROM sqlite_master WHERE type='view'`） | ✅ 两边一致 |
+| 表/行数、主键形状、约束是否触发 | ✅ 两边一致 |
+| 视图**指向哪张表**（定义文本里是原名还是新名） | 🔴 **两边结论相反，必须走 Go 驱动** |
+
+⚠️ 这条实撞过一次：复核 `migrate.go` 里「`RENAME` 会静默改写视图定义」那条注释时，先用 CLI 测，得到「视图未被改写」，**已经准备报该注释为假**；换成驱动重测，结论相反 ⇒ **注释是对的**，`migrate.go` 里那步 `DROP VIEW` 是**承重的**，不是防御性的。
+
+⇒ 通则：**跑出与既有注释/文档相反的结论时，先怀疑仪器，再怀疑对象。** 具体动作是换一个独立实现重测一次（CLI ↔ Go 驱动、线上二进制 ↔ 源码直跑）。
+
 ### ⚠️ `deploy.sh` 的 `--delete` 只保护排除表里的目录
 
 `--exclude` 列表（`/data/` `/logs/` `/queue/` 等）之外、**仓库里不存在**的 runtime 目录，

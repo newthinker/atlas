@@ -33,6 +33,14 @@
 #    ⇒ 这三项不足以证明二进制能运行；**部署后必须在 $ATLAS_RUNTIME 下实际跑一次**
 #    （`./bin/atlas crisis status --config configs/config.yaml --crisis-config configs/crisis-monitor.yaml`；
 #    必须 cd 进去，configs 里的 storage.path 是相对路径）。本脚本自身走 rsync，不受该问题影响。
+#    🔴 **判据是首行为 `system state: …`，不是 `rc=0`。** 两者区分不了这两种情况：
+#      守卫在**生产库**上通过          rc=0，首行 `system state: NORMAL (as of …, 44 eval days)`
+#      守卫在**它刚建出的空库**上空转  rc=0，首行 `no evaluations yet — …`
+#    成因：`crisis.NewStore` 对 storage.path 先 os.MkdirAll 再让 sqlite 建库，而
+#    verifyBitemporalShape 对全新空库**刻意放行**（表不存在 ⇒ return nil，否则谁都建不了新库）。
+#    ⇒ 忘了 cd 会当场新建一个空 data/crisis.db，rc=0、有输出、守卫「通过」，而验的是那个空库。
+#    `system state:` 这一行在空库上构造上不可能出现，所以它是唯一可用的判据。**判性质，不判退出码。**
+#    （2026-09-19 三场景实测，见 docs/deployment.md 的「部署后必须实际运行一次」小节。）
 #    ⚠️ 重启 `serve` **不验证** crisis 的双时态形状守卫：`crisis.NewStore`（含 verifyBitemporalShape）
 #    的唯一非测试调用点是 openCrisisStore，只服务 `atlas crisis *` 命令族，serve.go 无引用。
 #
