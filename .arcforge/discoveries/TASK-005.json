@@ -1,0 +1,79 @@
+{
+  "task_id": "TASK-005",
+  "title": "写改追加：裸 INSERT + 冲突按 value 分流",
+  "provenance": "代码全部由 dev-m4c-a 编写。单个 commit 850d6327a50089f5f7038645491d89c2702e0bf9，合入经 merge commit e4aa5034075c5d08f4e9ce0873e3b128d6a374e7。⚠️ 含一次**越界修改**：cmd/atlas/crisis_test.go（+6/-1），已在转 dev_done **之前**经写通道补进 writes 声明并向 Leader 申报，必要性用受控实验证明（见 verification.out_of_scope_justification）。",
+  "key_findings": [
+    "🔴 **写语义变更的影响面超出 DoD 预见的范围**：实现落地后 cmd/atlas 有 **5 个既有测试**变红，根因是 `seedReplayWatch`（cmd/atlas/crisis_test.go）用**同一个 fetched_at** 改写末 3 日 NFCI 值——那正是 C6 要拦的「同一次取回给出两个值」。错误文案：`crisis: nfci/2026-07-08 already has a different value for fetched_at 2026-07-11T... (have -0.5, got 0.2)`。DoD non_functional[0] 要求 ./cmd/atlas 全绿而又明令不许放宽写路径 ⇒ 只能改夹具，故越界。",
+    "✅ **生产路径不受新语义影响**（这条 DoD 没提，但若答案相反守卫会让生产天天报错）：ingest.go:60 的 `stamp := NowStamp(ig.now())` 与 cmd/atlas/crisis.go:182 的 `NowStamp(time.Now())` 都是**每次运行生成当前时刻**，所以采集重跑产生新 fetched_at ⇒ 追加新修订，不会被判成同三段异值。全仓库 UpsertObservations 调用点共 8 处（2 处生产、6 处测试），逐一看过。",
+    "🔴 **写冲突检测必须查基表，视图做不到**（实测，非推断）：同键有两个修订时，`SELECT ... FROM macro_observations WHERE ts=? AND indicator=? AND fetched_at=?` 查旧修订得 **1 行**，同样条件查 v_macro_current 得 **0 行**；据视图判「不存在」而插入直接得 `UNIQUE constraint failed: macro_observations.ts, macro_observations.indicator, macro_observations.fetched_at (1555)`。视图按定义只有当前行，而冲突检测要回答的是「这个确切的三段键是否已存在」。",
+    "sqlite 的 `IS NOT` 天然把两边 NULL 判成相同（实测 `SELECT NULL IS NOT NULL` = false、`SELECT 1.0 IS NOT NULL` = true），但本实现没有用它——value 比对放在 Go 侧（sameObservationValue），因为还要区分「一边 NULL 一边有值」并生成带 indicator/ts 的错误文案。记此条是因为下游若要在 SQL 里做同样的比对，`IS NOT` 是正确算子而 `!=` 不是。",
+    "⚠️ **我自己撞上了 TASK-004 的裸表守卫**——新增的冲突检测裸读被它当场抓住。这反过来证明那道闸有牙（不是只在源码里摆着）。处置是把豁免清单从「整文件前缀匹配」升级为 **(文件, SQL 片段) 逐处匹配**：同一文件里新增一处**不同**的裸读会因匹配不上而红，新增一处**相同**的会因总数超标而红。",
+    "⚠️ **X1 变异（改回 INSERT OR REPLACE）只被源码钉死那条断言抓住，行为测试没红**——因为只改 INSERT 语句时**冲突检测逻辑还在**，行为不变。它证明的是「源码钉死」断言有效，**不是**行为有守卫。真正的行为变异是 X2（异值分支改为静默吞掉）。报变异结果时这个区分不能省。"
+  ],
+  "decisions": [
+    {
+      "decision": "三分法用「先查后插」而非 INSERT OR IGNORE + 事后比对",
+      "rationale": "OR IGNORE 把「三段全同且 value 相同」与「三段全同而 value 不同」揉成一种（都静默跳过），而后者是数据源或采集器出了问题、必须响亮失败。用 OR IGNORE 再事后比对也不行：RowsAffected=0 只说明冲突了，仍要回查才知道 value 是否相同，省不掉那次查询却多了一条容易读错的语句。"
+    },
+    {
+      "decision": "value 比对放在 Go 侧（sameObservationValue），不放 SQL",
+      "rationale": "SQL 里 NULL != NULL，两行都没有值会被判成异值、一次无害的重跑变成报错。sqlite 的 `IS NOT` 能正确处理，但比对结果还要用来生成带 indicator/ts/新旧值的错误文案，放 Go 侧更直接；且 Observation.Value 是 float64、经公开 API 写不出 NULL，「两边都 NULL」这条语义**只能**由单测直接调函数覆盖，函数必须独立可测。"
+    },
+    {
+      "decision": "一边 NULL 一边有值判**异值**",
+      "rationale": "0 不是「没有值」。把它们混为一谈会让一个真实的数据缺口悄悄变成 0，而这正是双时态要防的那类静默损坏。"
+    },
+    {
+      "decision": "越界改 cmd/atlas/crisis_test.go 的 seedReplayWatch，而不是放宽写路径",
+      "rationale": "DoD non_functional[0] 明令「严禁改回 OR REPLACE/OR IGNORE 或在写路径加容忍来让它变绿」。夹具改写的本来就是同一 (ts, indicator) 的已有值 —— 在新语义下那是一次**修订**，必须带新的 fetched_at。给它一个更晚的时间戳是语义正确的修法，不是绕过。改动 +6/-1，其中 5 行是说明为什么的注释，实质只有一个时间戳字面量。"
+    },
+    {
+      "decision": "豁免清单升级为 (文件, SQL 片段) 逐处匹配",
+      "rationale": "原实现是 `strings.HasPrefix(hit, \"migrate.go:\")`，即整文件放行。加入 store.go 的写路径裸读后若沿用该形式，等于把 store.go 整个文件对守卫开了口子 —— 而 store.go 正是读路径所在、最需要被守的文件。逐处匹配保留了「新增裸读必须显式登记」这个性质。"
+    },
+    {
+      "decision": "空切片直接 return nil，连事务都不开",
+      "rationale": "DoD error_handling[0] 要求行为被测试钉住。不开事务比「开了立即提交」省一次往返，且语义更直白：没有要写的东西。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/store.go (+72/-11: UpsertObservations 改为裸 INSERT + 冲突三分法；新增 sameObservationValue 与 derefValue)",
+    "internal/crisis/store_test.go (+199/-11: 改写既有 upsert 契约；新增 8 个测试；豁免清单升级为逐处匹配)",
+    "cmd/atlas/crisis_test.go (+6/-1: **越界**，seedReplayWatch 的 fetched_at 改为更晚的时间戳，含 5 行说明注释)"
+  ],
+  "interfaces_exposed": [
+    "func (s *Store) UpsertObservations(ctx, obs []Observation) error —— 语义已变：**追加而非覆盖**。三段全同同值吞掉、三段全同异值整批回滚并报错、新 fetched_at 追加。⚠️ 调用方若原本依赖「重写即覆盖」，现在会拿到 error。",
+    "func sameObservationValue(a, b *float64) bool —— 包内未导出。两边 nil 判相同；一边 nil 判异值；否则 ==。下游若要在别处比对 value，**复用它**，别再写一份（两份判据改一处不会让另一处变红，同 AD-3）。",
+    "func derefValue(v *float64) any —— 包内未导出，把可空 value 渲染成错误文案里能读的东西（nil → \"NULL\"）。",
+    "TestNoBareTableReadsOutsideMigration 的 allowedBare 清单现为 3 条 {file, sqlFragment, why}：migrate.go 两处 COUNT(*)、store.go 一处冲突检测。**新增任何裸表读取都必须同时登记进这个清单**，否则测试红。",
+    "⚠️ 给 TASK-006 的提醒：本任务没有把 obsSelect 改成 obsFrom() 方法（那是 TASK-006 的范围）。另外 store.go 现在有一处**写路径**裸读，TASK-006 若要动 obsSelect 的形态，注意别把它一起改走视图。"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ e4aa5034075c5d08f4e9ce0873e3b128d6a374e7 (master)",
+    "commit": "850d6327a50089f5f7038645491d89c2702e0bf9，合入经 e4aa503",
+    "baseline": "46c401cf15df8c9922c5023c823d8182d2b3707e",
+    "note": "以下数字全部在最后一次改动之后、于 master 树 e4aa503 上统一重采。合入用内容判据核实：master 树上三个文件与 850d632 逐字节 sha256 一致。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis ./cmd/atlas rc=0",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0 (65 个 ok 行, 0 FAIL)",
+    "counts": "internal/crisis -v: 顶层 RUN 132 == PASS 132, FAIL 0, 子测试 33（两把独立的尺互验）。TASK-004 交付时 124，本任务 +8。",
+    "coverage": "internal/crisis 93.7%（dev_minimum 80）；cmd/atlas 78.2%（与 TASK-002 时同值，未因本任务下降）",
+    "numstat": "850d632: store.go 72/11、store_test.go 199/11、crisis_test.go 6/1 —— 取自提交本身",
+    "bare_read_audit": "守卫口径实测（master 树，排除注释行）：裸读恰 3 处 —— migrate.go:108、migrate.go:136、store.go:139，与 allowedBare 清单一一对应。",
+    "red_evidence": "RED 是 **6 红 3 绿**（先放 sameObservationValue 的 `return false` 桩，实现仍是 OR REPLACE）。⚠️ 那 3 条绿的理由是**性质**，不是断言弱：TestUpsertAppendsNewRevision（新 fetched_at 在三段主键下本就不冲突，OR REPLACE 也会追加）、TestUpsertSameTripleSameValueIsNoop（OR REPLACE 覆盖后结果相同、行数也相同）、TestUpsertEmptySliceIsNoop（本就 no-op）。它们是**回归护栏**：前两条在新实现下仍有意义（若实现成「直接 INSERT 不做冲突检测」，第二条会因主键冲突而红）。同 TASK-003/004 的区分口径。原始输出: scratchpad/dev-m4c-a-TASK-005-red.txt",
+    "mutation_evidence": "变异自证 4/4 杀死（原地变异+还原，每次还原后跑对照组确认绿，收尾 git status 核实只有声明的 3 个文件为 M）：X1 改回 INSERT OR REPLACE -> **仅** TestWritePathHasNoReplaceOrIgnore 红；X2 异值分支改为静默吞掉（等价 OR IGNORE）-> TestStoreUpsertIdempotentAndWindows + TestUpsertSameTripleDifferentValueFails + TestUpsertRollsBackWholeBatch + TestUpsertNullVersusNonNullConflicts 四条同时红；X3 sameObservationValue 把两边 NULL 判成异值 -> TestSameObservationValueNullSemantics 红；X4 去掉整批回滚（冲突前的行提交掉）-> TestUpsertRollsBackWholeBatch 红。⚠️ X1 的行为测试没红，理由见 key_findings 第 6 条 —— 它只验证了源码钉死那条断言。",
+    "out_of_scope_justification": "🔴 越界必要性用**受控实验**证明，不停在声称上：在临时 worktree 里 merge 本分支后，单独 `git checkout master -- cmd/atlas/crisis_test.go`（实现改动全在、唯独夹具退回原样），跑 `go test ./cmd/atlas` 得 **5 个 FAIL**。⇒ 这 5 个失败确实由新写语义引起且只能靠改夹具解决（充分性另由「只改这一处即全绿」证明）。merge 预演同时确认无冲突，将引入的三个文件与申报范围一致。临时 worktree 已 remove --force + prune。",
+    "preexisting_gofmt": "⚠️ `gofmt -l cmd/atlas/crisis_test.go` 有输出，但**不是本任务引入**：用 git stash 比对确认 master 上就未格式化（:1047 一处注释对齐差一个空格，与我改的 :588 无关）。按「只碰该碰的」未动。同理 internal/crisis 另有 4 个既存未格式化测试文件（eval_test / replay_html_test / replay_report_test / rules_test），Leader 已记进 plan 的范围外待办。",
+    "dod_mapping": [
+      "functional[0] 追加而非覆盖：先写 10@07-14 再写 11@08-14 ⇒ 裸表 2 行、Observation 看到 11 -> TestUpsertAppendsNewRevision -> PASS",
+      "functional[1] 同三段同值幂等：写两次不报错、裸表仍 1 行 -> TestUpsertSameTripleSameValueIsNoop -> PASS",
+      "functional[2] 同三段异值响亮失败，文案含 indicator 与 ts，整批回滚、裸表仍 1 行 -> TestUpsertSameTripleDifferentValueFails -> PASS（X2 变异证明有效）",
+      "functional[3] 源码钉死：store.go 不得出现 INSERT OR REPLACE / OR IGNORE INTO macro_observations -> TestWritePathHasNoReplaceOrIgnore -> PASS（X1 变异证明有效）",
+      "boundary[0](a) 裸 INSERT 造 NULL 前置行，API 写同三段非 NULL ⇒ 报错 -> TestUpsertNullVersusNonNullConflicts -> PASS",
+      "boundary[0](b) 两边都 NULL 判相同，由单测直接调比对函数 -> TestSameObservationValueNullSemantics -> PASS（X3 变异证明有效）",
+      "boundary[1] 批量中途冲突 ⇒ 整批回滚，批内前面已成功的行也不落盘 -> TestUpsertRollsBackWholeBatch -> PASS（X4 变异证明有效）",
+      "error_handling[0] 空切片是 no-op，不开事务也不报错 -> TestUpsertEmptySliceIsNoop -> PASS",
+      "non_functional[0] 既有测试契约改写而非放宽写路径：TestStoreUpsertIdempotentAndWindows 改为「同三段异值期望 error + 整批回滚后旧值不变」，store_test.go 文件头 boundary[0] 契约注释同步更新为「同三段同值吞掉、异值报错（TASK-005/C6 契约变更）」；go build ./... 通过、./internal/crisis ./cmd/atlas 全绿 -> PASS"
+    ]
+  }
+}

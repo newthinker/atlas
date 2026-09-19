@@ -1,0 +1,85 @@
+{
+  "task_id": "TASK-002",
+  "title": "迁移命令 MigrateBitemporal + atlas crisis migrate-bitemporal",
+  "key_findings": [
+    "🔴 ALTER TABLE RENAME 会**静默改写视图定义**（实测，非推断）：把 macro_observations 改名为 macro_observations_v1 后，v_macro_current 的 SQL 被 sqlite 自动改成 SELECT * FROM \"macro_observations_v1\" o WHERE ... —— 视图从此指向旧表。危险不在它报错，而在它**不报错**：无重复修订时 ViewRows 仍等于 RowsAfter，functional[0] 的三数相等照样通过，而视图再也看不到新写入的数据。⇒ 迁移必须先 DROP VIEW。这对老库是真实场景：TASK-001 之后 NewStore 每次打开老库都会执行 schemaDDL()，所以老库很可能已经有这个视图。",
+    "🔴 索引名在 sqlite 里是**全局唯一**的（实测）：RENAME 后 idx_macro_obs_ind_ts 的 tbl_name 变成 macro_observations_v1，此时 schemaDDL() 里的 CREATE INDEX IF NOT EXISTS idx_macro_obs_ind_ts ON macro_observations(...) 会因**同名索引已存在**而静默跳过，新表永远没有索引。这就是设计 C2 那句「漏了不报错只变慢」的确切机制，我复现了它。⇒ 迁移必须先 DROP INDEX。",
+    "sqlite 的 DDL 是事务性的，含 ALTER TABLE RENAME（实测：事务内 RENAME 后 rollback，sqlite_master 完整还原）。所以「中途失败不留半迁移的库」不需要额外补偿逻辑，一个事务足够。",
+    "sql.Open(\"sqlite\", \"file:\"+path) **默认会建库**，所以『--db 指向不存在的文件』必须显式 os.Stat 拦下 —— 不写这一步它恒不失败，而『迁移了一个空库并报成功』是最糟的结果（DoD error_handling[0] 已点名，此处确认属实）。",
+    "⚠️ cmd/atlas 的覆盖率基线与 coverage_floor 之间**余量为零**：背对背对照（同一时刻，pre = 移走本任务两个新文件即 master 态）得 pre 78.0% / post 78.2%，而 coverage_floor=78。本任务是抬高的，但后续任何在 cmd/atlas 加代码而测试跟不上的任务都会当场破线，且破线时看起来像是那个任务的锅——实际是基线本来就没有余量。已上报 Leader。",
+    "⚠️ 本任务 packages 只声明 ./internal/crisis，而 writes 含两个 ./cmd/atlas 文件 ⇒ dev_done 门禁的 -coverpkg 只量 internal/crisis（93.7%），**不会量 cmd/atlas**。cmd/atlas 的 78.2% 是我自己跑的，不受门禁保护。漂移检查用 writes 优先，所以 scope 不误报。已上报 Leader，由他决定要不要把 ./cmd/atlas 加进 packages。"
+  ],
+  "decisions": [
+    {
+      "decision": "走 rename-first，不建 _new 表（偏离 DoD functional[0] 的字面措辞，已落盘 questions[] 并上报 Leader）",
+      "rationale": "DoD functional[0] 的三条约束在本任务的 writes 范围内不可同时满足：①建 _new ②_new 的 DDL 必须复用 TASK-001 的常量/生成函数 ③不得在 migrate.go 里另写建表 SQL。原因是 schema.go 不在 TASK-002 的 writes 里，我无法给它加参数化的 DDL 生成函数；而 tablesDDL/schemaDDL() 把表名 macro_observations 硬编码在内，要造出 macro_observations_new 只能 strings.Replace 掉表名再剥掉 crisis_evaluations 与索引那几段——那本身就是表形状的一个脆弱副本，恰恰是②③想防的东西。改为 DROP VIEW -> DROP INDEX -> RENAME 老表为 _v1 -> schemaDDL()（原样调用，零副本）-> INSERT SELECT，全程一个事务。DoD 的可测断言两种方案都满足；boundary[0] 要求的『无 _new 残留』在 rename-first 下恒真（压根不存在 _new）。"
+    },
+    {
+      "decision": "『表形状只有一个副本』用源码扫描断言（TestMigrateReusesSchemaDDL），而非靠 code review",
+      "rationale": "断言 migrate.go 里不出现 CREATE TABLE、且出现 schemaDDL()。运行时看不出『这条 SQL 是从哪来的』，这本来就是一条源码层的性质。有了它，后人往 migrate.go 里贴一份建表 SQL 会当场变红，不依赖谁记得这条约定。"
+    },
+    {
+      "decision": "『老形状主表 + 已存在 _v1』时响亮失败，不删 _v1（这是测试暴露出来的语义，我据实修正了断言而不是修实现）",
+      "rationale": "我原本的 TestMigrateShapeProbeIgnoresLegacyTable 构造了这种库（半个回滚留下的异常状态）并断言迁移成功，跑出来是 RENAME 撞名失败。判断是断言错了：唯一能让迁移继续的做法是 DROP TABLE macro_observations_v1，而它可能是上一次迁移留下的**唯一**一份迁移前数据——C3 的回滚依据与逐值对照都靠它。删掉它换一次『成功』是拿不可逆的代价换顺畅。改为：仍不得因看见 _v1 就报 AlreadyMigrated=true（DoD boundary[1] 的判据要求，保留），但要响亮失败、文案点名挡路的表、失败后库原样。"
+    },
+    {
+      "decision": "探形状的判据是『主键里有没有 fetched_at』，不是『有没有 _v1 表』",
+      "rationale": "DoD boundary[1] 点名了这条。按 _v1 存在与否判会在回滚后误判成『已迁移』而拒绝干活——那正是最需要迁移的时候。实现读 sqlite_master 的 DDL 文本、折叠空白后找 'PRIMARY KEY (ts, indicator, fetched_at)'。"
+    },
+    {
+      "decision": "迁移步骤写成带 what 标签的步骤表，而非一串裸 tx.Exec",
+      "rationale": "每步失败的文案要能指出是哪一步炸的。运维现场看到 'crisis: migrate: renaming legacy table: ...' 比一个裸 sqlite 错误有用得多。"
+    },
+    {
+      "decision": "MigrateBitemporal 直接开库，不经 NewStore（AD-5）",
+      "rationale": "TASK-003 的守卫会拒绝老形状的库，而迁移恰恰要在那种库上跑，经 NewStore 就成了鸡生蛋。⚠️ 此刻守卫还不存在，所以走 NewStore 的话测试也会全绿——这个缺陷要到 TASK-003 落地后才会暴露。TASK-003 会加一条断言钉它（老库上 NewStore 报错而 MigrateBitemporal 仍成功）。"
+    },
+    {
+      "decision": "删掉 executeCrisisMigrate 里的 ctx == nil 兜底",
+      "rationale": "code-simplifier 提出，我去读源码核实后接受：cobra v1.10.2 的 ExecuteC 在 command.go:1085-1086 保证 root 的 ctx 非 nil，1145 行 `if cmd.ctx == nil { cmd.ctx = c.ctx }` 把它传给被选中的子命令 ⇒ cmd.Context() 在真实执行路径上永不为 nil。那确实是为不可能的场景加的错误处理。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/migrate.go (新建, +148)",
+    "internal/crisis/migrate_test.go (新建, +307)",
+    "cmd/atlas/crisis_migrate.go (新建, +66)",
+    "cmd/atlas/crisis_migrate_test.go (新建, +121)"
+  ],
+  "interfaces_exposed": [
+    "func MigrateBitemporal(ctx context.Context, dbPath string) (MigrateResult, error) —— 把 macro_observations 迁到三段主键，幂等。直接开库不经 NewStore（AD-5）。dbPath 为空或文件不存在都返回错误且不建库。",
+    "type MigrateResult{AlreadyMigrated bool; RowsBefore, RowsAfter, ViewRows int} —— 一次迁移的取证；三者相等才算好。",
+    "const legacyTableName = \"macro_observations_v1\" —— 迁移后旧表的名字。TASK-003 的守卫若要判断『迁过没有』，注意**不要**用这张表是否存在作判据（见 decisions 第 4 条），它在回滚后会误判。",
+    "func isBitemporal(ctx, db) (bool, error) —— 包内未导出，探 macro_observations 是否已是三段主键。TASK-003 的守卫需要同样的探形状逻辑时**请复用它，不要再写一份**（同 AD-3 的风险源：两份判据，改一处不会让另一处变红）。",
+    "cmd: atlas crisis migrate-bitemporal --db <path> —— 打印 RowsBefore / RowsAfter / ViewRows；三者不等时额外打一行 ⚠ 提示。已迁移的库打印 'already migrated, nothing to do'。",
+    "cmd 包级变量 migrateDBPath 与 crisisMigrateCmd —— 注意 cmd/atlas/crisis_test.go 的 snapshotCrisisFlags **不包含** migrateDBPath（那个函数不在本任务范围内，未动）；本任务在自己的测试文件里提供了 snapshotMigrateFlag。后续任务若扩展 flag 快照，两者需要合并。"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ d347c9adece0b657f972a63b21c08929905ae59a (master)",
+    "commit": "e93c950eb38d012eff898ef754cbbf820771742a (feat(TASK-002): ...), 合入 master 经 d347c9a (merge(TASK-002): ...)",
+    "baseline": "39d6565fb82c476aa4d6a5c8e05d38d9f26de03f",
+    "note": "以下数字全部在最后一次改动之后、于 master 树 d347c9a 上统一重采；worktree 上的早期采样一律作废。合入用内容判据核实：master 树上四个文件与 e93c950 逐字节 sha256 一致，不是只看 merge-base 拓扑（拓扑报非 0 时『真未合入』与『同内容换了 sha』输出相同）。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis ./cmd/atlas rc=0 (两个包均 ok)",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0 (65 个 ok 行, 0 FAIL)",
+    "new_tests": "本任务 14 条测试全部 PASS：TestMigrateConvertsLegacyShape / TestMigrateReusesSchemaDDL / TestMigrateIsIdempotent / TestMigrateKeepsLegacyTable / TestMigrateRebuildsIndex / TestMigrateRejectsNullFetchedAtAtomically / TestMigrateEmptyDB / TestMigrateAlreadyMigrated / TestMigrateShapeProbeIgnoresLegacyTable / TestMigrateMissingDBFile / TestExecuteCrisisMigratePrintsCounts / TestExecuteCrisisMigrateAlreadyMigrated / TestExecuteCrisisMigrateRequiresExistingDB / TestCrisisMigrateCmdWiring",
+    "counts": "internal/crisis -v: 顶层 RUN 112 == 顶层 PASS 112, 顶层 FAIL 0, 子测试 PASS 33（两把独立的尺互验；TASK-001 交付时该包顶层为 102，本任务 +10 条）",
+    "coverage": "internal/crisis 93.7%（-coverpkg=./internal/crisis，dev_minimum 80）；cmd/atlas 78.2%（coverage_floor 78）",
+    "coverage_backtoback": "cmd/atlas 背对背对照（**同一时刻**，pre = 移走本任务两个新文件、post = 放回，两组同环境同负载）：pre 78.0% / post 78.2%。两次独立执行结果一致。⇒ 本任务抬高了 0.2 个百分点，未拉低；同时说明 master 基线正好卡在 floor 上，余量为零。",
+    "vet_gofmt": "go vet ./internal/crisis ./cmd/atlas 通过；gofmt -l 对本任务四个文件为空。注：gofmt -l ./internal/crisis 另列出 4 个既存未格式化的测试文件（eval_test / replay_html_test / replay_report_test / rules_test），非本任务所改，未动（Leader 已记进 plan 的范围外待办）。",
+    "numstat": "git show --numstat e93c950: crisis_migrate.go 66/0, crisis_migrate_test.go 121/0, migrate.go 148/0, migrate_test.go 307/0 —— 取自提交本身，与交付物同源",
+    "scope": "git status 只有声明的四个文件，全部新建，无越界写入；writes/packages 无需修改。既有测试零改动。",
+    "red_evidence": "RED 是 **14/14 全红**，不是靠编译错误：先放『什么都不做』的桩（MigrateBitemporal 返回零值、executeCrisisMigrate 返回 nil）再跑。过程中发现三条测试在空桩下也绿，逐条补强后才达到全红 —— (a) TestMigrateRebuildsIndex 绿，因为老库的索引本来就叫 idx_macro_obs_ind_ts 且挂在 macro_observations 上，空桩什么都不做时断言自然成立（它对真实的 C2 缺陷有效，但对『压根没迁移』无感）；(b) TestMigrateEmptyDB 绿，因为空桩返回的三个 0 恰好满足断言；(c) TestMigrateShapeProbeIgnoresLegacyTable 绿，因为空桩返回 AlreadyMigrated=false。三条各补了一条『确认真的换了形状』的同源断言。原始输出: scratchpad/dev-m4c-a-TASK-002-red.txt",
+    "probe_evidence": "两条静默失败机制是跑探针实测的，不是从文档推断：探针建老形状库 + 视图，执行 RENAME 后 dump sqlite_master，直接观察到视图 SQL 被改写、索引 tbl_name 变为 _v1、以及事务回滚后 sqlite_master 完整还原。探针文件跑完即删，未进提交（git status 核实工作树 0 处改动）。",
+    "dod_mapping": [
+      "functional[0] 老形状 3 行迁移：三计数=3、新表三段主键+fetched_at NOT NULL、双向 EXCEPT 各 0 行 -> TestMigrateConvertsLegacyShape -> PASS",
+      "functional[0] _new 的 DDL 必须复用 TASK-001 的常量/生成函数、不另写建表 SQL -> TestMigrateReusesSchemaDDL（源码扫描）-> PASS（实现走 rename-first，零副本，见 decisions 第 1 条）",
+      "functional[1] 幂等：第二次 AlreadyMigrated=true 且行数与 sqlite_master 表/索引/视图数量均不变 -> TestMigrateIsIdempotent -> PASS",
+      "functional[2] 旧表保留为 macro_observations_v1 且行数一致 -> TestMigrateKeepsLegacyTable -> PASS",
+      "functional[3] C2 索引重建：idx_macro_obs_ind_ts 的 tbl_name 是 macro_observations -> TestMigrateRebuildsIndex -> PASS",
+      "boundary[0] NULL fetched_at ⇒ 报错，且失败后仍老形状、无 _v1、无 _new 残留 -> TestMigrateRejectsNullFetchedAtAtomically -> PASS",
+      "boundary[1] 空库三计数均 0 -> TestMigrateEmptyDB -> PASS；已是新形状直接 AlreadyMigrated=true -> TestMigrateAlreadyMigrated -> PASS；探形状看主键不看 _v1 -> TestMigrateShapeProbeIgnoresLegacyTable -> PASS（含 _v1 占名时响亮失败的语义修正，见 decisions 第 3 条）",
+      "error_handling[0] --db 指向不存在的文件 ⇒ 报错、文案含路径、不创建库 -> TestMigrateMissingDBFile + TestExecuteCrisisMigrateRequiresExistingDB -> PASS；缺 --db 报错且不开库 -> TestExecuteCrisisMigrateRequiresExistingDB + TestCrisisMigrateCmdWiring -> PASS",
+      "non_functional[0] go build ./... + go test -count=1 ./internal/crisis ./cmd/atlas 全绿，cmd/atlas 新增文件自带 cmd 级测试不拉低覆盖率 -> 见 build / suite / coverage_backtoback -> PASS"
+    ]
+  }
+}

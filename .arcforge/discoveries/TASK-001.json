@@ -1,0 +1,79 @@
+{
+  "task_id": "TASK-001",
+  "title": "Spec 装配与 v_macro_current 视图 DDL",
+  "key_findings": [
+    "旧 schema 的 macro_observations 是两段主键 (ts, indicator) 且 fetched_at 可空 —— RED 阶段由 sqlite_master 原文实证，不是从源码推断：\"CREATE TABLE macro_observations ( ts TEXT NOT NULL, indicator TEXT NOT NULL, value REAL, source TEXT, fetched_at TEXT, PRIMARY KEY (ts, indicator) )\"。",
+    "三段主键落地后，同一 (ts, indicator) 插入第二个修订不再报 UNIQUE constraint failed —— RED 阶段该插入被旧约束拒绝（errno 1555），是本任务最直接的行为分界点。",
+    "bitemporal.CurrentQuery(obsSpec) 实际生成的视图（从 sqlite_master 读出，非复述代码）：CREATE VIEW v_macro_current AS SELECT * FROM macro_observations o WHERE o.fetched_at = (SELECT MAX(fetched_at) FROM macro_observations WHERE ts = o.ts AND indicator = o.indicator)。",
+    "既有 crisis 测试零改动即全绿：现有测试的 fetched_at 在同一 (ts, indicator) 下都相同，三段主键下 INSERT OR REPLACE 仍然覆盖同一行，所以幂等语义对它们不变。",
+    "⚠️ 读路径尚未走视图：Observation / LatestObservation / SeriesWindow / SeriesSince / EvalDates 仍直查 macro_observations。三段主键后同一 (ts, indicator) 可有多行，Observation 的 QueryRow 会取到不确定的一行、窗口类查询会混入同日多个修订。现有测试没红只是因为它们的 fetched_at 全相同（单一修订），这是覆盖盲区不是正确性证据。本任务只声明三个文件，未改；已上报 Leader 请求补进下游任务的 done_criteria。",
+    "⚠️ CREATE TABLE IF NOT EXISTS 对已存在的表什么都不做 ⇒ 三段主键与 fetched_at NOT NULL 只对新建的库生效，老库形状不变；靠 TASK-002 迁移改形、TASK-003 守卫拦住未迁移就启动。"
+  ],
+  "decisions": [
+    {
+      "decision": "obsSpec 用包级 var + mustSpec() panic，而非返回 (Spec, error) 让调用方处理",
+      "rationale": "三个标识符都是源码字面量，过不了 identRE 只可能是改错了字 —— 那是编程错误。不吞成零值 Spec：bitemporal.CurrentQuery 对零值 Spec 会生成表名为空的 SQL，报的是一个离成因很远的语法错误。panic 文案带包名与原始错误（crisis: obsSpec: %v），在包初始化时就炸开。"
+    },
+    {
+      "decision": "schemaDDL() 返回 string 而不返回 error",
+      "rationale": "唯一的错误源是 NewSpec，已在 mustSpec 里 panic 掉。返回 error 会给每个调用点加一段走不到的错误处理。"
+    },
+    {
+      "decision": "DDL 拆成 tablesDDL 常量 + schemaDDL() 函数，而非整个 DDL 都用函数拼",
+      "rationale": "只有视图那一段需要从 Spec 生成；建表与建索引是纯字面量，留在常量里可读性更好，也让 diff 只体现真正变了的部分。"
+    },
+    {
+      "decision": "functional[3]（NewSpec 只装配一次）用源码扫描断言，按文件名分组计数",
+      "rationale": "Spec 的字段未导出，运行时看不出『有几份』——『只装配一次』本来就是一条源码层的性质。分组而非只给总数：断言失败时能直接指出多出来的那一份在哪个文件，而不是只知道『不止一个』。"
+    },
+    {
+      "decision": "删掉计划草稿里的 require.NotPanics(t, func() { _ = obsSpec })",
+      "rationale": "obsSpec 是包级变量，mustSpec 真 panic 会在 init 阶段崩，测试体内任何断言都执行不到 —— 那是条恒真断言，留着会让人误以为 panic 路径有测试覆盖。functional[3] 的实质（源码扫描）原样保留；panic 路径由 error_handling[0] 的 verify_by: review 覆盖，已在测试注释里写明这条分工。"
+    },
+    {
+      "decision": "DDL 断言先折叠空白再 Contains，而不是逐字匹配计划草稿里的 'fetched_at TEXT NOT NULL'",
+      "rationale": "sqlite_master 存的是 DDL 原文，含源码里的缩进与列对齐空格（实际是 'fetched_at  TEXT NOT NULL'，两个空格）。逐字匹配会把断言钉在源码的对齐方式上 —— 以后有人调一下列宽就变红，而那与被断言的性质（列的形状）无关。"
+    },
+    {
+      "decision": "同步更正 store.go 的 UpsertObservations 注释",
+      "rationale": "旧注释写『(ts, indicator) 主键让重写覆盖，所以回填与重复唤起天然幂等』。三段主键后这句话成了假话：只有同一 revision 的重写才覆盖，新的 fetched_at 是新增修订行。这是我这次改动造成的 orphan，属于『清理自己的烂摊子』，不是顺手改邻近代码。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/schema.go (新建, +73)",
+    "internal/crisis/schema_test.go (新建, +157)",
+    "internal/crisis/store.go (+6/-27: 删 schema 常量、db.Exec(schema) -> db.Exec(schemaDDL())、更正 UpsertObservations 注释)"
+  ],
+  "interfaces_exposed": [
+    "var obsSpec bitemporal.Spec —— macro_observations 的双时态 Spec，包级唯一实例。下游 TASK-002~007 一律复用它，不要再 NewSpec；schema_test.go 的 TestObsSpecIsSingleInstance 会扫源码，在别处再造一个会直接变红。",
+    "func schemaDDL() string —— 建表 + 建索引 + 建视图的全部 DDL，NewStore 在每次打开库时执行，幂等。",
+    "const tablesDDL string —— 仅建表与建索引（不含视图）。迁移类任务若需要『只建表不建视图』可用它。",
+    "func mustSpec() bitemporal.Spec —— obsSpec 的装配点，仅供包内初始化使用。",
+    "视图 v_macro_current —— 每个 (ts, indicator) 取 fetched_at 最大的那行。读路径改走视图是下游任务的事，本任务只建视图。"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ 39d6565fb82c476aa4d6a5c8e05d38d9f26de03f (master)",
+    "commit": "96a85c3e8328837b31f30fb5b8e0d3a3898d95f3 (feat(TASK-001): ...), 合入 master 经 39d6565 (merge(TASK-001): ...)",
+    "baseline": "2917c67e75476fa9616dfd4a71e7ab13b8e20e1d",
+    "note": "以下数字全部在最后一次改动之后、于 master 树 39d6565 上统一重采；worktree 上的早期采样一律作废。合入用内容判据核实过：master 树上三个文件与 96a85c3 逐字节 sha256 一致（不是靠挑特征串，也不是只看 merge-base 拓扑）。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis ./cmd/atlas rc=0 (两个包均 ok)",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0 (65 个 ok 行, 0 FAIL) —— 采于 96a85c3 worktree 树，其三个文件内容与 master 树逐字节一致",
+    "counts": "internal/crisis -v: 顶层 102 PASS / 0 FAIL / 102 RUN, 子测试 33 PASS。两把独立的尺互验：顶层 RUN == 顶层 PASS == 去重顶层函数名数 == 102；102+33=135。（先前用 '^=== RUN   Test' 数出的 135 是错的——该模式同样匹配 TestX/sub 子测试行，量的不是顶层数。）",
+    "coverage": "go test -cover -coverpkg=./internal/crisis ./internal/crisis => 94.5% of statements",
+    "vet_gofmt": "go vet ./internal/crisis 通过；gofmt -l 对本任务三个文件为空。注：gofmt -l ./internal/crisis 另列出 4 个既存未格式化的测试文件（eval_test.go / replay_html_test.go / replay_report_test.go / rules_test.go），非本任务所改，未动。",
+    "numstat": "git show --numstat 96a85c3: schema.go 73/0, schema_test.go 157/0, store.go 6/27 —— 取自提交本身，与交付物同源",
+    "scope": "git status 只有声明的三个文件，无越界写入，writes/packages 无需修改。既有 crisis 测试零改动（store_test.go 等均未出现在 diff 中）。",
+    "red_evidence": "RED 不是靠编译错误凑的：先放一个返回旧 schema 的 schemaDDL() 桩，再跑 6 个测试，5 个以正确理由变红 —— (a) DDL 不含 'PRIMARY KEY (ts, indicator, fetched_at)'，(b) DDL 不含 'fetched_at TEXT NOT NULL'，(c) 查 v_macro_current 得 'sql: no rows in result set'，(d)(e) 插第二个修订得 'UNIQUE constraint failed: macro_observations.ts, macro_observations.indicator (1555)'，(f) 幂等测试报 view v_macro_current 计数 0 != 1。TestObsSpecIsSingleInstance 在 RED 阶段就绿——它断言的是源码层不变量，桩里已有那唯一一处 NewSpec，这是预期而非漏测。原始输出: scratchpad/dev-m4c-a-TASK-001-red.txt",
+    "dod_mapping": [
+      "functional[0] 三段主键 + fetched_at NOT NULL（两条分别断言） -> TestSchemaCreatesBitemporalShape -> PASS",
+      "functional[1] v_macro_current 存在且 DDL 含 MAX(fetched_at) -> TestSchemaCreatesCurrentView -> PASS",
+      "functional[2] 视图取最新修订 [11, 20] -> TestCurrentViewPicksLatestRevision -> PASS",
+      "functional[3] NewSpec 包内非测试源码恰 1 次且在 schema.go -> TestObsSpecIsSingleInstance -> PASS",
+      "boundary[0] 乱序写入仍取较大 fetched_at -> TestCurrentViewIgnoresInsertOrder -> PASS",
+      "boundary[1] schemaDDL() 幂等，表/索引/视图各恰 1 份 -> TestSchemaDDLIsIdempotent -> PASS",
+      "error_handling[0] mustSpec 只在 NewSpec 出错时 panic 且文案含包名与原始错误 -> internal/crisis/schema.go 的 mustSpec (verify_by: review，无测试用例，理由见 decisions 第 5 条)",
+      "non_functional[0] 既有测试零改动全绿 + go build ./... + 包测试 -> 见 build / suite / scope -> PASS"
+    ]
+  }
+}

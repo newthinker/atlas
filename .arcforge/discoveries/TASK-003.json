@@ -1,0 +1,78 @@
+{
+  "task_id": "TASK-003",
+  "title": "NewStore 漂移守卫",
+  "key_findings": [
+    "守卫必须放在 db.Exec(schemaDDL()) **之前**，不是之后。放之后时：老库会先被建出一个指向老表的 v_macro_current，然后才被拒绝 —— 留下一个『被改了却打不开』的库，下一个人看到视图存在会以为迁移跑过一半。变异实测确认这是真缺陷（V4），而且它**不改变 macro_observations 的表 DDL**，所以只比对表 DDL 的断言挡不住它。",
+    "🔴 V4 第一次跑时**存活**：我把『守卫必须在 schemaDDL 之前』的理由写进了注释，断言却只比对 macro_observations 的表 DDL。升级为**全量 sqlite_master 快照**（schemaSnapshot 辅助，逐行取 type/name/tbl_name/sql）之后才杀死。这是本 sprint 我第二次犯同一形状的错（TASK-002 是『知道老库有视图却没把它放进夹具』）——**理由写进注释 ≠ 变成断言**。区别是这次变异当场抓住了，上次靠 Leader 追问才暴露。",
+    "探形状必须能区分三种库而不是两种：①表不存在=全新库（放行，schemaDDL 随后建新形状）②表存在且三段主键（放行）③表存在且两段主键（拒绝）。migrate.go 的 isBitemporal 对①返回 error 而非 (false,nil)，所以守卫要先查表是否存在再调它 —— 直接调会让谁都建不了新库。",
+    "两个本地真实库都是**老形状且都没有 v_macro_current 视图**：atlas/data/crisis.db（30787 行，未被 git 跟踪）与 /Users/zuowei/workspace/runtime/atlas/data/crisis.db。无视图 ⇒ TASK-001 合入后无人跑过 atlas crisis 任何子命令。对 TASK-008（生产迁移）有用：现场大概率是『无视图的老形状库』这个较简单的形态——但迁移实现仍必须处理带视图的情况，因为只要有人在守卫合入前跑一次 crisis 命令就会变成那样。⚠️ 我没有擅自迁移这两个库：迁移真实数据是不可逆写操作（虽保留 _v1），那是人的决定；测试全程用 t.TempDir()，不碰它们。",
+    "守卫的爆炸半径实测确认：cmd/atlas/crisis.go 的 openCrisisStore 一处，服务 backfill/eval/status/replay/report 全族；serve 不触达。手跑 atlas crisis status 命中的正是这条路径。",
+    "sqlite 的 sqlite_master 快照是比『逐个对象断言』更强的『什么都没变』判据：逐个断言只能证明『我想到的那几个没变』，而漏掉的那个恰好就是缺陷所在（V4 正是这个形态）。"
+  ],
+  "decisions": [
+    {
+      "decision": "守卫放在 schemaDDL() 之前",
+      "rationale": "放之后会给被拒绝的老库留下一个指向老表的视图。被拒绝却已被改动的库是最难排查的一种。代价是要额外处理『表还不存在』的全新库分支，值得。"
+    },
+    {
+      "decision": "形状判断复用 migrate.go 的 isBitemporal，只在守卫里加『表是否存在』一步",
+      "rationale": "TASK-002 的 discovery 在 interfaces_exposed 里明确请求过下游复用它（AD-3：两份形状判据意味着改一处不会让另一处变红）。不复用的话，主键列名一旦变化，两处判据会静默分叉。"
+    },
+    {
+      "decision": "刻意不自动迁移（AD-4/C9）",
+      "rationale": "启动时静默改表结构会把一个本该被人盯着的动作变成副作用 —— 迁移要搬全部历史数据、重建索引与视图、失败时需要人判断怎么回滚。让它在某个 launchd 唤起里悄悄发生，出问题时连『什么时候变的』都查不到。照 hestia 先例（internal/hestia/store.go 的 verifyObservationsSchema / verifyCurrentView 把这条写作 'Automatic migration is an explicit non-goal'）。用源码扫描 + 全量 sqlite_master 快照两条一起钉住。"
+    },
+    {
+      "decision": "测试夹具 legacyDBWithView 的视图 SQL 由 bitemporal.CurrentQuery(obsSpec) 生成，不手抄",
+      "rationale": "手抄就是视图定义的第二个副本（同 AD-3）。它模拟的是『TASK-001 之后、守卫之前被 NewStore 打开过』的生产库，那时每次打开老库都会执行 schemaDDL()，视图于是建在了老表上。"
+    },
+    {
+      "decision": "『什么都没变』用全量 sqlite_master 快照断言，而非逐个对象比对",
+      "rationale": "见 key_findings 第 2、6 条。这是 V4 变异逼出来的修正，不是一开始就想到的。"
+    },
+    {
+      "decision": "不迁移两个本地真实开发库，手跑验证用副本",
+      "rationale": "Leader 授权了『开发库若是老形状先迁一遍』，但迁移真实数据是不可逆写操作，我判断那是人的决定不该顺手做。测试用 t.TempDir() 本就不需要真库；non_functional[1] 要的错误文案用 30787 行副本取得，跑完即删。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/store.go (+53: verifyBitemporalShape，NewStore 内于 schemaDDL() 之前调用)",
+    "internal/crisis/store_test.go (+196: 7 个新测试 + legacyDBWithView / schemaSnapshot 两个辅助 + import 增 database/sql, strings, bitemporal)"
+  ],
+  "interfaces_exposed": [
+    "func verifyBitemporalShape(db *sql.DB, path string) error —— 包内未导出。NewStore 在 Ping 之后、schemaDDL() 之前调用。⚠️ 调用位置是语义的一部分，不是风格问题：挪到 schemaDDL() 之后会给被拒库留下视图（TestGuardDoesNotAutoMigrate 会红）。",
+    "func legacyDBWithView(t, rows...) string —— 测试辅助（store_test.go）。建**带 v_macro_current 视图**的老形状库。下游任务若要测『迁移/守卫在真实老库上的行为』请复用它，不要用 migrate_test.go 的 legacyDB —— 后者不带视图，会让视图相关的缺陷根本不触发（实测：变异存活）。",
+    "func schemaSnapshot(t, db) []string —— 测试辅助（store_test.go）。取 sqlite_master 全量快照，用于『什么都没变』类断言。",
+    "守卫的错误文案（运维会看到的原文，含库路径两次）：crisis: macro_observations in <path> still has the legacy two-part primary key (ts, indicator); this database predates the bitemporal migration and CREATE TABLE IF NOT EXISTS does not change it. Automatic migration is an explicit non-goal — run:  atlas crisis migrate-bitemporal --db <path>"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ a950f754fa0d45794adc0696cf01e9fd11a39fc9 (master)",
+    "commit": "62d3d2e960e1eec7ff2c1cc65ae485d13bbf66cc (feat(TASK-003): ...), 合入 master 经 a950f75 (merge(TASK-003): ...)",
+    "baseline": "d347c9adece0b657f972a63b21c08929905ae59a",
+    "note": "以下数字全部在最后一次改动之后、于 master 树 a950f75 上统一重采。合入用内容判据核实：master 树上两个文件与 62d3d2e 逐字节 sha256 一致。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis ./cmd/atlas rc=0",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0 (65 个 ok 行, 0 FAIL)",
+    "counts": "internal/crisis -v: 顶层 RUN 119 == 顶层 PASS 119, FAIL 0, 子测试 33（两把独立的尺互验）。TASK-002 交付时该包顶层为 112，本任务 +7 条新测试。",
+    "coverage": "internal/crisis 93.6%（-coverpkg=./internal/crisis，dev_minimum 80）",
+    "numstat": "git show --numstat 62d3d2e: store.go 53/0, store_test.go 196/0 —— 取自提交本身",
+    "scope": "git status 只有声明的两个文件；既有测试零改动（TestNewStoreBadPath 等原样保留并全绿）。",
+    "red_evidence": "RED 是 **3 红 5 绿**，且那 5 条绿**不是断言太弱**：TestNewStoreAcceptsMigratedDB / AcceptsFreshDB / ShapeProbeIgnoresLegacyTable 断言的就是『放行』，守卫不存在时本来就放行，性质上不可能在 RED 变红；TestNewStoreBadPath 更是 DoD error_handling[0] 要求零改动的既有测试；TestMigratedDBKeepsIndexAndViewOnNewTable 验的是 TASK-002 已实现的迁移行为。⚠️ 这与 TASK-002 那三条『补强后就红』的弱断言性质不同，请勿按同一把尺量。真正证明这几条有效的是下面的变异矩阵（V3/V4/V5）。原始输出: scratchpad/dev-m4c-a-TASK-003-red.txt",
+    "mutation_evidence": "🔴 变异自证 5/5 杀死（隔离 worktree 外的原地变异+还原，每次还原后跑对照组确认绿，收尾 git status 核实只有声明的两个文件为 M）：V1 删 migrate.go 的 DROP VIEW -> TestMigratedDBKeepsIndexAndViewOnNewTable 红；V2 删 migrate.go 的 DROP INDEX -> 同上红；V3 守卫判据改成看 macro_observations_v1 是否存在 -> TestNewStoreShapeProbeIgnoresLegacyTable 红；V4 守卫挪到 schemaDDL() 之后 -> **第一次存活**，把断言从『表 DDL 不变』升级为『全量 sqlite_master 快照不变』后 TestGuardDoesNotAutoMigrate 红；V5 守卫对老库直接放行 -> TestNewStoreRejectsLegacyShape + TestMigrateWorksOnDBRejectedByNewStore + TestGuardDoesNotAutoMigrate 三条同时红。V1/V2 证明本任务接管了 TASK-002 那个无守卫的缺口。",
+    "manual_run": "non_functional[1]：在 data/crisis.db 的 30787 行**副本**上手跑 `atlas crisis status`（老形状库），实际输出：\n  Error: crisis: macro_observations in <path> still has the legacy two-part primary key (ts, indicator); this database predates the bitemporal migration and CREATE TABLE IF NOT EXISTS does not change it. Automatic migration is an explicit non-goal — run:  atlas crisis migrate-bitemporal --db <path>\n被拒绝后副本 sqlite_master 中**无视图残留** ⇒ 实证守卫在 schemaDDL() 之前生效（不是只在注释里那么写）。",
+    "e2e_real_data": "同一 30787 行副本上的端到端：`atlas crisis migrate-bitemporal` 耗时 1.2s，输出 RowsBefore/RowsAfter/ViewRows 全为 30787；迁移后 idx_macro_obs_ind_ts 的 tbl_name=macro_observations；v_macro_current 的 SQL 不含 macro_observations_v1；再跑一次输出 'already migrated, nothing to do'；迁移后 `atlas crisis status` 正常输出 'no evaluations yet — run `atlas crisis eval` after backfill'。副本跑完即删，两个真实库未动。",
+    "vet_gofmt": "go vet ./internal/crisis 通过；gofmt -l 对本任务两个文件为空。既存的 4 个未格式化测试文件（eval_test / replay_html_test / replay_report_test / rules_test）非本任务所改，未动。",
+    "dod_mapping": [
+      "functional[0] 老形状 ⇒ NewStore 报错，err 含 migrate-bitemporal + macro_observations + 库路径 -> TestNewStoreRejectsLegacyShape -> PASS（并由 V5 变异证明有效）",
+      "functional[1] 迁移后的库正常返回 -> TestNewStoreAcceptsMigratedDB -> PASS；空库正常 -> TestNewStoreAcceptsFreshDB -> PASS",
+      "functional[1] 两条迁移后不变量（① 索引 tbl_name=macro_observations ② 视图指向新表而非 _v1，夹具带视图 + 行为断言缺一不可）-> TestMigratedDBKeepsIndexAndViewOnNewTable -> PASS（并由 V1/V2 变异证明有效）",
+      "functional[2] 守卫不自动迁移，NewStore 路径无改形语句 -> TestGuardDoesNotAutoMigrate（源码扫描禁 ALTER TABLE/RENAME TO/DROP TABLE/DROP VIEW/DROP INDEX + 全量 sqlite_master 快照不变）+ verify_by: review -> PASS（并由 V4 变异证明有效）",
+      "boundary[0] 探形状看主键含 fetched_at、不看 _v1（构造『已迁移但 _v1 已删除』的库）-> TestNewStoreShapeProbeIgnoresLegacyTable -> PASS（并由 V3 变异证明有效）",
+      "boundary[0] AD-5 鸡生蛋防线：同一老形状库上 NewStore 报错而 MigrateBitemporal 仍成功 -> TestMigrateWorksOnDBRejectedByNewStore -> PASS",
+      "boundary[1] NewStore 每条 error 返回路径前已 db.Close() -> verify_by: review。现状：四条 error 路径中 MkdirAll 与 sql.Open 两条发生在连接建立**前**（无 db 可关），Ping、verifyBitemporalShape、Exec(schemaDDL()) 三条都在 return 前 db.Close()。⚠️ 按 DoD 提示未用『能否删库文件』做判据——macOS 上 unlink 不受 open fd 阻塞，该判据恒真、零信息量。",
+      "error_handling[0] 库文件损坏/不可读的既有错误路径不变 -> TestNewStoreBadPath（既有测试，零改动）-> PASS",
+      "non_functional[0] go build ./... 通过；go test -count=1 ./internal/crisis ./cmd/atlas 全绿 -> 见 build / suite -> PASS",
+      "non_functional[1] 守卫代码注释写明『为什么不自动迁移』并指向 hestia 先例 -> store.go 的 verifyBitemporalShape 文档注释 -> 完成；手跑 atlas crisis status 的实际文案 -> 见 manual_run -> 完成"
+    ]
+  }
+}

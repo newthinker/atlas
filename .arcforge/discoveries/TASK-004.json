@@ -1,0 +1,82 @@
+{
+  "task_id": "TASK-004",
+  "title": "读全部改走 v_macro_current（含 EvalDates）",
+  "key_findings": [
+    "EvalDates 是第五个读取点且**不经 obsSelect** —— 它自己内联了一条 `SELECT ts FROM macro_observations ...`。这就是计划原文「五个读取点、只改 obsSelect 即可」不成立的原因：obsSelect 只有 4 个调用点（Observation / LatestObservation / SeriesWindow / SeriesSince）。经人类裁决 R1 并入本任务。",
+    "读裸表时同一天的每个修订都产出一个日期，EvalDates 于是返回重复日期、回测把那天评估两遍。⚠️ 而当前生产库全是单版本 ⇒ **缺陷要到第一次真实修订才发作**，在此之前任何测试与人工检查都看不出来。",
+    "🔴 裸表守卫的判据必须带词边界：`FROM\\s+macro_observations\\b`。同一行文本 `SELECT ts FROM macro_observations_v1` 实测——带词边界命中 **0** 次、朴素子串命中 **1** 次。而迁移正需要读 `_v1`，用朴素子串会把合法的迁移读取误判成违规。",
+    "🔴 守卫抓到了我自己的**注释**：我在 obsSelect 的注释里写「视图本身是 SELECT * FROM macro_observations o WHERE...」来解释为什么保持显式列名，判据当场把这行判成裸读。⇒ 判据改为跳过行注释。理由是注释里提到表名不是读取，而不跳过的话**任何人在注释里解释视图都会触发假阳**，守卫很快会被当成噪音整文件豁免掉 —— 而那正是它要防的。已知边界（只跳行注释、块注释 /* */ 不处理）写进测试注释，没藏着。",
+    "`schemaDDL()` 里的视图 SQL 由 `bitemporal.CurrentQuery` 在**运行时**生成，源码里没有 `FROM macro_observations` 这个字面量 ⇒ 守卫不会命中它、**不需要**为它加豁免。这条写进了测试注释，免得后人看见视图 SQL 就去加一条多余的豁免。",
+    "视图上必须保持**显式列名**而非 `SELECT *`：视图本身就是 `SELECT *`，再用 `*` 会把将来新增的列一并带出来，而 `scanObservation` 按固定列序扫描。",
+    "🔴 **测试函数红 ≠ 函数内每条断言都有牙**（我自己的口径错误，Leader 要求写进 discovery）。我最初报「RED 四条全红」，那是**测试函数**粒度——TestReadsSeeOnlyLatestRevision 因 Observation 那条断言失败就整体变红，而函数内的 LatestObservation 与 SeriesWindow 两条断言在改动前**就已成立**，测不出任何修复。验证者在 a950f75 上用我那份夹具跑探针发现，我复测确认属实。⇒ 这是本 sprint 同一个坑的又一变体：前几次是「理由写进注释没变成断言」，这次是「函数级的红掩盖了断言级的绿」，共同点是**拿粗粒度的信号当细粒度的证据**。报 RED 时应逐断言确认，而不是看测试函数是否 FAIL。",
+    "🔴 裸表上 `ORDER BY ts DESC LIMIT 1` 在同一业务日的多行里取的是**扫描顺序**的某一行，不是语义上的当前行。实测（改动前的树，同一夹具只改插入顺序）：旧修订先插 → LatestObservation 得 21（**碰巧正确**）；新修订先插 → 得 20（错）。⇒ 这条决定了「LatestObservation 断言 value」能否有牙：Leader 原本的修法只说「加一行最新日修订 + 断言 value=21」，在旧修订先插的顺序下**改动前也通过**，断言仍然没牙。必须同时把最新那天改成**新修订先落库**。（回填乱序是真实场景，TASK-001 boundary[0] 正是为它钉的。）"
+  ],
+  "decisions": [
+    {
+      "decision": "换 FROM，而不是给每个读取点加 WHERE 子句或 DISTINCT",
+      "rationale": "后者是同一条规则的 N 份副本，加第 N+1 个读点时必漏 —— EvalDates 就是这么漏掉的（它不经 obsSelect，计划原文因此把读取点数错）。视图把规则收进一个地方，新读点只要 FROM 对了就自动正确。⚠️ 这个决定**有测试守着**，不只是注释里的主张：变异 W3 把 EvalDates 改成 `SELECT DISTINCT ts FROM macro_observations`，去重断言**照样通过**（DISTINCT 确实去了重），但被『视图缺失须报错』与『裸表守卫』两条抓住。"
+    },
+    {
+      "decision": "裸表守卫跳过行注释，而不是改我自己的注释措辞",
+      "rationale": "见 key_findings 第 4 条。改措辞只解决我这一次，改判据解决所有人。代价是块注释不覆盖 —— 已在测试注释里声明这个边界，并已报 Leader 请他裁定是否要更严。"
+    },
+    {
+      "decision": "豁免逐条列成给人读的清单 + 断言条数恰为 len(清单)",
+      "rationale": "DoD 要求『逐文件逐行列出并断言条数恰为 N』。清单是给人读的（写明哪两条、各自干什么），计数是给机器验的。两个方向都钉住：新增裸读会红，删掉豁免也会红 —— 否则豁免清单会慢慢退化成整文件豁免。"
+    },
+    {
+      "decision": "夹具用裸 INSERT 造重复修订，不走 UpsertObservations",
+      "rationale": "此刻 UpsertObservations 仍是 INSERT OR REPLACE（TASK-005 才改），走公开 API 造不出同一 (ts, indicator) 的两行。夹具会静默退化成单版本，而**单版本下有缺陷的实现照样通过**。DoD 已点名这条，实现时确认属实。"
+    },
+    {
+      "decision": "不把 obsSelect 改成 obsFrom() 方法",
+      "rationale": "Leader 派发时明确：TASK-006 会做这个改动，计划刻意分两步。提前改会让本任务的 C5（四个调用点逐字未变）无法成立。"
+    },
+    {
+      "decision": "夹具加一行「最新那天也有修订」，**并且**把那天改成新修订先落库、旧修订后落库",
+      "rationale": "两处细节都是语义的一部分，缺一个断言就没牙。① 不加那一行：SeriesWindow(end=01-03,n=2) 的 LIMIT 2 正好跨到两个不同日期，改动前就返回 [11 20]，与期望一字不差。② 加了但不调顺序：LatestObservation 在裸表上碰巧返回 21（见 key_findings），断言照样绿。夹具**不依赖未定义行为产生正确结果**——走视图后两种插入顺序都得 21（视图按 MAX(fetched_at) 选，与插入顺序无关，正是 TASK-001 boundary[0] 钉住的性质），它只用来产生一个**能区分正确与错误实现**的输入。两处都写进了 revisedStore 的注释，免得后人随手改顺序让断言悄悄失去牙。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/store.go (+18/-2: obsSelect 与 EvalDates 的 FROM 换成 v_macro_current，各加一段说明「为什么换 FROM 而非每处加 WHERE」的注释)",
+    "internal/crisis/store_test.go (RED commit +178，GREEN commit +10/-1: 5 个测试 + revisedStore 夹具)"
+  ],
+  "interfaces_exposed": [
+    "obsSelect 常量现在从 v_macro_current 读。⚠️ TASK-006 计划把它改成 obsFrom() 方法，届时四个调用点必然改动 —— 本任务刻意没做，两者不要混在一起。",
+    "func revisedStore(t *testing.T) *Store —— 测试夹具（store_test.go）。建新形状库并用**裸 INSERT** 造出 DoD 指定的那组重复修订（2026-01-02/vix 有 10@07-14 与 11@08-14，另有 2026-01-03/vix=20）。下游任务要测『有修订时的读行为』请复用它；⚠️ TASK-005 把 UpsertObservations 改成不覆盖之后，这个夹具**可以**改走公开 API，但在那之前不行。",
+    "TestNoBareTableReadsOutsideMigration 的豁免清单 allowedBare —— 目前 2 条，都在 migrate.go（迁移前/后行数计数）。新增任何裸表读取都必须同时更新这个清单，否则测试红。"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ 46c401cf15df8c9922c5023c823d8182d2b3707e (master，含夹具补强)",
+    "red_commit": "983c3cf62e628e67607ef4ee02f94214382539d5 —— **仅含测试，不含实现**。已确认它在 master 祖先链上可达（git merge-base --is-ancestor 通过），验证者可直接 checkout 重跑。",
+    "green_commit": "5664ef754afcf37cd1d3a533bd1f6fdcf0d6e168",
+    "merge_commit": "31b575d (merge(TASK-004): ...)",
+    "baseline": "a950f754fa0d45794adc0696cf01e9fd11a39fc9",
+    "note": "以下数字全部在**最后一次改动之后**、于 master 树 46c401c 上统一重采（含夹具补强）。此前在 31b575d 上采的那批已作废——虽然数值相同（改的只是测试夹具），但按纪律仍以最终树为准。合入用内容判据核实：master 树上 store_test.go 与 0e261cf 逐字节 sha256 一致；RED sha 983c3cf 仍在祖先链可达（验证者要用）。",
+    "red_reproduction": "🔴 DoD functional[1] 要求的 RED 可复现，**我自己先验过**：独立 detached worktree checkout 到 983c3cf，跑 `go test ./internal/crisis -run 'TestReads|TestEvalDates|TestNoBareTable'` 得到 4 条 FAIL —— TestReadsSeeOnlyLatestRevision（SeriesSince 返回 3 行，同一天两个修订都混进来）、TestEvalDatesDeduplicatesRevisions（返回重复的 2026-01-02）、TestReadsFailLoudlyWhenViewMissing（删掉视图读方法照样成功，即根本没用视图）、TestNoBareTableReadsOutsideMigration（裸读 4 处，清单只允许 2 处）。TestSingleRevisionReadsUnchanged 在 RED 就绿是**预期**：它是回归护栏，钉单版本下语义不变，不是弱断言。跑完即拆 worktree。原始输出: scratchpad/dev-m4c-a-TASK-004-red.txt",
+    "mutation_evidence": "变异自证 3/3 杀死（原地变异+还原，每次还原后跑对照组确认绿，收尾 git status 核实只有声明的两个文件为 M）：W1 EvalDates 改回裸表 -> TestEvalDatesDeduplicatesRevisions 红（Leader 点名要验的就是这条）；W2 obsSelect 改回裸表 -> TestReadsSeeOnlyLatestRevision 红；W3 EvalDates 改用 `SELECT DISTINCT ts FROM macro_observations` -> **去重断言通过**，但 TestReadsFailLoudlyWhenViewMissing 与 TestNoBareTableReadsOutsideMigration 两条红。W3 是我特意构造的『看似修好』的变异，它证明『换 FROM 而非加 DISTINCT』这个设计决定确实有测试守着。",
+    "c5_selfcheck": "boundary[0] 的 C5 我自验过：`git diff store.go` 的实质改动只有两行（obsSelect 常量、EvalDates 内联 SQL 的表名），`git diff | grep -E '^[+-].*obsSelect\\+'` **无输出** —— 四个调用点的 WHERE/ORDER/LIMIT 与参数一行未动；EvalDates 那行也只换表名，WHERE/ORDER 逐字保留。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis ./cmd/atlas rc=0",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0 (65 个 ok 行, 0 FAIL)",
+    "counts": "internal/crisis -v（最终树 46c401c）: 顶层 RUN 124 == PASS 124, FAIL 0, 子测试 33（两把独立的尺互验）。TASK-003 交付时 119，本任务 +5。",
+    "coverage": "internal/crisis 93.8%（-coverpkg=./internal/crisis，dev_minimum 80）",
+    "numstat": "983c3cf: store_test.go 178/0（纯测试）；5664ef7: store.go 18/2 + store_test.go 10/1；0e261cf: store_test.go 27/7（夹具补强）—— 均取自提交本身",
+    "bare_read_audit": "守卫口径实测（master 树，排除注释行）：内联裸读仅剩 migrate.go:108 与 migrate.go:136 两处，恰为豁免清单。store.go:130 那处命中是**注释**，被判据跳过。",
+    "scope": "git status 只有声明的两个文件；既有 crisis 测试零改动全绿。",
+    "dod_mapping": [
+      "functional[0] 四个读方法只看到最新修订 -> TestReadsSeeOnlyLatestRevision -> PASS。⚠️ **交付后补强过**：最初 LatestObservation（只断 ts）与 SeriesWindow（夹具未触发 LIMIT 重复）两条断言在改动前就成立、不构成修复的证据；0e261cf 加强夹具与断言后，改动前变红的断言从 2 处增至 5 处（见 verification.fixture_red_reproduction）。Observation→11、SeriesSince→[11,21] 两条自始有牙。",
+      "functional[1] EvalDates 不返回重复日期，恰返回 [2026-01-02, 2026-01-03]；RED 可复现 -> TestEvalDatesDeduplicatesRevisions，RED sha 983c3cf 已验可复现且在 master 祖先链可达 -> PASS（W1 变异证明有效）",
+      "functional[2] 包内裸表守卫，带词边界正则，豁免逐行列出且条数恰为 2，migrate.go 不整文件豁免 -> TestNoBareTableReadsOutsideMigration -> PASS（W3 变异证明有效）",
+      "boundary[0] C5 四个 obsSelect 调用点 WHERE/ORDER/LIMIT 与参数逐字未变 -> verify_by: review，见 c5_selfcheck -> 完成",
+      "boundary[1] 单版本数据下四读方法与 EvalDates 与改动前逐值相同 -> TestSingleRevisionReadsUnchanged + 既有 crisis 测试零改动全绿 -> PASS",
+      "error_handling[0] 视图缺失时响亮失败且错误文案含 v_macro_current（不得吞成空集）-> TestReadsFailLoudlyWhenViewMissing -> PASS",
+      "non_functional[0] go build ./... 通过；go test -count=1 ./internal/crisis ./cmd/atlas 全绿 -> 见 build / suite -> PASS",
+      "non_functional[1] obsSelect 与 EvalDates 处各留注释说明『为什么换 FROM 而非给每处加 WHERE』-> store.go 的两段注释（含『同一规则的 N 份副本，加第 N+1 个读点时必漏 —— EvalDates 就是这么漏掉的』）-> verify_by: review -> 完成"
+    ],
+    "fixture_commit": "0e261cf13e1ff5ad3815afa579e91b203b5b084c（仅 store_test.go 27/7），合入经 merge commit 46c401cf15df8c9922c5023c823d8182d2b3707e",
+    "fixture_red_reproduction": "🔴 补强有效性的**直接证据**（按 Leader 建议，在真实 RED sha 上验而非人工变异）：把 0e261cf 的 store_test.go 打到 983c3cf 的树上（实现确认仍是裸表）跑 TestReadsSeeOnlyLatestRevision，5 处断言全红，逐条实际值：\n  store_test.go:408  Observation        expected 11                      actual 10                       （原有牙）\n  store_test.go:416  LatestObservation  expected 21                      actual 20                       ← 新装的牙\n  store_test.go:424  SeriesWindow dates expected [2026-01-02 2026-01-03] actual [2026-01-03 2026-01-03]  ← 新装的牙\n  store_test.go:426  SeriesWindow vals  expected [11 21]                 actual [21 20]\n  store_test.go:430  SeriesSince        should have 2 items, but has 4                                   （原有牙）\n补强前同一测试在改动前只有 2 处断言变红（408 与 430）。416 那行的 actual=20 正是「调整插入顺序」这半步的直接证据——不调顺序的话 actual 会是 21，断言绿。跑完即拆 worktree。",
+    "post_dev_done_equivalent_check": "补强提交未经 dev_done 门禁，故手跑等价检查（于最终树 46c401c）：go build ./... rc=0；go vet ./internal/crisis 干净；go test -count=1 ./internal/crisis ./cmd/atlas rc=0；go test -count=1 ./... rc=0（65 ok / 0 FAIL）；internal/crisis 覆盖率 93.8%、cmd/atlas 78.2% —— 与转 dev_done 那一刻同值。Leader 已在 master 独立复核一致。"
+  },
+  "provenance": "本 discovery 覆盖三个 commit，其中第三个是交付后补强：RED 983c3cf62e628e67607ef4ee02f94214382539d5（仅测试）→ GREEN 5664ef754afcf37cd1d3a533bd1f6fdcf0d6e168（实现，合入经 31b575d）→ 补强 0e261cf13e1ff5ad3815afa579e91b203b5b084c（仅测试，合入经 46c401cf15df8c9922c5023c823d8182d2b3707e）。⚠️ 补强提交发生在我转 dev_done（00:42:52）之后，**未经过 dev_done 门禁的机械校验**——门禁只在 transition 那一刻跑。Leader 裁定取方案 (a)（接受补提交而非走返工重跑门禁），理由是它只加测试不改实现，且我与他各自手跑了等价检查（见 verification.post_dev_done_equivalent_check）。Leader 表示派验时会明确告知验证者「这个补提交未经门禁、请自行复跑」。代码全部由 dev-m4c-a 编写。"
+}

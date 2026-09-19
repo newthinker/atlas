@@ -1,0 +1,84 @@
+{
+  "task_id": "TASK-006",
+  "title": "Store.AsOf 只读副本，obsFrom() 按 asOf 选形态",
+  "provenance": "代码全部由 dev-m4c-a 编写。单个 commit a3e7d32c0a19093fb5bcc8828d22168929d158c9，合入经 merge commit c7fa4b63cbbc28e0ad8c15ac39885b32ac03725e。本任务的 DoD 在派发前由 Leader 改过四处（新增 boundary[2]、non_functional[1] 追加订正要求、两处过期锚重采），其中 boundary[2] 来自 test-m4c-a 在 TASK-005 的变异 R3。",
+  "key_findings": [
+    "🔴 **参数必须前置，这是本任务最易错处**：`bitemporal.AsOfQuery` 的 `?` 在**相关子查询内**（`… AND fetched_at <= ?)` 收在子查询的右括号里），而调用点把 `WHERE indicator = ? …` 接在 FROM 之后 —— 按 SQL 文本顺序，子查询的 `?` 先出现。弄反**不报错**：驱动只按位置绑定，于是日期被当成 indicator 去查。`SeriesWindow` 有 indicator/end/LIMIT 三个外层参数，插错位置会返回**非空但错**的结果，只断「非空」等于没断。故实现让 `obsFrom()` 返回 `(string, []any)`，把顺序收进一处决定，而不是让五个调用点各自拼。",
+    "🔴 **整秒 as-of 会包含同秒带小数的行**（DoD 给的前提，我在实现与断言里都依赖它）：比较是字符串字典序，`'.'(0x2E) < 'Z'(0x5A)`，所以 `2026-07-14T05:42:08.150777000Z` < `2026-07-14T05:42:08Z`。⇒ `--as-of 2026-07-14T05:42:08Z` 会**看到**那一行。方向无害（多看到而非少看到），但整秒夹具把这点完全掩盖 —— 这是那种「不实测就会推反方向」的字符序问题，已用 TestAsOfNanoPrecisionBoundary 显式钉住。",
+    "变异 Y2（`<=` 改 `<`）**只杀死 TestAsOfIncludesEndpoint，没杀死 TestAsOfNanoPrecisionBoundary** —— 这是对的，不是覆盖漏洞：Nano 那条里行的 `fetched_at` 在字典序上**严格小于** as-of，两个算子对它无差别；它测的是字符序性质，牙由 Y1（参数顺序）证明。两条不是同一把尺。",
+    "⚠️ **O7 在真实数据上验过，但那份数据证明不了修订场景**：取 runtime 生产库副本（31098 行）迁移后跑 O7（7 个指标全量比对「不带 as-of」vs `AsOf(2099)`），**0 处不一致**。但该库迁移后 `ViewRows == RowsAfter == RowsBefore == 31098`，即**每个 (ts, indicator) 目前只有一个修订** ⇒ O7 在这份数据上是**恒等**而非经受了修订的考验。这与 TASK-003 报的「两个库都没有 v_macro_current 视图」是同一事实的两面：TASK-001 之后无人跑过 crisis 命令，也就没产生过新 fetched_at。⇒ 对 TASK-008 的意义：判据三若不是 0 处不一致，**那不是 as-of 逻辑的问题**（逻辑在这份数据上已验过），而是迁移或数据本身变了；若想要更强证据，可在迁移后人为注入一个修订再跑。",
+    "C5 在本任务是**另一把尺**：`obsSelect` 常量改成 `obsFrom()` 方法后，四个调用点**必然改动**（接两个返回值、参数改 `append(args, …)...`）。此处 C5 量的是「WHERE/ORDER/LIMIT 的 SQL 文本逐字不变」，**不是** TASK-004 的「调用点一字不动」。⚠️ 我在 TASK-004 自验 C5 用的正是后者（`grep '^[+-].*obsSelect+'` 无输出），若不换尺会得出「C5 违反」的错误结论并可能去做无谓的回避设计 —— Leader 在派发时提前说破了这点。**同一个代号在两个任务里是两把尺**，这类东西不提前说破，撞上时最容易自己绕进去。",
+    "🔴 **O7 探针的成因是结构性的，不依赖任何实测数（test-m4c-a 给出、Leader 转来的更强版本）**：\n  证明只需要一句 —— 老表主键是 `PRIMARY KEY (ts, indicator)` **两段**，因此同一 `(ts, indicator)` 结构上**不可能**有第二个 `fetched_at`；迁移是 1:1 复制，所以迁移后必然仍是每键一个修订。⇒ **这在任何两段主键的老库上都成立**，不是本库的巧合。\n  （佐证，非依据：本库实测 31098 个键的 `count(distinct fetched_at)` 全部 = 1，全库 43 个 distinct fetched_at 分布在不同的键上。）\n  ⚠️ 我最初写的是「该库目前每键只有一个修订」，读起来像「这次运气好」；Leader 查实成因后我改成「结构上不可能」；test-m4c-a 再指出**连实测数都不需要**。三步各强一层，记此过程是因为它是「结论对但理由偏弱」的典型——每一版都不算错，但依据的普适性差一个量级。\n  ⇒ **后果**：判据三在这份数据上是**恒等式**，即使 as-of 逻辑完全写错也会通过（只要它没把行过滤掉）。as-of 的正确性证据在单测的 Y1/Y2 变异里，**不在判据三**。该恒等状态会在第一次迁移后采集时结束。"
+  ],
+  "decisions": [
+    {
+      "decision": "obsFrom() 返回 (FROM 子句, 要前置的参数) 两个值，而不是让调用点各自拼 as-of 条件",
+      "rationale": "参数顺序错**不报错**、只产出错值，是最难排查的一类。把顺序收进一处决定，五个调用点只需 `append(args, 原参数…)...`，不可能各自拼错。代价是调用点签名变了（C5 因此改用另一把尺）。"
+    },
+    {
+      "decision": "AsOf(t) 返回共用同一个 *sql.DB 的副本（AD-8），只读是约定而非类型保证",
+      "rationale": "共用连接池让取副本变得廉价 —— 回放可以逐日取；Close() 在任一个上调用一次即可，也不该调两次（TestAsOfIsReadOnlyCopySharingDB 用 require.Same 钉住）。不做只读接口类型：那会波及全部调用点，而 C7 要求评估逻辑零改动，代价大于收益。"
+    },
+    {
+      "decision": "AsOf(\"\") 等价于当前形态，不报错",
+      "rationale": "调用方常从一个可选的 --as-of 参数取值，空值走当前形态是它唯一合理的含义。DoD error_handling[0] 要求「行为由测试钉住，不留未定义语义」—— 选了哪个都可以，关键是有测试说明选了哪个。"
+    },
+    {
+      "decision": "保留 revisedStore 的裸 INSERT，只重写理由；新加的 asOfStore 走公开 API",
+      "rationale": "两个夹具的选择各有其理，写在一起才不会被后人当成随手选的。revisedStore 服务**读路径**测试，不该依赖正在被逐 sprint 改的 UpsertObservations（TASK-005 刚把它从 OR REPLACE 改成追加）—— 这是**解耦**，不是「别的方式造不出来」。asOfStore 服务 as-of 测试，验的正是「经正常写入路径落库的东西能被正确读出」，那里的耦合是要测的性质本身。"
+    },
+    {
+      "decision": "订正假注释时同时记下「另一个半真说法」",
+      "rationale": "Leader 点破的陷阱：订正时容易换成「TASK-005 之后才造得出」，而那**也是假的** —— 同 (ts,indicator) 多行从 TASK-001 三段主键落地起一直造得出，TASK-005 之后造不出的只是「同三段主键、异值」。把这个区分写在原地，免得后人再绕回去。⚠️ 用一句新的半真话替换旧的假话比留着旧假话更难被发现，因为它读起来像是刚刚订正过的。"
+    },
+    {
+      "decision": "obsFrom() 返回的参数切片靠 `cap == len` 保证 append 不产生跨调用点别名 —— 这是个**不变量**，不是自然成立的事",
+      "rationale": "⚠️ 我写实现时的判断是「每次 obsFrom() 都返回新切片所以安全」，那是**推断不是观察**；Leader 追问「你怎么确认的」，我答没专门验过，由 code-simplifier 用实验补上了观察：`[]any{s.asOf}` 是复合字面量 ⇒ Go 规范保证 `cap == len == 1`，五个调用点分别追加 2/1/3/3/3 个元素，**全部必然扩容重分配**；它还故意构造两次 append 吃同一个 args，验证 r1/r2 互不污染、args 本身未被改写。🔴 **但这条安全性依赖 `cap == len` 这个不变量**：将来若有人为「优化」写成 `args := make([]any, 0, 4)`，追加 ≤3 个元素的调用点（LatestObservation 追加 1 个、Observation 追加 2 个）就会**原地写入共享底层数组**。目前损害面为零（切片仍不跨调用点复用），故不加防御性拷贝；记此条是因为它属于**只在有人「优化」时才引爆**的东西，而那时没有任何测试会红。"
+    },
+    {
+      "decision": "五处 `obsFrom()+append` 不收进 helper（Leader 裁决，我同意），但记下它的代价",
+      "rationale": "收进 helper 要两个 helper 加 cols 参数、净 +3 行，且多一层间接会让 SQL 长什么样不再一眼可见。⚠️ 代价是：「as-of 参数必须前置」现在是**五份人工遵守的副本**，而注释自己写着「弄反不报错」。目前拦住它的是 `TestAsOfAllReadersParameterOrder` 的逐值断言（含 n=1 验 LIMIT 没被挤走）——反馈回路是闭合的，**但这个闭合依赖那条测试继续覆盖全部五个读点**；将来加第六个读取点时，没有任何东西会提醒加断言。（这正是 EvalDates 当初被漏掉的同一形状。）"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/store.go (+56/-14: Store 加 asOf 字段；AsOf(t) 只读副本；obsSelect 常量 → obsCols + obsFrom() 方法；五个读取点改为接前置参数)",
+    "internal/crisis/store_test.go (+224/-3: 9 个新测试 + asOfStore 夹具；订正 revisedStore 的假注释)"
+  ],
+  "interfaces_exposed": [
+    "func (s *Store) AsOf(t string) *Store —— 只读副本，读方法只看 t 时刻及之前的修订。**共用同一个 *sql.DB**：Close() 一次即可、不该调两次。t 为空等价当前形态。⚠️ 只读是约定不是类型保证，副本上仍能调到 UpsertObservations。",
+    "func (s *Store) obsFrom() (string, []any) —— 包内未导出。返回 FROM 子句与**必须前置**的参数。新增读取点一律 `obsCols+from+\\` WHERE …\\`` + `append(args, 其余参数…)...`，顺序不要自己拼。",
+    "const obsCols —— 显式列清单（`SELECT ts, indicator, value, source, fetched_at `）。⚠️ 不要改成 SELECT *：当前形态读的是视图、视图本身已是 SELECT *，再用 * 会把将来新增的列一并带出来，而 scanObservation 按固定列序扫描。",
+    "func asOfStore(t *testing.T) *Store —— 测试夹具（store_test.go），走公开 API 造 as-of 场景（同键两修订 + 一个单版本键）。下游要测 as-of 行为请复用它。",
+    "⚠️ 给 TASK-007 的提醒：CLI 的 --as-of 参数直接传给 AsOf() 即可；空字符串已是合法输入（当前形态）。另注意整秒 as-of 会包含同秒带小数的行（见 key_findings 第 2 条），若要在 CLI 层做提示，方向是「你可能会多看到同秒的行」而不是少看到。"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ a0b32a5daac10e83ae4bc170fef1ac1e23e8d732 (master，含注释修正)",
+    "commit": "两个 commit：a3e7d32c0a19093fb5bcc8828d22168929d158c9（实现，合入经 c7fa4b6） + 50024a15fa92787c66d9877c41d3b8db1ac1870d（注释修正，合入经 a0b32a5）",
+    "baseline": "e4aa5034075c5d08f4e9ce0873e3b128d6a374e7",
+    "note": "以下数字全部在**最后一次改动之后**、于 master 树 a0b32a5 上统一重采（含注释修正提交）。此前在 c7fa4b6 上采的那批已作废 —— 虽然 50024a1 只改注释、数值全部相同，但按「一切自证数字必须在最后一次改动之后统一重采」的纪律仍以最终树为准，不以「反正没变」为由跳过。合入用内容判据核实：master 树上 store.go 与 50024a1 逐字节 sha256 一致。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0（采于 a0b32a5）",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./internal/crisis ./cmd/atlas rc=0（采于 a0b32a5）",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0（65 个 ok 行, 0 FAIL）—— 采于 a0b32a5",
+    "counts": "internal/crisis -v（最终树 a0b32a5）: 顶层 RUN 141 == PASS 141, FAIL 0, 子测试 33（两把独立的尺互验）。TASK-005 交付时 132，本任务 +9。",
+    "coverage": "internal/crisis 93.8%（-coverpkg=./internal/crisis，dev_minimum 80）—— 采于 a0b32a5",
+    "numstat": "a3e7d32: store.go 56/14、store_test.go 224/3；50024a1: store.go 7/3（仅注释）—— 均取自提交本身",
+    "red_evidence": "RED 是 **3 红 6 绿**（先放 `AsOf` 的「忽略 asOf、永远返回当前形态」桩）。⚠️ 那 6 条绿的理由是**桩的性质**：桩就是当前形态，而 IncludesEndpoint / NanoPrecisionBoundary 两条的期望值恰好等于当前值；FarFutureMatchesCurrent 与 AsOfEmptyEqualsCurrent 在桩下恒真；IsReadOnlyCopySharingDB 的 db 共用桩也满足；UpsertOlderRevisionAfterNewerIsSwallowed 是回归守卫（TASK-005 的实现已正确）。**它们对真实缺陷有牙**，由变异矩阵证明（见 mutation_evidence）—— 这个区分同 TASK-003/004/005 的口径，不把「RED 没红」等同于「断言是空的」。原始输出: scratchpad/dev-m4c-a-TASK-006-red.txt",
+    "mutation_evidence": "变异自证 4/4 杀死（原地变异+还原，每次还原后跑对照组确认绿，收尾 git status 核实只有声明的 2 个文件为 M）：**Y1 参数顺序弄反**（as-of 参数改为后置）-> TestAsOfSeesHistoricalRevision + IncludesEndpoint + NanoPrecisionBoundary + AllReadersParameterOrder 四条红（正对 DoD 点名的最易错处）；**Y2 `AsOfQuery` 的 `<=` 改成 `<`** -> TestAsOfIncludesEndpoint 红（证明那条在 RED 阶段绿的断言对真实缺陷有牙）；**Y3 `obsFrom` 忽略 asOf** -> SeesHistoricalRevision + AllReadersParameterOrder + ExcludesKeysWithNoRowsBefore 三条红；**Y4 写路径冲突检测改走 v_macro_current（即 TASK-005 的变异 R3）** -> TestUpsertOlderRevisionAfterNewerIsSwallowed 红 —— **这条证明 boundary[2] 的行为守卫真的接住了 R3**，那是 Leader 加它的全部目的。",
+    "review_selfcheck": "non_functional[1] 三条 review 我在交付前自验，不留给验证者发现：①**C7 零改动** —— types.go / rules.go / replay_html.go / eval.go / statemachine.go 在本任务 diff 中各 0 处改动；②**C4** —— `AsOfQuery` 在非测试源码中只出现于 store.go:227 的 `obsFrom()` 子查询拼接，`CREATE VIEW` 只在 schema.go:71，两者分属不同文件、无交集；③**C5 按本任务的尺** —— 五处 `WHERE/ORDER/LIMIT` 的 SQL 文本逐字未变（diff 两侧那段字符串完全相同，变的只是前缀与参数形态）。",
+    "o7_real_data": "O7 在真实数据上的额外验证（DoD 未要求，为 TASK-008 判据三做事前保险）：取 runtime 生产库副本 31098 行 → `migrate-bitemporal`（三计数全等 31098）→ 对 AllIndicators 全部 7 个指标比对 `SeriesSince(2000-01-01..2099-12-31)` 在「不带 as-of」与「AsOf(2099-01-01)」下的返回：**比对 31098 行，不一致 0 处**。探针跑完即删，主工作树 0 改动，真库未动（全程副本）。\n⚠️ **这份数据证明不了 as-of 的正确性**：老表两段主键 ⇒ 每键结构上只可能有一个修订 ⇒ O7 在其上是**恒等式**而非经受了修订的考验（成因与其普适性见 key_findings 中「O7 探针的成因是结构性的」那条）。它能证明的是「迁移没弄坏当前读」，仅此而已。",
+    "corrected_comment": "non_functional[1] 要求的注释订正已完成：`revisedStore` 的「必须裸 INSERT —— 走公开 API 造不出同一 (ts, indicator) 的两行」为假，已改写为三段——裸 INSERT 的**真**理由（解耦：读路径测试不该依赖正在被逐 sprint 改的 UpsertObservations）、原句为假及证伪来源（test-m4c-a 在 46c401c 实测）、以及**容易换上的另一个半真说法**（同 (ts,indicator) 多行从 TASK-001 起一直造得出；TASK-005 之后造不出的只是同三段异值）。并与新加的 `asOfStore`（走公开 API）做了对照说明，使两个夹具的选择各有明写的理由。",
+    "dod_mapping": [
+      "functional[0] as-of 看历史版本（当前 11 / AsOf(2026-07-20) 得 10）-> TestAsOfSeesHistoricalRevision -> PASS（Y1/Y3 变异证明有效）；O7 远未来 as-of 与不带 as-of 逐值相同 -> TestAsOfFarFutureMatchesCurrent -> PASS（另在 31098 行真实数据上验过，见 o7_real_data）",
+      "functional[1] 边界含端点（<= 而非 <）-> TestAsOfIncludesEndpoint -> PASS（Y2 变异证明有效）；生产 Nano 形态下整秒 as-of 包含同秒带小数行 -> TestAsOfNanoPrecisionBoundary -> PASS（牙由 Y1 证明，Y2 对它无差别且这是正确的，见 key_findings 第 3 条）",
+      "functional[2] 四个读方法 + EvalDates 在 as-of 形态下参数顺序正确，逐值断言；SeriesWindow 额外断言 n=1 时恰 1 行 -> TestAsOfAllReadersParameterOrder -> PASS（Y1 变异证明有效）",
+      "boundary[0] C8：某键在 t 之前无任何行 ⇒ (nil, nil)，不回退到最早那行 -> TestAsOfExcludesKeysWithNoRowsBefore -> PASS（Y3 变异证明有效）",
+      "boundary[1] AsOf 不改原 Store；副本与原 Store 共用同一个 *sql.DB（require.Same）-> TestAsOfIsReadOnlyCopySharingDB -> PASS",
+      "boundary[2] 写路径裸读的**行为层**守卫（R3 覆盖缺口）：更新修订已存在时重写更旧的修订必须被静默吞掉而非撞主键 -> TestUpsertOlderRevisionAfterNewerIsSwallowed -> PASS（**Y4 变异证明它真的接住了 R3**）",
+      "error_handling[0] AsOf(\"\") 等价于当前形态 -> TestAsOfEmptyEqualsCurrent -> PASS",
+      "non_functional[0] go build ./... 通过；go test -count=1 ./internal/crisis ./cmd/atlas 全绿 -> 见 build / suite -> PASS",
+      "non_functional[1] 三条源码级 review（C7 零改动 / C4 AsOfQuery 不进 CREATE VIEW / C5 按本任务的尺）+ 订正假注释 -> 见 review_selfcheck 与 corrected_comment -> 完成"
+    ],
+    "comment_fix_commit": "交付后补一个提交 50024a15fa92787c66d9877c41d3b8db1ac1870d（store.go 7/3，仅注释）：EvalDates 的文档注释仍引用已被本任务删除的 `obsSelect`，且「它自己内联了一条查询」这句**在改动后为假**——EvalDates 现在经过 `obsFrom()`，不经的是 `obsCols`。code-simplifier 查出、Leader 核实、我复核确认。已改为「不经 obsCols / 自己内联列清单（只要 ts）」并补一句它**经过** obsFrom()。⚠️ store_test.go 的 369/461 行有同名残留，是 TASK-004 遗留、本 diff 未触及，按「只清理自己制造的孤儿」未动。",
+    "orphan_audit": "注释修正后实测：`obsSelect` 在 master 树的 internal/crisis 非测试源码中**残留 0 处**。⚠️ store_test.go 的 369 / 461 行仍有同名残留，那是 TASK-004 遗留、本任务 diff 未触及，按「只清理自己制造的孤儿」未动 —— 这是刻意的，不是漏改。"
+  }
+}
