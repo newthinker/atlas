@@ -4514,3 +4514,403 @@ M4 登记的 §E 写着「本次契约停留 < 1 分钟，是回放，**不要�
 ⚠️ 同时也说明：前两次「加注释拦不住 `.note.md` 被通配符带走」这个判断**下得太早**。
 第二次加警告时会话已经缓存了旧版，那句警告**agent 根本没读到**。
 结构改动仍然值得做（它让误操作不可能，而不是不鼓励），但「注释无效」这个结论的证据比当时以为的弱。
+
+## Sprint M4-crisis · crisis 双时态迁移（2026-09-19）
+
+`macro_observations` 的主键从 `(ts, indicator)` 变成 `(ts, indicator, fetched_at)`。
+同一个观测日可以带多个修订，「当前值」不再是表里那一行，而是视图 `v_macro_current`
+用 `MAX(fetched_at)` 推出来的。
+
+**没有 `is_current` 列是刻意的**：那种列必须在每次写入时维护，而维护它的代码和读它的
+代码会分头演化。视图从数据本身推导，推不错。
+
+**A｜写路径的失败模式变了 —— 运维必读**
+
+旧写法是 `INSERT OR REPLACE`：同一 `(ts, indicator)` 的新抓取**替换**旧行，永远不出错。
+新写法是裸 `INSERT` + 冲突三分（`store.go` 的 `UpsertObservations`）：
+
+| 情形 | 行为 |
+|---|---|
+| `(ts, indicator, fetched_at)` 不存在 | 插入 |
+| 存在且值相同 | 跳过（同一批被重跑，无信息差） |
+| **存在且值不同** | **报错并回滚整个事务** |
+
+第三行是新出现的失败模式，错误文案是
+`the same fetch reported two values; refusing to overwrite`。
+
+🔴 **爆炸半径有两层，只看写路径会低估它**：
+
+**第一层（事务）**：那个 `return` 在遍历 observations 的循环**内部**，事务由
+`defer tx.Rollback()` 兜底 ⇒ 这一批**整批不落盘**，不是「跳过这一条继续」。
+
+**第二层（采集）**：`ingest.go` 的 `IngestAll` 在 FRED 循环里是
+`if err != nil { return nil, err }` —— **直接上抛，不 `continue`**。而 `fredDirect` 的
+第一个就是 **vix**（顺序 vix → hy_oas → t10y2y → nfci，随后 `ingestSpread` 的 sofr_effr
+同样 `return nil, err`）。
+
+⇒ **vix 一炸，该轮后续指标根本不会被抓取**。yahoo 那两个（move / usdjpy）虽然本身是
+「错误只记进 `YahooErrs` 不中断」，但它们排在 FRED 之后，FRED 抛错时**走都走不到**。
+
+⇒ 运维须知要写「**中断整轮采集**」，**不要写「整批报错」**——后者会让人以为只丢一个指标，
+实际是七个指标一个都没抓。
+
+这是刻意的取舍：同一个 `fetched_at` 报出两个值意味着数据源或抓取逻辑坏了，
+此时**部分写入比不写入更糟**——你会得到一个半新半旧、而且没人知道哪半是哪半的库。
+
+⚠️ **另一个前提让它不会误报**：`stamp := NowStamp(ig.now())` 取在 `IngestAll` 开头，
+**同一次运行内所有行共用一个 stamp**（纳秒精度）。所以**重跑采集是追加，不是冲突**——
+新一轮有新 stamp。只有**上游在一次抓取里对同一 `(日期, 指标)` 返回两个不同值**才触发。
+各源的指标互不重叠（FRED: vix/hy_oas/t10y2y/nfci，yahoo: move/usdjpy，派生: sofr_effr），
+所以触发条件只能来自上游自身返回重复日期。
+
+⇒ 迁移后若出现 `the same fetch reported two values` 形态的采集失败，**那是数据源问题被
+暴露出来，不是本次迁移引入的缺陷**。行为是对的——但它把一条静默路径变成了会中断采集的
+响亮失败，运维得先知道这件事，才不会在半夜把它当成迁移事故。
+
+**B｜回滚**
+
+⚠️ **迁移只有一次 RENAME**（原表 → `_v1`），不是两次：
+`DROP VIEW` → `DROP INDEX` → `RENAME TO macro_observations_v1` → 建新表 → `INSERT SELECT`。
+所以回滚是 **DROP + 一次 RENAME**：
+
+前置的导出见下面「§B-1 回滚前先导出」——**那条命令不能照着直觉写**，理由在那一节。
+
+```sql
+.bail on
+BEGIN;
+DROP VIEW  IF EXISTS v_macro_current;
+DROP INDEX IF EXISTS idx_macro_obs_ind_ts;
+DROP TABLE macro_observations;
+ALTER TABLE macro_observations_v1 RENAME TO macro_observations;
+CREATE INDEX idx_macro_obs_ind_ts ON macro_observations(indicator, ts);
+CREATE VIEW v_macro_current AS SELECT * FROM macro_observations o WHERE o.fetched_at = (SELECT MAX(fetched_at) FROM macro_observations WHERE ts = o.ts AND indicator = o.indicator);
+COMMIT;
+```
+
+### 🔴 §B-1 回滚前先导出 —— 直觉写法产出的东西灌不回去
+
+**回滚会丢掉迁移之后写入的一切**，所以要先导出。但**下面这条直觉写法是错的**：
+
+```bash
+# ❌ 错误：灌回去会每一行都失败
+sqlite3 <db> ".mode insert macro_observations" "SELECT * FROM macro_observations;" > out.sql
+```
+
+实测（生产库 `.backup` 快照，注入 1 条修订模拟「迁移后写入」）：
+
+```
+导出           ⇒ 31099 行
+回滚（表变两段主键）
+灌回           ⇒ rc=1，stderr 31099 行，全是
+                 UNIQUE constraint failed: macro_observations.ts, macro_observations.indicator (19)
+该键最后留下   ⇒ 旧修订。新修订丢失。
+```
+
+成因：三段主键表里同一 `(ts, indicator)` 可以有多个修订，而**回滚之后的表是两段主键**
+（`PRIMARY KEY (ts, indicator)`，就是上面那段 SQL 恢复出来的形状）。多行挤进一个键必然撞
+唯一约束；而回滚后的表里**本来就有**这些键（来自 `_v1`），所以裸 `INSERT` 一行都进不去。
+
+🔴 **最坏的地方是失败形态**：每一行都失败，**但表里仍然有数据**（回滚留下的那份）。
+运维看到一个有数据的表，会以为恢复成功了。
+
+**正确写法**（实测 `rc=0`、stderr 0 行、新修订与新键都恢复）：
+
+```bash
+sqlite3 /Users/zuowei/workspace/runtime/atlas/data/crisis.db \
+  ".mode insert macro_observations" \
+  "SELECT ts, indicator, value, source, fetched_at FROM macro_observations o
+   WHERE o.fetched_at = (SELECT MAX(fetched_at) FROM macro_observations
+                         WHERE ts = o.ts AND indicator = o.indicator);" \
+  | sed 's/^INSERT INTO/INSERT OR REPLACE INTO/' > post-migration-rows.sql
+```
+
+两处改动缺一不可：
+
+| 改动 | 没有它会怎样 |
+| --- | --- |
+| `WHERE o.fetched_at = (SELECT MAX(...))` 投影成每键一行 | 多修订挤进两段主键表，撞唯一约束 |
+| `INSERT INTO` → `INSERT OR REPLACE INTO` | 回滚后的表里已有这些键，裸 `INSERT` 仍冲突 |
+
+🔴 **必须同时知道的代价：这份导出物不是无损的。**
+`MAX(fetched_at)` 投影**丢掉历史修订，只保留每键最新值**——那是回滚到两段主键模型的
+**必然代价**（目标表结构上就容不下多修订），不是实现缺陷。⇒ 若历史修订本身有价值，
+**回滚前另外 `sqlite3 <db> ".backup '<副本>'"` 一份三段主键的完整库**，别指望这份 `.sql`。
+
+⚠️ **路径必须写绝对路径。** 实测同一条命令在错误目录下：相对路径 `crisis.db` ⇒ `rc=1`、
+导出 **0 行**、并**当场建出一个 0 字节的 `crisis.db`**（`Error: in prepare, no such table`）；
+绝对路径 ⇒ `rc=0`、导出 31098 行。**「导出文件存在」不是成功的判据，要看行数。**
+
+ℹ️ 本节的结论曾经写反过：初版说这条直觉写法「实测成立、导出物可回灌」。那次实测把导出物
+灌进了**空表**——空表没有约束冲突，所以必然成功。**在一个结论必然成立的条件下求了值，
+而没有把那个条件写出来。** 该问而没问的是「**灌回哪种表？**」。
+（同一个条件盲点在本 sprint 的三个角色身上连续出现过，只有最先报出它的那次选对了条件。）
+
+### 🔴 怎么执行这段 SQL —— 只有一种写法，别的都会出事
+
+**存成文件，用输入重定向跑**：
+
+```bash
+# 把上面那段存成 rollback.sql，然后：
+sqlite3 /Users/zuowei/workspace/runtime/atlas/data/crisis.db < rollback.sql
+```
+
+**不要写成 `sqlite3 db "$SQL"`**（单参数形态）——`.bail on` 是 dot-command，
+单参数形态**不识别**它，会报 `Usage: .bail on|off` 然后 **整段 SQL 一条都不执行**。
+实测：`_v1` 仍在时该形态 `rc=1`，而 `_v1` 照旧、表仍是三段主键 ⇒ **回滚根本没做**。
+
+### `.bail on` 那一行不是可选的——少了它，这段 SQL 会永久删库
+
+**条件**：`_v1` 已按 §C 授权删除之后（或在从未迁移的库上误跑），**且经 stdin 执行**
+（管道 / heredoc / `< file` 都算）。
+
+sqlite3 CLI **默认不 `.bail on`**：`ALTER TABLE … RENAME` 报
+`no such table: macro_observations_v1` 之后**继续往下执行**，于是最后那句 `COMMIT`
+把前面已经生效的 `DROP TABLE` 提交掉。**`BEGIN` 在场，但它没有保护任何东西。**
+
+### 六种形态的实测
+
+生产库的 `.backup` 快照上跑，SQL 用 `sed -n` 从本文件逐字提取、未手抄；生产库全程未碰。
+sqlite3 **3.51.0**（dot-command 行为可能随版本变，换版本请重测）。
+
+| 调用形态 | `.bail on` | `_v1` | rc | 结果 |
+| --- | --- | --- | --- | --- |
+| 管道 | **无** | 已删 | **1** | 🔴 **观测表不存在，31098 行全丢，索引/视图归零** |
+| 管道 | 有 | 已删 | **1** | ✅ 31098 行、索引 2、视图 1 全在（未执行任何破坏） |
+| heredoc | 有 | 已删 | **1** | ✅ 同上 |
+| `< file` | 有 | 已删 | **1** | ✅ 同上 |
+| `< file` | 有 | **仍在** | **0** | ✅ 回滚完成：两段主键、31098 行、视图可查 |
+| **单参数** `sqlite3 db "$SQL"` | 有 | 仍在 | **1** | 🔴 `Usage: .bail on|off`，**整段未执行，回滚没做** |
+
+⚠️ **`rc` 在这张表里几乎没有信息量**：五行 `rc=1` 里，一行删光了库、三行毫发无伤、
+一行什么都没做。运维对 `rc=1` 最自然的解读是「报错了所以没执行」——
+那个解读在第一行会让人不去检查，而库已经没了。
+
+⇒ **判据不能是退出码，只能是回滚后直接查表**：
+
+```bash
+sqlite3 <db> "SELECT COUNT(*) FROM macro_observations;"                       # 期望 31098（或你回滚前的行数）
+sqlite3 <db> "SELECT COUNT(*) FROM sqlite_master WHERE type='view';"          # 期望 1
+sqlite3 <db> "SELECT sql FROM sqlite_master WHERE name='macro_observations';" # 期望含 PRIMARY KEY (ts, indicator)
+```
+
+### `CREATE VIEW` 那一行同样不是可选的
+
+**正常回滚**（`_v1` 仍在）跑完这段 SQL：`rc=0`、31098 行一行不少、索引齐全——
+**而 `v_macro_current` 不存在**（实测 `SELECT COUNT(*) FROM sqlite_master WHERE type='view'` = 0）。
+
+原因：`DROP VIEW` 在第 2 行，而重建它的语句此前**根本没有**。于是回滚「成功」之后，
+所有走视图的读路径是坏的，**`rc=0`、行数对得上，没有任何东西会告诉你**。
+上面的 SQL 已补回 `CREATE VIEW`，DDL **逐字取自 `sqlite_master`**（不是手抄；`schema.go:71`
+那句是 `bitemporal.CurrentQuery(obsSpec)` 拼出来的，源码里没有字面量可抄）。
+
+### 这段 SQL 的验证覆盖了哪些调用形态
+
+**曾经的写法是「这段 SQL 是实跑验证过的」——那句话当时为真，但它没说验的是哪种形态。**
+那次验证用的是 `sqlite3 db "$SQL"` 单参数形态，**恰好是当时三种调用形态里唯一不会删库的那一种**。
+⇒ 一句无条件的「验证过」，覆盖了两种从未求值的分支。
+
+这是一个可复用的失效形状：**在一个结论必然成立的分支里求了值，却没有把那个分支写成条件。**
+判别式很机械——**写「验证过」时，把「验的是哪一种？」这句话问出声**；答得出就补进句子，
+答不出就说明还没验完。
+
+现在的覆盖范围：
+
+| 维度 | 已验 | 未验 |
+| --- | --- | --- |
+| 调用形态 | 管道、heredoc、`< file`、单参数 —— **四种全测，见上面六行实测表** | `-init file`（实测 rc=0 且回滚完成，但**未测 `_v1` 已删的分支**，故不列为已验） |
+| `.bail on` | 有、无 | — |
+| `_v1` 状态 | 已删、仍在 | — |
+| sqlite3 版本 | 3.51.0 | 其它版本（dot-command 行为可能随版本变） |
+| 判据 | 行数 / 索引 / 视图 / 视图可查询 / 主键形状 / `sqlite_master` 全量；**以及**旧二进制在回滚后的库上跑 `crisis replay --json` 与迁移前基线**逐字节一致**（`sha256 = d0ee798b…`） | — |
+
+⚠️ 那条 `replay` 产出比对是在**单参数形态、`_v1` 仍在**的条件下做的。它证明的是
+「回滚后的数据和迁移前一致」，**不证明**这段 SQL 在别的调用形态下安全——
+后者由上面那张六行表负责。**两张表管两件事，缺一张都会让「验证过」重新变成一句无条件的话。**
+
+⚠️ `ALTER ... RENAME` 会给 DDL 加引号（`CREATE TABLE "macro_observations"`）。功能等价，
+但**与原始 DDL 不逐字节相同**——拿 DDL 文本做比对的脚本会在这里绊一跤。
+
+**C｜`macro_observations_v1` 什么时候可以删**
+
+迁移把迁移前的表原样留作 `macro_observations_v1`。它是回滚的唯一依据，删掉就没有回滚了。
+
+判据不是「过了几天」，是这三条同时成立：
+
+1. 新形状的二进制已部署并至少跑完一个完整的 ingest 周期（daily + 一次 intraday），无报错；
+2. `SELECT count(*) FROM v_macro_current` 与 `SELECT count(*) FROM macro_observations_v1` 相等
+   —— 不等说明有修订行或丢行，任一情况下都还不该删；
+3. `crisis replay` 的产出与迁移前基线一致（这条会随时间推移失效，因为新数据会进来；
+   所以要在**迁移当天**跑，并把结果留档）。
+
+三条都成立后，删 `_v1` 只是回收空间（约 4MB 量级）。**没有磁盘压力就别删**——
+留着的成本是一次性的几 MB，删掉的成本是回滚路径消失。
+
+**D｜🔴 迁移与部署之间的窗口：会静默污染，不会失败**
+
+计划里写的是「先迁移后部署，反序会让 launchd 任务失败」。**「失败」这个预期是错的**，
+实测（在备份副本上，生产库未碰）结果相反：
+
+旧二进制的写语句**本来就带 `fetched_at`**
+（`INSERT OR REPLACE INTO macro_observations (ts, indicator, value, source, fetched_at)`），
+所以在新表上 `NOT NULL` 不触发；而三段主键下 `fetched_at` 不同即不冲突，
+**`OR REPLACE` 从「替换」变成「追加」**。实测 `rc=0`，同 `(ts, indicator)` 静默变两行。
+
+旧二进制的读路径全走裸表（没有 `fetched_at` 维度），于是：
+
+| 读路径 | 旧二进制（裸表） | 新二进制（`v_macro_current`） |
+|---|---|---|
+| `Observation(ind, date)` | **15.44（过期值）** | 99.99 |
+| `LatestObservation` | 99.99（**碰巧对**，取决于扫描顺序） | 99.99 |
+| `Window(ind, end, 5)` | **覆盖 4 个交易日**（期望 5） | 覆盖 5 |
+
+第三行最要命：`Window` 是**算分位数的输入**，`LIMIT n` 被重复行吃掉 ⇒ 窗口短了 ⇒
+分位数错 ⇒ 状态判定错 ⇒ 落进 `crisis_evaluations`，并可能发告警。**而且全程不报错。**
+
+⇒ **结论仍是「先迁移后部署」，但理由换了**：不是怕它崩，是怕它不崩。
+崩溃会在日志里留下东西，静默污染不会。所以这个窗口必须尽可能短，
+或者干脆在迁移前 `launchctl bootout` 掉 crisis 的三个任务、判据跑完再 `bootstrap` 回去。
+
+`com.newthinker.atlas.crisis-intraday-jpy` 是 `StartInterval 1800`（每 30 分钟，全天候，
+`runs = 726`、`last exit code = 0`）——窗口再短也在它射程内。
+
+⚠️ 它的日志自 7/14 起是 0 字节、库 mtime 停在前一晚的 daily，看起来「最近没在写库」。
+**那是观察，不是保证。** 它每 30 分钟确实起进程且成功退出，只是非交易时段可能不落值。
+拿「它最近没写」当「它不会写」是把观察升格成断言。
+
+**E｜`--as-of` 的口径是文本，不是时刻**
+
+`fetched_at` 是 TEXT，SQLite 按**字典序**比较。`'.'(0x2E) < 'Z'(0x5A)`，
+所以 `2026-07-13T00:00:00+00:00` 和 `2026-07-13T00:00:00Z` 指同一个时刻、
+却在比较里落在不同的位置。
+
+⇒ `parseAsOf` 拒绝一切带偏移的形式，**判据是 `strings.HasSuffix(v, "Z")` 而不是 `off != 0`**。
+后者问的是「语义上是不是 UTC」，而比较的是文本——**判据要和被比较的东西同口径**。
+`+00:00` 语义上就是 UTC，`off == 0` 会放行它，然后静默错位。
+
+`--as-of` 也接受纯日期 `2026-07-13`（补成当天 00:00:00Z）。
+
+**F｜空结果的两种含义**
+
+`crisis replay` 返回 0 行时：
+
+| 语境 | 行为 |
+|---|---|
+| 不带 `--as-of` | **报错** `no observations between … — run backfill first`（exit 1） |
+| 带 `--as-of` | **静默成功**（exit 0） |
+
+带 `--as-of` 时「空」是正确答案——那个时点上本来就还没有这段区间的观测。
+不带时空多半是忘了 backfill。同一个空结果，两种语境两种含义，靠退出码区分。
+
+**G｜两个会骗人的运维坑**
+
+1. `configs/crisis-monitor.yaml` 的 `storage.path` 是**相对路径** `data/crisis.db`，
+   靠 launchd 的 `WorkingDirectory` 解析。手工跑命令时 cd 错目录就指向别的库。
+   核实方法是比 inode，不是比路径字符串。
+2. **源码仓库目录下也有一个 `data/crisis.db`**（一个 7 月的旧库，30787 行、两段主键、无视图）。
+   在源码目录误跑 `crisis replay` 会读到它——**但这个坑已经被本 sprint 自己的守卫堵上了**，
+   下面两行是同一条命令、同一个目录、只换二进制的实测对照：
+
+   | 二进制 | rc | stdout | 状态机字样 | stderr |
+   | --- | --- | --- | --- | --- |
+   | **旧**（部署前，无守卫） | 0 | 28 行，`final state: WATCH over 1670 eval days` | 26 次 | 空 |
+   | **新**（现在线上这个） | **1** | **0 行** | **0 次** | 指名 `legacy two-part primary key`，并指路 `atlas crisis migrate-bitemporal --db data/crisis.db` |
+
+   ⇒ 部署含 `verifyBitemporalShape` 的二进制之后，**这个误跑从「静默算错」变成了「响亮失败
+   并告诉你怎么办」**。这是守卫的一项额外收益：它本来是为了防「在未迁移的生产库上跑新代码」，
+   顺带把「跑错了库」也变得可见了——因为任何**未迁移**的库都会被它拦下，而误跑目标恰好都是
+   这一类。
+
+   ⚠️ 仍然值得记住这个坑的原因：**守卫只拦得住未迁移的库。** 如果哪天源码目录下那个库也被
+   迁移过（或换成一个已迁移的库），守卫就不会响了，而 `storage.path` 是相对路径这件事没变。
+   ⇒ 判据仍然是比 inode（见上一条），守卫是第二道防线不是第一道。
+
+   ℹ️ 本条原先写的是「输出有数据、有状态机摘要、不报任何错」——那句话**在旧二进制下为真**
+   （上表第一行就是它的实测），但它写下时线上还没部署守卫。**结论没错，是有效期到了**，
+   而让它失效的正是本 sprint 的交付物。
+
+**H｜🔴 部署二进制必须 `rm` + `cp`，不能原地 `cp` 覆盖（实撞，非推测）**
+
+本次部署实撞：`cp -p atlas-new bin/atlas` 之后，线上 atlas **任何**子命令都被 SIGKILL。
+
+```
+atlas crisis status   rc=137   stdout 空   stderr 空
+```
+
+`137 = 128 + 9`。诊断时把「内容」和「路径」两个变量分开：
+
+| | rc |
+|---|---|
+| `m4c-migration/atlas-new`（原位置） | **0** |
+| `bin/atlas`（刚被覆盖的） | **137** |
+
+而两者 `sha256` **完全相同**，`codesign -dv` 也完全相同（adhoc / linker-signed，
+CodeDirectory size 336606、hashes 10516+0 一字不差）。
+
+⇒ 不是内容问题，也不是签名内容问题：**macOS 内核对那个 inode 缓存了旧二进制的代码签名**，
+`cp` 原地覆盖保持 inode、只换内容，新内容对不上缓存的签名 ⇒ 内核直接杀进程。
+
+修法是**换 inode**：
+
+```bash
+rm -f  /Users/zuowei/workspace/runtime/atlas/bin/atlas      # 旧 inode 释放
+cp -p  <新二进制> /Users/zuowei/workspace/runtime/atlas/bin/atlas   # 新 inode
+```
+
+（实测 inode `216433589` → `220870847`，随后 `crisis status` 首行输出
+`system state: NORMAL (as of 2026-09-17, 44 eval days)`。）
+
+🔴 **这条的真正教训在验证方法上**：部署后这三样**全部通过**——
+
+```
+sha256 与期望一致 ✓    codesign 正常 ✓    可执行位在 ✓
+```
+
+**而它跑不了。** 静态检查证明「文件是对的」，证明不了「它能运行」。
+
+⇒ **部署后必须实际跑一次会开库的命令**，把「能运行」变成被观察到的事实：
+
+```bash
+cd /Users/zuowei/workspace/runtime/atlas    # ⚠️ 必须：storage.path 是相对路径
+./bin/atlas crisis status \
+  --config configs/config.yaml --crisis-config configs/crisis-monitor.yaml | head -1
+# 判据：这一行必须是 system state: …
+```
+
+🔴 **判据是首行 `system state: …`，不是 `rc=0`。** `rc=0` 区分不了两件事：
+
+| | rc | 首行 |
+| --- | --- | --- |
+| 守卫在**生产库**上通过 | 0 | `system state: NORMAL (as of …, 44 eval days)` |
+| 守卫在**它刚自己建出来的空库**上空转 | **0** | `no evaluations yet — …` |
+
+成因：`crisis.NewStore` 对 `storage.path` 先 `os.MkdirAll` 再让 sqlite 建库，而
+`verifyBitemporalShape` **对全新空库刻意放行**（表不存在 ⇒ `return nil`，否则谁都建不了新库）。
+⇒ 忘了 `cd` 会当场新建一个空 `data/crisis.db`，`rc=0`、有输出、守卫「通过」，
+**而验的是那个空库**。`system state:` 这一行在空库上构造上不可能出现，所以它是唯一可用的判据。
+**判性质，不判退出码。**（三场景实测见 `docs/deployment.md` 的同名小节。）
+
+⚠️ 这条可推广（**F7**）：**验证任何带「空则放行」分支的守卫，判据都必须能区分「守卫真的
+检查过」与「守卫面对空对象直接返回」**——因为「守卫没报错」同时兼容这两种情形。
+凡「表不存在 / 集合为空 ⇒ `return nil`」形态的守卫都在内，本仓库不止这一个。
+
+本次是因为要验 `verifyBitemporalShape` 守卫才顺手跑了一次，
+**结果验出了一个与守卫完全无关的问题**（就是上面那个 SIGKILL）。
+
+⚠️ 若当时只做静态核实就宣布部署完成，第一个撞上的会是 **daily 22:45 的无人值守唤起**，
+排查的人看到的是「sha256 对、签名对、可执行位对，一跑就死，没有任何日志」——这是本次迁移
+全过程最难归因的失效形态，且它**不由迁移引入，纯粹由部署手法引入**。
+
+**I｜备份不要放在 `deploy.sh` 会 `--delete` 的位置**
+
+`scripts/ops/deploy.sh` 是 `rsync -a -m --delete` 全量同步，`--exclude` 保护的是
+`/data/`、`/logs/`、`/queue/` 等。**仓库里不存在的目录会被 `--delete` 清掉。**
+
+本次迁移产物一开始放在 `runtime/atlas/m4c-migration/` —— **不在 exclude 列表里** ⇒ 任何人
+任何时候跑一次 `deploy.sh`，两份库备份、迁移前基线、以及**旧二进制**就都没了。
+
+🔴 旧二进制（`atlas-old-f86a46dc`，7 月构建）是回滚路径的一半，而它**无法重建**：
+新二进制可以从 master 的 commit 重新 `go build`，旧的不行。
+
+⇒ 迁移/部署类产物放 `data/` 下（受 `--exclude='/data/'` 保护）或 runtime 之外。
+本次处置是**复制**而非移动一份到 `data/m4c-migration-safe/`：移动会让 checkpoint、
+已落盘的迁移日志、以及其他 agent 记下的路径**全部失效**，而多占几十 MB 没有代价。
