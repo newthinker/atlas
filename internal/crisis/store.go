@@ -94,30 +94,91 @@ func verifyBitemporalShape(db *sql.DB, path string) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// UpsertObservations writes obs in one transaction; the (ts, indicator,
-// fetched_at) primary key makes a rewrite of the *same* revision overwrite, so
-// backfill and repeated daily wakeups are idempotent by construction. A new
-// fetched_at is a new revision and lands as an extra row — v_macro_current is
-// what picks the latest one.
+// sameObservationValue 判断两个观测值是否相同，把「两边都没有值」算作相同。
+//
+// 不能直接用 SQL 比较：那里 NULL != NULL，两行都没有值会被判成异值、于是一次
+// 无害的重跑变成报错。value 列可空（REAL 无 NOT NULL），所以这条不是假想情形。
+//
+// 一边 NULL 一边有值则是**异值** —— 0 不是「没有值」，把它们混为一谈会让一个
+// 真实的数据缺口悄悄变成 0。
+func sameObservationValue(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// UpsertObservations 在一个事务里写入 obs，**追加而非覆盖**（C6/AD-7）。
+//
+// 三段主键 (ts, indicator, fetched_at) 下，一次写入相对库中现状只有三种可能，
+// 三种的正确处置各不相同 —— 这正是不能用 INSERT OR REPLACE 或 OR IGNORE 的原因：
+//
+//   - 新的 fetched_at：这是一个新修订，追加一行。旧值留着，那是本次迁移的全部目的。
+//   - 三段全同且 value 也相同：采集器重跑了同一批，没有信息差，吞掉。
+//   - 三段全同而 value 不同：**同一次取回给出了两个值** —— 数据源或采集器出了
+//     问题。整批回滚并报错，不能静默选一个。
+//
+// OR REPLACE 会把第三种静默覆盖（正是本次要修的缺陷）；OR IGNORE 把第二、三种
+// 揉成一种，于是最该响的那一种被吞掉。两者都让错误变成看不见的数据损坏。
+//
+// ⚠️ 冲突检测查的是**基表**而非 v_macro_current：视图按定义只有当前行，查不到
+// 已存在的旧修订（实测：同键两个修订时，基表查旧修订得 1 行、视图得 0 行），
+// 据视图判「不存在」而插入会直接撞主键。这条裸读在 TestNoBareTableReadsOutsideMigration
+// 的豁免清单里，理由同此。
 func (s *Store) UpsertObservations(ctx context.Context, obs []Observation) error {
+	if len(obs) == 0 {
+		return nil // 没有要写的东西，连事务都不必开
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning tx: %w", err)
 	}
 	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO macro_observations (ts, indicator, value, source, fetched_at)
+
+	conflictCheck, err := tx.PrepareContext(ctx,
+		`SELECT value FROM macro_observations WHERE ts = ? AND indicator = ? AND fetched_at = ?`)
+	if err != nil {
+		return fmt.Errorf("preparing conflict check: %w", err)
+	}
+	defer conflictCheck.Close()
+
+	insert, err := tx.PrepareContext(ctx,
+		`INSERT INTO macro_observations (ts, indicator, value, source, fetched_at)
 		 VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
-		return fmt.Errorf("preparing upsert: %w", err)
+		return fmt.Errorf("preparing insert: %w", err)
 	}
-	defer stmt.Close()
+	defer insert.Close()
+
 	for _, o := range obs {
-		if _, err := stmt.ExecContext(ctx, o.Date, o.Indicator, o.Value, o.Source, o.FetchedAt); err != nil {
-			return fmt.Errorf("upserting %s/%s: %w", o.Indicator, o.Date, err)
+		var prev *float64
+		err := conflictCheck.QueryRowContext(ctx, o.Date, o.Indicator, o.FetchedAt).Scan(&prev)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := insert.ExecContext(ctx,
+				o.Date, o.Indicator, o.Value, o.Source, o.FetchedAt); err != nil {
+				return fmt.Errorf("inserting %s/%s: %w", o.Indicator, o.Date, err)
+			}
+		case err != nil:
+			return fmt.Errorf("checking %s/%s: %w", o.Indicator, o.Date, err)
+		case sameObservationValue(prev, &o.Value):
+			// 同一批被重跑了，无信息差
+		default:
+			return fmt.Errorf(
+				"crisis: %s/%s already has a different value for fetched_at %s (have %v, got %v): "+
+					"the same fetch reported two values; refusing to overwrite",
+				o.Indicator, o.Date, o.FetchedAt, derefValue(prev), o.Value)
 		}
 	}
 	return tx.Commit()
+}
+
+// derefValue 把可空的 value 渲染成错误文案里能读的东西。
+func derefValue(v *float64) any {
+	if v == nil {
+		return "NULL"
+	}
+	return *v
 }
 
 // obsSelect 从 v_macro_current 读，不是从 macro_observations。

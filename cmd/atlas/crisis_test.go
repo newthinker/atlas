@@ -582,6 +582,11 @@ func TestStateStreakDaysBreak(t *testing.T) {
 // boundary[0]   "区间内无 vix 观测 → 返回含 run backfill first 的错误"               → TestExecuteCrisisReplayNoData
 
 // seedReplayWatch 铺 80 日全绿 + 末 3 日 NFCI 转正(领先层红),用于触发一次 NORMAL→WATCH。
+//
+// 末 3 日的 NFCI 用**比 seedObservations 更晚的 fetched_at**：它改写的是同一
+// (ts, indicator) 已有的值，在 TASK-005 的写语义下那是一次**修订**，必须带新的
+// fetched_at。沿用同一个 fetched_at 会被判成「同一次取回给出两个值」而整批报错
+// （C6/AD-7）——那正是新写路径要拦的情形，不是夹具该绕过的。
 func seedReplayWatch(t *testing.T, st *crisis.Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -589,7 +594,7 @@ func seedReplayWatch(t *testing.T, st *crisis.Store) {
 	var red []crisis.Observation
 	for _, d := range []string{"2026-07-08", "2026-07-09", "2026-07-10"} {
 		red = append(red, crisis.Observation{Date: d, Indicator: crisis.IndNFCI, Value: 0.2,
-			Source: "test", FetchedAt: "2026-07-11T00:00:00.000000000Z"})
+			Source: "test", FetchedAt: "2026-07-12T00:00:00.000000000Z"})
 	}
 	require.NoError(t, st.UpsertObservations(ctx, red))
 }

@@ -3,7 +3,8 @@ package crisis
 // Context Checkpoint: done_criteria → test mapping (store)
 // functional[1] NewStore WAL+建表 / UpsertObservations 事务 / SeriesWindow / SeriesSince → TestStoreUpsertIdempotentAndWindows
 // functional[2] AppendEvaluations / RecentSystemEvals(新→旧) / RecentIndicatorEvals / LatestSystemEval / HasSystemEvalForDate / Reader/History 适配器 → TestStoreEvaluations
-// boundary[0]   同 (ts,indicator) 重复 upsert 覆盖而非报错 → TestStoreUpsertIdempotentAndWindows
+// boundary[0]   同三段主键 (ts,indicator,fetched_at) 且 value 相同的重复 upsert 被吞掉；**异值则报错**
+//               （TASK-005/C6 契约变更：此前是 INSERT OR REPLACE 覆盖）→ TestStoreUpsertIdempotentAndWindows
 // boundary[1]   Observation/LatestObservation/LatestSystemEval 无数据返回 (nil,nil) → TestStoreUpsertIdempotentAndWindows / TestStoreEvaluations
 // error_handling[0] NewStore 不可创建路径返回包装错误 → TestNewStoreBadPath
 
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -42,15 +44,25 @@ func TestStoreUpsertIdempotentAndWindows(t *testing.T) {
 	}
 	require.NoError(t, s.UpsertObservations(ctx, obs))
 
-	// 同 (ts, indicator) 重写为覆盖而非报错（多时点唤起的幂等基础）
-	obs[2].Value = 18
+	// 整批重写同一批（三段全同、value 也全同）⇒ 吞掉，不报错。
+	// 这是多时点唤起的幂等基础：采集器重跑同一批没有信息差。
 	require.NoError(t, s.UpsertObservations(ctx, obs))
 
+	// 🔴 契约变更（TASK-005/C6）：三段全同而 value 不同，是「同一次取回给出了
+	// 两个值」—— 那是数据源或采集器的问题，**必须响亮失败**，不能像以前
+	// （INSERT OR REPLACE）那样静默覆盖掉前一个值。
+	obs[2].Value = 18
+	err := s.UpsertObservations(ctx, obs)
+	require.Error(t, err, "同三段主键异值必须报错，不得覆盖")
+	assert.Contains(t, err.Error(), IndVIX)
+	assert.Contains(t, err.Error(), "2026-07-03")
+
+	// 失败的批次整批回滚 ⇒ 库里仍是第一次写入的 17
 	win, err := s.SeriesWindow(ctx, IndVIX, "2026-07-03", 2)
 	require.NoError(t, err)
 	require.Len(t, win, 2) // 截断到 n，升序
 	assert.Equal(t, 16.0, win[0].Value)
-	assert.Equal(t, 18.0, win[1].Value)
+	assert.Equal(t, 17.0, win[1].Value, "冲突批次整批回滚，旧值不变")
 
 	since, err := s.SeriesSince(ctx, IndVIX, "2026-07-02", "2026-07-03")
 	require.NoError(t, err)
@@ -506,11 +518,24 @@ func TestReadsFailLoudlyWhenViewMissing(t *testing.T) {
 // 里没有 `FROM macro_observations` 这个字面量 ⇒ 本判据不会命中它，**不需要**为它
 // 加豁免。（写在这里免得后人看见视图 SQL 就去加一条多余的豁免。）
 func TestNoBareTableReadsOutsideMigration(t *testing.T) {
-	// 迁移必须裸读：它的工作就是在视图还不存在、或正要重建它的时候搬数据。
-	// 逐条列出而非整文件豁免 —— migrate.go 将来新增的裸读同样要被看见。
-	allowedBare := []string{
-		"migrate.go: SELECT COUNT(*) FROM macro_observations  （迁移前行数 RowsBefore）",
-		"migrate.go: SELECT COUNT(*) FROM macro_observations  （迁移后行数 RowsAfter）",
+	// 逐条列出而非整文件豁免 —— 这些文件将来新增的裸读同样要被看见。
+	//
+	// 两类合法裸读，理由不同：
+	//   - migrate.go：迁移的工作就是在视图还不存在、或正要重建它的时候搬数据。
+	//     🔴 它的两处 COUNT(*) **必须留在基表**：数的是**全部修订**，改走视图就
+	//     只数当前行，迁移的三计数会当场失去意义。
+	//   - store.go 的 UpsertObservations：写冲突检测要回答「这个确切的
+	//     (ts, indicator, fetched_at) 是否已存在」，而视图按定义只有当前行
+	//     （实测：同键两个修订时，基表查旧修订得 1 行、视图得 0 行），据视图判
+	//     「不存在」而插入会直接撞主键。这是**写路径**的裸读，与「读路径必须走
+	//     视图」不冲突。
+	// 每条带 SQL 特征片段 ⇒ 匹配是**逐处**的，不是整文件放行：同一文件里新增
+	// 一处不同的裸读会因匹配不上而红，新增一处相同的会因总数超标而红。
+	type bareRead struct{ file, sqlFragment, why string }
+	allowedBare := []bareRead{
+		{"migrate.go", "SELECT COUNT(*) FROM macro_observations", "迁移前行数 RowsBefore"},
+		{"migrate.go", "SELECT COUNT(*) FROM macro_observations", "迁移后行数 RowsAfter"},
+		{"store.go", "SELECT value FROM macro_observations", "UpsertObservations 的写冲突检测"},
 	}
 
 	bare := regexp.MustCompile(`FROM\s+macro_observations\b`)
@@ -541,10 +566,173 @@ func TestNoBareTableReadsOutsideMigration(t *testing.T) {
 	}
 
 	for _, hit := range found {
-		assert.True(t, strings.HasPrefix(hit, "migrate.go:"),
-			"非测试源码只许经 v_macro_current 读，裸读 macro_observations 的只有迁移：%s", hit)
+		matched := slices.ContainsFunc(allowedBare, func(a bareRead) bool {
+			return strings.HasPrefix(hit, a.file+":") && strings.Contains(hit, a.sqlFragment)
+		})
+		assert.True(t, matched,
+			"非测试源码只许经 v_macro_current 读；这处裸读不在豁免清单里：%s", hit)
 	}
 	assert.Len(t, found, len(allowedBare),
 		"豁免条数必须恰为 %d —— 多了是新增裸读，少了是豁免清单没跟上实现。\n  清单：%v\n  实际：%v",
 		len(allowedBare), allowedBare, found)
+}
+
+// ---------------------------------------------------------------------------
+// TASK-005 写路径改追加：裸 INSERT + 冲突按 value 分流（C6/AD-7）
+//
+// Context Checkpoint: done_criteria → test mapping (append-on-write)
+// functional[0]     追加而非覆盖：新 fetched_at ⇒ 裸表 2 行，Observation 看到新值      → TestUpsertAppendsNewRevision
+// functional[1]     同三段同值幂等：写两次不报错，裸表仍 1 行                            → TestUpsertSameTripleSameValueIsNoop
+// functional[2]     同三段异值响亮失败 + 整批回滚，文案含 indicator 与 ts               → TestUpsertSameTripleDifferentValueFails
+// functional[3]     源码钉死：不得出现 INSERT OR REPLACE / OR IGNORE INTO macro_observations → TestWritePathHasNoReplaceOrIgnore
+// boundary[0](a)    裸 INSERT 造 NULL 前置行，API 写同三段非 NULL ⇒ 报错                → TestUpsertNullVersusNonNullConflicts
+// boundary[0](b)    两边都 NULL 判「相同」——直接调比对函数                              → TestSameObservationValueNullSemantics
+// boundary[1]       批量中途冲突 ⇒ 整批回滚，前面已成功的行也不落盘                      → TestUpsertRollsBackWholeBatch
+// error_handling[0] 空切片是 no-op，不报错                                              → TestUpsertEmptySliceIsNoop
+// non_functional[0] 既有契约改写方向（同三段异值期望 error）                             → TestStoreUpsertIdempotentAndWindows（上方，已改写）
+
+// baseRowCount 直接数**基表**行数。
+//
+// 刻意不走视图：本任务全部断言的对象是「旧修订有没有被保留」，而视图按定义只
+// 显示当前行 —— 用它数行永远得不到 2，测不出覆盖与追加的区别。
+func baseRowCount(t *testing.T, s *Store, ts, indicator string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, s.db.QueryRow(
+		`SELECT COUNT(*) FROM macro_observations WHERE ts = ? AND indicator = ?`,
+		ts, indicator).Scan(&n))
+	return n
+}
+
+// TestUpsertAppendsNewRevision 是本任务的核心：新的 fetched_at 是新增行，不是覆盖。
+func TestUpsertAppendsNewRevision(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	}))
+	require.NoError(t, s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 11, Source: "fred", FetchedAt: "2026-08-14T00:00:00Z"},
+	}))
+
+	assert.Equal(t, 2, baseRowCount(t, s, "2026-01-02", IndVIX),
+		"旧修订必须还在 —— 保留它正是这次迁移的全部目的")
+
+	got, err := s.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 11.0, got.Value, "读路径仍只看到当前行")
+}
+
+// TestUpsertSameTripleSameValueIsNoop：采集器重跑同一批没有信息差，吞掉即可。
+func TestUpsertSameTripleSameValueIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	batch := []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	}
+
+	require.NoError(t, s.UpsertObservations(ctx, batch))
+	require.NoError(t, s.UpsertObservations(ctx, batch), "同三段同值重写不得报错")
+	assert.Equal(t, 1, baseRowCount(t, s, "2026-01-02", IndVIX), "也不得插出第二行")
+}
+
+// TestUpsertSameTripleDifferentValueFails：同一次取回给出两个值 ⇒ 响亮失败。
+//
+// 这是 OR IGNORE 会掩盖掉的那一种：它把「重复」和「矛盾」揉成一种，而后者是
+// 数据源或采集器出了问题，静默吞掉等于把一个真实故障变成看不见的数据损坏。
+func TestUpsertSameTripleDifferentValueFails(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	}))
+
+	err := s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 99, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), IndVIX, "文案要指名是哪个指标")
+	assert.Contains(t, err.Error(), "2026-01-02", "文案要指名是哪天")
+
+	assert.Equal(t, 1, baseRowCount(t, s, "2026-01-02", IndVIX), "失败批次不留半个状态")
+	got, err := s.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	assert.Equal(t, 10.0, got.Value, "原值不得被改动")
+}
+
+// TestUpsertRollsBackWholeBatch 覆盖 boundary[1]：批内前面已成功的行也要回滚。
+func TestUpsertRollsBackWholeBatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	}))
+
+	// 批内第一行是全新的（本可成功），第二行与已有行冲突
+	err := s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-05", Indicator: IndVIX, Value: 50, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 99, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	})
+	require.Error(t, err)
+
+	assert.Equal(t, 0, baseRowCount(t, s, "2026-01-05", IndVIX),
+		"批内前面已成功的行也必须回滚 —— 半批落盘比整批失败更难排查")
+	assert.Equal(t, 1, baseRowCount(t, s, "2026-01-02", IndVIX))
+}
+
+// TestUpsertEmptySliceIsNoop 覆盖 error_handling[0]。
+func TestUpsertEmptySliceIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	assert.NoError(t, s.UpsertObservations(context.Background(), nil))
+	assert.NoError(t, s.UpsertObservations(context.Background(), []Observation{}))
+}
+
+// TestUpsertNullVersusNonNullConflicts 覆盖 boundary[0](a)。
+//
+// ⚠️ Observation.Value 是 float64，经公开 API **写不出 NULL**，所以前置行只能用
+// 裸 INSERT 造。一边 NULL 一边非 NULL 是**异值**，必须报错。
+func TestUpsertNullVersusNonNullConflicts(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	_, err := s.db.Exec(
+		`INSERT INTO macro_observations (ts, indicator, value, source, fetched_at) VALUES (?,?,NULL,?,?)`,
+		"2026-01-02", IndVIX, "fred", "2026-07-14T00:00:00Z")
+	require.NoError(t, err)
+
+	err = s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-01-02", Indicator: IndVIX, Value: 10, Source: "fred", FetchedAt: "2026-07-14T00:00:00Z"},
+	})
+	require.Error(t, err, "已有行 value 为 NULL 而新值非 NULL，是异值")
+	assert.Equal(t, 1, baseRowCount(t, s, "2026-01-02", IndVIX))
+}
+
+// TestSameObservationValueNullSemantics 覆盖 boundary[0](b)：直接调比对函数。
+//
+// 「两边都 NULL 判相同」走不到 UpsertObservations（API 写不出 NULL），只能直接
+// 测比对函数本身 —— 否则这条语义没有任何测试覆盖。
+func TestSameObservationValueNullSemantics(t *testing.T) {
+	ptr := func(v float64) *float64 { return &v }
+
+	assert.True(t, sameObservationValue(nil, nil), "两边都 NULL 判相同（SQL 的 NULL != NULL 在这里是错的语义）")
+	assert.False(t, sameObservationValue(nil, ptr(0)), "一边 NULL 一边 0 是异值，0 不是「没有值」")
+	assert.False(t, sameObservationValue(ptr(0), nil))
+	assert.True(t, sameObservationValue(ptr(10), ptr(10)))
+	assert.False(t, sameObservationValue(ptr(10), ptr(11)))
+}
+
+// TestWritePathHasNoReplaceOrIgnore 覆盖 functional[3]：源码钉死两种写法。
+//
+// OR REPLACE 是本次要修的缺陷本身；OR IGNORE 把「重复」和「矛盾」揉成一种，
+// 会让「同一次取回给出两个值」被静默吞掉 —— 那正是最该响的一种。
+func TestWritePathHasNoReplaceOrIgnore(t *testing.T) {
+	src, err := os.ReadFile("store.go")
+	require.NoError(t, err)
+	body := strings.ToUpper(string(src))
+
+	assert.NotContains(t, body, "INSERT OR REPLACE INTO MACRO_OBSERVATIONS")
+	assert.NotContains(t, body, "INSERT OR IGNORE INTO MACRO_OBSERVATIONS")
 }
