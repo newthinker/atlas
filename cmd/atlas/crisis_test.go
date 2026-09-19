@@ -1357,7 +1357,17 @@ func TestParseAsOfRejectsZeroOffsetDespiteSameInstant(t *testing.T) {
 
 	_, err = parseAsOf(offsetForm)
 	require.Error(t, err, "同一时刻不代表同样的文本比较结果 —— 零偏移形式必须拒")
-	assert.Contains(t, err.Error(), "+00:00", "文案要点名这种形态也不收")
+	// 🔴 断言 "including +00:00" 而非裸的 "+00:00"：错误文案用 %q **原样回显输入**，
+	// 而输入本身就含 "+00:00" ⇒ 裸串是**恒真断言**，不区分「文案解释了零偏移这一类」
+	// 与「文案只是复读了用户的输入」。实测三种文案：
+	//
+	//	文案变体                    Contains("+00:00")   Contains("including +00:00")
+	//	现行                              true                    true
+	//	退回前一版（不点名零偏移）          true  ←                 false
+	//	砍成 "--as-of %q: bad"            true  ←                 false
+	//
+	// 第二行是要害：裸串连「退回到本次刚修掉的那版文案」都放过。
+	assert.Contains(t, err.Error(), "including +00:00", "文案要点名这种形态也不收")
 
 	// 后果：同一行数据，两种写法的字典序比较结果相反
 	const row = "2026-07-13T00:00:00.000000000Z"
