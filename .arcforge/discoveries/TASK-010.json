@@ -1,0 +1,86 @@
+{
+  "task_id": "TASK-010",
+  "title": "列级校验守卫的参照系缺陷：加列这个动作本身使守卫失明",
+  "key_findings": [
+    "缺陷是**构造上必然**的，不需要实测就能定死：守卫的 have 集来自 columnNames(q, \"macro_observations\")，而新表由 schemaDDL() ← tablesDDL 建 ⇒ 任何加进 tablesDDL 的列必然出现在 have 里、必然不在 lost 里。",
+    "失明的**时机**才是要害：原错误信息指名要求的动作（「给 tablesDDL 加列时必须同步改它」）**正是使守卫失明的那个动作**。守卫只在你还没开始加列的时候保护你，而那时它无事可做。",
+    "行为上「_v1 存在才查」与「无条件检查」**等价**：columnNames 对不存在的表返回 err=nil、cols=[]（已实测），所以 lost 恒为空、静默通过。收窄的价值在**结构与注释**，不在行为——这一点已写进测试注释，不冒充守卫。",
+    "复现该缺陷**必须同时改两处**：schema.go 的 tablesDDL 与 migrate_test.go 的 legacySchema（老库由后者建）。只改前者会得到 no such column，复现失败。",
+    "修法本身原先无人守卫：交付前实测「把修法退回成盲区写法，全量测试依然全绿」⇒ 必须配一条能杀死退回的测试，否则它会被静默退回。"
+  ],
+  "decisions": [
+    {
+      "decision": "参照系改为搬运清单 migratedColumns（包级切片），INSERT 由它拼出，守卫用「旧表列 ∖ 该切片」",
+      "rationale": "两份清单合一之后，「加了列但没加进 INSERT」这条旁路在构造上不存在。相比之下，任何「记得同步改两处」的方案都把正确性挂在人的自觉上，而原缺陷恰恰证明了那个自觉会失效。"
+    },
+    {
+      "decision": "错误信息文案跟着改（承重件 len(lost) / strings.Join(lost, \", \") / 指向 copying rows 那一步的指针保留）",
+      "rationale": "那句话**原本就是该缺陷的一半**。只改代码不改文案，结果是代码不再失明而文案仍在指引那个使人失明的动作。Leader 明确裁决射程只覆盖三个承重件，不含这句条件描述。"
+    },
+    {
+      "decision": "AlreadyMigrated 分支显式判断 _v1 是否存在，而不是依赖 columnNames 对不存在的表返回空列表",
+      "rationale": "两种写法行为等价，但隐式写法让「没丢」与「无从判断」共用一条无差别的路径，**连写下这个区别的地方都没有**。显式分支为那段注释提供了落点。沉默的两个来源写明之后，调用方才不会把静默读成「这个库的列是全的」。"
+    },
+    {
+      "decision": "行号锚 :125 改为符号锚「步骤表里 renaming legacy table 那一步」，并保留 :125 作为历史引用",
+      "rationale": "该行号在**写下时就已经是错的**（RENAME TO 实际在 :176），而本次修改又会让行号再漂一次。行号锚与符号锚的区别不是精度而是**是否会自己变坏**。保留历史引用是为了让后人知道这里曾经错过，而不是重新写一个行号。"
+    },
+    {
+      "decision": "订正 columnsNotMigrated 的函数头注释（DoD 未列，但属 error_handling[0] 同一类）",
+      "rationale": "原注释三重过期，其中「返回『旧表有、新表没有』的列名」最危险——**它在文档层面把本次修复的核心整个抵消掉**：读注释的人会以为参照系仍是新表。改了代码而留下描述旧代码的注释，与 error_handling[0] 是同一个失效模式，只是载体从错误信息换成了函数头。"
+    },
+    {
+      "decision": "TestAlreadyMigratedSilentWithoutLegacyTable 在注释里明说自己不是非恒真守卫",
+      "rationale": "它在修法态与无条件检查两种写法下都绿，不杀死任何东西。把它标成守卫会制造一个「已被守护」的假象，而那正是本任务要修的缺陷的心智版本。它守的是「加了检查之后别误伤干净的库」，是回归保护。"
+    }
+  ],
+  "files_modified": [
+    "internal/crisis/migrate.go",
+    "internal/crisis/migrate_test.go"
+  ],
+  "interfaces_exposed": [
+    "migratedColumns []string —— 包内搬运清单，单一来源。新增需要搬运的列时改这里，INSERT 与列级校验同时生效。",
+    "querier interface{QueryContext, QueryRowContext} —— 让列检查既能在迁移事务内跑，也能在 AlreadyMigrated 路径上直接对 *sql.DB 跑。*sql.DB 与 *sql.Tx 都满足。",
+    "tableExists(ctx, querier, name) (bool, error) —— 包内辅助。",
+    "MigrateBitemporal 新增一条错误路径：库已是三段主键、_v1 仍在且比搬运清单多列时报错而非静默返回 AlreadyMigrated。"
+  ],
+  "verification": {
+    "commit": "80338a2dc785822087bc99e6f0baa141b6222fe5",
+    "branch": "task/TASK-010",
+    "suite": "cd <worktree> && go build ./internal/crisis/ && go test ./internal/crisis/ ⇒ 145 PASS / 0 FAIL",
+    "baseline": "142 PASS / 0 FAIL @ d78a4d880cba940382f91b37e3ae6aaccda709c1（在同一棵树上现采，非引用历史值）",
+    "no_regression_method": "**按测试名逐条比对**而非减法：基线 PASS 集合与交付态 PASS 集合取差，「基线有而现在没有」= 0 条，新增正好 3 条（142+3=145 这个算式成立不足以排除「少 1 条原测试、多 4 条新测试」）。",
+    "functional_1_ab": {
+      "触发集": "schema.go 的 tablesDDL 加 note TEXT **且** migrate_test.go 的 legacySchema 加 note TEXT，老库 3 行 note 有值",
+      "A_退回态": "ERR=<nil>，RowsBefore/After/ViewRows=3/3/3，迁移后新表 note 非空=0（整列静默丢失）",
+      "B_交付态": "ERR=「crisis: migrate: 旧表有 1 列没有被搬运到新表: note …」，计数 0/0/0（事务原子回滚），note 非空=3（老表原样）",
+      "采样方式": "同一 worktree 紧邻两次，只改守卫参照系一处，其余逐字节不动"
+    },
+    "boundary_0_nontrivial": {
+      "方法": "把修法退回成参照新表 schema 的写法，守卫测试须红",
+      "编译判据": "go build rc=0（按 DoD 要求用 build 而非 vet；本次 vet 也是 0，但判据锚在 build）",
+      "结果": "--- FAIL: TestColumnsNotMigratedUsesCopyListNotNewSchema，expected: []string{\"note\"} / actual: []string(nil)"
+    },
+    "mutation_hygiene": "变异只作用在隔离 worktree（/Users/zuowei/workspace/go/src/github.com/newthinker/wt-TASK-010），主仓库 internal/crisis/ 全程 0 条未提交改动。变异后三份文件 sha256 与变异前**逐字节相同**（diff 核验通过），实验用 zz_*.go 残留 0 个。",
+    "merge_rehearsal": "在可弃的临时 worktree 上预演 merge 到 master：Automatic merge went well（无冲突），合并后 go build ./... rc=0、internal/crisis 145 PASS / 0 FAIL。预演 worktree 已拆。",
+    "scope": "实际改动文件 = writes 声明（internal/crisis/migrate.go + migrate_test.go），**无越界**。触发集需要临时改 schema.go，但那是隔离副本上的变异、已还原且不在提交里，故未扩 writes。",
+    "grep_caveat_for_verifier": [
+      "两处**刻意保留的历史引用**会让裸 grep 误判成「未修」：",
+      "① ':125' 命中 1 处（migrate.go:81，内容为「这行原本写的 :125 在写下时就已经是错的」）——是历史引用，不是锚；锚已改成「步骤表里 renaming legacy table 那一步」。",
+      "② 「它读的是本次迁移刚建出来的新表」命中 1 处——是 columnsNotMigrated 函数头的**撤回留痕**。",
+      "按验证者自己在 TASK-007 给出的 F7 处方，撤回留痕的判据应是 grep -cF ≥1 而非 =0，且整句须同行——这两处都整句同行，符合处方。"
+    ],
+    "code_simplifier": "按全局规范执行（subagent a9075e5d3a00e3a3e，13 次工具调用 / 180 秒）。它**未改动任何文件**（已用内容判据核实：硬约束内容全在、145 PASS / 0 FAIL、三条新测试在；numstat 由 74/17 变 81/22 的增量可由我自己随后的一次注释订正完全解释）。其回复正文自相矛盾且未带回简化结论，已追问；实质结果等同「无可简化」。三重过期注释那一处是我自审 diff 时发现的，不是它发现的。",
+    "merge_status_at_handoff": {
+      "state": "NOT-MERGED",
+      "warning": "🔴 转 dev_done 时本交付**尚未 merge 到 master**。门禁那次 PASS **不构成对本交付的验证**——门禁识别范围用 git（经 task_branch_ref 看得见 HEAD..refs/heads/task/TASK-010，实测命中我的 2 个文件），但执行测试用的是 `go test $PKGS` 跑在主仓库工作树（= master）上，那棵树 migratedColumns 命中 0 处。⇒ 它跑的是 142 条原测试，不是我的 145 条。",
+      "verifier_must": "**必须在 task/TASK-010 分支（或 merge 后的 master）上验，不能在未 merge 的 master 工作区验**。命令：git worktree add --detach <tmp> 80338a2dc785822087bc99e6f0baa141b6222fe5 && cd <tmp> && go build ./internal/crisis/ && go test ./internal/crisis/ ⇒ 应得 145 PASS / 0 FAIL。在未 merge 的 master 上跑会得到 142 PASS，那是原代码，不是缺陷。",
+      "why_handed_off_unmerged": "merge 是 leader 专属动作（CLAUDE.md：合并回 main 由 Leader 串行执行）。我提交后请求 merge 并催办共 4 封 inbox 消息，全部送达但 45+ 分钟无回应。而 `in_progress` **不在 leader 的轮询扫描动作列表**（它只扫 dev_done/rejected/review_fix），也**不在 stale-dispatch 的覆盖状态**（该规则刻意不含 in_progress）⇒ 停在 in_progress 对 leader 的两套发现机制都是隐形的，而 inbox 按 CLAUDE.md 本就只是通知、不是真相源。转 dev_done 是让文件层能被看见的唯一方式。",
+      "branch_sha": "80338a2dc785822087bc99e6f0baa141b6222fe5",
+      "merge_rehearsed": "已在可弃 worktree 预演：Automatic merge went well（无冲突），合并后 go build ./... rc=0、internal/crisis 145 PASS / 0 FAIL。master 自 d78a4d8 起未前进，预演结论仍有效。"
+    }
+  },
+  "out_of_scope": [
+    "以下属 TASK-002 遗留的 B 类（注释与文档精度），本任务 DoD 未列，刻意未做：:195 注释的条件描述、:51 的 PRAGMA 语句形态 vs 函数形态、映射块 :9 的「无 _new」、MigrateResult 注释里「三计数是唯一判据」、两处逐字节相同的 reading columns of %s、补记审查者对 objectNames 那一半的变异来源。"
+  ]
+}
