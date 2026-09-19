@@ -20,8 +20,59 @@ type MigrateResult struct {
 	ViewRows        int // v_macro_current 行数
 }
 
-// legacyTableName 是迁移后旧表的名字。保留而非丢弃：回滚靠两次 RENAME，
-// 迁移正确性的逐值对照也靠它（设计 C3）。
+// columnsNotMigrated 返回「旧表有、新表没有」的列名（有序）。
+//
+// 必须在事务内、Commit 之前调用 —— 它读的是本次迁移刚建出来的新表。
+// 用列名集合而不是列数：列数相等但改了名同样是丢失，而数量判据看不出来。
+func columnsNotMigrated(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	oldCols, err := columnNames(ctx, tx, legacyTableName)
+	if err != nil {
+		return nil, err
+	}
+	newCols, err := columnNames(ctx, tx, "macro_observations")
+	if err != nil {
+		return nil, err
+	}
+	have := make(map[string]bool, len(newCols))
+	for _, c := range newCols {
+		have[c] = true
+	}
+	var lost []string
+	for _, c := range oldCols {
+		if !have[c] {
+			lost = append(lost, c)
+		}
+	}
+	return lost, nil
+}
+
+// columnNames 按建表顺序返回表的列名。
+func columnNames(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
+	// PRAGMA 不支持占位符，表名是包内常量/字面量，不来自外部输入。
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("crisis: migrate: reading columns of %s: %w", table, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("crisis: migrate: scanning columns of %s: %w", table, err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("crisis: migrate: reading columns of %s: %w", table, err)
+	}
+	return out, nil
+}
+
+// legacyTableName 是迁移后旧表的名字。保留而非丢弃，两个用途：
+//
+//   - 回滚：DROP 掉新表再把它 **RENAME 回去**（一次 RENAME，不是两次 ——
+//     本函数向前迁移时也只有 :125 那一处 `RENAME TO`）。
+//   - 迁移正确性的逐值对照（设计 C3）。
 const legacyTableName = "macro_observations_v1"
 
 // MigrateBitemporal 把 macro_observations 迁到三段主键，幂等。
@@ -139,6 +190,21 @@ func migrate(ctx context.Context, db *sql.DB) (MigrateResult, error) {
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM v_macro_current`).Scan(&res.ViewRows); err != nil {
 		return MigrateResult{}, fmt.Errorf("crisis: migrate: counting view rows: %w", err)
+	}
+
+	// 列级校验：上面三个计数全是 COUNT(*)，**行数口径**。而搬运用的是
+	// `INSERT … (5 列) SELECT 5 列` 的硬编码清单 —— 老库多一列，那一列整列搬不过来，
+	// 而三个计数一个都不会变（实测：老库带 note 列、3 行有值，迁移后三计数仍是
+	// 3/3/3 相等，note 有值的行数从 3 变成 0）。⇒ 丢失发生在**列维度**，
+	// 而判据在**行维度**：检查的维度比它声称守住的集合窄一维，必然漏。
+	if lost, err := columnsNotMigrated(ctx, tx); err != nil {
+		return MigrateResult{}, err
+	} else if len(lost) > 0 {
+		return MigrateResult{}, fmt.Errorf(
+			"crisis: migrate: 旧表有 %d 列没有被搬运到新表: %s —— "+
+				"搬运语句的列清单是硬编码的（见上面 copying rows 那一步），"+
+				"给 tablesDDL 加列时必须同步改它；三个计数是行数口径，发现不了这种丢失",
+			len(lost), strings.Join(lost, ", "))
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -91,6 +91,27 @@ func objectExists(t *testing.T, db *sql.DB, name string) bool {
 	return countRows(t, db, `SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, name) > 0
 }
 
+// objectNames 返回库内全部对象的 `type:name`（有序）。
+//
+// 用它而不是逐个 objectExists：后者只挡得住**你想得到的**那个残留名字，而
+// 「迁移失败必须原子」这个不变量说的是**任何**中间产物都不该留下。逐个点名的
+// 写法在实现换一个临时表名时就失效了，而且因为那个名字从没出现在实现里，
+// 断言恒真、永远不会告诉你它已经失效（V-3 就是这么来的）。
+func objectNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT type || ':' || name FROM sqlite_master ORDER BY type, name`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		require.NoError(t, rows.Scan(&s))
+		out = append(out, s)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
 // TestMigrateConvertsLegacyShape：老形状 → 新形状，数据一行不差。
 func TestMigrateConvertsLegacyShape(t *testing.T) {
 	path := legacyDB(t,
@@ -184,7 +205,7 @@ func TestMigrateKeepsLegacyTable(t *testing.T) {
 
 	db := openRaw(t, path)
 	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM macro_observations_v1`),
-		"旧表必须保留且行数一致 —— 回滚靠两次 RENAME，对照靠它")
+		"旧表必须保留且行数一致 —— 回滚要把它 RENAME 回去（一次），逐值对照也靠它")
 }
 
 // TestMigrateRebuildsIndex 是 C2，最容易漏的一条。
@@ -219,6 +240,8 @@ func TestMigrateRejectsNullFetchedAtAtomically(t *testing.T) {
 		legacyRow{"2026-01-03", "vix", 20, nil}, // NULL fetched_at
 	)
 
+	before := objectNames(t, openRaw(t, path))
+
 	_, err := MigrateBitemporal(context.Background(), path)
 	require.Error(t, err, "含 NULL fetched_at 的老库必须迁移失败")
 
@@ -227,8 +250,44 @@ func TestMigrateRejectsNullFetchedAtAtomically(t *testing.T) {
 	assert.Contains(t, flat, "PRIMARY KEY (ts, indicator)", "失败后必须仍是老形状")
 	assert.NotContains(t, flat, "fetched_at TEXT NOT NULL")
 	assert.False(t, objectExists(t, db, "macro_observations_v1"), "不得留下 _v1")
-	assert.False(t, objectExists(t, db, "macro_observations_new"), "不得留下 _new 残留")
+	// 全集比对：任何中间产物（不论叫什么名字）都会让这一条变红。
+	// 这里曾写的是 `assert.False(objectExists(db, "macro_observations_new"))` —— 而
+	// `macro_observations_new` 全仓只出现在那一行里（实现从不走 _new 路线），
+	// 于是它恒真。恒真的断言与「被删掉」的唯一区别是它看起来还在守着。
+	assert.Equal(t, before, objectNames(t, db), "迁移失败必须原子：不得留下任何中间产物")
 	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM macro_observations`), "数据一行不少")
+}
+
+// TestMigrateRejectsUnmigratedColumns：老库多一列时必须响亮失败，而不是静默丢掉它。
+//
+// 这一条钉的是 V-9：三个计数（RowsBefore/RowsAfter/ViewRows）全是 COUNT(*)，**行数口径**，
+// 而搬运语句的列清单是硬编码的。老库多一列时那一列整列搬不过来，**三个计数一个都不会变**
+// —— 它们照样相等、照样「全绿」，而数据已经丢了。
+//
+// ⇒ 判据在行维度、丢失在列维度：**检查的维度比它声称守住的集合窄一维，必然漏。**
+// 所以这里不测计数，测的是「迁移拒绝执行」这个性质。
+func TestMigrateRejectsUnmigratedColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "extra-col.db")
+	db := openRaw(t, path)
+	_, err := db.Exec(legacySchema)
+	require.NoError(t, err)
+	_, err = db.Exec(`ALTER TABLE macro_observations ADD COLUMN note TEXT`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO macro_observations VALUES (?,?,?,?,?,?)`,
+		"2026-01-02", "vix", 10.0, "test", "2026-07-14T00:00:00Z", "有值")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	_, err = MigrateBitemporal(context.Background(), path)
+	require.Error(t, err, "老库多出的列搬不过来，必须失败而不是静默丢列")
+	assert.Contains(t, err.Error(), "note", "错误必须点名是哪一列，否则运维不知道改哪儿")
+
+	// 失败后库原样：note 列与它的值都还在，等人去修搬运语句。
+	db = openRaw(t, path)
+	assert.Equal(t, 1, countRows(t, db,
+		`SELECT COUNT(*) FROM macro_observations WHERE note IS NOT NULL`),
+		"失败必须原子，note 的值不能丢")
+	assert.False(t, objectExists(t, db, legacyTableName), "不得留下 _v1")
 }
 
 // TestMigrateEmptyDB：空库迁移成功，三个计数均为 0。
