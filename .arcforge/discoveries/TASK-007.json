@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-007",
+  "title": "crisis replay --as-of",
+  "provenance": "代码全部由 dev-m4c-a 编写。两个 commit：318733721564e113d55d6cf4bc10939960ec7394（实现，合入经 659bb0d）+ 739bfdead10408845341ddb979b56b925fff6d86（缺陷修复与五项裁决，合入经 0081c29）。第二个 commit 起因于 Leader 在 merge 前查出的一个**正确性缺陷**（parseAsOf 接受带时区偏移的 RFC3339），以及 code-simplifier 的四条意见与一处 DoD 标签订正。⚠️ 派发通知未送达，本任务是我**重扫任务文件**发现 `TASK-007 assigned` 才开工的；Leader 的两次指令也都是从 merge commit 正文读到的（消息通道双向丢失，git 是唯一已证可达的通道）。",
+  "key_findings": [
+    "🔴 **带时区偏移的 RFC3339 会让 as-of 静默错位**（Leader 查出，我用 sqlite 实测复核）：`--as-of` 的值最终进 `AsOfQuery` 的 `fetched_at <= ?`，而 fetched_at 是 TEXT ⇒ SQLite 做**字典序比较，不是时刻比较**。实测：库内 `2026-07-12T20:00:00.000000000Z`，`SELECT COUNT(*) WHERE f <= '2026-07-13T00:00:00+08:00'` 返回 **1**（被包含），而同一时刻写成 `2026-07-12T16:00:00Z` 返回 **0**（正确排除）。⇒ 一个发生在 as-of **之后 4 小时**的修订被静默包含，输出形状完全正常、不报错。",
+    "🔴 **修法只能是拒绝，不能是转 UTC**：`t.UTC().Format(time.RFC3339Nano)` 会把 `…150777000Z` 压成 `…150777Z`（尾随零被截），而字典序上 `…150777500Z <= …150777Z` 为真 ⇒ 用一个无声的错换另一个。拒绝是这里唯一不产生新错位的选项。（code-simplifier 提出、Leader 采纳，我复核认同。）",
+    "🔴 **RED 阶段的绿有三类，而不是两类**（本轮最值钱的发现，由 Leader 留的一个自查问题逼出）：\n  ① 【守住】的绿：性质本来就对（上游已保证）⇒ 靠变异取证；\n  ② 【实现】该红却绿：测试没钉住该性质 ⇒ **真缺口**；\n  ③ **前置条件未满足，缺陷根本没被触发 ⇒ 测试暂时无效**。\n  boundary[0] 就是第 ③ 类：RED 阶段 parseAsOf 是恒通过的桩、`--as-of` 未接线，reader 仍是当前形态 ⇒ 数据全在 ⇒ `len(days) != 0` ⇒ 那个分支**从未被触达**。\n  ⚠️ ③ 在 RED 输出里与 ① **完全同形**（都是 `--- PASS`）。而我当时看到它绿，用 Leader 的【守住】标签把它解释掉了。\n  ⇒ **教训不是「标签标错了」**：即使标签正确，我也不该用「它属于哪一类」去解释一条绿。正确的追问是「**它现在为什么不红？如果实现错了它会红吗？**」——分类回答的是归属，不回答有效性。",
+    "boundary[0] 的 DoD 标签应为【实现】而非【守住】（Leader 自行更正）：CLI 层「空结果 rc=0 而非报错」是本任务新写的三行（`executeCrisisReplay` 里的 `if asOf != \"\"`），`TestReplayAsOfBeforeAllRevisions` 是它们的**唯一覆盖者**——我验证过：删掉那三行，`go test ./cmd/atlas` 只有它红。判归属的正确问法不是「这个性质属于哪一层」，而是「本任务新增了哪些代码、这条断言覆盖其中哪些」。",
+    "「空结果」在两种语境下含义相反：带 `--as-of` 时空是**正确答案**（那个时点上本来就还没有观测，判据四），不带时多半是**忘了 backfill**。这是 DoD 没写、但实现绕不开的判断 —— `executeCrisisReplay` 因此需要知道有没有 as-of，我给它加了 `asOf string` 参数，三个既有调用点补 `\"\"`，`TestExecuteCrisisReplayNoData` 的契约逐字不变。",
+    "⚠️ 夹具「只改一天」测不出东西：状态机看连续 3 日，只把末日 NFCI 修订回绿时前两天仍红 ⇒ 最终状态不变，带 `--as-of` 与不带的输出**逐字相同**。我第一版正是这么写的，跑出来 `current == past`。必须改**三天**。这段注释已随 C 项重构搬进 `seedReplayFixture`。"
+  ],
+  "decisions": [
+    {
+      "decision": "parseAsOf 只收 UTC（Z 结尾），拒绝带偏移量的 RFC3339",
+      "rationale": "见 key_findings 前两条。「两种格式都收」的 O5 裁定不变，只是 RFC3339 那半边收窄为「必须 Z 结尾」。错误文案给了可照抄的例子（`2026-07-13T00:00:00Z`），因为拒绝一个**合法的 RFC3339** 会让人困惑，必须说清为什么。⚠️ 小写 z（`…00:00:00z`）现在也被拒 —— simplifier 不建议特殊处理，Leader 同意：帮助文案只承诺 RFC3339，且错误文案已给例子。"
+    },
+    {
+      "decision": "校验放在 openCrisisStore() 之前，并用测试钉住这个顺序",
+      "rationale": "参数写错的人要在第一秒知道，不等开库（同 runCrisisReplay 既有的 --from/--to 校验）。⚠️ 顺序是可以被后人无意改掉的，所以不靠读代码确认 —— TestReplayAsOfValidatedBeforeOpeningDB 把 --db 指到必定开库失败的路径（父路径是已存在的普通文件），此时错误仍须是格式错。**不能用「不存在的路径」证明**：NewStore 里的 os.MkdirAll 会把目录建出来、库随之建成功，那个证明恒真。"
+    },
+    {
+      "decision": "executeCrisisReplay 加 asOf 参数来区分「空」的两种含义",
+      "rationale": "见 key_findings 第 5 条。加参数而非在 runCrisisReplay 里判断：空结果的判定在 executeCrisisReplay 内部，让它自己知道语境比把判断抽到外面更直接。三个既有调用点补 \"\"，既有契约不变。"
+    },
+    {
+      "decision": "reader 用 if 分支而非无条件 st.AsOf(asOf)（D1，Leader 裁决不改代码、补注释）",
+      "rationale": "两者等价（AsOf(\"\") 返回当前形态），但分支让「不带 --as-of ⇒ 与改动前**逐字同一条路径**」一眼可见，而 functional[1] 是【守住】类断言、守的正是这条路径没变。写成无条件调用要多读一层才能确认。理由已补进注释 —— 原先那条注释只解释了 Close，没解释为什么分叉。"
+    },
+    {
+      "decision": "badDBConfig 的注释去掉行号，改符号指针（A1）",
+      "rationale": "原文写 `store.go:22`，而 os.MkdirAll 实际在 :27，:22 已被 TASK-006 的 asOf 字段占据。改成「NewStore 里的 os.MkdirAll」并写明「刻意不写行号：本文件已证明行号在同一个 sprint 内就会漂」。"
+    },
+    {
+      "decision": "抽 seedReplayFixture(t, revise)，只抽 setup 不抽 run/assert（C）",
+      "rationale": "三个用例共享 8 行夹具，抽出后净 -12 行。**只抽 setup**：三个用例的断言各不相同，合并它们会把「这条在验什么」藏进参数里。⚠️ 「必须改三天、只改一天会让 current==past」那段注释随之搬进 helper —— 那是本次信息量最高的一段，留在原地会随重构丢失。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/crisis.go（3187337: +49/-2 加 --as-of flag、parseAsOf、接线；739bfde: +29/-3 UTC 闸与 D1 注释）",
+    "cmd/atlas/crisis_test.go（3187337: +171/-4 六个测试与 badDBConfig；739bfde: +49/-37 拒绝用例、A1/A3、标签订正、C 重构）"
+  ],
+  "interfaces_exposed": [
+    "`atlas crisis replay --as-of <RFC3339|YYYY-MM-DD>` —— 空 = 当前最好估计。⚠️ **必须是 UTC（Z 结尾）**，带偏移量的形态会被拒（理由见 key_findings 第 1 条）。纯日期按当日 00:00:00Z 起点。",
+    "func parseAsOf(v string) (string, error) —— 包内未导出，cmd/atlas。校验并规范化 --as-of。将来若有别的子命令加 as-of，**复用它**，别再写一份：那会让「必须 UTC」这条约束有两个副本，改一处不会让另一处变红。",
+    "func executeCrisisReplay(ctx, cfg, st, from, to, asOf string, jsonOut bool, out io.Writer) error —— **签名变了**，多了 asOf。它用这个参数区分「空结果」的两种含义。新调用点若不涉及 as-of，传 \"\" 即可（既有语义：空报 run backfill first）。",
+    "func seedReplayFixture(t *testing.T, revise bool) string —— 测试夹具（crisis_test.go）。revise=true 时把末 3 日 NFCI 修订回绿区。⚠️ 若要改它，先读它的注释：改动天数是语义的一部分。"
+  ],
+  "verification": {
+    "tree": "主仓库 /Users/zuowei/workspace/go/src/github.com/newthinker/atlas @ 0081c2925d66afe12614d23e00a61aeb7f1b07a0 (master)",
+    "commits": "3187337（实现，合入经 659bb0d）+ 739bfde（缺陷修复，合入经 0081c29）",
+    "baseline": "06a86cade4a5f4a5f381357e2f302857d6e56ab8",
+    "note": "以下数字全部在**最后一次改动之后**、于 master 树 0081c29 上统一重采。此前在 659bb0d 上采的那批已作废。合入用内容判据核实：master 树上两个文件与 739bfde 逐字节 sha256 一致。",
+    "build": "GOTOOLCHAIN=local go build ./... rc=0（采于 0081c29）",
+    "suite": "GOTOOLCHAIN=local go test -count=1 ./cmd/atlas ./internal/crisis rc=0（采于 0081c29）",
+    "full_suite": "GOTOOLCHAIN=local go test -count=1 ./... rc=0（65 个 ok 行, 0 FAIL）—— 采于 0081c29。本任务是最后一个代码任务，按退出码与 ok/FAIL 计数判。",
+    "counts": "cmd/atlas -v: 顶层 PASS 302, FAIL 0, 子测试 90。两把独立的尺互验：`^--- PASS`（靠缩进区分层级）与 `^=== RUN   Test[^/]*$`（靠名字不含斜杠）都得 302。⚠️ 后一把是我 memory 里记过的不可靠方法（测试名自带斜杠时会多算），此处仅作互验、不单独承担任何一层。",
+    "coverage": "cmd/atlas 覆盖率 —— ⚠️ **两个数都对，是算法口径不同，不是数据变了**（我在转 dev_done 后发现门禁报的数与我采的不符，查清才记此条）：\n  • `go test -cover`（我采的）        → **78.4%**\n  • `go tool cover -func` 的 total 行 → **78.6%**  ← **门禁口径**（task-completed.sh 用这个）\n  同一份 coverprofile，两种算法给出不同百分比。任务级 coverage_floor=78 覆盖全局 dev_minimum=80，两个数都过线。\n  门禁实际输出：`Task scope passes. Coverage: 78.6% (dev_minimum: 78%)`。\n  背对背对照（两个隔离 worktree、同一时刻并排跑，Leader 复核）：78.2% → 78.4%（`go test -cover` 口径），本任务抬高未拉低。\n  📌 教训：**报覆盖率要带口径**。我此前几个任务都只写一个数，若验证者用门禁口径复核会对不上——那会像数据漂移，实际只是两把尺。",
+    "numstat": "3187337: crisis.go 49/2、crisis_test.go 171/4；739bfde: crisis.go 29/3、crisis_test.go 49/37 —— 均取自提交本身",
+    "red_evidence": "RED 是 **4 红 2 绿**，且**与 Leader 的【实现】/【守住】标注逐条吻合**：四条【实现】（functional[0] 校验早于开库、functional[2] 接到 store.AsOf、boundary[1] 帮助文案、boundary[2] O5 两种格式）全红；两条【守住】（functional[1] 不带 flag 行为不变、boundary[0]）全绿。⚠️ **但 boundary[0] 的绿是第三类**——见 key_findings 第 3 条：它本应是【实现】，绿的原因是前置条件未满足（--as-of 未接线），不是性质本来就对。原始输出: scratchpad/dev-m4c-a-TASK-007-red.txt",
+    "mutation_evidence": "变异自证 6/6 杀死（原地变异+还原，每次还原后跑对照组确认绿）：Z1 校验挪到开库之后 → TestReplayAsOfValidatedBeforeOpeningDB 红；Z2 丢掉 st.AsOf(asOf) 调用 → TestReplayAsOfSeesHistoricalRevision 红；Z3 拒绝纯日期（只收 RFC3339）→ TestParseAsOfAcceptsBothFormats 红；Z4 帮助文案改成 published at → TestReplayAsOfHelpWording 红；**Z5 as-of 空结果改回报错 → TestReplayAsOfBeforeAllRevisions 红**（boundary[0] 那三行的取证）；**Z6 整个 RFC3339 分支退回原样透传 → TestParseAsOfAcceptsBothFormats 红**（本轮新增 UTC 闸的取证）。\n⚠️ **两次假变异被自证闸当场抓住**：Z1 第一版 python 锚点未命中（assert 抛出），而测试输出仍是 `ok` —— 那是**未变异的对照组**，不是「变异存活」；Z6 第一版只删 if 块导致 `t` 成为未使用变量、**编译失败**，「变异体可编译」那行没打印。两次都不是事后回看发现的，是闸当场响的。",
+    "defect_reproduction": "UTC 缺陷我用 **sqlite3 直接实测**复核（不只 Go 字符串比较）：建表插入 `2026-07-12T20:00:00.000000000Z`，`SELECT COUNT(*) WHERE f <= '2026-07-13T00:00:00+08:00'` → **1**；同一时刻改写为 `'2026-07-12T16:00:00Z'` → **0**。两个查询构成对照，证明错位来自形态不同构而非时刻判断。",
+    "sole_coverage_check": "boundary[0] 是那三行的唯一覆盖者，我验证过而非推断：删掉 `executeCrisisReplay` 里的 `if asOf != \"\" { return nil }`，`go test -count=1 ./cmd/atlas` 只有 TestReplayAsOfBeforeAllRevisions 变红。",
+    "dod_mapping": [
+      "functional[0]【实现】--as-of 非法格式报错含 --as-of 且校验早于开库 -> TestReplayAsOfValidatedBeforeOpeningDB -> PASS（RED 红；Z1 变异证明有效）",
+      "functional[1]【守住】不带 flag 时行为与改动前逐行相同 -> TestReplayAsOfEmptyKeepsCurrentBehaviour + 既有 TestRunCrisisReplay/TestExecuteCrisisReplay* 零改动全绿 -> PASS（RED 绿，成因是性质本来就对）",
+      "functional[2]【实现】带合法 --as-of 走 store.AsOf(v)，输出对应旧值且与不带 flag 不同 -> TestReplayAsOfSeesHistoricalRevision -> PASS（RED 红；Z2 变异证明有效）",
+      "boundary[0]【实现，DoD 原标【守住】为误】--as-of 早于所有 fetched_at ⇒ 空序列且退出码 0 -> TestReplayAsOfBeforeAllRevisions -> PASS（⚠️ RED 绿，成因是**前置条件未满足**而非性质本来就对，见 key_findings 第 3 条；Z5 变异证明有效；唯一覆盖者已验证）",
+      "boundary[1]【实现】帮助文案含 visible at、不含 published at（AD-10）-> TestReplayAsOfHelpWording -> PASS（RED 红；Z4 变异证明有效）。A3 后补了 RFC3339 断言 —— 此前「两种格式都收」只验了 YYYY-MM-DD 那半边。",
+      "boundary[2]【实现】O5 两种入参格式各一例，其余拒绝 -> TestParseAsOfAcceptsBothFormats -> PASS（RED 红；Z3/Z6 变异证明有效）。⚠️ 拒绝表新增带偏移量的 RFC3339 两例（+08:00 / -05:00）。",
+      "error_handling[0]【守住】--as-of 与既有 flag 组合不冲突，--from/--to/--json 的校验与错误文案不变 -> 既有测试零改动全绿（executeCrisisReplay 三个调用点只补 asOf=\"\"）-> PASS",
+      "non_functional[0]【守住】go test -count=1 ./cmd/atlas ./internal/crisis 全绿；go build ./... 通过；go test -count=1 ./... rc=0 -> 见 build / suite / full_suite -> PASS"
+    ]
+  }
+}
