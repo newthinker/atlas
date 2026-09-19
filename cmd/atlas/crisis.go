@@ -32,6 +32,7 @@ var (
 	replayFrom        string
 	replayTo          string
 	replayJSON        bool
+	replayAsOf        string
 )
 
 var crisisCmd = &cobra.Command{
@@ -83,6 +84,8 @@ func init() {
 	crisisReplayCmd.Flags().StringVar(&replayFrom, "from", "", "start date YYYY-MM-DD (required)")
 	crisisReplayCmd.Flags().StringVar(&replayTo, "to", "", "end date YYYY-MM-DD (required)")
 	crisisReplayCmd.Flags().BoolVar(&replayJSON, "json", false, "emit transitions as JSON lines")
+	crisisReplayCmd.Flags().StringVar(&replayAsOf, "as-of", "",
+		"replay against what was visible at this instant (RFC3339 or YYYY-MM-DD; empty = current best estimate)")
 	crisisCmd.AddCommand(crisisBackfillCmd, crisisEvalCmd, crisisStatusCmd, crisisReplayCmd)
 	rootCmd.AddCommand(crisisCmd)
 }
@@ -601,27 +604,71 @@ func stateStreakDays(ctx context.Context, st *crisis.Store, state crisis.SystemS
 	return n, nil
 }
 
+// parseAsOf 校验并规范化 --as-of 的入参。
+//
+// 两种形态都收（Leader 裁定 O5）：RFC3339（含纳秒，生产 fetched_at 就是那个形态）
+// 与纯日期 YYYY-MM-DD（语义 = 当日 00:00:00Z 起点）。理由是两份文档各写了一种
+// —— spec §5 判据四写 `--as-of 2026-07-13`，plan Step 4 写 RFC3339；只收其一
+// 会让照另一份敲命令的人撞「格式非法」，而那是纯粹的摩擦，不是它该学的东西。
+//
+// RFC3339 原样返回（保留用户给的精度），纯日期补成 00:00:00Z —— as-of 的比较是
+// 字符串字典序，补全后与库里的 fetched_at 形态一致，读起来也不用猜它被当成了几点。
+//
+// 空值返回空，由调用方走当前形态；那是 --as-of 缺省时唯一合理的含义，不是错误。
+func parseAsOf(v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	if _, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		return v, nil
+	}
+	if t, err := time.Parse("2006-01-02", v); err == nil {
+		return t.UTC().Format(time.RFC3339), nil
+	}
+	return "", fmt.Errorf(
+		"--as-of %q: want RFC3339 (e.g. 2026-07-13T00:00:00Z) or a plain date (2026-07-13)", v)
+}
+
 func runCrisisReplay(cmd *cobra.Command, args []string) error {
 	if replayFrom == "" || replayTo == "" {
 		return fmt.Errorf("--from and --to are required")
+	}
+	// 校验在开库**之前**：参数写错的人要在第一秒知道，不等开库
+	// （同 runCrisisReplay 既有的 --from/--to 校验，也同 hestia.go 的 --only-period）。
+	asOf, err := parseAsOf(replayAsOf)
+	if err != nil {
+		return err
 	}
 	ccfg, st, err := openCrisisStore()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	return executeCrisisReplay(cmd.Context(), ccfg, st, replayFrom, replayTo, replayJSON, cmd.OutOrStdout())
+
+	// AsOf 返回的副本共用同一个 *sql.DB（AD-8），所以上面那个 defer st.Close()
+	// 已经覆盖它 —— 不要在这里再 Close 一次。
+	reader := st
+	if asOf != "" {
+		reader = st.AsOf(asOf)
+	}
+	return executeCrisisReplay(cmd.Context(), ccfg, reader, replayFrom, replayTo, asOf, replayJSON, cmd.OutOrStdout())
 }
 
 // executeCrisisReplay 逐日重放:观测来自 sqlite,评估历史只进 MemHistory,
 // 不写 crisis_evaluations(审计表只属于 live eval)。v1.1 起统一暖机语义:
 // 引擎从库内最早观测日推进,窗口期初态为暖机结果。
-func executeCrisisReplay(ctx context.Context, cfg *crisis.Config, st *crisis.Store, from, to string, jsonOut bool, out io.Writer) error {
+func executeCrisisReplay(ctx context.Context, cfg *crisis.Config, st *crisis.Store, from, to, asOf string, jsonOut bool, out io.Writer) error {
 	days, err := crisis.ReplayRange(cfg, st.Reader(ctx), from, to)
 	if err != nil {
 		return err
 	}
 	if len(days) == 0 {
+		// 带 --as-of 时「空」是**正确答案**而不是错误：那个时点上本来就还没有
+		// 这段区间的观测（判据四）。不带 --as-of 时空仍然报错 —— 那多半是忘了
+		// backfill，提示他比静默返回 0 行有用。同一个空结果，两种语境两种含义。
+		if asOf != "" {
+			return nil
+		}
 		return fmt.Errorf("no observations between %s and %s — run backfill first", from, to)
 	}
 
