@@ -611,15 +611,37 @@ func stateStreakDays(ctx context.Context, st *crisis.Store, state crisis.SystemS
 // —— spec §5 判据四写 `--as-of 2026-07-13`，plan Step 4 写 RFC3339；只收其一
 // 会让照另一份敲命令的人撞「格式非法」，而那是纯粹的摩擦，不是它该学的东西。
 //
-// RFC3339 原样返回（保留用户给的精度），纯日期补成 00:00:00Z —— as-of 的比较是
-// 字符串字典序，补全后与库里的 fetched_at 形态一致，读起来也不用猜它被当成了几点。
+// 🔴 **只收 UTC（Z 结尾）**：这个值最终进 AsOfQuery 的 `fetched_at <= ?`，而
+// fetched_at 是 TEXT ⇒ SQLite 做的是**字典序比较，不是时刻比较**。带偏移量的
+// 入参与库里的 …Z 形态不同构，会静默错位。实测反例：
+//
+//	库内修订  2026-07-12T20:00:00.000000000Z
+//	as-of     2026-07-13T00:00:00+08:00        （UTC = 2026-07-12T16:00:00Z）
+//	字典序    db <= asof 为 true  ⇒ 该行被包含
+//	时刻序    它在 as-of 之后 4 小时 ⇒ 本应排除
+//
+// 一个发生在 as-of **之后**的修订被静默包含，输出形状完全正常、不报错 —— 正是
+// AsOfQuery 注释里担心的「静默偏移一个修订」，换了个成因。
+//
+// ⚠️ 为什么拒绝而不是 `t.UTC().Format(...)` 转换：那会把 …150777000Z 压成
+// …150777Z，而字典序上 …150777500Z <= …150777Z 为真 —— 用一个无声的错换另一个。
+// 拒绝是这里唯一不产生新错位的选项。
+//
+// RFC3339 原样返回（保留用户给的精度，生产 fetched_at 就是纳秒形态），纯日期补成
+// 00:00:00Z —— 两条分支的输出都与库里的 fetched_at 同构，读起来也不用猜它被当成
+// 了几点。
 //
 // 空值返回空，由调用方走当前形态；那是 --as-of 缺省时唯一合理的含义，不是错误。
 func parseAsOf(v string) (string, error) {
 	if v == "" {
 		return "", nil
 	}
-	if _, err := time.Parse(time.RFC3339Nano, v); err == nil {
+	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		if _, off := t.Zone(); off != 0 {
+			return "", fmt.Errorf(
+				"--as-of %q: need UTC (a trailing Z) — fetched_at is compared as text, "+
+					"so an offset form silently misaligns; write e.g. 2026-07-13T00:00:00Z", v)
+		}
 		return v, nil
 	}
 	if t, err := time.Parse("2006-01-02", v); err == nil {
@@ -645,6 +667,10 @@ func runCrisisReplay(cmd *cobra.Command, args []string) error {
 	}
 	defer st.Close()
 
+	// 分支而不是无条件 st.AsOf(asOf)：让「不带 --as-of ⇒ 与改动前**逐字同一条
+	// 路径**」一眼可见。functional[1] 是【守住】类断言，而守住的正是这条路径没变；
+	// 写成无条件调用虽等价（AsOf("") 返回当前形态），却要多读一层才能确认。
+	//
 	// AsOf 返回的副本共用同一个 *sql.DB（AD-8），所以上面那个 defer st.Close()
 	// 已经覆盖它 —— 不要在这里再 Close 一次。
 	reader := st
