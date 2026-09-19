@@ -9,12 +9,17 @@ import (
 	"path/filepath"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/newthinker/atlas/internal/macro/bitemporal"
 )
 
 // Store is the sqlite-backed source of truth for observations and
 // evaluations (WAL + busy_timeout, same conventions as storage/signal).
 type Store struct {
 	db *sql.DB
+	// asOf 非空时，读方法只看到该时刻及之前的修订（AD-8/AD-9）。
+	// 空值是常态：当前形态，读 v_macro_current。
+	asOf string
 }
 
 func NewStore(path string) (*Store, error) {
@@ -90,6 +95,20 @@ func verifyBitemporalShape(db *sql.DB, path string) error {
 			"CREATE TABLE IF NOT EXISTS does not change it. Automatic migration is an "+
 			"explicit non-goal — run:  atlas crisis migrate-bitemporal --db %s",
 		path, path)
+}
+
+// AsOf 返回一个只读副本，其读方法只看到 t 时刻及之前的修订。
+//
+// **共用同一个 *sql.DB**（AD-8）：副本不持有独立连接池，Close() 在任一个上调用
+// 一次即可，也不该调用两次。取副本因此是廉价的，回放可以逐日取。
+//
+// t 为空等价于当前形态 —— 不是错误，也不是未定义：调用方常从一个可选的
+// --as-of 参数取值，空值走当前形态是它唯一合理的含义。
+//
+// 只读是约定而非类型保证：副本上仍能调到 UpsertObservations。加一个只读接口
+// 类型会波及全部调用点（C7 要求评估逻辑零改动），代价大于收益。
+func (s *Store) AsOf(t string) *Store {
+	return &Store{db: s.db, asOf: t}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -181,25 +200,43 @@ func derefValue(v *float64) any {
 	return *v
 }
 
-// obsSelect 从 v_macro_current 读，不是从 macro_observations。
+// obsCols 是观测表的显式列清单。
 //
-// 换 FROM 而不是给每个调用点加一句 "取 fetched_at 最大的那行"：后者是同一条规则的
-// N 份副本，加第 N+1 个读点时必漏 —— EvalDates 就是这么漏掉的（它不经本常量，
-// 计划原文因此把读取点数错成「只改 obsSelect 即可」）。视图把规则收进一个地方，
-// 新读点只要 FROM 对了就自动正确。
+// 显式列名而非 SELECT *：当前形态读的是视图、视图本身已是 SELECT *，再用 * 会把
+// 将来新增的列一并带出来，而 scanObservation 按固定列序扫描。
+const obsCols = `SELECT ts, indicator, value, source, fetched_at `
+
+// obsFrom 返回读观测的 FROM 子句，以及**必须前置**到其余参数之前的参数。
 //
-// 保持显式列名而非 SELECT *：视图是 SELECT * FROM macro_observations o WHERE...，
-// 用 * 会把将来新增的列一并带出来，而 scanObservation 按固定列序扫描。
-const obsSelect = `SELECT ts, indicator, value, source, fetched_at FROM v_macro_current`
+// 两种形态：asOf 为空读 v_macro_current（当前行）；非空则把 bitemporal.AsOfQuery
+// 的结果当作子查询（C4：它带 ? 占位符，**建不成视图**，只能这样拼）。
+//
+// 🔴 参数为什么必须前置：AsOfQuery 的 ? 在**相关子查询内**，而调用点把
+// `WHERE indicator = ? ...` 接在 FROM 之后 —— 按 SQL 文本顺序，子查询的 ? 先出现。
+// 弄反**不报错**：驱动只按位置绑定，于是日期被当成 indicator 去查，返回空结果或
+// 者（SeriesWindow 那种多参数的）非空但错的结果。返回 []any 而不是让调用点自己
+// 拼，就是为了让顺序只在这一处决定。
+//
+// 换 FROM 而不是给每个调用点加一句时点条件：后者是同一条规则的 N 份副本，加第
+// N+1 个读点时必漏 —— EvalDates 就是这么漏掉的（它不经本方法的返回值拼接之外的
+// 任何共享常量，计划原文因此把读取点数错成「只改一处即可」）。
+func (s *Store) obsFrom() (string, []any) {
+	if s.asOf == "" {
+		return `FROM v_macro_current`, nil
+	}
+	return `FROM (` + bitemporal.AsOfQuery(obsSpec) + `) o`, []any{s.asOf}
+}
 
 func (s *Store) Observation(ctx context.Context, indicator, date string) (*Observation, error) {
+	from, args := s.obsFrom()
 	return scanMaybeObservation(s.db.QueryRowContext(ctx,
-		obsSelect+` WHERE indicator = ? AND ts = ?`, indicator, date))
+		obsCols+from+` WHERE indicator = ? AND ts = ?`, append(args, indicator, date)...))
 }
 
 func (s *Store) LatestObservation(ctx context.Context, indicator string) (*Observation, error) {
+	from, args := s.obsFrom()
 	return scanMaybeObservation(s.db.QueryRowContext(ctx,
-		obsSelect+` WHERE indicator = ? ORDER BY ts DESC LIMIT 1`, indicator))
+		obsCols+from+` WHERE indicator = ? ORDER BY ts DESC LIMIT 1`, append(args, indicator)...))
 }
 
 // scanMaybeObservation scans a single-row query, mapping ErrNoRows to (nil, nil).
@@ -216,8 +253,10 @@ func scanMaybeObservation(sc scanner) (*Observation, error) {
 
 // SeriesWindow returns最近 n 条 ts<=end 的观测（升序）：DESC LIMIT 取窗再反转。
 func (s *Store) SeriesWindow(ctx context.Context, indicator, end string, n int) ([]Observation, error) {
+	from, args := s.obsFrom()
 	rows, err := s.db.QueryContext(ctx,
-		obsSelect+` WHERE indicator = ? AND ts <= ? ORDER BY ts DESC LIMIT ?`, indicator, end, n)
+		obsCols+from+` WHERE indicator = ? AND ts <= ? ORDER BY ts DESC LIMIT ?`,
+		append(args, indicator, end, n)...)
 	if err != nil {
 		return nil, fmt.Errorf("querying window: %w", err)
 	}
@@ -232,8 +271,10 @@ func (s *Store) SeriesWindow(ctx context.Context, indicator, end string, n int) 
 }
 
 func (s *Store) SeriesSince(ctx context.Context, indicator, from, end string) ([]Observation, error) {
+	fromClause, args := s.obsFrom()
 	rows, err := s.db.QueryContext(ctx,
-		obsSelect+` WHERE indicator = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`, indicator, from, end)
+		obsCols+fromClause+` WHERE indicator = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
+		append(args, indicator, from, end)...)
 	if err != nil {
 		return nil, fmt.Errorf("querying range: %w", err)
 	}
@@ -249,9 +290,10 @@ func (s *Store) SeriesSince(ctx context.Context, indicator, from, end string) ([
 // 同样是换 FROM 而非加 DISTINCT：DISTINCT 能去掉重复日期，但它是「就地补一条规则」
 // ——下一个读点还得再补一次。规则收在视图里只需对一次。
 func (s *Store) EvalDates(ctx context.Context, from, to string) ([]string, error) {
+	fromClause, args := s.obsFrom()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT ts FROM v_macro_current WHERE indicator = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
-		IndVIX, from, to)
+		`SELECT ts `+fromClause+` WHERE indicator = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
+		append(args, IndVIX, from, to)...)
 	if err != nil {
 		return nil, fmt.Errorf("querying eval dates: %w", err)
 	}
