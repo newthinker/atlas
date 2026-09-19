@@ -7,7 +7,13 @@
     "sqlite 的 DDL 是事务性的，含 ALTER TABLE RENAME（实测：事务内 RENAME 后 rollback，sqlite_master 完整还原）。所以「中途失败不留半迁移的库」不需要额外补偿逻辑，一个事务足够。",
     "sql.Open(\"sqlite\", \"file:\"+path) **默认会建库**，所以『--db 指向不存在的文件』必须显式 os.Stat 拦下 —— 不写这一步它恒不失败，而『迁移了一个空库并报成功』是最糟的结果（DoD error_handling[0] 已点名，此处确认属实）。",
     "⚠️ cmd/atlas 的覆盖率基线与 coverage_floor 之间**余量为零**：背对背对照（同一时刻，pre = 移走本任务两个新文件即 master 态）得 pre 78.0% / post 78.2%，而 coverage_floor=78。本任务是抬高的，但后续任何在 cmd/atlas 加代码而测试跟不上的任务都会当场破线，且破线时看起来像是那个任务的锅——实际是基线本来就没有余量。已上报 Leader。",
-    "⚠️ 本任务 packages 只声明 ./internal/crisis，而 writes 含两个 ./cmd/atlas 文件 ⇒ dev_done 门禁的 -coverpkg 只量 internal/crisis（93.7%），**不会量 cmd/atlas**。cmd/atlas 的 78.2% 是我自己跑的，不受门禁保护。漂移检查用 writes 优先，所以 scope 不误报。已上报 Leader，由他决定要不要把 ./cmd/atlas 加进 packages。"
+    "⚠️ 本任务 packages 只声明 ./internal/crisis，而 writes 含两个 ./cmd/atlas 文件 ⇒ dev_done 门禁的 -coverpkg 只量 internal/crisis（93.7%），**不会量 cmd/atlas**。cmd/atlas 的 78.2% 是我自己跑的，不受门禁保护。漂移检查用 writes 优先，所以 scope 不误报。已上报 Leader，由他决定要不要把 ./cmd/atlas 加进 packages。",
+    {
+      "id": "F7",
+      "finding": "恒真断言的两种来源不同，处置也不同：一种是断言写错了，一种是**点名式写法**在实现演化后失效。",
+      "detail": "V-3 属于后者：assert.False(objectExists(db, \"macro_observations_new\")) 在写下时可能是有意义的（如果当时实现确实走过 _new 路线），但实现改成 RENAME 路线之后它就恒真了，而且**不会有任何东西告诉你**——名字从实现里消失，断言却还在，看起来仍在守着。",
+      "general_rule": "守「不得出现 X」这类不变量时，如果 X 是一个**具体名字**，就要问：这个名字还在实现里吗？不在 ⇒ 断言已经恒真。⇒ 改成守**集合性质**（全集比对）而不是守具体成员，实现换名字时它仍然有效。"
+    }
   ],
   "decisions": [
     {
@@ -81,5 +87,30 @@
       "error_handling[0] --db 指向不存在的文件 ⇒ 报错、文案含路径、不创建库 -> TestMigrateMissingDBFile + TestExecuteCrisisMigrateRequiresExistingDB -> PASS；缺 --db 报错且不开库 -> TestExecuteCrisisMigrateRequiresExistingDB + TestCrisisMigrateCmdWiring -> PASS",
       "non_functional[0] go build ./... + go test -count=1 ./internal/crisis ./cmd/atlas 全绿，cmd/atlas 新增文件自带 cmd 级测试不拉低覆盖率 -> 见 build / suite / coverage_backtoback -> PASS"
     ]
+  },
+  "rework_round_1": {
+    "triggered_by": "QA V-3[HIGH] + V-9[MEDIUM] + 假注释，reason_class=task_defect，rework 0→1",
+    "v3_dead_assertion": {
+      "what": "migrate_test.go:230 的 assert.False(objectExists(db, \"macro_observations_new\")) 恒真：macro_observations_new 全仓只出现在那一行里，实现从不走 _new 路线。",
+      "fix": "换成**全集比对** assert.Equal(before, objectNames(db))：迁移前采一次全部对象的 type:name，失败后必须逐字相同。它覆盖了原断言想守的（不留 _new）并推广到任意名字的中间产物。",
+      "why_not_just_delete": "该不变量（迁移失败必须原子）是真的、值得守；恒真的是**点名某个具体名字**这种写法。逐个点名只挡得住你想得到的那个残留名字，而实现换一个临时表名它就失效了——且因为那个名字从没出现在实现里，断言恒真、永远不会告诉你它已经失效。",
+      "mutation_proof": "判据要求「给出一个会让它变红的变异」。在**隔离 git worktree** 上做了三个（主工作区 migrate.go 指纹 485f419681566950 全程未变，worktree 用完即拆）：M1「tx.ExecContext → db.ExecContext」**未杀死**（modernc/sqlite 下仍无残留，记为无效变异）；M2「失败 return 前先 tx.Commit()」杀死，但太宽——它同时让另外三条断言变红；**M3「在 migrate() 开头额外 CREATE TABLE macro_observations_scratch」只让新断言一条变红**（expected 3 个对象 / actual 4 个，多出 table:macro_observations_scratch）⇒ 新断言**独立有牙**。",
+      "controlled_comparison": "同一个 M3 变异下把测试换回旧断言（并删掉不再使用的 before 采集行以保证能编译）：vet rc=0、**test rc=0 ⇒ 旧断言放过了它**。⇒ 这一对实验正好证明了「新断言抓住了旧断言抓不住的东西」，而不只是「新断言会红」。",
+      "my_error_in_the_first_comparison": "🔴 我第一次做这个对照时换回旧断言却没删 before 采集行 ⇒ `declared and not used: before` **编译失败**，rc=1。而我在结论表里把那个 rc=1 直接写成了「抓住了」。两个我自己记过的错叠在一起：①崩溃型变异（语法/编译失败）被误记成 KILLED；②硬编码的结论盖住数据。重做时先跑 vet 确认编译通过，才看 test 的 rc。"
+    },
+    "v9_column_loss": {
+      "what": "migrate.go 原注释称「三个计数是运维现场唯一的判据：三者相等才算好」，但三计数全是 COUNT(*) **行数口径**，而搬运语句 `INSERT … (5 列) SELECT 5 列 FROM _v1` 是**硬编码列清单**。老库多一列时那一列整列搬不过来，而三个计数一个都不变。",
+      "the_shape": "🔴 **检查的维度比它声称守住的集合窄一维，必然漏**：丢失发生在列维度，判据在行维度。与 V-2（守卫查表不查视图）同构。",
+      "fix_chosen": "三个候选（列清单单一来源 / 迁移后加列级校验 / 把那句话的射程写准）里选了**列级校验**：在 Commit 之前比对 _v1 与新表的**列名集合**，旧表有而新表没有的列 ⇒ 返回错误并点名是哪一列。理由：①让丢列响亮失败，不依赖人读注释；②可被测试钉住（判据要求）；③与本 sprint 反复出现的「判性质不判数量」一致——三计数是数量，列集合是性质。",
+      "implementation_note": "用列名**集合**而不是列数：列数相等但改了名同样是丢失，而数量判据看不出来。读列名走 `SELECT name FROM pragma_table_info(?)` —— 该写法在 modernc.org/sqlite 驱动下可用占位符（已实测，非 CLI 结论）。",
+      "test_pinned": "TestMigrateRejectsUnmigratedColumns：老库 ALTER TABLE ADD COLUMN note TEXT 并写入有值行 ⇒ 迁移必须报错、错误文案必须点名 note、失败后 note 的值仍在且不留 _v1。",
+      "test_is_not_dead": "🔴 在**隔离 worktree** 上用 HEAD 版 migrate.go（无列级校验）跑这个新测试：vet rc=0（排除编译失败这种假红）、**test rc=1，报 `An error is expected but got nil`** ⇒ 迁移静默成功了，正是 V-9 描述的缺陷。⇒ 新测试确实抓得住原缺陷，不是恒真的绿。"
+    },
+    "false_comment_propagation": {
+      "fixed_here": "本任务 writes 内两处：migrate.go:23 的注释、migrate_test.go:187 的断言消息。实测 `RENAME TO` 在 migrate.go 命中总数 = 1（在 :125）。",
+      "total_propagation": "🔴 全部 **5 处**，不是 4 处：①migrate.go:23 注释 ②migrate_test.go:187 断言消息 ③本任务 done_criteria 的 functional 原文 ④TASK-008 的 DoD error_handling[0]（「日志须逐字写出回滚 SQL（两次 RENAME 反着来 + 重建索引）」）⑤由 ④ 派生的迁移日志 §9。③④ 都是 Leader 写的 DoD。",
+      "who_found_what": "我上一轮只查到 4 处——漏的正是 ④，即**指派我去查归属的那份任务文件本身**。我把「归属」理解成了「源码归属」，于是查了别人的载体、漏了给我任务的那份。第 5 处由 Leader 自己查出并自陈。"
+    },
+    "attribution_split_dod_defect_vs_task_defect": "🔴 **归因必须分开记（fix_items[3]，Leader 自陈）**：本任务 done_criteria 的 functional 原文写着「C3：回滚靠两次 RENAME、对照靠它」，migrate.go:23 与 migrate_test.go:187 那两处假说法是**照着这句 DoD 写的**——做的正是被要求的事。⇒ `migrate_test.go:187` 那一半的归因是 **dod_defect**，不是 task_defect；V-3 的恒真断言才是 task_defect。整个 transition 只能带一个 reason_class，Leader 按主体填了 task_defect。两者处置规则不同（dod_defect 累计第 2 次直接转 blocked_human），混在一起会让下次判断失准。ℹ️ 我领回本轮时读到的 DoD 已是**订正后**的版本（原文现为「回滚靠 DROP + **一次** RENAME、对照靠它」），订正由 Leader 在派发本轮时经写通道 update 完成。"
   }
 }
