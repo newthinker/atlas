@@ -32,11 +32,64 @@ func NewStore(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("connecting crisis db: %w", err)
 	}
+	// 形状守卫必须在 schemaDDL() **之前**：schemaDDL 会在老库上建出一个指向老表
+	// 的 v_macro_current，而这个库随后就会被拒绝 —— 留下一个被改了形状却打不开
+	// 的库。检查在前，被拒绝的库一个字节不变。
+	if err := verifyBitemporalShape(db, path); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schemaDDL()); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating crisis schema: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// verifyBitemporalShape 拒绝双时态迁移之前建的库（AD-4/C9）。
+//
+// 存在的理由：CREATE TABLE IF NOT EXISTS 对**已存在**的表静默无操作，所以老库
+// 能一路开到第一次写入。而那次写入不会报错 —— 三段主键的 INSERT OR REPLACE 落
+// 在两段主键的表上只会静默覆盖同一天的旧修订，双时态从此形同虚设，且没有任何
+// 迹象。等到有人发现修订历史是空的，现场早就不在了。
+//
+// **刻意不自动迁移**：启动时静默改表结构，会把一个本该被人盯着的动作变成副作用
+// —— 迁移要搬全部历史数据、要重建索引与视图、失败时需要人判断怎么回滚。让它在
+// 某个 launchd 唤起里悄悄发生，出问题时连「什么时候变的」都查不到。同 hestia 的
+// 先例（internal/hestia/store.go 的 verifyObservationsSchema / verifyCurrentView，
+// 那里把这条写作 "Automatic migration is an explicit non-goal"）。
+//
+// 探形状的判据是**主键里有没有 fetched_at**，不是「有没有 macro_observations_v1」：
+// 迁移后若有人清理了 _v1，按后者判会拒绝一个完全正常的库。判断本身复用 migrate.go
+// 的 isBitemporal —— 两份形状判据意味着改一处不会让另一处变红（同 AD-3）。
+func verifyBitemporalShape(db *sql.DB, path string) error {
+	ctx := context.Background()
+
+	// 表不存在 = 全新库，schemaDDL() 随后会建出新形状。isBitemporal 对这种库
+	// 返回错误，所以要先在这里放行，否则谁都建不了新库。
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='macro_observations'`,
+	).Scan(&n); err != nil {
+		return fmt.Errorf("crisis: inspecting schema of %s: %w", path, err)
+	}
+	if n == 0 {
+		return nil
+	}
+
+	ok, err := isBitemporal(ctx, db)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return fmt.Errorf(
+		"crisis: macro_observations in %s still has the legacy two-part primary key "+
+			"(ts, indicator); this database predates the bitemporal migration and "+
+			"CREATE TABLE IF NOT EXISTS does not change it. Automatic migration is an "+
+			"explicit non-goal — run:  atlas crisis migrate-bitemporal --db %s",
+		path, path)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
