@@ -10,8 +10,10 @@ package crisis
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -340,4 +342,189 @@ func schemaSnapshot(t *testing.T, db *sql.DB) []string {
 	}
 	require.NoError(t, rows.Err())
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// TASK-004 读路径改走 v_macro_current
+//
+// Context Checkpoint: done_criteria → test mapping (read-through-view)
+// functional[0]     四个读方法只看到最新修订（Observation/LatestObservation/SeriesWindow/SeriesSince） → TestReadsSeeOnlyLatestRevision
+// functional[1]     EvalDates 不返回重复日期（裁决 R1）                                                  → TestEvalDatesDeduplicatesRevisions
+// functional[2]     包内裸表守卫：带词边界正则，豁免逐行列出且条数恰为 N                                 → TestNoBareTableReadsOutsideMigration
+// boundary[0]       C5 四个调用点 WHERE/ORDER/LIMIT 逐字未变                                            → verify_by: review（git diff）
+// boundary[1]       单版本数据下与改动前逐值相同                                                         → TestSingleRevisionReadsUnchanged + 既有测试零改动
+// error_handling[0] 视图缺失 ⇒ 响亮失败且文案含 v_macro_current                                          → TestReadsFailLoudlyWhenViewMissing
+// non_functional[1] obsSelect 与 EvalDates 各留注释说明「为什么换 FROM 而非每处加 WHERE」                → verify_by: review（store.go）
+
+// revisedStore 建一个**新形状**的库并用裸 INSERT 造出重复修订。
+//
+// ⚠️ 必须裸 INSERT：此刻 UpsertObservations 仍是 INSERT OR REPLACE（TASK-005 才改），
+// 走公开 API 造不出同一 (ts, indicator) 的两行——夹具会静默退化成单版本，而单版本
+// 下有缺陷的实现照样通过。
+//
+// 夹具即 DoD 给定的那组：2026-01-02/vix 有 10@07-14 与 11@08-14（修订），
+// 另有 2026-01-03/vix=20（单版本）。
+func revisedStore(t *testing.T) *Store {
+	t.Helper()
+	s := newTestStore(t)
+	for _, r := range []struct {
+		ts        string
+		value     float64
+		fetchedAt string
+	}{
+		{"2026-01-02", 10, "2026-07-14T00:00:00Z"},
+		{"2026-01-02", 11, "2026-08-14T00:00:00Z"},
+		{"2026-01-03", 20, "2026-07-14T00:00:00Z"},
+	} {
+		_, err := s.db.Exec(`INSERT INTO macro_observations VALUES (?,?,?,?,?)`,
+			r.ts, IndVIX, r.value, "test", r.fetchedAt)
+		require.NoError(t, err)
+	}
+	return s
+}
+
+// TestReadsSeeOnlyLatestRevision 覆盖 functional[0]：四个读方法都只看当前行。
+func TestReadsSeeOnlyLatestRevision(t *testing.T) {
+	s := revisedStore(t)
+	ctx := context.Background()
+
+	obs, err := s.Observation(ctx, IndVIX, "2026-01-02")
+	require.NoError(t, err)
+	require.NotNil(t, obs)
+	assert.Equal(t, 11.0, obs.Value, "Observation 必须取最新修订，不是任取一行")
+
+	latest, err := s.LatestObservation(ctx, IndVIX)
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	assert.Equal(t, "2026-01-03", latest.Date)
+
+	// LIMIT 不被重复行吃掉：裸表上 DESC LIMIT 2 会取到 01-03 与 01-02 的**某个**修订，
+	// 行数看着也是 2，但值可能是旧的；走视图后每个业务键只剩一行。
+	win, err := s.SeriesWindow(ctx, IndVIX, "2026-01-03", 2)
+	require.NoError(t, err)
+	require.Len(t, win, 2)
+	assert.Equal(t, []float64{11, 20}, []float64{win[0].Value, win[1].Value})
+
+	since, err := s.SeriesSince(ctx, IndVIX, "2026-01-02", "2026-01-03")
+	require.NoError(t, err)
+	require.Len(t, since, 2, "不得混进旧修订")
+	assert.Equal(t, []float64{11, 20}, []float64{since[0].Value, since[1].Value})
+}
+
+// TestEvalDatesDeduplicatesRevisions 覆盖 functional[1]（裁决 R1）。
+//
+// EvalDates 不经 obsSelect —— 它是第五个读取点，内联的裸表查询。迁移后只要有
+// 修订，它就返回重复日期，回测会把同一天评估两次。而库里现全是单版本 ⇒ 缺陷
+// 要到第一次真实修订才发作。
+func TestEvalDatesDeduplicatesRevisions(t *testing.T) {
+	s := revisedStore(t)
+
+	dates, err := s.EvalDates(context.Background(), "2026-01-01", "2026-01-31")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2026-01-02", "2026-01-03"}, dates,
+		"同一天的两个修订只能产出一个评估日")
+}
+
+// TestSingleRevisionReadsUnchanged 覆盖 boundary[1]：无修订时行为不变。
+//
+// 单版本是当前生产库的形态，这条是回归护栏——改 FROM 不该让既有语义漂移。
+func TestSingleRevisionReadsUnchanged(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.UpsertObservations(ctx, []Observation{
+		{Date: "2026-02-01", Indicator: IndVIX, Value: 15, Source: "fred", FetchedAt: "2026-02-02T00:00:00Z"},
+		{Date: "2026-02-02", Indicator: IndVIX, Value: 16, Source: "fred", FetchedAt: "2026-02-03T00:00:00Z"},
+	}))
+
+	obs, err := s.Observation(ctx, IndVIX, "2026-02-01")
+	require.NoError(t, err)
+	require.NotNil(t, obs)
+	assert.Equal(t, 15.0, obs.Value)
+	assert.Equal(t, "fred", obs.Source, "视图要保留全部业务列，不只是 ts/value")
+
+	latest, err := s.LatestObservation(ctx, IndVIX)
+	require.NoError(t, err)
+	assert.Equal(t, "2026-02-02", latest.Date)
+
+	since, err := s.SeriesSince(ctx, IndVIX, "2026-02-01", "2026-02-02")
+	require.NoError(t, err)
+	assert.Len(t, since, 2)
+
+	dates, err := s.EvalDates(ctx, "2026-02-01", "2026-02-02")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2026-02-01", "2026-02-02"}, dates)
+}
+
+// TestReadsFailLoudlyWhenViewMissing 覆盖 error_handling[0]。
+//
+// 钉的是「不得把错误吞成空集」：视图没了要报错，而不是安静地返回 0 行——后者
+// 会让回测得出「这段时间没有数据」的结论，和真的没数据完全同形。
+func TestReadsFailLoudlyWhenViewMissing(t *testing.T) {
+	s := revisedStore(t)
+	_, err := s.db.Exec(`DROP VIEW v_macro_current`)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	_, err = s.SeriesSince(ctx, IndVIX, "2026-01-01", "2026-01-31")
+	require.Error(t, err, "视图缺失必须报错，不能吞成空集")
+	assert.Contains(t, err.Error(), "v_macro_current", "错误要能定位到视图")
+
+	_, err = s.EvalDates(ctx, "2026-01-01", "2026-01-31")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "v_macro_current")
+}
+
+// TestNoBareTableReadsOutsideMigration 覆盖 functional[2]：包内裸表读取守卫。
+//
+// 判据用**带词边界**的正则：朴素子串会被 `FROM macro_observations_v1` 假阳命中
+// （实测：同一行文本，带词边界 0 次、朴素子串 1 次），而迁移正需要读 _v1。
+//
+// 豁免逐文件逐行列出并断言条数**恰为** len(allowed)：新增一处裸读即变红，删掉
+// 一处豁免也变红——两个方向都钉住，否则豁免清单会慢慢变成整文件豁免。
+//
+// ⚠️ schemaDDL() 里的视图 SQL 由 bitemporal.CurrentQuery 在**运行时**生成，源码
+// 里没有 `FROM macro_observations` 这个字面量 ⇒ 本判据不会命中它，**不需要**为它
+// 加豁免。（写在这里免得后人看见视图 SQL 就去加一条多余的豁免。）
+func TestNoBareTableReadsOutsideMigration(t *testing.T) {
+	// 迁移必须裸读：它的工作就是在视图还不存在、或正要重建它的时候搬数据。
+	// 逐条列出而非整文件豁免 —— migrate.go 将来新增的裸读同样要被看见。
+	allowedBare := []string{
+		"migrate.go: SELECT COUNT(*) FROM macro_observations  （迁移前行数 RowsBefore）",
+		"migrate.go: SELECT COUNT(*) FROM macro_observations  （迁移后行数 RowsAfter）",
+	}
+
+	bare := regexp.MustCompile(`FROM\s+macro_observations\b`)
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+
+	var found []string
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		require.NoError(t, err)
+		for i, line := range strings.Split(string(src), "\n") {
+			trimmed := strings.TrimSpace(line)
+			// 行注释里提到表名不是读取。不跳过的话，任何人在注释里解释视图
+			// 是怎么回事都会触发假阳，守卫很快会被当成噪音整文件豁免掉 ——
+			// 而那正是本判据要防的。
+			// ⚠️ 已知边界：只跳行注释，块注释 /* */ 不处理（本包没有，且把
+			// SQL 藏在块注释里也不构成读取）。
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			if bare.MatchString(line) {
+				found = append(found, fmt.Sprintf("%s:%d: %s", f, i+1, trimmed))
+			}
+		}
+	}
+
+	for _, hit := range found {
+		assert.True(t, strings.HasPrefix(hit, "migrate.go:"),
+			"非测试源码只许经 v_macro_current 读，裸读 macro_observations 的只有迁移：%s", hit)
+	}
+	assert.Len(t, found, len(allowedBare),
+		"豁免条数必须恰为 %d —— 多了是新增裸读，少了是豁免清单没跟上实现。\n  清单：%v\n  实际：%v",
+		len(allowedBare), allowedBare, found)
 }

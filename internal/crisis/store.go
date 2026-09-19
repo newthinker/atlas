@@ -120,7 +120,16 @@ func (s *Store) UpsertObservations(ctx context.Context, obs []Observation) error
 	return tx.Commit()
 }
 
-const obsSelect = `SELECT ts, indicator, value, source, fetched_at FROM macro_observations`
+// obsSelect 从 v_macro_current 读，不是从 macro_observations。
+//
+// 换 FROM 而不是给每个调用点加一句 "取 fetched_at 最大的那行"：后者是同一条规则的
+// N 份副本，加第 N+1 个读点时必漏 —— EvalDates 就是这么漏掉的（它不经本常量，
+// 计划原文因此把读取点数错成「只改 obsSelect 即可」）。视图把规则收进一个地方，
+// 新读点只要 FROM 对了就自动正确。
+//
+// 保持显式列名而非 SELECT *：视图是 SELECT * FROM macro_observations o WHERE...，
+// 用 * 会把将来新增的列一并带出来，而 scanObservation 按固定列序扫描。
+const obsSelect = `SELECT ts, indicator, value, source, fetched_at FROM v_macro_current`
 
 func (s *Store) Observation(ctx context.Context, indicator, date string) (*Observation, error) {
 	return scanMaybeObservation(s.db.QueryRowContext(ctx,
@@ -171,9 +180,16 @@ func (s *Store) SeriesSince(ctx context.Context, indicator, from, end string) ([
 }
 
 // EvalDates returns vix 的观测日序列（回测的评估日历——vix 覆盖全部验收时段）。
+//
+// 🔴 这是第五个读取点，且**不经 obsSelect** —— 它自己内联了一条查询，所以「改了
+// obsSelect 就都改完了」是错的（计划原文正是这么数的）。读裸表时，同一天的每个
+// 修订都会产出一个日期，回测于是把那天评估两遍。走视图后每个业务键只剩一行。
+//
+// 同样是换 FROM 而非加 DISTINCT：DISTINCT 能去掉重复日期，但它是「就地补一条规则」
+// ——下一个读点还得再补一次。规则收在视图里只需对一次。
 func (s *Store) EvalDates(ctx context.Context, from, to string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT ts FROM macro_observations WHERE indicator = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
+		`SELECT ts FROM v_macro_current WHERE indicator = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
 		IndVIX, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("querying eval dates: %w", err)
