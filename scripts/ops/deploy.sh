@@ -25,11 +25,29 @@
 #    排除表补两条只堵住**已知**的两个症状；这道判别堵的是成因——下一个被 gitignore
 #    的运行时目录出现时，排除表不会保护它。详见 internal/hestia/CONTRACTS.md §A7。
 #
+# 🔴 手工替换单个二进制时（不跑本脚本）：必须 `rm` + `cp`，不能原地 `cp` 覆盖
+#    （2026-09-19 实测事故，详见 docs/deployment.md 同名小节）。原地覆盖保持 inode 不变，
+#    而 macOS 内核对该 inode 缓存了旧二进制的代码签名 ⇒ 新内容对不上缓存 ⇒ 内核 SIGKILL，
+#    表现为**任何**子命令 `rc=137`、**stdout 与 stderr 全空、无任何日志**。
+#    ⚠️ `sha256` 一致 + `codesign -dv` 逐字段相同 + 可执行位正确**三项全过**时仍会发生
+#    ⇒ 这三项不足以证明二进制能运行；**部署后必须在 $ATLAS_RUNTIME 下实际跑一次**
+#    （`./bin/atlas crisis status --config configs/config.yaml --crisis-config configs/crisis-monitor.yaml`；
+#    必须 cd 进去，configs 里的 storage.path 是相对路径）。本脚本自身走 rsync，不受该问题影响。
+#    ⚠️ 重启 `serve` **不验证** crisis 的双时态形状守卫：`crisis.NewStore`（含 verifyBitemporalShape）
+#    的唯一非测试调用点是 openCrisisStore，只服务 `atlas crisis *` 命令族，serve.go 无引用。
+#
+# 🔴 `--delete` 只保护下面排除表里的目录。**仓库里不存在的手工 runtime 目录会被清掉**，
+#    尤其是迁移/回滚工件：sprint M4-crisis 曾把两份库备份、迁移前 replay 基线、以及
+#    **7 月构建、无法重建的旧二进制**放在 $ATLAS_RUNTIME/m4c-migration/ ——那是回滚路径的一半。
+#    ⇒ 此类工件请放在受保护路径下（如 $ATLAS_RUNTIME/data/…，/data/ 在排除表内），
+#    而不是依赖「记得先搬走」。
+#
 # 用法：
 #   bash scripts/ops/deploy.sh                 # 部署到默认 runtime
 #   ATLAS_RUNTIME=/path/to/runtime bash scripts/ops/deploy.sh   # 覆盖目标
 #
 # 运维手册：docs/ops/qlib-warehouse-runbook.md
+#            部署约束与本次实测事故：docs/deployment.md 的「macOS launchd Deployment」节
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

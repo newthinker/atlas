@@ -249,6 +249,83 @@ bash scripts/ops/install-services.sh
 launchctl kickstart -k gui/$(id -u)/com.newthinker.atlas.serve
 ```
 
+### 🔴 手工替换二进制：必须 `rm` + `cp`，不能原地 `cp` 覆盖（2026-09-19 实测事故）
+
+只想换 `bin/atlas`、不跑 `deploy.sh` 时（例如 sprint M4-crisis 的迁移那种「先迁移后部署」场景）：
+
+```bash
+# ✅ 正确：先删再拷，换掉 inode
+rm -f  "$ATLAS_RUNTIME/bin/atlas"
+cp -p  <新二进制> "$ATLAS_RUNTIME/bin/atlas"
+
+# ❌ 错误：原地覆盖，inode 不变
+cp -p  <新二进制> "$ATLAS_RUNTIME/bin/atlas"
+```
+
+**实测症状**：原地 `cp` 覆盖后，`bin/atlas` 的**任何**子命令都以 `rc=137`（`128+9` = **SIGKILL**）退出，
+**stdout 与 stderr 全空**，不产生任何日志。
+
+**成因**：`cp` 原地覆盖保持 inode 不变，而 macOS 内核对该 inode 缓存了**旧二进制的代码签名**；
+新内容与缓存不符 ⇒ 内核直接 kill 进程。`rm` 释放旧 inode、`cp` 分配新 inode 即解决
+（实测 inode `216433589` → `220870847`）。
+
+⚠️ **这是本仓库记录过的最难归因的部署失效形态**，理由是它与所有常规核实项都不冲突：
+
+| 核实项 | 事故当时 |
+| --- | --- |
+| `sha256` 与源二进制一致 | ✅ 通过 |
+| `codesign -dv` 与源二进制逐字段相同（adhoc / linker-signed） | ✅ 通过 |
+| 可执行位 `-rwxr-xr-x` | ✅ 通过 |
+| **实际运行** | 🔴 `rc=137`，无输出 |
+
+⇒ **`sha256` + 签名 + 可执行位全对，不足以证明二进制能运行。**
+若只核实这三项就宣布部署完成，第一个撞上的会是**无人值守的定时任务**
+（本次是 `crisis-daily` 22:45），而排查者看到的是「二进制一切正确、一跑就死、没有任何日志」。
+
+### 部署后必须实际运行一次（不只核实文件属性）
+
+```bash
+cd "$ATLAS_RUNTIME"          # ⚠️ 必须在此目录：configs/*.yaml 的 storage.path 是**相对路径**
+./bin/atlas crisis status --config configs/config.yaml --crisis-config configs/crisis-monitor.yaml
+```
+
+- 🔴 **判据是首行为 `system state: …`，不是 `rc=0`。** `rc=0` 不足以区分「守卫在生产库上通过」
+  与「守卫在一个刚被自己建出来的空库上空转」——见下一条。`rc=137` 见上一节。
+- 🔴 **忘了 `cd` 不报错，它是假成功。** `crisis.NewStore` 对 `storage.path` 先
+  `os.MkdirAll` 再让 sqlite 建库，而 `verifyBitemporalShape` 对全新空库**刻意放行**
+  （`internal/crisis/store.go`：表不存在 ⇒ `return nil`，否则谁都建不了新库）。
+  ⇒ 在错误目录下会**当场新建一个空 `data/crisis.db`**，`rc=0`、有输出、守卫「通过」
+  ——而验的是那个空库，不是生产库。
+
+  实测（2026-09-19，临时目录，未碰生产）：
+
+  | 场景 | rc | 首行 | 副作用 |
+  | --- | --- | --- | --- |
+  | 在 `$ATLAS_RUNTIME` 下（正确） | 0 | `system state: NORMAL (as of …, 44 eval days)` | 无 |
+  | 错目录 + **绝对**配置路径 | **0** | `no evaluations yet — …` | **新建 24576 字节空库，主键正确** |
+  | 错目录 + 相对配置路径 | 1 | — | `Error: reading crisis config: open configs/crisis-monitor.yaml: …` |
+
+  ⇒ 第三行那个 `rc=1` 的成因是**配置文件路径**、不是 `storage.path`：`LoadConfig` 先失败，
+  根本走不到 `storage.path`。**换成绝对配置路径就只剩第二行那条假成功路径。**
+  ⚠️ `system state:` 这一行在全新空库上**构造上不可能出现**（空库恒为 `no evaluations yet — …`），
+  所以它是这里唯一可用的判据。**判性质，不判退出码。**
+- **为什么用 `crisis status` 而不是重启 `serve`**：`crisis.NewStore`（含双时态形状守卫
+  `verifyBitemporalShape`）的唯一非测试调用点是 `openCrisisStore`，**只服务 `atlas crisis *` 命令族**，
+  `serve.go` 无引用。⇒ **`serve` 起来了不构成守卫通过的证据。**
+  ⚠️ 但上一条说明：**「跑了 `crisis status` 且 rc=0」同样不构成证据**。本小节最初写的判据
+  （「rc 必须为 0 且有实际输出」）恰恰无法区分「真通过」与「在空库上空转」——
+  **它是它自己要防的那个失效的同形版本**。这一处由 code-simplifier 的受控实验查出并订正。
+
+### ⚠️ `deploy.sh` 的 `--delete` 只保护排除表里的目录
+
+`--exclude` 列表（`/data/` `/logs/` `/queue/` 等）之外、**仓库里不存在**的 runtime 目录，
+会被 `rsync --delete` 清掉。已知需要留意的一类是**手工创建的迁移/回滚工件目录**：
+
+- sprint M4-crisis 曾在 `$ATLAS_RUNTIME/m4c-migration/` 放两份库备份、迁移前 replay 基线、
+  以及**旧二进制**。其中旧二进制是 7 月构建的、**无法从源码重建**，是回滚路径的一半。
+- 处置：此类工件放在受保护路径下（本次放 `$ATLAS_RUNTIME/data/m4c-migration-safe/`，
+  `/data/` 在排除表内），或部署前先搬走。**不要依赖「记得先搬」——放在受保护路径里才是设计。**
+
 ### 服务清单（plist 真相源 `deploy/launchd/`）
 
 | 服务 | 调度 | 职责 |
