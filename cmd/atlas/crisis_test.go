@@ -1289,10 +1289,82 @@ func TestReplayAsOfValidatedBeforeOpeningDB(t *testing.T) {
 	assert.NotContains(t, err.Error(), "crisis db", "拿到开库错误就说明校验跑晚了")
 }
 
+// TestParseAsOfAlignmentMatrix 把 parseAsOf 注释里那张「方案 × 入参」对照表变成可执行的。
+//
+// 🔴 **为什么要这张表**：那段论证此前三轮各被独立审查查出三处以上事实错误/射程问题，
+// 而**每一处都是靠人读出来的** —— 注释里的错不会响，表驱动断言会。这张表在此承担论证，
+// 注释只留结论与指针。
+//
+// 列的含义（库内行固定为 row，比较是 SQLite 的**字典序** `fetched_at <= ?`）：
+//
+//	sameInstant  入参解析后与 row 是否同一时刻（时刻序的期望）
+//	wantA        原样透传（**本函数实际采用**）下 `row <= asof` 的实际值
+//	wantB        `t.UTC().Format(RFC3339Nano)` 规范化后的实际值（对照方案，未采用）
+//
+// ⚠️ **`wantA` 记录的是当前行为，不都是「正确行为」** —— 见下面标 `knownDefect` 的行。
+//
+// ⚠️ **「入参小数位」这一维的上界不取 9。** 9 位是**写入侧**约束（`NowStamp` 的
+// `timeLayout`），而入参由调用方给、不受它约束；`RFC3339Nano` 到 15 位仍解析成功。
+// 用写入侧的边界去划读入侧的穷尽范围，正是这张表要防的那类错。
+func TestParseAsOfAlignmentMatrix(t *testing.T) {
+	const row = "2026-07-14T05:42:08.150777000Z" // 生产形态：定宽 9 位
+	rowT, err := time.Parse(time.RFC3339Nano, row)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name        string
+		in          string
+		sameInstant bool
+		wantA       bool // 当前实现（原样透传）的 row <= asof
+		wantB       bool // 对照：Format 规范化后的 row <= asof
+		knownDefect string
+	}{
+		{name: "整秒", in: "2026-07-14T05:42:08Z", sameInstant: false, wantA: true, wantB: true},
+		{name: "6位", in: "2026-07-14T05:42:08.150777Z", sameInstant: true, wantA: true, wantB: true},
+		{name: "9位定宽（生产形态）", in: row, sameInstant: true, wantA: true, wantB: true},
+		{name: "9位全零", in: "2026-07-14T05:42:08.000000000Z", sameInstant: false, wantA: false, wantB: true},
+		{
+			name: "10位（同一时刻）", in: "2026-07-14T05:42:08.1507770000Z",
+			sameInstant: true, wantA: false, wantB: true,
+			knownDefect: "A 欠包含：与 as-of 同一时刻的那一行被排除，而 B 在该格是对的",
+		},
+		{
+			name: "15位（同一时刻）", in: "2026-07-14T05:42:08.150777000000000Z",
+			sameInstant: true, wantA: false, wantB: true,
+			knownDefect: "同上；小数位 10..15 全部命中，≤9 一侧零欠包含",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAsOf(tc.in)
+			require.NoError(t, err, "本表只放被接受的入参；被拒的形态见 TestParseAsOfRejects*")
+			require.Equal(t, tc.in, got, "A = 原样透传，输出应与入参逐字相同")
+
+			inT, err := time.Parse(time.RFC3339Nano, tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.sameInstant, inT.Equal(rowT), "时刻序：入参与 row 是否同一时刻")
+
+			assert.Equal(t, tc.wantA, row <= got, "A（当前实现）的字典序结果")
+			assert.Equal(t, tc.wantB, row <= inT.UTC().Format(time.RFC3339Nano), "B（对照方案）的字典序结果")
+
+			if tc.knownDefect != "" {
+				// 🔴 这一行钉的是**已知缺陷的当前行为，不是期望行为**：
+				//   缺陷 = tc.knownDefect
+				// 它现在是绿的（断言的就是当前行为），价值在**改实现时会红** —— 提醒改的人
+				// 这里有语义变化，别无声地改掉。⇒ 它守的不是正确性，是「这里有个已知的坑」。
+				// 修它要改 parseAsOf 的行为（拒绝 >9 位小数，与拒绝偏移同族），本任务
+				// boundary 冻结行为 ⇒ 不在范围内，已记入 discovery 与 PENDING-MECHANISMS。
+				assert.True(t, tc.sameInstant && !tc.wantA,
+					"已知缺陷的形状：同一时刻 ∧ A 排除了它 —— %s", tc.knownDefect)
+			}
+		})
+	}
+}
+
 // TestParseAsOfAcceptsBothFormats 覆盖 boundary[2]（O5 裁定，【实现】）。
 //
-// 两种形态都收：spec §5 判据四原文写的是 `--as-of 2026-07-13`，而 plan Step 4 写
-// RFC3339 —— 只收其一会让照另一份文档敲命令的人撞「格式非法」。
+// 两种形态都收：spec §5 判据四原文写的是 `--as-of 2026-07-13`（纯日期），而 plan
+// 的 flag 帮助文案写的是 RFC3339（`Step 2: 实现`，plan:769 —— 那是 plan 里 RFC3339
+// 的唯一一处）。⇒ 只收其一会让照另一份文档敲命令的人撞「格式非法」。
 func TestParseAsOfAcceptsBothFormats(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"", ""},
@@ -1335,10 +1407,11 @@ func TestParseAsOfAcceptsBothFormats(t *testing.T) {
 //	row <= …Z       → true   （包含）
 //	row <= …+00:00  → false  （排除）
 //
-// ⇒ 放行 +00:00 会让「as-of 那一瞬间的那个修订」被静默漏掉。转换也不行：
-// t.UTC().Format(RFC3339Nano) 会把 …150777000Z 压成 …150777Z，而字典序上
-// …150777500Z <= …150777Z 为真 —— 用一个无声的错换另一个。拒绝是唯一不产生
-// 新错位的选项。
+// ⇒ 放行 +00:00 会让「as-of 那一瞬间的那个修订」被静默漏掉。
+//
+// ⚠️ 这里曾写着「拒绝是唯一不产生新错位的选项」——**那句已被撤回，它是假的**：
+// 本函数采用的原样透传自己就有错位。各方案的错位形态、以及拒绝偏移形态的真实理由
+// （错位的上界由谁决定），见 TestParseAsOfAlignmentMatrix 的表与 parseAsOf 的注释。
 func TestParseAsOfRejectsZeroOffsetDespiteSameInstant(t *testing.T) {
 	const zForm = "2026-07-13T00:00:00Z"
 	const offsetForm = "2026-07-13T00:00:00+00:00"
