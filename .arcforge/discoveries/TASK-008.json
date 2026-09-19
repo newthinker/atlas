@@ -69,6 +69,14 @@
       "evidence": "NewStore 对 storage.path 先 os.MkdirAll 再让 sqlite 建库，而 verifyBitemporalShape 对全新空库刻意放行（表不存在 ⇒ return nil）。⇒ 在错误目录下跑 crisis status 会当场新建空库、rc=0、有输出、守卫「通过」。Leader 实测三场景：正确目录 rc=0 首行 system state:；错目录+绝对配置路径 rc=0 首行 no evaluations yet 且新建 24576 字节空库；错目录+相对配置路径 rc=1（LoadConfig 先失败，根本走不到 storage.path）。⇒ 换成绝对配置路径就只剩那条假成功路径。",
       "my_case": "我的验证输出首行确实是 system state: NORMAL (as of 2026-09-17, 44 eval days) ⇒ 在强判据下仍然有效。但我原先声称的判据是 rc=0，那个判据不足以区分「守卫在生产库上通过」与「守卫在空库上空转」。⇒ 结论对、证据够、理由弱——这与本 sprint 记过的「结论对但理由错」同族：结论正确会让判断永不被复查，而理由是别人复现时唯一的入口。",
       "generalization": "守卫对「空/新建」状态放行是合理设计（否则无法初始化），但它使得「守卫没报错」同时兼容「守卫真的检查过」和「守卫面对空对象直接返回」。⇒ 验证任何带「空则放行」分支的守卫，判据都必须能区分这两种情形。"
+    },
+    {
+      "id": "F8",
+      "finding": "migrate.go:23 的注释『回滚靠两次 RENAME』为假，且它不在本任务范围内，我无权改。",
+      "evidence": "grep 实测 internal/crisis/migrate.go 的 RENAME TO 命中总数 = 1（在 :125）。假注释在源码里有 2 处而非 fix_items 说的一处：internal/crisis/migrate.go:23（注释）与 internal/crisis/migrate_test.go:187（断言消息）。",
+      "ownership": "两处都在 TASK-002 的 writes 内（./internal/crisis/migrate.go、./internal/crisis/migrate_test.go），TASK-002 已 verified。TASK-008 的 writes 只有 ./.arcforge/docs/07-deploy/m4c-migration-log.md 与 ./internal/hestia/CONTRACTS.md，grep migrate.go 命中 0 ⇒ 我改它就是 scope 漂移。",
+      "propagation": "该假说法还出现在 .arcforge/tasks/TASK-002.json 的 DoD 原文（C3：回滚靠两次 RENAME）——即它不是从代码传到 DoD，而是 DoD 与注释同源。TASK-008 自己的 DoD error_handling[0] 也原样抄了『两次 RENAME 反着来』。",
+      "action": "CONTRACTS.md §B 开头已订正为『迁移只有一次 RENAME』。源码两处保持原样，留给 Leader 决定是否开新任务修 —— 不在本任务 writes 内的文件，正确做法是申报归属而不是顺手改掉。"
     }
   ],
   "decisions": [
@@ -111,6 +119,14 @@
     {
       "decision": "拒绝把 docs/deployment.md 与 scripts/ops/deploy.sh 加进自己的 writes 来解除 BLOCKED。",
       "rationale": "writes 是「我会写哪些路径」的声明，同时驱动 scope 互斥与漂移判据。把我没改的文件写进去是让声明失真——以后真有人越界改这两个文件也不会告警了。这是用一个永久的安全属性换一次交付的便利。"
+    },
+    {
+      "decision": "修复 CRITICAL 时不靠「加一句警告」，而是给出唯一推荐的执行方式。",
+      "rationale": "第一版修复（只加 .bail on）堵住了会删库的那条路径，同时堵死了原本唯一安全的单参数形态 —— 修一个洞挖一个洞。写警告要求运维『别用某形态』依赖的是人记得，而给一条可照抄的命令（存文件 + < 重定向）不依赖。判据也一并改成回滚后直接查三样（行数/视图数/主键形状），因为实测表明 rc 在这件事上几乎无信息量。"
+    },
+    {
+      "decision": "§G2 不删改成『已被守卫堵上』，并保留原说法作为有效期记录。",
+      "rationale": "实测同一命令同一目录只换二进制：旧二进制 rc=0、28 行输出、状态机字样 26 次；新二进制 rc=1、0 行、stderr 指名 legacy two-part primary key 并指路 migrate-bitemporal。⇒ 原文『输出有数据、不报任何错』在旧二进制下为真，是有效期到了而不是写错了，而让它失效的正是本 sprint 的交付物。但守卫只拦得住未迁移的库，若误跑目标本身已迁移则不会响 ⇒ 比 inode 仍是第一道判据，守卫是第二道。"
     }
   ],
   "files_modified": [
@@ -165,5 +181,23 @@
     ],
     "prescription": "JSON 一律 printf '%s' 不用 echo；参数写全不塞变量；核实用无过滤的全量查询；核实命令报异常时先用已知答案的输入验仪器，再怀疑数据。",
     "near_miss_on_reading_code": "读 task-completed.sh 时，CHANGED_FILES 定义后紧跟的注释说「.arcforge/ 整棵树排除」，我据此一度判断 packages 里的 .arcforge/docs/07-deploy/… 对门禁结构性不可见、本任务永远转不了 dev_done，差点报给 Leader。实际 grep -vE '^\\.arcforge/' 作用在 ACTUAL_FILES（漂移检查）上，docs-only 分支用的是未排除的 CHANGED_FILES。⇒ 注释的位置不等于它的作用域。"
+  },
+  "rework_round_1": {
+    "triggered_by": "QA REJECT + Leader 复测，reason_class=task_defect，rework_count 1→1（写通道自增）",
+    "critical": {
+      "what": "我写进 CONTRACTS.md §B 的回滚 SQL，在 _v1 已删（§C 授权删除之后）且经 stdin 执行时会永久删库。",
+      "reproduced_by_me": "SQL 用 sed -n 从 CONTRACTS.md 逐字提取（未手抄），生产库 .backup 快照上跑：跑前 31098 行/2 表/2 索引/1 视图 ⇒ 跑后 macro_observations 不存在，sqlite_master 只剩 crisis_evaluations 与 idx_crisis_eval_ind_ts。",
+      "root_cause": "sqlite3 CLI 默认不 .bail on：ALTER TABLE RENAME 报 no such table 后继续执行，最后那句 COMMIT 把已生效的 DROP TABLE 提交掉。BEGIN 在场但没有保护任何东西。",
+      "why_my_original_verification_missed_it": "我当时验的是 sqlite3 db \"$SQL\" 单参数形态——恰好是当时三种调用形态里唯一不会删库的那一种，而我在文档里写的是一句无条件的『这段 SQL 是实跑验证过的』。⇒ 在一个结论必然成立的分支里求了值，却没有把那个分支写成条件。这与我同一份 discovery 里的 F7 是同一个形状：F7 说『守卫没报错同时兼容真检查过与面对空对象直接返回』，这里是『我的验证通过同时兼容 SQL 是对的与我恰好用了它唯一不出错的调用方式』。我写下了那条规则，然后在相邻的一格里违反了它。"
+    },
+    "my_first_fix_introduced_a_new_defect": {
+      "what": "加 .bail on 之后，单参数形态 sqlite3 db \"$SQL\" 报 Usage: .bail on|off 且整段 SQL 一条都不执行 —— 正常回滚路径下 _v1 仍在、表仍是三段主键，即回滚根本没做。而修改前该形态是正常工作的。",
+      "how_found": "我自己跑对照发现的，不是被指出的。",
+      "final_fix": "不靠加警告，改为在文档里给出唯一推荐执行方式：存成文件 + sqlite3 <db> < rollback.sql，并把六种形态的实测表写进文档。"
+    },
+    "instrument_error_8th": "我第一轮报的 rc 有一半是假的：写成 sqlite3 ... | sed 然后取 $?，那是 sed 的退出码。只有 sqlite3 在管道末尾那次 rc=1 为真。重测（stderr 重定向到文件、不跨管道取 rc）后与 Leader 实测完全一致。『取退出码不要跨管道』这条我记忆里写着，这是本轮第八次同族。",
+    "six_form_matrix": "sqlite3 3.51.0，生产库 .backup 快照：管道/无 bail/_v1 已删 → rc=1 且 31098 行全丢；管道·heredoc·<file 三者/有 bail/_v1 已删 → rc=1 且全在；<file/有 bail/_v1 仍在 → rc=0 且回滚完成（两段主键、视图可查）；单参数/有 bail/_v1 仍在 → rc=1 且整段未执行。⇒ 五行 rc=1 里一行删光了库、三行毫发无伤、一行什么都没做，rc 几乎无信息量。",
+    "acceptance": "fix_items[0]：_v1 已删 + stdin ⇒ rc=1 ∧ 行数 31098（索引 2、视图 1 也在）→ 通过。fix_items[1]：_v1 仍在 + 完整回滚 ⇒ 视图=1、可查询返回 31098、主键形状回到 PRIMARY KEY (ts, indicator) → 通过。产出比对：回滚后旧二进制 replay sha256 = d0ee798b… 与迁移前基线逐字节一致。生产库全程未碰（sha256 4ef6a781… 不变）。",
+    "f9_my_result_differs_from_architect": "fix_items[2] 要我自行实跑判定 F9（§B 开头那条导出命令不成立），不要照抄结论。我实测：sqlite3 <副本> \".mode insert macro_observations\" \"SELECT * FROM macro_observations;\" → rc=0、输出 31098 行、形如 INSERT INTO macro_observations VALUES(...)；回灌到空表 rc=0、31098 行全部恢复。⇒ 在我测的条件下（sqlite3 3.51.0、生产库副本、表存在）该命令成立且导出物可回灌，与 Architect 的结论相反。我只能断言我测的条件，不替它下判断——差异已报 Leader 转交。"
   }
 }
