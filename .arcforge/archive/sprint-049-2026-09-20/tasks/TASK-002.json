@@ -1,0 +1,109 @@
+{
+  "id": "TASK-002",
+  "title": "迁移命令 MigrateBitemporal + atlas crisis migrate-bitemporal",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-002 段。新建 `internal/crisis/migrate.go`：`MigrateBitemporal(ctx, dbPath) (MigrateResult, error)`，**直接开库、不经 NewStore**（AD-5：TASK-003 的守卫会拒绝老形状，而迁移恰要在那种库上跑）。事务内：探形状 → 建 _new → INSERT SELECT → 旧表改名 `macro_observations_v1` → _new 就位 → **重建索引与视图**（C2：RENAME 后索引跟着旧表走，漏了不报错只变慢）。`MigrateResult{AlreadyMigrated, RowsBefore, RowsAfter, ViewRows}`。新建 `cmd/atlas/crisis_migrate.go` 子命令打印三个计数。⚠️ 含 NULL `fetched_at` 的老库迁移**应当失败**（NOT NULL 拦下），响亮失败好过静默塞空值。",
+  "module": "crisis",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/crisis/migrate.go",
+    "internal/crisis/migrate_test.go",
+    "cmd/atlas/crisis_migrate.go",
+    "cmd/atlas/crisis_migrate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "老形状库（两段主键、3 行）迁移后：`AlreadyMigrated=false`、`RowsBefore=RowsAfter=ViewRows=3`，且新表 DDL 为三段主键；逐值对照 `SELECT * FROM v_macro_current EXCEPT SELECT * FROM macro_observations_v1` 与反向双向均为 0 行（判据一的单测版）。 且**迁移后新表的 DDL 同样含 `fetched_at TEXT NOT NULL` 与三段主键**（C1 在迁移路径上也要成立，不只对新建库）。🔴 `_new` 表的 DDL **必须复用 TASK-001 的常量/生成函数**，不得在 migrate.go 里另写一份建表 SQL——那会造出表形状的第二个副本（同 AD-3 的风险源），C1 会在迁移路径上悄悄漂移。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "幂等：第二次调用 `AlreadyMigrated=true` 且不再搬数据（行数与 `sqlite_master` 中表/索引/视图数量均不变）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "旧表保留为 `macro_observations_v1` 且行数与迁移前一致（C3：回滚靠 DROP + **一次** RENAME、对照靠它）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**C2 索引重建**：`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_macro_obs_ind_ts'` 返回 `macro_observations`（挂在**新**表上，不是 _v1）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "含 NULL `fetched_at` 的老库 ⇒ 迁移返回错误（NOT NULL 拦下），且**失败后库仍是老形状**：`macro_observations` 仍为两段主键、无 `macro_observations_v1`、无 `_new` 残留（事务原子性）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "空库（0 行）迁移成功且三个计数均为 0；已是新形状的库直接 `AlreadyMigrated=true`（探形状看主键是否含 fetched_at，**不看有无 _v1 表**——后者在回滚后会误判）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`--db` 指向**不存在的文件** ⇒ 响亮失败、错误文案含该路径、且**不创建新库**。🔴 须显式实现（迁移前 `os.Stat`，或 DSN 用 `mode=rw`）——`sql.Open(\"sqlite\", \"file:\"+path)` **默认会建库**，不写这一步就恒不失败（Leader 核实：`NewStore` 同样 `os.MkdirAll` 后建库）。另：缺 `--db` 时报错且不开库。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go build ./...` 通过；`go test -count=1 ./internal/crisis ./cmd/atlas` 全绿（本任务在 cmd/atlas 新增文件，须自带 cmd 级测试以免拉低该包覆盖率）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/crisis",
+    "./cmd/atlas"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 1,
+  "questions": [
+    {
+      "q": "DoD functional[0] 的三条硬约束在我的 writes 范围内不可同时满足：①『建 _new 表』②『_new 表的 DDL 必须复用 TASK-001 的常量/生成函数』③『不得在 migrate.go 里另写一份建表 SQL』。原因：schema.go 不在 TASK-002 的 writes 里，我无法给它加一个参数化的 DDL 生成函数；而 tablesDDL/schemaDDL() 硬编码表名 macro_observations，要拿它造出名为 macro_observations_new 的表只能做字符串替换（strings.Replace 掉表名再剥掉 crisis_evaluations 与索引那几段），那本身就是表形状的一个脆弱副本，与②③的用意相悖。我的提议是改成 rename-first：DROP VIEW -> DROP INDEX -> ALTER TABLE macro_observations RENAME TO macro_observations_v1 -> 执行 schemaDDL()（原样调用，零副本）-> INSERT INTO macro_observations SELECT ... FROM macro_observations_v1，全程一个事务。全部已实测可行：新表三段主键+fetched_at NOT NULL、idx_macro_obs_ind_ts 的 tbl_name=macro_observations、_v1 保留、视图重建、事务回滚能完整还原（含 RENAME）。DoD 的可测断言在两种方案下都成立，且 boundary[0] 要求的『无 _new 残留』在 rename-first 下恒真（压根不存在 _new）。请确认：走 rename-first 可以吗？若你坚持 _new 形态请说，我改实现（测试不受影响）。我按 rename-first 继续推进以免空等，你否决我就改。",
+      "asked_at": "2026-09-19T00:00:00Z",
+      "answer": null
+    },
+    {
+      "q": "两条实测发现，DoD 未提及但会造成静默错误，报备一下（不需要你答复，除非你认为要写进 DoD）：(1) ALTER TABLE RENAME 会**静默改写视图定义**——实测 v_macro_current 的 SQL 被自动改成引用 \"macro_observations_v1\"，即迁移后视图指向旧表。危险在于 ViewRows 计数此时仍可能等于 RowsAfter（无重复键时行数相同），测试不红而语义已错。⇒ 必须先 DROP VIEW。(2) 索引名在 sqlite 里是**全局唯一**的：RENAME 后 idx_macro_obs_ind_ts 跟着 _v1 走，此时 CREATE INDEX IF NOT EXISTS idx_macro_obs_ind_ts 会因同名已存在而**静默跳过**，新表永远没有索引——这正是 C2『漏了不报错只变慢』的确切机制。⇒ 必须先 DROP INDEX。两条对 _new 方案同样适用。",
+      "asked_at": "2026-09-19T00:00:00Z",
+      "answer": null
+    }
+  ],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./internal/crisis/migrate.go",
+    "./internal/crisis/migrate_test.go",
+    "./cmd/atlas/crisis_migrate.go",
+    "./cmd/atlas/crisis_migrate_test.go"
+  ],
+  "coverage_floor": 78,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "d78a4d880cba940382f91b37e3ae6aaccda709c1",
+    "discovery_sha256": "2e7ed2fb05dee9fbcc47a7f797f925cf00f0aa886a0f7b8c8552fb4fc5066f16",
+    "at": "2026-09-19T12:00:55Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    "V-3 [HIGH] `migrate_test.go:230` 的 `assert.False(t, objectExists(t, db, \"macro_observations_new\"), \"不得留下 _new 残留\")` 是恒真断言。全仓 `.go` 文件里 `macro_observations_new` 仅此 1 处命中（就是断言自己），`CREATE TABLE` 该表 0 处，`migrate.go:32` 明确声明不走 _new 路线。与本 sprint 刚修的 `Contains(\"+00:00\")` 同形。判据：改成能被变异杀死的断言，或删除并说明为何该不变量无需断言；若保留，请给出一个会让它变红的变异。",
+    "V-9 [MEDIUM] `migrate.go:13` 写着「三个计数是运维现场唯一的判据：三者相等才算好」，但三计数是 `COUNT(*)` 行数口径，而 `migrate.go:127-128` 的 `INSERT INTO macro_observations (ts, indicator, value, source, fetched_at) SELECT 同样5列 FROM _v1` 是硬编码列清单。QA 已构造复现：给 tablesDDL 加一列 note TEXT，老库 note 有值，跑迁移后三计数全为 3、相等，而 note 有值的行数 _v1=3 / 迁移后=0。⇒ 加列之后那句话为假，而它恰是运维唯一被告知要看的东西。判据：让丢列这种情形能被某个机制发现（列清单单一来源、或迁移后加一道列级校验、或把那句话的射程写准）。不要求改成哪一种，但要能被测试钉住。",
+    "`migrate.go:23` 注释「回滚靠两次 RENAME」为假——`RENAME TO` 在 migrate.go 命中总数为 1（:125）。同一假说法在 `migrate_test.go:187` 的断言消息里也有一份。两处都在本任务 writes 内。判据：改成实际次数，并在 discovery 写明这条假理由传播了几处。",
+    "⚠️ 本条不是要你改代码，是 Leader 的自陈：本任务 done_criteria 的 functional 里原文写着「C3：回滚靠两次 RENAME、对照靠它」——上一条那两处假说法是照这句 DoD 写的，你做的正是被要求的事。该句已由 Leader 在派发本轮时经 update 订正（见 transitions.jsonl 的 update 审计行）。这条记在这里是为了让验证者知道：`migrate_test.go:187` 的问题归因是 dod_defect 而非 task_defect，定级时请与 V-3 分开看。"
+  ]
+}

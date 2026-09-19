@@ -1,0 +1,75 @@
+{
+  "id": "TASK-009",
+  "title": "收掉三条无 owner 的运维认知缺口（V-4 / V-6 / V-8）",
+  "description": "QA 四轮审查报出三条 MEDIUM，共同点是**不在任何任务的 writes 里，因此没有角色负责同步它们**——V-4 正是这么发生的（部署判据订正后只落进 3 份副本的 1 份）。本任务把它们收进有 owner 的范围。纯文档/脚本注释改动，不改任何可执行逻辑。",
+  "module": "ops-docs",
+  "complexity": "low",
+  "estimated_files": [
+    "docs/deployment.md",
+    "scripts/ops/deploy.sh"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "V-4：`scripts/ops/deploy.sh` 的头注释补上部署后验证的判据「首行为 `system state: …`，不是 rc=0」。判据：`grep -c 'system state:' scripts/ops/deploy.sh` 从 0 变为 ≥1。⚠️ 现状三份副本已漂——deployment.md 3 / deploy.sh 0 / CONTRACTS.md 0（CONTRACTS 那份由 TASK-008 处理，本任务不碰）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "V-6：`docs/deployment.md` 新增一节，写明「仓库 `bin/atlas` 可能是陈旧构建，不含当前分支的代码」，并给出可照抄的自检命令（`strings bin/atlas | grep -c <本分支新符号>` 配一个正对照符号）。⚠️ 必须写明它的危害形态：**它不只是不告诉你，它会把你推向相反的结论**——实测一次：用 9/18 的旧二进制复核 §G2，拿到 rc=0 + `no evaluations yet` 这个完全正常的输出，而真相是守卫会 rc=1 响亮拦住。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "V-8：`docs/deployment.md` 写明「运维手册的 `sqlite3` CLI 与应用的 `modernc.org/sqlite` 是语义不同的引擎」，附实测表（CLI `legacy_alter_table=1` 不改写视图 / 驱动为 0 会静默改写）。并给出判别：验视图**存在性**两边一致可用 CLI，验视图**指向哪张表**必须走 Go 驱动。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "不得改动 `deploy.sh` 的任何可执行行。判据：`git diff -- scripts/ops/deploy.sh` 的新增行全部以 `#` 开头（去掉前导空白后）；`bash -n scripts/ops/deploy.sh` rc=0。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "三条新增内容都必须带**实测证据或可复现命令**，不得只写结论。判据：逐条能指出它的证据来源（哪次实测、什么命令、什么输出）。理由：本 sprint 反复出现「结论对但理由错」，而理由是下一个人复现时的唯一入口。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`docs/deployment.md` 新增内容不得与既有章节矛盾。判据：改后 `grep -n 'system state:' docs/deployment.md` 的 3 处命中与新增内容口径一致（都说判据是首行，不是 rc）。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 2,
+  "context_from": [
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./docs/deployment.md"
+  ],
+  "writes": [
+    "./docs/deployment.md",
+    "./scripts/ops/deploy.sh"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "6918b5fb71489240045a472bbbc5194342f1d6a3",
+    "discovery_sha256": "af01e3ec0b95f06e757298c7ecdf22567c7bb872b567fc164ac76a14f8907169",
+    "at": "2026-09-19T10:29:13Z"
+  }
+}

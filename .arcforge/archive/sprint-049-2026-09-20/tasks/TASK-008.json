@@ -1,0 +1,121 @@
+{
+  "id": "TASK-008",
+  "title": "生产迁移执行与判据一～四实测（人类在场）",
+  "description": "人类裁决 R2：本任务由 agent 执行，但**必须在人类在场时进行**——它改生产库。开工第一步：向 Leader 确认人类在场，未确认不得开始。步骤见 /Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-008 段 Step 1-4：①备份 **`/Users/zuowei/workspace/runtime/atlas/data/crisis.db`**（绝对路径，见 boundary[0] 的🔴） 并采迁移前基线（`count(*)` 应为 31092；`replay --from 2020-01-01 --to 2026-09-17 --json` 存盘——🔴 判据二的「前」必须在迁移前采，事后补不出来）；②用**新二进制**跑 `crisis migrate-bitemporal`（**先别部署**，AD-11：守卫会拒绝老形状，反序会让 crisis 的 launchd 任务全部启动失败）；③部署+重启后复跑 replay 比对；④判据三、四。判据五（人造修订）、六（同键异值）、七（等真实采集）**不在本任务**，留给人类。产出写 `.arcforge/docs/07-deploy/m4c-migration-log.md`。",
+  "module": "ops",
+  "complexity": "medium",
+  "estimated_files": [
+    "./.arcforge/docs/07-deploy/m4c-migration-log.md"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "🔴 **判据一之前的 preflight（test-m4c-a 2026-09-19 从 schema 推出，Leader 当场实测）**——与「迁移前当场实测 count(*)」**同一趟**做完，缺它会把一个可以事前知道的阻塞变成部署途中的意外：\n```sql\nselect count(*) from macro_observations where fetched_at is null;  -- 必须为 0，否则迁移必失败\nselect count(*) from macro_observations where fetched_at = '';     -- 非阻塞，但同趟查掉\n```\n**为什么需要**：老 schema 的 `fetched_at` 是 `TEXT` **无 `NOT NULL`**（`git show 2917c67:internal/crisis/store.go`，Leader 直读生产库 `sqlite_master` 复核：`fetched_at  TEXT,`）⇒ 结构上可空；而 `migrate_test.go:223` 断言「含 NULL `fetched_at` 的老库必须迁移失败」（该断言经变异 N8 验过有牙）。TASK-003 的 e2e 跑的是仓库 `data/crisis.db` 的 30787 行副本，**是另一个文件**——生产那份从没被任何人验过。\n**空串那条的理由**（非阻塞）：`NOT NULL` **允许空字符串**，而空串在 `MAX(fetched_at)` 里永远排最低 ⇒ 它过得了迁移，却会让那一行**永远不是当前行**。\nℹ️ **Leader 2026-09-19 已实测（只读）**：生产库 NULL=0 空串=0（31098 行）；仓库库 NULL=0 空串=0（30787 行）。**但执行时仍须当场重跑**——这两个数是那一刻的，而本条正是为了不把「当时为 0」当成「此刻为 0」。⚠️ 真有 NULL 时迁移是**原子失败、库一字不动**，不会丢数据；按 `error_handling[0]` 回报人类、不得继续部署。\n\n**判据一**：`migrate-bitemporal` 输出的 RowsBefore / RowsAfter / ViewRows **三者相等**，且等于**迁移前当场实测的** `select count(*) from macro_observations`。🔴 **不得硬编码 31092**（Leader 2026-09-19 订正）：该数取自 2026-09-18，而 crisis 采集任务每天都在写——实测 2026-09-19 已是 **31098**。把一个会变的数写死进判据，等于把「判据在什么条件下成立」丢掉了；正确形态是「三数相等 ∧ 等于迁移前的实测值」，实测值与采样时刻一并记进日志。随后双向 `EXCEPT`（`v_macro_current` vs `macro_observations_v1`）两个方向均为 **0 行**（全量不抽样）。原始输出贴进迁移日志。 🔴 **三个计数须独立复算，不得只信命令输出**（源自 test-m4c-a 在 TASK-002 的变异 N9）：`TestExecuteCrisisMigratePrintsCounts` 的断言是 `assert.Contains(t, s, \"3\")`，而 `t.TempDir()` 的路径几乎必然含数字 3 ⇒ 该断言近乎恒真，把三个计数全打成 0 也不会有测试变红。故迁移后须用 `sqlite3` 直接复算三个数，与命令输出逐一对照后再判定。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**判据二**：迁移前采的 `replay --from 2020-01-01 --to 2026-09-17 --json` 与迁移+部署后复跑的输出 **`diff` 为空**（逐行相同）。两份文件路径与行数写进日志。 🔴 **防采集污染（O8）**：比对期间 crisis 的 launchd 采集/评估任务若唤起并写入新观测日，`diff` 会非空而与本次改动无关。故须二选一并记进日志：比对前先 `launchctl bootout` 掉 crisis 三个任务（crisis-daily / crisis-nfci / crisis-intraday-jpy）、比对后装回；或记录 before/after 两次采样时刻及其间 `count(*)` 未变。**基线锚（N8）**：before 文件须记生成时刻、所用二进制的 sha256 或构建 commit、当时 `count(*)`，且**不落 `/tmp`**（会被清），与备份放一处。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**判据三**：`replay --as-of <当前 UTC 时刻>` 与不带 `--as-of` 的输出完全相同。🔴 **但别把它绿了读成「as-of работает」——它在这份数据上是恒等式，不是检验**（Leader 2026-09-19 实测生产库后补；线索来自 dev-m4c-a 的真实数据探针，但成因比它说的更强）：老表是 `PRIMARY KEY (ts, indicator)` **两段主键**，**结构上就不可能**让同一个 `(ts,indicator)` 有两个 `fetched_at`；迁移是 1:1 复制，所以迁移后**每键仍恒为一个修订**。实测：31098 个键**全部** `count(distinct fetched_at)=1`，而 distinct `fetched_at` 有 43 个（43 次采集，各自落在不同的键上）。⇒ 在「每键一个修订」的数据上，`AsOf(任意未来时刻)` 与当前形态**必然**逐值相同，**即使 as-of 逻辑完全写错**（只要它没把行过滤掉）。⇒ **判据三是【守住】不是【实现】**：它能拦住的是「迁移弄坏了当前读」，**不能**证明 as-of 正确。as-of 的正确性证据在 TASK-006 的单测（含变异 Y1 参数顺序、Y2 `<=`→`<`）与 dev 的 31098 行探针（0 处不一致），**不在这里**。验证者请按这个标准判，别给判据三超出它射程的解读。ℹ️ 想要真正考验 as-of 的生产证据，那是**判据五（人造修订）**——已明确留给人类，不在本任务。**这个恒等状态会在第一次迁移后采集时结束**（新 `fetched_at` 落到已有键上），届时判据三才开始有区分力；迁移日志须记下这一点，免得后人拿本次的「完全相同」当作 as-of 的验收证据。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "**判据四**：`replay --as-of 2026-07-13T00:00:00Z` ⇒ **0 行且退出码 0**（空序列不是错误）。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "备份已生成且可用：`crisis.db.bak-m4c-<时间戳>` 存在，`sqlite3 <备份> \"select count(*) from macro_observations\"` 等于**迁移前实测值**（不是写死的 31092）。**另（dev-m4c-a 2026-09-19 现场勘察）**：两个本地库（仓库 `data/crisis.db` 30787 行、`/Users/zuowei/workspace/runtime/atlas/data/crisis.db` 31098 行）当前**均为老形状且无 `v_macro_current` 视图** ⇒ TASK-001 合入后没人跑过 `atlas crisis` 子命令。现场大概率是「无视图的老形状库」这个较简单形态，但**不得据此跳过带视图路径的处理**——只要有人在迁移前跑过一次 crisis 命令就会变成带视图。 🔴 **路径必须写绝对路径（Leader 2026-09-19 实测后补）**：生产 runtime 在 **`/Users/zuowei/workspace/runtime/atlas`**，**不是**仓库内的 `runtime/atlas`（仓库里没有这个目录）。我自己就在这上面栽过一次：对仓库内的 `runtime/atlas/bin/atlas` 跑 `strings … | grep -c 守卫串` 得 **0**，而 0 恰好等于我预期的答案——**文件不存在时 `strings` 报错、`grep -c` 照样打 0**，命令跑了、退出码看着没事、数字合理，测的却不是那个东西。⇒ 本任务里每一条 `strings`/`sqlite3`/`ls` 核实都必须：①用绝对路径；②配**正对照**（一个该文件必然含有的串，如 `crisis`）证明仪器在工作。⚠️ 对照串别挑本次改动才引入的东西（我第一次挑了 `migrate-bitemporal`，它是 TASK-002 才加的，老二进制本来就没有，那个 0 什么也不证明）。",
+        "verify_by": "manual"
+      },
+      {
+        "desc": "部署顺序遵守 AD-11：先迁移、后部署重启；日志记录两步的实际时刻，且迁移时用的是新二进制（记其 sha256 或构建 commit）。 ⚠️ plan Step 3 写的是重启 `com.newthinker.atlas.serve`，但 `crisis.NewStore` 的唯一非测试调用点是 `cmd/atlas/crisis.go` 的 openCrisisStore，只服务 `atlas crisis *` 命令族——**重启 serve 并不验证守卫**；日志须写明，别把「serve 起来了」当作守卫通过的证据。 🔴 **顺序约束是硬要求，不是「记得做」**（Leader 2026-09-19 核实现场后补，线索来自 dev-m4c-a）：守卫已在 master，而线上 **`/Users/zuowei/workspace/runtime/atlas/bin/atlas`**（Sep 18 18:11，43375234 字节）**不含守卫**（Leader 2026-09-19 带正负对照重测：老二进制 守卫串=0 / `v_macro_current`=0 / `migrate-bitemporal`=0，正对照 `crisis`=318、`macro_observations`=9 证明 `strings` 在工作；同一把尺量本地 master 新构建得 1/9/2），生产库仍是老形状（实测 `PRIMARY KEY (ts, indicator)`、31098 行、无 `v_macro_current` 视图） ⇒ **下一次 `deploy.sh` 一旦把含守卫的二进制投上去，crisis 的三个 launchd 任务（crisis-daily / crisis-nfci / crisis-intraday-jpy，三份 plist 的 `ProgramArguments[0]` 均为 **`/Users/zuowei/workspace/runtime/atlas/bin/atlas`**，子命令 `crisis eval --mode daily|nfci|intraday`，`WorkingDirectory=/Users/zuowei/workspace/runtime/atlas`，配置 `configs/crisis-monitor.yaml` 的 `storage.path: data/crisis.db`（相对工作目录）——Leader 2026-09-19 直读 `deploy/launchd/com.newthinker.atlas.crisis-daily.plist` 核实）会在无人值守的定时唤起里当场全部失败**。故迁移必须**先于或同步于**下一次部署，不得「部署完再找时间迁」。⚠️ 核实调用的是 `bin/atlas` 而非遗留的 `runtime/atlas/atlas`（Aug 7 的旧文件，crisis 任务不用它）。`serve` 不受影响已双向核实：全仓 `crisis.NewStore` 仅 `cmd/atlas/crisis.go` 的 openCrisisStore 一个调用点，其 5 个上游是 backfill/eval/status/replay/report，serve.go 无引用。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "迁移失败时**不得**继续部署，立即回报人类并保留现场（旧表与备份都在）；日志写明处置。 **另（O4）**：日志须**逐字写出回滚 SQL**（两次 RENAME 反着来 + 重建索引），事故当下没人有心情现推。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "判据五、六、七**不在本任务范围**，日志末尾列出并注明「留给人类」；不得以判据一～四通过为由声称七条判据全部完成。**另（O3）**：在 `internal/hestia/CONTRACTS.md` 新开 `## Sprint M4-crisis · crisis 双时态迁移` 节，记判据一～四实测、迁移前后行数、回滚 SQL，以及🔴**「旧表 `macro_observations_v1` 何时可以删」的判断依据**（spec §3.3 的保留是有期限的；不写下判断依据，这个决定没有任何落点）。 🔴 **另（Leader 2026-09-19 补，TASK-005 交付期核出、因窗口已过无法写进其 discovery）——运维必须知道的故障模式变化**：新写语义下 `UpsertObservations` 对「同 `(ts, indicator, fetched_at)` 三段全同但 value 不同」**整批回滚并报错**（旧实现 `INSERT OR REPLACE` 是静默取后者）。生产 `fetched_at` 取自 `NowStamp(now())`（`internal/crisis/ingest.go:60`、`cmd/atlas/crisis.go:182`，纳秒精度）⇒ **重跑采集是追加，不会误报**；但**同一次运行内所有行共用一个 stamp**，故**若上游在一次抓取里对同一 `(日期,指标)` 返回两个不同值，采集会报错**。🔴 **中断范围比「整批」大（test-m4c-a 2026-09-19 指出，Leader 读 `internal/crisis/ingest.go:58-85` 核实）**：`ingestFredSeries → upsert → UpsertObservations` 的错误经 `IngestAll` 的 `return nil, err` 直接上抛，**不 continue**；而 `fredDirect[0]` 就是 vix（`ingest.go:48`）⇒ vix 一炸，该轮**后续全部指标都不再抓取**（hy_oas / t10y2y / nfci、派生 sofr_effr，以及 yahoo 的 move / usdjpy——注意 yahoo 本来是「错误只记进 `YahooErrs` 不中断」的，但它排在 FRED 之后，FRED 抛错时根本走不到）。⇒ **运维须知写「中断整轮采集」，不要写「整批报错」**——后者会让人以为只丢一个指标。各源指标互不重叠（FRED vix/hy_oas/t10y2y/nfci、yahoo move/usdjpy、派生 sofr_effr），故只有上游自身返回重复日期才触发。**行为是对的（正是 C6 要暴露的），但它把一个静默路径变成了会中断采集的响亮失败**——迁移日志须写明这一条，并提示运维：若迁移后出现 `the same fetch reported two values` 形态的采集失败，那是数据源问题被暴露出来，不是本次迁移引入的缺陷。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "wave": 8,
+  "context_from": [
+    "TASK-002",
+    "TASK-006",
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./.arcforge/docs/07-deploy/m4c-migration-log.md"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 3,
+  "questions": [
+    {
+      "q": "【卡点1·需人类裁决】迁移↔部署窗口内的 launchd 任务如何处置？实测推翻了 AD-11 的前提：老二进制在迁移后的新表上不会失败，而是**静默污染**（其 INSERT OR REPLACE 本来就带 fetched_at，三段主键下变成追加；裸表读路径 Window(ind,end,5) 只覆盖 4 个交易日而非 5，那是算分位数的输入）。crisis-intraday-jpy 是 StartInterval=1800（每 30 分钟），窗口必被撞上。建议：迁移前 launchctl bootout 三个 crisis 任务，判据跑完再 bootstrap 回去。未获裁决前不碰生产库。⚠️ 【本条由 leader 于 2026-09-19 重建】原文经 `transition --json-field questions=` 两次被整数组替换而丢失（该路径不留字段审计，见 questions[3].answer 的说明）。",
+      "asked_at": "2026-09-19T04:23:31Z",
+      "answer": "【裁决：不停 launchd，直接执行步 2。人类已确认『ok,continue』。】\ndev 的机制发现是对的且重要，但据以推荐 bootout 的理由不成立：**executeCrisisIntraday 不写观测**。它碰 store 只有 LatestSystemEval / HasIndicatorEvalForDate / SeriesWindow（读）+ AppendEvaluations（写**评估表**），且 `case \"intraday\":` 的 deps 构造里**没有 ingest* 字段**（对比 `case \"nfci\":` 有 ingestNFCI）。Leader 读 cmd/atlas/crisis.go:259-265 与 478-548 核实。\n⇒ 污染场景**需要一次写入**；而迁移是 1:1 复制 ⇒ 迁移刚完成时库里无重复行 ⇒ 老二进制读裸表读到的与迁移前逐字相同。dev 探针里的污染是它自己先用老二进制写语句插了一条造成的，真实窗口里不会发生。\n唤起表：intraday 每 1800s **不写观测** ⇒ 无害；daily 22:45 本地（=14:45 UTC）**写** ⇒ 真正的截止线（当时余量约 10.5h）；nfci 周三 21:00/22:00，当日周六 ⇒ 不唤起。\n不选 bootout 的理由：它自带更糟的失效模式——**忘了 bootstrap 回去，监控静默关闭**。\n🔴 **事后被生产数据证实**：迁移 04:26:09Z → 部署 06:13:06Z，窗口 1h47m、intraday 应唤起 3~4 次，而库 sha256（4ef6a781…）与 crisis_evaluations（352）**均一字未变** ⇒ 「intraday 不写观测」从代码推断升级为真实窗口实证。\n⚠️ dev 查出的东西必须进日志与 CONTRACTS：**反序的危害不是『任务会失败』（那还是好事，会被发现），是『任务会成功但算错』。** 其措辞「不是怕它崩，是怕它不崩」采纳，AD-11 的论据按该改写走。"
+    },
+    {
+      "q": "【卡点2·需 leader 裁决】迁移日志落盘路径。TASK-008 的 writes/packages 指向 docs/07-deploy/m4c-migration-log.md，但写通道 DENY：合法写者是 ops-*。矩阵里 7 条 docs/ 规则没有一条给 dev-*，即 **dev-* 在 docs/ 下无任何可写目录**。这连带卡住 dev_done（无代码任务的 packages 路径无变更，门禁过不了）。日志内容已写完并保全在 scratchpad/m4c-migration-log-BY-dev-m4c-a.md（373 行，sha256=8fde834c…）。三选项：①spawn 一个 ops-* 实例读该文件落盘（推荐，符合矩阵设计）②改 writes/packages 到 dev 可写路径（绕过设计）③改 write-matrix 给 dev-* 加 docs/07-deploy/*（运行时资产，需人类，最贵）。⚠️ 【本条由 leader 于 2026-09-19 重建】原文经 `transition --json-field questions=` 两次被整数组替换而丢失（该路径不留字段审计，见 questions[3].answer 的说明）。",
+      "asked_at": "2026-09-19T04:23:31Z",
+      "answer": "【裁决：采纳选项 ①。ops-m4c-a 已 spawn，token 已登记。】\nLeader 核实矩阵属实：rules 里 7 条 docs/ 规则为 01-design/02-plan/03-progress→leader、04-test→test-*、05-review→qa-*、06-acceptance→leader、**07-deploy→ops-***，**没有一条给 dev-***。⇒ 结构性死锁，非操作失误。\nops-m4c-a 的任务只有一件：把 scratchpad 那份**原样**落盘。指令要求：①落盘前核 sha256 + 内容判据确认归属；②**读全文**（不落盘没读过的东西）；③落盘后 diff 整体比对。**明确禁止修改内容**——dev-m4c-a 是作者，ops 只是落盘者。\n不选 ②：07-deploy 是语义正确的位置，改路径等于绕过设计。不选 ③：运行时资产只读，需人类 + 会话外同步，且打开权限面。\n✅ 已完成（ops 回报并经 Leader 独立核实）：sha256 8fde834c… 与源及期望值三者相同、373 行 / 18439 字节 / 11 节、diff 逐字节一致。\n⚠️ dev 指出的根因已列入 PENDING-MECHANISMS：**validator 的 scope 检查不校验『assigned_to 的角色对 writes 里每条路径有没有写权』**——这在派发那一刻就查得出来（拿角色前缀比对矩阵 rules），却等到交付前才撞上。"
+    },
+    {
+      "q": "【卡点3·需人类确认】步 3 部署方式。生产库已于 2026-09-19T04:26:09Z 迁移完成，判据一~四全部通过，当前处于「已迁移、未部署」中间态（线上 bin/atlas 仍是老二进制 f86a46dc…）。余量到 daily 22:45 本地约 10.3 小时。①跑 deploy.sh（但它可能还部署 serve 等其他组件，副作用我不清楚）②直接把 m4c-migration/atlas-new（a8142360…）覆盖到 bin/atlas。⚠️ 附带：重启 serve 不验证守卫——crisis.NewStore 的唯一非测试调用点是 openCrisisStore，只服务 atlas crisis * 命令族，serve.go 无引用。⚠️ 【本条由 leader 于 2026-09-19 重建】原文经 `transition --json-field questions=` 两次被整数组替换而丢失（该路径不留字段审计，见 questions[3].answer 的说明）。",
+      "asked_at": "2026-09-19T04:33:39Z",
+      "answer": "【裁决（人类确认）：选项 ②，只覆盖 bin/atlas，不跑 deploy.sh。】\n理由（Leader 读 scripts/ops/deploy.sh 后才问的）：它是 rsync -a -m --delete 全量同步，--exclude 表含 /data/ /logs/ /queue/ **但不含 m4c-migration/** ⇒ 会清掉两份库备份、迁移前基线、以及**7 月构建、无法重建的旧二进制**（回滚路径的一半）；且它会同步整个 runtime，远超本次需要。\n🔴 **执行时撞上 SIGKILL 事故**：`cp -p` 原地覆盖保持 inode 不变，而 macOS 内核对该 inode 缓存了**旧二进制的代码签名** ⇒ 新内容对不上缓存 ⇒ 内核 SIGKILL，表现为**任何**子命令 rc=137（128+9）、**stdout 与 stderr 全空、无任何日志**。\n⚠️ 当时 sha256 一致、codesign -dv 逐字段相同、可执行位正确——**三项静态核实全过**。⇒ **这三项不足以证明二进制能运行。** 若只核实它们就宣布部署完成，第一个撞上的会是 daily 22:45 的无人值守唤起，而排查者看到的是「二进制一切正确、一跑就死、没有任何日志」——本次整个迁移里**最难归因的失效形态**，且它不由迁移引入、纯粹由部署手法引入。\n修法：`rm -f bin/atlas && cp -p <新> bin/atlas` 换 inode（实测 216433589 → 220870847）。\n⇒ 已按人类直接指示持久化到 **docs/deployment.md**（三个新小节）与 **scripts/ops/deploy.sh 头注释**（后者因为执行部署的人一定会打开脚本，而手册要主动去翻——载体决定约束会不会被执行）。\n✅ 部署已由 Leader 独立核实：bin/atlas = a8142360…、inode 220870847、守卫串 1（此前 0）、正对照 crisis 355（此前 318）、在 runtime 目录下 `crisis status` rc=0 且有实际输出。"
+    },
+    {
+      "q": "【卡点4·需 leader 裁决】转 dev_done 会被 scope 漂移检查 BLOCKED。漂移集三个文件：./docs/deployment.md、./internal/hestia/CONTRACTS.md、./scripts/ops/deploy.sh，而 TASK-008 的 writes 只有 ./.arcforge/docs/07-deploy/m4c-migration-log.md 与 ./internal/hestia/CONTRACTS.md ⇒ deployment.md 与 deploy.sh 落在 DRIFT 里。会话开始时 git status 无这两个文件，故为本会话期间被改；内容是把 SIGKILL 事故与备份位置风险写进运维文档（作者未经确认，故不断言）。**减不掉是结构性的**：OTHERS 只取 status ∈ {assigned,in_progress,dev_done,verifying,blocked_clarification} 的任务 writes，TASK-001~007 全是 verified，而 **leader 没有 task** ⇒ 其改动永远进不了 OTHERS。三选项：①把两文件加进我的 writes —— **我拒绝**：writes 是「我会写哪些路径」的声明，同时驱动 scope 互斥与漂移判据，把我没改的文件写进去是让声明失真，以后真有人越界改这两个文件也不会告警，等于用永久的安全属性换一次交付的便利。②leader 提交它们 —— ⚠️ 但 ACTUAL_FILES = CHANGED_FILES ∪ COMMITTED_BOUNDED，**已提交的也会并进漂移集**（C5 修的），所以若提交信息锚定 `<type>(TASK-008):` 反而会把它们并进 COMMITTED_BOUNDED、留在漂移集里 ⇒ 光提交可能不够，前缀是关键。③给这两个文件开一个小任务，让它们出现在某个在途任务的 writes 里。⇒ 后续裁决：leader 采用②并用**非 TASK-008 前缀**提交（离开 CHANGED_FILES 且因前缀不匹配不进 COMMITTED_BOUNDED），即上面那个警告恰好指向了正确做法。 ℹ️ 【本条溯源，2026-09-19】leader 曾因 jq 取值路径错误（`to_entries[] | .q` 应为 `.value.q`）误判本数组被清空，并据此重建了四条 q；其重建版丢失了本条选项②的上述警告与选项③，现由 dev-m4c-a 依原意补回。**但 leader 对我的另一半指控成立**：我三次写 questions 都经 `transition --json-field questions=`，该路径只记 from/to、不留字段审计（审计可证：我的 op=update 行 0 条，而数组内容从 2→3→4 确实变过）。此后改为拆两步：先 `update --json-field` 再单独 `transition`。",
+      "asked_at": "2026-09-19T06:30:40Z",
+      "answer": "【裁决：方向取 ②，但**提交前缀必须是非 TASK-008**；dev 不要动 writes。】\ndev 拒绝选项 ① 是对的，理由成立：让声明失真会永久关掉这两个文件的越界告警。\n**dev 担心的「光提交可能不够」是对的，而它恰好指向了正确做法。** Leader 读实现确认：\n  ACTUAL_FILES      = CHANGED_FILES ∪ COMMITTED_BOUNDED     （已提交的也进漂移集，C5 修的）\n  COMMITTED_BOUNDED = git log --grep=\"^[a-z]+\\(TASK-008\\):\"  ← **只含本任务前缀的提交**\n⇒ 用**非 TASK-008 前缀**提交，这两个文件既离开 CHANGED_FILES（已提交）、也不进 COMMITTED_BOUNDED（前缀不匹配）⇒ 从 ACTUAL_FILES 干净消失。\n⚠️ **这不是绕过门禁**：COMMITTED_BOUNDED 刻意只含**本任务自己的**提交，**别人的提交本来就不该算作 dev 的漂移**，这正是其设计语义。那两个文件是 Leader 按人类直接指示（「将上述操作约束持久化到部署手册中」）在任务体系之外改的，如实记成非 TASK-008 提交才准确。⇒ dev 建议的锚定 `<type>(TASK-008):` 会把它们**并进** COMMITTED_BOUNDED、**留在**漂移集里。\n执行：Leader 跑完 code-simplifier 后提交，提交信息写明内容、为何不在任何任务 writes 里、以及它们与 TASK-008 是「同一次事故的两个落点」而非 TASK-008 的产出。提交后 Leader 通知 dev，**dev 自己核一次 `git status --porcelain` 确认那两个文件已不在未提交集，然后**才转 dev_done——不要盲试。\n🔴 dev 那条结构性观察已列入 PENDING-MECHANISMS：**Leader 在共享工作区改任何 git 跟踪的文件，都会让下一个转 dev_done 的 dev 被 BLOCKED**，而那个 dev 既不知道文件是谁改的、也无权声明它。worktree 隔离本该解决它，但本任务必须在主仓库做（要写 .arcforge/、要碰生产）⇒ **隔离在这类任务上结构性不可用**。今天是这条的第一个实例。"
+    }
+  ],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./.arcforge/docs/07-deploy/m4c-migration-log.md",
+    "./internal/hestia/CONTRACTS.md"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "8023f6ce63fccbef1e1d4e0b237fa2e59cef4fa2",
+    "discovery_sha256": "2cc07d6ae0c4ef1f0fdd659bc895ca608cc927228264bc90401653189acea3e1",
+    "at": "2026-09-19T10:49:47Z"
+  },
+  "reason_class": "task_defect",
+  "fix_items": [
+    "本轮**不是修缺陷，是补一格未验证的断言** —— 请在 discovery 与交付报告里明确这样标注，别让 rework_count=3 被后人读成「第三次修 bug」。",
+    "dev 用「这个上界由几个字段决定？我扫了几个？」这条新判据自查时，发现 §B-1「导出行数 = 键总数」这条断言**有一格从未测过**：它由两个字段决定（键数 ∧ 每键修订数），而此前只测过「1 个键 2 个修订」。dev 已补测（一个键塞 5 个修订）并写进文档。判据：CONTRACTS.md 与迁移日志两份都要有这段，且逐字节相同。",
+    "Leader 独立复核了核心断言，成立：注入 5 条修订后 总行=31103 / 键数=31098 / 投影导出=31098（= 键数，与总行数无关）/ 该键投影后留 1 行。⚠️ 但 Leader 得到的值是 15.44 而 dev 报 44.44 —— 成因是两人构造不同（Leader 注入的 fetched_at 全早于原有那条，MAX 取到原值）。**结论相同、中间值不同，这本身说明该断言不依赖注入数据的时间分布**。请在文档里避免写死某个具体值。",
+    "迁移日志出 v6（sha256 c563eb09030cf051b3d8652ae498fc5958d78dda5b8ce451ac31abd289532820，705 行，v5 为 702）。⚠️ dev 刻意**没有覆盖 v5** —— v5 是 ops 已落盘且逐字节相同的那份，保住「ops 落的就是这份」的可追溯关系。v6 需 ops 落盘。",
+    "⚠️ dev 自己报了一处：它第一次算预期增删报「+4/−0」，实际行数差是 3（把 new 字符串的 4 行直接当成了增量，而 old 有 1 行）。它在报出前用行数差自查发现并改正。⇒ 请在 discovery 里记下它给的那条固定动作：**纯追加时 `new−old` 应等于行数差，报之前对一次**；以及它的总结「**『可算』和『算对』是两件事**」。"
+  ]
+}

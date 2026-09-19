@@ -1,0 +1,87 @@
+{
+  "id": "TASK-004",
+  "title": "读全部改走视图（含 EvalDates）",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-004 段，**范围经人类裁决 R1 扩大**：除 `obsSelect`（store.go:91）的 FROM 换成 `v_macro_current` 外，**`EvalDates`（store.go:142-144）内联的 `SELECT ts FROM macro_observations …` 同样要改走视图**——计划原文说「五个读取点、只改 obsSelect 即可」，Leader 核实后发现 obsSelect 只有 4 个调用点，第五个真实读取点是 EvalDates，它不经 obsSelect。迁移后只要有修订，EvalDates 会返回**重复日期**，回测把同一天评估两次；而库里现全是单版本 ⇒ 判据二照样通过，缺陷要到第一次真实修订才发作。🔴 C5：四个调用点的 WHERE/ORDER/LIMIT 一个字不动，只换 FROM。⚠️ 视图上不要改成 `SELECT *`（会带出全部列），保持显式列名。",
+  "module": "crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/store.go",
+    "internal/crisis/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "四个读方法只看到最新修订（夹具：2026-01-02/vix 有 10@07-14 与 11@08-14，另有 2026-01-03/vix=20）：`Observation`→11；`LatestObservation`→ts=2026-01-03；`SeriesWindow(end=2026-01-03,n=2)`→恰 2 行且值 `[11,20]`（LIMIT 不被重复行吃掉）；`SeriesSince`→`[11,20]`（不混进旧值）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**EvalDates 不返回重复日期**（裁决 R1）：夹具（2026-01-02/vix 有 10@07-14 与 11@08-14，另有 2026-01-03/vix=20）下 `EvalDates(from,to)` 恰返回 `[2026-01-02, 2026-01-03]`。🔴 **RED 可复现**：dev 分两个 commit 提交（RED 仅含测试 / GREEN 含实现），discovery 记 RED commit 的**全 sha**；验证者在该 sha 上重跑该用例须得到 FAIL。⚠️ 夹具造重复修订**必须用裸 INSERT**——此时 `UpsertObservations` 还是 `OR REPLACE`（TASK-005 未做），走公开 API 造不出两行。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "包内裸表守卫（R1）：非测试源码中不得出现裸表读取，判据用**带词边界的正则** `FROM\\s+macro_observations\\b`（🔴 朴素子串匹配会被 `FROM macro_observations_v1` 假阳命中）。豁免**逐文件逐行**列出并断言豁免条数**恰为 N**（新增裸读即变红）；migrate.go 的迁移 SQL 是合法裸读，属豁免项，不得整文件豁免。⚠️ `schemaDDL()` 里的视图 SQL 由 `CurrentQuery` **运行时生成**，源码无该字面量 ⇒ 不会命中、**无需豁免**（写进注释，免得后人加一条多余豁免）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "C5：四个 obsSelect 调用点的 WHERE/ORDER/LIMIT 与参数**逐字未变**（比对 git diff：store.go 中这四处只有常量定义行变化）。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "单版本数据（无修订）时四个读方法与 EvalDates 的返回与改动前**逐值相同**（回归：既有 crisis 测试零改动全绿）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "视图缺失时响亮失败**且错误可定位到视图**：构造缺 `v_macro_current` 的库，读方法返回的错误文案含 `v_macro_current`（sqlite 原生 `no such table: v_macro_current` 即满足；这条钉的是不得把错误吞成空集）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 ./internal/crisis ./cmd/atlas` 全绿；`go build ./...` 通过。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`obsSelect` 与 EvalDates 处各留一句注释：为什么换 FROM 而不是给每处加 WHERE（同一规则的 N 份副本，加第 N+1 个读点时必漏）。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./internal/crisis/store.go",
+    "./internal/crisis/store_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "46c401cf15df8c9922c5023c823d8182d2b3707e",
+    "discovery_sha256": "eb05ed690964b7e68eb1444f714d276fbde21224c355cba986d4928bf13afd2f",
+    "at": "2026-09-19T01:01:57Z"
+  }
+}

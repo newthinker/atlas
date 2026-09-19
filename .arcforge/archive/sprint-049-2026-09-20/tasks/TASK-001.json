@@ -1,0 +1,83 @@
+{
+  "id": "TASK-001",
+  "title": "Spec 装配与 v_macro_current 视图 DDL",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-001 段（测试与实现草稿可直接用）。新建 `internal/crisis/schema.go`：包级唯一 `obsSpec = mustSpec()`（`bitemporal.NewSpec(\"macro_observations\", []string{\"ts\",\"indicator\"}, \"fetched_at\")`），`schemaDDL()` 返回建表+建索引+`CREATE VIEW IF NOT EXISTS v_macro_current AS `+`bitemporal.CurrentQuery(obsSpec)`。`store.go` 删掉 `schema` 常量（当前在 store.go:14）、改调 `schemaDDL()`。crisis_evaluations 的 DDL 原样照抄不动。⚠️ `CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做 ⇒ NOT NULL 只对新建库生效，老库靠 TASK-002/003。",
+  "module": "crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/schema.go",
+    "internal/crisis/schema_test.go",
+    "internal/crisis/store.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "新建库的 `macro_observations` DDL 含 `PRIMARY KEY (ts, indicator, fetched_at)` **且** `fetched_at TEXT NOT NULL`（从 `sqlite_master.sql` 读，两条分别断言；C1）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`v_macro_current` 视图存在且其 DDL 含 `MAX(fetched_at)`——当前行由 revision 列派生，不靠 is_current 列（AD-2）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "视图取最新修订：同 `(ts='2026-01-02', indicator='vix')` 插入 fetched_at 2026-07-14 值 10 与 2026-08-14 值 11，另插 2026-01-03 值 20 ⇒ `SELECT value FROM v_macro_current WHERE indicator='vix' ORDER BY ts` 恰为 `[11, 20]`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`obsSpec` 是包级唯一实例：包内非测试源码中 `bitemporal.NewSpec(` 恰出现 1 次且在 schema.go（AD-3；用源码扫描断言，migrate.go/store.go 里不得再造）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "乱序写入不影响结果：先插 fetched_at 较大的行再插较小的，视图仍取较大那行（当前行从 revision 派生的直接体现）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`schemaDDL()` 幂等：对同一库连续执行两次不报错，且表/索引/视图各恰 1 份（`sqlite_master` 计数）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`mustSpec()` 只在 NewSpec 出错时 panic，且 panic 文案含包名与原始错误；不得把错误吞成零值 Spec（零值 Spec 会生成表名为空的 SQL）。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "既有 crisis 测试零改动且全绿；`go build ./...` 通过，`go test -count=1 ./internal/crisis ./cmd/atlas` 全绿（store.go 改了建表调用，须确认调用方不受影响）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./internal/crisis/schema.go",
+    "./internal/crisis/schema_test.go",
+    "./internal/crisis/store.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "39d6565fb82c476aa4d6a5c8e05d38d9f26de03f",
+    "discovery_sha256": "346211e73179ca602be2f5c8769506f35cf0237e9238009624e0c2cbbe5ecf13",
+    "at": "2026-09-18T22:45:26Z"
+  }
+}

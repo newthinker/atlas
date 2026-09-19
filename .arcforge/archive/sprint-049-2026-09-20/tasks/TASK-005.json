@@ -1,0 +1,88 @@
+{
+  "id": "TASK-005",
+  "title": "写改追加：裸 INSERT + 冲突按 value 分流",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-005 段。`UpsertObservations` 从 `INSERT OR REPLACE`（store.go:77）改为裸 `INSERT`：三段全同且 value 也同 ⇒ 吞掉（采集器重跑同一批，无信息差）；三段全同而 value 不同 ⇒ 「同一次取回给出两个值」，整批回滚并报错（C6/AD-7）。🔴 不用 `OR IGNORE`——它把这两种揉成一种。⚠️ 比对 value 注意 NULL：`value REAL` 可空，SQL 里 `NULL != NULL`，两边都 NULL 应判「相同」。",
+  "module": "crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/store.go",
+    "internal/crisis/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "追加而非覆盖：同 (ts,indicator) 先写 10@07-14 再写 11@08-14 ⇒ **裸表 2 行**（旧值还在，这是本次迁移的全部目的），而 `Observation` 看到 11。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "同三段同值幂等：同一批写两次不报错，裸表仍 1 行。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "同三段异值响亮失败：value 10@07-14 后再写 99@07-14 ⇒ 返回错误，文案含 indicator 与 ts；**整批回滚**，裸表仍 1 行（失败的批次不留半个状态）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "源码钉死：store.go 中不得出现 `INSERT OR REPLACE INTO macro_observations` 或 `INSERT OR IGNORE INTO macro_observations`（前者是本次要修的缺陷，后者会掩盖「同一次取回给出两个值」）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "NULL value 的两半分别覆盖（⚠️ `Observation.Value` 是 `float64`，经公开 API **写不出 NULL**，故不能只写一条）：(a) 用**裸 INSERT** 造一行 value 为 NULL 的前置行，再经 API 写同三段非 NULL 值 ⇒ **报错**（一边 NULL 一边非 NULL 判异值）；(b) 「两边都 NULL 判相同」由单测**直接调用比对函数**覆盖（不经 UpsertObservations）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "批量写入中途冲突 ⇒ 整批回滚（批内前面已成功的行也不落盘），行数与写入前一致。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "空切片写入是 no-op，不开事务也不报错（或开事务立即提交，行为须由测试钉住）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "🔴 **既有测试契约必须改写，不得靠放宽写路径来变绿**：`TestStoreUpsertIdempotentAndWindows`（store_test.go:39-41）当前写同三段异值并期望**覆盖成功**，文件头契约注释（store_test.go:6）也写着「同 (ts,indicator) 重复 upsert 覆盖而非报错」——二者在 C6 下**必红**。改写方向只能是「同三段异值期望 error」并同步更新那行契约注释；**严禁**改回 `OR REPLACE`/`OR IGNORE` 或在写路径加容忍来让它变绿。改完 `go test -count=1 ./internal/crisis ./cmd/atlas` 全绿、`go build ./...` 通过。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-004"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./internal/crisis/store.go",
+    "./internal/crisis/store_test.go",
+    "./cmd/atlas/crisis_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "e4aa5034075c5d08f4e9ce0873e3b128d6a374e7",
+    "discovery_sha256": "86915b304fbed88cf1f3ee399ed011751b30be5eee9c9c234fc5e6fdac1618eb",
+    "at": "2026-09-19T01:31:00Z"
+  }
+}

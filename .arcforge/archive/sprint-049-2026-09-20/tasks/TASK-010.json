@@ -1,0 +1,79 @@
+{
+  "id": "TASK-010",
+  "title": "修掉列级校验的参照系缺陷：守卫与被守护对象不得共用来源",
+  "description": "TASK-002 交付的列级校验守卫，参照系是**新表 schema**（来自 tablesDDL），而真正搬数据的是那条**硬编码 5 列的 INSERT**——两份不同的清单。任何加进 tablesDDL 的列必然出现在新表列里、必然不在 lost 里 ⇒ 守卫失明。🔴 而守卫自己的错误信息写着「给 tablesDDL 加列时必须同步改它」，**第一步恰好关掉守卫，第二步无人看守**。三方独立复现（code-simplifier / dev / test-m4c-a），A 组实测：err=nil、三计数 3/3/3 相等、新表 note 非空 0（迁移前 3）、_v1 非空 3 ⇒ 整列静默丢失而迁移报成功。⚠️ 本任务**只收这一条**，TASK-002 的另 9 条注释/文档精度项不在范围内（并表会让它被按清单平均优先级对待，而那个平均值是注释精度）。",
+  "module": "crisis-migrate",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/migrate.go",
+    "internal/crisis/migrate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "守卫的参照系改为**搬运清单本身**而非新表 schema：把 INSERT 的列名提成包级单一来源（如 migratedColumns），INSERT 语句由它拼出，守卫用「旧表列 ∖ 该来源」。判据：`grep` 确认 INSERT 语句中不再有硬编码列名字面量，且守卫与 INSERT 引用同一个标识符。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**在原缺陷的触发集上验收**（不是新构造的样本）：给 tablesDDL 加 note TEXT、不动其他，老库带 note 且 3 行有值 ⇒ 迁移必须**报错并点名 note**，而不是 err=nil。修改前该触发集下 err=nil / 三计数 3/3/3 / 新表 note 非空 0。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "不误伤：全量测试通过数与基线一致（基线 142 PASS / 0 FAIL）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "🔴 **守卫测试自身必须非恒真，且用退回态验证**：把修法退回成参照新表 schema 的写法 ⇒ 新测试必须**红**。⚠️ 先跑 `go build` 确认退回态能编译（`go vet` 只作静态检查，不作编译判据——V-9 变异曾出现 vet rc=1 而 build rc=0 的 unreachable code 警告）。判据：写明退回态的 FAIL 行与期望/实际值。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`AlreadyMigrated` 分支的列检查**收窄为「_v1 存在才查」**，_v1 不在时静默通过。⚠️ 注释必须写明**沉默的两个来源**（「无从判断」≠「没丢」），否则它成为「空则放行的守卫」的又一实例。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "🔴 **错误信息文案必须跟着改**：现文案「给 tablesDDL 加列时必须同步改它」在修法后指错方向（要改的是新的单一来源）。**这句话原本就是该缺陷的一半**——不改则代码不失明而文案仍在指引失明动作。⚠️ 承重件保留：len(lost)、strings.Join(lost, \", \")、指向 copying rows 那一步的指针。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "行号锚改符号锚：migrate.go:74 现写的 `:125` 已错（RENAME TO 实际在 :176，且本任务会再次移动它）⇒ 改为按名字指（「步骤表里 renaming legacy table 那一步」）。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 3,
+  "context_from": [
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "writes": [
+    "./internal/crisis/migrate.go",
+    "./internal/crisis/migrate_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T16:19:50Z"
+  },
+  "verify_baseline": {
+    "head": "89dc94e40f64fc89240ca5694a73e1a24fbaf567",
+    "discovery_sha256": "103fda3e62e5ed5d235735a440246178af4e8d47bc7d6cef22f2fa2d59d25cf0",
+    "at": "2026-09-19T13:42:08Z"
+  }
+}

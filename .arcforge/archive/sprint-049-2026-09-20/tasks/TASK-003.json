@@ -1,0 +1,86 @@
+{
+  "id": "TASK-003",
+  "title": "NewStore 漂移守卫：老形状拒绝启动并指路",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-003 段。`NewStore` 加形状检查：老形状（主键不含 fetched_at）⇒ 返回错误、**不自动迁移**（AD-4/C9），错误文案须含 `migrate-bitemporal` 与 `macro_observations`，照 hestia 先例（`internal/hestia/store_test.go:208 TestNewStoreRejectsSchemaDriftOnLegacyDB`）。⚠️ 探形状看**主键是否含 fetched_at**，不要看「有没有 macro_observations_v1」——后者在回滚后会误判。🔴 顺序不能反：守卫先于迁移会让本地所有开发库（含跑测试用的）立刻打不开，故本任务依赖 TASK-002。",
+  "module": "crisis",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/crisis/store.go",
+    "internal/crisis/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "老形状库 ⇒ `NewStore` 返回错误，`err.Error()` 同时含 `migrate-bitemporal`、`macro_observations` 与该库路径（运维不必自己猜该跑什么）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "迁移后的库 ⇒ `NewStore` 正常返回；空库（全新路径）⇒ 走 `schemaDDL()` 直接是新形状，正常返回。**另（Leader 2026-09-19 补，dev-m4c-a 在 TASK-002 用 6 个变异实测得出，含对本条初版的订正）**：核对两条迁移后不变量——① `idx_macro_obs_ind_ts` 的 `tbl_name` 是 `macro_observations`；② `v_macro_current` 指向 `macro_observations` 而**不是** `macro_observations_v1`。🔴 **第②条的夹具与断言缺一不可，否则是假绿**：夹具必须是**带 `v_macro_current` 视图的老形状库**（模拟被新版 NewStore 打开过的生产库——TASK-001 之后 NewStore 每次打开老库都会执行 schemaDDL()，所以真实老库是有视图的），**且**必须有**行为断言**（迁移后写入一个新修订，经视图读得到）。实测：夹具不带视图 ⇒ RENAME 那刻没有视图可被改写、缺陷根本不触发（变异存活）；只加行为断言而夹具不带视图 ⇒ 同样存活；只让夹具带视图而无行为断言 ⇒ 仍存活。**纯 DDL 文本断言不够**，因为迁移后 `_v1` 与新表内容相同 ⇒ 视图即使指向 `_v1`，行数与双向 EXCEPT 也全对（那是 `_v1` 减 `_v1`），TASK-002 的三数相等照样通过。⚠️ `ALTER TABLE RENAME` 静默改写视图定义、同名索引让 `CREATE INDEX IF NOT EXISTS` 静默跳过——两种坏法都不报错。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "守卫**不自动迁移**：`NewStore` 路径中不得出现任何 ALTER/RENAME/CREATE TABLE …_new 之类的改形语句（验证者读代码 + grep 核对）。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "探形状的判据是主键含 fetched_at：构造「已迁移但 `macro_observations_v1` 已被删除」的库 ⇒ `NewStore` 仍正常打开（证明不是靠 _v1 表存在与否判断）。 **另钉 AD-5（鸡生蛋防线）**：同一个老形状库上，`NewStore` 报错而 `MigrateBitemporal` **仍成功迁移**——若 MigrateBitemporal 走了 NewStore，本条必红；否则该缺陷要到 TASK-008 生产现场才发作（TASK-002 阶段守卫尚不存在，测试照样全绿）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`NewStore` 的**每条 error 返回路径**在返回前都已 `db.Close()`（逐条读代码核；已建立连接之后的路径都要有）。⚠️ 不要用「能否删除库文件」做判据——macOS 上 unlink 不受 open fd 阻塞，该判据恒真、零信息量。",
+        "verify_by": "review"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "库文件损坏/不可读时的既有错误路径不变（既有测试零改动且全绿）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 ./internal/crisis ./cmd/atlas` 全绿；`go build ./...` 通过。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "守卫代码带注释写明「为什么不自动迁移」（启动时静默改结构会让一个本该被人盯着的动作变成副作用），并指向 hestia 先例。 **另**：手跑一次 `atlas crisis status`（老形状库）并把**实际错误文案**贴进 discovery——守卫合入后，所有本地未迁移的 crisis.db 会让 `atlas crisis *` 全族失败（爆炸半径：`cmd/atlas/crisis.go` 的 openCrisisStore 一处，服务 backfill/eval/status/replay/report；`serve` 不触达），文案必须人类可读、能指路。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./internal/crisis/store.go",
+    "./internal/crisis/store_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "a950f754fa0d45794adc0696cf01e9fd11a39fc9",
+    "discovery_sha256": "57970feaa5c72ffadfd2e4f21737c1c27c93078d1e274c9e90522d920abbb641",
+    "at": "2026-09-19T00:16:30Z"
+  }
+}

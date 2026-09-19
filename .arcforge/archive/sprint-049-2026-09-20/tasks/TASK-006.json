@@ -1,0 +1,91 @@
+{
+  "id": "TASK-006",
+  "title": "Store.AsOf：两个查询形态，调用方签名不变",
+  "description": "需求原文：/Users/zuowei/workspace/go/src/github.com/newthinker/hestia/docs/superpowers/plans/2026-09-18-crisis-bitemporal.md 的 TASK-006 段。`Store` 加 `asOf string` 字段；`AsOf(t) *Store` 返回只读副本、**共用同一个 *sql.DB**（AD-8）。`obsFrom()` 按 asOf 选形态（C4/AD-9）：空 ⇒ `FROM v_macro_current`；非空 ⇒ `FROM (bitemporal.AsOfQuery(obsSpec)) o` 且返回要**前置**的参数。🔴 参数顺序是本任务最易错处：`?` 在子查询里，位置**先于**外层 WHERE 的参数——弄反不报错，只会把日期当指标名去查、返回空结果。C7：SeriesReader / 评估逻辑 / RenderReplayHTML 全不动。TASK-004 建立的 `obsSelect` 常量在此改为 `obsFrom()` 方法（计划刻意分两步，别在 004 提前改）。",
+  "module": "crisis",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/crisis/store.go",
+    "internal/crisis/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "as-of 看历史版本：10@07-14 与 11@08-14 ⇒ 当前 `Observation`=11，`AsOf(\"2026-07-20T00:00:00Z\").Observation`=10。 **另（判据三的单测版，O7）**：`AsOf(<远未来时刻>)` 的结果与不带 as-of **逐值相同**——这是 TASK-008 判据三唯一的事前保险。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "边界含端点（`<=` 而非 `<`）：`AsOf(\"2026-08-14T00:00:00Z\")` ⇒ 看到 11（差这一位会让每个历史视图静默偏移一个修订）。 ⚠️ **另加一例生产同形态的 Nano 值**：生产 `fetched_at` 形如 `2026-07-14T05:42:08.150777000Z`，比较是字符串字典序（`'.'(0x2E) < 'Z'(0x5A)`）⇒ `--as-of 2026-07-14T05:42:08Z` 会**包含**同秒带小数的那行。方向无害，但整秒夹具把这点完全掩盖，须显式钉住实际行为。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**四个读方法 + EvalDates 在 as-of 形态下参数顺序正确**：每个方法各一例，断言**逐值等于预期历史序列**（不是「非空」——`SeriesWindow` 有 indicator/end/LIMIT 三个外层参数，插错位置可能返回**非空但错**的结果）；`SeriesWindow` 额外断言 `n=1` 时恰 1 行（证明 LIMIT 参数没被挤走）。🔴 参数顺序弄反不报错，这是本任务最易错处。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "C8：某键在 t 之前无任何行 ⇒ 被排除，`Observation` 返回 `nil, nil`（空结果不是错误），**不是**回退到最早那行。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`AsOf` 不改原 Store：调用后原 Store 仍看当前值；副本与原 Store 的 `db` 是同一实例（`require.Same`），`Close()` 一次即可。",
+        "verify_by": "test"
+      },
+      {
+        "verify_by": "test",
+        "desc": "⚠️ **本条使 TASK-006 的 DoD 达 9 条，超出 Realistic Scope 的 ≤8（Leader 2026-09-19 明知故犯，理由记此）**：它是 TASK-005 变异 R3 暴露的覆盖缺口，而 TASK-005 已 `verified`、文本谁都改不了；本任务正要动 `obsSelect`，是唯一还写得动、且改动范围正好覆盖它的落点。**不把它折进别的条目**——那会让一条行为断言藏在一个测不出该性质的条目里，是本 sprint 反复记下的失效模式。🔴 **给「写路径必须裸读」补一个行为层守卫（test-m4c-a 在 TASK-005 变异 R3 查出的覆盖缺口，Leader 采纳）**：把 `UpsertObservations` 的冲突检测从基表改走 `v_macro_current`（R3 变异）时，**只有源码守卫会红，零行为测试会红**。而源码守卫报的是「豁免清单对不上」这个**记账理由**，不是行为理由——读到那条失败信息的人未必明白为什么不能改。请补一条**行为**断言钉住它：**更新修订已存在时，重写更旧的修订必须被静默吞掉，而不是撞主键**。验证者已把推理变成观察，照抄其场景即可：写 `10@2026-07-14` → 写 `11@2026-08-14` → **再写一次 `10@2026-07-14`**；交付态 `err=nil`（正确吞掉），走视图的变异态 `UNIQUE constraint failed … (1555)`。⚠️ 这是真实场景不是构造的：补跑历史（`manual_backfill` 路径）就是这个形状。⚠️ 本任务正要把 `obsSelect` 改成 `obsFrom()`，**那处写路径的裸读不能跟着改走视图**（dev-m4c-a 的移交也明写了这一点）；这条断言就是它的行为层保险。"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`AsOf(\"\")` 等价于当前形态（或明确报错——行为由测试钉住，不留未定义语义）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 ./internal/crisis ./cmd/atlas` 全绿；`go build ./...` 通过。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "三条源码级核对（review）：①**C7**——`SeriesReader` / 评估逻辑 / `RenderReplayHTML` 在本任务 diff 中零改动；②**C4**——`bitemporal.AsOfQuery(` 的结果**不得出现在任何 `CREATE VIEW` 里**（它带 `?` 占位符，建不成视图），只能作为子查询片段拼接；③**C5 在本任务的含义**：`obsSelect` 常量改成 `obsFrom()` 方法后四个调用点**必然改动**（接两个返回值、前置参数），此处 C5 的尺是「WHERE/ORDER/LIMIT 的 SQL 文本逐字不变」，**不是** TASK-004 的「调用点一字不动」——别拿 004 那把尺来量。 **另（Leader 2026-09-19 补）顺手订正一句已被实测证伪的注释**：`internal/crisis/store_test.go` 的 `revisedStore` 注释（约 :371-374）写着「夹具造重复修订**必须用裸 INSERT**——走公开 API 造不出同一 `(ts, indicator)` 的两行」，**该句为假**：三段主键下不同 `fetched_at` 即不同主键，走公开 API 先写 10@07-14 再写 11@08-14 就得到裸表 2 行（test-m4c-a 在 `46c401c` 实测）。⚠️ **订正时注意别换成另一个半真的说法**：同 `(ts,indicator)` 的多行**一直造得出**（TASK-001 起）；TASK-005 之后造不出的是「**同三段主键、异值**」——那会响亮失败。裸 INSERT 仍有一个**正当理由，但不是原句那个**：它让读路径测试**不耦合 `UpsertObservations`**。请按事实重写该段（保留或改走 API 均可，理由必须为真）。该假句同样存在于 TASK-004 的 DoD 原文里，但那个任务已 `verified`、文本谁都改不了，故清理只能落在注释与 final-report。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-m4c-a",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/crisis"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-m4c-a",
+  "writes": [
+    "./internal/crisis/store.go",
+    "./internal/crisis/store_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-19T12:42:15Z"
+  },
+  "verify_baseline": {
+    "head": "a0b32a5daac10e83ae4bc170fef1ac1e23e8d732",
+    "discovery_sha256": "f225733125557e1d87baa8e9e86e4ac4c0a4ca621804b091ae789787fd0ac7ab",
+    "at": "2026-09-19T02:07:19Z"
+  }
+}
