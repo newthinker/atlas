@@ -364,3 +364,72 @@ func TestMigrateMissingDBFile(t *testing.T) {
 	_, statErr := os.Stat(path)
 	assert.True(t, os.IsNotExist(statErr), "不得顺手建出一个空库")
 }
+
+// ---- TASK-010: 守卫参照系缺陷 ----
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0]  参照系改为搬运清单本身        → TestColumnsNotMigratedUsesCopyListNotNewSchema
+// functional[1]  原缺陷触发集上验收             → 变异验收（tablesDDL 不在本任务 writes，隔离副本跑）
+// functional[2]  不误伤 142 PASS / 0 FAIL       → 全量测试
+// boundary[0]    守卫测试非恒真（退回态验）     → TestColumnsNotMigratedUsesCopyListNotNewSchema
+// boundary[1]    AlreadyMigrated 收窄           → TestAlreadyMigratedReportsLostColumns
+//                                               + TestAlreadyMigratedSilentWithoutLegacyTable
+
+// bitemporalDB 建一个**已迁移**（三段主键）的库，可选附带一张 _v1。
+func bitemporalDB(t *testing.T, legacyCols string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "done.db")
+	db := openRaw(t, path)
+	_, err := db.Exec(schemaDDL())
+	require.NoError(t, err)
+	if legacyCols != "" {
+		_, err = db.Exec(`CREATE TABLE ` + legacyTableName + ` (` + legacyCols + `)`)
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Close())
+	return path
+}
+
+// 守卫的参照系必须是**搬运清单**，不是新表 schema。
+//
+// 这条守的正是 TASK-002 那个 HIGH：新表由 tablesDDL 建，所以「新表有 note」
+// 恒等于「tablesDDL 有 note」，拿它当参照系 ⇒ 加列必然使守卫失明。
+// 新表有 note 不等于 note 搬过去了 —— 只有搬运清单说了算。
+func TestColumnsNotMigratedUsesCopyListNotNewSchema(t *testing.T) {
+	db := openRaw(t, filepath.Join(t.TempDir(), "x.db"))
+	_, err := db.Exec(`
+CREATE TABLE macro_observations_v1 (ts TEXT, indicator TEXT, value REAL, source TEXT, fetched_at TEXT, note TEXT);
+CREATE TABLE macro_observations    (ts TEXT, indicator TEXT, value REAL, source TEXT, fetched_at TEXT, note TEXT);`)
+	require.NoError(t, err)
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	lost, err := columnsNotMigrated(context.Background(), tx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"note"}, lost,
+		"新表 schema 有 note 不等于 note 搬过去了 —— 参照系必须是搬运清单")
+}
+
+// 已迁移的库上，_v1 仍在且比新表多列 ⇒ 必须报出来，不能静默说「already migrated」。
+// 证据就在同一个文件里握着（_v1），不看是浪费。
+func TestAlreadyMigratedReportsLostColumns(t *testing.T) {
+	path := bitemporalDB(t, "ts TEXT, indicator TEXT, value REAL, source TEXT, fetched_at TEXT, note TEXT")
+	res, err := MigrateBitemporal(context.Background(), path)
+	require.Error(t, err, "已迁移但 _v1 显示丢了列，必须报错")
+	assert.Contains(t, err.Error(), "note", "错误信息要点名丢了哪一列")
+	assert.False(t, res.AlreadyMigrated)
+}
+
+// _v1 已被清理 ⇒ 静默通过。
+//
+// ⚠️ 这条是**回归保护**，不是非恒真的守卫：`columnNames` 对不存在的表返回空列表
+// 而非报错（已实测），所以「无条件检查」在行为上与「_v1 存在才查」等价，这条测试
+// 两种写法下都绿。它守的是「加了检查之后别误伤干净的库」，不证明收窄有行为效果。
+// 收窄的价值在**结构与注释**（把「无从判断」写成显式分支），见实现处注释。
+func TestAlreadyMigratedSilentWithoutLegacyTable(t *testing.T) {
+	path := bitemporalDB(t, "")
+	res, err := MigrateBitemporal(context.Background(), path)
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyMigrated)
+}
