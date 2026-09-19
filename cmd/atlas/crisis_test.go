@@ -1219,6 +1219,9 @@ func TestBuildNotifyContextStoreErrors(t *testing.T) {
 //   而是「本任务新增了哪些代码、这条断言覆盖其中哪些」。
 // boundary[1]   【实现】帮助文案含 visible at、不含 published at（AD-10）   → TestReplayAsOfHelpWording
 // boundary[2]   【实现】O5：RFC3339 与 YYYY-MM-DD 各一例，其余拒绝          → TestParseAsOfAcceptsBothFormats
+//   ⚠️ 返工补充（rework_count=1）：UTC 闸原判据 `off != 0` 漏掉 +00:00 / -00:00
+//   （解析后 off 确为 0）。已改为「原文以 Z 结尾」，并新增等价性断言
+//   → TestParseAsOfRejectsZeroOffsetDespiteSameInstant
 // error_handling[0]【守住】既有 --from/--to 校验与文案不变                   → TestRunCrisisReplay（既有，零改动）
 //
 // ⚠️ 【守住】类在 RED 阶段不会因本任务而红（多半只是编译错），其证据靠变异——
@@ -1309,11 +1312,57 @@ func TestParseAsOfAcceptsBothFormats(t *testing.T) {
 	for _, bad := range []string{
 		"去年", "2026/07/13", "2026-7-13", "20260713", "2026-13-45", "tomorrow",
 		"2026-07-13T00:00:00+08:00", "2026-07-13T00:00:00-05:00",
+		// 🔴 零偏移的文本形式：解析后 off == 0，前一版判据（off != 0）放行了它们。
+		// 它们与 …Z 指向同一时刻，但文本不同 ⇒ 字典序比较给出相反结果。
+		"2026-07-13T00:00:00+00:00", "2026-07-13T00:00:00-00:00",
 	} {
 		_, err := parseAsOf(bad)
 		require.Error(t, err, "应拒绝 %q", bad)
 		assert.Contains(t, err.Error(), "--as-of", "拒绝 %q 时文案要含 flag 名", bad)
 	}
+}
+
+// TestParseAsOfRejectsZeroOffsetDespiteSameInstant 把「为什么必须拒绝而不是转换」
+// 钉成测试，而不只是注释。
+//
+// `…Z` 与 `…+00:00` 是**同一时刻**的两种合法 RFC3339 写法 —— 本测试先证明这一点
+// （time.Parse 后 .Equal），再证明只有前者被放行。
+//
+// 🔴 这条断言的存在理由：判据必须与**被比较的东西**同口径。进 SQL 的是文本、
+// 比较是字典序，所以「同一时刻」在那里**不蕴含**「同样的比较结果」：
+//
+//	row = 2026-07-13T00:00:00.000000000Z
+//	row <= …Z       → true   （包含）
+//	row <= …+00:00  → false  （排除）
+//
+// ⇒ 放行 +00:00 会让「as-of 那一瞬间的那个修订」被静默漏掉。转换也不行：
+// t.UTC().Format(RFC3339Nano) 会把 …150777000Z 压成 …150777Z，而字典序上
+// …150777500Z <= …150777Z 为真 —— 用一个无声的错换另一个。拒绝是唯一不产生
+// 新错位的选项。
+func TestParseAsOfRejectsZeroOffsetDespiteSameInstant(t *testing.T) {
+	const zForm = "2026-07-13T00:00:00Z"
+	const offsetForm = "2026-07-13T00:00:00+00:00"
+
+	// 前提：两者确实是同一时刻
+	tz, err := time.Parse(time.RFC3339Nano, zForm)
+	require.NoError(t, err)
+	toff, err := time.Parse(time.RFC3339Nano, offsetForm)
+	require.NoError(t, err)
+	require.True(t, tz.Equal(toff), "前提：两种写法指向同一时刻")
+
+	// 但只有 Z 形态被放行
+	got, err := parseAsOf(zForm)
+	require.NoError(t, err)
+	assert.Equal(t, zForm, got)
+
+	_, err = parseAsOf(offsetForm)
+	require.Error(t, err, "同一时刻不代表同样的文本比较结果 —— 零偏移形式必须拒")
+	assert.Contains(t, err.Error(), "+00:00", "文案要点名这种形态也不收")
+
+	// 后果：同一行数据，两种写法的字典序比较结果相反
+	const row = "2026-07-13T00:00:00.000000000Z"
+	assert.True(t, row <= zForm, "Z 形态：as-of 那一瞬间的修订被包含")
+	assert.False(t, row <= offsetForm, "零偏移形态：同一个修订被静默排除")
 }
 
 // TestReplayAsOfSeesHistoricalRevision 覆盖 functional[2]（【实现】）。
