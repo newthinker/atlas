@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -20,26 +21,23 @@ type MigrateResult struct {
 	ViewRows        int // v_macro_current 行数
 }
 
-// columnsNotMigrated 返回「旧表有、新表没有」的列名（有序）。
+// columnsNotMigrated 返回旧表里有、但**搬运清单 migratedColumns 里没有**的列名（有序）。
 //
-// 必须在事务内、Commit 之前调用 —— 它读的是本次迁移刚建出来的新表。
+// 参照系是搬运清单而不是新表实际列 —— 这个区别就是本函数存在的全部意义，理由见
+// migratedColumns 的注释。（这段注释曾写着「它读的是本次迁移刚建出来的新表」，那正是
+// 被修掉的那个缺陷的描述，别照它理解。）
 // 用列名集合而不是列数：列数相等但改了名同样是丢失，而数量判据看不出来。
-func columnsNotMigrated(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	oldCols, err := columnNames(ctx, tx, legacyTableName)
+//
+// 两条调用路径，都只读：迁移事务内（Commit 之前），以及 AlreadyMigrated 分支直接在
+// 库上跑（那条没有事务）——所以收 querier 而不是 *sql.Tx。
+func columnsNotMigrated(ctx context.Context, q querier) ([]string, error) {
+	oldCols, err := columnNames(ctx, q, legacyTableName)
 	if err != nil {
 		return nil, err
-	}
-	newCols, err := columnNames(ctx, tx, "macro_observations")
-	if err != nil {
-		return nil, err
-	}
-	have := make(map[string]bool, len(newCols))
-	for _, c := range newCols {
-		have[c] = true
 	}
 	var lost []string
 	for _, c := range oldCols {
-		if !have[c] {
+		if !slices.Contains(migratedColumns, c) {
 			lost = append(lost, c)
 		}
 	}
@@ -47,9 +45,9 @@ func columnsNotMigrated(ctx context.Context, tx *sql.Tx) ([]string, error) {
 }
 
 // columnNames 按建表顺序返回表的列名。
-func columnNames(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
+func columnNames(ctx context.Context, q querier, table string) ([]string, error) {
 	// PRAGMA 不支持占位符，表名是包内常量/字面量，不来自外部输入。
-	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	rows, err := q.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
 		return nil, fmt.Errorf("crisis: migrate: reading columns of %s: %w", table, err)
 	}
@@ -68,12 +66,42 @@ func columnNames(ctx context.Context, tx *sql.Tx, table string) ([]string, error
 	return out, nil
 }
 
+// tableExists 报告库里有没有这个名字的表。
+func tableExists(ctx context.Context, q querier, name string) (bool, error) {
+	var n int
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?`, name).Scan(&n); err != nil {
+		return false, fmt.Errorf("crisis: migrate: checking table %s: %w", name, err)
+	}
+	return n > 0, nil
+}
+
 // legacyTableName 是迁移后旧表的名字。保留而非丢弃，两个用途：
 //
 //   - 回滚：DROP 掉新表再把它 **RENAME 回去**（一次 RENAME，不是两次 ——
-//     本函数向前迁移时也只有 :125 那一处 `RENAME TO`）。
+//     本函数向前迁移时也只有「步骤表里 renaming legacy table 那一步」那一处
+//     `RENAME TO`。写名字不写行号：这行原本写的 `:125` 在写下时就已经是错的，
+//     而任何一次编辑都会让行号再漂一次）。
 //   - 迁移正确性的逐值对照（设计 C3）。
 const legacyTableName = "macro_observations_v1"
+
+// migratedColumns 是**搬运清单**——步骤表里 copying rows 那一步的 INSERT 与列级校验
+// 共用的同一份依据。两者必须同源，否则守卫会在最需要它的那一刻瞎掉：
+//
+// 曾经守卫比的是「旧表列 ∖ **新表实际列**」。而新表由 tablesDDL 建 ⇒「新表有某列」
+// 恒等于「tablesDDL 有某列」，于是**给 tablesDDL 加列这个动作本身就使守卫失明** ——
+// 加完列它立刻报绿，而 INSERT 并没有搬那一列，整列数据静默丢失。实测（老库带 note、
+// 3 行有值）：err=nil、三个计数仍 3/3/3 相等、新表 note 非空 0 而 _v1 非空 3。
+// ⇒ 守卫只在你还没开始加列的时候保护你，而那时它无事可做。
+//
+// 现在参照系是本切片：加列而忘了把它加进来 ⇒ 守卫报错。那条旁路在构造上不存在。
+var migratedColumns = []string{"ts", "indicator", "value", "source", "fetched_at"}
+
+// querier 让列检查既能在事务内跑（迁移路径），也能直接在库上跑（AlreadyMigrated 路径）。
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 // MigrateBitemporal 把 macro_observations 迁到三段主键，幂等。
 //
@@ -109,6 +137,34 @@ func MigrateBitemporal(ctx context.Context, dbPath string) (MigrateResult, error
 		return MigrateResult{}, err
 	}
 	if migrated {
+		// 已是三段主键，本次无事可做。但**上一次**迁移可能丢过列，而证据就在同一个
+		// 文件里握着（_v1），不看一眼是浪费。
+		//
+		// ⚠️ **只在 _v1 存在时才查，而这里的「通过」有两个来源，调用方看来完全一样**：
+		//   ① _v1 还在，比对过，确实没丢     ⇒ 「没丢」
+		//   ② _v1 已被清理，无从比对         ⇒ 「无从判断」，**不是**「没丢」
+		// 不要把这里的静默读成「这个库的列是全的」——列检查的唯一证据是 _v1。
+		//
+		// 显式判断而不是靠 columnNames 对不存在的表返回空列表（它确实返回空、不报错，
+		// 已实测）：那样两个来源会共用一条无差别的路径，连写下这段话的地方都没有。
+		hasLegacy, err := tableExists(ctx, db, legacyTableName)
+		if err != nil {
+			return MigrateResult{}, err
+		}
+		if hasLegacy {
+			lost, err := columnsNotMigrated(ctx, db)
+			if err != nil {
+				return MigrateResult{}, err
+			}
+			if len(lost) > 0 {
+				return MigrateResult{}, fmt.Errorf(
+					"crisis: migrate: 库已是三段主键，但 %s 显示有 %d 列从未被搬过来: %s —— "+
+						"这是**上一次**迁移留下的丢失，本次迁移不会修它；"+
+						"请先把这些列的数据从 %s 补回，再决定是否丢弃 %s",
+					legacyTableName, len(lost), strings.Join(lost, ", "),
+					legacyTableName, legacyTableName)
+			}
+		}
 		return MigrateResult{AlreadyMigrated: true}, nil
 	}
 	return migrate(ctx, db)
@@ -160,6 +216,9 @@ func migrate(ctx context.Context, db *sql.DB) (MigrateResult, error) {
 		return MigrateResult{}, fmt.Errorf("crisis: migrate: counting rows: %w", err)
 	}
 
+	// 列名只在 migratedColumns 里写一次，INSERT 与列级校验都从这里取。
+	copyList := strings.Join(migratedColumns, ", ")
+
 	// 步骤表而非一串 tx.Exec：每步的失败文案要能指出是哪一步炸的，运维现场
 	// 「migrate: renaming legacy table: ...」比一个裸 sqlite 错误有用得多。
 	for _, step := range []struct{ what, stmt string }{
@@ -175,8 +234,8 @@ func migrate(ctx context.Context, db *sql.DB) (MigrateResult, error) {
 		{"dropping stale index", `DROP INDEX IF EXISTS idx_macro_obs_ind_ts`},
 		{"renaming legacy table", `ALTER TABLE macro_observations RENAME TO ` + legacyTableName},
 		{"creating new schema", schemaDDL()},
-		{"copying rows", `INSERT INTO macro_observations (ts, indicator, value, source, fetched_at)
-		                  SELECT ts, indicator, value, source, fetched_at FROM ` + legacyTableName},
+		{"copying rows", `INSERT INTO macro_observations (` + copyList + `)
+		                  SELECT ` + copyList + ` FROM ` + legacyTableName},
 	} {
 		if _, err := tx.ExecContext(ctx, step.stmt); err != nil {
 			return MigrateResult{}, fmt.Errorf("crisis: migrate: %s: %w", step.what, err)
@@ -192,8 +251,8 @@ func migrate(ctx context.Context, db *sql.DB) (MigrateResult, error) {
 		return MigrateResult{}, fmt.Errorf("crisis: migrate: counting view rows: %w", err)
 	}
 
-	// 列级校验：上面三个计数全是 COUNT(*)，**行数口径**。而搬运用的是
-	// `INSERT … (5 列) SELECT 5 列` 的硬编码清单 —— 老库多一列，那一列整列搬不过来，
+	// 列级校验：上面三个计数全是 COUNT(*)，**行数口径**。而搬运照的是
+	// migratedColumns 这份清单 —— 老库多一列而清单里没有，那一列整列搬不过来，
 	// 而三个计数一个都不会变（实测：老库带 note 列、3 行有值，迁移后三计数仍是
 	// 3/3/3 相等，note 有值的行数从 3 变成 0）。⇒ 丢失发生在**列维度**，
 	// 而判据在**行维度**：检查的维度比它声称守住的集合窄一维，必然漏。
@@ -202,8 +261,8 @@ func migrate(ctx context.Context, db *sql.DB) (MigrateResult, error) {
 	} else if len(lost) > 0 {
 		return MigrateResult{}, fmt.Errorf(
 			"crisis: migrate: 旧表有 %d 列没有被搬运到新表: %s —— "+
-				"搬运语句的列清单是硬编码的（见上面 copying rows 那一步），"+
-				"给 tablesDDL 加列时必须同步改它；三个计数是行数口径，发现不了这种丢失",
+				"搬运清单是 migratedColumns（上面 copying rows 那一步的 INSERT 由它拼出），"+
+				"新增的列必须加进它；三个计数是行数口径，发现不了这种丢失",
 			len(lost), strings.Join(lost, ", "))
 	}
 
