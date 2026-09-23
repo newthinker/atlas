@@ -104,6 +104,28 @@ func TestFetchPriceAPIs(t *testing.T) {
 	}
 }
 
+// 配置里的港股是 4 位形态(0700.HK),hk_daily 只认 5 位(00700.HK);4 位不报错,
+// 只返回 code=0 + 空 items(实测)。归一必须在客户端做,prism 兜底与 collector 两条
+// 调用路径才能一起生效。
+func TestFetchHKDailyNormalizesToFiveDigits(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"0700.HK", "00700.HK"},
+		{"9988.HK", "09988.HK"},
+		{"00700.HK", "00700.HK"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			var got map[string]any
+			srv := tsServer(t, `{"code":0,"data":{"fields":["ts_code","trade_date","close"],"items":[]},"msg":""}`, &got)
+			defer srv.Close()
+			start, end := yesterdayToNow()
+			_, err := NewWithBaseURL("tok", srv.URL).FetchHKDaily(tc.in, start, end)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got["params"].(map[string]any)["ts_code"])
+		})
+	}
+}
+
 func TestErrNoPermission(t *testing.T) {
 	var got map[string]any
 	srv := tsServer(t, `{"code":40203,"data":null,"msg":"抱歉，您没有接口(income)访问权限"}`, &got)

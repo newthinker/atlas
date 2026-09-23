@@ -436,7 +436,7 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
 | 配置接线(`prism.baostock_base_url` 等) | ✅ 已落地 | 默认值时序 bug 已修并由测试锁定(`buildCollectors` 早于 `ApplyDefaults` 执行,直读字段会让该跳静默缺席) |
 | 编排层降级链扩展(`internal/prism/refresh.go`) | ✅ 已落地 | 各跳 fallback 与 Degraded 上报有单测;`ts/td` 全 nil 时行为与改动前一致(既有用例回归即断言) |
 | 部署与断源演练 | 见 §10 与 `docs/deployment.md` | baostock plist + ops 脚本装载已就位;演练结果记入实施计划文档 |
-| 港股跳(hk_daily) | ⚠ **已接线但未实证取到数据,当前不构成可用兜底** | **待修缺陷:symbol 形态未归一**——配置为 4 位 `0700.HK`,tushare hk_daily 需 5 位 `00700.HK`,**客户端不做归一**,故生产形态调用返回 `code=0` 但 items 为空数组(静默空)。**归一之所以没做**:5 位形态能否真取到数据本身未实证(两次探针均撞 hk_daily 限频 1 次/小时,无正向证据),先做归一等于拿假设换假绿;已把「零行结果判失败」做成机制,让该跳失效时显性报错而非假成功(TASK-005 侧有测试红线锁定生产形态走该跳会零行判失败)。**ADR#8**「symbol 形态天然一致,无需映射」在 A 股成立、**对港股不成立,待修订**——修订随后续任务「限频感知退避」第 4 面(见下),届时以取数实证为准 |
+| 港股跳(hk_daily) | ✅ **可用(仅价格)** | **已修(2026-09-23)**:配置为 4 位 `0700.HK`,tushare hk_daily 只认 5 位 `00700.HK`(4 位返回 `code=0` + 空 items,静默空)。归一放在 tushare 客户端 `FetchHKDaily` 内(`hkTSCode` 补零到 5 位),Prism 兜底与 collector 注册表两条调用路径同时生效;由 `TestFetchHKDailyNormalizesToFiveDigits` 在真实 HTTP 请求上锁定。**正向实证**:2026-09-23 10:26 经修复后客户端以 `0700.HK` 调用,返回 22 行、`err=nil`,抽查 08-24/09-10/09-22 收盘价(440.00/425.60/451.60)与本地 qlib `hk00700.csv` 逐一一致。「零行判失败」机制保留(`errFallbackNoData`)。**ADR#8 修订**:「symbol 形态天然一致,无需映射」只对 A 股成立;港股须在客户端归一为 5 位 |
 
 **M3.5 后续工作(M3.5a 验收暴露,尚未立计划)**
 
@@ -444,7 +444,7 @@ API: /api/prism/{board,series,compare,fundamental,sankey}  → JSON,供 ECharts 
   1. **据分类退避重试**:`ErrRateLimited`(按 msg 含「频率超限」判别)已把限频与权限分开,且**已被消费于 Degraded 文案分叉**(限频输出「本次跳过,下次自动重试」,不再误报为权限问题)。**但尚未据此退避重试**——降级链仍是撞限频即放弃本轮,需要真正的退避(等窗口过后重试)而非等下一次 refresh。
   2. **A 股批量断源的容量改善**:现状是 `daily_basic` 1 次/分钟 × 串行遍历 ⇒ 单次 refresh 只有第一个 A 股标的能兜底(覆盖率约 1/3,见上表)。需要退避排队/跨轮次续拉,使批量断源下该跳真正可用。
   3. **路由层跳序与市场过滤**:`app.go` 的 `orderedCollectors` 改为**确定序**并按 `SupportedMarkets()` 过滤,让 spec §2 的「二跳/三跳」在行情链路上成为真实行为而非设计意图。
-  4. **港股 symbol 归一 + 取数实证**:配置 4 位 `0700.HK` 与 tushare hk_daily 所需 5 位 `00700.HK` 的归一**当前未做**,因为 5 位形态能否真取到数据从未实证(探针均撞 1 次/小时限频)。**顺序不能颠倒**:先靠本任务第 1 面解除限频阻塞拿到正向证据,**再**一次做对归一——否则是拿假设换假绿。届时**同步修订 ADR#8**(「symbol 形态天然一致,无需映射」对 A 股成立、对港股不成立)。
+  4. ~~**港股 symbol 归一 + 取数实证**~~ **已完成(2026-09-23)**:正向实证与归一已落地,见上表「港股跳(hk_daily)」行。实证未依赖第 1 面的退避——直接等过 1 次/小时的限频窗口,单次探针取得。
 
 **M3.5b — ETF 成分聚合(D3)**:N-PORT 持仓解析、加权调和平均聚合引擎、首批 11 个 SPDR
 行业 ETF + `etf_holdings`(自 M2 顺延)。计划 `plans/2026-08-02-prism-m3.5b-etf-aggregate.md`。
