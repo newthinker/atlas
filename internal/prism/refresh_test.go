@@ -1044,10 +1044,8 @@ func TestRefreshCNPathsNeverUpsertPrices(t *testing.T) {
 //   functional[1]     yahoo 价格失败 + td!=nil → td 数据参与 PE 重建(EPS 链路不变)
 //                       → TestRefreshUSPriceFallsBackToTwelvedata
 //   functional[2]     港股 akshare 失败 → hk_daily 仅价格,不写估值行,Degraded 注明
-//                       → TestRefreshHKPriceOnlyHopWiring(**仅验接线,非生产可用性证据**)
-//                       + TestRefreshHKProductionSymbolHitsKnownGap(生产形态零行→判失败,已知缺口红线)
-//                       缺口:配置是 4 位 0700.HK,tushare hk_daily 要 5 位;归一未做(Leader 裁决
-//                       方案 2:无 5 位正向实证前不做),见 D4 后续任务,修复后两条用例都要同步改写
+//                       → TestRefreshHKPriceOnlyHopWiring(接线;4→5 位归一在 tushare 客户端,
+//                       由 tushare.TestFetchHKDailyNormalizesToFiveDigits 锁定)
 //   functional[3]     A 股指数链尾 tushare 跳 = 仅价格(TASK-001 探针:index_dailybasic 40203)
 //                       → TestRefreshIndexChainTailTushareIsPriceOnly
 //   boundary[0]       ts/td 均 nil → 行为与改动前完全一致(不发「未配置」Degraded,ADR#9)
@@ -1208,11 +1206,10 @@ func TestRefreshUSPriceFallsBackToTwelvedata(t *testing.T) {
 // functional[2] 的**接线**部分:港股 akshare 失败 → 分派到 hk_daily、仅价格落库、
 // 不写估值行、Degraded 文案正确。
 //
-// ⚠ 本用例**不构成生产可用性证据**:fake 以配置形态 "0700.HK" 为 key,而真实 tushare
-// hk_daily 要 5 位 "00700.HK"(4 位实测返回 code=0 且 items 为空)。也就是说 fake 会命中
-// 只因为它按配置形态建键,真实上游不会命中。生产侧的已知缺口由
-// TestRefreshHKProductionSymbolHitsKnownGap 锁定;归一修复见 D4 后续任务。
-// 保留本用例的价值在于:分派逻辑、仅价格语义、水位保护这三件事仍需回归。
+// fake 以配置形态 "0700.HK" 为 key:它顶替的是整个 tushare 客户端,而客户端契约是
+// 「接受配置形态、内部补零成 hk_daily 要的 5 位」。归一本身由 tushare 包的
+// TestFetchHKDailyNormalizesToFiveDigits 在真实 HTTP 请求上锁定,本用例只验分派、
+// 仅价格语义与水位保护。
 //
 // 不写估值行是刻意设计:LatestDate 取 MAX(d) FROM valuation_daily,写 NaN 估值行会把
 // 增量水位推到今天,主源恢复后 incrementalStart 直接 skip,这些天的真实估值将永久不回填。
@@ -1432,40 +1429,6 @@ func TestRefreshTusharePricesUpsertFailureIsError(t *testing.T) {
 	for _, d := range rep.Degraded {
 		assert.NotContains(t, d, "fallback ok", "写失败不得同时上报兜底成功")
 	}
-}
-
-// M3b(Leader 裁决方案 2:如实记录红线,不做归一)——**已知缺口的锁定测试**。
-//
-// 缺口本体:配置(configs/config.yaml)里的港股形态是 4 位 "0700.HK",而 tushare
-// hk_daily 要 5 位 "00700.HK";4 位实测返回 code=0 且 items 为空(静默空,不是报错)。
-// 客户端**未做** %05s 归一(ADR#8 认为形态天然一致,在港股上不成立),因此该跳在生产里
-// 恒零行、恒判失败——这正是本用例锁定的事实。
-//
-// 本用例的 fake 按**真实上游契约**建键(只认 5 位),故 refresh 传 4 位时查不到 → 零行。
-// 它与 TestRefreshHKPriceOnlyHopWiring 的分工:那条验接线,这条验生产现实。
-//
-// ⚠ 后续任务(D4)做完归一后,本用例必须同步改写为「归一后能命中 5 位并成功」,
-// 否则它会反过来把修复判成失败。改写前置条件:先拿到 5 位形态的正向实证
-// ——截至 2026-08-02 两次探针均撞 hk_daily 限频(窗口已自升级到 1 次/小时),尚无证据。
-func TestRefreshHKProductionSymbolHitsKnownGap(t *testing.T) {
-	store := newFakeStore()
-	ak := &fakeAkshare{fail: map[string]error{"0700.HK": errors.New("aktools down")}}
-	// 真实 tushare 只认 5 位:fake 按上游契约建键,不迁就被测代码。
-	ts := &fakeTushare{hkPx: map[string][]tushare.PricePoint{
-		"00700.HK": {{Date: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), Close: 512.5}},
-	}}
-	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
-
-	rep := Refresh(akCfg(hkInst()), store, &fakeLix{}, fakeUS{}, ak, fakeEdgar{}, ts, nil, now)
-
-	assert.Equal(t, 0, rep.Refreshed, "已知缺口:4 位配置形态取不到数据,该跳必然失败")
-	require.Len(t, rep.Failed, 1)
-	assert.Contains(t, rep.Failed[0], "0700.HK")
-	assert.Empty(t, store.prices["0700.HK"], "零行不得落库")
-	for _, d := range rep.Degraded {
-		assert.NotContains(t, d, "fallback ok", "已知缺口不得被上报为兜底成功")
-	}
-	assert.Equal(t, 1, ts.calls["hk_daily:0700.HK"], "确实是以 4 位形态发起的调用")
 }
 
 // M2 延伸(Leader 指定):消费 TASK-001 拆出的 ErrRateLimited。

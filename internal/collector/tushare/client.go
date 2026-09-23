@@ -261,7 +261,17 @@ func (c *Client) FetchIndexDaily(symbol string, start, end time.Time) ([]PricePo
 	return c.fetchClose("index_daily", symbol, start, end)
 }
 func (c *Client) FetchHKDaily(symbol string, start, end time.Time) ([]PricePoint, error) {
-	return c.fetchClose("hk_daily", symbol, start, end)
+	return c.fetchClose("hk_daily", hkTSCode(symbol), start, end)
+}
+
+// hkTSCode: "0700.HK" → "00700.HK"。hk_daily 只认 5 位代码,4 位不报错而是返回
+// code=0 + 空 items(实测),故在客户端统一补零,调用方沿用配置形态即可。
+func hkTSCode(symbol string) string {
+	code, suffix, ok := strings.Cut(symbol, ".")
+	if !ok || len(code) >= 5 {
+		return symbol
+	}
+	return strings.Repeat("0", 5-len(code)) + code + "." + suffix
 }
 func (c *Client) FetchDaily(symbol string, start, end time.Time) ([]PricePoint, error) {
 	return c.fetchClose("daily", symbol, start, end)
