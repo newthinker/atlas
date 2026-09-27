@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-004",
+  "key_findings": [
+    "D15 众数统计期的计数对象只算「未失败且 Latest 非零」的主体。无数据主体如果也参与计数，零时间可能成为众数，此时 Current 为空、所有人进 Stale；变异 S5 即此情形，已 KILLED。",
+    "sort.Slice 对 12 个元素以内的切片走插入排序，本身就是稳定的，所以 4 家的并列用例区分不了 SliceStable 和 Slice（变异 S9 首轮存活）。补了 40 家的并列用例后 KILLED，同一变异体重跑 3 次都转红。",
+    "中位数前不排序（S14）首轮存活，因为原用例的值恰好已按 rank_by 排好。补了按 NPL 排名、拨备序列无序的偶数样本后 KILLED。",
+    "Collect 的「出错时丢弃部分数据」（series = Series{}）在原 fakeSource 下无法观测：原 fakeSource 出错时本来就返回空 Series。已把 fakeSource 改成原样返回「数据 + 错误」，变异 C1 KILLED。",
+    "code-simplifier 子代理回报「无改动」，但指纹比对显示改了两个文件：summary_test.go 把嵌套 append 换成 slices.Concat；summary.go 把中位数的 `if m := …;` 拆成两行。我逐段核对后确认两处都等价，予以接受；下面的数字都在包含这两处改动的提交上重采。子代理自述不可采信，这是本 sprint 第一次实际撞到。",
+    "time.Time 作 map 键时按 == 比较，会连时区一起比；而分组用的是 Before/After/Equal，只比时刻。source.go 统一用 time.Parse，结果都是 UTC，所以两者结论一致。今后若有数据源产出非 UTC 的 Period，modePeriod 的计数会被拆开。"
+  ],
+  "decisions": [
+    {"decision": "统计期由 modePeriod 单遍计数得出：计数更大，或计数相同且更晚，就替换当前候选", "rationale": "D15。变异 S1/S2/S3（取最晚、并列取早、并列取先到）都 KILLED；并列用例覆盖了早期在前、晚期在前、交错三种输入顺序，排除「恰好取到先到者」"},
+    {"decision": "分组顺序：Failed → Stale（Latest 为零或早于统计期）→ Ahead（晚于统计期）→ Current；各组内保持输入顺序", "rationale": "DoD functional[1]：四组互斥，且并集为全部输入（测试里显式断言）"},
+    {"decision": "Summary.value(r,k)：当 Ind[k].Period ≠ 统计期时返回 NaN。排名和 Stat 都只经由它取值", "rationale": "D2 联动：回退值视同 NaN。变异 S6/S7/S8 各自 KILLED；用例里的回退值分别设成「会成为最优」和「会成为最差」两种"},
+    {"decision": "Collect 出错时把 series 置空后再交给 Analyze", "rationale": "DoD error_handling：失败主体 Ind 三项必须全 NaN。Source 接口不保证出错时返回零值，不能依赖具体实现"},
+    {"decision": "测试中传给 Collect 的 fixture 一律 slices.Clone", "rationale": "TASK-003 返工的教训：被测函数若写入参，会跨测试污染包级 fixture"}
+  ],
+  "files_modified": ["internal/bank/collect.go", "internal/bank/collect_test.go", "internal/bank/summary.go", "internal/bank/summary_test.go"],
+  "interfaces_exposed": [
+    "func Collect(banks []BankCfg, src Source) []BankResult —— 按 DataSymbol 去重，配置中首个条目的 DisplayName 为 Name，其余进 Aliases；结果按首次出现顺序排列。失败主体：Err 为原错误（未包装），Latest 为零，Ind 三项 Value/QoQ/YoY 全 NaN、Period 为零，MissingFields 为 nil",
+    "type Stat struct{ N int; Mean, Median float64; Best, Worst string; BestVal, WorstVal float64 } —— 只统计 Current 中 Period==统计期 且非 NaN 的值；N==0 时 Mean/Median/BestVal/WorstVal 为 NaN、Best/Worst 为空串；最优/最差的方向按 Indicator.HigherIsWorse，与 RankBy 无关",
+    "type Summary struct{ Period time.Time; RankBy Indicator; Current, Stale, Ahead, Failed []BankResult; Stats [numIndicators]Stat } —— Period：以之为 Latest 的未失败有数据主体数最多的期，并列取较晚，没有则为零值。Current：Latest==Period，按 RankBy 由优到劣稳定排序，回退值与 NaN 排最后并保持配置顺序。Stale：Latest 早于 Period 或为零。Ahead：Latest 晚于 Period，不进统计与排名，渲染层（TASK-005）需单列。Failed：Err≠nil",
+    "func Summarize(results []BankResult, rankBy Indicator) Summary",
+    "测试辅助（仅 _test 可见，下游勿重复定义）：collect_test.go 中的 type fakeSource{series,errs,calls}（出错时仍返回 series）、var psbc；summary_test.go 中的 func br(name, latest string, npl, cov, cet1 float64) BankResult（NaN 指标的 Period 为零）、func withFallback(r, k, v, p string) BankResult、func names([]BankResult) []string（空时返回 []string{}）、func failedAt(name, latest string) BankResult、func sample() []BankResult"
+  ],
+  "verification": {
+    "measured_at_sha": "fb88b3e5e90e603738119320bb576321619d4cf8",
+    "branch": "task/TASK-004（基于 feature/bank-indicator-monitor @ 6d792474b9f78b3d76ec8807d2615947dff42e51）",
+    "note": "以下数字全部在最后一次改动（提交 fb88b3e）之后、在该树上统一重采。四个文件的 sha256：collect.go a2540fab…、collect_test.go 2e14b31a…、summary.go a6dc3830…、summary_test.go 087401a1…",
+    "go_vet": "go vet ./internal/bank/ 无输出（0 行）",
+    "go_test": "go test -count=1 -v -cover ./internal/bank/ rc=0；--- PASS 共 102 行，--- FAIL 0 行（顶层 43 个，其中本任务 11 个，与源码中 11 个 func Test 一致；本任务子测试 5 个；102 = 返工后的 86 + 11 + 5）；go test -shuffle=on ok",
+    "coverage": "99.5% of statements（./internal/bank）",
+    "mutation": "在隔离副本上跑（mktemp 拷贝 go.mod/go.sum/internal/bank/configs），每个变异前后都比对 worktree 四个文件的指纹和 git status，结果一致。26 个变异全部通过 vet，全部 KILLED：S1 统计期取最晚；S2 并列取早；S3 并列取先到；S4 失败主体参与计数；S5 无数据主体参与计数；S6 回退值视同当期；S7 统计用原始 Value；S8 排名用原始 Value；S9 SliceStable→Slice；S10/S11 Ahead 并入 Current/Stale；S12 无数据主体不进 Stale；S13 偶数中位数取上中位；S14 中位数前不排序；S15/S16 方向取反；S17 NaN 不排最后；S18 Worst 取最优；S19 均值分母错；S20 N 计全部 Current；C1 不丢弃出错时的部分数据；C2 不记 Aliases；C3 主名取最后一个条目；C4 不透传 MissingFields；C5 不记 Err；C6 包装 Err（assert.Same 抓到）。首轮 S9 和 S14 存活，已补用例；S1 首轮的变异体本身 vet 不通过，重写后 KILLED。harness 在 scratchpad/dev-bk-b-mut4.py",
+    "code_simplifier": "子代理回报「无改动」，但指纹比对发现 summary.go、summary_test.go 两处等价改写（详见 key_findings[4]），已核对并接受",
+    "done_criteria_map": {
+      "functional[0]": "TestCollectDedupsAH, TestCollectOrderFirstAppearance, TestCollectHOnly",
+      "functional[1]": "TestSummarizeGroupsAndRanks（四组 + 互斥且并集为全部）, TestSummarizeRankDirection",
+      "functional[2]": "TestSummarizeModePeriod（10:1、并列三种输入顺序、失败/无数据不计数）",
+      "functional[3]": "TestSummarizeGroupsAndRanks（N/均值/奇数中位数/最优最差/拨备方向）, TestSummarizeMedianEven",
+      "boundary[0]": "TestSummarizeExcludesNaNAndFallback, TestSummarizeNoCurrent",
+      "boundary[1]": "TestSummarizeTiesKeepConfigOrder（4 家并列 + 40 家并列）",
+      "error_handling[0]": "TestCollectKeepsErrors（assert.Same 原错误、Latest 零、三项 assertNaNChange、部分数据不采信、其他主体正常）",
+      "non_functional[0]": "go vet 无输出；go test 全绿；覆盖率 99.5%"
+    }
+  }
+}

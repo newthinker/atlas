@@ -63,6 +63,9 @@ func TestCollectorFetchHistoryRoutesBySymbol(t *testing.T) {
 				time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC), "1d")
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantAPI, got["api_name"])
+			if tc.wantAPI == "hk_daily" {
+				assert.Equal(t, "00700.HK", got["params"].(map[string]any)["ts_code"], "港股须归一为 5 位")
+			}
 
 			require.Len(t, bars, 2)
 			assert.Equal(t, tc.symbol, bars[0].Symbol, "Symbol 回填入参形态")

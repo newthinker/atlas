@@ -1,0 +1,93 @@
+{
+  "id": "TASK-006",
+  "title": "`atlas bank report` 命令（Telegram 推送，退出码 0/1/2）",
+  "description": "计划 Task 6：新建 `cmd/atlas/bank.go` 与 `bank_test.go`。**AD-7**：sender 构造与退出函数都做成包级可注入变量（`bankSenderFactory = buildBankSender`、`bankExit = os.Exit`），测试用 t.Cleanup 复原；新增经 `runBankReport` 的端到端测试（临时 bank 配置 + httptest 假 aktools）。【人类裁决 2026-09-27，改动 spec 语义，以本任务 DoD 为准】**D1（改计划）**：非 `--dry-run` 且拿不到 sender（主配置读不到 / telegram 未启用 / 缺凭据）⇒ 照常把报告打印到 stdout、stderr 说明原因，**返回错误（进程退出码 1）**；计划原为退出码 0，launchd 会把未推送的月报记成成功。`--dry-run` 不受影响（退出码按拉取结果 0/2）。**D14**：全部失败的摘要逐家列出「名称：错误」，不只取第一家。`coverage_floor: 78`（基线 b2f8546：-func 78.6% / profile 求和 78.44%）。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。",
+  "module": "bank",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/bank.go",
+    "cmd/atlas/bank_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "executeBankReport 全成功：退出码 0；600036.SH 只 Fetch 1 次；推送 1 条，含「🏦 银行关键指标月报 2026-10-01」「⚠️ 预警 (4)」「（招商银行H 同 600036.SH）」。部分失败：退出码 2、报告照推且含「· 邮储银行 拉取失败：timeout」。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "全部失败：返回 error（⇒ 退出码 1），仍推送 1 条错误摘要，含「全部 2 家拉取失败」且**每家**的名称与错误各占一行。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**--dry-run（spec §7）**：经 `runBankReport` 以 `--dry-run` 运行 ⇒ sender 构造函数调用次数为 0、报告打印到 stdout；部分失败时 bankExit 以 2 被调用恰一次，全成功时不被调用。把 `!bankDryRun` 取反的变异须转红。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "超长报告（如 150 家当期银行）⇒ Sender 按序收到多段，每段 rune 数 ≤ 4000，段数与 `bank.Split` 结果一致。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "**D1**：非 dry-run 且 sender 构造返回 nil ⇒ stdout 有完整报告、stderr 含原因、`runBankReport` 返回错误（退出码 1），不调用 bankExit(0/2)。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "推送失败 ⇒ error 含「telegram 推送第 1/1 段失败」；`runBankReport` 遇非法 bank 配置 ⇒ 返回错误、**不 Fetch、不推送**。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "命令注册：`rootCmd.Find(bank report)` 成功，含 `--dry-run`，继承 `--bank-config`（缺省 `configs/bank-monitor.yaml`）；编译期断言 `var _ bank.Sender = (*telegram.Telegram)(nil)`；`go vet ./cmd/atlas/ ./internal/bank/` 无输出；`go test -count=1 ./cmd/atlas/ ./internal/bank/` 全绿（含既有 gate_wiring）；cmd/atlas 覆盖率不低于 coverage_floor 78；`bank report --help` 含两个 flag。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-005"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-001",
+    "TASK-002",
+    "TASK-004",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-bk-b",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/bank.go",
+    "./cmd/atlas/bank_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 2,
+  "questions": [],
+  "verifier": "test-bk-a",
+  "coverage_floor": 78,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:05Z"
+  },
+  "verify_baseline": {
+    "head": "7234cd3f2e883a7f8d68d99fe749064ce6ff74dc",
+    "discovery_sha256": "99acb67b30bdc0dafa62d06567e847d3fa35d09326111bb62365a91f0ffd9480",
+    "at": "2026-09-27T08:26:24Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "error_handling[0]（D1）的主形态「全部拉取成功 + 拿不到 sender」没有测试守卫。TestRunBankReportNoSender 只覆盖部分失败（code=2）。V24（全成功无 sender 时返回 nil、退出码 0，正是 D1 要禁止的行为）与 V25（全成功无 sender 时调 bankExit(0)）在整包 421 用例下都存活；行为探针证实 V24 下 err=<nil>。实现正确，只需在 bank_test.go 补「全成功 + senderErr」场景，断言返回错误、exits 为空、stdout 有报告、stderr 有原因，修好后 V24/V25 应转红。其余 6 条 PASS；覆盖率 profile 求和 79.22% / -func 79.4%。另记观察：cmd/atlas 在 -shuffle 下有既有串扰（TestBackfillLoadRequiresDBFlag），非本任务所致。详见 docs/04-test/TASK-006-verification.md",
+  "fix_items": [
+    "FIX-1（WARNING，必修）cmd/atlas/bank.go:83-85 生产主路径「非 dry-run、sender 注入成功、部分主体拉取失败 ⇒ bankExit(2)」无端到端守卫：在 bank_test.go 增加 runBankReport 级用例（601658.SH 拉取失败），断言 sender 收到报告、runBankReport 返回 nil、bankExit 以 2 被调用恰一次。验收：把 bank.go:83 改成 `if code != 0 && bankDryRun {` 的变异须转红（Leader 已在隔离 worktree 独立复现该变异当前存活）。",
+    "FIX-2（SUGGESTION，同轮修，四方一致）全部失败摘要（bank.go:95-102）为每个主体补别名附注「（招商银行H 同 600036.SH）」，与 render.go 的不变量和 spec §4 A+H 附注一致。验收：bankE2ECfg（含 H 股）两家都拉取失败，推送摘要含「（招商银行H 同 600036.SH）」；注意全失败判定的计数须用独立变量，勿依赖 len(failed)==len(results)。",
+    "来源：.arcforge/docs/05-review/qa-review-round1.md（QA 第 1 轮，REJECT）；其余 12 条 LOW 仅作建议，不在本轮范围。"
+  ]
+}
