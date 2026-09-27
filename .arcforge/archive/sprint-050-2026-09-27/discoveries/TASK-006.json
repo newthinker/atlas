@@ -1,0 +1,97 @@
+{
+  "task_id": "TASK-006",
+  "key_findings": [
+    "【返工 r2，epoch=2，QA 第 1 轮 REJECT】FIX-1：launchd 实际跑的路径（非 dry-run、sender 注入成功、部分失败 ⇒ bankExit(2)）原先没有守卫，只有 dry-run 形态断言了 bankExit。现已加 TestRunBankReportSends/部分失败，断言照常推送 1 条且含「邮储银行 拉取失败」、runBankReport 返回 nil、stdout 为空、bankExit 恰一次且码为 2。验收变异 `if code != 0 && bankDryRun {` 只被这条新子测试杀掉；消融（同一份变异配 8fdd59b 的原测试文件）时存活，说明转红来自新子测试。",
+    "【返工 r2】FIX-2：全部失败摘要原先只写「· 名称：错误」，H 股条目整条消失，违反 render.go writeAliases 的不变量。现已在每个失败主体后补「  （招商银行H 同 600036.SH）」（与 writeAliases 同格式），全失败判定与两处「全部 N 家」计数改用独立的 nFailed。先红后绿：改实现前 TestBankReportAllFailed / TestRunBankReportAllFailed 为红。",
+    "【返工 r2】code-simplifier 调用在我这边显示「被中断」。据 leader 说明（16:2x 消息），是 leader 执行了 TaskStop：子代理已完成、报两文件未改且 -run Bank 通过，却被 idle hook 以我的名义循环催促。按 leader 裁决不重跑，以调用前后 sha256 为准：bank.go 0d618c2e… / bank_test.go cb68f79d… 一致，即零改动。",
+    "【返工 r1，epoch=2】验证者判 error_handling[0]（D1）缺守卫，结论属实：TestRunBankReportNoSender 只测了部分失败（code=2），而 D1 要防的主形态是「全部拉取成功 + 拿不到 sender」。如果这种情形退出码为 0，launchd 会把一份没推送出去的月报记成成功。V24（这种情形返回 nil）和 V25（这种情形调用 bankExit(0)）在原测试下都存活。已把它拆成「全部成功」「部分失败」两个子测试，bank.go 没有改动。消融对照：同一份 bank.go 配本次的测试时 V24/V25 被抓到，配 717f14d 上原来的测试时都存活，两组对照都是全绿，说明转红是新子测试带来的。",
+    "【shuffle 表述订正】验证报告说本 discovery 写了「go test -shuffle=on ok」，但首轮 TASK-006 的 discovery 里 grep「shuffle」是 0 次，出处引用错了。这句只跑一个随机 seed 的表述真正出现在我 TASK-004、TASK-005 的 discovery 里，测的是 internal/bank；这两个任务已经 verified，时机守卫禁止再改它们的 discovery，因此在这里如实补上多 seed 的结果（见 verification.shuffle），并报给 Leader。cmd/atlas 整包在 -shuffle 下有既有的顺序依赖（TestBackfillLoadRequiresDBFlag，基线同样失败），与本任务无关，本任务不修。",
+    "D1 要求 stderr 写明拿不到 sender 的原因，但计划草稿的 buildBankSender() bank.Sender 只返回 nil，原因在这一步就丢了。因此改成 (bank.Sender, error)，照同包 buildHestiaSender 的先例：主配置读不到、telegram 未启用、缺 bot_token/chat_id 三种情况各返回一个说明原因的错误。YAML 解析错误本身不含文件路径，所以错误里补上了 %q 形式的 cfgFile；变异 B13 去掉路径后被抓到。",
+    "buildBankSender 会调用 loadConfigOrDefaults，后者会调用 initPolicyGate，改写全局配额闸。因此 TestBuildBankSender 照 policy_test 的写法保存并复原 cfgFile 与 policy.Default()，并在临时主配置里把 collector.quota.path 指到临时目录，避免在包目录下留下账本文件。bank report 本身不构造任何 collector；gate_wiring_test 只扫它登记的入口函数与 collectorCtors 名单，与本任务无关（本地 -run 'Gate|Wire' 通过）。",
+    "cmd/atlas 覆盖率基线（feature 6d83a0d，本任务开工前 go test -cover）是 78.4%。交付后 go test -cover 为 79.2%，同一份 profile 用 go tool cover -func 统计为 79.4%，两个口径的差值与 Leader 提到的 PENDING #10（-func 偏高）是同一现象。bank.go 的 6 个函数（含 init）均为 100%。",
+    "变异 B5 首版把 strings.Join(failed, …) 换成 failed[0]，删掉了 strings 包的最后一处使用，导致 imported and not used 编译失败。harness 的 vet 检查把它判为 INVALID，没有误计为 KILLED；改写成 strings.Join(failed[:1], …) 后被抓到。B17（bankReportText 去掉 r.Err == nil 判断）存活，属于等价变异：失败主体经 Collect 后三项 Ind 都是 NaN（TASK-004 的保证），Alerts 对 NaN 不产生预警。这个判断保留下来是为了表明意图，并且不依赖 Collect 的这项实现细节。",
+    "code-simplifier 回报只说「工作已完成」，没有列出改动，但指纹比对显示改了两处，我逐行核对后确认都等价，予以接受：① deliver 的参数由 []string 改为 string，改由 deliver 内部调用 bank.Split（调用点和切段参数不变）；② 测试里用 slices.Contains 代替了手写循环。改动 ① 使变异 B8 的锚点失效，已改为对 deliver 内部的切段做变异，重跑后被抓到。这是本 sprint 第三次遇到子代理的自述与实际改动不符，都是靠指纹比对发现的。",
+    "cmd/atlas/backtest_test.go 用 gofmt -l 检查不干净，这是 feature 上原本就有的问题（最近一次改动来自 d27ca9d feat(TASK-008)），与本任务无关，按「只改自己范围内的文件」没有处理，在此记录。",
+    "探针与变异一律在 git worktree add --detach 建的临时检出里跑（基底 6d83a0d，只把本任务的两个文件拷进去），没有在主仓库留下任何文件；每轮变异前后都比对 wt-TASK-006 的指纹，结果一致。"
+  ],
+  "decisions": [
+    {
+      "decision": "buildBankSender() (bank.Sender, error)；bankSenderFactory 的类型与它相同",
+      "rationale": "D1：stderr 要写明原因（error_handling[0]），并与 buildHestiaSender 的「主配置装不上算错误」先例保持一致。三种原因的文案由 TestBuildBankSender 的子测试逐一断言，变异 B11–B13 都被抓到"
+    },
+    {
+      "decision": "runBankReport 的顺序：LoadConfig →（非 dry-run 时）bankSenderFactory → executeBankReport；拿不到 sender 时先把原因写到 stderr，照常打印报告，最后返回「银行月报未推送：…」错误，不调用 bankExit",
+      "rationale": "D1：未推送的月报不能以 0 或 2 退出。配置非法时既不构造 sender 也不 Fetch（error_handling[1]），变异 B16（先构造 sender 再读配置）被抓到。如果全部失败和拿不到 sender 同时发生，优先返回全部失败的错误，两种情况的退出码都是 1"
+    },
+    {
+      "decision": "全部失败的摘要格式为「🏦 银行关键指标月报 日期\\n❌ 全部 N 家拉取失败\\n· 名称：错误」，每家一行，同样经 bank.Split 切段",
+      "rationale": "D14 要求逐家列出；主体很多时摘要也可能超过单条上限，因此同样切段。B5（只列首家）被抓到"
+    },
+    {
+      "decision": "抽出 bankReportText(cfg, results, now)，150 家用例用它加 bank.Split 计算期望段序列，与 Sender 实际收到的逐段比对",
+      "rationale": "boundary[0] 要求段数和内容都与 bank.Split 的结果一致。直接比对完整序列，比只比段数更严格。B8（不分段）被抓到"
+    },
+    {
+      "decision": "端到端测试用 setupBankE2E：httptest 假 aktools（可指定某些代码返回 500），写临时 bank 配置，替换 bankSenderFactory / bankExit / bankCfgPath / bankDryRun，并由 t.Cleanup 全部复原；runBankReport 使用一个新的 cobra.Command，把 stdout 和 stderr 分别接到两个缓冲区",
+      "rationale": "AD-7 与 functional[2]：观测工厂被调用的次数、bankExit 收到的参数，以及 stdout、stderr 的内容。DoD 点名要求的 B1（!bankDryRun 取反）被 6 个用例抓到"
+    },
+    {
+      "decision": "TestBankReportHelp 走真实的 rootCmd.Execute([bank report --help])，cleanup 中复位 SetArgs/SetOut 以及 bankReportCmd 的 help flag",
+      "rationale": "non_functional 要求 --help 的输出包含两个 flag。cobra 执行过 --help 后 help flag 会保持为 true，不复位会让同一进程里后续执行 bank report 的测试只打印帮助"
+    },
+    {
+      "decision": "D1 用例拆成「全部成功」「部分失败」两个子测试，各自断言返回错误、stdout 有报告、stderr 写原因、不调用 bankExit",
+      "rationale": "DoD 中「不调用 bankExit(0/2)」的 0 与 2 分别对应这两种形态，两种都要有独立的守卫；变异 V24、V25 只被「全部成功」子测试抓到"
+    },
+    {
+      "decision": "别名附注格式在 cmd 里按 bank.writeAliases 重写一遍，不导出该函数",
+      "rationale": "本任务 writes 只含 cmd/atlas/bank.go 与 bank_test.go，改 internal/bank 会越界；格式由 TestBankReportAllFailed 的逐行等值断言守住。"
+    },
+    {
+      "decision": "计数用独立的 nFailed，不用 len(failed)",
+      "rationale": "failed 里混有附注行，行数不等于主体数。变异 VB/VC/VE（改回 len(failed)）全部转红，说明这一点有守卫。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/bank.go",
+    "cmd/atlas/bank_test.go"
+  ],
+  "interfaces_exposed": [
+    "CLI：atlas bank report [--dry-run]，--bank-config 是 bank 命令的持久 flag（默认 configs/bank-monitor.yaml），主配置沿用根命令的 -c/--config（其中 notifiers.telegram 提供凭据）",
+    "退出码：0 全部成功；2 部分主体拉取失败（报告照常推送或打印）；1 配置非法、全部失败（仍推送一条逐家摘要）、推送失败，或非 dry-run 却拿不到 sender（报告仍打印到 stdout，原因写到 stderr）。--dry-run 只打印，退出码按拉取结果取 0 或 2",
+    "包级可注入变量（仅 cmd/atlas 包内可见）：bankSenderFactory func() (bank.Sender, error) = buildBankSender；bankExit func(int) = os.Exit",
+    "func buildBankSender() (bank.Sender, error) —— 拿不到 sender 时返回字面量 nil 和原因错误（主配置读不到时错误里带 cfgFile 路径，另两种文案为「主配置未启用 notifiers.telegram」和「notifiers.telegram 缺 bot_token 或 chat_id」）",
+    "func executeBankReport(cfg *bank.Config, d bankReportDeps) (int, error)；func bankReportText(cfg *bank.Config, results []bank.BankResult, now time.Time) string；bankReportDeps{source, sender(nil 表示打印到 out), now, out}",
+    "给 TASK-007（部署）：launchd 需在 atlas 进程退出码为 1 时告警；拿不到 sender 同样是退出码 1，与计划原来的 0 不同"
+  ],
+  "verification": {
+    "measured_at_sha": "08d8571bf1951511446cb1d1301d908ae6afe7dd",
+    "branch": "task/TASK-006（返工 r1，基于 feature/bank-indicator-monitor @ 717f14dd7dc8ec6d06089eaabac91f56587d4e6c）",
+    "note": "以下数字都在最后一次改动（提交 1b61654）之后、在该树上统一重采。sha256：bank.go b9edc9f7…（与首轮相同，未改动）、bank_test.go 765558f5…。code-simplifier 本轮回报「无改动」，前后指纹一致，属实",
+    "go_vet": "go vet ./cmd/atlas/ ./internal/bank/ 无输出（0 行）",
+    "go_test": "go test -count=1 -v ./cmd/atlas/ rc=0：--- PASS 423 行，--- FAIL 0 行（等于首轮 421 加上新增 2 个子测试）；本任务顶层用例 15 个（与源码中 15 个 func Test 一致），子测试 8 个。go test -count=1 ./internal/bank/ ok",
+    "coverage": "cmd/atlas：go test -coverprofile 报 79.2%，go tool cover -func 的 total 为 79.4%（基线 78.4%，coverage_floor 78）；bank.go 各函数均为 100%",
+    "smoke": "go build ./cmd/atlas 后运行 bank report --help，输出中有 --dry-run 与 --bank-config（默认值 configs/bank-monitor.yaml）",
+    "mutation": "隔离 detached worktree（基底 717f14d，拷入 bank.go 和 bank_test.go），每个变异前后比对 wt-TASK-006 的指纹与 git status，结果一致，收尾时临时 worktree 已移除。对照组 rc=0，423 PASS。19 个变异全部通过 vet，其中 18 个 KILLED：首轮的 B1–B16，加上新增的 V24（全部成功且无 sender 时返回 nil）、V25（全部成功且无 sender 时调用 bankExit(0)），这两个都只被 TestRunBankReportNoSender/全部成功 抓到。B17 为等价变异，存活，原因见 key_findings[5]。消融：用 --ablate（隔离树保留 717f14d 上原来的测试文件）时 V24、V25 都存活。harness 在 scratchpad/dev-bk-b-mut6r1.py",
+    "done_criteria_map": {
+      "functional[0]": "TestBankReportAllOK, TestBankReportPartialFailure, TestRunBankReportSends",
+      "functional[1]": "TestBankReportAllFailed（按行断言每家一行）, TestRunBankReportAllFailed, TestBankReportAllFailedSendError",
+      "functional[2]": "TestRunBankReportDryRun/{全成功,部分失败}（工厂调用 0 次、stdout 有报告、bankExit 以 2 调用恰一次或不调用）+ 变异 B1",
+      "boundary[0]": "TestBankReportLongSplits（150 家，与 bank.Split 的完整段序列逐段比对，每段不超过 4000）",
+      "error_handling[0]": "TestRunBankReportNoSender/全部成功（D1 主形态，V24、V25 由它抓到）, TestRunBankReportNoSender/部分失败",
+      "error_handling[1]": "TestBankReportSendError（telegram 推送第 1/1 段失败）, TestRunBankReportBadConfig（假 aktools 请求数 0、工厂调用 0 次、未推送）",
+      "non_functional[0]": "TestBankCommandRegistered（dry-run、继承的 bank-config 及其默认值）, TestBankReportHelp, TestBuildBankSender（4 个子测试）；编译期断言写在 bank.go 中；vet 无输出、测试全绿、覆盖率不低于 78"
+    },
+    "shuffle": "只跑本任务用例：go test -count=3 -shuffle=<seed> -run 'Bank' ./cmd/atlas/，seed 1–10 全部 rc=0。internal/bank 整包：go test -count=3 -shuffle=<seed> ./internal/bank/，seed 1–10 全部 rc=0。cmd/atlas 整包在 -shuffle 下有既有的顺序依赖（TestBackfillLoadRequiresDBFlag，验证报告显示基线 6d83a0d 在 seed 3/9 同样失败），不在本任务范围内。首轮没有写任何 shuffle 结论，见 key_findings[1]",
+    "rework_r2": {
+      "base": "8fdd59ba008f81562b1cf789674cc376ebe99fe7",
+      "sampled_on_tree": "08d8571bf1951511446cb1d1301d908ae6afe7dd（提交后 16:24 重采）",
+      "numstat": "bank.go 11/4，bank_test.go 28/9",
+      "go_vet": "cmd/atlas 无输出；gofmt -l 只列出既有的 backtest_test.go（d27ca9d 遗留，非本任务）",
+      "go_test": "cmd/atlas 与 internal/bank 均 ok；-run Bank -v 共 25 行 --- PASS、0 行 --- FAIL",
+      "coverage": "cmd/atlas 79.3%（go test -cover，coverage_floor 78）；internal/bank 99.7%",
+      "shuffle": "-shuffle=1..5 各跑一次 -run Bank，rc 全为 0",
+      "mutation": "隔离副本（rsync 到 mktemp），worktree 指纹前后一致。VA `if code != 0 && bankDryRun {` KILLED（仅 TestRunBankReportSends/部分失败）；VB 全失败判定改回 len(failed) KILLED；VC 摘要计数改回 len(failed) KILLED；VD 删别名附注 KILLED；VE 错误文案计数改回 len(failed) KILLED；VF `nFailed > 0` → `len(failed) > 0` 存活，是等价变异（failed 非空当且仅当 nFailed>0）。消融：VA 配 8fdd59b 原测试文件时存活。"
+    }
+  }
+}

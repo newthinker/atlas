@@ -1,0 +1,83 @@
+{
+  "id": "TASK-001",
+  "title": "类型与配置加载（internal/bank types/config + configs/bank-monitor.yaml）",
+  "description": "计划 Task 1：新建 `internal/bank/types.go`（Indicator/Observation/Series/Source/Sender）、`config.go`（Config、LoadConfig 独立 viper、validate、DataSymbol/DisplayName/RankIndicator）、`configs/bank-monitor.yaml`。**与计划的差异**：①（AD-3）另建 `internal/bank/helpers_test.go`，只放包内共享测试辅助 `day(s string) time.Time`，TASK-002/003 不得再定义；②阈值校验写成 `!(v > 0)`（计划的 `v <= 0` 放过 NaN，独立 reviewer D11 实测）；③港股代码按去前导零后判重（`3968.HK` 与 `03968.HK` 视为同一只，reviewer D10）。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。",
+  "module": "bank",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/bank/types.go",
+    "internal/bank/config.go",
+    "internal/bank/config_test.go",
+    "internal/bank/helpers_test.go",
+    "configs/bank-monitor.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "合法配置加载：缺省 `source.aktools_url` = `http://127.0.0.1:8180`；缺省 `rank_by` ⇒ `RankIndicator()==IndNPL`；HK 条目 `DataSymbol()` 返回 `a_share_ref`、CN_A 返回 symbol；`DisplayName()` 无 name 时回退 symbol；阈值与 deterioration 各字段正确解析。`rank_by: cet1` / `coverage` 分别映射 IndCET1 / IndCoverage。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "仓库自带 `configs/bank-monitor.yaml` 可被 `LoadConfig(\"../../configs/bank-monitor.yaml\")` 加载：3 个条目（招商银行 600036.SH、邮储银行 601658.SH、招商银行H 3968.HK→600036.SH），阈值为 1.5/150/8.5 与恶化 0.10/20/0.50（断言数值，不只断言条数）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "types：`Indicators` 顺序为 NPL、Coverage、CET1；`Label()` 分别为 不良率/拨备覆盖率/CET1；`HigherIsWorse()` 仅 IndNPL 为 true。`helpers_test.go` 提供 `day()`，本包其余测试文件不重复定义。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "拒绝表逐条断言错误文案：空列表「banks 不能为空」、market=US「仅支持 CN_A / HK」、A 股 `'600036'`「格式应为 600036.SH」、港股 `3968`「格式应为 3968.HK」、纯港股缺 a_share_ref「须填 a_share_ref」、a_share_ref 非 A 股格式「须填 a_share_ref」、symbol 重复「重复」、`3968.HK` 与 `03968.HK` 同时出现「重复」、`rank_by: roe`「rank_by」。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "六个阈值字段（npl_max、coverage_min、cet1_min、deterioration.npl_up/coverage_down/cet1_down）**逐个**置 0、置负数、置 `.nan` 均被拒，错误含对应字段名（表驱动，每字段 × 每种非法值单独一例）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "配置文件不存在 ⇒ 错误含 `reading bank config`；YAML 语法错误 ⇒ 返回错误；校验失败的错误含配置文件路径（`invalid bank config <path>`）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go vet ./internal/bank/` 无输出；`go test -count=1 ./internal/bank/` 全绿；包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-bk-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/bank"
+  ],
+  "writes": [
+    "./internal/bank/types.go",
+    "./internal/bank/config.go",
+    "./internal/bank/config_test.go",
+    "./internal/bank/helpers_test.go",
+    "./configs/bank-monitor.yaml"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-bk-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:04Z"
+  },
+  "verify_baseline": {
+    "head": "d647428d4b543ed42b8d1f51e8899df717a40517",
+    "discovery_sha256": "388414d099df5d8aff36dfe4d41aae976bfd26fa6f367f04287b27fede9f3e23",
+    "at": "2026-09-27T01:36:44Z"
+  }
+}

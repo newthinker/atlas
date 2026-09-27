@@ -1,0 +1,89 @@
+{
+  "id": "TASK-002",
+  "title": "东方财富数据源 EMSource（经 aktools）",
+  "description": "计划 Task 2：新建 `internal/bank/source.go`（NewEMSource、Fetch、parseEMRows、toFloat、字段常量集中）、`testdata/em_600036_sample.json`（2026-09-26 实测 6 期）、`source_test.go`。**不得定义 `day()`**（由 TASK-001 提供）。**与计划的差异**：①样本首行再加诱饵 `\"FIRST_ADEQUACY_RATIO\": 16.59`；②`toFloat` 拒绝非有限值（`\"Inf\"`/`\"NaN\"` 字符串 ⇒ NaN，reviewer D12 实测计划会产出 +Inf）；③补「键在所有行都存在但全为 null」用例（reviewer D6：计划用例对该机制无杀伤力，真实响应恰是这种形状）；④60s 超时加测试（D13）；⑤错误体截断后用 `strings.ToValidUTF8` 防切坏多字节字符（D19）。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。",
+  "module": "bank",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/bank/source.go",
+    "internal/bank/source_test.go",
+    "internal/bank/testdata/em_600036_sample.json"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "httptest 回放样本：请求路径 `/api/public/stock_financial_analysis_indicator_em`、query `symbol=600036.SH`、`indicator=按报告期`；返回 6 期且按 Period **升序**；最新期 2026-06-30 取值 NPL 0.94、Coverage 385.1、CET1 14.07（样本首行同时含 LOAN_PROVISION_RATIO 3.63 / NEWCAPITALADER 18.33 / FIRST_ADEQUACY_RATIO 16.59 诱饵）；`MissingFields` 为空；`NewEMSource(url+\"/\")` 不产生 `//api`。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "parseEMRows 容错：字符串数值 \"1.23\" ⇒ 1.23；null ⇒ NaN；缺键 ⇒ NaN；REPORT_DATE 非法的行被跳过；`MissingFields` 只列所有行都不含的键，顺序与 NONPERLOAN/BLDKBBL/HXYJBCZL 一致。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**全 null 列不算缺失**：某键在每一行都存在且值全为 null ⇒ 该键**不在** `MissingFields`、对应值全为 NaN（把 `anyRowHas` 改成「值非 null 才算存在」的变异须转红）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "非数值统统 ⇒ NaN、绝不为 0 或 ±Inf：`\"-\"`、`\"\"`、`\"Inf\"`、`\"-Infinity\"`、`\"NaN\"`、布尔、对象。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "错误表：HTTP 500 ⇒ 含 `HTTP 500`；`[]` 与 `null` 响应体 ⇒ `无数据`；全部行日期非法 ⇒ `无可解析报告期`；非 JSON ⇒ `decode`；连接失败（server 已 Close）⇒ 返回错误不 panic；**每条错误都含 `600036.SH`**；错误信息是合法 UTF-8。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`NewEMSource(..).hc.Timeout == 60*time.Second` 有测试断言。三个取数字段名与 REPORT_DATE 只在 source.go 常量处出现；三个禁用字段名在非测试代码中只出现在注释里（grep 可核）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`go vet ./internal/bank/` 无输出；`go test -count=1 ./internal/bank/` 全绿；包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-bk-a",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/bank"
+  ],
+  "writes": [
+    "./internal/bank/source.go",
+    "./internal/bank/source_test.go",
+    "./internal/bank/testdata/em_600036_sample.json"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [
+    {
+      "q": "提交前的 code-simplifier 子代理调用被人类中断（中断后 3 个文件 sha256 与调用前一致、未提交；GREEN 已完成：vet 净/test 绿/覆盖率 98.0%/隔离变异 10/10 KILLED）。请选：① 重调 code-simplifier；② 跳过（dev 在 discovery 注明）。",
+      "asked_at": "2026-09-27T01:46:00Z",
+      "answer": "leader 2026-09-27 消息答复（dev-bk-a 代录）：子代理实际已跑完、未改文件；以 dev 自己的调用前后 sha256 比对为准，照常提交并通知 merge。dev 已复核 3 文件 sha256 一致。"
+    }
+  ],
+  "verifier": "test-bk-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:04Z"
+  },
+  "verify_baseline": {
+    "head": "7f51cd4c4e91c80021a958d6e11f9516181b2625",
+    "discovery_sha256": "b7acc547422f5c6a1723792ae4ac46ae1d44d521b4108e6be6484c2229cde3d1",
+    "at": "2026-09-27T01:53:51Z"
+  }
+}

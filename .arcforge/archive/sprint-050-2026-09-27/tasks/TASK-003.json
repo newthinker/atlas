@@ -1,0 +1,82 @@
+{
+  "id": "TASK-003",
+  "title": "按指标回退的最新值 / 环比 / 同比与阈值、恶化预警",
+  "description": "计划 Task 3：新建 `internal/bank/analyze.go` 与 `analyze_test.go`。**不得定义 `day()`**。【人类裁决 2026-09-27，改动 spec 语义，以本任务 DoD 为准】**D2 口径（改计划）**：季报常不披露 CET1（实测江苏 600919、宁波 002142 的 Q1/Q3 为 null），计划口径下这类银行 CET1 预警结构性失效。改为**按指标各自回退**：`Change` 增加 `Period time.Time` 字段 = 该指标**最近一个非 NaN 值**所在的报告期（全 NaN ⇒ 零值）；`Value` 取该值；`QoQ` = 该值 − 该指标**在此之前最近一个非 NaN 值**；`YoY` = 该值 − 该指标在 `Period.AddDate(-1,0,0)` 那一期的值（那期不存在或为 NaN ⇒ NaN）。`BankResult.Latest` 维持「至少一项非 NaN 的最近期」。`Alert` 增加 `Period time.Time`（取该指标 Change.Period），阈值预警与恶化预警都对回退值生效。**浮点边界（Leader 实测，两把尺一致）**：计划注释称 `1.02-0.92=0.10000000000000009`，实为 `0.099999999999999978`（低于 0.1），该用例测不到浮点假阳。改用真正越过阈值的对：NPL `0.57→0.67`（差 `0.10000000000000009`）、拨备 `256.04→236.04`（`-20.000000000000028`）、CET1 `16.01→15.51`（`-0.50000000000000178`）。注释写实测机制，勿照抄计划那句；round4 注释删去「源数据至多两位小数」（实测 002839 有 4 位）。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。",
+  "module": "bank",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/bank/analyze.go",
+    "internal/bank/analyze_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "cmb 实测序列（2025-03-31…2026-06-30，每期三项都有）：最新期 2026-06-30；NPL {0.94, 0, +0.01}、Coverage {385.1, −2.66, −25.83}、CET1 {14.07, −0.06, +0.07}，三项 Period 均为 2026-06-30，`assert.Equal` 精确比较。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**按指标回退（真实数据 600919.SH）**：取 2024-06-30…2025-09-30 的真实序列（2025-09-30 CET1 为 null，2025-06-30 为 8.49，2025-03-31 为 8.36；其余值由 dev 从 aktools 取并写进测试注释标明来源与日期）⇒ `Latest`=2025-09-30；CET1 `Value`=8.49、`Period`=2025-06-30、`QoQ`=+0.13；NPL/Coverage 的 Period 为 2025-09-30；`Alerts` 含 `{CET1, AlertLevel, 8.49, 8.5, Period=2025-06-30}`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**跨空期的环比/同比（真实数据 002142.SZ 截至 2026-06-30）**：2026-03-31 CET1 为 null ⇒ CET1 `QoQ` = 9.53 − 9.34（2025-12-31）= +0.19，`YoY` = 9.53 − 9.65（2025-06-30）= −0.12。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "阈值预警（NPL > max、Coverage < min、CET1 < min）与恶化预警（NPL 环比 +0.11、Coverage −20.5、CET1 −0.62）各产生正确的 Alert（Kind、Value、Limit、Period）；改善方向不预警。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "严格不等号：NPL=1.5、Coverage=150、CET1=8.5 均不预警。**浮点边界三例**：由 Analyze 算出的 NPL 0.57→0.67、Coverage 256.04→236.04、CET1 16.01→15.51 环比**精确等于** 0.1 / −20 / −0.5 且**不产生恶化预警**；删除 round4、或把任一指标的 `>` 改成 `>=`，都须有用例转红（变异证据写进 discovery）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "NaN：全 NaN 的尾期不算最新期；某指标全序列 NaN ⇒ Value/QoQ/YoY 为 NaN、Period 为零值、不预警；该指标只有一个非 NaN 值 ⇒ QoQ/YoY 为 NaN；空序列 ⇒ 零时间 + 全 NaN；上年同日那期存在但该指标为 NaN ⇒ YoY 为 NaN。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "Analyze 不修改入参切片；`go vet ./internal/bank/` 无输出；`go test -count=1 ./internal/bank/` 全绿；包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-bk-b",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "packages": [
+    "./internal/bank"
+  ],
+  "writes": [
+    "./internal/bank/analyze.go",
+    "./internal/bank/analyze_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-bk-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:04Z"
+  },
+  "verify_baseline": {
+    "head": "6d792474b9f78b3d76ec8807d2615947dff42e51",
+    "discovery_sha256": "6e6c173fee5308127ea4e385234fe26147bb699c74e4874af4ddf5bedbf97e9d",
+    "at": "2026-09-27T02:27:19Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "non_functional[0] 守卫依赖执行顺序：TestAnalyzeAcrossGap002142 先把全局 nbbk 本体传给 Analyze，TestAnalyzeDoesNotMutateInput 随后复制的是可能已被污染的 nbbk。幂等写入参的变异（P15 写 NaN、P15b 原地前向填充）在全套件默认顺序下存活，单跑时转红，-shuffle 下 1/3 转红。修法：该测试的输入与期望都在测试内用字面量构造（含 NaN 空期），并且/或者其他测试一律传 slices.Clone(fixture)。analyze.go 无需改，其余 6 条 PASS。详见 docs/04-test/TASK-003-verification.md"
+}

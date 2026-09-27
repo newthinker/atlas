@@ -1,0 +1,71 @@
+{
+  "task_id": "TASK-003",
+  "key_findings": [
+    "【返工 r1，epoch=2】test-bk-a 判 non_functional[0] 的守卫依赖执行顺序（task_defect），结论属实：返工前 TestAnalyzeAcrossGap002142 等把包级 fixture 本体交给 Analyze；幂等的越界写入（P15 写 NaN、P15b 原地前向填充）会先污染 fixture，守卫随后复制的也是被污染的值，期望和实际一起变，守卫就看不出差别。我在返工前测试（ea8e406）上复现：P15b 用 5 个独立 seed 跑 -shuffle，守卫只在 2 个里转红。",
+    "返工前的第二个症状：同一份被污染的 fixture 还会跨轮影响其他测试。对照组 P15b 用 -count=5 跑时，第 2 到 5 轮的 TestAnalyzeFallbackPerIndicator600919 转红（jsbk 的 2025-09-30 CET1 被原地填成 8.49），第 1 轮守卫却不一定红。所以 rc=1 并不说明守卫起了作用，只看退出码会把它误当成已被守住。这也是修法②（调用处一律 clone）必要的原因。",
+    "aktools 实测（2026-09-27）：600919.SH 的 2024-09-30、2025-09-30 与 002142.SZ 的 2024-09-30、2025-09-30、2026-03-31 CET1（HXYJBCZL）为 null；600919 在 2026-03-31 已披露 CET1=8.5（DoD 取 2025-09-30 截止的序列不受影响）。",
+    "三组浮点边界 Go 实测与 Leader 一致：0.67-0.57=0.10000000000000009、236.04-256.04=-20.00000000000003（Go 最短表示，即 -20.000000000000028）、15.51-16.01=-0.5000000000000018；计划原例 1.02-0.92=0.09999999999999998 低于阈值，测不到假阳。",
+    "首轮变异 M8（Latest 改为取首个指标 Period）存活：原用例里 NPL 总是在最新期有值，Latest 取最大值的语义无守卫；已补「尾期仅拨备有值」用例后 KILLED。",
+    "删 round4 的 KILLED 由预警断言本身产生：边界测试的 QoQ 断言用 assert（非 require），M1 下「恰等于恶化阈值不预警」失败 3 次（NPL/Coverage/CET1 各一），不是像 reviewer 那次只靠 require.Equal(QoQ) 转红。",
+    "detect-changes 在 worktree 里：`.gitnexus/` 未跟踪、worktree 中不存在，需 `node ../atlas/.gitnexus/run.cjs detect-changes --scope staged --repo atlas`；结果「2 files, no indexed symbols overlap」（新文件）。"
+  ],
+  "decisions": [
+    {
+      "decision": "按指标独立分析（analyzeIndicator + lastValid），Latest = 各指标 Change.Period 的最大值，不再单独用 hasAny 扫描",
+      "rationale": "D2 裁决要求按指标回退；序列升序时「至少一项非 NaN 的最近期」恰等于各指标最近非 NaN 期的最大值，少一个函数且与 Period 语义天然一致"
+    },
+    {
+      "decision": "YoY 只查 Period.AddDate(-1,0,0) 那一期，该期该指标为 NaN 时 NaN 自然传播，不回退到其他期",
+      "rationale": "DoD boundary[1]「上年同日那期存在但该指标为 NaN ⇒ YoY 为 NaN」；TestAnalyzeYoYPeriodNaN 两侧都放了非 NaN 期作诱饵"
+    },
+    {
+      "decision": "Alert.Period 取该指标 Change.Period（阈值与恶化预警一致），不取 BankResult.Latest",
+      "rationale": "DoD；TestAlertsLevel 给三项指标设不同 Period，变异 M7（改取 r.Latest）KILLED"
+    },
+    {
+      "decision": "round4 注释改写为实测机制（0.67-0.57 例），删去「源数据至多两位小数」",
+      "rationale": "DoD description：计划原句数值不成立，且 002839 实测有 4 位小数"
+    },
+    {
+      "decision": "浮点边界测试拆为 NPL/Coverage/CET1 三个子测试，并逐指标做 `>=` 变异（M3a/b/c）",
+      "rationale": "DoD 要求「把任一指标的 > 改成 >=」都有用例转红；源码里恶化比较是三指标共用一处，只变异共用处证明不了每个指标各自被守住"
+    },
+    {
+      "decision": "返工：TestAnalyzeDoesNotMutateInput 的输入和期望各调用一次 fresh() 现场构造，含 NaN 空期和全 NaN 尾期；其余三处直接传包级 fixture 的调用改为 slices.Clone。fixture 保持 var 形态，不改成函数",
+      "rationale": "修法①消除守卫对执行顺序的依赖；修法②防止被测函数的缺陷在测试之间传播（对照组的 -count=5 跨轮污染已实证）。fixture 只在 analyze_test.go 内引用（grep 核实），改成函数收益有限，而 interfaces_exposed 已把它们作为 var 暴露给下游"
+    }
+  ],
+  "files_modified": [
+    "internal/bank/analyze.go（首轮，返工未改）",
+    "internal/bank/analyze_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Change struct{ Value, QoQ, YoY float64; Period time.Time } —— 字段顺序固定（测试用位置字面量）。Value = 该指标最近一个非 NaN 值；Period = 该值所属报告期（可能早于 BankResult.Latest，下游渲染据此标「截至」；全 NaN ⇒ 零值且 Value/QoQ/YoY 全 NaN）；QoQ = Value − 该指标在 Period 之前最近一个非 NaN 值（可跨空期）；YoY = Value − 该指标在 Period.AddDate(-1,0,0) 那期的值（那期不存在或为 NaN ⇒ NaN）；QoQ/YoY 经 round4（1e-4）",
+    "type BankResult struct{ Symbol, Name string; Aliases []string; Latest time.Time; Ind [numIndicators]Change; MissingFields []string; Err error } —— Latest = 至少一项非 NaN 的最近期 = max(Ind[k].Period)；零值 = 无数据",
+    "type AlertKind int; const AlertLevel, AlertDeterioration",
+    "type Alert struct{ Name string; Ind Indicator; Kind AlertKind; Value, Limit float64; Period time.Time } —— Period = 该指标 Change.Period；AlertLevel 时 Value 为指标值，AlertDeterioration 时为环比变动（pp，带符号）；Limit 为对应阈值（恶化为正的幅度）",
+    "func Analyze(obs []Observation) (time.Time, [numIndicators]Change) —— obs 须按 Period 升序；不修改入参",
+    "func Alerts(r BankResult, t ThresholdsCfg) []Alert —— 严格不等号；按 Indicators 顺序、每指标先 Level 后 Deterioration；NaN 不预警；无预警返回 nil",
+    "测试辅助（analyze_test.go，仅 _test 可见，下游勿重复定义）：var nan; func obs(date string, npl, cov, cet1 float64) Observation; var cmb/jsbk/nbbk（600036/600919/002142 实测序列，**传给会写入参的函数时须 slices.Clone**）; var stdThresholds; func assertNaNChange; func result(npl, cov, cet1 Change) BankResult; func val(v float64, p time.Time) Change; var pNPL/pCov/pCET1"
+  ],
+  "verification": {
+    "measured_at_sha": "02cd35aed80e8849d0fe3baf47358d2bce3c729a",
+    "branch": "task/TASK-003-r1（基于 feature/bank-indicator-monitor @ ea8e406789fac8c90cfc24a324bfff3967089748，已含 TASK-002）",
+    "note": "以下数字全部在最后一次改动（提交 02cd35a）之后、在该树上统一重采。code-simplifier 前后两个文件的 sha256 一致（analyze.go e9183d0f…、analyze_test.go 7f21e49c…），没有改动。analyze.go 与首轮提交逐字节相同",
+    "go_vet": "go vet ./internal/bank/ 无输出（0 行）",
+    "go_test": "go test -count=1 -v -cover ./internal/bank/ rc=0；--- PASS 共 86 行，--- FAIL 0 行（顶层 32 个，其中本任务 12 个，与源码中 12 个 func Test 一致；本任务子测试 10 个，数量不变）；go test -count=5 -shuffle=on ./internal/bank/ ok",
+    "coverage": "99.3% of statements（./internal/bank，含 TASK-002）",
+    "mutation_rework": "所有变异都在临时 detached worktree 上跑（scratchpad/dev-bk-b-mutwt，基于 02cd35a，用完已移除），每个变异前后都比对 wt-TASK-003 的指纹，结果一致。① 复用验证者 harness（tbka/mut_tbka_task003.py，只把 W/MAIN 改成我的路径）的 27 个既有变异 P1–P20，外加 P15b（按报告描述自写：return 前对入参逐指标原地前向填充 NaN）和 P15c：29/29 KILLED，全部通过 vet。P15、P15b、P15c 都只让 TestAnalyzeDoesNotMutateInput 转红，默认顺序下即转红。② 用 go test -count=5 -shuffle=on 跑，P15/P15b/P15c 的守卫都是 5/5 转红。注意这 5 次共用同一个 seed、执行顺序相同，所以另用 5 个独立 seed（1/2/3/42/20260927）各跑一次 -count=1：P15 和 P15b 的守卫都是 5/5 转红。③ 对照组：把测试文件换回 ea8e406 版本，其余不变。默认顺序下 P15 和 P15b 都存活（rc=0）；P15b 在 5 个独立 seed 下只有 seed1 和 seed42 两次转红，其余三次存活，与验证报告一致。由此可以确认，转红是这次返工带来的",
+    "mutation_first_round": "首轮（00596c0）自有的 10 个变异 M1–M8 全部 KILLED，见 harness scratchpad/dev-bk-b-mutate.py；返工没有改 analyze.go，也没有改相关断言",
+    "harness_note": "我自己的 harness 有过一次假读数：f-string 里写的 r'…(\\\\S+)' 匹配的是字面反斜杠，导致 FAIL 列表恒为空，看起来像「rc=1 但没有任何测试失败」。改成 grep 之后查实了真正转红的测试（见 key_findings[1]）。上面的数字都来自修正后的命令",
+    "done_criteria_map": {
+      "functional[0]": "TestAnalyzeLatestQoQYoY",
+      "functional[1]": "TestAnalyzeFallbackPerIndicator600919",
+      "functional[2]": "TestAnalyzeAcrossGap002142",
+      "functional[3]": "TestAlertsLevel（超限/不足）, TestAlertsDeterioration（恶化 + 改善不预警）",
+      "boundary[0]": "TestAlertsLevel（三项等于阈值）, TestAlertsDeteriorationBoundaryIsStrict/{NPL,Coverage,CET1} + 变异 M1–M5",
+      "boundary[1]": "TestAnalyzeSkipsAllNaNTail, TestAnalyzeIndicatorAllNaN, TestAnalyzeSingleValidValue, TestAnalyzeEmpty, TestAnalyzeYoYPeriodNaN",
+      "non_functional[0]": "TestAnalyzeDoesNotMutateInput（输入与期望都在测试内现场构造，含 NaN 空期）；调用处 slices.Clone；go vet 无输出；go test 全绿；覆盖率 99.3%"
+    }
+  }
+}

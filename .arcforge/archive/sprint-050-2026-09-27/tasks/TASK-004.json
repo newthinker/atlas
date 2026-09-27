@@ -1,0 +1,90 @@
+{
+  "id": "TASK-004",
+  "title": "取数聚合（A+H 去重）与同期横向统计",
+  "description": "计划 Task 4：新建 `internal/bank/collect.go`、`summary.go` 及两份测试。【人类裁决 2026-09-27，改动 spec 语义，以本任务 DoD 为准】**D15 统计期（改计划）**：计划取「最晚的最新期」，一家银行提前发年报就会把统计期拉到 12-31、n=1（reviewer 实测）。改为：统计期 = 以该期为 `Latest` 的**未失败主体数最多**的那一期，并列取较晚；`Summary` 增加 `Ahead []BankResult`（`Latest` 晚于统计期的主体，不进同期统计与排名）。**D2 联动**：同期统计与排名对指标 k 只采用 `Ind[k].Period == 统计期` 的值；Period 不等于统计期的回退值在统计中视同 NaN（不进 N/均值/中位数/最优最差，排名排在最后）。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。",
+  "module": "bank",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/bank/collect.go",
+    "internal/bank/collect_test.go",
+    "internal/bank/summary.go",
+    "internal/bank/summary_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "A+H 去重：招商银行 + 招商银行H(→600036.SH) + 邮储银行 ⇒ 2 个结果，600036.SH 只 Fetch 1 次；主名取配置中首个条目、`Aliases=[\"招商银行H\"]`；结果顺序按首次出现；MissingFields 透传。只配 H 股 ⇒ 主名为 H 股名、Symbol 为 a_share_ref、无 Aliases。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Summarize 分组：Current（Latest=统计期）按 rank_by 由优到劣（NPL 升序；Coverage/CET1 降序），Stale = Latest 早于统计期或无任何数据，Ahead = Latest 晚于统计期，Failed = 拉取失败；四组互斥且并集为全部输入。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**统计期取众数（D15）**：10 家 Latest=2026-06-30、1 家 Latest=2026-12-31 ⇒ 统计期 2026-06-30、Current 10 家、Ahead 1 家；2 家 06-30 与 2 家 09-30 并列 ⇒ 取 2026-09-30；失败主体不参与计数。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Stat：N、均值、中位数（奇数取中位、偶数取中间两数均值）、最优/最差名称与值，方向随指标（拨备覆盖率越高越好）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "统计只用当期值：NaN 与 `Ind[k].Period ≠ 统计期` 的回退值都不进统计（N 只计合格值）且在按该指标排名时排最后；无当期主体 ⇒ Period 零值、各指标 N=0 且 Mean/Median/BestVal/WorstVal 为 NaN、Best/Worst 为空串。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "并列值排名稳定（保持配置顺序）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "单主体失败不影响其他：失败主体 `Err` 保留原错误、`Latest` 为零、`Ind` 三项 Value **均为 NaN**（断言 NaN，而非仅断言 Err）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go vet ./internal/bank/` 无输出；`go test -count=1 ./internal/bank/` 全绿；包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-bk-b",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/bank"
+  ],
+  "writes": [
+    "./internal/bank/collect.go",
+    "./internal/bank/collect_test.go",
+    "./internal/bank/summary.go",
+    "./internal/bank/summary_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-bk-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:04Z"
+  },
+  "verify_baseline": {
+    "head": "d4d1d051a376b0e8c36a834461c62949ea1b18c9",
+    "discovery_sha256": "58e45170378fe967f13f85caabe9bc8d1ff462717f7c40c18b8fb17b498e32b0",
+    "at": "2026-09-27T02:58:39Z"
+  }
+}

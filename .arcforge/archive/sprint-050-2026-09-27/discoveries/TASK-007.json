@@ -1,0 +1,51 @@
+{
+ "task_id": "TASK-007",
+ "author": "dev-bk-b",
+ "measured_at_sha": "26c2fc99281dbd0790efda9ab18d27b248e23f09",
+ "base": "459d9b109f1f32cd6085e3c83ee4c1364529d9d8",
+ "key_findings": [
+  "集成测试按计划草稿落地：600036.SH 实测 MissingFields 为空、最新期 2026-06-30（近 270 天内）、三项非 NaN。",
+  "ATLAS_AKTOOLS_URL 覆盖生效：指向 http://127.0.0.1:1 时 rc=1、0 条 SKIP，报错含 connection refused；指向 http://localhost:8180/ 时 PASS。",
+  "真实 dry-run（正式配置）招商银行 0.94% / 385.10% / 14.07% 与同时刻直查 600036.SH 2026-06-30 完全一致；环比 -2.66、同比 -25.83 等逐项手算核对一致；含「（招商银行H 同 600036.SH）」；全文 0 处 NaN；rc=0。",
+  "临时配置（scratchpad，不进仓库）加 600919.SH、002142.SZ：CET1 分别 8.67%、9.53%，期次 2026-06-30，与直查一致。宁波银行 2026-03-31 CET1 为 null，报告环比 +0.19 对的是 2025-12-31 的 9.34，与 R15「对该指标自己的上一个非 NaN 期」一致。",
+  "局限：本次两家 2026-06-30 都披露了 CET1，报告里「截至」回退标注那条路径没有被真实数据触发，只由 TASK-003/005 的单测覆盖。",
+  "code-simplifier 子代理的调用在我这边显示「被中断」。据 leader 说明，中断是 leader 执行 TaskStop（子代理已完成、报零改动，却被 idle hook 以我的名义循环催促），不是人类所为。按 leader 裁决不重跑，以调用前后 sha256 比对为准：两文件均一致（88c63b12… / 2f642633…），即零改动。",
+  "全程零 Telegram 推送：两次运行都带 --dry-run，runBankReport 在 dry-run 时不调用 bankSenderFactory；根命令无 PersistentPreRun/OnInitialize。没有部署 runtime，也没有 launchctl load（AD-9）。"
+ ],
+ "decisions": [
+  {
+   "decision": "集成测试按计划草稿原样实现，只在文件头加完成标准与测试的映射注释，并加一句「不可达必须失败」的说明",
+   "rationale": "计划草稿就是 DoD 下限。require.NoError 本身保证连不上时 FAIL 而非 skip；这句说明是给以后想把它改成 skip 的人看的。"
+  },
+  {
+   "decision": "plist 按计划草稿，未加 http_proxy",
+   "rationale": "crisis-daily 需要代理是因为 Yahoo 直连 403；本任务只访问本机 aktools（no_proxy 覆盖），Telegram 代理由主配置 notifiers.telegram.proxy 提供。"
+  }
+ ],
+ "files_modified": [
+  "internal/bank/source_integration_test.go",
+  "deploy/launchd/com.newthinker.atlas.bank-monthly.plist"
+ ],
+ "interfaces_exposed": [
+  "无（部署产物）；集成测试入口：go test -tags integration -count=1 ./internal/bank/ -run Integration -v"
+ ],
+ "verification": {
+  "sampled_on_tree": "26c2fc99281dbd0790efda9ab18d27b248e23f09（提交后重采）",
+  "integration_default": "rc=0，1 PASS",
+  "integration_neg_127_0_0_1_1": "rc=1，SKIP 0 条，含 connection refused",
+  "unit": "go test -count=1 ./internal/bank/ rc=0，--- PASS 117 行 / --- FAIL 0 行，coverage 99.7%",
+  "vet": "go vet 带 tag 与不带 tag 都无输出",
+  "build_tag": "不带 tag 时 go list TestGoFiles 不含 source_integration_test.go；单测里的 NewEMSource 全部指向 httptest 或只做断言，不连外网",
+  "plutil": "OK",
+  "mutation": "隔离副本（rsync 到 mktemp），worktree 指纹前后一致。M1 忽略 ATLAS_AKTOOLS_URL：负例 rc=0，由「127.0.0.1:1 必须失败」规程检出；M2 连不上改 skip：负例 SKIP=1 rc=0，同样检出；M3 CET1 键改错：FAIL（KILLED）；M4 窗口 270→27 天：FAIL（KILLED，证明时效断言确在求值）。M1/M2 只能由人工负例检出，测试本身不会自报。",
+  "dry_run_window": "2026-09-27 15:56:05–15:56:10，dry-run 与直查背对背，工作树 HEAD 459d9b1（本任务文件不影响 cmd 行为）",
+  "dry_run_official_stdout": "🏦 银行关键指标月报 2026-09-27\n覆盖 2 家（统计期 2026-06-30：2 家；未更新 0；失败 0）\n\n⚠️ 预警 (0)\n无\n\n📊 同期统计 2026-06-30（n=2）\n不良率 均值 0.97% | 中位 0.97% | 最优 招商银行 0.94% | 最差 邮储银行 1.00%\n拨备覆盖率 均值 300.01% | 中位 300.01% | 最优 招商银行 385.10% | 最差 邮储银行 214.93%\nCET1 均值 12.05% | 中位 12.05% | 最优 招商银行 14.07% | 最差 邮储银行 10.04%\n\n🏷 排名（按不良率由优到劣）\n1. 招商银行 不良率 0.94%(环比+0.00/同比+0.01) 拨备覆盖率 385.10%(环比-2.66/同比-25.83) CET1 14.07%(环比-0.06/同比+0.07)\n  （招商银行H 同 600036.SH）\n2. 邮储银行 不良率 1.00%(环比+0.01/同比+0.08) 拨备覆盖率 214.93%(环比-1.72/同比-45.42) CET1 10.04%(环比-0.14/同比-0.48)\n\n",
+  "dry_run_official_stderr": "",
+  "direct_query_official": "== 600036.SH 行数=102\n   2026-06-30 {'NPL': 0.94, 'Cov': 385.1, 'CET1': 14.07}\n   2026-03-31 {'NPL': 0.94, 'Cov': 387.76, 'CET1': 14.13}\n   2025-12-31 {'NPL': 0.94, 'Cov': 391.79, 'CET1': 14.16}\n   2025-09-30 {'NPL': 0.94, 'Cov': 405.93, 'CET1': 13.93}\n   2025-06-30 {'NPL': 0.93, 'Cov': 410.93, 'CET1': 14.0}\n   最近非空 NPL: 2026-06-30 = 0.94\n   最近非空 Cov: 2026-06-30 = 385.1\n   最近非空 CET1: 2026-06-30 = 14.07\n== 601658.SH 行数=47\n   2026-06-30 {'NPL': 1.0, 'Cov': 214.93, 'CET1': 10.04}\n   2026-03-31 {'NPL': 0.99, 'Cov': 216.65, 'CET1': 10.18}\n   2025-12-31 {'NPL': 0.95, 'Cov': 227.94, 'CET1': 10.53}\n   2025-09-30 {'NPL': 0.94, 'Cov': 240.21, 'CET1': 10.65}\n   2025-06-30 {'NPL': 0.92, 'Cov': 260.35, 'CET1': 10.52}\n   最近非空 NPL: 2026-06-30 = 1.0\n   最近非空 Cov: 2026-06-30 = 214.93\n   最近非空 CET1: 2026-06-30 = 10.04\n",
+  "dry_run_extra_config": "source:\n  aktools_url: http://127.0.0.1:8180\nrank_by: npl\nbanks:\n  - {market: CN_A, symbol: 600036.SH, name: 招商银行}\n  - {market: CN_A, symbol: 600919.SH, name: 江苏银行}\n  - {market: CN_A, symbol: 002142.SZ, name: 宁波银行}\nthresholds:\n  npl_max: 1.5\n  coverage_min: 150\n  cet1_min: 8.5\n  deterioration:\n    npl_up: 0.10\n    coverage_down: 20\n    cet1_down: 0.50\n",
+  "dry_run_extra_stdout": "🏦 银行关键指标月报 2026-09-27\n覆盖 3 家（统计期 2026-06-30：3 家；未更新 0；失败 0）\n\n⚠️ 预警 (0)\n无\n\n📊 同期统计 2026-06-30（n=3）\n不良率 均值 0.84% | 中位 0.81% | 最优 宁波银行 0.76% | 最差 招商银行 0.94%\n拨备覆盖率 均值 354.43% | 中位 373.35% | 最优 招商银行 385.10% | 最差 江苏银行 304.83%\nCET1 均值 10.76% | 中位 9.53% | 最优 招商银行 14.07% | 最差 江苏银行 8.67%\n\n🏷 排名（按不良率由优到劣）\n1. 宁波银行 不良率 0.76%(环比+0.00/同比+0.00) 拨备覆盖率 373.35%(环比+3.96/同比-0.81) CET1 9.53%(环比+0.19/同比-0.12)\n2. 江苏银行 不良率 0.81%(环比+0.00/同比-0.03) 拨备覆盖率 304.83%(环比-3.53/同比-26.19) CET1 8.67%(环比+0.17/同比+0.18)\n3. 招商银行 不良率 0.94%(环比+0.00/同比+0.01) 拨备覆盖率 385.10%(环比-2.66/同比-25.83) CET1 14.07%(环比-0.06/同比+0.07)\n\n",
+  "dry_run_extra_stderr": "",
+  "direct_query_extra": "== 600919.SH 行数=57\n   2026-06-30 {'NPL': 0.81, 'Cov': 304.83, 'CET1': 8.67}\n   2026-03-31 {'NPL': 0.81, 'Cov': 308.36, 'CET1': 8.5}\n   2025-12-31 {'NPL': 0.84, 'Cov': 322.98, 'CET1': 8.93}\n   2025-09-30 {'NPL': 0.84, 'Cov': 322.62, 'CET1': None}\n   2025-06-30 {'NPL': 0.84, 'Cov': 331.02, 'CET1': 8.49}\n   最近非空 NPL: 2026-06-30 = 0.81\n   最近非空 Cov: 2026-06-30 = 304.83\n   最近非空 CET1: 2026-06-30 = 8.67\n== 002142.SZ 行数=83\n   2026-06-30 {'NPL': 0.76, 'Cov': 373.35, 'CET1': 9.53}\n   2026-03-31 {'NPL': 0.76, 'Cov': 369.39, 'CET1': None}\n   2025-12-31 {'NPL': 0.76, 'Cov': 373.16, 'CET1': 9.34}\n   2025-09-30 {'NPL': 0.76, 'Cov': 375.92, 'CET1': None}\n   2025-06-30 {'NPL': 0.76, 'Cov': 374.16, 'CET1': 9.65}\n   最近非空 NPL: 2026-06-30 = 0.76\n   最近非空 Cov: 2026-06-30 = 373.35\n   最近非空 CET1: 2026-06-30 = 9.53\n",
+  "telegram_pushes": 0
+ }
+}

@@ -1,0 +1,60 @@
+{
+  "task_id": "TASK-001",
+  "key_findings": [
+    "viper.Unmarshal 为弱类型解码：YAML 裸数字 `symbol: 3968` 被解成字符串 \"3968\"，随后被港股正则拒绝（格式应为 3968.HK），不会在解码阶段报错。",
+    "YAML `.nan` 被解成 float64 NaN；`v <= 0` 对 NaN 为 false 会放过，必须写成 `!(v > 0)`。隔离副本变异实测：改回 `v <= 0` 后 6 个 `=.nan` 子测试转红。",
+    "detect-changes 在 worktree 中需 `--repo atlas`（`--repo .` 报 Repository not found）；它按 cwd 读 worktree 暂存区，看到本任务 5 个文件，与已索引符号无重叠（全为新文件，AD-10）。"
+  ],
+  "decisions": [
+    {
+      "decision": "港股判重用 BankCfg.dedupKey()（HK 市场 strings.TrimLeft(symbol, \"0\")，CN_A 原样）",
+      "rationale": "DoD boundary[0] / reviewer D10：3968.HK 与 03968.HK 为同一只；只对 HK 去零，避免 A 股 000001.SZ 与 1.SZ 之类被误并（后者本就被格式校验拒绝，但判重键不应依赖校验顺序）"
+    },
+    {
+      "decision": "阈值校验 `!(f.v > 0)`，错误文案 `thresholds.<字段> 须 > 0`（恶化字段带 deterioration. 前缀）",
+      "rationale": "拒绝 NaN（reviewer D11）；文案含完整字段名满足 boundary[1]"
+    },
+    {
+      "decision": "day() 仅在 helpers_test.go 定义，并加 TestDayHelper 使用它",
+      "rationale": "AD-3；TASK-002/003 若重复定义会编译失败，这本身就是机制化的「不得重复定义」守卫"
+    },
+    {
+      "decision": "TestShippedConfigLoads 以整结构体相等断言 3 个条目与全部 6 个阈值",
+      "rationale": "DoD functional[1] 要求断言数值而非只断条数"
+    }
+  ],
+  "files_modified": [
+    "internal/bank/types.go",
+    "internal/bank/config.go",
+    "internal/bank/config_test.go",
+    "internal/bank/helpers_test.go",
+    "configs/bank-monitor.yaml"
+  ],
+  "interfaces_exposed": [
+    "type Indicator int; const IndNPL, IndCoverage, IndCET1; numIndicators(=3,未导出); var Indicators; (Indicator) Label() string; (Indicator) HigherIsWorse() bool",
+    "type Observation struct{ Period time.Time; Values [numIndicators]float64 }",
+    "type Series struct{ Obs []Observation; MissingFields []string }",
+    "type Source interface{ Fetch(symbol string) (Series, error) }; type Sender interface{ SendText(text string) error }",
+    "type Config{Source SourceCfg; RankBy string; Banks []BankCfg; Thresholds ThresholdsCfg}; SourceCfg{AktoolsURL}; BankCfg{Market,Symbol,Name,AShareRef} + DataSymbol()/DisplayName(); ThresholdsCfg{NPLMax,CoverageMin,CET1Min,Deterioration}; DeteriorationCfg{NPLUp,CoverageDown,CET1Down}",
+    "func LoadConfig(path string) (*Config, error); func (c *Config) RankIndicator() Indicator",
+    "测试辅助（仅 _test 可见）：func day(s string) time.Time —— internal/bank/helpers_test.go，TASK-002/003 直接用，不得再定义"
+  ],
+  "verification": {
+    "measured_at_sha": "84c1ac23bce6a7766683633f32a531260ca46b97",
+    "branch": "task/TASK-001",
+    "note": "以下数字均在最后一次改动（提交 84c1ac2…）之后于该树上统一采集；code-simplifier 前后 5 个文件 sha256 逐一一致（未改动）",
+    "go_vet": "go vet ./internal/bank/ 无输出",
+    "go_test": "go test -count=1 ./internal/bank/ ok；-v 下 --- PASS 42 行（11 个顶层 + 31 个子测试：RankBy 3 + Rejects 10 + BadThresholds 18），--- FAIL 0 行",
+    "coverage": "97.9% of statements（./internal/bank）",
+    "mutation": "隔离副本（scratchpad mktemp 拷贝，worktree 指纹前后一致）6 个有效变异体全部 KILLED 且由目标子测试转红：!(v>0)→v<=0（6 个 .nan 子测试）、去掉 TrimLeft 零（港股前导零重复）、默认 aktools_url 置空（TestLoadConfigValid）、错误去掉 path（TestLoadConfigInvalidIncludesPath）、rank_by 校验失效（rank_by）、a_share_ref 只判空（映射格式）；另 1 个 CN 判重键加后缀为等价变异体（存活，符合预期）；首轮另有 2 个变异体因 go vet 构建失败（strings 未使用 / printf 参数不符）判为无效，不计入",
+    "done_criteria_map": {
+      "functional[0]": "TestLoadConfigValid, TestLoadConfigRankBy(npl/coverage/cet1), TestLoadConfigExplicitAktoolsURL",
+      "functional[1]": "TestShippedConfigLoads",
+      "functional[2]": "TestIndicators, TestDayHelper",
+      "boundary[0]": "TestLoadConfigRejects（10 例，含 港股前导零重复）",
+      "boundary[1]": "TestLoadConfigRejectsBadThresholds（6 字段 × {0,-1,.nan} = 18 例 + 合法对照组）",
+      "error_handling[0]": "TestLoadConfigMissingFile, TestLoadConfigBadYAML, TestLoadConfigInvalidIncludesPath",
+      "non_functional[0]": "go vet 无输出 / go test 全绿 / 覆盖率 97.9%"
+    }
+  }
+}

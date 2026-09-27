@@ -1,0 +1,86 @@
+{
+  "task_id": "TASK-005",
+  "key_findings": [
+    "【返工 r1，epoch=2】验证者判 boundary[1]「按 \\n 拼回无损」不成立：块边界落在空行处时，空行被 flush 的 TrimRight 吞掉（Split(\"a\\n\\nb\",3)=[\"a\",\"b\"]）。Leader 改判：这是期望行为，改为断言真实性质。我复核时还发现另一处违反新性质、验证者没有点出的情形：段会以空行开头。前一段以超长单行结尾、原文以空行开头，或者 renderSample 在 limit=10 时，都会出现（例如第 2 段是 \"\\n⚠️ 预警 (4)\"）。按旧的「拼回无损」判据这些情形是合法的，所以没被抓出来。已修复：段首遇到空行直接跳过。",
+    "原 golden 观察一、二（头部分项和不等于覆盖家数、CET1 行的 n 不可见）经 Leader 裁决并入本任务 functional[3]，已实现：头部在有 Ahead 时插入「；领先 N」；统计行在 N≠当期主体数时于指标名后标「（n=N）」。golden 只变这两行，人眼复核：头部 3+1+2+1=7，与覆盖家数一致；CET1 行为「CET1（n=2）」，因为 B 的回退值被排除；其余内容与 spec §5 的核对结论不变。CET1 均值 11.485 显示为 11.48 的浮点现象依旧存在，不在本次范围内。",
+    "golden 人眼核对 spec §5（结论）：段落顺序（标题 → 覆盖行 → ⚠️ 预警 → 📊 同期统计 → 🏷 排名 → ℹ️ 未更新/失败）、预警行三种形态（`1.62% > 1.50%` / `149.96% < 150.00%` / `环比 -20.04pp（超 20.00pp）`）、统计行「均值 | 中位 | 最优 | 最差」、别名附注「（X 同 600036.SH）」、信息区三类行（最新…未披露… / 拉取失败 / 字段缺失…疑似数据源结构变化），都与 spec §5 一致。与 spec 不同的地方都能对上 DoD：①–⑤ 格式增量，已声明的偏差（头部分列未更新与失败、排名标题「由优到劣」、空预警显示「无」），以及计划草稿的写法（排名行用完整指标名、别名紧跟对应主体而不是放在列表末尾）。没有找到 spec 与 DoD 都不支持的偏差。",
+    "Split 精确边界：`n` 累计的字符数含每行的换行符，而 `ln` 不含本行换行符（段尾换行在 flush 时被去掉）。所以 `n+ln` 正好等于即将产出的段长。用例「一二三\\n四五六」共 7 个字符：limit=7 不切，limit=6 切。R1（`> limit+1`）、R2（`>= limit`）、R3（ln 含换行）都被 TestSplitExactBoundary 抓到。",
+    "R15 首轮是假 KILLED：变异是把「未更新」和「无可用数据」合并成按配置顺序输出，golden 转红的原因却是 F 那一行被打印了两次，并不是顺序错了。原样本里 D（未更新）在配置中本来就排在 F（无数据）之前，合并输出与分组输出的顺序相同。已在 TestRenderAliasesAndMissingFieldsOutsideCurrent 里让 F 排在 D 之前，并断言「未更新」行在前；另加 R15b（纯顺序变异，不产生重复行），也被抓到。",
+    "自己踩的坑：提交时把 pathspec 放进 zsh 变量 `$P`，zsh 不拆分未加引号的变量，git add 失败，但后面的命令仍然执行了。我用 HEAD 未变 + status 未变确认这次什么都没有提交，然后改为显式列出参数重新提交。这次 code-simplifier 回报「无改动」，五个文件的指纹前后一致，属实。",
+    "本轮自己犯的一处测试错误：TestRenderStatN 第一版断言全文不含「（n=3）」，但统计段标题「同期统计 …（n=3）」本身就含这个串，于是实现正确却测试转红。已把断言收窄为「（n=3） 均值」。",
+    "code-simplifier 回报只说「工作已完成」、没有列出改动，但指纹比对显示它改了 render_test.go：把 TestSplitBlankLines 改成了表驱动写法。我逐行核对过 diff，4 个精确断言的输入、期望值和说明文字不变，5 组性质断言也都在，等价，予以接受。下面的数字都在包含这处改动的提交上重采。"
+  ],
+  "decisions": [
+    {
+      "decision": "展示精度统一为 const decimals = 2，fmtVal/fmtDelta 不再按指标取精度",
+      "rationale": "DoD ④（reviewer D3）。变异 R6（改回 1 位）KILLED"
+    },
+    {
+      "decision": "「截至」标注条件为：Value 非 NaN 且 Change.Period ≠ r.Latest",
+      "rationale": "DoD ①。NaN 的 Period 是零值，若不排除会输出「N/A（截至 —）」；变异 R9/R10 KILLED"
+    },
+    {
+      "decision": "预警行末的期次标注条件为 a.Period ≠ s.Period（统计期），而不是 ≠ 主体的 Latest",
+      "rationale": "DoD ②（D16）要的是「预警期次 ≠ 统计期」。因此 Stale 主体的预警和回退值的预警都会带上期次；s.Period 为零时，所有带期次的预警也都会标注"
+    },
+    {
+      "decision": "信息区分组输出：未更新 → 无可用数据 → 拉取失败 → 字段缺失（Current/Stale/Ahead）→ 已披露更新期；除字段缺失行外，每行后面紧跟该主体的别名附注",
+      "rationale": "DoD functional[0] 规定的顺序，以及 ⑤ 别名在各组都要出现。字段缺失行不再重复写别名，因为别名已跟在该主体的主行之后"
+    },
+    {
+      "decision": "Q27 守卫用例放在 summary_test.go，Ahead 主体 H 的 CET1 回退值为 5（若进入统计就会成为最差），且其 Period 恰等于统计期",
+      "rationale": "DoD boundary[2]。在这种形态下 D2 的 Period 过滤挡不住，只能靠「不在 Current 中」来排除。变异 Q27（统计输入改为 Current∪Ahead）KILLED，且只有这一个测试转红"
+    },
+    {
+      "decision": "golden 用包级 flag `-update` 控制重生成，默认只做比对；该 flag 必须写在包路径之后：go test ./internal/bank/ -run TestRenderGolden -update",
+      "rationale": "spec §7 / DoD functional[1]。我第一次把 flag 写在包路径前面，没有传进测试二进制"
+    },
+    {
+      "decision": "Split 在段首遇到空行时直接跳过（if n == 0 && ln == 0 { continue }）；flush 仍用 TrimRight 去掉段尾的全部换行",
+      "rationale": "DoD boundary[1] 改判后的要求是每段不以空行开头或结尾、段内空行保留、只丢块边界处的空行。跳过段首空行不会让它计入 n，因此「恰好等于 limit 不切」的精确边界不受影响。变异 N1（不跳过）与 N2（flush 只去掉一个换行）都 KILLED"
+    },
+    {
+      "decision": "Split 的测试改为 assertSplitProps 性质断言：各段依次是原文中一段连续的子串，起止都在行边界；相邻两段之间只丢换行；每段首尾不是换行；超过 limit 的段必须是单行",
+      "rationale": "由这几条可以推出：非空行按原顺序恰好各出现一次，段内空行原样保留。TestSplitRenderSampleAllLimits 对 renderSample（838 字符，4 处段间空行）遍历 limit=1…839"
+    },
+    {
+      "decision": "fmtStat 在 N==0 时仍然输出「X 无数据」，不标「（n=0）」",
+      "rationale": "DoD boundary[0] 要求这一行的字样是「CET1 无数据」；「无数据」本身已经说明 n=0"
+    },
+    {
+      "decision": "头部的「；领先 N」只在 Ahead>0 时出现，位置在「未更新」之前",
+      "rationale": "DoD functional[3]：N=0 时头部字符串保持原样（TestRenderHeaderSumsToTotal 用不含 Ahead 的样本断言了原字符串），并断言 golden 与含 Ahead 的样本都满足分项和等于覆盖家数"
+    }
+  ],
+  "files_modified": [
+    "internal/bank/render.go",
+    "internal/bank/render_test.go",
+    "internal/bank/testdata/render_golden.txt",
+    "internal/bank/summary_test.go（首轮纯追加 +21/-0，返工未改）"
+  ],
+  "interfaces_exposed": [
+    "const MaxMessageRunes = 4000",
+    "func Render(s Summary, alerts []Alert, now time.Time) string —— 纯文本，末尾带换行。alerts 由调用方传入（失败主体不应参与，同 renderSample）；预警行末在 Alert.Period ≠ s.Period 时追加「（YYYY-MM-DD）」。头部为「覆盖 N 家（统计期 D：C 家[；领先 A]；未更新 S；失败 F）」，其中「；领先 A」只在 A>0 时出现，C+A+S+F=N；统计行在该指标有效样本数少于当期主体数时写作「X（n=K） 均值 …」",
+    "func Split(text string, limit int) []string —— 每段非空，字符数 ≤ limit（超长单行除外，它独占一段且不截断）。各段依次是原文在行边界处截出的连续片段，段与段之间只丢换行，因此每个非空行按原顺序恰好出现一次，段内空行原样保留，块边界处的空行被丢弃，每段不以空行开头或结尾。空串返回 0 段。【订正】首轮写的契约 strings.Join(chunks, \"\\n\") == strings.TrimRight(text, \"\\n\") 是错的：块边界处的空行会被丢弃，所以这个等式不成立",
+    "测试辅助（仅 _test 可见）：render_test.go 中的 var update（flag -update）、func renderSample() string。下游 TASK-006 若也需要 golden，请复用 update，不要重复定义 flag，否则会 panic: flag redefined"
+  ],
+  "verification": {
+    "measured_at_sha": "5b777a501c73a25d97e1352a122084bbafe1954b",
+    "branch": "task/TASK-005（返工 r1，基于 feature/bank-indicator-monitor @ 55b6dda71a36c1249e197845408a8a36975490a1）",
+    "note": "以下数字都在最后一次改动（提交 5b777a5）之后、在该树上统一重采。四个文件的 sha256：render.go 0f8e377d…、render_test.go 3f7b3093…、summary_test.go fec1d99b…（与首轮相同）、render_golden.txt 862bea07…",
+    "go_vet": "go vet ./internal/bank/ 无输出（0 行）",
+    "go_test": "go test -count=1 -v -cover ./internal/bank/ rc=0；--- PASS 117 行，--- FAIL 0 行（顶层 58 个 = 首轮 54 + 新增 4 个：TestSplitBlankLines、TestSplitRenderSampleAllLimits、TestRenderHeaderSumsToTotal、TestRenderStatN；render 顶层 14 个，与源码 14 个 func Test 一致）；go test -shuffle=on ok",
+    "coverage": "99.7% of statements（./internal/bank）",
+    "mutation": "隔离副本（mktemp 拷贝），每个变异前后比对 worktree 五个文件的指纹和 git status，结果一致。31 个变异全部通过 vet，全部 KILLED：首轮的 24 个（R1–R22、R15b、Q27）加上新增 7 个。N1 段首空行不丢、N2 flush 只去一个换行：都由 TestSplitBlankLines 与 TestSplitRenderSampleAllLimits 抓到。N3 领先恒显示：TestRenderHeaderSumsToTotal 抓到。N4 领先恒不显示：Golden、Sections、HeaderSums 抓到。N5 n 恒标、N6 n 恒不标、N7 n 取当期主体数：Golden、Sections、StatN 抓到。R1（> limit+1）、R2（>= limit）仍被 TestSplitExactBoundary 抓到。harness 在 scratchpad/dev-bk-b-mut5r1.py",
+    "done_criteria_map": {
+      "functional[0]": "TestRenderSections, TestRenderAliasesAndMissingFieldsOutsideCurrent",
+      "functional[1]": "TestRenderGolden（golden 已更新，人眼复核见 key_findings[1]）",
+      "functional[2]": "TestRenderSections, TestRenderDeteriorationAlert",
+      "functional[3]": "TestRenderHeaderSumsToTotal（golden 与含 Ahead 的样本分项和等于覆盖家数；无 Ahead 时字符串不变）, TestRenderStatN, TestRenderSections, TestRenderGolden",
+      "boundary[0]": "TestRenderNoAlertsNoCurrent, TestRenderNaNShowsNA, TestRenderGolden",
+      "boundary[1]": "TestSplitExactBoundary（R1/R2）, TestSplitBlankLines（空行反例 Split(\"a\\n\\nb\",3)=[a,b] 等）, TestSplitRenderSampleAllLimits（limit=1…839 遍历）, TestSplitRespectsLimitAndLines, TestSplitOversizedLineStandsAlone, TestSplitShortAndEmpty；性质由 assertSplitProps 统一断言",
+      "boundary[2]": "summary_test.go TestSummarizeAheadFallbackAtPeriodNotInStats + 变异 Q27",
+      "non_functional[0]": "go vet 无输出；go test 全绿；覆盖率 99.7%"
+    }
+  }
+}

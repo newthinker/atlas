@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-002",
+  "key_findings": [
+    "计划原 toFloat 用 strconv.ParseFloat 会把 \"Inf\"/\"-Infinity\" 解成 ±Inf（\"NaN\" 解成 NaN 本身无害）；现统一在解析后判 math.IsInf ⇒ NaN。隔离变异：去掉该守卫后 TestToFloatNonNumericIsNaN/Inf 与 /-Infinity 转红。",
+    "坏日期行有两道过滤：长度 <10 与 time.Parse 失败。计划原用例 \"bad\"/\"x\" 都被长度检查挡掉，time.Parse 失败分支零覆盖——变异「解析失败时用零值日期而非跳过」首轮存活；补 \"2026-02-30 00:00:00\"（解析器用例）与 \"2026-13-01 00:00:00\"（错误表用例）后被 TestParseEMRowsTolerant 与 TestEMSourceFetchErrors/无有效期 杀掉。",
+    "响应体为 JSON `null` 时 Decode 得 nil 切片，走 parseEMRows 的 len==0 ⇒「无数据」，无需额外分支。",
+    "本任务过程：提交前 code-simplifier 子代理在 dev 侧显示为「用户中断」，dev 当时据此判为人类动作并转 blocked_clarification 请示；事后 leader 更正：实为 Leader 对该子代理执行 TaskStop（子代理已完成，却被 idle hook 以 dev-bk-a 名义循环催 dev_done），不是人类动作。子代理回报零改动，dev 以调用前后 sha256 比对确认 3 个文件未变，leader 答复照常提交。questions[0] 的问句仍写着「被人类中断」，以本条为准。"
+  ],
+  "decisions": [
+    {
+      "decision": "anyRowHas 只看键是否存在，不看值是否 null",
+      "rationale": "DoD boundary[1] / reviewer D6：全 null 列是「未披露」不是数据源结构变化；真实季报响应恰是键在、值 null。变异「值非 null 才算存在」被 TestParseEMRowsAllNullColumnNotMissing 杀掉"
+    },
+    {
+      "decision": "非 200 错误体截断 200 字节后 strings.ToValidUTF8(…, \"\")",
+      "rationale": "D19：按字节截断会切坏多字节字符；用 100 个「错」(300 字节) 构造切点落在字符中间的用例，去掉 ToValidUTF8 后转红"
+    },
+    {
+      "decision": "字段名只在 source.go 的 emDateKey / emFieldKeys 常量处出现；三个禁用字段只在注释里",
+      "rationale": "DoD non_functional[0]；便于上游字段变更时单点修改"
+    },
+    {
+      "decision": "测试不定义 day()，复用 helpers_test.go",
+      "rationale": "AD-3；同包重复定义会直接编译失败"
+    }
+  ],
+  "files_modified": [
+    "internal/bank/source.go",
+    "internal/bank/source_test.go",
+    "internal/bank/testdata/em_600036_sample.json"
+  ],
+  "interfaces_exposed": [
+    "type EMSource struct{ baseURL string; hc *http.Client }（字段未导出）",
+    "func NewEMSource(baseURL string) *EMSource —— 去尾斜杠；http.Client 超时 60s",
+    "func (s *EMSource) Fetch(symbol string) (Series, error) —— 满足 Source；Obs 按 Period 升序；错误均含 symbol 与接口名 stock_financial_analysis_indicator_em",
+    "未导出：parseEMRows(rows []map[string]any) (Series, error)；toFloat(v any) float64（非有限/非数值 ⇒ NaN）；anyRowHas",
+    "常量：emAPI、emDateKey；emFieldKeys [numIndicators]string 按 IndNPL/IndCoverage/IndCET1 索引",
+    "testdata/em_600036_sample.json：600036.SH 6 期（2025-03-31…2026-06-30，接口原样降序），首行含三个诱饵字段"
+  ],
+  "verification": {
+    "measured_at_sha": "9b183571b594721a768bc08a94cf6f12678a38a1",
+    "branch": "task/TASK-002（基于 feature/bank-indicator-monitor d647428d4b543ed42b8d1f51e8899df717a40517）",
+    "note": "以下数字均在最后一次改动（提交 9b18357…）之后于该树上统一采集",
+    "go_vet": "go vet ./internal/bank/ 无输出",
+    "go_test": "go test -count=1 ./internal/bank/ ok；-v 下 --- PASS 64 行、--- FAIL 0 行；顶层 20 = TASK-001 的 11 + source_test.go 源码中 9 个 func Test（两把尺一致）；子测试 44 = 31 + 13（toFloat 8、错误表 5）",
+    "coverage": "99.0% of statements（./internal/bank，含 TASK-001 代码）",
+    "grep": "非测试 go 文件中 NONPERLOAN/BLDKBBL/HXYJBCZL/REPORT_DATE 仅出现在 source.go:23,27-29 常量处；LOAN_PROVISION_RATIO/NEWCAPITALADER/FIRST_ADEQUACY_RATIO 仅出现在 source.go:19-20 注释行（非 // 开头行计数 0）",
+    "mutation": "隔离副本（scratchpad mktemp 拷贝，worktree 指纹前后一致）10 个变异体全部 KILLED：anyRowHas 改为值非 null 才算存在、去 IsInf 守卫、去 ToValidUTF8、超时改 30s、去 TrimRight、去排序、Coverage 键换 LOAN_PROVISION_RATIO、CET1 键换 FIRST_ADEQUACY_RATIO、解析失败改零值日期（补用例后才被杀，见 key_findings）、parse 错误不带 symbol",
+    "simplifier": "code-simplifier 回报零改动；3 文件 sha256 调用前后一致（子代理随后被 Leader TaskStop，非人类中断）",
+    "detect_changes": "--scope staged --repo atlas：3 个文件，与已索引符号无重叠（全为新文件）",
+    "done_criteria_map": {
+      "functional[0]": "TestEMSourceFetchParsesFixture",
+      "boundary[0]": "TestParseEMRowsTolerant, TestParseEMRowsMissingFieldsOrder",
+      "boundary[1]": "TestParseEMRowsAllNullColumnNotMissing",
+      "boundary[2]": "TestToFloatNonNumericIsNaN（8 子例）",
+      "error_handling[0]": "TestEMSourceFetchErrors（HTTP 500 / [] / null / 全坏日期 / 非 JSON，均断言含 600036.SH 与 UTF-8 合法）, TestEMSourceFetchConnectionRefused, TestEMSourceFetchErrorBodyValidUTF8",
+      "non_functional[0]": "TestNewEMSourceTimeout + 上述 grep",
+      "non_functional[1]": "vet 无输出 / test 全绿 / 覆盖率 99.0%"
+    }
+  }
+}

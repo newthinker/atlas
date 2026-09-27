@@ -1,0 +1,79 @@
+{
+  "id": "TASK-007",
+  "title": "aktools 集成冒烟测试、launchd plist 与真实数据 dry-run",
+  "description": "计划 Task 7 Step 1–5：新建 `internal/bank/source_integration_test.go`（`//go:build integration`）与 `deploy/launchd/com.newthinker.atlas.bank-monthly.plist`（对齐既有 crisis-daily.plist 约定）。**Step 6（部署 runtime、真实推送 Telegram、launchctl load）不在本任务范围（AD-9）**，严禁执行任何真实推送；真实数据验证只用 `--dry-run`。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。",
+  "module": "bank",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/bank/source_integration_test.go",
+    "deploy/launchd/com.newthinker.atlas.bank-monthly.plist"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`go test -tags integration -count=1 ./internal/bank/ -run Integration -v` 对本机 aktools PASS：600036.SH 的 `MissingFields` 为空、最新期在近 270 天内、三项取值非 NaN；`ATLAS_AKTOOLS_URL` 可覆盖地址。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "真实数据 dry-run：`go run ./cmd/atlas bank report --dry-run --bank-config configs/bank-monitor.yaml` 退出码 0；招商银行行的三项取值与同时刻 aktools 直查 600036.SH 最新期一致；含「（招商银行H 同 600036.SH）」；全文无 `NaN`。另用临时配置加入 600919.SH、002142.SZ 再跑一次，核对二者 CET1 取值/期次与直查一致。完整输出与直查结果存进 discovery。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "不带 tag 时集成测试不参与编译：`go list -f '{{.TestGoFiles}}' ./internal/bank` 不含 source_integration_test.go，`go test ./internal/bank/` 不发起网络请求。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`ATLAS_AKTOOLS_URL=http://127.0.0.1:1` 时集成测试**失败**（非 skip）且错误含连接失败信息。",
+        "verify_by": "manual"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "plist：`plutil -lint` OK；Label `com.newthinker.atlas.bank-monthly`；ProgramArguments 为 runtime 二进制 `bank report --config …/config.yaml --bank-config …/bank-monitor.yaml`；`StartCalendarInterval` Day=1 Hour=9 Minute=0；`no_proxy=localhost,127.0.0.1`；RunAtLoad false；日志 `logs/bank-monthly.{out,err}.log`；路径约定与 crisis-daily.plist 一致。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`go test -count=1 ./internal/bank/` 全绿；包覆盖率 ≥ 80%；验证过程中未向 Telegram 发送任何消息（只用 --dry-run）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-006"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-bk-b",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./internal/bank"
+  ],
+  "writes": [
+    "./internal/bank/source_integration_test.go",
+    "./deploy/launchd/com.newthinker.atlas.bank-monthly.plist"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-bk-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:05Z"
+  },
+  "verify_baseline": {
+    "head": "8fdd59ba008f81562b1cf789674cc376ebe99fe7",
+    "discovery_sha256": "a69863f89ae0ad4d374269c0b378300c94c26db57156c297e35edbc82c92f0dc",
+    "at": "2026-09-27T08:01:06Z"
+  }
+}

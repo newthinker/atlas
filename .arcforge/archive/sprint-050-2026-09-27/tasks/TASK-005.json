@@ -1,0 +1,90 @@
+{
+  "id": "TASK-005",
+  "title": "报告渲染与 Telegram 分段",
+  "description": "计划 Task 5：新建 `internal/bank/render.go` 与 `render_test.go`，**补 spec §7 孤儿需求**：`renderSample()` 完整输出做 golden 比对（`testdata/render_golden.txt`，`-update` flag 重生成、默认比对）。【人类裁决 2026-09-27，改动 spec 语义，以本任务 DoD 为准】**格式增量**：①（D2）某指标 `Change.Period ≠ 该主体 Latest` 时，取值后附「（截至 YYYY-MM-DD）」；②（D16）预警 `Period ≠ 统计期` 时，预警行末附「（YYYY-MM-DD）」；③（D15）信息区列出 Ahead 主体「· X 已披露 YYYY-MM-DD（晚于统计期）」；④（reviewer D3）三项指标展示精度统一 2 位小数（计划拨备 1 位会出现 `150.0% < 150.0%` 这种自相矛盾的预警行）；⑤（D4）H 股别名在主体为 Failed/Stale/Ahead 时也要出现。**已声明的 spec 偏差（验证时不算缺陷）**：「覆盖 N 家」计主体数不计配置条目数；空预警渲染为 `⚠️ 预警 (0)` 换行 `无`；头部分列「未更新 N；失败 M」；排名标题「按X由优到劣」。 需求原文：docs/superpowers/plans/2026-09-27-bank-indicator-monitor.md 的对应 Task 段（测试与实现草稿为 DoD 下限）；spec：docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md。worktree 基于 feature/bank-indicator-monitor（AD-4）；提交主题 `feat(<本任务ID>): …`（AD-6）；提交前按用户全局规范跑 code-simplifier 子代理并做改动前后指纹比对，再跑 `node .gitnexus/run.cjs detect-changes --scope staged --repo .`；提交后通知 Leader merge，merge 后才转 dev_done（AD-5）。 **追加义务（Leader 2026-09-27，源自 TASK-004 验证报告观察项 Q27）**：D15 的「Ahead 不进同期统计」目前只被 D2 的 Period 过滤顺带挡住、从未被单独测到；本任务 boundary 末条补该守卫，故 writes 增加 summary_test.go（TASK-004 已 verified，不在途）。 **返工 r1（Leader 2026-09-27）**：验证拒绝于 Split 边界空行（改判 boundary[1] 措辞为真实应守性质并补用例、订正 discovery 契约）；同时并入原 QA 待挂 F1/F2（functional 末条）。",
+  "module": "bank",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/bank/render.go",
+    "internal/bank/render_test.go",
+    "internal/bank/testdata/render_golden.txt"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "段落与行：标题日期、覆盖行、预警段、同期统计段（n=当期主体数）、排名段（首行含环比/同比）、别名行「（A银行H 同 600036.SH）」、信息区（未更新 / 无可用数据 / 拉取失败 / 字段缺失 / 已披露更新期）按此顺序出现。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**golden 比对（spec §7）**：`renderSample()` 完整输出与 golden 逐字节相等。样本须同时包含：Stale 主体带字段缺失、Failed 主体配了 H 股别名、一个 Ahead 主体、一个 CET1 回退（截至某期）主体、一条期次 ≠ 统计期的预警、一个 149.96 这类处在展示精度边缘的拨备值。golden 内容须人眼核对与 spec §5 样式一致（结论写进 discovery）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "预警行：阈值型按方向用 `>`（NPL）或 `<`，恶化型 `· X银行 CET1 环比 -0.62pp（超 0.50pp）`；拨备 149.96 渲染为 `149.96% < 150.00%`、环比 −20.04 渲染为 `-20.04pp（超 20.00pp）`（字面可见越界）；期次 ≠ 统计期的预警行末有「（2026-03-31）」，同期的没有。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "（**并入原 QA 待挂项 TASK-005-F1/F2**）① 头部：Ahead 数 >0 时在「未更新」前插入「；领先 N」，N=0 时不出现（既有字符串不变），并断言各分项之和 = 覆盖家数（对 golden 与至少一个含 Ahead 的样本）；② 统计行：某指标 `Stat.N ≠ 当期主体数` 时在该行指标名后加「（n=K）」，相等不加。golden 相应更新并人眼再核一次。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "无预警 ⇒ `⚠️ 预警 (0)\\n无`；无当期主体 ⇒ `统计期 —` 且无 📊 与排名段；NaN ⇒ 取值 `N/A`、变动 `—`、统计 `CET1 无数据`；全文不含 `NaN`、`Inf`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Split（**Leader 2026-09-27 改判措辞**：原「按 \\n 拼回无损」是从计划测试抄来的过强表述，spec §5 只要求按行切、不行内截断；块边界处的空行被丢弃对 Telegram 是期望行为）：每段 rune 数 ≤ limit；**恰好等于 limit 的段不被切、limit+1 必被切**（`> limit+1` 与 `>= limit` 两个变异须转红）；超长单行独占一段不截断；**每个非空行按原顺序恰好出现在某一段中一次、每段不以空行开头或结尾、原文内部（非块边界处）的空行保留**；须有空行反例用例（如 `Split(\"a\\n\\nb\",3)`）以及对 `renderSample()` 输出**遍历全部会分段的 limit** 的性质用例；空串 ⇒ 0 段。discovery 中「Join==TrimRight」的契约表述须订正为上述性质。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "**（自 TASK-004 验证观察项 Q27 转入）Ahead 主体不进同期统计的独立守卫**：在 `internal/bank/summary_test.go` 补用例——一个 Ahead 主体（Latest 晚于统计期）的 CET1 回退值的 `Period` **恰等于统计期**（600919 在 Q3 的真实形态），断言它不进 CET1 统计（N 不含它、Worst/Mean 不受影响）且不在 Current/排名中。把 Summarize 的统计输入从 Current 改成 Current∪Ahead 的变异（test-bk-a 报告 Q27）须转红。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "`go vet ./internal/bank/` 无输出；`go test -count=1 ./internal/bank/` 全绿；包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-bk-b",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/bank"
+  ],
+  "writes": [
+    "./internal/bank/render.go",
+    "./internal/bank/render_test.go",
+    "./internal/bank/testdata/render_golden.txt",
+    "./internal/bank/summary_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-bk-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-27T09:02:04Z"
+  },
+  "verify_baseline": {
+    "head": "6d83a0d8c2f9a5cf8b05f4261f39194d4b8f7e40",
+    "discovery_sha256": "0d4203f30c327721d092db86b08f2525531c5e8aa1e5143239f8507c0a6ba191",
+    "at": "2026-09-27T06:01:34Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "boundary[1]「按 \\n 拼回无损」不成立。render.go:151 的 flush 用 TrimRight 去掉块尾部全部换行，块边界落在空行处时空行被吞掉。最小反例：Split(\"a\\n\\nb\",3)=[\"a\",\"b\"]，拼回为 \"a\\nb\"。用 renderSample 遍历 limit，826 个会切成多段的 limit 中有 166 个拼回有损（例如 limit=679 时空行从 4 个变成 3 个）。现有 Split 用例都不含空行，discovery 的 Join==TrimRight 契约也因此为假。修复方向：flush 只去掉末尾一个换行，并补空行反例与 renderSample 全 limit 遍历用例。其余 6 条 PASS，golden 不受影响。详见 docs/04-test/TASK-005-verification.md"
+}
