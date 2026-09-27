@@ -5,7 +5,7 @@ package main
 // functional[1]     全部失败：error + 1 条摘要，每家「名称：错误」各一行 → TestBankReportAllFailed, TestRunBankReportAllFailed, TestBankReportAllFailedSendError
 // functional[2]     --dry-run 经 runBankReport：不构造 sender、打印、exit 2 → TestRunBankReportDryRun
 // boundary[0]       150 家 ⇒ 多段、每段 ≤ 4000、与 bank.Split 一致         → TestBankReportLongSplits
-// error_handling[0] D1：非 dry-run 拿不到 sender ⇒ 打印 + stderr 原因 + 错误 → TestRunBankReportNoSender
+// error_handling[0] D1：非 dry-run 拿不到 sender ⇒ 打印 + stderr 原因 + 错误 → TestRunBankReportNoSender/{全部成功,部分失败}
 // error_handling[1] 推送失败文案；非法 bank 配置不 Fetch 不推送            → TestBankReportSendError, TestRunBankReportBadConfig
 // non_functional[0] 命令注册 / flag / --help；buildBankSender 各形态         → TestBankCommandRegistered, TestBankReportHelp, TestBuildBankSender
 
@@ -266,16 +266,31 @@ func TestRunBankReportSends(t *testing.T) {
 }
 
 // D1：拿不到 sender 时照常打印、stderr 说明原因、返回错误（退出码 1），不走 bankExit(0/2)。
+// 主形态是「全部成功」：若此时退出码为 0，launchd 会把未推送的月报记成成功。
 func TestRunBankReportNoSender(t *testing.T) {
-	e := setupBankE2E(t, bankE2ECfg, false, errors.New("主配置未启用 notifiers.telegram"), "601658.SH")
-	err := e.run()
-	require.Error(t, err, "未推送的月报不能以成功退出")
-	assert.Contains(t, err.Error(), "主配置未启用 notifiers.telegram")
-	assert.Contains(t, e.stdout.String(), "🏦 银行关键指标月报 ")
-	assert.Contains(t, e.stdout.String(), "⚠️ 预警 (2)", "stdout 是完整报告")
-	assert.Contains(t, e.stdout.String(), "· 邮储银行 拉取失败：")
-	assert.Contains(t, e.stderr.String(), "主配置未启用 notifiers.telegram", "stderr 说明原因")
-	assert.Empty(t, e.exits, "退出码由返回的错误决定为 1，不调 bankExit(2)")
+	noSender := errors.New("主配置未启用 notifiers.telegram")
+	t.Run("全部成功", func(t *testing.T) {
+		e := setupBankE2E(t, bankE2ECfg, false, noSender)
+		err := e.run()
+		require.Error(t, err, "未推送的月报不能以 0 退出")
+		assert.Contains(t, err.Error(), "主配置未启用 notifiers.telegram")
+		assert.Contains(t, e.stdout.String(), "🏦 银行关键指标月报 ")
+		assert.Contains(t, e.stdout.String(), "⚠️ 预警 (4)", "stdout 是完整报告")
+		assert.Contains(t, e.stdout.String(), "（招商银行H 同 600036.SH）")
+		assert.Contains(t, e.stderr.String(), "主配置未启用 notifiers.telegram", "stderr 说明原因")
+		assert.Empty(t, e.exits, "退出码由返回的错误决定为 1，不调 bankExit(0)")
+	})
+	t.Run("部分失败", func(t *testing.T) {
+		e := setupBankE2E(t, bankE2ECfg, false, noSender, "601658.SH")
+		err := e.run()
+		require.Error(t, err, "未推送的月报不能以成功退出")
+		assert.Contains(t, err.Error(), "主配置未启用 notifiers.telegram")
+		assert.Contains(t, e.stdout.String(), "🏦 银行关键指标月报 ")
+		assert.Contains(t, e.stdout.String(), "⚠️ 预警 (2)", "stdout 是完整报告")
+		assert.Contains(t, e.stdout.String(), "· 邮储银行 拉取失败：")
+		assert.Contains(t, e.stderr.String(), "主配置未启用 notifiers.telegram", "stderr 说明原因")
+		assert.Empty(t, e.exits, "退出码由返回的错误决定为 1，不调 bankExit(2)")
+	})
 }
 
 func TestRunBankReportAllFailed(t *testing.T) {
