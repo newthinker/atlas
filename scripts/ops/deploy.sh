@@ -49,6 +49,10 @@
 #    **7 月构建、无法重建的旧二进制**放在 $ATLAS_RUNTIME/m4c-migration/ ——那是回滚路径的一半。
 #    ⇒ 此类工件请放在受保护路径下（如 $ATLAS_RUNTIME/data/…，/data/ 在排除表内），
 #    而不是依赖「记得先搬走」。
+#    2026-09-27：部署前 `rsync -n` 预演实测该目录（19 个文件）与 aktools 侧车日志
+#    `aktools_log.log*`（WorkingDirectory 即 runtime 根）均在删除清单里 ⇒ 目录已整体挪到
+#    $ATLAS_RUNTIME/data/m4c-migration/，并把两者补进排除表作兜底。**部署前先 `rsync -n -i` 预演、
+#    数 `*deleting` 条数**——下一个手工目录出现时排除表同样不会保护它。
 #
 # 用法：
 #   bash scripts/ops/deploy.sh                 # 部署到默认 runtime
@@ -128,6 +132,7 @@ rsync -a -m --delete \
   --exclude='/scripts/qlib_warehouse/tests/' --exclude='/scripts/qlib_warehouse/.pytest_cache/' \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='.DS_Store' \
   --exclude='/data/' --exclude='/logs/' --exclude='/queue/' \
+  --exclude='/m4c-migration/' --exclude='/aktools_log.log*' \
   --exclude='/configs/config.yaml' \
   --exclude='/configs/hestia.yaml' \
   --exclude='/scripts/akshare/.venv/' \

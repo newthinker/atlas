@@ -388,6 +388,10 @@ CLI    ⇒ CREATE VIEW v AS SELECT * FROM t
   以及**旧二进制**。其中旧二进制是 7 月构建的、**无法从源码重建**，是回滚路径的一半。
 - 处置：此类工件放在受保护路径下（本次放 `$ATLAS_RUNTIME/data/m4c-migration-safe/`，
   `/data/` 在排除表内），或部署前先搬走。**不要依赖「记得先搬」——放在受保护路径里才是设计。**
+- 2026-09-27：`data/m4c-migration-safe/` 实测只有原目录 19 个文件中的 6 个 ⇒ 原目录已**整体挪到**
+  `$ATLAS_RUNTIME/data/m4c-migration/`（sha256 逐一核对），历史日志 / checkpoint 里的旧路径
+  `$ATLAS_RUNTIME/m4c-migration/` 以此为准。`deploy.sh` 排除表同时补了 `/m4c-migration/` 与
+  `/aktools_log.log*`（aktools 侧车日志写在 runtime 根，原先也在删除清单里）。
 
 ### 服务清单（plist 真相源 `deploy/launchd/`）
 
