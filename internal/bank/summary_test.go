@@ -236,3 +236,24 @@ func TestSummarizeNoCurrent(t *testing.T) {
 		assert.Empty(t, st.Worst, k.Label())
 	}
 }
+
+// Q27（TASK-005 boundary[2]）：Ahead 主体的 CET1 回退值恰好落在统计期（600919 在 Q3 的真实形态），
+// 只靠 Period 过滤挡不住它；必须因为它不在 Current 中而不进统计与排名。
+func TestSummarizeAheadFallbackAtPeriodNotInStats(t *testing.T) {
+	rs := []BankResult{
+		br("A银行", "2026-06-30", 0.94, 385, 14.07),
+		br("B银行", "2026-06-30", 1.0, 214.93, 10.04),
+		br("C银行", "2026-06-30", 1.62, 142, 9.0),
+		// H 的 NPL/拨备已披露 2026-09-30，CET1 仍停在 2026-06-30，且回退值若进统计会成为最差。
+		withFallback(br("H银行", "2026-09-30", 0.84, 322.62, nan), IndCET1, 5, "2026-06-30"),
+	}
+	s := Summarize(rs, IndCET1)
+	require.Equal(t, day("2026-06-30"), s.Period)
+	assert.Equal(t, []string{"H银行"}, names(s.Ahead))
+	assert.Equal(t, []string{"A银行", "B银行", "C银行"}, names(s.Current), "Ahead 主体不在排名中")
+	cet1 := s.Stats[IndCET1]
+	assert.Equal(t, 3, cet1.N)
+	assert.InDelta(t, (14.07+10.04+9.0)/3, cet1.Mean, 1e-12)
+	assert.Equal(t, "C银行", cet1.Worst)
+	assert.Equal(t, 9.0, cet1.WorstVal)
+}
