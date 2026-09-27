@@ -1,0 +1,19 @@
+# 银行股关键指标月度监控（atlas bank report）
+# 设计: docs/superpowers/specs/2026-09-26-bank-indicator-monitor-design.md
+# 本文件不含密钥；Telegram 凭据走主配置 notifiers.telegram。
+# 港股条目必须填 a_share_ref（对应 A 股代码），纯港股银行一期不支持。
+source:
+  aktools_url: http://127.0.0.1:8180
+rank_by: npl            # npl | coverage | cet1
+banks:
+  - {market: CN_A, symbol: 600036.SH, name: 招商银行}
+  - {market: CN_A, symbol: 601658.SH, name: 邮储银行}
+  - {market: HK,   symbol: 3968.HK,   name: 招商银行H, a_share_ref: 600036.SH}
+thresholds:
+  npl_max: 1.5          # %，> 即预警
+  coverage_min: 150     # %，< 即预警
+  cet1_min: 8.5         # %，< 即预警（7.5% 监管下限 + 1pp 缓冲）
+  deterioration:        # 环比恶化超过以下幅度即预警，单位百分点
+    npl_up: 0.10
+    coverage_down: 20
+    cet1_down: 0.50
