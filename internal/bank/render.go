@@ -20,8 +20,12 @@ func Render(s Summary, alerts []Alert, now time.Time) string {
 	var b strings.Builder
 	total := len(s.Current) + len(s.Stale) + len(s.Ahead) + len(s.Failed)
 	fmt.Fprintf(&b, "🏦 银行关键指标月报 %s\n", now.Format("2006-01-02"))
-	fmt.Fprintf(&b, "覆盖 %d 家（统计期 %s：%d 家；未更新 %d；失败 %d）\n",
-		total, fmtDate(s.Period), len(s.Current), len(s.Stale), len(s.Failed))
+	ahead := "" // 有领先主体时单列，使各分项之和等于覆盖家数
+	if len(s.Ahead) > 0 {
+		ahead = fmt.Sprintf("；领先 %d", len(s.Ahead))
+	}
+	fmt.Fprintf(&b, "覆盖 %d 家（统计期 %s：%d 家%s；未更新 %d；失败 %d）\n",
+		total, fmtDate(s.Period), len(s.Current), ahead, len(s.Stale), len(s.Failed))
 
 	fmt.Fprintf(&b, "\n⚠️ 预警 (%d)\n", len(alerts))
 	if len(alerts) == 0 {
@@ -38,7 +42,7 @@ func Render(s Summary, alerts []Alert, now time.Time) string {
 	if len(s.Current) > 0 {
 		fmt.Fprintf(&b, "\n📊 同期统计 %s（n=%d）\n", fmtDate(s.Period), len(s.Current))
 		for _, k := range Indicators {
-			b.WriteString(fmtStat(k, s.Stats[k]) + "\n")
+			b.WriteString(fmtStat(k, s.Stats[k], len(s.Current)) + "\n")
 		}
 		fmt.Fprintf(&b, "\n🏷 排名（按%s由优到劣）\n", s.RankBy.Label())
 		for i, r := range s.Current {
@@ -102,11 +106,17 @@ func fmtBankLine(r BankResult) string {
 	return strings.Join(parts, " ")
 }
 
-func fmtStat(k Indicator, st Stat) string {
+// fmtStat 在该指标的有效值数 N 少于当期主体数时（缺失或回退值被排除）于指标名后标「（n=N）」，
+// 否则读者会把标题里的当期主体数当成这一行的样本数。
+func fmtStat(k Indicator, st Stat, current int) string {
 	if st.N == 0 {
 		return k.Label() + " 无数据"
 	}
-	return fmt.Sprintf("%s 均值 %s | 中位 %s | 最优 %s %s | 最差 %s %s", k.Label(),
+	label := k.Label()
+	if st.N != current {
+		label += fmt.Sprintf("（n=%d）", st.N)
+	}
+	return fmt.Sprintf("%s 均值 %s | 中位 %s | 最优 %s %s | 最差 %s %s", label,
 		fmtVal(st.Mean), fmtVal(st.Median), st.Best, fmtVal(st.BestVal), st.Worst, fmtVal(st.WorstVal))
 }
 
@@ -143,6 +153,7 @@ func fmtDate(t time.Time) string {
 }
 
 // Split 按行累加切分，单段不超过 limit 个字符；超长单行独占一段，绝不在行内截断。
+// 各段是原文在行边界处的有序片段，段内空行保留；块边界处的空行丢弃，故每段不以空行开头或结尾。
 func Split(text string, limit int) []string {
 	var chunks []string
 	var cur strings.Builder
@@ -159,6 +170,9 @@ func Split(text string, limit int) []string {
 		ln := utf8.RuneCountInString(strings.TrimRight(line, "\n"))
 		if n > 0 && n+ln > limit {
 			flush()
+		}
+		if n == 0 && ln == 0 {
+			continue // 段首空行丢弃
 		}
 		cur.WriteString(line)
 		n += utf8.RuneCountInString(line)
