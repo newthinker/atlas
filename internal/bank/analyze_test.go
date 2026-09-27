@@ -8,11 +8,12 @@ package bank
 // boundary[0]    严格不等号 + 浮点边界三例               → TestAlertsLevel(等于阈值), TestAlertsDeteriorationBoundaryIsStrict
 // boundary[1]    NaN 各形态                              → TestAnalyzeSkipsAllNaNTail, TestAnalyzeIndicatorAllNaN,
 //                                                          TestAnalyzeSingleValidValue, TestAnalyzeEmpty, TestAnalyzeYoYPeriodNaN
-// non_functional 不修改入参 / vet / 全绿 / 覆盖率         → TestAnalyzeDoesNotMutateInput + go vet / go test -cover
+// non_functional 不修改入参 / vet / 全绿 / 覆盖率         → TestAnalyzeDoesNotMutateInput（输入/期望现场构造）+ go vet / go test -cover
 
 import (
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func assertNaNChange(t *testing.T, c Change, msg string) {
 }
 
 func TestAnalyzeLatestQoQYoY(t *testing.T) {
-	latest, ind := Analyze(cmb)
+	latest, ind := Analyze(slices.Clone(cmb))
 	p := day("2026-06-30")
 	assert.Equal(t, p, latest)
 	assert.Equal(t, Change{0.94, 0, 0.01, p}, ind[IndNPL])
@@ -84,7 +85,7 @@ func TestAnalyzeLatestQoQYoY(t *testing.T) {
 }
 
 func TestAnalyzeFallbackPerIndicator600919(t *testing.T) {
-	latest, ind := Analyze(jsbk)
+	latest, ind := Analyze(slices.Clone(jsbk))
 	q3 := day("2025-09-30")
 	assert.Equal(t, q3, latest, "NPL/拨备有值即为最新期")
 	assert.Equal(t, Change{0.84, 0, -0.05, q3}, ind[IndNPL])
@@ -98,7 +99,7 @@ func TestAnalyzeFallbackPerIndicator600919(t *testing.T) {
 }
 
 func TestAnalyzeAcrossGap002142(t *testing.T) {
-	latest, ind := Analyze(nbbk)
+	latest, ind := Analyze(slices.Clone(nbbk))
 	p := day("2026-06-30")
 	assert.Equal(t, p, latest)
 	// 2026-03-31 CET1 为 null ⇒ 环比跨空期对 2025-12-31（9.34）；同比对 2025-06-30（9.65）。
@@ -169,11 +170,22 @@ func TestAnalyzeEmpty(t *testing.T) {
 	}
 }
 
+// 输入与期望都在此现场构造、互不共享底层数组，不依赖任何包级 fixture：
+// 若期望取自可能已被别的测试传给 Analyze 的 fixture，幂等的越界写入（写 NaN、原地前向填充）
+// 在它被复制之前就已发生，期望与实际同被污染，守卫随执行顺序失效。
 func TestAnalyzeDoesNotMutateInput(t *testing.T) {
-	in := append([]Observation(nil), nbbk...)
-	before := fmt.Sprint(in) // fmt 把 NaN 打成 "NaN"，可逐字比较
+	fresh := func() []Observation {
+		return []Observation{
+			obs("2025-06-30", 0.76, 374.16, 9.65),
+			obs("2025-09-30", 0.76, nan, nan),
+			obs("2025-12-31", nan, 373.16, 9.34),
+			obs("2026-03-31", 0.77, 369.39, nan),
+			obs("2026-06-30", nan, nan, nan),
+		}
+	}
+	in := fresh()
 	Analyze(in)
-	assert.Equal(t, before, fmt.Sprint(in))
+	assert.Equal(t, fmt.Sprint(fresh()), fmt.Sprint(in), "fmt 把 NaN 打成 \"NaN\"，可逐字比较")
 }
 
 func result(npl, cov, cet1 Change) BankResult {
