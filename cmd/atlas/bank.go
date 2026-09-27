@@ -91,24 +91,31 @@ func runBankReport(cmd *cobra.Command, _ []string) error {
 func executeBankReport(cfg *bank.Config, d bankReportDeps) (int, error) {
 	results := bank.Collect(cfg.Banks, d.source)
 	now := d.now()
+	// nFailed 单独计数：failed 里还有别名附注行，行数不等于主体数。
 	var failed []string
+	nFailed := 0
 	for _, r := range results {
 		if r.Err != nil {
+			nFailed++
 			failed = append(failed, fmt.Sprintf("· %s：%v", r.Name, r.Err))
+			// 与 bank.writeAliases 同格式：H 股等共用条目不能在摘要里消失。
+			for _, a := range r.Aliases {
+				failed = append(failed, fmt.Sprintf("  （%s 同 %s）", a, r.Symbol))
+			}
 		}
 	}
-	if len(failed) == len(results) {
+	if nFailed == len(results) {
 		msg := fmt.Sprintf("🏦 银行关键指标月报 %s\n❌ 全部 %d 家拉取失败\n%s",
-			now.Format("2006-01-02"), len(failed), strings.Join(failed, "\n"))
+			now.Format("2006-01-02"), nFailed, strings.Join(failed, "\n"))
 		if err := deliver(d, msg); err != nil {
 			return 1, err
 		}
-		return 1, fmt.Errorf("全部 %d 家银行拉取失败", len(failed))
+		return 1, fmt.Errorf("全部 %d 家银行拉取失败", nFailed)
 	}
 	if err := deliver(d, bankReportText(cfg, results, now)); err != nil {
 		return 1, err
 	}
-	if len(failed) > 0 {
+	if nFailed > 0 {
 		return 2, nil
 	}
 	return 0, nil

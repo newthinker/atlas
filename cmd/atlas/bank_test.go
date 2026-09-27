@@ -3,6 +3,8 @@ package main
 // Context Checkpoint: done_criteria → test mapping（TASK-006）
 // functional[0]     全成功 0 / 只拉一次 / 推 1 条；部分失败 2 且照推     → TestBankReportAllOK, TestBankReportPartialFailure
 // functional[1]     全部失败：error + 1 条摘要，每家「名称：错误」各一行 → TestBankReportAllFailed, TestRunBankReportAllFailed, TestBankReportAllFailedSendError
+// review_fix r2     FIX-1 非 dry-run + sender + 部分失败 ⇒ bankExit(2) 恰一次 → TestRunBankReportSends/部分失败
+//                   FIX-2 全失败摘要带别名附注、计数不含附注行           → TestBankReportAllFailed, TestRunBankReportAllFailed
 // functional[2]     --dry-run 经 runBankReport：不构造 sender、打印、exit 2 → TestRunBankReportDryRun
 // boundary[0]       150 家 ⇒ 多段、每段 ≤ 4000、与 bank.Split 一致         → TestBankReportLongSplits
 // error_handling[0] D1：非 dry-run 拿不到 sender ⇒ 打印 + stderr 原因 + 错误 → TestRunBankReportNoSender/{全部成功,部分失败}
@@ -117,8 +119,12 @@ func TestBankReportAllFailed(t *testing.T) {
 	require.Error(t, err, "全部失败 ⇒ 退出码 1")
 	require.Len(t, snd.msgs, 1, "全部失败也推一条错误摘要")
 	lines := strings.Split(snd.msgs[0], "\n")
-	assert.Contains(t, snd.msgs[0], "全部 2 家拉取失败")
-	assert.Contains(t, lines, "· 招商银行：connection refused", "每家的名称与错误各占一行")
+	assert.Contains(t, snd.msgs[0], "全部 2 家拉取失败", "计数是主体数，不含别名附注行")
+	assert.Contains(t, err.Error(), "全部 2 家银行拉取失败")
+	i := slices.Index(lines, "· 招商银行：connection refused")
+	require.GreaterOrEqual(t, i, 0, "每家的名称与错误各占一行")
+	require.Less(t, i+1, len(lines))
+	assert.Equal(t, "  （招商银行H 同 600036.SH）", lines[i+1], "别名附注紧跟其主体")
 	assert.Contains(t, lines, "· 邮储银行：timeout")
 }
 
@@ -255,14 +261,26 @@ func TestRunBankReportDryRun(t *testing.T) {
 	})
 }
 
+// launchd 每月跑的就是这条路径：非 dry-run、sender 注入成功。
 func TestRunBankReportSends(t *testing.T) {
-	e := setupBankE2E(t, bankE2ECfg, false, nil)
-	require.NoError(t, e.run())
-	assert.Equal(t, 1, e.factoryCalls)
-	require.Len(t, e.sender.msgs, 1)
-	assert.Contains(t, e.sender.msgs[0], "⚠️ 预警 (4)")
-	assert.Empty(t, e.stdout.String(), "已推送时不再打印")
-	assert.Empty(t, e.exits)
+	t.Run("全部成功", func(t *testing.T) {
+		e := setupBankE2E(t, bankE2ECfg, false, nil)
+		require.NoError(t, e.run())
+		assert.Equal(t, 1, e.factoryCalls)
+		require.Len(t, e.sender.msgs, 1)
+		assert.Contains(t, e.sender.msgs[0], "⚠️ 预警 (4)")
+		assert.Empty(t, e.stdout.String(), "已推送时不再打印")
+		assert.Empty(t, e.exits)
+	})
+	t.Run("部分失败", func(t *testing.T) {
+		e := setupBankE2E(t, bankE2ECfg, false, nil, "601658.SH")
+		require.NoError(t, e.run())
+		assert.Equal(t, 1, e.factoryCalls)
+		require.Len(t, e.sender.msgs, 1, "报告照常推送")
+		assert.Contains(t, e.sender.msgs[0], "· 邮储银行 拉取失败：")
+		assert.Empty(t, e.stdout.String(), "已推送时不再打印")
+		assert.Equal(t, []int{2}, e.exits, "部分失败以 2 调用 bankExit 恰一次，否则 launchd 记为成功")
+	})
 }
 
 // D1：拿不到 sender 时照常打印、stderr 说明原因、返回错误（退出码 1），不走 bankExit(0/2)。
@@ -300,6 +318,7 @@ func TestRunBankReportAllFailed(t *testing.T) {
 	assert.Contains(t, err.Error(), "全部 2 家银行拉取失败")
 	require.Len(t, e.sender.msgs, 1, "仍推送一条摘要")
 	assert.Contains(t, e.sender.msgs[0], "· 招商银行：")
+	assert.Contains(t, e.sender.msgs[0], "（招商银行H 同 600036.SH）", "H 股条目不能在摘要里消失")
 	assert.Contains(t, e.sender.msgs[0], "· 邮储银行：")
 	assert.Empty(t, e.exits)
 }
