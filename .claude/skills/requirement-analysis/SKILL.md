@@ -102,6 +102,38 @@ Leader 拆分时若某任务 `review`/`manual` 条目占比过高，提示该任
 - functional 覆盖核心 Happy Path；boundary 覆盖输入边界/空值/极值；
   error_handling 明确期望的错误码和行为；non_functional 明确可量化指标。
 
+**review / manual 类完成标准的编写原则：**
+
+上面那条「能直接转化为一个断言」只对 `verify_by: test` 成立。`review` / `manual` 类
+**没有断言可转化**，验收全靠人读——约束因此必须落在**写法**上，否则条目会长成没人能判真假的样子。
+
+1. **单一命题，且不超过 200 字。** 一条标准只说一件事。超长几乎总是因为把多件事塞进了一条：
+   拆开写，验收者才能逐条给出通过/不通过，而不是给一个「大体上算通过」。
+2. **不用分号串联多个断言。** `A；B；C` 形式在验收时会退化成「三件里过了两件算不算过」。
+   达到 2 个分号即视为复合。
+3. **描述「看 diff 能判真假」的可观察结果。** 写清楚改哪个文件、出现或消失什么内容。
+   「文档写清楚 X」不可判；「`CLAUDE.md` 的『认领协议』节出现 `--expect-epoch` 的用法示例」可判。
+
+**反例四项**（前三项取自本仓库归档，原文截断）：
+
+1. **超长**（203 字，sprint-003 `TASK-B8`）：
+   `CLAUDE.md.template:认领协议补「Dev 每次 transition 携带 --expect-epoch」;状态机表补三条新边(重派/收回/熔断)与…`
+   → 拆成三条：认领协议一条、状态机表一条、记录员代理模式一条。
+2. **分号复合**（sprint-006 `TASK-003`）：
+   `set -uo pipefail;头注释声明单一真相源、文档禁止复述解析步骤;文件 chmod +x`
+   → 三件互不相干的事（shell 选项 / 注释内容 / 文件权限），验收时会各判各的，没有统一结论。
+3. **多行**（771 字，sprint-008 `TASK-015`）：条目本身已经是一份小规格，还带编号清单。
+   → 规格写进 `docs/`，DoD 只留「该规格的 N 条要求在 X 文件中逐条出现」。
+4. **不可观察**（**构造示例**——这一类无法机械识别，归档统计里不体现）：
+   `错误提示对用户友好` → 改成 `失败时 stderr 打出该文件的绝对路径与可照抄的修复命令`。
+
+> **口径与数据**：判定口径取自 `project-template/hooks/jev/dod_filter.py` 的 `judge()`
+> （`max_chars=200`、`max_semicolons=1`，与 `arcforge.config.json` 的
+> `jev.quality_gate.dod_filter` 同值）。用它扫本仓库 `.arcforge/archive/` 的 **107** 份任务文件：
+> **174** 条 `verify_by: review|manual` 条目里 **29 条（16.7%）不可判定**
+> ——超长 9、分号复合 12、多行 7、`desc` 缺失 1。
+> 采集日期与可照抄的复算脚本见 `.arcforge/discoveries/TASK-009.json`。
+
 **Realistic Scope 约束**：每任务 ≤ 1 个 package、`done_criteria` 总条数 ≤ 8、预计改动文件 ≤ 5。
 超出则继续拆分。
 

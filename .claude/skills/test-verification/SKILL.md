@@ -37,7 +37,7 @@ plan.md 转述补全标准——A1 误判事件根因）。报告模板增加「
 优先读取 TaskCompleted hook 已生成的 `coverage.out`/报告；仅对可疑点补跑。
 
 ### 4. 回归与集成
-运行 `go test ./...` 确认未破坏既有测试；检查跨任务接口兼容。
+运行本语言的全量测试确认未破坏既有测试（Go：`go test ./...`；Rust：`cargo test --workspace`）；检查跨任务接口兼容。
 如可用，调用 ECC `e2e-runner` 做集成测试。
 
 ## 产出

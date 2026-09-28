@@ -92,8 +92,8 @@
         "hooks": [
           {
             "type": "command",
-            "timeout": 180,
-            "command": "bash .claude/hooks/task-completed.sh"
+            "timeout": 240,
+            "command": "bash .claude/hooks/task-completed-jev.sh"
           }
         ]
       }
@@ -105,6 +105,17 @@
             "type": "command",
             "timeout": 30,
             "command": "bash .claude/hooks/teammate-idle.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 60,
+            "command": "bash .claude/hooks/session-start-check.sh"
           }
         ]
       }
