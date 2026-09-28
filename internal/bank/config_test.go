@@ -168,15 +168,21 @@ func TestLoadConfigInvalidIncludesPath(t *testing.T) {
 func TestShippedConfigLoads(t *testing.T) {
 	cfg, err := LoadConfig("../../configs/bank-monitor.yaml")
 	require.NoError(t, err)
-	require.Len(t, cfg.Banks, 3)
+	require.Len(t, cfg.Banks, 21)
 
+	cnA := func(symbol, name string) BankCfg { return BankCfg{Market: "CN_A", Symbol: symbol, Name: name} }
 	want := []BankCfg{
-		{Market: "CN_A", Symbol: "600036.SH", Name: "招商银行"},
-		{Market: "CN_A", Symbol: "601658.SH", Name: "邮储银行"},
+		cnA("601398.SH", "工商银行"), cnA("601288.SH", "农业银行"), cnA("601988.SH", "中国银行"),
+		cnA("601939.SH", "建设银行"), cnA("601328.SH", "交通银行"), cnA("601658.SH", "邮储银行"),
+		cnA("600036.SH", "招商银行"), cnA("601166.SH", "兴业银行"), cnA("601998.SH", "中信银行"),
+		cnA("600000.SH", "浦发银行"), cnA("600016.SH", "民生银行"), cnA("601818.SH", "光大银行"),
+		cnA("000001.SZ", "平安银行"), cnA("600015.SH", "华夏银行"), cnA("601916.SH", "浙商银行"),
+		cnA("002142.SZ", "宁波银行"), cnA("600919.SH", "江苏银行"), cnA("601169.SH", "北京银行"),
+		cnA("601009.SH", "南京银行"), cnA("601229.SH", "上海银行"),
 		{Market: "HK", Symbol: "3968.HK", Name: "招商银行H", AShareRef: "600036.SH"},
 	}
 	assert.Equal(t, want, cfg.Banks)
-	assert.Equal(t, "600036.SH", cfg.Banks[2].DataSymbol())
+	assert.Equal(t, "600036.SH", cfg.Banks[20].DataSymbol())
 
 	assert.Equal(t, ThresholdsCfg{
 		NPLMax: 1.5, CoverageMin: 150, CET1Min: 8.5,
