@@ -37,8 +37,9 @@ class QualityThresholds:
     verdict_pass_conf: float = 0.60  # verdict=pass 时要求的最低 confidence
     clear_fail_conf: float = 0.70   # verdict=needs_work 且 confidence >= 此值 → 明确失败
     integrity_max: float = 0.80     # test_tampering / unsafe 达到此值 → 直接找人
-    # 返工上限复用 arcforge.config.json 的 max_rework（默认 3），读任务 JSON 的
-    # rework_count 来比。不自建计数：两套阈值会先后触发，Leader 要面对两种「次数用尽」。
+    # 返工上限复用 arcforge.config.json **顶层**的 max_rework（由 jev_common.resolve_max_rework
+    # 解析后注入；3 只是两处都没配时的默认），读任务 JSON 的 rework_count 来比。
+    # 不自建计数：两套阈值会先后触发，Leader 要面对两种「次数用尽」。
     max_rework: int = 3
 
     @classmethod

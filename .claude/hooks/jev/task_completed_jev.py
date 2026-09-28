@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jev_common import (  # noqa: E402
     JevError, arcforge_dir, call_jev, load_config, log_error, log_event,
-    project_allowed, project_root, read_hook_input, redact,
+    project_allowed, project_root, read_hook_input, redact, resolve_max_rework,
 )
 from jev_routing import (  # noqa: E402
     ROUTE_HUMAN, ROUTE_QA, ROUTE_REWORK,
@@ -456,7 +456,13 @@ def main() -> int:
         return 0  # fail 到原有流程
 
     sig = parse_quality_answers(answers)
-    th = QualityThresholds.from_dict(gate.get("thresholds"))
+    raw_thresholds = gate.get("thresholds") or {}
+    thresholds = dict(raw_thresholds)
+    thresholds.pop("max_rework", None)
+    max_rework = resolve_max_rework(raw_thresholds)
+    if max_rework is not None:
+        thresholds["max_rework"] = max_rework
+    th = QualityThresholds.from_dict(thresholds)
     # 返工次数取任务 JSON 既有的 rework_count（由写通道在 rejected/review_fix 重派时自增），
     # 闸门不自建计数 —— 两套阈值会先后触发，Leader 要面对两种「次数用尽」。
     rework_count = int(task.get("rework_count") or 0)
@@ -470,6 +476,7 @@ def main() -> int:
                     "unsafe": sig.unsafe,
                     "verdict": sig.verdict, "verdict_conf": sig.verdict_conf},
         "rework_count": rework_count,
+        "max_rework": th.max_rework,
         "decision": decision.to_dict(),
         "dod_text": dod_map,
     }

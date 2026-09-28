@@ -46,6 +46,9 @@ coverage.out
 # 归档后的瞬态数据同样不入版本控制（mv 进 archive 会脱离上面两条模式）
 .arcforge/archive/*/checkpoints/
 .arcforge/archive/*/coverage/
+# 门禁导出给 Jev 质量闸门的运行时状态（每次 dev_done 都会重写），不入库。
+# 对门禁无害（漂移判定整棵 .arcforge/ 排除），但会让 git status 常态变脏。
+.arcforge/state/
 
 # qlib_eval Python 评估环境
 scripts/qlib_eval/.venv/

@@ -82,11 +82,15 @@ def _deep_merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _config_candidates() -> Tuple[Path, ...]:
+    root = project_root()
+    return (root / "arcforge.config.json", root / ".claude" / "arcforge.config.json")
+
+
 def load_config() -> Dict[str, Any]:
     """读取 arcforge.config.json 的 "jev" 段；环境变量 ARCFORGE_JEV_MODE 可临时覆盖两个闸门的 mode。"""
     cfg = dict(DEFAULT_CONFIG)
-    for candidate in (project_root() / "arcforge.config.json",
-                      project_root() / ".claude" / "arcforge.config.json"):
+    for candidate in _config_candidates():
         if candidate.exists():
             try:
                 cfg = _deep_merge(cfg, json.loads(candidate.read_text()).get("jev", {}))
@@ -101,6 +105,42 @@ def load_config() -> Dict[str, Any]:
         # 删字典不删这行会全绿着把缺陷放过去（TASK-009 的 error_handling[0] 钉的就是这个）。
         cfg["quality_gate"]["mode"] = override
     return cfg
+
+
+def _positive_int(v: Any) -> bool:
+    # bool 必须单独排除：True 是 int 的子类，不排除的话 "max_rework": true 会被读成上限 1。
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def resolve_max_rework(thresholds: Dict[str, Any]) -> Optional[int]:
+    """返工上限的唯一来源是 arcforge.config.json **顶层** max_rework。
+
+    写通道与 Leader 用的是顶层那个值；闸门若另读 jev 段的值，两套上限会先后触发 ——
+    下游 loom 顶层为 8、jev 段缺省 3，同一任务写通道认为还能返工，Jev 已转人类。
+    优先级：顶层合法值 > jev.quality_gate.thresholds.max_rework 合法值 > None（调用方用默认）。
+    非法值与两处不一致都记 errors 日志后继续 —— 配置问题不能卡住开发，但也不能静默。
+    """
+    top = None
+    for candidate in _config_candidates():
+        if candidate.exists():
+            try:
+                top = json.loads(candidate.read_text()).get("max_rework")
+            except (OSError, json.JSONDecodeError, AttributeError):
+                top = None   # 文件本身的问题已由 load_config() 记过
+            break
+    local = thresholds.get("max_rework")
+    if top is not None and not _positive_int(top):
+        log_error("config", f"顶层 max_rework={top!r} 非法（须为正整数），已忽略")
+        top = None
+    if local is not None and not _positive_int(local):
+        log_error("config", f"jev.quality_gate.thresholds.max_rework={local!r} 非法（须为正整数），已忽略")
+        local = None
+    if top is not None:
+        if local is not None and local != top:
+            log_error("config", f"jev.quality_gate.thresholds.max_rework={local} 与顶层 "
+                                f"max_rework={top} 不一致，以顶层为准")
+        return top
+    return local
 
 
 def project_allowed(cfg: Dict[str, Any]) -> bool:
