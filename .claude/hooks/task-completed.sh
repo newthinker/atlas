@@ -33,10 +33,16 @@ TEST_TIMEOUT=$(jq -r '.coverage.test_timeout // "120s"' "$CONFIG_FILE" 2>/dev/nu
 path_under_scope() { # <路径> <声明清单(多行)>;0 = 落在某条声明之下
     local f="${1#./}" p q
     while IFS= read -r p; do
-        q="${p#./}"
-        # 剥**全部**尾斜杠(docs/// 与 docs/ 同解);剥空则该条声明无意义,跳过。
+        q="$p"
+        # 先剥**全部**尾斜杠(docs/// 与 docs/ 同解;.// 与 . 同解),再剥前导 ./;剥空则该条声明无意义,跳过。
         while [ -n "$q" ] && [ "$q" != "${q%/}" ]; do q="${q%/}"; done
+        q="${q#./}"
         [ -n "$q" ] || continue
+        # 〔sprint-012 T2 返工 C1,人类 2026-09-16 改选方案 B〕这里**不再**把 `.` 视为全仓库。T2 首版曾在此加
+        # `[ "$q" = "." ] && return 0`,QA 三方独立命中:本函数是漂移 / OTHERS 相减 / docs-only 三处共用的唯一口径,
+        # 任一在途任务声明 `.` 就让其他并发任务的越界改动被当成「他人的」静默相减掉。现在 `.` 只留给 packages
+        # 的 crate 解析(gate_rust 内);writes 口径里 `.` 是「全占」不是「占用」,由 §2c 之前的 scope_has_dot 判定
+        # 阻断出声(见下),本函数对 `.` 恢复原语义:`.` 与 `src/lib.rs` 这类相对路径永远不命中。
         case "$f" in
             "$q"|"$q"/*) return 0 ;;
         esac
@@ -53,6 +59,21 @@ filter_outside() { # <路径清单(多行)> <声明清单(多行)> → 打印**�
     done <<EOF
 $1
 EOF
+}
+# scope_has_dot <声明清单(多行)>:0 = 有一条归一化后是 `.`(`.`、`./`、`.//` 同解)。
+# 〔sprint-012 T2 返工 C1,方案 B〕writes 口径里的 `.` 是「全占」:它让 §2c 的两步相减对**一切**路径都成立
+# ——本任务声明它则自己永不漂移,他人声明它则本任务的越界改动全被当成「他人的」减掉。两种都不能静默,
+# 由 §2c 之前的两处判定阻断出声;归一化与 path_under_scope 逐字同步,免得 `.//` 从一处漏过另一处。
+scope_has_dot() {
+    local d
+    while IFS= read -r d; do
+        while [ -n "$d" ] && [ "$d" != "${d%/}" ]; do d="${d%/}"; done
+        d="${d#./}"
+        [ "$d" = "." ] && return 0
+    done <<EOF
+$1
+EOF
+    return 1
 }
 
 # ---- 1. 从 stdin 解析任务上下文(官方字段 task_id;兼容链兜底) ----
@@ -313,10 +334,68 @@ OTHERS=$(find "$TASK_DIR" -name '*.json' ! -name "${TASK_ID:-__none__}.json" -ex
     jq -r 'select(.status | IN("assigned","in_progress","dev_done","verifying","blocked_clarification"))
            | (if .writes == null then .packages else .writes end)[]?' {} \; \
     2>/dev/null | sort -u)
+# 〔sprint-012 T2 返工 C1,人类 2026-09-16 选定方案 B〕`.` 只留给 packages 的 crate 解析;writes 口径里出现 `.`
+# 一律在相减**之前**阻断出声,不得静默相减(理由见 scope_has_dot 的注释)。有效 writes 口径与 §2c 同:writes
+# 优先,字段缺失才回落 packages —— 单 crate Rust 项目按 packages:["."] + 显式窄 writes 声明,`.` 就不进 writes 口径。
+MY_SCOPE="$WRITES"; [ "$HAS_WRITES" = "true" ] || MY_SCOPE="$PKGS"
+if scope_has_dot "$MY_SCOPE"; then
+    # 措辞刻意避开字面串「scope 漂移」:它是全套件的阻断分支探测标记(assert_no_grep),这里不是那条分支。
+    echo "BLOCKED: ${TASK_ID:-unknown} 的有效 writes 声明含 \".\"(全仓库),范围漂移校验无法成立。" >&2
+    echo "  \".\" 只能出现在 packages(单 crate 项目的 crate 解析);writes 须显式窄声明。推荐形态:" >&2
+    # 〔QA-W-R2-2〕推荐形态必须含 Cargo.lock:gate_rust 跑 cargo llvm-cov 会在仓库根生成未跟踪的 Cargo.lock,
+    # 不含它的形态在首次 dev_done 被拦后重跑必被判越界(R-S5/R-S5b)。与 README 推荐形态元素、顺序一致。
+    echo "    packages:[\".\"] + writes:[\"src\",\"Cargo.toml\",\"Cargo.lock\"]" >&2
+    echo "  经写通道修正(必须在 transition dev_done 之前):" >&2
+    echo "    task ${TASK_ID:-TASK-xxx} update --json-field 'writes=[\"src\",\"Cargo.toml\",\"Cargo.lock\"]'" >&2
+    exit 2
+fi
+# 他人在途任务的有效 writes 含 `.`:它会把本任务的一切改动当成「他人的」减掉(QA 探针 A 实测:加一个
+# in_progress 的 packages:["."] 任务后,原本 BLOCKED 的越界改动直接进 Gate scope,零 WARN)。jq 表达式刻意
+# 不与上面 OTHERS 那行同形:变异 harness 按整行字面串锚定 OTHERS,同形会让锚点命中两行而报废。
+DOT_OTHER=$(find "$TASK_DIR" -name '*.json' ! -name "${TASK_ID:-__none__}.json" -exec \
+    jq -r 'select(.status | IN("assigned","in_progress","dev_done","verifying","blocked_clarification"))
+           | .id as $id | (.writes // .packages)[]? | select((sub("/+$"; "") | sub("^\\./"; "")) == ".") | $id' {} \; \
+    2>/dev/null | sort -u | head -1)
+if [ -n "$DOT_OTHER" ]; then
+    echo "BLOCKED: 另一在途任务 ${DOT_OTHER} 声明了全仓库 writes(\".\"),与本任务 ${TASK_ID:-unknown} 互斥。" >&2
+    echo "  它会把本任务的一切改动当成「他人的」从漂移判定里减掉,不能静默相减。" >&2
+    echo "  请 Leader 让 ${DOT_OTHER} 把 writes 改成显式窄声明(如 [\"src\",\"Cargo.toml\",\"Cargo.lock\"]),再重跑门禁。" >&2
+    exit 2
+fi
 # 两步相减一律走段前缀(原为 comm 的字符串精确比对):声明目录、实际改其子路径下的文件是
 # 合法的,精确比对会把它误报成漂移;而他人声明**文件路径**时,目录口径的相减又减不掉。
 MINE_FILES=$(filter_outside "$ACTUAL_FILES" "$OTHERS")
 MINE_ACTUAL=$(filter_outside "$ACTUAL_PKGS" "$OTHERS")
+
+# ---- 2b'. Jev 质量闸门的状态导出(设计见 specs/2026-09-20-jev-quality-gate-design.md §2.2) ----
+# 纯写文件:不读判定结果、不改变任何退出路径 —— 失败一律吞掉,门禁结论只由下面的检查决定。
+# 导出两份,缺一不可:
+#   .files —— 本任务的改动集合。范围口径与 scope 漂移判定**同源**(都取上面那个已算好的集合):
+#             闸门若自己再 diff 一遍,共享工作区下必然混进他人在途改动(F1)。
+#   .base  —— 下游做 diff 的基线。这个集合含**已提交**改动(§2b C5 并入的有下界集合)与
+#             untracked 新文件,而 `git diff HEAD --` 对这两类的输出**都是空**(隔离沙箱实测),
+#             本仓库又明确以「先 commit 再 dev_done」为正常流程 ⇒ 不导出基线时,下游 payload
+#             在主路径上恒为空,且没有任何症状。
+# 基线取**严格早于**本轮开工时刻的最后一个提交。开工时刻复用 §2a' 的 WORK_SINCE(含它那段
+# RFC3339 可解析性校验 —— 绕过去的话 approxidate 会把基线静默钉到任意时刻,正是 I1 那个事故)。
+# 为什么必须「严格早于」而不是 `--until` 直接取:`--since=T` 与 `--until=T` 对「恰好在 T」的
+# 提交**都包含**(§2a' M1 实测),那条提交于是同时是基线、又在本任务的已提交改动集合里 ——
+# 本任务自己的改动会被当成基线的一部分,从下游 diff 里整个消失。故按 commit hash 取差集,
+# 与 NONCONFORMING / EARLY_H 同手法,结构上不可能重叠。
+# WORK_SINCE 为空(取不到下界,或没过 RFC3339 校验)时基线写空:不猜,退出码不变。
+JEV_BASE=""
+if [ -n "${TASK_ID:-}" ] && [ -n "$WORK_SINCE" ]; then
+    JEV_SINCE_H=$(git log --format='%H' --since="$WORK_SINCE" 2>/dev/null || true)
+    JEV_BASE=$(git log --format='%H' --until="$WORK_SINCE" 2>/dev/null \
+               | SH="$JEV_SINCE_H" awk 'BEGIN { n = split(ENVIRON["SH"], a, "\n")
+                                                for (i = 1; i <= n; i++) if (a[i] != "") s[a[i]] = 1 }
+                                        NF && !($1 in s) { print; exit }')
+fi
+# `|| true` 不可省:set -uo pipefail 下 TASK_ID 为空时 `[ -n ]` 返回 1,会让这一组成为脚本的
+# 最后状态码。两次写入用 `&&` 串起来:目标目录不可写时第一次就短路,不会留下半份状态。
+[ -n "${TASK_ID:-}" ] && { mkdir -p .arcforge/state/jev \
+    && printf '%s\n' "$MINE_FILES" > ".arcforge/state/jev/${TASK_ID}.files" \
+    && printf '%s\n' "$JEV_BASE" > ".arcforge/state/jev/${TASK_ID}.base"; } 2>/dev/null || true
 
 if [ -n "$PKGS" ]; then
     # ---- 2c. 交叉校验:实际改动 ⊆ **writes**(评审 R3,防 scope 漂移逃逸) ----
@@ -449,50 +528,193 @@ EOF
     exit 0
 fi
 
-# 非 Go 项目(无 go.mod)跳过 Go 专用门禁。**只跳过 Go 那一段**:上面的 scope 漂移校验、
-# 空 scope 拒绝、无代码任务判定都与 Go 无关,却曾因这句早退而在框架自身仓库里一次都没跑过
-# (TASK-018)——本框架仓库根就没有 go.mod(go.work 在根、validator 在子目录),于是
-# writes 这个安全属性对最需要它的那类任务(文档/产物)完全失效。
-if [ ! -f go.mod ]; then
-    echo "No go.mod found; skipping Go coverage gate."
+# ---- 3. 语言分派 ----
+# 检测以**标记文件**为准,不以 config 的 language 为准:config 模板默认写死 "language": "go",
+# init 时没传语言参数的 Rust 仓库会被判成 Go,再因无 go.mod 跳过 —— 那正是 2026-09-16 核实到的
+# 「名义支持、机制缺失」形态换个入口重演。Cargo.toml / go.mod 是构建工具自己认的真相。
+# 两标记并存时读 config .language 裁决;取值不在 {go, rust} 内则 BLOCKED 出声 —— 宁可拦也不猜。
+# config 缺失/非法时 jq 失败 ⇒ 取到空串 ⇒ ambiguous,不得被当成任何有效值。
+detect_language() { # 打印 go | rust | none | ambiguous
+    local has_go=0 has_rust=0 lang
+    [ -f go.mod ] && has_go=1
+    [ -f Cargo.toml ] && has_rust=1
+    if [ "$has_go" = 1 ] && [ "$has_rust" = 1 ]; then
+        lang=$(jq -r '.language // empty' "$CONFIG_FILE" 2>/dev/null || true)
+        case "$lang" in go) echo go ;; rust) echo rust ;; *) echo ambiguous ;; esac
+    elif [ "$has_rust" = 1 ]; then echo rust
+    elif [ "$has_go" = 1 ]; then echo go
+    else echo none
+    fi
+}
+
+# 任务级 coverage_floor 覆盖全局 dev_minimum(历史包袱重的包按其既有水位设定),与语言无关。
+# 调用时点与语言路径里覆盖率解析之后、阈值比较之前 —— 与重构前的位置相同,override 文案的
+# 打印顺序不变。必须放在这里而非文件头:TASK_ID 在第 26 行才解析出来。
+apply_task_floor() {
+    TASK_FLOOR=$(jq -r '.coverage_floor // empty' ".arcforge/tasks/${TASK_ID}.json" 2>/dev/null)
+    if [ -n "$TASK_FLOOR" ]; then
+        echo "Task-level coverage_floor=${TASK_FLOOR} overrides dev_minimum=${DEV_MIN}"
+        DEV_MIN="$TASK_FLOOR"
+    fi
+}
+
+gate_go() {
+    # ---- 仅对声明范围跑测试 + 覆盖率,产物按任务隔离(F2) ----
+    mkdir -p "$COV_DIR"
+    COVERPKG=$(echo "$PKGS" | paste -sd, -)
+    COVERPROFILE="$COV_DIR/${TASK_ID:-adhoc-$$}.out"
+    echo "=== Gate scope (${TASK_ID:-fallback}) ==="
+    echo "$PKGS"
+    # shellcheck disable=SC2086  # PKGS 按行分包,word-splitting 是有意的
+    TEST_OUTPUT=$(go test $PKGS -timeout "$TEST_TIMEOUT" \
+                  -coverpkg="$COVERPKG" -coverprofile="$COVERPROFILE" 2>&1)
+    TEST_EXIT=$?
+    if [ $TEST_EXIT -ne 0 ]; then
+        echo "BLOCKED: Tests failed in task scope. Fix before marking complete:" >&2
+        echo "$TEST_OUTPUT" | tail -30 >&2
+        exit 2
+    fi
+
+    TOTAL=$(go tool cover -func="$COVERPROFILE" 2>/dev/null \
+            | { grep "total:" || true; } | awk '{print $NF}' | sed 's/%//')
+    if [ -z "$TOTAL" ]; then
+        echo "WARNING: Could not determine coverage. Proceeding."
+        exit 0
+    fi
+    apply_task_floor
+
+    if [ "${TOTAL%.*}" -lt "$DEV_MIN" ]; then
+        echo "BLOCKED: Task-scope coverage ${TOTAL}% < dev_minimum ${DEV_MIN}%." >&2
+        go tool cover -func="$COVERPROFILE" | grep -v "100.0%" >&2
+        exit 2
+    fi
+
+    echo "Task scope passes. Coverage: ${TOTAL}% (dev_minimum: ${DEV_MIN}%)"
     exit 0
-fi
+}
 
-# ---- 3. 仅对声明范围跑测试 + 覆盖率,产物按任务隔离(F2) ----
-mkdir -p "$COV_DIR"
-COVERPKG=$(echo "$PKGS" | paste -sd, -)
-COVERPROFILE="$COV_DIR/${TASK_ID:-adhoc-$$}.out"
-echo "=== Gate scope (${TASK_ID:-fallback}) ==="
-echo "$PKGS"
-# shellcheck disable=SC2086  # PKGS 按行分包,word-splitting 是有意的
-TEST_OUTPUT=$(go test $PKGS -timeout "$TEST_TIMEOUT" \
-              -coverpkg="$COVERPKG" -coverprofile="$COVERPROFILE" 2>&1)
-TEST_EXIT=$?
-if [ $TEST_EXIT -ne 0 ]; then
-    echo "BLOCKED: Tests failed in task scope. Fix before marking complete:" >&2
-    echo "$TEST_OUTPUT" | tail -30 >&2
-    exit 2
-fi
+# ---- Rust 路径(sprint-012 T2)----
+# jq 取总行覆盖率的路径。**由 tests/fixtures/llvm-cov-summary.json(cargo-llvm-cov 真实输出)钉死**,
+# 不是照 LLVM 文档抄的;R-J1 用例守着它。改工具版本发现格式变了,先改 fixture 再改这里。
+LLVM_COV_TOTAL_PATH='.data[0].totals.lines.percent'      # ← 若 Step 2 实测不同,以实测为准
+RUST_TOOL_HINT='cargo install cargo-llvm-cov --locked   # 或 cargo binstall cargo-llvm-cov;另需 rustup component add llvm-tools-preview'
 
-TOTAL=$(go tool cover -func="$COVERPROFILE" 2>/dev/null \
-        | { grep "total:" || true; } | awk '{print $NF}' | sed 's/%//')
-if [ -z "$TOTAL" ]; then
-    echo "WARNING: Could not determine coverage. Proceeding."
+# crate_name_of <crate 目录>:打印 Cargo.toml 的 [package] name;取不到返回 1。
+# 只认 [package] 段内的 name:workspace 根的虚拟清单没有 [package],其 [workspace] 段里也可能
+# 出现别的 name 键(如 workspace.package.name 的继承写法),按段切才不会认错。
+# 〔更正 MAJOR-2〕段头剥尾注释后比对(`[package] # c`);键用 `^name[[:space:]]*=` 匹配而非 `$1 == "name"`
+# (`name="x"` 无空格时 $1 是整个 `name="x"`);值兼容单双引号,裸值剥到空白/注释为止。
+# `name.workspace = true` 与 `[package.metadata]` 里的 name 都不命中 —— 前者键名带点,后者段名不等。
+crate_name_of() {
+    local toml="${1%/}/Cargo.toml"
+    [ -f "$toml" ] || return 1
+    awk '
+        /^[[:space:]]*\[/ { h = $0; sub(/#.*$/, "", h); gsub(/[[:space:]]/, "", h); in_pkg = (h == "[package]"); next }
+        in_pkg && /^[[:space:]]*name[[:space:]]*=/ {
+            v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
+            q = substr(v, 1, 1)
+            if (q == "\"" || q == "\047") { v = substr(v, 2); sub(q ".*$", "", v) } else { sub(/[[:space:]#].*$/, "", v) }
+            print v; found = 1; exit }
+        END { exit !found }
+    ' "$toml"
+}
+
+gate_rust() {
+    # 缺件 fail-closed(人类 2026-09-16 选定,与 sprint-005「检查器缺件 fail-closed」同口径):
+    # 没有秤就不能称重。Go 段对「算不出覆盖率」是 WARN 放行,那是 Go 的历史包袱,本路径是
+    # 新建的,从第一天起按 fail-closed 走,不继承。
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "BLOCKED: 仓库根有 Cargo.toml,但 cargo 不在 PATH。安装 rustup: https://rustup.rs" >&2
+        exit 2
+    fi
+    if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+        echo "BLOCKED: 覆盖率工具 cargo-llvm-cov 未安装(检查器缺件 fail-closed)。" >&2
+        echo "  → $RUST_TOOL_HINT" >&2
+        exit 2
+    fi
+    # packages 是 crate 目录(人类选定):逐条取 [package] name 喂 -p。取不到即 BLOCKED,
+    # 不静默跳过 —— 静默跳过等于该 crate 的测试从未被要求过。
+    local names="" p n
+    while read -r p; do
+        [ -n "$p" ] || continue
+        if n=$(crate_name_of "$p"); then
+            names="$names -p $n"
+        else
+            echo "BLOCKED: ${TASK_ID:-unknown} 的 packages 条目 '$p' 不是 crate 目录(无 Cargo.toml 或无 [package] 段)。" >&2
+            echo "  Rust 项目的 packages 须指向含 Cargo.toml 的 crate 目录;单 crate 项目声明 \".\"。" >&2
+            exit 2
+        fi
+    done <<EOF
+$PKGS
+EOF
+    mkdir -p "$COV_DIR"
+    local report="$COV_DIR/${TASK_ID:-adhoc-$$}.json"
+    # 〔更正 MAJOR-1〕先删旧报告:工具退出 0 却没写新报告时,读到上一次的产物会静默放行 —— 与 fail-closed 相悖。
+    rm -f "$report"
+    echo "=== Gate scope (${TASK_ID:-fallback}) ==="
+    echo "$PKGS"
+    # 超时:沿用 coverage.test_timeout;macOS 无 GNU timeout 时退回不限时并出声(放行可以,静默不行)。
+    local tmo=""
+    if command -v timeout >/dev/null 2>&1; then tmo="timeout $TEST_TIMEOUT"
+    elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $TEST_TIMEOUT"
+    else echo "WARN: 无 timeout/gtimeout,cargo llvm-cov 不限时运行。" >&2; fi
+    # cargo-llvm-cov 自己跑 cargo test,一条命令同时拿到测试结果与覆盖率。
+    # shellcheck disable=SC2086  # $tmo 与 $names 都是有意的 word-splitting
+    TEST_OUTPUT=$($tmo cargo llvm-cov --json --summary-only $names --output-path "$report" 2>&1)
+    TEST_EXIT=$?
+    if [ $TEST_EXIT -ne 0 ]; then
+        # 〔返工 W6〕工具类失败不伪装成「Tests failed」:124/125 是 timeout 的专属退出码(124 = 超时被杀,
+        # 125 = timeout 自己拒绝了参数,如 Go 风格复合时长 1m30s)。判定只看退出码、不看 $tmo 是否为空:
+        # 本机无 timeout 时 cargo 自己不会返回这两个码,而 R-M5 正是用假 cargo exit 124 钉着这条分支。
+        case "$TEST_EXIT" in
+            124) echo "BLOCKED: cargo llvm-cov 超过 test_timeout=${TEST_TIMEOUT},已被 timeout 终止。" >&2
+                 echo "  → 调大 arcforge.config.json 的 coverage.test_timeout,或先本地跑通 cargo test。" >&2 ;;
+            125) echo "BLOCKED: timeout 不接受该时长写法 test_timeout=${TEST_TIMEOUT}(须 GNU timeout 认得的单一单位,如 120s / 5m)。" >&2 ;;
+            *)   echo "BLOCKED: Tests failed in task scope. Fix before marking complete:" >&2 ;;
+        esac
+        echo "$TEST_OUTPUT" | tail -30 >&2
+        if echo "$TEST_OUTPUT" | grep -q 'llvm-tools'; then
+            echo "  → 缺 llvm-tools 组件:rustup component add llvm-tools-preview" >&2
+        fi
+        exit 2
+    fi
+    TOTAL=$(jq -r "$LLVM_COV_TOTAL_PATH // empty" "$report" 2>/dev/null)
+    # 〔返工 W1 连带〕阈值比较改用原始值后,非数值(如 "n/a")会让下面的 [ -lt ] 报错、条件为假 ⇒ 静默放行
+    # (fail-open)。原先 printf '%.1f' 把它打成 0.0 恰好挡住,改比 RAW 就挡不住了,故在此收成「解析不出」。
+    # 只认十进制「整数或带小数」:科学计数(1e-05)的 ${RAW%.*} 不是整数,同样会走 [ -lt ] 报错放行。
+    # 必须**整串**匹配:grep 按行匹配,多行值("80\nabc")首行是数字就漏过(R-M6b 守着)。正则放变量里,
+    # 是 bash 3.2 与 4+ 对 [[ =~ ]] 右侧引号语义不同时唯一两边同解的写法。
+    local num_re='^[0-9]+(\.[0-9]+)?$'
+    if ! [[ "$TOTAL" =~ $num_re ]]; then
+        echo "BLOCKED: 覆盖率报告 $report 解析不出总行覆盖率(路径 $LLVM_COV_TOTAL_PATH)。" >&2
+        echo "  可能是 cargo-llvm-cov 输出格式变了:先更新 tests/fixtures/llvm-cov-summary.json,再改 LLVM_COV_TOTAL_PATH。" >&2
+        exit 2
+    fi
+    # 〔更正 MINOR-1;返工 W1〕llvm-cov 给的是 66.66666666666666 这种全精度值;与 Go 的 66.7% 同形,打印保留一位
+    # 小数。但**阈值比较用原始值**:QA 探针实测 79.96 经 %.1f 成 80.0 后越过了 80 的阈值——为「显示同形」做的
+    # 格式化不得改变判定值(Go 路径无此问题,go tool cover 原生一位小数)。R-F5 用 79.96 / 80.0 两份报告钉着。
+    RAW="$TOTAL"
+    TOTAL=$(LC_ALL=C printf '%.1f' "$RAW")
+    apply_task_floor
+    if [ "${RAW%.*}" -lt "$DEV_MIN" ]; then
+        echo "BLOCKED: Task-scope coverage ${TOTAL}% (原始值 ${RAW}) < dev_minimum ${DEV_MIN}%." >&2
+        exit 2
+    fi
+    echo "Task scope passes. Coverage: ${TOTAL}% (dev_minimum: ${DEV_MIN}%)"
     exit 0
-fi
-# 任务级 coverage_floor 覆盖全局 dev_minimum（历史包袱重的包按其既有水位设定）。
-# 必须放在这里而非文件头：TASK_ID 在第 26 行才解析出来。
-TASK_FLOOR=$(jq -r '.coverage_floor // empty' ".arcforge/tasks/${TASK_ID}.json" 2>/dev/null)
-if [ -n "$TASK_FLOOR" ]; then
-    echo "Task-level coverage_floor=${TASK_FLOOR} overrides dev_minimum=${DEV_MIN}"
-    DEV_MIN="$TASK_FLOOR"
-fi
+}
 
-if [ "${TOTAL%.*}" -lt "$DEV_MIN" ]; then
-    echo "BLOCKED: Task-scope coverage ${TOTAL}% < dev_minimum ${DEV_MIN}%." >&2
-    go tool cover -func="$COVERPROFILE" | grep -v "100.0%" >&2
-    exit 2
-fi
-
-echo "Task scope passes. Coverage: ${TOTAL}% (dev_minimum: ${DEV_MIN}%)"
-exit 0
+case "$(detect_language)" in
+    go)   gate_go ;;
+    rust) gate_rust ;;
+    ambiguous)
+        echo "BLOCKED: 仓库根同时有 go.mod 与 Cargo.toml,无法判定语言。" >&2
+        echo "  → 请在 arcforge.config.json 里写明 language（go 或 rust）。" >&2
+        exit 2 ;;
+    none)
+        # 非 Go 项目(无 go.mod)跳过 Go 专用门禁。**只跳过这一段**:上面的 scope 漂移校验、
+        # 空 scope 拒绝、无代码任务判定都与语言无关,却曾因这句早退而在框架自身仓库里一次都
+        # 没跑过(TASK-018)。文案逐字保留:T18-F1 钉着它。
+        echo "No go.mod found; skipping Go coverage gate."
+        exit 0 ;;
+esac

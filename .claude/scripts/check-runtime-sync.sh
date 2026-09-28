@@ -13,7 +13,7 @@
 # 3 是「本仓库压根没有模板可比」,把 3 也阻断就会卡死每一个消费项目的归档。
 # 老调用方若用 `check || ...`,2/3 都落入失败分支 —— 失效方向安全(宁可多拦不可静默放行)。
 # 校验范围:project-template/hooks ↔ .claude/hooks、project-template/scripts ↔
-# .claude/scripts(逐字节 cmp)、templates/write-matrix.json ↔ .arcforge/write-matrix.json
+# .claude/scripts(逐字节 cmp,**含子目录**,比对键为相对该目录的路径)、templates/write-matrix.json ↔ .arcforge/write-matrix.json
 # (jq -S 语义,键序无关,**逐顶层字段**比对并在文案里指名字段)。
 # settings 漂移由 test-settings-sync.sh 独立覆盖,不在此。
 # bash 3.2 兼容:不用数组;失败路径显式处理。
@@ -54,10 +54,28 @@ RUNTIME_ONLY_FIELDS="tokens"
 # 只会被**报成 DRIFT**(可见噪音,人一眼看见来改这里),不会被静默放过;不得改成「只放行
 # 认识的扩展名」的白名单——那正是 W3 要消灭的原病(旧代码只认 .sh,新噪音一样会撞上,
 # 只是换了个白名单形状)。
-IGNORE_FILE_NAMES=".DS_Store *.orig *.rej *.swp *~"
+# Python 字节码产物(TASK-016):`hooks/jev/__pycache__/*.pyc`。TASK-008 让比对下探子目录
+# 之后它才暴露出来——字节码是**构建产物**,运行时侧永远不会有它,于是恒报「模板侧存在而
+# 运行时缺失」。与 .DS_Store 同形,失效方向同样是阻断归档。
+#
+# 为什么源头治理不够、这一层不是保险而是必需(test-agent-1 隔离实测,推翻了原先的假设):
+#   路径 A  hook 执行(python3 xxx.py 走 __main__)   → 0 个 .pyc,模块顶部的
+#           sys.dont_write_bytecode 有效;
+#   路径 B  **测试导入**(unittest discover 直接 import)→ **2 个,那行无效** —— 它只对
+#           本进程内、该行之后的 import 生效,而测试根本不经过那个模块的顶部;
+#   路径 B' 测试加 -B                                  → 0 个。
+# **路径 B 才是实际产生那条 DRIFT 的路径。** 三层各管一段:模块顶部那行管 A、调用侧 -B
+# 管 B、本名单兜底管前两层漏掉的一切(新的 Python 入口、别人手跑一次不带 -B 的测试、
+# 将来引入的其它 Python 工具链)。仓库根的 .gitignore 一层都管不着:本检查走文件系统,
+# 不读 .gitignore。
+# `*.pyo` 自 Python 3.5 起已不再生成,仍列上:代价为零,而漏掉的代价是阻断归档。
+IGNORE_FILE_NAMES=".DS_Store *.orig *.rej *.swp *~ *.pyc *.pyo"
 is_ignored_file() { # <basename> —— 命中黑名单里任一 glob 即忽略,不比对也不计入 CHECKED_FILES
     local b="$1" pat
-    for pat in $IGNORE_FILE_NAMES; do
+    # `${...:-}` 不可省:脚本跑在 `set -u` 下,名单未定义时裸 $IGNORE_FILE_NAMES 会以
+    # 「unbound variable」中断整个校验(实测退出码 1,与「发现漂移」同码,**分辨不出来**)。
+    # 空名单是合法形态(谁都不忽略),未定义应当与空名单同义,而不是把校验打死。
+    for pat in ${IGNORE_FILE_NAMES:-}; do
         case "$b" in
             $pat) return 0 ;;
         esac
@@ -99,15 +117,25 @@ for PAIR in "project-template/hooks:.claude/hooks" "project-template/scripts:.cl
     SRC="${PAIR%%:*}"; DST="${PAIR#*:}"
     [ "$APPLICABLE" -eq 1 ] || continue
     [ -d "$SRC" ] || [ -d "$DST" ] || continue
-    # 并集:两侧文件名取并,消除「运行时独有 ⇒ 隐形」。不限 .sh:非脚本资产同样会漂移。
-    NAMES=$( { [ -d "$SRC" ] && find "$SRC" -maxdepth 1 -type f -exec basename {} \; ; \
-               [ -d "$DST" ] && find "$DST" -maxdepth 1 -type f -exec basename {} \; ; } | sort -u )
-    while IFS= read -r B; do
-        [ -n "$B" ] || continue
-        is_ignored_file "$B" && continue   # 黑名单命中:不比对,也不计入 CHECKED_FILES
-        if   [ ! -f "$SRC/$B" ]; then drift "$DST/$B 是运行时独有(模板侧不存在)"
-        elif [ ! -f "$DST/$B" ]; then drift "$DST/$B 缺失(模板侧存在)"
-        elif ! cmp -s "$SRC/$B" "$DST/$B"; then drift "$DST/$B 与 $SRC/$B 字节不一致"
+    # 比对键是**相对 PAIR 根的路径**,不是 basename(TASK-008)。两处理由:
+    #   · `-maxdepth 1` 只扫顶层 ⇒ 子目录里的运行时副本漂移**整个隐形**,与 W3 刚消灭的
+    #     「运行时独有 ⇒ 隐形」同形,只是从文件粒度挪到了目录粒度。hooks/jev/ 是 arcforge
+    #     第一个带子目录的 hook 包,它的 Python 代码全在子目录里。
+    #   · 即便下探,basename 仍会把 jev/mod.py 与顶层同名的 mod.py 混成同一个键。
+    # W3 的「两侧文件名并集、不限扩展名」语义不变,变的只是键;下游 "$SRC/$REL" /
+    # "$DST/$REL" 的拼接对相对路径同样成立,无需改动。
+    NAMES=$( { [ -d "$SRC" ] && ( cd "$SRC" && find . -type f ) ; \
+               [ -d "$DST" ] && ( cd "$DST" && find . -type f ) ; } \
+             | sed 's#^\./##' | sort -u )
+    while IFS= read -r REL; do
+        [ -n "$REL" ] || continue
+        # 忽略名单仍按 **basename** 判定:拿整条相对路径去匹配的话,不含通配符的
+        # .DS_Store 匹配不上 jev/.DS_Store —— 下探子目录后 I3 治的那个病(Finder 打开一次
+        # 目录就触发不豁免 --force 的归档硬阻断)会原样在子目录里复发。
+        is_ignored_file "${REL##*/}" && continue   # 黑名单命中:不比对,也不计入 CHECKED_FILES
+        if   [ ! -f "$SRC/$REL" ]; then drift "$DST/$REL 是运行时独有(模板侧不存在)"
+        elif [ ! -f "$DST/$REL" ]; then drift "$DST/$REL 缺失(模板侧存在)"
+        elif ! cmp -s "$SRC/$REL" "$DST/$REL"; then drift "$DST/$REL 与 $SRC/$REL 字节不一致"
         fi
         # 四个分支都是「对该文件下了判断」⇒ 都算比对过一项(缺失/独有也是一种结论)
         CHECKED_FILES=$((CHECKED_FILES + 1))

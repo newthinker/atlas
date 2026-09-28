@@ -857,6 +857,21 @@ case "$CMD" in
                 "只能对绑定到你实例的任务执行 dev_done"
         fi
         if [ "$NEW" = "dev_done" ]; then
+            # ⚠ 这里直接调 task-completed.sh,**不经** task-completed-jev.sh(TaskCompleted wrapper)。
+            # 那个 wrapper 的文件头自称「TaskCompleted 唯一入口」,于是把下面这行改接它看起来
+            # 像是顺手的统一化 —— 一行改动。**改之前请先读 wrapper 的退出码契约。**
+            #
+            # 同一个门禁,两个消费者的语义不一样:
+            #   · 这里(写通道):`if ! … bash "$GATE"` ⇒ **任何非零都 DENY**
+            #   · 原生 TaskCompleted 事件:**只认 exit 2**,其余非零只是非阻断的错误提示
+            # wrapper 是为后者写的,它把 Jev 的**非 2 的非零统统转成 0**(那表示「Jev 没能给出
+            # 判定」,按 fail-open 原则不该阻断)。把下面这行改接 wrapper,等于让写通道也接受
+            # 那套转换:门禁真红时仍会 DENY(2 照样透传),但 Jev 的判定会**第一次**获得阻断
+            # dev_done 的能力,而这从来不是它的设计目标。
+            #
+            # 另:今天两个消费者无害地共存,**纯粹因为 task-completed.sh 恰好只吐 0 和 2**。
+            # 这一点由 tests/hooks/test-task-completed.sh 的 XC 组钉着(字面 exit 码集合 ⊆ {0,2}
+            # 且无变量形态)。它是前提,不是保证 —— 加退出码会让 XC 组变红,那正是它存在的理由。
             GATE="$(dirname "$SELF")/task-completed.sh"
             if [ -f "$GATE" ]; then
                 if ! printf '{"task_id":"%s"}\n' "$TASK_ID" | bash "$GATE" >&2; then
