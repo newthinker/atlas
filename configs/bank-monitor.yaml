@@ -6,8 +6,30 @@ source:
   aktools_url: http://127.0.0.1:8180
 rank_by: npl            # npl | coverage | cet1
 banks:
-  - {market: CN_A, symbol: 600036.SH, name: 招商银行}
+  # 国有大型商业银行
+  - {market: CN_A, symbol: 601398.SH, name: 工商银行}
+  - {market: CN_A, symbol: 601288.SH, name: 农业银行}
+  - {market: CN_A, symbol: 601988.SH, name: 中国银行}
+  - {market: CN_A, symbol: 601939.SH, name: 建设银行}
+  - {market: CN_A, symbol: 601328.SH, name: 交通银行}
   - {market: CN_A, symbol: 601658.SH, name: 邮储银行}
+  # 股份制商业银行
+  - {market: CN_A, symbol: 600036.SH, name: 招商银行}
+  - {market: CN_A, symbol: 601166.SH, name: 兴业银行}
+  - {market: CN_A, symbol: 601998.SH, name: 中信银行}
+  - {market: CN_A, symbol: 600000.SH, name: 浦发银行}
+  - {market: CN_A, symbol: 600016.SH, name: 民生银行}
+  - {market: CN_A, symbol: 601818.SH, name: 光大银行}
+  - {market: CN_A, symbol: 000001.SZ, name: 平安银行}   # 必须带 .SZ：000001 与上证综指代码重名
+  - {market: CN_A, symbol: 600015.SH, name: 华夏银行}
+  - {market: CN_A, symbol: 601916.SH, name: 浙商银行}
+  # 城市商业银行
+  - {market: CN_A, symbol: 002142.SZ, name: 宁波银行}
+  - {market: CN_A, symbol: 600919.SH, name: 江苏银行}
+  - {market: CN_A, symbol: 601169.SH, name: 北京银行}
+  - {market: CN_A, symbol: 601009.SH, name: 南京银行}
+  - {market: CN_A, symbol: 601229.SH, name: 上海银行}
+  # 港股附注（取数走 a_share_ref，报告中以「同 600036.SH」附注出现）
   - {market: HK,   symbol: 3968.HK,   name: 招商银行H, a_share_ref: 600036.SH}
 thresholds:
   npl_max: 1.5          # %，> 即预警
