@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 // [TASK-004] functional[1] sender=nil 行为不变(明细进 out 且返回 nil)       → TestPrismRefreshDetailWithoutSenderUnchanged
 // [TASK-004] boundary      Failed+Degraded 皆空 → 只有汇总行,无明细段(负向)  → TestPrismRefreshNoDetailSectionWhenClean
 // [TASK-004] error_handling SendText 失败仍 warn 到 errOut、返回 nil,明细已进 out → TestPrismRefreshPrintsDetailEvenWhenSendFails
+// [TASK-006 tiingo] functional[2] usPriceHops 顺序/跳过/无 typed-nil              → TestUSPriceHopsOrderAndSkips
 
 type fakeSender struct {
 	sent []string
@@ -473,4 +475,33 @@ func TestPrismBackupClientsAreUntypedNilWhenUnconfigured(t *testing.T) {
 
 	assert.False(t, tushareClientOrNil("tok") == nil, "配置了 key 须返回可用客户端")
 	assert.False(t, twelvedataClientOrNil("key") == nil, "配置了 key 须返回可用客户端")
+}
+
+func TestUSPriceHopsOrderAndSkips(t *testing.T) {
+	names := func(hs []prism.PriceHop) []string {
+		var out []string
+		for _, h := range hs {
+			out = append(out, h.Name)
+		}
+		return out
+	}
+	assert.Empty(t, usPriceHops(nil))
+	assert.Equal(t, []string{"tiingo", "twelvedata"}, names(usPriceHops(map[string]config.CollectorConfig{
+		"tiingo": {Enabled: true, APIKey: "k"}, "twelvedata": {APIKey: "k2"},
+	})))
+	assert.Equal(t, []string{"twelvedata"}, names(usPriceHops(map[string]config.CollectorConfig{
+		"tiingo": {Enabled: false, APIKey: "k"}, "twelvedata": {APIKey: "k2"},
+	})), "tiingo 未启用不入链")
+	assert.Equal(t, []string{"twelvedata"}, names(usPriceHops(map[string]config.CollectorConfig{
+		"tiingo": {Enabled: true}, "twelvedata": {APIKey: "k2"},
+	})), "tiingo 缺 key 不入链")
+	assert.Equal(t, []string{"tiingo"}, names(usPriceHops(map[string]config.CollectorConfig{
+		"tiingo": {Enabled: true, APIKey: "k"},
+	})), "twelvedata 缺 key 不入链")
+	for _, h := range usPriceHops(map[string]config.CollectorConfig{
+		"tiingo": {Enabled: true, APIKey: "k"}, "twelvedata": {APIKey: "k2"},
+	}) {
+		assert.NotNil(t, h.Client, "%s: 不得有 typed-nil", h.Name)
+		assert.False(t, reflect.ValueOf(h.Client).IsNil(), "%s: 接口内指针不得为 nil", h.Name)
+	}
 }
