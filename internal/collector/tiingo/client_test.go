@@ -192,3 +192,36 @@ func TestClientTransportIgnoresProxy(t *testing.T) {
 	assert.Nil(t, tr.Proxy, "Proxy 必须为 nil：不继承 HTTP(S)_PROXY")
 	assert.Equal(t, 30*time.Second, c.hc.Timeout)
 }
+
+// QA L4：脱敏须不区分大小写——上游若回显大写形式的 token，区分大小写的替换会漏掉。
+func TestFetchHistoryRedactsCaseInsensitively(t *testing.T) {
+	srv, _ := serveBody(t, http.StatusInternalServerError, "oops "+strings.ToUpper(testKey))
+	_, err := NewWithBaseURL(testKey, srv.URL).FetchHistory("AAPL", day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.NotContains(t, strings.ToLower(err.Error()), testKey, "任何大小写形式的 token 都不得出现在错误里")
+	assert.Contains(t, err.Error(), "<redacted>")
+}
+
+// QA L5：不跟随重定向。Go 对同主机（哪怕换端口）的重定向会带上 Authorization，
+// Tiingo API 本身不需要重定向，故一律不跟随、按 HTTP 3xx 报错。
+func TestFetchHistoryDoesNotFollowRedirect(t *testing.T) {
+	target, targetLog := serveBody(t, http.StatusOK, "[]")
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	_, err := NewWithBaseURL(testKey, redirector.URL).FetchHistory("AAPL", day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP 302")
+	_, _, n := targetLog.last()
+	assert.Equal(t, 0, n, "重定向目标不得收到请求（否则 token 随之送出）")
+}
+
+// Skeptic S1：200 但响应体是错误对象时，原因不能被 decode 错误吞掉。
+func TestFetchHistoryDecodeErrorKeepsDetail(t *testing.T) {
+	srv, _ := serveBody(t, http.StatusOK, `{"detail": "Error: startDate is invalid"}`)
+	_, err := NewWithBaseURL(testKey, srv.URL).FetchHistory("AAPL", day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Error: startDate is invalid")
+}

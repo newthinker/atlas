@@ -11,6 +11,7 @@ package tiingo
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -130,4 +131,24 @@ func TestCollectorMetadataAndInit(t *testing.T) {
 	_, auth, n := log.last()
 	assert.Equal(t, 1, n)
 	assert.Equal(t, "Token k2", auth)
+}
+
+// QA L11：前一根收盘为 0 时不得算出 ±Inf（会进入 snapshot 的 JSON）。
+func TestCollectorFetchQuoteZeroPrevClose(t *testing.T) {
+	c, _ := testCollector(t, `[
+	  {"date": "2026-09-28T00:00:00.000Z", "open": 0, "high": 0, "low": 0, "close": 0, "volume": 1, "splitFactor": 1},
+	  {"date": "2026-09-29T00:00:00.000Z", "open": 1, "high": 1, "low": 1, "close": 105, "volume": 1, "splitFactor": 1}
+	]`)
+	q, err := c.FetchQuote("AAPL")
+	require.NoError(t, err)
+	assert.Equal(t, 0.0, q.ChangePercent)
+	assert.False(t, math.IsInf(q.ChangePercent, 0) || math.IsNaN(q.ChangePercent))
+}
+
+// QA L12：行情的 Symbol 是 atlas 形态（BRK.B），不是请求 Tiingo 用的 BRK-B。
+func TestCollectorFetchQuoteKeepsAtlasSymbol(t *testing.T) {
+	c, _ := testCollector(t, `[{"date": "2026-09-29T00:00:00.000Z", "open": 1, "high": 1, "low": 1, "close": 105, "volume": 1, "splitFactor": 1}]`)
+	q, err := c.FetchQuote("BRK.B")
+	require.NoError(t, err)
+	assert.Equal(t, "BRK.B", q.Symbol)
 }
