@@ -10,6 +10,7 @@ import "testing"
 // boundary[2]   空串/小写/6 字母/超长/双字母后缀 → false          → TestSupported（"形态"）
 //               + 澄清答复补的字母集合边界 BF.B → true、BRK.D → false
 // boundary[3]   P11 外国交易所与未登记指数 → false                → TestSupported（"P11"）
+//               + 返工 R1 补的基底数字守卫 7203/7203.A/9988 → false
 // non_functional[0] go test/gofmt/vet/覆盖率                       → 包级命令，非单测
 
 func TestSupported(t *testing.T) {
@@ -49,13 +50,18 @@ func TestSupported(t *testing.T) {
 		{"形态", "BRK.D", false},  // 后缀字母白名单 A–C 的上边界（TASK-003 questions[0] 裁决）
 
 		// P11（AD-19）：外国交易所后缀与未登记指数。MarketForSymbol 对它们兜底 US，
-		// 故只能由形态正则拒绝。7203.T 的 '.T' 本身是单字母后缀，靠基底排除数字。
+		// 故只能由形态正则拒绝。7203.T 在 AD-22 后同时被后缀规则拒（T ∉ A–C），
+		// 已不能区分基底规则。
 		{"P11", "SAP.DE", false},
 		{"P11", "HSBA.L", false},
 		{"P11", "RY.TO", false},
 		{"P11", "7203.T", false},
 		{"P11", "000300.SS", false},
 		{"P11", "931151.CSI", false},
+		// 基底排除数字的独立守卫（返工 R1）：无后缀或合法后缀，只能由基底 [A-Z] 拒。
+		{"P11", "7203", false},
+		{"P11", "7203.A", false},
+		{"P11", "9988", false},
 	}
 	for _, c := range cases {
 		if got := Supported(c.sym); got != c.want {
