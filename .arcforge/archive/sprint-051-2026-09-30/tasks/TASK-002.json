@@ -1,0 +1,72 @@
+{
+  "id": "TASK-002",
+  "title": "policy 内置表登记 tiingo.daily（internal/collector/policy）",
+  "description": "计划 Task 2：在 `NewTable` 中 `twelvedata.time_series` 之后登记 `tiingo.daily`：`Policy{TTL: builtinTTL, Coalesce: true, Quota: &Quota{Limit: 40, Window: time.Hour}}`；更新 Topics 集合等值测试与相关注释计数。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "tiingo",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/collector/policy/policy.go",
+    "internal/collector/policy/policy_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`NewTable().Lookup(\"tiingo.daily\")` 命中：Domain==\"tiingo\"、`Quota.Limit==40`、`Quota.Window==time.Hour`、`MinInterval==0`、`Coalesce==true`、`TTL==builtinTTL`（`TestBuiltinTiingoDailyQuota`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Topics 集合等值测试的 want 集合含 `tiingo.daily` 并通过（集合等值，非计数）；该测试文件内提到的主题计数注释与实际一致。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "配额超额：用 `NewMemStore()` 与内置表 `tiingo.daily` 策略构造的 Gate，同一窗口内第 41 次（不同 key）`policy.Fetch` 返回 `ErrQuotaExceeded` 且 fetch 回调未被执行（计数 = 40）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`ApplyTTL` 以全局 TTL（如 5m）作用后，`tiingo.daily` 的 TTL 被提升而 Quota 保持 40/1h 不变。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "TTL 覆盖保配额：`ApplyTTL(5m)` 后再 `Override(\"tiingo.daily\", {TTL: 6h})`（与 `cmd/atlas/policy.go` 的顺序一致），`Lookup` 得 TTL 6h 且 Quota 仍为 40/1h。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 ./internal/collector/policy/` ok；`go vet ./internal/collector/policy/` 无输出；包覆盖率不低于基线 94.4%（-func）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-tg-b",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "packages": [
+    "./internal/collector/policy"
+  ],
+  "writes": [
+    "./internal/collector/policy/policy.go",
+    "./internal/collector/policy/policy_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:37Z"
+  },
+  "verify_baseline": {
+    "head": "b6c6a25740823b5e1b02f67e084bf6e7ad7f4f90",
+    "discovery_sha256": "094be471a63c470773fdd6d75a1db71086afa7ed0e2691db765f130afdb8f8af",
+    "at": "2026-09-30T10:47:26Z"
+  }
+}

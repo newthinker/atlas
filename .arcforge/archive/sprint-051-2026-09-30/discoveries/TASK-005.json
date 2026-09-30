@@ -1,0 +1,48 @@
+{
+  "task": "TASK-005",
+  "author": "dev-tg-d",
+  "key_findings": [
+    "collector.go 按计划 Task 5 Step 3 草稿实现，仅 Init 一处偏离（见 decisions）。gate_wiring_test 登记按 AD-7 归 TASK-007，本任务未碰 cmd/atlas。",
+    "白名单与 interval 检查都在调用 client 之前：拒绝路径不进 Gate、不发 HTTP、不占 40/h 配额（测试以服务端请求计数 0 为判据）。",
+    "FetchQuote 是 EOD 拼装：now−10 天内末两根日线，Time=末根 K 线日期、Source=tiingo_eod；ChangePercent 为百分数（×100）。"
+  ],
+  "decisions": [
+    {"decision": "Init 用 NewWithBaseURL(cfg.APIKey, c.client.baseURL)，而非计划草稿的 New(cfg.APIKey)", "rationale": "DoD functional[0] 要求观测到 Init 后请求头为 `Token k2`；草稿写法会把 client 指回生产端点，httptest 上无法观测且测试会真连外网。NewCollector 本就是生产端点，生产行为不变"},
+    {"decision": "测试的请求计数与观测复用 client_test.go 的 serveBody/reqLog，只新增 testCollector、requests 两个辅助", "rationale": "避免同包重名（先 grep 了全部 *_test.go 顶层声明）；计划草稿里的 atomic 计数器与 reqLog.n 等价"},
+    {"decision": "code-simplifier 跳过", "rationale": "AD-23：由 Leader 在 QA 前对整条分支统一补跑"}
+  ],
+  "files_modified": [
+    "internal/collector/tiingo/collector.go",
+    "internal/collector/tiingo/collector_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Collector struct{ client *Client; now func() time.Time }；var _ collector.Collector = (*Collector)(nil)",
+    "func NewCollector(apiKey string) *Collector —— 生产端点、now=time.Now",
+    "Name()=\"tiingo\"；SupportedMarkets()=[core.MarketUS]；Start/Stop 恒 nil",
+    "func (c *Collector) Init(cfg collector.Config) error —— 空 APIKey 报错；否则换 key、沿用当前端点",
+    "func (c *Collector) FetchHistory(symbol string, start, end time.Time, interval string) ([]core.OHLCV, error) —— 仅 \"1d\"（否则错误含 interval），不在白名单错误含 `unsupported symbol`，均不发 HTTP",
+    "func (c *Collector) FetchQuote(symbol string) (*core.Quote, error) —— 白名单拒绝不发 HTTP；零根错误含 `no recent bars`",
+    "测试辅助（collector_test.go）：testCollector(t, body) (*Collector, *reqLog)、requests(*reqLog) int——同包后续测试不得重名"
+  ],
+  "verification": {
+    "commit": "290dbbc7ea66a4d809561d13341dab31997839ab",
+    "merged_into": "feature/tiingo-source @ f43495731ba45e05451542f97e59d52b27664021",
+    "file_sha256_on_merged_tree_equals_commit": true,
+    "suite": "go test -count=1 -race -cover ./internal/collector/tiingo/ @ f434957：ok，覆盖率 95.6%",
+    "gofmt_vet": "gofmt -l / go vet 均无输出 @ f434957",
+    "mutation": "隔离副本 16/16 KILLED（均可编译）：Init 不换 key、Init 不校验空 key、FetchHistory 不查白名单、FetchQuote 不查白名单、不查 interval、回看 7 天、ChangePercent 小数、Time 取 now、Source 改名、取首根、零根不报错、单根也算 PrevClose（越界 panic 致红，崩溃型杀死）、Name 改名、Market 非 US、Low 取 High、Start 报错",
+    "done_criteria_map": {
+      "functional[0]": "var _ 编译期断言 / TestCollectorMetadataAndInit",
+      "functional[1]": "TestCollectorFetchQuoteFromLastTwoBars",
+      "functional[2]": "TestCollectorFetchQuoteStartDate",
+      "functional[3]": "TestCollectorFetchHistoryPassthrough",
+      "boundary[0]": "TestCollectorFetchQuoteSingleBarAndEmpty",
+      "error_handling[0]": "TestCollectorRejectsUnsupportedWithoutHTTP / TestCollectorRejectsNonDaily / TestCollectorMetadataAndInit（Init 空 key）",
+      "non_functional[0]": "上方 suite/gofmt_vet"
+    },
+    "caveats": [
+      "code-simplifier 按 AD-23 未跑",
+      "detect-changes（npx gitnexus，索引 77398b4）：新文件无已索引符号重叠"
+    ]
+  }
+}

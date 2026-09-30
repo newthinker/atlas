@@ -1,0 +1,71 @@
+{
+  "task_id": "TASK-001",
+  "author": "dev-tg-a",
+  "key_findings": [
+    "Registry.GetAll 原先遍历 map，返回顺序随机；5 个调用方隐式依赖其顺序（兜底链、每市场首个、collectors[0]）。",
+    "gitnexus impact（npx gitnexus@1.6.12，索引落后 HEAD 14 commit）：Registry.GetAll risk=CRITICAL（impactedCount 11，processes 10，modules 4，直接调用方仅解析出 SelectExternalForSymbol）；Registry.Register risk=CRITICAL（impactedCount 7，direct 3：runBacktest、newCollectorRegistry、Server.setupRoutes）。按名字 GetAll 查询还命中 notifier/FundamentalRegistry 等同名方法（UNKNOWN），与本改动无关。",
+    "索引未解析 internal/app/app.go 的 GetAll 调用（orderedCollectors:557、Status:649、GetCollectors:953），grep '\\.GetAll\\(\\)' 补查确认；internal/router/router.go:122 与 app.go:650-651 是 notifier/strategy registry，不受影响。",
+    "detect-changes --scope staged：risk critical，把 Get 列为 changed——系行号位移，Get 函数体未改（diff hunk 可证）。"
+  ],
+  "decisions": [
+    {
+      "decision": "新增 order []string 记录首次注册顺序，Register 同名只覆盖实例不改 order，GetAll 按 order 构造结果",
+      "rationale": "计划 Task 1 草稿；保持签名不变，零调用方改动；同名覆盖保持原位置使运行时重注册不会改变兜底链次序"
+    },
+    {
+      "decision": "GetAll 以 len(r.order) 预分配并返回非 nil 空切片",
+      "rationale": "DoD boundary[0]：空 Registry 返回长度 0 切片不 panic；测试同时断言非 nil"
+    },
+    {
+      "decision": "并发测试用 8 组 goroutine，各自注册同一组 10 个名字（不同名+同名混合）并并发 GetAll，-race 下断言长度==10 且无重复名",
+      "rationale": "DoD non_functional[0]；同名重注册追加 order 的错误实现会被长度断言抓到"
+    }
+  ],
+  "callers_after_change": [
+    {
+      "caller": "internal/app/app.go orderedCollectors",
+      "behavior": "首选 collector（SelectForSymbol）在前，其余按注册顺序作为有序兜底链；此前兜底次序随机"
+    },
+    {
+      "caller": "internal/collector/selector.go SelectExternalForSymbol",
+      "behavior": "仅当路由 collector 与 yahoo 均未注册时走末级兜底，现确定地返回第一个注册的非 qlib collector；此前随机"
+    },
+    {
+      "caller": "cmd/atlas/serve.go buildArbitrator",
+      "behavior": "每个市场取注册顺序中第一个 SupportedMarkets 包含该市场的 collector；此前多个同市场 collector 间随机"
+    },
+    {
+      "caller": "cmd/atlas/serve.go backtest.New(collectors[0])",
+      "behavior": "固定用第一个注册的 collector；此前随机"
+    },
+    {
+      "caller": "internal/api/server.go setupRoutes（经 App.GetCollectors 重新注册到新 Registry）",
+      "behavior": "按原注册顺序重新注册，新 Registry 保留同一顺序，顺序语义沿链路传递"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/registry.go",
+    "internal/collector/registry_test.go"
+  ],
+  "interfaces_exposed": [
+    "(*collector.Registry).GetAll() []Collector：按首次注册顺序返回；Register 同名覆盖保持原位置。签名不变。"
+  ],
+  "verification": {
+    "commit": "e11918a9484dec4adf3f4654e1a6c198a6d1a9a9",
+    "merged_into": "feature/tiingo-source @ 9af0cd3550ff158d2e05f07a44b8065663a34c77",
+    "sampled_on": "主仓库 feature/tiingo-source @ 9af0cd3550ff158d2e05f07a44b8065663a34c77（merge 后、最后一次改动之后统一重采）",
+    "done_criteria_tests": {
+      "functional[0]": "TestRegistry_GetAllKeepsRegistrationOrder",
+      "functional[1]": "TestRegistry_ReRegisterKeepsPosition",
+      "boundary[0]": "TestRegistry_GetAllEmpty",
+      "non_functional[0]": "TestRegistry_ConcurrentRegisterGetAll",
+      "non_functional[1]": "go test -count=1 ./internal/collector/ ./internal/app/ ./cmd/atlas/ 三包 ok；go vet ./internal/collector/ 无输出",
+      "non_functional[2]": "本文件 key_findings + callers_after_change"
+    },
+    "registry_tests": "go test -count=1 -run TestRegistry_ -v ./internal/collector/：6 PASS（2 既有 + 4 新增）；-race 通过",
+    "coverage": "./internal/collector 包 100.0% statements；registry.go 四个函数均 100%",
+    "red_evidence": "实现前 TestRegistry_GetAllKeepsRegistrationOrder FAIL（第 1 次即顺序错乱）",
+    "mutations": "在私有 worktree 中 2/2 KILLED：M1 同名也追加 order（ReRegister+Concurrent 红）；M2 重注册移到末尾（ReRegister 红）；还原后 sha256 一致",
+    "simplifier": "code-simplifier 自报无改动，前后 sha256 比对一致（registry.go cd9e0109…, registry_test.go 699a9cf6…）"
+  }
+}

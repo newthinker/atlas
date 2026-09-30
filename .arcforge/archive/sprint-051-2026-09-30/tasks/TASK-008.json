@@ -1,0 +1,75 @@
+{
+  "id": "TASK-008",
+  "title": "集成冒烟测试与 prism 降级演练（integration 标签）",
+  "description": "计划 Task 8 Step 1–4：新建 `internal/collector/tiingo/client_integration_test.go` 与 `internal/prism/tiingo_integration_test.go`（`//go:build integration`，`ATLAS_TIINGO_TOKEN` 缺失则 Skip）。真实 API 运行与上线动作（Step 3 带 token 运行、Step 5）为人类动作，不在 DoD 内（AD-9）。Realistic Scope 例外：跨两包，仅测试文件（AD-14）。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。 **同包测试名占用（dev-tg-d 于 TASK-004 提醒）**：tiingo 包测试已定义 TestMain、testDefaultGate、gateWith（main_test.go）、testKey、reqLog、serveBody、serveFixture（client_test.go）、cachingGate（gate_test.go）、day、fp、row、loadSample（normalize_test.go）——不得重复定义，不得再写 TestMain；新增辅助前先 `grep -n '^func\\|^var\\|^const' internal/collector/tiingo/*_test.go`。",
+  "module": "tiingo",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/collector/tiingo/client_integration_test.go",
+    "internal/prism/tiingo_integration_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`go vet -tags integration ./internal/collector/tiingo/ ./internal/prism/` 无输出（两个集成测试文件可编译）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "未设 `ATLAS_TIINGO_TOKEN` 时 `go test -tags integration -run 'Integration|LiveDrill' -count=1 -v` 两个测试均为 SKIP（输出含 `--- SKIP`），包结果 ok。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "集成测试断言内容覆盖：AAPL 与 BRK.B 近 30 天非空且每根 Close 非 NaN 且 > 0；prism 演练用 fake yahoo 失败 + 真实 tiingo 单跳，断言降级文案含 `tiingo fallback ok`。",
+        "verify_by": "review"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "不带 `-tags integration` 时两个文件不参与编译：`go test -count=1 ./internal/collector/tiingo/ ./internal/prism/` 的测试列表中不出现 `TestTiingoIntegration` / `TestFetchClosesTiingoLiveDrill`。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "测试源码与提交中不出现任何 token 字面量（仅读环境变量）。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004",
+    "TASK-006"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-004",
+    "TASK-006"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-tg-c",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "packages": [
+    "./internal/collector/tiingo",
+    "./internal/prism"
+  ],
+  "writes": [
+    "./internal/collector/tiingo/client_integration_test.go",
+    "./internal/prism/tiingo_integration_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:38Z"
+  },
+  "verify_baseline": {
+    "head": "b3232d6f3e2b07610bafe31e7381add623fdb442",
+    "discovery_sha256": "fca91e7a3eb1ca3fc9f779b9accb00eb371ea3efdefabbc4f5c933c71ee588bc",
+    "at": "2026-09-30T12:18:18Z"
+  }
+}

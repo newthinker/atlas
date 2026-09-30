@@ -1,0 +1,39 @@
+{
+  "task_id": "TASK-008",
+  "author": "dev-tg-c",
+  "key_findings": [
+    "计划 Task 8 草稿在基准 3700b40 上可直接编译：tiingo.New / Client.FetchHistory、prism.fetchCloses(us, hops, symbol, start, end) / PriceHop{Name, Client} / fakeUS2{failPrice} 签名均与草稿一致。",
+    "prism 包无 TestMain，演练里 tiingo.New 快照的是 policy.Default() 懒构造的内置表 Gate；其 QuotaStore 为 nil（仅内存计数），不落盘、不碰生产配置或数据库。tiingo 包则由既有 TestMain 装零策略 Gate。",
+    "gofmt -l internal/prism/ 报 sankey/template_test.go，基准 3700b40 上即如此，非本任务引入。",
+    "本环境未设 ATLAS_TIINGO_TOKEN：两测试的真实断言路径未执行，只验证了编译、Skip 与 tag 隔离；真实运行是人类动作（AD-9）。"
+  ],
+  "decisions": [
+    {
+      "decision": "prism 演练的降级文案用 assert.Equal 逐字断言 \"NVDA: yahoo price failed (drill: yahoo down), tiingo fallback ok\"，而非草稿的 Contains \"tiingo fallback ok\"",
+      "rationale": "P17 规定单跳成功文案带 yahoo 失败原因且无前序失败跳；fake 的 yahoo 错误文本受控，逐字断言可同时守住前缀、原因与无多余失败跳，且蕴含 DoD 要求的子串"
+    },
+    {
+      "decision": "prism 演练补逐根 Close > 0 断言",
+      "rationale": "与 tiingo 冒烟对称；零价格进入策略计算是真实风险"
+    },
+    {
+      "decision": "只读环境变量取 token，缺失即 t.Skip；未用伪造 token 做任何网络调用",
+      "rationale": "DoD non_functional[0]；Leader 指示不找/不伪造 token"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/tiingo/client_integration_test.go",
+    "internal/prism/tiingo_integration_test.go"
+  ],
+  "interfaces_exposed": [],
+  "verification": {
+    "commit": "f4d21239104d27ed456460f2c4348015d27d9f14",
+    "merged_into": "feature/tiingo-source @ b3232d6f3e2b07610bafe31e7381add623fdb442（f4d2123 为祖先，两文件内容一致）",
+    "vet": "go vet -tags integration ./internal/collector/tiingo/ ./internal/prism/ 无输出 rc=0（b3232d6）",
+    "skip": "env -u ATLAS_TIINGO_TOKEN go test -tags integration -run 'Integration|LiveDrill' -count=1 -v：两测试 --- SKIP，两包 ok（b3232d6）",
+    "tag_isolation": "不带 tag 的 go test -list '.*' 两包中两测试名出现 0 次；带 tag 时两者均在列表（b3232d6 / f4d2123）",
+    "token_literal": "两文件仅 os.Getenv(\"ATLAS_TIINGO_TOKEN\")；提交 diff 中 token 赋值字面量 0 处",
+    "code_simplifier": "按 AD-23 由 Leader 兜底，本人未运行",
+    "detect_changes": "npx gitnexus@latest detect-changes --scope staged --repo atlas：新文件无已索引符号重叠"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "task_id": "TASK-006",
+  "author": "dev-tg-a",
+  "key_findings": [
+    "impact（AD-10）：gitnexus CLI 1.6.12（索引建于 77398b4）对 fetchCloses/Refresh/refreshEngine/refreshEdgar/runPrismRefresh 解析失效——按名查询五者均 risk=CRITICAL，impactedCount 210/229 且彼此雷同，d1 含 scripts/qlib_warehouse/build_warehouse.py、hestia/crisis 等无关符号；按 -f <file> 或 uid 查询均 'Target not found'；context 返回的节点无 filePath/uid，入边为 mergeByBusinessKey 等无关符号。判定为 UNKNOWN（不采信 CRITICAL，也不当作 LOW），已报 Leader。",
+    "grep 补查（生产代码）：prism.Refresh 仅 cmd/atlas/prism.go runPrismRefresh 调用；refreshEngine 仅 Refresh 内两处（engine 分支、edgar→engine 兜底）；refreshEdgar 仅 Refresh 内一处；fetchCloses 仅 refreshEngine/refreshEdgar；runPrismRefresh 仅 prismRefreshCmd.RunE。测试中 Refresh 调用 51 处，除 TestRefreshUSPriceFallsBackToTwelvedata / TestRefreshUSPriceTwelvedataEmptyIsNotSuccess 外均传字面量 nil（对 []PriceHop 仍可编译，语义为无备用跳）。",
+    "detect-changes --scope staged 同样失真：列出 fakeStore.latest、errFallbackNoData 等未改动符号，未列出实际改动的 fetchCloses/Refresh/usPriceHops。",
+    "Refresh 文档注释原写「ts/td 为 nil」；cmd/atlas/prism.go 的 typed-nil 注释原写「Refresh 里的 td != nil」——两处均已随签名变更更正（td 判定移到 usPriceHops）。"
+  ],
+  "decisions": [
+    {
+      "decision": "fetchCloses 维护两条并行字符串：errMsg（全败时的错误，格式沿用 '; <name> fallback: <e>'）与 degMsg（成功时的降级文案，追加 ', <name> failed (<e>)'）",
+      "rationale": "人类裁决 P17 要求降级文案附前序失败跳原因；全败错误串格式由 DoD error_handling[0] 逐字规定且与旧单跳格式兼容。两者格式不同，不能共用一个累加器"
+    },
+    {
+      "decision": "hops 为空时保持 fmt.Errorf(\"price history: %w\", err)；有跳时用 errors.New(errMsg)（不保链）",
+      "rationale": "DoD boundary[1] 仅要求 nil hops 时 errors.Is(err, yerr)；有跳时与改动前单跳分支（%v）一致，不扩大行为变更"
+    },
+    {
+      "decision": "零行沿用 errFallbackNoData，文案中显示为 'fallback source returned no data'",
+      "rationale": "DoD boundary[0] 逐字文案即 errFallbackNoData 的消息；与既有 tushare 兜底零行语义统一"
+    },
+    {
+      "decision": "fetchCloses 不对 h.Client==nil 做防御",
+      "rationale": "唯一生产装配点 usPriceHops 保证不入 nil/typed-nil（TestUSPriceHopsOrderAndSkips 用 reflect 断言），不为不可能场景加分支"
+    },
+    {
+      "decision": "usPriceHops 复用 twelvedataClientOrNil；tiingo 要求 Enabled && APIKey!=\"\"",
+      "rationale": "DoD functional[2]；twelvedata 沿用既有「有 key 即用」判据，不改变现有部署行为"
+    },
+    {
+      "decision": "新测试直接测 fetchCloses（包内），既有两个 Refresh 级测试改传 []PriceHop{{Name: \"twelvedata\", Client: td}} 且断言不改",
+      "rationale": "DoD boundary[1] 点名要求；fetchCloses 级测试可逐字断言文案与调用记录"
+    }
+  ],
+  "files_modified": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go",
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go"
+  ],
+  "interfaces_exposed": [
+    "type prism.PriceHop struct{ Name string; Client TwelvedataClient }",
+    "func prism.Refresh(cfg, store, lix, us, ak, ed, ts TushareClient, usHops []PriceHop, now time.Time) Report —— 仅原 td 位置类型改变；nil/空 = 无备用跳，行为与改动前 td==nil 一致",
+    "cmd/atlas: func usPriceHops(collectors map[string]config.CollectorConfig) []prism.PriceHop —— 顺序 tiingo→twelvedata，未配置的跳不入链",
+    "降级文案格式：'<sym>: yahoo price failed (<yerr>)[, <n_i> failed (<e_i>)]*, <n_k> fallback ok'；全败错误：'price history: <yerr>[; <n_i> fallback: <e_i>]+'"
+  ],
+  "verification": {
+    "commit": "21cbc4d19154bfc76cd8ab968f6fd34c855458b2",
+    "merged_into": "feature/tiingo-source @ f610117544c05de58508d9b4c4a8c3723c700626",
+    "file_sha256_on_merged_tree_equals_commit": true,
+    "sampled_on": "主仓库 feature/tiingo-source @ f610117544c05de58508d9b4c4a8c3723c700626（merge 后统一重采）",
+    "suite": "go test -count=1 -race -cover ./internal/prism/ ./cmd/atlas/：两包 ok（prism 94.0%，cmd/atlas 79.3%，各自单包口径）；未用 -shuffle（AD-16）",
+    "gate_coverage": "门禁口径 -coverpkg=./internal/prism,./cmd/atlas 合并 82.9%；fetchCloses 100%、usPriceHops 100%、Refresh 97.6%、refreshEngine 95.2%、refreshEdgar 91.2%、runPrismRefresh 0%（装配壳，历来 0%）",
+    "vet_gofmt": "go vet 两包无输出；gofmt -l 四个改动文件无输出；go build ./... 通过",
+    "targeted_tests": "-run 'TestFetchCloses|TestRefreshUSPrice|TestUSPriceHops'：10 PASS / 0 FAIL",
+    "red_evidence": "实现前编译失败 undefined: PriceHop / prism.PriceHop",
+    "done_criteria_map": {
+      "functional[0]": "TestFetchClosesSecondHopSucceeds",
+      "functional[1]": "TestFetchClosesFirstHopSucceedsSkipsRest / TestFetchClosesYahooOKCallsNoHop",
+      "functional[2]": "TestUSPriceHopsOrderAndSkips",
+      "boundary[0]": "TestFetchClosesEmptyHopFallsThrough",
+      "boundary[1]": "TestFetchClosesNoHopsKeepsPrefix / TestFetchClosesSingleHopMatchesLegacyFormat / TestRefreshUSPriceFallsBackToTwelvedata / TestRefreshUSPriceTwelvedataEmptyIsNotSuccess（后两者仅改实参）",
+      "error_handling[0]": "TestFetchClosesAllHopsFail",
+      "non_functional[0]": "上方 suite/vet + key_findings impact",
+      "non_functional[1]": "review：cmd/atlas/prism.go runPrismRefresh 中 usHops := usPriceHops(cfg.Collectors) 并传入 prism.Refresh(…, ts, usHops, time.Now())"
+    },
+    "mutation": "隔离副本（tempfile 拷贝，源树 sha256 前后一致）：M1 文案不附前序失败跳（计划草稿写法）KILLED；M2 成功后继续调后续跳 KILLED；M3 零行视为成功 KILLED；M4 无跳 %v 断链 KILLED；M5 错误串不累加 KILLED；M6 usPriceHops 忽略 Enabled KILLED；M7' 两块对调顺序 KILLED（原 M7 为等价变异已作废——tiingo 块先执行时前插与后插同效）；M8 twelvedata 无 key 仍入 typed-nil KILLED；M9 runPrismRefresh 改传 nil SURVIVED（装配壳 0% 覆盖，DoD 定为 review 项）",
+    "simplifier": "按 AD-23 由 Leader 在 QA 前统一补跑，dev 侧未跑"
+  }
+}

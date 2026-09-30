@@ -1,0 +1,65 @@
+{
+  "task_id": "TASK-007",
+  "author": "dev-tg-b",
+  "commit": "fa345831f31e4bfd0a109a3fb4b38862181779a2",
+  "merged_into": "feature/tiingo-source @ 3700b40c48ad28e5833366c5893a1dff547c825b（TASK-006 已于 f610117 先合入）",
+  "key_findings": [
+    "buildCollectors 在 baostock 块之后、wireQlibWarehouse 之前登记 tiingo.NewCollector(collectorCfg.APIKey)，条件 enabled && APIKey != \"\"。行号（合并树 3700b40）：collectors.go:101-104 为 tiingo 块，collectors.go:109 为 wireQlibWarehouse ⇒ tiingo 先于 qlib；另有 TestBuildCollectors_TiingoBeforeQlib 用临时 sqlite 真启用 warehouse 做运行期断言。",
+    "先装配闸门、后构造（合并树 3700b40 行号）：serve —— serve.go:85 initPolicyGate(cfg, log) → serve.go:108 buildCollectors → collectors.go:102 tiingo.NewCollector；prism —— runPrismRefresh 在 prism.go:185 调 loadConfigOrDefaults()，其内 export_ohlcv.go:297 initPolicyGate(cfg, nil)，之后 prism.go:212 usPriceHops(cfg.Collectors) → prism.go:174 tiingo.New(tc.APIKey)。",
+    "gate_wiring 的 collectorCtors 只在 runCrisisBackfill/runCrisisEval/runBacktest 三个函数体内按字面名扫描：prism 的 tiingo.New 在 usPriceHops 内、serve 调的是 tiingo.NewCollector，均不在扫描范围；已在登记处注释如实写明（AD-11）。usPriceHops 在本任务基线 f434957 上尚不存在，由 TASK-006 引入，已在合并树上核实存在（prism.go:171）。",
+    "impact(buildCollectors, upstream) = UNKNOWN（索引落后、无解析调用方）；grep 补查调用方：serve.go:108（serve）与 watchlist.go:64（atlas watchlist，AD-13 接受）。detect-changes --scope staged = low，仅识别 collectorCtors 一个符号（同样因索引落后，buildCollectors 未被识别）。",
+    "gofmt -l cmd/atlas 报 backtest_test.go —— 基线 f434957 即如此，与本任务无关，未改。"
+  ],
+  "decisions": [
+    {
+      "decision": "注册顺序用 GetCollectors() 逐元素断言，另立 collectorSeq/buildSeq helper",
+      "rationale": "既有 collectorNames 会排序，只能判集合；boundary[0] 要求「其余序列完全相同」，同样需要顺序。"
+    },
+    {
+      "decision": "boundary[0] 的比较基准是同一配置去掉 tiingo 后的实际序列（非写死列表），并断言基准非空",
+      "rationale": "直接对应「与不配置 tiingo 时完全相同」；非空检查防空真。"
+    },
+    {
+      "decision": "functional[1] 用测试真启用 qlib（临时 sqlite 文件建一张表，wireQlibWarehouse 只 open+ping）而非仅行号论证",
+      "rationale": "DoD 优先「如测试可构造」；已构造成功。行号作为补充依据一并给出。"
+    },
+    {
+      "decision": "示例配置注释的检查用原文子串（tiingo.daily: / ttl: 6h / 40 次/时）",
+      "rationale": "注释不进 config.Load 解码结果，只能读原文。"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/collectors.go",
+    "cmd/atlas/collectors_test.go",
+    "cmd/atlas/gate_wiring_test.go",
+    "configs/config.example.yaml"
+  ],
+  "interfaces_exposed": [
+    "无新接口；serve/watchlist 的 registry 在 tiingo 启用且有 key 时多一个名为 \"tiingo\" 的 collector，位于 baostock 之后、qlib 之前"
+  ],
+  "verification": {
+    "anchor": "合并树 feature/tiingo-source @ 3700b40c48ad28e5833366c5893a1dff547c825b（本任务 4 文件与 fa34583 零 diff）",
+    "commands": [
+      "go test -count=1 ./cmd/atlas/ ./internal/...",
+      "go vet ./cmd/atlas/ ./internal/collector/... ./internal/prism/"
+    ],
+    "results": "全部 ok（非 ok 行 0 条）；vet 无输出；未用 -shuffle（AD-16）",
+    "coverage_cmd_atlas": {
+      "go_test": "79.6%",
+      "cover_func_total": "79.8%",
+      "profile_block_sum": "1325/1664 = 79.63%",
+      "floor": 78
+    },
+    "mutation": "collectors.go 5 个变异（在 worktree 基线树上跑）：挪到 qlib 后 / 去 key 判空 / 去 Enabled / 挪到 tushare 前 均 KILLED；M1 传空 key 存活——与 DoD nf[3] 预判一致（Collector 的 key 未导出、base URL 不可注入），以 diff 审查判定：collectors.go:102 传的是 collectorCfg.APIKey",
+    "dod_map": {
+      "functional[0]": "TestBuildCollectors_RegistersTiingoLast",
+      "functional[1]": "TestBuildCollectors_TiingoBeforeQlib + 行号 collectors.go:101-104 < 109",
+      "functional[2]": "TestExampleConfigDeclaresTiingo",
+      "boundary[0]": "TestBuildCollectors_SkipsTiingoWhenUnconfigured",
+      "non_functional[0]": "gate_wiring_test.go collectorCtors 的 tiingo.New 登记及其注释（review）",
+      "non_functional[1]": "key_findings[1] 行号（review）",
+      "non_functional[2]": "verification 数字",
+      "non_functional[3]": "collectors.go:102 collectorCfg.APIKey（review）"
+    }
+  }
+}

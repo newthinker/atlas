@@ -1,0 +1,72 @@
+{
+  "id": "TASK-001",
+  "title": "Registry.GetAll 按注册顺序返回（internal/collector/registry.go）",
+  "description": "计划 Task 1：`Registry` 增加 `order []string`，`Register` 新名追加、同名覆盖保持原位置，`GetAll` 按 order 返回；签名不变。改动既有符号，须先 impact（AD-10）。依赖 GetAll 顺序的调用方（独立 reviewer P12 实测，计划 Step 1 的 grep 找不全）：`app.orderedCollectors`、`selector.go` SelectExternalForSymbol、`serve.go` buildArbitrator（每市场取首个）、`serve.go` backtest.New(collectors[0])、`internal/api/server.go` 经 GetCollectors 重新注册。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "tiingo",
+  "complexity": "low",
+  "estimated_files": [
+    "internal/collector/registry.go",
+    "internal/collector/registry_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "注册 yahoo, eastmoney, crypto, tushare, baostock, tiingo, qlib 七个 collector 后，连续 100 次调用 `GetAll()` 返回的名字序列每次都逐元素等于注册顺序（`TestRegistry_GetAllKeepsRegistrationOrder`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "注册 a、b 后再注册一个新的同名 a 实例：`GetAll()` 长度为 2，`[0]` 与新实例**指针相等**，`[1].Name()==\"b\"`；`Get(\"a\")` 也返回新实例。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "空 Registry 的 `GetAll()` 返回长度 0 的切片（不 panic）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "并发安全：一个测试里多 goroutine 同时 `Register`（不同名与同名混合）与 `GetAll`，`go test -race ./internal/collector/` 无 data race 且结束后 `GetAll()` 无重复名、长度等于不同名个数。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "回归：`go test -count=1 ./internal/collector/ ./internal/app/ ./cmd/atlas/` 三包全部 ok；`go vet ./internal/collector/` 无输出。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "discovery 记录 `Register`/`GetAll` 的 impact 风险级别，并逐一列出 description 点名的 5 个依赖顺序的调用方及各自改动后的行为。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-tg-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "packages": [
+    "./internal/collector"
+  ],
+  "writes": [
+    "./internal/collector/registry.go",
+    "./internal/collector/registry_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:37Z"
+  },
+  "verify_baseline": {
+    "head": "b6c6a25740823b5e1b02f67e084bf6e7ad7f4f90",
+    "discovery_sha256": "523eb0918405f465e625d1a0380bbd2dea3d7e4446217237e548c530762cd9db",
+    "at": "2026-09-30T10:46:37Z"
+  }
+}

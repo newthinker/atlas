@@ -1,0 +1,46 @@
+{
+  "task": "TASK-009",
+  "author": "dev-tg-d",
+  "key_findings": [
+    "normalize 按计划 Task 4 Step 5 草稿实现，未偏离；计划测试杀不死的 4 个变异（Open 不折算、Volume 截断、sf<=0→sf==0、去掉排序）已由补测杀死。",
+    "非整数因子用 volume=3、其后 splitFactor=1.5：3×1.5=4.5 为精确浮点值，math.Round 得 5、截断得 4，能区分四舍五入与截断。",
+    "坏 splitFactor 所在行即使落在截取窗口之外也会让整段失败：折算依赖全量行，这一点由测试固定。"
+  ],
+  "decisions": [
+    {"decision": "测试直接调用 normalize，不经 HTTP/Gate", "rationale": "本任务只写 normalize.go；client/main_test.go 属 TASK-004，直接调用让本任务不依赖 policy 闸门配置"},
+    {"decision": "day() 与 fp()/row()/loadSample() 定义在 normalize_test.go", "rationale": "Leader 要求 day() 放这里供 TASK-004 复用；同包测试共用命名空间，TASK-004 不得重复定义这四个名字"},
+    {"decision": "变异在临时副本上跑，不动 worktree", "rationale": "CLAUDE.md 变异测试纪律"}
+  ],
+  "files_modified": [
+    "internal/collector/tiingo/normalize.go",
+    "internal/collector/tiingo/normalize_test.go",
+    "internal/collector/tiingo/testdata/nvda_split_sample.json"
+  ],
+  "interfaces_exposed": [
+    "type priceRow struct{ Date string; Open, High, Low, Close, Volume, SplitFactor *float64 }（json: date/open/high/low/close/volume/splitFactor；指针区分 null）",
+    "func normalize(symbol string, rows []priceRow, start, end time.Time) ([]core.OHLCV, error) —— 先折算后截取，[start,end] 按日闭区间；0 根返回非 nil 空切片；splitFactor 非有限或 <=0 返回 nil 与含 `invalid splitFactor` 及该行日期的错误（无 tiingo: 前缀，由 TASK-004 的 wrapErr 包装）",
+    "测试辅助（normalize_test.go）：func day(s string) time.Time（YYYY-MM-DD → UTC 零点，坏输入 panic）；func fp(v float64) *float64；func row(date string, price, volume, splitFactor float64) priceRow；func loadSample(t *testing.T) []priceRow（读 testdata/nvda_split_sample.json）"
+  ],
+  "verification": {
+    "commit": "ce80996e32f1c8da5755232d49359baf81c9f3c0",
+    "merged_into": "feature/tiingo-source @ d1a8d6acd4b420bfe70ac56a927fa5b64a4b964d（merge f00b653）",
+    "file_sha256_on_merged_tree_equals_commit": true,
+    "suite": "go test -count=1 -race -cover ./internal/collector/tiingo/ @ d1a8d6a：ok，覆盖率 97.0%（worktree 单独提交时 96.8%，合入 TASK-003 后整包为 97.0%）",
+    "gofmt_vet": "gofmt -l / go vet 均无输出 @ d1a8d6a",
+    "mutation": "12/12 KILLED（隔离副本，均非编译失败）：Open 不折算、Volume 截断、sf==0、去排序、lo 不截断、缺价行丢因子、空结果 nil、不查 Low、null 因子视 0、不查 NaN、volume null 不记 0、hi 开区间",
+    "done_criteria_map": {
+      "functional[0]": "TestNormalizeNVDASplitAndClip",
+      "functional[1]": "TestNormalizeEndBeforeLaterSplitStillAdjusted",
+      "boundary[0]": "TestNormalizeNonIntegerFactorRoundsVolume",
+      "boundary[1]": "TestNormalizeUnorderedInput",
+      "boundary[2]": "TestNormalizeSkipsBadRows",
+      "boundary[3]": "TestNormalizeClipInclusiveByDay",
+      "error_handling[0]": "TestNormalizeRejectsInvalidSplitFactor",
+      "non_functional[0]": "上方 suite/gofmt_vet"
+    },
+    "caveats": [
+      "code-simplifier 前后 sha256 一致，但其回复只有「Ignored as instructed. I made no changes」，看起来没有实际审查",
+      "node .gitnexus/run.cjs 报 pnpm MODULE_NOT_FOUND；改用 npx -y gitnexus@latest detect-changes --scope staged：新文件无已索引符号重叠"
+    ]
+  }
+}

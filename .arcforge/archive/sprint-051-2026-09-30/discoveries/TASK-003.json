@@ -1,0 +1,56 @@
+{
+  "task_id": "TASK-003",
+  "author": "dev-tg-c",
+  "key_findings": [
+    "DoD boundary[3] 要求 HSBA.L=false，与 AD-19 推荐正则 ^[A-Z]{1,5}([.-][A-Z])?$ 矛盾（HSBA.L 与 BRK.B 形态同构，推荐正则下仅此 1 条红）；经 questions[0] 澄清，Leader 裁决后缀字母白名单 A–C（AD-22）。",
+    "ETH 形态上是合法美股代码，只能靠路由表 'ETH*' → MarketCrypto 拒绝——它是 Supported 中 MarketForSymbol 合取项的唯一守卫用例（变异「该合取恒真」仅 ETH 转红）。",
+    "930713.CSI 由 MarketForSymbol 的 IsAShareIndex 前置规则判 CNA，同时也被形态正则拒（基底含数字），两层都拦。",
+    "返工 R1（test-tg-a，task_defect）：AD-22 把后缀收到 A–C 后，7203.T 被后缀规则拒（T ∉ A–C），不再经过基底规则 ⇒ 变异「基底 [A-Z]→[A-Z0-9]」在首版测试下存活。首版自测的两个变异只覆盖后缀字母集与 MarketForSymbol 合取，漏了基底字符集。补 7203 / 7203.A / 9988（MarketForSymbol 均判 US，只能由基底规则拒）后该变异 KILLED。"
+  ],
+  "decisions": [
+    {
+      "decision": "reTicker = ^[A-Z]{1,5}([.-][A-C])?$，Supported = reTicker 匹配 && collector.MarketForSymbol == core.MarketUS",
+      "rationale": "AD-19 基底纯字母 1–5 位（排除 7203、9988 这类数字基底；7203.T 在 AD-22 后同时被后缀规则拒，不能用来守卫基底）；questions[0] 裁决后缀 A–C（区分 HSBA.L 与 BRK.B，失败方向安全：少覆盖不耗配额）；MarketForSymbol 合取拦加密前缀形态"
+    },
+    {
+      "decision": "测试补 BF.B=true、BRK.D=false 作为字母集合边界",
+      "rationale": "questions[0] 答复要求；BRK.D 在旧正则 [A-Z] 下转红，证明边界有效"
+    },
+    {
+      "decision": "toTicker 只做 '.'→'-'，不做校验",
+      "rationale": "计划 Task 3 草稿；调用方应先过 Supported"
+    },
+    {
+      "decision": "返工 R1：补 7203、7203.A、9988 → false 作为基底排除数字的独立守卫，并更正测试与实现注释",
+      "rationale": "DoD boundary[3] 更新要求；三条分别覆盖「无后缀」「合法后缀」两种形态，确保只能由基底规则拒"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/tiingo/symbols.go",
+    "internal/collector/tiingo/symbols_test.go"
+  ],
+  "interfaces_exposed": [
+    "func Supported(symbol string) bool —— 美股/ETF 白名单（包 tiingo）",
+    "func toTicker(symbol string) string —— 未导出，BRK.B → BRK-B"
+  ],
+  "known_limitations": [
+    "AD-12：路由表加密前缀（UNI*/LINK*/ADA*/DOT* 等）使部分真实美股被拒",
+    "AD-22：份额类后缀 D 及以后（罕见）被拒"
+  ],
+  "verification": {
+    "commit": "5ce608f6d700da70acd2699b577acd52d77e7364（首版 1a1573f8bc0311149ef83caa709b233ef6f7d78d）",
+    "merged_into": "feature/tiingo-source @ 46bc54a3456b8137597ebd8e4923d935f56932ef（两文件与 5ce608f 内容一致）",
+    "suite": "TestSupported 33 条 + TestToTicker 2 条，全绿（采自 46bc54a）",
+    "coverage": "整包 97.0%（含 TASK-009 normalize.go），采自 46bc54a",
+    "gofmt_vet": "gofmt -l 与 go vet 均无输出（46bc54a）",
+    "mutations": "隔离副本（git worktree --detach），基于 5ce608f 的内容：对照组全绿；N8 基底 [A-Z0-9] → 7203/7203.A/9988 红；后缀 [A-Z] → BRK.D/HSBA.L 红；(MarketForSymbol==US || true) → ETH 红。主 worktree 指纹前后一致。",
+    "code_simplifier": "两轮前后 sha256 均一致，无改动",
+    "detect_changes": "npx gitnexus@latest detect-changes --scope staged --repo atlas：无已索引符号重叠；但索引停在 8d1c6cc、不含 tiingo 包，该结论信息量有限"
+  },
+  "rework": {
+    "round": 1,
+    "reason": "verification R1：变异 N8（基底加数字）存活，注释「7203.T 靠基底排除数字」在 AD-22 后为假",
+    "fix_commit": "5ce608f6d700da70acd2699b577acd52d77e7364",
+    "assignment_epoch": 2
+  }
+}
