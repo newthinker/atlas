@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -14,7 +15,8 @@ import (
 // Context Checkpoint: done_criteria → test mapping
 // functional[0]     "内置主题齐全且数值平移(yahoo 500ms/tushare 200ms/twelvedata 8s, Coalesce=true)"
 //                                                          → TestLookupBuiltinTopics（8 个具体主题）
-//                                                          + TestLixingerWildcardTTLOnly（第 9 个登记主题 lixinger.* 的 Coalesce）
+//                                                          + TestLixingerWildcardTTLOnly（第 10 个登记主题 lixinger.* 的 Coalesce）
+//                                                          + TestBuiltinTiingoDailyQuota（第 9 个登记主题 tiingo.daily，TASK-002）
 // functional[1]     "daily_basic 带 Quota{5,24h,Asia/Shanghai}；其余 tushare 主题 Quota 为 nil"
 //                                                          → TestDailyBasicQuota / TestOtherTushareTopicsHaveNoQuota
 // functional[2]     "三段查表：精确 → <域>.* 通配 → 未登记；lixinger 只补 TTL"
@@ -149,7 +151,8 @@ func TestLixingerWildcardTTLOnly(t *testing.T) {
 	if p.Domain != "lixinger" {
 		t.Errorf("Domain = %q, want lixinger", p.Domain)
 	}
-	// lixinger.* 是第 9 个登记主题，TestLookupBuiltinTopics 只覆盖了另外 8 个。
+	// lixinger.* 是第 10 个登记主题，TestLookupBuiltinTopics 只覆盖了前 8 个（第 9 个
+	// tiingo.daily 由 TestBuiltinTiingoDailyQuota 覆盖）。
 	// functional[0] 要求「登记主题 Coalesce 默认 true」，这里补上最后一个。
 	if !p.Coalesce {
 		t.Error("lixinger.* 也是登记主题，Coalesce 应为 true")
@@ -214,15 +217,16 @@ func TestDisableTTLKeepsThrottle(t *testing.T) {
 	// 三层断言，每层守一个**不同的被测对象**，不可合并也不可省略。
 	//
 	// ① 对 Topics() 做**集合等值**。此前用的「基数 + 逐元素 Lookup 命中」有三条
-	//    实测逃逸：返 9 个 lixinger.* 域内假名（Lookup 是三段查表，任何
+	//    实测逃逸：返与登记数等量的 lixinger.* 域内假名（Lookup 是三段查表，任何
 	//    lixinger.<任意> 都经通配段命中，该谓词**宽于**「已登记主题」）、返同一
-	//    主题重复 9 次、以及前者与「DisableTTL 只清 lixinger.*」组合后全绿逃逸。
-	//    集合等值不给任何逼近的余地。want 的 9 个主题名从实现直读
+	//    主题重复登记数次、以及前者与「DisableTTL 只清 lixinger.*」组合后全绿逃逸。
+	//    集合等值不给任何逼近的余地。want 的 13 个主题名从实现直读
 	//    （grep 't\.Set("' policy.go），不凭记忆写。
 	want := []string{
 		"yahoo.chart", "yahoo.eps", "yahoo.quote",
 		"tushare.daily", "tushare.index_daily", "tushare.hk_daily", "tushare.daily_basic",
 		"twelvedata.time_series", "lixinger.*",
+		"tiingo.daily", // TASK-002
 		// TASK-015 补登记：maybeCache 原本覆盖这三家，首版内置表漏了 ⇒ 缓存丢失回归
 		"eastmoney.*", "crypto.*", "baostock.*",
 	}
@@ -445,5 +449,107 @@ func TestOverrideRecomputesDomain(t *testing.T) {
 	p, _ := tbl.Lookup("shared.endpoint")
 	if p.Domain != "shared" {
 		t.Errorf("Domain = %q, want \"shared\"（从通配条目继承 Domain 会让限流域串味）", p.Domain)
+	}
+}
+
+// ---- TASK-002：tiingo.daily（小时配额 40，设计 docs/superpowers/specs/2026-09-30-tiingo-source-design.md §3.4）----
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0]     "Lookup(tiingo.daily) 命中且 Domain/Quota 40/1h/MinInterval 0/Coalesce/TTL=builtinTTL"
+//                                                          → TestBuiltinTiingoDailyQuota
+// functional[1]     "Topics 集合等值 want 含 tiingo.daily；本文件主题计数注释与实际一致"
+//                                                          → TestDisableTTLKeepsThrottle（want 集合）
+// boundary[0]       "内置 tiingo.daily 策略 + MemStore：第 41 次（不同 key）Fetch 返 ErrQuotaExceeded 且 fn 计数 = 40"
+//                                                          → TestTiingoDailyQuotaBlocksFortyFirst
+// boundary[1]       "ApplyTTL 提升 TTL，Quota 保持 40/1h"   → TestTiingoDailyApplyTTLKeepsQuota
+// boundary[2]       "ApplyTTL(5m) 后 Override(TTL 6h)：TTL 6h 且 Quota 仍 40/1h"
+//                                                          → TestTiingoDailyOverrideTTLKeepsQuota
+// non_functional[0] go test / go vet / 覆盖率 ≥ 94.4%       → 包级命令，见 discovery
+
+func TestBuiltinTiingoDailyQuota(t *testing.T) {
+	p, ok := NewTable().Lookup("tiingo.daily")
+	if !ok {
+		t.Fatal("tiingo.daily 应为内置主题")
+	}
+	if p.Domain != "tiingo" {
+		t.Errorf("Domain = %q, want tiingo", p.Domain)
+	}
+	if p.Quota == nil || p.Quota.Limit != 40 || p.Quota.Window != time.Hour {
+		t.Errorf("Quota = %+v, want 40/1h（免费档 50/h、1000/d：40×24=960 兼顾日上限）", p.Quota)
+	}
+	if p.MinInterval != 0 {
+		t.Errorf("MinInterval = %v, want 0（只靠配额，不节流）", p.MinInterval)
+	}
+	if !p.Coalesce || p.TTL != builtinTTL {
+		t.Errorf("Coalesce/TTL = %v/%v, want true/%v", p.Coalesce, p.TTL, builtinTTL)
+	}
+}
+
+// TestTiingoDailyQuotaBlocksFortyFirst 用**内置表**的策略（不是手搭的 Quota）走 Gate：
+// 钉住的是「登记的数值真能把第 41 次请求挡在发出之前」。每次用不同 key，
+// 否则 TTL 缓存命中根本不走配额（TestCacheHitDoesNotConsumeQuota）。
+//
+// 小时窗口按 time.Now() 截断：41 次调用若恰好跨整点，账本会在中途归零、
+// 第 41 次被放行。故跨窗口时重跑一轮（连续两轮都跨整点不可能）。
+func TestTiingoDailyQuotaBlocksFortyFirst(t *testing.T) {
+	p, ok := NewTable().Lookup("tiingo.daily")
+	if !ok || p.Quota == nil {
+		t.Fatalf("tiingo.daily 须登记且带 Quota: ok=%v p=%+v", ok, p)
+	}
+	q := *p.Quota
+	for attempt := 0; attempt < 2; attempt++ {
+		start := windowStart(time.Now(), q)
+		g := New(NewTable(), NewMemStore())
+		fnCalls := 0
+		fn := func() (int, error) { fnCalls++; return 1, nil }
+
+		var err error
+		for i := 1; i <= 41; i++ {
+			if _, err = Fetch(g, "tiingo.daily", fmt.Sprintf("k%d", i), fn); i <= 40 && err != nil {
+				t.Fatalf("第 %d 次应放行: %v", i, err)
+			}
+		}
+		if !windowStart(time.Now(), q).Equal(start) {
+			continue // 跨整点，本轮无效
+		}
+		if !errors.Is(err, ErrQuotaExceeded) {
+			t.Fatalf("第 41 次 err = %v, want ErrQuotaExceeded", err)
+		}
+		if fnCalls != 40 {
+			t.Errorf("超额请求必须在发出前被拦下: fn 调用 %d 次, want 40", fnCalls)
+		}
+		return
+	}
+	t.Fatal("连续两轮都跨整点，不应发生")
+}
+
+func TestTiingoDailyApplyTTLKeepsQuota(t *testing.T) {
+	tbl := NewTable()
+	tbl.ApplyTTL(30 * time.Minute) // 与 builtinTTL 不同，才看得出「被提升」
+	p, _ := tbl.Lookup("tiingo.daily")
+	if p.TTL != 30*time.Minute {
+		t.Errorf("TTL = %v, want 30m（tiingo.daily 本来就缓存，应被全局 TTL 提升）", p.TTL)
+	}
+	assertTiingoQuota(t, p)
+}
+
+// TestTiingoDailyOverrideTTLKeepsQuota 按 cmd/atlas/policy.go 的顺序：先 ApplyTTL
+// 全局 TTL、再按主题 Override。只覆盖 TTL 时配额必须原样保留（字段级覆盖）。
+func TestTiingoDailyOverrideTTLKeepsQuota(t *testing.T) {
+	tbl := NewTable()
+	tbl.ApplyTTL(5 * time.Minute)
+	ttl := 6 * time.Hour
+	tbl.Override("tiingo.daily", Override{TTL: &ttl})
+	p, _ := tbl.Lookup("tiingo.daily")
+	if p.TTL != 6*time.Hour {
+		t.Errorf("TTL = %v, want 6h", p.TTL)
+	}
+	assertTiingoQuota(t, p)
+}
+
+func assertTiingoQuota(t *testing.T, p Policy) {
+	t.Helper()
+	if p.Quota == nil || p.Quota.Limit != 40 || p.Quota.Window != time.Hour {
+		t.Errorf("Quota = %+v, want 40/1h 不变", p.Quota)
 	}
 }
