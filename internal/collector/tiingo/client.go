@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -49,8 +50,14 @@ func NewWithBaseURL(apiKey, baseURL string) *Client {
 	return &Client{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		hc:      &http.Client{Timeout: 30 * time.Second, Transport: tr},
-		gate:    policy.Default(),
+		hc: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: tr,
+			// 不跟随任何重定向：Go 对同主机（哪怕换端口、https→http）的重定向会带上
+			// Authorization，而 Tiingo API 本身不需要重定向；3xx 由 statusErr 报成 HTTP 3xx（QA L5）。
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		gate: policy.Default(),
 	}
 }
 
@@ -60,12 +67,12 @@ func (c *Client) wrapErr(format string, args ...any) error {
 	return fmt.Errorf("tiingo: %s", c.redact(fmt.Sprintf(format, args...)))
 }
 
-// redact 抹掉 apiKey。空 key 不替换。
+// redact 抹掉 apiKey，不区分大小写（上游回显的大小写形式无法预知，QA L4）。空 key 不替换。
 func (c *Client) redact(s string) string {
 	if c.apiKey == "" {
 		return s
 	}
-	return strings.ReplaceAll(s, c.apiKey, "<redacted>")
+	return regexp.MustCompile("(?i)"+regexp.QuoteMeta(c.apiKey)).ReplaceAllLiteralString(s, "<redacted>")
 }
 
 // mapPolicyErr 把 policy 哨兵错误换成本包的临时错误；必须在 policy.Fetch 返回处调用。
@@ -114,6 +121,13 @@ func (c *Client) fetchHistory(symbol string, start, end time.Time) ([]core.OHLCV
 	}
 	var rows []priceRow
 	if err := json.Unmarshal(raw, &rows); err != nil {
+		// 200 但响应体是 {"detail": …} 错误对象时，原因不能被 decode 错误吞掉（Skeptic S1）。
+		var e struct {
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal(raw, &e) == nil && e.Detail != "" {
+			return nil, c.wrapErr("%s: error body with HTTP 200: %s", symbol, e.Detail)
+		}
 		return nil, c.wrapErr("%s: decode: %v", symbol, err)
 	}
 	out, err := normalize(symbol, rows, start, end)

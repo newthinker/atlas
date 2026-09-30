@@ -43,6 +43,7 @@ collectors:
     api_key: ""
     markets: ["CN_A", "HK"]
   # Twelve Data: 美股价格备源(免费层 8 req/min,客户端内置 8s 最小间隔)
+  # ⚠ prism 价格链只看 api_key:填了 key 即启用,enabled 不生效(既有行为);tiingo 则需 enabled 且有 key。
   twelvedata:
     enabled: false
     api_key: ""

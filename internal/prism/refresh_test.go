@@ -1547,3 +1547,11 @@ func TestFetchClosesSingleHopMatchesLegacyFormat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "NVDA: yahoo price failed (yahoo 503), twelvedata fallback ok", deg, "单跳成功文案与改动前逐字一致")
 }
+
+// QA L14：PriceHop.Client 的类型名改为中性的 PriceHistoryClient（tiingo 与 twelvedata 共用）；
+// TwelvedataClient 保留为别名，二者须是同一类型，既有调用方不受影响。
+var (
+	_ PriceHistoryClient = (*fakeTD)(nil)
+	_ TwelvedataClient   = PriceHistoryClient(nil)
+	_                    = PriceHop{Client: TwelvedataClient(nil)}
+)

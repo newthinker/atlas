@@ -24,8 +24,10 @@ type priceRow struct {
 // normalize 把 Tiingo 原始价折算为 yahoo chart close 口径（拆股调整、不含分红，设计 §2.4）
 // 并截取 [start, end]（按日，闭区间）。折算须在截取之前对全量行进行：
 // t 日 O/H/L/C ÷ t 之后（不含 t）所有行 splitFactor 之积，Volume × 同一积。
-// 坏日期的行整行丢弃；O/H/L/C 任一缺失的行不输出，但其 splitFactor 仍参与累乘——
-// 拆股当日恰好缺价时若连因子一起丢，此前全部价格会错一个倍数。
+// 坏日期的行整行丢弃，但若它带非 1 的 splitFactor 则整段失败——无法定位在时间轴上的
+// 因子该乘给哪些行无从判断，静默丢弃会让价格错倍而 err=nil（QA L1）。
+// O/H/L/C 任一缺失的行不输出，但其 splitFactor 仍参与累乘——拆股当日恰好缺价时若连因子
+// 一起丢，此前全部价格会错一个倍数。同一日期出现两行 → 整段失败（无法判断哪行可信，QA L2）。
 // 任一 splitFactor 非有限或 ≤0 → 整段失败。
 func normalize(symbol string, rows []priceRow, start, end time.Time) ([]core.OHLCV, error) {
 	type bar struct {
@@ -34,16 +36,22 @@ func normalize(symbol string, rows []priceRow, start, end time.Time) ([]core.OHL
 	}
 	var bars []bar
 	for _, r := range rows {
-		if len(r.Date) < 10 {
-			continue
-		}
-		t, err := time.Parse("2006-01-02", r.Date[:10])
+		// 过短的日期串与格式错误同属坏日期，必须走同一条因子检查。
+		t, err := time.Parse("2006-01-02", r.Date[:min(len(r.Date), 10)])
 		if err != nil {
+			if r.SplitFactor != nil && *r.SplitFactor != 1 {
+				return nil, fmt.Errorf("%s: unparseable date %q with splitFactor %v", symbol, r.Date, *r.SplitFactor)
+			}
 			continue
 		}
 		bars = append(bars, bar{t, r})
 	}
 	sort.Slice(bars, func(i, j int) bool { return bars[i].t.Before(bars[j].t) })
+	for i := 1; i < len(bars); i++ {
+		if bars[i].t.Equal(bars[i-1].t) {
+			return nil, fmt.Errorf("%s: duplicate date %s", symbol, bars[i].t.Format("2006-01-02"))
+		}
+	}
 
 	lo := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
 	hi := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)

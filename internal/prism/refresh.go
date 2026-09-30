@@ -66,17 +66,19 @@ type TushareClient interface {
 	FetchHKDaily(symbol string, start, end time.Time) ([]tushare.PricePoint, error)
 }
 
-// TwelvedataClient is the subset of *twelvedata.Client used as the US price
-// second hop. 只补价格,EPS 链路不变。
-type TwelvedataClient interface {
+// PriceHistoryClient 是美股价格备用跳的窄接口（*tiingo.Client、*twelvedata.Client 均满足）。
+// 只补价格,EPS 链路不变。
+type PriceHistoryClient interface {
 	FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error)
 }
 
+// TwelvedataClient 是 PriceHistoryClient 的别名，保留旧名使既有调用方无需改动（QA L14）。
+type TwelvedataClient = PriceHistoryClient
+
 // PriceHop 是美股价格降级链上的一跳（设计 docs/superpowers/specs/2026-09-30-tiingo-source-design.md §3.5）。
-// Client 沿用 TwelvedataClient 这个窄接口：tiingo 与 twelvedata 的 FetchHistory 签名相同。
 type PriceHop struct {
 	Name   string
-	Client TwelvedataClient
+	Client PriceHistoryClient
 }
 
 // errFallbackNoData:兜底源返回零行。兜底跳只在主源已失败时触发,此时「零行」无法与

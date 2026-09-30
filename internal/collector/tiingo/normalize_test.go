@@ -224,3 +224,25 @@ func TestNormalizeRejectsInvalidSplitFactor(t *testing.T) {
 		assert.Contains(t, err.Error(), "2024-06-20")
 	}
 }
+
+// QA L1：坏日期行无法定位在时间轴上，它带的非 1 因子该乘给哪些行无从判断。
+// 静默丢弃会让拆股前的价格错一个倍数而 err=nil，故整段失败；因子为 1 或缺失时照旧只丢这一行。
+func TestNormalizeBadDateWithSplitFails(t *testing.T) {
+	rows := []priceRow{row("2024-06-03", 100, 1, 1), {Date: "bad", SplitFactor: fp(10)}}
+	_, err := normalize("AAPL", rows, day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unparseable date")
+
+	rows = []priceRow{row("2024-06-03", 100, 1, 1), {Date: "bad"}}
+	bars, err := normalize("AAPL", rows, day("2024-06-01"), day("2024-06-30"))
+	require.NoError(t, err, "坏日期行无因子时照旧丢弃")
+	require.Len(t, bars, 1)
+}
+
+// QA L2：同一日期两行会让因子乘两次、输出重复 bar；无法判断哪行可信，整段失败。
+func TestNormalizeDuplicateDateFails(t *testing.T) {
+	rows := []priceRow{row("2024-06-03", 100, 1, 1), row("2024-06-04", 50, 1, 2), row("2024-06-04", 50, 1, 2)}
+	_, err := normalize("AAPL", rows, day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate date 2024-06-04")
+}
