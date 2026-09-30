@@ -1,0 +1,91 @@
+{
+  "id": "TASK-007",
+  "title": "serve 装配注册 tiingo（最后一个外部兜底）+ 配置示例 + gate_wiring 登记",
+  "description": "计划 Task 7 + 计划 Task 5 中的 `gate_wiring_test.go` 改动（AD-7）：`cmd/atlas/collectors.go` 在 baostock 注册块之后、`wireQlibWarehouse` 之前注册 `tiingo.NewCollector`；`configs/config.example.yaml` 在 twelvedata 块之后加 tiingo 示例；`collectorCtors` 加 `\"tiingo.New\": true` 并在注释如实写明它不守护 prism/serve（AD-11）。改动既有函数 `buildCollectors`，须先 impact（AD-10）。`atlas watchlist` 也经 buildCollectors 获得 tiingo（AD-13，接受）。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "tiingo",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/collectors.go",
+    "cmd/atlas/collectors_test.go",
+    "cmd/atlas/gate_wiring_test.go",
+    "configs/config.example.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "yahoo+eastmoney+tushare(key)+tiingo(key)、Prism.Enabled 时，`GetCollectors()` 名字序列逐元素等于 `[yahoo, eastmoney, tushare, baostock, tiingo]`（依赖 TASK-001 有序 GetAll）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Registry 中 tiingo 位于 qlib 之前：启用 qlib warehouse 的配置下（如测试可构造），tiingo 下标 < qlib 下标；若 qlib 在测试中无法启用，discovery 须给出 `collectors.go` 中两段代码的行号作为顺序依据。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`config.example.yaml` 的 `collectors` 下有 `tiingo:` 块（`enabled: false`、`api_key: \"\"`、`markets: [\"US\"]`），注释含 `tiingo.daily` TTL 6h 建议与「prism/serve 共用 40 次/时」的提示；该示例能被 `config.Load` 加载。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "tiingo `Enabled:false`+key、或 `Enabled:true` 缺 key：均不登记 tiingo，且其余 collector 的名字序列与不配置 tiingo 时完全相同（R18）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "`gate_wiring_test.go` 的 `collectorCtors` 含 `\"tiingo.New\": true`，其相邻注释写明该登记不守护 prism 的 `usPriceHops` 与 serve 的 `tiingo.NewCollector`。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "discovery 给出 prism（`export_ohlcv.go` 的 initPolicyGate）与 serve（`serve.go` 的 initPolicyGate）先装配闸门、后构造 collector 的行号。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`go test -count=1 ./cmd/atlas/ ./internal/...` 全绿、`go vet ./cmd/atlas/ ./internal/collector/... ./internal/prism/` 无输出；cmd/atlas 覆盖率 ≥ coverage_floor 78（-func 与 profile 求和两把尺都报，AD-8）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`collectors.go` 注册 tiingo 时传入的是 `collectorCfg.APIKey`（reviewer C5：传空 key 的变异在名字断言下存活；以 diff 审查判定）。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-001",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-tg-b",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/collectors.go",
+    "./cmd/atlas/collectors_test.go",
+    "./cmd/atlas/gate_wiring_test.go",
+    "./configs/config.example.yaml"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-b",
+  "coverage_floor": 78,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:38Z"
+  },
+  "verify_baseline": {
+    "head": "3700b40c48ad28e5833366c5893a1dff547c825b",
+    "discovery_sha256": "0adcd50e15f86ce96887800fbc54dae25c687db2fbefff908389cd152aaed6a5",
+    "at": "2026-09-30T12:10:03Z"
+  }
+}

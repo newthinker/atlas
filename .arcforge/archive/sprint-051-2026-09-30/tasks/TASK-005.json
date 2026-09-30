@@ -1,0 +1,84 @@
+{
+  "id": "TASK-005",
+  "title": "collector.Collector 实现 collector.go（internal/collector/tiingo）",
+  "description": "计划 Task 5：新建 `Collector`/`NewCollector`，实现 Name/SupportedMarkets/Init/Start/Stop/FetchHistory/FetchQuote。**与计划差异**：`cmd/atlas/gate_wiring_test.go` 的 `collectorCtors` 登记挪到 TASK-007（AD-7，每任务 ≤1 package）。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。 **同包测试名占用（dev-tg-d 于 TASK-004 提醒）**：tiingo 包测试已定义 TestMain、testDefaultGate、gateWith（main_test.go）、testKey、reqLog、serveBody、serveFixture（client_test.go）、cachingGate（gate_test.go）、day、fp、row、loadSample（normalize_test.go）——不得重复定义，不得再写 TestMain；新增辅助前先 `grep -n '^func\\|^var\\|^const' internal/collector/tiingo/*_test.go`。",
+  "module": "tiingo",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/tiingo/collector.go",
+    "internal/collector/tiingo/collector_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "编译期断言 `var _ collector.Collector = (*Collector)(nil)`；`NewCollector(\"k\")`：Name==\"tiingo\"、SupportedMarkets==[US]、Start/Stop 返回 nil；`Init(Config{APIKey:\"k2\"})` 返回 nil 且之后请求头 `Authorization` 为 `Token k2`（观测到 key 真的被替换）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`FetchQuote(\"AAPL\")` 用末两根（09-28 C100、09-29 O100 H106 L99 C105 V20）拼装：Price 105、PrevClose 100、Change 5、ChangePercent 5（百分数）、Open 100、High 106、Low 99、Volume 20、Time=2026-09-29、Source `tiingo_eod`、Market US、Symbol AAPL。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`FetchQuote` 请求的 startDate 为注入的 now 减 10 天（now=2026-09-30 ⇒ `startDate=2026-09-20`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`FetchHistory(\"AAPL\", …, \"1d\")` 透传到 client 并返回折算后的 bars。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "单根时 Price=该收盘、PrevClose/Change/ChangePercent 均为 0；零根时错误含 `no recent bars`。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "Review Focus 4：600036.SH、0700.HK、^GSPC、GC=F、BTC-USD 的 `FetchHistory` 与 `FetchQuote` 均报错（FetchHistory 错误含 `unsupported symbol`），且服务端请求计数为 0；`interval=\"1h\"` 报错含 `interval` 且请求计数为 0；`Init(Config{})` 报错。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 -race ./internal/collector/tiingo/` 全绿，包覆盖率 ≥ 80%，`go vet` 无输出。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-003",
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-003",
+    "TASK-004",
+    "TASK-009"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-tg-d",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "packages": [
+    "./internal/collector/tiingo"
+  ],
+  "writes": [
+    "./internal/collector/tiingo/collector.go",
+    "./internal/collector/tiingo/collector_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:38Z"
+  },
+  "verify_baseline": {
+    "head": "f43495731ba45e05451542f97e59d52b27664021",
+    "discovery_sha256": "263ecaa5acd3a1ca5392d4964522ab4f94aeaa94d981c1811a4951f9be1f4c6a",
+    "at": "2026-09-30T11:59:41Z"
+  }
+}

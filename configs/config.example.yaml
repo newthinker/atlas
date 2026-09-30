@@ -47,6 +47,17 @@ collectors:
     enabled: false
     api_key: ""
     markets: ["US"]
+  tiingo:
+    enabled: false
+    api_key: ""        # Tiingo token，只在 runtime configs/config.yaml 填写
+    markets: ["US"]
+    # 配额：内置 tiingo.daily 小时配额 40（免费档 50 次/时、1000 次/日）。prism 与 serve
+    # 共用这 40 次/时——Yahoo 故障时 serve 一个周期可能就用完，超额即失败不排队。
+    # 日线一天只更新一次，建议在顶层覆盖缓存 TTL（内置默认随 collector.cache.ttl）：
+    # collector:
+    #   topics:
+    #     tiingo.daily:
+    #       ttl: 6h
 
 # Trading strategies
 strategies:

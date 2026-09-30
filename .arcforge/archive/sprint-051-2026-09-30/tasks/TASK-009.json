@@ -1,0 +1,83 @@
+{
+  "id": "TASK-009",
+  "title": "拆股折算与截取 normalize.go（internal/collector/tiingo）",
+  "description": "从计划 Task 4 拆出（TASK-004 DoD 超 8 条）：新建 `internal/collector/tiingo/normalize.go`，放 `priceRow`（指针字段区分 null）与 `normalize(symbol string, rows []priceRow, start, end time.Time) ([]core.OHLCV, error)`，实现按计划 Task 4 Step 5 草稿；`testdata/nvda_split_sample.json` 与样本测试归本任务。独立 reviewer P1/P5 的变异（Open 不折算、Volume 截断、`sf<=0` 改 `sf==0`、去掉排序）在计划测试下存活，本任务 DoD 必须杀死它们。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "tiingo",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/collector/tiingo/normalize.go",
+    "internal/collector/tiingo/normalize_test.go",
+    "internal/collector/tiingo/testdata/nvda_split_sample.json"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "NVDA 样本截取 `[06-05, 06-11]`：5 根、升序、Symbol NVDA、Interval 1d；06-05 的 Open/High/Low/Close 分别为 122.44/123.44/121.44/122.44（**含 Open**）、Volume 10000；06-10 的 OHLC 不折算（Close 121.79）、Volume 10000。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "先折算后截取：`[06-03, 06-07]`（end 早于 06-10 拆股）首根 Close 115.0、末根 120.888。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "非整数因子区分四舍五入与截断：某行 volume=3、其后一行 splitFactor=1.5 ⇒ 该行 Volume==5（`math.Round(4.5)`，截断会得 4），价格 ÷1.5。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "输入行乱序（日期倒序或打乱）时输出仍严格升序，且折算按日期而非输入位置累乘（与同数据有序输入的结果逐根相等）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "坏日期 / close 为 null / O·H·L 任一 null 的行不输出；volume null 记 0；splitFactor null 视为 1；拆股当日价格全 null（splitFactor=2）时此前 Close 100 → 50。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "截取区间为按日闭区间：start、end 当日的 bar 都包含，带时分秒的 start/end 按日期截断处理；截取后 0 根返回空切片与 nil 错误。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "splitFactor 为 0、为负数（如 -2）时整段失败：返回 nil 切片，错误含 `invalid splitFactor` 与该行日期。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 -race ./internal/collector/tiingo/` 全绿；`gofmt -l internal/collector/tiingo/` 无输出；`go vet` 无输出；包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "assigned_to": "dev-tg-d",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "packages": [
+    "./internal/collector/tiingo"
+  ],
+  "writes": [
+    "./internal/collector/tiingo/normalize.go",
+    "./internal/collector/tiingo/normalize_test.go",
+    "./internal/collector/tiingo/testdata/nvda_split_sample.json"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:38Z"
+  },
+  "verify_baseline": {
+    "head": "b6c6a25740823b5e1b02f67e084bf6e7ad7f4f90",
+    "discovery_sha256": "624484dbdcbc20c5c9a7cb71d6702252706c4259706b7a1a7a6a32099accd763",
+    "at": "2026-09-30T10:46:39Z"
+  }
+}

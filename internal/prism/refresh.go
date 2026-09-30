@@ -72,6 +72,13 @@ type TwelvedataClient interface {
 	FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error)
 }
 
+// PriceHop 是美股价格降级链上的一跳（设计 docs/superpowers/specs/2026-09-30-tiingo-source-design.md §3.5）。
+// Client 沿用 TwelvedataClient 这个窄接口：tiingo 与 twelvedata 的 FetchHistory 签名相同。
+type PriceHop struct {
+	Name   string
+	Client TwelvedataClient
+}
+
 // errFallbackNoData:兜底源返回零行。兜底跳只在主源已失败时触发,此时「零行」无法与
 // 「符号形态不被上游接受」区分——实测 tushare hk_daily 对 ts_code="0700.HK" 返回
 // code=0 且 items 为空(非报错)。判成功会天天上报「fallback ok」却零写入,把真实缺口
@@ -96,10 +103,10 @@ func (r *Report) degrade(msgs ...string) {
 
 // Refresh updates every configured instrument: lixinger-sourced instruments
 // fetch incrementally (理杏豆计费), engine-sourced US stocks rebuild via yahoo.
-// ts/td 为 nil 表示该备源未配置:此时行为与 M3.5a 之前完全一致,且不发「备源未配置」
+// ts 为 nil / usHops 为空表示该备源未配置:此时行为与 M3.5a 之前完全一致,且不发「备源未配置」
 // 提示(ADR#9——未配置是永久状态,天天提示违反 spec §2「不得天天降级」)。
 func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClient, ak AkshareClient, ed EdgarClient,
-	ts TushareClient, td TwelvedataClient, now time.Time) Report {
+	ts TushareClient, usHops []PriceHop, now time.Time) Report {
 	var rep Report
 	for _, inst := range cfg.Instruments {
 		var err error
@@ -127,7 +134,7 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 			}
 		case "engine":
 			var degs []string
-			degs, err = refreshEngine(cfg, store, us, td, inst, now)
+			degs, err = refreshEngine(cfg, store, us, usHops, inst, now)
 			rep.degrade(degs...)
 		case "akshare":
 			err = refreshAkshare(cfg, store, ak, inst, now)
@@ -144,10 +151,10 @@ func Refresh(cfg config.PrismConfig, store Store, lix LixingerClient, us USClien
 			}
 		case "edgar":
 			var degs []string
-			degs, err = refreshEdgar(cfg, store, ed, us, td, inst, now)
+			degs, err = refreshEdgar(cfg, store, ed, us, usHops, inst, now)
 			rep.degrade(degs...)
 			if err != nil && inst.FallbackSource == "engine" {
-				fbDegs, fbErr := refreshEngine(cfg, store, us, td, inst, now)
+				fbDegs, fbErr := refreshEngine(cfg, store, us, usHops, inst, now)
 				rep.degrade(fbDegs...)
 				if fbErr == nil {
 					rep.Degraded = append(rep.Degraded,
@@ -262,7 +269,7 @@ func upsertPrices(store Store, id int64, symbol string, closes []core.OHLCV) str
 // refreshEngine 每日全量重算美股公司近 us_lookback_years 年 PE 序列并整段 upsert
 // (幂等,无增量状态)。yahoo 路径 M1 口径:无 PB/PSTTM,仅 5Y 滚动分位。
 // 返回的首个值是降级说明("" 表示无降级),见 upsertPrices。
-func refreshEngine(cfg config.PrismConfig, store Store, us USClient, td TwelvedataClient,
+func refreshEngine(cfg config.PrismConfig, store Store, us USClient, hops []PriceHop,
 	inst config.PrismInstrument, now time.Time) ([]string, error) {
 	id, err := upsertMeta(store, inst)
 	if err != nil {
@@ -274,7 +281,7 @@ func refreshEngine(cfg config.PrismConfig, store Store, us USClient, td Twelveda
 	if err != nil {
 		return nil, fmt.Errorf("eps history: %w", err)
 	}
-	closes, fbDeg, err := fetchCloses(us, td, inst.Symbol, start, now)
+	closes, fbDeg, err := fetchCloses(us, hops, inst.Symbol, start, now)
 	if err != nil {
 		return nil, err
 	}
@@ -303,25 +310,33 @@ func refreshEngine(cfg config.PrismConfig, store Store, us USClient, td Twelveda
 	return deg, store.UpsertValuations(id, rows)
 }
 
-// fetchCloses 取美股价格:yahoo 失败且 td 已配置时,切 twelvedata 重取同一段
-// (spec §2 美股·价格二跳)。EPS 链路不受影响,twelvedata 只补价格。
-// td 为 nil 或兜底也失败时,错误保持既有的 "price history:" 前缀不变。
-func fetchCloses(us USClient, td TwelvedataClient, symbol string, start, end time.Time) ([]core.OHLCV, string, error) {
+// fetchCloses 取美股价格:yahoo 失败时按 hops 顺序逐跳重取同一段(spec §2 美股·价格链;
+// 2026-09-30 起为 yahoo→tiingo→twelvedata)。零行视为该跳失败并继续下一跳(同 errFallbackNoData)。
+// 首个成功跳之后的跳不再调用(省配额)。EPS 链路不受影响,备用跳只补价格。
+// 降级文案附前序失败跳原因(人类裁决 P17),否则 tiingo 配错会被 twelvedata 永久掩盖;
+// 首跳即成功时与改动前逐字一致。hops 为空时错误保持 "price history: %w"。
+func fetchCloses(us USClient, hops []PriceHop, symbol string, start, end time.Time) ([]core.OHLCV, string, error) {
 	closes, err := us.FetchHistory(symbol, start, end, "1d")
 	if err == nil {
 		return closes, "", nil
 	}
-	if td == nil {
+	if len(hops) == 0 {
 		return nil, "", fmt.Errorf("price history: %w", err)
 	}
-	fb, fbErr := td.FetchHistory(symbol, start, end)
-	if fbErr == nil && len(fb) == 0 {
-		fbErr = errFallbackNoData
+	errMsg := fmt.Sprintf("price history: %v", err)
+	degMsg := fmt.Sprintf("%s: yahoo price failed (%v)", symbol, err)
+	for _, h := range hops {
+		fb, fbErr := h.Client.FetchHistory(symbol, start, end)
+		if fbErr == nil && len(fb) == 0 {
+			fbErr = errFallbackNoData
+		}
+		if fbErr == nil {
+			return fb, fmt.Sprintf("%s, %s fallback ok", degMsg, h.Name), nil
+		}
+		errMsg += fmt.Sprintf("; %s fallback: %v", h.Name, fbErr)
+		degMsg += fmt.Sprintf(", %s failed (%v)", h.Name, fbErr)
 	}
-	if fbErr != nil {
-		return nil, "", fmt.Errorf("price history: %v; twelvedata fallback: %v", err, fbErr)
-	}
-	return fb, fmt.Sprintf("%s: yahoo price failed (%v), twelvedata fallback ok", symbol, err), nil
+	return nil, "", errors.New(errMsg)
 }
 
 // refreshAkshare 每日增量拉取 akshare(经 aktools)公司/指数估值,并在本地计算滚动
@@ -632,7 +647,7 @@ func seriesByDate(closes []core.OHLCV, pts []core.EPSPoint) map[string]float64 {
 // EPS_TTM 阶梯重建 PE 序列;PB(Close/BVPS)、PS(Close/RPS_TTM)同构对齐并入行。
 // 价格仍走 yahoo。CIK 空 → 报错提示配置。
 // 返回的首个值是降级说明("" 表示无降级),见 upsertPrices。
-func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, td TwelvedataClient,
+func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClient, hops []PriceHop,
 	inst config.PrismInstrument, now time.Time) ([]string, error) {
 	if inst.CIK == "" {
 		return nil, fmt.Errorf("edgar source requires cik in config")
@@ -661,7 +676,7 @@ func refreshEdgar(cfg config.PrismConfig, store Store, ed EdgarClient, us USClie
 		return nil, err
 	}
 
-	closes, fbDeg, err := fetchCloses(us, td, inst.Symbol, now.AddDate(-cfg.EdgarLookbackYears, 0, 0), now)
+	closes, fbDeg, err := fetchCloses(us, hops, inst.Symbol, now.AddDate(-cfg.EdgarLookbackYears, 0, 0), now)
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,90 @@
+{
+  "id": "TASK-006",
+  "title": "prism 美股价格链改为有序多跳 yahoo→tiingo→twelvedata",
+  "description": "计划 Task 6：`internal/prism/refresh.go` 新增 `PriceHop{Name, Client TwelvedataClient}`，`Refresh`/`refreshEngine`/`refreshEdgar`/`fetchCloses` 的 `td TwelvedataClient` 改为 `[]PriceHop`；`cmd/atlas/prism.go` 新增 `usPriceHops` 并替换 `runPrismRefresh` 中的 td 组装。改动既有符号，须先 impact（AD-10）。Realistic Scope 例外：跨 prism + cmd/atlas 两包（签名改动须原子，AD-14）。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。 **人类裁决 P17（2026-09-30）**：降级文案附前序失败跳的原因，格式 `<sym>: yahoo price failed (<yerr>), <n1> failed (<e1>), …, <nk> fallback ok`；首跳即成功时与 spec/现状逐字一致。偏离 spec §3.5 与计划 Task 6 草稿。",
+  "module": "tiingo",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/prism/refresh.go",
+    "internal/prism/refresh_test.go",
+    "cmd/atlas/prism.go",
+    "cmd/atlas/prism_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "P17：yahoo 失败、tiingo 报错、twelvedata 成功：返回 twelvedata 数据，降级文案逐字为 `NVDA: yahoo price failed (yahoo 503), tiingo failed (tiingo 403), twelvedata fallback ok`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "yahoo 失败、tiingo 成功：文案含 `tiingo fallback ok`，且 twelvedata 的调用记录为空（首跳成功不再调后续跳）；yahoo 成功时任何跳都不被调用、文案为空。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`usPriceHops`：nil ⇒ 空；tiingo(enabled+key)+twelvedata(key) ⇒ `[tiingo, twelvedata]`；tiingo 未启用或缺 key ⇒ `[twelvedata]`；每个 `Client` 非 nil（无 typed-nil）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "tiingo 零行（nil 错误、空切片）视为失败并继续：文案逐字为 `NVDA: yahoo price failed (yahoo 503), tiingo failed (fallback source returned no data), twelvedata fallback ok`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Review Focus 5：`hops` 为 nil 时错误逐字 `price history: yahoo 503` 且 `errors.Is(err, yerr)`；仅 twelvedata 一跳全失败时错误逐字 `price history: yahoo 503; twelvedata fallback: td 429`（与改动前一致）；既有 `TestRefreshUSPriceFallsBackToTwelvedata`、`TestRefreshUSPriceTwelvedataEmptyIsNotSuccess` 改用 `[]PriceHop{{Name: \"twelvedata\", Client: td}}` 后原断言不改仍通过。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "全部失败：错误逐字 `price history: yahoo 503; tiingo fallback: tiingo 403; twelvedata fallback: td 429`（按跳顺序）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`go test -count=1 -race ./internal/prism/ ./cmd/atlas/` 全绿；`go vet` 两包无输出；discovery 记录 `Refresh`/`fetchCloses` impact 结论与风险级别（HIGH/CRITICAL 须已报 Leader）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`runPrismRefresh` 把 `usPriceHops(cfg.Collectors)` 的结果传给 `prism.Refresh`（该装配壳历来 0% 覆盖，reviewer C3 变异存活；以 diff 审查判定）。",
+        "verify_by": "review"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-004"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-004"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-tg-a",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "packages": [
+    "./internal/prism",
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./internal/prism/refresh.go",
+    "./internal/prism/refresh_test.go",
+    "./cmd/atlas/prism.go",
+    "./cmd/atlas/prism_test.go"
+  ],
+  "assignment_epoch": 1,
+  "rework_count": 0,
+  "questions": [],
+  "verifier": "test-tg-a",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:38Z"
+  },
+  "verify_baseline": {
+    "head": "3700b40c48ad28e5833366c5893a1dff547c825b",
+    "discovery_sha256": "b5e67440937c00c75e83929b07aa740d00f29050d44efcd816655bce225021be",
+    "at": "2026-09-30T12:08:51Z"
+  }
+}

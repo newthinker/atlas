@@ -1,0 +1,95 @@
+{
+  "id": "TASK-004",
+  "title": "Tiingo HTTP 客户端 client.go：直连、Gate、错误映射",
+  "description": "计划 Task 4（`normalize`/`priceRow`/样本拆到 TASK-009）：新建 `Client`/`New`/`NewWithBaseURL`/`FetchHistory`（满足 `prism.TwelvedataClient`）、`wrapErr`、`mapPolicyErr`、`statusErr`，以及 `main_test.go` 零策略测试闸门；FetchHistory 调用 TASK-009 的 `normalize`。独立 reviewer P2/P3/P4/P6/P7 的变异在计划测试下存活（主题常量拼错、去掉 Clone、缓存键只含 symbol、400 不归类、传输错误用 %w 保链、丢 ErrTimeout），本任务 DoD 必须杀死它们；兄弟包 `internal/collector/twelvedata/gate_test.go` 有对等测试可参照。配额测试注意整点边界（窗口按 UTC 整点对齐，reviewer P21）：用长窗口或注入时钟避免偶发。 需求原文：docs/superpowers/plans/2026-09-30-tiingo-source.md 的对应 Task 段（其中测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-09-30-tiingo-source-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/tiingo-source`（AD-3）；提交主题 `<type>(<本任务ID>): …`（AD-5，覆盖计划的 `feat(tiingo)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + `node .gitnexus/run.cjs detect-changes --scope staged --repo .`（AD-6）；提交后通知 Leader merge 进 feature/tiingo-source，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "tiingo",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/collector/tiingo/client.go",
+    "internal/collector/tiingo/client_test.go",
+    "internal/collector/tiingo/main_test.go",
+    "internal/collector/tiingo/gate_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "请求形状：路径 `/tiingo/daily/NVDA/prices`，query 仅 `startDate=2024-06-03`（**无 endDate**），`Authorization: Token <key>`，RawQuery 不含 key；`BRK.B` 的路径为 `/tiingo/daily/BRK-B/prices`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "端到端：httptest 回放 NVDA 样本，`FetchHistory(NVDA, 06-05, 06-11)` 返回 5 根且 06-05 Close 122.44（经 normalize 折算）；200 且 body 为 `[]` 时返回空切片与 nil 错误。时区口径（test-tg-b 于 TASK-009 提出）：start/end 带非 UTC 时区（如 Asia/Shanghai `2024-06-05T07:00+08:00`）时，query 的 `startDate` 与截取下界都取该时间**自身时区**的日历日（06-05），二者一致。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "Gate 接线：`policy.NewTable().Lookup(topicDaily)` 精确命中且 Quota 为 40/1h（代码常量与**生产内置表**交叉断言）；`SetDefault` 发生在构造之后不影响已构造 client（构造时快照）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "缓存（TTL>0 的 Gate）：同 key 两次只发 1 次 HTTP 且修改第一次返回值不影响第二次；同 symbol 仅 start 或仅 end 不同各自发 HTTP；同 key 先 500 后 200 时第二次成功（失败不缓存）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "状态码：404→含 `not found: <detail>`；400/401/403→含 `permission/config error (not retryable)`；429→含 `rate limited (retryable)`；500→含 `HTTP 500`；均以 `tiingo: ` 开头且不含 key（含 detail/body 里带 key 的情形）。 **截断前先脱敏**（test-tg-b 返工 R1：body[:200] 截断先于 ReplaceAll，key 跨第 200 字节时前缀泄露）：body = 190 个 `x` + key、status 500 时，错误文本既不含完整 key，也不含 key 的任何 ≥4 字符前缀；且在隔离副本上把脱敏挪回截断之后的变异必须转红。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "传输层错误（127.0.0.1:1）、200 非 JSON 的 decode 错误、HTTP 错误：均以 `tiingo: ` 开头、不含 key，且 `errors.Unwrap(err)==nil`（%v 断链）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`ErrQuotaExceeded` 与 `ErrTimeout` 都映射为含 `retryable` 的错误且 `errors.Is(err, 哨兵)` 为 false；配额 1 的 Gate 下第 2 次（不同 key）失败且服务端请求计数仍为 1。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "Review Focus 2：`New(key).hc.Transport` 为 `*http.Transport` 且 `Proxy==nil`、`hc.Timeout==30s`；`go test -count=1 -race ./internal/collector/tiingo/` 全绿、`gofmt -l` 与 `go vet` 无输出、包覆盖率 ≥ 80%。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-009"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-009"
+  ],
+  "status": "accepted",
+  "assigned_to": "dev-tg-d",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "packages": [
+    "./internal/collector/tiingo"
+  ],
+  "writes": [
+    "./internal/collector/tiingo/client.go",
+    "./internal/collector/tiingo/client_test.go",
+    "./internal/collector/tiingo/main_test.go",
+    "./internal/collector/tiingo/gate_test.go"
+  ],
+  "assignment_epoch": 2,
+  "rework_count": 1,
+  "questions": [],
+  "verifier": "test-tg-b",
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-09-30T12:47:38Z"
+  },
+  "verify_baseline": {
+    "head": "77398b4e54bed75f4a87cd2094ec3d1d73b1e37e",
+    "discovery_sha256": "9cff3c2b540126ea68aa4b90ba755cf0ee38d4f6b6908fefe095db9969070523",
+    "at": "2026-09-30T11:53:08Z"
+  },
+  "reason_class": "task_defect",
+  "reject_reason": "statusErr 先把 body 截断到 200 字节、再由 wrapErr 做 key 替换：key 跨过第 200 字节时只剩前缀，ReplaceAll 匹配不到，部分 key 泄露进错误文本（探针：190 个 x + testKey、status 500 ⇒ 错误含 secret-key，即 14 字符 key 的前 10 个字符）。违反 error_handling[0]「不含 key（含 body 里带 key 的情形）」与 Review Focus 3。修复：截断前先脱敏，并补一个 key 横跨 200 字节边界的用例，断言错误文本不含 key 的前缀。其余 8 条 DoD 通过，有效变异 32/32 被杀。详见 docs/04-test/TASK-004-verification.md"
+}

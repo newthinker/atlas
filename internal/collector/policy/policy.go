@@ -82,6 +82,12 @@ func NewTable() *Table {
 	t.Set("tushare.daily_basic", dailyBasic)
 
 	t.Set("twelvedata.time_series", Policy{MinInterval: 8 * time.Second, TTL: builtinTTL, Coalesce: true})
+	// tiingo 免费档 50 次/时、1000 次/日：只设小时配额 40（40×24=960 < 1000 兼顾日上限），
+	// 超额即失败（设计 docs/superpowers/specs/2026-09-30-tiingo-source-design.md §3.4）。
+	// 不在这里写长 TTL：ApplyTTL 会用全局 collector.cache.ttl 覆盖它；需要长 TTL 请用
+	// collector.topics."tiingo.daily".ttl 覆盖。
+	t.Set("tiingo.daily", Policy{TTL: builtinTTL, Coalesce: true,
+		Quota: &Quota{Limit: 40, Window: time.Hour}})
 
 	// lixinger 是 §1.3 要修复的对象：它今天完全拿不到缓存。只补 TTL，
 	// 不新增任何它今天没有的限流行为。端点形如 cn/company/fundamental/

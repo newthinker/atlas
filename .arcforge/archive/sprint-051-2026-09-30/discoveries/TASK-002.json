@@ -1,0 +1,60 @@
+{
+  "task_id": "TASK-002",
+  "author": "dev-tg-b",
+  "commit": "720997cb0d53f429fd14f7ec40847d86dfa2bdad",
+  "merged_into": "feature/tiingo-source @ b6c6a25740823b5e1b02f67e084bf6e7ad7f4f90",
+  "key_findings": [
+    "内置表新增 tiingo.daily：Policy{TTL: builtinTTL, Coalesce: true, Quota: &Quota{Limit: 40, Window: time.Hour}}，登记在 twelvedata.time_series 之后；Domain 由 Set 推导为 tiingo，Quota.Loc 为 nil（小时窗口按 Truncate，与时区无关）。",
+    "Gate 的配额窗口取 time.Now()：41 次请求若跨整点，账本中途归零、第 41 次放行 ⇒ 测试若不处理会有极小概率假红；已用「跨窗口即重跑一轮」消除。",
+    "ApplyTTL 只改 TTL、复制 Policy 值，Quota 指针原样保留；Override 只给 TTL 时不进 Quota 分支 ⇒ 按 cmd/atlas/policy.go:40/47 的 ApplyTTL→Override 顺序，配额 40/1h 不变（测试已钉住）。",
+    "gitnexus impact(NewTable, upstream) = CRITICAL（直接调用方 initPolicyGate/Default/New，10 个模块）；detect-changes --scope staged = high。原因是结构性的：改动纯新增一个主题，生产代码中无 \"tiingo…\" 主题引用（grep internal cmd 为 0），Topics() 无生产调用方。已报 Leader。"
+  ],
+  "decisions": [
+    {
+      "decision": "ApplyTTL 边界测试用 30m 而非 DoD 举例的 5m",
+      "rationale": "builtinTTL 就是 5m，ApplyTTL(5m) 看不出「被提升」；Override 测试仍按 DoD 用 ApplyTTL(5m)→Override(6h)。"
+    },
+    {
+      "decision": "第 41 次测试用内置 NewTable() 的策略而非手搭 Quota，每次用不同 key",
+      "rationale": "DoD 要钉的是「登记的数值」真能拦截；同 key 会被 TTL 缓存命中而不走配额。"
+    },
+    {
+      "decision": "更新测试文件内全部主题计数注释：want「9 个」→「13 个」、lixinger.*「第 9 个」→「第 10 个」、逃逸描述里的「9」改为「登记数」",
+      "rationale": "DoD functional[1] 要求本文件计数注释与实际一致；原「9 个主题名」在 TASK-015 后已是 12 个，属既有陈旧，一并订正。"
+    },
+    {
+      "decision": "接受 code-simplifier 把单次使用的 mustTiingoQuota 内联",
+      "rationale": "sha256 比对发现它改了 policy_test.go（自报未说明），diff 核对行为等价。"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/policy/policy.go",
+    "internal/collector/policy/policy_test.go"
+  ],
+  "interfaces_exposed": [
+    "主题 \"tiingo.daily\"：Domain \"tiingo\"，Quota{Limit: 40, Window: time.Hour}，TTL builtinTTL，Coalesce true，MinInterval 0；超额返回 policy.ErrQuotaExceeded"
+  ],
+  "verification": {
+    "anchor": "提交 720997cb0d53f429fd14f7ec40847d86dfa2bdad；主仓库 feature/tiingo-source @ b6c6a25740823b5e1b02f67e084bf6e7ad7f4f90（policy/ 两文件 sha256 与提交一致）",
+    "commands": [
+      "go test -count=1 ./internal/collector/policy/",
+      "go test -count=3 -shuffle=on ./internal/collector/policy/",
+      "go vet ./internal/collector/policy/",
+      "gofmt -l internal/collector/policy"
+    ],
+    "results": "test ok；shuffle ok；vet 无输出；gofmt 无输出",
+    "coverage": {
+      "func": "94.4%（基线 94.4%）",
+      "profile_block_sum": "255/270 = 94.44%（基线 254/269 = 94.42%）"
+    },
+    "mutation": "5/5 KILLED（Limit 41 / Window 24h / Coalesce false / MinInterval 1ms / TTL 0），在最终版上重跑，worktree 内备份还原且 sha256 一致",
+    "dod_map": {
+      "functional[0]": "TestBuiltinTiingoDailyQuota",
+      "functional[1]": "TestDisableTTLKeepsThrottle（want 含 tiingo.daily，集合等值）+ 计数注释",
+      "boundary[0]": "TestTiingoDailyQuotaBlocksFortyFirst",
+      "boundary[1]": "TestTiingoDailyApplyTTLKeepsQuota",
+      "boundary[2]": "TestTiingoDailyOverrideTTLKeepsQuota",
+      "non_functional[0]": "上述包级命令"
+    }
+  }
+}

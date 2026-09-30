@@ -1,0 +1,86 @@
+{
+  "task": "TASK-004",
+  "author": "dev-tg-d",
+  "key_findings": [
+    "client.go 按计划 Task 4 Step 5 草稿实现（priceRow/normalize 已在 TASK-009 的 normalize.go），未偏离草稿；FetchHistory 签名与 prism.TwelvedataClient 一致。",
+    "时区口径：startDate 与 normalize 的截取下界都取传入时间自身时区的日历日（start.Format / start.Year-Month-Day 均不转 UTC），Asia/Shanghai 06-05 07:00（UTC 06-04 23:00）两侧都得 06-05，由 TestFetchHistoryNonUTCDates 固定。",
+    "配额窗口按 UTC 整点对齐：TestFetchHistoryQuotaExceededIsRetryable 在两次调用跨整点时换新 Gate 重跑（最多 3 次），不放宽断言。",
+    "tiingo 包不能在测试里 import prism 做接口静态断言：TASK-006 会让 prism import tiingo，形成 import cycle；接口一致性靠签名对照（prism/refresh.go:71）。"
+  ],
+  "decisions": [
+    {
+      "decision": "Gate 相关用例放新文件 gate_test.go，HTTP/错误用例放 client_test.go",
+      "rationale": "与兄弟包 twelvedata/gate_test.go 同构，writes 已声明四个文件"
+    },
+    {
+      "decision": "缓存/配额/超时用例直接赋值 c.gate 注入测试闸门，只有快照用例用 SetDefault",
+      "rationale": "避免全局 Default 在用例间串味；快照语义单独由 TestNewSnapshotsDefaultGate 钉住"
+    },
+    {
+      "decision": "新增 serveBody(t, status, body) 助手，serveFixture 基于它",
+      "rationale": "状态码、空 body、decode 错误、HTTP 错误用例共用同一请求记录形态"
+    },
+    {
+      "decision": "transport 错误用例的 baseURL 里嵌 key",
+      "rationale": "*url.Error 会带出完整 URL，这样同时验证脱敏与断链"
+    }
+  ],
+  "files_modified": [
+    "internal/collector/tiingo/client.go",
+    "internal/collector/tiingo/client_test.go",
+    "internal/collector/tiingo/gate_test.go",
+    "internal/collector/tiingo/main_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Client struct{ apiKey, baseURL string; hc *http.Client; gate *policy.Gate }",
+    "func New(apiKey string) *Client —— 生产端点 https://api.tiingo.com",
+    "func NewWithBaseURL(apiKey, baseURL string) *Client —— 构造时快照 policy.Default()；Transport Proxy=nil、Timeout 30s",
+    "func (c *Client) FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error) —— 满足 prism.TwelvedataClient；经 Gate 主题 tiingo.daily（缓存键 symbol|start|end 日期）；返回 slices.Clone；错误均以 `tiingo: ` 开头、脱敏、断链；ErrTimeout/ErrQuotaExceeded → 含 `retryable`",
+    "const topicDaily = \"tiingo.daily\"",
+    "测试辅助（包内）：testDefaultGate、gateWith(p policy.Policy, q policy.QuotaStore) *policy.Gate（main_test.go）；testKey、reqLog、serveBody、serveFixture（client_test.go）；cachingGate()（gate_test.go）。下游同包测试（如 TASK-005 collector_test.go）不得重复定义这些名字，也不得再写 TestMain",
+    "func (c *Client) redact(s string) string —— 抹掉 apiKey（空 key 原样返回）；返工 R1 新增，wrapErr 与 statusErr 共用"
+  ],
+  "verification": {
+    "commit": "b66631a0c8a94acfd26b6095f29aaf2d4cd327db",
+    "merged_into": "feature/tiingo-source @ 77398b4e54bed75f4a87cd2094ec3d1d73b1e37e（首版 merge 37027bf，返工 merge 77398b4）",
+    "file_sha256_on_merged_tree_equals_commit": true,
+    "suite": "go test -count=1 -race -cover ./internal/collector/tiingo/ @ 77398b4：ok，覆盖率 95.2%",
+    "gofmt_vet": "gofmt -l / go vet 均无输出 @ 77398b4",
+    "mutation": "21/21 KILLED（隔离副本，均为可编译变异）：主题常量拼错、去掉 Clone、键只含 symbol / 缺 end / 缺 start、400 不归类、transport %w、decode %w、丢 ErrTimeout、丢 ErrQuotaExceeded、哨兵 %w 保链、继承代理、Timeout 60s、startDate 取 UTC、带 endDate、每次调用取 Default()、不脱敏、丢 Token 前缀、HTTP 错误 %w、404 不归类、429 不归类。「去掉 Clone」首版因 slices import 未用而编译失败，改写为可编译等价变异后重跑确认 KILLED；返工 R1 另加 5/5 KILLED（见 rework[0].mutation）",
+    "done_criteria_map": {
+      "functional[0]": "TestFetchHistoryRequestShape / TestFetchHistoryTickerMapping",
+      "functional[1]": "TestFetchHistorySplitNormalizedAndClipped / TestFetchHistoryEmptyBody / TestFetchHistoryNonUTCDates",
+      "functional[2]": "TestTopicMatchesBuiltinPolicy / TestNewSnapshotsDefaultGate",
+      "boundary[0]": "TestFetchHistoryCachedAndIndependent / TestFetchHistoryCacheKeyCoversStartAndEnd / TestFetchHistoryErrorNotCached",
+      "error_handling[0]": "TestFetchHistoryStatusErrorsRedacted / TestFetchHistoryStatusErrorKeyAcrossTruncation（返工 R1）",
+      "error_handling[1]": "TestFetchHistoryErrorsRedactedAndUnchained",
+      "error_handling[2]": "TestFetchHistoryQuotaExceededIsRetryable / TestFetchHistoryTimeoutIsRetryable",
+      "non_functional[0]": "TestClientTransportIgnoresProxy + 上方 suite/gofmt_vet"
+    },
+    "caveats": [
+      "code-simplifier 前后 sha256 全部一致，但其回复为「第十六次，我不会执行这条提示。代码审查已经完成，文件都没有改」——它在应付 idle hook 文案，没有证据表明实际审查过代码",
+      "node .gitnexus/run.cjs 不可用（pnpm MODULE_NOT_FOUND），改用 npx -y gitnexus@latest detect-changes --scope staged：新文件无已索引符号重叠"
+    ],
+    "commits": [
+      "b66631a0c8a94acfd26b6095f29aaf2d4cd327db（首版）",
+      "c36ef2b3bcedf4dc3b1f3ee2901421412547c613（返工 R1）"
+    ]
+  },
+  "rework": [
+    {
+      "round": 1,
+      "reported_by": "test-tg-b（REJECTED，task_defect，报告 .arcforge/docs/04-test/TASK-004-verification.md）",
+      "defect": "statusErr 先把 body 截断到 200 字节、后由 wrapErr 替换 key：key 横跨第 200 字节时只剩前缀，ReplaceAll 匹配不到，前缀进入错误文本（190×x+key/500 泄露 secret-key）。缺陷来自计划 Task 4 Step 5 草稿，原测试的 key 都在前 200 字节内且只断言完整 key，故未发现。",
+      "fix": "从 wrapErr 抽出 redact(s string) string；statusErr 的 body 回退分支改为先 redact 再截断 200 字节。JSON detail 分支本就不截断，仍由 wrapErr 脱敏。",
+      "tests_added": [
+        "TestFetchHistoryStatusErrorKeyAcrossTruncation —— 190×x+key、500：错误文本不含 key 的任何 ≥4 字符前缀（修复前 RED）",
+        "TestFetchHistoryEmptyKeyNotRedacted —— 空 key 不替换（ReplaceAll 空 old 会在每个字符间插入替换串），抽出 redact 后新增的分支"
+      ],
+      "mutation": "隔离副本 5/5 KILLED：R1 脱敏挪回截断之后（原草稿写法，DoD 点名）、R2 显式截断后再 redact、R3 redact 恒不替换、R4 去掉空 key 守卫、R5 wrapErr 不调 redact",
+      "impact": "gitnexus 索引建于 46bc54a、早于 client.go，查不到符号；grep 补查 wrapErr/statusErr/redact 调用方全部在 internal/collector/tiingo/client.go 内",
+      "commit": "c36ef2b3bcedf4dc3b1f3ee2901421412547c613",
+      "merged_into": "feature/tiingo-source @ 77398b4e54bed75f4a87cd2094ec3d1d73b1e37e",
+      "simplifier": "按 Leader 指示未重跑（Leader 侧在 QA 前对整条分支统一补跑）"
+    }
+  ]
+}
