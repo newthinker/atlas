@@ -32,6 +32,12 @@ import (
 // [TASK-006] engine error_handling[0] "eps/price history/reconstruct 三处失败带前缀进 Failed"
 //                                                                        → TestRefreshEngineFailurePrefixes
 // [TASK-006] engine boundary[1] "engine 单标的失败不中断其余标的"           → TestRefreshEnginePartialFailure
+// [TASK-006 tiingo] functional[0] P17 yahoo 败/tiingo 报错/twelvedata 成功 → 逐字文案 → TestFetchClosesSecondHopSucceeds
+// [TASK-006 tiingo] functional[1] tiingo 首跳成功不调后续跳；yahoo 成功不调任何跳   → TestFetchClosesFirstHopSucceedsSkipsRest / TestFetchClosesYahooOKCallsNoHop
+// [TASK-006 tiingo] boundary[0]   tiingo 零行视为失败继续，逐字文案                    → TestFetchClosesEmptyHopFallsThrough
+// [TASK-006 tiingo] boundary[1]   hops nil 保持 %w；单 twelvedata 跳与改动前逐字一致   → TestFetchClosesNoHopsKeepsPrefix / TestFetchClosesSingleHopMatchesLegacyFormat
+//                                 （既有 TestRefreshUSPriceFallsBackToTwelvedata / TestRefreshUSPriceTwelvedataEmptyIsNotSuccess 改传 []PriceHop，断言不变）
+// [TASK-006 tiingo] error_handling[0] 全部失败按跳顺序列出                             → TestFetchClosesAllHopsFail
 
 type fakeStore struct {
 	latest       map[string]string // symbol -> latest date
@@ -1186,7 +1192,7 @@ func TestRefreshUSPriceFallsBackToTwelvedata(t *testing.T) {
 		failPrice: map[string]error{"NVDA": errors.New("yahoo 503")}}
 	td := &fakeTD{closes: map[string][]core.OHLCV{"NVDA": closes}}
 
-	rep := Refresh(engineCfg(), store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, nil, td, now)
+	rep := Refresh(engineCfg(), store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, nil, []PriceHop{{Name: "twelvedata", Client: td}}, now)
 	assert.Empty(t, rep.Failed)
 	assert.Equal(t, 1, rep.Refreshed)
 	require.Len(t, rep.Degraded, 1)
@@ -1398,7 +1404,7 @@ func TestRefreshUSPriceTwelvedataEmptyIsNotSuccess(t *testing.T) {
 		failPrice: map[string]error{"NVDA": errors.New("yahoo 503")}}
 	td := &fakeTD{} // closes 未预置 → 返回空切片,err=nil
 
-	rep := Refresh(engineCfg(), store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, nil, td, now)
+	rep := Refresh(engineCfg(), store, &fakeLix{}, us, &fakeAkshare{}, fakeEdgar{}, nil, []PriceHop{{Name: "twelvedata", Client: td}}, now)
 	assert.Equal(t, 0, rep.Refreshed)
 	require.Len(t, rep.Failed, 1)
 	assert.Contains(t, rep.Failed[0], "NVDA")
@@ -1452,4 +1458,92 @@ func TestRefreshTushareRateLimitedIsTemporary(t *testing.T) {
 
 	require.Len(t, rep.Failed, 1, "本次兜底确实没成功,标的仍判失败")
 	assert.Equal(t, 0, rep.Refreshed)
+}
+
+// hopTD 构造 NVDA 单标的的备用跳替身：err 非 nil 时报错，否则返回 closes（nil 即零行）。
+func hopTD(closes []core.OHLCV, err error) *fakeTD {
+	td := &fakeTD{closes: map[string][]core.OHLCV{}, fail: map[string]error{}}
+	if err != nil {
+		td.fail["NVDA"] = err
+	} else {
+		td.closes["NVDA"] = closes
+	}
+	return td
+}
+
+var hopNow = time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+
+func hopCloses() []core.OHLCV { return []core.OHLCV{{Time: hopNow.AddDate(0, 0, -1), Close: 100}} }
+
+func yahooDown() *fakeUS2 {
+	return &fakeUS2{failPrice: map[string]error{"NVDA": errors.New("yahoo 503")}}
+}
+
+func TestFetchClosesSecondHopSucceeds(t *testing.T) {
+	tg, td := hopTD(nil, errors.New("tiingo 403")), hopTD(hopCloses(), nil)
+
+	got, deg, err := fetchCloses(yahooDown(), []PriceHop{{"tiingo", tg}, {"twelvedata", td}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.NoError(t, err)
+	assert.Equal(t, hopCloses(), got)
+	assert.Equal(t, "NVDA: yahoo price failed (yahoo 503), tiingo failed (tiingo 403), twelvedata fallback ok", deg)
+}
+
+func TestFetchClosesFirstHopSucceedsSkipsRest(t *testing.T) {
+	tg, td := hopTD(hopCloses(), nil), hopTD(hopCloses(), nil)
+
+	got, deg, err := fetchCloses(yahooDown(), []PriceHop{{"tiingo", tg}, {"twelvedata", td}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.NoError(t, err)
+	assert.Equal(t, hopCloses(), got)
+	assert.Equal(t, "NVDA: yahoo price failed (yahoo 503), tiingo fallback ok", deg)
+	assert.Empty(t, td.calls, "首跳成功后不得再调后续跳（省配额）")
+}
+
+func TestFetchClosesYahooOKCallsNoHop(t *testing.T) {
+	tg, td := hopTD(hopCloses(), nil), hopTD(hopCloses(), nil)
+	us := &fakeUS2{closes: hopCloses()}
+
+	got, deg, err := fetchCloses(us, []PriceHop{{"tiingo", tg}, {"twelvedata", td}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.NoError(t, err)
+	assert.Equal(t, hopCloses(), got)
+	assert.Empty(t, deg)
+	assert.Empty(t, tg.calls)
+	assert.Empty(t, td.calls)
+}
+
+func TestFetchClosesEmptyHopFallsThrough(t *testing.T) {
+	tg, td := hopTD(nil, nil), hopTD(hopCloses(), nil) // tiingo 零行
+
+	_, deg, err := fetchCloses(yahooDown(), []PriceHop{{"tiingo", tg}, {"twelvedata", td}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.NoError(t, err)
+	assert.Equal(t, "NVDA: yahoo price failed (yahoo 503), tiingo failed (fallback source returned no data), twelvedata fallback ok", deg,
+		"零行视为失败，继续下一跳")
+}
+
+func TestFetchClosesAllHopsFail(t *testing.T) {
+	tg, td := hopTD(nil, errors.New("tiingo 403")), hopTD(nil, errors.New("td 429"))
+
+	_, deg, err := fetchCloses(yahooDown(), []PriceHop{{"tiingo", tg}, {"twelvedata", td}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.Error(t, err)
+	assert.Empty(t, deg)
+	assert.Equal(t, "price history: yahoo 503; tiingo fallback: tiingo 403; twelvedata fallback: td 429", err.Error())
+}
+
+func TestFetchClosesNoHopsKeepsPrefix(t *testing.T) {
+	yerr := errors.New("yahoo 503")
+	us := &fakeUS2{failPrice: map[string]error{"NVDA": yerr}}
+
+	_, _, err := fetchCloses(us, nil, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.Error(t, err)
+	assert.Equal(t, "price history: yahoo 503", err.Error())
+	assert.ErrorIs(t, err, yerr, "无备用跳时保持 %w 链（与现状一致）")
+}
+
+func TestFetchClosesSingleHopMatchesLegacyFormat(t *testing.T) {
+	_, _, err := fetchCloses(yahooDown(), []PriceHop{{"twelvedata", hopTD(nil, errors.New("td 429"))}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.Error(t, err)
+	assert.Equal(t, "price history: yahoo 503; twelvedata fallback: td 429", err.Error(), "与改动前单跳格式逐字一致")
+
+	_, deg, err := fetchCloses(yahooDown(), []PriceHop{{"twelvedata", hopTD(hopCloses(), nil)}}, "NVDA", hopNow.AddDate(-1, 0, 0), hopNow)
+	require.NoError(t, err)
+	assert.Equal(t, "NVDA: yahoo price failed (yahoo 503), twelvedata fallback ok", deg, "单跳成功文案与改动前逐字一致")
 }

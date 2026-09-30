@@ -12,6 +12,7 @@ import (
 	akshare "github.com/newthinker/atlas/internal/collector/akshare"
 	"github.com/newthinker/atlas/internal/collector/edgar"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
+	"github.com/newthinker/atlas/internal/collector/tiingo"
 	"github.com/newthinker/atlas/internal/collector/tushare"
 	"github.com/newthinker/atlas/internal/collector/twelvedata"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
@@ -149,7 +150,7 @@ func runPrismRefreshWith(d prismRefreshDeps) error {
 
 // tushareClientOrNil / twelvedataClientOrNil 在未配置 key 时返回**无类型 nil**。
 // 直接返回 (*tushare.Client)(nil) 会得到「非 nil 接口包裹 nil 指针」,让 Refresh 里的
-// ts != nil / td != nil 判定失真,未配置的备源会被当成已配置(typed-nil 陷阱,
+// ts != nil 与 usPriceHops 里的 td != nil 判定失真,未配置的备源会被当成已配置(typed-nil 陷阱,
 // 同 collectors.go 的 valuationSourceOrNil)。
 func tushareClientOrNil(apiKey string) prism.TushareClient {
 	if apiKey == "" {
@@ -163,6 +164,19 @@ func twelvedataClientOrNil(apiKey string) prism.TwelvedataClient {
 		return nil
 	}
 	return twelvedata.New(apiKey)
+}
+
+// usPriceHops 按 tiingo → twelvedata 组装 prism 美股价格备用跳。tiingo 需 enabled 且有 key;
+// twelvedata 沿用既有判据(有 key 即用)。未配置的跳不加入,避免 typed-nil 接口进链。
+func usPriceHops(collectors map[string]config.CollectorConfig) []prism.PriceHop {
+	var hops []prism.PriceHop
+	if tc := collectors["tiingo"]; tc.Enabled && tc.APIKey != "" {
+		hops = append(hops, prism.PriceHop{Name: "tiingo", Client: tiingo.New(tc.APIKey)})
+	}
+	if td := twelvedataClientOrNil(collectors["twelvedata"].APIKey); td != nil {
+		hops = append(hops, prism.PriceHop{Name: "twelvedata", Client: td})
+	}
+	return hops
 }
 
 func runPrismRefresh(cmd *cobra.Command, args []string) error {
@@ -195,11 +209,11 @@ func runPrismRefresh(cmd *cobra.Command, args []string) error {
 	// M3.5a 备源(spec §2):未配置 key 时注入无类型 nil,该跳整条跳过,
 	// 行为与 M3.5a 之前完全一致(ADR#9)。
 	ts := tushareClientOrNil(cfg.Collectors["tushare"].APIKey)
-	td := twelvedataClientOrNil(cfg.Collectors["twelvedata"].APIKey)
+	usHops := usPriceHops(cfg.Collectors)
 
 	deps := prismRefreshDeps{
 		refresh: func() prism.Report {
-			valuation := prism.Refresh(pcfg, store, lix, yh, ak, ed, ts, td, time.Now())
+			valuation := prism.Refresh(pcfg, store, lix, yh, ak, ed, ts, usHops, time.Now())
 			segments := segmentReport(pcfg, store, ed, ak, sankeyTemplatesDir, sankeySegmentsDir, prismFullSegments)
 			return mergeReports(valuation, segments)
 		},
