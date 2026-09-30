@@ -3,6 +3,7 @@
 日期：2026-09-30 · 状态：**已实施并上线**（PR #63，sprint-051，2026-09-30 部署；serve 21:10 重启后注册生效）
 
 > 2026-10-01 按实现同步修订：正文已改为与代码一致，修订处标 **〔实施后修订〕**；差异汇总见 §8，已知遗留见 §9。
+> 2026-10-01 §9 的 C/D 组（L1、L2、L4、L5、L10、L11、L12、L14、S1）已由 `fix/tiingo-hardening`（`7ef6ac2`）解决，正文相应处同步为修复后的行为。
 > 裁决出处：`.arcforge/archive/sprint-051-2026-09-30/docs/01-design/architecture-decisions.md`（AD-11…AD-24）、
 > QA 报告 `…/05-review/qa-review-round1.md`（W2、W3、L1…L14）。
 
@@ -73,7 +74,8 @@ serve 分析/快照 ─► orderedCollectors: 首选 ─✗─► …按注册�
 - 请求：`GET {base}/tiingo/daily/{ticker}/prices?startDate=YYYY-MM-DD`，**不带 `endDate`**；请求头 `Authorization: Token <key>`；token 不进 URL。
 - `FetchHistory(symbol string, start, end time.Time) ([]core.OHLCV, error)`：经 `policy.Fetch(gate, "tiingo.daily", key, …)`；key = `symbol|start|end`（日粒度）。返回按时间升序、`[start, end]` 闭区间、已按 §2.4 折算的 OHLCV（O/H/L/C ÷ 累计因子，Volume × 累计因子并四舍五入），`Interval="1d"`，返回前 `slices.Clone`。
 - `normalize`（独立文件 `normalize.go`，AD-17）：折算在**截取之前**对全量行进行。
-  - 坏日期的行**整行丢弃**（含其 `splitFactor`，见 §9 L1）；
+  - 坏日期的行整行丢弃；但若它带非 1 的 `splitFactor` 则**整段失败**（无法定位在时间轴上的因子不能静默丢，§9 L1 已解决）；
+  - 同一日期出现两行 → **整段失败**（无法判断哪行可信，§9 L2 已解决）；
   - O/H/L/C 任一为 null 的行**不输出，但其 `splitFactor` 仍参与累乘**〔实施后修订：spec 原只写「单行不可解析 → 跳过」，未覆盖拆股当日缺价这一边界；连因子一起丢会让此前全部价格错一个倍数〕；
   - 任一 `splitFactor` 非有限或 ≤ 0 → 整段失败。
 - `wrapErr` 为唯一 error 出口：前缀 `tiingo: `，替换 token 为 `<redacted>`，`%v` 断链（同 twelvedata ADR#7）；`mapPolicyErr` 把 `policy.ErrTimeout` / `ErrQuotaExceeded` 映射为含 `retryable` 的临时错误。
@@ -122,12 +124,12 @@ t.Set("tiingo.daily", Policy{TTL: builtinTTL, Coalesce: true,
   }
   ```
 
-  `Refresh(…, ts TushareClient, td TwelvedataClient, now)` 的 `td` 参数改为 `usHops []PriceHop`；`refreshEngine`、`refreshEdgar` 同步改为 `hops []PriceHop`。类型名 `TwelvedataClient` 现在也承载 tiingo，有误导（§9 L14）。
+  `Refresh(…, ts TushareClient, td TwelvedataClient, now)` 的 `td` 参数改为 `usHops []PriceHop`；`refreshEngine`、`refreshEdgar` 同步改为 `hops []PriceHop`。`PriceHop.Client` 的类型为 `PriceHistoryClient`，`TwelvedataClient` 保留为其类型别名（§9 L14 已解决）。
 - `fetchCloses(us, hops, symbol, start, end)`：yahoo 成功直接返回；否则按顺序试每一跳，零行视为失败（沿用 `errFallbackNoData`），首个成功跳之后不再调用后续跳。
   - 成功文案：`"<symbol>: yahoo price failed (<err>)[, <前序跳> failed (<err>)…], <name> fallback ok"`。〔实施后修订：人类裁决 P17（AD-20）——附上前序失败跳的原因，否则 tiingo 配错会被 twelvedata 的成功永久掩盖；首跳即成功时与改动前逐字一致〕
   - 全部失败：`"price history: <yahoo err>; <name1> fallback: <err1>; <name2> fallback: <err2>"`。
   - `hops` 为空：`"price history: %w"`，与改动前逐字一致。
-- `cmd/atlas/prism.go`：`usPriceHops(cfg.Collectors)` 按 `tiingo`、`twelvedata` 顺序组装。tiingo 需 `enabled` 且有 key；twelvedata 沿用既有判据（有 key 即用，不看 `enabled`，§9 L10）。未配置的跳不加入（防 typed-nil）。
+- `cmd/atlas/prism.go`：`usPriceHops(cfg.Collectors)` 按 `tiingo`、`twelvedata` 顺序组装。tiingo 需 `enabled` 且有 key；twelvedata 沿用既有判据（有 key 即用，不看 `enabled`；不改行为，已在 `config.example.yaml` 注明，§9 L10 已解决）。未配置的跳不加入（防 typed-nil）。
 
 ### 3.6 serve 接入
 
@@ -161,11 +163,13 @@ collector:
 | 400 / 401 / 403 | `tiingo: permission/config error (not retryable): HTTP <code>: <detail>` |
 | 429、gate 超额、gate 超时 | 含 `retryable` 的临时错误 |
 | 200 且 0 行（截取后） | 返回空切片；prism 侧按 `errFallbackNoData` 判失败；serve 循环继续下一源 |
-| 200 但响应体是错误对象 | 报 `decode` 错误，原因被吞（§9 S1，Tiingo 是否会这样返回未查实） |
-| 坏日期行 | 整行丢弃（含其 `splitFactor`，§9 L1） |
+| 200 但响应体是 `{"detail": …}` 错误对象 | 报 `error body with HTTP 200: <detail>`，保留原因（§9 S1 已解决） |
+| 3xx 重定向 | 不跟随，报 `HTTP 3xx`（避免 Authorization 随重定向送出，§9 L5 已解决） |
+| 坏日期行 | 整行丢弃；带非 1 的 `splitFactor` 时整段失败 |
+| 同一日期两行 | 整段失败 |
 | 价格为 null 的行 | 不输出，`splitFactor` 仍参与累乘 |
 | `splitFactor` 非有限或 ≤ 0 | 整段失败 |
-| 所有错误 | 经 `wrapErr` 脱敏、断链；状态错误先脱敏再截断 |
+| 所有错误 | 经 `wrapErr` 脱敏（不区分大小写）、断链；状态错误先脱敏再截断 |
 
 ## 5. 测试（TDD）
 
@@ -193,7 +197,7 @@ collector:
 | 进程级代理导致 TLS 失败 | Transport Clone + `Proxy = nil`，结构断言守护 |
 | 拆股折算遗漏 | 不带 `endDate` 取到最新；缺价行保留因子；NVDA 样本单测 |
 | 配额耗尽（Yahoo 长时间故障） | 小时配额 40 + 超额即失败；runtime 6h TTL。仍有 ×3 乘数与 404 重复扣费（§9 W2） |
-| token 外泄 | 只走请求头；`wrapErr` 脱敏断链、先脱敏再截断；token 仅在 gitignored runtime 配置。遗留：脱敏区分大小写、未限制重定向（§9 L4、L5） |
+| token 外泄 | 只走请求头；`wrapErr` 脱敏断链、先脱敏再截断；token 仅在 gitignored runtime 配置；脱敏不区分大小写、不跟随重定向（§9 L4、L5 已解决） |
 | Registry 有序化改变既有行为 | 5 处调用方的顺序由随机变为确定；特定配置下仲裁与回测会落到 tiingo（§9 W3、L9） |
 
 ## 8. 实施后差异汇总（2026-10-01）
@@ -217,22 +221,24 @@ collector:
 
 来源：QA 第 1 轮（`qa-review-round1.md`）与终验收裁决 AD-24。
 
+仍未排期：W2、W3（A/B 组，待单独设计）、L9（归入 B 组）、L13（AD-11 二期）；不改：L3、L7、S2、测试冗余 M。
+
 | 编号 | 内容 | 现状 / 裁决 |
 | --- | --- | --- |
 | W2 | 配额乘数：同一美股在一个 TTL 周期内有 3 个缓存键（FetchQuote 的 10 天窗、snapshot 的 FetchHistory、分析循环），最多扣 3 次；gate 先扣配额后请求、失败不缓存，404 标的每周期重复扣；prism 那一跳可能被 serve 饿死 | AD-24 接受，记入二期（负缓存 / 配额优先级） |
 | W3 | Yahoo 关闭 ∧ tiingo 与 arbitrator 开启时，仲裁的 US 市场上下文由 tiingo 提供，每次仲裁拉 SPY 耗配额 | AD-24 接受；二期考虑 arbitrator 跳过纯兜底源。当前 runtime 不触发 |
-| L1 | 坏日期行带 `splitFactor ≠ 1` 时因子随行丢失，此前价格错倍且 `err=nil` | 建议：坏日期行带非 1 因子时整段失败 |
-| L2 | 同一日期出现两行时因子乘两次、输出重复 bar | 建议：排序后去重或报错 |
+| L1 | 坏日期行带 `splitFactor ≠ 1` 时因子随行丢失，此前价格错倍且 `err=nil` | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：带非 1 因子时整段失败 |
+| L2 | 同一日期出现两行时因子乘两次、输出重复 bar | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：整段失败（选报错不选去重：无法判断哪行可信） |
 | L3 | 按调用方时区取日历日，上海早上调用时窗口左端可能少一根 bar，与 yahoo 一致 | 不改 |
-| L4 | 脱敏区分大小写 | 建议：大小写不敏感替换 |
-| L5 | 未设 `CheckRedirect`：同主机换端口或 https→http 的重定向会带 Authorization | 建议：拒绝重定向或只允许同主机 https |
+| L4 | 脱敏区分大小写 | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：`(?i)` + `QuoteMeta` 替换 |
+| L5 | 未设 `CheckRedirect`：同主机换端口或 https→http 的重定向会带 Authorization | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：不跟随任何重定向；生产 token 集成测试确认真实接口不受影响 |
 | L7 | 小写代码被拒 | 已写入 §3.2，失败方向安全 |
 | L9 | 只配 tiingo 与 qlib 时，回测固定用 tiingo，消耗配额 | 待记录 / 待定 |
-| L10 | `usPriceHops` 两跳启用判据不一致（tiingo 看 enabled，twelvedata 不看） | 改动前已有；建议在 config.example 注明 |
-| L11 | `FetchQuote` 的 `PrevClose != 0` 守卫无测试（删掉会产生 ±Inf 进入 snapshot JSON） | 建议补用例 |
-| L12 | `FetchQuote` 对 `BRK.B` 返回的 `Symbol` 无断言（实现正确） | 建议补断言 |
+| L10 | `usPriceHops` 两跳启用判据不一致（tiingo 看 enabled，twelvedata 不看） | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：仅在 `config.example.yaml` 注明，不改行为（改了会让「有 key 但 enabled: false」的配置悄悄失去一跳） |
+| L11 | `FetchQuote` 的 `PrevClose != 0` 守卫无测试（删掉会产生 ±Inf 进入 snapshot JSON） | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：补用例，删守卫的变异可杀 |
+| L12 | `FetchQuote` 对 `BRK.B` 返回的 `Symbol` 无断言（实现正确） | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：补断言，改用 ticker 形态的变异可杀 |
 | L13 | 装配壳（runPrismRefresh 传 nil、传空 key）只做了 diff 审查，`gate_wiring` 扫描不到 | 二期扩展 gate_wiring 扫描范围时覆盖（AD-11） |
-| L14 | `PriceHop.Client` 类型名 `TwelvedataClient` 误导 | 建议改名 `PriceHistoryClient` 并保留别名 |
-| S1 | 200 响应体为 `{"detail": …}` 时原因被 decode 错误吞掉 | Tiingo 是否会这样返回未查实 |
+| L14 | `PriceHop.Client` 类型名 `TwelvedataClient` 误导 | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：新增 `PriceHistoryClient`，旧名为别名（gitnexus 标 CRITICAL，经文本补查仅 2 处使用、人类同意后实施） |
+| S1 | 200 响应体为 `{"detail": …}` 时原因被 decode 错误吞掉 | 已解决（`fix/tiingo-hardening` `7ef6ac2`）：解码失败时回退读取 detail（Tiingo 是否真会这样返回仍未查实） |
 | S2 | 只有一根 bar 时 `ChangePercent` 为 0，snapshot 丢掉 `Source=tiingo_eod` | spec §3.3 明确规定不足两根取 0 |
 | M | 测试冗余若干（policy 与 tiingo 重复断言 40/h、NVDA 折算三层各测一遍、对 YAML 注释中文字面量断言） | 删不删不影响正确性 |
