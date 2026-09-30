@@ -4,6 +4,7 @@ package tiingo
 // functional[0]     请求形状 / BRK.B 映射                          → TestFetchHistoryRequestShape / TestFetchHistoryTickerMapping
 // functional[1]     端到端折算、200 [] 空切片、非 UTC 时区口径      → TestFetchHistorySplitNormalizedAndClipped / TestFetchHistoryEmptyBody / TestFetchHistoryNonUTCDates
 // error_handling[0] 状态码分类 + 前缀 + 脱敏                      → TestFetchHistoryStatusErrorsRedacted
+//                   截断前先脱敏（key 跨第 200 字节不泄露前缀）   → TestFetchHistoryStatusErrorKeyAcrossTruncation
 // error_handling[1] 传输 / decode / HTTP 错误断链且脱敏            → TestFetchHistoryErrorsRedactedAndUnchained
 // non_functional[0] Proxy nil + Timeout 30s                         → TestClientTransportIgnoresProxy
 // 其余（Gate 接线、缓存、配额、超时）见 gate_test.go。day() 定义在 normalize_test.go（TASK-009）。
@@ -141,6 +142,26 @@ func TestFetchHistoryStatusErrorsRedacted(t *testing.T) {
 		assert.True(t, strings.HasPrefix(err.Error(), "tiingo: "), "status %d", tc.status)
 		assert.NotContains(t, err.Error(), testKey, "status %d：错误文本不得含 token", tc.status)
 	}
+}
+
+// 返工 R1（test-tg-b）：body 截断到 200 字节若先于脱敏，key 跨第 200 字节时只剩前缀，
+// ReplaceAll 匹配不到，前缀原样进入错误文本（会经 prism 报告外发）。故断言任何 ≥4 字符前缀都不出现。
+func TestFetchHistoryStatusErrorKeyAcrossTruncation(t *testing.T) {
+	srv, _ := serveBody(t, http.StatusInternalServerError, strings.Repeat("x", 190)+testKey)
+	_, err := NewWithBaseURL(testKey, srv.URL).FetchHistory("AAPL", day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP 500")
+	for n := 4; n <= len(testKey); n++ {
+		assert.NotContains(t, err.Error(), testKey[:n], "错误文本含 key 的 %d 字符前缀", n)
+	}
+}
+
+// 空 key 不得做替换：strings.ReplaceAll 的 old 为空时会在每个字符之间插入替换串。
+func TestFetchHistoryEmptyKeyNotRedacted(t *testing.T) {
+	srv, _ := serveBody(t, http.StatusInternalServerError, "oops")
+	_, err := NewWithBaseURL("", srv.URL).FetchHistory("AAPL", day("2024-06-01"), day("2024-06-30"))
+	require.Error(t, err)
+	assert.Equal(t, "tiingo: AAPL: HTTP 500: oops", err.Error())
 }
 
 // 所有出口都必须断链：留链则 errors.Unwrap 可取回未脱敏原文（*url.Error 携带完整 URL）。

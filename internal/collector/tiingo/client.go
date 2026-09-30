@@ -55,13 +55,17 @@ func NewWithBaseURL(apiKey, baseURL string) *Client {
 }
 
 // wrapErr 是本包唯一的 error 出口：加前缀、抹掉 apiKey、用 %v 断链
-// （留链则 errors.Unwrap 可取回未脱敏原文）。空 key 不替换。
+// （留链则 errors.Unwrap 可取回未脱敏原文）。
 func (c *Client) wrapErr(format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if c.apiKey != "" {
-		msg = strings.ReplaceAll(msg, c.apiKey, "<redacted>")
+	return fmt.Errorf("tiingo: %s", c.redact(fmt.Sprintf(format, args...)))
+}
+
+// redact 抹掉 apiKey。空 key 不替换。
+func (c *Client) redact(s string) string {
+	if c.apiKey == "" {
+		return s
 	}
-	return fmt.Errorf("tiingo: %s", msg)
+	return strings.ReplaceAll(s, c.apiKey, "<redacted>")
 }
 
 // mapPolicyErr 把 policy 哨兵错误换成本包的临时错误；必须在 policy.Fetch 返回处调用。
@@ -128,7 +132,9 @@ func (c *Client) statusErr(symbol string, code int, body []byte) error {
 	_ = json.Unmarshal(body, &e)
 	detail := e.Detail
 	if detail == "" {
-		detail = strings.ToValidUTF8(string(body[:min(len(body), 200)]), "")
+		// 先脱敏再截断：先截断的话，横跨截断点的 key 只剩前缀，wrapErr 再也匹配不到。
+		detail = c.redact(string(body))
+		detail = strings.ToValidUTF8(detail[:min(len(detail), 200)], "")
 	}
 	switch code {
 	case http.StatusNotFound:
