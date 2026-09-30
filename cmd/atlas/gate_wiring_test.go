@@ -50,6 +50,12 @@ var collectorCtors = map[string]bool{
 	"yahoo.New": true, "eastmoney.New": true, "crypto.New": true,
 	"tushare.New": true, "lixinger.New": true, "baostock.New": true,
 	"twelvedata.New": true,
+	// tiingo.New 构造 Client 时同样快照 policy.Default()，登记它是为了名单完整。
+	// ⚠ 这条登记**不守护** tiingo 的真实调用点：本表只在 crisis/backtest 三个入口的
+	// 函数体内按字面名扫描，而 prism 的构造在 usPriceHops 里、serve 调用的是
+	// tiingo.NewCollector（名字不同）——两处都不在扫描范围内。它们的接线顺序由
+	// export_ohlcv.go / serve.go 的「先 initPolicyGate、后构造」保证（AD-11）。
+	"tiingo.New": true,
 }
 
 // gateOrder 记录目标函数体内的装配调用与**最早**的 collector 构造调用。

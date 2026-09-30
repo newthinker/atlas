@@ -1,8 +1,12 @@
 package main
 
 import (
+	"database/sql"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/newthinker/atlas/internal/app"
@@ -203,3 +207,137 @@ var (
 	_ collector.FundamentalCollector = (*lixinger.Lixinger)(nil)
 	_ app.ValuationSource            = (*lixinger.Lixinger)(nil)
 )
+
+// ——— TASK-007：tiingo 作为美股最后一个外部兜底登记 ———
+//
+// Context Checkpoint: done_criteria → test mapping
+// functional[0] "GetCollectors() 名字序列逐元素 = [yahoo, eastmoney, tushare, baostock, tiingo]"
+//                                              → TestBuildCollectors_RegistersTiingoLast
+// functional[1] "tiingo 位于 qlib 之前"         → TestBuildCollectors_TiingoBeforeQlib（真启用 qlib warehouse）
+// functional[2] "config.example.yaml 的 tiingo 块可被 config.Load 加载，注释含 TTL 6h 与共用 40 次/时"
+//                                              → TestExampleConfigDeclaresTiingo
+// boundary[0]   "未启用 / 缺 key 不登记，其余序列与不配置 tiingo 时完全相同"
+//                                              → TestBuildCollectors_SkipsTiingoWhenUnconfigured
+// non_functional[0] gate_wiring 登记 → gate_wiring_test.go 的 collectorCtors（review）
+
+// collectorSeq 返回已登记采集器名的**注册顺序**序列（collectorNames 会排序，只能判集合）。
+func collectorSeq(application *app.App) []string {
+	var got []string
+	for _, c := range application.GetCollectors() {
+		got = append(got, c.Name())
+	}
+	return got
+}
+
+// buildSeq 用 cfg 跑一次 buildCollectors，返回注册顺序序列。
+func buildSeq(t *testing.T, cfg *config.Config) []string {
+	t.Helper()
+	application := app.New(cfg, zap.NewNop())
+	cleanup, err := buildCollectors(cfg, application, zap.NewNop())
+	if err != nil {
+		t.Fatalf("buildCollectors: %v", err)
+	}
+	t.Cleanup(cleanup)
+	return collectorSeq(application)
+}
+
+// tiingo 是美股最后一个外部兜底：必须注册在 tushare/baostock 之后（Registry 按注册顺序返回）。
+func TestBuildCollectors_RegistersTiingoLast(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Collectors = map[string]config.CollectorConfig{
+		"yahoo":     {Enabled: true},
+		"eastmoney": {Enabled: true},
+		"tushare":   {Enabled: true, APIKey: "tok"},
+		"tiingo":    {Enabled: true, APIKey: "tk"},
+	}
+	cfg.Prism.Enabled = true
+
+	got := buildSeq(t, cfg)
+	want := []string{"yahoo", "eastmoney", "tushare", "baostock", "tiingo"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("注册顺序 = %v, want %v", got, want)
+	}
+}
+
+// qlib 的 WithExternal 在运行期按注册顺序挑外部源，tiingo 必须在它之前登记。
+// 用一个真实（空表）的 sqlite 文件启用 warehouse：wireQlibWarehouse 只 open+ping。
+func TestBuildCollectors_TiingoBeforeQlib(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "qlib.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE t (a INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	cfg := config.Defaults()
+	cfg.Collectors = map[string]config.CollectorConfig{
+		"yahoo":  {Enabled: true},
+		"tiingo": {Enabled: true, APIKey: "tk"},
+	}
+	cfg.Qlib.Enabled = true
+	cfg.Qlib.DBPath = dbPath
+
+	got := buildSeq(t, cfg)
+	ti, qi := slices.Index(got, "tiingo"), slices.Index(got, "qlib")
+	if ti < 0 || qi < 0 || ti > qi {
+		t.Fatalf("注册顺序 = %v：须同时含 tiingo 与 qlib 且 tiingo 在前", got)
+	}
+}
+
+// 未启用 / 缺 key 都不登记，且其余 collector 的注册序列与根本不配置 tiingo 时逐元素相同。
+func TestBuildCollectors_SkipsTiingoWhenUnconfigured(t *testing.T) {
+	base := func() *config.Config {
+		cfg := config.Defaults()
+		cfg.Collectors = map[string]config.CollectorConfig{
+			"yahoo":     {Enabled: true},
+			"eastmoney": {Enabled: true},
+			"tushare":   {Enabled: true, APIKey: "tok"},
+		}
+		cfg.Prism.Enabled = true
+		return cfg
+	}
+	want := buildSeq(t, base())
+	if len(want) == 0 {
+		t.Fatal("基准序列为空，下面的逐元素比较会空真")
+	}
+
+	for name, tc := range map[string]config.CollectorConfig{
+		"未启用":   {Enabled: false, APIKey: "tk"},
+		"缺 key": {Enabled: true},
+	} {
+		cfg := base()
+		cfg.Collectors["tiingo"] = tc
+		if got := buildSeq(t, cfg); !slices.Equal(got, want) {
+			t.Errorf("%s: 注册顺序 = %v, want %v（不得登记 tiingo，其余不变）", name, got, want)
+		}
+	}
+}
+
+// 样例配置里的 tiingo 块必须真能从整份 yaml 解码，且注释给出 TTL 建议与共用配额提示（AD-21）。
+func TestExampleConfigDeclaresTiingo(t *testing.T) {
+	const path = "../../configs/config.example.yaml"
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	tc, ok := cfg.Collectors["tiingo"]
+	if !ok {
+		t.Fatal("样例配置缺少 collectors.tiingo")
+	}
+	if tc.Enabled || tc.APIKey != "" || !slices.Equal(tc.Markets, []string{"US"}) {
+		t.Errorf("tiingo = %+v, want enabled=false、api_key 为空、markets=[US]", tc)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"tiingo.daily:", "ttl: 6h", "40 次/时"} {
+		if !strings.Contains(string(raw), s) {
+			t.Errorf("样例配置的 tiingo 注释缺少 %q", s)
+		}
+	}
+}

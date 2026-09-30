@@ -10,6 +10,7 @@ import (
 	"github.com/newthinker/atlas/internal/collector/eastmoney"
 	"github.com/newthinker/atlas/internal/collector/lixinger"
 	"github.com/newthinker/atlas/internal/collector/qlibpit"
+	"github.com/newthinker/atlas/internal/collector/tiingo"
 	"github.com/newthinker/atlas/internal/collector/tushare"
 	"github.com/newthinker/atlas/internal/collector/yahoo"
 	"github.com/newthinker/atlas/internal/config"
@@ -92,6 +93,14 @@ func buildCollectors(cfg *config.Config, application *app.App, log *zap.Logger) 
 		application.RegisterCollector(baostock.New(prismCfg.BaostockBaseURL))
 		log.Info("baostock collector registered (A-share price 3rd hop)",
 			zap.String("bridge", prismCfg.BaostockBaseURL))
+	}
+
+	// 美股价格最后一个外部兜底（设计 docs/superpowers/specs/2026-09-30-tiingo-source-design.md §3.6）：
+	// 注册在 tushare/baostock 之后、qlib 之前；Registry 按注册顺序返回，故它排在兜底链末尾。
+	// 非美股形态的代码在 collector 内直接拒绝，不发请求、不占配额。
+	if collectorCfg, ok := cfg.Collectors["tiingo"]; ok && collectorCfg.Enabled && collectorCfg.APIKey != "" {
+		application.RegisterCollector(tiingo.NewCollector(collectorCfg.APIKey))
+		log.Info("tiingo collector registered (US price last hop)")
 	}
 
 	// Wire qlib warehouse collector after all external collectors are registered
