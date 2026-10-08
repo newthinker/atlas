@@ -334,6 +334,36 @@ acquire_task_lock() { # <TASK-ID>
 #     下一个人自旋满 30 秒后报「疑似死锁残留」,而现场没有任何线索指向是谁覆盖的。
 #   · **fd 9 已被 flock 分支占用**,别再拿它做重定向。
 #
+# ---------- dev_done 落盘后以「只记录」方式调 Jev(2026-10-08,twine 实撞) ----------
+# Jev 原本只挂在原生 TaskCompleted 事件上(task-completed-jev.sh),而 Arcforge 的 dev_done 走本
+# 写通道 —— 下面 dev_done 门禁那段**刻意**直接调 task-completed.sh、不经 wrapper(理由见那段注释),
+# 原生事件在文件写通道下又不触发。于是 jev.enabled=true 的项目里 Jev 一次都没跑过,且毫无症状
+# (twine sprint-009:配置已启用,.arcforge/jev/log 根本不存在;本框架唯一一份 jev 日志来自测试沙箱)。
+#
+# 接法(人类 2026-10-08 裁定「只记录」):dev_done **落盘且释放任务锁之后**再调,强制 shadow、
+# 无视退出码与输出 —— 不赋予 Jev 阻断 dev_done 的能力(与上面不改接 wrapper 的理由同一条)。
+#   · 为什么在落盘之后:之前调的话,随后若因 epoch/status 断言被拒,就给一次没发生的 dev_done
+#     记了判定,污染影子期语料(那份语料是转 enforce 的唯一判据)。
+#   · 为什么先放锁:Jev 可能等外部 API 十几秒(timeout_s),不能让 Leader 派验等这把锁。
+#   · stdout/stderr 全部丢弃:shadow 的产物在 .arcforge/jev/log/,dev 不需要也不该据此行动。
+# Jev 未安装(hook 缺失)是正常形态,静默;装了却没有 python 是有声降级(WARN),与 wrapper 同档。
+# ARCFORGE_JEV_HOOK / ARCFORGE_JEV_PYTHON 覆写仅供测试注入,默认值即生产路径。
+run_jev_shadow() { # <TASK-ID> <me> <task-file>
+    local jev py input
+    jev="${ARCFORGE_JEV_HOOK:-$(dirname "$SELF")/jev/task_completed_jev.py}"
+    [ -f "$jev" ] || return 0
+    py="${ARCFORGE_JEV_PYTHON:-python3}"
+    if ! command -v "$py" >/dev/null 2>&1; then
+        echo "WARN: Jev 已安装但 $py 不可用,本次 dev_done 跳过 Jev 记录(不影响迁移结果)。" >&2
+        return 0
+    fi
+    input=$(jq -c --arg id "$1" --arg me "$2" \
+        '{task_id:$id, task_subject:(.title // ""), task_description:(.description // ""), teammate_name:$me}' \
+        "$3" 2>/dev/null) || input="{\"task_id\":\"$1\"}"
+    printf '%s\n' "$input" | ARCFORGE_JEV_MODE=shadow CLAUDE_PROJECT_DIR="$PWD" \
+        "$py" -B "$jev" >/dev/null 2>&1 || true
+}
+
 # ---------- 任务锁临界区内的读-校验-写 ----------
 # 由主模式在 acquire_task_lock 之后**原地调用**(不再是可被外部触达的第二个入口)。
 # ME/FILE/MODE/NEW 刻意**不声明 local**:下游(审计行、validator 挂载)按全局可见消费它们。
@@ -648,6 +678,15 @@ $DRIFT_STAT
             echo "WARN: transitions.jsonl 追加失败,审计缺行(主事务已落盘,不回滚)" >&2
         fi
         [ -n "$AUDIT_OLD" ] && rm -f "$AUDIT_OLD"
+    fi
+    if [ "$MODE" = "transition" ] && [ "$NEW" = "dev_done" ]; then
+        # 先放锁再调 Jev(理由见 run_jev_shadow 头注释)。两条锁路径都要放:mkdir 路径删目录,
+        # flock 路径关 fd 9(内核随之释放);对未打开的 fd 9 执行关闭是无害 no-op(实测 rc=0、无输出)。
+        # ⚠ 不得写成 `exec 9>&- 2>/dev/null`:无命令的 exec,其重定向**永久**作用于当前 shell,
+        #   那会把本脚本此后全部 stderr 送进 /dev/null —— 首版即如此,DJ6 的 WARN 因此消失。
+        release_task_lock
+        exec 9>&-
+        run_jev_shadow "$TID" "$ME" "$FILE"
     fi
     exit 0
 }
