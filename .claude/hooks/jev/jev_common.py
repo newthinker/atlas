@@ -8,12 +8,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 DEFAULT_API_URL = "https://api.typesafe.ai/v1/systemone"
 
@@ -149,13 +150,30 @@ def project_allowed(cfg: Dict[str, Any]) -> bool:
     if "*" in allowed:
         return True
     root = project_root()
-    names = {root.name}
-    try:
-        git_cfg = (root / ".git" / "config").read_text()
-        names.update(re.findall(r"url\s*=\s*(\S+)", git_cfg))
-    except OSError:
-        pass
+    names = {root.name} | _remote_urls(root)
     return any(a in n for a in allowed for n in names)
+
+
+def _remote_urls(root: Path) -> Set[str]:
+    """root 所在仓库的全部 remote URL。
+
+    经 `git config` 读而不是直接读 `<root>/.git/config`:linked worktree 的 `.git` 是**文件**
+    (`gitdir: …`),直接读必然 OSError,于是只剩目录名(如 wt-TASK-001)参与白名单匹配 ⇒
+    判「不允许」⇒ Jev 静默返回、一行日志都不写(twine 2026-10-08 实测:主仓库 allowed=True、
+    同一份配置在 worktree 里 allowed=False)。git 会自行解析 worktree 的 commondir。
+    git 不可用 / 非 git 仓库时退回读文件,行为与改前一致。
+    """
+    try:
+        r = subprocess.run(["git", "-C", str(root), "config", "--get-regexp", r"^remote\..*\.url$"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            return {ln.split(None, 1)[1] for ln in r.stdout.splitlines() if " " in ln}
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        return set(re.findall(r"url\s*=\s*(\S+)", (root / ".git" / "config").read_text()))
+    except OSError:
+        return set()
 
 
 # ---------------------------------------------------------------------------
