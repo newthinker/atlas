@@ -50,5 +50,29 @@
   "arcforge": {
     "repo": "https://github.com/newthinker/ArcForge.git",
     "auto_update_check": true
+  },
+  "jev": {
+    "enabled": true,
+    "model": "jev-1.13.0",
+    "api_key_env": "TYPESAFE_API_KEY",
+    "allowed_projects": [
+      "newthinker/atlas"
+    ],
+    "quality_gate": {
+      "mode": "shadow",
+      "timeout_s": 15,
+      "max_diff_bytes": 60000,
+      "dod_filter": {
+        "max_chars": 200,
+        "max_semicolons": 1
+      },
+      "thresholds": {
+        "pass_min": 0.90,
+        "fail_max": 0.70,
+        "verdict_pass_conf": 0.60,
+        "clear_fail_conf": 0.70,
+        "integrity_max": 0.80
+      }
+    }
   }
 }
