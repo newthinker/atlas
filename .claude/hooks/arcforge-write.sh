@@ -955,7 +955,11 @@ case "$CMD" in
                     # bash 3.2 没有 timeout(1),自己轮询。粒度 1 秒足够:阈值是 30 秒量级。
                     VTO="${ARCFORGE_VALIDATE_TIMEOUT:-30}"
                     VOUT_F=$(mktemp) || deny "mktemp 失败" "检查临时目录可写后重试"
-                    bash "$VRUN" validate .arcforge/tasks > "$VOUT_F" 2>&1 &
+                    # #24:带上派发上下文,validator 据此只按与本次派发相关的 scope 冲突阻断
+                    # (无关的既有冲突降为告警;派验在对方也不在写时不因冲突被拦)。走环境变量:
+                    # 旧版 validator 不认它,照旧全局判定 —— 版本错配的方向是多拦,不是漏拦。
+                    ARCFORGE_DISPATCH_TASK="$TASK_ID" ARCFORGE_DISPATCH_TO="$NEW" \
+                        bash "$VRUN" validate .arcforge/tasks > "$VOUT_F" 2>&1 &
                     # 「本次是否超时」用独立标志记,不从 (VRC==124 ∧ VWAIT≥VTO) 反推:124 是
                     # 退出码表里 validator **自己也会发**的码,两者处置同档(都判不可用)但成因
                     # 不同,而只有成因决定下面那行 ERROR 该不该打。反推还会让 VWAIT 泄漏出循环

@@ -92,7 +92,9 @@ NNN=$(printf '%03d' $((MAX + 1)))
 DEST="$ARCHIVE_DIR/sprint-$NNN-$(date +%F)"
 
 # ---- 4. 归档候选:逐目录 skip-if-missing;wisdom 保留原地 ----
-CANDIDATES="docs tasks discoveries checkpoints coverage"
+#         jev/:Jev 日志(quality.jsonl 是影子期语料、转 enforce 的唯一判据),按 sprint 留痕才可复核。
+#         归档后不重建:jev_common._append_jsonl 写时自己 mkdir -p,未启用 Jev 的项目也就不会凭空多出空目录。
+CANDIDATES="docs tasks discoveries checkpoints coverage jev"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] 目标: $DEST"
