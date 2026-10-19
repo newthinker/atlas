@@ -493,7 +493,7 @@ description 而不在 DoD）、`scope-writes-outside-packages`（writes 越出�
 | --- | --- |
 | 编辑代码、跑测试、跑变异 | 自己的 worktree |
 | 一切 `.arcforge/` 读写:**cd 回主仓库** | 主仓库（唯一真相源） |
-| 提交 | 自己的 worktree，分支 `task/<TASK-ID>` |
+| 提交 | 自己的 worktree，分支 `task/<TASK-ID>`；主题与时机见下「提交约定」 |
 | 合并回 `main` | 由 **Leader 串行执行** |
 
 ```bash
@@ -503,6 +503,29 @@ git worktree add -b task/<TASK-ID> ../wt-<TASK-ID> main
 # 收尾（回主仓库执行，谁建谁拆）
 git worktree remove ../wt-<TASK-ID>
 ```
+
+### 提交约定（门禁靠它认领你的改动）
+
+门禁只认两类提交：**主题为 `<type>(<TASK-ID>): …` 的提交**（在主仓库当前分支、`task/<TASK-ID>` 及其
+后缀分支 `task/<TASK-ID>-<后缀>` 上），以及**主题为 `<type>(<TASK-ID>):` 或 git 默认
+`Merge branch 'task/<TASK-ID>…'` 的合并提交**（取它相对第一父带进来的改动）。对不上的提交，范围漂移检查与 Jev 质量门
+**都看不见**：判定照常给出，只是在空集上跑，没有任何症状（#39：almanac 49 个任务、twine 全部任务的
+Jev 清单为空，起因都是主题里没有任务 ID）。
+
+- **主题**：`<type>(<TASK-ID>): <描述>`，`<type>` 小写（feat / fix / docs / test / refactor / chore …）。
+  - ✅ `feat(TASK-003): 持仓清单与 token 配置`
+  - ✅ `docs(TASK-006): a6 README 命令表`——项目计划自有的编号或模块名放进描述，**括号里留任务 ID**
+  - ❌ `feat(model): 核心模型`（模块名）
+  - ❌ `docs(a1): README 命令表`（计划编号）
+- **时机**：**先提交，再 `transition dev_done`**。门禁在主仓库里、在 dev_done 那一刻取证：worktree 里没提交的
+  改动，和 dev_done 之后才提交的改动，它都看不到。
+- **合并**（Leader）：`git merge --no-ff -m "merge(<TASK-ID>): <描述>" task/<TASK-ID>`。快进或 cherry-pick
+  也行，前提是被合入的提交本身符合上面的主题；**不要在合入时改写标题**（twine 曾为过门禁临时改成
+  `docs(TASK-006):`、合入时又改回计划编号）——改写后的历史对之后的返工与同号任务都不可见。
+- **门禁出声时**：dev_done 输出里出现「门禁看不到 <TASK-ID> 的任何改动」或「主题不符 … 不计入」的 WARN，
+  说明违反了上面某一条。这两条只是 WARN：迁移已发生，本次判定已在空集上给出。未推送的最后一条提交可用
+  `git commit --amend` 改主题，多条时另行改写，或由 Leader 合并时用 `merge(<TASK-ID>):` 主题把改动带进来；
+  无论哪种，都在交付报告里写明本次门禁没有输入，别当噪声划过去。
 
 ### ⚠ 隔离引入一个新的静默失败模式（已机制堵上）
 
