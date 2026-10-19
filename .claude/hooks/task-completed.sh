@@ -156,20 +156,48 @@ fi
 #   就在几行之后。定义留在后面时:`ref=$(task_branch_ref) || return 0` 会把
 #   `command not found`(127)吞掉 ⇒ 并入静默变成空操作(BR-1/BR-3 永远红而代码看着全对),
 #   且那行 command not found 走 **stderr**、不被 $( ) 捕获 ⇒ 漏进门禁输出。两者都实测过。
-task_branch_ref() { # 成功时打印 refs/heads/task/$TASK_ID 并返回 0;否则返回 1 且无输出
+#
+# #38:分支名认 task/<ID> **及其后缀分支** task/<ID>-*。返工轮按惯例另开带后缀的分支
+# (`task/TASK-022-qa1`、`task/TASK-004-r1`,同号旧分支还在),只认恰好叫 task/<ID> 的那条时,
+# 返工提交在合并之前对门禁全不可见(ArcForge 实测:15 个任务的 .files 因此为空)。
+# for-each-ref 的非 glob 模式匹配「整个 ref,或以它开头到某个 / 为止」:task/TASK-1 不会命中
+# task/TASK-10(但会命中 task/TASK-1/…,那也是本任务的分支);后缀分支必须以 - 起头。
+task_branch_ref() { # 成功时逐行打印 task/$TASK_ID 与 task/$TASK_ID-* 的 ref 并返回 0;否则返回 1 且无输出
     [ -n "${TASK_ID:-}" ] || return 1
-    git rev-parse --verify -q "refs/heads/task/$TASK_ID" >/dev/null 2>&1 || return 1
-    printf 'refs/heads/task/%s' "$TASK_ID"
+    local refs
+    refs=$(git for-each-ref --format='%(refname)' "refs/heads/task/$TASK_ID" "refs/heads/task/$TASK_ID-*" 2>/dev/null) \
+        || return 1
+    [ -n "$refs" ] || return 1
+    printf '%s\n' "$refs"
 }
 task_branch_log() { # [--since <ts>]
-    local ref; ref=$(task_branch_ref) || return 0
+    local refs; refs=$(task_branch_ref) || return 0
+    # shellcheck disable=SC2086  # refs 逐行一个 ref,refname 不含空白,按词展开是有意的
     if [ "${1:-}" = "--since" ] && [ -n "${2:-}" ]; then
         git log -E --grep="^[a-z]+\(${TASK_ID}\):" --since="$2" --name-only --pretty=format: \
-            "HEAD..$ref" 2>/dev/null || true
+            $refs --not HEAD 2>/dev/null || true
     else
         git log -E --grep="^[a-z]+\(${TASK_ID}\):" --name-only --pretty=format: \
-            "HEAD..$ref" 2>/dev/null || true
+            $refs --not HEAD 2>/dev/null || true
     fi
+}
+# #38:合并提交带进来的文件。`git log --name-only` 对合并提交**不列任何文件**,于是 dev 提交
+# 主题写模块名(`feat(model): …`)、只有 Leader 的合并提交带 ID 时,本任务的已提交改动对门禁
+# 整个不可见(almanac 实测:49 个任务的 .files 因此为空),范围漂移判定也跟着失明。
+# 认领判据:合并主题锚定本任务(与上面同一条 `<type>(ID):` 正则),或是合并本任务分支的
+# `Merge task/<ID>…` / git 默认的 `Merge branch 'task/<ID>…'`。后者按分支名认领不比前者松 ——
+# 两者都是谁都写得出的约定文本;而它合并进来的正是本任务分支,内容本就该算本任务的。
+# 只取相对**第一父**的 diff:那是这次合并给主干带来的改动。与第二父比(或 `-m` 两侧都比)
+# 会把合并时主干上别人的提交算成本任务的,成了被报者无从清除的越界(C-1 同形)。
+# 逐个 `git diff <M>^1 <M>` 而不用 `git log --diff-merges=first-parent`:后者要 git ≥ 2.31,
+# 旧 git 上整条命令报错,这一路静默变空;逐个 diff 对任何版本都成立。
+merged_task_files() { # [--since <ts>]
+    local h since=""
+    [ "${1:-}" = "--since" ] && [ -n "${2:-}" ] && since="--since=$2"
+    for h in $(git log --merges -E --grep="^[a-z]+\(${TASK_ID}\):" --grep="$MERGE_SUBJECT_RE" \
+                   ${since:+"$since"} --format=%H 2>/dev/null); do
+        git diff --name-only "$h^1" "$h" 2>/dev/null || true
+    done
 }
 COMMITTED_MINE=""
 COMMITTED_BOUNDED=""
@@ -186,6 +214,11 @@ if [ -n "$TASK_ID" ]; then
     BRANCH_MINE=$(task_branch_log)
     [ -n "$BRANCH_MINE" ] && COMMITTED_MINE="$COMMITTED_MINE
 $BRANCH_MINE"
+    # #38 并入合并提交带进来的文件(见 merged_task_files),同样先取变量、非空才拼。
+    MERGE_SUBJECT_RE="^Merge (branch ')?task/${TASK_ID}([-' :]|\$)"
+    MERGED_MINE=$(merged_task_files)
+    [ -n "$MERGED_MINE" ] && COMMITTED_MINE="$COMMITTED_MINE
+$MERGED_MINE"
     # C5 专用的**有下界**集合;下界缺失时置空,**绝不回落到 COMMITTED_MINE**(那就是 C-1)。
     if [ -f "$TASK_DIR/$TASK_ID.json" ]; then
         WORK_SINCE=$(jq -r '.last_transition
@@ -222,6 +255,10 @@ $BRANCH_MINE"
         BRANCH_BOUNDED=$(task_branch_log --since "$WORK_SINCE")
         [ -n "$BRANCH_BOUNDED" ] && COMMITTED_BOUNDED="$COMMITTED_BOUNDED
 $BRANCH_BOUNDED"
+        # 合并提交同样带下界:上一轮(同号任务)的合并带进来的文件不是本轮的越界。
+        MERGED_BOUNDED=$(merged_task_files --since "$WORK_SINCE")
+        [ -n "$MERGED_BOUNDED" ] && COMMITTED_BOUNDED="$COMMITTED_BOUNDED
+$MERGED_BOUNDED"
     fi
     # 旧的宽判据不丢弃,降级成**告警探针**:它命中而锚定判据未命中 ⇒ 有提交提到了本任务
     # 却不符约定,那些提交里的改动对下面的漂移检查不可见。放行可以,静默不行。
@@ -231,7 +268,10 @@ $BRANCH_BOUNDED"
     # 提交**会**进 COMMITTED_MINE,却过不了主题判据,于是被 WARN 说成「不可见」——
     # 一句假话。本仓库真实语料实测该形态 0 次,但告警一旦会说假话就没人再信它,
     # 而按 hash 取差集在结构上就不可能不一致(代价是多一次 git log,毫秒级)。
-    MINE_H=$(git log -E --grep="^[a-z]+\(${TASK_ID}\):" --format='%h' 2>/dev/null || true)
+    # #38:按分支名认领的合并(`Merge task/<ID>…`)也提到了 ID,它的文件已计入,不得再被说成
+    # 「主题不符、不计入」。只加 --merges 的那部分:非合并提交写成这个形态,文件照样不计入。
+    MINE_H=$(git log -E --grep="^[a-z]+\(${TASK_ID}\):" --format='%h' 2>/dev/null || true
+             git log --merges -E --grep="$MERGE_SUBJECT_RE" --format='%h' 2>/dev/null || true)
     NONCONFORMING=$(git log -E --grep="${TASK_ID}([^0-9]|\$)" --format='%h %s' 2>/dev/null \
                     | MH="$MINE_H" awk 'BEGIN { n = split(ENVIRON["MH"], a, "\n")
                                                 for (i = 1; i <= n; i++) if (a[i] != "") mine[a[i]] = 1 }
@@ -449,11 +489,11 @@ fi
 # 被测源里**恰好命中一行**。这里若也用 q,本行会与那行同形,M8 当场以「变异命令执行失败(锚点
 # 没匹配到唯一一行?)」报废 —— 实撞:该 harness 退出码由 0 变 2,而被测代码本身完全正确。
 # 同理本注释也不能原样引用那个子串(注释行同样会被 sub_line 命中)。口径相同不要求文本相同。
-path_in_task_branch() { # <路径>;0 = 该路径存在于任务分支的树里
-    local ref n="${1#./}"
+path_in_task_branch() { # <路径>;0 = 该路径存在于任一任务分支(task/<ID> 或其后缀分支,#38)的树里
+    local ref refs n="${1#./}"
     while [ -n "$n" ] && [ "$n" != "${n%/}" ]; do n="${n%/}"; done
     [ -n "$n" ] || return 1
-    ref=$(task_branch_ref) || return 1
+    refs=$(task_branch_ref) || return 1
     # 两处 non-ASCII 修正,缺任何一处中文声明路径都判不对(sprint-011 T5 实测):
     # ① `-c core.quotePath=false`:git 默认把非 ASCII 路径**转义**输出
     #    (`"docs-work/\350\256\276\350\256\241..."`),于是中文声明路径与它**永不**全等
@@ -464,8 +504,12 @@ path_in_task_branch() { # <路径>;0 = 该路径存在于任务分支的树里
     #    与本函数的全部意义相反。CLAUDE.md「含中文比对一律 LC_ALL=C」是既有纪律。
     # ⚠ 两者有先后依赖:只修 ① 会让原始多字节串第一次真正流进 awk,把 ② 从「不可达」
     #   变成「必然发生」—— 只修 ①,负例用例会当场由绿翻红。故两处必须一起改。
-    git -c core.quotePath=false ls-tree -r --name-only "$ref" 2>/dev/null \
-      | LC_ALL=C awk -v p="$n" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }'
+    for ref in $refs; do
+        git -c core.quotePath=false ls-tree -r --name-only "$ref" 2>/dev/null \
+          | LC_ALL=C awk -v p="$n" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }' \
+          && return 0
+    done
+    return 1
 }
 # 回落**只对无代码任务生效**。代码任务的 PKGS 会被原样喂给 `go test $PKGS -coverpkg=…`
 # (见下方 §3),放进一个主仓库树上不存在的包,阻断理由会从可读的「声明范围为空」退化成
@@ -487,6 +531,24 @@ if [ -z "$PKGS" ]; then
     echo "BLOCKED: ${TASK_ID} 的声明范围为空或声明路径全部不存在。" >&2
     echo "无代码任务也必须显式声明:packages 指向文档/产物路径,且全部 done_criteria 标注 verify_by: review|manual。" >&2
     exit 2
+fi
+
+# #38 形态 C:改动只在 worktree 里(未提交,或先 dev_done 后提交)时,主仓库里根本没有那份改动,
+# 门禁修不成「看得见」,只能出声 —— 否则范围漂移检查与 Jev 质量门都在空集上跑,结论照常、毫无症状
+# (twine 实测:10 个任务的 .files 全空)。不阻断:主仓库里确实没有可判的东西,而纯文档任务的
+# 改动可以只靠不带下界的已提交集合确认(见下面 DOCS_ONLY 分支)。
+# 放在「声明范围为空」那道阻断之后:那条路径上的问题是声明本身无效,不是看不见改动。
+# 范围全在 .arcforge/ 下时不出声:那棵树本就不进改动集合,清单为空是常态,不是看不见。
+# 无提交历史时不出声:上面那条「无提交历史」WARN 已说明原因,而这里列的原因全是提交相关的,不适用。
+if [ -z "$(printf '%s' "$MINE_FILES" | tr -d '[:space:]')" ] \
+   && git rev-parse --verify -q HEAD >/dev/null 2>&1 \
+   && printf '%s\n' "$MY_SCOPE" | grep -qvE '^$|^(\./)?\.arcforge(/|$)'; then
+    echo "WARN: 门禁看不到 ${TASK_ID} 的任何改动——本次范围漂移检查与 Jev 质量门都没有输入。" >&2
+    echo "      门禁只认:主仓库工作区里未提交的改动,以及本轮开工之后主题为 <type>(${TASK_ID}): 的提交" >&2
+    echo "      (当前分支、task/${TASK_ID} 及其后缀分支,和合并提交带进来的文件)。常见原因:" >&2
+    echo "        · 提交主题写的是模块名(如 feat(model):),而不是 <type>(${TASK_ID}):" >&2
+    echo "        · 改动还只在 worktree 里没有提交,或提交在别的分支名上" >&2
+    echo "        · 先 transition dev_done、后提交" >&2
 fi
 
 if [ "$DOCS_ONLY" = "true" ]; then
