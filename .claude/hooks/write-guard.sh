@@ -58,8 +58,9 @@ SUBAGENT_DENY_MSG="DENY: 子代理禁止调用 .arcforge/ 写通道(单写者模
 # 不会误拦合法实例;若格式将来变化,已登记实例仍由 L2 兜住。
 # .tokens 为空 ⇒ 整个机制关闭(全新目标项目就是这个形态,贴合「未登记保持旧行为」)。
 deny_subagent_write_channel() {
-    # 只对写通道脚本生效;只读的 arcforge-validate / validator-run.sh 不在内。
-    echo "$CMD" | grep -qE '(arcforge-write\.sh|arcforge-archive\.sh|with-task-lock\.sh)' || return 0
+    # 只对写通道脚本生效;只读的 arcforge-validate / validator-run.sh / quiet_briefing.py 不在内。
+    # quiet_apply.py 在内:它以 leader 身份调写通道,命令里却不含 arcforge-write.sh 字样。
+    echo "$CMD" | grep -qE '(arcforge-write\.sh|arcforge-archive\.sh|with-task-lock\.sh|quiet_apply\.py)' || return 0
     AID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null) || return 0
     [ -n "$AID" ] || return 0                                   # L1
     [ "$MATRIX_ACTIVE" = "true" ] || return 0                   # 无矩阵:bootstrap 期,放行
@@ -139,7 +140,168 @@ runtime_protected() {
 # WRITE_RE 与宽松分支共用(避免两处正则漂移);READ_CMDS 为读白名单首词。
 STRICT_WHY=""
 READ_CMDS=" jq cat ls grep egrep fgrep head tail wc find diff stat sort uniq cut tr file du comm cmp column test [ [[ md5sum shasum sha256sum echo printf date git basename dirname readlink realpath env true : "
-WRITE_RE='(>>?\|?[[:space:]]*[^[:space:]]*\.arcforge/|\btee\b.*\.arcforge/|\b(cp|mv|rsync|install)\b.*\.arcforge/|\bln\b.*[[:space:]]-[a-z]*f[a-z]*.*\.arcforge/|\bsed[[:space:]]+-i.*\.arcforge/|\brm\b.*\.arcforge/|\btruncate\b.*\.arcforge/)'
+# 写动词必须是独立的词(#25):原先用 \b…\b,而 `.` 与 `/` 都算单词边界 ⇒ 文件名 install.sh 被当成
+# install 动词。现在两侧都只**额外**排除会让它变成另一个词的字符,其余与 \b 相同 —— 不比原先少拦:
+#   前:不能紧贴字母数字 / _ / . / -(x.cp、how-to-cp 是别的词);刻意**允许** `/`:/bin/cp 仍是 cp。
+#   后:不能紧贴字母数字 / _ / . / / / -(install.sh、cp-x、cp/x 是别的词);引号**允许**:cp'' 与 cp"" 仍是 cp。
+VB='(^|[^[:alnum:]_.-])'
+VE='[^[:alnum:]_./-]'
+WRITE_RE='(>>?\|?[[:space:]]*[^[:space:]]*\.arcforge/|'"${VB}(tee|cp|mv|rsync|install|rm|truncate)${VE}"'.*\.arcforge/|'"${VB}ln${VE}"'(.*[[:space:]])?-[a-z]*f[a-z]*.*\.arcforge/|'"${VB}sed${VE}"'+-i.*\.arcforge/)'
+
+# #25:按顶层的 && || ; | 与换行拆段,每段一行输出。宽松模式据此要求「写动词与受保护路径出现在
+# 同一段」——原先对整条命令匹配,`.*` 会跨过 && 把第 1 段的动词和第 3 段的只读路径连成一次命中。
+#
+# ⚠ 只对**可确定解析的简单命令**拆段,其余整条退回原先的整条匹配(见 segments_or_whole)。
+# 拆段的风险是把写动词与它的目标路径拆进不同段而漏拦,而「哪个 ; | 是段界」取决于 shell 语法与方言:
+# PR #28 的三轮 review 依次撞出 $(…)/反引号/${…} 内的分隔符、双引号里的 $( 套内层引号、
+# $'…' 与 \$'/$$' 的区分、双引号里 ${…} 中的 '(zsh 与 bash ≥4.3 当字面,而本工具的命令正是 zsh 在执行)。
+# 逐个补状态机证明不了「不比原先弱」,故改为:命令里出现 ( ` ${ $' 任一即不拆。剩下的命令里能改变
+# 段界的只有 '…'、"…" 与反斜杠转义,bash 与 zsh 对它们的处理一致,下面的扫描对它们是完备的。
+# 代价:带子 shell / 命令替换的组合命令仍按原先的整条匹配误拦 —— 与改动前逐字相同,不会更弱。
+#
+# 引号内不拆(`cp x "a;b" .claude/hooks/y` 的 ; 不是段界);`>|`(强制覆盖重定向)不是管道;
+# 单个 & 不拆(2>&1、&> 都含它)。引号未闭合时其后整段不再拆分,失败方向是多拦。
+# 换行与 || 不需要单独处理:换行原样输出就是段界(下游 grep 逐行匹配),|| 按两个 | 拆出一个空段。
+# 引号内的换行与反斜杠续行由 join_logical 另跑一遍兜住(#33),这里不处理。
+# LC_ALL=C:逐字节扫描,多字节字符原样透传(分隔符都是 ASCII,不会落在多字节序列中间)。
+split_segments() { # <cmd>
+    printf '%s' "$1" | LC_ALL=C awk '
+        BEGIN { RS = "\001" }
+        {
+            n = length($0); out = ""; sq = 0; dq = 0; esc = 0
+            for (i = 1; i <= n; i++) {
+                c = substr($0, i, 1); nx = substr($0, i + 1, 1)
+                if (esc)            { out = out c; esc = 0; continue }
+                if (sq)             { out = out c; if (c == "\047") sq = 0; continue }
+                if (c == "\\")      { out = out c; esc = 1; continue }
+                if (dq)             { out = out c; if (c == "\"") dq = 0; continue }
+                if (c == "\047")    { out = out c; sq = 1; continue }
+                if (c == "\"")      { out = out c; dq = 1; continue }
+                if (c == ";")       { out = out "\n"; continue }
+                if (c == "&" && nx == "&") { out = out "\n"; i++; continue }
+                if (c == "|") {
+                    if (substr(out, length(out), 1) == ">") { out = out c; continue }
+                    out = out "\n"; if (nx == "&") i++; continue
+                }
+                out = out c
+            }
+            print out
+        }'
+}
+
+# 不拆段的结构:( 覆盖 $( <( >( 子 shell 与 zsh 的 (a|b) 通配,` 是命令替换,${ 与 $' 各有自己的引号规则。
+# $"…" 不在其中:它对段界的影响与 "…" 相同,下面的扫描按双引号处理即正确。
+# 刻意不区分出现在引号内还是外:判别「在不在引号里」本身就要用到上面那套会出错的解析。
+# 拆段失败、拆出空串或命令含不可拆结构时,退回整条命令(多拦不漏拦)。
+segments_or_whole() { # <cmd>
+    local segs
+    case "$1" in
+        *'('*|*'`'*|*'${'*|*"\$'"*) printf '%s\n' "$1"; return ;;
+    esac
+    segs=$(split_segments "$1") && [ -n "$segs" ] || segs="$1"
+    printf '%s\n' "$segs"
+}
+
+# #33:下游 grep 逐行匹配,写动词与目标路径分处两行(反斜杠续行、引号内换行)时哪一行都凑不齐。
+# 这里按 shell 的逻辑行折叠出另一份命令,Bash 分支对它**再跑一遍**同样的检查 —— 原始各行照旧
+# 匹配,只增不减,故不比改动前少拦。折叠规则:
+#   - 引号外与双引号内的 `\<换行>` 是续行,连同反斜杠一起删掉(c\<换行>p 就是 cp);单引号内是字面。
+#   - 引号内含真换行的串整体换成 _nl_:路径里带换行就不是受保护路径本身,换掉它既把两侧接上,
+#     又不会把多行提交说明这类散文连成一次假命中。串里有 $( 或 ` 时改为把换行换成空格 ——
+#     命令替换里的写入是真写入,此时宁可多拦。
+#   - 遇到引号外的 heredoc(<< 而非 <<<)就停:正文是数据,不按 shell 词法解析 —— 往脚本文件里
+#     写一段带续行的 cp,折叠后就成了一次假命中;正文里的撇号也会让后面的行全被当成引号内。
+#     注释(# 起头)原样抄到行尾,理由相同。
+# 已知仍漏:写在 heredoc 正文**之后**的跨行写入;$((1<<2)) 也会被当成 heredoc 而停;$'…' 里的
+# \' 会让引号配对错位(三者都只影响这份折叠结果,原始各行照旧匹配)。
+join_logical() { # <cmd>
+    printf '%s' "$1" | LC_ALL=C awk '
+        function flush(  b) {
+            b = (nl && index(buf, "$(") == 0 && index(buf, "`") == 0) ? "_nl_" : buf
+            out = out b; buf = ""; nl = 0
+        }
+        BEGIN { RS = "\001" }
+        {
+            n = length($0); out = ""; q = ""; buf = ""; nl = 0
+            for (i = 1; i <= n; i++) {
+                c = substr($0, i, 1); nx = substr($0, i + 1, 1)
+                if (q != "") {
+                    if (c == q)                 { flush(); out = out c; q = ""; continue }
+                    if (q == "\"" && c == "\\") { if (nx != "\n") buf = buf c nx; i++; continue }
+                    if (c == "\n") { nl = 1; c = " " }
+                    buf = buf c; continue
+                }
+                if (c == "\\")                 { if (nx != "\n") out = out c nx; i++; continue }
+                if (c == "\047" || c == "\"") { out = out c; q = c; qs = i; continue }
+                if (c == "#" && (out == "" || substr(out, length(out), 1) ~ /[ \t\n;&|(]/)) {
+                    j = index(substr($0, i), "\n")
+                    if (j == 0) { out = out substr($0, i); break }
+                    out = out substr($0, i, j); i += j - 1; continue
+                }
+                if (c == "<" && nx == "<") {
+                    if (substr($0, i + 2, 1) == "<") { out = out "<<<"; i += 2; continue }
+                    break
+                }
+                out = out c
+            }
+            if (q != "") out = out substr($0, qs + 1)   # 引号未闭合:剩余部分原样保留
+            print out
+        }'
+}
+
+# #25:.arcforge/ 侧的项目外路径中和(.claude/ 侧的对应处理见 Bash 分支的 SCRUBBED)。
+# ~/.arcforge/ 是框架安装目录,Leader 与人类频繁从里面复制文件;原先任何含 .arcforge/ 的
+# 词都按项目内对待。这里逐个取出含 .arcforge/ 的路径词,展开 ~ / $HOME 后用 repo_rel 规范化:
+# 落在项目 .arcforge/ 下的原样保留,其余换成 _ext_arcforge_。
+# 与 .claude/ 侧的正则中和不同,这里走 normalize_path:`$PWD/sub/../.arcforge/` 这类绕回
+# 项目内的写法仍被认出(.arcforge/ 侧原先对它是拦的,收窄不能把它放出去)。
+# 含 $ ` * ? [ ~ { } \ 的词无法静态判定指向哪里,一律按项目内保留(多拦不漏拦)。
+# 按出现顺序逐词拼接,不做全局替换:否则项目外的 ../.arcforge/x 会顺带把项目内
+# sub/../.arcforge/x 里的同一段子串也换掉。
+# ⚠ 正则切出的「词」不是 shell 的词:"$PWD"/.arcforge/x、'.'/.arcforge/x、foo=/../.arcforge/x、
+# $(pwd)/.arcforge/x、/tmp/.arcforge/"../../proj/.arcforge/x" 里切出的那段单看在项目外,拼回整个词
+# 却在项目内。所以只中和**独立成词**的路径:前后紧邻的都是边界(行首/行尾、空格/制表符、< > | ; &;
+# 换行不算 —— 失败方向是多拦),
+# 或者整个词恰好是 "…" / '…'。展开按引号区分:裸词展开 ~ 与 $HOME,"…" 只展开 $HOME(~ 不展开),
+# '…' 都不展开(展开后仍含 $ 或 ~,按上一条保留)。
+AF_TOK_RE='[^[:space:]"'\''=<>|;&()`]*\.arcforge/[^[:space:]"'\''<>|;&()`]*'
+# word_boundary <字符>:0 = 该字符(空串即行首/行尾)在 shell 里一定是词的边界。
+word_boundary() { case "$1" in ''|' '|$'\t'|'<'|'>'|'|'|';'|'&') return 0 ;; esac; return 1; }
+# word_quote <词之前的全部文本> <词之后的全部文本>:回显 bare / " / ',表示这个路径词独立成词的方式;
+# 不独立成词(与引号、$(…)、= 等拼接)时返回 1。
+word_quote() {
+    local before="$1" after="$2" p1 p2 n1 n2 b2 a2
+    p1="${before#"${before%?}"}"; b2="${before%?}"; p2="${b2#"${b2%?}"}"
+    n1="${after%"${after#?}"}";   a2="${after#?}";  n2="${a2%"${a2#?}"}"
+    if word_boundary "$p1" && word_boundary "$n1"; then echo bare; return 0; fi
+    if { [ "$p1" = '"' ] || [ "$p1" = "'" ]; } && [ "$n1" = "$p1" ] \
+       && word_boundary "$p2" && word_boundary "$n2"; then echo "$p1"; return 0; fi
+    return 1
+}
+scrub_arcforge_ext() { # <cmd>
+    local rest="$1" out="" tok exp q
+    while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        case "$rest" in *"$tok"*) ;; *) continue ;; esac
+        out="$out${rest%%"$tok"*}"; rest="${rest#*"$tok"}"
+        q=$(word_quote "$out" "$rest") || { out="$out$tok"; continue; }
+        exp="$tok"
+        case "$q" in
+            bare) case "$exp" in '~/'*|'$HOME/'*|'${HOME}/'*) exp="$HOME/${exp#*/}" ;; esac ;;
+            '"')  case "$exp" in '$HOME/'*|'${HOME}/'*)       exp="$HOME/${exp#*/}" ;; esac ;;
+        esac
+        case "$exp" in
+            *'$'*|*'`'*|*'*'*|*'?'*|*'['*|*'~'*|*'{'*|*'}'*|*'\'*) out="$out$tok"; continue ;;
+        esac
+        case "$(repo_rel "$exp")" in
+            .arcforge/*) out="$out$tok" ;;
+            *)           out="${out}_ext_arcforge_" ;;
+        esac
+    done <<EOF
+$(printf '%s\n' "$1" | grep -oE "$AF_TOK_RE")
+EOF
+    printf '%s' "$out$rest"
+}
 
 strict_deny() { # <触发段> <归类原因>
     echo "$DENY_MSG" >&2
@@ -192,6 +354,62 @@ SEGEOF
     return 0
 }
 
+# .claude/ 运行时写检测。
+# 只保护本项目的 .claude/:家目录(~、$HOME)及其他项目外绝对路径下的
+# .claude/ 是用户级配置,不在本 hook 职责内,不得误拦——先把项目绝对
+# 路径归一化为相对,再把其余前缀带 ~ / $HOME / 绝对路径的 .claude/
+# 中和为无害 token,后续启发式只对项目内引用生效。
+#
+# C4 补丁 round 2(reviewer 查出):上面的折叠只堵了 $PWD 与 .claude 之间的噪声,
+# .claude 与 hooks|scripts|settings 之间同样可以插入 // 或 /./ ——纯相对路径形态
+# (如 .claude//hooks/y、.claude/./hooks/y)压根不经过 $PWD 相关的折叠/外部化两步
+# 就直接落到这里的检测正则,而原正则 `\.claude/(hooks|scripts|settings)` 要求
+# .claude 与目标目录名之间**恰好一个斜杠**,// 或 /./ 都会让它失配、判定被跳过。
+# .arcforge/ 侧对此免疫(它的正则只要求 `\.arcforge/` 出现,不要求后面紧跟特定
+# 目录名,不受影响,不要动那一侧)。这条检测先于 STRICT 分支,故此处一次性
+# 修复同时覆盖宽松与严格两种模式,无需在 strict 分支再补一份。
+# 资产路径只写一次:门禁与「六选一写动词」模式共用同一份。六个动词分支共享同一
+# 后缀,故按 (动词1|…|动词6)后缀 提取(与上面 .arcforge/ 侧的 WRITE_RE 同型),
+# 而不是逐个分支插值 —— 后者要写 6 遍,漏改一处就是一个静默绕点。
+CLAUDE_ASSET_RE='\.claude(/\.)*/+(hooks|scripts|settings)'
+CLAUDE_WRITE_RE='(>>?\|?[[:space:]]*[^[:space:]]*|'"${VB}(tee|cp|mv|rsync|install|rm|chmod|truncate)${VE}"'.*|'"${VB}ln${VE}"'(.*[[:space:]])?-[a-z]*f[a-z]*.*|'"${VB}sed${VE}"'+-i.*)'"$CLAUDE_ASSET_RE"
+claude_runtime_check() { # <cmd>;命中则 exit 2
+    local scrubbed
+    # C4 补丁:原先只认单斜杠字面量 "$PWD/.claude/",对 "$PWD//.claude/"、
+    # "$PWD/../<自身目录名>/.claude/" 这类自然变体,会被下面「外部路径无害化」
+    # 那一步误判成仓库外(不是漏拦,是被误分类成外部,危害更高——那一步是刻意
+    # 放行仓库外同名路径的规则)。故先局部折叠这两种形态,只在 $PWD 紧邻
+    # .claude/ 的这一段做替换,不做全命令级的 // 折叠,避免误伤 http:// 等
+    # 无关内容。变量拼接(D=.claude; cp x $D/hooks/y)不在本次收口范围内——
+    # 那需要主动构造,文件头注释已声明本分支是「宁漏不误拦」的启发式。
+    scrubbed=$(printf '%s' "$1" | sed -E \
+        -e "s#(${PWD_ESC})/+\\.claude/#\\1/.claude/#g" \
+        -e "s#(${PWD_ESC})/\\.\\./${PWD_BASENAME_ESC}/+\\.claude/#\\1/.claude/#g") || scrubbed="$1"
+    PROJ_CLAUDE="$PWD/.claude/"
+    # 先赋给变量再展开:bash 3.2 下 ${x//"$PWD/.claude/"/…} 会把引号里的 / 当成分隔符。
+    scrubbed=${scrubbed//"$PROJ_CLAUDE"/.claude/}
+    scrubbed=$(printf '%s' "$scrubbed" | sed -E 's#(~|\$HOME|/[^[:space:]"'\''/][^[:space:]"'\'']*)/\.claude/#\1/_ext_claude_/#g') || scrubbed="$1"
+    if echo "$scrubbed" | grep -qE "$CLAUDE_ASSET_RE"; then
+        # #25:逐段匹配(见 split_segments)。
+        if segments_or_whole "$scrubbed" | grep -qE "$CLAUDE_WRITE_RE"; then
+            echo "$RUNTIME_DENY_MSG" >&2; exit 2
+        fi
+    fi
+}
+
+# 「写动词 × .arcforge 路径」启发式(宁漏不误拦)
+# #25:先中和项目外的 .arcforge/ 路径,再逐段匹配;任一步失败都退回原始整条命令。
+arcforge_lax_check() { # <cmd>;命中则 exit 2
+    local acmd
+    acmd=$(scrub_arcforge_ext "$1") || acmd="$1"
+    if echo "$acmd" | grep -q '\.arcforge/'; then
+        if segments_or_whole "$acmd" | grep -qE "$WRITE_RE"; then
+            echo "$DENY_MSG" >&2
+            exit 2
+        fi
+    fi
+}
+
 case "$TOOL" in
   Write|Edit)
     FP=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null) || exit 0
@@ -210,43 +428,11 @@ case "$TOOL" in
     # 严格模式的 classify_segment 与宽松模式的行内 grep 是两个**各自独立**的白名单,
     # 判别插在任一之后,另一条就是现成的绕过口。
     deny_subagent_write_channel
-    # .claude/ 运行时写检测(先于白名单——白名单脚本也不允许写运行时)。
-    # 只保护本项目的 .claude/:家目录(~、$HOME)及其他项目外绝对路径下的
-    # .claude/ 是用户级配置,不在本 hook 职责内,不得误拦——先把项目绝对
-    # 路径归一化为相对,再把其余前缀带 ~ / $HOME / 绝对路径的 .claude/
-    # 中和为无害 token,后续启发式只对项目内引用生效。
-    #
-    # C4 补丁:原先只认单斜杠字面量 "$PWD/.claude/",对 "$PWD//.claude/"、
-    # "$PWD/../<自身目录名>/.claude/" 这类自然变体,会被下面「外部路径无害化」
-    # 那一步误判成仓库外(不是漏拦,是被误分类成外部,危害更高——那一步是刻意
-    # 放行仓库外同名路径的规则)。故先局部折叠这两种形态,只在 $PWD 紧邻
-    # .claude/ 的这一段做替换,不做全命令级的 // 折叠,避免误伤 http:// 等
-    # 无关内容。变量拼接(D=.claude; cp x $D/hooks/y)不在本次收口范围内——
-    # 那需要主动构造,文件头注释已声明本分支是「宁漏不误拦」的启发式。
-    SCRUBBED=$(printf '%s' "$CMD" | sed -E \
-        -e "s#(${PWD_ESC})/+\\.claude/#\\1/.claude/#g" \
-        -e "s#(${PWD_ESC})/\\.\\./${PWD_BASENAME_ESC}/+\\.claude/#\\1/.claude/#g") || SCRUBBED="$CMD"
-    PROJ_CLAUDE="$PWD/.claude/"
-    SCRUBBED=${SCRUBBED//"$PROJ_CLAUDE"/.claude/}
-    SCRUBBED=$(printf '%s' "$SCRUBBED" | sed -E 's#(~|\$HOME|/[^[:space:]"'\''/][^[:space:]"'\'']*)/\.claude/#\1/_ext_claude_/#g') || SCRUBBED="$CMD"
-    # C4 补丁 round 2(reviewer 查出):上面的折叠只堵了 $PWD 与 .claude 之间的噪声,
-    # .claude 与 hooks|scripts|settings 之间同样可以插入 // 或 /./ ——纯相对路径形态
-    # (如 .claude//hooks/y、.claude/./hooks/y)压根不经过 $PWD 相关的折叠/外部化两步
-    # 就直接落到这里的检测正则,而原正则 `\.claude/(hooks|scripts|settings)` 要求
-    # .claude 与目标目录名之间**恰好一个斜杠**,// 或 /./ 都会让它失配、判定被跳过。
-    # .arcforge/ 侧对此免疫(它的正则只要求 `\.arcforge/` 出现,不要求后面紧跟特定
-    # 目录名,不受影响,不要动那一侧)。这条检测先于下面的 STRICT 分支,故此处一次性
-    # 修复同时覆盖宽松与严格两种模式,无需在 strict 分支再补一份。
-    # 资产路径只写一次:门禁与「六选一写动词」模式共用同一份。六个动词分支共享同一
-    # 后缀,故按 (动词1|…|动词6)后缀 提取(与上面 .arcforge/ 侧的 WRITE_RE 同型),
-    # 而不是逐个分支插值 —— 后者要写 6 遍,漏改一处就是一个静默绕点。
-    CLAUDE_ASSET_RE='\.claude(/\.)*/+(hooks|scripts|settings)'
-    CLAUDE_WRITE_RE='(>>?\|?[[:space:]]*[^[:space:]]*|\btee\b.*|\b(cp|mv|rsync|install)\b.*|\bln\b.*[[:space:]]-[a-z]*f[a-z]*.*|\bsed[[:space:]]+-i.*|\b(rm|chmod|truncate)\b.*)'"$CLAUDE_ASSET_RE"
-    if echo "$SCRUBBED" | grep -qE "$CLAUDE_ASSET_RE"; then
-        if echo "$SCRUBBED" | grep -qE "$CLAUDE_WRITE_RE"; then
-            echo "$RUNTIME_DENY_MSG" >&2; exit 2
-        fi
-    fi
+    # .claude/ 运行时写检测先于白名单——白名单脚本也不允许写运行时(见 claude_runtime_check)。
+    # #33:对原始命令与折叠出的逻辑行各跑一遍(见 join_logical);两者相同时只跑一遍。
+    JCMD=$(join_logical "$CMD") || JCMD="$CMD"
+    claude_runtime_check "$CMD"
+    [ "$JCMD" = "$CMD" ] || claude_runtime_check "$JCMD"
     [ "$MATRIX_ACTIVE" = "true" ] || exit 0
     # A-1:严格模式启用时走拆段分类器(fail-closed),否则维持现行宽松启发式。
     if [ "${ARCFORGE_GUARD_STRICT:-0}" = "1" ]; then
@@ -257,13 +443,8 @@ case "$TOOL" in
     if echo "$CMD" | grep -qE '(arcforge-write\.sh|arcforge-archive\.sh|arcforge-validate)'; then
         exit 0
     fi
-    # 「写动词 × .arcforge 路径」启发式(宁漏不误拦)
-    if echo "$CMD" | grep -q '\.arcforge/'; then
-        if echo "$CMD" | grep -qE "$WRITE_RE"; then
-            echo "$DENY_MSG" >&2
-            exit 2
-        fi
-    fi
+    arcforge_lax_check "$CMD"
+    [ "$JCMD" = "$CMD" ] || arcforge_lax_check "$JCMD"
     ;;
 esac
 exit 0

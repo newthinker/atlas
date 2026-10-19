@@ -648,9 +648,20 @@ gate_rust() {
 $PKGS
 EOF
     mkdir -p "$COV_DIR"
-    local report="$COV_DIR/${TASK_ID:-adhoc-$$}.json"
+    # 报告、失败日志、隔离目录三者必须用同一个键。
+    local task_key="${TASK_ID:-adhoc-$$}"
+    local report="$COV_DIR/$task_key.json"
+    local faillog="$COV_DIR/$task_key-failed.log"
     # 〔更正 MAJOR-1〕先删旧报告:工具退出 0 却没写新报告时,读到上一次的产物会静默放行 —— 与 fail-closed 相悖。
-    rm -f "$report"
+    # 失败日志同理:它只描述**本次**运行,留着上一次的会让人照着陈旧现场归因。
+    rm -f "$report" "$faillog"
+    # #23:每个任务独立的覆盖率构建目录。原先所有任务共用 target/llvm-cov-target:
+    #   ① 按旧版依赖编出的其他 crate 测试二进制被并进覆盖映射,分母变大(oikos TASK-004:82.28% vs 99.29%);
+    #   ② 几个 dev 同时 dev_done 时,后启动的那个开头清理产物,删掉先启动那个正在用的(TASK-019/016 第一次失败)。
+    # 只加 clean 而不隔离会加重②,所以两件事一起做:先在**本任务的目录里** clean --workspace,再跑。
+    # 绝对路径:cargo-llvm-cov 0.9.1 认 CARGO_LLVM_COV_TARGET_DIR(实测),不必依赖它对相对路径的解析口径。
+    # 代价:每个任务首次门禁要把依赖完整编一遍(之后同一任务复用);磁盘随任务数增长,在 target/ 下随 cargo clean 一并清掉。
+    local gate_target; gate_target="$(pwd -P)/target/arcforge-gate/$task_key"
     echo "=== Gate scope (${TASK_ID:-fallback}) ==="
     echo "$PKGS"
     # 超时:沿用 coverage.test_timeout;macOS 无 GNU timeout 时退回不限时并出声(放行可以,静默不行)。
@@ -658,11 +669,23 @@ EOF
     if command -v timeout >/dev/null 2>&1; then tmo="timeout $TEST_TIMEOUT"
     elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $TEST_TIMEOUT"
     else echo "WARN: 无 timeout/gtimeout,cargo llvm-cov 不限时运行。" >&2; fi
+    # clean 失败不阻断:陈旧产物只会把覆盖率拉低(多算未覆盖的区域),失败方向是假红不是假绿。出声即可。
+    # 用子 shell 里 export 而不是 `env VAR=… cargo`:env 不在门禁的最小工具集里(见测试的 MINTOOLS)。
+    local clean_out
+    # shellcheck disable=SC2086  # $tmo 是有意的 word-splitting
+    if ! clean_out=$(export CARGO_LLVM_COV_TARGET_DIR="$gate_target"; $tmo cargo llvm-cov clean --workspace 2>&1); then
+        echo "WARN: cargo llvm-cov clean 失败,本次覆盖率可能被陈旧产物拉低(只会偏低,不会偏高):" >&2
+        printf '%s\n' "$clean_out" | tail -5 >&2
+    fi
     # cargo-llvm-cov 自己跑 cargo test,一条命令同时拿到测试结果与覆盖率。
     # shellcheck disable=SC2086  # $tmo 与 $names 都是有意的 word-splitting
-    TEST_OUTPUT=$($tmo cargo llvm-cov --json --summary-only $names --output-path "$report" 2>&1)
+    TEST_OUTPUT=$(export CARGO_LLVM_COV_TARGET_DIR="$gate_target"; $tmo cargo llvm-cov --json --summary-only $names --output-path "$report" 2>&1)
     TEST_EXIT=$?
     if [ $TEST_EXIT -ne 0 ]; then
+        # #23:完整输出落盘。下面只把 tail -30 打到 stderr,而 stderr 不落盘 ⇒ oikos TASK-019 第一次失败的根因
+        # 只能停在推断。成功时删掉(见上面的 rm -f),所以这个文件存在 = 最近一次门禁失败了。
+        # 写盘失败时 bash 自己会报错(放行可以,静默不行),这里不吞。
+        printf '%s\n' "$TEST_OUTPUT" > "$faillog" && echo "  完整输出: $faillog" >&2
         # 〔返工 W6〕工具类失败不伪装成「Tests failed」:124/125 是 timeout 的专属退出码(124 = 超时被杀,
         # 125 = timeout 自己拒绝了参数,如 Go 风格复合时长 1m30s)。判定只看退出码、不看 $tmo 是否为空:
         # 本机无 timeout 时 cargo 自己不会返回这两个码,而 R-M5 正是用假 cargo exit 124 钉着这条分支。

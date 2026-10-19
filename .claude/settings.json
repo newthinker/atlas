@@ -1,44 +1,52 @@
 {
+  "subagentPromptCacheTtl": "1h",
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
   "permissions": {
     "allow": [
-      "Agent",
-      "Bash(cat:*)",
-      "Bash(cp:*)",
-      "Bash(date:*)",
-      "Bash(echo:*)",
-      "Bash(find:*)",
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob",
+      "Bash(go test:*)",
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(go run:*)",
+      "Bash(go tool cover:*)",
+      "Bash(golangci-lint:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo llvm-cov:*)",
       "Bash(git add:*)",
-      "Bash(git branch:*)",
-      "Bash(git checkout:*)",
       "Bash(git commit:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git status:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
       "Bash(git worktree:*)",
-      "Bash(go build:*)",
-      "Bash(go run:*)",
-      "Bash(go test:*)",
-      "Bash(go tool cover:*)",
-      "Bash(go vet:*)",
-      "Bash(golangci-lint:*)",
-      "Bash(grep:*)",
-      "Bash(head:*)",
-      "Bash(jq:*)",
-      "Bash(ls:*)",
       "Bash(mkdir:*)",
-      "Bash(mv:*)",
-      "Bash(sort:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(jq:*)",
+      "Bash(head:*)",
       "Bash(tail:*)",
       "Bash(wc:*)",
-      "Edit",
-      "Glob",
-      "Grep",
-      "Read",
-      "Skill(*)",
-      "Write"
+      "Bash(sort:*)",
+      "Bash(grep:*)",
+      "Bash(echo:*)",
+      "Bash(date:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Agent",
+      "Skill(*)"
     ],
     "ask": [
       "Bash(npx skills:*)",
@@ -87,6 +95,17 @@
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "BASH_ENV= bash .claude/hooks/quiet-permission-log.sh >/dev/null"
+          }
+        ]
+      }
+    ],
     "TaskCompleted": [
       {
         "hooks": [
@@ -120,6 +139,5 @@
         ]
       }
     ]
-  },
-  "subagentPromptCacheTtl": "1h"
+  }
 }
