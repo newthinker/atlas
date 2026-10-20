@@ -122,8 +122,8 @@ func adviceLine(s SideAdvice) string {
 	return strings.Join(parts, " · ")
 }
 
-func alertIcon(ts []Trigger) string {
-	var drop, rise bool
+// directions 报告 ts 中是否有跌（非 rise_from_low 一律按跌）与涨的规则。
+func directions(ts []Trigger) (drop, rise bool) {
 	for _, t := range ts {
 		if t.Rule.Type == RiseFromLow {
 			rise = true
@@ -131,6 +131,19 @@ func alertIcon(ts []Trigger) string {
 			drop = true
 		}
 	}
+	return drop, rise
+}
+
+// refVerb 返回规则类型对应的参照价名称与涨跌动词。
+func refVerb(t RuleType) (ref, verb string) {
+	if t == RiseFromLow {
+		return "最低价", "上涨"
+	}
+	return "最高价", "下跌"
+}
+
+func alertIcon(ts []Trigger) string {
+	drop, rise := directions(ts)
 	switch {
 	case drop && rise:
 		return "🔀"
@@ -144,10 +157,7 @@ func alertIcon(ts []Trigger) string {
 func triggerLines(ts []Trigger) string {
 	lines := make([]string, len(ts))
 	for i, t := range ts {
-		ref, verb := "最高价", "下跌"
-		if t.Rule.Type == RiseFromLow {
-			ref, verb = "最低价", "上涨"
-		}
+		ref, verb := refVerb(t.Rule.Type)
 		tier := fmt.Sprintf("第 %d 档", t.Tier)
 		if t.SentInTier > 1 {
 			tier += fmt.Sprintf("，第 %d/%d 次提醒", t.SentInTier, t.Rule.Notify.MaxPerTier)

@@ -45,14 +45,7 @@ const advisorSystemPrompt = "你是加密货币短线交易分析助手。只输
 
 // Sides 返回需要分析的方向：只有跌 → ["低买"]，只有涨 → ["高卖"]，都有 → ["低买","高卖"]。
 func Sides(ts []Trigger) []string {
-	var drop, rise bool
-	for _, t := range ts {
-		if t.Rule.Type == RiseFromLow {
-			rise = true
-		} else {
-			drop = true
-		}
-	}
+	drop, rise := directions(ts)
 	var out []string
 	if drop {
 		out = append(out, sideBuy)
@@ -153,10 +146,7 @@ func buildAdvicePrompt(in AdviceInput, sides []string) string {
 	fmt.Fprintf(&b, "请分析的方向：%s\n", strings.Join(sides, "、"))
 	b.WriteString("\n本轮触发的规则：\n")
 	for _, t := range in.Triggers {
-		ref, verb := "最高价", "下跌"
-		if t.Rule.Type == RiseFromLow {
-			ref, verb = "最低价", "上涨"
-		}
+		ref, verb := refVerb(t.Rule.Type)
 		fmt.Fprintf(&b, "- %s：%s窗口内较%s %s %s %.1f%%，第 %d 档\n",
 			t.Rule.ID, t.Rule.Window, ref, plainNum(t.Ref), verb, t.X, t.Tier)
 	}
