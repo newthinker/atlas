@@ -1,0 +1,120 @@
+{
+  "task": "TASK-011",
+  "author": "dev-pw-c",
+  "commit": "21bcde055f8f871906e83cfbf9219d6e074158e2",
+  "merged_as": "d861889d5d2d3e38218f4d058e878cf028b0931a",
+  "key_findings": [
+    "OK 删除键而非只清 down 标志：这样 Fail→OK→Fail 自然从第二次 Fail 重新计时，map 也不会随恢复过的键无限增长",
+    "Down 判据为 now.Sub(since) >= After（含等号）：DoD 要求 T0+30m 恰好告警；变异 < 改 <= 被 TestHealth_DownOnceAfterThreshold 杀死"
+  ],
+  "decisions": [
+    {
+      "decision": "Fail/OK 返回单值 HealthEvent{Key, Kind}，Kind==HealthNone 表示无事件（而非 (HealthEvent, bool)）",
+      "rationale": "Leader 要求接口 Engine 易用；调用方一行 `if ev.Kind != HealthNone { FormatHealth(ev.Kind == HealthDown, …) }`"
+    },
+    {
+      "decision": "HealthTracker 零值可用（map 惰性初始化），After=0 表示首次失败即告警",
+      "rationale": "Engine 可直接内嵌 HealthTracker 字段，无需构造函数"
+    },
+    {
+      "decision": "内置 sync.Mutex，Fail/OK 全程持锁",
+      "rationale": "DoD non_functional 要求多 goroutine 并发调用无 data race；变异去锁被 -race 报 DATA RACE"
+    },
+    {
+      "decision": "OK 的 now 参数保留但不使用",
+      "rationale": "与 Fail 签名对称、与任务描述 `OK(key, now)` 一致；恢复不需要时间"
+    },
+    {
+      "decision": "测试辅助函数命名 healthAt/noHealthEvent/wantHealthEvent",
+      "rationale": "同包并行任务（TASK-002/003/010）避免与通用名 at/wantEvent 冲突"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/health.go",
+    "internal/pricewatch/health_test.go"
+  ],
+  "interfaces_exposed": [
+    "type HealthKind int; const HealthNone, HealthDown, HealthUp",
+    "type HealthEvent struct{ Key string; Kind HealthKind } // Kind==HealthNone 即无事件",
+    "type HealthTracker struct{ After time.Duration } // 零值可用、并发安全、只放内存(AD-15)",
+    "func (h *HealthTracker) Fail(key string, now time.Time) HealthEvent // 连续失败满 After 返回一次 Down，之后不重复",
+    "func (h *HealthTracker) OK(key string, now time.Time) HealthEvent // 已 Down 过返回一次 Up 并清除；否则无事件（也清除失败起点）",
+    "对 TASK-007 Engine：键约定 price:<SYM> / gap:<SYM>/<ruleID> / sync:<SYM>/<bar>；用法 ev := e.health.Fail(k, now); if ev.Kind != HealthNone { text := FormatHealth(ev.Kind == HealthDown, …) }"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ d861889d5d2d3e38218f4d058e878cf028b0931a（主仓库，两文件 sha256 与 21bcde055f8f871906e83cfbf9219d6e074158e2 逐一致：health.go 2fd45e26…, health_test.go 3592f606…）",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 100.0%（主仓库 @ d861889）",
+    "dod_mapping": "functional[0]→TestHealth_DownOnceAfterThreshold(+DownJustBeforeThreshold)；functional[1]→TestHealth_UpOnceAfterDown, TestHealth_TransientFailureSilent；functional[2]→TestHealth_KeysIndependent, TestHealth_RestartTimingAfterOK；non_functional[0]→TestHealth_ConcurrentSafe + -race",
+    "vet_gofmt": "go vet ./internal/pricewatch/ 与 gofmt -l health.go health_test.go 均无输出（worktree @ 21bcde0 前未提交态，sha 与提交一致）",
+    "mutation": "go test -overlay 7 个变异全部 KILLED，源文件 sha256 前后不变：< 改 <=、去 down 去重、OK 不删键、OK 恒返回 Up（首版编译失败，补 `_ = s` 后重跑 KILLED）、Fail 去锁（DATA RACE）、每次 Fail 重置起点、Down 事件丢 Key",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠（新文件，预期）；索引落后 22 commit 告警"
+  },
+  "rework": [
+    {
+      "round": 1,
+      "epoch": 2,
+      "reason": "test-pw-a rejected (task_defect)：DoD non_functional 的 OK 半边无并发守卫，H14（删 OK 锁）-race 下 5/5 存活",
+      "commit": "4fb62a1fbd482a27fb4c4fa79f6d44f415ca19ae",
+      "merged_as": "ccb5ff2044723b7e5d1f8142aa97a9befdf29a21",
+      "files_modified": [
+        "internal/pricewatch/health_test.go"
+      ],
+      "fix": "新增 TestHealth_ConcurrentFailOK：8 goroutine 对两个键并发交替 Fail/OK（每 goroutine 200 次，After=0），断言每键 ups ≤ downs ≤ ups+1；health.go 未改（sha256 2fd45e26… 不变）",
+      "root_cause": "首版 TestHealth_ConcurrentSafe 把 OK 移到 wg.Wait() 之后是为避免『OK 重置后另一 goroutine 再次计满 30m 触发第二次 Down』导致的 flaky 计数断言，代价是 OK 失去并发覆盖；我首版自证的去锁变异只去了 Fail 的锁，没发现这一半缺口",
+      "verification": {
+        "anchor": "feature/pricewatch @ ccb5ff2044723b7e5d1f8142aa97a9befdf29a21（主仓库；health_test.go sha256 3d94676f… 与 4fb62a1 一致，health.go 2fd45e26… 未变）",
+        "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 93.1%（主仓库 @ ccb5ff2，整包）",
+        "mutation": "overlay：H14（删 OK 锁）5/5 红，DATA RACE 4–8 条/次，失败形态为 race detected 或竞态致 nil 解引用 panic；消融：仅跑新用例 H14 3/3 红、-skip 新用例 H14 3/3 绿（新用例独家守卫）；H13（删 Fail 锁）3/3 红；原实现 -race -count=30 绿；源文件 sha256 前后不变",
+        "dod_mapping": "non_functional[0]→TestHealth_ConcurrentSafe（并发 Fail）+ TestHealth_ConcurrentFailOK（并发 Fail/OK 同键）",
+        "simplifier": "code-simplifier 未改动，前后 sha256 一致",
+        "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：1 file touched、无已索引符号重叠"
+      }
+    }
+  ],
+  "qa_fix": [
+    {
+      "round": 1,
+      "epoch": 2,
+      "source": "QA REJECT 第 1 轮 R1-1（.arcforge/docs/05-review/qa-review-round2.md §2，4 个独立来源）；AD-30",
+      "commit": "dfae3abb21382fd353d8852b15cbc3831564e0f2",
+      "merged_as": "77c49ef04ff7615d7e568fa9dcf4cef7cb2998a9",
+      "files_modified": [
+        "internal/pricewatch/health.go",
+        "internal/pricewatch/health_test.go"
+      ],
+      "defect": "原 Fail 在返回 Down 时即置 down=true（发送之前）⇒ 一次发送失败「监控异常」永久丢失；之后恢复只送达「已恢复」而没有对应的异常",
+      "fix": "Down/Up 只在调用方 Ack 后推进：Fail 满 After 且 Down 未确认时每次都返回 Down（不改状态）；OK 在 Down 已确认时每次都返回 Up（不改状态），否则清除计时、无事件；新增 Ack(ev)",
+      "decisions": [
+        {
+          "decision": "Ack(Down) 对未知键 no-op（不凭空造出 Down 状态）；Ack(Up) 仅在 Down 已确认时删键；Ack(HealthNone) no-op",
+          "rationale": "迟到或错配的 Ack 不应改变状态；变异 ack_creates / ack_up_ignore_down 被 TestHealth_AckEdgeCases 杀死"
+        },
+        {
+          "decision": "Up 未确认期间再次 Fail 不返回 Down，下一次 OK 仍返回 Up",
+          "rationale": "用户此时看到的最后一条仍是「异常」，再发 Down 是重复；Up 送达后才回到正常"
+        },
+        {
+          "decision": "不支持「无 OK 直接 Ack(Up)」这种误用（不为此增加状态字段）",
+          "rationale": "AD-30 中 Up 只由 OK 产生；为误用加「Up 待确认」标志超出接口语义"
+        },
+        {
+          "decision": "并发用例改为在 Fail/OK/Ack 之间用 start 屏障制造确有重叠的读写，不变量取「结束后状态自洽」而非计数关系",
+          "rationale": "多个 goroutine 可能同时拿到同一事件并各自确认 ⇒ 计数关系（ackedUp≤ackedDown）不成立、会 flaky；状态自洽可稳定断言"
+        }
+      ],
+      "interfaces_exposed": [
+        "func (h *HealthTracker) Ack(ev HealthEvent) // 调用方确认 ev 已送达（或 dry-run 已写出）后调用",
+        "Fail/OK 语义变更（供 TASK-007）：未 Ack 的 Down 每次 Fail 都返回、未 Ack 的 Up 每次 OK 都返回；发送失败不 Ack ⇒ 下一轮自动重发；未确认 Down 就恢复 ⇒ 无事件并清除计时"
+      ],
+      "verification": {
+        "anchor": "feature/pricewatch @ 8ed58bc17d3179e32c56b9d5caf9199484dcc32e（主仓库，含 merge(TASK-011) 77c49ef04ff7615d7e568fa9dcf4cef7cb2998a9 与 merge(TASK-007) 8ed58bc；health.go sha256 c3f8bbde… 与 dfae3abb21382fd353d8852b15cbc3831564e0f2 一致，health_test.go e05987c6… 与 git show dfae3abb21382fd353d8852b15cbc3831564e0f2:… 一致）",
+        "suite": "主仓库 @ 合并点：go vet ./internal/pricewatch/ 无输出；go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 94.3%（含 TASK-007 的 TestCheckAsset_HealthAlerts/HealthSendFailureRetries）；单独合入本分支时 TestCheckAsset_HealthAlerts 会红（engine 未调 Ack），故与 TASK-007 一同合入",
+        "tests": "TestHealth_UnackedDownRepeats、TestHealth_UnackedUpRepeats、TestHealth_RecoverBeforeDownAcked、TestHealth_AckEdgeCases、TestHealth_ConcurrentFailOKAck（start 屏障）+ 原有用例改为 failAck/okAck 调用方形态；共 13 个 TestHealth_*",
+        "mutation": "go test -race -overlay 14/14 KILLED（vet 通过且 rc≠0），源文件 sha256 前后不变：Fail 发送前置 down（原缺陷）、Fail 忽略 down、< 改 <=、OK 无条件删键、OK 不删键、Ack(Down) 无效、Ack(Up) 无效、Ack(Up) 忽略 down、Ack 为未知键建状态、Ack/OK/Fail 各自去锁（DATA RACE 10–25 条/次，其中 Ack/OK 去锁另致 panic）、每次 Fail 重置起点、Down 丢 Key",
+        "simplifier": "code-simplifier 仅删除 TestHealth_AckEdgeCases 末尾一个空行（经内容核实）；health.go 未改",
+        "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+      }
+    }
+  ]
+}

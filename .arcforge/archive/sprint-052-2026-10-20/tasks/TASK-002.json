@@ -1,0 +1,95 @@
+{
+  "id": "TASK-002",
+  "title": "配置加载与校验（internal/pricewatch/config.go + configs/pricewatch.yaml）",
+  "description": "计划 Task 1：`Config`/`AssetCfg`/`Asset`、`LoadConfig`（viper.New + Unmarshal，写法同 internal/crisis/config.go）、规则组合并、`${ENV}` 严格展开、`CryptoAssets()`、`UnsupportedItems()`；`testdata/valid.yaml` 与 `configs/pricewatch.yaml` 均照抄 spec §3 示例。spec/plan 文档由 Leader 另行提交（AD-17），本任务不提交它们。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/pricewatch/config.go",
+    "internal/pricewatch/config_test.go",
+    "internal/pricewatch/testdata/valid.yaml",
+    "configs/pricewatch.yaml"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestLoadConfig_Valid`（env 由 `t.Setenv` 设置）：BTC 6 条规则；ETH `day_drop` 阈值 3 且 `Interval==10*time.Minute`；BTC `Interval==5*time.Minute`；`ath_drawdown.Notify=={24h,2}`、`week_drop.Notify=={1h,3}`；`Pair==\"BTCUSDT\"`；`Health.HeartbeatAt==\"09:00\"`；Telegram 为展开后的值。另一份 fixture 用非默认值（`fail_alert_after: 45m`、`ai.timeout: 20s`、`heartbeat_at: \"08:30\"`）逐个断言读入（防 mapstructure tag 漏写被静默丢弃）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "规则合并：ETH 恰 6 条、id 顺序与 strategy 一致、`day_drop` 原位整条替换；**BTC 的 `day_drop` 阈值仍为 2**（防切片别名）；资产 `rules` 中新 id 追加在末尾；strategy 规则带 `notify{24h,2}` 而覆盖规则不写 notify 时，覆盖后取 notify_defaults（整条替换而非逐字段合并）。`symbol: btc` → `Symbol==\"BTC\"`、`Pair==\"BTCUSDT\"`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestUnsupportedItems`：`stock.items` 含 `600519` 时返回 `[\"stock:600519\"]`，且 `CryptoAssets()` 结果与不含该项时相同。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestExampleConfigLoads`：`configs/pricewatch.yaml` 在设好两个 env 后可被 `LoadConfig` 成功加载，且 BTC/ETH 规则与 `testdata/valid.yaml` 解析结果相同（防示例与 spec 漂移）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`TestLoadConfig_Defaults`：`ai.timeout` 不写为 60s；`health.fail_alert_after` 不写为 30m；`heartbeat_at: \"\"` 合法。strategy 名与引用大小写不一致（如定义 `Crypto_Dual`、引用 `crypto_dual`）时仍能解析（viper 键小写化）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`TestLoadConfig_Rejects` 表驱动覆盖计划列出的 13 行，另加：`assets.crypto.sources` 为空、`quote` 为空、资产级 `check_interval: -1m`；每行断言返回 error 且信息含计划括号里的字样（重复 id 行含 `duplicate rule id`、明文 token 行含 `${ENV}`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`${ENV}` 严格匹配：`bot_token` 为 `${A}x`、`x${A}`、`$A` 均报错；`chat_id` 明文（如 `12345`）报错、`chat_id` 展开后为空报错；明文 token（如 `123:ABCdef`）报错时**错误文本不含该明文**；`telegram.proxy: \"${X}\"` 原样保留不展开。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/config.go",
+    "./internal/pricewatch/config_test.go",
+    "./internal/pricewatch/testdata/valid.yaml",
+    "./configs/pricewatch.yaml"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:36Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-a",
+  "discovery": ".arcforge/discoveries/TASK-002.json",
+  "verify_baseline": {
+    "head": "f8e37c2ce98451045361b8a7aa2acfa62299783d",
+    "discovery_sha256": "6417c8d02d3f14119946cfa28d1274a6d80a2d325212a8c6c5906617bb9e2f0e",
+    "at": "2026-10-20T12:52:54Z"
+  },
+  "verifier": "test-pw-c",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "QA-14：LoadConfig 拒绝以 REPLACE_WITH_ 开头的 telegram 值（展开后），报错指向 plist 注释；补用例",
+    "R1-2：改用 v.UnmarshalExact（QA 已验两份现有配置可过），补「未知键（如 heartbeat_al）报错」用例",
+    "QA-4：TestLoadConfig_Rejects 断言前剥掉 \".yaml: \" 之前的路径前缀，使 10 行字样断言不再被路径满足",
+    "R1-3：校验 health.fail_alert_after>0、ai.timeout>0（显式写 0 或负值报错）。证据见 .arcforge/docs/05-review/qa-review-round2.md §5"
+  ],
+  "rework_count": 1
+}

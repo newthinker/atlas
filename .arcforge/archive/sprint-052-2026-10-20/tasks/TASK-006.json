@@ -1,0 +1,81 @@
+{
+  "id": "TASK-006",
+  "title": "AI 下单建议（internal/pricewatch/advisor.go）",
+  "description": "计划 Task 6：`AdviceInput`、`Advisor{LLM, Timeout}.Advise`、`Sides`。提示词须写明 okx 双币赢、分析方向（Sides）、输出 JSON 结构、K 线压缩为 `时间,开,高,低,收` 一行一根；`MaxTokens=1500`、`Temperature=0.3`、`JSONMode=true`。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/pricewatch/advisor.go",
+    "internal/pricewatch/advisor_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestAdvise_ParsesJSON`：fake 返回计划给出的 JSON → 解析出 1 条 SideAdvice 且各字段正确；请求 `JSONMode==true`、`MaxTokens==1500`、`Temperature==0.3`，消息内容含现价与每条触发规则的 id。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "提示词内容：含「双币赢」、`Sides(triggers)` 的每个方向、输出 JSON 的键名（advice/side/verdict/target_price/term/reasoning）；K 线行数 = len(M1)+len(M5)，每行恰 5 个逗号分隔字段。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestSides`：只有跌 → [\"低买\"]；只有涨 → [\"高卖\"]；都有 → [\"低买\",\"高卖\"]。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "宽松提取（AD-23）：fake 返回被 ```` ```json ```` 围栏包裹、或前面带一句说明文字的合法 JSON → 正常解析；`FinishReason==\"max_tokens\"` 时返回 error。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`TestAdvise_Invalid` 表驱动，以下均返回 error：内容非 JSON；`advice` 为空数组；verdict 不是「现在下单」/「再等等」；side 不在 `Sides(triggers)` 中；LLM 返回 error。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestAdvise_Timeout`：fake 阻塞直到 ctx 结束，`Timeout=50ms` → 1 秒内返回 error；`Advisor.LLM==nil` 时返回 error 而非 panic。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-005"
+  ],
+  "wave": 4,
+  "context_from": [
+    "TASK-002",
+    "TASK-005"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/advisor.go",
+    "./internal/pricewatch/advisor_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:37Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-c",
+  "discovery": ".arcforge/discoveries/TASK-006.json",
+  "verify_baseline": {
+    "head": "04bed52d45612d45386e794efdb60e47536eedd2",
+    "discovery_sha256": "6f9d5b5a9930b84e3b2b438db8e2ce7b578757919f770ca7eed07049cd86026a",
+    "at": "2026-10-20T08:20:19Z"
+  },
+  "verifier": "test-pw-b"
+}

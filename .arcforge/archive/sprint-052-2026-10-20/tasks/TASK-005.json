@@ -1,0 +1,93 @@
+{
+  "id": "TASK-005",
+  "title": "提醒/心跳/健康消息文本（internal/pricewatch/message.go）",
+  "description": "计划 Task 5：`Trigger`/`Overview`/`SideAdvice`/`Alert`/`HeartbeatRow`、`FormatAlert`/`FormatHeartbeat`/`FormatHealth`。窗口中文名、价格与百分比格式见计划 Step 3；负号用 U+2212。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/pricewatch/message.go",
+    "internal/pricewatch/message_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestFormatAlert_Golden`：用 spec §8 示例数值构造 Alert，输出与计划 Task 5 给出的字面量**逐字相等**（Advice.Term 为 \"3 天\"）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestFormatAlert_NoAI`：Advice 为 nil 时结论行为 `【AI 结论】AI 分析不可用`，且输出不含 `【AI 分析】`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestFormatAlert_Icons`：只有 rise → 🔺；drop+rise → 🔀；rise 规则行为 `较 7d 最低价 X 上涨 Y%`。`TestFormatAlert_TwoSides`：两条 Advice 各占一行结论，【AI 分析】按「低买：…」「高卖：…」分行。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestFormatAlert_ShortWindow`：`ShortDays=100` 的规则行尾追加「（窗口数据仅 100 天）」；`ShortDays=0` 不追加。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestFormatHeartbeat` 含「监控仍在运行」、各资产名与现价、Active 规则文本、24h 提醒条数；`TestFormatHealth`：down=true 含「监控异常」与 subject/detail，down=false 含「已恢复」。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "价格格式表驱动：68120→`68,120`；1234567.8→`1,234,568`；2.5→`2.50`；0.123456→`0.1235`。百分比：−3.6→`−3.6%`（U+2212）、2.4→`+2.4%`；四舍五入后为 0.0 的值（如 −0.04）不出现 `−0.0`。SentInTier>1 时档位写「第 t 档，第 k/max 次提醒」，=1 时只写「第 t 档」。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "长度上限（AD-24）：Advice.Reasoning 为 1 万字时 `FormatAlert` 结果按 UTF-16 码元计 ≤ 4096，【触发规则】段完整保留，被截断处以「…（已截断）」结尾；正常长度消息不被截断。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-002"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/message.go",
+    "./internal/pricewatch/message_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:36Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-pw-c",
+  "discovery": ".arcforge/discoveries/TASK-005.json",
+  "verify_baseline": {
+    "head": "bc33f71827179242e06d2e74129b0f603bd9f699",
+    "discovery_sha256": "8ae0cceb8a7115e0c9ad9257f3880e50dff763b78b4176f10748b499c50ddd86",
+    "at": "2026-10-20T14:19:36Z"
+  },
+  "verifier": "test-pw-c",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "复验退回（test-pw-c，task_defect）：capUTF16 阈值边界无测试守卫——变异 N4（`<= maxMessageUTF16` → `<= maxMessageUTF16+1`）全包与 cmd/atlas 全绿 ⇒ 恰 4097 码元的健康消息原样发出（N1 要堵的 400 场景）。补「FormatHealth 恰 4096 不截 / 恰 4097 截到 4096」两条用例（样例见 .arcforge/docs/04-test/TASK-005-verification.md §6，验证者已证在原实现 PASS、在 N4 FAIL）",
+    "Leader 追加（非 DoD，同构于 N1，省一轮迭代）：FormatHeartbeat 同样不限长——约 30 个资产即 >4096 ⇒ 心跳 400 ⇒ 不写 heartbeat_date ⇒ 每 tick 重试永不送达。修法：FormatHeartbeat 结果过 capUTF16（保留首行「💓 监控仍在运行…」），补超长用例；overlay 证明去 cap 变红",
+    "顺手：测试失败信息按字节切 got[:60] 会劈开多字节字符，改按 rune 截"
+  ],
+  "rework_count": 3,
+  "reject_reason": "fix_item N1 的「结果 ≤4096」在阈值边界无测试守卫：变异 capUTF16 放行条件 <=maxMessageUTF16 改为 <=maxMessageUTF16+1 后 ./internal/pricewatch 全包与 ./cmd/atlas 全绿，探针证明恰 4097 码元的健康消息原样发出（N1 要堵的 Telegram 400 场景）。实现本身正确。修法：补 FormatHealth 边界用例——title+detail 恰 4096 逐字不截、恰 4097 截到 ≤4096 且以截断标记结尾（样例见 .arcforge/docs/04-test/TASK-005-verification.md §6）。8 条 DoD 全 PASS，AD-31 三步兜底仍成立，其余 12 个变异 KILLED。"
+}

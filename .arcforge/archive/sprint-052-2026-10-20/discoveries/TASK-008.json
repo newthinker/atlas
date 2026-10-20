@@ -1,0 +1,80 @@
+{
+  "task": "TASK-008",
+  "author": "dev-pw-b",
+  "commit": "249c02ee8f0bdaaf744dd184c3d1299134fdf74d",
+  "merged_as": "0f218bb577674779995224b633ef88f9c84aaa4d",
+  "key_findings": [
+    "若到期时间按「检测时刻 + Interval」推进，tick 的调度抖动会累积：晚到几微秒的那次把下一次推到 tick 网格之后，每次都漏一个 tick（30ms 资产实际变成 40ms 一次）；真实时间的 TestRunner_Schedules 对此不敏感，需可控时钟用例（TestRunner_ScheduleNoDrift）才能抓到",
+    "串行守卫的重叠证明：TestRunner_SerialPerAsset 中每次检测 50ms ≫ Tick 5ms 与 Interval 10ms；overlay 变异「每 tick 起 goroutine 不等上一轮」单独连跑 5 次全红，同一资产并发峰值 = 6（基线恒为 1）",
+    "dueHeartbeat 若按 UTC 取日期或构造 at 时刻，在 Asia/Shanghai 本地日期与 UTC 日期不同的时刻会误判；PutKV 写 heartbeat_date 同理（TestRunner_HeartbeatDateIsLocal 守卫）"
+  ],
+  "decisions": [
+    {
+      "decision": "调度：Run 先执行一轮 step 再进入 ticker 循环（首轮立即，不等 Interval）；每个 Tick 调 step：按 Assets 顺序检查各资产 due，到期的在调度 goroutine 内同步调用 CheckAsset，全部资产走完后检查心跳",
+      "rationale": "plan Task 8「到期的依次执行 CheckAsset，然后检查心跳」；DoD f[3] 首轮立即"
+    },
+    {
+      "decision": "到期判断：due 初值为零值（立即到期）；到期后 due = 上次 due + Interval，若仍不晚于当前时刻（落后超过一个 Interval，如检测本身很慢或首轮）则 due = now + Interval",
+      "rationale": "不累积 tick 抖动（变异实测），慢检测后不连续补跑"
+    },
+    {
+      "decision": "串行保证：所有 CheckAsset 都在 Run 所在的单个 goroutine 内同步执行，上一轮未结束不会开始下一轮；因此同一资产（以及不同资产之间）从不并发。代价是一个慢资产会推迟同一 tick 内后面的资产",
+      "rationale": "TASK-007 interfaces_exposed：同一资产不得并发 CheckAsset（规则状态读-判-写不加锁）；最简单的满足方式，无需锁"
+    },
+    {
+      "decision": "ctx：step 在每个资产前检查 ctx.Err()，取消后不再调用 CheckAsset、也不发心跳；Run 在 select 中见 ctx.Done() 即返回 nil。取消时若有一次 CheckAsset 正在执行，Run 会等它返回（CheckAsset 内部的 provider HTTP 调用不受 ctx 控制）",
+      "rationale": "DoD error_handling；返回后不再调用 CheckAsset 由「单 goroutine 同步执行」结构保证"
+    },
+    {
+      "decision": "心跳时区：dueHeartbeat 用 now 自身的 Location 取日期与构造 at 时刻；Runner 传入 Engine.Now()，cmd 侧 Now=time.Now 即本地时区；heartbeat_date 写 now.Format(\"2006-01-02\")（同一 Location）。at 为空或不是 HH:MM 时恒不发。睡眠错过 at 的，醒来当天第一次 tick 补发一次",
+      "rationale": "spec §9 本地时区、错过补发、当天不重复；DoD f[0] Asia/Shanghai 用例"
+    },
+    {
+      "decision": "心跳发送失败：只记 Warn 日志、不写 heartbeat_date，下一 tick 由 dueHeartbeat 再次判定为到期而重试；发送成功后才 PutKV（写失败只记日志，下一 tick 可能重发一次）。读 heartbeat_date 失败时本 tick 跳过心跳",
+      "rationale": "DoD boundary[0]；宁可重发不可漏发"
+    },
+    {
+      "decision": "心跳内容 = FormatHeartbeat(now, Engine.Snapshot(), Engine.Sent24h())，经 Engine.Sender.SendText 发送；Run 不处理 DryRun（dry-run 只走 RunOnce，RunOnce 不发心跳）",
+      "rationale": "DoD f[2]；spec §9 once --dry-run 只跑一轮"
+    },
+    {
+      "decision": "测试替身：Runner 有未导出字段 check（nil 时用 Engine.CheckAsset），供调度/串行/取消测试注入慢检测；心跳测试用真实 Engine（engFixture）",
+      "rationale": "Engine 是具体类型，无法在不改 engine.go 的前提下替换 CheckAsset"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/runner.go",
+    "internal/pricewatch/runner_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Runner struct{ Engine *Engine; Assets []Asset; HeartbeatAt string; Tick time.Duration }  // HeartbeatAt 本地 \"HH:MM\"，空=不发心跳；Tick 必须 >0（time.NewTicker 要求）；Engine 需按 TASK-007 填好 Cfg/Store/Now/Sender（心跳用 Store 的 kv 与 Sender）",
+    "TASK-009 用法（run）：r := &pricewatch.Runner{Engine: eng, Assets: cfg.CryptoAssets(), HeartbeatAt: cfg.Health.HeartbeatAt, Tick: <如 time.Minute 或更小>}；ctx 由 signal.NotifyContext(SIGTERM/SIGINT) 得到；err := r.Run(ctx) —— 阻塞运行，ctx 取消后返回 nil（若正在执行的 CheckAsset 未完成，会等它返回）；各资产检测错误只记日志不返回",
+    "TASK-009 用法（once [--dry-run]）：err := r.RunOnce(ctx) —— 每个资产各 CheckAsset 一次，某资产出错不阻断其余，错误以 \"<SYM>: ...\" 合并返回（errors.Join）；不发心跳；dry-run 由 Engine.DryRun/Out 控制",
+    "func dueHeartbeat(now time.Time, at, lastDate string) bool  // 包内；按 now 的 Location 判断",
+    "kv 键 heartbeat_date：值为本地日期 \"YYYY-MM-DD\"",
+    "约束：同一个 Runner 不得并发调用 Run/RunOnce；也不要对同一资产在 Runner 之外并发调用 Engine.CheckAsset"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ 0f218bb577674779995224b633ef88f9c84aaa4d（主仓库）；runner.go sha256 87b875a99f15b17cd75da44ccd13d24d54a4c98e144d5cffdda15f783c4f78ee、runner_test.go 2c745a0cca026b2c263964d9de21afd1937a2f8d211e80227a99fc5825b52d3d，与 249c02e 逐一致",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok，主仓库 @ 0f218bb 包覆盖率 93.6%",
+    "stability": "worktree @ 249c02e：-race -count=5 -run 'TestRunner|TestDue' 通过；真实时间用例（Schedules/SerialPerAsset/StopsOnCancel/FirstRoundImmediate）-race -count=30 通过；Schedules -count=30 -cpu 1,4 通过；另起两份 -race 全包测试并发负载下 -race -count=20 -run TestRunner 通过",
+    "vet_gofmt": "go vet ./internal/pricewatch/ 与 gofmt -l internal/pricewatch/ 无输出（worktree @ 249c02e）",
+    "mutation": "go test -overlay 21 个变异全部 KILLED，runner.go sha256 前后不变：每 tick 起 goroutine 不等上一轮（SerialPerAsset 峰值 6，单独连跑 5/5 红）、首轮等一个 tick、ctx 取消不返回、取消返回 ctx.Err、step 不查 ctx、到期按 now 推进、不判到期、RunOnce 出错即停/吞错、发送失败仍写日期、不写日期、日期用 UTC 写、dueHeartbeat 用 UTC 日期/UTC at、不查当天已发、at 严格大于、at 为空也发、非法 at 当成发、不查 HeartbeatAt 空、Sent24h 写 0、不带快照",
+    "pre_merge": "合入前临时 worktree 预演 merge 到 e9b963b：无冲突、vet 无输出、go test 通过",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致（结论 scratchpad dev-pw-b-TASK-008-simplifier.md）",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched，无已索引符号重叠（新文件）"
+  },
+  "rework": [
+    {
+      "round": 1,
+      "epoch": 2,
+      "trigger": "test-pw-a rejected（task_defect），见 .arcforge/docs/04-test/TASK-008-verification.md §6",
+      "root_cause": "所有 Runner 调度/RunOnce 测试都注入未导出替身 Runner.check，生产路径 `check==nil → r.Engine.CheckAsset` 从未执行（checkAsset 覆盖 66.7%）；变异 R22（该行改 return nil）全部测试照绿 ⇒ 生产中 run/once 不检测任何资产也不报错（spec §2 静默死亡）。我原 discovery 的 decisions「测试替身」一条只写了替身的用途，没有为生产路径单独设守卫",
+      "fix": "只改 runner_test.go（纯新增 63 行，runner.go sha256 87b875a9… 不变）：TestRunner_RunOnceUsesEngine、TestRunner_RunUsesEngine 不注入 check、用真实 Engine（engFixture，价格 100→90 触发 day_drop），断言发出 1 条提醒、day_drop Tier>0、Snapshot 价格 90；TestRunner_NoHeartbeatAfterCancel（R21，非 DoD）：已取消 ctx 调 Run 不发心跳不写 heartbeat_date，附「未取消时会发」对照",
+      "ablation": "overlay，runner.go sha256 前后不变；原实现：新增三例绿、全包绿；R22：RunOnceUsesEngine 单跑红、RunUsesEngine 单跑红、全包红，去掉新增三例的旧用例全集绿；R21：NoHeartbeatAfterCancel 单跑红、全包红，旧用例全集绿 ⇒ 两个变异都由且仅由新用例杀死",
+      "commit": "17e1906631a0f70b5652000f5fa8cc20795c42f7",
+      "merged_as": "1244e2a2dc36c939b77a3d5a735120e652628fc9",
+      "verification": "主仓库 @ 1244e2a：runner.go 87b875a99f15b17cd75da44ccd13d24d54a4c98e144d5cffdda15f783c4f78ee、runner_test.go 3e0f7a18c00e603abfe8421fdfd39d838fa36e66a6b449ec984d72d5bb47110d 与 17e1906 一致；go test -race -count=1 -cover ./internal/pricewatch/ ok 93.7%（checkAsset 100%）；worktree：-race -count=5 -run 'TestRunner|TestDue' 通过，vet/gofmt 无输出；code-simplifier 未改动；detect-changes 1 file 无已索引符号重叠"
+    }
+  ]
+}

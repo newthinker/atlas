@@ -1,0 +1,89 @@
+{
+  "id": "TASK-001",
+  "title": "规则计算与分档状态机（internal/pricewatch/rule.go, state.go）",
+  "description": "计划 Task 2（+ Task 1 的 `NotifyPolicy`/`RuleCfg` 类型，AD-7）：`RuleType`/`Window`（Span/Bar）、`Rule`、`ParseRule`（含规则级取值校验，AD-8）、`Measure`、`Tier`（1e-9 容差）、`RuleState`/`SendKind`/`Decide`（spec §5 四种情况按序判断，纯函数）。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/pricewatch/rule.go",
+    "internal/pricewatch/rule_test.go",
+    "internal/pricewatch/state.go",
+    "internal/pricewatch/state_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestMeasure`：drop price 50000/high 100000 → 50；rise price 40000/low 20000 → 100（spec §4 BTC 例）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestTier_Boundaries`（Review Focus 1）逐条成立：`Tier(2.0,2,2)==1`、`Tier(1.9999,2,2)==0`、`Tier(1.9999999999,2,2)==1`（阈值侧容差）、`Tier(3.9999999999,2,2)==2`、`Tier(4.0,2,2)==2`、`Tier(5.5,2,2)==2`、`Tier(5.9,2,2)==2`（杀 Round 变异）、`Tier(6.1,2,2)==3`、`Tier(55,50,0)==1`、`Tier(100,100,50)==1`、`Tier(150,100,50)==2`；x 为 NaN、+Inf、−Inf 时返回 0。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestDecide` 表驱动覆盖计划列出的 10 个用例（p={1h,3}），**每行**断言 `next` 三个字段（含 LastSentAt）与 `kind`；另含：`prev{2,1,T0}`、t=2、now=T0+1h → `SendRepeat`、`next{2,2,now}`（恰满间隔含等号）；`prev{2,3,T0}`、t=3、now=T0+1m → `SendNew`、`next{3,1,now}`（次数用尽后跌进更深一档仍立即提醒）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestWindow`：Span 依次为 24h、168h、720h、1461×24h、all→0；Bar：24h/7d→\"5m\"，30d/4y/all→\"1d\"。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`ParseRule`：`step_pct: 0` 合法；`Notify==nil` 时取传入的默认策略，非 nil 时原样使用；返回的 `Rule` 的 Type/Window 为对应常量。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`Decide` 不修改入参（调用后 `prev` 值不变）；`prev{0,0,零值时间}`、t=1 视为「从未发过 ⇒ 已满间隔」立即 `SendNew`。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`ParseRule` 对以下每种输入返回 error，且错误文本含规则 id 与出错字段名：`type: foo`、`window: 2d`、`threshold_pct` 为 0 与 −1、`step_pct: -1`、`max_per_tier: 0`、`repeat_interval` 为 0 与负值。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [],
+  "wave": 1,
+  "context_from": [],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/rule.go",
+    "./internal/pricewatch/rule_test.go",
+    "./internal/pricewatch/state.go",
+    "./internal/pricewatch/state_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:36Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-a",
+  "discovery": ".arcforge/discoveries/TASK-001.json",
+  "verify_baseline": {
+    "head": "ebc366e43a6deda8dc28ae8974b2e3fa77bb3c1b",
+    "discovery_sha256": "4be0411300e71c1b2ae615e45a5bf8d321d4d63c27bbd5cd74e9e8540a898a47",
+    "at": "2026-10-20T12:58:09Z"
+  },
+  "verifier": "test-pw-c",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "QA-1：ParseRule 对 threshold_pct=NaN/±Inf、step_pct=NaN/+Inf 报错（用 !(x > 0) / !(x >= 0) 加 IsInf，避免 NaN 比较恒假）；补用例",
+    "QA-2：补 Decide 用例 prev{2,2,T0}、t=2、now=T0+1h → SendRepeat、next{2,3,now}（杀 SentInTier 写死为 2 的变异）"
+  ],
+  "rework_count": 1
+}

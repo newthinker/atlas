@@ -1,0 +1,80 @@
+{
+  "task": "TASK-009",
+  "author": "dev-pw-c",
+  "commit": "e292f1690ac6f229bb4103b1984df8ffb13ff79f",
+  "merged_as": "5fc087c921c58c7e23dab9d5dc1b27bb5ac5fcfb",
+  "key_findings": [
+    "Engine 的 DryRun 只在有规则触发时才有可观察输出；不触发规则的 dry-run 用例无法区分 DryRun 是否生效（首轮变异 once_no_dry 因此存活，改为现价 90 < K 线最高价 101 触发 day_drop 后杀死）",
+    "cmd/atlas 覆盖率两把尺差 0.5% 的成因已查实：cover -func 只统计 FuncDecl 内语句（1410/1754=80.39%），go test 报数与 profile 逐块求和还计入 package 级 var 函数字面量中的 10 条语句（全部未覆盖：本任务 pricewatch.go:39-51 三个注入点真实实现 7 条 + 既有 version.go:18 3 条）⇒ 1410/1764=79.93%",
+    "worktree 中无 configs/config.yaml（未跟踪）；不带 -c 时 loadConfigOrDefaults 用内置默认值，collector 配额账本落在 cwd 的 data/collector-quota.json"
+  ],
+  "decisions": [
+    {
+      "decision": "装配顺序（newPricewatchApp，run/once/backfill 共用）：① pricewatch.LoadConfig（失败立即返回，此时尚未构造 sender ⇒ 不发任何消息）② UnsupportedItems 逐项 warn ③ pricewatchProviders：先 ensurePolicyGate() 再按 sources 名字构造（未知名 → error 含该名）④ NewStore ⑤ Syncer ⑥ pricewatchAdvisor ⑦ pricewatchNewSender ⑧ Engine",
+      "rationale": "spec §9 / plan Task 8 Step 3 的顺序；ensurePolicyGate 放在 provider 构造 helper 的第一行，任何入口都无法绕过（DoD e[1]，变异 no_gate / gate_after 被 TestPricewatchProviders_GateFirst 杀死）"
+    },
+    {
+      "decision": "两种 provider 顺序：取价 = sources 原序（Engine.Providers，Engine 按 Cfg.Assets.Crypto.Sources 查名取价）；K 线回填 = 同一组实例按 pricewatchHistoryRank{binance:0, okx:1} 稳定排序（Syncer.Providers）",
+      "rationale": "AD-20：用户在 okx 下单故取价 okx 先；回填优先历史最长的源（binance 日线回溯到 2017，okx 约 1440 根），TASK-004 的上线日判定依赖此序；共用实例避免重复构造与重复闸门快照"
+    },
+    {
+      "decision": "AI 降级：ai.enabled=false → Advisor=nil 且不构造 LLM；enabled 且 pricewatchNewLLM（loadConfigOrDefaults + factory.New(cfg.LLM)，沿用主配置 llm 段）失败 → 记一条 warn、Advisor=nil、照常运行；成功 → Advisor{LLM, Timeout: cfg.AI.Timeout}",
+      "rationale": "plan Task 8 Step 3.4；spec §7 AI 失败消息照发"
+    },
+    {
+      "decision": "SIGTERM/SIGINT：run 用 signal.NotifyContext(cmd.Context() 或 Background, SIGTERM, SIGINT) 得到 ctx 传给 Runner.Run，返回 Runner.Run 的结果（ctx 取消时为 nil）",
+      "rationale": "DoD e[2]（review）；TASK-008 Runner 契约：ctx 取消后返回 nil"
+    },
+    {
+      "decision": "已知限制：收到 SIGTERM 时 Runner 会等正在执行的 CheckAsset 返回；provider HTTP 调用不受 ctx 控制、超时 10s，因此真实退出最坏约「数据源数 × 10s」（再加 K 线同步中的同类调用）",
+      "rationale": "Leader 要求如实记录；launchd.plist(5) 对 ExitTimeOut 默认值只写「system-defined」（SIGTERM 后到 SIGKILL 的等待），本 plist 未设置该键；若默认等待短于最坏退出时间，进程会被 SIGKILL（本任务未实测该默认值）"
+    },
+    {
+      "decision": "once：返回 Runner.RunOnce 的错误（errors.Join，含资产代码）⇒ 任一资产检测失败（如所有源取价失败）时命令返回 error、退出码非 0；dry-run 时在 Engine 输出之后每资产打印一行「SYM 价格 计价 · 触发中：…」",
+      "rationale": "QA-11（非 DoD）：取价全失败不能 exit 0；plan Step 5「dry-run 打印出指标」而 Engine 只在规则触发时输出"
+    },
+    {
+      "decision": "backfill：--symbol 转大写后与 Asset.Symbol 比较，不存在报错；对选中资产依次 Sync 1d、5m，每次之后打印「SYM bar: N 根」（Store.Stats 全量计数）；Sync 出错立即返回",
+      "rationale": "DoD e[0] 大小写不敏感；plan「打印入库根数」"
+    },
+    {
+      "decision": "run 的 Tick 取 30s",
+      "rationale": "资产 check_interval 以分钟计，30s 使到期延迟 ≤30s；Runner 的到期推进不累积 tick 抖动（TASK-008）"
+    },
+    {
+      "decision": "三个测试注入点（package 级 var）：pricewatchProviderCtors、pricewatchNewSender、pricewatchNewLLM",
+      "rationale": "cmd 测试不能触网、不能发 Telegram；AD-10 只新增文件不改既有符号"
+    },
+    {
+      "decision": "plist 取值：Label com.newthinker.atlas.pricewatch；ProgramArguments 首项绝对路径 /Users/zuowei/workspace/runtime/atlas/bin/atlas，随后 --config <绝对路径 config.yaml> pricewatch run --pricewatch-config <绝对路径 pricewatch.yaml>；WorkingDirectory /Users/zuowei/workspace/runtime/atlas；EnvironmentVariables 含 http_proxy/https_proxy=http://127.0.0.1:7897、no_proxy=localhost,127.0.0.1、PATH、PRICEWATCH_TELEGRAM_BOT_TOKEN/CHAT_ID=REPLACE_WITH_*；RunAtLoad true；KeepAlive true；ThrottleInterval 60；日志 logs/pricewatch.{out,err}.log",
+      "rationale": "AD-27（人类裁决 KeepAlive true + ThrottleInterval 60，覆盖 spec §9 的 SuccessfulExit:false）；launchd 不做 PATH 查找故首项绝对路径；storage.path 等相对路径以 WorkingDirectory 为根；provider 用默认 http.Client 读 https_proxy（spec §9）；密钥不进仓库，plist 注释写明真值只填进 ~/Library/LaunchAgents 副本；路径与代理照 com.newthinker.atlas.serve.plist"
+    }
+  ],
+  "files_modified": [
+    "cmd/atlas/pricewatch.go",
+    "cmd/atlas/pricewatch_test.go",
+    "deploy/launchd/com.newthinker.atlas.pricewatch.plist"
+  ],
+  "interfaces_exposed": [
+    "CLI：atlas [-c main.yaml] pricewatch {run | once [--dry-run] | backfill [--symbol SYM]} [--pricewatch-config configs/pricewatch.yaml]",
+    "退出码：配置错误、未知数据源、backfill 资产不存在或 Sync 失败、once 任一资产检测失败 → 非 0；run 收到 SIGTERM/SIGINT → 0",
+    "包内（cmd/atlas）：pricewatchProviders(sources) (price, backfill []crypto.Provider, error)；pricewatchAdvisor(cfg, log) *pricewatch.Advisor；newPricewatchApp(out, dryRun, log)"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ 5fc087c921c58c7e23dab9d5dc1b27bb5ac5fcfb（主仓库，三文件 sha256 与 e292f1690ac6f229bb4103b1984df8ffb13ff79f 一致：pricewatch.go c92b0cbe…, pricewatch_test.go b193635f…, plist 1529eee9…）",
+    "suite": "主仓库 @ 合并点：GOTOOLCHAIN=local go build ./... ok；go vet ./cmd/atlas/ 无输出；go test -count=1 ./internal/pricewatch/... ./cmd/atlas/... → 两包 ok；TestPricewatch -race 绿（worktree）；gofmt -l 无输出",
+    "coverage_two_rulers": "cmd/atlas（主仓库 @ 合并点）：go test 报 79.9%；profile 逐块求和（同块取最大计数去重）1410/1764 = 79.93%；go tool cover -func total 80.4% = FuncDecl 内 1410/1754（AST 划分复算）；差额 10 条语句全部位于 package 级 var 函数字面量且未覆盖。三者均 ≥ coverage_floor 78（基线 79.6%）",
+    "dod_mapping": "functional[0]→TestPricewatchCmd_Registered；functional[1]→TestPricewatchProviders_Order、TestPricewatchProviders_Unknown、TestPricewatchAdvisor（warn 用 zaptest/observer 断言恰 1 条）；functional[2]（manual）→plutil -lint OK + 下方 plist 核对；error_handling[0]→TestPricewatchOnce_BadConfig（文件不存在/校验失败/未知源 × dry-run 两态：error、sender 未构造、无输出）、TestPricewatchBackfill_Symbol；error_handling[1]（review）→pricewatch.go pricewatchProviders 首行 + TestPricewatchProviders_GateFirst；error_handling[2]（review）→runPricewatchRun 的 signal.NotifyContext + TestPricewatchRun_ReturnsNilOnCancel；non_functional[0]→见 suite/coverage；non_functional[1]→见 smoke；QA-11→TestPricewatchOnce_PropagatesCheckError；另 TestPricewatchOnce_DryRun、TestPricewatchOnce_Sends",
+    "plist_check": "plutil -extract：ProgramArguments.0=/Users/zuowei/workspace/runtime/atlas/bin/atlas；ProgramArguments 含连续 \"pricewatch\",\"run\"；WorkingDirectory 已设；KeepAlive=true；ThrottleInterval=60；https_proxy=http://127.0.0.1:7897；no_proxy=localhost,127.0.0.1；PRICEWATCH_TELEGRAM_BOT_TOKEN=REPLACE_WITH_BOT_TOKEN；PRICEWATCH_TELEGRAM_CHAT_ID=REPLACE_WITH_CHAT_ID",
+    "smoke": {
+      "when": "2026-10-20T10:40Z，worktree @ 1244e2a 加本任务未提交改动（与 e292f16 内容一致），二进制 go build -o <scratchpad>/atlas ./cmd/atlas",
+      "setup": "cwd=scratchpad/dev-pw-c-TASK-009-smoke；临时配置 = configs/pricewatch.yaml 仅改 ai.enabled:false 与 storage.path 指向 scratchpad；不带 -c（无主配置，闸门用内置默认）；PRICEWATCH_TELEGRAM_BOT_TOKEN=placeholder PRICEWATCH_TELEGRAM_CHAT_ID=placeholder；环境有 https_proxy",
+      "backfill": "./atlas pricewatch backfill --symbol BTC --pricewatch-config <tmp>/pricewatch.yaml → rc=0，用时约 9s，stdout：「BTC 1d: 3352 根」「BTC 5m: 2304 根」，stderr 0 行（1d 3352 > 3000 ✓）",
+      "once_dry_run": "./atlas pricewatch once --dry-run --pricewatch-config <tmp>/pricewatch.yaml → rc=0，用时约 9s，stderr 0 行，未调用 Telegram；stdout 两条提醒：「🔺 BTC 81,499 USDT（okx）… · 4年窗口：较 4 年最低价 15,476 上涨 426.6%（第 7 档）…【多周期】24h −1.1% · 7d −2.2% · 30d −5.9% · 距历史最高 −35.4% · 距 4 年最低 +427%」与「🔀 ETH 2,384 USDT（okx）… 历史窗口 下跌 51.9%（第 1 档）/ 4年窗口 上涨 122.0%（第 1 档）/ 1周窗口 下跌 5.8%（第 1 档）…」，末尾两行「BTC 81499 USDT · 触发中：cycle_rise 第7档」「ETH 2383.66 USDT · 触发中：ath_drawdown 第1档、cycle_rise 第1档、week_drop 第1档」；AI 结论行为「AI 分析不可用」（ai.enabled:false）"
+    },
+    "mutation": "go test -overlay 20 个变异在最终测试文件（sha256 b193635f…）上统一重采，20/20 KILLED（vet 通过且有具名 FAIL），源文件 sha256 前后不变：去闸门、闸门挪到构造之后、去回填排序（首版因 sort import 未用而编译失败，改写为恒假 less 后 KILLED）、rank 互换、回填与取价共用切片（排序污染取价序）、未知源跳过、忽略 ai.enabled、去 warn、Advisor 不带 Timeout、once 吞错误、once 不传 dry-run、backfill 不转大写、不过滤、不报不存在、只同步 1d、run 取消后返回 ctx.Err()、配置加载前构造 sender、flag 默认值、flag 非持久、忽略 providers 错误。首轮 once_no_dry 存活（dry-run 用例无规则触发），已加强用例后 KILLED",
+    "simplifier": "code-simplifier 未改动，三文件 sha256 前后一致",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：3 files touched、无已索引符号重叠",
+    "shuffle_note": "cmd/atlas 整包 -shuffle 既有顺序依赖（AD-16）不属本任务，未测"
+  }
+}

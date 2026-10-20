@@ -1,0 +1,76 @@
+{
+  "id": "TASK-010",
+  "title": "窗口统计（internal/pricewatch/window.go）",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "description": "计划 Task 4 的 WindowStatsFor 部分（从 TASK-004 拆出，AD-26）：`WindowStats{High, Low, Days, Short, GapRatio}`、`WindowStatsFor(st, pair, w, price, now)`。H/L 取窗口内 K 线 high/low 并并入现价；**GapRatio 按槽位覆盖率**：有效窗口切成 bar 时长的槽，GapRatio = 无任何 K 线的槽数 / 槽总数（AD-13，与 K 线对齐方式无关）；**Short 仅当 kv 记录了上线日（AD-21 键 `listing:<pair>:<bar>`）且上线日晚于窗口起点**时成立，此时有效窗口从上线日起；未记录上线日时本地缺头一律计入缺口；all 窗口有效起点 = max(上线日, 本地最早一根)、Short=false（AD-14）。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "estimated_files": [
+    "internal/pricewatch/window.go",
+    "internal/pricewatch/window_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestWindowStats_Short`：kv 记录上线日为 100 天前、日线 100 天齐全、w=4y → `Short==true`、`Days==100`、`GapRatio==0`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestWindowStats_HeadMissing`：kv 未记录上线日、本地 5m 只有最近 5 天、w=7d → `Short==false` 且 `GapRatio` 在 2/7±0.01（缺头算缺口，不当作历史不够长）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestWindowStats_Gap`：7d 的 5m 线中间缺 20% → `GapRatio` 在 0.2±0.01；日线一段每天两根（UTC 0 点与 16:00 各一）、另一段缺 30% → `GapRatio` 在 0.3±0.01（重复不掩盖缺口）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestWindowStats_PriceIncluded`：现价高于所有 high → `High==price`；低于所有 low → `Low==price`；否则 High/Low 等于窗口内 K 线 max(high)/min(low)。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "w=all：`Short==false`、`Days` 为有效起点到 now 的天数；窗口内无任何 K 线时 `GapRatio==1`（规则会被跳过）且不返回 NaN。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/window.go",
+    "./internal/pricewatch/window_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:37Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-a",
+  "discovery": ".arcforge/discoveries/TASK-010.json",
+  "verify_baseline": {
+    "head": "cea96add97bc682ad8912facb43907e4b74661cc",
+    "discovery_sha256": "a21750000a71e66fe57345a950583b6a35d9e926475d5894844925193fa6f287",
+    "at": "2026-10-20T07:55:16Z"
+  },
+  "verifier": "test-pw-a"
+}

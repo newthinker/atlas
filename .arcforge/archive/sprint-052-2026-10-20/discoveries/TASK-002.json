@@ -1,0 +1,106 @@
+{
+  "task": "TASK-002",
+  "author": "dev-pw-a",
+  "commit": "eb206b6a0fc41e297ce3c3a447a348971cf6a29d",
+  "merged_as": "f3d3223136084113ea104d57891d827d5f768419",
+  "key_findings": [
+    "DoD functional[1] 的「BTC day_drop 阈值仍为 2（防切片别名）」按字面写抓不到别名：BTC 在 ETH 之前解析，ETH 替换发生时 BTC 的 Rule 已按值拷出。变异 `out := base` 在只有该断言时 SURVIVED；补「排在 ETH 之后的 SOL 资产 day_drop==2」与「Strategies[crypto_dual_invest][4] 未被改」后 KILLED",
+    "viper 把 strategies 的 map 键小写化，但不动值；资产里 `strategy:` 引用要同样 ToLower 才能匹配（定义与引用两个方向的大小写不一致都已测）",
+    "viper v1.21 默认 decode hook 已含 string→time.Duration，`5m`/`24h` 无需自定义 hook；`SetDefault(\"ai.timeout\",\"60s\")` 在 YAML 写了 ai 段但缺 timeout 时仍生效"
+  ],
+  "decisions": [
+    {
+      "decision": "在 DoD functional[1] 的「BTC day_drop 阈值仍为 2」之外，补两条别名断言：排在 ETH 之后的 SOL 资产（同引用 crypto_dual_invest）day_drop 阈值为 2；Strategies[\"crypto_dual_invest\"][4] 仍为 day_drop/阈值 2",
+      "rationale": "DoD 原断言抓不到别名：BTC 在 ETH 之前解析，ETH 原位替换发生时 BTC 的 Rule 已按值拷出；别名只会波及排在 ETH 之后的资产与 Strategies 本身。变异 `out := base` 在仅有原断言时 SURVIVED，补后 KILLED（TestLoadConfig_Merge）"
+    },
+    {
+      "decision": "Config 的嵌套匿名 struct 对多词字段补 mapstructure tag（bot_token/chat_id/notify_defaults/fail_alert_after/heartbeat_at/check_interval）",
+      "rationale": "计划接口草稿省略 tag；漏写时 viper 静默丢值，由 TestLoadConfig_NonDefaults 与 tag 删除变异验证"
+    },
+    {
+      "decision": "assets.crypto.sources / quote 非空只在 crypto.items 非空时强制",
+      "rationale": "无 crypto 资产时二者无消费者；DoD 未限定，自行决定并已报 Leader"
+    },
+    {
+      "decision": "资产级 check_interval：0 = 继承全局，负值报错（文案 must not be negative）；全局 check_interval 必须 > 0",
+      "rationale": "AssetCfg 未写该字段时为零值，不能把 0 当错误"
+    },
+    {
+      "decision": "Symbol 与 Quote 都转大写，Pair = Symbol+Quote",
+      "rationale": "DoD 要求 symbol 大写；quote 同理以免 `usdt` 生成 BTCusdt"
+    },
+    {
+      "decision": "规则合并：mergeRules 先拷贝 strategy 切片，同 id 原位整条替换、新 id 末尾追加；strategy 内或资产 rules 内重复 id 均报 duplicate rule id",
+      "rationale": "只在合并后列表上查重会让资产 rules 内的重复被后一条替换静默吞掉"
+    },
+    {
+      "decision": "expandEnv 错误文本只含字段名与变量名，不含原值",
+      "rationale": "DoD error_handling[1]：明文 token 不得进错误文本"
+    },
+    {
+      "decision": "CryptoAssets() 在 LoadConfig 时一次算好存入未导出字段 cryptoAssets",
+      "rationale": "校验错误需在加载时报出；CryptoAssets 签名无 error"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/config.go",
+    "internal/pricewatch/config_test.go",
+    "internal/pricewatch/testdata/valid.yaml",
+    "configs/pricewatch.yaml"
+  ],
+  "interfaces_exposed": [
+    "type AssetCfg struct{ Symbol, Name, Strategy string; CheckInterval time.Duration; Rules []RuleCfg }",
+    "type Config struct{ CheckInterval; Storage{Path}; Telegram{BotToken, ChatID, Proxy}（已展开）; AI{Enabled, Timeout}; NotifyDefaults NotifyPolicy; Health{FailAlertAfter, HeartbeatAt}; Strategies map[string][]RuleCfg（键已小写）; Assets{Crypto{Sources, Quote, Items}; Stock, Fund{Items}} }",
+    "type Asset struct{ Symbol, Name, Pair, Quote string; Interval time.Duration; Rules []Rule }",
+    "func LoadConfig(path string) (*Config, error)",
+    "func (*Config) CryptoAssets() []Asset",
+    "func (*Config) UnsupportedItems() []string  // \"stock:XXX\" / \"fund:XXX\""
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ f3d3223136084113ea104d57891d827d5f768419（主仓库，四文件 sha256 与 eb206b6a0fc41e297ce3c3a447a348971cf6a29d 逐一致）",
+    "suite": "主仓库 GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, 93.1%（整包含 TASK-003/011 代码）；worktree @ eb206b6 单独 99.3%（仅 viper Unmarshal 错误分支未覆盖）",
+    "vet_gofmt": "go vet 无输出；gofmt -l internal/pricewatch/ 无输出；两份 yaml diff -q 相同",
+    "rejects_probe": "一次性探针（未提交）逐行打印 22 种非法输入的错误文本，均由对应校验报出，无被前置校验截获",
+    "mutation": "go test -overlay 共 20 个变异全部 KILLED：首轮 20 个中 16 KILLED、3 SURVIVED（切片别名、strategy 引用 ToLower、quote ToUpper）、1 编译失败（改写为 `_ = i` 后 KILLED）；补测试后 4/4 KILLED；源文件指纹不变",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas → 4 files touched, no indexed symbols overlap（新文件）"
+  },
+  "qa_fix": [
+    {
+      "round": 1,
+      "source": ".arcforge/docs/05-review/qa-review-round2.md（QA 判 REJECT，review_fix，reason_class=task_defect）",
+      "commit": "769bdbd77eda0b92c7c86e6c56783e0f7b075eb4",
+      "merged_as": "943dacc54d14590081a1f4cd1251d4aebabbf9d6",
+      "items": [
+        {
+          "id": "QA-14",
+          "fix": "expandEnv 在展开值以 REPLACE_WITH_（常量 placeholderPrefix）开头时报错，文本含字段名、环境变量名、REPLACE_WITH_ 与 ~/Library/LaunchAgents/（指向 plist 注释所说的安装副本），不回显原值",
+          "test": "TestLoadConfig_PlaceholderRejected（bot_token、chat_id 各一）"
+        },
+        {
+          "id": "R1-2",
+          "fix": "LoadConfig 改用 v.UnmarshalExact，未知键报错",
+          "test": "TestLoadConfig_Rejects 新增 unknown key（health.heartbeat_al）、unknown rule key（规则里的 typo）"
+        },
+        {
+          "id": "QA-4",
+          "fix": "测试新增 errBody，断言前剥掉错误里「<path>.yaml: 」前缀；t.TempDir 路径含子测试名（如 window_2d），原断言会被路径顺带满足",
+          "test": "TestLoadConfig_Rejects 全部行改用 errBody"
+        },
+        {
+          "id": "R1-3",
+          "fix": "build() 校验 health.fail_alert_after > 0、ai.timeout > 0（缺省仍由 SetDefault 给 30m/60s，只有显式写 0 或负值才报错）",
+          "test": "TestLoadConfig_Rejects 新增 fail_alert_after 0s/-1m、ai.timeout 0s/-5s"
+        }
+      ],
+      "evidence": {
+        "mutation": "go test -overlay（config.go 变异体在 scratchpad，主树指纹不变）：UnmarshalExact→Unmarshal、去掉占位值检查、fail_alert_after <=0→<0、ai.timeout <=0→<0，4/4 KILLED",
+        "qa4_before_after": "把 rule.go 的「invalid window」文案改成「invalid w」：新测试 TestLoadConfig_Rejects/window_2d 变红；HEAD 版（修复前）测试仍绿 ⇒ 旧断言确被路径满足",
+        "impact": "gitnexus impact LoadConfig：索引早于 pricewatch 包，三个候选都不是本函数（结果 UNKNOWN）；grep 补查唯一外部调用方 cmd/atlas/pricewatch.go:137，GOTOOLCHAIN=local go test ./cmd/atlas/ -run Pricewatch 绿（其测试配置未写 ai.timeout、无未知键）",
+        "suite": "主仓库 feature/pricewatch @ 943dacc54d14590081a1f4cd1251d4aebabbf9d6：config.go/config_test.go sha256 与 769bdbd 一致；go test -race -count=1 -cover ./internal/pricewatch/ → ok 93.8%；go vet 无输出；gofmt -l 无输出",
+        "simplifier": "code-simplifier 未改动（指纹一致）",
+        "detect_changes": "--repo atlas：2 files，无已索引符号重叠"
+      }
+    }
+  ]
+}

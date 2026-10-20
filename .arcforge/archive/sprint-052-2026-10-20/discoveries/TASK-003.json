@@ -1,0 +1,37 @@
+{
+  "task": "TASK-003",
+  "author": "dev-pw-b",
+  "commit": "1854aa8d0323195de2cb94cfc5e3a321f8c80058",
+  "merged_as": "e4d0aeb4fe1de4b1cb6508843752a91bbbd88b51",
+  "key_findings": [
+    "零值 time.Time 的 UnixMilli 远早于任何 K 线，Stats 的 from 零值天然等于不设下界，无需特判；零值 LastSentAt 经 UnixMilli 往返读回仍 IsZero（TestRuleState_Overwrite 覆盖）",
+    "busy_timeout 是并发安全的必要条件：overlay 去掉 busy_timeout 后 TestStore_Concurrent 稳定出现 database is locked",
+    "Stats 空区间时 MAX/MIN 为 NULL，用 sql.Null* 接收；Count==0 时返回零值 CandleStats（First 为零值）"
+  ],
+  "decisions": [
+    {"decision": "DSN 与建目录完全照抄 crisis.NewStore（WAL + busy_timeout(5000)），未设 MaxOpenConns(1)", "rationale": "并发测试 -race -count=10 全绿；保持与仓库其他 store 同一约定"},
+    {"decision": "candles 存 open/high/low/close，不存 volume；时间列 ts 为 UTC Unix 毫秒，读回统一 .UTC()", "rationale": "spec §6 只用 H/L/close；计划约定毫秒"},
+    {"decision": "Prune 为 ts < before（before 本身保留）；FirstCloseSince 为 ts >= from；Stats 两端含", "rationale": "DoD functional[1]/[3] 字面；变异 Prune<=、FirstClose>、Stats 开区间均被杀"},
+    {"decision": "rule_state.last_sent_ms NOT NULL，零值时间按 UnixMilli 原样存（负数）", "rationale": "往返保持 IsZero，免去 NULL 映射分支"}
+  ],
+  "files_modified": ["internal/pricewatch/store.go", "internal/pricewatch/store_test.go"],
+  "interfaces_exposed": [
+    "type Store struct{ db *sql.DB }; func NewStore(path string) (*Store, error); func (*Store) Close() error",
+    "type CandleStats struct{ High, Low float64; First time.Time; Count int }",
+    "func (*Store) UpsertCandles(pair, bar string, cs []core.OHLCV) error  // PK(pair,bar,ts) INSERT OR REPLACE，单事务",
+    "func (*Store) LatestCandle(pair, bar string) (time.Time, bool, error)",
+    "func (*Store) Stats(pair, bar string, from, to time.Time) (CandleStats, error)  // [from,to] 两端含，from 零值=无下界",
+    "func (*Store) FirstCloseSince(pair, bar string, from time.Time) (float64, bool, error)",
+    "func (*Store) PruneCandles(pair, bar string, before time.Time) error  // 删 ts < before",
+    "func (*Store) GetRuleState(pair, ruleID string) (RuleState, error); func (*Store) PutRuleState(pair, ruleID string, st RuleState) error",
+    "func (*Store) GetKV(key string) (string, error)  // 不存在返回 \"\"; func (*Store) PutKV(key, val string) error  // 覆盖写，供 AD-21 listing:<pair>:<bar>"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ e4d0aeb4fe1de4b1cb6508843752a91bbbd88b51（主仓库）；store.go sha256 31e9169e78ea92f856761d8ae2b73f66b47a93553e87e3a028fffd38aca2da64、store_test.go 6ff935295415ea289e31cd676396974bf0133e5d07e90e76af7354e405ed4dfa，与 1854aa8 逐一致",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok，主仓库 @ e4d0aeb 包覆盖率 89.4%（含同包 TASK-011；worktree @ 1854aa8 时为 87.5%）；TestStore_Concurrent -race -count=10 全绿",
+    "vet_gofmt": "go vet ./internal/pricewatch/ 与 gofmt -l internal/pricewatch/ 无输出（worktree @ 1854aa8）",
+    "mutation": "go test -overlay 21 个变异全部 KILLED，源文件 sha256 前后不变：Stats to/from 开区间、MAX(close)/MIN(close)、First 取 MAX、Prune <=、Prune 去 bar 过滤、PK 去 bar、OR IGNORE、FirstClose DESC/>、Latest MIN、Latest 去 pair 过滤、rule_state PK 去 pair、两处秒精度、不建目录、GetRuleState/GetKV 空返回 err、去 busy_timeout",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致（结论 scratchpad dev-pw-b-TASK-003-simplifier.md）",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched，无已索引符号重叠（新文件）；附索引落后 22 commit 告警"
+  }
+}

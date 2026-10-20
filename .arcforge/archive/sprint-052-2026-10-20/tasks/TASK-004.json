@@ -1,0 +1,92 @@
+{
+  "id": "TASK-004",
+  "title": "K 线分段补数（internal/pricewatch/sync.go）",
+  "description": "计划 Task 4 的 Sync 部分，按 reviewer 实测修订（AD-12/20/21/22）：`Syncer{Providers, Store, Now}.Sync(ctx, pair, bar)`。从 backfillStart（1d=2010-01-01 UTC，若已记录上线日则从上线日；5m=now−8d）到 now 按每段 300×bar 时长切段；**本地该段槽位覆盖率 ≥90% 且不是最后一段则跳过不请求**，否则按 Providers 顺序取：一段返回 error 或根数 <90% 应有根数换下一源，全不够取根数最多者；最后一段起点 = 本地最新一根 − 1 个 bar（AD-12，兼容 okx 两端不含）；所有源对上线前各段返回 0 根时记录上线日到 kv（AD-21）；入库前丢弃坏 K 线（AD-20b）；bar=5m 同步后删 8 天前数据。fake provider 必须按真实区间语义建模（okx：两端不含、区间内返回最新 300 根；binance：两端含、从 start 起最多 1000 根）。窗口统计已拆为 TASK-010。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/pricewatch/sync.go",
+    "internal/pricewatch/sync_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestSync_Chunks`：本地为空、bar=1d，分别用 okx 语义 fake 与 binance 语义 fake 各跑一遍 → 入库根数等于 fake 总根数，段边界处无缺根。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestSync_FallbackPerChunk`：fake A（在前）只有最近 400 天、fake B 有 3000 天 → 老段由 B 补、新段用 A；A 对某段返回 error → 该段用 B；所有源都不足 90% 时取根数最多的结果入库。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestSync_Incremental`（AD-12）：本地已有完整数据、最新一根 T 的 high=100，fake 对 T 返回 high=120 → Sync 后 `Stats` 的 High 为 120；okx 语义与 binance 语义 fake 下都成立。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "稳态：本地数据完整时一次 Sync 只发 1 个请求（最后一段）且只调用第一个 provider（断言各 fake 调用次数）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "缺口修复（AD-22）：本地日线中间缺一整段（覆盖率 <90%）→ 下一次 Sync 重取该段并补齐，其余完整段不请求。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "上线日（AD-21）：fake 数据从 2017-08-17 开始 → 首次 Sync 后 kv 记录该上线日；第二次 Sync 不再请求完全早于上线日的段。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "坏 K 线不入库（AD-20b）：open/high/low/close 任一非有限或 ≤0、low>high、时间为零值或早于 2009-01-01 的 K 线被丢弃，同批其余正常入库。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。另：`TestSync_Prune5m`：bar=5m 同步后 8 天以前的数据被删除，1d 数据不受影响；所有源对某段都返回 error 时 Sync 返回含 pair 与 bar 的 error，且此前已成功的段仍在库中。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "wave": 3,
+  "context_from": [
+    "TASK-001",
+    "TASK-003"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/sync.go",
+    "./internal/pricewatch/sync_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:36Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-b",
+  "discovery": ".arcforge/discoveries/TASK-004.json",
+  "verify_baseline": {
+    "head": "ebc366e43a6deda8dc28ae8974b2e3fa77bb3c1b",
+    "discovery_sha256": "39fab782d213d02844e7ac37f940e4e0e06abf0b741f4d552a0fa96575e5b082",
+    "at": "2026-10-20T12:54:28Z"
+  },
+  "verifier": "test-pw-b",
+  "reason_class": "task_defect",
+  "fix_items": [
+    "QA-8：补两条上线日保护用例（源码 .arcforge/docs/02-plan/qa-8-probe.md，S29 某段全源报错、S30 部分源报错+其余 0 根）+ 第三个同类用例「跳过的完整段让上线日判定停下」；须 overlay 证明各自变异变红",
+    "QA-9/AD-29（人类裁决）：与该 bar 最短窗口（1d→30d、5m→24h）相交的段要求槽位覆盖率 100%，不满即重取；更早的段仍 90%",
+    "R1-5：fetch 在 best 覆盖 <90% 且有源报错时，照常把 best 入库并上抛错误，使 sync: 健康键可报；okx 替身加约 1440 根上限，补「binance 全挂」用例",
+    "可选：Minimalist F2——backfillStart 复用 readListing。证据见 .arcforge/docs/05-review/qa-review-round2.md §5"
+  ],
+  "rework_count": 1
+}

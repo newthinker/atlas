@@ -2070,3 +2070,60 @@ TASK-008 的 §B 表头锚写 `fd933f49…` 而非交付时的 `41a19d87…`，d
 撞到的必然只有「挡了我路的那些」，而**不挡路的缺陷（如装反的闸、恒真的判据）会一路通过**。
 本 sprint 恰好有实例：`##` 计数装反、构建树 grep 恒真，**都不是被 DoD 的使用者撞出来的，
 是被专门去求值的人算出来的**。⇒ **使用与审查是两种关系，前者的覆盖面由「碰巧走到哪」决定。**
+## 2026-10-20 sprint Pricewatch — QA 必办项（来自 test-pw-a 验证 TASK-001，非 DoD、不阻断）
+- QA-1：`ParseRule` 接受 `threshold_pct`=NaN/±Inf、`step_pct`=NaN（`<= 0`/`< 0` 对 NaN 恒假）；YAML `.nan`/`.inf` 可达 ⇒ Tier 得实现定义档位。修法 `!(x > 0)` + IsInf。Step 6 作为 TASK-001 review_fix 项（改 DoD 会使 dod-hash 失效、需重过确认门，故不改 DoD）。
+- QA-2：Decide 的 SentInTier+1 写死为 2 不被杀（重复提醒用例只测 1→2）；补 prev{2,2,T0}→{2,3,now}。同上走 review_fix。
+- 证据：.arcforge/docs/04-test/TASK-001-verification.md（被测树 f2fe680c52b896ef86a25df0ef3622623d3a337a）
+- QA-3（test-pw-b 验 TASK-003，非 DoD）：只去 WAL 的变异存活（无断言守卫）；读回时间不 .UTC() 存活（DoD 只要求 Equal，已提示下游 004/010 自己 .UTC()）；store.go 单文件覆盖 79.5%（未覆盖均为 DB 错误包装）。证据 .arcforge/docs/04-test/TASK-003-verification.md @ f3d3223136084113ea104d57891d827d5f768419
+- TASK-011 rework 1（task_defect，Fail/OK 并发只测 Fail 半边）→ dev-pw-c epoch 2
+- QA-4（test-pw-a 验 TASK-002，非 DoD）：TestLoadConfig_Rejects 有 10 行「错误含字样」断言空洞——错误文本含配置路径，t.TempDir() 路径含子测试名，want 被路径满足（删字段名文案后 10 行全存活）。修法只改测试：断言前剥掉 ".yaml: " 前的路径前缀。证据 .arcforge/docs/04-test/TASK-002-verification.md @ f3d3223136084113ea104d57891d827d5f768419
+- QA-5（test-pw-a 验 TASK-010，非 DoD）：X25 上线日键写死 ":1d" 不被杀——只测了「5m 键→日线窗口不判 Short」，缺「5m 窗口读 5m 键→判 Short」；属 004 写/010 读的接口契约，QA 补用例并与 TASK-004 的 ListingKey 收敛为一个构造函数。证据 .arcforge/docs/04-test/TASK-010-verification.md @ cea96add97bc682ad8912facb43907e4b74661cc
+- final-report 素材：TASK-010 门禁有界集合（--since 本轮 in_progress）正确认领 5990203/cea96ad；无界 COMMITTED_MINE 混入往届同号 47 条（PENDING #5 第 6 例）；Jev shadow n_dod=0 skipped=no_judgeable_criteria（Jev 实际未判定任何条目）
+- QA-6 🔴（test-pw-b 验 TASK-005，非 DoD 但触反目标）：AD-24 只截断【AI 分析】，Term/Verdict 等其他 AI 字段长度无界 ⇒ Term 5000 字时整条 5250 码元 > 4096 ⇒ Telegram 400 ⇒ 状态不推进、提醒永久丢失（spec §2「错过低点」）。必修：FormatAlert 保证**整条**≤4096（超长时先截 AI 分析、再截其余 AI 字段），补 Term 超长用例；另 T34 恰 4096 边界无用例。TASK-006 解析侧限长作第二道防线（派发时已提示）。证据 .arcforge/docs/04-test/TASK-005-verification.md @ 49f4b71e663884eac661294eae0992e4c913e1ca
+- QA-7（低）：价格舍入跨档外观——999.996→「1,000.00」、0.99999→「1.0000」。
+- QA-8 🔴（test-pw-a 验 TASK-004，非 DoD 但守的是 AD-21/V14 的立项理由）：上线日的两道保护无测试——S29（某段全源报错未终止上线日判定）、S30（部分源报错+其余 0 根被当成「全 0」）均存活；探针双向分离（原实现过、变异错记上线日 1754784000000）。后果：backfillStart 永久前移、更早历史永不回补、TASK-010 误判 Short。必修：补两个用例（测试代码见报告）。另 S33（slotCount 向上取整存活，dev 的「必须向下取整」无测试支撑）、S11（全不足平局取后者）低优先。证据 .arcforge/docs/04-test/TASK-004-verification.md @ 80a56f38888e6770d01db2ff8824e164d8d82039
+- 订正 QA-8：「测试代码见报告」有误——报告 §5-1 只有场景描述与结果表；探针源码在 scratchpad/testpwa-t004-mut/probe_test.go（两个函数，复用 sync_test.go 的 fakeProvider/series/newSyncer）。scratchpad 非持久，QA 派 review_fix 时须把源码贴进派发消息，不能只给路径。
+- QA-8 补：第三个同类变异——跳过的完整段未让上线日判定停下（未写探针，QA 补测时一并覆盖）。探针源码已持久化到 .arcforge/docs/04-test/QA-8-probe.md。
+- 订正上一行：探针源码**未**落到 docs/04-test/QA-8-probe.md（写通道 DENY，该目录只许 test-*）；实际持久化位置是 .arcforge/docs/02-plan/qa-8-probe.md（已 diff 核实与 scratchpad 源逐字一致）。教训：wisdom 的「已持久化」写在落盘命令同一条管道之后，未先核实 rc——又一次「写下观察之前没观察」。
+- QA-9 🔴（test-pw-a 验 TASK-004 §6(4)，**Leader 设计缺陷**：AD-22 × AD-13 阈值冲突）：Sync 按段 ≥90% 覆盖即跳过，窗口统计按 >10% 缺口跳过规则——粒度不同。实测：日线尾前段（~289 天）在最近 30 天挖 20 天 ⇒ 段覆盖 93% 被跳过、永不重取；30d 窗口 GapRatio=0.667 ⇒ 规则每轮被跳过；覆盖率只增不减 ⇒ 无修复路径，只剩健康告警（监控对该规则永久失明）。触发：provider 某次返回 ≥90% 但不完整（休眠不触发）。修法候选（QA 阶段带推荐提给人类）：A) 落在该 bar 最短窗口（1d→30d，5m→24h）内的段要求 100% 覆盖（推荐）；B) 全部段要求 100%（交易所维护造成的真实缺口会每轮重取）。
+- TASK-004 §6(2)：AD-12 的「减 1 个 bar」与 fetch 内 −1ms 互为冗余保护，单删任一不红、双删红（okx Incremental 最新一根 High 停在 100）；−1ms 由 S4 守（4 测试杀）。低风险，记 final-report。
+- QA-10（test-pw-b 验 TASK-006，非 DoD）：A42「两条 advice 只取第一条」存活（TestAdvise_Prompt fake 返回 2 条但未断言条数）⇒ 涨跌都触发时可能丢「高卖」——已要求 TASK-007 引擎测试补 2→2 断言；A04 两个方向时 JSON 示例写死「低买」存活（方向在提示词有三处冗余载体，单处改动无守卫）。term>20 视为失败与 TASK-005 组合后 AD-24 成立（QA-6 主修复仍需做）；goroutine+select 每轮至多残留 1 个、不累积，可接受。证据 .arcforge/docs/04-test/TASK-006-verification.md @ 04bed52d45612d45386e794efdb60e47536eedd2
+- TASK-007 rework 1（task_defect，test-pw-a）：并发测试读写不重叠（读侧 200/0），四处锁删任一存活 ⇒ 重派 dev-pw-a epoch 2，同提交补 E34（1m 线来自取价成功源）/E38（缺口跳过规则不入 Active）。
+- 同族模式第 2 次（TASK-011 Fail/OK 只并发一半、TASK-007 读写不重叠）：**「并发调用 -race 无竞争」类 DoD 被写成「起 goroutine 跑一下」就过**——-race 只能检出实际发生交错的访问。以后此类 DoD 写成「读写在时间上确有重叠（可计数证明）且删锁变异必红」。
+- TASK-008 契约（test-pw-a 建议）：「同一资产不得并发 CheckAsset」——不改 DoD（改则需重过确认门），写进 008 派发消息并要求验证者核查 Runner 串行。
+- final-report 素材：write-guard 假阳 ×2（PENDING #11 同族：拦命令文本不拦写入目标）——①dev-pw-a：把 .arcforge 下文件复制到 scratchpad（.arcforge 仅为读源）被判为写 .arcforge；②Leader 自己：wisdom 记录正文里出现复制命令字面量 + 运行时资产路径，整条命令被拦（未执行任何部分）。两者都改写措辞/只读打开绕开，未绕 hook。
+- TASK-007 r0 根因（dev 自查）：变异集只覆盖业务逻辑、未变异同步原语 ⇒ 没发现并发用例空转。与 TASK-011 同族（并发 DoD 第 2 例）。
+- final-report 素材（TASK-008 dev 声明）：Run 取消时等在跑的 CheckAsset 返回；okx/binance http.Client 超时 10s 且 FetchQuote/FetchHistory 不收 ctx ⇒ 真实环境 SIGTERM 后最长约十几秒才退出；DoD「1 秒内返回」只在测试替身（慢检测 20ms）下成立。launchd 下可接受。
+- TASK-008 rework 1（task_defect，test-pw-a）：Runner 测试全注入替身 check，生产路径 r.Engine.CheckAsset 零执行（R22 改 return nil 全绿 ⇒ 生产 run/once 静默不检测）。Leader 维持判定（触 spec §2 静默死亡）。重派 dev-pw-b epoch 2，同提交补 R21（取消后不再发心跳）。
+- 同族第 3 例（011 并发半边 / 007 读写不重叠 / 008 替身遮蔽生产路径）：**DoD 点名的行为只在替身上被测**。以后 DoD 写法：凡有注入点的行为，至少一条用例走生产实现。
+- final-report 已知限制（test-pw-a）：SIGTERM 退出最坏约「数据源数 × 10s」，launchd 默认 20s 后 SIGKILL；若杀在 SendText 之后、PutRuleState 之前，重启后重发一条（AD-15/Review Focus 3 的残余窗口）。
+- final-report 素材（消息延迟/丢失，PENDING #4 同族）：TASK-008 返工 dev 提交 10:06:12Z → Leader merge 10:23:00Z，等待约 17 分钟；dev 发 team-lead 两次 + main 一次，Leader 只在 ~10:22 收到一条（且晚到），merge 后 dev 又连发两条「仍停在 0f218bb」的旧催办。本 sprint dev-pw-b 发 team-lead 的消息丢失第 2 次（首次 TASK-003）。归因：主要是通道延迟/丢失，非 dev 侧互等；Leader 侧无挂起（中间一直在处理消息）。
+- QA-11（test-pw-b 复验 TASK-008，非 DoD）：Y6 生产路径吞 Engine 错误时测试照绿——RunOnce 合并错误只在替身路径上测过；退化后 `pricewatch once` 在取价全失败时仍 exit 0。补「真实 Engine、全部源失败 → RunOnce 返回 error」断言；TASK-009 派发时已要求 once 把 RunOnce 错误传到退出码。Y4（ctx 改 Background）存活，只影响取消速度，低。证据 .arcforge/docs/04-test/TASK-008-verification.md @ 1244e2a2dc36c939b77a3d5a735120e652628fc9
+- QA-9 人类裁决（2026-10-20）：采用方案 A——与最短窗口相交的段要求 100% 覆盖，早期段仍 90%；已记 AD-29，QA 阶段走 TASK-004 review_fix。
+- 订正（dev-pw-c 查 man launchd.plist）：上文「launchd 默认 20s 后 SIGKILL」未经核实——man page 原文 ExitTimeOut 默认为「system-defined」，本 plist 未设该键、默认值未实测。已知限制的措辞改为「退出最坏约『数据源数 × 10s』，可能超过 launchd 的系统默认等待时间而被 SIGKILL」。
+- QA-12（低，待 QA 时定）：plist 加 `ExitTimeOut`（如 30，需 ≥ 数据源数 × 10s）以降低「SendText 后、PutRuleState 前被 SIGKILL ⇒ 重启重发」的窗口。
+- TASK-009 验证者改派（AD-21 逃生边，12:09:35Z）：test-pw-a 10:46 派验，10:49:45Z 后零落盘、无 go 进程、不回 11:37 询问，ListAgents 恒 running（PENDING #12 同形）。**validator 盲区**：派验当时写的那一次 checkpoint 被算作「本轮产物」⇒ stale-dispatch 全程 0 条；靠 Leader 手查 scratchpad/worktree 文件 mtime + ps 才看出。改派 test-pw-b，未 TaskStop（写通道 verifier 校验防双写）。另：残留两个 tail -f 监视 test-pw-b 的 T007 结果文件（任务结束未清理）。
+- QA-13（test-pw-b 验 TASK-009，非 DoD）：回填顺序交给 Syncer 的那一行无测试（P26b，换成取价顺序全绿，与 TASK-008 R22 同形）；后果仅多余 okx 请求（Syncer 逐段回退不缺数据）。补断言 app.syncer.Providers == [binance, okx]。
+- QA-14 🔴（同上，触 spec §2 静默死亡）：plist 占位值 REPLACE_WITH_* 未替换即安装 ⇒ 过「展开后非空」校验 ⇒ 所有发送（含健康告警、心跳）失败且只记日志。Leader 推荐修法：LoadConfig 拒绝以 REPLACE_WITH_ 开头的 telegram 值（TASK-002 review_fix），报错指向 plist 注释；不做启动自检消息（KeepAlive 下崩溃循环会刷屏）。
+- QA-15（低）：TestPricewatch…ReturnsNilOnCancel 调 SetContext 未复原，潜在测试顺序依赖。
+- 全部 11 任务 verified（2026-10-20 ~12:2xZ）；返工 3 次（011/007/008，均 task_defect 且均为测试缺口）；TASK-009 验证者改派 1 次（env/实例失联）。
+- QA 第 1 轮（qa-pw）判 REJECT（共识必修，非 CONTESTED）：review_fix ×6——004（QA-8/AD-29/R1-5）、011+007（R1-1，AD-30 接口）、002（QA-14/R1-2/QA-4/R1-3）、005（QA-6，AD-31 Leader 不采纳降级）、001（QA-1/QA-2）。code_review 迭代 1/3。
+- 本轮不修、记入 final-report 已知限制：QA-3（WAL 无守卫）、QA-5 测试半边、QA-7、QA-12（ExitTimeOut）、QA-13、QA-15、R1-4（AI 只回一个方向即通过）、R1-6、R2-1（单 okx 源上线日误记）、Minimalist F1/F3、AD-15/P14 健康状态只在内存、SIGTERM 退出最坏约「源数×10s」与 SIGKILL 重发窗口。
+- 🔴 TASK-009 报告被覆盖（12:51:49Z）：test-pw-a 改派后醒来、按自己的 checkpoint 完成了验证，并经写通道 doc 覆盖了 test-pw-b 的 TASK-009-verification.md（任务状态未受影响：verified by test-pw-b 12:17:14Z）。**机制缺口**：逃生边改派只挡住 transition（verifier 校验），挡不住 doc 子命令——它只按角色 test-* 放行，不校验该任务的 verifier。处置：TaskStop test-pw-a；其报告原样备份 scratchpad/leader-pw/TASK-009-verification.test-pw-a.md（9894 字节，sha256 ecaa6468…，独立 PASS 可作旁证）；请 test-pw-b 恢复自己的报告；补位 spawn test-pw-c。教训：改派时**必须同时 TaskStop 原实例**，「写通道会 DENY」只对 transition 成立——我改派时据此判断不 TaskStop，是错的。供 PENDING-MECHANISMS 新增一条（doc 写入不校验 verifier）。
+- QA-16（test-pw-a 独立验 TASK-009 的独有发现，经 test-pw-b 恢复报告附节转述）：P28 心跳接线（cmd 侧把 heartbeat_at 交给 Runner）无测试守卫；与 QA-13（P25/P26b 回填顺序接线）同族——cmd 装配层的接线只有部分被测。交 QA 第 2 轮定级。
+- TASK-002 QA 返工复验 verified（test-pw-c，基线 f8e37c2）：QA-4 修复经 12 个「删字段名」变异确认——新测试 12/12 KILLED、旧测试 12/12 SURVIVED。非 DoD：M5 占位值报错回显原值存活（占位值非密钥，低）。test-pw-a 转述的「QA-14 已闭合」由本复验证实（M2 去占位检查被杀）。
+- TASK-004 QA 返工复验 verified（test-pw-b，基线 ebc366e）：QA-8/AD-29/R1-5/F2 全落地有守卫；39 变异 36 KILLED（S30、tail=latest 等价）。
+- QA-17（QA-4 同族第 2 例）：R6——TestSync_BinanceDownReportsError 断言错误含「binance」，被替身自带错误文本 "binance boom" 顺带满足；fetch 去掉 p.Name() 仍绿。修法：替身错误文本不含源名。**同族模式：断言要的字样由测试夹具自己提供**（路径里的子测试名 / 替身的错误文本）。
+- AD-29 代价（人类已接受）：近期窗口内交易所真实缺 K 线时每轮多 1 个重取请求。
+- 消息丢失第 3 例（Leader→dev-pw-a，PENDING #4 单向失效同形）：12:4x、12:54 两条「TASK-007 现在开工（基于 task/TASK-011-qa1）」均未送达；dev-pw-a 13:0x 询问 A/B 并声明「不回复就按 A（等 011 合入）」——而 011 被 Leader 刻意扣住等 007 ⇒ 若这条也丢就是**互等死锁**，且文件层面完全同形于「dev 在写代码」（in_progress 无阈值）。本次 dev 主动询问 + 给出缺省值才暴露。教训：**依赖链里「我扣住 X 等 Y、Y 等 X」的安排必须写进任务文件**（如 questions/answer 或 fix_items），不能只靠消息。
+- TASK-007 改派（13:2xZ，review_fix→assigned 收回边）：dev-pw-a 12:52Z 后 30 分钟零落盘、未认领、未建分支；开工方式已写入 fix_items[0] 且观察一个周期仍无动静 ⇒ TaskStop dev-pw-a（吸取 test-pw-a 覆盖报告教训：改派必同时停原实例），改派 dev-pw-c（011 接口作者，两侧同一 dev）。收回边**拒收 reason_class**（PENDING #4-15 再撞）⇒ 本应标 env_infra（实例失联、非任务缺陷）的分类无法入审计行，rework_count 是否 +1 见任务文件。
+- final-report 素材：TASK-007 rework_count=1 **少计 1 次**——实际返工 2 次（首轮 rejected→assigned +1；QA review_fix 经收回边 review_fix→assigned→in_progress 改派，绕开了 review_fix→in_progress 的自动 +1）。TASK-011 rework_count=2 正确。⇒ 收回边改派会让返工计数静默少计（与 PENDING #4-15「收回边不收 reason_class」同处）。
+- TASK-011 + TASK-007 QA 返工连续合入：011 → 77c49ef、007 → 8ed58bc（两包 -race 绿）；派验 011→test-pw-c、007→test-pw-b（基线 8ed58bc）。
+- TASK-011 QA 返工复验 verified（test-pw-c，基线 8ed58bc）：实现与 AD-30 逐条一致；逻辑变异 9/9、去锁 3 处各 5/5（读写重叠有计数证明）；health_test.go −44 行逐行审计无 DoD 失去守卫。
+- final-report：TASK-011 DoD functional[0]/[1]「不重复 / 恰 1 次 Up」写于 AD-30 之前，字面与 R1-1 修法冲突——按 AD-30（Ack 后才推进）解读，DoD 不改（改则 dod-hash 失效需重过确认门）。
+- 已知限制（test-pw-c 表征测试复现）：跨失败周期的迟到 Ack(Down) 会把新周期标成已确认 ⇒ 发出无对应异常的「已恢复」；生产不可达（track 同步 Fail→send→Ack、Runner 串行）。HealthTracker「可并发调用」只保证无数据竞争、不保证时序语义。
+- QA 迭代 2/3（qa-pw，qa-review-iter2.md）REJECT：第 1 轮 ①–⑥ 与顺手项全部闭合；新必修 N1（FormatHealth 不限长 × R1-5 errors.Join × AD-30 不 Ack ⇒ 冷启动 binance 挂时「监控异常」永不送达）⇒ TASK-005 review_fix（dev-pw-c）。**两个各自正确的修复叠加才出现的回归**（R1-5 让错误更全、AD-30 让失败不丢 ⇒ 超长就永远发不出）。
+- 迭代 2 定级为已知限制：QA-16、QA-17（+同族 config_test.go:333 REPLACE_WITH_ 由夹具自带）、迟到 Ack 跨周期误报、backfill 遇 Sync 错误直接 return、rework_count 少计（机制）；新 LOW：N2 仅 okx 上市币得永不恢复的 sync 告警（R1-5 回归，现配置不触发）、N3 fetch 90% 即返回与 AD-29 100% 不一致（每轮多 1 请求）、N4 AD-30 实为至少一次送达。codex 1 条（Down 未送达即恢复不发事件）= AD-30 原设计，不采纳。
+- TASK-005 N1 复验 rejected（test-pw-c，task_defect）：capUTF16 边界变异 N4（<=max → <=max+1）全绿 ⇒ 恰 4097 原样发出。重派 dev-pw-c epoch 2（rework_count=3，触及 max_rework=3 上限前最后一次——再退回须转 blocked_human）。Leader 同批追加 FormatHeartbeat 过 capUTF16（test-pw-c 实测约 30 资产即 4128>4096，后果同 N1：不写 heartbeat_date、每 tick 重试永不送达；现配置 320 码元不可达）。
+- 同族模式（本 sprint 第 4 次）：**测试只覆盖远离阈值的值**（夹具 1.2 万码元 / 走另一条截断路径），阈值本身无守卫——边界变异必须在阈值 ±1 上测。
+- TASK-005 第 3 轮复验 verified（test-pw-c，基线 bc33f71，rework_count=3 恰在上限）：N4 被 Health_Boundary 杀；心跳 cap 有实质守卫（同一 capUTF16 + Limit 上界）；HB4（心跳自写阈值 4095）存活为保守方向无害。已知限制：心跳超长时截尾会丢末行「过去 24 小时发出提醒 N 条」（约 30 资产以上）。11/11 verified ⇒ QA 迭代 3/3（最后一轮）。
