@@ -9,6 +9,8 @@ package pricewatch
 // error_handling[0] Advisor 出错照发且含「AI 分析不可用」；Advisor==nil 照发        → TestCheckAsset_AIFailureStillSends
 // error_handling[1] 取价/缺口/同步三类健康告警各 1 条异常、1 条恢复                 → TestCheckAsset_HealthAlerts
 // non_functional[0] DryRun 写 Out 不发送不写状态、K 线入库；Snapshot 与并发          → TestCheckAsset_DryRun、TestEngine_Snapshot、TestEngine_ConcurrentSnapshot
+// rework r1         并发用例读写真正交错（读侧持续到写侧结束、每轮都追加 sent）    → TestEngine_ConcurrentSnapshot
+// rework r1（非 DoD）E34 1m 线来自取价成功源；E38 缺口跳过规则不进 Active         → TestCheckAsset_AIMinuteBarsFromPriceSource、TestEngine_SnapshotExcludesGapSkipped
 // QA-10（非 DoD）   涨跌同时触发、2 条 advice 都进消息；同方向重复只取第一条        → TestCheckAsset_TwoSidesAdvice
 
 import (
@@ -680,24 +682,70 @@ func TestEngine_Snapshot(t *testing.T) {
 }
 
 func TestEngine_ConcurrentSnapshot(t *testing.T) {
+	// 写侧价格在 95（第 2 档，跳过防抖立即发送）与 100（清零）之间交替，每两轮追加一次 sent；
+	// 读侧持续到写侧全部结束，保证 recordSnap / sent 追加与 Snapshot / Sent24h 在时间上真正交错。
 	f := newEngFixture(t, engDayDrop)
-	f.okx.setPrice(95)
+	const rounds = 20
+
+	done := make(chan struct{})
+	var overlapped int // 读到写侧已写入快照的次数
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for range 20 {
-			_ = f.e.CheckAsset(context.Background(), f.asset)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for range 200 {
-			_ = f.e.Snapshot()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if rows := f.e.Snapshot(); rows[0].Price != 0 {
+				overlapped++
+			}
 			_ = f.e.Sent24h()
 		}
 	}()
+	prices := [2]float64{95, 100}
+	for i := range rounds {
+		f.okx.setPrice(prices[i%2])
+		if err := f.e.CheckAsset(context.Background(), f.asset); err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+	}
+	close(done)
 	wg.Wait()
+
+	if overlapped == 0 {
+		t.Fatal("reader never observed a written snapshot: reads and writes did not overlap")
+	}
+	if n := len(f.snd.sent()); n != rounds/2 {
+		t.Fatalf("sent %d alerts, want %d (every other round, so sent is appended while reading)", n, rounds/2)
+	}
+}
+
+func TestCheckAsset_AIMinuteBarsFromPriceSource(t *testing.T) {
+	// E34：取价成功的源不是 Providers[0] 时，AI 的 1m 线向取价成功的那个源取
+	f := newEngFixture(t, engDayDrop)
+	f.okx.fail(errors.New("okx down"))
+	f.bin.setPrice(95)
+	f.mustRun(t)
+	if len(f.snd.sent()) != 1 {
+		t.Fatalf("sent %d, want 1", len(f.snd.sent()))
+	}
+	if f.okx.m1Calls != 0 || f.bin.m1Calls != 1 {
+		t.Errorf("1m fetches okx=%d binance=%d, want 0/1", f.okx.m1Calls, f.bin.m1Calls)
+	}
+}
+
+func TestEngine_SnapshotExcludesGapSkipped(t *testing.T) {
+	// E38：缺口跳过的规则即使按价格会触发，也不计入 Active
+	f := newEngFixture(t, engDayDrop, engWeekDrop)
+	engPunchGap(t, f.st)
+	f.okx.setPrice(90)
+	f.mustRun(t)
+	if got := f.e.Snapshot()[0].Active; strings.Join(got, ",") != "day_drop 第5档" {
+		t.Errorf("Active = %q, want [day_drop 第5档] (week_drop skipped for gap)", got)
+	}
 }
 
 func TestCheckAsset_RepeatUsesCurrentTier(t *testing.T) {
