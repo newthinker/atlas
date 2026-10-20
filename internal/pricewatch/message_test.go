@@ -8,6 +8,7 @@ package pricewatch
 // functional[4]     心跳与健康消息关键字                         → TestFormatHeartbeat、TestFormatHealth
 // boundary[0]       价格/百分比格式、−0.0、档位写法              → TestFormatPrice、TestFormatPct、TestFormatTier
 // error_handling[0] UTF-16 ≤4096、触发规则完整、「…（已截断）」  → TestFormatAlert_Truncate、TestFormatAlert_NoTruncateNormal
+// QA-6（AD-31）     整条兜底 ≤4096：恰 4096 不截 / 4097 截；AI 结论字段超长；非 AI 部分超长 → TestFormatAlert_Limit*
 
 import (
 	"strings"
@@ -313,5 +314,91 @@ func TestFormatAlert_AdviceOptionalFields(t *testing.T) {
 	a.Advice[0].Term = ""
 	if got := FormatAlert(a); !strings.Contains(got, "\n【AI 结论】低买：再等等\n") {
 		t.Fatalf("目标价为 0、期限为空时应省略这两项:\n%s", got)
+	}
+}
+
+// alertWithReasoningLen 返回整条消息 UTF-16 长度恰为 total 的 Alert（reasoning 用 1 码元的汉字填充）。
+func alertWithReasoningLen(t *testing.T, total int) Alert {
+	t.Helper()
+	a := goldenAlert()
+	a.Advice[0].Reasoning = ""
+	base := encodedUTF16Len(FormatAlert(a))
+	if total < base {
+		t.Fatalf("目标长度 %d 小于空理由时的长度 %d", total, base)
+	}
+	a.Advice[0].Reasoning = strings.Repeat("稳", total-base)
+	return a
+}
+
+func TestFormatAlert_LimitBoundary(t *testing.T) {
+	a := alertWithReasoningLen(t, 4096)
+	got := FormatAlert(a)
+	if n := encodedUTF16Len(got); n != 4096 || strings.Contains(got, "已截断") || !strings.Contains(got, a.Advice[0].Reasoning) {
+		t.Fatalf("恰 4096 码元不应截断：长度 %d", n)
+	}
+	a = alertWithReasoningLen(t, 4097)
+	got = FormatAlert(a)
+	if n := encodedUTF16Len(got); n != 4096 || !strings.Contains(got, "稳…（已截断）\n\nAI 建议仅供参考") {
+		t.Fatalf("4097 码元应截断到恰 4096：长度 %d，尾部 %q", n, got[len(got)-80:])
+	}
+}
+
+// AI 结论字段（Term/Verdict/Side）超长时，先截【AI 分析】，仍超则截【AI 结论】，【触发规则】完整保留。
+func TestFormatAlert_LimitLongAdviceFields(t *testing.T) {
+	full := FormatAlert(goldenAlert())
+	trig := full[strings.Index(full, "【触发规则】"):strings.Index(full, "\n\n【多周期】")]
+	for name, mutate := range map[string]func(*SideAdvice){
+		"Term":    func(s *SideAdvice) { s.Term = strings.Repeat("天", 5000) },
+		"Verdict": func(s *SideAdvice) { s.Verdict = strings.Repeat("等", 5000) },
+		"Side":    func(s *SideAdvice) { s.Side = strings.Repeat("买", 5000) },
+		"Term+长理由": func(s *SideAdvice) {
+			s.Term = strings.Repeat("天", 3000)
+			s.Reasoning = strings.Repeat("跌", 3000)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := goldenAlert()
+			mutate(&a.Advice[0])
+			got := FormatAlert(a)
+			if n := encodedUTF16Len(got); n > maxMessageUTF16 {
+				t.Fatalf("UTF-16 长度 %d 超过 %d", n, maxMessageUTF16)
+			}
+			if !strings.Contains(got, trig) || !strings.Contains(got, "【多周期】") {
+				t.Fatalf("【触发规则】与【多周期】应完整保留:\n%s", got[:200])
+			}
+			if !strings.Contains(got, "\n\n【AI 结论】") || !strings.Contains(got, "…（已截断）") {
+				t.Fatalf("应保留【AI 结论】段并带截断标记")
+			}
+			if !strings.HasSuffix(got, "\n\nAI 建议仅供参考") {
+				t.Fatalf("末行免责声明应保留")
+			}
+		})
+	}
+	// 两个方向的结论都超长
+	a := goldenAlert()
+	a.Advice = []SideAdvice{
+		{Side: "低买", Verdict: "再等等", Term: strings.Repeat("天", 3000), Reasoning: "r"},
+		{Side: "高卖", Verdict: "现在下单", Term: strings.Repeat("天", 3000), Reasoning: "r"},
+	}
+	if n := encodedUTF16Len(FormatAlert(a)); n > maxMessageUTF16 {
+		t.Fatalf("两条超长结论：UTF-16 长度 %d 超限", n)
+	}
+}
+
+// 非 AI 部分（如触发规则极多）本身超限时，整条消息兜底截断，有无 AI 都 ≤4096。
+func TestFormatAlert_LimitWholeMessage(t *testing.T) {
+	for _, advice := range [][]SideAdvice{nil, goldenAlert().Advice} {
+		a := goldenAlert()
+		a.Advice = advice
+		for i := 0; i < 200; i++ {
+			a.Triggers = append(a.Triggers, a.Triggers[0])
+		}
+		got := FormatAlert(a)
+		if n := encodedUTF16Len(got); n > maxMessageUTF16 {
+			t.Fatalf("advice=%v：UTF-16 长度 %d 超限", advice != nil, n)
+		}
+		if !strings.HasPrefix(got, "🔻 BTC 68,120 USDT（okx）") || !strings.HasSuffix(got, "…（已截断）") {
+			t.Fatalf("整条截断应保留开头并以截断标记结尾，尾部 %q", got[len(got)-40:])
+		}
 	}
 }
