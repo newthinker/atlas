@@ -213,6 +213,7 @@ func FormatHeartbeat(now time.Time, rows []HeartbeatRow, sent24h int) string {
 }
 
 // FormatHealth 生成健康告警：down=true 为「监控异常」，false 为「已恢复」。detail 为空时只有一行。
+// 结果不超过 4096 个 UTF-16 码元。
 func FormatHealth(down bool, subject, detail string) string {
 	s := "✅ 已恢复：" + subject
 	if down {
@@ -221,7 +222,7 @@ func FormatHealth(down bool, subject, detail string) string {
 	if detail != "" {
 		s += "\n" + detail
 	}
-	return s
+	return capUTF16(s) // detail 可能是多段错误的拼接（N1），截尾保留标题
 }
 
 // formatPrice：带千分位；≥1000 不保留小数，≥1 保留 2 位，<1 保留 4 位。
