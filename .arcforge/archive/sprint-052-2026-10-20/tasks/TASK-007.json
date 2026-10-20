@@ -1,0 +1,104 @@
+{
+  "id": "TASK-007",
+  "title": "单资产一轮检测与健康追踪（internal/pricewatch/engine.go）",
+  "description": "计划 Task 7：`Sender`、`Engine`、`CheckAsset`（取价按 sources 顺序且价格须 >0 有限 → 同步 1d/5m（出错只记日志）→ 每条规则 WindowStats，GapRatio>0.10 跳过 → Measure/Tier/Decide → 不需发送的状态变化立即落盘 → 有发送时算 Overview、现取 60 根 1m 线调 Advisor、生成消息发送、成功后才写被发送规则状态）、`Snapshot`、`Sent24h`；健康追踪用 TASK-011 的 tracker（内存，AD-15），覆盖取价失败、缺口跳过、K 线同步失败三类（AD-25）；窗口统计用 TASK-010 的 WindowStatsFor；Trigger.Tier 写当前档位 t（AD-28）；DryRun 写 Out 不发送不写规则状态（K 线照常入库）。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "high",
+  "estimated_files": [
+    "internal/pricewatch/engine.go",
+    "internal/pricewatch/engine_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestCheckAsset_TriggersAndMerges`：同轮满足 day_drop 与 week_drop → Sender 恰收 1 条且两规则都在；两规则状态推进到 `{tier,1,now}`；LLM 恰调用 1 次；【多周期】五个数（24h/7d/30d 涨跌、距历史最高、距 4 年最低）与 fixture K 线手算值一致；随后 `Sent24h()==1`，Now 前进 25h 后为 0。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestCheckAsset_SendFailureKeepsState`（Review Focus 4）：Sender 返回 error → 被发送规则状态不变；同轮另一条规则从 tier 2 回落到不满足，清零照常落盘；下一轮 Sender 恢复后补发。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestCheckAsset_RestartNoDuplicate`（Review Focus 3）：第一轮发出 → 同库新建 Engine → 价格不变、未满 repeat_interval 的第二轮不发送。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestCheckAsset_GapSkipsRule`：week_drop 跳过前状态 {2,1,T0}，7d 缺口 20% → 本轮跳过、不发送、状态仍为 {2,1,T0}，day_* 正常；无规则需发送的一轮 LLM 调用 0 次。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "`TestCheckAsset_BadPriceFallsBack`（Review Focus 5）：第一个 provider 依次返回 Price 0、NaN、+Inf、−1、error、(nil, nil) 六个子测试，第二个正常 → 用第二源且标题来源名为第二源、不 panic；第一个源正常时用第一个源。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`TestCheckAsset_AIFailureStillSends`：Advisor 返回 error → 照常发送且含「AI 分析不可用」；`Advisor==nil` 时不调用 AI、照常发送。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestCheckAsset_HealthAlerts`（AD-25）：取价全失败、规则缺口跳过、K 线同步失败三类各自在 fail_alert_after=30m 时经 Sender 恰发 1 条「监控异常」、恢复后恰 1 条「已恢复」。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。另：`TestCheckAsset_DryRun`：消息与健康告警写到 Out、Sender 未被调用；fixture 含一次清零迁移（prev{2,1}、t=0），dry-run 后状态仍为 {2,1}；K 线照常入库。`Snapshot()` 返回现价、最近成功时间、形如 \"day_drop 第2档\" 的触发规则，且与 `CheckAsset` 并发在 `-race` 下无 data race。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "wave": 5,
+  "context_from": [
+    "TASK-002",
+    "TASK-003",
+    "TASK-004",
+    "TASK-005",
+    "TASK-006",
+    "TASK-010",
+    "TASK-011"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/engine.go",
+    "./internal/pricewatch/engine_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:37Z"
+  },
+  "assignment_epoch": 3,
+  "assigned_to": "dev-pw-c",
+  "discovery": ".arcforge/discoveries/TASK-007.json",
+  "verify_baseline": {
+    "head": "8ed58bc17d3179e32c56b9d5caf9199484dcc32e",
+    "discovery_sha256": "938665b1c98b090a342337fa2fc25ec24e4cca96c61645af5a21116dc1ba3dc0",
+    "at": "2026-10-20T13:32:56Z"
+  },
+  "verifier": "test-pw-b",
+  "reason_class": "task_defect",
+  "reject_reason": "DoD non_functional「Snapshot() 与 CheckAsset 并发在 -race 下无 data race」无有效测试：TestEngine_ConcurrentSnapshot 的读侧 200 次 Snapshot 全部发生在首次 recordSnap 之前（实测 200/0），读写零时间重叠。快照/发送记录四处去锁变异（recordSnap、Snapshot、sent 追加、Sent24h）在 -race 下全部存活，原测试 10 次 0 条 DATA RACE。修复只改 engine_test.go：读侧循环到写侧 CheckAsset 结束（探针：原实现 5/5 ok，四个去锁变异 5 次内各报 2-4 条 DATA RACE）。engine.go 无需改。其余 F1-F4/B1/E1/E2/DryRun/Snapshot 均通过，变异 33/40。详见 docs/04-test/TASK-007-verification.md",
+  "rework_count": 1,
+  "fix_items": [
+    "【开工方式（Leader 13:1xZ 写入，消息已丢 3 次故落盘）】不要等 TASK-011 合入——Leader 刻意不单独合 011（单合会让 TestCheckAsset_HealthAlerts 变红、011 门禁过不去），等待即互等死锁。做法：从最新 feature/pricewatch 建 task/TASK-007-qa1，先 `git merge --no-ff task/TASK-011-qa1`（dfae3abb21382fd353d8852b15cbc3831564e0f2）拿到 Ack 接口，再做 engine 接线与用例并提交；Leader 收到后先合 011、紧接着合 007。无需事后 rebase。",
+    "R1-1 引擎侧（AD-30，依赖 TASK-011 返工先合入）：健康事件只在 Sender 成功（或 DryRun 已写出 Out）后调用 Ack；发送失败不 Ack ⇒ 下一轮重发",
+    "补用例（用真实 HealthTracker + 会失败的 sender，不得用替身遮蔽）：第 30 分钟发送「监控异常」失败、下一轮补发成功；恢复时「已恢复」发送失败后同样补发",
+    "可选：R1-6 心跳列出当前 Down 键。证据见 .arcforge/docs/05-review/qa-review-round2.md §2"
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "task": "TASK-001",
+  "author": "dev-pw-a",
+  "commit": "f64680005716852d4811442e61bcc0522b66a45d",
+  "merged_as": "f2fe680c52b896ef86a25df0ef3622623d3a337a",
+  "key_findings": [
+    "Tier 必须显式拒绝 NaN/±Inf：计划草稿 `x+1e-9<th` 对 NaN 为 false、对 +Inf 为 false，随后 int(math.Floor(NaN/Inf)) 在 Go 中是实现定义值，不检查会返回任意档位",
+    "time.Time 零值的 now.Sub(zero) 饱和为 maxDuration，因此「从未发过 ⇒ 已满间隔」无需特判"
+  ],
+  "decisions": [
+    {
+      "decision": "NotifyPolicy、RuleCfg 放 rule.go，签名与计划一致（RuleCfg 的 ID/Type/Window/Notify 无 mapstructure tag，依赖 mapstructure 大小写不敏感匹配）",
+      "rationale": "AD-7；让 TASK-002 config.go 直接复用"
+    },
+    {
+      "decision": "ParseRule 的错误统一为 `rule \"<id>\": <field> ...`，字段名用 yaml 键名（type/window/threshold_pct/step_pct/max_per_tier/repeat_interval）",
+      "rationale": "DoD error_handling[0] 要求含规则 id 与字段名；TASK-002 TestLoadConfig_Rejects 可按同样字样断言"
+    },
+    {
+      "decision": "Notify 非 nil 时原样使用并校验，不与默认值逐字段合并",
+      "rationale": "DoD boundary[0]「原样使用」；AD-28 P18：只写一部分字段视为配置错误（零值字段会被 max_per_tier/repeat_interval 校验拒绝）"
+    },
+    {
+      "decision": "Decide 的 case 4 重复提醒时保持 Tier=prev.Tier（不降为当前 t）",
+      "rationale": "计划用例 9 next{2,2,now}；消息里写当前 t 是 AD-28 P16，由调用方处理"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/rule.go",
+    "internal/pricewatch/rule_test.go",
+    "internal/pricewatch/state.go",
+    "internal/pricewatch/state_test.go"
+  ],
+  "interfaces_exposed": [
+    "type NotifyPolicy struct{ RepeatInterval time.Duration; MaxPerTier int }",
+    "type RuleCfg struct{ ID, Type, Window string; ThresholdPct, StepPct float64; Notify *NotifyPolicy }",
+    "type RuleType string; const DropFromHigh, RiseFromLow",
+    "type Window string; const Window24h, Window7d, Window30d, Window4y, WindowAll; func (Window) Span() time.Duration; func (Window) Bar() string",
+    "type Rule struct{ ID string; Type RuleType; Window Window; ThresholdPct, StepPct float64; Notify NotifyPolicy }",
+    "func ParseRule(c RuleCfg, def NotifyPolicy) (Rule, error)",
+    "func Measure(t RuleType, price, high, low float64) float64",
+    "func Tier(x, thresholdPct, stepPct float64) int",
+    "type RuleState struct{ Tier, SentInTier int; LastSentAt time.Time }",
+    "type SendKind int; const SendNone, SendNew, SendRepeat",
+    "func Decide(prev RuleState, tier int, now time.Time, p NotifyPolicy) (RuleState, SendKind)"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ f2fe680c52b896ef86a25df0ef3622623d3a337a（主仓库，四文件 sha256 与 f64680005716852d4811442e61bcc0522b66a45d 逐一致）",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 100.0%",
+    "vet_gofmt": "go vet ./internal/pricewatch/ 与 gofmt -l internal/pricewatch/ 均无输出（worktree @ f646800）",
+    "mutation": "go test -overlay 19 个变异全部 KILLED（排除编译失败），源文件 sha256 前后不变；含 Floor→Round、去容差（两处）、去 NaN / 去 Inf 检查、各校验边界放宽、window 加 2d、Notify 忽略、Measure 分母换 price、间隔 >= 改 >、清零丢 LastSentAt、防抖 tier>=2→3、max_per_tier < 改 <=、深档判据 +1、重复提醒写 tier、新档不写 now",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致",
+    "detect_changes": "`npx -y gitnexus@latest detect-changes --scope staged --repo .` 在 worktree 中报 Repository not found；改 `--repo atlas` 得 4 files touched、无已索引符号重叠（新文件，预期）；附索引落后 20 commit 告警"
+  },
+  "qa_fix": [
+    {
+      "round": 1,
+      "source": ".arcforge/docs/05-review/qa-review-round2.md（review_fix，reason_class=task_defect）",
+      "commit": "5b69fe101ce4c218572a9c0225fac16c085cfb84",
+      "merged_as": "56c7c6f（merge(TASK-001) 提交）；验证时主仓库 HEAD f8e37c2ce98451045361b8a7aa2acfa62299783d",
+      "items": [
+        {
+          "id": "QA-1",
+          "fix": "ParseRule 校验改为 !(ThresholdPct > 0) || IsInf(ThresholdPct, 1) 与 !(StepPct >= 0) || IsInf(StepPct, 1)；原 x <= 0 / x < 0 对 NaN 恒假会放行 NaN，+Inf 也被放行；-Inf 原本就被拦",
+          "test": "TestParseRule_Rejects 新增 threshold NaN/+Inf/-Inf、step NaN/+Inf/-Inf 共 6 行（-Inf 两行在修复前已绿，作边界钉住）"
+        },
+        {
+          "id": "QA-2",
+          "fix": "无代码改动，补用例",
+          "test": "TestDecide 新增 prev{2,2,T0}、t=2、now=T0+1h → SendRepeat、next{2,3,now}"
+        }
+      ],
+      "evidence": {
+        "mutation": "go test -overlay（主树指纹不变）：threshold 改回 <=0、threshold 去 IsInf、step 改回 <0、step 去 IsInf 4/4 KILLED；state.go SentInTier: prev.SentInTier+1 → 2 被 QA-2 用例 KILLED",
+        "ablation": "同一 SentInTier=2 变异 + 测试去掉 QA-2 那一行 → 全包绿（存活）⇒ QA-2 用例是唯一守卫",
+        "suite": "主仓库 feature/pricewatch @ f8e37c2ce98451045361b8a7aa2acfa62299783d：rule.go/rule_test.go/state_test.go sha256 与 5b69fe1 一致；go test -race -count=1 -cover ./internal/pricewatch/ 绿；go vet 无输出；cmd/atlas -run Pricewatch 绿（worktree 内）",
+        "simplifier": "code-simplifier 未改动（指纹一致）",
+        "detect_changes": "--repo atlas：3 files，无已索引符号重叠"
+      }
+    }
+  ]
+}

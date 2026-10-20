@@ -1,0 +1,37 @@
+{
+  "task": "TASK-010",
+  "author": "dev-pw-a",
+  "commit": "5990203af84fc8baab865a220042955945d63a0a",
+  "merged_as": "cea96add97bc682ad8912facb43907e4b74661cc",
+  "key_findings": [
+    "槽从有效起点切、槽长 = bar 时长时，任何对齐方式的完整序列每槽恰好一根；两种对齐混存（00:00 与 16:00）时每槽一到两根，覆盖率不受影响 ⇒ AD-13 的「与对齐无关」由构造保证，无需按 UTC 截断",
+    "按根数算（1 − Count/应有根数）会被重复 K 线掩盖缺口：TestWindowStats_Gap 的日线 fixture 中 Count=36 > 30 槽，而真实缺口 30%；变异把 GapRatio 换成计数口径（含截到 0）即 KILLED",
+    "末槽必须向上取整：向下取整会把「今天那根」并进前一槽，最新一根缺失（同步滞后）不可见；且 ts 恰等于 now、跨度恰为 bar 整数倍时会落到第 n 槽，须钳位到 n−1，否则 GapRatio 为负",
+    "全部计算基于 time.Sub 与 UnixMilli，与 now 的 Location 无关；TestWindowStats_NonUTCNow 以 UTC+8 的 now 对照 UTC 结果逐字段相等（leader 转述的「读回不保证 .UTC()」对本实现无影响，fromMs 本身也返回 UTC）",
+    "TASK-004 在途的 sync.go 定义了 `barDuration(bar) (time.Duration, error)`，与我最初同名 ⇒ 后合入者编译失败；已改名 slotLength，并以 go vet -overlay 叠入其当时的 sync.go/sync_test.go 合编通过（对照组旧版报 barDuration redeclared）"
+  ],
+  "decisions": [
+    {"decision": "GapRatio = (n − 有 K 线的槽数)/n，n = max(1, ⌈跨度/bar⌉)，槽索引钳位到 n−1", "rationale": "AD-13 槽位覆盖率；max(1,…) 让「无数据」恒为 1 且不出 NaN（DoD boundary[0]）"},
+    {"decision": "Days = ⌈跨度/24h⌉（按时长，不按日历日）", "rationale": "非 all 窗口跨度恰为 Span ⇒ 24h/7d/30d/4y 分别得 1/7/30/1461；Short 时上线日=首根 00:00、now 为 08:03 得 100（DoD functional[0] 两种上线日取法都测）"},
+    {"decision": "Short 只看 kv `listing:<pair>:<bar>`（bar 与窗口 Bar() 一致），上线日晚于 now−Span 时有效起点取上线日；all 窗口有效起点 = max(上线日, 本地最早一根)，Short 恒 false；all 无数据无上线日时起点 = now（Days=0、GapRatio=1）", "rationale": "AD-14、AD-21；按 bar 分键已测（只记 5m 上线日时日线窗口不判 Short）"},
+    {"decision": "直接用同包 st.db 一次查询 ts/high/low，不调 Store.Stats", "rationale": "槽位覆盖率需要逐根时间戳，Store 无此接口且 store.go 不在 writes；一次查询同时得 H/L，避免两次读之间数据变化"},
+    {"decision": "上线日 kv 值非十进制整数时返回 error", "rationale": "坏值静默忽略会把 Short 判成 false 且无人知道；DoD 未列，自行增加并测（TestWindowStats_BadListing）"},
+    {"decision": "测试辅助一律 win 前缀；复用 store_test.go 的 newTestStore/candle/mustUpsert/mustStats", "rationale": "同包并行任务（TASK-004）的测试文件可能新增同名辅助函数"}
+  ],
+  "files_modified": [
+    "internal/pricewatch/window.go",
+    "internal/pricewatch/window_test.go"
+  ],
+  "interfaces_exposed": [
+    "type WindowStats struct{ High, Low float64; Days int; Short bool; GapRatio float64 }",
+    "func WindowStatsFor(st *Store, pair string, w Window, price float64, now time.Time) (WindowStats, error)  // 只在 kv 读失败、上线日值非法、查询失败时返回 error",
+    "未导出：listingKey(pair, bar) string —— 与 TASK-004 的导出 ListingKey 同格式，二者合入后可在 QA 收敛为一个"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ cea96add97bc682ad8912facb43907e4b74661cc（主仓库，两文件 sha256 与 5990203af84fc8baab865a220042955945d63a0a 一致）",
+    "suite": "主仓库 GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, 93.4%；go vet 无输出；gofmt -l 无输出",
+    "mutation": "go test -overlay 18 个变异 17 KILLED：首轮 19 个中 5 存活——无数据 Days（补断言）、末槽向下取整（补「缺今天那根」用例）、去钳位（补「一根恰在 now」用例）、`now = now.UTC()`（等价，已删该行并补 NonUTCNow 用例）、去 ORDER BY（等价：主键 (pair,bar,ts) 序与之相同，保留显式排序）；源文件指纹不变",
+    "simplifier": "code-simplifier 未改动（指纹一致）；其后仅 barDuration→slotLength 机械改名并 amend（作废的 1249272 未报出）",
+    "detect_changes": "--repo atlas，amend 前后两次：新文件，无已索引符号重叠"
+  }
+}

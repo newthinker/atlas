@@ -1,0 +1,89 @@
+{
+  "task": "TASK-004",
+  "author": "dev-pw-b",
+  "commit": "eb070c6245e2e76a91cb569737c72a2e7657e69e",
+  "merged_as": "80a56f38888e6770d01db2ff8824e164d8d82039",
+  "key_findings": [
+    "请求起点统一减 1ms（from.Add(-time.Millisecond)），使两端不含的 okx 也能取到恰在段起点的那根；因此 AD-12 的「尾段起点 = 最新一根 − 1 bar」与「= 最新一根」在刷新效果上等价（变异实测存活，属等价变异），按 AD-12 字面保留 −1 bar",
+    "槽位覆盖率必须用 COUNT(DISTINCT (ts-from)/bar) 而非根数：okx 16:00 与 binance 00:00 日线混存时，按根数会把 40% 的缺口算成 120% 覆盖（TestSync_RepairsGapUnderMixedAlignment，变异实测）",
+    "槽位数取 floor((to-from)/bar)，末尾不足一个 bar 的部分不计；否则稳态尾段在 okx 语义下应有 2 根只回 1 根会被误判不足而换源",
+    "停机超过一段（300 bar）时，本地最新一根所在段覆盖率 ≥90% 仍必须重取，否则那根停在未收盘时的 high/low（TestSync_Incremental 子测试，变异实测）",
+    "开盘时间恰为 now 的 K 线在 okx 两端不含语义下取不到，下一轮再取，属正常"
+  ],
+  "decisions": [
+    {
+      "decision": "尾段起点：本地有最新一根且 now−(latest−bar) ≤ 一段时为 latest−bar；否则为最后一个整段起点。尾段之前按 backfillStart 起每 300 bar 切段，覆盖率 ≥90% 且不含本地最新一根才跳过",
+      "rationale": "AD-12/AD-22；首次回填、日常增量、缺口修复、长停机恢复走同一路径"
+    },
+    {
+      "decision": "某段所有源都报错时记录错误、继续补其余段，结束时返回 `sync <pair>/<bar>: ...`（errors.Join）",
+      "rationale": "DoD non_functional：此前成功段仍在库；一个老段永久失败不应阻断最新数据更新"
+    },
+    {
+      "decision": "上线日仅在「从 backfillStart 起连续每段都实际请求过且所有源都成功返回 0 根有效 K 线」之后第一段有数据时记录，值为该段最早一根有效 K 线时间；任何一段报错或被覆盖率跳过都终止判定",
+      "rationale": "AD-21；报错时无法断定未上线，避免把补数失败当成历史短（V14）"
+    },
+    {
+      "decision": "localCoverage 在 sync.go 内直接查询 Store.db（同包），未改 store.go",
+      "rationale": "writes 只含 sync.go/sync_test.go；Store 无按区间取时间戳的方法。TASK-010 按 leader 指示各自实现，QA 阶段再考虑去重"
+    },
+    {
+      "decision": "坏 K 线判据 validCandle：OHLC 任一 NaN/±Inf/≤0、low>high、时间早于 2009-01-01（含零值与 1970）即丢弃；过滤后再计槽位",
+      "rationale": "AD-20b、reviewer P4"
+    },
+    {
+      "decision": "未知 bar（非 1d/5m）返回错误；ctx 在每次请求前检查，取消时原样返回 ctx.Err()",
+      "rationale": "Window.Bar() 只产出 1d/5m"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/sync.go",
+    "internal/pricewatch/sync_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Syncer struct{ Providers []crypto.Provider; Store *Store; Now func() time.Time }  // Providers 顺序 = 回填优先级，调用方按 AD-20 放历史最长的源（binance）在前",
+    "func (*Syncer) Sync(ctx context.Context, pair, bar string) error  // bar ∈ {1d, 5m}；5m 同步后删 now−8d 之前；错误含 pair/bar",
+    "func ListingKey(pair, bar string) string  // \"listing:<pair>:<bar>\"；值为上线日 UTC Unix 毫秒十进制字符串（AD-21），供 TASK-010 读取",
+    "约束：若 Providers 中没有历史长的源，所有源对老段都成功返回 0 根时上线日会被记成该源能取到的最早一根（AD-21 规则本身的后果）"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ 80a56f38888e6770d01db2ff8824e164d8d82039（主仓库）；sync.go sha256 a08bd7d26cf7cce7c7e07fd036a88ae2cf53395d2aedd7b92ff9a4986ae56f52、sync_test.go 2187942e2d6e2b93839bb9ddda806bfd8f5eab1719c72654c3e388a0abcb5a39，与 eb070c6 逐一致",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok，主仓库 @ 80a56f3 包覆盖率 93.2%（worktree @ eb070c6 时 91.4%）",
+    "vet_gofmt": "go vet ./internal/pricewatch/ 与 gofmt -l internal/pricewatch/ 无输出（worktree @ eb070c6）",
+    "mutation": "go test -overlay 24 个变异 23 KILLED，源文件 sha256 前后不变；唯一存活为 tailFrom=latest（等价变异，见 key_findings[0]）。KILLED 含：尾段改 latest+bar、不跳过完整段、阈值放宽、请求起点不减 1ms、报错不换源、首源即用、全不足取最少、不过滤坏 K 线及 validCandle 各条件、不记/不要求前段全 0/不读上线日、5m 不修剪/修剪 7 天、错误吞掉、出错即停、不强制含 latest 段、覆盖率按根数、ctx 不检查",
+    "pre_merge": "合入前在临时 worktree 预演 merge 到 49f4b71（含 TASK-010 window.go）：无冲突、vet 无输出、go test 通过",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致（结论 scratchpad dev-pw-b-TASK-004-simplifier.md）",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched，无已索引符号重叠（新文件）；附索引落后 28 commit 告警"
+  },
+  "qa_fix": {
+    "round": 1,
+    "reason_class": "task_defect",
+    "source": ".arcforge/docs/05-review/qa-review-round2.md §5；AD-29；.arcforge/docs/02-plan/qa-8-probe.md",
+    "commit": "626a8504a97abf5ab2fda4656c52849a104cd9b7",
+    "merged_as": "f8e37c2ce98451045361b8a7aa2acfa62299783d",
+    "items": [
+      {
+        "fix_item": "QA-8：上线日保护用例（S29 某段全源报错、S30 部分源报错+其余 0 根、S36 跳过的完整段让判定停下）",
+        "change": "测试：原样收录探针为 TestSync_ListingNotRecordedOnError / _AllError；新增 TestSync_ListingNotRecordedOnPartialWithError（第 10 段 A 部分数据 + B 报错 ⇒ 不记上线日、A 数据照常入库）、TestSync_ListingStoppedBySkippedSegment（子例：完整段被跳过；含本地最新一根的段被强制重取得 0 根；附本地为空时会记的对照）。实现：Sync 对尾段前每段都先算本地覆盖率，cov>0 ⇒ leadingEmpty=false（一行同时覆盖跳过与强制重取两条路径；修复前「含本地最新一根的段重取得 0 根」会误记上线日，属本次新发现）；fetchSeg 空结果分支合并为 `allZero || len(cs)==0 → return`，报错分支保留 leadingEmpty=false",
+        "evidence": "overlay 变异：S29（删报错分支的 leadingEmpty=false）KILLED by ListingNotRecordedOnError/_AllError/_OnPartialWithError/BinanceDownReportsError；S36（cov>0 判定恒假）KILLED by ListingStoppedBySkippedSegment；S30（有错时 allZero=bestSlots==0）在新代码中等价存活——R1-5 后任何源报错都经报错分支终止判定，allZero 在有错时只决定是否写入空切片；S29+S30 组合变异 KILLED by 两个 QA 探针 + _OnPartialWithError + BinanceDownReportsError"
+      },
+      {
+        "fix_item": "QA-9/AD-29：与该 bar 最短窗口（1d→30d、5m→24h）相交的段要求 100%，更早段 90%",
+        "change": "新增 requiredCoverage(bar, to, now)：to 晚于 now−最短窗口 Span（复用 Window30d/Window24h.Span()）⇒ 1，否则 coverageOK(0.9)；跳过判定改为 `!containsLatest && cov >= requiredCoverage(...)`",
+        "evidence": "TestSync_RecentSegmentsNeedFullCoverage：1d 子例把段边界构造在 now−15d（listing = today−15−3×300 天），删 now−20d 与 now−400d 各一根 ⇒ 前者补回、后者不补；5m 子例删 now−2h 与 now−3d 各一根 ⇒ 前者补回、后者不补。变异 KILLED：近期段仍 90%、所有段 100%、1d 窗口改 7d、5m 窗口改 30d"
+      },
+      {
+        "fix_item": "R1-5：best <90% 且有源报错时 best 照常入库并上抛错误；okx 替身加约 1440 根上限；补 binance 全挂用例",
+        "change": "fetch 去掉 anyOK：有任何源报错即 `return best, false, errors.Join(errs...)`（best 可为空）；Sync 报错分支不再 return，继续把非空 best 入库，错误汇总后以 `sync <pair>/<bar>: ...` 返回（含报错源名）。sync_test.go 的 okxSem 只取 data 末尾 okxHorizon=1440 根；超出 1440 根的既有 okx 用例改到 today−1400 天起，Prune5m 改 binanceSem（8 天 5m=2304 根，按 AD-20 由 binance 回填）",
+        "evidence": "TestSync_BinanceDownReportsError：okx（3000 天数据、1440 上限）+ binance 恒报错 ⇒ err 含 BTCUSDT、1d、binance；入库根数 == 1440（含不足 90% 的边界段）；不记上线日。变异 KILLED：有错且有部分结果时不上抛（`len(errs)>0 && bestSlots<0`）、报错时不入库 best"
+      },
+      {
+        "fix_item": "可选 F2：backfillStart 复用 readListing",
+        "change": "backfillStart 改调 window.go 的 readListing，删除自带的 GetKV+ParseInt",
+        "evidence": "变异「不读上线日」KILLED by TestSync_Listing/_RepairsGap/_SteadyState"
+      }
+    ],
+    "behavior_change_for_callers": "Sync 在「主回填源报错且其他源不足 90%」时由返回 nil 变为返回 error：Engine（engine.go:80）只记日志并 track sync:<SYM>/<bar>，正是 R1-5 目的；cmd/atlas/pricewatch.go:245 backfill 遇 err 直接 return ⇒ binance 不可用时 backfill 报错退出（已取到的数据已入库，后续资产/bar 不再补）。该文件属 TASK-009，本任务未改，已报 Leader",
+    "verification": "主仓库 @ f8e37c2：sync.go a9fa25181b030a39107fba667b130fe95fed24513bccc0cfdef5e5124f58c001、sync_test.go 2b6acaa12521635629137874656d1a7534f5ba508ce01e6360ebef56a5aa4e2c 与 626a850 一致；go test -race -count=1 -cover ./internal/pricewatch/ ./cmd/atlas/ → ok 94.1% / ok 79.9%；worktree：vet/gofmt 无输出、go build ./... 通过；变异 23 个 22 KILLED（S30 等价，组合红），sync.go sha256 前后不变；合入前临时 worktree 预演 merge 到 56c7c6f 无冲突、两包测试通过；code-simplifier 未改动；detect-changes 2 files 无已索引符号重叠"
+  }
+}

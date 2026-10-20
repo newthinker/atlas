@@ -1,0 +1,43 @@
+{
+  "task_id": "TASK-009",
+  "subject": "pricewatch 子命令与 launchd（cmd/atlas/pricewatch.go + plist）",
+  "mode": "shadow",
+  "teammate": "dev-pw-c",
+  "n_dod": 2,
+  "unjudgeable": {},
+  "content_bytes": 25489,
+  "content_mode": "diff",
+  "n_changed_files": 3,
+  "base": "1244e2a2dc36c939b77a3d5a735120e652628fc9",
+  "base_usable": true,
+  "content_from_heads": 0,
+  "latency_ms": 552.3,
+  "truncated": false,
+  "signals": {
+    "dod": {
+      "dod_1": 0.87,
+      "dod_2": 0.89
+    },
+    "min_dod": 0.87,
+    "test_tampering": 0.03,
+    "unsafe": 0.09,
+    "verdict": "needs_work",
+    "verdict_conf": 0.33
+  },
+  "rework_count": 0,
+  "max_rework": 3,
+  "decision": {
+    "route": "qa",
+    "reason": "判断不确定（min=0.87, verdict=needs_work），交给 QA",
+    "failing": [],
+    "flags": [
+      "uncertain"
+    ],
+    "reason_class": null
+  },
+  "dod_text": {
+    "dod_1": "`ensurePolicyGate()` 的调用位于 pricewatch 所有入口中任何 provider 构造之前。",
+    "dod_2": "`run` 收到 SIGTERM 或 SIGINT 时取消传给 Runner 的 ctx 并以 nil 返回。"
+  },
+  "ts": 1792493135.307946
+}

@@ -1,0 +1,66 @@
+{
+  "task": "TASK-006",
+  "author": "dev-pw-c",
+  "commit": "2be75a9e2325ab487624b8f012f7cc5bcd1e9dc9",
+  "merged_as": "04bed52d45612d45386e794efdb60e47536eedd2",
+  "key_findings": [
+    "claude provider 忽略 JSONMode（P5），且三家 provider 的截断标志不同：claude 为 max_tokens，openai/ollama 为 length",
+    "provider 若不响应 ctx，单靠 context.WithTimeout 无法让 Advise 按时返回；Chat 需放 goroutine + select ctx.Done()",
+    "Go 的 strconv/fmt 按 ties-to-even 舍入二进制精确值；测试输入避开 .x5 精确 tie"
+  ],
+  "decisions": [
+    {
+      "decision": "宽松提取规则（AD-23）：取 content 中第一个 '{' 到最后一个 '}'（含）之间的子串做 json.Unmarshal；找不到 '{'，或最后一个 '}' 在第一个 '{' 之前，即视为无 JSON",
+      "rationale": "一条规则同时去掉 ``` / ```json 围栏与前后说明文字；用最后一个 '}' 而非第一个，使 reasoning 里含花括号时仍完整（变异 LastIndex→Index 被 5 个测试杀死）"
+    },
+    {
+      "decision": "FinishReason 为 \"max_tokens\" 或 \"length\" 时直接返回 error，不尝试解析",
+      "rationale": "AD-23 只点名 max_tokens（claude）；openai/ollama 用 length 表示同一件事，被截断的 JSON 即便碰巧可解析也可能少一个方向"
+    },
+    {
+      "decision": "长度上限（QA-6，非 DoD）：term 超过 20 个字符（rune）视为 AI 失败、返回 error，不截断；side、verdict 不另设上限；reasoning 不在此处限制",
+      "rationale": "side 必须属于 Sides(triggers)、verdict 必须是「现在下单」/「再等等」，二者已是有界枚举；截断后的 term 无意义，宁可整体降级为「AI 分析不可用」；reasoning 由 FormatAlert 按 AD-24 截断。用例：21 字报错、恰 20 字接受"
+    },
+    {
+      "decision": "提示词结构：SystemPrompt 只说明角色与「只输出一个 JSON 对象」；全部数据放在唯一一条 user 消息，依次为 ① okx「双币赢」背景 ② 资产与现价（不带千分位）③ 请分析的方向 ④ 本轮触发规则（每条一行：规则 id、窗口、较最高/最低价、涨跌幅、档位）⑤ 多周期概况 ⑥ 最近 1 小时 1 分钟线 ⑦ 最近 24 小时 5 分钟线 ⑧ JSON 结构示例与取值约束（side 只能取本轮方向、verdict 两值、term ≤20 字）",
+      "rationale": "plan Step 3 的必写项全部覆盖；数据集中在 user 消息便于测试断言"
+    },
+    {
+      "decision": "JSON 示例里的 side 只列本轮方向（如只跌时为 \"低买\"），不写 \"低买|高卖\"",
+      "rationale": "reviewer V22 要求只跌时提示词不含「高卖」；若示例写死两个方向，这条会被示例顺带违反（QA-4）。变异 schema_all_sides 被 TestAdvise_PromptOnlyRequestedSides 杀死"
+    },
+    {
+      "decision": "K 线每行「时间,开,高,低,收」，时间为 UTC「2006-01-02 15:04」，数值用 strconv 'f' -1（无千分位、不补零）",
+      "rationale": "千分位逗号会破坏逗号分隔；测试按「恰 5 个字段且后 4 个可解析为数字」识别 K 线行，标题行与 JSON 示例行不会被计入"
+    },
+    {
+      "decision": "Chat 在 goroutine 中执行并 select ctx.Done()；Timeout<=0 时不加超时",
+      "rationale": "provider 无视 ctx 时 Engine 不被拖住（TestAdvise_TimeoutProviderIgnoresCtx）；ch 带缓冲，provider 迟到返回不会泄漏阻塞的 goroutine"
+    },
+    {
+      "decision": "保留「请分析的方向：…」一行，尽管删掉它的变异存活",
+      "rationale": "方向同时出现在 JSON 示例与「side 只能取」两处，DoD 层面等价；但这一行对模型最直白"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/advisor.go",
+    "internal/pricewatch/advisor_test.go"
+  ],
+  "interfaces_exposed": [
+    "type AdviceInput struct{ Asset Asset; Price float64; Triggers []Trigger; Overview Overview; M1, M5 []core.OHLCV }",
+    "type Advisor struct{ LLM llm.Provider; Timeout time.Duration } // Timeout<=0 不限时",
+    "func (a *Advisor) Advise(ctx context.Context, in AdviceInput) ([]SideAdvice, error)",
+    "func Sides(ts []Trigger) []string // 只跌 [\"低买\"]；只涨 [\"高卖\"]；都有 [\"低买\",\"高卖\"]（顺序固定）",
+    "Advise 的错误语义（供 TASK-007）：以下情况返回非 nil error 且 []SideAdvice 为 nil，调用方一律按「AI 分析不可用」处理（Alert.Advice=nil），消息照常发送：① a.LLM==nil ② LLM.Chat 返回 error ③ 超时或 ctx 取消（含 provider 无视 ctx 的情况，按 Timeout 返回 ctx.Err()）④ FinishReason 为 max_tokens/length ⑤ 回复中找不到 {…} 或 JSON 解析失败 ⑥ advice 为空或缺失 ⑦ 任一条 side 不在 Sides(in.Triggers) 中 ⑧ 任一条 verdict 不是「现在下单」/「再等等」⑨ 任一条 term 超过 20 个字符。返回 nil error 时切片非空，每条 side 都属于本轮方向；但不保证每个方向都有一条，也不去重",
+    "未导出：maxTermRunes=20、parseAdvice、buildAdvicePrompt、chatWithContext、plainNum"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ 04bed52d45612d45386e794efdb60e47536eedd2（主仓库，两文件 sha256 与 2be75a9e2325ab487624b8f012f7cc5bcd1e9dc9 一致：advisor.go a0072d46…, advisor_test.go 10f5d992…）",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 94.0%（主仓库 @ 合并点，整包）；go vet 无输出；gofmt -l 两文件无输出；advisor.go 无未覆盖块",
+    "dod_mapping": "functional[0]→TestAdvise_ParsesJSON；functional[1]→TestAdvise_Prompt, TestAdvise_PromptOnlyRequestedSides；functional[2]→TestSides；boundary[0]→TestAdvise_LenientExtract（json 围栏/裸围栏/前置说明/前后说明/理由含花括号）+ TestAdvise_Invalid（max_tokens、length）；error_handling[0]→TestAdvise_Invalid（13 例）；error_handling[1]→TestAdvise_Timeout, TestAdvise_TimeoutProviderIgnoresCtx, TestAdvise_NilLLM；QA-6→TestAdvise_Invalid「term 超长」+ TestAdvise_TermAtLimit",
+    "qa4_selfcheck": "现价 68120 与规则 id 不出现在 K 线（取值 40001–50060）或其他段落中；K 线行按「恰 5 个字段且后 4 个可解析为数字」计数，标题行与 JSON 示例行不计入；「只跌时不含高卖」断言覆盖 SystemPrompt + 全部 Messages",
+    "mutation": "go test -overlay 25 个变异，24 KILLED：其中 no_nil_llm（去 nil 检查）为 goroutine 内 nil 解引用 panic 致进程崩溃、no_timeout（去超时）为 -timeout 30s 超时，均无具名 FAIL 但测试为红；term_no_check 首版因 utf8 import 未使用而编译失败，改写为恒假条件后被 TestAdvise_Invalid 杀死。存活 1：no_sides_line（删「请分析的方向」行，DoD 等价，见 decisions）。注：后台批量 harness 按「vet 通过且有具名 FAIL」严格口径计为 21/25，差额即上述 3 个；变异跑在 code-simplifier 改动之前的源码上，前后仅 advisor.go:151 一行不同（Fprintf→WriteString），无变异涉及该行",
+    "simplifier": "code-simplifier 改 2 处并经内容核实：advisor.go:151 Fprintf→WriteString；TestAdvise_Invalid 去掉恒为 advInput(advDrop) 的 in 字段（13 例不变）",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+  }
+}

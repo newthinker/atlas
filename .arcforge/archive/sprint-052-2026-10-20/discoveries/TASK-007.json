@@ -1,0 +1,136 @@
+{
+  "task": "TASK-007",
+  "author": "dev-pw-a",
+  "commit": "1d36d5263ce8c28bf95cc78a3792498482c3e937",
+  "merged_as": "8cf608a230bae4565855a8d5f4692462979b8d5d",
+  "key_findings": [
+    "GapRatio>0.10 的跳过必须发生在 GetRuleState/Decide 之前：若把跳过当成 t=0 交给 Decide，会走清零分支并落盘（TestCheckAsset_GapSkipsRule/skip_is_not_a_clear 以价格不满足的情形钉住）",
+    "「距 4 年最低」用 all 窗口的错误实现，在低点都落在 4 年内的 fixture 上与正确实现输出相同；只有补一根 4 年外更低的日线（1500 天前 low=10）才能区分（变异由 SURVIVED 转 KILLED）",
+    "档内重复提醒（SendRepeat）在 DoD 的 8 条里没有直接覆盖：只测 kind==SendNew 的实现会存活；补 TestCheckAsset_RepeatUsesCurrentTier 后被抓到，且同一测试钉住 AD-28 P16（消息写当前档 t=1，状态 Tier 保持 2）",
+    "Advise 的 nil error 结果需在 Engine 侧整理：TwoSidesAdvice fixture 返回「低买、高卖、低买(重复)」三条，Engine 按 Sides 顺序每方向取第一条 ⇒ 消息含 R-buy-first 与 R-sell、不含 R-buy-dup；去掉 break（不去重）或直接用原切片的变异均 KILLED"
+  ],
+  "decisions": [
+    {
+      "decision": "CheckAsset 实际顺序：① fetchPrice（按 Cfg.Assets.Crypto.Sources 名字到 Providers 中查找；Price<=0/NaN/±Inf、quote==nil、error 均换下一源；全部失败 track(price) 后返回 error，本轮不同步不算规则）→ ② Syncer!=nil 时依次 Sync 1d、5m，错误只记日志并 track(sync:<SYM>/<bar>) → ③ 每条规则 WindowStatsFor；GapRatio>0.10 时 track(gap) 失败并 continue（不读不写状态），否则 track(gap) 成功 → Measure → Tier → GetRuleState → Decide → ④ kind==SendNone 且状态有变化（sameState 比较三字段，时间用 Equal）且非 DryRun 时立即 PutRuleState；kind!=SendNone 的只收集为 pending（含 next）→ 记快照 → ⑤ 有 pending 时 overview → advise → FormatAlert → DryRun 写 Out 返回；否则 SendText，失败返回 error（pending 的状态一律不写、不计 Sent24h），成功后先记发送时间再逐条 PutRuleState(next)",
+      "rationale": "plan Task 7 Step 3 + Review Focus 4：同轮清零与发送解耦；发送失败时下一轮 Decide 从旧状态重新判断即自然重试"
+    },
+    {
+      "decision": "多条 advice：Advise 返回 nil error 后按 Sides(triggers) 的顺序，每个方向取切片里第一条该方向的建议；没有任何方向命中则 Advice=nil（AI 不可用）；Advise 返回 error 或 Advisor==nil 时 Advice=nil，消息照发",
+      "rationale": "TASK-006 interfaces_exposed：nil error 不保证每方向一条也不去重；QA-10"
+    },
+    {
+      "decision": "DryRun 边界：提醒与健康告警都 fmt.Fprintln 到 Out、不调 Sender；任何规则状态都不写（含清零与被发送规则）；不计入 Sent24h；K 线同步照常（Syncer 写库）；健康追踪器内存状态照常推进；快照照常更新",
+      "rationale": "spec §9 once --dry-run「不发送也不写状态」；DoD non_functional"
+    },
+    {
+      "decision": "健康键与 subject：price:<SYM>「<SYM> 取价」、gap:<SYM>/<ruleID>「<SYM> <ruleID> 数据缺口」、sync:<SYM>/<bar>「<SYM> <bar> K 线同步」；Down 时 detail 为错误文本；HealthTracker.After 在首次 track 时由 Cfg.Health.FailAlertAfter 一次性设定（sync.Once）；健康消息发送失败只记日志",
+      "rationale": "TASK-011 键约定、AD-25；三类各自计时"
+    },
+    {
+      "decision": "Overview：Chg24h/Chg7d 用 5m 的 FirstCloseSince(now−24h/now−7d)，Chg30d 用 1d 的 FirstCloseSince(now−30d)；FromATH 用 WindowStatsFor(all).High，From4yLow 用 WindowStatsFor(4y).Low（均已并入现价）；缺数据或出错的项记 0",
+      "rationale": "plan Task 7 Step 3 第 5 步"
+    },
+    {
+      "decision": "AI 输入：M1 向本轮取价成功的 provider 现取 [now−1h, now] 的 1m 线（出错只记日志、传 nil）；M5 从本地库直接查 [now−24h, now] 的 5m 线（同包查 Store.db，store.go 无此接口）；Advisor==nil 时两者都不取",
+      "rationale": "spec §7；避免改 store.go（不在 writes）"
+    },
+    {
+      "decision": "Trigger：Tier=本轮档位 t，SentInTier=next.SentInTier，Ref=drop 取 ws.High、rise 取 ws.Low，ws.Short 时 ShortDays=ws.Days",
+      "rationale": "AD-28 P16；TASK-005 Trigger 语义"
+    },
+    {
+      "decision": "Syncer==nil 时跳过 K 线同步；Providers 的顺序不影响取价（以 Cfg sources 为准），Cfg sources 中名字找不到 provider 的源视为失败并换下一个",
+      "rationale": "Runner 正常应设 Syncer；测试与只读场景可省略。plan 要求按 sources 顺序取价"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/engine.go",
+    "internal/pricewatch/engine_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Sender interface{ SendText(text string) error }  // *telegram.Telegram 满足",
+    "type Engine struct{ Cfg *Config; Store *Store; Syncer *Syncer; Providers []crypto.Provider; Advisor *Advisor; Sender Sender; Now func() time.Time; Log *zap.Logger; DryRun bool; Out io.Writer }  // 零值未导出字段即可用；Log 为 nil 时用 zap.NewNop；Cfg/Store/Now 必填，非 DryRun 时 Sender 必填，DryRun 时 Out 必填",
+    "func (*Engine) CheckAsset(ctx context.Context, a Asset) error  // 返回 error 的情形：全部源取价失败、读写规则状态失败、发送提醒失败；K 线同步失败、窗口统计失败、AI 失败、健康消息发送失败只记日志不返回",
+    "func (*Engine) Snapshot() []HeartbeatRow  // 按 Cfg.CryptoAssets() 顺序每资产一行；Price/LastOK 为最近一次取价成功那轮的值（失败轮不覆盖；从未成功为 0/零值）；Active 为那一轮 t≥1 的规则，形如 \"day_drop 第2档\"（缺口跳过的规则不计入）；返回值为副本",
+    "func (*Engine) Sent24h() int  // 过去 24 小时（(now−24h, now]）成功发出的提醒条数；不含健康告警、发送失败与 DryRun；只在内存，重启清零（AD-15）",
+    "并发安全：Snapshot、Sent24h 与 CheckAsset 可并发（快照与发送记录由 Engine 内部互斥锁保护，HealthTracker 自带锁，Store 为 WAL+busy_timeout）；不同资产可并发 CheckAsset；同一资产不应并发 CheckAsset（规则状态读-判-写不加锁）。TestEngine_ConcurrentSnapshot 在 -race 下验证"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ 8cf608a230bae4565855a8d5f4692462979b8d5d（主仓库，engine.go/engine_test.go 的 sha256 与 1d36d5263ce8c28bf95cc78a3792498482c3e937 一致）",
+    "suite": "主仓库 GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, 93.8%（整包约 24s，主要是 TestSync_Chunks 与 BadPriceFallsBack）；go vet 无输出；gofmt -l 无输出",
+    "mutation": "go test -overlay 对 engine.go 28 个变异全部 KILLED（排除编译失败；M17「From4yLow 用 all」先 SURVIVED，补 1500 天前低点后 KILLED；M25 Sent24h 截止时间首版编译失败，改写为 cutoff−2h 后 KILLED）；源文件指纹不变",
+    "simplifier": "code-simplifier：engine.go 未改动（指纹一致）；engine_test.go 抽出 engDeleteCandles 合并两处同文 DELETE，区间参数不变，复跑 -race 绿",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas → 2 files，无已索引符号重叠（新文件）",
+    "extra_tests_beyond_dod": "TestCheckAsset_TwoSidesAdvice（QA-10）、TestCheckAsset_RepeatUsesCurrentTier、TestCheckAsset_ShortWindow、TestCheckAsset_GapExactlyTenPercent、BadPriceFallsBack/source_without_provider_is_skipped 与 sources_order_wins_over_Providers_order"
+  },
+  "rework": [
+    {
+      "round": 1,
+      "epoch": 2,
+      "commit": "4877eb9ebc98982bb4f4642bbf66af06ccef8383",
+      "merged_as": "e9b963be7640d5e54e0f2f8a373c082265d24451",
+      "trigger": "test-pw-a 判 rejected（task_defect）：DoD non_functional「Snapshot() 与 CheckAsset 并发在 -race 下无 data race」无有效测试；见 .arcforge/docs/04-test/TASK-007-verification.md",
+      "root_cause": "原 TestEngine_ConcurrentSnapshot 的读侧是固定 200 次的紧循环（微秒级），写侧每轮要先取价并做多次 SQLite 查询，读侧在第一次 recordSnap 之前就全部跑完（验证者实测 200/0）⇒ 读写在时间上零重叠，race detector 无从观察到竞争；快照与发送记录四处加锁删去任一处都存活。r0 的变异集合只变异了业务逻辑，没有变异同步原语，所以没发现该测试是空转的。验证者另证伪了「Sent24h 加锁建立 happens-before」这一解释，根因是时间不重叠而非同步关系",
+      "fix": "只改 engine_test.go：读侧 for-select 循环 Snapshot/Sent24h 直到写侧 20 轮 CheckAsset 结束（done channel）；写侧价格 95/100 交替，每两轮发送一次（第 2 档跳过防抖），使 sent 追加与 Sent24h 修剪都和读侧交错；读侧统计读到非零价格的次数，为 0 即 t.Fatal（重叠自证），并断言发送条数 = rounds/2。engine.go 未改（sha256 bd46e7f5… 与 r0 相同）",
+      "ablation": {
+        "method": "go test -race -overlay（engine.go 变异体在 scratchpad，主树指纹前后不变），在 simplifier 之后的最终版测试上重采",
+        "control": "原实现，-run ^TestEngine_ConcurrentSnapshot$ -count=10 → 绿，DATA RACE 0",
+        "E27_recordSnap_unlocked": "只跑新用例 -count=5 → 红（DATA RACE 3）；-skip 新用例整包 → 绿",
+        "E28_Snapshot_unlocked": "只跑新用例 -count=5 → 红（DATA RACE 4）；-skip 新用例整包 → 绿",
+        "E29_sent_append_unlocked": "只跑新用例 -count=5 → 红（DATA RACE 5）；-skip 新用例整包 → 绿",
+        "E30_Sent24h_unlocked": "只跑新用例 -count=5 → 红（DATA RACE 6）；-skip 新用例整包 → 绿"
+      },
+      "extra_tests": [
+        {
+          "id": "E34",
+          "test": "TestCheckAsset_AIMinuteBarsFromPriceSource",
+          "asserts": "okx 取价失败、binance 成功时，1m 线请求打到 binance（okx 0 次、binance 1 次）",
+          "evidence": "变异「1m 取自 Providers[0]」只跑该用例 → 红；跳过该用例整包 → 绿"
+        },
+        {
+          "id": "E38",
+          "test": "TestEngine_SnapshotExcludesGapSkipped",
+          "asserts": "week_drop 因 7d 缺口跳过（价格 90 本会触发），Active 恰为 [day_drop 第5档]",
+          "evidence": "变异「缺口分支仍把规则计入 Active」只跑该用例 → 红；跳过该用例整包 → 绿"
+        }
+      ],
+      "verification": "主仓库 feature/pricewatch @ e9b963be7640d5e54e0f2f8a373c082265d24451：engine.go/engine_test.go 的 sha256 与 4877eb9ebc98982bb4f4642bbf66af06ccef8383 一致；GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok, 93.8%；go vet 无输出；gofmt -l 无输出"
+    }
+  ],
+  "qa_fix": [
+    {
+      "round": 1,
+      "epoch": 3,
+      "author": "dev-pw-c",
+      "provenance": "本轮返工由 Leader 13:22:47Z 从 review_fix 改派给 dev-pw-c（原作者 dev-pw-a）；上文 author/commit/decisions/rework 为 dev-pw-a 的原交付，本段为 dev-pw-c 的 QA 返工",
+      "source": "QA REJECT 第 1 轮 R1-1 引擎侧（.arcforge/docs/05-review/qa-review-round2.md §2）；AD-30；fix_items 开工方式（先 merge task/TASK-011-qa1 再接线）",
+      "commit": "3d087fed77aaf606255f7e6fc53ccc06131f40c4",
+      "merged_as": "8ed58bc17d3179e32c56b9d5caf9199484dcc32e",
+      "branch_base": "task/TASK-007-qa1 = feature/pricewatch ebc366e + merge --no-ff TASK-011-qa1 dfae3ab（91efa2f0f27d290c32d6cbeea9fef72288a80f92），再提交 3d087fed77aaf606255f7e6fc53ccc06131f40c4",
+      "files_modified": [
+        "internal/pricewatch/engine.go",
+        "internal/pricewatch/engine_test.go"
+      ],
+      "defect": "Engine.track 在发送前由 HealthTracker 置 down（TASK-011 旧语义），SendText 失败只记 warn ⇒「监控异常」一次失败永久丢失",
+      "fix": "track 在 DryRun 写出 Out 后、或 Sender.SendText 返回 nil 后调用 e.health.Ack(ev)；发送失败记 warn 后直接 return、不 Ack ⇒ 下一轮 Fail/OK 再次返回同一事件并重发",
+      "decisions": [
+        {
+          "decision": "dry-run 写出 Out 即视为送达并 Ack",
+          "rationale": "AD-30 原文；否则 dry-run 每轮重复写出同一告警"
+        },
+        {
+          "decision": "未做可选项 R1-6（心跳列出当前 Down 键）",
+          "rationale": "非必修；需同时改 Snapshot 与 TASK-005 的心跳格式，扩大改动面"
+        }
+      ],
+      "verification": {
+        "anchor": "feature/pricewatch @ 8ed58bc17d3179e32c56b9d5caf9199484dcc32e（主仓库；engine.go 40f48a17…、engine_test.go 16a6898f… 与 3d087fed77aaf606255f7e6fc53ccc06131f40c4 一致；health.go/health_test.go 与 TASK-011-qa1 dfae3ab 一致）",
+        "suite": "主仓库 @ 合并点：go vet ./internal/pricewatch/ 无输出；go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 94.3%；worktree 上 go test ./cmd/atlas/ ok",
+        "tests": "TestCheckAsset_HealthSendFailureRetries（真实 HealthTracker + engSender.setErr）：① 30m「监控异常」发送失败→31m 重发仍失败→32m 送达→33m 不再发，「已恢复」同样失败→重发→送达→不再发 ② 异常未送达就恢复 ⇒ 不发孤立的「已恢复」③ dry-run 4 轮只写出 1 次、Sender 未调用；原 TestCheckAsset_HealthAlerts 在 Ack 接线后恢复绿",
+        "mutation": "go test -overlay 4/4 KILLED（vet 通过且有具名 FAIL），源文件 sha256 前后不变：成功后不 Ack、失败也 Ack、dry-run 不 Ack、发送前就 Ack",
+        "simplifier": "code-simplifier 未改动，sha256 前后一致",
+        "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+      }
+    }
+  ]
+}

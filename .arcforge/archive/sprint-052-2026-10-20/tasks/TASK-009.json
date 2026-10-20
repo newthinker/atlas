@@ -1,0 +1,85 @@
+{
+  "id": "TASK-009",
+  "title": "pricewatch 子命令与 launchd（cmd/atlas/pricewatch.go + plist）",
+  "description": "计划 Task 8 的 cmd/部署部分：`atlas pricewatch run / once [--dry-run] / backfill [--symbol]`，持久 flag `--pricewatch-config` 默认 `configs/pricewatch.yaml`，照 cmd/atlas/crisis.go 用 init() 注册（AD-10，不改既有符号）。装配顺序：ensurePolicyGate() 先于构造 provider → 按 sources 名字构造 okx/binance（其他名字报错）；取价顺序 = 配置 sources 顺序，K 线回填顺序 = 同一组 provider 按历史长度排（binance 先，AD-20）→ UnsupportedItems 打 warn → ai.enabled 且 factory.New 失败则 warn 后不带 AI → run 收 SIGTERM 取消 ctx。backfill 对指定/全部资产 Sync 1d 与 5m 并打印入库根数。plist 照 com.newthinker.atlas.serve.plist：ProgramArguments 首项绝对路径、设 WorkingDirectory、KeepAlive 按 AD-27、仓库内只放占位（AD-27）。coverage_floor 78（AD-11）；plist 只进 writes（AD-18）；冒烟按 AD-19。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "cmd/atlas/pricewatch.go",
+    "cmd/atlas/pricewatch_test.go",
+    "deploy/launchd/com.newthinker.atlas.pricewatch.plist"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestPricewatchCmd_Registered`：rootCmd 下有 `pricewatch`，含 `run`、`once`、`backfill`；`--pricewatch-config` 为持久 flag 且默认 `configs/pricewatch.yaml`；`once` 有 `--dry-run`、`backfill` 有 `--symbol`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "装配 helper 单测：sources `[okx, binance]` → 取价 provider 顺序 okx、binance，K 线回填顺序 binance、okx（AD-20）；含未知名 `kraken` → error 含该名；`ai.enabled:false` → Advisor 为 nil；`ai.enabled:true` 且 LLM 工厂失败 → Advisor 为 nil 并记一条 warn。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "plist（AD-27）：`plutil -lint` 通过；ProgramArguments 首项为绝对路径且含 `pricewatch run`；设 `WorkingDirectory`；KeepAlive 与 ThrottleInterval 符合 AD-27；含 `https_proxy`/`no_proxy`；两个 Telegram 环境变量只为占位值、无真实密钥。",
+        "verify_by": "manual"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [
+      {
+        "desc": "配置文件不存在或校验失败时 `once` 返回非 nil error（退出码非 0）且不发任何消息；`backfill --symbol` 指定不存在的资产时返回 error，大小写不敏感（`btc` 等同 `BTC`）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`ensurePolicyGate()` 的调用位于 pricewatch 所有入口中任何 provider 构造之前。",
+        "verify_by": "review"
+      },
+      {
+        "desc": "`run` 收到 SIGTERM 或 SIGINT 时取消传给 Runner 的 ctx 并以 nil 返回。",
+        "verify_by": "review"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go build ./...` 成功；`go test -count=1 ./internal/pricewatch/... ./cmd/atlas/...` 全部 ok；`go vet ./cmd/atlas/` 无输出；cmd/atlas 覆盖率 ≥ 78%（coverage_floor，AD-11）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "冒烟（AD-19）：占位 telegram env + 临时配置 `ai.enabled:false` 跑 `pricewatch backfill --symbol BTC`（日线根数 >3000）与 `pricewatch once --dry-run`（打印指标/消息、未调用 Telegram）；命令与输出写进 discovery；网络不可达时如实记录交人类。",
+        "verify_by": "manual"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-008"
+  ],
+  "wave": 7,
+  "context_from": [
+    "TASK-008"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./cmd/atlas"
+  ],
+  "writes": [
+    "./cmd/atlas/pricewatch.go",
+    "./cmd/atlas/pricewatch_test.go",
+    "./deploy/launchd/com.newthinker.atlas.pricewatch.plist"
+  ],
+  "coverage_floor": 78,
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:37Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-c",
+  "discovery": ".arcforge/discoveries/TASK-009.json",
+  "verify_baseline": {
+    "head": "5fc087c921c58c7e23dab9d5dc1b27bb5ac5fcfb",
+    "discovery_sha256": "e530320e16f9b5f7e131ca84d50340446deb4f0485d8a18754483434f24588f4",
+    "at": "2026-10-20T10:46:00Z"
+  },
+  "verifier": "test-pw-b"
+}

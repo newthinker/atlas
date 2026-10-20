@@ -1,0 +1,82 @@
+{
+  "id": "TASK-008",
+  "title": "调度与每日心跳（internal/pricewatch/runner.go）",
+  "description": "计划 Task 8 的 runner 部分：`Runner{Engine, Assets, HeartbeatAt, Tick}`、`Run`（每 tick 检查各资产到期则依次 CheckAsset，再检查心跳；ctx 取消返回 nil）、`RunOnce`、`dueHeartbeat`（本地时区；当天已过 at 且 lastDate≠今天）；心跳日期存 kv `heartbeat_date`。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/pricewatch/runner.go",
+    "internal/pricewatch/runner_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestDueHeartbeat`：at=\"09:00\" 时 08:59→false；09:00 且 last=\"\"→true；当天已发→false；第二天 10:30（睡眠错过）→true；at=\"\" 恒为 false；now 取 Asia/Shanghai 时区、UTC 日期与本地日期不同的时刻时按本地日期判断。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestRunner_Schedules`：Tick=10ms、两资产 Interval 30ms 与 90ms、跑约 200ms → 前者检测次数 ≥ 2×后者；`-count=5` 连跑全部通过。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestRunner_HeartbeatOncePerDay`：可控 Now 两次 tick 都过 09:00 → Sender 恰收 1 条心跳，kv `heartbeat_date` 为当天日期；心跳内容来自 `Engine.Snapshot()` 与 `Sent24h()`。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`RunOnce` 对每个资产恰调用一次 CheckAsset；某资产 CheckAsset 返回 error 不阻止其余资产；`Run` 启动后立即执行第一轮（不等满一个 Interval）。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "心跳发送失败时不写 `heartbeat_date`，下一 tick 重试并成功后才写。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`Run` 在 ctx 取消后 1 秒内返回 nil，不泄漏 goroutine（返回后不再调用 CheckAsset）。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-007"
+  ],
+  "wave": 6,
+  "context_from": [
+    "TASK-007"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/runner.go",
+    "./internal/pricewatch/runner_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:37Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-pw-b",
+  "discovery": ".arcforge/discoveries/TASK-008.json",
+  "verify_baseline": {
+    "head": "1244e2a2dc36c939b77a3d5a735120e652628fc9",
+    "discovery_sha256": "950a05f1bac449fbc2422351cb3ed7c1ff9843da9f4ce74827af6b46d55505c8",
+    "at": "2026-10-20T10:24:22Z"
+  },
+  "verifier": "test-pw-b",
+  "reason_class": "task_defect",
+  "reject_reason": "DoD functional[3]「RunOnce 对每个资产恰调用一次 CheckAsset」的生产路径无测试：全部 Runner 测试注入替身 check，check==nil → r.Engine.CheckAsset 一行从未执行（checkAsset 覆盖 66.7%）。变异 R22（该行改 return nil，即 Runner 永不检测）全部测试仍绿；探针用 engFixture 真实 Engine 跑 RunOnce：原实现发 1 条提醒，R22 发 0 条。修复只改 runner_test.go：补一个不注入 check 的 RunOnce/Run 首轮用例断言 Sender 收到提醒或状态推进。其余 F1-F3/B1/E1/串行约束均通过（R1 并发峰值 6，5/5 红；真实时间用例负载下 20/20）。详见 docs/04-test/TASK-008-verification.md",
+  "rework_count": 1
+}

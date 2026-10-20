@@ -1,0 +1,83 @@
+{
+  "id": "TASK-003",
+  "title": "SQLite 存储（internal/pricewatch/store.go）",
+  "description": "计划 Task 3：`Store`（DSN 与建目录写法照抄 crisis.NewStore：WAL + busy_timeout）、candles/rule_state/kv 三表、`UpsertCandles`（PK(pair,bar,ts) INSERT OR REPLACE）、`LatestCandle`、`Stats`、`FirstCloseSince`、`PruneCandles`、`Get/PutRuleState`、`Get/PutKV`。时间统一 UTC Unix 毫秒。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "module": "pricewatch",
+  "complexity": "medium",
+  "estimated_files": [
+    "internal/pricewatch/store.go",
+    "internal/pricewatch/store_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "`TestUpsertCandles_Idempotent`（Review Focus 2）：同一批 3 根乱序写入两次，再写入一根时间重复但 high 更高的 → `Count==3`，`High` 取更新后的值。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestStats_Range`：只统计 [from,to]（两端含）内的 K 线；from 为零值统计全部；空区间 `Count==0`；`First` 为区间内最早一根时间；K 线 {H:120,C:100,L:80} → `High==120`、`Low==80`（取 high/low 而非 close）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestRuleState_SurvivesReopen`（Review Focus 3）：Put `{2,1,T0}` → Close → 同路径 NewStore → Get 相等（毫秒精度）；不存在的 (pair,rule) 返回零值且 err==nil。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "`TestPruneCandles`（早于 before 删除、其余保留）；`TestKV`（不存在返回 \"\"，写后可读，重复写覆盖）；`LatestCandle` 空表返回 ok=false；`FirstCloseSince` 返回 ts≥from 的最早一根的 close，无数据 ok=false。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [
+      {
+        "desc": "隔离：BTCUSDT/1d 的数据不影响 ETHUSDT/1d 与 BTCUSDT/5m 的 Stats、Prune、LatestCandle；同一 ts 的 1d 与 5m 各自计数（主键含 bar）；rule_state 按 (pair, rule_id) 区分。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "时区：以非 UTC Location 构造的时间写入后读回 `Equal` 原值（毫秒截断后）。",
+        "verify_by": "test"
+      }
+    ],
+    "error_handling": [
+      {
+        "desc": "`NewStore` 自动创建不存在的父目录；路径不可创建（如父路径是普通文件）时返回 error 而非 panic。",
+        "verify_by": "test"
+      }
+    ],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。另：多 goroutine 并发 `UpsertCandles`/`Stats`/`PutRuleState` 在 `-race` 下无 data race、无 `database is locked` 错误。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/store.go",
+    "./internal/pricewatch/store_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:36Z"
+  },
+  "assignment_epoch": 1,
+  "assigned_to": "dev-pw-b",
+  "discovery": ".arcforge/discoveries/TASK-003.json",
+  "verify_baseline": {
+    "head": "f3d3223136084113ea104d57891d827d5f768419",
+    "discovery_sha256": "c575a577ca0e71fc7a3f26eda5b6383f60a738a69bf3f18e5af8b377c7b0a2f8",
+    "at": "2026-10-20T07:42:24Z"
+  },
+  "verifier": "test-pw-b"
+}

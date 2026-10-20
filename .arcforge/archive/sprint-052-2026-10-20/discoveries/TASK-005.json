@@ -1,0 +1,160 @@
+{
+  "task": "TASK-005",
+  "author": "dev-pw-c",
+  "commit": "bebd2bacd22cc09fc86dc727a96da292ea6fe075",
+  "merged_as": "49f4b71e663884eac661294eae0992e4c913e1ca",
+  "key_findings": [
+    "strconv/fmt 按二进制值做正确舍入，恰为 .x5 的二进制精确值（如 31.25、6.25）会按 ties-to-even 舍成偶数（31.2）；测试输入应避开精确 tie",
+    "AD-24 截断预算 = 4096 − UTF-16(前缀 + 「…（已截断）」 + 尾行)，按 rune 边界截，不会劈开代理对；BMP 字符时恰好用满 4096"
+  ],
+  "decisions": [
+    {
+      "decision": "多条 Advice：【AI 结论】【AI 分析】标题独占一行，其下逐行「低买：…」「高卖：…」；单条照 golden 接在标题后（分析段单条不带方向前缀）",
+      "rationale": "plan 只说「各占一行」「分行列出」；单条形态由 golden 锁定"
+    },
+    {
+      "decision": "Advice 为 nil 或空切片都视为 AI 不可用，且省略末行「AI 建议仅供参考」",
+      "rationale": "空切片与 nil 对用户无区别；无 AI 结论时免责行无意义"
+    },
+    {
+      "decision": "TargetPrice<=0 / Term 为空时结论行省略对应项",
+      "rationale": "避免出现「建议目标价 0.0000」"
+    },
+    {
+      "decision": "参照价文案：24h/7d/30d → 「较 24h 最高价」（golden），4y → 「较 4 年最高价」，all → 「较历史最高价」",
+      "rationale": "plan 标签为「4 年」「历史」，按中文排版只在数字/字母与汉字间留空"
+    },
+    {
+      "decision": "百分比四舍五入后为 0 时写「0.0%」/「0%」，不带正负号；负号 U+2212",
+      "rationale": "DoD boundary 禁止 −0.0；+0.0 同样无意义"
+    },
+    {
+      "decision": "心跳：首行「💓 监控仍在运行（YYYY-MM-DD HH:MM）」，每资产「· 名称 代码 价格 计价 · 最近成功 HH:MM|无 · 触发中：a、b|无」，末行「过去 24 小时发出提醒 N 条」；时间按 now 的时区",
+      "rationale": "DoD 只要求关键字；LastOK 转到 now 时区避免 UTC/本地混写"
+    },
+    {
+      "decision": "健康：「⚠️ 监控异常：<subject>」/「✅ 已恢复：<subject>」，detail 非空时换行附上",
+      "rationale": "供 TASK-007 以 HealthEvent.Key 作 subject"
+    },
+    {
+      "decision": "Trigger.Tier 原样写入消息，档内重复提醒写当前档位由调用方填入（AD-28 P16）",
+      "rationale": "格式化层不做状态判断"
+    }
+  ],
+  "files_modified": [
+    "internal/pricewatch/message.go",
+    "internal/pricewatch/message_test.go"
+  ],
+  "interfaces_exposed": [
+    "type Trigger struct{ Rule Rule; X float64; Tier, SentInTier int; Ref float64; ShortDays int }",
+    "type Overview struct{ Chg24h, Chg7d, Chg30d, FromATH, From4yLow float64 } // 百分数",
+    "type SideAdvice struct{ Side, Verdict string; TargetPrice float64; Term, Reasoning string } // json tag: side/verdict/target_price/term/reasoning",
+    "type Alert struct{ Asset Asset; Price float64; Source string; Triggers []Trigger; Overview Overview; Advice []SideAdvice } // Advice nil/空 = AI 不可用",
+    "type HeartbeatRow struct{ Asset Asset; Price float64; LastOK time.Time; Active []string }",
+    "func FormatAlert(a Alert) string // ≤4096 UTF-16 码元（AD-24）",
+    "func FormatHeartbeat(now time.Time, rows []HeartbeatRow, sent24h int) string",
+    "func FormatHealth(down bool, subject, detail string) string",
+    "未导出：formatPrice、formatPct、utf16Len、truncateUTF16、maxMessageUTF16=4096（同包 TASK-006/007 可复用）"
+  ],
+  "verification": {
+    "anchor": "feature/pricewatch @ 49f4b71e663884eac661294eae0992e4c913e1ca（主仓库，两文件 sha256 与 bebd2ba 一致：message.go ab3fd980…, message_test.go bb4bbb16…）",
+    "suite": "GOTOOLCHAIN=local go test -race -count=1 -cover ./internal/pricewatch/ → ok（主仓库 @ 49f4b71，覆盖率见门禁输出）；message.go 函数覆盖率均 100%，truncateUTF16 83.3%（末尾 return 仅在未超限时可达，FormatAlert 只在超限时调用）",
+    "dod_mapping": "functional[0]→TestFormatAlert_Golden；[1]→TestFormatAlert_NoAI；[2]→TestFormatAlert_Icons, TestFormatAlert_TwoSides；[3]→TestFormatAlert_ShortWindow；[4]→TestFormatHeartbeat, TestFormatHealth；boundary[0]→TestFormatPrice, TestFormatPct, TestFormatTier；error_handling[0]→TestFormatAlert_Truncate, TestFormatAlert_TruncateSurrogatePairs, TestFormatAlert_NoTruncateNormal；另 TestFormatAlert_WindowNames、TestFormatAlert_AdviceOptionalFields",
+    "qa4_selfcheck": "Contains 断言均锚定整行（前后带 \\n 或整行字面量）；健康消息断言反向关键字",
+    "vet_gofmt": "go vet ./internal/pricewatch/ 与 gofmt -l 两文件均无输出（worktree，sha 与提交一致）",
+    "mutation": "go test -overlay 24 个变异全部 KILLED（vet 通过且有具名 FAIL），源文件 sha256 前后不变：上限 4097、UTF-16 按 rune 计、截断 > 改 >=、去截断标记、预算不扣标记、去 −0.0 处理、U+2212 改 ASCII、≥1000 保留 2 位、≥1 改 >1、去千分位、SentInTier >1 改 >=1、ShortDays >0 改 >=0、去 🔀 分支（首版编译失败，改写为恒假条件后 KILLED）、FromATH 0 位、From4yLow 1 位、心跳不转时区、Active 只取第一个、健康 down 取反、detail 空也换行、只认 nil 为无 AI、多条不换行、rise 动词、all 标签、目标价 0 也输出",
+    "simplifier": "code-simplifier 未改动，前后 sha256 一致",
+    "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+  },
+  "qa_fix": [
+    {
+      "round": 1,
+      "epoch": 1,
+      "source": "QA REJECT 第 1 轮（.arcforge/docs/05-review/qa-review-round2.md）；fix_items QA-6 / AD-31（Leader 维持必修）",
+      "commit": "0d16d16b6ca66d4923bfbb5517cc7af02e298eba",
+      "merged_as": "ebc366e43a6deda8dc28ae8974b2e3fa77bb3c1b",
+      "files_modified": [
+        "internal/pricewatch/message.go",
+        "internal/pricewatch/message_test.go"
+      ],
+      "defect": "原实现只截【AI 分析】：预算 = 4096 − 其余部分；AI 结论字段（Term/Verdict/Side）超长时预算为负，整条仍超限（实测 Term 5000 字 ⇒ 5250 码元）⇒ Telegram 400 ⇒ 状态不推进、提醒永久丢失；非 AI 部分（触发规则极多）超长时同样无兜底",
+      "fix": "FormatAlert 三步兜底：① 截【AI 分析】（与原实现逐字相同，golden 与原截断用例不变）② 仍超则截【AI 结论】正文 ③ 仍超（非 AI 部分本身超长，含 Advice 为 nil 的情况）则 capUTF16 整条截断。①② 保留【触发规则】【多周期】与末行「AI 建议仅供参考」；每处截断以「…（已截断）」结尾",
+      "decisions": [
+        {
+          "decision": "截断顺序 AI 分析 → AI 结论 → 整条",
+          "rationale": "AD-31「先截 AI 分析、再截其余 AI 字段」；AD-24【触发规则】完整保留；整条兜底保证任何输入 ≤4096"
+        },
+        {
+          "decision": "未做可选项 QA-7（价格舍入跨档外观）",
+          "rationale": "非必修，避免扩大本轮改动面"
+        }
+      ],
+      "verification": {
+        "anchor": "feature/pricewatch @ ebc366e43a6deda8dc28ae8974b2e3fa77bb3c1b（主仓库，两文件 sha256 与 0d16d16b6ca66d4923bfbb5517cc7af02e298eba 一致：message.go bd825afe…, message_test.go 2b281943…）",
+        "suite": "主仓库 @ 合并点：go vet ./internal/pricewatch/ 无输出；go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 94.1%；gofmt -l 无输出（worktree）",
+        "tests": "TestFormatAlert_LimitBoundary（恰 4096 不截且内容完整 / 4097 截到恰 4096、以「稳…（已截断）」+ 免责行结尾）；TestFormatAlert_LimitLongAdviceFields（Term/Verdict/Side 各 5000 字、Term 3000+理由 3000、两方向结论各 3000：≤4096、触发规则与多周期完整、保留【AI 结论】段与截断标记、末行免责保留）；TestFormatAlert_LimitWholeMessage（200 条触发规则 × 有/无 AI：≤4096、保留开头、以截断标记结尾）；RED 实测：LongAdviceFields 5250/5251/6250 码元、WholeMessage 8005 码元",
+        "mutation": "go test -overlay 9 个变异在最终源码（sha256 bd825afe…，simplifier 之后重采）上 9/9 KILLED：无 AI 时不兜底、去最终兜底、只截分析、先截结论、over<=0 改 <0、截断预算不扣标记、整条兜底不扣标记、capUTF16 的 <= 改 <、去末行免责",
+        "simplifier": "code-simplifier 改 2 处并经内容核实：analysis 赋值改为 if/else（输出不变）；用例失败信息复用已算出的 n",
+        "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+      }
+    },
+    {
+      "round": 2,
+      "epoch": 1,
+      "source": "QA iter2 N1（.arcforge/docs/05-review/qa-review-iter2.md）",
+      "commit": "f9920a224f09ccb7c304222de462d9680f3981dd",
+      "merged_as": "78b15ec1c69a2fed95a5a96aa93a044f06d26d97",
+      "files_modified": [
+        "internal/pricewatch/message.go",
+        "internal/pricewatch/message_test.go"
+      ],
+      "defect": "FormatHealth 不限长；R1-5 后 sync 用 errors.Join 把每个失败段的完整错误拼进 detail ⇒ 冷启动多段失败时消息 >4096（QA 实测 5229/4998/4933）⇒ Telegram 400 ⇒ 按 AD-30 不 Ack ⇒ 每轮重发每轮失败，「监控异常」永不送达",
+      "fix": "FormatHealth 返回 capUTF16(s)：≤4096 UTF-16 码元，截尾、按 rune 边界、以「…（已截断）」结尾，标题行保留",
+      "decisions": [
+        {
+          "decision": "截尾而非截中间或截 detail 头部",
+          "rationale": "标题（告警种类与 subject）在开头，必须保留；detail 头部是首个失败段，信息量最大"
+        }
+      ],
+      "verification": {
+        "anchor": "feature/pricewatch @ 78b15ec1c69a2fed95a5a96aa93a044f06d26d97（主仓库；message.go bb96c817…、message_test.go 6cc95849… 与 f9920a224f09ccb7c304222de462d9680f3981dd 一致）",
+        "suite": "主仓库 @ 合并点：go vet ./internal/pricewatch/ 无输出；go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 94.3%",
+        "tests": "TestFormatHealth_Limit：detail =「同步失败📉」×2000（中文+代理对，约 1.2 万码元），down/up 两种均断言长度 ∈ [4094, 4096]、以标题开头、以截断标记结尾、utf8 有效；detail 4000 字不截断（逐字相等）；RED 实测修复前 12021",
+        "mutation": "go test -overlay 2/2 KILLED：去掉 cap、截头保尾（标题丢失）",
+        "simplifier": "code-simplifier 未改动，sha256 前后一致",
+        "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+      }
+    },
+    {
+      "round": 3,
+      "epoch": 2,
+      "source": "test-pw-c 复验退回（.arcforge/docs/04-test/TASK-005-verification.md §5–§7）+ Leader 追加 FormatHeartbeat",
+      "commit": "0cac1719a141d5d1a9c71235f59898c615005d5e",
+      "merged_as": "bc33f71827179242e06d2e74129b0f603bd9f699",
+      "files_modified": [
+        "internal/pricewatch/message.go",
+        "internal/pricewatch/message_test.go"
+      ],
+      "defect": "① capUTF16 阈值边界无守卫：比较改为 <= maxMessageUTF16+1（N4）时全包与 cmd/atlas 全绿，恰 4097 码元的健康消息原样发出 ② FormatHeartbeat 不限长，约 30 个资产即 >4096 ⇒ 心跳发送失败不写 heartbeat_date、每 tick 重试每次 400 ⇒ 每日心跳永不送达 ③ 测试失败信息按字节切（got[:60] 等）会劈开多字节字符",
+      "fix": "① 新增 TestFormatHealth_Boundary（恰 4096 逐字相等不截；恰 4097 ≤4096、以标题开头、以截断标记结尾）② FormatHeartbeat 返回 capUTF16(…)，截尾保留首行；新增 TestFormatHeartbeat_Limit ③ 新增 runeHead/runeTail，5 处失败信息改按字符截取",
+      "decisions": [
+        {
+          "decision": "边界用例放在 FormatHealth（经 capUTF16 的最短路径）而非 FormatAlert",
+          "rationale": "FormatAlert 的 4096/4097 边界走第①步截 AI 分析、不经 capUTF16；FormatHealth 是 capUTF16 最直接的调用方，一条用例同时守住 FormatAlert 的 !hasAI 分支与末尾兜底共用的比较"
+        },
+        {
+          "decision": "心跳截尾而非按资产整行丢弃",
+          "rationale": "与 N1 同法、成本最低；首行「监控仍在运行」即心跳的核心信号，必须保留"
+        }
+      ],
+      "verification": {
+        "anchor": "feature/pricewatch @ bc33f71827179242e06d2e74129b0f603bd9f699（主仓库；message.go 445da806…、message_test.go 872bb980… 与 0cac1719a141d5d1a9c71235f59898c615005d5e 一致）",
+        "suite": "主仓库 @ 合并点：go vet ./internal/pricewatch/ 无输出；go test -race -count=1 -cover ./internal/pricewatch/ → ok, coverage 94.3%；worktree 上 go test ./cmd/atlas/ ok；gofmt -l 无输出",
+        "tests": "TestFormatHealth_Boundary（验证报告 §6 样例形态）；TestFormatHeartbeat_Limit（60 个资产×4 条触发规则，修复前 6648 码元；断言 ∈[4094,4096]、以「💓 监控仍在运行（2026-10-20 09:00）\\n· 测试资产 SYM00 」开头、以截断标记结尾）",
+        "mutation": "go test -overlay 4/4 KILLED，在 simplifier 之后的最终测试（sha256 872bb980…）上重采：N4 cap 比较 <= max+1（被 TestFormatHealth_Boundary 杀死）、cap 比较 < max、心跳去 cap、健康去 cap；源文件 sha256 前后不变",
+        "simplifier": "code-simplifier 改 1 处并经内容核实：TestFormatHealth_Boundary 的 for+switch 拆为两段顺序检查，断言与数据不变",
+        "detect_changes": "npx -y gitnexus@latest detect-changes --scope staged --repo atlas：2 files touched、无已索引符号重叠"
+      }
+    }
+  ]
+}

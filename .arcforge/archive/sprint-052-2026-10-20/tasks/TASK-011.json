@@ -1,0 +1,73 @@
+{
+  "id": "TASK-011",
+  "title": "健康追踪器（internal/pricewatch/health.go）",
+  "module": "pricewatch",
+  "complexity": "low",
+  "description": "从计划 Task 7 拆出的纯逻辑（AD-26）：`HealthTracker{After time.Duration}`，`Fail(key, now)` / `OK(key, now)` 返回需要发送的事件（Down/Up/无），键形如 `price:BTC`、`gap:BTC/week_drop`、`sync:BTC/1d`；只放内存（AD-15）。由 TASK-007 的 Engine 接线并用 FormatHealth 发送。 需求原文：docs/superpowers/plans/2026-10-20-pricewatch.md 的对应 Task 段（测试与实现草稿为 DoD 下限，AD-2）；spec：docs/superpowers/specs/2026-10-20-pricewatch-design.md；Leader 增量与约定见 .arcforge/docs/01-design/architecture-decisions.md。worktree：`git worktree add -b task/<本任务ID> ../wt-<本任务ID> feature/pricewatch`（AD-3）；提交主题 `<type>(<本任务ID>): pricewatch …`（AD-5，覆盖计划的 `feat(pricewatch)`）；提交前 code-simplifier 子代理 + 改动前后 sha256 指纹比对 + detect-changes（AD-6）；go 命令一律 `GOTOOLCHAIN=local`，sqlite 固定 modernc.org/sqlite v1.38.2；提交后通知 Leader merge 进 feature/pricewatch，merge 后才回主仓库转 dev_done（AD-4）。",
+  "estimated_files": [
+    "internal/pricewatch/health.go",
+    "internal/pricewatch/health_test.go"
+  ],
+  "done_criteria": {
+    "functional": [
+      {
+        "desc": "After=30m：T0 起连续 Fail，T0+29m 无事件、T0+30m 恰返回 1 次 Down、T0+60m 无事件（不重复）。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "已发 Down 后 OK → 恰返回 1 次 Up，再 OK 无事件；未达 After 就 OK（短暂失败）→ 无任何事件。",
+        "verify_by": "test"
+      },
+      {
+        "desc": "不同键互不影响；Fail→OK→Fail 时失败起点从第二次 Fail 重新计时。",
+        "verify_by": "test"
+      }
+    ],
+    "boundary": [],
+    "error_handling": [],
+    "non_functional": [
+      {
+        "desc": "`GOTOOLCHAIN=local go test -race -count=1 ./internal/pricewatch/` 通过；`go vet ./internal/pricewatch/` 无输出；本任务新增文件 `gofmt -l` 无输出；包覆盖率 ≥ 80%（门禁口径）。另：多 goroutine 并发调用 Fail/OK 在 `-race` 下无 data race。",
+        "verify_by": "test"
+      }
+    ]
+  },
+  "dependencies": [
+    "TASK-001"
+  ],
+  "wave": 2,
+  "context_from": [
+    "TASK-001"
+  ],
+  "status": "accepted",
+  "packages": [
+    "./internal/pricewatch"
+  ],
+  "writes": [
+    "./internal/pricewatch/health.go",
+    "./internal/pricewatch/health_test.go"
+  ],
+  "last_transition": {
+    "from": "verified",
+    "to": "accepted",
+    "by": "leader",
+    "at": "2026-10-20T14:49:37Z"
+  },
+  "assignment_epoch": 2,
+  "assigned_to": "dev-pw-c",
+  "discovery": ".arcforge/discoveries/TASK-011.json",
+  "verify_baseline": {
+    "head": "8ed58bc17d3179e32c56b9d5caf9199484dcc32e",
+    "discovery_sha256": "42697de8cc820b1a6728ecb250219cf42a36023dd987c4276b15c91c2cb357e5",
+    "at": "2026-10-20T13:32:55Z"
+  },
+  "verifier": "test-pw-c",
+  "reason_class": "task_defect",
+  "reject_reason": "DoD non_functional「多 goroutine 并发调用 Fail/OK 在 -race 下无 data race」的 OK 半边无测试守卫：TestHealth_ConcurrentSafe 只并发调用 Fail，OK 在 wg.Wait() 后串行。变异 H14（删 OK 的 h.mu.Lock/Unlock）-race 下 5/5 存活；补 Fail/OK 对同一键并发的用例后 H14 3/3 DATA RACE、原实现 3/3 绿。修复：只改 health_test.go 加 Fail/OK 并发用例，health.go 无需改。其余 F1-F3、vet/gofmt/覆盖率 93.1% 均通过。详见 docs/04-test/TASK-011-verification.md",
+  "rework_count": 2,
+  "fix_items": [
+    "R1-1 健康侧（AD-30）：Fail/OK 改为只在调用方 Ack 后才推进 Down/Up；新增 Ack(ev HealthEvent)；未 Ack 的 Down 每次 Fail 都返回、未 Ack 的 Up 每次 OK 都返回；未确认 Down 就恢复 ⇒ 无事件并清除计时",
+    "补用例：Down 未 Ack 时后续每次 Fail 都返回 Down；Ack 后不再返回；Up 同理；并发 Fail/OK/Ack 在 -race 下无竞争（读写须确有重叠）",
+    "证据见 .arcforge/docs/05-review/qa-review-round2.md §2（R1-1，4 个独立来源）"
+  ]
+}

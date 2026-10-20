@@ -13996,3 +13996,6 @@ TASK-002 当时还是 `pending`、`assigned_to` 为空 ⇒ leader 有写权。**
 - **事件**：dev-m15-b 前台委派 code-simplifier 子代理，子代理完成后每次返回都被 TeammateIdle hook 拦下要求「推进 TASK-010 到 dev_done」——子代理无权写 `.arcforge/`，条件恒不可满足，循环 5 次后子代理主动给 Leader 发消息。**上游 PENDING-MECHANISMS #3 的第二个实例**（第一个在上游 sprint-010），频次证据成立：hook 按实例名过滤没把子代理排除。
 - **在 Leader 侧完全不可见**：`in_progress` 刻意无 stale-dispatch 阈值；dev 本体 `running`（等子代理）与「正在写代码」同形。本次靠子代理自报，不是靠机制。处置：回子代理「直接返回」，把结论转给 dev 本体让它不等子代理继续。
 - **我自己的错**：merge 回信里要求 dev「discovery decisions 记一句子代理卡死」，而那时它已在走 dev_done；它转 verifying 后我的要求才到，它正确拒绝（改 discovery = 判定对象漂移）。这是 M1d 记过三次的「补充要求晚于 dev_done」，出自 Leader 之手。**处方**：要进 discovery 的内容必须在派发消息或 merge 回信**之前**想好；机制事件的载体是 Leader 的 wisdom / PENDING-MECHANISMS，不是 dev 的 discovery。
+## 2026-10-20 Pricewatch — DoD 写法教训（TASK-002，test-pw-a 实测）
+- 「防切片别名」的 DoD 写成「先解析的资产 X 的值不变」是盲点：X 在被覆盖资产之前已解析完，别名改写发生在它之后，断言恒真（`out := base` 变异下 BTC 断言不红）。应写成「**排在被覆盖资产之后**的资产值不变 + strategy 源本身未被修改」。泛化：防共享可变状态的断言，被观察方必须在写入方**之后**读取。
+- Leader 时机差错 ×2（TASK-010、TASK-004）：在 merge 通知里要求「dev_done 之前补写 discovery」，到达时 dev 已按 sha256 自查完成合入并转 dev_done、甚至已派验 ⇒ 要求落空（dev 正确拒绝在 verifying 中改 discovery）。处方：**对 discovery 内容的要求一律放进派发消息**，merge 通知只说「已合入」；merge 通知是 dev 收尾的触发器，不是可附加要求的载体。
