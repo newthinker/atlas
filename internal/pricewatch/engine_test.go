@@ -799,3 +799,84 @@ func engWinStats(t *testing.T, s *Store, w Window, price float64, now time.Time)
 	}
 	return ws
 }
+
+// QA R1-1（AD-30）：健康告警发送失败不确认 ⇒ 下一轮重发；用真实 HealthTracker 与会失败的 sender。
+func TestCheckAsset_HealthSendFailureRetries(t *testing.T) {
+	const down, up = "⚠️ 监控异常：BTC 取价", "✅ 已恢复：BTC 取价"
+	runAt := func(t *testing.T, f *engFixture, minutes ...int) {
+		t.Helper()
+		for _, m := range minutes {
+			f.at(time.Duration(m) * time.Minute)
+			_ = f.run(t)
+		}
+	}
+	want := func(t *testing.T, f *engFixture, step, prefix string, n int) {
+		t.Helper()
+		if got := engCount(f.snd.sent(), prefix); got != n {
+			t.Fatalf("%s: %q 发送尝试 %d 次，期望 %d：%q", step, prefix, got, n, f.snd.sent())
+		}
+	}
+	tgDown := errors.New("telegram down")
+
+	t.Run("异常与恢复都在发送失败后补发", func(t *testing.T) {
+		f := newEngFixture(t, engDayDrop)
+		f.okx.fail(errors.New("okx down"))
+		f.bin.fail(errors.New("binance down"))
+		runAt(t, f, 0, 29)
+		want(t, f, "29m", down, 0)
+
+		f.snd.setErr(tgDown)
+		runAt(t, f, 30)
+		want(t, f, "30m 首次发送失败", down, 1)
+		runAt(t, f, 31)
+		want(t, f, "31m 未确认 ⇒ 重发（仍失败）", down, 2)
+		f.snd.setErr(nil)
+		runAt(t, f, 32)
+		want(t, f, "32m 重发成功", down, 3)
+		runAt(t, f, 33)
+		want(t, f, "33m 已确认不再发", down, 3)
+
+		f.bin.setPrice(100)
+		f.snd.setErr(tgDown)
+		runAt(t, f, 34)
+		want(t, f, "34m 恢复消息发送失败", up, 1)
+		runAt(t, f, 35)
+		want(t, f, "35m 未确认 ⇒ 重发（仍失败）", up, 2)
+		f.snd.setErr(nil)
+		runAt(t, f, 36)
+		want(t, f, "36m 重发成功", up, 3)
+		runAt(t, f, 37)
+		want(t, f, "37m 已确认不再发", up, 3)
+		want(t, f, "全程", down, 3)
+	})
+
+	t.Run("异常未送达就恢复 ⇒ 不发孤立的「已恢复」", func(t *testing.T) {
+		f := newEngFixture(t, engDayDrop)
+		f.okx.fail(errors.New("okx down"))
+		f.bin.fail(errors.New("binance down"))
+		runAt(t, f, 0)
+		f.snd.setErr(tgDown)
+		runAt(t, f, 30)
+		want(t, f, "30m 发送失败", down, 1)
+		f.snd.setErr(nil)
+		f.bin.setPrice(100)
+		runAt(t, f, 31, 32)
+		want(t, f, "恢复后", up, 0)
+		want(t, f, "恢复后", down, 1)
+	})
+
+	t.Run("dry-run 写出即确认", func(t *testing.T) {
+		f := newEngFixture(t, engDayDrop)
+		f.okx.fail(errors.New("okx down"))
+		f.bin.fail(errors.New("binance down"))
+		var out bytes.Buffer
+		f.e.DryRun, f.e.Out = true, &out
+		runAt(t, f, 0, 30, 31, 32)
+		if n := strings.Count(out.String(), down); n != 1 {
+			t.Fatalf("dry-run 下异常写出 %d 次，期望 1：\n%s", n, out.String())
+		}
+		if n := len(f.snd.sent()); n != 0 {
+			t.Fatalf("dry-run 调用了 Sender %d 次", n)
+		}
+	})
+}
