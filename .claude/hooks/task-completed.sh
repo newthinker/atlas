@@ -409,7 +409,7 @@ MINE_ACTUAL=$(filter_outside "$ACTUAL_PKGS" "$OTHERS")
 
 # ---- 2b'. Jev 质量闸门的状态导出(设计见 specs/2026-09-20-jev-quality-gate-design.md §2.2) ----
 # 纯写文件:不读判定结果、不改变任何退出路径 —— 失败一律吞掉,门禁结论只由下面的检查决定。
-# 导出两份,缺一不可:
+# 导出两份,缺一不可(另有 .heads,见下方 #45 一段):
 #   .files —— 本任务的改动集合。范围口径与 scope 漂移判定**同源**(都取上面那个已算好的集合):
 #             闸门若自己再 diff 一遍,共享工作区下必然混进他人在途改动(F1)。
 #   .base  —— 下游做 diff 的基线。这个集合含**已提交**改动(§2b C5 并入的有下界集合)与
@@ -431,11 +431,26 @@ if [ -n "${TASK_ID:-}" ] && [ -n "$WORK_SINCE" ]; then
                                                 for (i = 1; i <= n; i++) if (a[i] != "") s[a[i]] = 1 }
                                         NF && !($1 in s) { print; exit }')
 fi
+# #45 .heads —— 本任务**未合并**任务分支的 tip(全 sha,按提交时间新→旧)。.files 从 #38 起
+# 含这些分支上的改动,而 Jev 在主仓库工作区里 diff:按 worktree 协议 Leader 在 dev_done
+# **之后**才合并,于是 dev_done 那一刻 payload 恒为 0 字节(oikos 7 次 dev_done 全 empty_content)。
+# 判据与 task_branch_log 同源(主题锚定本任务、HEAD 走不到):走分支不放宽认领。已全部合并
+# 的分支不收 —— 内容主仓库里已有,工作区 diff 就对。多条时由 Jev 逐文件取第一个改过它的 head。
+JEV_HEADS=""
+if [ -n "${TASK_ID:-}" ] && JEV_REFS=$(task_branch_ref); then
+    # shellcheck disable=SC2086  # 同 task_branch_log:refname 不含空白
+    for sha in $(git for-each-ref --sort=-committerdate --format='%(objectname)' $JEV_REFS 2>/dev/null); do
+        [ -n "$(git log -1 -E --grep="^[a-z]+\(${TASK_ID}\):" --format=%H "$sha" --not HEAD 2>/dev/null)" ] \
+            && JEV_HEADS="$JEV_HEADS$sha
+"
+    done
+fi
 # `|| true` 不可省:set -uo pipefail 下 TASK_ID 为空时 `[ -n ]` 返回 1,会让这一组成为脚本的
-# 最后状态码。两次写入用 `&&` 串起来:目标目录不可写时第一次就短路,不会留下半份状态。
+# 最后状态码。写入用 `&&` 串起来:目标目录不可写时第一次就短路,不会留下半份状态。
 [ -n "${TASK_ID:-}" ] && { mkdir -p .arcforge/state/jev \
     && printf '%s\n' "$MINE_FILES" > ".arcforge/state/jev/${TASK_ID}.files" \
-    && printf '%s\n' "$JEV_BASE" > ".arcforge/state/jev/${TASK_ID}.base"; } 2>/dev/null || true
+    && printf '%s\n' "$JEV_BASE" > ".arcforge/state/jev/${TASK_ID}.base" \
+    && printf '%s' "$JEV_HEADS" > ".arcforge/state/jev/${TASK_ID}.heads"; } 2>/dev/null || true
 
 if [ -n "$PKGS" ]; then
     # ---- 2c. 交叉校验:实际改动 ⊆ **writes**(评审 R3,防 scope 漂移逃逸) ----
