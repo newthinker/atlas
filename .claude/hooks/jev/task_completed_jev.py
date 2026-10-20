@@ -222,6 +222,19 @@ def load_base(task_id: str) -> str:
         return ""
 
 
+def load_heads(task_id: str) -> List[str]:
+    """读未合并任务分支的 tip（#45 的 .heads）：每行一个全 sha，新→旧。
+
+    文件缺失（旧门禁没导出）与内容为空（分支都已合并 / 没有任务分支）同样返回 []，
+    collect_changes 随之退回修复前的行为——不能因为少了这个文件就 fail-closed。
+    """
+    p = arcforge_dir() / "state" / "jev" / f"{task_id}.heads"
+    try:
+        return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
 def _is_doc_path(path: str) -> bool:
     """文档后缀，或落在某个 docs/ 目录下。
 
@@ -256,19 +269,66 @@ def _read_files(paths: List[str], label: str = "") -> str:
     return "\n\n".join(parts)
 
 
-def collect_changes(scope: List[str], max_bytes: int, base: str = "") -> Dict[str, Any]:
+def _show_files(rev: str, paths: List[str]) -> str:
+    """同 _read_files，但从 rev 上读：分支上新建的文件在主仓库工作区里根本不存在。"""
+    parts: List[str] = []
+    for f in paths:
+        body = _git(["show", f"{rev}:{_repo_path(f)}"], quiet=True)
+        if body:
+            parts.append(f"===== {f} =====\n{body}")
+    return "\n\n".join(parts)
+
+
+def _repo_path(p: str) -> str:
+    """门禁导出 "./x" 形态，git 的 --name-only 输出 "x"：比对前统一成后者。"""
+    return p[2:] if p.startswith("./") else p
+
+
+def _split_by_heads(scope: List[str], heads: List[str],
+                    since: str) -> Tuple[List[Tuple[str, List[str]]], List[str]]:
+    """把 scope 里的文件分给「第一个改过它的 head」，余下的留给主仓库工作区。
+
+    「改过」= `git diff --name-only <since>...<head>` 里有它。三点取的是 since 与 head 的
+    merge-base：分支在 since 之前就分叉时，两点 diff 会把主干上 since 之前别人的改动
+    当成本任务删掉的行送出去。heads 新→旧，故返工分支的版本优先于上一轮的。
+    `-z` 不可省：git 默认把非 ASCII 路径转义加引号，对不上就静默退回工作区（又是 0 字节）。
+    """
+    remaining = list(scope)
+    picked: List[Tuple[str, List[str]]] = []
+    for h in heads:
+        if not remaining:
+            break
+        if not _rev_exists(h):
+            # 有声跳过：一个坏 head 不该让整条 payload 变空，也不该无声地少一块。
+            log_error("heads", f"解析不到 head {h[:12]}，跳过")
+            continue
+        changed = set(_git(["diff", "--name-only", "-z", f"{since}...{h}", "--"]
+                           + [_repo_path(f) for f in remaining]).split("\0"))
+        mine = [f for f in remaining if _repo_path(f) in changed]
+        if mine:
+            picked.append((h, mine))
+            remaining = [f for f in remaining if _repo_path(f) not in changed]
+    return picked, remaining
+
+
+def collect_changes(scope: List[str], max_bytes: int, base: str = "",
+                    heads: Optional[List[str]] = None) -> Dict[str, Any]:
     """把本任务范围内的改动整理成发给 Jev 的 payload。
 
     base 是 TASK-003 导出的基线 commit。**不能用 HEAD 代替**：本仓库以「先 commit 再
     dev_done」为正常流程，而 `git diff HEAD -- <scope>` 对已提交改动与 untracked 新文件
     的输出都是空 —— payload 会在主路径上恒为空，且闸门照常 exit 0、日志照常记录，
     没有任何症状（TASK-003 导出 .base 正是为了堵这个）。
+
+    heads 是未合并任务分支的 tip（#45）。只用 base 还不够：按 worktree 协议 Leader 在
+    dev_done **之后**才合并，dev_done 那一刻主仓库里根本没有这些改动，工作区 diff
+    同样恒为 0 字节。改过某文件的 head 优先，其余文件照旧走工作区（含 untracked）。
     """
     if not scope:
         # scope 为空时绝不能落到 `git diff <base> --`：不带 pathspec 就是整仓库 diff，
         # 会把所有人的在途改动一起送出去，正是本任务要消灭的 F1。
         return {"mode": "diff", "changed_files": [], "payload": "", "truncated": False,
-                "base": base, "base_usable": _rev_exists(base)}
+                "base": base, "base_usable": _rev_exists(base), "from_heads": []}
 
     # 没有**可用**基线就没法做 diff。退回 `git diff HEAD` 是错的（见上），送空 payload 更糟
     # ——Jev 会拿着空内容判 DoD，而判定结果看起来与正常判定毫无区别。故送全文。
@@ -276,19 +336,28 @@ def collect_changes(scope: List[str], max_bytes: int, base: str = "") -> Dict[st
     # 会让 git diff 给出 rc=128 + 空 stdout，与「没有改动」同形。
     base_usable = _rev_exists(base)
     mode = "full" if (is_doc_only(scope) or not base_usable) else "diff"
+    # 没有可用基线时以主仓库 HEAD 为三点左端：问的只是「分支自分叉以来改了哪些文件」。
+    picked, rest = _split_by_heads(scope, heads or [], base if base_usable else "HEAD")
+    parts: List[str] = []
     if mode == "full":
-        raw = _read_files(scope)
+        for h, files in picked:
+            parts.append(_show_files(h, files))
+        parts.append(_read_files(rest))
     else:
-        raw = _git(["diff", base, "--"] + list(scope))
-        # git diff 根本不看 untracked 文件：不单独补的话，「基线里不存在的新建文件」
-        # 这一整类在 payload 里隐形。补这一路同样受 scope 约束。
-        untracked = [ln for ln in _git(["ls-files", "--others", "--exclude-standard", "--"]
-                                       + list(scope)).splitlines() if ln.strip()]
-        extra = _read_files(untracked, label="新建文件")
-        raw = "\n\n".join(part for part in (raw, extra) if part)
+        for h, files in picked:
+            parts.append(_git(["diff", f"{base}...{h}", "--"] + files))
+        if rest:  # rest 为空时不能跑：不带 pathspec 就是整仓库 diff（同上 F1）
+            parts.append(_git(["diff", base, "--"] + rest))
+            # git diff 根本不看 untracked 文件：不单独补的话，「基线里不存在的新建文件」
+            # 这一整类在 payload 里隐形。补这一路同样受 scope 约束。
+            untracked = [ln for ln in _git(["ls-files", "--others", "--exclude-standard", "--"]
+                                           + rest).splitlines() if ln.strip()]
+            parts.append(_read_files(untracked, label="新建文件"))
+    raw = "\n\n".join(part for part in parts if part)
     payload, truncated = _truncate(redact(raw), max_bytes)
     return {"mode": mode, "changed_files": list(scope), "payload": payload,
-            "truncated": truncated, "base": base, "base_usable": base_usable}
+            "truncated": truncated, "base": base, "base_usable": base_usable,
+            "from_heads": [f for _, files in picked for f in files]}
 
 
 def _truncate(s: str, limit: int) -> Tuple[str, bool]:
@@ -395,7 +464,7 @@ def main() -> int:
         log_event("quality", {**base_record, "skipped": "no_scope"})
         return 0
     changes = collect_changes(scope, int(gate.get("max_diff_bytes", 60000)),
-                              base=load_base(task_id))
+                              base=load_base(task_id), heads=load_heads(task_id))
     # 并进 base_record 而不是只放进成功路径的 record：Jev 不可用时（影子期配置好之前
     # 是常态）日志里同样要能看出 payload 有没有内容。本任务修的就是「payload 恒为空
     # 且没有任何症状」——诊断字段只在成功路径可见的话，这个修复在运维上不可证。
@@ -404,6 +473,7 @@ def main() -> int:
         "content_mode": changes["mode"],
         "n_changed_files": len(changes["changed_files"]),
         "base": changes["base"], "base_usable": changes["base_usable"],
+        "content_from_heads": len(changes["from_heads"]),
     })
 
     # 没有内容就不要去判 —— 把空 payload 送给 Jev 得到的判定毫无意义，而它会照常
