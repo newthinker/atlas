@@ -62,45 +62,65 @@ var windowRefLabels = map[Window]string{
 	Window24h: " 24h ", Window7d: " 7d ", Window30d: " 30d ", Window4y: " 4 年", WindowAll: "历史",
 }
 
-// FormatAlert 按 spec §8 生成提醒消息。超过 4096 个 UTF-16 码元时截断【AI 分析】段（AD-24）。
+// FormatAlert 按 spec §8 生成提醒消息，并保证不超过 4096 个 UTF-16 码元（AD-24、AD-31）：
+// 超长时先截【AI 分析】，仍超则截【AI 结论】，【触发规则】与【多周期】完整保留；
+// 若非 AI 部分本身就超长，最后对整条消息兜底截断。
 func FormatAlert(a Alert) string {
 	hasAI := len(a.Advice) > 0
-	conclusion := "【AI 结论】AI 分析不可用"
+	conclusion := "AI 分析不可用"
+	var analysis string
 	if hasAI {
 		lines := make([]string, len(a.Advice))
 		for i, s := range a.Advice {
 			lines[i] = adviceLine(s)
 		}
-		conclusion = "【AI 结论】" + bySide(lines)
+		conclusion = bySide(lines)
+		if len(a.Advice) == 1 {
+			analysis = a.Advice[0].Reasoning
+		} else {
+			for i, s := range a.Advice {
+				lines[i] = s.Side + "：" + s.Reasoning
+			}
+			analysis = bySide(lines)
+		}
 	}
 	ov := a.Overview
-	head := strings.Join([]string{
-		fmt.Sprintf("%s %s %s %s（%s）", alertIcon(a.Triggers), a.Asset.Symbol, formatPrice(a.Price), a.Asset.Quote, a.Source),
-		conclusion,
+	header := fmt.Sprintf("%s %s %s %s（%s）", alertIcon(a.Triggers), a.Asset.Symbol, formatPrice(a.Price), a.Asset.Quote, a.Source)
+	body := strings.Join([]string{
 		"【触发规则】\n" + triggerLines(a.Triggers),
 		fmt.Sprintf("【多周期】24h %s · 7d %s · 30d %s · 距历史最高 %s · 距 4 年最低 %s",
 			formatPct(ov.Chg24h, 1), formatPct(ov.Chg7d, 1), formatPct(ov.Chg30d, 1),
 			formatPct(ov.FromATH, 1), formatPct(ov.From4yLow, 0)),
 	}, "\n\n")
-	if !hasAI {
-		return head
+	assemble := func() string {
+		parts := []string{header, "【AI 结论】" + conclusion, body}
+		if hasAI {
+			parts = append(parts, "【AI 分析】"+analysis, "AI 建议仅供参考")
+		}
+		return strings.Join(parts, "\n\n")
 	}
 
-	prefix := head + "\n\n【AI 分析】"
-	analysis := a.Advice[0].Reasoning
-	if len(a.Advice) > 1 {
-		lines := make([]string, len(a.Advice))
-		for i, s := range a.Advice {
-			lines[i] = s.Side + "：" + s.Reasoning
-		}
-		analysis = bySide(lines)
+	msg := assemble()
+	if !hasAI {
+		return capUTF16(msg)
 	}
-	suffix := "\n\nAI 建议仅供参考"
-	if msg := prefix + analysis + suffix; utf16Len(msg) <= maxMessageUTF16 {
+	for _, field := range []*string{&analysis, &conclusion} {
+		over := utf16Len(msg) - maxMessageUTF16
+		if over <= 0 {
+			return msg
+		}
+		*field = truncateUTF16(*field, utf16Len(*field)-over-utf16Len(truncatedMark)) + truncatedMark
+		msg = assemble()
+	}
+	return capUTF16(msg)
+}
+
+// capUTF16 把超过上限的消息截到恰好不超限，并以截断标记结尾。
+func capUTF16(msg string) string {
+	if utf16Len(msg) <= maxMessageUTF16 {
 		return msg
 	}
-	budget := maxMessageUTF16 - utf16Len(prefix+truncatedMark+suffix)
-	return prefix + truncateUTF16(analysis, budget) + truncatedMark + suffix
+	return truncateUTF16(msg, maxMessageUTF16-utf16Len(truncatedMark)) + truncatedMark
 }
 
 // bySide 只有一行时直接接在段标题后；多行时从标题下一行起逐行列出。
