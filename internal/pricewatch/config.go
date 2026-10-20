@@ -68,7 +68,8 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading pricewatch config: %w", err)
 	}
 	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
+	// 严格解析：拼错的键（如 heartbeat_al）会静默落空，心跳就被悄悄关掉了
+	if err := v.UnmarshalExact(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing pricewatch config: %w", err)
 	}
 	if err := cfg.build(); err != nil {
@@ -96,6 +97,12 @@ func (c *Config) UnsupportedItems() []string {
 func (c *Config) build() error {
 	if c.CheckInterval <= 0 {
 		return fmt.Errorf("check_interval must be > 0, got %v", c.CheckInterval)
+	}
+	if c.Health.FailAlertAfter <= 0 {
+		return fmt.Errorf("health.fail_alert_after must be > 0, got %v", c.Health.FailAlertAfter)
+	}
+	if c.AI.Timeout <= 0 {
+		return fmt.Errorf("ai.timeout must be > 0, got %v", c.AI.Timeout)
 	}
 	if h := c.Health.HeartbeatAt; h != "" {
 		if _, err := time.Parse("15:04", h); err != nil {
@@ -195,6 +202,9 @@ func mergeRules(base, overrides []RuleCfg) ([]RuleCfg, error) {
 	return out, nil
 }
 
+// placeholderPrefix 是仓库里 launchd plist 给 Telegram 变量放的占位值前缀（QA-14）。
+const placeholderPrefix = "REPLACE_WITH_"
+
 var envRefRE = regexp.MustCompile(`^\$\{([A-Za-z0-9_]+)\}$`)
 
 // expandEnv 只接受整值为 ${NAME} 的写法；错误文本不回显原值，避免把明文密钥写进日志。
@@ -206,6 +216,10 @@ func expandEnv(field, raw string) (string, error) {
 	val := os.Getenv(m[1])
 	if val == "" {
 		return "", fmt.Errorf("%s: environment variable %s is empty", field, m[1])
+	}
+	if strings.HasPrefix(val, placeholderPrefix) {
+		return "", fmt.Errorf("%s: environment variable %s still holds the %s… placeholder from the repo plist; "+
+			"put the real value into the copy installed under ~/Library/LaunchAgents/ (see the plist comment)", field, m[1], placeholderPrefix)
 	}
 	return val, nil
 }
