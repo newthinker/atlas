@@ -9,12 +9,14 @@ package pricewatch
 // boundary[0]       价格/百分比格式、−0.0、档位写法              → TestFormatPrice、TestFormatPct、TestFormatTier
 // error_handling[0] UTF-16 ≤4096、触发规则完整、「…（已截断）」  → TestFormatAlert_Truncate、TestFormatAlert_NoTruncateNormal
 // QA-6（AD-31）     整条兜底 ≤4096：恰 4096 不截 / 4097 截；AI 结论字段超长；非 AI 部分超长 → TestFormatAlert_Limit*
+// QA iter2 N1       健康消息 detail 超长 ⇒ ≤4096 且标题保留；正常长度不截 → TestFormatHealth_Limit
 
 import (
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 func msgRule(id string, typ RuleType, w Window) Rule {
@@ -400,5 +402,32 @@ func TestFormatAlert_LimitWholeMessage(t *testing.T) {
 		if !strings.HasPrefix(got, "🔻 BTC 68,120 USDT（okx）") || !strings.HasSuffix(got, "…（已截断）") {
 			t.Fatalf("整条截断应保留开头并以截断标记结尾，尾部 %q", got[len(got)-40:])
 		}
+	}
+}
+
+// N1：sync 多段失败的 errors.Join 可远超 4096；健康消息须截断且保留标题行。
+func TestFormatHealth_Limit(t *testing.T) {
+	detail := strings.Repeat("同步失败📉", 2000) // 中文 + 代理对，约 1.2 万码元
+	for _, c := range []struct {
+		down  bool
+		title string
+	}{
+		{true, "⚠️ 监控异常：BTC 1d K 线同步\n"},
+		{false, "✅ 已恢复：BTC 1d K 线同步\n"},
+	} {
+		got := FormatHealth(c.down, "BTC 1d K 线同步", detail)
+		if n := encodedUTF16Len(got); n > maxMessageUTF16 || n < maxMessageUTF16-2 {
+			t.Fatalf("down=%v：UTF-16 长度 %d，应截到 %d 以内且接近上限", c.down, n, maxMessageUTF16)
+		}
+		if !strings.HasPrefix(got, c.title) || !strings.HasSuffix(got, truncatedMark) {
+			t.Fatalf("down=%v：应以标题开头、以截断标记结尾：%q…%q", c.down, got[:60], got[len(got)-40:])
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("down=%v：截断劈开了字符", c.down)
+		}
+	}
+	normal := strings.Repeat("稳", 4000)
+	if got := FormatHealth(true, "k", normal); got != "⚠️ 监控异常：k\n"+normal {
+		t.Fatalf("正常长度不应截断（长度 %d）", encodedUTF16Len(got))
 	}
 }
