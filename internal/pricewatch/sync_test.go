@@ -9,6 +9,10 @@ package pricewatch
 // functional[5]     上线日写 kv；第二次不再请求早于上线日的段（AD-21）            → TestSync_Listing
 // boundary[0]       坏 K 线丢弃、同批其余入库（AD-20b）                           → TestValidCandle、TestSync_DropsBadCandles
 // non_functional[0] 5m 修剪不影响 1d；全源报错返回含 pair/bar 的 error 且已成功段仍在 → TestSync_Prune5m、TestSync_AllSourcesError
+// QA 返工（review_fix 1）
+// QA-8   上线日三道保护：部分源报错其余 0 根 / 某段全源报错 / 跳过的完整段 → TestSync_ListingNotRecordedOnError、TestSync_ListingNotRecordedAllError、TestSync_ListingStoppedBySkippedSegment
+// AD-29  与最短窗口（1d→30d，5m→24h）相交的段要求 100%，更早段 90% → TestSync_RecentSegmentsNeedFullCoverage
+// R1-5   best 不足且有源报错：best 照常入库并上抛错误；binance 全挂 → TestSync_BinanceDownReportsError
 
 import (
 	"context"
@@ -29,9 +33,12 @@ var syncNow = time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
 type semantics int
 
 const (
-	okxSem     semantics = iota // 区间两端不含，返回区间内最新 300 根
+	okxSem     semantics = iota // 区间两端不含，返回区间内最新 300 根；只有最近 okxHorizon 根（reviewer P2）
 	binanceSem                  // 区间两端含，从 start 起最多 1000 根
 )
+
+// okxHorizon：okx /market/candles 只能取到最近约 1440 根（reviewer P2 实测）。
+const okxHorizon = 1440
 
 type fakeCall struct{ start, end time.Time }
 
@@ -58,8 +65,12 @@ func (f *fakeProvider) FetchHistory(_ string, start, end time.Time, _ string) ([
 	if f.errIf != nil && f.errIf(start, end) {
 		return nil, errors.New(f.name + " boom")
 	}
+	data := f.data
+	if f.sem == okxSem && len(data) > okxHorizon {
+		data = data[len(data)-okxHorizon:]
+	}
 	var out []core.OHLCV
-	for _, c := range f.data {
+	for _, c := range data {
 		switch f.sem {
 		case okxSem:
 			if c.Time.After(start) && c.Time.Before(end) {
@@ -130,9 +141,9 @@ func TestSync_Chunks(t *testing.T) {
 		sem  semantics
 		from time.Time
 	}{
-		{"okx", okxSem, time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"okx（horizon 内）", okxSem, today.AddDate(0, 0, -1400)},
 		{"binance", binanceSem, time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC)},
-		{"okx 16:00 对齐", okxSem, time.Date(2018, 1, 1, 16, 0, 0, 0, time.UTC)},
+		{"okx 16:00 对齐", okxSem, today.AddDate(0, 0, -1400).Add(16 * time.Hour)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -261,9 +272,9 @@ func TestSync_SteadyState(t *testing.T) {
 		sem  semantics
 		from time.Time
 	}{
-		{"okx", okxSem, time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC)},
+		{"okx（horizon 内）", okxSem, today.AddDate(0, 0, -1400)},
 		{"binance", binanceSem, time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC)},
-		{"okx 16:00 对齐", okxSem, time.Date(2019, 3, 1, 16, 0, 0, 0, time.UTC)},
+		{"okx 16:00 对齐", okxSem, today.AddDate(0, 0, -1400).Add(16 * time.Hour)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -283,7 +294,7 @@ func TestSync_SteadyState(t *testing.T) {
 }
 
 func TestSync_RepairsGap(t *testing.T) {
-	data := series(time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC), syncNow, dayDur, 1)
+	data := series(today.AddDate(0, 0, -1400), syncNow, dayDur, 1)
 	p := &fakeProvider{name: "p", sem: okxSem, data: data}
 	sy := newSyncer(t, p)
 	mustSync(t, sy, "BTCUSDT", "1d")
@@ -427,7 +438,8 @@ func TestSync_DropsBadCandles(t *testing.T) {
 func TestSync_Prune5m(t *testing.T) {
 	const fiveMin = 5 * time.Minute
 	// 开盘时间恰为 now 的那根还不存在
-	p := &fakeProvider{name: "p", sem: okxSem, data: series(syncNow.Add(-8*dayDur), syncNow.Add(-fiveMin), fiveMin, 1)}
+	// 8 天 5m 线 2304 根超过 okx 的 1440 根上限，回填由 binance 承担（AD-20）
+	p := &fakeProvider{name: "p", sem: binanceSem, data: series(syncNow.Add(-8*dayDur), syncNow.Add(-fiveMin), fiveMin, 1)}
 	sy := newSyncer(t, p)
 	old := []core.OHLCV{candle(syncNow.Add(-10*dayDur), 2, 1, 1), candle(syncNow.Add(-9*dayDur), 2, 1, 1)}
 	mustUpsert(t, sy.Store, "BTCUSDT", "5m", old...)
@@ -479,5 +491,164 @@ func TestSync_Errors(t *testing.T) {
 	}
 	if p.callCount() != 0 {
 		t.Fatalf("no request after cancel, got %d", p.callCount())
+	}
+}
+
+// deleteCandle 从库里删掉恰在 ts 的那根（模拟补数失败留下的单根缺口）。
+func deleteCandle(t *testing.T, st *Store, bar string, ts time.Time) {
+	t.Helper()
+	if _, err := st.db.Exec(`DELETE FROM candles WHERE bar = ? AND ts = ?`, bar, ts.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hasCandle(t *testing.T, st *Store, bar string, ts time.Time) bool {
+	t.Helper()
+	return mustStats(t, st, "BTCUSDT", bar, ts, ts).Count == 1
+}
+
+// QA-8（探针源码 .arcforge/docs/02-plan/qa-8-probe.md）：A 只有最近 400 天；B 有 3000 天但对老段报错。
+// 老段「A 成功 0 根 + B 报错」不能当成「未上线」。
+func TestSync_ListingNotRecordedOnError(t *testing.T) {
+	aFrom := today.AddDate(0, 0, -400)
+	a := &fakeProvider{name: "A", sem: okxSem, data: series(aFrom, syncNow, dayDur, 1)}
+	b := &fakeProvider{name: "B", sem: binanceSem, data: series(today.AddDate(0, 0, -3000), syncNow, dayDur, 2),
+		errIf: func(s, e time.Time) bool { return s.Before(aFrom.AddDate(0, 0, -300)) }}
+	sy := newSyncer(t, a, b)
+	_ = sy.Sync(context.Background(), "BTCUSDT", "1d")
+	if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v != "" {
+		t.Fatalf("listing recorded despite errors: %q", v)
+	}
+}
+
+// QA-8：老段所有源都报错，之后的段有数据：报错段不能被当成「未上线」。
+func TestSync_ListingNotRecordedAllError(t *testing.T) {
+	cut := today.AddDate(0, 0, -400)
+	bad := func(s, e time.Time) bool { return s.Before(cut) }
+	a := &fakeProvider{name: "A", sem: okxSem, data: series(cut, syncNow, dayDur, 1), errIf: bad}
+	b := &fakeProvider{name: "B", sem: binanceSem, data: series(cut, syncNow, dayDur, 2), errIf: bad}
+	sy := newSyncer(t, a, b)
+	_ = sy.Sync(context.Background(), "BTCUSDT", "1d")
+	if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v != "" {
+		t.Fatalf("listing recorded despite all-source errors: %q", v)
+	}
+}
+
+// QA-8（S29 的非空形态）：前面各段都成功返回 0 根，接着一段 A 只给出部分数据、B 报错。
+// B 在该段可能有更早的数据 ⇒ 不能把 A 的最早一根记成上线日；A 的数据照常入库（R1-5）。
+func TestSync_ListingNotRecordedOnPartialWithError(t *testing.T) {
+	// 取 2010 起的第 10 段 [seg, seg+300d)：A 从段内第 150 天起有数据，B 从第 50 天起有、但对该段报错
+	seg := dailyBackfillStart.AddDate(0, 0, 10*chunkBars)
+	d := seg.AddDate(0, 0, 150)
+	hit := func(s, e time.Time) bool { return !s.After(d) && e.After(d) }
+	a := &fakeProvider{name: "A", sem: binanceSem, data: series(d, syncNow, dayDur, 1)}
+	b := &fakeProvider{name: "B", sem: binanceSem, data: series(seg.AddDate(0, 0, 50), syncNow, dayDur, 2), errIf: hit}
+	sy := newSyncer(t, a, b)
+	if err := sy.Sync(context.Background(), "BTCUSDT", "1d"); err == nil {
+		t.Fatal("want error from B")
+	}
+	if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v != "" {
+		t.Fatalf("listing recorded from a segment where a source errored: %q", v)
+	}
+	if !hasCandle(t, sy.Store, "1d", d) {
+		t.Fatal("A's partial data for the erroring segment must still be stored")
+	}
+}
+
+// QA-8 第三道：本地已有数据的段（完整而被跳过，或含本地最新一根而被强制重取却返回 0 根）
+// ⇒ 此前不可能「未上线」，上线日判定必须停下。
+func TestSync_ListingStoppedBySkippedSegment(t *testing.T) {
+	firstSeg := series(dailyBackfillStart, dailyBackfillStart.AddDate(0, 0, chunkBars-1), dayDur, 1)
+	cases := []struct {
+		name  string
+		local []core.OHLCV
+	}{
+		// 本地另有今天的数据 ⇒ 第一段不含本地最新一根 ⇒ 走「覆盖率 ≥90% 跳过」
+		{"完整段被跳过", append(append([]core.OHLCV(nil), firstSeg...), candle(today, 2, 1, 1))},
+		// 本地只有第一段 ⇒ 它含本地最新一根 ⇒ 被强制重取，数据源对它返回 0 根
+		{"含最新一根的段重取得 0 根", firstSeg},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// 数据源只有最近 1000 天，2010 起的各段都返回 0 根
+			p := &fakeProvider{name: "p", sem: binanceSem, data: series(today.AddDate(0, 0, -1000), syncNow, dayDur, 1)}
+			sy := newSyncer(t, p)
+			mustUpsert(t, sy.Store, "BTCUSDT", "1d", c.local...)
+			mustSync(t, sy, "BTCUSDT", "1d")
+			if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v != "" {
+				t.Fatalf("listing recorded although local data exists in an earlier segment: %q", v)
+			}
+		})
+	}
+	// 对照：同样的数据源、本地为空时会记上线日（排除「本来就不会记」）
+	p := &fakeProvider{name: "p", sem: binanceSem, data: series(today.AddDate(0, 0, -1000), syncNow, dayDur, 1)}
+	sy := newSyncer(t, p)
+	mustSync(t, sy, "BTCUSDT", "1d")
+	if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v == "" {
+		t.Fatal("control: listing should be recorded when every leading segment was fetched and empty")
+	}
+}
+
+// AD-29：与最短窗口相交的段只要缺一根就重取；完全早于最短窗口的段仍按 90%（缺一根不重取）。
+func TestSync_RecentSegmentsNeedFullCoverage(t *testing.T) {
+	t.Run("1d：30d 内缺一根补齐，30d 外不补", func(t *testing.T) {
+		// 上线日取在使某段边界恰落在 now−15d：该段 [now−315d, now−15d) 与 30d 窗口相交、与 7d 窗口不相交
+		listing := today.AddDate(0, 0, -15-3*chunkBars)
+		p := &fakeProvider{name: "p", sem: binanceSem, data: series(listing, syncNow, dayDur, 1)}
+		sy := newSyncer(t, p)
+		mustSync(t, sy, "BTCUSDT", "1d") // 首次同步记下上线日 = listing，之后按 listing 切段
+		if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v != strconv.FormatInt(listing.UnixMilli(), 10) {
+			t.Fatalf("setup: listing = %q, want %d", v, listing.UnixMilli())
+		}
+		recent, old := today.AddDate(0, 0, -20), today.AddDate(0, 0, -400)
+		deleteCandle(t, sy.Store, "1d", recent)
+		deleteCandle(t, sy.Store, "1d", old)
+
+		mustSync(t, sy, "BTCUSDT", "1d")
+		if !hasCandle(t, sy.Store, "1d", recent) {
+			t.Fatal("gap inside the 30d window must be refetched (AD-29)")
+		}
+		if hasCandle(t, sy.Store, "1d", old) {
+			t.Fatal("segment entirely before the 30d window should still be skipped at ≥90%")
+		}
+	})
+
+	t.Run("5m：24h 内缺一根补齐，24h 外不补", func(t *testing.T) {
+		const fiveMin = 5 * time.Minute
+		p := &fakeProvider{name: "p", sem: binanceSem, data: series(syncNow.Add(-8*dayDur), syncNow.Add(-fiveMin), fiveMin, 1)}
+		sy := newSyncer(t, p)
+		mustSync(t, sy, "BTCUSDT", "5m")
+		recent, old := syncNow.Add(-2*time.Hour), syncNow.Add(-3*dayDur)
+		deleteCandle(t, sy.Store, "5m", recent)
+		deleteCandle(t, sy.Store, "5m", old)
+
+		mustSync(t, sy, "BTCUSDT", "5m")
+		if !hasCandle(t, sy.Store, "5m", recent) {
+			t.Fatal("gap inside the 24h window must be refetched (AD-29)")
+		}
+		if hasCandle(t, sy.Store, "5m", old) {
+			t.Fatal("segment entirely before the 24h window should still be skipped at ≥90%")
+		}
+	})
+}
+
+// R1-5：binance（主回填源）全挂、okx 只有最近 1440 根。okx 能给的照常入库（含不足 90% 的边界段），
+// 同时 Sync 上抛含 pair/bar 的错误，使 sync: 健康键可报；不得记上线日。
+func TestSync_BinanceDownReportsError(t *testing.T) {
+	data := series(today.AddDate(0, 0, -3000), syncNow, dayDur, 1)
+	okx := &fakeProvider{name: "okx", sem: okxSem, data: data}
+	bin := &fakeProvider{name: "binance", sem: binanceSem, data: data,
+		errIf: func(time.Time, time.Time) bool { return true }}
+	sy := newSyncer(t, okx, bin)
+
+	err := sy.Sync(context.Background(), "BTCUSDT", "1d")
+	if err == nil || !strings.Contains(err.Error(), "BTCUSDT") || !strings.Contains(err.Error(), "1d") || !strings.Contains(err.Error(), "binance") {
+		t.Fatalf("want error naming pair, bar and the failing source, got %v", err)
+	}
+	if got := countAll(t, sy, "BTCUSDT", "1d"); got != okxHorizon {
+		t.Fatalf("everything okx can serve must be stored, want %d got %d", okxHorizon, got)
+	}
+	if v, _ := sy.Store.GetKV(ListingKey("BTCUSDT", "1d")); v != "" {
+		t.Fatalf("listing must not be recorded while binance is down: %q", v)
 	}
 }
