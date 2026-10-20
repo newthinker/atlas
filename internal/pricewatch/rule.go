@@ -86,11 +86,12 @@ func ParseRule(c RuleCfg, def NotifyPolicy) (Rule, error) {
 	default:
 		return fail("invalid window %q", c.Window)
 	}
-	if c.ThresholdPct <= 0 {
-		return fail("threshold_pct must be > 0, got %v", c.ThresholdPct)
+	// 写成 !(x > 0) 而非 x <= 0：NaN 的任何比较都为假，后者会放行 NaN
+	if !(c.ThresholdPct > 0) || math.IsInf(c.ThresholdPct, 1) {
+		return fail("threshold_pct must be a finite number > 0, got %v", c.ThresholdPct)
 	}
-	if c.StepPct < 0 {
-		return fail("step_pct must be >= 0, got %v", c.StepPct)
+	if !(c.StepPct >= 0) || math.IsInf(c.StepPct, 1) {
+		return fail("step_pct must be a finite number >= 0, got %v", c.StepPct)
 	}
 	n := def
 	if c.Notify != nil {
