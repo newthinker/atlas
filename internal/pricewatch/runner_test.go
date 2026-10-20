@@ -5,9 +5,11 @@ package pricewatch
 // functional[1]     真实时间 Tick=10ms、30ms/90ms 两资产 → 前者 ≥ 2×后者     → TestRunner_Schedules（另 TestRunner_ScheduleNoDrift 用可控时钟）
 // functional[2]     两次 tick 都过 09:00 只发 1 条心跳、kv 为当天、内容来自 Snapshot/Sent24h → TestRunner_HeartbeatOncePerDay
 // functional[3]     RunOnce 每资产一次且出错不阻断；Run 立即跑首轮       → TestRunner_RunOnce、TestRunner_FirstRoundImmediate
+//                   生产路径（不注入 check，真实 Engine）                  → TestRunner_RunOnceUsesEngine、TestRunner_RunUsesEngine（返工 R22）
 // boundary[0]       心跳发送失败不写 heartbeat_date，下一 tick 重试成功才写 → TestRunner_HeartbeatRetryAfterSendFailure
 // error_handling[0] ctx 取消 1 秒内返回 nil，之后不再调用 CheckAsset       → TestRunner_StopsOnCancel
 // 使用约束（TASK-007）同一资产不得并发 CheckAsset                        → TestRunner_SerialPerAsset
+// 非 DoD（返工 R21）ctx 取消后不再发心跳                                 → TestRunner_NoHeartbeatAfterCancel
 
 import (
 	"context"
@@ -348,5 +350,66 @@ func TestRunner_HeartbeatDateIsLocal(t *testing.T) {
 	}
 	if v, _ := f.st.GetKV("heartbeat_date"); v != "2026-10-21" {
 		t.Fatalf("heartbeat_date = %q, want local date 2026-10-21", v)
+	}
+}
+
+// 返工 R22：以上调度用例都注入替身 check，下面两个不注入、走 Engine.CheckAsset 的生产路径。
+// 价格自 24h 高点 100 跌到 90 ⇒ 真检测会发出 1 条 day_drop 提醒并推进规则状态；不检测则什么都不发。
+func engineRunner(t *testing.T) (*engFixture, *Runner) {
+	t.Helper()
+	f := newEngFixture(t, engDayDrop)
+	f.okx.setPrice(90)
+	f.at(0)
+	return f, &Runner{Engine: f.e, Assets: []Asset{f.asset}, Tick: time.Hour}
+}
+
+func assertEngineChecked(t *testing.T, f *engFixture) {
+	t.Helper()
+	if n := len(f.snd.sent()); n != 1 {
+		t.Fatalf("want 1 alert via Engine.CheckAsset, got %d", n)
+	}
+	if st := f.state(t, "day_drop"); st.Tier == 0 {
+		t.Fatalf("day_drop state not advanced: %+v", st)
+	}
+	if rows := f.e.Snapshot(); len(rows) != 1 || rows[0].Price != 90 {
+		t.Fatalf("snapshot not recorded by CheckAsset: %+v", rows)
+	}
+}
+
+func TestRunner_RunOnceUsesEngine(t *testing.T) {
+	f, r := engineRunner(t)
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertEngineChecked(t, f)
+}
+
+func TestRunner_RunUsesEngine(t *testing.T) {
+	f, r := engineRunner(t)
+	if err := runFor(t, r, 200*time.Millisecond); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	assertEngineChecked(t, f)
+}
+
+// 返工 R21（非 DoD）：ctx 已取消时 step 不再发心跳。
+func TestRunner_NoHeartbeatAfterCancel(t *testing.T) {
+	f, r := heartbeatFixture(t)
+	f.at(90 * time.Minute) // 09:30，心跳已到期
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := engCount(f.snd.sent(), heartbeatPrefix); n != 0 {
+		t.Fatalf("heartbeat sent after ctx cancelled: %d", n)
+	}
+	if v, _ := f.st.GetKV("heartbeat_date"); v != "" {
+		t.Fatalf("heartbeat_date written after cancel: %q", v)
+	}
+	// 对照：同一时刻未取消时确实会发（排除「本来就不到期」）
+	r.step(context.Background())
+	if n := engCount(f.snd.sent(), heartbeatPrefix); n != 1 {
+		t.Fatalf("control: want 1 heartbeat when not cancelled, got %d", n)
 	}
 }
