@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newthinker.atlas.pricewatch</string>
+
+  <!-- launchd 不做 PATH 查找，首项必须是绝对路径。 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zuowei/workspace/runtime/atlas/bin/atlas</string>
+    <string>--config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/config.yaml</string>
+    <string>pricewatch</string>
+    <string>run</string>
+    <string>--pricewatch-config</string>
+    <string>/Users/zuowei/workspace/runtime/atlas/configs/pricewatch.yaml</string>
+  </array>
+
+  <!-- pricewatch.yaml 里的 storage.path（data/pricewatch.db）等相对路径以此为根。 -->
+  <key>WorkingDirectory</key>
+  <string>/Users/zuowei/workspace/runtime/atlas</string>
+
+  <!--
+    两个 Telegram 变量在仓库里只放占位值。
+    真值只填进安装到 ~/Library/LaunchAgents/ 的那份副本，不要提交回仓库。
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>http_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>https_proxy</key>
+    <string>http://127.0.0.1:7897</string>
+    <key>no_proxy</key>
+    <string>localhost,127.0.0.1</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PRICEWATCH_TELEGRAM_BOT_TOKEN</key>
+    <string>REPLACE_WITH_BOT_TOKEN</string>
+    <key>PRICEWATCH_TELEGRAM_CHAT_ID</key>
+    <string>REPLACE_WITH_CHAT_ID</string>
+  </dict>
+
+  <!--
+    常驻：登录即起，任何退出都拉起（AD-27，人类 2026-10-20 裁决）；
+    ThrottleInterval 60 防止配置错误时快速重启刷屏。
+  -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/pricewatch.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zuowei/workspace/runtime/atlas/logs/pricewatch.err.log</string>
+</dict>
+</plist>
