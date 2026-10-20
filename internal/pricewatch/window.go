@@ -14,9 +14,6 @@ type WindowStats struct {
 	GapRatio  float64 // 有效窗口内没有任何 K 线的槽占比（AD-13）
 }
 
-// listingKey 是上线日在 kv 中的键，值为 UTC Unix 毫秒十进制字符串（AD-21）。
-func listingKey(pair, bar string) string { return "listing:" + pair + ":" + bar }
-
 func slotLength(bar string) time.Duration {
 	if bar == "5m" {
 		return 5 * time.Minute
@@ -108,13 +105,13 @@ func ceilDiv(d, unit time.Duration) int64 {
 }
 
 func readListing(st *Store, pair, bar string) (time.Time, bool, error) {
-	v, err := st.GetKV(listingKey(pair, bar))
+	v, err := st.GetKV(ListingKey(pair, bar))
 	if err != nil || v == "" {
 		return time.Time{}, false, err
 	}
 	ms, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("invalid %s value %q: %w", listingKey(pair, bar), v, err)
+		return time.Time{}, false, fmt.Errorf("invalid %s value %q: %w", ListingKey(pair, bar), v, err)
 	}
 	return fromMs(ms), true, nil
 }
