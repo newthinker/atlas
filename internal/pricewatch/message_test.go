@@ -10,8 +10,10 @@ package pricewatch
 // error_handling[0] UTF-16 ≤4096、触发规则完整、「…（已截断）」  → TestFormatAlert_Truncate、TestFormatAlert_NoTruncateNormal
 // QA-6（AD-31）     整条兜底 ≤4096：恰 4096 不截 / 4097 截；AI 结论字段超长；非 AI 部分超长 → TestFormatAlert_Limit*
 // QA iter2 N1       健康消息 detail 超长 ⇒ ≤4096 且标题保留；正常长度不截 → TestFormatHealth_Limit
+// QA 复验第 3 轮     cap 阈值边界：健康消息恰 4096 不截 / 4097 截；心跳超长截断保留首行 → TestFormatHealth_Boundary、TestFormatHeartbeat_Limit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -241,7 +243,7 @@ func TestFormatAlert_Truncate(t *testing.T) {
 		t.Fatalf("【AI 分析】之前的内容应与未截断时一致")
 	}
 	if !strings.HasSuffix(tail, "跌…（已截断）\n\nAI 建议仅供参考") {
-		t.Fatalf("截断处应以「…（已截断）」结尾，尾部: %q", tail[len(tail)-60:])
+		t.Fatalf("截断处应以「…（已截断）」结尾，尾部: %q", runeTail(tail, 60))
 	}
 	// 「跌」各占 1 个码元，截断应恰好用满预算
 	if n := encodedUTF16Len(got); n != maxMessageUTF16 {
@@ -341,7 +343,7 @@ func TestFormatAlert_LimitBoundary(t *testing.T) {
 	a = alertWithReasoningLen(t, 4097)
 	got = FormatAlert(a)
 	if n := encodedUTF16Len(got); n != 4096 || !strings.Contains(got, "稳…（已截断）\n\nAI 建议仅供参考") {
-		t.Fatalf("4097 码元应截断到恰 4096：长度 %d，尾部 %q", n, got[len(got)-80:])
+		t.Fatalf("4097 码元应截断到恰 4096：长度 %d，尾部 %q", n, runeTail(got, 80))
 	}
 }
 
@@ -366,7 +368,7 @@ func TestFormatAlert_LimitLongAdviceFields(t *testing.T) {
 				t.Fatalf("UTF-16 长度 %d 超过 %d", n, maxMessageUTF16)
 			}
 			if !strings.Contains(got, trig) || !strings.Contains(got, "【多周期】") {
-				t.Fatalf("【触发规则】与【多周期】应完整保留:\n%s", got[:200])
+				t.Fatalf("【触发规则】与【多周期】应完整保留:\n%s", runeHead(got, 200))
 			}
 			if !strings.Contains(got, "\n\n【AI 结论】") || !strings.Contains(got, "…（已截断）") {
 				t.Fatalf("应保留【AI 结论】段并带截断标记")
@@ -400,7 +402,7 @@ func TestFormatAlert_LimitWholeMessage(t *testing.T) {
 			t.Fatalf("advice=%v：UTF-16 长度 %d 超限", advice != nil, n)
 		}
 		if !strings.HasPrefix(got, "🔻 BTC 68,120 USDT（okx）") || !strings.HasSuffix(got, "…（已截断）") {
-			t.Fatalf("整条截断应保留开头并以截断标记结尾，尾部 %q", got[len(got)-40:])
+			t.Fatalf("整条截断应保留开头并以截断标记结尾，尾部 %q", runeTail(got, 40))
 		}
 	}
 }
@@ -420,7 +422,7 @@ func TestFormatHealth_Limit(t *testing.T) {
 			t.Fatalf("down=%v：UTF-16 长度 %d，应截到 %d 以内且接近上限", c.down, n, maxMessageUTF16)
 		}
 		if !strings.HasPrefix(got, c.title) || !strings.HasSuffix(got, truncatedMark) {
-			t.Fatalf("down=%v：应以标题开头、以截断标记结尾：%q…%q", c.down, got[:60], got[len(got)-40:])
+			t.Fatalf("down=%v：应以标题开头、以截断标记结尾：%q…%q", c.down, runeHead(got, 60), runeTail(got, 40))
 		}
 		if !utf8.ValidString(got) {
 			t.Fatalf("down=%v：截断劈开了字符", c.down)
@@ -429,5 +431,59 @@ func TestFormatHealth_Limit(t *testing.T) {
 	normal := strings.Repeat("稳", 4000)
 	if got := FormatHealth(true, "k", normal); got != "⚠️ 监控异常：k\n"+normal {
 		t.Fatalf("正常长度不应截断（长度 %d）", encodedUTF16Len(got))
+	}
+}
+
+// runeHead / runeTail 按字符截取，供失败信息使用（按字节切会劈开多字节字符）。
+func runeHead(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+func runeTail(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
+}
+
+// capUTF16 的阈值边界：恰 4096 原样，恰 4097 截到不超过 4096（守住比较写成 <= max+1 这类偏移）。
+func TestFormatHealth_Boundary(t *testing.T) {
+	title := "⚠️ 监控异常：k\n"
+	detailFor := func(total int) string { return strings.Repeat("x", total-encodedUTF16Len(title)) }
+
+	exact := detailFor(4096)
+	if got := FormatHealth(true, "k", exact); got != title+exact {
+		t.Fatalf("恰 4096 码元不应截断：长度 %d", encodedUTF16Len(got))
+	}
+
+	got := FormatHealth(true, "k", detailFor(4097))
+	if n := encodedUTF16Len(got); n > maxMessageUTF16 || !strings.HasPrefix(got, title) || !strings.HasSuffix(got, truncatedMark) {
+		t.Fatalf("恰 4097 码元应截断：长度 %d，尾部 %q", n, runeTail(got, 20))
+	}
+}
+
+// 心跳与健康消息同构：资产很多时整条会超限（约 30 个资产即 >4096），须截断且保留首行。
+func TestFormatHeartbeat_Limit(t *testing.T) {
+	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	var rows []HeartbeatRow
+	for i := 0; i < 60; i++ {
+		rows = append(rows, HeartbeatRow{
+			Asset:  Asset{Symbol: fmt.Sprintf("SYM%02d", i), Name: "测试资产", Quote: "USDT"},
+			Price:  1234567,
+			LastOK: now,
+			Active: []string{"ath_drawdown 第10档", "cycle_rise 第10档", "week_drop 第10档", "day_drop 第10档"},
+		})
+	}
+	got := FormatHeartbeat(now, rows, 99999)
+	if n := encodedUTF16Len(got); n > maxMessageUTF16 || n < maxMessageUTF16-2 {
+		t.Fatalf("UTF-16 长度 %d，应截到 %d 以内且接近上限", n, maxMessageUTF16)
+	}
+	if !strings.HasPrefix(got, "💓 监控仍在运行（2026-10-20 09:00）\n· 测试资产 SYM00 ") || !strings.HasSuffix(got, truncatedMark) {
+		t.Fatalf("应保留首行并以截断标记结尾：%q…%q", runeHead(got, 40), runeTail(got, 20))
 	}
 }
