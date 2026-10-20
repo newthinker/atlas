@@ -192,7 +192,7 @@ func triggerLines(ts []Trigger) string {
 	return strings.Join(lines, "\n")
 }
 
-// FormatHeartbeat 生成每日心跳消息（spec §9）。时间按 now 的时区显示。
+// FormatHeartbeat 生成每日心跳消息（spec §9）。时间按 now 的时区显示。结果不超过 4096 个 UTF-16 码元。
 func FormatHeartbeat(now time.Time, rows []HeartbeatRow, sent24h int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "💓 监控仍在运行（%s）", now.Format("2006-01-02 15:04"))
@@ -209,7 +209,7 @@ func FormatHeartbeat(now time.Time, rows []HeartbeatRow, sent24h int) string {
 			r.Asset.Name, r.Asset.Symbol, formatPrice(r.Price), r.Asset.Quote, lastOK, active)
 	}
 	fmt.Fprintf(&b, "\n过去 24 小时发出提醒 %d 条", sent24h)
-	return b.String()
+	return capUTF16(b.String()) // 资产很多时可超限；截尾保留首行
 }
 
 // FormatHealth 生成健康告警：down=true 为「监控异常」，false 为「已恢复」。detail 为空时只有一行。
