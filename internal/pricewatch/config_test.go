@@ -8,6 +8,8 @@ package pricewatch
 // boundary[0]   ai.timeout/fail_alert_after 默认值、heartbeat 空、strategy 大小写 → TestLoadConfig_Defaults
 // error_handling[0] 计划 13 行 + sources/quote/资产级 check_interval → TestLoadConfig_Rejects
 // error_handling[1] ${ENV} 严格匹配、明文不进错误文本、proxy 原样   → TestLoadConfig_TelegramEnv
+// qa_fix r1         QA-14 占位值；R1-2 未知键；R1-3 fail_alert_after/ai.timeout>0；QA-4 剥路径前缀
+//                   → TestLoadConfig_PlaceholderRejected、TestLoadConfig_Rejects（新增 6 行 + errBody）
 
 import (
 	"os"
@@ -49,6 +51,15 @@ func loadYAML(t *testing.T, content string) (*Config, error) {
 		t.Fatal(err)
 	}
 	return LoadConfig(path)
+}
+
+// errBody 去掉 LoadConfig 错误里「invalid pricewatch config <path>: 」这段前缀。
+// 路径来自 t.TempDir()，含子测试名（如 window_2d），不剥掉的话字段名断言会被路径顺带满足。
+func errBody(err error) string {
+	if _, body, ok := strings.Cut(err.Error(), ".yaml: "); ok {
+		return body
+	}
+	return err.Error()
 }
 
 func mustLoad(t *testing.T, content string) *Config {
@@ -251,6 +262,13 @@ func TestLoadConfig_Rejects(t *testing.T) {
 		{"quote empty", "quote: USDT", `quote: ""`, "quote"},
 		{"asset check_interval negative", "check_interval: 10m", "check_interval: -1m", "check_interval"},
 		{"duplicate id in asset rules", "          - " + ethDayDrop, "          - " + ethDayDrop + "\n          - " + ethDayDrop, "duplicate rule id"},
+		{"unknown key", `heartbeat_at: "09:00"`, `heartbeat_at: "09:00"
+  heartbeat_al: "08:00"`, "heartbeat_al"},
+		{"unknown rule key", "{id: week_drop, type: drop_from_high, window: 7d", "{id: week_drop, typo: x, type: drop_from_high, window: 7d", "typo"},
+		{"fail_alert_after 0s", "fail_alert_after: 30m", "fail_alert_after: 0s", "fail_alert_after"},
+		{"fail_alert_after negative", "fail_alert_after: 30m", "fail_alert_after: -1m", "fail_alert_after"},
+		{"ai.timeout 0s", "timeout: 60s", "timeout: 0s", "ai.timeout"},
+		{"ai.timeout negative", "timeout: 60s", "timeout: -5s", "ai.timeout"},
 		{"empty symbol", "{symbol: BTC, name: 比特币,", "{symbol: \"\", name: 比特币,", "symbol"},
 	}
 	for _, c := range cases {
@@ -261,8 +279,8 @@ func TestLoadConfig_Rejects(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), c.want) {
-				t.Errorf("error %q should contain %q", err, c.want)
+			if msg := errBody(err); !strings.Contains(msg, c.want) {
+				t.Errorf("error %q should contain %q", msg, c.want)
 			}
 		})
 	}
@@ -302,6 +320,29 @@ func TestLoadConfig_TelegramEnv(t *testing.T) {
 			t.Errorf("Proxy = %q, want ${X}", c.Telegram.Proxy)
 		}
 	})
+}
+
+func TestLoadConfig_PlaceholderRejected(t *testing.T) {
+	// QA-14：plist 仓库版只放 REPLACE_WITH_ 占位值，装到 LaunchAgents 时忘了替换要在启动时就报错
+	for _, c := range []struct{ env, field string }{
+		{"PRICEWATCH_TELEGRAM_BOT_TOKEN", "telegram.bot_token"},
+		{"PRICEWATCH_TELEGRAM_CHAT_ID", "telegram.chat_id"},
+	} {
+		t.Run(c.field, func(t *testing.T) {
+			setTelegramEnv(t)
+			t.Setenv(c.env, "REPLACE_WITH_SOMETHING")
+			_, err := loadYAML(t, validYAML(t))
+			if err == nil {
+				t.Fatal("expected error for placeholder value")
+			}
+			msg := errBody(err)
+			for _, want := range []string{c.field, c.env, "REPLACE_WITH_", "~/Library/LaunchAgents/"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q should contain %q", msg, want)
+				}
+			}
+		})
+	}
 }
 
 func TestUnsupportedItems(t *testing.T) {
