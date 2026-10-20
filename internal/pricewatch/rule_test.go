@@ -6,6 +6,7 @@ package pricewatch
 // functional[3] Window 的 Span/Bar                            → TestWindow
 // boundary[0]   step_pct 0 合法、Notify 默认/原样、Type/Window 常量 → TestParseRule_Valid
 // error_handling[0] 非法取值返回含规则 id 与字段名的 error      → TestParseRule_Rejects
+// qa_fix r1 QA-1    threshold_pct/step_pct 为 NaN、±Inf 报错          → TestParseRule_Rejects（新增 6 行）
 // functional[2]/boundary[1] 见 state_test.go
 
 import (
@@ -124,6 +125,12 @@ func TestParseRule_Rejects(t *testing.T) {
 		{"threshold 0", "threshold_pct", func(c *RuleCfg) { c.ThresholdPct = 0 }},
 		{"threshold -1", "threshold_pct", func(c *RuleCfg) { c.ThresholdPct = -1 }},
 		{"step -1", "step_pct", func(c *RuleCfg) { c.StepPct = -1 }},
+		{"threshold NaN", "threshold_pct", func(c *RuleCfg) { c.ThresholdPct = math.NaN() }},
+		{"threshold +Inf", "threshold_pct", func(c *RuleCfg) { c.ThresholdPct = math.Inf(1) }},
+		{"threshold -Inf", "threshold_pct", func(c *RuleCfg) { c.ThresholdPct = math.Inf(-1) }},
+		{"step NaN", "step_pct", func(c *RuleCfg) { c.StepPct = math.NaN() }},
+		{"step +Inf", "step_pct", func(c *RuleCfg) { c.StepPct = math.Inf(1) }},
+		{"step -Inf", "step_pct", func(c *RuleCfg) { c.StepPct = math.Inf(-1) }},
 		{"max_per_tier 0", "max_per_tier", func(c *RuleCfg) {
 			c.Notify = &NotifyPolicy{RepeatInterval: time.Hour, MaxPerTier: 0}
 		}},

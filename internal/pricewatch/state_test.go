@@ -3,6 +3,7 @@ package pricewatch
 // Context Checkpoint: done_criteria → test mapping (TASK-001)
 // functional[2] 计划 10 例 + 恰满间隔 + 用尽后跌深一档，每行断言 next 与 kind → TestDecide
 // boundary[1]   不修改入参；零值 LastSentAt 视为已满间隔                    → TestDecide（case 3）、TestDecide_DoesNotMutatePrev
+// qa_fix r1 QA-2 prev{2,2,T0} 满间隔 → SendRepeat next{2,3,now}              → TestDecide（QA-2 档内第 3 次提醒）
 
 import (
 	"testing"
@@ -32,6 +33,7 @@ func TestDecide(t *testing.T) {
 		{"8 同档未满间隔", RuleState{2, 1, T0}, 2, T0.Add(59 * time.Minute), SendNone, RuleState{2, 1, T0}},
 		{"9 回落仍在档内重复提醒", RuleState{2, 1, T0}, 1, T0.Add(time.Hour), SendRepeat, RuleState{2, 2, T0.Add(time.Hour)}},
 		{"10 已达 max_per_tier", RuleState{2, 3, T0}, 2, T0.Add(5 * time.Hour), SendNone, RuleState{2, 3, T0}},
+		{"QA-2 档内第 3 次提醒", RuleState{2, 2, T0}, 2, T0.Add(time.Hour), SendRepeat, RuleState{2, 3, T0.Add(time.Hour)}},
 		{"恰满间隔重复", RuleState{2, 1, T0}, 2, T0.Add(time.Hour), SendRepeat, RuleState{2, 2, T0.Add(time.Hour)}},
 		{"次数用尽后跌深一档", RuleState{2, 3, T0}, 3, T0.Add(time.Minute), SendNew, RuleState{3, 1, T0.Add(time.Minute)}},
 	}
