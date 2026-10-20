@@ -290,14 +290,18 @@ func (e *Engine) track(key, subject string, err error, now time.Time) {
 	if ev.Kind == HealthNone {
 		return
 	}
+	// 只在送达（或 dry-run 已写出）后确认；发送失败不确认，下一轮重发（AD-30）
 	text := FormatHealth(ev.Kind == HealthDown, subject, detail)
 	if e.DryRun {
 		fmt.Fprintln(e.Out, text)
+		e.health.Ack(ev)
 		return
 	}
 	if err := e.Sender.SendText(text); err != nil {
 		e.logger().Warn("pricewatch health alert send failed", zap.String("key", key), zap.Error(err))
+		return
 	}
+	e.health.Ack(ev)
 }
 
 func (e *Engine) recordSnap(sym string, s assetSnap) {
