@@ -4,7 +4,7 @@ package pricewatch
 // functional[0]     After=30m：29m 无事件、30m 恰 1 次 Down、60m 不重复 → TestHealth_DownOnceAfterThreshold
 // functional[1]     Down 后 OK 恰 1 次 Up、再 OK 无事件；短暂失败无事件 → TestHealth_UpOnceAfterDown、TestHealth_TransientFailureSilent
 // functional[2]     不同键互不影响；Fail→OK→Fail 重新计时             → TestHealth_KeysIndependent、TestHealth_RestartTimingAfterOK
-// non_functional[0] 并发调用 Fail/OK 在 -race 下无 data race          → TestHealth_ConcurrentSafe
+// non_functional[0] 并发调用 Fail/OK 在 -race 下无 data race          → TestHealth_ConcurrentSafe、TestHealth_ConcurrentFailOK
 
 import (
 	"fmt"
@@ -125,5 +125,45 @@ func TestHealth_ConcurrentSafe(t *testing.T) {
 			t.Fatalf("%s 的 Down 次数 = %d，期望恰 1", k, downs[k])
 		}
 		wantHealthEvent(t, k+" 恢复", h.OK(k, healthAt(61)), k, HealthUp)
+	}
+}
+
+// Fail 与 OK 对同一键（及不同键）并发交替调用：OK 去锁时 -race 必报 DATA RACE。
+// 每个键的事件序列在锁下串行，因此 Down/Up 必然交替且以 Down 开头：ups ≤ downs ≤ ups+1。
+func TestHealth_ConcurrentFailOK(t *testing.T) {
+	var h HealthTracker // After=0：每次失败起点即告警，使 Down/Up 频繁出现
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	downs, ups := map[string]int{}, map[string]int{}
+	record := func(ev HealthEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch ev.Kind {
+		case HealthDown:
+			downs[ev.Key]++
+		case HealthUp:
+			ups[ev.Key]++
+		}
+	}
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			k := fmt.Sprintf("price:K%d", g%2) // 每个键 4 个 goroutine 共享
+			for i := 0; i < 200; i++ {
+				if (i+g)%2 == 0 {
+					record(h.Fail(k, healthAt(i)))
+				} else {
+					record(h.OK(k, healthAt(i)))
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	for i := 0; i < 2; i++ {
+		k := fmt.Sprintf("price:K%d", i)
+		if downs[k] == 0 || ups[k] > downs[k] || downs[k] > ups[k]+1 {
+			t.Fatalf("%s: downs=%d ups=%d，违反交替不变量", k, downs[k], ups[k])
+		}
 	}
 }
