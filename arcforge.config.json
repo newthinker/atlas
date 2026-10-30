@@ -74,5 +74,36 @@
         "integrity_max": 0.80
       }
     }
+  },
+  "runtime_profiles": {
+    "claude-code": {
+      "adapter": "claude-code"
+    }
+  },
+  "roles": {
+    "code-simplifier": {
+      "profile": "claude-code"
+    },
+    "dev": {
+      "profile": "claude-code"
+    },
+    "dod-reviewer": {
+      "profile": "claude-code"
+    },
+    "leader": {
+      "profile": "claude-code"
+    },
+    "ops": {
+      "profile": "claude-code"
+    },
+    "qa": {
+      "profile": "claude-code"
+    },
+    "test": {
+      "profile": "claude-code"
+    }
+  },
+  "isolation": {
+    "mode": "native"
   }
 }

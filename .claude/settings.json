@@ -73,28 +73,6 @@
     ]
   },
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "timeout": 10,
-            "command": "bash .claude/hooks/write-guard.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "timeout": 10,
-            "command": "bash .claude/hooks/write-guard.sh"
-          }
-        ]
-      }
-    ],
     "PermissionRequest": [
       {
         "hooks": [
@@ -102,28 +80,6 @@
             "type": "command",
             "timeout": 10,
             "command": "BASH_ENV= bash .claude/hooks/quiet-permission-log.sh >/dev/null"
-          }
-        ]
-      }
-    ],
-    "TaskCompleted": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "timeout": 240,
-            "command": "bash .claude/hooks/task-completed-jev.sh"
-          }
-        ]
-      }
-    ],
-    "TeammateIdle": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "timeout": 30,
-            "command": "bash .claude/hooks/teammate-idle.sh"
           }
         ]
       }
