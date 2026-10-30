@@ -70,3 +70,9 @@ fundamentals_csv/
 fundamentals_csv_us/
 signals_us.csv
 signals_hk.csv
+
+# ArcForge（arcforge init 补齐）
+.arcforge/quiet/
+.arcforge/controller/
+.arcforge/archive/*/controller/
+*.py[cod]

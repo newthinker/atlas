@@ -864,3 +864,12 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+<!-- arcforge:begin -->
+## ArcForge
+
+本仓库由 ArcForge 控制器编排。你被控制器以某个角色启动时，角色规约已经在你的初始指令里；不要从本文件推断你的角色。
+
+- 状态目录 `.arcforge/` 只由控制器写入；你需要推进状态、提交产物时用 `arcforge propose`（用法见初始指令）。
+- 人在这里直接与你对话时，你不是 ArcForge 的 worker：不要代替控制器改 `.arcforge/` 下的任何文件，需要时让人执行 `arcforge status` 或 `arcforge inbox`。
+<!-- arcforge:end -->
